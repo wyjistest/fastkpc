@@ -1,0 +1,28 @@
+# Build artifacts
+build/
+**/build/
+*.o
+*.so
+*.dll
+*.dylib
+*.a
+*.tar.gz
+
+# Generated reports and local validation output
+fastkpc/reports/
+*.log
+*.csv
+*.tsv
+*.html
+*.rds
+*.RData
+
+# R session/editor files
+.Rhistory
+.Rproj.user/
+.Ruserdata
+
+# OS/editor files
+.DS_Store
+*.swp
+*~

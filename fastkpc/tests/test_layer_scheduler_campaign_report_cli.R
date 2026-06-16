@@ -1,0 +1,101 @@
+source("fastkpc/R/validation_campaign.R")
+source("fastkpc/R/report_writer.R")
+
+assert_true <- function(value, message) {
+  if (!isTRUE(value)) stop(message, call. = FALSE)
+}
+
+campaign <- run_fastkpc_validation_campaign(
+  seeds = c(11),
+  n_values = c(60),
+  scenarios = c("chain"),
+  engines = c("cuda"),
+  residual_backends = c("fastSpline"),
+  residual_devices = c("cuda"),
+  schedulers = c("legacy", "layer"),
+  alpha = 0.2,
+  max_conditioning_size = 1L,
+  legacy = FALSE,
+  benchmark = TRUE,
+  residual_batch_size = 0,
+  scheduler_diagnostics = TRUE
+)
+
+assert_true("scheduler" %in% names(campaign$runs),
+            "runs should include scheduler")
+assert_true(all(c("legacy", "layer") %in% campaign$runs$scheduler),
+            "runs should include legacy and layer scheduler rows")
+assert_true("scheduler_diffs" %in% names(campaign),
+            "campaign should include scheduler_diffs")
+assert_true(is.data.frame(campaign$scheduler_diffs),
+            "scheduler_diffs should be a data.frame")
+assert_true(nrow(campaign$scheduler_diffs) >= 1L,
+            "scheduler diffs should have rows")
+assert_true(all(campaign$scheduler_diffs$skeleton_adjacency_identical),
+            "scheduler comparison should preserve skeleton adjacency")
+assert_true(all(campaign$scheduler_diffs$max_abs_pmax_diff < 1e-7),
+            "scheduler comparison pMax diff should be tiny")
+assert_true(is.data.frame(campaign$scheduler_levels),
+            "campaign should include scheduler_levels")
+assert_true(is.data.frame(campaign$scheduler_batches),
+            "campaign should include scheduler_batches")
+assert_true(is.data.frame(campaign$scheduler_residuals),
+            "campaign should include scheduler_residuals")
+
+output_dir <- tempfile("fastkpc-scheduler-report-")
+artifacts <- write_fastkpc_validation_report(campaign, output_dir)
+for (name in c("scheduler_diffs.csv", "scheduler_levels.csv",
+               "scheduler_batches.csv", "scheduler_residuals.csv")) {
+  assert_true(file.exists(file.path(output_dir, name)),
+              paste("report should write", name))
+}
+assert_true(file.exists(artifacts$summary_md), "summary markdown should be written")
+
+input_csv <- tempfile(fileext = ".csv")
+output_rds <- tempfile(fileext = ".rds")
+set.seed(412)
+n <- 50
+z <- seq(-pi, pi, length.out = n)
+data <- data.frame(
+  x1 = z + rnorm(n, sd = 0.05),
+  x2 = sin(z) + rnorm(n, sd = 0.08),
+  x3 = cos(z) + rnorm(n, sd = 0.08),
+  x4 = rnorm(n)
+)
+utils::write.csv(data, input_csv, row.names = FALSE)
+status <- system2("Rscript", c("fastkpc/tools/run_fast_kpc.R",
+                               "--input", input_csv,
+                               "--output", output_rds,
+                               "--engine", "cuda",
+                               "--residual-backend", "fastSpline",
+                               "--residual-device", "cuda",
+                               "--scheduler", "layer",
+                               "--graph-stage", "skeleton",
+                               "--max-conditioning-size", "1",
+                               "--residual-batch-size", "0"))
+assert_true(identical(status, 0L), "run_fast_kpc.R scheduler call should pass")
+cli_result <- readRDS(output_rds)
+assert_true(cli_result$config$scheduler_requested == "layer",
+            "single-run CLI should record scheduler")
+
+report_dir <- tempfile("fastkpc-scheduler-cli-report-")
+status <- system2("Rscript", c("fastkpc/tools/run_validation_campaign.R",
+                               "--output-dir", report_dir,
+                               "--seeds", "11",
+                               "--n-values", "50",
+                               "--scenarios", "chain",
+                               "--engines", "cuda",
+                               "--residual-backends", "fastSpline",
+                               "--residual-devices", "cuda",
+                               "--schedulers", "legacy,layer",
+                               "--max-conditioning-size", "1",
+                               "--legacy", "FALSE",
+                               "--residual-batch-size", "0"))
+assert_true(identical(status, 0L),
+            "run_validation_campaign.R scheduler call should pass")
+assert_true(file.exists(file.path(report_dir, "scheduler_diffs.csv")),
+            "campaign CLI should write scheduler_diffs.csv")
+assert_true(file.exists(file.path(report_dir, "scheduler_levels.csv")),
+            "campaign CLI should write scheduler_levels.csv")
+
+cat("test_layer_scheduler_campaign_report_cli.R: PASS\n")

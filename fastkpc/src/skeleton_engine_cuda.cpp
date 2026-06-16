@@ -1,0 +1,710 @@
+#include "skeleton_engine_cuda.hpp"
+
+#include "ci_method.hpp"
+#include "cuda/dcov_batch_cuda.hpp"
+#include "cuda/fastspline_residual_cuda.hpp"
+#include "cuda/hsic_batch_cuda.hpp"
+#include "dcov_exact_cpu.hpp"
+#include "hsic_batch_types.hpp"
+#include "residual_cache.hpp"
+#include "skeleton_engine.hpp"
+#include "skeleton_task_scheduler.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <map>
+#include <stdexcept>
+#include <vector>
+
+namespace {
+
+int idx(int row, int col, int p) {
+  return row * p + col;
+}
+
+struct HsicCudaEvalCounters {
+  int gamma_tests = 0;
+  int perm_tests = 0;
+  int batches = 0;
+  int pairs = 0;
+  int permutation_replicates = 0;
+  std::size_t memory_bytes = 0;
+  int max_n = 0;
+  int max_batch_pairs = 0;
+};
+
+std::vector<double> column_as_vector(const Rcpp::NumericMatrix& data, int col) {
+  std::vector<double> out(data.nrow());
+  for (int i = 0; i < data.nrow(); ++i) out[i] = data(i, col);
+  return out;
+}
+
+class CudaSkeletonResidualCache {
+ public:
+  CudaSkeletonResidualCache(const std::string& backend_name,
+                            const FastSplineParams& fastspline_params,
+                            bool enabled,
+                            const std::string& requested_device,
+                            bool fallback)
+      : backend_(make_residual_backend_config(backend_name, fastspline_params)),
+        enabled_(enabled),
+        fallback_(fallback) {
+    requested_device_ = requested_device.empty() ? "cpu" : requested_device;
+    if (requested_device_ != "cpu" && requested_device_ != "cuda" &&
+        requested_device_ != "auto") {
+      throw std::runtime_error("Unknown residual device: " + requested_device_);
+    }
+    used_device_ = resolve_device();
+    stats_.enabled = enabled_;
+    stats_.requests = 0;
+    stats_.hits = 0;
+    stats_.misses = 0;
+    stats_.computations = 0;
+    stats_.stored_vectors = 0;
+    stats_.stored_values = 0;
+    stats_.backend_name = backend_.name;
+  }
+
+  const std::vector<double>& get(const Rcpp::NumericMatrix& data,
+                                 int target,
+                                 const std::vector<int>& conditioning_set) {
+    ++stats_.requests;
+    const ResidualCacheKey key = make_residual_cache_key(
+      target, conditioning_set, data.nrow(), data.ncol(), backend_.name,
+      backend_.params);
+
+    if (!enabled_) {
+      ++stats_.computations;
+      scratch_ = compute(data, target, key.conditioning_set);
+      return scratch_;
+    }
+
+    std::map<ResidualCacheKey, std::vector<double> >::iterator it = values_.find(key);
+    if (it != values_.end()) {
+      ++stats_.hits;
+      return it->second;
+    }
+
+    std::vector<double> residuals = compute_and_count(data, target, key.conditioning_set);
+    std::pair<std::map<ResidualCacheKey, std::vector<double> >::iterator, bool> inserted =
+      values_.insert(std::make_pair(key, residuals));
+    update_storage(data.nrow());
+    return inserted.first->second;
+  }
+
+  int prefetch_level(const Rcpp::NumericMatrix& data,
+                     const std::vector<LayerResidualRequest>& requests,
+                     int level,
+                     int residual_batch_size,
+                     SchedulerDiagnostics* diagnostics) {
+    if (!enabled_ || requests.empty()) return 0;
+    const int actual_batch_size = resolve_residual_batch_size(
+      residual_batch_size, static_cast<int>(requests.size()));
+    diagnostics->residual_batch_size_used =
+      std::max(diagnostics->residual_batch_size_used, actual_batch_size);
+
+    int batch_count = 0;
+    for (int start = 0; start < static_cast<int>(requests.size());
+         start += actual_batch_size) {
+      const int count = std::min(actual_batch_size,
+                                 static_cast<int>(requests.size()) - start);
+      std::vector<int> missing_positions;
+      missing_positions.reserve(count);
+
+      for (int k = 0; k < count; ++k) {
+        const LayerResidualRequest& request = requests[start + k];
+        const ResidualCacheKey key = make_key(data, request.target,
+                                              request.conditioning_set);
+        if (values_.find(key) == values_.end()) {
+          missing_positions.push_back(start + k);
+        } else {
+          diagnostics->residuals.push_back(SchedulerResidualDiagnostic{
+            level, request.request_id, request.target,
+            static_cast<int>(request.conditioning_set.size()), backend_.name,
+            used_device_, true, false, "cache-hit"});
+        }
+      }
+
+      if (missing_positions.empty()) continue;
+      ++batch_count;
+      diagnostics->batches.push_back(SchedulerBatchDiagnostic{
+        level, static_cast<int>(diagnostics->batches.size()), "residual",
+        requests[missing_positions.front()].request_id,
+        static_cast<int>(missing_positions.size()), data.nrow(), "ok"});
+
+      if (backend_.kind == ResidualBackendKind::FastSpline &&
+          used_device_ == "cuda") {
+        std::vector<int> targets;
+        std::vector<std::vector<int> > conditioning_sets;
+        targets.reserve(missing_positions.size());
+        conditioning_sets.reserve(missing_positions.size());
+        for (int position : missing_positions) {
+          const LayerResidualRequest& request = requests[position];
+          targets.push_back(request.target);
+          conditioning_sets.push_back(request.conditioning_set);
+        }
+        const FastSplineCudaBatchResult batch_result =
+          fit_fastspline_residuals_cuda_batch_result(
+            data, targets, conditioning_sets, backend_.fastspline, fallback_);
+        const std::vector<FastSplineCudaFit>& fits = batch_result.fits;
+        diagnostics->cuda_residual_batch_groups += batch_result.diagnostics.groups;
+        diagnostics->cuda_residual_true_batched_groups +=
+          batch_result.diagnostics.true_batched_groups;
+        diagnostics->cuda_residual_true_batched_fits +=
+          batch_result.diagnostics.true_batched_fits;
+        diagnostics->cuda_residual_single_fit_calls +=
+          batch_result.diagnostics.single_fit_calls;
+        diagnostics->cuda_residual_cpu_fallback_fits +=
+          batch_result.diagnostics.cpu_fallback_fits;
+        for (int i = 0; i < static_cast<int>(missing_positions.size()); ++i) {
+          const LayerResidualRequest& request = requests[missing_positions[i]];
+          const std::vector<int> normalized_cond =
+            make_key(data, request.target, request.conditioning_set).conditioning_set;
+          insert_prefetched(data, request.target, normalized_cond,
+                            fits[i].fit.residuals);
+          if (fits[i].diagnostics.fallback_used) {
+            used_device_ = "cuda-fallback-cpu";
+            if (reason_.empty()) reason_ = fits[i].diagnostics.reason;
+          }
+          diagnostics->residuals.push_back(SchedulerResidualDiagnostic{
+            level, request.request_id, request.target,
+            static_cast<int>(request.conditioning_set.size()), backend_.name,
+            fits[i].diagnostics.fallback_used ? "cuda-fallback-cpu" : "cuda",
+            true, fits[i].diagnostics.fallback_used,
+            fits[i].diagnostics.reason});
+        }
+      } else {
+        for (int position : missing_positions) {
+          const LayerResidualRequest& request = requests[position];
+          const ResidualCacheKey key = make_key(data, request.target,
+                                                request.conditioning_set);
+          std::vector<double> residuals =
+            compute_residuals_with_backend(data, request.target,
+                                           key.conditioning_set, backend_);
+          insert_prefetched(data, request.target, key.conditioning_set, residuals);
+          diagnostics->residuals.push_back(SchedulerResidualDiagnostic{
+            level, request.request_id, request.target,
+            static_cast<int>(request.conditioning_set.size()), backend_.name,
+            used_device_, true, false, ""});
+        }
+      }
+    }
+    return batch_count;
+  }
+
+  ResidualCacheStats stats() const {
+    ResidualCacheStats out = stats_;
+    out.stored_vectors = static_cast<int>(values_.size());
+    out.stored_values = out.stored_vectors * (values_.empty() ? 0 :
+      static_cast<int>(values_.begin()->second.size()));
+    return out;
+  }
+
+  const ResidualBackendConfig& backend() const { return backend_; }
+  const std::string& used_device() const { return used_device_; }
+  const std::string& requested_device() const { return requested_device_; }
+  const std::string& reason() const { return reason_; }
+
+ private:
+  std::string resolve_device() {
+    if (backend_.kind == ResidualBackendKind::Linear) {
+      if (requested_device_ == "cuda") {
+        reason_ = "linear residual CUDA device is not implemented";
+      }
+      return "cpu";
+    }
+    if (requested_device_ == "cpu") return "cpu";
+    return "cuda";
+  }
+
+  ResidualCacheKey make_key(const Rcpp::NumericMatrix& data,
+                            int target,
+                            const std::vector<int>& conditioning_set) const {
+    return make_residual_cache_key(target, conditioning_set, data.nrow(),
+                                   data.ncol(), backend_.name, backend_.params);
+  }
+
+  std::vector<double> compute(const Rcpp::NumericMatrix& data,
+                              int target,
+                              const std::vector<int>& conditioning_set) {
+    if (backend_.kind == ResidualBackendKind::FastSpline &&
+        used_device_ == "cuda") {
+      const FastSplineCudaFit fit = fit_fastspline_residuals_cuda(
+        data, target, conditioning_set, backend_.fastspline, fallback_);
+      if (fit.diagnostics.fallback_used) {
+        used_device_ = "cuda-fallback-cpu";
+        if (reason_.empty()) reason_ = fit.diagnostics.reason;
+      }
+      return fit.fit.residuals;
+    }
+    return compute_residuals_with_backend(data, target, conditioning_set, backend_);
+  }
+
+  std::vector<double> compute_and_count(const Rcpp::NumericMatrix& data,
+                                        int target,
+                                        const std::vector<int>& conditioning_set) {
+    ++stats_.misses;
+    ++stats_.computations;
+    return compute(data, target, conditioning_set);
+  }
+
+  void insert_prefetched(const Rcpp::NumericMatrix& data,
+                         int target,
+                         const std::vector<int>& conditioning_set,
+                         const std::vector<double>& residuals) {
+    const ResidualCacheKey key = make_key(data, target, conditioning_set);
+    if (values_.find(key) != values_.end()) return;
+    ++stats_.misses;
+    ++stats_.computations;
+    values_.insert(std::make_pair(key, residuals));
+    update_storage(data.nrow());
+  }
+
+  void update_storage(int n) {
+    stats_.stored_vectors = static_cast<int>(values_.size());
+    stats_.stored_values = stats_.stored_vectors * n;
+  }
+
+  ResidualBackendConfig backend_;
+  bool enabled_;
+  bool fallback_;
+  std::string requested_device_;
+  std::string used_device_;
+  std::string reason_;
+  ResidualCacheStats stats_;
+  std::map<ResidualCacheKey, std::vector<double> > values_;
+  std::vector<double> scratch_;
+};
+
+void fill_task_vectors(const Rcpp::NumericMatrix& data,
+                       const LayerCiTask& task,
+                       CudaSkeletonResidualCache* residual_cache,
+                       std::vector<double>* x,
+                       std::vector<double>* y) {
+  if (task.conditioning_set.empty()) {
+    *x = column_as_vector(data, task.orientation_x);
+    *y = column_as_vector(data, task.orientation_y);
+    return;
+  }
+  *x = residual_cache->get(data, task.orientation_x, task.conditioning_set);
+  *y = residual_cache->get(data, task.orientation_y, task.conditioning_set);
+}
+
+std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
+                                        const std::vector<LayerCiTask>& tasks,
+                                        int batch_size,
+                                        double index,
+                                        bool legacy_index,
+                                        int level,
+                                        CudaSkeletonResidualCache* residual_cache,
+                                        SchedulerDiagnostics* diagnostics,
+                                        int* dcov_batches) {
+  const int n = data.nrow();
+  std::vector<double> pvalues(tasks.size(), std::numeric_limits<double>::quiet_NaN());
+  if (tasks.empty()) return pvalues;
+  const int actual_batch_size = resolve_dcov_batch_size(
+    batch_size, n, static_cast<int>(tasks.size()));
+  diagnostics->dcov_batch_size_used =
+    std::max(diagnostics->dcov_batch_size_used, actual_batch_size);
+
+  DcovBatchOptions options;
+  options.index = index;
+  options.legacy_index = legacy_index;
+
+  for (int start = 0; start < static_cast<int>(tasks.size()); start += actual_batch_size) {
+    const int count = std::min(actual_batch_size, static_cast<int>(tasks.size()) - start);
+    std::vector<double> xmat(static_cast<std::size_t>(n) * count, 0.0);
+    std::vector<double> ymat(static_cast<std::size_t>(n) * count, 0.0);
+
+    for (int k = 0; k < count; ++k) {
+      std::vector<double> xvec;
+      std::vector<double> yvec;
+      fill_task_vectors(data, tasks[start + k], residual_cache, &xvec, &yvec);
+      for (int row = 0; row < n; ++row) {
+        xmat[static_cast<std::size_t>(k) * n + row] = xvec[row];
+        ymat[static_cast<std::size_t>(k) * n + row] = yvec[row];
+      }
+    }
+
+    const DcovBatchResult batch = dcov_batch_cuda(xmat.data(), ymat.data(), n, count, options);
+    for (int k = 0; k < count; ++k) {
+      pvalues[start + k] = batch.p_values[k];
+    }
+    ++(*dcov_batches);
+    diagnostics->batches.push_back(SchedulerBatchDiagnostic{
+      level, *dcov_batches - 1, "dcov", tasks[start].task_id, count, n, "ok"});
+  }
+  return pvalues;
+}
+
+HsicBatchOptions make_hsic_batch_options(const HsicOptions& hsic_options,
+                                         CiMethodKind kind) {
+  HsicBatchOptions options = default_hsic_batch_options();
+  if (std::isfinite(hsic_options.sig) && hsic_options.sig > 0.0) {
+    options.sig = hsic_options.sig;
+  }
+  options.permutation_replicates = hsic_options.replicates;
+  options.include_observed = hsic_options.include_observed;
+  options.has_seed = hsic_options.has_seed;
+  options.seed = hsic_options.seed;
+  options.return_replicates = false;
+  options.max_n = hsic_options.cuda_max_n;
+  options.max_batch_pairs = hsic_options.cuda_max_batch_pairs;
+  if (kind == CiMethodKind::HsicGamma) {
+    options.permutation_replicates = 0;
+  }
+  return options;
+}
+
+std::vector<double> evaluate_tasks_hsic_cuda(
+    const Rcpp::NumericMatrix& data,
+    const std::vector<LayerCiTask>& tasks,
+    int batch_size,
+    CiMethodKind kind,
+    const HsicOptions& hsic_options,
+    int level,
+    CudaSkeletonResidualCache* residual_cache,
+    SchedulerDiagnostics* diagnostics,
+    HsicCudaEvalCounters* counters) {
+  const int n = data.nrow();
+  std::vector<double> pvalues(tasks.size(), std::numeric_limits<double>::quiet_NaN());
+  if (tasks.empty()) return pvalues;
+
+  HsicBatchOptions options = make_hsic_batch_options(hsic_options, kind);
+  counters->max_n = options.max_n;
+  counters->max_batch_pairs = options.max_batch_pairs;
+
+  int actual_batch_size = resolve_dcov_batch_size(
+    batch_size, n, static_cast<int>(tasks.size()));
+  if (options.max_batch_pairs > 0) {
+    actual_batch_size = std::min(actual_batch_size, options.max_batch_pairs);
+  }
+  actual_batch_size = std::max(1, actual_batch_size);
+  diagnostics->dcov_batch_size_used =
+    std::max(diagnostics->dcov_batch_size_used, actual_batch_size);
+
+  for (int start = 0; start < static_cast<int>(tasks.size()); start += actual_batch_size) {
+    const int count = std::min(actual_batch_size, static_cast<int>(tasks.size()) - start);
+    std::vector<double> xmat(static_cast<std::size_t>(n) * count, 0.0);
+    std::vector<double> ymat(static_cast<std::size_t>(n) * count, 0.0);
+
+    for (int k = 0; k < count; ++k) {
+      std::vector<double> xvec;
+      std::vector<double> yvec;
+      fill_task_vectors(data, tasks[start + k], residual_cache, &xvec, &yvec);
+      for (int row = 0; row < n; ++row) {
+        xmat[static_cast<std::size_t>(k) * n + row] = xvec[row];
+        ymat[static_cast<std::size_t>(k) * n + row] = yvec[row];
+      }
+    }
+
+    const HsicBatchResult batch =
+      kind == CiMethodKind::HsicGamma ?
+        hsic_gamma_batch_cuda(xmat.data(), ymat.data(), n, count, options) :
+        hsic_permutation_batch_cuda(xmat.data(), ymat.data(), n, count, options);
+    if (batch.diagnostics.backend != "cuda-hsic") {
+      throw std::runtime_error("CUDA HSIC batch did not report cuda-hsic backend");
+    }
+    for (int k = 0; k < count; ++k) {
+      pvalues[start + k] = batch.p_values[k];
+    }
+
+    ++counters->batches;
+    counters->pairs += count;
+    counters->memory_bytes =
+      std::max(counters->memory_bytes, batch.diagnostics.bytes_allocated);
+    if (kind == CiMethodKind::HsicGamma) {
+      counters->gamma_tests += count;
+    } else {
+      counters->perm_tests += count;
+      counters->permutation_replicates +=
+        count * batch.diagnostics.permutation_replicates;
+    }
+    diagnostics->batches.push_back(SchedulerBatchDiagnostic{
+      level, counters->batches - 1, "hsic", tasks[start].task_id, count, n, "ok"});
+  }
+  return pvalues;
+}
+
+void replay_layer_pvalues(const LayerPlan& plan,
+                          const std::vector<double>& pvalues,
+                          const SkeletonOptions& options,
+                          int p,
+                          std::vector<int>* delete_edges,
+                          SkeletonResult* result,
+                          int* tests_replayed,
+                          std::vector<LevelDeletion>* level_log) {
+  std::map<int, bool> edge_done;
+  *tests_replayed = 0;
+
+  for (int i = 0; i < static_cast<int>(plan.tasks.size()); ++i) {
+    const LayerCiTask& task = plan.tasks[i];
+    if (edge_done[task.edge_key]) continue;
+
+    ++(*tests_replayed);
+    double pval = pvalues[i];
+    if (!std::isfinite(pval)) pval = options.na_delete ? 1.0 : 0.0;
+
+    const double current = result->pmax[idx(task.edge_x, task.edge_y, p)];
+    if (pval > current) {
+      result->pmax[idx(task.edge_x, task.edge_y, p)] = pval;
+      result->pmax[idx(task.edge_y, task.edge_x, p)] = pval;
+    }
+
+    if (pval >= options.alpha) {
+      (*delete_edges)[idx(task.edge_x, task.edge_y, p)] = 1;
+      (*delete_edges)[idx(task.edge_y, task.edge_x, p)] = 1;
+      result->sepsets[task.edge_x][task.edge_y] = task.conditioning_set;
+      result->sepsets[task.edge_y][task.edge_x] = task.conditioning_set;
+      level_log->push_back(LevelDeletion{task.edge_x, task.edge_y,
+                                         task.conditioning_set, pval});
+      edge_done[task.edge_key] = true;
+    }
+  }
+}
+
+void finalize_scheduler_diagnostics(SchedulerDiagnostics* diagnostics,
+                                    const ResidualCacheStats& stats,
+                                    const SkeletonResult& result) {
+  diagnostics->residual_requests = stats.requests;
+  diagnostics->tasks_ignored_after_delete =
+    diagnostics->tasks_evaluated - diagnostics->tests_replayed;
+  if (diagnostics->tasks_ignored_after_delete < 0) {
+    throw std::runtime_error("scheduler diagnostic identity failed: ignored tasks");
+  }
+  int replayed = 0;
+  for (int value : result.n_edge_tests) replayed += value;
+  if (replayed != diagnostics->tests_replayed) {
+    throw std::runtime_error("scheduler diagnostic identity failed: replayed tests");
+  }
+}
+
+SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
+                                      const SkeletonOptions& options,
+                                      int batch_size,
+                                      const std::string& scheduler) {
+  const int p = data.ncol();
+  const std::string residual_backend_name =
+    options.residual_backend_name.empty() ? "linear" : options.residual_backend_name;
+  const std::string residual_device_requested =
+    options.residual_device_requested.empty() ? "cpu" : options.residual_device_requested;
+  const std::string scheduler_requested =
+    options.scheduler_requested.empty() ? scheduler : options.scheduler_requested;
+  const CiMethodKind ci_method = parse_ci_method_kind(options.ci_method);
+
+  CudaSkeletonResidualCache residual_cache(
+    residual_backend_name, options.fastspline_params,
+    options.residual_cache_enabled, residual_device_requested,
+    options.cuda_residual_fallback);
+
+  SkeletonResult result;
+  result.adjacency.assign(static_cast<std::size_t>(p) * p, 1);
+  result.pmax.assign(static_cast<std::size_t>(p) * p,
+                     -std::numeric_limits<double>::infinity());
+  result.sepsets.resize(p, std::vector<std::vector<int> >(p));
+  result.scheduler = scheduler;
+  result.scheduler_requested = scheduler_requested;
+  result.ci_method = ci_method_name(ci_method);
+  result.ci_backend =
+    ci_method == CiMethodKind::DccGamma ? "cuda-dcov" : "cuda-hsic";
+  result.ci_backend_reason = "";
+  result.ci_dcc_gamma_tests = 0;
+  result.ci_hsic_gamma_tests = 0;
+  result.ci_hsic_perm_tests = 0;
+  result.ci_hsic_permutation_replicates = 0;
+  result.ci_hsic_gamma_cuda_tests = 0;
+  result.ci_hsic_perm_cuda_tests = 0;
+  result.ci_hsic_cuda_batches = 0;
+  result.ci_hsic_cuda_pairs = 0;
+  result.ci_hsic_cuda_fallback_tests = 0;
+  result.ci_hsic_cuda_memory_bytes = 0;
+  result.ci_hsic_cuda_max_n = 0;
+  result.ci_hsic_cuda_max_batch_pairs = 0;
+
+  for (int i = 0; i < p; ++i) {
+    result.adjacency[idx(i, i, p)] = 0;
+    result.pmax[idx(i, i, p)] = 1.0;
+  }
+
+  SchedulerDiagnostics diagnostics = make_scheduler_diagnostics(
+    scheduler, scheduler_requested, batch_size, options.residual_batch_size);
+  HsicCudaEvalCounters hsic_counters;
+
+  const int max_order = std::max(0, options.max_conditioning_size);
+  for (int ord = 0; ord <= max_order; ++ord) {
+    const std::vector<int> snapshot = result.adjacency;
+    LayerPlan plan = make_layer_plan(snapshot, p, ord);
+    std::vector<LayerResidualRequest> residual_requests;
+    int residual_batches = 0;
+
+    const ResidualCacheStats before_stats = residual_cache.stats();
+    if (scheduler == "layer") {
+      residual_requests = collect_unique_residual_requests(
+        plan, data.nrow(), data.ncol(), residual_cache.backend().name,
+        residual_cache.backend().params, residual_cache.used_device());
+      plan.unique_residual_requests = static_cast<int>(residual_requests.size());
+      residual_batches = residual_cache.prefetch_level(
+        data, residual_requests, ord, options.residual_batch_size, &diagnostics);
+    }
+
+    int dcov_batches = 0;
+    std::vector<double> pvalues;
+    if (ci_method == CiMethodKind::DccGamma) {
+      pvalues = evaluate_tasks_cuda(
+        data, plan.tasks, batch_size, options.index, options.legacy_index,
+        ord, &residual_cache, &diagnostics, &dcov_batches);
+    } else {
+      pvalues = evaluate_tasks_hsic_cuda(
+        data, plan.tasks, batch_size, ci_method, options.hsic_options,
+        ord, &residual_cache, &diagnostics, &hsic_counters);
+    }
+
+    const ResidualCacheStats after_stats = residual_cache.stats();
+    if (scheduler != "layer") {
+      plan.unique_residual_requests = after_stats.computations - before_stats.computations;
+      residual_batches = plan.unique_residual_requests;
+    }
+
+    std::vector<int> delete_edges(static_cast<std::size_t>(p) * p, 0);
+    int level_tests = 0;
+    std::vector<LevelDeletion> level_log;
+    replay_layer_pvalues(plan, pvalues, options, p, &delete_edges, &result,
+                         &level_tests, &level_log);
+
+    for (int i = 0; i < p * p; ++i) {
+      if (delete_edges[i] != 0) result.adjacency[i] = 0;
+    }
+    result.n_edge_tests.push_back(level_tests);
+    result.per_level_log.push_back(level_log);
+
+    const int task_count = static_cast<int>(plan.tasks.size());
+    const int ignored = task_count - level_tests;
+    diagnostics.per_level.push_back(LayerDiagnosticsLevel{
+      ord, task_count, task_count, level_tests, ignored,
+      static_cast<int>(level_log.size()), plan.unconditional_tasks,
+      plan.conditional_tasks, plan.unique_residual_requests,
+      dcov_batches, residual_batches});
+    diagnostics.levels = static_cast<int>(diagnostics.per_level.size());
+    diagnostics.tasks_planned += task_count;
+    diagnostics.tasks_evaluated += task_count;
+    diagnostics.tests_replayed += level_tests;
+    diagnostics.dcov_batches += dcov_batches;
+    diagnostics.unique_residual_requests += plan.unique_residual_requests;
+    diagnostics.residual_batches += residual_batches;
+    diagnostics.max_level_tasks = std::max(diagnostics.max_level_tasks, task_count);
+    diagnostics.max_level_unique_residuals =
+      std::max(diagnostics.max_level_unique_residuals,
+               plan.unique_residual_requests);
+  }
+
+  const ResidualCacheStats stats = residual_cache.stats();
+  finalize_scheduler_diagnostics(&diagnostics, stats, result);
+  result.scheduler_diagnostics = diagnostics;
+  if (ci_method == CiMethodKind::DccGamma) {
+    result.ci_dcc_gamma_tests = diagnostics.tests_replayed;
+  } else if (ci_method == CiMethodKind::HsicGamma) {
+    result.ci_hsic_gamma_tests = diagnostics.tests_replayed;
+    result.ci_hsic_gamma_cuda_tests = hsic_counters.gamma_tests;
+  } else {
+    result.ci_hsic_perm_tests = diagnostics.tests_replayed;
+    result.ci_hsic_perm_cuda_tests = hsic_counters.perm_tests;
+    result.ci_hsic_permutation_replicates =
+      hsic_counters.permutation_replicates;
+  }
+  result.ci_hsic_cuda_batches = hsic_counters.batches;
+  result.ci_hsic_cuda_pairs = hsic_counters.pairs;
+  result.ci_hsic_cuda_memory_bytes = hsic_counters.memory_bytes;
+  result.ci_hsic_cuda_max_n = hsic_counters.max_n;
+  result.ci_hsic_cuda_max_batch_pairs = hsic_counters.max_batch_pairs;
+
+  result.residual_cache_enabled = stats.enabled;
+  result.residual_cache_requests = stats.requests;
+  result.residual_cache_hits = stats.hits;
+  result.residual_cache_misses = stats.misses;
+  result.residual_cache_computations = stats.computations;
+  result.residual_cache_stored_vectors = stats.stored_vectors;
+  result.residual_cache_stored_values = stats.stored_values;
+  result.residual_backend = stats.backend_name;
+  result.residual_backend_params =
+    make_residual_backend_config(residual_backend_name, options.fastspline_params).params;
+  result.residual_device = residual_cache.used_device();
+  result.residual_device_requested = residual_cache.requested_device();
+  result.residual_device_reason = residual_cache.reason();
+  return result;
+}
+
+std::string resolve_scheduler(const SkeletonOptions& options) {
+  const std::string requested =
+    options.scheduler_requested.empty() ? "legacy" : options.scheduler_requested;
+  if (requested == "auto") return "layer";
+  if (requested == "layer" || requested == "legacy") return requested;
+  throw std::runtime_error("Unknown scheduler: " + requested);
+}
+
+SkeletonResult run_skeleton_cuda_cpu_fallback(const Rcpp::NumericMatrix& data,
+                                              const SkeletonOptions& options,
+                                              int batch_size,
+                                              CiMethodKind kind,
+                                              const std::string& reason) {
+  SkeletonOptions cpu_options = options;
+  cpu_options.residual_device_requested = "cpu";
+  cpu_options.scheduler_requested =
+    options.scheduler_requested.empty() ? "legacy" : options.scheduler_requested;
+  SkeletonResult result = run_skeleton_exact(data, cpu_options);
+  result.residual_device = "cpu";
+  result.residual_device_requested =
+    options.residual_device_requested.empty() ? "cpu" : options.residual_device_requested;
+  result.scheduler = resolve_scheduler(options);
+  result.scheduler_requested = cpu_options.scheduler_requested;
+  result.scheduler_diagnostics = make_scheduler_diagnostics(
+    result.scheduler, result.scheduler_requested, batch_size,
+    options.residual_batch_size);
+  result.ci_backend = "native-cpu";
+  result.ci_backend_reason = reason;
+  result.ci_hsic_cuda_max_n = options.hsic_options.cuda_max_n;
+  result.ci_hsic_cuda_max_batch_pairs =
+    options.hsic_options.cuda_max_batch_pairs;
+  if (kind == CiMethodKind::HsicGamma) {
+    result.ci_hsic_cuda_fallback_tests = result.ci_hsic_gamma_tests;
+  } else if (kind == CiMethodKind::HsicPermutation) {
+    result.ci_hsic_cuda_fallback_tests = result.ci_hsic_perm_tests;
+  }
+  return result;
+}
+
+}  // namespace
+
+SkeletonResult run_skeleton_cuda_batch(const Rcpp::NumericMatrix& data,
+                                       const SkeletonOptions& options,
+                                       int batch_size) {
+  const CiMethodKind kind = parse_ci_method_kind(options.ci_method);
+  if (kind == CiMethodKind::HsicPermutation &&
+      !options.hsic_options.has_seed) {
+    return run_skeleton_cuda_cpu_fallback(
+      data, options, batch_size, kind,
+      "CUDA HSIC permutation requires explicit seed in this stage");
+  }
+  if (kind != CiMethodKind::DccGamma) {
+    std::string reason;
+    if (!hsic_cuda_available(&reason)) {
+      if (!options.hsic_options.cuda_memory_fallback) {
+        throw std::runtime_error(
+          reason.empty() ? "CUDA HSIC backend is unavailable" : reason);
+      }
+      return run_skeleton_cuda_cpu_fallback(
+        data, options, batch_size, kind,
+        reason.empty() ? "CUDA HSIC backend is unavailable" : reason);
+    }
+    try {
+      return run_skeleton_cuda_impl(data, options, batch_size,
+                                    resolve_scheduler(options));
+    } catch (const std::exception& ex) {
+      if (!options.hsic_options.cuda_memory_fallback) throw;
+      return run_skeleton_cuda_cpu_fallback(
+        data, options, batch_size, kind, ex.what());
+    }
+  }
+  return run_skeleton_cuda_impl(data, options, batch_size,
+                                resolve_scheduler(options));
+}
