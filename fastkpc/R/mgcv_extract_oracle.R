@@ -33,6 +33,51 @@ fastkpc_stop_unsupported_setup <- function(message) {
   stop(paste0("Unsupported mgcv fixed-sp setup: ", message), call. = FALSE)
 }
 
+fastkpc_mgcv_extract_capabilities <- function() {
+  mgcv_version <- tryCatch(
+    as.character(utils::packageVersion("mgcv")),
+    error = function(e) NA_character_
+  )
+  list(
+    backend = "mgcvExtract",
+    role = "version-pinned oracle",
+    supported = list(
+      family = "gaussian_identity",
+      residual_output_only = TRUE,
+      full_smooth_when_S_leq_2 = TRUE,
+      additive_smooth_when_S_gt_2 = TRUE,
+      fixed_sp_self_solve = TRUE,
+      gcv_bridge = TRUE,
+      all_fixed_L_lsp0_semantics = TRUE,
+      canonical_hybrid_verifier = TRUE
+    ),
+    unsupported = list(
+      non_gaussian = TRUE,
+      summary_gam = TRUE,
+      vcov = TRUE,
+      se = TRUE,
+      prediction_intervals = TRUE,
+      gamm = TRUE,
+      by_smooths = TRUE,
+      factor_smooths = TRUE,
+      tensor_replacement_for_s_s1_s2 = TRUE,
+      self_contained_gcv = TRUE,
+      cuda_mgcv_subset = TRUE,
+      full_mgcv_clone = TRUE,
+      bam_gpu = TRUE
+    ),
+    version_pins = list(
+      R_version = R.version.string,
+      mgcv_version = mgcv_version
+    ),
+    baseline = list(
+      name = "mgcv Gate B fixed-sp self-solve + hybrid canonical replay",
+      tag = "mgcv-gate-b-v1",
+      commit = "5da2313"
+    )
+  )
+}
+
 fastkpc_validate_fixed_positive_sp <- function(sp, expected_length = NULL) {
   if (is.null(sp) || length(sp) == 0L) {
     fastkpc_stop_unsupported_setup("sp must be supplied for fixed-sp self-solve")

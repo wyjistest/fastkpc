@@ -1,0 +1,6 @@
+args <- commandArgs(trailingOnly = TRUE)
+output_dir <- if (length(args) >= 1L) args[[1]] else file.path("fastkpc", "artifacts", "hybrid_calibration")
+source("fastkpc/R/hybrid_calibration_campaign.R")
+result <- fastkpc_run_hybrid_calibration_campaign(output_dir = output_dir)
+cat("wrote hybrid calibration artifacts:", output_dir, "\n")
+print(head(result$summary[result$summary$recommended, ], 10))

@@ -906,7 +906,16 @@ can occur.
 mgcvExtractCPU is a version-pinned extraction oracle for compatibility
 validation. It is restricted to the `kpcalg::regrXonS()` residualization
 surface, may depend on `mgcv` internals, and is not the final portable product
-backend.
+backend. The protected baseline is:
+
+```text
+Baseline: mgcv Gate B fixed-sp self-solve + hybrid canonical replay
+Commit: 5da2313
+Tag: mgcv-gate-b-v1
+```
+
+`fastkpc_mgcv_extract_capabilities()` returns a machine-readable capability
+and version boundary object for diagnostics, bug reports, and campaign output.
 
 The mgcv fixed-sp reference calls `mgcv::gam(..., sp=sp, fit=TRUE)`.
 The mgcvExtract fixed-sp self-solve uses `mgcv::gam(fit=FALSE)` setup data,
@@ -947,6 +956,20 @@ the near-alpha verifier may replace p-values but not replay order. Primary rows
 define `canonical_test_order_id`; verifier rows are joined by that id and
 replayed deterministically. Sepsets are recorded from the canonical first
 separating set after p-value replacement.
+
+hybrid calibration campaign:
+`fastkpc/tools/run_hybrid_calibration_campaign.sh` evaluates tau values such as
+`log(1.5)`, `log(2)`, `log(3)`, and `log(5)` and writes
+`hybrid_calibration_summary.csv` plus `hybrid_policy_summary.txt`. The summary
+tracks near-alpha verifier rate, decision flip reduction, skeleton/sepset/WAN-
+PDAG drift proxies, runtime proxies, speedup versus legacy, and a recommended
+tau per scenario group.
+
+graph-level golden snapshots:
+`fastkpc_hybrid_golden_snapshots()` provides deterministic canonical replay
+snapshots for linear, nonlinear additive, pairwise full-smooth, and near-alpha
+flip scenarios. These protect test order, p-value source selection, edge
+deletion logs, sepsets, skeleton adjacency, and WAN-PDAG adjacency summaries.
 
 Non-goals:
 

@@ -23,5 +23,19 @@ assert_grepl("canonical hybrid replay",
              "README must mention canonical hybrid replay")
 assert_grepl("verifier may replace p-values but not replay order",
              "README must state verifier replay invariant")
+assert_grepl("Baseline: mgcv Gate B fixed-sp self-solve + hybrid canonical replay",
+             "README must document Gate B baseline")
+assert_grepl("Commit: 5da2313",
+             "README must document baseline commit")
+assert_grepl("Tag: mgcv-gate-b-v1",
+             "README must document baseline tag")
+assert_grepl("fastkpc_mgcv_extract_capabilities()",
+             "README must document mgcv capability object")
+assert_grepl("hybrid calibration campaign",
+             "README must document hybrid calibration")
+assert_grepl("hybrid_calibration_summary.csv",
+             "README must document calibration artifact")
+assert_grepl("graph-level golden snapshots",
+             "README must document golden snapshots")
 
 cat("PASS mgcv compatibility docs contract\n")
