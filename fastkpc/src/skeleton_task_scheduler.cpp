@@ -179,6 +179,11 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.dcov_batch_size_used = 0;
   out.residual_batch_size_requested = residual_batch_size_requested;
   out.residual_batch_size_used = 0;
+  out.plan_elapsed_sec = 0.0;
+  out.residual_prefetch_elapsed_sec = 0.0;
+  out.ci_eval_elapsed_sec = 0.0;
+  out.replay_elapsed_sec = 0.0;
+  out.total_elapsed_sec = 0.0;
   return out;
 }
 
@@ -186,11 +191,15 @@ int resolve_dcov_batch_size(int requested_batch_size,
                             int,
                             int planned_tasks) {
   if (requested_batch_size > 0) return requested_batch_size;
-  return planned_tasks > 0 ? planned_tasks : 1;
+  const int default_auto_batch_size = 512;
+  if (planned_tasks <= 0) return 1;
+  return std::min(planned_tasks, default_auto_batch_size);
 }
 
 int resolve_residual_batch_size(int requested_residual_batch_size,
                                 int unique_residual_requests) {
   if (requested_residual_batch_size > 0) return requested_residual_batch_size;
-  return unique_residual_requests > 0 ? unique_residual_requests : 1;
+  const int default_auto_residual_batch_size = 256;
+  if (unique_residual_requests <= 0) return 1;
+  return std::min(unique_residual_requests, default_auto_residual_batch_size);
 }

@@ -154,6 +154,9 @@ Rcpp::DataFrame scheduler_levels_to_data_frame(
   Rcpp::IntegerVector deletions(n), unconditional_tasks(n), conditional_tasks(n);
   Rcpp::IntegerVector unique_residual_requests(n), dcov_batches(n);
   Rcpp::IntegerVector residual_batches(n);
+  Rcpp::NumericVector plan_elapsed_sec(n), residual_prefetch_elapsed_sec(n);
+  Rcpp::NumericVector ci_eval_elapsed_sec(n), replay_elapsed_sec(n);
+  Rcpp::NumericVector total_elapsed_sec(n);
   for (int i = 0; i < n; ++i) {
     level[i] = levels[i].level;
     tasks_planned[i] = levels[i].tasks_planned;
@@ -166,6 +169,11 @@ Rcpp::DataFrame scheduler_levels_to_data_frame(
     unique_residual_requests[i] = levels[i].unique_residual_requests;
     dcov_batches[i] = levels[i].dcov_batches;
     residual_batches[i] = levels[i].residual_batches;
+    plan_elapsed_sec[i] = levels[i].plan_elapsed_sec;
+    residual_prefetch_elapsed_sec[i] = levels[i].residual_prefetch_elapsed_sec;
+    ci_eval_elapsed_sec[i] = levels[i].ci_eval_elapsed_sec;
+    replay_elapsed_sec[i] = levels[i].replay_elapsed_sec;
+    total_elapsed_sec[i] = levels[i].total_elapsed_sec;
   }
   return Rcpp::DataFrame::create(
     Rcpp::Named("level") = level,
@@ -179,6 +187,12 @@ Rcpp::DataFrame scheduler_levels_to_data_frame(
     Rcpp::Named("unique_residual_requests") = unique_residual_requests,
     Rcpp::Named("dcov_batches") = dcov_batches,
     Rcpp::Named("residual_batches") = residual_batches,
+    Rcpp::Named("plan_elapsed_sec") = plan_elapsed_sec,
+    Rcpp::Named("residual_prefetch_elapsed_sec") =
+      residual_prefetch_elapsed_sec,
+    Rcpp::Named("ci_eval_elapsed_sec") = ci_eval_elapsed_sec,
+    Rcpp::Named("replay_elapsed_sec") = replay_elapsed_sec,
+    Rcpp::Named("total_elapsed_sec") = total_elapsed_sec,
     Rcpp::Named("stringsAsFactors") = false
   );
 }
@@ -275,7 +289,13 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
       Rcpp::Named("residual_batch_size_requested") =
         diagnostics.residual_batch_size_requested,
       Rcpp::Named("residual_batch_size_used") =
-        diagnostics.residual_batch_size_used
+        diagnostics.residual_batch_size_used,
+      Rcpp::Named("plan_elapsed_sec") = diagnostics.plan_elapsed_sec,
+      Rcpp::Named("residual_prefetch_elapsed_sec") =
+        diagnostics.residual_prefetch_elapsed_sec,
+      Rcpp::Named("ci_eval_elapsed_sec") = diagnostics.ci_eval_elapsed_sec,
+      Rcpp::Named("replay_elapsed_sec") = diagnostics.replay_elapsed_sec,
+      Rcpp::Named("total_elapsed_sec") = diagnostics.total_elapsed_sec
     ),
     Rcpp::Named("levels") =
       scheduler_levels_to_data_frame(diagnostics.per_level),

@@ -3,6 +3,7 @@
 #include <Rmath.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -127,13 +128,22 @@ void check_cuda(cudaError_t err, const char* stage) {
   }
 }
 
-}  // namespace
+int dcov_max_grid_batch_dimension() {
+  int device = 0;
+  cudaDeviceProp prop;
+  check_cuda(cudaGetDevice(&device), "get device");
+  check_cuda(cudaGetDeviceProperties(&prop, device), "get device properties");
+  const int y_limit = prop.maxGridSize[1];
+  const int z_limit = prop.maxGridSize[2];
+  const int limit = std::min(y_limit, z_limit);
+  return std::max(1, limit);
+}
 
-DcovBatchResult dcov_batch_cuda(const double* x,
-                                const double* y,
-                                int n,
-                                int batch,
-                                const DcovBatchOptions& options) {
+DcovBatchResult dcov_batch_cuda_chunk(const double* x,
+                                      const double* y,
+                                      int n,
+                                      int batch,
+                                      const DcovBatchOptions& options) {
   if (n <= 5) throw std::runtime_error("gamma approximation requires n > 5");
   if (batch < 1) throw std::runtime_error("batch must be positive");
 
@@ -243,4 +253,48 @@ DcovBatchResult dcov_batch_cuda(const double* x,
     cudaFree(d_scalars);
     throw;
   }
+}
+
+}  // namespace
+
+DcovBatchResult dcov_batch_cuda(const double* x,
+                                const double* y,
+                                int n,
+                                int batch,
+                                const DcovBatchOptions& options) {
+  if (n <= 5) throw std::runtime_error("gamma approximation requires n > 5");
+  if (batch < 1) throw std::runtime_error("batch must be positive");
+
+  const int chunk_limit = dcov_max_grid_batch_dimension();
+  if (batch <= chunk_limit) {
+    return dcov_batch_cuda_chunk(x, y, n, batch, options);
+  }
+
+  DcovBatchResult result;
+  result.p_values.assign(batch, 0.0);
+  result.nV2.assign(batch, 0.0);
+  result.means.assign(batch, 0.0);
+  result.variances.assign(batch, 0.0);
+  result.raw_scalars.assign(static_cast<std::size_t>(batch) * 5, 0.0);
+
+  for (int start = 0; start < batch; start += chunk_limit) {
+    const int count = std::min(chunk_limit, batch - start);
+    const std::size_t offset = static_cast<std::size_t>(start) * n;
+    const DcovBatchResult chunk = dcov_batch_cuda_chunk(
+      x + offset, y + offset, n, count, options);
+
+    for (int k = 0; k < count; ++k) {
+      const int dest = start + k;
+      result.p_values[dest] = chunk.p_values[k];
+      result.nV2[dest] = chunk.nV2[k];
+      result.means[dest] = chunk.means[k];
+      result.variances[dest] = chunk.variances[k];
+      for (int s = 0; s < 5; ++s) {
+        result.raw_scalars[static_cast<std::size_t>(dest) * 5 + s] =
+          chunk.raw_scalars[static_cast<std::size_t>(k) * 5 + s];
+      }
+    }
+  }
+
+  return result;
 }

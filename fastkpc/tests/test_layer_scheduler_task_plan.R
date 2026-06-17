@@ -16,6 +16,27 @@ check_scheduler_diagnostics <- function(result, expected_scheduler) {
   assert_true(is.data.frame(diag$levels), "scheduler levels should be a data.frame")
   assert_true(is.data.frame(diag$batches), "scheduler batches should be a data.frame")
   assert_true(is.data.frame(diag$residuals), "scheduler residuals should be a data.frame")
+  timing_cols <- c(
+    "plan_elapsed_sec",
+    "residual_prefetch_elapsed_sec",
+    "ci_eval_elapsed_sec",
+    "replay_elapsed_sec",
+    "total_elapsed_sec"
+  )
+  assert_true(all(timing_cols %in% names(diag$levels)),
+              "scheduler levels should expose per-stage timing columns")
+  assert_true(all(is.finite(as.matrix(diag$levels[, timing_cols, drop = FALSE]))),
+              "scheduler level timings should be finite")
+  assert_true(all(as.matrix(diag$levels[, timing_cols, drop = FALSE]) >= 0),
+              "scheduler level timings should be non-negative")
+  for (field in c("plan_elapsed_sec", "residual_prefetch_elapsed_sec",
+                  "ci_eval_elapsed_sec", "replay_elapsed_sec",
+                  "total_elapsed_sec")) {
+    assert_true(field %in% names(diag$summary),
+                paste("scheduler summary should include", field))
+    assert_true(is.finite(diag$summary[[field]]) && diag$summary[[field]] >= 0,
+                paste("scheduler summary", field, "should be non-negative"))
+  }
   assert_true(diag$summary$tasks_planned >= sum(result$n.edgetests),
               "planned tasks should cover replayed tests")
   assert_true(diag$summary$tasks_ignored_after_delete ==

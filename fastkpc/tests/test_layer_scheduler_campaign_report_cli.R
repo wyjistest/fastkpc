@@ -37,6 +37,14 @@ assert_true(all(campaign$scheduler_diffs$max_abs_pmax_diff < 1e-7),
             "scheduler comparison pMax diff should be tiny")
 assert_true(is.data.frame(campaign$scheduler_levels),
             "campaign should include scheduler_levels")
+timing_cols <- c("plan_elapsed_sec", "residual_prefetch_elapsed_sec",
+                 "ci_eval_elapsed_sec", "replay_elapsed_sec",
+                 "total_elapsed_sec")
+assert_true(all(timing_cols %in% names(campaign$scheduler_levels)),
+            "scheduler_levels should include timing columns")
+assert_true(all(is.finite(as.matrix(campaign$scheduler_levels[, timing_cols,
+                                                              drop = FALSE]))),
+            "scheduler level timing columns should be finite")
 assert_true(is.data.frame(campaign$scheduler_batches),
             "campaign should include scheduler_batches")
 assert_true(is.data.frame(campaign$scheduler_residuals),
@@ -49,6 +57,10 @@ for (name in c("scheduler_diffs.csv", "scheduler_levels.csv",
   assert_true(file.exists(file.path(output_dir, name)),
               paste("report should write", name))
 }
+scheduler_levels_csv <- utils::read.csv(file.path(output_dir, "scheduler_levels.csv"),
+                                        check.names = FALSE)
+assert_true(all(timing_cols %in% names(scheduler_levels_csv)),
+            "scheduler_levels.csv should include timing columns")
 assert_true(file.exists(artifacts$summary_md), "summary markdown should be written")
 
 input_csv <- tempfile(fileext = ".csv")

@@ -289,7 +289,12 @@ write_fastkpc_validation_report <- function(campaign, output_dir) {
                                           "deletions", "unconditional_tasks",
                                           "conditional_tasks",
                                           "unique_residual_requests",
-                                          "dcov_batches", "residual_batches")),
+                                          "dcov_batches", "residual_batches",
+                                          "plan_elapsed_sec",
+                                          "residual_prefetch_elapsed_sec",
+                                          "ci_eval_elapsed_sec",
+                                          "replay_elapsed_sec",
+                                          "total_elapsed_sec")),
                     artifacts$scheduler_levels_csv)
   fastkpc_write_csv(campaign$scheduler_batches %||%
                       fastkpc_empty_df(c("run_id", "scenario", "seed", "n",

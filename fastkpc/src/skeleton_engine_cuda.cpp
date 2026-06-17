@@ -11,6 +11,7 @@
 #include "skeleton_task_scheduler.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -21,6 +22,11 @@ namespace {
 
 int idx(int row, int col, int p) {
   return row * p + col;
+}
+
+double seconds_since(std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration<double>(
+    std::chrono::steady_clock::now() - start).count();
 }
 
 struct HsicCudaEvalCounters {
@@ -533,12 +539,20 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
 
   const int max_order = std::max(0, options.max_conditioning_size);
   for (int ord = 0; ord <= max_order; ++ord) {
+    const std::chrono::steady_clock::time_point level_start =
+      std::chrono::steady_clock::now();
+    const std::chrono::steady_clock::time_point plan_start =
+      std::chrono::steady_clock::now();
     const std::vector<int> snapshot = result.adjacency;
     LayerPlan plan = make_layer_plan(snapshot, p, ord);
+    const double plan_elapsed_sec = seconds_since(plan_start);
+
     std::vector<LayerResidualRequest> residual_requests;
     int residual_batches = 0;
 
     const ResidualCacheStats before_stats = residual_cache.stats();
+    const std::chrono::steady_clock::time_point residual_start =
+      std::chrono::steady_clock::now();
     if (scheduler == "layer") {
       residual_requests = collect_unique_residual_requests(
         plan, data.nrow(), data.ncol(), residual_cache.backend().name,
@@ -547,9 +561,12 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
       residual_batches = residual_cache.prefetch_level(
         data, residual_requests, ord, options.residual_batch_size, &diagnostics);
     }
+    const double residual_prefetch_elapsed_sec = seconds_since(residual_start);
 
     int dcov_batches = 0;
     std::vector<double> pvalues;
+    const std::chrono::steady_clock::time_point ci_eval_start =
+      std::chrono::steady_clock::now();
     if (ci_method == CiMethodKind::DccGamma) {
       pvalues = evaluate_tasks_cuda(
         data, plan.tasks, batch_size, options.index, options.legacy_index,
@@ -559,6 +576,7 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
         data, plan.tasks, batch_size, ci_method, options.hsic_options,
         ord, &residual_cache, &diagnostics, &hsic_counters);
     }
+    const double ci_eval_elapsed_sec = seconds_since(ci_eval_start);
 
     const ResidualCacheStats after_stats = residual_cache.stats();
     if (scheduler != "layer") {
@@ -569,8 +587,11 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
     std::vector<int> delete_edges(static_cast<std::size_t>(p) * p, 0);
     int level_tests = 0;
     std::vector<LevelDeletion> level_log;
+    const std::chrono::steady_clock::time_point replay_start =
+      std::chrono::steady_clock::now();
     replay_layer_pvalues(plan, pvalues, options, p, &delete_edges, &result,
                          &level_tests, &level_log);
+    const double replay_elapsed_sec = seconds_since(replay_start);
 
     for (int i = 0; i < p * p; ++i) {
       if (delete_edges[i] != 0) result.adjacency[i] = 0;
@@ -580,11 +601,14 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
 
     const int task_count = static_cast<int>(plan.tasks.size());
     const int ignored = task_count - level_tests;
+    const double total_elapsed_sec = seconds_since(level_start);
     diagnostics.per_level.push_back(LayerDiagnosticsLevel{
       ord, task_count, task_count, level_tests, ignored,
       static_cast<int>(level_log.size()), plan.unconditional_tasks,
       plan.conditional_tasks, plan.unique_residual_requests,
-      dcov_batches, residual_batches});
+      dcov_batches, residual_batches, plan_elapsed_sec,
+      residual_prefetch_elapsed_sec, ci_eval_elapsed_sec, replay_elapsed_sec,
+      total_elapsed_sec});
     diagnostics.levels = static_cast<int>(diagnostics.per_level.size());
     diagnostics.tasks_planned += task_count;
     diagnostics.tasks_evaluated += task_count;
@@ -596,6 +620,11 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
     diagnostics.max_level_unique_residuals =
       std::max(diagnostics.max_level_unique_residuals,
                plan.unique_residual_requests);
+    diagnostics.plan_elapsed_sec += plan_elapsed_sec;
+    diagnostics.residual_prefetch_elapsed_sec += residual_prefetch_elapsed_sec;
+    diagnostics.ci_eval_elapsed_sec += ci_eval_elapsed_sec;
+    diagnostics.replay_elapsed_sec += replay_elapsed_sec;
+    diagnostics.total_elapsed_sec += total_elapsed_sec;
   }
 
   const ResidualCacheStats stats = residual_cache.stats();

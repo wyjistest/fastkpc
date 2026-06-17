@@ -56,6 +56,21 @@ assert_true(all(is.finite(large$p.value)), "batch p-values should be finite")
 assert_true(all(large$p.value >= 0 & large$p.value <= 1),
             "batch p-values should be in [0, 1]")
 
+set.seed(2301)
+wide_batch <- 70000L
+wide_x <- matrix(rnorm(12 * wide_batch), 12, wide_batch)
+wide_y <- matrix(rnorm(12 * wide_batch), 12, wide_batch)
+wide <- fast_dcov_batch_cuda(wide_x, wide_y)
+assert_true(length(wide$p.value) == wide_batch,
+            "wide batch output should keep all p-values")
+assert_true(all(is.finite(wide$p.value)),
+            "wide batch p-values should be finite")
+for (k in c(1L, 35000L, wide_batch)) {
+  cpu <- dcov_gamma_exact(wide_x[, k], wide_y[, k])
+  assert_true(abs(wide$p.value[k] - cpu$p.value) < 1e-10,
+              sprintf("wide batch p.value mismatch for column %d", k))
+}
+
 set.seed(24)
 xi <- matrix(rnorm(90 * 3), 90, 3)
 yi <- matrix(rnorm(90 * 3), 90, 3)

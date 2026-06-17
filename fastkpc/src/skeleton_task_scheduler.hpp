@@ -44,6 +44,11 @@ struct LayerDiagnosticsLevel {
   int unique_residual_requests;
   int dcov_batches;
   int residual_batches;
+  double plan_elapsed_sec;
+  double residual_prefetch_elapsed_sec;
+  double ci_eval_elapsed_sec;
+  double replay_elapsed_sec;
+  double total_elapsed_sec;
 };
 
 struct SchedulerBatchDiagnostic {
@@ -91,6 +96,11 @@ struct SchedulerDiagnostics {
   int dcov_batch_size_used;
   int residual_batch_size_requested;
   int residual_batch_size_used;
+  double plan_elapsed_sec;
+  double residual_prefetch_elapsed_sec;
+  double ci_eval_elapsed_sec;
+  double replay_elapsed_sec;
+  double total_elapsed_sec;
   std::vector<LayerDiagnosticsLevel> per_level;
   std::vector<SchedulerBatchDiagnostic> batches;
   std::vector<SchedulerResidualDiagnostic> residuals;

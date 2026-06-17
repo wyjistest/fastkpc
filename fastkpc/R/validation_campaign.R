@@ -249,13 +249,20 @@ fastkpc_flatten_orientation_device_diagnostics <- function(result, run_id) {
 }
 
 fastkpc_flatten_scheduler_levels <- function(result, run_id) {
-  diag <- result$skeleton$scheduler_diagnostics
-  levels <- diag$levels %||% fastkpc_empty_df(c(
+  level_columns <- c(
     "level", "tasks_planned", "tasks_evaluated", "tests_replayed",
     "tasks_ignored_after_delete", "deletions", "unconditional_tasks",
     "conditional_tasks", "unique_residual_requests", "dcov_batches",
-    "residual_batches"
-  ))
+    "residual_batches", "plan_elapsed_sec",
+    "residual_prefetch_elapsed_sec", "ci_eval_elapsed_sec",
+    "replay_elapsed_sec", "total_elapsed_sec"
+  )
+  diag <- result$skeleton$scheduler_diagnostics
+  levels <- diag$levels %||% fastkpc_empty_df(level_columns)
+  for (column in setdiff(level_columns, names(levels))) {
+    levels[[column]] <- NA_real_
+  }
+  levels <- levels[, level_columns, drop = FALSE]
   if (nrow(levels) == 0L) {
     return(fastkpc_empty_df(c("run_id", "scenario", "seed", "n", "engine",
                               "residual_backend", "residual_device", "scheduler",
@@ -1121,7 +1128,9 @@ run_fastkpc_validation_campaign <- function(seeds = c(11, 12, 13),
                        "tests_replayed", "tasks_ignored_after_delete",
                        "deletions", "unconditional_tasks", "conditional_tasks",
                        "unique_residual_requests", "dcov_batches",
-                       "residual_batches"))
+                       "residual_batches", "plan_elapsed_sec",
+                       "residual_prefetch_elapsed_sec", "ci_eval_elapsed_sec",
+                       "replay_elapsed_sec", "total_elapsed_sec"))
   } else {
     do.call(rbind, scheduler_level_rows)
   }
