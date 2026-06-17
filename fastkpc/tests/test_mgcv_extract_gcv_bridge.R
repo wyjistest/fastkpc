@@ -41,4 +41,24 @@ assert_true(max(abs(bridge$residuals - stats::residuals(legacy))) < 1e-5,
 assert_true(max(abs(log(bridge$sp) - log(legacy$sp))) < 1e-8,
             "GCV bridge selected sp should match direct legacy fit")
 
+self <- fastkpc_mgcv_extract_fixed_sp_solve(
+  formula = y ~ s(s1),
+  data = data,
+  sp = legacy$sp,
+  method = "GCV.Cp",
+  target = 1L,
+  S = 2L
+)
+
+assert_true(max(abs(bridge$residuals - self$residuals)) < 1e-10,
+            "GCVBridge residuals must equal self-solve at mgcv-selected sp")
+assert_true(max(abs(bridge$fitted - self$fitted)) < 1e-10,
+            "GCVBridge fitted values must equal self-solve at mgcv-selected sp")
+assert_true(identical(bridge$sp_source, "mgcv"),
+            "GCVBridge sp source must remain mgcv")
+assert_true(identical(bridge$gcv_source, "mgcv"),
+            "GCVBridge gcv source must remain mgcv")
+assert_true(identical(bridge$solve_source, "fastkpc-fixed-sp"),
+            "GCVBridge solve source must remain fastkpc fixed-sp")
+
 cat("PASS mgcv extract GCV bridge\n")

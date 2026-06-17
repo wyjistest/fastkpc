@@ -331,12 +331,191 @@ fastkpc_solve_gaussian_penalized_fixed_sp <- function(
   as.numeric(Z %*% theta)
 }
 
+fastkpc_mgcv_magic_kernel_fixed_sp_coefficients <- function(
+    setup,
+    sp = setup$sp,
+    control = list(tol = 1e-06,
+                   step.half = 25L,
+                   rank.tol = sqrt(.Machine$double.eps))) {
+  fastkpc_require_mgcv()
+  G <- setup$G
+  sp <- fastkpc_validate_fixed_positive_sp(sp, expected_length = length(setup$S))
+
+  if (is.null(G$L) || is.null(G$lsp0)) {
+    stop("G$L and G$lsp0 are required for mgcv fixed-sp kernel solve",
+         call. = FALSE)
+  }
+  L <- as.matrix(G$L)
+  if (nrow(L) != length(setup$S) || ncol(L) != 0L) {
+    stop("Only all-fixed mgcv smoothing parameter mappings are supported",
+         call. = FALSE)
+  }
+  lsp0 <- as.numeric(G$lsp0)
+  if (length(lsp0) != length(sp) || any(abs(lsp0 - log(sp)) > 1e-7)) {
+    stop("G$lsp0 must encode the supplied fixed smoothing parameters",
+         call. = FALSE)
+  }
+
+  if (is.null(control$tol)) control$tol <- 1e-06
+  if (is.null(control$step.half)) control$step.half <- 25L
+  if (is.null(control$rank.tol)) control$rank.tol <- sqrt(.Machine$double.eps)
+
+  X <- setup$X
+  y <- setup$y
+  S <- setup$S
+  off <- setup$off
+  rank <- setup$rank
+  H <- setup$H
+  C <- setup$C
+  w <- setup$w
+  n.p <- length(S)
+  n.b <- ncol(X)
+
+  initial_sp <- get("initial.sp", envir = asNamespace("mgcv"))
+  mroot <- get("mroot", envir = asNamespace("mgcv"))
+  C_magic <- get("C_magic", envir = asNamespace("mgcv"))
+  def.sp <- if (n.p > 0L) initial_sp(X, S, off) else numeric()
+
+  if (n.p > 0L) {
+    for (i in seq_len(n.p)) {
+      B <- mroot(S[[i]], rank = rank[i], method = "chol")
+      R <- matrix(0, n.b, ncol(B))
+      idx <- seq.int(off[i], length.out = nrow(B))
+      R[idx, ] <- B
+      S[[i]] <- R
+    }
+  }
+
+  n.con <- 0L
+  ns.qr <- NULL
+  if (!is.null(C) && length(C) > 0L && nrow(as.matrix(C)) > 0L) {
+    C <- as.matrix(C)
+    n.con <- nrow(C)
+    ns.qr <- qr(t(C))
+    X <- t(qr.qty(ns.qr, t(X)))[, (n.con + 1L):n.b, drop = FALSE]
+    if (n.p > 0L) {
+      for (i in seq_len(n.p)) {
+        S[[i]] <- qr.qty(ns.qr, S[[i]])[(n.con + 1L):n.b, , drop = FALSE]
+        if (ncol(S[[i]]) > nrow(S[[i]])) {
+          S[[i]] <- t(qr.R(qr(t(S[[i]]))))
+        }
+      }
+    }
+    if (!is.null(H)) {
+      H <- qr.qty(ns.qr, H)[(n.con + 1L):n.b, , drop = FALSE]
+      H <- t(qr.qty(ns.qr, t(H))[(n.con + 1L):n.b, , drop = FALSE])
+    }
+  }
+
+  if (!is.null(w)) {
+    if (is.matrix(w)) {
+      y <- w %*% y
+      X <- w %*% X
+    } else {
+      y <- y * as.vector(w)
+      X <- as.vector(w) * X
+    }
+  }
+
+  Si <- array(0, 0)
+  cS <- 0
+  if (n.p > 0L) {
+    for (i in seq_len(n.p)) {
+      Si <- c(Si, S[[i]])
+      cS[i] <- ncol(S[[i]])
+    }
+  }
+
+  rdef <- ncol(X) - nrow(X)
+  if (rdef > 0L) {
+    X <- rbind(X, matrix(0, rdef, ncol(X)))
+    y <- c(y, rep(0, rdef))
+  }
+
+  q <- ncol(X)
+  icontrol <- as.integer(TRUE)
+  icontrol[2] <- length(y)
+  icontrol[3] <- q
+  icontrol[4] <- as.integer(!is.null(H))
+  icontrol[5] <- n.p
+  icontrol[6] <- as.integer(control$step.half)
+  icontrol[7] <- ncol(L)
+
+  um <- .C(C_magic,
+           as.double(y),
+           X = as.double(X),
+           sp = as.double(numeric(0)),
+           as.double(def.sp),
+           as.double(Si),
+           as.double(H),
+           as.double(L),
+           lsp0 = as.double(lsp0),
+           score = as.double(1),
+           scale = as.double(1),
+           info = as.integer(icontrol),
+           as.integer(cS),
+           as.double(control$rank.tol),
+           rms.grad = as.double(control$tol),
+           b = as.double(array(0, q)),
+           rV = double(q * q),
+           as.double(0),
+           as.integer(length(setup$y)),
+           as.integer(1))
+
+  beta <- as.numeric(um$b)
+  if (!is.null(ns.qr)) {
+    beta <- qr.qy(ns.qr, c(rep(0, n.con), beta))
+  }
+  beta
+}
+
 fastkpc_relative_l2_diff <- function(a, b) {
   a <- as.numeric(a)
   b <- as.numeric(b)
   denom <- sqrt(sum(b^2))
   if (denom == 0) return(sqrt(sum((a - b)^2)))
   sqrt(sum((a - b)^2)) / denom
+}
+
+fastkpc_mgcv_solve_setup_fixed_sp <- function(setup,
+                                              sp = setup$sp,
+                                              tol = sqrt(.Machine$double.eps)) {
+  sp <- fastkpc_validate_fixed_positive_sp(sp, expected_length = length(setup$S))
+  beta <- fastkpc_mgcv_magic_kernel_fixed_sp_coefficients(setup = setup, sp = sp)
+  fitted <- as.numeric(setup$X %*% beta)
+  residuals <- as.numeric(setup$y - fitted)
+  list(
+    backend_family = "mgcvExtractCPU",
+    mode = "fixed-sp-setup-self-solve",
+    solve_source = "fastkpc-fixed-sp",
+    sp_source = "fixed-input",
+    gcv_source = "none",
+    is_self_contained_gcv = FALSE,
+    coefficients = beta,
+    fitted = fitted,
+    residuals = residuals,
+    sp = sp,
+    setup_fingerprint = setup$setup_fingerprint,
+    setup_diagnostics = list(
+      n = nrow(setup$X),
+      p = ncol(setup$X),
+      penalty_count = length(setup$S),
+      off = setup$off,
+      has_C = !is.null(setup$C) && length(setup$C) > 0L,
+      has_H = !is.null(setup$H),
+      weights_policy = setup$weights_policy,
+      offset_policy = setup$offset_policy,
+      solver_kernel = "mgcv-C-magic-fixed-sp"
+    ),
+    penalty_diagnostics = list(
+      sp = sp,
+      penalty_dims = lapply(setup$S, dim)
+    ),
+    constraint_diagnostics = list(
+      C_dim = if (is.null(setup$C)) c(0L, ncol(setup$X)) else dim(as.matrix(setup$C))
+    ),
+    rank_diagnostics = list(rank = setup$rank)
+  )
 }
 
 fastkpc_mgcv_extract_fixed_sp_solve <- function(formula, data, sp,
@@ -367,19 +546,10 @@ fastkpc_mgcv_extract_fixed_sp_solve <- function(formula, data, sp,
     bs = bs
   )
 
-  beta <- fastkpc_solve_gaussian_penalized_fixed_sp(
-    X = setup$X,
-    y = setup$y,
-    S = setup$S,
-    off = setup$off,
-    sp = setup$sp,
-    C = setup$C,
-    H = setup$H,
-    w = setup$w,
-    tol = tol
-  )
-  fitted <- as.numeric(setup$X %*% beta)
-  residuals <- as.numeric(setup$y - fitted)
+  solution <- fastkpc_mgcv_solve_setup_fixed_sp(setup = setup, sp = setup$sp, tol = tol)
+  beta <- solution$coefficients
+  fitted <- solution$fitted
+  residuals <- solution$residuals
   target_fp <- fastkpc_target_fingerprint(
     target = target,
     y_hash = fastkpc_mgcv_hash_numeric(setup$y),
@@ -417,24 +587,10 @@ fastkpc_mgcv_extract_fixed_sp_solve <- function(formula, data, sp,
     relative_l2_fitted_diff = fastkpc_relative_l2_diff(fitted, ref$fitted),
     max_abs_residual_diff = max(abs(residuals - ref$residuals)),
     relative_l2_residual_diff = fastkpc_relative_l2_diff(residuals, ref$residuals),
-    setup_diagnostics = list(
-      n = nrow(setup$X),
-      p = ncol(setup$X),
-      penalty_count = length(setup$S),
-      off = setup$off,
-      has_C = !is.null(setup$C) && length(setup$C) > 0L,
-      has_H = !is.null(setup$H),
-      weights_policy = setup$weights_policy,
-      offset_policy = setup$offset_policy
-    ),
-    penalty_diagnostics = list(
-      sp = setup$sp,
-      penalty_dims = lapply(setup$S, dim)
-    ),
-    constraint_diagnostics = list(
-      C_dim = if (is.null(setup$C)) c(0L, ncol(setup$X)) else dim(as.matrix(setup$C))
-    ),
-    rank_diagnostics = list(rank = setup$rank),
+    setup_diagnostics = solution$setup_diagnostics,
+    penalty_diagnostics = solution$penalty_diagnostics,
+    constraint_diagnostics = solution$constraint_diagnostics,
+    rank_diagnostics = solution$rank_diagnostics,
     setup = setup,
     reference = ref,
     setup_fingerprint = setup$setup_fingerprint,

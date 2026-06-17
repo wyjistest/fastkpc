@@ -1,0 +1,6 @@
+args <- commandArgs(trailingOnly = TRUE)
+output_dir <- if (length(args) >= 1L) args[[1]] else file.path("fastkpc", "artifacts", "hybrid_compatibility")
+source("fastkpc/R/hybrid_compatibility_campaign.R")
+result <- fastkpc_run_hybrid_compatibility_campaign(output_dir = output_dir)
+cat("wrote hybrid compatibility artifacts:", output_dir, "\n")
+print(result$summary)

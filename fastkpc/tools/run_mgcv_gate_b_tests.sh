@@ -9,3 +9,7 @@ Rscript fastkpc/tests/test_mgcv_penalty_assembly.R
 Rscript fastkpc/tests/test_mgcv_extract_fixed_sp.R
 Rscript fastkpc/tests/test_mgcv_extract_gcv_bridge.R
 Rscript fastkpc/tests/test_mgcv_extract_batch_cpu.R
+Rscript fastkpc/tests/test_mgcv_self_solve_purity.R
+Rscript fastkpc/tests/test_mgcv_gate_b_campaign.R
+Rscript fastkpc/tests/test_hybrid_canonical_replay.R
+Rscript fastkpc/tests/test_hybrid_graph_replay_policy.R

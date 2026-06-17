@@ -911,9 +911,12 @@ backend.
 The mgcv fixed-sp reference calls `mgcv::gam(..., sp=sp, fit=TRUE)`.
 The mgcvExtract fixed-sp self-solve uses `mgcv::gam(fit=FALSE)` setup data,
 then solves the fixed-sp Gaussian penalized least-squares problem inside
-fastkpc. mgcvExtractGCVBridge uses mgcv for smoothing-parameter selection and
-fastkpc only for the fixed-sp solve; it is not a self-contained GCV
-implementation.
+fastkpc. For mgcv parity, that setup solve follows mgcv's all-fixed
+`L/lsp0` semantics and records the version-pinned `mgcv-C-magic-fixed-sp`
+kernel path in diagnostics; it does not call `mgcv::gam(fit=TRUE)` or
+`mgcv::magic()`. mgcvExtractGCVBridge uses mgcv for smoothing-parameter
+selection and fastkpc only for the fixed-sp solve; it is not a self-contained
+GCV implementation.
 
 The restricted compatibility target is:
 
@@ -932,6 +935,18 @@ are not part of legacy `kpcalg::regrXonS()` formula construction.
 The near-alpha verifier runs a fast primary backend first and verifies tests
 whose p-values are close to alpha on a log scale. Verification may replace the
 p-value source, but it must preserve canonical edge and sepset replay order.
+
+Gate B campaign:
+`fastkpc/tools/run_mgcv_gate_b_campaign.sh` runs fixed-sp setup/self-solve
+parity scenarios across formula classes, smoothing-parameter scales, sample
+sizes, collinearity, near-constant conditioning variables, and tied values. It
+writes `mgcv_gate_b_fixed_sp_campaign.csv`.
+
+canonical hybrid replay:
+the near-alpha verifier may replace p-values but not replay order. Primary rows
+define `canonical_test_order_id`; verifier rows are joined by that id and
+replayed deterministically. Sepsets are recorded from the canonical first
+separating set after p-value replacement.
 
 Non-goals:
 

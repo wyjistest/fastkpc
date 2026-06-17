@@ -17,5 +17,11 @@ assert_grepl("default s(s1, s2) is not a tensor-product smooth",
              "README must state smooth semantics")
 assert_grepl("near-alpha verifier",
              "README must document hybrid verifier")
+assert_grepl("Gate B campaign",
+             "README must mention Gate B campaign")
+assert_grepl("canonical hybrid replay",
+             "README must mention canonical hybrid replay")
+assert_grepl("verifier may replace p-values but not replay order",
+             "README must state verifier replay invariant")
 
 cat("PASS mgcv compatibility docs contract\n")
