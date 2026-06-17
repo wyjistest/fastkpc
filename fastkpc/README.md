@@ -213,8 +213,8 @@ Generated reports include `scheduler_diffs.csv`, `scheduler_levels.csv`,
 `fastspline_residual_batch_cuda()` groups residual requests by sample count,
 fastSpline parameter set, and design column count. Compatible groups with two or
 more fits run through a grouped CUDA path for crossproducts, penalized systems,
-Cholesky solves, GCV scoring, and residual computation. Singleton groups keep
-using the single-fit CUDA path.
+cuSOLVER batched Cholesky solves, GCV scoring, and residual computation.
+Singleton groups keep using the single-fit CUDA path.
 
 Batch results include `batch_diagnostics`:
 
@@ -225,6 +225,9 @@ true_batched_groups
 true_batched_fits
 single_fit_calls
 cpu_fallback_fits
+unique_designs
+duplicate_design_fits
+max_fits_per_design
 group_table
 ```
 
@@ -236,6 +239,9 @@ cuda_residual_true_batched_groups
 cuda_residual_true_batched_fits
 cuda_residual_single_fit_calls
 cuda_residual_cpu_fallback_fits
+cuda_residual_unique_designs
+cuda_residual_duplicate_design_fits
+cuda_residual_max_fits_per_design
 ```
 
 `residual_batch_size = 0` lets a scheduler level materialize all unique

@@ -30,6 +30,9 @@ struct FastSplineCudaBatchDiagnostics {
   int true_batched_fits;
   int single_fit_calls;
   int cpu_fallback_fits;
+  int unique_designs;
+  int duplicate_design_fits;
+  int max_fits_per_design;
   int max_group_size;
   int min_group_size;
   std::string cholesky_backend;
@@ -41,6 +44,9 @@ struct FastSplineCudaBatchDiagnostics {
   std::vector<int> group_true_batched;
   std::vector<int> group_single_fit_calls;
   std::vector<int> group_cpu_fallback_fits;
+  std::vector<int> group_unique_designs;
+  std::vector<int> group_duplicate_design_fits;
+  std::vector<int> group_max_fits_per_design;
   std::vector<std::string> group_cholesky_backend;
   std::vector<std::string> group_status;
   std::vector<std::string> group_reason;

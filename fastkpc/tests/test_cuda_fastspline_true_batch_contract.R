@@ -51,6 +51,15 @@ assert_true(identical(as.integer(diag$cpu_fallback_fits), 0L),
 assert_true(is.data.frame(diag$group_table), "group_table should be a data frame")
 assert_true(all(diag$group_table$true_batched),
             "every compatible group should be marked true_batched")
+assert_true(all(diag$group_table$cholesky_backend == "cusolver-batched"),
+            "true batch groups should use cuSOLVER batched Cholesky")
+assert_true("unique_designs" %in% names(diag$group_table),
+            "group_table should expose exact-design reuse diagnostics")
+assert_true(identical(as.integer(diag$group_table$unique_designs[[1]]), 1L),
+            "same conditioning set should share one design inside the batch")
+assert_true(identical(as.integer(diag$group_table$max_fits_per_design[[1]]),
+                      length(targets)),
+            "same conditioning set should report all targets on one design")
 
 for (k in seq_along(targets)) {
   cpu <- fastspline_residual(data[, targets[[k]]],

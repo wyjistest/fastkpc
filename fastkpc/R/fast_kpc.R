@@ -171,7 +171,13 @@ fastkpc_graph_metrics <- function(result) {
     cuda_residual_single_fit_calls =
       as.integer(scheduler_summary$cuda_residual_single_fit_calls %||% 0L),
     cuda_residual_cpu_fallback_fits =
-      as.integer(scheduler_summary$cuda_residual_cpu_fallback_fits %||% 0L)
+      as.integer(scheduler_summary$cuda_residual_cpu_fallback_fits %||% 0L),
+    cuda_residual_unique_designs =
+      as.integer(scheduler_summary$cuda_residual_unique_designs %||% 0L),
+    cuda_residual_duplicate_design_fits =
+      as.integer(scheduler_summary$cuda_residual_duplicate_design_fits %||% 0L),
+    cuda_residual_max_fits_per_design =
+      as.integer(scheduler_summary$cuda_residual_max_fits_per_design %||% 0L)
   )
 }
 

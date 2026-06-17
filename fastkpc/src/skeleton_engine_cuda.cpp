@@ -150,7 +150,7 @@ class CudaSkeletonResidualCache {
         level, static_cast<int>(diagnostics->batches.size()), "residual",
         requests[missing_positions.front()].request_id,
         static_cast<int>(missing_positions.size()), data.nrow(), "ok",
-        0, 0, 0, 0, 0, 0, 0, 0, 0};
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
       if (backend_.kind == ResidualBackendKind::FastSpline &&
           used_device_ == "cuda") {
@@ -178,6 +178,11 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.single_fit_calls;
         batch_diag.cpu_fallback_fits =
           batch_result.diagnostics.cpu_fallback_fits;
+        batch_diag.unique_designs = batch_result.diagnostics.unique_designs;
+        batch_diag.duplicate_design_fits =
+          batch_result.diagnostics.duplicate_design_fits;
+        batch_diag.max_fits_per_design =
+          batch_result.diagnostics.max_fits_per_design;
         batch_diag.max_group_size = batch_result.diagnostics.max_group_size;
         batch_diag.min_group_size = batch_result.diagnostics.min_group_size;
         batch_diag.min_design_cols = design_cols.first;
@@ -191,6 +196,13 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.single_fit_calls;
         diagnostics->cuda_residual_cpu_fallback_fits +=
           batch_result.diagnostics.cpu_fallback_fits;
+        diagnostics->cuda_residual_unique_designs +=
+          batch_result.diagnostics.unique_designs;
+        diagnostics->cuda_residual_duplicate_design_fits +=
+          batch_result.diagnostics.duplicate_design_fits;
+        diagnostics->cuda_residual_max_fits_per_design =
+          std::max(diagnostics->cuda_residual_max_fits_per_design,
+                   batch_result.diagnostics.max_fits_per_design);
         for (int i = 0; i < static_cast<int>(missing_positions.size()); ++i) {
           const LayerResidualRequest& request = requests[missing_positions[i]];
           const std::vector<int> normalized_cond =
@@ -210,6 +222,7 @@ class CudaSkeletonResidualCache {
         }
       } else {
         batch_diag.groups = 1;
+        batch_diag.unique_designs = static_cast<int>(missing_positions.size());
         batch_diag.max_group_size = static_cast<int>(missing_positions.size());
         batch_diag.min_group_size = static_cast<int>(missing_positions.size());
         for (int position : missing_positions) {
@@ -372,7 +385,7 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     ++(*dcov_batches);
     diagnostics->batches.push_back(SchedulerBatchDiagnostic{
       level, *dcov_batches - 1, "dcov", tasks[start].task_id, count, n, "ok",
-      0, 0, 0, 0, 0, 0, 0, 0, 0});
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
   }
   return pvalues;
 }
@@ -462,7 +475,7 @@ std::vector<double> evaluate_tasks_hsic_cuda(
     }
     diagnostics->batches.push_back(SchedulerBatchDiagnostic{
       level, counters->batches - 1, "hsic", tasks[start].task_id, count, n, "ok",
-      0, 0, 0, 0, 0, 0, 0, 0, 0});
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
   }
   return pvalues;
 }

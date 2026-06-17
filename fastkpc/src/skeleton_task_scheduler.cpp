@@ -173,6 +173,9 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.cuda_residual_true_batched_fits = 0;
   out.cuda_residual_single_fit_calls = 0;
   out.cuda_residual_cpu_fallback_fits = 0;
+  out.cuda_residual_unique_designs = 0;
+  out.cuda_residual_duplicate_design_fits = 0;
+  out.cuda_residual_max_fits_per_design = 0;
   out.max_level_tasks = 0;
   out.max_level_unique_residuals = 0;
   out.dcov_batch_size_requested = dcov_batch_size_requested;

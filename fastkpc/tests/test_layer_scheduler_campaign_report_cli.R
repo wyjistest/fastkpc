@@ -49,6 +49,8 @@ assert_true(is.data.frame(campaign$scheduler_batches),
             "campaign should include scheduler_batches")
 batch_diag_cols <- c("groups", "true_batched_groups", "true_batched_fits",
                      "single_fit_calls", "cpu_fallback_fits",
+                     "unique_designs", "duplicate_design_fits",
+                     "max_fits_per_design",
                      "max_group_size", "min_group_size",
                      "max_design_cols", "min_design_cols")
 assert_true(all(batch_diag_cols %in% names(campaign$scheduler_batches)),

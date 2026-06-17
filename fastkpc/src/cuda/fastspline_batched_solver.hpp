@@ -11,13 +11,14 @@ struct FastSplineBatchRequest {
   int original_index;
   int target;
   std::vector<int> conditioning_set;
-  FastSplineDesign design;
+  int design_index;
 };
 
 struct FastSplineBatchGroup {
   int group_id;
   int n;
   int design_cols;
+  std::vector<FastSplineDesign> designs;
   std::vector<FastSplineBatchRequest> requests;
 };
 

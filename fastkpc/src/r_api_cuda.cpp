@@ -203,6 +203,8 @@ Rcpp::DataFrame scheduler_batches_to_data_frame(
   Rcpp::IntegerVector level(n), batch_id(n), start_task_id(n), task_count(n), rows(n);
   Rcpp::IntegerVector groups(n), true_batched_groups(n), true_batched_fits(n);
   Rcpp::IntegerVector single_fit_calls(n), cpu_fallback_fits(n);
+  Rcpp::IntegerVector unique_designs(n), duplicate_design_fits(n);
+  Rcpp::IntegerVector max_fits_per_design(n);
   Rcpp::IntegerVector max_group_size(n), min_group_size(n);
   Rcpp::IntegerVector max_design_cols(n), min_design_cols(n);
   Rcpp::CharacterVector kind(n), status(n);
@@ -219,6 +221,9 @@ Rcpp::DataFrame scheduler_batches_to_data_frame(
     true_batched_fits[i] = batches[i].true_batched_fits;
     single_fit_calls[i] = batches[i].single_fit_calls;
     cpu_fallback_fits[i] = batches[i].cpu_fallback_fits;
+    unique_designs[i] = batches[i].unique_designs;
+    duplicate_design_fits[i] = batches[i].duplicate_design_fits;
+    max_fits_per_design[i] = batches[i].max_fits_per_design;
     max_group_size[i] = batches[i].max_group_size;
     min_group_size[i] = batches[i].min_group_size;
     max_design_cols[i] = batches[i].max_design_cols;
@@ -237,6 +242,9 @@ Rcpp::DataFrame scheduler_batches_to_data_frame(
     Rcpp::Named("true_batched_fits") = true_batched_fits,
     Rcpp::Named("single_fit_calls") = single_fit_calls,
     Rcpp::Named("cpu_fallback_fits") = cpu_fallback_fits,
+    Rcpp::Named("unique_designs") = unique_designs,
+    Rcpp::Named("duplicate_design_fits") = duplicate_design_fits,
+    Rcpp::Named("max_fits_per_design") = max_fits_per_design,
     Rcpp::Named("max_group_size") = max_group_size,
     Rcpp::Named("min_group_size") = min_group_size,
     Rcpp::Named("max_design_cols") = max_design_cols,
@@ -302,6 +310,12 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.cuda_residual_single_fit_calls,
       Rcpp::Named("cuda_residual_cpu_fallback_fits") =
         diagnostics.cuda_residual_cpu_fallback_fits,
+      Rcpp::Named("cuda_residual_unique_designs") =
+        diagnostics.cuda_residual_unique_designs,
+      Rcpp::Named("cuda_residual_duplicate_design_fits") =
+        diagnostics.cuda_residual_duplicate_design_fits,
+      Rcpp::Named("cuda_residual_max_fits_per_design") =
+        diagnostics.cuda_residual_max_fits_per_design,
       Rcpp::Named("max_level_tasks") = diagnostics.max_level_tasks,
       Rcpp::Named("max_level_unique_residuals") =
         diagnostics.max_level_unique_residuals,
@@ -538,6 +552,8 @@ Rcpp::DataFrame fastspline_batch_group_table_to_df(
   const int n = static_cast<int>(diagnostics.group_id.size());
   Rcpp::IntegerVector group_id(n), rows(n), design_cols(n), fit_count(n);
   Rcpp::IntegerVector single_fit_calls(n), cpu_fallback_fits(n);
+  Rcpp::IntegerVector unique_designs(n), duplicate_design_fits(n);
+  Rcpp::IntegerVector max_fits_per_design(n);
   Rcpp::LogicalVector true_batched(n);
   Rcpp::CharacterVector cholesky_backend(n), status(n), reason(n);
   for (int i = 0; i < n; ++i) {
@@ -548,6 +564,9 @@ Rcpp::DataFrame fastspline_batch_group_table_to_df(
     true_batched[i] = diagnostics.group_true_batched[i] != 0;
     single_fit_calls[i] = diagnostics.group_single_fit_calls[i];
     cpu_fallback_fits[i] = diagnostics.group_cpu_fallback_fits[i];
+    unique_designs[i] = diagnostics.group_unique_designs[i];
+    duplicate_design_fits[i] = diagnostics.group_duplicate_design_fits[i];
+    max_fits_per_design[i] = diagnostics.group_max_fits_per_design[i];
     cholesky_backend[i] = diagnostics.group_cholesky_backend[i];
     status[i] = diagnostics.group_status[i];
     reason[i] = diagnostics.group_reason[i];
@@ -560,6 +579,9 @@ Rcpp::DataFrame fastspline_batch_group_table_to_df(
     Rcpp::Named("true_batched") = true_batched,
     Rcpp::Named("single_fit_calls") = single_fit_calls,
     Rcpp::Named("cpu_fallback_fits") = cpu_fallback_fits,
+    Rcpp::Named("unique_designs") = unique_designs,
+    Rcpp::Named("duplicate_design_fits") = duplicate_design_fits,
+    Rcpp::Named("max_fits_per_design") = max_fits_per_design,
     Rcpp::Named("cholesky_backend") = cholesky_backend,
     Rcpp::Named("status") = status,
     Rcpp::Named("reason") = reason,
@@ -576,6 +598,9 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
     Rcpp::Named("true_batched_fits") = diagnostics.true_batched_fits,
     Rcpp::Named("single_fit_calls") = diagnostics.single_fit_calls,
     Rcpp::Named("cpu_fallback_fits") = diagnostics.cpu_fallback_fits,
+    Rcpp::Named("unique_designs") = diagnostics.unique_designs,
+    Rcpp::Named("duplicate_design_fits") = diagnostics.duplicate_design_fits,
+    Rcpp::Named("max_fits_per_design") = diagnostics.max_fits_per_design,
     Rcpp::Named("max_group_size") = diagnostics.max_group_size,
     Rcpp::Named("min_group_size") = diagnostics.min_group_size,
     Rcpp::Named("cholesky_backend") = diagnostics.cholesky_backend,

@@ -64,6 +64,9 @@ struct SchedulerBatchDiagnostic {
   int true_batched_fits;
   int single_fit_calls;
   int cpu_fallback_fits;
+  int unique_designs;
+  int duplicate_design_fits;
+  int max_fits_per_design;
   int max_group_size;
   int min_group_size;
   int max_design_cols;
@@ -99,6 +102,9 @@ struct SchedulerDiagnostics {
   int cuda_residual_true_batched_fits;
   int cuda_residual_single_fit_calls;
   int cuda_residual_cpu_fallback_fits;
+  int cuda_residual_unique_designs;
+  int cuda_residual_duplicate_design_fits;
+  int cuda_residual_max_fits_per_design;
   int max_level_tasks;
   int max_level_unique_residuals;
   int dcov_batch_size_requested;

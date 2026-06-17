@@ -1,6 +1,8 @@
 #include "fastspline_batched_solver.hpp"
 
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
+#include <cusolverDn.h>
 
 #include <algorithm>
 #include <cmath>
@@ -40,6 +42,20 @@ void check_cuda(cudaError_t err, const char* stage) {
   }
 }
 
+void check_cublas(cublasStatus_t status, const char* stage) {
+  if (status != CUBLAS_STATUS_SUCCESS) {
+    throw std::runtime_error(std::string(stage) + ": cuBLAS status " +
+                             std::to_string(static_cast<int>(status)));
+  }
+}
+
+void check_cusolver(cusolverStatus_t status, const char* stage) {
+  if (status != CUSOLVER_STATUS_SUCCESS) {
+    throw std::runtime_error(std::string(stage) + ": cuSOLVER status " +
+                             std::to_string(static_cast<int>(status)));
+  }
+}
+
 std::vector<double> response_vector(const Rcpp::NumericMatrix& data, int target) {
   if (target < 0 || target >= data.ncol()) {
     throw std::runtime_error("target column out of range");
@@ -63,6 +79,25 @@ std::string group_key(const FastSplineDesign& design,
       << params.ridge << "|"
       << params.mode;
   return out.str();
+}
+
+std::string conditioning_set_key(std::vector<int> conditioning_set) {
+  std::sort(conditioning_set.begin(), conditioning_set.end());
+  std::ostringstream out;
+  for (std::size_t i = 0; i < conditioning_set.size(); ++i) {
+    if (i != 0) out << ",";
+    out << conditioning_set[i];
+  }
+  return out.str();
+}
+
+const FastSplineDesign& request_design(const FastSplineBatchGroup& group,
+                                       const FastSplineBatchRequest& request) {
+  if (request.design_index < 0 ||
+      request.design_index >= static_cast<int>(group.designs.size())) {
+    throw std::runtime_error("fastSpline batch design index out of range");
+  }
+  return group.designs[request.design_index];
 }
 
 FastSplineCudaDiagnostics make_diagnostics(bool cuda_used,
@@ -103,7 +138,7 @@ std::vector<double> pack_group_x(const FastSplineBatchGroup& group) {
   const int p = group.design_cols;
   std::vector<double> out(static_cast<std::size_t>(group_size) * n * p);
   for (int fit = 0; fit < group_size; ++fit) {
-    const FastSplineDesign& design = group.requests[fit].design;
+    const FastSplineDesign& design = request_design(group, group.requests[fit]);
     if (design.n != n || design.p != p) {
       throw std::runtime_error("fastSpline batch X shape mismatch");
     }
@@ -118,7 +153,7 @@ std::vector<double> pack_group_p(const FastSplineBatchGroup& group) {
   const int p = group.design_cols;
   std::vector<double> out(static_cast<std::size_t>(group_size) * p * p);
   for (int fit = 0; fit < group_size; ++fit) {
-    const FastSplineDesign& design = group.requests[fit].design;
+    const FastSplineDesign& design = request_design(group, group.requests[fit]);
     if (design.p != p || static_cast<int>(design.P.size()) != p * p) {
       throw std::runtime_error("fastSpline batch penalty shape mismatch");
     }
@@ -145,6 +180,21 @@ bool finite_vec(const std::vector<double>& values) {
     if (!std::isfinite(value)) return false;
   }
   return true;
+}
+
+int max_fits_per_design(const FastSplineBatchGroup& group) {
+  if (group.designs.empty()) return 0;
+  std::vector<int> counts(group.designs.size(), 0);
+  int max_count = 0;
+  for (const FastSplineBatchRequest& request : group.requests) {
+    if (request.design_index < 0 ||
+        request.design_index >= static_cast<int>(counts.size())) {
+      throw std::runtime_error("fastSpline batch design index out of range");
+    }
+    ++counts[request.design_index];
+    max_count = std::max(max_count, counts[request.design_index]);
+  }
+  return max_count;
 }
 
 __global__ void batched_xtx_kernel(const double* X,
@@ -222,7 +272,7 @@ __global__ void batched_build_system_kernel(const double* XtX,
     const int col = within / p;
     const std::size_t out_idx = colmajor_square_offset(fit, row, col, p);
     if (active[fit] == 0) {
-      A[out_idx] = 0.0;
+      A[out_idx] = row == col ? 1.0 : 0.0;
       continue;
     }
     double value = XtX[out_idx] +
@@ -233,67 +283,48 @@ __global__ void batched_build_system_kernel(const double* XtX,
   }
 }
 
-__global__ void batched_cholesky_solve_inverse_kernel(double* A,
-                                                      const double* Xty,
-                                                      const int* active,
-                                                      int group_size,
-                                                      int p,
-                                                      double* beta,
-                                                      double* Ainv,
-                                                      int* info) {
-  const int fit = blockIdx.x;
-  if (fit >= group_size || threadIdx.x != 0) return;
-  info[fit] = 0;
-  if (active[fit] == 0) return;
+__global__ void make_matrix_pointer_array(double* base,
+                                          int group_size,
+                                          int p,
+                                          double** ptrs) {
+  const int fit = blockIdx.x * blockDim.x + threadIdx.x;
+  if (fit >= group_size) return;
+  ptrs[fit] = base + static_cast<std::size_t>(fit) * p * p;
+}
 
-  double* Afit = A + static_cast<std::size_t>(fit) * p * p;
-  double* betafit = beta + static_cast<std::size_t>(fit) * p;
-  double* invfit = Ainv + static_cast<std::size_t>(fit) * p * p;
-  const double* rhs = Xty + static_cast<std::size_t>(fit) * p;
+__global__ void make_vector_pointer_array(double* base,
+                                          int group_size,
+                                          int p,
+                                          double** ptrs) {
+  const int fit = blockIdx.x * blockDim.x + threadIdx.x;
+  if (fit >= group_size) return;
+  ptrs[fit] = base + static_cast<std::size_t>(fit) * p;
+}
 
-  for (int j = 0; j < p; ++j) {
-    double diag = Afit[j + j * p];
-    for (int k = 0; k < j; ++k) {
-      const double ljk = Afit[j + k * p];
-      diag -= ljk * ljk;
-    }
-    if (!isfinite(diag) || diag <= 0.0) {
-      info[fit] = j + 1;
-      return;
-    }
-    const double ljj = sqrt(diag);
-    Afit[j + j * p] = ljj;
-    for (int i = j + 1; i < p; ++i) {
-      double value = Afit[i + j * p];
-      for (int k = 0; k < j; ++k) {
-        value -= Afit[i + k * p] * Afit[j + k * p];
-      }
-      Afit[i + j * p] = value / ljj;
-    }
+__global__ void batched_copy_xty_to_beta_kernel(const double* Xty,
+                                                int group_size,
+                                                int p,
+                                                double* beta) {
+  const int total = group_size * p;
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+       idx < total;
+       idx += gridDim.x * blockDim.x) {
+    beta[idx] = Xty[idx];
   }
+}
 
-  for (int i = 0; i < p; ++i) {
-    double value = rhs[i];
-    for (int k = 0; k < i; ++k) value -= Afit[i + k * p] * betafit[k];
-    betafit[i] = value / Afit[i + i * p];
-  }
-  for (int i = p - 1; i >= 0; --i) {
-    double value = betafit[i];
-    for (int k = i + 1; k < p; ++k) value -= Afit[k + i * p] * betafit[k];
-    betafit[i] = value / Afit[i + i * p];
-  }
-
-  for (int col = 0; col < p; ++col) {
-    for (int i = 0; i < p; ++i) {
-      double value = (i == col) ? 1.0 : 0.0;
-      for (int k = 0; k < i; ++k) value -= Afit[i + k * p] * invfit[k + col * p];
-      invfit[i + col * p] = value / Afit[i + i * p];
-    }
-    for (int i = p - 1; i >= 0; --i) {
-      double value = invfit[i + col * p];
-      for (int k = i + 1; k < p; ++k) value -= Afit[k + i * p] * invfit[k + col * p];
-      invfit[i + col * p] = value / Afit[i + i * p];
-    }
+__global__ void batched_identity_kernel(double* matrix,
+                                        int group_size,
+                                        int p) {
+  const int total = group_size * p * p;
+  for (int linear = blockIdx.x * blockDim.x + threadIdx.x;
+       linear < total;
+       linear += gridDim.x * blockDim.x) {
+    const int pp = p * p;
+    const int within = linear % pp;
+    const int row = within % p;
+    const int col = within / p;
+    matrix[linear] = row == col ? 1.0 : 0.0;
   }
 }
 
@@ -394,6 +425,11 @@ struct DeviceGroupBuffers {
   double* d_edf = nullptr;
   int* d_info = nullptr;
   int* d_active = nullptr;
+  double** d_A_ptrs = nullptr;
+  double** d_beta_ptrs = nullptr;
+  double** d_Ainv_ptrs = nullptr;
+  cusolverDnHandle_t solver = nullptr;
+  cublasHandle_t blas = nullptr;
 };
 
 void free_buffers(DeviceGroupBuffers* buffers) {
@@ -411,6 +447,17 @@ void free_buffers(DeviceGroupBuffers* buffers) {
   cudaFree(buffers->d_edf);
   cudaFree(buffers->d_info);
   cudaFree(buffers->d_active);
+  cudaFree(buffers->d_A_ptrs);
+  cudaFree(buffers->d_beta_ptrs);
+  cudaFree(buffers->d_Ainv_ptrs);
+  if (buffers->solver != nullptr) {
+    cusolverDnDestroy(buffers->solver);
+    buffers->solver = nullptr;
+  }
+  if (buffers->blas != nullptr) {
+    cublasDestroy(buffers->blas);
+    buffers->blas = nullptr;
+  }
 }
 
 struct BestFitState {
@@ -465,6 +512,15 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     check_cuda(cudaMalloc(&buffers.d_edf, sizeof(double) * group_size), "alloc batched edf");
     check_cuda(cudaMalloc(&buffers.d_info, sizeof(int) * group_size), "alloc batched info");
     check_cuda(cudaMalloc(&buffers.d_active, sizeof(int) * group_size), "alloc batched active");
+    check_cuda(cudaMalloc(&buffers.d_A_ptrs,
+                          sizeof(double*) * group_size), "alloc batched A ptrs");
+    check_cuda(cudaMalloc(&buffers.d_beta_ptrs,
+                          sizeof(double*) * group_size), "alloc batched beta ptrs");
+    check_cuda(cudaMalloc(&buffers.d_Ainv_ptrs,
+                          sizeof(double*) * group_size), "alloc batched inverse ptrs");
+    check_cusolver(cusolverDnCreate(&buffers.solver),
+                   "create batched cuSOLVER handle");
+    check_cublas(cublasCreate(&buffers.blas), "create batched cuBLAS handle");
 
     check_cuda(cudaMemcpy(buffers.d_X, host_X.data(), sizeof(double) * x_size,
                           cudaMemcpyHostToDevice), "copy batched X");
@@ -481,6 +537,15 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
                                              group_size, n, p, buffers.d_Xty);
     check_cuda(cudaGetLastError(), "launch batched XtX/Xty kernels");
     check_cuda(cudaDeviceSynchronize(), "synchronize batched XtX/Xty kernels");
+
+    const int ptr_blocks = (group_size + kBlock - 1) / kBlock;
+    make_matrix_pointer_array<<<std::max(1, ptr_blocks), kBlock>>>(
+      buffers.d_A, group_size, p, buffers.d_A_ptrs);
+    make_vector_pointer_array<<<std::max(1, ptr_blocks), kBlock>>>(
+      buffers.d_beta, group_size, p, buffers.d_beta_ptrs);
+    make_matrix_pointer_array<<<std::max(1, ptr_blocks), kBlock>>>(
+      buffers.d_Ainv, group_size, p, buffers.d_Ainv_ptrs);
+    check_cuda(cudaGetLastError(), "launch batched pointer setup kernels");
 
     std::vector<int> active(group_size, 1);
     std::vector<BestFitState> best(group_size);
@@ -499,10 +564,36 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
           lambda, ridge, buffers.d_A);
         check_cuda(cudaGetLastError(), "launch batched build system kernel");
 
-        batched_cholesky_solve_inverse_kernel<<<group_size, 1>>>(
-          buffers.d_A, buffers.d_Xty, buffers.d_active, group_size, p,
-          buffers.d_beta, buffers.d_Ainv, buffers.d_info);
-        check_cuda(cudaGetLastError(), "launch batched Cholesky solve kernel");
+        check_cusolver(cusolverDnDpotrfBatched(
+          buffers.solver, CUBLAS_FILL_MODE_UPPER, p, buffers.d_A_ptrs, p,
+          buffers.d_info, group_size), "batched potrf");
+
+        const int beta_blocks = static_cast<int>(
+          (vec_size + kBlock - 1) / kBlock);
+        batched_copy_xty_to_beta_kernel<<<std::max(1, beta_blocks), kBlock>>>(
+          buffers.d_Xty, group_size, p, buffers.d_beta);
+        check_cuda(cudaGetLastError(), "launch batched beta copy kernel");
+        check_cusolver(cusolverDnDpotrsBatched(
+          buffers.solver, CUBLAS_FILL_MODE_UPPER, p, 1, buffers.d_A_ptrs, p,
+          buffers.d_beta_ptrs, p, buffers.d_info, group_size),
+          "batched potrs beta");
+
+        batched_identity_kernel<<<std::max(1, system_blocks), kBlock>>>(
+          buffers.d_Ainv, group_size, p);
+        check_cuda(cudaGetLastError(), "launch batched identity kernel");
+        const double one = 1.0;
+        check_cublas(cublasDtrsmBatched(
+          buffers.blas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+          CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, p, p, &one,
+          const_cast<const double**>(buffers.d_A_ptrs), p,
+          buffers.d_Ainv_ptrs, p, group_size),
+          "batched inverse triangular solve 1");
+        check_cublas(cublasDtrsmBatched(
+          buffers.blas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+          CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, p, p, &one,
+          const_cast<const double**>(buffers.d_A_ptrs), p,
+          buffers.d_Ainv_ptrs, p, group_size),
+          "batched inverse triangular solve 2");
 
         const int row_blocks = (n + kBlock - 1) / kBlock;
         const dim3 fit_grid(std::max(1, row_blocks), group_size);
@@ -628,6 +719,12 @@ void append_group_diagnostics(FastSplineCudaBatchDiagnostics* diagnostics,
   diagnostics->group_true_batched.push_back(true_batched ? 1 : 0);
   diagnostics->group_single_fit_calls.push_back(single_fit_calls);
   diagnostics->group_cpu_fallback_fits.push_back(cpu_fallback_fits);
+  const int unique_designs = static_cast<int>(group.designs.size());
+  const int duplicate_design_fits = std::max(0, fit_count - unique_designs);
+  const int group_max_fits_per_design = max_fits_per_design(group);
+  diagnostics->group_unique_designs.push_back(unique_designs);
+  diagnostics->group_duplicate_design_fits.push_back(duplicate_design_fits);
+  diagnostics->group_max_fits_per_design.push_back(group_max_fits_per_design);
   diagnostics->group_cholesky_backend.push_back(backend);
   diagnostics->group_status.push_back(status);
   diagnostics->group_reason.push_back(reason);
@@ -636,6 +733,10 @@ void append_group_diagnostics(FastSplineCudaBatchDiagnostics* diagnostics,
   diagnostics->true_batched_fits += true_batched ? fit_count : 0;
   diagnostics->single_fit_calls += single_fit_calls;
   diagnostics->cpu_fallback_fits += cpu_fallback_fits;
+  diagnostics->unique_designs += unique_designs;
+  diagnostics->duplicate_design_fits += duplicate_design_fits;
+  diagnostics->max_fits_per_design =
+    std::max(diagnostics->max_fits_per_design, group_max_fits_per_design);
   diagnostics->max_group_size = std::max(diagnostics->max_group_size, fit_count);
   diagnostics->min_group_size = diagnostics->min_group_size == 0 ?
     fit_count : std::min(diagnostics->min_group_size, fit_count);
@@ -652,6 +753,9 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.true_batched_fits = 0;
   out.single_fit_calls = 0;
   out.cpu_fallback_fits = 0;
+  out.unique_designs = 0;
+  out.duplicate_design_fits = 0;
+  out.max_fits_per_design = 0;
   out.max_group_size = 0;
   out.min_group_size = 0;
   out.cholesky_backend = "";
@@ -671,26 +775,57 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
   }
   std::vector<FastSplineBatchGroup> groups;
   std::map<std::string, int> group_by_key;
+  std::map<std::string, FastSplineDesign> design_cache;
+  std::vector<std::map<std::string, int> > group_design_by_key;
   for (int i = 0; i < static_cast<int>(targets.size()); ++i) {
     if (targets[i] < 0 || targets[i] >= data.ncol()) {
       throw std::runtime_error("target column out of range");
     }
+    std::vector<int> normalized_conditioning_set = conditioning_sets[i];
+    std::sort(normalized_conditioning_set.begin(),
+              normalized_conditioning_set.end());
+    const std::string exact_design_key =
+      conditioning_set_key(normalized_conditioning_set);
+
+    std::map<std::string, FastSplineDesign>::iterator design_it =
+      design_cache.find(exact_design_key);
+    if (design_it == design_cache.end()) {
+      FastSplineDesign design =
+        make_fastspline_design(data, normalized_conditioning_set, params);
+      design_it = design_cache.insert(
+        std::make_pair(exact_design_key, design)).first;
+    }
+
     FastSplineBatchRequest request;
     request.original_index = i;
     request.target = targets[i];
-    request.conditioning_set = conditioning_sets[i];
-    request.design = make_fastspline_design(data, conditioning_sets[i], params);
+    request.conditioning_set = normalized_conditioning_set;
+    request.design_index = -1;
 
-    const std::string key = group_key(request.design, params);
+    const std::string key = group_key(design_it->second, params);
     std::map<std::string, int>::iterator it = group_by_key.find(key);
     if (it == group_by_key.end()) {
       FastSplineBatchGroup group;
       group.group_id = static_cast<int>(groups.size());
-      group.n = request.design.n;
-      group.design_cols = request.design.p;
+      group.n = design_it->second.n;
+      group.design_cols = design_it->second.p;
       groups.push_back(group);
+      group_design_by_key.push_back(std::map<std::string, int>());
       group_by_key[key] = group.group_id;
       it = group_by_key.find(key);
+    }
+    FastSplineBatchGroup& group = groups[it->second];
+    std::map<std::string, int>& designs_for_group =
+      group_design_by_key[it->second];
+    std::map<std::string, int>::iterator group_design_it =
+      designs_for_group.find(exact_design_key);
+    if (group_design_it == designs_for_group.end()) {
+      const int design_index = static_cast<int>(group.designs.size());
+      group.designs.push_back(design_it->second);
+      designs_for_group[exact_design_key] = design_index;
+      request.design_index = design_index;
+    } else {
+      request.design_index = group_design_it->second;
     }
     groups[it->second].requests.push_back(request);
   }
@@ -711,7 +846,7 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
 
   const std::vector<FastSplineBatchGroup> groups =
     make_fastspline_batch_groups(data, targets, conditioning_sets, params);
-  const std::string true_backend = "internal-small-spd";
+  const std::string true_backend = "cusolver-batched";
 
   for (const FastSplineBatchGroup& group : groups) {
     const int fit_count = static_cast<int>(group.requests.size());

@@ -289,7 +289,8 @@ fastkpc_flatten_scheduler_batches <- function(result, run_id) {
   batch_columns <- c(
     "level", "batch_id", "kind", "start_task_id", "task_count", "n", "status",
     "groups", "true_batched_groups", "true_batched_fits", "single_fit_calls",
-    "cpu_fallback_fits", "max_group_size", "min_group_size",
+    "cpu_fallback_fits", "unique_designs", "duplicate_design_fits",
+    "max_fits_per_design", "max_group_size", "min_group_size",
     "max_design_cols", "min_design_cols"
   )
   diag <- result$skeleton$scheduler_diagnostics
@@ -375,6 +376,12 @@ fastkpc_flatten_true_batched_residuals <- function(result, run_id) {
       as.integer(summary$cuda_residual_single_fit_calls %||% 0L),
     cuda_residual_cpu_fallback_fits =
       as.integer(summary$cuda_residual_cpu_fallback_fits %||% 0L),
+    cuda_residual_unique_designs =
+      as.integer(summary$cuda_residual_unique_designs %||% 0L),
+    cuda_residual_duplicate_design_fits =
+      as.integer(summary$cuda_residual_duplicate_design_fits %||% 0L),
+    cuda_residual_max_fits_per_design =
+      as.integer(summary$cuda_residual_max_fits_per_design %||% 0L),
     status = "ok",
     stringsAsFactors = FALSE
   )
@@ -774,7 +781,10 @@ fastkpc_campaign_summary <- function(campaign) {
     fastkpc_empty_df(c("cuda_residual_true_batched_groups",
                        "cuda_residual_true_batched_fits",
                        "cuda_residual_single_fit_calls",
-                       "cuda_residual_cpu_fallback_fits"))
+                       "cuda_residual_cpu_fallback_fits",
+                       "cuda_residual_unique_designs",
+                       "cuda_residual_duplicate_design_fits",
+                       "cuda_residual_max_fits_per_design"))
   hsic_cuda_backend_diagnostics <- campaign$hsic_cuda_backend_diagnostics %||%
     fastkpc_empty_df(c("cuda_hsic_used", "ci_hsic_cuda_batches",
                        "ci_hsic_cuda_pairs"))
@@ -840,6 +850,18 @@ fastkpc_campaign_summary <- function(campaign) {
     cuda_residual_cpu_fallback_fits =
       sum(true_batched_residuals$cuda_residual_cpu_fallback_fits,
           na.rm = TRUE),
+    cuda_residual_unique_designs =
+      sum(true_batched_residuals$cuda_residual_unique_designs,
+          na.rm = TRUE),
+    cuda_residual_duplicate_design_fits =
+      sum(true_batched_residuals$cuda_residual_duplicate_design_fits,
+          na.rm = TRUE),
+    cuda_residual_max_fits_per_design = if (nrow(true_batched_residuals) == 0L) {
+      0L
+    } else {
+      max(true_batched_residuals$cuda_residual_max_fits_per_design,
+          na.rm = TRUE)
+    },
     hsic_cuda_runs = sum(hsic_cuda_backend_diagnostics$cuda_hsic_used %in% TRUE,
                          na.rm = TRUE),
     hsic_cuda_batches =
@@ -1016,6 +1038,12 @@ run_fastkpc_validation_campaign <- function(seeds = c(11, 12, 13),
         as.integer(scheduler_summary$cuda_residual_single_fit_calls %||% 0L),
       cuda_residual_cpu_fallback_fits =
         as.integer(scheduler_summary$cuda_residual_cpu_fallback_fits %||% 0L),
+      cuda_residual_unique_designs =
+        as.integer(scheduler_summary$cuda_residual_unique_designs %||% 0L),
+      cuda_residual_duplicate_design_fits =
+        as.integer(scheduler_summary$cuda_residual_duplicate_design_fits %||% 0L),
+      cuda_residual_max_fits_per_design =
+        as.integer(scheduler_summary$cuda_residual_max_fits_per_design %||% 0L),
       elapsed_total_sec = elapsed_total
     )
     graph_rows[[length(graph_rows) + 1L]] <- c(run_rows[[length(run_rows)]],
@@ -1082,6 +1110,9 @@ run_fastkpc_validation_campaign <- function(seeds = c(11, 12, 13),
                                         "cuda_residual_true_batched_fits",
                                         "cuda_residual_single_fit_calls",
                                         "cuda_residual_cpu_fallback_fits",
+                                        "cuda_residual_unique_designs",
+                                        "cuda_residual_duplicate_design_fits",
+                                        "cuda_residual_max_fits_per_design",
                                         "elapsed_total_sec"))
   graph_metrics <- fastkpc_bind_rows(graph_rows, c(
     "run_id", "scenario", "seed", "n", "p", "engine", "residual_backend",
@@ -1093,7 +1124,9 @@ run_fastkpc_validation_campaign <- function(seeds = c(11, 12, 13),
     "undirected_edge_count", "bidirected_edge_count",
     "cuda_residual_batch_groups", "cuda_residual_true_batched_groups",
     "cuda_residual_true_batched_fits", "cuda_residual_single_fit_calls",
-    "cuda_residual_cpu_fallback_fits", "elapsed_total_sec",
+    "cuda_residual_cpu_fallback_fits", "cuda_residual_unique_designs",
+    "cuda_residual_duplicate_design_fits",
+    "cuda_residual_max_fits_per_design", "elapsed_total_sec",
     "orientation_event_count", "generalized_orientation_count", "max_pmax",
     "min_nonzero_pmax"
   ))
@@ -1149,6 +1182,8 @@ run_fastkpc_validation_campaign <- function(seeds = c(11, 12, 13),
                        "task_count", "n", "status", "groups",
                        "true_batched_groups", "true_batched_fits",
                        "single_fit_calls", "cpu_fallback_fits",
+                       "unique_designs", "duplicate_design_fits",
+                       "max_fits_per_design",
                        "max_group_size", "min_group_size",
                        "max_design_cols", "min_design_cols"))
   } else {
@@ -1171,7 +1206,10 @@ run_fastkpc_validation_campaign <- function(seeds = c(11, 12, 13),
                        "cuda_residual_true_batched_groups",
                        "cuda_residual_true_batched_fits",
                        "cuda_residual_single_fit_calls",
-                       "cuda_residual_cpu_fallback_fits", "status"))
+                       "cuda_residual_cpu_fallback_fits",
+                       "cuda_residual_unique_designs",
+                       "cuda_residual_duplicate_design_fits",
+                       "cuda_residual_max_fits_per_design", "status"))
   } else {
     do.call(rbind, true_batched_rows)
   }

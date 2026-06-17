@@ -439,6 +439,9 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
     result.diagnostics.true_batched_fits = 0;
     result.diagnostics.single_fit_calls = 0;
     result.diagnostics.cpu_fallback_fits = static_cast<int>(targets.size());
+    result.diagnostics.unique_designs = 0;
+    result.diagnostics.duplicate_design_fits = 0;
+    result.diagnostics.max_fits_per_design = 0;
     result.diagnostics.max_group_size = static_cast<int>(targets.size());
     result.diagnostics.min_group_size = static_cast<int>(targets.size());
     result.diagnostics.cholesky_backend = "cpu-fallback";
@@ -451,6 +454,9 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
       result.diagnostics.group_true_batched.push_back(0);
       result.diagnostics.group_single_fit_calls.push_back(0);
       result.diagnostics.group_cpu_fallback_fits.push_back(static_cast<int>(targets.size()));
+      result.diagnostics.group_unique_designs.push_back(0);
+      result.diagnostics.group_duplicate_design_fits.push_back(0);
+      result.diagnostics.group_max_fits_per_design.push_back(0);
       result.diagnostics.group_cholesky_backend.push_back("cpu-fallback");
       result.diagnostics.group_status.push_back("fallback");
       result.diagnostics.group_reason.push_back(e.what());
