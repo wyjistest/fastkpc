@@ -47,6 +47,19 @@ assert_true(all(is.finite(as.matrix(campaign$scheduler_levels[, timing_cols,
             "scheduler level timing columns should be finite")
 assert_true(is.data.frame(campaign$scheduler_batches),
             "campaign should include scheduler_batches")
+batch_diag_cols <- c("groups", "true_batched_groups", "true_batched_fits",
+                     "single_fit_calls", "cpu_fallback_fits",
+                     "max_group_size", "min_group_size",
+                     "max_design_cols", "min_design_cols")
+assert_true(all(batch_diag_cols %in% names(campaign$scheduler_batches)),
+            "scheduler_batches should include residual batch group diagnostics")
+residual_batches <- campaign$scheduler_batches[
+  campaign$scheduler_batches$kind == "residual", , drop = FALSE
+]
+assert_true(nrow(residual_batches) > 0L,
+            "scheduler_batches should contain residual batch rows")
+assert_true(any(residual_batches$true_batched_groups > 0L),
+            "residual batch diagnostics should record true-batched groups")
 assert_true(is.data.frame(campaign$scheduler_residuals),
             "campaign should include scheduler_residuals")
 
@@ -61,6 +74,10 @@ scheduler_levels_csv <- utils::read.csv(file.path(output_dir, "scheduler_levels.
                                         check.names = FALSE)
 assert_true(all(timing_cols %in% names(scheduler_levels_csv)),
             "scheduler_levels.csv should include timing columns")
+scheduler_batches_csv <- utils::read.csv(file.path(output_dir, "scheduler_batches.csv"),
+                                         check.names = FALSE)
+assert_true(all(batch_diag_cols %in% names(scheduler_batches_csv)),
+            "scheduler_batches.csv should include residual batch group diagnostics")
 assert_true(file.exists(artifacts$summary_md), "summary markdown should be written")
 
 input_csv <- tempfile(fileext = ".csv")

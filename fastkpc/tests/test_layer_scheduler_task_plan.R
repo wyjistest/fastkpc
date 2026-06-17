@@ -16,6 +16,12 @@ check_scheduler_diagnostics <- function(result, expected_scheduler) {
   assert_true(is.data.frame(diag$levels), "scheduler levels should be a data.frame")
   assert_true(is.data.frame(diag$batches), "scheduler batches should be a data.frame")
   assert_true(is.data.frame(diag$residuals), "scheduler residuals should be a data.frame")
+  batch_diag_cols <- c("groups", "true_batched_groups", "true_batched_fits",
+                       "single_fit_calls", "cpu_fallback_fits",
+                       "max_group_size", "min_group_size",
+                       "max_design_cols", "min_design_cols")
+  assert_true(all(batch_diag_cols %in% names(diag$batches)),
+              "scheduler batches should expose residual batch group diagnostics")
   timing_cols <- c(
     "plan_elapsed_sec",
     "residual_prefetch_elapsed_sec",

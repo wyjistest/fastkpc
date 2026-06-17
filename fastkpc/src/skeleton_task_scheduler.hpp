@@ -59,6 +59,15 @@ struct SchedulerBatchDiagnostic {
   int task_count;
   int n;
   std::string status;
+  int groups;
+  int true_batched_groups;
+  int true_batched_fits;
+  int single_fit_calls;
+  int cpu_fallback_fits;
+  int max_group_size;
+  int min_group_size;
+  int max_design_cols;
+  int min_design_cols;
 };
 
 struct SchedulerResidualDiagnostic {

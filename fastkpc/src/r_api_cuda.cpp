@@ -201,6 +201,10 @@ Rcpp::DataFrame scheduler_batches_to_data_frame(
   const std::vector<SchedulerBatchDiagnostic>& batches) {
   const int n = static_cast<int>(batches.size());
   Rcpp::IntegerVector level(n), batch_id(n), start_task_id(n), task_count(n), rows(n);
+  Rcpp::IntegerVector groups(n), true_batched_groups(n), true_batched_fits(n);
+  Rcpp::IntegerVector single_fit_calls(n), cpu_fallback_fits(n);
+  Rcpp::IntegerVector max_group_size(n), min_group_size(n);
+  Rcpp::IntegerVector max_design_cols(n), min_design_cols(n);
   Rcpp::CharacterVector kind(n), status(n);
   for (int i = 0; i < n; ++i) {
     level[i] = batches[i].level;
@@ -210,6 +214,15 @@ Rcpp::DataFrame scheduler_batches_to_data_frame(
     task_count[i] = batches[i].task_count;
     rows[i] = batches[i].n;
     status[i] = batches[i].status;
+    groups[i] = batches[i].groups;
+    true_batched_groups[i] = batches[i].true_batched_groups;
+    true_batched_fits[i] = batches[i].true_batched_fits;
+    single_fit_calls[i] = batches[i].single_fit_calls;
+    cpu_fallback_fits[i] = batches[i].cpu_fallback_fits;
+    max_group_size[i] = batches[i].max_group_size;
+    min_group_size[i] = batches[i].min_group_size;
+    max_design_cols[i] = batches[i].max_design_cols;
+    min_design_cols[i] = batches[i].min_design_cols;
   }
   return Rcpp::DataFrame::create(
     Rcpp::Named("level") = level,
@@ -219,6 +232,15 @@ Rcpp::DataFrame scheduler_batches_to_data_frame(
     Rcpp::Named("task_count") = task_count,
     Rcpp::Named("n") = rows,
     Rcpp::Named("status") = status,
+    Rcpp::Named("groups") = groups,
+    Rcpp::Named("true_batched_groups") = true_batched_groups,
+    Rcpp::Named("true_batched_fits") = true_batched_fits,
+    Rcpp::Named("single_fit_calls") = single_fit_calls,
+    Rcpp::Named("cpu_fallback_fits") = cpu_fallback_fits,
+    Rcpp::Named("max_group_size") = max_group_size,
+    Rcpp::Named("min_group_size") = min_group_size,
+    Rcpp::Named("max_design_cols") = max_design_cols,
+    Rcpp::Named("min_design_cols") = min_design_cols,
     Rcpp::Named("stringsAsFactors") = false
   );
 }

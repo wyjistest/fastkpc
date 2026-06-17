@@ -46,6 +46,18 @@ std::vector<double> column_as_vector(const Rcpp::NumericMatrix& data, int col) {
   return out;
 }
 
+std::pair<int, int> minmax_design_cols(
+    const FastSplineCudaBatchDiagnostics& diagnostics) {
+  if (diagnostics.group_design_cols.empty()) return std::make_pair(0, 0);
+  int min_value = diagnostics.group_design_cols[0];
+  int max_value = diagnostics.group_design_cols[0];
+  for (int value : diagnostics.group_design_cols) {
+    min_value = std::min(min_value, value);
+    max_value = std::max(max_value, value);
+  }
+  return std::make_pair(min_value, max_value);
+}
+
 class CudaSkeletonResidualCache {
  public:
   CudaSkeletonResidualCache(const std::string& backend_name,
@@ -134,10 +146,11 @@ class CudaSkeletonResidualCache {
 
       if (missing_positions.empty()) continue;
       ++batch_count;
-      diagnostics->batches.push_back(SchedulerBatchDiagnostic{
+      SchedulerBatchDiagnostic batch_diag{
         level, static_cast<int>(diagnostics->batches.size()), "residual",
         requests[missing_positions.front()].request_id,
-        static_cast<int>(missing_positions.size()), data.nrow(), "ok"});
+        static_cast<int>(missing_positions.size()), data.nrow(), "ok",
+        0, 0, 0, 0, 0, 0, 0, 0, 0};
 
       if (backend_.kind == ResidualBackendKind::FastSpline &&
           used_device_ == "cuda") {
@@ -154,6 +167,21 @@ class CudaSkeletonResidualCache {
           fit_fastspline_residuals_cuda_batch_result(
             data, targets, conditioning_sets, backend_.fastspline, fallback_);
         const std::vector<FastSplineCudaFit>& fits = batch_result.fits;
+        const std::pair<int, int> design_cols =
+          minmax_design_cols(batch_result.diagnostics);
+        batch_diag.groups = batch_result.diagnostics.groups;
+        batch_diag.true_batched_groups =
+          batch_result.diagnostics.true_batched_groups;
+        batch_diag.true_batched_fits =
+          batch_result.diagnostics.true_batched_fits;
+        batch_diag.single_fit_calls =
+          batch_result.diagnostics.single_fit_calls;
+        batch_diag.cpu_fallback_fits =
+          batch_result.diagnostics.cpu_fallback_fits;
+        batch_diag.max_group_size = batch_result.diagnostics.max_group_size;
+        batch_diag.min_group_size = batch_result.diagnostics.min_group_size;
+        batch_diag.min_design_cols = design_cols.first;
+        batch_diag.max_design_cols = design_cols.second;
         diagnostics->cuda_residual_batch_groups += batch_result.diagnostics.groups;
         diagnostics->cuda_residual_true_batched_groups +=
           batch_result.diagnostics.true_batched_groups;
@@ -181,6 +209,9 @@ class CudaSkeletonResidualCache {
             fits[i].diagnostics.reason});
         }
       } else {
+        batch_diag.groups = 1;
+        batch_diag.max_group_size = static_cast<int>(missing_positions.size());
+        batch_diag.min_group_size = static_cast<int>(missing_positions.size());
         for (int position : missing_positions) {
           const LayerResidualRequest& request = requests[position];
           const ResidualCacheKey key = make_key(data, request.target,
@@ -195,6 +226,7 @@ class CudaSkeletonResidualCache {
             used_device_, true, false, ""});
         }
       }
+      diagnostics->batches.push_back(batch_diag);
     }
     return batch_count;
   }
@@ -339,7 +371,8 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     }
     ++(*dcov_batches);
     diagnostics->batches.push_back(SchedulerBatchDiagnostic{
-      level, *dcov_batches - 1, "dcov", tasks[start].task_id, count, n, "ok"});
+      level, *dcov_batches - 1, "dcov", tasks[start].task_id, count, n, "ok",
+      0, 0, 0, 0, 0, 0, 0, 0, 0});
   }
   return pvalues;
 }
@@ -428,7 +461,8 @@ std::vector<double> evaluate_tasks_hsic_cuda(
         count * batch.diagnostics.permutation_replicates;
     }
     diagnostics->batches.push_back(SchedulerBatchDiagnostic{
-      level, counters->batches - 1, "hsic", tasks[start].task_id, count, n, "ok"});
+      level, counters->batches - 1, "hsic", tasks[start].task_id, count, n, "ok",
+      0, 0, 0, 0, 0, 0, 0, 0, 0});
   }
   return pvalues;
 }

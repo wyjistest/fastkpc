@@ -286,10 +286,18 @@ fastkpc_flatten_scheduler_levels <- function(result, run_id) {
 }
 
 fastkpc_flatten_scheduler_batches <- function(result, run_id) {
+  batch_columns <- c(
+    "level", "batch_id", "kind", "start_task_id", "task_count", "n", "status",
+    "groups", "true_batched_groups", "true_batched_fits", "single_fit_calls",
+    "cpu_fallback_fits", "max_group_size", "min_group_size",
+    "max_design_cols", "min_design_cols"
+  )
   diag <- result$skeleton$scheduler_diagnostics
-  batches <- diag$batches %||% fastkpc_empty_df(c(
-    "level", "batch_id", "kind", "start_task_id", "task_count", "n", "status"
-  ))
+  batches <- diag$batches %||% fastkpc_empty_df(batch_columns)
+  for (column in setdiff(batch_columns, names(batches))) {
+    batches[[column]] <- NA_real_
+  }
+  batches <- batches[, batch_columns, drop = FALSE]
   if (nrow(batches) == 0L) {
     return(fastkpc_empty_df(c("run_id", "scenario", "seed", "n", "engine",
                               "residual_backend", "residual_device", "scheduler",
@@ -1138,7 +1146,11 @@ run_fastkpc_validation_campaign <- function(seeds = c(11, 12, 13),
     fastkpc_empty_df(c("run_id", "scenario", "seed", "n", "engine",
                        "residual_backend", "residual_device", "scheduler",
                        "level", "batch_id", "kind", "start_task_id",
-                       "task_count", "n", "status"))
+                       "task_count", "n", "status", "groups",
+                       "true_batched_groups", "true_batched_fits",
+                       "single_fit_calls", "cpu_fallback_fits",
+                       "max_group_size", "min_group_size",
+                       "max_design_cols", "min_design_cols"))
   } else {
     do.call(rbind, scheduler_batch_rows)
   }

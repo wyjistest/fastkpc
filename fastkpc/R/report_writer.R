@@ -302,7 +302,15 @@ write_fastkpc_validation_report <- function(campaign, output_dir) {
                                           "residual_device", "scheduler",
                                           "level", "batch_id", "kind",
                                           "start_task_id", "task_count",
-                                          "status")),
+                                          "status", "groups",
+                                          "true_batched_groups",
+                                          "true_batched_fits",
+                                          "single_fit_calls",
+                                          "cpu_fallback_fits",
+                                          "max_group_size",
+                                          "min_group_size",
+                                          "max_design_cols",
+                                          "min_design_cols")),
                     artifacts$scheduler_batches_csv)
   fastkpc_write_csv(campaign$scheduler_residuals %||%
                       fastkpc_empty_df(c("run_id", "scenario", "seed", "n",
