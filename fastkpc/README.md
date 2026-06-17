@@ -908,6 +908,13 @@ validation. It is restricted to the `kpcalg::regrXonS()` residualization
 surface, may depend on `mgcv` internals, and is not the final portable product
 backend.
 
+The mgcv fixed-sp reference calls `mgcv::gam(..., sp=sp, fit=TRUE)`.
+The mgcvExtract fixed-sp self-solve uses `mgcv::gam(fit=FALSE)` setup data,
+then solves the fixed-sp Gaussian penalized least-squares problem inside
+fastkpc. mgcvExtractGCVBridge uses mgcv for smoothing-parameter selection and
+fastkpc only for the fixed-sp solve; it is not a self-contained GCV
+implementation.
+
 The restricted compatibility target is:
 
 ```text

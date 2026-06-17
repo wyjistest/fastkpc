@@ -98,7 +98,7 @@ legacy_udag2wanpdag_result <- function(data, alpha, max_conditioning_size,
     alpha = alpha,
     verbose = FALSE
   )
-  pdag <- as.matrix(legacy_oriented@graph)
+  pdag <- methods::as(legacy_oriented@graph, "matrix")
   storage.mode(pdag) <- "integer"
   list(
     available = TRUE,

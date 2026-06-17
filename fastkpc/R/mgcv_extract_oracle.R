@@ -29,21 +29,153 @@ fastkpc_mgcv_selected_sp <- function(fit, fallback = NULL) {
   fallback
 }
 
-# Gate B only proves that the extraction bridge can reproduce residuals when
-# mgcv supplies setup/sp semantics. It does not prove that fastkpc can construct
-# mgcv's basis, penalties, constraints, rank behavior, or optimizer independently.
-fastkpc_mgcv_extract_fixed_sp <- function(formula, data, sp,
-                                          method = "GCV.Cp",
-                                          target = 1L,
-                                          S = integer(),
-                                          k = NA_integer_,
-                                          bs = "tp") {
+fastkpc_stop_unsupported_setup <- function(message) {
+  stop(paste0("Unsupported mgcv fixed-sp setup: ", message), call. = FALSE)
+}
+
+fastkpc_validate_fixed_positive_sp <- function(sp, expected_length = NULL) {
+  if (is.null(sp) || length(sp) == 0L) {
+    fastkpc_stop_unsupported_setup("sp must be supplied for fixed-sp self-solve")
+  }
+  sp <- as.numeric(sp)
+  if (any(!is.finite(sp)) || any(sp <= 0)) {
+    fastkpc_stop_unsupported_setup("sp must contain fixed positive finite values")
+  }
+  if (!is.null(expected_length) && length(sp) != expected_length) {
+    fastkpc_stop_unsupported_setup(
+      paste0("length(sp) must equal length(G$S); got ", length(sp),
+             " and expected ", expected_length)
+    )
+  }
+  sp
+}
+
+fastkpc_setup_weights_policy <- function(G) {
+  w <- G$w
+  if (is.null(w)) return(list(policy = "none-or-unit", w = NULL))
+  w <- as.numeric(w)
+  if (length(w) == 0L || all(abs(w - 1) < 1e-12)) {
+    return(list(policy = "none-or-unit", w = NULL))
+  }
+  fastkpc_stop_unsupported_setup("non-unit weights are not supported in Gate B v1")
+}
+
+fastkpc_setup_offset_policy <- function(G) {
+  offset <- G$offset
+  if (is.null(offset)) return(list(policy = "none-or-zero", offset = NULL))
+  offset <- as.numeric(offset)
+  if (length(offset) == 0L || all(abs(offset) < 1e-12)) {
+    return(list(policy = "none-or-zero", offset = NULL))
+  }
+  fastkpc_stop_unsupported_setup("non-zero offsets are not supported in Gate B v1")
+}
+
+fastkpc_check_setup_family <- function(G) {
+  fam <- G$family
+  if (is.null(fam) ||
+      !identical(fam$family, "gaussian") ||
+      !identical(fam$link, "identity")) {
+    fastkpc_stop_unsupported_setup("only gaussian identity family is supported")
+  }
+  "gaussian_identity"
+}
+
+fastkpc_check_setup_L <- function(G) {
+  L <- G$L
+  if (is.null(L) || length(L) == 0L) return(invisible(TRUE))
+  L <- as.matrix(L)
+  if (nrow(L) == ncol(L) && all(abs(L - diag(nrow(L))) < 1e-12)) {
+    return(invisible(TRUE))
+  }
+  fastkpc_stop_unsupported_setup("non-identity smoothing parameter mapping G$L")
+}
+
+fastkpc_mgcv_extract_setup <- function(formula, data, sp,
+                                       method = "GCV.Cp",
+                                       target = 1L,
+                                       S = integer(),
+                                       k = NA_integer_,
+                                       bs = "tp") {
   fastkpc_require_mgcv()
   data <- as.data.frame(data)
+  sp <- fastkpc_validate_fixed_positive_sp(sp)
+
+  G <- mgcv::gam(
+    formula = formula,
+    data = data,
+    family = stats::gaussian(),
+    sp = sp,
+    method = method,
+    fit = FALSE
+  )
+
+  if (is.null(G$X) || is.null(G$y) || is.null(G$S) || is.null(G$off)) {
+    fastkpc_stop_unsupported_setup("G must contain X, y, S, and off")
+  }
+  sp <- fastkpc_validate_fixed_positive_sp(sp, expected_length = length(G$S))
+  family <- fastkpc_check_setup_family(G)
+  weights_info <- fastkpc_setup_weights_policy(G)
+  offset_info <- fastkpc_setup_offset_policy(G)
+  fastkpc_check_setup_L(G)
+  if (!is.null(G$paraPen) && length(G$paraPen) > 0L) {
+    fastkpc_stop_unsupported_setup("paraPen is not supported in Gate B v1")
+  }
+
+  X <- as.matrix(G$X)
+  y <- as.numeric(G$y)
+  sem <- fastkpc_regrxons_semantics(S = S, target = target,
+                                    n = length(y), p = ncol(data))
+  setup_fp <- fastkpc_setup_fingerprint(
+    sem,
+    mgcv_version = as.character(utils::packageVersion("mgcv")),
+    backend_family = "mgcvExtractCPU",
+    backend_version = "setup-fixed-sp-v1",
+    k = k,
+    bs = bs,
+    method = method,
+    model_matrix_hash = fastkpc_hash_object(round(as.numeric(X), digits = 14)),
+    penalty_hashes = vapply(G$S, fastkpc_hash_object, character(1)),
+    constraint_hash = fastkpc_hash_object(G$C),
+    rank_metadata = paste0("rank=", paste(G$rank, collapse = "|")),
+    weights_policy = weights_info$policy
+  )
+
+  list(
+    G = G,
+    X = X,
+    y = y,
+    S = G$S,
+    off = as.integer(G$off),
+    C = G$C,
+    rank = G$rank,
+    H = G$H,
+    w = weights_info$w,
+    offset = offset_info$offset,
+    sp = sp,
+    formula = formula,
+    method = method,
+    family = family,
+    weights_policy = weights_info$policy,
+    offset_policy = offset_info$policy,
+    mgcv_version = as.character(utils::packageVersion("mgcv")),
+    setup_fingerprint = setup_fp
+  )
+}
+
+fastkpc_mgcv_gam_fixed_sp_reference <- function(formula, data, sp,
+                                                method = "GCV.Cp",
+                                                target = 1L,
+                                                S = integer(),
+                                                k = NA_integer_,
+                                                bs = "tp") {
+  fastkpc_require_mgcv()
+  data <- as.data.frame(data)
+  sp <- fastkpc_validate_fixed_positive_sp(sp)
 
   fit <- mgcv::gam(
     formula = formula,
     data = data,
+    family = stats::gaussian(),
     sp = sp,
     method = method,
     fit = TRUE
@@ -51,10 +183,12 @@ fastkpc_mgcv_extract_fixed_sp <- function(formula, data, sp,
 
   residuals <- as.numeric(stats::residuals(fit))
   fitted <- as.numeric(stats::fitted(fit))
+  coefficients <- as.numeric(stats::coef(fit))
   selected_sp <- fastkpc_mgcv_selected_sp(fit, fallback = sp)
   response <- if (!is.null(fit$y)) fit$y else model.response(stats::model.frame(fit))
   lpmatrix_hash <- tryCatch(
-    fastkpc_hash_object(round(stats::predict(fit, type = "lpmatrix"), digits = 14)),
+    fastkpc_hash_object(round(as.numeric(stats::predict(fit, type = "lpmatrix")),
+                              digits = 14)),
     error = function(e) ""
   )
   sem <- fastkpc_regrxons_semantics(S = S, target = target,
@@ -63,7 +197,7 @@ fastkpc_mgcv_extract_fixed_sp <- function(formula, data, sp,
     sem,
     mgcv_version = as.character(utils::packageVersion("mgcv")),
     backend_family = "mgcvExtractCPU",
-    backend_version = "fixed-sp-v1",
+    backend_version = "mgcv-gam-fixed-sp-reference-v1",
     k = k,
     bs = bs,
     method = method,
@@ -87,24 +221,248 @@ fastkpc_mgcv_extract_fixed_sp <- function(formula, data, sp,
 
   list(
     backend_family = "mgcvExtractCPU",
-    mode = "fixed-sp",
+    mode = "mgcv-gam-fixed-sp-reference",
+    solve_source = "mgcv",
+    sp_source = "fixed-input",
+    gcv_source = "none",
+    is_self_contained_gcv = FALSE,
     formula = formula,
     method = method,
+    coefficients = coefficients,
     sp = selected_sp,
     residuals = residuals,
     fitted = fitted,
     score = if (!is.null(fit$gcv.ubre)) as.numeric(fit$gcv.ubre) else NA_real_,
     edf = if (!is.null(fit$edf)) sum(fit$edf) else NA_real_,
     rank = fit$rank,
+    fit = fit,
     setup_fingerprint = setup,
     target_fingerprint = target_fp,
     mgcv_version = as.character(utils::packageVersion("mgcv"))
   )
 }
 
-# mgcvExtractGCVBridge may call mgcv to select smoothing parameters. A future
-# mgcvPortGCVPrototype must be validated separately and should not inherit this
-# bridge's strict parity gate until optimizer details are implemented.
+fastkpc_assemble_penalty <- function(p, S, off, sp, H = NULL) {
+  p <- as.integer(p)
+  if (length(p) != 1L || is.na(p) || p <= 0L) {
+    stop("p must be a positive scalar coefficient dimension", call. = FALSE)
+  }
+  if (length(S) != length(off) || length(S) != length(sp)) {
+    stop("length(S), length(off), and length(sp) must match", call. = FALSE)
+  }
+  sp <- fastkpc_validate_fixed_positive_sp(sp, expected_length = length(S))
+
+  P <- matrix(0, p, p)
+  if (!is.null(H)) {
+    H <- as.matrix(H)
+    if (!identical(dim(H), c(p, p))) {
+      stop("H must have dimension p x p", call. = FALSE)
+    }
+    P <- P + H
+  }
+
+  for (j in seq_along(S)) {
+    Sj <- as.matrix(S[[j]])
+    if (nrow(Sj) != ncol(Sj)) {
+      stop("Each penalty matrix S[[j]] must be square", call. = FALSE)
+    }
+    kj <- nrow(Sj)
+    idx <- seq.int(as.integer(off[j]), length.out = kj)
+    if (min(idx) < 1L || max(idx) > p) {
+      stop("Penalty block indexed by off is outside coefficient dimension",
+           call. = FALSE)
+    }
+    P[idx, idx] <- P[idx, idx, drop = FALSE] + sp[j] * Sj
+  }
+
+  P
+}
+
+fastkpc_constraint_nullspace <- function(C, p, tol = sqrt(.Machine$double.eps)) {
+  if (is.null(C) || length(C) == 0L) return(diag(p))
+  C <- as.matrix(C)
+  if (nrow(C) == 0L) return(diag(p))
+  if (ncol(C) != p) {
+    stop("Constraint matrix C must have ncol(C) equal to coefficient dimension",
+         call. = FALSE)
+  }
+  qrCt <- qr(t(C), tol = tol)
+  Q <- qr.Q(qrCt, complete = TRUE)
+  rC <- qrCt$rank
+  if (rC >= p) {
+    stop("Constraint matrix leaves no free coefficient space", call. = FALSE)
+  }
+  Q[, seq.int(rC + 1L, p), drop = FALSE]
+}
+
+fastkpc_solve_gaussian_penalized_fixed_sp <- function(
+    X, y, S, off, sp, C = NULL, H = NULL, w = NULL,
+    tol = sqrt(.Machine$double.eps)) {
+  X <- as.matrix(X)
+  y <- as.numeric(y)
+  if (nrow(X) != length(y)) {
+    stop("nrow(X) must equal length(y)", call. = FALSE)
+  }
+  p <- ncol(X)
+  P <- fastkpc_assemble_penalty(p = p, S = S, off = off, sp = sp, H = H)
+
+  if (is.null(w)) {
+    Xw <- X
+    yw <- y
+  } else {
+    w <- as.numeric(w)
+    if (length(w) != length(y)) {
+      stop("length(w) must equal length(y)", call. = FALSE)
+    }
+    if (any(!is.finite(w)) || any(w < 0)) {
+      stop("weights must be finite and nonnegative", call. = FALSE)
+    }
+    sw <- sqrt(w)
+    Xw <- X * sw
+    yw <- y * sw
+  }
+
+  Z <- fastkpc_constraint_nullspace(C = C, p = p, tol = tol)
+  XZ <- Xw %*% Z
+  A <- crossprod(XZ) + crossprod(Z, P %*% Z)
+  b <- crossprod(XZ, yw)
+
+  theta <- as.numeric(qr.solve(A, b, tol = tol))
+  as.numeric(Z %*% theta)
+}
+
+fastkpc_relative_l2_diff <- function(a, b) {
+  a <- as.numeric(a)
+  b <- as.numeric(b)
+  denom <- sqrt(sum(b^2))
+  if (denom == 0) return(sqrt(sum((a - b)^2)))
+  sqrt(sum((a - b)^2)) / denom
+}
+
+fastkpc_mgcv_extract_fixed_sp_solve <- function(formula, data, sp,
+                                                method = "GCV.Cp",
+                                                target = 1L,
+                                                S = integer(),
+                                                k = NA_integer_,
+                                                bs = "tp",
+                                                tol = sqrt(.Machine$double.eps)) {
+  ref <- fastkpc_mgcv_gam_fixed_sp_reference(
+    formula = formula,
+    data = data,
+    sp = sp,
+    method = method,
+    target = target,
+    S = S,
+    k = k,
+    bs = bs
+  )
+  setup <- fastkpc_mgcv_extract_setup(
+    formula = formula,
+    data = data,
+    sp = ref$sp,
+    method = method,
+    target = target,
+    S = S,
+    k = k,
+    bs = bs
+  )
+
+  beta <- fastkpc_solve_gaussian_penalized_fixed_sp(
+    X = setup$X,
+    y = setup$y,
+    S = setup$S,
+    off = setup$off,
+    sp = setup$sp,
+    C = setup$C,
+    H = setup$H,
+    w = setup$w,
+    tol = tol
+  )
+  fitted <- as.numeric(setup$X %*% beta)
+  residuals <- as.numeric(setup$y - fitted)
+  target_fp <- fastkpc_target_fingerprint(
+    target = target,
+    y_hash = fastkpc_mgcv_hash_numeric(setup$y),
+    sp_input = sp,
+    sp_output = setup$sp,
+    selected_sp = setup$sp,
+    score = NA_real_,
+    edf = NA_real_,
+    rank_if_target_specific = setup$rank,
+    residual_hash = fastkpc_mgcv_hash_numeric(residuals),
+    fitted_hash = fastkpc_mgcv_hash_numeric(fitted)
+  )
+
+  list(
+    backend_family = "mgcvExtractCPU",
+    mode = "fixed-sp-self-solve",
+    reference_mode = ref$mode,
+    solve_source = "fastkpc-fixed-sp",
+    sp_source = "fixed-input",
+    gcv_source = "none",
+    is_self_contained_gcv = FALSE,
+    formula = formula,
+    method = method,
+    coefficients = beta,
+    fitted = fitted,
+    residuals = residuals,
+    sp = setup$sp,
+    score = NA_real_,
+    edf = NA_real_,
+    rank = setup$rank,
+    reference_coefficients = ref$coefficients,
+    reference_fitted = ref$fitted,
+    reference_residuals = ref$residuals,
+    max_abs_fitted_diff = max(abs(fitted - ref$fitted)),
+    relative_l2_fitted_diff = fastkpc_relative_l2_diff(fitted, ref$fitted),
+    max_abs_residual_diff = max(abs(residuals - ref$residuals)),
+    relative_l2_residual_diff = fastkpc_relative_l2_diff(residuals, ref$residuals),
+    setup_diagnostics = list(
+      n = nrow(setup$X),
+      p = ncol(setup$X),
+      penalty_count = length(setup$S),
+      off = setup$off,
+      has_C = !is.null(setup$C) && length(setup$C) > 0L,
+      has_H = !is.null(setup$H),
+      weights_policy = setup$weights_policy,
+      offset_policy = setup$offset_policy
+    ),
+    penalty_diagnostics = list(
+      sp = setup$sp,
+      penalty_dims = lapply(setup$S, dim)
+    ),
+    constraint_diagnostics = list(
+      C_dim = if (is.null(setup$C)) c(0L, ncol(setup$X)) else dim(as.matrix(setup$C))
+    ),
+    rank_diagnostics = list(rank = setup$rank),
+    setup = setup,
+    reference = ref,
+    setup_fingerprint = setup$setup_fingerprint,
+    target_fingerprint = target_fp,
+    mgcv_version = setup$mgcv_version
+  )
+}
+
+fastkpc_mgcv_extract_fixed_sp <- function(formula, data, sp,
+                                          method = "GCV.Cp",
+                                          target = 1L,
+                                          S = integer(),
+                                          k = NA_integer_,
+                                          bs = "tp") {
+  out <- fastkpc_mgcv_extract_fixed_sp_solve(
+    formula = formula,
+    data = data,
+    sp = sp,
+    method = method,
+    target = target,
+    S = S,
+    k = k,
+    bs = bs
+  )
+  out$compatibility_alias_for <- "fastkpc_mgcv_extract_fixed_sp_solve"
+  out
+}
+
 fastkpc_mgcv_extract_gcv_bridge <- function(formula, data,
                                             method = "GCV.Cp",
                                             target = 1L,
@@ -113,8 +471,9 @@ fastkpc_mgcv_extract_gcv_bridge <- function(formula, data,
                                             bs = "tp") {
   fastkpc_require_mgcv()
   data <- as.data.frame(data)
-  legacy <- mgcv::gam(formula = formula, data = data, method = method)
-  fixed <- fastkpc_mgcv_extract_fixed_sp(
+  legacy <- mgcv::gam(formula = formula, data = data,
+                      family = stats::gaussian(), method = method)
+  fixed <- fastkpc_mgcv_extract_fixed_sp_solve(
     formula = formula,
     data = data,
     sp = legacy$sp,
@@ -125,9 +484,17 @@ fastkpc_mgcv_extract_gcv_bridge <- function(formula, data,
     bs = bs
   )
   fixed$mode <- "gcv-bridge"
+  fixed$sp_source <- "mgcv"
+  fixed$gcv_source <- "mgcv"
+  fixed$solve_source <- "fastkpc-fixed-sp"
+  fixed$is_self_contained_gcv <- FALSE
   fixed$legacy_score <- if (!is.null(legacy$gcv.ubre)) as.numeric(legacy$gcv.ubre) else NA_real_
   fixed$legacy_edf <- if (!is.null(legacy$edf)) sum(legacy$edf) else NA_real_
   fixed$legacy_rank <- legacy$rank
+  fixed$legacy_sp <- legacy$sp
+  fixed$score <- fixed$legacy_score
+  fixed$edf <- fixed$legacy_edf
+  fixed$rank <- fixed$legacy_rank
   fixed
 }
 
@@ -193,6 +560,10 @@ fastkpc_mgcv_extract_batch <- function(Y, S_data, S,
   list(
     backend_family = "mgcvExtractCPU",
     mode = "batch-gcv-bridge",
+    solve_source = "fastkpc-fixed-sp",
+    sp_source = "mgcv",
+    gcv_source = "mgcv",
+    is_self_contained_gcv = FALSE,
     residuals = residuals,
     fitted = fitted,
     sp = sp,

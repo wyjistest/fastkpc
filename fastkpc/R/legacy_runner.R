@@ -12,6 +12,9 @@ fastkpc_legacy_env <- function(path = "kpcalg/R") {
     env$rbfdot <- kernlab::rbfdot
   }
   if (requireNamespace("mgcv", quietly = TRUE)) env$gam <- mgcv::gam
+  if (requireNamespace("graph", quietly = TRUE)) env$numEdges <- graph::numEdges
+  if (requireNamespace("pcalg", quietly = TRUE)) env$triple2numb <- pcalg::triple2numb
+  env$as <- methods::as
   env$combn <- utils::combn
   env$makeCluster <- parallel::makeCluster
   env$clusterEvalQ <- parallel::clusterEvalQ

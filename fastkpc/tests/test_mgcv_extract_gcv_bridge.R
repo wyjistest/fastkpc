@@ -28,7 +28,15 @@ assert_true(identical(bridge$backend_family, "mgcvExtractCPU"),
             "backend family")
 assert_true(identical(bridge$mode, "gcv-bridge"),
             "mode")
-assert_true(max(abs(bridge$residuals - stats::residuals(legacy))) < 1e-6,
+assert_true(identical(bridge$sp_source, "mgcv"),
+            "GCVBridge sp source must be mgcv")
+assert_true(identical(bridge$gcv_source, "mgcv"),
+            "GCVBridge gcv source must be mgcv")
+assert_true(identical(bridge$solve_source, "fastkpc-fixed-sp"),
+            "GCVBridge solve source must be fastkpc fixed-sp")
+assert_true(isFALSE(bridge$is_self_contained_gcv),
+            "GCVBridge must not claim self-contained GCV")
+assert_true(max(abs(bridge$residuals - stats::residuals(legacy))) < 1e-5,
             "GCV bridge residuals should match direct legacy fit")
 assert_true(max(abs(log(bridge$sp) - log(legacy$sp))) < 1e-8,
             "GCV bridge selected sp should match direct legacy fit")

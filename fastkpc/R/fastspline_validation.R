@@ -63,7 +63,7 @@ legacy_graph_result <- function(data, alpha, max_conditioning_size) {
     ic.method = "dcc.gamma",
     numCol = max(1L, floor(nrow(data) / 10))
   )
-  amat <- as.matrix(legacy@graph)
+  amat <- methods::as(legacy@graph, "matrix")
   storage.mode(amat) <- "logical"
   list(
     adjacency = amat,

@@ -32,8 +32,19 @@ assert_true(!identical(batch$sp[[1]], batch$sp[[2]]),
             "targets must not share one selected smoothing parameter")
 assert_true(length(unique(vapply(batch$target_fingerprints, `[[`, character(1), "fingerprint"))) == 2L,
             "target fingerprints must differ")
+assert_true(all(vapply(batch$target_fingerprints, function(fp) {
+  nchar(fp$fingerprint) > 0
+}, logical(1))), "all target fingerprints required")
 assert_true(nchar(batch$setup_fingerprint$fingerprint) > 0,
             "shared setup fingerprint required")
+assert_true(identical(batch$solve_source, "fastkpc-fixed-sp"),
+            "batch extraction must use fixed-sp self-solve through GCVBridge")
+assert_true(identical(batch$sp_source, "mgcv"),
+            "batch GCVBridge sp source must be mgcv per target")
+assert_true(identical(batch$gcv_source, "mgcv"),
+            "batch GCVBridge gcv source must be mgcv per target")
+assert_true(isFALSE(batch$is_self_contained_gcv),
+            "batch GCVBridge must not claim self-contained GCV")
 
 legacy_x <- mgcv::gam(x ~ s(s1), data = data, method = "GCV.Cp")
 legacy_y <- mgcv::gam(y ~ s(s1), data = data, method = "GCV.Cp")
