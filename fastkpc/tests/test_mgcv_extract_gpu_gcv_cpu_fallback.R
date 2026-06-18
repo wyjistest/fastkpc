@@ -41,8 +41,12 @@ assert_true(!isTRUE(fit$native_gpu_solve_used),
             "CPU fallback should not claim native GPU solve")
 assert_true(identical(fit$sp_source, "fastkpc-cpu"),
             "CPU fallback sp source should be explicit")
-assert_true(identical(fit$gcv_source, "fastkpc-cpu"),
-            "CPU fallback GCV source should be explicit")
+assert_true(identical(fit$gcv_source, "fastkpc-cpu-grid-solve"),
+            "direct grid GCV source should identify CPU solve scoring")
+assert_true(identical(fit$gcv_score_backend_executed, "cpu-grid-solve"),
+            "GCV score backend should be explicit")
+assert_true(identical(fit$selected_solve_backend_executed, "cpu"),
+            "selected solve backend should be explicit")
 assert_true(isTRUE(fit$is_self_contained_gcv),
             "grid search is still self-contained GCV")
 assert_true(fit$sp %in% sp_grid, "selected sp should come from grid")

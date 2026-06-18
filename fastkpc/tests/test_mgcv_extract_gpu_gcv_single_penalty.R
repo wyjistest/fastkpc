@@ -44,8 +44,12 @@ check_case <- function(formula, data, S, k, label) {
               paste(label, "mode"))
   assert_true(identical(gpu$sp_source, "fastkpc-gpu"),
               paste(label, "sp source"))
-  assert_true(identical(gpu$gcv_source, "fastkpc-gpu"),
-              paste(label, "gcv source"))
+  assert_true(identical(gpu$gcv_source, "fastkpc-r-cpu-spectral"),
+              paste(label, "spectral GCV source"))
+  assert_true(identical(gpu$gcv_score_backend_executed, "r-cpu-spectral"),
+              paste(label, "GCV score backend"))
+  assert_true(identical(gpu$selected_solve_backend_executed, "cuda"),
+              paste(label, "selected solve backend"))
   assert_true(identical(gpu$solve_source, "mgcvExtractGPU"),
               paste(label, "solve source"))
   assert_true(isTRUE(gpu$is_self_contained_gcv),

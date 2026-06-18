@@ -35,9 +35,9 @@ timing, and graph-level evidence justify a new pure GPU approximation.
 CUDA-specific tests remain opt-in. GitHub Actions are intentionally absent
 unless reintroduced by explicit request.
 
-## Precision ladder control-plane integration
+## Precision ladder data-plane integration
 
-The precision policy control plane is integrated into `fast_kpc()`:
+The precision policy and skeleton data plane are integrated into `fast_kpc()`:
 
 ```text
 precision = "fast":
@@ -46,22 +46,22 @@ precision = "fast":
 precision = "compatible":
     routes through the authoritative resolver
     fails closed when semantic/version/runtime envelope checks fail
-    executes a CPU skeleton vertical slice for |S| <= 1 through direct CI
-    and mgcvExtractCPU/GCVBridge receipts
+    executes CPU and CUDA skeleton data-plane slices for |S| <= 2
+    uses mgcvExtractGPU where supported
+    falls back through mgcvExtractCPU/GCVBridge and legacy mgcv
 
 precision = "hybrid":
     keeps fastSpline primary execution
-    records verifier and fallback plans
+    executes near-alpha verifier residualization for skeleton |S| <= 2
+    records verifier and fallback receipts
     preserves canonical replay
-    does not yet execute verifier residualization or replace p-values in the
-    real skeleton/WAN-PDAG data plane
+    uses verifier p-values in real skeleton edge/sepset decisions
 ```
 
 The default remains the existing legacy-compatible fastkpc behavior unless
 `precision` is explicitly requested. Diagnostics distinguish
 `backend_planned` from `backend_executed`; `backend_used` refers to the actual
-executor. The compatible data-plane slice is currently CPU skeleton only for
-`max_conditioning_size <= 1`; |S| = 2, WAN-PDAG, CUDA, and hybrid verifier
-execution remain future work. True fused/batched `mgcvExtractGPU` kernel work
-remains blocked on scenario-aligned timing/workload evidence and broader
-data-plane integration.
+executor. Current precision data-plane scope is skeleton only, CPU/CUDA, and
+single-penalty `|S| <= 2`. WAN-PDAG, `|S| > 2` multi-penalty GCV, cache
+amortization, and true fused/batched `mgcvExtractGPU` kernels remain future
+work pending native CUDA parity and timing evidence.

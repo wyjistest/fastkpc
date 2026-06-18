@@ -19,6 +19,7 @@ Rscript fastkpc/tests/test_mgcv_extract_gpu_native_fixed_sp.R
 Rscript fastkpc/tests/test_mgcv_extract_gpu_native_batch_bridge.R
 Rscript fastkpc/tests/test_mgcv_extract_gpu_same_setup_batch.R
 Rscript fastkpc/tests/test_mgcv_extract_gpu_gcv_cpu_fallback.R
+Rscript fastkpc/tests/test_mgcv_extract_gpu_gcv_diagnostics_truthful.R
 Rscript fastkpc/tests/test_mgcv_extract_gpu_gcv_spectral.R
 Rscript fastkpc/tests/test_mgcv_extract_gpu_gcv_single_penalty.R
 Rscript fastkpc/tests/test_mgcv_self_solve_purity.R
@@ -45,6 +46,7 @@ Rscript fastkpc/tests/test_precision_fast_mode_e2e.R
 Rscript fastkpc/tests/test_precision_compatible_fail_closed.R
 Rscript fastkpc/tests/test_precision_hybrid_e2e_replay.R
 Rscript fastkpc/tests/test_precision_truthful_execution_fields.R
+Rscript fastkpc/tests/test_precision_truthful_docs_and_backend.R
 Rscript fastkpc/tests/test_precision_hybrid_no_fake_verifier.R
 Rscript fastkpc/tests/test_precision_hybrid_cpu_verifier_spy.R
 Rscript fastkpc/tests/test_precision_hybrid_cpu_skip_and_fallback.R
