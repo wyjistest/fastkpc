@@ -2,6 +2,7 @@ source("fastkpc/R/native.R")
 source("fastkpc/R/cuda_native.R")
 source("fastkpc/R/precision_backend_resolver.R")
 source("fastkpc/R/precision_execution_trace.R")
+source("fastkpc/R/precision_data_plane.R")
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
@@ -353,6 +354,7 @@ fast_kpc <- function(data,
                                                include_observed = TRUE),
                      ci_diagnostics = TRUE,
                      precision_diagnostics = TRUE,
+                     precision_executors = NULL,
                      runtime_capabilities = NULL,
                      allow_canary_mgcv_extract = FALSE,
                      cuda_residual_fallback = TRUE,
@@ -398,6 +400,10 @@ fast_kpc <- function(data,
   normalized$info$data_hash <- data_hash
   if (is.null(runtime_capabilities)) {
     runtime_capabilities <- fastkpc_precision_runtime_capabilities()
+  }
+  precision_executors_requested <- !is.null(precision_executors)
+  if (is.null(precision_executors)) {
+    precision_executors <- fastkpc_default_precision_executors()
   }
   precision_route <- if (identical(precision_requested, "legacy")) {
     list(
@@ -524,6 +530,13 @@ fast_kpc <- function(data,
     seed = seed
   )
 
+  use_precision_r_skeleton <- graph_stage == "skeleton" &&
+    identical(engine_used, "cpu") &&
+    as.integer(max_conditioning_size) <= 1L &&
+    precision_requested %in% c("fast", "compatible") &&
+    (isTRUE(precision_executors_requested) ||
+       identical(precision_requested, "compatible"))
+
   timed <- fastkpc_elapsed({
     if (graph_stage == "wanpdag") {
       if (engine_used == "cuda") {
@@ -568,6 +581,21 @@ fast_kpc <- function(data,
           ci_diagnostics = ci_diagnostics
         )
       }
+    } else if (isTRUE(use_precision_r_skeleton)) {
+      skeleton <- fastkpc_r_skeleton_precision(
+        matrix_data, alpha, max_conditioning_size,
+        precision = precision_requested,
+        tau = tau,
+        ci_method = ci_method,
+        index = index,
+        legacy_index = legacy_index,
+        hsic_params = hsic_params,
+        permutation_params = permutation_params,
+        precision_executors = precision_executors,
+        runtime_capabilities = runtime_capabilities,
+        allow_canary = allow_canary_mgcv_extract
+      )
+      list(skeleton = skeleton, orientation = NULL)
     } else {
       skeleton <- if (engine_used == "cuda") {
         fast_skeleton_cuda_backend(
@@ -617,6 +645,13 @@ fast_kpc <- function(data,
   config$ci_backend <- timed$value$skeleton$ci_backend %||% config$ci_backend
   config$ci_backend_reason <-
     timed$value$skeleton$ci_backend_reason %||% config$ci_backend_reason
+  if (!is.null(timed$value$skeleton$precision_receipt)) {
+    receipt <- timed$value$skeleton$precision_receipt
+    config$backend_executed <- timed$value$skeleton$residual_backend %||%
+      receipt$residual_backend_executed %||% config$backend_executed
+    config$backend_used <- config$backend_executed
+    config$precision_execution_status <- "data-plane-executed"
+  }
   config$cuda_hsic_used <- isTRUE(config$cuda_hsic_requested) &&
     identical(config$ci_backend, "cuda-hsic")
   if (!is.null(timed$value$orientation)) {
@@ -640,13 +675,15 @@ fast_kpc <- function(data,
     benchmark = benchmark_section
   )
   if (isTRUE(precision_diagnostics)) {
-    result$diagnostics$precision_trace <- fastkpc_precision_trace_from_result(
-      result = result,
-      route = precision_route,
-      run_id = paste0("fastkpc-", format(Sys.time(), "%Y%m%d%H%M%S")),
-      scenario_id = "fast_kpc",
-      elapsed_total_sec = timed$elapsed
-    )
+    result$diagnostics$precision_trace <-
+      timed$value$skeleton$precision_trace %||%
+      fastkpc_precision_trace_from_result(
+        result = result,
+        route = precision_route,
+        run_id = paste0("fastkpc-", format(Sys.time(), "%Y%m%d%H%M%S")),
+        scenario_id = "fast_kpc",
+        elapsed_total_sec = timed$elapsed
+      )
   }
   validate_fastkpc_result(result)
   result

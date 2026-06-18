@@ -46,8 +46,8 @@ precision = "fast":
 precision = "compatible":
     routes through the authoritative resolver
     fails closed when semantic/version/runtime envelope checks fail
-    currently records planned compatibility fallback, while the existing
-    fastkpc data plane still executes fastSpline until residual dispatch is wired
+    executes a CPU skeleton vertical slice for |S| <= 1 through direct CI
+    and mgcvExtractCPU/GCVBridge receipts
 
 precision = "hybrid":
     keeps fastSpline primary execution
@@ -60,5 +60,8 @@ precision = "hybrid":
 The default remains the existing legacy-compatible fastkpc behavior unless
 `precision` is explicitly requested. Diagnostics distinguish
 `backend_planned` from `backend_executed`; `backend_used` refers to the actual
-executor. True fused/batched `mgcvExtractGPU` kernel work remains blocked on
-scenario-aligned timing/workload evidence and real data-plane integration.
+executor. The compatible data-plane slice is currently CPU skeleton only for
+`max_conditioning_size <= 1`; |S| = 2, WAN-PDAG, CUDA, and hybrid verifier
+execution remain future work. True fused/batched `mgcvExtractGPU` kernel work
+remains blocked on scenario-aligned timing/workload evidence and broader
+data-plane integration.

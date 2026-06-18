@@ -34,21 +34,20 @@ assert_true("verifier_executed" %in% names(compatible$config),
             "config should distinguish verifier_executed")
 assert_true(compatible$config$backend_planned == "legacy-mgcv",
             "compatible unsupported route may plan legacy fallback")
-assert_true(compatible$config$backend_executed == "fastSplineCPU",
-            "current compatible data plane still executes fastSplineCPU")
+assert_true(compatible$config$backend_executed == "mgcvExtractCPU",
+            "compatible CPU fallback data plane should execute mgcvExtractCPU")
 assert_true(compatible$config$backend_used == compatible$config$backend_executed,
             "backend_used must describe executed backend, not planned backend")
 assert_true(compatible$config$precision_execution_status ==
-              "control-plane-only",
-            "compatible must disclose that precision backend execution is not wired")
+              "data-plane-executed",
+            "compatible CPU vertical slice should disclose data-plane execution")
 
 trace <- compatible$diagnostics$precision_trace
-assert_true(all(trace$backend_planned == "legacy-mgcv"),
+assert_true(all(trace$backend_planned %in% c("direct-ci", "legacy-mgcv")),
             "trace should record planned fallback backend")
-assert_true(all(trace$backend_executed == "fastSplineCPU"),
+assert_true(any(trace$backend_executed == "mgcvExtractCPU"),
             "trace should record actual executor backend")
-assert_true(all(is.na(trace$p_source_used) |
-                  trace$p_source_used == "not-recorded"),
-            "trace must not invent p-value source before real CI trace exists")
+assert_true(!any(trace$p_source_used == "not-recorded", na.rm = TRUE),
+            "data-plane trace should record real p-value sources")
 
 cat("PASS precision truthful execution fields\n")
