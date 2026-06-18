@@ -17,6 +17,7 @@ expected_files <- c(
   "mgcv_ci_compatibility.csv",
   "mgcv_graph_compatibility.csv",
   "fastspline_cuda_capabilities.csv",
+  "mgcv_extract_gpu_capabilities.csv",
   "precision_ladder_attribution_summary.csv"
 )
 missing_files <- expected_files[!file.exists(file.path(out_dir, expected_files))]
@@ -46,5 +47,13 @@ assert_true(identical(cap$backend[1], "fastSplineCUDA"),
             "capability CSV should identify fastSplineCUDA")
 assert_true(identical(cap$mgcv_equivalent[1], FALSE),
             "capability CSV should record non-equivalence to mgcv")
+bridge_cap <- utils::read.csv(file.path(out_dir, "mgcv_extract_gpu_capabilities.csv"),
+                              stringsAsFactors = FALSE)
+assert_true(identical(bridge_cap$backend[1], "mgcvExtractGPU"),
+            "GPU bridge capability CSV should identify mgcvExtractGPU")
+assert_true(identical(bridge_cap$native_gpu_fixed_sp_solve[1], FALSE),
+            "GPU bridge capability CSV should not claim native GPU solve yet")
+assert_true(identical(bridge_cap$cpu_gate_b_fallback[1], TRUE),
+            "GPU bridge capability CSV should record Gate B fallback")
 
 cat("PASS precision ladder attribution campaign\n")

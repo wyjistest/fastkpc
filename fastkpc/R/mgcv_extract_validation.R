@@ -1,4 +1,8 @@
 source("fastkpc/R/mgcv_compat_contract.R")
+if (!exists("fastkpc_mgcv_extract_gpu_capabilities", mode = "function") &&
+    file.exists("fastkpc/R/mgcv_extract_oracle.R")) {
+  source("fastkpc/R/mgcv_extract_oracle.R")
+}
 
 fastkpc_log_distance_to_alpha <- function(p, alpha) {
   p <- max(as.numeric(p), .Machine$double.xmin)
@@ -265,6 +269,22 @@ fastkpc_fastspline_cuda_capability_row <- function() {
   )
 }
 
+fastkpc_mgcv_extract_gpu_capability_row <- function() {
+  cap <- fastkpc_mgcv_extract_gpu_capabilities()
+  data.frame(
+    backend = cap$backend,
+    role = cap$role,
+    backend_version = cap$version_pins$backend_version,
+    fixed_sp_api = isTRUE(cap$supported$fixed_sp_api),
+    cpu_gate_b_fallback = isTRUE(cap$supported$cpu_gate_b_fallback),
+    native_gpu_fixed_sp_solve = isTRUE(cap$supported$native_gpu_fixed_sp_solve),
+    gcv_bridge_api = isTRUE(cap$supported$gcv_bridge_api),
+    self_contained_gcv = isTRUE(cap$supported$self_contained_gcv),
+    cpu_fallback_baseline = cap$version_pins$cpu_fallback_baseline,
+    stringsAsFactors = FALSE
+  )
+}
+
 fastkpc_precision_ladder_synthetic_case <- function(seed, n, alpha) {
   set.seed(seed)
   z <- seq(-2, 2, length.out = n)
@@ -412,6 +432,7 @@ fastkpc_run_precision_ladder_attribution_campaign <- function(
     fastkpc_empty_graph_compatibility_metrics()
   )
   capabilities <- fastkpc_fastspline_cuda_capability_row()
+  gpu_capabilities <- fastkpc_mgcv_extract_gpu_capability_row()
   summary <- fastkpc_precision_ladder_summary(residual, ci, graph)
 
   utils::write.csv(residual,
@@ -426,6 +447,9 @@ fastkpc_run_precision_ladder_attribution_campaign <- function(
   utils::write.csv(capabilities,
                    file.path(output_dir, "fastspline_cuda_capabilities.csv"),
                    row.names = FALSE)
+  utils::write.csv(gpu_capabilities,
+                   file.path(output_dir, "mgcv_extract_gpu_capabilities.csv"),
+                   row.names = FALSE)
   utils::write.csv(summary,
                    file.path(output_dir, "precision_ladder_attribution_summary.csv"),
                    row.names = FALSE)
@@ -435,6 +459,7 @@ fastkpc_run_precision_ladder_attribution_campaign <- function(
     ci = ci,
     graph = graph,
     capabilities = capabilities,
+    gpu_capabilities = gpu_capabilities,
     summary = summary,
     output_dir = output_dir
   )

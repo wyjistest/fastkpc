@@ -78,6 +78,42 @@ fastkpc_mgcv_extract_capabilities <- function() {
   )
 }
 
+fastkpc_mgcv_extract_gpu_capabilities <- function() {
+  mgcv_version <- tryCatch(
+    as.character(utils::packageVersion("mgcv")),
+    error = function(e) NA_character_
+  )
+  list(
+    backend = "mgcvExtractGPU",
+    role = "mgcv setup anchored GPU compatibility bridge",
+    supported = list(
+      family = "gaussian_identity",
+      residual_output_only = TRUE,
+      fixed_sp_api = TRUE,
+      cpu_gate_b_fallback = TRUE,
+      native_gpu_fixed_sp_solve = FALSE,
+      gcv_bridge_api = FALSE,
+      self_contained_gcv = FALSE
+    ),
+    unsupported = list(
+      full_mgcv_clone = TRUE,
+      bam_gpu = TRUE,
+      non_gaussian = TRUE,
+      native_gpu_fixed_sp_solve = TRUE,
+      native_gpu_gcv = TRUE,
+      multi_penalty_gpu_gcv = TRUE,
+      tprs_approximation = TRUE
+    ),
+    version_pins = list(
+      R_version = R.version.string,
+      mgcv_version = mgcv_version,
+      backend_version = "mgcvExtractGPU-fixed-sp-api-v1",
+      cpu_fallback_baseline = "mgcv-gate-b-v1",
+      cpu_fallback_commit = "5da2313"
+    )
+  )
+}
+
 fastkpc_validate_fixed_positive_sp <- function(sp, expected_length = NULL) {
   if (is.null(sp) || length(sp) == 0L) {
     fastkpc_stop_unsupported_setup("sp must be supplied for fixed-sp self-solve")
@@ -662,6 +698,70 @@ fastkpc_mgcv_extract_fixed_sp <- function(formula, data, sp,
   )
   out$compatibility_alias_for <- "fastkpc_mgcv_extract_fixed_sp_solve"
   out
+}
+
+fastkpc_mgcv_extract_gpu_fixed_sp <- function(formula, data, sp,
+                                              method = "GCV.Cp",
+                                              target = 1L,
+                                              S = integer(),
+                                              k = NA_integer_,
+                                              bs = "tp",
+                                              device = c("cuda", "auto", "cpu"),
+                                              allow_cpu_fallback = TRUE,
+                                              tol = sqrt(.Machine$double.eps)) {
+  device <- match.arg(device)
+  if (identical(device, "cpu")) {
+    solved <- fastkpc_mgcv_extract_fixed_sp_solve(
+      formula = formula,
+      data = data,
+      sp = sp,
+      method = method,
+      target = target,
+      S = S,
+      k = k,
+      bs = bs,
+      tol = tol
+    )
+    requested_device <- "cpu"
+    used_device <- "cpu"
+    fallback_used <- FALSE
+    fallback_reason <- ""
+  } else if (isTRUE(allow_cpu_fallback)) {
+    solved <- fastkpc_mgcv_extract_fixed_sp_solve(
+      formula = formula,
+      data = data,
+      sp = sp,
+      method = method,
+      target = target,
+      S = S,
+      k = k,
+      bs = bs,
+      tol = tol
+    )
+    requested_device <- device
+    used_device <- "cpu"
+    fallback_used <- TRUE
+    fallback_reason <- paste(
+      "mgcvExtractGPU native fixed-sp solve is not implemented;",
+      "using Gate B CPU fixed-sp self-solve"
+    )
+  } else {
+    stop(
+      "mgcvExtractGPU native fixed-sp solve is not implemented and CPU fallback is disabled",
+      call. = FALSE
+    )
+  }
+
+  solved$backend_family <- "mgcvExtractGPU"
+  solved$mode <- "fixed-sp-gpu-bridge"
+  solved$requested_device <- requested_device
+  solved$used_device <- used_device
+  solved$fallback_used <- fallback_used
+  solved$fallback_reason <- fallback_reason
+  solved$gpu_bridge_version <- "mgcvExtractGPU-fixed-sp-api-v1"
+  solved$native_gpu_solve_available <- FALSE
+  solved$capabilities <- fastkpc_mgcv_extract_gpu_capabilities()
+  solved
 }
 
 fastkpc_mgcv_extract_gcv_bridge <- function(formula, data,
