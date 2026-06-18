@@ -40,6 +40,11 @@ fastkpc_resolve_backend_request <- function(
   execution_engine <- match.arg(execution_engine)
   runtime_capabilities <- runtime_capabilities %||%
     fastkpc_precision_runtime_capabilities()
+  fast_backend <- if (identical(execution_engine, "cpu")) {
+    "fastSplineCPU"
+  } else {
+    "fastSplineCUDA"
+  }
   if (identical(execution_engine, "cpu")) {
     checks <- fastkpc_check_mgcv_extract_cpu_compatibility(
       observed_R_version = runtime_capabilities$R_version %||% NA_character_,
@@ -84,7 +89,8 @@ fastkpc_resolve_backend_request <- function(
     mgcv_extract_supported = supported,
     tau = tau,
     fallback_backend = fallback_backend,
-    compatible_backend = compatible_backend
+    compatible_backend = compatible_backend,
+    fast_backend = fast_backend
   )
   if (identical(precision, "compatible") && !supported) {
     route$primary_backend <- fallback_backend

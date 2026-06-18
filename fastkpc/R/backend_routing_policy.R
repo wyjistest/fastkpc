@@ -5,7 +5,8 @@ fastkpc_select_backend_route <- function(precision = c("fast", "compatible", "hy
                                          mgcv_extract_gpu_supported = NULL,
                                          tau = log(2),
                                          fallback_backend = "legacy-mgcv",
-                                         compatible_backend = "mgcvExtractGPUGCV") {
+                                         compatible_backend = "mgcvExtractGPUGCV",
+                                         fast_backend = "fastSplineCUDA") {
   precision <- match.arg(precision)
   if (is.null(mgcv_extract_supported)) {
     mgcv_extract_supported <- mgcv_extract_gpu_supported
@@ -16,7 +17,7 @@ fastkpc_select_backend_route <- function(precision = c("fast", "compatible", "hy
   if (identical(precision, "fast")) {
     return(list(
       precision = precision,
-      primary_backend = "fastSplineCUDA",
+      primary_backend = fast_backend,
       verifier_backend = NA_character_,
       compatibility_claim = "approximate",
       canonical_replay_required = FALSE,
@@ -49,7 +50,7 @@ fastkpc_select_backend_route <- function(precision = c("fast", "compatible", "hy
     "mgcvExtract verifier unsupported; using fallback verifier"
   list(
     precision = precision,
-    primary_backend = "fastSplineCUDA",
+    primary_backend = fast_backend,
     verifier_backend = verifier,
     compatibility_claim = "hybrid-primary-approximate-verifier-compatible",
     canonical_replay_required = TRUE,

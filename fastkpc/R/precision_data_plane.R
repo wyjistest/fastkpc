@@ -32,18 +32,24 @@ fastkpc_precision_combinations <- function(values, choose) {
 fastkpc_precision_ci_randomness <- function(ci_method, permutation_params,
                                             canonical_test_order_id) {
   replicates <- as.integer(permutation_params$replicates %||% 100L)
-  base_seed <- permutation_params$seed %||% 0L
-  if (is.null(base_seed) || is.na(base_seed)) base_seed <- 0L
+  base_seed <- as.double((permutation_params$seed %||% 0L)[1L])
+  if (!is.finite(base_seed) || is.na(base_seed)) base_seed <- 0
   effective_seed <- if (identical(ci_method, "hsic.perm")) {
-    as.integer((as.integer(base_seed) + 1000003L *
-                  as.integer(canonical_test_order_id)) %% .Machine$integer.max)
+    test_id <- as.double(canonical_test_order_id[1L])
+    if (!is.finite(test_id) || is.na(test_id)) test_id <- 0
+    seed <- as.integer((base_seed + 1000003 * test_id) %%
+                         .Machine$integer.max)
+    if (length(seed) != 1L || is.na(seed) || seed < 0L) {
+      stop("failed to derive finite permutation seed", call. = FALSE)
+    }
+    seed
   } else {
     NA_integer_
   }
-  plan_hash <- if (identical(ci_method, "hsic.perm")) {
+  plan_spec_hash <- if (identical(ci_method, "hsic.perm")) {
     fastkpc_hash_object(list(
       ci_method = ci_method,
-      base_seed = as.integer(base_seed),
+      base_seed = as.integer(base_seed %% .Machine$integer.max),
       effective_seed = effective_seed,
       canonical_test_order_id = as.integer(canonical_test_order_id),
       replicates = replicates,
@@ -60,7 +66,8 @@ fastkpc_precision_ci_randomness <- function(ci_method, permutation_params,
       ""
     },
     permutation_seed_effective = effective_seed,
-    permutation_plan_hash = plan_hash,
+    permutation_plan_spec_hash = plan_spec_hash,
+    permutation_plan_hash = plan_spec_hash,
     permutation_replicates = if (identical(ci_method, "hsic.perm")) {
       replicates
     } else {
@@ -495,6 +502,7 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
     fallback_backend = primary_fallback
   )
   primary_receipt <- primary_exec$receipt
+  attempts <- primary_exec$attempts %||% list(primary_exec)
   primary_info <- fastkpc_resolve_ci_decision(primary_receipt$p.value,
                                               alpha = alpha,
                                               na_delete = na_delete)
@@ -512,7 +520,6 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
   p_source <- primary_receipt$p_source_used
   fallback_triggered <- isTRUE(primary_exec$fallback_triggered)
   fallback_reason <- primary_exec$fallback_reason %||% ""
-  attempt_count <- primary_exec$attempt_count %||% 1L
 
   if (isTRUE(near_alpha)) {
     verifier_backend <- fastkpc_nonempty_backend(route$verifier_backend,
@@ -528,6 +535,7 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
       fallback_backend = fastkpc_nonempty_backend(route$fallback_backend,
                                                   "legacy-mgcv")
     )
+    attempts <- c(attempts, verifier_exec$attempts %||% list(verifier_exec))
     verifier_fallback_backend <- fastkpc_nonempty_backend(route$fallback_backend,
                                                           "legacy-mgcv")
     verifier_info <- fastkpc_resolve_ci_decision(
@@ -546,6 +554,7 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
         precision_executors = precision_executors,
         fallback_backend = NA_character_
       )
+      attempts <- c(attempts, legacy_exec$attempts %||% list(legacy_exec))
       verifier_exec <- legacy_exec
       verifier_info <- fastkpc_resolve_ci_decision(
         verifier_exec$receipt$p.value, alpha = alpha, na_delete = na_delete
@@ -558,8 +567,15 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
     p_source <- verifier_exec$receipt$p_source_used
     fallback_triggered <- isTRUE(verifier_exec$fallback_triggered)
     fallback_reason <- verifier_exec$fallback_reason
-    attempt_count <- attempt_count + (verifier_exec$attempt_count %||% 1L)
   }
+
+  attempt_backend_sequence <- paste(vapply(attempts, function(attempt) {
+    attempted <- attempt$backend_executed %||% attempt$backend_attempted %||% ""
+    as.character(attempted[1L])
+  }, character(1L)), collapse = ">")
+  attempt_status_sequence <- paste(vapply(attempts, function(attempt) {
+    as.character((attempt$attempt_status %||% "")[1L])
+  }, character(1L)), collapse = ">")
 
   list(
     pval = chosen_info$p_used,
@@ -574,7 +590,10 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
     p_source_used = p_source,
     fallback_triggered = fallback_triggered,
     fallback_reason = fallback_reason,
-    attempt_count = attempt_count,
+    attempts = attempts,
+    attempt_count = length(attempts),
+    attempt_backend_sequence = attempt_backend_sequence,
+    attempt_status_sequence = attempt_status_sequence,
     ci_randomness = randomness,
     decision_before_verify = primary_info$delete_edge,
     decision_after_verify = chosen_info$delete_edge
@@ -643,9 +662,13 @@ fastkpc_precision_trace_for_test <- function(resolved, route, run_id,
     verifier_p_used = verifier_p_used,
     fallback_triggered = resolved$fallback_triggered,
     attempt_count = resolved$attempt_count,
+    attempt_backend_sequence = resolved$attempt_backend_sequence,
+    attempt_status_sequence = resolved$attempt_status_sequence,
     ci_randomness_id = resolved$ci_randomness$ci_randomness_id,
     permutation_seed_effective =
       resolved$ci_randomness$permutation_seed_effective,
+    permutation_plan_spec_hash =
+      resolved$ci_randomness$permutation_plan_spec_hash,
     permutation_plan_hash = resolved$ci_randomness$permutation_plan_hash,
     permutation_replicates = resolved$ci_randomness$permutation_replicates,
     precision_execution_status = "data-plane-executed",

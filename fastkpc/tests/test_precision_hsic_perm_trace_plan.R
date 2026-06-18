@@ -99,22 +99,26 @@ b <- fast_kpc(
 trace_a <- a$diagnostics$precision_trace
 trace_b <- b$diagnostics$precision_trace
 required <- c("ci_randomness_id", "permutation_seed_effective",
-              "permutation_plan_hash", "permutation_replicates")
+              "permutation_plan_spec_hash", "permutation_plan_hash",
+              "permutation_replicates")
 assert_true(all(required %in% names(trace_a)),
             "precision trace should expose CI randomness plan fields")
 assert_true(identical(trace_a$ci_randomness_id, trace_b$ci_randomness_id),
             "fixed seed should reproduce CI randomness ids")
-assert_true(identical(trace_a$permutation_plan_hash,
-                      trace_b$permutation_plan_hash),
-            "fixed seed should reproduce permutation plan hash")
+assert_true(identical(trace_a$permutation_plan_spec_hash,
+                      trace_b$permutation_plan_spec_hash),
+            "fixed seed should reproduce permutation plan spec hash")
+assert_true(identical(trace_a$permutation_plan_spec_hash,
+                      trace_a$permutation_plan_hash),
+            "deprecated permutation plan hash alias should match spec hash")
 assert_true(all(trace_a$permutation_replicates == 12L),
             "trace should record permutation replicate count")
 
 verified <- trace_a[trace_a$near_alpha_triggered, , drop = FALSE]
 assert_true(nrow(verified) > 0L,
             "tau=Inf should force verifier rows for non-empty S")
-assert_true(all(nzchar(verified$permutation_plan_hash)),
-            "verified rows should retain explicit permutation plan hash")
+assert_true(all(nzchar(verified$permutation_plan_spec_hash)),
+            "verified rows should retain explicit permutation plan spec hash")
 
 primary_nonempty <- Filter(function(row) length(row$S) > 0L,
                            primary_calls_a$rows)
