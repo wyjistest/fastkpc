@@ -1084,6 +1084,117 @@ extern "C" SEXP C_mgcv_extract_gpu_solve_handle_fixed_sp(
   END_RCPP
 }
 
+extern "C" SEXP C_mgcv_extract_gpu_solve_same_setup_batch_fixed_sp(
+    SEXP Xs,
+    SEXP Ys,
+    SEXP Zs,
+    SEXP XtX_nulls,
+    SEXP penalty_null_list_s,
+    SEXP Xty_nulls) {
+  BEGIN_RCPP
+  if (!Rf_isReal(Xs) || !Rf_isMatrix(Xs)) Rcpp::stop("X must be a numeric matrix");
+  if (!Rf_isReal(Ys) || !Rf_isMatrix(Ys)) Rcpp::stop("Y must be a numeric matrix");
+  if (!Rf_isReal(Zs) || !Rf_isMatrix(Zs)) Rcpp::stop("Z must be a numeric matrix");
+  if (!Rf_isReal(XtX_nulls) || !Rf_isMatrix(XtX_nulls)) {
+    Rcpp::stop("XtX_null must be a numeric matrix");
+  }
+  if (!Rf_isNewList(penalty_null_list_s)) {
+    Rcpp::stop("penalty_null_list must be a list of numeric matrices");
+  }
+  if (!Rf_isReal(Xty_nulls) || !Rf_isMatrix(Xty_nulls)) {
+    Rcpp::stop("Xty_null must be a numeric matrix");
+  }
+
+  Rcpp::NumericMatrix X(Xs);
+  Rcpp::NumericMatrix Y(Ys);
+  Rcpp::NumericMatrix Z(Zs);
+  Rcpp::NumericMatrix XtX_null(XtX_nulls);
+  Rcpp::List penalty_list(penalty_null_list_s);
+  Rcpp::NumericMatrix Xty_null(Xty_nulls);
+
+  const int n = X.nrow();
+  const int p = X.ncol();
+  const int targets = Y.ncol();
+  const int q = Z.ncol();
+  if (Y.nrow() != n) Rcpp::stop("nrow(Y) must equal nrow(X)");
+  if (Z.nrow() != p) Rcpp::stop("nrow(Z) must equal ncol(X)");
+  if (XtX_null.nrow() != q || XtX_null.ncol() != q) {
+    Rcpp::stop("XtX_null dimensions must match ncol(Z)");
+  }
+  if (penalty_list.size() != targets) {
+    Rcpp::stop("penalty_null_list length must equal ncol(Y)");
+  }
+  if (Xty_null.nrow() != q || Xty_null.ncol() != targets) {
+    Rcpp::stop("Xty_null dimensions must be ncol(Z) by ncol(Y)");
+  }
+  if (!all_finite(X)) Rcpp::stop("X contains missing or infinite values");
+  if (!all_finite(Y)) Rcpp::stop("Y contains missing or infinite values");
+  if (!all_finite(Z)) Rcpp::stop("Z contains missing or infinite values");
+  if (!all_finite(XtX_null)) {
+    Rcpp::stop("XtX_null contains missing or infinite values");
+  }
+  if (!all_finite(Xty_null)) {
+    Rcpp::stop("Xty_null contains missing or infinite values");
+  }
+
+  Rcpp::NumericMatrix residuals(n, targets);
+  Rcpp::NumericMatrix fitted(n, targets);
+  Rcpp::NumericMatrix theta(q, targets);
+  Rcpp::NumericMatrix coefficients(p, targets);
+  Rcpp::NumericVector rss(targets);
+  Rcpp::List diagnostics(targets);
+
+  for (int target = 0; target < targets; ++target) {
+    Rcpp::NumericMatrix penalty(penalty_list[target]);
+    if (penalty.nrow() != q || penalty.ncol() != q) {
+      Rcpp::stop("each penalty_null matrix dimensions must match ncol(Z)");
+    }
+    if (!all_finite(penalty)) {
+      Rcpp::stop("penalty_null contains missing or infinite values");
+    }
+    const MgcvExtractGpuFixedSpResult result =
+      mgcv_extract_fixed_sp_solve_cuda(
+        REAL(Xs), n, p, &REAL(Ys)[static_cast<std::size_t>(target) * n],
+        REAL(Zs), REAL(XtX_nulls), REAL(penalty),
+        &REAL(Xty_nulls)[static_cast<std::size_t>(target) * q], q);
+    for (int row = 0; row < n; ++row) {
+      fitted(row, target) = result.fitted[row];
+      residuals(row, target) = result.residuals[row];
+    }
+    for (int j = 0; j < q; ++j) theta(j, target) = result.theta[j];
+    for (int j = 0; j < p; ++j) coefficients(j, target) = result.coefficients[j];
+    rss[target] = result.rss;
+    diagnostics[target] = Rcpp::List::create(
+      Rcpp::Named("n") = result.n,
+      Rcpp::Named("coefficient_dim") = result.coefficient_dim,
+      Rcpp::Named("null_dim") = result.null_dim,
+      Rcpp::Named("target_index") = target + 1,
+      Rcpp::Named("solve_stage") = "native-gpu-same-setup-batch-linear-solve",
+      Rcpp::Named("cholesky_backend") = result.cholesky_backend
+    );
+  }
+
+  return Rcpp::List::create(
+    Rcpp::Named("theta") = theta,
+    Rcpp::Named("coefficients") = coefficients,
+    Rcpp::Named("fitted") = fitted,
+    Rcpp::Named("residuals") = residuals,
+    Rcpp::Named("rss") = rss,
+    Rcpp::Named("diagnostics") = diagnostics,
+    Rcpp::Named("batch_diagnostics") = Rcpp::List::create(
+      Rcpp::Named("n") = n,
+      Rcpp::Named("targets") = targets,
+      Rcpp::Named("coefficient_dim") = p,
+      Rcpp::Named("null_dim") = q,
+      Rcpp::Named("native_batch_call") = true,
+      Rcpp::Named("setup_reused") = true,
+      Rcpp::Named("true_batched_kernel") = false,
+      Rcpp::Named("batch_stage") = "native-same-setup-repeated-cuda-solve"
+    )
+  );
+  END_RCPP
+}
+
 extern "C" SEXP C_fast_skeleton_cuda(SEXP data, SEXP alphas, SEXP max_ords,
                                       SEXP indexs, SEXP legacy_indexs,
                                       SEXP batch_sizes) {
@@ -1280,6 +1391,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fastspline_residual_cuda", reinterpret_cast<DL_FUNC>(&C_fastspline_residual_cuda), 4},
   {"C_fastspline_residual_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fastspline_residual_batch_cuda), 5},
   {"C_mgcv_extract_gpu_solve_handle_fixed_sp", reinterpret_cast<DL_FUNC>(&C_mgcv_extract_gpu_solve_handle_fixed_sp), 6},
+  {"C_mgcv_extract_gpu_solve_same_setup_batch_fixed_sp", reinterpret_cast<DL_FUNC>(&C_mgcv_extract_gpu_solve_same_setup_batch_fixed_sp), 6},
   {"C_fast_skeleton_cuda", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda), 6},
   {"C_fast_skeleton_cuda_cached", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda_cached), 7},
   {"C_fast_skeleton_cuda_backend", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda_backend), 18},

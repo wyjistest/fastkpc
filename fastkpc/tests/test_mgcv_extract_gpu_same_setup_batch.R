@@ -61,7 +61,7 @@ assert_true(identical(batch$backend_family, "mgcvExtractGPU"),
 assert_true(identical(batch$mode, "fixed-sp-same-setup-native-gpu-batch-bridge"),
             "same-setup batch mode")
 assert_true(identical(batch$solve_source,
-                      "mgcvExtractGPU-same-setup-native-fixed-sp-batch-bridge"),
+                      "mgcvExtractGPU-native-same-setup-fixed-sp-batch"),
             "same-setup batch solve source")
 assert_true(identical(batch$used_device, "cuda"),
             "same-setup batch should use CUDA")
@@ -81,6 +81,8 @@ assert_true(length(unique(batch$setup_fingerprints)) == 1L,
             "same-setup batch should reuse one setup fingerprint")
 assert_true(identical(batch$diagnostics$setup_reused, TRUE),
             "diagnostics should record setup reuse")
+assert_true(identical(batch$diagnostics$native_batch_call, TRUE),
+            "diagnostics should record one native batch call")
 assert_true(identical(batch$diagnostics$targets, 2L),
             "diagnostics should record target count")
 

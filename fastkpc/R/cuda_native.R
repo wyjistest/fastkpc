@@ -118,6 +118,32 @@ mgcv_extract_gpu_solve_handle_fixed_sp_cuda <- function(handle) {
         PACKAGE = "fastkpc_cuda")
 }
 
+mgcv_extract_gpu_solve_same_setup_batch_fixed_sp_cuda <- function(handles) {
+  load_fastkpc_cuda_native()
+  if (!is.list(handles) || length(handles) == 0L) {
+    stop("handles must be a non-empty list", call. = FALSE)
+  }
+  first <- handles[[1L]]
+  X <- as.matrix(first$X)
+  Z <- as.matrix(first$Z)
+  XtX_null <- as.matrix(first$XtX_null)
+  Y <- do.call(cbind, lapply(handles, function(handle) as.numeric(handle$y)))
+  Xty_null <- do.call(cbind, lapply(handles, function(handle) as.numeric(handle$Xty_null)))
+  penalty_null_list <- lapply(handles, function(handle) {
+    penalty <- as.matrix(handle$penalty_null)
+    storage.mode(penalty) <- "double"
+    penalty
+  })
+  storage.mode(X) <- "double"
+  storage.mode(Y) <- "double"
+  storage.mode(Z) <- "double"
+  storage.mode(XtX_null) <- "double"
+  storage.mode(Xty_null) <- "double"
+  .Call("C_mgcv_extract_gpu_solve_same_setup_batch_fixed_sp",
+        X, Y, Z, XtX_null, penalty_null_list, Xty_null,
+        PACKAGE = "fastkpc_cuda")
+}
+
 fast_skeleton_cuda <- function(data, alpha, max_conditioning_size,
                                index = 1, legacy_index = TRUE,
                                batch_size = 0) {

@@ -1468,13 +1468,51 @@ fastkpc_mgcv_extract_gpu_same_setup_batch_fixed_sp_cuda <- function(
       target = target_ids[j]
     )
   })
-  batch <- fastkpc_mgcv_extract_gpu_solve_handle_batch_fixed_sp_cuda(
-    setups = setups,
-    target_ids = target_ids,
+  handles <- lapply(
+    setups,
+    fastkpc_mgcv_extract_gpu_setup_handle,
+    device_resident = TRUE,
     tol = tol
   )
-  batch$mode <- "fixed-sp-same-setup-native-gpu-batch-bridge"
-  batch$solve_source <- "mgcvExtractGPU-same-setup-native-fixed-sp-batch-bridge"
+  native <- mgcv_extract_gpu_solve_same_setup_batch_fixed_sp_cuda(handles)
+  residuals <- as.matrix(native$residuals)
+  fitted <- as.matrix(native$fitted)
+  colnames(residuals) <- paste0("target", as.integer(target_ids))
+  colnames(fitted) <- colnames(residuals)
+  setup_fingerprints <- vapply(
+    setups,
+    function(x) x$setup_fingerprint$fingerprint,
+    character(1)
+  )
+  coefficients <- lapply(seq_len(q), function(j) native$coefficients[, j])
+  theta <- lapply(seq_len(q), function(j) native$theta[, j])
+
+  batch <- list(
+    backend_family = "mgcvExtractGPU",
+    mode = "fixed-sp-same-setup-native-gpu-batch-bridge",
+    solve_source = "mgcvExtractGPU-native-same-setup-fixed-sp-batch",
+    sp_source = "fixed-input-per-target",
+    gcv_source = "none",
+    is_self_contained_gcv = FALSE,
+    used_device = "cuda",
+    native_gpu_solve_used = TRUE,
+    residuals = residuals,
+    fitted = fitted,
+    coefficients = coefficients,
+    theta = theta,
+    sp = sp,
+    rss = as.numeric(native$rss),
+    target_ids = as.integer(target_ids),
+    setup_fingerprints = setup_fingerprints,
+    handles = handles,
+    solved = native,
+    diagnostics = c(
+      native$batch_diagnostics,
+      list(
+        same_setup_fingerprint_count = length(unique(setup_fingerprints))
+      )
+    )
+  )
   batch$template_setup <- template_setup
   batch$diagnostics$setup_reused <- TRUE
   batch$diagnostics$template_setup_fingerprint <-
