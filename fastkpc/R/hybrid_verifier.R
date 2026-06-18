@@ -1,3 +1,5 @@
+source("fastkpc/R/precision_data_plane.R")
+
 fastkpc_hybrid_policy <- function(enabled = TRUE,
                                   alpha = 0.05,
                                   tau = log(3),
@@ -34,8 +36,14 @@ fastkpc_apply_hybrid_policy <- function(test_rows, policy) {
   out$p_used[use_verifier] <- out$verifier_p[use_verifier]
   out$p_source_used <- policy$primary
   out$p_source_used[use_verifier] <- policy$verifier
-  out$decision_before_verify <- out$primary_p > policy$alpha
-  out$decision_after_verify <- out$p_used > policy$alpha
+  primary_decisions <- lapply(out$primary_p, fastkpc_resolve_ci_decision,
+                              alpha = policy$alpha, na_delete = TRUE)
+  used_decisions <- lapply(out$p_used, fastkpc_resolve_ci_decision,
+                           alpha = policy$alpha, na_delete = TRUE)
+  out$decision_before_verify <- vapply(primary_decisions, `[[`, logical(1),
+                                         "delete_edge")
+  out$decision_after_verify <- vapply(used_decisions, `[[`, logical(1),
+                                        "delete_edge")
   out$verification_reason <- ""
   out$verification_reason[out$near_alpha_triggered] <- "near-alpha"
   out
@@ -114,9 +122,10 @@ fastkpc_replay_canonical_ci_decisions <- function(test_rows, alpha, p,
       rows$edge_already_deleted[i] <- TRUE
       next
     }
-    pval <- rows$p_used[i]
-    if (!is.finite(pval)) pval <- 0
-    if (pval >= alpha) {
+    decision <- fastkpc_resolve_ci_decision(rows$p_used[i], alpha = alpha,
+                                            na_delete = TRUE)
+    rows$p_used[i] <- decision$p_used
+    if (decision$delete_edge) {
       S <- fastkpc_parse_S_key(rows$S_key[i])
       adjacency[x, y] <- FALSE
       adjacency[y, x] <- FALSE

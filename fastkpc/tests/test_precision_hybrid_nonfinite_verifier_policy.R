@@ -56,7 +56,7 @@ primary_na <- fast_kpc(
     `direct-ci` = make_spy(0.001, "direct-ci-spy", direct_calls),
     fastSplineCPU = make_spy(0.001, "fastSplineCPU-spy", primary_calls,
                              p_value_nonempty = NA_real_),
-    mgcvExtractGPUGCV = make_spy(0.051, "mgcvExtractCPU-spy",
+    mgcvExtractCPUGCVBridge = make_spy(0.051, "mgcvExtractCPU-spy",
                                  verifier_calls),
     `legacy-mgcv` = make_spy(0.9, "legacy-mgcv-spy", legacy_calls)
   ),
@@ -92,7 +92,7 @@ verifier_na <- fast_kpc(
   precision_executors = list(
     `direct-ci` = make_spy(0.001, "direct-ci-spy", direct_calls),
     fastSplineCPU = make_spy(0.049, "fastSplineCPU-spy", primary_calls),
-    mgcvExtractGPUGCV = make_spy(NA_real_, "mgcvExtractCPU-spy",
+    mgcvExtractCPUGCVBridge = make_spy(NA_real_, "mgcvExtractCPU-spy",
                                  verifier_calls),
     `legacy-mgcv` = make_spy(0.051, "legacy-mgcv-spy", legacy_calls)
   ),
@@ -128,7 +128,7 @@ legacy_na <- fast_kpc(
   precision_executors = list(
     `direct-ci` = make_spy(0.001, "direct-ci-spy", direct_calls),
     fastSplineCPU = make_spy(0.049, "fastSplineCPU-spy", primary_calls),
-    mgcvExtractGPUGCV = make_spy(NA_real_, "mgcvExtractCPU-spy",
+    mgcvExtractCPUGCVBridge = make_spy(NA_real_, "mgcvExtractCPU-spy",
                                  verifier_calls),
     `legacy-mgcv` = make_spy(NA_real_, "legacy-mgcv-spy", legacy_calls)
   ),

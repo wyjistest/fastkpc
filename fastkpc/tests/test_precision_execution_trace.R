@@ -35,6 +35,8 @@ required <- c(
   "verifier_residual_backend_executed", "verifier_ci_backend_executed",
   "verifier_p_raw", "verifier_p_used", "fallback_triggered",
   "attempt_count",
+  "ci_randomness_id", "permutation_seed_effective",
+  "permutation_plan_hash", "permutation_replicates",
   "decision_before_verify", "decision_after_verify",
   "mgcv_setup_cpu_ms", "setup_cache_lookup_ms", "host_to_device_ms",
   "spectral_prepare_ms", "gcv_score_ms", "linear_solve_ms",

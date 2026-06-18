@@ -44,7 +44,7 @@ calls <- new.env(parent = emptyenv())
 calls$keys <- character()
 executors <- list(
   `direct-ci` = make_table_executor(calls),
-  mgcvExtractGPUGCV = make_table_executor(calls)
+  mgcvExtractCPUGCVBridge = make_table_executor(calls)
 )
 caps <- list(
   R_version = "4.5.0",

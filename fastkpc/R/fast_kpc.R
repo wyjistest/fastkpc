@@ -440,7 +440,8 @@ fast_kpc <- function(data,
       setup_fingerprint = paste("fastkpc", max_conditioning_size, sep = ":"),
       runtime_capabilities = runtime_capabilities,
       fallback_backend = "legacy-mgcv",
-      allow_canary = allow_canary_mgcv_extract
+      allow_canary = allow_canary_mgcv_extract,
+      execution_engine = engine_used
     )
   }
   if (identical(engine_used, "cpu") &&
@@ -532,7 +533,7 @@ fast_kpc <- function(data,
 
   use_precision_r_skeleton <- graph_stage == "skeleton" &&
     identical(engine_used, "cpu") &&
-    as.integer(max_conditioning_size) <= 1L &&
+    as.integer(max_conditioning_size) <= 2L &&
     precision_requested %in% c("fast", "compatible", "hybrid") &&
     (isTRUE(precision_executors_requested) ||
        precision_requested %in% c("compatible", "hybrid"))

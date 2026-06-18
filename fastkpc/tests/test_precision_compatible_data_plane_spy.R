@@ -40,7 +40,7 @@ compatible_calls$rows <- list()
 executors <- list(
   `direct-ci` = make_spy(0.049, "direct-ci-spy", direct_calls),
   fastSplineCPU = make_spy(0.049, "fastSplineCPU-spy", primary_calls),
-  mgcvExtractGPUGCV = make_spy(0.049, "mgcvExtractCPU-spy",
+  mgcvExtractCPUGCVBridge = make_spy(0.049, "mgcvExtractCPU-spy",
                                compatible_calls, p_value_nonempty = 0.051)
 )
 
@@ -95,8 +95,8 @@ assert_true(direct_calls$count > 0L,
             "compatible precision should execute direct CI for empty S")
 assert_true(compatible_calls$count > 0L,
             "compatible precision should execute mgcv-compatible spy")
-assert_true(compatible$config$backend_planned == "mgcvExtractGPUGCV",
-            "compatible supported route should plan mgcvExtractGPUGCV")
+assert_true(compatible$config$backend_planned == "mgcvExtractCPUGCVBridge",
+            "compatible supported route should plan mgcvExtractCPUGCVBridge")
 assert_true(compatible$config$backend_executed == "mgcvExtractCPU-spy",
             "backend_executed must come from compatible executor receipt")
 assert_true(compatible$config$backend_used == compatible$config$backend_executed,

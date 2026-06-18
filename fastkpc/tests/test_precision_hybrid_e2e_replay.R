@@ -32,7 +32,7 @@ caps <- list(
 executors <- list(
   `direct-ci` = make_spy(0.001, "direct-ci-spy"),
   fastSplineCPU = make_spy(0.049, "fastSplineCPU-spy"),
-  mgcvExtractGPUGCV = make_spy(0.049, "mgcvExtractCPU-spy")
+  mgcvExtractCPUGCVBridge = make_spy(0.049, "mgcvExtractCPU-spy")
 )
 
 primary <- fast_kpc(

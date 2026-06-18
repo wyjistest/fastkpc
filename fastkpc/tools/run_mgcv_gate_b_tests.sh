@@ -39,6 +39,8 @@ Rscript fastkpc/tests/test_mgcv_extract_fail_closed.R
 Rscript fastkpc/tests/test_workload_structure_stats.R
 Rscript fastkpc/tests/test_true_batched_kernel_decision.R
 Rscript fastkpc/tests/test_precision_backend_resolver.R
+Rscript fastkpc/tests/test_precision_ci_decision_contract.R
+Rscript fastkpc/tests/test_precision_cpu_backend_identity.R
 Rscript fastkpc/tests/test_precision_fast_mode_e2e.R
 Rscript fastkpc/tests/test_precision_compatible_fail_closed.R
 Rscript fastkpc/tests/test_precision_hybrid_e2e_replay.R
@@ -48,8 +50,11 @@ Rscript fastkpc/tests/test_precision_hybrid_cpu_verifier_spy.R
 Rscript fastkpc/tests/test_precision_hybrid_cpu_skip_and_fallback.R
 Rscript fastkpc/tests/test_precision_hybrid_cpu_double_verifier_failure.R
 Rscript fastkpc/tests/test_precision_hybrid_nonfinite_verifier_policy.R
+Rscript fastkpc/tests/test_precision_hsic_perm_trace_plan.R
 Rscript fastkpc/tests/test_precision_compatible_data_plane_spy.R
 Rscript fastkpc/tests/test_precision_compatible_cpu_data_plane_smoke.R
+Rscript fastkpc/tests/test_precision_cpu_s_size2_data_plane.R
+Rscript fastkpc/tests/test_precision_cpu_s_size2_mgcv_smoke.R
 Rscript fastkpc/tests/test_precision_trace_real_sepset_fields.R
 Rscript fastkpc/tests/test_precision_nonfinite_p_policy.R
 Rscript fastkpc/tests/test_precision_legacy_mgcv_executor.R

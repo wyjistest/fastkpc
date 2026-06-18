@@ -33,36 +33,58 @@ fastkpc_resolve_backend_request <- function(
   setup_fingerprint,
   runtime_capabilities,
   fallback_backend = "legacy-mgcv",
-  allow_canary = FALSE
+  allow_canary = FALSE,
+  execution_engine = c("cuda", "cpu")
 ) {
   precision <- match.arg(precision)
+  execution_engine <- match.arg(execution_engine)
   runtime_capabilities <- runtime_capabilities %||%
     fastkpc_precision_runtime_capabilities()
-  checks <- fastkpc_check_mgcv_extract_gpu_compatibility(
-    observed_R_version = runtime_capabilities$R_version %||% NA_character_,
-    observed_mgcv_version = runtime_capabilities$mgcv_version %||% NA_character_,
-    family = family,
-    link = link,
-    formula_class = formula_class,
-    S_size = length(S),
-    penalty_count = penalty_count,
-    setup_fingerprint_schema_version =
-      runtime_capabilities$setup_fingerprint_schema_version %||% NA_character_,
-    cuda_available = runtime_capabilities$cuda_available %||% FALSE,
-    mgcvExtractGPU_backend_version =
-      runtime_capabilities$mgcvExtractGPU_backend_version %||% NA_character_,
-    spectral_gcv_version =
-      runtime_capabilities$spectral_gcv_version %||% NA_character_,
-    allow_canary = allow_canary
-  )
+  if (identical(execution_engine, "cpu")) {
+    checks <- fastkpc_check_mgcv_extract_cpu_compatibility(
+      observed_R_version = runtime_capabilities$R_version %||% NA_character_,
+      observed_mgcv_version = runtime_capabilities$mgcv_version %||% NA_character_,
+      family = family,
+      link = link,
+      formula_class = formula_class,
+      S_size = length(S),
+      penalty_count = penalty_count,
+      setup_fingerprint_schema_version =
+        runtime_capabilities$setup_fingerprint_schema_version %||% NA_character_,
+      spectral_gcv_version =
+        runtime_capabilities$spectral_gcv_version %||% NA_character_,
+      allow_canary = allow_canary
+    )
+    compatible_backend <- "mgcvExtractCPUGCVBridge"
+  } else {
+    checks <- fastkpc_check_mgcv_extract_gpu_compatibility(
+      observed_R_version = runtime_capabilities$R_version %||% NA_character_,
+      observed_mgcv_version = runtime_capabilities$mgcv_version %||% NA_character_,
+      family = family,
+      link = link,
+      formula_class = formula_class,
+      S_size = length(S),
+      penalty_count = penalty_count,
+      setup_fingerprint_schema_version =
+        runtime_capabilities$setup_fingerprint_schema_version %||% NA_character_,
+      cuda_available = runtime_capabilities$cuda_available %||% FALSE,
+      mgcvExtractGPU_backend_version =
+        runtime_capabilities$mgcvExtractGPU_backend_version %||% NA_character_,
+      spectral_gcv_version =
+        runtime_capabilities$spectral_gcv_version %||% NA_character_,
+      allow_canary = allow_canary
+    )
+    compatible_backend <- "mgcvExtractGPUGCV"
+  }
   supported <- identical(checks$compatibility_status, "supported")
   route <- fastkpc_select_backend_route(
     precision = precision,
     S_size = length(S),
     single_penalty = as.integer(penalty_count) == 1L,
-    mgcv_extract_gpu_supported = supported,
+    mgcv_extract_supported = supported,
     tau = tau,
-    fallback_backend = fallback_backend
+    fallback_backend = fallback_backend,
+    compatible_backend = compatible_backend
   )
   if (identical(precision, "compatible") && !supported) {
     route$primary_backend <- fallback_backend

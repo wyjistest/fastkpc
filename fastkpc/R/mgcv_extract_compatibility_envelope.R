@@ -67,6 +67,68 @@ fastkpc_check_mgcv_extract_gpu_compatibility <- function(
   )
 }
 
+fastkpc_check_mgcv_extract_cpu_compatibility <- function(
+  observed_R_version,
+  observed_mgcv_version,
+  supported_R_versions = c("4.5.0"),
+  supported_mgcv_versions = c("1.9-4"),
+  family = "gaussian",
+  link = "identity",
+  formula_class = "full-smooth",
+  S_size = 1L,
+  penalty_count = 1L,
+  setup_fingerprint_schema_version = "mgcvExtractGPU-setup-v1",
+  supported_setup_fingerprint_schema_versions = "mgcvExtractGPU-setup-v1",
+  spectral_gcv_version = "single-penalty-spectral-gcv-v1",
+  supported_spectral_gcv_versions = "single-penalty-spectral-gcv-v1",
+  allow_canary = FALSE
+) {
+  checks <- c(
+    R_version = as.character(observed_R_version) %in%
+      as.character(supported_R_versions),
+    mgcv_version = as.character(observed_mgcv_version) %in%
+      as.character(supported_mgcv_versions),
+    family = identical(as.character(family), "gaussian"),
+    link = identical(as.character(link), "identity"),
+    formula_class = as.character(formula_class) %in%
+      c("full-smooth", "additive-smooth"),
+    S_size = as.integer(S_size) <= 2L,
+    penalty_count = as.integer(penalty_count) == 1L,
+    setup_fingerprint_schema_version =
+      as.character(setup_fingerprint_schema_version) %in%
+        as.character(supported_setup_fingerprint_schema_versions),
+    spectral_gcv_version = as.character(spectral_gcv_version) %in%
+      as.character(supported_spectral_gcv_versions)
+  )
+  unsupported <- names(checks)[!checks]
+  if (length(unsupported) == 0L) {
+    status <- "supported"
+    action <- "run-mgcvExtractCPU"
+  } else if (isTRUE(allow_canary)) {
+    status <- "canary"
+    action <- "warn-and-run"
+  } else {
+    status <- "unsupported"
+    action <- "fallback"
+  }
+  warning_message <- if (identical(status, "supported")) "" else paste(
+    "mgcvExtractCPU compatibility envelope mismatch:",
+    "observed R", observed_R_version,
+    "observed mgcv", observed_mgcv_version,
+    "supported R", paste(supported_R_versions, collapse = ","),
+    "supported mgcv", paste(supported_mgcv_versions, collapse = ","),
+    "unsupported", paste(unsupported, collapse = ","),
+    "action", action
+  )
+  list(
+    compatibility_status = status,
+    compatibility_action = action,
+    warning_message = warning_message,
+    supported_checks = names(checks)[checks],
+    unsupported_checks = unsupported
+  )
+}
+
 fastkpc_mgcv_extract_gpu_capabilities <- function(
   observed_R_version = paste(R.version$major, R.version$minor, sep = "."),
   observed_mgcv_version = if (requireNamespace("mgcv", quietly = TRUE)) {

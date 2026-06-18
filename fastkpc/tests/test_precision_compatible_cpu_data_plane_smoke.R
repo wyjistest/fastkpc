@@ -36,8 +36,8 @@ result <- fast_kpc(
   runtime_capabilities = caps
 )
 
-assert_true(result$config$backend_planned == "mgcvExtractGPUGCV",
-            "supported compatible route should plan mgcvExtractGPUGCV")
+assert_true(result$config$backend_planned == "mgcvExtractCPUGCVBridge",
+            "supported compatible route should plan mgcvExtractCPUGCVBridge")
 assert_true(result$config$backend_executed == "mgcvExtractCPU",
             "default compatible CPU vertical slice should execute mgcvExtractCPU")
 assert_true(result$config$precision_execution_status == "data-plane-executed",

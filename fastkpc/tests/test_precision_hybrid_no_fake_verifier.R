@@ -50,7 +50,7 @@ hybrid <- fast_kpc(
   precision_executors = list(
     `direct-ci` = make_spy(0.001, "direct-ci-spy", direct_calls),
     fastSplineCPU = make_spy(0.001, "fastSplineCPU-spy", primary_calls),
-    mgcvExtractGPUGCV = make_spy(0.9, "mgcvExtractCPU-spy",
+    mgcvExtractCPUGCVBridge = make_spy(0.9, "mgcvExtractCPU-spy",
                                  verifier_calls)
   ),
   runtime_capabilities = caps

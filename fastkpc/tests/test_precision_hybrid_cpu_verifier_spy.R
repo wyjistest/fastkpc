@@ -45,7 +45,7 @@ verifier_calls$rows <- list()
 executors <- list(
   `direct-ci` = make_spy(0.049, "direct-ci-spy", direct_calls),
   fastSplineCPU = make_spy(0.049, "fastSplineCPU-spy", primary_calls),
-  mgcvExtractGPUGCV = make_spy(0.049, "mgcvExtractCPU-spy",
+  mgcvExtractCPUGCVBridge = make_spy(0.049, "mgcvExtractCPU-spy",
                                verifier_calls, p_value_nonempty = 0.051)
 )
 caps <- list(

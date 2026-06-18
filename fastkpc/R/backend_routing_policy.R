@@ -1,11 +1,16 @@
 fastkpc_select_backend_route <- function(precision = c("fast", "compatible", "hybrid"),
                                          S_size,
                                          single_penalty,
-                                         mgcv_extract_gpu_supported,
+                                         mgcv_extract_supported = NULL,
+                                         mgcv_extract_gpu_supported = NULL,
                                          tau = log(2),
-                                         fallback_backend = "legacy-mgcv") {
+                                         fallback_backend = "legacy-mgcv",
+                                         compatible_backend = "mgcvExtractGPUGCV") {
   precision <- match.arg(precision)
-  supported_gpu <- isTRUE(mgcv_extract_gpu_supported) &&
+  if (is.null(mgcv_extract_supported)) {
+    mgcv_extract_supported <- mgcv_extract_gpu_supported
+  }
+  supported_extract <- isTRUE(mgcv_extract_supported) &&
     isTRUE(single_penalty) && as.integer(S_size) <= 2L
 
   if (identical(precision, "fast")) {
@@ -21,12 +26,12 @@ fastkpc_select_backend_route <- function(precision = c("fast", "compatible", "hy
   }
 
   if (identical(precision, "compatible")) {
-    if (supported_gpu) {
-      primary <- "mgcvExtractGPUGCV"
+    if (supported_extract) {
+      primary <- compatible_backend
       reason <- ""
     } else {
       primary <- fallback_backend
-      reason <- "mgcvExtractGPU unsupported for requested S/formula/envelope"
+      reason <- "mgcvExtract unsupported for requested S/formula/envelope"
     }
     return(list(
       precision = precision,
@@ -39,9 +44,9 @@ fastkpc_select_backend_route <- function(precision = c("fast", "compatible", "hy
     ))
   }
 
-  verifier <- if (supported_gpu) "mgcvExtractGPUGCV" else fallback_backend
-  reason <- if (supported_gpu) "" else
-    "mgcvExtractGPU verifier unsupported; using fallback verifier"
+  verifier <- if (supported_extract) compatible_backend else fallback_backend
+  reason <- if (supported_extract) "" else
+    "mgcvExtract verifier unsupported; using fallback verifier"
   list(
     precision = precision,
     primary_backend = "fastSplineCUDA",

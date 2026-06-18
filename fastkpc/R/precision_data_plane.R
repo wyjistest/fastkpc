@@ -5,6 +5,7 @@ fastkpc_default_precision_executors <- function() {
   list(
     `direct-ci` = fastkpc_execute_ci_direct,
     fastSplineCPU = fastkpc_execute_ci_fast_spline_cpu,
+    mgcvExtractCPUGCVBridge = fastkpc_execute_ci_mgcv_extract_cpu,
     mgcvExtractGPUGCV = fastkpc_execute_ci_mgcv_extract_cpu,
     `legacy-mgcv` = fastkpc_execute_ci_legacy_mgcv
   )
@@ -28,12 +29,61 @@ fastkpc_precision_combinations <- function(values, choose) {
   })
 }
 
+fastkpc_precision_ci_randomness <- function(ci_method, permutation_params,
+                                            canonical_test_order_id) {
+  replicates <- as.integer(permutation_params$replicates %||% 100L)
+  base_seed <- permutation_params$seed %||% 0L
+  if (is.null(base_seed) || is.na(base_seed)) base_seed <- 0L
+  effective_seed <- if (identical(ci_method, "hsic.perm")) {
+    as.integer((as.integer(base_seed) + 1000003L *
+                  as.integer(canonical_test_order_id)) %% .Machine$integer.max)
+  } else {
+    NA_integer_
+  }
+  plan_hash <- if (identical(ci_method, "hsic.perm")) {
+    fastkpc_hash_object(list(
+      ci_method = ci_method,
+      base_seed = as.integer(base_seed),
+      effective_seed = effective_seed,
+      canonical_test_order_id = as.integer(canonical_test_order_id),
+      replicates = replicates,
+      include_observed = permutation_params$include_observed %||% TRUE
+    ))
+  } else {
+    ""
+  }
+  list(
+    ci_randomness_id = if (identical(ci_method, "hsic.perm")) {
+      paste("hsic.perm", as.integer(canonical_test_order_id),
+            effective_seed, replicates, sep = ":")
+    } else {
+      ""
+    },
+    permutation_seed_effective = effective_seed,
+    permutation_plan_hash = plan_hash,
+    permutation_replicates = if (identical(ci_method, "hsic.perm")) {
+      replicates
+    } else {
+      NA_integer_
+    }
+  )
+}
+
+fastkpc_precision_effective_permutation_params <- function(ci_method,
+                                                           permutation_params,
+                                                           randomness) {
+  if (!identical(ci_method, "hsic.perm")) return(permutation_params)
+  out <- permutation_params
+  out$seed <- randomness$permutation_seed_effective
+  out
+}
+
 fastkpc_precision_neighbors <- function(adjacency, vertex, excluded) {
   out <- which(adjacency[, vertex] & seq_len(nrow(adjacency)) != excluded)
   as.integer(out)
 }
 
-fastkpc_precision_normalize_p <- function(p_raw, na_delete = TRUE) {
+fastkpc_resolve_ci_decision <- function(p_raw, alpha, na_delete = TRUE) {
   p_raw <- as.numeric(p_raw)[1L]
   p_was_nonfinite <- !is.finite(p_raw)
   if (p_was_nonfinite) {
@@ -41,28 +91,46 @@ fastkpc_precision_normalize_p <- function(p_raw, na_delete = TRUE) {
       return(list(
         p_raw = p_raw,
         p_used = 1.0,
+        independent = TRUE,
+        delete_edge = TRUE,
         p_was_nonfinite = TRUE,
-        nonfinite_action = "na-delete-use-1"
+        nonfinite_action = "na-delete-use-1",
+        boundary_rule = "p_used >= alpha"
       ))
     }
     return(list(
       p_raw = p_raw,
       p_used = 0.0,
+      independent = FALSE,
+      delete_edge = FALSE,
       p_was_nonfinite = TRUE,
-      nonfinite_action = "na-keep-use-0"
+      nonfinite_action = "na-keep-use-0",
+      boundary_rule = "p_used >= alpha"
     ))
   }
+  p_used <- p_raw
+  delete_edge <- p_used >= as.numeric(alpha)
   list(
     p_raw = p_raw,
-    p_used = p_raw,
+    p_used = p_used,
+    independent = delete_edge,
+    delete_edge = delete_edge,
     p_was_nonfinite = FALSE,
-    nonfinite_action = ""
+    nonfinite_action = "",
+    boundary_rule = "p_used >= alpha"
   )
+}
+
+fastkpc_precision_normalize_p <- function(p_raw, na_delete = TRUE,
+                                          alpha = NA_real_) {
+  alpha <- if (is.finite(alpha)) alpha else Inf
+  fastkpc_resolve_ci_decision(p_raw, alpha = alpha, na_delete = na_delete)
 }
 
 fastkpc_precision_group_route <- function(precision, alpha, tau, S,
                                           runtime_capabilities,
-                                          allow_canary = FALSE) {
+                                          allow_canary = FALSE,
+                                          execution_engine = "cpu") {
   if (length(S) == 0L) {
     return(list(
       precision = precision,
@@ -92,7 +160,8 @@ fastkpc_precision_group_route <- function(precision, alpha, tau, S,
     setup_fingerprint = paste0("S:", fastkpc_precision_S_key(S)),
     runtime_capabilities = runtime_capabilities,
     fallback_backend = "legacy-mgcv",
-    allow_canary = allow_canary
+    allow_canary = allow_canary,
+    execution_engine = execution_engine
   )
 }
 
@@ -156,10 +225,11 @@ fastkpc_mgcv_batch_residuals_for_pair <- function(data, x, y, S) {
       setup_fingerprint = paste0("direct:", x, "-", y)
     ))
   }
-  if (length(S) > 1L) {
-    stop("compatible CPU vertical slice supports |S| <= 1", call. = FALSE)
+  if (length(S) > 2L) {
+    stop("compatible CPU precision slice supports |S| <= 2", call. = FALSE)
   }
-  S_data <- data.frame(s1 = data[, S[1L]])
+  S_data <- as.data.frame(data[, S, drop = FALSE])
+  colnames(S_data) <- paste0("s", seq_along(S))
   Y <- cbind(x = data[, x], y = data[, y])
   batch <- fastkpc_mgcv_extract_batch(
     Y = Y,
@@ -200,15 +270,19 @@ fastkpc_execute_ci_mgcv_extract_cpu <- function(data, x, y, S, ci_method,
 
 fastkpc_legacy_mgcv_residual <- function(data, target, S) {
   if (length(S) == 0L) return(as.numeric(data[, target]))
-  if (length(S) > 1L) {
-    stop("legacy mgcv CPU vertical slice supports |S| <= 1", call. = FALSE)
+  if (length(S) > 2L) {
+    stop("legacy mgcv CPU precision slice supports |S| <= 2", call. = FALSE)
   }
   fastkpc_require_mgcv()
-  local_data <- data.frame(
-    .target = as.numeric(data[, target]),
-    s1 = as.numeric(data[, S[1L]])
+  S_data <- as.data.frame(data[, S, drop = FALSE])
+  colnames(S_data) <- paste0("s", seq_along(S))
+  local_data <- data.frame(.target = as.numeric(data[, target]), S_data)
+  rhs <- fastkpc_mgcv_regrxons_rhs(
+    S_data = S_data,
+    S = S,
+    formula_class = fastkpc_regrxons_formula_class(S)
   )
-  form <- stats::as.formula(".target ~ s(s1, bs = 'tp')",
+  form <- stats::as.formula(paste(".target ~", rhs),
                             env = asNamespace("mgcv"))
   fit <- mgcv::gam(
     formula = form,
@@ -390,7 +464,18 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
                                            legacy_index, hsic_params,
                                            permutation_params,
                                            precision_executors,
-                                           na_delete = TRUE) {
+                                           na_delete = TRUE,
+                                           canonical_test_order_id = NA_integer_) {
+  randomness <- fastkpc_precision_ci_randomness(
+    ci_method = ci_method,
+    permutation_params = permutation_params,
+    canonical_test_order_id = canonical_test_order_id
+  )
+  effective_permutation_params <- fastkpc_precision_effective_permutation_params(
+    ci_method = ci_method,
+    permutation_params = permutation_params,
+    randomness = randomness
+  )
   primary_route <- route
   primary_route$primary_backend <- fastkpc_precision_primary_backend(route, precision)
   primary_fallback <- NA_character_
@@ -404,13 +489,15 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
   primary_exec <- fastkpc_execute_route_with_fallback(
     data = data, x = x, y = y, S = S, route = primary_route, role = "primary",
     ci_method = ci_method, index = index, legacy_index = legacy_index,
-    hsic_params = hsic_params, permutation_params = permutation_params,
+    hsic_params = hsic_params,
+    permutation_params = effective_permutation_params,
     precision_executors = precision_executors,
     fallback_backend = primary_fallback
   )
   primary_receipt <- primary_exec$receipt
-  primary_info <- fastkpc_precision_normalize_p(primary_receipt$p.value,
-                                                na_delete)
+  primary_info <- fastkpc_resolve_ci_decision(primary_receipt$p.value,
+                                              alpha = alpha,
+                                              na_delete = na_delete)
 
   verifier_exec <- NULL
   verifier_info <- NULL
@@ -436,15 +523,15 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
       data = data, x = x, y = y, S = S, route = verifier_route,
       role = "verifier", ci_method = ci_method, index = index,
       legacy_index = legacy_index, hsic_params = hsic_params,
-      permutation_params = permutation_params,
+      permutation_params = effective_permutation_params,
       precision_executors = precision_executors,
       fallback_backend = fastkpc_nonempty_backend(route$fallback_backend,
                                                   "legacy-mgcv")
     )
     verifier_fallback_backend <- fastkpc_nonempty_backend(route$fallback_backend,
                                                           "legacy-mgcv")
-    verifier_info <- fastkpc_precision_normalize_p(
-      verifier_exec$receipt$p.value, na_delete
+    verifier_info <- fastkpc_resolve_ci_decision(
+      verifier_exec$receipt$p.value, alpha = alpha, na_delete = na_delete
     )
     if (isTRUE(verifier_info$p_was_nonfinite) &&
         !identical(verifier_exec$receipt$residual_backend_executed,
@@ -455,13 +542,13 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
         data = data, x = x, y = y, S = S, route = legacy_route,
         role = "verifier", ci_method = ci_method, index = index,
         legacy_index = legacy_index, hsic_params = hsic_params,
-        permutation_params = permutation_params,
+        permutation_params = effective_permutation_params,
         precision_executors = precision_executors,
         fallback_backend = NA_character_
       )
       verifier_exec <- legacy_exec
-      verifier_info <- fastkpc_precision_normalize_p(
-        verifier_exec$receipt$p.value, na_delete
+      verifier_info <- fastkpc_resolve_ci_decision(
+        verifier_exec$receipt$p.value, alpha = alpha, na_delete = na_delete
       )
       verifier_exec$fallback_triggered <- TRUE
       verifier_exec$fallback_reason <- "verifier returned non-finite p-value"
@@ -488,8 +575,9 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
     fallback_triggered = fallback_triggered,
     fallback_reason = fallback_reason,
     attempt_count = attempt_count,
-    decision_before_verify = primary_info$p_used >= alpha,
-    decision_after_verify = chosen_info$p_used >= alpha
+    ci_randomness = randomness,
+    decision_before_verify = primary_info$delete_edge,
+    decision_after_verify = chosen_info$delete_edge
   )
 }
 
@@ -555,6 +643,11 @@ fastkpc_precision_trace_for_test <- function(resolved, route, run_id,
     verifier_p_used = verifier_p_used,
     fallback_triggered = resolved$fallback_triggered,
     attempt_count = resolved$attempt_count,
+    ci_randomness_id = resolved$ci_randomness$ci_randomness_id,
+    permutation_seed_effective =
+      resolved$ci_randomness$permutation_seed_effective,
+    permutation_plan_hash = resolved$ci_randomness$permutation_plan_hash,
+    permutation_replicates = resolved$ci_randomness$permutation_replicates,
     precision_execution_status = "data-plane-executed",
     decision_before_verify = resolved$decision_before_verify,
     decision_after_verify = resolved$decision_after_verify,
@@ -601,7 +694,8 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
           route <- fastkpc_precision_group_route(
             precision = precision, alpha = alpha, tau = tau, S = S,
             runtime_capabilities = runtime_capabilities,
-            allow_canary = allow_canary
+            allow_canary = allow_canary,
+            execution_engine = "cpu"
           )
           resolved <- fastkpc_precision_resolve_test(
             data = data, x = x, y = y, S = S, route = route,
@@ -610,7 +704,8 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             hsic_params = hsic_params,
             permutation_params = permutation_params,
             precision_executors = precision_executors,
-            na_delete = na_delete
+            na_delete = na_delete,
+            canonical_test_order_id = test_id
           )
           receipt <- resolved$receipt
           last_receipt <- receipt
@@ -633,7 +728,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             pmax[x, y] <- pval
             pmax[y, x] <- pval
           }
-          deleted <- pval >= alpha
+          deleted <- resolved$p_info$delete_edge
           if (deleted) {
             delete_edges[x, y] <- TRUE
             delete_edges[y, x] <- TRUE
@@ -665,7 +760,8 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
           route <- fastkpc_precision_group_route(
             precision = precision, alpha = alpha, tau = tau, S = S,
             runtime_capabilities = runtime_capabilities,
-            allow_canary = allow_canary
+            allow_canary = allow_canary,
+            execution_engine = "cpu"
           )
           resolved <- fastkpc_precision_resolve_test(
             data = data, x = y, y = x, S = S, route = route,
@@ -674,7 +770,8 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             hsic_params = hsic_params,
             permutation_params = permutation_params,
             precision_executors = precision_executors,
-            na_delete = na_delete
+            na_delete = na_delete,
+            canonical_test_order_id = test_id
           )
           receipt <- resolved$receipt
           last_receipt <- receipt
@@ -697,7 +794,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             pmax[x, y] <- pval
             pmax[y, x] <- pval
           }
-          deleted <- pval >= alpha
+          deleted <- resolved$p_info$delete_edge
           if (deleted) {
             delete_edges[x, y] <- TRUE
             delete_edges[y, x] <- TRUE
