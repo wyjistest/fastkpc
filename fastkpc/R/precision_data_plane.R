@@ -5,8 +5,9 @@ fastkpc_default_precision_executors <- function() {
   list(
     `direct-ci` = fastkpc_execute_ci_direct,
     fastSplineCPU = fastkpc_execute_ci_fast_spline_cpu,
+    fastSplineCUDA = fastkpc_execute_ci_fast_spline_cuda,
     mgcvExtractCPUGCVBridge = fastkpc_execute_ci_mgcv_extract_cpu,
-    mgcvExtractGPUGCV = fastkpc_execute_ci_mgcv_extract_cpu,
+    mgcvExtractGPUGCV = fastkpc_execute_ci_mgcv_extract_gpu,
     `legacy-mgcv` = fastkpc_execute_ci_legacy_mgcv
   )
 }
@@ -225,6 +226,37 @@ fastkpc_execute_ci_fast_spline_cpu <- function(data, x, y, S, ci_method,
   )
 }
 
+fastkpc_execute_ci_fast_spline_cuda <- function(data, x, y, S, ci_method,
+                                                index, legacy_index,
+                                                hsic_params,
+                                                permutation_params, route,
+                                                role = "primary") {
+  start <- proc.time()[["elapsed"]]
+  if (length(S) == 0L) {
+    rx <- data[, x]
+    ry <- data[, y]
+  } else {
+    S_data <- data[, S, drop = FALSE]
+    rx <- fastspline_residual_cuda(data[, x], S_data, fallback = FALSE)$residuals
+    ry <- fastspline_residual_cuda(data[, y], S_data, fallback = FALSE)$residuals
+  }
+  ci <- fastkpc_precision_ci_from_residuals(
+    rx, ry, ci_method = ci_method, index = index,
+    legacy_index = legacy_index, hsic_params = hsic_params,
+    permutation_params = permutation_params
+  )
+  elapsed <- (proc.time()[["elapsed"]] - start) * 1000
+  list(
+    p.value = ci$p.value,
+    residual_backend_executed = "fastSplineCUDA",
+    ci_backend_executed = "native-cpu",
+    setup_fingerprint = route$setup_fingerprint %||%
+      paste0("fastSplineCUDA:S:", fastkpc_precision_S_key(S)),
+    p_source_used = paste0(role, ":fastSplineCUDA+native-cpu"),
+    timings = list(ci_test_ms = elapsed)
+  )
+}
+
 fastkpc_mgcv_batch_residuals_for_pair <- function(data, x, y, S) {
   if (length(S) == 0L) {
     return(list(
@@ -248,6 +280,98 @@ fastkpc_mgcv_batch_residuals_for_pair <- function(data, x, y, S) {
   list(
     residuals = batch$residuals,
     setup_fingerprint = batch$setup_fingerprint$fingerprint
+  )
+}
+
+fastkpc_mgcv_extract_gpu_gcv_for_target <- function(data, target, S,
+                                                    sp_grid = NULL) {
+  if (length(S) == 0L) {
+    return(list(
+      residuals = as.numeric(data[, target]),
+      fitted = rep(0, nrow(data)),
+      setup_fingerprint = paste0("direct:", target),
+      sp = NA_real_,
+      score = NA_real_,
+      edf = NA_real_,
+      grid = data.frame()
+    ))
+  }
+  if (length(S) > 2L) {
+    stop("mgcvExtractGPU precision slice supports |S| <= 2", call. = FALSE)
+  }
+  S_data <- as.data.frame(data[, S, drop = FALSE])
+  colnames(S_data) <- paste0("s", seq_along(S))
+  local_data <- data.frame(.target = as.numeric(data[, target]), S_data)
+  rhs <- fastkpc_mgcv_regrxons_rhs(
+    S_data = S_data,
+    S = S,
+    formula_class = fastkpc_regrxons_formula_class(S)
+  )
+  form <- stats::as.formula(paste(".target ~", rhs))
+  if (is.null(sp_grid)) {
+    sp_grid <- exp(seq(log(1e-4), log(1e4), length.out = 17L))
+  }
+  fit <- fastkpc_mgcv_extract_gpu_gcv(
+    formula = form,
+    data = local_data,
+    setup_sp = 1,
+    sp_grid = sp_grid,
+    method = "GCV.Cp",
+    target = target,
+    S = S,
+    bs = "tp",
+    device = "cuda",
+    allow_cpu_fallback = FALSE,
+    gcv_strategy = "spectral"
+  )
+  list(
+    residuals = fit$residuals,
+    fitted = fit$fitted,
+    setup_fingerprint = fit$setup_fingerprint$fingerprint,
+    sp = fit$sp,
+    score = fit$score,
+    edf = fit$edf,
+    grid = fit$grid,
+    fit = fit
+  )
+}
+
+fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
+                                                index, legacy_index,
+                                                hsic_params,
+                                                permutation_params, route,
+                                                role = "primary") {
+  start <- proc.time()[["elapsed"]]
+  gx <- fastkpc_mgcv_extract_gpu_gcv_for_target(data, x, S)
+  gy <- fastkpc_mgcv_extract_gpu_gcv_for_target(data, y, S)
+  ci <- fastkpc_precision_ci_from_residuals(
+    gx$residuals, gy$residuals,
+    ci_method = ci_method, index = index,
+    legacy_index = legacy_index, hsic_params = hsic_params,
+    permutation_params = permutation_params
+  )
+  elapsed <- (proc.time()[["elapsed"]] - start) * 1000
+  list(
+    p.value = ci$p.value,
+    residual_backend_executed = "mgcvExtractGPU",
+    ci_backend_executed = "native-cpu",
+    setup_fingerprint = gx$setup_fingerprint %||%
+      paste0("mgcvExtractGPU:S:", fastkpc_precision_S_key(S)),
+    p_source_used = paste0(role, ":mgcvExtractGPU+native-cpu"),
+    sp = c(x = as.numeric(gx$sp), y = as.numeric(gy$sp)),
+    score = c(x = as.numeric(gx$score), y = as.numeric(gy$score)),
+    edf = c(x = as.numeric(gx$edf), y = as.numeric(gy$edf)),
+    gcv_grid_points = c(x = nrow(gx$grid), y = nrow(gy$grid)),
+    used_device = "cuda",
+    timings = list(
+      mgcv_setup_cpu_ms = NA_real_,
+      host_to_device_ms = NA_real_,
+      spectral_prepare_ms = NA_real_,
+      gcv_score_ms = NA_real_,
+      linear_solve_ms = NA_real_,
+      device_to_host_ms = NA_real_,
+      ci_test_ms = elapsed
+    )
   )
 }
 
@@ -354,11 +478,6 @@ fastkpc_precision_execute_ci <- function(data, x, y, S, route, role,
                                          hsic_params, permutation_params,
                                          precision_executors) {
   backend <- route$primary_backend
-  if (identical(backend, "fastSplineCUDA") &&
-      is.null(precision_executors[[backend]]) &&
-      !is.null(precision_executors$fastSplineCPU)) {
-    backend <- "fastSplineCPU"
-  }
   executor <- precision_executors[[backend]]
   if (is.null(executor)) {
     stop("No precision executor registered for backend: ", backend,
@@ -369,6 +488,22 @@ fastkpc_precision_execute_ci <- function(data, x, y, S, route, role,
     index = index, legacy_index = legacy_index, hsic_params = hsic_params,
     permutation_params = permutation_params, route = route, role = role
   )
+}
+
+fastkpc_precision_fallback_backends <- function(primary_backend, route) {
+  primary_backend <- fastkpc_nonempty_backend(primary_backend, "")
+  fallback_backend <- fastkpc_nonempty_backend(route$fallback_backend,
+                                               "legacy-mgcv")
+  out <- character()
+  if (identical(primary_backend, "mgcvExtractGPUGCV")) {
+    out <- c(out, "mgcvExtractCPUGCVBridge", fallback_backend)
+  } else if (identical(primary_backend, "mgcvExtractCPUGCVBridge")) {
+    out <- c(out, fallback_backend)
+  } else if (!identical(primary_backend, fallback_backend)) {
+    out <- c(out, fallback_backend)
+  }
+  out <- out[nzchar(out) & !is.na(out)]
+  unique(out[out != primary_backend])
 }
 
 fastkpc_execute_backend_attempt <- function(data, x, y, S, route, role,
@@ -433,37 +568,46 @@ fastkpc_execute_route_with_fallback <- function(data, x, y, S, route, role,
     primary$attempt_count <- length(attempts)
     return(primary)
   }
-  fallback_backend <- fastkpc_nonempty_backend(fallback_backend, "")
-  if (!nzchar(fallback_backend)) {
+  fallback_chain <- as.character(fallback_backend)
+  fallback_chain <- fallback_chain[!is.na(fallback_chain) & nzchar(fallback_chain)]
+  fallback_chain <- unique(fallback_chain[fallback_chain != primary_backend])
+  if (length(fallback_chain) == 0L) {
     stop(primary$error_message, call. = FALSE)
   }
-  fallback_route <- route
-  fallback_route$primary_backend <- fallback_backend
-  fallback <- fastkpc_execute_backend_attempt(
-    data = data, x = x, y = y, S = S, route = fallback_route, role = role,
-    backend = fallback_backend, ci_method = ci_method, index = index,
-    legacy_index = legacy_index, hsic_params = hsic_params,
-    permutation_params = permutation_params,
-    precision_executors = precision_executors
-  )
-  fallback$fallback_triggered <- TRUE
-  fallback$fallback_reason <- primary$error_message
-  attempts[[length(attempts) + 1L]] <- fallback
-  if (!identical(fallback$attempt_status, "ok")) {
-    stop(paste0("backend ", primary_backend, " failed: ",
-                primary$error_message, "; fallback ", fallback_backend,
-                " failed: ", fallback$error_message), call. = FALSE)
+  errors <- paste0("backend ", primary_backend, " failed: ",
+                   primary$error_message)
+  for (backend in fallback_chain) {
+    fallback_route <- route
+    fallback_route$primary_backend <- backend
+    fallback <- fastkpc_execute_backend_attempt(
+      data = data, x = x, y = y, S = S, route = fallback_route, role = role,
+      backend = backend, ci_method = ci_method, index = index,
+      legacy_index = legacy_index, hsic_params = hsic_params,
+      permutation_params = permutation_params,
+      precision_executors = precision_executors
+    )
+    fallback$fallback_triggered <- TRUE
+    fallback$fallback_reason <- errors
+    attempts[[length(attempts) + 1L]] <- fallback
+    if (identical(fallback$attempt_status, "ok")) {
+      fallback$attempts <- attempts
+      fallback$attempt_count <- length(attempts)
+      return(fallback)
+    }
+    errors <- paste0(errors, "; fallback ", backend, " failed: ",
+                     fallback$error_message)
   }
-  fallback$attempts <- attempts
-  fallback$attempt_count <- length(attempts)
-  fallback
+  stop(errors, call. = FALSE)
 }
 
-fastkpc_precision_primary_backend <- function(route, precision) {
-  if (identical(precision, "hybrid")) {
-    return("fastSplineCPU")
+fastkpc_precision_primary_backend <- function(route, precision,
+                                              execution_engine = "cpu") {
+  fallback <- if (identical(execution_engine, "cuda")) {
+    "fastSplineCUDA"
+  } else {
+    "fastSplineCPU"
   }
-  fastkpc_nonempty_backend(route$primary_backend, "fastSplineCPU")
+  fastkpc_nonempty_backend(route$primary_backend, fallback)
 }
 
 fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
@@ -472,7 +616,8 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
                                            permutation_params,
                                            precision_executors,
                                            na_delete = TRUE,
-                                           canonical_test_order_id = NA_integer_) {
+                                           canonical_test_order_id = NA_integer_,
+                                           execution_engine = "cpu") {
   randomness <- fastkpc_precision_ci_randomness(
     ci_method = ci_method,
     permutation_params = permutation_params,
@@ -484,14 +629,14 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
     randomness = randomness
   )
   primary_route <- route
-  primary_route$primary_backend <- fastkpc_precision_primary_backend(route, precision)
-  primary_fallback <- NA_character_
+  primary_route$primary_backend <- fastkpc_precision_primary_backend(
+    route, precision, execution_engine = execution_engine
+  )
+  primary_fallback <- character()
   if (identical(precision, "compatible")) {
-    route_fallback <- fastkpc_nonempty_backend(route$fallback_backend,
-                                               "legacy-mgcv")
-    if (!identical(primary_route$primary_backend, route_fallback)) {
-      primary_fallback <- route_fallback
-    }
+    primary_fallback <- fastkpc_precision_fallback_backends(
+      primary_route$primary_backend, route
+    )
   }
   primary_exec <- fastkpc_execute_route_with_fallback(
     data = data, x = x, y = y, S = S, route = primary_route, role = "primary",
@@ -532,8 +677,9 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
       legacy_index = legacy_index, hsic_params = hsic_params,
       permutation_params = effective_permutation_params,
       precision_executors = precision_executors,
-      fallback_backend = fastkpc_nonempty_backend(route$fallback_backend,
-                                                  "legacy-mgcv")
+      fallback_backend = fastkpc_precision_fallback_backends(
+        verifier_backend, route
+      )
     )
     attempts <- c(attempts, verifier_exec$attempts %||% list(verifier_exec))
     verifier_fallback_backend <- fastkpc_nonempty_backend(route$fallback_backend,
@@ -544,23 +690,32 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
     if (isTRUE(verifier_info$p_was_nonfinite) &&
         !identical(verifier_exec$receipt$residual_backend_executed,
                    verifier_fallback_backend)) {
-      legacy_route <- route
-      legacy_route$primary_backend <- verifier_fallback_backend
-      legacy_exec <- fastkpc_execute_route_with_fallback(
-        data = data, x = x, y = y, S = S, route = legacy_route,
-        role = "verifier", ci_method = ci_method, index = index,
-        legacy_index = legacy_index, hsic_params = hsic_params,
-        permutation_params = effective_permutation_params,
-        precision_executors = precision_executors,
-        fallback_backend = NA_character_
+      attempted <- vapply(attempts, function(attempt) {
+        as.character((attempt$backend_attempted %||% "")[1L])
+      }, character(1L))
+      nonfinite_chain <- fastkpc_precision_fallback_backends(
+        verifier_backend, route
       )
-      attempts <- c(attempts, legacy_exec$attempts %||% list(legacy_exec))
-      verifier_exec <- legacy_exec
-      verifier_info <- fastkpc_resolve_ci_decision(
-        verifier_exec$receipt$p.value, alpha = alpha, na_delete = na_delete
-      )
-      verifier_exec$fallback_triggered <- TRUE
-      verifier_exec$fallback_reason <- "verifier returned non-finite p-value"
+      nonfinite_chain <- setdiff(nonfinite_chain, attempted)
+      if (length(nonfinite_chain) > 0L) {
+        nonfinite_route <- route
+        nonfinite_route$primary_backend <- nonfinite_chain[[1L]]
+        legacy_exec <- fastkpc_execute_route_with_fallback(
+          data = data, x = x, y = y, S = S, route = nonfinite_route,
+          role = "verifier", ci_method = ci_method, index = index,
+          legacy_index = legacy_index, hsic_params = hsic_params,
+          permutation_params = effective_permutation_params,
+          precision_executors = precision_executors,
+          fallback_backend = nonfinite_chain[-1L]
+        )
+        attempts <- c(attempts, legacy_exec$attempts %||% list(legacy_exec))
+        verifier_exec <- legacy_exec
+        verifier_info <- fastkpc_resolve_ci_decision(
+          verifier_exec$receipt$p.value, alpha = alpha, na_delete = na_delete
+        )
+        verifier_exec$fallback_triggered <- TRUE
+        verifier_exec$fallback_reason <- "verifier returned non-finite p-value"
+      }
     }
     chosen_receipt <- verifier_exec$receipt
     chosen_info <- verifier_info
@@ -570,8 +725,10 @@ fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
   }
 
   attempt_backend_sequence <- paste(vapply(attempts, function(attempt) {
-    attempted <- attempt$backend_executed %||% attempt$backend_attempted %||% ""
-    as.character(attempted[1L])
+    fastkpc_nonempty_backend(
+      attempt$backend_executed,
+      fastkpc_nonempty_backend(attempt$backend_attempted, "")
+    )
   }, character(1L)), collapse = ">")
   attempt_status_sequence <- paste(vapply(attempts, function(attempt) {
     as.character((attempt$attempt_status %||% "")[1L])
@@ -674,6 +831,12 @@ fastkpc_precision_trace_for_test <- function(resolved, route, run_id,
     precision_execution_status = "data-plane-executed",
     decision_before_verify = resolved$decision_before_verify,
     decision_after_verify = resolved$decision_after_verify,
+    mgcv_setup_cpu_ms = receipt$timings$mgcv_setup_cpu_ms %||% NA_real_,
+    host_to_device_ms = receipt$timings$host_to_device_ms %||% NA_real_,
+    spectral_prepare_ms = receipt$timings$spectral_prepare_ms %||% NA_real_,
+    gcv_score_ms = receipt$timings$gcv_score_ms %||% NA_real_,
+    linear_solve_ms = receipt$timings$linear_solve_ms %||% NA_real_,
+    device_to_host_ms = receipt$timings$device_to_host_ms %||% NA_real_,
     ci_test_ms = receipt$timings$ci_test_ms %||% NA_real_
   )
 }
@@ -685,7 +848,9 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
                                          precision_executors,
                                          runtime_capabilities,
                                          allow_canary = FALSE,
-                                         na_delete = TRUE) {
+                                         na_delete = TRUE,
+                                         execution_engine = c("cpu", "cuda")) {
+  execution_engine <- match.arg(execution_engine)
   data <- as.matrix(data)
   storage.mode(data) <- "double"
   p <- ncol(data)
@@ -718,7 +883,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             precision = precision, alpha = alpha, tau = tau, S = S,
             runtime_capabilities = runtime_capabilities,
             allow_canary = allow_canary,
-            execution_engine = "cpu"
+            execution_engine = execution_engine
           )
           resolved <- fastkpc_precision_resolve_test(
             data = data, x = x, y = y, S = S, route = route,
@@ -728,7 +893,8 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             permutation_params = permutation_params,
             precision_executors = precision_executors,
             na_delete = na_delete,
-            canonical_test_order_id = test_id
+            canonical_test_order_id = test_id,
+            execution_engine = execution_engine
           )
           receipt <- resolved$receipt
           last_receipt <- receipt
@@ -784,7 +950,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             precision = precision, alpha = alpha, tau = tau, S = S,
             runtime_capabilities = runtime_capabilities,
             allow_canary = allow_canary,
-            execution_engine = "cpu"
+            execution_engine = execution_engine
           )
           resolved <- fastkpc_precision_resolve_test(
             data = data, x = y, y = x, S = S, route = route,
@@ -794,7 +960,8 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             permutation_params = permutation_params,
             precision_executors = precision_executors,
             na_delete = na_delete,
-            canonical_test_order_id = test_id
+            canonical_test_order_id = test_id,
+            execution_engine = execution_engine
           )
           receipt <- resolved$receipt
           last_receipt <- receipt

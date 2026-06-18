@@ -532,7 +532,6 @@ fast_kpc <- function(data,
   )
 
   use_precision_r_skeleton <- graph_stage == "skeleton" &&
-    identical(engine_used, "cpu") &&
     as.integer(max_conditioning_size) <= 2L &&
     precision_requested %in% c("fast", "compatible", "hybrid") &&
     (isTRUE(precision_executors_requested) ||
@@ -594,7 +593,8 @@ fast_kpc <- function(data,
         permutation_params = permutation_params,
         precision_executors = precision_executors,
         runtime_capabilities = runtime_capabilities,
-        allow_canary = allow_canary_mgcv_extract
+        allow_canary = allow_canary_mgcv_extract,
+        execution_engine = engine_used
       )
       list(skeleton = skeleton, orientation = NULL)
     } else {

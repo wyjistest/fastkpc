@@ -24,14 +24,21 @@ extract <- executors$mgcvExtractGPUGCV(
   index = 1, legacy_index = TRUE, hsic_params = list(),
   permutation_params = list(), route = route, role = "primary"
 )
+cpu_bridge <- executors$mgcvExtractCPUGCVBridge(
+  data = data, x = 1L, y = 2L, S = 3L, ci_method = "dcc.gamma",
+  index = 1, legacy_index = TRUE, hsic_params = list(),
+  permutation_params = list(), route = route, role = "primary"
+)
 legacy <- executors[["legacy-mgcv"]](
   data = data, x = 1L, y = 2L, S = 3L, ci_method = "dcc.gamma",
   index = 1, legacy_index = TRUE, hsic_params = list(),
   permutation_params = list(), route = route, role = "primary"
 )
 
-assert_true(extract$residual_backend_executed == "mgcvExtractCPU",
-            "mgcvExtractGPUGCV CPU fallback should report mgcvExtractCPU")
+assert_true(extract$residual_backend_executed == "mgcvExtractGPU",
+            "mgcvExtractGPUGCV should report its real GPU backend when it executes")
+assert_true(cpu_bridge$residual_backend_executed == "mgcvExtractCPU",
+            "mgcvExtractCPUGCVBridge should report mgcvExtractCPU")
 assert_true(legacy$residual_backend_executed == "legacy-mgcv",
             "legacy-mgcv executor should report distinct legacy backend")
 assert_true(grepl("legacy-mgcv", legacy$p_source_used, fixed = TRUE),
