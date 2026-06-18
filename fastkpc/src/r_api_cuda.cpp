@@ -10,6 +10,7 @@
 #include "cuda/dcov_batch_cuda.hpp"
 #include "cuda/fastspline_residual_cuda.hpp"
 #include "cuda/hsic_batch_cuda.hpp"
+#include "cuda/mgcv_extract_fixed_sp_cuda.hpp"
 
 #include <Rcpp.h>
 #include <R_ext/Rdynload.h>
@@ -1005,6 +1006,84 @@ extern "C" SEXP C_fastspline_residual_batch_cuda(SEXP datas,
   END_RCPP
 }
 
+extern "C" SEXP C_mgcv_extract_gpu_solve_handle_fixed_sp(
+    SEXP Xs,
+    SEXP ys,
+    SEXP Zs,
+    SEXP XtX_nulls,
+    SEXP penalty_nulls,
+    SEXP Xty_nulls) {
+  BEGIN_RCPP
+  if (!Rf_isReal(Xs) || !Rf_isMatrix(Xs)) Rcpp::stop("X must be a numeric matrix");
+  if (!Rf_isReal(ys)) Rcpp::stop("y must be numeric");
+  if (!Rf_isReal(Zs) || !Rf_isMatrix(Zs)) Rcpp::stop("Z must be a numeric matrix");
+  if (!Rf_isReal(XtX_nulls) || !Rf_isMatrix(XtX_nulls)) {
+    Rcpp::stop("XtX_null must be a numeric matrix");
+  }
+  if (!Rf_isReal(penalty_nulls) || !Rf_isMatrix(penalty_nulls)) {
+    Rcpp::stop("penalty_null must be a numeric matrix");
+  }
+  if (!Rf_isReal(Xty_nulls)) Rcpp::stop("Xty_null must be numeric");
+
+  Rcpp::NumericMatrix X(Xs);
+  Rcpp::NumericVector y(ys);
+  Rcpp::NumericMatrix Z(Zs);
+  Rcpp::NumericMatrix XtX_null(XtX_nulls);
+  Rcpp::NumericMatrix penalty_null(penalty_nulls);
+  Rcpp::NumericVector Xty_null(Xty_nulls);
+
+  const int n = X.nrow();
+  const int p = X.ncol();
+  const int q = Z.ncol();
+  if (y.size() != n) Rcpp::stop("length(y) must equal nrow(X)");
+  if (Z.nrow() != p) Rcpp::stop("nrow(Z) must equal ncol(X)");
+  if (XtX_null.nrow() != q || XtX_null.ncol() != q) {
+    Rcpp::stop("XtX_null dimensions must match ncol(Z)");
+  }
+  if (penalty_null.nrow() != q || penalty_null.ncol() != q) {
+    Rcpp::stop("penalty_null dimensions must match ncol(Z)");
+  }
+  if (Xty_null.size() != q) Rcpp::stop("length(Xty_null) must equal ncol(Z)");
+  if (!all_finite(X)) Rcpp::stop("X contains missing or infinite values");
+  if (!all_finite_vector(y)) Rcpp::stop("y contains missing or infinite values");
+  if (!all_finite(Z)) Rcpp::stop("Z contains missing or infinite values");
+  if (!all_finite(XtX_null)) {
+    Rcpp::stop("XtX_null contains missing or infinite values");
+  }
+  if (!all_finite(penalty_null)) {
+    Rcpp::stop("penalty_null contains missing or infinite values");
+  }
+  if (!all_finite_vector(Xty_null)) {
+    Rcpp::stop("Xty_null contains missing or infinite values");
+  }
+
+  const MgcvExtractGpuFixedSpResult result =
+    mgcv_extract_fixed_sp_solve_cuda(
+      REAL(Xs), n, p, REAL(ys), REAL(Zs), REAL(XtX_nulls),
+      REAL(penalty_nulls), REAL(Xty_nulls), q);
+
+  return Rcpp::List::create(
+    Rcpp::Named("theta") =
+      Rcpp::NumericVector(result.theta.begin(), result.theta.end()),
+    Rcpp::Named("coefficients") =
+      Rcpp::NumericVector(result.coefficients.begin(),
+                          result.coefficients.end()),
+    Rcpp::Named("fitted") =
+      Rcpp::NumericVector(result.fitted.begin(), result.fitted.end()),
+    Rcpp::Named("residuals") =
+      Rcpp::NumericVector(result.residuals.begin(), result.residuals.end()),
+    Rcpp::Named("rss") = result.rss,
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("n") = result.n,
+      Rcpp::Named("coefficient_dim") = result.coefficient_dim,
+      Rcpp::Named("null_dim") = result.null_dim,
+      Rcpp::Named("solve_stage") = "native-gpu-handle-linear-solve",
+      Rcpp::Named("cholesky_backend") = result.cholesky_backend
+    )
+  );
+  END_RCPP
+}
+
 extern "C" SEXP C_fast_skeleton_cuda(SEXP data, SEXP alphas, SEXP max_ords,
                                       SEXP indexs, SEXP legacy_indexs,
                                       SEXP batch_sizes) {
@@ -1200,6 +1279,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fast_hsic_perm_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_perm_cuda), 6},
   {"C_fastspline_residual_cuda", reinterpret_cast<DL_FUNC>(&C_fastspline_residual_cuda), 4},
   {"C_fastspline_residual_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fastspline_residual_batch_cuda), 5},
+  {"C_mgcv_extract_gpu_solve_handle_fixed_sp", reinterpret_cast<DL_FUNC>(&C_mgcv_extract_gpu_solve_handle_fixed_sp), 6},
   {"C_fast_skeleton_cuda", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda), 6},
   {"C_fast_skeleton_cuda_cached", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda_cached), 7},
   {"C_fast_skeleton_cuda_backend", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda_backend), 18},

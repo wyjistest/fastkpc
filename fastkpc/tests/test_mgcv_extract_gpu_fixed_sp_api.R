@@ -56,10 +56,10 @@ assert_true(identical(gpu$mode, "fixed-sp-gpu-bridge"),
 assert_true(identical(gpu$requested_device, "cuda"),
             "requested device should be recorded")
 assert_true(identical(gpu$used_device, "cpu"),
-            "v1 should fall back to CPU until native GPU solve is implemented")
+            "CPU-only test context should fall back when CUDA wrapper is unavailable")
 assert_true(isTRUE(gpu$fallback_used), "fallback_used should be TRUE")
-assert_true(grepl("not implemented", gpu$fallback_reason, fixed = TRUE),
-            "fallback reason should explain native GPU solve is not implemented")
+assert_true(grepl("unavailable", gpu$fallback_reason, fixed = TRUE),
+            "fallback reason should explain native GPU solve is unavailable")
 assert_true(identical(gpu$solve_source, "fastkpc-fixed-sp"),
             "fallback solve source should remain Gate B fixed-sp")
 assert_true(identical(gpu$sp_source, "fixed-input"),
@@ -78,7 +78,7 @@ assert_true(identical(gpu$setup_fingerprint$fingerprint,
 assert_true(identical(handle_gpu$solve_source, "fastkpc-handle-fixed-sp"),
             "handle strategy should use handle fixed-sp solve source")
 assert_true(identical(handle_gpu$used_device, "cpu"),
-            "handle strategy should remain CPU until native GPU solve exists")
+            "handle strategy should fall back when CUDA wrapper is unavailable")
 assert_true(isTRUE(handle_gpu$fallback_used),
             "handle strategy should still report fallback for cuda request")
 assert_true(max(abs(handle_gpu$residuals - cpu$residuals)) < 1e-8,
@@ -99,7 +99,9 @@ no_fallback_error <- tryCatch({
   ""
 }, error = function(e) conditionMessage(e))
 assert_true(grepl("mgcvExtractGPU native fixed-sp solve is not implemented",
-                  no_fallback_error, fixed = TRUE),
+                  no_fallback_error, fixed = TRUE) ||
+              grepl("mgcvExtractGPU native fixed-sp solve is unavailable",
+                    no_fallback_error, fixed = TRUE),
             "disabling fallback should fail explicitly")
 
 cap <- fastkpc_mgcv_extract_gpu_capabilities()

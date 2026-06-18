@@ -99,6 +99,25 @@ fastspline_residual_batch_cuda <- function(data, targets, conditioning_sets,
         PACKAGE = "fastkpc_cuda")
 }
 
+mgcv_extract_gpu_solve_handle_fixed_sp_cuda <- function(handle) {
+  load_fastkpc_cuda_native()
+  X <- as.matrix(handle$X)
+  y <- as.numeric(handle$y)
+  Z <- as.matrix(handle$Z)
+  XtX_null <- as.matrix(handle$XtX_null)
+  penalty_null <- as.matrix(handle$penalty_null)
+  Xty_null <- as.numeric(handle$Xty_null)
+  storage.mode(X) <- "double"
+  storage.mode(y) <- "double"
+  storage.mode(Z) <- "double"
+  storage.mode(XtX_null) <- "double"
+  storage.mode(penalty_null) <- "double"
+  storage.mode(Xty_null) <- "double"
+  .Call("C_mgcv_extract_gpu_solve_handle_fixed_sp",
+        X, y, Z, XtX_null, penalty_null, Xty_null,
+        PACKAGE = "fastkpc_cuda")
+}
+
 fast_skeleton_cuda <- function(data, alpha, max_conditioning_size,
                                index = 1, legacy_index = TRUE,
                                batch_size = 0) {

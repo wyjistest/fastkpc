@@ -83,6 +83,10 @@ fastkpc_mgcv_extract_gpu_capabilities <- function() {
     as.character(utils::packageVersion("mgcv")),
     error = function(e) NA_character_
   )
+  native_gpu_available <- tryCatch({
+    exists("fastkpc_cuda_available", mode = "function") &&
+      isTRUE(fastkpc_cuda_available())
+  }, error = function(e) FALSE)
   list(
     backend = "mgcvExtractGPU",
     role = "mgcv setup anchored GPU compatibility bridge",
@@ -91,7 +95,7 @@ fastkpc_mgcv_extract_gpu_capabilities <- function() {
       residual_output_only = TRUE,
       fixed_sp_api = TRUE,
       cpu_gate_b_fallback = TRUE,
-      native_gpu_fixed_sp_solve = FALSE,
+      native_gpu_fixed_sp_solve = native_gpu_available,
       gcv_bridge_api = FALSE,
       self_contained_gcv = FALSE
     ),
@@ -99,7 +103,7 @@ fastkpc_mgcv_extract_gpu_capabilities <- function() {
       full_mgcv_clone = TRUE,
       bam_gpu = TRUE,
       non_gaussian = TRUE,
-      native_gpu_fixed_sp_solve = TRUE,
+      native_gpu_fixed_sp_solve = !native_gpu_available,
       native_gpu_gcv = TRUE,
       multi_penalty_gpu_gcv = TRUE,
       tprs_approximation = TRUE
@@ -109,7 +113,8 @@ fastkpc_mgcv_extract_gpu_capabilities <- function() {
       mgcv_version = mgcv_version,
       backend_version = "mgcvExtractGPU-fixed-sp-api-v1",
       cpu_fallback_baseline = "mgcv-gate-b-v1",
-      cpu_fallback_commit = "5da2313"
+      cpu_fallback_commit = "5da2313",
+      native_cuda_available = native_gpu_available
     )
   )
 }
@@ -712,21 +717,20 @@ fastkpc_mgcv_extract_gpu_fixed_sp <- function(formula, data, sp,
                                               tol = sqrt(.Machine$double.eps)) {
   device <- match.arg(device)
   solve_strategy <- match.arg(solve_strategy)
-  run_fallback_solve <- function() {
-    if (identical(solve_strategy, "gate_b")) {
-      return(fastkpc_mgcv_extract_fixed_sp_solve(
-        formula = formula,
-        data = data,
-        sp = sp,
-        method = method,
-        target = target,
-        S = S,
-        k = k,
-        bs = bs,
-        tol = tol
-      ))
-    }
-
+  run_gate_b_solve <- function() {
+    fastkpc_mgcv_extract_fixed_sp_solve(
+      formula = formula,
+      data = data,
+      sp = sp,
+      method = method,
+      target = target,
+      S = S,
+      k = k,
+      bs = bs,
+      tol = tol
+    )
+  }
+  run_handle_solve <- function(use_native_cuda) {
     ref <- fastkpc_mgcv_gam_fixed_sp_reference(
       formula = formula,
       data = data,
@@ -750,13 +754,17 @@ fastkpc_mgcv_extract_gpu_fixed_sp <- function(formula, data, sp,
     handle <- fastkpc_mgcv_extract_gpu_setup_handle(
       setup = setup,
       sp = setup$sp,
-      device_resident = FALSE,
+      device_resident = isTRUE(use_native_cuda),
       tol = tol
     )
-    solved <- fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp(
-      handle = handle,
-      tol = tol
-    )
+    solved <- if (isTRUE(use_native_cuda)) {
+      fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp_cuda(handle = handle)
+    } else {
+      fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp(
+        handle = handle,
+        tol = tol
+      )
+    }
     target_fp <- fastkpc_target_fingerprint(
       target = target,
       y_hash = fastkpc_mgcv_hash_numeric(setup$y),
@@ -785,11 +793,28 @@ fastkpc_mgcv_extract_gpu_fixed_sp <- function(formula, data, sp,
     solved$mgcv_version <- setup$mgcv_version
     solved
   }
+  native_cuda_available <- function() {
+    exists("fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp_cuda", mode = "function") &&
+      exists("fastkpc_cuda_available", mode = "function") &&
+      isTRUE(tryCatch(fastkpc_cuda_available(), error = function(e) FALSE))
+  }
+  run_fallback_solve <- function() {
+    if (identical(solve_strategy, "gate_b")) {
+      return(run_gate_b_solve())
+    }
+    run_handle_solve(use_native_cuda = FALSE)
+  }
 
   if (identical(device, "cpu")) {
     solved <- run_fallback_solve()
     requested_device <- "cpu"
     used_device <- "cpu"
+    fallback_used <- FALSE
+    fallback_reason <- ""
+  } else if (identical(solve_strategy, "handle") && native_cuda_available()) {
+    solved <- run_handle_solve(use_native_cuda = TRUE)
+    requested_device <- device
+    used_device <- "cuda"
     fallback_used <- FALSE
     fallback_reason <- ""
   } else if (isTRUE(allow_cpu_fallback)) {
@@ -798,12 +823,12 @@ fastkpc_mgcv_extract_gpu_fixed_sp <- function(formula, data, sp,
     used_device <- "cpu"
     fallback_used <- TRUE
     fallback_reason <- paste(
-      "mgcvExtractGPU native fixed-sp solve is not implemented;",
+      "mgcvExtractGPU native fixed-sp solve is unavailable;",
       "using Gate B CPU fixed-sp self-solve"
     )
   } else {
     stop(
-      "mgcvExtractGPU native fixed-sp solve is not implemented and CPU fallback is disabled",
+      "mgcvExtractGPU native fixed-sp solve is unavailable and CPU fallback is disabled",
       call. = FALSE
     )
   }
@@ -815,7 +840,7 @@ fastkpc_mgcv_extract_gpu_fixed_sp <- function(formula, data, sp,
   solved$fallback_used <- fallback_used
   solved$fallback_reason <- fallback_reason
   solved$gpu_bridge_version <- "mgcvExtractGPU-fixed-sp-api-v1"
-  solved$native_gpu_solve_available <- FALSE
+  solved$native_gpu_solve_available <- native_cuda_available()
   solved$solve_strategy <- solve_strategy
   solved$capabilities <- fastkpc_mgcv_extract_gpu_capabilities()
   solved
@@ -911,6 +936,42 @@ fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp <- function(
       list(
         solve_stage = "host-handle-linear-solve",
         linear_system_dim = ncol(handle$X_null)
+      )
+    )
+  )
+}
+
+fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp_cuda <- function(handle) {
+  if (!exists("mgcv_extract_gpu_solve_handle_fixed_sp_cuda", mode = "function")) {
+    stop(
+      "mgcvExtractGPU native fixed-sp solve wrapper is unavailable; source fastkpc/R/cuda_native.R",
+      call. = FALSE
+    )
+  }
+  native <- mgcv_extract_gpu_solve_handle_fixed_sp_cuda(handle)
+  list(
+    backend_family = "mgcvExtractGPU",
+    mode = "fixed-sp-native-gpu-solve",
+    solve_source = "mgcvExtractGPU-native-fixed-sp",
+    sp_source = "fixed-input",
+    gcv_source = "none",
+    is_self_contained_gcv = FALSE,
+    used_device = "cuda",
+    native_gpu_solve_used = TRUE,
+    coefficients = as.numeric(native$coefficients),
+    theta = as.numeric(native$theta),
+    fitted = as.numeric(native$fitted),
+    residuals = as.numeric(native$residuals),
+    sp = handle$sp,
+    rss = as.numeric(native$rss),
+    setup_fingerprint = handle$setup_fingerprint,
+    handle_version = handle$handle_version,
+    diagnostics = c(
+      handle$diagnostics,
+      native$diagnostics,
+      list(
+        device_resident = TRUE,
+        native_gpu_solve_used = TRUE
       )
     )
   )

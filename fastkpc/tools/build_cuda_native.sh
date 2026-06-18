@@ -54,6 +54,10 @@ COMMON_CXX="$CXXSTD $CXXFLAGS -fPIC $COMMON_INC"
   $COMMON_INC -c "$ROOT/src/cuda/fastspline_residual_cuda.cu" \
   -o "$BUILD/fastspline_residual_cuda.o"
 
+"$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
+  $COMMON_INC -c "$ROOT/src/cuda/mgcv_extract_fixed_sp_cuda.cu" \
+  -o "$BUILD/mgcv_extract_fixed_sp_cuda.o"
+
 "$CXX" -shared -o "$BUILD/fastkpc_cuda.so" \
   "$BUILD/dcov_exact_cpu.o" \
   "$BUILD/hsic_cpu.o" \
@@ -77,6 +81,7 @@ COMMON_CXX="$CXXSTD $CXXFLAGS -fPIC $COMMON_INC"
   "$BUILD/hsic_batch_cuda.o" \
   "$BUILD/fastspline_batched_solver.o" \
   "$BUILD/fastspline_residual_cuda.o" \
+  "$BUILD/mgcv_extract_fixed_sp_cuda.o" \
   $LAPACK_LIBS $BLAS_LIBS $FLIBS \
   -L/usr/local/cuda/lib64 -lcudart -lcublas -lcusolver \
   -L"$(R RHOME)/lib" -lR
