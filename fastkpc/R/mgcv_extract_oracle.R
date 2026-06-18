@@ -1281,6 +1281,109 @@ fastkpc_mgcv_extract_gpu_solve_handle_batch_fixed_sp_cuda <- function(
   )
 }
 
+fastkpc_mgcv_regrxons_rhs <- function(S_data, S, k = NA_integer_, bs = "tp",
+                                      formula_class = NULL) {
+  if (is.null(formula_class)) formula_class <- fastkpc_regrxons_formula_class(S)
+  terms <- colnames(S_data)
+  smooth_arg <- function(vars) {
+    args <- vars
+    if (!is.na(k)) args <- c(args, paste0("k = ", as.integer(k)))
+    if (!is.null(bs) && nzchar(bs)) args <- c(args, paste0("bs = \"", bs, "\""))
+    paste0("s(", paste(args, collapse = ", "), ")")
+  }
+  if (identical(formula_class, "additive-smooth")) {
+    paste(vapply(terms, smooth_arg, character(1)), collapse = " + ")
+  } else {
+    smooth_arg(terms)
+  }
+}
+
+fastkpc_mgcv_extract_retarget_setup <- function(setup, y, sp, target) {
+  y <- as.numeric(y)
+  if (length(y) != nrow(setup$X)) {
+    stop("target y length must match setup row count", call. = FALSE)
+  }
+  sp <- fastkpc_validate_fixed_positive_sp(sp, expected_length = length(setup$S))
+  out <- setup
+  out$y <- y
+  out$sp <- sp
+  out$target <- as.integer(target)
+  out$setup_fingerprint <- setup$setup_fingerprint
+  out
+}
+
+fastkpc_mgcv_extract_gpu_same_setup_batch_fixed_sp_cuda <- function(
+    Y,
+    S_data,
+    S,
+    sp,
+    k = NA_integer_,
+    bs = "tp",
+    method = "GCV.Cp",
+    target_ids = seq_len(ncol(as.matrix(Y))),
+    tol = sqrt(.Machine$double.eps)) {
+  Y <- as.matrix(Y)
+  S_data <- as.data.frame(S_data)
+  if (nrow(Y) != nrow(S_data)) {
+    stop("Y and S_data must have the same row count", call. = FALSE)
+  }
+  q <- ncol(Y)
+  if (length(target_ids) != q) {
+    stop("length(target_ids) must equal ncol(Y)", call. = FALSE)
+  }
+  if (length(sp) == 1L && q > 1L) {
+    sp <- rep(as.numeric(sp), q)
+  }
+  if (length(sp) != q) {
+    stop("sp must have length 1 or one value per target", call. = FALSE)
+  }
+  sp <- fastkpc_validate_fixed_positive_sp(sp, expected_length = q)
+
+  s_names <- names(S_data)
+  if (is.null(s_names) || any(!nzchar(s_names))) {
+    s_names <- paste0("s", seq_len(ncol(S_data)))
+    names(S_data) <- s_names
+  }
+  rhs <- fastkpc_mgcv_regrxons_rhs(
+    S_data = S_data,
+    S = S,
+    k = k,
+    bs = bs
+  )
+  formula <- stats::as.formula(paste("y ~", rhs))
+  template_data <- data.frame(y = Y[, 1L], S_data, check.names = FALSE)
+  template_setup <- fastkpc_mgcv_extract_setup(
+    formula = formula,
+    data = template_data,
+    sp = sp[1L],
+    method = method,
+    target = target_ids[1L],
+    S = S,
+    k = k,
+    bs = bs
+  )
+  setups <- lapply(seq_len(q), function(j) {
+    fastkpc_mgcv_extract_retarget_setup(
+      setup = template_setup,
+      y = Y[, j],
+      sp = sp[j],
+      target = target_ids[j]
+    )
+  })
+  batch <- fastkpc_mgcv_extract_gpu_solve_handle_batch_fixed_sp_cuda(
+    setups = setups,
+    target_ids = target_ids,
+    tol = tol
+  )
+  batch$mode <- "fixed-sp-same-setup-native-gpu-batch-bridge"
+  batch$solve_source <- "mgcvExtractGPU-same-setup-native-fixed-sp-batch-bridge"
+  batch$template_setup <- template_setup
+  batch$diagnostics$setup_reused <- TRUE
+  batch$diagnostics$template_setup_fingerprint <-
+    template_setup$setup_fingerprint$fingerprint
+  batch
+}
+
 fastkpc_mgcv_extract_gcv_bridge <- function(formula, data,
                                             method = "GCV.Cp",
                                             target = 1L,
@@ -1337,11 +1440,11 @@ fastkpc_mgcv_extract_batch <- function(Y, S_data, S,
   ranks <- rep(NA_integer_, q)
   target_fps <- vector("list", q)
 
-  rhs <- if (identical(formula_class, "additive-smooth")) {
-    paste(sprintf("s(%s)", colnames(S_data)), collapse = " + ")
-  } else {
-    sprintf("s(%s)", paste(colnames(S_data), collapse = ", "))
-  }
+  rhs <- fastkpc_mgcv_regrxons_rhs(
+    S_data = S_data,
+    S = S,
+    formula_class = formula_class
+  )
 
   sem <- fastkpc_regrxons_semantics(S = S, target = target_ids[1],
                                     n = n, p = q + ncol(S_data))
