@@ -31,6 +31,10 @@ fit <- fastkpc_mgcv_extract_gpu_gcv(
 
 assert_true(identical(fit$gcv_source, "fastkpc-r-cpu-spectral"),
             "spectral GCV scoring should be identified as R/CPU spectral")
+assert_true(identical(fit$sp_source, "fastkpc-r-cpu-spectral"),
+            "spectral sp source should be identified as R/CPU spectral")
+assert_true(identical(fit$sp_selection_backend_executed, "r-cpu-spectral"),
+            "sp selection backend should be separate from solve backend")
 assert_true(identical(fit$gcv_score_backend_executed, "r-cpu-spectral"),
             "GCV score backend should be separate from final solve backend")
 assert_true(identical(fit$selected_solve_backend_executed, "cpu"),
@@ -38,6 +42,9 @@ assert_true(identical(fit$selected_solve_backend_executed, "cpu"),
 assert_true(identical(fit$diagnostics$gcv_score_backend_executed,
                       "r-cpu-spectral"),
             "diagnostics should carry truthful GCV score backend")
+assert_true(identical(fit$diagnostics$sp_selection_backend_executed,
+                      "r-cpu-spectral"),
+            "diagnostics should carry truthful sp selection backend")
 assert_true(identical(fit$diagnostics$selected_solve_backend_executed,
                       "cpu"),
             "diagnostics should carry selected solve backend")

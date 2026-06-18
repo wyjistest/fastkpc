@@ -39,8 +39,10 @@ assert_true(identical(fit$used_device, "cpu"),
             "explicit cpu device should use CPU handle solve")
 assert_true(!isTRUE(fit$native_gpu_solve_used),
             "CPU fallback should not claim native GPU solve")
-assert_true(identical(fit$sp_source, "fastkpc-cpu"),
+assert_true(identical(fit$sp_source, "fastkpc-cpu-grid-solve"),
             "CPU fallback sp source should be explicit")
+assert_true(identical(fit$sp_selection_backend_executed, "cpu-grid-solve"),
+            "CPU fallback sp selection backend should be explicit")
 assert_true(identical(fit$gcv_source, "fastkpc-cpu-grid-solve"),
             "direct grid GCV source should identify CPU solve scoring")
 assert_true(identical(fit$gcv_score_backend_executed, "cpu-grid-solve"),

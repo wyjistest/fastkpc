@@ -1184,12 +1184,14 @@ fastkpc_mgcv_extract_gpu_gcv <- function(
   } else {
     "cpu-grid-solve"
   }
+  sp_selection_backend <- gcv_score_backend
   selected_solve_backend <- selected$used_device
   list(
     backend_family = "mgcvExtractGPU",
     mode = "single-penalty-gpu-gcv",
     solve_source = "mgcvExtractGPU",
-    sp_source = if (used_cuda) "fastkpc-gpu" else "fastkpc-cpu",
+    sp_source = paste0("fastkpc-", sp_selection_backend),
+    sp_selection_backend_executed = sp_selection_backend,
     gcv_source = paste0("fastkpc-", gcv_score_backend),
     gcv_score_backend_executed = gcv_score_backend,
     selected_solve_backend_executed = selected_solve_backend,
@@ -1243,6 +1245,7 @@ fastkpc_mgcv_extract_gpu_gcv <- function(
         selected_grid_index = selected_grid_index,
         setup_sp = as.numeric(setup_sp),
         penalty_count = length(setup$S),
+        sp_selection_backend_executed = sp_selection_backend,
         gcv_score_backend_executed = gcv_score_backend,
         selected_solve_backend_executed = selected_solve_backend,
         is_self_contained_gcv = TRUE

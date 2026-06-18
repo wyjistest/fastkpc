@@ -56,6 +56,7 @@ Rscript fastkpc/tests/test_precision_hsic_perm_trace_plan.R
 Rscript fastkpc/tests/test_precision_compatible_data_plane_spy.R
 Rscript fastkpc/tests/test_precision_cuda_data_plane_spy.R
 Rscript fastkpc/tests/test_precision_mgcv_extract_gpu_executor_fallback.R
+Rscript fastkpc/tests/test_precision_gpu_executor_receipt_truthful.R
 Rscript fastkpc/tests/test_precision_compatible_cpu_data_plane_smoke.R
 Rscript fastkpc/tests/test_precision_cpu_s_size2_data_plane.R
 Rscript fastkpc/tests/test_precision_cpu_s_size2_mgcv_smoke.R
