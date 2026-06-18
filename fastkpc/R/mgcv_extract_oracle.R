@@ -764,6 +764,64 @@ fastkpc_mgcv_extract_gpu_fixed_sp <- function(formula, data, sp,
   solved
 }
 
+fastkpc_mgcv_extract_gpu_setup_handle <- function(
+    setup,
+    sp = setup$sp,
+    device_resident = FALSE,
+    tol = sqrt(.Machine$double.eps)) {
+  sp <- fastkpc_validate_fixed_positive_sp(sp, expected_length = length(setup$S))
+  X <- as.matrix(setup$X)
+  y <- as.numeric(setup$y)
+  p <- ncol(X)
+  P <- fastkpc_assemble_penalty(
+    p = p,
+    S = setup$S,
+    off = setup$off,
+    sp = sp,
+    H = setup$H
+  )
+  Z <- fastkpc_constraint_nullspace(C = setup$C, p = p, tol = tol)
+  X_null <- X %*% Z
+  penalty_null <- crossprod(Z, P %*% Z)
+  XtX_null <- crossprod(X_null)
+  Xty_null <- crossprod(X_null, y)
+  constraint_rank <- p - ncol(Z)
+
+  list(
+    backend_family = "mgcvExtractGPU",
+    mode = "fixed-sp-setup-handle",
+    handle_version = "mgcvExtractGPU-setup-handle-v1",
+    device_resident = isTRUE(device_resident),
+    native_gpu_solve_available = FALSE,
+    setup_fingerprint = setup$setup_fingerprint,
+    mgcv_version = setup$mgcv_version,
+    sp = sp,
+    X = X,
+    y = y,
+    penalty = P,
+    Z = Z,
+    X_null = X_null,
+    penalty_null = penalty_null,
+    XtX_null = XtX_null,
+    Xty_null = Xty_null,
+    diagnostics = list(
+      n = nrow(X),
+      coefficient_dim = p,
+      null_dim = ncol(Z),
+      constraint_rank = as.integer(constraint_rank),
+      penalty_count = length(setup$S),
+      penalty_dims = lapply(setup$S, dim),
+      off = setup$off,
+      has_C = !is.null(setup$C) && length(setup$C) > 0L,
+      has_H = !is.null(setup$H),
+      weights_policy = setup$weights_policy,
+      offset_policy = setup$offset_policy,
+      setup_stage = "host-prepared",
+      device_resident = isTRUE(device_resident)
+    )
+  )
+}
+
 fastkpc_mgcv_extract_gcv_bridge <- function(formula, data,
                                             method = "GCV.Cp",
                                             target = 1L,
