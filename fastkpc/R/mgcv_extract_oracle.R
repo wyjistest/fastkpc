@@ -97,14 +97,15 @@ fastkpc_mgcv_extract_gpu_capabilities <- function() {
       cpu_gate_b_fallback = TRUE,
       native_gpu_fixed_sp_solve = native_gpu_available,
       gcv_bridge_api = FALSE,
-      self_contained_gcv = FALSE
+      single_penalty_gpu_gcv = native_gpu_available,
+      self_contained_gcv = native_gpu_available
     ),
     unsupported = list(
       full_mgcv_clone = TRUE,
       bam_gpu = TRUE,
       non_gaussian = TRUE,
       native_gpu_fixed_sp_solve = !native_gpu_available,
-      native_gpu_gcv = TRUE,
+      native_gpu_gcv = !native_gpu_available,
       multi_penalty_gpu_gcv = TRUE,
       tprs_approximation = TRUE
     ),
@@ -974,6 +975,171 @@ fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp_cuda <- function(handle) {
         native_gpu_solve_used = TRUE
       )
     )
+  )
+}
+
+fastkpc_mgcv_extract_gpu_edf_for_handle <- function(handle, sp) {
+  if (length(handle$sp) != 1L || length(sp) != 1L) {
+    stop("EDF helper currently supports exactly one smoothing parameter",
+         call. = FALSE)
+  }
+  base_sp <- as.numeric(handle$sp)
+  sp <- as.numeric(sp)
+  if (!is.finite(base_sp) || base_sp <= 0 || !is.finite(sp) || sp <= 0) {
+    stop("sp values must be positive and finite", call. = FALSE)
+  }
+  penalty_at_sp <- handle$penalty_null * (sp / base_sp)
+  A <- handle$XtX_null + penalty_at_sp
+  A_inv <- tryCatch(solve(A), error = function(e) NULL)
+  if (is.null(A_inv)) return(NA_real_)
+  as.numeric(sum(diag(handle$XtX_null %*% A_inv)))
+}
+
+fastkpc_mgcv_extract_gpu_gcv <- function(
+    formula,
+    data,
+    setup_sp = 1,
+    sp_grid,
+    method = "GCV.Cp",
+    target = 1L,
+    S = integer(),
+    k = NA_integer_,
+    bs = "tp",
+    device = c("cuda", "auto", "cpu"),
+    allow_cpu_fallback = TRUE,
+    tol = sqrt(.Machine$double.eps)) {
+  device <- match.arg(device)
+  sp_grid <- fastkpc_validate_fixed_positive_sp(sp_grid)
+  if (length(sp_grid) == 0L) {
+    stop("sp_grid must contain at least one candidate", call. = FALSE)
+  }
+  setup <- fastkpc_mgcv_extract_setup(
+    formula = formula,
+    data = data,
+    sp = setup_sp,
+    method = method,
+    target = target,
+    S = S,
+    k = k,
+    bs = bs
+  )
+  if (length(setup$S) != 1L) {
+    stop("mgcvExtractGPU GCV currently supports single-penalty setups only",
+         call. = FALSE)
+  }
+  if (!identical(method, "GCV.Cp")) {
+    stop("mgcvExtractGPU GCV v1 supports method = 'GCV.Cp' only",
+         call. = FALSE)
+  }
+  native_cuda_available <- exists(
+    "fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp_cuda",
+    mode = "function"
+  ) && exists("fastkpc_cuda_available", mode = "function") &&
+    isTRUE(tryCatch(fastkpc_cuda_available(), error = function(e) FALSE))
+
+  if (!identical(device, "cpu") && !native_cuda_available && !isTRUE(allow_cpu_fallback)) {
+    stop("mgcvExtractGPU GCV native CUDA solve is unavailable and CPU fallback is disabled",
+         call. = FALSE)
+  }
+
+  eval_one <- function(sp_value) {
+    handle <- fastkpc_mgcv_extract_gpu_setup_handle(
+      setup = setup,
+      sp = sp_value,
+      device_resident = !identical(device, "cpu") && native_cuda_available,
+      tol = tol
+    )
+    solved <- if (!identical(device, "cpu") && native_cuda_available) {
+      fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp_cuda(handle)
+    } else {
+      fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp(handle, tol = tol)
+    }
+    edf <- fastkpc_mgcv_extract_gpu_edf_for_handle(handle, sp = sp_value)
+    denom <- length(solved$residuals) - edf
+    gcv <- if (is.finite(edf) && denom > 1e-8) {
+      length(solved$residuals) * solved$rss / (denom * denom)
+    } else {
+      Inf
+    }
+    list(handle = handle, solved = solved, edf = edf, gcv = gcv)
+  }
+
+  evaluations <- lapply(sp_grid, eval_one)
+  rss <- vapply(evaluations, function(x) x$solved$rss, numeric(1))
+  edf <- vapply(evaluations, function(x) x$edf, numeric(1))
+  gcv <- vapply(evaluations, function(x) x$gcv, numeric(1))
+  valid <- is.finite(rss) & is.finite(edf) & is.finite(gcv)
+  if (!any(valid)) {
+    stop("No valid GCV candidate in sp_grid", call. = FALSE)
+  }
+  selected_grid_index <- which(gcv == min(gcv[valid]))[1L]
+  selected <- evaluations[[selected_grid_index]]$solved
+  selected_handle <- evaluations[[selected_grid_index]]$handle
+  selected_sp <- sp_grid[selected_grid_index]
+  target_fp <- fastkpc_target_fingerprint(
+    target = target,
+    y_hash = fastkpc_mgcv_hash_numeric(setup$y),
+    sp_input = setup_sp,
+    sp_output = selected_sp,
+    selected_sp = selected_sp,
+    score = gcv[selected_grid_index],
+    edf = edf[selected_grid_index],
+    rank_if_target_specific = setup$rank,
+    residual_hash = fastkpc_mgcv_hash_numeric(selected$residuals),
+    fitted_hash = fastkpc_mgcv_hash_numeric(selected$fitted)
+  )
+
+  used_cuda <- identical(selected$used_device, "cuda")
+  list(
+    backend_family = "mgcvExtractGPU",
+    mode = "single-penalty-gpu-gcv",
+    solve_source = "mgcvExtractGPU",
+    sp_source = if (used_cuda) "fastkpc-gpu" else "fastkpc-cpu",
+    gcv_source = if (used_cuda) "fastkpc-gpu" else "fastkpc-cpu",
+    is_self_contained_gcv = TRUE,
+    used_device = selected$used_device,
+    native_gpu_solve_used = isTRUE(selected$native_gpu_solve_used),
+    fallback_used = !used_cuda && !identical(device, "cpu"),
+    fallback_reason = if (!used_cuda && !identical(device, "cpu")) {
+      "mgcvExtractGPU GCV native CUDA solve is unavailable; using CPU handle solve"
+    } else {
+      ""
+    },
+    formula = formula,
+    method = method,
+    coefficients = selected$coefficients,
+    theta = selected$theta,
+    fitted = selected$fitted,
+    residuals = selected$residuals,
+    sp = selected_sp,
+    score = gcv[selected_grid_index],
+    edf = edf[selected_grid_index],
+    rss = selected$rss,
+    selected_grid_index = selected_grid_index,
+    grid = data.frame(
+      sp = as.numeric(sp_grid),
+      rss = as.numeric(rss),
+      edf = as.numeric(edf),
+      gcv = as.numeric(gcv),
+      valid = as.logical(valid)
+    ),
+    setup = setup,
+    setup_fingerprint = setup$setup_fingerprint,
+    target_fingerprint = target_fp,
+    handle_version = selected_handle$handle_version,
+    diagnostics = c(
+      selected$diagnostics,
+      list(
+        gcv_stage = "single-penalty-grid-search",
+        grid_size = length(sp_grid),
+        selected_grid_index = selected_grid_index,
+        setup_sp = as.numeric(setup_sp),
+        penalty_count = length(setup$S),
+        is_self_contained_gcv = TRUE
+      )
+    ),
+    mgcv_version = setup$mgcv_version,
+    capabilities = fastkpc_mgcv_extract_gpu_capabilities()
   )
 }
 
