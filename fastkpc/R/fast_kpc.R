@@ -442,13 +442,24 @@ fast_kpc <- function(data,
     precision_route$primary_backend <- "fastSplineCPU"
   }
   backend_requested <- precision_route$primary_backend
-  backend_used <- backend_requested
+  backend_planned <- backend_requested
+  verifier_planned <- precision_route$verifier_backend %||% NA_character_
   if (precision_requested == "compatible" &&
       identical(precision_route$compatibility_action, "fallback")) {
-    backend_used <- precision_route$fallback_backend %||% "legacy-mgcv"
+    backend_planned <- precision_route$fallback_backend %||% "legacy-mgcv"
   }
-  if (precision_requested == "hybrid") {
-    backend_used <- if (identical(engine_used, "cuda")) "fastSplineCUDA" else "fastSplineCPU"
+  backend_executed <- if (identical(residual_backend, "fastSpline")) {
+    if (identical(engine_used, "cuda")) "fastSplineCUDA" else "fastSplineCPU"
+  } else {
+    residual_backend
+  }
+  verifier_executed <- NA_character_
+  backend_used <- backend_executed
+  precision_execution_status <- if (precision_requested %in%
+                                    c("compatible", "hybrid")) {
+    "control-plane-only"
+  } else {
+    "executed"
   }
 
   config <- list(
@@ -458,12 +469,17 @@ fast_kpc <- function(data,
     precision = precision_requested,
     precision_route = precision_route,
     backend_requested = backend_requested,
+    backend_planned = backend_planned,
+    backend_executed = backend_executed,
     backend_used = backend_used,
-    verifier_backend = precision_route$verifier_backend %||% NA_character_,
+    verifier_backend = verifier_planned,
+    verifier_planned = verifier_planned,
+    verifier_executed = verifier_executed,
     compatibility_status = precision_route$compatibility_status %||% "",
     compatibility_action = precision_route$compatibility_action %||% "",
     compatibility_claim = precision_route$compatibility_claim %||% "",
     fallback_reason = precision_route$fallback_reason %||% "",
+    precision_execution_status = precision_execution_status,
     canonical_replay_required =
       isTRUE(precision_route$canonical_replay_required),
     precision_diagnostics = isTRUE(precision_diagnostics),

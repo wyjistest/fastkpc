@@ -35,9 +35,9 @@ timing, and graph-level evidence justify a new pure GPU approximation.
 CUDA-specific tests remain opt-in. GitHub Actions are intentionally absent
 unless reintroduced by explicit request.
 
-## Precision ladder integration
+## Precision ladder control-plane integration
 
-The precision policy is integrated into `fast_kpc()`:
+The precision policy control plane is integrated into `fast_kpc()`:
 
 ```text
 precision = "fast":
@@ -46,13 +46,19 @@ precision = "fast":
 precision = "compatible":
     routes through the authoritative resolver
     fails closed when semantic/version/runtime envelope checks fail
+    currently records planned compatibility fallback, while the existing
+    fastkpc data plane still executes fastSpline until residual dispatch is wired
 
 precision = "hybrid":
     keeps fastSpline primary execution
-    records verifier and fallback diagnostics
+    records verifier and fallback plans
     preserves canonical replay
+    does not yet execute verifier residualization or replace p-values in the
+    real skeleton/WAN-PDAG data plane
 ```
 
 The default remains the existing legacy-compatible fastkpc behavior unless
-`precision` is explicitly requested. True fused/batched `mgcvExtractGPU` kernel
-work remains blocked on scenario-aligned timing/workload evidence.
+`precision` is explicitly requested. Diagnostics distinguish
+`backend_planned` from `backend_executed`; `backend_used` refers to the actual
+executor. True fused/batched `mgcvExtractGPU` kernel work remains blocked on
+scenario-aligned timing/workload evidence and real data-plane integration.
