@@ -10,6 +10,7 @@ build/
 
 # Generated reports and local validation output
 fastkpc/reports/
+fastkpc/artifacts/
 *.log
 *.csv
 *.tsv

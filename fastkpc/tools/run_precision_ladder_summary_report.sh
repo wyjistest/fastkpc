@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+Rscript fastkpc/tools/run_precision_ladder_summary_report.R "$@"

@@ -29,3 +29,12 @@ Rscript fastkpc/tests/test_hybrid_golden_snapshots.R
 Rscript fastkpc/tests/test_hybrid_calibration_campaign.R
 Rscript fastkpc/tests/test_mgcv_extract_gpu_graph_campaign.R
 Rscript fastkpc/tests/test_tprs_approx_decision_memo.R
+Rscript fastkpc/tests/test_precision_ladder_summary_report.R
+Rscript fastkpc/tests/test_precision_ladder_timing_schema.R
+Rscript fastkpc/tests/test_precision_ladder_timing_report.R
+Rscript fastkpc/tests/test_backend_routing_policy.R
+Rscript fastkpc/tests/test_hybrid_policy_calibration_report.R
+Rscript fastkpc/tests/test_mgcv_extract_compatibility_envelope.R
+Rscript fastkpc/tests/test_mgcv_extract_fail_closed.R
+Rscript fastkpc/tests/test_workload_structure_stats.R
+Rscript fastkpc/tests/test_true_batched_kernel_decision.R

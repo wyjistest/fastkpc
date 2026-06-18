@@ -35,12 +35,62 @@ Implemented:
 - CUDA HSIC kernels for `hsic.gamma` and fixed-seed `hsic.perm`
 - CUDA HSIC skeleton and WAN-PDAG orientation diagnostics
 - CUDA HSIC validation and benchmark helpers: `R/hsic_cuda_validation.R`
+- Operational precision-ladder reports, timing attribution, routing policy,
+  compatibility envelope, workload structure stats, and true-batched-kernel
+  decision artifacts for the fastSplineCUDA / mgcvExtractGPU stack
 
 Not implemented:
 
 - Full CUDA GAM replacement for mgcv
 - Multi-GPU scheduling
 - Replacement of exported `kpcalg::kpc()`
+- `tprsApproxCUDA`, unless future attribution evidence reverses the current
+  defer decision
+
+## Operational precision ladder
+
+The public backend positioning is:
+
+```text
+precision = "fast":
+    fastSplineCUDA
+    fastest approximate CUDA primary backend
+    not mgcv-compatible
+
+precision = "compatible":
+    mgcvExtractGPU where the version/semantic envelope is supported
+    mgcvExtractCPU / legacy mgcv fallback otherwise
+
+precision = "hybrid":
+    fastSplineCUDA primary
+    mgcvExtractGPU near-alpha verifier
+    canonical replay preserved
+```
+
+`mgcvExtractGPU` is a version-pinned compatibility bridge: mgcv constructs the
+restricted setup and fastkpc uses GPU numerical paths where supported. It is not
+a full mgcv clone and it is not a pure GPU approximation backend.
+
+The same-setup native batch path reduces setup repetition and R/native call
+overhead, but it is not a true fused/batched GPU kernel. Diagnostics must keep
+`true_batched_kernel = false` until a fused kernel exists.
+
+`fastSplineCUDA` remains the frozen approximate baseline. `tprsApproxCUDA`
+remains deferred unless projection-floor, oracle-lambda, timing, and graph-level
+evidence justify building a new pure GPU approximation.
+
+Operational artifacts can be generated with:
+
+```bash
+Rscript fastkpc/tools/run_precision_ladder_summary_report.R
+Rscript fastkpc/tools/run_precision_ladder_timing_campaign.R
+Rscript fastkpc/tools/run_hybrid_policy_calibration_report.R
+Rscript fastkpc/tools/run_workload_structure_stats.R
+Rscript fastkpc/tools/run_true_batched_kernel_decision.R
+```
+
+CUDA-specific tests remain opt-in. GitHub Actions are intentionally absent
+unless reintroduced by explicit request.
 
 ## Build
 
