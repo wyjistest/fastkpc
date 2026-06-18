@@ -38,3 +38,12 @@ Rscript fastkpc/tests/test_mgcv_extract_compatibility_envelope.R
 Rscript fastkpc/tests/test_mgcv_extract_fail_closed.R
 Rscript fastkpc/tests/test_workload_structure_stats.R
 Rscript fastkpc/tests/test_true_batched_kernel_decision.R
+Rscript fastkpc/tests/test_precision_backend_resolver.R
+Rscript fastkpc/tests/test_precision_fast_mode_e2e.R
+Rscript fastkpc/tests/test_precision_compatible_fail_closed.R
+Rscript fastkpc/tests/test_precision_hybrid_e2e_replay.R
+Rscript fastkpc/tests/test_precision_execution_trace.R
+Rscript fastkpc/tests/test_workload_structure_cache_aware.R
+Rscript fastkpc/tests/test_true_batched_kernel_decision_scenario_aligned.R
+Rscript fastkpc/tests/test_hybrid_heldout_validation.R
+Rscript fastkpc/tests/test_precision_failure_injection.R

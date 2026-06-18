@@ -92,6 +92,26 @@ Rscript fastkpc/tools/run_true_batched_kernel_decision.R
 CUDA-specific tests remain opt-in. GitHub Actions are intentionally absent
 unless reintroduced by explicit request.
 
+The precision policy is now wired into `fast_kpc()`:
+
+```text
+precision = "fast":
+    preserves fastSpline primary execution
+
+precision = "compatible":
+    routes through the authoritative resolver
+    fails closed when semantic/version/runtime envelope checks fail
+
+precision = "hybrid":
+    keeps fastSpline primary execution
+    records verifier and fallback diagnostics
+    preserves canonical replay
+```
+
+The default remains the existing behavior until held-out validation is accepted.
+True fused/batched `mgcvExtractGPU` kernel work remains blocked on
+scenario-aligned timing/workload evidence.
+
 ## Build
 
 The first slice uses `Rcpp::sourceCpp()` rather than a package build system.

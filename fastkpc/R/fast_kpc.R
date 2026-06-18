@@ -1,5 +1,7 @@
 source("fastkpc/R/native.R")
 source("fastkpc/R/cuda_native.R")
+source("fastkpc/R/precision_backend_resolver.R")
+source("fastkpc/R/precision_execution_trace.R")
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
@@ -325,6 +327,8 @@ fast_kpc <- function(data,
                      alpha = 0.2,
                      max_conditioning_size = 2,
                      engine = c("auto", "cuda", "cpu"),
+                     precision = c("legacy", "fast", "compatible", "hybrid"),
+                     tau = log(2),
                      ci_method = c("dcc.gamma", "hsic.gamma", "hsic.perm"),
                      residual_backend = c("fastSpline", "linear"),
                      residual_device = c("auto", "cpu", "cuda"),
@@ -348,6 +352,9 @@ fast_kpc <- function(data,
                                                seed = NULL,
                                                include_observed = TRUE),
                      ci_diagnostics = TRUE,
+                     precision_diagnostics = TRUE,
+                     runtime_capabilities = NULL,
+                     allow_canary_mgcv_extract = FALSE,
                      cuda_residual_fallback = TRUE,
                      validate = FALSE,
                      benchmark = FALSE,
@@ -356,8 +363,12 @@ fast_kpc <- function(data,
                      seed = NULL) {
   engine_requested <- match.arg(engine)
   engine_used <- fastkpc_resolve_engine(engine_requested)
+  precision_requested <- match.arg(precision)
   ci_method <- match.arg(ci_method)
   residual_backend <- match.arg(residual_backend)
+  if (precision_requested %in% c("fast", "compatible", "hybrid")) {
+    residual_backend <- "fastSpline"
+  }
   residual_device <- match.arg(residual_device)
   orientation_residual_device <- match.arg(orientation_residual_device)
   scheduler_requested <- match.arg(scheduler)
@@ -382,9 +393,80 @@ fast_kpc <- function(data,
   if (!is.null(seed)) set.seed(seed)
   normalized <- fastkpc_normalize_data(data, labels = labels)
   matrix_data <- normalized$data
+  data_hash <- paste(nrow(matrix_data), ncol(matrix_data),
+                     signif(sum(matrix_data), 8), sep = ":")
+  normalized$info$data_hash <- data_hash
+  if (is.null(runtime_capabilities)) {
+    runtime_capabilities <- fastkpc_precision_runtime_capabilities()
+  }
+  precision_route <- if (identical(precision_requested, "legacy")) {
+    list(
+      precision = "legacy",
+      primary_backend = if (identical(residual_backend, "fastSpline")) {
+        if (identical(engine_used, "cuda")) "fastSplineCUDA" else "fastSplineCPU"
+      } else {
+        "linear"
+      },
+      verifier_backend = NA_character_,
+      compatibility_status = "legacy",
+      compatibility_action = "run-existing",
+      compatibility_claim = "existing-fastkpc",
+      near_alpha_policy = list(alpha = alpha, tau = tau),
+      canonical_replay_required = FALSE,
+      fallback_backend = NA_character_,
+      fallback_reason = "",
+      supported_checks = character(),
+      unsupported_checks = character(),
+      setup_fingerprint = paste("fastkpc", max_conditioning_size, sep = ":"),
+      runtime_capabilities = runtime_capabilities
+    )
+  } else {
+    fastkpc_resolve_backend_request(
+      precision = precision_requested,
+      alpha = alpha,
+      tau = tau,
+      S = seq_len(min(2L, max(1L, as.integer(max_conditioning_size)))),
+      formula_class = if (max_conditioning_size <= 2L) "full-smooth" else "additive-smooth",
+      penalty_count = if (max_conditioning_size <= 2L) 1L else
+        max(1L, as.integer(max_conditioning_size)),
+      family = "gaussian",
+      link = "identity",
+      setup_fingerprint = paste("fastkpc", max_conditioning_size, sep = ":"),
+      runtime_capabilities = runtime_capabilities,
+      fallback_backend = "legacy-mgcv",
+      allow_canary = allow_canary_mgcv_extract
+    )
+  }
+  if (identical(engine_used, "cpu") &&
+      identical(precision_route$primary_backend, "fastSplineCUDA")) {
+    precision_route$primary_backend <- "fastSplineCPU"
+  }
+  backend_requested <- precision_route$primary_backend
+  backend_used <- backend_requested
+  if (precision_requested == "compatible" &&
+      identical(precision_route$compatibility_action, "fallback")) {
+    backend_used <- precision_route$fallback_backend %||% "legacy-mgcv"
+  }
+  if (precision_requested == "hybrid") {
+    backend_used <- if (identical(engine_used, "cuda")) "fastSplineCUDA" else "fastSplineCPU"
+  }
 
   config <- list(
     alpha = alpha,
+    tau = tau,
+    precision_requested = precision_requested,
+    precision = precision_requested,
+    precision_route = precision_route,
+    backend_requested = backend_requested,
+    backend_used = backend_used,
+    verifier_backend = precision_route$verifier_backend %||% NA_character_,
+    compatibility_status = precision_route$compatibility_status %||% "",
+    compatibility_action = precision_route$compatibility_action %||% "",
+    compatibility_claim = precision_route$compatibility_claim %||% "",
+    fallback_reason = precision_route$fallback_reason %||% "",
+    canonical_replay_required =
+      isTRUE(precision_route$canonical_replay_required),
+    precision_diagnostics = isTRUE(precision_diagnostics),
     max_conditioning_size = as.integer(max_conditioning_size),
     engine_requested = engine_requested,
     engine_used = engine_used,
@@ -533,7 +615,7 @@ fast_kpc <- function(data,
   }
   validation <- list(enabled = isTRUE(validate), legacy_requested = isTRUE(legacy))
   benchmark_section <- list(enabled = isTRUE(benchmark))
-  as_fastkpc_result(
+  result <- as_fastkpc_result(
     timed$value,
     config = config,
     data_info = normalized$info,
@@ -541,4 +623,15 @@ fast_kpc <- function(data,
     validation = validation,
     benchmark = benchmark_section
   )
+  if (isTRUE(precision_diagnostics)) {
+    result$diagnostics$precision_trace <- fastkpc_precision_trace_from_result(
+      result = result,
+      route = precision_route,
+      run_id = paste0("fastkpc-", format(Sys.time(), "%Y%m%d%H%M%S")),
+      scenario_id = "fast_kpc",
+      elapsed_total_sec = timed$elapsed
+    )
+  }
+  validate_fastkpc_result(result)
+  result
 }

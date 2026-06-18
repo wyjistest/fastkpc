@@ -86,3 +86,47 @@ fastkpc_write_workload_structure_stats <- function(
   writeLines(lines, report_path)
   list(csv_path = csv_path, report_path = report_path, stats = stats)
 }
+
+fastkpc_cache_aware_workload_stats <- function(residual_requests,
+                                               dataset_id,
+                                               n,
+                                               p,
+                                               alpha,
+                                               max_conditioning_level) {
+  required <- c("setup_fingerprint", "canonical_test_order_id", "target_id",
+                "cache_hit", "device_solve_called", "S_size",
+                "conditioning_level")
+  missing <- setdiff(required, names(residual_requests))
+  if (length(missing) > 0L) {
+    stop("residual_requests missing columns: ", paste(missing, collapse = ", "),
+         call. = FALSE)
+  }
+  groups <- split(residual_requests, residual_requests$setup_fingerprint)
+  rows <- lapply(names(groups), function(key) {
+    subset <- groups[[key]]
+    data.frame(
+      dataset_id = as.character(dataset_id),
+      n = as.integer(n),
+      p = as.integer(p),
+      alpha = as.numeric(alpha),
+      max_conditioning_level = as.integer(max_conditioning_level),
+      setup_fingerprint = as.character(key),
+      conditioning_level = as.integer(subset$conditioning_level[1L]),
+      S_size = as.integer(subset$S_size[1L]),
+      ci_tests_per_setup =
+        as.integer(length(unique(subset$canonical_test_order_id))),
+      raw_residual_requests_per_setup = as.integer(nrow(subset)),
+      unique_targets_per_setup =
+        as.integer(length(unique(as.character(subset$target_id)))),
+      uncached_targets_per_setup =
+        as.integer(sum(!as.logical(subset$cache_hit), na.rm = TRUE)),
+      device_solve_calls_per_setup =
+        as.integer(sum(as.logical(subset$device_solve_called), na.rm = TRUE)),
+      cache_hit_rate = mean(as.logical(subset$cache_hit), na.rm = TRUE),
+      stringsAsFactors = FALSE
+    )
+  })
+  out <- do.call(rbind, rows)
+  rownames(out) <- NULL
+  out
+}

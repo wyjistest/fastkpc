@@ -1,14 +1,45 @@
 fastkpc_check_mgcv_extract_gpu_compatibility <- function(
   observed_R_version,
   observed_mgcv_version,
-  supported_R_versions,
-  supported_mgcv_versions,
+  supported_R_versions = c("4.5.0"),
+  supported_mgcv_versions = c("1.9-4"),
+  family = "gaussian",
+  link = "identity",
+  formula_class = "full-smooth",
+  S_size = 1L,
+  penalty_count = 1L,
+  setup_fingerprint_schema_version = "mgcvExtractGPU-setup-v1",
+  supported_setup_fingerprint_schema_versions = "mgcvExtractGPU-setup-v1",
+  cuda_available = TRUE,
+  mgcvExtractGPU_backend_version = "mgcvExtractGPU-v1",
+  supported_mgcvExtractGPU_backend_versions = "mgcvExtractGPU-v1",
+  spectral_gcv_version = "single-penalty-spectral-gcv-v1",
+  supported_spectral_gcv_versions = "single-penalty-spectral-gcv-v1",
   allow_canary = FALSE
 ) {
-  r_ok <- as.character(observed_R_version) %in% as.character(supported_R_versions)
-  mgcv_ok <- as.character(observed_mgcv_version) %in%
-    as.character(supported_mgcv_versions)
-  if (r_ok && mgcv_ok) {
+  checks <- c(
+    R_version = as.character(observed_R_version) %in%
+      as.character(supported_R_versions),
+    mgcv_version = as.character(observed_mgcv_version) %in%
+      as.character(supported_mgcv_versions),
+    family = identical(as.character(family), "gaussian"),
+    link = identical(as.character(link), "identity"),
+    formula_class = as.character(formula_class) %in%
+      c("full-smooth", "additive-smooth"),
+    S_size = as.integer(S_size) <= 2L,
+    penalty_count = as.integer(penalty_count) == 1L,
+    setup_fingerprint_schema_version =
+      as.character(setup_fingerprint_schema_version) %in%
+        as.character(supported_setup_fingerprint_schema_versions),
+    cuda_available = isTRUE(cuda_available),
+    mgcvExtractGPU_backend_version =
+      as.character(mgcvExtractGPU_backend_version) %in%
+        as.character(supported_mgcvExtractGPU_backend_versions),
+    spectral_gcv_version = as.character(spectral_gcv_version) %in%
+      as.character(supported_spectral_gcv_versions)
+  )
+  unsupported <- names(checks)[!checks]
+  if (length(unsupported) == 0L) {
     status <- "supported"
     action <- "run-mgcvExtractGPU"
   } else if (isTRUE(allow_canary)) {
@@ -24,12 +55,15 @@ fastkpc_check_mgcv_extract_gpu_compatibility <- function(
     "observed mgcv", observed_mgcv_version,
     "supported R", paste(supported_R_versions, collapse = ","),
     "supported mgcv", paste(supported_mgcv_versions, collapse = ","),
+    "unsupported", paste(unsupported, collapse = ","),
     "action", action
   )
   list(
     compatibility_status = status,
     compatibility_action = action,
-    warning_message = warning_message
+    warning_message = warning_message,
+    supported_checks = names(checks)[checks],
+    unsupported_checks = unsupported
   )
 }
 

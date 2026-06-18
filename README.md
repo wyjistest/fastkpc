@@ -34,3 +34,25 @@ timing, and graph-level evidence justify a new pure GPU approximation.
 
 CUDA-specific tests remain opt-in. GitHub Actions are intentionally absent
 unless reintroduced by explicit request.
+
+## Precision ladder integration
+
+The precision policy is integrated into `fast_kpc()`:
+
+```text
+precision = "fast":
+    preserves fastSpline primary execution
+
+precision = "compatible":
+    routes through the authoritative resolver
+    fails closed when semantic/version/runtime envelope checks fail
+
+precision = "hybrid":
+    keeps fastSpline primary execution
+    records verifier and fallback diagnostics
+    preserves canonical replay
+```
+
+The default remains the existing legacy-compatible fastkpc behavior unless
+`precision` is explicitly requested. True fused/batched `mgcvExtractGPU` kernel
+work remains blocked on scenario-aligned timing/workload evidence.
