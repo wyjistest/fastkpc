@@ -1201,6 +1201,86 @@ fastkpc_mgcv_extract_gpu_solve_handle_batch_fixed_sp <- function(
   )
 }
 
+fastkpc_mgcv_extract_gpu_solve_handle_batch_fixed_sp_cuda <- function(
+    setups,
+    target_ids = seq_along(setups),
+    tol = sqrt(.Machine$double.eps)) {
+  if (!exists("fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp_cuda",
+              mode = "function")) {
+    stop(
+      "mgcvExtractGPU native fixed-sp solve wrapper is unavailable; source fastkpc/R/cuda_native.R",
+      call. = FALSE
+    )
+  }
+  if (!exists("fastkpc_cuda_available", mode = "function") ||
+      !isTRUE(tryCatch(fastkpc_cuda_available(), error = function(e) FALSE))) {
+    stop("mgcvExtractGPU native CUDA solve is unavailable", call. = FALSE)
+  }
+  if (!is.list(setups) || length(setups) == 0L) {
+    stop("setups must be a non-empty list of mgcv extracted setups", call. = FALSE)
+  }
+  if (length(target_ids) != length(setups)) {
+    stop("length(target_ids) must equal length(setups)", call. = FALSE)
+  }
+
+  handles <- lapply(
+    setups,
+    fastkpc_mgcv_extract_gpu_setup_handle,
+    device_resident = TRUE,
+    tol = tol
+  )
+  solved <- lapply(handles, fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp_cuda)
+  n <- length(solved[[1]]$residuals)
+  q <- length(solved)
+  if (any(vapply(solved, function(x) length(x$residuals) != n, logical(1)))) {
+    stop("all setup solves must have the same row count", call. = FALSE)
+  }
+
+  residuals <- do.call(cbind, lapply(solved, `[[`, "residuals"))
+  fitted <- do.call(cbind, lapply(solved, `[[`, "fitted"))
+  coefficients <- lapply(solved, `[[`, "coefficients")
+  theta <- lapply(solved, `[[`, "theta")
+  setup_fingerprints <- vapply(
+    solved,
+    function(x) x$setup_fingerprint$fingerprint,
+    character(1)
+  )
+  sp <- vapply(solved, function(x) as.numeric(x$sp)[1L], numeric(1))
+  rss <- vapply(solved, function(x) as.numeric(x$rss), numeric(1))
+  colnames(residuals) <- paste0("target", as.integer(target_ids))
+  colnames(fitted) <- colnames(residuals)
+
+  list(
+    backend_family = "mgcvExtractGPU",
+    mode = "fixed-sp-native-gpu-batch-bridge",
+    solve_source = "mgcvExtractGPU-native-fixed-sp-batch-bridge",
+    sp_source = "fixed-input-per-target",
+    gcv_source = "none",
+    is_self_contained_gcv = FALSE,
+    used_device = "cuda",
+    native_gpu_solve_used = TRUE,
+    residuals = residuals,
+    fitted = fitted,
+    coefficients = coefficients,
+    theta = theta,
+    sp = sp,
+    rss = rss,
+    target_ids = as.integer(target_ids),
+    setup_fingerprints = setup_fingerprints,
+    handles = handles,
+    solved = solved,
+    diagnostics = list(
+      targets = as.integer(q),
+      n = as.integer(n),
+      same_setup_fingerprint_count = length(unique(setup_fingerprints)),
+      device_resident = TRUE,
+      solve_stage = "native-fixed-sp-repeated-handle-solve",
+      batch_stage = "native-fixed-sp-repeated-handle-bridge",
+      true_batched_kernel = FALSE
+    )
+  )
+}
+
 fastkpc_mgcv_extract_gcv_bridge <- function(formula, data,
                                             method = "GCV.Cp",
                                             target = 1L,
