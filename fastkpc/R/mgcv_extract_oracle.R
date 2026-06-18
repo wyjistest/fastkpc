@@ -995,6 +995,59 @@ fastkpc_mgcv_extract_gpu_edf_for_handle <- function(handle, sp) {
   as.numeric(sum(diag(handle$XtX_null %*% A_inv)))
 }
 
+fastkpc_mgcv_extract_gpu_spectral_gcv_grid <- function(handle, sp_grid,
+                                                       tol = sqrt(.Machine$double.eps)) {
+  if (length(handle$sp) != 1L) {
+    stop("spectral GCV currently supports exactly one smoothing parameter",
+         call. = FALSE)
+  }
+  base_sp <- as.numeric(handle$sp)
+  if (!is.finite(base_sp) || base_sp <= 0) {
+    stop("handle sp must be positive and finite", call. = FALSE)
+  }
+  XtX <- as.matrix(handle$XtX_null)
+  P_base <- as.matrix(handle$penalty_null) / base_sp
+  Xty <- as.numeric(handle$Xty_null)
+  y <- as.numeric(handle$y)
+  n <- length(y)
+  chol_xtx <- tryCatch(chol(XtX, pivot = FALSE), error = function(e) NULL)
+  if (is.null(chol_xtx)) {
+    stop("spectral GCV requires positive definite XtX in the constraint null space",
+         call. = FALSE)
+  }
+  inv_chol <- backsolve(chol_xtx, diag(ncol(XtX)))
+  symmetric_penalty <- crossprod(inv_chol, P_base %*% inv_chol)
+  symmetric_penalty <- (symmetric_penalty + t(symmetric_penalty)) / 2
+  eigen_penalty <- eigen(symmetric_penalty, symmetric = TRUE)
+  d <- pmax(as.numeric(eigen_penalty$values), 0)
+  z <- as.numeric(t(eigen_penalty$vectors) %*%
+                    as.numeric(crossprod(inv_chol, Xty)))
+  y_sq <- sum(y^2)
+
+  rows <- lapply(sp_grid, function(sp_value) {
+    h <- 1 / (1 + as.numeric(sp_value) * d)
+    rss <- y_sq - 2 * sum(h * z^2) + sum((h^2) * z^2)
+    rss <- max(0, rss)
+    edf <- sum(h)
+    denom <- n - edf
+    gcv <- if (is.finite(edf) && denom > tol) n * rss / (denom * denom) else Inf
+    data.frame(
+      sp = as.numeric(sp_value),
+      rss = as.numeric(rss),
+      edf = as.numeric(edf),
+      gcv = as.numeric(gcv),
+      valid = is.finite(gcv),
+      stringsAsFactors = FALSE
+    )
+  })
+  grid <- do.call(rbind, rows)
+  list(
+    grid = grid,
+    eigenvalues = d,
+    spectral_rank = length(d)
+  )
+}
+
 fastkpc_mgcv_extract_gpu_gcv <- function(
     formula,
     data,
@@ -1007,8 +1060,10 @@ fastkpc_mgcv_extract_gpu_gcv <- function(
     bs = "tp",
     device = c("cuda", "auto", "cpu"),
     allow_cpu_fallback = TRUE,
+    gcv_strategy = c("direct", "spectral"),
     tol = sqrt(.Machine$double.eps)) {
   device <- match.arg(device)
+  gcv_strategy <- match.arg(gcv_strategy)
   sp_grid <- fastkpc_validate_fixed_positive_sp(sp_grid)
   if (length(sp_grid) == 0L) {
     stop("sp_grid must contain at least one candidate", call. = FALSE)
@@ -1042,7 +1097,7 @@ fastkpc_mgcv_extract_gpu_gcv <- function(
          call. = FALSE)
   }
 
-  eval_one <- function(sp_value) {
+  solve_one <- function(sp_value) {
     handle <- fastkpc_mgcv_extract_gpu_setup_handle(
       setup = setup,
       sp = sp_value,
@@ -1054,28 +1109,60 @@ fastkpc_mgcv_extract_gpu_gcv <- function(
     } else {
       fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp(handle, tol = tol)
     }
-    edf <- fastkpc_mgcv_extract_gpu_edf_for_handle(handle, sp = sp_value)
-    denom <- length(solved$residuals) - edf
-    gcv <- if (is.finite(edf) && denom > 1e-8) {
-      length(solved$residuals) * solved$rss / (denom * denom)
-    } else {
-      Inf
-    }
-    list(handle = handle, solved = solved, edf = edf, gcv = gcv)
+    list(handle = handle, solved = solved)
   }
 
-  evaluations <- lapply(sp_grid, eval_one)
-  rss <- vapply(evaluations, function(x) x$solved$rss, numeric(1))
-  edf <- vapply(evaluations, function(x) x$edf, numeric(1))
-  gcv <- vapply(evaluations, function(x) x$gcv, numeric(1))
+  if (identical(gcv_strategy, "spectral")) {
+    base_handle <- fastkpc_mgcv_extract_gpu_setup_handle(
+      setup = setup,
+      sp = setup_sp,
+      device_resident = !identical(device, "cpu") && native_cuda_available,
+      tol = tol
+    )
+    spectral <- fastkpc_mgcv_extract_gpu_spectral_gcv_grid(
+      handle = base_handle,
+      sp_grid = sp_grid,
+      tol = tol
+    )
+    grid <- spectral$grid
+    rss <- grid$rss
+    edf <- grid$edf
+    gcv <- grid$gcv
+    evaluations <- vector("list", length(sp_grid))
+  } else {
+    evaluations <- lapply(sp_grid, function(sp_value) {
+      solved <- solve_one(sp_value)
+      edf <- fastkpc_mgcv_extract_gpu_edf_for_handle(
+        solved$handle,
+        sp = sp_value
+      )
+      denom <- length(solved$solved$residuals) - edf
+      gcv <- if (is.finite(edf) && denom > 1e-8) {
+        length(solved$solved$residuals) * solved$solved$rss / (denom * denom)
+      } else {
+        Inf
+      }
+      c(solved, list(edf = edf, gcv = gcv))
+    })
+    rss <- vapply(evaluations, function(x) x$solved$rss, numeric(1))
+    edf <- vapply(evaluations, function(x) x$edf, numeric(1))
+    gcv <- vapply(evaluations, function(x) x$gcv, numeric(1))
+    spectral <- NULL
+  }
   valid <- is.finite(rss) & is.finite(edf) & is.finite(gcv)
   if (!any(valid)) {
     stop("No valid GCV candidate in sp_grid", call. = FALSE)
   }
   selected_grid_index <- which(gcv == min(gcv[valid]))[1L]
-  selected <- evaluations[[selected_grid_index]]$solved
-  selected_handle <- evaluations[[selected_grid_index]]$handle
   selected_sp <- sp_grid[selected_grid_index]
+  if (identical(gcv_strategy, "spectral")) {
+    selected_eval <- solve_one(selected_sp)
+    selected <- selected_eval$solved
+    selected_handle <- selected_eval$handle
+  } else {
+    selected <- evaluations[[selected_grid_index]]$solved
+    selected_handle <- evaluations[[selected_grid_index]]$handle
+  }
   target_fp <- fastkpc_target_fingerprint(
     target = target,
     y_hash = fastkpc_mgcv_hash_numeric(setup$y),
@@ -1130,7 +1217,18 @@ fastkpc_mgcv_extract_gpu_gcv <- function(
     diagnostics = c(
       selected$diagnostics,
       list(
-        gcv_stage = "single-penalty-grid-search",
+        gcv_stage = if (identical(gcv_strategy, "spectral")) {
+          "single-penalty-spectral-grid-search"
+        } else {
+          "single-penalty-grid-search"
+        },
+        gcv_strategy = gcv_strategy,
+        spectral_reparameterization = identical(gcv_strategy, "spectral"),
+        spectral_rank = if (identical(gcv_strategy, "spectral")) {
+          spectral$spectral_rank
+        } else {
+          NA_integer_
+        },
         grid_size = length(sp_grid),
         selected_grid_index = selected_grid_index,
         setup_sp = as.numeric(setup_sp),

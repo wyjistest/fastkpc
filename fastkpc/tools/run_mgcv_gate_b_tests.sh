@@ -19,6 +19,7 @@ Rscript fastkpc/tests/test_mgcv_extract_gpu_native_fixed_sp.R
 Rscript fastkpc/tests/test_mgcv_extract_gpu_native_batch_bridge.R
 Rscript fastkpc/tests/test_mgcv_extract_gpu_same_setup_batch.R
 Rscript fastkpc/tests/test_mgcv_extract_gpu_gcv_cpu_fallback.R
+Rscript fastkpc/tests/test_mgcv_extract_gpu_gcv_spectral.R
 Rscript fastkpc/tests/test_mgcv_extract_gpu_gcv_single_penalty.R
 Rscript fastkpc/tests/test_mgcv_self_solve_purity.R
 Rscript fastkpc/tests/test_mgcv_gate_b_campaign.R
