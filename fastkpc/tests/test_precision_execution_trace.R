@@ -25,9 +25,11 @@ row <- fastkpc_precision_trace_row(
 required <- c(
   "run_id", "scenario_id", "dataset_hash", "conditioning_level",
   "canonical_test_order_id", "setup_fingerprint", "target_id",
+  "x", "y", "S_key", "conditioning_target_side",
   "backend_requested", "backend_used", "verifier_backend",
   "compatibility_action", "fallback_reason", "CUDA_device",
-  "git_sha", "primary_p", "verifier_p", "p_used", "p_source_used",
+  "git_sha", "primary_p", "verifier_p", "p_used", "p_raw",
+  "p_was_nonfinite", "nonfinite_action", "p_source_used",
   "decision_before_verify", "decision_after_verify",
   "mgcv_setup_cpu_ms", "setup_cache_lookup_ms", "host_to_device_ms",
   "spectral_prepare_ms", "gcv_score_ms", "linear_solve_ms",

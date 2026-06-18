@@ -34,8 +34,8 @@ assert_true("verifier_executed" %in% names(compatible$config),
             "config should distinguish verifier_executed")
 assert_true(compatible$config$backend_planned == "legacy-mgcv",
             "compatible unsupported route may plan legacy fallback")
-assert_true(compatible$config$backend_executed == "mgcvExtractCPU",
-            "compatible CPU fallback data plane should execute mgcvExtractCPU")
+assert_true(compatible$config$backend_executed == "legacy-mgcv",
+            "compatible unsupported data plane should execute legacy-mgcv")
 assert_true(compatible$config$backend_used == compatible$config$backend_executed,
             "backend_used must describe executed backend, not planned backend")
 assert_true(compatible$config$precision_execution_status ==
@@ -45,7 +45,7 @@ assert_true(compatible$config$precision_execution_status ==
 trace <- compatible$diagnostics$precision_trace
 assert_true(all(trace$backend_planned %in% c("direct-ci", "legacy-mgcv")),
             "trace should record planned fallback backend")
-assert_true(any(trace$backend_executed == "mgcvExtractCPU"),
+assert_true(any(trace$backend_executed == "legacy-mgcv"),
             "trace should record actual executor backend")
 assert_true(!any(trace$p_source_used == "not-recorded", na.rm = TRUE),
             "data-plane trace should record real p-value sources")

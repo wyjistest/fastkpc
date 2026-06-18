@@ -46,6 +46,10 @@ Rscript fastkpc/tests/test_precision_truthful_execution_fields.R
 Rscript fastkpc/tests/test_precision_hybrid_no_fake_verifier.R
 Rscript fastkpc/tests/test_precision_compatible_data_plane_spy.R
 Rscript fastkpc/tests/test_precision_compatible_cpu_data_plane_smoke.R
+Rscript fastkpc/tests/test_precision_trace_real_sepset_fields.R
+Rscript fastkpc/tests/test_precision_nonfinite_p_policy.R
+Rscript fastkpc/tests/test_precision_legacy_mgcv_executor.R
+Rscript fastkpc/tests/test_precision_canonical_order_table.R
 Rscript fastkpc/tests/test_precision_execution_trace.R
 Rscript fastkpc/tests/test_workload_structure_cache_aware.R
 Rscript fastkpc/tests/test_true_batched_kernel_decision_scenario_aligned.R

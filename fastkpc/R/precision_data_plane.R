@@ -6,7 +6,7 @@ fastkpc_default_precision_executors <- function() {
     `direct-ci` = fastkpc_execute_ci_direct,
     fastSplineCPU = fastkpc_execute_ci_fast_spline_cpu,
     mgcvExtractGPUGCV = fastkpc_execute_ci_mgcv_extract_cpu,
-    `legacy-mgcv` = fastkpc_execute_ci_mgcv_extract_cpu
+    `legacy-mgcv` = fastkpc_execute_ci_legacy_mgcv
   )
 }
 
@@ -31,6 +31,33 @@ fastkpc_precision_combinations <- function(values, choose) {
 fastkpc_precision_neighbors <- function(adjacency, vertex, excluded) {
   out <- which(adjacency[, vertex] & seq_len(nrow(adjacency)) != excluded)
   as.integer(out)
+}
+
+fastkpc_precision_normalize_p <- function(p_raw, na_delete = TRUE) {
+  p_raw <- as.numeric(p_raw)[1L]
+  p_was_nonfinite <- !is.finite(p_raw)
+  if (p_was_nonfinite) {
+    if (isTRUE(na_delete)) {
+      return(list(
+        p_raw = p_raw,
+        p_used = 1.0,
+        p_was_nonfinite = TRUE,
+        nonfinite_action = "na-delete-use-1"
+      ))
+    }
+    return(list(
+      p_raw = p_raw,
+      p_used = 0.0,
+      p_was_nonfinite = TRUE,
+      nonfinite_action = "na-keep-use-0"
+    ))
+  }
+  list(
+    p_raw = p_raw,
+    p_used = p_raw,
+    p_was_nonfinite = FALSE,
+    nonfinite_action = ""
+  )
 }
 
 fastkpc_precision_group_route <- function(precision, alpha, tau, S,
@@ -171,6 +198,52 @@ fastkpc_execute_ci_mgcv_extract_cpu <- function(data, x, y, S, ci_method,
   )
 }
 
+fastkpc_legacy_mgcv_residual <- function(data, target, S) {
+  if (length(S) == 0L) return(as.numeric(data[, target]))
+  if (length(S) > 1L) {
+    stop("legacy mgcv CPU vertical slice supports |S| <= 1", call. = FALSE)
+  }
+  fastkpc_require_mgcv()
+  local_data <- data.frame(
+    .target = as.numeric(data[, target]),
+    s1 = as.numeric(data[, S[1L]])
+  )
+  form <- stats::as.formula(".target ~ s(s1, bs = 'tp')",
+                            env = asNamespace("mgcv"))
+  fit <- mgcv::gam(
+    formula = form,
+    data = local_data,
+    family = stats::gaussian(),
+    method = "GCV.Cp"
+  )
+  as.numeric(stats::residuals(fit))
+}
+
+fastkpc_execute_ci_legacy_mgcv <- function(data, x, y, S, ci_method,
+                                           index, legacy_index,
+                                           hsic_params,
+                                           permutation_params, route,
+                                           role = "primary") {
+  start <- proc.time()[["elapsed"]]
+  rx <- fastkpc_legacy_mgcv_residual(data, x, S)
+  ry <- fastkpc_legacy_mgcv_residual(data, y, S)
+  ci <- fastkpc_precision_ci_from_residuals(
+    rx, ry, ci_method = ci_method, index = index,
+    legacy_index = legacy_index, hsic_params = hsic_params,
+    permutation_params = permutation_params
+  )
+  elapsed <- (proc.time()[["elapsed"]] - start) * 1000
+  list(
+    p.value = ci$p.value,
+    residual_backend_executed = "legacy-mgcv",
+    ci_backend_executed = "native-cpu",
+    setup_fingerprint = route$setup_fingerprint %||%
+      paste0("legacy-mgcv:S:", fastkpc_precision_S_key(S)),
+    p_source_used = paste0(role, ":legacy-mgcv+native-cpu"),
+    timings = list(ci_test_ms = elapsed)
+  )
+}
+
 fastkpc_precision_ci_from_residuals <- function(rx, ry, ci_method,
                                                 index, legacy_index,
                                                 hsic_params,
@@ -223,7 +296,8 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
                                          permutation_params,
                                          precision_executors,
                                          runtime_capabilities,
-                                         allow_canary = FALSE) {
+                                         allow_canary = FALSE,
+                                         na_delete = TRUE) {
   data <- as.matrix(data)
   storage.mode(data) <- "double"
   p <- ncol(data)
@@ -269,8 +343,8 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
                                    receipt$residual_backend_executed)
           }
           ci_backends <- c(ci_backends, receipt$ci_backend_executed)
-          pval <- as.numeric(receipt$p.value)
-          if (!is.finite(pval)) pval <- 1.0
+          pinfo <- fastkpc_precision_normalize_p(receipt$p.value, na_delete)
+          pval <- pinfo$p_used
           if (pval > pmax[x, y]) {
             pmax[x, y] <- pval
             pmax[y, x] <- pval
@@ -294,6 +368,10 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             setup_fingerprint = receipt$setup_fingerprint %||%
               route$setup_fingerprint,
             target_id = paste(x, y, sep = "|"),
+            x = x,
+            y = y,
+            S_key = fastkpc_precision_S_key(S),
+            conditioning_target_side = "x",
             backend_requested = route$primary_backend,
             backend_used = receipt$residual_backend_executed,
             backend_planned = route$primary_backend,
@@ -305,6 +383,9 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             fallback_reason = route$fallback_reason %||% "",
             primary_p = pval,
             p_used = pval,
+            p_raw = pinfo$p_raw,
+            p_was_nonfinite = pinfo$p_was_nonfinite,
+            nonfinite_action = pinfo$nonfinite_action,
             p_source_used = receipt$p_source_used,
             precision_execution_status = "data-plane-executed",
             decision_before_verify = pval >= alpha,
@@ -336,8 +417,8 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
                                    receipt$residual_backend_executed)
           }
           ci_backends <- c(ci_backends, receipt$ci_backend_executed)
-          pval <- as.numeric(receipt$p.value)
-          if (!is.finite(pval)) pval <- 1.0
+          pinfo <- fastkpc_precision_normalize_p(receipt$p.value, na_delete)
+          pval <- pinfo$p_used
           if (pval > pmax[x, y]) {
             pmax[x, y] <- pval
             pmax[y, x] <- pval
@@ -361,6 +442,10 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             setup_fingerprint = receipt$setup_fingerprint %||%
               route$setup_fingerprint,
             target_id = paste(y, x, sep = "|"),
+            x = y,
+            y = x,
+            S_key = fastkpc_precision_S_key(S),
+            conditioning_target_side = "y",
             backend_requested = route$primary_backend,
             backend_used = receipt$residual_backend_executed,
             backend_planned = route$primary_backend,
@@ -372,6 +457,9 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             fallback_reason = route$fallback_reason %||% "",
             primary_p = pval,
             p_used = pval,
+            p_raw = pinfo$p_raw,
+            p_was_nonfinite = pinfo$p_was_nonfinite,
+            nonfinite_action = pinfo$nonfinite_action,
             p_source_used = receipt$p_source_used,
             precision_execution_status = "data-plane-executed",
             decision_before_verify = pval >= alpha,
@@ -397,14 +485,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
     do.call(rbind, trace_rows)
   }
   trace$edge_deleted <- trace$decision_after_verify
-  trace$sepset_recorded <- ""
-  deleted_idx <- which(trace$edge_deleted)
-  if (length(deleted_idx) > 0L) {
-    trace$sepset_recorded[deleted_idx] <- vapply(deleted_idx, function(i) {
-      fp <- trace$setup_fingerprint[i]
-      if (grepl("spy:", fp, fixed = TRUE)) sub("^spy:", "", fp) else ""
-    }, character(1))
-  }
+  trace$sepset_recorded <- ifelse(trace$edge_deleted, trace$S_key, "")
 
   backend_candidates <- unique(executed_backends)
   if (length(backend_candidates) == 0L) backend_candidates <- "direct-ci"
