@@ -23,3 +23,5 @@ Rscript fastkpc/tests/test_hybrid_canonical_replay.R
 Rscript fastkpc/tests/test_hybrid_graph_replay_policy.R
 Rscript fastkpc/tests/test_hybrid_golden_snapshots.R
 Rscript fastkpc/tests/test_hybrid_calibration_campaign.R
+Rscript fastkpc/tests/test_mgcv_extract_gpu_graph_campaign.R
+Rscript fastkpc/tests/test_tprs_approx_decision_memo.R
