@@ -44,6 +44,10 @@ Rscript fastkpc/tests/test_precision_compatible_fail_closed.R
 Rscript fastkpc/tests/test_precision_hybrid_e2e_replay.R
 Rscript fastkpc/tests/test_precision_truthful_execution_fields.R
 Rscript fastkpc/tests/test_precision_hybrid_no_fake_verifier.R
+Rscript fastkpc/tests/test_precision_hybrid_cpu_verifier_spy.R
+Rscript fastkpc/tests/test_precision_hybrid_cpu_skip_and_fallback.R
+Rscript fastkpc/tests/test_precision_hybrid_cpu_double_verifier_failure.R
+Rscript fastkpc/tests/test_precision_hybrid_nonfinite_verifier_policy.R
 Rscript fastkpc/tests/test_precision_compatible_data_plane_spy.R
 Rscript fastkpc/tests/test_precision_compatible_cpu_data_plane_smoke.R
 Rscript fastkpc/tests/test_precision_trace_real_sepset_fields.R

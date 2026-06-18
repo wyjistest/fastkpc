@@ -290,6 +290,278 @@ fastkpc_precision_execute_ci <- function(data, x, y, S, route, role,
   )
 }
 
+fastkpc_execute_backend_attempt <- function(data, x, y, S, route, role,
+                                            backend,
+                                            ci_method, index, legacy_index,
+                                            hsic_params, permutation_params,
+                                            precision_executors) {
+  start <- proc.time()[["elapsed"]]
+  attempt_route <- route
+  attempt_route$primary_backend <- backend
+  value <- tryCatch({
+    receipt <- fastkpc_precision_execute_ci(
+      data = data, x = x, y = y, S = S, route = attempt_route, role = role,
+      ci_method = ci_method, index = index, legacy_index = legacy_index,
+      hsic_params = hsic_params, permutation_params = permutation_params,
+      precision_executors = precision_executors
+    )
+    list(status = "ok", receipt = receipt, error = NULL)
+  }, error = function(e) {
+    list(status = "error", receipt = NULL, error = e)
+  })
+  elapsed <- (proc.time()[["elapsed"]] - start) * 1000
+  list(
+    backend_planned = route$primary_backend %||% backend,
+    backend_attempted = backend,
+    backend_executed = value$receipt$residual_backend_executed %||% NA_character_,
+    attempt_status = value$status,
+    error_class = if (is.null(value$error)) "" else class(value$error)[1L],
+    error_message = if (is.null(value$error)) "" else conditionMessage(value$error),
+    fallback_triggered = FALSE,
+    fallback_reason = "",
+    elapsed_ms = elapsed,
+    receipt = value$receipt
+  )
+}
+
+fastkpc_nonempty_backend <- function(value, fallback) {
+  if (is.null(value) || length(value) == 0L || is.na(value[1L]) ||
+      !nzchar(as.character(value[1L]))) {
+    return(fallback)
+  }
+  as.character(value[1L])
+}
+
+fastkpc_execute_route_with_fallback <- function(data, x, y, S, route, role,
+                                                ci_method, index, legacy_index,
+                                                hsic_params,
+                                                permutation_params,
+                                                precision_executors,
+                                                fallback_backend = "legacy-mgcv") {
+  primary_backend <- fastkpc_nonempty_backend(route$primary_backend, "")
+  primary <- fastkpc_execute_backend_attempt(
+    data = data, x = x, y = y, S = S, route = route, role = role,
+    backend = primary_backend, ci_method = ci_method, index = index,
+    legacy_index = legacy_index, hsic_params = hsic_params,
+    permutation_params = permutation_params,
+    precision_executors = precision_executors
+  )
+  attempts <- list(primary)
+  if (identical(primary$attempt_status, "ok")) {
+    primary$attempts <- attempts
+    primary$attempt_count <- length(attempts)
+    return(primary)
+  }
+  fallback_backend <- fastkpc_nonempty_backend(fallback_backend, "")
+  if (!nzchar(fallback_backend)) {
+    stop(primary$error_message, call. = FALSE)
+  }
+  fallback_route <- route
+  fallback_route$primary_backend <- fallback_backend
+  fallback <- fastkpc_execute_backend_attempt(
+    data = data, x = x, y = y, S = S, route = fallback_route, role = role,
+    backend = fallback_backend, ci_method = ci_method, index = index,
+    legacy_index = legacy_index, hsic_params = hsic_params,
+    permutation_params = permutation_params,
+    precision_executors = precision_executors
+  )
+  fallback$fallback_triggered <- TRUE
+  fallback$fallback_reason <- primary$error_message
+  attempts[[length(attempts) + 1L]] <- fallback
+  if (!identical(fallback$attempt_status, "ok")) {
+    stop(paste0("backend ", primary_backend, " failed: ",
+                primary$error_message, "; fallback ", fallback_backend,
+                " failed: ", fallback$error_message), call. = FALSE)
+  }
+  fallback$attempts <- attempts
+  fallback$attempt_count <- length(attempts)
+  fallback
+}
+
+fastkpc_precision_primary_backend <- function(route, precision) {
+  if (identical(precision, "hybrid")) {
+    return("fastSplineCPU")
+  }
+  fastkpc_nonempty_backend(route$primary_backend, "fastSplineCPU")
+}
+
+fastkpc_precision_resolve_test <- function(data, x, y, S, route, precision,
+                                           alpha, tau, ci_method, index,
+                                           legacy_index, hsic_params,
+                                           permutation_params,
+                                           precision_executors,
+                                           na_delete = TRUE) {
+  primary_route <- route
+  primary_route$primary_backend <- fastkpc_precision_primary_backend(route, precision)
+  primary_fallback <- NA_character_
+  if (identical(precision, "compatible")) {
+    route_fallback <- fastkpc_nonempty_backend(route$fallback_backend,
+                                               "legacy-mgcv")
+    if (!identical(primary_route$primary_backend, route_fallback)) {
+      primary_fallback <- route_fallback
+    }
+  }
+  primary_exec <- fastkpc_execute_route_with_fallback(
+    data = data, x = x, y = y, S = S, route = primary_route, role = "primary",
+    ci_method = ci_method, index = index, legacy_index = legacy_index,
+    hsic_params = hsic_params, permutation_params = permutation_params,
+    precision_executors = precision_executors,
+    fallback_backend = primary_fallback
+  )
+  primary_receipt <- primary_exec$receipt
+  primary_info <- fastkpc_precision_normalize_p(primary_receipt$p.value,
+                                                na_delete)
+
+  verifier_exec <- NULL
+  verifier_info <- NULL
+  near_alpha <- FALSE
+  if (identical(precision, "hybrid") && length(S) > 0L) {
+    near_alpha <- primary_info$p_was_nonfinite ||
+      fastkpc_near_alpha_trigger(primary_info$p_raw, alpha, tau)
+  }
+
+  chosen_receipt <- primary_receipt
+  chosen_info <- primary_info
+  p_source <- primary_receipt$p_source_used
+  fallback_triggered <- isTRUE(primary_exec$fallback_triggered)
+  fallback_reason <- primary_exec$fallback_reason %||% ""
+  attempt_count <- primary_exec$attempt_count %||% 1L
+
+  if (isTRUE(near_alpha)) {
+    verifier_backend <- fastkpc_nonempty_backend(route$verifier_backend,
+                                                 "mgcvExtractGPUGCV")
+    verifier_route <- route
+    verifier_route$primary_backend <- verifier_backend
+    verifier_exec <- fastkpc_execute_route_with_fallback(
+      data = data, x = x, y = y, S = S, route = verifier_route,
+      role = "verifier", ci_method = ci_method, index = index,
+      legacy_index = legacy_index, hsic_params = hsic_params,
+      permutation_params = permutation_params,
+      precision_executors = precision_executors,
+      fallback_backend = fastkpc_nonempty_backend(route$fallback_backend,
+                                                  "legacy-mgcv")
+    )
+    verifier_fallback_backend <- fastkpc_nonempty_backend(route$fallback_backend,
+                                                          "legacy-mgcv")
+    verifier_info <- fastkpc_precision_normalize_p(
+      verifier_exec$receipt$p.value, na_delete
+    )
+    if (isTRUE(verifier_info$p_was_nonfinite) &&
+        !identical(verifier_exec$receipt$residual_backend_executed,
+                   verifier_fallback_backend)) {
+      legacy_route <- route
+      legacy_route$primary_backend <- verifier_fallback_backend
+      legacy_exec <- fastkpc_execute_route_with_fallback(
+        data = data, x = x, y = y, S = S, route = legacy_route,
+        role = "verifier", ci_method = ci_method, index = index,
+        legacy_index = legacy_index, hsic_params = hsic_params,
+        permutation_params = permutation_params,
+        precision_executors = precision_executors,
+        fallback_backend = NA_character_
+      )
+      verifier_exec <- legacy_exec
+      verifier_info <- fastkpc_precision_normalize_p(
+        verifier_exec$receipt$p.value, na_delete
+      )
+      verifier_exec$fallback_triggered <- TRUE
+      verifier_exec$fallback_reason <- "verifier returned non-finite p-value"
+    }
+    chosen_receipt <- verifier_exec$receipt
+    chosen_info <- verifier_info
+    p_source <- verifier_exec$receipt$p_source_used
+    fallback_triggered <- isTRUE(verifier_exec$fallback_triggered)
+    fallback_reason <- verifier_exec$fallback_reason
+    attempt_count <- attempt_count + (verifier_exec$attempt_count %||% 1L)
+  }
+
+  list(
+    pval = chosen_info$p_used,
+    p_raw = chosen_info$p_raw,
+    p_info = chosen_info,
+    receipt = chosen_receipt,
+    primary_receipt = primary_receipt,
+    primary_info = primary_info,
+    verifier_receipt = if (is.null(verifier_exec)) NULL else verifier_exec$receipt,
+    verifier_info = verifier_info,
+    near_alpha_triggered = near_alpha,
+    p_source_used = p_source,
+    fallback_triggered = fallback_triggered,
+    fallback_reason = fallback_reason,
+    attempt_count = attempt_count,
+    decision_before_verify = primary_info$p_used >= alpha,
+    decision_after_verify = chosen_info$p_used >= alpha
+  )
+}
+
+fastkpc_precision_trace_for_test <- function(resolved, route, run_id,
+                                             conditioning_level,
+                                             canonical_test_order_id,
+                                             x, y, S,
+                                             conditioning_target_side) {
+  receipt <- resolved$receipt
+  primary_receipt <- resolved$primary_receipt
+  verifier_receipt <- resolved$verifier_receipt
+  verifier_info <- resolved$verifier_info
+  verifier_executed <- if (is.null(verifier_receipt)) {
+    NA_character_
+  } else {
+    verifier_receipt$residual_backend_executed
+  }
+  verifier_ci <- if (is.null(verifier_receipt)) {
+    NA_character_
+  } else {
+    verifier_receipt$ci_backend_executed
+  }
+  verifier_p_raw <- if (is.null(verifier_info)) NA_real_ else verifier_info$p_raw
+  verifier_p_used <- if (is.null(verifier_info)) NA_real_ else verifier_info$p_used
+  fastkpc_precision_trace_row(
+    run_id = run_id,
+    scenario_id = "fast_kpc",
+    conditioning_level = conditioning_level,
+    canonical_test_order_id = canonical_test_order_id,
+    setup_fingerprint = receipt$setup_fingerprint %||%
+      route$setup_fingerprint,
+    target_id = paste(x, y, sep = "|"),
+    x = x,
+    y = y,
+    S_key = fastkpc_precision_S_key(S),
+    conditioning_target_side = conditioning_target_side,
+    backend_requested = route$primary_backend,
+    backend_used = receipt$residual_backend_executed,
+    backend_planned = route$primary_backend,
+    backend_executed = receipt$residual_backend_executed,
+    verifier_backend = route$verifier_backend %||% NA_character_,
+    verifier_planned = route$verifier_backend %||% NA_character_,
+    verifier_executed = verifier_executed,
+    compatibility_action = route$compatibility_action %||% "",
+    fallback_reason = resolved$fallback_reason %||%
+      route$fallback_reason %||% "",
+    primary_p = resolved$primary_info$p_used,
+    verifier_p = verifier_p_used,
+    p_used = resolved$pval,
+    p_raw = resolved$p_raw,
+    p_was_nonfinite = resolved$p_info$p_was_nonfinite,
+    nonfinite_action = resolved$p_info$nonfinite_action,
+    p_source_used = resolved$p_source_used,
+    primary_residual_backend_executed =
+      primary_receipt$residual_backend_executed,
+    primary_ci_backend_executed = primary_receipt$ci_backend_executed,
+    primary_p_raw = resolved$primary_info$p_raw,
+    primary_p_used = resolved$primary_info$p_used,
+    near_alpha_triggered = resolved$near_alpha_triggered,
+    verifier_residual_backend_executed = verifier_executed,
+    verifier_ci_backend_executed = verifier_ci,
+    verifier_p_raw = verifier_p_raw,
+    verifier_p_used = verifier_p_used,
+    fallback_triggered = resolved$fallback_triggered,
+    attempt_count = resolved$attempt_count,
+    precision_execution_status = "data-plane-executed",
+    decision_before_verify = resolved$decision_before_verify,
+    decision_after_verify = resolved$decision_after_verify,
+    ci_test_ms = receipt$timings$ci_test_ms %||% NA_real_
+  )
+}
+
 fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
                                          precision, tau, ci_method, index,
                                          legacy_index, hsic_params,
@@ -312,6 +584,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
   last_receipt <- NULL
   test_id <- 0L
   executed_backends <- character()
+  verifier_backends <- character()
   ci_backends <- character()
 
   for (ord in seq.int(0L, as.integer(max_conditioning_size))) {
@@ -330,21 +603,32 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             runtime_capabilities = runtime_capabilities,
             allow_canary = allow_canary
           )
-          receipt <- fastkpc_precision_execute_ci(
-            data = data, x = x, y = y, S = S, route = route, role = "primary",
+          resolved <- fastkpc_precision_resolve_test(
+            data = data, x = x, y = y, S = S, route = route,
+            precision = precision, alpha = alpha, tau = tau,
             ci_method = ci_method, index = index, legacy_index = legacy_index,
             hsic_params = hsic_params,
             permutation_params = permutation_params,
-            precision_executors = precision_executors
+            precision_executors = precision_executors,
+            na_delete = na_delete
           )
+          receipt <- resolved$receipt
           last_receipt <- receipt
+          primary_receipt <- resolved$primary_receipt
           if (!identical(route$primary_backend, "direct-ci")) {
             executed_backends <- c(executed_backends,
-                                   receipt$residual_backend_executed)
+                                   primary_receipt$residual_backend_executed)
           }
-          ci_backends <- c(ci_backends, receipt$ci_backend_executed)
-          pinfo <- fastkpc_precision_normalize_p(receipt$p.value, na_delete)
-          pval <- pinfo$p_used
+          if (!is.null(resolved$verifier_receipt)) {
+            verifier_backends <- c(verifier_backends,
+                                   resolved$verifier_receipt$residual_backend_executed)
+          }
+          ci_backends <- c(ci_backends, primary_receipt$ci_backend_executed)
+          if (!is.null(resolved$verifier_receipt)) {
+            ci_backends <- c(ci_backends,
+                             resolved$verifier_receipt$ci_backend_executed)
+          }
+          pval <- resolved$pval
           if (pval > pmax[x, y]) {
             pmax[x, y] <- pval
             pmax[y, x] <- pval
@@ -360,37 +644,16 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             )
             edge_done <- TRUE
           }
-          trace_rows[[length(trace_rows) + 1L]] <- fastkpc_precision_trace_row(
+          trace_rows[[length(trace_rows) + 1L]] <- fastkpc_precision_trace_for_test(
+            resolved = resolved,
+            route = route,
             run_id = "fastkpc-r-skeleton",
-            scenario_id = "fast_kpc",
             conditioning_level = ord,
             canonical_test_order_id = test_id,
-            setup_fingerprint = receipt$setup_fingerprint %||%
-              route$setup_fingerprint,
-            target_id = paste(x, y, sep = "|"),
             x = x,
             y = y,
-            S_key = fastkpc_precision_S_key(S),
-            conditioning_target_side = "x",
-            backend_requested = route$primary_backend,
-            backend_used = receipt$residual_backend_executed,
-            backend_planned = route$primary_backend,
-            backend_executed = receipt$residual_backend_executed,
-            verifier_backend = route$verifier_backend %||% NA_character_,
-            verifier_planned = route$verifier_backend %||% NA_character_,
-            verifier_executed = NA_character_,
-            compatibility_action = route$compatibility_action %||% "",
-            fallback_reason = route$fallback_reason %||% "",
-            primary_p = pval,
-            p_used = pval,
-            p_raw = pinfo$p_raw,
-            p_was_nonfinite = pinfo$p_was_nonfinite,
-            nonfinite_action = pinfo$nonfinite_action,
-            p_source_used = receipt$p_source_used,
-            precision_execution_status = "data-plane-executed",
-            decision_before_verify = pval >= alpha,
-            decision_after_verify = pval >= alpha,
-            ci_test_ms = receipt$timings$ci_test_ms %||% NA_real_
+            S = S,
+            conditioning_target_side = "x"
           )
           n_edge_tests[[ord + 1L]] <- n_edge_tests[[ord + 1L]] + 1L
           if (edge_done) break
@@ -404,21 +667,32 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             runtime_capabilities = runtime_capabilities,
             allow_canary = allow_canary
           )
-          receipt <- fastkpc_precision_execute_ci(
-            data = data, x = y, y = x, S = S, route = route, role = "primary",
+          resolved <- fastkpc_precision_resolve_test(
+            data = data, x = y, y = x, S = S, route = route,
+            precision = precision, alpha = alpha, tau = tau,
             ci_method = ci_method, index = index, legacy_index = legacy_index,
             hsic_params = hsic_params,
             permutation_params = permutation_params,
-            precision_executors = precision_executors
+            precision_executors = precision_executors,
+            na_delete = na_delete
           )
+          receipt <- resolved$receipt
           last_receipt <- receipt
+          primary_receipt <- resolved$primary_receipt
           if (!identical(route$primary_backend, "direct-ci")) {
             executed_backends <- c(executed_backends,
-                                   receipt$residual_backend_executed)
+                                   primary_receipt$residual_backend_executed)
           }
-          ci_backends <- c(ci_backends, receipt$ci_backend_executed)
-          pinfo <- fastkpc_precision_normalize_p(receipt$p.value, na_delete)
-          pval <- pinfo$p_used
+          if (!is.null(resolved$verifier_receipt)) {
+            verifier_backends <- c(verifier_backends,
+                                   resolved$verifier_receipt$residual_backend_executed)
+          }
+          ci_backends <- c(ci_backends, primary_receipt$ci_backend_executed)
+          if (!is.null(resolved$verifier_receipt)) {
+            ci_backends <- c(ci_backends,
+                             resolved$verifier_receipt$ci_backend_executed)
+          }
+          pval <- resolved$pval
           if (pval > pmax[x, y]) {
             pmax[x, y] <- pval
             pmax[y, x] <- pval
@@ -434,37 +708,16 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             )
             edge_done <- TRUE
           }
-          trace_rows[[length(trace_rows) + 1L]] <- fastkpc_precision_trace_row(
+          trace_rows[[length(trace_rows) + 1L]] <- fastkpc_precision_trace_for_test(
+            resolved = resolved,
+            route = route,
             run_id = "fastkpc-r-skeleton",
-            scenario_id = "fast_kpc",
             conditioning_level = ord,
             canonical_test_order_id = test_id,
-            setup_fingerprint = receipt$setup_fingerprint %||%
-              route$setup_fingerprint,
-            target_id = paste(y, x, sep = "|"),
             x = y,
             y = x,
-            S_key = fastkpc_precision_S_key(S),
-            conditioning_target_side = "y",
-            backend_requested = route$primary_backend,
-            backend_used = receipt$residual_backend_executed,
-            backend_planned = route$primary_backend,
-            backend_executed = receipt$residual_backend_executed,
-            verifier_backend = route$verifier_backend %||% NA_character_,
-            verifier_planned = route$verifier_backend %||% NA_character_,
-            verifier_executed = NA_character_,
-            compatibility_action = route$compatibility_action %||% "",
-            fallback_reason = route$fallback_reason %||% "",
-            primary_p = pval,
-            p_used = pval,
-            p_raw = pinfo$p_raw,
-            p_was_nonfinite = pinfo$p_was_nonfinite,
-            nonfinite_action = pinfo$nonfinite_action,
-            p_source_used = receipt$p_source_used,
-            precision_execution_status = "data-plane-executed",
-            decision_before_verify = pval >= alpha,
-            decision_after_verify = pval >= alpha,
-            ci_test_ms = receipt$timings$ci_test_ms %||% NA_real_
+            S = S,
+            conditioning_target_side = "y"
           )
           n_edge_tests[[ord + 1L]] <- n_edge_tests[[ord + 1L]] + 1L
           if (edge_done) break
@@ -494,6 +747,14 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
   } else {
     paste(backend_candidates, collapse = "+")
   }
+  verifier_backend_candidates <- unique(verifier_backends)
+  verifier_backend <- if (length(verifier_backend_candidates) == 0L) {
+    NA_character_
+  } else if (length(verifier_backend_candidates) == 1L) {
+    verifier_backend_candidates
+  } else {
+    paste(verifier_backend_candidates, collapse = "+")
+  }
   ci_backend <- if (length(unique(ci_backends)) == 1L) {
     unique(ci_backends)
   } else {
@@ -507,6 +768,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
     per.level.log = level_logs,
     backend = "cpu",
     residual_backend = backend,
+    verifier_backend = verifier_backend,
     residual_backend_params = "",
     residual_cache = list(
       enabled = FALSE,

@@ -533,9 +533,9 @@ fast_kpc <- function(data,
   use_precision_r_skeleton <- graph_stage == "skeleton" &&
     identical(engine_used, "cpu") &&
     as.integer(max_conditioning_size) <= 1L &&
-    precision_requested %in% c("fast", "compatible") &&
+    precision_requested %in% c("fast", "compatible", "hybrid") &&
     (isTRUE(precision_executors_requested) ||
-       identical(precision_requested, "compatible"))
+       precision_requested %in% c("compatible", "hybrid"))
 
   timed <- fastkpc_elapsed({
     if (graph_stage == "wanpdag") {
@@ -650,6 +650,8 @@ fast_kpc <- function(data,
     config$backend_executed <- timed$value$skeleton$residual_backend %||%
       receipt$residual_backend_executed %||% config$backend_executed
     config$backend_used <- config$backend_executed
+    config$verifier_executed <- timed$value$skeleton$verifier_backend %||%
+      config$verifier_executed
     config$precision_execution_status <- "data-plane-executed"
   }
   config$cuda_hsic_used <- isTRUE(config$cuda_hsic_requested) &&
