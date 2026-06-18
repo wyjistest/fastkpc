@@ -28,6 +28,10 @@ assert_true(identical(cap$baseline$commit, "5da2313"),
             "baseline commit")
 
 gpu_cap <- fastkpc_mgcv_extract_gpu_capabilities()
+native_expected <- tryCatch({
+  exists("fastkpc_cuda_available", mode = "function") &&
+    isTRUE(fastkpc_cuda_available())
+}, error = function(e) FALSE)
 assert_true(identical(gpu_cap$backend, "mgcvExtractGPU"),
             "GPU bridge backend name")
 assert_true(identical(gpu_cap$role, "mgcv setup anchored GPU compatibility bridge"),
@@ -36,10 +40,12 @@ assert_true(isTRUE(gpu_cap$supported$fixed_sp_api),
             "GPU bridge should expose fixed-sp API")
 assert_true(isTRUE(gpu_cap$supported$cpu_gate_b_fallback),
             "GPU bridge should support Gate B CPU fallback")
-assert_true(isFALSE(gpu_cap$supported$native_gpu_fixed_sp_solve),
-            "native GPU fixed-sp solve should not be claimed yet")
-assert_true(isTRUE(gpu_cap$unsupported$native_gpu_gcv),
-            "native GPU GCV remains unsupported")
+assert_true(identical(gpu_cap$supported$native_gpu_fixed_sp_solve,
+                      native_expected),
+            "native GPU fixed-sp capability should reflect current CUDA availability")
+assert_true(identical(gpu_cap$unsupported$native_gpu_gcv,
+                      !native_expected),
+            "native GPU GCV unsupported flag should reflect current CUDA availability")
 assert_true(identical(gpu_cap$version_pins$backend_version,
                       "mgcvExtractGPU-fixed-sp-api-v1"),
             "GPU bridge version pin")

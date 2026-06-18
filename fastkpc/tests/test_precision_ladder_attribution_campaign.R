@@ -49,10 +49,12 @@ assert_true(identical(cap$mgcv_equivalent[1], FALSE),
             "capability CSV should record non-equivalence to mgcv")
 bridge_cap <- utils::read.csv(file.path(out_dir, "mgcv_extract_gpu_capabilities.csv"),
                               stringsAsFactors = FALSE)
+expected_gpu_cap <- fastkpc_mgcv_extract_gpu_capabilities()
 assert_true(identical(bridge_cap$backend[1], "mgcvExtractGPU"),
             "GPU bridge capability CSV should identify mgcvExtractGPU")
-assert_true(identical(bridge_cap$native_gpu_fixed_sp_solve[1], FALSE),
-            "GPU bridge capability CSV should not claim native GPU solve yet")
+assert_true(identical(bridge_cap$native_gpu_fixed_sp_solve[1],
+                      expected_gpu_cap$supported$native_gpu_fixed_sp_solve),
+            "GPU bridge capability CSV should reflect current CUDA availability")
 assert_true(identical(bridge_cap$cpu_gate_b_fallback[1], TRUE),
             "GPU bridge capability CSV should record Gate B fallback")
 

@@ -15,9 +15,16 @@ LAPACK_LIBS=$(R CMD config LAPACK_LIBS)
 FLIBS=$(R CMD config FLIBS)
 
 mkdir -p "$BUILD"
+LOCK="$BUILD/fastkpc_cuda.lock"
+SO="$BUILD/fastkpc_cuda.so"
+TMP_SO="$BUILD/fastkpc_cuda.so.tmp.$$"
 
 COMMON_INC="$R_CPPFLAGS $RCPP_FLAGS -I$RCPP_ARMADILLO_INCLUDE -I/usr/local/cuda/include -I$ROOT/src -I$ROOT/src/cuda"
 COMMON_CXX="$CXXSTD $CXXFLAGS -fPIC $COMMON_INC"
+
+(
+flock 9
+trap 'rm -f "$TMP_SO"' EXIT INT TERM
 
 "$CXX" $COMMON_CXX -c "$ROOT/src/dcov_exact_cpu.cpp" -o "$BUILD/dcov_exact_cpu.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/hsic_cpu.cpp" -o "$BUILD/hsic_cpu.o"
@@ -58,7 +65,7 @@ COMMON_CXX="$CXXSTD $CXXFLAGS -fPIC $COMMON_INC"
   $COMMON_INC -c "$ROOT/src/cuda/mgcv_extract_fixed_sp_cuda.cu" \
   -o "$BUILD/mgcv_extract_fixed_sp_cuda.o"
 
-"$CXX" -shared -o "$BUILD/fastkpc_cuda.so" \
+"$CXX" -shared -o "$TMP_SO" \
   "$BUILD/dcov_exact_cpu.o" \
   "$BUILD/hsic_cpu.o" \
   "$BUILD/ci_method.o" \
@@ -86,4 +93,8 @@ COMMON_CXX="$CXXSTD $CXXFLAGS -fPIC $COMMON_INC"
   -L/usr/local/cuda/lib64 -lcudart -lcublas -lcusolver \
   -L"$(R RHOME)/lib" -lR
 
-echo "built: $BUILD/fastkpc_cuda.so"
+mv -f "$TMP_SO" "$SO"
+trap - EXIT INT TERM
+) 9>"$LOCK"
+
+echo "built: $SO"

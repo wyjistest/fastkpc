@@ -3,6 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
+Rscript fastkpc/tests/test_cuda_build_lock_contract.R
 Rscript fastkpc/tests/test_mgcv_compat_contract.R
 Rscript fastkpc/tests/test_mgcv_extract_setup_contract.R
 Rscript fastkpc/tests/test_mgcv_penalty_assembly.R
