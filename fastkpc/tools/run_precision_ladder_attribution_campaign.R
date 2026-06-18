@@ -1,0 +1,6 @@
+args <- commandArgs(trailingOnly = TRUE)
+output_dir <- if (length(args) >= 1L) args[[1]] else file.path("fastkpc", "artifacts", "precision_ladder")
+source("fastkpc/R/mgcv_extract_validation.R")
+result <- fastkpc_run_precision_ladder_attribution_campaign(output_dir = output_dir)
+cat("wrote precision ladder attribution artifacts:", output_dir, "\n")
+print(result$summary)

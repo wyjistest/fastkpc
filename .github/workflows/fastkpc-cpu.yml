@@ -28,11 +28,14 @@ jobs:
         run: fastkpc/tools/run_hybrid_compatibility_campaign.sh fastkpc/artifacts/hybrid_compatibility
       - name: Run hybrid calibration campaign
         run: fastkpc/tools/run_hybrid_calibration_campaign.sh fastkpc/artifacts/hybrid_calibration
+      - name: Run precision ladder attribution campaign
+        run: fastkpc/tools/run_precision_ladder_attribution_campaign.sh fastkpc/artifacts/precision_ladder
       - name: Check artifact summaries
         run: |
           test -f fastkpc/artifacts/mgcv_gate_b/mgcv_gate_b_fixed_sp_campaign.csv
           test -f fastkpc/artifacts/hybrid_compatibility/hybrid_near_alpha_diagnostics.csv
           test -f fastkpc/artifacts/hybrid_calibration/hybrid_calibration_summary.csv
+          test -f fastkpc/artifacts/precision_ladder/precision_ladder_attribution_summary.csv
       - uses: actions/upload-artifact@v4
         with:
           name: fastkpc-cpu-campaign-artifacts
@@ -41,3 +44,4 @@ jobs:
             fastkpc/artifacts/hybrid_compatibility/*.csv
             fastkpc/artifacts/hybrid_calibration/hybrid_calibration_summary.csv
             fastkpc/artifacts/hybrid_calibration/hybrid_policy_summary.txt
+            fastkpc/artifacts/precision_ladder/*.csv
