@@ -44,7 +44,8 @@ assert_equal(sem$conditioning_set_as_set, c(2L, 4L),
 assert_true(grepl("kpcalg_regrXonS_v1", sem$compatibility_mode),
             "compatibility mode must be explicit")
 
-setup <- fastkpc_setup_fingerprint(sem, mgcv_version = "1.9-4",
+setup <- fastkpc_setup_fingerprint(sem, R_version = "4.6.0",
+                                   mgcv_version = "1.9-4",
                                    model_matrix_hash = "XHASH",
                                    penalty_hashes = c("S1", "S2"),
                                    constraint_hash = "CHASH",
@@ -56,8 +57,9 @@ target_b <- fastkpc_target_fingerprint(target = 2L, y_hash = "YB",
                                        selected_sp = c(0.2, 2.0),
                                        score = 13.5, edf = 4.2)
 
-setup_text <- paste(unlist(setup$fields), collapse = "|")
-assert_true(!grepl("YA|YB|0.1|0.2", setup_text),
+setup_values <- as.character(unlist(setup$fields, use.names = FALSE))
+target_specific_values <- c("YA", "YB", "0.1", "0.2")
+assert_true(!any(setup_values %in% target_specific_values),
             "setup fields must not contain target-specific values")
 assert_true(!identical(target_a$fingerprint, target_b$fingerprint),
             "target fingerprint must differ across targets")
