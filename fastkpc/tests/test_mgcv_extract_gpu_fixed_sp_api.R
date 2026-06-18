@@ -36,6 +36,18 @@ gpu <- fastkpc_mgcv_extract_gpu_fixed_sp(
   device = "cuda",
   allow_cpu_fallback = TRUE
 )
+handle_gpu <- fastkpc_mgcv_extract_gpu_fixed_sp(
+  formula = formula,
+  data = data,
+  sp = sp,
+  target = 1L,
+  S = 2L,
+  k = 8L,
+  bs = "tp",
+  device = "cuda",
+  allow_cpu_fallback = TRUE,
+  solve_strategy = "handle"
+)
 
 assert_true(identical(gpu$backend_family, "mgcvExtractGPU"),
             "backend family should identify mgcvExtractGPU")
@@ -63,6 +75,14 @@ assert_true(max(abs(gpu$fitted - cpu$fitted)) < 1e-10,
 assert_true(identical(gpu$setup_fingerprint$fingerprint,
                       cpu$setup_fingerprint$fingerprint),
             "fallback should preserve setup fingerprint")
+assert_true(identical(handle_gpu$solve_source, "fastkpc-handle-fixed-sp"),
+            "handle strategy should use handle fixed-sp solve source")
+assert_true(identical(handle_gpu$used_device, "cpu"),
+            "handle strategy should remain CPU until native GPU solve exists")
+assert_true(isTRUE(handle_gpu$fallback_used),
+            "handle strategy should still report fallback for cuda request")
+assert_true(max(abs(handle_gpu$residuals - cpu$residuals)) < 1e-8,
+            "handle strategy residuals should match Gate B CPU")
 
 no_fallback_error <- tryCatch({
   fastkpc_mgcv_extract_gpu_fixed_sp(

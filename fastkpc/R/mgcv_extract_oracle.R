@@ -708,10 +708,26 @@ fastkpc_mgcv_extract_gpu_fixed_sp <- function(formula, data, sp,
                                               bs = "tp",
                                               device = c("cuda", "auto", "cpu"),
                                               allow_cpu_fallback = TRUE,
+                                              solve_strategy = c("gate_b", "handle"),
                                               tol = sqrt(.Machine$double.eps)) {
   device <- match.arg(device)
-  if (identical(device, "cpu")) {
-    solved <- fastkpc_mgcv_extract_fixed_sp_solve(
+  solve_strategy <- match.arg(solve_strategy)
+  run_fallback_solve <- function() {
+    if (identical(solve_strategy, "gate_b")) {
+      return(fastkpc_mgcv_extract_fixed_sp_solve(
+        formula = formula,
+        data = data,
+        sp = sp,
+        method = method,
+        target = target,
+        S = S,
+        k = k,
+        bs = bs,
+        tol = tol
+      ))
+    }
+
+    ref <- fastkpc_mgcv_gam_fixed_sp_reference(
       formula = formula,
       data = data,
       sp = sp,
@@ -719,25 +735,65 @@ fastkpc_mgcv_extract_gpu_fixed_sp <- function(formula, data, sp,
       target = target,
       S = S,
       k = k,
-      bs = bs,
+      bs = bs
+    )
+    setup <- fastkpc_mgcv_extract_setup(
+      formula = formula,
+      data = data,
+      sp = ref$sp,
+      method = method,
+      target = target,
+      S = S,
+      k = k,
+      bs = bs
+    )
+    handle <- fastkpc_mgcv_extract_gpu_setup_handle(
+      setup = setup,
+      sp = setup$sp,
+      device_resident = FALSE,
       tol = tol
     )
+    solved <- fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp(
+      handle = handle,
+      tol = tol
+    )
+    target_fp <- fastkpc_target_fingerprint(
+      target = target,
+      y_hash = fastkpc_mgcv_hash_numeric(setup$y),
+      sp_input = sp,
+      sp_output = setup$sp,
+      selected_sp = setup$sp,
+      score = NA_real_,
+      edf = NA_real_,
+      rank_if_target_specific = setup$rank,
+      residual_hash = fastkpc_mgcv_hash_numeric(solved$residuals),
+      fitted_hash = fastkpc_mgcv_hash_numeric(solved$fitted)
+    )
+    solved$formula <- formula
+    solved$method <- method
+    solved$reference_mode <- ref$mode
+    solved$reference_coefficients <- ref$coefficients
+    solved$reference_fitted <- ref$fitted
+    solved$reference_residuals <- ref$residuals
+    solved$max_abs_fitted_diff <- max(abs(solved$fitted - ref$fitted))
+    solved$relative_l2_fitted_diff <- fastkpc_relative_l2_diff(solved$fitted, ref$fitted)
+    solved$max_abs_residual_diff <- max(abs(solved$residuals - ref$residuals))
+    solved$relative_l2_residual_diff <- fastkpc_relative_l2_diff(solved$residuals, ref$residuals)
+    solved$setup <- setup
+    solved$reference <- ref
+    solved$target_fingerprint <- target_fp
+    solved$mgcv_version <- setup$mgcv_version
+    solved
+  }
+
+  if (identical(device, "cpu")) {
+    solved <- run_fallback_solve()
     requested_device <- "cpu"
     used_device <- "cpu"
     fallback_used <- FALSE
     fallback_reason <- ""
   } else if (isTRUE(allow_cpu_fallback)) {
-    solved <- fastkpc_mgcv_extract_fixed_sp_solve(
-      formula = formula,
-      data = data,
-      sp = sp,
-      method = method,
-      target = target,
-      S = S,
-      k = k,
-      bs = bs,
-      tol = tol
-    )
+    solved <- run_fallback_solve()
     requested_device <- device
     used_device <- "cpu"
     fallback_used <- TRUE
@@ -760,6 +816,7 @@ fastkpc_mgcv_extract_gpu_fixed_sp <- function(formula, data, sp,
   solved$fallback_reason <- fallback_reason
   solved$gpu_bridge_version <- "mgcvExtractGPU-fixed-sp-api-v1"
   solved$native_gpu_solve_available <- FALSE
+  solved$solve_strategy <- solve_strategy
   solved$capabilities <- fastkpc_mgcv_extract_gpu_capabilities()
   solved
 }
@@ -818,6 +875,43 @@ fastkpc_mgcv_extract_gpu_setup_handle <- function(
       offset_policy = setup$offset_policy,
       setup_stage = "host-prepared",
       device_resident = isTRUE(device_resident)
+    )
+  )
+}
+
+fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp <- function(
+    handle,
+    tol = sqrt(.Machine$double.eps)) {
+  A <- handle$XtX_null + handle$penalty_null
+  b <- handle$Xty_null
+  theta <- as.numeric(qr.solve(A, b, tol = tol))
+  beta <- as.numeric(handle$Z %*% theta)
+  fitted <- as.numeric(handle$X %*% beta)
+  residuals <- as.numeric(handle$y - fitted)
+
+  list(
+    backend_family = "mgcvExtractGPU",
+    mode = "fixed-sp-handle-solve",
+    solve_source = "fastkpc-handle-fixed-sp",
+    sp_source = "fixed-input",
+    gcv_source = "none",
+    is_self_contained_gcv = FALSE,
+    used_device = "cpu",
+    native_gpu_solve_used = FALSE,
+    coefficients = beta,
+    theta = theta,
+    fitted = fitted,
+    residuals = residuals,
+    sp = handle$sp,
+    rss = sum(residuals^2),
+    setup_fingerprint = handle$setup_fingerprint,
+    handle_version = handle$handle_version,
+    diagnostics = c(
+      handle$diagnostics,
+      list(
+        solve_stage = "host-handle-linear-solve",
+        linear_system_dim = ncol(handle$X_null)
+      )
     )
   )
 }
