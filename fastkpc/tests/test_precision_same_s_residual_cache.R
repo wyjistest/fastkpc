@@ -32,7 +32,10 @@ pair_env <- new.env(parent = emptyenv())
 pair_env$count <- 0L
 pair_env$calls <- list()
 assign("fastkpc_mgcv_extract_gpu_gcv_for_pair", function(data, x, y, S,
-                                                         sp_grid = NULL) {
+                                                         sp_grid = NULL,
+                                                         context = NULL,
+                                                         prepared_setup = NULL,
+                                                         prepared_spectral = NULL) {
   pair_env$count <- pair_env$count + 1L
   pair_env$calls[[length(pair_env$calls) + 1L]] <- list(x = x, y = y, S = S)
   residual_for <- function(target) {
@@ -76,8 +79,8 @@ assign("fastkpc_mgcv_extract_gpu_gcv_for_pair", function(data, x, y, S,
     ),
     timings = list(
       residualization_total_ms = 20,
-      mgcv_setup_cpu_ms = 4,
-      spectral_prepare_ms = 5,
+      mgcv_setup_cpu_ms = if (is.null(prepared_setup)) 4 else 0,
+      spectral_prepare_ms = if (is.null(prepared_spectral)) 5 else 0,
       gcv_score_ms = 6,
       linear_solve_ms = 7,
       host_to_device_ms = 8,
@@ -91,7 +94,10 @@ target_env <- new.env(parent = emptyenv())
 target_env$count <- 0L
 target_env$calls <- list()
 assign("fastkpc_mgcv_extract_gpu_gcv_for_target", function(data, target, S,
-                                                           sp_grid = NULL) {
+                                                           sp_grid = NULL,
+                                                           context = NULL,
+                                                           prepared_setup = NULL,
+                                                           prepared_spectral = NULL) {
   target_env$count <- target_env$count + 1L
   target_env$calls[[length(target_env$calls) + 1L]] <-
     list(target = target, S = S)
@@ -119,8 +125,8 @@ assign("fastkpc_mgcv_extract_gpu_gcv_for_target", function(data, target, S,
     ),
     timings = list(
       residualization_total_ms = 11,
-      mgcv_setup_cpu_ms = 2,
-      spectral_prepare_ms = 3,
+      mgcv_setup_cpu_ms = if (is.null(prepared_setup)) 2 else 0,
+      spectral_prepare_ms = if (is.null(prepared_spectral)) 3 else 0,
       gcv_score_ms = 4,
       linear_solve_ms = 5,
       host_to_device_ms = 6,
@@ -215,6 +221,10 @@ assert_true(all(partial_rows$cache_service_mode == "partial-hit"),
             "partial cache hit rows should report partial-hit service mode")
 assert_true(all(partial_rows$residualization_compute_ms == 11),
             "partial cache hit rows should retain single-target compute timing")
+assert_true(all(partial_rows$mgcv_setup_cpu_ms == 0),
+            "partial cache hit rows should reuse prepared setup")
+assert_true(all(partial_rows$spectral_prepare_ms == 0),
+            "partial cache hit rows should reuse prepared spectral state")
 assert_true(all(partial_rows$cache_lookup_ms >= 0),
             "partial cache hit rows should report cache lookup timing")
 assert_true(all(partial_rows$cuda_single_target_calls == 1L),
@@ -239,5 +249,30 @@ assert_true(cached$skeleton$residual_cache$cuda_solve_calls ==
               cached$skeleton$residual_cache$cuda_batch_calls +
                 cached$skeleton$residual_cache$cuda_single_target_calls,
             "cuda solve call stats should count both pair batch and single-target calls")
+assert_true(cached$skeleton$residual_cache$cuda_api_calls ==
+              cached$skeleton$residual_cache$cuda_solve_calls,
+            "cuda_api_calls should alias native API invocation count")
+assert_true(cached$skeleton$residual_cache$cuda_batch_api_calls ==
+              cached$skeleton$residual_cache$cuda_batch_calls,
+            "cuda_batch_api_calls should alias pair batch API calls")
+assert_true(cached$skeleton$residual_cache$cuda_single_target_api_calls ==
+              cached$skeleton$residual_cache$cuda_single_target_calls,
+            "cuda_single_target_api_calls should alias single-target API calls")
+assert_true(cached$skeleton$residual_cache$cuda_target_solves ==
+              cached$skeleton$residual_cache$target_computations,
+            "cuda_target_solves should count solved target systems")
+assert_true(cached$skeleton$residual_cache$setup_cache_hits > 0L,
+            "same-S misses should reuse prepared setup state")
+assert_true(cached$skeleton$residual_cache$spectral_cache_hits > 0L,
+            "same-S misses should reuse prepared spectral state")
+assert_true(cached$skeleton$residual_cache$setup_cache_entries > 0L,
+            "setup cache should report entry count")
+assert_true(cached$skeleton$residual_cache$spectral_cache_entries > 0L,
+            "spectral cache should report entry count")
+assert_true(cached$skeleton$residual_cache$prepared_cache_current_bytes > 0,
+            "prepared cache should report current memory use")
+assert_true(cached$skeleton$residual_cache$prepared_cache_peak_bytes >=
+              cached$skeleton$residual_cache$prepared_cache_current_bytes,
+            "prepared cache peak bytes should cover current bytes")
 
 cat("PASS precision same-S residual cache\n")

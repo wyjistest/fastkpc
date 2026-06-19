@@ -188,6 +188,8 @@ fastkpc_precision_create_execution_context <- function(data, residual_cache,
     runtime_capabilities = runtime_capabilities,
     execution_engine = execution_engine,
     residual_cache = new.env(parent = emptyenv()),
+    setup_cache = new.env(parent = emptyenv()),
+    spectral_cache = new.env(parent = emptyenv()),
     residual_cache_stats = new.env(parent = emptyenv())
   )
 }
@@ -210,9 +212,80 @@ fastkpc_precision_init_cache_stats <- function(context) {
   stats$cuda_solve_calls <- 0L
   stats$stored_vectors <- 0L
   stats$stored_values <- 0L
+  stats$setup_cache_requests <- 0L
   stats$setup_cache_hits <- 0L
+  stats$setup_cache_misses <- 0L
+  stats$setup_cache_entries <- 0L
+  stats$spectral_cache_requests <- 0L
   stats$spectral_cache_hits <- 0L
+  stats$spectral_cache_misses <- 0L
+  stats$spectral_cache_entries <- 0L
+  stats$prepared_cache_evictions <- 0L
+  stats$setup_cache_bytes <- 0
+  stats$spectral_cache_bytes <- 0
+  stats$prepared_cache_current_bytes <- 0
+  stats$prepared_cache_peak_bytes <- 0
   invisible(NULL)
+}
+
+fastkpc_precision_env_bytes <- function(env) {
+  if (is.null(env)) return(0)
+  keys <- ls(envir = env, all.names = TRUE)
+  if (length(keys) == 0L) return(0)
+  sum(vapply(keys, function(key) {
+    as.numeric(utils::object.size(get(key, envir = env, inherits = FALSE)))
+  }, numeric(1)), na.rm = TRUE)
+}
+
+fastkpc_precision_update_prepared_cache_memory <- function(context) {
+  if (is.null(context) || is.null(context$residual_cache_stats)) {
+    return(invisible(NULL))
+  }
+  stats <- context$residual_cache_stats
+  setup_bytes <- fastkpc_precision_env_bytes(context$setup_cache)
+  spectral_bytes <- fastkpc_precision_env_bytes(context$spectral_cache)
+  current <- setup_bytes + spectral_bytes
+  stats$setup_cache_bytes <- setup_bytes
+  stats$spectral_cache_bytes <- spectral_bytes
+  stats$prepared_cache_current_bytes <- current
+  stats$prepared_cache_peak_bytes <- max(
+    as.numeric(stats$prepared_cache_peak_bytes %||% 0),
+    current,
+    na.rm = TRUE
+  )
+  invisible(NULL)
+}
+
+fastkpc_precision_setup_cache_key <- function(context, S, formula_class,
+                                              backend = "mgcvExtractGPU",
+                                              bs = "tp", k = NA_integer_) {
+  runtime <- context$runtime_capabilities %||% list()
+  fastkpc_hash_object(list(
+    data_hash = context$data_hash %||% NA_character_,
+    S = as.integer(S),
+    formula_class = as.character(formula_class),
+    backend = as.character(backend),
+    bs = as.character(bs),
+    k = as.integer(k),
+    mgcv_version = runtime$mgcv_version %||% NA_character_,
+    setup_schema =
+      runtime$setup_fingerprint_schema_version %||% NA_character_,
+    execution_engine = context$execution_engine %||% NA_character_
+  ))
+}
+
+fastkpc_precision_spectral_cache_key <- function(context, setup_fingerprint,
+                                                 backend = "mgcvExtractGPU",
+                                                 tol = sqrt(.Machine$double.eps)) {
+  runtime <- context$runtime_capabilities %||% list()
+  fastkpc_hash_object(list(
+    data_hash = context$data_hash %||% NA_character_,
+    setup_fingerprint = as.character(setup_fingerprint),
+    backend = as.character(backend),
+    spectral_gcv_version = runtime$spectral_gcv_version %||% NA_character_,
+    tol = signif(as.numeric(tol), digits = 14),
+    execution_engine = context$execution_engine %||% NA_character_
+  ))
 }
 
 fastkpc_precision_residual_cache_key <- function(context, target, S, backend,
@@ -251,10 +324,33 @@ fastkpc_precision_cache_stats <- function(context, backend_name) {
     cuda_single_target_calls =
       as.integer(stats$cuda_single_target_calls %||% 0L),
     cuda_solve_calls = as.integer(stats$cuda_solve_calls %||% 0L),
+    cuda_api_calls = as.integer(stats$cuda_solve_calls %||% 0L),
+    cuda_batch_api_calls = as.integer(stats$cuda_batch_calls %||% 0L),
+    cuda_single_target_api_calls =
+      as.integer(stats$cuda_single_target_calls %||% 0L),
+    cuda_target_solves = as.integer(stats$target_computations %||% 0L),
     stored_vectors = as.integer(stats$stored_vectors %||% 0L),
     stored_values = as.integer(stats$stored_values %||% 0L),
+    setup_cache_requests =
+      as.integer(stats$setup_cache_requests %||% 0L),
     setup_cache_hits = as.integer(stats$setup_cache_hits %||% 0L),
+    setup_cache_misses = as.integer(stats$setup_cache_misses %||% 0L),
+    setup_cache_entries = as.integer(stats$setup_cache_entries %||% 0L),
+    spectral_cache_requests =
+      as.integer(stats$spectral_cache_requests %||% 0L),
     spectral_cache_hits = as.integer(stats$spectral_cache_hits %||% 0L),
+    spectral_cache_misses =
+      as.integer(stats$spectral_cache_misses %||% 0L),
+    spectral_cache_entries =
+      as.integer(stats$spectral_cache_entries %||% 0L),
+    prepared_cache_evictions =
+      as.integer(stats$prepared_cache_evictions %||% 0L),
+    setup_cache_bytes = as.numeric(stats$setup_cache_bytes %||% 0),
+    spectral_cache_bytes = as.numeric(stats$spectral_cache_bytes %||% 0),
+    prepared_cache_current_bytes =
+      as.numeric(stats$prepared_cache_current_bytes %||% 0),
+    prepared_cache_peak_bytes =
+      as.numeric(stats$prepared_cache_peak_bytes %||% 0),
     backend_name = backend_name
   )
 }
@@ -414,8 +510,273 @@ fastkpc_gpu_residual_timings <- function(timings = NULL,
   )
 }
 
+fastkpc_strip_target_from_setup <- function(setup) {
+  setup$G <- NULL
+  setup$y <- NULL
+  setup
+}
+
+fastkpc_strip_target_from_handle <- function(handle) {
+  handle$y <- NULL
+  handle$Xty_null <- NULL
+  handle
+}
+
+fastkpc_prepare_gpu_setup_state <- function(data, S, template_target,
+                                            sp_grid, context = NULL,
+                                            bs = "tp", k = NA_integer_,
+                                            tol = sqrt(.Machine$double.eps)) {
+  setup_start <- proc.time()[["elapsed"]]
+  S_data <- as.data.frame(data[, S, drop = FALSE])
+  colnames(S_data) <- paste0("s", seq_along(S))
+  rhs <- fastkpc_mgcv_regrxons_rhs(
+    S_data = S_data,
+    S = S,
+    formula_class = fastkpc_regrxons_formula_class(S)
+  )
+  form <- stats::as.formula(paste(".target ~", rhs))
+  formula_class <- fastkpc_regrxons_formula_class(S)
+  cache_enabled <- !is.null(context) && isTRUE(context$residual_cache_enabled)
+  setup_key <- if (isTRUE(cache_enabled)) {
+    fastkpc_precision_setup_cache_key(
+      context = context, S = S, formula_class = formula_class,
+      backend = "mgcvExtractGPU", bs = bs, k = k
+    )
+  } else {
+    NA_character_
+  }
+  if (isTRUE(cache_enabled)) {
+    context$residual_cache_stats$setup_cache_requests <-
+      as.integer(context$residual_cache_stats$setup_cache_requests %||% 0L) + 1L
+    cached <- if (exists(setup_key, envir = context$setup_cache,
+                         inherits = FALSE)) {
+      get(setup_key, envir = context$setup_cache, inherits = FALSE)
+    } else {
+      NULL
+    }
+    valid_cached <- !is.null(cached) &&
+      identical(cached$data_hash, context$data_hash) &&
+      identical(cached$S, as.integer(S)) &&
+      identical(cached$formula_class, formula_class) &&
+      is.null(cached$template_setup$y) &&
+      is.null(cached$base_handle$y) &&
+      is.null(cached$base_handle$Xty_null)
+    if (!is.null(cached) && !isTRUE(valid_cached)) {
+      rm(list = setup_key, envir = context$setup_cache)
+      context$residual_cache_stats$prepared_cache_evictions <-
+        as.integer(context$residual_cache_stats$prepared_cache_evictions %||% 0L) + 1L
+      fastkpc_precision_update_prepared_cache_memory(context)
+      cached <- NULL
+    }
+    if (!is.null(cached)) {
+      context$residual_cache_stats$setup_cache_hits <-
+        as.integer(context$residual_cache_stats$setup_cache_hits %||% 0L) + 1L
+      cached$cache_hit <- TRUE
+      cached$timings$mgcv_setup_cpu_ms <- 0
+      return(cached)
+    }
+    context$residual_cache_stats$setup_cache_misses <-
+      as.integer(context$residual_cache_stats$setup_cache_misses %||% 0L) + 1L
+  }
+
+  template_setup <- fastkpc_mgcv_extract_setup(
+    formula = form,
+    data = data.frame(.target = as.numeric(data[, template_target]), S_data),
+    sp = 1,
+    method = "GCV.Cp",
+    target = template_target,
+    S = S,
+    k = k,
+    bs = bs
+  )
+  setup_ms <- (proc.time()[["elapsed"]] - setup_start) * 1000
+  if (length(template_setup$S) != 1L) {
+    stop("mgcvExtractGPU GCV currently supports single-penalty setups only",
+         call. = FALSE)
+  }
+  base_handle <- fastkpc_mgcv_extract_gpu_setup_handle(
+    setup = template_setup,
+    sp = 1,
+    device_resident = TRUE,
+    tol = tol
+  )
+  prepared <- list(
+    data_hash = if (is.null(context)) NA_character_ else context$data_hash,
+    S = as.integer(S),
+    formula_class = formula_class,
+    form = form,
+    S_data = S_data,
+    template_setup = fastkpc_strip_target_from_setup(template_setup),
+    base_handle = fastkpc_strip_target_from_handle(base_handle),
+    setup_fingerprint = template_setup$setup_fingerprint$fingerprint,
+    sp_grid = sp_grid,
+    cache_key = setup_key,
+    cache_hit = FALSE,
+    timings = list(mgcv_setup_cpu_ms = setup_ms)
+  )
+  if (isTRUE(cache_enabled)) {
+    assign(setup_key, prepared, envir = context$setup_cache)
+    context$residual_cache_stats$setup_cache_entries <-
+      length(ls(envir = context$setup_cache, all.names = TRUE))
+    fastkpc_precision_update_prepared_cache_memory(context)
+  }
+  prepared
+}
+
+fastkpc_prepare_gpu_spectral_state <- function(prepared_setup,
+                                               context = NULL,
+                                               tol = sqrt(.Machine$double.eps)) {
+  spectral_start <- proc.time()[["elapsed"]]
+  cache_enabled <- !is.null(context) && isTRUE(context$residual_cache_enabled)
+  spectral_key <- if (isTRUE(cache_enabled)) {
+    fastkpc_precision_spectral_cache_key(
+      context = context,
+      setup_fingerprint = prepared_setup$setup_fingerprint,
+      backend = "mgcvExtractGPU",
+      tol = tol
+    )
+  } else {
+    NA_character_
+  }
+  if (isTRUE(cache_enabled)) {
+    context$residual_cache_stats$spectral_cache_requests <-
+      as.integer(context$residual_cache_stats$spectral_cache_requests %||% 0L) + 1L
+    cached <- if (exists(spectral_key, envir = context$spectral_cache,
+                         inherits = FALSE)) {
+      get(spectral_key, envir = context$spectral_cache, inherits = FALSE)
+    } else {
+      NULL
+    }
+    valid_cached <- !is.null(cached) &&
+      identical(cached$setup_fingerprint, prepared_setup$setup_fingerprint)
+    if (!is.null(cached) && !isTRUE(valid_cached)) {
+      rm(list = spectral_key, envir = context$spectral_cache)
+      context$residual_cache_stats$prepared_cache_evictions <-
+        as.integer(context$residual_cache_stats$prepared_cache_evictions %||% 0L) + 1L
+      fastkpc_precision_update_prepared_cache_memory(context)
+      cached <- NULL
+    }
+    if (!is.null(cached)) {
+      context$residual_cache_stats$spectral_cache_hits <-
+        as.integer(context$residual_cache_stats$spectral_cache_hits %||% 0L) + 1L
+      cached$cache_hit <- TRUE
+      cached$timings$spectral_prepare_ms <- 0
+      return(cached)
+    }
+    context$residual_cache_stats$spectral_cache_misses <-
+      as.integer(context$residual_cache_stats$spectral_cache_misses %||% 0L) + 1L
+  }
+  spectral <- fastkpc_mgcv_extract_gpu_spectral_prepare(
+    prepared_setup$base_handle,
+    tol = tol
+  )
+  spectral_ms <- (proc.time()[["elapsed"]] - spectral_start) * 1000
+  prepared <- list(
+    setup_fingerprint = prepared_setup$setup_fingerprint,
+    spectral = spectral,
+    cache_key = spectral_key,
+    cache_hit = FALSE,
+    timings = list(spectral_prepare_ms = spectral_ms)
+  )
+  if (isTRUE(cache_enabled)) {
+    assign(spectral_key, prepared, envir = context$spectral_cache)
+    context$residual_cache_stats$spectral_cache_entries <-
+      length(ls(envir = context$spectral_cache, all.names = TRUE))
+    fastkpc_precision_update_prepared_cache_memory(context)
+  }
+  prepared
+}
+
+fastkpc_score_gpu_target_from_prepared <- function(data, target,
+                                                   prepared_setup,
+                                                   prepared_spectral,
+                                                   sp_grid,
+                                                   tol = sqrt(.Machine$double.eps)) {
+  yj <- as.numeric(data[, target])
+  Xty_null <- as.numeric(crossprod(prepared_setup$base_handle$X_null, yj))
+  scored <- fastkpc_mgcv_extract_gpu_spectral_score_grid(
+    spectral = prepared_spectral$spectral,
+    y = yj,
+    Xty_null = Xty_null,
+    sp_grid = sp_grid,
+    tol = tol
+  )
+  grid <- scored$grid
+  valid <- is.finite(grid$rss) & is.finite(grid$edf) & is.finite(grid$gcv)
+  if (!any(valid)) {
+    stop("No valid GCV candidate in sp_grid", call. = FALSE)
+  }
+  idx <- which(grid$gcv == min(grid$gcv[valid]))[1L]
+  list(
+    target = as.integer(target),
+    grid = grid,
+    selected_grid_index = idx,
+    sp = as.numeric(sp_grid[idx]),
+    score = as.numeric(grid$gcv[idx]),
+    edf = as.numeric(grid$edf[idx]),
+    y = yj,
+    Xty_null = Xty_null
+  )
+}
+
+fastkpc_gpu_handle_for_scored_target <- function(scored, prepared_setup) {
+  handle <- prepared_setup$base_handle
+  handle$y <- scored$y
+  handle$sp <- scored$sp
+  handle$Xty_null <- scored$Xty_null
+  template_setup <- prepared_setup$template_setup
+  penalty <- fastkpc_assemble_penalty(
+    p = ncol(template_setup$X),
+    S = template_setup$S,
+    off = template_setup$off,
+    sp = scored$sp,
+    H = template_setup$H
+  )
+  handle$penalty <- penalty
+  handle$penalty_null <- crossprod(handle$Z, penalty %*% handle$Z)
+  handle$setup_fingerprint <- template_setup$setup_fingerprint
+  handle
+}
+
+fastkpc_call_gpu_target_wrapper <- function(data, target, S, sp_grid,
+                                            context = NULL,
+                                            prepared_setup = NULL,
+                                            prepared_spectral = NULL) {
+  fn <- get("fastkpc_mgcv_extract_gpu_gcv_for_target", mode = "function")
+  args <- list(data = data, target = target, S = S, sp_grid = sp_grid)
+  formals_names <- names(formals(fn))
+  if ("context" %in% formals_names) args$context <- context
+  if ("prepared_setup" %in% formals_names) {
+    args$prepared_setup <- prepared_setup
+  }
+  if ("prepared_spectral" %in% formals_names) {
+    args$prepared_spectral <- prepared_spectral
+  }
+  do.call(fn, args)
+}
+
+fastkpc_call_gpu_pair_wrapper <- function(data, x, y, S, sp_grid,
+                                          context = NULL,
+                                          prepared_setup = NULL,
+                                          prepared_spectral = NULL) {
+  fn <- get("fastkpc_mgcv_extract_gpu_gcv_for_pair", mode = "function")
+  args <- list(data = data, x = x, y = y, S = S, sp_grid = sp_grid)
+  formals_names <- names(formals(fn))
+  if ("context" %in% formals_names) args$context <- context
+  if ("prepared_setup" %in% formals_names) {
+    args$prepared_setup <- prepared_setup
+  }
+  if ("prepared_spectral" %in% formals_names) {
+    args$prepared_spectral <- prepared_spectral
+  }
+  do.call(fn, args)
+}
+
 fastkpc_mgcv_extract_gpu_gcv_for_target <- function(data, target, S,
-                                                    sp_grid = NULL) {
+                                                    sp_grid = NULL,
+                                                    context = NULL,
+                                                    prepared_setup = NULL,
+                                                    prepared_spectral = NULL) {
   start <- proc.time()[["elapsed"]]
   if (length(S) == 0L) {
     elapsed <- (proc.time()[["elapsed"]] - start) * 1000
@@ -443,44 +804,73 @@ fastkpc_mgcv_extract_gpu_gcv_for_target <- function(data, target, S,
   if (length(S) > 2L) {
     stop("mgcvExtractGPU precision slice supports |S| <= 2", call. = FALSE)
   }
-  S_data <- as.data.frame(data[, S, drop = FALSE])
-  colnames(S_data) <- paste0("s", seq_along(S))
-  local_data <- data.frame(.target = as.numeric(data[, target]), S_data)
-  rhs <- fastkpc_mgcv_regrxons_rhs(
-    S_data = S_data,
-    S = S,
-    formula_class = fastkpc_regrxons_formula_class(S)
-  )
-  form <- stats::as.formula(paste(".target ~", rhs))
   if (is.null(sp_grid)) {
     sp_grid <- exp(seq(log(1e-4), log(1e4), length.out = 17L))
   }
-  fit <- fastkpc_mgcv_extract_gpu_gcv(
-    formula = form,
-    data = local_data,
-    setup_sp = 1,
-    sp_grid = sp_grid,
-    method = "GCV.Cp",
+  sp_grid <- fastkpc_validate_fixed_positive_sp(sp_grid)
+  if (is.null(prepared_setup)) {
+    prepared_setup <- fastkpc_prepare_gpu_setup_state(
+      data = data,
+      S = S,
+      template_target = target,
+      sp_grid = sp_grid,
+      context = context
+    )
+  }
+  if (is.null(prepared_spectral)) {
+    prepared_spectral <- fastkpc_prepare_gpu_spectral_state(
+      prepared_setup,
+      context = context
+    )
+  }
+  gcv_start <- proc.time()[["elapsed"]]
+  scored <- fastkpc_score_gpu_target_from_prepared(
+    data = data,
     target = target,
-    S = S,
-    bs = "tp",
-    device = "cuda",
-    allow_cpu_fallback = FALSE,
-    gcv_strategy = "spectral"
+    prepared_setup = prepared_setup,
+    prepared_spectral = prepared_spectral,
+    sp_grid = sp_grid
   )
+  gcv_ms <- (proc.time()[["elapsed"]] - gcv_start) * 1000
+  handle <- fastkpc_gpu_handle_for_scored_target(scored, prepared_setup)
+  solve_start <- proc.time()[["elapsed"]]
+  solved <- fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp_cuda(handle)
+  solve_ms <- (proc.time()[["elapsed"]] - solve_start) * 1000
+  materialize_start <- proc.time()[["elapsed"]]
+  residuals <- as.numeric(solved$residuals)
+  fitted <- as.numeric(solved$fitted)
+  materialize_ms <- (proc.time()[["elapsed"]] - materialize_start) * 1000
   elapsed <- (proc.time()[["elapsed"]] - start) * 1000
   list(
-    residuals = fit$residuals,
-    fitted = fit$fitted,
-    setup_fingerprint = fastkpc_setup_fingerprint_value(fit$setup_fingerprint),
-    setup_fingerprint_full = fit$setup_fingerprint,
-    sp = fit$sp,
-    score = fit$score,
-    edf = fit$edf,
-    grid = fit$grid,
-    fit = fit,
+    residuals = residuals,
+    fitted = fitted,
+    setup_fingerprint = prepared_setup$setup_fingerprint,
+    setup_fingerprint_full = prepared_setup$template_setup$setup_fingerprint,
+    sp = scored$sp,
+    score = scored$score,
+    edf = scored$edf,
+    selected_grid_index = as.integer(scored$selected_grid_index),
+    grid = scored$grid,
+    fit = list(
+      used_device = solved$used_device,
+      native_gpu_solve_used = isTRUE(solved$native_gpu_solve_used),
+      setup_fingerprint = prepared_setup$template_setup$setup_fingerprint,
+      sp_selection_backend_executed = "r-cpu-spectral",
+      gcv_score_backend_executed = "r-cpu-spectral",
+      selected_solve_backend_executed = solved$used_device
+    ),
     timings = fastkpc_gpu_residual_timings(
-      fit$timings,
+      list(
+        mgcv_setup_cpu_ms = prepared_setup$timings$mgcv_setup_cpu_ms %||%
+          NA_real_,
+        spectral_prepare_ms =
+          prepared_spectral$timings$spectral_prepare_ms %||% NA_real_,
+        gcv_score_ms = gcv_ms,
+        linear_solve_ms = solve_ms,
+        residual_materialize_ms = materialize_ms,
+        host_to_device_ms = NA_real_,
+        device_to_host_ms = NA_real_
+      ),
       residualization_total_ms = elapsed,
       residualization_compute_ms = elapsed
     )
@@ -488,7 +878,10 @@ fastkpc_mgcv_extract_gpu_gcv_for_target <- function(data, target, S,
 }
 
 fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
-                                                  sp_grid = NULL) {
+                                                  sp_grid = NULL,
+                                                  context = NULL,
+                                                  prepared_setup = NULL,
+                                                  prepared_spectral = NULL) {
   total_start <- proc.time()[["elapsed"]]
   if (length(S) == 0L) {
     setup_fingerprint <- paste0("direct:", x, "-", y)
@@ -544,88 +937,39 @@ fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
   }
   sp_grid <- fastkpc_validate_fixed_positive_sp(sp_grid)
 
-  S_data <- as.data.frame(data[, S, drop = FALSE])
-  colnames(S_data) <- paste0("s", seq_along(S))
-  Y <- cbind(x = as.numeric(data[, x]), y = as.numeric(data[, y]))
-  rhs <- fastkpc_mgcv_regrxons_rhs(
-    S_data = S_data,
-    S = S,
-    formula_class = fastkpc_regrxons_formula_class(S)
-  )
-  form <- stats::as.formula(paste(".target ~", rhs))
-
-  setup_start <- proc.time()[["elapsed"]]
-  template_setup <- fastkpc_mgcv_extract_setup(
-    formula = form,
-    data = data.frame(.target = Y[, 1L], S_data),
-    sp = 1,
-    method = "GCV.Cp",
-    target = x,
-    S = S,
-    bs = "tp"
-  )
-  setup_ms <- (proc.time()[["elapsed"]] - setup_start) * 1000
-  if (length(template_setup$S) != 1L) {
-    stop("mgcvExtractGPU GCV currently supports single-penalty setups only",
-         call. = FALSE)
+  if (is.null(prepared_setup)) {
+    prepared_setup <- fastkpc_prepare_gpu_setup_state(
+      data = data,
+      S = S,
+      template_target = x,
+      sp_grid = sp_grid,
+      context = context
+    )
   }
-
-  spectral_start <- proc.time()[["elapsed"]]
-  base_handle <- fastkpc_mgcv_extract_gpu_setup_handle(
-    setup = template_setup,
-    sp = 1,
-    device_resident = TRUE
-  )
-  spectral <- fastkpc_mgcv_extract_gpu_spectral_prepare(base_handle)
-  spectral_ms <- (proc.time()[["elapsed"]] - spectral_start) * 1000
+  if (is.null(prepared_spectral)) {
+    prepared_spectral <- fastkpc_prepare_gpu_spectral_state(
+      prepared_setup,
+      context = context
+    )
+  }
 
   gcv_start <- proc.time()[["elapsed"]]
   target_ids <- c(x = as.integer(x), y = as.integer(y))
-  score_one <- function(j) {
-    yj <- Y[, j]
-    Xty_null <- as.numeric(crossprod(base_handle$X_null, yj))
-    scored <- fastkpc_mgcv_extract_gpu_spectral_score_grid(
-      spectral = spectral,
-      y = yj,
-      Xty_null = Xty_null,
+  score_one <- function(target) {
+    fastkpc_score_gpu_target_from_prepared(
+      data = data,
+      target = target,
+      prepared_setup = prepared_setup,
+      prepared_spectral = prepared_spectral,
       sp_grid = sp_grid
     )
-    grid <- scored$grid
-    valid <- is.finite(grid$rss) & is.finite(grid$edf) & is.finite(grid$gcv)
-    if (!any(valid)) {
-      stop("No valid GCV candidate in sp_grid", call. = FALSE)
-    }
-    idx <- which(grid$gcv == min(grid$gcv[valid]))[1L]
-    list(
-      grid = grid,
-      selected_grid_index = idx,
-      sp = as.numeric(sp_grid[idx]),
-      score = as.numeric(grid$gcv[idx]),
-      edf = as.numeric(grid$edf[idx]),
-      y = yj,
-      Xty_null = Xty_null
-    )
   }
-  scored <- lapply(seq_len(ncol(Y)), score_one)
+  scored <- lapply(target_ids, score_one)
   gcv_ms <- (proc.time()[["elapsed"]] - gcv_start) * 1000
   selected_sp <- vapply(scored, `[[`, numeric(1), "sp")
 
   make_handle <- function(j) {
-    handle <- base_handle
-    handle$y <- scored[[j]]$y
-    handle$sp <- selected_sp[j]
-    handle$Xty_null <- scored[[j]]$Xty_null
-    penalty <- fastkpc_assemble_penalty(
-      p = ncol(template_setup$X),
-      S = template_setup$S,
-      off = template_setup$off,
-      sp = selected_sp[j],
-      H = template_setup$H
-    )
-    handle$penalty <- penalty
-    handle$penalty_null <- crossprod(handle$Z, penalty %*% handle$Z)
-    handle$setup_fingerprint <- template_setup$setup_fingerprint
-    handle
+    fastkpc_gpu_handle_for_scored_target(scored[[j]], prepared_setup)
   }
   handles <- lapply(seq_along(selected_sp), make_handle)
 
@@ -644,7 +988,7 @@ fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
   theta <- lapply(seq_along(selected_sp), function(j) native$theta[, j])
   materialize_ms <- (proc.time()[["elapsed"]] - materialize_start) * 1000
 
-  shared_setup <- template_setup$setup_fingerprint$fingerprint
+  shared_setup <- prepared_setup$setup_fingerprint
   elapsed <- (proc.time()[["elapsed"]] - total_start) * 1000
   list(
     residuals = residuals,
@@ -672,7 +1016,7 @@ fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
       used_device_y = "cuda",
       native_gpu_solve_used_x = TRUE,
       native_gpu_solve_used_y = TRUE,
-      setup_fingerprint = template_setup$setup_fingerprint,
+      setup_fingerprint = prepared_setup$template_setup$setup_fingerprint,
       setup_fingerprint_x = shared_setup,
       setup_fingerprint_y = shared_setup,
       shared_setup_fingerprint = shared_setup,
@@ -687,9 +1031,11 @@ fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
       batch_stage = "native-same-setup-repeated-cuda-solve"
     ),
     timings = list(
-      mgcv_setup_cpu_ms = setup_ms,
+      mgcv_setup_cpu_ms =
+        prepared_setup$timings$mgcv_setup_cpu_ms %||% NA_real_,
       host_to_device_ms = NA_real_,
-      spectral_prepare_ms = spectral_ms,
+      spectral_prepare_ms =
+        prepared_spectral$timings$spectral_prepare_ms %||% NA_real_,
       gcv_score_ms = gcv_ms,
       linear_solve_ms = solve_ms,
       residual_materialize_ms = materialize_ms,
@@ -926,11 +1272,25 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
     cache_service_mode <- "partial-hit"
     miss_index <- if (!isTRUE(cache_hit_x)) 1L else 2L
     miss_target <- targets[[miss_index]]
-    target_fit <- fastkpc_mgcv_extract_gpu_gcv_for_target(
+    prepared_setup <- fastkpc_prepare_gpu_setup_state(
+      data = data,
+      S = S,
+      template_target = miss_target,
+      sp_grid = sp_grid,
+      context = context
+    )
+    prepared_spectral <- fastkpc_prepare_gpu_spectral_state(
+      prepared_setup,
+      context = context
+    )
+    target_fit <- fastkpc_call_gpu_target_wrapper(
       data = data,
       target = miss_target,
       S = S,
-      sp_grid = sp_grid
+      sp_grid = sp_grid,
+      context = context,
+      prepared_setup = prepared_setup,
+      prepared_spectral = prepared_spectral
     )
     miss_entry <- fastkpc_entry_from_gpu_target(target_fit, miss_target)
     target_timings <- miss_entry$timings %||% list()
@@ -971,8 +1331,27 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
     )
   } else {
     cache_service_mode <- "full-miss"
-    pair <- fastkpc_mgcv_extract_gpu_gcv_for_pair(data, x, y, S,
-                                                  sp_grid = sp_grid)
+    prepared_setup <- fastkpc_prepare_gpu_setup_state(
+      data = data,
+      S = S,
+      template_target = x,
+      sp_grid = sp_grid,
+      context = context
+    )
+    prepared_spectral <- fastkpc_prepare_gpu_spectral_state(
+      prepared_setup,
+      context = context
+    )
+    pair <- fastkpc_call_gpu_pair_wrapper(
+      data = data,
+      x = x,
+      y = y,
+      S = S,
+      sp_grid = sp_grid,
+      context = context,
+      prepared_setup = prepared_setup,
+      prepared_spectral = prepared_spectral
+    )
     residualization_compute_ms <-
       pair$timings$residualization_total_ms %||% NA_real_
     cuda_single_target_calls <- 0L
@@ -1843,8 +2222,30 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
         residual_cache_cuda_single_target_calls =
           cache$cuda_single_target_calls,
         residual_cache_cuda_solve_calls = cache$cuda_solve_calls,
+        residual_cache_cuda_api_calls = cache$cuda_api_calls,
+        residual_cache_cuda_batch_api_calls = cache$cuda_batch_api_calls,
+        residual_cache_cuda_single_target_api_calls =
+          cache$cuda_single_target_api_calls,
+        residual_cache_cuda_target_solves = cache$cuda_target_solves,
         residual_cache_stored_vectors = cache$stored_vectors,
         residual_cache_stored_values = cache$stored_values,
+        residual_cache_setup_cache_requests = cache$setup_cache_requests,
+        residual_cache_setup_cache_hits = cache$setup_cache_hits,
+        residual_cache_setup_cache_misses = cache$setup_cache_misses,
+        residual_cache_setup_cache_entries = cache$setup_cache_entries,
+        residual_cache_spectral_cache_requests =
+          cache$spectral_cache_requests,
+        residual_cache_spectral_cache_hits = cache$spectral_cache_hits,
+        residual_cache_spectral_cache_misses = cache$spectral_cache_misses,
+        residual_cache_spectral_cache_entries = cache$spectral_cache_entries,
+        residual_cache_prepared_cache_evictions =
+          cache$prepared_cache_evictions,
+        residual_cache_setup_cache_bytes = cache$setup_cache_bytes,
+        residual_cache_spectral_cache_bytes = cache$spectral_cache_bytes,
+        residual_cache_prepared_cache_current_bytes =
+          cache$prepared_cache_current_bytes,
+        residual_cache_prepared_cache_peak_bytes =
+          cache$prepared_cache_peak_bytes,
         dcov_batches = 0L,
         residual_batches = 0L
       )
