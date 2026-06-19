@@ -8,11 +8,22 @@ old_pair <- if (exists("fastkpc_mgcv_extract_gpu_gcv_for_pair", mode = "function
 } else {
   NULL
 }
+old_target <- if (exists("fastkpc_mgcv_extract_gpu_gcv_for_target", mode = "function")) {
+  fastkpc_mgcv_extract_gpu_gcv_for_target
+} else {
+  NULL
+}
 on.exit({
   if (is.null(old_pair)) {
     rm("fastkpc_mgcv_extract_gpu_gcv_for_pair", envir = .GlobalEnv)
   } else {
     assign("fastkpc_mgcv_extract_gpu_gcv_for_pair", old_pair,
+           envir = .GlobalEnv)
+  }
+  if (is.null(old_target)) {
+    rm("fastkpc_mgcv_extract_gpu_gcv_for_target", envir = .GlobalEnv)
+  } else {
+    assign("fastkpc_mgcv_extract_gpu_gcv_for_target", old_target,
            envir = .GlobalEnv)
   }
 }, add = TRUE)
@@ -76,6 +87,49 @@ assign("fastkpc_mgcv_extract_gpu_gcv_for_pair", function(data, x, y, S,
   )
 }, envir = .GlobalEnv)
 
+target_env <- new.env(parent = emptyenv())
+target_env$count <- 0L
+target_env$calls <- list()
+assign("fastkpc_mgcv_extract_gpu_gcv_for_target", function(data, target, S,
+                                                           sp_grid = NULL) {
+  target_env$count <- target_env$count + 1L
+  target_env$calls[[length(target_env$calls) + 1L]] <-
+    list(target = target, S = S)
+  residual <- as.numeric(data[, target]) - mean(data[, target])
+  fitted <- rep(mean(data[, target]), nrow(data))
+  setup <- paste0("cached-spy:S:", paste(S, collapse = "|"))
+  list(
+    residuals = residual,
+    fitted = fitted,
+    setup_fingerprint = setup,
+    setup_fingerprint_full = list(fingerprint = setup),
+    sp = 0.4 + target / 100,
+    score = 1 + target / 10,
+    edf = 3 + target / 10,
+    selected_grid_index = as.integer(target),
+    gcv_grid_points = 9L,
+    grid = data.frame(sp = 0.4, gcv = 1),
+    fit = list(
+      used_device = "cuda",
+      native_gpu_solve_used = TRUE,
+      setup_fingerprint = list(fingerprint = setup),
+      sp_selection_backend_executed = "r-cpu-spectral",
+      gcv_score_backend_executed = "r-cpu-spectral",
+      selected_solve_backend_executed = "cuda"
+    ),
+    timings = list(
+      residualization_total_ms = 11,
+      mgcv_setup_cpu_ms = 2,
+      spectral_prepare_ms = 3,
+      gcv_score_ms = 4,
+      linear_solve_ms = 5,
+      host_to_device_ms = 6,
+      device_to_host_ms = 7,
+      residual_materialize_ms = 8
+    )
+  )
+}, envir = .GlobalEnv)
+
 caps <- list(
   R_version = "4.5.0",
   mgcv_version = "1.9-4",
@@ -114,6 +168,7 @@ cached <- fast_kpc(
   runtime_capabilities = caps
 )
 cached_calls <- pair_env$count
+single_target_calls <- target_env$count
 
 assert_true(identical(uncached$skeleton$adjacency, cached$skeleton$adjacency),
             "same-S residual cache must not change adjacency")
@@ -128,11 +183,41 @@ assert_true(isTRUE(cached$skeleton$residual_cache$enabled),
             "precision skeleton should report residual cache enabled")
 assert_true(cached$skeleton$residual_cache$hits > 0L,
             "precision skeleton should report same-S residual cache hits")
-assert_true(cached$skeleton$residual_cache$computations == cached_calls,
-            "residual cache computations should match pair wrapper calls")
+assert_true(cached$skeleton$residual_cache$computations ==
+              cached$skeleton$residual_cache$cuda_batch_calls +
+                single_target_calls,
+            "residual cache computations should count pair and single-target work")
 assert_true("cache_hit" %in% names(cached$diagnostics$precision_trace),
             "precision trace should expose per-test cache hit status")
 assert_true(any(cached$diagnostics$precision_trace$cache_hit),
             "precision trace should mark tests served from residual cache")
+assert_true(single_target_calls > 0L,
+            "partial residual hits should compute only the missing target")
+
+trace <- cached$diagnostics$precision_trace
+required_cache_cols <- c(
+  "cache_hit_x", "cache_hit_y", "cache_hit_any",
+  "cache_hit_all", "cache_partial_hit"
+)
+missing_cache_cols <- setdiff(required_cache_cols, names(trace))
+assert_true(length(missing_cache_cols) == 0L,
+            paste("precision trace missing cache fields:",
+                  paste(missing_cache_cols, collapse = ",")))
+partial_rows <- trace[trace$cache_partial_hit, , drop = FALSE]
+assert_true(nrow(partial_rows) > 0L,
+            "precision trace should record partial cache hit rows")
+assert_true(all(xor(partial_rows$cache_hit_x, partial_rows$cache_hit_y)),
+            "partial cache hit rows should identify the target-side hit")
+assert_true(cached$skeleton$residual_cache$partial_hit_events > 0L,
+            "residual cache stats should count partial hit events")
+assert_true(cached$skeleton$residual_cache$target_computations >=
+              cached$skeleton$residual_cache$stored_vectors,
+            "target computation stats should use target-vector units")
+assert_true(cached$skeleton$residual_cache$cuda_batch_calls == cached_calls,
+            "cuda batch call stats should match pair wrapper calls")
+assert_true(cached$skeleton$residual_cache$target_computations ==
+              cached$skeleton$residual_cache$cuda_batch_calls * 2L +
+                single_target_calls,
+            "target computation stats should count pair width plus single-target work")
 
 cat("PASS precision same-S residual cache\n")
