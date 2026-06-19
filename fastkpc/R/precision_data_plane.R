@@ -173,6 +173,77 @@ fastkpc_precision_group_route <- function(precision, alpha, tau, S,
   )
 }
 
+fastkpc_precision_create_execution_context <- function(data, residual_cache,
+                                                       runtime_capabilities,
+                                                       execution_engine) {
+  data <- as.matrix(data)
+  data_hash <- fastkpc_hash_object(list(
+    n = nrow(data),
+    p = ncol(data),
+    values = round(as.numeric(data), digits = 14)
+  ))
+  list(
+    residual_cache_enabled = isTRUE(residual_cache),
+    data_hash = data_hash,
+    runtime_capabilities = runtime_capabilities,
+    execution_engine = execution_engine,
+    residual_cache = new.env(parent = emptyenv()),
+    residual_cache_stats = new.env(parent = emptyenv())
+  )
+}
+
+fastkpc_precision_init_cache_stats <- function(context) {
+  if (is.null(context) || is.null(context$residual_cache_stats)) {
+    return(invisible(NULL))
+  }
+  stats <- context$residual_cache_stats
+  stats$requests <- 0L
+  stats$hits <- 0L
+  stats$misses <- 0L
+  stats$computations <- 0L
+  stats$stored_vectors <- 0L
+  stats$stored_values <- 0L
+  stats$setup_cache_hits <- 0L
+  stats$spectral_cache_hits <- 0L
+  invisible(NULL)
+}
+
+fastkpc_precision_residual_cache_key <- function(context, target, S, backend,
+                                                 setup_fingerprint,
+                                                 sp_grid = NULL) {
+  runtime <- context$runtime_capabilities %||% list()
+  fastkpc_hash_object(list(
+    data_hash = context$data_hash %||% NA_character_,
+    target = as.integer(target),
+    S = as.integer(S),
+    backend = as.character(backend),
+    setup_fingerprint = as.character(setup_fingerprint),
+    formula_class = fastkpc_regrxons_formula_class(S),
+    mgcv_version = runtime$mgcv_version %||% NA_character_,
+    setup_schema =
+      runtime$setup_fingerprint_schema_version %||% NA_character_,
+    spectral_gcv_version = runtime$spectral_gcv_version %||% NA_character_,
+    sp_grid = round(as.numeric(sp_grid %||% numeric()), digits = 14)
+  ))
+}
+
+fastkpc_precision_cache_stats <- function(context, backend_name) {
+  enabled <- !is.null(context) && isTRUE(context$residual_cache_enabled)
+  stats <- if (is.null(context)) NULL else context$residual_cache_stats
+  list(
+    enabled = enabled,
+    requests = as.integer(stats$requests %||% 0L),
+    hits = as.integer(stats$hits %||% 0L),
+    misses = as.integer(stats$misses %||% 0L),
+    computations = as.integer(stats$computations %||% 0L),
+    stored_vectors = as.integer(stats$stored_vectors %||% 0L),
+    stored_values = as.integer(stats$stored_values %||% 0L),
+    setup_cache_hits = as.integer(stats$setup_cache_hits %||% 0L),
+    spectral_cache_hits = as.integer(stats$spectral_cache_hits %||% 0L),
+    backend_name = backend_name
+  )
+}
+
 fastkpc_execute_ci_direct <- function(data, x, y, S, ci_method,
                                       index, legacy_index,
                                       hsic_params,
@@ -580,13 +651,177 @@ fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
   )
 }
 
+fastkpc_entries_from_gpu_pair <- function(pair, x, y) {
+  targets <- c(as.integer(x), as.integer(y))
+  lapply(seq_along(targets), function(j) {
+    list(
+      target = targets[[j]],
+      residuals = as.numeric(pair$residuals[, j]),
+      fitted = as.numeric(pair$fitted[, j]),
+      setup_fingerprint = pair$shared_setup_fingerprint %||%
+        pair$setup_fingerprint,
+      sp = as.numeric(pair$sp[j]),
+      score = as.numeric(pair$score[j]),
+      edf = as.numeric(pair$edf[j]),
+      selected_grid_index = as.integer(pair$selected_grid_index[j]),
+      gcv_grid_points = as.integer(pair$gcv_grid_points[j]),
+      grid = pair$grid[[j]],
+      used_device = pair$fit[[paste0("used_device_", if (j == 1L) "x" else "y")]] %||%
+        pair$fit$used_device,
+      native_gpu_solve_used =
+        isTRUE(pair$fit[[paste0("native_gpu_solve_used_",
+                                if (j == 1L) "x" else "y")]]) ||
+        isTRUE(pair$fit$native_gpu_solve_used),
+      sp_selection_backend_executed =
+        pair$fit[[paste0("sp_selection_backend_executed_",
+                         if (j == 1L) "x" else "y")]] %||% NA_character_,
+      gcv_score_backend_executed =
+        pair$fit[[paste0("gcv_score_backend_executed_",
+                         if (j == 1L) "x" else "y")]] %||% NA_character_,
+      selected_solve_backend_executed =
+        pair$fit[[paste0("selected_solve_backend_executed_",
+                         if (j == 1L) "x" else "y")]] %||% NA_character_,
+      timings = pair$timings
+    )
+  })
+}
+
+fastkpc_pair_from_cached_gpu_residuals <- function(x_entry, y_entry, x, y) {
+  shared_setup <- x_entry$setup_fingerprint
+  if (is.na(shared_setup) ||
+      !identical(as.character(shared_setup),
+                 as.character(y_entry$setup_fingerprint))) {
+    stop("cached mgcvExtractGPU residual setup fingerprint mismatch",
+         call. = FALSE)
+  }
+  residuals <- cbind(x = x_entry$residuals, y = y_entry$residuals)
+  fitted <- cbind(x = x_entry$fitted, y = y_entry$fitted)
+  list(
+    residuals = residuals,
+    fitted = fitted,
+    setup_fingerprint = shared_setup,
+    setup_fingerprint_x = shared_setup,
+    setup_fingerprint_y = shared_setup,
+    shared_setup_fingerprint = shared_setup,
+    sp = c(x = x_entry$sp, y = y_entry$sp),
+    score = c(x = x_entry$score, y = y_entry$score),
+    edf = c(x = x_entry$edf, y = y_entry$edf),
+    selected_grid_index = c(
+      x = as.integer(x_entry$selected_grid_index),
+      y = as.integer(y_entry$selected_grid_index)
+    ),
+    gcv_grid_points = c(
+      x = as.integer(x_entry$gcv_grid_points),
+      y = as.integer(y_entry$gcv_grid_points)
+    ),
+    grid = list(x = x_entry$grid, y = y_entry$grid),
+    fit = list(
+      used_device = "cuda",
+      native_gpu_solve_used = TRUE,
+      used_device_x = x_entry$used_device,
+      used_device_y = y_entry$used_device,
+      native_gpu_solve_used_x = isTRUE(x_entry$native_gpu_solve_used),
+      native_gpu_solve_used_y = isTRUE(y_entry$native_gpu_solve_used),
+      setup_fingerprint_x = shared_setup,
+      setup_fingerprint_y = shared_setup,
+      shared_setup_fingerprint = shared_setup,
+      sp_selection_backend_executed_x =
+        x_entry$sp_selection_backend_executed,
+      sp_selection_backend_executed_y =
+        y_entry$sp_selection_backend_executed,
+      gcv_score_backend_executed_x = x_entry$gcv_score_backend_executed,
+      gcv_score_backend_executed_y = y_entry$gcv_score_backend_executed,
+      selected_solve_backend_executed_x =
+        x_entry$selected_solve_backend_executed,
+      selected_solve_backend_executed_y =
+        y_entry$selected_solve_backend_executed,
+      same_setup_pair_batch_used = FALSE,
+      true_batched_kernel = FALSE,
+      batch_stage = "run-scoped-residual-cache-hit"
+    ),
+    timings = list(
+      mgcv_setup_cpu_ms = NA_real_,
+      host_to_device_ms = NA_real_,
+      spectral_prepare_ms = NA_real_,
+      gcv_score_ms = NA_real_,
+      linear_solve_ms = NA_real_,
+      residual_materialize_ms = NA_real_,
+      device_to_host_ms = NA_real_,
+      residualization_total_ms = 0
+    )
+  )
+}
+
 fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
                                                 index, legacy_index,
                                                 hsic_params,
                                                 permutation_params, route,
                                                 role = "primary") {
   total_start <- proc.time()[["elapsed"]]
-  pair <- fastkpc_mgcv_extract_gpu_gcv_for_pair(data, x, y, S)
+  context <- route$execution_context %||% NULL
+  sp_grid <- NULL
+  if (is.null(sp_grid)) {
+    sp_grid <- exp(seq(log(1e-4), log(1e4), length.out = 17L))
+  }
+  setup_key <- paste0("S:", fastkpc_precision_S_key(S))
+  cache_enabled <- !is.null(context) && isTRUE(context$residual_cache_enabled)
+  cached_entries <- list()
+  cache_hits <- 0L
+  cache_keys <- character()
+  if (isTRUE(cache_enabled)) {
+    for (target in c(x, y)) {
+      key <- fastkpc_precision_residual_cache_key(
+        context = context,
+        target = target,
+        S = S,
+        backend = "mgcvExtractGPU",
+        setup_fingerprint = setup_key,
+        sp_grid = sp_grid
+      )
+      cache_keys <- c(cache_keys, key)
+      context$residual_cache_stats$requests <-
+        as.integer(context$residual_cache_stats$requests %||% 0L) + 1L
+      if (exists(key, envir = context$residual_cache, inherits = FALSE)) {
+        cache_hits <- cache_hits + 1L
+        context$residual_cache_stats$hits <-
+          as.integer(context$residual_cache_stats$hits %||% 0L) + 1L
+        cached_entries[[as.character(target)]] <-
+          get(key, envir = context$residual_cache, inherits = FALSE)
+      } else {
+        context$residual_cache_stats$misses <-
+          as.integer(context$residual_cache_stats$misses %||% 0L) + 1L
+      }
+    }
+  }
+
+  served_from_cache <- isTRUE(cache_enabled) && length(cached_entries) == 2L
+  if (isTRUE(served_from_cache)) {
+    pair <- fastkpc_pair_from_cached_gpu_residuals(
+      cached_entries[[as.character(x)]],
+      cached_entries[[as.character(y)]],
+      x = x,
+      y = y
+    )
+  } else {
+    pair <- fastkpc_mgcv_extract_gpu_gcv_for_pair(data, x, y, S,
+                                                  sp_grid = sp_grid)
+    if (isTRUE(cache_enabled)) {
+      context$residual_cache_stats$computations <-
+        as.integer(context$residual_cache_stats$computations %||% 0L) + 1L
+      entries <- fastkpc_entries_from_gpu_pair(pair, x = x, y = y)
+      for (j in seq_along(entries)) {
+        key <- cache_keys[[j]]
+        if (!exists(key, envir = context$residual_cache, inherits = FALSE)) {
+          assign(key, entries[[j]], envir = context$residual_cache)
+          context$residual_cache_stats$stored_vectors <-
+            as.integer(context$residual_cache_stats$stored_vectors %||% 0L) + 1L
+          context$residual_cache_stats$stored_values <-
+            as.integer(context$residual_cache_stats$stored_values %||% 0L) +
+              length(entries[[j]]$residuals)
+        }
+      }
+    }
+  }
 
   if (!identical(pair$fit$used_device_x, "cuda") ||
       !identical(pair$fit$used_device_y, "cuda") ||
@@ -644,6 +879,9 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
     selected_solve_backend_executed_y =
       pair$fit$selected_solve_backend_executed_y %||% NA_character_,
     same_setup_pair_batch_used = isTRUE(pair$fit$same_setup_pair_batch_used),
+    cache_hit = isTRUE(served_from_cache),
+    cache_hit_x = isTRUE(served_from_cache),
+    cache_hit_y = isTRUE(served_from_cache),
     timings = list(
       mgcv_setup_cpu_ms = pair$timings$mgcv_setup_cpu_ms %||% NA_real_,
       host_to_device_ms = pair$timings$host_to_device_ms %||% NA_real_,
@@ -1106,6 +1344,7 @@ fastkpc_precision_trace_for_test <- function(resolved, route, run_id,
     verifier_ci_backend_executed = verifier_ci,
     verifier_p_raw = verifier_p_raw,
     verifier_p_used = verifier_p_used,
+    cache_hit = isTRUE(receipt$cache_hit),
     fallback_triggered = resolved$fallback_triggered,
     attempt_count = resolved$attempt_count,
     attempt_backend_sequence = resolved$attempt_backend_sequence,
@@ -1138,11 +1377,19 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
                                          precision_executors,
                                          runtime_capabilities,
                                          allow_canary = FALSE,
+                                         residual_cache = TRUE,
                                          na_delete = TRUE,
                                          execution_engine = c("cpu", "cuda")) {
   execution_engine <- match.arg(execution_engine)
   data <- as.matrix(data)
   storage.mode(data) <- "double"
+  execution_context <- fastkpc_precision_create_execution_context(
+    data = data,
+    residual_cache = residual_cache,
+    runtime_capabilities = runtime_capabilities,
+    execution_engine = execution_engine
+  )
+  fastkpc_precision_init_cache_stats(execution_context)
   p <- ncol(data)
   adjacency <- matrix(TRUE, p, p)
   diag(adjacency) <- FALSE
@@ -1175,6 +1422,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             allow_canary = allow_canary,
             execution_engine = execution_engine
           )
+          route$execution_context <- execution_context
           resolved <- fastkpc_precision_resolve_test(
             data = data, x = x, y = y, S = S, route = route,
             precision = precision, alpha = alpha, tau = tau,
@@ -1242,6 +1490,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             allow_canary = allow_canary,
             execution_engine = execution_engine
           )
+          route$execution_context <- execution_context
           resolved <- fastkpc_precision_resolve_test(
             data = data, x = y, y = x, S = S, route = route,
             precision = precision, alpha = alpha, tau = tau,
@@ -1337,6 +1586,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
   } else {
     paste(unique(ci_backends), collapse = "+")
   }
+  cache <- fastkpc_precision_cache_stats(execution_context, backend)
   list(
     adjacency = adjacency,
     sepsets = sepsets,
@@ -1347,16 +1597,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
     residual_backend = backend,
     verifier_backend = verifier_backend,
     residual_backend_params = "",
-    residual_cache = list(
-      enabled = FALSE,
-      requests = 0L,
-      hits = 0L,
-      misses = 0L,
-      computations = 0L,
-      stored_vectors = 0L,
-      stored_values = 0L,
-      backend_name = backend
-    ),
+    residual_cache = cache,
     ci_method = ci_method,
     ci_backend = ci_backend,
     ci_backend_reason = "",
@@ -1385,7 +1626,13 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
         tasks_evaluated = test_id,
         tests_replayed = test_id,
         tasks_ignored_after_delete = 0L,
-        unique_residual_requests = test_id,
+        unique_residual_requests = cache$stored_vectors,
+        residual_cache_requests = cache$requests,
+        residual_cache_hits = cache$hits,
+        residual_cache_misses = cache$misses,
+        residual_cache_computations = cache$computations,
+        residual_cache_stored_vectors = cache$stored_vectors,
+        residual_cache_stored_values = cache$stored_values,
         dcov_batches = 0L,
         residual_batches = 0L
       )

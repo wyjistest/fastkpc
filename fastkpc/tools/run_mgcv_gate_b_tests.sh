@@ -60,6 +60,7 @@ Rscript fastkpc/tests/test_precision_cuda_data_plane_spy.R
 Rscript fastkpc/tests/test_precision_mgcv_extract_gpu_executor_fallback.R
 Rscript fastkpc/tests/test_precision_gpu_executor_receipt_truthful.R
 Rscript fastkpc/tests/test_precision_gpu_pair_wrapper_receipt.R
+Rscript fastkpc/tests/test_precision_same_s_residual_cache.R
 Rscript fastkpc/tests/test_precision_native_cuda_e2e_gate.R
 Rscript fastkpc/tests/test_native_cuda_precision_parity_artifact.R
 Rscript fastkpc/tests/test_precision_compatible_cpu_data_plane_smoke.R

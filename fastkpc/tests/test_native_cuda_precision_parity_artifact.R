@@ -59,9 +59,40 @@ assert_true(length(missing) == 0L,
             paste("missing parity fields:", paste(missing, collapse = ",")))
 assert_true(file.exists(artifact$path),
             "native_cuda_precision_parity.csv should be written")
+required_paths <- c(
+  "native_cuda_fixed_sp_parity",
+  "spectral_cpu_vs_cuda_solve_parity",
+  "mgcv_vs_spectral_gcv_compatibility",
+  "summary_json",
+  "summary_md"
+)
+missing_paths <- setdiff(required_paths, names(artifact$paths))
+assert_true(length(missing_paths) == 0L,
+            paste("missing artifact paths:", paste(missing_paths, collapse = ",")))
+assert_true(all(file.exists(unlist(artifact$paths[required_paths]))),
+            "split parity artifact files should be written")
 written <- utils::read.csv(artifact$path)
 assert_true(nrow(written) == 1L,
             "parity CSV should contain one scenario row")
+fixed_sp <- utils::read.csv(artifact$paths$native_cuda_fixed_sp_parity)
+spectral <- utils::read.csv(artifact$paths$spectral_cpu_vs_cuda_solve_parity)
+compat <- utils::read.csv(artifact$paths$mgcv_vs_spectral_gcv_compatibility)
+assert_true(all(c("artifact_type", "fixed_sp_x", "fixed_sp_y",
+                  "residual_rel_l2_x", "residual_rel_l2_y") %in%
+                  names(fixed_sp)),
+            "fixed-sp parity artifact should isolate solve drift fields")
+assert_true(all(c("artifact_type", "selected_sp_x", "selected_sp_y",
+                  "selected_grid_index_x", "selected_grid_index_y") %in%
+                  names(spectral)),
+            "spectral parity artifact should record selected spectral grid")
+assert_true(all(c("artifact_type", "cpu_selected_sp_x", "gpu_selected_sp_x",
+                  "log_p_drift", "decision_flip") %in% names(compat)),
+            "compatibility artifact should record smoothing-selection drift")
+summary_text <- paste(readLines(artifact$paths$summary_md, warn = FALSE),
+                      collapse = "\n")
+assert_true(grepl("Fixed-sp CUDA Gate", summary_text, fixed = TRUE) &&
+              grepl("Legacy compatibility Gate", summary_text, fixed = TRUE),
+            "summary markdown should name split parity gates")
 assert_true(isTRUE(artifact$gpu_pair$fit$native_gpu_solve_used_x) &&
               isTRUE(artifact$gpu_pair$fit$native_gpu_solve_used_y),
             "parity artifact should use native GPU solves")

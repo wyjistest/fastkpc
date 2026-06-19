@@ -604,6 +604,7 @@ fast_kpc <- function(data,
         precision_executors = precision_executors,
         runtime_capabilities = runtime_capabilities,
         allow_canary = allow_canary_mgcv_extract,
+        residual_cache = residual_cache,
         execution_engine = engine_used
       )
       list(skeleton = skeleton, orientation = NULL)

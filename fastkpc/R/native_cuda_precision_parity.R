@@ -24,6 +24,140 @@ fastkpc_precision_first_sepset_key <- function(sepsets) {
   ""
 }
 
+fastkpc_precision_log_p_drift <- function(a, b) {
+  a <- as.numeric(a)[1L]
+  b <- as.numeric(b)[1L]
+  if (!is.finite(a) || !is.finite(b) || a <= 0 || b <= 0) return(NA_real_)
+  abs(log(a) - log(b))
+}
+
+fastkpc_native_cuda_fixed_sp_pair_parity <- function(data, x, y, S,
+                                                     fixed_sp) {
+  S_data <- as.data.frame(data[, S, drop = FALSE])
+  colnames(S_data) <- paste0("s", seq_along(S))
+  rhs <- fastkpc_mgcv_regrxons_rhs(
+    S_data = S_data,
+    S = S,
+    formula_class = fastkpc_regrxons_formula_class(S)
+  )
+  form <- stats::as.formula(paste(".target ~", rhs))
+  make_setup <- function(target, sp) {
+    fastkpc_mgcv_extract_setup(
+      formula = form,
+      data = data.frame(.target = as.numeric(data[, target]), S_data),
+      sp = sp,
+      method = "GCV.Cp",
+      target = target,
+      S = S,
+      bs = "tp"
+    )
+  }
+  setups <- list(
+    make_setup(x, fixed_sp[[1L]]),
+    make_setup(y, fixed_sp[[2L]])
+  )
+  cpu <- fastkpc_mgcv_extract_gpu_solve_handle_batch_fixed_sp(
+    setups,
+    target_ids = c(x, y)
+  )
+  cuda <- fastkpc_mgcv_extract_gpu_solve_handle_batch_fixed_sp_cuda(
+    setups,
+    target_ids = c(x, y)
+  )
+  data.frame(
+    artifact_type = "native_cuda_fixed_sp_parity",
+    x = as.integer(x),
+    y = as.integer(y),
+    S_key = fastkpc_precision_S_key(S),
+    fixed_sp_x = as.numeric(fixed_sp[[1L]]),
+    fixed_sp_y = as.numeric(fixed_sp[[2L]]),
+    coefficient_rel_l2_x =
+      fastkpc_relative_l2_or_na(cuda$coefficients[[1L]],
+                                cpu$coefficients[[1L]]),
+    coefficient_rel_l2_y =
+      fastkpc_relative_l2_or_na(cuda$coefficients[[2L]],
+                                cpu$coefficients[[2L]]),
+    fitted_rel_l2_x =
+      fastkpc_relative_l2_or_na(cuda$fitted[, 1L], cpu$fitted[, 1L]),
+    fitted_rel_l2_y =
+      fastkpc_relative_l2_or_na(cuda$fitted[, 2L], cpu$fitted[, 2L]),
+    residual_rel_l2_x =
+      fastkpc_relative_l2_or_na(cuda$residuals[, 1L], cpu$residuals[, 1L]),
+    residual_rel_l2_y =
+      fastkpc_relative_l2_or_na(cuda$residuals[, 2L], cpu$residuals[, 2L]),
+    setup_fingerprint_x = as.character(cpu$setup_fingerprints[[1L]]),
+    setup_fingerprint_y = as.character(cpu$setup_fingerprints[[2L]]),
+    stringsAsFactors = FALSE
+  )
+}
+
+fastkpc_json_number <- function(value) {
+  value <- as.numeric(value)[1L]
+  if (!is.finite(value)) return("null")
+  format(signif(value, 8), scientific = FALSE, trim = TRUE)
+}
+
+fastkpc_json_bool <- function(value) {
+  if (isTRUE(value)) return("true")
+  if (identical(value, FALSE)) return("false")
+  "null"
+}
+
+fastkpc_max_finite_or_na <- function(values) {
+  values <- as.numeric(values)
+  values <- values[is.finite(values)]
+  if (length(values) == 0L) return(NA_real_)
+  max(values)
+}
+
+fastkpc_write_precision_parity_summary <- function(paths, rows, fixed_sp,
+                                                   spectral, compat) {
+  json_path <- paths$summary_json
+  md_path <- paths$summary_md
+  fixed_sp_residual_max <- fastkpc_max_finite_or_na(c(
+    fixed_sp$residual_rel_l2_x,
+    fixed_sp$residual_rel_l2_y
+  ))
+  json_lines <- c(
+    "{",
+    paste0('  "legacy_artifact": "', basename(paths$legacy), '",'),
+    paste0('  "native_cuda_fixed_sp_parity": "', basename(paths$native_cuda_fixed_sp_parity), '",'),
+    paste0('  "spectral_cpu_vs_cuda_solve_parity": "', basename(paths$spectral_cpu_vs_cuda_solve_parity), '",'),
+    paste0('  "mgcv_vs_spectral_gcv_compatibility": "', basename(paths$mgcv_vs_spectral_gcv_compatibility), '",'),
+    paste0('  "fixed_sp_residual_rel_l2_max": ',
+           fastkpc_json_number(fixed_sp_residual_max), ","),
+    paste0('  "compatibility_log_p_drift": ',
+           fastkpc_json_number(compat$log_p_drift[[1L]]), ","),
+    paste0('  "compatibility_decision_flip": ',
+           fastkpc_json_bool(compat$decision_flip[[1L]])),
+    "}"
+  )
+  writeLines(json_lines, json_path)
+  md <- c(
+    "# Native CUDA Precision Parity Summary",
+    "",
+    "## Fixed-sp CUDA Gate",
+    "",
+    paste0("- CSV: `", basename(paths$native_cuda_fixed_sp_parity), "`"),
+    paste0("- Max residual rel-L2: ",
+           fastkpc_json_number(fixed_sp_residual_max)),
+    "",
+    "## Spectral CPU/CUDA Gate",
+    "",
+    paste0("- CSV: `", basename(paths$spectral_cpu_vs_cuda_solve_parity), "`"),
+    paste0("- Selected grid x/y: ", spectral$selected_grid_index_x[[1L]],
+           " / ", spectral$selected_grid_index_y[[1L]]),
+    "",
+    "## Legacy compatibility Gate",
+    "",
+    paste0("- CSV: `", basename(paths$mgcv_vs_spectral_gcv_compatibility), "`"),
+    paste0("- log-p drift: ",
+           fastkpc_json_number(compat$log_p_drift[[1L]])),
+    paste0("- decision flip: ", compat$decision_flip[[1L]])
+  )
+  writeLines(md, md_path)
+}
+
 fastkpc_run_native_cuda_precision_parity <- function(
     data,
     x = 1L,
@@ -165,9 +299,86 @@ fastkpc_run_native_cuda_precision_parity <- function(
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   csv_path <- file.path(output_dir, "native_cuda_precision_parity.csv")
   utils::write.csv(rows, csv_path, row.names = FALSE)
+
+  fixed_sp_rows <- fastkpc_native_cuda_fixed_sp_pair_parity(
+    data = data,
+    x = x,
+    y = y,
+    S = S,
+    fixed_sp = as.numeric(gpu_pair$sp)
+  )
+  spectral_rows <- data.frame(
+    artifact_type = "spectral_cpu_vs_cuda_solve_parity",
+    x = x,
+    y = y,
+    S_key = fastkpc_precision_S_key(S),
+    selected_sp_x = as.numeric(gpu_pair$sp[1L]),
+    selected_sp_y = as.numeric(gpu_pair$sp[2L]),
+    selected_grid_index_x = as.integer(gpu_pair$selected_grid_index[1L]),
+    selected_grid_index_y = as.integer(gpu_pair$selected_grid_index[2L]),
+    grid_boundary_hit_x = gpu_pair$selected_grid_index[1L] %in%
+      c(1L, nrow(gpu_pair$grid$x)),
+    grid_boundary_hit_y = gpu_pair$selected_grid_index[2L] %in%
+      c(1L, nrow(gpu_pair$grid$y)),
+    gcv_score_x = as.numeric(gpu_pair$score[1L]),
+    gcv_score_y = as.numeric(gpu_pair$score[2L]),
+    residual_rel_l2_x = fixed_sp_rows$residual_rel_l2_x,
+    residual_rel_l2_y = fixed_sp_rows$residual_rel_l2_y,
+    fitted_rel_l2_x = fixed_sp_rows$fitted_rel_l2_x,
+    fitted_rel_l2_y = fixed_sp_rows$fitted_rel_l2_y,
+    stringsAsFactors = FALSE
+  )
+  compat_rows <- data.frame(
+    artifact_type = "mgcv_vs_spectral_gcv_compatibility",
+    x = x,
+    y = y,
+    S_key = fastkpc_precision_S_key(S),
+    cpu_selected_sp_x = rows$cpu_selected_sp_x,
+    cpu_selected_sp_y = rows$cpu_selected_sp_y,
+    gpu_selected_sp_x = rows$gpu_selected_sp_x,
+    gpu_selected_sp_y = rows$gpu_selected_sp_y,
+    selected_grid_index_x = rows$selected_grid_index_x,
+    selected_grid_index_y = rows$selected_grid_index_y,
+    grid_boundary_hit_x = spectral_rows$grid_boundary_hit_x,
+    grid_boundary_hit_y = spectral_rows$grid_boundary_hit_y,
+    residual_rel_l2_x = rows$residual_rel_l2_x,
+    residual_rel_l2_y = rows$residual_rel_l2_y,
+    fitted_rel_l2_x = rows$fitted_rel_l2_x,
+    fitted_rel_l2_y = rows$fitted_rel_l2_y,
+    log_p_drift = fastkpc_precision_log_p_drift(rows$p_value_cpu,
+                                                rows$p_value_gpu),
+    decision_flip = !identical(rows$decision_cpu, rows$decision_gpu),
+    adjacency_identical = rows$adjacency_identical,
+    first_sepset_identical = rows$first_sepset_identical,
+    pmax_max_abs_diff = rows$pmax_max_abs_diff,
+    stringsAsFactors = FALSE
+  )
+  paths <- list(
+    legacy = csv_path,
+    native_cuda_fixed_sp_parity =
+      file.path(output_dir, "native_cuda_fixed_sp_parity.csv"),
+    spectral_cpu_vs_cuda_solve_parity =
+      file.path(output_dir, "spectral_cpu_vs_cuda_solve_parity.csv"),
+    mgcv_vs_spectral_gcv_compatibility =
+      file.path(output_dir, "mgcv_vs_spectral_gcv_compatibility.csv"),
+    summary_json = file.path(output_dir, "native_cuda_goal_summary.json"),
+    summary_md = file.path(output_dir, "native_cuda_goal_summary.md")
+  )
+  utils::write.csv(fixed_sp_rows, paths$native_cuda_fixed_sp_parity,
+                   row.names = FALSE)
+  utils::write.csv(spectral_rows, paths$spectral_cpu_vs_cuda_solve_parity,
+                   row.names = FALSE)
+  utils::write.csv(compat_rows, paths$mgcv_vs_spectral_gcv_compatibility,
+                   row.names = FALSE)
+  fastkpc_write_precision_parity_summary(paths, rows, fixed_sp_rows,
+                                         spectral_rows, compat_rows)
   list(
     parity = rows,
     path = csv_path,
+    paths = paths,
+    fixed_sp_parity = fixed_sp_rows,
+    spectral_parity = spectral_rows,
+    compatibility = compat_rows,
     cpu_graph = cpu_graph,
     gpu_graph = gpu_graph,
     cpu_batch = cpu_batch,
