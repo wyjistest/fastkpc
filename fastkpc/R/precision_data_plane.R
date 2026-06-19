@@ -371,31 +371,233 @@ fastkpc_mgcv_extract_gpu_gcv_for_target <- function(data, target, S,
   )
 }
 
+fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
+                                                  sp_grid = NULL) {
+  total_start <- proc.time()[["elapsed"]]
+  if (length(S) == 0L) {
+    setup_fingerprint <- paste0("direct:", x, "-", y)
+    residuals <- cbind(as.numeric(data[, x]), as.numeric(data[, y]))
+    fitted <- matrix(0, nrow(data), 2L)
+    colnames(residuals) <- c("x", "y")
+    colnames(fitted) <- c("x", "y")
+    elapsed <- (proc.time()[["elapsed"]] - total_start) * 1000
+    return(list(
+      residuals = residuals,
+      fitted = fitted,
+      setup_fingerprint = setup_fingerprint,
+      setup_fingerprint_x = setup_fingerprint,
+      setup_fingerprint_y = setup_fingerprint,
+      shared_setup_fingerprint = setup_fingerprint,
+      sp = c(x = NA_real_, y = NA_real_),
+      score = c(x = NA_real_, y = NA_real_),
+      edf = c(x = NA_real_, y = NA_real_),
+      selected_grid_index = c(x = NA_integer_, y = NA_integer_),
+      gcv_grid_points = c(x = 0L, y = 0L),
+      grid = list(x = data.frame(), y = data.frame()),
+      fit = list(
+        used_device = "none",
+        native_gpu_solve_used = FALSE,
+        used_device_x = "none",
+        used_device_y = "none",
+        native_gpu_solve_used_x = FALSE,
+        native_gpu_solve_used_y = FALSE,
+        shared_setup_fingerprint = setup_fingerprint,
+        same_setup_pair_batch_used = FALSE
+      ),
+      timings = list(residualization_total_ms = elapsed)
+    ))
+  }
+  if (length(S) > 2L) {
+    stop("mgcvExtractGPU precision slice supports |S| <= 2", call. = FALSE)
+  }
+  native_cuda_available <- exists("fastkpc_cuda_available", mode = "function") &&
+    isTRUE(tryCatch(fastkpc_cuda_available(), error = function(e) FALSE))
+  native_batch_available <- exists(
+    "mgcv_extract_gpu_solve_same_setup_batch_fixed_sp_cuda",
+    mode = "function"
+  )
+  if (!native_cuda_available || !native_batch_available) {
+    stop("mgcvExtractGPU GCV native CUDA same-setup batch solve is unavailable",
+         call. = FALSE)
+  }
+  if (is.null(sp_grid)) {
+    sp_grid <- exp(seq(log(1e-4), log(1e4), length.out = 17L))
+  }
+  sp_grid <- fastkpc_validate_fixed_positive_sp(sp_grid)
+
+  S_data <- as.data.frame(data[, S, drop = FALSE])
+  colnames(S_data) <- paste0("s", seq_along(S))
+  Y <- cbind(x = as.numeric(data[, x]), y = as.numeric(data[, y]))
+  rhs <- fastkpc_mgcv_regrxons_rhs(
+    S_data = S_data,
+    S = S,
+    formula_class = fastkpc_regrxons_formula_class(S)
+  )
+  form <- stats::as.formula(paste(".target ~", rhs))
+
+  setup_start <- proc.time()[["elapsed"]]
+  template_setup <- fastkpc_mgcv_extract_setup(
+    formula = form,
+    data = data.frame(.target = Y[, 1L], S_data),
+    sp = 1,
+    method = "GCV.Cp",
+    target = x,
+    S = S,
+    bs = "tp"
+  )
+  setup_ms <- (proc.time()[["elapsed"]] - setup_start) * 1000
+  if (length(template_setup$S) != 1L) {
+    stop("mgcvExtractGPU GCV currently supports single-penalty setups only",
+         call. = FALSE)
+  }
+
+  spectral_start <- proc.time()[["elapsed"]]
+  base_handle <- fastkpc_mgcv_extract_gpu_setup_handle(
+    setup = template_setup,
+    sp = 1,
+    device_resident = TRUE
+  )
+  spectral <- fastkpc_mgcv_extract_gpu_spectral_prepare(base_handle)
+  spectral_ms <- (proc.time()[["elapsed"]] - spectral_start) * 1000
+
+  gcv_start <- proc.time()[["elapsed"]]
+  target_ids <- c(x = as.integer(x), y = as.integer(y))
+  score_one <- function(j) {
+    yj <- Y[, j]
+    Xty_null <- as.numeric(crossprod(base_handle$X_null, yj))
+    scored <- fastkpc_mgcv_extract_gpu_spectral_score_grid(
+      spectral = spectral,
+      y = yj,
+      Xty_null = Xty_null,
+      sp_grid = sp_grid
+    )
+    grid <- scored$grid
+    valid <- is.finite(grid$rss) & is.finite(grid$edf) & is.finite(grid$gcv)
+    if (!any(valid)) {
+      stop("No valid GCV candidate in sp_grid", call. = FALSE)
+    }
+    idx <- which(grid$gcv == min(grid$gcv[valid]))[1L]
+    list(
+      grid = grid,
+      selected_grid_index = idx,
+      sp = as.numeric(sp_grid[idx]),
+      score = as.numeric(grid$gcv[idx]),
+      edf = as.numeric(grid$edf[idx]),
+      y = yj,
+      Xty_null = Xty_null
+    )
+  }
+  scored <- lapply(seq_len(ncol(Y)), score_one)
+  gcv_ms <- (proc.time()[["elapsed"]] - gcv_start) * 1000
+  selected_sp <- vapply(scored, `[[`, numeric(1), "sp")
+
+  make_handle <- function(j) {
+    handle <- base_handle
+    handle$y <- scored[[j]]$y
+    handle$sp <- selected_sp[j]
+    handle$Xty_null <- scored[[j]]$Xty_null
+    penalty <- fastkpc_assemble_penalty(
+      p = ncol(template_setup$X),
+      S = template_setup$S,
+      off = template_setup$off,
+      sp = selected_sp[j],
+      H = template_setup$H
+    )
+    handle$penalty <- penalty
+    handle$penalty_null <- crossprod(handle$Z, penalty %*% handle$Z)
+    handle$setup_fingerprint <- template_setup$setup_fingerprint
+    handle
+  }
+  handles <- lapply(seq_along(selected_sp), make_handle)
+
+  solve_start <- proc.time()[["elapsed"]]
+  native <- mgcv_extract_gpu_solve_same_setup_batch_fixed_sp_cuda(handles)
+  solve_ms <- (proc.time()[["elapsed"]] - solve_start) * 1000
+
+  materialize_start <- proc.time()[["elapsed"]]
+  residuals <- as.matrix(native$residuals)
+  fitted <- as.matrix(native$fitted)
+  colnames(residuals) <- c("x", "y")
+  colnames(fitted) <- c("x", "y")
+  coefficients <- lapply(seq_along(selected_sp), function(j) {
+    native$coefficients[, j]
+  })
+  theta <- lapply(seq_along(selected_sp), function(j) native$theta[, j])
+  materialize_ms <- (proc.time()[["elapsed"]] - materialize_start) * 1000
+
+  shared_setup <- template_setup$setup_fingerprint$fingerprint
+  elapsed <- (proc.time()[["elapsed"]] - total_start) * 1000
+  list(
+    residuals = residuals,
+    fitted = fitted,
+    setup_fingerprint = shared_setup,
+    setup_fingerprint_x = shared_setup,
+    setup_fingerprint_y = shared_setup,
+    shared_setup_fingerprint = shared_setup,
+    sp = c(x = selected_sp[1L], y = selected_sp[2L]),
+    score = c(x = scored[[1L]]$score, y = scored[[2L]]$score),
+    edf = c(x = scored[[1L]]$edf, y = scored[[2L]]$edf),
+    selected_grid_index = c(
+      x = as.integer(scored[[1L]]$selected_grid_index),
+      y = as.integer(scored[[2L]]$selected_grid_index)
+    ),
+    gcv_grid_points = c(x = nrow(scored[[1L]]$grid),
+                        y = nrow(scored[[2L]]$grid)),
+    grid = list(x = scored[[1L]]$grid, y = scored[[2L]]$grid),
+    coefficients = coefficients,
+    theta = theta,
+    fit = list(
+      used_device = "cuda",
+      native_gpu_solve_used = TRUE,
+      used_device_x = "cuda",
+      used_device_y = "cuda",
+      native_gpu_solve_used_x = TRUE,
+      native_gpu_solve_used_y = TRUE,
+      setup_fingerprint = template_setup$setup_fingerprint,
+      setup_fingerprint_x = shared_setup,
+      setup_fingerprint_y = shared_setup,
+      shared_setup_fingerprint = shared_setup,
+      sp_selection_backend_executed_x = "r-cpu-spectral",
+      sp_selection_backend_executed_y = "r-cpu-spectral",
+      gcv_score_backend_executed_x = "r-cpu-spectral",
+      gcv_score_backend_executed_y = "r-cpu-spectral",
+      selected_solve_backend_executed_x = "cuda",
+      selected_solve_backend_executed_y = "cuda",
+      same_setup_pair_batch_used = TRUE,
+      true_batched_kernel = FALSE,
+      batch_stage = "native-same-setup-repeated-cuda-solve"
+    ),
+    timings = list(
+      mgcv_setup_cpu_ms = setup_ms,
+      host_to_device_ms = NA_real_,
+      spectral_prepare_ms = spectral_ms,
+      gcv_score_ms = gcv_ms,
+      linear_solve_ms = solve_ms,
+      residual_materialize_ms = materialize_ms,
+      device_to_host_ms = NA_real_,
+      residualization_total_ms = elapsed
+    )
+  )
+}
+
 fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
                                                 index, legacy_index,
                                                 hsic_params,
                                                 permutation_params, route,
                                                 role = "primary") {
   total_start <- proc.time()[["elapsed"]]
-  gx <- fastkpc_mgcv_extract_gpu_gcv_for_target(data, x, S)
-  gy <- fastkpc_mgcv_extract_gpu_gcv_for_target(data, y, S)
+  pair <- fastkpc_mgcv_extract_gpu_gcv_for_pair(data, x, y, S)
 
-  if (!identical(gx$fit$used_device, "cuda") ||
-      !identical(gy$fit$used_device, "cuda") ||
-      !isTRUE(gx$fit$native_gpu_solve_used) ||
-      !isTRUE(gy$fit$native_gpu_solve_used)) {
+  if (!identical(pair$fit$used_device_x, "cuda") ||
+      !identical(pair$fit$used_device_y, "cuda") ||
+      !isTRUE(pair$fit$native_gpu_solve_used_x) ||
+      !isTRUE(pair$fit$native_gpu_solve_used_y)) {
     stop("mgcvExtractGPU executor did not receive native CUDA target fits",
          call. = FALSE)
   }
 
-  setup_x <- fastkpc_setup_fingerprint_value(
-    gx$fit$setup_fingerprint %||% gx$setup_fingerprint_full %||%
-      gx$setup_fingerprint
-  )
-  setup_y <- fastkpc_setup_fingerprint_value(
-    gy$fit$setup_fingerprint %||% gy$setup_fingerprint_full %||%
-      gy$setup_fingerprint
-  )
+  setup_x <- fastkpc_setup_fingerprint_value(pair$setup_fingerprint_x)
+  setup_y <- fastkpc_setup_fingerprint_value(pair$setup_fingerprint_y)
   if (is.na(setup_x) || is.na(setup_y) || !identical(setup_x, setup_y)) {
     stop("mgcvExtractGPU x/y setup fingerprint mismatch", call. = FALSE)
   }
@@ -403,17 +605,13 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
 
   ci_start <- proc.time()[["elapsed"]]
   ci <- fastkpc_precision_ci_from_residuals(
-    gx$residuals, gy$residuals,
+    pair$residuals[, 1L], pair$residuals[, 2L],
     ci_method = ci_method, index = index,
     legacy_index = legacy_index, hsic_params = hsic_params,
     permutation_params = permutation_params
   )
   ci_elapsed <- (proc.time()[["elapsed"]] - ci_start) * 1000
   total_elapsed <- (proc.time()[["elapsed"]] - total_start) * 1000
-  residualization_ms <- fastkpc_sum_timing(list(
-    gx$timings$residualization_total_ms,
-    gy$timings$residualization_total_ms
-  ))
   list(
     p.value = ci$p.value,
     residual_backend_executed = "mgcvExtractGPU",
@@ -423,47 +621,40 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
     setup_fingerprint_y = setup_y,
     shared_setup_fingerprint = shared_setup,
     p_source_used = paste0(role, ":mgcvExtractGPU+native-cpu"),
-    sp = c(x = as.numeric(gx$sp), y = as.numeric(gy$sp)),
-    score = c(x = as.numeric(gx$score), y = as.numeric(gy$score)),
-    edf = c(x = as.numeric(gx$edf), y = as.numeric(gy$edf)),
-    gcv_grid_points = c(x = nrow(gx$grid), y = nrow(gy$grid)),
-    used_device = gx$fit$used_device,
-    used_device_x = gx$fit$used_device,
-    used_device_y = gy$fit$used_device,
-    native_gpu_solve_used_x = isTRUE(gx$fit$native_gpu_solve_used),
-    native_gpu_solve_used_y = isTRUE(gy$fit$native_gpu_solve_used),
+    sp = as.numeric(pair$sp),
+    score = as.numeric(pair$score),
+    edf = as.numeric(pair$edf),
+    selected_grid_index = as.integer(pair$selected_grid_index),
+    gcv_grid_points = as.integer(pair$gcv_grid_points),
+    used_device = pair$fit$used_device,
+    used_device_x = pair$fit$used_device_x,
+    used_device_y = pair$fit$used_device_y,
+    native_gpu_solve_used_x = isTRUE(pair$fit$native_gpu_solve_used_x),
+    native_gpu_solve_used_y = isTRUE(pair$fit$native_gpu_solve_used_y),
     sp_selection_backend_executed_x =
-      gx$fit$sp_selection_backend_executed %||% NA_character_,
+      pair$fit$sp_selection_backend_executed_x %||% NA_character_,
     sp_selection_backend_executed_y =
-      gy$fit$sp_selection_backend_executed %||% NA_character_,
+      pair$fit$sp_selection_backend_executed_y %||% NA_character_,
     gcv_score_backend_executed_x =
-      gx$fit$gcv_score_backend_executed %||% NA_character_,
+      pair$fit$gcv_score_backend_executed_x %||% NA_character_,
     gcv_score_backend_executed_y =
-      gy$fit$gcv_score_backend_executed %||% NA_character_,
+      pair$fit$gcv_score_backend_executed_y %||% NA_character_,
     selected_solve_backend_executed_x =
-      gx$fit$selected_solve_backend_executed %||% NA_character_,
+      pair$fit$selected_solve_backend_executed_x %||% NA_character_,
     selected_solve_backend_executed_y =
-      gy$fit$selected_solve_backend_executed %||% NA_character_,
+      pair$fit$selected_solve_backend_executed_y %||% NA_character_,
+    same_setup_pair_batch_used = isTRUE(pair$fit$same_setup_pair_batch_used),
     timings = list(
-      mgcv_setup_cpu_ms = fastkpc_sum_timing(list(
-        gx$timings$setup_cpu_ms, gy$timings$setup_cpu_ms
-      )),
-      host_to_device_ms = fastkpc_sum_timing(list(
-        gx$timings$host_to_device_ms, gy$timings$host_to_device_ms
-      )),
-      spectral_prepare_ms = fastkpc_sum_timing(list(
-        gx$timings$spectral_prepare_ms, gy$timings$spectral_prepare_ms
-      )),
-      gcv_score_ms = fastkpc_sum_timing(list(
-        gx$timings$gcv_score_ms, gy$timings$gcv_score_ms
-      )),
-      linear_solve_ms = fastkpc_sum_timing(list(
-        gx$timings$linear_solve_ms, gy$timings$linear_solve_ms
-      )),
-      device_to_host_ms = fastkpc_sum_timing(list(
-        gx$timings$device_to_host_ms, gy$timings$device_to_host_ms
-      )),
-      residualization_total_ms = residualization_ms,
+      mgcv_setup_cpu_ms = pair$timings$mgcv_setup_cpu_ms %||% NA_real_,
+      host_to_device_ms = pair$timings$host_to_device_ms %||% NA_real_,
+      spectral_prepare_ms = pair$timings$spectral_prepare_ms %||% NA_real_,
+      gcv_score_ms = pair$timings$gcv_score_ms %||% NA_real_,
+      linear_solve_ms = pair$timings$linear_solve_ms %||% NA_real_,
+      residual_materialize_ms =
+        pair$timings$residual_materialize_ms %||% NA_real_,
+      device_to_host_ms = pair$timings$device_to_host_ms %||% NA_real_,
+      residualization_total_ms =
+        pair$timings$residualization_total_ms %||% NA_real_,
       ci_test_ms = ci_elapsed,
       total_ms = total_elapsed
     )

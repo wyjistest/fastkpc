@@ -35,7 +35,8 @@ check_case <- function(formula, data, S, k, label) {
     k = k,
     bs = "tp",
     device = "cuda",
-    allow_cpu_fallback = FALSE
+    allow_cpu_fallback = FALSE,
+    gcv_strategy = "spectral"
   )
 
   assert_true(identical(gpu$backend_family, "mgcvExtractGPU"),

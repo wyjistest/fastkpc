@@ -81,21 +81,21 @@ fastkpc_resolve_backend_request <- function(
     )
     compatible_backend <- "mgcvExtractGPUGCV"
   }
-  supported <- identical(checks$compatibility_status, "supported")
+  runnable <- checks$compatibility_status %in% c("supported", "canary")
   route <- fastkpc_select_backend_route(
     precision = precision,
     S_size = length(S),
     single_penalty = as.integer(penalty_count) == 1L,
-    mgcv_extract_supported = supported,
+    mgcv_extract_supported = runnable,
     tau = tau,
     fallback_backend = fallback_backend,
     compatible_backend = compatible_backend,
     fast_backend = fast_backend
   )
-  if (identical(precision, "compatible") && !supported) {
+  if (identical(precision, "compatible") && !runnable) {
     route$primary_backend <- fallback_backend
   }
-  if (identical(precision, "hybrid") && !supported) {
+  if (identical(precision, "hybrid") && !runnable) {
     route$verifier_backend <- fallback_backend
   }
   if (identical(precision, "fast")) {
@@ -107,7 +107,12 @@ fastkpc_resolve_backend_request <- function(
   } else {
     route$compatibility_status <- checks$compatibility_status
     route$compatibility_action <- checks$compatibility_action
-    route$fallback_reason <- if (supported) "" else checks$warning_message
+    route$fallback_reason <- if (identical(checks$compatibility_status,
+                                           "supported")) {
+      ""
+    } else {
+      checks$warning_message
+    }
     route$supported_checks <- checks$supported_checks
     route$unsupported_checks <- checks$unsupported_checks
   }

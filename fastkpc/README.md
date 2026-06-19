@@ -71,9 +71,16 @@ precision = "hybrid":
 restricted setup and fastkpc uses GPU numerical paths where supported. It is not
 a full mgcv clone and it is not a pure GPU approximation backend.
 
-The same-setup native batch path reduces setup repetition and R/native call
-overhead, but it is not a true fused/batched GPU kernel. Diagnostics must keep
-`true_batched_kernel = false` until a fused kernel exists.
+The precision `mgcvExtractGPU` executor now uses same-setup x/y pair batching
+for selected fixed-sp CUDA solves after per-target spectral GCV selection.
+This reduces repeated setup/solve overhead for each CI test pair, but it is not
+same-S group caching and it is not a true fused/batched GPU kernel. Diagnostics
+must keep `true_batched_kernel = false` until a fused kernel exists.
+
+Native CUDA validation remains opt-in. Running
+`FASTKPC_RUN_CUDA_TESTS=1 fastkpc/tools/run_mgcv_gate_b_tests.sh` exercises the
+native precision E2E gate and writes CPU/GPU parity evidence through
+`fastkpc_run_native_cuda_precision_parity()`.
 
 `fastSplineCUDA` remains the frozen approximate baseline. `tprsApproxCUDA`
 remains deferred unless projection-floor, oracle-lambda, timing, and graph-level

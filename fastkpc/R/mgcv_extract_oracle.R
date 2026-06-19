@@ -995,8 +995,9 @@ fastkpc_mgcv_extract_gpu_edf_for_handle <- function(handle, sp) {
   as.numeric(sum(diag(handle$XtX_null %*% A_inv)))
 }
 
-fastkpc_mgcv_extract_gpu_spectral_gcv_grid <- function(handle, sp_grid,
-                                                       tol = sqrt(.Machine$double.eps)) {
+fastkpc_mgcv_extract_gpu_spectral_prepare <- function(
+    handle,
+    tol = sqrt(.Machine$double.eps)) {
   if (length(handle$sp) != 1L) {
     stop("spectral GCV currently supports exactly one smoothing parameter",
          call. = FALSE)
@@ -1007,9 +1008,6 @@ fastkpc_mgcv_extract_gpu_spectral_gcv_grid <- function(handle, sp_grid,
   }
   XtX <- as.matrix(handle$XtX_null)
   P_base <- as.matrix(handle$penalty_null) / base_sp
-  Xty <- as.numeric(handle$Xty_null)
-  y <- as.numeric(handle$y)
-  n <- length(y)
   chol_xtx <- tryCatch(chol(XtX, pivot = FALSE), error = function(e) NULL)
   if (is.null(chol_xtx)) {
     stop("spectral GCV requires positive definite XtX in the constraint null space",
@@ -1020,8 +1018,27 @@ fastkpc_mgcv_extract_gpu_spectral_gcv_grid <- function(handle, sp_grid,
   symmetric_penalty <- (symmetric_penalty + t(symmetric_penalty)) / 2
   eigen_penalty <- eigen(symmetric_penalty, symmetric = TRUE)
   d <- pmax(as.numeric(eigen_penalty$values), 0)
-  z <- as.numeric(t(eigen_penalty$vectors) %*%
-                    as.numeric(crossprod(inv_chol, Xty)))
+  list(
+    base_sp = base_sp,
+    inv_chol = inv_chol,
+    eigenvectors = eigen_penalty$vectors,
+    eigenvalues = d,
+    spectral_rank = length(d)
+  )
+}
+
+fastkpc_mgcv_extract_gpu_spectral_score_grid <- function(
+    spectral,
+    y,
+    Xty_null,
+    sp_grid,
+    tol = sqrt(.Machine$double.eps)) {
+  y <- as.numeric(y)
+  Xty_null <- as.numeric(Xty_null)
+  d <- as.numeric(spectral$eigenvalues)
+  n <- length(y)
+  z <- as.numeric(t(spectral$eigenvectors) %*%
+                    as.numeric(crossprod(spectral$inv_chol, Xty_null)))
   y_sq <- sum(y^2)
 
   rows <- lapply(sp_grid, function(sp_value) {
@@ -1045,6 +1062,18 @@ fastkpc_mgcv_extract_gpu_spectral_gcv_grid <- function(handle, sp_grid,
     grid = grid,
     eigenvalues = d,
     spectral_rank = length(d)
+  )
+}
+
+fastkpc_mgcv_extract_gpu_spectral_gcv_grid <- function(handle, sp_grid,
+                                                       tol = sqrt(.Machine$double.eps)) {
+  spectral <- fastkpc_mgcv_extract_gpu_spectral_prepare(handle, tol = tol)
+  fastkpc_mgcv_extract_gpu_spectral_score_grid(
+    spectral = spectral,
+    y = handle$y,
+    Xty_null = handle$Xty_null,
+    sp_grid = sp_grid,
+    tol = tol
   )
 }
 
@@ -1585,6 +1614,7 @@ fastkpc_mgcv_extract_batch <- function(Y, S_data, S,
   q <- ncol(Y)
   residuals <- matrix(NA_real_, n, q)
   fitted <- matrix(NA_real_, n, q)
+  coefficients <- vector("list", q)
   sp <- vector("list", q)
   score <- rep(NA_real_, q)
   edf <- rep(NA_real_, q)
@@ -1620,6 +1650,7 @@ fastkpc_mgcv_extract_batch <- function(Y, S_data, S,
     )
     residuals[, j] <- fit$residuals
     fitted[, j] <- fit$fitted
+    coefficients[[j]] <- fit$coefficients
     sp[[j]] <- fit$sp
     score[j] <- fit$score
     edf[j] <- fit$edf
@@ -1638,6 +1669,7 @@ fastkpc_mgcv_extract_batch <- function(Y, S_data, S,
     is_self_contained_gcv = FALSE,
     residuals = residuals,
     fitted = fitted,
+    coefficients = coefficients,
     sp = sp,
     score = score,
     edf = edf,

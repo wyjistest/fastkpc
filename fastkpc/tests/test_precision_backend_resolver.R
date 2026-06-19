@@ -64,4 +64,34 @@ assert_true(hybrid_bad_cuda$verifier_backend == "legacy-mgcv",
 assert_true(hybrid_bad_cuda$canonical_replay_required,
             "hybrid must require canonical replay")
 
+canary_gpu <- fastkpc_resolve_backend_request(
+  precision = "compatible", alpha = 0.05, tau = log(2), S = 1L,
+  formula_class = "full-smooth", penalty_count = 1L,
+  family = "gaussian", link = "identity",
+  setup_fingerprint = "setup-canary",
+  runtime_capabilities = modifyList(caps, list(R_version = "4.4.1")),
+  allow_canary = TRUE,
+  execution_engine = "cuda"
+)
+assert_true(canary_gpu$compatibility_status == "canary",
+            "canary route should preserve canary status")
+assert_true(canary_gpu$compatibility_action == "warn-and-run",
+            "canary route should warn and run")
+assert_true(canary_gpu$primary_backend == "mgcvExtractGPUGCV",
+            "canary compatible route should execute mgcvExtractGPUGCV")
+
+canary_hybrid <- fastkpc_resolve_backend_request(
+  precision = "hybrid", alpha = 0.05, tau = log(2), S = 1L,
+  formula_class = "full-smooth", penalty_count = 1L,
+  family = "gaussian", link = "identity",
+  setup_fingerprint = "setup-canary-hybrid",
+  runtime_capabilities = modifyList(caps, list(mgcv_version = "1.9.1")),
+  allow_canary = TRUE,
+  execution_engine = "cuda"
+)
+assert_true(canary_hybrid$primary_backend == "fastSplineCUDA",
+            "canary hybrid primary remains fastSplineCUDA")
+assert_true(canary_hybrid$verifier_backend == "mgcvExtractGPUGCV",
+            "canary hybrid verifier should execute mgcvExtractGPUGCV")
+
 cat("PASS precision backend resolver\n")
