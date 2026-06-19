@@ -206,6 +206,8 @@ fastkpc_precision_init_cache_stats <- function(context) {
   stats$full_miss_events <- 0L
   stats$target_computations <- 0L
   stats$cuda_batch_calls <- 0L
+  stats$cuda_single_target_calls <- 0L
+  stats$cuda_solve_calls <- 0L
   stats$stored_vectors <- 0L
   stats$stored_values <- 0L
   stats$setup_cache_hits <- 0L
@@ -246,6 +248,9 @@ fastkpc_precision_cache_stats <- function(context, backend_name) {
     full_miss_events = as.integer(stats$full_miss_events %||% 0L),
     target_computations = as.integer(stats$target_computations %||% 0L),
     cuda_batch_calls = as.integer(stats$cuda_batch_calls %||% 0L),
+    cuda_single_target_calls =
+      as.integer(stats$cuda_single_target_calls %||% 0L),
+    cuda_solve_calls = as.integer(stats$cuda_solve_calls %||% 0L),
     stored_vectors = as.integer(stats$stored_vectors %||% 0L),
     stored_values = as.integer(stats$stored_values %||% 0L),
     setup_cache_hits = as.integer(stats$setup_cache_hits %||% 0L),
@@ -386,6 +391,29 @@ fastkpc_sum_timing <- function(values) {
   sum(values, na.rm = TRUE)
 }
 
+fastkpc_gpu_residual_timings <- function(timings = NULL,
+                                         residualization_total_ms = NA_real_,
+                                         residualization_compute_ms = NULL) {
+  timings <- timings %||% list()
+  total <- timings$residualization_total_ms %||% residualization_total_ms
+  compute <- residualization_compute_ms %||%
+    timings$residualization_compute_ms %||% total
+  list(
+    mgcv_setup_cpu_ms = timings$mgcv_setup_cpu_ms %||%
+      timings$setup_cpu_ms %||% NA_real_,
+    host_to_device_ms = timings$host_to_device_ms %||% NA_real_,
+    spectral_prepare_ms = timings$spectral_prepare_ms %||% NA_real_,
+    gcv_score_ms = timings$gcv_score_ms %||% NA_real_,
+    linear_solve_ms = timings$linear_solve_ms %||%
+      timings$selected_solve_ms %||% timings$solve_ms %||% NA_real_,
+    residual_materialize_ms =
+      timings$residual_materialize_ms %||% NA_real_,
+    device_to_host_ms = timings$device_to_host_ms %||% NA_real_,
+    residualization_total_ms = total,
+    residualization_compute_ms = compute
+  )
+}
+
 fastkpc_mgcv_extract_gpu_gcv_for_target <- function(data, target, S,
                                                     sp_grid = NULL) {
   start <- proc.time()[["elapsed"]]
@@ -406,7 +434,10 @@ fastkpc_mgcv_extract_gpu_gcv_for_target <- function(data, target, S,
         native_gpu_solve_used = FALSE,
         setup_fingerprint = list(fingerprint = setup_fingerprint)
       ),
-      timings = list(residualization_total_ms = elapsed)
+      timings = fastkpc_gpu_residual_timings(
+        residualization_total_ms = elapsed,
+        residualization_compute_ms = elapsed
+      )
     ))
   }
   if (length(S) > 2L) {
@@ -448,7 +479,11 @@ fastkpc_mgcv_extract_gpu_gcv_for_target <- function(data, target, S,
     edf = fit$edf,
     grid = fit$grid,
     fit = fit,
-    timings = list(residualization_total_ms = elapsed)
+    timings = fastkpc_gpu_residual_timings(
+      fit$timings,
+      residualization_total_ms = elapsed,
+      residualization_compute_ms = elapsed
+    )
   )
 }
 
@@ -485,7 +520,10 @@ fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
         shared_setup_fingerprint = setup_fingerprint,
         same_setup_pair_batch_used = FALSE
       ),
-      timings = list(residualization_total_ms = elapsed)
+      timings = fastkpc_gpu_residual_timings(
+        residualization_total_ms = elapsed,
+        residualization_compute_ms = elapsed
+      )
     ))
   }
   if (length(S) > 2L) {
@@ -656,7 +694,8 @@ fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
       linear_solve_ms = solve_ms,
       residual_materialize_ms = materialize_ms,
       device_to_host_ms = NA_real_,
-      residualization_total_ms = elapsed
+      residualization_total_ms = elapsed,
+      residualization_compute_ms = elapsed
     )
   )
 }
@@ -721,7 +760,9 @@ fastkpc_entry_from_gpu_target <- function(target_fit, target) {
   )
 }
 
-fastkpc_pair_from_cached_gpu_residuals <- function(x_entry, y_entry, x, y) {
+fastkpc_pair_from_cached_gpu_residuals <- function(x_entry, y_entry, x, y,
+                                                   timings = NULL,
+                                                   cache_service_mode = "full-hit") {
   shared_setup <- x_entry$setup_fingerprint
   if (is.na(shared_setup) ||
       !identical(as.character(shared_setup),
@@ -731,6 +772,22 @@ fastkpc_pair_from_cached_gpu_residuals <- function(x_entry, y_entry, x, y) {
   }
   residuals <- cbind(x = x_entry$residuals, y = y_entry$residuals)
   fitted <- cbind(x = x_entry$fitted, y = y_entry$fitted)
+  timings <- timings %||% list(
+    mgcv_setup_cpu_ms = NA_real_,
+    host_to_device_ms = NA_real_,
+    spectral_prepare_ms = NA_real_,
+    gcv_score_ms = NA_real_,
+    linear_solve_ms = NA_real_,
+    residual_materialize_ms = NA_real_,
+    device_to_host_ms = NA_real_,
+    residualization_total_ms = 0,
+    residualization_compute_ms = 0
+  )
+  timings$residualization_total_ms <-
+    timings$residualization_total_ms %||% 0
+  timings$residualization_compute_ms <-
+    timings$residualization_compute_ms %||%
+      timings$residualization_total_ms %||% 0
   list(
     residuals = residuals,
     fitted = fitted,
@@ -772,18 +829,10 @@ fastkpc_pair_from_cached_gpu_residuals <- function(x_entry, y_entry, x, y) {
         y_entry$selected_solve_backend_executed,
       same_setup_pair_batch_used = FALSE,
       true_batched_kernel = FALSE,
-      batch_stage = "run-scoped-residual-cache-hit"
+      batch_stage = "run-scoped-residual-cache-hit",
+      cache_service_mode = cache_service_mode
     ),
-    timings = list(
-      mgcv_setup_cpu_ms = NA_real_,
-      host_to_device_ms = NA_real_,
-      spectral_prepare_ms = NA_real_,
-      gcv_score_ms = NA_real_,
-      linear_solve_ms = NA_real_,
-      residual_materialize_ms = NA_real_,
-      device_to_host_ms = NA_real_,
-      residualization_total_ms = 0
-    )
+    timings = timings
   )
 }
 
@@ -800,6 +849,7 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
   }
   setup_key <- paste0("S:", fastkpc_precision_S_key(S))
   cache_enabled <- !is.null(context) && isTRUE(context$residual_cache_enabled)
+  cache_lookup_start <- proc.time()[["elapsed"]]
   cached_entries <- list()
   cache_keys <- character()
   targets <- c(as.integer(x), as.integer(y))
@@ -827,6 +877,7 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
       }
     }
   }
+  cache_lookup_ms <- (proc.time()[["elapsed"]] - cache_lookup_start) * 1000
 
   cache_hit_x <- isTRUE(cache_enabled) &&
     !is.null(cached_entries[[as.character(x)]])
@@ -849,13 +900,30 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
   }
 
   if (isTRUE(cache_hit_all)) {
+    cache_service_mode <- "full-hit"
+    residualization_compute_ms <- 0
+    cuda_single_target_calls <- 0L
+    cuda_solve_calls <- 0L
     pair <- fastkpc_pair_from_cached_gpu_residuals(
       cached_entries[[as.character(x)]],
       cached_entries[[as.character(y)]],
       x = x,
-      y = y
+      y = y,
+      timings = list(
+        mgcv_setup_cpu_ms = NA_real_,
+        host_to_device_ms = NA_real_,
+        spectral_prepare_ms = NA_real_,
+        gcv_score_ms = NA_real_,
+        linear_solve_ms = NA_real_,
+        residual_materialize_ms = NA_real_,
+        device_to_host_ms = NA_real_,
+        residualization_total_ms = 0,
+        residualization_compute_ms = 0
+      ),
+      cache_service_mode = cache_service_mode
     )
   } else if (isTRUE(cache_partial_hit)) {
+    cache_service_mode <- "partial-hit"
     miss_index <- if (!isTRUE(cache_hit_x)) 1L else 2L
     miss_target <- targets[[miss_index]]
     target_fit <- fastkpc_mgcv_extract_gpu_gcv_for_target(
@@ -865,11 +933,22 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
       sp_grid = sp_grid
     )
     miss_entry <- fastkpc_entry_from_gpu_target(target_fit, miss_target)
+    target_timings <- miss_entry$timings %||% list()
+    residualization_compute_ms <-
+      target_timings$residualization_total_ms %||% NA_real_
+    target_timings$residualization_compute_ms <-
+      residualization_compute_ms
+    cuda_single_target_calls <- 1L
+    cuda_solve_calls <- 1L
     if (isTRUE(cache_enabled)) {
       context$residual_cache_stats$computations <-
         as.integer(context$residual_cache_stats$computations %||% 0L) + 1L
       context$residual_cache_stats$target_computations <-
         as.integer(context$residual_cache_stats$target_computations %||% 0L) + 1L
+      context$residual_cache_stats$cuda_single_target_calls <-
+        as.integer(context$residual_cache_stats$cuda_single_target_calls %||% 0L) + 1L
+      context$residual_cache_stats$cuda_solve_calls <-
+        as.integer(context$residual_cache_stats$cuda_solve_calls %||% 0L) + 1L
       key <- cache_keys[[miss_index]]
       if (!exists(key, envir = context$residual_cache, inherits = FALSE)) {
         assign(key, miss_entry, envir = context$residual_cache)
@@ -886,11 +965,18 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
       entries[[as.character(x)]],
       entries[[as.character(y)]],
       x = x,
-      y = y
+      y = y,
+      timings = target_timings,
+      cache_service_mode = cache_service_mode
     )
   } else {
+    cache_service_mode <- "full-miss"
     pair <- fastkpc_mgcv_extract_gpu_gcv_for_pair(data, x, y, S,
                                                   sp_grid = sp_grid)
+    residualization_compute_ms <-
+      pair$timings$residualization_total_ms %||% NA_real_
+    cuda_single_target_calls <- 0L
+    cuda_solve_calls <- 1L
     if (isTRUE(cache_enabled)) {
       context$residual_cache_stats$computations <-
         as.integer(context$residual_cache_stats$computations %||% 0L) + 1L
@@ -898,6 +984,8 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
         as.integer(context$residual_cache_stats$target_computations %||% 0L) + 2L
       context$residual_cache_stats$cuda_batch_calls <-
         as.integer(context$residual_cache_stats$cuda_batch_calls %||% 0L) + 1L
+      context$residual_cache_stats$cuda_solve_calls <-
+        as.integer(context$residual_cache_stats$cuda_solve_calls %||% 0L) + 1L
       entries <- fastkpc_entries_from_gpu_pair(pair, x = x, y = y)
       for (j in seq_along(entries)) {
         key <- cache_keys[[j]]
@@ -975,6 +1063,11 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
     cache_hit_any = isTRUE(cache_hit_any),
     cache_hit_all = isTRUE(cache_hit_all),
     cache_partial_hit = isTRUE(cache_partial_hit),
+    cache_service_mode = cache_service_mode,
+    residualization_compute_ms = residualization_compute_ms,
+    cache_lookup_ms = cache_lookup_ms,
+    cuda_single_target_calls = as.integer(cuda_single_target_calls),
+    cuda_solve_calls = as.integer(cuda_solve_calls),
     timings = list(
       mgcv_setup_cpu_ms = pair$timings$mgcv_setup_cpu_ms %||% NA_real_,
       host_to_device_ms = pair$timings$host_to_device_ms %||% NA_real_,
@@ -986,6 +1079,8 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
       device_to_host_ms = pair$timings$device_to_host_ms %||% NA_real_,
       residualization_total_ms =
         pair$timings$residualization_total_ms %||% NA_real_,
+      residualization_compute_ms = residualization_compute_ms,
+      cache_lookup_ms = cache_lookup_ms,
       ci_test_ms = ci_elapsed,
       total_ms = total_elapsed
     )
@@ -1443,6 +1538,15 @@ fastkpc_precision_trace_for_test <- function(resolved, route, run_id,
     cache_hit_any = isTRUE(receipt$cache_hit_any),
     cache_hit_all = isTRUE(receipt$cache_hit_all),
     cache_partial_hit = isTRUE(receipt$cache_partial_hit),
+    cache_service_mode = receipt$cache_service_mode %||% NA_character_,
+    residualization_compute_ms =
+      receipt$timings$residualization_compute_ms %||%
+        receipt$residualization_compute_ms %||% NA_real_,
+    cache_lookup_ms = receipt$timings$cache_lookup_ms %||%
+      receipt$cache_lookup_ms %||% NA_real_,
+    cuda_single_target_calls =
+      receipt$cuda_single_target_calls %||% NA_integer_,
+    cuda_solve_calls = receipt$cuda_solve_calls %||% NA_integer_,
     fallback_triggered = resolved$fallback_triggered,
     attempt_count = resolved$attempt_count,
     attempt_backend_sequence = resolved$attempt_backend_sequence,
@@ -1462,6 +1566,8 @@ fastkpc_precision_trace_for_test <- function(resolved, route, run_id,
     spectral_prepare_ms = receipt$timings$spectral_prepare_ms %||% NA_real_,
     gcv_score_ms = receipt$timings$gcv_score_ms %||% NA_real_,
     linear_solve_ms = receipt$timings$linear_solve_ms %||% NA_real_,
+    residual_materialize_ms =
+      receipt$timings$residual_materialize_ms %||% NA_real_,
     device_to_host_ms = receipt$timings$device_to_host_ms %||% NA_real_,
     ci_test_ms = receipt$timings$ci_test_ms %||% NA_real_,
     total_ms = receipt$timings$total_ms %||% NA_real_
@@ -1734,6 +1840,9 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
         residual_cache_full_miss_events = cache$full_miss_events,
         residual_cache_target_computations = cache$target_computations,
         residual_cache_cuda_batch_calls = cache$cuda_batch_calls,
+        residual_cache_cuda_single_target_calls =
+          cache$cuda_single_target_calls,
+        residual_cache_cuda_solve_calls = cache$cuda_solve_calls,
         residual_cache_stored_vectors = cache$stored_vectors,
         residual_cache_stored_values = cache$stored_values,
         dcov_batches = 0L,

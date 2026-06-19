@@ -197,7 +197,10 @@ assert_true(single_target_calls > 0L,
 trace <- cached$diagnostics$precision_trace
 required_cache_cols <- c(
   "cache_hit_x", "cache_hit_y", "cache_hit_any",
-  "cache_hit_all", "cache_partial_hit"
+  "cache_hit_all", "cache_partial_hit",
+  "cache_service_mode", "residualization_compute_ms",
+  "cache_lookup_ms", "cuda_single_target_calls",
+  "cuda_solve_calls"
 )
 missing_cache_cols <- setdiff(required_cache_cols, names(trace))
 assert_true(length(missing_cache_cols) == 0L,
@@ -208,6 +211,16 @@ assert_true(nrow(partial_rows) > 0L,
             "precision trace should record partial cache hit rows")
 assert_true(all(xor(partial_rows$cache_hit_x, partial_rows$cache_hit_y)),
             "partial cache hit rows should identify the target-side hit")
+assert_true(all(partial_rows$cache_service_mode == "partial-hit"),
+            "partial cache hit rows should report partial-hit service mode")
+assert_true(all(partial_rows$residualization_compute_ms == 11),
+            "partial cache hit rows should retain single-target compute timing")
+assert_true(all(partial_rows$cache_lookup_ms >= 0),
+            "partial cache hit rows should report cache lookup timing")
+assert_true(all(partial_rows$cuda_single_target_calls == 1L),
+            "partial cache hit rows should report one single-target CUDA solve")
+assert_true(all(partial_rows$cuda_solve_calls == 1L),
+            "partial cache hit rows should count the single-target CUDA solve")
 assert_true(cached$skeleton$residual_cache$partial_hit_events > 0L,
             "residual cache stats should count partial hit events")
 assert_true(cached$skeleton$residual_cache$target_computations >=
@@ -219,5 +232,12 @@ assert_true(cached$skeleton$residual_cache$target_computations ==
               cached$skeleton$residual_cache$cuda_batch_calls * 2L +
                 single_target_calls,
             "target computation stats should count pair width plus single-target work")
+assert_true(cached$skeleton$residual_cache$cuda_single_target_calls ==
+              single_target_calls,
+            "cuda single-target call stats should match target wrapper calls")
+assert_true(cached$skeleton$residual_cache$cuda_solve_calls ==
+              cached$skeleton$residual_cache$cuda_batch_calls +
+                cached$skeleton$residual_cache$cuda_single_target_calls,
+            "cuda solve call stats should count both pair batch and single-target calls")
 
 cat("PASS precision same-S residual cache\n")
