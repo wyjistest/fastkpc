@@ -42,6 +42,8 @@ Rscript fastkpc/tests/test_true_batched_kernel_decision.R
 Rscript fastkpc/tests/test_precision_backend_resolver.R
 Rscript fastkpc/tests/test_precision_ci_decision_contract.R
 Rscript fastkpc/tests/test_precision_cpu_backend_identity.R
+Rscript fastkpc/tests/test_precision_canary_warning.R
+Rscript fastkpc/tests/test_precision_nonfinite_input_fail_closed.R
 Rscript fastkpc/tests/test_precision_fast_mode_e2e.R
 Rscript fastkpc/tests/test_precision_compatible_fail_closed.R
 Rscript fastkpc/tests/test_precision_hybrid_e2e_replay.R

@@ -1064,6 +1064,10 @@ fastkpc_precision_trace_for_test <- function(resolved, route, run_id,
   }
   verifier_p_raw <- if (is.null(verifier_info)) NA_real_ else verifier_info$p_raw
   verifier_p_used <- if (is.null(verifier_info)) NA_real_ else verifier_info$p_used
+  fallback_reason <- resolved$fallback_reason %||% ""
+  if (!nzchar(fallback_reason)) {
+    fallback_reason <- route$fallback_reason %||% ""
+  }
   fastkpc_precision_trace_row(
     run_id = run_id,
     scenario_id = "fast_kpc",
@@ -1084,8 +1088,7 @@ fastkpc_precision_trace_for_test <- function(resolved, route, run_id,
     verifier_planned = route$verifier_backend %||% NA_character_,
     verifier_executed = verifier_executed,
     compatibility_action = route$compatibility_action %||% "",
-    fallback_reason = resolved$fallback_reason %||%
-      route$fallback_reason %||% "",
+    fallback_reason = fallback_reason,
     primary_p = resolved$primary_info$p_used,
     verifier_p = verifier_p_used,
     p_used = resolved$pval,

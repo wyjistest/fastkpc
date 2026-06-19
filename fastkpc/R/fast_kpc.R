@@ -448,6 +448,10 @@ fast_kpc <- function(data,
       identical(precision_route$primary_backend, "fastSplineCUDA")) {
     precision_route$primary_backend <- "fastSplineCPU"
   }
+  if (identical(precision_route$compatibility_status, "canary") &&
+      identical(precision_route$compatibility_action, "warn-and-run")) {
+    warning(precision_route$fallback_reason, call. = FALSE)
+  }
   backend_requested <- precision_route$primary_backend
   backend_planned <- backend_requested
   verifier_planned <- precision_route$verifier_backend %||% NA_character_
@@ -536,6 +540,12 @@ fast_kpc <- function(data,
     precision_requested %in% c("fast", "compatible", "hybrid") &&
     (isTRUE(precision_executors_requested) ||
        precision_requested %in% c("compatible", "hybrid"))
+  if (isTRUE(use_precision_r_skeleton) && !isTRUE(normalized$info$all_finite)) {
+    stop(
+      "fast_kpc precision data plane requires finite input; shared row masks are not yet supported",
+      call. = FALSE
+    )
+  }
 
   timed <- fastkpc_elapsed({
     if (graph_stage == "wanpdag") {
