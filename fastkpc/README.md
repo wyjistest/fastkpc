@@ -101,10 +101,13 @@ FASTKPC_RUN_CUDA_TESTS=1 fastkpc/tools/run_precision_end_to_end_benchmark.sh
 ```
 
 The end-to-end benchmark writes `runs.csv`, `stage_timing.csv`, `cache.csv`,
-`graph_agreement.csv`, and `summary.{json,md}` under
+`graph_agreement.csv`, `mode_summary.csv`, `comparison_summary.csv`,
+`bottleneck_decision.csv`, and `summary.{json,md}` under
 `fastkpc/artifacts/precision_end_to_end_benchmark/`. It compares legacy mgcv,
-fastSplineCUDA, compatible CUDA, and hybrid CUDA rows and records skipped CUDA
-rows explicitly when native CUDA is not enabled.
+fastSplineCUDA, precision-scheduler primary-only CUDA, compatible CUDA, and
+hybrid CUDA rows, with warm-up, randomized measured mode order, and robust
+per-mode summaries. Set `FASTKPC_PRECISION_E2E_REAL_DATA=/path/to/data.csv` or
+`.rds` to append an external numeric workload.
 
 CUDA-specific tests remain opt-in. GitHub Actions are intentionally absent
 unless reintroduced by explicit request.

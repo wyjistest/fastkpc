@@ -22,26 +22,32 @@ scenario <- list(
 benchmark <- fastkpc_run_precision_end_to_end_benchmark(
   output_dir = output_dir,
   scenarios = list(scenario),
-  modes = c("legacy_mgcv", "fast_cuda", "compatible_cuda", "hybrid_cuda"),
+  modes = c("legacy_mgcv", "primary_only_cuda", "hybrid_cuda"),
   repeats = 1L,
   alpha = 0.15,
   max_conditioning_size = 1L,
-  run_native_cuda = FALSE
+  run_native_cuda = FALSE,
+  warmup = TRUE,
+  randomize_mode_order = TRUE
 )
 
 required <- c("runs", "stage_timing", "cache", "graph_agreement",
+              "mode_summary", "comparison_summary", "bottleneck_decision",
               "summary", "paths")
 missing <- setdiff(required, names(benchmark))
 assert_true(length(missing) == 0L,
             paste("benchmark missing fields:", paste(missing, collapse = ", ")))
 
 assert_true(is.data.frame(benchmark$runs), "runs should be a data.frame")
-assert_true(nrow(benchmark$runs) == 4L,
+assert_true(nrow(benchmark$runs) == 3L,
             "one row should be recorded for each requested mode")
 assert_true(all(benchmark$runs$mode %in%
-                  c("legacy_mgcv", "fast_cuda", "compatible_cuda",
-                    "hybrid_cuda")),
+                  c("legacy_mgcv", "primary_only_cuda", "hybrid_cuda")),
             "runs should keep requested mode names")
+assert_true("execution_order" %in% names(benchmark$runs),
+            "runs should record randomized execution order")
+assert_true("warmup_enabled" %in% names(benchmark$runs),
+            "runs should record whether warm-up was enabled")
 assert_true(all(benchmark$runs$status %in% c("ok", "skipped", "error")),
             "runs should use explicit status values")
 assert_true(any(benchmark$runs$status == "ok"),
@@ -55,8 +61,26 @@ assert_true(is.data.frame(benchmark$stage_timing),
 assert_true(is.data.frame(benchmark$cache), "cache should be a data.frame")
 assert_true(is.data.frame(benchmark$graph_agreement),
             "graph_agreement should be a data.frame")
+assert_true(is.data.frame(benchmark$mode_summary),
+            "mode_summary should be a data.frame")
+assert_true(is.data.frame(benchmark$comparison_summary),
+            "comparison_summary should be a data.frame")
+assert_true(is.data.frame(benchmark$bottleneck_decision),
+            "bottleneck_decision should be a data.frame")
 assert_true(nrow(benchmark$graph_agreement) >= 1L,
             "graph agreement should include at least one baseline comparison")
+assert_true(all(c("median_wall_time_sec", "p90_wall_time_sec",
+                  "geomean_wall_time_sec",
+                  "median_stage_share_ci") %in%
+                  names(benchmark$mode_summary)),
+            "mode_summary should include robust timing and stage-share columns")
+assert_true(any(benchmark$comparison_summary$comparison ==
+                  "hybrid_cuda_vs_primary_only_cuda"),
+            "comparison_summary should include hybrid overhead against primary-only")
+assert_true(all(c("analysis_scope", "dominant_phase",
+                  "recommended_next_optimization") %in%
+                  names(benchmark$bottleneck_decision)),
+            "bottleneck decision should name the scope, dominant phase, and action")
 assert_true(is.list(benchmark$summary), "summary should exist")
 assert_true(nzchar(benchmark$summary$recommended_next_optimization),
             "summary should recommend the next optimization")
