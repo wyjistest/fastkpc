@@ -97,7 +97,14 @@ Rscript fastkpc/tools/run_precision_ladder_timing_campaign.R
 Rscript fastkpc/tools/run_hybrid_policy_calibration_report.R
 Rscript fastkpc/tools/run_workload_structure_stats.R
 Rscript fastkpc/tools/run_true_batched_kernel_decision.R
+FASTKPC_RUN_CUDA_TESTS=1 fastkpc/tools/run_precision_end_to_end_benchmark.sh
 ```
+
+The end-to-end benchmark writes `runs.csv`, `stage_timing.csv`, `cache.csv`,
+`graph_agreement.csv`, and `summary.{json,md}` under
+`fastkpc/artifacts/precision_end_to_end_benchmark/`. It compares legacy mgcv,
+fastSplineCUDA, compatible CUDA, and hybrid CUDA rows and records skipped CUDA
+rows explicitly when native CUDA is not enabled.
 
 CUDA-specific tests remain opt-in. GitHub Actions are intentionally absent
 unless reintroduced by explicit request.
