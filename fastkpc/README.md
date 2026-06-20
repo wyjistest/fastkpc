@@ -73,9 +73,12 @@ a full mgcv clone and it is not a pure GPU approximation backend.
 
 The precision `mgcvExtractGPU` executor now uses same-setup x/y pair batching
 for selected fixed-sp CUDA solves after per-target spectral GCV selection.
-This reduces repeated setup/solve overhead for each CI test pair, but it is not
-same-S group caching and it is not a true fused/batched GPU kernel. Diagnostics
-must keep `true_batched_kernel = false` until a fused kernel exists.
+It also uses an on-demand same-S prepared setup/spectral cache inside each run,
+so later misses reuse response-free design and spectral state while preserving
+target-specific `X'y`, GCV, `sp`, and solve work. This is not eager same-S group
+planning/batching, it is not capacity-bounded prepared-cache eviction, and it
+is not a true fused/batched GPU kernel. Diagnostics must keep
+`true_batched_kernel = false` until a fused kernel exists.
 
 Native CUDA validation remains opt-in. Running
 `FASTKPC_RUN_CUDA_TESTS=1 fastkpc/tools/run_mgcv_gate_b_tests.sh` exercises the
@@ -123,9 +126,12 @@ precision = "hybrid":
 The default remains the existing behavior until held-out validation is accepted.
 Diagnostics distinguish `backend_planned` from `backend_executed`;
 `backend_used` refers to the actual executor. Current precision data-plane scope
-is skeleton only, CPU/CUDA, and single-penalty `|S| <= 2`. WAN-PDAG, `|S| > 2`
-multi-penalty GCV, cache amortization, and true fused/batched `mgcvExtractGPU`
-kernels remain future work pending native CUDA parity and timing evidence.
+is skeleton only, CPU/CUDA, and single-penalty `|S| <= 2`. On-demand same-S
+prepared setup/spectral caching is implemented for the precision GPU executor;
+eager same-S group planning/batching, capacity-bounded prepared-cache eviction,
+WAN-PDAG, `|S| > 2` multi-penalty GCV, and true fused/batched
+`mgcvExtractGPU` kernels remain future work pending native CUDA parity and
+timing evidence.
 
 ## Build
 

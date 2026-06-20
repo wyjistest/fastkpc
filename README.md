@@ -64,7 +64,8 @@ The default remains the existing legacy-compatible fastkpc behavior unless
 executor. Current precision data-plane scope is skeleton only, CPU/CUDA, and
 single-penalty `|S| <= 2`. CUDA precision tests include an opt-in native E2E
 gate and a CPU/GPU parity artifact. The `mgcvExtractGPU` precision executor
-uses same-setup x/y pair batching for selected fixed-sp CUDA solves, while
-same-S group cache, WAN-PDAG, `|S| > 2` multi-penalty GCV, and true
-fused/batched `mgcvExtractGPU` kernels remain future work pending broader
-workload timing evidence.
+uses same-setup x/y pair batching for selected fixed-sp CUDA solves and an
+on-demand same-S prepared setup/spectral cache within each run. Eager same-S
+group planning/batching, capacity-bounded prepared-cache eviction, WAN-PDAG,
+`|S| > 2` multi-penalty GCV, and true fused/batched `mgcvExtractGPU` kernels
+remain future work pending broader workload timing evidence.

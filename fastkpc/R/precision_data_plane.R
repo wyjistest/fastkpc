@@ -256,9 +256,16 @@ fastkpc_precision_update_prepared_cache_memory <- function(context) {
   invisible(NULL)
 }
 
+fastkpc_precision_gpu_setup_handle_version <- function() {
+  "mgcvExtractGPU-setup-handle-v1"
+}
+
 fastkpc_precision_setup_cache_key <- function(context, S, formula_class,
                                               backend = "mgcvExtractGPU",
-                                              bs = "tp", k = NA_integer_) {
+                                              bs = "tp", k = NA_integer_,
+                                              tol = sqrt(.Machine$double.eps),
+                                              handle_version =
+                                                fastkpc_precision_gpu_setup_handle_version()) {
   runtime <- context$runtime_capabilities %||% list()
   fastkpc_hash_object(list(
     data_hash = context$data_hash %||% NA_character_,
@@ -270,6 +277,8 @@ fastkpc_precision_setup_cache_key <- function(context, S, formula_class,
     mgcv_version = runtime$mgcv_version %||% NA_character_,
     setup_schema =
       runtime$setup_fingerprint_schema_version %||% NA_character_,
+    handle_version = as.character(handle_version),
+    tol = signif(as.numeric(tol), digits = 14),
     execution_engine = context$execution_engine %||% NA_character_
   ))
 }
@@ -540,7 +549,8 @@ fastkpc_prepare_gpu_setup_state <- function(data, S, template_target,
   setup_key <- if (isTRUE(cache_enabled)) {
     fastkpc_precision_setup_cache_key(
       context = context, S = S, formula_class = formula_class,
-      backend = "mgcvExtractGPU", bs = bs, k = k
+      backend = "mgcvExtractGPU", bs = bs, k = k, tol = tol,
+      handle_version = fastkpc_precision_gpu_setup_handle_version()
     )
   } else {
     NA_character_
@@ -558,6 +568,9 @@ fastkpc_prepare_gpu_setup_state <- function(data, S, template_target,
       identical(cached$data_hash, context$data_hash) &&
       identical(cached$S, as.integer(S)) &&
       identical(cached$formula_class, formula_class) &&
+      identical(cached$tol, signif(as.numeric(tol), digits = 14)) &&
+      identical(cached$handle_version,
+                fastkpc_precision_gpu_setup_handle_version()) &&
       is.null(cached$template_setup$y) &&
       is.null(cached$base_handle$y) &&
       is.null(cached$base_handle$Xty_null)
@@ -609,6 +622,8 @@ fastkpc_prepare_gpu_setup_state <- function(data, S, template_target,
     template_setup = fastkpc_strip_target_from_setup(template_setup),
     base_handle = fastkpc_strip_target_from_handle(base_handle),
     setup_fingerprint = template_setup$setup_fingerprint$fingerprint,
+    handle_version = fastkpc_precision_gpu_setup_handle_version(),
+    tol = signif(as.numeric(tol), digits = 14),
     sp_grid = sp_grid,
     cache_key = setup_key,
     cache_hit = FALSE,
