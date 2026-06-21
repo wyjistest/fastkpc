@@ -62,6 +62,7 @@ Rscript fastkpc/tests/test_precision_gpu_executor_receipt_truthful.R
 Rscript fastkpc/tests/test_precision_gpu_pair_wrapper_receipt.R
 Rscript fastkpc/tests/test_precision_same_s_residual_cache.R
 Rscript fastkpc/tests/test_precision_setup_cache_tol_key.R
+Rscript fastkpc/tests/test_precision_cuda_primary_adapter.R
 Rscript fastkpc/tests/test_precision_end_to_end_benchmark.R
 Rscript fastkpc/tests/test_precision_native_cuda_e2e_gate.R
 Rscript fastkpc/tests/test_native_cuda_precision_parity_artifact.R

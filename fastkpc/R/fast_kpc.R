@@ -73,6 +73,587 @@ fastkpc_cuda_hsic_status <- function() {
   list(available = isTRUE(cuda_ok && gamma_ok && perm_ok), reason = reason)
 }
 
+fastkpc_is_default_precision_executors <- function(precision_executors) {
+  identical(precision_executors, fastkpc_default_precision_executors())
+}
+
+fastkpc_batched_precision_combinations <- function(values, choose) {
+  values <- as.integer(values)
+  if (choose == 0L) return(list(integer()))
+  if (length(values) < choose) return(list())
+  lapply(utils::combn(values, choose, simplify = FALSE), as.integer)
+}
+
+fastkpc_batched_precision_make_layer_plan <- function(adjacency, level) {
+  p <- ncol(adjacency)
+  tasks <- list()
+  append_task <- function(edge_x, edge_y, x, y, S, side) {
+    tasks[[length(tasks) + 1L]] <<- list(
+      task_id = length(tasks) + 1L,
+      edge_x = as.integer(edge_x),
+      edge_y = as.integer(edge_y),
+      x = as.integer(x),
+      y = as.integer(y),
+      S = as.integer(S),
+      S_key = fastkpc_precision_S_key(S),
+      conditioning_target_side = side
+    )
+  }
+  for (x in seq_len(p - 1L)) {
+    for (y in seq.int(x + 1L, p)) {
+      if (!isTRUE(adjacency[x, y])) next
+      nx <- which(adjacency[, x] & seq_len(p) != y)
+      for (S in fastkpc_batched_precision_combinations(nx, level)) {
+        append_task(x, y, x, y, S, "x")
+      }
+      ny <- which(adjacency[, y] & seq_len(p) != x)
+      for (S in fastkpc_batched_precision_combinations(ny, level)) {
+        append_task(x, y, y, x, S, "y")
+      }
+    }
+  }
+  tasks
+}
+
+fastkpc_batched_precision_residual_key <- function(target, S) {
+  paste(as.integer(target), fastkpc_precision_S_key(S), sep = "|")
+}
+
+fastkpc_batched_precision_primary_pvalues <- function(data, tasks, ci_method,
+                                                      index, legacy_index,
+                                                      batch_size,
+                                                      fastspline_params,
+                                                      cuda_residual_fallback) {
+  if (!identical(ci_method, "dcc.gamma")) {
+    stop("batched CUDA precision primary currently supports dcc.gamma",
+         call. = FALSE)
+  }
+  n <- nrow(data)
+  task_count <- length(tasks)
+  if (task_count == 0L) {
+    return(list(pvalues = numeric(), diagnostics = list(
+      residual_batches = 0L, dcov_batches = 0L,
+      unique_residual_requests = 0L, residual_batch_diagnostics = NULL
+    )))
+  }
+
+  residuals <- new.env(parent = emptyenv())
+  residual_requests <- list()
+  seen <- new.env(parent = emptyenv())
+  for (task in tasks) {
+    if (length(task$S) == 0L) next
+    for (target in c(task$x, task$y)) {
+      key <- fastkpc_batched_precision_residual_key(target, task$S)
+      if (exists(key, envir = seen, inherits = FALSE)) next
+      assign(key, TRUE, envir = seen)
+      residual_requests[[length(residual_requests) + 1L]] <- list(
+        target = as.integer(target),
+        S = as.integer(task$S),
+        key = key
+      )
+    }
+  }
+
+  residual_batches <- 0L
+  residual_batch_diag <- NULL
+  if (length(residual_requests) > 0L) {
+    batch <- fastspline_residual_batch_cuda(
+      data = data,
+      targets = vapply(residual_requests, `[[`, integer(1L), "target"),
+      conditioning_sets = lapply(residual_requests, `[[`, "S"),
+      fastspline_params = fastspline_params,
+      fallback = cuda_residual_fallback
+    )
+    residual_batches <- 1L
+    residual_batch_diag <- batch$batch_diagnostics
+    for (i in seq_along(residual_requests)) {
+      assign(residual_requests[[i]]$key, as.numeric(batch$residuals[, i]),
+             envir = residuals)
+    }
+  }
+
+  xmat <- matrix(NA_real_, n, task_count)
+  ymat <- matrix(NA_real_, n, task_count)
+  for (i in seq_along(tasks)) {
+    task <- tasks[[i]]
+    if (length(task$S) == 0L) {
+      xmat[, i] <- data[, task$x]
+      ymat[, i] <- data[, task$y]
+    } else {
+      xmat[, i] <- get(
+        fastkpc_batched_precision_residual_key(task$x, task$S),
+        envir = residuals, inherits = FALSE
+      )
+      ymat[, i] <- get(
+        fastkpc_batched_precision_residual_key(task$y, task$S),
+        envir = residuals, inherits = FALSE
+      )
+    }
+  }
+
+  actual_batch_size <- as.integer(batch_size)
+  if (is.na(actual_batch_size) || actual_batch_size <= 0L) {
+    actual_batch_size <- min(task_count, 512L)
+  }
+  pvalues <- numeric(task_count)
+  dcov_batches <- 0L
+  starts <- seq.int(1L, task_count, by = actual_batch_size)
+  for (start in starts) {
+    end <- min(task_count, start + actual_batch_size - 1L)
+    cols <- seq.int(start, end)
+    ci <- fast_dcov_batch_cuda(xmat[, cols, drop = FALSE],
+                               ymat[, cols, drop = FALSE],
+                               index = index,
+                               legacy_index = legacy_index)
+    pvalues[cols] <- as.numeric(ci$p.value)
+    dcov_batches <- dcov_batches + 1L
+  }
+
+  list(
+    pvalues = pvalues,
+    diagnostics = list(
+      residual_batches = residual_batches,
+      dcov_batches = dcov_batches,
+      unique_residual_requests = length(residual_requests),
+      residual_batch_diagnostics = residual_batch_diag
+    )
+  )
+}
+
+fastkpc_parse_precision_S_key <- function(S_key) {
+  if (is.null(S_key) || !nzchar(as.character(S_key)[1L])) return(integer())
+  as.integer(strsplit(as.character(S_key)[1L], "\\|")[[1L]])
+}
+
+fastkpc_batched_precision_execute_verifier <- function(data, row, alpha, tau,
+                                                       ci_method, index,
+                                                       legacy_index,
+                                                       hsic_params,
+                                                       permutation_params,
+                                                       precision_executors,
+                                                       runtime_capabilities,
+                                                       allow_canary,
+                                                       execution_context) {
+  S <- fastkpc_parse_precision_S_key(row$S_key)
+  route <- fastkpc_precision_group_route(
+    precision = "hybrid", alpha = alpha, tau = tau, S = S,
+    runtime_capabilities = runtime_capabilities,
+    allow_canary = allow_canary,
+    execution_engine = "cuda"
+  )
+  route$execution_context <- execution_context
+  verifier_backend <- fastkpc_nonempty_backend(route$verifier_backend,
+                                               "mgcvExtractGPUGCV")
+  route$primary_backend <- verifier_backend
+  randomness <- fastkpc_precision_ci_randomness(
+    ci_method = ci_method,
+    permutation_params = permutation_params,
+    canonical_test_order_id = row$canonical_test_order_id
+  )
+  effective_permutation_params <- fastkpc_precision_effective_permutation_params(
+    ci_method = ci_method,
+    permutation_params = permutation_params,
+    randomness = randomness
+  )
+  exec <- fastkpc_execute_route_with_fallback(
+    data = data,
+    x = as.integer(row$x),
+    y = as.integer(row$y),
+    S = S,
+    route = route,
+    role = "verifier",
+    ci_method = ci_method,
+    index = index,
+    legacy_index = legacy_index,
+    hsic_params = hsic_params,
+    permutation_params = effective_permutation_params,
+    precision_executors = precision_executors,
+    fallback_backend = fastkpc_precision_fallback_backends(verifier_backend, route)
+  )
+  info <- fastkpc_resolve_ci_decision(exec$receipt$p.value, alpha = alpha,
+                                      na_delete = TRUE)
+  list(exec = exec, info = info, randomness = randomness)
+}
+
+fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
+                                                   state, level, alpha, tau,
+                                                   ci_method, index,
+                                                   legacy_index, hsic_params,
+                                                   permutation_params,
+                                                   precision_executors,
+                                                   runtime_capabilities,
+                                                   allow_canary,
+                                                   execution_context) {
+  edge_done <- new.env(parent = emptyenv())
+  delete_edges <- matrix(FALSE, state$p, state$p)
+  level_log <- list()
+  rows <- list()
+  verifier_backends <- character()
+  ci_backends <- c("cuda-dcov")
+  verifier_count <- 0L
+  decision_changes <- 0L
+
+  for (i in seq_along(tasks)) {
+    task <- tasks[[i]]
+    edge_key <- paste(task$edge_x, task$edge_y, sep = "-")
+    if (isTRUE(edge_done[[edge_key]])) next
+    state$test_id <- state$test_id + 1L
+    primary_info <- fastkpc_resolve_ci_decision(pvalues[[i]], alpha = alpha,
+                                                na_delete = TRUE)
+    near_alpha <- length(task$S) > 0L &&
+      (isTRUE(primary_info$p_was_nonfinite) ||
+         fastkpc_near_alpha_trigger(primary_info$p_raw, alpha, tau))
+
+    verifier_receipt <- NULL
+    verifier_info <- NULL
+    verifier_exec <- NULL
+    p_used <- primary_info$p_used
+    p_raw <- primary_info$p_raw
+    delete_edge <- primary_info$delete_edge
+    p_source <- "primary:fastSplineCUDA+cuda-dcov"
+    fallback_triggered <- FALSE
+    fallback_reason <- ""
+    attempt_count <- 1L
+    attempt_backend_sequence <- "fastSplineCUDA"
+    attempt_status_sequence <- "ok"
+    randomness <- fastkpc_precision_ci_randomness(
+      ci_method = ci_method,
+      permutation_params = permutation_params,
+      canonical_test_order_id = state$test_id
+    )
+
+    if (isTRUE(near_alpha)) {
+      verifier_count <- verifier_count + 1L
+      verifier <- fastkpc_batched_precision_execute_verifier(
+        data = data,
+        row = data.frame(
+          canonical_test_order_id = state$test_id,
+          x = task$x, y = task$y, S_key = task$S_key,
+          stringsAsFactors = FALSE
+        ),
+        alpha = alpha, tau = tau, ci_method = ci_method,
+        index = index, legacy_index = legacy_index,
+        hsic_params = hsic_params, permutation_params = permutation_params,
+        precision_executors = precision_executors,
+        runtime_capabilities = runtime_capabilities,
+        allow_canary = allow_canary,
+        execution_context = execution_context
+      )
+      verifier_exec <- verifier$exec
+      verifier_receipt <- verifier_exec$receipt
+      verifier_info <- verifier$info
+      randomness <- verifier$randomness
+      p_used <- verifier_info$p_used
+      p_raw <- verifier_info$p_raw
+      delete_edge <- verifier_info$delete_edge
+      p_source <- verifier_receipt$p_source_used
+      fallback_triggered <- isTRUE(verifier_exec$fallback_triggered)
+      fallback_reason <- verifier_exec$fallback_reason %||% ""
+      attempts <- verifier_exec$attempts %||% list(verifier_exec)
+      attempt_count <- length(attempts)
+      attempt_backend_sequence <- paste(vapply(attempts, function(attempt) {
+        fastkpc_nonempty_backend(
+          attempt$backend_executed,
+          fastkpc_nonempty_backend(attempt$backend_attempted, "")
+        )
+      }, character(1L)), collapse = ">")
+      attempt_status_sequence <- paste(vapply(attempts, function(attempt) {
+        as.character((attempt$attempt_status %||% "")[1L])
+      }, character(1L)), collapse = ">")
+      verifier_backends <- c(verifier_backends,
+                             verifier_receipt$residual_backend_executed)
+      ci_backends <- c(ci_backends, verifier_receipt$ci_backend_executed)
+      if (!identical(primary_info$delete_edge, verifier_info$delete_edge)) {
+        decision_changes <- decision_changes + 1L
+      }
+    }
+
+    if (p_used > state$pmax[task$edge_x, task$edge_y]) {
+      state$pmax[task$edge_x, task$edge_y] <- p_used
+      state$pmax[task$edge_y, task$edge_x] <- p_used
+    }
+    if (isTRUE(delete_edge)) {
+      delete_edges[task$edge_x, task$edge_y] <- TRUE
+      delete_edges[task$edge_y, task$edge_x] <- TRUE
+      state$sepsets[[task$edge_x]][[task$edge_y]] <- as.integer(task$S)
+      state$sepsets[[task$edge_y]][[task$edge_x]] <- as.integer(task$S)
+      level_log[[length(level_log) + 1L]] <- list(
+        x = task$edge_x, y = task$edge_y, S = as.integer(task$S),
+        p.value = p_used
+      )
+      edge_done[[edge_key]] <- TRUE
+    }
+
+    rows[[length(rows) + 1L]] <- fastkpc_precision_trace_row(
+      run_id = "fastkpc-batched-hybrid",
+      scenario_id = "fast_kpc",
+      conditioning_level = level,
+      canonical_test_order_id = state$test_id,
+      setup_fingerprint = if (length(task$S) == 0L) {
+        "direct-ci:S:"
+      } else {
+        paste0("fastSplineCUDA:S:", task$S_key)
+      },
+      target_id = paste(task$x, task$y, sep = "|"),
+      x = task$x,
+      y = task$y,
+      S_key = task$S_key,
+      conditioning_target_side = task$conditioning_target_side,
+      backend_requested = "fastSplineCUDA",
+      backend_used = "fastSplineCUDA",
+      backend_planned = "fastSplineCUDA",
+      backend_executed = "fastSplineCUDA",
+      verifier_backend = "mgcvExtractGPUGCV",
+      verifier_planned = "mgcvExtractGPUGCV",
+      verifier_executed = if (is.null(verifier_receipt)) {
+        NA_character_
+      } else {
+        verifier_receipt$residual_backend_executed
+      },
+      compatibility_action = "run-batched-primary",
+      fallback_reason = fallback_reason,
+      primary_p = primary_info$p_used,
+      verifier_p = if (is.null(verifier_info)) NA_real_ else verifier_info$p_used,
+      p_used = p_used,
+      p_raw = p_raw,
+      p_was_nonfinite = if (is.null(verifier_info)) {
+        primary_info$p_was_nonfinite
+      } else {
+        verifier_info$p_was_nonfinite
+      },
+      nonfinite_action = if (is.null(verifier_info)) {
+        primary_info$nonfinite_action
+      } else {
+        verifier_info$nonfinite_action
+      },
+      p_source_used = p_source,
+      primary_residual_backend_executed =
+        if (length(task$S) == 0L) "direct-ci" else "fastSplineCUDA",
+      primary_ci_backend_executed = "cuda-dcov",
+      primary_p_raw = primary_info$p_raw,
+      primary_p_used = primary_info$p_used,
+      near_alpha_triggered = near_alpha,
+      verifier_residual_backend_executed =
+        if (is.null(verifier_receipt)) NA_character_ else
+          verifier_receipt$residual_backend_executed,
+      verifier_ci_backend_executed =
+        if (is.null(verifier_receipt)) NA_character_ else
+          verifier_receipt$ci_backend_executed,
+      verifier_p_raw = if (is.null(verifier_info)) NA_real_ else verifier_info$p_raw,
+      verifier_p_used = if (is.null(verifier_info)) NA_real_ else verifier_info$p_used,
+      fallback_triggered = fallback_triggered,
+      attempt_count = attempt_count,
+      attempt_backend_sequence = attempt_backend_sequence,
+      attempt_status_sequence = attempt_status_sequence,
+      ci_randomness_id = randomness$ci_randomness_id,
+      permutation_seed_effective = randomness$permutation_seed_effective,
+      permutation_plan_spec_hash = randomness$permutation_plan_spec_hash,
+      permutation_plan_hash = randomness$permutation_plan_hash,
+      permutation_replicates = randomness$permutation_replicates,
+      precision_execution_status = "batched-primary-data-plane",
+      decision_before_verify = primary_info$delete_edge,
+      decision_after_verify = delete_edge
+    )
+    state$n_edge_tests[[level + 1L]] <- state$n_edge_tests[[level + 1L]] + 1L
+  }
+
+  state$adjacency[delete_edges] <- FALSE
+  list(
+    state = state,
+    trace_rows = rows,
+    level_log = level_log,
+    verifier_backends = verifier_backends,
+    ci_backends = ci_backends,
+    verifier_count = verifier_count,
+    decision_changes = decision_changes
+  )
+}
+
+fastkpc_batched_cuda_hybrid_skeleton <- function(data, alpha,
+                                                 max_conditioning_size,
+                                                 tau, ci_method, index,
+                                                 legacy_index, batch_size,
+                                                 fastspline_params,
+                                                 cuda_residual_fallback,
+                                                 hsic_params,
+                                                 permutation_params,
+                                                 precision_executors,
+                                                 runtime_capabilities,
+                                                 allow_canary,
+                                                 residual_cache = TRUE) {
+  data <- as.matrix(data)
+  storage.mode(data) <- "double"
+  if (!identical(ci_method, "dcc.gamma")) {
+    stop("batched CUDA hybrid precision currently supports dcc.gamma",
+         call. = FALSE)
+  }
+  execution_context <- fastkpc_precision_create_execution_context(
+    data = data,
+    residual_cache = residual_cache,
+    runtime_capabilities = runtime_capabilities,
+    execution_engine = "cuda"
+  )
+  fastkpc_precision_init_cache_stats(execution_context)
+  p <- ncol(data)
+  state <- list(
+    p = p,
+    adjacency = {
+      adj <- matrix(TRUE, p, p)
+      diag(adj) <- FALSE
+      adj
+    },
+    pmax = {
+      mat <- matrix(-Inf, p, p)
+      diag(mat) <- 1
+      mat
+    },
+    sepsets = fastkpc_precision_sepsets(p),
+    n_edge_tests = integer(max_conditioning_size + 1L),
+    test_id = 0L
+  )
+  trace_rows <- list()
+  level_logs <- vector("list", max_conditioning_size + 1L)
+  verifier_backends <- character()
+  ci_backends <- c("cuda-dcov")
+  total_tasks <- 0L
+  total_dcov_batches <- 0L
+  total_residual_batches <- 0L
+  total_unique_residual_requests <- 0L
+  total_verifier_count <- 0L
+  total_decision_changes <- 0L
+
+  for (level in seq.int(0L, as.integer(max_conditioning_size))) {
+    snapshot <- state$adjacency
+    tasks <- fastkpc_batched_precision_make_layer_plan(snapshot, level)
+    total_tasks <- total_tasks + length(tasks)
+    primary <- fastkpc_batched_precision_primary_pvalues(
+      data = data,
+      tasks = tasks,
+      ci_method = ci_method,
+      index = index,
+      legacy_index = legacy_index,
+      batch_size = batch_size,
+      fastspline_params = fastspline_params,
+      cuda_residual_fallback = cuda_residual_fallback
+    )
+    total_dcov_batches <- total_dcov_batches +
+      as.integer(primary$diagnostics$dcov_batches %||% 0L)
+    total_residual_batches <- total_residual_batches +
+      as.integer(primary$diagnostics$residual_batches %||% 0L)
+    total_unique_residual_requests <- total_unique_residual_requests +
+      as.integer(primary$diagnostics$unique_residual_requests %||% 0L)
+    replay <- fastkpc_batched_precision_replay_level(
+      data = data,
+      tasks = tasks,
+      pvalues = primary$pvalues,
+      state = state,
+      level = level,
+      alpha = alpha,
+      tau = tau,
+      ci_method = ci_method,
+      index = index,
+      legacy_index = legacy_index,
+      hsic_params = hsic_params,
+      permutation_params = permutation_params,
+      precision_executors = precision_executors,
+      runtime_capabilities = runtime_capabilities,
+      allow_canary = allow_canary,
+      execution_context = execution_context
+    )
+    state <- replay$state
+    trace_rows <- c(trace_rows, replay$trace_rows)
+    level_logs[[level + 1L]] <- replay$level_log
+    verifier_backends <- c(verifier_backends, replay$verifier_backends)
+    ci_backends <- c(ci_backends, replay$ci_backends)
+    total_verifier_count <- total_verifier_count + replay$verifier_count
+    total_decision_changes <- total_decision_changes + replay$decision_changes
+  }
+
+  trace <- if (length(trace_rows) == 0L) {
+    fastkpc_precision_trace_row(
+      run_id = "fastkpc-batched-hybrid",
+      backend_requested = NA_character_,
+      backend_used = NA_character_
+    )[0, , drop = FALSE]
+  } else {
+    do.call(rbind, trace_rows)
+  }
+  trace$edge_deleted <- trace$decision_after_verify
+  trace$sepset_recorded <- ifelse(trace$edge_deleted, trace$S_key, "")
+
+  verifier_backend <- if (length(verifier_backends) == 0L) {
+    NA_character_
+  } else {
+    paste(unique(verifier_backends), collapse = "+")
+  }
+  cache <- fastkpc_precision_cache_stats(execution_context, "mgcvExtractGPU")
+  list(
+    adjacency = state$adjacency,
+    sepsets = state$sepsets,
+    pMax = state$pmax,
+    n.edgetests = as.integer(state$n_edge_tests),
+    per.level.log = level_logs,
+    backend = "cuda",
+    residual_backend = "fastSplineCUDA",
+    verifier_backend = verifier_backend,
+    residual_backend_params = "",
+    residual_device = "cuda",
+    residual_device_requested = "auto",
+    residual_device_reason = "",
+    residual_cache = cache,
+    ci_method = ci_method,
+    ci_backend = if (length(unique(ci_backends)) == 1L) {
+      unique(ci_backends)
+    } else {
+      paste(unique(ci_backends), collapse = "+")
+    },
+    ci_backend_reason = "",
+    ci_diagnostics = list(
+      ci_dcc_gamma_tests = state$test_id,
+      ci_hsic_gamma_tests = 0L,
+      ci_hsic_perm_tests = 0L,
+      ci_hsic_permutation_replicates = 0L,
+      ci_hsic_gamma_cuda_tests = 0L,
+      ci_hsic_perm_cuda_tests = 0L,
+      ci_hsic_cuda_batches = 0L,
+      ci_hsic_cuda_pairs = 0L,
+      ci_hsic_cuda_fallback_tests = 0L,
+      ci_hsic_cuda_memory_bytes = 0,
+      ci_hsic_cuda_max_n = 0L,
+      ci_hsic_cuda_max_batch_pairs = 0L
+    ),
+    scheduler = "layer-precision",
+    scheduler_requested = "layer",
+    scheduler_diagnostics = list(
+      summary = list(
+        scheduler = "layer-precision",
+        scheduler_requested = "layer",
+        tasks_planned = total_tasks,
+        tasks_evaluated = total_tasks,
+        tests_replayed = state$test_id,
+        tasks_ignored_after_delete = total_tasks - state$test_id,
+        unique_residual_requests = total_unique_residual_requests,
+        dcov_batches = total_dcov_batches,
+        residual_batches = total_residual_batches,
+        cuda_residual_true_batched_groups =
+          as.integer(total_residual_batches > 0L),
+        precision_verifier_tests = total_verifier_count,
+        precision_verifier_decision_changes = total_decision_changes,
+        residual_cache_setup_cache_hits = cache$setup_cache_hits,
+        residual_cache_spectral_cache_hits = cache$spectral_cache_hits
+      )
+    ),
+    precision_trace = trace,
+    precision_receipt = list(
+      residual_backend_executed = "fastSplineCUDA",
+      ci_backend_executed = "cuda-dcov",
+      p.value = NA_real_,
+      setup_fingerprint = "batched-primary",
+      p_source_used = "primary:fastSplineCUDA+cuda-dcov"
+    )
+  )
+}
+
 fastkpc_resolve_orientation_device <- function(engine_used, graph_stage,
                                                residual_backend,
                                                orientation_residual_device) {
@@ -540,7 +1121,22 @@ fast_kpc <- function(data,
     precision_requested %in% c("fast", "compatible", "hybrid") &&
     (isTRUE(precision_executors_requested) ||
        precision_requested %in% c("compatible", "hybrid"))
-  if (isTRUE(use_precision_r_skeleton) && !isTRUE(normalized$info$all_finite)) {
+  use_batched_precision_primary <- isTRUE(use_precision_r_skeleton) &&
+    identical(precision_requested, "fast") &&
+    identical(engine_used, "cuda") &&
+    fastkpc_is_default_precision_executors(precision_executors)
+  use_batched_precision_hybrid <- isTRUE(use_precision_r_skeleton) &&
+    identical(precision_requested, "hybrid") &&
+    identical(engine_used, "cuda") &&
+    identical(ci_method, "dcc.gamma") &&
+    fastkpc_is_default_precision_executors(precision_executors)
+  if (isTRUE(use_batched_precision_primary) ||
+      isTRUE(use_batched_precision_hybrid)) {
+    use_precision_r_skeleton <- FALSE
+  }
+  if ((isTRUE(use_precision_r_skeleton) ||
+       isTRUE(use_batched_precision_hybrid)) &&
+      !isTRUE(normalized$info$all_finite)) {
     stop(
       "fast_kpc precision data plane requires finite input; shared row masks are not yet supported",
       call. = FALSE
@@ -608,6 +1204,24 @@ fast_kpc <- function(data,
         execution_engine = engine_used
       )
       list(skeleton = skeleton, orientation = NULL)
+    } else if (isTRUE(use_batched_precision_hybrid)) {
+      skeleton <- fastkpc_batched_cuda_hybrid_skeleton(
+        matrix_data, alpha, max_conditioning_size,
+        tau = tau,
+        ci_method = ci_method,
+        index = index,
+        legacy_index = legacy_index,
+        batch_size = batch_size,
+        fastspline_params = fastspline_params,
+        cuda_residual_fallback = cuda_residual_fallback,
+        hsic_params = hsic_params,
+        permutation_params = permutation_params,
+        precision_executors = precision_executors,
+        runtime_capabilities = runtime_capabilities,
+        allow_canary = allow_canary_mgcv_extract,
+        residual_cache = residual_cache
+      )
+      list(skeleton = skeleton, orientation = NULL)
     } else {
       skeleton <- if (engine_used == "cuda") {
         fast_skeleton_cuda_backend(
@@ -665,6 +1279,19 @@ fast_kpc <- function(data,
     config$verifier_executed <- timed$value$skeleton$verifier_backend %||%
       config$verifier_executed
     config$precision_execution_status <- "data-plane-executed"
+  }
+  if (isTRUE(use_batched_precision_primary)) {
+    config$precision_execution_status <- "batched-primary-data-plane"
+    config$backend_executed <- timed$value$skeleton$residual_backend %||%
+      config$backend_executed
+    config$backend_used <- config$backend_executed
+  }
+  if (isTRUE(use_batched_precision_hybrid)) {
+    config$precision_execution_status <- "batched-primary-data-plane"
+    config$backend_executed <- "fastSplineCUDA"
+    config$backend_used <- config$backend_executed
+    config$verifier_executed <- timed$value$skeleton$verifier_backend %||%
+      config$verifier_executed
   }
   config$cuda_hsic_used <- isTRUE(config$cuda_hsic_requested) &&
     identical(config$ci_backend, "cuda-hsic")

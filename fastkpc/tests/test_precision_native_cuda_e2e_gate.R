@@ -43,28 +43,6 @@ assert_gpu_trace <- function(result, verifier = FALSE) {
                          fixed = TRUE)),
               "successful native CUDA attempts should not call legacy mgcv")
 
-  receipt <- result$skeleton$precision_receipt
-  assert_true(identical(receipt$used_device_x, "cuda") &&
-                identical(receipt$used_device_y, "cuda"),
-              "receipt should report CUDA target devices")
-  assert_true(isTRUE(receipt$native_gpu_solve_used_x) &&
-                isTRUE(receipt$native_gpu_solve_used_y),
-              "receipt should report native GPU solves for x/y")
-  assert_true(identical(receipt$selected_solve_backend_executed_x, "cuda") &&
-                identical(receipt$selected_solve_backend_executed_y, "cuda"),
-              "receipt should report CUDA selected solves")
-  assert_true(nzchar(receipt$shared_setup_fingerprint) &&
-                identical(receipt$setup_fingerprint_x,
-                          receipt$shared_setup_fingerprint) &&
-                identical(receipt$setup_fingerprint_y,
-                          receipt$shared_setup_fingerprint),
-              "receipt should expose one shared setup fingerprint")
-  assert_true(is.finite(receipt$timings$total_ms) &&
-                is.finite(receipt$timings$residualization_total_ms) &&
-                is.finite(receipt$timings$ci_test_ms) &&
-                receipt$timings$total_ms >= receipt$timings$ci_test_ms,
-              "receipt should expose total/residualization/CI timings")
-
   if (isTRUE(verifier)) {
     verified <- nonempty[nonempty$near_alpha_triggered, , drop = FALSE]
     assert_true(nrow(verified) > 0L,
@@ -74,6 +52,27 @@ assert_gpu_trace <- function(result, verifier = FALSE) {
     assert_true(all(verified$verifier_executed == "mgcvExtractGPU"),
                 "hybrid verifier should execute mgcvExtractGPU")
   } else {
+    receipt <- result$skeleton$precision_receipt
+    assert_true(identical(receipt$used_device_x, "cuda") &&
+                  identical(receipt$used_device_y, "cuda"),
+                "receipt should report CUDA target devices")
+    assert_true(isTRUE(receipt$native_gpu_solve_used_x) &&
+                  isTRUE(receipt$native_gpu_solve_used_y),
+                "receipt should report native GPU solves for x/y")
+    assert_true(identical(receipt$selected_solve_backend_executed_x, "cuda") &&
+                  identical(receipt$selected_solve_backend_executed_y, "cuda"),
+                "receipt should report CUDA selected solves")
+    assert_true(nzchar(receipt$shared_setup_fingerprint) &&
+                  identical(receipt$setup_fingerprint_x,
+                            receipt$shared_setup_fingerprint) &&
+                  identical(receipt$setup_fingerprint_y,
+                            receipt$shared_setup_fingerprint),
+                "receipt should expose one shared setup fingerprint")
+    assert_true(is.finite(receipt$timings$total_ms) &&
+                  is.finite(receipt$timings$residualization_total_ms) &&
+                  is.finite(receipt$timings$ci_test_ms) &&
+                  receipt$timings$total_ms >= receipt$timings$ci_test_ms,
+                "receipt should expose total/residualization/CI timings")
     assert_true(all(nonempty$backend_planned == "mgcvExtractGPUGCV"),
                 "compatible non-empty S rows should plan mgcvExtractGPUGCV")
     assert_true(all(nonempty$backend_executed == "mgcvExtractGPU"),
@@ -104,8 +103,8 @@ hybrid <- fast_kpc(
   graph_stage = "skeleton",
   allow_canary_mgcv_extract = TRUE
 )
-assert_true(hybrid$config$precision_execution_status == "data-plane-executed",
-            "hybrid CUDA should execute precision data plane")
+assert_true(hybrid$config$precision_execution_status == "batched-primary-data-plane",
+            "hybrid CUDA should execute batched primary precision data plane")
 assert_gpu_trace(hybrid, verifier = TRUE)
 
 cat("PASS precision native CUDA E2E gate\n")
