@@ -124,6 +124,7 @@ scalar_hybrid <- fast_kpc(
   fastspline_params = params,
   precision_executors = scalar_executors,
   precision_trace_level = "full",
+  allow_canary_mgcv_extract = TRUE,
   seed = 621
 )
 
@@ -137,6 +138,7 @@ batched_hybrid <- fast_kpc(
   graph_stage = "skeleton",
   fastspline_params = params,
   precision_trace_level = "full",
+  allow_canary_mgcv_extract = TRUE,
   seed = 621
 )
 
@@ -157,6 +159,10 @@ assert_true(identical(batched_hybrid$skeleton$scheduler, "layer-precision"),
 hybrid_summary <- batched_hybrid$skeleton$scheduler_diagnostics$summary
 assert_true(identical(hybrid_summary$verifier_policy, "near-alpha"),
             "hybrid precision layer should use near-alpha verifier policy")
+assert_true(as.integer(hybrid_summary$verifier_batch_groups %||% 0L) > 0L,
+            "default CUDA hybrid should batch near-alpha verifier groups")
+assert_true(as.integer(hybrid_summary$verifier_ci_batches %||% 0L) > 0L,
+            "default CUDA hybrid should batch verifier CUDA dCov tests")
 assert_true(identical(precision_primary$skeleton$scheduler,
                       batched_hybrid$skeleton$scheduler),
             "primary-only and hybrid must share precision layer scheduler")
@@ -168,5 +174,8 @@ assert_true(nrow(hybrid_trace) == sum(batched_hybrid$skeleton$n.edgetests),
             "batched hybrid trace should preserve canonical replay rows")
 assert_true(any(hybrid_trace$near_alpha_triggered),
             "batched hybrid should still execute sparse verifier rows")
+assert_true(any(hybrid_trace$near_alpha_triggered &
+                  hybrid_trace$verifier_ci_backend_executed == "cuda-dcov"),
+            "batched hybrid verifier rows should use CUDA dCov CI")
 
 cat("PASS precision CUDA primary adapter\n")

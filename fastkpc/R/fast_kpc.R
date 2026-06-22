@@ -275,6 +275,222 @@ fastkpc_batched_precision_execute_verifier <- function(data, row, alpha, tau,
   list(exec = exec, info = info, randomness = randomness)
 }
 
+fastkpc_batched_precision_execute_verifier_batch <- function(
+    data, tasks, task_indices, alpha, ci_method, index, legacy_index,
+    hsic_params, permutation_params, runtime_capabilities, allow_canary,
+    execution_context) {
+  if (!identical(ci_method, "dcc.gamma")) {
+    stop("batched verifier currently supports dcc.gamma", call. = FALSE)
+  }
+  if (length(task_indices) == 0L) {
+    return(list(results = list(), metrics = list(
+      total_ms = 0, mgcv_setup_ms = 0, spectral_prepare_ms = 0,
+      gcv_score_ms = 0, cuda_solve_ms = 0, ci_test_ms = 0,
+      cache_full_hit_count = 0L, cache_partial_hit_count = 0L,
+      cache_miss_count = 0L, fallback_count = 0L,
+      verifier_batch_groups = 0L, verifier_ci_batches = 0L
+    )))
+  }
+  total_start <- proc.time()[["elapsed"]]
+  sp_grid <- exp(seq(log(1e-4), log(1e4), length.out = 17L))
+  grouped <- split(task_indices, vapply(task_indices, function(i) {
+    tasks[[i]]$S_key
+  }, character(1L)))
+  results <- vector("list", length(tasks))
+  metrics <- list(
+    total_ms = 0,
+    mgcv_setup_ms = 0,
+    spectral_prepare_ms = 0,
+    gcv_score_ms = 0,
+    cuda_solve_ms = 0,
+    ci_test_ms = 0,
+    cache_full_hit_count = 0L,
+    cache_partial_hit_count = 0L,
+    cache_miss_count = 0L,
+    fallback_count = 0L,
+    verifier_batch_groups = 0L,
+    verifier_ci_batches = 0L
+  )
+
+  for (group_indices in grouped) {
+    representative <- tasks[[group_indices[[1L]]]]
+    S <- representative$S
+    route <- fastkpc_precision_group_route(
+      precision = "hybrid", alpha = alpha, tau = Inf, S = S,
+      runtime_capabilities = runtime_capabilities,
+      allow_canary = allow_canary,
+      execution_engine = "cuda"
+    )
+    verifier_backend <- fastkpc_nonempty_backend(route$verifier_backend,
+                                                 "mgcvExtractGPUGCV")
+    if (!identical(verifier_backend, "mgcvExtractGPUGCV")) {
+      stop("batched verifier only supports mgcvExtractGPUGCV", call. = FALSE)
+    }
+    cuda_ok <- exists("fastkpc_cuda_available", mode = "function") &&
+      isTRUE(tryCatch(fastkpc_cuda_available(), error = function(e) FALSE))
+    solve_ok <- exists(
+      "mgcv_extract_gpu_solve_same_setup_batch_fixed_sp_cuda",
+      mode = "function"
+    )
+    dcov_ok <- exists("fast_dcov_batch_cuda", mode = "function")
+    if (!cuda_ok || !solve_ok || !dcov_ok) {
+      stop("batched verifier requires native CUDA mgcvExtractGPU and dCov",
+           call. = FALSE)
+    }
+    group_tasks <- tasks[group_indices]
+    unique_targets <- sort(unique(as.integer(unlist(lapply(group_tasks, function(task) {
+      c(task$x, task$y)
+    }), use.names = FALSE))))
+    residual_batch <- fastkpc_mgcv_extract_gpu_cached_entries_for_targets(
+      data = data,
+      targets = unique_targets,
+      S = S,
+      sp_grid = sp_grid,
+      context = execution_context
+    )
+    entries <- residual_batch$entries
+    xmat <- matrix(NA_real_, nrow(data), length(group_indices))
+    ymat <- matrix(NA_real_, nrow(data), length(group_indices))
+    for (j in seq_along(group_indices)) {
+      task <- tasks[[group_indices[[j]]]]
+      xmat[, j] <- entries[[as.character(task$x)]]$residuals
+      ymat[, j] <- entries[[as.character(task$y)]]$residuals
+    }
+    ci_start <- proc.time()[["elapsed"]]
+    ci <- fast_dcov_batch_cuda(xmat, ymat, index = index,
+                               legacy_index = legacy_index)
+    ci_ms <- (proc.time()[["elapsed"]] - ci_start) * 1000
+    timings <- residual_batch$timings %||% list()
+    timings$ci_test_ms <- ci_ms
+    timings$total_ms <- fastkpc_sum_timing(list(
+      timings$residualization_total_ms %||% NA_real_,
+      ci_ms
+    ))
+
+    metrics$mgcv_setup_ms <- fastkpc_batched_precision_add_ms(
+      metrics$mgcv_setup_ms, timings$mgcv_setup_cpu_ms
+    )
+    metrics$spectral_prepare_ms <- fastkpc_batched_precision_add_ms(
+      metrics$spectral_prepare_ms, timings$spectral_prepare_ms
+    )
+    metrics$gcv_score_ms <- fastkpc_batched_precision_add_ms(
+      metrics$gcv_score_ms, timings$gcv_score_ms
+    )
+    metrics$cuda_solve_ms <- fastkpc_batched_precision_add_ms(
+      metrics$cuda_solve_ms, timings$linear_solve_ms
+    )
+    metrics$ci_test_ms <- fastkpc_batched_precision_add_ms(
+      metrics$ci_test_ms, timings$ci_test_ms
+    )
+    metrics$verifier_batch_groups <- metrics$verifier_batch_groups + 1L
+    metrics$verifier_ci_batches <- metrics$verifier_ci_batches + 1L
+
+    for (j in seq_along(group_indices)) {
+      task_index <- group_indices[[j]]
+      task <- tasks[[task_index]]
+      x_entry <- entries[[as.character(task$x)]]
+      y_entry <- entries[[as.character(task$y)]]
+      setup_x <- fastkpc_setup_fingerprint_value(x_entry$setup_fingerprint)
+      setup_y <- fastkpc_setup_fingerprint_value(y_entry$setup_fingerprint)
+      if (is.na(setup_x) || is.na(setup_y) || !identical(setup_x, setup_y)) {
+        stop("batched mgcvExtractGPU verifier setup fingerprint mismatch",
+             call. = FALSE)
+      }
+      p_value <- as.numeric(ci$p.value[[j]])
+      cache_hit_x <- isTRUE(residual_batch$cache_hit[[as.character(task$x)]])
+      cache_hit_y <- isTRUE(residual_batch$cache_hit[[as.character(task$y)]])
+      cache_hit_any <- cache_hit_x || cache_hit_y
+      cache_hit_all <- cache_hit_x && cache_hit_y
+      cache_partial_hit <- xor(cache_hit_x, cache_hit_y)
+      if (isTRUE(cache_hit_all)) {
+        metrics$cache_full_hit_count <- metrics$cache_full_hit_count + 1L
+      } else if (isTRUE(cache_partial_hit)) {
+        metrics$cache_partial_hit_count <-
+          metrics$cache_partial_hit_count + 1L
+      } else {
+        metrics$cache_miss_count <- metrics$cache_miss_count + 1L
+      }
+      results[[task_index]] <- list(
+        receipt = list(
+          p.value = p_value,
+          residual_backend_executed = "mgcvExtractGPU",
+          ci_backend_executed = "cuda-dcov",
+          setup_fingerprint = setup_x,
+          setup_fingerprint_x = setup_x,
+          setup_fingerprint_y = setup_y,
+          shared_setup_fingerprint = setup_x,
+          p_source_used = "verifier:mgcvExtractGPU+cuda-dcov",
+          sp = c(x = x_entry$sp, y = y_entry$sp),
+          score = c(x = x_entry$score, y = y_entry$score),
+          edf = c(x = x_entry$edf, y = y_entry$edf),
+          selected_grid_index = c(x = x_entry$selected_grid_index,
+                                  y = y_entry$selected_grid_index),
+          gcv_grid_points = c(x = x_entry$gcv_grid_points,
+                              y = y_entry$gcv_grid_points),
+          used_device = "cuda",
+          used_device_x = x_entry$used_device,
+          used_device_y = y_entry$used_device,
+          native_gpu_solve_used_x = isTRUE(x_entry$native_gpu_solve_used),
+          native_gpu_solve_used_y = isTRUE(y_entry$native_gpu_solve_used),
+          sp_selection_backend_executed_x =
+            x_entry$sp_selection_backend_executed,
+          sp_selection_backend_executed_y =
+            y_entry$sp_selection_backend_executed,
+          gcv_score_backend_executed_x = x_entry$gcv_score_backend_executed,
+          gcv_score_backend_executed_y = y_entry$gcv_score_backend_executed,
+          selected_solve_backend_executed_x =
+            x_entry$selected_solve_backend_executed,
+          selected_solve_backend_executed_y =
+            y_entry$selected_solve_backend_executed,
+          same_setup_pair_batch_used = FALSE,
+          same_setup_target_batch_used =
+            as.integer(residual_batch$target_computations %||% 0L) > 1L,
+          cache_hit = cache_hit_any,
+          cache_hit_x = cache_hit_x,
+          cache_hit_y = cache_hit_y,
+          cache_hit_any = cache_hit_any,
+          cache_hit_all = cache_hit_all,
+          cache_partial_hit = cache_partial_hit,
+          cache_service_mode = "level-batched-verifier",
+          residualization_compute_ms =
+            timings$residualization_compute_ms %||% NA_real_,
+          cache_lookup_ms = NA_real_,
+          cuda_single_target_calls = 0L,
+          cuda_solve_calls = as.integer(residual_batch$cuda_solve_calls %||% 0L),
+          timings = timings
+        )
+      )
+      results[[task_index]]$info <- fastkpc_resolve_ci_decision(
+        p_value, alpha = alpha, na_delete = TRUE
+      )
+      results[[task_index]]$randomness <- fastkpc_precision_ci_randomness(
+        ci_method = ci_method,
+        permutation_params = permutation_params,
+        canonical_test_order_id = NA_integer_
+      )
+      results[[task_index]]$fallback_triggered <- FALSE
+      results[[task_index]]$fallback_reason <- ""
+      results[[task_index]]$attempts <- list(list(
+        backend_planned = "mgcvExtractGPUGCV",
+        backend_attempted = "mgcvExtractGPUGCV",
+        backend_executed = "mgcvExtractGPU",
+        attempt_status = "ok",
+        error_class = "",
+        error_message = "",
+        fallback_triggered = FALSE,
+        fallback_reason = "",
+        elapsed_ms = timings$total_ms %||% NA_real_,
+        receipt = results[[task_index]]$receipt
+      ))
+      results[[task_index]]$attempt_count <- 1L
+      results[[task_index]]$attempt_backend_sequence <- "mgcvExtractGPU"
+      results[[task_index]]$attempt_status_sequence <- "ok"
+    }
+  }
+  metrics$total_ms <- (proc.time()[["elapsed"]] - total_start) * 1000
+  list(results = results, metrics = metrics)
+}
+
 fastkpc_batched_precision_add_ms <- function(total, value) {
   value <- as.numeric(value %||% NA_real_)[1L]
   if (is.finite(value)) total + value else total
@@ -361,7 +577,9 @@ fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
     cache_full_hit_count = 0L,
     cache_partial_hit_count = 0L,
     cache_miss_count = 0L,
-    fallback_count = 0L
+    fallback_count = 0L,
+    verifier_batch_groups = 0L,
+    verifier_ci_batches = 0L
   )
 
   if (length(tasks) == 0L) {
@@ -386,7 +604,91 @@ fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
 
   state$test_id <- state$test_id + length(tasks)
 
-  for (i in near_alpha_indices) {
+  record_verifier_result <- function(i, verifier_receipt, verifier_info,
+                                     randomness, attempts,
+                                     fallback_triggered = FALSE,
+                                     fallback_reason = "") {
+    verified[[i]] <<- TRUE
+    verifier_receipts[[i]] <<- verifier_receipt
+    verifier_infos[[i]] <<- verifier_info
+    verifier_randomness[[i]] <<- randomness
+    final_p[[i]] <<- verifier_info$p_used
+    final_raw_p[[i]] <<- verifier_info$p_raw
+    final_delete[[i]] <<- verifier_info$delete_edge
+    p_source_vec[[i]] <<- verifier_receipt$p_source_used
+    fallback_triggered_vec[[i]] <<- isTRUE(fallback_triggered)
+    fallback_reason_vec[[i]] <<- fallback_reason %||% ""
+    attempt_count_vec[[i]] <<- length(attempts)
+    attempt_backend_sequence_vec[[i]] <<- paste(vapply(attempts, function(attempt) {
+      fastkpc_nonempty_backend(
+        attempt$backend_executed,
+        fastkpc_nonempty_backend(attempt$backend_attempted, "")
+      )
+    }, character(1L)), collapse = ">")
+    attempt_status_sequence_vec[[i]] <<- paste(vapply(attempts, function(attempt) {
+      as.character((attempt$attempt_status %||% "")[1L])
+    }, character(1L)), collapse = ">")
+    verifier_backends <<- c(verifier_backends,
+                            verifier_receipt$residual_backend_executed)
+    ci_backends <<- c(ci_backends, verifier_receipt$ci_backend_executed)
+    if (!identical(primary_decision$delete_edge[[i]], verifier_info$delete_edge)) {
+      decision_changes <<- decision_changes + 1L
+    }
+  }
+
+  use_batched_verifier <- length(near_alpha_indices) > 0L &&
+    identical(ci_method, "dcc.gamma") &&
+    fastkpc_is_default_precision_executors(precision_executors)
+  scalar_verifier_indices <- near_alpha_indices
+  if (isTRUE(use_batched_verifier)) {
+    batch <- tryCatch(
+      fastkpc_batched_precision_execute_verifier_batch(
+        data = data,
+        tasks = tasks,
+        task_indices = near_alpha_indices,
+        alpha = alpha,
+        ci_method = ci_method,
+        index = index,
+        legacy_index = legacy_index,
+        hsic_params = hsic_params,
+        permutation_params = permutation_params,
+        runtime_capabilities = runtime_capabilities,
+        allow_canary = allow_canary,
+        execution_context = execution_context
+      ),
+      error = function(e) e
+    )
+    if (!inherits(batch, "error")) {
+      for (i in near_alpha_indices) {
+        item <- batch$results[[i]]
+        if (is.null(item)) next
+        canonical_test_order_id <- state$test_id - length(tasks) + i
+        randomness <- fastkpc_precision_ci_randomness(
+          ci_method = ci_method,
+          permutation_params = permutation_params,
+          canonical_test_order_id = canonical_test_order_id
+        )
+        record_verifier_result(
+          i = i,
+          verifier_receipt = item$receipt,
+          verifier_info = item$info,
+          randomness = randomness,
+          attempts = item$attempts,
+          fallback_triggered = item$fallback_triggered,
+          fallback_reason = item$fallback_reason
+        )
+        verifier_count <- verifier_count + 1L
+      }
+      for (name in names(batch$metrics)) {
+        if (!name %in% names(verifier_metrics)) next
+        verifier_metrics[[name]] <- verifier_metrics[[name]] +
+          batch$metrics[[name]]
+      }
+      scalar_verifier_indices <- near_alpha_indices[!verified[near_alpha_indices]]
+    }
+  }
+
+  for (i in scalar_verifier_indices) {
     task <- tasks[[i]]
     verifier_receipt <- NULL
     verifier_info <- NULL
@@ -423,40 +725,18 @@ fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
     verifier_exec <- verifier$exec
     verifier_receipt <- verifier_exec$receipt
     verifier_info <- verifier$info
-    verified[[i]] <- TRUE
-    verifier_receipts[[i]] <- verifier_receipt
-    verifier_infos[[i]] <- verifier_info
-    randomness <- verifier$randomness
-    verifier_randomness[[i]] <- randomness
-    final_p[[i]] <- verifier_info$p_used
-    final_raw_p[[i]] <- verifier_info$p_raw
-    final_delete[[i]] <- verifier_info$delete_edge
-    p_source <- verifier_receipt$p_source_used
     fallback_triggered <- isTRUE(verifier_exec$fallback_triggered)
     fallback_reason <- verifier_exec$fallback_reason %||% ""
     attempts <- verifier_exec$attempts %||% list(verifier_exec)
-    attempt_count <- length(attempts)
-    attempt_backend_sequence <- paste(vapply(attempts, function(attempt) {
-      fastkpc_nonempty_backend(
-        attempt$backend_executed,
-        fastkpc_nonempty_backend(attempt$backend_attempted, "")
-      )
-    }, character(1L)), collapse = ">")
-    attempt_status_sequence <- paste(vapply(attempts, function(attempt) {
-      as.character((attempt$attempt_status %||% "")[1L])
-    }, character(1L)), collapse = ">")
-    p_source_vec[[i]] <- p_source
-    fallback_triggered_vec[[i]] <- fallback_triggered
-    fallback_reason_vec[[i]] <- fallback_reason
-    attempt_count_vec[[i]] <- attempt_count
-    attempt_backend_sequence_vec[[i]] <- attempt_backend_sequence
-    attempt_status_sequence_vec[[i]] <- attempt_status_sequence
-    verifier_backends <- c(verifier_backends,
-                           verifier_receipt$residual_backend_executed)
-    ci_backends <- c(ci_backends, verifier_receipt$ci_backend_executed)
-    if (!identical(primary_decision$delete_edge[[i]], verifier_info$delete_edge)) {
-      decision_changes <- decision_changes + 1L
-    }
+    record_verifier_result(
+      i = i,
+      verifier_receipt = verifier_receipt,
+      verifier_info = verifier_info,
+      randomness = verifier$randomness,
+      attempts = attempts,
+      fallback_triggered = fallback_triggered,
+      fallback_reason = fallback_reason
+    )
     timings <- verifier_receipt$timings %||% list()
     verifier_metrics$total_ms <- fastkpc_batched_precision_add_ms(
       verifier_metrics$total_ms, timings$total_ms
@@ -752,7 +1032,9 @@ fastkpc_batched_cuda_precision_skeleton <- function(data, alpha,
     cache_full_hit_count = 0L,
     cache_partial_hit_count = 0L,
     cache_miss_count = 0L,
-    fallback_count = 0L
+    fallback_count = 0L,
+    verifier_batch_groups = 0L,
+    verifier_ci_batches = 0L
   )
 
   for (level in seq.int(0L, as.integer(max_conditioning_size))) {
@@ -906,6 +1188,10 @@ fastkpc_batched_cuda_precision_skeleton <- function(data, alpha,
           as.integer(verifier_metrics$cache_miss_count),
         verifier_fallback_count =
           as.integer(verifier_metrics$fallback_count),
+        verifier_batch_groups =
+          as.integer(verifier_metrics$verifier_batch_groups),
+        verifier_ci_batches =
+          as.integer(verifier_metrics$verifier_ci_batches),
         verifier_ms_per_verified_test =
           if (total_verifier_count > 0L) {
             verifier_metrics$total_ms / total_verifier_count
