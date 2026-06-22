@@ -101,6 +101,7 @@ hybrid <- fast_kpc(
   precision = "hybrid",
   tau = Inf,
   graph_stage = "skeleton",
+  precision_trace_level = "full",
   allow_canary_mgcv_extract = TRUE
 )
 assert_true(hybrid$config$precision_execution_status == "batched-primary-data-plane",

@@ -280,6 +280,32 @@ fastkpc_batched_precision_add_ms <- function(total, value) {
   if (is.finite(value)) total + value else total
 }
 
+fastkpc_batched_precision_resolve_pvalues <- function(pvalues, alpha) {
+  p_raw <- as.numeric(pvalues)
+  nonfinite <- !is.finite(p_raw)
+  p_used <- p_raw
+  p_used[nonfinite] <- 1.0
+  delete_edge <- p_used >= as.numeric(alpha)
+  list(
+    p_raw = p_raw,
+    p_used = p_used,
+    delete_edge = delete_edge,
+    p_was_nonfinite = nonfinite,
+    nonfinite_action = ifelse(nonfinite, "na-delete-use-1", "")
+  )
+}
+
+fastkpc_batched_precision_near_alpha_indices <- function(tasks, decision,
+                                                         alpha, tau,
+                                                         verifier_policy) {
+  if (!identical(verifier_policy, "near-alpha")) return(integer())
+  has_s <- vapply(tasks, function(task) length(task$S) > 0L, logical(1L))
+  p_for_trigger <- pmax(as.numeric(decision$p_raw), .Machine$double.xmin)
+  alpha <- max(as.numeric(alpha), .Machine$double.xmin)
+  near <- abs(log(p_for_trigger / alpha)) <= as.numeric(tau)
+  which(has_s & (decision$p_was_nonfinite | near))
+}
+
 fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
                                                    state, level, alpha, tau,
                                                    ci_method, index,
@@ -289,16 +315,42 @@ fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
                                                    runtime_capabilities,
                                                    allow_canary,
                                                    execution_context,
-                                                   verifier_policy) {
+                                                   verifier_policy,
+                                                   trace_level) {
   verifier_policy <- match.arg(verifier_policy, c("none", "near-alpha"))
-  edge_done <- new.env(parent = emptyenv())
-  delete_edges <- matrix(FALSE, state$p, state$p)
-  level_log <- list()
+  trace_level <- match.arg(trace_level, c("summary", "full", "none"))
+  collect_trace <- identical(trace_level, "full")
   rows <- list()
   verifier_backends <- character()
   ci_backends <- c("cuda-dcov")
   verifier_count <- 0L
   decision_changes <- 0L
+  primary_decision <- fastkpc_batched_precision_resolve_pvalues(
+    pvalues, alpha = alpha
+  )
+  final_p <- primary_decision$p_used
+  final_raw_p <- primary_decision$p_raw
+  final_delete <- primary_decision$delete_edge
+  near_alpha_indices <- fastkpc_batched_precision_near_alpha_indices(
+    tasks = tasks,
+    decision = primary_decision,
+    alpha = alpha,
+    tau = tau,
+    verifier_policy = verifier_policy
+  )
+  near_alpha_flags <- logical(length(tasks))
+  near_alpha_flags[near_alpha_indices] <- TRUE
+  verified <- logical(length(tasks))
+  verifier_receipts <- vector("list", length(tasks))
+  verifier_infos <- vector("list", length(tasks))
+  verifier_randomness <- vector("list", length(tasks))
+  p_source_vec <- rep("primary:fastSplineCUDA+cuda-dcov", length(tasks))
+  fallback_triggered_vec <- logical(length(tasks))
+  fallback_reason_vec <- rep("", length(tasks))
+  attempt_count_vec <- rep(1L, length(tasks))
+  attempt_backend_sequence_vec <- rep("fastSplineCUDA", length(tasks))
+  attempt_status_sequence_vec <- rep("ok", length(tasks))
+  verified_but_unreplayed <- 0L
   verifier_metrics <- list(
     total_ms = 0,
     mgcv_setup_ms = 0,
@@ -312,242 +364,319 @@ fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
     fallback_count = 0L
   )
 
-  for (i in seq_along(tasks)) {
-    task <- tasks[[i]]
-    edge_key <- paste(task$edge_x, task$edge_y, sep = "-")
-    if (isTRUE(edge_done[[edge_key]])) next
-    state$test_id <- state$test_id + 1L
-    primary_info <- fastkpc_resolve_ci_decision(pvalues[[i]], alpha = alpha,
-                                                na_delete = TRUE)
-    near_alpha <- identical(verifier_policy, "near-alpha") &&
-      length(task$S) > 0L &&
-      (isTRUE(primary_info$p_was_nonfinite) ||
-         fastkpc_near_alpha_trigger(primary_info$p_raw, alpha, tau))
+  if (length(tasks) == 0L) {
+    return(list(
+      state = state,
+      trace_rows = rows,
+      level_log = list(),
+      verifier_backends = verifier_backends,
+      ci_backends = ci_backends,
+      verifier_count = verifier_count,
+      decision_changes = decision_changes,
+      verifier_metrics = verifier_metrics,
+      native_summary = list(
+        tasks_planned = 0L,
+        tests_replayed = 0L,
+        tasks_ignored_after_delete = 0L,
+        deletions = 0L
+      ),
+      verified_but_unreplayed = 0L
+    ))
+  }
 
+  state$test_id <- state$test_id + length(tasks)
+
+  for (i in near_alpha_indices) {
+    task <- tasks[[i]]
     verifier_receipt <- NULL
     verifier_info <- NULL
     verifier_exec <- NULL
-    p_used <- primary_info$p_used
-    p_raw <- primary_info$p_raw
-    delete_edge <- primary_info$delete_edge
     p_source <- "primary:fastSplineCUDA+cuda-dcov"
     fallback_triggered <- FALSE
     fallback_reason <- ""
     attempt_count <- 1L
     attempt_backend_sequence <- "fastSplineCUDA"
     attempt_status_sequence <- "ok"
+    canonical_test_order_id <- state$test_id - length(tasks) + i
     randomness <- fastkpc_precision_ci_randomness(
       ci_method = ci_method,
       permutation_params = permutation_params,
-      canonical_test_order_id = state$test_id
+      canonical_test_order_id = canonical_test_order_id
     )
 
-    if (isTRUE(near_alpha)) {
-      verifier_count <- verifier_count + 1L
-      verifier <- fastkpc_batched_precision_execute_verifier(
-        data = data,
-        row = data.frame(
-          canonical_test_order_id = state$test_id,
-          x = task$x, y = task$y, S_key = task$S_key,
-          stringsAsFactors = FALSE
-        ),
-        alpha = alpha, tau = tau, ci_method = ci_method,
-        index = index, legacy_index = legacy_index,
-        hsic_params = hsic_params, permutation_params = permutation_params,
-        precision_executors = precision_executors,
-        runtime_capabilities = runtime_capabilities,
-        allow_canary = allow_canary,
-        execution_context = execution_context
-      )
-      verifier_exec <- verifier$exec
-      verifier_receipt <- verifier_exec$receipt
-      verifier_info <- verifier$info
-      randomness <- verifier$randomness
-      p_used <- verifier_info$p_used
-      p_raw <- verifier_info$p_raw
-      delete_edge <- verifier_info$delete_edge
-      p_source <- verifier_receipt$p_source_used
-      fallback_triggered <- isTRUE(verifier_exec$fallback_triggered)
-      fallback_reason <- verifier_exec$fallback_reason %||% ""
-      attempts <- verifier_exec$attempts %||% list(verifier_exec)
-      attempt_count <- length(attempts)
-      attempt_backend_sequence <- paste(vapply(attempts, function(attempt) {
-        fastkpc_nonempty_backend(
-          attempt$backend_executed,
-          fastkpc_nonempty_backend(attempt$backend_attempted, "")
-        )
-      }, character(1L)), collapse = ">")
-      attempt_status_sequence <- paste(vapply(attempts, function(attempt) {
-        as.character((attempt$attempt_status %||% "")[1L])
-      }, character(1L)), collapse = ">")
-      verifier_backends <- c(verifier_backends,
-                             verifier_receipt$residual_backend_executed)
-      ci_backends <- c(ci_backends, verifier_receipt$ci_backend_executed)
-      if (!identical(primary_info$delete_edge, verifier_info$delete_edge)) {
-        decision_changes <- decision_changes + 1L
-      }
-      timings <- verifier_receipt$timings %||% list()
-      verifier_metrics$total_ms <- fastkpc_batched_precision_add_ms(
-        verifier_metrics$total_ms, timings$total_ms
-      )
-      verifier_metrics$mgcv_setup_ms <- fastkpc_batched_precision_add_ms(
-        verifier_metrics$mgcv_setup_ms, timings$mgcv_setup_cpu_ms
-      )
-      verifier_metrics$spectral_prepare_ms <- fastkpc_batched_precision_add_ms(
-        verifier_metrics$spectral_prepare_ms, timings$spectral_prepare_ms
-      )
-      verifier_metrics$gcv_score_ms <- fastkpc_batched_precision_add_ms(
-        verifier_metrics$gcv_score_ms, timings$gcv_score_ms
-      )
-      verifier_metrics$cuda_solve_ms <- fastkpc_batched_precision_add_ms(
-        verifier_metrics$cuda_solve_ms, timings$linear_solve_ms
-      )
-      verifier_metrics$ci_test_ms <- fastkpc_batched_precision_add_ms(
-        verifier_metrics$ci_test_ms, timings$ci_test_ms
-      )
-      if (isTRUE(verifier_receipt$cache_hit_all)) {
-        verifier_metrics$cache_full_hit_count <-
-          verifier_metrics$cache_full_hit_count + 1L
-      } else if (isTRUE(verifier_receipt$cache_partial_hit)) {
-        verifier_metrics$cache_partial_hit_count <-
-          verifier_metrics$cache_partial_hit_count + 1L
-      } else if (identical(verifier_receipt$cache_service_mode, "full-miss")) {
-        verifier_metrics$cache_miss_count <-
-          verifier_metrics$cache_miss_count + 1L
-      }
-      if (isTRUE(fallback_triggered) || attempt_count > 1L) {
-        verifier_metrics$fallback_count <- verifier_metrics$fallback_count + 1L
-      }
-    }
-
-    if (p_used > state$pmax[task$edge_x, task$edge_y]) {
-      state$pmax[task$edge_x, task$edge_y] <- p_used
-      state$pmax[task$edge_y, task$edge_x] <- p_used
-    }
-    if (isTRUE(delete_edge)) {
-      delete_edges[task$edge_x, task$edge_y] <- TRUE
-      delete_edges[task$edge_y, task$edge_x] <- TRUE
-      state$sepsets[[task$edge_x]][[task$edge_y]] <- as.integer(task$S)
-      state$sepsets[[task$edge_y]][[task$edge_x]] <- as.integer(task$S)
-      level_log[[length(level_log) + 1L]] <- list(
-        x = task$edge_x, y = task$edge_y, S = as.integer(task$S),
-        p.value = p_used
-      )
-      edge_done[[edge_key]] <- TRUE
-    }
-
-    rows[[length(rows) + 1L]] <- fastkpc_precision_trace_row(
-      run_id = "fastkpc-batched-hybrid",
-      scenario_id = "fast_kpc",
-      conditioning_level = level,
-      canonical_test_order_id = state$test_id,
-      setup_fingerprint = if (length(task$S) == 0L) {
-        "direct-ci:S:"
-      } else {
-        paste0("fastSplineCUDA:S:", task$S_key)
-      },
-      target_id = paste(task$x, task$y, sep = "|"),
-      x = task$x,
-      y = task$y,
-      S_key = task$S_key,
-      conditioning_target_side = task$conditioning_target_side,
-      backend_requested = "fastSplineCUDA",
-      backend_used = "fastSplineCUDA",
-      backend_planned = "fastSplineCUDA",
-      backend_executed = "fastSplineCUDA",
-      verifier_backend = if (identical(verifier_policy, "near-alpha")) {
-        "mgcvExtractGPUGCV"
-      } else {
-        NA_character_
-      },
-      verifier_planned = if (identical(verifier_policy, "near-alpha")) {
-        "mgcvExtractGPUGCV"
-      } else {
-        NA_character_
-      },
-      verifier_executed = if (is.null(verifier_receipt)) {
-        NA_character_
-      } else {
-        verifier_receipt$residual_backend_executed
-      },
-      compatibility_action = "run-batched-primary",
-      fallback_reason = fallback_reason,
-      primary_p = primary_info$p_used,
-      verifier_p = if (is.null(verifier_info)) NA_real_ else verifier_info$p_used,
-      p_used = p_used,
-      p_raw = p_raw,
-      p_was_nonfinite = if (is.null(verifier_info)) {
-        primary_info$p_was_nonfinite
-      } else {
-        verifier_info$p_was_nonfinite
-      },
-      nonfinite_action = if (is.null(verifier_info)) {
-        primary_info$nonfinite_action
-      } else {
-        verifier_info$nonfinite_action
-      },
-      p_source_used = p_source,
-      primary_residual_backend_executed =
-        if (length(task$S) == 0L) "direct-ci" else "fastSplineCUDA",
-      primary_ci_backend_executed = "cuda-dcov",
-      primary_p_raw = primary_info$p_raw,
-      primary_p_used = primary_info$p_used,
-      near_alpha_triggered = near_alpha,
-      verifier_residual_backend_executed =
-        if (is.null(verifier_receipt)) NA_character_ else
-          verifier_receipt$residual_backend_executed,
-      verifier_ci_backend_executed =
-        if (is.null(verifier_receipt)) NA_character_ else
-          verifier_receipt$ci_backend_executed,
-      verifier_p_raw = if (is.null(verifier_info)) NA_real_ else verifier_info$p_raw,
-      verifier_p_used = if (is.null(verifier_info)) NA_real_ else verifier_info$p_used,
-      fallback_triggered = fallback_triggered,
-      attempt_count = attempt_count,
-      attempt_backend_sequence = attempt_backend_sequence,
-      attempt_status_sequence = attempt_status_sequence,
-      ci_randomness_id = randomness$ci_randomness_id,
-      permutation_seed_effective = randomness$permutation_seed_effective,
-      permutation_plan_spec_hash = randomness$permutation_plan_spec_hash,
-      permutation_plan_hash = randomness$permutation_plan_hash,
-      permutation_replicates = randomness$permutation_replicates,
-      precision_execution_status = "batched-primary-data-plane",
-      decision_before_verify = primary_info$delete_edge,
-      decision_after_verify = delete_edge,
-      mgcv_setup_cpu_ms =
-        if (is.null(verifier_receipt)) NA_real_ else
-          verifier_receipt$timings$mgcv_setup_cpu_ms %||% NA_real_,
-      spectral_prepare_ms =
-        if (is.null(verifier_receipt)) NA_real_ else
-          verifier_receipt$timings$spectral_prepare_ms %||% NA_real_,
-      gcv_score_ms =
-        if (is.null(verifier_receipt)) NA_real_ else
-          verifier_receipt$timings$gcv_score_ms %||% NA_real_,
-      linear_solve_ms =
-        if (is.null(verifier_receipt)) NA_real_ else
-          verifier_receipt$timings$linear_solve_ms %||% NA_real_,
-      residual_materialize_ms =
-        if (is.null(verifier_receipt)) NA_real_ else
-          verifier_receipt$timings$residual_materialize_ms %||% NA_real_,
-      ci_test_ms =
-        if (is.null(verifier_receipt)) NA_real_ else
-          verifier_receipt$timings$ci_test_ms %||% NA_real_,
-      total_ms =
-        if (is.null(verifier_receipt)) NA_real_ else
-          verifier_receipt$timings$total_ms %||% NA_real_
+    verifier_count <- verifier_count + 1L
+    verifier <- fastkpc_batched_precision_execute_verifier(
+      data = data,
+      row = data.frame(
+        canonical_test_order_id = canonical_test_order_id,
+        x = task$x, y = task$y, S_key = task$S_key,
+        stringsAsFactors = FALSE
+      ),
+      alpha = alpha, tau = tau, ci_method = ci_method,
+      index = index, legacy_index = legacy_index,
+      hsic_params = hsic_params, permutation_params = permutation_params,
+      precision_executors = precision_executors,
+      runtime_capabilities = runtime_capabilities,
+      allow_canary = allow_canary,
+      execution_context = execution_context
     )
-    state$n_edge_tests[[level + 1L]] <- state$n_edge_tests[[level + 1L]] + 1L
+    verifier_exec <- verifier$exec
+    verifier_receipt <- verifier_exec$receipt
+    verifier_info <- verifier$info
+    verified[[i]] <- TRUE
+    verifier_receipts[[i]] <- verifier_receipt
+    verifier_infos[[i]] <- verifier_info
+    randomness <- verifier$randomness
+    verifier_randomness[[i]] <- randomness
+    final_p[[i]] <- verifier_info$p_used
+    final_raw_p[[i]] <- verifier_info$p_raw
+    final_delete[[i]] <- verifier_info$delete_edge
+    p_source <- verifier_receipt$p_source_used
+    fallback_triggered <- isTRUE(verifier_exec$fallback_triggered)
+    fallback_reason <- verifier_exec$fallback_reason %||% ""
+    attempts <- verifier_exec$attempts %||% list(verifier_exec)
+    attempt_count <- length(attempts)
+    attempt_backend_sequence <- paste(vapply(attempts, function(attempt) {
+      fastkpc_nonempty_backend(
+        attempt$backend_executed,
+        fastkpc_nonempty_backend(attempt$backend_attempted, "")
+      )
+    }, character(1L)), collapse = ">")
+    attempt_status_sequence <- paste(vapply(attempts, function(attempt) {
+      as.character((attempt$attempt_status %||% "")[1L])
+    }, character(1L)), collapse = ">")
+    p_source_vec[[i]] <- p_source
+    fallback_triggered_vec[[i]] <- fallback_triggered
+    fallback_reason_vec[[i]] <- fallback_reason
+    attempt_count_vec[[i]] <- attempt_count
+    attempt_backend_sequence_vec[[i]] <- attempt_backend_sequence
+    attempt_status_sequence_vec[[i]] <- attempt_status_sequence
+    verifier_backends <- c(verifier_backends,
+                           verifier_receipt$residual_backend_executed)
+    ci_backends <- c(ci_backends, verifier_receipt$ci_backend_executed)
+    if (!identical(primary_decision$delete_edge[[i]], verifier_info$delete_edge)) {
+      decision_changes <- decision_changes + 1L
+    }
+    timings <- verifier_receipt$timings %||% list()
+    verifier_metrics$total_ms <- fastkpc_batched_precision_add_ms(
+      verifier_metrics$total_ms, timings$total_ms
+    )
+    verifier_metrics$mgcv_setup_ms <- fastkpc_batched_precision_add_ms(
+      verifier_metrics$mgcv_setup_ms, timings$mgcv_setup_cpu_ms
+    )
+    verifier_metrics$spectral_prepare_ms <- fastkpc_batched_precision_add_ms(
+      verifier_metrics$spectral_prepare_ms, timings$spectral_prepare_ms
+    )
+    verifier_metrics$gcv_score_ms <- fastkpc_batched_precision_add_ms(
+      verifier_metrics$gcv_score_ms, timings$gcv_score_ms
+    )
+    verifier_metrics$cuda_solve_ms <- fastkpc_batched_precision_add_ms(
+      verifier_metrics$cuda_solve_ms, timings$linear_solve_ms
+    )
+    verifier_metrics$ci_test_ms <- fastkpc_batched_precision_add_ms(
+      verifier_metrics$ci_test_ms, timings$ci_test_ms
+    )
+    if (isTRUE(verifier_receipt$cache_hit_all)) {
+      verifier_metrics$cache_full_hit_count <-
+        verifier_metrics$cache_full_hit_count + 1L
+    } else if (isTRUE(verifier_receipt$cache_partial_hit)) {
+      verifier_metrics$cache_partial_hit_count <-
+        verifier_metrics$cache_partial_hit_count + 1L
+    } else if (identical(verifier_receipt$cache_service_mode, "full-miss")) {
+      verifier_metrics$cache_miss_count <-
+        verifier_metrics$cache_miss_count + 1L
+    }
+    if (isTRUE(fallback_triggered) || attempt_count > 1L) {
+      verifier_metrics$fallback_count <- verifier_metrics$fallback_count + 1L
+    }
   }
 
-  state$adjacency[delete_edges] <- FALSE
+  if (isTRUE(collect_trace)) {
+    for (i in seq_along(tasks)) {
+      task <- tasks[[i]]
+      canonical_test_order_id <- state$test_id - length(tasks) + i
+      has_verifier <- isTRUE(verified[[i]])
+      verifier_receipt <- verifier_receipts[[i]]
+      verifier_info <- verifier_infos[[i]]
+      randomness <- verifier_randomness[[i]]
+      if (is.null(randomness)) {
+        randomness <- fastkpc_precision_ci_randomness(
+          ci_method = ci_method,
+          permutation_params = permutation_params,
+          canonical_test_order_id = canonical_test_order_id
+        )
+      }
+      rows[[length(rows) + 1L]] <- fastkpc_precision_trace_row(
+        run_id = "fastkpc-batched-hybrid",
+        scenario_id = "fast_kpc",
+        conditioning_level = level,
+        canonical_test_order_id = canonical_test_order_id,
+        setup_fingerprint = if (length(task$S) == 0L) {
+          "direct-ci:S:"
+        } else {
+          paste0("fastSplineCUDA:S:", task$S_key)
+        },
+        target_id = paste(task$x, task$y, sep = "|"),
+        x = task$x,
+        y = task$y,
+        S_key = task$S_key,
+        conditioning_target_side = task$conditioning_target_side,
+        backend_requested = "fastSplineCUDA",
+        backend_used = "fastSplineCUDA",
+        backend_planned = "fastSplineCUDA",
+        backend_executed = "fastSplineCUDA",
+        verifier_backend = if (identical(verifier_policy, "near-alpha")) {
+          "mgcvExtractGPUGCV"
+        } else {
+          NA_character_
+        },
+        verifier_planned = if (identical(verifier_policy, "near-alpha")) {
+          "mgcvExtractGPUGCV"
+        } else {
+          NA_character_
+        },
+        verifier_executed = if (is.null(verifier_receipt)) {
+          NA_character_
+        } else {
+          verifier_receipt$residual_backend_executed
+        },
+        compatibility_action = "run-batched-primary",
+        fallback_reason = fallback_reason_vec[[i]],
+        primary_p = primary_decision$p_used[[i]],
+        verifier_p = if (is.null(verifier_info)) NA_real_ else verifier_info$p_used,
+        p_used = final_p[[i]],
+        p_raw = final_raw_p[[i]],
+        p_was_nonfinite = if (is.null(verifier_info)) {
+          primary_decision$p_was_nonfinite[[i]]
+        } else {
+          verifier_info$p_was_nonfinite
+        },
+        nonfinite_action = if (is.null(verifier_info)) {
+          primary_decision$nonfinite_action[[i]]
+        } else {
+          verifier_info$nonfinite_action
+        },
+        p_source_used = p_source_vec[[i]],
+        primary_residual_backend_executed =
+          if (length(task$S) == 0L) "direct-ci" else "fastSplineCUDA",
+        primary_ci_backend_executed = "cuda-dcov",
+        primary_p_raw = primary_decision$p_raw[[i]],
+        primary_p_used = primary_decision$p_used[[i]],
+        near_alpha_triggered = near_alpha_flags[[i]],
+        verifier_residual_backend_executed =
+          if (is.null(verifier_receipt)) NA_character_ else
+            verifier_receipt$residual_backend_executed,
+        verifier_ci_backend_executed =
+          if (is.null(verifier_receipt)) NA_character_ else
+            verifier_receipt$ci_backend_executed,
+        verifier_p_raw = if (is.null(verifier_info)) NA_real_ else verifier_info$p_raw,
+        verifier_p_used = if (is.null(verifier_info)) NA_real_ else verifier_info$p_used,
+        fallback_triggered = fallback_triggered_vec[[i]],
+        attempt_count = attempt_count_vec[[i]],
+        attempt_backend_sequence = attempt_backend_sequence_vec[[i]],
+        attempt_status_sequence = attempt_status_sequence_vec[[i]],
+        ci_randomness_id = randomness$ci_randomness_id,
+        permutation_seed_effective = randomness$permutation_seed_effective,
+        permutation_plan_spec_hash = randomness$permutation_plan_spec_hash,
+        permutation_plan_hash = randomness$permutation_plan_hash,
+        permutation_replicates = randomness$permutation_replicates,
+        precision_execution_status = "batched-primary-data-plane",
+        decision_before_verify = primary_decision$delete_edge[[i]],
+        decision_after_verify = final_delete[[i]],
+        mgcv_setup_cpu_ms =
+          if (is.null(verifier_receipt)) NA_real_ else
+            verifier_receipt$timings$mgcv_setup_cpu_ms %||% NA_real_,
+        spectral_prepare_ms =
+          if (is.null(verifier_receipt)) NA_real_ else
+            verifier_receipt$timings$spectral_prepare_ms %||% NA_real_,
+        gcv_score_ms =
+          if (is.null(verifier_receipt)) NA_real_ else
+            verifier_receipt$timings$gcv_score_ms %||% NA_real_,
+        linear_solve_ms =
+          if (is.null(verifier_receipt)) NA_real_ else
+            verifier_receipt$timings$linear_solve_ms %||% NA_real_,
+        residual_materialize_ms =
+          if (is.null(verifier_receipt)) NA_real_ else
+            verifier_receipt$timings$residual_materialize_ms %||% NA_real_,
+        ci_test_ms =
+          if (is.null(verifier_receipt)) NA_real_ else
+            verifier_receipt$timings$ci_test_ms %||% NA_real_,
+        total_ms =
+          if (is.null(verifier_receipt)) NA_real_ else
+            verifier_receipt$timings$total_ms %||% NA_real_
+      )
+    }
+  }
+
+  native <- precision_replay_layer_native(
+    adjacency = state$adjacency,
+    edge_x = vapply(tasks, `[[`, integer(1L), "edge_x"),
+    edge_y = vapply(tasks, `[[`, integer(1L), "edge_y"),
+    x = vapply(tasks, `[[`, integer(1L), "x"),
+    y = vapply(tasks, `[[`, integer(1L), "y"),
+    conditioning_sets = lapply(tasks, `[[`, "S"),
+    p_values = final_p,
+    alpha = alpha,
+    pmax = state$pmax,
+    trace_level = trace_level
+  )
+  state$adjacency <- native$adjacency
+  state$pmax <- native$pMax
+  for (entry in native$per.level.log) {
+    x <- as.integer(entry$x)
+    y <- as.integer(entry$y)
+    state$sepsets[[x]][[y]] <- as.integer(entry$S)
+    state$sepsets[[y]][[x]] <- as.integer(entry$S)
+  }
+  state$n_edge_tests[[level + 1L]] <- as.integer(native$summary$tests_replayed)
+  ignored_task_index <- as.integer(native$ignored_task_index %||% integer())
+  deleted_task_index <- as.integer(native$deleted_task_index %||% integer())
+  if (length(ignored_task_index) > 0L) {
+    verified_but_unreplayed <- sum(verified[ignored_task_index] %in% TRUE)
+  }
+  if (length(rows) > 0L) {
+    replay_rows <- native$replay_rows
+    if (nrow(replay_rows) > 0L) {
+      ignored <- replay_rows$edge_already_deleted %in% TRUE
+      if (any(ignored)) {
+        ignored_idx <- replay_rows$task_index[ignored]
+        for (idx in ignored_idx) {
+          rows[[idx]]$decision_after_verify <- FALSE
+        }
+      }
+      deleted <- replay_rows$edge_deleted %in% TRUE
+      if (any(deleted)) {
+        deleted_idx <- replay_rows$task_index[deleted]
+        for (idx in deleted_idx) {
+          rows[[idx]]$decision_after_verify <- TRUE
+        }
+      }
+    }
+    if (length(deleted_task_index) > 0L) {
+      for (idx in deleted_task_index) {
+        rows[[idx]]$decision_after_verify <- TRUE
+      }
+    }
+    if (length(ignored_task_index) > 0L) {
+      for (idx in ignored_task_index) {
+        rows[[idx]]$decision_after_verify <- FALSE
+      }
+    }
+    if (length(ignored_task_index) > 0L) {
+      rows <- rows[setdiff(seq_along(rows), ignored_task_index)]
+    }
+  }
   list(
     state = state,
     trace_rows = rows,
-    level_log = level_log,
+    level_log = native$per.level.log,
     verifier_backends = verifier_backends,
     ci_backends = ci_backends,
     verifier_count = verifier_count,
     decision_changes = decision_changes,
-    verifier_metrics = verifier_metrics
+    verifier_metrics = verifier_metrics,
+    native_summary = native$summary,
+    verified_but_unreplayed = verified_but_unreplayed
   )
 }
 
@@ -564,8 +693,11 @@ fastkpc_batched_cuda_precision_skeleton <- function(data, alpha,
                                                     allow_canary,
                                                     residual_cache = TRUE,
                                                     verifier_policy =
-                                                      c("none", "near-alpha")) {
+                                                      c("none", "near-alpha"),
+                                                    trace_level =
+                                                      c("summary", "full", "none")) {
   verifier_policy <- match.arg(verifier_policy)
+  trace_level <- match.arg(trace_level)
   data <- as.matrix(data)
   storage.mode(data) <- "double"
   if (!identical(ci_method, "dcc.gamma")) {
@@ -606,6 +738,10 @@ fastkpc_batched_cuda_precision_skeleton <- function(data, alpha,
   total_unique_residual_requests <- 0L
   total_verifier_count <- 0L
   total_decision_changes <- 0L
+  total_native_replayed <- 0L
+  total_native_ignored <- 0L
+  total_native_deletions <- 0L
+  total_verified_but_unreplayed <- 0L
   verifier_metrics <- list(
     total_ms = 0,
     mgcv_setup_ms = 0,
@@ -656,7 +792,8 @@ fastkpc_batched_cuda_precision_skeleton <- function(data, alpha,
       runtime_capabilities = runtime_capabilities,
       allow_canary = allow_canary,
       execution_context = execution_context,
-      verifier_policy = verifier_policy
+      verifier_policy = verifier_policy,
+      trace_level = trace_level
     )
     state <- replay$state
     trace_rows <- c(trace_rows, replay$trace_rows)
@@ -665,13 +802,23 @@ fastkpc_batched_cuda_precision_skeleton <- function(data, alpha,
     ci_backends <- c(ci_backends, replay$ci_backends)
     total_verifier_count <- total_verifier_count + replay$verifier_count
     total_decision_changes <- total_decision_changes + replay$decision_changes
+    total_native_replayed <- total_native_replayed +
+      as.integer(replay$native_summary$tests_replayed %||% 0L)
+    total_native_ignored <- total_native_ignored +
+      as.integer(replay$native_summary$tasks_ignored_after_delete %||% 0L)
+    total_native_deletions <- total_native_deletions +
+      as.integer(replay$native_summary$deletions %||% 0L)
+    total_verified_but_unreplayed <- total_verified_but_unreplayed +
+      as.integer(replay$verified_but_unreplayed %||% 0L)
     for (name in names(verifier_metrics)) {
       verifier_metrics[[name]] <- verifier_metrics[[name]] +
         replay$verifier_metrics[[name]]
     }
   }
 
-  trace <- if (length(trace_rows) == 0L) {
+  trace <- if (!identical(trace_level, "full")) {
+    NULL
+  } else if (length(trace_rows) == 0L) {
     fastkpc_precision_trace_row(
       run_id = "fastkpc-batched-hybrid",
       backend_requested = NA_character_,
@@ -680,8 +827,10 @@ fastkpc_batched_cuda_precision_skeleton <- function(data, alpha,
   } else {
     do.call(rbind, trace_rows)
   }
-  trace$edge_deleted <- trace$decision_after_verify
-  trace$sepset_recorded <- ifelse(trace$edge_deleted, trace$S_key, "")
+  if (is.data.frame(trace)) {
+    trace$edge_deleted <- trace$decision_after_verify
+    trace$sepset_recorded <- ifelse(trace$edge_deleted, trace$S_key, "")
+  }
 
   verifier_backend <- if (length(verifier_backends) == 0L) {
     NA_character_
@@ -732,8 +881,10 @@ fastkpc_batched_cuda_precision_skeleton <- function(data, alpha,
         scheduler_requested = "layer",
         tasks_planned = total_tasks,
         tasks_evaluated = total_tasks,
-        tests_replayed = state$test_id,
-        tasks_ignored_after_delete = total_tasks - state$test_id,
+        tests_replayed = total_native_replayed,
+        tasks_ignored_after_delete = total_native_ignored,
+        native_replay_deletions = total_native_deletions,
+        verified_but_unreplayed = total_verified_but_unreplayed,
         unique_residual_requests = total_unique_residual_requests,
         dcov_batches = total_dcov_batches,
         residual_batches = total_residual_batches,
@@ -762,6 +913,7 @@ fastkpc_batched_cuda_precision_skeleton <- function(data, alpha,
             NA_real_
           },
         verifier_policy = verifier_policy,
+        trace_level = trace_level,
         residual_cache_setup_cache_hits = cache$setup_cache_hits,
         residual_cache_spectral_cache_hits = cache$spectral_cache_hits
       )
@@ -1058,6 +1210,7 @@ fast_kpc <- function(data,
                                                include_observed = TRUE),
                      ci_diagnostics = TRUE,
                      precision_diagnostics = TRUE,
+                     precision_trace_level = c("auto", "summary", "full", "none"),
                      precision_executors = NULL,
                      runtime_capabilities = NULL,
                      allow_canary_mgcv_extract = FALSE,
@@ -1079,6 +1232,7 @@ fast_kpc <- function(data,
   orientation_residual_device <- match.arg(orientation_residual_device)
   scheduler_requested <- match.arg(scheduler)
   graph_stage <- match.arg(graph_stage)
+  precision_trace_level <- match.arg(precision_trace_level)
   if (engine_used == "cpu" && scheduler_requested == "layer") {
     stop("layer scheduler is only implemented for CUDA skeleton execution",
          call. = FALSE)
@@ -1198,6 +1352,7 @@ fast_kpc <- function(data,
     canonical_replay_required =
       isTRUE(precision_route$canonical_replay_required),
     precision_diagnostics = isTRUE(precision_diagnostics),
+    precision_trace_level = precision_trace_level,
     max_conditioning_size = as.integer(max_conditioning_size),
     engine_requested = engine_requested,
     engine_used = engine_used,
@@ -1330,6 +1485,13 @@ fast_kpc <- function(data,
       )
       list(skeleton = skeleton, orientation = NULL)
     } else if (isTRUE(use_batched_precision_layer)) {
+      batched_precision_trace_level <- if (!isTRUE(precision_diagnostics)) {
+        "none"
+      } else if (identical(precision_trace_level, "auto")) {
+        "summary"
+      } else {
+        precision_trace_level
+      }
       skeleton <- fastkpc_batched_cuda_precision_skeleton(
         matrix_data, alpha, max_conditioning_size,
         tau = tau,
@@ -1349,7 +1511,8 @@ fast_kpc <- function(data,
           "near-alpha"
         } else {
           "none"
-        }
+        },
+        trace_level = batched_precision_trace_level
       )
       list(skeleton = skeleton, orientation = NULL)
     } else {

@@ -509,12 +509,27 @@ fastkpc_precision_e2e_run_row <- function(entry, scenario_id, repeat_id, n, p,
     entry$result$skeleton$residual_cache %||% list()
   scheduler_summary <- if (is.null(entry$result)) list() else
     entry$result$skeleton$scheduler_diagnostics$summary %||% list()
-  verifier_tests <- if (is.null(trace) || !"near_alpha_triggered" %in% names(trace)) {
+  replayed_tests <- as.integer(scheduler_summary$tests_replayed %||%
+                                 scheduler_summary$n_edgetests %||%
+                                 NA_integer_)
+  verifier_tests <- as.integer(
+    scheduler_summary$precision_verifier_tests %||% NA_integer_
+  )
+  if (!is.finite(verifier_tests)) {
+    verifier_tests <- if (is.null(trace) ||
+                          !"near_alpha_triggered" %in% names(trace)) {
+      0L
+    } else {
+      sum(trace$near_alpha_triggered %in% TRUE, na.rm = TRUE)
+    }
+  }
+  trace_tests <- if (is.finite(replayed_tests) && replayed_tests > 0L) {
+    replayed_tests
+  } else if (is.null(trace)) {
     0L
   } else {
-    sum(trace$near_alpha_triggered %in% TRUE, na.rm = TRUE)
+    nrow(trace)
   }
-  trace_tests <- if (is.null(trace)) 0L else nrow(trace)
   data.frame(
     run_id = entry$run_id,
     scenario_id = scenario_id,
@@ -538,10 +553,7 @@ fastkpc_precision_e2e_run_row <- function(entry, scenario_id, repeat_id, n, p,
     ci_backend = cfg$ci_backend %||% NA_character_,
     residual_backend = if (is.null(entry$result)) NA_character_ else
       entry$result$skeleton$residual_backend %||% cfg$backend_used %||% NA_character_,
-    n_edgetests = if (is.null(entry$result)) NA_integer_ else
-      as.integer(entry$result$skeleton$scheduler_diagnostics$summary$tests_replayed %||%
-                   entry$result$skeleton$scheduler_diagnostics$summary$n_edgetests %||%
-                   NA_integer_),
+    n_edgetests = if (is.null(entry$result)) NA_integer_ else replayed_tests,
     verifier_tests = as.integer(verifier_tests),
     verifier_rate = if (trace_tests > 0L) verifier_tests / trace_tests else NA_real_,
     verifier_total_ms =
@@ -681,6 +693,18 @@ fastkpc_precision_e2e_mode_summary <- function(runs, stage_timing,
 }
 
 fastkpc_precision_e2e_entry_verifier_rate <- function(entry) {
+  scheduler_summary <- if (is.null(entry$result)) list() else
+    entry$result$skeleton$scheduler_diagnostics$summary %||% list()
+  verifier_tests <- as.numeric(
+    scheduler_summary$precision_verifier_tests %||% NA_real_
+  )
+  replayed_tests <- as.numeric(scheduler_summary$tests_replayed %||%
+                                 scheduler_summary$n_edgetests %||%
+                                 NA_real_)
+  if (is.finite(verifier_tests) && is.finite(replayed_tests) &&
+      replayed_tests > 0) {
+    return(verifier_tests / replayed_tests)
+  }
   trace <- fastkpc_precision_e2e_trace(entry$result)
   if (is.null(trace) || nrow(trace) == 0L ||
       !"near_alpha_triggered" %in% names(trace)) {

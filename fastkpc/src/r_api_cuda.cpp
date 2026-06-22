@@ -15,6 +15,8 @@
 #include <Rcpp.h>
 #include <R_ext/Rdynload.h>
 #include <cmath>
+#include <map>
+#include <sstream>
 #include <stdexcept>
 
 namespace {
@@ -386,6 +388,15 @@ Rcpp::List skeleton_result_to_list(const SkeletonResult& result, int p) {
         result.ci_hsic_cuda_max_batch_pairs
     )
   );
+}
+
+std::string replay_s_key(const std::vector<int>& conditioning_set) {
+  std::ostringstream out;
+  for (std::size_t i = 0; i < conditioning_set.size(); ++i) {
+    if (i != 0) out << "|";
+    out << conditioning_set[i] + 1;
+  }
+  return out.str();
 }
 
 Rcpp::IntegerMatrix pdag_to_matrix(const std::vector<int>& pdag, int p) {
@@ -1382,6 +1393,180 @@ extern "C" SEXP C_fast_kpc_wanpdag_cuda(SEXP data, SEXP alphas,
   END_RCPP
 }
 
+extern "C" SEXP C_precision_replay_layer_native(SEXP adjacencys,
+                                                SEXP pmaxs,
+                                                SEXP edge_xs,
+                                                SEXP edge_ys,
+                                                SEXP xs,
+                                                SEXP ys,
+                                                SEXP conditioning_setss,
+                                                SEXP p_values,
+                                                SEXP alphas,
+                                                SEXP trace_levels) {
+  BEGIN_RCPP
+  Rcpp::IntegerMatrix adjacency_in(adjacencys);
+  Rcpp::NumericMatrix pmax_in(pmaxs);
+  Rcpp::IntegerVector edge_x(edge_xs);
+  Rcpp::IntegerVector edge_y(edge_ys);
+  Rcpp::IntegerVector x(xs);
+  Rcpp::IntegerVector y(ys);
+  Rcpp::List conditioning_sets(conditioning_setss);
+  Rcpp::NumericVector pvals(p_values);
+  const double alpha = Rf_asReal(alphas);
+  const std::string trace_level = Rcpp::as<std::string>(trace_levels);
+  const bool full_trace = trace_level == "full";
+
+  const int p = adjacency_in.nrow();
+  if (adjacency_in.ncol() != p || pmax_in.nrow() != p || pmax_in.ncol() != p) {
+    Rcpp::stop("adjacency and pmax must be square matrices with matching dimensions");
+  }
+  const int n_tasks = pvals.size();
+  if (edge_x.size() != n_tasks || edge_y.size() != n_tasks ||
+      x.size() != n_tasks || y.size() != n_tasks ||
+      conditioning_sets.size() != n_tasks) {
+    Rcpp::stop("task arrays must have the same length");
+  }
+
+  std::vector<int> adjacency(static_cast<std::size_t>(p) * p, 0);
+  std::vector<double> pmax(static_cast<std::size_t>(p) * p, 0.0);
+  std::vector<std::vector<std::vector<int> > > sepsets(
+    p, std::vector<std::vector<int> >(p));
+  for (int row = 0; row < p; ++row) {
+    for (int col = 0; col < p; ++col) {
+      adjacency[static_cast<std::size_t>(row) * p + col] =
+        adjacency_in(row, col) != 0 ? 1 : 0;
+      pmax[static_cast<std::size_t>(row) * p + col] = pmax_in(row, col);
+    }
+  }
+
+  Rcpp::IntegerVector trace_id, trace_edge_x, trace_edge_y, trace_x, trace_y;
+  Rcpp::CharacterVector trace_s_key;
+  Rcpp::NumericVector trace_p;
+  Rcpp::LogicalVector trace_deleted, trace_ignored;
+  Rcpp::IntegerVector replayed_task_index, ignored_task_index, deleted_task_index;
+
+  int tests_replayed = 0;
+  int ignored_after_delete = 0;
+  int deletions = 0;
+  std::map<int, bool> edge_done;
+  std::vector<int> delete_edges(static_cast<std::size_t>(p) * p, 0);
+  std::vector<LevelDeletion> level_log;
+
+  for (int i = 0; i < n_tasks; ++i) {
+    const int ex = edge_x[i] - 1;
+    const int ey = edge_y[i] - 1;
+    const int ox = x[i] - 1;
+    const int oy = y[i] - 1;
+    if (ex < 0 || ex >= p || ey < 0 || ey >= p ||
+        ox < 0 || ox >= p || oy < 0 || oy >= p) {
+      Rcpp::stop("task vertex index out of range");
+    }
+    const int edge_key = ex < ey ? ex * p + ey : ey * p + ex;
+    Rcpp::IntegerVector cond_in = conditioning_sets[i];
+    std::vector<int> cond;
+    cond.reserve(cond_in.size());
+    for (int j = 0; j < cond_in.size(); ++j) {
+      if (Rcpp::IntegerVector::is_na(cond_in[j])) {
+        Rcpp::stop("conditioning set contains NA");
+      }
+      const int value = cond_in[j] - 1;
+      if (value < 0 || value >= p) Rcpp::stop("conditioning set index out of range");
+      cond.push_back(value);
+    }
+
+    const bool ignored = edge_done[edge_key] ||
+      adjacency[static_cast<std::size_t>(ex) * p + ey] == 0;
+    if (ignored) {
+      ++ignored_after_delete;
+      ignored_task_index.push_back(i + 1);
+      if (full_trace) {
+        trace_id.push_back(i + 1);
+        trace_edge_x.push_back(ex + 1);
+        trace_edge_y.push_back(ey + 1);
+        trace_x.push_back(ox + 1);
+        trace_y.push_back(oy + 1);
+        trace_s_key.push_back(replay_s_key(cond));
+        trace_p.push_back(NA_REAL);
+        trace_deleted.push_back(false);
+        trace_ignored.push_back(true);
+      }
+      continue;
+    }
+
+    ++tests_replayed;
+    replayed_task_index.push_back(i + 1);
+    double pval = pvals[i];
+    if (!std::isfinite(pval)) pval = 1.0;
+    const std::size_t pmax_idx = static_cast<std::size_t>(ex) * p + ey;
+    const std::size_t pmax_rev = static_cast<std::size_t>(ey) * p + ex;
+    if (pval > pmax[pmax_idx]) {
+      pmax[pmax_idx] = pval;
+      pmax[pmax_rev] = pval;
+    }
+
+    const bool deleted = pval >= alpha;
+    if (deleted) {
+      ++deletions;
+      deleted_task_index.push_back(i + 1);
+      delete_edges[static_cast<std::size_t>(ex) * p + ey] = 1;
+      delete_edges[static_cast<std::size_t>(ey) * p + ex] = 1;
+      sepsets[ex][ey] = cond;
+      sepsets[ey][ex] = cond;
+      level_log.push_back(LevelDeletion{ex, ey, cond, pval});
+      edge_done[edge_key] = true;
+    }
+
+    if (full_trace) {
+      trace_id.push_back(i + 1);
+      trace_edge_x.push_back(ex + 1);
+      trace_edge_y.push_back(ey + 1);
+      trace_x.push_back(ox + 1);
+      trace_y.push_back(oy + 1);
+      trace_s_key.push_back(replay_s_key(cond));
+      trace_p.push_back(pval);
+      trace_deleted.push_back(deleted);
+      trace_ignored.push_back(false);
+    }
+  }
+
+  for (int i = 0; i < p * p; ++i) {
+    if (delete_edges[i] != 0) adjacency[i] = 0;
+  }
+
+  Rcpp::DataFrame replay_rows = Rcpp::DataFrame::create(
+    Rcpp::Named("task_index") = trace_id,
+    Rcpp::Named("edge_x") = trace_edge_x,
+    Rcpp::Named("edge_y") = trace_edge_y,
+    Rcpp::Named("x") = trace_x,
+    Rcpp::Named("y") = trace_y,
+    Rcpp::Named("S_key") = trace_s_key,
+    Rcpp::Named("p_used") = trace_p,
+    Rcpp::Named("edge_deleted") = trace_deleted,
+    Rcpp::Named("edge_already_deleted") = trace_ignored,
+    Rcpp::Named("stringsAsFactors") = false
+  );
+
+  return Rcpp::List::create(
+    Rcpp::Named("adjacency") = adjacency_to_matrix(adjacency, p),
+    Rcpp::Named("sepsets") = sepsets_to_list(sepsets),
+    Rcpp::Named("pMax") = pmax_to_matrix(pmax, p),
+    Rcpp::Named("n.edgetests") = tests_replayed,
+    Rcpp::Named("per.level.log") =
+      level_log_to_list(std::vector<std::vector<LevelDeletion> >(1, level_log))[0],
+    Rcpp::Named("summary") = Rcpp::List::create(
+      Rcpp::Named("tasks_planned") = n_tasks,
+      Rcpp::Named("tests_replayed") = tests_replayed,
+      Rcpp::Named("tasks_ignored_after_delete") = ignored_after_delete,
+      Rcpp::Named("deletions") = deletions
+    ),
+    Rcpp::Named("replayed_task_index") = replayed_task_index,
+    Rcpp::Named("ignored_task_index") = ignored_task_index,
+    Rcpp::Named("deleted_task_index") = deleted_task_index,
+    Rcpp::Named("replay_rows") = replay_rows
+  );
+  END_RCPP
+}
+
 static const R_CallMethodDef call_methods[] = {
   {"C_fastkpc_cuda_available", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_available), 0},
   {"C_fastkpc_cuda_device_info", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_device_info), 0},
@@ -1396,6 +1581,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fast_skeleton_cuda_cached", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda_cached), 7},
   {"C_fast_skeleton_cuda_backend", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda_backend), 18},
   {"C_fast_kpc_wanpdag_cuda", reinterpret_cast<DL_FUNC>(&C_fast_kpc_wanpdag_cuda), 24},
+  {"C_precision_replay_layer_native", reinterpret_cast<DL_FUNC>(&C_precision_replay_layer_native), 10},
   {nullptr, nullptr, 0}
 };
 

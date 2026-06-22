@@ -48,6 +48,7 @@ precision_primary <- fast_kpc(
   graph_stage = "skeleton",
   fastspline_params = params,
   precision_executors = fastkpc_default_precision_executors(),
+  precision_trace_level = "full",
   seed = 621
 )
 
@@ -80,6 +81,33 @@ assert_true(nrow(primary_trace) == sum(precision_primary$skeleton$n.edgetests),
 assert_true(!any(primary_trace$near_alpha_triggered),
             "primary-only precision layer should not trigger verifier")
 
+benchmark_primary <- fast_kpc(
+  data,
+  alpha = 0.2,
+  max_conditioning_size = 1,
+  engine = "cuda",
+  precision = "fast",
+  graph_stage = "skeleton",
+  fastspline_params = params,
+  precision_executors = fastkpc_default_precision_executors(),
+  benchmark = TRUE,
+  seed = 621
+)
+benchmark_summary <- benchmark_primary$skeleton$scheduler_diagnostics$summary
+assert_true(identical(benchmark_summary$trace_level, "summary"),
+            "benchmark precision primary should use summary trace mode")
+assert_true(!is.data.frame(benchmark_primary$skeleton$precision_trace),
+            "benchmark precision primary should not materialize full trace rows")
+assert_true(nrow(benchmark_primary$diagnostics$precision_trace) ==
+              as.integer(benchmark_summary$tests_replayed),
+            "benchmark diagnostics may expose lightweight replay rows")
+assert_true(identical(benchmark_primary$skeleton$n.edgetests,
+                      fast_cuda$skeleton$n.edgetests),
+            "summary trace mode should preserve native replay n.edgetests")
+assert_true(as.integer(benchmark_summary$tests_replayed) ==
+              sum(benchmark_primary$skeleton$n.edgetests),
+            "summary trace mode should report native replayed test count")
+
 scalar_executors <- fastkpc_default_precision_executors()
 scalar_executors$fastSplineCUDA <- function(...) {
   fastkpc_execute_ci_fast_spline_cuda(...)
@@ -95,6 +123,7 @@ scalar_hybrid <- fast_kpc(
   graph_stage = "skeleton",
   fastspline_params = params,
   precision_executors = scalar_executors,
+  precision_trace_level = "full",
   seed = 621
 )
 
@@ -107,6 +136,7 @@ batched_hybrid <- fast_kpc(
   tau = Inf,
   graph_stage = "skeleton",
   fastspline_params = params,
+  precision_trace_level = "full",
   seed = 621
 )
 

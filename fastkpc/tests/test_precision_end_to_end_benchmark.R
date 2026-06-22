@@ -93,4 +93,37 @@ runs_csv <- utils::read.csv(benchmark$paths$runs, stringsAsFactors = FALSE)
 assert_true(nrow(runs_csv) == nrow(benchmark$runs),
             "runs.csv should mirror returned run rows")
 
+summary_only_entry <- list(
+  run_id = "summary-only",
+  mode = "hybrid_cuda",
+  status = "ok",
+  error_message = "",
+  wall_time_sec = 0.1,
+  result = list(
+    config = list(engine_used = "cuda", precision_requested = "hybrid"),
+    skeleton = list(
+      scheduler_diagnostics = list(summary = list(
+        tests_replayed = 40L,
+        precision_verifier_tests = 5L
+      )),
+      residual_cache = list()
+    ),
+    timings = data.frame(stage = "skeleton", elapsed_sec = 0.1),
+    diagnostics = list(precision_trace = NULL)
+  )
+)
+summary_only_row <- fastkpc_precision_e2e_run_row(
+  summary_only_entry,
+  scenario_id = "summary-only",
+  repeat_id = 1L,
+  n = 10L,
+  p = 4L,
+  alpha = 0.1,
+  max_conditioning_size = 1L,
+  execution_order = 1L,
+  warmup_enabled = FALSE
+)
+assert_true(abs(summary_only_row$verifier_rate - 0.125) < 1e-12,
+            "summary trace mode should derive verifier rate from scheduler summary")
+
 cat("test_precision_end_to_end_benchmark.R: PASS\n")

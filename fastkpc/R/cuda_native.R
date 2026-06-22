@@ -203,6 +203,33 @@ fast_skeleton_cuda_backend <- function(data, alpha, max_conditioning_size,
         PACKAGE = "fastkpc_cuda")
 }
 
+precision_replay_layer_native <- function(adjacency, edge_x, edge_y, x, y,
+                                          conditioning_sets, p_values, alpha,
+                                          pmax = NULL, trace_level = c("summary", "full", "none")) {
+  load_fastkpc_cuda_native()
+  trace_level <- match.arg(trace_level)
+  adjacency <- as.matrix(adjacency)
+  storage.mode(adjacency) <- "integer"
+  if (is.null(pmax)) {
+    pmax <- matrix(-Inf, nrow(adjacency), ncol(adjacency))
+    diag(pmax) <- 1
+  }
+  pmax <- as.matrix(pmax)
+  storage.mode(pmax) <- "double"
+  .Call("C_precision_replay_layer_native",
+        adjacency,
+        pmax,
+        as.integer(edge_x),
+        as.integer(edge_y),
+        as.integer(x),
+        as.integer(y),
+        conditioning_sets,
+        as.numeric(p_values),
+        as.numeric(alpha),
+        as.character(trace_level),
+        PACKAGE = "fastkpc_cuda")
+}
+
 fast_kpc_wanpdag_cuda <- function(data, alpha, max_conditioning_size,
                                   residual_backend = "fastSpline",
                                   residual_device = c("auto", "cpu", "cuda"),
