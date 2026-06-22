@@ -123,6 +123,17 @@ fastkpc_precision_e2e_mode_config <- function(mode) {
   )
 }
 
+fastkpc_precision_e2e_env_modes <- function(default_modes) {
+  value <- Sys.getenv("FASTKPC_PRECISION_E2E_MODES", "")
+  if (!nzchar(value)) return(default_modes)
+  modes <- trimws(unlist(strsplit(value, "[,[:space:]]+")))
+  modes <- modes[nzchar(modes)]
+  if (length(modes) == 0L) return(default_modes)
+  match.arg(modes, c("legacy_mgcv", "fast_cuda", "primary_only_cuda",
+                     "compatible_cuda", "hybrid_cuda", "fast_cpu",
+                     "compatible_cpu", "hybrid_cpu"), several.ok = TRUE)
+}
+
 fastkpc_precision_e2e_cuda_available <- function() {
   exists("fastkpc_cuda_available", mode = "function") &&
     isTRUE(tryCatch(fastkpc_cuda_available(), error = function(e) FALSE))
@@ -588,6 +599,12 @@ fastkpc_precision_e2e_finite <- function(x) {
   x[is.finite(x)]
 }
 
+fastkpc_precision_e2e_empty_df <- function(columns) {
+  out <- stats::setNames(replicate(length(columns), logical(0),
+                                   simplify = FALSE), columns)
+  as.data.frame(out, stringsAsFactors = FALSE, check.names = FALSE)
+}
+
 fastkpc_precision_e2e_median <- function(x) {
   x <- fastkpc_precision_e2e_finite(x)
   if (length(x) == 0L) NA_real_ else stats::median(x)
@@ -602,6 +619,15 @@ fastkpc_precision_e2e_p90 <- function(x) {
   }
 }
 
+fastkpc_precision_e2e_p95 <- function(x) {
+  x <- fastkpc_precision_e2e_finite(x)
+  if (length(x) == 0L) {
+    NA_real_
+  } else {
+    as.numeric(stats::quantile(x, probs = 0.95, names = FALSE, type = 7))
+  }
+}
+
 fastkpc_precision_e2e_geomean <- function(x) {
   x <- fastkpc_precision_e2e_finite(x)
   x <- x[x > 0]
@@ -611,6 +637,34 @@ fastkpc_precision_e2e_geomean <- function(x) {
 fastkpc_precision_e2e_max_finite_or_na <- function(x) {
   x <- fastkpc_precision_e2e_finite(x)
   if (length(x) == 0L) NA_real_ else max(x)
+}
+
+fastkpc_precision_e2e_bootstrap_ci <- function(x, statistic = stats::median,
+                                               reps = 400L,
+                                               probs = c(0.025, 0.975),
+                                               seed = 91031L) {
+  x <- fastkpc_precision_e2e_finite(x)
+  if (length(x) == 0L) return(c(low = NA_real_, high = NA_real_))
+  if (length(x) == 1L) return(c(low = x[[1L]], high = x[[1L]]))
+  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+    get(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+  } else {
+    NULL
+  }
+  on.exit({
+    if (is.null(old_seed)) {
+      if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+        rm(".Random.seed", envir = .GlobalEnv)
+      }
+    } else {
+      assign(".Random.seed", old_seed, envir = .GlobalEnv)
+    }
+  }, add = TRUE)
+  set.seed(seed)
+  values <- replicate(as.integer(reps), {
+    statistic(sample(x, length(x), replace = TRUE))
+  })
+  as.numeric(stats::quantile(values, probs = probs, names = FALSE, type = 7))
 }
 
 fastkpc_precision_e2e_stage_shares <- function(stage_timing) {
@@ -720,6 +774,110 @@ fastkpc_precision_e2e_find_entry <- function(entries, mode) {
   if (length(matches) == 0L) NULL else matches[[1L]]
 }
 
+fastkpc_precision_e2e_trace_target_count <- function(entry) {
+  trace <- fastkpc_precision_e2e_trace(entry$result)
+  if (is.null(trace) || !"near_alpha_triggered" %in% names(trace)) {
+    return(c(unique_targets = NA_integer_,
+             max_targets_per_group = NA_integer_))
+  }
+  verified <- trace[trace$near_alpha_triggered %in% TRUE, , drop = FALSE]
+  if (nrow(verified) == 0L) {
+    return(c(unique_targets = 0L, max_targets_per_group = 0L))
+  }
+  unique_targets <- NA_integer_
+  max_targets <- NA_integer_
+  if (all(c("x", "y") %in% names(verified))) {
+    target_values <- unique(as.integer(c(verified$x, verified$y)))
+    target_values <- target_values[is.finite(target_values)]
+    unique_targets <- length(target_values)
+  }
+  if (all(c("S_key", "x", "y") %in% names(verified))) {
+    max_targets <- max(vapply(split(seq_len(nrow(verified)), verified$S_key),
+                              function(idx) {
+      length(unique(as.integer(c(verified$x[idx], verified$y[idx]))))
+    }, integer(1L)), na.rm = TRUE)
+  }
+  c(unique_targets = as.integer(unique_targets),
+    max_targets_per_group = as.integer(max_targets))
+}
+
+fastkpc_precision_e2e_pair_rows <- function(entries_by_scenario,
+                                            left_mode = "primary_only_cuda",
+                                            right_mode = "hybrid_cuda") {
+  rows <- list()
+  for (entries in entries_by_scenario) {
+    if (length(entries) == 0L) next
+    left <- fastkpc_precision_e2e_find_entry(entries, left_mode)
+    right <- fastkpc_precision_e2e_find_entry(entries, right_mode)
+    if (is.null(left) || is.null(right)) next
+    scenario_id <- sub(paste0("-", right$mode, "-r[0-9]+$"), "", right$run_id)
+    repeat_id <- suppressWarnings(as.integer(sub(".*-r([0-9]+)$", "\\1",
+                                                 right$run_id)))
+    right_summary <- right$result$skeleton$scheduler_diagnostics$summary %||%
+      list()
+    right_cache <- right$result$skeleton$residual_cache %||% list()
+    target_counts <- fastkpc_precision_e2e_trace_target_count(right)
+    wall_ratio <- if (is.finite(left$wall_time_sec) &&
+                      left$wall_time_sec > 0) {
+      right$wall_time_sec / left$wall_time_sec
+    } else {
+      NA_real_
+    }
+    rows[[length(rows) + 1L]] <- data.frame(
+      scenario_id = scenario_id,
+      `repeat` = as.integer(repeat_id),
+      left_mode = left_mode,
+      right_mode = right_mode,
+      primary_wall_time_sec = left$wall_time_sec,
+      hybrid_wall_time_sec = right$wall_time_sec,
+      wall_time_ratio = wall_ratio,
+      overhead_ms = (right$wall_time_sec - left$wall_time_sec) * 1000,
+      verified_tests =
+        as.integer(right_summary$precision_verifier_tests %||% 0L),
+      verifier_S_groups =
+        as.integer(right_summary$verifier_batch_groups %||% 0L),
+      verifier_ci_batches =
+        as.integer(right_summary$verifier_ci_batches %||% 0L),
+      unique_targets = as.integer(target_counts[["unique_targets"]]),
+      max_targets_per_group =
+        as.integer(target_counts[["max_targets_per_group"]]),
+      residual_cache_misses = as.integer(right_cache$misses %||% 0L),
+      setup_cache_misses =
+        as.integer(right_cache$setup_cache_misses %||% 0L),
+      spectral_cache_misses =
+        as.integer(right_cache$spectral_cache_misses %||% 0L),
+      gcv_score_ms =
+        as.numeric(right_summary$verifier_gcv_score_ms %||% NA_real_),
+      cuda_solve_ms =
+        as.numeric(right_summary$verifier_cuda_solve_ms %||% NA_real_),
+      dcov_ms =
+        as.numeric(right_summary$verifier_ci_test_ms %||% NA_real_),
+      verifier_total_ms =
+        as.numeric(right_summary$verifier_total_ms %||% NA_real_),
+      fallback_count =
+        as.integer(right_summary$verifier_fallback_count %||% 0L),
+      grid_boundary_hit_count = NA_integer_,
+      verified_but_unreplayed =
+        as.integer(right_summary$verified_but_unreplayed %||% 0L),
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  }
+  if (length(rows) == 0L) {
+    return(fastkpc_precision_e2e_empty_df(c(
+      "scenario_id", "repeat", "left_mode", "right_mode",
+      "primary_wall_time_sec", "hybrid_wall_time_sec", "wall_time_ratio",
+      "overhead_ms", "verified_tests", "verifier_S_groups",
+      "verifier_ci_batches", "unique_targets", "max_targets_per_group",
+      "residual_cache_misses", "setup_cache_misses",
+      "spectral_cache_misses", "gcv_score_ms", "cuda_solve_ms", "dcov_ms",
+      "verifier_total_ms", "fallback_count", "grid_boundary_hit_count",
+      "verified_but_unreplayed"
+    )))
+  }
+  do.call(rbind, rows)
+}
+
 fastkpc_precision_e2e_pair_metrics <- function(entries_by_scenario,
                                                left_mode, right_mode,
                                                comparison) {
@@ -760,6 +918,185 @@ fastkpc_precision_e2e_pair_metrics <- function(entries_by_scenario,
       "comparison", "left_mode", "right_mode", "wall_time_ratio",
       "overhead_pct", "right_verifier_rate", "skeleton_shd",
       "first_sepset_identical", "pmax_max_abs_diff"
+    )))
+  }
+  do.call(rbind, rows)
+}
+
+fastkpc_precision_e2e_tail_latency <- function(pair_rows) {
+  if (nrow(pair_rows) == 0L) {
+    return(data.frame(
+      scenario_id = "pooled",
+      comparison = "hybrid_cuda_vs_primary_only_cuda",
+      pair_count = 0L,
+      median_overhead_ms = NA_real_,
+      p90_overhead_ms = NA_real_,
+      p95_overhead_ms = NA_real_,
+      median_wall_time_ratio = NA_real_,
+      p90_wall_time_ratio = NA_real_,
+      p95_wall_time_ratio = NA_real_,
+      bootstrap_ratio_ci_low = NA_real_,
+      bootstrap_ratio_ci_high = NA_real_,
+      stringsAsFactors = FALSE
+    ))
+  }
+  scenario_ids <- c(unique(as.character(pair_rows$scenario_id)), "pooled")
+  rows <- lapply(scenario_ids, function(scenario_id) {
+    subset <- if (identical(scenario_id, "pooled")) {
+      pair_rows
+    } else {
+      pair_rows[pair_rows$scenario_id == scenario_id, , drop = FALSE]
+    }
+    ci <- fastkpc_precision_e2e_bootstrap_ci(subset$wall_time_ratio)
+    data.frame(
+      scenario_id = scenario_id,
+      comparison = "hybrid_cuda_vs_primary_only_cuda",
+      pair_count = nrow(subset),
+      median_overhead_ms =
+        fastkpc_precision_e2e_median(subset$overhead_ms),
+      p90_overhead_ms = fastkpc_precision_e2e_p90(subset$overhead_ms),
+      p95_overhead_ms = fastkpc_precision_e2e_p95(subset$overhead_ms),
+      median_wall_time_ratio =
+        fastkpc_precision_e2e_median(subset$wall_time_ratio),
+      p90_wall_time_ratio =
+        fastkpc_precision_e2e_p90(subset$wall_time_ratio),
+      p95_wall_time_ratio =
+        fastkpc_precision_e2e_p95(subset$wall_time_ratio),
+      bootstrap_ratio_ci_low = ci[[1L]],
+      bootstrap_ratio_ci_high = ci[[2L]],
+      stringsAsFactors = FALSE
+    )
+  })
+  do.call(rbind, rows)
+}
+
+fastkpc_precision_e2e_tail_reason <- function(row, scenario_medians) {
+  if (is.finite(row$verified_tests) &&
+      is.finite(scenario_medians$verified_tests) &&
+      row$verified_tests > scenario_medians$verified_tests) {
+    return("more verifier tests")
+  }
+  if (is.finite(row$residual_cache_misses) &&
+      is.finite(scenario_medians$residual_cache_misses) &&
+      row$residual_cache_misses > scenario_medians$residual_cache_misses) {
+    return("more residual cache misses")
+  }
+  if (is.finite(row$max_targets_per_group) &&
+      is.finite(scenario_medians$max_targets_per_group) &&
+      row$max_targets_per_group > scenario_medians$max_targets_per_group) {
+    return("larger verifier S group")
+  }
+  if (is.finite(row$gcv_score_ms) &&
+      is.finite(scenario_medians$gcv_score_ms) &&
+      row$gcv_score_ms > scenario_medians$gcv_score_ms) {
+    return("higher GCV scoring time")
+  }
+  if (is.finite(row$overhead_ms) && abs(row$overhead_ms) < 25) {
+    return("small absolute overhead")
+  }
+  "unattributed tail"
+}
+
+fastkpc_precision_e2e_slow_run_attribution <- function(pair_rows) {
+  if (nrow(pair_rows) == 0L) {
+    return(fastkpc_precision_e2e_empty_df(c(
+      "scenario_id", "repeat", "wall_time_ratio", "overhead_ms",
+      "verified_tests", "verifier_S_groups", "unique_targets",
+      "max_targets_per_group", "residual_cache_misses",
+      "setup_cache_misses", "spectral_cache_misses", "gcv_score_ms",
+      "cuda_solve_ms", "dcov_ms", "verifier_total_ms", "fallback_count",
+      "grid_boundary_hit_count", "verified_but_unreplayed",
+      "tail_threshold_ratio", "tail_attribution"
+    )))
+  }
+  rows <- list()
+  for (scenario_id in unique(pair_rows$scenario_id)) {
+    subset <- pair_rows[pair_rows$scenario_id == scenario_id, , drop = FALSE]
+    threshold <- fastkpc_precision_e2e_p90(subset$wall_time_ratio)
+    slow <- subset[subset$wall_time_ratio >= threshold, , drop = FALSE]
+    medians <- list(
+      verified_tests = fastkpc_precision_e2e_median(subset$verified_tests),
+      residual_cache_misses =
+        fastkpc_precision_e2e_median(subset$residual_cache_misses),
+      max_targets_per_group =
+        fastkpc_precision_e2e_median(subset$max_targets_per_group),
+      gcv_score_ms = fastkpc_precision_e2e_median(subset$gcv_score_ms)
+    )
+    if (nrow(slow) == 0L) next
+    slow$tail_threshold_ratio <- threshold
+    slow$tail_attribution <- vapply(seq_len(nrow(slow)), function(i) {
+      fastkpc_precision_e2e_tail_reason(slow[i, , drop = FALSE], medians)
+    }, character(1L))
+    rows[[length(rows) + 1L]] <- slow
+  }
+  if (length(rows) == 0L) {
+    return(fastkpc_precision_e2e_empty_df(c(
+      names(pair_rows), "tail_threshold_ratio", "tail_attribution"
+    )))
+  }
+  do.call(rbind, rows)
+}
+
+fastkpc_precision_e2e_edge_flip_count <- function(a, b) {
+  if (is.null(a) || is.null(b)) return(NA_integer_)
+  a <- as.matrix(a)
+  b <- as.matrix(b)
+  if (!identical(dim(a), dim(b))) return(NA_integer_)
+  as.integer(sum(abs(a[upper.tri(a)] - b[upper.tri(b)])))
+}
+
+fastkpc_precision_e2e_graph_value <- function(entries_by_scenario) {
+  rows <- list()
+  for (entries in entries_by_scenario) {
+    legacy <- fastkpc_precision_e2e_find_entry(entries, "legacy_mgcv")
+    primary <- fastkpc_precision_e2e_find_entry(entries, "primary_only_cuda")
+    hybrid <- fastkpc_precision_e2e_find_entry(entries, "hybrid_cuda")
+    if (is.null(legacy) || is.null(primary) || is.null(hybrid)) next
+    scenario_id <- sub("-legacy_mgcv-r[0-9]+$", "", legacy$run_id)
+    repeat_id <- suppressWarnings(as.integer(sub(".*-r([0-9]+)$", "\\1",
+                                                 legacy$run_id)))
+    legacy_adj <- legacy$result$skeleton$adjacency
+    primary_adj <- primary$result$skeleton$adjacency
+    hybrid_adj <- hybrid$result$skeleton$adjacency
+    legacy_vec <- as.integer(as.matrix(legacy_adj)[upper.tri(legacy_adj)])
+    primary_vec <- as.integer(as.matrix(primary_adj)[upper.tri(primary_adj)])
+    hybrid_vec <- as.integer(as.matrix(hybrid_adj)[upper.tri(hybrid_adj)])
+    primary_wrong <- primary_vec != legacy_vec
+    hybrid_wrong <- hybrid_vec != legacy_vec
+    rows[[length(rows) + 1L]] <- data.frame(
+      scenario_id = scenario_id,
+      `repeat` = as.integer(repeat_id),
+      primary_vs_legacy_flips = sum(primary_wrong, na.rm = TRUE),
+      hybrid_vs_legacy_flips = sum(hybrid_wrong, na.rm = TRUE),
+      corrected_flips = sum(primary_wrong & !hybrid_wrong, na.rm = TRUE),
+      introduced_flips = sum(!primary_wrong & hybrid_wrong, na.rm = TRUE),
+      primary_legacy_skeleton_shd =
+        fastkpc_precision_e2e_skeleton_shd(primary_adj, legacy_adj),
+      hybrid_legacy_skeleton_shd =
+        fastkpc_precision_e2e_skeleton_shd(hybrid_adj, legacy_adj),
+      primary_legacy_pmax_diff =
+        fastkpc_max_abs_matrix_diff(primary$result$skeleton$pMax,
+                                    legacy$result$skeleton$pMax),
+      hybrid_legacy_pmax_diff =
+        fastkpc_max_abs_matrix_diff(hybrid$result$skeleton$pMax,
+                                    legacy$result$skeleton$pMax),
+      hybrid_runtime_vs_legacy =
+        if (is.finite(legacy$wall_time_sec) && legacy$wall_time_sec > 0) {
+          hybrid$wall_time_sec / legacy$wall_time_sec
+        } else {
+          NA_real_
+        },
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  }
+  if (length(rows) == 0L) {
+    return(fastkpc_precision_e2e_empty_df(c(
+      "scenario_id", "repeat", "primary_vs_legacy_flips",
+      "hybrid_vs_legacy_flips", "corrected_flips", "introduced_flips",
+      "primary_legacy_skeleton_shd", "hybrid_legacy_skeleton_shd",
+      "primary_legacy_pmax_diff", "hybrid_legacy_pmax_diff",
+      "hybrid_runtime_vs_legacy"
     )))
   }
   do.call(rbind, rows)
@@ -1095,6 +1432,11 @@ fastkpc_run_precision_end_to_end_benchmark <- function(
   comparison_summary <- fastkpc_precision_e2e_comparison_summary(
     entries_by_scenario
   )
+  pair_rows <- fastkpc_precision_e2e_pair_rows(entries_by_scenario)
+  tail_latency <- fastkpc_precision_e2e_tail_latency(pair_rows)
+  slow_run_attribution <-
+    fastkpc_precision_e2e_slow_run_attribution(pair_rows)
+  graph_value <- fastkpc_precision_e2e_graph_value(entries_by_scenario)
   bottleneck_decision <- fastkpc_precision_e2e_bottleneck_decision(
     mode_summary
   )
@@ -1135,6 +1477,9 @@ fastkpc_run_precision_end_to_end_benchmark <- function(
     graph_agreement = file.path(output_dir, "graph_agreement.csv"),
     mode_summary = file.path(output_dir, "mode_summary.csv"),
     comparison_summary = file.path(output_dir, "comparison_summary.csv"),
+    tail_latency = file.path(output_dir, "tail_latency.csv"),
+    slow_run_attribution = file.path(output_dir, "slow_run_attribution.csv"),
+    graph_value = file.path(output_dir, "graph_value.csv"),
     bottleneck_decision = file.path(output_dir, "bottleneck_decision.csv")
   )
   utils::write.csv(runs, paths$runs, row.names = FALSE)
@@ -1144,6 +1489,10 @@ fastkpc_run_precision_end_to_end_benchmark <- function(
   utils::write.csv(mode_summary, paths$mode_summary, row.names = FALSE)
   utils::write.csv(comparison_summary, paths$comparison_summary,
                    row.names = FALSE)
+  utils::write.csv(tail_latency, paths$tail_latency, row.names = FALSE)
+  utils::write.csv(slow_run_attribution, paths$slow_run_attribution,
+                   row.names = FALSE)
+  utils::write.csv(graph_value, paths$graph_value, row.names = FALSE)
   utils::write.csv(bottleneck_decision, paths$bottleneck_decision,
                    row.names = FALSE)
   paths <- c(paths, fastkpc_precision_e2e_write_summary(summary, output_dir))
@@ -1155,6 +1504,9 @@ fastkpc_run_precision_end_to_end_benchmark <- function(
     graph_agreement = graph_agreement,
     mode_summary = mode_summary,
     comparison_summary = comparison_summary,
+    tail_latency = tail_latency,
+    slow_run_attribution = slow_run_attribution,
+    graph_value = graph_value,
     bottleneck_decision = bottleneck_decision,
     summary = summary,
     paths = paths,

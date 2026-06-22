@@ -32,8 +32,9 @@ benchmark <- fastkpc_run_precision_end_to_end_benchmark(
 )
 
 required <- c("runs", "stage_timing", "cache", "graph_agreement",
-              "mode_summary", "comparison_summary", "bottleneck_decision",
-              "summary", "paths")
+              "mode_summary", "comparison_summary", "tail_latency",
+              "slow_run_attribution", "graph_value",
+              "bottleneck_decision", "summary", "paths")
 missing <- setdiff(required, names(benchmark))
 assert_true(length(missing) == 0L,
             paste("benchmark missing fields:", paste(missing, collapse = ", ")))
@@ -65,6 +66,12 @@ assert_true(is.data.frame(benchmark$mode_summary),
             "mode_summary should be a data.frame")
 assert_true(is.data.frame(benchmark$comparison_summary),
             "comparison_summary should be a data.frame")
+assert_true(is.data.frame(benchmark$tail_latency),
+            "tail_latency should be a data.frame")
+assert_true(is.data.frame(benchmark$slow_run_attribution),
+            "slow_run_attribution should be a data.frame")
+assert_true(is.data.frame(benchmark$graph_value),
+            "graph_value should be a data.frame")
 assert_true(is.data.frame(benchmark$bottleneck_decision),
             "bottleneck_decision should be a data.frame")
 assert_true(nrow(benchmark$graph_agreement) >= 1L,
@@ -77,6 +84,26 @@ assert_true(all(c("median_wall_time_sec", "p90_wall_time_sec",
 assert_true(any(benchmark$comparison_summary$comparison ==
                   "hybrid_cuda_vs_primary_only_cuda"),
             "comparison_summary should include hybrid overhead against primary-only")
+assert_true(all(c("scenario_id", "comparison", "pair_count",
+                  "median_overhead_ms", "p90_wall_time_ratio",
+                  "p95_wall_time_ratio", "bootstrap_ratio_ci_low",
+                  "bootstrap_ratio_ci_high") %in%
+                  names(benchmark$tail_latency)),
+            "tail latency should include paired per-scenario ratio and absolute overhead")
+assert_true(any(benchmark$tail_latency$scenario_id == "pooled"),
+            "tail latency should include pooled summary")
+assert_true(all(c("scenario_id", "repeat", "wall_time_ratio",
+                  "overhead_ms", "verified_tests", "verifier_S_groups",
+                  "unique_targets", "max_targets_per_group",
+                  "verified_but_unreplayed", "tail_attribution") %in%
+                  names(benchmark$slow_run_attribution)),
+            "slow run attribution should include verifier workload and reason fields")
+assert_true(all(c("scenario_id", "repeat", "primary_vs_legacy_flips",
+                  "hybrid_vs_legacy_flips", "corrected_flips",
+                  "introduced_flips", "primary_legacy_skeleton_shd",
+                  "hybrid_legacy_skeleton_shd") %in%
+                  names(benchmark$graph_value)),
+            "graph value should summarize primary/hybrid differences against legacy")
 assert_true(all(c("analysis_scope", "dominant_phase",
                   "recommended_next_optimization") %in%
                   names(benchmark$bottleneck_decision)),
@@ -89,9 +116,30 @@ for (path in unlist(benchmark$paths, use.names = FALSE)) {
   assert_true(file.exists(path), paste("missing artifact:", path))
 }
 
+assert_true(file.exists(benchmark$paths$tail_latency),
+            "tail latency artifact should be written")
+assert_true(file.exists(benchmark$paths$slow_run_attribution),
+            "slow run attribution artifact should be written")
+assert_true(file.exists(benchmark$paths$graph_value),
+            "graph value artifact should be written")
+
 runs_csv <- utils::read.csv(benchmark$paths$runs, stringsAsFactors = FALSE)
 assert_true(nrow(runs_csv) == nrow(benchmark$runs),
             "runs.csv should mirror returned run rows")
+
+old_modes <- Sys.getenv("FASTKPC_PRECISION_E2E_MODES", unset = NA_character_)
+on.exit({
+  if (is.na(old_modes)) {
+    Sys.unsetenv("FASTKPC_PRECISION_E2E_MODES")
+  } else {
+    Sys.setenv(FASTKPC_PRECISION_E2E_MODES = old_modes)
+  }
+}, add = TRUE)
+Sys.setenv(FASTKPC_PRECISION_E2E_MODES = "primary_only_cuda, hybrid_cuda")
+assert_true(identical(
+  fastkpc_precision_e2e_env_modes(c("legacy_mgcv", "fast_cuda")),
+  c("primary_only_cuda", "hybrid_cuda")
+), "env mode filter should parse comma-separated precision benchmark modes")
 
 summary_only_entry <- list(
   run_id = "summary-only",
@@ -125,5 +173,48 @@ summary_only_row <- fastkpc_precision_e2e_run_row(
 )
 assert_true(abs(summary_only_row$verifier_rate - 0.125) < 1e-12,
             "summary trace mode should derive verifier rate from scheduler summary")
+
+legacy_adj <- matrix(c(
+  FALSE, TRUE, FALSE,
+  TRUE, FALSE, TRUE,
+  FALSE, TRUE, FALSE
+), nrow = 3L, byrow = TRUE)
+primary_adj <- matrix(c(
+  FALSE, FALSE, FALSE,
+  FALSE, FALSE, TRUE,
+  FALSE, TRUE, FALSE
+), nrow = 3L, byrow = TRUE)
+graph_value <- fastkpc_precision_e2e_graph_value(list(list(
+  list(
+    run_id = "stress-legacy_mgcv-r1",
+    mode = "legacy_mgcv",
+    status = "ok",
+    wall_time_sec = 0.5,
+    result = list(skeleton = list(adjacency = legacy_adj,
+                                  pMax = matrix(0, 3L, 3L)))
+  ),
+  list(
+    run_id = "stress-primary_only_cuda-r1",
+    mode = "primary_only_cuda",
+    status = "ok",
+    wall_time_sec = 0.1,
+    result = list(skeleton = list(adjacency = primary_adj,
+                                  pMax = matrix(0, 3L, 3L)))
+  ),
+  list(
+    run_id = "stress-hybrid_cuda-r1",
+    mode = "hybrid_cuda",
+    status = "ok",
+    wall_time_sec = 1.0,
+    result = list(skeleton = list(adjacency = legacy_adj,
+                                  pMax = matrix(0, 3L, 3L)))
+  )
+)))
+assert_true(graph_value$primary_vs_legacy_flips[[1L]] == 1L,
+            "graph value should count primary flips against legacy")
+assert_true(graph_value$corrected_flips[[1L]] == 1L,
+            "graph value should count hybrid corrections against legacy")
+assert_true(abs(graph_value$hybrid_runtime_vs_legacy[[1L]] - 2) < 1e-12,
+            "graph value runtime ratio should be hybrid wall time over legacy wall time")
 
 cat("test_precision_end_to_end_benchmark.R: PASS\n")
