@@ -734,6 +734,57 @@ fastkpc_score_gpu_target_from_prepared <- function(data, target,
   )
 }
 
+fastkpc_score_gpu_targets_from_prepared <- function(data, targets,
+                                                    prepared_setup,
+                                                    prepared_spectral,
+                                                    sp_grid,
+                                                    tol = sqrt(.Machine$double.eps)) {
+  targets <- as.integer(targets)
+  if (length(targets) == 0L) {
+    return(list())
+  }
+  Y <- as.matrix(data[, targets, drop = FALSE])
+  storage.mode(Y) <- "double"
+  Xty_null <- crossprod(prepared_setup$base_handle$X_null, Y)
+  scored_batch <- fastkpc_mgcv_extract_gpu_spectral_score_batch_cpp(
+    eigenvectors = prepared_spectral$spectral$eigenvectors,
+    inv_chol = prepared_spectral$spectral$inv_chol,
+    eigenvalues = prepared_spectral$spectral$eigenvalues,
+    y = Y,
+    Xty_null = Xty_null,
+    sp_grid = sp_grid,
+    tol = tol
+  )
+  rss <- as.matrix(scored_batch$rss)
+  gcv <- as.matrix(scored_batch$gcv)
+  edf <- as.numeric(scored_batch$edf)
+  lapply(seq_along(targets), function(j) {
+    grid <- data.frame(
+      sp = as.numeric(sp_grid),
+      rss = as.numeric(rss[j, ]),
+      edf = as.numeric(edf),
+      gcv = as.numeric(gcv[j, ]),
+      valid = is.finite(as.numeric(gcv[j, ])),
+      stringsAsFactors = FALSE
+    )
+    valid <- is.finite(grid$rss) & is.finite(grid$edf) & is.finite(grid$gcv)
+    if (!any(valid)) {
+      stop("No valid GCV candidate in sp_grid", call. = FALSE)
+    }
+    idx <- which(grid$gcv == min(grid$gcv[valid]))[1L]
+    list(
+      target = as.integer(targets[[j]]),
+      grid = grid,
+      selected_grid_index = idx,
+      sp = as.numeric(sp_grid[idx]),
+      score = as.numeric(grid$gcv[idx]),
+      edf = as.numeric(grid$edf[idx]),
+      y = as.numeric(Y[, j]),
+      Xty_null = as.numeric(Xty_null[, j])
+    )
+  })
+}
+
 fastkpc_gpu_handle_for_scored_target <- function(scored, prepared_setup) {
   handle <- prepared_setup$base_handle
   handle$y <- scored$y
@@ -896,7 +947,9 @@ fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
                                                   sp_grid = NULL,
                                                   context = NULL,
                                                   prepared_setup = NULL,
-                                                  prepared_spectral = NULL) {
+                                                  prepared_spectral = NULL,
+                                                  solve_backend = c("cuda", "cpu")) {
+  solve_backend <- match.arg(solve_backend)
   total_start <- proc.time()[["elapsed"]]
   if (length(S) == 0L) {
     setup_fingerprint <- paste0("direct:", x, "-", y)
@@ -970,16 +1023,13 @@ fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
 
   gcv_start <- proc.time()[["elapsed"]]
   target_ids <- c(x = as.integer(x), y = as.integer(y))
-  score_one <- function(target) {
-    fastkpc_score_gpu_target_from_prepared(
-      data = data,
-      target = target,
-      prepared_setup = prepared_setup,
-      prepared_spectral = prepared_spectral,
-      sp_grid = sp_grid
-    )
-  }
-  scored <- lapply(target_ids, score_one)
+  scored <- fastkpc_score_gpu_targets_from_prepared(
+    data = data,
+    targets = target_ids,
+    prepared_setup = prepared_setup,
+    prepared_spectral = prepared_spectral,
+    sp_grid = sp_grid
+  )
   gcv_ms <- (proc.time()[["elapsed"]] - gcv_start) * 1000
   selected_sp <- vapply(scored, `[[`, numeric(1), "sp")
 
@@ -989,7 +1039,17 @@ fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
   handles <- lapply(seq_along(selected_sp), make_handle)
 
   solve_start <- proc.time()[["elapsed"]]
-  native <- mgcv_extract_gpu_solve_same_setup_batch_fixed_sp_cuda(handles)
+  native <- if (identical(solve_backend, "cuda")) {
+    mgcv_extract_gpu_solve_same_setup_batch_fixed_sp_cuda(handles)
+  } else {
+    solved <- lapply(handles, fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp)
+    list(
+      residuals = do.call(cbind, lapply(solved, `[[`, "residuals")),
+      fitted = do.call(cbind, lapply(solved, `[[`, "fitted")),
+      coefficients = do.call(cbind, lapply(solved, `[[`, "coefficients")),
+      theta = do.call(cbind, lapply(solved, `[[`, "theta"))
+    )
+  }
   solve_ms <- (proc.time()[["elapsed"]] - solve_start) * 1000
 
   materialize_start <- proc.time()[["elapsed"]]
@@ -1039,11 +1099,16 @@ fastkpc_mgcv_extract_gpu_gcv_for_pair <- function(data, x, y, S,
       sp_selection_backend_executed_y = "r-cpu-spectral",
       gcv_score_backend_executed_x = "r-cpu-spectral",
       gcv_score_backend_executed_y = "r-cpu-spectral",
-      selected_solve_backend_executed_x = "cuda",
-      selected_solve_backend_executed_y = "cuda",
+      gcv_score_batch_used = TRUE,
+      selected_solve_backend_executed_x = solve_backend,
+      selected_solve_backend_executed_y = solve_backend,
       same_setup_pair_batch_used = TRUE,
       true_batched_kernel = FALSE,
-      batch_stage = "native-same-setup-repeated-cuda-solve"
+      batch_stage = if (identical(solve_backend, "cuda")) {
+        "native-same-setup-repeated-cuda-solve"
+      } else {
+        "host-same-setup-repeated-cpu-solve"
+      }
     ),
     timings = list(
       mgcv_setup_cpu_ms =
@@ -1065,7 +1130,9 @@ fastkpc_mgcv_extract_gpu_gcv_for_targets <- function(data, targets, S,
                                                      sp_grid = NULL,
                                                      context = NULL,
                                                      prepared_setup = NULL,
-                                                     prepared_spectral = NULL) {
+                                                     prepared_spectral = NULL,
+                                                     solve_backend = c("cuda", "cpu")) {
+  solve_backend <- match.arg(solve_backend)
   total_start <- proc.time()[["elapsed"]]
   targets <- as.integer(targets)
   if (length(targets) == 0L) {
@@ -1138,21 +1205,29 @@ fastkpc_mgcv_extract_gpu_gcv_for_targets <- function(data, targets, S,
   }
 
   gcv_start <- proc.time()[["elapsed"]]
-  scored <- lapply(targets, function(target) {
-    fastkpc_score_gpu_target_from_prepared(
-      data = data,
-      target = target,
-      prepared_setup = prepared_setup,
-      prepared_spectral = prepared_spectral,
-      sp_grid = sp_grid
-    )
-  })
+  scored <- fastkpc_score_gpu_targets_from_prepared(
+    data = data,
+    targets = targets,
+    prepared_setup = prepared_setup,
+    prepared_spectral = prepared_spectral,
+    sp_grid = sp_grid
+  )
   gcv_ms <- (proc.time()[["elapsed"]] - gcv_start) * 1000
   handles <- lapply(scored, fastkpc_gpu_handle_for_scored_target,
                     prepared_setup = prepared_setup)
 
   solve_start <- proc.time()[["elapsed"]]
-  native <- mgcv_extract_gpu_solve_same_setup_batch_fixed_sp_cuda(handles)
+  native <- if (identical(solve_backend, "cuda")) {
+    mgcv_extract_gpu_solve_same_setup_batch_fixed_sp_cuda(handles)
+  } else {
+    solved <- lapply(handles, fastkpc_mgcv_extract_gpu_solve_handle_fixed_sp)
+    list(
+      residuals = do.call(cbind, lapply(solved, `[[`, "residuals")),
+      fitted = do.call(cbind, lapply(solved, `[[`, "fitted")),
+      coefficients = do.call(cbind, lapply(solved, `[[`, "coefficients")),
+      theta = do.call(cbind, lapply(solved, `[[`, "theta"))
+    )
+  }
   solve_ms <- (proc.time()[["elapsed"]] - solve_start) * 1000
 
   materialize_start <- proc.time()[["elapsed"]]
@@ -1191,10 +1266,15 @@ fastkpc_mgcv_extract_gpu_gcv_for_targets <- function(data, targets, S,
       shared_setup_fingerprint = shared_setup,
       sp_selection_backend_executed = rep("r-cpu-spectral", length(targets)),
       gcv_score_backend_executed = rep("r-cpu-spectral", length(targets)),
-      selected_solve_backend_executed = rep("cuda", length(targets)),
+      gcv_score_batch_used = TRUE,
+      selected_solve_backend_executed = rep(solve_backend, length(targets)),
       same_setup_target_batch_used = TRUE,
       true_batched_kernel = FALSE,
-      batch_stage = "native-same-setup-repeated-cuda-solve"
+      batch_stage = if (identical(solve_backend, "cuda")) {
+        "native-same-setup-repeated-cuda-solve"
+      } else {
+        "host-same-setup-repeated-cpu-solve"
+      }
     ),
     timings = list(
       mgcv_setup_cpu_ms =

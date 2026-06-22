@@ -32,6 +32,25 @@ fast_dcov_exact_cpp <- function(x, y, index = 1, legacy_index = TRUE) {
   )
 }
 
+fastkpc_mgcv_extract_gpu_spectral_score_batch_cpp <- function(
+    eigenvectors, inv_chol, eigenvalues, y, Xty_null, sp_grid,
+    tol = sqrt(.Machine$double.eps)) {
+  build_fastkpc_native()
+  y <- as.matrix(y)
+  Xty_null <- as.matrix(Xty_null)
+  storage.mode(y) <- "double"
+  storage.mode(Xty_null) <- "double"
+  mgcv_extract_gpu_spectral_score_batch_export(
+    as.matrix(eigenvectors),
+    as.matrix(inv_chol),
+    as.numeric(eigenvalues),
+    y,
+    Xty_null,
+    as.numeric(sp_grid),
+    as.numeric(tol)
+  )
+}
+
 fast_hsic_gamma_cpp <- function(x, y, sig = 1) {
   build_fastkpc_native()
   fast_hsic_gamma_cpp_export(

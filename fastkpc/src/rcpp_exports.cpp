@@ -521,6 +521,96 @@ Rcpp::List fit_case_to_list(const FastSplineFit& fit,
   );
 }
 
+Rcpp::List spectral_score_batch_impl(
+    Rcpp::NumericMatrix eigenvectors,
+    Rcpp::NumericMatrix inv_chol,
+    Rcpp::NumericVector eigenvalues,
+    Rcpp::NumericMatrix y,
+    Rcpp::NumericMatrix Xty_null,
+    Rcpp::NumericVector sp_grid,
+    double tol) {
+  const int n = y.nrow();
+  const int q = y.ncol();
+  const int rank = eigenvalues.size();
+  const int grid_size = sp_grid.size();
+  if (inv_chol.nrow() != rank || inv_chol.ncol() != rank ||
+      eigenvectors.nrow() != rank || eigenvectors.ncol() != rank ||
+      Xty_null.nrow() != rank || Xty_null.ncol() != q) {
+    Rcpp::stop("spectral score batch dimension mismatch");
+  }
+
+  Rcpp::NumericMatrix z(rank, q);
+  Rcpp::NumericVector y_sq(q);
+  for (int target = 0; target < q; ++target) {
+    double y_total = 0.0;
+    for (int row = 0; row < n; ++row) {
+      const double value = y(row, target);
+      y_total += value * value;
+    }
+    y_sq[target] = y_total;
+
+    std::vector<double> tmp(rank, 0.0);
+    for (int col = 0; col < rank; ++col) {
+      double value = 0.0;
+      for (int row = 0; row < rank; ++row) {
+        value += inv_chol(row, col) * Xty_null(row, target);
+      }
+      tmp[static_cast<std::size_t>(col)] = value;
+    }
+    for (int component = 0; component < rank; ++component) {
+      double value = 0.0;
+      for (int row = 0; row < rank; ++row) {
+        value += eigenvectors(row, component) * tmp[static_cast<std::size_t>(row)];
+      }
+      z(component, target) = value;
+    }
+  }
+
+  Rcpp::NumericMatrix rss(q, grid_size);
+  Rcpp::NumericMatrix gcv(q, grid_size);
+  Rcpp::NumericVector edf(grid_size);
+  for (int grid = 0; grid < grid_size; ++grid) {
+    const double sp = sp_grid[grid];
+    double edf_value = 0.0;
+    std::vector<double> h(rank);
+    for (int component = 0; component < rank; ++component) {
+      const double shrinkage =
+        1.0 / (1.0 + sp * static_cast<double>(eigenvalues[component]));
+      h[static_cast<std::size_t>(component)] = shrinkage;
+      edf_value += shrinkage;
+    }
+    edf[grid] = edf_value;
+    const double denom = static_cast<double>(n) - edf_value;
+    for (int target = 0; target < q; ++target) {
+      double linear = 0.0;
+      double quadratic = 0.0;
+      for (int component = 0; component < rank; ++component) {
+        const double z_value = z(component, target);
+        const double z_sq = z_value * z_value;
+        const double h_value = h[static_cast<std::size_t>(component)];
+        linear += h_value * z_sq;
+        quadratic += h_value * h_value * z_sq;
+      }
+      double rss_value = y_sq[target] - 2.0 * linear + quadratic;
+      if (rss_value < 0.0) rss_value = 0.0;
+      rss(target, grid) = rss_value;
+      if (std::isfinite(edf_value) && denom > tol) {
+        gcv(target, grid) = static_cast<double>(n) * rss_value / (denom * denom);
+      } else {
+        gcv(target, grid) = R_PosInf;
+      }
+    }
+  }
+
+  return Rcpp::List::create(
+    Rcpp::Named("rss") = rss,
+    Rcpp::Named("edf") = edf,
+    Rcpp::Named("gcv") = gcv,
+    Rcpp::Named("z") = z,
+    Rcpp::Named("y_sq") = y_sq
+  );
+}
+
 double get_named_double(Rcpp::List values, const char* name, double fallback) {
   if (!values.containsElementNamed(name)) return fallback;
   return Rcpp::as<double>(values[name]);
@@ -592,6 +682,19 @@ void apply_ci_options(SkeletonOptions* options,
 }
 
 }  // namespace
+
+// [[Rcpp::export]]
+Rcpp::List mgcv_extract_gpu_spectral_score_batch_export(
+    Rcpp::NumericMatrix eigenvectors,
+    Rcpp::NumericMatrix inv_chol,
+    Rcpp::NumericVector eigenvalues,
+    Rcpp::NumericMatrix y,
+    Rcpp::NumericMatrix Xty_null,
+    Rcpp::NumericVector sp_grid,
+    double tol) {
+  return spectral_score_batch_impl(eigenvectors, inv_chol, eigenvalues, y,
+                                   Xty_null, sp_grid, tol);
+}
 
 // [[Rcpp::export]]
 double fast_dcov_exact_cpp_export(Rcpp::NumericVector x,
