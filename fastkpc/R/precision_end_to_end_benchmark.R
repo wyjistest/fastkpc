@@ -312,6 +312,8 @@ fastkpc_precision_e2e_sum <- function(x) {
 fastkpc_precision_e2e_stage_row <- function(entry, scenario_id, repeat_id, n, p) {
   trace <- fastkpc_precision_e2e_trace(entry$result)
   cfg <- if (is.null(entry$result)) list() else entry$result$config
+  scheduler_summary <- if (is.null(entry$result)) list() else
+    entry$result$skeleton$scheduler_diagnostics$summary %||% list()
   timings <- if (is.null(entry$result)) NULL else entry$result$timings
   skeleton_sec <- if (!is.null(timings) && "skeleton" %in% timings$stage) {
     as.numeric(timings$elapsed_sec[timings$stage == "skeleton"][[1L]])
@@ -343,6 +345,30 @@ fastkpc_precision_e2e_stage_row <- function(entry, scenario_id, repeat_id, n, p)
     ci_test_ms = fastkpc_precision_e2e_sum(trace$ci_test_ms),
     precision_trace_total_ms =
       fastkpc_precision_e2e_sum(trace$total_ms),
+    verifier_total_ms =
+      as.numeric(scheduler_summary$verifier_total_ms %||% NA_real_),
+    verifier_mgcv_setup_ms =
+      as.numeric(scheduler_summary$verifier_mgcv_setup_ms %||% NA_real_),
+    verifier_spectral_prepare_ms =
+      as.numeric(scheduler_summary$verifier_spectral_prepare_ms %||% NA_real_),
+    verifier_gcv_score_ms =
+      as.numeric(scheduler_summary$verifier_gcv_score_ms %||% NA_real_),
+    verifier_cuda_solve_ms =
+      as.numeric(scheduler_summary$verifier_cuda_solve_ms %||% NA_real_),
+    verifier_ci_test_ms =
+      as.numeric(scheduler_summary$verifier_ci_test_ms %||% NA_real_),
+    verifier_cache_full_hit_count =
+      as.integer(scheduler_summary$verifier_cache_full_hit_count %||% 0L),
+    verifier_cache_partial_hit_count =
+      as.integer(scheduler_summary$verifier_cache_partial_hit_count %||% 0L),
+    verifier_cache_miss_count =
+      as.integer(scheduler_summary$verifier_cache_miss_count %||% 0L),
+    verifier_fallback_count =
+      as.integer(scheduler_summary$verifier_fallback_count %||% 0L),
+    verified_tests =
+      as.integer(scheduler_summary$precision_verifier_tests %||% 0L),
+    ms_per_verified_test =
+      as.numeric(scheduler_summary$verifier_ms_per_verified_test %||% NA_real_),
     scheduler_replay_overhead_ms = NA_real_,
     check.names = FALSE,
     stringsAsFactors = FALSE
@@ -481,6 +507,8 @@ fastkpc_precision_e2e_run_row <- function(entry, scenario_id, repeat_id, n, p,
   trace <- fastkpc_precision_e2e_trace(entry$result)
   cache <- if (is.null(entry$result)) list() else
     entry$result$skeleton$residual_cache %||% list()
+  scheduler_summary <- if (is.null(entry$result)) list() else
+    entry$result$skeleton$scheduler_diagnostics$summary %||% list()
   verifier_tests <- if (is.null(trace) || !"near_alpha_triggered" %in% names(trace)) {
     0L
   } else {
@@ -516,6 +544,10 @@ fastkpc_precision_e2e_run_row <- function(entry, scenario_id, repeat_id, n, p,
                    NA_integer_),
     verifier_tests = as.integer(verifier_tests),
     verifier_rate = if (trace_tests > 0L) verifier_tests / trace_tests else NA_real_,
+    verifier_total_ms =
+      as.numeric(scheduler_summary$verifier_total_ms %||% NA_real_),
+    verifier_ms_per_verified_test =
+      as.numeric(scheduler_summary$verifier_ms_per_verified_test %||% NA_real_),
     cache_hit_rate = if ((cache$requests %||% 0L) > 0L) {
       as.numeric(cache$hits %||% 0L) / as.numeric(cache$requests)
     } else {
@@ -632,6 +664,10 @@ fastkpc_precision_e2e_mode_summary <- function(runs, stage_timing,
         fastkpc_precision_e2e_median(stages$stage_accounted_share_of_wall),
       median_verifier_rate =
         fastkpc_precision_e2e_median(ok$verifier_rate),
+      median_verifier_total_ms =
+        fastkpc_precision_e2e_median(ok$verifier_total_ms),
+      median_verifier_ms_per_verified_test =
+        fastkpc_precision_e2e_median(ok$verifier_ms_per_verified_test),
       median_cache_hit_rate =
         fastkpc_precision_e2e_median(ok$cache_hit_rate),
       median_setup_cache_hit_rate =

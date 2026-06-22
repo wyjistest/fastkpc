@@ -63,15 +63,22 @@ assert_true(max(abs(precision_primary$skeleton$pMax -
 assert_true(identical(precision_primary$skeleton$n.edgetests,
                       fast_cuda$skeleton$n.edgetests),
             "batched precision primary should match fast CUDA n.edgetests")
-assert_true(identical(precision_primary$skeleton$scheduler, "layer"),
-            "default CUDA precision primary should use layer scheduler")
+assert_true(identical(precision_primary$skeleton$scheduler, "layer-precision"),
+            "default CUDA precision primary should use precision layer scheduler")
 summary <- precision_primary$skeleton$scheduler_diagnostics$summary
+assert_true(identical(summary$verifier_policy, "none"),
+            "primary-only precision layer should disable verifier")
 assert_true(as.integer(summary$dcov_batches %||% 0L) > 0L,
             "batched precision primary should use CUDA dCov batches")
 assert_true(as.integer(summary$cuda_residual_true_batched_groups %||% 0L) > 0L,
             "batched precision primary should use true-batched residual groups")
 assert_true(!identical(precision_primary$skeleton$scheduler, "r-precision"),
             "default CUDA precision primary should not use scalar R precision loop")
+primary_trace <- precision_primary$skeleton$precision_trace
+assert_true(nrow(primary_trace) == sum(precision_primary$skeleton$n.edgetests),
+            "batched precision primary should expose canonical trace rows")
+assert_true(!any(primary_trace$near_alpha_triggered),
+            "primary-only precision layer should not trigger verifier")
 
 scalar_executors <- fastkpc_default_precision_executors()
 scalar_executors$fastSplineCUDA <- function(...) {
@@ -117,6 +124,15 @@ assert_true(identical(batched_hybrid$skeleton$n.edgetests,
             "batched hybrid n.edgetests should match scalar precision hybrid")
 assert_true(identical(batched_hybrid$skeleton$scheduler, "layer-precision"),
             "default CUDA hybrid should use batched precision layer scheduler")
+hybrid_summary <- batched_hybrid$skeleton$scheduler_diagnostics$summary
+assert_true(identical(hybrid_summary$verifier_policy, "near-alpha"),
+            "hybrid precision layer should use near-alpha verifier policy")
+assert_true(identical(precision_primary$skeleton$scheduler,
+                      batched_hybrid$skeleton$scheduler),
+            "primary-only and hybrid must share precision layer scheduler")
+assert_true(identical(names(precision_primary$skeleton$precision_trace),
+                      names(batched_hybrid$skeleton$precision_trace)),
+            "primary-only and hybrid should share trace schema")
 hybrid_trace <- batched_hybrid$skeleton$precision_trace
 assert_true(nrow(hybrid_trace) == sum(batched_hybrid$skeleton$n.edgetests),
             "batched hybrid trace should preserve canonical replay rows")

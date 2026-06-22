@@ -275,6 +275,11 @@ fastkpc_batched_precision_execute_verifier <- function(data, row, alpha, tau,
   list(exec = exec, info = info, randomness = randomness)
 }
 
+fastkpc_batched_precision_add_ms <- function(total, value) {
+  value <- as.numeric(value %||% NA_real_)[1L]
+  if (is.finite(value)) total + value else total
+}
+
 fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
                                                    state, level, alpha, tau,
                                                    ci_method, index,
@@ -283,7 +288,9 @@ fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
                                                    precision_executors,
                                                    runtime_capabilities,
                                                    allow_canary,
-                                                   execution_context) {
+                                                   execution_context,
+                                                   verifier_policy) {
+  verifier_policy <- match.arg(verifier_policy, c("none", "near-alpha"))
   edge_done <- new.env(parent = emptyenv())
   delete_edges <- matrix(FALSE, state$p, state$p)
   level_log <- list()
@@ -292,6 +299,18 @@ fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
   ci_backends <- c("cuda-dcov")
   verifier_count <- 0L
   decision_changes <- 0L
+  verifier_metrics <- list(
+    total_ms = 0,
+    mgcv_setup_ms = 0,
+    spectral_prepare_ms = 0,
+    gcv_score_ms = 0,
+    cuda_solve_ms = 0,
+    ci_test_ms = 0,
+    cache_full_hit_count = 0L,
+    cache_partial_hit_count = 0L,
+    cache_miss_count = 0L,
+    fallback_count = 0L
+  )
 
   for (i in seq_along(tasks)) {
     task <- tasks[[i]]
@@ -300,7 +319,8 @@ fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
     state$test_id <- state$test_id + 1L
     primary_info <- fastkpc_resolve_ci_decision(pvalues[[i]], alpha = alpha,
                                                 na_delete = TRUE)
-    near_alpha <- length(task$S) > 0L &&
+    near_alpha <- identical(verifier_policy, "near-alpha") &&
+      length(task$S) > 0L &&
       (isTRUE(primary_info$p_was_nonfinite) ||
          fastkpc_near_alpha_trigger(primary_info$p_raw, alpha, tau))
 
@@ -366,6 +386,38 @@ fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
       if (!identical(primary_info$delete_edge, verifier_info$delete_edge)) {
         decision_changes <- decision_changes + 1L
       }
+      timings <- verifier_receipt$timings %||% list()
+      verifier_metrics$total_ms <- fastkpc_batched_precision_add_ms(
+        verifier_metrics$total_ms, timings$total_ms
+      )
+      verifier_metrics$mgcv_setup_ms <- fastkpc_batched_precision_add_ms(
+        verifier_metrics$mgcv_setup_ms, timings$mgcv_setup_cpu_ms
+      )
+      verifier_metrics$spectral_prepare_ms <- fastkpc_batched_precision_add_ms(
+        verifier_metrics$spectral_prepare_ms, timings$spectral_prepare_ms
+      )
+      verifier_metrics$gcv_score_ms <- fastkpc_batched_precision_add_ms(
+        verifier_metrics$gcv_score_ms, timings$gcv_score_ms
+      )
+      verifier_metrics$cuda_solve_ms <- fastkpc_batched_precision_add_ms(
+        verifier_metrics$cuda_solve_ms, timings$linear_solve_ms
+      )
+      verifier_metrics$ci_test_ms <- fastkpc_batched_precision_add_ms(
+        verifier_metrics$ci_test_ms, timings$ci_test_ms
+      )
+      if (isTRUE(verifier_receipt$cache_hit_all)) {
+        verifier_metrics$cache_full_hit_count <-
+          verifier_metrics$cache_full_hit_count + 1L
+      } else if (isTRUE(verifier_receipt$cache_partial_hit)) {
+        verifier_metrics$cache_partial_hit_count <-
+          verifier_metrics$cache_partial_hit_count + 1L
+      } else if (identical(verifier_receipt$cache_service_mode, "full-miss")) {
+        verifier_metrics$cache_miss_count <-
+          verifier_metrics$cache_miss_count + 1L
+      }
+      if (isTRUE(fallback_triggered) || attempt_count > 1L) {
+        verifier_metrics$fallback_count <- verifier_metrics$fallback_count + 1L
+      }
     }
 
     if (p_used > state$pmax[task$edge_x, task$edge_y]) {
@@ -403,8 +455,16 @@ fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
       backend_used = "fastSplineCUDA",
       backend_planned = "fastSplineCUDA",
       backend_executed = "fastSplineCUDA",
-      verifier_backend = "mgcvExtractGPUGCV",
-      verifier_planned = "mgcvExtractGPUGCV",
+      verifier_backend = if (identical(verifier_policy, "near-alpha")) {
+        "mgcvExtractGPUGCV"
+      } else {
+        NA_character_
+      },
+      verifier_planned = if (identical(verifier_policy, "near-alpha")) {
+        "mgcvExtractGPUGCV"
+      } else {
+        NA_character_
+      },
       verifier_executed = if (is.null(verifier_receipt)) {
         NA_character_
       } else {
@@ -452,7 +512,28 @@ fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
       permutation_replicates = randomness$permutation_replicates,
       precision_execution_status = "batched-primary-data-plane",
       decision_before_verify = primary_info$delete_edge,
-      decision_after_verify = delete_edge
+      decision_after_verify = delete_edge,
+      mgcv_setup_cpu_ms =
+        if (is.null(verifier_receipt)) NA_real_ else
+          verifier_receipt$timings$mgcv_setup_cpu_ms %||% NA_real_,
+      spectral_prepare_ms =
+        if (is.null(verifier_receipt)) NA_real_ else
+          verifier_receipt$timings$spectral_prepare_ms %||% NA_real_,
+      gcv_score_ms =
+        if (is.null(verifier_receipt)) NA_real_ else
+          verifier_receipt$timings$gcv_score_ms %||% NA_real_,
+      linear_solve_ms =
+        if (is.null(verifier_receipt)) NA_real_ else
+          verifier_receipt$timings$linear_solve_ms %||% NA_real_,
+      residual_materialize_ms =
+        if (is.null(verifier_receipt)) NA_real_ else
+          verifier_receipt$timings$residual_materialize_ms %||% NA_real_,
+      ci_test_ms =
+        if (is.null(verifier_receipt)) NA_real_ else
+          verifier_receipt$timings$ci_test_ms %||% NA_real_,
+      total_ms =
+        if (is.null(verifier_receipt)) NA_real_ else
+          verifier_receipt$timings$total_ms %||% NA_real_
     )
     state$n_edge_tests[[level + 1L]] <- state$n_edge_tests[[level + 1L]] + 1L
   }
@@ -465,26 +546,30 @@ fastkpc_batched_precision_replay_level <- function(data, tasks, pvalues,
     verifier_backends = verifier_backends,
     ci_backends = ci_backends,
     verifier_count = verifier_count,
-    decision_changes = decision_changes
+    decision_changes = decision_changes,
+    verifier_metrics = verifier_metrics
   )
 }
 
-fastkpc_batched_cuda_hybrid_skeleton <- function(data, alpha,
-                                                 max_conditioning_size,
-                                                 tau, ci_method, index,
-                                                 legacy_index, batch_size,
-                                                 fastspline_params,
-                                                 cuda_residual_fallback,
-                                                 hsic_params,
-                                                 permutation_params,
-                                                 precision_executors,
-                                                 runtime_capabilities,
-                                                 allow_canary,
-                                                 residual_cache = TRUE) {
+fastkpc_batched_cuda_precision_skeleton <- function(data, alpha,
+                                                    max_conditioning_size,
+                                                    tau, ci_method, index,
+                                                    legacy_index, batch_size,
+                                                    fastspline_params,
+                                                    cuda_residual_fallback,
+                                                    hsic_params,
+                                                    permutation_params,
+                                                    precision_executors,
+                                                    runtime_capabilities,
+                                                    allow_canary,
+                                                    residual_cache = TRUE,
+                                                    verifier_policy =
+                                                      c("none", "near-alpha")) {
+  verifier_policy <- match.arg(verifier_policy)
   data <- as.matrix(data)
   storage.mode(data) <- "double"
   if (!identical(ci_method, "dcc.gamma")) {
-    stop("batched CUDA hybrid precision currently supports dcc.gamma",
+    stop("batched CUDA precision currently supports dcc.gamma",
          call. = FALSE)
   }
   execution_context <- fastkpc_precision_create_execution_context(
@@ -521,6 +606,18 @@ fastkpc_batched_cuda_hybrid_skeleton <- function(data, alpha,
   total_unique_residual_requests <- 0L
   total_verifier_count <- 0L
   total_decision_changes <- 0L
+  verifier_metrics <- list(
+    total_ms = 0,
+    mgcv_setup_ms = 0,
+    spectral_prepare_ms = 0,
+    gcv_score_ms = 0,
+    cuda_solve_ms = 0,
+    ci_test_ms = 0,
+    cache_full_hit_count = 0L,
+    cache_partial_hit_count = 0L,
+    cache_miss_count = 0L,
+    fallback_count = 0L
+  )
 
   for (level in seq.int(0L, as.integer(max_conditioning_size))) {
     snapshot <- state$adjacency
@@ -558,7 +655,8 @@ fastkpc_batched_cuda_hybrid_skeleton <- function(data, alpha,
       precision_executors = precision_executors,
       runtime_capabilities = runtime_capabilities,
       allow_canary = allow_canary,
-      execution_context = execution_context
+      execution_context = execution_context,
+      verifier_policy = verifier_policy
     )
     state <- replay$state
     trace_rows <- c(trace_rows, replay$trace_rows)
@@ -567,6 +665,10 @@ fastkpc_batched_cuda_hybrid_skeleton <- function(data, alpha,
     ci_backends <- c(ci_backends, replay$ci_backends)
     total_verifier_count <- total_verifier_count + replay$verifier_count
     total_decision_changes <- total_decision_changes + replay$decision_changes
+    for (name in names(verifier_metrics)) {
+      verifier_metrics[[name]] <- verifier_metrics[[name]] +
+        replay$verifier_metrics[[name]]
+    }
   }
 
   trace <- if (length(trace_rows) == 0L) {
@@ -639,6 +741,27 @@ fastkpc_batched_cuda_hybrid_skeleton <- function(data, alpha,
           as.integer(total_residual_batches > 0L),
         precision_verifier_tests = total_verifier_count,
         precision_verifier_decision_changes = total_decision_changes,
+        verifier_total_ms = verifier_metrics$total_ms,
+        verifier_mgcv_setup_ms = verifier_metrics$mgcv_setup_ms,
+        verifier_spectral_prepare_ms = verifier_metrics$spectral_prepare_ms,
+        verifier_gcv_score_ms = verifier_metrics$gcv_score_ms,
+        verifier_cuda_solve_ms = verifier_metrics$cuda_solve_ms,
+        verifier_ci_test_ms = verifier_metrics$ci_test_ms,
+        verifier_cache_full_hit_count =
+          as.integer(verifier_metrics$cache_full_hit_count),
+        verifier_cache_partial_hit_count =
+          as.integer(verifier_metrics$cache_partial_hit_count),
+        verifier_cache_miss_count =
+          as.integer(verifier_metrics$cache_miss_count),
+        verifier_fallback_count =
+          as.integer(verifier_metrics$fallback_count),
+        verifier_ms_per_verified_test =
+          if (total_verifier_count > 0L) {
+            verifier_metrics$total_ms / total_verifier_count
+          } else {
+            NA_real_
+          },
+        verifier_policy = verifier_policy,
         residual_cache_setup_cache_hits = cache$setup_cache_hits,
         residual_cache_spectral_cache_hits = cache$spectral_cache_hits
       )
@@ -1124,14 +1247,16 @@ fast_kpc <- function(data,
   use_batched_precision_primary <- isTRUE(use_precision_r_skeleton) &&
     identical(precision_requested, "fast") &&
     identical(engine_used, "cuda") &&
+    identical(ci_method, "dcc.gamma") &&
     fastkpc_is_default_precision_executors(precision_executors)
   use_batched_precision_hybrid <- isTRUE(use_precision_r_skeleton) &&
     identical(precision_requested, "hybrid") &&
     identical(engine_used, "cuda") &&
     identical(ci_method, "dcc.gamma") &&
     fastkpc_is_default_precision_executors(precision_executors)
-  if (isTRUE(use_batched_precision_primary) ||
-      isTRUE(use_batched_precision_hybrid)) {
+  use_batched_precision_layer <- isTRUE(use_batched_precision_primary) ||
+    isTRUE(use_batched_precision_hybrid)
+  if (isTRUE(use_batched_precision_layer)) {
     use_precision_r_skeleton <- FALSE
   }
   if ((isTRUE(use_precision_r_skeleton) ||
@@ -1204,8 +1329,8 @@ fast_kpc <- function(data,
         execution_engine = engine_used
       )
       list(skeleton = skeleton, orientation = NULL)
-    } else if (isTRUE(use_batched_precision_hybrid)) {
-      skeleton <- fastkpc_batched_cuda_hybrid_skeleton(
+    } else if (isTRUE(use_batched_precision_layer)) {
+      skeleton <- fastkpc_batched_cuda_precision_skeleton(
         matrix_data, alpha, max_conditioning_size,
         tau = tau,
         ci_method = ci_method,
@@ -1219,7 +1344,12 @@ fast_kpc <- function(data,
         precision_executors = precision_executors,
         runtime_capabilities = runtime_capabilities,
         allow_canary = allow_canary_mgcv_extract,
-        residual_cache = residual_cache
+        residual_cache = residual_cache,
+        verifier_policy = if (isTRUE(use_batched_precision_hybrid)) {
+          "near-alpha"
+        } else {
+          "none"
+        }
       )
       list(skeleton = skeleton, orientation = NULL)
     } else {
@@ -1285,6 +1415,7 @@ fast_kpc <- function(data,
     config$backend_executed <- timed$value$skeleton$residual_backend %||%
       config$backend_executed
     config$backend_used <- config$backend_executed
+    config$ci_backend <- timed$value$skeleton$ci_backend %||% config$ci_backend
   }
   if (isTRUE(use_batched_precision_hybrid)) {
     config$precision_execution_status <- "batched-primary-data-plane"
