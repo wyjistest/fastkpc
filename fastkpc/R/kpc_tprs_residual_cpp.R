@@ -404,6 +404,51 @@ fastkpc_kpc_tprs_oracle_absorbed_basis <- function(oracle) {
   as.matrix(oracle$X[, -1L, drop = FALSE])
 }
 
+fastkpc_kpc_tprs_candidate_uz_design <- function(setup) {
+  raw <- setup$raw %||% list()
+  UZ <- raw$UZ
+  unique_locations <- raw$unique_locations
+  if (is.null(UZ) || is.null(unique_locations)) return(NULL)
+  UZ <- as.matrix(UZ)
+  unique_locations <- as.matrix(unique_locations)
+  if (ncol(unique_locations) != 1L) return(NULL)
+  n_unique <- nrow(unique_locations)
+  if (nrow(UZ) < n_unique + 2L) return(NULL)
+  b <- cbind(
+    fastkpc_kpc_tprs_eta_1d(unique_locations[, 1L],
+                            unique_locations[, 1L]),
+    1,
+    unique_locations[, 1L]
+  )
+  b %*% UZ
+}
+
+fastkpc_kpc_tprs_eta_1d <- function(x, knots) {
+  outer(as.numeric(x), as.numeric(knots),
+        function(a, b) abs(a - b)^3 / 12)
+}
+
+fastkpc_kpc_tprs_oracle_uz_design <- function(oracle) {
+  raw <- oracle$raw %||% list()
+  UZ <- raw$UZ
+  unique_locations <- raw$unique_locations
+  if (is.null(UZ) || is.null(unique_locations)) return(NULL)
+  UZ <- as.matrix(UZ)
+  unique_locations <- as.matrix(unique_locations)
+  if (ncol(unique_locations) != 1L) return(NULL)
+  b <- cbind(
+    fastkpc_kpc_tprs_eta_1d(unique_locations[, 1L],
+                            unique_locations[, 1L]),
+    1,
+    unique_locations[, 1L]
+  )
+  b %*% UZ
+}
+
+fastkpc_kpc_tprs_diagnostic_or_na <- function(x, name) {
+  if (is.null(x) || is.null(x[[name]])) NA_real_ else x[[name]]
+}
+
 fastkpc_kpc_tprs_align_rows <- function(candidate, oracle) {
   n <- min(nrow(candidate), nrow(oracle))
   list(
@@ -499,6 +544,13 @@ fastkpc_kpc_tprs_fixed_sp_drift_isolation <- function(
   candidate_setup <- kpc_tprs_residual_cpp_setup(input$S, tol = tol)
   oracle <- fastkpc_kpc_tprs_mgcv_oracle_setup(input$y, input$S, sp = sp)
 
+  candidate_uz <- fastkpc_kpc_tprs_candidate_uz_design(candidate_setup)
+  oracle_uz <- fastkpc_kpc_tprs_oracle_uz_design(oracle)
+  uz_projector_distance <- if (is.null(candidate_uz) || is.null(oracle_uz)) {
+    NA_real_
+  } else {
+    fastkpc_kpc_tprs_projector_distance(candidate_uz, oracle_uz, tol = tol)
+  }
   raw_projector_distance <- fastkpc_kpc_tprs_projector_distance(
     candidate_setup$X, oracle$smooth$X, tol = tol
   )
@@ -548,6 +600,7 @@ fastkpc_kpc_tprs_fixed_sp_drift_isolation <- function(
     mode = "fixed-sp-drift-isolation",
     authoritative = FALSE,
     conditioning_size = as.integer(ncol(input$S)),
+    uz_projector_distance = uz_projector_distance,
     raw_projector_distance = raw_projector_distance,
     absorbed_projector_distance = absorbed_projector_distance,
     penalty_shape_distance = shape_scale$shape_distance,
@@ -561,6 +614,30 @@ fastkpc_kpc_tprs_fixed_sp_drift_isolation <- function(
       oracle_setup_fingerprint = oracle$setup_fingerprint,
       candidate_basis_rank = candidate_setup$basis_rank,
       oracle_basis_rank = oracle$basis_rank,
+      selected_eigenvalues =
+        fastkpc_kpc_tprs_diagnostic_or_na(candidate_setup$diagnostics,
+                                          "selected_eigenvalues"),
+      truncation_eigengap =
+        fastkpc_kpc_tprs_diagnostic_or_na(candidate_setup$diagnostics,
+                                          "truncation_eigengap"),
+      rank_T =
+        fastkpc_kpc_tprs_diagnostic_or_na(candidate_setup$diagnostics,
+                                          "rank_T"),
+      rank_TU =
+        fastkpc_kpc_tprs_diagnostic_or_na(candidate_setup$diagnostics,
+                                          "rank_TU"),
+      Z_orthogonality_error =
+        fastkpc_kpc_tprs_diagnostic_or_na(candidate_setup$diagnostics,
+                                          "Z_orthogonality_error"),
+      TPS_constraint_error =
+        fastkpc_kpc_tprs_diagnostic_or_na(candidate_setup$diagnostics,
+                                          "TPS_constraint_error"),
+      pre_rms_column_norms =
+        fastkpc_kpc_tprs_diagnostic_or_na(candidate_setup$diagnostics,
+                                          "pre_rms_column_norms"),
+      post_rms_column_norms =
+        fastkpc_kpc_tprs_diagnostic_or_na(candidate_setup$diagnostics,
+                                          "post_rms_column_norms"),
       does_not_drive_graph_decisions = TRUE
     )
   )
@@ -601,6 +678,7 @@ fastkpc_run_kpc_tprs_drift_isolation_campaign <- function(
           mode = "fixed-sp-drift-isolation-failed-closed",
           authoritative = FALSE,
           conditioning_size = as.integer(ncol(as.matrix(scenario$S))),
+          uz_projector_distance = NA_real_,
           raw_projector_distance = NA_real_,
           absorbed_projector_distance = NA_real_,
           penalty_shape_distance = NA_real_,
@@ -622,6 +700,7 @@ fastkpc_run_kpc_tprs_drift_isolation_campaign <- function(
     rows[[length(rows) + 1L]] <- data.frame(
       scenario = name,
       conditioning_size = result$conditioning_size,
+      uz_projector_distance = result$uz_projector_distance,
       raw_projector_distance = result$raw_projector_distance,
       absorbed_projector_distance = result$absorbed_projector_distance,
       penalty_shape_distance = result$penalty_shape_distance,
@@ -724,6 +803,7 @@ fastkpc_kpc_tprs_fixed_sp_parity <- function(
       fastkpc_kpc_tprs_setup_fingerprint(input$S, candidate_setup),
     projector_distance = projector_distance,
     penalty_spectrum_distance = penalty_spectrum_distance,
+    uz_projector_distance = isolation$uz_projector_distance,
     raw_projector_distance = isolation$raw_projector_distance,
     absorbed_projector_distance = isolation$absorbed_projector_distance,
     penalty_shape_distance = isolation$penalty_shape_distance,

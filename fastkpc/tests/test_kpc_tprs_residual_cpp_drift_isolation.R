@@ -30,6 +30,7 @@ iso <- fastkpc_kpc_tprs_fixed_sp_drift_isolation(
 assert_has_names(
   iso,
   c("backend_family", "mode", "authoritative", "conditioning_size",
+    "uz_projector_distance",
     "raw_projector_distance", "absorbed_projector_distance",
     "penalty_shape_distance", "penalty_scale_ratio",
     "same_raw_sp", "scale_corrected", "edf_matched",
@@ -40,6 +41,8 @@ assert_true(identical(iso$backend_family, "kpcTprsResidualCPP"),
             "backend family")
 assert_true(isFALSE(iso$authoritative),
             "drift isolation must be non-authoritative")
+assert_true(is.finite(iso$uz_projector_distance),
+            "UZ/full-parameter projector distance finite")
 assert_true(is.finite(iso$raw_projector_distance),
             "raw projector distance finite")
 assert_true(is.finite(iso$absorbed_projector_distance),
@@ -67,6 +70,24 @@ assert_true(iso$classification %in%
               c("function-space", "constraint-intercept", "penalty-shape",
                 "penalty-scale", "unclassified"),
             "classification")
+assert_has_names(iso$diagnostics,
+                 c("selected_eigenvalues", "truncation_eigengap",
+                   "rank_T", "rank_TU", "Z_orthogonality_error",
+                   "TPS_constraint_error", "pre_rms_column_norms",
+                   "post_rms_column_norms"),
+                 "1D truncation diagnostics")
+assert_true(length(iso$diagnostics$selected_eigenvalues) == 10L,
+            "1D should retain k eigen directions before TPS constraint")
+assert_true(iso$diagnostics$rank_T == 2L, "1D polynomial rank")
+assert_true(iso$diagnostics$rank_TU == 2L, "1D T'U rank")
+assert_true(is.finite(iso$diagnostics$truncation_eigengap),
+            "truncation eigengap finite")
+assert_true(iso$diagnostics$Z_orthogonality_error < 1e-8,
+            "TPS null-space basis should be orthonormal")
+assert_true(iso$diagnostics$TPS_constraint_error < 1e-8,
+            "TPS side constraint should be enforced before identifiability")
+assert_true(max(abs(iso$diagnostics$post_rms_column_norms - 1)) < 1e-8,
+            "final 1D X columns should be RMS scaled")
 
 campaign <- fastkpc_run_kpc_tprs_drift_isolation_campaign(
   scenarios = fastkpc_kpc_tprs_1d_first_drift_scenarios(seed = 62307, n = 100L),
