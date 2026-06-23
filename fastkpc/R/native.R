@@ -51,6 +51,18 @@ fastkpc_mgcv_extract_gpu_spectral_score_batch_cpp <- function(
   )
 }
 
+kpc_tprs_residual_cpp_setup <- function(S, k = NA_integer_,
+                                        tol = sqrt(.Machine$double.eps)) {
+  build_fastkpc_native()
+  S <- as.matrix(S)
+  storage.mode(S) <- "double"
+  kpc_tprs_residual_cpp_setup_export(
+    S,
+    as.integer(if (is.na(k)) 0L else k),
+    as.numeric(tol)
+  )
+}
+
 fast_hsic_gamma_cpp <- function(x, y, sig = 1) {
   build_fastkpc_native()
   fast_hsic_gamma_cpp_export(

@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 #include <utility>
 
 namespace {
@@ -24,6 +25,143 @@ namespace {
 std::vector<double> numeric_vector_to_std(Rcpp::NumericVector values) {
   std::vector<double> out(values.size());
   for (int i = 0; i < values.size(); ++i) out[i] = values[i];
+  return out;
+}
+
+bool finite_numeric_matrix(Rcpp::NumericMatrix values) {
+  for (int col = 0; col < values.ncol(); ++col) {
+    for (int row = 0; row < values.nrow(); ++row) {
+      if (!std::isfinite(values(row, col))) return false;
+    }
+  }
+  return true;
+}
+
+std::string row_key(Rcpp::NumericMatrix values, int row) {
+  std::ostringstream out;
+  out.precision(17);
+  for (int col = 0; col < values.ncol(); ++col) {
+    if (col > 0) out << "|";
+    out << values(row, col);
+  }
+  return out.str();
+}
+
+Rcpp::NumericMatrix unique_rows_in_order(Rcpp::NumericMatrix values) {
+  std::vector<int> keep;
+  std::vector<std::string> seen;
+  for (int row = 0; row < values.nrow(); ++row) {
+    const std::string key = row_key(values, row);
+    if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;
+    seen.push_back(key);
+    keep.push_back(row);
+  }
+  Rcpp::NumericMatrix out(keep.size(), values.ncol());
+  for (int i = 0; i < static_cast<int>(keep.size()); ++i) {
+    for (int col = 0; col < values.ncol(); ++col) {
+      out(i, col) = values(keep[static_cast<std::size_t>(i)], col);
+    }
+  }
+  return out;
+}
+
+Rcpp::NumericMatrix evenly_spaced_knots(Rcpp::NumericMatrix unique_rows,
+                                        int requested_k) {
+  const int unique_n = unique_rows.nrow();
+  const int d = unique_rows.ncol();
+  const int knot_count = std::max(1, std::min(requested_k, unique_n));
+  Rcpp::NumericMatrix knots(knot_count, d);
+  if (knot_count == 1) {
+    for (int col = 0; col < d; ++col) knots(0, col) = unique_rows(0, col);
+    return knots;
+  }
+  for (int i = 0; i < knot_count; ++i) {
+    const double pos = static_cast<double>(i) *
+      static_cast<double>(unique_n - 1) / static_cast<double>(knot_count - 1);
+    const int idx = static_cast<int>(std::floor(pos + 0.5));
+    for (int col = 0; col < d; ++col) knots(i, col) = unique_rows(idx, col);
+  }
+  return knots;
+}
+
+double tprs_radial_value(double radius, int dimension) {
+  if (radius <= 0.0) return 0.0;
+  if (dimension == 1) return radius * radius * radius;
+  return radius * radius * std::log(radius);
+}
+
+Rcpp::NumericMatrix kpc_tprs_polynomial_null_space(Rcpp::NumericMatrix S) {
+  const int n = S.nrow();
+  const int d = S.ncol();
+  Rcpp::NumericMatrix out(n, d + 1);
+  for (int row = 0; row < n; ++row) {
+    out(row, 0) = 1.0;
+    for (int col = 0; col < d; ++col) out(row, col + 1) = S(row, col);
+  }
+  return out;
+}
+
+Rcpp::NumericMatrix kpc_tprs_radial_basis(Rcpp::NumericMatrix S,
+                                          Rcpp::NumericMatrix knots) {
+  const int n = S.nrow();
+  const int d = S.ncol();
+  const int k = knots.nrow();
+  Rcpp::NumericMatrix out(n, k);
+  for (int row = 0; row < n; ++row) {
+    for (int knot = 0; knot < k; ++knot) {
+      double dist_sq = 0.0;
+      for (int col = 0; col < d; ++col) {
+        const double diff = S(row, col) - knots(knot, col);
+        dist_sq += diff * diff;
+      }
+      out(row, knot) = tprs_radial_value(std::sqrt(dist_sq), d);
+    }
+  }
+  return out;
+}
+
+Rcpp::NumericMatrix cbind_numeric_matrices(Rcpp::NumericMatrix left,
+                                           Rcpp::NumericMatrix right) {
+  if (left.nrow() != right.nrow()) {
+    Rcpp::stop("cannot combine matrices with different row counts");
+  }
+  Rcpp::NumericMatrix out(left.nrow(), left.ncol() + right.ncol());
+  for (int row = 0; row < out.nrow(); ++row) {
+    for (int col = 0; col < left.ncol(); ++col) out(row, col) = left(row, col);
+    for (int col = 0; col < right.ncol(); ++col) {
+      out(row, left.ncol() + col) = right(row, col);
+    }
+  }
+  return out;
+}
+
+Rcpp::NumericMatrix kpc_tprs_penalty_matrix(Rcpp::NumericMatrix knots,
+                                            int null_space_rank) {
+  const int d = knots.ncol();
+  const int k = knots.nrow();
+  const int p = null_space_rank + k;
+  Rcpp::NumericMatrix out(p, p);
+  for (int i = 0; i < k; ++i) {
+    for (int j = 0; j < k; ++j) {
+      double dist_sq = 0.0;
+      for (int col = 0; col < d; ++col) {
+        const double diff = knots(i, col) - knots(j, col);
+        dist_sq += diff * diff;
+      }
+      out(null_space_rank + i, null_space_rank + j) =
+        tprs_radial_value(std::sqrt(dist_sq), d);
+    }
+  }
+  return out;
+}
+
+Rcpp::NumericMatrix kpc_tprs_centering_constraint(Rcpp::NumericMatrix X) {
+  Rcpp::NumericMatrix out(1, X.ncol());
+  for (int col = 0; col < X.ncol(); ++col) {
+    double total = 0.0;
+    for (int row = 0; row < X.nrow(); ++row) total += X(row, col);
+    out(0, col) = total / static_cast<double>(X.nrow());
+  }
   return out;
 }
 
@@ -694,6 +832,52 @@ Rcpp::List mgcv_extract_gpu_spectral_score_batch_export(
     double tol) {
   return spectral_score_batch_impl(eigenvectors, inv_chol, eigenvalues, y,
                                    Xty_null, sp_grid, tol);
+}
+
+// [[Rcpp::export]]
+Rcpp::List kpc_tprs_residual_cpp_setup_export(Rcpp::NumericMatrix S,
+                                              int k = 0,
+                                              double tol = 1.490116e-8) {
+  if (S.nrow() <= 0) {
+    Rcpp::stop("S must have at least one row");
+  }
+  if (S.ncol() < 1 || S.ncol() > 2) {
+    Rcpp::stop("kpcTprsResidualCPP supports |S| = 1 or 2");
+  }
+  if (!finite_numeric_matrix(S)) {
+    Rcpp::stop("S must be finite numeric");
+  }
+  if (!std::isfinite(tol) || tol <= 0.0) {
+    Rcpp::stop("tol must be positive and finite");
+  }
+
+  Rcpp::NumericMatrix unique_rows = unique_rows_in_order(S);
+  const int requested_k = k > 0 ? k : std::min(10, std::max(1, unique_rows.nrow()));
+  Rcpp::NumericMatrix knots = evenly_spaced_knots(unique_rows, requested_k);
+  Rcpp::NumericMatrix polynomial = kpc_tprs_polynomial_null_space(S);
+  Rcpp::NumericMatrix radial = kpc_tprs_radial_basis(S, knots);
+  Rcpp::NumericMatrix X = cbind_numeric_matrices(polynomial, radial);
+  Rcpp::NumericMatrix penalty = kpc_tprs_penalty_matrix(knots, polynomial.ncol());
+  Rcpp::NumericMatrix constraint = kpc_tprs_centering_constraint(X);
+
+  return Rcpp::List::create(
+    Rcpp::Named("backend_family") = "kpcTprsResidualCPP",
+    Rcpp::Named("schema_version") = "setup-shadow-v1",
+    Rcpp::Named("X") = X,
+    Rcpp::Named("penalty") = penalty,
+    Rcpp::Named("constraint") = constraint,
+    Rcpp::Named("knots") = knots,
+    Rcpp::Named("unique_rows") = unique_rows,
+    Rcpp::Named("basis_rank") = X.ncol(),
+    Rcpp::Named("null_space_rank") = polynomial.ncol(),
+    Rcpp::Named("effective_rank") = X.ncol() - constraint.nrow(),
+    Rcpp::Named("k") = knots.nrow(),
+    Rcpp::Named("radial_basis") = S.ncol() == 1 ? "r^3" : "r^2 log(r)",
+    Rcpp::Named("polynomial_basis") =
+      S.ncol() == 1 ? "1 + s1" : "1 + s1 + s2",
+    Rcpp::Named("smooth_geometry") = "joint-isotropic",
+    Rcpp::Named("tol") = tol
+  );
 }
 
 // [[Rcpp::export]]

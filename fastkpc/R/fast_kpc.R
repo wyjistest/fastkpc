@@ -1,5 +1,6 @@
 source("fastkpc/R/native.R")
 source("fastkpc/R/cuda_native.R")
+source("fastkpc/R/kpc_tprs_residual_cpp.R")
 source("fastkpc/R/precision_backend_resolver.R")
 source("fastkpc/R/precision_execution_trace.R")
 source("fastkpc/R/precision_data_plane.R")
