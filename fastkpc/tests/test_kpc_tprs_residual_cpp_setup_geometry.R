@@ -42,8 +42,12 @@ assert_equal(dim(setup2$penalty), rep(ncol(setup2$X), 2L),
              "2D penalty dimension")
 assert_true(max(abs(setup2$penalty - t(setup2$penalty))) < 1e-12,
             "2D penalty symmetric")
-assert_true(max(abs(setup2$penalty - setup2_rot$penalty)) < 1e-10,
-            "2D isotropic knot penalty should be rotation invariant")
+rotation_distance <- fastkpc_kpc_tprs_projector_distance(
+  setup2$absorbed$X,
+  setup2_rot$absorbed$X
+)
+assert_true(rotation_distance < 1e-6,
+            "2D isotropic function space should be rotation invariant")
 
 bad <- tryCatch(
   kpc_tprs_residual_cpp_setup(cbind(S2, s3 = stats::rnorm(n))),

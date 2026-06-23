@@ -1,5 +1,6 @@
 source("fastkpc/R/mgcv_compat_contract.R")
 source("fastkpc/R/native.R")
+source("fastkpc/R/dcov_exact.R")
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
@@ -369,9 +370,18 @@ fastkpc_kpc_tprs_fixed_sp_solve_candidate <- function(
 
 fastkpc_kpc_tprs_solve_candidate_setup <- function(
     y, setup, sp, penalty = setup$absorbed$penalty,
+    include_intercept = FALSE,
     tol = sqrt(.Machine$double.eps)) {
-  X <- as.matrix(setup$absorbed$X)
-  P <- as.matrix(penalty)
+  X_smooth <- as.matrix(setup$absorbed$X)
+  P_smooth <- as.matrix(penalty)
+  if (isTRUE(include_intercept)) {
+    X <- cbind(`(Intercept)` = 1, X_smooth)
+    P <- matrix(0, nrow = ncol(X), ncol = ncol(X))
+    P[-1L, -1L] <- P_smooth
+  } else {
+    X <- X_smooth
+    P <- P_smooth
+  }
   A <- crossprod(X) + as.numeric(sp) * P
   b <- crossprod(X, as.numeric(y))
   theta <- as.numeric(qr.solve(A, b, tol = tol))
@@ -391,13 +401,90 @@ fastkpc_kpc_tprs_solve_candidate_setup <- function(
     residuals = residuals,
     edf = as.numeric(edf),
     selected_sp = as.numeric(sp),
+    score = NA_real_,
+    basis_rank = as.integer(setup$basis_rank %||% ncol(X_smooth)),
+    null_space_rank = as.integer(setup$null_space_rank %||% NA_integer_),
     setup = setup,
     setup_fingerprint = setup$schema_version %||% "kpcTprsResidualCPP",
     diagnostics = list(
       solver = "absorbed-penalized-least-squares",
+      include_intercept = isTRUE(include_intercept),
       does_not_drive_graph_decisions = TRUE
     )
   )
+}
+
+fastkpc_kpc_tprs_mapped_sp_scale <- function(
+    setup, oracle_absorbed,
+    tol = sqrt(.Machine$double.eps)) {
+  generalized_spectrum <- fastkpc_kpc_tprs_generalized_spectrum_compare(
+    setup$absorbed$X,
+    setup$absorbed$penalty,
+    oracle_absorbed$X,
+    oracle_absorbed$S[[1L]],
+    tol = tol
+  )
+  offset <- as.numeric(generalized_spectrum$log_spectrum_scale_offset)
+  scale <- if (is.finite(offset)) exp(-offset) else NA_real_
+  list(
+    source_sp_semantics = "mgcv-smoothCon-scaled-penalty",
+    target_lambda_semantics = "kpc-canonical-penalty",
+    scale = as.numeric(scale),
+    log_spectrum_scale_offset = offset,
+    log_spectrum_shape_rmse =
+      as.numeric(generalized_spectrum$log_spectrum_shape_rmse),
+    generalized_penalty_rank =
+      as.integer(generalized_spectrum$generalized_penalty_rank)
+  )
+}
+
+fastkpc_kpc_tprs_map_mgcv_sp_to_canonical <- function(
+    sp, setup, oracle_absorbed = NULL,
+    tol = sqrt(.Machine$double.eps)) {
+  if (is.null(oracle_absorbed)) {
+    stop("oracle_absorbed is required for mapped-sp parity", call. = FALSE)
+  }
+  mapping <- fastkpc_kpc_tprs_mapped_sp_scale(
+    setup = setup,
+    oracle_absorbed = oracle_absorbed,
+    tol = tol
+  )
+  if (!is.finite(mapping$scale) || mapping$scale <= 0) {
+    stop("could not derive a finite positive mapped-sp scale", call. = FALSE)
+  }
+  mapping$source_sp <- as.numeric(sp)
+  mapping$canonical_lambda <- as.numeric(sp) * mapping$scale
+  mapping
+}
+
+fastkpc_kpc_tprs_mapped_sp_solve_candidate <- function(
+    y, S, sp, k = NA_integer_, oracle_absorbed = NULL,
+    tol = sqrt(.Machine$double.eps)) {
+  input <- fastkpc_kpc_tprs_validate_input(y, S)
+  setup <- kpc_tprs_residual_cpp_setup(input$S, k = k, tol = tol)
+  if (is.null(oracle_absorbed)) {
+    oracle_absorbed <- fastkpc_kpc_tprs_absorbed_oracle_setup(input$y, input$S)
+  }
+  mapped <- fastkpc_kpc_tprs_map_mgcv_sp_to_canonical(
+    sp = sp,
+    setup = setup,
+    oracle_absorbed = oracle_absorbed,
+    tol = tol
+  )
+  solved <- fastkpc_kpc_tprs_solve_candidate_setup(
+    input$y,
+    setup,
+    sp = mapped$canonical_lambda,
+    include_intercept = TRUE,
+    tol = tol
+  )
+  solved$mode <- "mapped-sp-candidate-solve"
+  solved$source_sp <- as.numeric(sp)
+  solved$selected_sp <- as.numeric(mapped$canonical_lambda)
+  solved$mapped_sp <- mapped
+  solved$diagnostics$solver <- "intercept-plus-absorbed-smooth-pls"
+  solved$diagnostics$sp_semantics <- mapped$target_lambda_semantics
+  solved
 }
 
 fastkpc_kpc_tprs_oracle_absorbed_basis <- function(oracle) {
@@ -1154,3 +1241,172 @@ fastkpc_run_kpc_tprs_fixed_sp_parity_campaign <- function(
     details = details
   )
 }
+
+fastkpc_kpc_tprs_mapped_sp_residual_parity <- function(
+    y, S, sp_values = c(1e-6, 1e-3, 1, 1e3, 1e6),
+    fitted_rel_l2_tol = 1e-6,
+    residual_rel_l2_tol = 1e-6,
+    edf_abs_tol = 1e-6,
+    tol = sqrt(.Machine$double.eps)) {
+  input <- fastkpc_kpc_tprs_validate_input(y, S)
+  candidate_setup <- kpc_tprs_residual_cpp_setup(input$S, tol = tol)
+  oracle_absorbed <- fastkpc_kpc_tprs_absorbed_oracle_setup(input$y, input$S)
+  mapped_sp <- fastkpc_kpc_tprs_map_mgcv_sp_to_canonical(
+    sp = sp_values,
+    setup = candidate_setup,
+    oracle_absorbed = oracle_absorbed,
+    tol = tol
+  )
+  rows <- lapply(seq_along(as.numeric(sp_values)), function(i) {
+    sp <- as.numeric(sp_values[[i]])
+    oracle <- fastkpc_kpc_tprs_mgcv_oracle_setup(input$y, input$S, sp = sp)
+    candidate <- fastkpc_kpc_tprs_solve_candidate_setup(
+      input$y,
+      candidate_setup,
+      sp = mapped_sp$canonical_lambda[[i]],
+      include_intercept = TRUE,
+      tol = tol
+    )
+    data.frame(
+      source_sp = sp,
+      canonical_lambda = mapped_sp$canonical_lambda[[i]],
+      fitted_rel_l2 = fastkpc_kpc_tprs_rel_l2(candidate$fitted, oracle$fitted),
+      residual_rel_l2 = fastkpc_kpc_tprs_rel_l2(candidate$residuals,
+                                                oracle$residuals),
+      edf_candidate = candidate$edf,
+      edf_oracle = oracle$edf,
+      edf_abs_diff = abs(candidate$edf - oracle$edf),
+      stringsAsFactors = FALSE
+    )
+  })
+  fixed_sp <- do.call(rbind, rows)
+  gate_b_r <- all(is.finite(fixed_sp$fitted_rel_l2)) &&
+    all(is.finite(fixed_sp$residual_rel_l2)) &&
+    all(is.finite(fixed_sp$edf_abs_diff)) &&
+    all(fixed_sp$fitted_rel_l2 <= fitted_rel_l2_tol) &&
+    all(fixed_sp$residual_rel_l2 <= residual_rel_l2_tol) &&
+    all(fixed_sp$edf_abs_diff <= edf_abs_tol)
+
+  list(
+    backend_family = "kpcTprsResidualCPP",
+    mode = "mapped-sp-residual-parity-shadow",
+    authoritative = FALSE,
+    conditioning_size = as.integer(ncol(input$S)),
+    mapped_sp = mapped_sp,
+    fixed_sp = fixed_sp,
+    fixed_sp_residual_rel_l2 = max(fixed_sp$residual_rel_l2, na.rm = TRUE),
+    fixed_sp_fitted_rel_l2 = max(fixed_sp$fitted_rel_l2, na.rm = TRUE),
+    edf_abs_diff = max(fixed_sp$edf_abs_diff, na.rm = TRUE),
+    gate_b_r_passed = isTRUE(gate_b_r),
+    passed = isTRUE(gate_b_r),
+    diagnostics = list(
+      schema_version = "kpcTprsResidualCPP-mapped-sp-parity-v1",
+      candidate_setup_fingerprint =
+        fastkpc_kpc_tprs_setup_fingerprint(input$S, candidate_setup),
+      source_sp_semantics = mapped_sp$source_sp_semantics,
+      target_lambda_semantics = mapped_sp$target_lambda_semantics,
+      include_intercept = TRUE,
+      exact_mgcv_s_scale_required = FALSE,
+      does_not_drive_graph_decisions = TRUE
+    )
+  )
+}
+
+fastkpc_run_kpc_tprs_mapped_sp_residual_parity_campaign <- function(
+    scenarios, sp_values = c(1e-6, 1e-3, 1, 1e3, 1e6),
+    fitted_rel_l2_tol = 1e-6,
+    residual_rel_l2_tol = 1e-6,
+    edf_abs_tol = 1e-6) {
+  rows <- list()
+  details <- list()
+  for (name in names(scenarios)) {
+    scenario <- scenarios[[name]]
+    result <- tryCatch(
+      fastkpc_kpc_tprs_mapped_sp_residual_parity(
+        y = scenario$y,
+        S = scenario$S,
+        sp_values = sp_values,
+        fitted_rel_l2_tol = fitted_rel_l2_tol,
+        residual_rel_l2_tol = residual_rel_l2_tol,
+        edf_abs_tol = edf_abs_tol
+      ),
+      error = function(e) {
+        list(
+          backend_family = "kpcTprsResidualCPP",
+          mode = "mapped-sp-residual-parity-failed-closed",
+          authoritative = FALSE,
+          conditioning_size = as.integer(ncol(as.matrix(scenario$S))),
+          mapped_sp = list(),
+          fixed_sp = data.frame(),
+          fixed_sp_residual_rel_l2 = NA_real_,
+          fixed_sp_fitted_rel_l2 = NA_real_,
+          edf_abs_diff = NA_real_,
+          gate_b_r_passed = FALSE,
+          passed = FALSE,
+          diagnostics = list(
+            schema_version = "kpcTprsResidualCPP-mapped-sp-parity-v1",
+            failed_closed = TRUE,
+            failure_reason = conditionMessage(e),
+            does_not_drive_graph_decisions = TRUE
+          )
+        )
+      }
+    )
+    details[[name]] <- result
+    rows[[length(rows) + 1L]] <- data.frame(
+      scenario = name,
+      conditioning_size = result$conditioning_size,
+      max_residual_rel_l2 = result$fixed_sp_residual_rel_l2,
+      max_fitted_rel_l2 = result$fixed_sp_fitted_rel_l2,
+      max_edf_abs_diff = result$edf_abs_diff,
+      gate_b_r_passed = result$gate_b_r_passed,
+      passed = result$passed,
+      failure_reason = result$diagnostics$failure_reason %||% "",
+      stringsAsFactors = FALSE
+    )
+  }
+  list(
+    summary = if (length(rows) == 0L) data.frame() else do.call(rbind, rows),
+    details = details
+  )
+}
+
+fastkpc_kpc_tprs_mapped_sp_ci_parity <- function(
+    x, y, S, sp = 1, index = 1, legacy_index = TRUE,
+    p_abs_tol = 1e-8,
+    tol = sqrt(.Machine$double.eps)) {
+  input_x <- fastkpc_kpc_tprs_validate_input(x, S)
+  input_y <- fastkpc_kpc_tprs_validate_input(y, S)
+  candidate_x <- fastkpc_kpc_tprs_mapped_sp_solve_candidate(
+    y = input_x$y, S = input_x$S, sp = sp, tol = tol)
+  candidate_y <- fastkpc_kpc_tprs_mapped_sp_solve_candidate(
+    y = input_y$y, S = input_y$S, sp = sp, tol = tol)
+  oracle_x <- fastkpc_kpc_tprs_mgcv_oracle_setup(input_x$y, input_x$S, sp = sp)
+  oracle_y <- fastkpc_kpc_tprs_mgcv_oracle_setup(input_y$y, input_y$S, sp = sp)
+
+  candidate_p <- dcov_gamma_exact(candidate_x$residuals,
+                                  candidate_y$residuals,
+                                  index = index,
+                                  legacy_index = legacy_index)$p.value
+  oracle_p <- dcov_gamma_exact(oracle_x$residuals,
+                               oracle_y$residuals,
+                               index = index,
+                               legacy_index = legacy_index)$p.value
+  p_abs_diff <- abs(as.numeric(candidate_p) - as.numeric(oracle_p))
+  list(
+    backend_family = "kpcTprsResidualCPP",
+    mode = "mapped-sp-ci-parity-shadow",
+    authoritative = FALSE,
+    candidate_p = as.numeric(candidate_p),
+    oracle_p = as.numeric(oracle_p),
+    p_abs_diff = p_abs_diff,
+    passed = is.finite(p_abs_diff) && p_abs_diff <= p_abs_tol,
+    diagnostics = list(
+      schema_version = "kpcTprsResidualCPP-mapped-sp-ci-parity-v1",
+      candidate_x_mapped_sp = candidate_x$mapped_sp,
+      candidate_y_mapped_sp = candidate_y$mapped_sp,
+      does_not_drive_graph_decisions = TRUE
+    )
+  )
+}
+

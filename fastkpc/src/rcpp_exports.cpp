@@ -307,6 +307,11 @@ struct UniqueRows1D {
   std::vector<int> map_to_unique;
 };
 
+struct UniqueRowsMatrix {
+  Rcpp::NumericMatrix unique_rows;
+  std::vector<int> map_to_unique;
+};
+
 UniqueRows1D sorted_unique_rows_1d(Rcpp::NumericMatrix shifted) {
   std::vector<std::pair<double, int> > rows;
   rows.reserve(static_cast<std::size_t>(shifted.nrow()));
@@ -345,6 +350,53 @@ Rcpp::IntegerVector std_int_vector_to_rcpp(const std::vector<int>& values) {
   Rcpp::IntegerVector out(values.size());
   for (std::size_t i = 0; i < values.size(); ++i) out[static_cast<int>(i)] = values[i];
   return out;
+}
+
+UniqueRowsMatrix sorted_unique_rows_matrix(Rcpp::NumericMatrix shifted) {
+  const int n = shifted.nrow();
+  const int d = shifted.ncol();
+  std::vector<int> order(static_cast<std::size_t>(n));
+  std::iota(order.begin(), order.end(), 0);
+  std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+    for (int col = 0; col < d; ++col) {
+      const double av = shifted(a, col);
+      const double bv = shifted(b, col);
+      if (av < bv) return true;
+      if (av > bv) return false;
+    }
+    return a < b;
+  });
+
+  std::vector<double> unique_values;
+  std::vector<int> map_to_unique(static_cast<std::size_t>(n));
+  int current = -1;
+  for (std::size_t oi = 0; oi < order.size(); ++oi) {
+    const int row = order[oi];
+    bool is_new = oi == 0;
+    if (!is_new) {
+      const int previous = order[oi - 1];
+      for (int col = 0; col < d; ++col) {
+        if (shifted(row, col) != shifted(previous, col)) {
+          is_new = true;
+          break;
+        }
+      }
+    }
+    if (is_new) {
+      ++current;
+      for (int col = 0; col < d; ++col) unique_values.push_back(shifted(row, col));
+    }
+    map_to_unique[static_cast<std::size_t>(row)] = current;
+  }
+
+  Rcpp::NumericMatrix unique_rows(current + 1, d);
+  for (int row = 0; row <= current; ++row) {
+    for (int col = 0; col < d; ++col) {
+      unique_rows(row, col) =
+        unique_values[static_cast<std::size_t>(row * d + col)];
+    }
+  }
+  return UniqueRowsMatrix{unique_rows, map_to_unique};
 }
 
 Rcpp::List kpc_tprs_residual_cpp_setup_1d(
@@ -536,6 +588,213 @@ Rcpp::List kpc_tprs_residual_cpp_setup_1d(
     Rcpp::Named("k") = basis_rank,
     Rcpp::Named("radial_basis") = "eta_1d_m2",
     Rcpp::Named("polynomial_basis") = "1 + s1",
+    Rcpp::Named("smooth_geometry") = "joint-isotropic",
+    Rcpp::Named("tol") = tol,
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("selected_eigenvalues") = arma_vector_to_rcpp(selected_eigenvalues),
+      Rcpp::Named("truncation_eigengap") = truncation_eigengap,
+      Rcpp::Named("rank_T") = rank_T,
+      Rcpp::Named("rank_TU") = rank_TU,
+      Rcpp::Named("Z_orthogonality_error") = z_orthogonality_error,
+      Rcpp::Named("TPS_constraint_error") = tps_constraint_error,
+      Rcpp::Named("pre_rms_column_norms") = pre_rms_column_norms,
+      Rcpp::Named("post_rms_column_norms") = post_rms_column_norms
+    )
+  );
+}
+
+Rcpp::List kpc_tprs_residual_cpp_setup_2d(
+    Rcpp::NumericMatrix S,
+    Rcpp::NumericMatrix shifted,
+    Rcpp::NumericVector shift,
+    const UniqueRowsMatrix& unique_info,
+    int basis_rank,
+    int null_space_rank,
+    int k_def,
+    double tol) {
+  const int n = S.nrow();
+  const int unique_n = unique_info.unique_rows.nrow();
+  if (unique_n > 2000) {
+    Rcpp::stop("kpcTprsResidualCPP requires unique conditioning locations <= 2000");
+  }
+  if (unique_n < basis_rank) {
+    Rcpp::stop("A term has fewer unique conditioning locations than the basis dimension");
+  }
+
+  const int penalized_rank = basis_rank - null_space_rank;
+  arma::mat Xu(unique_n, 2, arma::fill::zeros);
+  for (int row = 0; row < unique_n; ++row) {
+    Xu(row, 0) = unique_info.unique_rows(row, 0);
+    Xu(row, 1) = unique_info.unique_rows(row, 1);
+  }
+
+  arma::mat E(unique_n, unique_n, arma::fill::zeros);
+  for (int row = 0; row < unique_n; ++row) {
+    for (int col = 0; col < row; ++col) {
+      const double dx = Xu(row, 0) - Xu(col, 0);
+      const double dy = Xu(row, 1) - Xu(col, 1);
+      const double value = tprs_eta_from_squared_distance(dx * dx + dy * dy, 2, 2);
+      E(row, col) = value;
+      E(col, row) = value;
+    }
+  }
+
+  arma::mat T(unique_n, null_space_rank, arma::fill::ones);
+  T.col(1) = Xu.col(0);
+  T.col(2) = Xu.col(1);
+
+  arma::vec eigval;
+  arma::mat eigvec;
+  if (!arma::eig_sym(eigval, eigvec, E)) {
+    Rcpp::stop("2D TPRS eigen decomposition failed");
+  }
+  std::vector<int> order(static_cast<std::size_t>(eigval.n_elem));
+  std::iota(order.begin(), order.end(), 0);
+  std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+    const double aa = std::abs(eigval(static_cast<arma::uword>(a)));
+    const double bb = std::abs(eigval(static_cast<arma::uword>(b)));
+    if (aa == bb) return eigval(static_cast<arma::uword>(a)) >
+      eigval(static_cast<arma::uword>(b));
+    return aa > bb;
+  });
+
+  arma::mat U(unique_n, basis_rank);
+  arma::vec selected_eigenvalues(basis_rank);
+  for (int col = 0; col < basis_rank; ++col) {
+    const int idx = order[static_cast<std::size_t>(col)];
+    U.col(col) = eigvec.col(static_cast<arma::uword>(idx));
+    selected_eigenvalues(col) = eigval(static_cast<arma::uword>(idx));
+  }
+  double truncation_eigengap = R_PosInf;
+  if (static_cast<int>(order.size()) > basis_rank) {
+    const double kept = std::abs(selected_eigenvalues(basis_rank - 1));
+    const double next = std::abs(eigval(static_cast<arma::uword>(
+      order[static_cast<std::size_t>(basis_rank)])));
+    truncation_eigengap = kept - next;
+  }
+
+  const arma::mat TU = T.t() * U;
+  const int rank_T = arma_rank(T, tol);
+  const int rank_TU = arma_rank(TU, tol);
+  if (rank_TU != null_space_rank) {
+    Rcpp::stop("2D TPRS T'U constraint rank does not match null-space rank");
+  }
+
+  arma::mat svd_u;
+  arma::vec svd_s;
+  arma::mat svd_v;
+  if (!arma::svd(svd_u, svd_s, svd_v, TU)) {
+    Rcpp::stop("2D TPRS T'U SVD failed");
+  }
+  arma::mat Z_tps = svd_v.cols(rank_TU, basis_rank - 1);
+  const arma::mat X_pen_unique = U * arma::diagmat(selected_eigenvalues) * Z_tps;
+
+  arma::mat X_unique(unique_n, basis_rank, arma::fill::zeros);
+  X_unique.cols(0, penalized_rank - 1) = X_pen_unique;
+  X_unique.cols(penalized_rank, basis_rank - 1) = T;
+
+  arma::mat X(n, basis_rank, arma::fill::zeros);
+  for (int row = 0; row < n; ++row) {
+    X.row(row) = X_unique.row(
+      static_cast<arma::uword>(unique_info.map_to_unique[static_cast<std::size_t>(row)]));
+  }
+
+  arma::mat penalty(basis_rank, basis_rank, arma::fill::zeros);
+  arma::mat S_tps_constrained =
+    Z_tps.t() * arma::diagmat(selected_eigenvalues) * Z_tps;
+  penalty.submat(0, 0, penalized_rank - 1, penalized_rank - 1) =
+    S_tps_constrained;
+
+  arma::mat UZ(unique_n + null_space_rank, basis_rank, arma::fill::zeros);
+  UZ.submat(0, 0, unique_n - 1, penalized_rank - 1) = U * Z_tps;
+  UZ.submat(unique_n, penalized_rank,
+            unique_n + null_space_rank - 1, basis_rank - 1) =
+    arma::eye(null_space_rank, null_space_rank);
+  arma::mat UZ_unscaled = UZ;
+  arma::mat penalty_pre_rms = penalty;
+
+  const Rcpp::NumericVector pre_rms_column_norms = arma_row_rms(X);
+  arma::vec rms_inverse(basis_rank);
+  for (int col = 0; col < basis_rank; ++col) {
+    const double w = pre_rms_column_norms[col];
+    if (!std::isfinite(w) || w <= tol) {
+      Rcpp::stop("2D TPRS RMS scaling encountered a zero column");
+    }
+    rms_inverse(col) = 1.0 / w;
+    X.col(col) /= w;
+    UZ.col(col) /= w;
+    penalty.row(col) /= w;
+    penalty.col(col) /= w;
+  }
+  arma::mat W_rms = arma::diagmat(rms_inverse);
+  const Rcpp::NumericVector post_rms_column_norms = arma_row_rms(X);
+
+  Rcpp::NumericMatrix X_rcpp = arma_matrix_to_rcpp(X);
+  Rcpp::NumericMatrix penalty_rcpp = arma_matrix_to_rcpp(penalty);
+  Rcpp::NumericMatrix constraint = kpc_tprs_column_sum_constraint(X_rcpp);
+  Rcpp::NumericMatrix Z_ident = constraint_null_space_cpp(
+    constraint, basis_rank, tol);
+  arma::mat Z_ident_arma = rcpp_matrix_to_arma(Z_ident);
+  Rcpp::NumericMatrix X_absorbed = arma_matrix_to_rcpp(X * Z_ident_arma);
+  arma::mat penalty_rms = penalty;
+  arma::mat penalty_absorbed_arma = Z_ident_arma.t() * penalty * Z_ident_arma;
+  Rcpp::NumericMatrix penalty_absorbed =
+    arma_matrix_to_rcpp(penalty_absorbed_arma);
+
+  arma::mat radial_full = X.cols(0, penalized_rank - 1);
+  arma::mat polynomial_full = X.cols(penalized_rank, basis_rank - 1);
+
+  const double z_orthogonality_error = arma_frobenius_norm(
+    Z_tps.t() * Z_tps - arma::eye(penalized_rank, penalized_rank));
+  const double tps_constraint_error = arma_frobenius_norm(TU * Z_tps);
+
+  return Rcpp::List::create(
+    Rcpp::Named("backend_family") = "kpcTprsResidualCPP",
+    Rcpp::Named("schema_version") = "setup-shadow-v1",
+    Rcpp::Named("X") = X_rcpp,
+    Rcpp::Named("penalty") = penalty_rcpp,
+    Rcpp::Named("constraint") = constraint,
+    Rcpp::Named("raw") = Rcpp::List::create(
+      Rcpp::Named("shift") = shift,
+      Rcpp::Named("shifted_covariates") = shifted,
+      Rcpp::Named("unique_locations") = unique_info.unique_rows,
+      Rcpp::Named("unique_row_index") = std_int_vector_to_rcpp(unique_info.map_to_unique),
+      Rcpp::Named("radial_kernel_block") = arma_matrix_to_rcpp(E),
+      Rcpp::Named("radial") = arma_matrix_to_rcpp(radial_full),
+      Rcpp::Named("polynomial") = arma_matrix_to_rcpp(polynomial_full),
+      Rcpp::Named("penalty") = penalty_rcpp,
+      Rcpp::Named("constraint") = constraint,
+      Rcpp::Named("UZ") = arma_matrix_to_rcpp(UZ),
+      Rcpp::Named("UZ_unscaled") = arma_matrix_to_rcpp(UZ_unscaled),
+      Rcpp::Named("eigenvectors") = arma_matrix_to_rcpp(U),
+      Rcpp::Named("selected_eigenvalues") = arma_vector_to_rcpp(selected_eigenvalues),
+      Rcpp::Named("S_eigen") = arma_matrix_to_rcpp(arma::diagmat(selected_eigenvalues)),
+      Rcpp::Named("S_tps_constrained") = arma_matrix_to_rcpp(S_tps_constrained),
+      Rcpp::Named("S_pre_rms") = arma_matrix_to_rcpp(penalty_pre_rms),
+      Rcpp::Named("S_rms") = arma_matrix_to_rcpp(penalty_rms),
+      Rcpp::Named("rms_inverse") = arma_vector_to_rcpp(rms_inverse),
+      Rcpp::Named("W_rms") = arma_matrix_to_rcpp(W_rms),
+      Rcpp::Named("tps_side_constraint") = arma_matrix_to_rcpp(TU),
+      Rcpp::Named("tps_null_space") = arma_matrix_to_rcpp(Z_tps)
+    ),
+    Rcpp::Named("absorbed") = Rcpp::List::create(
+      Rcpp::Named("Z") = Z_ident,
+      Rcpp::Named("X") = X_absorbed,
+      Rcpp::Named("penalty") = penalty_absorbed,
+      Rcpp::Named("penalty_from_raw") = arma_matrix_to_rcpp(penalty_absorbed_arma),
+      Rcpp::Named("effective_rank") = X_absorbed.ncol(),
+      Rcpp::Named("null_space_rank") = null_space_rank
+    ),
+    Rcpp::Named("knots") = unique_info.unique_rows,
+    Rcpp::Named("unique_rows") = unique_info.unique_rows,
+    Rcpp::Named("basis_rank") = basis_rank,
+    Rcpp::Named("null_space_rank") = null_space_rank,
+    Rcpp::Named("penalized_rank") = penalized_rank,
+    Rcpp::Named("effective_rank") = X_absorbed.ncol(),
+    Rcpp::Named("k_def") = k_def,
+    Rcpp::Named("k") = basis_rank,
+    Rcpp::Named("radial_basis") = "r^2 log(r)",
+    Rcpp::Named("polynomial_basis") = "1 + s1 + s2",
     Rcpp::Named("smooth_geometry") = "joint-isotropic",
     Rcpp::Named("tol") = tol,
     Rcpp::Named("diagnostics") = Rcpp::List::create(
@@ -1255,58 +1514,9 @@ Rcpp::List kpc_tprs_residual_cpp_setup_export(Rcpp::NumericMatrix S,
       S, shifted, shift, sorted_unique_rows_1d(shifted),
       basis_rank, null_space_rank, k_def, tol);
   }
-  const int penalized_rank = basis_rank - null_space_rank;
-  Rcpp::NumericMatrix knots = evenly_spaced_knots(unique_rows, penalized_rank);
-  Rcpp::NumericMatrix polynomial = kpc_tprs_polynomial_null_space(shifted);
-  Rcpp::NumericMatrix radial = kpc_tprs_radial_basis(shifted, knots);
-  Rcpp::NumericMatrix X = cbind_numeric_matrices(polynomial, radial);
-  Rcpp::NumericMatrix penalty = kpc_tprs_penalty_matrix(knots, polynomial.ncol());
-  Rcpp::NumericMatrix constraint = kpc_tprs_centering_constraint(X);
-  Rcpp::NumericMatrix Z = constraint_null_space_cpp(constraint, X.ncol(), tol);
-  arma::mat Xa = rcpp_matrix_to_arma(X);
-  arma::mat Pa = rcpp_matrix_to_arma(penalty);
-  arma::mat Za = rcpp_matrix_to_arma(Z);
-  Rcpp::NumericMatrix X_absorbed = arma_matrix_to_rcpp(Xa * Za);
-  Rcpp::NumericMatrix penalty_absorbed = arma_matrix_to_rcpp(Za.t() * Pa * Za);
-  Rcpp::NumericMatrix radial_kernel = kpc_tprs_radial_basis(knots, knots);
-
-  return Rcpp::List::create(
-    Rcpp::Named("backend_family") = "kpcTprsResidualCPP",
-    Rcpp::Named("schema_version") = "setup-shadow-v1",
-    Rcpp::Named("X") = X,
-    Rcpp::Named("penalty") = penalty,
-    Rcpp::Named("constraint") = constraint,
-    Rcpp::Named("raw") = Rcpp::List::create(
-      Rcpp::Named("shift") = shift,
-      Rcpp::Named("shifted_covariates") = shifted,
-      Rcpp::Named("unique_locations") = unique_rows,
-      Rcpp::Named("radial_kernel_block") = radial_kernel,
-      Rcpp::Named("radial") = radial,
-      Rcpp::Named("polynomial") = polynomial,
-      Rcpp::Named("penalty") = penalty,
-      Rcpp::Named("constraint") = constraint
-    ),
-    Rcpp::Named("absorbed") = Rcpp::List::create(
-      Rcpp::Named("Z") = Z,
-      Rcpp::Named("X") = X_absorbed,
-      Rcpp::Named("penalty") = penalty_absorbed,
-      Rcpp::Named("effective_rank") = X_absorbed.ncol(),
-      Rcpp::Named("null_space_rank") = null_space_rank
-    ),
-    Rcpp::Named("knots") = knots,
-    Rcpp::Named("unique_rows") = unique_rows,
-    Rcpp::Named("basis_rank") = basis_rank,
-    Rcpp::Named("null_space_rank") = null_space_rank,
-    Rcpp::Named("penalized_rank") = penalized_rank,
-    Rcpp::Named("effective_rank") = X_absorbed.ncol(),
-    Rcpp::Named("k_def") = k_def,
-    Rcpp::Named("k") = knots.nrow(),
-    Rcpp::Named("radial_basis") = S.ncol() == 1 ? "r^3" : "r^2 log(r)",
-    Rcpp::Named("polynomial_basis") =
-      S.ncol() == 1 ? "1 + s1" : "1 + s1 + s2",
-    Rcpp::Named("smooth_geometry") = "joint-isotropic",
-    Rcpp::Named("tol") = tol
-  );
+  return kpc_tprs_residual_cpp_setup_2d(
+    S, shifted, shift, sorted_unique_rows_matrix(shifted),
+    basis_rank, null_space_rank, k_def, tol);
 }
 
 // [[Rcpp::export]]
