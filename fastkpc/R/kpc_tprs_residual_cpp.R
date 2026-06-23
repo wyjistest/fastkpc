@@ -1,6 +1,8 @@
 source("fastkpc/R/mgcv_compat_contract.R")
 source("fastkpc/R/native.R")
 
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
 fastkpc_kpc_tprs_stop <- function(message) {
   stop(paste0("kpcTprsResidualCPP unsupported input: ", message),
        call. = FALSE)
@@ -362,13 +364,19 @@ fastkpc_kpc_tprs_fixed_sp_solve_candidate <- function(
     y, S, sp, k = NA_integer_, tol = sqrt(.Machine$double.eps)) {
   input <- fastkpc_kpc_tprs_validate_input(y, S)
   setup <- kpc_tprs_residual_cpp_setup(input$S, k = k, tol = tol)
+  fastkpc_kpc_tprs_solve_candidate_setup(input$y, setup, sp = sp, tol = tol)
+}
+
+fastkpc_kpc_tprs_solve_candidate_setup <- function(
+    y, setup, sp, penalty = setup$absorbed$penalty,
+    tol = sqrt(.Machine$double.eps)) {
   X <- as.matrix(setup$absorbed$X)
-  P <- as.matrix(setup$absorbed$penalty)
+  P <- as.matrix(penalty)
   A <- crossprod(X) + as.numeric(sp) * P
-  b <- crossprod(X, input$y)
+  b <- crossprod(X, as.numeric(y))
   theta <- as.numeric(qr.solve(A, b, tol = tol))
   fitted <- as.numeric(X %*% theta)
-  residuals <- as.numeric(input$y - fitted)
+  residuals <- as.numeric(y - fitted)
   A_inv <- tryCatch(
     solve(A),
     error = function(e) qr.solve(A, diag(ncol(A)), tol = tol)
@@ -384,11 +392,252 @@ fastkpc_kpc_tprs_fixed_sp_solve_candidate <- function(
     edf = as.numeric(edf),
     selected_sp = as.numeric(sp),
     setup = setup,
-    setup_fingerprint = fastkpc_kpc_tprs_setup_fingerprint(input$S, setup),
+    setup_fingerprint = setup$schema_version %||% "kpcTprsResidualCPP",
     diagnostics = list(
       solver = "absorbed-penalized-least-squares",
       does_not_drive_graph_decisions = TRUE
     )
+  )
+}
+
+fastkpc_kpc_tprs_oracle_absorbed_basis <- function(oracle) {
+  as.matrix(oracle$X[, -1L, drop = FALSE])
+}
+
+fastkpc_kpc_tprs_align_rows <- function(candidate, oracle) {
+  n <- min(nrow(candidate), nrow(oracle))
+  list(
+    candidate = candidate[seq_len(n), , drop = FALSE],
+    oracle = oracle[seq_len(n), , drop = FALSE]
+  )
+}
+
+fastkpc_kpc_tprs_basis_change <- function(X_from, X_to,
+                                          tol = sqrt(.Machine$double.eps)) {
+  qr.solve(as.matrix(X_from), as.matrix(X_to), tol = tol)
+}
+
+fastkpc_kpc_tprs_penalty_shape_scale <- function(S_candidate_mapped,
+                                                 S_oracle) {
+  Sc <- as.matrix(S_candidate_mapped)
+  So <- as.matrix(S_oracle)
+  n <- min(nrow(Sc), nrow(So))
+  m <- min(ncol(Sc), ncol(So))
+  Sc <- Sc[seq_len(n), seq_len(m), drop = FALSE]
+  So <- So[seq_len(n), seq_len(m), drop = FALSE]
+  denom <- sum(Sc * Sc)
+  scale <- if (denom == 0) NA_real_ else sum(So * Sc) / denom
+  shape <- if (!is.finite(scale)) {
+    Inf
+  } else {
+    sqrt(sum((So - scale * Sc)^2)) / max(sqrt(sum(So^2)), .Machine$double.eps)
+  }
+  list(shape_distance = as.numeric(shape), scale_ratio = as.numeric(scale))
+}
+
+fastkpc_kpc_tprs_compare_fit <- function(candidate, oracle) {
+  data.frame(
+    candidate_sp = as.numeric(candidate$selected_sp),
+    oracle_sp = as.numeric(oracle$selected_sp[1L]),
+    residual_rel_l2 = fastkpc_kpc_tprs_rel_l2(candidate$residuals,
+                                              oracle$residuals),
+    fitted_rel_l2 = fastkpc_kpc_tprs_rel_l2(candidate$fitted, oracle$fitted),
+    edf_candidate = as.numeric(candidate$edf),
+    edf_oracle = as.numeric(oracle$edf),
+    edf_abs_diff = abs(as.numeric(candidate$edf) - as.numeric(oracle$edf)),
+    stringsAsFactors = FALSE
+  )
+}
+
+fastkpc_kpc_tprs_edf_matched_candidate <- function(
+    y, setup, oracle_edf, grid,
+    penalty = setup$absorbed$penalty,
+    tol = sqrt(.Machine$double.eps)) {
+  fits <- lapply(as.numeric(grid), function(sp) {
+    tryCatch(
+      fastkpc_kpc_tprs_solve_candidate_setup(y, setup, sp = sp,
+                                             penalty = penalty, tol = tol),
+      error = function(e) NULL
+    )
+  })
+  fits <- Filter(Negate(is.null), fits)
+  if (length(fits) == 0L) {
+    stop("all EDF-matching candidate solves failed", call. = FALSE)
+  }
+  edf <- vapply(fits, `[[`, numeric(1L), "edf")
+  best <- which.min(abs(edf - oracle_edf))
+  fits[[best]]
+}
+
+fastkpc_kpc_tprs_classify_drift <- function(raw_projector_distance,
+                                            absorbed_projector_distance,
+                                            penalty_shape_distance,
+                                            same_raw_sp,
+                                            scale_corrected,
+                                            edf_matched,
+                                            projector_tol = 1e-4,
+                                            shape_tol = 1e-4,
+                                            residual_tol = 1e-4) {
+  if (raw_projector_distance > projector_tol) return("function-space")
+  if (absorbed_projector_distance > projector_tol) return("constraint-intercept")
+  if (penalty_shape_distance > shape_tol) return("penalty-shape")
+  if (edf_matched$residual_rel_l2 <= residual_tol &&
+      same_raw_sp$residual_rel_l2 > residual_tol) {
+    return("penalty-scale")
+  }
+  if (scale_corrected$residual_rel_l2 < same_raw_sp$residual_rel_l2) {
+    return("penalty-scale")
+  }
+  "unclassified"
+}
+
+fastkpc_kpc_tprs_fixed_sp_drift_isolation <- function(
+    y, S, sp = 1,
+    edf_search_grid = exp(seq(log(1e-6), log(1e6), length.out = 61L)),
+    tol = sqrt(.Machine$double.eps)) {
+  input <- fastkpc_kpc_tprs_validate_input(y, S)
+  candidate_setup <- kpc_tprs_residual_cpp_setup(input$S, tol = tol)
+  oracle <- fastkpc_kpc_tprs_mgcv_oracle_setup(input$y, input$S, sp = sp)
+
+  raw_projector_distance <- fastkpc_kpc_tprs_projector_distance(
+    candidate_setup$X, oracle$smooth$X, tol = tol
+  )
+  candidate_absorbed_X <- as.matrix(candidate_setup$absorbed$X)
+  oracle_absorbed_X <- fastkpc_kpc_tprs_oracle_absorbed_basis(oracle)
+  absorbed_projector_distance <- fastkpc_kpc_tprs_projector_distance(
+    candidate_absorbed_X, oracle_absorbed_X, tol = tol
+  )
+
+  aligned <- fastkpc_kpc_tprs_align_rows(candidate_absorbed_X, oracle_absorbed_X)
+  A <- fastkpc_kpc_tprs_basis_change(aligned$candidate, aligned$oracle, tol = tol)
+  S_candidate_mapped <- t(A) %*% as.matrix(candidate_setup$absorbed$penalty) %*% A
+  shape_scale <- fastkpc_kpc_tprs_penalty_shape_scale(
+    S_candidate_mapped, oracle$penalty
+  )
+
+  candidate_raw <- fastkpc_kpc_tprs_solve_candidate_setup(
+    input$y, candidate_setup, sp = sp, tol = tol
+  )
+  oracle_raw <- fastkpc_kpc_tprs_mgcv_oracle_setup(input$y, input$S, sp = sp)
+  same_raw_sp <- fastkpc_kpc_tprs_compare_fit(candidate_raw, oracle_raw)
+
+  corrected_sp <- sp * shape_scale$scale_ratio
+  if (!is.finite(corrected_sp) || corrected_sp <= 0) corrected_sp <- sp
+  candidate_scale <- fastkpc_kpc_tprs_solve_candidate_setup(
+    input$y, candidate_setup, sp = corrected_sp, tol = tol
+  )
+  scale_corrected <- fastkpc_kpc_tprs_compare_fit(candidate_scale, oracle_raw)
+
+  candidate_edf <- fastkpc_kpc_tprs_edf_matched_candidate(
+    input$y, candidate_setup, oracle_edf = oracle_raw$edf,
+    grid = edf_search_grid, tol = tol
+  )
+  edf_matched <- fastkpc_kpc_tprs_compare_fit(candidate_edf, oracle_raw)
+
+  classification <- fastkpc_kpc_tprs_classify_drift(
+    raw_projector_distance = raw_projector_distance,
+    absorbed_projector_distance = absorbed_projector_distance,
+    penalty_shape_distance = shape_scale$shape_distance,
+    same_raw_sp = same_raw_sp,
+    scale_corrected = scale_corrected,
+    edf_matched = edf_matched
+  )
+
+  list(
+    backend_family = "kpcTprsResidualCPP",
+    mode = "fixed-sp-drift-isolation",
+    authoritative = FALSE,
+    conditioning_size = as.integer(ncol(input$S)),
+    raw_projector_distance = raw_projector_distance,
+    absorbed_projector_distance = absorbed_projector_distance,
+    penalty_shape_distance = shape_scale$shape_distance,
+    penalty_scale_ratio = shape_scale$scale_ratio,
+    same_raw_sp = same_raw_sp,
+    scale_corrected = scale_corrected,
+    edf_matched = edf_matched,
+    classification = classification,
+    diagnostics = list(
+      schema_version = "kpcTprsResidualCPP-drift-isolation-v1",
+      oracle_setup_fingerprint = oracle$setup_fingerprint,
+      candidate_basis_rank = candidate_setup$basis_rank,
+      oracle_basis_rank = oracle$basis_rank,
+      does_not_drive_graph_decisions = TRUE
+    )
+  )
+}
+
+fastkpc_kpc_tprs_1d_first_drift_scenarios <- function(seed = 1L, n = 100L) {
+  set.seed(seed)
+  x <- as.numeric(scale(seq(-2, 2, length.out = n)))
+  y <- sin(x) + stats::rnorm(n, sd = 0.03)
+  list(
+    one_d_standard = list(y = y, S = matrix(x, ncol = 1)),
+    one_d_translation = list(y = y, S = matrix(x + 3.5, ncol = 1)),
+    one_d_rescale = list(y = y, S = matrix(2.25 * x, ncol = 1)),
+    one_d_duplicates = list(
+      y = c(y, y[seq_len(8L)]),
+      S = matrix(c(x, x[seq_len(8L)]), ncol = 1)
+    )
+  )
+}
+
+fastkpc_run_kpc_tprs_drift_isolation_campaign <- function(
+    scenarios, sp = 1,
+    edf_search_grid = exp(seq(log(1e-6), log(1e6), length.out = 61L))) {
+  rows <- list()
+  details <- list()
+  for (name in names(scenarios)) {
+    scenario <- scenarios[[name]]
+    result <- tryCatch(
+      fastkpc_kpc_tprs_fixed_sp_drift_isolation(
+        y = scenario$y,
+        S = scenario$S,
+        sp = sp,
+        edf_search_grid = edf_search_grid
+      ),
+      error = function(e) {
+        list(
+          backend_family = "kpcTprsResidualCPP",
+          mode = "fixed-sp-drift-isolation-failed-closed",
+          authoritative = FALSE,
+          conditioning_size = as.integer(ncol(as.matrix(scenario$S))),
+          raw_projector_distance = NA_real_,
+          absorbed_projector_distance = NA_real_,
+          penalty_shape_distance = NA_real_,
+          penalty_scale_ratio = NA_real_,
+          same_raw_sp = data.frame(residual_rel_l2 = NA_real_),
+          scale_corrected = data.frame(residual_rel_l2 = NA_real_),
+          edf_matched = data.frame(residual_rel_l2 = NA_real_),
+          classification = "unclassified",
+          diagnostics = list(
+            schema_version = "kpcTprsResidualCPP-drift-isolation-v1",
+            failed_closed = TRUE,
+            failure_reason = conditionMessage(e),
+            does_not_drive_graph_decisions = TRUE
+          )
+        )
+      }
+    )
+    details[[name]] <- result
+    rows[[length(rows) + 1L]] <- data.frame(
+      scenario = name,
+      conditioning_size = result$conditioning_size,
+      raw_projector_distance = result$raw_projector_distance,
+      absorbed_projector_distance = result$absorbed_projector_distance,
+      penalty_shape_distance = result$penalty_shape_distance,
+      penalty_scale_ratio = result$penalty_scale_ratio,
+      same_raw_sp_residual_rel_l2 = result$same_raw_sp$residual_rel_l2,
+      scale_corrected_residual_rel_l2 =
+        result$scale_corrected$residual_rel_l2,
+      edf_matched_residual_rel_l2 = result$edf_matched$residual_rel_l2,
+      classification = result$classification,
+      failure_reason = result$diagnostics$failure_reason %||% "",
+      stringsAsFactors = FALSE
+    )
+  }
+  list(
+    summary = if (length(rows) == 0L) data.frame() else do.call(rbind, rows),
+    details = details
   )
 }
 
@@ -435,6 +684,28 @@ fastkpc_kpc_tprs_fixed_sp_parity <- function(
     )
   })
   fixed_sp <- do.call(rbind, rows)
+  isolation <- tryCatch(
+    fastkpc_kpc_tprs_fixed_sp_drift_isolation(
+      y = input$y,
+      S = input$S,
+      sp = sp_values[[1L]],
+      tol = tol
+    ),
+    error = function(e) {
+      list(
+        raw_projector_distance = projector_distance,
+        absorbed_projector_distance = NA_real_,
+        penalty_shape_distance = NA_real_,
+        penalty_scale_ratio = NA_real_,
+        scale_corrected = data.frame(residual_rel_l2 = NA_real_,
+                                     edf_abs_diff = NA_real_),
+        edf_matched = data.frame(residual_rel_l2 = NA_real_,
+                                 edf_abs_diff = NA_real_),
+        classification = "unclassified",
+        diagnostics = list(failure_reason = conditionMessage(e))
+      )
+    }
+  )
   gate_b1 <- is.finite(projector_distance) &&
     is.finite(penalty_spectrum_distance)
   gate_b2 <- all(is.finite(fixed_sp$fitted_rel_l2)) &&
@@ -453,6 +724,13 @@ fastkpc_kpc_tprs_fixed_sp_parity <- function(
       fastkpc_kpc_tprs_setup_fingerprint(input$S, candidate_setup),
     projector_distance = projector_distance,
     penalty_spectrum_distance = penalty_spectrum_distance,
+    raw_projector_distance = isolation$raw_projector_distance,
+    absorbed_projector_distance = isolation$absorbed_projector_distance,
+    penalty_shape_distance = isolation$penalty_shape_distance,
+    penalty_scale_ratio = isolation$penalty_scale_ratio,
+    scale_corrected = isolation$scale_corrected,
+    edf_matched = isolation$edf_matched,
+    drift_classification = isolation$classification,
     fixed_sp = fixed_sp,
     fixed_sp_residual_rel_l2 = max(fixed_sp$residual_rel_l2, na.rm = TRUE),
     fixed_sp_fitted_rel_l2 = max(fixed_sp$fitted_rel_l2, na.rm = TRUE),
@@ -466,6 +744,8 @@ fastkpc_kpc_tprs_fixed_sp_parity <- function(
       oracle_basis_rank = oracle_setup$basis_rank,
       candidate_null_space_rank = candidate_setup$null_space_rank,
       oracle_null_space_rank = oracle_setup$null_space_rank,
+      drift_isolation_failure_reason =
+        isolation$diagnostics$failure_reason %||% "",
       does_not_drive_graph_decisions = TRUE
     )
   )

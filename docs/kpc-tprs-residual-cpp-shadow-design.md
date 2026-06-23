@@ -19,6 +19,12 @@ Phase 1b: fixed-sp parity harness
     measures geometry and fixed-sp residual drift
     remains non-authoritative
 
+Phase 1c: fixed-sp drift isolation
+    separates function-space drift, constraint/intercept drift,
+    penalty-shape drift, and penalty-scale drift
+    includes EDF-matched and scale-corrected diagnostics
+    remains non-authoritative
+
 Not complete:
     fixed-sp parity qualification
     continuous GCV

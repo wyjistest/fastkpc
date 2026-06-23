@@ -40,6 +40,9 @@ required <- c(
   "backend_family", "mode", "authoritative", "conditioning_size",
   "oracle_setup_fingerprint", "candidate_setup_fingerprint",
   "projector_distance", "penalty_spectrum_distance",
+  "raw_projector_distance", "absorbed_projector_distance",
+  "penalty_shape_distance", "penalty_scale_ratio",
+  "scale_corrected", "edf_matched", "drift_classification",
   "fixed_sp", "fixed_sp_residual_rel_l2", "fixed_sp_fitted_rel_l2",
   "edf_abs_diff", "gate_b1_passed", "gate_b2_passed", "passed",
   "diagnostics"
@@ -58,6 +61,20 @@ assert_true(all(is.finite(one$fixed_sp$residual_rel_l2)),
             "1D residual rel-L2 finite")
 assert_true(all(is.finite(two$fixed_sp$residual_rel_l2)),
             "2D residual rel-L2 finite")
+assert_true(is.finite(one$raw_projector_distance),
+            "1D raw projector distance finite")
+assert_true(is.finite(one$absorbed_projector_distance),
+            "1D absorbed projector distance finite")
+assert_true(is.finite(one$penalty_shape_distance),
+            "1D penalty shape distance finite")
+assert_true(is.finite(one$penalty_scale_ratio),
+            "1D penalty scale ratio finite")
+assert_has_names(one$scale_corrected,
+                 c("residual_rel_l2", "edf_abs_diff"),
+                 "scale corrected diagnostic")
+assert_has_names(one$edf_matched,
+                 c("residual_rel_l2", "edf_abs_diff"),
+                 "EDF matched diagnostic")
 assert_true(isFALSE(one$passed) || isFALSE(two$passed),
             "candidate must not silently qualify before fixed-sp parity passes")
 
