@@ -555,6 +555,37 @@ fastkpc_kpc_tprs_absorbed_oracle_setup <- function(y, S) {
   )[[1L]]
 }
 
+fastkpc_kpc_tprs_mgcv_gcv_oracle_fit <- function(y, S) {
+  if (!requireNamespace("mgcv", quietly = TRUE)) {
+    stop("mgcv is required for kpcTprsResidualCPP oracle setup",
+         call. = FALSE)
+  }
+  input <- fastkpc_kpc_tprs_validate_input(y, S)
+  data <- fastkpc_kpc_tprs_data_frame(input$y, input$S)
+  formula <- fastkpc_kpc_tprs_formula(input$S)
+  fit <- mgcv::gam(
+    formula = formula,
+    data = data,
+    family = stats::gaussian(),
+    method = "GCV.Cp",
+    fit = TRUE
+  )
+  list(
+    residuals = as.numeric(stats::residuals(fit)),
+    fitted = as.numeric(stats::fitted(fit)),
+    selected_sp = if (!is.null(fit$sp) && length(fit$sp) > 0L) {
+      as.numeric(fit$sp)
+    } else if (!is.null(fit$full.sp) && length(fit$full.sp) > 0L) {
+      as.numeric(fit$full.sp)
+    } else {
+      NA_real_
+    },
+    score = as.numeric(fit$gcv.ubre %||% NA_real_),
+    edf = if (!is.null(fit$edf)) sum(fit$edf) else NA_real_,
+    fit = fit
+  )
+}
+
 fastkpc_kpc_tprs_rel_fro <- function(candidate, oracle) {
   candidate <- as.matrix(candidate)
   oracle <- as.matrix(oracle)
@@ -1405,6 +1436,475 @@ fastkpc_kpc_tprs_mapped_sp_ci_parity <- function(
       schema_version = "kpcTprsResidualCPP-mapped-sp-ci-parity-v1",
       candidate_x_mapped_sp = candidate_x$mapped_sp,
       candidate_y_mapped_sp = candidate_y$mapped_sp,
+      does_not_drive_graph_decisions = TRUE
+    )
+  )
+}
+
+fastkpc_kpc_tprs_gcv_score_for_setup <- function(
+    y, setup, lambda, tol = sqrt(.Machine$double.eps)) {
+  fit <- fastkpc_kpc_tprs_solve_candidate_setup(
+    y = y,
+    setup = setup,
+    sp = lambda,
+    include_intercept = TRUE,
+    tol = tol
+  )
+  n <- length(y)
+  rss <- sum(fit$residuals^2)
+  denom <- n - fit$edf
+  gcv <- if (is.finite(fit$edf) && denom > tol) {
+    n * rss / (denom * denom)
+  } else {
+    Inf
+  }
+  list(
+    lambda = as.numeric(lambda),
+    rss = as.numeric(rss),
+    edf = as.numeric(fit$edf),
+    gcv = as.numeric(gcv),
+    valid = is.finite(gcv),
+    fit = fit
+  )
+}
+
+fastkpc_kpc_tprs_gcv_candidate <- function(
+    y, S,
+    lambda_grid = exp(seq(log(1e-4), log(1e4), length.out = 17L)),
+    refine = TRUE,
+    tol = sqrt(.Machine$double.eps)) {
+  input <- fastkpc_kpc_tprs_validate_input(y, S)
+  lambda_grid <- as.numeric(lambda_grid)
+  if (length(lambda_grid) == 0L ||
+      any(!is.finite(lambda_grid)) || any(lambda_grid <= 0)) {
+    fastkpc_kpc_tprs_stop("lambda_grid must be positive finite")
+  }
+  lambda_grid <- sort(unique(lambda_grid))
+  setup <- kpc_tprs_residual_cpp_setup(input$S, tol = tol)
+  grid_eval <- lapply(lambda_grid, function(lambda) {
+    fastkpc_kpc_tprs_gcv_score_for_setup(
+      y = input$y, setup = setup, lambda = lambda, tol = tol)
+  })
+  grid <- do.call(rbind, lapply(grid_eval, function(x) {
+    data.frame(
+      lambda = x$lambda,
+      rss = x$rss,
+      edf = x$edf,
+      gcv = x$gcv,
+      valid = x$valid,
+      stringsAsFactors = FALSE
+    )
+  }))
+  if (!any(grid$valid)) {
+    stop("No valid GCV candidate in lambda_grid", call. = FALSE)
+  }
+  selected_grid_index <- which(grid$gcv == min(grid$gcv[grid$valid]))[1L]
+  selected_lambda <- grid$lambda[[selected_grid_index]]
+  selected_score <- grid$gcv[[selected_grid_index]]
+  brent_refined <- FALSE
+  brent_selected <- FALSE
+
+  if (isTRUE(refine) && length(lambda_grid) >= 3L) {
+    idx <- selected_grid_index
+    lower_idx <- max(1L, idx - 1L)
+    upper_idx <- min(length(lambda_grid), idx + 1L)
+    if (lower_idx == idx && upper_idx < length(lambda_grid)) {
+      upper_idx <- idx + 1L
+    }
+    if (upper_idx == idx && lower_idx > 1L) {
+      lower_idx <- idx - 1L
+    }
+    lower <- log(lambda_grid[[lower_idx]])
+    upper <- log(lambda_grid[[upper_idx]])
+    if (is.finite(lower) && is.finite(upper) && lower < upper) {
+      brent_refined <- TRUE
+      objective <- function(log_lambda) {
+        fastkpc_kpc_tprs_gcv_score_for_setup(
+          y = input$y,
+          setup = setup,
+          lambda = exp(log_lambda),
+          tol = tol
+        )$gcv
+      }
+      opt <- stats::optimize(objective, interval = c(lower, upper))
+      refined_lambda <- exp(opt$minimum)
+      refined_score <- as.numeric(opt$objective)
+      improvement_tol <- max(1e-12, abs(selected_score) * 1e-8)
+      if (is.finite(refined_score) &&
+          refined_score < selected_score - improvement_tol) {
+        selected_lambda <- refined_lambda
+        selected_score <- refined_score
+        brent_selected <- TRUE
+      }
+    }
+  }
+
+  selected <- fastkpc_kpc_tprs_solve_candidate_setup(
+    y = input$y,
+    setup = setup,
+    sp = selected_lambda,
+    include_intercept = TRUE,
+    tol = tol
+  )
+  selected$mode <- "continuous-gcv-candidate-shadow"
+  selected$selected_sp <- as.numeric(selected_lambda)
+  selected$score <- as.numeric(selected_score)
+  selected$grid <- grid
+  selected$selected_grid_index <- as.integer(selected_grid_index)
+  selected$backend_family <- "kpcTprsResidualCPP"
+  selected$authoritative <- FALSE
+  selected$diagnostics <- c(
+    selected$diagnostics,
+    list(
+      schema_version = "kpcTprsResidualCPP-continuous-gcv-v1",
+      gcv_source = "kpc-canonical-continuous-gcv",
+      sp_semantics = "kpc-canonical-penalty",
+      brent_refined = isTRUE(brent_refined),
+      brent_selected = isTRUE(brent_selected),
+      bracket_lower_lambda = lambda_grid[[max(1L, selected_grid_index - 1L)]],
+      bracket_upper_lambda =
+        lambda_grid[[min(length(lambda_grid), selected_grid_index + 1L)]],
+      does_not_drive_graph_decisions = TRUE
+    )
+  )
+  selected
+}
+
+fastkpc_kpc_tprs_shadow_sepsets <- function(p) {
+  replicate(p, replicate(p, integer(), simplify = FALSE), simplify = FALSE)
+}
+
+fastkpc_kpc_tprs_shadow_combinations <- function(values, choose) {
+  values <- as.integer(values)
+  if (choose == 0L) return(list(integer()))
+  if (length(values) < choose) return(list())
+  lapply(utils::combn(values, choose, simplify = FALSE), as.integer)
+}
+
+fastkpc_kpc_tprs_shadow_neighbors <- function(adjacency, vertex, excluded) {
+  as.integer(which(adjacency[, vertex] & seq_len(nrow(adjacency)) != excluded))
+}
+
+fastkpc_kpc_tprs_named_or_na <- function(x, name) {
+  if (is.null(x) || is.null(names(x)) || !(name %in% names(x))) return(NA_real_)
+  as.numeric(x[[name]])
+}
+
+fastkpc_kpc_tprs_shadow_ci <- function(data, x, y, S,
+                                       backend = c("oracle", "candidate"),
+                                       index = 1,
+                                       legacy_index = TRUE) {
+  backend <- match.arg(backend)
+  if (length(S) == 0L) {
+    p <- dcov_gamma_exact(data[, x], data[, y],
+                          index = index,
+                          legacy_index = legacy_index)$p.value
+    return(list(
+      p.value = as.numeric(p),
+      mode = "unconditional-dcov",
+      selected_sp = NA_real_,
+      score = NA_real_,
+      edf = NA_real_
+    ))
+  }
+  S_matrix <- data[, S, drop = FALSE]
+  if (identical(backend, "oracle")) {
+    px <- fastkpc_kpc_tprs_mgcv_gcv_oracle_fit(data[, x], S_matrix)
+    py <- fastkpc_kpc_tprs_mgcv_gcv_oracle_fit(data[, y], S_matrix)
+    rx <- px$residuals
+    ry <- py$residuals
+    mode <- "mgcv-oracle-gcv"
+  } else {
+    px <- fastkpc_kpc_tprs_gcv_candidate(data[, x], S_matrix)
+    py <- fastkpc_kpc_tprs_gcv_candidate(data[, y], S_matrix)
+    rx <- px$residuals
+    ry <- py$residuals
+    mode <- "continuous-gcv-candidate-shadow"
+  }
+  p <- dcov_gamma_exact(rx, ry, index = index,
+                        legacy_index = legacy_index)$p.value
+  list(
+    p.value = as.numeric(p),
+    mode = mode,
+    selected_sp = c(x = as.numeric(px$selected_sp), y = as.numeric(py$selected_sp)),
+    score = c(x = as.numeric(px$score), y = as.numeric(py$score)),
+    edf = c(x = as.numeric(px$edf), y = as.numeric(py$edf))
+  )
+}
+
+fastkpc_kpc_tprs_shadow_run_skeleton <- function(
+    data, alpha, max_conditioning_size,
+    backend = c("oracle", "candidate"),
+    index = 1, legacy_index = TRUE) {
+  backend <- match.arg(backend)
+  data <- as.matrix(data)
+  storage.mode(data) <- "double"
+  p <- ncol(data)
+  adjacency <- matrix(TRUE, p, p)
+  diag(adjacency) <- FALSE
+  pmax <- matrix(-Inf, p, p)
+  diag(pmax) <- 1
+  sepsets <- fastkpc_kpc_tprs_shadow_sepsets(p)
+  n_edge_tests <- integer(max_conditioning_size + 1L)
+  trace_rows <- list()
+  test_id <- 0L
+
+  for (ord in seq.int(0L, as.integer(max_conditioning_size))) {
+    snapshot <- adjacency
+    delete_edges <- matrix(FALSE, p, p)
+    for (x in seq_len(p - 1L)) {
+      for (y in seq.int(x + 1L, p)) {
+        if (!snapshot[x, y]) next
+        edge_done <- FALSE
+        for (side in c("x", "y")) {
+          if (edge_done) break
+          source_vertex <- if (identical(side, "x")) x else y
+          target_vertex <- if (identical(side, "x")) y else x
+          neighbors <- fastkpc_kpc_tprs_shadow_neighbors(
+            snapshot, source_vertex, target_vertex)
+          for (S in fastkpc_kpc_tprs_shadow_combinations(neighbors, ord)) {
+            test_id <- test_id + 1L
+            ci <- fastkpc_kpc_tprs_shadow_ci(
+              data = data,
+              x = source_vertex,
+              y = target_vertex,
+              S = S,
+              backend = backend,
+              index = index,
+              legacy_index = legacy_index
+            )
+            pval <- as.numeric(ci$p.value)
+            if (pval > pmax[x, y]) {
+              pmax[x, y] <- pval
+              pmax[y, x] <- pval
+            }
+            deleted <- is.finite(pval) && pval >= as.numeric(alpha)
+            if (deleted) {
+              delete_edges[x, y] <- TRUE
+              delete_edges[y, x] <- TRUE
+              sepsets[[x]][[y]] <- as.integer(S)
+              sepsets[[y]][[x]] <- as.integer(S)
+              edge_done <- TRUE
+            }
+            trace_rows[[length(trace_rows) + 1L]] <- data.frame(
+              canonical_test_order_id = test_id,
+              conditioning_level = ord,
+              edge_x = x,
+              edge_y = y,
+              x = source_vertex,
+              y = target_vertex,
+              conditioning_target_side = side,
+              S_key = if (length(S) == 0L) "" else paste(S, collapse = "|"),
+              p.value = pval,
+              delete_edge = deleted,
+              mode = ci$mode,
+              selected_sp_x = fastkpc_kpc_tprs_named_or_na(ci$selected_sp, "x"),
+              selected_sp_y = fastkpc_kpc_tprs_named_or_na(ci$selected_sp, "y"),
+              score_x = fastkpc_kpc_tprs_named_or_na(ci$score, "x"),
+              score_y = fastkpc_kpc_tprs_named_or_na(ci$score, "y"),
+              edf_x = fastkpc_kpc_tprs_named_or_na(ci$edf, "x"),
+              edf_y = fastkpc_kpc_tprs_named_or_na(ci$edf, "y"),
+              stringsAsFactors = FALSE
+            )
+            n_edge_tests[[ord + 1L]] <- n_edge_tests[[ord + 1L]] + 1L
+            if (edge_done) break
+          }
+        }
+      }
+    }
+    adjacency[delete_edges] <- FALSE
+  }
+  list(
+    adjacency = adjacency,
+    sepsets = sepsets,
+    pMax = pmax,
+    n.edgetests = as.integer(n_edge_tests),
+    trace = if (length(trace_rows) == 0L) data.frame() else do.call(rbind, trace_rows)
+  )
+}
+
+fastkpc_kpc_tprs_shadow_skeleton_shd <- function(left, right) {
+  left <- as.matrix(left)
+  right <- as.matrix(right)
+  sum(left[upper.tri(left)] != right[upper.tri(right)])
+}
+
+fastkpc_kpc_tprs_shadow_replay_trace <- function(p, trace) {
+  adjacency <- matrix(TRUE, p, p)
+  diag(adjacency) <- FALSE
+  pmax <- matrix(-Inf, p, p)
+  diag(pmax) <- 1
+  sepsets <- fastkpc_kpc_tprs_shadow_sepsets(p)
+  max_level <- if (nrow(trace) == 0L) 0L else max(trace$conditioning_level)
+  n_edge_tests <- integer(max_level + 1L)
+  if (nrow(trace) > 0L) {
+    for (i in seq_len(nrow(trace))) {
+      row <- trace[i, , drop = FALSE]
+      x <- as.integer(row$edge_x)
+      y <- as.integer(row$edge_y)
+      pval <- as.numeric(row$p.value)
+      if (pval > pmax[x, y]) {
+        pmax[x, y] <- pval
+        pmax[y, x] <- pval
+      }
+      level <- as.integer(row$conditioning_level)
+      n_edge_tests[[level + 1L]] <- n_edge_tests[[level + 1L]] + 1L
+      if (isTRUE(row$delete_edge) && isTRUE(adjacency[x, y])) {
+        adjacency[x, y] <- FALSE
+        adjacency[y, x] <- FALSE
+        S <- if (!nzchar(row$S_key)) {
+          integer()
+        } else {
+          as.integer(strsplit(row$S_key, "|", fixed = TRUE)[[1L]])
+        }
+        sepsets[[x]][[y]] <- S
+        sepsets[[y]][[x]] <- S
+      }
+    }
+  }
+  list(
+    adjacency = adjacency,
+    sepsets = sepsets,
+    pMax = pmax,
+    n.edgetests = as.integer(n_edge_tests),
+    trace = trace
+  )
+}
+
+fastkpc_kpc_tprs_shadow_sepset_mismatch_rate <- function(left, right) {
+  p <- length(left)
+  mismatches <- 0L
+  total <- 0L
+  for (i in seq_len(p - 1L)) {
+    for (j in seq.int(i + 1L, p)) {
+      total <- total + 1L
+      li <- sort(as.integer(left[[i]][[j]]))
+      ri <- sort(as.integer(right[[i]][[j]]))
+      if (!identical(li, ri)) mismatches <- mismatches + 1L
+    }
+  }
+  mismatches / max(1L, total)
+}
+
+fastkpc_kpc_tprs_shadow_campaign <- function(
+    data, alpha = 0.05, max_conditioning_size = 1L,
+    index = 1, legacy_index = TRUE) {
+  data <- as.matrix(data)
+  storage.mode(data) <- "double"
+  oracle <- fastkpc_kpc_tprs_shadow_run_skeleton(
+    data = data,
+    alpha = alpha,
+    max_conditioning_size = max_conditioning_size,
+    backend = "oracle",
+    index = index,
+    legacy_index = legacy_index
+  )
+  candidate_trace_rows <- lapply(seq_len(nrow(oracle$trace)), function(i) {
+    row <- oracle$trace[i, , drop = FALSE]
+    S <- if (!nzchar(row$S_key)) {
+      integer()
+    } else {
+      as.integer(strsplit(row$S_key, "|", fixed = TRUE)[[1L]])
+    }
+    ci <- fastkpc_kpc_tprs_shadow_ci(
+      data = data,
+      x = as.integer(row$x),
+      y = as.integer(row$y),
+      S = S,
+      backend = "candidate",
+      index = index,
+      legacy_index = legacy_index
+    )
+    data.frame(
+      canonical_test_order_id = row$canonical_test_order_id,
+      conditioning_level = row$conditioning_level,
+      edge_x = row$edge_x,
+      edge_y = row$edge_y,
+      x = row$x,
+      y = row$y,
+      conditioning_target_side = row$conditioning_target_side,
+      S_key = row$S_key,
+      p.value = ci$p.value,
+      delete_edge = is.finite(ci$p.value) && ci$p.value >= as.numeric(alpha),
+      mode = ci$mode,
+      selected_sp_x = fastkpc_kpc_tprs_named_or_na(ci$selected_sp, "x"),
+      selected_sp_y = fastkpc_kpc_tprs_named_or_na(ci$selected_sp, "y"),
+      score_x = fastkpc_kpc_tprs_named_or_na(ci$score, "x"),
+      score_y = fastkpc_kpc_tprs_named_or_na(ci$score, "y"),
+      edf_x = fastkpc_kpc_tprs_named_or_na(ci$edf, "x"),
+      edf_y = fastkpc_kpc_tprs_named_or_na(ci$edf, "y"),
+      stringsAsFactors = FALSE
+    )
+  })
+  candidate_trace <- if (length(candidate_trace_rows) == 0L) {
+    data.frame()
+  } else {
+    do.call(rbind, candidate_trace_rows)
+  }
+  candidate <- fastkpc_kpc_tprs_shadow_replay_trace(
+    p = ncol(data),
+    trace = candidate_trace
+  )
+  n <- min(nrow(oracle$trace), nrow(candidate$trace))
+  trace <- data.frame()
+  if (n > 0L) {
+    ot <- oracle$trace[seq_len(n), , drop = FALSE]
+    ct <- candidate$trace[seq_len(n), , drop = FALSE]
+    trace <- data.frame(
+      canonical_test_order_id = ot$canonical_test_order_id,
+      conditioning_level = ot$conditioning_level,
+      x = ot$x,
+      y = ot$y,
+      edge_x = ot$edge_x,
+      edge_y = ot$edge_y,
+      S_key = ot$S_key,
+      oracle_p = ot$p.value,
+      candidate_p = ct$p.value,
+      oracle_delete = ot$delete_edge,
+      candidate_delete = ct$delete_edge,
+      decision_flip = ot$delete_edge != ct$delete_edge,
+      candidate_mode = ct$mode,
+      candidate_selected_sp = paste(ct$selected_sp_x, ct$selected_sp_y, sep = "|"),
+      candidate_score = paste(ct$score_x, ct$score_y, sep = "|"),
+      candidate_edf = paste(ct$edf_x, ct$edf_y, sep = "|"),
+      stringsAsFactors = FALSE
+    )
+  }
+  pmax_diff <- abs(candidate$pMax - oracle$pMax)
+  pmax_diff <- pmax_diff[upper.tri(pmax_diff)]
+  log_p_diff <- if (nrow(trace) > 0L) {
+    abs(log(pmax(trace$candidate_p, .Machine$double.xmin)) -
+          log(pmax(trace$oracle_p, .Machine$double.xmin)))
+  } else {
+    numeric()
+  }
+  list(
+    backend_family = "kpcTprsResidualCPP",
+    mode = "shadow-graph-campaign",
+    authoritative = FALSE,
+    oracle_authoritative = TRUE,
+    p_used_source = "oracle",
+    decision_source = "oracle",
+    oracle = oracle[c("adjacency", "sepsets", "pMax", "n.edgetests")],
+    candidate = candidate[c("adjacency", "sepsets", "pMax", "n.edgetests")],
+    trace = trace,
+    agreement = list(
+      adjacency_identical = identical(oracle$adjacency, candidate$adjacency),
+      skeleton_shd = as.integer(fastkpc_kpc_tprs_shadow_skeleton_shd(
+        oracle$adjacency, candidate$adjacency)),
+      sepset_mismatch_rate = fastkpc_kpc_tprs_shadow_sepset_mismatch_rate(
+        oracle$sepsets, candidate$sepsets),
+      pmax_max_abs_diff =
+        if (length(pmax_diff) == 0L) 0 else max(pmax_diff, na.rm = TRUE),
+      n_edgetests_identical =
+        identical(oracle$n.edgetests, candidate$n.edgetests),
+      decision_flip_count =
+        if (nrow(trace) == 0L) 0L else sum(trace$decision_flip, na.rm = TRUE),
+      max_log_p_abs_diff =
+        if (length(log_p_diff) == 0L) 0 else max(log_p_diff, na.rm = TRUE)
+    ),
+    diagnostics = list(
+      schema_version = "kpcTprsResidualCPP-shadow-campaign-v1",
       does_not_drive_graph_decisions = TRUE
     )
   )
