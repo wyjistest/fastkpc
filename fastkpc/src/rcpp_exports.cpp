@@ -84,6 +84,48 @@ Rcpp::NumericMatrix evenly_spaced_knots(Rcpp::NumericMatrix unique_rows,
   return knots;
 }
 
+arma::mat rcpp_matrix_to_arma(Rcpp::NumericMatrix values) {
+  arma::mat out(values.nrow(), values.ncol());
+  for (int row = 0; row < values.nrow(); ++row) {
+    for (int col = 0; col < values.ncol(); ++col) out(row, col) = values(row, col);
+  }
+  return out;
+}
+
+Rcpp::NumericMatrix arma_matrix_to_rcpp(const arma::mat& values) {
+  Rcpp::NumericMatrix out(values.n_rows, values.n_cols);
+  for (arma::uword row = 0; row < values.n_rows; ++row) {
+    for (arma::uword col = 0; col < values.n_cols; ++col) {
+      out(row, col) = values(row, col);
+    }
+  }
+  return out;
+}
+
+Rcpp::NumericMatrix constraint_null_space_cpp(Rcpp::NumericMatrix C,
+                                              int p,
+                                              double tol) {
+  if (C.nrow() == 0) {
+    Rcpp::NumericMatrix identity(p, p);
+    for (int i = 0; i < p; ++i) identity(i, i) = 1.0;
+    return identity;
+  }
+  arma::mat Ct = rcpp_matrix_to_arma(C).t();
+  arma::mat Q;
+  arma::mat R;
+  arma::qr_econ(Q, R, Ct);
+  int rank = 0;
+  const int diag_count = std::min(R.n_rows, R.n_cols);
+  for (int i = 0; i < diag_count; ++i) {
+    if (std::abs(R(i, i)) > tol) ++rank;
+  }
+  arma::mat Qfull;
+  arma::mat Rfull;
+  arma::qr(Qfull, Rfull, Ct);
+  if (rank >= p) Rcpp::stop("constraint matrix leaves no free space");
+  return arma_matrix_to_rcpp(Qfull.cols(rank, p - 1));
+}
+
 double tprs_radial_value(double radius, int dimension) {
   if (radius <= 0.0) return 0.0;
   if (dimension == 1) return radius * radius * radius;
@@ -98,6 +140,22 @@ Rcpp::NumericMatrix kpc_tprs_polynomial_null_space(Rcpp::NumericMatrix S) {
     out(row, 0) = 1.0;
     for (int col = 0; col < d; ++col) out(row, col + 1) = S(row, col);
   }
+  return out;
+}
+
+Rcpp::NumericMatrix center_columns(Rcpp::NumericMatrix values,
+                                   Rcpp::NumericVector* shift_out) {
+  Rcpp::NumericMatrix out(values.nrow(), values.ncol());
+  Rcpp::NumericVector shift(values.ncol());
+  for (int col = 0; col < values.ncol(); ++col) {
+    double total = 0.0;
+    for (int row = 0; row < values.nrow(); ++row) total += values(row, col);
+    shift[col] = total / static_cast<double>(values.nrow());
+    for (int row = 0; row < values.nrow(); ++row) {
+      out(row, col) = values(row, col) - shift[col];
+    }
+  }
+  if (shift_out != nullptr) *shift_out = shift;
   return out;
 }
 
@@ -851,14 +909,33 @@ Rcpp::List kpc_tprs_residual_cpp_setup_export(Rcpp::NumericMatrix S,
     Rcpp::stop("tol must be positive and finite");
   }
 
-  Rcpp::NumericMatrix unique_rows = unique_rows_in_order(S);
-  const int requested_k = k > 0 ? k : std::min(10, std::max(1, unique_rows.nrow()));
-  Rcpp::NumericMatrix knots = evenly_spaced_knots(unique_rows, requested_k);
-  Rcpp::NumericMatrix polynomial = kpc_tprs_polynomial_null_space(S);
-  Rcpp::NumericMatrix radial = kpc_tprs_radial_basis(S, knots);
+  Rcpp::NumericVector shift;
+  Rcpp::NumericMatrix shifted = center_columns(S, &shift);
+  Rcpp::NumericMatrix unique_rows = unique_rows_in_order(shifted);
+  if (unique_rows.nrow() > 2000) {
+    Rcpp::stop("kpcTprsResidualCPP requires unique conditioning locations <= 2000");
+  }
+
+  const int null_space_rank = S.ncol() + 1;
+  const int k_def = S.ncol() == 1 ? 8 : 27;
+  const int basis_rank = k > 0 ? k : null_space_rank + k_def;
+  if (basis_rank < null_space_rank + 1) {
+    Rcpp::stop("basis dimension must exceed null-space rank");
+  }
+  const int penalized_rank = basis_rank - null_space_rank;
+  Rcpp::NumericMatrix knots = evenly_spaced_knots(unique_rows, penalized_rank);
+  Rcpp::NumericMatrix polynomial = kpc_tprs_polynomial_null_space(shifted);
+  Rcpp::NumericMatrix radial = kpc_tprs_radial_basis(shifted, knots);
   Rcpp::NumericMatrix X = cbind_numeric_matrices(polynomial, radial);
   Rcpp::NumericMatrix penalty = kpc_tprs_penalty_matrix(knots, polynomial.ncol());
   Rcpp::NumericMatrix constraint = kpc_tprs_centering_constraint(X);
+  Rcpp::NumericMatrix Z = constraint_null_space_cpp(constraint, X.ncol(), tol);
+  arma::mat Xa = rcpp_matrix_to_arma(X);
+  arma::mat Pa = rcpp_matrix_to_arma(penalty);
+  arma::mat Za = rcpp_matrix_to_arma(Z);
+  Rcpp::NumericMatrix X_absorbed = arma_matrix_to_rcpp(Xa * Za);
+  Rcpp::NumericMatrix penalty_absorbed = arma_matrix_to_rcpp(Za.t() * Pa * Za);
+  Rcpp::NumericMatrix radial_kernel = kpc_tprs_radial_basis(knots, knots);
 
   return Rcpp::List::create(
     Rcpp::Named("backend_family") = "kpcTprsResidualCPP",
@@ -866,11 +943,30 @@ Rcpp::List kpc_tprs_residual_cpp_setup_export(Rcpp::NumericMatrix S,
     Rcpp::Named("X") = X,
     Rcpp::Named("penalty") = penalty,
     Rcpp::Named("constraint") = constraint,
+    Rcpp::Named("raw") = Rcpp::List::create(
+      Rcpp::Named("shift") = shift,
+      Rcpp::Named("shifted_covariates") = shifted,
+      Rcpp::Named("unique_locations") = unique_rows,
+      Rcpp::Named("radial_kernel_block") = radial_kernel,
+      Rcpp::Named("radial") = radial,
+      Rcpp::Named("polynomial") = polynomial,
+      Rcpp::Named("penalty") = penalty,
+      Rcpp::Named("constraint") = constraint
+    ),
+    Rcpp::Named("absorbed") = Rcpp::List::create(
+      Rcpp::Named("Z") = Z,
+      Rcpp::Named("X") = X_absorbed,
+      Rcpp::Named("penalty") = penalty_absorbed,
+      Rcpp::Named("effective_rank") = X_absorbed.ncol(),
+      Rcpp::Named("null_space_rank") = null_space_rank
+    ),
     Rcpp::Named("knots") = knots,
     Rcpp::Named("unique_rows") = unique_rows,
-    Rcpp::Named("basis_rank") = X.ncol(),
-    Rcpp::Named("null_space_rank") = polynomial.ncol(),
-    Rcpp::Named("effective_rank") = X.ncol() - constraint.nrow(),
+    Rcpp::Named("basis_rank") = basis_rank,
+    Rcpp::Named("null_space_rank") = null_space_rank,
+    Rcpp::Named("penalized_rank") = penalized_rank,
+    Rcpp::Named("effective_rank") = X_absorbed.ncol(),
+    Rcpp::Named("k_def") = k_def,
     Rcpp::Named("k") = knots.nrow(),
     Rcpp::Named("radial_basis") = S.ncol() == 1 ? "r^3" : "r^2 log(r)",
     Rcpp::Named("polynomial_basis") =

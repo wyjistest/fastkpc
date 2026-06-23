@@ -1,13 +1,31 @@
 # kpcTprsResidualCPP shadow design
 
 Date: 2026-06-23
-Status: design spike
+Status: implementation in progress
 
 ## Positioning
 
 `kpcTprsResidualCPP` is a standalone C++ residual engine for the restricted single-smooth TPRS semantics used by kPC. It is developed first as a shadow candidate against a version-pinned mgcv oracle and does not drive graph decisions until residual-, CI-, and graph-level compatibility gates pass.
 
 This is not a C++ implementation of `mgcv::gam()`. It is not a generic GAM framework and is not a drop-in replacement for mgcv.
+
+Current implementation status:
+
+```text
+Phase 1a: standalone TPRS setup candidate
+    implemented in 20ea910
+
+Phase 1b: fixed-sp parity harness
+    measures geometry and fixed-sp residual drift
+    remains non-authoritative
+
+Not complete:
+    fixed-sp parity qualification
+    continuous GCV
+    candidate-selected sp
+    CUDA integration
+    graph decision replacement
+```
 
 ## First-Version Contract
 
