@@ -34,6 +34,7 @@ assert_has_names(
     "raw_projector_distance", "absorbed_projector_distance",
     "penalty_shape_distance", "penalty_scale_ratio",
     "same_raw_sp", "scale_corrected", "edf_matched",
+    "mapped_penalty_classification", "penalty_geometry",
     "classification", "diagnostics"),
   "drift isolation result"
 )
@@ -68,8 +69,21 @@ assert_true(iso$edf_matched$edf_abs_diff <= iso$same_raw_sp$edf_abs_diff,
             "EDF-matched path should not worsen EDF match")
 assert_true(iso$classification %in%
               c("function-space", "constraint-intercept", "penalty-shape",
-                "penalty-scale", "unclassified"),
+                "penalty-scale", "metric-false-positive", "unclassified"),
             "classification")
+assert_true(identical(iso$mapped_penalty_classification, "penalty-shape"),
+            "legacy mapped penalty metric should remain visible")
+assert_true(identical(iso$classification, "penalty-scale"),
+            "basis-invariant penalty geometry should override mapped metric")
+assert_has_names(iso$penalty_geometry,
+                 c("candidate_stage_identities", "oracle_stage_identities",
+                   "generalized_spectrum", "smoother_comparison",
+                   "classification"),
+                 "penalty geometry evidence")
+assert_true(iso$penalty_geometry$generalized_spectrum$log_spectrum_shape_rmse < 1e-8,
+            "generalized penalty spectrum should show scale-only drift")
+assert_true(max(iso$penalty_geometry$smoother_comparison$global_scale_smoother_rel_frobenius) < 1e-6,
+            "one global scale should align smoother matrices")
 assert_has_names(iso$diagnostics,
                  c("selected_eigenvalues", "truncation_eigengap",
                    "rank_T", "rank_TU", "Z_orthogonality_error",

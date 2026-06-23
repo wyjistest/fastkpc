@@ -449,6 +449,268 @@ fastkpc_kpc_tprs_diagnostic_or_na <- function(x, name) {
   if (is.null(x) || is.null(x[[name]])) NA_real_ else x[[name]]
 }
 
+fastkpc_kpc_tprs_absorbed_oracle_setup <- function(y, S) {
+  if (!requireNamespace("mgcv", quietly = TRUE)) {
+    stop("mgcv is required for kpcTprsResidualCPP oracle setup",
+         call. = FALSE)
+  }
+  input <- fastkpc_kpc_tprs_validate_input(y, S)
+  data <- fastkpc_kpc_tprs_data_frame(input$y, input$S)
+  formula <- fastkpc_kpc_tprs_formula(input$S)
+  smooth_spec <- eval(formula[[3L]], envir = data,
+                      enclos = asNamespace("mgcv"))
+  mgcv::smoothCon(
+    smooth_spec,
+    data = data,
+    knots = NULL,
+    absorb.cons = TRUE,
+    scale.penalty = TRUE
+  )[[1L]]
+}
+
+fastkpc_kpc_tprs_rel_fro <- function(candidate, oracle) {
+  candidate <- as.matrix(candidate)
+  oracle <- as.matrix(oracle)
+  denom <- sqrt(sum(oracle^2))
+  if (denom == 0) return(sqrt(sum((candidate - oracle)^2)))
+  sqrt(sum((candidate - oracle)^2)) / denom
+}
+
+fastkpc_kpc_tprs_candidate_uz_penalty_identity <- function(setup) {
+  E <- as.matrix(setup$raw$radial_kernel_block)
+  UZ <- as.matrix(setup$raw$UZ)
+  S <- as.matrix(setup$penalty)
+  n_unique <- nrow(E)
+  UZ_delta <- UZ[seq_len(n_unique), , drop = FALSE]
+  fastkpc_kpc_tprs_rel_fro(t(UZ_delta) %*% E %*% UZ_delta, S)
+}
+
+fastkpc_kpc_tprs_oracle_uz_penalty_identity <- function(oracle_raw) {
+  Xu <- as.matrix(oracle_raw$unique_locations)
+  UZ <- as.matrix(oracle_raw$UZ)
+  S <- as.matrix(oracle_raw$penalty)
+  S_scale <- as.numeric(oracle_raw$S_scale %||% 1)
+  E <- fastkpc_kpc_tprs_eta_1d(Xu[, 1L], Xu[, 1L])
+  UZ_delta <- UZ[seq_len(nrow(Xu)), , drop = FALSE]
+  fastkpc_kpc_tprs_rel_fro(t(UZ_delta) %*% E %*% UZ_delta, S * S_scale)
+}
+
+fastkpc_kpc_tprs_candidate_stage_identities <- function(setup) {
+  raw <- setup$raw
+  S_eigen <- as.matrix(raw$S_eigen)
+  Z_tps <- as.matrix(raw$tps_null_space)
+  S_tps <- as.matrix(raw$S_tps_constrained)
+  S_pre <- as.matrix(raw$S_pre_rms)
+  W <- as.matrix(raw$W_rms)
+  S_rms <- as.matrix(raw$S_rms)
+  Q <- as.matrix(setup$absorbed$Z)
+  S_abs <- as.matrix(setup$absorbed$penalty)
+  list(
+    uz_penalty_identity_rel_error =
+      fastkpc_kpc_tprs_candidate_uz_penalty_identity(setup),
+    pre_rms_congruence_rel_error =
+      fastkpc_kpc_tprs_rel_fro(
+        S_pre[seq_len(nrow(S_tps)), seq_len(ncol(S_tps)), drop = FALSE],
+        S_tps
+      ),
+    post_rms_congruence_rel_error =
+      fastkpc_kpc_tprs_rel_fro(t(W) %*% S_pre %*% W, S_rms),
+    ident_absorb_congruence_rel_error =
+      fastkpc_kpc_tprs_rel_fro(t(Q) %*% S_rms %*% Q, S_abs),
+    tps_from_eigen_rel_error =
+      fastkpc_kpc_tprs_rel_fro(t(Z_tps) %*% S_eigen %*% Z_tps, S_tps)
+  )
+}
+
+fastkpc_kpc_tprs_whitened_penalty_eigenvalues <- function(
+    X, S, tol = sqrt(.Machine$double.eps)) {
+  X <- as.matrix(X)
+  S <- as.matrix(S)
+  G <- crossprod(X)
+  eigG <- eigen((G + t(G)) / 2, symmetric = TRUE)
+  keep <- eigG$values > tol * max(1, max(eigG$values))
+  if (!any(keep)) return(numeric())
+  Q <- eigG$vectors[, keep, drop = FALSE]
+  values <- eigG$values[keep]
+  G_inv_half <- Q %*% diag(1 / sqrt(values), nrow = length(values)) %*% t(Q)
+  K <- G_inv_half %*% S %*% G_inv_half
+  eigK <- eigen((K + t(K)) / 2, symmetric = TRUE, only.values = TRUE)$values
+  eigK <- sort(as.numeric(eigK[eigK > tol * max(1, max(abs(eigK)))]),
+               decreasing = TRUE)
+  eigK
+}
+
+fastkpc_kpc_tprs_generalized_spectrum_compare <- function(
+    X_candidate, S_candidate, X_oracle, S_oracle,
+    tol = sqrt(.Machine$double.eps)) {
+  candidate <- fastkpc_kpc_tprs_whitened_penalty_eigenvalues(
+    X_candidate, S_candidate, tol = tol)
+  oracle <- fastkpc_kpc_tprs_whitened_penalty_eigenvalues(
+    X_oracle, S_oracle, tol = tol)
+  m <- min(length(candidate), length(oracle))
+  if (m == 0L) {
+    offset <- NA_real_
+    rmse <- NA_real_
+  } else {
+    delta <- log(candidate[seq_len(m)]) - log(oracle[seq_len(m)])
+    offset <- stats::median(delta)
+    rmse <- sqrt(mean((delta - offset)^2))
+  }
+  list(
+    generalized_penalty_rank = as.integer(length(candidate)),
+    generalized_eigenvalues_positive = list(
+      candidate = candidate,
+      oracle = oracle
+    ),
+    log_spectrum_scale_offset = as.numeric(offset),
+    log_spectrum_shape_rmse = as.numeric(rmse)
+  )
+}
+
+fastkpc_kpc_tprs_smoother_matrix <- function(X, S, lambda,
+                                             tol = sqrt(.Machine$double.eps)) {
+  X <- as.matrix(X)
+  S <- as.matrix(S)
+  A <- crossprod(X) + as.numeric(lambda) * S
+  A_inv <- tryCatch(
+    solve(A),
+    error = function(e) qr.solve(A, diag(ncol(A)), tol = tol)
+  )
+  X %*% A_inv %*% t(X)
+}
+
+fastkpc_kpc_tprs_smoother_rel_distance <- function(
+    X_candidate, S_candidate, X_oracle, S_oracle,
+    lambda_oracle, scale, tol = sqrt(.Machine$double.eps)) {
+  H_candidate <- fastkpc_kpc_tprs_smoother_matrix(
+    X_candidate, S_candidate, lambda_oracle * scale, tol = tol)
+  H_oracle <- fastkpc_kpc_tprs_smoother_matrix(
+    X_oracle, S_oracle, lambda_oracle, tol = tol)
+  fastkpc_kpc_tprs_rel_fro(H_candidate, H_oracle)
+}
+
+fastkpc_kpc_tprs_smoother_comparison <- function(
+    X_candidate, S_candidate, X_oracle, S_oracle, lambda_values,
+    global_scale = 1,
+    tol = sqrt(.Machine$double.eps)) {
+  local_grid <- exp(seq(log(1e-6), log(1e6), length.out = 49L))
+  rows <- lapply(as.numeric(lambda_values), function(lambda) {
+    distances <- vapply(local_grid, function(scale) {
+      fastkpc_kpc_tprs_smoother_rel_distance(
+        X_candidate, S_candidate, X_oracle, S_oracle,
+        lambda_oracle = lambda, scale = scale, tol = tol)
+    }, numeric(1L))
+    best <- which.min(distances)
+    data.frame(
+      lambda = lambda,
+      best_scale = local_grid[[best]],
+      smoother_rel_frobenius = distances[[best]],
+      global_scale = global_scale,
+      global_scale_smoother_rel_frobenius =
+        fastkpc_kpc_tprs_smoother_rel_distance(
+          X_candidate, S_candidate, X_oracle, S_oracle,
+          lambda_oracle = lambda, scale = global_scale, tol = tol),
+      stringsAsFactors = FALSE
+    )
+  })
+  do.call(rbind, rows)
+}
+
+fastkpc_kpc_tprs_classify_penalty_geometry <- function(
+    candidate_stage_identities, oracle_stage_identities,
+    generalized_spectrum, smoother_comparison,
+    identity_tol = 1e-8,
+    spectrum_shape_tol = 1e-4,
+    smoother_tol = 1e-4) {
+  if (candidate_stage_identities$uz_penalty_identity_rel_error > identity_tol ||
+      candidate_stage_identities$post_rms_congruence_rel_error > identity_tol ||
+      candidate_stage_identities$ident_absorb_congruence_rel_error > identity_tol) {
+    return("penalty-assembly")
+  }
+  if (oracle_stage_identities$uz_penalty_identity_rel_error > identity_tol) {
+    return("stage-mismatch")
+  }
+  if (is.finite(generalized_spectrum$log_spectrum_shape_rmse) &&
+      generalized_spectrum$log_spectrum_shape_rmse > spectrum_shape_tol) {
+    return("penalty-shape")
+  }
+  global_dist <- smoother_comparison$global_scale_smoother_rel_frobenius
+  if (all(is.finite(global_dist)) && max(global_dist) <= smoother_tol) {
+    return("penalty-scale")
+  }
+  if (all(is.finite(smoother_comparison$smoother_rel_frobenius)) &&
+      max(smoother_comparison$smoother_rel_frobenius) <= smoother_tol) {
+    return("metric-false-positive")
+  }
+  "unclassified"
+}
+
+fastkpc_kpc_tprs_penalty_geometry_isolation <- function(
+    y, S, lambda_values = c(1e-6, 1e-3, 1, 1e3, 1e6),
+    tol = sqrt(.Machine$double.eps)) {
+  input <- fastkpc_kpc_tprs_validate_input(y, S)
+  if (ncol(input$S) != 1L) {
+    fastkpc_kpc_tprs_stop("Phase 1e penalty geometry isolation is 1D only")
+  }
+  candidate_setup <- kpc_tprs_residual_cpp_setup(input$S, tol = tol)
+  oracle_raw <- fastkpc_kpc_tprs_mgcv_oracle_setup(input$y, input$S, sp = 1)
+  oracle_absorbed <- fastkpc_kpc_tprs_absorbed_oracle_setup(input$y, input$S)
+
+  candidate_stage_identities <-
+    fastkpc_kpc_tprs_candidate_stage_identities(candidate_setup)
+  oracle_stage_identities <- list(
+    uz_penalty_identity_rel_error =
+      fastkpc_kpc_tprs_oracle_uz_penalty_identity(oracle_raw$raw)
+  )
+  generalized_spectrum <- fastkpc_kpc_tprs_generalized_spectrum_compare(
+    candidate_setup$absorbed$X,
+    candidate_setup$absorbed$penalty,
+    oracle_absorbed$X,
+    oracle_absorbed$S[[1L]],
+    tol = tol
+  )
+  global_scale <- if (is.finite(generalized_spectrum$log_spectrum_scale_offset)) {
+    exp(-generalized_spectrum$log_spectrum_scale_offset)
+  } else {
+    1
+  }
+  smoother_comparison <- fastkpc_kpc_tprs_smoother_comparison(
+    candidate_setup$absorbed$X,
+    candidate_setup$absorbed$penalty,
+    oracle_absorbed$X,
+    oracle_absorbed$S[[1L]],
+    lambda_values = lambda_values,
+    global_scale = global_scale,
+    tol = tol
+  )
+  classification <- fastkpc_kpc_tprs_classify_penalty_geometry(
+    candidate_stage_identities = candidate_stage_identities,
+    oracle_stage_identities = oracle_stage_identities,
+    generalized_spectrum = generalized_spectrum,
+    smoother_comparison = smoother_comparison
+  )
+
+  list(
+    backend_family = "kpcTprsResidualCPP",
+    mode = "penalty-geometry-isolation",
+    authoritative = FALSE,
+    conditioning_size = as.integer(ncol(input$S)),
+    signed_eigenvalues = as.numeric(candidate_setup$raw$selected_eigenvalues),
+    candidate_stage_identities = candidate_stage_identities,
+    oracle_stage_identities = oracle_stage_identities,
+    generalized_spectrum = generalized_spectrum,
+    smoother_comparison = smoother_comparison,
+    classification = classification,
+    diagnostics = list(
+      schema_version = "kpcTprsResidualCPP-penalty-geometry-v1",
+      candidate_basis_rank = candidate_setup$basis_rank,
+      oracle_absorbed_rank = ncol(oracle_absorbed$X),
+      oracle_s_scale = oracle_raw$raw$S_scale,
+      does_not_drive_graph_decisions = TRUE
+    )
+  )
+}
+
 fastkpc_kpc_tprs_align_rows <- function(candidate, oracle) {
   n <- min(nrow(candidate), nrow(oracle))
   list(
@@ -586,7 +848,7 @@ fastkpc_kpc_tprs_fixed_sp_drift_isolation <- function(
   )
   edf_matched <- fastkpc_kpc_tprs_compare_fit(candidate_edf, oracle_raw)
 
-  classification <- fastkpc_kpc_tprs_classify_drift(
+  mapped_classification <- fastkpc_kpc_tprs_classify_drift(
     raw_projector_distance = raw_projector_distance,
     absorbed_projector_distance = absorbed_projector_distance,
     penalty_shape_distance = shape_scale$shape_distance,
@@ -594,6 +856,28 @@ fastkpc_kpc_tprs_fixed_sp_drift_isolation <- function(
     scale_corrected = scale_corrected,
     edf_matched = edf_matched
   )
+  penalty_geometry <- NULL
+  classification <- mapped_classification
+  if (ncol(input$S) == 1L) {
+    penalty_geometry <- tryCatch(
+      fastkpc_kpc_tprs_penalty_geometry_isolation(
+        y = input$y,
+        S = input$S,
+        lambda_values = c(1e-6, 1e-3, 1, 1e3, 1e6),
+        tol = tol
+      ),
+      error = function(e) {
+        list(
+          classification = "unclassified",
+          diagnostics = list(failure_reason = conditionMessage(e))
+        )
+      }
+    )
+    if (penalty_geometry$classification %in%
+        c("penalty-scale", "metric-false-positive")) {
+      classification <- penalty_geometry$classification
+    }
+  }
 
   list(
     backend_family = "kpcTprsResidualCPP",
@@ -608,6 +892,8 @@ fastkpc_kpc_tprs_fixed_sp_drift_isolation <- function(
     same_raw_sp = same_raw_sp,
     scale_corrected = scale_corrected,
     edf_matched = edf_matched,
+    mapped_penalty_classification = mapped_classification,
+    penalty_geometry = penalty_geometry,
     classification = classification,
     diagnostics = list(
       schema_version = "kpcTprsResidualCPP-drift-isolation-v1",

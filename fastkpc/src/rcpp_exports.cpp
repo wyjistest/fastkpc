@@ -439,8 +439,10 @@ Rcpp::List kpc_tprs_residual_cpp_setup_1d(
   }
 
   arma::mat penalty(basis_rank, basis_rank, arma::fill::zeros);
-  penalty.submat(0, 0, penalized_rank - 1, penalized_rank - 1) =
+  arma::mat S_tps_constrained =
     Z_tps.t() * arma::diagmat(selected_eigenvalues) * Z_tps;
+  penalty.submat(0, 0, penalized_rank - 1, penalized_rank - 1) =
+    S_tps_constrained;
 
   arma::mat UZ(unique_n + null_space_rank, basis_rank, arma::fill::zeros);
   UZ.submat(0, 0, unique_n - 1, penalized_rank - 1) = U * Z_tps;
@@ -448,18 +450,22 @@ Rcpp::List kpc_tprs_residual_cpp_setup_1d(
             unique_n + null_space_rank - 1, basis_rank - 1) =
     arma::eye(null_space_rank, null_space_rank);
   arma::mat UZ_unscaled = UZ;
+  arma::mat penalty_pre_rms = penalty;
 
   const Rcpp::NumericVector pre_rms_column_norms = arma_row_rms(X);
+  arma::vec rms_inverse(basis_rank);
   for (int col = 0; col < basis_rank; ++col) {
     const double w = pre_rms_column_norms[col];
     if (!std::isfinite(w) || w <= tol) {
       Rcpp::stop("1D TPRS RMS scaling encountered a zero column");
     }
+    rms_inverse(col) = 1.0 / w;
     X.col(col) /= w;
     UZ.col(col) /= w;
     penalty.row(col) /= w;
     penalty.col(col) /= w;
   }
+  arma::mat W_rms = arma::diagmat(rms_inverse);
   const Rcpp::NumericVector post_rms_column_norms = arma_row_rms(X);
 
   Rcpp::NumericMatrix X_rcpp = arma_matrix_to_rcpp(X);
@@ -469,8 +475,10 @@ Rcpp::List kpc_tprs_residual_cpp_setup_1d(
     constraint, basis_rank, tol);
   arma::mat Z_ident_arma = rcpp_matrix_to_arma(Z_ident);
   Rcpp::NumericMatrix X_absorbed = arma_matrix_to_rcpp(X * Z_ident_arma);
+  arma::mat penalty_rms = penalty;
+  arma::mat penalty_absorbed_arma = Z_ident_arma.t() * penalty * Z_ident_arma;
   Rcpp::NumericMatrix penalty_absorbed =
-    arma_matrix_to_rcpp(Z_ident_arma.t() * penalty * Z_ident_arma);
+    arma_matrix_to_rcpp(penalty_absorbed_arma);
 
   arma::mat radial_full(n, penalized_rank, arma::fill::zeros);
   arma::mat polynomial_full(n, null_space_rank, arma::fill::zeros);
@@ -501,6 +509,12 @@ Rcpp::List kpc_tprs_residual_cpp_setup_1d(
       Rcpp::Named("UZ_unscaled") = arma_matrix_to_rcpp(UZ_unscaled),
       Rcpp::Named("eigenvectors") = arma_matrix_to_rcpp(U),
       Rcpp::Named("selected_eigenvalues") = arma_vector_to_rcpp(selected_eigenvalues),
+      Rcpp::Named("S_eigen") = arma_matrix_to_rcpp(arma::diagmat(selected_eigenvalues)),
+      Rcpp::Named("S_tps_constrained") = arma_matrix_to_rcpp(S_tps_constrained),
+      Rcpp::Named("S_pre_rms") = arma_matrix_to_rcpp(penalty_pre_rms),
+      Rcpp::Named("S_rms") = arma_matrix_to_rcpp(penalty_rms),
+      Rcpp::Named("rms_inverse") = arma_vector_to_rcpp(rms_inverse),
+      Rcpp::Named("W_rms") = arma_matrix_to_rcpp(W_rms),
       Rcpp::Named("tps_side_constraint") = arma_matrix_to_rcpp(TU),
       Rcpp::Named("tps_null_space") = arma_matrix_to_rcpp(Z_tps)
     ),
@@ -508,6 +522,7 @@ Rcpp::List kpc_tprs_residual_cpp_setup_1d(
       Rcpp::Named("Z") = Z_ident,
       Rcpp::Named("X") = X_absorbed,
       Rcpp::Named("penalty") = penalty_absorbed,
+      Rcpp::Named("penalty_from_raw") = arma_matrix_to_rcpp(penalty_absorbed_arma),
       Rcpp::Named("effective_rank") = X_absorbed.ncol(),
       Rcpp::Named("null_space_rank") = null_space_rank
     ),
