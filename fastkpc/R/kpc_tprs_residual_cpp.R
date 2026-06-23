@@ -1910,3 +1910,127 @@ fastkpc_kpc_tprs_shadow_campaign <- function(
   )
 }
 
+fastkpc_kpc_tprs_switch_qualification_campaign <- function(
+    scenarios, alpha = 0.05, max_conditioning_size = 1L,
+    engine = "cpu") {
+  caps_mgcv <- list(
+    R_version = "4.5.0",
+    mgcv_version = "1.9-4",
+    cuda_available = FALSE,
+    mgcvExtractGPU_backend_version = "mgcvExtractGPU-v1",
+    spectral_gcv_version = "single-penalty-spectral-gcv-v1",
+    setup_fingerprint_schema_version = "mgcvExtractGPU-setup-v1"
+  )
+  caps_kpc <- modifyList(caps_mgcv, list(
+    kpcTprsResidualCPP_supported = TRUE,
+    kpcTprsResidualCPP_backend_version = "kpcTprsResidualCPP-v1"
+  ))
+  rows <- list()
+  details <- list()
+  for (name in names(scenarios)) {
+    data <- scenarios[[name]]
+    result <- tryCatch({
+      reference <- fast_kpc(
+        data,
+        alpha = alpha,
+        max_conditioning_size = max_conditioning_size,
+        engine = engine,
+        precision = "compatible",
+        graph_stage = "skeleton",
+        runtime_capabilities = caps_mgcv
+      )
+      candidate <- fast_kpc(
+        data,
+        alpha = alpha,
+        max_conditioning_size = max_conditioning_size,
+        engine = engine,
+        precision = "compatible",
+        graph_stage = "skeleton",
+        runtime_capabilities = caps_kpc
+      )
+      pmax_diff <- abs(candidate$skeleton$pMax - reference$skeleton$pMax)
+      pmax_diff <- pmax_diff[upper.tri(pmax_diff)]
+      trace <- candidate$diagnostics$precision_trace
+      conditional <- trace[nzchar(trace$S_key), , drop = FALSE]
+      two_d <- conditional[grepl("|", conditional$S_key, fixed = TRUE),
+                           , drop = FALSE]
+      fallback_trace <- fast_kpc(
+        data,
+        alpha = alpha,
+        max_conditioning_size = max_conditioning_size,
+        engine = engine,
+        precision = "compatible",
+        graph_stage = "skeleton",
+        runtime_capabilities = caps_mgcv
+      )$diagnostics$precision_trace
+      mgcv_fallback_available <- any(
+        fallback_trace$backend_executed %in% c("mgcvExtractCPU",
+                                               "mgcvExtractGPU",
+                                               "legacy-mgcv")
+      )
+      list(
+        reference = reference,
+        candidate = candidate,
+        row = data.frame(
+          scenario = name,
+          adjacency_identical =
+            identical(candidate$skeleton$adjacency,
+                      reference$skeleton$adjacency),
+          n_edgetests_identical =
+            identical(candidate$skeleton$n.edgetests,
+                      reference$skeleton$n.edgetests),
+          pmax_max_abs_diff =
+            if (length(pmax_diff) == 0L) 0 else max(pmax_diff, na.rm = TRUE),
+          conditional_kpc_rows =
+            sum(conditional$backend_executed == "kpcTprsResidualCPP",
+                na.rm = TRUE),
+          two_d_kpc_rows =
+            sum(two_d$backend_executed == "kpcTprsResidualCPP",
+                na.rm = TRUE),
+          mgcv_fallback_available = isTRUE(mgcv_fallback_available),
+          passed = identical(candidate$skeleton$adjacency,
+                             reference$skeleton$adjacency) &&
+            identical(candidate$skeleton$n.edgetests,
+                      reference$skeleton$n.edgetests) &&
+            (if (length(pmax_diff) == 0L) 0 else max(pmax_diff, na.rm = TRUE)) <
+              1e-4 &&
+            sum(conditional$backend_executed == "kpcTprsResidualCPP",
+                na.rm = TRUE) > 0L &&
+            isTRUE(mgcv_fallback_available),
+          failure_reason = "",
+          stringsAsFactors = FALSE
+        )
+      )
+    }, error = function(e) {
+      list(
+        reference = NULL,
+        candidate = NULL,
+        row = data.frame(
+          scenario = name,
+          adjacency_identical = FALSE,
+          n_edgetests_identical = FALSE,
+          pmax_max_abs_diff = NA_real_,
+          conditional_kpc_rows = 0L,
+          two_d_kpc_rows = 0L,
+          mgcv_fallback_available = FALSE,
+          passed = FALSE,
+          failure_reason = conditionMessage(e),
+          stringsAsFactors = FALSE
+        )
+      )
+    })
+    details[[name]] <- result
+    rows[[length(rows) + 1L]] <- result$row
+  }
+  list(
+    backend_family = "kpcTprsResidualCPP",
+    mode = "switch-qualification-campaign",
+    authoritative = FALSE,
+    summary = if (length(rows) == 0L) data.frame() else do.call(rbind, rows),
+    details = details,
+    diagnostics = list(
+      schema_version = "kpcTprsResidualCPP-switch-qualification-v1",
+      does_not_drive_graph_decisions = TRUE
+    )
+  )
+}

@@ -16,6 +16,8 @@ fastkpc_precision_runtime_capabilities <- function() {
     ),
     cuda_device_capability = NA_character_,
     mgcvExtractGPU_backend_version = "mgcvExtractGPU-v1",
+    kpcTprsResidualCPP_supported = FALSE,
+    kpcTprsResidualCPP_backend_version = "kpcTprsResidualCPP-shadow-v1",
     spectral_gcv_version = "single-penalty-spectral-gcv-v1",
     setup_fingerprint_schema_version = "mgcvExtractGPU-setup-v1"
   )
@@ -95,6 +97,18 @@ fastkpc_resolve_backend_request <- function(
   if (identical(precision, "compatible") && !runnable) {
     route$primary_backend <- fallback_backend
   }
+  kpc_tprs_supported <- identical(precision, "compatible") &&
+    isTRUE(runtime_capabilities$kpcTprsResidualCPP_supported) &&
+    runnable &&
+    identical(family, "gaussian") &&
+    identical(link, "identity") &&
+    formula_class %in% c("full-smooth", "single-smooth-1d", "single-smooth-2d") &&
+    as.integer(penalty_count) == 1L &&
+    length(S) <= 2L
+  if (isTRUE(kpc_tprs_supported)) {
+    route$primary_backend <- "kpcTprsResidualCPP"
+    route$compatibility_claim <- "kpc-tprs-residual-cpp-shadow-qualified"
+  }
   if (identical(precision, "hybrid") && !runnable) {
     route$verifier_backend <- fallback_backend
   }
@@ -116,9 +130,13 @@ fastkpc_resolve_backend_request <- function(
     route$supported_checks <- checks$supported_checks
     route$unsupported_checks <- checks$unsupported_checks
   }
+  if (isTRUE(kpc_tprs_supported)) {
+    route$compatibility_action <- "run-kpcTprsResidualCPP-with-mgcv-fallback"
+  }
   route$fallback_backend <- fallback_backend
   route$near_alpha_policy <- list(alpha = as.numeric(alpha), tau = as.numeric(tau))
   route$setup_fingerprint <- as.character(setup_fingerprint)
   route$runtime_capabilities <- runtime_capabilities
+  route$execution_engine <- execution_engine
   route
 }

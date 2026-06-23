@@ -6,6 +6,7 @@ fastkpc_default_precision_executors <- function() {
     `direct-ci` = fastkpc_execute_ci_direct,
     fastSplineCPU = fastkpc_execute_ci_fast_spline_cpu,
     fastSplineCUDA = fastkpc_execute_ci_fast_spline_cuda,
+    kpcTprsResidualCPP = fastkpc_execute_ci_kpc_tprs_residual_cpp,
     mgcvExtractCPUGCVBridge = fastkpc_execute_ci_mgcv_extract_cpu,
     mgcvExtractGPUGCV = fastkpc_execute_ci_mgcv_extract_gpu,
     `legacy-mgcv` = fastkpc_execute_ci_legacy_mgcv
@@ -1884,6 +1885,57 @@ fastkpc_execute_ci_mgcv_extract_cpu <- function(data, x, y, S, ci_method,
   )
 }
 
+fastkpc_execute_ci_kpc_tprs_residual_cpp <- function(data, x, y, S, ci_method,
+                                                     index, legacy_index,
+                                                     hsic_params,
+                                                     permutation_params, route,
+                                                     role = "primary") {
+  start <- proc.time()[["elapsed"]]
+  if (length(S) == 0L || length(S) > 2L) {
+    stop("kpcTprsResidualCPP precision executor supports 1 <= |S| <= 2",
+         call. = FALSE)
+  }
+  S_matrix <- data[, S, drop = FALSE]
+  fit_x <- fastkpc_kpc_tprs_gcv_candidate(data[, x], S_matrix)
+  fit_y <- fastkpc_kpc_tprs_gcv_candidate(data[, y], S_matrix)
+  ci <- fastkpc_precision_ci_from_residuals(
+    fit_x$residuals, fit_y$residuals,
+    ci_method = ci_method, index = index,
+    legacy_index = legacy_index, hsic_params = hsic_params,
+    permutation_params = permutation_params
+  )
+  elapsed <- (proc.time()[["elapsed"]] - start) * 1000
+  setup_key <- route$setup_fingerprint %||%
+    paste0("kpcTprsResidualCPP:S:", fastkpc_precision_S_key(S))
+  list(
+    p.value = ci$p.value,
+    residual_backend_executed = "kpcTprsResidualCPP",
+    ci_backend_executed = "native-cpu",
+    setup_fingerprint = setup_key,
+    setup_fingerprint_x = setup_key,
+    setup_fingerprint_y = setup_key,
+    shared_setup_fingerprint = setup_key,
+    p_source_used = paste0(role, ":kpcTprsResidualCPP+native-cpu"),
+    sp = c(x = fit_x$selected_sp, y = fit_y$selected_sp),
+    score = c(x = fit_x$score, y = fit_y$score),
+    edf = c(x = fit_x$edf, y = fit_y$edf),
+    selected_grid_index = c(x = fit_x$selected_grid_index,
+                            y = fit_y$selected_grid_index),
+    gcv_grid_points = c(x = nrow(fit_x$grid), y = nrow(fit_y$grid)),
+    sp_selection_backend_executed_x = "kpcTprsResidualCPP-continuous-gcv",
+    sp_selection_backend_executed_y = "kpcTprsResidualCPP-continuous-gcv",
+    gcv_score_backend_executed_x = "kpcTprsResidualCPP-cpu",
+    gcv_score_backend_executed_y = "kpcTprsResidualCPP-cpu",
+    selected_solve_backend_executed_x = "kpcTprsResidualCPP-cpu",
+    selected_solve_backend_executed_y = "kpcTprsResidualCPP-cpu",
+    timings = list(
+      residualization_compute_ms = elapsed,
+      ci_test_ms = elapsed,
+      total_ms = elapsed
+    )
+  )
+}
+
 fastkpc_legacy_mgcv_residual <- function(data, target, S) {
   if (length(S) == 0L) return(as.numeric(data[, target]))
   if (length(S) > 2L) {
@@ -1980,7 +2032,14 @@ fastkpc_precision_fallback_backends <- function(primary_backend, route) {
   fallback_backend <- fastkpc_nonempty_backend(route$fallback_backend,
                                                "legacy-mgcv")
   out <- character()
-  if (identical(primary_backend, "mgcvExtractGPUGCV")) {
+  if (identical(primary_backend, "kpcTprsResidualCPP")) {
+    if (identical(route$execution_engine %||% "", "cuda")) {
+      out <- c(out, "mgcvExtractGPUGCV", "mgcvExtractCPUGCVBridge",
+               fallback_backend)
+    } else {
+      out <- c(out, "mgcvExtractCPUGCVBridge", fallback_backend)
+    }
+  } else if (identical(primary_backend, "mgcvExtractGPUGCV")) {
     out <- c(out, "mgcvExtractCPUGCVBridge", fallback_backend)
   } else if (identical(primary_backend, "mgcvExtractCPUGCVBridge")) {
     out <- c(out, fallback_backend)
