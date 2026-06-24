@@ -1468,23 +1468,104 @@ fastkpc_kpc_tprs_gcv_score_for_setup <- function(
   )
 }
 
-fastkpc_kpc_tprs_gcv_candidate <- function(
-    y, S,
-    lambda_grid = exp(seq(log(1e-4), log(1e4), length.out = 17L)),
-    refine = TRUE,
-    tol = sqrt(.Machine$double.eps)) {
-  input <- fastkpc_kpc_tprs_validate_input(y, S)
-  lambda_grid <- as.numeric(lambda_grid)
-  if (length(lambda_grid) == 0L ||
-      any(!is.finite(lambda_grid)) || any(lambda_grid <= 0)) {
-    fastkpc_kpc_tprs_stop("lambda_grid must be positive finite")
+fastkpc_kpc_tprs_initial_lambda <- function(setup) {
+  X <- cbind(`(Intercept)` = 1, as.matrix(setup$absorbed$X))
+  S <- as.matrix(setup$absorbed$penalty)
+  ldxx <- colSums(X * X)
+  ldss <- ldxx * 0
+  start <- 2L
+  finish <- start + ncol(S) - 1L
+  maS <- max(abs(S))
+  rsS <- rowMeans(abs(S))
+  csS <- colMeans(abs(S))
+  dS <- diag(abs(S))
+  thresh <- .Machine$double.eps^0.8 * maS
+  ind <- rsS > thresh & csS > thresh & dS > thresh
+  ss <- diag(S)[ind]
+  xx <- ldxx[start:finish][ind]
+  if (length(ss) == 0L || length(xx) == 0L || mean(ss) <= 0) {
+    return(1)
   }
-  lambda_grid <- sort(unique(lambda_grid))
-  setup <- kpc_tprs_residual_cpp_setup(input$S, tol = tol)
-  grid_eval <- lapply(lambda_grid, function(lambda) {
+  lambda <- mean(xx) / mean(ss)
+  pen <- rep(FALSE, length(ldxx))
+  pen[start:finish] <- ind
+  ldss[start:finish] <- ldss[start:finish] + lambda * diag(S)
+  active <- ldss > 0 & pen & ldxx > 0
+  if (!any(active)) return(as.numeric(lambda))
+  active_xx <- ldxx[active]
+  active_ss <- ldss[active]
+  while (mean(active_xx / (active_xx + active_ss)) > 0.4) {
+    lambda <- lambda * 10
+    active_ss <- active_ss * 10
+  }
+  while (mean(active_xx / (active_xx + active_ss)) < 0.4) {
+    lambda <- lambda / 10
+    active_ss <- active_ss / 10
+  }
+  as.numeric(lambda)
+}
+
+fastkpc_kpc_tprs_local_gcv_candidate <- function(
+    y, setup, lambda_start, step_factor = sqrt(10),
+    max_steps = 30L, tol = sqrt(.Machine$double.eps)) {
+  lambda_start <- as.numeric(lambda_start)[1L]
+  if (!is.finite(lambda_start) || lambda_start <= 0) lambda_start <- 1
+  step_factor <- as.numeric(step_factor)[1L]
+  if (!is.finite(step_factor) || step_factor <= 1) step_factor <- sqrt(10)
+  score_at <- function(lambda) {
     fastkpc_kpc_tprs_gcv_score_for_setup(
-      y = input$y, setup = setup, lambda = lambda, tol = tol)
-  })
+      y = y, setup = setup, lambda = lambda, tol = tol)
+  }
+  center <- score_at(lambda_start)
+  lower <- lambda_start / step_factor
+  upper <- lambda_start * step_factor
+  lower_score <- score_at(lower)
+  upper_score <- score_at(upper)
+  direction <- if (lower_score$gcv < center$gcv &&
+                   lower_score$gcv <= upper_score$gcv) {
+    -1L
+  } else if (upper_score$gcv < center$gcv) {
+    1L
+  } else {
+    0L
+  }
+  if (direction == 0L) {
+    bracket <- c(log(lower), log(upper))
+    grid_eval <- list(lower_score, center, upper_score)
+  } else {
+    previous <- center
+    current <- if (direction < 0L) lower_score else upper_score
+    previous_lambda <- lambda_start
+    current_lambda <- if (direction < 0L) lower else upper
+    next_lambda <- current_lambda
+    next_score <- current
+    for (i in seq_len(as.integer(max_steps))) {
+      next_lambda <- if (direction < 0L) {
+        current_lambda / step_factor
+      } else {
+        current_lambda * step_factor
+      }
+      next_score <- score_at(next_lambda)
+      if (!is.finite(next_score$gcv) || next_score$gcv >= current$gcv) {
+        break
+      }
+      previous <- current
+      previous_lambda <- current_lambda
+      current <- next_score
+      current_lambda <- next_lambda
+    }
+    if (direction < 0L) {
+      bracket <- sort(log(c(next_lambda, previous_lambda)))
+    } else {
+      bracket <- sort(log(c(previous_lambda, next_lambda)))
+    }
+    grid_eval <- list(previous, current, next_score)
+  }
+  opt <- stats::optimize(function(log_lambda) {
+    score_at(exp(log_lambda))$gcv
+  }, interval = bracket, tol = 1e-10)
+  selected_lambda <- exp(opt$minimum)
+  selected <- score_at(selected_lambda)
   grid <- do.call(rbind, lapply(grid_eval, function(x) {
     data.frame(
       lambda = x$lambda,
@@ -1495,46 +1576,107 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
       stringsAsFactors = FALSE
     )
   }))
-  if (!any(grid$valid)) {
-    stop("No valid GCV candidate in lambda_grid", call. = FALSE)
-  }
-  selected_grid_index <- which(grid$gcv == min(grid$gcv[grid$valid]))[1L]
-  selected_lambda <- grid$lambda[[selected_grid_index]]
-  selected_score <- grid$gcv[[selected_grid_index]]
-  brent_refined <- FALSE
-  brent_selected <- FALSE
+  list(
+    selected = selected,
+    selected_lambda = as.numeric(selected_lambda),
+    selected_score = as.numeric(selected$gcv),
+    grid = grid,
+    bracket = exp(bracket),
+    lambda_start = as.numeric(lambda_start)
+  )
+}
 
-  if (isTRUE(refine) && length(lambda_grid) >= 3L) {
-    idx <- selected_grid_index
-    lower_idx <- max(1L, idx - 1L)
-    upper_idx <- min(length(lambda_grid), idx + 1L)
-    if (lower_idx == idx && upper_idx < length(lambda_grid)) {
-      upper_idx <- idx + 1L
+fastkpc_kpc_tprs_gcv_candidate <- function(
+    y, S,
+    lambda_grid = exp(seq(log(1e-4), log(1e4), length.out = 17L)),
+    refine = TRUE,
+    selection = c("mgcv-local", "global-grid"),
+    tol = sqrt(.Machine$double.eps)) {
+  selection <- match.arg(selection)
+  input <- fastkpc_kpc_tprs_validate_input(y, S)
+  lambda_grid <- as.numeric(lambda_grid)
+  if (length(lambda_grid) == 0L ||
+      any(!is.finite(lambda_grid)) || any(lambda_grid <= 0)) {
+    fastkpc_kpc_tprs_stop("lambda_grid must be positive finite")
+  }
+  lambda_grid <- sort(unique(lambda_grid))
+  setup <- kpc_tprs_residual_cpp_setup(input$S, tol = tol)
+  if (identical(selection, "mgcv-local")) {
+    local <- fastkpc_kpc_tprs_local_gcv_candidate(
+      y = input$y,
+      setup = setup,
+      lambda_start = fastkpc_kpc_tprs_initial_lambda(setup),
+      tol = tol
+    )
+    selected_lambda <- local$selected_lambda
+    selected_score <- local$selected_score
+    grid <- local$grid
+    selected_grid_index <- which.min(abs(log(grid$lambda) -
+                                         log(selected_lambda)))
+    bracket_lower_lambda <- min(local$bracket)
+    bracket_upper_lambda <- max(local$bracket)
+    brent_refined <- TRUE
+    brent_selected <- TRUE
+  } else {
+    grid_eval <- lapply(lambda_grid, function(lambda) {
+      fastkpc_kpc_tprs_gcv_score_for_setup(
+        y = input$y, setup = setup, lambda = lambda, tol = tol)
+    })
+    grid <- do.call(rbind, lapply(grid_eval, function(x) {
+      data.frame(
+        lambda = x$lambda,
+        rss = x$rss,
+        edf = x$edf,
+        gcv = x$gcv,
+        valid = x$valid,
+        stringsAsFactors = FALSE
+      )
+    }))
+    if (!any(grid$valid)) {
+      stop("No valid GCV candidate in lambda_grid", call. = FALSE)
     }
-    if (upper_idx == idx && lower_idx > 1L) {
-      lower_idx <- idx - 1L
-    }
-    lower <- log(lambda_grid[[lower_idx]])
-    upper <- log(lambda_grid[[upper_idx]])
-    if (is.finite(lower) && is.finite(upper) && lower < upper) {
-      brent_refined <- TRUE
-      objective <- function(log_lambda) {
-        fastkpc_kpc_tprs_gcv_score_for_setup(
-          y = input$y,
-          setup = setup,
-          lambda = exp(log_lambda),
-          tol = tol
-        )$gcv
+    selected_grid_index <- which(grid$gcv == min(grid$gcv[grid$valid]))[1L]
+    selected_lambda <- grid$lambda[[selected_grid_index]]
+    selected_score <- grid$gcv[[selected_grid_index]]
+    brent_refined <- FALSE
+    brent_selected <- FALSE
+    bracket_lower_lambda <- lambda_grid[[max(1L, selected_grid_index - 1L)]]
+    bracket_upper_lambda <-
+      lambda_grid[[min(length(lambda_grid), selected_grid_index + 1L)]]
+
+    if (isTRUE(refine) && length(lambda_grid) >= 3L) {
+      idx <- selected_grid_index
+      lower_idx <- max(1L, idx - 1L)
+      upper_idx <- min(length(lambda_grid), idx + 1L)
+      if (lower_idx == idx && upper_idx < length(lambda_grid)) {
+        upper_idx <- idx + 1L
       }
-      opt <- stats::optimize(objective, interval = c(lower, upper))
-      refined_lambda <- exp(opt$minimum)
-      refined_score <- as.numeric(opt$objective)
-      improvement_tol <- max(1e-12, abs(selected_score) * 1e-8)
-      if (is.finite(refined_score) &&
-          refined_score < selected_score - improvement_tol) {
-        selected_lambda <- refined_lambda
-        selected_score <- refined_score
-        brent_selected <- TRUE
+      if (upper_idx == idx && lower_idx > 1L) {
+        lower_idx <- idx - 1L
+      }
+      lower <- log(lambda_grid[[lower_idx]])
+      upper <- log(lambda_grid[[upper_idx]])
+      if (is.finite(lower) && is.finite(upper) && lower < upper) {
+        brent_refined <- TRUE
+        objective <- function(log_lambda) {
+          fastkpc_kpc_tprs_gcv_score_for_setup(
+            y = input$y,
+            setup = setup,
+            lambda = exp(log_lambda),
+            tol = tol
+          )$gcv
+        }
+        opt <- stats::optimize(objective, interval = c(lower, upper),
+                               tol = 1e-10)
+        refined_lambda <- exp(opt$minimum)
+        refined_score <- as.numeric(opt$objective)
+        improvement_tol <- max(1e-12, abs(selected_score) * 1e-8)
+        if (is.finite(refined_score) &&
+            refined_score < selected_score - improvement_tol) {
+          selected_lambda <- refined_lambda
+          selected_score <- refined_score
+          brent_selected <- TRUE
+        }
       }
     }
   }
@@ -1557,13 +1699,17 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
     selected$diagnostics,
     list(
       schema_version = "kpcTprsResidualCPP-continuous-gcv-v1",
-      gcv_source = "kpc-canonical-continuous-gcv",
+      gcv_source = if (identical(selection, "mgcv-local")) {
+        "kpc-canonical-mgcv-local-gcv"
+      } else {
+        "kpc-canonical-global-grid-gcv"
+      },
+      gcv_selection = selection,
       sp_semantics = "kpc-canonical-penalty",
       brent_refined = isTRUE(brent_refined),
       brent_selected = isTRUE(brent_selected),
-      bracket_lower_lambda = lambda_grid[[max(1L, selected_grid_index - 1L)]],
-      bracket_upper_lambda =
-        lambda_grid[[min(length(lambda_grid), selected_grid_index + 1L)]],
+      bracket_lower_lambda = bracket_lower_lambda,
+      bracket_upper_lambda = bracket_upper_lambda,
       does_not_drive_graph_decisions = TRUE
     )
   )

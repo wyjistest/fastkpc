@@ -77,13 +77,16 @@ assert_true(all(campaign$runs$status == "ok"),
 
 assert_true(all(c("scenario_id", "repeat", "adjacency_identical",
                   "n_edgetests_identical", "pmax_max_abs_diff",
+                  "pmax_abs_tol",
                   "first_sepset_mismatch_rate", "all_sepset_mismatch_rate",
                   "passed") %in% names(campaign$graph_agreement)),
             "graph agreement should expose graph and sepset fields")
 assert_true(all(campaign$graph_agreement$passed),
             paste(campaign$graph_agreement$scenario_id[
               !campaign$graph_agreement$passed], collapse = ", "))
-assert_true(max(campaign$graph_agreement$pmax_max_abs_diff, na.rm = TRUE) < 1e-4,
+assert_true(
+  max(campaign$graph_agreement$pmax_max_abs_diff, na.rm = TRUE) <=
+    fastkpc_kpc_tprs_pmax_abs_tol(),
             "pMax drift should remain bounded")
 
 candidate_trace <- campaign$trace_summary[

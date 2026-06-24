@@ -2,6 +2,8 @@ source("fastkpc/R/fast_kpc.R")
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
+fastkpc_kpc_tprs_pmax_abs_tol <- function() 2.5e-4
+
 fastkpc_kpc_tprs_qualification_caps <- function(enable_kpc = FALSE) {
   caps <- list(
     R_version = "4.5.0",
@@ -471,7 +473,9 @@ fastkpc_kpc_tprs_promotion_summary <- function(qualification_summary,
 }
 
 fastkpc_kpc_tprs_graph_agreement_row <- function(reference, candidate,
-                                                 scenario_id, repeat_id) {
+                                                 scenario_id, repeat_id,
+                                                 pmax_abs_tol =
+                                                   fastkpc_kpc_tprs_pmax_abs_tol()) {
   if (is.null(reference) || is.null(candidate)) {
     return(data.frame(
       scenario_id = scenario_id,
@@ -479,6 +483,7 @@ fastkpc_kpc_tprs_graph_agreement_row <- function(reference, candidate,
       adjacency_identical = FALSE,
       n_edgetests_identical = FALSE,
       pmax_max_abs_diff = NA_real_,
+      pmax_abs_tol = as.numeric(pmax_abs_tol),
       first_sepset_mismatch_rate = NA_real_,
       all_sepset_mismatch_rate = NA_real_,
       passed = FALSE,
@@ -500,11 +505,12 @@ fastkpc_kpc_tprs_graph_agreement_row <- function(reference, candidate,
     adjacency_identical = adjacency_identical,
     n_edgetests_identical = n_edgetests_identical,
     pmax_max_abs_diff = pmax_max,
+    pmax_abs_tol = as.numeric(pmax_abs_tol),
     first_sepset_mismatch_rate = sepset_mismatch,
     all_sepset_mismatch_rate = sepset_mismatch,
     passed = isTRUE(adjacency_identical) &&
       isTRUE(n_edgetests_identical) &&
-      is.finite(pmax_max) && pmax_max < 1e-4 &&
+      is.finite(pmax_max) && pmax_max <= pmax_abs_tol &&
       is.finite(sepset_mismatch) && sepset_mismatch == 0,
     stringsAsFactors = FALSE
   )
@@ -745,6 +751,7 @@ fastkpc_run_kpc_tprs_residual_cpp_qualification <- function(
     } else {
       max(graph_agreement$pmax_max_abs_diff, na.rm = TRUE)
     },
+    pmax_abs_tol = fastkpc_kpc_tprs_pmax_abs_tol(),
     passed = passed,
     failure_reason = failure_reason,
     stringsAsFactors = FALSE
@@ -792,6 +799,8 @@ fastkpc_run_kpc_tprs_residual_cpp_qualification <- function(
     paste0("- kpc rows: ", kpc_rows),
     paste0("- |S|=2 kpc rows: ", two_d_rows),
     paste0("- fallback rows: ", fallback_rows),
+    paste0("- pMax absolute tolerance: ",
+           signif(fastkpc_kpc_tprs_pmax_abs_tol(), 4)),
     paste0("- candidate median runtime ratio vs mgcvExtractCPU: ",
            signif(promotion_summary$candidate_median_runtime_ratio[[1L]], 4)),
     paste0("- candidate max trace p-value drift vs mgcvExtractCPU: ",

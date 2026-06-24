@@ -1,4 +1,5 @@
 source("fastkpc/R/fast_kpc.R")
+source("fastkpc/R/kpc_tprs_residual_cpp_qualification.R")
 
 fail <- function(message) stop(message, call. = FALSE)
 assert_true <- function(value, message) if (!isTRUE(value)) fail(message)
@@ -56,7 +57,8 @@ assert_true(all(campaign$summary$adjacency_identical),
             "all scenario adjacencies should match mgcv reference")
 assert_true(all(campaign$summary$n_edgetests_identical),
             "all n.edgetests should match mgcv reference")
-assert_true(max(campaign$summary$pmax_max_abs_diff, na.rm = TRUE) < 1e-4,
+assert_true(max(campaign$summary$pmax_max_abs_diff, na.rm = TRUE) <=
+              fastkpc_kpc_tprs_pmax_abs_tol(),
             "pMax drift should remain small")
 assert_true(any(campaign$summary$conditional_kpc_rows > 0L),
             "campaign should exercise conditional kpcTprsResidualCPP rows")

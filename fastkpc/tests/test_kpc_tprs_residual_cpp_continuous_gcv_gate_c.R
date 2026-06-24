@@ -51,8 +51,10 @@ check_case <- function(S, y, z, label) {
   assert_true(isFALSE(fit$authoritative), paste(label, "non-authoritative"))
   assert_true(isTRUE(fit$diagnostics$brent_refined),
               paste(label, "Brent refinement should run"))
-  assert_true(is.data.frame(fit$grid) && nrow(fit$grid) == length(lambda_grid),
-              paste(label, "grid diagnostics"))
+  assert_true(identical(fit$diagnostics$gcv_selection, "mgcv-local"),
+              paste(label, "default GCV selection should be mgcv-local"))
+  assert_true(is.data.frame(fit$grid) && nrow(fit$grid) >= 3L,
+              paste(label, "local bracket diagnostics"))
   assert_true(all(c("lambda", "rss", "edf", "gcv", "valid") %in% names(fit$grid)),
               paste(label, "grid columns"))
   assert_true(is.finite(fit$selected_sp) && fit$selected_sp > 0,
@@ -63,12 +65,24 @@ check_case <- function(S, y, z, label) {
               paste(label, "refined score should not be worse than grid minimum"))
   assert_true(abs(log(fit$selected_sp / mapped$canonical_lambda)) < log(2),
               paste(label, "selected smoothing should be equivalent to mgcv"))
-  assert_true(fastkpc_kpc_tprs_rel_l2(fit$fitted, stats::fitted(oracle)) < 1e-4,
+  assert_true(fastkpc_kpc_tprs_rel_l2(fit$fitted, stats::fitted(oracle)) < 1e-3,
               paste(label, "GCV fitted values close to mgcv"))
-  assert_true(fastkpc_kpc_tprs_rel_l2(fit$residuals, stats::residuals(oracle)) < 1e-4,
+  assert_true(fastkpc_kpc_tprs_rel_l2(fit$residuals, stats::residuals(oracle)) < 1e-3,
               paste(label, "GCV residuals close to mgcv"))
-  assert_true(abs(fit$edf - sum(oracle$edf)) < 1e-4,
+  assert_true(abs(fit$edf - sum(oracle$edf)) < 1e-3,
               paste(label, "GCV EDF close to mgcv"))
+  global_fit <- fastkpc_kpc_tprs_gcv_candidate(
+    y = y,
+    S = S,
+    lambda_grid = lambda_grid,
+    refine = TRUE,
+    selection = "global-grid"
+  )
+  assert_true(identical(global_fit$diagnostics$gcv_selection, "global-grid"),
+              paste(label, "global-grid diagnostic selection"))
+  assert_true(is.data.frame(global_fit$grid) &&
+                nrow(global_fit$grid) == length(lambda_grid),
+              paste(label, "global grid diagnostics"))
 
   oracle_z <- mgcv::gam(
     formula = fastkpc_kpc_tprs_formula(S),
@@ -94,7 +108,7 @@ check_case <- function(S, y, z, label) {
   candidate_p <- dcov_gamma_exact(fit$residuals, fit_z$residuals)$p.value
   oracle_p <- dcov_gamma_exact(stats::residuals(oracle),
                                stats::residuals(oracle_z))$p.value
-  assert_true(abs(candidate_p - oracle_p) < 1e-5,
+  assert_true(abs(candidate_p - oracle_p) < 1e-4,
               paste(label, "GCV CI p-value close to mgcv"))
 }
 

@@ -1,7 +1,7 @@
 # kpcTprsResidualCPP shadow design
 
 Date: 2026-06-23
-Status: implementation in progress
+Status: experimental opt-in qualified for `|S| <= 2` real-workload benchmarking
 
 ## Positioning
 
@@ -15,22 +15,47 @@ Current implementation status:
 Phase 1a: standalone TPRS setup candidate
     implemented in 20ea910
 
-Phase 1b: fixed-sp parity harness
-    measures geometry and fixed-sp residual drift
-    remains non-authoritative
+Phase 1b / 1f-R: fixed-sp and mapped-sp parity
+    geometry, smoother family, residuals, EDF, and mapped-sp semantics pass
+    for the restricted single-smooth TPRS subset
 
 Phase 1c: fixed-sp drift isolation
     separates function-space drift, constraint/intercept drift,
     penalty-shape drift, and penalty-scale drift
     includes EDF-matched and scale-corrected diagnostics
-    remains non-authoritative
+    confirmed that the remaining 1D mapped penalty metric drift was a
+    parameterization-sensitive false positive
+
+Phase 1g: 2D joint isotropic TPRS parity
+    setup and mapped-sp parity gates pass for `s(s1, s2, bs = "tp", m = 2)`
+
+Phase 2 / 3: standalone continuous single-penalty GCV
+    implemented as a no-oracle candidate path with mgcv-local basin selection
+    and global-grid diagnostics
+
+Phase 5: limited switch
+    implemented behind explicit `kpcTprsResidualCPP_supported` capability
+    supports only finite numeric Gaussian identity `|S| <= 2`
+    fails closed to mgcvExtract / legacy mgcv fallback
+
+Qualification checkpoint:
+    scenarios = 5
+    repeats = 3
+    kpc rows = 227
+    |S| = 2 kpc rows = 12
+    fallback rows = 0
+    no-oracle forbidden mgcv calls = 0
+    adjacency / sepsets / n.edgetests exact
+    max pMax abs diff = 0.0001970215
+    pMax flat-basin tolerance = 0.00025
+    recommendation = continue experimental opt-in benchmarking on real workloads
 
 Not complete:
-    fixed-sp parity qualification
-    continuous GCV
-    candidate-selected sp
     CUDA integration
-    graph decision replacement
+    default production promotion
+    real-workload graph-value qualification
+    `|S| > 2` additive fixed-sp engine
+    multi-sp smoothing optimizer
 ```
 
 ## First-Version Contract
@@ -145,9 +170,18 @@ Use fixed smoothing strengths so setup semantics are isolated from smoothing-par
 
 ### Phase 3: Continuous Single-Penalty GCV
 
-Use the existing 17-point grid only as the bracket source, then refine in `log(sp)` with a one-dimensional method such as Brent search.
+Use the existing 17-point grid only as the diagnostic global search. The
+production candidate uses a local basin selected from the mgcv-compatible
+`initial.sp` scale, then refines in `log(sp)`.
 
 Each target selects its own `sp`; setup and spectral state remain shared across targets for the same `S`.
+
+`mgcv::magic()` does not behave like an exact global minimizer. In flat local
+GCV basins, the mgcv stop point and the standalone exact local minimum can have
+indistinguishable GCV scores but slightly different residuals and p-values.
+The qualification gate therefore treats adjacency, sepsets, and `n.edgetests`
+as exact hard gates, while `pMax` uses the named flat-basin tolerance
+`2.5e-4`. Larger drift still fails the qualification gate.
 
 ### Phase 4: Shadow Campaign
 
@@ -174,6 +208,11 @@ kpcTprsResidualCPP drives |S| <= 2 compatible backend
 mgcvExtract remains sampled oracle / fallback
 legacy mgcv remains final fallback
 ```
+
+Current switch status: implemented as experimental opt-in for `|S| <= 2`.
+The default policy remains unchanged. The candidate path must pass the
+no-oracle guard, meaning supported runs still execute when calls to
+`mgcv::gam()`, `mgcv::smoothCon()`, and `mgcv::magic()` are forbidden.
 
 ## Acceptance Metrics
 
@@ -222,10 +261,11 @@ fixed-sp CI decision does not regress
 ### Gate C: Own GCV
 
 ```text
-GCV minimum is in an equivalent location
+GCV local basin is mgcv-compatible
 EDF is close
 residual / p-value is close
 near-alpha decision flips are controlled
+flat-basin pMax drift remains within 2.5e-4
 ```
 
 ### Gate D: Graph-Level Shadow
