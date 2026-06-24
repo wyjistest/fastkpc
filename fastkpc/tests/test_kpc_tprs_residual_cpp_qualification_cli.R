@@ -18,7 +18,9 @@ assert_true(identical(status, 0L),
             "qualification CLI should exit 0")
 
 required <- c("runs.csv", "graph_agreement.csv", "trace_summary.csv",
-              "qualification_summary.csv", "no_oracle.csv", "summary.md")
+              "backend_comparison.csv", "pvalue_drift.csv",
+              "qualification_summary.csv", "promotion_summary.csv",
+              "no_oracle.csv", "summary.md")
 for (name in required) {
   assert_true(file.exists(file.path(output_dir, name)),
               paste("missing artifact:", name))

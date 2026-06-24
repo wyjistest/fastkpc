@@ -41,7 +41,8 @@ campaign <- fastkpc_run_kpc_tprs_residual_cpp_qualification(
 assert_has_names(
   campaign,
   c("runs", "graph_agreement", "trace_summary", "qualification_summary",
-    "no_oracle", "summary", "paths", "output_dir"),
+    "backend_comparison", "pvalue_drift", "promotion_summary", "no_oracle",
+    "summary", "paths", "output_dir"),
   "qualification campaign"
 )
 assert_true(is.data.frame(campaign$runs), "runs should be a data frame")
@@ -51,6 +52,12 @@ assert_true(is.data.frame(campaign$trace_summary),
             "trace summary should be a data frame")
 assert_true(is.data.frame(campaign$qualification_summary),
             "qualification summary should be a data frame")
+assert_true(is.data.frame(campaign$backend_comparison),
+            "backend comparison should be a data frame")
+assert_true(is.data.frame(campaign$pvalue_drift),
+            "p-value drift should be a data frame")
+assert_true(is.data.frame(campaign$promotion_summary),
+            "promotion summary should be a data frame")
 assert_true(is.data.frame(campaign$no_oracle),
             "no-oracle summary should be a data frame")
 
@@ -100,6 +107,41 @@ assert_true(nrow(campaign$qualification_summary) == 1L,
             "qualification summary should contain one row")
 assert_true(isTRUE(campaign$qualification_summary$passed[[1L]]),
             campaign$qualification_summary$failure_reason[[1L]])
+
+assert_true(all(c("scenario_id", "repeat", "reference_mode", "candidate_mode",
+                  "promotion_gate", "runtime_ratio", "runtime_delta_sec",
+                  "adjacency_identical", "first_sepset_mismatch_rate",
+                  "all_sepset_mismatch_rate", "pmax_max_abs_diff",
+                  "n_edgetests_identical", "reference_backend_executed",
+                  "candidate_backend_executed", "passed") %in%
+                  names(campaign$backend_comparison)),
+            "backend comparison should expose runtime and graph parity fields")
+assert_true(any(campaign$backend_comparison$candidate_mode == "candidate_kpc"),
+            "backend comparison should include candidate kpc rows")
+assert_true(any(campaign$backend_comparison$candidate_mode == "mgcv_extract_cpu"),
+            "backend comparison should include mgcvExtractCPU rows")
+assert_true(any(campaign$backend_comparison$candidate_mode == "legacy_mgcv"),
+            "backend comparison should include legacy mgcv rows")
+gate_rows <- campaign$backend_comparison[
+  campaign$backend_comparison$promotion_gate %in% TRUE, , drop = FALSE]
+assert_true(nrow(gate_rows) > 0L,
+            "backend comparison should include promotion-gate rows")
+assert_true(all(gate_rows$passed),
+            paste(gate_rows$candidate_mode[!gate_rows$passed],
+                  collapse = ", "))
+assert_true(nrow(campaign$promotion_summary) == 1L,
+            "promotion summary should contain one row")
+assert_true(isTRUE(campaign$promotion_summary$passed[[1L]]),
+            campaign$promotion_summary$failure_reason[[1L]])
+assert_true(all(c("scenario_id", "repeat", "candidate_mode",
+                  "canonical_test_order_id", "x", "y", "S_key",
+                  "p_used_reference", "p_used_candidate",
+                  "abs_p_used_diff", "reference_backend_executed",
+                  "candidate_backend_executed") %in%
+                  names(campaign$pvalue_drift)),
+            "p-value drift should expose canonical test drift fields")
+assert_true(any(campaign$pvalue_drift$candidate_mode == "candidate_kpc"),
+            "p-value drift should include candidate kpc rows")
 
 for (path in unlist(campaign$paths, use.names = FALSE)) {
   assert_true(file.exists(path), paste("missing artifact:", path))
