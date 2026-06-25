@@ -150,6 +150,9 @@ assert_true(any(campaign$pvalue_drift$candidate_mode == "candidate_kpc"),
 assert_true(all(c("scenario_id", "repeat", "canonical_test_order_id",
                   "target", "target_side", "mapped_lambda",
                   "local_lambda", "global_lambda",
+                  "local_pre_boundary_lambda",
+                  "local_magic_boundary_probe",
+                  "local_magic_boundary_steps",
                   "local_contains_mapped_lambda", "basin_label") %in%
                   names(campaign$magic_optimizer_diagnostics)),
             "magic optimizer diagnostics should expose basin fields")

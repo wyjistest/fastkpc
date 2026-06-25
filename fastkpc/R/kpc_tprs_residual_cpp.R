@@ -1468,6 +1468,110 @@ fastkpc_kpc_tprs_gcv_score_for_setup <- function(
   )
 }
 
+fastkpc_kpc_tprs_gcv_log_gradient <- function(
+    y, setup, lambda, log_step = 1e-4,
+    tol = sqrt(.Machine$double.eps)) {
+  lambda <- as.numeric(lambda)[1L]
+  if (!is.finite(lambda) || lambda <= 0) return(NA_real_)
+  rho <- log(lambda)
+  h <- as.numeric(log_step)[1L]
+  if (!is.finite(h) || h <= 0) h <- 1e-4
+  f_plus <- fastkpc_kpc_tprs_gcv_score_for_setup(
+    y = y, setup = setup, lambda = exp(rho + h), tol = tol)$gcv
+  f_minus <- fastkpc_kpc_tprs_gcv_score_for_setup(
+    y = y, setup = setup, lambda = exp(rho - h), tol = tol)$gcv
+  if (!is.finite(f_plus) || !is.finite(f_minus)) return(NA_real_)
+  as.numeric((f_plus - f_minus) / (2 * h))
+}
+
+fastkpc_kpc_tprs_magic_boundary_probe <- function(
+    y, setup, selected, log_step = 2,
+    max_steps = 5L, improvement_tol = 0,
+    tol = sqrt(.Machine$double.eps)) {
+  score_at <- function(lambda) {
+    fastkpc_kpc_tprs_gcv_score_for_setup(
+      y = y, setup = setup, lambda = lambda, tol = tol)
+  }
+  current <- selected
+  current_lambda <- as.numeric(current$lambda)
+  current_score <- as.numeric(current$gcv)
+  if (!is.finite(current_lambda) || current_lambda <= 0 ||
+      !is.finite(current_score)) {
+    return(list(
+      selected = selected,
+      moved = FALSE,
+      steps = 0L,
+      direction = NA_integer_,
+      start_lambda = current_lambda,
+      start_score = current_score,
+      gradient = NA_real_,
+      path = data.frame()
+    ))
+  }
+  log_step <- as.numeric(log_step)[1L]
+  if (!is.finite(log_step) || log_step <= 0) log_step <- 2
+  max_steps <- as.integer(max_steps)[1L]
+  if (is.na(max_steps) || max_steps < 0L) max_steps <- 5L
+  grad <- fastkpc_kpc_tprs_gcv_log_gradient(
+    y = y, setup = setup, lambda = current_lambda, tol = tol)
+  direction <- if (is.finite(grad) &&
+                   abs(grad) > sqrt(.Machine$double.eps) *
+                     (1 + abs(current_score))) {
+    if (grad < 0) 1L else -1L
+  } else {
+    down <- score_at(current_lambda * exp(-log_step))
+    up <- score_at(current_lambda * exp(log_step))
+    down_score <- as.numeric(down$gcv)
+    up_score <- as.numeric(up$gcv)
+    if (is.finite(down_score) &&
+        down_score < current_score - improvement_tol &&
+        (!is.finite(up_score) || down_score <= up_score)) {
+      -1L
+    } else if (is.finite(up_score) &&
+               up_score < current_score - improvement_tol) {
+      1L
+    } else {
+      0L
+    }
+  }
+  path <- list()
+  moved <- FALSE
+  steps <- 0L
+  if (direction != 0L && max_steps > 0L) {
+    for (i in seq_len(max_steps)) {
+      candidate_lambda <- current_lambda * exp(direction * log_step)
+      candidate <- score_at(candidate_lambda)
+      candidate_score <- as.numeric(candidate$gcv)
+      accepted <- is.finite(candidate_score) &&
+        candidate_score < current_score - improvement_tol
+      path[[length(path) + 1L]] <- data.frame(
+        step = i,
+        direction = direction,
+        lambda = candidate_lambda,
+        score = candidate_score,
+        accepted = accepted,
+        stringsAsFactors = FALSE
+      )
+      if (!isTRUE(accepted)) break
+      current <- candidate
+      current_lambda <- as.numeric(current$lambda)
+      current_score <- candidate_score
+      moved <- TRUE
+      steps <- i
+    }
+  }
+  list(
+    selected = current,
+    moved = isTRUE(moved),
+    steps = as.integer(steps),
+    direction = as.integer(direction),
+    start_lambda = as.numeric(selected$lambda),
+    start_score = as.numeric(selected$gcv),
+    gradient = as.numeric(grad),
+    path = if (length(path) == 0L) data.frame() else do.call(rbind, path)
+  )
+}
+
 fastkpc_kpc_tprs_initial_lambda <- function(setup) {
   X <- cbind(`(Intercept)` = 1, as.matrix(setup$absorbed$X))
   S <- as.matrix(setup$absorbed$penalty)
@@ -1566,6 +1670,14 @@ fastkpc_kpc_tprs_local_gcv_candidate <- function(
   }, interval = bracket, tol = 1e-10)
   selected_lambda <- exp(opt$minimum)
   selected <- score_at(selected_lambda)
+  boundary <- fastkpc_kpc_tprs_magic_boundary_probe(
+    y = y,
+    setup = setup,
+    selected = selected,
+    tol = tol
+  )
+  selected <- boundary$selected
+  selected_lambda <- as.numeric(selected$lambda)
   grid <- do.call(rbind, lapply(grid_eval, function(x) {
     data.frame(
       lambda = x$lambda,
@@ -1582,7 +1694,10 @@ fastkpc_kpc_tprs_local_gcv_candidate <- function(
     selected_score = as.numeric(selected$gcv),
     grid = grid,
     bracket = exp(bracket),
-    lambda_start = as.numeric(lambda_start)
+    lambda_start = as.numeric(lambda_start),
+    pre_boundary_lambda = as.numeric(exp(opt$minimum)),
+    pre_boundary_score = as.numeric(opt$objective),
+    magic_boundary = boundary
   )
 }
 
@@ -1708,6 +1823,26 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
       sp_semantics = "kpc-canonical-penalty",
       brent_refined = isTRUE(brent_refined),
       brent_selected = isTRUE(brent_selected),
+      magic_boundary_probe = if (identical(selection, "mgcv-local")) {
+        isTRUE(local$magic_boundary$moved)
+      } else {
+        FALSE
+      },
+      magic_boundary_steps = if (identical(selection, "mgcv-local")) {
+        as.integer(local$magic_boundary$steps)
+      } else {
+        0L
+      },
+      magic_boundary_direction = if (identical(selection, "mgcv-local")) {
+        as.integer(local$magic_boundary$direction)
+      } else {
+        NA_integer_
+      },
+      pre_boundary_lambda = if (identical(selection, "mgcv-local")) {
+        as.numeric(local$pre_boundary_lambda)
+      } else {
+        NA_real_
+      },
       bracket_lower_lambda = bracket_lower_lambda,
       bracket_upper_lambda = bracket_upper_lambda,
       does_not_drive_graph_decisions = TRUE
@@ -1795,6 +1930,14 @@ fastkpc_kpc_tprs_magic_parity_diagnostics <- function(
     global_residual_rel_l2 = as.numeric(global_rel),
     local_bracket_lower_lambda = local_lower,
     local_bracket_upper_lambda = local_upper,
+    local_pre_boundary_lambda =
+      as.numeric(local$diagnostics$pre_boundary_lambda %||% NA_real_),
+    local_magic_boundary_probe =
+      isTRUE(local$diagnostics$magic_boundary_probe),
+    local_magic_boundary_steps =
+      as.integer(local$diagnostics$magic_boundary_steps %||% NA_integer_),
+    local_magic_boundary_direction =
+      as.integer(local$diagnostics$magic_boundary_direction %||% NA_integer_),
     local_contains_mapped_lambda = local_contains_mapped,
     global_score_lower_than_local = global_lower,
     log_spectrum_shape_rmse = as.numeric(mapped$log_spectrum_shape_rmse),
