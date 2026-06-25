@@ -1716,6 +1716,93 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
   selected
 }
 
+fastkpc_kpc_tprs_magic_parity_diagnostics <- function(
+    y, S, label = "",
+    lambda_grid = exp(seq(log(1e-4), log(1e4), length.out = 81L)),
+    tol = sqrt(.Machine$double.eps)) {
+  input <- fastkpc_kpc_tprs_validate_input(y, S)
+  setup <- kpc_tprs_residual_cpp_setup(input$S, tol = tol)
+  oracle <- fastkpc_kpc_tprs_mgcv_gcv_oracle_fit(input$y, input$S)
+  oracle_absorbed <- fastkpc_kpc_tprs_absorbed_oracle_setup(input$y, input$S)
+  mapped <- fastkpc_kpc_tprs_map_mgcv_sp_to_canonical(
+    sp = oracle$selected_sp,
+    setup = setup,
+    oracle_absorbed = oracle_absorbed,
+    tol = tol
+  )
+  mapped_score <- fastkpc_kpc_tprs_gcv_score_for_setup(
+    y = input$y,
+    setup = setup,
+    lambda = mapped$canonical_lambda,
+    tol = tol
+  )
+  local <- fastkpc_kpc_tprs_gcv_candidate(
+    y = input$y,
+    S = input$S,
+    lambda_grid = lambda_grid,
+    selection = "mgcv-local",
+    tol = tol
+  )
+  global <- fastkpc_kpc_tprs_gcv_candidate(
+    y = input$y,
+    S = input$S,
+    lambda_grid = lambda_grid,
+    selection = "global-grid",
+    tol = tol
+  )
+  local_lower <- as.numeric(local$diagnostics$bracket_lower_lambda %||% NA_real_)
+  local_upper <- as.numeric(local$diagnostics$bracket_upper_lambda %||% NA_real_)
+  mapped_lambda <- as.numeric(mapped$canonical_lambda)
+  local_contains_mapped <- is.finite(local_lower) && is.finite(local_upper) &&
+    is.finite(mapped_lambda) && mapped_lambda >= min(local_lower, local_upper) &&
+    mapped_lambda <= max(local_lower, local_upper)
+  global_lower <- is.finite(global$score) && is.finite(local$score) &&
+    global$score < local$score - max(1e-10, abs(local$score) * 1e-8)
+  mapped_rel <- fastkpc_kpc_tprs_rel_l2(
+    mapped_score$fit$residuals, oracle$residuals)
+  local_rel <- fastkpc_kpc_tprs_rel_l2(local$residuals, oracle$residuals)
+  global_rel <- fastkpc_kpc_tprs_rel_l2(global$residuals, oracle$residuals)
+  basin_label <- if (mapped_rel < 1e-8 && local_rel > 1e-3 &&
+                     !local_contains_mapped) {
+    "local-missed-mgcv-basin"
+  } else if (mapped_rel < 1e-8 && local_rel < 1e-5 &&
+             isTRUE(global_lower)) {
+    "mgcv-local-basin-nonglobal"
+  } else if (mapped_rel < 1e-8 && local_rel < 1e-5) {
+    "mgcv-local-basin"
+  } else {
+    "optimizer-or-objective-drift"
+  }
+  data.frame(
+    label = as.character(label),
+    backend_family = "kpcTprsResidualCPP",
+    mode = "magic-optimizer-parity-diagnostics",
+    authoritative = FALSE,
+    oracle_raw_sp = as.numeric(oracle$selected_sp),
+    mapped_lambda = mapped_lambda,
+    local_lambda = as.numeric(local$selected_sp),
+    global_lambda = as.numeric(global$selected_sp),
+    oracle_edf = as.numeric(oracle$edf),
+    mapped_edf = as.numeric(mapped_score$edf),
+    local_edf = as.numeric(local$edf),
+    global_edf = as.numeric(global$edf),
+    oracle_score = as.numeric(oracle$score),
+    mapped_score = as.numeric(mapped_score$gcv),
+    local_score = as.numeric(local$score),
+    global_score = as.numeric(global$score),
+    mapped_residual_rel_l2 = as.numeric(mapped_rel),
+    local_residual_rel_l2 = as.numeric(local_rel),
+    global_residual_rel_l2 = as.numeric(global_rel),
+    local_bracket_lower_lambda = local_lower,
+    local_bracket_upper_lambda = local_upper,
+    local_contains_mapped_lambda = local_contains_mapped,
+    global_score_lower_than_local = global_lower,
+    log_spectrum_shape_rmse = as.numeric(mapped$log_spectrum_shape_rmse),
+    basin_label = basin_label,
+    stringsAsFactors = FALSE
+  )
+}
+
 fastkpc_kpc_tprs_shadow_sepsets <- function(p) {
   replicate(p, replicate(p, integer(), simplify = FALSE), simplify = FALSE)
 }

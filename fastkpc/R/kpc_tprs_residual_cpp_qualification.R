@@ -420,6 +420,128 @@ fastkpc_kpc_tprs_pvalue_drift_rows <- function(
   )
 }
 
+fastkpc_kpc_tprs_magic_optimizer_diagnostic_rows <- function(
+    data, drift_rows, top_n = 5L) {
+  empty <- data.frame(
+    scenario_id = character(),
+    `repeat` = integer(),
+    canonical_test_order_id = integer(),
+    edge_x = integer(),
+    edge_y = integer(),
+    target = integer(),
+    target_side = character(),
+    S_key = character(),
+    label = character(),
+    backend_family = character(),
+    mode = character(),
+    authoritative = logical(),
+    oracle_raw_sp = numeric(),
+    mapped_lambda = numeric(),
+    local_lambda = numeric(),
+    global_lambda = numeric(),
+    oracle_edf = numeric(),
+    mapped_edf = numeric(),
+    local_edf = numeric(),
+    global_edf = numeric(),
+    oracle_score = numeric(),
+    mapped_score = numeric(),
+    local_score = numeric(),
+    global_score = numeric(),
+    mapped_residual_rel_l2 = numeric(),
+    local_residual_rel_l2 = numeric(),
+    global_residual_rel_l2 = numeric(),
+    local_bracket_lower_lambda = numeric(),
+    local_bracket_upper_lambda = numeric(),
+    local_contains_mapped_lambda = logical(),
+    global_score_lower_than_local = logical(),
+    log_spectrum_shape_rmse = numeric(),
+    basin_label = character(),
+    stringsAsFactors = FALSE
+  )
+  if (!is.data.frame(drift_rows) || nrow(drift_rows) == 0L) return(empty)
+  required <- c("scenario_id", "repeat", "candidate_mode",
+                "canonical_test_order_id", "x", "y", "S_key",
+                "abs_p_used_diff")
+  if (!all(required %in% names(drift_rows))) return(empty)
+  rows <- drift_rows[drift_rows$candidate_mode == "candidate_kpc" &
+                       nzchar(drift_rows$S_key), , drop = FALSE]
+  if (nrow(rows) == 0L) return(empty)
+  rows <- rows[order(-rows$abs_p_used_diff,
+                     rows$canonical_test_order_id), , drop = FALSE]
+  rows <- rows[seq_len(min(as.integer(top_n), nrow(rows))), , drop = FALSE]
+  out <- list()
+  for (i in seq_len(nrow(rows))) {
+    row <- rows[i, , drop = FALSE]
+    S <- as.integer(strsplit(as.character(row$S_key[[1L]]), "\\|")[[1L]])
+    if (length(S) == 0L || anyNA(S)) next
+    S_matrix <- data[, S, drop = FALSE]
+    for (side in c("x", "y")) {
+      target <- as.integer(row[[side]][[1L]])
+      label <- paste(
+        row$scenario_id[[1L]],
+        row$canonical_test_order_id[[1L]],
+        side,
+        paste(S, collapse = "|"),
+        sep = "::"
+      )
+      diag <- tryCatch(
+        fastkpc_kpc_tprs_magic_parity_diagnostics(
+          y = data[, target],
+          S = S_matrix,
+          label = label
+        ),
+        error = function(e) {
+          data.frame(
+            label = label,
+            backend_family = "kpcTprsResidualCPP",
+            mode = "magic-optimizer-parity-diagnostics",
+            authoritative = FALSE,
+            oracle_raw_sp = NA_real_,
+            mapped_lambda = NA_real_,
+            local_lambda = NA_real_,
+            global_lambda = NA_real_,
+            oracle_edf = NA_real_,
+            mapped_edf = NA_real_,
+            local_edf = NA_real_,
+            global_edf = NA_real_,
+            oracle_score = NA_real_,
+            mapped_score = NA_real_,
+            local_score = NA_real_,
+            global_score = NA_real_,
+            mapped_residual_rel_l2 = NA_real_,
+            local_residual_rel_l2 = NA_real_,
+            global_residual_rel_l2 = NA_real_,
+            local_bracket_lower_lambda = NA_real_,
+            local_bracket_upper_lambda = NA_real_,
+            local_contains_mapped_lambda = NA,
+            global_score_lower_than_local = NA,
+            log_spectrum_shape_rmse = NA_real_,
+            basin_label = paste0("diagnostic-failed: ", conditionMessage(e)),
+            stringsAsFactors = FALSE
+          )
+        }
+      )
+      out[[length(out) + 1L]] <- cbind(
+        data.frame(
+          scenario_id = row$scenario_id[[1L]],
+          `repeat` = as.integer(row[["repeat"]][[1L]]),
+          canonical_test_order_id =
+            as.integer(row$canonical_test_order_id[[1L]]),
+          edge_x = as.integer(row$x[[1L]]),
+          edge_y = as.integer(row$y[[1L]]),
+          target = target,
+          target_side = side,
+          S_key = as.character(row$S_key[[1L]]),
+          stringsAsFactors = FALSE
+        ),
+        diag,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  if (length(out) == 0L) empty else do.call(rbind, out)
+}
+
 fastkpc_kpc_tprs_promotion_summary <- function(qualification_summary,
                                                backend_comparison,
                                                no_oracle) {
@@ -693,6 +815,45 @@ fastkpc_run_kpc_tprs_residual_cpp_qualification <- function(
     do.call(rbind, drift_rows)
   }
   pvalue_drift <- fastkpc_kpc_tprs_restore_repeat_name(pvalue_drift)
+  magic_optimizer_diagnostics <- if (nrow(pvalue_drift) == 0L) {
+    fastkpc_kpc_tprs_magic_optimizer_diagnostic_rows(
+      data = matrix(numeric(), nrow = 0L, ncol = 0L),
+      drift_rows = pvalue_drift
+    )
+  } else {
+    magic_rows <- list()
+    for (scenario in scenarios) {
+      scenario_id <- scenario$scenario_id
+      n <- as.integer(scenario$n %||% 64L)
+      seed <- as.integer(scenario$seed %||% 62410L)
+      for (repeat_id in seq_len(as.integer(repeats))) {
+        subset <- pvalue_drift[
+          pvalue_drift$scenario_id == scenario_id &
+            as.integer(pvalue_drift[["repeat"]]) == repeat_id &
+            pvalue_drift$candidate_mode == "candidate_kpc",
+          , drop = FALSE
+        ]
+        if (nrow(subset) == 0L) next
+        data <- as.matrix(scenario$generator(n, seed + repeat_id - 1L))
+        storage.mode(data) <- "double"
+        magic_rows[[length(magic_rows) + 1L]] <-
+          fastkpc_kpc_tprs_magic_optimizer_diagnostic_rows(
+            data = data,
+            drift_rows = subset
+          )
+      }
+    }
+    if (length(magic_rows) == 0L) {
+      fastkpc_kpc_tprs_magic_optimizer_diagnostic_rows(
+        data = matrix(numeric(), nrow = 0L, ncol = 0L),
+        drift_rows = pvalue_drift[0L, , drop = FALSE]
+      )
+    } else {
+      do.call(rbind, magic_rows)
+    }
+  }
+  magic_optimizer_diagnostics <-
+    fastkpc_kpc_tprs_restore_repeat_name(magic_optimizer_diagnostics)
   no_oracle <- if (isTRUE(no_oracle_check) && length(scenarios) > 0L) {
     scenario <- scenarios[[1L]]
     data <- as.matrix(scenario$generator(as.integer(scenario$n), scenario$seed))
@@ -774,6 +935,8 @@ fastkpc_run_kpc_tprs_residual_cpp_qualification <- function(
     trace_summary = file.path(output_dir, "trace_summary.csv"),
     backend_comparison = file.path(output_dir, "backend_comparison.csv"),
     pvalue_drift = file.path(output_dir, "pvalue_drift.csv"),
+    magic_optimizer_diagnostics =
+      file.path(output_dir, "magic_optimizer_diagnostics.csv"),
     qualification_summary = file.path(output_dir, "qualification_summary.csv"),
     promotion_summary = file.path(output_dir, "promotion_summary.csv"),
     no_oracle = file.path(output_dir, "no_oracle.csv"),
@@ -785,6 +948,8 @@ fastkpc_run_kpc_tprs_residual_cpp_qualification <- function(
   utils::write.csv(backend_comparison, paths$backend_comparison,
                    row.names = FALSE)
   utils::write.csv(pvalue_drift, paths$pvalue_drift, row.names = FALSE)
+  utils::write.csv(magic_optimizer_diagnostics,
+                   paths$magic_optimizer_diagnostics, row.names = FALSE)
   utils::write.csv(qualification_summary, paths$qualification_summary,
                    row.names = FALSE)
   utils::write.csv(promotion_summary, paths$promotion_summary,
@@ -814,6 +979,13 @@ fastkpc_run_kpc_tprs_residual_cpp_qualification <- function(
                na.rm = TRUE
              ), 4)
            }),
+    paste0("- magic optimizer basin labels: ",
+           if (nrow(magic_optimizer_diagnostics) == 0L) {
+             "none"
+           } else {
+             paste(sort(unique(magic_optimizer_diagnostics$basin_label)),
+                   collapse = ", ")
+           }),
     paste0("- legacy median runtime ratio vs mgcvExtractCPU: ",
            signif(promotion_summary$legacy_median_runtime_ratio[[1L]], 4)),
     paste0("- no-oracle forbidden calls: ",
@@ -826,6 +998,7 @@ fastkpc_run_kpc_tprs_residual_cpp_qualification <- function(
     trace_summary = trace_summary,
     backend_comparison = backend_comparison,
     pvalue_drift = pvalue_drift,
+    magic_optimizer_diagnostics = magic_optimizer_diagnostics,
     qualification_summary = qualification_summary,
     promotion_summary = promotion_summary,
     no_oracle = no_oracle,

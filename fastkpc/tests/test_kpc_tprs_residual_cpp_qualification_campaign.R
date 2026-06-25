@@ -41,8 +41,8 @@ campaign <- fastkpc_run_kpc_tprs_residual_cpp_qualification(
 assert_has_names(
   campaign,
   c("runs", "graph_agreement", "trace_summary", "qualification_summary",
-    "backend_comparison", "pvalue_drift", "promotion_summary", "no_oracle",
-    "summary", "paths", "output_dir"),
+    "backend_comparison", "pvalue_drift", "magic_optimizer_diagnostics",
+    "promotion_summary", "no_oracle", "summary", "paths", "output_dir"),
   "qualification campaign"
 )
 assert_true(is.data.frame(campaign$runs), "runs should be a data frame")
@@ -56,6 +56,8 @@ assert_true(is.data.frame(campaign$backend_comparison),
             "backend comparison should be a data frame")
 assert_true(is.data.frame(campaign$pvalue_drift),
             "p-value drift should be a data frame")
+assert_true(is.data.frame(campaign$magic_optimizer_diagnostics),
+            "magic optimizer diagnostics should be a data frame")
 assert_true(is.data.frame(campaign$promotion_summary),
             "promotion summary should be a data frame")
 assert_true(is.data.frame(campaign$no_oracle),
@@ -145,6 +147,12 @@ assert_true(all(c("scenario_id", "repeat", "candidate_mode",
             "p-value drift should expose canonical test drift fields")
 assert_true(any(campaign$pvalue_drift$candidate_mode == "candidate_kpc"),
             "p-value drift should include candidate kpc rows")
+assert_true(all(c("scenario_id", "repeat", "canonical_test_order_id",
+                  "target", "target_side", "mapped_lambda",
+                  "local_lambda", "global_lambda",
+                  "local_contains_mapped_lambda", "basin_label") %in%
+                  names(campaign$magic_optimizer_diagnostics)),
+            "magic optimizer diagnostics should expose basin fields")
 
 for (path in unlist(campaign$paths, use.names = FALSE)) {
   assert_true(file.exists(path), paste("missing artifact:", path))
