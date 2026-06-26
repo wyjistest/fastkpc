@@ -61,7 +61,8 @@ fast <- fast_kpc(
   precision = "fast",
   graph_stage = "skeleton",
   precision_executors = executors,
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 assert_true(primary_calls$count > 0L,
@@ -86,7 +87,8 @@ compatible <- fast_kpc(
   precision = "compatible",
   graph_stage = "skeleton",
   precision_executors = executors,
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 assert_true(primary_calls$count == 0L,

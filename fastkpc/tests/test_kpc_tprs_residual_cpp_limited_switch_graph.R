@@ -41,7 +41,8 @@ reference <- fast_kpc(
   engine = "cpu",
   precision = "compatible",
   graph_stage = "skeleton",
-  runtime_capabilities = caps_mgcv
+  runtime_capabilities = caps_mgcv,
+  precision_trace_level = "full"
 )
 candidate <- fast_kpc(
   data,
@@ -50,7 +51,8 @@ candidate <- fast_kpc(
   engine = "cpu",
   precision = "compatible",
   graph_stage = "skeleton",
-  runtime_capabilities = caps_kpc
+  runtime_capabilities = caps_kpc,
+  precision_trace_level = "full"
 )
 
 assert_true(candidate$config$backend_planned == "kpcTprsResidualCPP",
@@ -73,5 +75,19 @@ assert_true(all(conditional$backend_requested == "kpcTprsResidualCPP"),
             "conditional rows should request kpcTprsResidualCPP")
 assert_true(all(conditional$backend_executed == "kpcTprsResidualCPP"),
             "conditional rows should execute kpcTprsResidualCPP")
+assert_true(sum(conditional$mgcv_setup_cpu_ms, na.rm = TRUE) > 0,
+            "kpcTprs trace should report setup timing")
+assert_true(sum(conditional$gcv_score_ms, na.rm = TRUE) > 0,
+            "kpcTprs trace should report GCV/magic timing")
+assert_true(sum(conditional$total_ms, na.rm = TRUE) >
+              sum(conditional$ci_test_ms, na.rm = TRUE),
+            "kpcTprs ci_test_ms should not include residualization")
+assert_true(any(conditional$cache_hit_any),
+            "kpcTprs run-scoped residual cache should record hits")
+assert_true(sum(conditional$cold_start, na.rm = TRUE) == 1L,
+            "kpcTprs trace should mark exactly one cold-start row")
+assert_true(candidate$skeleton$residual_cache$computations <
+              candidate$skeleton$residual_cache$requests,
+            "kpcTprs residual cache should reduce target-S computations")
 
 cat("PASS kpcTprsResidualCPP limited switch graph\n")

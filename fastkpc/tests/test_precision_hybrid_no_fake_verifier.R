@@ -53,7 +53,8 @@ hybrid <- fast_kpc(
     mgcvExtractCPUGCVBridge = make_spy(0.9, "mgcvExtractCPU-spy",
                                  verifier_calls)
   ),
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 assert_true(hybrid$config$precision == "hybrid",

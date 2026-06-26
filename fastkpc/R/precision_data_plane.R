@@ -226,6 +226,7 @@ fastkpc_precision_init_cache_stats <- function(context) {
   stats$spectral_cache_bytes <- 0
   stats$prepared_cache_current_bytes <- 0
   stats$prepared_cache_peak_bytes <- 0
+  stats$kpc_tprs_cold_started <- FALSE
   invisible(NULL)
 }
 
@@ -302,6 +303,13 @@ fastkpc_precision_residual_cache_key <- function(context, target, S, backend,
                                                  setup_fingerprint,
                                                  sp_grid = NULL) {
   runtime <- context$runtime_capabilities %||% list()
+  sp_grid_key <- if (is.null(sp_grid)) {
+    numeric()
+  } else if (is.numeric(sp_grid)) {
+    round(as.numeric(sp_grid), digits = 14)
+  } else {
+    as.character(sp_grid)
+  }
   fastkpc_hash_object(list(
     data_hash = context$data_hash %||% NA_character_,
     target = as.integer(target),
@@ -313,8 +321,73 @@ fastkpc_precision_residual_cache_key <- function(context, target, S, backend,
     setup_schema =
       runtime$setup_fingerprint_schema_version %||% NA_character_,
     spectral_gcv_version = runtime$spectral_gcv_version %||% NA_character_,
-    sp_grid = round(as.numeric(sp_grid %||% numeric()), digits = 14)
+    sp_grid = sp_grid_key
   ))
+}
+
+fastkpc_precision_residual_cache_request <- function(context, target, S,
+                                                     backend,
+                                                     setup_fingerprint,
+                                                     sp_grid = NULL) {
+  if (is.null(context) || !isTRUE(context$residual_cache_enabled)) {
+    return(list(enabled = FALSE, key = NA_character_, hit = FALSE,
+                entry = NULL))
+  }
+  key <- fastkpc_precision_residual_cache_key(
+    context = context,
+    target = target,
+    S = S,
+    backend = backend,
+    setup_fingerprint = setup_fingerprint,
+    sp_grid = sp_grid
+  )
+  context$residual_cache_stats$requests <-
+    as.integer(context$residual_cache_stats$requests %||% 0L) + 1L
+  if (exists(key, envir = context$residual_cache, inherits = FALSE)) {
+    context$residual_cache_stats$hits <-
+      as.integer(context$residual_cache_stats$hits %||% 0L) + 1L
+    return(list(
+      enabled = TRUE,
+      key = key,
+      hit = TRUE,
+      entry = get(key, envir = context$residual_cache, inherits = FALSE)
+    ))
+  }
+  context$residual_cache_stats$misses <-
+    as.integer(context$residual_cache_stats$misses %||% 0L) + 1L
+  list(enabled = TRUE, key = key, hit = FALSE, entry = NULL)
+}
+
+fastkpc_precision_store_residual_cache_entry <- function(context, key, entry) {
+  if (is.null(context) || !isTRUE(context$residual_cache_enabled) ||
+      is.null(key) || is.na(key) || !nzchar(key)) {
+    return(invisible(FALSE))
+  }
+  if (!exists(key, envir = context$residual_cache, inherits = FALSE)) {
+    assign(key, entry, envir = context$residual_cache)
+    context$residual_cache_stats$stored_vectors <-
+      as.integer(context$residual_cache_stats$stored_vectors %||% 0L) + 1L
+    context$residual_cache_stats$stored_values <-
+      as.integer(context$residual_cache_stats$stored_values %||% 0L) +
+        length(entry$residuals %||% numeric())
+    return(invisible(TRUE))
+  }
+  invisible(FALSE)
+}
+
+fastkpc_precision_cached_residual_hit_entry <- function(entry) {
+  entry$timings <- list(
+    mgcv_setup_cpu_ms = 0,
+    host_to_device_ms = 0,
+    spectral_prepare_ms = 0,
+    gcv_score_ms = 0,
+    linear_solve_ms = 0,
+    residual_materialize_ms = 0,
+    device_to_host_ms = 0,
+    residualization_total_ms = 0,
+    residualization_compute_ms = 0
+  )
+  entry
 }
 
 fastkpc_precision_cache_stats <- function(context, backend_name) {
@@ -1627,6 +1700,7 @@ fastkpc_execute_ci_mgcv_extract_gpu <- function(data, x, y, S, ci_method,
   cache_hit_any <- cache_hit_x || cache_hit_y
   cache_hit_all <- cache_hit_x && cache_hit_y
   cache_partial_hit <- xor(cache_hit_x, cache_hit_y)
+  cold_start <- FALSE
   if (isTRUE(cache_enabled)) {
     if (isTRUE(cache_hit_all)) {
       context$residual_cache_stats$full_hit_events <-
@@ -1895,18 +1969,146 @@ fastkpc_execute_ci_kpc_tprs_residual_cpp <- function(data, x, y, S, ci_method,
     stop("kpcTprsResidualCPP precision executor supports 1 <= |S| <= 2",
          call. = FALSE)
   }
+  context <- route$execution_context %||% NULL
+  setup_key <- route$setup_fingerprint %||%
+    paste0("kpcTprsResidualCPP:S:", fastkpc_precision_S_key(S))
+  cache_lookup_start <- proc.time()[["elapsed"]]
+  cache_x <- fastkpc_precision_residual_cache_request(
+    context = context,
+    target = x,
+    S = S,
+    backend = "kpcTprsResidualCPP",
+    setup_fingerprint = setup_key,
+    sp_grid = "mgcv-magic"
+  )
+  cache_y <- fastkpc_precision_residual_cache_request(
+    context = context,
+    target = y,
+    S = S,
+    backend = "kpcTprsResidualCPP",
+    setup_fingerprint = setup_key,
+    sp_grid = "mgcv-magic"
+  )
+  cache_lookup_ms <- (proc.time()[["elapsed"]] - cache_lookup_start) * 1000
+  cache_enabled <- isTRUE(cache_x$enabled) || isTRUE(cache_y$enabled)
+  cache_hit_x <- isTRUE(cache_x$hit)
+  cache_hit_y <- isTRUE(cache_y$hit)
+  cache_hit_any <- cache_hit_x || cache_hit_y
+  cache_hit_all <- cache_hit_x && cache_hit_y
+  cache_partial_hit <- xor(cache_hit_x, cache_hit_y)
+  cold_start <- FALSE
+  if (isTRUE(cache_enabled)) {
+    if (isTRUE(cache_hit_all)) {
+      context$residual_cache_stats$full_hit_events <-
+        as.integer(context$residual_cache_stats$full_hit_events %||% 0L) + 1L
+    } else if (isTRUE(cache_partial_hit)) {
+      context$residual_cache_stats$partial_hit_events <-
+        as.integer(context$residual_cache_stats$partial_hit_events %||% 0L) + 1L
+    } else {
+      context$residual_cache_stats$full_miss_events <-
+        as.integer(context$residual_cache_stats$full_miss_events %||% 0L) + 1L
+    }
+  }
+  cache_service_mode <- if (isTRUE(cache_hit_all)) {
+    "full-hit"
+  } else if (isTRUE(cache_partial_hit)) {
+    "partial-hit"
+  } else if (isTRUE(cache_enabled)) {
+    "full-miss"
+  } else {
+    "cache-disabled"
+  }
   S_matrix <- data[, S, drop = FALSE]
-  fit_x <- fastkpc_kpc_tprs_gcv_candidate(data[, x], S_matrix)
-  fit_y <- fastkpc_kpc_tprs_gcv_candidate(data[, y], S_matrix)
+  fit_x <- if (isTRUE(cache_hit_x)) {
+    fastkpc_precision_cached_residual_hit_entry(cache_x$entry)
+  } else {
+    NULL
+  }
+  fit_y <- if (isTRUE(cache_hit_y)) {
+    fastkpc_precision_cached_residual_hit_entry(cache_y$entry)
+  } else {
+    NULL
+  }
+  computed_targets <- 0L
+  if (is.null(fit_x)) {
+    fit_x <- fastkpc_kpc_tprs_gcv_candidate(data[, x], S_matrix)
+    entry_x <- list(
+      residuals = fit_x$residuals,
+      fitted = fit_x$fitted,
+      coefficients = fit_x$coefficients,
+      sp = fit_x$selected_sp,
+      score = fit_x$score,
+      edf = fit_x$edf,
+      selected_grid_index = fit_x$selected_grid_index,
+      gcv_grid_points = nrow(fit_x$grid),
+      grid = fit_x$grid,
+      timings = fit_x$timings
+    )
+    fastkpc_precision_store_residual_cache_entry(
+      context, cache_x$key, entry_x)
+    fit_x <- entry_x
+    computed_targets <- computed_targets + 1L
+  }
+  if (is.null(fit_y)) {
+    fit_y <- fastkpc_kpc_tprs_gcv_candidate(data[, y], S_matrix)
+    entry_y <- list(
+      residuals = fit_y$residuals,
+      fitted = fit_y$fitted,
+      coefficients = fit_y$coefficients,
+      sp = fit_y$selected_sp,
+      score = fit_y$score,
+      edf = fit_y$edf,
+      selected_grid_index = fit_y$selected_grid_index,
+      gcv_grid_points = nrow(fit_y$grid),
+      grid = fit_y$grid,
+      timings = fit_y$timings
+    )
+    fastkpc_precision_store_residual_cache_entry(
+      context, cache_y$key, entry_y)
+    fit_y <- entry_y
+    computed_targets <- computed_targets + 1L
+  }
+  if (isTRUE(cache_enabled) && computed_targets > 0L) {
+    cold_start <- !isTRUE(context$residual_cache_stats$kpc_tprs_cold_started)
+    context$residual_cache_stats$kpc_tprs_cold_started <- TRUE
+    context$residual_cache_stats$computations <-
+      as.integer(context$residual_cache_stats$computations %||% 0L) +
+        computed_targets
+    context$residual_cache_stats$target_computations <-
+      as.integer(context$residual_cache_stats$target_computations %||% 0L) +
+        computed_targets
+  }
+  ci_start <- proc.time()[["elapsed"]]
   ci <- fastkpc_precision_ci_from_residuals(
     fit_x$residuals, fit_y$residuals,
     ci_method = ci_method, index = index,
     legacy_index = legacy_index, hsic_params = hsic_params,
     permutation_params = permutation_params
   )
+  ci_ms <- (proc.time()[["elapsed"]] - ci_start) * 1000
   elapsed <- (proc.time()[["elapsed"]] - start) * 1000
-  setup_key <- route$setup_fingerprint %||%
-    paste0("kpcTprsResidualCPP:S:", fastkpc_precision_S_key(S))
+  setup_ms <- sum(
+    as.numeric(fit_x$timings$mgcv_setup_cpu_ms %||% 0),
+    as.numeric(fit_y$timings$mgcv_setup_cpu_ms %||% 0),
+    na.rm = TRUE
+  )
+  gcv_ms <- sum(
+    as.numeric(fit_x$timings$gcv_score_ms %||% 0),
+    as.numeric(fit_y$timings$gcv_score_ms %||% 0),
+    na.rm = TRUE
+  )
+  solve_ms <- sum(
+    as.numeric(fit_x$timings$linear_solve_ms %||% 0),
+    as.numeric(fit_y$timings$linear_solve_ms %||% 0),
+    na.rm = TRUE
+  )
+  residual_materialize_ms <- sum(
+    as.numeric(fit_x$timings$residual_materialize_ms %||% 0),
+    as.numeric(fit_y$timings$residual_materialize_ms %||% 0),
+    na.rm = TRUE
+  )
+  residualization_ms <- sum(setup_ms, gcv_ms, solve_ms,
+                            residual_materialize_ms, na.rm = TRUE)
   list(
     p.value = ci$p.value,
     residual_backend_executed = "kpcTprsResidualCPP",
@@ -1916,21 +2118,37 @@ fastkpc_execute_ci_kpc_tprs_residual_cpp <- function(data, x, y, S, ci_method,
     setup_fingerprint_y = setup_key,
     shared_setup_fingerprint = setup_key,
     p_source_used = paste0(role, ":kpcTprsResidualCPP+native-cpu"),
-    sp = c(x = fit_x$selected_sp, y = fit_y$selected_sp),
+    sp = c(x = fit_x$sp, y = fit_y$sp),
     score = c(x = fit_x$score, y = fit_y$score),
     edf = c(x = fit_x$edf, y = fit_y$edf),
     selected_grid_index = c(x = fit_x$selected_grid_index,
                             y = fit_y$selected_grid_index),
-    gcv_grid_points = c(x = nrow(fit_x$grid), y = nrow(fit_y$grid)),
+    gcv_grid_points = c(x = fit_x$gcv_grid_points,
+                        y = fit_y$gcv_grid_points),
     sp_selection_backend_executed_x = "kpcTprsResidualCPP-continuous-gcv",
     sp_selection_backend_executed_y = "kpcTprsResidualCPP-continuous-gcv",
     gcv_score_backend_executed_x = "kpcTprsResidualCPP-cpu",
     gcv_score_backend_executed_y = "kpcTprsResidualCPP-cpu",
     selected_solve_backend_executed_x = "kpcTprsResidualCPP-cpu",
     selected_solve_backend_executed_y = "kpcTprsResidualCPP-cpu",
+    cache_hit = isTRUE(cache_hit_all),
+    cache_hit_x = isTRUE(cache_hit_x),
+    cache_hit_y = isTRUE(cache_hit_y),
+    cache_hit_any = isTRUE(cache_hit_any),
+    cache_hit_all = isTRUE(cache_hit_all),
+    cache_partial_hit = isTRUE(cache_partial_hit),
+    cache_service_mode = cache_service_mode,
+    cold_start = isTRUE(cold_start),
+    residualization_compute_ms = residualization_ms,
+    cache_lookup_ms = cache_lookup_ms,
     timings = list(
-      residualization_compute_ms = elapsed,
-      ci_test_ms = elapsed,
+      mgcv_setup_cpu_ms = setup_ms,
+      gcv_score_ms = gcv_ms,
+      linear_solve_ms = solve_ms,
+      residual_materialize_ms = residual_materialize_ms,
+      residualization_compute_ms = residualization_ms,
+      cache_lookup_ms = cache_lookup_ms,
+      ci_test_ms = ci_ms,
       total_ms = elapsed
     )
   )
@@ -2371,6 +2589,7 @@ fastkpc_precision_trace_for_test <- function(resolved, route, run_id,
     cache_hit_all = isTRUE(receipt$cache_hit_all),
     cache_partial_hit = isTRUE(receipt$cache_partial_hit),
     cache_service_mode = receipt$cache_service_mode %||% NA_character_,
+    cold_start = isTRUE(receipt$cold_start),
     residualization_compute_ms =
       receipt$timings$residualization_compute_ms %||%
         receipt$residualization_compute_ms %||% NA_real_,
@@ -2415,8 +2634,12 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
                                          allow_canary = FALSE,
                                          residual_cache = TRUE,
                                          na_delete = TRUE,
-                                         execution_engine = c("cpu", "cuda")) {
+                                         execution_engine = c("cpu", "cuda"),
+                                         trace_level = c("summary", "full",
+                                                         "none")) {
   execution_engine <- match.arg(execution_engine)
+  trace_level <- match.arg(trace_level)
+  collect_trace <- identical(trace_level, "full")
   data <- as.matrix(data)
   storage.mode(data) <- "double"
   execution_context <- fastkpc_precision_create_execution_context(
@@ -2440,6 +2663,68 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
   executed_backends <- character()
   verifier_backends <- character()
   ci_backends <- character()
+  scheduler_timing <- list(
+    route_resolve_ms = 0,
+    executor_dispatch_ms = 0,
+    executor_receipt_total_ms = 0,
+    graph_update_ms = 0,
+    trace_append_ms = 0,
+    dataframe_bind_ms = 0
+  )
+  run_test <- function(source_vertex, target_vertex, edge_x, edge_y, S,
+                       side) {
+    route_start <- proc.time()[["elapsed"]]
+    route <- fastkpc_precision_group_route(
+      precision = precision, alpha = alpha, tau = tau, S = S,
+      runtime_capabilities = runtime_capabilities,
+      allow_canary = allow_canary,
+      execution_engine = execution_engine
+    )
+    route$execution_context <- execution_context
+    scheduler_timing$route_resolve_ms <<-
+      scheduler_timing$route_resolve_ms +
+        (proc.time()[["elapsed"]] - route_start) * 1000
+
+    dispatch_start <- proc.time()[["elapsed"]]
+    resolved <- fastkpc_precision_resolve_test(
+      data = data, x = source_vertex, y = target_vertex, S = S, route = route,
+      precision = precision, alpha = alpha, tau = tau,
+      ci_method = ci_method, index = index, legacy_index = legacy_index,
+      hsic_params = hsic_params,
+      permutation_params = permutation_params,
+      precision_executors = precision_executors,
+      na_delete = na_delete,
+      canonical_test_order_id = test_id,
+      execution_engine = execution_engine
+    )
+    scheduler_timing$executor_dispatch_ms <<-
+      scheduler_timing$executor_dispatch_ms +
+        (proc.time()[["elapsed"]] - dispatch_start) * 1000
+    scheduler_timing$executor_receipt_total_ms <<-
+      scheduler_timing$executor_receipt_total_ms +
+        as.numeric(resolved$receipt$timings$total_ms %||% 0)
+
+    trace_row <- NULL
+    if (isTRUE(collect_trace)) {
+      trace_start <- proc.time()[["elapsed"]]
+      trace_row <- fastkpc_precision_trace_for_test(
+        resolved = resolved,
+        route = route,
+        run_id = "fastkpc-r-skeleton",
+        conditioning_level = ord,
+        canonical_test_order_id = test_id,
+        x = source_vertex,
+        y = target_vertex,
+        S = S,
+        conditioning_target_side = side
+      )
+      scheduler_timing$trace_append_ms <<-
+        scheduler_timing$trace_append_ms +
+          (proc.time()[["elapsed"]] - trace_start) * 1000
+    }
+
+    list(route = route, resolved = resolved, trace_row = trace_row)
+  }
 
   for (ord in seq.int(0L, as.integer(max_conditioning_size))) {
     snapshot <- adjacency
@@ -2452,24 +2737,9 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
         nx <- fastkpc_precision_neighbors(snapshot, x, y)
         for (S in fastkpc_precision_combinations(nx, ord)) {
           test_id <- test_id + 1L
-          route <- fastkpc_precision_group_route(
-            precision = precision, alpha = alpha, tau = tau, S = S,
-            runtime_capabilities = runtime_capabilities,
-            allow_canary = allow_canary,
-            execution_engine = execution_engine
-          )
-          route$execution_context <- execution_context
-          resolved <- fastkpc_precision_resolve_test(
-            data = data, x = x, y = y, S = S, route = route,
-            precision = precision, alpha = alpha, tau = tau,
-            ci_method = ci_method, index = index, legacy_index = legacy_index,
-            hsic_params = hsic_params,
-            permutation_params = permutation_params,
-            precision_executors = precision_executors,
-            na_delete = na_delete,
-            canonical_test_order_id = test_id,
-            execution_engine = execution_engine
-          )
+          test <- run_test(x, y, x, y, S, "x")
+          route <- test$route
+          resolved <- test$resolved
           receipt <- resolved$receipt
           last_receipt <- receipt
           primary_receipt <- resolved$primary_receipt
@@ -2486,6 +2756,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             ci_backends <- c(ci_backends,
                              resolved$verifier_receipt$ci_backend_executed)
           }
+          graph_start <- proc.time()[["elapsed"]]
           pval <- resolved$pval
           if (pval > pmax[x, y]) {
             pmax[x, y] <- pval
@@ -2502,17 +2773,12 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             )
             edge_done <- TRUE
           }
-          trace_rows[[length(trace_rows) + 1L]] <- fastkpc_precision_trace_for_test(
-            resolved = resolved,
-            route = route,
-            run_id = "fastkpc-r-skeleton",
-            conditioning_level = ord,
-            canonical_test_order_id = test_id,
-            x = x,
-            y = y,
-            S = S,
-            conditioning_target_side = "x"
-          )
+          scheduler_timing$graph_update_ms <-
+            scheduler_timing$graph_update_ms +
+              (proc.time()[["elapsed"]] - graph_start) * 1000
+          if (isTRUE(collect_trace)) {
+            trace_rows[[length(trace_rows) + 1L]] <- test$trace_row
+          }
           n_edge_tests[[ord + 1L]] <- n_edge_tests[[ord + 1L]] + 1L
           if (edge_done) break
         }
@@ -2520,24 +2786,9 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
         ny <- fastkpc_precision_neighbors(snapshot, y, x)
         for (S in fastkpc_precision_combinations(ny, ord)) {
           test_id <- test_id + 1L
-          route <- fastkpc_precision_group_route(
-            precision = precision, alpha = alpha, tau = tau, S = S,
-            runtime_capabilities = runtime_capabilities,
-            allow_canary = allow_canary,
-            execution_engine = execution_engine
-          )
-          route$execution_context <- execution_context
-          resolved <- fastkpc_precision_resolve_test(
-            data = data, x = y, y = x, S = S, route = route,
-            precision = precision, alpha = alpha, tau = tau,
-            ci_method = ci_method, index = index, legacy_index = legacy_index,
-            hsic_params = hsic_params,
-            permutation_params = permutation_params,
-            precision_executors = precision_executors,
-            na_delete = na_delete,
-            canonical_test_order_id = test_id,
-            execution_engine = execution_engine
-          )
+          test <- run_test(y, x, x, y, S, "y")
+          route <- test$route
+          resolved <- test$resolved
           receipt <- resolved$receipt
           last_receipt <- receipt
           primary_receipt <- resolved$primary_receipt
@@ -2554,6 +2805,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             ci_backends <- c(ci_backends,
                              resolved$verifier_receipt$ci_backend_executed)
           }
+          graph_start <- proc.time()[["elapsed"]]
           pval <- resolved$pval
           if (pval > pmax[x, y]) {
             pmax[x, y] <- pval
@@ -2570,17 +2822,12 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
             )
             edge_done <- TRUE
           }
-          trace_rows[[length(trace_rows) + 1L]] <- fastkpc_precision_trace_for_test(
-            resolved = resolved,
-            route = route,
-            run_id = "fastkpc-r-skeleton",
-            conditioning_level = ord,
-            canonical_test_order_id = test_id,
-            x = y,
-            y = x,
-            S = S,
-            conditioning_target_side = "y"
-          )
+          scheduler_timing$graph_update_ms <-
+            scheduler_timing$graph_update_ms +
+              (proc.time()[["elapsed"]] - graph_start) * 1000
+          if (isTRUE(collect_trace)) {
+            trace_rows[[length(trace_rows) + 1L]] <- test$trace_row
+          }
           n_edge_tests[[ord + 1L]] <- n_edge_tests[[ord + 1L]] + 1L
           if (edge_done) break
         }
@@ -2590,7 +2837,10 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
     level_logs[[ord + 1L]] <- level_log
   }
 
-  trace <- if (length(trace_rows) == 0L) {
+  bind_start <- proc.time()[["elapsed"]]
+  trace <- if (!isTRUE(collect_trace)) {
+    NULL
+  } else if (length(trace_rows) == 0L) {
     fastkpc_precision_trace_row(
       run_id = "fastkpc-r-skeleton",
       backend_requested = NA_character_,
@@ -2599,8 +2849,18 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
   } else {
     do.call(rbind, trace_rows)
   }
-  trace$edge_deleted <- trace$decision_after_verify
-  trace$sepset_recorded <- ifelse(trace$edge_deleted, trace$S_key, "")
+  scheduler_timing$dataframe_bind_ms <-
+    (proc.time()[["elapsed"]] - bind_start) * 1000
+  if (is.data.frame(trace)) {
+    trace$edge_deleted <- trace$decision_after_verify
+    trace$sepset_recorded <- ifelse(trace$edge_deleted, trace$S_key, "")
+  }
+  scheduler_timing$executor_dispatch_overhead_ms <- max(
+    0,
+    as.numeric(scheduler_timing$executor_dispatch_ms) -
+      as.numeric(scheduler_timing$executor_receipt_total_ms),
+    na.rm = TRUE
+  )
 
   backend_candidates <- unique(executed_backends)
   if (length(backend_candidates) == 0L) backend_candidates <- "direct-ci"
@@ -2661,6 +2921,7 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
         tasks_planned = test_id,
         tasks_evaluated = test_id,
         tests_replayed = test_id,
+        trace_level = trace_level,
         tasks_ignored_after_delete = 0L,
         unique_residual_requests = cache$stored_vectors,
         residual_cache_requests = cache$requests,
@@ -2699,6 +2960,15 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
           cache$prepared_cache_current_bytes,
         residual_cache_prepared_cache_peak_bytes =
           cache$prepared_cache_peak_bytes,
+        route_resolve_ms = scheduler_timing$route_resolve_ms,
+        executor_dispatch_ms = scheduler_timing$executor_dispatch_ms,
+        executor_receipt_total_ms =
+          scheduler_timing$executor_receipt_total_ms,
+        executor_dispatch_overhead_ms =
+          scheduler_timing$executor_dispatch_overhead_ms,
+        graph_update_ms = scheduler_timing$graph_update_ms,
+        trace_append_ms = scheduler_timing$trace_append_ms,
+        dataframe_bind_ms = scheduler_timing$dataframe_bind_ms,
         dcov_batches = 0L,
         residual_batches = 0L
       )

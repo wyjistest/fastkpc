@@ -66,7 +66,8 @@ hybrid <- fast_kpc(
   tau = log(2),
   graph_stage = "skeleton",
   precision_executors = executors,
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 assert_true(primary_calls$count > 0L,

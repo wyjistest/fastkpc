@@ -40,14 +40,16 @@ primary <- fast_kpc(
   engine = "cpu", precision = "fast",
   graph_stage = "skeleton", seed = 103,
   precision_executors = executors,
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 hybrid <- fast_kpc(
   data, alpha = 0.05, max_conditioning_size = 1,
   engine = "cpu", precision = "hybrid", tau = log(2),
   graph_stage = "skeleton", seed = 103,
   precision_executors = executors,
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 assert_true(hybrid$config$precision == "hybrid",

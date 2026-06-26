@@ -71,7 +71,8 @@ compatible <- fast_kpc(
                                        cpu_calls),
     `legacy-mgcv` = make_spy(0.9, "legacy-mgcv-spy", legacy_calls)
   ),
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 assert_true(gpu_calls$count > 0L,
@@ -126,7 +127,8 @@ hybrid <- fast_kpc(
                                        cpu_calls),
     `legacy-mgcv` = make_spy(0.9, "legacy-mgcv-spy", legacy_calls)
   ),
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 assert_true(primary_calls$count > 0L,
@@ -173,7 +175,8 @@ fallback <- fast_kpc(
                                        cpu_calls, p_value_nonempty = 0.051),
     `legacy-mgcv` = make_spy(0.9, "legacy-mgcv-spy", legacy_calls)
   ),
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 trace <- fallback$diagnostics$precision_trace

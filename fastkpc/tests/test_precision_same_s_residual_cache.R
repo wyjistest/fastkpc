@@ -157,7 +157,8 @@ uncached <- fast_kpc(
   precision = "compatible",
   graph_stage = "skeleton",
   residual_cache = FALSE,
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 uncached_calls <- pair_env$count
 
@@ -171,7 +172,8 @@ cached <- fast_kpc(
   precision = "compatible",
   graph_stage = "skeleton",
   residual_cache = TRUE,
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 cached_calls <- pair_env$count
 single_target_calls <- target_env$count

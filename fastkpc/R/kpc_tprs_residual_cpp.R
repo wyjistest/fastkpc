@@ -28,6 +28,45 @@ fastkpc_kpc_tprs_validate_input <- function(y, S) {
   list(y = y, S = S)
 }
 
+fastkpc_prewarm_kpc_tprs_residual_cpp <- function(
+    n = 32L, seed = 62491L,
+    tol = sqrt(.Machine$double.eps)) {
+  n <- as.integer(n)[1L]
+  if (is.na(n) || n < 16L) n <- 32L
+  seed <- as.integer(seed)[1L]
+  old_seed <- if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+    get(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+  } else {
+    NULL
+  }
+  on.exit({
+    if (is.null(old_seed)) {
+      if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+        rm(".Random.seed", envir = .GlobalEnv)
+      }
+    } else {
+      assign(".Random.seed", old_seed, envir = .GlobalEnv)
+    }
+  }, add = TRUE)
+  set.seed(seed)
+  s <- seq(-1, 1, length.out = n)
+  y <- sin(2 * s) + stats::rnorm(n, sd = 0.01)
+  S <- matrix(s + stats::rnorm(n, sd = 0.005), ncol = 1L)
+  start <- proc.time()[["elapsed"]]
+  fit <- fastkpc_kpc_tprs_gcv_candidate(y = y, S = S, tol = tol)
+  elapsed_ms <- (proc.time()[["elapsed"]] - start) * 1000
+  list(
+    backend_family = "kpcTprsResidualCPP",
+    mode = "prewarm",
+    n = n,
+    elapsed_ms = elapsed_ms,
+    selected_sp = fit$selected_sp,
+    score = fit$score,
+    edf = fit$edf,
+    timings = fit$timings
+  )
+}
+
 fastkpc_kpc_tprs_setup_fingerprint <- function(S, setup) {
   fastkpc_hash_object(list(
     backend = "kpcTprsResidualCPP",
@@ -1985,6 +2024,7 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
     refine = TRUE,
     selection = c("mgcv-magic", "global-grid", "mgcv-local"),
     tol = sqrt(.Machine$double.eps)) {
+  total_start <- proc.time()[["elapsed"]]
   selection <- match.arg(selection)
   if (identical(selection, "mgcv-local")) selection <- "mgcv-magic"
   input <- fastkpc_kpc_tprs_validate_input(y, S)
@@ -1994,8 +2034,11 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
     fastkpc_kpc_tprs_stop("lambda_grid must be positive finite")
   }
   lambda_grid <- sort(unique(lambda_grid))
+  setup_start <- proc.time()[["elapsed"]]
   setup <- kpc_tprs_residual_cpp_setup(input$S, tol = tol)
+  setup_ms <- (proc.time()[["elapsed"]] - setup_start) * 1000
   local <- NULL
+  gcv_start <- proc.time()[["elapsed"]]
   if (identical(selection, "mgcv-magic")) {
     local <- fastkpc_kpc_tprs_magic1d_candidate(
       y = input$y,
@@ -2075,7 +2118,9 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
       }
     }
   }
+  gcv_score_ms <- (proc.time()[["elapsed"]] - gcv_start) * 1000
 
+  solve_start <- proc.time()[["elapsed"]]
   selected <- fastkpc_kpc_tprs_solve_candidate_setup(
     y = input$y,
     setup = setup,
@@ -2083,6 +2128,8 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
     include_intercept = TRUE,
     tol = tol
   )
+  linear_solve_ms <- (proc.time()[["elapsed"]] - solve_start) * 1000
+  total_ms <- (proc.time()[["elapsed"]] - total_start) * 1000
   selected$mode <- "continuous-gcv-candidate-shadow"
   selected$selected_sp <- as.numeric(selected_lambda)
   selected$score <- as.numeric(selected_score)
@@ -2147,6 +2194,14 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
       bracket_upper_lambda = bracket_upper_lambda,
       does_not_drive_graph_decisions = TRUE
     )
+  )
+  selected$timings <- list(
+    mgcv_setup_cpu_ms = as.numeric(setup_ms),
+    gcv_score_ms = as.numeric(gcv_score_ms),
+    linear_solve_ms = as.numeric(linear_solve_ms),
+    residual_materialize_ms = 0,
+    residualization_compute_ms = as.numeric(total_ms),
+    total_ms = as.numeric(total_ms)
   )
   selected
 }

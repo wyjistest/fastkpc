@@ -62,7 +62,8 @@ far <- fast_kpc(
     mgcvExtractCPUGCVBridge = make_spy(0.9, "mgcvExtractCPU-spy", verifier_calls),
     `legacy-mgcv` = make_spy(0.9, "legacy-mgcv-spy", legacy_calls)
   ),
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 assert_true(primary_calls$count > 0L,
@@ -96,7 +97,8 @@ fallback <- fast_kpc(
                                  verifier_calls, fail = TRUE),
     `legacy-mgcv` = make_spy(0.051, "legacy-mgcv-spy", legacy_calls)
   ),
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 assert_true(verifier_calls$count > 0L,

@@ -21,7 +21,8 @@ result <- fast_kpc(
   engine = "cpu",
   precision = "compatible",
   graph_stage = "skeleton",
-  runtime_capabilities = caps_cpu_only
+  runtime_capabilities = caps_cpu_only,
+  precision_trace_level = "full"
 )
 
 trace <- result$diagnostics$precision_trace

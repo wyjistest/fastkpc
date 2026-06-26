@@ -62,7 +62,8 @@ compatible <- fast_kpc(
     `legacy-mgcv` = make_spy(0.9, 0.9, 0.9, "legacy-mgcv-spy",
                              new.env(parent = emptyenv()))
   ),
-  runtime_capabilities = caps_cpu_only
+  runtime_capabilities = caps_cpu_only,
+  precision_trace_level = "full"
 )
 
 assert_true(any(vapply(compatible_calls$rows, function(row) length(row$S) == 2L,
@@ -99,7 +100,8 @@ hybrid <- fast_kpc(
     `legacy-mgcv` = make_spy(0.9, 0.9, 0.9, "legacy-mgcv-spy",
                              new.env(parent = emptyenv()))
   ),
-  runtime_capabilities = caps_cpu_only
+  runtime_capabilities = caps_cpu_only,
+  precision_trace_level = "full"
 )
 verified_two <- hybrid$diagnostics$precision_trace[
   hybrid$diagnostics$precision_trace$near_alpha_triggered &

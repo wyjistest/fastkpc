@@ -21,7 +21,8 @@ compatible <- fast_kpc(
   engine = "cpu",
   precision = "compatible",
   graph_stage = "skeleton",
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 assert_true("backend_planned" %in% names(compatible$config),

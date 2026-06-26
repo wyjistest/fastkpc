@@ -74,7 +74,8 @@ switch_guard <- with_mgcv_forbidden(
     engine = "cpu",
     precision = "compatible",
     graph_stage = "skeleton",
-    runtime_capabilities = caps
+    runtime_capabilities = caps,
+    precision_trace_level = "full"
   )
 )
 trace <- switch_guard$value$diagnostics$precision_trace

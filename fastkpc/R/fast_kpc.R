@@ -1755,6 +1755,13 @@ fast_kpc <- function(data,
         )
       }
     } else if (isTRUE(use_precision_r_skeleton)) {
+      r_precision_trace_level <- if (!isTRUE(precision_diagnostics)) {
+        "none"
+      } else if (identical(precision_trace_level, "auto")) {
+        "summary"
+      } else {
+        precision_trace_level
+      }
       skeleton <- fastkpc_r_skeleton_precision(
         matrix_data, alpha, max_conditioning_size,
         precision = precision_requested,
@@ -1768,7 +1775,8 @@ fast_kpc <- function(data,
         runtime_capabilities = runtime_capabilities,
         allow_canary = allow_canary_mgcv_extract,
         residual_cache = residual_cache,
-        execution_engine = engine_used
+        execution_engine = engine_used,
+        trace_level = r_precision_trace_level
       )
       list(skeleton = skeleton, orientation = NULL)
     } else if (isTRUE(use_batched_precision_layer)) {

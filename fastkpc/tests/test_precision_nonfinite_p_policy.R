@@ -43,7 +43,8 @@ result <- fast_kpc(
   precision = "compatible",
   graph_stage = "skeleton",
   precision_executors = executors,
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 trace <- result$diagnostics$precision_trace

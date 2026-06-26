@@ -76,6 +76,7 @@ result <- fast_kpc(
   precision = "compatible",
   graph_stage = "skeleton",
   runtime_capabilities = caps_cpu_only,
+  precision_trace_level = "full",
   precision_executors = list(
     `direct-ci` = make_spy(0.001, 0.001, "direct-ci-spy"),
     mgcvExtractCPUGCVBridge = make_spy(0.001, 0.9,

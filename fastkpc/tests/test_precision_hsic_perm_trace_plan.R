@@ -64,7 +64,8 @@ a <- fast_kpc(
   permutation_params = list(replicates = 12L, seed = 404L,
                             include_observed = TRUE),
   precision_executors = executors_a,
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 primary_calls_b <- new.env(parent = emptyenv())
@@ -93,7 +94,8 @@ b <- fast_kpc(
   permutation_params = list(replicates = 12L, seed = 404L,
                             include_observed = TRUE),
   precision_executors = executors_b,
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 trace_a <- a$diagnostics$precision_trace

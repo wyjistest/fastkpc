@@ -60,7 +60,8 @@ primary_na <- fast_kpc(
                                  verifier_calls),
     `legacy-mgcv` = make_spy(0.9, "legacy-mgcv-spy", legacy_calls)
   ),
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 trace <- primary_na$diagnostics$precision_trace
@@ -96,7 +97,8 @@ verifier_na <- fast_kpc(
                                  verifier_calls),
     `legacy-mgcv` = make_spy(0.051, "legacy-mgcv-spy", legacy_calls)
   ),
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 trace <- verifier_na$diagnostics$precision_trace
@@ -132,7 +134,8 @@ legacy_na <- fast_kpc(
                                  verifier_calls),
     `legacy-mgcv` = make_spy(NA_real_, "legacy-mgcv-spy", legacy_calls)
   ),
-  runtime_capabilities = caps
+  runtime_capabilities = caps,
+  precision_trace_level = "full"
 )
 
 trace <- legacy_na$diagnostics$precision_trace
