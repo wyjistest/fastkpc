@@ -45,7 +45,8 @@ assert_true(length(missing_breakdown) == 0L,
 required_stages <- c(
   "skeleton_total", "fastspline_residual_prefetch", "ci_eval_total",
   "native_replay", "dcov_rowsum_distance", "dcov_fused_center_reduce",
-  "dcov_measured_total"
+  "dcov_measured_total", "residual_host_pack", "residual_factor_solve",
+  "residual_d2h", "residual_true_batch_total"
 )
 missing_stages <- setdiff(required_stages, unique(breakdown$stage))
 assert_true(length(missing_stages) == 0L,
@@ -66,6 +67,10 @@ assert_true(runs$dcov_batches[[1L]] > 0L,
             "stage breakdown should record dCov batches")
 assert_true(runs$dcov_chunks[[1L]] > 0L,
             "stage breakdown should record dCov chunks")
+assert_true(runs$unique_residual_requests[[1L]] > 0L,
+            "stage breakdown should record unique residual requests")
+assert_true(runs$cuda_residual_true_batched_fits[[1L]] >= 0L,
+            "stage breakdown should record true batched residual fits")
 
 required_summary <- c(
   "stage", "stage_group", "run_count", "finite_count", "median_ms", "p90_ms"

@@ -332,6 +332,30 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
       Rcpp::Named("plan_elapsed_sec") = diagnostics.plan_elapsed_sec,
       Rcpp::Named("residual_prefetch_elapsed_sec") =
         diagnostics.residual_prefetch_elapsed_sec,
+      Rcpp::Named("residual_grouping_sec") =
+        diagnostics.residual_grouping_sec,
+      Rcpp::Named("residual_host_pack_sec") =
+        diagnostics.residual_host_pack_sec,
+      Rcpp::Named("residual_alloc_sec") = diagnostics.residual_alloc_sec,
+      Rcpp::Named("residual_h2d_sec") = diagnostics.residual_h2d_sec,
+      Rcpp::Named("residual_xtx_xty_sec") =
+        diagnostics.residual_xtx_xty_sec,
+      Rcpp::Named("residual_pointer_setup_sec") =
+        diagnostics.residual_pointer_setup_sec,
+      Rcpp::Named("residual_active_copy_sec") =
+        diagnostics.residual_active_copy_sec,
+      Rcpp::Named("residual_build_system_sec") =
+        diagnostics.residual_build_system_sec,
+      Rcpp::Named("residual_factor_solve_sec") =
+        diagnostics.residual_factor_solve_sec,
+      Rcpp::Named("residual_summary_sec") =
+        diagnostics.residual_summary_sec,
+      Rcpp::Named("residual_d2h_sec") = diagnostics.residual_d2h_sec,
+      Rcpp::Named("residual_host_select_sec") =
+        diagnostics.residual_host_select_sec,
+      Rcpp::Named("residual_free_sec") = diagnostics.residual_free_sec,
+      Rcpp::Named("residual_true_batch_total_sec") =
+        diagnostics.residual_true_batch_total_sec,
       Rcpp::Named("ci_eval_elapsed_sec") = diagnostics.ci_eval_elapsed_sec,
       Rcpp::Named("replay_elapsed_sec") = diagnostics.replay_elapsed_sec,
       Rcpp::Named("total_elapsed_sec") = diagnostics.total_elapsed_sec,
@@ -629,6 +653,20 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
     Rcpp::Named("min_group_size") = diagnostics.min_group_size,
     Rcpp::Named("cholesky_backend") = diagnostics.cholesky_backend,
     Rcpp::Named("batch_mode") = diagnostics.batch_mode,
+    Rcpp::Named("grouping_sec") = diagnostics.grouping_sec,
+    Rcpp::Named("host_pack_sec") = diagnostics.host_pack_sec,
+    Rcpp::Named("alloc_sec") = diagnostics.alloc_sec,
+    Rcpp::Named("h2d_sec") = diagnostics.h2d_sec,
+    Rcpp::Named("xtx_xty_sec") = diagnostics.xtx_xty_sec,
+    Rcpp::Named("pointer_setup_sec") = diagnostics.pointer_setup_sec,
+    Rcpp::Named("active_copy_sec") = diagnostics.active_copy_sec,
+    Rcpp::Named("build_system_sec") = diagnostics.build_system_sec,
+    Rcpp::Named("factor_solve_sec") = diagnostics.factor_solve_sec,
+    Rcpp::Named("residual_summary_sec") = diagnostics.residual_summary_sec,
+    Rcpp::Named("d2h_sec") = diagnostics.d2h_sec,
+    Rcpp::Named("host_select_sec") = diagnostics.host_select_sec,
+    Rcpp::Named("free_sec") = diagnostics.free_sec,
+    Rcpp::Named("true_batch_total_sec") = diagnostics.true_batch_total_sec,
     Rcpp::Named("group_table") =
       fastspline_batch_group_table_to_df(diagnostics)
   );

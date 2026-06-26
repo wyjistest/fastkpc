@@ -5,6 +5,7 @@
 #include <cusolverDn.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <limits>
@@ -18,6 +19,29 @@ namespace {
 
 constexpr int kBlock = 256;
 constexpr int kMaxTrueBatchedDesignCols = 128;
+
+double elapsed_since(std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration<double>(
+    std::chrono::steady_clock::now() - start).count();
+}
+
+void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
+                      const FastSplineCudaBatchDiagnostics& value) {
+  out->grouping_sec += value.grouping_sec;
+  out->host_pack_sec += value.host_pack_sec;
+  out->alloc_sec += value.alloc_sec;
+  out->h2d_sec += value.h2d_sec;
+  out->xtx_xty_sec += value.xtx_xty_sec;
+  out->pointer_setup_sec += value.pointer_setup_sec;
+  out->active_copy_sec += value.active_copy_sec;
+  out->build_system_sec += value.build_system_sec;
+  out->factor_solve_sec += value.factor_solve_sec;
+  out->residual_summary_sec += value.residual_summary_sec;
+  out->d2h_sec += value.d2h_sec;
+  out->host_select_sec += value.host_select_sec;
+  out->free_sec += value.free_sec;
+  out->true_batch_total_sec += value.true_batch_total_sec;
+}
 
 __device__ __host__ inline std::size_t matrix_offset(int fit,
                                                      int row,
@@ -475,7 +499,8 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
   const Rcpp::NumericMatrix& data,
   const FastSplineBatchGroup& group,
   const FastSplineParams& params,
-  const std::string& backend) {
+  const std::string& backend,
+  FastSplineCudaBatchDiagnostics* timing) {
   const int group_size = static_cast<int>(group.requests.size());
   const int n = group.n;
   const int p = group.design_cols;
@@ -487,9 +512,14 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
                              std::to_string(p) + " for true batched solve");
   }
 
+  const std::chrono::steady_clock::time_point total_start =
+    std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point stage =
+    std::chrono::steady_clock::now();
   const std::vector<double> host_X = pack_group_x(group);
   const std::vector<double> host_P = pack_group_p(group);
   const std::vector<double> host_y = pack_group_y(data, group);
+  timing->host_pack_sec += elapsed_since(stage);
   const std::vector<double> lambdas = lambda_grid(params);
   const std::size_t x_size = static_cast<std::size_t>(group_size) * n * p;
   const std::size_t y_size = static_cast<std::size_t>(group_size) * n;
@@ -498,6 +528,7 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
 
   DeviceGroupBuffers buffers;
   try {
+    stage = std::chrono::steady_clock::now();
     check_cuda(cudaMalloc(&buffers.d_X, sizeof(double) * x_size), "alloc batched X");
     check_cuda(cudaMalloc(&buffers.d_P, sizeof(double) * pp_size), "alloc batched P");
     check_cuda(cudaMalloc(&buffers.d_y, sizeof(double) * y_size), "alloc batched y");
@@ -521,14 +552,18 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     check_cusolver(cusolverDnCreate(&buffers.solver),
                    "create batched cuSOLVER handle");
     check_cublas(cublasCreate(&buffers.blas), "create batched cuBLAS handle");
+    timing->alloc_sec += elapsed_since(stage);
 
+    stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(buffers.d_X, host_X.data(), sizeof(double) * x_size,
                           cudaMemcpyHostToDevice), "copy batched X");
     check_cuda(cudaMemcpy(buffers.d_P, host_P.data(), sizeof(double) * pp_size,
                           cudaMemcpyHostToDevice), "copy batched P");
     check_cuda(cudaMemcpy(buffers.d_y, host_y.data(), sizeof(double) * y_size,
                           cudaMemcpyHostToDevice), "copy batched y");
+    timing->h2d_sec += elapsed_since(stage);
 
+    stage = std::chrono::steady_clock::now();
     const dim3 xtx_grid(p, p, group_size);
     batched_xtx_kernel<<<xtx_grid, kBlock>>>(buffers.d_X, group_size, n, p,
                                              buffers.d_XtX);
@@ -537,7 +572,9 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
                                              group_size, n, p, buffers.d_Xty);
     check_cuda(cudaGetLastError(), "launch batched XtX/Xty kernels");
     check_cuda(cudaDeviceSynchronize(), "synchronize batched XtX/Xty kernels");
+    timing->xtx_xty_sec += elapsed_since(stage);
 
+    stage = std::chrono::steady_clock::now();
     const int ptr_blocks = (group_size + kBlock - 1) / kBlock;
     make_matrix_pointer_array<<<std::max(1, ptr_blocks), kBlock>>>(
       buffers.d_A, group_size, p, buffers.d_A_ptrs);
@@ -546,6 +583,8 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     make_matrix_pointer_array<<<std::max(1, ptr_blocks), kBlock>>>(
       buffers.d_Ainv, group_size, p, buffers.d_Ainv_ptrs);
     check_cuda(cudaGetLastError(), "launch batched pointer setup kernels");
+    check_cuda(cudaDeviceSynchronize(), "synchronize batched pointer setup kernels");
+    timing->pointer_setup_sec += elapsed_since(stage);
 
     std::vector<int> active(group_size, 1);
     std::vector<BestFitState> best(group_size);
@@ -553,17 +592,23 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     int ridge_attempt = 0;
     while (ridge <= 1e-4 * (1.0 + 1e-12)) {
       std::vector<BestFitState> ridge_best(group_size);
+      stage = std::chrono::steady_clock::now();
       check_cuda(cudaMemcpy(buffers.d_active, active.data(),
                             sizeof(int) * group_size, cudaMemcpyHostToDevice),
                  "copy active flags");
+      timing->active_copy_sec += elapsed_since(stage);
       for (double lambda : lambdas) {
         const int system_blocks = static_cast<int>(
           (pp_size + kBlock - 1) / kBlock);
+        stage = std::chrono::steady_clock::now();
         batched_build_system_kernel<<<std::max(1, system_blocks), kBlock>>>(
           buffers.d_XtX, buffers.d_P, buffers.d_active, group_size, p,
           lambda, ridge, buffers.d_A);
         check_cuda(cudaGetLastError(), "launch batched build system kernel");
+        check_cuda(cudaDeviceSynchronize(), "synchronize batched build system kernel");
+        timing->build_system_sec += elapsed_since(stage);
 
+        stage = std::chrono::steady_clock::now();
         check_cusolver(cusolverDnDpotrfBatched(
           buffers.solver, CUBLAS_FILL_MODE_UPPER, p, buffers.d_A_ptrs, p,
           buffers.d_info, group_size), "batched potrf");
@@ -594,7 +639,10 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
           const_cast<const double**>(buffers.d_A_ptrs), p,
           buffers.d_Ainv_ptrs, p, group_size),
           "batched inverse triangular solve 2");
+        check_cuda(cudaDeviceSynchronize(), "synchronize batched factor solve");
+        timing->factor_solve_sec += elapsed_since(stage);
 
+        stage = std::chrono::steady_clock::now();
         const int row_blocks = (n + kBlock - 1) / kBlock;
         const dim3 fit_grid(std::max(1, row_blocks), group_size);
         batched_fitted_residual_kernel<<<fit_grid, kBlock>>>(
@@ -605,12 +653,14 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
           buffers.d_active, group_size, n, p, buffers.d_rss, buffers.d_edf);
         check_cuda(cudaGetLastError(), "launch batched residual summary kernels");
         check_cuda(cudaDeviceSynchronize(), "synchronize batched solve candidate");
+        timing->residual_summary_sec += elapsed_since(stage);
 
         std::vector<int> info(group_size);
         std::vector<double> rss(group_size);
         std::vector<double> edf(group_size);
         std::vector<double> fitted(y_size);
         std::vector<double> residuals(y_size);
+        stage = std::chrono::steady_clock::now();
         check_cuda(cudaMemcpy(info.data(), buffers.d_info,
                               sizeof(int) * group_size, cudaMemcpyDeviceToHost),
                    "copy batched info");
@@ -626,7 +676,9 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
         check_cuda(cudaMemcpy(residuals.data(), buffers.d_residuals,
                               sizeof(double) * y_size, cudaMemcpyDeviceToHost),
                    "copy batched residuals");
+        timing->d2h_sec += elapsed_since(stage);
 
+        stage = std::chrono::steady_clock::now();
         for (int fit = 0; fit < group_size; ++fit) {
           if (active[fit] == 0 || info[fit] != 0) continue;
           const double denom = static_cast<double>(n) - edf[fit];
@@ -659,6 +711,7 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
             ridge_best[fit].residuals = fit_residuals;
           }
         }
+        timing->host_select_sec += elapsed_since(stage);
       }
 
       bool any_active = false;
@@ -678,6 +731,7 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     }
 
     std::vector<FastSplineCudaFit> out(group_size);
+    stage = std::chrono::steady_clock::now();
     for (int fit = 0; fit < group_size; ++fit) {
       if (!best[fit].found) {
         throw std::runtime_error("no finite CUDA fastSpline batch solve");
@@ -695,10 +749,16 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
       out[fit].diagnostics = make_diagnostics(true, false, "", group.group_id,
                                               fit, true, backend);
     }
+    timing->host_select_sec += elapsed_since(stage);
+    stage = std::chrono::steady_clock::now();
     free_buffers(&buffers);
+    timing->free_sec += elapsed_since(stage);
+    timing->true_batch_total_sec += elapsed_since(total_start);
     return out;
   } catch (...) {
+    stage = std::chrono::steady_clock::now();
     free_buffers(&buffers);
+    timing->free_sec += elapsed_since(stage);
     throw;
   }
 }
@@ -760,6 +820,20 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.min_group_size = 0;
   out.cholesky_backend = "";
   out.batch_mode = requested_fits == 0 ? "empty" : "true-batch";
+  out.grouping_sec = 0.0;
+  out.host_pack_sec = 0.0;
+  out.alloc_sec = 0.0;
+  out.h2d_sec = 0.0;
+  out.xtx_xty_sec = 0.0;
+  out.pointer_setup_sec = 0.0;
+  out.active_copy_sec = 0.0;
+  out.build_system_sec = 0.0;
+  out.factor_solve_sec = 0.0;
+  out.residual_summary_sec = 0.0;
+  out.d2h_sec = 0.0;
+  out.host_select_sec = 0.0;
+  out.free_sec = 0.0;
+  out.true_batch_total_sec = 0.0;
   return out;
 }
 
@@ -844,8 +918,11 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
   result.diagnostics = make_empty_batch_diagnostics(requested_fits);
   if (requested_fits == 0) return result;
 
+  std::chrono::steady_clock::time_point stage =
+    std::chrono::steady_clock::now();
   const std::vector<FastSplineBatchGroup> groups =
     make_fastspline_batch_groups(data, targets, conditioning_sets, params);
+  result.diagnostics.grouping_sec += elapsed_since(stage);
   const std::string true_backend = "cusolver-batched";
 
   for (const FastSplineBatchGroup& group : groups) {
@@ -885,8 +962,12 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
     }
 
     try {
+      FastSplineCudaBatchDiagnostics group_timing =
+        make_empty_batch_diagnostics(fit_count);
       const std::vector<FastSplineCudaFit> group_fits =
-        run_true_batched_group(data, group, params, true_backend);
+        run_true_batched_group(data, group, params, true_backend,
+                               &group_timing);
+      add_batch_timing(&result.diagnostics, group_timing);
       for (int i = 0; i < fit_count; ++i) {
         result.fits[group.requests[i].original_index] = group_fits[i];
       }

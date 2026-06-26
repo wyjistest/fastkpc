@@ -203,6 +203,31 @@ class CudaSkeletonResidualCache {
         diagnostics->cuda_residual_max_fits_per_design =
           std::max(diagnostics->cuda_residual_max_fits_per_design,
                    batch_result.diagnostics.max_fits_per_design);
+        diagnostics->residual_grouping_sec +=
+          batch_result.diagnostics.grouping_sec;
+        diagnostics->residual_host_pack_sec +=
+          batch_result.diagnostics.host_pack_sec;
+        diagnostics->residual_alloc_sec +=
+          batch_result.diagnostics.alloc_sec;
+        diagnostics->residual_h2d_sec += batch_result.diagnostics.h2d_sec;
+        diagnostics->residual_xtx_xty_sec +=
+          batch_result.diagnostics.xtx_xty_sec;
+        diagnostics->residual_pointer_setup_sec +=
+          batch_result.diagnostics.pointer_setup_sec;
+        diagnostics->residual_active_copy_sec +=
+          batch_result.diagnostics.active_copy_sec;
+        diagnostics->residual_build_system_sec +=
+          batch_result.diagnostics.build_system_sec;
+        diagnostics->residual_factor_solve_sec +=
+          batch_result.diagnostics.factor_solve_sec;
+        diagnostics->residual_summary_sec +=
+          batch_result.diagnostics.residual_summary_sec;
+        diagnostics->residual_d2h_sec += batch_result.diagnostics.d2h_sec;
+        diagnostics->residual_host_select_sec +=
+          batch_result.diagnostics.host_select_sec;
+        diagnostics->residual_free_sec += batch_result.diagnostics.free_sec;
+        diagnostics->residual_true_batch_total_sec +=
+          batch_result.diagnostics.true_batch_total_sec;
         for (int i = 0; i < static_cast<int>(missing_positions.size()); ++i) {
           const LayerResidualRequest& request = requests[missing_positions[i]];
           const std::vector<int> normalized_cond =
