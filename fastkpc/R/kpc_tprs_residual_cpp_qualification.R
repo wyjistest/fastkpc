@@ -550,6 +550,89 @@ fastkpc_kpc_tprs_magic_optimizer_diagnostic_rows <- function(
   if (length(out) == 0L) empty else do.call(rbind, out)
 }
 
+fastkpc_kpc_tprs_magic1d_trace_rows <- function(data, diagnostics) {
+  empty <- data.frame(
+    scenario_id = character(),
+    `repeat` = integer(),
+    canonical_test_order_id = integer(),
+    edge_x = integer(),
+    edge_y = integer(),
+    target = integer(),
+    target_side = character(),
+    S_key = character(),
+    initial_lambda = numeric(),
+    final_lambda = numeric(),
+    mgcv_mapped_lambda = numeric(),
+    lambda_log_diff = numeric(),
+    iteration = integer(),
+    phase = character(),
+    lambda = numeric(),
+    score = numeric(),
+    gradient = numeric(),
+    hessian = numeric(),
+    hessian_positive = logical(),
+    step_type = character(),
+    raw_step = numeric(),
+    capped_step = numeric(),
+    step_halving_count = integer(),
+    accepted = logical(),
+    stringsAsFactors = FALSE
+  )
+  if (!is.data.frame(diagnostics) || nrow(diagnostics) == 0L) return(empty)
+  out <- list()
+  for (i in seq_len(nrow(diagnostics))) {
+    row <- diagnostics[i, , drop = FALSE]
+    S <- as.integer(strsplit(as.character(row$S_key[[1L]]), "\\|")[[1L]])
+    target <- as.integer(row$target[[1L]])
+    if (length(S) == 0L || anyNA(S) || is.na(target)) next
+    fit <- tryCatch(
+      fastkpc_kpc_tprs_gcv_candidate(
+        y = data[, target],
+        S = data[, S, drop = FALSE],
+        selection = "mgcv-magic"
+      ),
+      error = function(e) NULL
+    )
+    if (is.null(fit) || is.null(fit$diagnostics$magic1d_trace)) next
+    trace <- fit$diagnostics$magic1d_trace[[1L]]
+    if (!is.data.frame(trace) || nrow(trace) == 0L) next
+    initial_lambda <- if ("lambda" %in% names(trace)) {
+      as.numeric(trace$lambda[[1L]])
+    } else {
+      NA_real_
+    }
+    final_lambda <- as.numeric(fit$selected_sp)
+    mapped_lambda <- as.numeric(row$mapped_lambda[[1L]])
+    out[[length(out) + 1L]] <- cbind(
+      data.frame(
+        scenario_id = row$scenario_id[[1L]],
+        `repeat` = as.integer(row[["repeat"]][[1L]]),
+        canonical_test_order_id =
+          as.integer(row$canonical_test_order_id[[1L]]),
+        edge_x = as.integer(row$edge_x[[1L]]),
+        edge_y = as.integer(row$edge_y[[1L]]),
+        target = target,
+        target_side = as.character(row$target_side[[1L]]),
+        S_key = as.character(row$S_key[[1L]]),
+        initial_lambda = initial_lambda,
+        final_lambda = final_lambda,
+        mgcv_mapped_lambda = mapped_lambda,
+        lambda_log_diff = if (is.finite(final_lambda) &&
+                              is.finite(mapped_lambda) &&
+                              final_lambda > 0 && mapped_lambda > 0) {
+          log(final_lambda / mapped_lambda)
+        } else {
+          NA_real_
+        },
+        stringsAsFactors = FALSE
+      ),
+      trace,
+      stringsAsFactors = FALSE
+    )
+  }
+  if (length(out) == 0L) empty else do.call(rbind, out)
+}
+
 fastkpc_kpc_tprs_promotion_summary <- function(qualification_summary,
                                                backend_comparison,
                                                no_oracle) {
@@ -862,6 +945,43 @@ fastkpc_run_kpc_tprs_residual_cpp_qualification <- function(
   }
   magic_optimizer_diagnostics <-
     fastkpc_kpc_tprs_restore_repeat_name(magic_optimizer_diagnostics)
+  magic1d_trace <- if (nrow(magic_optimizer_diagnostics) == 0L) {
+    fastkpc_kpc_tprs_magic1d_trace_rows(
+      data = matrix(numeric(), nrow = 0L, ncol = 0L),
+      diagnostics = magic_optimizer_diagnostics
+    )
+  } else {
+    magic_trace_rows <- list()
+    for (scenario in scenarios) {
+      scenario_id <- scenario$scenario_id
+      n <- as.integer(scenario$n %||% 64L)
+      seed <- as.integer(scenario$seed %||% 62410L)
+      for (repeat_id in seq_len(as.integer(repeats))) {
+        subset <- magic_optimizer_diagnostics[
+          magic_optimizer_diagnostics$scenario_id == scenario_id &
+            as.integer(magic_optimizer_diagnostics[["repeat"]]) == repeat_id,
+          , drop = FALSE
+        ]
+        if (nrow(subset) == 0L) next
+        data <- as.matrix(scenario$generator(n, seed + repeat_id - 1L))
+        storage.mode(data) <- "double"
+        magic_trace_rows[[length(magic_trace_rows) + 1L]] <-
+          fastkpc_kpc_tprs_magic1d_trace_rows(
+            data = data,
+            diagnostics = subset
+          )
+      }
+    }
+    if (length(magic_trace_rows) == 0L) {
+      fastkpc_kpc_tprs_magic1d_trace_rows(
+        data = matrix(numeric(), nrow = 0L, ncol = 0L),
+        diagnostics = magic_optimizer_diagnostics[0L, , drop = FALSE]
+      )
+    } else {
+      do.call(rbind, magic_trace_rows)
+    }
+  }
+  magic1d_trace <- fastkpc_kpc_tprs_restore_repeat_name(magic1d_trace)
   no_oracle <- if (isTRUE(no_oracle_check) && length(scenarios) > 0L) {
     scenario <- scenarios[[1L]]
     data <- as.matrix(scenario$generator(as.integer(scenario$n), scenario$seed))
@@ -945,6 +1065,7 @@ fastkpc_run_kpc_tprs_residual_cpp_qualification <- function(
     pvalue_drift = file.path(output_dir, "pvalue_drift.csv"),
     magic_optimizer_diagnostics =
       file.path(output_dir, "magic_optimizer_diagnostics.csv"),
+    magic1d_trace = file.path(output_dir, "magic1d_trace.csv"),
     qualification_summary = file.path(output_dir, "qualification_summary.csv"),
     promotion_summary = file.path(output_dir, "promotion_summary.csv"),
     no_oracle = file.path(output_dir, "no_oracle.csv"),
@@ -958,6 +1079,7 @@ fastkpc_run_kpc_tprs_residual_cpp_qualification <- function(
   utils::write.csv(pvalue_drift, paths$pvalue_drift, row.names = FALSE)
   utils::write.csv(magic_optimizer_diagnostics,
                    paths$magic_optimizer_diagnostics, row.names = FALSE)
+  utils::write.csv(magic1d_trace, paths$magic1d_trace, row.names = FALSE)
   utils::write.csv(qualification_summary, paths$qualification_summary,
                    row.names = FALSE)
   utils::write.csv(promotion_summary, paths$promotion_summary,
@@ -1007,6 +1129,7 @@ fastkpc_run_kpc_tprs_residual_cpp_qualification <- function(
     backend_comparison = backend_comparison,
     pvalue_drift = pvalue_drift,
     magic_optimizer_diagnostics = magic_optimizer_diagnostics,
+    magic1d_trace = magic1d_trace,
     qualification_summary = qualification_summary,
     promotion_summary = promotion_summary,
     no_oracle = no_oracle,

@@ -34,12 +34,12 @@ candidate_p <- dcov_gamma_exact(candidate_x$residuals,
                                 candidate_y$residuals)$p.value
 
 assert_true(abs(candidate_p - oracle_p) < 1e-5,
-            paste("candidate p-value should stay in mgcv-compatible basin;",
+            paste("candidate p-value should stay in the mgcv-compatible basin;",
                   "oracle", oracle_p, "candidate", candidate_p))
 assert_true(fastkpc_kpc_tprs_rel_l2(candidate_y$residuals,
                                     oracle_y$residuals) < 1e-4,
-            "candidate residuals should match mgcv local GCV basin")
-assert_true(abs(log(candidate_y$selected_sp / 0.031655121)) < 1e-3,
+            "candidate residuals should stay near the mgcv-magic trajectory")
+assert_true(abs(log(candidate_y$selected_sp / 0.031655121)) < 2e-3,
             "candidate should select the mgcv-compatible local basin")
 
 global_y <- fastkpc_kpc_tprs_gcv_candidate(

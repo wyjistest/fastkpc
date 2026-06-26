@@ -32,6 +32,11 @@ high_basin <- fastkpc_kpc_tprs_magic_parity_diagnostics(
   S = data[, 6L, drop = FALSE],
   label = "real-target34-S6"
 )
+non_global <- fastkpc_kpc_tprs_magic_parity_diagnostics(
+  y = data[, 16L],
+  S = data[, 6L, drop = FALSE],
+  label = "real-target16-S6"
+)
 
 required <- c(
   "label", "backend_family", "mode", "authoritative",
@@ -47,6 +52,7 @@ required <- c(
 )
 assert_has_names(low_basin, required, "low-basin diagnostics")
 assert_has_names(high_basin, required, "high-basin diagnostics")
+assert_has_names(non_global, required, "non-global diagnostics")
 
 assert_true(identical(low_basin$backend_family, "kpcTprsResidualCPP"),
             "low-basin backend family")
@@ -80,5 +86,16 @@ assert_true(high_basin$global_score_lower_than_local,
             "target 34 global scan should expose a lower-score non-mgcv basin")
 assert_true(identical(high_basin$basin_label, "mgcv-local-basin-nonglobal"),
             "target 34 basin classification")
+
+assert_true(non_global$mapped_residual_rel_l2 < 1e-10,
+            "mapped lambda should reproduce mgcv residuals for target 16")
+assert_true(non_global$local_residual_rel_l2 < 1e-6,
+            "mgcv-magic policy should follow target 16 mgcv trajectory")
+assert_true(non_global$global_score_lower_than_local,
+            "target 16 should retain a lower-score non-compatible global point")
+assert_true(non_global$global_residual_rel_l2 > 1e-2,
+            "target 16 global policy should not be mgcv-compatible")
+assert_true(identical(non_global$basin_label, "mgcv-local-basin-nonglobal"),
+            "target 16 basin classification")
 
 cat("PASS kpcTprsResidualCPP magic optimizer parity diagnostics\n")

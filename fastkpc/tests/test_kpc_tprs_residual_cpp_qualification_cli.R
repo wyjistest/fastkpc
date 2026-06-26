@@ -19,7 +19,7 @@ assert_true(identical(status, 0L),
 
 required <- c("runs.csv", "graph_agreement.csv", "trace_summary.csv",
               "backend_comparison.csv", "pvalue_drift.csv",
-              "magic_optimizer_diagnostics.csv",
+              "magic_optimizer_diagnostics.csv", "magic1d_trace.csv",
               "qualification_summary.csv", "promotion_summary.csv",
               "no_oracle.csv", "summary.md")
 for (name in required) {

@@ -42,7 +42,8 @@ assert_has_names(
   campaign,
   c("runs", "graph_agreement", "trace_summary", "qualification_summary",
     "backend_comparison", "pvalue_drift", "magic_optimizer_diagnostics",
-    "promotion_summary", "no_oracle", "summary", "paths", "output_dir"),
+    "magic1d_trace", "promotion_summary", "no_oracle", "summary", "paths",
+    "output_dir"),
   "qualification campaign"
 )
 assert_true(is.data.frame(campaign$runs), "runs should be a data frame")
@@ -58,6 +59,8 @@ assert_true(is.data.frame(campaign$pvalue_drift),
             "p-value drift should be a data frame")
 assert_true(is.data.frame(campaign$magic_optimizer_diagnostics),
             "magic optimizer diagnostics should be a data frame")
+assert_true(is.data.frame(campaign$magic1d_trace),
+            "magic1d trace should be a data frame")
 assert_true(is.data.frame(campaign$promotion_summary),
             "promotion summary should be a data frame")
 assert_true(is.data.frame(campaign$no_oracle),
@@ -156,6 +159,12 @@ assert_true(all(c("scenario_id", "repeat", "canonical_test_order_id",
                   "local_contains_mapped_lambda", "basin_label") %in%
                   names(campaign$magic_optimizer_diagnostics)),
             "magic optimizer diagnostics should expose basin fields")
+assert_true(all(c("scenario_id", "repeat", "canonical_test_order_id",
+                  "target", "target_side", "initial_lambda",
+                  "final_lambda", "mgcv_mapped_lambda", "lambda_log_diff",
+                  "iteration", "phase", "gradient", "hessian",
+                  "step_type", "accepted") %in% names(campaign$magic1d_trace)),
+            "magic1d trace should expose optimizer trajectory fields")
 
 for (path in unlist(campaign$paths, use.names = FALSE)) {
   assert_true(file.exists(path), paste("missing artifact:", path))
