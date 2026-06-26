@@ -122,11 +122,17 @@ struct SchedulerDiagnostics {
   double residual_active_copy_sec;
   double residual_build_system_sec;
   double residual_factor_solve_sec;
+  double residual_factor_cholesky_sec;
+  double residual_factor_rhs_solve_sec;
+  double residual_factor_inverse_solve_sec;
   double residual_summary_sec;
   double residual_d2h_sec;
   double residual_host_select_sec;
   double residual_free_sec;
   double residual_true_batch_total_sec;
+  int residual_factorization_count;
+  int residual_rhs_solve_count;
+  int residual_inverse_solve_count;
   double ci_eval_elapsed_sec;
   double replay_elapsed_sec;
   double total_elapsed_sec;

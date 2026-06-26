@@ -348,6 +348,12 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_build_system_sec,
       Rcpp::Named("residual_factor_solve_sec") =
         diagnostics.residual_factor_solve_sec,
+      Rcpp::Named("residual_factor_cholesky_sec") =
+        diagnostics.residual_factor_cholesky_sec,
+      Rcpp::Named("residual_factor_rhs_solve_sec") =
+        diagnostics.residual_factor_rhs_solve_sec,
+      Rcpp::Named("residual_factor_inverse_solve_sec") =
+        diagnostics.residual_factor_inverse_solve_sec,
       Rcpp::Named("residual_summary_sec") =
         diagnostics.residual_summary_sec,
       Rcpp::Named("residual_d2h_sec") = diagnostics.residual_d2h_sec,
@@ -356,6 +362,12 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
       Rcpp::Named("residual_free_sec") = diagnostics.residual_free_sec,
       Rcpp::Named("residual_true_batch_total_sec") =
         diagnostics.residual_true_batch_total_sec,
+      Rcpp::Named("residual_factorization_count") =
+        diagnostics.residual_factorization_count,
+      Rcpp::Named("residual_rhs_solve_count") =
+        diagnostics.residual_rhs_solve_count,
+      Rcpp::Named("residual_inverse_solve_count") =
+        diagnostics.residual_inverse_solve_count,
       Rcpp::Named("ci_eval_elapsed_sec") = diagnostics.ci_eval_elapsed_sec,
       Rcpp::Named("replay_elapsed_sec") = diagnostics.replay_elapsed_sec,
       Rcpp::Named("total_elapsed_sec") = diagnostics.total_elapsed_sec,
@@ -662,11 +674,18 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
     Rcpp::Named("active_copy_sec") = diagnostics.active_copy_sec,
     Rcpp::Named("build_system_sec") = diagnostics.build_system_sec,
     Rcpp::Named("factor_solve_sec") = diagnostics.factor_solve_sec,
+    Rcpp::Named("factor_cholesky_sec") = diagnostics.factor_cholesky_sec,
+    Rcpp::Named("factor_rhs_solve_sec") = diagnostics.factor_rhs_solve_sec,
+    Rcpp::Named("factor_inverse_solve_sec") =
+      diagnostics.factor_inverse_solve_sec,
     Rcpp::Named("residual_summary_sec") = diagnostics.residual_summary_sec,
     Rcpp::Named("d2h_sec") = diagnostics.d2h_sec,
     Rcpp::Named("host_select_sec") = diagnostics.host_select_sec,
     Rcpp::Named("free_sec") = diagnostics.free_sec,
     Rcpp::Named("true_batch_total_sec") = diagnostics.true_batch_total_sec,
+    Rcpp::Named("factorization_count") = diagnostics.factorization_count,
+    Rcpp::Named("rhs_solve_count") = diagnostics.rhs_solve_count,
+    Rcpp::Named("inverse_solve_count") = diagnostics.inverse_solve_count,
     Rcpp::Named("group_table") =
       fastspline_batch_group_table_to_df(diagnostics)
   );

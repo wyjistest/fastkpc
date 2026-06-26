@@ -36,11 +36,17 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->active_copy_sec += value.active_copy_sec;
   out->build_system_sec += value.build_system_sec;
   out->factor_solve_sec += value.factor_solve_sec;
+  out->factor_cholesky_sec += value.factor_cholesky_sec;
+  out->factor_rhs_solve_sec += value.factor_rhs_solve_sec;
+  out->factor_inverse_solve_sec += value.factor_inverse_solve_sec;
   out->residual_summary_sec += value.residual_summary_sec;
   out->d2h_sec += value.d2h_sec;
   out->host_select_sec += value.host_select_sec;
   out->free_sec += value.free_sec;
   out->true_batch_total_sec += value.true_batch_total_sec;
+  out->factorization_count += value.factorization_count;
+  out->rhs_solve_count += value.rhs_solve_count;
+  out->inverse_solve_count += value.inverse_solve_count;
 }
 
 __device__ __host__ inline std::size_t matrix_offset(int fit,
@@ -646,7 +652,13 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
         check_cusolver(cusolverDnDpotrfBatched(
           buffers.solver, CUBLAS_FILL_MODE_UPPER, p, buffers.d_A_ptrs, p,
           buffers.d_info, group_size), "batched potrf");
+        check_cuda(cudaDeviceSynchronize(), "synchronize batched potrf");
+        const double cholesky_sec = elapsed_since(stage);
+        timing->factor_cholesky_sec += cholesky_sec;
+        timing->factor_solve_sec += cholesky_sec;
+        timing->factorization_count += group_size;
 
+        stage = std::chrono::steady_clock::now();
         const int beta_blocks = static_cast<int>(
           (vec_size + kBlock - 1) / kBlock);
         batched_copy_xty_to_beta_kernel<<<std::max(1, beta_blocks), kBlock>>>(
@@ -656,7 +668,13 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
           buffers.solver, CUBLAS_FILL_MODE_UPPER, p, 1, buffers.d_A_ptrs, p,
           buffers.d_beta_ptrs, p, buffers.d_info, group_size),
           "batched potrs beta");
+        check_cuda(cudaDeviceSynchronize(), "synchronize batched RHS solve");
+        const double rhs_sec = elapsed_since(stage);
+        timing->factor_rhs_solve_sec += rhs_sec;
+        timing->factor_solve_sec += rhs_sec;
+        timing->rhs_solve_count += group_size;
 
+        stage = std::chrono::steady_clock::now();
         batched_identity_kernel<<<std::max(1, system_blocks), kBlock>>>(
           buffers.d_Ainv, group_size, p);
         check_cuda(cudaGetLastError(), "launch batched identity kernel");
@@ -673,8 +691,11 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
           const_cast<const double**>(buffers.d_A_ptrs), p,
           buffers.d_Ainv_ptrs, p, group_size),
           "batched inverse triangular solve 2");
-        check_cuda(cudaDeviceSynchronize(), "synchronize batched factor solve");
-        timing->factor_solve_sec += elapsed_since(stage);
+        check_cuda(cudaDeviceSynchronize(), "synchronize batched inverse solve");
+        const double inverse_sec = elapsed_since(stage);
+        timing->factor_inverse_solve_sec += inverse_sec;
+        timing->factor_solve_sec += inverse_sec;
+        timing->inverse_solve_count += group_size;
 
         stage = std::chrono::steady_clock::now();
         const int row_blocks = (n + kBlock - 1) / kBlock;
@@ -782,6 +803,13 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     check_cusolver(cusolverDnDpotrfBatched(
       buffers.solver, CUBLAS_FILL_MODE_UPPER, p, buffers.d_A_ptrs, p,
       buffers.d_info, group_size), "selected batched potrf");
+    check_cuda(cudaDeviceSynchronize(), "synchronize selected potrf");
+    double cholesky_sec = elapsed_since(stage);
+    timing->factor_cholesky_sec += cholesky_sec;
+    timing->factor_solve_sec += cholesky_sec;
+    timing->factorization_count += group_size;
+
+    stage = std::chrono::steady_clock::now();
     const int beta_blocks = static_cast<int>((vec_size + kBlock - 1) / kBlock);
     batched_copy_xty_to_beta_kernel<<<std::max(1, beta_blocks), kBlock>>>(
       buffers.d_Xty, group_size, p, buffers.d_beta);
@@ -790,8 +818,11 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
       buffers.solver, CUBLAS_FILL_MODE_UPPER, p, 1, buffers.d_A_ptrs, p,
       buffers.d_beta_ptrs, p, buffers.d_info, group_size),
       "selected batched potrs beta");
-    check_cuda(cudaDeviceSynchronize(), "synchronize selected factor solve");
-    timing->factor_solve_sec += elapsed_since(stage);
+    check_cuda(cudaDeviceSynchronize(), "synchronize selected RHS solve");
+    double rhs_sec = elapsed_since(stage);
+    timing->factor_rhs_solve_sec += rhs_sec;
+    timing->factor_solve_sec += rhs_sec;
+    timing->rhs_solve_count += group_size;
 
     stage = std::chrono::steady_clock::now();
     const int row_blocks = (n + kBlock - 1) / kBlock;
@@ -927,11 +958,17 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.active_copy_sec = 0.0;
   out.build_system_sec = 0.0;
   out.factor_solve_sec = 0.0;
+  out.factor_cholesky_sec = 0.0;
+  out.factor_rhs_solve_sec = 0.0;
+  out.factor_inverse_solve_sec = 0.0;
   out.residual_summary_sec = 0.0;
   out.d2h_sec = 0.0;
   out.host_select_sec = 0.0;
   out.free_sec = 0.0;
   out.true_batch_total_sec = 0.0;
+  out.factorization_count = 0;
+  out.rhs_solve_count = 0;
+  out.inverse_solve_count = 0;
   return out;
 }
 

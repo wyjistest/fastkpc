@@ -107,6 +107,21 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
     row("residual_factor_solve",
         fastkpc_stage_breakdown_seconds(summary$residual_factor_solve_sec),
         "residual"),
+    row("residual_factor_cholesky",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_factor_cholesky_sec
+        ),
+        "residual"),
+    row("residual_factor_rhs_solve",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_factor_rhs_solve_sec
+        ),
+        "residual"),
+    row("residual_factor_inverse_solve",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_factor_inverse_solve_sec
+        ),
+        "residual"),
     row("residual_summary_kernel",
         fastkpc_stage_breakdown_seconds(summary$residual_summary_sec),
         "residual"),
@@ -191,8 +206,64 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$cuda_residual_single_fit_calls %||% 0L),
     cuda_residual_unique_designs =
       as.integer(summary$cuda_residual_unique_designs %||% 0L),
+    residual_factorization_count =
+      as.integer(summary$residual_factorization_count %||% 0L),
+    residual_rhs_solve_count =
+      as.integer(summary$residual_rhs_solve_count %||% 0L),
+    residual_inverse_solve_count =
+      as.integer(summary$residual_inverse_solve_count %||% 0L),
     stringsAsFactors = FALSE
   )
+}
+
+fastkpc_stage_breakdown_reconciliation <- function(runs, breakdown) {
+  keys <- unique(runs[, c("scenario_id", "repeat_id"), drop = FALSE])
+  rows <- lapply(seq_len(nrow(keys)), function(i) {
+    scenario_id <- keys$scenario_id[[i]]
+    repeat_id <- keys$repeat_id[[i]]
+    stages <- breakdown[breakdown$scenario_id == scenario_id &
+                          breakdown$repeat_id == repeat_id, , drop = FALSE]
+    value <- function(stage) {
+      x <- stages$elapsed_ms[stages$stage == stage]
+      if (length(x) == 0L || !is.finite(x[[1L]])) return(NA_real_)
+      as.numeric(x[[1L]])
+    }
+    skeleton_total <- value("skeleton_total")
+    residual <- value("fastspline_residual_prefetch")
+    ci <- value("ci_eval_total")
+    replay <- value("native_replay")
+    plan <- value("plan")
+    sum_exclusive <- sum(c(plan, residual, ci, replay), na.rm = TRUE)
+    unaccounted <- if (is.finite(skeleton_total)) {
+      skeleton_total - sum_exclusive
+    } else {
+      NA_real_
+    }
+    data.frame(
+      scenario_id = scenario_id,
+      repeat_id = as.integer(repeat_id),
+      skeleton_total_ms = skeleton_total,
+      plan_exclusive_ms = plan,
+      residual_prefetch_exclusive_ms = residual,
+      ci_eval_exclusive_ms = ci,
+      native_replay_exclusive_ms = replay,
+      sum_exclusive_ms = sum_exclusive,
+      unaccounted_ms = unaccounted,
+      accounted_share = if (is.finite(skeleton_total) &&
+                              skeleton_total > 0) {
+        sum_exclusive / skeleton_total
+      } else {
+        NA_real_
+      },
+      cuda_sync_ms = NA_real_,
+      cuda_measured_ms = sum(c(
+        value("residual_true_batch_total"),
+        value("dcov_measured_total")
+      ), na.rm = TRUE),
+      stringsAsFactors = FALSE
+    )
+  })
+  do.call(rbind, rows)
 }
 
 fastkpc_stage_breakdown_summary <- function(rows) {
@@ -255,6 +326,9 @@ fastkpc_run_fast_cuda_stage_breakdown <- function(
   breakdown <- do.call(rbind, rows)
   run_summary <- do.call(rbind, runs)
   summary <- fastkpc_stage_breakdown_summary(breakdown)
+  reconciliation <- fastkpc_stage_breakdown_reconciliation(
+    run_summary, breakdown
+  )
 
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   paths <- list(
@@ -262,12 +336,18 @@ fastkpc_run_fast_cuda_stage_breakdown <- function(
     runs_csv = file.path(output_dir, "fast_cuda_stage_breakdown_runs.csv"),
     summary_csv = file.path(output_dir,
                             "fast_cuda_stage_breakdown_summary.csv"),
+    reconciliation_csv = file.path(
+      output_dir,
+      "fast_cuda_stage_breakdown_reconciliation.csv"
+    ),
     summary_md = file.path(output_dir,
                            "fast_cuda_stage_breakdown_summary.md")
   )
   utils::write.csv(breakdown, paths$breakdown_csv, row.names = FALSE)
   utils::write.csv(run_summary, paths$runs_csv, row.names = FALSE)
   utils::write.csv(summary, paths$summary_csv, row.names = FALSE)
+  utils::write.csv(reconciliation, paths$reconciliation_csv,
+                   row.names = FALSE)
   md <- c(
     "# Fast CUDA Stage Breakdown",
     "",
@@ -276,6 +356,11 @@ fastkpc_run_fast_cuda_stage_breakdown <- function(
            sum(run_summary$scheduler != "layer" |
                  run_summary$precision_overlay_used %in% TRUE |
                  run_summary$cpu_fallback_count > 0L)),
+    paste0("- Median accounted share: ",
+           format(signif(stats::median(
+             reconciliation$accounted_share,
+             na.rm = TRUE
+           ), 4), trim = TRUE)),
     paste0("- CSV: `", basename(paths$breakdown_csv), "`")
   )
   writeLines(md, paths$summary_md)
@@ -283,6 +368,7 @@ fastkpc_run_fast_cuda_stage_breakdown <- function(
     breakdown = breakdown,
     runs = run_summary,
     summary = summary,
+    reconciliation = reconciliation,
     paths = paths
   )
 }

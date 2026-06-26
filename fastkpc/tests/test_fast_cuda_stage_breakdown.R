@@ -46,7 +46,9 @@ required_stages <- c(
   "skeleton_total", "fastspline_residual_prefetch", "ci_eval_total",
   "native_replay", "dcov_rowsum_distance", "dcov_fused_center_reduce",
   "dcov_measured_total", "residual_host_pack", "residual_factor_solve",
-  "residual_d2h", "residual_true_batch_total"
+  "residual_factor_cholesky", "residual_factor_rhs_solve",
+  "residual_factor_inverse_solve", "residual_d2h",
+  "residual_true_batch_total"
 )
 missing_stages <- setdiff(required_stages, unique(breakdown$stage))
 assert_true(length(missing_stages) == 0L,
@@ -71,6 +73,14 @@ assert_true(runs$unique_residual_requests[[1L]] > 0L,
             "stage breakdown should record unique residual requests")
 assert_true(runs$cuda_residual_true_batched_fits[[1L]] >= 0L,
             "stage breakdown should record true batched residual fits")
+assert_true(runs$residual_factorization_count[[1L]] >= 0L,
+            "stage breakdown should record factorization count")
+assert_true(is.data.frame(artifact$reconciliation),
+            "stage breakdown should return reconciliation table")
+assert_true("accounted_share" %in% names(artifact$reconciliation),
+            "reconciliation table should report accounted_share")
+assert_true("cuda_sync_ms" %in% names(artifact$reconciliation),
+            "reconciliation table should report cuda_sync_ms")
 
 required_summary <- c(
   "stage", "stage_group", "run_count", "finite_count", "median_ms", "p90_ms"
@@ -85,6 +95,8 @@ assert_true(file.exists(artifact$paths$runs_csv),
             "stage breakdown runs CSV should be written")
 assert_true(file.exists(artifact$paths$summary_csv),
             "stage breakdown summary CSV should be written")
+assert_true(file.exists(artifact$paths$reconciliation_csv),
+            "stage breakdown reconciliation CSV should be written")
 assert_true(file.exists(artifact$paths$summary_md),
             "stage breakdown Markdown summary should be written")
 

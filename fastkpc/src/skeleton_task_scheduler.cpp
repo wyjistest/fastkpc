@@ -193,11 +193,17 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_active_copy_sec = 0.0;
   out.residual_build_system_sec = 0.0;
   out.residual_factor_solve_sec = 0.0;
+  out.residual_factor_cholesky_sec = 0.0;
+  out.residual_factor_rhs_solve_sec = 0.0;
+  out.residual_factor_inverse_solve_sec = 0.0;
   out.residual_summary_sec = 0.0;
   out.residual_d2h_sec = 0.0;
   out.residual_host_select_sec = 0.0;
   out.residual_free_sec = 0.0;
   out.residual_true_batch_total_sec = 0.0;
+  out.residual_factorization_count = 0;
+  out.residual_rhs_solve_count = 0;
+  out.residual_inverse_solve_count = 0;
   out.ci_eval_elapsed_sec = 0.0;
   out.replay_elapsed_sec = 0.0;
   out.total_elapsed_sec = 0.0;

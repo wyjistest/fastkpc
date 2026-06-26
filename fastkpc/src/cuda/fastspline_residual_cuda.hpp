@@ -46,11 +46,17 @@ struct FastSplineCudaBatchDiagnostics {
   double active_copy_sec;
   double build_system_sec;
   double factor_solve_sec;
+  double factor_cholesky_sec;
+  double factor_rhs_solve_sec;
+  double factor_inverse_solve_sec;
   double residual_summary_sec;
   double d2h_sec;
   double host_select_sec;
   double free_sec;
   double true_batch_total_sec;
+  int factorization_count;
+  int rhs_solve_count;
+  int inverse_solve_count;
   std::vector<int> group_id;
   std::vector<int> group_n;
   std::vector<int> group_design_cols;

@@ -220,6 +220,12 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.build_system_sec;
         diagnostics->residual_factor_solve_sec +=
           batch_result.diagnostics.factor_solve_sec;
+        diagnostics->residual_factor_cholesky_sec +=
+          batch_result.diagnostics.factor_cholesky_sec;
+        diagnostics->residual_factor_rhs_solve_sec +=
+          batch_result.diagnostics.factor_rhs_solve_sec;
+        diagnostics->residual_factor_inverse_solve_sec +=
+          batch_result.diagnostics.factor_inverse_solve_sec;
         diagnostics->residual_summary_sec +=
           batch_result.diagnostics.residual_summary_sec;
         diagnostics->residual_d2h_sec += batch_result.diagnostics.d2h_sec;
@@ -228,6 +234,12 @@ class CudaSkeletonResidualCache {
         diagnostics->residual_free_sec += batch_result.diagnostics.free_sec;
         diagnostics->residual_true_batch_total_sec +=
           batch_result.diagnostics.true_batch_total_sec;
+        diagnostics->residual_factorization_count +=
+          batch_result.diagnostics.factorization_count;
+        diagnostics->residual_rhs_solve_count +=
+          batch_result.diagnostics.rhs_solve_count;
+        diagnostics->residual_inverse_solve_count +=
+          batch_result.diagnostics.inverse_solve_count;
         for (int i = 0; i < static_cast<int>(missing_positions.size()); ++i) {
           const LayerResidualRequest& request = requests[missing_positions[i]];
           const std::vector<int> normalized_cond =
