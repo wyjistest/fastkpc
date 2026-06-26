@@ -116,6 +116,18 @@ struct SchedulerDiagnostics {
   double ci_eval_elapsed_sec;
   double replay_elapsed_sec;
   double total_elapsed_sec;
+  double dcov_alloc_sec;
+  double dcov_h2d_sec;
+  double dcov_memset_sec;
+  double dcov_rowsum_sec;
+  double dcov_totals_d2h_sec;
+  double dcov_reduce_sec;
+  double dcov_scalars_d2h_sec;
+  double dcov_host_scalar_sec;
+  double dcov_free_sec;
+  double dcov_total_sec;
+  int dcov_chunks;
+  int dcov_max_chunk_batch;
   std::vector<LayerDiagnosticsLevel> per_level;
   std::vector<SchedulerBatchDiagnostic> batches;
   std::vector<SchedulerResidualDiagnostic> residuals;

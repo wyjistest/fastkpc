@@ -1,5 +1,6 @@
 source("fastkpc/R/fast_cuda_data_plane_validation.R")
 source("fastkpc/R/cuda_native.R")
+source("fastkpc/R/native.R")
 
 fail <- function(message) stop(message, call. = FALSE)
 assert_true <- function(value, message) if (!isTRUE(value)) fail(message)
@@ -9,6 +10,7 @@ if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
   quit(save = "no", status = 0)
 }
 
+build_fastkpc_native(rebuild = TRUE)
 build_fastkpc_cuda_native(rebuild = FALSE)
 if (!fastkpc_cuda_available()) {
   cat("SKIP fast CUDA data-plane validation: CUDA unavailable\n")

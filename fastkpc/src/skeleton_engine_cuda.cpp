@@ -382,6 +382,19 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     for (int k = 0; k < count; ++k) {
       pvalues[start + k] = batch.p_values[k];
     }
+    diagnostics->dcov_alloc_sec += batch.alloc_sec;
+    diagnostics->dcov_h2d_sec += batch.h2d_sec;
+    diagnostics->dcov_memset_sec += batch.memset_sec;
+    diagnostics->dcov_rowsum_sec += batch.rowsum_sec;
+    diagnostics->dcov_totals_d2h_sec += batch.totals_d2h_sec;
+    diagnostics->dcov_reduce_sec += batch.reduce_sec;
+    diagnostics->dcov_scalars_d2h_sec += batch.scalars_d2h_sec;
+    diagnostics->dcov_host_scalar_sec += batch.host_scalar_sec;
+    diagnostics->dcov_free_sec += batch.free_sec;
+    diagnostics->dcov_total_sec += batch.total_sec;
+    diagnostics->dcov_chunks += batch.chunks;
+    diagnostics->dcov_max_chunk_batch =
+      std::max(diagnostics->dcov_max_chunk_batch, batch.max_chunk_batch);
     ++(*dcov_batches);
     diagnostics->batches.push_back(SchedulerBatchDiagnostic{
       level, *dcov_batches - 1, "dcov", tasks[start].task_id, count, n, "ok",

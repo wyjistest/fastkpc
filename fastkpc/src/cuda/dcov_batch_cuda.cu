@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -128,6 +129,26 @@ void check_cuda(cudaError_t err, const char* stage) {
   }
 }
 
+double elapsed_since(std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration<double>(
+    std::chrono::steady_clock::now() - start).count();
+}
+
+void add_timing(DcovBatchResult* out, const DcovBatchResult& value) {
+  out->alloc_sec += value.alloc_sec;
+  out->h2d_sec += value.h2d_sec;
+  out->memset_sec += value.memset_sec;
+  out->rowsum_sec += value.rowsum_sec;
+  out->totals_d2h_sec += value.totals_d2h_sec;
+  out->reduce_sec += value.reduce_sec;
+  out->scalars_d2h_sec += value.scalars_d2h_sec;
+  out->host_scalar_sec += value.host_scalar_sec;
+  out->free_sec += value.free_sec;
+  out->total_sec += value.total_sec;
+  out->chunks += value.chunks;
+  out->max_chunk_batch = std::max(out->max_chunk_batch, value.max_chunk_batch);
+}
+
 int dcov_max_grid_batch_dimension() {
   int device = 0;
   cudaDeviceProp prop;
@@ -147,6 +168,9 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
   if (n <= 5) throw std::runtime_error("gamma approximation requires n > 5");
   if (batch < 1) throw std::runtime_error("batch must be positive");
 
+  const std::chrono::steady_clock::time_point total_start =
+    std::chrono::steady_clock::now();
+
   double* d_x = nullptr;
   double* d_y = nullptr;
   double* d_row_k = nullptr;
@@ -158,8 +182,13 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
   const std::size_t matrix_size = static_cast<std::size_t>(n) * batch;
   const std::size_t row_size = matrix_size;
   const std::size_t scalar_size = static_cast<std::size_t>(batch) * 5;
+  DcovBatchResult result;
+  result.chunks = 1;
+  result.max_chunk_batch = batch;
 
   try {
+    std::chrono::steady_clock::time_point stage =
+      std::chrono::steady_clock::now();
     check_cuda(cudaMalloc(&d_x, sizeof(double) * matrix_size), "alloc x");
     check_cuda(cudaMalloc(&d_y, sizeof(double) * matrix_size), "alloc y");
     check_cuda(cudaMalloc(&d_row_k, sizeof(double) * row_size), "alloc row K");
@@ -167,15 +196,22 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
     check_cuda(cudaMalloc(&d_total_k, sizeof(double) * batch), "alloc total K");
     check_cuda(cudaMalloc(&d_total_l, sizeof(double) * batch), "alloc total L");
     check_cuda(cudaMalloc(&d_scalars, sizeof(double) * scalar_size), "alloc scalars");
+    result.alloc_sec += elapsed_since(stage);
 
+    stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(d_x, x, sizeof(double) * matrix_size, cudaMemcpyHostToDevice),
                "copy x");
     check_cuda(cudaMemcpy(d_y, y, sizeof(double) * matrix_size, cudaMemcpyHostToDevice),
                "copy y");
+    result.h2d_sec += elapsed_since(stage);
+
+    stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemset(d_total_k, 0, sizeof(double) * batch), "zero total K");
     check_cuda(cudaMemset(d_total_l, 0, sizeof(double) * batch), "zero total L");
     check_cuda(cudaMemset(d_scalars, 0, sizeof(double) * scalar_size), "zero scalars");
+    result.memset_sec += elapsed_since(stage);
 
+    stage = std::chrono::steady_clock::now();
     const dim3 rowsum_grid(n, batch);
     rowsum_kernel<<<rowsum_grid, kBlock>>>(d_x, n, batch, options.index,
                                            options.legacy_index, d_row_k, d_total_k);
@@ -183,14 +219,18 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
                                            options.legacy_index, d_row_l, d_total_l);
     check_cuda(cudaGetLastError(), "launch rowsum");
     check_cuda(cudaDeviceSynchronize(), "rowsum synchronize");
+    result.rowsum_sec += elapsed_since(stage);
 
     std::vector<double> total_k(batch);
     std::vector<double> total_l(batch);
+    stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(total_k.data(), d_total_k, sizeof(double) * batch,
                           cudaMemcpyDeviceToHost), "copy total K");
     check_cuda(cudaMemcpy(total_l.data(), d_total_l, sizeof(double) * batch,
                           cudaMemcpyDeviceToHost), "copy total L");
+    result.totals_d2h_sec += elapsed_since(stage);
 
+    stage = std::chrono::steady_clock::now();
     const int gy = n < 1024 ? n : 1024;
     int gx = 2048 / gy;
     if (gx < 1) gx = 1;
@@ -200,17 +240,20 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
       d_total_k, d_total_l, d_scalars);
     check_cuda(cudaGetLastError(), "launch fused reduce");
     check_cuda(cudaDeviceSynchronize(), "fused reduce synchronize");
+    result.reduce_sec += elapsed_since(stage);
 
-    DcovBatchResult result;
     result.p_values.assign(batch, 0.0);
     result.nV2.assign(batch, 0.0);
     result.means.assign(batch, 0.0);
     result.variances.assign(batch, 0.0);
     result.raw_scalars.assign(scalar_size, 0.0);
+    stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(result.raw_scalars.data(), d_scalars,
                           sizeof(double) * scalar_size, cudaMemcpyDeviceToHost),
                "copy scalars");
+    result.scalars_d2h_sec += elapsed_since(stage);
 
+    stage = std::chrono::steady_clock::now();
     for (int task = 0; task < batch; ++task) {
       const std::size_t base = static_cast<std::size_t>(task) * 5;
       const double sab = result.raw_scalars[base + 0];
@@ -234,7 +277,9 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
       result.variances[task] = variance;
       result.p_values[task] = p;
     }
+    result.host_scalar_sec += elapsed_since(stage);
 
+    stage = std::chrono::steady_clock::now();
     cudaFree(d_x);
     cudaFree(d_y);
     cudaFree(d_row_k);
@@ -242,6 +287,8 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
     cudaFree(d_total_k);
     cudaFree(d_total_l);
     cudaFree(d_scalars);
+    result.free_sec += elapsed_since(stage);
+    result.total_sec += elapsed_since(total_start);
     return result;
   } catch (...) {
     cudaFree(d_x);
@@ -276,12 +323,15 @@ DcovBatchResult dcov_batch_cuda(const double* x,
   result.means.assign(batch, 0.0);
   result.variances.assign(batch, 0.0);
   result.raw_scalars.assign(static_cast<std::size_t>(batch) * 5, 0.0);
+  result.chunks = 0;
+  result.max_chunk_batch = 0;
 
   for (int start = 0; start < batch; start += chunk_limit) {
     const int count = std::min(chunk_limit, batch - start);
     const std::size_t offset = static_cast<std::size_t>(start) * n;
     const DcovBatchResult chunk = dcov_batch_cuda_chunk(
       x + offset, y + offset, n, count, options);
+    add_timing(&result, chunk);
 
     for (int k = 0; k < count; ++k) {
       const int dest = start + k;

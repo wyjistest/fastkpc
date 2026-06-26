@@ -334,7 +334,19 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_prefetch_elapsed_sec,
       Rcpp::Named("ci_eval_elapsed_sec") = diagnostics.ci_eval_elapsed_sec,
       Rcpp::Named("replay_elapsed_sec") = diagnostics.replay_elapsed_sec,
-      Rcpp::Named("total_elapsed_sec") = diagnostics.total_elapsed_sec
+      Rcpp::Named("total_elapsed_sec") = diagnostics.total_elapsed_sec,
+      Rcpp::Named("dcov_alloc_sec") = diagnostics.dcov_alloc_sec,
+      Rcpp::Named("dcov_h2d_sec") = diagnostics.dcov_h2d_sec,
+      Rcpp::Named("dcov_memset_sec") = diagnostics.dcov_memset_sec,
+      Rcpp::Named("dcov_rowsum_sec") = diagnostics.dcov_rowsum_sec,
+      Rcpp::Named("dcov_totals_d2h_sec") = diagnostics.dcov_totals_d2h_sec,
+      Rcpp::Named("dcov_reduce_sec") = diagnostics.dcov_reduce_sec,
+      Rcpp::Named("dcov_scalars_d2h_sec") = diagnostics.dcov_scalars_d2h_sec,
+      Rcpp::Named("dcov_host_scalar_sec") = diagnostics.dcov_host_scalar_sec,
+      Rcpp::Named("dcov_free_sec") = diagnostics.dcov_free_sec,
+      Rcpp::Named("dcov_total_sec") = diagnostics.dcov_total_sec,
+      Rcpp::Named("dcov_chunks") = diagnostics.dcov_chunks,
+      Rcpp::Named("dcov_max_chunk_batch") = diagnostics.dcov_max_chunk_batch
     ),
     Rcpp::Named("levels") =
       scheduler_levels_to_data_frame(diagnostics.per_level),
@@ -818,7 +830,21 @@ extern "C" SEXP C_fast_dcov_batch_cuda(SEXP xs, SEXP ys, SEXP indexs,
     Rcpp::Named("nV2") = result.nV2,
     Rcpp::Named("mean") = result.means,
     Rcpp::Named("variance") = result.variances,
-    Rcpp::Named("raw") = raw
+    Rcpp::Named("raw") = raw,
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("alloc_sec") = result.alloc_sec,
+      Rcpp::Named("h2d_sec") = result.h2d_sec,
+      Rcpp::Named("memset_sec") = result.memset_sec,
+      Rcpp::Named("rowsum_sec") = result.rowsum_sec,
+      Rcpp::Named("totals_d2h_sec") = result.totals_d2h_sec,
+      Rcpp::Named("reduce_sec") = result.reduce_sec,
+      Rcpp::Named("scalars_d2h_sec") = result.scalars_d2h_sec,
+      Rcpp::Named("host_scalar_sec") = result.host_scalar_sec,
+      Rcpp::Named("free_sec") = result.free_sec,
+      Rcpp::Named("total_sec") = result.total_sec,
+      Rcpp::Named("chunks") = result.chunks,
+      Rcpp::Named("max_chunk_batch") = result.max_chunk_batch
+    )
   );
   END_RCPP
 }

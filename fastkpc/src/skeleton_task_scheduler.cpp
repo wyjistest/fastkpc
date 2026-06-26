@@ -187,6 +187,18 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.ci_eval_elapsed_sec = 0.0;
   out.replay_elapsed_sec = 0.0;
   out.total_elapsed_sec = 0.0;
+  out.dcov_alloc_sec = 0.0;
+  out.dcov_h2d_sec = 0.0;
+  out.dcov_memset_sec = 0.0;
+  out.dcov_rowsum_sec = 0.0;
+  out.dcov_totals_d2h_sec = 0.0;
+  out.dcov_reduce_sec = 0.0;
+  out.dcov_scalars_d2h_sec = 0.0;
+  out.dcov_host_scalar_sec = 0.0;
+  out.dcov_free_sec = 0.0;
+  out.dcov_total_sec = 0.0;
+  out.dcov_chunks = 0;
+  out.dcov_max_chunk_batch = 0;
   return out;
 }
 
