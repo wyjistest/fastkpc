@@ -65,36 +65,38 @@ __global__ void fused_center_reduce_kernel(const double* x,
                                            bool legacy_index,
                                            const double* row_k,
                                            const double* row_l,
-                                           const double* total_k,
-                                           const double* total_l,
                                            double* scalars) {
   __shared__ double sab_s[kBlock];
   __shared__ double saa_s[kBlock];
   __shared__ double sbb_s[kBlock];
+  __shared__ double row_ab_s[kBlock];
+  __shared__ double row_aa_s[kBlock];
+  __shared__ double row_bb_s[kBlock];
 
   const int task = blockIdx.z;
   if (task >= batch) return;
 
-  const double inv_n = 1.0 / static_cast<double>(n);
-  const double grand_k = total_k[task] * inv_n * inv_n;
-  const double grand_l = total_l[task] * inv_n * inv_n;
   const double* rk = row_k + static_cast<std::size_t>(task) * n;
   const double* rl = row_l + static_cast<std::size_t>(task) * n;
 
   double sab = 0.0;
   double saa = 0.0;
   double sbb = 0.0;
+  double row_ab = 0.0;
+  double row_aa = 0.0;
+  double row_bb = 0.0;
 
   for (int i = blockIdx.y; i < n; i += gridDim.y) {
-    const double left_k = grand_k - rk[i] * inv_n;
-    const double left_l = grand_l - rl[i] * inv_n;
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+      row_ab += rk[i] * rl[i];
+      row_aa += rk[i] * rk[i];
+      row_bb += rl[i] * rl[i];
+    }
     for (int j = blockIdx.x * blockDim.x + threadIdx.x;
          j < n;
          j += gridDim.x * blockDim.x) {
-      const double a = pair_dist_1d(x, n, task, i, j, index, legacy_index) -
-        rk[j] * inv_n + left_k;
-      const double b = pair_dist_1d(y, n, task, i, j, index, legacy_index) -
-        rl[j] * inv_n + left_l;
+      const double a = pair_dist_1d(x, n, task, i, j, index, legacy_index);
+      const double b = pair_dist_1d(y, n, task, i, j, index, legacy_index);
       sab += a * b;
       saa += a * a;
       sbb += b * b;
@@ -104,6 +106,9 @@ __global__ void fused_center_reduce_kernel(const double* x,
   sab_s[threadIdx.x] = sab;
   saa_s[threadIdx.x] = saa;
   sbb_s[threadIdx.x] = sbb;
+  row_ab_s[threadIdx.x] = row_ab;
+  row_aa_s[threadIdx.x] = row_aa;
+  row_bb_s[threadIdx.x] = row_bb;
   __syncthreads();
 
   for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
@@ -111,14 +116,21 @@ __global__ void fused_center_reduce_kernel(const double* x,
       sab_s[threadIdx.x] += sab_s[threadIdx.x + stride];
       saa_s[threadIdx.x] += saa_s[threadIdx.x + stride];
       sbb_s[threadIdx.x] += sbb_s[threadIdx.x + stride];
+      row_ab_s[threadIdx.x] += row_ab_s[threadIdx.x + stride];
+      row_aa_s[threadIdx.x] += row_aa_s[threadIdx.x + stride];
+      row_bb_s[threadIdx.x] += row_bb_s[threadIdx.x + stride];
     }
     __syncthreads();
   }
 
   if (threadIdx.x == 0) {
-    atomicAdd(&scalars[static_cast<std::size_t>(task) * 5 + 0], sab_s[0]);
-    atomicAdd(&scalars[static_cast<std::size_t>(task) * 5 + 1], saa_s[0]);
-    atomicAdd(&scalars[static_cast<std::size_t>(task) * 5 + 2], sbb_s[0]);
+    const std::size_t base = static_cast<std::size_t>(task) * 6;
+    atomicAdd(&scalars[base + 0], sab_s[0]);
+    atomicAdd(&scalars[base + 1], saa_s[0]);
+    atomicAdd(&scalars[base + 2], sbb_s[0]);
+    atomicAdd(&scalars[base + 3], row_ab_s[0]);
+    atomicAdd(&scalars[base + 4], row_aa_s[0]);
+    atomicAdd(&scalars[base + 5], row_bb_s[0]);
   }
 }
 
@@ -181,7 +193,8 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
 
   const std::size_t matrix_size = static_cast<std::size_t>(n) * batch;
   const std::size_t row_size = matrix_size;
-  const std::size_t scalar_size = static_cast<std::size_t>(batch) * 5;
+  const std::size_t raw_scalar_size = static_cast<std::size_t>(batch) * 5;
+  const std::size_t device_scalar_size = static_cast<std::size_t>(batch) * 6;
   DcovBatchResult result;
   result.chunks = 1;
   result.max_chunk_batch = batch;
@@ -195,7 +208,8 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
     check_cuda(cudaMalloc(&d_row_l, sizeof(double) * row_size), "alloc row L");
     check_cuda(cudaMalloc(&d_total_k, sizeof(double) * batch), "alloc total K");
     check_cuda(cudaMalloc(&d_total_l, sizeof(double) * batch), "alloc total L");
-    check_cuda(cudaMalloc(&d_scalars, sizeof(double) * scalar_size), "alloc scalars");
+    check_cuda(cudaMalloc(&d_scalars, sizeof(double) * device_scalar_size),
+               "alloc scalars");
     result.alloc_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
@@ -208,7 +222,8 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
     stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemset(d_total_k, 0, sizeof(double) * batch), "zero total K");
     check_cuda(cudaMemset(d_total_l, 0, sizeof(double) * batch), "zero total L");
-    check_cuda(cudaMemset(d_scalars, 0, sizeof(double) * scalar_size), "zero scalars");
+    check_cuda(cudaMemset(d_scalars, 0, sizeof(double) * device_scalar_size),
+               "zero scalars");
     result.memset_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
@@ -237,7 +252,7 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
     const dim3 reduce_grid(gx, gy, batch);
     fused_center_reduce_kernel<<<reduce_grid, kBlock>>>(
       d_x, d_y, n, batch, options.index, options.legacy_index, d_row_k, d_row_l,
-      d_total_k, d_total_l, d_scalars);
+      d_scalars);
     check_cuda(cudaGetLastError(), "launch fused reduce");
     check_cuda(cudaDeviceSynchronize(), "fused reduce synchronize");
     result.reduce_sec += elapsed_since(stage);
@@ -246,23 +261,38 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
     result.nV2.assign(batch, 0.0);
     result.means.assign(batch, 0.0);
     result.variances.assign(batch, 0.0);
-    result.raw_scalars.assign(scalar_size, 0.0);
+    result.raw_scalars.assign(raw_scalar_size, 0.0);
+    std::vector<double> device_scalars(device_scalar_size, 0.0);
     stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(result.raw_scalars.data(), d_scalars,
-                          sizeof(double) * scalar_size, cudaMemcpyDeviceToHost),
+    check_cuda(cudaMemcpy(device_scalars.data(), d_scalars,
+                          sizeof(double) * device_scalar_size,
+                          cudaMemcpyDeviceToHost),
                "copy scalars");
     result.scalars_d2h_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
     for (int task = 0; task < batch; ++task) {
+      const double nd = static_cast<double>(n);
+      const std::size_t device_base = static_cast<std::size_t>(task) * 6;
+      const double raw_ab = device_scalars[device_base + 0];
+      const double raw_aa = device_scalars[device_base + 1];
+      const double raw_bb = device_scalars[device_base + 2];
+      const double row_ab = device_scalars[device_base + 3];
+      const double row_aa = device_scalars[device_base + 4];
+      const double row_bb = device_scalars[device_base + 5];
+      const double total_ab = total_k[task] * total_l[task];
+      const double total_aa = total_k[task] * total_k[task];
+      const double total_bb = total_l[task] * total_l[task];
+      const double sab = raw_ab - 2.0 * row_ab / nd + total_ab / (nd * nd);
+      const double saa = raw_aa - 2.0 * row_aa / nd + total_aa / (nd * nd);
+      const double sbb = raw_bb - 2.0 * row_bb / nd + total_bb / (nd * nd);
       const std::size_t base = static_cast<std::size_t>(task) * 5;
-      const double sab = result.raw_scalars[base + 0];
-      const double saa = result.raw_scalars[base + 1];
-      const double sbb = result.raw_scalars[base + 2];
+      result.raw_scalars[base + 0] = sab;
+      result.raw_scalars[base + 1] = saa;
+      result.raw_scalars[base + 2] = sbb;
       result.raw_scalars[base + 3] = total_k[task];
       result.raw_scalars[base + 4] = total_l[task];
 
-      const double nd = static_cast<double>(n);
       const double nV2 = sab / nd;
       const double mean = (total_k[task] / (nd * nd)) *
         (total_l[task] / (nd * nd));
