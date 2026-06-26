@@ -212,6 +212,22 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_rhs_solve_count %||% 0L),
     residual_inverse_solve_count =
       as.integer(summary$residual_inverse_solve_count %||% 0L),
+    residual_rhs_solve_api_calls =
+      as.integer(summary$residual_rhs_solve_api_calls %||% 0L),
+    residual_rhs_target_solves =
+      as.integer(summary$residual_rhs_target_solves %||% 0L),
+    residual_winning_factor_reuse_count =
+      as.integer(summary$residual_winning_factor_reuse_count %||% 0L),
+    residual_factor_cache_hits =
+      as.integer(summary$residual_factor_cache_hits %||% 0L),
+    residual_factor_cache_misses =
+      as.integer(summary$residual_factor_cache_misses %||% 0L),
+    residual_factor_cache_entries =
+      as.integer(summary$residual_factor_cache_entries %||% 0L),
+    residual_factor_cache_bytes =
+      as.numeric(summary$residual_factor_cache_bytes %||% 0),
+    residual_lambda_candidates =
+      as.integer(summary$residual_lambda_candidates %||% 0L),
     stringsAsFactors = FALSE
   )
 }

@@ -133,6 +133,14 @@ struct SchedulerDiagnostics {
   int residual_factorization_count;
   int residual_rhs_solve_count;
   int residual_inverse_solve_count;
+  int residual_rhs_solve_api_calls;
+  int residual_rhs_target_solves;
+  int residual_winning_factor_reuse_count;
+  int residual_factor_cache_hits;
+  int residual_factor_cache_misses;
+  int residual_factor_cache_entries;
+  double residual_factor_cache_bytes;
+  int residual_lambda_candidates;
   double ci_eval_elapsed_sec;
   double replay_elapsed_sec;
   double total_elapsed_sec;

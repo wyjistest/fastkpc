@@ -57,6 +57,14 @@ struct FastSplineCudaBatchDiagnostics {
   int factorization_count;
   int rhs_solve_count;
   int inverse_solve_count;
+  int rhs_solve_api_calls;
+  int rhs_target_solves;
+  int winning_factor_reuse_count;
+  int factor_cache_hits;
+  int factor_cache_misses;
+  int factor_cache_entries;
+  double factor_cache_bytes;
+  int lambda_candidates;
   std::vector<int> group_id;
   std::vector<int> group_n;
   std::vector<int> group_design_cols;

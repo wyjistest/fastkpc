@@ -204,6 +204,14 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_factorization_count = 0;
   out.residual_rhs_solve_count = 0;
   out.residual_inverse_solve_count = 0;
+  out.residual_rhs_solve_api_calls = 0;
+  out.residual_rhs_target_solves = 0;
+  out.residual_winning_factor_reuse_count = 0;
+  out.residual_factor_cache_hits = 0;
+  out.residual_factor_cache_misses = 0;
+  out.residual_factor_cache_entries = 0;
+  out.residual_factor_cache_bytes = 0.0;
+  out.residual_lambda_candidates = 0;
   out.ci_eval_elapsed_sec = 0.0;
   out.replay_elapsed_sec = 0.0;
   out.total_elapsed_sec = 0.0;

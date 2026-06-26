@@ -75,6 +75,24 @@ assert_true(runs$cuda_residual_true_batched_fits[[1L]] >= 0L,
             "stage breakdown should record true batched residual fits")
 assert_true(runs$residual_factorization_count[[1L]] >= 0L,
             "stage breakdown should record factorization count")
+assert_true(runs$residual_factor_cache_entries[[1L]] >= 0L,
+            "stage breakdown should record factor cache entries")
+assert_true(runs$residual_rhs_solve_api_calls[[1L]] >= 0L,
+            "stage breakdown should record RHS solve API calls")
+assert_true(runs$residual_lambda_candidates[[1L]] >= 0L,
+            "stage breakdown should record lambda candidate count")
+if (runs$residual_lambda_candidates[[1L]] > 0L &&
+    runs$cuda_residual_unique_designs[[1L]] > 0L) {
+  factor_bound <- runs$cuda_residual_unique_designs[[1L]] *
+    runs$residual_lambda_candidates[[1L]] +
+    runs$unique_residual_requests[[1L]]
+  assert_true(runs$residual_factorization_count[[1L]] <= factor_bound,
+              "factorization count should be design/lambda scoped")
+  inverse_bound <- runs$cuda_residual_unique_designs[[1L]] *
+    runs$residual_lambda_candidates[[1L]]
+  assert_true(runs$residual_inverse_solve_count[[1L]] <= inverse_bound,
+              "inverse solve count should be design/lambda scoped")
+}
 assert_true(is.data.frame(artifact$reconciliation),
             "stage breakdown should return reconciliation table")
 assert_true("accounted_share" %in% names(artifact$reconciliation),
