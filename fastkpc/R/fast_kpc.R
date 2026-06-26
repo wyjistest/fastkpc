@@ -1905,15 +1905,19 @@ fast_kpc <- function(data,
     benchmark = benchmark_section
   )
   if (isTRUE(precision_diagnostics)) {
-    result$diagnostics$precision_trace <-
-      timed$value$skeleton$precision_trace %||%
-      fastkpc_precision_trace_from_result(
+    if (is.data.frame(timed$value$skeleton$precision_trace)) {
+      result$diagnostics$precision_trace <- timed$value$skeleton$precision_trace
+    } else if (identical(precision_trace_level, "full")) {
+      result$diagnostics$precision_trace <- fastkpc_precision_trace_from_result(
         result = result,
         route = precision_route,
         run_id = paste0("fastkpc-", format(Sys.time(), "%Y%m%d%H%M%S")),
         scenario_id = "fast_kpc",
         elapsed_total_sec = timed$elapsed
       )
+    } else {
+      result$diagnostics$precision_trace <- NULL
+    }
   }
   validate_fastkpc_result(result)
   result

@@ -51,8 +51,10 @@ assert_true(identical(summary_diag$trace_level, "summary"),
             "R precision skeleton should default auto trace to summary")
 assert_true(summary_diag$trace_append_ms == 0,
             "summary trace should not construct per-test trace rows")
-assert_true(summary_diag$dataframe_bind_ms <= 1,
-            "summary trace should not bind per-test trace rows")
+assert_true(!is.data.frame(summary_result$skeleton$precision_trace),
+            "summary skeleton should not materialize per-test trace rows")
+assert_true(!is.data.frame(summary_result$diagnostics$precision_trace),
+            "summary diagnostics should not materialize fallback trace rows")
 
 full_result <- fast_kpc(
   data,

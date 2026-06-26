@@ -40,6 +40,7 @@ withCallingHandlers(
     graph_stage = "skeleton",
     allow_canary_mgcv_extract = TRUE,
     runtime_capabilities = caps_canary,
+    precision_trace_level = "full",
     precision_executors = list(
       `direct-ci` = make_spy(0.001, "direct-ci-spy"),
       mgcvExtractGPUGCV = make_spy(0.001, "mgcvExtractGPU-spy"),

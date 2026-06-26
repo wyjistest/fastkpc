@@ -52,6 +52,7 @@ result <- fast_kpc(
   precision = "hybrid",
   tau = log(2),
   graph_stage = "skeleton",
+  precision_trace_level = "full",
   precision_executors = list(
     `direct-ci` = make_spy(0.001, "direct-ci-spy", direct_calls),
     fastSplineCPU = make_spy(0.049, "fastSplineCPU-spy", primary_calls),

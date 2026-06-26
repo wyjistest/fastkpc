@@ -2031,17 +2031,28 @@ fastkpc_execute_ci_kpc_tprs_residual_cpp <- function(data, x, y, S, ci_method,
   }
   computed_targets <- 0L
   if (is.null(fit_x)) {
-    fit_x <- fastkpc_kpc_tprs_gcv_candidate(data[, x], S_matrix)
+    fit_x <- fastkpc_kpc_tprs_gcv_candidate(
+      data[, x], S_matrix, diagnostics_level = "compact")
     entry_x <- list(
       residuals = fit_x$residuals,
       fitted = fit_x$fitted,
-      coefficients = fit_x$coefficients,
       sp = fit_x$selected_sp,
       score = fit_x$score,
       edf = fit_x$edf,
       selected_grid_index = fit_x$selected_grid_index,
-      gcv_grid_points = nrow(fit_x$grid),
-      grid = fit_x$grid,
+      gcv_grid_points = fit_x$gcv_grid_points %||% 0L,
+      grid = NULL,
+      magic_boundary_steps =
+        fit_x$diagnostics$magic_boundary_steps %||% NA_integer_,
+      magic_iterations =
+        fit_x$diagnostics$magic_iterations %||% NA_integer_,
+      convergence_code = if (isTRUE(fit_x$diagnostics$magic_converged)) {
+        0L
+      } else if (isTRUE(fit_x$diagnostics$magic_step_failed)) {
+        2L
+      } else {
+        1L
+      },
       timings = fit_x$timings
     )
     fastkpc_precision_store_residual_cache_entry(
@@ -2050,17 +2061,28 @@ fastkpc_execute_ci_kpc_tprs_residual_cpp <- function(data, x, y, S, ci_method,
     computed_targets <- computed_targets + 1L
   }
   if (is.null(fit_y)) {
-    fit_y <- fastkpc_kpc_tprs_gcv_candidate(data[, y], S_matrix)
+    fit_y <- fastkpc_kpc_tprs_gcv_candidate(
+      data[, y], S_matrix, diagnostics_level = "compact")
     entry_y <- list(
       residuals = fit_y$residuals,
       fitted = fit_y$fitted,
-      coefficients = fit_y$coefficients,
       sp = fit_y$selected_sp,
       score = fit_y$score,
       edf = fit_y$edf,
       selected_grid_index = fit_y$selected_grid_index,
-      gcv_grid_points = nrow(fit_y$grid),
-      grid = fit_y$grid,
+      gcv_grid_points = fit_y$gcv_grid_points %||% 0L,
+      grid = NULL,
+      magic_boundary_steps =
+        fit_y$diagnostics$magic_boundary_steps %||% NA_integer_,
+      magic_iterations =
+        fit_y$diagnostics$magic_iterations %||% NA_integer_,
+      convergence_code = if (isTRUE(fit_y$diagnostics$magic_converged)) {
+        0L
+      } else if (isTRUE(fit_y$diagnostics$magic_step_failed)) {
+        2L
+      } else {
+        1L
+      },
       timings = fit_y$timings
     )
     fastkpc_precision_store_residual_cache_entry(

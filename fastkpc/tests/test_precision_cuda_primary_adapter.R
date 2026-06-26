@@ -98,9 +98,8 @@ assert_true(identical(benchmark_summary$trace_level, "summary"),
             "benchmark precision primary should use summary trace mode")
 assert_true(!is.data.frame(benchmark_primary$skeleton$precision_trace),
             "benchmark precision primary should not materialize full trace rows")
-assert_true(nrow(benchmark_primary$diagnostics$precision_trace) ==
-              as.integer(benchmark_summary$tests_replayed),
-            "benchmark diagnostics may expose lightweight replay rows")
+assert_true(!is.data.frame(benchmark_primary$diagnostics$precision_trace),
+            "benchmark diagnostics should not materialize summary trace rows")
 assert_true(identical(benchmark_primary$skeleton$n.edgetests,
                       fast_cuda$skeleton$n.edgetests),
             "summary trace mode should preserve native replay n.edgetests")

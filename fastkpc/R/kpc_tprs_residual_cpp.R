@@ -1610,7 +1610,10 @@ fastkpc_kpc_tprs_magic_boundary_probe <- function(
     y, setup, selected, log_step = 2,
     max_steps = 5L, improvement_tol = 0,
     direction = NULL,
-    tol = sqrt(.Machine$double.eps)) {
+    tol = sqrt(.Machine$double.eps),
+    diagnostics_level = c("full", "compact")) {
+  diagnostics_level <- match.arg(diagnostics_level)
+  collect_diagnostics <- identical(diagnostics_level, "full")
   score_at <- function(lambda) {
     fastkpc_kpc_tprs_gcv_score_for_setup(
       y = y, setup = setup, lambda = lambda, tol = tol)
@@ -1628,7 +1631,7 @@ fastkpc_kpc_tprs_magic_boundary_probe <- function(
       start_lambda = current_lambda,
       start_score = current_score,
       gradient = NA_real_,
-      path = data.frame()
+      path = if (isTRUE(collect_diagnostics)) data.frame() else NULL
     ))
   }
   log_step <- as.numeric(log_step)[1L]
@@ -1661,7 +1664,7 @@ fastkpc_kpc_tprs_magic_boundary_probe <- function(
       0L
     }
   }
-  path <- list()
+  path <- if (isTRUE(collect_diagnostics)) list() else NULL
   moved <- FALSE
   steps <- 0L
   if (direction != 0L && max_steps > 0L) {
@@ -1671,14 +1674,16 @@ fastkpc_kpc_tprs_magic_boundary_probe <- function(
       candidate_score <- as.numeric(candidate$gcv)
       accepted <- is.finite(candidate_score) &&
         candidate_score < current_score - improvement_tol
-      path[[length(path) + 1L]] <- data.frame(
-        step = i,
-        direction = direction,
-        lambda = candidate_lambda,
-        score = candidate_score,
-        accepted = accepted,
-        stringsAsFactors = FALSE
-      )
+      if (isTRUE(collect_diagnostics)) {
+        path[[length(path) + 1L]] <- data.frame(
+          step = i,
+          direction = direction,
+          lambda = candidate_lambda,
+          score = candidate_score,
+          accepted = accepted,
+          stringsAsFactors = FALSE
+        )
+      }
       if (!isTRUE(accepted)) break
       current <- candidate
       current_lambda <- as.numeric(current$lambda)
@@ -1695,7 +1700,13 @@ fastkpc_kpc_tprs_magic_boundary_probe <- function(
     start_lambda = as.numeric(selected$lambda),
     start_score = as.numeric(selected$gcv),
     gradient = as.numeric(grad),
-    path = if (length(path) == 0L) data.frame() else do.call(rbind, path)
+    path = if (!isTRUE(collect_diagnostics)) {
+      NULL
+    } else if (length(path) == 0L) {
+      data.frame()
+    } else {
+      do.call(rbind, path)
+    }
   )
 }
 
@@ -1705,7 +1716,10 @@ fastkpc_kpc_tprs_magic1d_candidate <- function(
     step_half = 25L,
     tol_score = 1e-9,
     log_derivative_step = 1e-4,
-    tol = sqrt(.Machine$double.eps)) {
+    tol = sqrt(.Machine$double.eps),
+    diagnostics_level = c("full", "compact")) {
+  diagnostics_level <- match.arg(diagnostics_level)
+  collect_diagnostics <- identical(diagnostics_level, "full")
   lambda_start <- as.numeric(lambda_start)[1L]
   if (!is.finite(lambda_start) || lambda_start <= 0) lambda_start <- 1
   max_iter <- as.integer(max_iter)[1L]
@@ -1729,23 +1743,29 @@ fastkpc_kpc_tprs_magic1d_candidate <- function(
   hess <- NA_real_
   converged <- FALSE
   step_failed <- FALSE
-  trace <- list(data.frame(
-    iteration = 0L,
-    phase = "start",
-    lambda = exp(rho),
-    score = min_score,
-    gradient = NA_real_,
-    hessian = NA_real_,
-    hessian_positive = NA,
-    step_type = NA_character_,
-    raw_step = NA_real_,
-    capped_step = NA_real_,
-    step_halving_count = NA_integer_,
-    accepted = NA,
-    stringsAsFactors = FALSE
-  ))
+  last_iteration <- 0L
+  trace <- if (isTRUE(collect_diagnostics)) {
+    list(data.frame(
+      iteration = 0L,
+      phase = "start",
+      lambda = exp(rho),
+      score = min_score,
+      gradient = NA_real_,
+      hessian = NA_real_,
+      hessian_positive = NA,
+      step_type = NA_character_,
+      raw_step = NA_real_,
+      capped_step = NA_real_,
+      step_halving_count = NA_integer_,
+      accepted = NA,
+      stringsAsFactors = FALSE
+    ))
+  } else {
+    NULL
+  }
 
   for (iteration in seq_len(max_iter)) {
+    last_iteration <- as.integer(iteration)
     try_count <- 0L
     accepted <- NA
     step_type <- NA_character_
@@ -1782,21 +1802,23 @@ fastkpc_kpc_tprs_magic1d_candidate <- function(
         }
       }
       capped_step <- step
-      trace[[length(trace) + 1L]] <- data.frame(
-        iteration = as.integer(iteration),
-        phase = "step",
-        lambda = exp(rho),
-        score = min_score,
-        gradient = grad,
-        hessian = hess,
-        hessian_positive = is.finite(hess) && hess >= 0,
-        step_type = step_type,
-        raw_step = raw_step,
-        capped_step = capped_step,
-        step_halving_count = as.integer(max(0L, try_count - 1L)),
-        accepted = accepted,
-        stringsAsFactors = FALSE
-      )
+      if (isTRUE(collect_diagnostics)) {
+        trace[[length(trace) + 1L]] <- data.frame(
+          iteration = as.integer(iteration),
+          phase = "step",
+          lambda = exp(rho),
+          score = min_score,
+          gradient = grad,
+          hessian = hess,
+          hessian_positive = is.finite(hess) && hess >= 0,
+          step_type = step_type,
+          raw_step = raw_step,
+          capped_step = capped_step,
+          step_halving_count = as.integer(max(0L, try_count - 1L)),
+          accepted = accepted,
+          stringsAsFactors = FALSE
+        )
+      }
     }
 
     if (iteration > 3L) {
@@ -1833,21 +1855,23 @@ fastkpc_kpc_tprs_magic1d_candidate <- function(
     }
     grad_scale <- if (is.finite(grad) && abs(grad) > 0) abs(grad) else 1
     steepest_step <- if (is.finite(grad)) -grad / grad_scale else 0
-    trace[[length(trace) + 1L]] <- data.frame(
-      iteration = as.integer(iteration),
-      phase = "derivative",
-      lambda = exp(rho),
-      score = min_score,
-      gradient = grad,
-      hessian = hess,
-      hessian_positive = is.finite(hess) && hess >= 0,
-      step_type = if (isTRUE(use_steepest)) "steepest" else "newton",
-      raw_step = if (isTRUE(use_steepest)) steepest_step else newton_step,
-      capped_step = if (isTRUE(use_steepest)) steepest_step else newton_step,
-      step_halving_count = NA_integer_,
-      accepted = NA,
-      stringsAsFactors = FALSE
-    )
+    if (isTRUE(collect_diagnostics)) {
+      trace[[length(trace) + 1L]] <- data.frame(
+        iteration = as.integer(iteration),
+        phase = "derivative",
+        lambda = exp(rho),
+        score = min_score,
+        gradient = grad,
+        hessian = hess,
+        hessian_positive = is.finite(hess) && hess >= 0,
+        step_type = if (isTRUE(use_steepest)) "steepest" else "newton",
+        raw_step = if (isTRUE(use_steepest)) steepest_step else newton_step,
+        capped_step = if (isTRUE(use_steepest)) steepest_step else newton_step,
+        step_halving_count = NA_integer_,
+        accepted = NA,
+        stringsAsFactors = FALSE
+      )
+    }
   }
 
   boundary_direction <- if (is.finite(grad) && grad < 0) 1L else -1L
@@ -1856,28 +1880,39 @@ fastkpc_kpc_tprs_magic1d_candidate <- function(
     setup = setup,
     selected = current,
     direction = boundary_direction,
-    tol = tol
+    tol = tol,
+    diagnostics_level = diagnostics_level
   )
   selected <- boundary$selected
-  trace_df <- do.call(rbind, trace)
-  grid <- unique(trace_df[, c("lambda", "score"), drop = FALSE])
-  grid_rows <- lapply(grid$lambda, score_at)
-  grid <- do.call(rbind, lapply(grid_rows, function(x) {
-    data.frame(
-      lambda = x$lambda,
-      rss = x$rss,
-      edf = x$edf,
-      gcv = x$gcv,
-      valid = x$valid,
-      stringsAsFactors = FALSE
-    )
-  }))
+  if (isTRUE(collect_diagnostics)) {
+    trace_df <- do.call(rbind, trace)
+    grid <- unique(trace_df[, c("lambda", "score"), drop = FALSE])
+    grid_rows <- lapply(grid$lambda, score_at)
+    grid <- do.call(rbind, lapply(grid_rows, function(x) {
+      data.frame(
+        lambda = x$lambda,
+        rss = x$rss,
+        edf = x$edf,
+        gcv = x$gcv,
+        valid = x$valid,
+        stringsAsFactors = FALSE
+      )
+    }))
+    bracket <- range(grid$lambda[is.finite(grid$lambda)], na.rm = TRUE)
+    iterations <- if (nrow(trace_df) == 0L) 0L else max(trace_df$iteration)
+  } else {
+    trace_df <- NULL
+    grid <- NULL
+    bracket <- range(c(lambda_start, current$lambda, selected$lambda),
+                     finite = TRUE)
+    iterations <- as.integer(last_iteration)
+  }
   list(
     selected = selected,
     selected_lambda = as.numeric(selected$lambda),
     selected_score = as.numeric(selected$gcv),
     grid = grid,
-    bracket = range(grid$lambda[is.finite(grid$lambda)], na.rm = TRUE),
+    bracket = bracket,
     trace = trace_df,
     lambda_start = as.numeric(lambda_start),
     pre_boundary_lambda = as.numeric(current$lambda),
@@ -1885,7 +1920,7 @@ fastkpc_kpc_tprs_magic1d_candidate <- function(
     magic_boundary = boundary,
     converged = isTRUE(converged),
     step_failed = isTRUE(step_failed),
-    iterations = if (nrow(trace_df) == 0L) 0L else max(trace_df$iteration)
+    iterations = iterations
   )
 }
 
@@ -2023,9 +2058,12 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
     lambda_grid = exp(seq(log(1e-4), log(1e4), length.out = 17L)),
     refine = TRUE,
     selection = c("mgcv-magic", "global-grid", "mgcv-local"),
-    tol = sqrt(.Machine$double.eps)) {
+    tol = sqrt(.Machine$double.eps),
+    diagnostics_level = c("full", "compact")) {
   total_start <- proc.time()[["elapsed"]]
   selection <- match.arg(selection)
+  diagnostics_level <- match.arg(diagnostics_level)
+  collect_diagnostics <- identical(diagnostics_level, "full")
   if (identical(selection, "mgcv-local")) selection <- "mgcv-magic"
   input <- fastkpc_kpc_tprs_validate_input(y, S)
   lambda_grid <- as.numeric(lambda_grid)
@@ -2044,13 +2082,17 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
       y = input$y,
       setup = setup,
       lambda_start = fastkpc_kpc_tprs_initial_lambda(setup),
-      tol = tol
+      tol = tol,
+      diagnostics_level = diagnostics_level
     )
     selected_lambda <- local$selected_lambda
     selected_score <- local$selected_score
     grid <- local$grid
-    selected_grid_index <- which.min(abs(log(grid$lambda) -
-                                         log(selected_lambda)))
+    selected_grid_index <- if (is.data.frame(grid) && nrow(grid) > 0L) {
+      which.min(abs(log(grid$lambda) - log(selected_lambda)))
+    } else {
+      NA_integer_
+    }
     bracket_lower_lambda <- min(local$bracket)
     bracket_upper_lambda <- max(local$bracket)
     brent_refined <- FALSE
@@ -2060,16 +2102,26 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
       fastkpc_kpc_tprs_gcv_score_for_setup(
         y = input$y, setup = setup, lambda = lambda, tol = tol)
     })
-    grid <- do.call(rbind, lapply(grid_eval, function(x) {
-      data.frame(
-        lambda = x$lambda,
-        rss = x$rss,
-        edf = x$edf,
-        gcv = x$gcv,
-        valid = x$valid,
-        stringsAsFactors = FALSE
+    if (isTRUE(collect_diagnostics)) {
+      grid <- do.call(rbind, lapply(grid_eval, function(x) {
+        data.frame(
+          lambda = x$lambda,
+          rss = x$rss,
+          edf = x$edf,
+          gcv = x$gcv,
+          valid = x$valid,
+          stringsAsFactors = FALSE
+        )
+      }))
+    } else {
+      grid <- list(
+        lambda = vapply(grid_eval, `[[`, numeric(1L), "lambda"),
+        rss = vapply(grid_eval, `[[`, numeric(1L), "rss"),
+        edf = vapply(grid_eval, `[[`, numeric(1L), "edf"),
+        gcv = vapply(grid_eval, `[[`, numeric(1L), "gcv"),
+        valid = vapply(grid_eval, `[[`, logical(1L), "valid")
       )
-    }))
+    }
     if (!any(grid$valid)) {
       stop("No valid GCV candidate in lambda_grid", call. = FALSE)
     }
@@ -2133,8 +2185,16 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
   selected$mode <- "continuous-gcv-candidate-shadow"
   selected$selected_sp <- as.numeric(selected_lambda)
   selected$score <- as.numeric(selected_score)
-  selected$grid <- grid
+  selected$grid <- if (isTRUE(collect_diagnostics)) grid else NULL
   selected$selected_grid_index <- as.integer(selected_grid_index)
+  selected$gcv_grid_points <- if (isTRUE(collect_diagnostics) &&
+                                  is.data.frame(grid)) {
+    nrow(grid)
+  } else if (identical(selection, "global-grid")) {
+    length(lambda_grid)
+  } else {
+    0L
+  }
   selected$backend_family <- "kpcTprsResidualCPP"
   selected$authoritative <- FALSE
   selected$diagnostics <- c(
@@ -2186,9 +2246,9 @@ fastkpc_kpc_tprs_gcv_candidate <- function(
         NA
       },
       magic1d_trace = if (identical(selection, "mgcv-magic")) {
-        list(local$trace)
+        if (isTRUE(collect_diagnostics)) list(local$trace) else NULL
       } else {
-        list(data.frame())
+        if (isTRUE(collect_diagnostics)) list(data.frame()) else NULL
       },
       bracket_lower_lambda = bracket_lower_lambda,
       bracket_upper_lambda = bracket_upper_lambda,

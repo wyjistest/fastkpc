@@ -52,6 +52,7 @@ result <- fast_kpc(
   precision = "compatible",
   graph_stage = "skeleton",
   runtime_capabilities = caps,
+  precision_trace_level = "full",
   precision_executors = list(
     `direct-ci` = make_spy(0.001, "direct-ci-spy",
                            new.env(parent = emptyenv())),
@@ -87,6 +88,7 @@ fallback <- fast_kpc(
   precision = "compatible",
   graph_stage = "skeleton",
   runtime_capabilities = caps,
+  precision_trace_level = "full",
   precision_executors = list(
     `direct-ci` = make_spy(0.001, "direct-ci-spy",
                            new.env(parent = emptyenv())),
