@@ -26,6 +26,8 @@ struct DcovBatchResult {
   double total_sec = 0.0;
   int chunks = 0;
   int max_chunk_batch = 0;
+  int workspace_reuse_count = 0;
+  int workspace_grow_count = 0;
 };
 
 #endif

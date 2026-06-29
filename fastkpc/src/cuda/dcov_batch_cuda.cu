@@ -159,6 +159,8 @@ void add_timing(DcovBatchResult* out, const DcovBatchResult& value) {
   out->total_sec += value.total_sec;
   out->chunks += value.chunks;
   out->max_chunk_batch = std::max(out->max_chunk_batch, value.max_chunk_batch);
+  out->workspace_reuse_count += value.workspace_reuse_count;
+  out->workspace_grow_count += value.workspace_grow_count;
 }
 
 int dcov_max_grid_batch_dimension() {
@@ -172,24 +174,124 @@ int dcov_max_grid_batch_dimension() {
   return std::max(1, limit);
 }
 
+struct DcovChunkBuffers {
+  double* d_x = nullptr;
+  std::size_t d_x_capacity = 0;
+  double* d_y = nullptr;
+  std::size_t d_y_capacity = 0;
+  double* d_row_k = nullptr;
+  std::size_t d_row_k_capacity = 0;
+  double* d_row_l = nullptr;
+  std::size_t d_row_l_capacity = 0;
+  double* d_total_k = nullptr;
+  std::size_t d_total_k_capacity = 0;
+  double* d_total_l = nullptr;
+  std::size_t d_total_l_capacity = 0;
+  double* d_scalars = nullptr;
+  std::size_t d_scalars_capacity = 0;
+  std::vector<double> h_total_k;
+  std::vector<double> h_total_l;
+  std::vector<double> h_device_scalars;
+};
+
+template <typename T>
+void ensure_device_capacity(T** ptr,
+                            std::size_t* capacity,
+                            std::size_t required,
+                            const char* stage,
+                            DcovBatchResult* result,
+                            bool track_workspace_grow) {
+  if (required <= *capacity) return;
+  if (*ptr != nullptr) check_cuda(cudaFree(*ptr), stage);
+  *ptr = nullptr;
+  *capacity = 0;
+  if (required > 0) {
+    check_cuda(cudaMalloc(ptr, sizeof(T) * required), stage);
+    *capacity = required;
+  }
+  if (track_workspace_grow && result != nullptr) {
+    ++result->workspace_grow_count;
+  }
+}
+
+void ensure_host_capacity(std::vector<double>* values, std::size_t required) {
+  if (values->size() < required) values->resize(required);
+}
+
+void ensure_dcov_buffers(DcovChunkBuffers* buffers,
+                         std::size_t matrix_size,
+                         std::size_t row_size,
+                         int batch,
+                         std::size_t device_scalar_size,
+                         DcovBatchResult* result,
+                         bool track_workspace_grow) {
+  ensure_device_capacity(&buffers->d_x, &buffers->d_x_capacity, matrix_size,
+                         "alloc x", result, track_workspace_grow);
+  ensure_device_capacity(&buffers->d_y, &buffers->d_y_capacity, matrix_size,
+                         "alloc y", result, track_workspace_grow);
+  ensure_device_capacity(&buffers->d_row_k, &buffers->d_row_k_capacity,
+                         row_size, "alloc row K", result,
+                         track_workspace_grow);
+  ensure_device_capacity(&buffers->d_row_l, &buffers->d_row_l_capacity,
+                         row_size, "alloc row L", result,
+                         track_workspace_grow);
+  ensure_device_capacity(&buffers->d_total_k, &buffers->d_total_k_capacity,
+                         static_cast<std::size_t>(batch), "alloc total K",
+                         result, track_workspace_grow);
+  ensure_device_capacity(&buffers->d_total_l, &buffers->d_total_l_capacity,
+                         static_cast<std::size_t>(batch), "alloc total L",
+                         result, track_workspace_grow);
+  ensure_device_capacity(&buffers->d_scalars, &buffers->d_scalars_capacity,
+                         device_scalar_size, "alloc scalars", result,
+                         track_workspace_grow);
+  ensure_host_capacity(&buffers->h_total_k, static_cast<std::size_t>(batch));
+  ensure_host_capacity(&buffers->h_total_l, static_cast<std::size_t>(batch));
+  ensure_host_capacity(&buffers->h_device_scalars, device_scalar_size);
+}
+
+void free_dcov_buffers(DcovChunkBuffers* buffers) {
+  cudaFree(buffers->d_x);
+  buffers->d_x = nullptr;
+  buffers->d_x_capacity = 0;
+  cudaFree(buffers->d_y);
+  buffers->d_y = nullptr;
+  buffers->d_y_capacity = 0;
+  cudaFree(buffers->d_row_k);
+  buffers->d_row_k = nullptr;
+  buffers->d_row_k_capacity = 0;
+  cudaFree(buffers->d_row_l);
+  buffers->d_row_l = nullptr;
+  buffers->d_row_l_capacity = 0;
+  cudaFree(buffers->d_total_k);
+  buffers->d_total_k = nullptr;
+  buffers->d_total_k_capacity = 0;
+  cudaFree(buffers->d_total_l);
+  buffers->d_total_l = nullptr;
+  buffers->d_total_l_capacity = 0;
+  cudaFree(buffers->d_scalars);
+  buffers->d_scalars = nullptr;
+  buffers->d_scalars_capacity = 0;
+}
+
+}  // namespace
+
+struct DcovCudaWorkspace {
+  DcovChunkBuffers buffers;
+};
+
+namespace {
+
 DcovBatchResult dcov_batch_cuda_chunk(const double* x,
                                       const double* y,
                                       int n,
                                       int batch,
-                                      const DcovBatchOptions& options) {
+                                      const DcovBatchOptions& options,
+                                      DcovCudaWorkspace* workspace) {
   if (n <= 5) throw std::runtime_error("gamma approximation requires n > 5");
   if (batch < 1) throw std::runtime_error("batch must be positive");
 
   const std::chrono::steady_clock::time_point total_start =
     std::chrono::steady_clock::now();
-
-  double* d_x = nullptr;
-  double* d_y = nullptr;
-  double* d_row_k = nullptr;
-  double* d_row_l = nullptr;
-  double* d_total_k = nullptr;
-  double* d_total_l = nullptr;
-  double* d_scalars = nullptr;
 
   const std::size_t matrix_size = static_cast<std::size_t>(n) * batch;
   const std::size_t row_size = matrix_size;
@@ -198,50 +300,57 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
   DcovBatchResult result;
   result.chunks = 1;
   result.max_chunk_batch = batch;
+  DcovChunkBuffers local_buffers;
+  DcovChunkBuffers* buffers = workspace == nullptr ?
+    &local_buffers : &workspace->buffers;
+  const bool has_workspace = workspace != nullptr;
+  if (has_workspace) ++result.workspace_reuse_count;
 
   try {
     std::chrono::steady_clock::time_point stage =
       std::chrono::steady_clock::now();
-    check_cuda(cudaMalloc(&d_x, sizeof(double) * matrix_size), "alloc x");
-    check_cuda(cudaMalloc(&d_y, sizeof(double) * matrix_size), "alloc y");
-    check_cuda(cudaMalloc(&d_row_k, sizeof(double) * row_size), "alloc row K");
-    check_cuda(cudaMalloc(&d_row_l, sizeof(double) * row_size), "alloc row L");
-    check_cuda(cudaMalloc(&d_total_k, sizeof(double) * batch), "alloc total K");
-    check_cuda(cudaMalloc(&d_total_l, sizeof(double) * batch), "alloc total L");
-    check_cuda(cudaMalloc(&d_scalars, sizeof(double) * device_scalar_size),
-               "alloc scalars");
+    ensure_dcov_buffers(buffers, matrix_size, row_size, batch,
+                        device_scalar_size, &result, has_workspace);
     result.alloc_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(d_x, x, sizeof(double) * matrix_size, cudaMemcpyHostToDevice),
+    check_cuda(cudaMemcpy(buffers->d_x, x, sizeof(double) * matrix_size, cudaMemcpyHostToDevice),
                "copy x");
-    check_cuda(cudaMemcpy(d_y, y, sizeof(double) * matrix_size, cudaMemcpyHostToDevice),
+    check_cuda(cudaMemcpy(buffers->d_y, y, sizeof(double) * matrix_size, cudaMemcpyHostToDevice),
                "copy y");
     result.h2d_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemset(d_total_k, 0, sizeof(double) * batch), "zero total K");
-    check_cuda(cudaMemset(d_total_l, 0, sizeof(double) * batch), "zero total L");
-    check_cuda(cudaMemset(d_scalars, 0, sizeof(double) * device_scalar_size),
-               "zero scalars");
+    check_cuda(cudaMemset(buffers->d_total_k, 0, sizeof(double) * batch),
+               "zero total K");
+    check_cuda(cudaMemset(buffers->d_total_l, 0, sizeof(double) * batch),
+               "zero total L");
+    check_cuda(cudaMemset(buffers->d_scalars, 0,
+                          sizeof(double) * device_scalar_size), "zero scalars");
     result.memset_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
     const dim3 rowsum_grid(n, batch);
-    rowsum_kernel<<<rowsum_grid, kBlock>>>(d_x, n, batch, options.index,
-                                           options.legacy_index, d_row_k, d_total_k);
-    rowsum_kernel<<<rowsum_grid, kBlock>>>(d_y, n, batch, options.index,
-                                           options.legacy_index, d_row_l, d_total_l);
+    rowsum_kernel<<<rowsum_grid, kBlock>>>(buffers->d_x, n, batch,
+                                           options.index,
+                                           options.legacy_index,
+                                           buffers->d_row_k,
+                                           buffers->d_total_k);
+    rowsum_kernel<<<rowsum_grid, kBlock>>>(buffers->d_y, n, batch,
+                                           options.index,
+                                           options.legacy_index,
+                                           buffers->d_row_l,
+                                           buffers->d_total_l);
     check_cuda(cudaGetLastError(), "launch rowsum");
     check_cuda(cudaDeviceSynchronize(), "rowsum synchronize");
     result.rowsum_sec += elapsed_since(stage);
 
-    std::vector<double> total_k(batch);
-    std::vector<double> total_l(batch);
+    double* total_k = buffers->h_total_k.data();
+    double* total_l = buffers->h_total_l.data();
     stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(total_k.data(), d_total_k, sizeof(double) * batch,
+    check_cuda(cudaMemcpy(total_k, buffers->d_total_k, sizeof(double) * batch,
                           cudaMemcpyDeviceToHost), "copy total K");
-    check_cuda(cudaMemcpy(total_l.data(), d_total_l, sizeof(double) * batch,
+    check_cuda(cudaMemcpy(total_l, buffers->d_total_l, sizeof(double) * batch,
                           cudaMemcpyDeviceToHost), "copy total L");
     result.totals_d2h_sec += elapsed_since(stage);
 
@@ -251,8 +360,9 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
     if (gx < 1) gx = 1;
     const dim3 reduce_grid(gx, gy, batch);
     fused_center_reduce_kernel<<<reduce_grid, kBlock>>>(
-      d_x, d_y, n, batch, options.index, options.legacy_index, d_row_k, d_row_l,
-      d_scalars);
+      buffers->d_x, buffers->d_y, n, batch, options.index,
+      options.legacy_index, buffers->d_row_k, buffers->d_row_l,
+      buffers->d_scalars);
     check_cuda(cudaGetLastError(), "launch fused reduce");
     check_cuda(cudaDeviceSynchronize(), "fused reduce synchronize");
     result.reduce_sec += elapsed_since(stage);
@@ -262,9 +372,9 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
     result.means.assign(batch, 0.0);
     result.variances.assign(batch, 0.0);
     result.raw_scalars.assign(raw_scalar_size, 0.0);
-    std::vector<double> device_scalars(device_scalar_size, 0.0);
+    double* device_scalars = buffers->h_device_scalars.data();
     stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(device_scalars.data(), d_scalars,
+    check_cuda(cudaMemcpy(device_scalars, buffers->d_scalars,
                           sizeof(double) * device_scalar_size,
                           cudaMemcpyDeviceToHost),
                "copy scalars");
@@ -310,41 +420,40 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
     result.host_scalar_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
-    cudaFree(d_x);
-    cudaFree(d_y);
-    cudaFree(d_row_k);
-    cudaFree(d_row_l);
-    cudaFree(d_total_k);
-    cudaFree(d_total_l);
-    cudaFree(d_scalars);
+    if (!has_workspace) free_dcov_buffers(buffers);
     result.free_sec += elapsed_since(stage);
     result.total_sec += elapsed_since(total_start);
     return result;
   } catch (...) {
-    cudaFree(d_x);
-    cudaFree(d_y);
-    cudaFree(d_row_k);
-    cudaFree(d_row_l);
-    cudaFree(d_total_k);
-    cudaFree(d_total_l);
-    cudaFree(d_scalars);
+    if (!has_workspace) free_dcov_buffers(buffers);
     throw;
   }
 }
 
 }  // namespace
 
+DcovCudaWorkspace* create_dcov_cuda_workspace() {
+  return new DcovCudaWorkspace();
+}
+
+void destroy_dcov_cuda_workspace(DcovCudaWorkspace* workspace) {
+  if (workspace == nullptr) return;
+  free_dcov_buffers(&workspace->buffers);
+  delete workspace;
+}
+
 DcovBatchResult dcov_batch_cuda(const double* x,
                                 const double* y,
                                 int n,
                                 int batch,
-                                const DcovBatchOptions& options) {
+                                const DcovBatchOptions& options,
+                                DcovCudaWorkspace* workspace) {
   if (n <= 5) throw std::runtime_error("gamma approximation requires n > 5");
   if (batch < 1) throw std::runtime_error("batch must be positive");
 
   const int chunk_limit = dcov_max_grid_batch_dimension();
   if (batch <= chunk_limit) {
-    return dcov_batch_cuda_chunk(x, y, n, batch, options);
+    return dcov_batch_cuda_chunk(x, y, n, batch, options, workspace);
   }
 
   DcovBatchResult result;
@@ -360,7 +469,7 @@ DcovBatchResult dcov_batch_cuda(const double* x,
     const int count = std::min(chunk_limit, batch - start);
     const std::size_t offset = static_cast<std::size_t>(start) * n;
     const DcovBatchResult chunk = dcov_batch_cuda_chunk(
-      x + offset, y + offset, n, count, options);
+      x + offset, y + offset, n, count, options, workspace);
     add_timing(&result, chunk);
 
     for (int k = 0; k < count; ++k) {
@@ -377,4 +486,12 @@ DcovBatchResult dcov_batch_cuda(const double* x,
   }
 
   return result;
+}
+
+DcovBatchResult dcov_batch_cuda(const double* x,
+                                const double* y,
+                                int n,
+                                int batch,
+                                const DcovBatchOptions& options) {
+  return dcov_batch_cuda(x, y, n, batch, options, nullptr);
 }

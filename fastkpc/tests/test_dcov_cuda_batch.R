@@ -55,6 +55,10 @@ assert_true(length(large$p.value) == 64, "batch output should have 64 p-values")
 assert_true(all(is.finite(large$p.value)), "batch p-values should be finite")
 assert_true(all(large$p.value >= 0 & large$p.value <= 1),
             "batch p-values should be in [0, 1]")
+assert_true(identical(as.integer(large$diagnostics$workspace_reuse_count), 0L),
+            "direct dCov batch API should use the no-workspace overload")
+assert_true(identical(as.integer(large$diagnostics$workspace_grow_count), 0L),
+            "direct dCov batch API should not report workspace growth")
 
 set.seed(2301)
 wide_batch <- 70000L

@@ -405,7 +405,11 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
       Rcpp::Named("dcov_free_sec") = diagnostics.dcov_free_sec,
       Rcpp::Named("dcov_total_sec") = diagnostics.dcov_total_sec,
       Rcpp::Named("dcov_chunks") = diagnostics.dcov_chunks,
-      Rcpp::Named("dcov_max_chunk_batch") = diagnostics.dcov_max_chunk_batch
+      Rcpp::Named("dcov_max_chunk_batch") = diagnostics.dcov_max_chunk_batch,
+      Rcpp::Named("dcov_workspace_reuse_count") =
+        diagnostics.dcov_workspace_reuse_count,
+      Rcpp::Named("dcov_workspace_grow_count") =
+        diagnostics.dcov_workspace_grow_count
     ),
     Rcpp::Named("levels") =
       scheduler_levels_to_data_frame(diagnostics.per_level),
@@ -936,7 +940,9 @@ extern "C" SEXP C_fast_dcov_batch_cuda(SEXP xs, SEXP ys, SEXP indexs,
       Rcpp::Named("free_sec") = result.free_sec,
       Rcpp::Named("total_sec") = result.total_sec,
       Rcpp::Named("chunks") = result.chunks,
-      Rcpp::Named("max_chunk_batch") = result.max_chunk_batch
+      Rcpp::Named("max_chunk_batch") = result.max_chunk_batch,
+      Rcpp::Named("workspace_reuse_count") = result.workspace_reuse_count,
+      Rcpp::Named("workspace_grow_count") = result.workspace_grow_count
     )
   );
   END_RCPP

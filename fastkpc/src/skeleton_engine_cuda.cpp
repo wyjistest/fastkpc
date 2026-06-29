@@ -40,6 +40,13 @@ struct HsicCudaEvalCounters {
   int max_batch_pairs = 0;
 };
 
+struct DcovWorkspaceHolder {
+  DcovCudaWorkspace* value = nullptr;
+  explicit DcovWorkspaceHolder(bool enabled)
+      : value(enabled ? create_dcov_cuda_workspace() : nullptr) {}
+  ~DcovWorkspaceHolder() { destroy_dcov_cuda_workspace(value); }
+};
+
 std::vector<double> column_as_vector(const Rcpp::NumericMatrix& data, int col) {
   std::vector<double> out(data.nrow());
   for (int i = 0; i < data.nrow(); ++i) out[i] = data(i, col);
@@ -460,6 +467,7 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
                                         bool legacy_index,
                                         int level,
                                         CudaSkeletonResidualCache* residual_cache,
+                                        DcovCudaWorkspace* dcov_workspace,
                                         SchedulerDiagnostics* diagnostics,
                                         int* dcov_batches) {
   const int n = data.nrow();
@@ -482,7 +490,8 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     diagnostics->ci_host_pack_sec += pack_ci_task_batch(
       data, tasks, start, count, n, residual_cache, xmat.data(), ymat.data());
 
-    const DcovBatchResult batch = dcov_batch_cuda(xmat.data(), ymat.data(), n, count, options);
+    const DcovBatchResult batch = dcov_batch_cuda(
+      xmat.data(), ymat.data(), n, count, options, dcov_workspace);
     for (int k = 0; k < count; ++k) {
       pvalues[start + k] = batch.p_values[k];
     }
@@ -499,6 +508,8 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     diagnostics->dcov_chunks += batch.chunks;
     diagnostics->dcov_max_chunk_batch =
       std::max(diagnostics->dcov_max_chunk_batch, batch.max_chunk_batch);
+    diagnostics->dcov_workspace_reuse_count += batch.workspace_reuse_count;
+    diagnostics->dcov_workspace_grow_count += batch.workspace_grow_count;
     ++(*dcov_batches);
     diagnostics->batches.push_back(SchedulerBatchDiagnostic{
       level, *dcov_batches - 1, "dcov", tasks[start].task_id, count, n, "ok",
@@ -693,6 +704,7 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
   SchedulerDiagnostics diagnostics = make_scheduler_diagnostics(
     scheduler, scheduler_requested, batch_size, options.residual_batch_size);
   HsicCudaEvalCounters hsic_counters;
+  DcovWorkspaceHolder dcov_workspace(ci_method == CiMethodKind::DccGamma);
 
   const int max_order = std::max(0, options.max_conditioning_size);
   for (int ord = 0; ord <= max_order; ++ord) {
@@ -727,7 +739,8 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
     if (ci_method == CiMethodKind::DccGamma) {
       pvalues = evaluate_tasks_cuda(
         data, plan.tasks, batch_size, options.index, options.legacy_index,
-        ord, &residual_cache, &diagnostics, &dcov_batches);
+        ord, &residual_cache, dcov_workspace.value, &diagnostics,
+        &dcov_batches);
     } else {
       pvalues = evaluate_tasks_hsic_cuda(
         data, plan.tasks, batch_size, ci_method, options.hsic_options,

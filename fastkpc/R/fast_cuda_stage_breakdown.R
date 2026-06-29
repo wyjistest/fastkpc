@@ -200,6 +200,10 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
     dcov_batch_size_used = as.integer(summary$dcov_batch_size_used %||% 0L),
     dcov_max_chunk_batch =
       as.integer(summary$dcov_max_chunk_batch %||% 0L),
+    dcov_workspace_reuse_count =
+      as.integer(summary$dcov_workspace_reuse_count %||% 0L),
+    dcov_workspace_grow_count =
+      as.integer(summary$dcov_workspace_grow_count %||% 0L),
     residual_batches = as.integer(summary$residual_batches %||% 0L),
     unique_residual_requests =
       as.integer(summary$unique_residual_requests %||% 0L),
