@@ -216,6 +216,7 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_workspace_grow_count = 0;
   out.residual_solver_handle_create_count = 0;
   out.ci_eval_elapsed_sec = 0.0;
+  out.ci_host_pack_sec = 0.0;
   out.replay_elapsed_sec = 0.0;
   out.total_elapsed_sec = 0.0;
   out.dcov_alloc_sec = 0.0;

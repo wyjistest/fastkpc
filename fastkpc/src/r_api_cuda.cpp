@@ -391,6 +391,7 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
       Rcpp::Named("residual_solver_handle_create_count") =
         diagnostics.residual_solver_handle_create_count,
       Rcpp::Named("ci_eval_elapsed_sec") = diagnostics.ci_eval_elapsed_sec,
+      Rcpp::Named("ci_host_pack_sec") = diagnostics.ci_host_pack_sec,
       Rcpp::Named("replay_elapsed_sec") = diagnostics.replay_elapsed_sec,
       Rcpp::Named("total_elapsed_sec") = diagnostics.total_elapsed_sec,
       Rcpp::Named("dcov_alloc_sec") = diagnostics.dcov_alloc_sec,

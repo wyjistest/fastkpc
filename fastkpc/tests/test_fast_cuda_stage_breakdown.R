@@ -44,9 +44,10 @@ assert_true(length(missing_breakdown) == 0L,
                   paste(missing_breakdown, collapse = ",")))
 required_stages <- c(
   "skeleton_total", "fastspline_residual_prefetch", "ci_eval_total",
-  "native_replay", "dcov_rowsum_distance", "dcov_fused_center_reduce",
-  "dcov_measured_total", "residual_host_pack", "residual_factor_solve",
-  "residual_factor_cholesky", "residual_factor_rhs_solve",
+  "ci_host_pack", "native_replay", "dcov_rowsum_distance",
+  "dcov_fused_center_reduce", "dcov_measured_total", "residual_host_pack",
+  "residual_factor_solve", "residual_factor_cholesky",
+  "residual_factor_rhs_solve",
   "residual_factor_inverse_solve", "residual_d2h",
   "residual_true_batch_total"
 )
@@ -69,6 +70,10 @@ assert_true(runs$dcov_batches[[1L]] > 0L,
             "stage breakdown should record dCov batches")
 assert_true(runs$dcov_chunks[[1L]] > 0L,
             "stage breakdown should record dCov chunks")
+ci_host_pack <- breakdown$elapsed_ms[breakdown$stage == "ci_host_pack"]
+assert_true(length(ci_host_pack) == 1L && is.finite(ci_host_pack[[1L]]) &&
+              ci_host_pack[[1L]] > 0,
+            "stage breakdown should record positive CI host pack time")
 assert_true(runs$unique_residual_requests[[1L]] > 0L,
             "stage breakdown should record unique residual requests")
 assert_true(runs$cuda_residual_true_batched_fits[[1L]] >= 0L,

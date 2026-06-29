@@ -399,18 +399,58 @@ class CudaSkeletonResidualCache {
   FastSplineCudaWorkspace* residual_workspace_ = nullptr;
 };
 
-void fill_task_vectors(const Rcpp::NumericMatrix& data,
-                       const LayerCiTask& task,
-                       CudaSkeletonResidualCache* residual_cache,
-                       std::vector<double>* x,
-                       std::vector<double>* y) {
+void copy_column_to_buffer(const Rcpp::NumericMatrix& data,
+                           int col,
+                           double* out) {
+  for (int row = 0; row < data.nrow(); ++row) out[row] = data(row, col);
+}
+
+void copy_vector_to_buffer(const std::vector<double>& values,
+                           int n,
+                           double* out) {
+  if (static_cast<int>(values.size()) != n) {
+    throw std::runtime_error("CI host pack residual length mismatch");
+  }
+  std::copy(values.begin(), values.end(), out);
+}
+
+void pack_task_vectors_directly(const Rcpp::NumericMatrix& data,
+                                const LayerCiTask& task,
+                                CudaSkeletonResidualCache* residual_cache,
+                                double* x,
+                                double* y) {
+  const int n = data.nrow();
   if (task.conditioning_set.empty()) {
-    *x = column_as_vector(data, task.orientation_x);
-    *y = column_as_vector(data, task.orientation_y);
+    copy_column_to_buffer(data, task.orientation_x, x);
+    copy_column_to_buffer(data, task.orientation_y, y);
     return;
   }
-  *x = residual_cache->get(data, task.orientation_x, task.conditioning_set);
-  *y = residual_cache->get(data, task.orientation_y, task.conditioning_set);
+
+  const std::vector<double>& x_residual =
+    residual_cache->get(data, task.orientation_x, task.conditioning_set);
+  copy_vector_to_buffer(x_residual, n, x);
+  const std::vector<double>& y_residual =
+    residual_cache->get(data, task.orientation_y, task.conditioning_set);
+  copy_vector_to_buffer(y_residual, n, y);
+}
+
+double pack_ci_task_batch(const Rcpp::NumericMatrix& data,
+                          const std::vector<LayerCiTask>& tasks,
+                          int start,
+                          int count,
+                          int n,
+                          CudaSkeletonResidualCache* residual_cache,
+                          double* xmat,
+                          double* ymat) {
+  const std::chrono::steady_clock::time_point pack_start =
+    std::chrono::steady_clock::now();
+  for (int k = 0; k < count; ++k) {
+    pack_task_vectors_directly(
+      data, tasks[start + k], residual_cache,
+      xmat + static_cast<std::size_t>(k) * n,
+      ymat + static_cast<std::size_t>(k) * n);
+  }
+  return seconds_since(pack_start);
 }
 
 std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
@@ -434,20 +474,13 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
   options.index = index;
   options.legacy_index = legacy_index;
 
+  std::vector<double> xmat(static_cast<std::size_t>(n) * actual_batch_size);
+  std::vector<double> ymat(static_cast<std::size_t>(n) * actual_batch_size);
+
   for (int start = 0; start < static_cast<int>(tasks.size()); start += actual_batch_size) {
     const int count = std::min(actual_batch_size, static_cast<int>(tasks.size()) - start);
-    std::vector<double> xmat(static_cast<std::size_t>(n) * count, 0.0);
-    std::vector<double> ymat(static_cast<std::size_t>(n) * count, 0.0);
-
-    for (int k = 0; k < count; ++k) {
-      std::vector<double> xvec;
-      std::vector<double> yvec;
-      fill_task_vectors(data, tasks[start + k], residual_cache, &xvec, &yvec);
-      for (int row = 0; row < n; ++row) {
-        xmat[static_cast<std::size_t>(k) * n + row] = xvec[row];
-        ymat[static_cast<std::size_t>(k) * n + row] = yvec[row];
-      }
-    }
+    diagnostics->ci_host_pack_sec += pack_ci_task_batch(
+      data, tasks, start, count, n, residual_cache, xmat.data(), ymat.data());
 
     const DcovBatchResult batch = dcov_batch_cuda(xmat.data(), ymat.data(), n, count, options);
     for (int k = 0; k < count; ++k) {
@@ -520,20 +553,13 @@ std::vector<double> evaluate_tasks_hsic_cuda(
   diagnostics->dcov_batch_size_used =
     std::max(diagnostics->dcov_batch_size_used, actual_batch_size);
 
+  std::vector<double> xmat(static_cast<std::size_t>(n) * actual_batch_size);
+  std::vector<double> ymat(static_cast<std::size_t>(n) * actual_batch_size);
+
   for (int start = 0; start < static_cast<int>(tasks.size()); start += actual_batch_size) {
     const int count = std::min(actual_batch_size, static_cast<int>(tasks.size()) - start);
-    std::vector<double> xmat(static_cast<std::size_t>(n) * count, 0.0);
-    std::vector<double> ymat(static_cast<std::size_t>(n) * count, 0.0);
-
-    for (int k = 0; k < count; ++k) {
-      std::vector<double> xvec;
-      std::vector<double> yvec;
-      fill_task_vectors(data, tasks[start + k], residual_cache, &xvec, &yvec);
-      for (int row = 0; row < n; ++row) {
-        xmat[static_cast<std::size_t>(k) * n + row] = xvec[row];
-        ymat[static_cast<std::size_t>(k) * n + row] = yvec[row];
-      }
-    }
+    diagnostics->ci_host_pack_sec += pack_ci_task_batch(
+      data, tasks, start, count, n, residual_cache, xmat.data(), ymat.data());
 
     const HsicBatchResult batch =
       kind == CiMethodKind::HsicGamma ?
