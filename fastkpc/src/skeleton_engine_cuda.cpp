@@ -510,6 +510,10 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
       std::max(diagnostics->dcov_max_chunk_batch, batch.max_chunk_batch);
     diagnostics->dcov_workspace_reuse_count += batch.workspace_reuse_count;
     diagnostics->dcov_workspace_grow_count += batch.workspace_grow_count;
+    diagnostics->dcov_raw_aggregate_fused_count +=
+      batch.raw_aggregate_fused_count;
+    diagnostics->dcov_row_product_reduce_count +=
+      batch.row_product_reduce_count;
     ++(*dcov_batches);
     diagnostics->batches.push_back(SchedulerBatchDiagnostic{
       level, *dcov_batches - 1, "dcov", tasks[start].task_id, count, n, "ok",

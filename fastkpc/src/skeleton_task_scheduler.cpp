@@ -233,6 +233,8 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.dcov_max_chunk_batch = 0;
   out.dcov_workspace_reuse_count = 0;
   out.dcov_workspace_grow_count = 0;
+  out.dcov_raw_aggregate_fused_count = 0;
+  out.dcov_row_product_reduce_count = 0;
   return out;
 }
 

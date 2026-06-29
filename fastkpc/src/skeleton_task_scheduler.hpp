@@ -162,6 +162,8 @@ struct SchedulerDiagnostics {
   int dcov_max_chunk_batch;
   int dcov_workspace_reuse_count;
   int dcov_workspace_grow_count;
+  int dcov_raw_aggregate_fused_count;
+  int dcov_row_product_reduce_count;
   std::vector<LayerDiagnosticsLevel> per_level;
   std::vector<SchedulerBatchDiagnostic> batches;
   std::vector<SchedulerResidualDiagnostic> residuals;

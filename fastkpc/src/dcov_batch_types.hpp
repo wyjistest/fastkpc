@@ -28,6 +28,8 @@ struct DcovBatchResult {
   int max_chunk_batch = 0;
   int workspace_reuse_count = 0;
   int workspace_grow_count = 0;
+  int raw_aggregate_fused_count = 0;
+  int row_product_reduce_count = 0;
 };
 
 #endif

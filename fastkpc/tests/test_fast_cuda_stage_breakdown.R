@@ -74,6 +74,10 @@ assert_true(runs$dcov_workspace_reuse_count[[1L]] > 0L,
             "stage breakdown should record dCov workspace reuse")
 assert_true(runs$dcov_workspace_grow_count[[1L]] > 0L,
             "stage breakdown should record dCov workspace growth")
+assert_true(runs$dcov_raw_aggregate_fused_count[[1L]] > 0L,
+            "stage breakdown should record dCov raw aggregate fusion")
+assert_true(runs$dcov_row_product_reduce_count[[1L]] > 0L,
+            "stage breakdown should record dCov row-product reduce")
 ci_host_pack <- breakdown$elapsed_ms[breakdown$stage == "ci_host_pack"]
 assert_true(length(ci_host_pack) == 1L && is.finite(ci_host_pack[[1L]]) &&
               ci_host_pack[[1L]] > 0,
