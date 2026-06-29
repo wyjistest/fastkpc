@@ -68,6 +68,8 @@ struct FastSplineCudaBatchDiagnostics {
   int workspace_reuse_count;
   int workspace_grow_count;
   int solver_handle_create_count;
+  int per_request_design_x_values;
+  int duplicate_design_x_values_avoided;
   std::vector<int> group_id;
   std::vector<int> group_n;
   std::vector<int> group_design_cols;

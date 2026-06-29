@@ -390,6 +390,10 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_workspace_grow_count,
       Rcpp::Named("residual_solver_handle_create_count") =
         diagnostics.residual_solver_handle_create_count,
+      Rcpp::Named("residual_per_request_design_x_values") =
+        diagnostics.residual_per_request_design_x_values,
+      Rcpp::Named("residual_duplicate_design_x_values_avoided") =
+        diagnostics.residual_duplicate_design_x_values_avoided,
       Rcpp::Named("ci_eval_elapsed_sec") = diagnostics.ci_eval_elapsed_sec,
       Rcpp::Named("ci_host_pack_sec") = diagnostics.ci_host_pack_sec,
       Rcpp::Named("replay_elapsed_sec") = diagnostics.replay_elapsed_sec,
@@ -730,6 +734,10 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
     Rcpp::Named("workspace_grow_count") = diagnostics.workspace_grow_count,
     Rcpp::Named("solver_handle_create_count") =
       diagnostics.solver_handle_create_count,
+    Rcpp::Named("per_request_design_x_values") =
+      diagnostics.per_request_design_x_values,
+    Rcpp::Named("duplicate_design_x_values_avoided") =
+      diagnostics.duplicate_design_x_values_avoided,
     Rcpp::Named("group_table") =
       fastspline_batch_group_table_to_df(diagnostics)
   );

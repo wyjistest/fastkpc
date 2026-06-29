@@ -144,6 +144,8 @@ struct SchedulerDiagnostics {
   int residual_workspace_reuse_count;
   int residual_workspace_grow_count;
   int residual_solver_handle_create_count;
+  int residual_per_request_design_x_values;
+  int residual_duplicate_design_x_values_avoided;
   double ci_eval_elapsed_sec;
   double ci_host_pack_sec;
   double replay_elapsed_sec;

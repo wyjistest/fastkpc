@@ -60,6 +60,10 @@ assert_true(identical(as.integer(diag$group_table$unique_designs[[1]]), 1L),
 assert_true(identical(as.integer(diag$group_table$max_fits_per_design[[1]]),
                       length(targets)),
             "same conditioning set should report all targets on one design")
+assert_true(identical(as.integer(diag$per_request_design_x_values), 0L),
+            "true batch should not pack per-request duplicate design X")
+assert_true(as.integer(diag$duplicate_design_x_values_avoided) > 0L,
+            "true batch should report avoided duplicate design X values")
 
 for (k in seq_along(targets)) {
   cpu <- fastspline_residual(data[, targets[[k]]],

@@ -280,6 +280,10 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.workspace_grow_count;
         diagnostics->residual_solver_handle_create_count +=
           batch_result.diagnostics.solver_handle_create_count;
+        diagnostics->residual_per_request_design_x_values +=
+          batch_result.diagnostics.per_request_design_x_values;
+        diagnostics->residual_duplicate_design_x_values_avoided +=
+          batch_result.diagnostics.duplicate_design_x_values_avoided;
         for (int i = 0; i < static_cast<int>(missing_positions.size()); ++i) {
           const LayerResidualRequest& request = requests[missing_positions[i]];
           const std::vector<int> normalized_cond =

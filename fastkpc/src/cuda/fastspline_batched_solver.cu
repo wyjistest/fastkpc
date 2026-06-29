@@ -59,6 +59,9 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->workspace_reuse_count += value.workspace_reuse_count;
   out->workspace_grow_count += value.workspace_grow_count;
   out->solver_handle_create_count += value.solver_handle_create_count;
+  out->per_request_design_x_values += value.per_request_design_x_values;
+  out->duplicate_design_x_values_avoided +=
+    value.duplicate_design_x_values_avoided;
 }
 
 __device__ __host__ inline std::size_t matrix_offset(int fit,
@@ -133,15 +136,6 @@ std::string conditioning_set_key(std::vector<int> conditioning_set) {
   return out.str();
 }
 
-const FastSplineDesign& request_design(const FastSplineBatchGroup& group,
-                                       const FastSplineBatchRequest& request) {
-  if (request.design_index < 0 ||
-      request.design_index >= static_cast<int>(group.designs.size())) {
-    throw std::runtime_error("fastSpline batch design index out of range");
-  }
-  return group.designs[request.design_index];
-}
-
 FastSplineCudaDiagnostics make_diagnostics(bool cuda_used,
                                            bool fallback_used,
                                            const std::string& reason,
@@ -171,22 +165,6 @@ FastSplineCudaFit cpu_fallback_fit(const Rcpp::NumericMatrix& data,
                                      request.conditioning_set, params);
   out.diagnostics = make_diagnostics(false, true, reason, group_id,
                                      batch_position, false, "cpu-fallback");
-  return out;
-}
-
-std::vector<double> pack_group_x(const FastSplineBatchGroup& group) {
-  const int group_size = static_cast<int>(group.requests.size());
-  const int n = group.n;
-  const int p = group.design_cols;
-  std::vector<double> out(static_cast<std::size_t>(group_size) * n * p);
-  for (int fit = 0; fit < group_size; ++fit) {
-    const FastSplineDesign& design = request_design(group, group.requests[fit]);
-    if (design.n != n || design.p != p) {
-      throw std::runtime_error("fastSpline batch X shape mismatch");
-    }
-    std::copy(design.X.begin(), design.X.end(),
-              out.begin() + static_cast<std::size_t>(fit) * n * p);
-  }
   return out;
 }
 
@@ -298,21 +276,24 @@ __global__ void batched_xtx_kernel(const double* X,
   }
 }
 
-__global__ void batched_xty_kernel(const double* X,
-                                   const double* y,
-                                   int group_size,
-                                   int n,
-                                   int p,
-                                   double* Xty) {
+__global__ void batched_xty_by_design_kernel(const double* design_X,
+                                             const double* y,
+                                             const int* design_index,
+                                             int group_size,
+                                             int n,
+                                             int p,
+                                             double* Xty) {
   __shared__ double scratch[kBlock];
   const int col = blockIdx.x;
   const int fit = blockIdx.y;
   if (fit >= group_size || col >= p) return;
 
+  const int design = design_index[fit];
   double acc = 0.0;
   const std::size_t y_base = static_cast<std::size_t>(fit) * n;
   for (int row = threadIdx.x; row < n; row += blockDim.x) {
-    acc += X[matrix_offset(fit, row, col, n, p)] * y[y_base + row];
+    acc += design_X[matrix_offset(design, row, col, n, p)] *
+           y[y_base + row];
   }
   scratch[threadIdx.x] = acc;
   __syncthreads();
@@ -455,15 +436,17 @@ __global__ void batched_identity_kernel(double* matrix,
   }
 }
 
-__global__ void batched_fitted_residual_kernel(const double* X,
-                                               const double* y,
-                                               const double* beta,
-                                               const int* active,
-                                               int group_size,
-                                               int n,
-                                               int p,
-                                               double* fitted,
-                                               double* residuals) {
+__global__ void batched_fitted_residual_by_design_kernel(
+  const double* design_X,
+  const double* y,
+  const double* beta,
+  const int* design_index,
+  const int* active,
+  int group_size,
+  int n,
+  int p,
+  double* fitted,
+  double* residuals) {
   const int row = blockIdx.x * blockDim.x + threadIdx.x;
   const int fit = blockIdx.y;
   if (fit >= group_size || row >= n) return;
@@ -473,9 +456,10 @@ __global__ void batched_fitted_residual_kernel(const double* X,
     residuals[out_idx] = 0.0;
     return;
   }
+  const int design = design_index[fit];
   double value = 0.0;
   for (int col = 0; col < p; ++col) {
-    value += X[matrix_offset(fit, row, col, n, p)] *
+    value += design_X[matrix_offset(design, row, col, n, p)] *
              beta[static_cast<std::size_t>(fit) * p + col];
   }
   fitted[out_idx] = value;
@@ -878,7 +862,6 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     std::chrono::steady_clock::now();
   std::chrono::steady_clock::time_point stage =
     std::chrono::steady_clock::now();
-  const std::vector<double> host_X = pack_group_x(group);
   const std::vector<double> host_design_X = pack_group_design_x(group);
   const std::vector<double> host_design_P = pack_group_design_p(group);
   const std::vector<double> host_y = pack_group_y(data, group);
@@ -888,9 +871,13 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
   const std::vector<double> lambdas = lambda_grid(params);
   const int design_count = static_cast<int>(group.designs.size());
   const int lambda_count = static_cast<int>(lambdas.size());
-  const std::size_t x_size = static_cast<std::size_t>(group_size) * n * p;
+  const std::size_t per_request_x_size =
+    static_cast<std::size_t>(group_size) * n * p;
+  const std::size_t x_size = 0;
   const std::size_t design_x_size =
     static_cast<std::size_t>(design_count) * n * p;
+  timing->duplicate_design_x_values_avoided +=
+    static_cast<int>(per_request_x_size - design_x_size);
   const std::size_t y_size = static_cast<std::size_t>(group_size) * n;
   const std::size_t design_pp_size =
     static_cast<std::size_t>(design_count) * p * p;
@@ -920,8 +907,6 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     timing->alloc_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(buffers->d_X, host_X.data(), sizeof(double) * x_size,
-                          cudaMemcpyHostToDevice), "copy batched X");
     check_cuda(cudaMemcpy(buffers->d_design_X, host_design_X.data(),
                           sizeof(double) * design_x_size,
                           cudaMemcpyHostToDevice), "copy batched design X");
@@ -945,8 +930,9 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
                                              design_count, n, p,
                                              buffers->d_design_XtX);
     const dim3 xty_grid(p, group_size);
-    batched_xty_kernel<<<xty_grid, kBlock>>>(buffers->d_X, buffers->d_y,
-                                             group_size, n, p, buffers->d_Xty);
+    batched_xty_by_design_kernel<<<xty_grid, kBlock>>>(
+      buffers->d_design_X, buffers->d_y, buffers->d_request_design_index,
+      group_size, n, p, buffers->d_Xty);
     check_cuda(cudaGetLastError(), "launch batched XtX/Xty kernels");
     check_cuda(cudaDeviceSynchronize(), "synchronize batched XtX/Xty kernels");
     timing->xtx_xty_sec += elapsed_since(stage);
@@ -1058,9 +1044,10 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
         stage = std::chrono::steady_clock::now();
         const int row_blocks = (n + kBlock - 1) / kBlock;
         const dim3 fit_grid(std::max(1, row_blocks), group_size);
-        batched_fitted_residual_kernel<<<fit_grid, kBlock>>>(
-          buffers->d_X, buffers->d_y, buffers->d_beta, buffers->d_active,
-          group_size, n, p, buffers->d_fitted, buffers->d_residuals);
+        batched_fitted_residual_by_design_kernel<<<fit_grid, kBlock>>>(
+          buffers->d_design_X, buffers->d_y, buffers->d_beta,
+          buffers->d_request_design_index, buffers->d_active, group_size, n,
+          p, buffers->d_fitted, buffers->d_residuals);
         batched_rss_edf_kernel<<<group_size, kBlock>>>(
           buffers->d_residuals, buffers->d_design_XtX, buffers->d_design_Ainv,
           buffers->d_active, buffers->d_request_design_index, design_count,
@@ -1244,9 +1231,10 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     stage = std::chrono::steady_clock::now();
     const int row_blocks = (n + kBlock - 1) / kBlock;
     const dim3 fit_grid(std::max(1, row_blocks), group_size);
-    batched_fitted_residual_kernel<<<fit_grid, kBlock>>>(
-      buffers->d_X, buffers->d_y, buffers->d_beta, buffers->d_active,
-      group_size, n, p, buffers->d_fitted, buffers->d_residuals);
+    batched_fitted_residual_by_design_kernel<<<fit_grid, kBlock>>>(
+      buffers->d_design_X, buffers->d_y, buffers->d_beta,
+      buffers->d_request_design_index, buffers->d_active, group_size, n, p,
+      buffers->d_fitted, buffers->d_residuals);
     check_cuda(cudaGetLastError(), "launch selected residual kernels");
     check_cuda(cudaDeviceSynchronize(), "synchronize selected residual kernels");
     timing->residual_summary_sec += elapsed_since(stage);
@@ -1397,6 +1385,8 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.workspace_reuse_count = 0;
   out.workspace_grow_count = 0;
   out.solver_handle_create_count = 0;
+  out.per_request_design_x_values = 0;
+  out.duplicate_design_x_values_avoided = 0;
   return out;
 }
 

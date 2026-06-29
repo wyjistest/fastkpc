@@ -245,6 +245,10 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_workspace_grow_count %||% 0L),
     residual_solver_handle_create_count =
       as.integer(summary$residual_solver_handle_create_count %||% 0L),
+    residual_per_request_design_x_values =
+      as.integer(summary$residual_per_request_design_x_values %||% 0L),
+    residual_duplicate_design_x_values_avoided =
+      as.integer(summary$residual_duplicate_design_x_values_avoided %||% 0L),
     stringsAsFactors = FALSE
   )
 }

@@ -100,6 +100,10 @@ assert_true(runs$residual_workspace_grow_count[[1L]] >= 0L,
             "stage breakdown should record residual workspace grow count")
 assert_true(runs$residual_solver_handle_create_count[[1L]] >= 0L,
             "stage breakdown should record residual solver handle creation count")
+assert_true(runs$residual_per_request_design_x_values[[1L]] == 0L,
+            "stage breakdown should avoid per-request residual design X")
+assert_true(runs$residual_duplicate_design_x_values_avoided[[1L]] >= 0L,
+            "stage breakdown should record avoided duplicate residual design X")
 if (runs$residual_lambda_candidates[[1L]] > 0L &&
     runs$cuda_residual_unique_designs[[1L]] > 0L) {
   factor_bound <- runs$cuda_residual_unique_designs[[1L]] *
