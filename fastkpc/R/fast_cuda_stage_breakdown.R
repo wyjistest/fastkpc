@@ -134,6 +134,9 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
     row("residual_free",
         fastkpc_stage_breakdown_seconds(summary$residual_free_sec),
         "residual"),
+    row("residual_cache_insert",
+        fastkpc_stage_breakdown_seconds(summary$residual_cache_insert_sec),
+        "residual"),
     row("residual_true_batch_total",
         fastkpc_stage_breakdown_seconds(
           summary$residual_true_batch_total_sec
@@ -249,6 +252,12 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_per_request_design_x_values %||% 0L),
     residual_duplicate_design_x_values_avoided =
       as.integer(summary$residual_duplicate_design_x_values_avoided %||% 0L),
+    residual_cache_insert_ms =
+      fastkpc_stage_breakdown_seconds(summary$residual_cache_insert_sec) * 1000,
+    residual_cache_move_insert_count =
+      as.integer(summary$residual_cache_move_insert_count %||% 0L),
+    residual_cache_copy_insert_count =
+      as.integer(summary$residual_cache_copy_insert_count %||% 0L),
     stringsAsFactors = FALSE
   )
 }

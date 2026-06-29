@@ -394,6 +394,12 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_per_request_design_x_values,
       Rcpp::Named("residual_duplicate_design_x_values_avoided") =
         diagnostics.residual_duplicate_design_x_values_avoided,
+      Rcpp::Named("residual_cache_insert_sec") =
+        diagnostics.residual_cache_insert_sec,
+      Rcpp::Named("residual_cache_move_insert_count") =
+        diagnostics.residual_cache_move_insert_count,
+      Rcpp::Named("residual_cache_copy_insert_count") =
+        diagnostics.residual_cache_copy_insert_count,
       Rcpp::Named("ci_eval_elapsed_sec") = diagnostics.ci_eval_elapsed_sec,
       Rcpp::Named("ci_host_pack_sec") = diagnostics.ci_host_pack_sec,
       Rcpp::Named("replay_elapsed_sec") = diagnostics.replay_elapsed_sec,

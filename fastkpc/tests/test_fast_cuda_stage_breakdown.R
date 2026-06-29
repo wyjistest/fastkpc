@@ -49,7 +49,7 @@ required_stages <- c(
   "residual_factor_solve", "residual_factor_cholesky",
   "residual_factor_rhs_solve",
   "residual_factor_inverse_solve", "residual_d2h",
-  "residual_true_batch_total"
+  "residual_cache_insert", "residual_true_batch_total"
 )
 missing_stages <- setdiff(required_stages, unique(breakdown$stage))
 assert_true(length(missing_stages) == 0L,
@@ -104,6 +104,10 @@ assert_true(runs$residual_per_request_design_x_values[[1L]] == 0L,
             "stage breakdown should avoid per-request residual design X")
 assert_true(runs$residual_duplicate_design_x_values_avoided[[1L]] >= 0L,
             "stage breakdown should record avoided duplicate residual design X")
+assert_true(runs$residual_cache_move_insert_count[[1L]] > 0L,
+            "stage breakdown should record moved residual cache inserts")
+assert_true(runs$residual_cache_copy_insert_count[[1L]] == 0L,
+            "stage breakdown should avoid copied residual cache inserts")
 if (runs$residual_lambda_candidates[[1L]] > 0L &&
     runs$cuda_residual_unique_designs[[1L]] > 0L) {
   factor_bound <- runs$cuda_residual_unique_designs[[1L]] *

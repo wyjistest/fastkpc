@@ -217,6 +217,9 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_solver_handle_create_count = 0;
   out.residual_per_request_design_x_values = 0;
   out.residual_duplicate_design_x_values_avoided = 0;
+  out.residual_cache_insert_sec = 0.0;
+  out.residual_cache_move_insert_count = 0;
+  out.residual_cache_copy_insert_count = 0;
   out.ci_eval_elapsed_sec = 0.0;
   out.ci_host_pack_sec = 0.0;
   out.replay_elapsed_sec = 0.0;

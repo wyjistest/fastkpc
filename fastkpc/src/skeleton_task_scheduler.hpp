@@ -146,6 +146,9 @@ struct SchedulerDiagnostics {
   int residual_solver_handle_create_count;
   int residual_per_request_design_x_values;
   int residual_duplicate_design_x_values_avoided;
+  double residual_cache_insert_sec;
+  int residual_cache_move_insert_count;
+  int residual_cache_copy_insert_count;
   double ci_eval_elapsed_sec;
   double ci_host_pack_sec;
   double replay_elapsed_sec;

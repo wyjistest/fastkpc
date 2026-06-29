@@ -15,6 +15,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <utility>
 #include <stdexcept>
 #include <vector>
 
@@ -45,6 +46,11 @@ struct DcovWorkspaceHolder {
   explicit DcovWorkspaceHolder(bool enabled)
       : value(enabled ? create_dcov_cuda_workspace() : nullptr) {}
   ~DcovWorkspaceHolder() { destroy_dcov_cuda_workspace(value); }
+};
+
+struct MissingResidual {
+  int position;
+  ResidualCacheKey key;
 };
 
 std::vector<double> column_as_vector(const Rcpp::NumericMatrix& data, int col) {
@@ -143,15 +149,18 @@ class CudaSkeletonResidualCache {
          start += actual_batch_size) {
       const int count = std::min(actual_batch_size,
                                  static_cast<int>(requests.size()) - start);
-      std::vector<int> missing_positions;
-      missing_positions.reserve(count);
+      std::vector<MissingResidual> missing;
+      missing.reserve(count);
 
       for (int k = 0; k < count; ++k) {
         const LayerResidualRequest& request = requests[start + k];
-        const ResidualCacheKey key = make_key(data, request.target,
-                                              request.conditioning_set);
+        ResidualCacheKey key = make_key(data, request.target,
+                                        request.conditioning_set);
         if (values_.find(key) == values_.end()) {
-          missing_positions.push_back(start + k);
+          MissingResidual miss;
+          miss.position = start + k;
+          miss.key = std::move(key);
+          missing.push_back(std::move(miss));
         } else {
           diagnostics->residuals.push_back(SchedulerResidualDiagnostic{
             level, request.request_id, request.target,
@@ -160,30 +169,30 @@ class CudaSkeletonResidualCache {
         }
       }
 
-      if (missing_positions.empty()) continue;
+      if (missing.empty()) continue;
       ++batch_count;
       SchedulerBatchDiagnostic batch_diag{
         level, static_cast<int>(diagnostics->batches.size()), "residual",
-        requests[missing_positions.front()].request_id,
-        static_cast<int>(missing_positions.size()), data.nrow(), "ok",
+        requests[missing.front().position].request_id,
+        static_cast<int>(missing.size()), data.nrow(), "ok",
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
       if (backend_.kind == ResidualBackendKind::FastSpline &&
           used_device_ == "cuda") {
         std::vector<int> targets;
         std::vector<std::vector<int> > conditioning_sets;
-        targets.reserve(missing_positions.size());
-        conditioning_sets.reserve(missing_positions.size());
-        for (int position : missing_positions) {
-          const LayerResidualRequest& request = requests[position];
+        targets.reserve(missing.size());
+        conditioning_sets.reserve(missing.size());
+        for (const MissingResidual& miss : missing) {
+          const LayerResidualRequest& request = requests[miss.position];
           targets.push_back(request.target);
-          conditioning_sets.push_back(request.conditioning_set);
+          conditioning_sets.push_back(miss.key.conditioning_set);
         }
-        const FastSplineCudaBatchResult batch_result =
+        FastSplineCudaBatchResult batch_result =
           fit_fastspline_residuals_cuda_batch_result(
             data, targets, conditioning_sets, backend_.fastspline, fallback_,
             residual_workspace_);
-        const std::vector<FastSplineCudaFit>& fits = batch_result.fits;
+        std::vector<FastSplineCudaFit>& fits = batch_result.fits;
         const std::pair<int, int> design_cols =
           minmax_design_cols(batch_result.diagnostics);
         batch_diag.groups = batch_result.diagnostics.groups;
@@ -284,12 +293,11 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.per_request_design_x_values;
         diagnostics->residual_duplicate_design_x_values_avoided +=
           batch_result.diagnostics.duplicate_design_x_values_avoided;
-        for (int i = 0; i < static_cast<int>(missing_positions.size()); ++i) {
-          const LayerResidualRequest& request = requests[missing_positions[i]];
-          const std::vector<int> normalized_cond =
-            make_key(data, request.target, request.conditioning_set).conditioning_set;
-          insert_prefetched(data, request.target, normalized_cond,
-                            fits[i].fit.residuals);
+        for (int i = 0; i < static_cast<int>(missing.size()); ++i) {
+          const LayerResidualRequest& request = requests[missing[i].position];
+          insert_prefetched_key(data.nrow(), missing[i].key,
+                                std::move(fits[i].fit.residuals),
+                                diagnostics);
           if (fits[i].diagnostics.fallback_used) {
             used_device_ = "cuda-fallback-cpu";
             if (reason_.empty()) reason_ = fits[i].diagnostics.reason;
@@ -303,17 +311,16 @@ class CudaSkeletonResidualCache {
         }
       } else {
         batch_diag.groups = 1;
-        batch_diag.unique_designs = static_cast<int>(missing_positions.size());
-        batch_diag.max_group_size = static_cast<int>(missing_positions.size());
-        batch_diag.min_group_size = static_cast<int>(missing_positions.size());
-        for (int position : missing_positions) {
-          const LayerResidualRequest& request = requests[position];
-          const ResidualCacheKey key = make_key(data, request.target,
-                                                request.conditioning_set);
+        batch_diag.unique_designs = static_cast<int>(missing.size());
+        batch_diag.max_group_size = static_cast<int>(missing.size());
+        batch_diag.min_group_size = static_cast<int>(missing.size());
+        for (MissingResidual& miss : missing) {
+          const LayerResidualRequest& request = requests[miss.position];
           std::vector<double> residuals =
             compute_residuals_with_backend(data, request.target,
-                                           key.conditioning_set, backend_);
-          insert_prefetched(data, request.target, key.conditioning_set, residuals);
+                                           miss.key.conditioning_set, backend_);
+          insert_prefetched_key(data.nrow(), miss.key, std::move(residuals),
+                                diagnostics);
           diagnostics->residuals.push_back(SchedulerResidualDiagnostic{
             level, request.request_id, request.target,
             static_cast<int>(request.conditioning_set.size()), backend_.name,
@@ -391,6 +398,24 @@ class CudaSkeletonResidualCache {
     ++stats_.computations;
     values_.insert(std::make_pair(key, residuals));
     update_storage(data.nrow());
+  }
+
+  void insert_prefetched_key(int n,
+                             const ResidualCacheKey& key,
+                             std::vector<double>&& residuals,
+                             SchedulerDiagnostics* diagnostics) {
+    const std::chrono::steady_clock::time_point stage =
+      std::chrono::steady_clock::now();
+    if (values_.find(key) == values_.end()) {
+      ++stats_.misses;
+      ++stats_.computations;
+      values_.insert(std::make_pair(key, std::move(residuals)));
+      update_storage(n);
+      if (diagnostics != nullptr) ++diagnostics->residual_cache_move_insert_count;
+    }
+    if (diagnostics != nullptr) {
+      diagnostics->residual_cache_insert_sec += seconds_since(stage);
+    }
   }
 
   void update_storage(int n) {
