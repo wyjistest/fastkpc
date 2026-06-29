@@ -141,6 +141,9 @@ struct SchedulerDiagnostics {
   int residual_factor_cache_entries;
   double residual_factor_cache_bytes;
   int residual_lambda_candidates;
+  int residual_workspace_reuse_count;
+  int residual_workspace_grow_count;
+  int residual_solver_handle_create_count;
   double ci_eval_elapsed_sec;
   double replay_elapsed_sec;
   double total_elapsed_sec;

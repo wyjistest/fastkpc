@@ -81,6 +81,12 @@ assert_true(runs$residual_rhs_solve_api_calls[[1L]] >= 0L,
             "stage breakdown should record RHS solve API calls")
 assert_true(runs$residual_lambda_candidates[[1L]] >= 0L,
             "stage breakdown should record lambda candidate count")
+assert_true(runs$residual_workspace_reuse_count[[1L]] >= 0L,
+            "stage breakdown should record residual workspace reuse count")
+assert_true(runs$residual_workspace_grow_count[[1L]] >= 0L,
+            "stage breakdown should record residual workspace grow count")
+assert_true(runs$residual_solver_handle_create_count[[1L]] >= 0L,
+            "stage breakdown should record residual solver handle creation count")
 if (runs$residual_lambda_candidates[[1L]] > 0L &&
     runs$cuda_residual_unique_designs[[1L]] > 0L) {
   factor_bound <- runs$cuda_residual_unique_designs[[1L]] *

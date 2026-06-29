@@ -74,6 +74,10 @@ class CudaSkeletonResidualCache {
       throw std::runtime_error("Unknown residual device: " + requested_device_);
     }
     used_device_ = resolve_device();
+    residual_workspace_ =
+      backend_.kind == ResidualBackendKind::FastSpline &&
+      used_device_ == "cuda" ?
+        create_fastspline_cuda_workspace() : nullptr;
     stats_.enabled = enabled_;
     stats_.requests = 0;
     stats_.hits = 0;
@@ -82,6 +86,11 @@ class CudaSkeletonResidualCache {
     stats_.stored_vectors = 0;
     stats_.stored_values = 0;
     stats_.backend_name = backend_.name;
+  }
+
+  ~CudaSkeletonResidualCache() {
+    destroy_fastspline_cuda_workspace(residual_workspace_);
+    residual_workspace_ = nullptr;
   }
 
   const std::vector<double>& get(const Rcpp::NumericMatrix& data,
@@ -165,7 +174,8 @@ class CudaSkeletonResidualCache {
         }
         const FastSplineCudaBatchResult batch_result =
           fit_fastspline_residuals_cuda_batch_result(
-            data, targets, conditioning_sets, backend_.fastspline, fallback_);
+            data, targets, conditioning_sets, backend_.fastspline, fallback_,
+            residual_workspace_);
         const std::vector<FastSplineCudaFit>& fits = batch_result.fits;
         const std::pair<int, int> design_cols =
           minmax_design_cols(batch_result.diagnostics);
@@ -257,6 +267,12 @@ class CudaSkeletonResidualCache {
         diagnostics->residual_lambda_candidates = std::max(
           diagnostics->residual_lambda_candidates,
           batch_result.diagnostics.lambda_candidates);
+        diagnostics->residual_workspace_reuse_count +=
+          batch_result.diagnostics.workspace_reuse_count;
+        diagnostics->residual_workspace_grow_count +=
+          batch_result.diagnostics.workspace_grow_count;
+        diagnostics->residual_solver_handle_create_count +=
+          batch_result.diagnostics.solver_handle_create_count;
         for (int i = 0; i < static_cast<int>(missing_positions.size()); ++i) {
           const LayerResidualRequest& request = requests[missing_positions[i]];
           const std::vector<int> normalized_cond =
@@ -380,6 +396,7 @@ class CudaSkeletonResidualCache {
   ResidualCacheStats stats_;
   std::map<ResidualCacheKey, std::vector<double> > values_;
   std::vector<double> scratch_;
+  FastSplineCudaWorkspace* residual_workspace_ = nullptr;
 };
 
 void fill_task_vectors(const Rcpp::NumericMatrix& data,

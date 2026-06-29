@@ -384,6 +384,12 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_factor_cache_bytes,
       Rcpp::Named("residual_lambda_candidates") =
         diagnostics.residual_lambda_candidates,
+      Rcpp::Named("residual_workspace_reuse_count") =
+        diagnostics.residual_workspace_reuse_count,
+      Rcpp::Named("residual_workspace_grow_count") =
+        diagnostics.residual_workspace_grow_count,
+      Rcpp::Named("residual_solver_handle_create_count") =
+        diagnostics.residual_solver_handle_create_count,
       Rcpp::Named("ci_eval_elapsed_sec") = diagnostics.ci_eval_elapsed_sec,
       Rcpp::Named("replay_elapsed_sec") = diagnostics.replay_elapsed_sec,
       Rcpp::Named("total_elapsed_sec") = diagnostics.total_elapsed_sec,
@@ -711,6 +717,10 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
     Rcpp::Named("factor_cache_entries") = diagnostics.factor_cache_entries,
     Rcpp::Named("factor_cache_bytes") = diagnostics.factor_cache_bytes,
     Rcpp::Named("lambda_candidates") = diagnostics.lambda_candidates,
+    Rcpp::Named("workspace_reuse_count") = diagnostics.workspace_reuse_count,
+    Rcpp::Named("workspace_grow_count") = diagnostics.workspace_grow_count,
+    Rcpp::Named("solver_handle_create_count") =
+      diagnostics.solver_handle_create_count,
     Rcpp::Named("group_table") =
       fastspline_batch_group_table_to_df(diagnostics)
   );

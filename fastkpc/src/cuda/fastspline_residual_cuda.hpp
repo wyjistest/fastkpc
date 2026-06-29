@@ -65,6 +65,9 @@ struct FastSplineCudaBatchDiagnostics {
   int factor_cache_entries;
   double factor_cache_bytes;
   int lambda_candidates;
+  int workspace_reuse_count;
+  int workspace_grow_count;
+  int solver_handle_create_count;
   std::vector<int> group_id;
   std::vector<int> group_n;
   std::vector<int> group_design_cols;
@@ -85,6 +88,12 @@ struct FastSplineCudaBatchResult {
   FastSplineCudaBatchDiagnostics diagnostics;
 };
 
+struct FastSplineCudaWorkspace;
+
+FastSplineCudaWorkspace* create_fastspline_cuda_workspace();
+
+void destroy_fastspline_cuda_workspace(FastSplineCudaWorkspace* workspace);
+
 FastSplineCudaFit fit_fastspline_residuals_cuda(
   const Rcpp::NumericMatrix& data,
   int target,
@@ -98,6 +107,14 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
   const std::vector<std::vector<int> >& conditioning_sets,
   const FastSplineParams& params,
   bool fallback);
+
+FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
+  const Rcpp::NumericMatrix& data,
+  const std::vector<int>& targets,
+  const std::vector<std::vector<int> >& conditioning_sets,
+  const FastSplineParams& params,
+  bool fallback,
+  FastSplineCudaWorkspace* workspace);
 
 std::vector<FastSplineCudaFit> fit_fastspline_residuals_cuda_batch(
   const Rcpp::NumericMatrix& data,

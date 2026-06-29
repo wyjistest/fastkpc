@@ -35,4 +35,12 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
   const FastSplineParams& params,
   bool fallback);
 
+FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
+  const Rcpp::NumericMatrix& data,
+  const std::vector<int>& targets,
+  const std::vector<std::vector<int> >& conditioning_sets,
+  const FastSplineParams& params,
+  bool fallback,
+  FastSplineCudaWorkspace* workspace);
+
 #endif

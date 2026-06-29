@@ -421,10 +421,11 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
   const std::vector<int>& targets,
   const std::vector<std::vector<int> >& conditioning_sets,
   const FastSplineParams& params,
-  bool fallback) {
+  bool fallback,
+  FastSplineCudaWorkspace* workspace) {
   try {
     return fit_fastspline_residuals_cuda_true_batch(
-      data, targets, conditioning_sets, params, fallback);
+      data, targets, conditioning_sets, params, fallback, workspace);
   } catch (const std::exception& e) {
     if (!fallback) {
       throw std::runtime_error(std::string("CUDA fastSpline residual batch failed: ") +
@@ -474,6 +475,9 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
     result.diagnostics.factor_cache_entries = 0;
     result.diagnostics.factor_cache_bytes = 0.0;
     result.diagnostics.lambda_candidates = 0;
+    result.diagnostics.workspace_reuse_count = 0;
+    result.diagnostics.workspace_grow_count = 0;
+    result.diagnostics.solver_handle_create_count = 0;
     if (!targets.empty()) {
       result.diagnostics.group_id.push_back(0);
       result.diagnostics.group_n.push_back(data.nrow());
@@ -503,6 +507,16 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
     }
     return result;
   }
+}
+
+FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
+  const Rcpp::NumericMatrix& data,
+  const std::vector<int>& targets,
+  const std::vector<std::vector<int> >& conditioning_sets,
+  const FastSplineParams& params,
+  bool fallback) {
+  return fit_fastspline_residuals_cuda_batch_result(
+    data, targets, conditioning_sets, params, fallback, nullptr);
 }
 
 std::vector<FastSplineCudaFit> fit_fastspline_residuals_cuda_batch(

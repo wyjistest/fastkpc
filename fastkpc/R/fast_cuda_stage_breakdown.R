@@ -228,6 +228,12 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.numeric(summary$residual_factor_cache_bytes %||% 0),
     residual_lambda_candidates =
       as.integer(summary$residual_lambda_candidates %||% 0L),
+    residual_workspace_reuse_count =
+      as.integer(summary$residual_workspace_reuse_count %||% 0L),
+    residual_workspace_grow_count =
+      as.integer(summary$residual_workspace_grow_count %||% 0L),
+    residual_solver_handle_create_count =
+      as.integer(summary$residual_solver_handle_create_count %||% 0L),
     stringsAsFactors = FALSE
   )
 }

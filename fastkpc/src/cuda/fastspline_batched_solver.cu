@@ -56,6 +56,9 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->factor_cache_bytes += value.factor_cache_bytes;
   out->lambda_candidates = std::max(out->lambda_candidates,
                                     value.lambda_candidates);
+  out->workspace_reuse_count += value.workspace_reuse_count;
+  out->workspace_grow_count += value.workspace_grow_count;
+  out->solver_handle_create_count += value.solver_handle_create_count;
 }
 
 __device__ __host__ inline std::size_t matrix_offset(int fit,
@@ -541,68 +544,288 @@ __global__ void batched_rss_edf_kernel(const double* residuals,
 
 struct DeviceGroupBuffers {
   double* d_X = nullptr;
+  std::size_t d_X_capacity = 0;
   double* d_P = nullptr;
+  std::size_t d_P_capacity = 0;
   double* d_design_X = nullptr;
+  std::size_t d_design_X_capacity = 0;
   double* d_design_P = nullptr;
+  std::size_t d_design_P_capacity = 0;
   double* d_y = nullptr;
+  std::size_t d_y_capacity = 0;
   int* d_request_design_index = nullptr;
+  std::size_t d_request_design_index_capacity = 0;
   double* d_XtX = nullptr;
+  std::size_t d_XtX_capacity = 0;
   double* d_design_XtX = nullptr;
+  std::size_t d_design_XtX_capacity = 0;
   double* d_Xty = nullptr;
+  std::size_t d_Xty_capacity = 0;
   double* d_A = nullptr;
+  std::size_t d_A_capacity = 0;
   double* d_design_A = nullptr;
+  std::size_t d_design_A_capacity = 0;
   double* d_beta = nullptr;
+  std::size_t d_beta_capacity = 0;
   double* d_Ainv = nullptr;
+  std::size_t d_Ainv_capacity = 0;
   double* d_design_Ainv = nullptr;
+  std::size_t d_design_Ainv_capacity = 0;
   double* d_fitted = nullptr;
+  std::size_t d_fitted_capacity = 0;
   double* d_residuals = nullptr;
+  std::size_t d_residuals_capacity = 0;
   double* d_rss = nullptr;
+  std::size_t d_rss_capacity = 0;
   double* d_edf = nullptr;
+  std::size_t d_edf_capacity = 0;
   double* d_selected_lambda = nullptr;
+  std::size_t d_selected_lambda_capacity = 0;
   double* d_selected_ridge = nullptr;
+  std::size_t d_selected_ridge_capacity = 0;
   double* d_lambda_grid = nullptr;
+  std::size_t d_lambda_grid_capacity = 0;
   int* d_selected_factor_design_index = nullptr;
+  std::size_t d_selected_factor_design_index_capacity = 0;
   int* d_selected_factor_index = nullptr;
+  std::size_t d_selected_factor_index_capacity = 0;
   int* d_info = nullptr;
+  std::size_t d_info_capacity = 0;
   int* d_active = nullptr;
+  std::size_t d_active_capacity = 0;
   double** d_A_ptrs = nullptr;
+  std::size_t d_A_ptrs_capacity = 0;
   double** d_design_A_ptrs = nullptr;
+  std::size_t d_design_A_ptrs_capacity = 0;
   double** d_beta_ptrs = nullptr;
+  std::size_t d_beta_ptrs_capacity = 0;
   double** d_design_Ainv_ptrs = nullptr;
+  std::size_t d_design_Ainv_ptrs_capacity = 0;
   cusolverDnHandle_t solver = nullptr;
   cublasHandle_t blas = nullptr;
 };
 
+template <typename T>
+void ensure_device_capacity(T** ptr,
+                            std::size_t* capacity,
+                            std::size_t required,
+                            const char* stage,
+                            FastSplineCudaBatchDiagnostics* timing) {
+  if (required <= *capacity) return;
+  if (*ptr != nullptr) check_cuda(cudaFree(*ptr), stage);
+  *ptr = nullptr;
+  *capacity = 0;
+  if (required > 0) {
+    check_cuda(cudaMalloc(ptr, sizeof(T) * required), stage);
+    *capacity = required;
+  }
+  if (timing != nullptr) ++timing->workspace_grow_count;
+}
+
+void ensure_handles(DeviceGroupBuffers* buffers,
+                    FastSplineCudaBatchDiagnostics* timing) {
+  bool created = false;
+  if (buffers->solver == nullptr) {
+    check_cusolver(cusolverDnCreate(&buffers->solver),
+                   "create batched cuSOLVER handle");
+    created = true;
+  }
+  if (buffers->blas == nullptr) {
+    check_cublas(cublasCreate(&buffers->blas),
+                 "create batched cuBLAS handle");
+    created = true;
+  }
+  if (created && timing != nullptr) ++timing->solver_handle_create_count;
+}
+
+void ensure_group_buffers(DeviceGroupBuffers* buffers,
+                          std::size_t x_size,
+                          std::size_t design_x_size,
+                          std::size_t design_pp_size,
+                          std::size_t y_size,
+                          int group_size,
+                          std::size_t vec_size,
+                          std::size_t factor_pp_size,
+                          std::size_t candidate_pp_size,
+                          int lambda_count,
+                          int selected_capacity,
+                          int info_count,
+                          int candidate_factor_count,
+                          FastSplineCudaBatchDiagnostics* timing) {
+  ensure_device_capacity(&buffers->d_X, &buffers->d_X_capacity, x_size,
+                         "alloc batched X", timing);
+  ensure_device_capacity(&buffers->d_design_X,
+                         &buffers->d_design_X_capacity, design_x_size,
+                         "alloc batched design X", timing);
+  ensure_device_capacity(&buffers->d_design_P,
+                         &buffers->d_design_P_capacity, design_pp_size,
+                         "alloc batched design P", timing);
+  ensure_device_capacity(&buffers->d_y, &buffers->d_y_capacity, y_size,
+                         "alloc batched y", timing);
+  ensure_device_capacity(&buffers->d_request_design_index,
+                         &buffers->d_request_design_index_capacity,
+                         static_cast<std::size_t>(group_size),
+                         "alloc batched request design index", timing);
+  ensure_device_capacity(&buffers->d_design_XtX,
+                         &buffers->d_design_XtX_capacity, design_pp_size,
+                         "alloc batched design XtX", timing);
+  ensure_device_capacity(&buffers->d_Xty, &buffers->d_Xty_capacity, vec_size,
+                         "alloc batched Xty", timing);
+  ensure_device_capacity(&buffers->d_A, &buffers->d_A_capacity,
+                         factor_pp_size,
+                         "alloc batched selected factor A", timing);
+  ensure_device_capacity(&buffers->d_design_A,
+                         &buffers->d_design_A_capacity, candidate_pp_size,
+                         "alloc batched design A", timing);
+  ensure_device_capacity(&buffers->d_beta, &buffers->d_beta_capacity,
+                         vec_size, "alloc batched beta", timing);
+  ensure_device_capacity(&buffers->d_design_Ainv,
+                         &buffers->d_design_Ainv_capacity, candidate_pp_size,
+                         "alloc batched design A inverse", timing);
+  ensure_device_capacity(&buffers->d_fitted, &buffers->d_fitted_capacity,
+                         y_size, "alloc batched fitted", timing);
+  ensure_device_capacity(&buffers->d_residuals,
+                         &buffers->d_residuals_capacity, y_size,
+                         "alloc batched residuals", timing);
+  ensure_device_capacity(&buffers->d_rss, &buffers->d_rss_capacity,
+                         static_cast<std::size_t>(group_size),
+                         "alloc batched rss", timing);
+  ensure_device_capacity(&buffers->d_edf, &buffers->d_edf_capacity,
+                         static_cast<std::size_t>(group_size),
+                         "alloc batched edf", timing);
+  ensure_device_capacity(&buffers->d_selected_lambda,
+                         &buffers->d_selected_lambda_capacity,
+                         static_cast<std::size_t>(selected_capacity),
+                         "alloc selected lambda", timing);
+  ensure_device_capacity(&buffers->d_selected_ridge,
+                         &buffers->d_selected_ridge_capacity,
+                         static_cast<std::size_t>(selected_capacity),
+                         "alloc selected ridge", timing);
+  ensure_device_capacity(&buffers->d_lambda_grid,
+                         &buffers->d_lambda_grid_capacity,
+                         static_cast<std::size_t>(lambda_count),
+                         "alloc lambda grid", timing);
+  ensure_device_capacity(&buffers->d_selected_factor_design_index,
+                         &buffers->d_selected_factor_design_index_capacity,
+                         static_cast<std::size_t>(selected_capacity),
+                         "alloc selected factor design index", timing);
+  ensure_device_capacity(&buffers->d_selected_factor_index,
+                         &buffers->d_selected_factor_index_capacity,
+                         static_cast<std::size_t>(group_size),
+                         "alloc selected factor index", timing);
+  ensure_device_capacity(&buffers->d_info, &buffers->d_info_capacity,
+                         static_cast<std::size_t>(info_count),
+                         "alloc batched info", timing);
+  ensure_device_capacity(&buffers->d_active, &buffers->d_active_capacity,
+                         static_cast<std::size_t>(group_size),
+                         "alloc batched active", timing);
+  ensure_device_capacity(&buffers->d_A_ptrs, &buffers->d_A_ptrs_capacity,
+                         static_cast<std::size_t>(group_size),
+                         "alloc batched A ptrs", timing);
+  ensure_device_capacity(&buffers->d_design_A_ptrs,
+                         &buffers->d_design_A_ptrs_capacity,
+                         static_cast<std::size_t>(
+                           std::max(group_size, candidate_factor_count)),
+                         "alloc batched design A ptrs", timing);
+  ensure_device_capacity(&buffers->d_beta_ptrs,
+                         &buffers->d_beta_ptrs_capacity,
+                         static_cast<std::size_t>(group_size),
+                         "alloc batched beta ptrs", timing);
+  ensure_device_capacity(&buffers->d_design_Ainv_ptrs,
+                         &buffers->d_design_Ainv_ptrs_capacity,
+                         static_cast<std::size_t>(candidate_factor_count),
+                         "alloc batched design inverse ptrs", timing);
+  ensure_handles(buffers, timing);
+}
+
 void free_buffers(DeviceGroupBuffers* buffers) {
   cudaFree(buffers->d_X);
+  buffers->d_X = nullptr;
+  buffers->d_X_capacity = 0;
   cudaFree(buffers->d_P);
+  buffers->d_P = nullptr;
+  buffers->d_P_capacity = 0;
   cudaFree(buffers->d_design_X);
+  buffers->d_design_X = nullptr;
+  buffers->d_design_X_capacity = 0;
   cudaFree(buffers->d_design_P);
+  buffers->d_design_P = nullptr;
+  buffers->d_design_P_capacity = 0;
   cudaFree(buffers->d_y);
+  buffers->d_y = nullptr;
+  buffers->d_y_capacity = 0;
   cudaFree(buffers->d_request_design_index);
+  buffers->d_request_design_index = nullptr;
+  buffers->d_request_design_index_capacity = 0;
   cudaFree(buffers->d_XtX);
+  buffers->d_XtX = nullptr;
+  buffers->d_XtX_capacity = 0;
   cudaFree(buffers->d_design_XtX);
+  buffers->d_design_XtX = nullptr;
+  buffers->d_design_XtX_capacity = 0;
   cudaFree(buffers->d_Xty);
+  buffers->d_Xty = nullptr;
+  buffers->d_Xty_capacity = 0;
   cudaFree(buffers->d_A);
+  buffers->d_A = nullptr;
+  buffers->d_A_capacity = 0;
   cudaFree(buffers->d_design_A);
+  buffers->d_design_A = nullptr;
+  buffers->d_design_A_capacity = 0;
   cudaFree(buffers->d_beta);
+  buffers->d_beta = nullptr;
+  buffers->d_beta_capacity = 0;
   cudaFree(buffers->d_Ainv);
+  buffers->d_Ainv = nullptr;
+  buffers->d_Ainv_capacity = 0;
   cudaFree(buffers->d_design_Ainv);
+  buffers->d_design_Ainv = nullptr;
+  buffers->d_design_Ainv_capacity = 0;
   cudaFree(buffers->d_fitted);
+  buffers->d_fitted = nullptr;
+  buffers->d_fitted_capacity = 0;
   cudaFree(buffers->d_residuals);
+  buffers->d_residuals = nullptr;
+  buffers->d_residuals_capacity = 0;
   cudaFree(buffers->d_rss);
+  buffers->d_rss = nullptr;
+  buffers->d_rss_capacity = 0;
   cudaFree(buffers->d_edf);
+  buffers->d_edf = nullptr;
+  buffers->d_edf_capacity = 0;
   cudaFree(buffers->d_selected_lambda);
+  buffers->d_selected_lambda = nullptr;
+  buffers->d_selected_lambda_capacity = 0;
   cudaFree(buffers->d_selected_ridge);
+  buffers->d_selected_ridge = nullptr;
+  buffers->d_selected_ridge_capacity = 0;
   cudaFree(buffers->d_lambda_grid);
+  buffers->d_lambda_grid = nullptr;
+  buffers->d_lambda_grid_capacity = 0;
   cudaFree(buffers->d_selected_factor_design_index);
+  buffers->d_selected_factor_design_index = nullptr;
+  buffers->d_selected_factor_design_index_capacity = 0;
   cudaFree(buffers->d_selected_factor_index);
+  buffers->d_selected_factor_index = nullptr;
+  buffers->d_selected_factor_index_capacity = 0;
   cudaFree(buffers->d_info);
+  buffers->d_info = nullptr;
+  buffers->d_info_capacity = 0;
   cudaFree(buffers->d_active);
+  buffers->d_active = nullptr;
+  buffers->d_active_capacity = 0;
   cudaFree(buffers->d_A_ptrs);
+  buffers->d_A_ptrs = nullptr;
+  buffers->d_A_ptrs_capacity = 0;
   cudaFree(buffers->d_design_A_ptrs);
+  buffers->d_design_A_ptrs = nullptr;
+  buffers->d_design_A_ptrs_capacity = 0;
   cudaFree(buffers->d_beta_ptrs);
+  buffers->d_beta_ptrs = nullptr;
+  buffers->d_beta_ptrs_capacity = 0;
   cudaFree(buffers->d_design_Ainv_ptrs);
+  buffers->d_design_Ainv_ptrs = nullptr;
+  buffers->d_design_Ainv_ptrs_capacity = 0;
   if (buffers->solver != nullptr) {
     cusolverDnDestroy(buffers->solver);
     buffers->solver = nullptr;
@@ -612,6 +835,14 @@ void free_buffers(DeviceGroupBuffers* buffers) {
     buffers->blas = nullptr;
   }
 }
+
+}  // namespace
+
+struct FastSplineCudaWorkspace {
+  DeviceGroupBuffers group_buffers;
+};
+
+namespace {
 
 struct BestFitState {
   bool found = false;
@@ -630,7 +861,8 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
   const FastSplineBatchGroup& group,
   const FastSplineParams& params,
   const std::string& backend,
-  FastSplineCudaBatchDiagnostics* timing) {
+  FastSplineCudaBatchDiagnostics* timing,
+  FastSplineCudaWorkspace* workspace) {
   const int group_size = static_cast<int>(group.requests.size());
   const int n = group.n;
   const int p = group.design_cols;
@@ -675,95 +907,46 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
   timing->lambda_candidates = std::max(timing->lambda_candidates,
                                        lambda_count);
 
-  DeviceGroupBuffers buffers;
+  DeviceGroupBuffers local_buffers;
+  DeviceGroupBuffers* buffers = workspace == nullptr ?
+    &local_buffers : &workspace->group_buffers;
+  if (workspace != nullptr) ++timing->workspace_reuse_count;
   try {
     stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMalloc(&buffers.d_X, sizeof(double) * x_size), "alloc batched X");
-    check_cuda(cudaMalloc(&buffers.d_design_X, sizeof(double) * design_x_size),
-               "alloc batched design X");
-    check_cuda(cudaMalloc(&buffers.d_design_P, sizeof(double) * design_pp_size),
-               "alloc batched design P");
-    check_cuda(cudaMalloc(&buffers.d_y, sizeof(double) * y_size), "alloc batched y");
-    check_cuda(cudaMalloc(&buffers.d_request_design_index,
-                          sizeof(int) * group_size),
-               "alloc batched request design index");
-    check_cuda(cudaMalloc(&buffers.d_design_XtX,
-                          sizeof(double) * design_pp_size),
-               "alloc batched design XtX");
-    check_cuda(cudaMalloc(&buffers.d_Xty, sizeof(double) * vec_size), "alloc batched Xty");
-    check_cuda(cudaMalloc(&buffers.d_A, sizeof(double) * factor_pp_size),
-               "alloc batched selected factor A");
-    check_cuda(cudaMalloc(&buffers.d_design_A,
-                          sizeof(double) * candidate_pp_size),
-               "alloc batched design A");
-    check_cuda(cudaMalloc(&buffers.d_beta, sizeof(double) * vec_size), "alloc batched beta");
-    check_cuda(cudaMalloc(&buffers.d_design_Ainv,
-                          sizeof(double) * candidate_pp_size),
-               "alloc batched design A inverse");
-    check_cuda(cudaMalloc(&buffers.d_fitted, sizeof(double) * y_size), "alloc batched fitted");
-    check_cuda(cudaMalloc(&buffers.d_residuals, sizeof(double) * y_size), "alloc batched residuals");
-    check_cuda(cudaMalloc(&buffers.d_rss, sizeof(double) * group_size), "alloc batched rss");
-    check_cuda(cudaMalloc(&buffers.d_edf, sizeof(double) * group_size), "alloc batched edf");
-    check_cuda(cudaMalloc(&buffers.d_selected_lambda,
-                          sizeof(double) * group_size), "alloc selected lambda");
-    check_cuda(cudaMalloc(&buffers.d_selected_ridge,
-                          sizeof(double) * group_size), "alloc selected ridge");
-    check_cuda(cudaMalloc(&buffers.d_lambda_grid,
-                          sizeof(double) * lambda_count),
-               "alloc lambda grid");
-    check_cuda(cudaMalloc(&buffers.d_selected_factor_design_index,
-                          sizeof(int) * group_size),
-               "alloc selected factor design index");
-    check_cuda(cudaMalloc(&buffers.d_selected_factor_index,
-                          sizeof(int) * group_size),
-               "alloc selected factor index");
-    check_cuda(cudaMalloc(&buffers.d_info, sizeof(int) * info_count),
-               "alloc batched info");
-    check_cuda(cudaMalloc(&buffers.d_active, sizeof(int) * group_size), "alloc batched active");
-    check_cuda(cudaMalloc(&buffers.d_A_ptrs,
-                          sizeof(double*) * group_size), "alloc batched A ptrs");
-    check_cuda(cudaMalloc(&buffers.d_design_A_ptrs,
-                          sizeof(double*) * std::max(group_size,
-                                                     candidate_factor_count)),
-               "alloc batched design A ptrs");
-    check_cuda(cudaMalloc(&buffers.d_beta_ptrs,
-                          sizeof(double*) * group_size), "alloc batched beta ptrs");
-    check_cuda(cudaMalloc(&buffers.d_design_Ainv_ptrs,
-                          sizeof(double*) * candidate_factor_count),
-               "alloc batched design inverse ptrs");
-    check_cusolver(cusolverDnCreate(&buffers.solver),
-                   "create batched cuSOLVER handle");
-    check_cublas(cublasCreate(&buffers.blas), "create batched cuBLAS handle");
+    ensure_group_buffers(buffers, x_size, design_x_size, design_pp_size,
+                         y_size, group_size, vec_size, factor_pp_size,
+                         candidate_pp_size, lambda_count, group_size,
+                         info_count, candidate_factor_count, timing);
     timing->alloc_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(buffers.d_X, host_X.data(), sizeof(double) * x_size,
+    check_cuda(cudaMemcpy(buffers->d_X, host_X.data(), sizeof(double) * x_size,
                           cudaMemcpyHostToDevice), "copy batched X");
-    check_cuda(cudaMemcpy(buffers.d_design_X, host_design_X.data(),
+    check_cuda(cudaMemcpy(buffers->d_design_X, host_design_X.data(),
                           sizeof(double) * design_x_size,
                           cudaMemcpyHostToDevice), "copy batched design X");
-    check_cuda(cudaMemcpy(buffers.d_design_P, host_design_P.data(),
+    check_cuda(cudaMemcpy(buffers->d_design_P, host_design_P.data(),
                           sizeof(double) * design_pp_size,
                           cudaMemcpyHostToDevice), "copy batched design P");
-    check_cuda(cudaMemcpy(buffers.d_y, host_y.data(), sizeof(double) * y_size,
+    check_cuda(cudaMemcpy(buffers->d_y, host_y.data(), sizeof(double) * y_size,
                           cudaMemcpyHostToDevice), "copy batched y");
-    check_cuda(cudaMemcpy(buffers.d_request_design_index,
+    check_cuda(cudaMemcpy(buffers->d_request_design_index,
                           host_design_index.data(), sizeof(int) * group_size,
                           cudaMemcpyHostToDevice),
                "copy batched request design index");
-    check_cuda(cudaMemcpy(buffers.d_lambda_grid, lambdas.data(),
+    check_cuda(cudaMemcpy(buffers->d_lambda_grid, lambdas.data(),
                           sizeof(double) * lambda_count,
                           cudaMemcpyHostToDevice), "copy lambda grid");
     timing->h2d_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
     const dim3 xtx_grid(p, p, design_count);
-    batched_xtx_kernel<<<xtx_grid, kBlock>>>(buffers.d_design_X,
+    batched_xtx_kernel<<<xtx_grid, kBlock>>>(buffers->d_design_X,
                                              design_count, n, p,
-                                             buffers.d_design_XtX);
+                                             buffers->d_design_XtX);
     const dim3 xty_grid(p, group_size);
-    batched_xty_kernel<<<xty_grid, kBlock>>>(buffers.d_X, buffers.d_y,
-                                             group_size, n, p, buffers.d_Xty);
+    batched_xty_kernel<<<xty_grid, kBlock>>>(buffers->d_X, buffers->d_y,
+                                             group_size, n, p, buffers->d_Xty);
     check_cuda(cudaGetLastError(), "launch batched XtX/Xty kernels");
     check_cuda(cudaDeviceSynchronize(), "synchronize batched XtX/Xty kernels");
     timing->xtx_xty_sec += elapsed_since(stage);
@@ -773,13 +956,13 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     const int candidate_ptr_blocks =
       (candidate_factor_count + kBlock - 1) / kBlock;
     make_vector_pointer_array<<<std::max(1, ptr_blocks), kBlock>>>(
-      buffers.d_beta, group_size, p, buffers.d_beta_ptrs);
+      buffers->d_beta, group_size, p, buffers->d_beta_ptrs);
     make_matrix_pointer_array<<<std::max(1, candidate_ptr_blocks), kBlock>>>(
-      buffers.d_design_A, candidate_factor_count, p,
-      buffers.d_design_A_ptrs);
+      buffers->d_design_A, candidate_factor_count, p,
+      buffers->d_design_A_ptrs);
     make_matrix_pointer_array<<<std::max(1, candidate_ptr_blocks), kBlock>>>(
-      buffers.d_design_Ainv, candidate_factor_count, p,
-      buffers.d_design_Ainv_ptrs);
+      buffers->d_design_Ainv, candidate_factor_count, p,
+      buffers->d_design_Ainv_ptrs);
     check_cuda(cudaGetLastError(), "launch batched pointer setup kernels");
     check_cuda(cudaDeviceSynchronize(), "synchronize batched pointer setup kernels");
     timing->pointer_setup_sec += elapsed_since(stage);
@@ -791,7 +974,7 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     while (ridge <= 1e-4 * (1.0 + 1e-12)) {
       std::vector<BestFitState> ridge_best(group_size);
       stage = std::chrono::steady_clock::now();
-      check_cuda(cudaMemcpy(buffers.d_active, active.data(),
+      check_cuda(cudaMemcpy(buffers->d_active, active.data(),
                             sizeof(int) * group_size, cudaMemcpyHostToDevice),
                  "copy active flags");
       timing->active_copy_sec += elapsed_since(stage);
@@ -800,16 +983,16 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
       stage = std::chrono::steady_clock::now();
       batched_build_lambda_design_system_kernel<<<std::max(1, system_blocks),
                                                   kBlock>>>(
-        buffers.d_design_XtX, buffers.d_design_P, buffers.d_lambda_grid,
-        design_count, lambda_count, p, ridge, buffers.d_design_A);
+        buffers->d_design_XtX, buffers->d_design_P, buffers->d_lambda_grid,
+        design_count, lambda_count, p, ridge, buffers->d_design_A);
       check_cuda(cudaGetLastError(), "launch batched build system kernel");
       check_cuda(cudaDeviceSynchronize(), "synchronize batched build system kernel");
       timing->build_system_sec += elapsed_since(stage);
 
       stage = std::chrono::steady_clock::now();
       check_cusolver(cusolverDnDpotrfBatched(
-        buffers.solver, CUBLAS_FILL_MODE_UPPER, p, buffers.d_design_A_ptrs,
-        p, buffers.d_info, candidate_factor_count), "batched potrf");
+        buffers->solver, CUBLAS_FILL_MODE_UPPER, p, buffers->d_design_A_ptrs,
+        p, buffers->d_info, candidate_factor_count), "batched potrf");
       check_cuda(cudaDeviceSynchronize(), "synchronize batched potrf");
       const double cholesky_sec = elapsed_since(stage);
       timing->factor_cholesky_sec += cholesky_sec;
@@ -822,20 +1005,20 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
 
       stage = std::chrono::steady_clock::now();
       batched_identity_kernel<<<std::max(1, system_blocks), kBlock>>>(
-        buffers.d_design_Ainv, candidate_factor_count, p);
+        buffers->d_design_Ainv, candidate_factor_count, p);
       check_cuda(cudaGetLastError(), "launch batched identity kernel");
       const double one = 1.0;
       check_cublas(cublasDtrsmBatched(
-        buffers.blas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+        buffers->blas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
         CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT, p, p, &one,
-        const_cast<const double**>(buffers.d_design_A_ptrs), p,
-        buffers.d_design_Ainv_ptrs, p, candidate_factor_count),
+        const_cast<const double**>(buffers->d_design_A_ptrs), p,
+        buffers->d_design_Ainv_ptrs, p, candidate_factor_count),
         "batched inverse triangular solve 1");
       check_cublas(cublasDtrsmBatched(
-        buffers.blas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
+        buffers->blas, CUBLAS_SIDE_LEFT, CUBLAS_FILL_MODE_UPPER,
         CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT, p, p, &one,
-        const_cast<const double**>(buffers.d_design_A_ptrs), p,
-        buffers.d_design_Ainv_ptrs, p, candidate_factor_count),
+        const_cast<const double**>(buffers->d_design_A_ptrs), p,
+        buffers->d_design_Ainv_ptrs, p, candidate_factor_count),
         "batched inverse triangular solve 2");
       check_cuda(cudaDeviceSynchronize(), "synchronize batched inverse solve");
       const double inverse_sec = elapsed_since(stage);
@@ -848,8 +1031,8 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
         stage = std::chrono::steady_clock::now();
         make_request_lambda_matrix_pointer_array<<<std::max(1, ptr_blocks),
                                                    kBlock>>>(
-          buffers.d_design_A, buffers.d_request_design_index, group_size,
-          design_count, lambda_index, p, buffers.d_A_ptrs);
+          buffers->d_design_A, buffers->d_request_design_index, group_size,
+          design_count, lambda_index, p, buffers->d_A_ptrs);
         check_cuda(cudaGetLastError(), "launch candidate pointer setup kernel");
         check_cuda(cudaDeviceSynchronize(), "synchronize candidate pointer setup kernel");
         timing->pointer_setup_sec += elapsed_since(stage);
@@ -858,11 +1041,11 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
         const int beta_blocks = static_cast<int>(
           (vec_size + kBlock - 1) / kBlock);
         batched_copy_xty_to_beta_kernel<<<std::max(1, beta_blocks), kBlock>>>(
-          buffers.d_Xty, group_size, p, buffers.d_beta);
+          buffers->d_Xty, group_size, p, buffers->d_beta);
         check_cuda(cudaGetLastError(), "launch batched beta copy kernel");
         check_cusolver(cusolverDnDpotrsBatched(
-          buffers.solver, CUBLAS_FILL_MODE_UPPER, p, 1, buffers.d_A_ptrs, p,
-          buffers.d_beta_ptrs, p, buffers.d_info, group_size),
+          buffers->solver, CUBLAS_FILL_MODE_UPPER, p, 1, buffers->d_A_ptrs, p,
+          buffers->d_beta_ptrs, p, buffers->d_info, group_size),
           "batched potrs beta");
         check_cuda(cudaDeviceSynchronize(), "synchronize batched RHS solve");
         const double rhs_sec = elapsed_since(stage);
@@ -876,12 +1059,12 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
         const int row_blocks = (n + kBlock - 1) / kBlock;
         const dim3 fit_grid(std::max(1, row_blocks), group_size);
         batched_fitted_residual_kernel<<<fit_grid, kBlock>>>(
-          buffers.d_X, buffers.d_y, buffers.d_beta, buffers.d_active,
-          group_size, n, p, buffers.d_fitted, buffers.d_residuals);
+          buffers->d_X, buffers->d_y, buffers->d_beta, buffers->d_active,
+          group_size, n, p, buffers->d_fitted, buffers->d_residuals);
         batched_rss_edf_kernel<<<group_size, kBlock>>>(
-          buffers.d_residuals, buffers.d_design_XtX, buffers.d_design_Ainv,
-          buffers.d_active, buffers.d_request_design_index, design_count,
-          lambda_index, group_size, n, p, buffers.d_rss, buffers.d_edf);
+          buffers->d_residuals, buffers->d_design_XtX, buffers->d_design_Ainv,
+          buffers->d_active, buffers->d_request_design_index, design_count,
+          lambda_index, group_size, n, p, buffers->d_rss, buffers->d_edf);
         check_cuda(cudaGetLastError(), "launch batched residual summary kernels");
         check_cuda(cudaDeviceSynchronize(), "synchronize batched solve candidate");
         timing->residual_summary_sec += elapsed_since(stage);
@@ -890,13 +1073,13 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
         std::vector<double> rss(group_size);
         std::vector<double> edf(group_size);
         stage = std::chrono::steady_clock::now();
-        check_cuda(cudaMemcpy(info.data(), buffers.d_info,
+        check_cuda(cudaMemcpy(info.data(), buffers->d_info,
                               sizeof(int) * group_size, cudaMemcpyDeviceToHost),
                    "copy batched info");
-        check_cuda(cudaMemcpy(rss.data(), buffers.d_rss,
+        check_cuda(cudaMemcpy(rss.data(), buffers->d_rss,
                               sizeof(double) * group_size, cudaMemcpyDeviceToHost),
                    "copy batched rss");
-        check_cuda(cudaMemcpy(edf.data(), buffers.d_edf,
+        check_cuda(cudaMemcpy(edf.data(), buffers->d_edf,
                               sizeof(double) * group_size, cudaMemcpyDeviceToHost),
                    "copy batched edf");
         timing->d2h_sec += elapsed_since(stage);
@@ -983,27 +1166,27 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     timing->factor_cache_hits += std::max(0, group_size - selected_factor_count);
 
     stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(buffers.d_selected_lambda,
+    check_cuda(cudaMemcpy(buffers->d_selected_lambda,
                           selected_factor_lambdas.data(),
                           sizeof(double) * selected_factor_count,
                           cudaMemcpyHostToDevice),
                "copy selected lambdas");
-    check_cuda(cudaMemcpy(buffers.d_selected_ridge,
+    check_cuda(cudaMemcpy(buffers->d_selected_ridge,
                           selected_factor_ridges.data(),
                           sizeof(double) * selected_factor_count,
                           cudaMemcpyHostToDevice),
                "copy selected ridges");
-    check_cuda(cudaMemcpy(buffers.d_selected_factor_design_index,
+    check_cuda(cudaMemcpy(buffers->d_selected_factor_design_index,
                           selected_factor_design_index.data(),
                           sizeof(int) * selected_factor_count,
                           cudaMemcpyHostToDevice),
                "copy selected factor design index");
-    check_cuda(cudaMemcpy(buffers.d_selected_factor_index,
+    check_cuda(cudaMemcpy(buffers->d_selected_factor_index,
                           selected_factor_index.data(),
                           sizeof(int) * group_size, cudaMemcpyHostToDevice),
                "copy selected factor index");
     std::vector<int> final_active(group_size, 1);
-    check_cuda(cudaMemcpy(buffers.d_active, final_active.data(),
+    check_cuda(cudaMemcpy(buffers->d_active, final_active.data(),
                           sizeof(int) * group_size, cudaMemcpyHostToDevice),
                "copy selected active flags");
     timing->h2d_sec += elapsed_since(stage);
@@ -1014,27 +1197,27 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     stage = std::chrono::steady_clock::now();
     batched_build_selected_factor_system_kernel<<<
       std::max(1, selected_system_blocks), kBlock>>>(
-      buffers.d_design_XtX, buffers.d_design_P,
-      buffers.d_selected_factor_design_index, buffers.d_selected_lambda,
-      buffers.d_selected_ridge, selected_factor_count, p, buffers.d_A);
+      buffers->d_design_XtX, buffers->d_design_P,
+      buffers->d_selected_factor_design_index, buffers->d_selected_lambda,
+      buffers->d_selected_ridge, selected_factor_count, p, buffers->d_A);
     check_cuda(cudaGetLastError(), "launch selected build system kernel");
     check_cuda(cudaDeviceSynchronize(), "synchronize selected build system kernel");
     timing->build_system_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
     make_indexed_matrix_pointer_array<<<std::max(1, ptr_blocks), kBlock>>>(
-      buffers.d_A, buffers.d_selected_factor_index, group_size, p,
-      buffers.d_A_ptrs);
+      buffers->d_A, buffers->d_selected_factor_index, group_size, p,
+      buffers->d_A_ptrs);
     make_matrix_pointer_array<<<std::max(1, selected_system_blocks), kBlock>>>(
-      buffers.d_A, selected_factor_count, p, buffers.d_design_A_ptrs);
+      buffers->d_A, selected_factor_count, p, buffers->d_design_A_ptrs);
     check_cuda(cudaGetLastError(), "launch selected pointer setup kernels");
     check_cuda(cudaDeviceSynchronize(), "synchronize selected pointer setup kernels");
     timing->pointer_setup_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
     check_cusolver(cusolverDnDpotrfBatched(
-      buffers.solver, CUBLAS_FILL_MODE_UPPER, p, buffers.d_design_A_ptrs, p,
-      buffers.d_info, selected_factor_count), "selected batched potrf");
+      buffers->solver, CUBLAS_FILL_MODE_UPPER, p, buffers->d_design_A_ptrs, p,
+      buffers->d_info, selected_factor_count), "selected batched potrf");
     check_cuda(cudaDeviceSynchronize(), "synchronize selected potrf");
     double cholesky_sec = elapsed_since(stage);
     timing->factor_cholesky_sec += cholesky_sec;
@@ -1044,11 +1227,11 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     stage = std::chrono::steady_clock::now();
     const int beta_blocks = static_cast<int>((vec_size + kBlock - 1) / kBlock);
     batched_copy_xty_to_beta_kernel<<<std::max(1, beta_blocks), kBlock>>>(
-      buffers.d_Xty, group_size, p, buffers.d_beta);
+      buffers->d_Xty, group_size, p, buffers->d_beta);
     check_cuda(cudaGetLastError(), "launch selected beta copy kernel");
     check_cusolver(cusolverDnDpotrsBatched(
-      buffers.solver, CUBLAS_FILL_MODE_UPPER, p, 1, buffers.d_A_ptrs, p,
-      buffers.d_beta_ptrs, p, buffers.d_info, group_size),
+      buffers->solver, CUBLAS_FILL_MODE_UPPER, p, 1, buffers->d_A_ptrs, p,
+      buffers->d_beta_ptrs, p, buffers->d_info, group_size),
       "selected batched potrs beta");
     check_cuda(cudaDeviceSynchronize(), "synchronize selected RHS solve");
     double rhs_sec = elapsed_since(stage);
@@ -1062,8 +1245,8 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     const int row_blocks = (n + kBlock - 1) / kBlock;
     const dim3 fit_grid(std::max(1, row_blocks), group_size);
     batched_fitted_residual_kernel<<<fit_grid, kBlock>>>(
-      buffers.d_X, buffers.d_y, buffers.d_beta, buffers.d_active,
-      group_size, n, p, buffers.d_fitted, buffers.d_residuals);
+      buffers->d_X, buffers->d_y, buffers->d_beta, buffers->d_active,
+      group_size, n, p, buffers->d_fitted, buffers->d_residuals);
     check_cuda(cudaGetLastError(), "launch selected residual kernels");
     check_cuda(cudaDeviceSynchronize(), "synchronize selected residual kernels");
     timing->residual_summary_sec += elapsed_since(stage);
@@ -1072,13 +1255,13 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     std::vector<double> fitted(y_size);
     std::vector<double> residuals(y_size);
     stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(final_info.data(), buffers.d_info,
+    check_cuda(cudaMemcpy(final_info.data(), buffers->d_info,
                           sizeof(int) * group_size, cudaMemcpyDeviceToHost),
                "copy selected info");
-    check_cuda(cudaMemcpy(fitted.data(), buffers.d_fitted,
+    check_cuda(cudaMemcpy(fitted.data(), buffers->d_fitted,
                           sizeof(double) * y_size, cudaMemcpyDeviceToHost),
                "copy selected fitted");
-    check_cuda(cudaMemcpy(residuals.data(), buffers.d_residuals,
+    check_cuda(cudaMemcpy(residuals.data(), buffers->d_residuals,
                           sizeof(double) * y_size, cudaMemcpyDeviceToHost),
                "copy selected residuals");
     timing->d2h_sec += elapsed_since(stage);
@@ -1114,13 +1297,13 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     }
     timing->host_select_sec += elapsed_since(stage);
     stage = std::chrono::steady_clock::now();
-    free_buffers(&buffers);
+    if (workspace == nullptr) free_buffers(buffers);
     timing->free_sec += elapsed_since(stage);
     timing->true_batch_total_sec += elapsed_since(total_start);
     return out;
   } catch (...) {
     stage = std::chrono::steady_clock::now();
-    free_buffers(&buffers);
+    if (workspace == nullptr) free_buffers(buffers);
     timing->free_sec += elapsed_since(stage);
     throw;
   }
@@ -1211,10 +1394,23 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.factor_cache_entries = 0;
   out.factor_cache_bytes = 0.0;
   out.lambda_candidates = 0;
+  out.workspace_reuse_count = 0;
+  out.workspace_grow_count = 0;
+  out.solver_handle_create_count = 0;
   return out;
 }
 
 }  // namespace
+
+FastSplineCudaWorkspace* create_fastspline_cuda_workspace() {
+  return new FastSplineCudaWorkspace();
+}
+
+void destroy_fastspline_cuda_workspace(FastSplineCudaWorkspace* workspace) {
+  if (workspace == nullptr) return;
+  free_buffers(&workspace->group_buffers);
+  delete workspace;
+}
 
 std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
   const Rcpp::NumericMatrix& data,
@@ -1288,7 +1484,8 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
   const std::vector<int>& targets,
   const std::vector<std::vector<int> >& conditioning_sets,
   const FastSplineParams& params,
-  bool fallback) {
+  bool fallback,
+  FastSplineCudaWorkspace* workspace) {
   const int requested_fits = static_cast<int>(targets.size());
   FastSplineCudaBatchResult result;
   result.fits.resize(requested_fits);
@@ -1343,7 +1540,7 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
         make_empty_batch_diagnostics(fit_count);
       const std::vector<FastSplineCudaFit> group_fits =
         run_true_batched_group(data, group, params, true_backend,
-                               &group_timing);
+                               &group_timing, workspace);
       add_batch_timing(&result.diagnostics, group_timing);
       for (int i = 0; i < fit_count; ++i) {
         result.fits[group.requests[i].original_index] = group_fits[i];
@@ -1367,4 +1564,14 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
       result.diagnostics.single_fit_calls > 0 ? "single-fit-cusolver" : "";
   }
   return result;
+}
+
+FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
+  const Rcpp::NumericMatrix& data,
+  const std::vector<int>& targets,
+  const std::vector<std::vector<int> >& conditioning_sets,
+  const FastSplineParams& params,
+  bool fallback) {
+  return fit_fastspline_residuals_cuda_true_batch(
+    data, targets, conditioning_sets, params, fallback, nullptr);
 }

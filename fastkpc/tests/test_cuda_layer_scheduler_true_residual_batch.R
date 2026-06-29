@@ -71,5 +71,9 @@ assert_true(as.integer(summary$cuda_residual_true_batched_fits %||% 0L) > 0L,
             "scheduler should report true-batched residual fits")
 assert_true(identical(as.integer(summary$cuda_residual_single_fit_calls %||% -1L), 0L),
             "automatic residual batching should not use single-fit CUDA calls")
+assert_true(as.integer(summary$residual_workspace_reuse_count %||% 0L) > 0L,
+            "scheduler should reuse one fastSpline CUDA residual workspace")
+assert_true(as.integer(summary$residual_solver_handle_create_count %||% 0L) <= 1L,
+            "fastSpline CUDA residual workspace should amortize solver handles")
 
 cat("test_cuda_layer_scheduler_true_residual_batch.R: PASS\n")
