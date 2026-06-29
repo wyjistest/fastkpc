@@ -293,6 +293,14 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.per_request_design_x_values;
         diagnostics->residual_duplicate_design_x_values_avoided +=
           batch_result.diagnostics.duplicate_design_x_values_avoided;
+        diagnostics->residual_algebraic_rss_count +=
+          batch_result.diagnostics.algebraic_rss_count;
+        diagnostics->residual_candidate_residual_materialize_count +=
+          batch_result.diagnostics.candidate_residual_materialize_count;
+        diagnostics->residual_winning_residual_materialize_count +=
+          batch_result.diagnostics.winning_residual_materialize_count;
+        diagnostics->residual_algebraic_rss_clamp_count +=
+          batch_result.diagnostics.algebraic_rss_clamp_count;
         for (int i = 0; i < static_cast<int>(missing.size()); ++i) {
           const LayerResidualRequest& request = requests[missing[i].position];
           insert_prefetched_key(data.nrow(), missing[i].key,

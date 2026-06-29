@@ -108,6 +108,12 @@ assert_true(runs$residual_cache_move_insert_count[[1L]] > 0L,
             "stage breakdown should record moved residual cache inserts")
 assert_true(runs$residual_cache_copy_insert_count[[1L]] == 0L,
             "stage breakdown should avoid copied residual cache inserts")
+assert_true(runs$residual_algebraic_rss_count[[1L]] > 0L,
+            "stage breakdown should record algebraic RSS scoring")
+assert_true(runs$residual_candidate_residual_materialize_count[[1L]] == 0L,
+            "stage breakdown should avoid candidate residual materialization")
+assert_true(runs$residual_winning_residual_materialize_count[[1L]] > 0L,
+            "stage breakdown should record winning residual materialization")
 if (runs$residual_lambda_candidates[[1L]] > 0L &&
     runs$cuda_residual_unique_designs[[1L]] > 0L) {
   factor_bound <- runs$cuda_residual_unique_designs[[1L]] *

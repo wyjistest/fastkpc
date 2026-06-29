@@ -220,6 +220,10 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_cache_insert_sec = 0.0;
   out.residual_cache_move_insert_count = 0;
   out.residual_cache_copy_insert_count = 0;
+  out.residual_algebraic_rss_count = 0;
+  out.residual_candidate_residual_materialize_count = 0;
+  out.residual_winning_residual_materialize_count = 0;
+  out.residual_algebraic_rss_clamp_count = 0;
   out.ci_eval_elapsed_sec = 0.0;
   out.ci_host_pack_sec = 0.0;
   out.replay_elapsed_sec = 0.0;

@@ -400,6 +400,14 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_cache_move_insert_count,
       Rcpp::Named("residual_cache_copy_insert_count") =
         diagnostics.residual_cache_copy_insert_count,
+      Rcpp::Named("residual_algebraic_rss_count") =
+        diagnostics.residual_algebraic_rss_count,
+      Rcpp::Named("residual_candidate_residual_materialize_count") =
+        diagnostics.residual_candidate_residual_materialize_count,
+      Rcpp::Named("residual_winning_residual_materialize_count") =
+        diagnostics.residual_winning_residual_materialize_count,
+      Rcpp::Named("residual_algebraic_rss_clamp_count") =
+        diagnostics.residual_algebraic_rss_clamp_count,
       Rcpp::Named("ci_eval_elapsed_sec") = diagnostics.ci_eval_elapsed_sec,
       Rcpp::Named("ci_host_pack_sec") = diagnostics.ci_host_pack_sec,
       Rcpp::Named("replay_elapsed_sec") = diagnostics.replay_elapsed_sec,
@@ -744,6 +752,13 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.per_request_design_x_values,
     Rcpp::Named("duplicate_design_x_values_avoided") =
       diagnostics.duplicate_design_x_values_avoided,
+    Rcpp::Named("algebraic_rss_count") = diagnostics.algebraic_rss_count,
+    Rcpp::Named("candidate_residual_materialize_count") =
+      diagnostics.candidate_residual_materialize_count,
+    Rcpp::Named("winning_residual_materialize_count") =
+      diagnostics.winning_residual_materialize_count,
+    Rcpp::Named("algebraic_rss_clamp_count") =
+      diagnostics.algebraic_rss_clamp_count,
     Rcpp::Named("group_table") =
       fastspline_batch_group_table_to_df(diagnostics)
   );

@@ -258,6 +258,14 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_cache_move_insert_count %||% 0L),
     residual_cache_copy_insert_count =
       as.integer(summary$residual_cache_copy_insert_count %||% 0L),
+    residual_algebraic_rss_count =
+      as.integer(summary$residual_algebraic_rss_count %||% 0L),
+    residual_candidate_residual_materialize_count =
+      as.integer(summary$residual_candidate_residual_materialize_count %||% 0L),
+    residual_winning_residual_materialize_count =
+      as.integer(summary$residual_winning_residual_materialize_count %||% 0L),
+    residual_algebraic_rss_clamp_count =
+      as.integer(summary$residual_algebraic_rss_clamp_count %||% 0L),
     stringsAsFactors = FALSE
   )
 }

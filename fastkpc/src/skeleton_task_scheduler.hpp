@@ -149,6 +149,10 @@ struct SchedulerDiagnostics {
   double residual_cache_insert_sec;
   int residual_cache_move_insert_count;
   int residual_cache_copy_insert_count;
+  int residual_algebraic_rss_count;
+  int residual_candidate_residual_materialize_count;
+  int residual_winning_residual_materialize_count;
+  int residual_algebraic_rss_clamp_count;
   double ci_eval_elapsed_sec;
   double ci_host_pack_sec;
   double replay_elapsed_sec;

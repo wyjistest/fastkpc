@@ -64,6 +64,12 @@ assert_true(identical(as.integer(diag$per_request_design_x_values), 0L),
             "true batch should not pack per-request duplicate design X")
 assert_true(as.integer(diag$duplicate_design_x_values_avoided) > 0L,
             "true batch should report avoided duplicate design X values")
+assert_true(as.integer(diag$algebraic_rss_count) > 0L,
+            "true batch should score candidate lambdas with algebraic RSS")
+assert_true(identical(as.integer(diag$candidate_residual_materialize_count), 0L),
+            "candidate lambda scoring should not materialize residual vectors")
+assert_true(as.integer(diag$winning_residual_materialize_count) > 0L,
+            "true batch should materialize residuals for winning lambdas")
 
 for (k in seq_along(targets)) {
   cpu <- fastspline_residual(data[, targets[[k]]],

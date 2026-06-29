@@ -70,6 +70,10 @@ struct FastSplineCudaBatchDiagnostics {
   int solver_handle_create_count;
   int per_request_design_x_values;
   int duplicate_design_x_values_avoided;
+  int algebraic_rss_count;
+  int candidate_residual_materialize_count;
+  int winning_residual_materialize_count;
+  int algebraic_rss_clamp_count;
   std::vector<int> group_id;
   std::vector<int> group_n;
   std::vector<int> group_design_cols;

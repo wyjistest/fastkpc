@@ -62,6 +62,12 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->per_request_design_x_values += value.per_request_design_x_values;
   out->duplicate_design_x_values_avoided +=
     value.duplicate_design_x_values_avoided;
+  out->algebraic_rss_count += value.algebraic_rss_count;
+  out->candidate_residual_materialize_count +=
+    value.candidate_residual_materialize_count;
+  out->winning_residual_materialize_count +=
+    value.winning_residual_materialize_count;
+  out->algebraic_rss_clamp_count += value.algebraic_rss_clamp_count;
 }
 
 __device__ __host__ inline std::size_t matrix_offset(int fit,
@@ -466,18 +472,44 @@ __global__ void batched_fitted_residual_by_design_kernel(
   residuals[out_idx] = y[out_idx] - value;
 }
 
-__global__ void batched_rss_edf_kernel(const double* residuals,
-                                       const double* XtX,
-                                       const double* Ainv,
-                                       const int* active,
-                                       const int* design_index,
-                                       int design_count,
-                                       int lambda_index,
+__global__ void batched_y_norm2_kernel(const double* y,
                                        int group_size,
                                        int n,
-                                       int p,
-                                       double* rss,
-                                       double* edf) {
+                                       double* y_norm2) {
+  __shared__ double scratch[kBlock];
+  const int fit = blockIdx.x;
+  if (fit >= group_size) return;
+
+  double acc = 0.0;
+  const std::size_t y_base = static_cast<std::size_t>(fit) * n;
+  for (int row = threadIdx.x; row < n; row += blockDim.x) {
+    const double value = y[y_base + row];
+    acc += value * value;
+  }
+  scratch[threadIdx.x] = acc;
+  __syncthreads();
+
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) scratch[threadIdx.x] += scratch[threadIdx.x + stride];
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) y_norm2[fit] = scratch[0];
+}
+
+__global__ void batched_algebraic_rss_edf_kernel(const double* y_norm2,
+                                                 const double* Xty,
+                                                 const double* XtX,
+                                                 const double* beta,
+                                                 const double* Ainv,
+                                                 const int* active,
+                                                 const int* design_index,
+                                                 int design_count,
+                                                 int lambda_index,
+                                                 int group_size,
+                                                 int p,
+                                                 double* rss,
+                                                 double* edf,
+                                                 int* clamp_count) {
   __shared__ double scratch_rss[kBlock];
   __shared__ double scratch_edf[kBlock];
   const int fit = blockIdx.x;
@@ -491,16 +523,21 @@ __global__ void batched_rss_edf_kernel(const double* residuals,
   }
 
   double rss_acc = 0.0;
-  const std::size_t row_base = static_cast<std::size_t>(fit) * n;
-  for (int row = threadIdx.x; row < n; row += blockDim.x) {
-    const double value = residuals[row_base + row];
-    rss_acc += value * value;
-  }
-
   double edf_acc = 0.0;
   const int pp = p * p;
   const int design = design_index[fit];
   const int factor = lambda_index * design_count + design;
+  const std::size_t fit_vec_base = static_cast<std::size_t>(fit) * p;
+  for (int col = threadIdx.x; col < p; col += blockDim.x) {
+    const double beta_col = beta[fit_vec_base + col];
+    rss_acc += -2.0 * beta_col * Xty[fit_vec_base + col];
+    for (int row = 0; row < p; ++row) {
+      rss_acc += beta_col *
+        XtX[colmajor_square_offset(design, row, col, p)] *
+        beta[fit_vec_base + row];
+    }
+  }
+
   for (int linear = threadIdx.x; linear < pp; linear += blockDim.x) {
     const int row = linear % p;
     const int col = linear / p;
@@ -521,8 +558,13 @@ __global__ void batched_rss_edf_kernel(const double* residuals,
   }
 
   if (threadIdx.x == 0) {
-    rss[fit] = scratch_rss[0];
+    double value = y_norm2[fit] + scratch_rss[0];
+    if (value < 0.0 && value > -1e-8) {
+      value = 0.0;
+      atomicAdd(clamp_count, 1);
+    }
     edf[fit] = scratch_edf[0];
+    rss[fit] = value;
   }
 }
 
@@ -545,6 +587,8 @@ struct DeviceGroupBuffers {
   std::size_t d_design_XtX_capacity = 0;
   double* d_Xty = nullptr;
   std::size_t d_Xty_capacity = 0;
+  double* d_y_norm2 = nullptr;
+  std::size_t d_y_norm2_capacity = 0;
   double* d_A = nullptr;
   std::size_t d_A_capacity = 0;
   double* d_design_A = nullptr;
@@ -577,6 +621,8 @@ struct DeviceGroupBuffers {
   std::size_t d_info_capacity = 0;
   int* d_active = nullptr;
   std::size_t d_active_capacity = 0;
+  int* d_algebraic_rss_clamp_count = nullptr;
+  std::size_t d_algebraic_rss_clamp_count_capacity = 0;
   double** d_A_ptrs = nullptr;
   std::size_t d_A_ptrs_capacity = 0;
   double** d_design_A_ptrs = nullptr;
@@ -655,6 +701,10 @@ void ensure_group_buffers(DeviceGroupBuffers* buffers,
                          "alloc batched design XtX", timing);
   ensure_device_capacity(&buffers->d_Xty, &buffers->d_Xty_capacity, vec_size,
                          "alloc batched Xty", timing);
+  ensure_device_capacity(&buffers->d_y_norm2,
+                         &buffers->d_y_norm2_capacity,
+                         static_cast<std::size_t>(group_size),
+                         "alloc batched y norm2", timing);
   ensure_device_capacity(&buffers->d_A, &buffers->d_A_capacity,
                          factor_pp_size,
                          "alloc batched selected factor A", timing);
@@ -703,6 +753,10 @@ void ensure_group_buffers(DeviceGroupBuffers* buffers,
   ensure_device_capacity(&buffers->d_active, &buffers->d_active_capacity,
                          static_cast<std::size_t>(group_size),
                          "alloc batched active", timing);
+  ensure_device_capacity(&buffers->d_algebraic_rss_clamp_count,
+                         &buffers->d_algebraic_rss_clamp_count_capacity,
+                         static_cast<std::size_t>(1),
+                         "alloc algebraic rss clamp count", timing);
   ensure_device_capacity(&buffers->d_A_ptrs, &buffers->d_A_ptrs_capacity,
                          static_cast<std::size_t>(group_size),
                          "alloc batched A ptrs", timing);
@@ -750,6 +804,9 @@ void free_buffers(DeviceGroupBuffers* buffers) {
   cudaFree(buffers->d_Xty);
   buffers->d_Xty = nullptr;
   buffers->d_Xty_capacity = 0;
+  cudaFree(buffers->d_y_norm2);
+  buffers->d_y_norm2 = nullptr;
+  buffers->d_y_norm2_capacity = 0;
   cudaFree(buffers->d_A);
   buffers->d_A = nullptr;
   buffers->d_A_capacity = 0;
@@ -798,6 +855,9 @@ void free_buffers(DeviceGroupBuffers* buffers) {
   cudaFree(buffers->d_active);
   buffers->d_active = nullptr;
   buffers->d_active_capacity = 0;
+  cudaFree(buffers->d_algebraic_rss_clamp_count);
+  buffers->d_algebraic_rss_clamp_count = nullptr;
+  buffers->d_algebraic_rss_clamp_count_capacity = 0;
   cudaFree(buffers->d_A_ptrs);
   buffers->d_A_ptrs = nullptr;
   buffers->d_A_ptrs_capacity = 0;
@@ -938,6 +998,13 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     timing->xtx_xty_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
+    batched_y_norm2_kernel<<<group_size, kBlock>>>(
+      buffers->d_y, group_size, n, buffers->d_y_norm2);
+    check_cuda(cudaGetLastError(), "launch batched y norm2 kernel");
+    check_cuda(cudaDeviceSynchronize(), "synchronize batched y norm2 kernel");
+    timing->residual_summary_sec += elapsed_since(stage);
+
+    stage = std::chrono::steady_clock::now();
     const int ptr_blocks = (group_size + kBlock - 1) / kBlock;
     const int candidate_ptr_blocks =
       (candidate_factor_count + kBlock - 1) / kBlock;
@@ -957,6 +1024,10 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     std::vector<BestFitState> best(group_size);
     double ridge = params.ridge;
     int ridge_attempt = 0;
+    stage = std::chrono::steady_clock::now();
+    check_cuda(cudaMemset(buffers->d_algebraic_rss_clamp_count, 0,
+                          sizeof(int)), "zero algebraic rss clamp count");
+    timing->active_copy_sec += elapsed_since(stage);
     while (ridge <= 1e-4 * (1.0 + 1e-12)) {
       std::vector<BestFitState> ridge_best(group_size);
       stage = std::chrono::steady_clock::now();
@@ -1042,18 +1113,15 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
         timing->rhs_target_solves += group_size;
 
         stage = std::chrono::steady_clock::now();
-        const int row_blocks = (n + kBlock - 1) / kBlock;
-        const dim3 fit_grid(std::max(1, row_blocks), group_size);
-        batched_fitted_residual_by_design_kernel<<<fit_grid, kBlock>>>(
-          buffers->d_design_X, buffers->d_y, buffers->d_beta,
-          buffers->d_request_design_index, buffers->d_active, group_size, n,
-          p, buffers->d_fitted, buffers->d_residuals);
-        batched_rss_edf_kernel<<<group_size, kBlock>>>(
-          buffers->d_residuals, buffers->d_design_XtX, buffers->d_design_Ainv,
-          buffers->d_active, buffers->d_request_design_index, design_count,
-          lambda_index, group_size, n, p, buffers->d_rss, buffers->d_edf);
-        check_cuda(cudaGetLastError(), "launch batched residual summary kernels");
+        batched_algebraic_rss_edf_kernel<<<group_size, kBlock>>>(
+          buffers->d_y_norm2, buffers->d_Xty, buffers->d_design_XtX,
+          buffers->d_beta, buffers->d_design_Ainv, buffers->d_active,
+          buffers->d_request_design_index, design_count, lambda_index,
+          group_size, p, buffers->d_rss, buffers->d_edf,
+          buffers->d_algebraic_rss_clamp_count);
+        check_cuda(cudaGetLastError(), "launch batched algebraic RSS kernels");
         check_cuda(cudaDeviceSynchronize(), "synchronize batched solve candidate");
+        timing->algebraic_rss_count += group_size;
         timing->residual_summary_sec += elapsed_since(stage);
 
         std::vector<int> info(group_size);
@@ -1112,6 +1180,13 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
       if (ridge <= 0.0) ridge = 1e-8;
       ++ridge_attempt;
     }
+    int clamp_count = 0;
+    stage = std::chrono::steady_clock::now();
+    check_cuda(cudaMemcpy(&clamp_count, buffers->d_algebraic_rss_clamp_count,
+                          sizeof(int), cudaMemcpyDeviceToHost),
+               "copy algebraic rss clamp count");
+    timing->algebraic_rss_clamp_count += clamp_count;
+    timing->d2h_sec += elapsed_since(stage);
 
     std::vector<double> selected_lambdas(group_size);
     std::vector<double> selected_ridges(group_size);
@@ -1237,6 +1312,7 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
       buffers->d_fitted, buffers->d_residuals);
     check_cuda(cudaGetLastError(), "launch selected residual kernels");
     check_cuda(cudaDeviceSynchronize(), "synchronize selected residual kernels");
+    timing->winning_residual_materialize_count += group_size;
     timing->residual_summary_sec += elapsed_since(stage);
 
     std::vector<int> final_info(group_size);
@@ -1387,6 +1463,10 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.solver_handle_create_count = 0;
   out.per_request_design_x_values = 0;
   out.duplicate_design_x_values_avoided = 0;
+  out.algebraic_rss_count = 0;
+  out.candidate_residual_materialize_count = 0;
+  out.winning_residual_materialize_count = 0;
+  out.algebraic_rss_clamp_count = 0;
   return out;
 }
 
