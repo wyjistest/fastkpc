@@ -441,6 +441,14 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_workspace_reuse_count,
       Rcpp::Named("residual_workspace_grow_count") =
         diagnostics.residual_workspace_grow_count,
+      Rcpp::Named("residual_workspace_slab_grow_count") =
+        diagnostics.residual_workspace_slab_grow_count,
+      Rcpp::Named("residual_workspace_slab_reuse_count") =
+        diagnostics.residual_workspace_slab_reuse_count,
+      Rcpp::Named("residual_workspace_slab_bytes") =
+        diagnostics.residual_workspace_slab_bytes,
+      Rcpp::Named("residual_workspace_legacy_alloc_count") =
+        diagnostics.residual_workspace_legacy_alloc_count,
       Rcpp::Named("residual_solver_handle_create_count") =
         diagnostics.residual_solver_handle_create_count,
       Rcpp::Named("residual_per_request_design_x_values") =
@@ -879,6 +887,13 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
     Rcpp::Named("lambda_candidates") = diagnostics.lambda_candidates,
     Rcpp::Named("workspace_reuse_count") = diagnostics.workspace_reuse_count,
     Rcpp::Named("workspace_grow_count") = diagnostics.workspace_grow_count,
+    Rcpp::Named("workspace_slab_grow_count") =
+      diagnostics.workspace_slab_grow_count,
+    Rcpp::Named("workspace_slab_reuse_count") =
+      diagnostics.workspace_slab_reuse_count,
+    Rcpp::Named("workspace_slab_bytes") = diagnostics.workspace_slab_bytes,
+    Rcpp::Named("workspace_legacy_alloc_count") =
+      diagnostics.workspace_legacy_alloc_count,
     Rcpp::Named("solver_handle_create_count") =
       diagnostics.solver_handle_create_count,
     Rcpp::Named("per_request_design_x_values") =

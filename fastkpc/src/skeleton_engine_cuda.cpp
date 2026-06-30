@@ -203,6 +203,13 @@ class CudaSkeletonResidualCache {
           targets.push_back(request.target);
           conditioning_sets.push_back(miss.key.conditioning_set);
         }
+        if (residual_workspace_ != nullptr) {
+          try {
+            prewarm_fastspline_cuda_workspace(residual_workspace_);
+          } catch (const std::exception&) {
+            // Leave fallback handling to the residual batch call below.
+          }
+        }
         diagnostics->residual_prefetch_batch_input_sec += seconds_since(stage);
         stage = std::chrono::steady_clock::now();
         FastSplineCudaResidualOnlyBatchResult batch_result =
@@ -348,6 +355,15 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.workspace_reuse_count;
         diagnostics->residual_workspace_grow_count +=
           batch_result.diagnostics.workspace_grow_count;
+        diagnostics->residual_workspace_slab_grow_count +=
+          batch_result.diagnostics.workspace_slab_grow_count;
+        diagnostics->residual_workspace_slab_reuse_count +=
+          batch_result.diagnostics.workspace_slab_reuse_count;
+        diagnostics->residual_workspace_slab_bytes = std::max(
+          diagnostics->residual_workspace_slab_bytes,
+          batch_result.diagnostics.workspace_slab_bytes);
+        diagnostics->residual_workspace_legacy_alloc_count +=
+          batch_result.diagnostics.workspace_legacy_alloc_count;
         diagnostics->residual_solver_handle_create_count +=
           batch_result.diagnostics.solver_handle_create_count;
         diagnostics->residual_per_request_design_x_values +=

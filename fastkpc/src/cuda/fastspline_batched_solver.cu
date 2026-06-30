@@ -30,6 +30,20 @@ struct FastSplineScoreMetadata {
   double pad1;
 };
 
+template <typename T>
+struct DeviceArena {
+  T* base = nullptr;
+  std::size_t capacity = 0;
+  std::size_t used = 0;
+};
+
+struct TrueBatchArenaCounts {
+  std::size_t double_count = 0;
+  std::size_t int_count = 0;
+  std::size_t ptr_count = 0;
+  std::size_t score_metadata_count = 0;
+};
+
 double elapsed_since(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration<double>(
     std::chrono::steady_clock::now() - start).count();
@@ -113,6 +127,11 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
                                     value.lambda_candidates);
   out->workspace_reuse_count += value.workspace_reuse_count;
   out->workspace_grow_count += value.workspace_grow_count;
+  out->workspace_slab_grow_count += value.workspace_slab_grow_count;
+  out->workspace_slab_reuse_count += value.workspace_slab_reuse_count;
+  out->workspace_slab_bytes = std::max(out->workspace_slab_bytes,
+                                       value.workspace_slab_bytes);
+  out->workspace_legacy_alloc_count += value.workspace_legacy_alloc_count;
   out->solver_handle_create_count += value.solver_handle_create_count;
   out->per_request_design_x_values += value.per_request_design_x_values;
   out->duplicate_design_x_values_avoided +=
@@ -953,9 +972,286 @@ struct DeviceGroupBuffers {
   std::size_t d_beta_ptrs_capacity = 0;
   double** d_design_Ainv_ptrs = nullptr;
   std::size_t d_design_Ainv_ptrs_capacity = 0;
+  DeviceArena<double> double_arena;
+  DeviceArena<int> int_arena;
+  DeviceArena<double*> ptr_arena;
+  DeviceArena<FastSplineScoreMetadata> score_metadata_arena;
   cusolverDnHandle_t solver = nullptr;
   cublasHandle_t blas = nullptr;
 };
+
+template <typename T>
+std::size_t arena_capacity_bytes(const DeviceArena<T>& arena) {
+  return arena.capacity * sizeof(T);
+}
+
+template <typename T>
+void free_arena(DeviceArena<T>* arena) {
+  cudaFree(arena->base);
+  arena->base = nullptr;
+  arena->capacity = 0;
+  arena->used = 0;
+}
+
+std::size_t grow_arena_capacity(std::size_t current,
+                                std::size_t required) {
+  const std::size_t doubled = current > 0 ? current * 2 : 0;
+  return std::max(required, std::max(doubled,
+                                     static_cast<std::size_t>(256)));
+}
+
+template <typename T>
+void ensure_arena_capacity(DeviceArena<T>* arena,
+                           std::size_t required,
+                           const char* stage,
+                           FastSplineCudaBatchDiagnostics* timing) {
+  if (required <= arena->capacity) {
+    arena->used = 0;
+    if (required > 0 && timing != nullptr) {
+      ++timing->workspace_slab_reuse_count;
+    }
+    return;
+  }
+  const std::size_t old_capacity = arena->capacity;
+  if (arena->base != nullptr) check_cuda(cudaFree(arena->base), stage);
+  arena->base = nullptr;
+  arena->capacity = 0;
+  arena->used = 0;
+  if (required > 0) {
+    const std::size_t new_capacity =
+      grow_arena_capacity(old_capacity, required);
+    void* raw = nullptr;
+    check_cuda(cudaMalloc(&raw, sizeof(T) * new_capacity), stage);
+    arena->base = static_cast<T*>(raw);
+    arena->capacity = new_capacity;
+  }
+  if (timing != nullptr) {
+    ++timing->workspace_slab_grow_count;
+    ++timing->workspace_grow_count;
+  }
+}
+
+template <typename T>
+T* carve_arena(DeviceArena<T>* arena,
+               std::size_t count,
+               const char* stage) {
+  if (count == 0) return nullptr;
+  if (arena->base == nullptr || arena->used + count > arena->capacity) {
+    throw std::runtime_error(std::string("insufficient arena capacity for ") +
+                             stage);
+  }
+  T* out = arena->base + arena->used;
+  arena->used += count;
+  return out;
+}
+
+TrueBatchArenaCounts compute_arena_counts(std::size_t x_size,
+                                          std::size_t design_x_size,
+                                          std::size_t design_pp_size,
+                                          std::size_t y_size,
+                                          int group_size,
+                                          std::size_t vec_size,
+                                          std::size_t factor_pp_size,
+                                          std::size_t candidate_pp_size,
+                                          int lambda_count,
+                                          int selected_capacity,
+                                          int info_count,
+                                          int candidate_factor_count,
+                                          bool need_fitted) {
+  TrueBatchArenaCounts counts;
+  const std::size_t group_count = static_cast<std::size_t>(group_size);
+  const std::size_t selected_count =
+    static_cast<std::size_t>(selected_capacity);
+  const std::size_t lambda_count_size =
+    static_cast<std::size_t>(lambda_count);
+  const std::size_t info_count_size = static_cast<std::size_t>(info_count);
+  const std::size_t candidate_factor_count_size =
+    static_cast<std::size_t>(candidate_factor_count);
+
+  counts.double_count =
+    x_size +
+    design_x_size +
+    design_pp_size +
+    y_size +
+    design_pp_size +
+    vec_size +
+    group_count +
+    factor_pp_size +
+    candidate_pp_size +
+    vec_size +
+    candidate_pp_size +
+    (need_fitted ? y_size : static_cast<std::size_t>(0)) +
+    y_size +
+    group_count +
+    group_count +
+    selected_count +
+    selected_count +
+    lambda_count_size;
+  counts.int_count =
+    group_count +
+    selected_count +
+    group_count +
+    info_count_size +
+    group_count +
+    static_cast<std::size_t>(1);
+  counts.ptr_count =
+    group_count +
+    static_cast<std::size_t>(std::max(group_size, candidate_factor_count)) +
+    group_count +
+    candidate_factor_count_size;
+  counts.score_metadata_count = group_count * lambda_count_size;
+  return counts;
+}
+
+double arena_total_bytes(const DeviceGroupBuffers& buffers) {
+  return static_cast<double>(
+    arena_capacity_bytes(buffers.double_arena) +
+    arena_capacity_bytes(buffers.int_arena) +
+    arena_capacity_bytes(buffers.ptr_arena) +
+    arena_capacity_bytes(buffers.score_metadata_arena));
+}
+
+void assign_group_buffer_slices(DeviceGroupBuffers* buffers,
+                                std::size_t x_size,
+                                std::size_t design_x_size,
+                                std::size_t design_pp_size,
+                                std::size_t y_size,
+                                int group_size,
+                                std::size_t vec_size,
+                                std::size_t factor_pp_size,
+                                std::size_t candidate_pp_size,
+                                int lambda_count,
+                                int selected_capacity,
+                                int info_count,
+                                int candidate_factor_count,
+                                bool need_fitted) {
+  const std::size_t group_count = static_cast<std::size_t>(group_size);
+  const std::size_t selected_count =
+    static_cast<std::size_t>(selected_capacity);
+  const std::size_t lambda_count_size =
+    static_cast<std::size_t>(lambda_count);
+  const std::size_t info_count_size = static_cast<std::size_t>(info_count);
+  const std::size_t candidate_factor_count_size =
+    static_cast<std::size_t>(candidate_factor_count);
+  buffers->double_arena.used = 0;
+  buffers->int_arena.used = 0;
+  buffers->ptr_arena.used = 0;
+  buffers->score_metadata_arena.used = 0;
+
+  buffers->d_X = carve_arena(&buffers->double_arena, x_size, "batched X");
+  buffers->d_X_capacity = x_size;
+  buffers->d_P = nullptr;
+  buffers->d_P_capacity = 0;
+  buffers->d_design_X = carve_arena(&buffers->double_arena, design_x_size,
+                                    "batched design X");
+  buffers->d_design_X_capacity = design_x_size;
+  buffers->d_design_P = carve_arena(&buffers->double_arena, design_pp_size,
+                                    "batched design P");
+  buffers->d_design_P_capacity = design_pp_size;
+  buffers->d_y = carve_arena(&buffers->double_arena, y_size, "batched y");
+  buffers->d_y_capacity = y_size;
+  buffers->d_XtX = nullptr;
+  buffers->d_XtX_capacity = 0;
+  buffers->d_design_XtX = carve_arena(&buffers->double_arena,
+                                      design_pp_size,
+                                      "batched design XtX");
+  buffers->d_design_XtX_capacity = design_pp_size;
+  buffers->d_Xty = carve_arena(&buffers->double_arena, vec_size,
+                               "batched Xty");
+  buffers->d_Xty_capacity = vec_size;
+  buffers->d_y_norm2 = carve_arena(&buffers->double_arena, group_count,
+                                   "batched y norm2");
+  buffers->d_y_norm2_capacity = group_count;
+  buffers->d_A = carve_arena(&buffers->double_arena, factor_pp_size,
+                             "batched selected factor A");
+  buffers->d_A_capacity = factor_pp_size;
+  buffers->d_design_A = carve_arena(&buffers->double_arena,
+                                    candidate_pp_size,
+                                    "batched design A");
+  buffers->d_design_A_capacity = candidate_pp_size;
+  buffers->d_beta = carve_arena(&buffers->double_arena, vec_size,
+                                "batched beta");
+  buffers->d_beta_capacity = vec_size;
+  buffers->d_Ainv = nullptr;
+  buffers->d_Ainv_capacity = 0;
+  buffers->d_design_Ainv = carve_arena(&buffers->double_arena,
+                                       candidate_pp_size,
+                                       "batched design A inverse");
+  buffers->d_design_Ainv_capacity = candidate_pp_size;
+  buffers->d_fitted = carve_arena(&buffers->double_arena,
+                                  need_fitted ? y_size :
+                                    static_cast<std::size_t>(0),
+                                  "batched fitted");
+  buffers->d_fitted_capacity = need_fitted ? y_size : 0;
+  buffers->d_residuals = carve_arena(&buffers->double_arena, y_size,
+                                     "batched residuals");
+  buffers->d_residuals_capacity = y_size;
+  buffers->d_rss = carve_arena(&buffers->double_arena, group_count,
+                               "batched rss");
+  buffers->d_rss_capacity = group_count;
+  buffers->d_edf = carve_arena(&buffers->double_arena, group_count,
+                               "batched edf");
+  buffers->d_edf_capacity = group_count;
+  buffers->d_selected_lambda = carve_arena(&buffers->double_arena,
+                                           selected_count,
+                                           "selected lambda");
+  buffers->d_selected_lambda_capacity = selected_count;
+  buffers->d_selected_ridge = carve_arena(&buffers->double_arena,
+                                          selected_count,
+                                          "selected ridge");
+  buffers->d_selected_ridge_capacity = selected_count;
+  buffers->d_lambda_grid = carve_arena(&buffers->double_arena,
+                                       lambda_count_size,
+                                       "lambda grid");
+  buffers->d_lambda_grid_capacity = lambda_count_size;
+
+  buffers->d_request_design_index = carve_arena(&buffers->int_arena,
+                                                group_count,
+                                                "request design index");
+  buffers->d_request_design_index_capacity = group_count;
+  buffers->d_selected_factor_design_index =
+    carve_arena(&buffers->int_arena, selected_count,
+                "selected factor design index");
+  buffers->d_selected_factor_design_index_capacity = selected_count;
+  buffers->d_selected_factor_index = carve_arena(&buffers->int_arena,
+                                                 group_count,
+                                                 "selected factor index");
+  buffers->d_selected_factor_index_capacity = group_count;
+  buffers->d_info = carve_arena(&buffers->int_arena, info_count_size,
+                                "batched info");
+  buffers->d_info_capacity = info_count_size;
+  buffers->d_active = carve_arena(&buffers->int_arena, group_count,
+                                  "batched active");
+  buffers->d_active_capacity = group_count;
+  buffers->d_algebraic_rss_clamp_count =
+    carve_arena(&buffers->int_arena, static_cast<std::size_t>(1),
+                "algebraic rss clamp count");
+  buffers->d_algebraic_rss_clamp_count_capacity = 1;
+
+  buffers->d_A_ptrs = carve_arena(&buffers->ptr_arena, group_count,
+                                  "batched A ptrs");
+  buffers->d_A_ptrs_capacity = group_count;
+  buffers->d_design_A_ptrs =
+    carve_arena(&buffers->ptr_arena,
+                static_cast<std::size_t>(
+                  std::max(group_size, candidate_factor_count)),
+                "batched design A ptrs");
+  buffers->d_design_A_ptrs_capacity =
+    static_cast<std::size_t>(std::max(group_size, candidate_factor_count));
+  buffers->d_beta_ptrs = carve_arena(&buffers->ptr_arena, group_count,
+                                     "batched beta ptrs");
+  buffers->d_beta_ptrs_capacity = group_count;
+  buffers->d_design_Ainv_ptrs =
+    carve_arena(&buffers->ptr_arena, candidate_factor_count_size,
+                "batched design inverse ptrs");
+  buffers->d_design_Ainv_ptrs_capacity = candidate_factor_count_size;
+
+  buffers->d_score_metadata =
+    carve_arena(&buffers->score_metadata_arena,
+                group_count * lambda_count_size,
+                "batched score metadata");
+  buffers->d_score_metadata_capacity = group_count * lambda_count_size;
+}
 
 template <typename T>
 void ensure_device_capacity(T** ptr,
@@ -972,6 +1268,7 @@ void ensure_device_capacity(T** ptr,
     *capacity = required;
   }
   if (timing != nullptr) ++timing->workspace_grow_count;
+  if (timing != nullptr) ++timing->workspace_legacy_alloc_count;
 }
 
 void ensure_handles(DeviceGroupBuffers* buffers,
@@ -1005,103 +1302,30 @@ void ensure_group_buffers(DeviceGroupBuffers* buffers,
                           int candidate_factor_count,
                           bool need_fitted,
                           FastSplineCudaBatchDiagnostics* timing) {
-  ensure_device_capacity(&buffers->d_X, &buffers->d_X_capacity, x_size,
-                         "alloc batched X", timing);
-  ensure_device_capacity(&buffers->d_design_X,
-                         &buffers->d_design_X_capacity, design_x_size,
-                         "alloc batched design X", timing);
-  ensure_device_capacity(&buffers->d_design_P,
-                         &buffers->d_design_P_capacity, design_pp_size,
-                         "alloc batched design P", timing);
-  ensure_device_capacity(&buffers->d_y, &buffers->d_y_capacity, y_size,
-                         "alloc batched y", timing);
-  ensure_device_capacity(&buffers->d_request_design_index,
-                         &buffers->d_request_design_index_capacity,
-                         static_cast<std::size_t>(group_size),
-                         "alloc batched request design index", timing);
-  ensure_device_capacity(&buffers->d_design_XtX,
-                         &buffers->d_design_XtX_capacity, design_pp_size,
-                         "alloc batched design XtX", timing);
-  ensure_device_capacity(&buffers->d_Xty, &buffers->d_Xty_capacity, vec_size,
-                         "alloc batched Xty", timing);
-  ensure_device_capacity(&buffers->d_y_norm2,
-                         &buffers->d_y_norm2_capacity,
-                         static_cast<std::size_t>(group_size),
-                         "alloc batched y norm2", timing);
-  ensure_device_capacity(&buffers->d_A, &buffers->d_A_capacity,
-                         factor_pp_size,
-                         "alloc batched selected factor A", timing);
-  ensure_device_capacity(&buffers->d_design_A,
-                         &buffers->d_design_A_capacity, candidate_pp_size,
-                         "alloc batched design A", timing);
-  ensure_device_capacity(&buffers->d_beta, &buffers->d_beta_capacity,
-                         vec_size, "alloc batched beta", timing);
-  ensure_device_capacity(&buffers->d_design_Ainv,
-                         &buffers->d_design_Ainv_capacity, candidate_pp_size,
-                         "alloc batched design A inverse", timing);
-  ensure_device_capacity(&buffers->d_fitted, &buffers->d_fitted_capacity,
-                         need_fitted ? y_size : 0,
-                         "alloc batched fitted", timing);
-  ensure_device_capacity(&buffers->d_residuals,
-                         &buffers->d_residuals_capacity, y_size,
-                         "alloc batched residuals", timing);
-  ensure_device_capacity(&buffers->d_rss, &buffers->d_rss_capacity,
-                         static_cast<std::size_t>(group_size),
-                         "alloc batched rss", timing);
-  ensure_device_capacity(&buffers->d_edf, &buffers->d_edf_capacity,
-                         static_cast<std::size_t>(group_size),
-                         "alloc batched edf", timing);
-  ensure_device_capacity(&buffers->d_score_metadata,
-                         &buffers->d_score_metadata_capacity,
-                         static_cast<std::size_t>(group_size) *
-                           static_cast<std::size_t>(lambda_count),
-                         "alloc batched score metadata", timing);
-  ensure_device_capacity(&buffers->d_selected_lambda,
-                         &buffers->d_selected_lambda_capacity,
-                         static_cast<std::size_t>(selected_capacity),
-                         "alloc selected lambda", timing);
-  ensure_device_capacity(&buffers->d_selected_ridge,
-                         &buffers->d_selected_ridge_capacity,
-                         static_cast<std::size_t>(selected_capacity),
-                         "alloc selected ridge", timing);
-  ensure_device_capacity(&buffers->d_lambda_grid,
-                         &buffers->d_lambda_grid_capacity,
-                         static_cast<std::size_t>(lambda_count),
-                         "alloc lambda grid", timing);
-  ensure_device_capacity(&buffers->d_selected_factor_design_index,
-                         &buffers->d_selected_factor_design_index_capacity,
-                         static_cast<std::size_t>(selected_capacity),
-                         "alloc selected factor design index", timing);
-  ensure_device_capacity(&buffers->d_selected_factor_index,
-                         &buffers->d_selected_factor_index_capacity,
-                         static_cast<std::size_t>(group_size),
-                         "alloc selected factor index", timing);
-  ensure_device_capacity(&buffers->d_info, &buffers->d_info_capacity,
-                         static_cast<std::size_t>(info_count),
-                         "alloc batched info", timing);
-  ensure_device_capacity(&buffers->d_active, &buffers->d_active_capacity,
-                         static_cast<std::size_t>(group_size),
-                         "alloc batched active", timing);
-  ensure_device_capacity(&buffers->d_algebraic_rss_clamp_count,
-                         &buffers->d_algebraic_rss_clamp_count_capacity,
-                         static_cast<std::size_t>(1),
-                         "alloc algebraic rss clamp count", timing);
-  ensure_device_capacity(&buffers->d_A_ptrs, &buffers->d_A_ptrs_capacity,
-                         static_cast<std::size_t>(group_size),
-                         "alloc batched A ptrs", timing);
-  ensure_device_capacity(&buffers->d_design_A_ptrs,
-                         &buffers->d_design_A_ptrs_capacity,
-                         static_cast<std::size_t>(
-                           std::max(group_size, candidate_factor_count)),
-                         "alloc batched design A ptrs", timing);
-  ensure_device_capacity(&buffers->d_beta_ptrs,
-                         &buffers->d_beta_ptrs_capacity,
-                         static_cast<std::size_t>(group_size),
-                         "alloc batched beta ptrs", timing);
-  ensure_device_capacity(&buffers->d_design_Ainv_ptrs,
-                         &buffers->d_design_Ainv_ptrs_capacity,
-                         static_cast<std::size_t>(candidate_factor_count),
-                         "alloc batched design inverse ptrs", timing);
+  const TrueBatchArenaCounts counts =
+    compute_arena_counts(x_size, design_x_size, design_pp_size, y_size,
+                         group_size, vec_size, factor_pp_size,
+                         candidate_pp_size, lambda_count, selected_capacity,
+                         info_count, candidate_factor_count, need_fitted);
+  ensure_arena_capacity(&buffers->double_arena, counts.double_count,
+                        "alloc batched double workspace slab", timing);
+  ensure_arena_capacity(&buffers->int_arena, counts.int_count,
+                        "alloc batched int workspace slab", timing);
+  ensure_arena_capacity(&buffers->ptr_arena, counts.ptr_count,
+                        "alloc batched pointer workspace slab", timing);
+  ensure_arena_capacity(&buffers->score_metadata_arena,
+                        counts.score_metadata_count,
+                        "alloc batched score metadata workspace slab",
+                        timing);
+  assign_group_buffer_slices(buffers, x_size, design_x_size, design_pp_size,
+                             y_size, group_size, vec_size, factor_pp_size,
+                             candidate_pp_size, lambda_count,
+                             selected_capacity, info_count,
+                             candidate_factor_count, need_fitted);
+  if (timing != nullptr) {
+    timing->workspace_slab_bytes =
+      std::max(timing->workspace_slab_bytes, arena_total_bytes(*buffers));
+  }
   ensure_handles(buffers, timing);
 }
 
@@ -1144,103 +1368,79 @@ void solve_rhs_batched(DeviceGroupBuffers* buffers,
   check_cuda(cudaDeviceSynchronize(), "synchronize batched RHS solve");
 }
 
-void free_buffers(DeviceGroupBuffers* buffers) {
-  cudaFree(buffers->d_X);
+void clear_group_buffer_views(DeviceGroupBuffers* buffers) {
   buffers->d_X = nullptr;
   buffers->d_X_capacity = 0;
-  cudaFree(buffers->d_P);
   buffers->d_P = nullptr;
   buffers->d_P_capacity = 0;
-  cudaFree(buffers->d_design_X);
   buffers->d_design_X = nullptr;
   buffers->d_design_X_capacity = 0;
-  cudaFree(buffers->d_design_P);
   buffers->d_design_P = nullptr;
   buffers->d_design_P_capacity = 0;
-  cudaFree(buffers->d_y);
   buffers->d_y = nullptr;
   buffers->d_y_capacity = 0;
-  cudaFree(buffers->d_request_design_index);
   buffers->d_request_design_index = nullptr;
   buffers->d_request_design_index_capacity = 0;
-  cudaFree(buffers->d_XtX);
   buffers->d_XtX = nullptr;
   buffers->d_XtX_capacity = 0;
-  cudaFree(buffers->d_design_XtX);
   buffers->d_design_XtX = nullptr;
   buffers->d_design_XtX_capacity = 0;
-  cudaFree(buffers->d_Xty);
   buffers->d_Xty = nullptr;
   buffers->d_Xty_capacity = 0;
-  cudaFree(buffers->d_y_norm2);
   buffers->d_y_norm2 = nullptr;
   buffers->d_y_norm2_capacity = 0;
-  cudaFree(buffers->d_A);
   buffers->d_A = nullptr;
   buffers->d_A_capacity = 0;
-  cudaFree(buffers->d_design_A);
   buffers->d_design_A = nullptr;
   buffers->d_design_A_capacity = 0;
-  cudaFree(buffers->d_beta);
   buffers->d_beta = nullptr;
   buffers->d_beta_capacity = 0;
-  cudaFree(buffers->d_Ainv);
   buffers->d_Ainv = nullptr;
   buffers->d_Ainv_capacity = 0;
-  cudaFree(buffers->d_design_Ainv);
   buffers->d_design_Ainv = nullptr;
   buffers->d_design_Ainv_capacity = 0;
-  cudaFree(buffers->d_fitted);
   buffers->d_fitted = nullptr;
   buffers->d_fitted_capacity = 0;
-  cudaFree(buffers->d_residuals);
   buffers->d_residuals = nullptr;
   buffers->d_residuals_capacity = 0;
-  cudaFree(buffers->d_rss);
   buffers->d_rss = nullptr;
   buffers->d_rss_capacity = 0;
-  cudaFree(buffers->d_edf);
   buffers->d_edf = nullptr;
   buffers->d_edf_capacity = 0;
-  cudaFree(buffers->d_score_metadata);
   buffers->d_score_metadata = nullptr;
   buffers->d_score_metadata_capacity = 0;
-  cudaFree(buffers->d_selected_lambda);
   buffers->d_selected_lambda = nullptr;
   buffers->d_selected_lambda_capacity = 0;
-  cudaFree(buffers->d_selected_ridge);
   buffers->d_selected_ridge = nullptr;
   buffers->d_selected_ridge_capacity = 0;
-  cudaFree(buffers->d_lambda_grid);
   buffers->d_lambda_grid = nullptr;
   buffers->d_lambda_grid_capacity = 0;
-  cudaFree(buffers->d_selected_factor_design_index);
   buffers->d_selected_factor_design_index = nullptr;
   buffers->d_selected_factor_design_index_capacity = 0;
-  cudaFree(buffers->d_selected_factor_index);
   buffers->d_selected_factor_index = nullptr;
   buffers->d_selected_factor_index_capacity = 0;
-  cudaFree(buffers->d_info);
   buffers->d_info = nullptr;
   buffers->d_info_capacity = 0;
-  cudaFree(buffers->d_active);
   buffers->d_active = nullptr;
   buffers->d_active_capacity = 0;
-  cudaFree(buffers->d_algebraic_rss_clamp_count);
   buffers->d_algebraic_rss_clamp_count = nullptr;
   buffers->d_algebraic_rss_clamp_count_capacity = 0;
-  cudaFree(buffers->d_A_ptrs);
   buffers->d_A_ptrs = nullptr;
   buffers->d_A_ptrs_capacity = 0;
-  cudaFree(buffers->d_design_A_ptrs);
   buffers->d_design_A_ptrs = nullptr;
   buffers->d_design_A_ptrs_capacity = 0;
-  cudaFree(buffers->d_beta_ptrs);
   buffers->d_beta_ptrs = nullptr;
   buffers->d_beta_ptrs_capacity = 0;
-  cudaFree(buffers->d_design_Ainv_ptrs);
   buffers->d_design_Ainv_ptrs = nullptr;
   buffers->d_design_Ainv_ptrs_capacity = 0;
+}
+
+void free_buffers(DeviceGroupBuffers* buffers) {
+  free_arena(&buffers->double_arena);
+  free_arena(&buffers->int_arena);
+  free_arena(&buffers->ptr_arena);
+  free_arena(&buffers->score_metadata_arena);
+  clear_group_buffer_views(buffers);
   if (buffers->solver != nullptr) {
     cusolverDnDestroy(buffers->solver);
     buffers->solver = nullptr;
@@ -1951,6 +2151,10 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.lambda_candidates = 0;
   out.workspace_reuse_count = 0;
   out.workspace_grow_count = 0;
+  out.workspace_slab_grow_count = 0;
+  out.workspace_slab_reuse_count = 0;
+  out.workspace_slab_bytes = 0.0;
+  out.workspace_legacy_alloc_count = 0;
   out.solver_handle_create_count = 0;
   out.per_request_design_x_values = 0;
   out.duplicate_design_x_values_avoided = 0;
@@ -1980,6 +2184,11 @@ void destroy_fastspline_cuda_workspace(FastSplineCudaWorkspace* workspace) {
   if (workspace == nullptr) return;
   free_buffers(&workspace->group_buffers);
   delete workspace;
+}
+
+void prewarm_fastspline_cuda_workspace(FastSplineCudaWorkspace* workspace) {
+  if (workspace == nullptr) return;
+  ensure_handles(&workspace->group_buffers, nullptr);
 }
 
 std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(

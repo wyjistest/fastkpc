@@ -93,6 +93,10 @@ struct FastSplineCudaBatchDiagnostics {
   int lambda_candidates;
   int workspace_reuse_count;
   int workspace_grow_count;
+  int workspace_slab_grow_count;
+  int workspace_slab_reuse_count;
+  double workspace_slab_bytes;
+  int workspace_legacy_alloc_count;
   int solver_handle_create_count;
   int per_request_design_x_values;
   int duplicate_design_x_values_avoided;
@@ -139,6 +143,8 @@ struct FastSplineCudaWorkspace;
 FastSplineCudaWorkspace* create_fastspline_cuda_workspace();
 
 void destroy_fastspline_cuda_workspace(FastSplineCudaWorkspace* workspace);
+
+void prewarm_fastspline_cuda_workspace(FastSplineCudaWorkspace* workspace);
 
 FastSplineCudaFit fit_fastspline_residuals_cuda(
   const Rcpp::NumericMatrix& data,

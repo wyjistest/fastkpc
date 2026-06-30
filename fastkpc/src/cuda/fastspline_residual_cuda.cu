@@ -519,6 +519,10 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
     result.diagnostics.lambda_candidates = 0;
     result.diagnostics.workspace_reuse_count = 0;
     result.diagnostics.workspace_grow_count = 0;
+    result.diagnostics.workspace_slab_grow_count = 0;
+    result.diagnostics.workspace_slab_reuse_count = 0;
+    result.diagnostics.workspace_slab_bytes = 0.0;
+    result.diagnostics.workspace_legacy_alloc_count = 0;
     result.diagnostics.solver_handle_create_count = 0;
     result.diagnostics.per_request_design_x_values = 0;
     result.diagnostics.duplicate_design_x_values_avoided = 0;

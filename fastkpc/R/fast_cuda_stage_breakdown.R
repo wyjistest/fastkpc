@@ -425,6 +425,14 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_workspace_reuse_count %||% 0L),
     residual_workspace_grow_count =
       as.integer(summary$residual_workspace_grow_count %||% 0L),
+    residual_workspace_slab_grow_count =
+      as.integer(summary$residual_workspace_slab_grow_count %||% 0L),
+    residual_workspace_slab_reuse_count =
+      as.integer(summary$residual_workspace_slab_reuse_count %||% 0L),
+    residual_workspace_slab_bytes =
+      as.numeric(summary$residual_workspace_slab_bytes %||% 0),
+    residual_workspace_legacy_alloc_count =
+      as.integer(summary$residual_workspace_legacy_alloc_count %||% 0L),
     residual_solver_handle_create_count =
       as.integer(summary$residual_solver_handle_create_count %||% 0L),
     residual_per_request_design_x_values =

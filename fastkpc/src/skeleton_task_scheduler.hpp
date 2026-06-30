@@ -170,6 +170,10 @@ struct SchedulerDiagnostics {
   int residual_lambda_candidates;
   int residual_workspace_reuse_count;
   int residual_workspace_grow_count;
+  int residual_workspace_slab_grow_count;
+  int residual_workspace_slab_reuse_count;
+  double residual_workspace_slab_bytes;
+  int residual_workspace_legacy_alloc_count;
   int residual_solver_handle_create_count;
   int residual_per_request_design_x_values;
   int residual_duplicate_design_x_values_avoided;

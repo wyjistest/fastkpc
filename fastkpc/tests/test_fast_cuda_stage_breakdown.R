@@ -173,8 +173,15 @@ assert_true(runs$residual_workspace_reuse_count[[1L]] >= 0L,
             "stage breakdown should record residual workspace reuse count")
 assert_true(runs$residual_workspace_grow_count[[1L]] >= 0L,
             "stage breakdown should record residual workspace grow count")
-assert_true(runs$residual_solver_handle_create_count[[1L]] >= 0L,
-            "stage breakdown should record residual solver handle creation count")
+assert_true(runs$residual_workspace_slab_grow_count[[1L]] > 0L ||
+              runs$residual_workspace_slab_reuse_count[[1L]] > 0L,
+            "stage breakdown should record residual slab workspace use")
+assert_true(runs$residual_workspace_slab_bytes[[1L]] > 0,
+            "stage breakdown should record residual slab workspace bytes")
+assert_true(runs$residual_workspace_legacy_alloc_count[[1L]] == 0L,
+            "stage breakdown should avoid legacy per-buffer residual allocations")
+assert_true(runs$residual_solver_handle_create_count[[1L]] == 0L,
+            "stage breakdown should prewarm residual solver handles outside allocation")
 assert_true(runs$residual_per_request_design_x_values[[1L]] == 0L,
             "stage breakdown should avoid per-request residual design X")
 assert_true(runs$residual_duplicate_design_x_values_avoided[[1L]] >= 0L,
