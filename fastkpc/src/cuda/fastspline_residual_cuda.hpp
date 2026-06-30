@@ -63,6 +63,8 @@ struct FastSplineCudaBatchDiagnostics {
   double d2h_bytes;
   double d2h_residual_bytes;
   double d2h_metadata_bytes;
+  int d2h_metadata_coalesced_count;
+  double d2h_metadata_coalesced_bytes;
   double host_select_sec;
   double free_sec;
   double true_batch_total_sec;

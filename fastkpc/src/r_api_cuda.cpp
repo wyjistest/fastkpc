@@ -382,6 +382,10 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_d2h_residual_bytes,
       Rcpp::Named("residual_d2h_metadata_bytes") =
         diagnostics.residual_d2h_metadata_bytes,
+      Rcpp::Named("residual_d2h_metadata_coalesced_count") =
+        diagnostics.residual_d2h_metadata_coalesced_count,
+      Rcpp::Named("residual_d2h_metadata_coalesced_bytes") =
+        diagnostics.residual_d2h_metadata_coalesced_bytes,
       Rcpp::Named("residual_host_select_sec") =
         diagnostics.residual_host_select_sec,
       Rcpp::Named("residual_free_sec") = diagnostics.residual_free_sec,
@@ -816,6 +820,10 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
     Rcpp::Named("d2h_bytes") = diagnostics.d2h_bytes,
     Rcpp::Named("d2h_residual_bytes") = diagnostics.d2h_residual_bytes,
     Rcpp::Named("d2h_metadata_bytes") = diagnostics.d2h_metadata_bytes,
+    Rcpp::Named("d2h_metadata_coalesced_count") =
+      diagnostics.d2h_metadata_coalesced_count,
+    Rcpp::Named("d2h_metadata_coalesced_bytes") =
+      diagnostics.d2h_metadata_coalesced_bytes,
     Rcpp::Named("host_select_sec") = diagnostics.host_select_sec,
     Rcpp::Named("free_sec") = diagnostics.free_sec,
     Rcpp::Named("true_batch_total_sec") = diagnostics.true_batch_total_sec,

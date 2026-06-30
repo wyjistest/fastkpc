@@ -140,6 +140,8 @@ struct SchedulerDiagnostics {
   double residual_d2h_bytes;
   double residual_d2h_residual_bytes;
   double residual_d2h_metadata_bytes;
+  int residual_d2h_metadata_coalesced_count;
+  double residual_d2h_metadata_coalesced_bytes;
   double residual_host_select_sec;
   double residual_free_sec;
   double residual_true_batch_total_sec;

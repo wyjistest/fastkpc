@@ -131,6 +131,14 @@ assert_true(runs$residual_rhs_cublas_solve_ms[[1L]] >= 0,
             "stage breakdown should time cuBLAS RHS solves")
 assert_true(runs$residual_d2h_copy_count[[1L]] > 0L,
             "stage breakdown should record residual D2H copy count")
+assert_true(runs$residual_d2h_metadata_coalesced_count[[1L]] > 0L,
+            "stage breakdown should coalesce residual score metadata D2H")
+assert_true(runs$residual_d2h_metadata_coalesced_count[[1L]] ==
+              runs$residual_lambda_candidates[[1L]],
+            "residual score metadata should be coalesced once per lambda")
+assert_true(runs$residual_d2h_copy_count[[1L]] <=
+              runs$residual_d2h_metadata_coalesced_count[[1L]] + 3L,
+            "residual D2H copy count should avoid per-candidate tiny copies")
 assert_true(runs$residual_d2h_bytes[[1L]] > 0,
             "stage breakdown should record residual D2H bytes")
 assert_true(runs$residual_d2h_residual_bytes[[1L]] > 0,
