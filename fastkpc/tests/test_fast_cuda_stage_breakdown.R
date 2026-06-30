@@ -134,8 +134,8 @@ assert_true(runs$residual_d2h_copy_count[[1L]] > 0L,
 assert_true(runs$residual_d2h_metadata_coalesced_count[[1L]] > 0L,
             "stage breakdown should coalesce residual score metadata D2H")
 assert_true(runs$residual_d2h_metadata_coalesced_count[[1L]] ==
-              runs$residual_lambda_candidates[[1L]],
-            "residual score metadata should be coalesced once per lambda")
+              runs$residual_only_batch_count[[1L]],
+            "residual score metadata should be coalesced once per batch")
 assert_true(runs$residual_d2h_copy_count[[1L]] <=
               runs$residual_d2h_metadata_coalesced_count[[1L]] + 3L,
             "residual D2H copy count should avoid per-candidate tiny copies")

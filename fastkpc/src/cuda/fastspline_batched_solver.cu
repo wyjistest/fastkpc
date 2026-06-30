@@ -658,15 +658,17 @@ __global__ void batched_algebraic_rss_edf_kernel(const double* y_norm2,
   __shared__ double scratch_edf[kBlock];
   const int fit = blockIdx.x;
   if (fit >= group_size) return;
+  const std::size_t metadata_index =
+    static_cast<std::size_t>(lambda_index) * group_size + fit;
   if (active[fit] == 0) {
     if (threadIdx.x == 0) {
       rss[fit] = nan("");
       edf[fit] = nan("");
-      metadata[fit].info = info[fit];
-      metadata[fit].pad0 = 0;
-      metadata[fit].rss = nan("");
-      metadata[fit].edf = nan("");
-      metadata[fit].pad1 = 0.0;
+      metadata[metadata_index].info = info[fit];
+      metadata[metadata_index].pad0 = 0;
+      metadata[metadata_index].rss = nan("");
+      metadata[metadata_index].edf = nan("");
+      metadata[metadata_index].pad1 = 0.0;
     }
     return;
   }
@@ -714,11 +716,11 @@ __global__ void batched_algebraic_rss_edf_kernel(const double* y_norm2,
     }
     edf[fit] = scratch_edf[0];
     rss[fit] = value;
-    metadata[fit].info = info[fit];
-    metadata[fit].pad0 = 0;
-    metadata[fit].rss = value;
-    metadata[fit].edf = scratch_edf[0];
-    metadata[fit].pad1 = 0.0;
+    metadata[metadata_index].info = info[fit];
+    metadata[metadata_index].pad0 = 0;
+    metadata[metadata_index].rss = value;
+    metadata[metadata_index].edf = scratch_edf[0];
+    metadata[metadata_index].pad1 = 0.0;
   }
 }
 
@@ -887,7 +889,8 @@ void ensure_group_buffers(DeviceGroupBuffers* buffers,
                          "alloc batched edf", timing);
   ensure_device_capacity(&buffers->d_score_metadata,
                          &buffers->d_score_metadata_capacity,
-                         static_cast<std::size_t>(group_size),
+                         static_cast<std::size_t>(group_size) *
+                           static_cast<std::size_t>(lambda_count),
                          "alloc batched score metadata", timing);
   ensure_device_capacity(&buffers->d_selected_lambda,
                          &buffers->d_selected_lambda_capacity,
@@ -1339,26 +1342,34 @@ TrueBatchGroupResult run_true_batched_group(
         check_cuda(cudaDeviceSynchronize(), "synchronize batched solve candidate");
         timing->algebraic_rss_count += group_size;
         timing->residual_summary_sec += elapsed_since(stage);
+      }
 
-        std::vector<FastSplineScoreMetadata> score_metadata(group_size);
-        stage = std::chrono::steady_clock::now();
-        const std::size_t score_metadata_bytes =
-          sizeof(FastSplineScoreMetadata) *
-          static_cast<std::size_t>(group_size);
-        check_cuda(cudaMemcpy(score_metadata.data(),
-                              buffers->d_score_metadata,
-                              score_metadata_bytes,
-                              cudaMemcpyDeviceToHost),
-                   "copy batched score metadata");
-        add_d2h_timing(timing, elapsed_since(stage),
-                       score_metadata_bytes, false, true);
-        timing->d2h_metadata_coalesced_count += 1;
-        timing->d2h_metadata_coalesced_bytes +=
-          static_cast<double>(score_metadata_bytes);
+      std::vector<FastSplineScoreMetadata> score_metadata(
+        static_cast<std::size_t>(lambda_count) * group_size);
+      stage = std::chrono::steady_clock::now();
+      const std::size_t score_metadata_bytes =
+        sizeof(FastSplineScoreMetadata) *
+        static_cast<std::size_t>(lambda_count) *
+        static_cast<std::size_t>(group_size);
+      check_cuda(cudaMemcpy(score_metadata.data(),
+                            buffers->d_score_metadata,
+                            score_metadata_bytes,
+                            cudaMemcpyDeviceToHost),
+                 "copy batched score metadata");
+      add_d2h_timing(timing, elapsed_since(stage),
+                     score_metadata_bytes, false, true);
+      timing->d2h_metadata_coalesced_count += 1;
+      timing->d2h_metadata_coalesced_bytes +=
+        static_cast<double>(score_metadata_bytes);
 
-        stage = std::chrono::steady_clock::now();
+      stage = std::chrono::steady_clock::now();
+      for (int lambda_index = 0; lambda_index < lambda_count; ++lambda_index) {
+        const double lambda = lambdas[lambda_index];
+        const std::size_t lambda_offset =
+          static_cast<std::size_t>(lambda_index) * group_size;
         for (int fit = 0; fit < group_size; ++fit) {
-          const FastSplineScoreMetadata& meta = score_metadata[fit];
+          const FastSplineScoreMetadata& meta =
+            score_metadata[lambda_offset + fit];
           if (active[fit] == 0 || meta.info != 0) continue;
           const double denom = static_cast<double>(n) - meta.edf;
           if (!std::isfinite(meta.rss) || !std::isfinite(meta.edf) ||
@@ -1381,8 +1392,8 @@ TrueBatchGroupResult run_true_batched_group(
             ridge_best[fit].ridge_attempt = ridge_attempt;
           }
         }
-        timing->host_select_sec += elapsed_since(stage);
       }
+      timing->host_select_sec += elapsed_since(stage);
 
       bool any_active = false;
       for (int fit = 0; fit < group_size; ++fit) {
