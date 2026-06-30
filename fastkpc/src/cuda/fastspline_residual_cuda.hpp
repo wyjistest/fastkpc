@@ -78,6 +78,10 @@ struct FastSplineCudaBatchDiagnostics {
   int rhs_solve_fallback_count;
   double rhs_custom_solve_sec;
   double rhs_cublas_solve_sec;
+  int candidate_rhs_fused_solve_count;
+  int candidate_rhs_materialized_solve_count;
+  int selected_rhs_materialized_solve_count;
+  int candidate_beta_values_avoided;
   int winning_factor_reuse_count;
   int factor_cache_hits;
   int factor_cache_misses;

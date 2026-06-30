@@ -92,6 +92,13 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->rhs_solve_fallback_count += value.rhs_solve_fallback_count;
   out->rhs_custom_solve_sec += value.rhs_custom_solve_sec;
   out->rhs_cublas_solve_sec += value.rhs_cublas_solve_sec;
+  out->candidate_rhs_fused_solve_count +=
+    value.candidate_rhs_fused_solve_count;
+  out->candidate_rhs_materialized_solve_count +=
+    value.candidate_rhs_materialized_solve_count;
+  out->selected_rhs_materialized_solve_count +=
+    value.selected_rhs_materialized_solve_count;
+  out->candidate_beta_values_avoided += value.candidate_beta_values_avoided;
   out->winning_factor_reuse_count += value.winning_factor_reuse_count;
   out->factor_cache_hits += value.factor_cache_hits;
   out->factor_cache_misses += value.factor_cache_misses;
@@ -480,6 +487,7 @@ __global__ void small_p_cholesky_rhs_solve_kernel(
     work[row] = Xty[beta_base + row];
   }
 
+  int solve_info = 0;
   for (int row = 0; row < p; ++row) {
     double value = work[row];
     for (int col = 0; col < row; ++col) {
@@ -489,31 +497,81 @@ __global__ void small_p_cholesky_rhs_solve_kernel(
     const double diag =
       factors[factor_base + static_cast<std::size_t>(row) * p + row];
     if (!isfinite(diag) || fabs(diag) <= 1e-14) {
-      if (info != nullptr) info[fit] = row + 1;
-      return;
+      solve_info = row + 1;
+      break;
     }
     work[row] = value / diag;
   }
 
-  for (int row = p - 1; row >= 0; --row) {
-    double value = work[row];
-    for (int col = row + 1; col < p; ++col) {
-      value -= factors[factor_base + static_cast<std::size_t>(col) * p + row] *
-        work[col];
+  if (solve_info == 0) {
+    for (int row = p - 1; row >= 0; --row) {
+      double value = work[row];
+      for (int col = row + 1; col < p; ++col) {
+        value -= factors[factor_base + static_cast<std::size_t>(col) * p + row] *
+          work[col];
+      }
+      const double diag =
+        factors[factor_base + static_cast<std::size_t>(row) * p + row];
+      if (!isfinite(diag) || fabs(diag) <= 1e-14) {
+        solve_info = row + 1;
+        break;
+      }
+      work[row] = value / diag;
     }
-    const double diag =
-      factors[factor_base + static_cast<std::size_t>(row) * p + row];
-    if (!isfinite(diag) || fabs(diag) <= 1e-14) {
-      if (info != nullptr) info[fit] = row + 1;
-      return;
-    }
-    work[row] = value / diag;
+  }
+
+  if (solve_info != 0) {
+    if (info != nullptr) info[fit] = solve_info;
+    return;
   }
 
   for (int row = 0; row < p; ++row) {
     beta[beta_base + row] = work[row];
   }
   if (info != nullptr) info[fit] = 0;
+}
+
+__device__ int solve_small_p_cholesky_rhs_local(const double* factors,
+                                                const double* Xty,
+                                                int factor,
+                                                int fit,
+                                                int p,
+                                                double* beta) {
+  const std::size_t beta_base = static_cast<std::size_t>(fit) * p;
+  const std::size_t factor_base = static_cast<std::size_t>(factor) * p * p;
+  for (int row = 0; row < p; ++row) {
+    beta[row] = Xty[beta_base + row];
+  }
+
+  for (int row = 0; row < p; ++row) {
+    double value = beta[row];
+    for (int col = 0; col < row; ++col) {
+      value -= factors[factor_base + static_cast<std::size_t>(row) * p + col] *
+        beta[col];
+    }
+    const double diag =
+      factors[factor_base + static_cast<std::size_t>(row) * p + row];
+    if (!isfinite(diag) || fabs(diag) <= 1e-14) {
+      return row + 1;
+    }
+    beta[row] = value / diag;
+  }
+
+  for (int row = p - 1; row >= 0; --row) {
+    double value = beta[row];
+    for (int col = row + 1; col < p; ++col) {
+      value -= factors[factor_base + static_cast<std::size_t>(col) * p + row] *
+        beta[col];
+    }
+    const double diag =
+      factors[factor_base + static_cast<std::size_t>(row) * p + row];
+    if (!isfinite(diag) || fabs(diag) <= 1e-14) {
+      return row + 1;
+    }
+    beta[row] = value / diag;
+  }
+
+  return 0;
 }
 
 __global__ void make_request_lambda_matrix_pointer_array(
@@ -717,6 +775,107 @@ __global__ void batched_algebraic_rss_edf_kernel(const double* y_norm2,
     edf[fit] = scratch_edf[0];
     rss[fit] = value;
     metadata[metadata_index].info = info[fit];
+    metadata[metadata_index].pad0 = 0;
+    metadata[metadata_index].rss = value;
+    metadata[metadata_index].edf = scratch_edf[0];
+    metadata[metadata_index].pad1 = 0.0;
+  }
+}
+
+__global__ void batched_algebraic_rss_edf_solve_kernel(
+  const double* y_norm2,
+  const double* Xty,
+  const double* XtX,
+  const double* factors,
+  const double* Ainv,
+  const int* active,
+  const int* design_index,
+  int design_count,
+  int lambda_index,
+  int group_size,
+  int p,
+  double* rss,
+  double* edf,
+  FastSplineScoreMetadata* metadata,
+  int* clamp_count) {
+  __shared__ double scratch_rss[kBlock];
+  __shared__ double scratch_edf[kBlock];
+  __shared__ double beta_s[kSmallPRhsMaxDesignCols];
+  __shared__ int solve_info;
+  const int fit = blockIdx.x;
+  if (fit >= group_size) return;
+  const std::size_t metadata_index =
+    static_cast<std::size_t>(lambda_index) * group_size + fit;
+  const int design = design_index[fit];
+  const int factor = lambda_index * design_count + design;
+
+  if (threadIdx.x == 0) {
+    solve_info = 0;
+    if (active[fit] == 0) {
+      solve_info = 0;
+      for (int row = 0; row < p; ++row) beta_s[row] = 0.0;
+    } else {
+      solve_info = solve_small_p_cholesky_rhs_local(
+        factors, Xty, factor, fit, p, beta_s);
+    }
+  }
+  __syncthreads();
+
+  if (active[fit] == 0 || solve_info != 0) {
+    if (threadIdx.x == 0) {
+      rss[fit] = nan("");
+      edf[fit] = nan("");
+      metadata[metadata_index].info = solve_info;
+      metadata[metadata_index].pad0 = 0;
+      metadata[metadata_index].rss = nan("");
+      metadata[metadata_index].edf = nan("");
+      metadata[metadata_index].pad1 = 0.0;
+    }
+    return;
+  }
+
+  double rss_acc = 0.0;
+  double edf_acc = 0.0;
+  const int pp = p * p;
+  const std::size_t fit_vec_base = static_cast<std::size_t>(fit) * p;
+  for (int col = threadIdx.x; col < p; col += blockDim.x) {
+    const double beta_col = beta_s[col];
+    rss_acc += -2.0 * beta_col * Xty[fit_vec_base + col];
+    for (int row = 0; row < p; ++row) {
+      rss_acc += beta_col *
+        XtX[colmajor_square_offset(design, row, col, p)] *
+        beta_s[row];
+    }
+  }
+
+  for (int linear = threadIdx.x; linear < pp; linear += blockDim.x) {
+    const int row = linear % p;
+    const int col = linear / p;
+    edf_acc += XtX[colmajor_square_offset(design, row, col, p)] *
+               Ainv[colmajor_square_offset(factor, col, row, p)];
+  }
+
+  scratch_rss[threadIdx.x] = rss_acc;
+  scratch_edf[threadIdx.x] = edf_acc;
+  __syncthreads();
+
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      scratch_rss[threadIdx.x] += scratch_rss[threadIdx.x + stride];
+      scratch_edf[threadIdx.x] += scratch_edf[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    double value = y_norm2[fit] + scratch_rss[0];
+    if (value < 0.0 && value > -1e-8) {
+      value = 0.0;
+      atomicAdd(clamp_count, 1);
+    }
+    edf[fit] = scratch_edf[0];
+    rss[fit] = value;
+    metadata[metadata_index].info = 0;
     metadata[metadata_index].pad0 = 0;
     metadata[metadata_index].rss = value;
     metadata[metadata_index].edf = scratch_edf[0];
@@ -1308,40 +1467,57 @@ TrueBatchGroupResult run_true_batched_group(
         check_cuda(cudaDeviceSynchronize(), "synchronize candidate pointer setup kernel");
         timing->pointer_setup_sec += elapsed_since(stage);
 
-        stage = std::chrono::steady_clock::now();
-        solve_rhs_batched(buffers, group_size, p, vec_size,
-                          buffers->d_design_A +
-                            static_cast<std::size_t>(lambda_index) *
-                              design_count * p * p,
-                          buffers->d_request_design_index, buffers->d_active,
-                          "launch batched beta copy kernel",
-                          "launch small-p candidate RHS solve kernel",
-                          "batched potrs beta", timing);
-        const double rhs_sec = elapsed_since(stage);
-        timing->factor_rhs_solve_sec += rhs_sec;
-        timing->factor_solve_sec += rhs_sec;
         if (p <= kSmallPRhsMaxDesignCols) {
-          timing->rhs_custom_solve_sec += rhs_sec;
+          stage = std::chrono::steady_clock::now();
+          batched_algebraic_rss_edf_solve_kernel<<<group_size, kBlock>>>(
+            buffers->d_y_norm2, buffers->d_Xty, buffers->d_design_XtX,
+            buffers->d_design_A, buffers->d_design_Ainv, buffers->d_active,
+            buffers->d_request_design_index, design_count, lambda_index,
+            group_size, p, buffers->d_rss, buffers->d_edf,
+            buffers->d_score_metadata,
+            buffers->d_algebraic_rss_clamp_count);
+          check_cuda(cudaGetLastError(),
+                     "launch batched fused algebraic RSS kernels");
+          check_cuda(cudaDeviceSynchronize(),
+                     "synchronize batched fused solve candidate");
+          timing->candidate_rhs_fused_solve_count += group_size;
+          timing->candidate_beta_values_avoided += group_size * p;
+          timing->algebraic_rss_count += group_size;
+          timing->residual_summary_sec += elapsed_since(stage);
         } else {
+          stage = std::chrono::steady_clock::now();
+          solve_rhs_batched(buffers, group_size, p, vec_size,
+                            buffers->d_design_A +
+                              static_cast<std::size_t>(lambda_index) *
+                                design_count * p * p,
+                            buffers->d_request_design_index, buffers->d_active,
+                            "launch batched beta copy kernel",
+                            "launch small-p candidate RHS solve kernel",
+                            "batched potrs beta", timing);
+          const double rhs_sec = elapsed_since(stage);
+          timing->factor_rhs_solve_sec += rhs_sec;
+          timing->factor_solve_sec += rhs_sec;
           timing->rhs_cublas_solve_sec += rhs_sec;
-        }
-        timing->rhs_solve_count += group_size;
-        timing->rhs_solve_api_calls += 1;
-        timing->rhs_target_solves += group_size;
+          timing->rhs_solve_count += group_size;
+          timing->rhs_solve_api_calls += 1;
+          timing->rhs_target_solves += group_size;
+          timing->candidate_rhs_materialized_solve_count += group_size;
 
-        stage = std::chrono::steady_clock::now();
-        batched_algebraic_rss_edf_kernel<<<group_size, kBlock>>>(
-          buffers->d_y_norm2, buffers->d_Xty, buffers->d_design_XtX,
-          buffers->d_beta, buffers->d_design_Ainv, buffers->d_info,
-          buffers->d_active, buffers->d_request_design_index, design_count,
-          lambda_index,
-          group_size, p, buffers->d_rss, buffers->d_edf,
-          buffers->d_score_metadata,
-          buffers->d_algebraic_rss_clamp_count);
-        check_cuda(cudaGetLastError(), "launch batched algebraic RSS kernels");
-        check_cuda(cudaDeviceSynchronize(), "synchronize batched solve candidate");
-        timing->algebraic_rss_count += group_size;
-        timing->residual_summary_sec += elapsed_since(stage);
+          stage = std::chrono::steady_clock::now();
+          batched_algebraic_rss_edf_kernel<<<group_size, kBlock>>>(
+            buffers->d_y_norm2, buffers->d_Xty, buffers->d_design_XtX,
+            buffers->d_beta, buffers->d_design_Ainv, buffers->d_info,
+            buffers->d_active, buffers->d_request_design_index, design_count,
+            lambda_index,
+            group_size, p, buffers->d_rss, buffers->d_edf,
+            buffers->d_score_metadata,
+            buffers->d_algebraic_rss_clamp_count);
+          check_cuda(cudaGetLastError(), "launch batched algebraic RSS kernels");
+          check_cuda(cudaDeviceSynchronize(),
+                     "synchronize batched solve candidate");
+          timing->algebraic_rss_count += group_size;
+          timing->residual_summary_sec += elapsed_since(stage);
+        }
       }
 
       std::vector<FastSplineScoreMetadata> score_metadata(
@@ -1533,6 +1709,7 @@ TrueBatchGroupResult run_true_batched_group(
     timing->rhs_solve_count += group_size;
     timing->rhs_solve_api_calls += 1;
     timing->rhs_target_solves += group_size;
+    timing->selected_rhs_materialized_solve_count += group_size;
 
     stage = std::chrono::steady_clock::now();
     const int row_blocks = (n + kBlock - 1) / kBlock;
@@ -1749,6 +1926,10 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.rhs_solve_fallback_count = 0;
   out.rhs_custom_solve_sec = 0.0;
   out.rhs_cublas_solve_sec = 0.0;
+  out.candidate_rhs_fused_solve_count = 0;
+  out.candidate_rhs_materialized_solve_count = 0;
+  out.selected_rhs_materialized_solve_count = 0;
+  out.candidate_beta_values_avoided = 0;
   out.winning_factor_reuse_count = 0;
   out.factor_cache_hits = 0;
   out.factor_cache_misses = 0;

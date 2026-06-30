@@ -226,6 +226,10 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_rhs_solve_fallback_count = 0;
   out.residual_rhs_custom_solve_sec = 0.0;
   out.residual_rhs_cublas_solve_sec = 0.0;
+  out.residual_candidate_rhs_fused_solve_count = 0;
+  out.residual_candidate_rhs_materialized_solve_count = 0;
+  out.residual_selected_rhs_materialized_solve_count = 0;
+  out.residual_candidate_beta_values_avoided = 0;
   out.residual_winning_factor_reuse_count = 0;
   out.residual_factor_cache_hits = 0;
   out.residual_factor_cache_misses = 0;

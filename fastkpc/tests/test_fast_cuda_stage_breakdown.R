@@ -121,6 +121,14 @@ assert_true(runs$residual_rhs_solve_api_calls[[1L]] >= 0L,
             "stage breakdown should record RHS solve API calls")
 assert_true(runs$residual_rhs_custom_solve_count[[1L]] > 0L,
             "stage breakdown should record custom RHS solves")
+assert_true(runs$residual_candidate_rhs_fused_solve_count[[1L]] > 0L,
+            "stage breakdown should record fused candidate RHS solves")
+assert_true(runs$residual_candidate_rhs_materialized_solve_count[[1L]] == 0L,
+            "stage breakdown should avoid materialized candidate RHS solves")
+assert_true(runs$residual_selected_rhs_materialized_solve_count[[1L]] > 0L,
+            "stage breakdown should keep selected RHS materialization")
+assert_true(runs$residual_candidate_beta_values_avoided[[1L]] > 0L,
+            "stage breakdown should record avoided candidate beta values")
 assert_true(runs$residual_rhs_cublas_solve_count[[1L]] == 0L,
             "stage breakdown should avoid cuBLAS RHS solves on small-p smoke run")
 assert_true(runs$residual_rhs_solve_fallback_count[[1L]] == 0L,

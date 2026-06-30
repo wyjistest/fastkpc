@@ -366,6 +366,18 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       fastkpc_stage_breakdown_seconds(
         summary$residual_rhs_cublas_solve_sec
       ) * 1000,
+    residual_candidate_rhs_fused_solve_count =
+      as.integer(summary$residual_candidate_rhs_fused_solve_count %||% 0L),
+    residual_candidate_rhs_materialized_solve_count =
+      as.integer(
+        summary$residual_candidate_rhs_materialized_solve_count %||% 0L
+      ),
+    residual_selected_rhs_materialized_solve_count =
+      as.integer(
+        summary$residual_selected_rhs_materialized_solve_count %||% 0L
+      ),
+    residual_candidate_beta_values_avoided =
+      as.integer(summary$residual_candidate_beta_values_avoided %||% 0L),
     residual_d2h_residuals_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_d2h_residuals_sec

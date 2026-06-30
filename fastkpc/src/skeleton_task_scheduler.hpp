@@ -155,6 +155,10 @@ struct SchedulerDiagnostics {
   int residual_rhs_solve_fallback_count;
   double residual_rhs_custom_solve_sec;
   double residual_rhs_cublas_solve_sec;
+  int residual_candidate_rhs_fused_solve_count;
+  int residual_candidate_rhs_materialized_solve_count;
+  int residual_selected_rhs_materialized_solve_count;
+  int residual_candidate_beta_values_avoided;
   int residual_winning_factor_reuse_count;
   int residual_factor_cache_hits;
   int residual_factor_cache_misses;
