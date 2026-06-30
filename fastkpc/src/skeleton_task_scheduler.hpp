@@ -178,6 +178,10 @@ struct SchedulerDiagnostics {
   double dcov_result_materialize_sec;
   double dcov_free_sec;
   double dcov_total_sec;
+  double dcov_top_level_wall_sec;
+  double dcov_grid_limit_query_sec;
+  double dcov_chunk_dispatch_sec;
+  double dcov_top_level_unaccounted_sec;
   int dcov_chunks;
   int dcov_max_chunk_batch;
   int dcov_workspace_reuse_count;
@@ -186,6 +190,8 @@ struct SchedulerDiagnostics {
   int dcov_row_product_reduce_count;
   int dcov_pvalue_only_count;
   int dcov_full_result_materialize_count;
+  int dcov_grid_limit_query_count;
+  int dcov_grid_limit_cache_hit_count;
   std::vector<LayerDiagnosticsLevel> per_level;
   std::vector<SchedulerBatchDiagnostic> batches;
   std::vector<SchedulerResidualDiagnostic> residuals;

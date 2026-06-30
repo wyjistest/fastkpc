@@ -443,6 +443,14 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.dcov_result_materialize_sec,
       Rcpp::Named("dcov_free_sec") = diagnostics.dcov_free_sec,
       Rcpp::Named("dcov_total_sec") = diagnostics.dcov_total_sec,
+      Rcpp::Named("dcov_top_level_wall_sec") =
+        diagnostics.dcov_top_level_wall_sec,
+      Rcpp::Named("dcov_grid_limit_query_sec") =
+        diagnostics.dcov_grid_limit_query_sec,
+      Rcpp::Named("dcov_chunk_dispatch_sec") =
+        diagnostics.dcov_chunk_dispatch_sec,
+      Rcpp::Named("dcov_top_level_unaccounted_sec") =
+        diagnostics.dcov_top_level_unaccounted_sec,
       Rcpp::Named("dcov_chunks") = diagnostics.dcov_chunks,
       Rcpp::Named("dcov_max_chunk_batch") = diagnostics.dcov_max_chunk_batch,
       Rcpp::Named("dcov_workspace_reuse_count") =
@@ -456,7 +464,11 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
       Rcpp::Named("dcov_pvalue_only_count") =
         diagnostics.dcov_pvalue_only_count,
       Rcpp::Named("dcov_full_result_materialize_count") =
-        diagnostics.dcov_full_result_materialize_count
+        diagnostics.dcov_full_result_materialize_count,
+      Rcpp::Named("dcov_grid_limit_query_count") =
+        diagnostics.dcov_grid_limit_query_count,
+      Rcpp::Named("dcov_grid_limit_cache_hit_count") =
+        diagnostics.dcov_grid_limit_cache_hit_count
     ),
     Rcpp::Named("levels") =
       scheduler_levels_to_data_frame(diagnostics.per_level),
@@ -1009,7 +1021,16 @@ extern "C" SEXP C_fast_dcov_batch_cuda(SEXP xs, SEXP ys, SEXP indexs,
       Rcpp::Named("full_result_materialize_count") =
         result.full_result_materialize_count,
       Rcpp::Named("result_materialize_sec") =
-        result.result_materialize_sec
+        result.result_materialize_sec,
+      Rcpp::Named("top_level_wall_sec") = result.top_level_wall_sec,
+      Rcpp::Named("grid_limit_query_sec") = result.grid_limit_query_sec,
+      Rcpp::Named("grid_limit_query_count") =
+        result.grid_limit_query_count,
+      Rcpp::Named("grid_limit_cache_hit_count") =
+        result.grid_limit_cache_hit_count,
+      Rcpp::Named("chunk_dispatch_sec") = result.chunk_dispatch_sec,
+      Rcpp::Named("top_level_unaccounted_sec") =
+        result.top_level_unaccounted_sec
     )
   );
   END_RCPP

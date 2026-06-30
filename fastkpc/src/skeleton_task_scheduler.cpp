@@ -249,6 +249,10 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.dcov_result_materialize_sec = 0.0;
   out.dcov_free_sec = 0.0;
   out.dcov_total_sec = 0.0;
+  out.dcov_top_level_wall_sec = 0.0;
+  out.dcov_grid_limit_query_sec = 0.0;
+  out.dcov_chunk_dispatch_sec = 0.0;
+  out.dcov_top_level_unaccounted_sec = 0.0;
   out.dcov_chunks = 0;
   out.dcov_max_chunk_batch = 0;
   out.dcov_workspace_reuse_count = 0;
@@ -257,6 +261,8 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.dcov_row_product_reduce_count = 0;
   out.dcov_pvalue_only_count = 0;
   out.dcov_full_result_materialize_count = 0;
+  out.dcov_grid_limit_query_count = 0;
+  out.dcov_grid_limit_cache_hit_count = 0;
   return out;
 }
 

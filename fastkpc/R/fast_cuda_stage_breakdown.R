@@ -219,6 +219,20 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
         "dcov"),
     row("dcov_measured_total",
         fastkpc_stage_breakdown_seconds(summary$dcov_total_sec),
+        "dcov"),
+    row("dcov_top_level_wall",
+        fastkpc_stage_breakdown_seconds(summary$dcov_top_level_wall_sec),
+        "dcov"),
+    row("dcov_grid_limit_query",
+        fastkpc_stage_breakdown_seconds(summary$dcov_grid_limit_query_sec),
+        "dcov"),
+    row("dcov_chunk_dispatch",
+        fastkpc_stage_breakdown_seconds(summary$dcov_chunk_dispatch_sec),
+        "dcov"),
+    row("dcov_top_level_unaccounted",
+        fastkpc_stage_breakdown_seconds(
+          summary$dcov_top_level_unaccounted_sec
+        ),
         "dcov")
   )
   do.call(rbind, rows)
@@ -258,6 +272,22 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$dcov_pvalue_only_count %||% 0L),
     dcov_full_result_materialize_count =
       as.integer(summary$dcov_full_result_materialize_count %||% 0L),
+    dcov_top_level_wall_ms =
+      fastkpc_stage_breakdown_seconds(summary$dcov_top_level_wall_sec) * 1000,
+    dcov_grid_limit_query_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$dcov_grid_limit_query_sec
+      ) * 1000,
+    dcov_chunk_dispatch_ms =
+      fastkpc_stage_breakdown_seconds(summary$dcov_chunk_dispatch_sec) * 1000,
+    dcov_top_level_unaccounted_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$dcov_top_level_unaccounted_sec
+      ) * 1000,
+    dcov_grid_limit_query_count =
+      as.integer(summary$dcov_grid_limit_query_count %||% 0L),
+    dcov_grid_limit_cache_hit_count =
+      as.integer(summary$dcov_grid_limit_cache_hit_count %||% 0L),
     residual_batches = as.integer(summary$residual_batches %||% 0L),
     unique_residual_requests =
       as.integer(summary$unique_residual_requests %||% 0L),

@@ -578,6 +578,11 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     diagnostics->dcov_result_materialize_sec += batch.result_materialize_sec;
     diagnostics->dcov_free_sec += batch.free_sec;
     diagnostics->dcov_total_sec += batch.total_sec;
+    diagnostics->dcov_top_level_wall_sec += batch.top_level_wall_sec;
+    diagnostics->dcov_grid_limit_query_sec += batch.grid_limit_query_sec;
+    diagnostics->dcov_chunk_dispatch_sec += batch.chunk_dispatch_sec;
+    diagnostics->dcov_top_level_unaccounted_sec +=
+      batch.top_level_unaccounted_sec;
     diagnostics->dcov_chunks += batch.chunks;
     diagnostics->dcov_max_chunk_batch =
       std::max(diagnostics->dcov_max_chunk_batch, batch.max_chunk_batch);
@@ -590,6 +595,10 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     diagnostics->dcov_pvalue_only_count += batch.pvalue_only_count;
     diagnostics->dcov_full_result_materialize_count +=
       batch.full_result_materialize_count;
+    diagnostics->dcov_grid_limit_query_count +=
+      batch.grid_limit_query_count;
+    diagnostics->dcov_grid_limit_cache_hit_count +=
+      batch.grid_limit_cache_hit_count;
     ++(*dcov_batches);
     diagnostics->batches.push_back(SchedulerBatchDiagnostic{
       level, *dcov_batches - 1, "dcov", tasks[start].task_id, count, n, "ok",

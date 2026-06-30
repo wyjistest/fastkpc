@@ -165,6 +165,10 @@ void add_timing(DcovBatchResult* out, const DcovBatchResult& value) {
   out->result_materialize_sec += value.result_materialize_sec;
   out->free_sec += value.free_sec;
   out->total_sec += value.total_sec;
+  out->top_level_wall_sec += value.top_level_wall_sec;
+  out->grid_limit_query_sec += value.grid_limit_query_sec;
+  out->chunk_dispatch_sec += value.chunk_dispatch_sec;
+  out->top_level_unaccounted_sec += value.top_level_unaccounted_sec;
   out->chunks += value.chunks;
   out->max_chunk_batch = std::max(out->max_chunk_batch, value.max_chunk_batch);
   out->workspace_reuse_count += value.workspace_reuse_count;
@@ -173,12 +177,16 @@ void add_timing(DcovBatchResult* out, const DcovBatchResult& value) {
   out->row_product_reduce_count += value.row_product_reduce_count;
   out->pvalue_only_count += value.pvalue_only_count;
   out->full_result_materialize_count += value.full_result_materialize_count;
+  out->grid_limit_query_count += value.grid_limit_query_count;
+  out->grid_limit_cache_hit_count += value.grid_limit_cache_hit_count;
 }
 
-int dcov_max_grid_batch_dimension() {
-  int device = 0;
+double nonnegative_gap(double total, double accounted) {
+  return std::max(0.0, total - accounted);
+}
+
+int query_dcov_grid_batch_dimension(int device) {
   cudaDeviceProp prop;
-  check_cuda(cudaGetDevice(&device), "get device");
   check_cuda(cudaGetDeviceProperties(&prop, device), "get device properties");
   const int y_limit = prop.maxGridSize[1];
   const int z_limit = prop.maxGridSize[2];
@@ -289,9 +297,36 @@ void free_dcov_buffers(DcovChunkBuffers* buffers) {
 
 struct DcovCudaWorkspace {
   DcovChunkBuffers buffers;
+  int grid_limit_device_id = -1;
+  int grid_limit_batch = 0;
 };
 
 namespace {
+
+int cached_dcov_grid_batch_dimension(DcovCudaWorkspace* workspace,
+                                     DcovBatchResult* result) {
+  const std::chrono::steady_clock::time_point stage =
+    std::chrono::steady_clock::now();
+  int device = 0;
+  check_cuda(cudaGetDevice(&device), "get device");
+  if (workspace != nullptr &&
+      workspace->grid_limit_device_id == device &&
+      workspace->grid_limit_batch > 0) {
+    if (result != nullptr) ++result->grid_limit_cache_hit_count;
+    return workspace->grid_limit_batch;
+  }
+
+  const int limit = query_dcov_grid_batch_dimension(device);
+  if (result != nullptr) {
+    result->grid_limit_query_sec += elapsed_since(stage);
+    ++result->grid_limit_query_count;
+  }
+  if (workspace != nullptr) {
+    workspace->grid_limit_device_id = device;
+    workspace->grid_limit_batch = limit;
+  }
+  return limit;
+}
 
 DcovBatchResult dcov_batch_cuda_chunk_impl(const double* x,
                                            const double* y,
@@ -480,12 +515,11 @@ DcovBatchResult dcov_batch_cuda(const double* x,
   if (n <= 5) throw std::runtime_error("gamma approximation requires n > 5");
   if (batch < 1) throw std::runtime_error("batch must be positive");
 
-  const int chunk_limit = dcov_max_grid_batch_dimension();
-  if (batch <= chunk_limit) {
-    return dcov_batch_cuda_chunk(x, y, n, batch, options, workspace);
-  }
-
+  const std::chrono::steady_clock::time_point call_start =
+    std::chrono::steady_clock::now();
   DcovBatchResult result;
+  const int chunk_limit = cached_dcov_grid_batch_dimension(workspace, &result);
+
   result.p_values.assign(batch, 0.0);
   result.nV2.assign(batch, 0.0);
   result.means.assign(batch, 0.0);
@@ -497,8 +531,13 @@ DcovBatchResult dcov_batch_cuda(const double* x,
   for (int start = 0; start < batch; start += chunk_limit) {
     const int count = std::min(chunk_limit, batch - start);
     const std::size_t offset = static_cast<std::size_t>(start) * n;
+    const std::chrono::steady_clock::time_point dispatch_start =
+      std::chrono::steady_clock::now();
     const DcovBatchResult chunk = dcov_batch_cuda_chunk(
       x + offset, y + offset, n, count, options, workspace);
+    const double dispatch_wall = elapsed_since(dispatch_start);
+    result.chunk_dispatch_sec += nonnegative_gap(dispatch_wall,
+                                                chunk.total_sec);
     add_timing(&result, chunk);
 
     for (int k = 0; k < count; ++k) {
@@ -514,6 +553,11 @@ DcovBatchResult dcov_batch_cuda(const double* x,
     }
   }
 
+  result.top_level_wall_sec += elapsed_since(call_start);
+  result.top_level_unaccounted_sec += nonnegative_gap(
+    result.top_level_wall_sec,
+    result.total_sec + result.grid_limit_query_sec +
+      result.chunk_dispatch_sec);
   return result;
 }
 
@@ -530,25 +574,32 @@ DcovBatchResult dcov_batch_cuda_pvalues_into(const double* x,
     throw std::runtime_error("pvalue-only dCov output buffer is null");
   }
 
-  const int chunk_limit = dcov_max_grid_batch_dimension();
-  if (batch <= chunk_limit) {
-    return dcov_batch_cuda_chunk_impl(x, y, n, batch, options, workspace,
-                                      out_pvalues, false);
-  }
-
+  const std::chrono::steady_clock::time_point call_start =
+    std::chrono::steady_clock::now();
   DcovBatchResult result;
+  const int chunk_limit = cached_dcov_grid_batch_dimension(workspace, &result);
   result.chunks = 0;
   result.max_chunk_batch = 0;
 
   for (int start = 0; start < batch; start += chunk_limit) {
     const int count = std::min(chunk_limit, batch - start);
     const std::size_t offset = static_cast<std::size_t>(start) * n;
+    const std::chrono::steady_clock::time_point dispatch_start =
+      std::chrono::steady_clock::now();
     const DcovBatchResult chunk = dcov_batch_cuda_chunk_impl(
       x + offset, y + offset, n, count, options, workspace,
       out_pvalues + start, false);
+    const double dispatch_wall = elapsed_since(dispatch_start);
+    result.chunk_dispatch_sec += nonnegative_gap(dispatch_wall,
+                                                chunk.total_sec);
     add_timing(&result, chunk);
   }
 
+  result.top_level_wall_sec += elapsed_since(call_start);
+  result.top_level_unaccounted_sec += nonnegative_gap(
+    result.top_level_wall_sec,
+    result.total_sec + result.grid_limit_query_sec +
+      result.chunk_dispatch_sec);
   return result;
 }
 
