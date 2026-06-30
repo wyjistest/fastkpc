@@ -378,6 +378,16 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       ),
     residual_candidate_beta_values_avoided =
       as.integer(summary$residual_candidate_beta_values_avoided %||% 0L),
+    residual_summary_candidate_launch_count =
+      as.integer(summary$residual_summary_candidate_launch_count %||% 0L),
+    residual_summary_group_batched_launch_count =
+      as.integer(
+        summary$residual_summary_group_batched_launch_count %||% 0L
+      ),
+    residual_summary_group_batched_candidate_count =
+      as.integer(
+        summary$residual_summary_group_batched_candidate_count %||% 0L
+      ),
     residual_d2h_residuals_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_d2h_residuals_sec

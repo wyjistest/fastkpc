@@ -159,6 +159,9 @@ struct SchedulerDiagnostics {
   int residual_candidate_rhs_materialized_solve_count;
   int residual_selected_rhs_materialized_solve_count;
   int residual_candidate_beta_values_avoided;
+  int residual_summary_candidate_launch_count;
+  int residual_summary_group_batched_launch_count;
+  int residual_summary_group_batched_candidate_count;
   int residual_winning_factor_reuse_count;
   int residual_factor_cache_hits;
   int residual_factor_cache_misses;

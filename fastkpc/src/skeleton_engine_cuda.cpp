@@ -325,6 +325,12 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.selected_rhs_materialized_solve_count;
         diagnostics->residual_candidate_beta_values_avoided +=
           batch_result.diagnostics.candidate_beta_values_avoided;
+        diagnostics->residual_summary_candidate_launch_count +=
+          batch_result.diagnostics.summary_candidate_launch_count;
+        diagnostics->residual_summary_group_batched_launch_count +=
+          batch_result.diagnostics.summary_group_batched_launch_count;
+        diagnostics->residual_summary_group_batched_candidate_count +=
+          batch_result.diagnostics.summary_group_batched_candidate_count;
         diagnostics->residual_winning_factor_reuse_count +=
           batch_result.diagnostics.winning_factor_reuse_count;
         diagnostics->residual_factor_cache_hits +=

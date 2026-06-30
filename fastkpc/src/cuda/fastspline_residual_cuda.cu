@@ -508,6 +508,9 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
     result.diagnostics.candidate_rhs_materialized_solve_count = 0;
     result.diagnostics.selected_rhs_materialized_solve_count = 0;
     result.diagnostics.candidate_beta_values_avoided = 0;
+    result.diagnostics.summary_candidate_launch_count = 0;
+    result.diagnostics.summary_group_batched_launch_count = 0;
+    result.diagnostics.summary_group_batched_candidate_count = 0;
     result.diagnostics.winning_factor_reuse_count = 0;
     result.diagnostics.factor_cache_hits = 0;
     result.diagnostics.factor_cache_misses = 0;

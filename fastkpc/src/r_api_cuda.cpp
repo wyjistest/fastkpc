@@ -419,6 +419,12 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_selected_rhs_materialized_solve_count,
       Rcpp::Named("residual_candidate_beta_values_avoided") =
         diagnostics.residual_candidate_beta_values_avoided,
+      Rcpp::Named("residual_summary_candidate_launch_count") =
+        diagnostics.residual_summary_candidate_launch_count,
+      Rcpp::Named("residual_summary_group_batched_launch_count") =
+        diagnostics.residual_summary_group_batched_launch_count,
+      Rcpp::Named("residual_summary_group_batched_candidate_count") =
+        diagnostics.residual_summary_group_batched_candidate_count,
       Rcpp::Named("residual_winning_factor_reuse_count") =
         diagnostics.residual_winning_factor_reuse_count,
       Rcpp::Named("residual_factor_cache_hits") =
@@ -858,6 +864,12 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.selected_rhs_materialized_solve_count,
     Rcpp::Named("candidate_beta_values_avoided") =
       diagnostics.candidate_beta_values_avoided,
+    Rcpp::Named("summary_candidate_launch_count") =
+      diagnostics.summary_candidate_launch_count,
+    Rcpp::Named("summary_group_batched_launch_count") =
+      diagnostics.summary_group_batched_launch_count,
+    Rcpp::Named("summary_group_batched_candidate_count") =
+      diagnostics.summary_group_batched_candidate_count,
     Rcpp::Named("winning_factor_reuse_count") =
       diagnostics.winning_factor_reuse_count,
     Rcpp::Named("factor_cache_hits") = diagnostics.factor_cache_hits,

@@ -82,6 +82,9 @@ struct FastSplineCudaBatchDiagnostics {
   int candidate_rhs_materialized_solve_count;
   int selected_rhs_materialized_solve_count;
   int candidate_beta_values_avoided;
+  int summary_candidate_launch_count;
+  int summary_group_batched_launch_count;
+  int summary_group_batched_candidate_count;
   int winning_factor_reuse_count;
   int factor_cache_hits;
   int factor_cache_misses;

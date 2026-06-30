@@ -99,6 +99,11 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->selected_rhs_materialized_solve_count +=
     value.selected_rhs_materialized_solve_count;
   out->candidate_beta_values_avoided += value.candidate_beta_values_avoided;
+  out->summary_candidate_launch_count += value.summary_candidate_launch_count;
+  out->summary_group_batched_launch_count +=
+    value.summary_group_batched_launch_count;
+  out->summary_group_batched_candidate_count +=
+    value.summary_group_batched_candidate_count;
   out->winning_factor_reuse_count += value.winning_factor_reuse_count;
   out->factor_cache_hits += value.factor_cache_hits;
   out->factor_cache_misses += value.factor_cache_misses;
@@ -782,7 +787,7 @@ __global__ void batched_algebraic_rss_edf_kernel(const double* y_norm2,
   }
 }
 
-__global__ void batched_algebraic_rss_edf_solve_kernel(
+__global__ void batched_algebraic_rss_edf_all_candidates_kernel(
   const double* y_norm2,
   const double* Xty,
   const double* XtX,
@@ -791,7 +796,7 @@ __global__ void batched_algebraic_rss_edf_solve_kernel(
   const int* active,
   const int* design_index,
   int design_count,
-  int lambda_index,
+  int lambda_count,
   int group_size,
   int p,
   double* rss,
@@ -803,7 +808,8 @@ __global__ void batched_algebraic_rss_edf_solve_kernel(
   __shared__ double beta_s[kSmallPRhsMaxDesignCols];
   __shared__ int solve_info;
   const int fit = blockIdx.x;
-  if (fit >= group_size) return;
+  const int lambda_index = blockIdx.y;
+  if (fit >= group_size || lambda_index >= lambda_count) return;
   const std::size_t metadata_index =
     static_cast<std::size_t>(lambda_index) * group_size + fit;
   const int design = design_index[fit];
@@ -812,7 +818,6 @@ __global__ void batched_algebraic_rss_edf_solve_kernel(
   if (threadIdx.x == 0) {
     solve_info = 0;
     if (active[fit] == 0) {
-      solve_info = 0;
       for (int row = 0; row < p; ++row) beta_s[row] = 0.0;
     } else {
       solve_info = solve_small_p_cholesky_rhs_local(
@@ -1456,35 +1461,39 @@ TrueBatchGroupResult run_true_batched_group(
       timing->factor_solve_sec += inverse_sec;
       timing->inverse_solve_count += candidate_factor_count;
 
-      for (int lambda_index = 0; lambda_index < lambda_count; ++lambda_index) {
-        const double lambda = lambdas[lambda_index];
+      if (p <= kSmallPRhsMaxDesignCols) {
         stage = std::chrono::steady_clock::now();
-        make_request_lambda_matrix_pointer_array<<<std::max(1, ptr_blocks),
-                                                   kBlock>>>(
-          buffers->d_design_A, buffers->d_request_design_index, group_size,
-          design_count, lambda_index, p, buffers->d_A_ptrs);
-        check_cuda(cudaGetLastError(), "launch candidate pointer setup kernel");
-        check_cuda(cudaDeviceSynchronize(), "synchronize candidate pointer setup kernel");
-        timing->pointer_setup_sec += elapsed_since(stage);
-
-        if (p <= kSmallPRhsMaxDesignCols) {
+        const dim3 fused_grid(group_size, lambda_count);
+        batched_algebraic_rss_edf_all_candidates_kernel<<<fused_grid, kBlock>>>(
+          buffers->d_y_norm2, buffers->d_Xty, buffers->d_design_XtX,
+          buffers->d_design_A, buffers->d_design_Ainv, buffers->d_active,
+          buffers->d_request_design_index, design_count, lambda_count,
+          group_size, p, buffers->d_rss, buffers->d_edf,
+          buffers->d_score_metadata,
+          buffers->d_algebraic_rss_clamp_count);
+        check_cuda(cudaGetLastError(),
+                   "launch batched fused all-candidate RSS kernels");
+        check_cuda(cudaDeviceSynchronize(),
+                   "synchronize batched fused all-candidate solve");
+        const int fused_candidates = group_size * lambda_count;
+        timing->candidate_rhs_fused_solve_count += fused_candidates;
+        timing->candidate_beta_values_avoided += fused_candidates * p;
+        timing->algebraic_rss_count += fused_candidates;
+        timing->summary_group_batched_launch_count += 1;
+        timing->summary_group_batched_candidate_count += fused_candidates;
+        timing->residual_summary_sec += elapsed_since(stage);
+      } else {
+        for (int lambda_index = 0; lambda_index < lambda_count; ++lambda_index) {
           stage = std::chrono::steady_clock::now();
-          batched_algebraic_rss_edf_solve_kernel<<<group_size, kBlock>>>(
-            buffers->d_y_norm2, buffers->d_Xty, buffers->d_design_XtX,
-            buffers->d_design_A, buffers->d_design_Ainv, buffers->d_active,
-            buffers->d_request_design_index, design_count, lambda_index,
-            group_size, p, buffers->d_rss, buffers->d_edf,
-            buffers->d_score_metadata,
-            buffers->d_algebraic_rss_clamp_count);
-          check_cuda(cudaGetLastError(),
-                     "launch batched fused algebraic RSS kernels");
+          make_request_lambda_matrix_pointer_array<<<std::max(1, ptr_blocks),
+                                                     kBlock>>>(
+            buffers->d_design_A, buffers->d_request_design_index, group_size,
+            design_count, lambda_index, p, buffers->d_A_ptrs);
+          check_cuda(cudaGetLastError(), "launch candidate pointer setup kernel");
           check_cuda(cudaDeviceSynchronize(),
-                     "synchronize batched fused solve candidate");
-          timing->candidate_rhs_fused_solve_count += group_size;
-          timing->candidate_beta_values_avoided += group_size * p;
-          timing->algebraic_rss_count += group_size;
-          timing->residual_summary_sec += elapsed_since(stage);
-        } else {
+                     "synchronize candidate pointer setup kernel");
+          timing->pointer_setup_sec += elapsed_since(stage);
+
           stage = std::chrono::steady_clock::now();
           solve_rhs_batched(buffers, group_size, p, vec_size,
                             buffers->d_design_A +
@@ -1516,6 +1525,7 @@ TrueBatchGroupResult run_true_batched_group(
           check_cuda(cudaDeviceSynchronize(),
                      "synchronize batched solve candidate");
           timing->algebraic_rss_count += group_size;
+          timing->summary_candidate_launch_count += 1;
           timing->residual_summary_sec += elapsed_since(stage);
         }
       }
@@ -1930,6 +1940,9 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.candidate_rhs_materialized_solve_count = 0;
   out.selected_rhs_materialized_solve_count = 0;
   out.candidate_beta_values_avoided = 0;
+  out.summary_candidate_launch_count = 0;
+  out.summary_group_batched_launch_count = 0;
+  out.summary_group_batched_candidate_count = 0;
   out.winning_factor_reuse_count = 0;
   out.factor_cache_hits = 0;
   out.factor_cache_misses = 0;

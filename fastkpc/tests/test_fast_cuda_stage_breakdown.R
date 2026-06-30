@@ -123,6 +123,14 @@ assert_true(runs$residual_rhs_custom_solve_count[[1L]] > 0L,
             "stage breakdown should record custom RHS solves")
 assert_true(runs$residual_candidate_rhs_fused_solve_count[[1L]] > 0L,
             "stage breakdown should record fused candidate RHS solves")
+assert_true(runs$residual_summary_candidate_launch_count[[1L]] == 0L,
+            "stage breakdown should avoid per-candidate fused summary launches")
+assert_true(runs$residual_summary_group_batched_launch_count[[1L]] ==
+              runs$residual_only_batch_count[[1L]],
+            "stage breakdown should batch fused summary launches per group")
+assert_true(runs$residual_summary_group_batched_candidate_count[[1L]] ==
+              runs$residual_candidate_rhs_fused_solve_count[[1L]],
+            "stage breakdown should count group-batched fused candidates")
 assert_true(runs$residual_candidate_rhs_materialized_solve_count[[1L]] == 0L,
             "stage breakdown should avoid materialized candidate RHS solves")
 assert_true(runs$residual_selected_rhs_materialized_solve_count[[1L]] > 0L,
