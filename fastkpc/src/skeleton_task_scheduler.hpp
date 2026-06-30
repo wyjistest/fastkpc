@@ -175,6 +175,7 @@ struct SchedulerDiagnostics {
   double dcov_reduce_sec;
   double dcov_scalars_d2h_sec;
   double dcov_host_scalar_sec;
+  double dcov_result_materialize_sec;
   double dcov_free_sec;
   double dcov_total_sec;
   int dcov_chunks;
@@ -183,6 +184,8 @@ struct SchedulerDiagnostics {
   int dcov_workspace_grow_count;
   int dcov_raw_aggregate_fused_count;
   int dcov_row_product_reduce_count;
+  int dcov_pvalue_only_count;
+  int dcov_full_result_materialize_count;
   std::vector<LayerDiagnosticsLevel> per_level;
   std::vector<SchedulerBatchDiagnostic> batches;
   std::vector<SchedulerResidualDiagnostic> residuals;

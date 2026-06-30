@@ -54,7 +54,7 @@ required_stages <- c(
   "residual_prefetch_batch_input", "residual_batch_call_wall",
   "residual_diagnostic_merge", "residual_prefetch_unaccounted",
   "ci_dcov_call_wall", "ci_pvalue_copy", "ci_diagnostic_append",
-  "ci_eval_unaccounted"
+  "ci_eval_unaccounted", "dcov_result_materialize"
 )
 missing_stages <- setdiff(required_stages, unique(breakdown$stage))
 assert_true(length(missing_stages) == 0L,
@@ -83,6 +83,10 @@ assert_true(runs$dcov_raw_aggregate_fused_count[[1L]] > 0L,
             "stage breakdown should record dCov raw aggregate fusion")
 assert_true(runs$dcov_row_product_reduce_count[[1L]] > 0L,
             "stage breakdown should record dCov row-product reduce")
+assert_true(runs$dcov_pvalue_only_count[[1L]] > 0L,
+            "stage breakdown should use dCov pvalue-only skeleton path")
+assert_true(runs$dcov_full_result_materialize_count[[1L]] == 0L,
+            "stage breakdown should avoid full dCov result materialization")
 ci_host_pack <- breakdown$elapsed_ms[breakdown$stage == "ci_host_pack"]
 assert_true(length(ci_host_pack) == 1L && is.finite(ci_host_pack[[1L]]) &&
               ci_host_pack[[1L]] > 0,

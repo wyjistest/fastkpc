@@ -210,6 +210,11 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
     row("dcov_host_gamma_pvalue",
         fastkpc_stage_breakdown_seconds(summary$dcov_host_scalar_sec),
         "dcov"),
+    row("dcov_result_materialize",
+        fastkpc_stage_breakdown_seconds(
+          summary$dcov_result_materialize_sec
+        ),
+        "dcov"),
     row("dcov_free", fastkpc_stage_breakdown_seconds(summary$dcov_free_sec),
         "dcov"),
     row("dcov_measured_total",
@@ -249,6 +254,10 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$dcov_raw_aggregate_fused_count %||% 0L),
     dcov_row_product_reduce_count =
       as.integer(summary$dcov_row_product_reduce_count %||% 0L),
+    dcov_pvalue_only_count =
+      as.integer(summary$dcov_pvalue_only_count %||% 0L),
+    dcov_full_result_materialize_count =
+      as.integer(summary$dcov_full_result_materialize_count %||% 0L),
     residual_batches = as.integer(summary$residual_batches %||% 0L),
     unique_residual_requests =
       as.integer(summary$unique_residual_requests %||% 0L),

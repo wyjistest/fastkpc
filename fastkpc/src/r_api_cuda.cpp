@@ -439,6 +439,8 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
       Rcpp::Named("dcov_reduce_sec") = diagnostics.dcov_reduce_sec,
       Rcpp::Named("dcov_scalars_d2h_sec") = diagnostics.dcov_scalars_d2h_sec,
       Rcpp::Named("dcov_host_scalar_sec") = diagnostics.dcov_host_scalar_sec,
+      Rcpp::Named("dcov_result_materialize_sec") =
+        diagnostics.dcov_result_materialize_sec,
       Rcpp::Named("dcov_free_sec") = diagnostics.dcov_free_sec,
       Rcpp::Named("dcov_total_sec") = diagnostics.dcov_total_sec,
       Rcpp::Named("dcov_chunks") = diagnostics.dcov_chunks,
@@ -450,7 +452,11 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
       Rcpp::Named("dcov_raw_aggregate_fused_count") =
         diagnostics.dcov_raw_aggregate_fused_count,
       Rcpp::Named("dcov_row_product_reduce_count") =
-        diagnostics.dcov_row_product_reduce_count
+        diagnostics.dcov_row_product_reduce_count,
+      Rcpp::Named("dcov_pvalue_only_count") =
+        diagnostics.dcov_pvalue_only_count,
+      Rcpp::Named("dcov_full_result_materialize_count") =
+        diagnostics.dcov_full_result_materialize_count
     ),
     Rcpp::Named("levels") =
       scheduler_levels_to_data_frame(diagnostics.per_level),
@@ -998,7 +1004,12 @@ extern "C" SEXP C_fast_dcov_batch_cuda(SEXP xs, SEXP ys, SEXP indexs,
       Rcpp::Named("raw_aggregate_fused_count") =
         result.raw_aggregate_fused_count,
       Rcpp::Named("row_product_reduce_count") =
-        result.row_product_reduce_count
+        result.row_product_reduce_count,
+      Rcpp::Named("pvalue_only_count") = result.pvalue_only_count,
+      Rcpp::Named("full_result_materialize_count") =
+        result.full_result_materialize_count,
+      Rcpp::Named("result_materialize_sec") =
+        result.result_materialize_sec
     )
   );
   END_RCPP

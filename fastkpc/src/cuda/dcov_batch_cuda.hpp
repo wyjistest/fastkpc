@@ -22,4 +22,12 @@ DcovBatchResult dcov_batch_cuda(const double* x,
                                 const DcovBatchOptions& options,
                                 DcovCudaWorkspace* workspace);
 
+DcovBatchResult dcov_batch_cuda_pvalues_into(const double* x,
+                                             const double* y,
+                                             int n,
+                                             int batch,
+                                             const DcovBatchOptions& options,
+                                             DcovCudaWorkspace* workspace,
+                                             double* out_pvalues);
+
 #endif

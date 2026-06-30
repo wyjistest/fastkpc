@@ -22,6 +22,7 @@ struct DcovBatchResult {
   double reduce_sec = 0.0;
   double scalars_d2h_sec = 0.0;
   double host_scalar_sec = 0.0;
+  double result_materialize_sec = 0.0;
   double free_sec = 0.0;
   double total_sec = 0.0;
   int chunks = 0;
@@ -30,6 +31,8 @@ struct DcovBatchResult {
   int workspace_grow_count = 0;
   int raw_aggregate_fused_count = 0;
   int row_product_reduce_count = 0;
+  int pvalue_only_count = 0;
+  int full_result_materialize_count = 0;
 };
 
 #endif

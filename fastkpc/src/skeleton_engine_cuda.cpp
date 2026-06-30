@@ -560,13 +560,11 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
 
     std::chrono::steady_clock::time_point stage =
       std::chrono::steady_clock::now();
-    const DcovBatchResult batch = dcov_batch_cuda(
-      xmat.data(), ymat.data(), n, count, options, dcov_workspace);
+    DcovBatchResult batch = dcov_batch_cuda_pvalues_into(
+      xmat.data(), ymat.data(), n, count, options, dcov_workspace,
+      pvalues.data() + start);
     diagnostics->ci_dcov_call_wall_sec += seconds_since(stage);
     stage = std::chrono::steady_clock::now();
-    for (int k = 0; k < count; ++k) {
-      pvalues[start + k] = batch.p_values[k];
-    }
     diagnostics->ci_pvalue_copy_sec += seconds_since(stage);
     stage = std::chrono::steady_clock::now();
     diagnostics->dcov_alloc_sec += batch.alloc_sec;
@@ -577,6 +575,7 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     diagnostics->dcov_reduce_sec += batch.reduce_sec;
     diagnostics->dcov_scalars_d2h_sec += batch.scalars_d2h_sec;
     diagnostics->dcov_host_scalar_sec += batch.host_scalar_sec;
+    diagnostics->dcov_result_materialize_sec += batch.result_materialize_sec;
     diagnostics->dcov_free_sec += batch.free_sec;
     diagnostics->dcov_total_sec += batch.total_sec;
     diagnostics->dcov_chunks += batch.chunks;
@@ -588,6 +587,9 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
       batch.raw_aggregate_fused_count;
     diagnostics->dcov_row_product_reduce_count +=
       batch.row_product_reduce_count;
+    diagnostics->dcov_pvalue_only_count += batch.pvalue_only_count;
+    diagnostics->dcov_full_result_materialize_count +=
+      batch.full_result_materialize_count;
     ++(*dcov_batches);
     diagnostics->batches.push_back(SchedulerBatchDiagnostic{
       level, *dcov_batches - 1, "dcov", tasks[start].task_id, count, n, "ok",

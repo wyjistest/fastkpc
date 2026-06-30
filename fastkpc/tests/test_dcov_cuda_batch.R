@@ -63,6 +63,10 @@ assert_true(as.integer(large$diagnostics$raw_aggregate_fused_count) > 0L,
             "direct dCov batch API should use fused raw aggregate rowsum")
 assert_true(as.integer(large$diagnostics$row_product_reduce_count) > 0L,
             "direct dCov batch API should use row-product reduce")
+assert_true(identical(as.integer(large$diagnostics$pvalue_only_count), 0L),
+            "direct dCov batch API should not use pvalue-only output")
+assert_true(as.integer(large$diagnostics$full_result_materialize_count) > 0L,
+            "direct dCov batch API should materialize the full result")
 
 set.seed(2301)
 wide_batch <- 70000L

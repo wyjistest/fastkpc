@@ -162,6 +162,7 @@ void add_timing(DcovBatchResult* out, const DcovBatchResult& value) {
   out->reduce_sec += value.reduce_sec;
   out->scalars_d2h_sec += value.scalars_d2h_sec;
   out->host_scalar_sec += value.host_scalar_sec;
+  out->result_materialize_sec += value.result_materialize_sec;
   out->free_sec += value.free_sec;
   out->total_sec += value.total_sec;
   out->chunks += value.chunks;
@@ -170,6 +171,8 @@ void add_timing(DcovBatchResult* out, const DcovBatchResult& value) {
   out->workspace_grow_count += value.workspace_grow_count;
   out->raw_aggregate_fused_count += value.raw_aggregate_fused_count;
   out->row_product_reduce_count += value.row_product_reduce_count;
+  out->pvalue_only_count += value.pvalue_only_count;
+  out->full_result_materialize_count += value.full_result_materialize_count;
 }
 
 int dcov_max_grid_batch_dimension() {
@@ -290,14 +293,19 @@ struct DcovCudaWorkspace {
 
 namespace {
 
-DcovBatchResult dcov_batch_cuda_chunk(const double* x,
-                                      const double* y,
-                                      int n,
-                                      int batch,
-                                      const DcovBatchOptions& options,
-                                      DcovCudaWorkspace* workspace) {
+DcovBatchResult dcov_batch_cuda_chunk_impl(const double* x,
+                                           const double* y,
+                                           int n,
+                                           int batch,
+                                           const DcovBatchOptions& options,
+                                           DcovCudaWorkspace* workspace,
+                                           double* out_pvalues,
+                                           bool full_result) {
   if (n <= 5) throw std::runtime_error("gamma approximation requires n > 5");
   if (batch < 1) throw std::runtime_error("batch must be positive");
+  if (!full_result && out_pvalues == nullptr) {
+    throw std::runtime_error("pvalue-only dCov output buffer is null");
+  }
 
   const std::chrono::steady_clock::time_point total_start =
     std::chrono::steady_clock::now();
@@ -366,11 +374,6 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
     result.row_product_reduce_count += batch;
     result.reduce_sec += elapsed_since(stage);
 
-    result.p_values.assign(batch, 0.0);
-    result.nV2.assign(batch, 0.0);
-    result.means.assign(batch, 0.0);
-    result.variances.assign(batch, 0.0);
-    result.raw_scalars.assign(raw_scalar_size, 0.0);
     double* device_scalars = buffers->h_device_scalars.data();
     stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(device_scalars, buffers->d_scalars,
@@ -378,6 +381,19 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
                           cudaMemcpyDeviceToHost),
                "copy scalars");
     result.scalars_d2h_sec += elapsed_since(stage);
+
+    stage = std::chrono::steady_clock::now();
+    if (full_result) {
+      result.p_values.assign(batch, 0.0);
+      result.nV2.assign(batch, 0.0);
+      result.means.assign(batch, 0.0);
+      result.variances.assign(batch, 0.0);
+      result.raw_scalars.assign(raw_scalar_size, 0.0);
+      result.full_result_materialize_count += batch;
+    } else {
+      result.pvalue_only_count += batch;
+    }
+    result.result_materialize_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
     for (int task = 0; task < batch; ++task) {
@@ -395,12 +411,6 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
       const double sab = raw_ab - 2.0 * row_ab / nd + total_ab / (nd * nd);
       const double saa = raw_aa - 2.0 * row_aa / nd + total_aa / (nd * nd);
       const double sbb = raw_bb - 2.0 * row_bb / nd + total_bb / (nd * nd);
-      const std::size_t base = static_cast<std::size_t>(task) * 5;
-      result.raw_scalars[base + 0] = sab;
-      result.raw_scalars[base + 1] = saa;
-      result.raw_scalars[base + 2] = sbb;
-      result.raw_scalars[base + 3] = total_k[task];
-      result.raw_scalars[base + 4] = total_l[task];
 
       const double nV2 = sab / nd;
       const double mean = (total_k[task] / (nd * nd)) *
@@ -411,10 +421,20 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
       const double scale = variance / mean;
       const double p = Rf_pgamma(nV2, alpha, scale, false, false);
 
-      result.nV2[task] = nV2;
-      result.means[task] = mean;
-      result.variances[task] = variance;
-      result.p_values[task] = p;
+      if (full_result) {
+        const std::size_t base = static_cast<std::size_t>(task) * 5;
+        result.raw_scalars[base + 0] = sab;
+        result.raw_scalars[base + 1] = saa;
+        result.raw_scalars[base + 2] = sbb;
+        result.raw_scalars[base + 3] = total_k[task];
+        result.raw_scalars[base + 4] = total_l[task];
+        result.nV2[task] = nV2;
+        result.means[task] = mean;
+        result.variances[task] = variance;
+        result.p_values[task] = p;
+      } else {
+        out_pvalues[task] = p;
+      }
     }
     result.host_scalar_sec += elapsed_since(stage);
 
@@ -427,6 +447,16 @@ DcovBatchResult dcov_batch_cuda_chunk(const double* x,
     if (!has_workspace) free_dcov_buffers(buffers);
     throw;
   }
+}
+
+DcovBatchResult dcov_batch_cuda_chunk(const double* x,
+                                      const double* y,
+                                      int n,
+                                      int batch,
+                                      const DcovBatchOptions& options,
+                                      DcovCudaWorkspace* workspace) {
+  return dcov_batch_cuda_chunk_impl(x, y, n, batch, options, workspace,
+                                    nullptr, true);
 }
 
 }  // namespace
@@ -482,6 +512,41 @@ DcovBatchResult dcov_batch_cuda(const double* x,
           chunk.raw_scalars[static_cast<std::size_t>(k) * 5 + s];
       }
     }
+  }
+
+  return result;
+}
+
+DcovBatchResult dcov_batch_cuda_pvalues_into(const double* x,
+                                             const double* y,
+                                             int n,
+                                             int batch,
+                                             const DcovBatchOptions& options,
+                                             DcovCudaWorkspace* workspace,
+                                             double* out_pvalues) {
+  if (n <= 5) throw std::runtime_error("gamma approximation requires n > 5");
+  if (batch < 1) throw std::runtime_error("batch must be positive");
+  if (out_pvalues == nullptr) {
+    throw std::runtime_error("pvalue-only dCov output buffer is null");
+  }
+
+  const int chunk_limit = dcov_max_grid_batch_dimension();
+  if (batch <= chunk_limit) {
+    return dcov_batch_cuda_chunk_impl(x, y, n, batch, options, workspace,
+                                      out_pvalues, false);
+  }
+
+  DcovBatchResult result;
+  result.chunks = 0;
+  result.max_chunk_batch = 0;
+
+  for (int start = 0; start < batch; start += chunk_limit) {
+    const int count = std::min(chunk_limit, batch - start);
+    const std::size_t offset = static_cast<std::size_t>(start) * n;
+    const DcovBatchResult chunk = dcov_batch_cuda_chunk_impl(
+      x + offset, y + offset, n, count, options, workspace,
+      out_pvalues + start, false);
+    add_timing(&result, chunk);
   }
 
   return result;

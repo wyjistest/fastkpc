@@ -246,6 +246,7 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.dcov_reduce_sec = 0.0;
   out.dcov_scalars_d2h_sec = 0.0;
   out.dcov_host_scalar_sec = 0.0;
+  out.dcov_result_materialize_sec = 0.0;
   out.dcov_free_sec = 0.0;
   out.dcov_total_sec = 0.0;
   out.dcov_chunks = 0;
@@ -254,6 +255,8 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.dcov_workspace_grow_count = 0;
   out.dcov_raw_aggregate_fused_count = 0;
   out.dcov_row_product_reduce_count = 0;
+  out.dcov_pvalue_only_count = 0;
+  out.dcov_full_result_materialize_count = 0;
   return out;
 }
 
