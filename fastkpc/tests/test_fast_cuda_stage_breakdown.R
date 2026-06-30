@@ -48,6 +48,7 @@ required_stages <- c(
   "dcov_fused_center_reduce", "dcov_measured_total", "residual_host_pack",
   "residual_factor_solve", "residual_factor_cholesky",
   "residual_factor_rhs_solve",
+  "residual_rhs_custom_solve", "residual_rhs_cublas_solve",
   "residual_factor_inverse_solve", "residual_d2h",
   "residual_cache_insert", "residual_true_batch_total",
   "residual_request_collect", "residual_prefetch_missing_scan",
@@ -116,6 +117,16 @@ assert_true(runs$residual_factor_cache_entries[[1L]] >= 0L,
             "stage breakdown should record factor cache entries")
 assert_true(runs$residual_rhs_solve_api_calls[[1L]] >= 0L,
             "stage breakdown should record RHS solve API calls")
+assert_true(runs$residual_rhs_custom_solve_count[[1L]] > 0L,
+            "stage breakdown should record custom RHS solves")
+assert_true(runs$residual_rhs_cublas_solve_count[[1L]] == 0L,
+            "stage breakdown should avoid cuBLAS RHS solves on small-p smoke run")
+assert_true(runs$residual_rhs_solve_fallback_count[[1L]] == 0L,
+            "stage breakdown should avoid RHS solve fallbacks on small-p smoke run")
+assert_true(runs$residual_rhs_custom_solve_ms[[1L]] > 0,
+            "stage breakdown should time custom RHS solves")
+assert_true(runs$residual_rhs_cublas_solve_ms[[1L]] >= 0,
+            "stage breakdown should time cuBLAS RHS solves")
 assert_true(runs$residual_lambda_candidates[[1L]] >= 0L,
             "stage breakdown should record lambda candidate count")
 assert_true(runs$residual_workspace_reuse_count[[1L]] >= 0L,

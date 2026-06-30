@@ -384,6 +384,16 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_rhs_solve_api_calls,
       Rcpp::Named("residual_rhs_target_solves") =
         diagnostics.residual_rhs_target_solves,
+      Rcpp::Named("residual_rhs_custom_solve_count") =
+        diagnostics.residual_rhs_custom_solve_count,
+      Rcpp::Named("residual_rhs_cublas_solve_count") =
+        diagnostics.residual_rhs_cublas_solve_count,
+      Rcpp::Named("residual_rhs_solve_fallback_count") =
+        diagnostics.residual_rhs_solve_fallback_count,
+      Rcpp::Named("residual_rhs_custom_solve_sec") =
+        diagnostics.residual_rhs_custom_solve_sec,
+      Rcpp::Named("residual_rhs_cublas_solve_sec") =
+        diagnostics.residual_rhs_cublas_solve_sec,
       Rcpp::Named("residual_winning_factor_reuse_count") =
         diagnostics.residual_winning_factor_reuse_count,
       Rcpp::Named("residual_factor_cache_hits") =
@@ -794,6 +804,16 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
     Rcpp::Named("inverse_solve_count") = diagnostics.inverse_solve_count,
     Rcpp::Named("rhs_solve_api_calls") = diagnostics.rhs_solve_api_calls,
     Rcpp::Named("rhs_target_solves") = diagnostics.rhs_target_solves,
+    Rcpp::Named("rhs_custom_solve_count") =
+      diagnostics.rhs_custom_solve_count,
+    Rcpp::Named("rhs_cublas_solve_count") =
+      diagnostics.rhs_cublas_solve_count,
+    Rcpp::Named("rhs_solve_fallback_count") =
+      diagnostics.rhs_solve_fallback_count,
+    Rcpp::Named("rhs_custom_solve_sec") =
+      diagnostics.rhs_custom_solve_sec,
+    Rcpp::Named("rhs_cublas_solve_sec") =
+      diagnostics.rhs_cublas_solve_sec,
     Rcpp::Named("winning_factor_reuse_count") =
       diagnostics.winning_factor_reuse_count,
     Rcpp::Named("factor_cache_hits") = diagnostics.factor_cache_hits,

@@ -289,6 +289,16 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.rhs_solve_api_calls;
         diagnostics->residual_rhs_target_solves +=
           batch_result.diagnostics.rhs_target_solves;
+        diagnostics->residual_rhs_custom_solve_count +=
+          batch_result.diagnostics.rhs_custom_solve_count;
+        diagnostics->residual_rhs_cublas_solve_count +=
+          batch_result.diagnostics.rhs_cublas_solve_count;
+        diagnostics->residual_rhs_solve_fallback_count +=
+          batch_result.diagnostics.rhs_solve_fallback_count;
+        diagnostics->residual_rhs_custom_solve_sec +=
+          batch_result.diagnostics.rhs_custom_solve_sec;
+        diagnostics->residual_rhs_cublas_solve_sec +=
+          batch_result.diagnostics.rhs_cublas_solve_sec;
         diagnostics->residual_winning_factor_reuse_count +=
           batch_result.diagnostics.winning_factor_reuse_count;
         diagnostics->residual_factor_cache_hits +=

@@ -163,6 +163,16 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
           summary$residual_factor_rhs_solve_sec
         ),
         "residual"),
+    row("residual_rhs_custom_solve",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_rhs_custom_solve_sec
+        ),
+        "residual"),
+    row("residual_rhs_cublas_solve",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_rhs_cublas_solve_sec
+        ),
+        "residual"),
     row("residual_factor_inverse_solve",
         fastkpc_stage_breakdown_seconds(
           summary$residual_factor_inverse_solve_sec
@@ -329,6 +339,20 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_rhs_solve_api_calls %||% 0L),
     residual_rhs_target_solves =
       as.integer(summary$residual_rhs_target_solves %||% 0L),
+    residual_rhs_custom_solve_count =
+      as.integer(summary$residual_rhs_custom_solve_count %||% 0L),
+    residual_rhs_cublas_solve_count =
+      as.integer(summary$residual_rhs_cublas_solve_count %||% 0L),
+    residual_rhs_solve_fallback_count =
+      as.integer(summary$residual_rhs_solve_fallback_count %||% 0L),
+    residual_rhs_custom_solve_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_rhs_custom_solve_sec
+      ) * 1000,
+    residual_rhs_cublas_solve_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_rhs_cublas_solve_sec
+      ) * 1000,
     residual_winning_factor_reuse_count =
       as.integer(summary$residual_winning_factor_reuse_count %||% 0L),
     residual_factor_cache_hits =
