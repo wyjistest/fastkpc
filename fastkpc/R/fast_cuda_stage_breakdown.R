@@ -106,6 +106,26 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
           summary$residual_prefetch_unaccounted_sec
         ),
         "residual"),
+    row("residual_batch_top_level_wall",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_batch_top_level_wall_sec
+        ),
+        "residual"),
+    row("residual_result_materialize",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_result_materialize_sec
+        ),
+        "residual"),
+    row("residual_fitted_materialize",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_fitted_materialize_sec
+        ),
+        "residual"),
+    row("residual_batch_top_level_unaccounted",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_batch_top_level_unaccounted_sec
+        ),
+        "residual"),
     row("residual_grouping",
         fastkpc_stage_breakdown_seconds(summary$residual_grouping_sec),
         "residual"),
@@ -369,6 +389,32 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_winning_residual_materialize_count %||% 0L),
     residual_algebraic_rss_clamp_count =
       as.integer(summary$residual_algebraic_rss_clamp_count %||% 0L),
+    residual_only_batch_count =
+      as.integer(summary$residual_only_batch_count %||% 0L),
+    residual_full_fit_batch_count =
+      as.integer(summary$residual_full_fit_batch_count %||% 0L),
+    residual_only_fit_count =
+      as.integer(summary$residual_only_fit_count %||% 0L),
+    residual_full_fit_materialize_count =
+      as.integer(summary$residual_full_fit_materialize_count %||% 0L),
+    residual_fitted_values_avoided =
+      as.integer(summary$residual_fitted_values_avoided %||% 0L),
+    residual_batch_top_level_wall_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_batch_top_level_wall_sec
+      ) * 1000,
+    residual_result_materialize_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_result_materialize_sec
+      ) * 1000,
+    residual_fitted_materialize_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_fitted_materialize_sec
+      ) * 1000,
+    residual_batch_top_level_unaccounted_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_batch_top_level_unaccounted_sec
+      ) * 1000,
     ci_dcov_call_wall_ms =
       fastkpc_stage_breakdown_seconds(summary$ci_dcov_call_wall_sec) * 1000,
     ci_pvalue_copy_ms =

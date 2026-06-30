@@ -53,6 +53,8 @@ required_stages <- c(
   "residual_request_collect", "residual_prefetch_missing_scan",
   "residual_prefetch_batch_input", "residual_batch_call_wall",
   "residual_diagnostic_merge", "residual_prefetch_unaccounted",
+  "residual_batch_top_level_wall", "residual_result_materialize",
+  "residual_fitted_materialize", "residual_batch_top_level_unaccounted",
   "ci_dcov_call_wall", "ci_pvalue_copy", "ci_diagnostic_append",
   "ci_eval_unaccounted", "dcov_result_materialize",
   "dcov_top_level_wall", "dcov_grid_limit_query",
@@ -138,6 +140,24 @@ assert_true(runs$residual_winning_residual_materialize_count[[1L]] > 0L,
             "stage breakdown should record winning residual materialization")
 assert_true(runs$residual_batch_call_wall_ms[[1L]] > 0,
             "stage breakdown should record residual batch-call wall time")
+assert_true(runs$residual_only_batch_count[[1L]] > 0L,
+            "stage breakdown should use residual-only scheduler batches")
+assert_true(runs$residual_full_fit_batch_count[[1L]] == 0L,
+            "stage breakdown should avoid full residual fit batches")
+assert_true(runs$residual_only_fit_count[[1L]] > 0L,
+            "stage breakdown should record residual-only fits")
+assert_true(runs$residual_full_fit_materialize_count[[1L]] == 0L,
+            "stage breakdown should avoid full residual fit materialization")
+assert_true(runs$residual_fitted_values_avoided[[1L]] > 0L,
+            "stage breakdown should record avoided fitted residual values")
+assert_true(runs$residual_batch_top_level_wall_ms[[1L]] > 0,
+            "stage breakdown should record residual callee top-level wall time")
+assert_true(runs$residual_result_materialize_ms[[1L]] >= 0,
+            "stage breakdown should record residual result materialization time")
+assert_true(runs$residual_fitted_materialize_ms[[1L]] >= 0,
+            "stage breakdown should record residual fitted materialization time")
+assert_true(runs$residual_batch_top_level_unaccounted_ms[[1L]] >= 0,
+            "stage breakdown should record residual callee top-level unaccounted time")
 assert_true(runs$residual_prefetch_unaccounted_ms[[1L]] >= 0,
             "stage breakdown should record residual prefetch unaccounted time")
 assert_true(runs$ci_dcov_call_wall_ms[[1L]] > 0,

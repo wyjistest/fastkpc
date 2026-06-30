@@ -230,6 +230,15 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_candidate_residual_materialize_count = 0;
   out.residual_winning_residual_materialize_count = 0;
   out.residual_algebraic_rss_clamp_count = 0;
+  out.residual_only_batch_count = 0;
+  out.residual_full_fit_batch_count = 0;
+  out.residual_only_fit_count = 0;
+  out.residual_full_fit_materialize_count = 0;
+  out.residual_fitted_values_avoided = 0;
+  out.residual_result_materialize_sec = 0.0;
+  out.residual_fitted_materialize_sec = 0.0;
+  out.residual_batch_top_level_wall_sec = 0.0;
+  out.residual_batch_top_level_unaccounted_sec = 0.0;
   out.ci_eval_elapsed_sec = 0.0;
   out.ci_host_pack_sec = 0.0;
   out.ci_dcov_call_wall_sec = 0.0;

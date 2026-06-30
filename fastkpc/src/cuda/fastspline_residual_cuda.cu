@@ -5,15 +5,26 @@
 #include <cusolverDn.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
 
 constexpr int kBlock = 256;
+
+double elapsed_since(std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration<double>(
+    std::chrono::steady_clock::now() - start).count();
+}
+
+double nonnegative_gap(double total, double accounted) {
+  return std::max(0.0, total - accounted);
+}
 
 __global__ void xtx_kernel(const double* X,
                            int n,
@@ -423,9 +434,19 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
   const FastSplineParams& params,
   bool fallback,
   FastSplineCudaWorkspace* workspace) {
+  const std::chrono::steady_clock::time_point call_start =
+    std::chrono::steady_clock::now();
   try {
-    return fit_fastspline_residuals_cuda_true_batch(
+    FastSplineCudaBatchResult result = fit_fastspline_residuals_cuda_true_batch(
       data, targets, conditioning_sets, params, fallback, workspace);
+    const double wall = elapsed_since(call_start);
+    result.diagnostics.residual_batch_top_level_wall_sec += wall;
+    const double accounted =
+      result.diagnostics.grouping_sec +
+      result.diagnostics.true_batch_total_sec;
+    result.diagnostics.residual_batch_top_level_unaccounted_sec +=
+      nonnegative_gap(wall, accounted);
+    return result;
   } catch (const std::exception& e) {
     if (!fallback) {
       throw std::runtime_error(std::string("CUDA fastSpline residual batch failed: ") +
@@ -478,6 +499,24 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
     result.diagnostics.workspace_reuse_count = 0;
     result.diagnostics.workspace_grow_count = 0;
     result.diagnostics.solver_handle_create_count = 0;
+    result.diagnostics.per_request_design_x_values = 0;
+    result.diagnostics.duplicate_design_x_values_avoided = 0;
+    result.diagnostics.algebraic_rss_count = 0;
+    result.diagnostics.candidate_residual_materialize_count = 0;
+    result.diagnostics.winning_residual_materialize_count = 0;
+    result.diagnostics.algebraic_rss_clamp_count = 0;
+    result.diagnostics.residual_only_batch_count = 0;
+    result.diagnostics.residual_full_fit_batch_count = targets.empty() ? 0 : 1;
+    result.diagnostics.residual_only_fit_count = 0;
+    result.diagnostics.residual_full_fit_materialize_count =
+      static_cast<int>(targets.size());
+    result.diagnostics.residual_fitted_values_avoided = 0;
+    result.diagnostics.residual_result_materialize_sec = 0.0;
+    result.diagnostics.residual_fitted_materialize_sec = 0.0;
+    result.diagnostics.residual_batch_top_level_wall_sec =
+      elapsed_since(call_start);
+    result.diagnostics.residual_batch_top_level_unaccounted_sec =
+      result.diagnostics.residual_batch_top_level_wall_sec;
     if (!targets.empty()) {
       result.diagnostics.group_id.push_back(0);
       result.diagnostics.group_n.push_back(data.nrow());
@@ -504,6 +543,95 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
       fit.diagnostics.true_batched = false;
       fit.diagnostics.cholesky_backend = "cpu-fallback";
       result.fits.push_back(fit);
+    }
+    return result;
+  }
+}
+
+FastSplineCudaResidualOnlyBatchResult
+fit_fastspline_residuals_cuda_batch_residuals_only(
+  const Rcpp::NumericMatrix& data,
+  const std::vector<int>& targets,
+  const std::vector<std::vector<int> >& conditioning_sets,
+  const FastSplineParams& params,
+  bool fallback,
+  FastSplineCudaWorkspace* workspace) {
+  const std::chrono::steady_clock::time_point call_start =
+    std::chrono::steady_clock::now();
+  try {
+    FastSplineCudaResidualOnlyBatchResult result =
+      fit_fastspline_residuals_cuda_true_batch_residuals_only(
+        data, targets, conditioning_sets, params, fallback, workspace);
+    const double wall = elapsed_since(call_start);
+    result.diagnostics.residual_batch_top_level_wall_sec += wall;
+    const double accounted =
+      result.diagnostics.grouping_sec +
+      result.diagnostics.true_batch_total_sec;
+    result.diagnostics.residual_batch_top_level_unaccounted_sec +=
+      nonnegative_gap(wall, accounted);
+    return result;
+  } catch (const std::exception& e) {
+    if (!fallback) {
+      throw std::runtime_error(std::string("CUDA fastSpline residual batch failed: ") +
+                               e.what());
+    }
+
+    FastSplineCudaResidualOnlyBatchResult result;
+    result.fits.reserve(targets.size());
+    result.diagnostics = FastSplineCudaBatchDiagnostics();
+    result.diagnostics.requested_fits = static_cast<int>(targets.size());
+    result.diagnostics.groups = targets.empty() ? 0 : 1;
+    result.diagnostics.true_batched_groups = 0;
+    result.diagnostics.true_batched_fits = 0;
+    result.diagnostics.single_fit_calls = 0;
+    result.diagnostics.cpu_fallback_fits = static_cast<int>(targets.size());
+    result.diagnostics.unique_designs = 0;
+    result.diagnostics.duplicate_design_fits = 0;
+    result.diagnostics.max_fits_per_design = 0;
+    result.diagnostics.max_group_size = static_cast<int>(targets.size());
+    result.diagnostics.min_group_size = static_cast<int>(targets.size());
+    result.diagnostics.cholesky_backend = "cpu-fallback";
+    result.diagnostics.batch_mode = targets.empty() ? "empty" : "fallback";
+    result.diagnostics.residual_only_batch_count = targets.empty() ? 0 : 1;
+    result.diagnostics.residual_full_fit_batch_count = 0;
+    result.diagnostics.residual_only_fit_count = static_cast<int>(targets.size());
+    result.diagnostics.residual_full_fit_materialize_count = 0;
+    result.diagnostics.residual_fitted_values_avoided = 0;
+    result.diagnostics.residual_batch_top_level_wall_sec =
+      elapsed_since(call_start);
+    result.diagnostics.residual_batch_top_level_unaccounted_sec =
+      result.diagnostics.residual_batch_top_level_wall_sec;
+    if (!targets.empty()) {
+      result.diagnostics.group_id.push_back(0);
+      result.diagnostics.group_n.push_back(data.nrow());
+      result.diagnostics.group_design_cols.push_back(-1);
+      result.diagnostics.group_fit_count.push_back(
+        static_cast<int>(targets.size()));
+      result.diagnostics.group_true_batched.push_back(0);
+      result.diagnostics.group_single_fit_calls.push_back(0);
+      result.diagnostics.group_cpu_fallback_fits.push_back(
+        static_cast<int>(targets.size()));
+      result.diagnostics.group_unique_designs.push_back(0);
+      result.diagnostics.group_duplicate_design_fits.push_back(0);
+      result.diagnostics.group_max_fits_per_design.push_back(0);
+      result.diagnostics.group_cholesky_backend.push_back("cpu-fallback");
+      result.diagnostics.group_status.push_back("fallback");
+      result.diagnostics.group_reason.push_back(e.what());
+    }
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+      FastSplineFit fit =
+        fit_fastspline_residuals(data, targets[i], conditioning_sets[i],
+                                 params);
+      FastSplineCudaResidualOnlyFit residual_fit;
+      residual_fit.residuals = std::move(fit.residuals);
+      residual_fit.diagnostics.cuda_used = false;
+      residual_fit.diagnostics.fallback_used = true;
+      residual_fit.diagnostics.reason = e.what();
+      residual_fit.diagnostics.batch_group_id = 0;
+      residual_fit.diagnostics.batch_position = static_cast<int>(i);
+      residual_fit.diagnostics.true_batched = false;
+      residual_fit.diagnostics.cholesky_backend = "cpu-fallback";
+      result.fits.push_back(std::move(residual_fit));
     }
     return result;
   }

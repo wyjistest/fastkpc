@@ -13,6 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -68,6 +69,15 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->winning_residual_materialize_count +=
     value.winning_residual_materialize_count;
   out->algebraic_rss_clamp_count += value.algebraic_rss_clamp_count;
+  out->residual_only_fit_count += value.residual_only_fit_count;
+  out->residual_full_fit_materialize_count +=
+    value.residual_full_fit_materialize_count;
+  out->residual_fitted_values_avoided +=
+    value.residual_fitted_values_avoided;
+  out->residual_result_materialize_sec +=
+    value.residual_result_materialize_sec;
+  out->residual_fitted_materialize_sec +=
+    value.residual_fitted_materialize_sec;
 }
 
 __device__ __host__ inline std::size_t matrix_offset(int fit,
@@ -472,6 +482,33 @@ __global__ void batched_fitted_residual_by_design_kernel(
   residuals[out_idx] = y[out_idx] - value;
 }
 
+__global__ void batched_residual_by_design_kernel(
+  const double* design_X,
+  const double* y,
+  const double* beta,
+  const int* design_index,
+  const int* active,
+  int group_size,
+  int n,
+  int p,
+  double* residuals) {
+  const int row = blockIdx.x * blockDim.x + threadIdx.x;
+  const int fit = blockIdx.y;
+  if (fit >= group_size || row >= n) return;
+  const std::size_t out_idx = static_cast<std::size_t>(fit) * n + row;
+  if (active[fit] == 0) {
+    residuals[out_idx] = 0.0;
+    return;
+  }
+  const int design = design_index[fit];
+  double value = 0.0;
+  for (int col = 0; col < p; ++col) {
+    value += design_X[matrix_offset(design, row, col, n, p)] *
+             beta[static_cast<std::size_t>(fit) * p + col];
+  }
+  residuals[out_idx] = y[out_idx] - value;
+}
+
 __global__ void batched_y_norm2_kernel(const double* y,
                                        int group_size,
                                        int n,
@@ -681,6 +718,7 @@ void ensure_group_buffers(DeviceGroupBuffers* buffers,
                           int selected_capacity,
                           int info_count,
                           int candidate_factor_count,
+                          bool need_fitted,
                           FastSplineCudaBatchDiagnostics* timing) {
   ensure_device_capacity(&buffers->d_X, &buffers->d_X_capacity, x_size,
                          "alloc batched X", timing);
@@ -717,7 +755,8 @@ void ensure_group_buffers(DeviceGroupBuffers* buffers,
                          &buffers->d_design_Ainv_capacity, candidate_pp_size,
                          "alloc batched design A inverse", timing);
   ensure_device_capacity(&buffers->d_fitted, &buffers->d_fitted_capacity,
-                         y_size, "alloc batched fitted", timing);
+                         need_fitted ? y_size : 0,
+                         "alloc batched fitted", timing);
   ensure_device_capacity(&buffers->d_residuals,
                          &buffers->d_residuals_capacity, y_size,
                          "alloc batched residuals", timing);
@@ -900,13 +939,19 @@ struct BestFitState {
   std::vector<double> residuals;
 };
 
-std::vector<FastSplineCudaFit> run_true_batched_group(
+struct TrueBatchGroupResult {
+  std::vector<FastSplineCudaFit> full_fits;
+  std::vector<FastSplineCudaResidualOnlyFit> residual_only_fits;
+};
+
+TrueBatchGroupResult run_true_batched_group(
   const Rcpp::NumericMatrix& data,
   const FastSplineBatchGroup& group,
   const FastSplineParams& params,
   const std::string& backend,
   FastSplineCudaBatchDiagnostics* timing,
-  FastSplineCudaWorkspace* workspace) {
+  FastSplineCudaWorkspace* workspace,
+  bool residual_only) {
   const int group_size = static_cast<int>(group.requests.size());
   const int n = group.n;
   const int p = group.design_cols;
@@ -963,7 +1008,8 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     ensure_group_buffers(buffers, x_size, design_x_size, design_pp_size,
                          y_size, group_size, vec_size, factor_pp_size,
                          candidate_pp_size, lambda_count, group_size,
-                         info_count, candidate_factor_count, timing);
+                         info_count, candidate_factor_count,
+                         !residual_only, timing);
     timing->alloc_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
@@ -1306,60 +1352,103 @@ std::vector<FastSplineCudaFit> run_true_batched_group(
     stage = std::chrono::steady_clock::now();
     const int row_blocks = (n + kBlock - 1) / kBlock;
     const dim3 fit_grid(std::max(1, row_blocks), group_size);
-    batched_fitted_residual_by_design_kernel<<<fit_grid, kBlock>>>(
-      buffers->d_design_X, buffers->d_y, buffers->d_beta,
-      buffers->d_request_design_index, buffers->d_active, group_size, n, p,
-      buffers->d_fitted, buffers->d_residuals);
+    if (residual_only) {
+      batched_residual_by_design_kernel<<<fit_grid, kBlock>>>(
+        buffers->d_design_X, buffers->d_y, buffers->d_beta,
+        buffers->d_request_design_index, buffers->d_active, group_size, n, p,
+        buffers->d_residuals);
+    } else {
+      batched_fitted_residual_by_design_kernel<<<fit_grid, kBlock>>>(
+        buffers->d_design_X, buffers->d_y, buffers->d_beta,
+        buffers->d_request_design_index, buffers->d_active, group_size, n, p,
+        buffers->d_fitted, buffers->d_residuals);
+    }
     check_cuda(cudaGetLastError(), "launch selected residual kernels");
     check_cuda(cudaDeviceSynchronize(), "synchronize selected residual kernels");
     timing->winning_residual_materialize_count += group_size;
+    if (residual_only) {
+      timing->residual_fitted_values_avoided += static_cast<int>(y_size);
+    }
     timing->residual_summary_sec += elapsed_since(stage);
 
     std::vector<int> final_info(group_size);
-    std::vector<double> fitted(y_size);
     std::vector<double> residuals(y_size);
     stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(final_info.data(), buffers->d_info,
                           sizeof(int) * group_size, cudaMemcpyDeviceToHost),
                "copy selected info");
-    check_cuda(cudaMemcpy(fitted.data(), buffers->d_fitted,
-                          sizeof(double) * y_size, cudaMemcpyDeviceToHost),
-               "copy selected fitted");
+    std::vector<double> fitted;
+    if (!residual_only) {
+      fitted.resize(y_size);
+      const std::chrono::steady_clock::time_point fitted_stage =
+        std::chrono::steady_clock::now();
+      check_cuda(cudaMemcpy(fitted.data(), buffers->d_fitted,
+                            sizeof(double) * y_size, cudaMemcpyDeviceToHost),
+                 "copy selected fitted");
+      timing->residual_fitted_materialize_sec +=
+        elapsed_since(fitted_stage);
+    }
     check_cuda(cudaMemcpy(residuals.data(), buffers->d_residuals,
                           sizeof(double) * y_size, cudaMemcpyDeviceToHost),
                "copy selected residuals");
     timing->d2h_sec += elapsed_since(stage);
 
-    std::vector<FastSplineCudaFit> out(group_size);
+    TrueBatchGroupResult out;
     stage = std::chrono::steady_clock::now();
-    for (int fit = 0; fit < group_size; ++fit) {
-      if (final_info[fit] != 0) {
-        throw std::runtime_error("selected CUDA fastSpline batch solve failed");
+    if (residual_only) {
+      out.residual_only_fits.resize(group_size);
+      for (int fit = 0; fit < group_size; ++fit) {
+        if (final_info[fit] != 0) {
+          throw std::runtime_error("selected CUDA fastSpline batch solve failed");
+        }
+        const std::size_t offset = static_cast<std::size_t>(fit) * n;
+        std::vector<double> fit_residuals(n);
+        std::copy(residuals.begin() + offset, residuals.begin() + offset + n,
+                  fit_residuals.begin());
+        if (!finite_vec(fit_residuals)) {
+          throw std::runtime_error("selected CUDA fastSpline residual contains non-finite values");
+        }
+        out.residual_only_fits[fit].residuals = std::move(fit_residuals);
+        out.residual_only_fits[fit].diagnostics =
+          make_diagnostics(true, false, "", group.group_id, fit, true,
+                           backend);
       }
-      const std::size_t offset = static_cast<std::size_t>(fit) * n;
-      std::vector<double> fit_fitted(n);
-      std::vector<double> fit_residuals(n);
-      std::copy(fitted.begin() + offset, fitted.begin() + offset + n,
-                fit_fitted.begin());
-      std::copy(residuals.begin() + offset, residuals.begin() + offset + n,
-                fit_residuals.begin());
-      if (!finite_vec(fit_fitted) || !finite_vec(fit_residuals)) {
-        throw std::runtime_error("selected CUDA fastSpline residual contains non-finite values");
+      timing->residual_only_fit_count += group_size;
+    } else {
+      out.full_fits.resize(group_size);
+      for (int fit = 0; fit < group_size; ++fit) {
+        if (final_info[fit] != 0) {
+          throw std::runtime_error("selected CUDA fastSpline batch solve failed");
+        }
+        const std::size_t offset = static_cast<std::size_t>(fit) * n;
+        std::vector<double> fit_fitted(n);
+        std::vector<double> fit_residuals(n);
+        std::copy(fitted.begin() + offset, fitted.begin() + offset + n,
+                  fit_fitted.begin());
+        std::copy(residuals.begin() + offset, residuals.begin() + offset + n,
+                  fit_residuals.begin());
+        if (!finite_vec(fit_fitted) || !finite_vec(fit_residuals)) {
+          throw std::runtime_error("selected CUDA fastSpline residual contains non-finite values");
+        }
+        FastSplineFit value;
+        value.residuals = fit_residuals;
+        value.fitted = fit_fitted;
+        value.selected_lambda = best[fit].lambda;
+        value.gcv = best[fit].gcv;
+        value.rss = best[fit].rss;
+        value.edf = best[fit].edf;
+        value.design_cols = p;
+        value.ridge_attempts = best[fit].ridge_attempt;
+        out.full_fits[fit].fit = value;
+        out.full_fits[fit].diagnostics =
+          make_diagnostics(true, false, "", group.group_id, fit, true,
+                           backend);
       }
-      FastSplineFit value;
-      value.residuals = fit_residuals;
-      value.fitted = fit_fitted;
-      value.selected_lambda = best[fit].lambda;
-      value.gcv = best[fit].gcv;
-      value.rss = best[fit].rss;
-      value.edf = best[fit].edf;
-      value.design_cols = p;
-      value.ridge_attempts = best[fit].ridge_attempt;
-      out[fit].fit = value;
-      out[fit].diagnostics = make_diagnostics(true, false, "", group.group_id,
-                                              fit, true, backend);
+      timing->residual_full_fit_materialize_count += group_size;
     }
-    timing->host_select_sec += elapsed_since(stage);
+    const double materialize_sec = elapsed_since(stage);
+    timing->residual_result_materialize_sec += materialize_sec;
+    timing->host_select_sec += materialize_sec;
     stage = std::chrono::steady_clock::now();
     if (workspace == nullptr) free_buffers(buffers);
     timing->free_sec += elapsed_since(stage);
@@ -1467,6 +1556,15 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.candidate_residual_materialize_count = 0;
   out.winning_residual_materialize_count = 0;
   out.algebraic_rss_clamp_count = 0;
+  out.residual_only_batch_count = 0;
+  out.residual_full_fit_batch_count = 0;
+  out.residual_only_fit_count = 0;
+  out.residual_full_fit_materialize_count = 0;
+  out.residual_fitted_values_avoided = 0;
+  out.residual_result_materialize_sec = 0.0;
+  out.residual_fitted_materialize_sec = 0.0;
+  out.residual_batch_top_level_wall_sec = 0.0;
+  out.residual_batch_top_level_unaccounted_sec = 0.0;
   return out;
 }
 
@@ -1560,6 +1658,7 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
   FastSplineCudaBatchResult result;
   result.fits.resize(requested_fits);
   result.diagnostics = make_empty_batch_diagnostics(requested_fits);
+  if (requested_fits > 0) result.diagnostics.residual_full_fit_batch_count = 1;
   if (requested_fits == 0) return result;
 
   std::chrono::steady_clock::time_point stage =
@@ -1582,6 +1681,7 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
         fit.diagnostics.cholesky_backend = fit.diagnostics.fallback_used ?
           "cpu-fallback" : "single-fit-cusolver";
       }
+      result.diagnostics.residual_full_fit_materialize_count += 1;
       result.fits[request.original_index] = fit;
       append_group_diagnostics(&result.diagnostics, group, false, 1,
                                fit.diagnostics.fallback_used ? 1 : 0,
@@ -1600,6 +1700,7 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
         result.fits[request.original_index] =
           cpu_fallback_fit(data, request, params, reason, group.group_id, i);
       }
+      result.diagnostics.residual_full_fit_materialize_count += fit_count;
       append_group_diagnostics(&result.diagnostics, group, false, 0, fit_count,
                                "cpu-fallback", "fallback", reason);
       continue;
@@ -1608,12 +1709,13 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
     try {
       FastSplineCudaBatchDiagnostics group_timing =
         make_empty_batch_diagnostics(fit_count);
-      const std::vector<FastSplineCudaFit> group_fits =
+      const TrueBatchGroupResult group_result =
         run_true_batched_group(data, group, params, true_backend,
-                               &group_timing, workspace);
+                               &group_timing, workspace, false);
       add_batch_timing(&result.diagnostics, group_timing);
       for (int i = 0; i < fit_count; ++i) {
-        result.fits[group.requests[i].original_index] = group_fits[i];
+        result.fits[group.requests[i].original_index] =
+          group_result.full_fits[i];
       }
       append_group_diagnostics(&result.diagnostics, group, true, 0, 0,
                                true_backend, "ok", "");
@@ -1625,6 +1727,108 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
         result.fits[request.original_index] =
           cpu_fallback_fit(data, request, params, reason, group.group_id, i);
       }
+      result.diagnostics.residual_full_fit_materialize_count += fit_count;
+      append_group_diagnostics(&result.diagnostics, group, false, 0, fit_count,
+                               "cpu-fallback", "fallback", reason);
+    }
+  }
+  if (result.diagnostics.cholesky_backend.empty()) {
+    result.diagnostics.cholesky_backend =
+      result.diagnostics.single_fit_calls > 0 ? "single-fit-cusolver" : "";
+  }
+  return result;
+}
+
+FastSplineCudaResidualOnlyBatchResult
+fit_fastspline_residuals_cuda_true_batch_residuals_only(
+  const Rcpp::NumericMatrix& data,
+  const std::vector<int>& targets,
+  const std::vector<std::vector<int> >& conditioning_sets,
+  const FastSplineParams& params,
+  bool fallback,
+  FastSplineCudaWorkspace* workspace) {
+  const int requested_fits = static_cast<int>(targets.size());
+  FastSplineCudaResidualOnlyBatchResult result;
+  result.fits.resize(requested_fits);
+  result.diagnostics = make_empty_batch_diagnostics(requested_fits);
+  if (requested_fits > 0) result.diagnostics.residual_only_batch_count = 1;
+  if (requested_fits == 0) return result;
+
+  std::chrono::steady_clock::time_point stage =
+    std::chrono::steady_clock::now();
+  const std::vector<FastSplineBatchGroup> groups =
+    make_fastspline_batch_groups(data, targets, conditioning_sets, params);
+  result.diagnostics.grouping_sec += elapsed_since(stage);
+  const std::string true_backend = "cusolver-batched";
+
+  for (const FastSplineBatchGroup& group : groups) {
+    const int fit_count = static_cast<int>(group.requests.size());
+    if (fit_count == 1) {
+      const FastSplineBatchRequest& request = group.requests[0];
+      FastSplineCudaFit fit = fit_fastspline_residuals_cuda(
+        data, request.target, request.conditioning_set, params, fallback);
+      fit.diagnostics.batch_group_id = group.group_id;
+      fit.diagnostics.batch_position = 0;
+      fit.diagnostics.true_batched = false;
+      if (fit.diagnostics.cholesky_backend.empty()) {
+        fit.diagnostics.cholesky_backend = fit.diagnostics.fallback_used ?
+          "cpu-fallback" : "single-fit-cusolver";
+      }
+      result.fits[request.original_index].residuals =
+        std::move(fit.fit.residuals);
+      result.fits[request.original_index].diagnostics = fit.diagnostics;
+      result.diagnostics.residual_only_fit_count += 1;
+      append_group_diagnostics(&result.diagnostics, group, false, 1,
+                               fit.diagnostics.fallback_used ? 1 : 0,
+                               fit.diagnostics.cholesky_backend,
+                               fit.diagnostics.fallback_used ? "fallback" : "ok",
+                               fit.diagnostics.reason);
+      continue;
+    }
+
+    if (group.design_cols > kMaxTrueBatchedDesignCols) {
+      const std::string reason = "CUDA fastSpline batch unsupported design_cols=" +
+        std::to_string(group.design_cols) + " for true batched solve";
+      if (!fallback) throw std::runtime_error(reason);
+      for (int i = 0; i < fit_count; ++i) {
+        const FastSplineBatchRequest& request = group.requests[i];
+        FastSplineCudaFit fit =
+          cpu_fallback_fit(data, request, params, reason, group.group_id, i);
+        result.fits[request.original_index].residuals =
+          std::move(fit.fit.residuals);
+        result.fits[request.original_index].diagnostics = fit.diagnostics;
+      }
+      result.diagnostics.residual_only_fit_count += fit_count;
+      append_group_diagnostics(&result.diagnostics, group, false, 0, fit_count,
+                               "cpu-fallback", "fallback", reason);
+      continue;
+    }
+
+    try {
+      FastSplineCudaBatchDiagnostics group_timing =
+        make_empty_batch_diagnostics(fit_count);
+      const TrueBatchGroupResult group_result =
+        run_true_batched_group(data, group, params, true_backend,
+                               &group_timing, workspace, true);
+      add_batch_timing(&result.diagnostics, group_timing);
+      for (int i = 0; i < fit_count; ++i) {
+        result.fits[group.requests[i].original_index] =
+          group_result.residual_only_fits[i];
+      }
+      append_group_diagnostics(&result.diagnostics, group, true, 0, 0,
+                               true_backend, "ok", "");
+    } catch (const std::exception& e) {
+      if (!fallback) throw;
+      const std::string reason = e.what();
+      for (int i = 0; i < fit_count; ++i) {
+        const FastSplineBatchRequest& request = group.requests[i];
+        FastSplineCudaFit fit =
+          cpu_fallback_fit(data, request, params, reason, group.group_id, i);
+        result.fits[request.original_index].residuals =
+          std::move(fit.fit.residuals);
+        result.fits[request.original_index].diagnostics = fit.diagnostics;
+      }
+      result.diagnostics.residual_only_fit_count += fit_count;
       append_group_diagnostics(&result.diagnostics, group, false, 0, fit_count,
                                "cpu-fallback", "fallback", reason);
     }

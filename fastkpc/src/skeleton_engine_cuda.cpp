@@ -205,12 +205,12 @@ class CudaSkeletonResidualCache {
         }
         diagnostics->residual_prefetch_batch_input_sec += seconds_since(stage);
         stage = std::chrono::steady_clock::now();
-        FastSplineCudaBatchResult batch_result =
-          fit_fastspline_residuals_cuda_batch_result(
+        FastSplineCudaResidualOnlyBatchResult batch_result =
+          fit_fastspline_residuals_cuda_batch_residuals_only(
             data, targets, conditioning_sets, backend_.fastspline, fallback_,
             residual_workspace_);
         diagnostics->residual_batch_call_wall_sec += seconds_since(stage);
-        std::vector<FastSplineCudaFit>& fits = batch_result.fits;
+        std::vector<FastSplineCudaResidualOnlyFit>& fits = batch_result.fits;
         stage = std::chrono::steady_clock::now();
         const std::pair<int, int> design_cols =
           minmax_design_cols(batch_result.diagnostics);
@@ -320,11 +320,29 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.winning_residual_materialize_count;
         diagnostics->residual_algebraic_rss_clamp_count +=
           batch_result.diagnostics.algebraic_rss_clamp_count;
+        diagnostics->residual_only_batch_count +=
+          batch_result.diagnostics.residual_only_batch_count;
+        diagnostics->residual_full_fit_batch_count +=
+          batch_result.diagnostics.residual_full_fit_batch_count;
+        diagnostics->residual_only_fit_count +=
+          batch_result.diagnostics.residual_only_fit_count;
+        diagnostics->residual_full_fit_materialize_count +=
+          batch_result.diagnostics.residual_full_fit_materialize_count;
+        diagnostics->residual_fitted_values_avoided +=
+          batch_result.diagnostics.residual_fitted_values_avoided;
+        diagnostics->residual_result_materialize_sec +=
+          batch_result.diagnostics.residual_result_materialize_sec;
+        diagnostics->residual_fitted_materialize_sec +=
+          batch_result.diagnostics.residual_fitted_materialize_sec;
+        diagnostics->residual_batch_top_level_wall_sec +=
+          batch_result.diagnostics.residual_batch_top_level_wall_sec;
+        diagnostics->residual_batch_top_level_unaccounted_sec +=
+          batch_result.diagnostics.residual_batch_top_level_unaccounted_sec;
         diagnostics->residual_diagnostic_merge_sec += seconds_since(stage);
         for (int i = 0; i < static_cast<int>(missing.size()); ++i) {
           const LayerResidualRequest& request = requests[missing[i].position];
           insert_prefetched_key(data.nrow(), missing[i].key,
-                                std::move(fits[i].fit.residuals),
+                                std::move(fits[i].residuals),
                                 diagnostics);
           stage = std::chrono::steady_clock::now();
           if (fits[i].diagnostics.fallback_used) {

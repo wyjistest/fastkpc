@@ -420,6 +420,24 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_winning_residual_materialize_count,
       Rcpp::Named("residual_algebraic_rss_clamp_count") =
         diagnostics.residual_algebraic_rss_clamp_count,
+      Rcpp::Named("residual_only_batch_count") =
+        diagnostics.residual_only_batch_count,
+      Rcpp::Named("residual_full_fit_batch_count") =
+        diagnostics.residual_full_fit_batch_count,
+      Rcpp::Named("residual_only_fit_count") =
+        diagnostics.residual_only_fit_count,
+      Rcpp::Named("residual_full_fit_materialize_count") =
+        diagnostics.residual_full_fit_materialize_count,
+      Rcpp::Named("residual_fitted_values_avoided") =
+        diagnostics.residual_fitted_values_avoided,
+      Rcpp::Named("residual_result_materialize_sec") =
+        diagnostics.residual_result_materialize_sec,
+      Rcpp::Named("residual_fitted_materialize_sec") =
+        diagnostics.residual_fitted_materialize_sec,
+      Rcpp::Named("residual_batch_top_level_wall_sec") =
+        diagnostics.residual_batch_top_level_wall_sec,
+      Rcpp::Named("residual_batch_top_level_unaccounted_sec") =
+        diagnostics.residual_batch_top_level_unaccounted_sec,
       Rcpp::Named("ci_eval_elapsed_sec") = diagnostics.ci_eval_elapsed_sec,
       Rcpp::Named("ci_host_pack_sec") = diagnostics.ci_host_pack_sec,
       Rcpp::Named("ci_dcov_call_wall_sec") =
@@ -798,6 +816,24 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.winning_residual_materialize_count,
     Rcpp::Named("algebraic_rss_clamp_count") =
       diagnostics.algebraic_rss_clamp_count,
+    Rcpp::Named("residual_only_batch_count") =
+      diagnostics.residual_only_batch_count,
+    Rcpp::Named("residual_full_fit_batch_count") =
+      diagnostics.residual_full_fit_batch_count,
+    Rcpp::Named("residual_only_fit_count") =
+      diagnostics.residual_only_fit_count,
+    Rcpp::Named("residual_full_fit_materialize_count") =
+      diagnostics.residual_full_fit_materialize_count,
+    Rcpp::Named("residual_fitted_values_avoided") =
+      diagnostics.residual_fitted_values_avoided,
+    Rcpp::Named("residual_result_materialize_sec") =
+      diagnostics.residual_result_materialize_sec,
+    Rcpp::Named("residual_fitted_materialize_sec") =
+      diagnostics.residual_fitted_materialize_sec,
+    Rcpp::Named("residual_batch_top_level_wall_sec") =
+      diagnostics.residual_batch_top_level_wall_sec,
+    Rcpp::Named("residual_batch_top_level_unaccounted_sec") =
+      diagnostics.residual_batch_top_level_unaccounted_sec,
     Rcpp::Named("group_table") =
       fastspline_batch_group_table_to_df(diagnostics)
   );

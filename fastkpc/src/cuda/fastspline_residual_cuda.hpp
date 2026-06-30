@@ -23,6 +23,11 @@ struct FastSplineCudaFit {
   FastSplineCudaDiagnostics diagnostics;
 };
 
+struct FastSplineCudaResidualOnlyFit {
+  std::vector<double> residuals;
+  FastSplineCudaDiagnostics diagnostics;
+};
+
 struct FastSplineCudaBatchDiagnostics {
   int requested_fits;
   int groups;
@@ -74,6 +79,15 @@ struct FastSplineCudaBatchDiagnostics {
   int candidate_residual_materialize_count;
   int winning_residual_materialize_count;
   int algebraic_rss_clamp_count;
+  int residual_only_batch_count;
+  int residual_full_fit_batch_count;
+  int residual_only_fit_count;
+  int residual_full_fit_materialize_count;
+  int residual_fitted_values_avoided;
+  double residual_result_materialize_sec;
+  double residual_fitted_materialize_sec;
+  double residual_batch_top_level_wall_sec;
+  double residual_batch_top_level_unaccounted_sec;
   std::vector<int> group_id;
   std::vector<int> group_n;
   std::vector<int> group_design_cols;
@@ -91,6 +105,11 @@ struct FastSplineCudaBatchDiagnostics {
 
 struct FastSplineCudaBatchResult {
   std::vector<FastSplineCudaFit> fits;
+  FastSplineCudaBatchDiagnostics diagnostics;
+};
+
+struct FastSplineCudaResidualOnlyBatchResult {
+  std::vector<FastSplineCudaResidualOnlyFit> fits;
   FastSplineCudaBatchDiagnostics diagnostics;
 };
 
@@ -115,6 +134,15 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
   bool fallback);
 
 FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
+  const Rcpp::NumericMatrix& data,
+  const std::vector<int>& targets,
+  const std::vector<std::vector<int> >& conditioning_sets,
+  const FastSplineParams& params,
+  bool fallback,
+  FastSplineCudaWorkspace* workspace);
+
+FastSplineCudaResidualOnlyBatchResult
+fit_fastspline_residuals_cuda_batch_residuals_only(
   const Rcpp::NumericMatrix& data,
   const std::vector<int>& targets,
   const std::vector<std::vector<int> >& conditioning_sets,
