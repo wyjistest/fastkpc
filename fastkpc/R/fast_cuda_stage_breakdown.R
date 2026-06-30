@@ -80,6 +80,32 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
     row("fastspline_residual_prefetch",
         fastkpc_stage_breakdown_seconds(summary$residual_prefetch_elapsed_sec),
         "residual"),
+    row("residual_request_collect",
+        fastkpc_stage_breakdown_seconds(summary$residual_request_collect_sec),
+        "residual"),
+    row("residual_prefetch_missing_scan",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_prefetch_missing_scan_sec
+        ),
+        "residual"),
+    row("residual_prefetch_batch_input",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_prefetch_batch_input_sec
+        ),
+        "residual"),
+    row("residual_batch_call_wall",
+        fastkpc_stage_breakdown_seconds(summary$residual_batch_call_wall_sec),
+        "residual"),
+    row("residual_diagnostic_merge",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_diagnostic_merge_sec
+        ),
+        "residual"),
+    row("residual_prefetch_unaccounted",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_prefetch_unaccounted_sec
+        ),
+        "residual"),
     row("residual_grouping",
         fastkpc_stage_breakdown_seconds(summary$residual_grouping_sec),
         "residual"),
@@ -147,6 +173,18 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
         "ci"),
     row("ci_host_pack",
         fastkpc_stage_breakdown_seconds(summary$ci_host_pack_sec),
+        "ci"),
+    row("ci_dcov_call_wall",
+        fastkpc_stage_breakdown_seconds(summary$ci_dcov_call_wall_sec),
+        "ci"),
+    row("ci_pvalue_copy",
+        fastkpc_stage_breakdown_seconds(summary$ci_pvalue_copy_sec),
+        "ci"),
+    row("ci_diagnostic_append",
+        fastkpc_stage_breakdown_seconds(summary$ci_diagnostic_append_sec),
+        "ci"),
+    row("ci_eval_unaccounted",
+        fastkpc_stage_breakdown_seconds(summary$ci_eval_unaccounted_sec),
         "ci"),
     row("native_replay",
         fastkpc_stage_breakdown_seconds(summary$replay_elapsed_sec),
@@ -254,6 +292,30 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_duplicate_design_x_values_avoided %||% 0L),
     residual_cache_insert_ms =
       fastkpc_stage_breakdown_seconds(summary$residual_cache_insert_sec) * 1000,
+    residual_request_collect_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_request_collect_sec
+      ) * 1000,
+    residual_prefetch_missing_scan_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_prefetch_missing_scan_sec
+      ) * 1000,
+    residual_prefetch_batch_input_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_prefetch_batch_input_sec
+      ) * 1000,
+    residual_batch_call_wall_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_batch_call_wall_sec
+      ) * 1000,
+    residual_diagnostic_merge_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_diagnostic_merge_sec
+      ) * 1000,
+    residual_prefetch_unaccounted_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_prefetch_unaccounted_sec
+      ) * 1000,
     residual_cache_move_insert_count =
       as.integer(summary$residual_cache_move_insert_count %||% 0L),
     residual_cache_copy_insert_count =
@@ -266,6 +328,14 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_winning_residual_materialize_count %||% 0L),
     residual_algebraic_rss_clamp_count =
       as.integer(summary$residual_algebraic_rss_clamp_count %||% 0L),
+    ci_dcov_call_wall_ms =
+      fastkpc_stage_breakdown_seconds(summary$ci_dcov_call_wall_sec) * 1000,
+    ci_pvalue_copy_ms =
+      fastkpc_stage_breakdown_seconds(summary$ci_pvalue_copy_sec) * 1000,
+    ci_diagnostic_append_ms =
+      fastkpc_stage_breakdown_seconds(summary$ci_diagnostic_append_sec) * 1000,
+    ci_eval_unaccounted_ms =
+      fastkpc_stage_breakdown_seconds(summary$ci_eval_unaccounted_sec) * 1000,
     stringsAsFactors = FALSE
   )
 }

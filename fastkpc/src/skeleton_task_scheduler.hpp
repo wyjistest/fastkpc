@@ -113,6 +113,12 @@ struct SchedulerDiagnostics {
   int residual_batch_size_used;
   double plan_elapsed_sec;
   double residual_prefetch_elapsed_sec;
+  double residual_request_collect_sec;
+  double residual_prefetch_missing_scan_sec;
+  double residual_prefetch_batch_input_sec;
+  double residual_batch_call_wall_sec;
+  double residual_diagnostic_merge_sec;
+  double residual_prefetch_unaccounted_sec;
   double residual_grouping_sec;
   double residual_host_pack_sec;
   double residual_alloc_sec;
@@ -155,6 +161,10 @@ struct SchedulerDiagnostics {
   int residual_algebraic_rss_clamp_count;
   double ci_eval_elapsed_sec;
   double ci_host_pack_sec;
+  double ci_dcov_call_wall_sec;
+  double ci_pvalue_copy_sec;
+  double ci_diagnostic_append_sec;
+  double ci_eval_unaccounted_sec;
   double replay_elapsed_sec;
   double total_elapsed_sec;
   double dcov_alloc_sec;

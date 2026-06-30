@@ -30,6 +30,10 @@ double seconds_since(std::chrono::steady_clock::time_point start) {
     std::chrono::steady_clock::now() - start).count();
 }
 
+double nonnegative_gap(double total, double accounted) {
+  return std::max(0.0, total - accounted);
+}
+
 struct HsicCudaEvalCounters {
   int gamma_tests = 0;
   int perm_tests = 0;
@@ -143,6 +147,13 @@ class CudaSkeletonResidualCache {
       residual_batch_size, static_cast<int>(requests.size()));
     diagnostics->residual_batch_size_used =
       std::max(diagnostics->residual_batch_size_used, actual_batch_size);
+    const int expected_batches =
+      (static_cast<int>(requests.size()) + actual_batch_size - 1) /
+      actual_batch_size;
+    diagnostics->batches.reserve(diagnostics->batches.size() +
+                                 static_cast<std::size_t>(expected_batches));
+    diagnostics->residuals.reserve(diagnostics->residuals.size() +
+                                   requests.size());
 
     int batch_count = 0;
     for (int start = 0; start < static_cast<int>(requests.size());
@@ -152,6 +163,8 @@ class CudaSkeletonResidualCache {
       std::vector<MissingResidual> missing;
       missing.reserve(count);
 
+      std::chrono::steady_clock::time_point stage =
+        std::chrono::steady_clock::now();
       for (int k = 0; k < count; ++k) {
         const LayerResidualRequest& request = requests[start + k];
         ResidualCacheKey key = make_key(data, request.target,
@@ -168,6 +181,7 @@ class CudaSkeletonResidualCache {
             used_device_, true, false, "cache-hit"});
         }
       }
+      diagnostics->residual_prefetch_missing_scan_sec += seconds_since(stage);
 
       if (missing.empty()) continue;
       ++batch_count;
@@ -179,6 +193,7 @@ class CudaSkeletonResidualCache {
 
       if (backend_.kind == ResidualBackendKind::FastSpline &&
           used_device_ == "cuda") {
+        stage = std::chrono::steady_clock::now();
         std::vector<int> targets;
         std::vector<std::vector<int> > conditioning_sets;
         targets.reserve(missing.size());
@@ -188,11 +203,15 @@ class CudaSkeletonResidualCache {
           targets.push_back(request.target);
           conditioning_sets.push_back(miss.key.conditioning_set);
         }
+        diagnostics->residual_prefetch_batch_input_sec += seconds_since(stage);
+        stage = std::chrono::steady_clock::now();
         FastSplineCudaBatchResult batch_result =
           fit_fastspline_residuals_cuda_batch_result(
             data, targets, conditioning_sets, backend_.fastspline, fallback_,
             residual_workspace_);
+        diagnostics->residual_batch_call_wall_sec += seconds_since(stage);
         std::vector<FastSplineCudaFit>& fits = batch_result.fits;
+        stage = std::chrono::steady_clock::now();
         const std::pair<int, int> design_cols =
           minmax_design_cols(batch_result.diagnostics);
         batch_diag.groups = batch_result.diagnostics.groups;
@@ -301,11 +320,13 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.winning_residual_materialize_count;
         diagnostics->residual_algebraic_rss_clamp_count +=
           batch_result.diagnostics.algebraic_rss_clamp_count;
+        diagnostics->residual_diagnostic_merge_sec += seconds_since(stage);
         for (int i = 0; i < static_cast<int>(missing.size()); ++i) {
           const LayerResidualRequest& request = requests[missing[i].position];
           insert_prefetched_key(data.nrow(), missing[i].key,
                                 std::move(fits[i].fit.residuals),
                                 diagnostics);
+          stage = std::chrono::steady_clock::now();
           if (fits[i].diagnostics.fallback_used) {
             used_device_ = "cuda-fallback-cpu";
             if (reason_.empty()) reason_ = fits[i].diagnostics.reason;
@@ -316,6 +337,7 @@ class CudaSkeletonResidualCache {
             fits[i].diagnostics.fallback_used ? "cuda-fallback-cpu" : "cuda",
             true, fits[i].diagnostics.fallback_used,
             fits[i].diagnostics.reason});
+          diagnostics->residual_diagnostic_merge_sec += seconds_since(stage);
         }
       } else {
         batch_diag.groups = 1;
@@ -329,13 +351,17 @@ class CudaSkeletonResidualCache {
                                            miss.key.conditioning_set, backend_);
           insert_prefetched_key(data.nrow(), miss.key, std::move(residuals),
                                 diagnostics);
+          stage = std::chrono::steady_clock::now();
           diagnostics->residuals.push_back(SchedulerResidualDiagnostic{
             level, request.request_id, request.target,
             static_cast<int>(request.conditioning_set.size()), backend_.name,
             used_device_, true, false, ""});
+          diagnostics->residual_diagnostic_merge_sec += seconds_since(stage);
         }
       }
+      stage = std::chrono::steady_clock::now();
       diagnostics->batches.push_back(batch_diag);
+      diagnostics->residual_diagnostic_merge_sec += seconds_since(stage);
     }
     return batch_count;
   }
@@ -514,6 +540,11 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     batch_size, n, static_cast<int>(tasks.size()));
   diagnostics->dcov_batch_size_used =
     std::max(diagnostics->dcov_batch_size_used, actual_batch_size);
+  const int expected_batches =
+    (static_cast<int>(tasks.size()) + actual_batch_size - 1) /
+    actual_batch_size;
+  diagnostics->batches.reserve(diagnostics->batches.size() +
+                               static_cast<std::size_t>(expected_batches));
 
   DcovBatchOptions options;
   options.index = index;
@@ -527,11 +558,17 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     diagnostics->ci_host_pack_sec += pack_ci_task_batch(
       data, tasks, start, count, n, residual_cache, xmat.data(), ymat.data());
 
+    std::chrono::steady_clock::time_point stage =
+      std::chrono::steady_clock::now();
     const DcovBatchResult batch = dcov_batch_cuda(
       xmat.data(), ymat.data(), n, count, options, dcov_workspace);
+    diagnostics->ci_dcov_call_wall_sec += seconds_since(stage);
+    stage = std::chrono::steady_clock::now();
     for (int k = 0; k < count; ++k) {
       pvalues[start + k] = batch.p_values[k];
     }
+    diagnostics->ci_pvalue_copy_sec += seconds_since(stage);
+    stage = std::chrono::steady_clock::now();
     diagnostics->dcov_alloc_sec += batch.alloc_sec;
     diagnostics->dcov_h2d_sec += batch.h2d_sec;
     diagnostics->dcov_memset_sec += batch.memset_sec;
@@ -555,6 +592,7 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     diagnostics->batches.push_back(SchedulerBatchDiagnostic{
       level, *dcov_batches - 1, "dcov", tasks[start].task_id, count, n, "ok",
       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+    diagnostics->ci_diagnostic_append_sec += seconds_since(stage);
   }
   return pvalues;
 }
@@ -761,20 +799,50 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
     int residual_batches = 0;
 
     const ResidualCacheStats before_stats = residual_cache.stats();
+    const double residual_request_collect_before =
+      diagnostics.residual_request_collect_sec;
+    const double residual_missing_scan_before =
+      diagnostics.residual_prefetch_missing_scan_sec;
+    const double residual_batch_input_before =
+      diagnostics.residual_prefetch_batch_input_sec;
+    const double residual_batch_call_before =
+      diagnostics.residual_batch_call_wall_sec;
+    const double residual_diagnostic_merge_before =
+      diagnostics.residual_diagnostic_merge_sec;
+    const double residual_cache_insert_before =
+      diagnostics.residual_cache_insert_sec;
     const std::chrono::steady_clock::time_point residual_start =
       std::chrono::steady_clock::now();
     if (scheduler == "layer") {
+      const std::chrono::steady_clock::time_point collect_start =
+        std::chrono::steady_clock::now();
       residual_requests = collect_unique_residual_requests(
         plan, data.nrow(), data.ncol(), residual_cache.backend().name,
         residual_cache.backend().params, residual_cache.used_device());
+      diagnostics.residual_request_collect_sec += seconds_since(collect_start);
       plan.unique_residual_requests = static_cast<int>(residual_requests.size());
       residual_batches = residual_cache.prefetch_level(
         data, residual_requests, ord, options.residual_batch_size, &diagnostics);
     }
     const double residual_prefetch_elapsed_sec = seconds_since(residual_start);
+    const double residual_prefetch_accounted_sec =
+      diagnostics.residual_request_collect_sec - residual_request_collect_before +
+      diagnostics.residual_prefetch_missing_scan_sec - residual_missing_scan_before +
+      diagnostics.residual_prefetch_batch_input_sec - residual_batch_input_before +
+      diagnostics.residual_batch_call_wall_sec - residual_batch_call_before +
+      diagnostics.residual_diagnostic_merge_sec - residual_diagnostic_merge_before +
+      diagnostics.residual_cache_insert_sec - residual_cache_insert_before;
+    diagnostics.residual_prefetch_unaccounted_sec +=
+      nonnegative_gap(residual_prefetch_elapsed_sec,
+                      residual_prefetch_accounted_sec);
 
     int dcov_batches = 0;
     std::vector<double> pvalues;
+    const double ci_host_pack_before = diagnostics.ci_host_pack_sec;
+    const double ci_dcov_call_before = diagnostics.ci_dcov_call_wall_sec;
+    const double ci_pvalue_copy_before = diagnostics.ci_pvalue_copy_sec;
+    const double ci_diagnostic_append_before =
+      diagnostics.ci_diagnostic_append_sec;
     const std::chrono::steady_clock::time_point ci_eval_start =
       std::chrono::steady_clock::now();
     if (ci_method == CiMethodKind::DccGamma) {
@@ -788,6 +856,13 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
         ord, &residual_cache, &diagnostics, &hsic_counters);
     }
     const double ci_eval_elapsed_sec = seconds_since(ci_eval_start);
+    const double ci_eval_accounted_sec =
+      diagnostics.ci_host_pack_sec - ci_host_pack_before +
+      diagnostics.ci_dcov_call_wall_sec - ci_dcov_call_before +
+      diagnostics.ci_pvalue_copy_sec - ci_pvalue_copy_before +
+      diagnostics.ci_diagnostic_append_sec - ci_diagnostic_append_before;
+    diagnostics.ci_eval_unaccounted_sec +=
+      nonnegative_gap(ci_eval_elapsed_sec, ci_eval_accounted_sec);
 
     const ResidualCacheStats after_stats = residual_cache.stats();
     if (scheduler != "layer") {

@@ -184,6 +184,12 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_batch_size_used = 0;
   out.plan_elapsed_sec = 0.0;
   out.residual_prefetch_elapsed_sec = 0.0;
+  out.residual_request_collect_sec = 0.0;
+  out.residual_prefetch_missing_scan_sec = 0.0;
+  out.residual_prefetch_batch_input_sec = 0.0;
+  out.residual_batch_call_wall_sec = 0.0;
+  out.residual_diagnostic_merge_sec = 0.0;
+  out.residual_prefetch_unaccounted_sec = 0.0;
   out.residual_grouping_sec = 0.0;
   out.residual_host_pack_sec = 0.0;
   out.residual_alloc_sec = 0.0;
@@ -226,6 +232,10 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_algebraic_rss_clamp_count = 0;
   out.ci_eval_elapsed_sec = 0.0;
   out.ci_host_pack_sec = 0.0;
+  out.ci_dcov_call_wall_sec = 0.0;
+  out.ci_pvalue_copy_sec = 0.0;
+  out.ci_diagnostic_append_sec = 0.0;
+  out.ci_eval_unaccounted_sec = 0.0;
   out.replay_elapsed_sec = 0.0;
   out.total_elapsed_sec = 0.0;
   out.dcov_alloc_sec = 0.0;

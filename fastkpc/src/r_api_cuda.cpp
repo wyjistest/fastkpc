@@ -332,6 +332,18 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
       Rcpp::Named("plan_elapsed_sec") = diagnostics.plan_elapsed_sec,
       Rcpp::Named("residual_prefetch_elapsed_sec") =
         diagnostics.residual_prefetch_elapsed_sec,
+      Rcpp::Named("residual_request_collect_sec") =
+        diagnostics.residual_request_collect_sec,
+      Rcpp::Named("residual_prefetch_missing_scan_sec") =
+        diagnostics.residual_prefetch_missing_scan_sec,
+      Rcpp::Named("residual_prefetch_batch_input_sec") =
+        diagnostics.residual_prefetch_batch_input_sec,
+      Rcpp::Named("residual_batch_call_wall_sec") =
+        diagnostics.residual_batch_call_wall_sec,
+      Rcpp::Named("residual_diagnostic_merge_sec") =
+        diagnostics.residual_diagnostic_merge_sec,
+      Rcpp::Named("residual_prefetch_unaccounted_sec") =
+        diagnostics.residual_prefetch_unaccounted_sec,
       Rcpp::Named("residual_grouping_sec") =
         diagnostics.residual_grouping_sec,
       Rcpp::Named("residual_host_pack_sec") =
@@ -410,6 +422,13 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_algebraic_rss_clamp_count,
       Rcpp::Named("ci_eval_elapsed_sec") = diagnostics.ci_eval_elapsed_sec,
       Rcpp::Named("ci_host_pack_sec") = diagnostics.ci_host_pack_sec,
+      Rcpp::Named("ci_dcov_call_wall_sec") =
+        diagnostics.ci_dcov_call_wall_sec,
+      Rcpp::Named("ci_pvalue_copy_sec") = diagnostics.ci_pvalue_copy_sec,
+      Rcpp::Named("ci_diagnostic_append_sec") =
+        diagnostics.ci_diagnostic_append_sec,
+      Rcpp::Named("ci_eval_unaccounted_sec") =
+        diagnostics.ci_eval_unaccounted_sec,
       Rcpp::Named("replay_elapsed_sec") = diagnostics.replay_elapsed_sec,
       Rcpp::Named("total_elapsed_sec") = diagnostics.total_elapsed_sec,
       Rcpp::Named("dcov_alloc_sec") = diagnostics.dcov_alloc_sec,

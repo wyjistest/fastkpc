@@ -49,7 +49,12 @@ required_stages <- c(
   "residual_factor_solve", "residual_factor_cholesky",
   "residual_factor_rhs_solve",
   "residual_factor_inverse_solve", "residual_d2h",
-  "residual_cache_insert", "residual_true_batch_total"
+  "residual_cache_insert", "residual_true_batch_total",
+  "residual_request_collect", "residual_prefetch_missing_scan",
+  "residual_prefetch_batch_input", "residual_batch_call_wall",
+  "residual_diagnostic_merge", "residual_prefetch_unaccounted",
+  "ci_dcov_call_wall", "ci_pvalue_copy", "ci_diagnostic_append",
+  "ci_eval_unaccounted"
 )
 missing_stages <- setdiff(required_stages, unique(breakdown$stage))
 assert_true(length(missing_stages) == 0L,
@@ -114,6 +119,14 @@ assert_true(runs$residual_candidate_residual_materialize_count[[1L]] == 0L,
             "stage breakdown should avoid candidate residual materialization")
 assert_true(runs$residual_winning_residual_materialize_count[[1L]] > 0L,
             "stage breakdown should record winning residual materialization")
+assert_true(runs$residual_batch_call_wall_ms[[1L]] > 0,
+            "stage breakdown should record residual batch-call wall time")
+assert_true(runs$residual_prefetch_unaccounted_ms[[1L]] >= 0,
+            "stage breakdown should record residual prefetch unaccounted time")
+assert_true(runs$ci_dcov_call_wall_ms[[1L]] > 0,
+            "stage breakdown should record CI dCov call wall time")
+assert_true(runs$ci_eval_unaccounted_ms[[1L]] >= 0,
+            "stage breakdown should record CI eval unaccounted time")
 if (runs$residual_lambda_candidates[[1L]] > 0L &&
     runs$cuda_residual_unique_designs[[1L]] > 0L) {
   factor_bound <- runs$cuda_residual_unique_designs[[1L]] *
