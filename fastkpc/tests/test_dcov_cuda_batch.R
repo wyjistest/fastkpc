@@ -67,10 +67,16 @@ assert_true(identical(as.integer(large$diagnostics$pvalue_only_count), 0L),
             "direct dCov batch API should not use pvalue-only output")
 assert_true(as.integer(large$diagnostics$full_result_materialize_count) > 0L,
             "direct dCov batch API should materialize the full result")
-assert_true(as.integer(large$diagnostics$grid_limit_query_count) >= 1L,
-            "direct dCov batch API should report grid-limit queries")
+assert_true(as.integer(large$diagnostics$grid_limit_query_count) +
+              as.integer(large$diagnostics$grid_limit_process_cache_hit_count) >= 1L,
+            "direct dCov batch API should report grid-limit lookup accounting")
 assert_true(as.numeric(large$diagnostics$top_level_wall_sec) > 0,
             "direct dCov batch API should report top-level wall time")
+large_warm <- fast_dcov_batch_cuda(large_x, large_y)
+assert_true(identical(as.integer(large_warm$diagnostics$grid_limit_query_count), 0L),
+            "warm direct dCov batch API should use process grid-limit cache")
+assert_true(as.integer(large_warm$diagnostics$grid_limit_process_cache_hit_count) >= 1L,
+            "warm direct dCov batch API should report process grid-limit cache hit")
 
 set.seed(2301)
 wide_batch <- 70000L

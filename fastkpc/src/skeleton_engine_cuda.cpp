@@ -599,6 +599,8 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
       batch.grid_limit_query_count;
     diagnostics->dcov_grid_limit_cache_hit_count +=
       batch.grid_limit_cache_hit_count;
+    diagnostics->dcov_grid_limit_process_cache_hit_count +=
+      batch.grid_limit_process_cache_hit_count;
     ++(*dcov_batches);
     diagnostics->batches.push_back(SchedulerBatchDiagnostic{
       level, *dcov_batches - 1, "dcov", tasks[start].task_id, count, n, "ok",

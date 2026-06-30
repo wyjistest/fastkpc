@@ -39,6 +39,7 @@ struct DcovBatchResult {
   int full_result_materialize_count = 0;
   int grid_limit_query_count = 0;
   int grid_limit_cache_hit_count = 0;
+  int grid_limit_process_cache_hit_count = 0;
 };
 
 #endif

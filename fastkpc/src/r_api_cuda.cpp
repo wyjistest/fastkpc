@@ -468,7 +468,9 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
       Rcpp::Named("dcov_grid_limit_query_count") =
         diagnostics.dcov_grid_limit_query_count,
       Rcpp::Named("dcov_grid_limit_cache_hit_count") =
-        diagnostics.dcov_grid_limit_cache_hit_count
+        diagnostics.dcov_grid_limit_cache_hit_count,
+      Rcpp::Named("dcov_grid_limit_process_cache_hit_count") =
+        diagnostics.dcov_grid_limit_process_cache_hit_count
     ),
     Rcpp::Named("levels") =
       scheduler_levels_to_data_frame(diagnostics.per_level),
@@ -1028,6 +1030,8 @@ extern "C" SEXP C_fast_dcov_batch_cuda(SEXP xs, SEXP ys, SEXP indexs,
         result.grid_limit_query_count,
       Rcpp::Named("grid_limit_cache_hit_count") =
         result.grid_limit_cache_hit_count,
+      Rcpp::Named("grid_limit_process_cache_hit_count") =
+        result.grid_limit_process_cache_hit_count,
       Rcpp::Named("chunk_dispatch_sec") = result.chunk_dispatch_sec,
       Rcpp::Named("top_level_unaccounted_sec") =
         result.top_level_unaccounted_sec

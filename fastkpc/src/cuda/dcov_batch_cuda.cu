@@ -6,8 +6,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -179,6 +181,8 @@ void add_timing(DcovBatchResult* out, const DcovBatchResult& value) {
   out->full_result_materialize_count += value.full_result_materialize_count;
   out->grid_limit_query_count += value.grid_limit_query_count;
   out->grid_limit_cache_hit_count += value.grid_limit_cache_hit_count;
+  out->grid_limit_process_cache_hit_count +=
+    value.grid_limit_process_cache_hit_count;
 }
 
 double nonnegative_gap(double total, double accounted) {
@@ -192,6 +196,32 @@ int query_dcov_grid_batch_dimension(int device) {
   const int z_limit = prop.maxGridSize[2];
   const int limit = std::min(y_limit, z_limit);
   return std::max(1, limit);
+}
+
+struct ProcessDcovGridLimitCache {
+  std::mutex mutex;
+  std::unordered_map<int, int> limits;
+};
+
+ProcessDcovGridLimitCache& process_dcov_grid_limit_cache() {
+  static ProcessDcovGridLimitCache cache;
+  return cache;
+}
+
+bool process_dcov_grid_limit_lookup(int device, int* limit) {
+  ProcessDcovGridLimitCache& cache = process_dcov_grid_limit_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  const std::unordered_map<int, int>::const_iterator it =
+    cache.limits.find(device);
+  if (it == cache.limits.end()) return false;
+  *limit = it->second;
+  return true;
+}
+
+void process_dcov_grid_limit_store(int device, int limit) {
+  ProcessDcovGridLimitCache& cache = process_dcov_grid_limit_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  cache.limits[device] = limit;
 }
 
 struct DcovChunkBuffers {
@@ -316,11 +346,25 @@ int cached_dcov_grid_batch_dimension(DcovCudaWorkspace* workspace,
     return workspace->grid_limit_batch;
   }
 
+  int process_limit = 0;
+  if (process_dcov_grid_limit_lookup(device, &process_limit)) {
+    if (workspace != nullptr) {
+      workspace->grid_limit_device_id = device;
+      workspace->grid_limit_batch = process_limit;
+    }
+    if (result != nullptr) {
+      ++result->grid_limit_cache_hit_count;
+      ++result->grid_limit_process_cache_hit_count;
+    }
+    return process_limit;
+  }
+
   const int limit = query_dcov_grid_batch_dimension(device);
   if (result != nullptr) {
     result->grid_limit_query_sec += elapsed_since(stage);
     ++result->grid_limit_query_count;
   }
+  process_dcov_grid_limit_store(device, limit);
   if (workspace != nullptr) {
     workspace->grid_limit_device_id = device;
     workspace->grid_limit_batch = limit;

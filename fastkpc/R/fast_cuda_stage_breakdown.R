@@ -288,6 +288,8 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$dcov_grid_limit_query_count %||% 0L),
     dcov_grid_limit_cache_hit_count =
       as.integer(summary$dcov_grid_limit_cache_hit_count %||% 0L),
+    dcov_grid_limit_process_cache_hit_count =
+      as.integer(summary$dcov_grid_limit_process_cache_hit_count %||% 0L),
     residual_batches = as.integer(summary$residual_batches %||% 0L),
     unique_residual_requests =
       as.integer(summary$unique_residual_requests %||% 0L),

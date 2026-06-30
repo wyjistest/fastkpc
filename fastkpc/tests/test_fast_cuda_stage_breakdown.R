@@ -91,10 +91,13 @@ assert_true(runs$dcov_full_result_materialize_count[[1L]] == 0L,
             "stage breakdown should avoid full dCov result materialization")
 assert_true(runs$dcov_top_level_wall_ms[[1L]] > 0,
             "stage breakdown should record dCov top-level wall time")
-assert_true(runs$dcov_grid_limit_query_count[[1L]] >= 1L,
-            "stage breakdown should record dCov grid-limit query count")
+assert_true(runs$dcov_grid_limit_query_count[[1L]] +
+              runs$dcov_grid_limit_process_cache_hit_count[[1L]] >= 1L,
+            "stage breakdown should record dCov grid-limit lookup accounting")
 assert_true(runs$dcov_grid_limit_cache_hit_count[[1L]] > 0L,
             "stage breakdown should record cached dCov grid-limit hits")
+assert_true(runs$dcov_grid_limit_process_cache_hit_count[[1L]] >= 0L,
+            "stage breakdown should record process dCov grid-limit cache hits")
 assert_true(runs$dcov_top_level_unaccounted_ms[[1L]] >= 0,
             "stage breakdown should record dCov top-level unaccounted time")
 ci_host_pack <- breakdown$elapsed_ms[breakdown$stage == "ci_host_pack"]

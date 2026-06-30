@@ -192,6 +192,7 @@ struct SchedulerDiagnostics {
   int dcov_full_result_materialize_count;
   int dcov_grid_limit_query_count;
   int dcov_grid_limit_cache_hit_count;
+  int dcov_grid_limit_process_cache_hit_count;
   std::vector<LayerDiagnosticsLevel> per_level;
   std::vector<SchedulerBatchDiagnostic> batches;
   std::vector<SchedulerResidualDiagnostic> residuals;

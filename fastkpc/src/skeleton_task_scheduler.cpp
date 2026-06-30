@@ -263,6 +263,7 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.dcov_full_result_materialize_count = 0;
   out.dcov_grid_limit_query_count = 0;
   out.dcov_grid_limit_cache_hit_count = 0;
+  out.dcov_grid_limit_process_cache_hit_count = 0;
   return out;
 }
 
