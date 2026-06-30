@@ -50,6 +50,8 @@ required_stages <- c(
   "residual_factor_rhs_solve",
   "residual_rhs_custom_solve", "residual_rhs_cublas_solve",
   "residual_factor_inverse_solve", "residual_d2h",
+  "residual_d2h_residuals", "residual_d2h_metadata",
+  "residual_d2h_info",
   "residual_cache_insert", "residual_true_batch_total",
   "residual_request_collect", "residual_prefetch_missing_scan",
   "residual_prefetch_batch_input", "residual_batch_call_wall",
@@ -127,6 +129,20 @@ assert_true(runs$residual_rhs_custom_solve_ms[[1L]] > 0,
             "stage breakdown should time custom RHS solves")
 assert_true(runs$residual_rhs_cublas_solve_ms[[1L]] >= 0,
             "stage breakdown should time cuBLAS RHS solves")
+assert_true(runs$residual_d2h_copy_count[[1L]] > 0L,
+            "stage breakdown should record residual D2H copy count")
+assert_true(runs$residual_d2h_bytes[[1L]] > 0,
+            "stage breakdown should record residual D2H bytes")
+assert_true(runs$residual_d2h_residual_bytes[[1L]] > 0,
+            "stage breakdown should record residual D2H residual bytes")
+assert_true(runs$residual_d2h_metadata_bytes[[1L]] > 0,
+            "stage breakdown should record residual D2H metadata bytes")
+assert_true(runs$residual_d2h_residuals_ms[[1L]] >= 0,
+            "stage breakdown should time residual vector D2H")
+assert_true(runs$residual_d2h_metadata_ms[[1L]] >= 0,
+            "stage breakdown should time residual metadata D2H")
+assert_true(runs$residual_d2h_info_ms[[1L]] >= 0,
+            "stage breakdown should time residual info D2H")
 assert_true(runs$residual_lambda_candidates[[1L]] >= 0L,
             "stage breakdown should record lambda candidate count")
 assert_true(runs$residual_workspace_reuse_count[[1L]] >= 0L,

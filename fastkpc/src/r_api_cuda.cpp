@@ -369,6 +369,19 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
       Rcpp::Named("residual_summary_sec") =
         diagnostics.residual_summary_sec,
       Rcpp::Named("residual_d2h_sec") = diagnostics.residual_d2h_sec,
+      Rcpp::Named("residual_d2h_residuals_sec") =
+        diagnostics.residual_d2h_residuals_sec,
+      Rcpp::Named("residual_d2h_metadata_sec") =
+        diagnostics.residual_d2h_metadata_sec,
+      Rcpp::Named("residual_d2h_info_sec") =
+        diagnostics.residual_d2h_info_sec,
+      Rcpp::Named("residual_d2h_copy_count") =
+        diagnostics.residual_d2h_copy_count,
+      Rcpp::Named("residual_d2h_bytes") = diagnostics.residual_d2h_bytes,
+      Rcpp::Named("residual_d2h_residual_bytes") =
+        diagnostics.residual_d2h_residual_bytes,
+      Rcpp::Named("residual_d2h_metadata_bytes") =
+        diagnostics.residual_d2h_metadata_bytes,
       Rcpp::Named("residual_host_select_sec") =
         diagnostics.residual_host_select_sec,
       Rcpp::Named("residual_free_sec") = diagnostics.residual_free_sec,
@@ -796,6 +809,13 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.factor_inverse_solve_sec,
     Rcpp::Named("residual_summary_sec") = diagnostics.residual_summary_sec,
     Rcpp::Named("d2h_sec") = diagnostics.d2h_sec,
+    Rcpp::Named("d2h_residuals_sec") = diagnostics.d2h_residuals_sec,
+    Rcpp::Named("d2h_metadata_sec") = diagnostics.d2h_metadata_sec,
+    Rcpp::Named("d2h_info_sec") = diagnostics.d2h_info_sec,
+    Rcpp::Named("d2h_copy_count") = diagnostics.d2h_copy_count,
+    Rcpp::Named("d2h_bytes") = diagnostics.d2h_bytes,
+    Rcpp::Named("d2h_residual_bytes") = diagnostics.d2h_residual_bytes,
+    Rcpp::Named("d2h_metadata_bytes") = diagnostics.d2h_metadata_bytes,
     Rcpp::Named("host_select_sec") = diagnostics.host_select_sec,
     Rcpp::Named("free_sec") = diagnostics.free_sec,
     Rcpp::Named("true_batch_total_sec") = diagnostics.true_batch_total_sec,

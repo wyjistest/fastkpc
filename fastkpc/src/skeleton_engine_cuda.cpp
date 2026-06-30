@@ -274,6 +274,20 @@ class CudaSkeletonResidualCache {
         diagnostics->residual_summary_sec +=
           batch_result.diagnostics.residual_summary_sec;
         diagnostics->residual_d2h_sec += batch_result.diagnostics.d2h_sec;
+        diagnostics->residual_d2h_residuals_sec +=
+          batch_result.diagnostics.d2h_residuals_sec;
+        diagnostics->residual_d2h_metadata_sec +=
+          batch_result.diagnostics.d2h_metadata_sec;
+        diagnostics->residual_d2h_info_sec +=
+          batch_result.diagnostics.d2h_info_sec;
+        diagnostics->residual_d2h_copy_count +=
+          batch_result.diagnostics.d2h_copy_count;
+        diagnostics->residual_d2h_bytes +=
+          batch_result.diagnostics.d2h_bytes;
+        diagnostics->residual_d2h_residual_bytes +=
+          batch_result.diagnostics.d2h_residual_bytes;
+        diagnostics->residual_d2h_metadata_bytes +=
+          batch_result.diagnostics.d2h_metadata_bytes;
         diagnostics->residual_host_select_sec +=
           batch_result.diagnostics.host_select_sec;
         diagnostics->residual_free_sec += batch_result.diagnostics.free_sec;

@@ -56,6 +56,13 @@ struct FastSplineCudaBatchDiagnostics {
   double factor_inverse_solve_sec;
   double residual_summary_sec;
   double d2h_sec;
+  double d2h_residuals_sec;
+  double d2h_metadata_sec;
+  double d2h_info_sec;
+  int d2h_copy_count;
+  double d2h_bytes;
+  double d2h_residual_bytes;
+  double d2h_metadata_bytes;
   double host_select_sec;
   double free_sec;
   double true_batch_total_sec;

@@ -27,6 +27,25 @@ double elapsed_since(std::chrono::steady_clock::time_point start) {
     std::chrono::steady_clock::now() - start).count();
 }
 
+void add_d2h_timing(FastSplineCudaBatchDiagnostics* timing,
+                    double elapsed_sec,
+                    std::size_t bytes,
+                    bool residuals,
+                    bool metadata) {
+  timing->d2h_sec += elapsed_sec;
+  timing->d2h_copy_count += 1;
+  timing->d2h_bytes += static_cast<double>(bytes);
+  if (residuals) {
+    timing->d2h_residuals_sec += elapsed_sec;
+    timing->d2h_residual_bytes += static_cast<double>(bytes);
+  } else if (metadata) {
+    timing->d2h_metadata_sec += elapsed_sec;
+    timing->d2h_metadata_bytes += static_cast<double>(bytes);
+  } else {
+    timing->d2h_info_sec += elapsed_sec;
+  }
+}
+
 void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
                       const FastSplineCudaBatchDiagnostics& value) {
   out->grouping_sec += value.grouping_sec;
@@ -43,6 +62,13 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->factor_inverse_solve_sec += value.factor_inverse_solve_sec;
   out->residual_summary_sec += value.residual_summary_sec;
   out->d2h_sec += value.d2h_sec;
+  out->d2h_residuals_sec += value.d2h_residuals_sec;
+  out->d2h_metadata_sec += value.d2h_metadata_sec;
+  out->d2h_info_sec += value.d2h_info_sec;
+  out->d2h_copy_count += value.d2h_copy_count;
+  out->d2h_bytes += value.d2h_bytes;
+  out->d2h_residual_bytes += value.d2h_residual_bytes;
+  out->d2h_metadata_bytes += value.d2h_metadata_bytes;
   out->host_select_sec += value.host_select_sec;
   out->free_sec += value.free_sec;
   out->true_batch_total_sec += value.true_batch_total_sec;
@@ -1288,13 +1314,23 @@ TrueBatchGroupResult run_true_batched_group(
         check_cuda(cudaMemcpy(info.data(), buffers->d_info,
                               sizeof(int) * group_size, cudaMemcpyDeviceToHost),
                    "copy batched info");
+        add_d2h_timing(timing, elapsed_since(stage),
+                       sizeof(int) * static_cast<std::size_t>(group_size),
+                       false, false);
+        stage = std::chrono::steady_clock::now();
         check_cuda(cudaMemcpy(rss.data(), buffers->d_rss,
                               sizeof(double) * group_size, cudaMemcpyDeviceToHost),
                    "copy batched rss");
+        add_d2h_timing(timing, elapsed_since(stage),
+                       sizeof(double) * static_cast<std::size_t>(group_size),
+                       false, true);
+        stage = std::chrono::steady_clock::now();
         check_cuda(cudaMemcpy(edf.data(), buffers->d_edf,
                               sizeof(double) * group_size, cudaMemcpyDeviceToHost),
                    "copy batched edf");
-        timing->d2h_sec += elapsed_since(stage);
+        add_d2h_timing(timing, elapsed_since(stage),
+                       sizeof(double) * static_cast<std::size_t>(group_size),
+                       false, true);
 
         stage = std::chrono::steady_clock::now();
         for (int fit = 0; fit < group_size; ++fit) {
@@ -1343,7 +1379,7 @@ TrueBatchGroupResult run_true_batched_group(
                           sizeof(int), cudaMemcpyDeviceToHost),
                "copy algebraic rss clamp count");
     timing->algebraic_rss_clamp_count += clamp_count;
-    timing->d2h_sec += elapsed_since(stage);
+    add_d2h_timing(timing, elapsed_since(stage), sizeof(int), false, false);
 
     std::vector<double> selected_lambdas(group_size);
     std::vector<double> selected_ridges(group_size);
@@ -1489,6 +1525,9 @@ TrueBatchGroupResult run_true_batched_group(
     check_cuda(cudaMemcpy(final_info.data(), buffers->d_info,
                           sizeof(int) * group_size, cudaMemcpyDeviceToHost),
                "copy selected info");
+    add_d2h_timing(timing, elapsed_since(stage),
+                   sizeof(int) * static_cast<std::size_t>(group_size),
+                   false, false);
     std::vector<double> fitted;
     if (!residual_only) {
       fitted.resize(y_size);
@@ -1497,13 +1536,19 @@ TrueBatchGroupResult run_true_batched_group(
       check_cuda(cudaMemcpy(fitted.data(), buffers->d_fitted,
                             sizeof(double) * y_size, cudaMemcpyDeviceToHost),
                  "copy selected fitted");
-      timing->residual_fitted_materialize_sec +=
-        elapsed_since(fitted_stage);
+      const double fitted_sec = elapsed_since(fitted_stage);
+      timing->residual_fitted_materialize_sec += fitted_sec;
+      add_d2h_timing(timing, fitted_sec,
+                     sizeof(double) * static_cast<std::size_t>(y_size),
+                     false, true);
     }
+    stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(residuals.data(), buffers->d_residuals,
                           sizeof(double) * y_size, cudaMemcpyDeviceToHost),
                "copy selected residuals");
-    timing->d2h_sec += elapsed_since(stage);
+    add_d2h_timing(timing, elapsed_since(stage),
+                   sizeof(double) * static_cast<std::size_t>(y_size),
+                   true, false);
 
     TrueBatchGroupResult out;
     stage = std::chrono::steady_clock::now();
@@ -1645,6 +1690,13 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.factor_inverse_solve_sec = 0.0;
   out.residual_summary_sec = 0.0;
   out.d2h_sec = 0.0;
+  out.d2h_residuals_sec = 0.0;
+  out.d2h_metadata_sec = 0.0;
+  out.d2h_info_sec = 0.0;
+  out.d2h_copy_count = 0;
+  out.d2h_bytes = 0.0;
+  out.d2h_residual_bytes = 0.0;
+  out.d2h_metadata_bytes = 0.0;
   out.host_select_sec = 0.0;
   out.free_sec = 0.0;
   out.true_batch_total_sec = 0.0;

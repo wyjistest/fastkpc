@@ -184,6 +184,19 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
     row("residual_d2h",
         fastkpc_stage_breakdown_seconds(summary$residual_d2h_sec),
         "residual"),
+    row("residual_d2h_residuals",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_d2h_residuals_sec
+        ),
+        "residual"),
+    row("residual_d2h_metadata",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_d2h_metadata_sec
+        ),
+        "residual"),
+    row("residual_d2h_info",
+        fastkpc_stage_breakdown_seconds(summary$residual_d2h_info_sec),
+        "residual"),
     row("residual_host_select",
         fastkpc_stage_breakdown_seconds(summary$residual_host_select_sec),
         "residual"),
@@ -353,6 +366,23 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       fastkpc_stage_breakdown_seconds(
         summary$residual_rhs_cublas_solve_sec
       ) * 1000,
+    residual_d2h_residuals_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_d2h_residuals_sec
+      ) * 1000,
+    residual_d2h_metadata_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_d2h_metadata_sec
+      ) * 1000,
+    residual_d2h_info_ms =
+      fastkpc_stage_breakdown_seconds(summary$residual_d2h_info_sec) * 1000,
+    residual_d2h_copy_count =
+      as.integer(summary$residual_d2h_copy_count %||% 0L),
+    residual_d2h_bytes = as.numeric(summary$residual_d2h_bytes %||% 0),
+    residual_d2h_residual_bytes =
+      as.numeric(summary$residual_d2h_residual_bytes %||% 0),
+    residual_d2h_metadata_bytes =
+      as.numeric(summary$residual_d2h_metadata_bytes %||% 0),
     residual_winning_factor_reuse_count =
       as.integer(summary$residual_winning_factor_reuse_count %||% 0L),
     residual_factor_cache_hits =

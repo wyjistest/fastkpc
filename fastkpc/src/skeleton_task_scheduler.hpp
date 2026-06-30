@@ -133,6 +133,13 @@ struct SchedulerDiagnostics {
   double residual_factor_inverse_solve_sec;
   double residual_summary_sec;
   double residual_d2h_sec;
+  double residual_d2h_residuals_sec;
+  double residual_d2h_metadata_sec;
+  double residual_d2h_info_sec;
+  int residual_d2h_copy_count;
+  double residual_d2h_bytes;
+  double residual_d2h_residual_bytes;
+  double residual_d2h_metadata_bytes;
   double residual_host_select_sec;
   double residual_free_sec;
   double residual_true_batch_total_sec;
