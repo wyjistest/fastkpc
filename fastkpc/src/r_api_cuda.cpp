@@ -412,6 +412,36 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_basis_cache_hit_sec,
       Rcpp::Named("residual_basis_cache_miss_build_sec") =
         diagnostics.residual_basis_cache_miss_build_sec,
+      Rcpp::Named("residual_basis_build_total_sec") =
+        diagnostics.residual_basis_build_total_sec,
+      Rcpp::Named("residual_basis_build_alloc_sec") =
+        diagnostics.residual_basis_build_alloc_sec,
+      Rcpp::Named("residual_basis_build_near_constant_sec") =
+        diagnostics.residual_basis_build_near_constant_sec,
+      Rcpp::Named("residual_basis_build_knots_sec") =
+        diagnostics.residual_basis_build_knots_sec,
+      Rcpp::Named("residual_basis_build_min_gap_sec") =
+        diagnostics.residual_basis_build_min_gap_sec,
+      Rcpp::Named("residual_basis_build_eval_sec") =
+        diagnostics.residual_basis_build_eval_sec,
+      Rcpp::Named("residual_basis_build_normalize_sec") =
+        diagnostics.residual_basis_build_normalize_sec,
+      Rcpp::Named("residual_basis_build_fallback_sec") =
+        diagnostics.residual_basis_build_fallback_sec,
+      Rcpp::Named("residual_basis_build_unaccounted_sec") =
+        diagnostics.residual_basis_build_unaccounted_sec,
+      Rcpp::Named("residual_basis_build_count") =
+        diagnostics.residual_basis_build_count,
+      Rcpp::Named("residual_basis_build_rows") =
+        diagnostics.residual_basis_build_rows,
+      Rcpp::Named("residual_basis_build_cols") =
+        diagnostics.residual_basis_build_cols,
+      Rcpp::Named("residual_basis_build_values") =
+        diagnostics.residual_basis_build_values,
+      Rcpp::Named("residual_basis_build_near_constant_count") =
+        diagnostics.residual_basis_build_near_constant_count,
+      Rcpp::Named("residual_basis_build_fallback_row_count") =
+        diagnostics.residual_basis_build_fallback_row_count,
       Rcpp::Named("residual_host_pack_sec") =
         diagnostics.residual_host_pack_sec,
       Rcpp::Named("residual_alloc_sec") = diagnostics.residual_alloc_sec,
@@ -980,6 +1010,36 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.basis_cache_hit_sec,
     Rcpp::Named("basis_cache_miss_build_sec") =
       diagnostics.basis_cache_miss_build_sec,
+    Rcpp::Named("basis_build_total_sec") =
+      diagnostics.basis_build_total_sec,
+    Rcpp::Named("basis_build_alloc_sec") =
+      diagnostics.basis_build_alloc_sec,
+    Rcpp::Named("basis_build_near_constant_sec") =
+      diagnostics.basis_build_near_constant_sec,
+    Rcpp::Named("basis_build_knots_sec") =
+      diagnostics.basis_build_knots_sec,
+    Rcpp::Named("basis_build_min_gap_sec") =
+      diagnostics.basis_build_min_gap_sec,
+    Rcpp::Named("basis_build_eval_sec") =
+      diagnostics.basis_build_eval_sec,
+    Rcpp::Named("basis_build_normalize_sec") =
+      diagnostics.basis_build_normalize_sec,
+    Rcpp::Named("basis_build_fallback_sec") =
+      diagnostics.basis_build_fallback_sec,
+    Rcpp::Named("basis_build_unaccounted_sec") =
+      diagnostics.basis_build_unaccounted_sec,
+    Rcpp::Named("basis_build_count") =
+      diagnostics.basis_build_count,
+    Rcpp::Named("basis_build_rows") =
+      diagnostics.basis_build_rows,
+    Rcpp::Named("basis_build_cols") =
+      diagnostics.basis_build_cols,
+    Rcpp::Named("basis_build_values") =
+      diagnostics.basis_build_values,
+    Rcpp::Named("basis_build_near_constant_count") =
+      diagnostics.basis_build_near_constant_count,
+    Rcpp::Named("basis_build_fallback_row_count") =
+      diagnostics.basis_build_fallback_row_count,
     Rcpp::Named("host_pack_sec") = diagnostics.host_pack_sec,
     Rcpp::Named("alloc_sec") = diagnostics.alloc_sec,
     Rcpp::Named("h2d_sec") = diagnostics.h2d_sec,

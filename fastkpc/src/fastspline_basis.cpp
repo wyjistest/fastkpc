@@ -132,7 +132,7 @@ FastSplineBasisBlock build_basis_block(const Rcpp::NumericMatrix& data,
   int n_basis = 0;
   stage = design_timing_start(diagnostics);
   FastSplineBasisBlock block;
-  block.values = cubic_bspline_basis(values, params, &n_basis);
+  block.values = cubic_bspline_basis(values, params, &n_basis, diagnostics);
   if (diagnostics != nullptr) {
     const double elapsed = elapsed_since(stage);
     diagnostics->basis_sec += elapsed;
@@ -428,6 +428,21 @@ FastSplineDesignBuildDiagnostics make_empty_fastspline_design_build_diagnostics(
   out.basis_cache_entries = 0;
   out.basis_cache_hit_sec = 0.0;
   out.basis_cache_miss_build_sec = 0.0;
+  out.basis_build_total_sec = 0.0;
+  out.basis_build_alloc_sec = 0.0;
+  out.basis_build_near_constant_sec = 0.0;
+  out.basis_build_knots_sec = 0.0;
+  out.basis_build_min_gap_sec = 0.0;
+  out.basis_build_eval_sec = 0.0;
+  out.basis_build_normalize_sec = 0.0;
+  out.basis_build_fallback_sec = 0.0;
+  out.basis_build_unaccounted_sec = 0.0;
+  out.basis_build_count = 0;
+  out.basis_build_rows = 0;
+  out.basis_build_cols = 0;
+  out.basis_build_values = 0;
+  out.basis_build_near_constant_count = 0;
+  out.basis_build_fallback_row_count = 0;
   return out;
 }
 
@@ -448,19 +463,75 @@ std::vector<double> quantile_knots(const std::vector<double>& x, int knots) {
 
 std::vector<double> cubic_bspline_basis(const std::vector<double>& x,
                                         const FastSplineParams& params,
-                                        int* n_basis) {
+                                        int* n_basis,
+                                        FastSplineDesignBuildDiagnostics* diagnostics) {
+  const std::chrono::steady_clock::time_point total_start =
+    design_timing_start(diagnostics);
+  double alloc_sec = 0.0;
+  double near_constant_sec = 0.0;
+  double knots_sec = 0.0;
+  double min_gap_sec = 0.0;
+  double eval_sec = 0.0;
+  double normalize_sec = 0.0;
+  double fallback_sec = 0.0;
+  int fallback_rows = 0;
   const int n = static_cast<int>(x.size());
   const int basis_cols = std::max(6, params.knots);
   if (n_basis != nullptr) *n_basis = basis_cols;
+  if (diagnostics != nullptr) {
+    diagnostics->basis_build_count += 1;
+    diagnostics->basis_build_rows += n;
+    diagnostics->basis_build_cols += basis_cols;
+    diagnostics->basis_build_values += n * basis_cols;
+  }
+  std::chrono::steady_clock::time_point stage =
+    design_timing_start(diagnostics);
   std::vector<double> out(static_cast<std::size_t>(n) * basis_cols, 0.0);
-  if (n == 0) return out;
-
-  if (near_constant(x)) {
-    for (int row = 0; row < n; ++row) out[ridx(row, 0, basis_cols)] = 1.0;
+  if (diagnostics != nullptr) {
+    alloc_sec += elapsed_since(stage);
+  }
+  if (n == 0) {
+    if (diagnostics != nullptr) {
+      const double total = elapsed_since(total_start);
+      diagnostics->basis_build_total_sec += total;
+      diagnostics->basis_build_alloc_sec += alloc_sec;
+      diagnostics->basis_build_unaccounted_sec +=
+        nonnegative_gap(total, alloc_sec);
+    }
     return out;
   }
 
+  stage = design_timing_start(diagnostics);
+  if (near_constant(x)) {
+    if (diagnostics != nullptr) {
+      near_constant_sec += elapsed_since(stage);
+      diagnostics->basis_build_near_constant_count += 1;
+    }
+    stage = design_timing_start(diagnostics);
+    for (int row = 0; row < n; ++row) out[ridx(row, 0, basis_cols)] = 1.0;
+    if (diagnostics != nullptr) {
+      eval_sec += elapsed_since(stage);
+      const double total = elapsed_since(total_start);
+      diagnostics->basis_build_total_sec += total;
+      diagnostics->basis_build_alloc_sec += alloc_sec;
+      diagnostics->basis_build_near_constant_sec += near_constant_sec;
+      diagnostics->basis_build_eval_sec += eval_sec;
+      const double accounted = alloc_sec + near_constant_sec + eval_sec;
+      diagnostics->basis_build_unaccounted_sec +=
+        nonnegative_gap(total, accounted);
+    }
+    return out;
+  }
+  if (diagnostics != nullptr) {
+    near_constant_sec += elapsed_since(stage);
+  }
+
+  stage = design_timing_start(diagnostics);
   const std::vector<double> centers = quantile_knots(x, basis_cols);
+  if (diagnostics != nullptr) {
+    knots_sec += elapsed_since(stage);
+  }
+  stage = design_timing_start(diagnostics);
   double min_gap = std::numeric_limits<double>::infinity();
   for (int i = 1; i < static_cast<int>(centers.size()); ++i) {
     const double gap = centers[i] - centers[i - 1];
@@ -468,16 +539,24 @@ std::vector<double> cubic_bspline_basis(const std::vector<double>& x,
   }
   if (!std::isfinite(min_gap) || min_gap <= 0.0) min_gap = 1.0;
   const double width = 2.5 * min_gap;
+  if (diagnostics != nullptr) {
+    min_gap_sec += elapsed_since(stage);
+  }
 
   for (int row = 0; row < n; ++row) {
     double total = 0.0;
+    stage = design_timing_start(diagnostics);
     for (int col = 0; col < basis_cols; ++col) {
       const double scaled = std::abs(x[row] - centers[col]) / width;
       const double value = scaled < 1.0 ? std::pow(1.0 - scaled, 3.0) : 0.0;
       out[ridx(row, col, basis_cols)] = value;
       total += value;
     }
+    if (diagnostics != nullptr) {
+      eval_sec += elapsed_since(stage);
+    }
     if (total <= 0.0 || !std::isfinite(total)) {
+      stage = design_timing_start(diagnostics);
       int nearest = 0;
       double best = std::abs(x[row] - centers[0]);
       for (int col = 1; col < basis_cols; ++col) {
@@ -489,9 +568,33 @@ std::vector<double> cubic_bspline_basis(const std::vector<double>& x,
       }
       for (int col = 0; col < basis_cols; ++col) out[ridx(row, col, basis_cols)] = 0.0;
       out[ridx(row, nearest, basis_cols)] = 1.0;
+      if (diagnostics != nullptr) {
+        fallback_sec += elapsed_since(stage);
+        fallback_rows += 1;
+      }
     } else {
+      stage = design_timing_start(diagnostics);
       for (int col = 0; col < basis_cols; ++col) out[ridx(row, col, basis_cols)] /= total;
+      if (diagnostics != nullptr) {
+        normalize_sec += elapsed_since(stage);
+      }
     }
+  }
+  if (diagnostics != nullptr) {
+    const double total = elapsed_since(total_start);
+    diagnostics->basis_build_total_sec += total;
+    diagnostics->basis_build_alloc_sec += alloc_sec;
+    diagnostics->basis_build_near_constant_sec += near_constant_sec;
+    diagnostics->basis_build_knots_sec += knots_sec;
+    diagnostics->basis_build_min_gap_sec += min_gap_sec;
+    diagnostics->basis_build_eval_sec += eval_sec;
+    diagnostics->basis_build_normalize_sec += normalize_sec;
+    diagnostics->basis_build_fallback_sec += fallback_sec;
+    diagnostics->basis_build_fallback_row_count += fallback_rows;
+    const double accounted = alloc_sec + near_constant_sec + knots_sec +
+      min_gap_sec + eval_sec + normalize_sec + fallback_sec;
+    diagnostics->basis_build_unaccounted_sec +=
+      nonnegative_gap(total, accounted);
   }
   return out;
 }

@@ -325,6 +325,36 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.basis_cache_hit_sec;
         diagnostics->residual_basis_cache_miss_build_sec +=
           batch_result.diagnostics.basis_cache_miss_build_sec;
+        diagnostics->residual_basis_build_total_sec +=
+          batch_result.diagnostics.basis_build_total_sec;
+        diagnostics->residual_basis_build_alloc_sec +=
+          batch_result.diagnostics.basis_build_alloc_sec;
+        diagnostics->residual_basis_build_near_constant_sec +=
+          batch_result.diagnostics.basis_build_near_constant_sec;
+        diagnostics->residual_basis_build_knots_sec +=
+          batch_result.diagnostics.basis_build_knots_sec;
+        diagnostics->residual_basis_build_min_gap_sec +=
+          batch_result.diagnostics.basis_build_min_gap_sec;
+        diagnostics->residual_basis_build_eval_sec +=
+          batch_result.diagnostics.basis_build_eval_sec;
+        diagnostics->residual_basis_build_normalize_sec +=
+          batch_result.diagnostics.basis_build_normalize_sec;
+        diagnostics->residual_basis_build_fallback_sec +=
+          batch_result.diagnostics.basis_build_fallback_sec;
+        diagnostics->residual_basis_build_unaccounted_sec +=
+          batch_result.diagnostics.basis_build_unaccounted_sec;
+        diagnostics->residual_basis_build_count +=
+          batch_result.diagnostics.basis_build_count;
+        diagnostics->residual_basis_build_rows +=
+          batch_result.diagnostics.basis_build_rows;
+        diagnostics->residual_basis_build_cols +=
+          batch_result.diagnostics.basis_build_cols;
+        diagnostics->residual_basis_build_values +=
+          batch_result.diagnostics.basis_build_values;
+        diagnostics->residual_basis_build_near_constant_count +=
+          batch_result.diagnostics.basis_build_near_constant_count;
+        diagnostics->residual_basis_build_fallback_row_count +=
+          batch_result.diagnostics.basis_build_fallback_row_count;
         diagnostics->residual_host_pack_sec +=
           batch_result.diagnostics.host_pack_sec;
         diagnostics->residual_alloc_sec +=

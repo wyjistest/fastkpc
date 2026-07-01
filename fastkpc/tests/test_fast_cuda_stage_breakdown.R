@@ -299,6 +299,50 @@ assert_true(runs$residual_basis_cache_entries[[1L]] >=
             "residual basis cache entries should cover inserted bases")
 assert_true(runs$residual_basis_cache_miss_build_ms[[1L]] >= 0,
             "stage breakdown should time residual basis cache miss builds")
+required_basis_build_fields <- c(
+  "residual_basis_build_total_ms",
+  "residual_basis_build_alloc_ms",
+  "residual_basis_build_near_constant_ms",
+  "residual_basis_build_knots_ms",
+  "residual_basis_build_min_gap_ms",
+  "residual_basis_build_eval_ms",
+  "residual_basis_build_normalize_ms",
+  "residual_basis_build_fallback_ms",
+  "residual_basis_build_unaccounted_ms",
+  "residual_basis_build_count",
+  "residual_basis_build_rows",
+  "residual_basis_build_cols",
+  "residual_basis_build_values",
+  "residual_basis_build_near_constant_count",
+  "residual_basis_build_fallback_row_count"
+)
+missing_basis_build_fields <-
+  setdiff(required_basis_build_fields, names(runs))
+assert_true(length(missing_basis_build_fields) == 0L,
+            paste("stage breakdown should expose residual basis build split:",
+                  paste(missing_basis_build_fields, collapse = ",")))
+assert_true(runs$residual_basis_build_total_ms[[1L]] > 0,
+            "stage breakdown should time residual basis build total")
+assert_true(runs$residual_basis_build_count[[1L]] > 0L,
+            "stage breakdown should count residual basis builds")
+assert_true(runs$residual_basis_build_rows[[1L]] > 0L,
+            "stage breakdown should count residual basis build rows")
+assert_true(runs$residual_basis_build_cols[[1L]] > 0L,
+            "stage breakdown should count residual basis build columns")
+assert_true(runs$residual_basis_build_values[[1L]] > 0L,
+            "stage breakdown should count residual basis build values")
+basis_build_accounted_ms <-
+  runs$residual_basis_build_alloc_ms[[1L]] +
+  runs$residual_basis_build_near_constant_ms[[1L]] +
+  runs$residual_basis_build_knots_ms[[1L]] +
+  runs$residual_basis_build_min_gap_ms[[1L]] +
+  runs$residual_basis_build_eval_ms[[1L]] +
+  runs$residual_basis_build_normalize_ms[[1L]] +
+  runs$residual_basis_build_fallback_ms[[1L]] +
+  runs$residual_basis_build_unaccounted_ms[[1L]]
+assert_true(basis_build_accounted_ms <=
+              runs$residual_basis_build_total_ms[[1L]] + 1e-6,
+            "residual basis build split should not exceed total")
 residual_grouping_accounted_ms <-
   runs$residual_grouping_condition_key_ms[[1L]] +
   runs$residual_grouping_group_key_ms[[1L]] +

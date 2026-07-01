@@ -601,6 +601,54 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       fastkpc_stage_breakdown_seconds(
         summary$residual_basis_cache_miss_build_sec
       ) * 1000,
+    residual_basis_build_total_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_total_sec
+      ) * 1000,
+    residual_basis_build_alloc_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_alloc_sec
+      ) * 1000,
+    residual_basis_build_near_constant_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_near_constant_sec
+      ) * 1000,
+    residual_basis_build_knots_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_knots_sec
+      ) * 1000,
+    residual_basis_build_min_gap_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_min_gap_sec
+      ) * 1000,
+    residual_basis_build_eval_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_eval_sec
+      ) * 1000,
+    residual_basis_build_normalize_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_normalize_sec
+      ) * 1000,
+    residual_basis_build_fallback_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_fallback_sec
+      ) * 1000,
+    residual_basis_build_unaccounted_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_unaccounted_sec
+      ) * 1000,
+    residual_basis_build_count =
+      as.integer(summary$residual_basis_build_count %||% 0L),
+    residual_basis_build_rows =
+      as.integer(summary$residual_basis_build_rows %||% 0L),
+    residual_basis_build_cols =
+      as.integer(summary$residual_basis_build_cols %||% 0L),
+    residual_basis_build_values =
+      as.integer(summary$residual_basis_build_values %||% 0L),
+    residual_basis_build_near_constant_count =
+      as.integer(summary$residual_basis_build_near_constant_count %||% 0L),
+    residual_basis_build_fallback_row_count =
+      as.integer(summary$residual_basis_build_fallback_row_count %||% 0L),
     residual_diagnostic_merge_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_diagnostic_merge_sec

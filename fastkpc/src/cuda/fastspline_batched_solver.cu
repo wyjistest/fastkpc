@@ -169,6 +169,23 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
     std::max(out->basis_cache_entries, value.basis_cache_entries);
   out->basis_cache_hit_sec += value.basis_cache_hit_sec;
   out->basis_cache_miss_build_sec += value.basis_cache_miss_build_sec;
+  out->basis_build_total_sec += value.basis_build_total_sec;
+  out->basis_build_alloc_sec += value.basis_build_alloc_sec;
+  out->basis_build_near_constant_sec += value.basis_build_near_constant_sec;
+  out->basis_build_knots_sec += value.basis_build_knots_sec;
+  out->basis_build_min_gap_sec += value.basis_build_min_gap_sec;
+  out->basis_build_eval_sec += value.basis_build_eval_sec;
+  out->basis_build_normalize_sec += value.basis_build_normalize_sec;
+  out->basis_build_fallback_sec += value.basis_build_fallback_sec;
+  out->basis_build_unaccounted_sec += value.basis_build_unaccounted_sec;
+  out->basis_build_count += value.basis_build_count;
+  out->basis_build_rows += value.basis_build_rows;
+  out->basis_build_cols += value.basis_build_cols;
+  out->basis_build_values += value.basis_build_values;
+  out->basis_build_near_constant_count +=
+    value.basis_build_near_constant_count;
+  out->basis_build_fallback_row_count +=
+    value.basis_build_fallback_row_count;
   out->host_pack_sec += value.host_pack_sec;
   out->alloc_sec += value.alloc_sec;
   out->h2d_sec += value.h2d_sec;
@@ -2383,6 +2400,21 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.basis_cache_entries = 0;
   out.basis_cache_hit_sec = 0.0;
   out.basis_cache_miss_build_sec = 0.0;
+  out.basis_build_total_sec = 0.0;
+  out.basis_build_alloc_sec = 0.0;
+  out.basis_build_near_constant_sec = 0.0;
+  out.basis_build_knots_sec = 0.0;
+  out.basis_build_min_gap_sec = 0.0;
+  out.basis_build_eval_sec = 0.0;
+  out.basis_build_normalize_sec = 0.0;
+  out.basis_build_fallback_sec = 0.0;
+  out.basis_build_unaccounted_sec = 0.0;
+  out.basis_build_count = 0;
+  out.basis_build_rows = 0;
+  out.basis_build_cols = 0;
+  out.basis_build_values = 0;
+  out.basis_build_near_constant_count = 0;
+  out.basis_build_fallback_row_count = 0;
   out.host_pack_sec = 0.0;
   out.alloc_sec = 0.0;
   out.h2d_sec = 0.0;
@@ -2625,6 +2657,36 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
           build_diagnostics.basis_cache_hit_sec;
         diagnostics->basis_cache_miss_build_sec +=
           build_diagnostics.basis_cache_miss_build_sec;
+        diagnostics->basis_build_total_sec +=
+          build_diagnostics.basis_build_total_sec;
+        diagnostics->basis_build_alloc_sec +=
+          build_diagnostics.basis_build_alloc_sec;
+        diagnostics->basis_build_near_constant_sec +=
+          build_diagnostics.basis_build_near_constant_sec;
+        diagnostics->basis_build_knots_sec +=
+          build_diagnostics.basis_build_knots_sec;
+        diagnostics->basis_build_min_gap_sec +=
+          build_diagnostics.basis_build_min_gap_sec;
+        diagnostics->basis_build_eval_sec +=
+          build_diagnostics.basis_build_eval_sec;
+        diagnostics->basis_build_normalize_sec +=
+          build_diagnostics.basis_build_normalize_sec;
+        diagnostics->basis_build_fallback_sec +=
+          build_diagnostics.basis_build_fallback_sec;
+        diagnostics->basis_build_unaccounted_sec +=
+          build_diagnostics.basis_build_unaccounted_sec;
+        diagnostics->basis_build_count +=
+          build_diagnostics.basis_build_count;
+        diagnostics->basis_build_rows +=
+          build_diagnostics.basis_build_rows;
+        diagnostics->basis_build_cols +=
+          build_diagnostics.basis_build_cols;
+        diagnostics->basis_build_values +=
+          build_diagnostics.basis_build_values;
+        diagnostics->basis_build_near_constant_count +=
+          build_diagnostics.basis_build_near_constant_count;
+        diagnostics->basis_build_fallback_row_count +=
+          build_diagnostics.basis_build_fallback_row_count;
       }
       substage = std::chrono::steady_clock::now();
       design_it = design_cache->insert(

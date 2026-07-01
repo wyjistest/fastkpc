@@ -44,6 +44,21 @@ struct FastSplineDesignBuildDiagnostics {
   int basis_cache_entries;
   double basis_cache_hit_sec;
   double basis_cache_miss_build_sec;
+  double basis_build_total_sec;
+  double basis_build_alloc_sec;
+  double basis_build_near_constant_sec;
+  double basis_build_knots_sec;
+  double basis_build_min_gap_sec;
+  double basis_build_eval_sec;
+  double basis_build_normalize_sec;
+  double basis_build_fallback_sec;
+  double basis_build_unaccounted_sec;
+  int basis_build_count;
+  int basis_build_rows;
+  int basis_build_cols;
+  int basis_build_values;
+  int basis_build_near_constant_count;
+  int basis_build_fallback_row_count;
 };
 
 struct FastSplineBasisBlock {
@@ -62,7 +77,8 @@ std::string serialize_fastspline_params(const FastSplineParams& params);
 std::vector<double> quantile_knots(const std::vector<double>& x, int knots);
 std::vector<double> cubic_bspline_basis(const std::vector<double>& x,
                                         const FastSplineParams& params,
-                                        int* n_basis);
+                                        int* n_basis,
+                                        FastSplineDesignBuildDiagnostics* diagnostics = nullptr);
 std::vector<double> second_difference_penalty(int n_basis);
 
 FastSplineDesignBuildDiagnostics make_empty_fastspline_design_build_diagnostics();
