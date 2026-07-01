@@ -304,10 +304,17 @@ required_basis_build_fields <- c(
   "residual_basis_build_alloc_ms",
   "residual_basis_build_near_constant_ms",
   "residual_basis_build_knots_ms",
+  "residual_basis_build_knots_copy_ms",
+  "residual_basis_build_knots_sort_ms",
+  "residual_basis_build_knots_center_ms",
   "residual_basis_build_min_gap_ms",
+  "residual_basis_build_width_ms",
   "residual_basis_build_eval_ms",
+  "residual_basis_build_eval_fill_ms",
   "residual_basis_build_normalize_ms",
+  "residual_basis_build_normalize_scale_ms",
   "residual_basis_build_fallback_ms",
+  "residual_basis_build_return_ms",
   "residual_basis_build_unaccounted_ms",
   "residual_basis_build_count",
   "residual_basis_build_rows",
@@ -336,13 +343,29 @@ basis_build_accounted_ms <-
   runs$residual_basis_build_near_constant_ms[[1L]] +
   runs$residual_basis_build_knots_ms[[1L]] +
   runs$residual_basis_build_min_gap_ms[[1L]] +
+  runs$residual_basis_build_width_ms[[1L]] +
   runs$residual_basis_build_eval_ms[[1L]] +
   runs$residual_basis_build_normalize_ms[[1L]] +
   runs$residual_basis_build_fallback_ms[[1L]] +
+  runs$residual_basis_build_return_ms[[1L]] +
   runs$residual_basis_build_unaccounted_ms[[1L]]
 assert_true(basis_build_accounted_ms <=
               runs$residual_basis_build_total_ms[[1L]] + 1e-6,
             "residual basis build split should not exceed total")
+assert_true(runs$residual_basis_build_knots_copy_ms[[1L]] >= 0,
+            "stage breakdown should time residual basis knot copy")
+assert_true(runs$residual_basis_build_knots_sort_ms[[1L]] >= 0,
+            "stage breakdown should time residual basis knot sort")
+assert_true(runs$residual_basis_build_knots_center_ms[[1L]] >= 0,
+            "stage breakdown should time residual basis knot center build")
+assert_true(runs$residual_basis_build_width_ms[[1L]] >= 0,
+            "stage breakdown should time residual basis width setup")
+assert_true(runs$residual_basis_build_eval_fill_ms[[1L]] >= 0,
+            "stage breakdown should time residual basis eval fill")
+assert_true(runs$residual_basis_build_normalize_scale_ms[[1L]] >= 0,
+            "stage breakdown should time residual basis normalize scale")
+assert_true(runs$residual_basis_build_return_ms[[1L]] >= 0,
+            "stage breakdown should time residual basis return packaging")
 residual_grouping_accounted_ms <-
   runs$residual_grouping_condition_key_ms[[1L]] +
   runs$residual_grouping_group_key_ms[[1L]] +

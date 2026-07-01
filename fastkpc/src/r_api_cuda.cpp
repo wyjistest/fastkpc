@@ -420,14 +420,28 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_basis_build_near_constant_sec,
       Rcpp::Named("residual_basis_build_knots_sec") =
         diagnostics.residual_basis_build_knots_sec,
+      Rcpp::Named("residual_basis_build_knots_copy_sec") =
+        diagnostics.residual_basis_build_knots_copy_sec,
+      Rcpp::Named("residual_basis_build_knots_sort_sec") =
+        diagnostics.residual_basis_build_knots_sort_sec,
+      Rcpp::Named("residual_basis_build_knots_center_sec") =
+        diagnostics.residual_basis_build_knots_center_sec,
       Rcpp::Named("residual_basis_build_min_gap_sec") =
         diagnostics.residual_basis_build_min_gap_sec,
+      Rcpp::Named("residual_basis_build_width_sec") =
+        diagnostics.residual_basis_build_width_sec,
       Rcpp::Named("residual_basis_build_eval_sec") =
         diagnostics.residual_basis_build_eval_sec,
+      Rcpp::Named("residual_basis_build_eval_fill_sec") =
+        diagnostics.residual_basis_build_eval_fill_sec,
       Rcpp::Named("residual_basis_build_normalize_sec") =
         diagnostics.residual_basis_build_normalize_sec,
+      Rcpp::Named("residual_basis_build_normalize_scale_sec") =
+        diagnostics.residual_basis_build_normalize_scale_sec,
       Rcpp::Named("residual_basis_build_fallback_sec") =
         diagnostics.residual_basis_build_fallback_sec,
+      Rcpp::Named("residual_basis_build_return_sec") =
+        diagnostics.residual_basis_build_return_sec,
       Rcpp::Named("residual_basis_build_unaccounted_sec") =
         diagnostics.residual_basis_build_unaccounted_sec,
       Rcpp::Named("residual_basis_build_count") =
@@ -1018,14 +1032,28 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.basis_build_near_constant_sec,
     Rcpp::Named("basis_build_knots_sec") =
       diagnostics.basis_build_knots_sec,
+    Rcpp::Named("basis_build_knots_copy_sec") =
+      diagnostics.basis_build_knots_copy_sec,
+    Rcpp::Named("basis_build_knots_sort_sec") =
+      diagnostics.basis_build_knots_sort_sec,
+    Rcpp::Named("basis_build_knots_center_sec") =
+      diagnostics.basis_build_knots_center_sec,
     Rcpp::Named("basis_build_min_gap_sec") =
       diagnostics.basis_build_min_gap_sec,
+    Rcpp::Named("basis_build_width_sec") =
+      diagnostics.basis_build_width_sec,
     Rcpp::Named("basis_build_eval_sec") =
       diagnostics.basis_build_eval_sec,
+    Rcpp::Named("basis_build_eval_fill_sec") =
+      diagnostics.basis_build_eval_fill_sec,
     Rcpp::Named("basis_build_normalize_sec") =
       diagnostics.basis_build_normalize_sec,
+    Rcpp::Named("basis_build_normalize_scale_sec") =
+      diagnostics.basis_build_normalize_scale_sec,
     Rcpp::Named("basis_build_fallback_sec") =
       diagnostics.basis_build_fallback_sec,
+    Rcpp::Named("basis_build_return_sec") =
+      diagnostics.basis_build_return_sec,
     Rcpp::Named("basis_build_unaccounted_sec") =
       diagnostics.basis_build_unaccounted_sec,
     Rcpp::Named("basis_build_count") =

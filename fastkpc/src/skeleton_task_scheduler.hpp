@@ -157,10 +157,17 @@ struct SchedulerDiagnostics {
   double residual_basis_build_alloc_sec;
   double residual_basis_build_near_constant_sec;
   double residual_basis_build_knots_sec;
+  double residual_basis_build_knots_copy_sec;
+  double residual_basis_build_knots_sort_sec;
+  double residual_basis_build_knots_center_sec;
   double residual_basis_build_min_gap_sec;
+  double residual_basis_build_width_sec;
   double residual_basis_build_eval_sec;
+  double residual_basis_build_eval_fill_sec;
   double residual_basis_build_normalize_sec;
+  double residual_basis_build_normalize_scale_sec;
   double residual_basis_build_fallback_sec;
+  double residual_basis_build_return_sec;
   double residual_basis_build_unaccounted_sec;
   int residual_basis_build_count;
   int residual_basis_build_rows;

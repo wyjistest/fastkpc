@@ -48,10 +48,17 @@ struct FastSplineDesignBuildDiagnostics {
   double basis_build_alloc_sec;
   double basis_build_near_constant_sec;
   double basis_build_knots_sec;
+  double basis_build_knots_copy_sec;
+  double basis_build_knots_sort_sec;
+  double basis_build_knots_center_sec;
   double basis_build_min_gap_sec;
+  double basis_build_width_sec;
   double basis_build_eval_sec;
+  double basis_build_eval_fill_sec;
   double basis_build_normalize_sec;
+  double basis_build_normalize_scale_sec;
   double basis_build_fallback_sec;
+  double basis_build_return_sec;
   double basis_build_unaccounted_sec;
   int basis_build_count;
   int basis_build_rows;

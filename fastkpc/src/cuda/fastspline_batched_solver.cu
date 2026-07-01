@@ -173,10 +173,18 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->basis_build_alloc_sec += value.basis_build_alloc_sec;
   out->basis_build_near_constant_sec += value.basis_build_near_constant_sec;
   out->basis_build_knots_sec += value.basis_build_knots_sec;
+  out->basis_build_knots_copy_sec += value.basis_build_knots_copy_sec;
+  out->basis_build_knots_sort_sec += value.basis_build_knots_sort_sec;
+  out->basis_build_knots_center_sec += value.basis_build_knots_center_sec;
   out->basis_build_min_gap_sec += value.basis_build_min_gap_sec;
+  out->basis_build_width_sec += value.basis_build_width_sec;
   out->basis_build_eval_sec += value.basis_build_eval_sec;
+  out->basis_build_eval_fill_sec += value.basis_build_eval_fill_sec;
   out->basis_build_normalize_sec += value.basis_build_normalize_sec;
+  out->basis_build_normalize_scale_sec +=
+    value.basis_build_normalize_scale_sec;
   out->basis_build_fallback_sec += value.basis_build_fallback_sec;
+  out->basis_build_return_sec += value.basis_build_return_sec;
   out->basis_build_unaccounted_sec += value.basis_build_unaccounted_sec;
   out->basis_build_count += value.basis_build_count;
   out->basis_build_rows += value.basis_build_rows;
@@ -2404,10 +2412,17 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.basis_build_alloc_sec = 0.0;
   out.basis_build_near_constant_sec = 0.0;
   out.basis_build_knots_sec = 0.0;
+  out.basis_build_knots_copy_sec = 0.0;
+  out.basis_build_knots_sort_sec = 0.0;
+  out.basis_build_knots_center_sec = 0.0;
   out.basis_build_min_gap_sec = 0.0;
+  out.basis_build_width_sec = 0.0;
   out.basis_build_eval_sec = 0.0;
+  out.basis_build_eval_fill_sec = 0.0;
   out.basis_build_normalize_sec = 0.0;
+  out.basis_build_normalize_scale_sec = 0.0;
   out.basis_build_fallback_sec = 0.0;
+  out.basis_build_return_sec = 0.0;
   out.basis_build_unaccounted_sec = 0.0;
   out.basis_build_count = 0;
   out.basis_build_rows = 0;
@@ -2665,14 +2680,28 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
           build_diagnostics.basis_build_near_constant_sec;
         diagnostics->basis_build_knots_sec +=
           build_diagnostics.basis_build_knots_sec;
+        diagnostics->basis_build_knots_copy_sec +=
+          build_diagnostics.basis_build_knots_copy_sec;
+        diagnostics->basis_build_knots_sort_sec +=
+          build_diagnostics.basis_build_knots_sort_sec;
+        diagnostics->basis_build_knots_center_sec +=
+          build_diagnostics.basis_build_knots_center_sec;
         diagnostics->basis_build_min_gap_sec +=
           build_diagnostics.basis_build_min_gap_sec;
+        diagnostics->basis_build_width_sec +=
+          build_diagnostics.basis_build_width_sec;
         diagnostics->basis_build_eval_sec +=
           build_diagnostics.basis_build_eval_sec;
+        diagnostics->basis_build_eval_fill_sec +=
+          build_diagnostics.basis_build_eval_fill_sec;
         diagnostics->basis_build_normalize_sec +=
           build_diagnostics.basis_build_normalize_sec;
+        diagnostics->basis_build_normalize_scale_sec +=
+          build_diagnostics.basis_build_normalize_scale_sec;
         diagnostics->basis_build_fallback_sec +=
           build_diagnostics.basis_build_fallback_sec;
+        diagnostics->basis_build_return_sec +=
+          build_diagnostics.basis_build_return_sec;
         diagnostics->basis_build_unaccounted_sec +=
           build_diagnostics.basis_build_unaccounted_sec;
         diagnostics->basis_build_count +=

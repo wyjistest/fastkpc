@@ -506,10 +506,17 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
     result.diagnostics.basis_build_alloc_sec = 0.0;
     result.diagnostics.basis_build_near_constant_sec = 0.0;
     result.diagnostics.basis_build_knots_sec = 0.0;
+    result.diagnostics.basis_build_knots_copy_sec = 0.0;
+    result.diagnostics.basis_build_knots_sort_sec = 0.0;
+    result.diagnostics.basis_build_knots_center_sec = 0.0;
     result.diagnostics.basis_build_min_gap_sec = 0.0;
+    result.diagnostics.basis_build_width_sec = 0.0;
     result.diagnostics.basis_build_eval_sec = 0.0;
+    result.diagnostics.basis_build_eval_fill_sec = 0.0;
     result.diagnostics.basis_build_normalize_sec = 0.0;
+    result.diagnostics.basis_build_normalize_scale_sec = 0.0;
     result.diagnostics.basis_build_fallback_sec = 0.0;
+    result.diagnostics.basis_build_return_sec = 0.0;
     result.diagnostics.basis_build_unaccounted_sec = 0.0;
     result.diagnostics.basis_build_count = 0;
     result.diagnostics.basis_build_rows = 0;

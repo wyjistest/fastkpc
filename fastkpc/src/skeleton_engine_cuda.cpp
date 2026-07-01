@@ -333,14 +333,28 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.basis_build_near_constant_sec;
         diagnostics->residual_basis_build_knots_sec +=
           batch_result.diagnostics.basis_build_knots_sec;
+        diagnostics->residual_basis_build_knots_copy_sec +=
+          batch_result.diagnostics.basis_build_knots_copy_sec;
+        diagnostics->residual_basis_build_knots_sort_sec +=
+          batch_result.diagnostics.basis_build_knots_sort_sec;
+        diagnostics->residual_basis_build_knots_center_sec +=
+          batch_result.diagnostics.basis_build_knots_center_sec;
         diagnostics->residual_basis_build_min_gap_sec +=
           batch_result.diagnostics.basis_build_min_gap_sec;
+        diagnostics->residual_basis_build_width_sec +=
+          batch_result.diagnostics.basis_build_width_sec;
         diagnostics->residual_basis_build_eval_sec +=
           batch_result.diagnostics.basis_build_eval_sec;
+        diagnostics->residual_basis_build_eval_fill_sec +=
+          batch_result.diagnostics.basis_build_eval_fill_sec;
         diagnostics->residual_basis_build_normalize_sec +=
           batch_result.diagnostics.basis_build_normalize_sec;
+        diagnostics->residual_basis_build_normalize_scale_sec +=
+          batch_result.diagnostics.basis_build_normalize_scale_sec;
         diagnostics->residual_basis_build_fallback_sec +=
           batch_result.diagnostics.basis_build_fallback_sec;
+        diagnostics->residual_basis_build_return_sec +=
+          batch_result.diagnostics.basis_build_return_sec;
         diagnostics->residual_basis_build_unaccounted_sec +=
           batch_result.diagnostics.basis_build_unaccounted_sec;
         diagnostics->residual_basis_build_count +=

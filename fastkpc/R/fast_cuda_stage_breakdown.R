@@ -617,21 +617,49 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       fastkpc_stage_breakdown_seconds(
         summary$residual_basis_build_knots_sec
       ) * 1000,
+    residual_basis_build_knots_copy_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_knots_copy_sec
+      ) * 1000,
+    residual_basis_build_knots_sort_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_knots_sort_sec
+      ) * 1000,
+    residual_basis_build_knots_center_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_knots_center_sec
+      ) * 1000,
     residual_basis_build_min_gap_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_basis_build_min_gap_sec
+      ) * 1000,
+    residual_basis_build_width_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_width_sec
       ) * 1000,
     residual_basis_build_eval_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_basis_build_eval_sec
       ) * 1000,
+    residual_basis_build_eval_fill_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_eval_fill_sec
+      ) * 1000,
     residual_basis_build_normalize_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_basis_build_normalize_sec
       ) * 1000,
+    residual_basis_build_normalize_scale_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_normalize_scale_sec
+      ) * 1000,
     residual_basis_build_fallback_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_basis_build_fallback_sec
+      ) * 1000,
+    residual_basis_build_return_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_build_return_sec
       ) * 1000,
     residual_basis_build_unaccounted_ms =
       fastkpc_stage_breakdown_seconds(
