@@ -220,6 +220,21 @@ assert_true(runs$residual_grouping_group_count[[1L]] > 0L,
             "stage breakdown should count residual grouping groups")
 assert_true(runs$residual_grouping_design_count[[1L]] > 0L,
             "stage breakdown should count residual grouping unique designs")
+assert_true("residual_design_cache_hit_count" %in% names(runs),
+            "stage breakdown should expose residual design cache hits")
+assert_true("residual_design_cache_miss_count" %in% names(runs),
+            "stage breakdown should expose residual design cache misses")
+assert_true("residual_design_cache_insert_count" %in% names(runs),
+            "stage breakdown should expose residual design cache inserts")
+assert_true("residual_design_cache_entries" %in% names(runs),
+            "stage breakdown should expose residual design cache entries")
+assert_true(runs$residual_design_cache_miss_count[[1L]] > 0L,
+            "stage breakdown should record residual design cache misses")
+assert_true(runs$residual_design_cache_insert_count[[1L]] > 0L,
+            "stage breakdown should record residual design cache inserts")
+assert_true(runs$residual_design_cache_entries[[1L]] >=
+              runs$residual_design_cache_insert_count[[1L]],
+            "residual design cache entries should cover inserted designs")
 residual_grouping_accounted_ms <-
   runs$residual_grouping_condition_key_ms[[1L]] +
   runs$residual_grouping_group_key_ms[[1L]] +

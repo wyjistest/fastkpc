@@ -275,6 +275,15 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.grouping_condition_key_sort_count;
         diagnostics->residual_grouping_string_key_count +=
           batch_result.diagnostics.grouping_string_key_count;
+        diagnostics->residual_design_cache_hit_count +=
+          batch_result.diagnostics.design_cache_hit_count;
+        diagnostics->residual_design_cache_miss_count +=
+          batch_result.diagnostics.design_cache_miss_count;
+        diagnostics->residual_design_cache_insert_count +=
+          batch_result.diagnostics.design_cache_insert_count;
+        diagnostics->residual_design_cache_entries =
+          std::max(diagnostics->residual_design_cache_entries,
+                   batch_result.diagnostics.design_cache_entries);
         diagnostics->residual_host_pack_sec +=
           batch_result.diagnostics.host_pack_sec;
         diagnostics->residual_alloc_sec +=

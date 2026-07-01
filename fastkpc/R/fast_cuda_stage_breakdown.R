@@ -533,6 +533,14 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       ),
     residual_grouping_string_key_count =
       as.integer(summary$residual_grouping_string_key_count %||% 0L),
+    residual_design_cache_hit_count =
+      as.integer(summary$residual_design_cache_hit_count %||% 0L),
+    residual_design_cache_miss_count =
+      as.integer(summary$residual_design_cache_miss_count %||% 0L),
+    residual_design_cache_insert_count =
+      as.integer(summary$residual_design_cache_insert_count %||% 0L),
+    residual_design_cache_entries =
+      as.integer(summary$residual_design_cache_entries %||% 0L),
     residual_diagnostic_merge_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_diagnostic_merge_sec
@@ -689,6 +697,7 @@ fastkpc_run_fast_cuda_stage_breakdown <- function(
         precision = "fast",
         graph_stage = "skeleton",
         fastspline_params = params,
+        residual_batch_size = as.integer(scenario$residual_batch_size %||% 0L),
         benchmark = TRUE,
         seed = scenario$seed + repeat_id
       )

@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -141,6 +142,11 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->grouping_condition_key_sort_count +=
     value.grouping_condition_key_sort_count;
   out->grouping_string_key_count += value.grouping_string_key_count;
+  out->design_cache_hit_count += value.design_cache_hit_count;
+  out->design_cache_miss_count += value.design_cache_miss_count;
+  out->design_cache_insert_count += value.design_cache_insert_count;
+  out->design_cache_entries =
+    std::max(out->design_cache_entries, value.design_cache_entries);
   out->host_pack_sec += value.host_pack_sec;
   out->alloc_sec += value.alloc_sec;
   out->h2d_sec += value.h2d_sec;
@@ -1650,6 +1656,12 @@ void free_buffers(DeviceGroupBuffers* buffers) {
 
 struct FastSplineCudaWorkspace {
   DeviceGroupBuffers group_buffers;
+  std::map<std::string, FastSplineDesign> design_cache;
+  const double* design_cache_data_ptr = nullptr;
+  int design_cache_nrow = 0;
+  int design_cache_ncol = 0;
+  FastSplineParams design_cache_params;
+  bool design_cache_params_set = false;
 };
 
 namespace {
@@ -2324,6 +2336,10 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.grouping_design_count = 0;
   out.grouping_condition_key_sort_count = 0;
   out.grouping_string_key_count = 0;
+  out.design_cache_hit_count = 0;
+  out.design_cache_miss_count = 0;
+  out.design_cache_insert_count = 0;
+  out.design_cache_entries = 0;
   out.host_pack_sec = 0.0;
   out.alloc_sec = 0.0;
   out.h2d_sec = 0.0;
@@ -2428,12 +2444,44 @@ void prewarm_fastspline_cuda_workspace(FastSplineCudaWorkspace* workspace) {
   ensure_handles(&workspace->group_buffers, nullptr);
 }
 
+bool same_fastspline_params(const FastSplineParams& lhs,
+                            const FastSplineParams& rhs) {
+  return lhs.degree == rhs.degree &&
+    lhs.knots == rhs.knots &&
+    lhs.lambda_min == rhs.lambda_min &&
+    lhs.lambda_max == rhs.lambda_max &&
+    lhs.lambda_count == rhs.lambda_count &&
+    lhs.ridge == rhs.ridge &&
+    lhs.mode == rhs.mode;
+}
+
+void bind_fastspline_design_cache(FastSplineCudaWorkspace* workspace,
+                                  const Rcpp::NumericMatrix& data,
+                                  const FastSplineParams& params) {
+  if (workspace == nullptr) return;
+  const double* data_ptr = REAL(data);
+  if (workspace->design_cache_data_ptr == data_ptr &&
+      workspace->design_cache_nrow == data.nrow() &&
+      workspace->design_cache_ncol == data.ncol() &&
+      workspace->design_cache_params_set &&
+      same_fastspline_params(workspace->design_cache_params, params)) {
+    return;
+  }
+  workspace->design_cache.clear();
+  workspace->design_cache_data_ptr = data_ptr;
+  workspace->design_cache_nrow = data.nrow();
+  workspace->design_cache_ncol = data.ncol();
+  workspace->design_cache_params = params;
+  workspace->design_cache_params_set = true;
+}
+
 std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
   const Rcpp::NumericMatrix& data,
   const std::vector<int>& targets,
   const std::vector<std::vector<int> >& conditioning_sets,
   const FastSplineParams& params,
-  FastSplineCudaBatchDiagnostics* diagnostics) {
+  FastSplineCudaBatchDiagnostics* diagnostics,
+  std::map<std::string, FastSplineDesign>* run_design_cache) {
   const std::chrono::steady_clock::time_point grouping_start =
     std::chrono::steady_clock::now();
   if (targets.size() != conditioning_sets.size()) {
@@ -2441,7 +2489,10 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
   }
   std::vector<FastSplineBatchGroup> groups;
   std::map<std::string, int> group_by_key;
-  std::map<std::string, FastSplineDesign> design_cache;
+  std::map<std::string, FastSplineDesign> local_design_cache;
+  std::map<std::string, FastSplineDesign>* design_cache =
+    run_design_cache == nullptr ? &local_design_cache : run_design_cache;
+  std::set<std::string> grouping_design_keys;
   std::vector<std::map<std::string, int> > group_design_by_key;
   for (int i = 0; i < static_cast<int>(targets.size()); ++i) {
     if (targets[i] < 0 || targets[i] >= data.ncol()) {
@@ -2458,13 +2509,23 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
       diagnostics->grouping_condition_key_sec += elapsed_since(substage);
       diagnostics->grouping_condition_key_sort_count += 2;
       diagnostics->grouping_string_key_count += 1;
+      if (grouping_design_keys.insert(exact_design_key).second) {
+        diagnostics->grouping_design_count += 1;
+      }
     }
 
     substage = std::chrono::steady_clock::now();
     std::map<std::string, FastSplineDesign>::iterator design_it =
-      design_cache.find(exact_design_key);
+      design_cache->find(exact_design_key);
     bool inserted_design = false;
-    if (design_it == design_cache.end()) {
+    if (diagnostics != nullptr) {
+      if (design_it == design_cache->end()) {
+        diagnostics->design_cache_miss_count += 1;
+      } else {
+        diagnostics->design_cache_hit_count += 1;
+      }
+    }
+    if (design_it == design_cache->end()) {
       if (diagnostics != nullptr) {
         diagnostics->grouping_map_insert_sec += elapsed_since(substage);
       }
@@ -2475,13 +2536,17 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
         diagnostics->grouping_design_build_sec += elapsed_since(substage);
       }
       substage = std::chrono::steady_clock::now();
-      design_it = design_cache.insert(
+      design_it = design_cache->insert(
         std::make_pair(exact_design_key, design)).first;
       inserted_design = true;
     }
     if (diagnostics != nullptr) {
       diagnostics->grouping_map_insert_sec += elapsed_since(substage);
-      if (inserted_design) diagnostics->grouping_design_count += 1;
+      if (inserted_design) {
+        diagnostics->design_cache_insert_count += 1;
+      }
+      diagnostics->design_cache_entries =
+        static_cast<int>(design_cache->size());
     }
 
     FastSplineBatchRequest request;
@@ -2539,6 +2604,15 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
   return groups;
 }
 
+std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
+  const Rcpp::NumericMatrix& data,
+  const std::vector<int>& targets,
+  const std::vector<std::vector<int> >& conditioning_sets,
+  const FastSplineParams& params) {
+  return make_fastspline_batch_groups(data, targets, conditioning_sets, params,
+                                      nullptr, nullptr);
+}
+
 FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
   const Rcpp::NumericMatrix& data,
   const std::vector<int>& targets,
@@ -2557,7 +2631,7 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
     std::chrono::steady_clock::now();
   const std::vector<FastSplineBatchGroup> groups =
     make_fastspline_batch_groups(data, targets, conditioning_sets, params,
-                                 &result.diagnostics);
+                                 &result.diagnostics, nullptr);
   result.diagnostics.grouping_sec += elapsed_since(stage);
   const std::string true_backend = "cusolver-batched";
 
@@ -2647,11 +2721,14 @@ fit_fastspline_residuals_cuda_true_batch_residuals_only(
   if (requested_fits > 0) result.diagnostics.residual_only_batch_count = 1;
   if (requested_fits == 0) return result;
 
+  bind_fastspline_design_cache(workspace, data, params);
   std::chrono::steady_clock::time_point stage =
     std::chrono::steady_clock::now();
   const std::vector<FastSplineBatchGroup> groups =
     make_fastspline_batch_groups(data, targets, conditioning_sets, params,
-                                 &result.diagnostics);
+                                 &result.diagnostics,
+                                 workspace == nullptr ?
+                                   nullptr : &workspace->design_cache);
   result.diagnostics.grouping_sec += elapsed_since(stage);
   const std::string true_backend = "cusolver-batched";
 

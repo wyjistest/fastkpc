@@ -364,6 +364,14 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_grouping_condition_key_sort_count,
       Rcpp::Named("residual_grouping_string_key_count") =
         diagnostics.residual_grouping_string_key_count,
+      Rcpp::Named("residual_design_cache_hit_count") =
+        diagnostics.residual_design_cache_hit_count,
+      Rcpp::Named("residual_design_cache_miss_count") =
+        diagnostics.residual_design_cache_miss_count,
+      Rcpp::Named("residual_design_cache_insert_count") =
+        diagnostics.residual_design_cache_insert_count,
+      Rcpp::Named("residual_design_cache_entries") =
+        diagnostics.residual_design_cache_entries,
       Rcpp::Named("residual_host_pack_sec") =
         diagnostics.residual_host_pack_sec,
       Rcpp::Named("residual_alloc_sec") = diagnostics.residual_alloc_sec,
@@ -884,6 +892,14 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.grouping_condition_key_sort_count,
     Rcpp::Named("grouping_string_key_count") =
       diagnostics.grouping_string_key_count,
+    Rcpp::Named("design_cache_hit_count") =
+      diagnostics.design_cache_hit_count,
+    Rcpp::Named("design_cache_miss_count") =
+      diagnostics.design_cache_miss_count,
+    Rcpp::Named("design_cache_insert_count") =
+      diagnostics.design_cache_insert_count,
+    Rcpp::Named("design_cache_entries") =
+      diagnostics.design_cache_entries,
     Rcpp::Named("host_pack_sec") = diagnostics.host_pack_sec,
     Rcpp::Named("alloc_sec") = diagnostics.alloc_sec,
     Rcpp::Named("h2d_sec") = diagnostics.h2d_sec,
