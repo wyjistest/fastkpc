@@ -138,6 +138,24 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
     row("residual_h2d",
         fastkpc_stage_breakdown_seconds(summary$residual_h2d_sec),
         "residual"),
+    row("residual_h2d_design",
+        fastkpc_stage_breakdown_seconds(summary$residual_h2d_design_sec),
+        "residual"),
+    row("residual_h2d_penalty",
+        fastkpc_stage_breakdown_seconds(summary$residual_h2d_penalty_sec),
+        "residual"),
+    row("residual_h2d_y",
+        fastkpc_stage_breakdown_seconds(summary$residual_h2d_y_sec),
+        "residual"),
+    row("residual_h2d_index",
+        fastkpc_stage_breakdown_seconds(summary$residual_h2d_index_sec),
+        "residual"),
+    row("residual_h2d_lambda",
+        fastkpc_stage_breakdown_seconds(summary$residual_h2d_lambda_sec),
+        "residual"),
+    row("residual_h2d_active",
+        fastkpc_stage_breakdown_seconds(summary$residual_h2d_active_sec),
+        "residual"),
     row("residual_xtx_xty",
         fastkpc_stage_breakdown_seconds(summary$residual_xtx_xty_sec),
         "residual"),
@@ -409,6 +427,26 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_d2h_metadata_coalesced_count %||% 0L),
     residual_d2h_metadata_coalesced_bytes =
       as.numeric(summary$residual_d2h_metadata_coalesced_bytes %||% 0),
+    residual_h2d_design_ms =
+      fastkpc_stage_breakdown_seconds(summary$residual_h2d_design_sec) * 1000,
+    residual_h2d_penalty_ms =
+      fastkpc_stage_breakdown_seconds(summary$residual_h2d_penalty_sec) * 1000,
+    residual_h2d_y_ms =
+      fastkpc_stage_breakdown_seconds(summary$residual_h2d_y_sec) * 1000,
+    residual_h2d_index_ms =
+      fastkpc_stage_breakdown_seconds(summary$residual_h2d_index_sec) * 1000,
+    residual_h2d_lambda_ms =
+      fastkpc_stage_breakdown_seconds(summary$residual_h2d_lambda_sec) * 1000,
+    residual_h2d_active_ms =
+      fastkpc_stage_breakdown_seconds(summary$residual_h2d_active_sec) * 1000,
+    residual_h2d_copy_count =
+      as.integer(summary$residual_h2d_copy_count %||% 0L),
+    residual_h2d_bytes = as.numeric(summary$residual_h2d_bytes %||% 0),
+    residual_h2d_design_bytes =
+      as.numeric(summary$residual_h2d_design_bytes %||% 0),
+    residual_h2d_y_bytes = as.numeric(summary$residual_h2d_y_bytes %||% 0),
+    residual_h2d_metadata_bytes =
+      as.numeric(summary$residual_h2d_metadata_bytes %||% 0),
     residual_winning_factor_reuse_count =
       as.integer(summary$residual_winning_factor_reuse_count %||% 0L),
     residual_factor_cache_hits =

@@ -50,6 +50,8 @@ required_stages <- c(
   "residual_factor_rhs_solve",
   "residual_rhs_custom_solve", "residual_rhs_cublas_solve",
   "residual_factor_inverse_solve", "residual_d2h",
+  "residual_h2d_design", "residual_h2d_penalty", "residual_h2d_y",
+  "residual_h2d_index", "residual_h2d_lambda", "residual_h2d_active",
   "residual_d2h_residuals", "residual_d2h_metadata",
   "residual_d2h_info",
   "residual_cache_insert", "residual_true_batch_total",
@@ -167,6 +169,33 @@ assert_true(runs$residual_d2h_metadata_ms[[1L]] >= 0,
             "stage breakdown should time residual metadata D2H")
 assert_true(runs$residual_d2h_info_ms[[1L]] >= 0,
             "stage breakdown should time residual info D2H")
+assert_true(runs$residual_h2d_copy_count[[1L]] > 0L,
+            "stage breakdown should record residual H2D copy count")
+assert_true(runs$residual_h2d_bytes[[1L]] > 0,
+            "stage breakdown should record residual H2D bytes")
+assert_true(runs$residual_h2d_design_bytes[[1L]] > 0,
+            "stage breakdown should record residual H2D design bytes")
+assert_true(runs$residual_h2d_y_bytes[[1L]] > 0,
+            "stage breakdown should record residual H2D y bytes")
+assert_true(runs$residual_h2d_metadata_bytes[[1L]] > 0,
+            "stage breakdown should record residual H2D metadata bytes")
+assert_true(runs$residual_h2d_design_ms[[1L]] >= 0,
+            "stage breakdown should time residual design H2D")
+assert_true(runs$residual_h2d_penalty_ms[[1L]] >= 0,
+            "stage breakdown should time residual penalty H2D")
+assert_true(runs$residual_h2d_y_ms[[1L]] >= 0,
+            "stage breakdown should time residual y H2D")
+assert_true(runs$residual_h2d_index_ms[[1L]] >= 0,
+            "stage breakdown should time residual index H2D")
+assert_true(runs$residual_h2d_lambda_ms[[1L]] >= 0,
+            "stage breakdown should time residual lambda H2D")
+assert_true(runs$residual_h2d_active_ms[[1L]] >= 0,
+            "stage breakdown should time residual active H2D")
+assert_true(runs$residual_h2d_bytes[[1L]] ==
+              runs$residual_h2d_design_bytes[[1L]] +
+              runs$residual_h2d_y_bytes[[1L]] +
+              runs$residual_h2d_metadata_bytes[[1L]],
+            "residual H2D bytes should equal classified bytes")
 assert_true(runs$residual_lambda_candidates[[1L]] >= 0L,
             "stage breakdown should record lambda candidate count")
 assert_true(runs$residual_workspace_reuse_count[[1L]] >= 0L,

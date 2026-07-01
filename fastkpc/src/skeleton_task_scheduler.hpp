@@ -123,6 +123,17 @@ struct SchedulerDiagnostics {
   double residual_host_pack_sec;
   double residual_alloc_sec;
   double residual_h2d_sec;
+  double residual_h2d_design_sec;
+  double residual_h2d_penalty_sec;
+  double residual_h2d_y_sec;
+  double residual_h2d_index_sec;
+  double residual_h2d_lambda_sec;
+  double residual_h2d_active_sec;
+  int residual_h2d_copy_count;
+  double residual_h2d_bytes;
+  double residual_h2d_design_bytes;
+  double residual_h2d_y_bytes;
+  double residual_h2d_metadata_bytes;
   double residual_xtx_xty_sec;
   double residual_pointer_setup_sec;
   double residual_active_copy_sec;

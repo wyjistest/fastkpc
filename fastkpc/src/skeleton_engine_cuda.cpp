@@ -262,6 +262,28 @@ class CudaSkeletonResidualCache {
         diagnostics->residual_alloc_sec +=
           batch_result.diagnostics.alloc_sec;
         diagnostics->residual_h2d_sec += batch_result.diagnostics.h2d_sec;
+        diagnostics->residual_h2d_design_sec +=
+          batch_result.diagnostics.h2d_design_sec;
+        diagnostics->residual_h2d_penalty_sec +=
+          batch_result.diagnostics.h2d_penalty_sec;
+        diagnostics->residual_h2d_y_sec +=
+          batch_result.diagnostics.h2d_y_sec;
+        diagnostics->residual_h2d_index_sec +=
+          batch_result.diagnostics.h2d_index_sec;
+        diagnostics->residual_h2d_lambda_sec +=
+          batch_result.diagnostics.h2d_lambda_sec;
+        diagnostics->residual_h2d_active_sec +=
+          batch_result.diagnostics.h2d_active_sec;
+        diagnostics->residual_h2d_copy_count +=
+          batch_result.diagnostics.h2d_copy_count;
+        diagnostics->residual_h2d_bytes +=
+          batch_result.diagnostics.h2d_bytes;
+        diagnostics->residual_h2d_design_bytes +=
+          batch_result.diagnostics.h2d_design_bytes;
+        diagnostics->residual_h2d_y_bytes +=
+          batch_result.diagnostics.h2d_y_bytes;
+        diagnostics->residual_h2d_metadata_bytes +=
+          batch_result.diagnostics.h2d_metadata_bytes;
         diagnostics->residual_xtx_xty_sec +=
           batch_result.diagnostics.xtx_xty_sec;
         diagnostics->residual_pointer_setup_sec +=

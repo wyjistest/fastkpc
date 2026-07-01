@@ -46,6 +46,17 @@ struct FastSplineCudaBatchDiagnostics {
   double host_pack_sec;
   double alloc_sec;
   double h2d_sec;
+  double h2d_design_sec;
+  double h2d_penalty_sec;
+  double h2d_y_sec;
+  double h2d_index_sec;
+  double h2d_lambda_sec;
+  double h2d_active_sec;
+  int h2d_copy_count;
+  double h2d_bytes;
+  double h2d_design_bytes;
+  double h2d_y_bytes;
+  double h2d_metadata_bytes;
   double xtx_xty_sec;
   double pointer_setup_sec;
   double active_copy_sec;

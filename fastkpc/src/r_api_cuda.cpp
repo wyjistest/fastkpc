@@ -350,6 +350,27 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_host_pack_sec,
       Rcpp::Named("residual_alloc_sec") = diagnostics.residual_alloc_sec,
       Rcpp::Named("residual_h2d_sec") = diagnostics.residual_h2d_sec,
+      Rcpp::Named("residual_h2d_design_sec") =
+        diagnostics.residual_h2d_design_sec,
+      Rcpp::Named("residual_h2d_penalty_sec") =
+        diagnostics.residual_h2d_penalty_sec,
+      Rcpp::Named("residual_h2d_y_sec") =
+        diagnostics.residual_h2d_y_sec,
+      Rcpp::Named("residual_h2d_index_sec") =
+        diagnostics.residual_h2d_index_sec,
+      Rcpp::Named("residual_h2d_lambda_sec") =
+        diagnostics.residual_h2d_lambda_sec,
+      Rcpp::Named("residual_h2d_active_sec") =
+        diagnostics.residual_h2d_active_sec,
+      Rcpp::Named("residual_h2d_copy_count") =
+        diagnostics.residual_h2d_copy_count,
+      Rcpp::Named("residual_h2d_bytes") = diagnostics.residual_h2d_bytes,
+      Rcpp::Named("residual_h2d_design_bytes") =
+        diagnostics.residual_h2d_design_bytes,
+      Rcpp::Named("residual_h2d_y_bytes") =
+        diagnostics.residual_h2d_y_bytes,
+      Rcpp::Named("residual_h2d_metadata_bytes") =
+        diagnostics.residual_h2d_metadata_bytes,
       Rcpp::Named("residual_xtx_xty_sec") =
         diagnostics.residual_xtx_xty_sec,
       Rcpp::Named("residual_pointer_setup_sec") =
@@ -824,6 +845,17 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
     Rcpp::Named("host_pack_sec") = diagnostics.host_pack_sec,
     Rcpp::Named("alloc_sec") = diagnostics.alloc_sec,
     Rcpp::Named("h2d_sec") = diagnostics.h2d_sec,
+    Rcpp::Named("h2d_design_sec") = diagnostics.h2d_design_sec,
+    Rcpp::Named("h2d_penalty_sec") = diagnostics.h2d_penalty_sec,
+    Rcpp::Named("h2d_y_sec") = diagnostics.h2d_y_sec,
+    Rcpp::Named("h2d_index_sec") = diagnostics.h2d_index_sec,
+    Rcpp::Named("h2d_lambda_sec") = diagnostics.h2d_lambda_sec,
+    Rcpp::Named("h2d_active_sec") = diagnostics.h2d_active_sec,
+    Rcpp::Named("h2d_copy_count") = diagnostics.h2d_copy_count,
+    Rcpp::Named("h2d_bytes") = diagnostics.h2d_bytes,
+    Rcpp::Named("h2d_design_bytes") = diagnostics.h2d_design_bytes,
+    Rcpp::Named("h2d_y_bytes") = diagnostics.h2d_y_bytes,
+    Rcpp::Named("h2d_metadata_bytes") = diagnostics.h2d_metadata_bytes,
     Rcpp::Named("xtx_xty_sec") = diagnostics.xtx_xty_sec,
     Rcpp::Named("pointer_setup_sec") = diagnostics.pointer_setup_sec,
     Rcpp::Named("active_copy_sec") = diagnostics.active_copy_sec,

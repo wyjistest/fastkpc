@@ -68,12 +68,67 @@ void add_d2h_timing(FastSplineCudaBatchDiagnostics* timing,
   }
 }
 
+enum class H2dTransferKind {
+  Design,
+  Penalty,
+  Y,
+  Index,
+  Lambda,
+  Active
+};
+
+void add_h2d_timing(FastSplineCudaBatchDiagnostics* timing,
+                    double elapsed_sec,
+                    std::size_t bytes,
+                    H2dTransferKind kind) {
+  timing->h2d_sec += elapsed_sec;
+  timing->h2d_copy_count += 1;
+  timing->h2d_bytes += static_cast<double>(bytes);
+  switch (kind) {
+    case H2dTransferKind::Design:
+      timing->h2d_design_sec += elapsed_sec;
+      timing->h2d_design_bytes += static_cast<double>(bytes);
+      break;
+    case H2dTransferKind::Penalty:
+      timing->h2d_penalty_sec += elapsed_sec;
+      timing->h2d_design_bytes += static_cast<double>(bytes);
+      break;
+    case H2dTransferKind::Y:
+      timing->h2d_y_sec += elapsed_sec;
+      timing->h2d_y_bytes += static_cast<double>(bytes);
+      break;
+    case H2dTransferKind::Index:
+      timing->h2d_index_sec += elapsed_sec;
+      timing->h2d_metadata_bytes += static_cast<double>(bytes);
+      break;
+    case H2dTransferKind::Lambda:
+      timing->h2d_lambda_sec += elapsed_sec;
+      timing->h2d_metadata_bytes += static_cast<double>(bytes);
+      break;
+    case H2dTransferKind::Active:
+      timing->h2d_active_sec += elapsed_sec;
+      timing->h2d_metadata_bytes += static_cast<double>(bytes);
+      break;
+  }
+}
+
 void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
                       const FastSplineCudaBatchDiagnostics& value) {
   out->grouping_sec += value.grouping_sec;
   out->host_pack_sec += value.host_pack_sec;
   out->alloc_sec += value.alloc_sec;
   out->h2d_sec += value.h2d_sec;
+  out->h2d_design_sec += value.h2d_design_sec;
+  out->h2d_penalty_sec += value.h2d_penalty_sec;
+  out->h2d_y_sec += value.h2d_y_sec;
+  out->h2d_index_sec += value.h2d_index_sec;
+  out->h2d_lambda_sec += value.h2d_lambda_sec;
+  out->h2d_active_sec += value.h2d_active_sec;
+  out->h2d_copy_count += value.h2d_copy_count;
+  out->h2d_bytes += value.h2d_bytes;
+  out->h2d_design_bytes += value.h2d_design_bytes;
+  out->h2d_y_bytes += value.h2d_y_bytes;
+  out->h2d_metadata_bytes += value.h2d_metadata_bytes;
   out->xtx_xty_sec += value.xtx_xty_sec;
   out->pointer_setup_sec += value.pointer_setup_sec;
   out->active_copy_sec += value.active_copy_sec;
@@ -1544,23 +1599,39 @@ TrueBatchGroupResult run_true_batched_group(
                          !residual_only, timing);
     timing->alloc_sec += elapsed_since(stage);
 
-    stage = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point copy_stage =
+      std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(buffers->d_design_X, host_design_X.data(),
                           sizeof(double) * design_x_size,
                           cudaMemcpyHostToDevice), "copy batched design X");
+    add_h2d_timing(timing, elapsed_since(copy_stage),
+                   sizeof(double) * design_x_size, H2dTransferKind::Design);
+    copy_stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(buffers->d_design_P, host_design_P.data(),
                           sizeof(double) * design_pp_size,
                           cudaMemcpyHostToDevice), "copy batched design P");
+    add_h2d_timing(timing, elapsed_since(copy_stage),
+                   sizeof(double) * design_pp_size, H2dTransferKind::Penalty);
+    copy_stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(buffers->d_y, host_y.data(), sizeof(double) * y_size,
                           cudaMemcpyHostToDevice), "copy batched y");
+    add_h2d_timing(timing, elapsed_since(copy_stage),
+                   sizeof(double) * y_size, H2dTransferKind::Y);
+    copy_stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(buffers->d_request_design_index,
                           host_design_index.data(), sizeof(int) * group_size,
                           cudaMemcpyHostToDevice),
                "copy batched request design index");
+    add_h2d_timing(timing, elapsed_since(copy_stage),
+                   sizeof(int) * static_cast<std::size_t>(group_size),
+                   H2dTransferKind::Index);
+    copy_stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(buffers->d_lambda_grid, lambdas.data(),
                           sizeof(double) * lambda_count,
                           cudaMemcpyHostToDevice), "copy lambda grid");
-    timing->h2d_sec += elapsed_since(stage);
+    add_h2d_timing(timing, elapsed_since(copy_stage),
+                   sizeof(double) * static_cast<std::size_t>(lambda_count),
+                   H2dTransferKind::Lambda);
 
     stage = std::chrono::steady_clock::now();
     const dim3 xtx_grid(p, p, design_count);
@@ -1843,31 +1914,52 @@ TrueBatchGroupResult run_true_batched_group(
     timing->factor_cache_misses += selected_factor_count;
     timing->factor_cache_hits += std::max(0, group_size - selected_factor_count);
 
-    stage = std::chrono::steady_clock::now();
+    copy_stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(buffers->d_selected_lambda,
                           selected_factor_lambdas.data(),
                           sizeof(double) * selected_factor_count,
                           cudaMemcpyHostToDevice),
                "copy selected lambdas");
+    add_h2d_timing(timing, elapsed_since(copy_stage),
+                   sizeof(double) *
+                     static_cast<std::size_t>(selected_factor_count),
+                   H2dTransferKind::Lambda);
+    copy_stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(buffers->d_selected_ridge,
                           selected_factor_ridges.data(),
                           sizeof(double) * selected_factor_count,
                           cudaMemcpyHostToDevice),
                "copy selected ridges");
+    add_h2d_timing(timing, elapsed_since(copy_stage),
+                   sizeof(double) *
+                     static_cast<std::size_t>(selected_factor_count),
+                   H2dTransferKind::Lambda);
+    copy_stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(buffers->d_selected_factor_design_index,
                           selected_factor_design_index.data(),
                           sizeof(int) * selected_factor_count,
                           cudaMemcpyHostToDevice),
                "copy selected factor design index");
+    add_h2d_timing(timing, elapsed_since(copy_stage),
+                   sizeof(int) *
+                     static_cast<std::size_t>(selected_factor_count),
+                   H2dTransferKind::Index);
+    copy_stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(buffers->d_selected_factor_index,
                           selected_factor_index.data(),
                           sizeof(int) * group_size, cudaMemcpyHostToDevice),
                "copy selected factor index");
+    add_h2d_timing(timing, elapsed_since(copy_stage),
+                   sizeof(int) * static_cast<std::size_t>(group_size),
+                   H2dTransferKind::Index);
     std::vector<int> final_active(group_size, 1);
+    copy_stage = std::chrono::steady_clock::now();
     check_cuda(cudaMemcpy(buffers->d_active, final_active.data(),
                           sizeof(int) * group_size, cudaMemcpyHostToDevice),
                "copy selected active flags");
-    timing->h2d_sec += elapsed_since(stage);
+    add_h2d_timing(timing, elapsed_since(copy_stage),
+                   sizeof(int) * static_cast<std::size_t>(group_size),
+                   H2dTransferKind::Active);
 
     const int selected_system_blocks = static_cast<int>(
       (static_cast<std::size_t>(selected_factor_count) * p * p + kBlock - 1) /
@@ -2104,6 +2196,17 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.host_pack_sec = 0.0;
   out.alloc_sec = 0.0;
   out.h2d_sec = 0.0;
+  out.h2d_design_sec = 0.0;
+  out.h2d_penalty_sec = 0.0;
+  out.h2d_y_sec = 0.0;
+  out.h2d_index_sec = 0.0;
+  out.h2d_lambda_sec = 0.0;
+  out.h2d_active_sec = 0.0;
+  out.h2d_copy_count = 0;
+  out.h2d_bytes = 0.0;
+  out.h2d_design_bytes = 0.0;
+  out.h2d_y_bytes = 0.0;
+  out.h2d_metadata_bytes = 0.0;
   out.xtx_xty_sec = 0.0;
   out.pointer_setup_sec = 0.0;
   out.active_copy_sec = 0.0;

@@ -194,6 +194,17 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_host_pack_sec = 0.0;
   out.residual_alloc_sec = 0.0;
   out.residual_h2d_sec = 0.0;
+  out.residual_h2d_design_sec = 0.0;
+  out.residual_h2d_penalty_sec = 0.0;
+  out.residual_h2d_y_sec = 0.0;
+  out.residual_h2d_index_sec = 0.0;
+  out.residual_h2d_lambda_sec = 0.0;
+  out.residual_h2d_active_sec = 0.0;
+  out.residual_h2d_copy_count = 0;
+  out.residual_h2d_bytes = 0.0;
+  out.residual_h2d_design_bytes = 0.0;
+  out.residual_h2d_y_bytes = 0.0;
+  out.residual_h2d_metadata_bytes = 0.0;
   out.residual_xtx_xty_sec = 0.0;
   out.residual_pointer_setup_sec = 0.0;
   out.residual_active_copy_sec = 0.0;
