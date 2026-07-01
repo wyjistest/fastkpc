@@ -284,6 +284,34 @@ class CudaSkeletonResidualCache {
         diagnostics->residual_design_cache_entries =
           std::max(diagnostics->residual_design_cache_entries,
                    batch_result.diagnostics.design_cache_entries);
+        diagnostics->residual_design_build_total_sec +=
+          batch_result.diagnostics.design_build_total_sec;
+        diagnostics->residual_design_build_basis_sec +=
+          batch_result.diagnostics.design_build_basis_sec;
+        diagnostics->residual_design_build_penalty_sec +=
+          batch_result.diagnostics.design_build_penalty_sec;
+        diagnostics->residual_design_build_x_pack_sec +=
+          batch_result.diagnostics.design_build_x_pack_sec;
+        diagnostics->residual_design_build_p_pack_sec +=
+          batch_result.diagnostics.design_build_p_pack_sec;
+        diagnostics->residual_design_build_alloc_sec +=
+          batch_result.diagnostics.design_build_alloc_sec;
+        diagnostics->residual_design_build_column_extract_sec +=
+          batch_result.diagnostics.design_build_column_extract_sec;
+        diagnostics->residual_design_build_unaccounted_sec +=
+          batch_result.diagnostics.design_build_unaccounted_sec;
+        diagnostics->residual_design_build_count +=
+          batch_result.diagnostics.design_build_count;
+        diagnostics->residual_design_build_x_values +=
+          batch_result.diagnostics.design_build_x_values;
+        diagnostics->residual_design_build_p_values +=
+          batch_result.diagnostics.design_build_p_values;
+        diagnostics->residual_design_build_basis_values +=
+          batch_result.diagnostics.design_build_basis_values;
+        diagnostics->residual_design_build_penalty_values +=
+          batch_result.diagnostics.design_build_penalty_values;
+        diagnostics->residual_design_build_condition_cols +=
+          batch_result.diagnostics.design_build_condition_cols;
         diagnostics->residual_host_pack_sec +=
           batch_result.diagnostics.host_pack_sec;
         diagnostics->residual_alloc_sec +=

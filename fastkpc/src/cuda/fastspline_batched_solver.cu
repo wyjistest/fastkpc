@@ -147,6 +147,21 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->design_cache_insert_count += value.design_cache_insert_count;
   out->design_cache_entries =
     std::max(out->design_cache_entries, value.design_cache_entries);
+  out->design_build_total_sec += value.design_build_total_sec;
+  out->design_build_basis_sec += value.design_build_basis_sec;
+  out->design_build_penalty_sec += value.design_build_penalty_sec;
+  out->design_build_x_pack_sec += value.design_build_x_pack_sec;
+  out->design_build_p_pack_sec += value.design_build_p_pack_sec;
+  out->design_build_alloc_sec += value.design_build_alloc_sec;
+  out->design_build_column_extract_sec +=
+    value.design_build_column_extract_sec;
+  out->design_build_unaccounted_sec += value.design_build_unaccounted_sec;
+  out->design_build_count += value.design_build_count;
+  out->design_build_x_values += value.design_build_x_values;
+  out->design_build_p_values += value.design_build_p_values;
+  out->design_build_basis_values += value.design_build_basis_values;
+  out->design_build_penalty_values += value.design_build_penalty_values;
+  out->design_build_condition_cols += value.design_build_condition_cols;
   out->host_pack_sec += value.host_pack_sec;
   out->alloc_sec += value.alloc_sec;
   out->h2d_sec += value.h2d_sec;
@@ -2340,6 +2355,20 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.design_cache_miss_count = 0;
   out.design_cache_insert_count = 0;
   out.design_cache_entries = 0;
+  out.design_build_total_sec = 0.0;
+  out.design_build_basis_sec = 0.0;
+  out.design_build_penalty_sec = 0.0;
+  out.design_build_x_pack_sec = 0.0;
+  out.design_build_p_pack_sec = 0.0;
+  out.design_build_alloc_sec = 0.0;
+  out.design_build_column_extract_sec = 0.0;
+  out.design_build_unaccounted_sec = 0.0;
+  out.design_build_count = 0;
+  out.design_build_x_values = 0;
+  out.design_build_p_values = 0;
+  out.design_build_basis_values = 0;
+  out.design_build_penalty_values = 0;
+  out.design_build_condition_cols = 0;
   out.host_pack_sec = 0.0;
   out.alloc_sec = 0.0;
   out.h2d_sec = 0.0;
@@ -2530,10 +2559,42 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
         diagnostics->grouping_map_insert_sec += elapsed_since(substage);
       }
       substage = std::chrono::steady_clock::now();
+      FastSplineDesignBuildDiagnostics build_diagnostics =
+        make_empty_fastspline_design_build_diagnostics();
       FastSplineDesign design =
-        make_fastspline_design(data, normalized_conditioning_set, params);
+        make_fastspline_design(data, normalized_conditioning_set, params,
+                               diagnostics == nullptr ?
+                                 nullptr : &build_diagnostics);
       if (diagnostics != nullptr) {
         diagnostics->grouping_design_build_sec += elapsed_since(substage);
+        diagnostics->design_build_total_sec +=
+          build_diagnostics.total_sec;
+        diagnostics->design_build_basis_sec +=
+          build_diagnostics.basis_sec;
+        diagnostics->design_build_penalty_sec +=
+          build_diagnostics.penalty_sec;
+        diagnostics->design_build_x_pack_sec +=
+          build_diagnostics.x_pack_sec;
+        diagnostics->design_build_p_pack_sec +=
+          build_diagnostics.p_pack_sec;
+        diagnostics->design_build_alloc_sec +=
+          build_diagnostics.alloc_sec;
+        diagnostics->design_build_column_extract_sec +=
+          build_diagnostics.column_extract_sec;
+        diagnostics->design_build_unaccounted_sec +=
+          build_diagnostics.unaccounted_sec;
+        diagnostics->design_build_count +=
+          build_diagnostics.build_count;
+        diagnostics->design_build_x_values +=
+          build_diagnostics.x_values;
+        diagnostics->design_build_p_values +=
+          build_diagnostics.p_values;
+        diagnostics->design_build_basis_values +=
+          build_diagnostics.basis_values;
+        diagnostics->design_build_penalty_values +=
+          build_diagnostics.penalty_values;
+        diagnostics->design_build_condition_cols +=
+          build_diagnostics.condition_cols;
       }
       substage = std::chrono::steady_clock::now();
       design_it = design_cache->insert(

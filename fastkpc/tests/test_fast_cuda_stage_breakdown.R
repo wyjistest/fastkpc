@@ -235,6 +235,46 @@ assert_true(runs$residual_design_cache_insert_count[[1L]] > 0L,
 assert_true(runs$residual_design_cache_entries[[1L]] >=
               runs$residual_design_cache_insert_count[[1L]],
             "residual design cache entries should cover inserted designs")
+required_design_build_fields <- c(
+  "residual_design_build_total_ms",
+  "residual_design_build_basis_ms",
+  "residual_design_build_penalty_ms",
+  "residual_design_build_x_pack_ms",
+  "residual_design_build_p_pack_ms",
+  "residual_design_build_alloc_ms",
+  "residual_design_build_column_extract_ms",
+  "residual_design_build_unaccounted_ms",
+  "residual_design_build_count",
+  "residual_design_build_x_values",
+  "residual_design_build_p_values",
+  "residual_design_build_basis_values",
+  "residual_design_build_penalty_values",
+  "residual_design_build_condition_cols"
+)
+missing_design_build_fields <-
+  setdiff(required_design_build_fields, names(runs))
+assert_true(length(missing_design_build_fields) == 0L,
+            paste("stage breakdown should expose residual design build split:",
+                  paste(missing_design_build_fields, collapse = ",")))
+assert_true(runs$residual_design_build_total_ms[[1L]] > 0,
+            "stage breakdown should time residual design build total")
+assert_true(runs$residual_design_build_count[[1L]] > 0L,
+            "stage breakdown should count residual design builds")
+assert_true(runs$residual_design_build_x_values[[1L]] > 0L,
+            "stage breakdown should count residual design X values")
+assert_true(runs$residual_design_build_p_values[[1L]] > 0L,
+            "stage breakdown should count residual design P values")
+residual_design_build_accounted_ms <-
+  runs$residual_design_build_basis_ms[[1L]] +
+  runs$residual_design_build_penalty_ms[[1L]] +
+  runs$residual_design_build_x_pack_ms[[1L]] +
+  runs$residual_design_build_p_pack_ms[[1L]] +
+  runs$residual_design_build_alloc_ms[[1L]] +
+  runs$residual_design_build_column_extract_ms[[1L]] +
+  runs$residual_design_build_unaccounted_ms[[1L]]
+assert_true(residual_design_build_accounted_ms <=
+              runs$residual_design_build_total_ms[[1L]] + 1e-6,
+            "residual design build split should not exceed total")
 residual_grouping_accounted_ms <-
   runs$residual_grouping_condition_key_ms[[1L]] +
   runs$residual_grouping_group_key_ms[[1L]] +

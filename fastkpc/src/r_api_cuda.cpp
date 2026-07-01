@@ -372,6 +372,34 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_design_cache_insert_count,
       Rcpp::Named("residual_design_cache_entries") =
         diagnostics.residual_design_cache_entries,
+      Rcpp::Named("residual_design_build_total_sec") =
+        diagnostics.residual_design_build_total_sec,
+      Rcpp::Named("residual_design_build_basis_sec") =
+        diagnostics.residual_design_build_basis_sec,
+      Rcpp::Named("residual_design_build_penalty_sec") =
+        diagnostics.residual_design_build_penalty_sec,
+      Rcpp::Named("residual_design_build_x_pack_sec") =
+        diagnostics.residual_design_build_x_pack_sec,
+      Rcpp::Named("residual_design_build_p_pack_sec") =
+        diagnostics.residual_design_build_p_pack_sec,
+      Rcpp::Named("residual_design_build_alloc_sec") =
+        diagnostics.residual_design_build_alloc_sec,
+      Rcpp::Named("residual_design_build_column_extract_sec") =
+        diagnostics.residual_design_build_column_extract_sec,
+      Rcpp::Named("residual_design_build_unaccounted_sec") =
+        diagnostics.residual_design_build_unaccounted_sec,
+      Rcpp::Named("residual_design_build_count") =
+        diagnostics.residual_design_build_count,
+      Rcpp::Named("residual_design_build_x_values") =
+        diagnostics.residual_design_build_x_values,
+      Rcpp::Named("residual_design_build_p_values") =
+        diagnostics.residual_design_build_p_values,
+      Rcpp::Named("residual_design_build_basis_values") =
+        diagnostics.residual_design_build_basis_values,
+      Rcpp::Named("residual_design_build_penalty_values") =
+        diagnostics.residual_design_build_penalty_values,
+      Rcpp::Named("residual_design_build_condition_cols") =
+        diagnostics.residual_design_build_condition_cols,
       Rcpp::Named("residual_host_pack_sec") =
         diagnostics.residual_host_pack_sec,
       Rcpp::Named("residual_alloc_sec") = diagnostics.residual_alloc_sec,
@@ -900,6 +928,34 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.design_cache_insert_count,
     Rcpp::Named("design_cache_entries") =
       diagnostics.design_cache_entries,
+    Rcpp::Named("design_build_total_sec") =
+      diagnostics.design_build_total_sec,
+    Rcpp::Named("design_build_basis_sec") =
+      diagnostics.design_build_basis_sec,
+    Rcpp::Named("design_build_penalty_sec") =
+      diagnostics.design_build_penalty_sec,
+    Rcpp::Named("design_build_x_pack_sec") =
+      diagnostics.design_build_x_pack_sec,
+    Rcpp::Named("design_build_p_pack_sec") =
+      diagnostics.design_build_p_pack_sec,
+    Rcpp::Named("design_build_alloc_sec") =
+      diagnostics.design_build_alloc_sec,
+    Rcpp::Named("design_build_column_extract_sec") =
+      diagnostics.design_build_column_extract_sec,
+    Rcpp::Named("design_build_unaccounted_sec") =
+      diagnostics.design_build_unaccounted_sec,
+    Rcpp::Named("design_build_count") =
+      diagnostics.design_build_count,
+    Rcpp::Named("design_build_x_values") =
+      diagnostics.design_build_x_values,
+    Rcpp::Named("design_build_p_values") =
+      diagnostics.design_build_p_values,
+    Rcpp::Named("design_build_basis_values") =
+      diagnostics.design_build_basis_values,
+    Rcpp::Named("design_build_penalty_values") =
+      diagnostics.design_build_penalty_values,
+    Rcpp::Named("design_build_condition_cols") =
+      diagnostics.design_build_condition_cols,
     Rcpp::Named("host_pack_sec") = diagnostics.host_pack_sec,
     Rcpp::Named("alloc_sec") = diagnostics.alloc_sec,
     Rcpp::Named("h2d_sec") = diagnostics.h2d_sec,

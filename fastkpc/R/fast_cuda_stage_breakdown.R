@@ -541,6 +541,50 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_design_cache_insert_count %||% 0L),
     residual_design_cache_entries =
       as.integer(summary$residual_design_cache_entries %||% 0L),
+    residual_design_build_total_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_total_sec
+      ) * 1000,
+    residual_design_build_basis_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_basis_sec
+      ) * 1000,
+    residual_design_build_penalty_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_penalty_sec
+      ) * 1000,
+    residual_design_build_x_pack_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_x_pack_sec
+      ) * 1000,
+    residual_design_build_p_pack_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_p_pack_sec
+      ) * 1000,
+    residual_design_build_alloc_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_alloc_sec
+      ) * 1000,
+    residual_design_build_column_extract_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_column_extract_sec
+      ) * 1000,
+    residual_design_build_unaccounted_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_unaccounted_sec
+      ) * 1000,
+    residual_design_build_count =
+      as.integer(summary$residual_design_build_count %||% 0L),
+    residual_design_build_x_values =
+      as.integer(summary$residual_design_build_x_values %||% 0L),
+    residual_design_build_p_values =
+      as.integer(summary$residual_design_build_p_values %||% 0L),
+    residual_design_build_basis_values =
+      as.integer(summary$residual_design_build_basis_values %||% 0L),
+    residual_design_build_penalty_values =
+      as.integer(summary$residual_design_build_penalty_values %||% 0L),
+    residual_design_build_condition_cols =
+      as.integer(summary$residual_design_build_condition_cols %||% 0L),
     residual_diagnostic_merge_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_diagnostic_merge_sec
