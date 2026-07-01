@@ -30,6 +30,18 @@ struct FastSplineScoreMetadata {
   double pad1;
 };
 
+struct FastSplineSelectedFactorDescriptor {
+  double lambda;
+  double ridge;
+  int design_index;
+  int pad;
+};
+
+struct FastSplineSelectedFitDescriptor {
+  int factor_index;
+  int active;
+};
+
 template <typename T>
 struct DeviceArena {
   T* base = nullptr;
@@ -129,6 +141,10 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->h2d_design_bytes += value.h2d_design_bytes;
   out->h2d_y_bytes += value.h2d_y_bytes;
   out->h2d_metadata_bytes += value.h2d_metadata_bytes;
+  out->h2d_metadata_coalesced_count += value.h2d_metadata_coalesced_count;
+  out->h2d_metadata_coalesced_bytes += value.h2d_metadata_coalesced_bytes;
+  out->h2d_selected_metadata_copy_count +=
+    value.h2d_selected_metadata_copy_count;
   out->xtx_xty_sec += value.xtx_xty_sec;
   out->pointer_setup_sec += value.pointer_setup_sec;
   out->active_copy_sec += value.active_copy_sec;
@@ -484,9 +500,7 @@ __global__ void batched_build_lambda_design_system_kernel(
 __global__ void batched_build_selected_factor_system_kernel(
   const double* XtX,
   const double* P,
-  const int* factor_design_index,
-  const double* lambdas,
-  const double* ridges,
+  const FastSplineSelectedFactorDescriptor* factors,
   int factor_count,
   int p,
   double* A) {
@@ -499,12 +513,13 @@ __global__ void batched_build_selected_factor_system_kernel(
     const int within = linear - factor * pp;
     const int row = within % p;
     const int col = within / p;
-    const int design = factor_design_index[factor];
+    const FastSplineSelectedFactorDescriptor descriptor = factors[factor];
+    const int design = descriptor.design_index;
     const std::size_t out_idx = colmajor_square_offset(factor, row, col, p);
     double value = XtX[colmajor_square_offset(design, row, col, p)] +
-      lambdas[factor] * P[static_cast<std::size_t>(design) * pp +
-                          static_cast<std::size_t>(row) * p + col];
-    if (row == col && row > 0) value += ridges[factor];
+      descriptor.lambda * P[static_cast<std::size_t>(design) * pp +
+                            static_cast<std::size_t>(row) * p + col];
+    if (row == col && row > 0) value += descriptor.ridge;
     A[out_idx] = value;
   }
 }
@@ -560,6 +575,77 @@ __global__ void small_p_cholesky_rhs_solve_kernel(
 
   double work[kSmallPRhsMaxDesignCols];
   const int factor = factor_index == nullptr ? fit : factor_index[fit];
+  const std::size_t beta_base = static_cast<std::size_t>(fit) * p;
+  const std::size_t factor_base = static_cast<std::size_t>(factor) * p * p;
+  for (int row = 0; row < p; ++row) {
+    work[row] = Xty[beta_base + row];
+  }
+
+  int solve_info = 0;
+  for (int row = 0; row < p; ++row) {
+    double value = work[row];
+    for (int col = 0; col < row; ++col) {
+      value -= factors[factor_base + static_cast<std::size_t>(row) * p + col] *
+        work[col];
+    }
+    const double diag =
+      factors[factor_base + static_cast<std::size_t>(row) * p + row];
+    if (!isfinite(diag) || fabs(diag) <= 1e-14) {
+      solve_info = row + 1;
+      break;
+    }
+    work[row] = value / diag;
+  }
+
+  if (solve_info == 0) {
+    for (int row = p - 1; row >= 0; --row) {
+      double value = work[row];
+      for (int col = row + 1; col < p; ++col) {
+        value -= factors[factor_base + static_cast<std::size_t>(col) * p + row] *
+          work[col];
+      }
+      const double diag =
+        factors[factor_base + static_cast<std::size_t>(row) * p + row];
+      if (!isfinite(diag) || fabs(diag) <= 1e-14) {
+        solve_info = row + 1;
+        break;
+      }
+      work[row] = value / diag;
+    }
+  }
+
+  if (solve_info != 0) {
+    if (info != nullptr) info[fit] = solve_info;
+    return;
+  }
+
+  for (int row = 0; row < p; ++row) {
+    beta[beta_base + row] = work[row];
+  }
+  if (info != nullptr) info[fit] = 0;
+}
+
+__global__ void small_p_cholesky_rhs_solve_selected_kernel(
+  const double* factors,
+  const double* Xty,
+  const FastSplineSelectedFitDescriptor* selected_fits,
+  int group_size,
+  int p,
+  double* beta,
+  int* info) {
+  const int fit = blockIdx.x * blockDim.x + threadIdx.x;
+  if (fit >= group_size) return;
+  if (selected_fits != nullptr && selected_fits[fit].active == 0) {
+    if (info != nullptr) info[fit] = 0;
+    for (int row = 0; row < p; ++row) {
+      beta[static_cast<std::size_t>(fit) * p + row] = 0.0;
+    }
+    return;
+  }
+
+  double work[kSmallPRhsMaxDesignCols];
+  const int factor = selected_fits == nullptr ? fit :
+    selected_fits[fit].factor_index;
   const std::size_t beta_base = static_cast<std::size_t>(fit) * p;
   const std::size_t factor_base = static_cast<std::size_t>(factor) * p * p;
   for (int row = 0; row < p; ++row) {
@@ -668,14 +754,15 @@ __global__ void make_request_lambda_matrix_pointer_array(
   ptrs[fit] = base + static_cast<std::size_t>(factor) * p * p;
 }
 
-__global__ void make_indexed_matrix_pointer_array(double* base,
-                                                  const int* matrix_index,
-                                                  int count,
-                                                  int p,
-                                                  double** ptrs) {
+__global__ void make_selected_matrix_pointer_array(
+  double* base,
+  const FastSplineSelectedFitDescriptor* fits,
+  int count,
+  int p,
+  double** ptrs) {
   const int fit = blockIdx.x * blockDim.x + threadIdx.x;
   if (fit >= count) return;
-  const int matrix = matrix_index[fit];
+  const int matrix = fits[fit].factor_index;
   ptrs[fit] = base + static_cast<std::size_t>(matrix) * p * p;
 }
 
@@ -709,7 +796,7 @@ __global__ void batched_fitted_residual_by_design_kernel(
   const int fit = blockIdx.y;
   if (fit >= group_size || row >= n) return;
   const std::size_t out_idx = static_cast<std::size_t>(fit) * n + row;
-  if (active[fit] == 0) {
+  if (active != nullptr && active[fit] == 0) {
     fitted[out_idx] = 0.0;
     residuals[out_idx] = 0.0;
     return;
@@ -738,7 +825,7 @@ __global__ void batched_residual_by_design_kernel(
   const int fit = blockIdx.y;
   if (fit >= group_size || row >= n) return;
   const std::size_t out_idx = static_cast<std::size_t>(fit) * n + row;
-  if (active[fit] == 0) {
+  if (active != nullptr && active[fit] == 0) {
     residuals[out_idx] = 0.0;
     return;
   }
@@ -1003,16 +1090,12 @@ struct DeviceGroupBuffers {
   std::size_t d_edf_capacity = 0;
   FastSplineScoreMetadata* d_score_metadata = nullptr;
   std::size_t d_score_metadata_capacity = 0;
-  double* d_selected_lambda = nullptr;
-  std::size_t d_selected_lambda_capacity = 0;
-  double* d_selected_ridge = nullptr;
-  std::size_t d_selected_ridge_capacity = 0;
+  FastSplineSelectedFactorDescriptor* d_selected_factor_descriptors = nullptr;
+  std::size_t d_selected_factor_descriptors_capacity = 0;
+  FastSplineSelectedFitDescriptor* d_selected_fit_descriptors = nullptr;
+  std::size_t d_selected_fit_descriptors_capacity = 0;
   double* d_lambda_grid = nullptr;
   std::size_t d_lambda_grid_capacity = 0;
-  int* d_selected_factor_design_index = nullptr;
-  std::size_t d_selected_factor_design_index_capacity = 0;
-  int* d_selected_factor_index = nullptr;
-  std::size_t d_selected_factor_index_capacity = 0;
   int* d_info = nullptr;
   std::size_t d_info_capacity = 0;
   int* d_active = nullptr;
@@ -1100,6 +1183,12 @@ T* carve_arena(DeviceArena<T>* arena,
   return out;
 }
 
+template <typename StorageT, typename ValueT>
+std::size_t arena_storage_count(std::size_t value_count) {
+  const std::size_t bytes = sizeof(ValueT) * value_count;
+  return (bytes + sizeof(StorageT) - 1) / sizeof(StorageT);
+}
+
 TrueBatchArenaCounts compute_arena_counts(std::size_t x_size,
                                           std::size_t design_x_size,
                                           std::size_t design_pp_size,
@@ -1139,16 +1228,15 @@ TrueBatchArenaCounts compute_arena_counts(std::size_t x_size,
     y_size +
     group_count +
     group_count +
-    selected_count +
-    selected_count +
-    lambda_count_size;
+    lambda_count_size +
+    arena_storage_count<double, FastSplineSelectedFactorDescriptor>(
+      selected_count);
   counts.int_count =
-    group_count +
-    selected_count +
     group_count +
     info_count_size +
     group_count +
-    static_cast<std::size_t>(1);
+    static_cast<std::size_t>(1) +
+    arena_storage_count<int, FastSplineSelectedFitDescriptor>(group_count);
   counts.ptr_count =
     group_count +
     static_cast<std::size_t>(std::max(group_size, candidate_factor_count)) +
@@ -1247,14 +1335,6 @@ void assign_group_buffer_slices(DeviceGroupBuffers* buffers,
   buffers->d_edf = carve_arena(&buffers->double_arena, group_count,
                                "batched edf");
   buffers->d_edf_capacity = group_count;
-  buffers->d_selected_lambda = carve_arena(&buffers->double_arena,
-                                           selected_count,
-                                           "selected lambda");
-  buffers->d_selected_lambda_capacity = selected_count;
-  buffers->d_selected_ridge = carve_arena(&buffers->double_arena,
-                                          selected_count,
-                                          "selected ridge");
-  buffers->d_selected_ridge_capacity = selected_count;
   buffers->d_lambda_grid = carve_arena(&buffers->double_arena,
                                        lambda_count_size,
                                        "lambda grid");
@@ -1264,14 +1344,6 @@ void assign_group_buffer_slices(DeviceGroupBuffers* buffers,
                                                 group_count,
                                                 "request design index");
   buffers->d_request_design_index_capacity = group_count;
-  buffers->d_selected_factor_design_index =
-    carve_arena(&buffers->int_arena, selected_count,
-                "selected factor design index");
-  buffers->d_selected_factor_design_index_capacity = selected_count;
-  buffers->d_selected_factor_index = carve_arena(&buffers->int_arena,
-                                                 group_count,
-                                                 "selected factor index");
-  buffers->d_selected_factor_index_capacity = group_count;
   buffers->d_info = carve_arena(&buffers->int_arena, info_count_size,
                                 "batched info");
   buffers->d_info_capacity = info_count_size;
@@ -1306,6 +1378,25 @@ void assign_group_buffer_slices(DeviceGroupBuffers* buffers,
                 group_count * lambda_count_size,
                 "batched score metadata");
   buffers->d_score_metadata_capacity = group_count * lambda_count_size;
+  double* selected_factor_descriptor_storage =
+    carve_arena(
+      &buffers->double_arena,
+      arena_storage_count<double, FastSplineSelectedFactorDescriptor>(
+        selected_count),
+      "selected factor descriptors");
+  buffers->d_selected_factor_descriptors =
+    reinterpret_cast<FastSplineSelectedFactorDescriptor*>(
+      selected_factor_descriptor_storage);
+  buffers->d_selected_factor_descriptors_capacity = selected_count;
+  int* selected_fit_descriptor_storage =
+    carve_arena(&buffers->int_arena,
+                arena_storage_count<int, FastSplineSelectedFitDescriptor>(
+                  group_count),
+                "selected fit descriptors");
+  buffers->d_selected_fit_descriptors =
+    reinterpret_cast<FastSplineSelectedFitDescriptor*>(
+      selected_fit_descriptor_storage);
+  buffers->d_selected_fit_descriptors_capacity = group_count;
 }
 
 template <typename T>
@@ -1423,6 +1514,45 @@ void solve_rhs_batched(DeviceGroupBuffers* buffers,
   check_cuda(cudaDeviceSynchronize(), "synchronize batched RHS solve");
 }
 
+void solve_rhs_batched_selected(DeviceGroupBuffers* buffers,
+                                int group_size,
+                                int p,
+                                std::size_t vec_size,
+                                double* factor_base,
+                                const char* copy_stage,
+                                const char* launch_stage,
+                                const char* cusolver_stage,
+                                FastSplineCudaBatchDiagnostics* timing) {
+  const int beta_blocks = static_cast<int>(
+    (vec_size + kBlock - 1) / kBlock);
+  batched_copy_xty_to_beta_kernel<<<std::max(1, beta_blocks), kBlock>>>(
+    buffers->d_Xty, group_size, p, buffers->d_beta);
+  check_cuda(cudaGetLastError(), copy_stage);
+
+  if (p <= kSmallPRhsMaxDesignCols) {
+    check_cuda(cudaMemset(buffers->d_info, 0, sizeof(int) * group_size),
+               "zero small-p selected rhs info");
+    const int solve_blocks = (group_size + kBlock - 1) / kBlock;
+    small_p_cholesky_rhs_solve_selected_kernel<<<
+      std::max(1, solve_blocks), kBlock>>>(
+        factor_base, buffers->d_Xty, buffers->d_selected_fit_descriptors,
+        group_size, p, buffers->d_beta, buffers->d_info);
+    check_cuda(cudaGetLastError(), launch_stage);
+    check_cuda(cudaDeviceSynchronize(),
+               "synchronize small-p selected RHS solve");
+    timing->rhs_custom_solve_count += group_size;
+    return;
+  }
+
+  timing->rhs_solve_fallback_count += group_size;
+  timing->rhs_cublas_solve_count += group_size;
+  check_cusolver(cusolverDnDpotrsBatched(
+    buffers->solver, CUBLAS_FILL_MODE_UPPER, p, 1, buffers->d_A_ptrs, p,
+    buffers->d_beta_ptrs, p, buffers->d_info, group_size),
+    cusolver_stage);
+  check_cuda(cudaDeviceSynchronize(), "synchronize selected batched RHS solve");
+}
+
 void clear_group_buffer_views(DeviceGroupBuffers* buffers) {
   buffers->d_X = nullptr;
   buffers->d_X_capacity = 0;
@@ -1464,16 +1594,12 @@ void clear_group_buffer_views(DeviceGroupBuffers* buffers) {
   buffers->d_edf_capacity = 0;
   buffers->d_score_metadata = nullptr;
   buffers->d_score_metadata_capacity = 0;
-  buffers->d_selected_lambda = nullptr;
-  buffers->d_selected_lambda_capacity = 0;
-  buffers->d_selected_ridge = nullptr;
-  buffers->d_selected_ridge_capacity = 0;
+  buffers->d_selected_factor_descriptors = nullptr;
+  buffers->d_selected_factor_descriptors_capacity = 0;
+  buffers->d_selected_fit_descriptors = nullptr;
+  buffers->d_selected_fit_descriptors_capacity = 0;
   buffers->d_lambda_grid = nullptr;
   buffers->d_lambda_grid_capacity = 0;
-  buffers->d_selected_factor_design_index = nullptr;
-  buffers->d_selected_factor_design_index_capacity = 0;
-  buffers->d_selected_factor_index = nullptr;
-  buffers->d_selected_factor_index_capacity = 0;
   buffers->d_info = nullptr;
   buffers->d_info_capacity = 0;
   buffers->d_active = nullptr;
@@ -1875,19 +2001,15 @@ TrueBatchGroupResult run_true_batched_group(
     timing->algebraic_rss_clamp_count += clamp_count;
     add_d2h_timing(timing, elapsed_since(stage), sizeof(int), false, false);
 
-    std::vector<double> selected_lambdas(group_size);
-    std::vector<double> selected_ridges(group_size);
-    std::vector<int> selected_factor_index(group_size);
-    std::vector<int> selected_factor_design_index;
-    std::vector<double> selected_factor_lambdas;
-    std::vector<double> selected_factor_ridges;
+    std::vector<FastSplineSelectedFitDescriptor> selected_fit_descriptors(
+      group_size);
+    std::vector<FastSplineSelectedFactorDescriptor>
+      selected_factor_descriptors;
     std::map<std::string, int> selected_factor_by_key;
     for (int fit = 0; fit < group_size; ++fit) {
       if (!best[fit].found) {
         throw std::runtime_error("no finite CUDA fastSpline batch solve");
       }
-      selected_lambdas[fit] = best[fit].lambda;
-      selected_ridges[fit] = best[fit].ridge;
       std::ostringstream selected_key;
       selected_key << host_design_index[fit] << "|"
                    << std::setprecision(17) << best[fit].lambda << "|"
@@ -1896,70 +2018,57 @@ TrueBatchGroupResult run_true_batched_group(
         selected_factor_by_key.find(selected_key.str());
       if (selected_it == selected_factor_by_key.end()) {
         const int factor_index =
-          static_cast<int>(selected_factor_design_index.size());
+          static_cast<int>(selected_factor_descriptors.size());
         selected_factor_by_key[selected_key.str()] = factor_index;
-        selected_factor_design_index.push_back(host_design_index[fit]);
-        selected_factor_lambdas.push_back(best[fit].lambda);
-        selected_factor_ridges.push_back(best[fit].ridge);
-        selected_factor_index[fit] = factor_index;
+        FastSplineSelectedFactorDescriptor descriptor;
+        descriptor.lambda = best[fit].lambda;
+        descriptor.ridge = best[fit].ridge;
+        descriptor.design_index = host_design_index[fit];
+        descriptor.pad = 0;
+        selected_factor_descriptors.push_back(descriptor);
+        selected_fit_descriptors[fit].factor_index = factor_index;
       } else {
-        selected_factor_index[fit] = selected_it->second;
+        selected_fit_descriptors[fit].factor_index = selected_it->second;
       }
+      selected_fit_descriptors[fit].active = 1;
     }
     const int selected_factor_count =
-      static_cast<int>(selected_factor_design_index.size());
+      static_cast<int>(selected_factor_descriptors.size());
     timing->winning_factor_reuse_count +=
       std::max(0, group_size - selected_factor_count);
     timing->factor_cache_entries += selected_factor_count;
     timing->factor_cache_misses += selected_factor_count;
     timing->factor_cache_hits += std::max(0, group_size - selected_factor_count);
 
+    const std::size_t selected_factor_descriptor_bytes =
+      sizeof(FastSplineSelectedFactorDescriptor) *
+      static_cast<std::size_t>(selected_factor_count);
     copy_stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(buffers->d_selected_lambda,
-                          selected_factor_lambdas.data(),
-                          sizeof(double) * selected_factor_count,
+    check_cuda(cudaMemcpy(buffers->d_selected_factor_descriptors,
+                          selected_factor_descriptors.data(),
+                          selected_factor_descriptor_bytes,
                           cudaMemcpyHostToDevice),
-               "copy selected lambdas");
+               "copy selected factor descriptors");
     add_h2d_timing(timing, elapsed_since(copy_stage),
-                   sizeof(double) *
-                     static_cast<std::size_t>(selected_factor_count),
+                   selected_factor_descriptor_bytes,
                    H2dTransferKind::Lambda);
+    const std::size_t selected_fit_descriptor_bytes =
+      sizeof(FastSplineSelectedFitDescriptor) *
+      static_cast<std::size_t>(group_size);
     copy_stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(buffers->d_selected_ridge,
-                          selected_factor_ridges.data(),
-                          sizeof(double) * selected_factor_count,
+    check_cuda(cudaMemcpy(buffers->d_selected_fit_descriptors,
+                          selected_fit_descriptors.data(),
+                          selected_fit_descriptor_bytes,
                           cudaMemcpyHostToDevice),
-               "copy selected ridges");
+               "copy selected fit descriptors");
     add_h2d_timing(timing, elapsed_since(copy_stage),
-                   sizeof(double) *
-                     static_cast<std::size_t>(selected_factor_count),
-                   H2dTransferKind::Lambda);
-    copy_stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(buffers->d_selected_factor_design_index,
-                          selected_factor_design_index.data(),
-                          sizeof(int) * selected_factor_count,
-                          cudaMemcpyHostToDevice),
-               "copy selected factor design index");
-    add_h2d_timing(timing, elapsed_since(copy_stage),
-                   sizeof(int) *
-                     static_cast<std::size_t>(selected_factor_count),
+                   selected_fit_descriptor_bytes,
                    H2dTransferKind::Index);
-    copy_stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(buffers->d_selected_factor_index,
-                          selected_factor_index.data(),
-                          sizeof(int) * group_size, cudaMemcpyHostToDevice),
-               "copy selected factor index");
-    add_h2d_timing(timing, elapsed_since(copy_stage),
-                   sizeof(int) * static_cast<std::size_t>(group_size),
-                   H2dTransferKind::Index);
-    std::vector<int> final_active(group_size, 1);
-    copy_stage = std::chrono::steady_clock::now();
-    check_cuda(cudaMemcpy(buffers->d_active, final_active.data(),
-                          sizeof(int) * group_size, cudaMemcpyHostToDevice),
-               "copy selected active flags");
-    add_h2d_timing(timing, elapsed_since(copy_stage),
-                   sizeof(int) * static_cast<std::size_t>(group_size),
-                   H2dTransferKind::Active);
+    timing->h2d_metadata_coalesced_count += 2;
+    timing->h2d_metadata_coalesced_bytes +=
+      static_cast<double>(selected_factor_descriptor_bytes +
+                          selected_fit_descriptor_bytes);
+    timing->h2d_selected_metadata_copy_count += 2;
 
     const int selected_system_blocks = static_cast<int>(
       (static_cast<std::size_t>(selected_factor_count) * p * p + kBlock - 1) /
@@ -1968,15 +2077,15 @@ TrueBatchGroupResult run_true_batched_group(
     batched_build_selected_factor_system_kernel<<<
       std::max(1, selected_system_blocks), kBlock>>>(
       buffers->d_design_XtX, buffers->d_design_P,
-      buffers->d_selected_factor_design_index, buffers->d_selected_lambda,
-      buffers->d_selected_ridge, selected_factor_count, p, buffers->d_A);
+      buffers->d_selected_factor_descriptors, selected_factor_count, p,
+      buffers->d_A);
     check_cuda(cudaGetLastError(), "launch selected build system kernel");
     check_cuda(cudaDeviceSynchronize(), "synchronize selected build system kernel");
     timing->build_system_sec += elapsed_since(stage);
 
     stage = std::chrono::steady_clock::now();
-    make_indexed_matrix_pointer_array<<<std::max(1, ptr_blocks), kBlock>>>(
-      buffers->d_A, buffers->d_selected_factor_index, group_size, p,
+    make_selected_matrix_pointer_array<<<std::max(1, ptr_blocks), kBlock>>>(
+      buffers->d_A, buffers->d_selected_fit_descriptors, group_size, p,
       buffers->d_A_ptrs);
     make_matrix_pointer_array<<<std::max(1, selected_system_blocks), kBlock>>>(
       buffers->d_A, selected_factor_count, p, buffers->d_design_A_ptrs);
@@ -1995,11 +2104,10 @@ TrueBatchGroupResult run_true_batched_group(
     timing->factorization_count += selected_factor_count;
 
     stage = std::chrono::steady_clock::now();
-    solve_rhs_batched(buffers, group_size, p, vec_size, buffers->d_A,
-                      buffers->d_selected_factor_index, buffers->d_active,
-                      "launch selected beta copy kernel",
-                      "launch small-p selected RHS solve kernel",
-                      "selected batched potrs beta", timing);
+    solve_rhs_batched_selected(buffers, group_size, p, vec_size, buffers->d_A,
+                               "launch selected beta copy kernel",
+                               "launch small-p selected RHS solve kernel",
+                               "selected batched potrs beta", timing);
     double rhs_sec = elapsed_since(stage);
     timing->factor_rhs_solve_sec += rhs_sec;
     timing->factor_solve_sec += rhs_sec;
@@ -2019,12 +2127,12 @@ TrueBatchGroupResult run_true_batched_group(
     if (residual_only) {
       batched_residual_by_design_kernel<<<fit_grid, kBlock>>>(
         buffers->d_design_X, buffers->d_y, buffers->d_beta,
-        buffers->d_request_design_index, buffers->d_active, group_size, n, p,
+        buffers->d_request_design_index, nullptr, group_size, n, p,
         buffers->d_residuals);
     } else {
       batched_fitted_residual_by_design_kernel<<<fit_grid, kBlock>>>(
         buffers->d_design_X, buffers->d_y, buffers->d_beta,
-        buffers->d_request_design_index, buffers->d_active, group_size, n, p,
+        buffers->d_request_design_index, nullptr, group_size, n, p,
         buffers->d_fitted, buffers->d_residuals);
     }
     check_cuda(cudaGetLastError(), "launch selected residual kernels");
@@ -2207,6 +2315,9 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.h2d_design_bytes = 0.0;
   out.h2d_y_bytes = 0.0;
   out.h2d_metadata_bytes = 0.0;
+  out.h2d_metadata_coalesced_count = 0;
+  out.h2d_metadata_coalesced_bytes = 0.0;
+  out.h2d_selected_metadata_copy_count = 0;
   out.xtx_xty_sec = 0.0;
   out.pointer_setup_sec = 0.0;
   out.active_copy_sec = 0.0;

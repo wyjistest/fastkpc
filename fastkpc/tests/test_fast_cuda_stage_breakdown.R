@@ -171,6 +171,8 @@ assert_true(runs$residual_d2h_info_ms[[1L]] >= 0,
             "stage breakdown should time residual info D2H")
 assert_true(runs$residual_h2d_copy_count[[1L]] > 0L,
             "stage breakdown should record residual H2D copy count")
+assert_true(runs$residual_h2d_copy_count[[1L]] <= 7L,
+            "stage breakdown should coalesce selected residual H2D metadata")
 assert_true(runs$residual_h2d_bytes[[1L]] > 0,
             "stage breakdown should record residual H2D bytes")
 assert_true(runs$residual_h2d_design_bytes[[1L]] > 0,
@@ -191,6 +193,10 @@ assert_true(runs$residual_h2d_lambda_ms[[1L]] >= 0,
             "stage breakdown should time residual lambda H2D")
 assert_true(runs$residual_h2d_active_ms[[1L]] >= 0,
             "stage breakdown should time residual active H2D")
+assert_true(runs$residual_h2d_metadata_coalesced_count[[1L]] > 0L,
+            "stage breakdown should record coalesced residual H2D metadata copies")
+assert_true(runs$residual_h2d_metadata_coalesced_bytes[[1L]] > 0,
+            "stage breakdown should record coalesced residual H2D metadata bytes")
 assert_true(runs$residual_h2d_bytes[[1L]] ==
               runs$residual_h2d_design_bytes[[1L]] +
               runs$residual_h2d_y_bytes[[1L]] +

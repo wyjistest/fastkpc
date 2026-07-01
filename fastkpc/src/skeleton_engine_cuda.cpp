@@ -284,6 +284,12 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.h2d_y_bytes;
         diagnostics->residual_h2d_metadata_bytes +=
           batch_result.diagnostics.h2d_metadata_bytes;
+        diagnostics->residual_h2d_metadata_coalesced_count +=
+          batch_result.diagnostics.h2d_metadata_coalesced_count;
+        diagnostics->residual_h2d_metadata_coalesced_bytes +=
+          batch_result.diagnostics.h2d_metadata_coalesced_bytes;
+        diagnostics->residual_h2d_selected_metadata_copy_count +=
+          batch_result.diagnostics.h2d_selected_metadata_copy_count;
         diagnostics->residual_xtx_xty_sec +=
           batch_result.diagnostics.xtx_xty_sec;
         diagnostics->residual_pointer_setup_sec +=

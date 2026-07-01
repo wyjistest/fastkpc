@@ -134,6 +134,9 @@ struct SchedulerDiagnostics {
   double residual_h2d_design_bytes;
   double residual_h2d_y_bytes;
   double residual_h2d_metadata_bytes;
+  int residual_h2d_metadata_coalesced_count;
+  double residual_h2d_metadata_coalesced_bytes;
+  int residual_h2d_selected_metadata_copy_count;
   double residual_xtx_xty_sec;
   double residual_pointer_setup_sec;
   double residual_active_copy_sec;

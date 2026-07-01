@@ -483,6 +483,9 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
     result.diagnostics.h2d_design_bytes = 0.0;
     result.diagnostics.h2d_y_bytes = 0.0;
     result.diagnostics.h2d_metadata_bytes = 0.0;
+    result.diagnostics.h2d_metadata_coalesced_count = 0;
+    result.diagnostics.h2d_metadata_coalesced_bytes = 0.0;
+    result.diagnostics.h2d_selected_metadata_copy_count = 0;
     result.diagnostics.xtx_xty_sec = 0.0;
     result.diagnostics.pointer_setup_sec = 0.0;
     result.diagnostics.active_copy_sec = 0.0;

@@ -57,6 +57,9 @@ struct FastSplineCudaBatchDiagnostics {
   double h2d_design_bytes;
   double h2d_y_bytes;
   double h2d_metadata_bytes;
+  int h2d_metadata_coalesced_count;
+  double h2d_metadata_coalesced_bytes;
+  int h2d_selected_metadata_copy_count;
   double xtx_xty_sec;
   double pointer_setup_sec;
   double active_copy_sec;

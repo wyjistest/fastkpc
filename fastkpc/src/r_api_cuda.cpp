@@ -371,6 +371,12 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_h2d_y_bytes,
       Rcpp::Named("residual_h2d_metadata_bytes") =
         diagnostics.residual_h2d_metadata_bytes,
+      Rcpp::Named("residual_h2d_metadata_coalesced_count") =
+        diagnostics.residual_h2d_metadata_coalesced_count,
+      Rcpp::Named("residual_h2d_metadata_coalesced_bytes") =
+        diagnostics.residual_h2d_metadata_coalesced_bytes,
+      Rcpp::Named("residual_h2d_selected_metadata_copy_count") =
+        diagnostics.residual_h2d_selected_metadata_copy_count,
       Rcpp::Named("residual_xtx_xty_sec") =
         diagnostics.residual_xtx_xty_sec,
       Rcpp::Named("residual_pointer_setup_sec") =
@@ -856,6 +862,12 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
     Rcpp::Named("h2d_design_bytes") = diagnostics.h2d_design_bytes,
     Rcpp::Named("h2d_y_bytes") = diagnostics.h2d_y_bytes,
     Rcpp::Named("h2d_metadata_bytes") = diagnostics.h2d_metadata_bytes,
+    Rcpp::Named("h2d_metadata_coalesced_count") =
+      diagnostics.h2d_metadata_coalesced_count,
+    Rcpp::Named("h2d_metadata_coalesced_bytes") =
+      diagnostics.h2d_metadata_coalesced_bytes,
+    Rcpp::Named("h2d_selected_metadata_copy_count") =
+      diagnostics.h2d_selected_metadata_copy_count,
     Rcpp::Named("xtx_xty_sec") = diagnostics.xtx_xty_sec,
     Rcpp::Named("pointer_setup_sec") = diagnostics.pointer_setup_sec,
     Rcpp::Named("active_copy_sec") = diagnostics.active_copy_sec,

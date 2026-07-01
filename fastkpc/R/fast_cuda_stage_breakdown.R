@@ -447,6 +447,12 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
     residual_h2d_y_bytes = as.numeric(summary$residual_h2d_y_bytes %||% 0),
     residual_h2d_metadata_bytes =
       as.numeric(summary$residual_h2d_metadata_bytes %||% 0),
+    residual_h2d_metadata_coalesced_count =
+      as.integer(summary$residual_h2d_metadata_coalesced_count %||% 0L),
+    residual_h2d_metadata_coalesced_bytes =
+      as.numeric(summary$residual_h2d_metadata_coalesced_bytes %||% 0),
+    residual_h2d_selected_metadata_copy_count =
+      as.integer(summary$residual_h2d_selected_metadata_copy_count %||% 0L),
     residual_winning_factor_reuse_count =
       as.integer(summary$residual_winning_factor_reuse_count %||% 0L),
     residual_factor_cache_hits =

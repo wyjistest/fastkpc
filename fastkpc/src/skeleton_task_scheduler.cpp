@@ -205,6 +205,9 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_h2d_design_bytes = 0.0;
   out.residual_h2d_y_bytes = 0.0;
   out.residual_h2d_metadata_bytes = 0.0;
+  out.residual_h2d_metadata_coalesced_count = 0;
+  out.residual_h2d_metadata_coalesced_bytes = 0.0;
+  out.residual_h2d_selected_metadata_copy_count = 0;
   out.residual_xtx_xty_sec = 0.0;
   out.residual_pointer_setup_sec = 0.0;
   out.residual_active_copy_sec = 0.0;
