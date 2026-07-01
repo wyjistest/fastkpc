@@ -70,6 +70,12 @@ struct FastSplineCudaBatchDiagnostics {
   int design_build_basis_values;
   int design_build_penalty_values;
   int design_build_condition_cols;
+  int basis_cache_hit_count;
+  int basis_cache_miss_count;
+  int basis_cache_insert_count;
+  int basis_cache_entries;
+  double basis_cache_hit_sec;
+  double basis_cache_miss_build_sec;
   double host_pack_sec;
   double alloc_sec;
   double h2d_sec;

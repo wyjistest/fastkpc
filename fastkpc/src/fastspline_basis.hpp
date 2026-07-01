@@ -2,6 +2,7 @@
 #define FASTKPC_FASTSPLINE_BASIS_HPP
 
 #include <Rcpp.h>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,22 @@ struct FastSplineDesignBuildDiagnostics {
   int basis_values;
   int penalty_values;
   int condition_cols;
+  int basis_cache_hit_count;
+  int basis_cache_miss_count;
+  int basis_cache_insert_count;
+  int basis_cache_entries;
+  double basis_cache_hit_sec;
+  double basis_cache_miss_build_sec;
+};
+
+struct FastSplineBasisBlock {
+  int n;
+  int n_basis;
+  std::vector<double> values;
+};
+
+struct FastSplineBasisCache {
+  std::map<std::string, FastSplineBasisBlock> entries;
 };
 
 FastSplineParams default_fastspline_params();
@@ -54,6 +71,7 @@ FastSplineDesign make_fastspline_design(
     const Rcpp::NumericMatrix& data,
     const std::vector<int>& conditioning_set,
     const FastSplineParams& params,
-    FastSplineDesignBuildDiagnostics* diagnostics = nullptr);
+    FastSplineDesignBuildDiagnostics* diagnostics = nullptr,
+    FastSplineBasisCache* basis_cache = nullptr);
 
 #endif

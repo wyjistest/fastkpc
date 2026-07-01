@@ -162,6 +162,13 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->design_build_basis_values += value.design_build_basis_values;
   out->design_build_penalty_values += value.design_build_penalty_values;
   out->design_build_condition_cols += value.design_build_condition_cols;
+  out->basis_cache_hit_count += value.basis_cache_hit_count;
+  out->basis_cache_miss_count += value.basis_cache_miss_count;
+  out->basis_cache_insert_count += value.basis_cache_insert_count;
+  out->basis_cache_entries =
+    std::max(out->basis_cache_entries, value.basis_cache_entries);
+  out->basis_cache_hit_sec += value.basis_cache_hit_sec;
+  out->basis_cache_miss_build_sec += value.basis_cache_miss_build_sec;
   out->host_pack_sec += value.host_pack_sec;
   out->alloc_sec += value.alloc_sec;
   out->h2d_sec += value.h2d_sec;
@@ -1672,6 +1679,7 @@ void free_buffers(DeviceGroupBuffers* buffers) {
 struct FastSplineCudaWorkspace {
   DeviceGroupBuffers group_buffers;
   std::map<std::string, FastSplineDesign> design_cache;
+  FastSplineBasisCache basis_cache;
   const double* design_cache_data_ptr = nullptr;
   int design_cache_nrow = 0;
   int design_cache_ncol = 0;
@@ -2369,6 +2377,12 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.design_build_basis_values = 0;
   out.design_build_penalty_values = 0;
   out.design_build_condition_cols = 0;
+  out.basis_cache_hit_count = 0;
+  out.basis_cache_miss_count = 0;
+  out.basis_cache_insert_count = 0;
+  out.basis_cache_entries = 0;
+  out.basis_cache_hit_sec = 0.0;
+  out.basis_cache_miss_build_sec = 0.0;
   out.host_pack_sec = 0.0;
   out.alloc_sec = 0.0;
   out.h2d_sec = 0.0;
@@ -2497,6 +2511,7 @@ void bind_fastspline_design_cache(FastSplineCudaWorkspace* workspace,
     return;
   }
   workspace->design_cache.clear();
+  workspace->basis_cache.entries.clear();
   workspace->design_cache_data_ptr = data_ptr;
   workspace->design_cache_nrow = data.nrow();
   workspace->design_cache_ncol = data.ncol();
@@ -2510,7 +2525,8 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
   const std::vector<std::vector<int> >& conditioning_sets,
   const FastSplineParams& params,
   FastSplineCudaBatchDiagnostics* diagnostics,
-  std::map<std::string, FastSplineDesign>* run_design_cache) {
+  std::map<std::string, FastSplineDesign>* run_design_cache,
+  FastSplineBasisCache* run_basis_cache) {
   const std::chrono::steady_clock::time_point grouping_start =
     std::chrono::steady_clock::now();
   if (targets.size() != conditioning_sets.size()) {
@@ -2564,7 +2580,8 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
       FastSplineDesign design =
         make_fastspline_design(data, normalized_conditioning_set, params,
                                diagnostics == nullptr ?
-                                 nullptr : &build_diagnostics);
+                                 nullptr : &build_diagnostics,
+                               run_basis_cache);
       if (diagnostics != nullptr) {
         diagnostics->grouping_design_build_sec += elapsed_since(substage);
         diagnostics->design_build_total_sec +=
@@ -2595,6 +2612,19 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
           build_diagnostics.penalty_values;
         diagnostics->design_build_condition_cols +=
           build_diagnostics.condition_cols;
+        diagnostics->basis_cache_hit_count +=
+          build_diagnostics.basis_cache_hit_count;
+        diagnostics->basis_cache_miss_count +=
+          build_diagnostics.basis_cache_miss_count;
+        diagnostics->basis_cache_insert_count +=
+          build_diagnostics.basis_cache_insert_count;
+        diagnostics->basis_cache_entries =
+          std::max(diagnostics->basis_cache_entries,
+                   build_diagnostics.basis_cache_entries);
+        diagnostics->basis_cache_hit_sec +=
+          build_diagnostics.basis_cache_hit_sec;
+        diagnostics->basis_cache_miss_build_sec +=
+          build_diagnostics.basis_cache_miss_build_sec;
       }
       substage = std::chrono::steady_clock::now();
       design_it = design_cache->insert(
@@ -2671,7 +2701,7 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
   const std::vector<std::vector<int> >& conditioning_sets,
   const FastSplineParams& params) {
   return make_fastspline_batch_groups(data, targets, conditioning_sets, params,
-                                      nullptr, nullptr);
+                                      nullptr, nullptr, nullptr);
 }
 
 FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
@@ -2692,7 +2722,7 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
     std::chrono::steady_clock::now();
   const std::vector<FastSplineBatchGroup> groups =
     make_fastspline_batch_groups(data, targets, conditioning_sets, params,
-                                 &result.diagnostics, nullptr);
+                                 &result.diagnostics, nullptr, nullptr);
   result.diagnostics.grouping_sec += elapsed_since(stage);
   const std::string true_backend = "cusolver-batched";
 
@@ -2789,7 +2819,9 @@ fit_fastspline_residuals_cuda_true_batch_residuals_only(
     make_fastspline_batch_groups(data, targets, conditioning_sets, params,
                                  &result.diagnostics,
                                  workspace == nullptr ?
-                                   nullptr : &workspace->design_cache);
+                                   nullptr : &workspace->design_cache,
+                                 workspace == nullptr ?
+                                   nullptr : &workspace->basis_cache);
   result.diagnostics.grouping_sec += elapsed_since(stage);
   const std::string true_backend = "cusolver-batched";
 

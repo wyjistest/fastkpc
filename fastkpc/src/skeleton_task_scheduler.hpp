@@ -147,6 +147,12 @@ struct SchedulerDiagnostics {
   int residual_design_build_basis_values;
   int residual_design_build_penalty_values;
   int residual_design_build_condition_cols;
+  int residual_basis_cache_hit_count;
+  int residual_basis_cache_miss_count;
+  int residual_basis_cache_insert_count;
+  int residual_basis_cache_entries;
+  double residual_basis_cache_hit_sec;
+  double residual_basis_cache_miss_build_sec;
   double residual_host_pack_sec;
   double residual_alloc_sec;
   double residual_h2d_sec;

@@ -400,6 +400,18 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_design_build_penalty_values,
       Rcpp::Named("residual_design_build_condition_cols") =
         diagnostics.residual_design_build_condition_cols,
+      Rcpp::Named("residual_basis_cache_hit_count") =
+        diagnostics.residual_basis_cache_hit_count,
+      Rcpp::Named("residual_basis_cache_miss_count") =
+        diagnostics.residual_basis_cache_miss_count,
+      Rcpp::Named("residual_basis_cache_insert_count") =
+        diagnostics.residual_basis_cache_insert_count,
+      Rcpp::Named("residual_basis_cache_entries") =
+        diagnostics.residual_basis_cache_entries,
+      Rcpp::Named("residual_basis_cache_hit_sec") =
+        diagnostics.residual_basis_cache_hit_sec,
+      Rcpp::Named("residual_basis_cache_miss_build_sec") =
+        diagnostics.residual_basis_cache_miss_build_sec,
       Rcpp::Named("residual_host_pack_sec") =
         diagnostics.residual_host_pack_sec,
       Rcpp::Named("residual_alloc_sec") = diagnostics.residual_alloc_sec,
@@ -956,6 +968,18 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.design_build_penalty_values,
     Rcpp::Named("design_build_condition_cols") =
       diagnostics.design_build_condition_cols,
+    Rcpp::Named("basis_cache_hit_count") =
+      diagnostics.basis_cache_hit_count,
+    Rcpp::Named("basis_cache_miss_count") =
+      diagnostics.basis_cache_miss_count,
+    Rcpp::Named("basis_cache_insert_count") =
+      diagnostics.basis_cache_insert_count,
+    Rcpp::Named("basis_cache_entries") =
+      diagnostics.basis_cache_entries,
+    Rcpp::Named("basis_cache_hit_sec") =
+      diagnostics.basis_cache_hit_sec,
+    Rcpp::Named("basis_cache_miss_build_sec") =
+      diagnostics.basis_cache_miss_build_sec,
     Rcpp::Named("host_pack_sec") = diagnostics.host_pack_sec,
     Rcpp::Named("alloc_sec") = diagnostics.alloc_sec,
     Rcpp::Named("h2d_sec") = diagnostics.h2d_sec,

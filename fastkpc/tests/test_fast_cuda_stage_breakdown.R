@@ -275,6 +275,30 @@ residual_design_build_accounted_ms <-
 assert_true(residual_design_build_accounted_ms <=
               runs$residual_design_build_total_ms[[1L]] + 1e-6,
             "residual design build split should not exceed total")
+required_basis_cache_fields <- c(
+  "residual_basis_cache_hit_count",
+  "residual_basis_cache_miss_count",
+  "residual_basis_cache_insert_count",
+  "residual_basis_cache_entries",
+  "residual_basis_cache_hit_ms",
+  "residual_basis_cache_miss_build_ms"
+)
+missing_basis_cache_fields <-
+  setdiff(required_basis_cache_fields, names(runs))
+assert_true(length(missing_basis_cache_fields) == 0L,
+            paste("stage breakdown should expose residual basis cache fields:",
+                  paste(missing_basis_cache_fields, collapse = ",")))
+assert_true(runs$residual_basis_cache_hit_count[[1L]] >= 0L,
+            "stage breakdown should record residual basis cache hits")
+assert_true(runs$residual_basis_cache_miss_count[[1L]] > 0L,
+            "stage breakdown should record residual basis cache misses")
+assert_true(runs$residual_basis_cache_insert_count[[1L]] > 0L,
+            "stage breakdown should record residual basis cache inserts")
+assert_true(runs$residual_basis_cache_entries[[1L]] >=
+              runs$residual_basis_cache_insert_count[[1L]],
+            "residual basis cache entries should cover inserted bases")
+assert_true(runs$residual_basis_cache_miss_build_ms[[1L]] >= 0,
+            "stage breakdown should time residual basis cache miss builds")
 residual_grouping_accounted_ms <-
   runs$residual_grouping_condition_key_ms[[1L]] +
   runs$residual_grouping_group_key_ms[[1L]] +
@@ -375,5 +399,38 @@ assert_true(file.exists(artifact$paths$reconciliation_csv),
             "stage breakdown reconciliation CSV should be written")
 assert_true(file.exists(artifact$paths$summary_md),
             "stage breakdown Markdown summary should be written")
+
+basis_cache_scenario <- list(
+  scenario_id = "basis-cache-n48-p6-m2",
+  n = 48L,
+  p = 6L,
+  max_conditioning_size = 2L,
+  seed = 9201L,
+  data = fastkpc_stage_breakdown_synthetic_data(48L, 6L, 9201L)
+)
+basis_cache_artifact <- fastkpc_run_fast_cuda_stage_breakdown(
+  output_dir = tempfile("fast-cuda-stage-breakdown-basis-cache-"),
+  scenarios = list(basis_cache_scenario),
+  repeats = 1L,
+  alpha = 0.8
+)
+basis_cache_runs <- basis_cache_artifact$runs
+assert_true(nrow(basis_cache_runs) == 1L,
+            "basis cache scenario should produce one run row")
+assert_true(basis_cache_runs$residual_basis_cache_hit_count[[1L]] > 0L,
+            "stage breakdown should record residual basis cache hits")
+assert_true(basis_cache_runs$residual_basis_cache_miss_count[[1L]] > 0L,
+            "stage breakdown should record residual basis cache misses")
+assert_true(
+  basis_cache_runs$residual_basis_cache_miss_count[[1L]] <=
+    basis_cache_runs$residual_design_build_condition_cols[[1L]],
+  "basis cache misses should not exceed built conditioning columns"
+)
+assert_true(
+  basis_cache_runs$residual_basis_cache_hit_count[[1L]] +
+    basis_cache_runs$residual_basis_cache_miss_count[[1L]] >
+    basis_cache_runs$residual_basis_cache_miss_count[[1L]],
+  "basis cache should avoid rebuilding shared conditioning-column bases"
+)
 
 cat("PASS fast CUDA stage breakdown\n")

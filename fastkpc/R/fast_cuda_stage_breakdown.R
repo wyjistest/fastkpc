@@ -585,6 +585,22 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_design_build_penalty_values %||% 0L),
     residual_design_build_condition_cols =
       as.integer(summary$residual_design_build_condition_cols %||% 0L),
+    residual_basis_cache_hit_count =
+      as.integer(summary$residual_basis_cache_hit_count %||% 0L),
+    residual_basis_cache_miss_count =
+      as.integer(summary$residual_basis_cache_miss_count %||% 0L),
+    residual_basis_cache_insert_count =
+      as.integer(summary$residual_basis_cache_insert_count %||% 0L),
+    residual_basis_cache_entries =
+      as.integer(summary$residual_basis_cache_entries %||% 0L),
+    residual_basis_cache_hit_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_cache_hit_sec
+      ) * 1000,
+    residual_basis_cache_miss_build_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_basis_cache_miss_build_sec
+      ) * 1000,
     residual_diagnostic_merge_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_diagnostic_merge_sec

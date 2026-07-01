@@ -106,31 +106,106 @@ void copy_basis_into_design(const std::vector<double>& basis,
   }
 }
 
-FastSplineDesign one_dimensional_design(const Rcpp::NumericMatrix& data,
-                                        int col,
-                                        const FastSplineParams& params,
-                                        FastSplineDesignBuildDiagnostics* diagnostics) {
+std::string basis_cache_key(const Rcpp::NumericMatrix& data,
+                            int col,
+                            const FastSplineParams& params) {
+  std::ostringstream out;
+  out << static_cast<const void*>(REAL(data)) << "|"
+      << data.nrow() << "|" << data.ncol() << "|"
+      << col << "|" << serialize_fastspline_params(params);
+  return out.str();
+}
+
+FastSplineBasisBlock build_basis_block(const Rcpp::NumericMatrix& data,
+                                       int col,
+                                       const FastSplineParams& params,
+                                       FastSplineDesignBuildDiagnostics* diagnostics,
+                                       bool record_cache_miss_build) {
   std::chrono::steady_clock::time_point stage =
     design_timing_start(diagnostics);
-  const std::vector<double> x = column_values(data, col);
+  const std::vector<double> values = column_values(data, col);
   if (diagnostics != nullptr) {
     add_elapsed(&diagnostics->column_extract_sec, diagnostics, stage);
     diagnostics->condition_cols += 1;
   }
+
   int n_basis = 0;
   stage = design_timing_start(diagnostics);
-  const std::vector<double> basis = cubic_bspline_basis(x, params, &n_basis);
+  FastSplineBasisBlock block;
+  block.values = cubic_bspline_basis(values, params, &n_basis);
   if (diagnostics != nullptr) {
-    add_elapsed(&diagnostics->basis_sec, diagnostics, stage);
-    diagnostics->basis_values += static_cast<int>(basis.size());
+    const double elapsed = elapsed_since(stage);
+    diagnostics->basis_sec += elapsed;
+    if (record_cache_miss_build) {
+      diagnostics->basis_cache_miss_build_sec += elapsed;
+    }
+    diagnostics->basis_values += static_cast<int>(block.values.size());
   }
+  block.n = data.nrow();
+  block.n_basis = n_basis;
+  return block;
+}
+
+const FastSplineBasisBlock& get_or_build_fastspline_basis(
+    const Rcpp::NumericMatrix& data,
+    int col,
+    const FastSplineParams& params,
+    FastSplineDesignBuildDiagnostics* diagnostics,
+    FastSplineBasisCache* basis_cache,
+    FastSplineBasisBlock* scratch) {
+  if (basis_cache == nullptr) {
+    *scratch = build_basis_block(data, col, params, diagnostics, false);
+    return *scratch;
+  }
+
+  std::chrono::steady_clock::time_point stage =
+    design_timing_start(diagnostics);
+  const std::string key = basis_cache_key(data, col, params);
+  std::map<std::string, FastSplineBasisBlock>::iterator it =
+    basis_cache->entries.find(key);
+  if (it != basis_cache->entries.end()) {
+    if (diagnostics != nullptr) {
+      add_elapsed(&diagnostics->basis_cache_hit_sec, diagnostics, stage);
+      diagnostics->basis_cache_hit_count += 1;
+      diagnostics->basis_cache_entries =
+        static_cast<int>(basis_cache->entries.size());
+    }
+    return it->second;
+  }
+
+  if (diagnostics != nullptr) {
+    diagnostics->basis_cache_miss_count += 1;
+  }
+  FastSplineBasisBlock block =
+    build_basis_block(data, col, params, diagnostics, true);
+  std::pair<std::map<std::string, FastSplineBasisBlock>::iterator, bool>
+    inserted = basis_cache->entries.insert(std::make_pair(key, std::move(block)));
+  if (diagnostics != nullptr) {
+    if (inserted.second) diagnostics->basis_cache_insert_count += 1;
+    diagnostics->basis_cache_entries =
+      static_cast<int>(basis_cache->entries.size());
+  }
+  return inserted.first->second;
+}
+
+FastSplineDesign one_dimensional_design(const Rcpp::NumericMatrix& data,
+                                        int col,
+                                        const FastSplineParams& params,
+                                        FastSplineDesignBuildDiagnostics* diagnostics,
+                                        FastSplineBasisCache* basis_cache) {
+  FastSplineBasisBlock scratch;
+  const FastSplineBasisBlock& block =
+    get_or_build_fastspline_basis(data, col, params, diagnostics,
+                                  basis_cache, &scratch);
+  const int n_basis = block.n_basis;
   const int n = data.nrow();
   const int p = 1 + n_basis;
 
   FastSplineDesign design;
   design.n = n;
   design.p = p;
-  stage = design_timing_start(diagnostics);
+  std::chrono::steady_clock::time_point stage =
+    design_timing_start(diagnostics);
   design.X.assign(static_cast<std::size_t>(n) * p, 0.0);
   design.P.assign(static_cast<std::size_t>(p) * p, 0.0);
   if (diagnostics != nullptr) {
@@ -138,7 +213,7 @@ FastSplineDesign one_dimensional_design(const Rcpp::NumericMatrix& data,
   }
   stage = design_timing_start(diagnostics);
   for (int row = 0; row < n; ++row) design.X[ridx(row, 0, p)] = 1.0;
-  copy_basis_into_design(basis, n, n_basis, 1, p, &design.X);
+  copy_basis_into_design(block.values, n, n_basis, 1, p, &design.X);
   if (diagnostics != nullptr) {
     add_elapsed(&diagnostics->x_pack_sec, diagnostics, stage);
   }
@@ -159,25 +234,18 @@ FastSplineDesign one_dimensional_design(const Rcpp::NumericMatrix& data,
 FastSplineDesign tensor_design(const Rcpp::NumericMatrix& data,
                                const std::vector<int>& conditioning_set,
                                const FastSplineParams& params,
-                               FastSplineDesignBuildDiagnostics* diagnostics) {
-  std::chrono::steady_clock::time_point stage =
-    design_timing_start(diagnostics);
-  const std::vector<double> x1 = column_values(data, conditioning_set[0]);
-  const std::vector<double> x2 = column_values(data, conditioning_set[1]);
-  if (diagnostics != nullptr) {
-    add_elapsed(&diagnostics->column_extract_sec, diagnostics, stage);
-    diagnostics->condition_cols += 2;
-  }
-  int b1_cols = 0;
-  int b2_cols = 0;
-  stage = design_timing_start(diagnostics);
-  const std::vector<double> b1 = cubic_bspline_basis(x1, params, &b1_cols);
-  const std::vector<double> b2 = cubic_bspline_basis(x2, params, &b2_cols);
-  if (diagnostics != nullptr) {
-    add_elapsed(&diagnostics->basis_sec, diagnostics, stage);
-    diagnostics->basis_values +=
-      static_cast<int>(b1.size() + b2.size());
-  }
+                               FastSplineDesignBuildDiagnostics* diagnostics,
+                               FastSplineBasisCache* basis_cache) {
+  FastSplineBasisBlock scratch1;
+  FastSplineBasisBlock scratch2;
+  const FastSplineBasisBlock& b1 =
+    get_or_build_fastspline_basis(data, conditioning_set[0], params,
+                                  diagnostics, basis_cache, &scratch1);
+  const FastSplineBasisBlock& b2 =
+    get_or_build_fastspline_basis(data, conditioning_set[1], params,
+                                  diagnostics, basis_cache, &scratch2);
+  const int b1_cols = b1.n_basis;
+  const int b2_cols = b2.n_basis;
   const int n = data.nrow();
   const int tensor_cols = b1_cols * b2_cols;
   const int p = 1 + tensor_cols;
@@ -185,7 +253,8 @@ FastSplineDesign tensor_design(const Rcpp::NumericMatrix& data,
   FastSplineDesign design;
   design.n = n;
   design.p = p;
-  stage = design_timing_start(diagnostics);
+  std::chrono::steady_clock::time_point stage =
+    design_timing_start(diagnostics);
   design.X.assign(static_cast<std::size_t>(n) * p, 0.0);
   design.P.assign(static_cast<std::size_t>(p) * p, 0.0);
   if (diagnostics != nullptr) {
@@ -198,7 +267,8 @@ FastSplineDesign tensor_design(const Rcpp::NumericMatrix& data,
     for (int a = 0; a < b1_cols; ++a) {
       for (int b = 0; b < b2_cols; ++b) {
         design.X[ridx(row, dest, p)] =
-          b1[ridx(row, a, b1_cols)] * b2[ridx(row, b, b2_cols)];
+          b1.values[ridx(row, a, b1_cols)] *
+          b2.values[ridx(row, b, b2_cols)];
         ++dest;
       }
     }
@@ -245,29 +315,26 @@ FastSplineDesign tensor_design(const Rcpp::NumericMatrix& data,
 FastSplineDesign additive_design(const Rcpp::NumericMatrix& data,
                                  const std::vector<int>& conditioning_set,
                                  const FastSplineParams& params,
-                                 FastSplineDesignBuildDiagnostics* diagnostics) {
+                                 FastSplineDesignBuildDiagnostics* diagnostics,
+                                 FastSplineBasisCache* basis_cache) {
   const int n = data.nrow();
-  std::vector<std::vector<double> > bases;
+  std::vector<const FastSplineBasisBlock*> bases;
+  std::vector<FastSplineBasisBlock> scratch_blocks;
   std::vector<int> basis_cols;
   int total_basis_cols = 0;
+  scratch_blocks.reserve(basis_cache == nullptr ? conditioning_set.size() : 0);
   for (int col : conditioning_set) {
-    int n_basis = 0;
-    std::chrono::steady_clock::time_point stage =
-      design_timing_start(diagnostics);
-    std::vector<double> values = column_values(data, col);
-    if (diagnostics != nullptr) {
-      add_elapsed(&diagnostics->column_extract_sec, diagnostics, stage);
-      diagnostics->condition_cols += 1;
+    FastSplineBasisBlock* scratch = nullptr;
+    if (basis_cache == nullptr) {
+      scratch_blocks.push_back(FastSplineBasisBlock());
+      scratch = &scratch_blocks.back();
     }
-    stage = design_timing_start(diagnostics);
-    std::vector<double> basis = cubic_bspline_basis(values, params, &n_basis);
-    if (diagnostics != nullptr) {
-      add_elapsed(&diagnostics->basis_sec, diagnostics, stage);
-      diagnostics->basis_values += static_cast<int>(basis.size());
-    }
-    bases.push_back(basis);
-    basis_cols.push_back(n_basis);
-    total_basis_cols += n_basis;
+    const FastSplineBasisBlock& block =
+      get_or_build_fastspline_basis(data, col, params, diagnostics,
+                                    basis_cache, scratch);
+    bases.push_back(&block);
+    basis_cols.push_back(block.n_basis);
+    total_basis_cols += block.n_basis;
   }
   const int p = 1 + total_basis_cols;
 
@@ -290,7 +357,8 @@ FastSplineDesign additive_design(const Rcpp::NumericMatrix& data,
   int offset = 1;
   for (int block = 0; block < static_cast<int>(bases.size()); ++block) {
     stage = design_timing_start(diagnostics);
-    copy_basis_into_design(bases[block], n, basis_cols[block], offset, p, &design.X);
+    copy_basis_into_design(bases[block]->values, n, basis_cols[block],
+                           offset, p, &design.X);
     if (diagnostics != nullptr) {
       add_elapsed(&diagnostics->x_pack_sec, diagnostics, stage);
     }
@@ -354,6 +422,12 @@ FastSplineDesignBuildDiagnostics make_empty_fastspline_design_build_diagnostics(
   out.basis_values = 0;
   out.penalty_values = 0;
   out.condition_cols = 0;
+  out.basis_cache_hit_count = 0;
+  out.basis_cache_miss_count = 0;
+  out.basis_cache_insert_count = 0;
+  out.basis_cache_entries = 0;
+  out.basis_cache_hit_sec = 0.0;
+  out.basis_cache_miss_build_sec = 0.0;
   return out;
 }
 
@@ -441,7 +515,8 @@ std::vector<double> second_difference_penalty(int n_basis) {
 FastSplineDesign make_fastspline_design(const Rcpp::NumericMatrix& data,
                                         const std::vector<int>& conditioning_set,
                                         const FastSplineParams& params,
-                                        FastSplineDesignBuildDiagnostics* diagnostics) {
+                                        FastSplineDesignBuildDiagnostics* diagnostics,
+                                        FastSplineBasisCache* basis_cache) {
   const std::chrono::steady_clock::time_point total_start =
     design_timing_start(diagnostics);
   if (diagnostics != nullptr) diagnostics->build_count += 1;
@@ -461,11 +536,13 @@ FastSplineDesign make_fastspline_design(const Rcpp::NumericMatrix& data,
     }
   } else if (conditioning_set.size() == 1) {
     design = one_dimensional_design(data, conditioning_set[0], params,
-                                    diagnostics);
+                                    diagnostics, basis_cache);
   } else if (conditioning_set.size() == 2) {
-    design = tensor_design(data, conditioning_set, params, diagnostics);
+    design = tensor_design(data, conditioning_set, params, diagnostics,
+                           basis_cache);
   } else {
-    design = additive_design(data, conditioning_set, params, diagnostics);
+    design = additive_design(data, conditioning_set, params, diagnostics,
+                             basis_cache);
   }
   if (diagnostics != nullptr) {
     diagnostics->x_values += static_cast<int>(design.X.size());

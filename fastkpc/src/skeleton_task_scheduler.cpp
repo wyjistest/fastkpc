@@ -218,6 +218,12 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_design_build_basis_values = 0;
   out.residual_design_build_penalty_values = 0;
   out.residual_design_build_condition_cols = 0;
+  out.residual_basis_cache_hit_count = 0;
+  out.residual_basis_cache_miss_count = 0;
+  out.residual_basis_cache_insert_count = 0;
+  out.residual_basis_cache_entries = 0;
+  out.residual_basis_cache_hit_sec = 0.0;
+  out.residual_basis_cache_miss_build_sec = 0.0;
   out.residual_host_pack_sec = 0.0;
   out.residual_alloc_sec = 0.0;
   out.residual_h2d_sec = 0.0;

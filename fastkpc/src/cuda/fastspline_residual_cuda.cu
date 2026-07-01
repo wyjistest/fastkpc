@@ -496,6 +496,12 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
     result.diagnostics.design_build_basis_values = 0;
     result.diagnostics.design_build_penalty_values = 0;
     result.diagnostics.design_build_condition_cols = 0;
+    result.diagnostics.basis_cache_hit_count = 0;
+    result.diagnostics.basis_cache_miss_count = 0;
+    result.diagnostics.basis_cache_insert_count = 0;
+    result.diagnostics.basis_cache_entries = 0;
+    result.diagnostics.basis_cache_hit_sec = 0.0;
+    result.diagnostics.basis_cache_miss_build_sec = 0.0;
     result.diagnostics.host_pack_sec = 0.0;
     result.diagnostics.alloc_sec = 0.0;
     result.diagnostics.h2d_sec = 0.0;
