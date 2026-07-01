@@ -40,4 +40,8 @@ assert_true(constant$finite, "constant input design and penalty should be finite
 assert_true(constant$non_intercept_cols_all_zero_or_constant,
             "constant input non-intercept columns should be zero or constant")
 
+basis_source <- readLines("fastkpc/src/fastspline_basis.cpp", warn = FALSE)
+assert_true(!any(grepl("std::pow", basis_source, fixed = TRUE)),
+            "cubic fastSpline basis evaluation should avoid std::pow")
+
 cat("test_fastspline_basis.R: PASS\n")

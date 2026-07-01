@@ -539,17 +539,24 @@ std::vector<double> cubic_bspline_basis(const std::vector<double>& x,
   }
   if (!std::isfinite(min_gap) || min_gap <= 0.0) min_gap = 1.0;
   const double width = 2.5 * min_gap;
+  const double inv_width = 1.0 / width;
   if (diagnostics != nullptr) {
     min_gap_sec += elapsed_since(stage);
   }
 
   for (int row = 0; row < n; ++row) {
     double total = 0.0;
+    const double xr = x[row];
+    double* out_row = out.data() + static_cast<std::size_t>(row) * basis_cols;
     stage = design_timing_start(diagnostics);
     for (int col = 0; col < basis_cols; ++col) {
-      const double scaled = std::abs(x[row] - centers[col]) / width;
-      const double value = scaled < 1.0 ? std::pow(1.0 - scaled, 3.0) : 0.0;
-      out[ridx(row, col, basis_cols)] = value;
+      const double scaled = std::abs(xr - centers[col]) * inv_width;
+      double value = 0.0;
+      if (scaled < 1.0) {
+        const double t = 1.0 - scaled;
+        value = t * t * t;
+      }
+      out_row[col] = value;
       total += value;
     }
     if (diagnostics != nullptr) {
@@ -558,23 +565,24 @@ std::vector<double> cubic_bspline_basis(const std::vector<double>& x,
     if (total <= 0.0 || !std::isfinite(total)) {
       stage = design_timing_start(diagnostics);
       int nearest = 0;
-      double best = std::abs(x[row] - centers[0]);
+      double best = std::abs(xr - centers[0]);
       for (int col = 1; col < basis_cols; ++col) {
-        const double candidate = std::abs(x[row] - centers[col]);
+        const double candidate = std::abs(xr - centers[col]);
         if (candidate < best) {
           nearest = col;
           best = candidate;
         }
       }
-      for (int col = 0; col < basis_cols; ++col) out[ridx(row, col, basis_cols)] = 0.0;
-      out[ridx(row, nearest, basis_cols)] = 1.0;
+      for (int col = 0; col < basis_cols; ++col) out_row[col] = 0.0;
+      out_row[nearest] = 1.0;
       if (diagnostics != nullptr) {
         fallback_sec += elapsed_since(stage);
         fallback_rows += 1;
       }
     } else {
       stage = design_timing_start(diagnostics);
-      for (int col = 0; col < basis_cols; ++col) out[ridx(row, col, basis_cols)] /= total;
+      const double inv_total = 1.0 / total;
+      for (int col = 0; col < basis_cols; ++col) out_row[col] *= inv_total;
       if (diagnostics != nullptr) {
         normalize_sec += elapsed_since(stage);
       }
