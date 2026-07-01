@@ -61,6 +61,10 @@ double elapsed_since(std::chrono::steady_clock::time_point start) {
     std::chrono::steady_clock::now() - start).count();
 }
 
+double nonnegative_gap(double total, double accounted) {
+  return std::max(0.0, total - accounted);
+}
+
 void add_d2h_timing(FastSplineCudaBatchDiagnostics* timing,
                     double elapsed_sec,
                     std::size_t bytes,
@@ -127,6 +131,16 @@ void add_h2d_timing(FastSplineCudaBatchDiagnostics* timing,
 void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
                       const FastSplineCudaBatchDiagnostics& value) {
   out->grouping_sec += value.grouping_sec;
+  out->grouping_condition_key_sec += value.grouping_condition_key_sec;
+  out->grouping_group_key_sec += value.grouping_group_key_sec;
+  out->grouping_design_build_sec += value.grouping_design_build_sec;
+  out->grouping_map_insert_sec += value.grouping_map_insert_sec;
+  out->grouping_unaccounted_sec += value.grouping_unaccounted_sec;
+  out->grouping_group_count += value.grouping_group_count;
+  out->grouping_design_count += value.grouping_design_count;
+  out->grouping_condition_key_sort_count +=
+    value.grouping_condition_key_sort_count;
+  out->grouping_string_key_count += value.grouping_string_key_count;
   out->host_pack_sec += value.host_pack_sec;
   out->alloc_sec += value.alloc_sec;
   out->h2d_sec += value.h2d_sec;
@@ -2301,6 +2315,15 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.cholesky_backend = "";
   out.batch_mode = requested_fits == 0 ? "empty" : "true-batch";
   out.grouping_sec = 0.0;
+  out.grouping_condition_key_sec = 0.0;
+  out.grouping_group_key_sec = 0.0;
+  out.grouping_design_build_sec = 0.0;
+  out.grouping_map_insert_sec = 0.0;
+  out.grouping_unaccounted_sec = 0.0;
+  out.grouping_group_count = 0;
+  out.grouping_design_count = 0;
+  out.grouping_condition_key_sort_count = 0;
+  out.grouping_string_key_count = 0;
   out.host_pack_sec = 0.0;
   out.alloc_sec = 0.0;
   out.h2d_sec = 0.0;
@@ -2409,7 +2432,10 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
   const Rcpp::NumericMatrix& data,
   const std::vector<int>& targets,
   const std::vector<std::vector<int> >& conditioning_sets,
-  const FastSplineParams& params) {
+  const FastSplineParams& params,
+  FastSplineCudaBatchDiagnostics* diagnostics) {
+  const std::chrono::steady_clock::time_point grouping_start =
+    std::chrono::steady_clock::now();
   if (targets.size() != conditioning_sets.size()) {
     throw std::runtime_error("targets and conditioning_sets length mismatch");
   }
@@ -2421,19 +2447,41 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
     if (targets[i] < 0 || targets[i] >= data.ncol()) {
       throw std::runtime_error("target column out of range");
     }
+    std::chrono::steady_clock::time_point substage =
+      std::chrono::steady_clock::now();
     std::vector<int> normalized_conditioning_set = conditioning_sets[i];
     std::sort(normalized_conditioning_set.begin(),
               normalized_conditioning_set.end());
     const std::string exact_design_key =
       conditioning_set_key(normalized_conditioning_set);
+    if (diagnostics != nullptr) {
+      diagnostics->grouping_condition_key_sec += elapsed_since(substage);
+      diagnostics->grouping_condition_key_sort_count += 2;
+      diagnostics->grouping_string_key_count += 1;
+    }
 
+    substage = std::chrono::steady_clock::now();
     std::map<std::string, FastSplineDesign>::iterator design_it =
       design_cache.find(exact_design_key);
+    bool inserted_design = false;
     if (design_it == design_cache.end()) {
+      if (diagnostics != nullptr) {
+        diagnostics->grouping_map_insert_sec += elapsed_since(substage);
+      }
+      substage = std::chrono::steady_clock::now();
       FastSplineDesign design =
         make_fastspline_design(data, normalized_conditioning_set, params);
+      if (diagnostics != nullptr) {
+        diagnostics->grouping_design_build_sec += elapsed_since(substage);
+      }
+      substage = std::chrono::steady_clock::now();
       design_it = design_cache.insert(
         std::make_pair(exact_design_key, design)).first;
+      inserted_design = true;
+    }
+    if (diagnostics != nullptr) {
+      diagnostics->grouping_map_insert_sec += elapsed_since(substage);
+      if (inserted_design) diagnostics->grouping_design_count += 1;
     }
 
     FastSplineBatchRequest request;
@@ -2442,7 +2490,13 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
     request.conditioning_set = normalized_conditioning_set;
     request.design_index = -1;
 
+    substage = std::chrono::steady_clock::now();
     const std::string key = group_key(design_it->second, params);
+    if (diagnostics != nullptr) {
+      diagnostics->grouping_group_key_sec += elapsed_since(substage);
+      diagnostics->grouping_string_key_count += 1;
+    }
+    substage = std::chrono::steady_clock::now();
     std::map<std::string, int>::iterator it = group_by_key.find(key);
     if (it == group_by_key.end()) {
       FastSplineBatchGroup group;
@@ -2453,6 +2507,7 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
       group_design_by_key.push_back(std::map<std::string, int>());
       group_by_key[key] = group.group_id;
       it = group_by_key.find(key);
+      if (diagnostics != nullptr) diagnostics->grouping_group_count += 1;
     }
     FastSplineBatchGroup& group = groups[it->second];
     std::map<std::string, int>& designs_for_group =
@@ -2468,6 +2523,18 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
       request.design_index = group_design_it->second;
     }
     groups[it->second].requests.push_back(request);
+    if (diagnostics != nullptr) {
+      diagnostics->grouping_map_insert_sec += elapsed_since(substage);
+    }
+  }
+  if (diagnostics != nullptr) {
+    const double total = elapsed_since(grouping_start);
+    const double accounted =
+      diagnostics->grouping_condition_key_sec +
+      diagnostics->grouping_group_key_sec +
+      diagnostics->grouping_design_build_sec +
+      diagnostics->grouping_map_insert_sec;
+    diagnostics->grouping_unaccounted_sec += nonnegative_gap(total, accounted);
   }
   return groups;
 }
@@ -2489,7 +2556,8 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_true_batch(
   std::chrono::steady_clock::time_point stage =
     std::chrono::steady_clock::now();
   const std::vector<FastSplineBatchGroup> groups =
-    make_fastspline_batch_groups(data, targets, conditioning_sets, params);
+    make_fastspline_batch_groups(data, targets, conditioning_sets, params,
+                                 &result.diagnostics);
   result.diagnostics.grouping_sec += elapsed_since(stage);
   const std::string true_backend = "cusolver-batched";
 
@@ -2582,7 +2650,8 @@ fit_fastspline_residuals_cuda_true_batch_residuals_only(
   std::chrono::steady_clock::time_point stage =
     std::chrono::steady_clock::now();
   const std::vector<FastSplineBatchGroup> groups =
-    make_fastspline_batch_groups(data, targets, conditioning_sets, params);
+    make_fastspline_batch_groups(data, targets, conditioning_sets, params,
+                                 &result.diagnostics);
   result.diagnostics.grouping_sec += elapsed_since(stage);
   const std::string true_backend = "cusolver-batched";
 

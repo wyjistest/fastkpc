@@ -469,6 +469,15 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
     result.diagnostics.cholesky_backend = "cpu-fallback";
     result.diagnostics.batch_mode = targets.empty() ? "empty" : "fallback";
     result.diagnostics.grouping_sec = 0.0;
+    result.diagnostics.grouping_condition_key_sec = 0.0;
+    result.diagnostics.grouping_group_key_sec = 0.0;
+    result.diagnostics.grouping_design_build_sec = 0.0;
+    result.diagnostics.grouping_map_insert_sec = 0.0;
+    result.diagnostics.grouping_unaccounted_sec = 0.0;
+    result.diagnostics.grouping_group_count = 0;
+    result.diagnostics.grouping_design_count = 0;
+    result.diagnostics.grouping_condition_key_sort_count = 0;
+    result.diagnostics.grouping_string_key_count = 0;
     result.diagnostics.host_pack_sec = 0.0;
     result.diagnostics.alloc_sec = 0.0;
     result.diagnostics.h2d_sec = 0.0;

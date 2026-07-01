@@ -202,6 +202,33 @@ assert_true(runs$residual_h2d_bytes[[1L]] ==
               runs$residual_h2d_y_bytes[[1L]] +
               runs$residual_h2d_metadata_bytes[[1L]],
             "residual H2D bytes should equal classified bytes")
+assert_true("residual_grouping_condition_key_ms" %in% names(runs),
+            "stage breakdown should split residual grouping condition-key time")
+assert_true("residual_grouping_group_key_ms" %in% names(runs),
+            "stage breakdown should split residual grouping group-key time")
+assert_true("residual_grouping_design_build_ms" %in% names(runs),
+            "stage breakdown should split residual grouping design-build time")
+assert_true("residual_grouping_map_insert_ms" %in% names(runs),
+            "stage breakdown should split residual grouping map-insert time")
+assert_true("residual_grouping_unaccounted_ms" %in% names(runs),
+            "stage breakdown should expose residual grouping unaccounted time")
+assert_true(runs$residual_grouping_string_key_count[[1L]] > 0L,
+            "stage breakdown should count residual grouping string keys")
+assert_true(runs$residual_grouping_condition_key_sort_count[[1L]] > 0L,
+            "stage breakdown should count residual grouping condition-key sorts")
+assert_true(runs$residual_grouping_group_count[[1L]] > 0L,
+            "stage breakdown should count residual grouping groups")
+assert_true(runs$residual_grouping_design_count[[1L]] > 0L,
+            "stage breakdown should count residual grouping unique designs")
+residual_grouping_accounted_ms <-
+  runs$residual_grouping_condition_key_ms[[1L]] +
+  runs$residual_grouping_group_key_ms[[1L]] +
+  runs$residual_grouping_design_build_ms[[1L]] +
+  runs$residual_grouping_map_insert_ms[[1L]] +
+  runs$residual_grouping_unaccounted_ms[[1L]]
+assert_true(residual_grouping_accounted_ms <=
+              runs$residual_grouping_ms[[1L]] + 1e-6,
+            "residual grouping split should not exceed aggregate grouping time")
 assert_true(runs$residual_lambda_candidates[[1L]] >= 0L,
             "stage breakdown should record lambda candidate count")
 assert_true(runs$residual_workspace_reuse_count[[1L]] >= 0L,

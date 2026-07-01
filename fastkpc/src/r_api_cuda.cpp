@@ -346,6 +346,24 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_prefetch_unaccounted_sec,
       Rcpp::Named("residual_grouping_sec") =
         diagnostics.residual_grouping_sec,
+      Rcpp::Named("residual_grouping_condition_key_sec") =
+        diagnostics.residual_grouping_condition_key_sec,
+      Rcpp::Named("residual_grouping_group_key_sec") =
+        diagnostics.residual_grouping_group_key_sec,
+      Rcpp::Named("residual_grouping_design_build_sec") =
+        diagnostics.residual_grouping_design_build_sec,
+      Rcpp::Named("residual_grouping_map_insert_sec") =
+        diagnostics.residual_grouping_map_insert_sec,
+      Rcpp::Named("residual_grouping_unaccounted_sec") =
+        diagnostics.residual_grouping_unaccounted_sec,
+      Rcpp::Named("residual_grouping_group_count") =
+        diagnostics.residual_grouping_group_count,
+      Rcpp::Named("residual_grouping_design_count") =
+        diagnostics.residual_grouping_design_count,
+      Rcpp::Named("residual_grouping_condition_key_sort_count") =
+        diagnostics.residual_grouping_condition_key_sort_count,
+      Rcpp::Named("residual_grouping_string_key_count") =
+        diagnostics.residual_grouping_string_key_count,
       Rcpp::Named("residual_host_pack_sec") =
         diagnostics.residual_host_pack_sec,
       Rcpp::Named("residual_alloc_sec") = diagnostics.residual_alloc_sec,
@@ -848,6 +866,24 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
     Rcpp::Named("cholesky_backend") = diagnostics.cholesky_backend,
     Rcpp::Named("batch_mode") = diagnostics.batch_mode,
     Rcpp::Named("grouping_sec") = diagnostics.grouping_sec,
+    Rcpp::Named("grouping_condition_key_sec") =
+      diagnostics.grouping_condition_key_sec,
+    Rcpp::Named("grouping_group_key_sec") =
+      diagnostics.grouping_group_key_sec,
+    Rcpp::Named("grouping_design_build_sec") =
+      diagnostics.grouping_design_build_sec,
+    Rcpp::Named("grouping_map_insert_sec") =
+      diagnostics.grouping_map_insert_sec,
+    Rcpp::Named("grouping_unaccounted_sec") =
+      diagnostics.grouping_unaccounted_sec,
+    Rcpp::Named("grouping_group_count") =
+      diagnostics.grouping_group_count,
+    Rcpp::Named("grouping_design_count") =
+      diagnostics.grouping_design_count,
+    Rcpp::Named("grouping_condition_key_sort_count") =
+      diagnostics.grouping_condition_key_sort_count,
+    Rcpp::Named("grouping_string_key_count") =
+      diagnostics.grouping_string_key_count,
     Rcpp::Named("host_pack_sec") = diagnostics.host_pack_sec,
     Rcpp::Named("alloc_sec") = diagnostics.alloc_sec,
     Rcpp::Named("h2d_sec") = diagnostics.h2d_sec,

@@ -501,6 +501,38 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       fastkpc_stage_breakdown_seconds(
         summary$residual_batch_call_wall_sec
       ) * 1000,
+    residual_grouping_ms =
+      fastkpc_stage_breakdown_seconds(summary$residual_grouping_sec) * 1000,
+    residual_grouping_condition_key_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_condition_key_sec
+      ) * 1000,
+    residual_grouping_group_key_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_group_key_sec
+      ) * 1000,
+    residual_grouping_design_build_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_design_build_sec
+      ) * 1000,
+    residual_grouping_map_insert_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_map_insert_sec
+      ) * 1000,
+    residual_grouping_unaccounted_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_unaccounted_sec
+      ) * 1000,
+    residual_grouping_group_count =
+      as.integer(summary$residual_grouping_group_count %||% 0L),
+    residual_grouping_design_count =
+      as.integer(summary$residual_grouping_design_count %||% 0L),
+    residual_grouping_condition_key_sort_count =
+      as.integer(
+        summary$residual_grouping_condition_key_sort_count %||% 0L
+      ),
+    residual_grouping_string_key_count =
+      as.integer(summary$residual_grouping_string_key_count %||% 0L),
     residual_diagnostic_merge_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_diagnostic_merge_sec

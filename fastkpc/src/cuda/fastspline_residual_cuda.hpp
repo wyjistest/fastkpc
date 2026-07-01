@@ -43,6 +43,15 @@ struct FastSplineCudaBatchDiagnostics {
   std::string cholesky_backend;
   std::string batch_mode;
   double grouping_sec;
+  double grouping_condition_key_sec;
+  double grouping_group_key_sec;
+  double grouping_design_build_sec;
+  double grouping_map_insert_sec;
+  double grouping_unaccounted_sec;
+  int grouping_group_count;
+  int grouping_design_count;
+  int grouping_condition_key_sort_count;
+  int grouping_string_key_count;
   double host_pack_sec;
   double alloc_sec;
   double h2d_sec;

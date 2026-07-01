@@ -120,6 +120,15 @@ struct SchedulerDiagnostics {
   double residual_diagnostic_merge_sec;
   double residual_prefetch_unaccounted_sec;
   double residual_grouping_sec;
+  double residual_grouping_condition_key_sec;
+  double residual_grouping_group_key_sec;
+  double residual_grouping_design_build_sec;
+  double residual_grouping_map_insert_sec;
+  double residual_grouping_unaccounted_sec;
+  int residual_grouping_group_count;
+  int residual_grouping_design_count;
+  int residual_grouping_condition_key_sort_count;
+  int residual_grouping_string_key_count;
   double residual_host_pack_sec;
   double residual_alloc_sec;
   double residual_h2d_sec;

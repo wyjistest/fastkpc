@@ -257,6 +257,24 @@ class CudaSkeletonResidualCache {
                    batch_result.diagnostics.max_fits_per_design);
         diagnostics->residual_grouping_sec +=
           batch_result.diagnostics.grouping_sec;
+        diagnostics->residual_grouping_condition_key_sec +=
+          batch_result.diagnostics.grouping_condition_key_sec;
+        diagnostics->residual_grouping_group_key_sec +=
+          batch_result.diagnostics.grouping_group_key_sec;
+        diagnostics->residual_grouping_design_build_sec +=
+          batch_result.diagnostics.grouping_design_build_sec;
+        diagnostics->residual_grouping_map_insert_sec +=
+          batch_result.diagnostics.grouping_map_insert_sec;
+        diagnostics->residual_grouping_unaccounted_sec +=
+          batch_result.diagnostics.grouping_unaccounted_sec;
+        diagnostics->residual_grouping_group_count +=
+          batch_result.diagnostics.grouping_group_count;
+        diagnostics->residual_grouping_design_count +=
+          batch_result.diagnostics.grouping_design_count;
+        diagnostics->residual_grouping_condition_key_sort_count +=
+          batch_result.diagnostics.grouping_condition_key_sort_count;
+        diagnostics->residual_grouping_string_key_count +=
+          batch_result.diagnostics.grouping_string_key_count;
         diagnostics->residual_host_pack_sec +=
           batch_result.diagnostics.host_pack_sec;
         diagnostics->residual_alloc_sec +=

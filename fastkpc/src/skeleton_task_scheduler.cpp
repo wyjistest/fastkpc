@@ -191,6 +191,15 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_diagnostic_merge_sec = 0.0;
   out.residual_prefetch_unaccounted_sec = 0.0;
   out.residual_grouping_sec = 0.0;
+  out.residual_grouping_condition_key_sec = 0.0;
+  out.residual_grouping_group_key_sec = 0.0;
+  out.residual_grouping_design_build_sec = 0.0;
+  out.residual_grouping_map_insert_sec = 0.0;
+  out.residual_grouping_unaccounted_sec = 0.0;
+  out.residual_grouping_group_count = 0;
+  out.residual_grouping_design_count = 0;
+  out.residual_grouping_condition_key_sort_count = 0;
+  out.residual_grouping_string_key_count = 0;
   out.residual_host_pack_sec = 0.0;
   out.residual_alloc_sec = 0.0;
   out.residual_h2d_sec = 0.0;
