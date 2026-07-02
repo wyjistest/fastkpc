@@ -165,6 +165,18 @@ struct SchedulerDiagnostics {
   int residual_design_build_penalty_values;
   int residual_design_build_condition_cols;
   int residual_design_build_finite_check_values;
+  int residual_design_build_intercept_count;
+  int residual_design_build_one_dimensional_count;
+  int residual_design_build_additive_count;
+  int residual_design_build_tensor_count;
+  double residual_design_build_tensor_basis_sec;
+  double residual_design_build_tensor_alloc_sec;
+  double residual_design_build_tensor_x_pack_sec;
+  double residual_design_build_tensor_product_sec;
+  double residual_design_build_tensor_p_build_sec;
+  double residual_design_build_tensor_p_pack_sec;
+  int residual_design_build_tensor_cols;
+  int residual_design_build_tensor_values;
   int residual_basis_cache_hit_count;
   int residual_basis_cache_miss_count;
   int residual_basis_cache_insert_count;

@@ -40,6 +40,18 @@ struct FastSplineDesignBuildDiagnostics {
   int penalty_values;
   int condition_cols;
   int finite_check_values;
+  int intercept_count;
+  int one_dimensional_count;
+  int additive_count;
+  int tensor_count;
+  double tensor_basis_sec;
+  double tensor_alloc_sec;
+  double tensor_x_pack_sec;
+  double tensor_product_sec;
+  double tensor_p_build_sec;
+  double tensor_p_pack_sec;
+  int tensor_cols;
+  int tensor_values;
   int basis_cache_hit_count;
   int basis_cache_miss_count;
   int basis_cache_insert_count;

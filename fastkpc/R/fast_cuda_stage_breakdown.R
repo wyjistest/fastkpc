@@ -639,6 +639,44 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_design_build_condition_cols %||% 0L),
     residual_design_build_finite_check_values =
       as.integer(summary$residual_design_build_finite_check_values %||% 0L),
+    residual_design_build_intercept_count =
+      as.integer(summary$residual_design_build_intercept_count %||% 0L),
+    residual_design_build_1d_count =
+      as.integer(
+        summary$residual_design_build_one_dimensional_count %||% 0L
+      ),
+    residual_design_build_additive_count =
+      as.integer(summary$residual_design_build_additive_count %||% 0L),
+    residual_design_build_tensor_count =
+      as.integer(summary$residual_design_build_tensor_count %||% 0L),
+    residual_design_build_tensor_basis_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_tensor_basis_sec
+      ) * 1000,
+    residual_design_build_tensor_alloc_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_tensor_alloc_sec
+      ) * 1000,
+    residual_design_build_tensor_x_pack_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_tensor_x_pack_sec
+      ) * 1000,
+    residual_design_build_tensor_product_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_tensor_product_sec
+      ) * 1000,
+    residual_design_build_tensor_p_build_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_tensor_p_build_sec
+      ) * 1000,
+    residual_design_build_tensor_p_pack_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_tensor_p_pack_sec
+      ) * 1000,
+    residual_design_build_tensor_cols =
+      as.integer(summary$residual_design_build_tensor_cols %||% 0L),
+    residual_design_build_tensor_values =
+      as.integer(summary$residual_design_build_tensor_values %||% 0L),
     residual_basis_cache_hit_count =
       as.integer(summary$residual_basis_cache_hit_count %||% 0L),
     residual_basis_cache_miss_count =

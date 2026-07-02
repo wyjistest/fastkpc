@@ -436,6 +436,30 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_design_build_condition_cols,
       Rcpp::Named("residual_design_build_finite_check_values") =
         diagnostics.residual_design_build_finite_check_values,
+      Rcpp::Named("residual_design_build_intercept_count") =
+        diagnostics.residual_design_build_intercept_count,
+      Rcpp::Named("residual_design_build_one_dimensional_count") =
+        diagnostics.residual_design_build_one_dimensional_count,
+      Rcpp::Named("residual_design_build_additive_count") =
+        diagnostics.residual_design_build_additive_count,
+      Rcpp::Named("residual_design_build_tensor_count") =
+        diagnostics.residual_design_build_tensor_count,
+      Rcpp::Named("residual_design_build_tensor_basis_sec") =
+        diagnostics.residual_design_build_tensor_basis_sec,
+      Rcpp::Named("residual_design_build_tensor_alloc_sec") =
+        diagnostics.residual_design_build_tensor_alloc_sec,
+      Rcpp::Named("residual_design_build_tensor_x_pack_sec") =
+        diagnostics.residual_design_build_tensor_x_pack_sec,
+      Rcpp::Named("residual_design_build_tensor_product_sec") =
+        diagnostics.residual_design_build_tensor_product_sec,
+      Rcpp::Named("residual_design_build_tensor_p_build_sec") =
+        diagnostics.residual_design_build_tensor_p_build_sec,
+      Rcpp::Named("residual_design_build_tensor_p_pack_sec") =
+        diagnostics.residual_design_build_tensor_p_pack_sec,
+      Rcpp::Named("residual_design_build_tensor_cols") =
+        diagnostics.residual_design_build_tensor_cols,
+      Rcpp::Named("residual_design_build_tensor_values") =
+        diagnostics.residual_design_build_tensor_values,
       Rcpp::Named("residual_basis_cache_hit_count") =
         diagnostics.residual_basis_cache_hit_count,
       Rcpp::Named("residual_basis_cache_miss_count") =
@@ -1084,6 +1108,30 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.design_build_condition_cols,
     Rcpp::Named("design_build_finite_check_values") =
       diagnostics.design_build_finite_check_values,
+    Rcpp::Named("design_build_intercept_count") =
+      diagnostics.design_build_intercept_count,
+    Rcpp::Named("design_build_one_dimensional_count") =
+      diagnostics.design_build_one_dimensional_count,
+    Rcpp::Named("design_build_additive_count") =
+      diagnostics.design_build_additive_count,
+    Rcpp::Named("design_build_tensor_count") =
+      diagnostics.design_build_tensor_count,
+    Rcpp::Named("design_build_tensor_basis_sec") =
+      diagnostics.design_build_tensor_basis_sec,
+    Rcpp::Named("design_build_tensor_alloc_sec") =
+      diagnostics.design_build_tensor_alloc_sec,
+    Rcpp::Named("design_build_tensor_x_pack_sec") =
+      diagnostics.design_build_tensor_x_pack_sec,
+    Rcpp::Named("design_build_tensor_product_sec") =
+      diagnostics.design_build_tensor_product_sec,
+    Rcpp::Named("design_build_tensor_p_build_sec") =
+      diagnostics.design_build_tensor_p_build_sec,
+    Rcpp::Named("design_build_tensor_p_pack_sec") =
+      diagnostics.design_build_tensor_p_pack_sec,
+    Rcpp::Named("design_build_tensor_cols") =
+      diagnostics.design_build_tensor_cols,
+    Rcpp::Named("design_build_tensor_values") =
+      diagnostics.design_build_tensor_values,
     Rcpp::Named("basis_cache_hit_count") =
       diagnostics.basis_cache_hit_count,
     Rcpp::Named("basis_cache_miss_count") =

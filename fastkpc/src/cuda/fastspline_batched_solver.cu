@@ -191,6 +191,25 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->design_build_condition_cols += value.design_build_condition_cols;
   out->design_build_finite_check_values +=
     value.design_build_finite_check_values;
+  out->design_build_intercept_count += value.design_build_intercept_count;
+  out->design_build_one_dimensional_count +=
+    value.design_build_one_dimensional_count;
+  out->design_build_additive_count += value.design_build_additive_count;
+  out->design_build_tensor_count += value.design_build_tensor_count;
+  out->design_build_tensor_basis_sec +=
+    value.design_build_tensor_basis_sec;
+  out->design_build_tensor_alloc_sec +=
+    value.design_build_tensor_alloc_sec;
+  out->design_build_tensor_x_pack_sec +=
+    value.design_build_tensor_x_pack_sec;
+  out->design_build_tensor_product_sec +=
+    value.design_build_tensor_product_sec;
+  out->design_build_tensor_p_build_sec +=
+    value.design_build_tensor_p_build_sec;
+  out->design_build_tensor_p_pack_sec +=
+    value.design_build_tensor_p_pack_sec;
+  out->design_build_tensor_cols += value.design_build_tensor_cols;
+  out->design_build_tensor_values += value.design_build_tensor_values;
   out->basis_cache_hit_count += value.basis_cache_hit_count;
   out->basis_cache_miss_count += value.basis_cache_miss_count;
   out->basis_cache_insert_count += value.basis_cache_insert_count;
@@ -2385,6 +2404,18 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.design_build_penalty_values = 0;
   out.design_build_condition_cols = 0;
   out.design_build_finite_check_values = 0;
+  out.design_build_intercept_count = 0;
+  out.design_build_one_dimensional_count = 0;
+  out.design_build_additive_count = 0;
+  out.design_build_tensor_count = 0;
+  out.design_build_tensor_basis_sec = 0.0;
+  out.design_build_tensor_alloc_sec = 0.0;
+  out.design_build_tensor_x_pack_sec = 0.0;
+  out.design_build_tensor_product_sec = 0.0;
+  out.design_build_tensor_p_build_sec = 0.0;
+  out.design_build_tensor_p_pack_sec = 0.0;
+  out.design_build_tensor_cols = 0;
+  out.design_build_tensor_values = 0;
   out.basis_cache_hit_count = 0;
   out.basis_cache_miss_count = 0;
   out.basis_cache_insert_count = 0;
@@ -2654,6 +2685,30 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
           build_diagnostics.condition_cols;
         diagnostics->design_build_finite_check_values +=
           build_diagnostics.finite_check_values;
+        diagnostics->design_build_intercept_count +=
+          build_diagnostics.intercept_count;
+        diagnostics->design_build_one_dimensional_count +=
+          build_diagnostics.one_dimensional_count;
+        diagnostics->design_build_additive_count +=
+          build_diagnostics.additive_count;
+        diagnostics->design_build_tensor_count +=
+          build_diagnostics.tensor_count;
+        diagnostics->design_build_tensor_basis_sec +=
+          build_diagnostics.tensor_basis_sec;
+        diagnostics->design_build_tensor_alloc_sec +=
+          build_diagnostics.tensor_alloc_sec;
+        diagnostics->design_build_tensor_x_pack_sec +=
+          build_diagnostics.tensor_x_pack_sec;
+        diagnostics->design_build_tensor_product_sec +=
+          build_diagnostics.tensor_product_sec;
+        diagnostics->design_build_tensor_p_build_sec +=
+          build_diagnostics.tensor_p_build_sec;
+        diagnostics->design_build_tensor_p_pack_sec +=
+          build_diagnostics.tensor_p_pack_sec;
+        diagnostics->design_build_tensor_cols +=
+          build_diagnostics.tensor_cols;
+        diagnostics->design_build_tensor_values +=
+          build_diagnostics.tensor_values;
         diagnostics->basis_cache_hit_count +=
           build_diagnostics.basis_cache_hit_count;
         diagnostics->basis_cache_miss_count +=

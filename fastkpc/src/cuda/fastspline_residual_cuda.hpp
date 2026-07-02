@@ -88,6 +88,18 @@ struct FastSplineCudaBatchDiagnostics {
   int design_build_penalty_values;
   int design_build_condition_cols;
   int design_build_finite_check_values;
+  int design_build_intercept_count;
+  int design_build_one_dimensional_count;
+  int design_build_additive_count;
+  int design_build_tensor_count;
+  double design_build_tensor_basis_sec;
+  double design_build_tensor_alloc_sec;
+  double design_build_tensor_x_pack_sec;
+  double design_build_tensor_product_sec;
+  double design_build_tensor_p_build_sec;
+  double design_build_tensor_p_pack_sec;
+  int design_build_tensor_cols;
+  int design_build_tensor_values;
   int basis_cache_hit_count;
   int basis_cache_miss_count;
   int basis_cache_insert_count;

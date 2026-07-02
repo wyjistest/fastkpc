@@ -348,6 +348,30 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.design_build_condition_cols;
         diagnostics->residual_design_build_finite_check_values +=
           batch_result.diagnostics.design_build_finite_check_values;
+        diagnostics->residual_design_build_intercept_count +=
+          batch_result.diagnostics.design_build_intercept_count;
+        diagnostics->residual_design_build_one_dimensional_count +=
+          batch_result.diagnostics.design_build_one_dimensional_count;
+        diagnostics->residual_design_build_additive_count +=
+          batch_result.diagnostics.design_build_additive_count;
+        diagnostics->residual_design_build_tensor_count +=
+          batch_result.diagnostics.design_build_tensor_count;
+        diagnostics->residual_design_build_tensor_basis_sec +=
+          batch_result.diagnostics.design_build_tensor_basis_sec;
+        diagnostics->residual_design_build_tensor_alloc_sec +=
+          batch_result.diagnostics.design_build_tensor_alloc_sec;
+        diagnostics->residual_design_build_tensor_x_pack_sec +=
+          batch_result.diagnostics.design_build_tensor_x_pack_sec;
+        diagnostics->residual_design_build_tensor_product_sec +=
+          batch_result.diagnostics.design_build_tensor_product_sec;
+        diagnostics->residual_design_build_tensor_p_build_sec +=
+          batch_result.diagnostics.design_build_tensor_p_build_sec;
+        diagnostics->residual_design_build_tensor_p_pack_sec +=
+          batch_result.diagnostics.design_build_tensor_p_pack_sec;
+        diagnostics->residual_design_build_tensor_cols +=
+          batch_result.diagnostics.design_build_tensor_cols;
+        diagnostics->residual_design_build_tensor_values +=
+          batch_result.diagnostics.design_build_tensor_values;
         diagnostics->residual_basis_cache_hit_count +=
           batch_result.diagnostics.basis_cache_hit_count;
         diagnostics->residual_basis_cache_miss_count +=

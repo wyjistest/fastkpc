@@ -252,31 +252,43 @@ FastSplineDesign tensor_design(const Rcpp::NumericMatrix& data,
                                FastSplineBasisCache* basis_cache) {
   FastSplineBasisBlock scratch1;
   FastSplineBasisBlock scratch2;
+  std::chrono::steady_clock::time_point stage =
+    design_timing_start(diagnostics);
   const FastSplineBasisBlock& b1 =
     get_or_build_fastspline_basis(data, conditioning_set[0], params,
                                   diagnostics, basis_cache, &scratch1);
   const FastSplineBasisBlock& b2 =
     get_or_build_fastspline_basis(data, conditioning_set[1], params,
                                   diagnostics, basis_cache, &scratch2);
+  if (diagnostics != nullptr) {
+    add_elapsed(&diagnostics->tensor_basis_sec, diagnostics, stage);
+  }
   const int b1_cols = b1.n_basis;
   const int b2_cols = b2.n_basis;
   const int n = data.nrow();
   const int tensor_cols = b1_cols * b2_cols;
   const int p = 1 + tensor_cols;
+  if (diagnostics != nullptr) {
+    diagnostics->tensor_cols += tensor_cols;
+    diagnostics->tensor_values += n * tensor_cols;
+  }
 
   FastSplineDesign design;
   design.n = n;
   design.p = p;
-  std::chrono::steady_clock::time_point stage =
-    design_timing_start(diagnostics);
+  stage = design_timing_start(diagnostics);
   design.X.assign(static_cast<std::size_t>(n) * p, 0.0);
   design.P.assign(static_cast<std::size_t>(p) * p, 0.0);
   if (diagnostics != nullptr) {
-    add_elapsed(&diagnostics->alloc_sec, diagnostics, stage);
+    const double elapsed = elapsed_since(stage);
+    diagnostics->alloc_sec += elapsed;
+    diagnostics->tensor_alloc_sec += elapsed;
   }
   stage = design_timing_start(diagnostics);
+  for (int row = 0; row < n; ++row) design.X[ridx(row, 0, p)] = 1.0;
+  std::chrono::steady_clock::time_point product_stage =
+    design_timing_start(diagnostics);
   for (int row = 0; row < n; ++row) {
-    design.X[ridx(row, 0, p)] = 1.0;
     int dest = 1;
     for (int a = 0; a < b1_cols; ++a) {
       for (int b = 0; b < b2_cols; ++b) {
@@ -288,14 +300,20 @@ FastSplineDesign tensor_design(const Rcpp::NumericMatrix& data,
     }
   }
   if (diagnostics != nullptr) {
-    add_elapsed(&diagnostics->x_pack_sec, diagnostics, stage);
+    const double product_elapsed = elapsed_since(product_stage);
+    const double x_pack_elapsed = elapsed_since(stage);
+    diagnostics->x_pack_sec += x_pack_elapsed;
+    diagnostics->tensor_x_pack_sec += x_pack_elapsed;
+    diagnostics->tensor_product_sec += product_elapsed;
   }
 
   stage = design_timing_start(diagnostics);
   const std::vector<double> p1 = second_difference_penalty(b1_cols);
   const std::vector<double> p2 = second_difference_penalty(b2_cols);
   if (diagnostics != nullptr) {
-    add_elapsed(&diagnostics->penalty_sec, diagnostics, stage);
+    const double elapsed = elapsed_since(stage);
+    diagnostics->penalty_sec += elapsed;
+    diagnostics->tensor_p_build_sec += elapsed;
     diagnostics->penalty_values +=
       static_cast<int>(p1.size() + p2.size());
   }
@@ -321,7 +339,9 @@ FastSplineDesign tensor_design(const Rcpp::NumericMatrix& data,
     }
   }
   if (diagnostics != nullptr) {
-    add_elapsed(&diagnostics->p_pack_sec, diagnostics, stage);
+    const double elapsed = elapsed_since(stage);
+    diagnostics->p_pack_sec += elapsed;
+    diagnostics->tensor_p_pack_sec += elapsed;
   }
   return design;
 }
@@ -438,6 +458,18 @@ FastSplineDesignBuildDiagnostics make_empty_fastspline_design_build_diagnostics(
   out.penalty_values = 0;
   out.condition_cols = 0;
   out.finite_check_values = 0;
+  out.intercept_count = 0;
+  out.one_dimensional_count = 0;
+  out.additive_count = 0;
+  out.tensor_count = 0;
+  out.tensor_basis_sec = 0.0;
+  out.tensor_alloc_sec = 0.0;
+  out.tensor_x_pack_sec = 0.0;
+  out.tensor_product_sec = 0.0;
+  out.tensor_p_build_sec = 0.0;
+  out.tensor_p_pack_sec = 0.0;
+  out.tensor_cols = 0;
+  out.tensor_values = 0;
   out.basis_cache_hit_count = 0;
   out.basis_cache_miss_count = 0;
   out.basis_cache_insert_count = 0;
@@ -724,6 +756,7 @@ FastSplineDesign make_fastspline_design(const Rcpp::NumericMatrix& data,
   }
   FastSplineDesign design;
   if (conditioning_set.empty()) {
+    if (diagnostics != nullptr) diagnostics->intercept_count += 1;
     design.n = data.nrow();
     design.p = 1;
     stage = design_timing_start(diagnostics);
@@ -733,12 +766,15 @@ FastSplineDesign make_fastspline_design(const Rcpp::NumericMatrix& data,
       add_elapsed(&diagnostics->alloc_sec, diagnostics, stage);
     }
   } else if (conditioning_set.size() == 1) {
+    if (diagnostics != nullptr) diagnostics->one_dimensional_count += 1;
     design = one_dimensional_design(data, conditioning_set[0], params,
                                     diagnostics, basis_cache);
   } else if (conditioning_set.size() == 2) {
+    if (diagnostics != nullptr) diagnostics->tensor_count += 1;
     design = tensor_design(data, conditioning_set, params, diagnostics,
                            basis_cache);
   } else {
+    if (diagnostics != nullptr) diagnostics->additive_count += 1;
     design = additive_design(data, conditioning_set, params, diagnostics,
                              basis_cache);
   }
