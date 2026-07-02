@@ -649,6 +649,60 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_design_build_additive_count %||% 0L),
     residual_design_build_tensor_count =
       as.integer(summary$residual_design_build_tensor_count %||% 0L),
+    residual_design_build_1d_basis_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_one_dimensional_basis_sec
+      ) * 1000,
+    residual_design_build_1d_alloc_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_one_dimensional_alloc_sec
+      ) * 1000,
+    residual_design_build_1d_x_pack_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_one_dimensional_x_pack_sec
+      ) * 1000,
+    residual_design_build_1d_p_build_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_one_dimensional_p_build_sec
+      ) * 1000,
+    residual_design_build_1d_p_pack_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_one_dimensional_p_pack_sec
+      ) * 1000,
+    residual_design_build_1d_cols =
+      as.integer(summary$residual_design_build_one_dimensional_cols %||% 0L),
+    residual_design_build_1d_values =
+      as.integer(
+        summary$residual_design_build_one_dimensional_values %||% 0L
+      ),
+    residual_design_build_additive_basis_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_additive_basis_sec
+      ) * 1000,
+    residual_design_build_additive_alloc_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_additive_alloc_sec
+      ) * 1000,
+    residual_design_build_additive_x_pack_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_additive_x_pack_sec
+      ) * 1000,
+    residual_design_build_additive_p_build_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_additive_p_build_sec
+      ) * 1000,
+    residual_design_build_additive_p_pack_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_additive_p_pack_sec
+      ) * 1000,
+    residual_design_build_additive_component_count =
+      as.integer(
+        summary$residual_design_build_additive_component_count %||% 0L
+      ),
+    residual_design_build_additive_basis_cols =
+      as.integer(summary$residual_design_build_additive_basis_cols %||% 0L),
+    residual_design_build_additive_values =
+      as.integer(summary$residual_design_build_additive_values %||% 0L),
     residual_design_build_tensor_basis_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_design_build_tensor_basis_sec

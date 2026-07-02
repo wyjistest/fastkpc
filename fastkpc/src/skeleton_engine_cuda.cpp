@@ -356,6 +356,36 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.design_build_additive_count;
         diagnostics->residual_design_build_tensor_count +=
           batch_result.diagnostics.design_build_tensor_count;
+        diagnostics->residual_design_build_one_dimensional_basis_sec +=
+          batch_result.diagnostics.design_build_one_dimensional_basis_sec;
+        diagnostics->residual_design_build_one_dimensional_alloc_sec +=
+          batch_result.diagnostics.design_build_one_dimensional_alloc_sec;
+        diagnostics->residual_design_build_one_dimensional_x_pack_sec +=
+          batch_result.diagnostics.design_build_one_dimensional_x_pack_sec;
+        diagnostics->residual_design_build_one_dimensional_p_build_sec +=
+          batch_result.diagnostics.design_build_one_dimensional_p_build_sec;
+        diagnostics->residual_design_build_one_dimensional_p_pack_sec +=
+          batch_result.diagnostics.design_build_one_dimensional_p_pack_sec;
+        diagnostics->residual_design_build_one_dimensional_cols +=
+          batch_result.diagnostics.design_build_one_dimensional_cols;
+        diagnostics->residual_design_build_one_dimensional_values +=
+          batch_result.diagnostics.design_build_one_dimensional_values;
+        diagnostics->residual_design_build_additive_basis_sec +=
+          batch_result.diagnostics.design_build_additive_basis_sec;
+        diagnostics->residual_design_build_additive_alloc_sec +=
+          batch_result.diagnostics.design_build_additive_alloc_sec;
+        diagnostics->residual_design_build_additive_x_pack_sec +=
+          batch_result.diagnostics.design_build_additive_x_pack_sec;
+        diagnostics->residual_design_build_additive_p_build_sec +=
+          batch_result.diagnostics.design_build_additive_p_build_sec;
+        diagnostics->residual_design_build_additive_p_pack_sec +=
+          batch_result.diagnostics.design_build_additive_p_pack_sec;
+        diagnostics->residual_design_build_additive_component_count +=
+          batch_result.diagnostics.design_build_additive_component_count;
+        diagnostics->residual_design_build_additive_basis_cols +=
+          batch_result.diagnostics.design_build_additive_basis_cols;
+        diagnostics->residual_design_build_additive_values +=
+          batch_result.diagnostics.design_build_additive_values;
         diagnostics->residual_design_build_tensor_basis_sec +=
           batch_result.diagnostics.design_build_tensor_basis_sec;
         diagnostics->residual_design_build_tensor_alloc_sec +=

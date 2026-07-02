@@ -196,6 +196,36 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
     value.design_build_one_dimensional_count;
   out->design_build_additive_count += value.design_build_additive_count;
   out->design_build_tensor_count += value.design_build_tensor_count;
+  out->design_build_one_dimensional_basis_sec +=
+    value.design_build_one_dimensional_basis_sec;
+  out->design_build_one_dimensional_alloc_sec +=
+    value.design_build_one_dimensional_alloc_sec;
+  out->design_build_one_dimensional_x_pack_sec +=
+    value.design_build_one_dimensional_x_pack_sec;
+  out->design_build_one_dimensional_p_build_sec +=
+    value.design_build_one_dimensional_p_build_sec;
+  out->design_build_one_dimensional_p_pack_sec +=
+    value.design_build_one_dimensional_p_pack_sec;
+  out->design_build_one_dimensional_cols +=
+    value.design_build_one_dimensional_cols;
+  out->design_build_one_dimensional_values +=
+    value.design_build_one_dimensional_values;
+  out->design_build_additive_basis_sec +=
+    value.design_build_additive_basis_sec;
+  out->design_build_additive_alloc_sec +=
+    value.design_build_additive_alloc_sec;
+  out->design_build_additive_x_pack_sec +=
+    value.design_build_additive_x_pack_sec;
+  out->design_build_additive_p_build_sec +=
+    value.design_build_additive_p_build_sec;
+  out->design_build_additive_p_pack_sec +=
+    value.design_build_additive_p_pack_sec;
+  out->design_build_additive_component_count +=
+    value.design_build_additive_component_count;
+  out->design_build_additive_basis_cols +=
+    value.design_build_additive_basis_cols;
+  out->design_build_additive_values +=
+    value.design_build_additive_values;
   out->design_build_tensor_basis_sec +=
     value.design_build_tensor_basis_sec;
   out->design_build_tensor_alloc_sec +=
@@ -2408,6 +2438,21 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.design_build_one_dimensional_count = 0;
   out.design_build_additive_count = 0;
   out.design_build_tensor_count = 0;
+  out.design_build_one_dimensional_basis_sec = 0.0;
+  out.design_build_one_dimensional_alloc_sec = 0.0;
+  out.design_build_one_dimensional_x_pack_sec = 0.0;
+  out.design_build_one_dimensional_p_build_sec = 0.0;
+  out.design_build_one_dimensional_p_pack_sec = 0.0;
+  out.design_build_one_dimensional_cols = 0;
+  out.design_build_one_dimensional_values = 0;
+  out.design_build_additive_basis_sec = 0.0;
+  out.design_build_additive_alloc_sec = 0.0;
+  out.design_build_additive_x_pack_sec = 0.0;
+  out.design_build_additive_p_build_sec = 0.0;
+  out.design_build_additive_p_pack_sec = 0.0;
+  out.design_build_additive_component_count = 0;
+  out.design_build_additive_basis_cols = 0;
+  out.design_build_additive_values = 0;
   out.design_build_tensor_basis_sec = 0.0;
   out.design_build_tensor_alloc_sec = 0.0;
   out.design_build_tensor_x_pack_sec = 0.0;
@@ -2693,6 +2738,36 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
           build_diagnostics.additive_count;
         diagnostics->design_build_tensor_count +=
           build_diagnostics.tensor_count;
+        diagnostics->design_build_one_dimensional_basis_sec +=
+          build_diagnostics.one_dimensional_basis_sec;
+        diagnostics->design_build_one_dimensional_alloc_sec +=
+          build_diagnostics.one_dimensional_alloc_sec;
+        diagnostics->design_build_one_dimensional_x_pack_sec +=
+          build_diagnostics.one_dimensional_x_pack_sec;
+        diagnostics->design_build_one_dimensional_p_build_sec +=
+          build_diagnostics.one_dimensional_p_build_sec;
+        diagnostics->design_build_one_dimensional_p_pack_sec +=
+          build_diagnostics.one_dimensional_p_pack_sec;
+        diagnostics->design_build_one_dimensional_cols +=
+          build_diagnostics.one_dimensional_cols;
+        diagnostics->design_build_one_dimensional_values +=
+          build_diagnostics.one_dimensional_values;
+        diagnostics->design_build_additive_basis_sec +=
+          build_diagnostics.additive_basis_sec;
+        diagnostics->design_build_additive_alloc_sec +=
+          build_diagnostics.additive_alloc_sec;
+        diagnostics->design_build_additive_x_pack_sec +=
+          build_diagnostics.additive_x_pack_sec;
+        diagnostics->design_build_additive_p_build_sec +=
+          build_diagnostics.additive_p_build_sec;
+        diagnostics->design_build_additive_p_pack_sec +=
+          build_diagnostics.additive_p_pack_sec;
+        diagnostics->design_build_additive_component_count +=
+          build_diagnostics.additive_component_count;
+        diagnostics->design_build_additive_basis_cols +=
+          build_diagnostics.additive_basis_cols;
+        diagnostics->design_build_additive_values +=
+          build_diagnostics.additive_values;
         diagnostics->design_build_tensor_basis_sec +=
           build_diagnostics.tensor_basis_sec;
         diagnostics->design_build_tensor_alloc_sec +=

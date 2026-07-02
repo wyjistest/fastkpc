@@ -444,6 +444,36 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_design_build_additive_count,
       Rcpp::Named("residual_design_build_tensor_count") =
         diagnostics.residual_design_build_tensor_count,
+      Rcpp::Named("residual_design_build_one_dimensional_basis_sec") =
+        diagnostics.residual_design_build_one_dimensional_basis_sec,
+      Rcpp::Named("residual_design_build_one_dimensional_alloc_sec") =
+        diagnostics.residual_design_build_one_dimensional_alloc_sec,
+      Rcpp::Named("residual_design_build_one_dimensional_x_pack_sec") =
+        diagnostics.residual_design_build_one_dimensional_x_pack_sec,
+      Rcpp::Named("residual_design_build_one_dimensional_p_build_sec") =
+        diagnostics.residual_design_build_one_dimensional_p_build_sec,
+      Rcpp::Named("residual_design_build_one_dimensional_p_pack_sec") =
+        diagnostics.residual_design_build_one_dimensional_p_pack_sec,
+      Rcpp::Named("residual_design_build_one_dimensional_cols") =
+        diagnostics.residual_design_build_one_dimensional_cols,
+      Rcpp::Named("residual_design_build_one_dimensional_values") =
+        diagnostics.residual_design_build_one_dimensional_values,
+      Rcpp::Named("residual_design_build_additive_basis_sec") =
+        diagnostics.residual_design_build_additive_basis_sec,
+      Rcpp::Named("residual_design_build_additive_alloc_sec") =
+        diagnostics.residual_design_build_additive_alloc_sec,
+      Rcpp::Named("residual_design_build_additive_x_pack_sec") =
+        diagnostics.residual_design_build_additive_x_pack_sec,
+      Rcpp::Named("residual_design_build_additive_p_build_sec") =
+        diagnostics.residual_design_build_additive_p_build_sec,
+      Rcpp::Named("residual_design_build_additive_p_pack_sec") =
+        diagnostics.residual_design_build_additive_p_pack_sec,
+      Rcpp::Named("residual_design_build_additive_component_count") =
+        diagnostics.residual_design_build_additive_component_count,
+      Rcpp::Named("residual_design_build_additive_basis_cols") =
+        diagnostics.residual_design_build_additive_basis_cols,
+      Rcpp::Named("residual_design_build_additive_values") =
+        diagnostics.residual_design_build_additive_values,
       Rcpp::Named("residual_design_build_tensor_basis_sec") =
         diagnostics.residual_design_build_tensor_basis_sec,
       Rcpp::Named("residual_design_build_tensor_alloc_sec") =
@@ -1116,6 +1146,36 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.design_build_additive_count,
     Rcpp::Named("design_build_tensor_count") =
       diagnostics.design_build_tensor_count,
+    Rcpp::Named("design_build_one_dimensional_basis_sec") =
+      diagnostics.design_build_one_dimensional_basis_sec,
+    Rcpp::Named("design_build_one_dimensional_alloc_sec") =
+      diagnostics.design_build_one_dimensional_alloc_sec,
+    Rcpp::Named("design_build_one_dimensional_x_pack_sec") =
+      diagnostics.design_build_one_dimensional_x_pack_sec,
+    Rcpp::Named("design_build_one_dimensional_p_build_sec") =
+      diagnostics.design_build_one_dimensional_p_build_sec,
+    Rcpp::Named("design_build_one_dimensional_p_pack_sec") =
+      diagnostics.design_build_one_dimensional_p_pack_sec,
+    Rcpp::Named("design_build_one_dimensional_cols") =
+      diagnostics.design_build_one_dimensional_cols,
+    Rcpp::Named("design_build_one_dimensional_values") =
+      diagnostics.design_build_one_dimensional_values,
+    Rcpp::Named("design_build_additive_basis_sec") =
+      diagnostics.design_build_additive_basis_sec,
+    Rcpp::Named("design_build_additive_alloc_sec") =
+      diagnostics.design_build_additive_alloc_sec,
+    Rcpp::Named("design_build_additive_x_pack_sec") =
+      diagnostics.design_build_additive_x_pack_sec,
+    Rcpp::Named("design_build_additive_p_build_sec") =
+      diagnostics.design_build_additive_p_build_sec,
+    Rcpp::Named("design_build_additive_p_pack_sec") =
+      diagnostics.design_build_additive_p_pack_sec,
+    Rcpp::Named("design_build_additive_component_count") =
+      diagnostics.design_build_additive_component_count,
+    Rcpp::Named("design_build_additive_basis_cols") =
+      diagnostics.design_build_additive_basis_cols,
+    Rcpp::Named("design_build_additive_values") =
+      diagnostics.design_build_additive_values,
     Rcpp::Named("design_build_tensor_basis_sec") =
       diagnostics.design_build_tensor_basis_sec,
     Rcpp::Named("design_build_tensor_alloc_sec") =

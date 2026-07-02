@@ -318,6 +318,21 @@ required_design_build_fields <- c(
   "residual_design_build_1d_count",
   "residual_design_build_additive_count",
   "residual_design_build_tensor_count",
+  "residual_design_build_1d_basis_ms",
+  "residual_design_build_1d_alloc_ms",
+  "residual_design_build_1d_x_pack_ms",
+  "residual_design_build_1d_p_build_ms",
+  "residual_design_build_1d_p_pack_ms",
+  "residual_design_build_1d_cols",
+  "residual_design_build_1d_values",
+  "residual_design_build_additive_basis_ms",
+  "residual_design_build_additive_alloc_ms",
+  "residual_design_build_additive_x_pack_ms",
+  "residual_design_build_additive_p_build_ms",
+  "residual_design_build_additive_p_pack_ms",
+  "residual_design_build_additive_component_count",
+  "residual_design_build_additive_basis_cols",
+  "residual_design_build_additive_values",
   "residual_design_build_tensor_basis_ms",
   "residual_design_build_tensor_alloc_ms",
   "residual_design_build_tensor_x_pack_ms",
@@ -356,6 +371,38 @@ assert_true(runs$residual_design_build_finite_check_ms[[1L]] >= 0,
             "stage breakdown should time residual design finite checks")
 assert_true(runs$residual_design_build_finite_check_values[[1L]] > 0L,
             "stage breakdown should count residual design finite-check values")
+assert_true(runs$residual_design_build_1d_count[[1L]] > 0L,
+            "stage breakdown should count one-dimensional residual design builds")
+assert_true(runs$residual_design_build_1d_cols[[1L]] > 0L,
+            "stage breakdown should count one-dimensional residual design columns")
+assert_true(runs$residual_design_build_1d_values[[1L]] > 0L,
+            "stage breakdown should count one-dimensional residual design values")
+assert_true(runs$residual_design_build_1d_basis_ms[[1L]] >= 0,
+            "stage breakdown should time one-dimensional residual basis lookup/build")
+assert_true(runs$residual_design_build_1d_alloc_ms[[1L]] >= 0,
+            "stage breakdown should time one-dimensional residual allocation")
+assert_true(runs$residual_design_build_1d_x_pack_ms[[1L]] >= 0,
+            "stage breakdown should time one-dimensional residual X packing")
+assert_true(runs$residual_design_build_1d_p_build_ms[[1L]] >= 0,
+            "stage breakdown should time one-dimensional residual penalty construction")
+assert_true(runs$residual_design_build_1d_p_pack_ms[[1L]] >= 0,
+            "stage breakdown should time one-dimensional residual penalty packing")
+assert_true(runs$residual_design_build_additive_component_count[[1L]] >= 0L,
+            "stage breakdown should expose additive residual components")
+assert_true(runs$residual_design_build_additive_basis_cols[[1L]] >= 0L,
+            "stage breakdown should expose additive residual basis columns")
+assert_true(runs$residual_design_build_additive_values[[1L]] >= 0L,
+            "stage breakdown should expose additive residual design values")
+assert_true(runs$residual_design_build_additive_basis_ms[[1L]] >= 0,
+            "stage breakdown should time additive residual basis lookup/build")
+assert_true(runs$residual_design_build_additive_alloc_ms[[1L]] >= 0,
+            "stage breakdown should time additive residual allocation")
+assert_true(runs$residual_design_build_additive_x_pack_ms[[1L]] >= 0,
+            "stage breakdown should time additive residual X packing")
+assert_true(runs$residual_design_build_additive_p_build_ms[[1L]] >= 0,
+            "stage breakdown should time additive residual penalty construction")
+assert_true(runs$residual_design_build_additive_p_pack_ms[[1L]] >= 0,
+            "stage breakdown should time additive residual penalty packing")
 assert_true(runs$residual_design_build_tensor_count[[1L]] >= 0L,
             "stage breakdown should expose tensor residual design builds")
 assert_true(runs$residual_design_build_tensor_cols[[1L]] >= 0L,
