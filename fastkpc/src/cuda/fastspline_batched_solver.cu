@@ -674,75 +674,19 @@ __global__ void batched_copy_xty_to_beta_kernel(const double* Xty,
   }
 }
 
-__global__ void small_p_cholesky_rhs_solve_kernel(
-  const double* factors,
+__global__ void batched_copy_xty_to_beta_all_candidates_kernel(
   const double* Xty,
-  const int* factor_index,
-  const int* active,
   int group_size,
+  int lambda_count,
   int p,
-  double* beta,
-  int* info) {
-  const int fit = blockIdx.x * blockDim.x + threadIdx.x;
-  if (fit >= group_size) return;
-  if (active != nullptr && active[fit] == 0) {
-    if (info != nullptr) info[fit] = 0;
-    for (int row = 0; row < p; ++row) {
-      beta[static_cast<std::size_t>(fit) * p + row] = 0.0;
-    }
-    return;
+  double* beta) {
+  const int total = group_size * lambda_count * p;
+  const int fit_values = group_size * p;
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+       idx < total;
+       idx += gridDim.x * blockDim.x) {
+    beta[idx] = Xty[idx % fit_values];
   }
-
-  double work[kSmallPRhsMaxDesignCols];
-  const int factor = factor_index == nullptr ? fit : factor_index[fit];
-  const std::size_t beta_base = static_cast<std::size_t>(fit) * p;
-  const std::size_t factor_base = static_cast<std::size_t>(factor) * p * p;
-  for (int row = 0; row < p; ++row) {
-    work[row] = Xty[beta_base + row];
-  }
-
-  int solve_info = 0;
-  for (int row = 0; row < p; ++row) {
-    double value = work[row];
-    for (int col = 0; col < row; ++col) {
-      value -= factors[factor_base + static_cast<std::size_t>(row) * p + col] *
-        work[col];
-    }
-    const double diag =
-      factors[factor_base + static_cast<std::size_t>(row) * p + row];
-    if (!isfinite(diag) || fabs(diag) <= 1e-14) {
-      solve_info = row + 1;
-      break;
-    }
-    work[row] = value / diag;
-  }
-
-  if (solve_info == 0) {
-    for (int row = p - 1; row >= 0; --row) {
-      double value = work[row];
-      for (int col = row + 1; col < p; ++col) {
-        value -= factors[factor_base + static_cast<std::size_t>(col) * p + row] *
-          work[col];
-      }
-      const double diag =
-        factors[factor_base + static_cast<std::size_t>(row) * p + row];
-      if (!isfinite(diag) || fabs(diag) <= 1e-14) {
-        solve_info = row + 1;
-        break;
-      }
-      work[row] = value / diag;
-    }
-  }
-
-  if (solve_info != 0) {
-    if (info != nullptr) info[fit] = solve_info;
-    return;
-  }
-
-  for (int row = 0; row < p; ++row) {
-    beta[beta_base + row] = work[row];
-  }
-  if (info != nullptr) info[fit] = 0;
 }
 
 __global__ void small_p_cholesky_rhs_solve_selected_kernel(
@@ -859,19 +803,21 @@ __device__ int solve_small_p_cholesky_rhs_local(const double* factors,
   return 0;
 }
 
-__global__ void make_request_lambda_matrix_pointer_array(
+__global__ void make_request_all_lambda_matrix_pointer_array(
   double* base,
   const int* design_index,
   int group_size,
   int design_count,
-  int lambda_index,
+  int lambda_count,
   int p,
   double** ptrs) {
-  const int fit = blockIdx.x * blockDim.x + threadIdx.x;
-  if (fit >= group_size) return;
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= group_size * lambda_count) return;
+  const int fit = idx % group_size;
+  const int lambda_index = idx / group_size;
   const int design = design_index[fit];
   const int factor = lambda_index * design_count + design;
-  ptrs[fit] = base + static_cast<std::size_t>(factor) * p * p;
+  ptrs[idx] = base + static_cast<std::size_t>(factor) * p * p;
 }
 
 __global__ void make_selected_matrix_pointer_array(
@@ -982,33 +928,36 @@ __global__ void batched_y_norm2_kernel(const double* y,
   if (threadIdx.x == 0) y_norm2[fit] = scratch[0];
 }
 
-__global__ void batched_algebraic_rss_edf_kernel(const double* y_norm2,
-                                                 const double* Xty,
-                                                 const double* XtX,
-                                                 const double* beta,
-                                                 const double* Ainv,
-                                                 const int* info,
-                                                 const int* active,
-                                                 const int* design_index,
-                                                 int design_count,
-                                                 int lambda_index,
-                                                 int group_size,
-                                                 int p,
-                                                 double* rss,
-                                                 double* edf,
-                                                 FastSplineScoreMetadata* metadata,
-                                                 int* clamp_count) {
+__global__ void batched_algebraic_rss_edf_all_lambda_kernel(
+  const double* y_norm2,
+  const double* Xty,
+  const double* XtX,
+  const double* beta,
+  const double* Ainv,
+  const int* info,
+  const int* active,
+  const int* design_index,
+  int design_count,
+  int lambda_count,
+  int group_size,
+  int p,
+  double* rss,
+  double* edf,
+  FastSplineScoreMetadata* metadata,
+  int* clamp_count) {
   __shared__ double scratch_rss[kBlock];
   __shared__ double scratch_edf[kBlock];
   const int fit = blockIdx.x;
-  if (fit >= group_size) return;
-  const std::size_t metadata_index =
+  const int lambda_index = blockIdx.y;
+  if (fit >= group_size || lambda_index >= lambda_count) return;
+  const std::size_t candidate_index =
     static_cast<std::size_t>(lambda_index) * group_size + fit;
+  const std::size_t metadata_index = candidate_index;
   if (active[fit] == 0) {
     if (threadIdx.x == 0) {
       rss[fit] = nan("");
       edf[fit] = nan("");
-      metadata[metadata_index].info = info[fit];
+      metadata[metadata_index].info = info[candidate_index];
       metadata[metadata_index].pad0 = 0;
       metadata[metadata_index].rss = nan("");
       metadata[metadata_index].edf = nan("");
@@ -1023,13 +972,14 @@ __global__ void batched_algebraic_rss_edf_kernel(const double* y_norm2,
   const int design = design_index[fit];
   const int factor = lambda_index * design_count + design;
   const std::size_t fit_vec_base = static_cast<std::size_t>(fit) * p;
+  const std::size_t candidate_vec_base = candidate_index * p;
   for (int col = threadIdx.x; col < p; col += blockDim.x) {
-    const double beta_col = beta[fit_vec_base + col];
+    const double beta_col = beta[candidate_vec_base + col];
     rss_acc += -2.0 * beta_col * Xty[fit_vec_base + col];
     for (int row = 0; row < p; ++row) {
       rss_acc += beta_col *
         XtX[colmajor_square_offset(design, row, col, p)] *
-        beta[fit_vec_base + row];
+        beta[candidate_vec_base + row];
     }
   }
 
@@ -1060,7 +1010,7 @@ __global__ void batched_algebraic_rss_edf_kernel(const double* y_norm2,
     }
     edf[fit] = scratch_edf[0];
     rss[fit] = value;
-    metadata[metadata_index].info = info[fit];
+    metadata[metadata_index].info = info[candidate_index];
     metadata[metadata_index].pad0 = 0;
     metadata[metadata_index].rss = value;
     metadata[metadata_index].edf = scratch_edf[0];
@@ -1315,12 +1265,14 @@ TrueBatchArenaCounts compute_arena_counts(std::size_t x_size,
                                           std::size_t y_size,
                                           int group_size,
                                           std::size_t vec_size,
+                                          std::size_t beta_size,
                                           std::size_t factor_pp_size,
                                           std::size_t candidate_pp_size,
                                           int lambda_count,
                                           int selected_capacity,
                                           int info_count,
                                           int candidate_factor_count,
+                                          int rhs_batch_count,
                                           bool need_fitted) {
   TrueBatchArenaCounts counts;
   const std::size_t group_count = static_cast<std::size_t>(group_size);
@@ -1331,6 +1283,8 @@ TrueBatchArenaCounts compute_arena_counts(std::size_t x_size,
   const std::size_t info_count_size = static_cast<std::size_t>(info_count);
   const std::size_t candidate_factor_count_size =
     static_cast<std::size_t>(candidate_factor_count);
+  const std::size_t rhs_batch_count_size =
+    static_cast<std::size_t>(rhs_batch_count);
 
   counts.double_count =
     x_size +
@@ -1342,7 +1296,7 @@ TrueBatchArenaCounts compute_arena_counts(std::size_t x_size,
     group_count +
     factor_pp_size +
     candidate_pp_size +
-    vec_size +
+    beta_size +
     candidate_pp_size +
     (need_fitted ? y_size : static_cast<std::size_t>(0)) +
     y_size +
@@ -1358,9 +1312,9 @@ TrueBatchArenaCounts compute_arena_counts(std::size_t x_size,
     static_cast<std::size_t>(1) +
     arena_storage_count<int, FastSplineSelectedFitDescriptor>(group_count);
   counts.ptr_count =
-    group_count +
+    rhs_batch_count_size +
     static_cast<std::size_t>(std::max(group_size, candidate_factor_count)) +
-    group_count +
+    rhs_batch_count_size +
     candidate_factor_count_size;
   counts.score_metadata_count = group_count * lambda_count_size;
   return counts;
@@ -1381,12 +1335,14 @@ void assign_group_buffer_slices(DeviceGroupBuffers* buffers,
                                 std::size_t y_size,
                                 int group_size,
                                 std::size_t vec_size,
+                                std::size_t beta_size,
                                 std::size_t factor_pp_size,
                                 std::size_t candidate_pp_size,
                                 int lambda_count,
                                 int selected_capacity,
                                 int info_count,
                                 int candidate_factor_count,
+                                int rhs_batch_count,
                                 bool need_fitted) {
   const std::size_t group_count = static_cast<std::size_t>(group_size);
   const std::size_t selected_count =
@@ -1396,6 +1352,8 @@ void assign_group_buffer_slices(DeviceGroupBuffers* buffers,
   const std::size_t info_count_size = static_cast<std::size_t>(info_count);
   const std::size_t candidate_factor_count_size =
     static_cast<std::size_t>(candidate_factor_count);
+  const std::size_t rhs_batch_count_size =
+    static_cast<std::size_t>(rhs_batch_count);
   buffers->double_arena.used = 0;
   buffers->int_arena.used = 0;
   buffers->ptr_arena.used = 0;
@@ -1432,9 +1390,9 @@ void assign_group_buffer_slices(DeviceGroupBuffers* buffers,
                                     candidate_pp_size,
                                     "batched design A");
   buffers->d_design_A_capacity = candidate_pp_size;
-  buffers->d_beta = carve_arena(&buffers->double_arena, vec_size,
+  buffers->d_beta = carve_arena(&buffers->double_arena, beta_size,
                                 "batched beta");
-  buffers->d_beta_capacity = vec_size;
+  buffers->d_beta_capacity = beta_size;
   buffers->d_Ainv = nullptr;
   buffers->d_Ainv_capacity = 0;
   buffers->d_design_Ainv = carve_arena(&buffers->double_arena,
@@ -1475,9 +1433,9 @@ void assign_group_buffer_slices(DeviceGroupBuffers* buffers,
                 "algebraic rss clamp count");
   buffers->d_algebraic_rss_clamp_count_capacity = 1;
 
-  buffers->d_A_ptrs = carve_arena(&buffers->ptr_arena, group_count,
+  buffers->d_A_ptrs = carve_arena(&buffers->ptr_arena, rhs_batch_count_size,
                                   "batched A ptrs");
-  buffers->d_A_ptrs_capacity = group_count;
+  buffers->d_A_ptrs_capacity = rhs_batch_count_size;
   buffers->d_design_A_ptrs =
     carve_arena(&buffers->ptr_arena,
                 static_cast<std::size_t>(
@@ -1485,9 +1443,10 @@ void assign_group_buffer_slices(DeviceGroupBuffers* buffers,
                 "batched design A ptrs");
   buffers->d_design_A_ptrs_capacity =
     static_cast<std::size_t>(std::max(group_size, candidate_factor_count));
-  buffers->d_beta_ptrs = carve_arena(&buffers->ptr_arena, group_count,
+  buffers->d_beta_ptrs = carve_arena(&buffers->ptr_arena,
+                                     rhs_batch_count_size,
                                      "batched beta ptrs");
-  buffers->d_beta_ptrs_capacity = group_count;
+  buffers->d_beta_ptrs_capacity = rhs_batch_count_size;
   buffers->d_design_Ainv_ptrs =
     carve_arena(&buffers->ptr_arena, candidate_factor_count_size,
                 "batched design inverse ptrs");
@@ -1560,19 +1519,22 @@ void ensure_group_buffers(DeviceGroupBuffers* buffers,
                           std::size_t y_size,
                           int group_size,
                           std::size_t vec_size,
+                          std::size_t beta_size,
                           std::size_t factor_pp_size,
                           std::size_t candidate_pp_size,
                           int lambda_count,
                           int selected_capacity,
                           int info_count,
                           int candidate_factor_count,
+                          int rhs_batch_count,
                           bool need_fitted,
                           FastSplineCudaBatchDiagnostics* timing) {
   const TrueBatchArenaCounts counts =
     compute_arena_counts(x_size, design_x_size, design_pp_size, y_size,
-                         group_size, vec_size, factor_pp_size,
+                         group_size, vec_size, beta_size, factor_pp_size,
                          candidate_pp_size, lambda_count, selected_capacity,
-                         info_count, candidate_factor_count, need_fitted);
+                         info_count, candidate_factor_count, rhs_batch_count,
+                         need_fitted);
   ensure_arena_capacity(&buffers->double_arena, counts.double_count,
                         "alloc batched double workspace slab", timing);
   ensure_arena_capacity(&buffers->int_arena, counts.int_count,
@@ -1584,54 +1546,17 @@ void ensure_group_buffers(DeviceGroupBuffers* buffers,
                         "alloc batched score metadata workspace slab",
                         timing);
   assign_group_buffer_slices(buffers, x_size, design_x_size, design_pp_size,
-                             y_size, group_size, vec_size, factor_pp_size,
+                             y_size, group_size, vec_size, beta_size,
+                             factor_pp_size,
                              candidate_pp_size, lambda_count,
                              selected_capacity, info_count,
-                             candidate_factor_count, need_fitted);
+                             candidate_factor_count, rhs_batch_count,
+                             need_fitted);
   if (timing != nullptr) {
     timing->workspace_slab_bytes =
       std::max(timing->workspace_slab_bytes, arena_total_bytes(*buffers));
   }
   ensure_handles(buffers, timing);
-}
-
-void solve_rhs_batched(DeviceGroupBuffers* buffers,
-                       int group_size,
-                       int p,
-                       std::size_t vec_size,
-                       double* factor_base,
-                       const int* factor_index,
-                       const int* active,
-                       const char* copy_stage,
-                       const char* launch_stage,
-                       const char* cusolver_stage,
-                       FastSplineCudaBatchDiagnostics* timing) {
-  const int beta_blocks = static_cast<int>(
-    (vec_size + kBlock - 1) / kBlock);
-  batched_copy_xty_to_beta_kernel<<<std::max(1, beta_blocks), kBlock>>>(
-    buffers->d_Xty, group_size, p, buffers->d_beta);
-  check_cuda(cudaGetLastError(), copy_stage);
-
-  if (p <= kSmallPRhsMaxDesignCols) {
-    check_cuda(cudaMemset(buffers->d_info, 0, sizeof(int) * group_size),
-               "zero small-p rhs info");
-    const int solve_blocks = (group_size + kBlock - 1) / kBlock;
-    small_p_cholesky_rhs_solve_kernel<<<std::max(1, solve_blocks), kBlock>>>(
-      factor_base, buffers->d_Xty, factor_index, active, group_size, p,
-      buffers->d_beta, buffers->d_info);
-    check_cuda(cudaGetLastError(), launch_stage);
-    check_cuda(cudaDeviceSynchronize(), "synchronize small-p RHS solve");
-    timing->rhs_custom_solve_count += group_size;
-    return;
-  }
-
-  timing->rhs_solve_fallback_count += group_size;
-  timing->rhs_cublas_solve_count += group_size;
-  check_cusolver(cusolverDnDpotrsBatched(
-    buffers->solver, CUBLAS_FILL_MODE_UPPER, p, 1, buffers->d_A_ptrs, p,
-    buffers->d_beta_ptrs, p, buffers->d_info, group_size),
-    cusolver_stage);
-  check_cuda(cudaDeviceSynchronize(), "synchronize batched RHS solve");
 }
 
 void solve_rhs_batched_selected(DeviceGroupBuffers* buffers,
@@ -1833,7 +1758,13 @@ TrueBatchGroupResult run_true_batched_group(
   const std::size_t factor_pp_size =
     static_cast<std::size_t>(group_size) * p * p;
   const std::size_t vec_size = static_cast<std::size_t>(group_size) * p;
-  const int info_count = std::max(group_size, candidate_factor_count);
+  const bool small_p_rhs = p <= kSmallPRhsMaxDesignCols;
+  const int rhs_batch_count =
+    small_p_rhs ? group_size : group_size * lambda_count;
+  const std::size_t beta_size =
+    static_cast<std::size_t>(rhs_batch_count) * p;
+  const int info_count =
+    std::max(rhs_batch_count, std::max(group_size, candidate_factor_count));
   timing->factor_cache_bytes += static_cast<double>(candidate_pp_size) *
     sizeof(double) * 2.0 + static_cast<double>(factor_pp_size) *
     sizeof(double) + static_cast<double>(design_pp_size) * sizeof(double);
@@ -1847,9 +1778,10 @@ TrueBatchGroupResult run_true_batched_group(
   try {
     stage = std::chrono::steady_clock::now();
     ensure_group_buffers(buffers, x_size, design_x_size, design_pp_size,
-                         y_size, group_size, vec_size, factor_pp_size,
+                         y_size, group_size, vec_size, beta_size,
+                         factor_pp_size,
                          candidate_pp_size, lambda_count, group_size,
-                         info_count, candidate_factor_count,
+                         info_count, candidate_factor_count, rhs_batch_count,
                          !residual_only, timing);
     timing->alloc_sec += elapsed_since(stage);
 
@@ -1911,8 +1843,15 @@ TrueBatchGroupResult run_true_batched_group(
     const int ptr_blocks = (group_size + kBlock - 1) / kBlock;
     const int candidate_ptr_blocks =
       (candidate_factor_count + kBlock - 1) / kBlock;
-    make_vector_pointer_array<<<std::max(1, ptr_blocks), kBlock>>>(
-      buffers->d_beta, group_size, p, buffers->d_beta_ptrs);
+    const int rhs_batch_blocks = (rhs_batch_count + kBlock - 1) / kBlock;
+    make_vector_pointer_array<<<std::max(1, rhs_batch_blocks), kBlock>>>(
+      buffers->d_beta, rhs_batch_count, p, buffers->d_beta_ptrs);
+    if (!small_p_rhs) {
+      make_request_all_lambda_matrix_pointer_array<<<
+        std::max(1, rhs_batch_blocks), kBlock>>>(
+          buffers->d_design_A, buffers->d_request_design_index, group_size,
+          design_count, lambda_count, p, buffers->d_A_ptrs);
+    }
     make_matrix_pointer_array<<<std::max(1, candidate_ptr_blocks), kBlock>>>(
       buffers->d_design_A, candidate_factor_count, p,
       buffers->d_design_A_ptrs);
@@ -2008,51 +1947,51 @@ TrueBatchGroupResult run_true_batched_group(
         timing->summary_group_batched_candidate_count += fused_candidates;
         timing->residual_summary_sec += elapsed_since(stage);
       } else {
-        for (int lambda_index = 0; lambda_index < lambda_count; ++lambda_index) {
-          stage = std::chrono::steady_clock::now();
-          make_request_lambda_matrix_pointer_array<<<std::max(1, ptr_blocks),
-                                                     kBlock>>>(
-            buffers->d_design_A, buffers->d_request_design_index, group_size,
-            design_count, lambda_index, p, buffers->d_A_ptrs);
-          check_cuda(cudaGetLastError(), "launch candidate pointer setup kernel");
-          check_cuda(cudaDeviceSynchronize(),
-                     "synchronize candidate pointer setup kernel");
-          timing->pointer_setup_sec += elapsed_since(stage);
+        stage = std::chrono::steady_clock::now();
+        const int beta_blocks = static_cast<int>(
+          (beta_size + kBlock - 1) / kBlock);
+        batched_copy_xty_to_beta_all_candidates_kernel<<<
+          std::max(1, beta_blocks), kBlock>>>(
+            buffers->d_Xty, group_size, lambda_count, p, buffers->d_beta);
+        check_cuda(cudaGetLastError(),
+                   "launch batched all-candidate beta copy kernel");
+        check_cuda(cudaMemset(buffers->d_info, 0,
+                              sizeof(int) * rhs_batch_count),
+                   "zero all-candidate rhs info");
+        check_cusolver(cusolverDnDpotrsBatched(
+          buffers->solver, CUBLAS_FILL_MODE_UPPER, p, 1, buffers->d_A_ptrs, p,
+          buffers->d_beta_ptrs, p, buffers->d_info, rhs_batch_count),
+          "batched all-candidate potrs beta");
+        check_cuda(cudaDeviceSynchronize(),
+                   "synchronize batched all-candidate RHS solve");
+        const double rhs_sec = elapsed_since(stage);
+        timing->factor_rhs_solve_sec += rhs_sec;
+        timing->factor_solve_sec += rhs_sec;
+        timing->rhs_cublas_solve_sec += rhs_sec;
+        timing->rhs_solve_count += rhs_batch_count;
+        timing->rhs_solve_api_calls += 1;
+        timing->rhs_target_solves += rhs_batch_count;
+        timing->rhs_cublas_solve_count += rhs_batch_count;
+        timing->rhs_solve_fallback_count += rhs_batch_count;
+        timing->candidate_rhs_materialized_solve_count += rhs_batch_count;
 
-          stage = std::chrono::steady_clock::now();
-          solve_rhs_batched(buffers, group_size, p, vec_size,
-                            buffers->d_design_A +
-                              static_cast<std::size_t>(lambda_index) *
-                                design_count * p * p,
-                            buffers->d_request_design_index, buffers->d_active,
-                            "launch batched beta copy kernel",
-                            "launch small-p candidate RHS solve kernel",
-                            "batched potrs beta", timing);
-          const double rhs_sec = elapsed_since(stage);
-          timing->factor_rhs_solve_sec += rhs_sec;
-          timing->factor_solve_sec += rhs_sec;
-          timing->rhs_cublas_solve_sec += rhs_sec;
-          timing->rhs_solve_count += group_size;
-          timing->rhs_solve_api_calls += 1;
-          timing->rhs_target_solves += group_size;
-          timing->candidate_rhs_materialized_solve_count += group_size;
-
-          stage = std::chrono::steady_clock::now();
-          batched_algebraic_rss_edf_kernel<<<group_size, kBlock>>>(
-            buffers->d_y_norm2, buffers->d_Xty, buffers->d_design_XtX,
-            buffers->d_beta, buffers->d_design_Ainv, buffers->d_info,
-            buffers->d_active, buffers->d_request_design_index, design_count,
-            lambda_index,
-            group_size, p, buffers->d_rss, buffers->d_edf,
-            buffers->d_score_metadata,
-            buffers->d_algebraic_rss_clamp_count);
-          check_cuda(cudaGetLastError(), "launch batched algebraic RSS kernels");
-          check_cuda(cudaDeviceSynchronize(),
-                     "synchronize batched solve candidate");
-          timing->algebraic_rss_count += group_size;
-          timing->summary_candidate_launch_count += 1;
-          timing->residual_summary_sec += elapsed_since(stage);
-        }
+        stage = std::chrono::steady_clock::now();
+        const dim3 all_lambda_grid(group_size, lambda_count);
+        batched_algebraic_rss_edf_all_lambda_kernel<<<all_lambda_grid,
+                                                      kBlock>>>(
+          buffers->d_y_norm2, buffers->d_Xty, buffers->d_design_XtX,
+          buffers->d_beta, buffers->d_design_Ainv, buffers->d_info,
+          buffers->d_active, buffers->d_request_design_index, design_count,
+          lambda_count,
+          group_size, p, buffers->d_rss, buffers->d_edf,
+          buffers->d_score_metadata,
+          buffers->d_algebraic_rss_clamp_count);
+        check_cuda(cudaGetLastError(), "launch batched algebraic RSS kernels");
+        check_cuda(cudaDeviceSynchronize(),
+                   "synchronize batched solve candidate");
+        timing->algebraic_rss_count += rhs_batch_count;
+        timing->summary_candidate_launch_count += 1;
+        timing->residual_summary_sec += elapsed_since(stage);
       }
 
       std::vector<FastSplineScoreMetadata> score_metadata(
