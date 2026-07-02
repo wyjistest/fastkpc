@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -453,7 +454,7 @@ std::vector<double> pack_group_design_x(const FastSplineBatchGroup& group) {
   const int p = group.design_cols;
   std::vector<double> out(static_cast<std::size_t>(design_count) * n * p);
   for (int design_index = 0; design_index < design_count; ++design_index) {
-    const FastSplineDesign& design = group.designs[design_index];
+    const FastSplineDesign& design = *group.designs[design_index];
     if (design.n != n || design.p != p) {
       throw std::runtime_error("fastSpline design batch X shape mismatch");
     }
@@ -468,7 +469,7 @@ std::vector<double> pack_group_design_p(const FastSplineBatchGroup& group) {
   const int p = group.design_cols;
   std::vector<double> out(static_cast<std::size_t>(design_count) * p * p);
   for (int design_index = 0; design_index < design_count; ++design_index) {
-    const FastSplineDesign& design = group.designs[design_index];
+    const FastSplineDesign& design = *group.designs[design_index];
     if (design.p != p || static_cast<int>(design.P.size()) != p * p) {
       throw std::runtime_error("fastSpline design batch penalty shape mismatch");
     }
@@ -1755,7 +1756,8 @@ void free_buffers(DeviceGroupBuffers* buffers) {
 
 struct FastSplineCudaWorkspace {
   DeviceGroupBuffers group_buffers;
-  std::map<FastSplineConditionKey, FastSplineDesign> design_cache;
+  std::map<FastSplineConditionKey,
+           std::shared_ptr<const FastSplineDesign> > design_cache;
   FastSplineBasisCache basis_cache;
   const double* design_cache_data_ptr = nullptr;
   int design_cache_nrow = 0;
@@ -2642,7 +2644,8 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
   const std::vector<std::vector<int> >& conditioning_sets,
   const FastSplineParams& params,
   FastSplineCudaBatchDiagnostics* diagnostics,
-  std::map<FastSplineConditionKey, FastSplineDesign>* run_design_cache,
+  std::map<FastSplineConditionKey,
+           std::shared_ptr<const FastSplineDesign> >* run_design_cache,
   FastSplineBasisCache* run_basis_cache) {
   const std::chrono::steady_clock::time_point grouping_start =
     std::chrono::steady_clock::now();
@@ -2651,8 +2654,10 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
   }
   std::vector<FastSplineBatchGroup> groups;
   std::map<FastSplineGroupKey, int> group_by_key;
-  std::map<FastSplineConditionKey, FastSplineDesign> local_design_cache;
-  std::map<FastSplineConditionKey, FastSplineDesign>* design_cache =
+  std::map<FastSplineConditionKey,
+           std::shared_ptr<const FastSplineDesign> > local_design_cache;
+  std::map<FastSplineConditionKey,
+           std::shared_ptr<const FastSplineDesign> >* design_cache =
     run_design_cache == nullptr ? &local_design_cache : run_design_cache;
   std::set<FastSplineConditionKey> grouping_design_keys;
   std::vector<std::map<FastSplineConditionKey, int> > group_design_by_key;
@@ -2677,7 +2682,8 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
     }
 
     substage = std::chrono::steady_clock::now();
-    std::map<FastSplineConditionKey, FastSplineDesign>::iterator design_it =
+    std::map<FastSplineConditionKey,
+             std::shared_ptr<const FastSplineDesign> >::iterator design_it =
       design_cache->find(exact_design_key);
     bool inserted_design = false;
     if (diagnostics != nullptr) {
@@ -2701,6 +2707,8 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
                                diagnostics == nullptr ?
                                  nullptr : &build_diagnostics,
                                run_basis_cache);
+      std::shared_ptr<const FastSplineDesign> design_ptr =
+        std::make_shared<FastSplineDesign>(std::move(design));
       if (diagnostics != nullptr) {
         diagnostics->grouping_design_build_sec += elapsed_since(substage);
         diagnostics->design_build_total_sec +=
@@ -2795,7 +2803,7 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
       }
       substage = std::chrono::steady_clock::now();
       design_it = design_cache->insert(
-        std::make_pair(exact_design_key, design)).first;
+        std::make_pair(exact_design_key, std::move(design_ptr))).first;
       inserted_design = true;
       if (diagnostics != nullptr) {
         const double elapsed = elapsed_since(substage);
@@ -2818,7 +2826,7 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
     request.design_index = -1;
 
     substage = std::chrono::steady_clock::now();
-    const FastSplineGroupKey key = structural_group_key(design_it->second, params);
+    const FastSplineGroupKey key = structural_group_key(*design_it->second, params);
     if (diagnostics != nullptr) {
       diagnostics->grouping_group_key_sec += elapsed_since(substage);
       diagnostics->structural_group_key_count += 1;
@@ -2834,8 +2842,8 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
       substage = std::chrono::steady_clock::now();
       FastSplineBatchGroup group;
       group.group_id = static_cast<int>(groups.size());
-      group.n = design_it->second.n;
-      group.design_cols = design_it->second.p;
+      group.n = design_it->second->n;
+      group.design_cols = design_it->second->p;
       groups.push_back(group);
       group_design_by_key.push_back(std::map<FastSplineConditionKey, int>());
       group_by_key[key] = group.group_id;
@@ -2868,9 +2876,9 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
         diagnostics->grouping_map_insert_sec += elapsed;
         diagnostics->grouping_group_design_copy_count += 1;
         diagnostics->grouping_group_design_x_values +=
-          static_cast<int>(design_it->second.X.size());
+          static_cast<int>(design_it->second->X.size());
         diagnostics->grouping_group_design_p_values +=
-          static_cast<int>(design_it->second.P.size());
+          static_cast<int>(design_it->second->P.size());
       }
       substage = std::chrono::steady_clock::now();
       designs_for_group[exact_design_key] = design_index;

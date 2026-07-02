@@ -4,6 +4,7 @@
 #include "fastspline_residual_cuda.hpp"
 
 #include <Rcpp.h>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -18,7 +19,7 @@ struct FastSplineBatchGroup {
   int group_id;
   int n;
   int design_cols;
-  std::vector<FastSplineDesign> designs;
+  std::vector<std::shared_ptr<const FastSplineDesign> > designs;
   std::vector<FastSplineBatchRequest> requests;
 };
 
