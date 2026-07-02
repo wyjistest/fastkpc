@@ -124,6 +124,14 @@ struct SchedulerDiagnostics {
   double residual_grouping_group_key_sec;
   double residual_grouping_design_build_sec;
   double residual_grouping_map_insert_sec;
+  double residual_grouping_design_cache_lookup_sec;
+  double residual_grouping_design_cache_insert_sec;
+  double residual_grouping_group_lookup_sec;
+  double residual_grouping_group_insert_sec;
+  double residual_grouping_group_design_lookup_sec;
+  double residual_grouping_group_design_copy_sec;
+  double residual_grouping_group_design_index_insert_sec;
+  double residual_grouping_request_insert_sec;
   double residual_grouping_unaccounted_sec;
   int residual_grouping_group_count;
   int residual_grouping_design_count;
@@ -133,6 +141,10 @@ struct SchedulerDiagnostics {
   int residual_structural_condition_key_count;
   int residual_string_group_key_count;
   int residual_string_condition_key_count;
+  int residual_grouping_group_design_copy_count;
+  int residual_grouping_group_design_x_values;
+  int residual_grouping_group_design_p_values;
+  int residual_grouping_request_insert_count;
   int residual_design_cache_hit_count;
   int residual_design_cache_miss_count;
   int residual_design_cache_insert_count;
@@ -144,6 +156,7 @@ struct SchedulerDiagnostics {
   double residual_design_build_p_pack_sec;
   double residual_design_build_alloc_sec;
   double residual_design_build_column_extract_sec;
+  double residual_design_build_finite_check_sec;
   double residual_design_build_unaccounted_sec;
   int residual_design_build_count;
   int residual_design_build_x_values;
@@ -151,6 +164,7 @@ struct SchedulerDiagnostics {
   int residual_design_build_basis_values;
   int residual_design_build_penalty_values;
   int residual_design_build_condition_cols;
+  int residual_design_build_finite_check_values;
   int residual_basis_cache_hit_count;
   int residual_basis_cache_miss_count;
   int residual_basis_cache_insert_count;

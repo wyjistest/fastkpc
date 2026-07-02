@@ -31,6 +31,7 @@ struct FastSplineDesignBuildDiagnostics {
   double p_pack_sec;
   double alloc_sec;
   double column_extract_sec;
+  double finite_check_sec;
   double unaccounted_sec;
   int build_count;
   int x_values;
@@ -38,6 +39,7 @@ struct FastSplineDesignBuildDiagnostics {
   int basis_values;
   int penalty_values;
   int condition_cols;
+  int finite_check_values;
   int basis_cache_hit_count;
   int basis_cache_miss_count;
   int basis_cache_insert_count;

@@ -519,6 +519,38 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       fastkpc_stage_breakdown_seconds(
         summary$residual_grouping_map_insert_sec
       ) * 1000,
+    residual_grouping_design_cache_lookup_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_design_cache_lookup_sec
+      ) * 1000,
+    residual_grouping_design_cache_insert_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_design_cache_insert_sec
+      ) * 1000,
+    residual_grouping_group_lookup_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_group_lookup_sec
+      ) * 1000,
+    residual_grouping_group_insert_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_group_insert_sec
+      ) * 1000,
+    residual_grouping_group_design_lookup_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_group_design_lookup_sec
+      ) * 1000,
+    residual_grouping_group_design_copy_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_group_design_copy_sec
+      ) * 1000,
+    residual_grouping_group_design_index_insert_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_group_design_index_insert_sec
+      ) * 1000,
+    residual_grouping_request_insert_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_grouping_request_insert_sec
+      ) * 1000,
     residual_grouping_unaccounted_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_grouping_unaccounted_sec
@@ -541,6 +573,14 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_string_group_key_count %||% 0L),
     residual_string_condition_key_count =
       as.integer(summary$residual_string_condition_key_count %||% 0L),
+    residual_grouping_group_design_copy_count =
+      as.integer(summary$residual_grouping_group_design_copy_count %||% 0L),
+    residual_grouping_group_design_x_values =
+      as.integer(summary$residual_grouping_group_design_x_values %||% 0L),
+    residual_grouping_group_design_p_values =
+      as.integer(summary$residual_grouping_group_design_p_values %||% 0L),
+    residual_grouping_request_insert_count =
+      as.integer(summary$residual_grouping_request_insert_count %||% 0L),
     residual_design_cache_hit_count =
       as.integer(summary$residual_design_cache_hit_count %||% 0L),
     residual_design_cache_miss_count =
@@ -577,6 +617,10 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       fastkpc_stage_breakdown_seconds(
         summary$residual_design_build_column_extract_sec
       ) * 1000,
+    residual_design_build_finite_check_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_design_build_finite_check_sec
+      ) * 1000,
     residual_design_build_unaccounted_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_design_build_unaccounted_sec
@@ -593,6 +637,8 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_design_build_penalty_values %||% 0L),
     residual_design_build_condition_cols =
       as.integer(summary$residual_design_build_condition_cols %||% 0L),
+    residual_design_build_finite_check_values =
+      as.integer(summary$residual_design_build_finite_check_values %||% 0L),
     residual_basis_cache_hit_count =
       as.integer(summary$residual_basis_cache_hit_count %||% 0L),
     residual_basis_cache_miss_count =

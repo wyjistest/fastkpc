@@ -47,6 +47,14 @@ struct FastSplineCudaBatchDiagnostics {
   double grouping_group_key_sec;
   double grouping_design_build_sec;
   double grouping_map_insert_sec;
+  double grouping_design_cache_lookup_sec;
+  double grouping_design_cache_insert_sec;
+  double grouping_group_lookup_sec;
+  double grouping_group_insert_sec;
+  double grouping_group_design_lookup_sec;
+  double grouping_group_design_copy_sec;
+  double grouping_group_design_index_insert_sec;
+  double grouping_request_insert_sec;
   double grouping_unaccounted_sec;
   int grouping_group_count;
   int grouping_design_count;
@@ -56,6 +64,10 @@ struct FastSplineCudaBatchDiagnostics {
   int structural_condition_key_count;
   int string_group_key_count;
   int string_condition_key_count;
+  int grouping_group_design_copy_count;
+  int grouping_group_design_x_values;
+  int grouping_group_design_p_values;
+  int grouping_request_insert_count;
   int design_cache_hit_count;
   int design_cache_miss_count;
   int design_cache_insert_count;
@@ -67,6 +79,7 @@ struct FastSplineCudaBatchDiagnostics {
   double design_build_p_pack_sec;
   double design_build_alloc_sec;
   double design_build_column_extract_sec;
+  double design_build_finite_check_sec;
   double design_build_unaccounted_sec;
   int design_build_count;
   int design_build_x_values;
@@ -74,6 +87,7 @@ struct FastSplineCudaBatchDiagnostics {
   int design_build_basis_values;
   int design_build_penalty_values;
   int design_build_condition_cols;
+  int design_build_finite_check_values;
   int basis_cache_hit_count;
   int basis_cache_miss_count;
   int basis_cache_insert_count;

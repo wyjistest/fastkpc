@@ -239,6 +239,49 @@ assert_true(runs$residual_grouping_group_count[[1L]] > 0L,
             "stage breakdown should count residual grouping groups")
 assert_true(runs$residual_grouping_design_count[[1L]] > 0L,
             "stage breakdown should count residual grouping unique designs")
+required_grouping_object_fields <- c(
+  "residual_grouping_design_cache_lookup_ms",
+  "residual_grouping_design_cache_insert_ms",
+  "residual_grouping_group_lookup_ms",
+  "residual_grouping_group_insert_ms",
+  "residual_grouping_group_design_lookup_ms",
+  "residual_grouping_group_design_copy_ms",
+  "residual_grouping_group_design_index_insert_ms",
+  "residual_grouping_request_insert_ms",
+  "residual_grouping_group_design_copy_count",
+  "residual_grouping_group_design_x_values",
+  "residual_grouping_group_design_p_values",
+  "residual_grouping_request_insert_count"
+)
+missing_grouping_object_fields <-
+  setdiff(required_grouping_object_fields, names(runs))
+assert_true(length(missing_grouping_object_fields) == 0L,
+            paste("stage breakdown should expose residual grouping object costs:",
+                  paste(missing_grouping_object_fields, collapse = ",")))
+assert_true(runs$residual_grouping_design_cache_lookup_ms[[1L]] >= 0,
+            "stage breakdown should time residual design-cache lookup")
+assert_true(runs$residual_grouping_design_cache_insert_ms[[1L]] >= 0,
+            "stage breakdown should time residual design-cache insert")
+assert_true(runs$residual_grouping_group_lookup_ms[[1L]] >= 0,
+            "stage breakdown should time residual group lookup")
+assert_true(runs$residual_grouping_group_insert_ms[[1L]] >= 0,
+            "stage breakdown should time residual group insert")
+assert_true(runs$residual_grouping_group_design_lookup_ms[[1L]] >= 0,
+            "stage breakdown should time residual group-design lookup")
+assert_true(runs$residual_grouping_group_design_copy_ms[[1L]] >= 0,
+            "stage breakdown should time residual group-design copy")
+assert_true(runs$residual_grouping_group_design_index_insert_ms[[1L]] >= 0,
+            "stage breakdown should time residual group-design index insert")
+assert_true(runs$residual_grouping_request_insert_ms[[1L]] >= 0,
+            "stage breakdown should time residual request insert")
+assert_true(runs$residual_grouping_group_design_copy_count[[1L]] > 0L,
+            "stage breakdown should count residual group-design copies")
+assert_true(runs$residual_grouping_group_design_x_values[[1L]] > 0L,
+            "stage breakdown should count copied residual group-design X values")
+assert_true(runs$residual_grouping_group_design_p_values[[1L]] > 0L,
+            "stage breakdown should count copied residual group-design P values")
+assert_true(runs$residual_grouping_request_insert_count[[1L]] > 0L,
+            "stage breakdown should count residual request inserts")
 assert_true("residual_design_cache_hit_count" %in% names(runs),
             "stage breakdown should expose residual design cache hits")
 assert_true("residual_design_cache_miss_count" %in% names(runs),
@@ -262,13 +305,15 @@ required_design_build_fields <- c(
   "residual_design_build_p_pack_ms",
   "residual_design_build_alloc_ms",
   "residual_design_build_column_extract_ms",
+  "residual_design_build_finite_check_ms",
   "residual_design_build_unaccounted_ms",
   "residual_design_build_count",
   "residual_design_build_x_values",
   "residual_design_build_p_values",
   "residual_design_build_basis_values",
   "residual_design_build_penalty_values",
-  "residual_design_build_condition_cols"
+  "residual_design_build_condition_cols",
+  "residual_design_build_finite_check_values"
 )
 missing_design_build_fields <-
   setdiff(required_design_build_fields, names(runs))
@@ -290,10 +335,15 @@ residual_design_build_accounted_ms <-
   runs$residual_design_build_p_pack_ms[[1L]] +
   runs$residual_design_build_alloc_ms[[1L]] +
   runs$residual_design_build_column_extract_ms[[1L]] +
+  runs$residual_design_build_finite_check_ms[[1L]] +
   runs$residual_design_build_unaccounted_ms[[1L]]
 assert_true(residual_design_build_accounted_ms <=
               runs$residual_design_build_total_ms[[1L]] + 1e-6,
             "residual design build split should not exceed total")
+assert_true(runs$residual_design_build_finite_check_ms[[1L]] >= 0,
+            "stage breakdown should time residual design finite checks")
+assert_true(runs$residual_design_build_finite_check_values[[1L]] > 0L,
+            "stage breakdown should count residual design finite-check values")
 required_basis_cache_fields <- c(
   "residual_basis_cache_hit_count",
   "residual_basis_cache_miss_count",

@@ -137,6 +137,19 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->grouping_group_key_sec += value.grouping_group_key_sec;
   out->grouping_design_build_sec += value.grouping_design_build_sec;
   out->grouping_map_insert_sec += value.grouping_map_insert_sec;
+  out->grouping_design_cache_lookup_sec +=
+    value.grouping_design_cache_lookup_sec;
+  out->grouping_design_cache_insert_sec +=
+    value.grouping_design_cache_insert_sec;
+  out->grouping_group_lookup_sec += value.grouping_group_lookup_sec;
+  out->grouping_group_insert_sec += value.grouping_group_insert_sec;
+  out->grouping_group_design_lookup_sec +=
+    value.grouping_group_design_lookup_sec;
+  out->grouping_group_design_copy_sec +=
+    value.grouping_group_design_copy_sec;
+  out->grouping_group_design_index_insert_sec +=
+    value.grouping_group_design_index_insert_sec;
+  out->grouping_request_insert_sec += value.grouping_request_insert_sec;
   out->grouping_unaccounted_sec += value.grouping_unaccounted_sec;
   out->grouping_group_count += value.grouping_group_count;
   out->grouping_design_count += value.grouping_design_count;
@@ -147,6 +160,13 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->structural_condition_key_count += value.structural_condition_key_count;
   out->string_group_key_count += value.string_group_key_count;
   out->string_condition_key_count += value.string_condition_key_count;
+  out->grouping_group_design_copy_count +=
+    value.grouping_group_design_copy_count;
+  out->grouping_group_design_x_values +=
+    value.grouping_group_design_x_values;
+  out->grouping_group_design_p_values +=
+    value.grouping_group_design_p_values;
+  out->grouping_request_insert_count += value.grouping_request_insert_count;
   out->design_cache_hit_count += value.design_cache_hit_count;
   out->design_cache_miss_count += value.design_cache_miss_count;
   out->design_cache_insert_count += value.design_cache_insert_count;
@@ -160,6 +180,7 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->design_build_alloc_sec += value.design_build_alloc_sec;
   out->design_build_column_extract_sec +=
     value.design_build_column_extract_sec;
+  out->design_build_finite_check_sec += value.design_build_finite_check_sec;
   out->design_build_unaccounted_sec += value.design_build_unaccounted_sec;
   out->design_build_count += value.design_build_count;
   out->design_build_x_values += value.design_build_x_values;
@@ -167,6 +188,8 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->design_build_basis_values += value.design_build_basis_values;
   out->design_build_penalty_values += value.design_build_penalty_values;
   out->design_build_condition_cols += value.design_build_condition_cols;
+  out->design_build_finite_check_values +=
+    value.design_build_finite_check_values;
   out->basis_cache_hit_count += value.basis_cache_hit_count;
   out->basis_cache_miss_count += value.basis_cache_miss_count;
   out->basis_cache_insert_count += value.basis_cache_insert_count;
@@ -2408,6 +2431,14 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.grouping_group_key_sec = 0.0;
   out.grouping_design_build_sec = 0.0;
   out.grouping_map_insert_sec = 0.0;
+  out.grouping_design_cache_lookup_sec = 0.0;
+  out.grouping_design_cache_insert_sec = 0.0;
+  out.grouping_group_lookup_sec = 0.0;
+  out.grouping_group_insert_sec = 0.0;
+  out.grouping_group_design_lookup_sec = 0.0;
+  out.grouping_group_design_copy_sec = 0.0;
+  out.grouping_group_design_index_insert_sec = 0.0;
+  out.grouping_request_insert_sec = 0.0;
   out.grouping_unaccounted_sec = 0.0;
   out.grouping_group_count = 0;
   out.grouping_design_count = 0;
@@ -2417,6 +2448,10 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.structural_condition_key_count = 0;
   out.string_group_key_count = 0;
   out.string_condition_key_count = 0;
+  out.grouping_group_design_copy_count = 0;
+  out.grouping_group_design_x_values = 0;
+  out.grouping_group_design_p_values = 0;
+  out.grouping_request_insert_count = 0;
   out.design_cache_hit_count = 0;
   out.design_cache_miss_count = 0;
   out.design_cache_insert_count = 0;
@@ -2428,6 +2463,7 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.design_build_p_pack_sec = 0.0;
   out.design_build_alloc_sec = 0.0;
   out.design_build_column_extract_sec = 0.0;
+  out.design_build_finite_check_sec = 0.0;
   out.design_build_unaccounted_sec = 0.0;
   out.design_build_count = 0;
   out.design_build_x_values = 0;
@@ -2435,6 +2471,7 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.design_build_basis_values = 0;
   out.design_build_penalty_values = 0;
   out.design_build_condition_cols = 0;
+  out.design_build_finite_check_values = 0;
   out.basis_cache_hit_count = 0;
   out.basis_cache_miss_count = 0;
   out.basis_cache_insert_count = 0;
@@ -2644,6 +2681,11 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
       design_cache->find(exact_design_key);
     bool inserted_design = false;
     if (diagnostics != nullptr) {
+      const double elapsed = elapsed_since(substage);
+      diagnostics->grouping_design_cache_lookup_sec += elapsed;
+      diagnostics->grouping_map_insert_sec += elapsed;
+    }
+    if (diagnostics != nullptr) {
       if (design_it == design_cache->end()) {
         diagnostics->design_cache_miss_count += 1;
       } else {
@@ -2651,9 +2693,6 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
       }
     }
     if (design_it == design_cache->end()) {
-      if (diagnostics != nullptr) {
-        diagnostics->grouping_map_insert_sec += elapsed_since(substage);
-      }
       substage = std::chrono::steady_clock::now();
       FastSplineDesignBuildDiagnostics build_diagnostics =
         make_empty_fastspline_design_build_diagnostics();
@@ -2678,6 +2717,8 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
           build_diagnostics.alloc_sec;
         diagnostics->design_build_column_extract_sec +=
           build_diagnostics.column_extract_sec;
+        diagnostics->design_build_finite_check_sec +=
+          build_diagnostics.finite_check_sec;
         diagnostics->design_build_unaccounted_sec +=
           build_diagnostics.unaccounted_sec;
         diagnostics->design_build_count +=
@@ -2692,6 +2733,8 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
           build_diagnostics.penalty_values;
         diagnostics->design_build_condition_cols +=
           build_diagnostics.condition_cols;
+        diagnostics->design_build_finite_check_values +=
+          build_diagnostics.finite_check_values;
         diagnostics->basis_cache_hit_count +=
           build_diagnostics.basis_cache_hit_count;
         diagnostics->basis_cache_miss_count +=
@@ -2754,9 +2797,13 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
       design_it = design_cache->insert(
         std::make_pair(exact_design_key, design)).first;
       inserted_design = true;
+      if (diagnostics != nullptr) {
+        const double elapsed = elapsed_since(substage);
+        diagnostics->grouping_design_cache_insert_sec += elapsed;
+        diagnostics->grouping_map_insert_sec += elapsed;
+      }
     }
     if (diagnostics != nullptr) {
-      diagnostics->grouping_map_insert_sec += elapsed_since(substage);
       if (inserted_design) {
         diagnostics->design_cache_insert_count += 1;
       }
@@ -2778,7 +2825,13 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
     }
     substage = std::chrono::steady_clock::now();
     std::map<FastSplineGroupKey, int>::iterator it = group_by_key.find(key);
+    if (diagnostics != nullptr) {
+      const double elapsed = elapsed_since(substage);
+      diagnostics->grouping_group_lookup_sec += elapsed;
+      diagnostics->grouping_map_insert_sec += elapsed;
+    }
     if (it == group_by_key.end()) {
+      substage = std::chrono::steady_clock::now();
       FastSplineBatchGroup group;
       group.group_id = static_cast<int>(groups.size());
       group.n = design_it->second.n;
@@ -2787,24 +2840,56 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
       group_design_by_key.push_back(std::map<FastSplineConditionKey, int>());
       group_by_key[key] = group.group_id;
       it = group_by_key.find(key);
-      if (diagnostics != nullptr) diagnostics->grouping_group_count += 1;
+      if (diagnostics != nullptr) {
+        const double elapsed = elapsed_since(substage);
+        diagnostics->grouping_group_insert_sec += elapsed;
+        diagnostics->grouping_map_insert_sec += elapsed;
+        diagnostics->grouping_group_count += 1;
+      }
     }
     FastSplineBatchGroup& group = groups[it->second];
     std::map<FastSplineConditionKey, int>& designs_for_group =
       group_design_by_key[it->second];
+    substage = std::chrono::steady_clock::now();
     std::map<FastSplineConditionKey, int>::iterator group_design_it =
       designs_for_group.find(exact_design_key);
+    if (diagnostics != nullptr) {
+      const double elapsed = elapsed_since(substage);
+      diagnostics->grouping_group_design_lookup_sec += elapsed;
+      diagnostics->grouping_map_insert_sec += elapsed;
+    }
     if (group_design_it == designs_for_group.end()) {
       const int design_index = static_cast<int>(group.designs.size());
+      substage = std::chrono::steady_clock::now();
       group.designs.push_back(design_it->second);
+      if (diagnostics != nullptr) {
+        const double elapsed = elapsed_since(substage);
+        diagnostics->grouping_group_design_copy_sec += elapsed;
+        diagnostics->grouping_map_insert_sec += elapsed;
+        diagnostics->grouping_group_design_copy_count += 1;
+        diagnostics->grouping_group_design_x_values +=
+          static_cast<int>(design_it->second.X.size());
+        diagnostics->grouping_group_design_p_values +=
+          static_cast<int>(design_it->second.P.size());
+      }
+      substage = std::chrono::steady_clock::now();
       designs_for_group[exact_design_key] = design_index;
+      if (diagnostics != nullptr) {
+        const double elapsed = elapsed_since(substage);
+        diagnostics->grouping_group_design_index_insert_sec += elapsed;
+        diagnostics->grouping_map_insert_sec += elapsed;
+      }
       request.design_index = design_index;
     } else {
       request.design_index = group_design_it->second;
     }
+    substage = std::chrono::steady_clock::now();
     groups[it->second].requests.push_back(request);
     if (diagnostics != nullptr) {
-      diagnostics->grouping_map_insert_sec += elapsed_since(substage);
+      const double elapsed = elapsed_since(substage);
+      diagnostics->grouping_request_insert_sec += elapsed;
+      diagnostics->grouping_map_insert_sec += elapsed;
+      diagnostics->grouping_request_insert_count += 1;
     }
   }
   if (diagnostics != nullptr) {

@@ -429,6 +429,7 @@ FastSplineDesignBuildDiagnostics make_empty_fastspline_design_build_diagnostics(
   out.p_pack_sec = 0.0;
   out.alloc_sec = 0.0;
   out.column_extract_sec = 0.0;
+  out.finite_check_sec = 0.0;
   out.unaccounted_sec = 0.0;
   out.build_count = 0;
   out.x_values = 0;
@@ -436,6 +437,7 @@ FastSplineDesignBuildDiagnostics make_empty_fastspline_design_build_diagnostics(
   out.basis_values = 0;
   out.penalty_values = 0;
   out.condition_cols = 0;
+  out.finite_check_values = 0;
   out.basis_cache_hit_count = 0;
   out.basis_cache_miss_count = 0;
   out.basis_cache_insert_count = 0;
@@ -708,15 +710,23 @@ FastSplineDesign make_fastspline_design(const Rcpp::NumericMatrix& data,
   const std::chrono::steady_clock::time_point total_start =
     design_timing_start(diagnostics);
   if (diagnostics != nullptr) diagnostics->build_count += 1;
-  if (!finite_values(std::vector<double>(data.begin(), data.end()))) {
+  std::chrono::steady_clock::time_point stage =
+    design_timing_start(diagnostics);
+  const std::vector<double> finite_check_values(data.begin(), data.end());
+  const bool finite = finite_values(finite_check_values);
+  if (diagnostics != nullptr) {
+    add_elapsed(&diagnostics->finite_check_sec, diagnostics, stage);
+    diagnostics->finite_check_values +=
+      static_cast<int>(finite_check_values.size());
+  }
+  if (!finite) {
     throw std::runtime_error("fastSpline design data contains non-finite values");
   }
   FastSplineDesign design;
   if (conditioning_set.empty()) {
     design.n = data.nrow();
     design.p = 1;
-    std::chrono::steady_clock::time_point stage =
-      design_timing_start(diagnostics);
+    stage = design_timing_start(diagnostics);
     design.X.assign(static_cast<std::size_t>(design.n), 1.0);
     design.P.assign(1, 0.0);
     if (diagnostics != nullptr) {
@@ -743,7 +753,8 @@ FastSplineDesign make_fastspline_design(const Rcpp::NumericMatrix& data,
       diagnostics->x_pack_sec +
       diagnostics->p_pack_sec +
       diagnostics->alloc_sec +
-      diagnostics->column_extract_sec;
+      diagnostics->column_extract_sec +
+      diagnostics->finite_check_sec;
     diagnostics->unaccounted_sec += nonnegative_gap(total, accounted);
   }
   return design;

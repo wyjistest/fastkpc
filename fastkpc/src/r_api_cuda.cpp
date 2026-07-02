@@ -354,6 +354,22 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_grouping_design_build_sec,
       Rcpp::Named("residual_grouping_map_insert_sec") =
         diagnostics.residual_grouping_map_insert_sec,
+      Rcpp::Named("residual_grouping_design_cache_lookup_sec") =
+        diagnostics.residual_grouping_design_cache_lookup_sec,
+      Rcpp::Named("residual_grouping_design_cache_insert_sec") =
+        diagnostics.residual_grouping_design_cache_insert_sec,
+      Rcpp::Named("residual_grouping_group_lookup_sec") =
+        diagnostics.residual_grouping_group_lookup_sec,
+      Rcpp::Named("residual_grouping_group_insert_sec") =
+        diagnostics.residual_grouping_group_insert_sec,
+      Rcpp::Named("residual_grouping_group_design_lookup_sec") =
+        diagnostics.residual_grouping_group_design_lookup_sec,
+      Rcpp::Named("residual_grouping_group_design_copy_sec") =
+        diagnostics.residual_grouping_group_design_copy_sec,
+      Rcpp::Named("residual_grouping_group_design_index_insert_sec") =
+        diagnostics.residual_grouping_group_design_index_insert_sec,
+      Rcpp::Named("residual_grouping_request_insert_sec") =
+        diagnostics.residual_grouping_request_insert_sec,
       Rcpp::Named("residual_grouping_unaccounted_sec") =
         diagnostics.residual_grouping_unaccounted_sec,
       Rcpp::Named("residual_grouping_group_count") =
@@ -372,6 +388,14 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_string_group_key_count,
       Rcpp::Named("residual_string_condition_key_count") =
         diagnostics.residual_string_condition_key_count,
+      Rcpp::Named("residual_grouping_group_design_copy_count") =
+        diagnostics.residual_grouping_group_design_copy_count,
+      Rcpp::Named("residual_grouping_group_design_x_values") =
+        diagnostics.residual_grouping_group_design_x_values,
+      Rcpp::Named("residual_grouping_group_design_p_values") =
+        diagnostics.residual_grouping_group_design_p_values,
+      Rcpp::Named("residual_grouping_request_insert_count") =
+        diagnostics.residual_grouping_request_insert_count,
       Rcpp::Named("residual_design_cache_hit_count") =
         diagnostics.residual_design_cache_hit_count,
       Rcpp::Named("residual_design_cache_miss_count") =
@@ -394,6 +418,8 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_design_build_alloc_sec,
       Rcpp::Named("residual_design_build_column_extract_sec") =
         diagnostics.residual_design_build_column_extract_sec,
+      Rcpp::Named("residual_design_build_finite_check_sec") =
+        diagnostics.residual_design_build_finite_check_sec,
       Rcpp::Named("residual_design_build_unaccounted_sec") =
         diagnostics.residual_design_build_unaccounted_sec,
       Rcpp::Named("residual_design_build_count") =
@@ -408,6 +434,8 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_design_build_penalty_values,
       Rcpp::Named("residual_design_build_condition_cols") =
         diagnostics.residual_design_build_condition_cols,
+      Rcpp::Named("residual_design_build_finite_check_values") =
+        diagnostics.residual_design_build_finite_check_values,
       Rcpp::Named("residual_basis_cache_hit_count") =
         diagnostics.residual_basis_cache_hit_count,
       Rcpp::Named("residual_basis_cache_miss_count") =
@@ -974,6 +1002,22 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.grouping_design_build_sec,
     Rcpp::Named("grouping_map_insert_sec") =
       diagnostics.grouping_map_insert_sec,
+    Rcpp::Named("grouping_design_cache_lookup_sec") =
+      diagnostics.grouping_design_cache_lookup_sec,
+    Rcpp::Named("grouping_design_cache_insert_sec") =
+      diagnostics.grouping_design_cache_insert_sec,
+    Rcpp::Named("grouping_group_lookup_sec") =
+      diagnostics.grouping_group_lookup_sec,
+    Rcpp::Named("grouping_group_insert_sec") =
+      diagnostics.grouping_group_insert_sec,
+    Rcpp::Named("grouping_group_design_lookup_sec") =
+      diagnostics.grouping_group_design_lookup_sec,
+    Rcpp::Named("grouping_group_design_copy_sec") =
+      diagnostics.grouping_group_design_copy_sec,
+    Rcpp::Named("grouping_group_design_index_insert_sec") =
+      diagnostics.grouping_group_design_index_insert_sec,
+    Rcpp::Named("grouping_request_insert_sec") =
+      diagnostics.grouping_request_insert_sec,
     Rcpp::Named("grouping_unaccounted_sec") =
       diagnostics.grouping_unaccounted_sec,
     Rcpp::Named("grouping_group_count") =
@@ -992,6 +1036,14 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.string_group_key_count,
     Rcpp::Named("string_condition_key_count") =
       diagnostics.string_condition_key_count,
+    Rcpp::Named("grouping_group_design_copy_count") =
+      diagnostics.grouping_group_design_copy_count,
+    Rcpp::Named("grouping_group_design_x_values") =
+      diagnostics.grouping_group_design_x_values,
+    Rcpp::Named("grouping_group_design_p_values") =
+      diagnostics.grouping_group_design_p_values,
+    Rcpp::Named("grouping_request_insert_count") =
+      diagnostics.grouping_request_insert_count,
     Rcpp::Named("design_cache_hit_count") =
       diagnostics.design_cache_hit_count,
     Rcpp::Named("design_cache_miss_count") =
@@ -1014,6 +1066,8 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.design_build_alloc_sec,
     Rcpp::Named("design_build_column_extract_sec") =
       diagnostics.design_build_column_extract_sec,
+    Rcpp::Named("design_build_finite_check_sec") =
+      diagnostics.design_build_finite_check_sec,
     Rcpp::Named("design_build_unaccounted_sec") =
       diagnostics.design_build_unaccounted_sec,
     Rcpp::Named("design_build_count") =
@@ -1028,6 +1082,8 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.design_build_penalty_values,
     Rcpp::Named("design_build_condition_cols") =
       diagnostics.design_build_condition_cols,
+    Rcpp::Named("design_build_finite_check_values") =
+      diagnostics.design_build_finite_check_values,
     Rcpp::Named("basis_cache_hit_count") =
       diagnostics.basis_cache_hit_count,
     Rcpp::Named("basis_cache_miss_count") =

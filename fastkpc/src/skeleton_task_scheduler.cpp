@@ -195,6 +195,14 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_grouping_group_key_sec = 0.0;
   out.residual_grouping_design_build_sec = 0.0;
   out.residual_grouping_map_insert_sec = 0.0;
+  out.residual_grouping_design_cache_lookup_sec = 0.0;
+  out.residual_grouping_design_cache_insert_sec = 0.0;
+  out.residual_grouping_group_lookup_sec = 0.0;
+  out.residual_grouping_group_insert_sec = 0.0;
+  out.residual_grouping_group_design_lookup_sec = 0.0;
+  out.residual_grouping_group_design_copy_sec = 0.0;
+  out.residual_grouping_group_design_index_insert_sec = 0.0;
+  out.residual_grouping_request_insert_sec = 0.0;
   out.residual_grouping_unaccounted_sec = 0.0;
   out.residual_grouping_group_count = 0;
   out.residual_grouping_design_count = 0;
@@ -204,6 +212,10 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_structural_condition_key_count = 0;
   out.residual_string_group_key_count = 0;
   out.residual_string_condition_key_count = 0;
+  out.residual_grouping_group_design_copy_count = 0;
+  out.residual_grouping_group_design_x_values = 0;
+  out.residual_grouping_group_design_p_values = 0;
+  out.residual_grouping_request_insert_count = 0;
   out.residual_design_cache_hit_count = 0;
   out.residual_design_cache_miss_count = 0;
   out.residual_design_cache_insert_count = 0;
@@ -215,6 +227,7 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_design_build_p_pack_sec = 0.0;
   out.residual_design_build_alloc_sec = 0.0;
   out.residual_design_build_column_extract_sec = 0.0;
+  out.residual_design_build_finite_check_sec = 0.0;
   out.residual_design_build_unaccounted_sec = 0.0;
   out.residual_design_build_count = 0;
   out.residual_design_build_x_values = 0;
@@ -222,6 +235,7 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_design_build_basis_values = 0;
   out.residual_design_build_penalty_values = 0;
   out.residual_design_build_condition_cols = 0;
+  out.residual_design_build_finite_check_values = 0;
   out.residual_basis_cache_hit_count = 0;
   out.residual_basis_cache_miss_count = 0;
   out.residual_basis_cache_insert_count = 0;

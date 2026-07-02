@@ -265,6 +265,22 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.grouping_design_build_sec;
         diagnostics->residual_grouping_map_insert_sec +=
           batch_result.diagnostics.grouping_map_insert_sec;
+        diagnostics->residual_grouping_design_cache_lookup_sec +=
+          batch_result.diagnostics.grouping_design_cache_lookup_sec;
+        diagnostics->residual_grouping_design_cache_insert_sec +=
+          batch_result.diagnostics.grouping_design_cache_insert_sec;
+        diagnostics->residual_grouping_group_lookup_sec +=
+          batch_result.diagnostics.grouping_group_lookup_sec;
+        diagnostics->residual_grouping_group_insert_sec +=
+          batch_result.diagnostics.grouping_group_insert_sec;
+        diagnostics->residual_grouping_group_design_lookup_sec +=
+          batch_result.diagnostics.grouping_group_design_lookup_sec;
+        diagnostics->residual_grouping_group_design_copy_sec +=
+          batch_result.diagnostics.grouping_group_design_copy_sec;
+        diagnostics->residual_grouping_group_design_index_insert_sec +=
+          batch_result.diagnostics.grouping_group_design_index_insert_sec;
+        diagnostics->residual_grouping_request_insert_sec +=
+          batch_result.diagnostics.grouping_request_insert_sec;
         diagnostics->residual_grouping_unaccounted_sec +=
           batch_result.diagnostics.grouping_unaccounted_sec;
         diagnostics->residual_grouping_group_count +=
@@ -283,6 +299,14 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.string_group_key_count;
         diagnostics->residual_string_condition_key_count +=
           batch_result.diagnostics.string_condition_key_count;
+        diagnostics->residual_grouping_group_design_copy_count +=
+          batch_result.diagnostics.grouping_group_design_copy_count;
+        diagnostics->residual_grouping_group_design_x_values +=
+          batch_result.diagnostics.grouping_group_design_x_values;
+        diagnostics->residual_grouping_group_design_p_values +=
+          batch_result.diagnostics.grouping_group_design_p_values;
+        diagnostics->residual_grouping_request_insert_count +=
+          batch_result.diagnostics.grouping_request_insert_count;
         diagnostics->residual_design_cache_hit_count +=
           batch_result.diagnostics.design_cache_hit_count;
         diagnostics->residual_design_cache_miss_count +=
@@ -306,6 +330,8 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.design_build_alloc_sec;
         diagnostics->residual_design_build_column_extract_sec +=
           batch_result.diagnostics.design_build_column_extract_sec;
+        diagnostics->residual_design_build_finite_check_sec +=
+          batch_result.diagnostics.design_build_finite_check_sec;
         diagnostics->residual_design_build_unaccounted_sec +=
           batch_result.diagnostics.design_build_unaccounted_sec;
         diagnostics->residual_design_build_count +=
@@ -320,6 +346,8 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.design_build_penalty_values;
         diagnostics->residual_design_build_condition_cols +=
           batch_result.diagnostics.design_build_condition_cols;
+        diagnostics->residual_design_build_finite_check_values +=
+          batch_result.diagnostics.design_build_finite_check_values;
         diagnostics->residual_basis_cache_hit_count +=
           batch_result.diagnostics.basis_cache_hit_count;
         diagnostics->residual_basis_cache_miss_count +=
