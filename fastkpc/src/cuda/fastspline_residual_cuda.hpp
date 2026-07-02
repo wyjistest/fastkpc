@@ -199,6 +199,13 @@ struct FastSplineCudaBatchDiagnostics {
   int summary_candidate_launch_count;
   int summary_group_batched_launch_count;
   int summary_group_batched_candidate_count;
+  double edf_trace_shadow_sec;
+  int edf_trace_shadow_count;
+  int edf_trace_mode_full_inverse_count;
+  int edf_trace_mode_shadow_count;
+  int edf_trace_winner_flip_count;
+  double edf_trace_max_abs_diff;
+  double edf_trace_max_rel_diff;
   int winning_factor_reuse_count;
   int factor_cache_hits;
   int factor_cache_misses;

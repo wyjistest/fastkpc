@@ -139,6 +139,33 @@ assert_true(runs$residual_selected_rhs_materialized_solve_count[[1L]] > 0L,
             "stage breakdown should keep selected RHS materialization")
 assert_true(runs$residual_candidate_beta_values_avoided[[1L]] > 0L,
             "stage breakdown should record avoided candidate beta values")
+required_edf_shadow_fields <- c(
+  "residual_edf_trace_shadow_ms",
+  "residual_edf_trace_shadow_count",
+  "residual_edf_trace_mode_full_inverse_count",
+  "residual_edf_trace_mode_shadow_count",
+  "residual_edf_trace_winner_flip_count",
+  "residual_edf_trace_max_abs_diff",
+  "residual_edf_trace_max_rel_diff"
+)
+missing_edf_shadow_fields <- setdiff(required_edf_shadow_fields, names(runs))
+assert_true(length(missing_edf_shadow_fields) == 0L,
+            paste("stage breakdown should expose EDF trace shadow diagnostics:",
+                  paste(missing_edf_shadow_fields, collapse = ",")))
+assert_true(runs$residual_edf_trace_mode_full_inverse_count[[1L]] > 0L,
+            "stage breakdown should count default full-inverse EDF candidates")
+assert_true(runs$residual_edf_trace_shadow_count[[1L]] >= 0L,
+            "stage breakdown should expose shadow EDF comparison count")
+assert_true(runs$residual_edf_trace_mode_shadow_count[[1L]] >= 0L,
+            "stage breakdown should expose shadow EDF mode count")
+assert_true(runs$residual_edf_trace_winner_flip_count[[1L]] >= 0L,
+            "stage breakdown should expose shadow EDF winner flips")
+assert_true(runs$residual_edf_trace_max_abs_diff[[1L]] >= 0,
+            "stage breakdown should expose shadow EDF max absolute error")
+assert_true(runs$residual_edf_trace_max_rel_diff[[1L]] >= 0,
+            "stage breakdown should expose shadow EDF max relative error")
+assert_true(runs$residual_edf_trace_shadow_ms[[1L]] >= 0,
+            "stage breakdown should time shadow EDF comparison")
 assert_true(runs$residual_rhs_cublas_solve_count[[1L]] == 0L,
             "stage breakdown should avoid cuBLAS RHS solves on small-p smoke run")
 assert_true(runs$residual_rhs_solve_fallback_count[[1L]] == 0L,

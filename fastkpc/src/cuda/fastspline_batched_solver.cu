@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -334,6 +335,16 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
     value.summary_group_batched_launch_count;
   out->summary_group_batched_candidate_count +=
     value.summary_group_batched_candidate_count;
+  out->edf_trace_shadow_sec += value.edf_trace_shadow_sec;
+  out->edf_trace_shadow_count += value.edf_trace_shadow_count;
+  out->edf_trace_mode_full_inverse_count +=
+    value.edf_trace_mode_full_inverse_count;
+  out->edf_trace_mode_shadow_count += value.edf_trace_mode_shadow_count;
+  out->edf_trace_winner_flip_count += value.edf_trace_winner_flip_count;
+  out->edf_trace_max_abs_diff =
+    std::max(out->edf_trace_max_abs_diff, value.edf_trace_max_abs_diff);
+  out->edf_trace_max_rel_diff =
+    std::max(out->edf_trace_max_rel_diff, value.edf_trace_max_rel_diff);
   out->winning_factor_reuse_count += value.winning_factor_reuse_count;
   out->factor_cache_hits += value.factor_cache_hits;
   out->factor_cache_misses += value.factor_cache_misses;
@@ -1726,10 +1737,156 @@ struct BestFitState {
   std::vector<double> residuals;
 };
 
+struct ShadowBestState {
+  bool found = false;
+  double gcv = std::numeric_limits<double>::infinity();
+  double lambda = std::numeric_limits<double>::quiet_NaN();
+};
+
 struct TrueBatchGroupResult {
   std::vector<FastSplineCudaFit> full_fits;
   std::vector<FastSplineCudaResidualOnlyFit> residual_only_fits;
 };
+
+bool edf_trace_shadow_enabled() {
+  const char* value = std::getenv("FASTKPC_FASTSPLINE_EDF_TRACE_SHADOW");
+  if (value == nullptr) return false;
+  const std::string text(value);
+  return text == "1" || text == "true" || text == "TRUE" ||
+    text == "yes" || text == "YES";
+}
+
+double edf_trace_from_upper_cholesky(const double* xtx,
+                                     const double* upper,
+                                     int p) {
+  std::vector<double> y(p, 0.0);
+  std::vector<double> z(p, 0.0);
+  double edf = 0.0;
+  for (int rhs = 0; rhs < p; ++rhs) {
+    std::fill(y.begin(), y.end(), 0.0);
+    std::fill(z.begin(), z.end(), 0.0);
+    for (int row = 0; row < p; ++row) {
+      double value = row == rhs ? 1.0 : 0.0;
+      for (int col = 0; col < row; ++col) {
+        value -= upper[colmajor_square_offset(0, col, row, p)] * y[col];
+      }
+      const double diag = upper[colmajor_square_offset(0, row, row, p)];
+      if (!std::isfinite(diag) || std::abs(diag) <= 1e-14) {
+        return std::numeric_limits<double>::quiet_NaN();
+      }
+      y[row] = value / diag;
+    }
+    for (int row = p - 1; row >= 0; --row) {
+      double value = y[row];
+      for (int col = row + 1; col < p; ++col) {
+        value -= upper[colmajor_square_offset(0, row, col, p)] * z[col];
+      }
+      const double diag = upper[colmajor_square_offset(0, row, row, p)];
+      if (!std::isfinite(diag) || std::abs(diag) <= 1e-14) {
+        return std::numeric_limits<double>::quiet_NaN();
+      }
+      z[row] = value / diag;
+    }
+    for (int col = 0; col < p; ++col) {
+      edf += xtx[colmajor_square_offset(0, rhs, col, p)] * z[col];
+    }
+  }
+  return edf;
+}
+
+void compare_shadow_edf_trace(
+    DeviceGroupBuffers* buffers,
+    int design_count,
+    int lambda_count,
+    int group_size,
+    int n,
+    int p,
+    const std::vector<int>& active,
+    const std::vector<int>& host_design_index,
+    const std::vector<double>& lambdas,
+    const std::vector<FastSplineScoreMetadata>& score_metadata,
+    const std::vector<BestFitState>& full_ridge_best,
+    std::size_t design_pp_size,
+    std::size_t candidate_pp_size,
+    FastSplineCudaBatchDiagnostics* timing) {
+  if (!edf_trace_shadow_enabled()) return;
+  const std::chrono::steady_clock::time_point stage =
+    std::chrono::steady_clock::now();
+  std::vector<double> host_design_xtx(design_pp_size);
+  std::vector<double> host_candidate_factor(candidate_pp_size);
+  check_cuda(cudaMemcpy(host_design_xtx.data(), buffers->d_design_XtX,
+                        sizeof(double) * design_pp_size,
+                        cudaMemcpyDeviceToHost),
+             "copy shadow EDF design XtX");
+  check_cuda(cudaMemcpy(host_candidate_factor.data(), buffers->d_design_A,
+                        sizeof(double) * candidate_pp_size,
+                        cudaMemcpyDeviceToHost),
+             "copy shadow EDF Cholesky factors");
+
+  std::vector<ShadowBestState> shadow_best(group_size);
+  int compared = 0;
+  int winner_flips = 0;
+  double max_abs_diff = 0.0;
+  double max_rel_diff = 0.0;
+  for (int lambda_index = 0; lambda_index < lambda_count; ++lambda_index) {
+    const double lambda = lambdas[lambda_index];
+    const std::size_t lambda_offset =
+      static_cast<std::size_t>(lambda_index) * group_size;
+    for (int fit = 0; fit < group_size; ++fit) {
+      if (active[fit] == 0) continue;
+      const FastSplineScoreMetadata& meta =
+        score_metadata[lambda_offset + fit];
+      if (meta.info != 0 || !std::isfinite(meta.rss) ||
+          !std::isfinite(meta.edf)) {
+        continue;
+      }
+      const int design = host_design_index[fit];
+      const int factor = lambda_index * design_count + design;
+      const double shadow_edf = edf_trace_from_upper_cholesky(
+        host_design_xtx.data() + static_cast<std::size_t>(design) * p * p,
+        host_candidate_factor.data() +
+          static_cast<std::size_t>(factor) * p * p,
+        p);
+      if (!std::isfinite(shadow_edf)) continue;
+      const double abs_diff = std::abs(shadow_edf - meta.edf);
+      const double rel_diff = abs_diff / std::max(1.0, std::abs(meta.edf));
+      max_abs_diff = std::max(max_abs_diff, abs_diff);
+      max_rel_diff = std::max(max_rel_diff, rel_diff);
+      ++compared;
+
+      const double denom = static_cast<double>(n) - shadow_edf;
+      if (denom <= 1e-8) continue;
+      const double gcv = static_cast<double>(n) * meta.rss / (denom * denom);
+      if (!std::isfinite(gcv)) continue;
+      if (!shadow_best[fit].found || gcv < shadow_best[fit].gcv ||
+          (std::abs(gcv - shadow_best[fit].gcv) <= 1e-14 &&
+           lambda < shadow_best[fit].lambda)) {
+        shadow_best[fit].found = true;
+        shadow_best[fit].gcv = gcv;
+        shadow_best[fit].lambda = lambda;
+      }
+    }
+  }
+
+  for (int fit = 0; fit < group_size; ++fit) {
+    if (active[fit] == 0) continue;
+    if (full_ridge_best[fit].found != shadow_best[fit].found) {
+      ++winner_flips;
+    } else if (full_ridge_best[fit].found &&
+               full_ridge_best[fit].lambda != shadow_best[fit].lambda) {
+      ++winner_flips;
+    }
+  }
+
+  timing->edf_trace_shadow_sec += elapsed_since(stage);
+  timing->edf_trace_shadow_count += compared;
+  timing->edf_trace_mode_shadow_count += compared;
+  timing->edf_trace_winner_flip_count += winner_flips;
+  timing->edf_trace_max_abs_diff =
+    std::max(timing->edf_trace_max_abs_diff, max_abs_diff);
+  timing->edf_trace_max_rel_diff =
+    std::max(timing->edf_trace_max_rel_diff, max_rel_diff);
+}
 
 TrueBatchGroupResult run_true_batched_group(
   const Rcpp::NumericMatrix& data,
@@ -1964,6 +2121,7 @@ TrueBatchGroupResult run_true_batched_group(
         timing->candidate_rhs_fused_solve_count += fused_candidates;
         timing->candidate_beta_values_avoided += fused_candidates * p;
         timing->algebraic_rss_count += fused_candidates;
+        timing->edf_trace_mode_full_inverse_count += fused_candidates;
         timing->summary_group_batched_launch_count += 1;
         timing->summary_group_batched_candidate_count += fused_candidates;
         timing->residual_summary_sec += elapsed_since(stage);
@@ -2011,6 +2169,7 @@ TrueBatchGroupResult run_true_batched_group(
         check_cuda(cudaDeviceSynchronize(),
                    "synchronize batched solve candidate");
         timing->algebraic_rss_count += rhs_batch_count;
+        timing->edf_trace_mode_full_inverse_count += rhs_batch_count;
         timing->summary_candidate_launch_count += 1;
         timing->residual_summary_sec += elapsed_since(stage);
       }
@@ -2065,6 +2224,11 @@ TrueBatchGroupResult run_true_batched_group(
         }
       }
       timing->host_select_sec += elapsed_since(stage);
+      compare_shadow_edf_trace(buffers, design_count, lambda_count,
+                               group_size, n, p, active,
+                               host_design_index, lambdas, score_metadata,
+                               ridge_best, design_pp_size, candidate_pp_size,
+                               timing);
 
       bool any_active = false;
       for (int fit = 0; fit < group_size; ++fit) {
@@ -2545,6 +2709,13 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.summary_candidate_launch_count = 0;
   out.summary_group_batched_launch_count = 0;
   out.summary_group_batched_candidate_count = 0;
+  out.edf_trace_shadow_sec = 0.0;
+  out.edf_trace_shadow_count = 0;
+  out.edf_trace_mode_full_inverse_count = 0;
+  out.edf_trace_mode_shadow_count = 0;
+  out.edf_trace_winner_flip_count = 0;
+  out.edf_trace_max_abs_diff = 0.0;
+  out.edf_trace_max_rel_diff = 0.0;
   out.winning_factor_reuse_count = 0;
   out.factor_cache_hits = 0;
   out.factor_cache_misses = 0;

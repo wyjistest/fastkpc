@@ -199,6 +199,11 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
     row("residual_summary_kernel",
         fastkpc_stage_breakdown_seconds(summary$residual_summary_sec),
         "residual"),
+    row("residual_edf_trace_shadow",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_edf_trace_shadow_sec
+        ),
+        "residual"),
     row("residual_d2h",
         fastkpc_stage_breakdown_seconds(summary$residual_d2h_sec),
         "residual"),
@@ -406,6 +411,24 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(
         summary$residual_summary_group_batched_candidate_count %||% 0L
       ),
+    residual_edf_trace_shadow_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_edf_trace_shadow_sec
+      ) * 1000,
+    residual_edf_trace_shadow_count =
+      as.integer(summary$residual_edf_trace_shadow_count %||% 0L),
+    residual_edf_trace_mode_full_inverse_count =
+      as.integer(
+        summary$residual_edf_trace_mode_full_inverse_count %||% 0L
+      ),
+    residual_edf_trace_mode_shadow_count =
+      as.integer(summary$residual_edf_trace_mode_shadow_count %||% 0L),
+    residual_edf_trace_winner_flip_count =
+      as.integer(summary$residual_edf_trace_winner_flip_count %||% 0L),
+    residual_edf_trace_max_abs_diff =
+      as.numeric(summary$residual_edf_trace_max_abs_diff %||% 0),
+    residual_edf_trace_max_rel_diff =
+      as.numeric(summary$residual_edf_trace_max_rel_diff %||% 0),
     residual_d2h_residuals_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_d2h_residuals_sec

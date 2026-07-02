@@ -347,6 +347,13 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_summary_candidate_launch_count = 0;
   out.residual_summary_group_batched_launch_count = 0;
   out.residual_summary_group_batched_candidate_count = 0;
+  out.residual_edf_trace_shadow_sec = 0.0;
+  out.residual_edf_trace_shadow_count = 0;
+  out.residual_edf_trace_mode_full_inverse_count = 0;
+  out.residual_edf_trace_mode_shadow_count = 0;
+  out.residual_edf_trace_winner_flip_count = 0;
+  out.residual_edf_trace_max_abs_diff = 0.0;
+  out.residual_edf_trace_max_rel_diff = 0.0;
   out.residual_winning_factor_reuse_count = 0;
   out.residual_factor_cache_hits = 0;
   out.residual_factor_cache_misses = 0;

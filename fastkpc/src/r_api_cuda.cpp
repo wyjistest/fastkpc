@@ -652,6 +652,20 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_summary_group_batched_launch_count,
       Rcpp::Named("residual_summary_group_batched_candidate_count") =
         diagnostics.residual_summary_group_batched_candidate_count,
+      Rcpp::Named("residual_edf_trace_shadow_sec") =
+        diagnostics.residual_edf_trace_shadow_sec,
+      Rcpp::Named("residual_edf_trace_shadow_count") =
+        diagnostics.residual_edf_trace_shadow_count,
+      Rcpp::Named("residual_edf_trace_mode_full_inverse_count") =
+        diagnostics.residual_edf_trace_mode_full_inverse_count,
+      Rcpp::Named("residual_edf_trace_mode_shadow_count") =
+        diagnostics.residual_edf_trace_mode_shadow_count,
+      Rcpp::Named("residual_edf_trace_winner_flip_count") =
+        diagnostics.residual_edf_trace_winner_flip_count,
+      Rcpp::Named("residual_edf_trace_max_abs_diff") =
+        diagnostics.residual_edf_trace_max_abs_diff,
+      Rcpp::Named("residual_edf_trace_max_rel_diff") =
+        diagnostics.residual_edf_trace_max_rel_diff,
       Rcpp::Named("residual_winning_factor_reuse_count") =
         diagnostics.residual_winning_factor_reuse_count,
       Rcpp::Named("residual_factor_cache_hits") =
@@ -1322,6 +1336,20 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.summary_group_batched_launch_count,
     Rcpp::Named("summary_group_batched_candidate_count") =
       diagnostics.summary_group_batched_candidate_count,
+    Rcpp::Named("edf_trace_shadow_sec") =
+      diagnostics.edf_trace_shadow_sec,
+    Rcpp::Named("edf_trace_shadow_count") =
+      diagnostics.edf_trace_shadow_count,
+    Rcpp::Named("edf_trace_mode_full_inverse_count") =
+      diagnostics.edf_trace_mode_full_inverse_count,
+    Rcpp::Named("edf_trace_mode_shadow_count") =
+      diagnostics.edf_trace_mode_shadow_count,
+    Rcpp::Named("edf_trace_winner_flip_count") =
+      diagnostics.edf_trace_winner_flip_count,
+    Rcpp::Named("edf_trace_max_abs_diff") =
+      diagnostics.edf_trace_max_abs_diff,
+    Rcpp::Named("edf_trace_max_rel_diff") =
+      diagnostics.edf_trace_max_rel_diff,
     Rcpp::Named("winning_factor_reuse_count") =
       diagnostics.winning_factor_reuse_count,
     Rcpp::Named("factor_cache_hits") = diagnostics.factor_cache_hits,
