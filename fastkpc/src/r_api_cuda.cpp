@@ -364,6 +364,14 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_grouping_condition_key_sort_count,
       Rcpp::Named("residual_grouping_string_key_count") =
         diagnostics.residual_grouping_string_key_count,
+      Rcpp::Named("residual_structural_group_key_count") =
+        diagnostics.residual_structural_group_key_count,
+      Rcpp::Named("residual_structural_condition_key_count") =
+        diagnostics.residual_structural_condition_key_count,
+      Rcpp::Named("residual_string_group_key_count") =
+        diagnostics.residual_string_group_key_count,
+      Rcpp::Named("residual_string_condition_key_count") =
+        diagnostics.residual_string_condition_key_count,
       Rcpp::Named("residual_design_cache_hit_count") =
         diagnostics.residual_design_cache_hit_count,
       Rcpp::Named("residual_design_cache_miss_count") =
@@ -976,6 +984,14 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.grouping_condition_key_sort_count,
     Rcpp::Named("grouping_string_key_count") =
       diagnostics.grouping_string_key_count,
+    Rcpp::Named("structural_group_key_count") =
+      diagnostics.structural_group_key_count,
+    Rcpp::Named("structural_condition_key_count") =
+      diagnostics.structural_condition_key_count,
+    Rcpp::Named("string_group_key_count") =
+      diagnostics.string_group_key_count,
+    Rcpp::Named("string_condition_key_count") =
+      diagnostics.string_condition_key_count,
     Rcpp::Named("design_cache_hit_count") =
       diagnostics.design_cache_hit_count,
     Rcpp::Named("design_cache_miss_count") =

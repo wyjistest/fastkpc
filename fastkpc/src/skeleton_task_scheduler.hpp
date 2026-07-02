@@ -129,6 +129,10 @@ struct SchedulerDiagnostics {
   int residual_grouping_design_count;
   int residual_grouping_condition_key_sort_count;
   int residual_grouping_string_key_count;
+  int residual_structural_group_key_count;
+  int residual_structural_condition_key_count;
+  int residual_string_group_key_count;
+  int residual_string_condition_key_count;
   int residual_design_cache_hit_count;
   int residual_design_cache_miss_count;
   int residual_design_cache_insert_count;

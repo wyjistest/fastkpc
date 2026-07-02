@@ -275,6 +275,14 @@ class CudaSkeletonResidualCache {
           batch_result.diagnostics.grouping_condition_key_sort_count;
         diagnostics->residual_grouping_string_key_count +=
           batch_result.diagnostics.grouping_string_key_count;
+        diagnostics->residual_structural_group_key_count +=
+          batch_result.diagnostics.structural_group_key_count;
+        diagnostics->residual_structural_condition_key_count +=
+          batch_result.diagnostics.structural_condition_key_count;
+        diagnostics->residual_string_group_key_count +=
+          batch_result.diagnostics.string_group_key_count;
+        diagnostics->residual_string_condition_key_count +=
+          batch_result.diagnostics.string_condition_key_count;
         diagnostics->residual_design_cache_hit_count +=
           batch_result.diagnostics.design_cache_hit_count;
         diagnostics->residual_design_cache_miss_count +=

@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -142,6 +143,10 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
   out->grouping_condition_key_sort_count +=
     value.grouping_condition_key_sort_count;
   out->grouping_string_key_count += value.grouping_string_key_count;
+  out->structural_group_key_count += value.structural_group_key_count;
+  out->structural_condition_key_count += value.structural_condition_key_count;
+  out->string_group_key_count += value.string_group_key_count;
+  out->string_condition_key_count += value.string_condition_key_count;
   out->design_cache_hit_count += value.design_cache_hit_count;
   out->design_cache_miss_count += value.design_cache_miss_count;
   out->design_cache_insert_count += value.design_cache_insert_count;
@@ -337,30 +342,54 @@ std::vector<double> response_vector(const Rcpp::NumericMatrix& data, int target)
   return y;
 }
 
-std::string group_key(const FastSplineDesign& design,
-                      const FastSplineParams& params) {
-  std::ostringstream out;
-  out << std::setprecision(17)
-      << design.n << "|"
-      << design.p << "|"
-      << params.degree << "|"
-      << params.knots << "|"
-      << params.lambda_min << "|"
-      << params.lambda_max << "|"
-      << params.lambda_count << "|"
-      << params.ridge << "|"
-      << params.mode;
-  return out.str();
+struct FastSplineConditionKey {
+  std::vector<int> cols;
+
+  bool operator<(const FastSplineConditionKey& other) const {
+    return cols < other.cols;
+  }
+};
+
+struct FastSplineGroupKey {
+  int n = 0;
+  int p = 0;
+  int degree = 0;
+  int knots = 0;
+  int lambda_count = 0;
+  std::string mode;
+  double lambda_min = 0.0;
+  double lambda_max = 0.0;
+  double ridge = 0.0;
+
+  bool operator<(const FastSplineGroupKey& other) const {
+    return std::tie(n, p, degree, knots, lambda_count, mode,
+                    lambda_min, lambda_max, ridge) <
+      std::tie(other.n, other.p, other.degree, other.knots,
+               other.lambda_count, other.mode, other.lambda_min,
+               other.lambda_max, other.ridge);
+  }
+};
+
+FastSplineConditionKey condition_key_from_normalized(
+    const std::vector<int>& normalized_conditioning_set) {
+  FastSplineConditionKey key;
+  key.cols = normalized_conditioning_set;
+  return key;
 }
 
-std::string conditioning_set_key(std::vector<int> conditioning_set) {
-  std::sort(conditioning_set.begin(), conditioning_set.end());
-  std::ostringstream out;
-  for (std::size_t i = 0; i < conditioning_set.size(); ++i) {
-    if (i != 0) out << ",";
-    out << conditioning_set[i];
-  }
-  return out.str();
+FastSplineGroupKey structural_group_key(const FastSplineDesign& design,
+                                        const FastSplineParams& params) {
+  FastSplineGroupKey key;
+  key.n = design.n;
+  key.p = design.p;
+  key.degree = params.degree;
+  key.knots = params.knots;
+  key.lambda_count = params.lambda_count;
+  key.mode = params.mode;
+  key.lambda_min = params.lambda_min;
+  key.lambda_max = params.lambda_max;
+  key.ridge = params.ridge;
+  return key;
 }
 
 FastSplineCudaDiagnostics make_diagnostics(bool cuda_used,
@@ -1703,7 +1732,7 @@ void free_buffers(DeviceGroupBuffers* buffers) {
 
 struct FastSplineCudaWorkspace {
   DeviceGroupBuffers group_buffers;
-  std::map<std::string, FastSplineDesign> design_cache;
+  std::map<FastSplineConditionKey, FastSplineDesign> design_cache;
   FastSplineBasisCache basis_cache;
   const double* design_cache_data_ptr = nullptr;
   int design_cache_nrow = 0;
@@ -2384,6 +2413,10 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.grouping_design_count = 0;
   out.grouping_condition_key_sort_count = 0;
   out.grouping_string_key_count = 0;
+  out.structural_group_key_count = 0;
+  out.structural_condition_key_count = 0;
+  out.string_group_key_count = 0;
+  out.string_condition_key_count = 0;
   out.design_cache_hit_count = 0;
   out.design_cache_miss_count = 0;
   out.design_cache_insert_count = 0;
@@ -2572,7 +2605,7 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
   const std::vector<std::vector<int> >& conditioning_sets,
   const FastSplineParams& params,
   FastSplineCudaBatchDiagnostics* diagnostics,
-  std::map<std::string, FastSplineDesign>* run_design_cache,
+  std::map<FastSplineConditionKey, FastSplineDesign>* run_design_cache,
   FastSplineBasisCache* run_basis_cache) {
   const std::chrono::steady_clock::time_point grouping_start =
     std::chrono::steady_clock::now();
@@ -2580,12 +2613,12 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
     throw std::runtime_error("targets and conditioning_sets length mismatch");
   }
   std::vector<FastSplineBatchGroup> groups;
-  std::map<std::string, int> group_by_key;
-  std::map<std::string, FastSplineDesign> local_design_cache;
-  std::map<std::string, FastSplineDesign>* design_cache =
+  std::map<FastSplineGroupKey, int> group_by_key;
+  std::map<FastSplineConditionKey, FastSplineDesign> local_design_cache;
+  std::map<FastSplineConditionKey, FastSplineDesign>* design_cache =
     run_design_cache == nullptr ? &local_design_cache : run_design_cache;
-  std::set<std::string> grouping_design_keys;
-  std::vector<std::map<std::string, int> > group_design_by_key;
+  std::set<FastSplineConditionKey> grouping_design_keys;
+  std::vector<std::map<FastSplineConditionKey, int> > group_design_by_key;
   for (int i = 0; i < static_cast<int>(targets.size()); ++i) {
     if (targets[i] < 0 || targets[i] >= data.ncol()) {
       throw std::runtime_error("target column out of range");
@@ -2595,19 +2628,19 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
     std::vector<int> normalized_conditioning_set = conditioning_sets[i];
     std::sort(normalized_conditioning_set.begin(),
               normalized_conditioning_set.end());
-    const std::string exact_design_key =
-      conditioning_set_key(normalized_conditioning_set);
+    const FastSplineConditionKey exact_design_key =
+      condition_key_from_normalized(normalized_conditioning_set);
     if (diagnostics != nullptr) {
       diagnostics->grouping_condition_key_sec += elapsed_since(substage);
-      diagnostics->grouping_condition_key_sort_count += 2;
-      diagnostics->grouping_string_key_count += 1;
+      diagnostics->grouping_condition_key_sort_count += 1;
+      diagnostics->structural_condition_key_count += 1;
       if (grouping_design_keys.insert(exact_design_key).second) {
         diagnostics->grouping_design_count += 1;
       }
     }
 
     substage = std::chrono::steady_clock::now();
-    std::map<std::string, FastSplineDesign>::iterator design_it =
+    std::map<FastSplineConditionKey, FastSplineDesign>::iterator design_it =
       design_cache->find(exact_design_key);
     bool inserted_design = false;
     if (diagnostics != nullptr) {
@@ -2738,28 +2771,28 @@ std::vector<FastSplineBatchGroup> make_fastspline_batch_groups(
     request.design_index = -1;
 
     substage = std::chrono::steady_clock::now();
-    const std::string key = group_key(design_it->second, params);
+    const FastSplineGroupKey key = structural_group_key(design_it->second, params);
     if (diagnostics != nullptr) {
       diagnostics->grouping_group_key_sec += elapsed_since(substage);
-      diagnostics->grouping_string_key_count += 1;
+      diagnostics->structural_group_key_count += 1;
     }
     substage = std::chrono::steady_clock::now();
-    std::map<std::string, int>::iterator it = group_by_key.find(key);
+    std::map<FastSplineGroupKey, int>::iterator it = group_by_key.find(key);
     if (it == group_by_key.end()) {
       FastSplineBatchGroup group;
       group.group_id = static_cast<int>(groups.size());
       group.n = design_it->second.n;
       group.design_cols = design_it->second.p;
       groups.push_back(group);
-      group_design_by_key.push_back(std::map<std::string, int>());
+      group_design_by_key.push_back(std::map<FastSplineConditionKey, int>());
       group_by_key[key] = group.group_id;
       it = group_by_key.find(key);
       if (diagnostics != nullptr) diagnostics->grouping_group_count += 1;
     }
     FastSplineBatchGroup& group = groups[it->second];
-    std::map<std::string, int>& designs_for_group =
+    std::map<FastSplineConditionKey, int>& designs_for_group =
       group_design_by_key[it->second];
-    std::map<std::string, int>::iterator group_design_it =
+    std::map<FastSplineConditionKey, int>::iterator group_design_it =
       designs_for_group.find(exact_design_key);
     if (group_design_it == designs_for_group.end()) {
       const int design_index = static_cast<int>(group.designs.size());

@@ -533,6 +533,14 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       ),
     residual_grouping_string_key_count =
       as.integer(summary$residual_grouping_string_key_count %||% 0L),
+    residual_structural_group_key_count =
+      as.integer(summary$residual_structural_group_key_count %||% 0L),
+    residual_structural_condition_key_count =
+      as.integer(summary$residual_structural_condition_key_count %||% 0L),
+    residual_string_group_key_count =
+      as.integer(summary$residual_string_group_key_count %||% 0L),
+    residual_string_condition_key_count =
+      as.integer(summary$residual_string_condition_key_count %||% 0L),
     residual_design_cache_hit_count =
       as.integer(summary$residual_design_cache_hit_count %||% 0L),
     residual_design_cache_miss_count =

@@ -478,6 +478,10 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
     result.diagnostics.grouping_design_count = 0;
     result.diagnostics.grouping_condition_key_sort_count = 0;
     result.diagnostics.grouping_string_key_count = 0;
+    result.diagnostics.structural_group_key_count = 0;
+    result.diagnostics.structural_condition_key_count = 0;
+    result.diagnostics.string_group_key_count = 0;
+    result.diagnostics.string_condition_key_count = 0;
     result.diagnostics.design_cache_hit_count = 0;
     result.diagnostics.design_cache_miss_count = 0;
     result.diagnostics.design_cache_insert_count = 0;

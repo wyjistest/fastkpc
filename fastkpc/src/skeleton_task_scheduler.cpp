@@ -200,6 +200,10 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_grouping_design_count = 0;
   out.residual_grouping_condition_key_sort_count = 0;
   out.residual_grouping_string_key_count = 0;
+  out.residual_structural_group_key_count = 0;
+  out.residual_structural_condition_key_count = 0;
+  out.residual_string_group_key_count = 0;
+  out.residual_string_condition_key_count = 0;
   out.residual_design_cache_hit_count = 0;
   out.residual_design_cache_miss_count = 0;
   out.residual_design_cache_insert_count = 0;

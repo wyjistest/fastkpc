@@ -52,6 +52,10 @@ struct FastSplineCudaBatchDiagnostics {
   int grouping_design_count;
   int grouping_condition_key_sort_count;
   int grouping_string_key_count;
+  int structural_group_key_count;
+  int structural_condition_key_count;
+  int string_group_key_count;
+  int string_condition_key_count;
   int design_cache_hit_count;
   int design_cache_miss_count;
   int design_cache_insert_count;

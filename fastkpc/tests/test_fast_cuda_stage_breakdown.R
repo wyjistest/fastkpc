@@ -212,8 +212,27 @@ assert_true("residual_grouping_map_insert_ms" %in% names(runs),
             "stage breakdown should split residual grouping map-insert time")
 assert_true("residual_grouping_unaccounted_ms" %in% names(runs),
             "stage breakdown should expose residual grouping unaccounted time")
-assert_true(runs$residual_grouping_string_key_count[[1L]] > 0L,
-            "stage breakdown should count residual grouping string keys")
+required_grouping_route_fields <- c(
+  "residual_structural_group_key_count",
+  "residual_structural_condition_key_count",
+  "residual_string_group_key_count",
+  "residual_string_condition_key_count"
+)
+missing_grouping_route_fields <-
+  setdiff(required_grouping_route_fields, names(runs))
+assert_true(length(missing_grouping_route_fields) == 0L,
+            paste("stage breakdown should expose residual grouping key routes:",
+                  paste(missing_grouping_route_fields, collapse = ",")))
+assert_true(runs$residual_structural_group_key_count[[1L]] > 0L,
+            "stage breakdown should count residual structural group keys")
+assert_true(runs$residual_structural_condition_key_count[[1L]] > 0L,
+            "stage breakdown should count residual structural condition keys")
+assert_true(runs$residual_string_group_key_count[[1L]] == 0L,
+            "residual grouping should avoid string group keys")
+assert_true(runs$residual_string_condition_key_count[[1L]] == 0L,
+            "residual grouping should avoid string condition keys")
+assert_true(runs$residual_grouping_string_key_count[[1L]] == 0L,
+            "residual grouping should not serialize string keys")
 assert_true(runs$residual_grouping_condition_key_sort_count[[1L]] > 0L,
             "stage breakdown should count residual grouping condition-key sorts")
 assert_true(runs$residual_grouping_group_count[[1L]] > 0L,
