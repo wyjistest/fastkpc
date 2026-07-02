@@ -941,8 +941,6 @@ __global__ void batched_algebraic_rss_edf_all_lambda_kernel(
   int lambda_count,
   int group_size,
   int p,
-  double* rss,
-  double* edf,
   FastSplineScoreMetadata* metadata,
   int* clamp_count) {
   __shared__ double scratch_rss[kBlock];
@@ -955,8 +953,6 @@ __global__ void batched_algebraic_rss_edf_all_lambda_kernel(
   const std::size_t metadata_index = candidate_index;
   if (active[fit] == 0) {
     if (threadIdx.x == 0) {
-      rss[fit] = nan("");
-      edf[fit] = nan("");
       metadata[metadata_index].info = info[candidate_index];
       metadata[metadata_index].pad0 = 0;
       metadata[metadata_index].rss = nan("");
@@ -1008,8 +1004,6 @@ __global__ void batched_algebraic_rss_edf_all_lambda_kernel(
       value = 0.0;
       atomicAdd(clamp_count, 1);
     }
-    edf[fit] = scratch_edf[0];
-    rss[fit] = value;
     metadata[metadata_index].info = info[candidate_index];
     metadata[metadata_index].pad0 = 0;
     metadata[metadata_index].rss = value;
@@ -1030,8 +1024,6 @@ __global__ void batched_algebraic_rss_edf_all_candidates_kernel(
   int lambda_count,
   int group_size,
   int p,
-  double* rss,
-  double* edf,
   FastSplineScoreMetadata* metadata,
   int* clamp_count) {
   __shared__ double scratch_rss[kBlock];
@@ -1059,8 +1051,6 @@ __global__ void batched_algebraic_rss_edf_all_candidates_kernel(
 
   if (active[fit] == 0 || solve_info != 0) {
     if (threadIdx.x == 0) {
-      rss[fit] = nan("");
-      edf[fit] = nan("");
       metadata[metadata_index].info = solve_info;
       metadata[metadata_index].pad0 = 0;
       metadata[metadata_index].rss = nan("");
@@ -1109,8 +1099,6 @@ __global__ void batched_algebraic_rss_edf_all_candidates_kernel(
       value = 0.0;
       atomicAdd(clamp_count, 1);
     }
-    edf[fit] = scratch_edf[0];
-    rss[fit] = value;
     metadata[metadata_index].info = 0;
     metadata[metadata_index].pad0 = 0;
     metadata[metadata_index].rss = value;
@@ -1154,10 +1142,6 @@ struct DeviceGroupBuffers {
   std::size_t d_fitted_capacity = 0;
   double* d_residuals = nullptr;
   std::size_t d_residuals_capacity = 0;
-  double* d_rss = nullptr;
-  std::size_t d_rss_capacity = 0;
-  double* d_edf = nullptr;
-  std::size_t d_edf_capacity = 0;
   FastSplineScoreMetadata* d_score_metadata = nullptr;
   std::size_t d_score_metadata_capacity = 0;
   FastSplineSelectedFactorDescriptor* d_selected_factor_descriptors = nullptr;
@@ -1300,8 +1284,6 @@ TrueBatchArenaCounts compute_arena_counts(std::size_t x_size,
     candidate_pp_size +
     (need_fitted ? y_size : static_cast<std::size_t>(0)) +
     y_size +
-    group_count +
-    group_count +
     lambda_count_size +
     arena_storage_count<double, FastSplineSelectedFactorDescriptor>(
       selected_count);
@@ -1407,12 +1389,6 @@ void assign_group_buffer_slices(DeviceGroupBuffers* buffers,
   buffers->d_residuals = carve_arena(&buffers->double_arena, y_size,
                                      "batched residuals");
   buffers->d_residuals_capacity = y_size;
-  buffers->d_rss = carve_arena(&buffers->double_arena, group_count,
-                               "batched rss");
-  buffers->d_rss_capacity = group_count;
-  buffers->d_edf = carve_arena(&buffers->double_arena, group_count,
-                               "batched edf");
-  buffers->d_edf_capacity = group_count;
   buffers->d_lambda_grid = carve_arena(&buffers->double_arena,
                                        lambda_count_size,
                                        "lambda grid");
@@ -1633,10 +1609,6 @@ void clear_group_buffer_views(DeviceGroupBuffers* buffers) {
   buffers->d_fitted_capacity = 0;
   buffers->d_residuals = nullptr;
   buffers->d_residuals_capacity = 0;
-  buffers->d_rss = nullptr;
-  buffers->d_rss_capacity = 0;
-  buffers->d_edf = nullptr;
-  buffers->d_edf_capacity = 0;
   buffers->d_score_metadata = nullptr;
   buffers->d_score_metadata_capacity = 0;
   buffers->d_selected_factor_descriptors = nullptr;
@@ -1932,7 +1904,7 @@ TrueBatchGroupResult run_true_batched_group(
           buffers->d_y_norm2, buffers->d_Xty, buffers->d_design_XtX,
           buffers->d_design_A, buffers->d_design_Ainv, buffers->d_active,
           buffers->d_request_design_index, design_count, lambda_count,
-          group_size, p, buffers->d_rss, buffers->d_edf,
+          group_size, p,
           buffers->d_score_metadata,
           buffers->d_algebraic_rss_clamp_count);
         check_cuda(cudaGetLastError(),
@@ -1983,7 +1955,7 @@ TrueBatchGroupResult run_true_batched_group(
           buffers->d_beta, buffers->d_design_Ainv, buffers->d_info,
           buffers->d_active, buffers->d_request_design_index, design_count,
           lambda_count,
-          group_size, p, buffers->d_rss, buffers->d_edf,
+          group_size, p,
           buffers->d_score_metadata,
           buffers->d_algebraic_rss_clamp_count);
         check_cuda(cudaGetLastError(), "launch batched algebraic RSS kernels");
