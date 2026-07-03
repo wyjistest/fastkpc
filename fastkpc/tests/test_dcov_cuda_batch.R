@@ -61,6 +61,26 @@ assert_true(identical(as.integer(large$diagnostics$workspace_grow_count), 0L),
             "direct dCov batch API should not report workspace growth")
 assert_true(as.integer(large$diagnostics$raw_aggregate_fused_count) > 0L,
             "direct dCov batch API should use fused raw aggregate rowsum")
+assert_true(as.integer(large$diagnostics$rowsum_kernel_launch_count) > 0L,
+            "direct dCov batch API should count rowsum launches")
+assert_true(as.integer(large$diagnostics$rowsum_chunk_count) > 0L,
+            "direct dCov batch API should count rowsum chunks")
+assert_true(as.numeric(large$diagnostics$rowsum_total_blocks) > 0,
+            "direct dCov batch API should count rowsum blocks")
+assert_true(as.numeric(large$diagnostics$rowsum_pair_count) > 0,
+            "direct dCov batch API should count rowsum pair work")
+assert_true(as.integer(large$diagnostics$rowsum_threads) > 0L,
+            "direct dCov batch API should report rowsum threads")
+assert_true(as.integer(large$diagnostics$rowsum_n_max) == nrow(large_x),
+            "direct dCov batch API should report rowsum n")
+assert_true(as.integer(large$diagnostics$rowsum_batch_total) == ncol(large_x),
+            "direct dCov batch API should report rowsum batch")
+assert_true(as.integer(large$diagnostics$rowsum_max_chunk_batch) > 0L,
+            "direct dCov batch API should report max rowsum chunk batch")
+assert_true(as.numeric(large$diagnostics$rowsum_max_chunk_sec) >= 0,
+            "direct dCov batch API should report max rowsum chunk time")
+assert_true(as.integer(large$diagnostics$rowsum_max_chunk_n) == nrow(large_x),
+            "direct dCov batch API should report max rowsum chunk n")
 assert_true(as.integer(large$diagnostics$row_product_reduce_count) > 0L,
             "direct dCov batch API should use row-product reduce")
 assert_true(identical(as.integer(large$diagnostics$pvalue_only_count), 0L),

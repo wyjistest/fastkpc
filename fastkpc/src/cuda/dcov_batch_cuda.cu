@@ -176,6 +176,19 @@ void add_timing(DcovBatchResult* out, const DcovBatchResult& value) {
   out->workspace_reuse_count += value.workspace_reuse_count;
   out->workspace_grow_count += value.workspace_grow_count;
   out->raw_aggregate_fused_count += value.raw_aggregate_fused_count;
+  out->rowsum_kernel_launch_count += value.rowsum_kernel_launch_count;
+  out->rowsum_chunk_count += value.rowsum_chunk_count;
+  out->rowsum_total_blocks += value.rowsum_total_blocks;
+  out->rowsum_pair_count += value.rowsum_pair_count;
+  out->rowsum_threads = std::max(out->rowsum_threads, value.rowsum_threads);
+  out->rowsum_n_max = std::max(out->rowsum_n_max, value.rowsum_n_max);
+  out->rowsum_batch_total += value.rowsum_batch_total;
+  out->rowsum_max_chunk_batch =
+    std::max(out->rowsum_max_chunk_batch, value.rowsum_max_chunk_batch);
+  if (value.rowsum_max_chunk_sec > out->rowsum_max_chunk_sec) {
+    out->rowsum_max_chunk_sec = value.rowsum_max_chunk_sec;
+    out->rowsum_max_chunk_n = value.rowsum_max_chunk_n;
+  }
   out->row_product_reduce_count += value.row_product_reduce_count;
   out->pvalue_only_count += value.pvalue_only_count;
   out->full_result_materialize_count += value.full_result_materialize_count;
@@ -434,7 +447,23 @@ DcovBatchResult dcov_batch_cuda_chunk_impl(const double* x,
     check_cuda(cudaGetLastError(), "launch rowsum raw aggregate");
     check_cuda(cudaDeviceSynchronize(), "rowsum raw aggregate synchronize");
     result.raw_aggregate_fused_count += batch;
-    result.rowsum_sec += elapsed_since(stage);
+    const double rowsum_sec = elapsed_since(stage);
+    result.rowsum_sec += rowsum_sec;
+    result.rowsum_kernel_launch_count += 1;
+    result.rowsum_chunk_count += 1;
+    result.rowsum_total_blocks += static_cast<double>(n) *
+      static_cast<double>(batch);
+    result.rowsum_pair_count += static_cast<double>(n) *
+      static_cast<double>(n) * static_cast<double>(batch);
+    result.rowsum_threads = std::max(result.rowsum_threads, kBlock);
+    result.rowsum_n_max = std::max(result.rowsum_n_max, n);
+    result.rowsum_batch_total += batch;
+    result.rowsum_max_chunk_batch =
+      std::max(result.rowsum_max_chunk_batch, batch);
+    if (rowsum_sec > result.rowsum_max_chunk_sec) {
+      result.rowsum_max_chunk_sec = rowsum_sec;
+      result.rowsum_max_chunk_n = n;
+    }
 
     double* total_k = buffers->h_total_k.data();
     double* total_l = buffers->h_total_l.data();

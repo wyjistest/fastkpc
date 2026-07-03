@@ -34,6 +34,16 @@ struct DcovBatchResult {
   int workspace_reuse_count = 0;
   int workspace_grow_count = 0;
   int raw_aggregate_fused_count = 0;
+  int rowsum_kernel_launch_count = 0;
+  int rowsum_chunk_count = 0;
+  double rowsum_total_blocks = 0.0;
+  double rowsum_pair_count = 0.0;
+  int rowsum_threads = 0;
+  int rowsum_n_max = 0;
+  int rowsum_batch_total = 0;
+  int rowsum_max_chunk_batch = 0;
+  double rowsum_max_chunk_sec = 0.0;
+  int rowsum_max_chunk_n = 0;
   int row_product_reduce_count = 0;
   int pvalue_only_count = 0;
   int full_result_materialize_count = 0;

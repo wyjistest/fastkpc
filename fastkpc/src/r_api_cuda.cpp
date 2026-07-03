@@ -791,6 +791,26 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.dcov_workspace_grow_count,
       Rcpp::Named("dcov_raw_aggregate_fused_count") =
         diagnostics.dcov_raw_aggregate_fused_count,
+      Rcpp::Named("dcov_rowsum_kernel_launch_count") =
+        diagnostics.dcov_rowsum_kernel_launch_count,
+      Rcpp::Named("dcov_rowsum_chunk_count") =
+        diagnostics.dcov_rowsum_chunk_count,
+      Rcpp::Named("dcov_rowsum_total_blocks") =
+        diagnostics.dcov_rowsum_total_blocks,
+      Rcpp::Named("dcov_rowsum_pair_count") =
+        diagnostics.dcov_rowsum_pair_count,
+      Rcpp::Named("dcov_rowsum_threads") =
+        diagnostics.dcov_rowsum_threads,
+      Rcpp::Named("dcov_rowsum_n_max") =
+        diagnostics.dcov_rowsum_n_max,
+      Rcpp::Named("dcov_rowsum_batch_total") =
+        diagnostics.dcov_rowsum_batch_total,
+      Rcpp::Named("dcov_rowsum_max_chunk_batch") =
+        diagnostics.dcov_rowsum_max_chunk_batch,
+      Rcpp::Named("dcov_rowsum_max_chunk_sec") =
+        diagnostics.dcov_rowsum_max_chunk_sec,
+      Rcpp::Named("dcov_rowsum_max_chunk_n") =
+        diagnostics.dcov_rowsum_max_chunk_n,
       Rcpp::Named("dcov_row_product_reduce_count") =
         diagnostics.dcov_row_product_reduce_count,
       Rcpp::Named("dcov_pvalue_only_count") =
@@ -1664,6 +1684,18 @@ extern "C" SEXP C_fast_dcov_batch_cuda(SEXP xs, SEXP ys, SEXP indexs,
       Rcpp::Named("workspace_grow_count") = result.workspace_grow_count,
       Rcpp::Named("raw_aggregate_fused_count") =
         result.raw_aggregate_fused_count,
+      Rcpp::Named("rowsum_kernel_launch_count") =
+        result.rowsum_kernel_launch_count,
+      Rcpp::Named("rowsum_chunk_count") = result.rowsum_chunk_count,
+      Rcpp::Named("rowsum_total_blocks") = result.rowsum_total_blocks,
+      Rcpp::Named("rowsum_pair_count") = result.rowsum_pair_count,
+      Rcpp::Named("rowsum_threads") = result.rowsum_threads,
+      Rcpp::Named("rowsum_n_max") = result.rowsum_n_max,
+      Rcpp::Named("rowsum_batch_total") = result.rowsum_batch_total,
+      Rcpp::Named("rowsum_max_chunk_batch") =
+        result.rowsum_max_chunk_batch,
+      Rcpp::Named("rowsum_max_chunk_sec") = result.rowsum_max_chunk_sec,
+      Rcpp::Named("rowsum_max_chunk_n") = result.rowsum_max_chunk_n,
       Rcpp::Named("row_product_reduce_count") =
         result.row_product_reduce_count,
       Rcpp::Named("pvalue_only_count") = result.pvalue_only_count,

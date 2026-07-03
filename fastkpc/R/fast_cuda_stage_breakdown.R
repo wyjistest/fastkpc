@@ -326,6 +326,18 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
   residual_edf_trace_cuda_p_weighted_sum <- as.numeric(
     summary$residual_edf_trace_cuda_p_weighted_sum %||% 0
   )
+  dcov_rowsum_sec <- fastkpc_stage_breakdown_seconds(
+    summary$dcov_rowsum_sec
+  )
+  dcov_rowsum_pair_count <- as.numeric(
+    summary$dcov_rowsum_pair_count %||% 0
+  )
+  dcov_rowsum_total_blocks <- as.numeric(
+    summary$dcov_rowsum_total_blocks %||% 0
+  )
+  dcov_rowsum_kernel_launch_count <- as.numeric(
+    summary$dcov_rowsum_kernel_launch_count %||% 0
+  )
   data.frame(
     scenario_id = scenario$scenario_id,
     repeat_id = as.integer(repeat_id),
@@ -352,6 +364,44 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$dcov_workspace_grow_count %||% 0L),
     dcov_raw_aggregate_fused_count =
       as.integer(summary$dcov_raw_aggregate_fused_count %||% 0L),
+    dcov_rowsum_kernel_launch_count =
+      as.integer(summary$dcov_rowsum_kernel_launch_count %||% 0L),
+    dcov_rowsum_chunk_count =
+      as.integer(summary$dcov_rowsum_chunk_count %||% 0L),
+    dcov_rowsum_total_blocks = dcov_rowsum_total_blocks,
+    dcov_rowsum_pair_count = dcov_rowsum_pair_count,
+    dcov_rowsum_threads =
+      as.integer(summary$dcov_rowsum_threads %||% 0L),
+    dcov_rowsum_n_max =
+      as.integer(summary$dcov_rowsum_n_max %||% 0L),
+    dcov_rowsum_batch_total =
+      as.integer(summary$dcov_rowsum_batch_total %||% 0L),
+    dcov_rowsum_max_chunk_batch =
+      as.integer(summary$dcov_rowsum_max_chunk_batch %||% 0L),
+    dcov_rowsum_max_chunk_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$dcov_rowsum_max_chunk_sec
+      ) * 1000,
+    dcov_rowsum_max_chunk_n =
+      as.integer(summary$dcov_rowsum_max_chunk_n %||% 0L),
+    dcov_rowsum_time_per_pair_ns =
+      if (dcov_rowsum_pair_count > 0) {
+        dcov_rowsum_sec * 1e9 / dcov_rowsum_pair_count
+      } else {
+        0
+      },
+    dcov_rowsum_time_per_block_ns =
+      if (dcov_rowsum_total_blocks > 0) {
+        dcov_rowsum_sec * 1e9 / dcov_rowsum_total_blocks
+      } else {
+        0
+      },
+    dcov_rowsum_time_per_launch_ms =
+      if (dcov_rowsum_kernel_launch_count > 0) {
+        dcov_rowsum_sec * 1000 / dcov_rowsum_kernel_launch_count
+      } else {
+        0
+      },
     dcov_row_product_reduce_count =
       as.integer(summary$dcov_row_product_reduce_count %||% 0L),
     dcov_pvalue_only_count =

@@ -354,6 +354,16 @@ struct SchedulerDiagnostics {
   int dcov_workspace_reuse_count;
   int dcov_workspace_grow_count;
   int dcov_raw_aggregate_fused_count;
+  int dcov_rowsum_kernel_launch_count;
+  int dcov_rowsum_chunk_count;
+  double dcov_rowsum_total_blocks;
+  double dcov_rowsum_pair_count;
+  int dcov_rowsum_threads;
+  int dcov_rowsum_n_max;
+  int dcov_rowsum_batch_total;
+  int dcov_rowsum_max_chunk_batch;
+  double dcov_rowsum_max_chunk_sec;
+  int dcov_rowsum_max_chunk_n;
   int dcov_row_product_reduce_count;
   int dcov_pvalue_only_count;
   int dcov_full_result_materialize_count;

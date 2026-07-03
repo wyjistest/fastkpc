@@ -937,6 +937,24 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     diagnostics->dcov_workspace_grow_count += batch.workspace_grow_count;
     diagnostics->dcov_raw_aggregate_fused_count +=
       batch.raw_aggregate_fused_count;
+    diagnostics->dcov_rowsum_kernel_launch_count +=
+      batch.rowsum_kernel_launch_count;
+    diagnostics->dcov_rowsum_chunk_count += batch.rowsum_chunk_count;
+    diagnostics->dcov_rowsum_total_blocks += batch.rowsum_total_blocks;
+    diagnostics->dcov_rowsum_pair_count += batch.rowsum_pair_count;
+    diagnostics->dcov_rowsum_threads =
+      std::max(diagnostics->dcov_rowsum_threads, batch.rowsum_threads);
+    diagnostics->dcov_rowsum_n_max =
+      std::max(diagnostics->dcov_rowsum_n_max, batch.rowsum_n_max);
+    diagnostics->dcov_rowsum_batch_total += batch.rowsum_batch_total;
+    diagnostics->dcov_rowsum_max_chunk_batch =
+      std::max(diagnostics->dcov_rowsum_max_chunk_batch,
+               batch.rowsum_max_chunk_batch);
+    if (batch.rowsum_max_chunk_sec >
+        diagnostics->dcov_rowsum_max_chunk_sec) {
+      diagnostics->dcov_rowsum_max_chunk_sec = batch.rowsum_max_chunk_sec;
+      diagnostics->dcov_rowsum_max_chunk_n = batch.rowsum_max_chunk_n;
+    }
     diagnostics->dcov_row_product_reduce_count +=
       batch.row_product_reduce_count;
     diagnostics->dcov_pvalue_only_count += batch.pvalue_only_count;

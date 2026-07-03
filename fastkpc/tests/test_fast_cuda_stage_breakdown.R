@@ -85,6 +85,52 @@ assert_true(runs$dcov_batches[[1L]] > 0L,
             "stage breakdown should record dCov batches")
 assert_true(runs$dcov_chunks[[1L]] > 0L,
             "stage breakdown should record dCov chunks")
+required_dcov_rowsum_shape_fields <- c(
+  "dcov_rowsum_kernel_launch_count",
+  "dcov_rowsum_chunk_count",
+  "dcov_rowsum_total_blocks",
+  "dcov_rowsum_pair_count",
+  "dcov_rowsum_threads",
+  "dcov_rowsum_n_max",
+  "dcov_rowsum_batch_total",
+  "dcov_rowsum_max_chunk_batch",
+  "dcov_rowsum_max_chunk_ms",
+  "dcov_rowsum_max_chunk_n",
+  "dcov_rowsum_time_per_pair_ns",
+  "dcov_rowsum_time_per_block_ns",
+  "dcov_rowsum_time_per_launch_ms"
+)
+missing_dcov_rowsum_shape_fields <- setdiff(required_dcov_rowsum_shape_fields,
+                                            names(runs))
+assert_true(length(missing_dcov_rowsum_shape_fields) == 0L,
+            paste("stage breakdown should expose dCov rowsum shape diagnostics:",
+                  paste(missing_dcov_rowsum_shape_fields, collapse = ",")))
+assert_true(runs$dcov_rowsum_kernel_launch_count[[1L]] > 0L,
+            "stage breakdown should record dCov rowsum kernel launches")
+assert_true(runs$dcov_rowsum_chunk_count[[1L]] > 0L,
+            "stage breakdown should record dCov rowsum chunks")
+assert_true(runs$dcov_rowsum_total_blocks[[1L]] > 0,
+            "stage breakdown should record dCov rowsum grid blocks")
+assert_true(runs$dcov_rowsum_pair_count[[1L]] > 0,
+            "stage breakdown should record dCov rowsum pair work")
+assert_true(runs$dcov_rowsum_threads[[1L]] > 0L,
+            "stage breakdown should record dCov rowsum thread count")
+assert_true(runs$dcov_rowsum_n_max[[1L]] >= scenario$n,
+            "stage breakdown should record dCov rowsum n")
+assert_true(runs$dcov_rowsum_batch_total[[1L]] > 0L,
+            "stage breakdown should record total dCov rowsum batch")
+assert_true(runs$dcov_rowsum_max_chunk_batch[[1L]] > 0L,
+            "stage breakdown should record max dCov rowsum chunk batch")
+assert_true(runs$dcov_rowsum_max_chunk_ms[[1L]] >= 0,
+            "stage breakdown should record max dCov rowsum chunk time")
+assert_true(runs$dcov_rowsum_max_chunk_n[[1L]] >= scenario$n,
+            "stage breakdown should record max dCov rowsum chunk n")
+assert_true(runs$dcov_rowsum_time_per_pair_ns[[1L]] >= 0,
+            "stage breakdown should record dCov rowsum time per pair")
+assert_true(runs$dcov_rowsum_time_per_block_ns[[1L]] >= 0,
+            "stage breakdown should record dCov rowsum time per block")
+assert_true(runs$dcov_rowsum_time_per_launch_ms[[1L]] >= 0,
+            "stage breakdown should record dCov rowsum time per launch")
 assert_true(runs$dcov_workspace_reuse_count[[1L]] > 0L,
             "stage breakdown should record dCov workspace reuse")
 assert_true(runs$dcov_workspace_grow_count[[1L]] > 0L,

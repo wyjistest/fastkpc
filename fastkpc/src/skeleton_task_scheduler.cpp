@@ -425,6 +425,16 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.dcov_workspace_reuse_count = 0;
   out.dcov_workspace_grow_count = 0;
   out.dcov_raw_aggregate_fused_count = 0;
+  out.dcov_rowsum_kernel_launch_count = 0;
+  out.dcov_rowsum_chunk_count = 0;
+  out.dcov_rowsum_total_blocks = 0.0;
+  out.dcov_rowsum_pair_count = 0.0;
+  out.dcov_rowsum_threads = 0;
+  out.dcov_rowsum_n_max = 0;
+  out.dcov_rowsum_batch_total = 0;
+  out.dcov_rowsum_max_chunk_batch = 0;
+  out.dcov_rowsum_max_chunk_sec = 0.0;
+  out.dcov_rowsum_max_chunk_n = 0;
   out.dcov_row_product_reduce_count = 0;
   out.dcov_pvalue_only_count = 0;
   out.dcov_full_result_materialize_count = 0;
