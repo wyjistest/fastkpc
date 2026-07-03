@@ -584,6 +584,20 @@ class CudaSkeletonResidualCache {
         diagnostics->residual_edf_trace_max_rel_diff =
           std::max(diagnostics->residual_edf_trace_max_rel_diff,
                    batch_result.diagnostics.edf_trace_max_rel_diff);
+        diagnostics->residual_edf_trace_cuda_sec +=
+          batch_result.diagnostics.edf_trace_cuda_sec;
+        diagnostics->residual_edf_trace_cuda_count +=
+          batch_result.diagnostics.edf_trace_cuda_count;
+        diagnostics->residual_edf_trace_cuda_candidate_count +=
+          batch_result.diagnostics.edf_trace_cuda_candidate_count;
+        diagnostics->residual_edf_trace_full_inverse_skipped_count +=
+          batch_result.diagnostics.edf_trace_full_inverse_skipped_count;
+        diagnostics->residual_edf_trace_cuda_fallback_count +=
+          batch_result.diagnostics.edf_trace_cuda_fallback_count;
+        diagnostics->residual_edf_trace_cuda_values +=
+          batch_result.diagnostics.edf_trace_cuda_values;
+        diagnostics->residual_candidate_inverse_values_avoided +=
+          batch_result.diagnostics.candidate_inverse_values_avoided;
         diagnostics->residual_winning_factor_reuse_count +=
           batch_result.diagnostics.winning_factor_reuse_count;
         diagnostics->residual_factor_cache_hits +=

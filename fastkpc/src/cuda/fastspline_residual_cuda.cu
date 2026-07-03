@@ -632,6 +632,13 @@ FastSplineCudaBatchResult fit_fastspline_residuals_cuda_batch_result(
     result.diagnostics.edf_trace_winner_flip_count = 0;
     result.diagnostics.edf_trace_max_abs_diff = 0.0;
     result.diagnostics.edf_trace_max_rel_diff = 0.0;
+    result.diagnostics.edf_trace_cuda_sec = 0.0;
+    result.diagnostics.edf_trace_cuda_count = 0;
+    result.diagnostics.edf_trace_cuda_candidate_count = 0;
+    result.diagnostics.edf_trace_full_inverse_skipped_count = 0;
+    result.diagnostics.edf_trace_cuda_fallback_count = 0;
+    result.diagnostics.edf_trace_cuda_values = 0.0;
+    result.diagnostics.candidate_inverse_values_avoided = 0.0;
     result.diagnostics.winning_factor_reuse_count = 0;
     result.diagnostics.factor_cache_hits = 0;
     result.diagnostics.factor_cache_misses = 0;

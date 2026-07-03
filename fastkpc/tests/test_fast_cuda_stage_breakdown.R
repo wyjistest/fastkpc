@@ -50,6 +50,7 @@ required_stages <- c(
   "residual_factor_rhs_solve",
   "residual_rhs_custom_solve", "residual_rhs_cublas_solve",
   "residual_factor_inverse_solve", "residual_d2h",
+  "residual_edf_trace_cuda",
   "residual_h2d_design", "residual_h2d_penalty", "residual_h2d_y",
   "residual_h2d_index", "residual_h2d_lambda", "residual_h2d_active",
   "residual_d2h_residuals", "residual_d2h_metadata",
@@ -146,7 +147,14 @@ required_edf_shadow_fields <- c(
   "residual_edf_trace_mode_shadow_count",
   "residual_edf_trace_winner_flip_count",
   "residual_edf_trace_max_abs_diff",
-  "residual_edf_trace_max_rel_diff"
+  "residual_edf_trace_max_rel_diff",
+  "residual_edf_trace_cuda_ms",
+  "residual_edf_trace_cuda_count",
+  "residual_edf_trace_cuda_candidate_count",
+  "residual_edf_trace_full_inverse_skipped_count",
+  "residual_edf_trace_cuda_fallback_count",
+  "residual_edf_trace_cuda_values",
+  "residual_candidate_inverse_values_avoided"
 )
 missing_edf_shadow_fields <- setdiff(required_edf_shadow_fields, names(runs))
 assert_true(length(missing_edf_shadow_fields) == 0L,
@@ -166,6 +174,24 @@ assert_true(runs$residual_edf_trace_max_rel_diff[[1L]] >= 0,
             "stage breakdown should expose shadow EDF max relative error")
 assert_true(runs$residual_edf_trace_shadow_ms[[1L]] >= 0,
             "stage breakdown should time shadow EDF comparison")
+assert_true(runs$residual_edf_trace_cuda_ms[[1L]] >= 0,
+            "stage breakdown should time CUDA Cholesky EDF mode")
+assert_true(runs$residual_edf_trace_cuda_count[[1L]] >= 0L,
+            "stage breakdown should expose CUDA Cholesky EDF launch count")
+assert_true(runs$residual_edf_trace_cuda_candidate_count[[1L]] >= 0L,
+            "stage breakdown should expose CUDA Cholesky EDF candidates")
+assert_true(runs$residual_edf_trace_full_inverse_skipped_count[[1L]] >= 0L,
+            "stage breakdown should expose skipped candidate inverses")
+assert_true(runs$residual_edf_trace_cuda_fallback_count[[1L]] >= 0L,
+            "stage breakdown should expose CUDA Cholesky EDF fallbacks")
+assert_true(runs$residual_edf_trace_cuda_values[[1L]] >= 0,
+            "stage breakdown should expose CUDA Cholesky EDF values")
+assert_true(runs$residual_candidate_inverse_values_avoided[[1L]] >= 0,
+            "stage breakdown should expose avoided candidate inverse values")
+assert_true(runs$residual_edf_trace_cuda_count[[1L]] == 0L,
+            "default EDF trace mode should not use CUDA Cholesky mode")
+assert_true(runs$residual_edf_trace_full_inverse_skipped_count[[1L]] == 0L,
+            "default EDF trace mode should not skip full inverses")
 assert_true(runs$residual_rhs_cublas_solve_count[[1L]] == 0L,
             "stage breakdown should avoid cuBLAS RHS solves on small-p smoke run")
 assert_true(runs$residual_rhs_solve_fallback_count[[1L]] == 0L,

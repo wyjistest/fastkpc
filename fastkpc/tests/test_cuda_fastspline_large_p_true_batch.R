@@ -72,4 +72,54 @@ for (k in seq_along(targets)) {
               paste("large-p fit", k, "should be marked true_batched"))
 }
 
+old_edf_trace_mode <- Sys.getenv("FASTKPC_FASTSPLINE_EDF_TRACE_MODE",
+                                 unset = NA_character_)
+Sys.setenv(FASTKPC_FASTSPLINE_EDF_TRACE_MODE = "cholesky_cuda")
+on.exit({
+  if (is.na(old_edf_trace_mode)) {
+    Sys.unsetenv("FASTKPC_FASTSPLINE_EDF_TRACE_MODE")
+  } else {
+    Sys.setenv(FASTKPC_FASTSPLINE_EDF_TRACE_MODE = old_edf_trace_mode)
+  }
+}, add = TRUE)
+
+cholesky_batch <- fastspline_residual_batch_cuda(
+  data,
+  targets = targets,
+  conditioning_sets = conditioning_sets,
+  fastspline_params = params,
+  fallback = FALSE
+)
+cholesky_diag <- cholesky_batch$batch_diagnostics
+assert_true(as.integer(cholesky_diag$edf_trace_cuda_candidate_count) > 0L,
+            "cholesky CUDA EDF mode should score candidates on device")
+assert_true(as.integer(cholesky_diag$edf_trace_full_inverse_skipped_count) > 0L,
+            "cholesky CUDA EDF mode should skip candidate full inverses")
+assert_true(as.numeric(cholesky_diag$candidate_inverse_values_avoided) > 0,
+            "cholesky CUDA EDF mode should count avoided inverse values")
+assert_true(identical(as.integer(cholesky_diag$inverse_solve_count), 0L),
+            "cholesky CUDA EDF mode should avoid candidate inverse solves")
+assert_true(as.numeric(cholesky_diag$factor_inverse_solve_sec) == 0,
+            "cholesky CUDA EDF mode should not time candidate inverse solves")
+assert_true(identical(
+  as.integer(cholesky_diag$edf_trace_mode_full_inverse_count), 0L
+), "cholesky CUDA EDF mode should not count full-inverse EDF candidates")
+assert_true(identical(as.integer(cholesky_diag$edf_trace_cuda_fallback_count),
+                      0L),
+            "cholesky CUDA EDF mode should not fall back in this scenario")
+
+for (k in seq_along(targets)) {
+  cpu <- fastspline_residual(data[, targets[[k]]],
+                             data[, conditioning_sets[[k]], drop = FALSE],
+                             fastspline_params = params)
+  assert_true(max_abs_diff(cholesky_batch$residuals[, k],
+                           residual_values(cpu)) < 1e-7,
+              paste("cholesky CUDA residual", k, "should match CPU"))
+  assert_true(max_abs_diff(cholesky_batch$fitted[, k], cpu$fitted) < 1e-7,
+              paste("cholesky CUDA fitted", k, "should match CPU"))
+  rel_rss <- abs(cholesky_batch$rss[[k]] - cpu$rss) / max(1, abs(cpu$rss))
+  assert_true(rel_rss < 1e-8,
+              paste("cholesky CUDA rss", k, "should match CPU"))
+}
+
 cat("test_cuda_fastspline_large_p_true_batch.R: PASS\n")

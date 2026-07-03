@@ -204,6 +204,11 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
           summary$residual_edf_trace_shadow_sec
         ),
         "residual"),
+    row("residual_edf_trace_cuda",
+        fastkpc_stage_breakdown_seconds(
+          summary$residual_edf_trace_cuda_sec
+        ),
+        "residual"),
     row("residual_d2h",
         fastkpc_stage_breakdown_seconds(summary$residual_d2h_sec),
         "residual"),
@@ -429,6 +434,24 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.numeric(summary$residual_edf_trace_max_abs_diff %||% 0),
     residual_edf_trace_max_rel_diff =
       as.numeric(summary$residual_edf_trace_max_rel_diff %||% 0),
+    residual_edf_trace_cuda_ms =
+      fastkpc_stage_breakdown_seconds(
+        summary$residual_edf_trace_cuda_sec
+      ) * 1000,
+    residual_edf_trace_cuda_count =
+      as.integer(summary$residual_edf_trace_cuda_count %||% 0L),
+    residual_edf_trace_cuda_candidate_count =
+      as.integer(summary$residual_edf_trace_cuda_candidate_count %||% 0L),
+    residual_edf_trace_full_inverse_skipped_count =
+      as.integer(
+        summary$residual_edf_trace_full_inverse_skipped_count %||% 0L
+      ),
+    residual_edf_trace_cuda_fallback_count =
+      as.integer(summary$residual_edf_trace_cuda_fallback_count %||% 0L),
+    residual_edf_trace_cuda_values =
+      as.numeric(summary$residual_edf_trace_cuda_values %||% 0),
+    residual_candidate_inverse_values_avoided =
+      as.numeric(summary$residual_candidate_inverse_values_avoided %||% 0),
     residual_d2h_residuals_ms =
       fastkpc_stage_breakdown_seconds(
         summary$residual_d2h_residuals_sec

@@ -666,6 +666,20 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_edf_trace_max_abs_diff,
       Rcpp::Named("residual_edf_trace_max_rel_diff") =
         diagnostics.residual_edf_trace_max_rel_diff,
+      Rcpp::Named("residual_edf_trace_cuda_sec") =
+        diagnostics.residual_edf_trace_cuda_sec,
+      Rcpp::Named("residual_edf_trace_cuda_count") =
+        diagnostics.residual_edf_trace_cuda_count,
+      Rcpp::Named("residual_edf_trace_cuda_candidate_count") =
+        diagnostics.residual_edf_trace_cuda_candidate_count,
+      Rcpp::Named("residual_edf_trace_full_inverse_skipped_count") =
+        diagnostics.residual_edf_trace_full_inverse_skipped_count,
+      Rcpp::Named("residual_edf_trace_cuda_fallback_count") =
+        diagnostics.residual_edf_trace_cuda_fallback_count,
+      Rcpp::Named("residual_edf_trace_cuda_values") =
+        diagnostics.residual_edf_trace_cuda_values,
+      Rcpp::Named("residual_candidate_inverse_values_avoided") =
+        diagnostics.residual_candidate_inverse_values_avoided,
       Rcpp::Named("residual_winning_factor_reuse_count") =
         diagnostics.residual_winning_factor_reuse_count,
       Rcpp::Named("residual_factor_cache_hits") =
@@ -1350,6 +1364,20 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.edf_trace_max_abs_diff,
     Rcpp::Named("edf_trace_max_rel_diff") =
       diagnostics.edf_trace_max_rel_diff,
+    Rcpp::Named("edf_trace_cuda_sec") =
+      diagnostics.edf_trace_cuda_sec,
+    Rcpp::Named("edf_trace_cuda_count") =
+      diagnostics.edf_trace_cuda_count,
+    Rcpp::Named("edf_trace_cuda_candidate_count") =
+      diagnostics.edf_trace_cuda_candidate_count,
+    Rcpp::Named("edf_trace_full_inverse_skipped_count") =
+      diagnostics.edf_trace_full_inverse_skipped_count,
+    Rcpp::Named("edf_trace_cuda_fallback_count") =
+      diagnostics.edf_trace_cuda_fallback_count,
+    Rcpp::Named("edf_trace_cuda_values") =
+      diagnostics.edf_trace_cuda_values,
+    Rcpp::Named("candidate_inverse_values_avoided") =
+      diagnostics.candidate_inverse_values_avoided,
     Rcpp::Named("winning_factor_reuse_count") =
       diagnostics.winning_factor_reuse_count,
     Rcpp::Named("factor_cache_hits") = diagnostics.factor_cache_hits,

@@ -206,6 +206,13 @@ struct FastSplineCudaBatchDiagnostics {
   int edf_trace_winner_flip_count;
   double edf_trace_max_abs_diff;
   double edf_trace_max_rel_diff;
+  double edf_trace_cuda_sec;
+  int edf_trace_cuda_count;
+  int edf_trace_cuda_candidate_count;
+  int edf_trace_full_inverse_skipped_count;
+  int edf_trace_cuda_fallback_count;
+  double edf_trace_cuda_values;
+  double candidate_inverse_values_avoided;
   int winning_factor_reuse_count;
   int factor_cache_hits;
   int factor_cache_misses;
