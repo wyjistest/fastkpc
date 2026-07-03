@@ -93,8 +93,22 @@ cholesky_batch <- fastspline_residual_batch_cuda(
 cholesky_diag <- cholesky_batch$batch_diagnostics
 assert_true(as.integer(cholesky_diag$edf_trace_cuda_candidate_count) > 0L,
             "cholesky CUDA EDF mode should score candidates on device")
+assert_true(as.integer(cholesky_diag$edf_trace_cuda_kernel_launch_count) > 0L,
+            "cholesky CUDA EDF mode should count trace kernel launches")
+assert_true(as.integer(cholesky_diag$edf_trace_cuda_system_count) > 0L,
+            "cholesky CUDA EDF mode should count factored systems")
+assert_true(as.numeric(cholesky_diag$edf_trace_cuda_trace_terms) > 0,
+            "cholesky CUDA EDF mode should count trace terms")
+assert_true(as.integer(cholesky_diag$edf_trace_cuda_p_max) > 64L,
+            "cholesky CUDA EDF mode should record large-p design columns")
+assert_true(as.numeric(cholesky_diag$edf_trace_cuda_p_weighted_sum) > 0,
+            "cholesky CUDA EDF mode should record p-weighted workload")
 assert_true(as.integer(cholesky_diag$edf_trace_full_inverse_skipped_count) > 0L,
             "cholesky CUDA EDF mode should skip candidate full inverses")
+assert_true(identical(
+  as.integer(cholesky_diag$edf_trace_cuda_system_count),
+  as.integer(cholesky_diag$edf_trace_full_inverse_skipped_count)
+), "cholesky CUDA EDF system count should match skipped inverse systems")
 assert_true(as.numeric(cholesky_diag$candidate_inverse_values_avoided) > 0,
             "cholesky CUDA EDF mode should count avoided inverse values")
 assert_true(identical(as.integer(cholesky_diag$inverse_solve_count), 0L),

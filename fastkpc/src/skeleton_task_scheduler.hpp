@@ -289,6 +289,11 @@ struct SchedulerDiagnostics {
   int residual_edf_trace_full_inverse_skipped_count;
   int residual_edf_trace_cuda_fallback_count;
   double residual_edf_trace_cuda_values;
+  int residual_edf_trace_cuda_kernel_launch_count;
+  int residual_edf_trace_cuda_system_count;
+  double residual_edf_trace_cuda_trace_terms;
+  int residual_edf_trace_cuda_p_max;
+  double residual_edf_trace_cuda_p_weighted_sum;
   double residual_candidate_inverse_values_avoided;
   int residual_winning_factor_reuse_count;
   int residual_factor_cache_hits;

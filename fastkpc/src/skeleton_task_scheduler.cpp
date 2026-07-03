@@ -360,6 +360,11 @@ SchedulerDiagnostics make_scheduler_diagnostics(const std::string& scheduler,
   out.residual_edf_trace_full_inverse_skipped_count = 0;
   out.residual_edf_trace_cuda_fallback_count = 0;
   out.residual_edf_trace_cuda_values = 0.0;
+  out.residual_edf_trace_cuda_kernel_launch_count = 0;
+  out.residual_edf_trace_cuda_system_count = 0;
+  out.residual_edf_trace_cuda_trace_terms = 0.0;
+  out.residual_edf_trace_cuda_p_max = 0;
+  out.residual_edf_trace_cuda_p_weighted_sum = 0.0;
   out.residual_candidate_inverse_values_avoided = 0.0;
   out.residual_winning_factor_reuse_count = 0;
   out.residual_factor_cache_hits = 0;

@@ -678,6 +678,16 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.residual_edf_trace_cuda_fallback_count,
       Rcpp::Named("residual_edf_trace_cuda_values") =
         diagnostics.residual_edf_trace_cuda_values,
+      Rcpp::Named("residual_edf_trace_cuda_kernel_launch_count") =
+        diagnostics.residual_edf_trace_cuda_kernel_launch_count,
+      Rcpp::Named("residual_edf_trace_cuda_system_count") =
+        diagnostics.residual_edf_trace_cuda_system_count,
+      Rcpp::Named("residual_edf_trace_cuda_trace_terms") =
+        diagnostics.residual_edf_trace_cuda_trace_terms,
+      Rcpp::Named("residual_edf_trace_cuda_p_max") =
+        diagnostics.residual_edf_trace_cuda_p_max,
+      Rcpp::Named("residual_edf_trace_cuda_p_weighted_sum") =
+        diagnostics.residual_edf_trace_cuda_p_weighted_sum,
       Rcpp::Named("residual_candidate_inverse_values_avoided") =
         diagnostics.residual_candidate_inverse_values_avoided,
       Rcpp::Named("residual_winning_factor_reuse_count") =
@@ -1376,6 +1386,16 @@ Rcpp::List fastspline_batch_diagnostics_to_list(
       diagnostics.edf_trace_cuda_fallback_count,
     Rcpp::Named("edf_trace_cuda_values") =
       diagnostics.edf_trace_cuda_values,
+    Rcpp::Named("edf_trace_cuda_kernel_launch_count") =
+      diagnostics.edf_trace_cuda_kernel_launch_count,
+    Rcpp::Named("edf_trace_cuda_system_count") =
+      diagnostics.edf_trace_cuda_system_count,
+    Rcpp::Named("edf_trace_cuda_trace_terms") =
+      diagnostics.edf_trace_cuda_trace_terms,
+    Rcpp::Named("edf_trace_cuda_p_max") =
+      diagnostics.edf_trace_cuda_p_max,
+    Rcpp::Named("edf_trace_cuda_p_weighted_sum") =
+      diagnostics.edf_trace_cuda_p_weighted_sum,
     Rcpp::Named("candidate_inverse_values_avoided") =
       diagnostics.candidate_inverse_values_avoided,
     Rcpp::Named("winning_factor_reuse_count") =

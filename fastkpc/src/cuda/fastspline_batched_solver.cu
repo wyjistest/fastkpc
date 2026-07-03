@@ -352,6 +352,14 @@ void add_batch_timing(FastSplineCudaBatchDiagnostics* out,
     value.edf_trace_full_inverse_skipped_count;
   out->edf_trace_cuda_fallback_count += value.edf_trace_cuda_fallback_count;
   out->edf_trace_cuda_values += value.edf_trace_cuda_values;
+  out->edf_trace_cuda_kernel_launch_count +=
+    value.edf_trace_cuda_kernel_launch_count;
+  out->edf_trace_cuda_system_count += value.edf_trace_cuda_system_count;
+  out->edf_trace_cuda_trace_terms += value.edf_trace_cuda_trace_terms;
+  out->edf_trace_cuda_p_max =
+    std::max(out->edf_trace_cuda_p_max, value.edf_trace_cuda_p_max);
+  out->edf_trace_cuda_p_weighted_sum +=
+    value.edf_trace_cuda_p_weighted_sum;
   out->candidate_inverse_values_avoided +=
     value.candidate_inverse_values_avoided;
   out->winning_factor_reuse_count += value.winning_factor_reuse_count;
@@ -884,6 +892,11 @@ __device__ double cholesky_edf_trace_rhs_local(const double* XtX,
     static_cast<std::size_t>(design) * p * p;
   const std::size_t factor_base =
     static_cast<std::size_t>(factor) * p * p;
+  if (p == 1) {
+    const double diag = factors[factor_base];
+    if (!isfinite(diag) || fabs(diag) <= 1e-14) return nan("");
+    return XtX[design_base] / (diag * diag);
+  }
 
   for (int row = 0; row < p; ++row) {
     double value = row == rhs ? 1.0 : 0.0;
@@ -1991,6 +2004,26 @@ EdfTraceMode edf_trace_mode() {
   return EdfTraceMode::FullInverse;
 }
 
+void record_cholesky_cuda_trace_stats(FastSplineCudaBatchDiagnostics* timing,
+                                      double elapsed_sec,
+                                      int candidate_count,
+                                      int system_count,
+                                      int p) {
+  timing->edf_trace_cuda_sec += elapsed_sec;
+  timing->edf_trace_cuda_count += 1;
+  timing->edf_trace_cuda_kernel_launch_count += 1;
+  timing->edf_trace_cuda_candidate_count += candidate_count;
+  timing->edf_trace_cuda_system_count += system_count;
+  const double trace_terms = static_cast<double>(candidate_count) *
+    static_cast<double>(p) * static_cast<double>(p);
+  timing->edf_trace_cuda_values += trace_terms;
+  timing->edf_trace_cuda_trace_terms += trace_terms;
+  timing->edf_trace_cuda_p_max =
+    std::max(timing->edf_trace_cuda_p_max, p);
+  timing->edf_trace_cuda_p_weighted_sum +=
+    static_cast<double>(candidate_count) * static_cast<double>(p);
+}
+
 bool edf_trace_shadow_enabled() {
   const char* value = std::getenv("FASTKPC_FASTSPLINE_EDF_TRACE_SHADOW");
   if (value == nullptr) return false;
@@ -2389,12 +2422,9 @@ TrueBatchGroupResult run_true_batched_group(
         timing->candidate_beta_values_avoided += fused_candidates * p;
         timing->algebraic_rss_count += fused_candidates;
         if (use_cholesky_cuda_edf) {
-          timing->edf_trace_cuda_sec += summary_sec;
-          timing->edf_trace_cuda_count += 1;
-          timing->edf_trace_cuda_candidate_count += fused_candidates;
-          timing->edf_trace_cuda_values +=
-            static_cast<double>(fused_candidates) *
-            static_cast<double>(p) * static_cast<double>(p);
+          record_cholesky_cuda_trace_stats(timing, summary_sec,
+                                           fused_candidates,
+                                           candidate_factor_count, p);
         } else {
           timing->edf_trace_mode_full_inverse_count += fused_candidates;
         }
@@ -2461,12 +2491,9 @@ TrueBatchGroupResult run_true_batched_group(
         const double summary_sec = elapsed_since(stage);
         timing->algebraic_rss_count += rhs_batch_count;
         if (use_cholesky_cuda_edf) {
-          timing->edf_trace_cuda_sec += summary_sec;
-          timing->edf_trace_cuda_count += 1;
-          timing->edf_trace_cuda_candidate_count += rhs_batch_count;
-          timing->edf_trace_cuda_values +=
-            static_cast<double>(rhs_batch_count) *
-            static_cast<double>(p) * static_cast<double>(p);
+          record_cholesky_cuda_trace_stats(timing, summary_sec,
+                                           rhs_batch_count,
+                                           candidate_factor_count, p);
         } else {
           timing->edf_trace_mode_full_inverse_count += rhs_batch_count;
         }
@@ -3022,6 +3049,11 @@ FastSplineCudaBatchDiagnostics make_empty_batch_diagnostics(int requested_fits) 
   out.edf_trace_full_inverse_skipped_count = 0;
   out.edf_trace_cuda_fallback_count = 0;
   out.edf_trace_cuda_values = 0.0;
+  out.edf_trace_cuda_kernel_launch_count = 0;
+  out.edf_trace_cuda_system_count = 0;
+  out.edf_trace_cuda_trace_terms = 0.0;
+  out.edf_trace_cuda_p_max = 0;
+  out.edf_trace_cuda_p_weighted_sum = 0.0;
   out.candidate_inverse_values_avoided = 0.0;
   out.winning_factor_reuse_count = 0;
   out.factor_cache_hits = 0;

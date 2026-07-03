@@ -311,6 +311,21 @@ fastkpc_stage_breakdown_rows <- function(result, scenario, repeat_id) {
 
 fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
   summary <- result$skeleton$scheduler_diagnostics$summary %||% list()
+  residual_edf_trace_cuda_sec <- fastkpc_stage_breakdown_seconds(
+    summary$residual_edf_trace_cuda_sec
+  )
+  residual_edf_trace_cuda_system_count <- as.numeric(
+    summary$residual_edf_trace_cuda_system_count %||% 0
+  )
+  residual_edf_trace_cuda_trace_terms <- as.numeric(
+    summary$residual_edf_trace_cuda_trace_terms %||% 0
+  )
+  residual_edf_trace_cuda_candidate_count <- as.numeric(
+    summary$residual_edf_trace_cuda_candidate_count %||% 0
+  )
+  residual_edf_trace_cuda_p_weighted_sum <- as.numeric(
+    summary$residual_edf_trace_cuda_p_weighted_sum %||% 0
+  )
   data.frame(
     scenario_id = scenario$scenario_id,
     repeat_id = as.integer(repeat_id),
@@ -450,6 +465,37 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$residual_edf_trace_cuda_fallback_count %||% 0L),
     residual_edf_trace_cuda_values =
       as.numeric(summary$residual_edf_trace_cuda_values %||% 0),
+    residual_edf_trace_cuda_kernel_launch_count =
+      as.integer(
+        summary$residual_edf_trace_cuda_kernel_launch_count %||% 0L
+      ),
+    residual_edf_trace_cuda_system_count =
+      as.integer(summary$residual_edf_trace_cuda_system_count %||% 0L),
+    residual_edf_trace_cuda_trace_terms =
+      residual_edf_trace_cuda_trace_terms,
+    residual_edf_trace_cuda_p_max =
+      as.integer(summary$residual_edf_trace_cuda_p_max %||% 0L),
+    residual_edf_trace_cuda_p_weighted_mean =
+      if (residual_edf_trace_cuda_candidate_count > 0) {
+        residual_edf_trace_cuda_p_weighted_sum /
+          residual_edf_trace_cuda_candidate_count
+      } else {
+        0
+      },
+    residual_edf_trace_cuda_time_per_system_ns =
+      if (residual_edf_trace_cuda_system_count > 0) {
+        residual_edf_trace_cuda_sec * 1e9 /
+          residual_edf_trace_cuda_system_count
+      } else {
+        0
+      },
+    residual_edf_trace_cuda_time_per_trace_term_ns =
+      if (residual_edf_trace_cuda_trace_terms > 0) {
+        residual_edf_trace_cuda_sec * 1e9 /
+          residual_edf_trace_cuda_trace_terms
+      } else {
+        0
+      },
     residual_candidate_inverse_values_avoided =
       as.numeric(summary$residual_candidate_inverse_values_avoided %||% 0),
     residual_d2h_residuals_ms =
