@@ -358,6 +358,10 @@ struct SchedulerDiagnostics {
   int dcov_rowsum_chunk_count;
   double dcov_rowsum_total_blocks;
   double dcov_rowsum_pair_count;
+  int dcov_rowsum_abs_fast_count;
+  int dcov_rowsum_pow_generic_count;
+  double dcov_rowsum_abs_pair_count;
+  double dcov_rowsum_generic_pair_count;
   int dcov_rowsum_threads;
   int dcov_rowsum_n_max;
   int dcov_rowsum_batch_total;

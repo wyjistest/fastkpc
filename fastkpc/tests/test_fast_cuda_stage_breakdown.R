@@ -90,6 +90,10 @@ required_dcov_rowsum_shape_fields <- c(
   "dcov_rowsum_chunk_count",
   "dcov_rowsum_total_blocks",
   "dcov_rowsum_pair_count",
+  "dcov_rowsum_abs_fast_count",
+  "dcov_rowsum_pow_generic_count",
+  "dcov_rowsum_abs_pair_count",
+  "dcov_rowsum_generic_pair_count",
   "dcov_rowsum_threads",
   "dcov_rowsum_n_max",
   "dcov_rowsum_batch_total",
@@ -113,6 +117,14 @@ assert_true(runs$dcov_rowsum_total_blocks[[1L]] > 0,
             "stage breakdown should record dCov rowsum grid blocks")
 assert_true(runs$dcov_rowsum_pair_count[[1L]] > 0,
             "stage breakdown should record dCov rowsum pair work")
+assert_true(runs$dcov_rowsum_abs_fast_count[[1L]] > 0L,
+            "stage breakdown should record default dCov abs fast rowsum")
+assert_true(runs$dcov_rowsum_pow_generic_count[[1L]] == 0L,
+            "stage breakdown should avoid generic pow rowsum by default")
+assert_true(runs$dcov_rowsum_abs_pair_count[[1L]] > 0,
+            "stage breakdown should record abs fast rowsum pair work")
+assert_true(runs$dcov_rowsum_generic_pair_count[[1L]] == 0,
+            "stage breakdown should avoid generic rowsum pair work by default")
 assert_true(runs$dcov_rowsum_threads[[1L]] > 0L,
             "stage breakdown should record dCov rowsum thread count")
 assert_true(runs$dcov_rowsum_n_max[[1L]] >= scenario$n,

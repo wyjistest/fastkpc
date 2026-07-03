@@ -942,6 +942,12 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
     diagnostics->dcov_rowsum_chunk_count += batch.rowsum_chunk_count;
     diagnostics->dcov_rowsum_total_blocks += batch.rowsum_total_blocks;
     diagnostics->dcov_rowsum_pair_count += batch.rowsum_pair_count;
+    diagnostics->dcov_rowsum_abs_fast_count += batch.rowsum_abs_fast_count;
+    diagnostics->dcov_rowsum_pow_generic_count +=
+      batch.rowsum_pow_generic_count;
+    diagnostics->dcov_rowsum_abs_pair_count += batch.rowsum_abs_pair_count;
+    diagnostics->dcov_rowsum_generic_pair_count +=
+      batch.rowsum_generic_pair_count;
     diagnostics->dcov_rowsum_threads =
       std::max(diagnostics->dcov_rowsum_threads, batch.rowsum_threads);
     diagnostics->dcov_rowsum_n_max =

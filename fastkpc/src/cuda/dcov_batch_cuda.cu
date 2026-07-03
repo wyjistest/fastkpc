@@ -29,6 +29,76 @@ __device__ __forceinline__ double pair_dist_1d(const double* values,
   return dist;
 }
 
+__global__ void rowsum_raw_abs_kernel(const double* x,
+                                      const double* y,
+                                      int n,
+                                      int batch,
+                                      double* row_k,
+                                      double* row_l,
+                                      double* total_k,
+                                      double* total_l,
+                                      double* scalars) {
+  __shared__ double sx_s[kBlock];
+  __shared__ double sy_s[kBlock];
+  __shared__ double raw_ab_s[kBlock];
+  __shared__ double raw_aa_s[kBlock];
+  __shared__ double raw_bb_s[kBlock];
+
+  const int row = blockIdx.x;
+  const int task = blockIdx.y;
+  if (row >= n || task >= batch) return;
+
+  const double* x_col = x + static_cast<std::size_t>(task) * n;
+  const double* y_col = y + static_cast<std::size_t>(task) * n;
+  const double xr = x_col[row];
+  const double yr = y_col[row];
+
+  double sx = 0.0;
+  double sy = 0.0;
+  double raw_ab = 0.0;
+  double raw_aa = 0.0;
+  double raw_bb = 0.0;
+  for (int j = threadIdx.x; j < n; j += blockDim.x) {
+    const double a = fabs(xr - x_col[j]);
+    const double b = fabs(yr - y_col[j]);
+    sx += a;
+    sy += b;
+    raw_ab += a * b;
+    raw_aa += a * a;
+    raw_bb += b * b;
+  }
+
+  sx_s[threadIdx.x] = sx;
+  sy_s[threadIdx.x] = sy;
+  raw_ab_s[threadIdx.x] = raw_ab;
+  raw_aa_s[threadIdx.x] = raw_aa;
+  raw_bb_s[threadIdx.x] = raw_bb;
+  __syncthreads();
+
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      sx_s[threadIdx.x] += sx_s[threadIdx.x + stride];
+      sy_s[threadIdx.x] += sy_s[threadIdx.x + stride];
+      raw_ab_s[threadIdx.x] += raw_ab_s[threadIdx.x + stride];
+      raw_aa_s[threadIdx.x] += raw_aa_s[threadIdx.x + stride];
+      raw_bb_s[threadIdx.x] += raw_bb_s[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    const std::size_t row_base = static_cast<std::size_t>(task) * n + row;
+    const std::size_t scalar_base = static_cast<std::size_t>(task) * 6;
+    row_k[row_base] = sx_s[0];
+    row_l[row_base] = sy_s[0];
+    atomicAdd(&total_k[task], sx_s[0]);
+    atomicAdd(&total_l[task], sy_s[0]);
+    atomicAdd(&scalars[scalar_base + 0], raw_ab_s[0]);
+    atomicAdd(&scalars[scalar_base + 1], raw_aa_s[0]);
+    atomicAdd(&scalars[scalar_base + 2], raw_bb_s[0]);
+  }
+}
+
 __global__ void rowsum_raw_kernel(const double* x,
                                   const double* y,
                                   int n,
@@ -180,6 +250,10 @@ void add_timing(DcovBatchResult* out, const DcovBatchResult& value) {
   out->rowsum_chunk_count += value.rowsum_chunk_count;
   out->rowsum_total_blocks += value.rowsum_total_blocks;
   out->rowsum_pair_count += value.rowsum_pair_count;
+  out->rowsum_abs_fast_count += value.rowsum_abs_fast_count;
+  out->rowsum_pow_generic_count += value.rowsum_pow_generic_count;
+  out->rowsum_abs_pair_count += value.rowsum_abs_pair_count;
+  out->rowsum_generic_pair_count += value.rowsum_generic_pair_count;
   out->rowsum_threads = std::max(out->rowsum_threads, value.rowsum_threads);
   out->rowsum_n_max = std::max(out->rowsum_n_max, value.rowsum_n_max);
   out->rowsum_batch_total += value.rowsum_batch_total;
@@ -440,11 +514,21 @@ DcovBatchResult dcov_batch_cuda_chunk_impl(const double* x,
 
     stage = std::chrono::steady_clock::now();
     const dim3 rowsum_grid(n, batch);
-    rowsum_raw_kernel<<<rowsum_grid, kBlock>>>(
-      buffers->d_x, buffers->d_y, n, batch, options.index,
-      options.legacy_index, buffers->d_row_k, buffers->d_row_l,
-      buffers->d_total_k, buffers->d_total_l, buffers->d_scalars);
-    check_cuda(cudaGetLastError(), "launch rowsum raw aggregate");
+    const bool use_abs_fast_rowsum =
+      options.legacy_index || options.index == 1.0;
+    if (use_abs_fast_rowsum) {
+      rowsum_raw_abs_kernel<<<rowsum_grid, kBlock>>>(
+        buffers->d_x, buffers->d_y, n, batch, buffers->d_row_k,
+        buffers->d_row_l, buffers->d_total_k, buffers->d_total_l,
+        buffers->d_scalars);
+      check_cuda(cudaGetLastError(), "launch rowsum raw abs aggregate");
+    } else {
+      rowsum_raw_kernel<<<rowsum_grid, kBlock>>>(
+        buffers->d_x, buffers->d_y, n, batch, options.index,
+        options.legacy_index, buffers->d_row_k, buffers->d_row_l,
+        buffers->d_total_k, buffers->d_total_l, buffers->d_scalars);
+      check_cuda(cudaGetLastError(), "launch rowsum raw aggregate");
+    }
     check_cuda(cudaDeviceSynchronize(), "rowsum raw aggregate synchronize");
     result.raw_aggregate_fused_count += batch;
     const double rowsum_sec = elapsed_since(stage);
@@ -453,8 +537,16 @@ DcovBatchResult dcov_batch_cuda_chunk_impl(const double* x,
     result.rowsum_chunk_count += 1;
     result.rowsum_total_blocks += static_cast<double>(n) *
       static_cast<double>(batch);
-    result.rowsum_pair_count += static_cast<double>(n) *
+    const double rowsum_pair_count = static_cast<double>(n) *
       static_cast<double>(n) * static_cast<double>(batch);
+    result.rowsum_pair_count += rowsum_pair_count;
+    if (use_abs_fast_rowsum) {
+      result.rowsum_abs_fast_count += batch;
+      result.rowsum_abs_pair_count += rowsum_pair_count;
+    } else {
+      result.rowsum_pow_generic_count += batch;
+      result.rowsum_generic_pair_count += rowsum_pair_count;
+    }
     result.rowsum_threads = std::max(result.rowsum_threads, kBlock);
     result.rowsum_n_max = std::max(result.rowsum_n_max, n);
     result.rowsum_batch_total += batch;

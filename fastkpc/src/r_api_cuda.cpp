@@ -799,6 +799,14 @@ Rcpp::List scheduler_diagnostics_to_list(const SchedulerDiagnostics& diagnostics
         diagnostics.dcov_rowsum_total_blocks,
       Rcpp::Named("dcov_rowsum_pair_count") =
         diagnostics.dcov_rowsum_pair_count,
+      Rcpp::Named("dcov_rowsum_abs_fast_count") =
+        diagnostics.dcov_rowsum_abs_fast_count,
+      Rcpp::Named("dcov_rowsum_pow_generic_count") =
+        diagnostics.dcov_rowsum_pow_generic_count,
+      Rcpp::Named("dcov_rowsum_abs_pair_count") =
+        diagnostics.dcov_rowsum_abs_pair_count,
+      Rcpp::Named("dcov_rowsum_generic_pair_count") =
+        diagnostics.dcov_rowsum_generic_pair_count,
       Rcpp::Named("dcov_rowsum_threads") =
         diagnostics.dcov_rowsum_threads,
       Rcpp::Named("dcov_rowsum_n_max") =
@@ -1689,6 +1697,12 @@ extern "C" SEXP C_fast_dcov_batch_cuda(SEXP xs, SEXP ys, SEXP indexs,
       Rcpp::Named("rowsum_chunk_count") = result.rowsum_chunk_count,
       Rcpp::Named("rowsum_total_blocks") = result.rowsum_total_blocks,
       Rcpp::Named("rowsum_pair_count") = result.rowsum_pair_count,
+      Rcpp::Named("rowsum_abs_fast_count") = result.rowsum_abs_fast_count,
+      Rcpp::Named("rowsum_pow_generic_count") =
+        result.rowsum_pow_generic_count,
+      Rcpp::Named("rowsum_abs_pair_count") = result.rowsum_abs_pair_count,
+      Rcpp::Named("rowsum_generic_pair_count") =
+        result.rowsum_generic_pair_count,
       Rcpp::Named("rowsum_threads") = result.rowsum_threads,
       Rcpp::Named("rowsum_n_max") = result.rowsum_n_max,
       Rcpp::Named("rowsum_batch_total") = result.rowsum_batch_total,

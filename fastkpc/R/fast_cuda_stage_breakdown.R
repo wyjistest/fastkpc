@@ -370,6 +370,14 @@ fastkpc_stage_breakdown_run_row <- function(result, scenario, repeat_id) {
       as.integer(summary$dcov_rowsum_chunk_count %||% 0L),
     dcov_rowsum_total_blocks = dcov_rowsum_total_blocks,
     dcov_rowsum_pair_count = dcov_rowsum_pair_count,
+    dcov_rowsum_abs_fast_count =
+      as.integer(summary$dcov_rowsum_abs_fast_count %||% 0L),
+    dcov_rowsum_pow_generic_count =
+      as.integer(summary$dcov_rowsum_pow_generic_count %||% 0L),
+    dcov_rowsum_abs_pair_count =
+      as.numeric(summary$dcov_rowsum_abs_pair_count %||% 0),
+    dcov_rowsum_generic_pair_count =
+      as.numeric(summary$dcov_rowsum_generic_pair_count %||% 0),
     dcov_rowsum_threads =
       as.integer(summary$dcov_rowsum_threads %||% 0L),
     dcov_rowsum_n_max =

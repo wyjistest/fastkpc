@@ -38,6 +38,10 @@ struct DcovBatchResult {
   int rowsum_chunk_count = 0;
   double rowsum_total_blocks = 0.0;
   double rowsum_pair_count = 0.0;
+  int rowsum_abs_fast_count = 0;
+  int rowsum_pow_generic_count = 0;
+  double rowsum_abs_pair_count = 0.0;
+  double rowsum_generic_pair_count = 0.0;
   int rowsum_threads = 0;
   int rowsum_n_max = 0;
   int rowsum_batch_total = 0;

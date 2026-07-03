@@ -69,6 +69,16 @@ assert_true(as.numeric(large$diagnostics$rowsum_total_blocks) > 0,
             "direct dCov batch API should count rowsum blocks")
 assert_true(as.numeric(large$diagnostics$rowsum_pair_count) > 0,
             "direct dCov batch API should count rowsum pair work")
+assert_true(as.integer(large$diagnostics$rowsum_abs_fast_count) > 0L,
+            "default dCov rowsum should use the abs fast path")
+assert_true(identical(as.integer(large$diagnostics$rowsum_pow_generic_count),
+                      0L),
+            "default dCov rowsum should avoid the generic pow path")
+assert_true(as.numeric(large$diagnostics$rowsum_abs_pair_count) > 0,
+            "default dCov rowsum should count abs fast pair work")
+assert_true(identical(as.numeric(large$diagnostics$rowsum_generic_pair_count),
+                      0),
+            "default dCov rowsum should avoid generic pair work")
 assert_true(as.integer(large$diagnostics$rowsum_threads) > 0L,
             "direct dCov batch API should report rowsum threads")
 assert_true(as.integer(large$diagnostics$rowsum_n_max) == nrow(large_x),
@@ -120,6 +130,18 @@ legacy <- fast_dcov_batch_cuda(xi, yi, index = 1.5, legacy_index = TRUE)
 semantic <- fast_dcov_batch_cuda(xi, yi, index = 1.5, legacy_index = FALSE)
 assert_true(max(abs(legacy$nV2 - semantic$nV2)) > 1e-8,
             "legacy_index should change nV2 when index != 1")
+assert_true(as.integer(legacy$diagnostics$rowsum_abs_fast_count) > 0L,
+            "legacy index mode should keep the abs fast rowsum path")
+assert_true(identical(as.integer(legacy$diagnostics$rowsum_pow_generic_count),
+                      0L),
+            "legacy index mode should avoid generic pow rowsum")
+assert_true(as.integer(semantic$diagnostics$rowsum_pow_generic_count) > 0L,
+            "semantic index != 1 should use generic pow rowsum")
+assert_true(as.numeric(semantic$diagnostics$rowsum_generic_pair_count) > 0,
+            "semantic index != 1 should count generic pair work")
+assert_true(identical(as.integer(semantic$diagnostics$rowsum_abs_fast_count),
+                      0L),
+            "semantic index != 1 should not use abs fast rowsum")
 check_column_matches_cpu(xi, yi, index = 1.5, legacy_index = FALSE)
 
 assert_error(fast_dcov_batch_cuda(1:5, 1:5), "gamma approximation requires n > 5")
