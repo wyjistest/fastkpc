@@ -127,6 +127,8 @@ assert_true(runs$dcov_rowsum_generic_pair_count[[1L]] == 0,
             "stage breakdown should avoid generic rowsum pair work by default")
 assert_true(runs$dcov_rowsum_threads[[1L]] > 0L,
             "stage breakdown should record dCov rowsum thread count")
+assert_true(runs$dcov_rowsum_threads[[1L]] %in% c(64L, 128L, 256L),
+            "stage breakdown should record a supported dCov rowsum block size")
 assert_true(runs$dcov_rowsum_n_max[[1L]] >= scenario$n,
             "stage breakdown should record dCov rowsum n")
 assert_true(runs$dcov_rowsum_batch_total[[1L]] > 0L,

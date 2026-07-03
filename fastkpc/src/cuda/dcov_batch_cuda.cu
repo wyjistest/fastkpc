@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -15,6 +16,19 @@
 namespace {
 
 constexpr int kBlock = 256;
+
+int rowsum_abs_block_size(int n) {
+  const char* override_value = std::getenv("FASTKPC_DCOV_ROWSUM_BLOCK");
+  if (override_value != nullptr && override_value[0] != '\0') {
+    const int override_block = std::atoi(override_value);
+    if (override_block == 64 || override_block == 128 ||
+        override_block == 256) {
+      return override_block;
+    }
+  }
+  (void)n;
+  return 64;
+}
 
 __device__ __forceinline__ double pair_dist_1d(const double* values,
                                                int n,
@@ -29,6 +43,7 @@ __device__ __forceinline__ double pair_dist_1d(const double* values,
   return dist;
 }
 
+template<int BlockSize>
 __global__ void rowsum_raw_abs_kernel(const double* x,
                                       const double* y,
                                       int n,
@@ -38,11 +53,11 @@ __global__ void rowsum_raw_abs_kernel(const double* x,
                                       double* total_k,
                                       double* total_l,
                                       double* scalars) {
-  __shared__ double sx_s[kBlock];
-  __shared__ double sy_s[kBlock];
-  __shared__ double raw_ab_s[kBlock];
-  __shared__ double raw_aa_s[kBlock];
-  __shared__ double raw_bb_s[kBlock];
+  __shared__ double sx_s[BlockSize];
+  __shared__ double sy_s[BlockSize];
+  __shared__ double raw_ab_s[BlockSize];
+  __shared__ double raw_aa_s[BlockSize];
+  __shared__ double raw_bb_s[BlockSize];
 
   const int row = blockIdx.x;
   const int task = blockIdx.y;
@@ -75,7 +90,7 @@ __global__ void rowsum_raw_abs_kernel(const double* x,
   raw_bb_s[threadIdx.x] = raw_bb;
   __syncthreads();
 
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+  for (int stride = BlockSize / 2; stride > 0; stride >>= 1) {
     if (threadIdx.x < stride) {
       sx_s[threadIdx.x] += sx_s[threadIdx.x + stride];
       sy_s[threadIdx.x] += sy_s[threadIdx.x + stride];
@@ -516,11 +531,25 @@ DcovBatchResult dcov_batch_cuda_chunk_impl(const double* x,
     const dim3 rowsum_grid(n, batch);
     const bool use_abs_fast_rowsum =
       options.legacy_index || options.index == 1.0;
+    int rowsum_threads = kBlock;
     if (use_abs_fast_rowsum) {
-      rowsum_raw_abs_kernel<<<rowsum_grid, kBlock>>>(
-        buffers->d_x, buffers->d_y, n, batch, buffers->d_row_k,
-        buffers->d_row_l, buffers->d_total_k, buffers->d_total_l,
-        buffers->d_scalars);
+      rowsum_threads = rowsum_abs_block_size(n);
+      if (rowsum_threads == 64) {
+        rowsum_raw_abs_kernel<64><<<rowsum_grid, 64>>>(
+          buffers->d_x, buffers->d_y, n, batch, buffers->d_row_k,
+          buffers->d_row_l, buffers->d_total_k, buffers->d_total_l,
+          buffers->d_scalars);
+      } else if (rowsum_threads == 128) {
+        rowsum_raw_abs_kernel<128><<<rowsum_grid, 128>>>(
+          buffers->d_x, buffers->d_y, n, batch, buffers->d_row_k,
+          buffers->d_row_l, buffers->d_total_k, buffers->d_total_l,
+          buffers->d_scalars);
+      } else {
+        rowsum_raw_abs_kernel<256><<<rowsum_grid, 256>>>(
+          buffers->d_x, buffers->d_y, n, batch, buffers->d_row_k,
+          buffers->d_row_l, buffers->d_total_k, buffers->d_total_l,
+          buffers->d_scalars);
+      }
       check_cuda(cudaGetLastError(), "launch rowsum raw abs aggregate");
     } else {
       rowsum_raw_kernel<<<rowsum_grid, kBlock>>>(
@@ -547,7 +576,7 @@ DcovBatchResult dcov_batch_cuda_chunk_impl(const double* x,
       result.rowsum_pow_generic_count += batch;
       result.rowsum_generic_pair_count += rowsum_pair_count;
     }
-    result.rowsum_threads = std::max(result.rowsum_threads, kBlock);
+    result.rowsum_threads = std::max(result.rowsum_threads, rowsum_threads);
     result.rowsum_n_max = std::max(result.rowsum_n_max, n);
     result.rowsum_batch_total += batch;
     result.rowsum_max_chunk_batch =

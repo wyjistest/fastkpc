@@ -81,6 +81,8 @@ assert_true(identical(as.numeric(large$diagnostics$rowsum_generic_pair_count),
             "default dCov rowsum should avoid generic pair work")
 assert_true(as.integer(large$diagnostics$rowsum_threads) > 0L,
             "direct dCov batch API should report rowsum threads")
+assert_true(identical(as.integer(large$diagnostics$rowsum_threads), 64L),
+            "default abs-fast dCov rowsum should use tuned 64-thread blocks")
 assert_true(as.integer(large$diagnostics$rowsum_n_max) == nrow(large_x),
             "direct dCov batch API should report rowsum n")
 assert_true(as.integer(large$diagnostics$rowsum_batch_total) == ncol(large_x),
@@ -91,6 +93,29 @@ assert_true(as.numeric(large$diagnostics$rowsum_max_chunk_sec) >= 0,
             "direct dCov batch API should report max rowsum chunk time")
 assert_true(as.integer(large$diagnostics$rowsum_max_chunk_n) == nrow(large_x),
             "direct dCov batch API should report max rowsum chunk n")
+old_rowsum_block <- Sys.getenv("FASTKPC_DCOV_ROWSUM_BLOCK", unset = NA)
+on.exit({
+  if (is.na(old_rowsum_block)) {
+    Sys.unsetenv("FASTKPC_DCOV_ROWSUM_BLOCK")
+  } else {
+    Sys.setenv(FASTKPC_DCOV_ROWSUM_BLOCK = old_rowsum_block)
+  }
+}, add = TRUE)
+set.seed(2300)
+block_x <- matrix(rnorm(160 * 4), 160, 4)
+block_y <- matrix(rnorm(160 * 4), 160, 4)
+Sys.setenv(FASTKPC_DCOV_ROWSUM_BLOCK = "64")
+block64 <- fast_dcov_batch_cuda(block_x, block_y)
+assert_true(identical(as.integer(block64$diagnostics$rowsum_threads), 64L),
+            "dCov rowsum block override should select 64 threads")
+assert_true(as.integer(block64$diagnostics$rowsum_abs_fast_count) > 0L,
+            "64-thread dCov rowsum override should use abs fast path")
+Sys.setenv(FASTKPC_DCOV_ROWSUM_BLOCK = "128")
+block128 <- fast_dcov_batch_cuda(block_x, block_y)
+assert_true(identical(as.integer(block128$diagnostics$rowsum_threads), 128L),
+            "dCov rowsum block override should select 128 threads")
+assert_true(as.integer(block128$diagnostics$rowsum_abs_fast_count) > 0L,
+            "128-thread dCov rowsum override should use abs fast path")
 assert_true(as.integer(large$diagnostics$row_product_reduce_count) > 0L,
             "direct dCov batch API should use row-product reduce")
 assert_true(identical(as.integer(large$diagnostics$pvalue_only_count), 0L),
@@ -142,6 +167,8 @@ assert_true(as.numeric(semantic$diagnostics$rowsum_generic_pair_count) > 0,
 assert_true(identical(as.integer(semantic$diagnostics$rowsum_abs_fast_count),
                       0L),
             "semantic index != 1 should not use abs fast rowsum")
+assert_true(identical(as.integer(semantic$diagnostics$rowsum_threads), 256L),
+            "semantic index != 1 should keep the generic 256-thread rowsum")
 check_column_matches_cpu(xi, yi, index = 1.5, legacy_index = FALSE)
 
 assert_error(fast_dcov_batch_cuda(1:5, 1:5), "gamma approximation requires n > 5")
