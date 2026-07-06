@@ -331,6 +331,15 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_pgamma_ms = 0,
     dcov_output_ms = 0,
     dcov_unaccounted_ms = 0,
+    dcov_cpp_shadow_ms = 0,
+    dcov_cpp_shadow_count = 0L,
+    dcov_cpp_shadow_error_count = 0L,
+    dcov_cpp_shadow_decision_flip_count = 0L,
+    dcov_cpp_shadow_near_alpha_count = 0L,
+    dcov_cpp_shadow_max_p_diff = 0,
+    dcov_cpp_shadow_max_nV2_diff = 0,
+    dcov_cpp_shadow_max_mean_diff = 0,
+    dcov_cpp_shadow_max_variance_diff = 0,
     direct_ci_count = 0L,
     conditional_ci_count = 0L,
     mgcv_fit_count = 0L,
@@ -366,6 +375,33 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     dcov_unaccounted_ms =
       as.numeric(a$dcov_unaccounted_ms) +
         as.numeric(b$dcov_unaccounted_ms),
+    dcov_cpp_shadow_ms =
+      as.numeric(a$dcov_cpp_shadow_ms) +
+        as.numeric(b$dcov_cpp_shadow_ms),
+    dcov_cpp_shadow_count =
+      as.integer(a$dcov_cpp_shadow_count) +
+        as.integer(b$dcov_cpp_shadow_count),
+    dcov_cpp_shadow_error_count =
+      as.integer(a$dcov_cpp_shadow_error_count) +
+        as.integer(b$dcov_cpp_shadow_error_count),
+    dcov_cpp_shadow_decision_flip_count =
+      as.integer(a$dcov_cpp_shadow_decision_flip_count) +
+        as.integer(b$dcov_cpp_shadow_decision_flip_count),
+    dcov_cpp_shadow_near_alpha_count =
+      as.integer(a$dcov_cpp_shadow_near_alpha_count) +
+        as.integer(b$dcov_cpp_shadow_near_alpha_count),
+    dcov_cpp_shadow_max_p_diff =
+      max(as.numeric(a$dcov_cpp_shadow_max_p_diff),
+          as.numeric(b$dcov_cpp_shadow_max_p_diff)),
+    dcov_cpp_shadow_max_nV2_diff =
+      max(as.numeric(a$dcov_cpp_shadow_max_nV2_diff),
+          as.numeric(b$dcov_cpp_shadow_max_nV2_diff)),
+    dcov_cpp_shadow_max_mean_diff =
+      max(as.numeric(a$dcov_cpp_shadow_max_mean_diff),
+          as.numeric(b$dcov_cpp_shadow_max_mean_diff)),
+    dcov_cpp_shadow_max_variance_diff =
+      max(as.numeric(a$dcov_cpp_shadow_max_variance_diff),
+          as.numeric(b$dcov_cpp_shadow_max_variance_diff)),
     direct_ci_count =
       as.integer(a$direct_ci_count) + as.integer(b$direct_ci_count),
     conditional_ci_count =
@@ -392,6 +428,9 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_distance_ms = numeric(), dcov_lowrank_ms = numeric(),
       dcov_statistic_ms = numeric(), dcov_moment_ms = numeric(),
       dcov_pgamma_ms = numeric(),
+      dcov_cpp_shadow_ms = numeric(), dcov_cpp_shadow_count = integer(),
+      dcov_cpp_shadow_decision_flip_count = integer(),
+      dcov_cpp_shadow_error_count = integer(),
       mgcv_fit_count = integer(), dcov_gamma_count = integer()
     ))
   }
@@ -414,6 +453,12 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_statistic_ms = as.numeric(metrics$dcov_statistic_ms),
       dcov_moment_ms = as.numeric(metrics$dcov_moment_ms),
       dcov_pgamma_ms = as.numeric(metrics$dcov_pgamma_ms),
+      dcov_cpp_shadow_ms = as.numeric(metrics$dcov_cpp_shadow_ms),
+      dcov_cpp_shadow_count = as.integer(metrics$dcov_cpp_shadow_count),
+      dcov_cpp_shadow_decision_flip_count =
+        as.integer(metrics$dcov_cpp_shadow_decision_flip_count),
+      dcov_cpp_shadow_error_count =
+        as.integer(metrics$dcov_cpp_shadow_error_count),
       mgcv_fit_count = as.integer(metrics$mgcv_fit_count),
       dcov_gamma_count = as.integer(metrics$dcov_gamma_count)
     )
@@ -442,6 +487,66 @@ fastkpc_legacy_runtime_add_dcov <- function(metrics, diagnostics) {
     as.numeric(diagnostics$output_ms)
   metrics$dcov_unaccounted_ms <- metrics$dcov_unaccounted_ms +
     as.numeric(diagnostics$unaccounted_ms)
+  metrics
+}
+
+fastkpc_legacy_dcov_cpp_shadow_enabled <- function() {
+  identical(Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SHADOW", unset = ""), "1")
+}
+
+fastkpc_legacy_prepare_dcov_cpp_shadow <- function(enabled) {
+  if (!isTRUE(enabled)) return(invisible(FALSE))
+  if (!exists("fastkpc_legacy_dcov_gamma_cpp_oracle", mode = "function")) {
+    try(source("fastkpc/R/native.R"), silent = TRUE)
+  }
+  if (exists("build_fastkpc_native", mode = "function")) {
+    build_fastkpc_native()
+  }
+  invisible(exists("fastkpc_legacy_dcov_gamma_cpp_oracle", mode = "function"))
+}
+
+fastkpc_legacy_runtime_add_dcov_cpp_shadow <- function(
+    metrics, x, y, legacy_result, alpha, index, numCol) {
+  shadow_start <- proc.time()[["elapsed"]]
+  cpp <- tryCatch(
+    fastkpc_legacy_dcov_gamma_cpp_oracle(
+      x = x, y = y, index = index, numCol = numCol
+    ),
+    error = function(e) structure(list(message = conditionMessage(e)),
+                                  class = "fastkpc_dcov_cpp_shadow_error")
+  )
+  metrics$dcov_cpp_shadow_ms <- metrics$dcov_cpp_shadow_ms +
+    (proc.time()[["elapsed"]] - shadow_start) * 1000
+  if (inherits(cpp, "fastkpc_dcov_cpp_shadow_error")) {
+    metrics$dcov_cpp_shadow_error_count <-
+      metrics$dcov_cpp_shadow_error_count + 1L
+    return(metrics)
+  }
+
+  legacy_estimates <- as.numeric(legacy_result$estimates)
+  legacy_p <- as.numeric(legacy_result$p.value)
+  cpp_p <- as.numeric(cpp$p.value)
+  p_diff <- abs(cpp_p - legacy_p)
+  nV2_diff <- abs(as.numeric(cpp$nV2) - legacy_estimates[[1L]])
+  mean_diff <- abs(as.numeric(cpp$mean) - legacy_estimates[[2L]])
+  variance_diff <- abs(as.numeric(cpp$variance) - legacy_estimates[[3L]])
+  metrics$dcov_cpp_shadow_count <- metrics$dcov_cpp_shadow_count + 1L
+  metrics$dcov_cpp_shadow_max_p_diff <- max(
+    metrics$dcov_cpp_shadow_max_p_diff, p_diff)
+  metrics$dcov_cpp_shadow_max_nV2_diff <- max(
+    metrics$dcov_cpp_shadow_max_nV2_diff, nV2_diff)
+  metrics$dcov_cpp_shadow_max_mean_diff <- max(
+    metrics$dcov_cpp_shadow_max_mean_diff, mean_diff)
+  metrics$dcov_cpp_shadow_max_variance_diff <- max(
+    metrics$dcov_cpp_shadow_max_variance_diff, variance_diff)
+  if (!identical(cpp_p >= alpha, legacy_p >= alpha)) {
+    metrics$dcov_cpp_shadow_decision_flip_count <-
+      metrics$dcov_cpp_shadow_decision_flip_count + 1L
+  }
+  if (abs(legacy_p - alpha) <= 1e-6 || abs(cpp_p - alpha) <= 1e-6) {
+    metrics$dcov_cpp_shadow_near_alpha_count <-
+      metrics$dcov_cpp_shadow_near_alpha_count + 1L
+  }
   metrics
 }
 
@@ -477,6 +582,9 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     min(as.integer(max_conditioning_size), p - 2L)
   }
   num_cores <- fastkpc_legacy_parallel_cores(num_cores)
+  dcov_cpp_shadow_enabled <- identical(ic.method, "dcc.gamma") &&
+    fastkpc_legacy_dcov_cpp_shadow_enabled()
+  fastkpc_legacy_prepare_dcov_cpp_shadow(dcov_cpp_shadow_enabled)
 
   G <- matrix(TRUE, nrow = p, ncol = p)
   diag(G) <- FALSE
@@ -506,6 +614,13 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           metrics <- fastkpc_legacy_runtime_add_dcov(
             metrics, timed$diagnostics
           )
+          if (isTRUE(dcov_cpp_shadow_enabled)) {
+            metrics <- fastkpc_legacy_runtime_add_dcov_cpp_shadow(
+              metrics = metrics, x = data[, x], y = data[, y],
+              legacy_result = timed$result, alpha = alpha,
+              index = index, numCol = numCol
+            )
+          }
           metrics$dcov_gamma_count <- 1L
           timed$result$p.value
         } else {
@@ -522,6 +637,13 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           metrics <- fastkpc_legacy_runtime_add_dcov(
             metrics, timed$diagnostics
           )
+          if (isTRUE(dcov_cpp_shadow_enabled)) {
+            metrics <- fastkpc_legacy_runtime_add_dcov_cpp_shadow(
+              metrics = metrics, x = residuals[, 1L], y = residuals[, 2L],
+              legacy_result = timed$result, alpha = alpha,
+              index = index, numCol = numCol
+            )
+          }
           metrics$dcov_gamma_count <- 1L
           timed$result$p.value
         }
@@ -781,6 +903,24 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.numeric(runtime_total$dcov_output_ms),
         legacy_dcov_unaccounted_ms =
           as.numeric(runtime_total$dcov_unaccounted_ms),
+        legacy_dcov_cpp_shadow_count =
+          as.integer(runtime_total$dcov_cpp_shadow_count),
+        legacy_dcov_cpp_shadow_ms =
+          as.numeric(runtime_total$dcov_cpp_shadow_ms),
+        legacy_dcov_cpp_shadow_max_p_diff =
+          as.numeric(runtime_total$dcov_cpp_shadow_max_p_diff),
+        legacy_dcov_cpp_shadow_max_nV2_diff =
+          as.numeric(runtime_total$dcov_cpp_shadow_max_nV2_diff),
+        legacy_dcov_cpp_shadow_max_mean_diff =
+          as.numeric(runtime_total$dcov_cpp_shadow_max_mean_diff),
+        legacy_dcov_cpp_shadow_max_variance_diff =
+          as.numeric(runtime_total$dcov_cpp_shadow_max_variance_diff),
+        legacy_dcov_cpp_shadow_decision_flip_count =
+          as.integer(runtime_total$dcov_cpp_shadow_decision_flip_count),
+        legacy_dcov_cpp_shadow_error_count =
+          as.integer(runtime_total$dcov_cpp_shadow_error_count),
+        legacy_dcov_cpp_shadow_near_alpha_count =
+          as.integer(runtime_total$dcov_cpp_shadow_near_alpha_count),
         legacy_direct_ci_count =
           as.integer(runtime_total$direct_ci_count),
         legacy_conditional_ci_count =
