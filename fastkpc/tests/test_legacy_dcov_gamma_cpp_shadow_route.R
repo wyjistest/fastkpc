@@ -92,6 +92,15 @@ required_cpp_stages <- c(
   "legacy_dcov_cpp_lowrank_select_ms",
   "legacy_dcov_cpp_lowrank_center_ms",
   "legacy_dcov_cpp_lowrank_unaccounted_ms",
+  "legacy_dcov_cpp_lowrank_full_eig_count",
+  "legacy_dcov_cpp_lowrank_spectra_count",
+  "legacy_dcov_cpp_lowrank_spectra_converged_count",
+  "legacy_dcov_cpp_lowrank_spectra_failed_count",
+  "legacy_dcov_cpp_lowrank_spectra_fallback_full_eig_count",
+  "legacy_dcov_cpp_lowrank_spectra_iterations",
+  "legacy_dcov_cpp_lowrank_spectra_nconv",
+  "legacy_dcov_cpp_lowrank_spectra_ncv",
+  "legacy_dcov_cpp_lowrank_spectra_tol",
   "legacy_dcov_cpp_statistic_ms",
   "legacy_dcov_cpp_moment_ms",
   "legacy_dcov_cpp_pgamma_ms",
@@ -119,6 +128,11 @@ lowrank_parts <- shadow_summary$legacy_dcov_cpp_lowrank_eig_ms +
   shadow_summary$legacy_dcov_cpp_lowrank_unaccounted_ms
 assert_true(abs(lowrank_parts - shadow_summary$legacy_dcov_cpp_lowrank_ms) <= 1e-3,
             "legacy dCov C++ shadow lowrank timing should be accounted")
+assert_true(shadow_summary$legacy_dcov_cpp_lowrank_full_eig_count > 0,
+            "default legacy dCov C++ shadow should report full eig lowrank count")
+assert_true(identical(
+  as.integer(shadow_summary$legacy_dcov_cpp_lowrank_spectra_count), 0L),
+  "default legacy dCov C++ shadow should not report Spectra selected eigs")
 assert_true(shadow_summary$legacy_dcov_cpp_statistic_ms > 0,
             "legacy dCov C++ shadow should report statistic time")
 assert_true(shadow_summary$legacy_dcov_cpp_moment_ms > 0,

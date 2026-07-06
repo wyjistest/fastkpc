@@ -1,6 +1,10 @@
 #include <RcppArmadillo.h>
-// [[Rcpp::depends(RcppArmadillo)]]
+// [[Rcpp::depends(RcppArmadillo, RcppEigen, RSpectra)]]
 // [[Rcpp::plugins(cpp17)]]
+
+#include <Eigen/Core>
+#include <Spectra/MatOp/DenseSymMatProd.h>
+#include <Spectra/SymEigsSolver.h>
 
 #include "dcov_exact_cpu.hpp"
 #include "fastspline_basis.hpp"
@@ -18,8 +22,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <numeric>
 #include <sstream>
+#include <string>
 #include <utility>
 
 namespace {
@@ -111,11 +117,40 @@ struct LegacyDcovLowrankTimings {
   double eig_ms = 0.0;
   double select_ms = 0.0;
   double center_ms = 0.0;
+  int full_eig_count = 0;
+  int spectra_count = 0;
+  int spectra_converged_count = 0;
+  int spectra_failed_count = 0;
+  int spectra_fallback_full_eig_count = 0;
+  int spectra_iterations = 0;
+  int spectra_nconv = 0;
+  int spectra_ncv = 0;
+  double spectra_tol = 0.0;
 };
 
-LegacyDcovLowrank legacy_dcov_lowrank(const arma::mat& distance,
-                                      int num_col,
-                                      LegacyDcovLowrankTimings* timings = nullptr) {
+enum class LegacyDcovLowrankMode {
+  FullEig,
+  Spectra
+};
+
+LegacyDcovLowrankMode legacy_dcov_lowrank_mode_from_env() {
+  const char* raw = std::getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK");
+  if (raw == nullptr) return LegacyDcovLowrankMode::FullEig;
+  const std::string mode(raw);
+  if (mode == "spectra" || mode == "selected" || mode == "selected_eigs") {
+    return LegacyDcovLowrankMode::Spectra;
+  }
+  return LegacyDcovLowrankMode::FullEig;
+}
+
+const char* legacy_dcov_lowrank_mode_name(LegacyDcovLowrankMode mode) {
+  return mode == LegacyDcovLowrankMode::Spectra ? "spectra" : "full_eig";
+}
+
+LegacyDcovLowrank legacy_dcov_lowrank_full_eig(
+    const arma::mat& distance,
+    int num_col,
+    LegacyDcovLowrankTimings* timings = nullptr) {
   const auto eig_start = std::chrono::steady_clock::now();
   arma::vec eigenvalues;
   arma::mat eigenvectors;
@@ -143,8 +178,87 @@ LegacyDcovLowrank legacy_dcov_lowrank(const arma::mat& distance,
     timings->eig_ms += eig_ms;
     timings->select_ms += select_ms;
     timings->center_ms += center_ms;
+    timings->full_eig_count += 1;
   }
   return LegacyDcovLowrank{values, vectors};
+}
+
+LegacyDcovLowrank legacy_dcov_lowrank_spectra(
+    const arma::mat& distance,
+    int num_col,
+    LegacyDcovLowrankTimings* timings = nullptr) {
+  const int n = static_cast<int>(distance.n_rows);
+  const int ncv = std::min(n, std::max(2 * num_col + 1, 20));
+  constexpr double kTol = 1e-10;
+  constexpr int kMaxIterations = 1000;
+
+  if (timings != nullptr) {
+    timings->spectra_count += 1;
+    timings->spectra_ncv = std::max(timings->spectra_ncv, ncv);
+    timings->spectra_tol = std::max(timings->spectra_tol, kTol);
+  }
+
+  const auto eig_start = std::chrono::steady_clock::now();
+  Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
+                                 Eigen::ColMajor>> mapped(
+    distance.memptr(), distance.n_rows, distance.n_cols);
+  Spectra::DenseSymMatProd<double> op(mapped);
+  Spectra::SymEigsSolver<double, Spectra::LARGEST_MAGN,
+                         Spectra::DenseSymMatProd<double>> eigs(
+    &op, num_col, ncv);
+  eigs.init();
+  const int nconv = static_cast<int>(eigs.compute(
+    kMaxIterations, kTol, Spectra::LARGEST_MAGN));
+  const int iterations = static_cast<int>(eigs.num_iterations());
+  const bool ok = eigs.info() == Spectra::SUCCESSFUL && nconv >= num_col;
+  const double spectra_eig_ms = elapsed_ms_since(eig_start);
+  if (timings != nullptr) {
+    timings->eig_ms += spectra_eig_ms;
+    timings->spectra_iterations += iterations;
+    timings->spectra_nconv += nconv;
+    if (ok) {
+      timings->spectra_converged_count += 1;
+    } else {
+      timings->spectra_failed_count += 1;
+      timings->spectra_fallback_full_eig_count += 1;
+    }
+  }
+  if (!ok) {
+    return legacy_dcov_lowrank_full_eig(distance, num_col, timings);
+  }
+
+  const auto select_start = std::chrono::steady_clock::now();
+  const Eigen::VectorXd eigenvalues = eigs.eigenvalues();
+  const Eigen::MatrixXd eigenvectors = eigs.eigenvectors();
+  arma::mat vectors(distance.n_rows, num_col);
+  arma::vec values(num_col);
+  for (int col = 0; col < num_col; ++col) {
+    values(col) = eigenvalues(col);
+    for (int row = 0; row < n; ++row) {
+      vectors(row, col) = eigenvectors(row, col);
+    }
+  }
+  const double select_ms = elapsed_ms_since(select_start);
+
+  const auto center_start = std::chrono::steady_clock::now();
+  vectors.each_row() -= arma::mean(vectors, 0);
+  const double center_ms = elapsed_ms_since(center_start);
+
+  if (timings != nullptr) {
+    timings->select_ms += select_ms;
+    timings->center_ms += center_ms;
+  }
+  return LegacyDcovLowrank{values, vectors};
+}
+
+LegacyDcovLowrank legacy_dcov_lowrank(const arma::mat& distance,
+                                      int num_col,
+                                      LegacyDcovLowrankMode mode,
+                                      LegacyDcovLowrankTimings* timings = nullptr) {
+  if (mode == LegacyDcovLowrankMode::Spectra) {
+    return legacy_dcov_lowrank_spectra(distance, num_col, timings);
+  }
+  return legacy_dcov_lowrank_full_eig(distance, num_col, timings);
 }
 
 double legacy_dcov_weighted_cross_sum(const arma::mat& left,
@@ -1651,11 +1765,13 @@ Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
   const double distance_ms = elapsed_ms_since(distance_start);
 
   const auto lowrank_start = std::chrono::steady_clock::now();
+  const LegacyDcovLowrankMode lowrank_mode =
+    legacy_dcov_lowrank_mode_from_env();
   LegacyDcovLowrankTimings lowrank_timings;
   const LegacyDcovLowrank x_lowrank = legacy_dcov_lowrank(
-    matx, numCol, &lowrank_timings);
+    matx, numCol, lowrank_mode, &lowrank_timings);
   const LegacyDcovLowrank y_lowrank = legacy_dcov_lowrank(
-    maty, numCol, &lowrank_timings);
+    maty, numCol, lowrank_mode, &lowrank_timings);
   const double lowrank_ms = elapsed_ms_since(lowrank_start);
   const double lowrank_accounted_ms = lowrank_timings.eig_ms +
     lowrank_timings.select_ms + lowrank_timings.center_ms;
@@ -1712,6 +1828,8 @@ Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
       Rcpp::Named("n") = n,
       Rcpp::Named("numCol") = numCol,
       Rcpp::Named("index") = index,
+      Rcpp::Named("lowrank_mode") =
+        std::string(legacy_dcov_lowrank_mode_name(lowrank_mode)),
       Rcpp::Named("input_ms") = input_ms,
       Rcpp::Named("distance_ms") = distance_ms,
       Rcpp::Named("lowrank_ms") = lowrank_ms,
@@ -1719,6 +1837,24 @@ Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
       Rcpp::Named("lowrank_select_ms") = lowrank_timings.select_ms,
       Rcpp::Named("lowrank_center_ms") = lowrank_timings.center_ms,
       Rcpp::Named("lowrank_unaccounted_ms") = lowrank_unaccounted_ms,
+      Rcpp::Named("lowrank_full_eig_count") =
+        lowrank_timings.full_eig_count,
+      Rcpp::Named("lowrank_spectra_count") =
+        lowrank_timings.spectra_count,
+      Rcpp::Named("lowrank_spectra_converged_count") =
+        lowrank_timings.spectra_converged_count,
+      Rcpp::Named("lowrank_spectra_failed_count") =
+        lowrank_timings.spectra_failed_count,
+      Rcpp::Named("lowrank_spectra_fallback_full_eig_count") =
+        lowrank_timings.spectra_fallback_full_eig_count,
+      Rcpp::Named("lowrank_spectra_iterations") =
+        lowrank_timings.spectra_iterations,
+      Rcpp::Named("lowrank_spectra_nconv") =
+        lowrank_timings.spectra_nconv,
+      Rcpp::Named("lowrank_spectra_ncv") =
+        lowrank_timings.spectra_ncv,
+      Rcpp::Named("lowrank_spectra_tol") =
+        lowrank_timings.spectra_tol,
       Rcpp::Named("statistic_ms") = statistic_ms,
       Rcpp::Named("moment_ms") = moment_ms,
       Rcpp::Named("pgamma_ms") = pgamma_ms,

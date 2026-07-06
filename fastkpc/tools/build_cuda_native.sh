@@ -10,6 +10,8 @@ CXXFLAGS=$(R CMD config CXX17FLAGS)
 R_CPPFLAGS=$(R CMD config --cppflags)
 RCPP_FLAGS=$(Rscript -e 'cat(Rcpp:::CxxFlags())')
 RCPP_ARMADILLO_INCLUDE=$(Rscript -e 'cat(system.file("include", package="RcppArmadillo"))')
+RCPP_EIGEN_INCLUDE=$(Rscript -e 'cat(system.file("include", package="RcppEigen"))')
+RSPECTRA_INCLUDE=$(Rscript -e 'cat(system.file("include", package="RSpectra"))')
 BLAS_LIBS=$(R CMD config BLAS_LIBS)
 LAPACK_LIBS=$(R CMD config LAPACK_LIBS)
 FLIBS=$(R CMD config FLIBS)
@@ -19,7 +21,7 @@ LOCK="$BUILD/fastkpc_cuda.lock"
 SO="$BUILD/fastkpc_cuda.so"
 TMP_SO="$BUILD/fastkpc_cuda.so.tmp.$$"
 
-COMMON_INC="$R_CPPFLAGS $RCPP_FLAGS -I$RCPP_ARMADILLO_INCLUDE -I/usr/local/cuda/include -I$ROOT/src -I$ROOT/src/cuda"
+COMMON_INC="$R_CPPFLAGS $RCPP_FLAGS -I$RCPP_ARMADILLO_INCLUDE -I$RCPP_EIGEN_INCLUDE -I$RSPECTRA_INCLUDE -I/usr/local/cuda/include -I$ROOT/src -I$ROOT/src/cuda"
 COMMON_CXX="$CXXSTD $CXXFLAGS -fPIC $COMMON_INC"
 
 (

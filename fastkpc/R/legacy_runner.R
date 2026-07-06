@@ -347,6 +347,15 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_cpp_lowrank_select_ms = 0,
     dcov_cpp_lowrank_center_ms = 0,
     dcov_cpp_lowrank_unaccounted_ms = 0,
+    dcov_cpp_lowrank_full_eig_count = 0L,
+    dcov_cpp_lowrank_spectra_count = 0L,
+    dcov_cpp_lowrank_spectra_converged_count = 0L,
+    dcov_cpp_lowrank_spectra_failed_count = 0L,
+    dcov_cpp_lowrank_spectra_fallback_full_eig_count = 0L,
+    dcov_cpp_lowrank_spectra_iterations = 0L,
+    dcov_cpp_lowrank_spectra_nconv = 0L,
+    dcov_cpp_lowrank_spectra_ncv = 0L,
+    dcov_cpp_lowrank_spectra_tol = 0,
     dcov_cpp_statistic_ms = 0,
     dcov_cpp_moment_ms = 0,
     dcov_cpp_pgamma_ms = 0,
@@ -433,6 +442,33 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     dcov_cpp_lowrank_unaccounted_ms =
       as.numeric(a$dcov_cpp_lowrank_unaccounted_ms) +
         as.numeric(b$dcov_cpp_lowrank_unaccounted_ms),
+    dcov_cpp_lowrank_full_eig_count =
+      as.integer(a$dcov_cpp_lowrank_full_eig_count) +
+        as.integer(b$dcov_cpp_lowrank_full_eig_count),
+    dcov_cpp_lowrank_spectra_count =
+      as.integer(a$dcov_cpp_lowrank_spectra_count) +
+        as.integer(b$dcov_cpp_lowrank_spectra_count),
+    dcov_cpp_lowrank_spectra_converged_count =
+      as.integer(a$dcov_cpp_lowrank_spectra_converged_count) +
+        as.integer(b$dcov_cpp_lowrank_spectra_converged_count),
+    dcov_cpp_lowrank_spectra_failed_count =
+      as.integer(a$dcov_cpp_lowrank_spectra_failed_count) +
+        as.integer(b$dcov_cpp_lowrank_spectra_failed_count),
+    dcov_cpp_lowrank_spectra_fallback_full_eig_count =
+      as.integer(a$dcov_cpp_lowrank_spectra_fallback_full_eig_count) +
+        as.integer(b$dcov_cpp_lowrank_spectra_fallback_full_eig_count),
+    dcov_cpp_lowrank_spectra_iterations =
+      as.integer(a$dcov_cpp_lowrank_spectra_iterations) +
+        as.integer(b$dcov_cpp_lowrank_spectra_iterations),
+    dcov_cpp_lowrank_spectra_nconv =
+      as.integer(a$dcov_cpp_lowrank_spectra_nconv) +
+        as.integer(b$dcov_cpp_lowrank_spectra_nconv),
+    dcov_cpp_lowrank_spectra_ncv =
+      max(as.integer(a$dcov_cpp_lowrank_spectra_ncv),
+          as.integer(b$dcov_cpp_lowrank_spectra_ncv)),
+    dcov_cpp_lowrank_spectra_tol =
+      max(as.numeric(a$dcov_cpp_lowrank_spectra_tol),
+          as.numeric(b$dcov_cpp_lowrank_spectra_tol)),
     dcov_cpp_statistic_ms =
       as.numeric(a$dcov_cpp_statistic_ms) +
         as.numeric(b$dcov_cpp_statistic_ms),
@@ -482,6 +518,15 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_lowrank_select_ms = numeric(),
       dcov_cpp_lowrank_center_ms = numeric(),
       dcov_cpp_lowrank_unaccounted_ms = numeric(),
+      dcov_cpp_lowrank_full_eig_count = integer(),
+      dcov_cpp_lowrank_spectra_count = integer(),
+      dcov_cpp_lowrank_spectra_converged_count = integer(),
+      dcov_cpp_lowrank_spectra_failed_count = integer(),
+      dcov_cpp_lowrank_spectra_fallback_full_eig_count = integer(),
+      dcov_cpp_lowrank_spectra_iterations = integer(),
+      dcov_cpp_lowrank_spectra_nconv = integer(),
+      dcov_cpp_lowrank_spectra_ncv = integer(),
+      dcov_cpp_lowrank_spectra_tol = numeric(),
       dcov_cpp_statistic_ms = numeric(), dcov_cpp_moment_ms = numeric(),
       dcov_cpp_pgamma_ms = numeric(), dcov_cpp_overhead_ms = numeric(),
       mgcv_fit_count = integer(), dcov_gamma_count = integer()
@@ -522,6 +567,24 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.numeric(metrics$dcov_cpp_lowrank_center_ms),
       dcov_cpp_lowrank_unaccounted_ms =
         as.numeric(metrics$dcov_cpp_lowrank_unaccounted_ms),
+      dcov_cpp_lowrank_full_eig_count =
+        as.integer(metrics$dcov_cpp_lowrank_full_eig_count),
+      dcov_cpp_lowrank_spectra_count =
+        as.integer(metrics$dcov_cpp_lowrank_spectra_count),
+      dcov_cpp_lowrank_spectra_converged_count =
+        as.integer(metrics$dcov_cpp_lowrank_spectra_converged_count),
+      dcov_cpp_lowrank_spectra_failed_count =
+        as.integer(metrics$dcov_cpp_lowrank_spectra_failed_count),
+      dcov_cpp_lowrank_spectra_fallback_full_eig_count =
+        as.integer(metrics$dcov_cpp_lowrank_spectra_fallback_full_eig_count),
+      dcov_cpp_lowrank_spectra_iterations =
+        as.integer(metrics$dcov_cpp_lowrank_spectra_iterations),
+      dcov_cpp_lowrank_spectra_nconv =
+        as.integer(metrics$dcov_cpp_lowrank_spectra_nconv),
+      dcov_cpp_lowrank_spectra_ncv =
+        as.integer(metrics$dcov_cpp_lowrank_spectra_ncv),
+      dcov_cpp_lowrank_spectra_tol =
+        as.numeric(metrics$dcov_cpp_lowrank_spectra_tol),
       dcov_cpp_statistic_ms = as.numeric(metrics$dcov_cpp_statistic_ms),
       dcov_cpp_moment_ms = as.numeric(metrics$dcov_cpp_moment_ms),
       dcov_cpp_pgamma_ms = as.numeric(metrics$dcov_cpp_pgamma_ms),
@@ -611,6 +674,33 @@ fastkpc_legacy_runtime_add_dcov_cpp_shadow <- function(
   metrics$dcov_cpp_lowrank_unaccounted_ms <-
     metrics$dcov_cpp_lowrank_unaccounted_ms +
       cpp_diag_value("lowrank_unaccounted_ms")
+  metrics$dcov_cpp_lowrank_full_eig_count <-
+    metrics$dcov_cpp_lowrank_full_eig_count +
+      as.integer(cpp_diag_value("lowrank_full_eig_count"))
+  metrics$dcov_cpp_lowrank_spectra_count <-
+    metrics$dcov_cpp_lowrank_spectra_count +
+      as.integer(cpp_diag_value("lowrank_spectra_count"))
+  metrics$dcov_cpp_lowrank_spectra_converged_count <-
+    metrics$dcov_cpp_lowrank_spectra_converged_count +
+      as.integer(cpp_diag_value("lowrank_spectra_converged_count"))
+  metrics$dcov_cpp_lowrank_spectra_failed_count <-
+    metrics$dcov_cpp_lowrank_spectra_failed_count +
+      as.integer(cpp_diag_value("lowrank_spectra_failed_count"))
+  metrics$dcov_cpp_lowrank_spectra_fallback_full_eig_count <-
+    metrics$dcov_cpp_lowrank_spectra_fallback_full_eig_count +
+      as.integer(cpp_diag_value("lowrank_spectra_fallback_full_eig_count"))
+  metrics$dcov_cpp_lowrank_spectra_iterations <-
+    metrics$dcov_cpp_lowrank_spectra_iterations +
+      as.integer(cpp_diag_value("lowrank_spectra_iterations"))
+  metrics$dcov_cpp_lowrank_spectra_nconv <-
+    metrics$dcov_cpp_lowrank_spectra_nconv +
+      as.integer(cpp_diag_value("lowrank_spectra_nconv"))
+  metrics$dcov_cpp_lowrank_spectra_ncv <-
+    max(metrics$dcov_cpp_lowrank_spectra_ncv,
+        as.integer(cpp_diag_value("lowrank_spectra_ncv")))
+  metrics$dcov_cpp_lowrank_spectra_tol <-
+    max(metrics$dcov_cpp_lowrank_spectra_tol,
+        cpp_diag_value("lowrank_spectra_tol"))
   metrics$dcov_cpp_statistic_ms <- metrics$dcov_cpp_statistic_ms +
     cpp_diag_value("statistic_ms")
   metrics$dcov_cpp_moment_ms <- metrics$dcov_cpp_moment_ms +
@@ -1036,6 +1126,24 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.numeric(runtime_total$dcov_cpp_lowrank_center_ms),
         legacy_dcov_cpp_lowrank_unaccounted_ms =
           as.numeric(runtime_total$dcov_cpp_lowrank_unaccounted_ms),
+        legacy_dcov_cpp_lowrank_full_eig_count =
+          as.integer(runtime_total$dcov_cpp_lowrank_full_eig_count),
+        legacy_dcov_cpp_lowrank_spectra_count =
+          as.integer(runtime_total$dcov_cpp_lowrank_spectra_count),
+        legacy_dcov_cpp_lowrank_spectra_converged_count =
+          as.integer(runtime_total$dcov_cpp_lowrank_spectra_converged_count),
+        legacy_dcov_cpp_lowrank_spectra_failed_count =
+          as.integer(runtime_total$dcov_cpp_lowrank_spectra_failed_count),
+        legacy_dcov_cpp_lowrank_spectra_fallback_full_eig_count =
+          as.integer(runtime_total$dcov_cpp_lowrank_spectra_fallback_full_eig_count),
+        legacy_dcov_cpp_lowrank_spectra_iterations =
+          as.integer(runtime_total$dcov_cpp_lowrank_spectra_iterations),
+        legacy_dcov_cpp_lowrank_spectra_nconv =
+          as.integer(runtime_total$dcov_cpp_lowrank_spectra_nconv),
+        legacy_dcov_cpp_lowrank_spectra_ncv =
+          as.integer(runtime_total$dcov_cpp_lowrank_spectra_ncv),
+        legacy_dcov_cpp_lowrank_spectra_tol =
+          as.numeric(runtime_total$dcov_cpp_lowrank_spectra_tol),
         legacy_dcov_cpp_statistic_ms =
           as.numeric(runtime_total$dcov_cpp_statistic_ms),
         legacy_dcov_cpp_moment_ms =
