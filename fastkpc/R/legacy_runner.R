@@ -122,6 +122,444 @@ fastkpc_legacy_skeleton <- function(data, alpha, max_conditioning_size,
   )
 }
 
+fastkpc_legacy_parallel_cores <- function(num_cores = NULL) {
+  if (!is.null(num_cores)) {
+    out <- as.integer(num_cores)
+  } else {
+    env_value <- Sys.getenv("FASTKPC_LEGACY_PARALLEL_CORES", "")
+    out <- suppressWarnings(as.integer(env_value))
+  }
+  if (length(out) != 1L || is.na(out) || out < 1L) {
+    out <- parallel::detectCores()
+  }
+  max(1L, as.integer(out))
+}
+
+fastkpc_legacy_sepsets <- function(p) {
+  replicate(p, replicate(p, integer(), simplify = FALSE), simplify = FALSE)
+}
+
+fastkpc_legacy_combinations <- function(values, choose) {
+  values <- as.integer(values)
+  choose <- as.integer(choose)
+  if (choose == 0L) return(list(integer()))
+  if (length(values) < choose) return(list())
+  lapply(utils::combn(seq_along(values), choose, simplify = FALSE), function(idx) {
+    as.integer(values[idx])
+  })
+}
+
+fastkpc_legacy_runtime_zero <- function() {
+  list(
+    ci_total_ms = 0,
+    residual_ms = 0,
+    dcov_gamma_ms = 0,
+    direct_ci_count = 0L,
+    conditional_ci_count = 0L,
+    mgcv_fit_count = 0L,
+    dcov_gamma_count = 0L,
+    fake_level0_test_count = 0L
+  )
+}
+
+fastkpc_legacy_runtime_add <- function(a, b) {
+  if (is.null(a)) a <- fastkpc_legacy_runtime_zero()
+  if (is.null(b)) b <- fastkpc_legacy_runtime_zero()
+  list(
+    ci_total_ms = as.numeric(a$ci_total_ms) + as.numeric(b$ci_total_ms),
+    residual_ms = as.numeric(a$residual_ms) + as.numeric(b$residual_ms),
+    dcov_gamma_ms =
+      as.numeric(a$dcov_gamma_ms) + as.numeric(b$dcov_gamma_ms),
+    direct_ci_count =
+      as.integer(a$direct_ci_count) + as.integer(b$direct_ci_count),
+    conditional_ci_count =
+      as.integer(a$conditional_ci_count) +
+        as.integer(b$conditional_ci_count),
+    mgcv_fit_count =
+      as.integer(a$mgcv_fit_count) + as.integer(b$mgcv_fit_count),
+    dcov_gamma_count =
+      as.integer(a$dcov_gamma_count) + as.integer(b$dcov_gamma_count),
+    fake_level0_test_count =
+      as.integer(a$fake_level0_test_count) +
+        as.integer(b$fake_level0_test_count)
+  )
+}
+
+fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
+  level_count <- length(n_edgetests)
+  if (level_count == 0L) {
+    return(data.frame(
+      level = integer(), recorded_tests = integer(), ci_calls = integer(),
+      direct_ci_calls = integer(), conditional_ci_calls = integer(),
+      fake_level0_tests = integer(), residual_ms = numeric(),
+      dcov_gamma_ms = numeric(), ci_total_ms = numeric(),
+      mgcv_fit_count = integer(), dcov_gamma_count = integer()
+    ))
+  }
+  rows <- lapply(seq_len(level_count), function(i) {
+    metrics <- level_metrics[[i]]
+    if (is.null(metrics)) metrics <- fastkpc_legacy_runtime_zero()
+    data.frame(
+      level = i - 1L,
+      recorded_tests = as.integer(n_edgetests[[i]]),
+      ci_calls = as.integer(metrics$direct_ci_count) +
+        as.integer(metrics$conditional_ci_count),
+      direct_ci_calls = as.integer(metrics$direct_ci_count),
+      conditional_ci_calls = as.integer(metrics$conditional_ci_count),
+      fake_level0_tests = as.integer(metrics$fake_level0_test_count),
+      residual_ms = as.numeric(metrics$residual_ms),
+      dcov_gamma_ms = as.numeric(metrics$dcov_gamma_ms),
+      ci_total_ms = as.numeric(metrics$ci_total_ms),
+      mgcv_fit_count = as.integer(metrics$mgcv_fit_count),
+      dcov_gamma_count = as.integer(metrics$dcov_gamma_count)
+    )
+  })
+  do.call(rbind, rows)
+}
+
+fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
+                                             ic.method = "dcc.gamma",
+                                             index = 1,
+                                             numCol = floor(nrow(data) / 10),
+                                             labels = NULL,
+                                             num_cores = NULL,
+                                             env = fastkpc_legacy_env(),
+                                             na_delete = TRUE) {
+  if (!requireNamespace("graph", quietly = TRUE)) {
+    stop("graph is required for legacy parallel skeleton compatibility",
+         call. = FALSE)
+  }
+  fastkpc_require_legacy_packages(
+    fastkpc_legacy_packages_for_method(
+      ic.method, conditional = isTRUE(max_conditioning_size > 0)
+    )
+  )
+  data <- as.matrix(data)
+  storage.mode(data) <- "double"
+  p <- ncol(data)
+  if (is.null(labels)) {
+    labels <- colnames(data)
+    if (is.null(labels)) labels <- as.character(seq_len(p))
+  }
+  colnames(data) <- labels
+  seq_p <- seq_len(p)
+  max_level <- if (is.infinite(max_conditioning_size)) {
+    p - 2L
+  } else {
+    min(as.integer(max_conditioning_size), p - 2L)
+  }
+  num_cores <- fastkpc_legacy_parallel_cores(num_cores)
+
+  G <- matrix(TRUE, nrow = p, ncol = p)
+  diag(G) <- FALSE
+  sepset <- fastkpc_legacy_sepsets(p)
+  pMax <- matrix(-Inf, nrow = p, ncol = p)
+  diag(pMax) <- 1
+  n_edgetests <- numeric()
+  n_edges <- numeric()
+  level_logs <- list()
+  level_metrics <- list()
+  done <- FALSE
+  ord <- 0L
+  suffStat <- list(data = data, ic.method = ic.method, index = index,
+                   numCol = numCol)
+  total_start <- proc.time()[["elapsed"]]
+
+  run_legacy_ci <- function(x, y, S) {
+    metrics <- fastkpc_legacy_runtime_zero()
+    ci_start <- proc.time()[["elapsed"]]
+    value <- tryCatch({
+      if (identical(ic.method, "dcc.gamma")) {
+        if (length(S) == 0L) {
+          metrics$direct_ci_count <- 1L
+          dcov_start <- proc.time()[["elapsed"]]
+          out <- env$dcov.gamma(
+            x = data[, x], y = data[, y], index = index, numCol = numCol
+          )
+          metrics$dcov_gamma_ms <-
+            (proc.time()[["elapsed"]] - dcov_start) * 1000
+          metrics$dcov_gamma_count <- 1L
+          out$p.value
+        } else {
+          metrics$conditional_ci_count <- 1L
+          residual_start <- proc.time()[["elapsed"]]
+          residuals <- env$regrXonS(data[, c(x, y)], data[, S])
+          metrics$residual_ms <-
+            (proc.time()[["elapsed"]] - residual_start) * 1000
+          metrics$mgcv_fit_count <- 2L
+          dcov_start <- proc.time()[["elapsed"]]
+          out <- env$dcov.gamma(
+            x = residuals[, 1L], y = residuals[, 2L],
+            index = index, numCol = numCol
+          )
+          metrics$dcov_gamma_ms <-
+            (proc.time()[["elapsed"]] - dcov_start) * 1000
+          metrics$dcov_gamma_count <- 1L
+          out$p.value
+        }
+      } else {
+        env$kernelCItest(x, y, S, suffStat)
+      }
+    }, error = function(e) {
+      structure(NA_real_, fastkpc_error = conditionMessage(e))
+    })
+    metrics$ci_total_ms <- (proc.time()[["elapsed"]] - ci_start) * 1000
+    list(p.value = value, metrics = metrics)
+  }
+
+  while (!done && any(G) && ord <= max_level) {
+    ord1 <- ord + 1L
+    n_edgetests[ord1] <- 0
+    n_edges[ord1] <- 0
+    level_log <- list()
+    done <- TRUE
+    ind <- which(G, arr.ind = TRUE)
+    ind <- ind[order(ind[, 1L]), , drop = FALSE]
+    ind <- ind[ind[, 1L] < ind[, 2L], , drop = FALSE]
+    remaining_edge_tests <- nrow(ind)
+    if (remaining_edge_tests == 0L) break
+    G_l <- split(G, gl(p, p))
+
+    edge_test_xy <- function(x, y) {
+      G_xy <- TRUE
+      num_tests_xy <- 0L
+      pMax_xy <- pMax[x, y]
+      sepset_xy <- NULL
+      done_xy <- TRUE
+      metrics <- fastkpc_legacy_runtime_zero()
+      nbrsBool <- G_l[[x]]
+      nbrsBool[y] <- FALSE
+      nbrs <- seq_p[nbrsBool]
+      length_nbrs <- length(nbrs)
+      if (length_nbrs >= ord) {
+        if (length_nbrs > ord) done_xy <- FALSE
+        for (S in fastkpc_legacy_combinations(nbrs, ord)) {
+          num_tests_xy <- num_tests_xy + 1L
+          ci <- run_legacy_ci(x, y, S)
+          metrics <- fastkpc_legacy_runtime_add(metrics, ci$metrics)
+          pval <- ci$p.value
+          if (length(pval) == 0L ||
+              !is.numeric(pval) || is.na(pval[1L])) {
+            pval <- as.numeric(na_delete)
+          } else {
+            pval <- as.numeric(pval[1L])
+          }
+          if (pMax_xy < pval) pMax_xy <- pval
+          if (pval >= alpha) {
+            G_xy <- FALSE
+            sepset_xy <- as.integer(S)
+            break
+          }
+        }
+      }
+      list(G_xy, sepset_xy, num_tests_xy, pMax_xy, done_xy, metrics)
+    }
+
+    edge_test <- function(i) {
+      x <- ind[i, 1L]
+      y <- ind[i, 2L]
+      num_tests_i <- 0L
+      G_i <- TRUE
+      pMax_xy <- pMax[x, y]
+      pMax_yx <- pMax[y, x]
+      sepset_xy <- NULL
+      sepset_yx <- NULL
+      done_i <- TRUE
+      metrics_i <- fastkpc_legacy_runtime_zero()
+
+      res_x <- edge_test_xy(x, y)
+      G_i <- res_x[[1L]]
+      sepset_xy <- res_x[[2L]]
+      num_tests_i <- num_tests_i + res_x[[3L]]
+      pMax_xy <- res_x[[4L]]
+      done_i <- done_i & res_x[[5L]]
+      metrics_i <- fastkpc_legacy_runtime_add(metrics_i, res_x[[6L]])
+
+      if (G_i) {
+        if (ord == 0L) {
+          num_tests_i <- num_tests_i + 1L
+          metrics_i$fake_level0_test_count <-
+            metrics_i$fake_level0_test_count + 1L
+        } else {
+          res_y <- edge_test_xy(y, x)
+          G_i <- res_y[[1L]]
+          sepset_yx <- res_y[[2L]]
+          num_tests_i <- num_tests_i + res_y[[3L]]
+          pMax_yx <- res_y[[4L]]
+          done_i <- done_i & res_y[[5L]]
+          metrics_i <- fastkpc_legacy_runtime_add(metrics_i, res_y[[6L]])
+        }
+      }
+
+      list(i, G_i, sepset_xy, sepset_yx, num_tests_i, pMax_xy, pMax_yx,
+           done_i, metrics_i)
+    }
+
+    edge_indices <- seq_len(remaining_edge_tests)
+    workers <- min(num_cores, length(edge_indices))
+    res <- if (.Platform$OS.type == "unix" && workers > 1L) {
+      parallel::mclapply(
+        edge_indices, edge_test, mc.cores = workers, mc.set.seed = FALSE,
+        mc.cleanup = TRUE, mc.allow.recursive = FALSE, mc.preschedule = FALSE
+      )
+    } else {
+      lapply(edge_indices, edge_test)
+    }
+
+    metrics_level <- fastkpc_legacy_runtime_zero()
+    for (p_obj in res) {
+      i <- p_obj[[1L]]
+      x <- ind[i, 1L]
+      y <- ind[i, 2L]
+      n_edgetests[ord1] <- n_edgetests[ord1] + p_obj[[5L]]
+      pMax[x, y] <- p_obj[[6L]]
+      pMax[y, x] <- p_obj[[7L]]
+      G[x, y] <- G[y, x] <- p_obj[[2L]]
+      if (!isTRUE(p_obj[[2L]])) {
+        if (!is.null(p_obj[[3L]])) sepset[[x]][[y]] <- p_obj[[3L]]
+        if (!is.null(p_obj[[4L]])) sepset[[y]][[x]] <- p_obj[[4L]]
+        level_log[[length(level_log) + 1L]] <- list(
+          x = x, y = y, S_xy = p_obj[[3L]], S_yx = p_obj[[4L]]
+        )
+      }
+      done <- done & p_obj[[8L]]
+      metrics_level <- fastkpc_legacy_runtime_add(metrics_level, p_obj[[9L]])
+    }
+
+    n_edges[ord1] <- sum(G) / 2
+    level_logs[[ord1]] <- level_log
+    level_metrics[[ord1]] <- metrics_level
+    if (ord > 0L && isTRUE(n_edges[ord1] == n_edges[ord])) break
+    ord <- ord + 1L
+  }
+
+  if (p > 1L) {
+    for (i in seq_len(p - 1L)) {
+      for (j in seq.int(i + 1L, p)) {
+        pMax[i, j] <- pMax[j, i] <- max(pMax[i, j], pMax[j, i])
+      }
+    }
+  }
+  colnames(G) <- rownames(G) <- labels
+  dimnames(pMax) <- list(labels, labels)
+  elapsed_ms <- (proc.time()[["elapsed"]] - total_start) * 1000
+  total_tests <- sum(n_edgetests)
+  runtime_total <- Reduce(
+    fastkpc_legacy_runtime_add, level_metrics,
+    init = fastkpc_legacy_runtime_zero()
+  )
+  runtime_by_level <- fastkpc_legacy_runtime_frame(level_metrics, n_edgetests)
+  cache <- list(requests = 0L, hits = 0L, computations = 0L)
+
+  list(
+    adjacency = G,
+    sepsets = sepset,
+    pMax = pMax,
+    n.edgetests = as.integer(n_edgetests),
+    max.ord = as.integer(ord - 1L),
+    n.edges = n_edges,
+    per.level.log = level_logs,
+    backend = "cpu",
+    residual_device = "cpu",
+    residual_device_reason = "compatible legacy parallel skeleton executes legacy mgcv on CPU",
+    residual_backend = "legacy-mgcv",
+    verifier_backend = NA_character_,
+    residual_backend_params = "",
+    residual_cache = cache,
+    ci_method = ic.method,
+    ci_backend = if (identical(ic.method, "dcc.gamma")) {
+      "legacy-dcov.gamma"
+    } else {
+      "native-cpu"
+    },
+    ci_backend_reason = "legacy-compatible parallel skeleton",
+    ci_diagnostics = list(
+      ci_dcc_gamma_tests = if (identical(ic.method, "dcc.gamma")) {
+        as.integer(total_tests)
+      } else {
+        0L
+      },
+      ci_hsic_gamma_tests = if (identical(ic.method, "hsic.gamma")) {
+        as.integer(total_tests)
+      } else {
+        0L
+      },
+      ci_hsic_perm_tests = if (identical(ic.method, "hsic.perm")) {
+        as.integer(total_tests)
+      } else {
+        0L
+      },
+      ci_hsic_permutation_replicates = 0L,
+      ci_hsic_gamma_cuda_tests = 0L,
+      ci_hsic_perm_cuda_tests = 0L,
+      ci_hsic_cuda_batches = 0L,
+      ci_hsic_cuda_pairs = 0L,
+      ci_hsic_cuda_fallback_tests = 0L,
+      ci_hsic_cuda_memory_bytes = 0,
+      ci_hsic_cuda_max_n = 0L,
+      ci_hsic_cuda_max_batch_pairs = 0L
+    ),
+    scheduler = "legacy-parallel",
+    scheduler_diagnostics = list(
+      legacy_runtime_by_level = runtime_by_level,
+      summary = list(
+        tasks_planned = as.integer(total_tests),
+        tasks_evaluated = as.integer(total_tests),
+        tests_replayed = as.integer(total_tests),
+        trace_level = "summary",
+        tasks_ignored_after_delete = 0L,
+        unique_residual_requests = 0L,
+        residual_cache_requests = 0L,
+        residual_cache_hits = 0L,
+        residual_cache_misses = 0L,
+        residual_cache_computations = 0L,
+        residual_cache_full_hit_events = 0L,
+        residual_cache_partial_hit_events = 0L,
+        residual_cache_full_miss_events = 0L,
+        residual_cache_target_computations = 0L,
+        residual_cache_cuda_batch_calls = 0L,
+        residual_cache_cuda_single_target_calls = 0L,
+        residual_cache_cuda_solve_calls = 0L,
+        residual_cache_cuda_api_calls = 0L,
+        residual_cache_cuda_batch_api_calls = 0L,
+        residual_cache_cuda_single_target_api_calls = 0L,
+        residual_cache_cuda_target_solves = 0L,
+        dcov_batches = 0L,
+        residual_batches = 0L,
+        legacy_parallel_workers = as.integer(num_cores),
+        legacy_parallel_worker_count = as.integer(num_cores),
+        legacy_parallel_elapsed_ms = elapsed_ms,
+        legacy_scheduler_elapsed_ms = elapsed_ms,
+        legacy_ci_total_ms = as.numeric(runtime_total$ci_total_ms),
+        legacy_residual_total_ms =
+          as.numeric(runtime_total$residual_ms),
+        legacy_dcov_gamma_ms =
+          as.numeric(runtime_total$dcov_gamma_ms),
+        legacy_direct_ci_count =
+          as.integer(runtime_total$direct_ci_count),
+        legacy_conditional_ci_count =
+          as.integer(runtime_total$conditional_ci_count),
+        legacy_mgcv_fit_count =
+          as.integer(runtime_total$mgcv_fit_count),
+        legacy_dcov_gamma_count =
+          as.integer(runtime_total$dcov_gamma_count),
+        legacy_fake_level0_test_count =
+          as.integer(runtime_total$fake_level0_test_count)
+      )
+    ),
+    precision_trace = NULL,
+    precision_receipt = list(
+      residual_backend_executed = "legacy-mgcv",
+      ci_backend_executed = if (identical(ic.method, "dcc.gamma")) {
+        "legacy-dcov.gamma"
+      } else {
+        "native-cpu"
+      },
+      timings = list(total_ms = elapsed_ms)
+    )
+  )
+}
+
 fastkpc_fixed_scenario <- function(seed = 4, n = 80) {
   set.seed(seed)
   z <- stats::runif(n)

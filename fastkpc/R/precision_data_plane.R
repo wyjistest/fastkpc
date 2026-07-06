@@ -1,5 +1,6 @@
 source("fastkpc/R/mgcv_extract_oracle.R")
 source("fastkpc/R/dcov_exact.R")
+source("fastkpc/R/legacy_runner.R")
 
 fastkpc_default_precision_executors <- function() {
   list(
@@ -444,18 +445,37 @@ fastkpc_execute_ci_direct <- function(data, x, y, S, ci_method,
                                       permutation_params, route,
                                       role = "primary") {
   start <- proc.time()[["elapsed"]]
-  ci <- fastkpc_precision_ci_from_residuals(
-    data[, x], data[, y], ci_method = ci_method, index = index,
-    legacy_index = legacy_index, hsic_params = hsic_params,
-    permutation_params = permutation_params
-  )
+  use_legacy_dcov <- identical(route$precision %||% "", "compatible") &&
+    identical(ci_method, "dcc.gamma")
+  ci <- if (isTRUE(use_legacy_dcov)) {
+    fastkpc_legacy_ci_from_residuals(
+      data[, x], data[, y], ci_method = ci_method, index = index,
+      legacy_index = legacy_index, hsic_params = hsic_params,
+      permutation_params = permutation_params
+    )
+  } else {
+    fastkpc_precision_ci_from_residuals(
+      data[, x], data[, y], ci_method = ci_method, index = index,
+      legacy_index = legacy_index, hsic_params = hsic_params,
+      permutation_params = permutation_params
+    )
+  }
   elapsed <- (proc.time()[["elapsed"]] - start) * 1000
   list(
     p.value = ci$p.value,
     residual_backend_executed = "direct-ci",
-    ci_backend_executed = "native-cpu",
+    ci_backend_executed = if (isTRUE(use_legacy_dcov)) {
+      "legacy-dcov.gamma"
+    } else {
+      "native-cpu"
+    },
     setup_fingerprint = route$setup_fingerprint %||% "direct-ci:S:",
-    p_source_used = paste0(role, ":direct-ci+native-cpu"),
+    p_source_used = paste0(role, ":direct-ci+",
+                           if (isTRUE(use_legacy_dcov)) {
+                             "legacy-dcov.gamma"
+                           } else {
+                             "native-cpu"
+                           }),
     timings = list(ci_test_ms = elapsed)
   )
 }
@@ -2178,27 +2198,33 @@ fastkpc_execute_ci_kpc_tprs_residual_cpp <- function(data, x, y, S, ci_method,
 
 fastkpc_legacy_mgcv_residual <- function(data, target, S) {
   if (length(S) == 0L) return(as.numeric(data[, target]))
-  if (length(S) > 2L) {
-    stop("legacy mgcv CPU precision slice supports |S| <= 2", call. = FALSE)
+  env <- fastkpc_legacy_env()
+  fastkpc_require_legacy_packages(
+    fastkpc_legacy_packages_for_method("dcc.gamma", conditional = TRUE)
+  )
+  residuals <- env$regrXonS(
+    matrix(as.numeric(data[, target]), ncol = 1L),
+    as.matrix(data[, S, drop = FALSE])
+  )
+  as.numeric(residuals[, 1L])
+}
+
+fastkpc_legacy_ci_from_residuals <- function(rx, ry, ci_method, index,
+                                             legacy_index, hsic_params,
+                                             permutation_params) {
+  if (identical(ci_method, "dcc.gamma")) {
+    env <- fastkpc_legacy_env()
+    fastkpc_require_legacy_packages("RSpectra")
+    return(env$dcov.gamma(
+      x = rx, y = ry, index = index,
+      numCol = max(1L, floor(length(rx) / 10L))
+    ))
   }
-  fastkpc_require_mgcv()
-  S_data <- as.data.frame(data[, S, drop = FALSE])
-  colnames(S_data) <- paste0("s", seq_along(S))
-  local_data <- data.frame(.target = as.numeric(data[, target]), S_data)
-  rhs <- fastkpc_mgcv_regrxons_rhs(
-    S_data = S_data,
-    S = S,
-    formula_class = fastkpc_regrxons_formula_class(S)
+  fastkpc_precision_ci_from_residuals(
+    rx, ry, ci_method = ci_method, index = index,
+    legacy_index = legacy_index, hsic_params = hsic_params,
+    permutation_params = permutation_params
   )
-  form <- stats::as.formula(paste(".target ~", rhs),
-                            env = asNamespace("mgcv"))
-  fit <- mgcv::gam(
-    formula = form,
-    data = local_data,
-    family = stats::gaussian(),
-    method = "GCV.Cp"
-  )
-  as.numeric(stats::residuals(fit))
 }
 
 fastkpc_execute_ci_legacy_mgcv <- function(data, x, y, S, ci_method,
@@ -2209,7 +2235,7 @@ fastkpc_execute_ci_legacy_mgcv <- function(data, x, y, S, ci_method,
   start <- proc.time()[["elapsed"]]
   rx <- fastkpc_legacy_mgcv_residual(data, x, S)
   ry <- fastkpc_legacy_mgcv_residual(data, y, S)
-  ci <- fastkpc_precision_ci_from_residuals(
+  ci <- fastkpc_legacy_ci_from_residuals(
     rx, ry, ci_method = ci_method, index = index,
     legacy_index = legacy_index, hsic_params = hsic_params,
     permutation_params = permutation_params
@@ -2218,10 +2244,19 @@ fastkpc_execute_ci_legacy_mgcv <- function(data, x, y, S, ci_method,
   list(
     p.value = ci$p.value,
     residual_backend_executed = "legacy-mgcv",
-    ci_backend_executed = "native-cpu",
+    ci_backend_executed = if (identical(ci_method, "dcc.gamma")) {
+      "legacy-dcov.gamma"
+    } else {
+      "native-cpu"
+    },
     setup_fingerprint = route$setup_fingerprint %||%
       paste0("legacy-mgcv:S:", fastkpc_precision_S_key(S)),
-    p_source_used = paste0(role, ":legacy-mgcv+native-cpu"),
+    p_source_used = paste0(role, ":legacy-mgcv+",
+                           if (identical(ci_method, "dcc.gamma")) {
+                             "legacy-dcov.gamma"
+                           } else {
+                             "native-cpu"
+                           }),
     timings = list(ci_test_ms = elapsed)
   )
 }

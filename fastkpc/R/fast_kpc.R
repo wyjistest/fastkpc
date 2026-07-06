@@ -1682,10 +1682,19 @@ fast_kpc <- function(data,
   )
 
   use_precision_r_skeleton <- graph_stage == "skeleton" &&
-    as.integer(max_conditioning_size) <= 2L &&
     precision_requested %in% c("fast", "compatible", "hybrid") &&
     (isTRUE(precision_executors_requested) ||
-       precision_requested %in% c("compatible", "hybrid"))
+       precision_requested %in% c("compatible", "hybrid")) &&
+    (as.integer(max_conditioning_size) <= 2L ||
+       identical(precision_requested, "compatible"))
+  use_legacy_parallel_skeleton <- graph_stage == "skeleton" &&
+    identical(precision_requested, "compatible") &&
+    identical(ci_method, "dcc.gamma") &&
+    as.integer(max_conditioning_size) > 2L &&
+    fastkpc_is_default_precision_executors(precision_executors)
+  if (isTRUE(use_legacy_parallel_skeleton)) {
+    use_precision_r_skeleton <- FALSE
+  }
   use_batched_precision_primary <- isTRUE(use_precision_r_skeleton) &&
     identical(precision_requested, "fast") &&
     identical(engine_used, "cuda") &&
@@ -1754,6 +1763,15 @@ fast_kpc <- function(data,
           ci_diagnostics = ci_diagnostics
         )
       }
+    } else if (isTRUE(use_legacy_parallel_skeleton)) {
+      skeleton <- fastkpc_legacy_parallel_skeleton(
+        matrix_data, alpha, max_conditioning_size,
+        ic.method = ci_method,
+        index = index,
+        numCol = floor(nrow(matrix_data) / 10),
+        labels = colnames(matrix_data)
+      )
+      list(skeleton = skeleton, orientation = NULL)
     } else if (isTRUE(use_precision_r_skeleton)) {
       r_precision_trace_level <- if (!isTRUE(precision_diagnostics)) {
         "none"
