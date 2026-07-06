@@ -71,6 +71,174 @@ fastkpc_legacy_dcov_gamma <- function(x, y, index = 1, numCol = NULL,
   env$dcov.gamma(x = x, y = y, index = index, numCol = numCol)
 }
 
+fastkpc_legacy_dcov_gamma_timed <- function(x, y, index = 1, numCol = NULL,
+                                            env = fastkpc_legacy_env()) {
+  fastkpc_require_legacy_packages("RSpectra")
+  total_start <- proc.time()[["elapsed"]]
+  input_start <- total_start
+  n <- length(x)
+  m <- length(y)
+  if (is.null(numCol)) numCol <- floor(n / 10)
+  if (index < 0 || index > 2) {
+    warning("index must be in [0,2), using default index=1")
+    index <- 1
+  }
+  if (n != m) stop("Sample sizes must agree", call. = FALSE)
+  if (!(all(is.finite(c(x, y))))) {
+    stop("Data contains missing or infinite values", call. = FALSE)
+  }
+  input_ms <- (proc.time()[["elapsed"]] - input_start) * 1000
+
+  h_start <- proc.time()[["elapsed"]]
+  H <- diag(n) - matrix(1 / n, n, n)
+  h_ms <- (proc.time()[["elapsed"]] - h_start) * 1000
+
+  distance_start <- proc.time()[["elapsed"]]
+  matx <- as.matrix(stats::dist(x))
+  maty <- as.matrix(stats::dist(y))
+  distance_ms <- (proc.time()[["elapsed"]] - distance_start) * 1000
+
+  lowrank_start <- proc.time()[["elapsed"]]
+  P <- env$eigs(matx, numCol)
+  Q <- env$eigs(maty, numCol)
+  Ux <- P$vectors
+  Sx <- diag(P$values)
+  Uy <- Q$vectors
+  Sy <- diag(Q$values)
+  lowrank_ms <- (proc.time()[["elapsed"]] - lowrank_start) * 1000
+
+  statistic_start <- proc.time()[["elapsed"]]
+  nV2 <- sum(diag(
+    (H %*% Ux) %*% Sx %*%
+      ((t(Ux) %*% H) %*% (H %*% Uy)) %*%
+      Sy %*% (t(Uy) %*% H)
+  )) / n
+  statistic_ms <- (proc.time()[["elapsed"]] - statistic_start) * 1000
+
+  moment_start <- proc.time()[["elapsed"]]
+  nV2Mean <- mean(matx) * mean(maty)
+  nV2Variance <- 2 * (n - 4) * (n - 5) / n / (n - 1) / (n - 2) /
+    (n - 3) *
+    sum(diag(
+      (H %*% Ux) %*% Sx %*%
+        ((t(Ux) %*% H) %*% (H %*% Ux)) %*%
+        Sx %*% (t(Ux) %*% H)
+    )) *
+    sum(diag(
+      (H %*% Uy) %*% Sy %*%
+        ((t(Uy) %*% H) %*% (H %*% Uy)) %*%
+        Sy %*% (t(Uy) %*% H)
+    )) / n^4 * n^2
+  alpha <- (nV2Mean)^2 / nV2Variance
+  beta <- nV2Variance / nV2Mean
+  moment_ms <- (proc.time()[["elapsed"]] - moment_start) * 1000
+
+  pgamma_start <- proc.time()[["elapsed"]]
+  pval <- 1 - stats::pgamma(q = nV2, shape = alpha, rate = 1 / beta)
+  dCov <- sqrt(nV2 / n)
+  pgamma_ms <- (proc.time()[["elapsed"]] - pgamma_start) * 1000
+
+  output_start <- proc.time()[["elapsed"]]
+  names(dCov) <- "dCov"
+  names(nV2) <- "nV^2"
+  names(nV2Mean) <- "nV^2 mean"
+  names(nV2Variance) <- "nV^2 variance"
+  dataname <- paste("index 1, Gamma approximation", sep = "")
+  result <- list(
+    method = paste("dCov test of independence", sep = ""),
+    statistic = nV2,
+    estimate = dCov,
+    estimates = c(nV2, nV2Mean, nV2Variance),
+    p.value = pval,
+    replicates = NULL,
+    data.name = dataname
+  )
+  class(result) <- "htest"
+  output_ms <- (proc.time()[["elapsed"]] - output_start) * 1000
+  total_ms <- (proc.time()[["elapsed"]] - total_start) * 1000
+  accounted_ms <- input_ms + h_ms + distance_ms + lowrank_ms +
+    statistic_ms + moment_ms + pgamma_ms + output_ms
+  list(
+    result = result,
+    diagnostics = list(
+      n = as.integer(n),
+      numCol = as.integer(numCol),
+      index = as.numeric(index),
+      input_ms = input_ms,
+      h_ms = h_ms,
+      distance_ms = distance_ms,
+      lowrank_ms = lowrank_ms,
+      statistic_ms = statistic_ms,
+      moment_ms = moment_ms,
+      pgamma_ms = pgamma_ms,
+      output_ms = output_ms,
+      accounted_ms = accounted_ms,
+      unaccounted_ms = max(0, total_ms - accounted_ms),
+      total_ms = total_ms
+    )
+  )
+}
+
+fastkpc_legacy_dcov_gamma_oracle_case <- function(data, x, y, S = integer(),
+                                                  alpha, index = 1,
+                                                  numCol = floor(nrow(data) / 10),
+                                                  env = fastkpc_legacy_env(),
+                                                  case_id = "case") {
+  data <- as.matrix(data)
+  S <- as.integer(S)
+  residual_start <- proc.time()[["elapsed"]]
+  if (length(S) == 0L) {
+    rx <- as.numeric(data[, x])
+    ry <- as.numeric(data[, y])
+  } else {
+    residuals <- env$regrXonS(data[, c(x, y)], data[, S])
+    rx <- as.numeric(residuals[, 1L])
+    ry <- as.numeric(residuals[, 2L])
+  }
+  residual_ms <- (proc.time()[["elapsed"]] - residual_start) * 1000
+  timed <- fastkpc_legacy_dcov_gamma_timed(
+    rx, ry, index = index, numCol = numCol, env = env
+  )
+  diag <- timed$diagnostics
+  S_key <- if (length(S) == 0L) "" else paste(S, collapse = "|")
+  meta <- data.frame(
+    case_id = as.character(case_id),
+    x = as.integer(x),
+    y = as.integer(y),
+    S_key = S_key,
+    S_size = length(S),
+    n = nrow(data),
+    numCol = as.integer(numCol),
+    index = as.numeric(index),
+    alpha = as.numeric(alpha),
+    p.value = as.numeric(timed$result$p.value),
+    delete_edge = as.numeric(timed$result$p.value) >= as.numeric(alpha),
+    nV2 = as.numeric(timed$result$estimates[[1L]]),
+    nV2Mean = as.numeric(timed$result$estimates[[2L]]),
+    nV2Variance = as.numeric(timed$result$estimates[[3L]]),
+    residual_ms = residual_ms,
+    dcov_total_ms = as.numeric(diag$total_ms),
+    dcov_distance_ms = as.numeric(diag$distance_ms),
+    dcov_lowrank_ms = as.numeric(diag$lowrank_ms),
+    dcov_statistic_ms = as.numeric(diag$statistic_ms),
+    dcov_moment_ms = as.numeric(diag$moment_ms),
+    dcov_pgamma_ms = as.numeric(diag$pgamma_ms),
+    stringsAsFactors = FALSE
+  )
+  residual_frame <- data.frame(
+    case_id = as.character(case_id),
+    row = seq_len(nrow(data)),
+    rx = rx,
+    ry = ry
+  )
+  list(
+    meta = meta,
+    residuals = residual_frame,
+    result = timed$result,
+    diagnostics = diag
+  )
+}
+
 fastkpc_legacy_kernel_ci <- function(data, x, y, S = integer(),
                                      ic.method = "dcc.gamma",
                                      index = 1,
@@ -154,6 +322,15 @@ fastkpc_legacy_runtime_zero <- function() {
     ci_total_ms = 0,
     residual_ms = 0,
     dcov_gamma_ms = 0,
+    dcov_input_ms = 0,
+    dcov_h_ms = 0,
+    dcov_distance_ms = 0,
+    dcov_lowrank_ms = 0,
+    dcov_statistic_ms = 0,
+    dcov_moment_ms = 0,
+    dcov_pgamma_ms = 0,
+    dcov_output_ms = 0,
+    dcov_unaccounted_ms = 0,
     direct_ci_count = 0L,
     conditional_ci_count = 0L,
     mgcv_fit_count = 0L,
@@ -170,6 +347,25 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     residual_ms = as.numeric(a$residual_ms) + as.numeric(b$residual_ms),
     dcov_gamma_ms =
       as.numeric(a$dcov_gamma_ms) + as.numeric(b$dcov_gamma_ms),
+    dcov_input_ms =
+      as.numeric(a$dcov_input_ms) + as.numeric(b$dcov_input_ms),
+    dcov_h_ms =
+      as.numeric(a$dcov_h_ms) + as.numeric(b$dcov_h_ms),
+    dcov_distance_ms =
+      as.numeric(a$dcov_distance_ms) + as.numeric(b$dcov_distance_ms),
+    dcov_lowrank_ms =
+      as.numeric(a$dcov_lowrank_ms) + as.numeric(b$dcov_lowrank_ms),
+    dcov_statistic_ms =
+      as.numeric(a$dcov_statistic_ms) + as.numeric(b$dcov_statistic_ms),
+    dcov_moment_ms =
+      as.numeric(a$dcov_moment_ms) + as.numeric(b$dcov_moment_ms),
+    dcov_pgamma_ms =
+      as.numeric(a$dcov_pgamma_ms) + as.numeric(b$dcov_pgamma_ms),
+    dcov_output_ms =
+      as.numeric(a$dcov_output_ms) + as.numeric(b$dcov_output_ms),
+    dcov_unaccounted_ms =
+      as.numeric(a$dcov_unaccounted_ms) +
+        as.numeric(b$dcov_unaccounted_ms),
     direct_ci_count =
       as.integer(a$direct_ci_count) + as.integer(b$direct_ci_count),
     conditional_ci_count =
@@ -193,6 +389,9 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       direct_ci_calls = integer(), conditional_ci_calls = integer(),
       fake_level0_tests = integer(), residual_ms = numeric(),
       dcov_gamma_ms = numeric(), ci_total_ms = numeric(),
+      dcov_distance_ms = numeric(), dcov_lowrank_ms = numeric(),
+      dcov_statistic_ms = numeric(), dcov_moment_ms = numeric(),
+      dcov_pgamma_ms = numeric(),
       mgcv_fit_count = integer(), dcov_gamma_count = integer()
     ))
   }
@@ -210,11 +409,40 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       residual_ms = as.numeric(metrics$residual_ms),
       dcov_gamma_ms = as.numeric(metrics$dcov_gamma_ms),
       ci_total_ms = as.numeric(metrics$ci_total_ms),
+      dcov_distance_ms = as.numeric(metrics$dcov_distance_ms),
+      dcov_lowrank_ms = as.numeric(metrics$dcov_lowrank_ms),
+      dcov_statistic_ms = as.numeric(metrics$dcov_statistic_ms),
+      dcov_moment_ms = as.numeric(metrics$dcov_moment_ms),
+      dcov_pgamma_ms = as.numeric(metrics$dcov_pgamma_ms),
       mgcv_fit_count = as.integer(metrics$mgcv_fit_count),
       dcov_gamma_count = as.integer(metrics$dcov_gamma_count)
     )
   })
   do.call(rbind, rows)
+}
+
+fastkpc_legacy_runtime_add_dcov <- function(metrics, diagnostics) {
+  metrics$dcov_gamma_ms <- metrics$dcov_gamma_ms +
+    as.numeric(diagnostics$total_ms)
+  metrics$dcov_input_ms <- metrics$dcov_input_ms +
+    as.numeric(diagnostics$input_ms)
+  metrics$dcov_h_ms <- metrics$dcov_h_ms +
+    as.numeric(diagnostics$h_ms)
+  metrics$dcov_distance_ms <- metrics$dcov_distance_ms +
+    as.numeric(diagnostics$distance_ms)
+  metrics$dcov_lowrank_ms <- metrics$dcov_lowrank_ms +
+    as.numeric(diagnostics$lowrank_ms)
+  metrics$dcov_statistic_ms <- metrics$dcov_statistic_ms +
+    as.numeric(diagnostics$statistic_ms)
+  metrics$dcov_moment_ms <- metrics$dcov_moment_ms +
+    as.numeric(diagnostics$moment_ms)
+  metrics$dcov_pgamma_ms <- metrics$dcov_pgamma_ms +
+    as.numeric(diagnostics$pgamma_ms)
+  metrics$dcov_output_ms <- metrics$dcov_output_ms +
+    as.numeric(diagnostics$output_ms)
+  metrics$dcov_unaccounted_ms <- metrics$dcov_unaccounted_ms +
+    as.numeric(diagnostics$unaccounted_ms)
+  metrics
 }
 
 fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
@@ -272,14 +500,14 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
       if (identical(ic.method, "dcc.gamma")) {
         if (length(S) == 0L) {
           metrics$direct_ci_count <- 1L
-          dcov_start <- proc.time()[["elapsed"]]
-          out <- env$dcov.gamma(
+          timed <- fastkpc_legacy_dcov_gamma_timed(
             x = data[, x], y = data[, y], index = index, numCol = numCol
           )
-          metrics$dcov_gamma_ms <-
-            (proc.time()[["elapsed"]] - dcov_start) * 1000
+          metrics <- fastkpc_legacy_runtime_add_dcov(
+            metrics, timed$diagnostics
+          )
           metrics$dcov_gamma_count <- 1L
-          out$p.value
+          timed$result$p.value
         } else {
           metrics$conditional_ci_count <- 1L
           residual_start <- proc.time()[["elapsed"]]
@@ -287,15 +515,15 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           metrics$residual_ms <-
             (proc.time()[["elapsed"]] - residual_start) * 1000
           metrics$mgcv_fit_count <- 2L
-          dcov_start <- proc.time()[["elapsed"]]
-          out <- env$dcov.gamma(
+          timed <- fastkpc_legacy_dcov_gamma_timed(
             x = residuals[, 1L], y = residuals[, 2L],
             index = index, numCol = numCol
           )
-          metrics$dcov_gamma_ms <-
-            (proc.time()[["elapsed"]] - dcov_start) * 1000
+          metrics <- fastkpc_legacy_runtime_add_dcov(
+            metrics, timed$diagnostics
+          )
           metrics$dcov_gamma_count <- 1L
-          out$p.value
+          timed$result$p.value
         }
       } else {
         env$kernelCItest(x, y, S, suffStat)
@@ -535,6 +763,24 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.numeric(runtime_total$residual_ms),
         legacy_dcov_gamma_ms =
           as.numeric(runtime_total$dcov_gamma_ms),
+        legacy_dcov_input_ms =
+          as.numeric(runtime_total$dcov_input_ms),
+        legacy_dcov_h_ms =
+          as.numeric(runtime_total$dcov_h_ms),
+        legacy_dcov_distance_ms =
+          as.numeric(runtime_total$dcov_distance_ms),
+        legacy_dcov_lowrank_ms =
+          as.numeric(runtime_total$dcov_lowrank_ms),
+        legacy_dcov_statistic_ms =
+          as.numeric(runtime_total$dcov_statistic_ms),
+        legacy_dcov_moment_ms =
+          as.numeric(runtime_total$dcov_moment_ms),
+        legacy_dcov_pgamma_ms =
+          as.numeric(runtime_total$dcov_pgamma_ms),
+        legacy_dcov_output_ms =
+          as.numeric(runtime_total$dcov_output_ms),
+        legacy_dcov_unaccounted_ms =
+          as.numeric(runtime_total$dcov_unaccounted_ms),
         legacy_direct_ci_count =
           as.integer(runtime_total$direct_ci_count),
         legacy_conditional_ci_count =
