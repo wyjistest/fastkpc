@@ -84,5 +84,34 @@ assert_true(shadow_summary$legacy_dcov_cpp_shadow_max_nV2_diff <= 1e-8,
             "legacy dCov C++ shadow nV2 drift should stay within oracle tolerance")
 assert_true(shadow_summary$legacy_dcov_cpp_shadow_ms > 0,
             "legacy dCov C++ shadow should report elapsed time")
+required_cpp_stages <- c(
+  "legacy_dcov_cpp_input_ms",
+  "legacy_dcov_cpp_distance_ms",
+  "legacy_dcov_cpp_lowrank_ms",
+  "legacy_dcov_cpp_statistic_ms",
+  "legacy_dcov_cpp_moment_ms",
+  "legacy_dcov_cpp_pgamma_ms",
+  "legacy_dcov_cpp_accounted_ms",
+  "legacy_dcov_cpp_unaccounted_ms",
+  "legacy_dcov_cpp_overhead_ms"
+)
+missing_cpp_stages <- setdiff(required_cpp_stages, names(shadow_summary))
+assert_true(length(missing_cpp_stages) == 0L,
+            paste("legacy dCov C++ shadow summary missing",
+                  missing_cpp_stages[[1L]]))
+assert_true(shadow_summary$legacy_dcov_cpp_distance_ms > 0,
+            "legacy dCov C++ shadow should report distance time")
+assert_true(shadow_summary$legacy_dcov_cpp_lowrank_ms > 0,
+            "legacy dCov C++ shadow should report lowrank time")
+assert_true(shadow_summary$legacy_dcov_cpp_statistic_ms > 0,
+            "legacy dCov C++ shadow should report statistic time")
+assert_true(shadow_summary$legacy_dcov_cpp_moment_ms > 0,
+            "legacy dCov C++ shadow should report moment time")
+assert_true(shadow_summary$legacy_dcov_cpp_pgamma_ms >= 0,
+            "legacy dCov C++ shadow should report pgamma time")
+assert_true(shadow_summary$legacy_dcov_cpp_accounted_ms > 0,
+            "legacy dCov C++ shadow should report accounted time")
+assert_true(shadow_summary$legacy_dcov_cpp_overhead_ms >= 0,
+            "legacy dCov C++ shadow should report wrapper overhead time")
 
 cat("PASS legacy dCov gamma C++ shadow route\n")
