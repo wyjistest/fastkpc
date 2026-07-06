@@ -1698,6 +1698,59 @@ Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
 }
 
 // [[Rcpp::export]]
+Rcpp::List legacy_dcov_gamma_cpp_oracle_batch_export(Rcpp::NumericMatrix x,
+                                                     Rcpp::NumericMatrix y,
+                                                     int numCol,
+                                                     double index = 1.0) {
+  const auto total_start = std::chrono::steady_clock::now();
+  if (x.nrow() != y.nrow() || x.ncol() != y.ncol()) {
+    Rcpp::stop("x and y must have matching dimensions");
+  }
+  const int n = x.nrow();
+  const int batch = x.ncol();
+  Rcpp::NumericVector p_values(batch);
+  Rcpp::NumericVector nV2_values(batch);
+  Rcpp::NumericVector mean_values(batch);
+  Rcpp::NumericVector variance_values(batch);
+  Rcpp::NumericVector estimate_values(batch);
+  double scalar_total_ms = 0.0;
+  for (int col = 0; col < batch; ++col) {
+    Rcpp::NumericVector x_col(n);
+    Rcpp::NumericVector y_col(n);
+    for (int row = 0; row < n; ++row) {
+      x_col[row] = x(row, col);
+      y_col[row] = y(row, col);
+    }
+    Rcpp::List result =
+      legacy_dcov_gamma_cpp_oracle_export(x_col, y_col, numCol, index);
+    p_values[col] = Rcpp::as<double>(result["p.value"]);
+    nV2_values[col] = Rcpp::as<double>(result["nV2"]);
+    mean_values[col] = Rcpp::as<double>(result["mean"]);
+    variance_values[col] = Rcpp::as<double>(result["variance"]);
+    estimate_values[col] = Rcpp::as<double>(result["estimate"]);
+    Rcpp::List diagnostics = result["diagnostics"];
+    scalar_total_ms += Rcpp::as<double>(diagnostics["total_ms"]);
+  }
+  const double total_ms = elapsed_ms_since(total_start);
+  return Rcpp::List::create(
+    Rcpp::Named("p.value") = p_values,
+    Rcpp::Named("nV2") = nV2_values,
+    Rcpp::Named("mean") = mean_values,
+    Rcpp::Named("variance") = variance_values,
+    Rcpp::Named("statistic") = nV2_values,
+    Rcpp::Named("estimate") = estimate_values,
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("n") = n,
+      Rcpp::Named("batch_count") = batch,
+      Rcpp::Named("numCol") = numCol,
+      Rcpp::Named("index") = index,
+      Rcpp::Named("scalar_total_ms") = scalar_total_ms,
+      Rcpp::Named("total_ms") = total_ms
+    )
+  );
+}
+
+// [[Rcpp::export]]
 Rcpp::List fast_hsic_gamma_cpp_export(Rcpp::NumericVector x,
                                       Rcpp::NumericVector y,
                                       double sig = 1.0) {
