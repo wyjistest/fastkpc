@@ -32,6 +32,17 @@ fast_dcov_exact_cpp <- function(x, y, index = 1, legacy_index = TRUE) {
   )
 }
 
+fastkpc_legacy_dcov_gamma_cpp_oracle <- function(
+    x, y, numCol = floor(length(x) / 10), index = 1) {
+  build_fastkpc_native()
+  legacy_dcov_gamma_cpp_oracle_export(
+    as.numeric(x),
+    as.numeric(y),
+    as.integer(numCol),
+    as.numeric(index)
+  )
+}
+
 fastkpc_mgcv_extract_gpu_spectral_score_batch_cpp <- function(
     eigenvectors, inv_chol, eigenvalues, y, Xty_null, sp_grid,
     tol = sqrt(.Machine$double.eps)) {

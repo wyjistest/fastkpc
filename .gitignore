@@ -16,6 +16,7 @@ fastkpc/artifacts/
 *.tsv
 *.html
 *.rds
+!fastkpc/tests/fixtures/legacy_dcov_gamma_oracle_v1.rds
 *.RData
 
 # R session/editor files

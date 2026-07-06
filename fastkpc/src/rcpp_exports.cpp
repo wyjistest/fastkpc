@@ -16,6 +16,7 @@
 #include "wanpdag_engine.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <numeric>
 #include <sstream>
@@ -64,6 +65,80 @@ Rcpp::NumericMatrix unique_rows_in_order(Rcpp::NumericMatrix values) {
     }
   }
   return out;
+}
+
+double elapsed_ms_since(std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - start).count();
+}
+
+arma::mat legacy_dcov_distance_matrix(Rcpp::NumericVector values) {
+  const int n = values.size();
+  arma::mat out(n, n, arma::fill::zeros);
+  for (int col = 0; col < n; ++col) {
+    const double vc = values[col];
+    for (int row = col + 1; row < n; ++row) {
+      const double dist = std::abs(values[row] - vc);
+      out(row, col) = dist;
+      out(col, row) = dist;
+    }
+  }
+  return out;
+}
+
+arma::uvec legacy_dcov_top_abs_eigen_indices(const arma::vec& values,
+                                             int num_col) {
+  std::vector<int> order(values.n_elem);
+  std::iota(order.begin(), order.end(), 0);
+  std::stable_sort(order.begin(), order.end(),
+                   [&values](int lhs, int rhs) {
+                     const double la = std::abs(values(lhs));
+                     const double ra = std::abs(values(rhs));
+                     if (la == ra) return lhs > rhs;
+                     return la > ra;
+                   });
+  arma::uvec idx(num_col);
+  for (int i = 0; i < num_col; ++i) idx(i) = order[static_cast<std::size_t>(i)];
+  return idx;
+}
+
+struct LegacyDcovLowrank {
+  arma::vec values;
+  arma::mat centered_vectors;
+};
+
+LegacyDcovLowrank legacy_dcov_lowrank(const arma::mat& distance,
+                                      int num_col) {
+  arma::vec eigenvalues;
+  arma::mat eigenvectors;
+  if (!arma::eig_sym(eigenvalues, eigenvectors, distance)) {
+    Rcpp::stop("legacy dCov gamma eigen decomposition failed");
+  }
+  const arma::uvec idx = legacy_dcov_top_abs_eigen_indices(eigenvalues, num_col);
+  arma::mat vectors(distance.n_rows, num_col);
+  arma::vec values(num_col);
+  for (int col = 0; col < num_col; ++col) {
+    const arma::uword selected = idx(col);
+    values(col) = eigenvalues(selected);
+    vectors.col(col) = eigenvectors.col(selected);
+  }
+  vectors.each_row() -= arma::mean(vectors, 0);
+  return LegacyDcovLowrank{values, vectors};
+}
+
+double legacy_dcov_weighted_cross_sum(const arma::mat& left,
+                                      const arma::vec& left_values,
+                                      const arma::mat& right,
+                                      const arma::vec& right_values) {
+  const arma::mat cross = left.t() * right;
+  double total = 0.0;
+  for (arma::uword col = 0; col < cross.n_cols; ++col) {
+    for (arma::uword row = 0; row < cross.n_rows; ++row) {
+      total += left_values(row) * right_values(col) *
+        cross(row, col) * cross(row, col);
+    }
+  }
+  return total;
 }
 
 Rcpp::NumericMatrix evenly_spaced_knots(Rcpp::NumericMatrix unique_rows,
@@ -1526,6 +1601,100 @@ double fast_dcov_exact_cpp_export(Rcpp::NumericVector x,
                                   bool legacy_index = true) {
   return dcov_exact_pvalue(numeric_vector_to_std(x), numeric_vector_to_std(y),
                            index, legacy_index);
+}
+
+// [[Rcpp::export]]
+Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
+                                               Rcpp::NumericVector y,
+                                               int numCol,
+                                               double index = 1.0) {
+  const auto total_start = std::chrono::steady_clock::now();
+  const auto input_start = std::chrono::steady_clock::now();
+  const int n = x.size();
+  if (y.size() != n) Rcpp::stop("Sample sizes must agree");
+  if (n <= 5) Rcpp::stop("legacy dCov gamma oracle requires n > 5");
+  if (numCol <= 0 || numCol >= n) {
+    Rcpp::stop("numCol must be positive and less than sample size");
+  }
+  if (index < 0.0 || index > 2.0) index = 1.0;
+  for (int i = 0; i < n; ++i) {
+    if (!std::isfinite(x[i]) || !std::isfinite(y[i])) {
+      Rcpp::stop("Data contains missing or infinite values");
+    }
+  }
+  const double input_ms = elapsed_ms_since(input_start);
+
+  const auto distance_start = std::chrono::steady_clock::now();
+  const arma::mat matx = legacy_dcov_distance_matrix(x);
+  const arma::mat maty = legacy_dcov_distance_matrix(y);
+  const double distance_ms = elapsed_ms_since(distance_start);
+
+  const auto lowrank_start = std::chrono::steady_clock::now();
+  const LegacyDcovLowrank x_lowrank = legacy_dcov_lowrank(matx, numCol);
+  const LegacyDcovLowrank y_lowrank = legacy_dcov_lowrank(maty, numCol);
+  const double lowrank_ms = elapsed_ms_since(lowrank_start);
+
+  const auto statistic_start = std::chrono::steady_clock::now();
+  const double nV2 = legacy_dcov_weighted_cross_sum(
+    x_lowrank.centered_vectors, x_lowrank.values,
+    y_lowrank.centered_vectors, y_lowrank.values) / static_cast<double>(n);
+  const double statistic_ms = elapsed_ms_since(statistic_start);
+
+  const auto moment_start = std::chrono::steady_clock::now();
+  const double n_double = static_cast<double>(n);
+  const double nV2Mean = (arma::accu(matx) / (n_double * n_double)) *
+    (arma::accu(maty) / (n_double * n_double));
+  const double x_moment = legacy_dcov_weighted_cross_sum(
+    x_lowrank.centered_vectors, x_lowrank.values,
+    x_lowrank.centered_vectors, x_lowrank.values);
+  const double y_moment = legacy_dcov_weighted_cross_sum(
+    y_lowrank.centered_vectors, y_lowrank.values,
+    y_lowrank.centered_vectors, y_lowrank.values);
+  const double variance_factor =
+    2.0 * (n_double - 4.0) * (n_double - 5.0) /
+    n_double / (n_double - 1.0) / (n_double - 2.0) / (n_double - 3.0);
+  const double nV2Variance =
+    variance_factor * x_moment * y_moment /
+    std::pow(n_double, 4.0) * std::pow(n_double, 2.0);
+  const double alpha = (nV2Mean * nV2Mean) / nV2Variance;
+  const double beta = nV2Variance / nV2Mean;
+  const double moment_ms = elapsed_ms_since(moment_start);
+
+  const auto pgamma_start = std::chrono::steady_clock::now();
+  const double p_value = 1.0 - R::pgamma(nV2, alpha, beta, true, false);
+  const double statistic = nV2;
+  const double dCov = std::sqrt(nV2 / n_double);
+  const double pgamma_ms = elapsed_ms_since(pgamma_start);
+  const double total_ms = elapsed_ms_since(total_start);
+  const double accounted_ms = input_ms + distance_ms + lowrank_ms +
+    statistic_ms + moment_ms + pgamma_ms;
+
+  return Rcpp::List::create(
+    Rcpp::Named("p.value") = p_value,
+    Rcpp::Named("nV2") = nV2,
+    Rcpp::Named("mean") = nV2Mean,
+    Rcpp::Named("variance") = nV2Variance,
+    Rcpp::Named("statistic") = statistic,
+    Rcpp::Named("estimate") = dCov,
+    Rcpp::Named("estimates") = Rcpp::NumericVector::create(
+      Rcpp::Named("nV^2") = nV2,
+      Rcpp::Named("nV^2 mean") = nV2Mean,
+      Rcpp::Named("nV^2 variance") = nV2Variance),
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("n") = n,
+      Rcpp::Named("numCol") = numCol,
+      Rcpp::Named("index") = index,
+      Rcpp::Named("input_ms") = input_ms,
+      Rcpp::Named("distance_ms") = distance_ms,
+      Rcpp::Named("lowrank_ms") = lowrank_ms,
+      Rcpp::Named("statistic_ms") = statistic_ms,
+      Rcpp::Named("moment_ms") = moment_ms,
+      Rcpp::Named("pgamma_ms") = pgamma_ms,
+      Rcpp::Named("accounted_ms") = accounted_ms,
+      Rcpp::Named("unaccounted_ms") = std::max(0.0, total_ms - accounted_ms),
+      Rcpp::Named("total_ms") = total_ms
+    )
+  );
 }
 
 // [[Rcpp::export]]
