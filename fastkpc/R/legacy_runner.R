@@ -343,6 +343,10 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_cpp_input_ms = 0,
     dcov_cpp_distance_ms = 0,
     dcov_cpp_lowrank_ms = 0,
+    dcov_cpp_lowrank_eig_ms = 0,
+    dcov_cpp_lowrank_select_ms = 0,
+    dcov_cpp_lowrank_center_ms = 0,
+    dcov_cpp_lowrank_unaccounted_ms = 0,
     dcov_cpp_statistic_ms = 0,
     dcov_cpp_moment_ms = 0,
     dcov_cpp_pgamma_ms = 0,
@@ -417,6 +421,18 @@ fastkpc_legacy_runtime_add <- function(a, b) {
       as.numeric(a$dcov_cpp_distance_ms) + as.numeric(b$dcov_cpp_distance_ms),
     dcov_cpp_lowrank_ms =
       as.numeric(a$dcov_cpp_lowrank_ms) + as.numeric(b$dcov_cpp_lowrank_ms),
+    dcov_cpp_lowrank_eig_ms =
+      as.numeric(a$dcov_cpp_lowrank_eig_ms) +
+        as.numeric(b$dcov_cpp_lowrank_eig_ms),
+    dcov_cpp_lowrank_select_ms =
+      as.numeric(a$dcov_cpp_lowrank_select_ms) +
+        as.numeric(b$dcov_cpp_lowrank_select_ms),
+    dcov_cpp_lowrank_center_ms =
+      as.numeric(a$dcov_cpp_lowrank_center_ms) +
+        as.numeric(b$dcov_cpp_lowrank_center_ms),
+    dcov_cpp_lowrank_unaccounted_ms =
+      as.numeric(a$dcov_cpp_lowrank_unaccounted_ms) +
+        as.numeric(b$dcov_cpp_lowrank_unaccounted_ms),
     dcov_cpp_statistic_ms =
       as.numeric(a$dcov_cpp_statistic_ms) +
         as.numeric(b$dcov_cpp_statistic_ms),
@@ -462,6 +478,10 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_shadow_decision_flip_count = integer(),
       dcov_cpp_shadow_error_count = integer(),
       dcov_cpp_distance_ms = numeric(), dcov_cpp_lowrank_ms = numeric(),
+      dcov_cpp_lowrank_eig_ms = numeric(),
+      dcov_cpp_lowrank_select_ms = numeric(),
+      dcov_cpp_lowrank_center_ms = numeric(),
+      dcov_cpp_lowrank_unaccounted_ms = numeric(),
       dcov_cpp_statistic_ms = numeric(), dcov_cpp_moment_ms = numeric(),
       dcov_cpp_pgamma_ms = numeric(), dcov_cpp_overhead_ms = numeric(),
       mgcv_fit_count = integer(), dcov_gamma_count = integer()
@@ -494,6 +514,14 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.integer(metrics$dcov_cpp_shadow_error_count),
       dcov_cpp_distance_ms = as.numeric(metrics$dcov_cpp_distance_ms),
       dcov_cpp_lowrank_ms = as.numeric(metrics$dcov_cpp_lowrank_ms),
+      dcov_cpp_lowrank_eig_ms =
+        as.numeric(metrics$dcov_cpp_lowrank_eig_ms),
+      dcov_cpp_lowrank_select_ms =
+        as.numeric(metrics$dcov_cpp_lowrank_select_ms),
+      dcov_cpp_lowrank_center_ms =
+        as.numeric(metrics$dcov_cpp_lowrank_center_ms),
+      dcov_cpp_lowrank_unaccounted_ms =
+        as.numeric(metrics$dcov_cpp_lowrank_unaccounted_ms),
       dcov_cpp_statistic_ms = as.numeric(metrics$dcov_cpp_statistic_ms),
       dcov_cpp_moment_ms = as.numeric(metrics$dcov_cpp_moment_ms),
       dcov_cpp_pgamma_ms = as.numeric(metrics$dcov_cpp_pgamma_ms),
@@ -574,6 +602,15 @@ fastkpc_legacy_runtime_add_dcov_cpp_shadow <- function(
     cpp_diag_value("distance_ms")
   metrics$dcov_cpp_lowrank_ms <- metrics$dcov_cpp_lowrank_ms +
     cpp_diag_value("lowrank_ms")
+  metrics$dcov_cpp_lowrank_eig_ms <- metrics$dcov_cpp_lowrank_eig_ms +
+    cpp_diag_value("lowrank_eig_ms")
+  metrics$dcov_cpp_lowrank_select_ms <- metrics$dcov_cpp_lowrank_select_ms +
+    cpp_diag_value("lowrank_select_ms")
+  metrics$dcov_cpp_lowrank_center_ms <- metrics$dcov_cpp_lowrank_center_ms +
+    cpp_diag_value("lowrank_center_ms")
+  metrics$dcov_cpp_lowrank_unaccounted_ms <-
+    metrics$dcov_cpp_lowrank_unaccounted_ms +
+      cpp_diag_value("lowrank_unaccounted_ms")
   metrics$dcov_cpp_statistic_ms <- metrics$dcov_cpp_statistic_ms +
     cpp_diag_value("statistic_ms")
   metrics$dcov_cpp_moment_ms <- metrics$dcov_cpp_moment_ms +
@@ -991,6 +1028,14 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.numeric(runtime_total$dcov_cpp_distance_ms),
         legacy_dcov_cpp_lowrank_ms =
           as.numeric(runtime_total$dcov_cpp_lowrank_ms),
+        legacy_dcov_cpp_lowrank_eig_ms =
+          as.numeric(runtime_total$dcov_cpp_lowrank_eig_ms),
+        legacy_dcov_cpp_lowrank_select_ms =
+          as.numeric(runtime_total$dcov_cpp_lowrank_select_ms),
+        legacy_dcov_cpp_lowrank_center_ms =
+          as.numeric(runtime_total$dcov_cpp_lowrank_center_ms),
+        legacy_dcov_cpp_lowrank_unaccounted_ms =
+          as.numeric(runtime_total$dcov_cpp_lowrank_unaccounted_ms),
         legacy_dcov_cpp_statistic_ms =
           as.numeric(runtime_total$dcov_cpp_statistic_ms),
         legacy_dcov_cpp_moment_ms =

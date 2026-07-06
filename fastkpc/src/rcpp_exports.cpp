@@ -107,13 +107,24 @@ struct LegacyDcovLowrank {
   arma::mat centered_vectors;
 };
 
+struct LegacyDcovLowrankTimings {
+  double eig_ms = 0.0;
+  double select_ms = 0.0;
+  double center_ms = 0.0;
+};
+
 LegacyDcovLowrank legacy_dcov_lowrank(const arma::mat& distance,
-                                      int num_col) {
+                                      int num_col,
+                                      LegacyDcovLowrankTimings* timings = nullptr) {
+  const auto eig_start = std::chrono::steady_clock::now();
   arma::vec eigenvalues;
   arma::mat eigenvectors;
   if (!arma::eig_sym(eigenvalues, eigenvectors, distance)) {
     Rcpp::stop("legacy dCov gamma eigen decomposition failed");
   }
+  const double eig_ms = elapsed_ms_since(eig_start);
+
+  const auto select_start = std::chrono::steady_clock::now();
   const arma::uvec idx = legacy_dcov_top_abs_eigen_indices(eigenvalues, num_col);
   arma::mat vectors(distance.n_rows, num_col);
   arma::vec values(num_col);
@@ -122,7 +133,17 @@ LegacyDcovLowrank legacy_dcov_lowrank(const arma::mat& distance,
     values(col) = eigenvalues(selected);
     vectors.col(col) = eigenvectors.col(selected);
   }
+  const double select_ms = elapsed_ms_since(select_start);
+
+  const auto center_start = std::chrono::steady_clock::now();
   vectors.each_row() -= arma::mean(vectors, 0);
+  const double center_ms = elapsed_ms_since(center_start);
+
+  if (timings != nullptr) {
+    timings->eig_ms += eig_ms;
+    timings->select_ms += select_ms;
+    timings->center_ms += center_ms;
+  }
   return LegacyDcovLowrank{values, vectors};
 }
 
@@ -1630,9 +1651,16 @@ Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
   const double distance_ms = elapsed_ms_since(distance_start);
 
   const auto lowrank_start = std::chrono::steady_clock::now();
-  const LegacyDcovLowrank x_lowrank = legacy_dcov_lowrank(matx, numCol);
-  const LegacyDcovLowrank y_lowrank = legacy_dcov_lowrank(maty, numCol);
+  LegacyDcovLowrankTimings lowrank_timings;
+  const LegacyDcovLowrank x_lowrank = legacy_dcov_lowrank(
+    matx, numCol, &lowrank_timings);
+  const LegacyDcovLowrank y_lowrank = legacy_dcov_lowrank(
+    maty, numCol, &lowrank_timings);
   const double lowrank_ms = elapsed_ms_since(lowrank_start);
+  const double lowrank_accounted_ms = lowrank_timings.eig_ms +
+    lowrank_timings.select_ms + lowrank_timings.center_ms;
+  const double lowrank_unaccounted_ms =
+    std::max(0.0, lowrank_ms - lowrank_accounted_ms);
 
   const auto statistic_start = std::chrono::steady_clock::now();
   const double nV2 = legacy_dcov_weighted_cross_sum(
@@ -1687,6 +1715,10 @@ Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
       Rcpp::Named("input_ms") = input_ms,
       Rcpp::Named("distance_ms") = distance_ms,
       Rcpp::Named("lowrank_ms") = lowrank_ms,
+      Rcpp::Named("lowrank_eig_ms") = lowrank_timings.eig_ms,
+      Rcpp::Named("lowrank_select_ms") = lowrank_timings.select_ms,
+      Rcpp::Named("lowrank_center_ms") = lowrank_timings.center_ms,
+      Rcpp::Named("lowrank_unaccounted_ms") = lowrank_unaccounted_ms,
       Rcpp::Named("statistic_ms") = statistic_ms,
       Rcpp::Named("moment_ms") = moment_ms,
       Rcpp::Named("pgamma_ms") = pgamma_ms,

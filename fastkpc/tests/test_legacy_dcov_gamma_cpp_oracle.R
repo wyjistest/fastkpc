@@ -42,10 +42,18 @@ for (case in cases) {
               paste(label, "C++ oracle variance should match legacy oracle"))
   assert_true(identical(cpp$p.value >= meta$alpha, meta$delete_edge),
               paste(label, "C++ oracle decision should match legacy oracle"))
-  assert_true(all(c("distance_ms", "lowrank_ms", "statistic_ms",
+  assert_true(all(c("distance_ms", "lowrank_ms", "lowrank_eig_ms",
+                    "lowrank_select_ms", "lowrank_center_ms",
+                    "lowrank_unaccounted_ms", "statistic_ms",
                     "moment_ms", "pgamma_ms", "total_ms") %in%
                     names(cpp$diagnostics)),
               paste(label, "C++ oracle should expose stage timings"))
+  lowrank_parts <- cpp$diagnostics$lowrank_eig_ms +
+    cpp$diagnostics$lowrank_select_ms +
+    cpp$diagnostics$lowrank_center_ms +
+    cpp$diagnostics$lowrank_unaccounted_ms
+  assert_true(abs(lowrank_parts - cpp$diagnostics$lowrank_ms) <= 1e-6,
+              paste(label, "C++ oracle lowrank timing should be accounted"))
 }
 
 cat("PASS legacy dCov gamma C++ oracle parity\n")

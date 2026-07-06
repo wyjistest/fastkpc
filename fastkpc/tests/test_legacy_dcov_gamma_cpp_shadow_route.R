@@ -88,6 +88,10 @@ required_cpp_stages <- c(
   "legacy_dcov_cpp_input_ms",
   "legacy_dcov_cpp_distance_ms",
   "legacy_dcov_cpp_lowrank_ms",
+  "legacy_dcov_cpp_lowrank_eig_ms",
+  "legacy_dcov_cpp_lowrank_select_ms",
+  "legacy_dcov_cpp_lowrank_center_ms",
+  "legacy_dcov_cpp_lowrank_unaccounted_ms",
   "legacy_dcov_cpp_statistic_ms",
   "legacy_dcov_cpp_moment_ms",
   "legacy_dcov_cpp_pgamma_ms",
@@ -103,6 +107,18 @@ assert_true(shadow_summary$legacy_dcov_cpp_distance_ms > 0,
             "legacy dCov C++ shadow should report distance time")
 assert_true(shadow_summary$legacy_dcov_cpp_lowrank_ms > 0,
             "legacy dCov C++ shadow should report lowrank time")
+assert_true(shadow_summary$legacy_dcov_cpp_lowrank_eig_ms > 0,
+            "legacy dCov C++ shadow should report lowrank eig time")
+assert_true(shadow_summary$legacy_dcov_cpp_lowrank_select_ms > 0,
+            "legacy dCov C++ shadow should report lowrank select time")
+assert_true(shadow_summary$legacy_dcov_cpp_lowrank_center_ms > 0,
+            "legacy dCov C++ shadow should report lowrank center time")
+lowrank_parts <- shadow_summary$legacy_dcov_cpp_lowrank_eig_ms +
+  shadow_summary$legacy_dcov_cpp_lowrank_select_ms +
+  shadow_summary$legacy_dcov_cpp_lowrank_center_ms +
+  shadow_summary$legacy_dcov_cpp_lowrank_unaccounted_ms
+assert_true(abs(lowrank_parts - shadow_summary$legacy_dcov_cpp_lowrank_ms) <= 1e-3,
+            "legacy dCov C++ shadow lowrank timing should be accounted")
 assert_true(shadow_summary$legacy_dcov_cpp_statistic_ms > 0,
             "legacy dCov C++ shadow should report statistic time")
 assert_true(shadow_summary$legacy_dcov_cpp_moment_ms > 0,
