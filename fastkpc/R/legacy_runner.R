@@ -369,6 +369,32 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_cpp_accounted_ms = 0,
     dcov_cpp_unaccounted_ms = 0,
     dcov_cpp_overhead_ms = 0,
+    mgcv_residual_request_count = 0L,
+    mgcv_cache_hit_count = 0L,
+    mgcv_cache_miss_count = 0L,
+    mgcv_unique_residual_key_count = 0L,
+    mgcv_duplicate_residual_key_count = 0L,
+    mgcv_unique_target_s_count = 0L,
+    mgcv_unique_s_count = 0L,
+    mgcv_same_s_group_count = 0L,
+    mgcv_same_s_total_targets = 0L,
+    mgcv_same_s_max_targets = 0L,
+    mgcv_same_s_mean_targets = 0,
+    mgcv_same_s_reuse_opportunity_count = 0L,
+    mgcv_key_build_ms = 0,
+    mgcv_cache_lookup_ms = 0,
+    mgcv_formula_build_ms = 0,
+    mgcv_data_subset_ms = 0,
+    mgcv_fit_call_ms = 0,
+    mgcv_residual_extract_ms = 0,
+    mgcv_result_store_ms = 0,
+    mgcv_unaccounted_ms = 0,
+    mgcv_s_size_0_count = 0L,
+    mgcv_s_size_1_count = 0L,
+    mgcv_s_size_2_count = 0L,
+    mgcv_s_size_gt2_count = 0L,
+    mgcv_residual_keys = character(),
+    mgcv_s_keys = character(),
     direct_ci_count = 0L,
     conditional_ci_count = 0L,
     mgcv_fit_count = 0L,
@@ -511,6 +537,82 @@ fastkpc_legacy_runtime_add <- function(a, b) {
         as.numeric(b$dcov_cpp_unaccounted_ms),
     dcov_cpp_overhead_ms =
       as.numeric(a$dcov_cpp_overhead_ms) + as.numeric(b$dcov_cpp_overhead_ms),
+    mgcv_residual_request_count =
+      as.integer(a$mgcv_residual_request_count) +
+        as.integer(b$mgcv_residual_request_count),
+    mgcv_cache_hit_count =
+      as.integer(a$mgcv_cache_hit_count) +
+        as.integer(b$mgcv_cache_hit_count),
+    mgcv_cache_miss_count =
+      as.integer(a$mgcv_cache_miss_count) +
+        as.integer(b$mgcv_cache_miss_count),
+    mgcv_unique_residual_key_count =
+      as.integer(a$mgcv_unique_residual_key_count) +
+        as.integer(b$mgcv_unique_residual_key_count),
+    mgcv_duplicate_residual_key_count =
+      as.integer(a$mgcv_duplicate_residual_key_count) +
+        as.integer(b$mgcv_duplicate_residual_key_count),
+    mgcv_unique_target_s_count =
+      as.integer(a$mgcv_unique_target_s_count) +
+        as.integer(b$mgcv_unique_target_s_count),
+    mgcv_unique_s_count =
+      as.integer(a$mgcv_unique_s_count) + as.integer(b$mgcv_unique_s_count),
+    mgcv_same_s_group_count =
+      as.integer(a$mgcv_same_s_group_count) +
+        as.integer(b$mgcv_same_s_group_count),
+    mgcv_same_s_total_targets =
+      as.integer(a$mgcv_same_s_total_targets) +
+        as.integer(b$mgcv_same_s_total_targets),
+    mgcv_same_s_max_targets =
+      max(as.integer(a$mgcv_same_s_max_targets),
+          as.integer(b$mgcv_same_s_max_targets)),
+    mgcv_same_s_mean_targets = {
+      total_groups <- as.integer(a$mgcv_same_s_group_count) +
+        as.integer(b$mgcv_same_s_group_count)
+      if (total_groups > 0L) {
+        (as.numeric(a$mgcv_same_s_mean_targets) *
+           as.integer(a$mgcv_same_s_group_count) +
+           as.numeric(b$mgcv_same_s_mean_targets) *
+           as.integer(b$mgcv_same_s_group_count)) / total_groups
+      } else {
+        0
+      }
+    },
+    mgcv_same_s_reuse_opportunity_count =
+      as.integer(a$mgcv_same_s_reuse_opportunity_count) +
+        as.integer(b$mgcv_same_s_reuse_opportunity_count),
+    mgcv_key_build_ms =
+      as.numeric(a$mgcv_key_build_ms) + as.numeric(b$mgcv_key_build_ms),
+    mgcv_cache_lookup_ms =
+      as.numeric(a$mgcv_cache_lookup_ms) + as.numeric(b$mgcv_cache_lookup_ms),
+    mgcv_formula_build_ms =
+      as.numeric(a$mgcv_formula_build_ms) +
+        as.numeric(b$mgcv_formula_build_ms),
+    mgcv_data_subset_ms =
+      as.numeric(a$mgcv_data_subset_ms) +
+        as.numeric(b$mgcv_data_subset_ms),
+    mgcv_fit_call_ms =
+      as.numeric(a$mgcv_fit_call_ms) + as.numeric(b$mgcv_fit_call_ms),
+    mgcv_residual_extract_ms =
+      as.numeric(a$mgcv_residual_extract_ms) +
+        as.numeric(b$mgcv_residual_extract_ms),
+    mgcv_result_store_ms =
+      as.numeric(a$mgcv_result_store_ms) +
+        as.numeric(b$mgcv_result_store_ms),
+    mgcv_unaccounted_ms =
+      as.numeric(a$mgcv_unaccounted_ms) +
+        as.numeric(b$mgcv_unaccounted_ms),
+    mgcv_s_size_0_count =
+      as.integer(a$mgcv_s_size_0_count) + as.integer(b$mgcv_s_size_0_count),
+    mgcv_s_size_1_count =
+      as.integer(a$mgcv_s_size_1_count) + as.integer(b$mgcv_s_size_1_count),
+    mgcv_s_size_2_count =
+      as.integer(a$mgcv_s_size_2_count) + as.integer(b$mgcv_s_size_2_count),
+    mgcv_s_size_gt2_count =
+      as.integer(a$mgcv_s_size_gt2_count) +
+        as.integer(b$mgcv_s_size_gt2_count),
+    mgcv_residual_keys = c(a$mgcv_residual_keys, b$mgcv_residual_keys),
+    mgcv_s_keys = c(a$mgcv_s_keys, b$mgcv_s_keys),
     direct_ci_count =
       as.integer(a$direct_ci_count) + as.integer(b$direct_ci_count),
     conditional_ci_count =
@@ -561,6 +663,22 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_lowrank_spectra_tol = numeric(),
       dcov_cpp_statistic_ms = numeric(), dcov_cpp_moment_ms = numeric(),
       dcov_cpp_pgamma_ms = numeric(), dcov_cpp_overhead_ms = numeric(),
+      mgcv_residual_request_count = integer(),
+      mgcv_cache_hit_count = integer(), mgcv_cache_miss_count = integer(),
+      mgcv_unique_residual_key_count = integer(),
+      mgcv_duplicate_residual_key_count = integer(),
+      mgcv_unique_target_s_count = integer(), mgcv_unique_s_count = integer(),
+      mgcv_same_s_group_count = integer(),
+      mgcv_same_s_total_targets = integer(),
+      mgcv_same_s_max_targets = integer(),
+      mgcv_same_s_mean_targets = numeric(),
+      mgcv_same_s_reuse_opportunity_count = integer(),
+      mgcv_key_build_ms = numeric(), mgcv_cache_lookup_ms = numeric(),
+      mgcv_formula_build_ms = numeric(), mgcv_data_subset_ms = numeric(),
+      mgcv_fit_call_ms = numeric(), mgcv_residual_extract_ms = numeric(),
+      mgcv_result_store_ms = numeric(), mgcv_unaccounted_ms = numeric(),
+      mgcv_s_size_0_count = integer(), mgcv_s_size_1_count = integer(),
+      mgcv_s_size_2_count = integer(), mgcv_s_size_gt2_count = integer(),
       mgcv_fit_count = integer(), dcov_gamma_count = integer()
     ))
   }
@@ -630,6 +748,40 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_moment_ms = as.numeric(metrics$dcov_cpp_moment_ms),
       dcov_cpp_pgamma_ms = as.numeric(metrics$dcov_cpp_pgamma_ms),
       dcov_cpp_overhead_ms = as.numeric(metrics$dcov_cpp_overhead_ms),
+      mgcv_residual_request_count =
+        as.integer(metrics$mgcv_residual_request_count),
+      mgcv_cache_hit_count = as.integer(metrics$mgcv_cache_hit_count),
+      mgcv_cache_miss_count = as.integer(metrics$mgcv_cache_miss_count),
+      mgcv_unique_residual_key_count =
+        as.integer(metrics$mgcv_unique_residual_key_count),
+      mgcv_duplicate_residual_key_count =
+        as.integer(metrics$mgcv_duplicate_residual_key_count),
+      mgcv_unique_target_s_count =
+        as.integer(metrics$mgcv_unique_target_s_count),
+      mgcv_unique_s_count = as.integer(metrics$mgcv_unique_s_count),
+      mgcv_same_s_group_count =
+        as.integer(metrics$mgcv_same_s_group_count),
+      mgcv_same_s_total_targets =
+        as.integer(metrics$mgcv_same_s_total_targets),
+      mgcv_same_s_max_targets =
+        as.integer(metrics$mgcv_same_s_max_targets),
+      mgcv_same_s_mean_targets =
+        as.numeric(metrics$mgcv_same_s_mean_targets),
+      mgcv_same_s_reuse_opportunity_count =
+        as.integer(metrics$mgcv_same_s_reuse_opportunity_count),
+      mgcv_key_build_ms = as.numeric(metrics$mgcv_key_build_ms),
+      mgcv_cache_lookup_ms = as.numeric(metrics$mgcv_cache_lookup_ms),
+      mgcv_formula_build_ms = as.numeric(metrics$mgcv_formula_build_ms),
+      mgcv_data_subset_ms = as.numeric(metrics$mgcv_data_subset_ms),
+      mgcv_fit_call_ms = as.numeric(metrics$mgcv_fit_call_ms),
+      mgcv_residual_extract_ms =
+        as.numeric(metrics$mgcv_residual_extract_ms),
+      mgcv_result_store_ms = as.numeric(metrics$mgcv_result_store_ms),
+      mgcv_unaccounted_ms = as.numeric(metrics$mgcv_unaccounted_ms),
+      mgcv_s_size_0_count = as.integer(metrics$mgcv_s_size_0_count),
+      mgcv_s_size_1_count = as.integer(metrics$mgcv_s_size_1_count),
+      mgcv_s_size_2_count = as.integer(metrics$mgcv_s_size_2_count),
+      mgcv_s_size_gt2_count = as.integer(metrics$mgcv_s_size_gt2_count),
       mgcv_fit_count = as.integer(metrics$mgcv_fit_count),
       dcov_gamma_count = as.integer(metrics$dcov_gamma_count)
     )
@@ -658,6 +810,41 @@ fastkpc_legacy_runtime_add_dcov <- function(metrics, diagnostics) {
     as.numeric(diagnostics$output_ms)
   metrics$dcov_unaccounted_ms <- metrics$dcov_unaccounted_ms +
     as.numeric(diagnostics$unaccounted_ms)
+  metrics
+}
+
+fastkpc_legacy_mgcv_s_key <- function(S) {
+  S <- as.integer(S)
+  if (length(S) == 0L) return("")
+  paste(S, collapse = "|")
+}
+
+fastkpc_legacy_mgcv_residual_key <- function(target, S) {
+  paste0(as.integer(target), ":", fastkpc_legacy_mgcv_s_key(S))
+}
+
+fastkpc_legacy_runtime_finalize_mgcv_keys <- function(metrics) {
+  residual_keys <- metrics$mgcv_residual_keys
+  s_keys <- metrics$mgcv_s_keys
+  if (length(residual_keys) > 0L) {
+    unique_residual <- unique(residual_keys)
+    metrics$mgcv_unique_residual_key_count <- length(unique_residual)
+    metrics$mgcv_duplicate_residual_key_count <-
+      length(residual_keys) - length(unique_residual)
+    metrics$mgcv_unique_target_s_count <- length(unique_residual)
+  }
+  if (length(s_keys) > 0L) {
+    per_s <- table(s_keys)
+    metrics$mgcv_unique_s_count <- length(per_s)
+    metrics$mgcv_same_s_group_count <- length(per_s)
+    metrics$mgcv_same_s_total_targets <- sum(as.integer(per_s))
+    metrics$mgcv_same_s_max_targets <- max(as.integer(per_s))
+    metrics$mgcv_same_s_mean_targets <- mean(as.integer(per_s))
+    metrics$mgcv_same_s_reuse_opportunity_count <-
+      metrics$mgcv_same_s_total_targets - metrics$mgcv_same_s_group_count
+  }
+  metrics$mgcv_residual_keys <- character()
+  metrics$mgcv_s_keys <- character()
   metrics
 }
 
@@ -928,10 +1115,56 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
         } else {
           metrics$conditional_ci_count <- 1L
           residual_start <- proc.time()[["elapsed"]]
-          residuals <- env$regrXonS(data[, c(x, y)], data[, S])
+          key_start <- residual_start
+          S_int <- as.integer(S)
+          target_keys <- c(
+            fastkpc_legacy_mgcv_residual_key(x, S_int),
+            fastkpc_legacy_mgcv_residual_key(y, S_int)
+          )
+          s_key <- fastkpc_legacy_mgcv_s_key(S_int)
+          metrics$mgcv_residual_keys <- target_keys
+          metrics$mgcv_s_keys <- rep(s_key, 2L)
+          metrics$mgcv_key_build_ms <-
+            (proc.time()[["elapsed"]] - key_start) * 1000
+
+          data_subset_start <- proc.time()[["elapsed"]]
+          xy_data <- data[, c(x, y)]
+          s_data <- data[, S]
+          metrics$mgcv_data_subset_ms <-
+            (proc.time()[["elapsed"]] - data_subset_start) * 1000
+
+          fit_start <- proc.time()[["elapsed"]]
+          residuals <- env$regrXonS(xy_data, s_data)
+          metrics$mgcv_fit_call_ms <-
+            (proc.time()[["elapsed"]] - fit_start) * 1000
+
+          residual_extract_start <- proc.time()[["elapsed"]]
+          metrics$mgcv_residual_extract_ms <-
+            (proc.time()[["elapsed"]] - residual_extract_start) * 1000
           metrics$residual_ms <-
             (proc.time()[["elapsed"]] - residual_start) * 1000
           metrics$mgcv_fit_count <- 2L
+          metrics$mgcv_residual_request_count <- 2L
+          metrics$mgcv_cache_miss_count <- 2L
+          if (length(S_int) == 0L) {
+            metrics$mgcv_s_size_0_count <- 2L
+          } else if (length(S_int) == 1L) {
+            metrics$mgcv_s_size_1_count <- 2L
+          } else if (length(S_int) == 2L) {
+            metrics$mgcv_s_size_2_count <- 2L
+          } else {
+            metrics$mgcv_s_size_gt2_count <- 2L
+          }
+          metrics$mgcv_unaccounted_ms <- max(
+            0,
+            metrics$residual_ms - metrics$mgcv_key_build_ms -
+              metrics$mgcv_cache_lookup_ms -
+              metrics$mgcv_formula_build_ms -
+              metrics$mgcv_data_subset_ms -
+              metrics$mgcv_fit_call_ms -
+              metrics$mgcv_residual_extract_ms -
+              metrics$mgcv_result_store_ms
+          )
           if (identical(dcov_backend, "cpp")) {
             backend <- fastkpc_legacy_run_dcov_cpp_backend(
               metrics = metrics, x = residuals[, 1L], y = residuals[, 2L],
@@ -1070,6 +1303,8 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     }
 
     metrics_level <- fastkpc_legacy_runtime_zero()
+    mgcv_residual_key_chunks <- list()
+    mgcv_s_key_chunks <- list()
     for (p_obj in res) {
       i <- p_obj[[1L]]
       x <- ind[i, 1L]
@@ -1086,8 +1321,27 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
         )
       }
       done <- done & p_obj[[8L]]
-      metrics_level <- fastkpc_legacy_runtime_add(metrics_level, p_obj[[9L]])
+      edge_metrics <- p_obj[[9L]]
+      if (length(edge_metrics$mgcv_residual_keys) > 0L) {
+        mgcv_residual_key_chunks[[length(mgcv_residual_key_chunks) + 1L]] <-
+          edge_metrics$mgcv_residual_keys
+        edge_metrics$mgcv_residual_keys <- character()
+      }
+      if (length(edge_metrics$mgcv_s_keys) > 0L) {
+        mgcv_s_key_chunks[[length(mgcv_s_key_chunks) + 1L]] <-
+          edge_metrics$mgcv_s_keys
+        edge_metrics$mgcv_s_keys <- character()
+      }
+      metrics_level <- fastkpc_legacy_runtime_add(metrics_level, edge_metrics)
     }
+    if (length(mgcv_residual_key_chunks) > 0L) {
+      metrics_level$mgcv_residual_keys <-
+        unlist(mgcv_residual_key_chunks, use.names = FALSE)
+    }
+    if (length(mgcv_s_key_chunks) > 0L) {
+      metrics_level$mgcv_s_keys <- unlist(mgcv_s_key_chunks, use.names = FALSE)
+    }
+    metrics_level <- fastkpc_legacy_runtime_finalize_mgcv_keys(metrics_level)
 
     n_edges[ord1] <- sum(G) / 2
     level_logs[[ord1]] <- level_log
@@ -1299,6 +1553,54 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$conditional_ci_count),
         legacy_mgcv_fit_count =
           as.integer(runtime_total$mgcv_fit_count),
+        legacy_mgcv_residual_request_count =
+          as.integer(runtime_total$mgcv_residual_request_count),
+        legacy_mgcv_cache_hit_count =
+          as.integer(runtime_total$mgcv_cache_hit_count),
+        legacy_mgcv_cache_miss_count =
+          as.integer(runtime_total$mgcv_cache_miss_count),
+        legacy_mgcv_unique_residual_key_count =
+          as.integer(runtime_total$mgcv_unique_residual_key_count),
+        legacy_mgcv_duplicate_residual_key_count =
+          as.integer(runtime_total$mgcv_duplicate_residual_key_count),
+        legacy_mgcv_unique_target_s_count =
+          as.integer(runtime_total$mgcv_unique_target_s_count),
+        legacy_mgcv_unique_s_count =
+          as.integer(runtime_total$mgcv_unique_s_count),
+        legacy_mgcv_same_s_group_count =
+          as.integer(runtime_total$mgcv_same_s_group_count),
+        legacy_mgcv_same_s_total_targets =
+          as.integer(runtime_total$mgcv_same_s_total_targets),
+        legacy_mgcv_same_s_max_targets =
+          as.integer(runtime_total$mgcv_same_s_max_targets),
+        legacy_mgcv_same_s_mean_targets =
+          as.numeric(runtime_total$mgcv_same_s_mean_targets),
+        legacy_mgcv_same_s_reuse_opportunity_count =
+          as.integer(runtime_total$mgcv_same_s_reuse_opportunity_count),
+        legacy_mgcv_key_build_ms =
+          as.numeric(runtime_total$mgcv_key_build_ms),
+        legacy_mgcv_cache_lookup_ms =
+          as.numeric(runtime_total$mgcv_cache_lookup_ms),
+        legacy_mgcv_formula_build_ms =
+          as.numeric(runtime_total$mgcv_formula_build_ms),
+        legacy_mgcv_data_subset_ms =
+          as.numeric(runtime_total$mgcv_data_subset_ms),
+        legacy_mgcv_fit_call_ms =
+          as.numeric(runtime_total$mgcv_fit_call_ms),
+        legacy_mgcv_residual_extract_ms =
+          as.numeric(runtime_total$mgcv_residual_extract_ms),
+        legacy_mgcv_result_store_ms =
+          as.numeric(runtime_total$mgcv_result_store_ms),
+        legacy_mgcv_unaccounted_ms =
+          as.numeric(runtime_total$mgcv_unaccounted_ms),
+        legacy_mgcv_s_size_0_count =
+          as.integer(runtime_total$mgcv_s_size_0_count),
+        legacy_mgcv_s_size_1_count =
+          as.integer(runtime_total$mgcv_s_size_1_count),
+        legacy_mgcv_s_size_2_count =
+          as.integer(runtime_total$mgcv_s_size_2_count),
+        legacy_mgcv_s_size_gt2_count =
+          as.integer(runtime_total$mgcv_s_size_gt2_count),
         legacy_dcov_gamma_count =
           as.integer(runtime_total$dcov_gamma_count),
         legacy_fake_level0_test_count =
