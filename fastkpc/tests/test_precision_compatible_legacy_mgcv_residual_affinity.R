@@ -72,6 +72,10 @@ Sys.setenv(FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY = "s")
 affinity <- run_compatible()
 affinity_summary <- affinity$skeleton$scheduler_diagnostics$summary
 
+Sys.setenv(FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY = "target_s")
+owner <- run_compatible()
+owner_summary <- owner$skeleton$scheduler_diagnostics$summary
+
 required <- c(
   "legacy_mgcv_residual_affinity_enabled",
   "legacy_mgcv_residual_affinity_group_count",
@@ -88,7 +92,19 @@ required <- c(
   "legacy_mgcv_residual_cache_lost_cross_worker_count",
   "legacy_mgcv_residual_cache_lost_split_s_group_count",
   "legacy_mgcv_residual_cache_lost_cross_level_count",
-  "legacy_mgcv_residual_cache_cross_worker_loss_estimate"
+  "legacy_mgcv_residual_cache_cross_worker_loss_estimate",
+  "legacy_mgcv_residual_owner_enabled",
+  "legacy_mgcv_residual_owner_key_count",
+  "legacy_mgcv_residual_owner_task_count",
+  "legacy_mgcv_residual_owner_both_local_count",
+  "legacy_mgcv_residual_owner_one_local_count",
+  "legacy_mgcv_residual_owner_none_local_count",
+  "legacy_mgcv_residual_owner_conflict_count",
+  "legacy_mgcv_residual_owner_predicted_hit_count",
+  "legacy_mgcv_residual_owner_realized_hit_count",
+  "legacy_mgcv_residual_owner_lost_duplicate_count",
+  "legacy_mgcv_residual_owner_load_imbalance",
+  "legacy_mgcv_residual_owner_spill_count"
 )
 missing_fields <- setdiff(required, names(affinity_summary))
 assert_true(length(missing_fields) == 0L,
@@ -140,5 +156,40 @@ assert_true(affinity_summary$legacy_mgcv_fit_count +
               affinity_summary$legacy_mgcv_residual_cache_hit_count ==
               affinity_summary$legacy_mgcv_residual_request_count,
             "mgcv residual S-affinity fits plus hits should account for requests")
+
+missing_owner_fields <- setdiff(required, names(owner_summary))
+assert_true(length(missing_owner_fields) == 0L,
+            paste("legacy mgcv residual target|S owner summary missing",
+                  missing_owner_fields[[1L]]))
+assert_true(identical(owner$skeleton$adjacency, cached$skeleton$adjacency),
+            "mgcv residual target|S owner scheduling should not change skeleton adjacency")
+assert_true(identical(owner$skeleton$n.edgetests,
+                      cached$skeleton$n.edgetests),
+            "mgcv residual target|S owner scheduling should not change n.edgetests")
+assert_true(isTRUE(owner_summary$legacy_mgcv_residual_affinity_enabled),
+            "target|S owner scheduling should use the affinity scheduling route")
+assert_true(isTRUE(owner_summary$legacy_mgcv_residual_owner_enabled),
+            "target|S owner scheduling summary should report enabled")
+assert_true(owner_summary$legacy_mgcv_residual_owner_key_count > 0L,
+            "target|S owner scheduling should report owned residual keys")
+assert_true(owner_summary$legacy_mgcv_residual_owner_task_count > 0L,
+            "target|S owner scheduling should report owner-scored tasks")
+assert_true(owner_summary$legacy_mgcv_residual_owner_both_local_count +
+              owner_summary$legacy_mgcv_residual_owner_one_local_count +
+              owner_summary$legacy_mgcv_residual_owner_none_local_count ==
+              owner_summary$legacy_mgcv_residual_owner_task_count,
+            "target|S owner locality buckets should account for owner tasks")
+assert_true(owner_summary$legacy_mgcv_residual_owner_realized_hit_count ==
+              owner_summary$legacy_mgcv_residual_cache_hit_count,
+            "target|S owner realized hits should match cache hits")
+assert_true(owner_summary$legacy_mgcv_residual_owner_lost_duplicate_count ==
+              owner_summary$legacy_mgcv_residual_cache_lost_duplicate_count,
+            "target|S owner lost duplicates should match cache lost duplicates")
+assert_true(owner_summary$legacy_mgcv_residual_owner_load_imbalance > 0,
+            "target|S owner scheduling should report load imbalance")
+assert_true(owner_summary$legacy_mgcv_fit_count +
+              owner_summary$legacy_mgcv_residual_cache_hit_count ==
+              owner_summary$legacy_mgcv_residual_request_count,
+            "target|S owner fits plus hits should account for requests")
 
 cat("PASS precision compatible legacy mgcv residual affinity\n")
