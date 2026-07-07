@@ -80,8 +80,14 @@ required <- c(
   "legacy_mgcv_residual_affinity_max_group_size",
   "legacy_mgcv_residual_affinity_mean_group_size",
   "legacy_mgcv_residual_affinity_load_imbalance",
+  "legacy_mgcv_residual_affinity_split_group_count",
+  "legacy_mgcv_residual_affinity_split_group_tasks",
   "legacy_mgcv_residual_cache_theoretical_hit_count",
   "legacy_mgcv_residual_cache_realized_hit_count",
+  "legacy_mgcv_residual_cache_lost_duplicate_count",
+  "legacy_mgcv_residual_cache_lost_cross_worker_count",
+  "legacy_mgcv_residual_cache_lost_split_s_group_count",
+  "legacy_mgcv_residual_cache_lost_cross_level_count",
   "legacy_mgcv_residual_cache_cross_worker_loss_estimate"
 )
 missing_fields <- setdiff(required, names(affinity_summary))
@@ -115,6 +121,21 @@ assert_true(affinity_summary$legacy_mgcv_residual_cache_theoretical_hit_count >=
             "mgcv residual S-affinity theoretical hits should dominate realized hits")
 assert_true(affinity_summary$legacy_mgcv_residual_cache_cross_worker_loss_estimate >= 0L,
             "mgcv residual S-affinity should report nonnegative cross-worker loss")
+assert_true(affinity_summary$legacy_mgcv_residual_cache_lost_duplicate_count ==
+              affinity_summary$legacy_mgcv_residual_cache_theoretical_hit_count -
+                affinity_summary$legacy_mgcv_residual_cache_realized_hit_count,
+            "mgcv residual S-affinity lost duplicates should equal theoretical minus realized hits")
+assert_true(affinity_summary$legacy_mgcv_residual_cache_lost_cross_worker_count >= 0L,
+            "mgcv residual S-affinity should report nonnegative cross-worker lost duplicates")
+assert_true(affinity_summary$legacy_mgcv_residual_cache_lost_split_s_group_count >= 0L,
+            "mgcv residual S-affinity should report nonnegative split-group lost duplicates")
+assert_true(affinity_summary$legacy_mgcv_residual_cache_lost_cross_level_count == 0L,
+            "mgcv residual target|S keys should not have cross-level duplicate loss")
+assert_true(affinity_summary$legacy_mgcv_residual_affinity_split_group_count >= 0L,
+            "mgcv residual S-affinity should report split group count")
+assert_true(affinity_summary$legacy_mgcv_residual_affinity_split_group_tasks >=
+              affinity_summary$legacy_mgcv_residual_affinity_split_group_count,
+            "mgcv residual S-affinity split group tasks should dominate split groups")
 assert_true(affinity_summary$legacy_mgcv_fit_count +
               affinity_summary$legacy_mgcv_residual_cache_hit_count ==
               affinity_summary$legacy_mgcv_residual_request_count,
