@@ -386,6 +386,13 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_residual_cache_hit_ms = 0,
     mgcv_residual_cache_store_ms = 0,
     mgcv_fit_avoided_count = 0L,
+    mgcv_residual_affinity_enabled = 0L,
+    mgcv_residual_affinity_group_count = 0L,
+    mgcv_residual_affinity_task_count = 0L,
+    mgcv_residual_affinity_worker_count = 0L,
+    mgcv_residual_affinity_max_group_size = 0L,
+    mgcv_residual_affinity_mean_group_size = 0,
+    mgcv_residual_affinity_load_imbalance = 0,
     mgcv_key_build_ms = 0,
     mgcv_cache_lookup_ms = 0,
     mgcv_formula_build_ms = 0,
@@ -601,6 +608,36 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     mgcv_fit_avoided_count =
       as.integer(a$mgcv_fit_avoided_count) +
         as.integer(b$mgcv_fit_avoided_count),
+    mgcv_residual_affinity_enabled =
+      max(as.integer(a$mgcv_residual_affinity_enabled),
+          as.integer(b$mgcv_residual_affinity_enabled)),
+    mgcv_residual_affinity_group_count =
+      as.integer(a$mgcv_residual_affinity_group_count) +
+        as.integer(b$mgcv_residual_affinity_group_count),
+    mgcv_residual_affinity_task_count =
+      as.integer(a$mgcv_residual_affinity_task_count) +
+        as.integer(b$mgcv_residual_affinity_task_count),
+    mgcv_residual_affinity_worker_count =
+      max(as.integer(a$mgcv_residual_affinity_worker_count),
+          as.integer(b$mgcv_residual_affinity_worker_count)),
+    mgcv_residual_affinity_max_group_size =
+      max(as.integer(a$mgcv_residual_affinity_max_group_size),
+          as.integer(b$mgcv_residual_affinity_max_group_size)),
+    mgcv_residual_affinity_mean_group_size = {
+      total_groups <- as.integer(a$mgcv_residual_affinity_group_count) +
+        as.integer(b$mgcv_residual_affinity_group_count)
+      if (total_groups > 0L) {
+        (as.numeric(a$mgcv_residual_affinity_mean_group_size) *
+           as.integer(a$mgcv_residual_affinity_group_count) +
+           as.numeric(b$mgcv_residual_affinity_mean_group_size) *
+           as.integer(b$mgcv_residual_affinity_group_count)) / total_groups
+      } else {
+        0
+      }
+    },
+    mgcv_residual_affinity_load_imbalance =
+      max(as.numeric(a$mgcv_residual_affinity_load_imbalance),
+          as.numeric(b$mgcv_residual_affinity_load_imbalance)),
     mgcv_key_build_ms =
       as.numeric(a$mgcv_key_build_ms) + as.numeric(b$mgcv_key_build_ms),
     mgcv_cache_lookup_ms =
@@ -698,6 +735,13 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       mgcv_residual_cache_hit_ms = numeric(),
       mgcv_residual_cache_store_ms = numeric(),
       mgcv_fit_avoided_count = integer(),
+      mgcv_residual_affinity_enabled = integer(),
+      mgcv_residual_affinity_group_count = integer(),
+      mgcv_residual_affinity_task_count = integer(),
+      mgcv_residual_affinity_worker_count = integer(),
+      mgcv_residual_affinity_max_group_size = integer(),
+      mgcv_residual_affinity_mean_group_size = numeric(),
+      mgcv_residual_affinity_load_imbalance = numeric(),
       mgcv_key_build_ms = numeric(), mgcv_cache_lookup_ms = numeric(),
       mgcv_formula_build_ms = numeric(), mgcv_data_subset_ms = numeric(),
       mgcv_fit_call_ms = numeric(), mgcv_residual_extract_ms = numeric(),
@@ -803,6 +847,20 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       mgcv_residual_cache_store_ms =
         as.numeric(metrics$mgcv_residual_cache_store_ms),
       mgcv_fit_avoided_count = as.integer(metrics$mgcv_fit_avoided_count),
+      mgcv_residual_affinity_enabled =
+        as.integer(metrics$mgcv_residual_affinity_enabled),
+      mgcv_residual_affinity_group_count =
+        as.integer(metrics$mgcv_residual_affinity_group_count),
+      mgcv_residual_affinity_task_count =
+        as.integer(metrics$mgcv_residual_affinity_task_count),
+      mgcv_residual_affinity_worker_count =
+        as.integer(metrics$mgcv_residual_affinity_worker_count),
+      mgcv_residual_affinity_max_group_size =
+        as.integer(metrics$mgcv_residual_affinity_max_group_size),
+      mgcv_residual_affinity_mean_group_size =
+        as.numeric(metrics$mgcv_residual_affinity_mean_group_size),
+      mgcv_residual_affinity_load_imbalance =
+        as.numeric(metrics$mgcv_residual_affinity_load_imbalance),
       mgcv_key_build_ms = as.numeric(metrics$mgcv_key_build_ms),
       mgcv_cache_lookup_ms = as.numeric(metrics$mgcv_cache_lookup_ms),
       mgcv_formula_build_ms = as.numeric(metrics$mgcv_formula_build_ms),
@@ -859,6 +917,91 @@ fastkpc_legacy_mgcv_residual_key <- function(target, S) {
 
 fastkpc_legacy_mgcv_residual_cache_enabled <- function() {
   identical(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE", unset = ""), "1")
+}
+
+fastkpc_legacy_mgcv_residual_affinity_mode <- function() {
+  tolower(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY", unset = ""))
+}
+
+fastkpc_legacy_mgcv_residual_affinity_chunks <- function(edge_indices,
+                                                         group_keys,
+                                                         workers,
+                                                         task_weights = NULL) {
+  workers <- as.integer(workers)
+  edge_indices <- as.integer(edge_indices)
+  if (is.null(task_weights)) {
+    task_weights <- rep(1, length(edge_indices))
+  }
+  task_weights <- as.numeric(task_weights)
+  task_weights[!is.finite(task_weights) | task_weights <= 0] <- 1
+  weights_by_edge <- stats::setNames(task_weights, as.character(edge_indices))
+  groups <- split(as.integer(edge_indices), as.character(group_keys),
+                  drop = TRUE)
+  group_sizes <- lengths(groups, use.names = TRUE)
+  target_load <- max(1, sum(task_weights) / workers)
+  pieces <- list()
+  piece_names <- character()
+  piece_weights <- numeric()
+  for (group_name in names(groups)) {
+    group_edges <- groups[[group_name]]
+    current_edges <- integer()
+    current_weight <- 0
+    piece_idx <- 1L
+    for (edge in group_edges) {
+      edge_weight <- weights_by_edge[[as.character(edge)]]
+      if (length(current_edges) > 0L &&
+          current_weight + edge_weight > target_load) {
+        pieces[[length(pieces) + 1L]] <- current_edges
+        piece_names[[length(piece_names) + 1L]] <-
+          paste0(group_name, "#", piece_idx)
+        piece_weights[[length(piece_weights) + 1L]] <- current_weight
+        current_edges <- integer()
+        current_weight <- 0
+        piece_idx <- piece_idx + 1L
+      }
+      current_edges <- c(current_edges, as.integer(edge))
+      current_weight <- current_weight + edge_weight
+    }
+    if (length(current_edges) > 0L) {
+      pieces[[length(pieces) + 1L]] <- current_edges
+      piece_names[[length(piece_names) + 1L]] <-
+        paste0(group_name, "#", piece_idx)
+      piece_weights[[length(piece_weights) + 1L]] <- current_weight
+    }
+  }
+  names(piece_weights) <- piece_names
+  order_idx <- order(-piece_weights, names(piece_weights))
+  chunks <- vector("list", workers)
+  loads <- numeric(workers)
+  for (piece_idx in order_idx) {
+    worker <- which.min(loads)
+    piece_edges <- pieces[[piece_idx]]
+    chunks[[worker]] <- c(chunks[[worker]], piece_edges)
+    loads[[worker]] <- loads[[worker]] + piece_weights[[piece_idx]]
+  }
+  chunks <- lapply(chunks, sort)
+  mean_load <- mean(loads)
+  list(
+    chunks = chunks[lengths(chunks) > 0L],
+    group_count = as.integer(length(groups)),
+    task_count = as.integer(length(edge_indices)),
+    worker_count = as.integer(workers),
+    max_group_size = if (length(group_sizes) > 0L) {
+      as.integer(max(group_sizes))
+    } else {
+      0L
+    },
+    mean_group_size = if (length(group_sizes) > 0L) {
+      as.numeric(mean(group_sizes))
+    } else {
+      0
+    },
+    load_imbalance = if (mean_load > 0) {
+      as.numeric(max(loads) / mean_load)
+    } else {
+      0
+    }
+  )
 }
 
 fastkpc_legacy_run_mgcv_residual_pair <- function(
@@ -1227,6 +1370,8 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
   fastkpc_legacy_prepare_dcov_cpp(dcov_cpp_required)
   mgcv_residual_cache_enabled <- identical(ic.method, "dcc.gamma") &&
     fastkpc_legacy_mgcv_residual_cache_enabled()
+  mgcv_residual_affinity_mode <-
+    fastkpc_legacy_mgcv_residual_affinity_mode()
 
   G <- matrix(TRUE, nrow = p, ncol = p)
   diag(G) <- FALSE
@@ -1420,7 +1565,66 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
 
     edge_indices <- seq_len(remaining_edge_tests)
     workers <- min(num_cores, length(edge_indices))
-    res <- if (.Platform$OS.type == "unix" && workers > 1L) {
+    affinity_enabled <- .Platform$OS.type == "unix" && workers > 1L &&
+      ord > 0L && isTRUE(mgcv_residual_cache_enabled) &&
+      identical(mgcv_residual_affinity_mode, "s")
+    affinity_metrics <- fastkpc_legacy_runtime_zero()
+    res <- if (isTRUE(affinity_enabled)) {
+      edge_s_key_for_xy <- function(x, y) {
+        nbrsBool <- G_l[[x]]
+        nbrsBool[y] <- FALSE
+        nbrs <- seq_p[nbrsBool]
+        if (length(nbrs) < ord) return(character())
+        fastkpc_legacy_mgcv_s_key(nbrs[seq_len(ord)])
+      }
+      edge_work_for_xy <- function(x, y) {
+        nbrsBool <- G_l[[x]]
+        nbrsBool[y] <- FALSE
+        nbrs <- seq_p[nbrsBool]
+        if (length(nbrs) < ord) return(0)
+        as.numeric(choose(length(nbrs), ord))
+      }
+      edge_affinity_key <- function(i) {
+        x <- ind[i, 1L]
+        y <- ind[i, 2L]
+        s_keys <- unique(c(edge_s_key_for_xy(x, y),
+                           edge_s_key_for_xy(y, x)))
+        if (length(s_keys) == 0L) return(paste0("edge:", i))
+        paste(sort(s_keys), collapse = "||")
+      }
+      edge_affinity_weight <- function(i) {
+        x <- ind[i, 1L]
+        y <- ind[i, 2L]
+        max(1, edge_work_for_xy(x, y) + edge_work_for_xy(y, x))
+      }
+      group_keys <- vapply(edge_indices, edge_affinity_key, character(1L))
+      task_weights <- vapply(edge_indices, edge_affinity_weight, numeric(1L))
+      schedule <- fastkpc_legacy_mgcv_residual_affinity_chunks(
+        edge_indices, group_keys, workers, task_weights = task_weights
+      )
+      affinity_metrics$mgcv_residual_affinity_enabled <- 1L
+      affinity_metrics$mgcv_residual_affinity_group_count <-
+        schedule$group_count
+      affinity_metrics$mgcv_residual_affinity_task_count <-
+        schedule$task_count
+      affinity_metrics$mgcv_residual_affinity_worker_count <-
+        schedule$worker_count
+      affinity_metrics$mgcv_residual_affinity_max_group_size <-
+        schedule$max_group_size
+      affinity_metrics$mgcv_residual_affinity_mean_group_size <-
+        schedule$mean_group_size
+      affinity_metrics$mgcv_residual_affinity_load_imbalance <-
+        schedule$load_imbalance
+      res_chunks <- parallel::mclapply(
+        schedule$chunks, function(chunk) lapply(chunk, edge_test),
+        mc.cores = length(schedule$chunks), mc.set.seed = FALSE,
+        mc.cleanup = TRUE, mc.allow.recursive = FALSE,
+        mc.preschedule = TRUE
+      )
+      res <- unlist(res_chunks, recursive = FALSE)
+      res[order(vapply(res, function(item) as.integer(item[[1L]]),
+                       integer(1L)))]
+    } else if (.Platform$OS.type == "unix" && workers > 1L) {
       parallel::mclapply(
         edge_indices, edge_test, mc.cores = workers, mc.set.seed = FALSE,
         mc.cleanup = TRUE, mc.allow.recursive = FALSE,
@@ -1431,6 +1635,9 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     }
 
     metrics_level <- fastkpc_legacy_runtime_zero()
+    metrics_level <- fastkpc_legacy_runtime_add(
+      metrics_level, affinity_metrics
+    )
     mgcv_residual_key_chunks <- list()
     mgcv_s_key_chunks <- list()
     for (p_obj in res) {
@@ -1703,6 +1910,34 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.numeric(runtime_total$mgcv_residual_cache_store_ms),
         legacy_mgcv_fit_avoided_count =
           as.integer(runtime_total$mgcv_fit_avoided_count),
+        legacy_mgcv_residual_affinity_enabled =
+          isTRUE(as.integer(runtime_total$mgcv_residual_affinity_enabled) > 0L),
+        legacy_mgcv_residual_affinity_group_count =
+          as.integer(runtime_total$mgcv_residual_affinity_group_count),
+        legacy_mgcv_residual_affinity_task_count =
+          as.integer(runtime_total$mgcv_residual_affinity_task_count),
+        legacy_mgcv_residual_affinity_worker_count =
+          as.integer(runtime_total$mgcv_residual_affinity_worker_count),
+        legacy_mgcv_residual_affinity_max_group_size =
+          as.integer(runtime_total$mgcv_residual_affinity_max_group_size),
+        legacy_mgcv_residual_affinity_mean_group_size =
+          as.numeric(runtime_total$mgcv_residual_affinity_mean_group_size),
+        legacy_mgcv_residual_affinity_load_imbalance =
+          as.numeric(runtime_total$mgcv_residual_affinity_load_imbalance),
+        legacy_mgcv_residual_cache_theoretical_hit_count = {
+          requests <- as.integer(runtime_total$mgcv_residual_request_count)
+          unique_keys <- as.integer(runtime_total$mgcv_unique_residual_key_count)
+          as.integer(max(0L, requests - unique_keys))
+        },
+        legacy_mgcv_residual_cache_realized_hit_count =
+          as.integer(runtime_total$mgcv_cache_hit_count),
+        legacy_mgcv_residual_cache_cross_worker_loss_estimate = {
+          requests <- as.integer(runtime_total$mgcv_residual_request_count)
+          unique_keys <- as.integer(runtime_total$mgcv_unique_residual_key_count)
+          theoretical <- as.integer(max(0L, requests - unique_keys))
+          realized <- as.integer(runtime_total$mgcv_cache_hit_count)
+          as.integer(max(0L, theoretical - realized))
+        },
         legacy_mgcv_fit_avoided_estimated_ms = {
           fit_count <- as.integer(runtime_total$mgcv_fit_count)
           if (fit_count > 0L) {
