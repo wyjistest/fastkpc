@@ -381,6 +381,11 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_same_s_max_targets = 0L,
     mgcv_same_s_mean_targets = 0,
     mgcv_same_s_reuse_opportunity_count = 0L,
+    mgcv_residual_cache_insert_count = 0L,
+    mgcv_residual_cache_entries = 0L,
+    mgcv_residual_cache_hit_ms = 0,
+    mgcv_residual_cache_store_ms = 0,
+    mgcv_fit_avoided_count = 0L,
     mgcv_key_build_ms = 0,
     mgcv_cache_lookup_ms = 0,
     mgcv_formula_build_ms = 0,
@@ -581,6 +586,21 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     mgcv_same_s_reuse_opportunity_count =
       as.integer(a$mgcv_same_s_reuse_opportunity_count) +
         as.integer(b$mgcv_same_s_reuse_opportunity_count),
+    mgcv_residual_cache_insert_count =
+      as.integer(a$mgcv_residual_cache_insert_count) +
+        as.integer(b$mgcv_residual_cache_insert_count),
+    mgcv_residual_cache_entries =
+      as.integer(a$mgcv_residual_cache_entries) +
+        as.integer(b$mgcv_residual_cache_entries),
+    mgcv_residual_cache_hit_ms =
+      as.numeric(a$mgcv_residual_cache_hit_ms) +
+        as.numeric(b$mgcv_residual_cache_hit_ms),
+    mgcv_residual_cache_store_ms =
+      as.numeric(a$mgcv_residual_cache_store_ms) +
+        as.numeric(b$mgcv_residual_cache_store_ms),
+    mgcv_fit_avoided_count =
+      as.integer(a$mgcv_fit_avoided_count) +
+        as.integer(b$mgcv_fit_avoided_count),
     mgcv_key_build_ms =
       as.numeric(a$mgcv_key_build_ms) + as.numeric(b$mgcv_key_build_ms),
     mgcv_cache_lookup_ms =
@@ -673,6 +693,11 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       mgcv_same_s_max_targets = integer(),
       mgcv_same_s_mean_targets = numeric(),
       mgcv_same_s_reuse_opportunity_count = integer(),
+      mgcv_residual_cache_insert_count = integer(),
+      mgcv_residual_cache_entries = integer(),
+      mgcv_residual_cache_hit_ms = numeric(),
+      mgcv_residual_cache_store_ms = numeric(),
+      mgcv_fit_avoided_count = integer(),
       mgcv_key_build_ms = numeric(), mgcv_cache_lookup_ms = numeric(),
       mgcv_formula_build_ms = numeric(), mgcv_data_subset_ms = numeric(),
       mgcv_fit_call_ms = numeric(), mgcv_residual_extract_ms = numeric(),
@@ -769,6 +794,15 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.numeric(metrics$mgcv_same_s_mean_targets),
       mgcv_same_s_reuse_opportunity_count =
         as.integer(metrics$mgcv_same_s_reuse_opportunity_count),
+      mgcv_residual_cache_insert_count =
+        as.integer(metrics$mgcv_residual_cache_insert_count),
+      mgcv_residual_cache_entries =
+        as.integer(metrics$mgcv_residual_cache_entries),
+      mgcv_residual_cache_hit_ms =
+        as.numeric(metrics$mgcv_residual_cache_hit_ms),
+      mgcv_residual_cache_store_ms =
+        as.numeric(metrics$mgcv_residual_cache_store_ms),
+      mgcv_fit_avoided_count = as.integer(metrics$mgcv_fit_avoided_count),
       mgcv_key_build_ms = as.numeric(metrics$mgcv_key_build_ms),
       mgcv_cache_lookup_ms = as.numeric(metrics$mgcv_cache_lookup_ms),
       mgcv_formula_build_ms = as.numeric(metrics$mgcv_formula_build_ms),
@@ -821,6 +855,135 @@ fastkpc_legacy_mgcv_s_key <- function(S) {
 
 fastkpc_legacy_mgcv_residual_key <- function(target, S) {
   paste0(as.integer(target), ":", fastkpc_legacy_mgcv_s_key(S))
+}
+
+fastkpc_legacy_mgcv_residual_cache_enabled <- function() {
+  identical(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE", unset = ""), "1")
+}
+
+fastkpc_legacy_run_mgcv_residual_pair <- function(
+    metrics, data, x, y, S, env, cache_env = NULL, cache_enabled = FALSE) {
+  residual_start <- proc.time()[["elapsed"]]
+  S_int <- as.integer(S)
+
+  key_start <- residual_start
+  target_keys <- c(
+    fastkpc_legacy_mgcv_residual_key(x, S_int),
+    fastkpc_legacy_mgcv_residual_key(y, S_int)
+  )
+  s_key <- fastkpc_legacy_mgcv_s_key(S_int)
+  metrics$mgcv_residual_keys <- target_keys
+  metrics$mgcv_s_keys <- rep(s_key, 2L)
+  metrics$mgcv_residual_request_count <- 2L
+  if (length(S_int) == 0L) {
+    metrics$mgcv_s_size_0_count <- 2L
+  } else if (length(S_int) == 1L) {
+    metrics$mgcv_s_size_1_count <- 2L
+  } else if (length(S_int) == 2L) {
+    metrics$mgcv_s_size_2_count <- 2L
+  } else {
+    metrics$mgcv_s_size_gt2_count <- 2L
+  }
+  metrics$mgcv_key_build_ms <-
+    metrics$mgcv_key_build_ms +
+      (proc.time()[["elapsed"]] - key_start) * 1000
+
+  if (!isTRUE(cache_enabled)) {
+    data_subset_start <- proc.time()[["elapsed"]]
+    xy_data <- data[, c(x, y)]
+    s_data <- data[, S_int, drop = FALSE]
+    metrics$mgcv_data_subset_ms <- metrics$mgcv_data_subset_ms +
+      (proc.time()[["elapsed"]] - data_subset_start) * 1000
+
+    fit_start <- proc.time()[["elapsed"]]
+    residuals <- env$regrXonS(xy_data, s_data)
+    metrics$mgcv_fit_call_ms <- metrics$mgcv_fit_call_ms +
+      (proc.time()[["elapsed"]] - fit_start) * 1000
+    metrics$mgcv_fit_count <- 2L
+    metrics$mgcv_cache_miss_count <- 2L
+
+    residual_extract_start <- proc.time()[["elapsed"]]
+    residuals <- as.matrix(residuals)
+    metrics$mgcv_residual_extract_ms <- metrics$mgcv_residual_extract_ms +
+      (proc.time()[["elapsed"]] - residual_extract_start) * 1000
+    metrics$residual_ms <- (proc.time()[["elapsed"]] - residual_start) * 1000
+    metrics$mgcv_unaccounted_ms <- max(
+      0,
+      metrics$residual_ms - metrics$mgcv_key_build_ms -
+        metrics$mgcv_cache_lookup_ms -
+        metrics$mgcv_formula_build_ms -
+        metrics$mgcv_data_subset_ms -
+        metrics$mgcv_fit_call_ms -
+        metrics$mgcv_residual_extract_ms -
+        metrics$mgcv_result_store_ms
+    )
+    return(list(residuals = residuals, metrics = metrics))
+  }
+
+  if (is.null(cache_env)) cache_env <- new.env(parent = emptyenv())
+  s_data <- NULL
+  residual_cols <- vector("list", 2L)
+  targets <- c(as.integer(x), as.integer(y))
+  for (idx in seq_along(targets)) {
+    key <- target_keys[[idx]]
+    lookup_start <- proc.time()[["elapsed"]]
+    hit <- exists(key, envir = cache_env, inherits = FALSE)
+    if (isTRUE(hit)) {
+      residual_cols[[idx]] <- get(key, envir = cache_env, inherits = FALSE)
+      hit_elapsed <- (proc.time()[["elapsed"]] - lookup_start) * 1000
+      metrics$mgcv_cache_hit_count <- metrics$mgcv_cache_hit_count + 1L
+      metrics$mgcv_fit_avoided_count <- metrics$mgcv_fit_avoided_count + 1L
+      metrics$mgcv_residual_cache_hit_ms <-
+        metrics$mgcv_residual_cache_hit_ms + hit_elapsed
+      metrics$mgcv_cache_lookup_ms <- metrics$mgcv_cache_lookup_ms +
+        hit_elapsed
+      next
+    }
+    metrics$mgcv_cache_lookup_ms <- metrics$mgcv_cache_lookup_ms +
+      (proc.time()[["elapsed"]] - lookup_start) * 1000
+    metrics$mgcv_cache_miss_count <- metrics$mgcv_cache_miss_count + 1L
+
+    data_subset_start <- proc.time()[["elapsed"]]
+    x_data <- data[, targets[[idx]], drop = FALSE]
+    if (is.null(s_data)) s_data <- data[, S_int, drop = FALSE]
+    metrics$mgcv_data_subset_ms <- metrics$mgcv_data_subset_ms +
+      (proc.time()[["elapsed"]] - data_subset_start) * 1000
+
+    fit_start <- proc.time()[["elapsed"]]
+    target_residual <- as.numeric(env$regrXonS(x_data, s_data)[, 1L])
+    metrics$mgcv_fit_call_ms <- metrics$mgcv_fit_call_ms +
+      (proc.time()[["elapsed"]] - fit_start) * 1000
+    metrics$mgcv_fit_count <- metrics$mgcv_fit_count + 1L
+
+    store_start <- proc.time()[["elapsed"]]
+    assign(key, target_residual, envir = cache_env)
+    metrics$mgcv_residual_cache_store_ms <-
+      metrics$mgcv_residual_cache_store_ms +
+        (proc.time()[["elapsed"]] - store_start) * 1000
+    metrics$mgcv_residual_cache_insert_count <-
+      metrics$mgcv_residual_cache_insert_count + 1L
+    metrics$mgcv_residual_cache_entries <-
+      metrics$mgcv_residual_cache_entries + 1L
+    residual_cols[[idx]] <- target_residual
+  }
+
+  residual_extract_start <- proc.time()[["elapsed"]]
+  residuals <- cbind(residual_cols[[1L]], residual_cols[[2L]])
+  metrics$mgcv_residual_extract_ms <- metrics$mgcv_residual_extract_ms +
+    (proc.time()[["elapsed"]] - residual_extract_start) * 1000
+  metrics$residual_ms <- (proc.time()[["elapsed"]] - residual_start) * 1000
+  metrics$mgcv_unaccounted_ms <- max(
+    0,
+    metrics$residual_ms - metrics$mgcv_key_build_ms -
+      metrics$mgcv_cache_lookup_ms -
+      metrics$mgcv_formula_build_ms -
+      metrics$mgcv_data_subset_ms -
+      metrics$mgcv_fit_call_ms -
+      metrics$mgcv_residual_extract_ms -
+      metrics$mgcv_result_store_ms -
+      metrics$mgcv_residual_cache_store_ms
+  )
+  list(residuals = residuals, metrics = metrics)
 }
 
 fastkpc_legacy_runtime_finalize_mgcv_keys <- function(metrics) {
@@ -1062,6 +1225,8 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
   dcov_cpp_required <- identical(dcov_backend, "cpp") ||
     isTRUE(dcov_cpp_shadow_enabled)
   fastkpc_legacy_prepare_dcov_cpp(dcov_cpp_required)
+  mgcv_residual_cache_enabled <- identical(ic.method, "dcc.gamma") &&
+    fastkpc_legacy_mgcv_residual_cache_enabled()
 
   G <- matrix(TRUE, nrow = p, ncol = p)
   diag(G) <- FALSE
@@ -1077,6 +1242,7 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
   suffStat <- list(data = data, ic.method = ic.method, index = index,
                    numCol = numCol)
   total_start <- proc.time()[["elapsed"]]
+  mgcv_residual_cache_env <- NULL
 
   run_legacy_ci <- function(x, y, S) {
     metrics <- fastkpc_legacy_runtime_zero()
@@ -1114,57 +1280,13 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           result$p.value
         } else {
           metrics$conditional_ci_count <- 1L
-          residual_start <- proc.time()[["elapsed"]]
-          key_start <- residual_start
-          S_int <- as.integer(S)
-          target_keys <- c(
-            fastkpc_legacy_mgcv_residual_key(x, S_int),
-            fastkpc_legacy_mgcv_residual_key(y, S_int)
+          residual <- fastkpc_legacy_run_mgcv_residual_pair(
+            metrics = metrics, data = data, x = x, y = y, S = S, env = env,
+            cache_env = mgcv_residual_cache_env,
+            cache_enabled = mgcv_residual_cache_enabled
           )
-          s_key <- fastkpc_legacy_mgcv_s_key(S_int)
-          metrics$mgcv_residual_keys <- target_keys
-          metrics$mgcv_s_keys <- rep(s_key, 2L)
-          metrics$mgcv_key_build_ms <-
-            (proc.time()[["elapsed"]] - key_start) * 1000
-
-          data_subset_start <- proc.time()[["elapsed"]]
-          xy_data <- data[, c(x, y)]
-          s_data <- data[, S]
-          metrics$mgcv_data_subset_ms <-
-            (proc.time()[["elapsed"]] - data_subset_start) * 1000
-
-          fit_start <- proc.time()[["elapsed"]]
-          residuals <- env$regrXonS(xy_data, s_data)
-          metrics$mgcv_fit_call_ms <-
-            (proc.time()[["elapsed"]] - fit_start) * 1000
-
-          residual_extract_start <- proc.time()[["elapsed"]]
-          metrics$mgcv_residual_extract_ms <-
-            (proc.time()[["elapsed"]] - residual_extract_start) * 1000
-          metrics$residual_ms <-
-            (proc.time()[["elapsed"]] - residual_start) * 1000
-          metrics$mgcv_fit_count <- 2L
-          metrics$mgcv_residual_request_count <- 2L
-          metrics$mgcv_cache_miss_count <- 2L
-          if (length(S_int) == 0L) {
-            metrics$mgcv_s_size_0_count <- 2L
-          } else if (length(S_int) == 1L) {
-            metrics$mgcv_s_size_1_count <- 2L
-          } else if (length(S_int) == 2L) {
-            metrics$mgcv_s_size_2_count <- 2L
-          } else {
-            metrics$mgcv_s_size_gt2_count <- 2L
-          }
-          metrics$mgcv_unaccounted_ms <- max(
-            0,
-            metrics$residual_ms - metrics$mgcv_key_build_ms -
-              metrics$mgcv_cache_lookup_ms -
-              metrics$mgcv_formula_build_ms -
-              metrics$mgcv_data_subset_ms -
-              metrics$mgcv_fit_call_ms -
-              metrics$mgcv_residual_extract_ms -
-              metrics$mgcv_result_store_ms
-          )
+          metrics <- residual$metrics
+          residuals <- residual$residuals
           if (identical(dcov_backend, "cpp")) {
             backend <- fastkpc_legacy_run_dcov_cpp_backend(
               metrics = metrics, x = residuals[, 1L], y = residuals[, 2L],
@@ -1215,6 +1337,11 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     remaining_edge_tests <- nrow(ind)
     if (remaining_edge_tests == 0L) break
     G_l <- split(G, gl(p, p))
+    mgcv_residual_cache_env <- if (isTRUE(mgcv_residual_cache_enabled)) {
+      new.env(parent = emptyenv())
+    } else {
+      NULL
+    }
 
     edge_test_xy <- function(x, y) {
       G_xy <- TRUE
@@ -1296,7 +1423,8 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     res <- if (.Platform$OS.type == "unix" && workers > 1L) {
       parallel::mclapply(
         edge_indices, edge_test, mc.cores = workers, mc.set.seed = FALSE,
-        mc.cleanup = TRUE, mc.allow.recursive = FALSE, mc.preschedule = FALSE
+        mc.cleanup = TRUE, mc.allow.recursive = FALSE,
+        mc.preschedule = isTRUE(mgcv_residual_cache_enabled)
       )
     } else {
       lapply(edge_indices, edge_test)
@@ -1559,6 +1687,31 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$mgcv_cache_hit_count),
         legacy_mgcv_cache_miss_count =
           as.integer(runtime_total$mgcv_cache_miss_count),
+        legacy_mgcv_residual_cache_hit_count =
+          as.integer(runtime_total$mgcv_cache_hit_count),
+        legacy_mgcv_residual_cache_miss_count =
+          as.integer(runtime_total$mgcv_cache_miss_count),
+        legacy_mgcv_residual_cache_insert_count =
+          as.integer(runtime_total$mgcv_residual_cache_insert_count),
+        legacy_mgcv_residual_cache_entries =
+          as.integer(runtime_total$mgcv_residual_cache_entries),
+        legacy_mgcv_residual_cache_hit_ms =
+          as.numeric(runtime_total$mgcv_residual_cache_hit_ms),
+        legacy_mgcv_residual_cache_lookup_ms =
+          as.numeric(runtime_total$mgcv_cache_lookup_ms),
+        legacy_mgcv_residual_cache_store_ms =
+          as.numeric(runtime_total$mgcv_residual_cache_store_ms),
+        legacy_mgcv_fit_avoided_count =
+          as.integer(runtime_total$mgcv_fit_avoided_count),
+        legacy_mgcv_fit_avoided_estimated_ms = {
+          fit_count <- as.integer(runtime_total$mgcv_fit_count)
+          if (fit_count > 0L) {
+            as.numeric(runtime_total$mgcv_fit_call_ms) /
+              fit_count * as.integer(runtime_total$mgcv_fit_avoided_count)
+          } else {
+            0
+          }
+        },
         legacy_mgcv_unique_residual_key_count =
           as.integer(runtime_total$mgcv_unique_residual_key_count),
         legacy_mgcv_duplicate_residual_key_count =
