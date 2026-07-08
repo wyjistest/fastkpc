@@ -325,6 +325,28 @@ precision_run_skeleton_residual_provider_native <- function(
         PACKAGE = "fastkpc_cuda")
 }
 
+precision_run_skeleton_residual_provider_legacy_dcov_native <- function(
+    data, alpha, max_conditioning_size, residual_provider,
+    index = 1, numCol = floor(nrow(as.matrix(data)) / 10),
+    trace_level = c("summary", "full", "none")) {
+  load_fastkpc_cuda_native()
+  if (!is.function(residual_provider)) {
+    stop("residual_provider must be a function", call. = FALSE)
+  }
+  trace_level <- match.arg(trace_level)
+  data <- as.matrix(data)
+  storage.mode(data) <- "double"
+  .Call("C_precision_run_skeleton_residual_provider_legacy_dcov_native",
+        data,
+        as.numeric(alpha),
+        as.integer(max_conditioning_size),
+        residual_provider,
+        as.numeric(index),
+        as.integer(numCol),
+        as.character(trace_level),
+        PACKAGE = "fastkpc_cuda")
+}
+
 fast_kpc_wanpdag_cuda <- function(data, alpha, max_conditioning_size,
                                   residual_backend = "fastSpline",
                                   residual_device = c("auto", "cpu", "cuda"),

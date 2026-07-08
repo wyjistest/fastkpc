@@ -2901,6 +2901,65 @@ plane while preserving native skeleton control and the residual-provider
 request contract.
 ```
 
+### Native residual-provider + legacy-dCov checkpoint
+
+The next C++ host boundary replaces the exact dCov helper with the
+legacy-compatible C++ `dcov.gamma` implementation while keeping the same native
+skeleton control loop and residual-provider request contract:
+
+```text
+precision_run_skeleton_residual_provider_legacy_dcov_native()
+```
+
+Status:
+
+```text
+status: targeted one-call host-control + mgcv residual-provider + legacy CI gate
+scope:
+  C++ owns complete graph initialization
+  C++ owns skeleton level loop through max_conditioning_size = 1
+  C++ generates each level with make_layer_plan()
+  C++ enumerates unique target|S residual requests per level
+  R residual provider supplies legacy mgcv/regrXonS residual vectors
+  C++ computes legacy-compatible lowrank dcov.gamma p-values from those vectors
+  C++ replays deletion / ignored-after-delete / pMax / sepsets
+```
+
+Gate:
+
+```text
+Rscript fastkpc/tests/test_skeleton_native_residual_provider_legacy_dcov.R
+```
+
+Coverage:
+
+```text
+real-valued data
+max_conditioning_size = 1
+legacy mgcv/regrXonS residual authority via provider
+unique target|S residual request table exercised
+shared C++ legacy dcov.gamma oracle used by R and native paths
+Spectra lowrank route exercised through FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK
+adjacency identical to R residual-provider + legacy-dCov reference replay
+sepsets identical to R residual-provider + legacy-dCov reference replay
+n.edgetests identical to R residual-provider + legacy-dCov reference replay
+pMax max abs diff < 1e-10
+```
+
+Decision:
+
+```text
+This closes the targeted Phase 5 host/data-plane boundary that still used
+native exact dCov: native skeleton control can now consume legacy mgcv residuals
+and compute legacy-compatible C++ dcov.gamma p-values behind one native
+entrypoint. It is still not the final compatible.cuda route because residual
+authority remains an R provider seam, execution is only a targeted
+max_conditioning_size = 1 gate, and full 351x48 one-call execution has not yet
+passed SHD=0 / n.edgetests-exact gates. The next boundary must move residual
+generation or residual batches further behind the native entrypoint while
+preserving this legacy dcov.gamma CI data-plane contract.
+```
+
 ### CUDA responsibilities
 
 ```text
