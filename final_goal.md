@@ -1553,6 +1553,87 @@ reuse target-independent setup by S, preserve per-target mgcv smoothing
 parameter selection, and only share fixed-sp factorization/solve work when the
 selected-sp signature also matches.
 
+Guarded residual same-S setup timing potential diagnostic:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_timing_potential_subset_v1
+```
+
+Status:
+
+```text
+status: created
+mode: env-neutral diagnostic over cpp_guarded backend route
+data: real 351x48 fixture, 12 hot-column subset
+max_conditioning_size: 3
+num_cores: 8
+
+edge_count: 20
+n.edgetests: 131,994,1453,243
+
+backend / native / fallback / error targets:
+  2756 / 2297 / 459 / 0
+
+same-S groups / targets / reuse / ratio:
+  78 / 2297 / 2219 / 0.9660427
+
+same-S+setup groups / reuse / ratio:
+  78 / 2219 / 0.9660427
+
+same-S+selected-sp groups / reuse / ratio:
+  765 / 1532 / 0.6669569
+
+input_setup_ms:       6378
+mgcv_gam_fit_ms:     34388
+setup_extract_ms:    28313
+condition_ms:         1073
+native_solve_ms:      2711
+fallback_ms:         13148
+
+same-S setup input potential saved ms:       6378
+same-S setup extract potential saved ms:    27414
+same-S setup condition potential saved ms:   1073
+same-S setup structure potential saved ms:  34865
+same-S+sp native solve potential saved ms:   2408
+same-S+sp native solve reuse ratio:          0.8882331
+gam fit preserved ms:                       34388
+```
+
+This timing diagnostic makes the next implementation boundary sharper. The
+same-S target-independent setup path has a large estimated worker-ms ceiling on
+the subset:
+
+```text
+input/formula + setup extraction + condition check potential:
+  34.865s worker-ms
+```
+
+But the diagnostic also shows that `mgcv::gam` time is preserved:
+
+```text
+mgcv_gam_fit_ms = gam_fit_preserved_ms = 34.388s worker-ms
+```
+
+Therefore same-S setup reuse is not allowed to skip per-target mgcv smoothing
+parameter selection. The first serious prototype should reuse only
+target-independent same-S structure:
+
+```text
+conditioning-set data/model frame
+formula / term structure
+model matrix / basis
+penalty and constraint structure
+condition metadata where semantically identical
+```
+
+It must still run target-specific `mgcv::gam` or an exactly equivalent
+selected-sp provider for each target. Fixed-sp numeric replay or factorization
+can only be shared under the narrower key:
+
+```text
+same S + selected sp
+```
+
 Same-S guarded residual prefill prototype:
 
 ```bash
@@ -2115,6 +2196,24 @@ native same-S mean targets = 62.74359
 native same-S reuse opportunity = 4816
 native same-S setup reuse ratio = 0.9840621
 status: strong same-S setup reuse opportunity; proceed to prototype
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_timing_potential_subset_v1 exists
+real 351x48 fixture, 12 hot-column subset, same-S setup timing potential
+backend / native / fallback / error targets = 2756 / 2297 / 459 / 0
+same-S groups / native targets / reuse ratio = 78 / 2297 / 0.9660427
+same-S+setup groups / reuse ratio = 78 / 0.9660427
+same-S+selected-sp groups / reuse ratio = 765 / 0.6669569
+input_setup_ms = 6378
+mgcv_gam_fit_ms = 34388
+setup_extract_ms = 28313
+condition_ms = 1073
+native_solve_ms = 2711
+same-S setup structure potential saved ms = 34865
+same-S+sp native solve potential saved ms = 2408
+gam_fit_preserved_ms = 34388
+status: same-S target-independent setup reuse has measurable potential, but
+per-target mgcv::gam / selected-sp selection remains preserved and cannot be
+skipped by an S-only setup cache
 ```
 
 Next Phase 3 step:
@@ -2122,12 +2221,14 @@ Next Phase 3 step:
 ```text
 do not promote FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded. The regression
 is now attributed to repeated per-target setup/extraction, not the native
-fixed-sp numeric solve, and the same-S diagnostic shows a 98.4% setup reuse
-opportunity on the deep real subset. The next viable Phase 3 step is an
-env-gated same-S guarded setup reuse prototype: group native-supported
-target residuals by conditioning set S, build/extract the reusable setup once
-per S where semantics allow it, solve all targets in that group, and preserve
-canonical replay. Keep the default route unchanged.
+fixed-sp numeric solve. Same-S diagnostics show strong target-independent setup
+reuse opportunity on the deep real subset, but selected smoothing parameters
+are target-specific. The next viable Phase 3 step is an env-gated same-S
+target-independent setup provider prototype: group native-supported target
+residuals by conditioning set S, reuse only formula/data/model-matrix/basis/
+penalty/constraint structure where semantics allow it, preserve per-target
+mgcv::gam selected-sp authority, batch fixed-sp replay only by same S +
+selected sp, and preserve canonical replay. Keep the default route unchanged.
 ```
 
 ### 8.4 Continue dCov backend improvement separately
