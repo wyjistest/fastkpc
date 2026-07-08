@@ -2729,6 +2729,216 @@ extern "C" SEXP C_precision_run_skeleton_ptable_native(SEXP ps,
   END_RCPP
 }
 
+extern "C" SEXP C_precision_run_skeleton_provider_native(SEXP ps,
+                                                         SEXP alphas,
+                                                         SEXP max_conditioning_sizes,
+                                                         SEXP providers,
+                                                         SEXP trace_levels) {
+  BEGIN_RCPP
+  const int p = Rf_asInteger(ps);
+  const double alpha = Rf_asReal(alphas);
+  const int max_conditioning_size = Rf_asInteger(max_conditioning_sizes);
+  Rcpp::Function provider(providers);
+  const std::string trace_level = Rcpp::as<std::string>(trace_levels);
+  const bool full_trace = trace_level == "full";
+  if (p < 2) {
+    Rcpp::stop("provider native skeleton requires p >= 2");
+  }
+  if (!std::isfinite(alpha) || alpha <= 0.0) {
+    Rcpp::stop("alpha must be a positive finite value");
+  }
+  if (max_conditioning_size < 0) {
+    Rcpp::stop("max_conditioning_size must be non-negative");
+  }
+
+  std::vector<int> adjacency(static_cast<std::size_t>(p) * p, 1);
+  std::vector<double> pmax(static_cast<std::size_t>(p) * p,
+                           -std::numeric_limits<double>::infinity());
+  std::vector<std::vector<std::vector<int> > > sepsets(
+    p, std::vector<std::vector<int> >(p));
+  for (int i = 0; i < p; ++i) {
+    adjacency[static_cast<std::size_t>(i) * p + i] = 0;
+    pmax[static_cast<std::size_t>(i) * p + i] = 1.0;
+  }
+
+  Rcpp::IntegerVector n_edgetests;
+  Rcpp::IntegerVector level_level, level_tasks_planned, level_tests_replayed,
+    level_ignored, level_deletions;
+
+  Rcpp::IntegerVector task_global_id, task_level, task_index, task_edge_x,
+    task_edge_y, task_x, task_y, task_conditioning_size;
+  Rcpp::CharacterVector task_s_key;
+  Rcpp::NumericVector task_p_used;
+  Rcpp::LogicalVector task_deleted, task_ignored;
+
+  int global_task_id = 0;
+  int total_tasks_planned = 0;
+  int total_tests_replayed = 0;
+  int total_ignored = 0;
+  int total_deletions = 0;
+
+  for (int level = 0; level <= max_conditioning_size; ++level) {
+    const LayerPlan plan = make_layer_plan(adjacency, p, level);
+    const int task_count = static_cast<int>(plan.tasks.size());
+
+    Rcpp::IntegerVector provider_task_index(task_count), provider_edge_x(task_count),
+      provider_edge_y(task_count), provider_x(task_count), provider_y(task_count),
+      provider_conditioning_size(task_count);
+    Rcpp::CharacterVector provider_s_key(task_count);
+    Rcpp::List provider_conditioning_sets(task_count);
+    for (int i = 0; i < task_count; ++i) {
+      const LayerCiTask& task = plan.tasks[i];
+      Rcpp::IntegerVector cond(task.conditioning_set.size());
+      for (int j = 0; j < cond.size(); ++j) cond[j] = task.conditioning_set[j] + 1;
+      provider_task_index[i] = i + 1;
+      provider_edge_x[i] = task.edge_x + 1;
+      provider_edge_y[i] = task.edge_y + 1;
+      provider_x[i] = task.orientation_x + 1;
+      provider_y[i] = task.orientation_y + 1;
+      provider_conditioning_sets[i] = cond;
+      provider_s_key[i] = replay_s_key(task.conditioning_set);
+      provider_conditioning_size[i] =
+        static_cast<int>(task.conditioning_set.size());
+    }
+    provider_conditioning_sets.attr("class") = "AsIs";
+    Rcpp::DataFrame provider_tasks = Rcpp::DataFrame::create(
+      Rcpp::Named("task_index") = provider_task_index,
+      Rcpp::Named("edge_x") = provider_edge_x,
+      Rcpp::Named("edge_y") = provider_edge_y,
+      Rcpp::Named("x") = provider_x,
+      Rcpp::Named("y") = provider_y,
+      Rcpp::Named("conditioning_sets") = provider_conditioning_sets,
+      Rcpp::Named("S_key") = provider_s_key,
+      Rcpp::Named("conditioning_size") = provider_conditioning_size,
+      Rcpp::Named("stringsAsFactors") = false
+    );
+    Rcpp::NumericVector pvalues = provider(provider_tasks, level);
+    if (pvalues.size() != task_count) {
+      Rcpp::stop("provider returned p-value vector with wrong length");
+    }
+
+    std::map<int, bool> edge_done;
+    std::vector<int> delete_edges(static_cast<std::size_t>(p) * p, 0);
+    int tests_replayed = 0;
+    int ignored_after_delete = 0;
+    int deletions = 0;
+
+    for (int i = 0; i < task_count; ++i) {
+      const LayerCiTask& task = plan.tasks[i];
+      const int edge_key = task.edge_x < task.edge_y
+        ? task.edge_x * p + task.edge_y
+        : task.edge_y * p + task.edge_x;
+      const bool ignored = edge_done[edge_key] ||
+        adjacency[static_cast<std::size_t>(task.edge_x) * p + task.edge_y] == 0;
+      bool deleted = false;
+      double pval = NA_REAL;
+
+      if (ignored) {
+        ++ignored_after_delete;
+      } else {
+        ++tests_replayed;
+        pval = pvalues[i];
+        if (!std::isfinite(pval)) pval = 1.0;
+        const std::size_t pmax_idx =
+          static_cast<std::size_t>(task.edge_x) * p + task.edge_y;
+        const std::size_t pmax_rev =
+          static_cast<std::size_t>(task.edge_y) * p + task.edge_x;
+        if (pval > pmax[pmax_idx]) {
+          pmax[pmax_idx] = pval;
+          pmax[pmax_rev] = pval;
+        }
+        deleted = pval >= alpha;
+        if (deleted) {
+          ++deletions;
+          delete_edges[static_cast<std::size_t>(task.edge_x) * p +
+                       task.edge_y] = 1;
+          delete_edges[static_cast<std::size_t>(task.edge_y) * p +
+                       task.edge_x] = 1;
+          sepsets[task.edge_x][task.edge_y] = task.conditioning_set;
+          sepsets[task.edge_y][task.edge_x] = task.conditioning_set;
+          edge_done[edge_key] = true;
+        }
+      }
+
+      if (full_trace) {
+        ++global_task_id;
+        task_global_id.push_back(global_task_id);
+        task_level.push_back(level);
+        task_index.push_back(i + 1);
+        task_edge_x.push_back(task.edge_x + 1);
+        task_edge_y.push_back(task.edge_y + 1);
+        task_x.push_back(task.orientation_x + 1);
+        task_y.push_back(task.orientation_y + 1);
+        task_s_key.push_back(replay_s_key(task.conditioning_set));
+        task_conditioning_size.push_back(
+          static_cast<int>(task.conditioning_set.size()));
+        task_p_used.push_back(pval);
+        task_deleted.push_back(deleted);
+        task_ignored.push_back(ignored);
+      }
+    }
+
+    for (int i = 0; i < p * p; ++i) {
+      if (delete_edges[i] != 0) adjacency[i] = 0;
+    }
+
+    total_tasks_planned += task_count;
+    total_tests_replayed += tests_replayed;
+    total_ignored += ignored_after_delete;
+    total_deletions += deletions;
+    n_edgetests.push_back(tests_replayed);
+    level_level.push_back(level);
+    level_tasks_planned.push_back(task_count);
+    level_tests_replayed.push_back(tests_replayed);
+    level_ignored.push_back(ignored_after_delete);
+    level_deletions.push_back(deletions);
+  }
+
+  Rcpp::DataFrame task_rows = Rcpp::DataFrame::create(
+    Rcpp::Named("canonical_test_order_id") = task_global_id,
+    Rcpp::Named("level") = task_level,
+    Rcpp::Named("task_index") = task_index,
+    Rcpp::Named("edge_x") = task_edge_x,
+    Rcpp::Named("edge_y") = task_edge_y,
+    Rcpp::Named("x") = task_x,
+    Rcpp::Named("y") = task_y,
+    Rcpp::Named("S_key") = task_s_key,
+    Rcpp::Named("conditioning_size") = task_conditioning_size,
+    Rcpp::Named("p_used") = task_p_used,
+    Rcpp::Named("native_edge_deleted") = task_deleted,
+    Rcpp::Named("native_edge_ignored") = task_ignored,
+    Rcpp::Named("stringsAsFactors") = false
+  );
+  Rcpp::DataFrame level_rows = Rcpp::DataFrame::create(
+    Rcpp::Named("level") = level_level,
+    Rcpp::Named("tasks_planned") = level_tasks_planned,
+    Rcpp::Named("tests_replayed") = level_tests_replayed,
+    Rcpp::Named("tasks_ignored_after_delete") = level_ignored,
+    Rcpp::Named("deletions") = level_deletions,
+    Rcpp::Named("stringsAsFactors") = false
+  );
+
+  return Rcpp::List::create(
+    Rcpp::Named("adjacency") = adjacency_to_matrix(adjacency, p),
+    Rcpp::Named("sepsets") = sepsets_to_list(sepsets),
+    Rcpp::Named("pMax") = pmax_to_matrix(pmax, p),
+    Rcpp::Named("n.edgetests") = n_edgetests,
+    Rcpp::Named("tasks") = task_rows,
+    Rcpp::Named("levels") = level_rows,
+    Rcpp::Named("summary") = Rcpp::List::create(
+      Rcpp::Named("p") = p,
+      Rcpp::Named("alpha") = alpha,
+      Rcpp::Named("max_conditioning_size") = max_conditioning_size,
+      Rcpp::Named("levels") = max_conditioning_size + 1,
+      Rcpp::Named("tasks_planned") = total_tasks_planned,
+      Rcpp::Named("tests_replayed") = total_tests_replayed,
+      Rcpp::Named("tasks_ignored_after_delete") = total_ignored,
+      Rcpp::Named("deletions") = total_deletions
+    )
+  );
+  END_RCPP
+}
+
 static const R_CallMethodDef call_methods[] = {
   {"C_fastkpc_cuda_available", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_available), 0},
   {"C_fastkpc_cuda_device_info", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_device_info), 0},
@@ -2745,6 +2955,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fast_kpc_wanpdag_cuda", reinterpret_cast<DL_FUNC>(&C_fast_kpc_wanpdag_cuda), 24},
   {"C_precision_make_layer_plan_native", reinterpret_cast<DL_FUNC>(&C_precision_make_layer_plan_native), 2},
   {"C_precision_run_skeleton_ptable_native", reinterpret_cast<DL_FUNC>(&C_precision_run_skeleton_ptable_native), 4},
+  {"C_precision_run_skeleton_provider_native", reinterpret_cast<DL_FUNC>(&C_precision_run_skeleton_provider_native), 5},
   {"C_precision_replay_layer_native", reinterpret_cast<DL_FUNC>(&C_precision_replay_layer_native), 10},
   {nullptr, nullptr, 0}
 };

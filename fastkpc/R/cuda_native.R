@@ -253,6 +253,23 @@ precision_run_skeleton_ptable_native <- function(
         PACKAGE = "fastkpc_cuda")
 }
 
+precision_run_skeleton_provider_native <- function(
+    p, alpha, max_conditioning_size, provider,
+    trace_level = c("summary", "full", "none")) {
+  load_fastkpc_cuda_native()
+  if (!is.function(provider)) {
+    stop("provider must be a function", call. = FALSE)
+  }
+  trace_level <- match.arg(trace_level)
+  .Call("C_precision_run_skeleton_provider_native",
+        as.integer(p),
+        as.numeric(alpha),
+        as.integer(max_conditioning_size),
+        provider,
+        as.character(trace_level),
+        PACKAGE = "fastkpc_cuda")
+}
+
 fast_kpc_wanpdag_cuda <- function(data, alpha, max_conditioning_size,
                                   residual_backend = "fastSpline",
                                   residual_device = c("auto", "cpu", "cuda"),

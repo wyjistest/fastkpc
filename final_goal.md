@@ -2682,6 +2682,60 @@ The next boundary must replace the synthetic p-table oracle with a real
 compatible CI data-plane call while preserving the same native control flow.
 ```
 
+### Native provider skeleton checkpoint
+
+The next C++ host boundary replaces the synthetic p-table oracle with a
+provider seam that receives native-planned task tables and returns p-values:
+
+```text
+precision_run_skeleton_provider_native()
+```
+
+Status:
+
+```text
+status: targeted one-call host-control + real legacy CI provider gate
+scope:
+  C++ owns complete graph initialization
+  C++ owns skeleton level loop
+  C++ generates each level with make_layer_plan()
+  C++ calls an R p-value provider with the native task table
+  provider computes legacy mgcv/regrXonS + dcc.gamma p-values in the test gate
+  C++ replays deletion / ignored-after-delete / pMax / sepsets
+```
+
+Gate:
+
+```text
+Rscript fastkpc/tests/test_skeleton_native_provider_legacy_ci.R
+```
+
+Coverage:
+
+```text
+p = 4 real-valued data
+max_conditioning_size = 1
+legacy mgcv residual authority
+legacy dcc.gamma CI p-values
+conditional task rows exercised
+adjacency identical to R reference replay over the same provider
+sepsets identical to R reference replay over the same provider
+n.edgetests identical to R reference replay over the same provider
+pMax max abs diff < 1e-12
+```
+
+Decision:
+
+```text
+This moves Phase 5 beyond synthetic p-tables: the native one-call control loop
+can now consume p-values produced by a real legacy-compatible CI provider while
+retaining native ownership of planning and replay. The provider is still an R
+callback and therefore not the final compatible CUDA data plane. The next
+boundary must replace this R provider seam with a native C++/CUDA-compatible CI
+executor that can generate p-values from data behind the same one-call skeleton
+entrypoint.
+```
+
 ### CUDA responsibilities
 
 ```text
