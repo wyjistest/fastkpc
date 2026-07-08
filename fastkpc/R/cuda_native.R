@@ -240,6 +240,19 @@ precision_make_layer_plan_native <- function(adjacency, level) {
         PACKAGE = "fastkpc_cuda")
 }
 
+precision_run_skeleton_ptable_native <- function(
+    p = 6L, alpha = 0.05, max_conditioning_size = 2L,
+    trace_level = c("summary", "full", "none")) {
+  load_fastkpc_cuda_native()
+  trace_level <- match.arg(trace_level)
+  .Call("C_precision_run_skeleton_ptable_native",
+        as.integer(p),
+        as.numeric(alpha),
+        as.integer(max_conditioning_size),
+        as.character(trace_level),
+        PACKAGE = "fastkpc_cuda")
+}
+
 fast_kpc_wanpdag_cuda <- function(data, alpha, max_conditioning_size,
                                   residual_backend = "fastSpline",
                                   residual_device = c("auto", "cpu", "cuda"),

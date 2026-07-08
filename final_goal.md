@@ -2628,6 +2628,60 @@ ownership, and full 351x48 one-call execution still remain outside the native
 entrypoint.
 ```
 
+### Native p-table one-call skeleton checkpoint
+
+The next C++ host boundary combines the native planner and replay primitive
+inside a single native skeleton control entrypoint:
+
+```text
+precision_run_skeleton_ptable_native()
+```
+
+Status:
+
+```text
+status: targeted one-call host-control parity gate, not a real CI engine
+scope:
+  C++ owns complete graph initialization
+  C++ owns skeleton level loop
+  C++ generates each level with make_layer_plan()
+  C++ applies synthetic p-table p-values
+  C++ replays deletion / ignored-after-delete / pMax / sepsets
+  R reference remains fastkpc_run_skeleton_ptable_parity()
+```
+
+Gate:
+
+```text
+Rscript fastkpc/tests/test_skeleton_ptable_native_one_call.R
+```
+
+Coverage:
+
+```text
+p = 6
+max_conditioning_size = 2
+level-2 deletion
+level-2 ignored post-delete task rows
+adjacency identical to R/native p-table reference
+sepsets identical to R/native p-table reference
+n.edgetests identical to R/native p-table reference
+pMax max abs diff < 1e-12
+global canonical task trace emitted by the one-call native entrypoint
+```
+
+Decision:
+
+```text
+This is the first one-call native skeleton-control checkpoint. It proves that
+C++ can own the level loop, task generation, adjacency mutation, sepset writes,
+pMax updates, and ignored-after-delete semantics for a deterministic p-table
+CI oracle. It still does not execute real mgcv residuals, dCov p-values, CUDA
+residual batches, or the full 351x48 compatible route, so Phase 5 remains open.
+The next boundary must replace the synthetic p-table oracle with a real
+compatible CI data-plane call while preserving the same native control flow.
+```
+
 ### CUDA responsibilities
 
 ```text
