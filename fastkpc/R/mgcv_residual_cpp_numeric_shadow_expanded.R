@@ -21,7 +21,10 @@ fastkpc_run_mgcv_residual_cpp_numeric_shadow_expanded <- function(
     numCol = NULL,
     residual_tol = 1e-5,
     p_tol = 1e-5,
+    solver = c("cpp", "cpp_guarded"),
+    condition_threshold = 1e12,
     env = fastkpc_legacy_env()) {
+  solver <- match.arg(solver)
   if (is.null(data)) data <- fastkpc_mgcv_oracle_default_data()
   data <- as.matrix(data)
   storage.mode(data) <- "double"
@@ -62,8 +65,13 @@ fastkpc_run_mgcv_residual_cpp_numeric_shadow_expanded <- function(
     numCol = numCol,
     residual_tol = residual_tol,
     p_tol = p_tol,
-    solver = "cpp",
-    artifact_name = "mgcv_residual_cpp_numeric_shadow_expanded_v1",
+    solver = solver,
+    condition_threshold = condition_threshold,
+    artifact_name = if (identical(solver, "cpp_guarded")) {
+      "mgcv_residual_cpp_numeric_shadow_guarded_expanded_v1"
+    } else {
+      "mgcv_residual_cpp_numeric_shadow_expanded_v1"
+    },
     env = env
   )
   artifact$oracle <- oracle

@@ -822,6 +822,60 @@ therefore use one of these routes:
    has zero strict residual/p mismatches or an accepted fallback policy.
 ```
 
+Guarded C++ fixed-sp numeric shadow artifact:
+
+```text
+fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_guarded_expanded_v1
+```
+
+Status:
+
+```text
+status: created
+mode: shadow only, not authoritative
+source: expanded cases from full 351x48 skeleton deletion log
+solver: cpp_guarded
+condition_threshold: 1e12
+case_count: 28
+setup_supported_count: 28
+setup_unsupported_count: 0
+residual_pair_match_count: 28
+residual_pair_mismatch_count: 0
+dcov_p_match_count: 28
+dcov_p_mismatch_count: 0
+decision_match_count: 28
+decision_flip_count: 0
+fallback_count: 19 targets
+high_condition_fallback_count: 19 targets
+cpp_guarded_count: 37 targets
+max_normal_matrix_condition: 9.20319e13
+max_residual_x_abs_diff: 7.194023e-12
+max_residual_y_abs_diff: 2.175637e-11
+max_dcov_p_abs_diff: 5.538792e-12
+pass: TRUE
+```
+
+The previous expanded mismatch case is now covered by the guarded high-condition
+fallback:
+
+```text
+case_id: expanded351_22_s4_x8_y9
+normal_matrix_condition_x: 4.267963e13
+normal_matrix_condition_y: 3.799319e13
+fallback_reason_x: high_normal_matrix_condition
+fallback_reason_y: high_normal_matrix_condition
+residual_pair_match: TRUE
+dcov_p_match: TRUE
+decision_flip: FALSE
+```
+
+This is a useful fail-closed supported-envelope policy, but it is still not a
+production residual backend. It proves that high-condition guardrails can make
+the current native C++ fixed-sp executor safe under the expanded shadow sample
+by falling back to mgcv C_magic replay. The next promotion step must either
+expand this guarded shadow across more full-skeleton cases or replace the
+normal-equation path with a closer mgcv-equivalent numeric kernel.
+
 #### Gate before production use
 
 ```text
@@ -1188,14 +1242,22 @@ fastkpc/artifacts/mgcv_residual_cpp_numeric_drift_isolation_v1 exists
 C++ normal solve matches R normal solve
 mgcv C_magic fixed-sp replay matches full mgcv oracle
 drift layer = normal_equation_vs_mgcv_magic
+
+fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_guarded_expanded_v1 exists
+28 / 28 expanded extracted setups supported
+28 / 28 residual pairs match under strict tolerance
+28 / 28 dCov p-values match under strict tolerance
+decision_flip_count = 0
+fallback_count = 19 high-condition targets
+status: guarded shadow pass; still not production
 ```
 
 Next Phase 3 step:
 
 ```text
-define and test the supported-envelope fallback policy for native C++ fixed-sp
-residual solve, starting with high-condition/deeper additive setups that drift
-from mgcv C_magic under strict residual/p-value tolerances
+expand the guarded native C++ fixed-sp residual shadow across a larger
+full-skeleton sample and decide whether to keep the high-condition fallback
+policy or implement a closer mgcv-equivalent C++ solve kernel
 ```
 
 ### 8.4 Continue dCov backend improvement separately

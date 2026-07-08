@@ -33,24 +33,6 @@ fastkpc_drift_iso_rel_l2 <- function(a, b) {
   fastkpc_mgcv_setup_shadow_rel_l2(a, b)
 }
 
-fastkpc_drift_iso_normal_matrix_condition <- function(
-    setup, sp = setup$sp, tol = sqrt(.Machine$double.eps)) {
-  X <- as.matrix(setup$X)
-  y <- as.numeric(setup$y)
-  P <- fastkpc_assemble_penalty(
-    p = ncol(X), S = setup$S, off = setup$off, sp = sp, H = setup$H
-  )
-  if (is.null(setup$w)) {
-    Xw <- X
-  } else {
-    Xw <- X * sqrt(as.numeric(setup$w))
-  }
-  Z <- fastkpc_constraint_nullspace(C = setup$C, p = ncol(X), tol = tol)
-  XZ <- Xw %*% Z
-  A <- crossprod(XZ) + crossprod(Z, P %*% Z)
-  suppressWarnings(kappa(A, exact = TRUE))
-}
-
 fastkpc_drift_iso_solve_target <- function(data, case, entry, suffix,
                                            target_col, env, tol) {
   fit_data_info <- fastkpc_mgcv_setup_shadow_fit_data(data, case)
@@ -96,7 +78,7 @@ fastkpc_drift_iso_solve_target <- function(data, case, entry, suffix,
       residuals = r_residuals
     ),
     cpp = cpp,
-    condition = fastkpc_drift_iso_normal_matrix_condition(
+    condition = fastkpc_mgcv_fixed_sp_normal_matrix_condition(
       setup, sp = setup$sp, tol = tol
     )
   )

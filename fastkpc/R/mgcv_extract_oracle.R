@@ -382,6 +382,23 @@ fastkpc_constraint_nullspace <- function(C, p, tol = sqrt(.Machine$double.eps)) 
   Q[, seq.int(rC + 1L, p), drop = FALSE]
 }
 
+fastkpc_mgcv_fixed_sp_normal_matrix_condition <- function(
+    setup, sp = setup$sp, tol = sqrt(.Machine$double.eps)) {
+  X <- as.matrix(setup$X)
+  P <- fastkpc_assemble_penalty(
+    p = ncol(X), S = setup$S, off = setup$off, sp = sp, H = setup$H
+  )
+  if (is.null(setup$w)) {
+    Xw <- X
+  } else {
+    Xw <- X * sqrt(as.numeric(setup$w))
+  }
+  Z <- fastkpc_constraint_nullspace(C = setup$C, p = ncol(X), tol = tol)
+  XZ <- Xw %*% Z
+  A <- crossprod(XZ) + crossprod(Z, P %*% Z)
+  suppressWarnings(kappa(A, exact = TRUE))
+}
+
 fastkpc_solve_gaussian_penalized_fixed_sp <- function(
     X, y, S, off, sp, C = NULL, H = NULL, w = NULL,
     tol = sqrt(.Machine$double.eps)) {

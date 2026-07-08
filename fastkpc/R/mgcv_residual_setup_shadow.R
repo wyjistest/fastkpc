@@ -76,7 +76,8 @@ fastkpc_mgcv_setup_shadow_sp <- function(entry, suffix) {
 
 fastkpc_mgcv_setup_shadow_solve_one <- function(entry, fit_data_info,
                                                 target_col, suffix, env,
-                                                solver) {
+                                                solver,
+                                                condition_threshold) {
   formula <- fastkpc_mgcv_oracle_formula(
     target_col, length(fit_data_info$S), env
   )
@@ -88,12 +89,33 @@ fastkpc_mgcv_setup_shadow_solve_one <- function(entry, fit_data_info,
     target = target_col,
     S = fit_data_info$S_fit
   )
+  fallback_used <- FALSE
+  fallback_reason <- ""
+  normal_matrix_condition <- NA_real_
   solution <- if (identical(solver, "cpp")) {
     fastkpc_mgcv_solve_setup_fixed_sp_cpp(setup)
+  } else if (identical(solver, "cpp_guarded")) {
+    normal_matrix_condition <- fastkpc_mgcv_fixed_sp_normal_matrix_condition(
+      setup, sp = setup$sp
+    )
+    if (is.finite(normal_matrix_condition) &&
+        normal_matrix_condition > condition_threshold) {
+      fallback_used <- TRUE
+      fallback_reason <- "high_normal_matrix_condition"
+      fastkpc_mgcv_solve_setup_fixed_sp(setup)
+    } else {
+      fastkpc_mgcv_solve_setup_fixed_sp_cpp(setup)
+    }
   } else {
     fastkpc_mgcv_solve_setup_fixed_sp(setup)
   }
-  list(setup = setup, solution = solution)
+  list(
+    setup = setup,
+    solution = solution,
+    normal_matrix_condition = normal_matrix_condition,
+    fallback_used = fallback_used,
+    fallback_reason = fallback_reason
+  )
 }
 
 fastkpc_mgcv_setup_shadow_unsupported_row <- function(case, entry,
@@ -124,6 +146,12 @@ fastkpc_mgcv_setup_shadow_unsupported_row <- function(case, entry,
     mode_y = "",
     solve_source_x = "",
     solve_source_y = "",
+    fallback_used_x = FALSE,
+    fallback_used_y = FALSE,
+    fallback_reason_x = "",
+    fallback_reason_y = "",
+    normal_matrix_condition_x = NA_real_,
+    normal_matrix_condition_y = NA_real_,
     residual_x_match = FALSE,
     residual_y_match = FALSE,
     residual_pair_match = FALSE,
@@ -149,17 +177,17 @@ fastkpc_mgcv_setup_shadow_unsupported_row <- function(case, entry,
 
 fastkpc_mgcv_setup_shadow_case <- function(data, case, entry, alpha, index,
                                            numCol, env, residual_tol, p_tol,
-                                           solver) {
+                                           solver, condition_threshold) {
   solved <- tryCatch({
     fit_data_info <- fastkpc_mgcv_setup_shadow_fit_data(data, case)
     list(
       x = fastkpc_mgcv_setup_shadow_solve_one(
         entry, fit_data_info, target_col = 1L, suffix = "x", env = env,
-        solver = solver
+        solver = solver, condition_threshold = condition_threshold
       ),
       y = fastkpc_mgcv_setup_shadow_solve_one(
         entry, fit_data_info, target_col = 2L, suffix = "y", env = env,
-        solver = solver
+        solver = solver, condition_threshold = condition_threshold
       )
     )
   }, error = function(e) e)
@@ -211,6 +239,12 @@ fastkpc_mgcv_setup_shadow_case <- function(data, case, entry, alpha, index,
     mode_y = solved$y$solution$mode,
     solve_source_x = solved$x$solution$solve_source,
     solve_source_y = solved$y$solution$solve_source,
+    fallback_used_x = isTRUE(solved$x$fallback_used),
+    fallback_used_y = isTRUE(solved$y$fallback_used),
+    fallback_reason_x = solved$x$fallback_reason,
+    fallback_reason_y = solved$y$fallback_reason,
+    normal_matrix_condition_x = solved$x$normal_matrix_condition,
+    normal_matrix_condition_y = solved$y$normal_matrix_condition,
     residual_x_match = residual_x_match,
     residual_y_match = residual_y_match,
     residual_pair_match = isTRUE(residual_x_match && residual_y_match),
@@ -254,10 +288,18 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
     numCol = NULL,
     residual_tol = 1e-5,
     p_tol = 1e-5,
-    solver = c("mgcv_magic", "cpp"),
+    solver = c("mgcv_magic", "cpp", "cpp_guarded"),
+    condition_threshold = 1e12,
     artifact_name = "mgcv_residual_setup_shadow_v1",
     env = fastkpc_legacy_env()) {
   solver <- match.arg(solver)
+  condition_threshold <- as.numeric(condition_threshold)
+  if (length(condition_threshold) != 1L ||
+      !is.finite(condition_threshold) ||
+      condition_threshold < 0) {
+    stop("condition_threshold must be a finite nonnegative scalar",
+         call. = FALSE)
+  }
   if (!requireNamespace("mgcv", quietly = TRUE)) {
     stop("mgcv is required for mgcv residual setup shadow", call. = FALSE)
   }
@@ -292,11 +334,30 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
       env = env,
       residual_tol = residual_tol,
       p_tol = p_tol,
-      solver = solver
+      solver = solver,
+      condition_threshold = condition_threshold
     )
   }
 
   case_rows <- do.call(rbind, rows)
+  normal_conditions <- c(
+    case_rows$normal_matrix_condition_x,
+    case_rows$normal_matrix_condition_y
+  )
+  finite_normal_conditions <- normal_conditions[is.finite(normal_conditions)]
+  fallback_count <- sum(case_rows$fallback_used_x, na.rm = TRUE) +
+    sum(case_rows$fallback_used_y, na.rm = TRUE)
+  high_condition_fallback_count <-
+    sum(case_rows$fallback_reason_x == "high_normal_matrix_condition",
+        na.rm = TRUE) +
+    sum(case_rows$fallback_reason_y == "high_normal_matrix_condition",
+        na.rm = TRUE)
+  supported_target_count <- sum(case_rows$setup_supported, na.rm = TRUE) * 2L
+  cpp_guarded_count <- if (identical(solver, "cpp_guarded")) {
+    supported_target_count - fallback_count
+  } else {
+    0L
+  }
   summary <- data.frame(
     artifact = artifact_name,
     case_count = nrow(case_rows),
@@ -317,6 +378,20 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
     residual_tol = residual_tol,
     p_tol = p_tol,
     solver = solver,
+    condition_threshold = if (identical(solver, "cpp_guarded")) {
+      condition_threshold
+    } else {
+      NA_real_
+    },
+    fallback_count = fallback_count,
+    high_condition_fallback_count = high_condition_fallback_count,
+    cpp_guarded_count = cpp_guarded_count,
+    max_normal_matrix_condition =
+      if (length(finite_normal_conditions)) {
+        max(finite_normal_conditions)
+      } else {
+        NA_real_
+      },
     authoritative = FALSE,
     pass = all(case_rows$setup_supported) &&
       all(case_rows$residual_pair_match) &&
@@ -324,7 +399,8 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
     stringsAsFactors = FALSE
   )
   for (name in c("max_residual_x_abs_diff", "max_residual_y_abs_diff",
-                 "max_dcov_p_abs_diff")) {
+                 "max_dcov_p_abs_diff",
+                 "max_normal_matrix_condition")) {
     if (!is.finite(summary[[name]][[1L]])) summary[[name]][[1L]] <- NA_real_
   }
 
@@ -347,6 +423,14 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
     paste0("- strict dCov p matches: ",
            summary$dcov_p_match_count[[1L]]),
     paste0("- decision flips: ", summary$decision_flip_count[[1L]]),
+    paste0("- guarded fallback count: ",
+           summary$fallback_count[[1L]]),
+    paste0("- guarded high-condition fallback count: ",
+           summary$high_condition_fallback_count[[1L]]),
+    paste0("- guarded native C++ target count: ",
+           summary$cpp_guarded_count[[1L]]),
+    paste0("- max normal matrix condition: ",
+           signif(summary$max_normal_matrix_condition[[1L]], 8L)),
     paste0("- max residual x abs diff: ",
            signif(summary$max_residual_x_abs_diff[[1L]], 8L)),
     paste0("- max residual y abs diff: ",
