@@ -1771,6 +1771,86 @@ residual backend error_count = 0
 elapsed < current recommended S-affinity route
 ```
 
+Full 351x48 same-S setup provider artifact:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_setup_provider_full_351x48_v1
+```
+
+Status:
+
+```text
+status: created
+mode: env-gated same-S target-independent setup provider prototype,
+      not default and not recommended
+data: real 351x48 fixture, all columns
+n / p: 351 / 48
+alpha: 0.1
+max_conditioning_size: 46
+num_cores: 20
+
+adjacency_identical: TRUE
+SHD: 0
+n.edgetests_identical: TRUE
+baseline_n.edgetests: 2213,52659,125293,40694,13293,5422,835,80
+provider_n.edgetests: 2213,52659,125293,40694,13293,5422,835,80
+baseline/provider edge_count: 110 / 110
+
+baseline_elapsed_sec: 899.461
+provider_elapsed_sec: 1152.628
+elapsed_speedup: 0.780x
+
+baseline/provider residual_worker_ms:
+  9010282 / 14602256
+
+baseline/provider mgcv_fit_count:
+  273284 / 402019
+
+provider backend / native / fallback / error targets:
+  402019 / 285857 / 116162 / 0
+
+setup_provider groups / targets / templates / reuse:
+  22585 / 285857 / 22585 / 263272
+
+setup_provider_setup_ms: 516777
+setup_provider_error_count: 0
+prefill_unused_count: 128735
+prefill_ms: 9792094
+
+provider input/setup/gam/native/fallback ms:
+  141770 / 516777 / 7702648 / 483903 / 4721014
+
+dCov cpp backend count / errors / fallbacks:
+  239404 / 0 / 0
+
+Spectra count / converged / failed:
+  478808 / 478808 / 0
+```
+
+This full gate is correctness-clean but performance-negative. It proves the
+same-S setup provider preserves canonical replay and graph output on the full
+351x48 benchmark, but the route must not be promoted:
+
+```text
+elapsed: 899.461s -> 1152.628s
+residual worker-ms: 9.01M -> 14.60M
+```
+
+The failure is not dCov and not residual mismatch. It is the current prefill
+vehicle overcomputing residuals:
+
+```text
+baseline mgcv fits: 273284
+provider mgcv fits: 402019
+prefill unused residual keys: 128735
+```
+
+Therefore the setup provider idea remains useful, but the prefill vehicle is
+not viable for full 351x48. The next prototype must avoid precomputing unused
+target|S residuals. It should move same-S setup reuse into an on-demand or
+consumed-key execution path where only residual keys actually required by
+canonical CI tasks are fitted.
+
 #### Gate before production use
 
 ```text
@@ -2314,6 +2394,30 @@ baseline/provider gam_fit_ms = 46113 / 46753
 status: subset correctness and wall-time pass; still experimental because the
 same-S setup provider is running through the same-S prefill vehicle and needs
 the full 351x48 gate before promotion
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_setup_provider_full_351x48_v1 exists
+real 351x48 fixture, full compatible skeleton, env-gated same-S setup provider
+adjacency_identical = TRUE
+SHD = 0
+n.edgetests_identical = TRUE
+baseline/provider n.edgetests = 2213,52659,125293,40694,13293,5422,835,80 /
+  2213,52659,125293,40694,13293,5422,835,80
+baseline/provider edge_count = 110 / 110
+baseline_elapsed_sec = 899.461
+provider_elapsed_sec = 1152.628
+elapsed_speedup = 0.780x
+baseline/provider residual_worker_ms = 9010282 / 14602256
+baseline/provider mgcv_fit_count = 273284 / 402019
+provider backend / native / fallback / error targets = 402019 / 285857 /
+  116162 / 0
+setup_provider groups / targets / templates / reuse = 22585 / 285857 /
+  22585 / 263272
+setup_provider_error_count = 0
+prefill_unused_count = 128735
+dCov cpp backend count / errors / fallbacks = 239404 / 0 / 0
+Spectra count / converged / failed = 478808 / 478808 / 0
+status: full correctness pass but wall-time and residual worker-ms fail; do not
+promote. The current prefill vehicle overcomputes 128735 unused residual keys.
 ```
 
 Next Phase 3 step:
@@ -2324,19 +2428,30 @@ is now attributed to repeated per-target setup/extraction, not the native
 fixed-sp numeric solve. Same-S diagnostics show strong target-independent setup
 reuse opportunity on the deep real subset, but selected smoothing parameters
 are target-specific. An env-gated same-S target-independent setup provider
-prototype now exists and passes the 12-column subset gate. The next viable
-Phase 3 step is the full 351x48 artifact:
+prototype exists and passes the 12-column subset gate, but the full 351x48 gate
+fails wall time because it is currently attached to the same-S prefill vehicle.
+Do not promote FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=1.
 
-fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_setup_provider_full_351x48_v1
+The next viable Phase 3 step is:
 
-Use the same env plus:
+diag/perf: move same-S mgcv setup provider to consumed-key/on-demand execution
 
-FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=1
+The goal is to keep the full 351x48 correctness of the setup provider while
+avoiding prefill overcompute:
 
-Promotion requires edge_count = 110 / 110, SHD = 0, n.edgetests exact,
+  use only residual keys actually consumed by canonical CI tasks
+  preserve per-target mgcv::gam selected-sp authority
+  reuse same-S target-independent setup only within consumed key groups
+  keep parent canonical replay unchanged
+  keep default and recommended routes unchanged
+
+The next artifact should be:
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_setup_provider_consumed_keys_v1
+
+Promotion still requires edge_count = 110 / 110, SHD = 0, n.edgetests exact,
 setup_provider_error_count = 0, residual backend error_count = 0, and wall time
-below the current recommended S-affinity route. Keep the default route
-unchanged until that full gate passes.
+below the current recommended S-affinity route.
 ```
 
 ### 8.4 Continue dCov backend improvement separately
