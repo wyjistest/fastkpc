@@ -88,6 +88,16 @@ required_case_fields <- c(
   "case_id", "role", "target_x", "target_y", "S_key", "S_size",
   "formula_route", "formula_x", "formula_y", "regrxons_parameters",
   "runtime_ms", "dcov_p_value", "decision_at_alpha",
+  "dcov_alpha", "dcov_log_alpha_distance",
+  "conditioning_rank", "conditioning_rank_deficient",
+  "conditioning_condition_kappa", "near_constant_column_count",
+  "target_near_constant_count",
+  "mgcv_family_x", "mgcv_family_y", "mgcv_link_x", "mgcv_link_y",
+  "mgcv_converged_x", "mgcv_converged_y",
+  "smooth_count_x", "smooth_count_y",
+  "smooth_labels_x", "smooth_labels_y",
+  "lpmatrix_ncol_x", "lpmatrix_ncol_y",
+  "lpmatrix_rank_x", "lpmatrix_rank_y",
   "residual_x_hash", "residual_y_hash", "residual_length",
   "source", "source_level", "source_pmax", "source_distance_to_alpha",
   "mgcv_version", "R_version"
@@ -106,8 +116,18 @@ assert_true(identical(
 ), "oracle trace should record the legacy formula route")
 assert_true(all(is.finite(artifact$cases$dcov_p_value)),
             "oracle trace should record finite downstream dCov p-values")
+assert_true(all(artifact$cases$dcov_alpha == 0.1),
+            "oracle trace should record the downstream alpha")
+assert_true(all(is.finite(artifact$cases$dcov_log_alpha_distance)),
+            "oracle trace should record finite log-alpha decision distance")
 assert_true(all(artifact$cases$residual_length == nrow(data)),
             "oracle trace should store residual vectors with data row count")
+assert_true(all(artifact$cases$conditioning_rank <= artifact$cases$S_size),
+            "oracle trace should record conditioning rank diagnostics")
+assert_true(any(artifact$cases$smooth_count_x > 0L),
+            "oracle trace should record mgcv smooth metadata")
+assert_true(all(artifact$cases$lpmatrix_ncol_x > 0L),
+            "oracle trace should record lpmatrix metadata")
 
 residuals <- readRDS(file.path(out_dir, "residuals.rds"))
 assert_true(length(residuals) == nrow(cases),
@@ -121,9 +141,20 @@ assert_true(all(vapply(residuals, function(entry) {
 
 summary <- utils::read.csv(file.path(out_dir, "summary.csv"),
                            stringsAsFactors = FALSE)
+required_summary_fields <- c(
+  "rank_deficient_case_count",
+  "near_constant_case_count",
+  "max_conditioning_condition_kappa",
+  "min_dcov_log_alpha_distance"
+)
+missing_summary_fields <- setdiff(required_summary_fields, names(summary))
+assert_true(length(missing_summary_fields) == 0L,
+            paste("oracle summary missing", missing_summary_fields[[1L]]))
 assert_true(summary$case_count[[1L]] == nrow(cases),
             "summary should count oracle cases")
 assert_true(summary$error_count[[1L]] == 0L,
             "summary should report no oracle errors")
+assert_true(summary$min_dcov_log_alpha_distance[[1L]] >= 0,
+            "summary should report non-negative log-alpha distance")
 
 cat("PASS mgcv residual oracle trace\n")

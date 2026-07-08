@@ -289,6 +289,14 @@ fastkpc_mgcv_oracle_default_cases <- function(
 }
 
 fastkpc_mgcv_oracle_fit_metadata <- function(fit) {
+  family <- fit$family
+  smooth_labels <- if (!is.null(fit$smooth) && length(fit$smooth) > 0L) {
+    vapply(fit$smooth, function(smooth) {
+      if (!is.null(smooth$label)) as.character(smooth$label) else ""
+    }, character(1))
+  } else {
+    character()
+  }
   list(
     edf = if (!is.null(fit$edf)) as.numeric(fit$edf) else numeric(),
     rank = if (!is.null(fit$rank)) as.integer(fit$rank) else NA_integer_,
@@ -298,7 +306,79 @@ fastkpc_mgcv_oracle_fit_metadata <- function(fit) {
       paste(as.character(fit$optimizer), collapse = "|")
     } else {
       ""
-    }
+    },
+    family = if (!is.null(family$family)) as.character(family$family) else "",
+    link = if (!is.null(family$link)) as.character(family$link) else "",
+    converged = if (!is.null(fit$converged)) isTRUE(fit$converged) else NA,
+    smooth_count = length(smooth_labels),
+    smooth_labels = paste(smooth_labels, collapse = "|"),
+    nobs = suppressWarnings(as.integer(stats::nobs(fit))),
+    coef_count = length(stats::coef(fit))
+  )
+}
+
+fastkpc_mgcv_oracle_numeric_sd <- function(x) {
+  value <- suppressWarnings(stats::sd(as.numeric(x)))
+  if (is.finite(value)) value else NA_real_
+}
+
+fastkpc_mgcv_oracle_matrix_rank <- function(mat) {
+  mat <- as.matrix(mat)
+  if (ncol(mat) == 0L || nrow(mat) == 0L) return(0L)
+  as.integer(qr(mat)$rank)
+}
+
+fastkpc_mgcv_oracle_matrix_kappa <- function(mat) {
+  mat <- as.matrix(mat)
+  if (ncol(mat) == 0L || nrow(mat) == 0L) return(NA_real_)
+  rank <- fastkpc_mgcv_oracle_matrix_rank(mat)
+  if (rank < ncol(mat)) return(Inf)
+  value <- tryCatch(
+    suppressWarnings(kappa(mat, exact = FALSE)),
+    error = function(e) NA_real_
+  )
+  as.numeric(value)
+}
+
+fastkpc_mgcv_oracle_data_diagnostics <- function(fit_data, S_size) {
+  S_size <- as.integer(S_size)
+  conditioning <- if (S_size > 0L) {
+    as.matrix(fit_data[, seq.int(3L, 2L + S_size), drop = FALSE])
+  } else {
+    matrix(numeric(), nrow = nrow(fit_data), ncol = 0L)
+  }
+  conditioning_centered <- if (ncol(conditioning) > 0L) {
+    scale(conditioning, center = TRUE, scale = FALSE)
+  } else {
+    conditioning
+  }
+  conditioning_sd <- if (ncol(conditioning) > 0L) {
+    apply(conditioning, 2L, fastkpc_mgcv_oracle_numeric_sd)
+  } else {
+    numeric()
+  }
+  near_threshold <- sqrt(.Machine$double.eps)
+  target_sd <- c(
+    fastkpc_mgcv_oracle_numeric_sd(fit_data$x1),
+    fastkpc_mgcv_oracle_numeric_sd(fit_data$x2)
+  )
+  conditioning_rank <- fastkpc_mgcv_oracle_matrix_rank(conditioning_centered)
+  list(
+    conditioning_rank = conditioning_rank,
+    conditioning_rank_deficient = conditioning_rank < S_size,
+    conditioning_condition_kappa =
+      fastkpc_mgcv_oracle_matrix_kappa(conditioning_centered),
+    near_constant_column_count =
+      sum(!is.finite(conditioning_sd) | conditioning_sd <= near_threshold),
+    min_conditioning_sd = if (length(conditioning_sd) > 0L) {
+      suppressWarnings(min(conditioning_sd, na.rm = TRUE))
+    } else {
+      NA_real_
+    },
+    target_x_sd = target_sd[[1L]],
+    target_y_sd = target_sd[[2L]],
+    target_near_constant_count =
+      sum(!is.finite(target_sd) | target_sd <= near_threshold)
   )
 }
 
@@ -323,6 +403,9 @@ fastkpc_mgcv_oracle_case <- function(data, case, alpha, index, numCol, env) {
   S_data <- data[, S, drop = FALSE]
   fit_data <- data.frame(cbind(X, S_data))
   colnames(fit_data) <- paste0("x", seq_len(ncol(fit_data)))
+  data_diag <- fastkpc_mgcv_oracle_data_diagnostics(
+    fit_data, S_size = length(S)
+  )
 
   formula_x <- fastkpc_mgcv_oracle_formula(1L, length(S), env)
   formula_y <- fastkpc_mgcv_oracle_formula(2L, length(S), env)
@@ -348,9 +431,12 @@ fastkpc_mgcv_oracle_case <- function(data, case, alpha, index, numCol, env) {
     x = residual_x, y = residual_y, index = index, numCol = numCol, env = env
   )
   p_value <- as.numeric(dcov$result$p.value)
+  log_alpha_distance <- abs(log(p_value) - log(alpha))
 
   meta_x <- fastkpc_mgcv_oracle_fit_metadata(fit_x)
   meta_y <- fastkpc_mgcv_oracle_fit_metadata(fit_y)
+  lpmatrix_rank_x <- fastkpc_mgcv_oracle_matrix_rank(model_matrix_x)
+  lpmatrix_rank_y <- fastkpc_mgcv_oracle_matrix_rank(model_matrix_y)
   case_id <- as.character(case$case_id[[1L]])
   role <- if ("role" %in% names(case)) as.character(case$role[[1L]]) else ""
   source <- as.character(fastkpc_mgcv_oracle_source_value(
@@ -385,8 +471,18 @@ fastkpc_mgcv_oracle_case <- function(data, case, alpha, index, numCol, env) {
     ),
     runtime_ms = runtime_ms,
     dcov_p_value = p_value,
+    dcov_alpha = alpha,
     decision_at_alpha = isTRUE(p_value > alpha),
     distance_to_alpha = abs(p_value - alpha),
+    dcov_log_alpha_distance = log_alpha_distance,
+    conditioning_rank = data_diag$conditioning_rank,
+    conditioning_rank_deficient = data_diag$conditioning_rank_deficient,
+    conditioning_condition_kappa = data_diag$conditioning_condition_kappa,
+    near_constant_column_count = data_diag$near_constant_column_count,
+    min_conditioning_sd = data_diag$min_conditioning_sd,
+    target_x_sd = data_diag$target_x_sd,
+    target_y_sd = data_diag$target_y_sd,
+    target_near_constant_count = data_diag$target_near_constant_count,
     source = source,
     source_level = source_level,
     source_pmax = source_pmax,
@@ -417,6 +513,30 @@ fastkpc_mgcv_oracle_case <- function(data, case, alpha, index, numCol, env) {
     mgcv_method_y = meta_y$method,
     mgcv_optimizer_x = meta_x$optimizer,
     mgcv_optimizer_y = meta_y$optimizer,
+    mgcv_family_x = meta_x$family,
+    mgcv_family_y = meta_y$family,
+    mgcv_link_x = meta_x$link,
+    mgcv_link_y = meta_y$link,
+    mgcv_converged_x = meta_x$converged,
+    mgcv_converged_y = meta_y$converged,
+    smooth_count_x = meta_x$smooth_count,
+    smooth_count_y = meta_y$smooth_count,
+    smooth_labels_x = meta_x$smooth_labels,
+    smooth_labels_y = meta_y$smooth_labels,
+    mgcv_nobs_x = meta_x$nobs,
+    mgcv_nobs_y = meta_y$nobs,
+    mgcv_coef_count_x = meta_x$coef_count,
+    mgcv_coef_count_y = meta_y$coef_count,
+    lpmatrix_ncol_x = ncol(model_matrix_x),
+    lpmatrix_ncol_y = ncol(model_matrix_y),
+    lpmatrix_rank_x = lpmatrix_rank_x,
+    lpmatrix_rank_y = lpmatrix_rank_y,
+    lpmatrix_rank_deficient_x = lpmatrix_rank_x < ncol(model_matrix_x),
+    lpmatrix_rank_deficient_y = lpmatrix_rank_y < ncol(model_matrix_y),
+    lpmatrix_condition_kappa_x =
+      fastkpc_mgcv_oracle_matrix_kappa(model_matrix_x),
+    lpmatrix_condition_kappa_y =
+      fastkpc_mgcv_oracle_matrix_kappa(model_matrix_y),
     mgcv_version = as.character(utils::packageVersion("mgcv")),
     R_version = R.version.string,
     error = "",
@@ -442,7 +562,16 @@ fastkpc_mgcv_oracle_case <- function(data, case, alpha, index, numCol, env) {
     coefficients_y = coefficients_y,
     fit_metadata_x = meta_x,
     fit_metadata_y = meta_y,
+    data_diagnostics = data_diag,
+    lpmatrix_rank_x = lpmatrix_rank_x,
+    lpmatrix_rank_y = lpmatrix_rank_y,
+    lpmatrix_condition_kappa_x =
+      fastkpc_mgcv_oracle_matrix_kappa(model_matrix_x),
+    lpmatrix_condition_kappa_y =
+      fastkpc_mgcv_oracle_matrix_kappa(model_matrix_y),
     dcov_p_value = p_value,
+    dcov_alpha = alpha,
+    dcov_log_alpha_distance = log_alpha_distance,
     decision_at_alpha = isTRUE(p_value > alpha)
   )
   list(row = row, residual = residual_entry)
@@ -506,8 +635,18 @@ fastkpc_run_mgcv_residual_oracle_trace <- function(
           regrxons_parameters = "",
           runtime_ms = NA_real_,
           dcov_p_value = NA_real_,
+          dcov_alpha = alpha,
           decision_at_alpha = NA,
           distance_to_alpha = NA_real_,
+          dcov_log_alpha_distance = NA_real_,
+          conditioning_rank = NA_integer_,
+          conditioning_rank_deficient = NA,
+          conditioning_condition_kappa = NA_real_,
+          near_constant_column_count = NA_integer_,
+          min_conditioning_sd = NA_real_,
+          target_x_sd = NA_real_,
+          target_y_sd = NA_real_,
+          target_near_constant_count = NA_integer_,
           source = if ("source" %in% names(cases)) {
             as.character(cases$source[[i]])
           } else {
@@ -538,6 +677,10 @@ fastkpc_run_mgcv_residual_oracle_trace <- function(
           residual_y_hash = "",
           fitted_x_hash = "",
           fitted_y_hash = "",
+          model_matrix_x_hash = "",
+          model_matrix_y_hash = "",
+          coefficients_x_hash = "",
+          coefficients_y_hash = "",
           residual_length = NA_integer_,
           edf_x_sum = NA_real_,
           edf_y_sum = NA_real_,
@@ -549,6 +692,28 @@ fastkpc_run_mgcv_residual_oracle_trace <- function(
           mgcv_method_y = "",
           mgcv_optimizer_x = "",
           mgcv_optimizer_y = "",
+          mgcv_family_x = "",
+          mgcv_family_y = "",
+          mgcv_link_x = "",
+          mgcv_link_y = "",
+          mgcv_converged_x = NA,
+          mgcv_converged_y = NA,
+          smooth_count_x = NA_integer_,
+          smooth_count_y = NA_integer_,
+          smooth_labels_x = "",
+          smooth_labels_y = "",
+          mgcv_nobs_x = NA_integer_,
+          mgcv_nobs_y = NA_integer_,
+          mgcv_coef_count_x = NA_integer_,
+          mgcv_coef_count_y = NA_integer_,
+          lpmatrix_ncol_x = NA_integer_,
+          lpmatrix_ncol_y = NA_integer_,
+          lpmatrix_rank_x = NA_integer_,
+          lpmatrix_rank_y = NA_integer_,
+          lpmatrix_rank_deficient_x = NA,
+          lpmatrix_rank_deficient_y = NA,
+          lpmatrix_condition_kappa_x = NA_real_,
+          lpmatrix_condition_kappa_y = NA_real_,
           mgcv_version = as.character(utils::packageVersion("mgcv")),
           R_version = R.version.string,
           error = conditionMessage(e),
@@ -565,6 +730,12 @@ fastkpc_run_mgcv_residual_oracle_trace <- function(
   }
 
   case_rows <- do.call(rbind, rows)
+  finite_condition_kappa <- case_rows$conditioning_condition_kappa[
+    is.finite(case_rows$conditioning_condition_kappa)
+  ]
+  finite_log_alpha_distance <- case_rows$dcov_log_alpha_distance[
+    is.finite(case_rows$dcov_log_alpha_distance)
+  ]
   summary <- data.frame(
     artifact = "mgcv_residual_oracle_v1",
     case_count = nrow(case_rows),
@@ -583,6 +754,30 @@ fastkpc_run_mgcv_residual_oracle_trace <- function(
       sum(case_rows$source == "full_351x48_skeleton_deletion"),
     near_alpha_source_count =
       sum(grepl("near-alpha", case_rows$role, fixed = TRUE)),
+    rank_deficient_case_count =
+      sum(case_rows$conditioning_rank_deficient %in% TRUE),
+    lpmatrix_rank_deficient_case_count =
+      sum(case_rows$lpmatrix_rank_deficient_x %in% TRUE |
+            case_rows$lpmatrix_rank_deficient_y %in% TRUE),
+    near_constant_case_count = sum(
+      case_rows$near_constant_column_count > 0L |
+        case_rows$target_near_constant_count > 0L,
+      na.rm = TRUE
+    ),
+    max_conditioning_condition_kappa =
+      if (length(finite_condition_kappa) > 0L) {
+        max(finite_condition_kappa)
+      } else if (any(is.infinite(case_rows$conditioning_condition_kappa))) {
+        Inf
+      } else {
+        NA_real_
+      },
+    min_dcov_log_alpha_distance =
+      if (length(finite_log_alpha_distance) > 0L) {
+        min(finite_log_alpha_distance)
+      } else {
+        NA_real_
+      },
     max_runtime_ms = suppressWarnings(max(case_rows$runtime_ms, na.rm = TRUE)),
     mgcv_version = as.character(utils::packageVersion("mgcv")),
     R_version = R.version.string,
@@ -619,6 +814,12 @@ fastkpc_run_mgcv_residual_oracle_trace <- function(
            summary$full_skeleton_source_count[[1L]]),
     paste0("- near-alpha source cases: ",
            summary$near_alpha_source_count[[1L]]),
+    paste0("- rank-deficient conditioning cases: ",
+           summary$rank_deficient_case_count[[1L]]),
+    paste0("- near-constant data cases: ",
+           summary$near_constant_case_count[[1L]]),
+    paste0("- min log-alpha distance: ",
+           signif(summary$min_dcov_log_alpha_distance[[1L]], 8L)),
     paste0("- mgcv version: ", summary$mgcv_version[[1L]])
   ), paths$summary_md)
 

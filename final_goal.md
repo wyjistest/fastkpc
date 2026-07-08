@@ -909,6 +909,18 @@ coverage:
 
 The current oracle trace is still intentionally small, but its cases are now selected from the full 351x48 skeleton deletion log and carry source `pMax` / level diagnostics. It should be expanded further if rank-deficient, collinear, near-constant, or other envelope-risk examples are discovered.
 
+Current generator coverage also records per-case envelope diagnostics needed by
+the C++/CUDA residual executor:
+
+```text
+conditioning rank / rank-deficient flag
+conditioning condition-kappa
+near-constant conditioning / target counts
+mgcv family, link, convergence, smooth labels, smooth counts
+linear predictor matrix dimensions, rank, rank-deficiency, condition-kappa
+downstream legacy dCov alpha, p-value, alpha decision, log-alpha distance
+```
+
 #### Cases to include
 
 - `|S| = 1`
@@ -930,6 +942,7 @@ mgcv/regrXonS parameters
 residual vector
 fitted vector if available
 edf / rank / smoothing info if accessible
+conditioning rank / near-constant / lpmatrix diagnostics
 runtime
 downstream legacy dCov p-value
 decision at alpha
@@ -3267,13 +3280,49 @@ Do not promote `FASTKPC_LEGACY_MGCV_RESIDUAL_PREFETCH=level`, `target_s`, or hyb
 fastkpc/artifacts/mgcv_residual_oracle_v1
 ```
 
-Current artifact exists and is sourced from the full 351x48 skeleton deletion log. Expand it further with:
+Current artifact exists and is sourced from the full 351x48 skeleton deletion log.
+The generator and gate now add:
 
 ```text
-rank-deficient / collinear / near-constant examples if present
-additional late sparse levels if they expose new mgcv formula/setup behavior
-formula route and mgcv metadata
-downstream legacy dCov p-value and alpha decision
+rank-deficient / collinear / near-constant diagnostics
+formula route and richer mgcv metadata
+lpmatrix rank / condition metadata
+downstream legacy dCov alpha, p-value, log-alpha distance, and alpha decision
+summary-level risk counts
+```
+
+Gate:
+
+```bash
+Rscript fastkpc/tests/test_mgcv_residual_oracle_trace.R
+```
+
+Default artifact generation:
+
+```bash
+Rscript fastkpc/tools/run_mgcv_residual_oracle_trace.R
+```
+
+Current generated summary:
+
+```text
+case_count:                         8
+success_count:                      8
+error_count:                        0
+full_skeleton_source_count:         8
+near_alpha_source_count:            7
+rank_deficient_case_count:          0
+lpmatrix_rank_deficient_case_count: 0
+near_constant_case_count:           0
+max_conditioning_condition_kappa:   3.883344
+min_dcov_log_alpha_distance:        0.0001601918
+```
+
+Still open for future expansion:
+
+```text
+add concrete rank-deficient / collinear / near-constant examples if discovered
+add more late sparse levels if they expose new mgcv formula/setup behavior
 ```
 
 ### 8.3 Start mgcv replay executable spec
