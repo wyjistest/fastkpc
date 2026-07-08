@@ -2992,6 +2992,8 @@ Native legacy dCov level-batch checkpoint:
 
 ```text
 env gate: FASTKPC_NATIVE_LEGACY_DCOV_BATCH=level
+R-facing one-call option:
+  precision_run_skeleton_legacy_mgcv_legacy_dcov_native(dcov_batch = "level")
 scope: precision_run_skeleton_residual_provider_legacy_dcov_native()
 
 behavior:
@@ -3000,6 +3002,9 @@ behavior:
   C++ batches each nonempty skeleton level through the shared legacy
     dcov.gamma batch oracle
   p-values are replayed by the same native canonical state machine
+  the R-facing one-call wrapper scopes the env toggle during the native call
+    and restores the caller environment afterward
+  default dcov_batch = "env" preserves existing env-gated behavior
 
 diagnostics:
   legacy_dcov_native_batch_enabled
@@ -3016,8 +3021,7 @@ diagnostics:
 
 gate:
   Rscript fastkpc/tests/test_skeleton_native_residual_provider_legacy_dcov.R
-  FASTKPC_NATIVE_LEGACY_DCOV_BATCH=level \
-    Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
 
 status:
   This moves the level-batch dCov data-plane boundary into the native

@@ -393,7 +393,30 @@ fastkpc_legacy_mgcv_residual_provider <- function(data, counter_env = NULL) {
 precision_run_skeleton_legacy_mgcv_legacy_dcov_native <- function(
     data, alpha, max_conditioning_size,
     index = 1, numCol = floor(nrow(as.matrix(data)) / 10),
-    trace_level = c("summary", "full", "none")) {
+    trace_level = c("summary", "full", "none"),
+    dcov_batch = c("env", "none", "level")) {
+  dcov_batch <- match.arg(dcov_batch)
+  old_dcov_batch <- Sys.getenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH",
+                               unset = NA_character_)
+  if (identical(dcov_batch, "level")) {
+    Sys.setenv(FASTKPC_NATIVE_LEGACY_DCOV_BATCH = "level")
+    on.exit({
+      if (is.na(old_dcov_batch)) {
+        Sys.unsetenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH")
+      } else {
+        Sys.setenv(FASTKPC_NATIVE_LEGACY_DCOV_BATCH = old_dcov_batch)
+      }
+    }, add = TRUE)
+  } else if (identical(dcov_batch, "none")) {
+    Sys.unsetenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH")
+    on.exit({
+      if (is.na(old_dcov_batch)) {
+        Sys.unsetenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH")
+      } else {
+        Sys.setenv(FASTKPC_NATIVE_LEGACY_DCOV_BATCH = old_dcov_batch)
+      }
+    }, add = TRUE)
+  }
   data <- as.matrix(data)
   storage.mode(data) <- "double"
   result <- precision_run_skeleton_residual_provider_legacy_dcov_native(
