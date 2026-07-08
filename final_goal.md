@@ -1945,6 +1945,91 @@ diagnostics. It also still routes all misses through the slower `cpp_guarded`
 residual backend, including many outside-envelope fallbacks. Do not promote
 `FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=consumed`.
 
+Actual consumed cache-miss same-S grouping artifact:
+
+```bash
+FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=spectra
+FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE=1
+FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY=s
+```
+
+Artifact:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cache_miss_key_grouping_v1
+```
+
+Status:
+
+```text
+status: created
+mode: current recommended compatible route with actual cache hit/miss-key
+      diagnostics
+data: real 351x48 fixture, all columns
+n / p: 351 / 48
+alpha: 0.1
+max_conditioning_size: 46
+num_cores: 20
+
+elapsed_sec: 899.077
+edge_count: 110
+n.edgetests exact: TRUE
+n.edgetests: 2213,52659,125293,40694,13293,5422,835,80
+
+residual_worker_ms: 9103781
+mgcv_fit_count: 273284
+residual_request_count: 476552
+cache hits / misses: 203268 / 273284
+cache hit / miss keys: 203268 / 273284
+
+actual miss same-S groups / targets:
+  8634 / 273284
+
+actual miss same-S max / mean targets:
+  637 / 31.652
+
+actual miss same-S reuse opportunity / ratio:
+  264650 / 0.968406
+
+all request same-S groups / targets / reuse:
+  8634 / 476552 / 467918
+
+dCov cpp backend count / errors / fallbacks:
+  239404 / 0 / 0
+
+Spectra count / converged / failed:
+  478808 / 478808 / 0
+```
+
+By level, the actual cache-miss same-S opportunity is concentrated in the
+early hot levels:
+
+```text
+level 1:
+  miss keys: 23008
+  miss same-S groups: 48
+  reuse opportunity / ratio: 22960 / 0.997914
+
+level 2:
+  miss keys: 134114
+  miss same-S groups: 1126
+  reuse opportunity / ratio: 132988 / 0.991604
+
+level 3:
+  miss keys: 77808
+  miss same-S groups: 4064
+  reuse opportunity / ratio: 73744 / 0.947769
+```
+
+This artifact proves the large same-S reuse opportunity is present in the
+actual consumed cache-miss stream, not only in over-prefetch estimates. The
+pair-local consumed provider fails because it cannot group across CI calls.
+The next serious prototype must change execution shape: collect actual misses
+within a worker chunk or level, group those misses by S, fit each consumed
+target once through a same-S provider batch, then run dCov and parent canonical
+replay unchanged.
+
 #### Gate before production use
 
 ```text
@@ -2550,6 +2635,41 @@ miss keys across a worker chunk or skeleton level by S, then call the setup
 provider once per consumed same-S group. If that still fails wall time, move to
 same-S setup extraction for a C++/CUDA numeric executor rather than further
 R-level task scheduling.
+
+The actual consumed miss-key grouping diagnostic has now been run:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cache_miss_key_grouping_v1
+
+route: current recommended S-affinity route
+edge_count = 110
+n.edgetests exact = TRUE
+elapsed_sec = 899.077
+cache miss keys = 273284
+miss same-S groups = 8634
+miss same-S reuse opportunity = 264650
+miss same-S reuse ratio = 0.968406
+status: actual consumed miss stream has strong same-S grouping opportunity
+```
+
+Next Phase 3 implementation target:
+
+```text
+perf/exp: batch actual legacy mgcv cache misses by S inside compatible workers
+
+requirements:
+  group actual residual cache misses by S across a worker chunk or level
+  fit only consumed target|S keys
+  preserve per-target mgcv::gam selected-sp authority
+  preserve parent canonical replay
+  keep default and recommended routes unchanged until full gate passes
+
+gate:
+  edge_count = 110 / 110
+  SHD = 0
+  n.edgetests exact = TRUE
+  elapsed < current recommended S-affinity route
+```
 ```
 
 ### 8.4 Continue dCov backend improvement separately
