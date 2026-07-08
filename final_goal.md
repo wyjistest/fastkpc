@@ -1432,6 +1432,62 @@ setup reuse opportunity before considering load balance and cache boundaries.
 This is the strongest evidence so far that the next residual acceleration path
 should batch or reuse setup by conditioning set, not optimize scalar solves.
 
+Same-S guarded residual prefill prototype:
+
+```bash
+FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded
+FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT=2
+FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD=1e300
+FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE=1
+FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY=s
+FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_PREFILL=1
+```
+
+Artifact:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_prefill_subset_v1
+```
+
+Status:
+
+```text
+status: created
+mode: env-gated worker/chunk-local prefill prototype, not recommended
+data: real 351x48 fixture, 12 hot-column subset
+max_conditioning_size: 3
+num_cores: 8
+
+adjacency_identical: TRUE
+n.edgetests_identical: TRUE
+
+baseline_elapsed_sec: 21.106
+prefill_elapsed_sec:  20.343
+
+baseline_mgcv_fit_count: 2756
+prefill_mgcv_fit_count:  3488
+baseline_cache_hits:     2624
+prefill_cache_hits:      4921
+
+prefill_groups:  599
+prefill_targets: 3029
+prefill_inserts: 3029
+prefill_unused:   732
+prefill_errors:     0
+
+baseline_backend_ms:  99222
+prefill_backend_ms: 108493
+prefill_ms:          96729
+```
+
+This prototype preserves canonical replay on the subset and slightly improves
+wall time, but it is not true same-S setup reuse. It still runs the guarded
+backend per target during prefill, and it overcomputes unused residual keys.
+The higher fit/backend counts confirm that prefill is only a scheduling/cache
+experiment. It should remain experimental and must not be promoted without a
+full 351x48 wall-time win. The next serious residual path should reuse or batch
+the same-S setup itself rather than merely precomputing per-target residuals.
+
 #### Gate before production use
 
 ```text

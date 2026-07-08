@@ -19,6 +19,8 @@ old_env <- Sys.getenv(c(
   "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT",
   "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD",
   "FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE",
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY",
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_PREFILL",
   "FASTKPC_LEGACY_MGCV_RESIDUAL_CPP_SHADOW"
 ), unset = NA_character_)
 restore_env <- function(name, value) {
@@ -46,18 +48,20 @@ data <- cbind(
   x6 = z1 * z3 + stats::rnorm(n, sd = 0.12)
 )
 
-run_compatible <- function() {
+run_compatible <- function(num_cores = 1L) {
   fastkpc_legacy_parallel_skeleton(
     data,
     alpha = 0.08,
     max_conditioning_size = 2L,
     ic.method = "dcc.gamma",
-    num_cores = 1L
+    num_cores = num_cores
   )
 }
 
 Sys.setenv(FASTKPC_LEGACY_PARALLEL_CORES = "1")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_PREFILL")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CPP_SHADOW")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
 baseline <- run_compatible()
@@ -109,7 +113,15 @@ required <- c(
   "legacy_mgcv_cpp_backend_same_s_native_reuse_opportunity_count",
   "legacy_mgcv_cpp_backend_same_s_native_setup_reuse_ratio",
   "legacy_mgcv_cpp_backend_native_s_size_limit",
-  "legacy_mgcv_cpp_backend_condition_threshold"
+  "legacy_mgcv_cpp_backend_condition_threshold",
+  "legacy_mgcv_cpp_same_s_prefill_enabled",
+  "legacy_mgcv_cpp_same_s_prefill_group_count",
+  "legacy_mgcv_cpp_same_s_prefill_target_count",
+  "legacy_mgcv_cpp_same_s_prefill_cache_insert_count",
+  "legacy_mgcv_cpp_same_s_prefill_existing_count",
+  "legacy_mgcv_cpp_same_s_prefill_unused_count",
+  "legacy_mgcv_cpp_same_s_prefill_ms",
+  "legacy_mgcv_cpp_same_s_prefill_error_count"
 )
 missing_fields <- setdiff(required, names(summary))
 assert_true(length(missing_fields) == 0L,
@@ -184,6 +196,36 @@ assert_true(summary$legacy_mgcv_cpp_backend_condition_threshold > 1e100,
 assert_true(summary$legacy_mgcv_residual_request_count ==
               baseline_summary$legacy_mgcv_residual_request_count,
             "backend should not change residual request count")
+assert_true(!isTRUE(summary$legacy_mgcv_cpp_same_s_prefill_enabled),
+            "same-S prefill should remain disabled by default")
+
+Sys.setenv(
+  FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE = "1",
+  FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY = "s",
+  FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_PREFILL = "1"
+)
+prefill <- run_compatible(num_cores = 2L)
+prefill_summary <- prefill$scheduler_diagnostics$summary
+
+assert_true(identical(prefill$adjacency, baseline$adjacency),
+            "same-S prefill must preserve adjacency")
+assert_true(identical(prefill$n.edgetests, baseline$n.edgetests),
+            "same-S prefill must preserve n.edgetests")
+assert_true(isTRUE(prefill_summary$legacy_mgcv_cpp_same_s_prefill_enabled),
+            "same-S prefill env gate should report enabled")
+assert_true(prefill_summary$legacy_mgcv_cpp_same_s_prefill_group_count > 0L,
+            "same-S prefill should report grouped conditioning sets")
+assert_true(prefill_summary$legacy_mgcv_cpp_same_s_prefill_target_count > 0L,
+            "same-S prefill should enumerate native target residual keys")
+assert_true(
+  prefill_summary$legacy_mgcv_cpp_same_s_prefill_cache_insert_count > 0L,
+  "same-S prefill should insert residuals into worker-local cache"
+)
+assert_true(prefill_summary$legacy_mgcv_cpp_same_s_prefill_error_count == 0L,
+            "same-S prefill should not report guarded backend errors")
+assert_true(prefill_summary$legacy_mgcv_residual_request_count ==
+              baseline_summary$legacy_mgcv_residual_request_count,
+            "same-S prefill should not change residual request count")
 
 fallback_metrics <- fastkpc_legacy_runtime_zero()
 fallback <- fastkpc_legacy_run_mgcv_residual_pair(
