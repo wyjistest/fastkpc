@@ -83,7 +83,8 @@ batch_diag_fields <- c(
   "lowrank_full_eig_count", "lowrank_spectra_count",
   "lowrank_spectra_converged_count", "lowrank_spectra_failed_count",
   "lowrank_spectra_fallback_full_eig_count", "statistic_ms", "moment_ms",
-  "pgamma_ms", "accounted_ms", "unaccounted_ms"
+  "pgamma_ms", "accounted_ms", "scalar_total_ms", "wrapper_overhead_ms",
+  "batch_overhead_ms", "unaccounted_ms"
 )
 missing_batch_diag <- setdiff(batch_diag_fields, names(batch$diagnostics))
 assert_true(length(missing_batch_diag) == 0L,
@@ -108,5 +109,18 @@ accounted_parts <- batch$diagnostics$input_ms +
   batch$diagnostics$pgamma_ms
 assert_true(abs(accounted_parts - batch$diagnostics$accounted_ms) <= 1e-6,
             "batched C++ oracle accounted time should sum stage timings")
+assert_true(batch$diagnostics$scalar_total_ms >=
+              batch$diagnostics$accounted_ms,
+            "batched C++ oracle should report scalar total time")
+assert_true(batch$diagnostics$wrapper_overhead_ms >= 0,
+            "batched C++ oracle should report wrapper overhead time")
+assert_true(batch$diagnostics$batch_overhead_ms >= 0,
+            "batched C++ oracle should report total batch overhead time")
+assert_true(abs(
+  batch$diagnostics$total_ms -
+    batch$diagnostics$scalar_total_ms -
+    batch$diagnostics$wrapper_overhead_ms
+) <= 1e-6,
+"batched C++ oracle total time should decompose into scalar and wrapper time")
 
 cat("PASS legacy dCov gamma C++ batch oracle parity\n")

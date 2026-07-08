@@ -3904,6 +3904,40 @@ CUDA legacy-compatible dCov backend
 
 Do not block mgcv residual work on dCov once current C++ Spectra backend is stable.
 
+Current dCov batch substrate status:
+
+```text
+fastkpc_legacy_dcov_gamma_cpp_oracle_batch() exists
+FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=chunk exists
+FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=round exists
+```
+
+The C++ batch oracle is still a scalar-loop batch wrapper, not a real shared
+workspace. It now reports:
+
+```text
+scalar_total_ms
+wrapper_overhead_ms
+batch_overhead_ms
+stage accounted timing
+lowrank Spectra/full-eig aggregate counts
+```
+
+Gate:
+
+```bash
+Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_batch_oracle.R
+Rscript fastkpc/tests/test_precision_compatible_legacy_dcov_cpp_backend.R
+```
+
+Next implementation target:
+
+```text
+move batch execution from scalar-loop wrapper toward shared n x n distance,
+centering, and lowrank workspaces while preserving legacy C++ scalar parity and
+the env-gated chunk/round skeleton replay semantics.
+```
+
 ---
 
 ## 9. Final success definition

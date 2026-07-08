@@ -1790,6 +1790,8 @@ Rcpp::List legacy_dcov_gamma_cpp_oracle_batch_export(Rcpp::NumericMatrix x,
   const double total_ms = elapsed_ms_since(total_start);
   const double accounted_ms = input_ms + distance_ms + lowrank_ms +
     statistic_ms + moment_ms + pgamma_ms;
+  const double wrapper_overhead_ms = std::max(0.0, total_ms - scalar_total_ms);
+  const double batch_overhead_ms = std::max(0.0, total_ms - accounted_ms);
   return Rcpp::List::create(
     Rcpp::Named("p.value") = p_values,
     Rcpp::Named("nV2") = nV2_values,
@@ -1833,8 +1835,10 @@ Rcpp::List legacy_dcov_gamma_cpp_oracle_batch_export(Rcpp::NumericMatrix x,
       Rcpp::Named("moment_ms") = moment_ms,
       Rcpp::Named("pgamma_ms") = pgamma_ms,
       Rcpp::Named("accounted_ms") = accounted_ms,
-      Rcpp::Named("unaccounted_ms") = std::max(0.0, total_ms - accounted_ms),
       Rcpp::Named("scalar_total_ms") = scalar_total_ms,
+      Rcpp::Named("wrapper_overhead_ms") = wrapper_overhead_ms,
+      Rcpp::Named("batch_overhead_ms") = batch_overhead_ms,
+      Rcpp::Named("unaccounted_ms") = std::max(0.0, total_ms - accounted_ms),
       Rcpp::Named("total_ms") = total_ms
     )
   );
