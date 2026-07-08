@@ -498,6 +498,12 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_cpp_backend_same_s_sp_native_mean_targets = 0,
     mgcv_cpp_backend_same_s_sp_native_reuse_opportunity_count = 0L,
     mgcv_cpp_backend_same_s_sp_native_setup_reuse_ratio = 0,
+    mgcv_cpp_backend_same_s_setup_native_group_count = 0L,
+    mgcv_cpp_backend_same_s_setup_native_target_count = 0L,
+    mgcv_cpp_backend_same_s_setup_native_max_targets = 0L,
+    mgcv_cpp_backend_same_s_setup_native_mean_targets = 0,
+    mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count = 0L,
+    mgcv_cpp_backend_same_s_setup_native_reuse_ratio = 0,
     mgcv_cpp_same_s_prefill_enabled = 0L,
     mgcv_cpp_same_s_prefill_group_count = 0L,
     mgcv_cpp_same_s_prefill_target_count = 0L,
@@ -526,6 +532,7 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_cpp_backend_native_residual_keys = character(),
     mgcv_cpp_backend_native_s_keys = character(),
     mgcv_cpp_backend_native_s_sp_keys = character(),
+    mgcv_cpp_backend_native_s_setup_keys = character(),
     direct_ci_count = 0L,
     conditional_ci_count = 0L,
     mgcv_fit_count = 0L,
@@ -1104,6 +1111,44 @@ fastkpc_legacy_runtime_add <- function(a, b) {
         0
       }
     },
+    mgcv_cpp_backend_same_s_setup_native_group_count =
+      as.integer(a$mgcv_cpp_backend_same_s_setup_native_group_count) +
+        as.integer(b$mgcv_cpp_backend_same_s_setup_native_group_count),
+    mgcv_cpp_backend_same_s_setup_native_target_count =
+      as.integer(a$mgcv_cpp_backend_same_s_setup_native_target_count) +
+        as.integer(b$mgcv_cpp_backend_same_s_setup_native_target_count),
+    mgcv_cpp_backend_same_s_setup_native_max_targets =
+      max(as.integer(a$mgcv_cpp_backend_same_s_setup_native_max_targets),
+          as.integer(b$mgcv_cpp_backend_same_s_setup_native_max_targets)),
+    mgcv_cpp_backend_same_s_setup_native_mean_targets = {
+      total_groups <-
+        as.integer(a$mgcv_cpp_backend_same_s_setup_native_group_count) +
+        as.integer(b$mgcv_cpp_backend_same_s_setup_native_group_count)
+      if (total_groups > 0L) {
+        (as.numeric(a$mgcv_cpp_backend_same_s_setup_native_mean_targets) *
+           as.integer(a$mgcv_cpp_backend_same_s_setup_native_group_count) +
+           as.numeric(b$mgcv_cpp_backend_same_s_setup_native_mean_targets) *
+             as.integer(b$mgcv_cpp_backend_same_s_setup_native_group_count)) /
+          total_groups
+      } else {
+        0
+      }
+    },
+    mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count =
+      as.integer(a$mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count) +
+        as.integer(b$mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count),
+    mgcv_cpp_backend_same_s_setup_native_reuse_ratio = {
+      total_targets <-
+        as.integer(a$mgcv_cpp_backend_same_s_setup_native_target_count) +
+        as.integer(b$mgcv_cpp_backend_same_s_setup_native_target_count)
+      if (total_targets > 0L) {
+        (as.integer(a$mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count) +
+           as.integer(b$mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count)) /
+          total_targets
+      } else {
+        0
+      }
+    },
     mgcv_cpp_same_s_prefill_enabled =
       max(as.integer(a$mgcv_cpp_same_s_prefill_enabled),
           as.integer(b$mgcv_cpp_same_s_prefill_enabled)),
@@ -1183,6 +1228,9 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     mgcv_cpp_backend_native_s_sp_keys =
       c(a$mgcv_cpp_backend_native_s_sp_keys,
         b$mgcv_cpp_backend_native_s_sp_keys),
+    mgcv_cpp_backend_native_s_setup_keys =
+      c(a$mgcv_cpp_backend_native_s_setup_keys,
+        b$mgcv_cpp_backend_native_s_setup_keys),
     direct_ci_count =
       as.integer(a$direct_ci_count) + as.integer(b$direct_ci_count),
     conditional_ci_count =
@@ -1345,6 +1393,12 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       mgcv_cpp_backend_same_s_sp_native_mean_targets = numeric(),
       mgcv_cpp_backend_same_s_sp_native_reuse_opportunity_count = integer(),
       mgcv_cpp_backend_same_s_sp_native_setup_reuse_ratio = numeric(),
+      mgcv_cpp_backend_same_s_setup_native_group_count = integer(),
+      mgcv_cpp_backend_same_s_setup_native_target_count = integer(),
+      mgcv_cpp_backend_same_s_setup_native_max_targets = integer(),
+      mgcv_cpp_backend_same_s_setup_native_mean_targets = numeric(),
+      mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count = integer(),
+      mgcv_cpp_backend_same_s_setup_native_reuse_ratio = numeric(),
       mgcv_cpp_same_s_prefill_enabled = integer(),
       mgcv_cpp_same_s_prefill_group_count = integer(),
       mgcv_cpp_same_s_prefill_target_count = integer(),
@@ -1645,6 +1699,18 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.integer(metrics$mgcv_cpp_backend_same_s_sp_native_reuse_opportunity_count),
       mgcv_cpp_backend_same_s_sp_native_setup_reuse_ratio =
         as.numeric(metrics$mgcv_cpp_backend_same_s_sp_native_setup_reuse_ratio),
+      mgcv_cpp_backend_same_s_setup_native_group_count =
+        as.integer(metrics$mgcv_cpp_backend_same_s_setup_native_group_count),
+      mgcv_cpp_backend_same_s_setup_native_target_count =
+        as.integer(metrics$mgcv_cpp_backend_same_s_setup_native_target_count),
+      mgcv_cpp_backend_same_s_setup_native_max_targets =
+        as.integer(metrics$mgcv_cpp_backend_same_s_setup_native_max_targets),
+      mgcv_cpp_backend_same_s_setup_native_mean_targets =
+        as.numeric(metrics$mgcv_cpp_backend_same_s_setup_native_mean_targets),
+      mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count =
+        as.integer(metrics$mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count),
+      mgcv_cpp_backend_same_s_setup_native_reuse_ratio =
+        as.numeric(metrics$mgcv_cpp_backend_same_s_setup_native_reuse_ratio),
       mgcv_cpp_same_s_prefill_enabled =
         as.integer(metrics$mgcv_cpp_same_s_prefill_enabled),
       mgcv_cpp_same_s_prefill_group_count =
@@ -1804,6 +1870,24 @@ fastkpc_legacy_mgcv_sp_key <- function(sp) {
         collapse = "|")
 }
 
+fastkpc_legacy_mgcv_setup_structure_key <- function(setup) {
+  if (!exists("fastkpc_hash_object", mode = "function")) {
+    source("fastkpc/R/mgcv_extract_oracle.R")
+  }
+  penalty_keys <- if (length(setup$S) > 0L) {
+    vapply(setup$S, fastkpc_hash_object, character(1L))
+  } else {
+    character()
+  }
+  paste(
+    fastkpc_hash_object(round(as.numeric(setup$X), digits = 14L)),
+    paste(penalty_keys, collapse = "|"),
+    fastkpc_hash_object(setup$C),
+    paste(as.integer(setup$rank), collapse = "|"),
+    sep = "||"
+  )
+}
+
 fastkpc_legacy_mgcv_residual_cache_enabled <- function() {
   identical(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE", unset = ""), "1")
 }
@@ -1936,6 +2020,7 @@ fastkpc_legacy_mgcv_residual_cpp_guarded_compute <- function(
       message = as.character(message),
       s_size = as.integer(s_size),
       sp_key = "",
+      setup_structure_key = "",
       timings = timings
     )
   }
@@ -2014,6 +2099,7 @@ fastkpc_legacy_mgcv_residual_cpp_guarded_compute <- function(
       message = "",
       s_size = as.integer(s_size),
       sp_key = fastkpc_legacy_mgcv_sp_key(sp),
+      setup_structure_key = fastkpc_legacy_mgcv_setup_structure_key(setup),
       timings = timings
     )
   }, error = function(e) {
@@ -2123,6 +2209,10 @@ fastkpc_legacy_mgcv_residual_cpp_backend_target <- function(
       metrics$mgcv_cpp_backend_native_s_sp_keys <- c(
         metrics$mgcv_cpp_backend_native_s_sp_keys,
         paste0(s_key, "||sp=", as.character(result$sp_key))
+      )
+      metrics$mgcv_cpp_backend_native_s_setup_keys <- c(
+        metrics$mgcv_cpp_backend_native_s_setup_keys,
+        paste0(s_key, "||setup=", as.character(result$setup_structure_key))
       )
     }
     if (s_size == 0L) {
@@ -3075,6 +3165,7 @@ fastkpc_legacy_runtime_finalize_mgcv_keys <- function(metrics) {
   native_s_keys <- metrics$mgcv_cpp_backend_native_s_keys
   native_residual_keys <- metrics$mgcv_cpp_backend_native_residual_keys
   native_s_sp_keys <- metrics$mgcv_cpp_backend_native_s_sp_keys
+  native_s_setup_keys <- metrics$mgcv_cpp_backend_native_s_setup_keys
   if (length(native_s_keys) > 0L) {
     native_per_s <- table(native_s_keys)
     metrics$mgcv_cpp_backend_same_s_native_group_count <-
@@ -3115,11 +3206,32 @@ fastkpc_legacy_runtime_finalize_mgcv_keys <- function(metrics) {
         0
       }
   }
+  if (length(native_s_setup_keys) > 0L) {
+    native_per_s_setup <- table(native_s_setup_keys)
+    metrics$mgcv_cpp_backend_same_s_setup_native_group_count <-
+      length(native_per_s_setup)
+    metrics$mgcv_cpp_backend_same_s_setup_native_target_count <-
+      length(native_s_setup_keys)
+    metrics$mgcv_cpp_backend_same_s_setup_native_max_targets <-
+      max(as.integer(native_per_s_setup))
+    metrics$mgcv_cpp_backend_same_s_setup_native_mean_targets <-
+      mean(as.integer(native_per_s_setup))
+    metrics$mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count <-
+      length(native_s_setup_keys) - length(native_per_s_setup)
+    metrics$mgcv_cpp_backend_same_s_setup_native_reuse_ratio <-
+      if (length(native_s_setup_keys) > 0L) {
+        metrics$mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count /
+          length(native_s_setup_keys)
+      } else {
+        0
+      }
+  }
   metrics$mgcv_residual_keys <- character()
   metrics$mgcv_s_keys <- character()
   metrics$mgcv_cpp_backend_native_residual_keys <- character()
   metrics$mgcv_cpp_backend_native_s_keys <- character()
   metrics$mgcv_cpp_backend_native_s_sp_keys <- character()
+  metrics$mgcv_cpp_backend_native_s_setup_keys <- character()
   metrics
 }
 
@@ -4296,6 +4408,18 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$mgcv_cpp_backend_same_s_sp_native_reuse_opportunity_count),
         legacy_mgcv_cpp_backend_same_s_sp_native_setup_reuse_ratio =
           as.numeric(runtime_total$mgcv_cpp_backend_same_s_sp_native_setup_reuse_ratio),
+        legacy_mgcv_cpp_backend_same_s_setup_native_group_count =
+          as.integer(runtime_total$mgcv_cpp_backend_same_s_setup_native_group_count),
+        legacy_mgcv_cpp_backend_same_s_setup_native_target_count =
+          as.integer(runtime_total$mgcv_cpp_backend_same_s_setup_native_target_count),
+        legacy_mgcv_cpp_backend_same_s_setup_native_max_targets =
+          as.integer(runtime_total$mgcv_cpp_backend_same_s_setup_native_max_targets),
+        legacy_mgcv_cpp_backend_same_s_setup_native_mean_targets =
+          as.numeric(runtime_total$mgcv_cpp_backend_same_s_setup_native_mean_targets),
+        legacy_mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count =
+          as.integer(runtime_total$mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count),
+        legacy_mgcv_cpp_backend_same_s_setup_native_reuse_ratio =
+          as.numeric(runtime_total$mgcv_cpp_backend_same_s_setup_native_reuse_ratio),
         legacy_mgcv_cpp_same_s_prefill_enabled =
           isTRUE(as.integer(runtime_total$mgcv_cpp_same_s_prefill_enabled) > 0L),
         legacy_mgcv_cpp_same_s_prefill_group_count =

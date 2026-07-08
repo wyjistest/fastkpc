@@ -1489,6 +1489,70 @@ It should either batch by same-S+selected-sp for full setup/factorization reuse,
 or split the executor so same-S basis/model-frame work is reused while
 target-specific smoothing parameter selection remains faithful to mgcv.
 
+Guarded residual same-S setup-structure reuse diagnostic:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_setup_structure_subset_v1
+```
+
+Status:
+
+```text
+status: created
+mode: env-neutral diagnostic over cpp_guarded backend route
+data: real 351x48 fixture, 12 hot-column subset
+max_conditioning_size: 3
+num_cores: 8
+
+edge_count: 20
+n.edgetests: 131,994,1453,243
+
+backend / native / fallback / error targets:
+  2756 / 2297 / 459 / 0
+
+same-S groups / targets / reuse / ratio:
+  78 / 2297 / 2219 / 0.96604266
+
+same-S+setup-structure groups / targets / max / mean:
+  78 / 2297 / 56 / 29.448718
+same-S+setup-structure reuse / ratio:
+  2219 / 0.96604266
+
+same-S+selected-sp groups / reuse / ratio:
+  765 / 1532 / 0.6669569
+
+input_formula_setup_ms: 15369
+mgcv_gam_fit_ms:        34235
+setup_extract_ms:       28419
+native_fixed_sp_solve:   2213
+fallback_regrXonS_ms:   17231
+```
+
+This confirms the split design implied above. On this subset, the
+target-independent setup structure hash is invariant within each same-S group:
+same-S and same-S+setup-structure both have 78 groups and 96.6% reuse
+opportunity. The selected smoothing parameter still splits those groups into
+765 same-S+sp groups. Therefore the next implementation should not treat
+`sp` selection as reusable by S alone, but it can target same-S reuse for:
+
+```text
+formula construction
+model frame / predictor data
+model matrix / basis metadata
+penalty and constraint structure
+```
+
+Then it should batch the fixed-sp numerical replay under:
+
+```text
+same S + selected sp
+```
+
+This is the current lowest-risk path toward an exact same-S residual executor:
+reuse target-independent setup by S, preserve per-target mgcv smoothing
+parameter selection, and only share fixed-sp factorization/solve work when the
+selected-sp signature also matches.
+
 Same-S guarded residual prefill prototype:
 
 ```bash
