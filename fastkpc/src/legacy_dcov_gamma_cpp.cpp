@@ -182,8 +182,14 @@ LegacyDcovLowrank legacy_dcov_lowrank(const arma::mat& distance,
 double legacy_dcov_weighted_cross_sum(const arma::mat& left,
                                       const arma::vec& left_values,
                                       const arma::mat& right,
-                                      const arma::vec& right_values) {
-  const arma::mat cross = left.t() * right;
+                                      const arma::vec& right_values,
+                                      arma::mat* cross_workspace = nullptr,
+                                      int* reuse_count = nullptr) {
+  arma::mat local_cross;
+  arma::mat& cross =
+    cross_workspace == nullptr ? local_cross : *cross_workspace;
+  cross = left.t() * right;
+  if (reuse_count != nullptr) *reuse_count += 1;
   double total = 0.0;
   for (arma::uword col = 0; col < cross.n_cols; ++col) {
     for (arma::uword row = 0; row < cross.n_rows; ++row) {
@@ -213,8 +219,10 @@ const char* legacy_dcov_lowrank_mode_name(LegacyDcovLowrankMode mode) {
 struct LegacyDcovGammaCppWorkspace {
   arma::mat x_distance;
   arma::mat y_distance;
+  arma::mat statistic_moment_cross;
   int n = 0;
   int distance_workspace_reuse_count = 0;
+  int statistic_moment_workspace_reuse_count = 0;
 };
 
 LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute(
@@ -277,9 +285,15 @@ LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute_workspace(
     std::max(0.0, lowrank_ms - lowrank_accounted_ms);
 
   const auto statistic_start = std::chrono::steady_clock::now();
+  arma::mat* cross_workspace =
+    workspace == nullptr ? nullptr : &workspace->statistic_moment_cross;
+  int* statistic_moment_workspace_reuse_count = workspace == nullptr ?
+    nullptr : &workspace->statistic_moment_workspace_reuse_count;
   const double nV2 = legacy_dcov_weighted_cross_sum(
     x_lowrank.centered_vectors, x_lowrank.values,
-    y_lowrank.centered_vectors, y_lowrank.values) / static_cast<double>(n);
+    y_lowrank.centered_vectors, y_lowrank.values,
+    cross_workspace, statistic_moment_workspace_reuse_count) /
+    static_cast<double>(n);
   const double statistic_ms = legacy_dcov_elapsed_ms_since(statistic_start);
 
   const auto moment_start = std::chrono::steady_clock::now();
@@ -288,10 +302,12 @@ LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute_workspace(
     (arma::accu(maty) / (n_double * n_double));
   const double x_moment = legacy_dcov_weighted_cross_sum(
     x_lowrank.centered_vectors, x_lowrank.values,
-    x_lowrank.centered_vectors, x_lowrank.values);
+    x_lowrank.centered_vectors, x_lowrank.values,
+    cross_workspace, statistic_moment_workspace_reuse_count);
   const double y_moment = legacy_dcov_weighted_cross_sum(
     y_lowrank.centered_vectors, y_lowrank.values,
-    y_lowrank.centered_vectors, y_lowrank.values);
+    y_lowrank.centered_vectors, y_lowrank.values,
+    cross_workspace, statistic_moment_workspace_reuse_count);
   const double variance_factor =
     2.0 * (n_double - 4.0) * (n_double - 5.0) /
     n_double / (n_double - 1.0) / (n_double - 2.0) / (n_double - 3.0);
@@ -514,6 +530,8 @@ Rcpp::List legacy_dcov_gamma_cpp_compute_batch(Rcpp::NumericMatrix x,
       Rcpp::Named("workspace_reuse_enabled") = true,
       Rcpp::Named("distance_workspace_reuse_count") =
         workspace.distance_workspace_reuse_count,
+      Rcpp::Named("statistic_moment_workspace_reuse_count") =
+        workspace.statistic_moment_workspace_reuse_count,
       Rcpp::Named("column_copy_count") = 0,
       Rcpp::Named("unaccounted_ms") = std::max(0.0, total_ms - accounted_ms),
       Rcpp::Named("total_ms") = total_ms
