@@ -1677,6 +1677,46 @@ void apply_ci_options(SkeletonOptions* options,
 }  // namespace
 
 // [[Rcpp::export]]
+Rcpp::List mgcv_residual_replay_from_setup_export(
+    Rcpp::NumericMatrix model_matrix,
+    Rcpp::NumericVector coefficients,
+    Rcpp::NumericVector y) {
+  const int n = model_matrix.nrow();
+  const int p = model_matrix.ncol();
+  if (coefficients.size() != p) {
+    Rcpp::stop("coefficient length must match model matrix columns");
+  }
+  if (y.size() != n) {
+    Rcpp::stop("response length must match model matrix rows");
+  }
+  Rcpp::NumericVector fitted(n);
+  Rcpp::NumericVector residuals(n);
+  for (int row = 0; row < n; ++row) {
+    if (!std::isfinite(y[row])) Rcpp::stop("response contains non-finite value");
+    double value = 0.0;
+    for (int col = 0; col < p; ++col) {
+      const double x = model_matrix(row, col);
+      const double beta = coefficients[col];
+      if (!std::isfinite(x) || !std::isfinite(beta)) {
+        Rcpp::stop("model matrix or coefficients contain non-finite value");
+      }
+      value += x * beta;
+    }
+    fitted[row] = value;
+    residuals[row] = y[row] - value;
+  }
+  return Rcpp::List::create(
+    Rcpp::Named("backend_family") = "mgcvCapturedCppReplay",
+    Rcpp::Named("backend_version") = "captured-setup-matvec-v1",
+    Rcpp::Named("authoritative") = false,
+    Rcpp::Named("fitted") = fitted,
+    Rcpp::Named("residuals") = residuals,
+    Rcpp::Named("n") = n,
+    Rcpp::Named("p") = p
+  );
+}
+
+// [[Rcpp::export]]
 Rcpp::List mgcv_extract_gpu_spectral_score_batch_export(
     Rcpp::NumericMatrix eigenvectors,
     Rcpp::NumericMatrix inv_chol,

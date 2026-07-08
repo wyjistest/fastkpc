@@ -89,6 +89,18 @@ kpc_tprs_residual_cpp_setup <- function(S, k = NA_integer_,
   )
 }
 
+fastkpc_mgcv_residual_replay_from_setup_cpp <- function(
+    model_matrix, coefficients, y) {
+  build_fastkpc_native()
+  model_matrix <- as.matrix(model_matrix)
+  storage.mode(model_matrix) <- "double"
+  mgcv_residual_replay_from_setup_export(
+    model_matrix,
+    as.numeric(coefficients),
+    as.numeric(y)
+  )
+}
+
 fast_hsic_gamma_cpp <- function(x, y, sig = 1) {
   build_fastkpc_native()
   fast_hsic_gamma_cpp_export(
