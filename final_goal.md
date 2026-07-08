@@ -2960,6 +2960,59 @@ generation or residual batches further behind the native entrypoint while
 preserving this legacy dcov.gamma CI data-plane contract.
 ```
 
+### R-facing legacy-mgcv + legacy-dCov one-call checkpoint
+
+The next API boundary hides the residual-provider callback behind a single
+R-facing native skeleton call:
+
+```text
+precision_run_skeleton_legacy_mgcv_legacy_dcov_native()
+```
+
+Status:
+
+```text
+status: targeted one-call API wrapper over native skeleton + legacy CI gate
+scope:
+  R caller passes data / alpha / max_conditioning_size / dCov parameters
+  wrapper constructs the legacy mgcv/regrXonS residual provider
+  native entrypoint owns skeleton level loop, residual request enumeration,
+    legacy-compatible C++ dcov.gamma p-values, canonical replay, and sepsets
+  summary records entrypoint = legacy-mgcv-legacy-dcov-native
+```
+
+Gate:
+
+```text
+Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+```
+
+Coverage:
+
+```text
+real-valued data
+max_conditioning_size = 1
+legacy mgcv/regrXonS residual authority via hidden provider
+native legacy dcov.gamma CI data plane
+adjacency identical to explicit residual-provider native route
+sepsets identical to explicit residual-provider native route
+n.edgetests identical to explicit residual-provider native route
+pMax max abs diff < 1e-12
+```
+
+Decision:
+
+```text
+This gives Phase 5 a single R-facing call for the current native-compatible
+legacy residual + legacy dCov gate. It improves the final API shape but is not
+yet the final compatible.cuda engine: internally, residual generation still
+uses an R provider callback, execution is still a small max_conditioning_size =
+1 gate, and full 351x48 one-call execution still has not passed SHD=0 /
+n.edgetests-exact / wall-time gates. The next boundary should either validate
+this one-call wrapper on a real 351-row subset or move residual batching/setup
+further behind the native entrypoint.
+```
+
 ### CUDA responsibilities
 
 ```text

@@ -347,6 +347,68 @@ precision_run_skeleton_residual_provider_legacy_dcov_native <- function(
         PACKAGE = "fastkpc_cuda")
 }
 
+fastkpc_legacy_mgcv_residual_provider <- function(data, counter_env = NULL) {
+  data <- as.matrix(data)
+  storage.mode(data) <- "double"
+  force(counter_env)
+  function(requests, level) {
+    required <- c("request_index", "target", "conditioning_sets",
+                  "S_key", "conditioning_size")
+    missing_fields <- setdiff(required, names(requests))
+    if (length(missing_fields) > 0L) {
+      stop("residual provider request table missing fields: ",
+           paste(missing_fields, collapse = ","), call. = FALSE)
+    }
+    if (!is.null(counter_env)) {
+      level_calls <- if (is.null(counter_env$level_calls)) {
+        0L
+      } else {
+        counter_env$level_calls
+      }
+      request_count <- if (is.null(counter_env$request_count)) {
+        0L
+      } else {
+        counter_env$request_count
+      }
+      counter_env$level_calls <- level_calls + 1L
+      counter_env$request_count <- request_count + nrow(requests)
+    }
+    out <- matrix(NA_real_, nrow(data), nrow(requests))
+    for (i in seq_len(nrow(requests))) {
+      S <- as.integer(requests$conditioning_sets[[i]])
+      if (length(S) == 0L) {
+        stop("legacy mgcv residual provider received unconditional request",
+             call. = FALSE)
+      }
+      out[, i] <- fastkpc_legacy_mgcv_residual(
+        data = data,
+        target = as.integer(requests$target[[i]]),
+        S = S
+      )
+    }
+    out
+  }
+}
+
+precision_run_skeleton_legacy_mgcv_legacy_dcov_native <- function(
+    data, alpha, max_conditioning_size,
+    index = 1, numCol = floor(nrow(as.matrix(data)) / 10),
+    trace_level = c("summary", "full", "none")) {
+  data <- as.matrix(data)
+  storage.mode(data) <- "double"
+  result <- precision_run_skeleton_residual_provider_legacy_dcov_native(
+    data = data,
+    alpha = alpha,
+    max_conditioning_size = max_conditioning_size,
+    residual_provider = fastkpc_legacy_mgcv_residual_provider(data),
+    index = index,
+    numCol = numCol,
+    trace_level = trace_level
+  )
+  result$summary$entrypoint <- "legacy-mgcv-legacy-dcov-native"
+  result
+}
+
 fast_kpc_wanpdag_cuda <- function(data, alpha, max_conditioning_size,
                                   residual_backend = "fastSpline",
                                   residual_device = c("auto", "cpu", "cuda"),
