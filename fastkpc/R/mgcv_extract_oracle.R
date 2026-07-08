@@ -1524,6 +1524,139 @@ fastkpc_mgcv_extract_retarget_setup <- function(setup, y, sp, target) {
   out
 }
 
+fastkpc_mgcv_extract_same_setup_batch_fixed_sp_cpp <- function(
+    Y,
+    S_data,
+    S,
+    sp,
+    k = NA_integer_,
+    bs = "tp",
+    method = "GCV.Cp",
+    target_ids = seq_len(ncol(as.matrix(Y))),
+    tol = sqrt(.Machine$double.eps)) {
+  Y <- as.matrix(Y)
+  S_data <- as.data.frame(S_data)
+  if (nrow(Y) != nrow(S_data)) {
+    stop("Y and S_data must have the same row count", call. = FALSE)
+  }
+  if (ncol(S_data) == 0L) {
+    stop("S_data must contain at least one conditioning column", call. = FALSE)
+  }
+  q <- ncol(Y)
+  if (length(target_ids) != q) {
+    stop("length(target_ids) must equal ncol(Y)", call. = FALSE)
+  }
+  if (length(sp) == 1L && q > 1L) {
+    sp <- rep(as.numeric(sp), q)
+  }
+  if (length(sp) != q) {
+    stop("sp must have length 1 or one value per target", call. = FALSE)
+  }
+  sp <- fastkpc_validate_fixed_positive_sp(sp, expected_length = q)
+
+  s_names <- names(S_data)
+  if (is.null(s_names) || any(!nzchar(s_names))) {
+    s_names <- paste0("s", seq_len(ncol(S_data)))
+    names(S_data) <- s_names
+  }
+  rhs <- fastkpc_mgcv_regrxons_rhs(
+    S_data = S_data,
+    S = S,
+    k = k,
+    bs = bs
+  )
+  formula <- stats::as.formula(paste("y ~", rhs))
+
+  total_start <- proc.time()[["elapsed"]]
+  template_start <- proc.time()[["elapsed"]]
+  template_data <- data.frame(y = Y[, 1L], S_data, check.names = FALSE)
+  template_setup <- fastkpc_mgcv_extract_setup(
+    formula = formula,
+    data = template_data,
+    sp = sp[1L],
+    method = method,
+    target = target_ids[1L],
+    S = S,
+    k = k,
+    bs = bs
+  )
+  template_setup_ms <- (proc.time()[["elapsed"]] - template_start) * 1000
+
+  retarget_ms <- 0
+  solve_ms <- 0
+  setups <- vector("list", q)
+  solved <- vector("list", q)
+  for (j in seq_len(q)) {
+    retarget_start <- proc.time()[["elapsed"]]
+    setups[[j]] <- fastkpc_mgcv_extract_retarget_setup(
+      setup = template_setup,
+      y = Y[, j],
+      sp = sp[j],
+      target = target_ids[j]
+    )
+    retarget_ms <- retarget_ms +
+      (proc.time()[["elapsed"]] - retarget_start) * 1000
+
+    solve_start <- proc.time()[["elapsed"]]
+    solved[[j]] <- fastkpc_mgcv_solve_setup_fixed_sp_cpp(
+      setups[[j]],
+      tol = tol
+    )
+    solve_ms <- solve_ms + (proc.time()[["elapsed"]] - solve_start) * 1000
+  }
+
+  n <- length(solved[[1L]]$residuals)
+  if (any(vapply(solved, function(x) length(x$residuals) != n, logical(1)))) {
+    stop("all setup solves must have the same row count", call. = FALSE)
+  }
+  residuals <- do.call(cbind, lapply(solved, `[[`, "residuals"))
+  fitted <- do.call(cbind, lapply(solved, `[[`, "fitted"))
+  coefficients <- lapply(solved, `[[`, "coefficients")
+  setup_fingerprints <- vapply(
+    setups,
+    function(x) x$setup_fingerprint$fingerprint,
+    character(1)
+  )
+  colnames(residuals) <- paste0("target", as.integer(target_ids))
+  colnames(fitted) <- colnames(residuals)
+
+  total_ms <- (proc.time()[["elapsed"]] - total_start) * 1000
+  list(
+    backend_family = "mgcvExtractCPU",
+    mode = "fixed-sp-same-setup-native-cpp-batch-prototype",
+    solve_source = "fastkpc-native-same-setup-fixed-sp-batch-prototype",
+    sp_source = "fixed-input-per-target",
+    gcv_source = "none",
+    is_self_contained_gcv = FALSE,
+    used_device = "cpu",
+    native_cpp_solve_used = TRUE,
+    residuals = residuals,
+    fitted = fitted,
+    coefficients = coefficients,
+    sp = sp,
+    target_ids = as.integer(target_ids),
+    setup_fingerprints = setup_fingerprints,
+    template_setup = template_setup,
+    setups = setups,
+    solved = solved,
+    diagnostics = list(
+      targets = as.integer(q),
+      n = as.integer(n),
+      setup_reused = TRUE,
+      same_setup_fingerprint_count = length(unique(setup_fingerprints)),
+      template_setup_fingerprint =
+        template_setup$setup_fingerprint$fingerprint,
+      device_resident = FALSE,
+      true_batched_kernel = FALSE,
+      batch_stage = "same-setup-repeated-cpp-solve-prototype",
+      template_setup_ms = as.numeric(template_setup_ms),
+      retarget_ms = as.numeric(retarget_ms),
+      native_solve_ms = as.numeric(solve_ms),
+      total_ms = as.numeric(total_ms)
+    )
+  )
+}
+
 fastkpc_mgcv_extract_gpu_same_setup_batch_fixed_sp_cuda <- function(
     Y,
     S_data,

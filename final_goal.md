@@ -2733,6 +2733,34 @@ next:
   that reduces setup/extraction overhead without the R chunk state-machine cost.
 ```
 
+Executor substrate checkpoint:
+
+```text
+fastkpc_mgcv_extract_same_setup_batch_fixed_sp_cpp()
+
+status: implemented as a narrow non-CUDA same-S fixed-sp batch prototype
+scope: mgcvExtract CPU/C++ helper only; not connected to the legacy skeleton
+behavior:
+  accepts a same-S target matrix Y, conditioning data S_data, and one fixed
+    scalar sp per target
+  extracts one template mgcv setup
+  retargets that template for each target and per-target fixed sp
+  solves each retargeted setup through the existing native C++ fixed-sp solver
+  reports setup reuse while explicitly not claiming a true batched kernel
+
+test:
+  Rscript fastkpc/tests/test_mgcv_extract_same_setup_fixed_sp_batch_cpp.R
+
+neighbor checks:
+  Rscript fastkpc/tests/test_mgcv_extract_gpu_handle_batch_solve.R
+  Rscript fastkpc/tests/test_mgcv_extract_batch_cpu.R
+
+status:
+  This is a substrate for the next residual executor iteration, not a promoted
+  compatible route. It preserves fixed-sp semantics and proves a reusable
+  same-S setup contract on CPU/C++ before any full skeleton integration.
+```
+
 ### 8.4 Continue dCov backend improvement separately
 
 Next dCov steps:
