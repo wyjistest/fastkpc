@@ -2791,6 +2791,60 @@ swap the exact dCov helper for the legacy-compatible C++/CUDA dcov.gamma data
 plane while preserving the same one-call native control flow.
 ```
 
+### Native exact-CI conditional one-call checkpoint
+
+The next C++ host boundary extends the native data-plane checkpoint from
+unconditional dCov to conditional CI tests:
+
+```text
+precision_run_skeleton_exact_ci_native()
+```
+
+Status:
+
+```text
+status: targeted one-call host-control + native residual/CI data-plane gate
+scope:
+  C++ owns complete graph initialization
+  C++ owns skeleton level loop through max_conditioning_size = 1
+  C++ generates each level with make_layer_plan()
+  C++ computes unconditional exact dCov p-values from the data matrix
+  C++ computes conditional residuals with native linear lm residualization
+  C++ computes exact dCov p-values from those residuals
+  C++ replays deletion / ignored-after-delete / pMax / sepsets
+```
+
+Gate:
+
+```text
+Rscript fastkpc/tests/test_skeleton_native_exact_ci_one_call.R
+```
+
+Coverage:
+
+```text
+real-valued data
+max_conditioning_size = 1
+native conditional residual generation exercised
+native exact dCov p-value generation exercised
+adjacency identical to R lm-residual + exact-dCov reference replay
+sepsets identical to R lm-residual + exact-dCov reference replay
+n.edgetests identical to R lm-residual + exact-dCov reference replay
+pMax max abs diff < 1e-10
+```
+
+Decision:
+
+```text
+This is the first one-call native skeleton checkpoint with conditional
+residual generation and p-value generation behind the native entrypoint. It is
+still not legacy-compatible: the residual backend is native linear lm, and the
+CI backend is native exact dCov, not mgcv/regrXonS plus legacy-compatible
+dcov.gamma. The next Phase 5 boundary must replace native-linear-lm residuals
+with the mgcv-compatible residual executor/provider path, and then replace the
+exact dCov helper with the legacy-compatible dCov gamma C++/CUDA data plane.
+```
+
 ### CUDA responsibilities
 
 ```text
