@@ -65,17 +65,31 @@ struct LegacyDcovLowrank {
   arma::mat centered_vectors;
 };
 
+struct LegacyDcovLowrankEigWorkspace {
+  arma::vec full_eigenvalues;
+  arma::mat full_eigenvectors;
+  Eigen::VectorXd spectra_eigenvalues;
+  Eigen::MatrixXd spectra_eigenvectors;
+  int reuse_count = 0;
+};
+
 void legacy_dcov_lowrank_full_eig(
     const arma::mat& distance,
     int num_col,
     LegacyDcovLowrank& output,
+    LegacyDcovLowrankEigWorkspace* eig_workspace = nullptr,
     LegacyDcovLowrankTimings* timings = nullptr) {
   const auto eig_start = std::chrono::steady_clock::now();
-  arma::vec eigenvalues;
-  arma::mat eigenvectors;
+  arma::vec local_eigenvalues;
+  arma::mat local_eigenvectors;
+  arma::vec& eigenvalues = eig_workspace == nullptr ?
+    local_eigenvalues : eig_workspace->full_eigenvalues;
+  arma::mat& eigenvectors = eig_workspace == nullptr ?
+    local_eigenvectors : eig_workspace->full_eigenvectors;
   if (!arma::eig_sym(eigenvalues, eigenvectors, distance)) {
     Rcpp::stop("legacy dCov gamma eigen decomposition failed");
   }
+  if (eig_workspace != nullptr) eig_workspace->reuse_count += 1;
   const double eig_ms = legacy_dcov_elapsed_ms_since(eig_start);
 
   const auto select_start = std::chrono::steady_clock::now();
@@ -105,6 +119,7 @@ void legacy_dcov_lowrank_spectra(
     const arma::mat& distance,
     int num_col,
     LegacyDcovLowrank& output,
+    LegacyDcovLowrankEigWorkspace* eig_workspace = nullptr,
     LegacyDcovLowrankTimings* timings = nullptr) {
   const int n = static_cast<int>(distance.n_rows);
   const int ncv = std::min(n, std::max(2 * num_col + 1, 20));
@@ -143,13 +158,21 @@ void legacy_dcov_lowrank_spectra(
     }
   }
   if (!ok) {
-    legacy_dcov_lowrank_full_eig(distance, num_col, output, timings);
+    legacy_dcov_lowrank_full_eig(
+      distance, num_col, output, eig_workspace, timings);
     return;
   }
 
   const auto select_start = std::chrono::steady_clock::now();
-  const Eigen::VectorXd eigenvalues = eigs.eigenvalues();
-  const Eigen::MatrixXd eigenvectors = eigs.eigenvectors();
+  Eigen::VectorXd local_eigenvalues;
+  Eigen::MatrixXd local_eigenvectors;
+  Eigen::VectorXd& eigenvalues = eig_workspace == nullptr ?
+    local_eigenvalues : eig_workspace->spectra_eigenvalues;
+  Eigen::MatrixXd& eigenvectors = eig_workspace == nullptr ?
+    local_eigenvectors : eig_workspace->spectra_eigenvectors;
+  eigenvalues = eigs.eigenvalues();
+  eigenvectors = eigs.eigenvectors();
+  if (eig_workspace != nullptr) eig_workspace->reuse_count += 1;
   output.centered_vectors.set_size(distance.n_rows, num_col);
   output.values.set_size(num_col);
   for (int col = 0; col < num_col; ++col) {
@@ -174,12 +197,15 @@ void legacy_dcov_lowrank(const arma::mat& distance,
                          int num_col,
                          LegacyDcovLowrankMode mode,
                          LegacyDcovLowrank& output,
+                         LegacyDcovLowrankEigWorkspace* eig_workspace = nullptr,
                          LegacyDcovLowrankTimings* timings = nullptr) {
   if (mode == LegacyDcovLowrankMode::Spectra) {
-    legacy_dcov_lowrank_spectra(distance, num_col, output, timings);
+    legacy_dcov_lowrank_spectra(
+      distance, num_col, output, eig_workspace, timings);
     return;
   }
-  legacy_dcov_lowrank_full_eig(distance, num_col, output, timings);
+  legacy_dcov_lowrank_full_eig(
+    distance, num_col, output, eig_workspace, timings);
 }
 
 double legacy_dcov_weighted_cross_sum(const arma::mat& left,
@@ -225,6 +251,7 @@ struct LegacyDcovGammaCppWorkspace {
   arma::mat statistic_moment_cross;
   LegacyDcovLowrank x_lowrank;
   LegacyDcovLowrank y_lowrank;
+  LegacyDcovLowrankEigWorkspace lowrank_eig_workspace;
   int n = 0;
   int distance_workspace_reuse_count = 0;
   int statistic_moment_workspace_reuse_count = 0;
@@ -286,8 +313,14 @@ LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute_workspace(
     workspace == nullptr ? local_x_lowrank : workspace->x_lowrank;
   LegacyDcovLowrank& y_lowrank =
     workspace == nullptr ? local_y_lowrank : workspace->y_lowrank;
-  legacy_dcov_lowrank(matx, numCol, lowrank_mode, x_lowrank, &lowrank_timings);
-  legacy_dcov_lowrank(maty, numCol, lowrank_mode, y_lowrank, &lowrank_timings);
+  LegacyDcovLowrankEigWorkspace* lowrank_eig_workspace = workspace == nullptr ?
+    nullptr : &workspace->lowrank_eig_workspace;
+  legacy_dcov_lowrank(
+    matx, numCol, lowrank_mode, x_lowrank, lowrank_eig_workspace,
+    &lowrank_timings);
+  legacy_dcov_lowrank(
+    maty, numCol, lowrank_mode, y_lowrank, lowrank_eig_workspace,
+    &lowrank_timings);
   if (workspace != nullptr) workspace->lowrank_output_workspace_reuse_count += 2;
   const double lowrank_ms = legacy_dcov_elapsed_ms_since(lowrank_start);
   const double lowrank_accounted_ms = lowrank_timings.eig_ms +
@@ -545,6 +578,8 @@ Rcpp::List legacy_dcov_gamma_cpp_compute_batch(Rcpp::NumericMatrix x,
         workspace.statistic_moment_workspace_reuse_count,
       Rcpp::Named("lowrank_output_workspace_reuse_count") =
         workspace.lowrank_output_workspace_reuse_count,
+      Rcpp::Named("lowrank_eig_workspace_reuse_count") =
+        workspace.lowrank_eig_workspace.reuse_count,
       Rcpp::Named("column_copy_count") = 0,
       Rcpp::Named("unaccounted_ms") = std::max(0.0, total_ms - accounted_ms),
       Rcpp::Named("total_ms") = total_ms

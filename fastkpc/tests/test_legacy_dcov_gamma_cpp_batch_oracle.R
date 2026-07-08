@@ -86,7 +86,8 @@ batch_diag_fields <- c(
   "pgamma_ms", "accounted_ms", "scalar_total_ms", "wrapper_overhead_ms",
   "batch_overhead_ms", "unaccounted_ms", "workspace_reuse_enabled",
   "distance_workspace_reuse_count", "statistic_moment_workspace_reuse_count",
-  "lowrank_output_workspace_reuse_count", "column_copy_count"
+  "lowrank_output_workspace_reuse_count",
+  "lowrank_eig_workspace_reuse_count", "column_copy_count"
 )
 missing_batch_diag <- setdiff(batch_diag_fields, names(batch$diagnostics))
 assert_true(length(missing_batch_diag) == 0L,
@@ -138,6 +139,10 @@ assert_true(identical(
   as.integer(batch$diagnostics$lowrank_output_workspace_reuse_count),
   2L * ncol(x)
 ), "batched C++ oracle should reuse x/y lowrank output workspaces per pair")
+assert_true(identical(
+  as.integer(batch$diagnostics$lowrank_eig_workspace_reuse_count),
+  2L * ncol(x)
+), "batched C++ oracle should reuse x/y lowrank eig workspaces per pair")
 assert_true(identical(as.integer(batch$diagnostics$column_copy_count), 0L),
             "batched C++ oracle should avoid per-column Rcpp vector copies")
 
