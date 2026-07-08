@@ -2736,6 +2736,61 @@ executor that can generate p-values from data behind the same one-call skeleton
 entrypoint.
 ```
 
+### Native dCov0 one-call checkpoint
+
+The next C++ host boundary removes the R p-value provider for the
+unconditional level and computes p-values directly from data inside the native
+entrypoint:
+
+```text
+precision_run_skeleton_dcov0_native()
+```
+
+Status:
+
+```text
+status: targeted one-call host-control + native CI data-plane gate
+scope:
+  C++ owns complete graph initialization
+  C++ owns level-0 skeleton control
+  C++ generates level 0 with make_layer_plan()
+  C++ computes unconditional p-values from the data matrix
+  C++ uses the existing native exact dCov gamma approximation helper
+  C++ replays deletion / ignored-after-delete / pMax / sepsets
+```
+
+Gate:
+
+```text
+Rscript fastkpc/tests/test_skeleton_native_dcov0_one_call.R
+```
+
+Coverage:
+
+```text
+real-valued data
+max_conditioning_size = 0
+native exact dCov p-value generation
+adjacency identical to R exact-dCov p-value replay
+n.edgetests identical to R exact-dCov p-value replay
+pMax max abs diff < 1e-10
+at least one deletion
+ignored post-delete task rows
+```
+
+Decision:
+
+```text
+This is the first one-call native skeleton checkpoint that generates CI
+p-values from data without an R provider callback. It covers only
+unconditional tests and uses the native exact dCov helper, not the
+legacy-compatible lowrank dcov.gamma backend. Therefore it is a host/data-plane
+integration checkpoint, not a promotion route for the final 351x48 compatible
+engine. The next boundaries must add conditional residual generation and then
+swap the exact dCov helper for the legacy-compatible C++/CUDA dcov.gamma data
+plane while preserving the same one-call native control flow.
+```
+
 ### CUDA responsibilities
 
 ```text
