@@ -11,7 +11,7 @@ levels <- artifact$levels
 
 required_task_fields <- c(
   "canonical_test_order_id", "level", "task_index", "edge_x", "edge_y",
-  "x", "y", "S_key", "p_used", "native_edge_deleted",
+  "x", "y", "S_key", "conditioning_size", "p_used", "native_edge_deleted",
   "native_edge_ignored"
 )
 missing_task_fields <- setdiff(required_task_fields, names(tasks))
@@ -62,5 +62,16 @@ summary_md <- paste(readLines(artifact$paths$summary_md, warn = FALSE),
 assert_true(grepl("Skeleton P-Table Native Replay Parity", summary_md,
                   fixed = TRUE),
             "summary Markdown should name the p-table parity gate")
+
+assert_true(summary$p == 6L && summary$max_conditioning_size == 2L,
+            "p-table parity artifact should default to the deep replay gate")
+assert_true(max(tasks$conditioning_size) >= 2L,
+            "deep p-table artifact should include |S|=2 tasks")
+assert_true(any(tasks$level == 2L & tasks$native_edge_deleted),
+            "deep p-table artifact should include a level-2 deletion")
+assert_true(any(tasks$level == 2L & tasks$native_edge_ignored),
+            "deep p-table artifact should include level-2 ignored tasks")
+assert_true(any(levels$level == 2L & levels$tasks_ignored_after_delete > 0L),
+            "deep p-table levels should record level-2 ignored tasks")
 
 cat("PASS skeleton p-table parity artifact\n")

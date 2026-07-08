@@ -2539,6 +2539,47 @@ sepset writeback
 return diagnostics
 ```
 
+### Native p-table replay checkpoint
+
+The first C++ host boundary already has a native p-value table replay artifact:
+
+```text
+fastkpc/artifacts/skeleton_ptable_parity
+```
+
+Status:
+
+```text
+status: targeted host replay parity gate, not a full skeleton engine
+scope:
+  synthetic p-table CI values
+  native C++ replay of canonical task rows
+  R reference replay over the same task table
+
+coverage:
+  default p=6, max_conditioning_size=2 scenario
+  explicit conditioning_size task column
+  level-2 deletion
+  level-2 post-delete ignored task rows
+
+gate:
+  adjacency_identical = TRUE
+  sepsets_identical = TRUE
+  n.edgetests identical = TRUE
+  pMax max abs diff < 1e-12
+```
+
+Decision:
+
+```text
+This proves the native host replay primitive can preserve canonical deletion,
+sepset, pMax, n.edgetests, and ignored-after-delete semantics beyond the
+small |S|=1 smoke case. It is a useful boundary for the future one-call
+compatible CUDA skeleton, but it is not yet the full C++/CUDA skeleton engine:
+CI task generation, residual batching, dCov batching, and full 351x48 execution
+still have to move behind the native entrypoint before Phase 5 can be promoted.
+```
+
 ### CUDA responsibilities
 
 ```text

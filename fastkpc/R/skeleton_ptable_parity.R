@@ -29,6 +29,10 @@ fastkpc_ptable_p_for_task <- function(task, alpha) {
       length(task$S) == 1L && task$S[[1L]] %in% c(1L, 3L)) {
     return(alpha * 1.1)
   }
+  if (task$edge_x == 5L && task$edge_y == 6L &&
+      identical(sort(as.integer(task$S)), c(1L, 2L))) {
+    return(alpha * 1.3)
+  }
   alpha / (3 + task$task_id)
 }
 
@@ -165,9 +169,9 @@ fastkpc_ptable_state <- function(p) {
 
 fastkpc_run_skeleton_ptable_parity <- function(
     output_dir = file.path("fastkpc", "artifacts", "skeleton_ptable_parity"),
-    p = 4L,
+    p = 6L,
     alpha = 0.05,
-    max_conditioning_size = 1L) {
+    max_conditioning_size = 2L) {
   p <- as.integer(p)
   alpha <- as.numeric(alpha)
   max_conditioning_size <- as.integer(max_conditioning_size)
@@ -240,6 +244,7 @@ fastkpc_run_skeleton_ptable_parity <- function(
           x = as.integer(task$x),
           y = as.integer(task$y),
           S_key = task$S_key,
+          conditioning_size = as.integer(length(task$S)),
           p_used = as.numeric(p_values[[i]]),
           native_edge_deleted =
             i %in% as.integer(native$deleted_task_index %||% integer()),
