@@ -4612,7 +4612,13 @@ fastkpc_legacy_dcov_backend <- function() {
 fastkpc_legacy_dcov_cpp_batch_mode <- function() {
   raw <- tolower(Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH",
                             unset = ""))
-  if (raw %in% c("chunk", "worker_chunk", "worker-chunk")) "chunk" else ""
+  if (raw %in% c("chunk", "worker_chunk", "worker-chunk")) {
+    "chunk"
+  } else if (raw %in% c("round", "level_round", "level-round")) {
+    "round"
+  } else {
+    ""
+  }
 }
 
 fastkpc_legacy_prepare_dcov_cpp <- function(enabled) {
@@ -4902,6 +4908,7 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     ""
   }
   dcov_cpp_batch_chunk_requested <- identical(dcov_cpp_batch_mode, "chunk")
+  dcov_cpp_batch_round_requested <- identical(dcov_cpp_batch_mode, "round")
   dcov_cpp_shadow_enabled <- identical(ic.method, "dcc.gamma") &&
     identical(dcov_backend, "r") &&
     fastkpc_legacy_dcov_cpp_shadow_enabled()
@@ -5396,7 +5403,7 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           )
         }
 
-        if (isTRUE(dcov_cpp_batch_chunk_enabled)) {
+        if (isTRUE(dcov_cpp_batch_active_enabled)) {
           prepared <- lapply(current_tests, prepare_legacy_ci_dcov_cpp_input)
           valid <- vapply(prepared, function(item) isTRUE(item$ok), logical(1L))
           p_values <- rep(NA_real_, length(current_tests))
@@ -5458,11 +5465,28 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     dcov_cpp_batch_chunk_enabled <- isTRUE(dcov_cpp_batch_chunk_requested) &&
       identical(dcov_backend, "cpp") &&
       isTRUE(affinity_enabled)
+    dcov_cpp_batch_round_enabled <- isTRUE(dcov_cpp_batch_round_requested) &&
+      identical(dcov_backend, "cpp") &&
+      ord > 0L
+    dcov_cpp_batch_active_enabled <- isTRUE(dcov_cpp_batch_chunk_enabled) ||
+      isTRUE(dcov_cpp_batch_round_enabled)
     affinity_metrics <- fastkpc_legacy_runtime_zero()
     affinity_worker_by_edge <- integer()
     affinity_group_by_edge <- character()
     affinity_split_group_keys <- character()
-    res <- if (isTRUE(affinity_enabled)) {
+    affinity_scheduled <- FALSE
+    same_s_setup_chunk_enabled <- FALSE
+    res <- if (isTRUE(dcov_cpp_batch_round_enabled)) {
+      round_batch <- edge_test_chunk_same_s(edge_indices)
+      affinity_metrics <- fastkpc_legacy_runtime_add(
+        affinity_metrics, round_batch$metrics
+      )
+      round_batch$results[order(vapply(
+        round_batch$results, function(item) as.integer(item[[1L]]),
+        integer(1L)
+      ))]
+    } else if (isTRUE(affinity_enabled)) {
+      affinity_scheduled <- TRUE
       affinity_schedule_start <- proc.time()[["elapsed"]]
       edge_s_key_for_xy <- function(x, y) {
         nbrsBool <- G_l[[x]]
@@ -5765,7 +5789,7 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
             as.integer(edge_metrics$fake_level0_test_count)
         ))
       if (length(edge_metrics$mgcv_residual_keys) > 0L) {
-        if (isTRUE(affinity_enabled)) {
+        if (isTRUE(affinity_scheduled)) {
           worker_id <- affinity_worker_by_edge[[as.character(i)]]
           if (length(worker_id) == 1L && !is.na(worker_id) &&
               worker_id > 0L) {
@@ -5836,7 +5860,7 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
       metrics_level$mgcv_residual_cache_theoretical_hit_count -
         metrics_level$mgcv_residual_cache_realized_hit_count
     ))
-    if (isTRUE(affinity_enabled)) {
+    if (isTRUE(affinity_scheduled)) {
       metrics_level$mgcv_residual_cache_lost_cross_worker_count <-
         fastkpc_legacy_mgcv_residual_key_worker_loss(
           mgcv_residual_keys_by_worker

@@ -215,9 +215,12 @@ Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH")
 chunk_baseline <- run_compatible()
 Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH = "chunk")
 chunk_batch <- run_compatible()
+Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH = "round")
+round_batch <- run_compatible()
 chunk_baseline_summary <-
   chunk_baseline$skeleton$scheduler_diagnostics$summary
 chunk_batch_summary <- chunk_batch$skeleton$scheduler_diagnostics$summary
+round_batch_summary <- round_batch$skeleton$scheduler_diagnostics$summary
 
 assert_true(identical(chunk_batch$skeleton$adjacency,
                       chunk_baseline$skeleton$adjacency),
@@ -225,6 +228,12 @@ assert_true(identical(chunk_batch$skeleton$adjacency,
 assert_true(identical(chunk_batch$skeleton$n.edgetests,
                       chunk_baseline$skeleton$n.edgetests),
             "chunk-batched dCov C++ backend should preserve n.edgetests")
+assert_true(identical(round_batch$skeleton$adjacency,
+                      chunk_baseline$skeleton$adjacency),
+            "round-batched dCov C++ backend should preserve adjacency")
+assert_true(identical(round_batch$skeleton$n.edgetests,
+                      chunk_baseline$skeleton$n.edgetests),
+            "round-batched dCov C++ backend should preserve n.edgetests")
 batch_backend_fields <- c(
   "legacy_dcov_cpp_batch_backend_enabled",
   "legacy_dcov_cpp_batch_backend_count",
@@ -262,6 +271,33 @@ assert_true(identical(
   as.integer(chunk_batch_summary$legacy_dcov_cpp_backend_count),
   as.integer(chunk_batch_summary$legacy_dcov_gamma_count)),
   "chunk-batched C++ backend count should still match dCov call count")
+missing_round_batch_backend <- setdiff(batch_backend_fields,
+                                       names(round_batch_summary))
+assert_true(length(missing_round_batch_backend) == 0L,
+            paste("legacy dCov C++ backend summary missing round batch",
+                  missing_round_batch_backend[[1L]]))
+assert_true(isTRUE(round_batch_summary$legacy_dcov_cpp_batch_backend_enabled),
+            "round-batched dCov C++ backend should report enabled")
+assert_true(round_batch_summary$legacy_dcov_cpp_batch_backend_count > 0L,
+            "round-batched dCov C++ backend should report batch calls")
+assert_true(round_batch_summary$legacy_dcov_cpp_batch_backend_pair_count > 0L,
+            "round-batched dCov C++ backend should report batched pairs")
+assert_true(round_batch_summary$legacy_dcov_cpp_batch_backend_count <=
+              chunk_batch_summary$legacy_dcov_cpp_batch_backend_count,
+            "round-batched dCov should use no more batch calls than chunks")
+assert_true(round_batch_summary$legacy_dcov_cpp_batch_backend_mean_batch_size >=
+              chunk_batch_summary$legacy_dcov_cpp_batch_backend_mean_batch_size,
+            "round-batched dCov should improve mean batch size over chunks")
+assert_true(identical(
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_backend_error_count), 0L),
+  "round-batched dCov C++ backend should not report batch errors")
+assert_true(identical(
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_backend_fallback_count), 0L),
+  "round-batched dCov C++ backend should not fallback")
+assert_true(identical(
+  as.integer(round_batch_summary$legacy_dcov_cpp_backend_count),
+  as.integer(round_batch_summary$legacy_dcov_gamma_count)),
+  "round-batched C++ backend count should still match dCov call count")
 assert_true(!isTRUE(
   chunk_batch_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_enabled),
   "chunk-batched dCov should not enable mgcv same-S setup chunk provider")
