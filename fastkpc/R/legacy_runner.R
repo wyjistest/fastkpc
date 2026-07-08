@@ -432,6 +432,20 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_residual_owner_worker_cache_hit_median = 0,
     mgcv_residual_owner_worker_residual_ms_max = 0,
     mgcv_residual_owner_worker_residual_ms_median = 0,
+    mgcv_prefetch_enabled = 0L,
+    mgcv_prefetch_level_count = 0L,
+    mgcv_prefetch_key_count = 0L,
+    mgcv_prefetch_fit_count = 0L,
+    mgcv_prefetch_fit_ms = 0,
+    mgcv_prefetch_collect_ms = 0,
+    mgcv_prefetch_matrix_build_ms = 0,
+    mgcv_prefetch_payload_bytes = 0,
+    mgcv_prefetch_max_level_payload_bytes = 0,
+    mgcv_prefetch_lookup_ms = 0,
+    mgcv_prefetch_ci_phase_ms = 0,
+    mgcv_prefetch_error_count = 0L,
+    mgcv_prefetch_consumed_key_count = 0L,
+    mgcv_prefetch_unused_key_count = 0L,
     mgcv_key_build_ms = 0,
     mgcv_cache_lookup_ms = 0,
     mgcv_formula_build_ms = 0,
@@ -794,6 +808,48 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     mgcv_residual_owner_worker_residual_ms_median =
       max(as.numeric(a$mgcv_residual_owner_worker_residual_ms_median),
           as.numeric(b$mgcv_residual_owner_worker_residual_ms_median)),
+    mgcv_prefetch_enabled =
+      max(as.integer(a$mgcv_prefetch_enabled),
+          as.integer(b$mgcv_prefetch_enabled)),
+    mgcv_prefetch_level_count =
+      as.integer(a$mgcv_prefetch_level_count) +
+        as.integer(b$mgcv_prefetch_level_count),
+    mgcv_prefetch_key_count =
+      as.integer(a$mgcv_prefetch_key_count) +
+        as.integer(b$mgcv_prefetch_key_count),
+    mgcv_prefetch_fit_count =
+      as.integer(a$mgcv_prefetch_fit_count) +
+        as.integer(b$mgcv_prefetch_fit_count),
+    mgcv_prefetch_fit_ms =
+      as.numeric(a$mgcv_prefetch_fit_ms) +
+        as.numeric(b$mgcv_prefetch_fit_ms),
+    mgcv_prefetch_collect_ms =
+      as.numeric(a$mgcv_prefetch_collect_ms) +
+        as.numeric(b$mgcv_prefetch_collect_ms),
+    mgcv_prefetch_matrix_build_ms =
+      as.numeric(a$mgcv_prefetch_matrix_build_ms) +
+        as.numeric(b$mgcv_prefetch_matrix_build_ms),
+    mgcv_prefetch_payload_bytes =
+      as.numeric(a$mgcv_prefetch_payload_bytes) +
+        as.numeric(b$mgcv_prefetch_payload_bytes),
+    mgcv_prefetch_max_level_payload_bytes =
+      max(as.numeric(a$mgcv_prefetch_max_level_payload_bytes),
+          as.numeric(b$mgcv_prefetch_max_level_payload_bytes)),
+    mgcv_prefetch_lookup_ms =
+      as.numeric(a$mgcv_prefetch_lookup_ms) +
+        as.numeric(b$mgcv_prefetch_lookup_ms),
+    mgcv_prefetch_ci_phase_ms =
+      as.numeric(a$mgcv_prefetch_ci_phase_ms) +
+        as.numeric(b$mgcv_prefetch_ci_phase_ms),
+    mgcv_prefetch_error_count =
+      as.integer(a$mgcv_prefetch_error_count) +
+        as.integer(b$mgcv_prefetch_error_count),
+    mgcv_prefetch_consumed_key_count =
+      as.integer(a$mgcv_prefetch_consumed_key_count) +
+        as.integer(b$mgcv_prefetch_consumed_key_count),
+    mgcv_prefetch_unused_key_count =
+      as.integer(a$mgcv_prefetch_unused_key_count) +
+        as.integer(b$mgcv_prefetch_unused_key_count),
     mgcv_key_build_ms =
       as.numeric(a$mgcv_key_build_ms) + as.numeric(b$mgcv_key_build_ms),
     mgcv_cache_lookup_ms =
@@ -937,6 +993,20 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       mgcv_residual_owner_worker_cache_hit_median = numeric(),
       mgcv_residual_owner_worker_residual_ms_max = numeric(),
       mgcv_residual_owner_worker_residual_ms_median = numeric(),
+      mgcv_prefetch_enabled = integer(),
+      mgcv_prefetch_level_count = integer(),
+      mgcv_prefetch_key_count = integer(),
+      mgcv_prefetch_fit_count = integer(),
+      mgcv_prefetch_fit_ms = numeric(),
+      mgcv_prefetch_collect_ms = numeric(),
+      mgcv_prefetch_matrix_build_ms = numeric(),
+      mgcv_prefetch_payload_bytes = numeric(),
+      mgcv_prefetch_max_level_payload_bytes = numeric(),
+      mgcv_prefetch_lookup_ms = numeric(),
+      mgcv_prefetch_ci_phase_ms = numeric(),
+      mgcv_prefetch_error_count = integer(),
+      mgcv_prefetch_consumed_key_count = integer(),
+      mgcv_prefetch_unused_key_count = integer(),
       mgcv_key_build_ms = numeric(), mgcv_cache_lookup_ms = numeric(),
       mgcv_formula_build_ms = numeric(), mgcv_data_subset_ms = numeric(),
       mgcv_fit_call_ms = numeric(), mgcv_residual_extract_ms = numeric(),
@@ -1134,6 +1204,32 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.numeric(metrics$mgcv_residual_owner_worker_residual_ms_max),
       mgcv_residual_owner_worker_residual_ms_median =
         as.numeric(metrics$mgcv_residual_owner_worker_residual_ms_median),
+      mgcv_prefetch_enabled = as.integer(metrics$mgcv_prefetch_enabled),
+      mgcv_prefetch_level_count =
+        as.integer(metrics$mgcv_prefetch_level_count),
+      mgcv_prefetch_key_count =
+        as.integer(metrics$mgcv_prefetch_key_count),
+      mgcv_prefetch_fit_count =
+        as.integer(metrics$mgcv_prefetch_fit_count),
+      mgcv_prefetch_fit_ms = as.numeric(metrics$mgcv_prefetch_fit_ms),
+      mgcv_prefetch_collect_ms =
+        as.numeric(metrics$mgcv_prefetch_collect_ms),
+      mgcv_prefetch_matrix_build_ms =
+        as.numeric(metrics$mgcv_prefetch_matrix_build_ms),
+      mgcv_prefetch_payload_bytes =
+        as.numeric(metrics$mgcv_prefetch_payload_bytes),
+      mgcv_prefetch_max_level_payload_bytes =
+        as.numeric(metrics$mgcv_prefetch_max_level_payload_bytes),
+      mgcv_prefetch_lookup_ms =
+        as.numeric(metrics$mgcv_prefetch_lookup_ms),
+      mgcv_prefetch_ci_phase_ms =
+        as.numeric(metrics$mgcv_prefetch_ci_phase_ms),
+      mgcv_prefetch_error_count =
+        as.integer(metrics$mgcv_prefetch_error_count),
+      mgcv_prefetch_consumed_key_count =
+        as.integer(metrics$mgcv_prefetch_consumed_key_count),
+      mgcv_prefetch_unused_key_count =
+        as.integer(metrics$mgcv_prefetch_unused_key_count),
       mgcv_key_build_ms = as.numeric(metrics$mgcv_key_build_ms),
       mgcv_cache_lookup_ms = as.numeric(metrics$mgcv_cache_lookup_ms),
       mgcv_formula_build_ms = as.numeric(metrics$mgcv_formula_build_ms),
@@ -1206,6 +1302,49 @@ fastkpc_legacy_mgcv_prefetch_potential_frame <- function(runtime_by_level, n) {
   )
 }
 
+fastkpc_legacy_mgcv_prefetch_runtime_frame <- function(runtime_by_level) {
+  if (!is.data.frame(runtime_by_level) || nrow(runtime_by_level) == 0L) {
+    return(data.frame(
+      level = integer(),
+      task_count = integer(),
+      residual_request_count = integer(),
+      unique_key_count = integer(),
+      fit_count = integer(),
+      payload_bytes = numeric(),
+      prefetch_fit_ms = numeric(),
+      prefetch_collect_ms = numeric(),
+      matrix_build_ms = numeric(),
+      ci_phase_ms = numeric(),
+      elapsed_ms = numeric()
+    ))
+  }
+  column_or_zero <- function(name) {
+    if (name %in% names(runtime_by_level)) {
+      runtime_by_level[[name]]
+    } else {
+      rep(0L, nrow(runtime_by_level))
+    }
+  }
+  data.frame(
+    level = as.integer(column_or_zero("level")),
+    task_count = as.integer(column_or_zero("recorded_tests")),
+    residual_request_count =
+      as.integer(column_or_zero("mgcv_residual_request_count")),
+    unique_key_count = as.integer(column_or_zero("mgcv_prefetch_key_count")),
+    fit_count = as.integer(column_or_zero("mgcv_prefetch_fit_count")),
+    payload_bytes = as.numeric(column_or_zero("mgcv_prefetch_payload_bytes")),
+    prefetch_fit_ms = as.numeric(column_or_zero("mgcv_prefetch_fit_ms")),
+    prefetch_collect_ms =
+      as.numeric(column_or_zero("mgcv_prefetch_collect_ms")),
+    matrix_build_ms =
+      as.numeric(column_or_zero("mgcv_prefetch_matrix_build_ms")),
+    ci_phase_ms = as.numeric(column_or_zero("mgcv_prefetch_ci_phase_ms")),
+    elapsed_ms = as.numeric(column_or_zero("mgcv_prefetch_collect_ms")) +
+      as.numeric(column_or_zero("mgcv_prefetch_matrix_build_ms")) +
+      as.numeric(column_or_zero("mgcv_prefetch_ci_phase_ms"))
+  )
+}
+
 fastkpc_legacy_runtime_add_dcov <- function(metrics, diagnostics) {
   metrics$dcov_gamma_ms <- metrics$dcov_gamma_ms +
     as.numeric(diagnostics$total_ms)
@@ -1246,6 +1385,161 @@ fastkpc_legacy_mgcv_residual_cache_enabled <- function() {
 
 fastkpc_legacy_mgcv_residual_affinity_mode <- function() {
   tolower(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY", unset = ""))
+}
+
+fastkpc_legacy_mgcv_residual_prefetch_mode <- function() {
+  tolower(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_PREFETCH", unset = ""))
+}
+
+fastkpc_legacy_mgcv_parse_residual_key <- function(key) {
+  key <- as.character(key)
+  target <- as.integer(sub(":.*$", "", key))
+  s_key <- sub("^[^:]*:", "", key)
+  S <- if (nzchar(s_key)) {
+    as.integer(strsplit(s_key, "|", fixed = TRUE)[[1L]])
+  } else {
+    integer()
+  }
+  list(target = target, S = S)
+}
+
+fastkpc_legacy_mgcv_empty_prefetch_cache <- function(n) {
+  list(
+    residuals = matrix(numeric(), nrow = as.integer(n), ncol = 0L),
+    key_index = new.env(parent = emptyenv()),
+    keys = character()
+  )
+}
+
+fastkpc_legacy_mgcv_residual_prefetch_level <- function(keys, data, env,
+                                                        workers) {
+  metrics <- fastkpc_legacy_runtime_zero()
+  metrics$mgcv_prefetch_enabled <- 1L
+  metrics$mgcv_prefetch_level_count <- 1L
+  keys <- unique(as.character(keys))
+  keys <- keys[nzchar(keys)]
+  key_count <- length(keys)
+  n <- nrow(data)
+  metrics$mgcv_prefetch_key_count <- as.integer(key_count)
+  metrics$mgcv_prefetch_payload_bytes <- as.numeric(n) *
+    as.numeric(key_count) * 8
+  metrics$mgcv_prefetch_max_level_payload_bytes <-
+    metrics$mgcv_prefetch_payload_bytes
+  if (key_count == 0L) {
+    return(list(
+      cache = fastkpc_legacy_mgcv_empty_prefetch_cache(n),
+      metrics = metrics
+    ))
+  }
+
+  workers <- max(1L, min(as.integer(workers), key_count))
+  worker_id <- rep(seq_len(workers), length.out = key_count)
+  key_chunks <- split(keys, worker_id)
+  compute_chunk <- function(chunk_keys) {
+    chunk_metrics <- fastkpc_legacy_runtime_zero()
+    chunk_matrix <- matrix(NA_real_, nrow = n, ncol = length(chunk_keys))
+    success <- rep(FALSE, length(chunk_keys))
+    for (idx in seq_along(chunk_keys)) {
+      parsed <- fastkpc_legacy_mgcv_parse_residual_key(chunk_keys[[idx]])
+      data_subset_start <- proc.time()[["elapsed"]]
+      x_data <- data[, parsed$target, drop = FALSE]
+      s_data <- data[, parsed$S, drop = FALSE]
+      chunk_metrics$mgcv_data_subset_ms <-
+        chunk_metrics$mgcv_data_subset_ms +
+          (proc.time()[["elapsed"]] - data_subset_start) * 1000
+
+      fit_start <- proc.time()[["elapsed"]]
+      fit <- tryCatch(
+        env$regrXonS(x_data, s_data),
+        error = function(e) structure(
+          list(message = conditionMessage(e)),
+          class = "fastkpc_mgcv_prefetch_error"
+        )
+      )
+      fit_elapsed <- (proc.time()[["elapsed"]] - fit_start) * 1000
+      chunk_metrics$mgcv_prefetch_fit_ms <-
+        chunk_metrics$mgcv_prefetch_fit_ms + fit_elapsed
+      chunk_metrics$mgcv_fit_call_ms <-
+        chunk_metrics$mgcv_fit_call_ms + fit_elapsed
+      if (inherits(fit, "fastkpc_mgcv_prefetch_error")) {
+        chunk_metrics$mgcv_prefetch_error_count <-
+          chunk_metrics$mgcv_prefetch_error_count + 1L
+        next
+      }
+
+      extract_start <- proc.time()[["elapsed"]]
+      chunk_matrix[, idx] <- as.numeric(fit[, 1L])
+      chunk_metrics$mgcv_residual_extract_ms <-
+        chunk_metrics$mgcv_residual_extract_ms +
+          (proc.time()[["elapsed"]] - extract_start) * 1000
+      chunk_metrics$mgcv_prefetch_fit_count <-
+        chunk_metrics$mgcv_prefetch_fit_count + 1L
+      chunk_metrics$mgcv_fit_count <- chunk_metrics$mgcv_fit_count + 1L
+      chunk_metrics$mgcv_residual_cache_insert_count <-
+        chunk_metrics$mgcv_residual_cache_insert_count + 1L
+      chunk_metrics$mgcv_residual_cache_entries <-
+        chunk_metrics$mgcv_residual_cache_entries + 1L
+      success[[idx]] <- TRUE
+    }
+    list(
+      keys = chunk_keys[success],
+      residuals = chunk_matrix[, success, drop = FALSE],
+      metrics = chunk_metrics
+    )
+  }
+
+  collect_start <- proc.time()[["elapsed"]]
+  chunks <- if (.Platform$OS.type == "unix" && workers > 1L) {
+    parallel::mclapply(
+      key_chunks, compute_chunk, mc.cores = workers, mc.set.seed = FALSE,
+      mc.cleanup = TRUE, mc.allow.recursive = FALSE, mc.preschedule = TRUE
+    )
+  } else {
+    lapply(key_chunks, compute_chunk)
+  }
+  metrics$mgcv_prefetch_collect_ms <-
+    (proc.time()[["elapsed"]] - collect_start) * 1000
+
+  for (chunk in chunks) {
+    metrics <- fastkpc_legacy_runtime_add(metrics, chunk$metrics)
+  }
+
+  matrix_start <- proc.time()[["elapsed"]]
+  success_keys <- unlist(lapply(chunks, `[[`, "keys"), use.names = FALSE)
+  residual_chunks <- lapply(chunks, `[[`, "residuals")
+  residual_chunks <- residual_chunks[vapply(
+    residual_chunks, ncol, integer(1L)
+  ) > 0L]
+  residuals <- if (length(residual_chunks) > 0L) {
+    do.call(cbind, residual_chunks)
+  } else {
+    matrix(numeric(), nrow = n, ncol = 0L)
+  }
+  key_index <- new.env(parent = emptyenv())
+  if (length(success_keys) > 0L) {
+    for (idx in seq_along(success_keys)) {
+      assign(success_keys[[idx]], as.integer(idx), envir = key_index)
+    }
+  }
+  metrics$mgcv_prefetch_matrix_build_ms <-
+    (proc.time()[["elapsed"]] - matrix_start) * 1000
+  metrics$mgcv_prefetch_payload_bytes <- as.numeric(n) *
+    as.numeric(ncol(residuals)) * 8
+  metrics$mgcv_prefetch_max_level_payload_bytes <-
+    metrics$mgcv_prefetch_payload_bytes
+  metrics$mgcv_prefetch_key_count <- as.integer(ncol(residuals))
+  metrics$residual_ms <- metrics$mgcv_data_subset_ms +
+    metrics$mgcv_fit_call_ms + metrics$mgcv_residual_extract_ms +
+    metrics$mgcv_prefetch_matrix_build_ms
+
+  list(
+    cache = list(
+      residuals = residuals,
+      key_index = key_index,
+      keys = success_keys
+    ),
+    metrics = metrics
+  )
 }
 
 fastkpc_legacy_mgcv_residual_affinity_chunks <- function(edge_indices,
@@ -1533,7 +1827,8 @@ fastkpc_legacy_mgcv_residual_owner_chunks <- function(edge_indices,
 }
 
 fastkpc_legacy_run_mgcv_residual_pair <- function(
-    metrics, data, x, y, S, env, cache_env = NULL, cache_enabled = FALSE) {
+    metrics, data, x, y, S, env, cache_env = NULL, cache_enabled = FALSE,
+    prefetch_cache = NULL, prefetch_enabled = FALSE) {
   residual_start <- proc.time()[["elapsed"]]
   S_int <- as.integer(S)
 
@@ -1558,6 +1853,55 @@ fastkpc_legacy_run_mgcv_residual_pair <- function(
   metrics$mgcv_key_build_ms <-
     metrics$mgcv_key_build_ms +
       (proc.time()[["elapsed"]] - key_start) * 1000
+
+  if (isTRUE(prefetch_enabled) && !is.null(prefetch_cache) &&
+      !is.null(prefetch_cache$key_index) && !is.null(prefetch_cache$residuals)) {
+    lookup_start <- proc.time()[["elapsed"]]
+    col_idx <- vapply(target_keys, function(key) {
+      if (exists(key, envir = prefetch_cache$key_index, inherits = FALSE)) {
+        as.integer(get(key, envir = prefetch_cache$key_index, inherits = FALSE))
+      } else {
+        NA_integer_
+      }
+    }, integer(1L))
+    lookup_elapsed <- (proc.time()[["elapsed"]] - lookup_start) * 1000
+    metrics$mgcv_cache_lookup_ms <- metrics$mgcv_cache_lookup_ms +
+      lookup_elapsed
+    metrics$mgcv_prefetch_lookup_ms <- metrics$mgcv_prefetch_lookup_ms +
+      lookup_elapsed
+
+    if (all(!is.na(col_idx))) {
+      extract_start <- proc.time()[["elapsed"]]
+      residuals <- cbind(
+        prefetch_cache$residuals[, col_idx[[1L]]],
+        prefetch_cache$residuals[, col_idx[[2L]]]
+      )
+      extract_elapsed <- (proc.time()[["elapsed"]] - extract_start) * 1000
+      metrics$mgcv_residual_extract_ms <-
+        metrics$mgcv_residual_extract_ms + extract_elapsed
+      metrics$mgcv_prefetch_ci_phase_ms <-
+        metrics$mgcv_prefetch_ci_phase_ms + lookup_elapsed + extract_elapsed
+      metrics$mgcv_cache_hit_count <- metrics$mgcv_cache_hit_count + 2L
+      metrics$mgcv_fit_avoided_count <- metrics$mgcv_fit_avoided_count + 2L
+      metrics$mgcv_residual_cache_hit_ms <-
+        metrics$mgcv_residual_cache_hit_ms + lookup_elapsed
+      metrics$residual_ms <- (proc.time()[["elapsed"]] - residual_start) * 1000
+      metrics$mgcv_unaccounted_ms <- max(
+        0,
+        metrics$residual_ms - metrics$mgcv_key_build_ms -
+          metrics$mgcv_cache_lookup_ms -
+          metrics$mgcv_formula_build_ms -
+          metrics$mgcv_data_subset_ms -
+          metrics$mgcv_fit_call_ms -
+          metrics$mgcv_residual_extract_ms -
+          metrics$mgcv_result_store_ms -
+          metrics$mgcv_residual_cache_store_ms
+      )
+      return(list(residuals = residuals, metrics = metrics))
+    }
+    metrics$mgcv_prefetch_error_count <-
+      metrics$mgcv_prefetch_error_count + sum(is.na(col_idx))
+  }
 
   if (!isTRUE(cache_enabled)) {
     data_subset_start <- proc.time()[["elapsed"]]
@@ -1900,6 +2244,15 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     fastkpc_legacy_mgcv_residual_cache_enabled()
   mgcv_residual_affinity_mode <-
     fastkpc_legacy_mgcv_residual_affinity_mode()
+  mgcv_residual_prefetch_mode <-
+    fastkpc_legacy_mgcv_residual_prefetch_mode()
+  mgcv_residual_prefetch_requested <- identical(
+    mgcv_residual_prefetch_mode, "level"
+  )
+  mgcv_residual_prefetch_enabled <- identical(ic.method, "dcc.gamma") &&
+    isTRUE(mgcv_residual_cache_enabled) &&
+    isTRUE(mgcv_residual_prefetch_requested) &&
+    identical(.Platform$OS.type, "unix")
 
   G <- matrix(TRUE, nrow = p, ncol = p)
   diag(G) <- FALSE
@@ -1916,6 +2269,8 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
                    numCol = numCol)
   total_start <- proc.time()[["elapsed"]]
   mgcv_residual_cache_env <- NULL
+  mgcv_residual_prefetch_cache <- NULL
+  mgcv_residual_prefetch_level_enabled <- FALSE
 
   run_legacy_ci <- function(x, y, S) {
     metrics <- fastkpc_legacy_runtime_zero()
@@ -1956,7 +2311,9 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           residual <- fastkpc_legacy_run_mgcv_residual_pair(
             metrics = metrics, data = data, x = x, y = y, S = S, env = env,
             cache_env = mgcv_residual_cache_env,
-            cache_enabled = mgcv_residual_cache_enabled
+            cache_enabled = mgcv_residual_cache_enabled,
+            prefetch_cache = mgcv_residual_prefetch_cache,
+            prefetch_enabled = mgcv_residual_prefetch_level_enabled
           )
           metrics <- residual$metrics
           residuals <- residual$residuals
@@ -2014,6 +2371,41 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
       new.env(parent = emptyenv())
     } else {
       NULL
+    }
+    edge_indices <- seq_len(remaining_edge_tests)
+    workers <- min(num_cores, length(edge_indices))
+    mgcv_residual_prefetch_cache <- NULL
+    mgcv_residual_prefetch_level_enabled <- FALSE
+    prefetch_metrics <- fastkpc_legacy_runtime_zero()
+    if (isTRUE(mgcv_residual_prefetch_enabled) && workers > 1L &&
+        ord > 0L) {
+      level_prefetch_keys_for_xy <- function(x, y) {
+        nbrsBool <- G_l[[x]]
+        nbrsBool[y] <- FALSE
+        nbrs <- seq_p[nbrsBool]
+        if (length(nbrs) < ord) return(character())
+        keys <- character()
+        for (S in fastkpc_legacy_combinations(nbrs, ord)) {
+          keys <- c(
+            keys,
+            fastkpc_legacy_mgcv_residual_key(x, S),
+            fastkpc_legacy_mgcv_residual_key(y, S)
+          )
+        }
+        keys
+      }
+      prefetch_keys <- unlist(lapply(edge_indices, function(i) {
+        x <- ind[i, 1L]
+        y <- ind[i, 2L]
+        c(level_prefetch_keys_for_xy(x, y),
+          level_prefetch_keys_for_xy(y, x))
+      }), use.names = FALSE)
+      prefetched <- fastkpc_legacy_mgcv_residual_prefetch_level(
+        prefetch_keys, data = data, env = env, workers = workers
+      )
+      mgcv_residual_prefetch_cache <- prefetched$cache
+      mgcv_residual_prefetch_level_enabled <- TRUE
+      prefetch_metrics <- prefetched$metrics
     }
 
     edge_test_xy <- function(x, y) {
@@ -2091,8 +2483,6 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
            done_i, metrics_i)
     }
 
-    edge_indices <- seq_len(remaining_edge_tests)
-    workers <- min(num_cores, length(edge_indices))
     affinity_enabled <- .Platform$OS.type == "unix" && workers > 1L &&
       ord > 0L && isTRUE(mgcv_residual_cache_enabled) &&
       mgcv_residual_affinity_mode %in% c("s", "target_s")
@@ -2314,6 +2704,9 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
 
     metrics_level <- fastkpc_legacy_runtime_zero()
     metrics_level <- fastkpc_legacy_runtime_add(
+      metrics_level, prefetch_metrics
+    )
+    metrics_level <- fastkpc_legacy_runtime_add(
       metrics_level, affinity_metrics
     )
     mgcv_residual_key_chunks <- list()
@@ -2374,7 +2767,23 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     if (length(mgcv_s_key_chunks) > 0L) {
       metrics_level$mgcv_s_keys <- unlist(mgcv_s_key_chunks, use.names = FALSE)
     }
+    prefetch_consumed_keys <- if (isTRUE(mgcv_residual_prefetch_level_enabled)) {
+      unique(metrics_level$mgcv_residual_keys)
+    } else {
+      character()
+    }
     metrics_level <- fastkpc_legacy_runtime_finalize_mgcv_keys(metrics_level)
+    if (isTRUE(mgcv_residual_prefetch_level_enabled)) {
+      prefetched_keys <- mgcv_residual_prefetch_cache$keys
+      consumed_prefetched_keys <- intersect(prefetch_consumed_keys,
+                                           prefetched_keys)
+      metrics_level$mgcv_prefetch_consumed_key_count <-
+        as.integer(length(consumed_prefetched_keys))
+      metrics_level$mgcv_prefetch_unused_key_count <- as.integer(max(
+        0L,
+        length(prefetched_keys) - length(consumed_prefetched_keys)
+      ))
+    }
     metrics_level$mgcv_residual_cache_theoretical_hit_count <-
       as.integer(metrics_level$mgcv_duplicate_residual_key_count)
     metrics_level$mgcv_residual_cache_realized_hit_count <-
@@ -2431,6 +2840,8 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
   runtime_by_level <- fastkpc_legacy_runtime_frame(level_metrics, n_edgetests)
   prefetch_potential_by_level <-
     fastkpc_legacy_mgcv_prefetch_potential_frame(runtime_by_level, nrow(data))
+  prefetch_runtime_by_level <-
+    fastkpc_legacy_mgcv_prefetch_runtime_frame(runtime_by_level)
   prefetch_sum <- function(name) {
     if (name %in% names(prefetch_potential_by_level)) {
       sum(prefetch_potential_by_level[[name]])
@@ -2500,6 +2911,7 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     scheduler_diagnostics = list(
       legacy_runtime_by_level = runtime_by_level,
       legacy_mgcv_prefetch_potential_by_level = prefetch_potential_by_level,
+      legacy_mgcv_prefetch_by_level = prefetch_runtime_by_level,
       summary = list(
         tasks_planned = as.integer(total_tests),
         tasks_evaluated = as.integer(total_tests),
@@ -2793,6 +3205,34 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.numeric(prefetch_max("residual_payload_bytes")),
         legacy_mgcv_level_prefetch_max_level_unique_keys =
           as.integer(prefetch_max("unique_target_s_count")),
+        legacy_mgcv_prefetch_enabled =
+          isTRUE(as.integer(runtime_total$mgcv_prefetch_enabled) > 0L),
+        legacy_mgcv_prefetch_level_count =
+          as.integer(runtime_total$mgcv_prefetch_level_count),
+        legacy_mgcv_prefetch_key_count =
+          as.integer(runtime_total$mgcv_prefetch_key_count),
+        legacy_mgcv_prefetch_fit_count =
+          as.integer(runtime_total$mgcv_prefetch_fit_count),
+        legacy_mgcv_prefetch_fit_ms =
+          as.numeric(runtime_total$mgcv_prefetch_fit_ms),
+        legacy_mgcv_prefetch_collect_ms =
+          as.numeric(runtime_total$mgcv_prefetch_collect_ms),
+        legacy_mgcv_prefetch_matrix_build_ms =
+          as.numeric(runtime_total$mgcv_prefetch_matrix_build_ms),
+        legacy_mgcv_prefetch_payload_bytes =
+          as.numeric(runtime_total$mgcv_prefetch_payload_bytes),
+        legacy_mgcv_prefetch_max_level_payload_bytes =
+          as.numeric(runtime_total$mgcv_prefetch_max_level_payload_bytes),
+        legacy_mgcv_prefetch_lookup_ms =
+          as.numeric(runtime_total$mgcv_prefetch_lookup_ms),
+        legacy_mgcv_prefetch_ci_phase_ms =
+          as.numeric(runtime_total$mgcv_prefetch_ci_phase_ms),
+        legacy_mgcv_prefetch_error_count =
+          as.integer(runtime_total$mgcv_prefetch_error_count),
+        legacy_mgcv_prefetch_consumed_key_count =
+          as.integer(runtime_total$mgcv_prefetch_consumed_key_count),
+        legacy_mgcv_prefetch_unused_key_count =
+          as.integer(runtime_total$mgcv_prefetch_unused_key_count),
         legacy_mgcv_key_build_ms =
           as.numeric(runtime_total$mgcv_key_build_ms),
         legacy_mgcv_cache_lookup_ms =
