@@ -1175,6 +1175,68 @@ fallback path inside the legacy scheduler. Canonical replay, adjacency, and
 without errors or mismatches. It is still a subset gate, not the full 351x48
 acceptance gate.
 
+Full 351x48 guarded residual shadow artifact:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_shadow_full_351x48_v1
+```
+
+Status:
+
+```text
+status: created
+mode: full legacy-parallel skeleton shadow, not authoritative
+data: real 351x48 fixture, all columns
+n / p: 351 / 48
+alpha: 0.1
+max_conditioning_size: 46
+num_cores: 20
+dCov backend: C++ Spectra
+residual cache: enabled
+residual affinity: s
+residual authority: legacy regrXonS / mgcv
+shadow solver: cpp_guarded
+native_s_size_limit: 2
+condition_threshold: 1e300
+
+adjacency_identical: TRUE
+n.edgetests_identical: TRUE
+baseline_n.edgetests: 2213,52659,125293,40694,13293,5422,835,80
+shadow_n.edgetests:   2213,52659,125293,40694,13293,5422,835,80
+baseline_edge_count: 110
+shadow_edge_count:   110
+
+residual_request_count: 476552
+mgcv_fit_count: 273284
+residual_cache_hit_count: 203268
+shadow_count: 273284
+native_count: 157122
+fallback_count: 116162
+high_condition_fallback_count: 0
+outside_envelope_fallback_count: 116162
+error_count: 0
+residual_mismatch_count: 0
+max_abs_diff: 6.223067e-10
+max_rel_l2: 4.174908e-10
+
+legacy_dcov_gamma_count: 239404
+legacy_dcov_cpp_backend_count: 239404
+legacy_dcov_cpp_backend_error_count: 0
+legacy_dcov_cpp_backend_fallback_count: 0
+legacy_dcov_cpp_lowrank_spectra_count: 478808
+legacy_dcov_cpp_lowrank_spectra_converged_count: 478808
+legacy_dcov_cpp_lowrank_spectra_failed_count: 0
+elapsed_ms: 1848722
+```
+
+This is the first full 351x48 legacy-compatible guarded residual shadow pass.
+The authoritative residuals still come from legacy `regrXonS` / mgcv, and the
+`cpp_guarded` residual path remains shadow-only. Within the current recommended
+compatible route, every worker-local mgcv cache miss was shadowed: `|S|<=2`
+targets used the native C++ fixed-sp solve, while `|S|>2` targets failed closed
+to mgcv fallback. Canonical replay, adjacency, `n.edgetests`, dCov backend
+selection, and Spectra convergence remained unchanged.
+
 #### Gate before production use
 
 ```text
@@ -1605,15 +1667,32 @@ error_count = 0
 residual_mismatch_count = 0
 status: deep real subset full-route shadow pass with |S|>2 fallback traffic;
 still not production
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_shadow_full_351x48_v1 exists
+real 351x48 fixture, full compatible skeleton shadow
+adjacency identical = TRUE
+n.edgetests identical = TRUE
+edge_count = 110
+273284 / 273284 cache-miss residual shadow targets matched
+native_count = 157122
+fallback_count = 116162
+outside_envelope_fallback_count = 116162
+error_count = 0
+residual_mismatch_count = 0
+dCov C++ backend count = 239404
+dCov C++ backend errors/fallbacks = 0 / 0
+Spectra converged/failed = 478808 / 0
+status: full 351x48 guarded residual shadow pass; still not production
 ```
 
 Next Phase 3 step:
 
 ```text
-run the guarded residual shadow on the full 351x48 compatible skeleton.
-Promotion requires canonical replay to remain unchanged and all shadow-supported
-residual targets to match without errors or decision drift. The route remains
-shadow-only until that gate passes.
+use the full 351x48 shadow pass to design the next guarded residual execution
+step. Do not promote cpp_guarded residuals as authoritative yet: production
+requires a separate env-gated backend/prototype with canonical replay unchanged,
+all supported residual targets matched without errors or decision drift, and a
+wall-time win over the current recommended compatible route.
 ```
 
 ### 8.4 Continue dCov backend improvement separately
