@@ -22,6 +22,18 @@ old_lowrank <- Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK",
                           unset = NA_character_)
 old_shadow <- Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SHADOW",
                          unset = NA_character_)
+old_batch <- Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH",
+                        unset = NA_character_)
+old_cache <- Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE",
+                        unset = NA_character_)
+old_affinity <- Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY",
+                           unset = NA_character_)
+old_mgcv_backend <- Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
+                               unset = NA_character_)
+old_same_s_setup <- Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP",
+                               unset = NA_character_)
+old_cores <- Sys.getenv("FASTKPC_LEGACY_PARALLEL_CORES",
+                        unset = NA_character_)
 restore_env <- function(name, value) {
   if (is.na(value)) {
     Sys.unsetenv(name)
@@ -33,6 +45,12 @@ on.exit({
   restore_env("FASTKPC_LEGACY_DCOV_GAMMA_BACKEND", old_backend)
   restore_env("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK", old_lowrank)
   restore_env("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SHADOW", old_shadow)
+  restore_env("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH", old_batch)
+  restore_env("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE", old_cache)
+  restore_env("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY", old_affinity)
+  restore_env("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND", old_mgcv_backend)
+  restore_env("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP", old_same_s_setup)
+  restore_env("FASTKPC_LEGACY_PARALLEL_CORES", old_cores)
 }, add = TRUE)
 
 set.seed(18127)
@@ -64,6 +82,11 @@ run_compatible <- function() {
 Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_BACKEND")
 Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK")
 Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SHADOW")
+Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP")
 baseline <- run_compatible()
 baseline_summary <- baseline$skeleton$scheduler_diagnostics$summary
 
@@ -78,6 +101,11 @@ assert_true(identical(
 Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_BACKEND = "cpp")
 Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra")
 Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SHADOW")
+Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP")
 cpp <- run_compatible()
 cpp_summary <- cpp$skeleton$scheduler_diagnostics$summary
 
@@ -144,5 +172,80 @@ assert_true(identical(
 assert_true(cpp_summary$legacy_dcov_cpp_batch_potential_reuse_ratio >= 0 &&
               cpp_summary$legacy_dcov_cpp_batch_potential_reuse_ratio < 1,
             "dCov batch potential reuse ratio should be in [0, 1)")
+
+Sys.setenv(
+  FASTKPC_LEGACY_DCOV_GAMMA_BACKEND = "cpp",
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra",
+  FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE = "1",
+  FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY = "s",
+  FASTKPC_LEGACY_PARALLEL_CORES = "2"
+)
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP")
+Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH")
+chunk_baseline <- run_compatible()
+Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH = "chunk")
+chunk_batch <- run_compatible()
+chunk_baseline_summary <-
+  chunk_baseline$skeleton$scheduler_diagnostics$summary
+chunk_batch_summary <- chunk_batch$skeleton$scheduler_diagnostics$summary
+
+assert_true(identical(chunk_batch$skeleton$adjacency,
+                      chunk_baseline$skeleton$adjacency),
+            "chunk-batched dCov C++ backend should preserve adjacency")
+assert_true(identical(chunk_batch$skeleton$n.edgetests,
+                      chunk_baseline$skeleton$n.edgetests),
+            "chunk-batched dCov C++ backend should preserve n.edgetests")
+batch_backend_fields <- c(
+  "legacy_dcov_cpp_batch_backend_enabled",
+  "legacy_dcov_cpp_batch_backend_count",
+  "legacy_dcov_cpp_batch_backend_pair_count",
+  "legacy_dcov_cpp_batch_backend_ms",
+  "legacy_dcov_cpp_batch_backend_error_count",
+  "legacy_dcov_cpp_batch_backend_fallback_count",
+  "legacy_dcov_cpp_batch_backend_max_batch_size",
+  "legacy_dcov_cpp_batch_backend_mean_batch_size"
+)
+missing_batch_backend <- setdiff(batch_backend_fields,
+                                 names(chunk_batch_summary))
+assert_true(length(missing_batch_backend) == 0L,
+            paste("legacy dCov C++ backend summary missing chunk batch",
+                  missing_batch_backend[[1L]]))
+assert_true(isTRUE(chunk_batch_summary$legacy_dcov_cpp_batch_backend_enabled),
+            "chunk-batched dCov C++ backend should report enabled")
+assert_true(chunk_batch_summary$legacy_dcov_cpp_batch_backend_count > 0L,
+            "chunk-batched dCov C++ backend should report batch calls")
+assert_true(chunk_batch_summary$legacy_dcov_cpp_batch_backend_pair_count > 0L,
+            "chunk-batched dCov C++ backend should report batched pairs")
+assert_true(chunk_batch_summary$legacy_dcov_cpp_batch_backend_pair_count <=
+              chunk_batch_summary$legacy_dcov_cpp_backend_count,
+            "chunk-batched pair count should be covered by backend count")
+assert_true(chunk_batch_summary$legacy_dcov_cpp_batch_backend_max_batch_size >=
+              chunk_batch_summary$legacy_dcov_cpp_batch_backend_mean_batch_size,
+            "chunk-batched max batch size should dominate mean")
+assert_true(identical(
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_backend_error_count), 0L),
+  "chunk-batched dCov C++ backend should not report batch errors")
+assert_true(identical(
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_backend_fallback_count), 0L),
+  "chunk-batched dCov C++ backend should not fallback")
+assert_true(identical(
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_backend_count),
+  as.integer(chunk_batch_summary$legacy_dcov_gamma_count)),
+  "chunk-batched C++ backend count should still match dCov call count")
+assert_true(!isTRUE(
+  chunk_batch_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_enabled),
+  "chunk-batched dCov should not enable mgcv same-S setup chunk provider")
+assert_true(identical(
+  as.integer(
+    chunk_batch_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_count %||%
+      0L
+  ),
+  0L),
+  "chunk-batched dCov should not run mgcv same-S setup chunk provider")
+assert_true(identical(
+  as.integer(chunk_baseline_summary$legacy_dcov_cpp_batch_backend_count %||% 0L),
+  0L),
+  "chunk batching should be env-gated")
 
 cat("PASS precision compatible legacy dCov C++ backend\n")

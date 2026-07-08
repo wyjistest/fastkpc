@@ -541,6 +541,57 @@ status:
   skeleton does not yet route level-local dCov tasks through the batch export.
 ```
 
+Env-gated scheduler integration checkpoint:
+
+```bash
+FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=chunk
+```
+
+Status:
+
+```text
+status: implemented as an env-gated worker-chunk prototype, not default
+scope:
+  compatible legacy dcc.gamma route
+  C++ legacy dCov backend only
+  affinity worker chunks on conditional levels
+
+behavior:
+  each worker chunk advances the existing edge-local CI state machine
+  only currently reached CI tests are evaluated
+  residual generation remains legacy mgcv/regrXonS or the selected residual
+    backend for that route
+  reached dCov tests in the current chunk round are sent through the native
+    C++ batch oracle
+  p-values are replayed back into the unchanged edge state machine
+  parent level replay remains canonical by edge index
+
+diagnostics:
+  legacy_dcov_cpp_batch_backend_enabled
+  legacy_dcov_cpp_batch_backend_count
+  legacy_dcov_cpp_batch_backend_pair_count
+  legacy_dcov_cpp_batch_backend_ms
+  legacy_dcov_cpp_batch_backend_error_count
+  legacy_dcov_cpp_batch_backend_fallback_count
+  legacy_dcov_cpp_batch_backend_max_batch_size
+  legacy_dcov_cpp_batch_backend_mean_batch_size
+
+targeted gate:
+  Rscript fastkpc/tests/test_precision_compatible_legacy_dcov_cpp_backend.R
+  Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_batch_oracle.R
+  Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_oracle.R
+  Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_spectra_oracle.R
+  Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_shadow_route.R
+  Rscript fastkpc/tests/test_precision_compatible_legacy_parallel_runtime_breakdown.R
+
+status:
+  The targeted gate proves the env-gated chunk batch path preserves adjacency
+  and n.edgetests on the tested compatible skeleton while reporting batch
+  counters and zero batch errors/fallbacks. This is still not a promoted route.
+  The next gate is a full 351x48 artifact against the current recommended
+  S-affinity baseline.
+```
+
 #### Artifact
 
 ```text

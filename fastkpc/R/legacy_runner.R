@@ -375,6 +375,14 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_cpp_batch_potential_mean_group_size = 0,
     dcov_cpp_batch_potential_reuse_opportunity_count = 0L,
     dcov_cpp_batch_potential_reuse_ratio = 0,
+    dcov_cpp_batch_backend_enabled = 0L,
+    dcov_cpp_batch_backend_count = 0L,
+    dcov_cpp_batch_backend_pair_count = 0L,
+    dcov_cpp_batch_backend_ms = 0,
+    dcov_cpp_batch_backend_error_count = 0L,
+    dcov_cpp_batch_backend_fallback_count = 0L,
+    dcov_cpp_batch_backend_max_batch_size = 0L,
+    dcov_cpp_batch_backend_mean_batch_size = 0,
     mgcv_residual_request_count = 0L,
     mgcv_cache_hit_count = 0L,
     mgcv_cache_miss_count = 0L,
@@ -756,6 +764,40 @@ fastkpc_legacy_runtime_add <- function(a, b) {
         (as.integer(a$dcov_cpp_batch_potential_reuse_opportunity_count) +
            as.integer(b$dcov_cpp_batch_potential_reuse_opportunity_count)) /
           total_calls
+      } else {
+        0
+      }
+    },
+    dcov_cpp_batch_backend_enabled =
+      max(as.integer(a$dcov_cpp_batch_backend_enabled),
+          as.integer(b$dcov_cpp_batch_backend_enabled)),
+    dcov_cpp_batch_backend_count =
+      as.integer(a$dcov_cpp_batch_backend_count) +
+        as.integer(b$dcov_cpp_batch_backend_count),
+    dcov_cpp_batch_backend_pair_count =
+      as.integer(a$dcov_cpp_batch_backend_pair_count) +
+        as.integer(b$dcov_cpp_batch_backend_pair_count),
+    dcov_cpp_batch_backend_ms =
+      as.numeric(a$dcov_cpp_batch_backend_ms) +
+        as.numeric(b$dcov_cpp_batch_backend_ms),
+    dcov_cpp_batch_backend_error_count =
+      as.integer(a$dcov_cpp_batch_backend_error_count) +
+        as.integer(b$dcov_cpp_batch_backend_error_count),
+    dcov_cpp_batch_backend_fallback_count =
+      as.integer(a$dcov_cpp_batch_backend_fallback_count) +
+        as.integer(b$dcov_cpp_batch_backend_fallback_count),
+    dcov_cpp_batch_backend_max_batch_size =
+      max(as.integer(a$dcov_cpp_batch_backend_max_batch_size),
+          as.integer(b$dcov_cpp_batch_backend_max_batch_size)),
+    dcov_cpp_batch_backend_mean_batch_size = {
+      total_batches <- as.integer(a$dcov_cpp_batch_backend_count) +
+        as.integer(b$dcov_cpp_batch_backend_count)
+      if (total_batches > 0L) {
+        (as.numeric(a$dcov_cpp_batch_backend_mean_batch_size) *
+           as.integer(a$dcov_cpp_batch_backend_count) +
+           as.numeric(b$dcov_cpp_batch_backend_mean_batch_size) *
+             as.integer(b$dcov_cpp_batch_backend_count)) /
+          total_batches
       } else {
         0
       }
@@ -1524,6 +1566,14 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_batch_potential_mean_group_size = numeric(),
       dcov_cpp_batch_potential_reuse_opportunity_count = integer(),
       dcov_cpp_batch_potential_reuse_ratio = numeric(),
+      dcov_cpp_batch_backend_enabled = integer(),
+      dcov_cpp_batch_backend_count = integer(),
+      dcov_cpp_batch_backend_pair_count = integer(),
+      dcov_cpp_batch_backend_ms = numeric(),
+      dcov_cpp_batch_backend_error_count = integer(),
+      dcov_cpp_batch_backend_fallback_count = integer(),
+      dcov_cpp_batch_backend_max_batch_size = integer(),
+      dcov_cpp_batch_backend_mean_batch_size = numeric(),
       mgcv_residual_request_count = integer(),
       mgcv_cache_hit_count = integer(), mgcv_cache_miss_count = integer(),
       mgcv_residual_cache_hit_key_count = integer(),
@@ -1765,6 +1815,22 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.integer(metrics$dcov_cpp_batch_potential_reuse_opportunity_count),
       dcov_cpp_batch_potential_reuse_ratio =
         as.numeric(metrics$dcov_cpp_batch_potential_reuse_ratio),
+      dcov_cpp_batch_backend_enabled =
+        as.integer(metrics$dcov_cpp_batch_backend_enabled),
+      dcov_cpp_batch_backend_count =
+        as.integer(metrics$dcov_cpp_batch_backend_count),
+      dcov_cpp_batch_backend_pair_count =
+        as.integer(metrics$dcov_cpp_batch_backend_pair_count),
+      dcov_cpp_batch_backend_ms =
+        as.numeric(metrics$dcov_cpp_batch_backend_ms),
+      dcov_cpp_batch_backend_error_count =
+        as.integer(metrics$dcov_cpp_batch_backend_error_count),
+      dcov_cpp_batch_backend_fallback_count =
+        as.integer(metrics$dcov_cpp_batch_backend_fallback_count),
+      dcov_cpp_batch_backend_max_batch_size =
+        as.integer(metrics$dcov_cpp_batch_backend_max_batch_size),
+      dcov_cpp_batch_backend_mean_batch_size =
+        as.numeric(metrics$dcov_cpp_batch_backend_mean_batch_size),
       mgcv_residual_request_count =
         as.integer(metrics$mgcv_residual_request_count),
       mgcv_cache_hit_count = as.integer(metrics$mgcv_cache_hit_count),
@@ -4448,6 +4514,12 @@ fastkpc_legacy_dcov_backend <- function() {
   if (backend %in% c("cpp", "c++")) "cpp" else "r"
 }
 
+fastkpc_legacy_dcov_cpp_batch_mode <- function() {
+  raw <- tolower(Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH",
+                            unset = ""))
+  if (raw %in% c("chunk", "worker_chunk", "worker-chunk")) "chunk" else ""
+}
+
 fastkpc_legacy_prepare_dcov_cpp <- function(enabled) {
   if (!isTRUE(enabled)) return(invisible(FALSE))
   if (!exists("fastkpc_legacy_dcov_gamma_cpp_oracle", mode = "function")) {
@@ -4613,6 +4685,84 @@ fastkpc_legacy_run_dcov_cpp_backend <- function(
   list(result = timed$result, metrics = metrics, used_cpp = FALSE)
 }
 
+fastkpc_legacy_run_dcov_cpp_backend_batch <- function(
+    metrics, x, y, index, numCol, env) {
+  x <- as.matrix(x)
+  y <- as.matrix(y)
+  storage.mode(x) <- "double"
+  storage.mode(y) <- "double"
+  if (nrow(x) != nrow(y) || ncol(x) != ncol(y)) {
+    stop("batched dCov inputs must have matching dimensions", call. = FALSE)
+  }
+  batch_size <- ncol(x)
+  metrics$dcov_cpp_batch_backend_enabled <- 1L
+  if (batch_size == 0L) {
+    return(list(p.value = numeric(), metrics = metrics, used_cpp = TRUE))
+  }
+  backend_start <- proc.time()[["elapsed"]]
+  cpp <- tryCatch(
+    fastkpc_legacy_dcov_gamma_cpp_oracle_batch(
+      x = x, y = y, index = index, numCol = numCol
+    ),
+    error = function(e) structure(list(message = conditionMessage(e)),
+                                  class = "fastkpc_dcov_cpp_batch_error")
+  )
+  backend_elapsed_ms <- (proc.time()[["elapsed"]] - backend_start) * 1000
+  metrics$dcov_cpp_batch_backend_ms <-
+    metrics$dcov_cpp_batch_backend_ms + backend_elapsed_ms
+  metrics$ci_total_ms <- metrics$ci_total_ms + backend_elapsed_ms
+
+  if (!inherits(cpp, "fastkpc_dcov_cpp_batch_error")) {
+    metrics$dcov_cpp_batch_backend_count <-
+      metrics$dcov_cpp_batch_backend_count + 1L
+    metrics$dcov_cpp_batch_backend_pair_count <-
+      metrics$dcov_cpp_batch_backend_pair_count + batch_size
+    metrics$dcov_cpp_batch_backend_max_batch_size <- max(
+      metrics$dcov_cpp_batch_backend_max_batch_size, batch_size
+    )
+    metrics$dcov_cpp_batch_backend_mean_batch_size <-
+      as.numeric(metrics$dcov_cpp_batch_backend_pair_count) /
+        as.numeric(metrics$dcov_cpp_batch_backend_count)
+    metrics$dcov_cpp_backend_count <-
+      metrics$dcov_cpp_backend_count + batch_size
+    metrics$dcov_gamma_count <- metrics$dcov_gamma_count + batch_size
+    metrics$dcov_cpp_batch_shape_keys <- c(
+      metrics$dcov_cpp_batch_shape_keys,
+      rep(
+        fastkpc_legacy_dcov_cpp_batch_shape_key(
+          x[, 1L], y[, 1L], index, numCol
+        ),
+        batch_size
+      )
+    )
+    metrics <- fastkpc_legacy_runtime_add_dcov_cpp_diagnostics(
+      metrics, cpp$diagnostics, wrapper_ms = backend_elapsed_ms
+    )
+    return(list(p.value = as.numeric(cpp$p.value),
+                metrics = metrics, used_cpp = TRUE))
+  }
+
+  metrics$dcov_cpp_batch_backend_error_count <-
+    metrics$dcov_cpp_batch_backend_error_count + 1L
+  metrics$dcov_cpp_batch_backend_fallback_count <-
+    metrics$dcov_cpp_batch_backend_fallback_count + batch_size
+  p_values <- numeric(batch_size)
+  for (col in seq_len(batch_size)) {
+    backend <- fastkpc_legacy_run_dcov_cpp_backend(
+      metrics = metrics,
+      x = x[, col],
+      y = y[, col],
+      index = index,
+      numCol = numCol,
+      env = env
+    )
+    metrics <- backend$metrics
+    metrics$dcov_gamma_count <- metrics$dcov_gamma_count + 1L
+    p_values[[col]] <- as.numeric(backend$result$p.value)
+  }
+  list(p.value = p_values, metrics = metrics, used_cpp = FALSE)
+}
+
 fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
                                              ic.method = "dcc.gamma",
                                              index = 1,
@@ -4650,6 +4800,13 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
   } else {
     "r"
   }
+  dcov_cpp_batch_mode <- if (identical(ic.method, "dcc.gamma") &&
+                             identical(dcov_backend, "cpp")) {
+    fastkpc_legacy_dcov_cpp_batch_mode()
+  } else {
+    ""
+  }
+  dcov_cpp_batch_chunk_requested <- identical(dcov_cpp_batch_mode, "chunk")
   dcov_cpp_shadow_enabled <- identical(ic.method, "dcc.gamma") &&
     identical(dcov_backend, "r") &&
     fastkpc_legacy_dcov_cpp_shadow_enabled()
@@ -5055,6 +5212,66 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
       )
     }
 
+    prepare_legacy_ci_dcov_cpp_input <- function(test) {
+      metrics <- fastkpc_legacy_runtime_zero()
+      ci_start <- proc.time()[["elapsed"]]
+      prepared <- tryCatch({
+        if (length(test$S) == 0L) {
+          metrics$direct_ci_count <- 1L
+          list(
+            ok = TRUE,
+            x = data[, test$x],
+            y = data[, test$y],
+            p.value = NA_real_
+          )
+        } else {
+          metrics$conditional_ci_count <- 1L
+          residual <- fastkpc_legacy_run_mgcv_residual_pair(
+            metrics = metrics,
+            data = data,
+            x = test$x,
+            y = test$y,
+            S = test$S,
+            env = env,
+            cache_env = mgcv_residual_cache_env,
+            cache_enabled = mgcv_residual_cache_enabled,
+            prefetch_cache = mgcv_residual_prefetch_cache,
+            prefetch_enabled = mgcv_residual_prefetch_level_enabled,
+            cpp_backend_enabled = mgcv_residual_cpp_backend_enabled,
+            same_s_setup_consumed_enabled =
+              mgcv_residual_same_s_setup_consumed_enabled,
+            cpp_backend_condition_threshold =
+              mgcv_residual_cpp_backend_condition_threshold,
+            cpp_backend_native_s_size_limit =
+              mgcv_residual_cpp_backend_native_s_size_limit,
+            cpp_shadow_enabled = mgcv_residual_cpp_shadow_enabled,
+            cpp_shadow_condition_threshold =
+              mgcv_residual_cpp_shadow_condition_threshold,
+            cpp_shadow_native_s_size_limit =
+              mgcv_residual_cpp_shadow_native_s_size_limit
+          )
+          metrics <- residual$metrics
+          list(
+            ok = TRUE,
+            x = residual$residuals[, 1L],
+            y = residual$residuals[, 2L],
+            p.value = NA_real_
+          )
+        }
+      }, error = function(e) {
+        list(
+          ok = FALSE,
+          x = numeric(),
+          y = numeric(),
+          p.value = structure(NA_real_, fastkpc_error = conditionMessage(e))
+        )
+      })
+      metrics$ci_total_ms <- metrics$ci_total_ms +
+        (proc.time()[["elapsed"]] - ci_start) * 1000
+      prepared$metrics <- metrics
+      prepared
+    }
+
     edge_test_chunk_same_s <- function(chunk) {
       states <- lapply(as.integer(chunk), chunk_state_init)
       names(states) <- as.character(as.integer(chunk))
@@ -5070,28 +5287,68 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
         }
         if (length(current_tests) == 0L) break
 
-        batch <- fastkpc_legacy_mgcv_cpp_same_s_batch_misses(
-          tests = current_tests,
-          data = data,
-          env = env,
-          cache_env = mgcv_residual_cache_env,
-          condition_threshold = mgcv_residual_cpp_backend_condition_threshold,
-          native_s_size_limit = mgcv_residual_cpp_backend_native_s_size_limit
-        )
-        batch_metrics <- fastkpc_legacy_runtime_add(
-          batch_metrics, batch$metrics
-        )
+        if (isTRUE(same_s_setup_chunk_enabled)) {
+          batch <- fastkpc_legacy_mgcv_cpp_same_s_batch_misses(
+            tests = current_tests,
+            data = data,
+            env = env,
+            cache_env = mgcv_residual_cache_env,
+            condition_threshold = mgcv_residual_cpp_backend_condition_threshold,
+            native_s_size_limit = mgcv_residual_cpp_backend_native_s_size_limit
+          )
+          batch_metrics <- fastkpc_legacy_runtime_add(
+            batch_metrics, batch$metrics
+          )
+        }
 
-        for (test in current_tests) {
-          ci <- run_legacy_ci(test$x, test$y, test$S)
-          state_name <- as.character(test$state_i)
-          states[[state_name]]$metrics <- fastkpc_legacy_runtime_add(
-            states[[state_name]]$metrics, ci$metrics
-          )
-          pval <- normalize_ci_pvalue(ci$p.value)
-          states[[state_name]] <- chunk_state_apply_pvalue(
-            states[[state_name]], test, pval
-          )
+        if (isTRUE(dcov_cpp_batch_chunk_enabled)) {
+          prepared <- lapply(current_tests, prepare_legacy_ci_dcov_cpp_input)
+          valid <- vapply(prepared, function(item) isTRUE(item$ok), logical(1L))
+          p_values <- rep(NA_real_, length(current_tests))
+          if (any(valid)) {
+            valid_indices <- which(valid)
+            x_batch <- do.call(cbind, lapply(
+              prepared[valid_indices], function(item) item$x
+            ))
+            y_batch <- do.call(cbind, lapply(
+              prepared[valid_indices], function(item) item$y
+            ))
+            dcov_batch <- fastkpc_legacy_run_dcov_cpp_backend_batch(
+              metrics = fastkpc_legacy_runtime_zero(),
+              x = x_batch,
+              y = y_batch,
+              index = index,
+              numCol = numCol,
+              env = env
+            )
+            batch_metrics <- fastkpc_legacy_runtime_add(
+              batch_metrics, dcov_batch$metrics
+            )
+            p_values[valid_indices] <- as.numeric(dcov_batch$p.value)
+          }
+          for (idx in seq_along(current_tests)) {
+            test <- current_tests[[idx]]
+            state_name <- as.character(test$state_i)
+            states[[state_name]]$metrics <- fastkpc_legacy_runtime_add(
+              states[[state_name]]$metrics, prepared[[idx]]$metrics
+            )
+            pval <- normalize_ci_pvalue(p_values[[idx]])
+            states[[state_name]] <- chunk_state_apply_pvalue(
+              states[[state_name]], test, pval
+            )
+          }
+        } else {
+          for (test in current_tests) {
+            ci <- run_legacy_ci(test$x, test$y, test$S)
+            state_name <- as.character(test$state_i)
+            states[[state_name]]$metrics <- fastkpc_legacy_runtime_add(
+              states[[state_name]]$metrics, ci$metrics
+            )
+            pval <- normalize_ci_pvalue(ci$p.value)
+            states[[state_name]] <- chunk_state_apply_pvalue(
+              states[[state_name]], test, pval
+            )
+          }
         }
       }
       list(
@@ -5103,6 +5360,9 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     affinity_enabled <- .Platform$OS.type == "unix" && workers > 1L &&
       ord > 0L && isTRUE(mgcv_residual_cache_enabled) &&
       mgcv_residual_affinity_mode %in% c("s", "target_s")
+    dcov_cpp_batch_chunk_enabled <- isTRUE(dcov_cpp_batch_chunk_requested) &&
+      identical(dcov_backend, "cpp") &&
+      isTRUE(affinity_enabled)
     affinity_metrics <- fastkpc_legacy_runtime_zero()
     affinity_worker_by_edge <- integer()
     affinity_group_by_edge <- character()
@@ -5265,7 +5525,8 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           } else {
             list(keys = character(), metrics = fastkpc_legacy_runtime_zero())
           }
-          chunk_batch <- if (isTRUE(same_s_setup_chunk_enabled)) {
+          chunk_batch <- if (isTRUE(same_s_setup_chunk_enabled) ||
+                             isTRUE(dcov_cpp_batch_chunk_enabled)) {
             edge_test_chunk_same_s(chunk)
           } else {
             list(
@@ -5726,6 +5987,22 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$dcov_cpp_batch_potential_reuse_opportunity_count),
         legacy_dcov_cpp_batch_potential_reuse_ratio =
           as.numeric(runtime_total$dcov_cpp_batch_potential_reuse_ratio),
+        legacy_dcov_cpp_batch_backend_enabled =
+          isTRUE(as.integer(runtime_total$dcov_cpp_batch_backend_enabled) > 0L),
+        legacy_dcov_cpp_batch_backend_count =
+          as.integer(runtime_total$dcov_cpp_batch_backend_count),
+        legacy_dcov_cpp_batch_backend_pair_count =
+          as.integer(runtime_total$dcov_cpp_batch_backend_pair_count),
+        legacy_dcov_cpp_batch_backend_ms =
+          as.numeric(runtime_total$dcov_cpp_batch_backend_ms),
+        legacy_dcov_cpp_batch_backend_error_count =
+          as.integer(runtime_total$dcov_cpp_batch_backend_error_count),
+        legacy_dcov_cpp_batch_backend_fallback_count =
+          as.integer(runtime_total$dcov_cpp_batch_backend_fallback_count),
+        legacy_dcov_cpp_batch_backend_max_batch_size =
+          as.integer(runtime_total$dcov_cpp_batch_backend_max_batch_size),
+        legacy_dcov_cpp_batch_backend_mean_batch_size =
+          as.numeric(runtime_total$dcov_cpp_batch_backend_mean_batch_size),
         legacy_direct_ci_count =
           as.integer(runtime_total$direct_ci_count),
         legacy_conditional_ci_count =
