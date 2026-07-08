@@ -32,6 +32,26 @@ data <- cbind(
 )
 
 out_dir <- tempfile("fastkpc-legacy-mgcv-cpp-shadow-artifact-")
+old_backend_env <- Sys.getenv(c(
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT",
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD"
+), unset = NA_character_)
+restore_env <- function(name, value) {
+  if (is.na(value)) {
+    Sys.unsetenv(name)
+  } else {
+    do.call(Sys.setenv, stats::setNames(list(value), name))
+  }
+}
+on.exit({
+  for (name in names(old_backend_env)) restore_env(name, old_backend_env[[name]])
+}, add = TRUE)
+Sys.setenv(
+  FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND = "cpp_guarded",
+  FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT = "2",
+  FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD = "1e300"
+)
 artifact <- fastkpc_run_legacy_mgcv_residual_cpp_shadow_artifact(
   data = data,
   output_dir = out_dir,
@@ -80,5 +100,13 @@ assert_true(artifact$summary$residual_mismatch_count[[1L]] == 0L,
             "shadow artifact should not report residual mismatches")
 assert_true(artifact$summary$max_abs_diff[[1L]] <= 1e-5,
             "shadow artifact residual abs diff should be within tolerance")
+assert_true(identical(
+  artifact$baseline$scheduler_diagnostics$summary$legacy_mgcv_residual_backend,
+  "r"
+), "shadow artifact baseline should not inherit mgcv residual backend env")
+assert_true(identical(
+  artifact$shadow$scheduler_diagnostics$summary$legacy_mgcv_residual_backend,
+  "r"
+), "shadow artifact shadow run should not inherit mgcv residual backend env")
 
 cat("PASS legacy mgcv residual C++ shadow artifact\n")

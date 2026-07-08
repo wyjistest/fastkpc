@@ -1237,6 +1237,69 @@ targets used the native C++ fixed-sp solve, while `|S|>2` targets failed closed
 to mgcv fallback. Canonical replay, adjacency, `n.edgetests`, dCov backend
 selection, and Spectra convergence remained unchanged.
 
+Initial env-gated guarded residual backend prototype:
+
+```bash
+FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded
+FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT=2
+FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD=1e300
+```
+
+Artifact:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_real_subset_deep_v1
+```
+
+Status:
+
+```text
+status: created
+mode: env-gated backend prototype, not default
+data: real 351x48 fixture, 12 hot-column subset
+columns: 1,2,3,4,5,6,9,12,15,16,17,18
+n / p: 351 / 12
+alpha: 0.1
+max_conditioning_size: 3
+num_cores: 4
+dCov backend: C++ Spectra
+residual authority: cpp_guarded for native envelope, legacy regrXonS fallback
+native_s_size_limit: 2
+condition_threshold: 1e300
+
+adjacency_identical: TRUE
+n.edgetests_identical: TRUE
+baseline_n.edgetests: 131,994,1453,243
+backend_n.edgetests:  131,994,1453,243
+baseline_edge_count: 20
+backend_edge_count:  20
+
+baseline_elapsed_sec: 90.126
+backend_elapsed_sec:  73.678
+residual_request_count: 5380
+cpp_backend_count: 5380
+native_count: 4894
+r_fallback_count: 486
+fallback_count: 486
+high_condition_fallback_count: 0
+outside_envelope_fallback_count: 486
+error_count: 0
+
+legacy_dcov_cpp_backend_count: 2756
+legacy_dcov_cpp_backend_error_count: 0
+legacy_dcov_cpp_backend_fallback_count: 0
+legacy_dcov_cpp_lowrank_spectra_count: 5512
+legacy_dcov_cpp_lowrank_spectra_failed_count: 0
+```
+
+This is the first real-data env-gated guarded residual backend prototype. It
+does switch residual authority for supported `|S|<=2` targets to the native C++
+fixed-sp solve, while unsupported `|S|>2` targets fail closed to legacy
+`regrXonS`. On the 12-column deep subset it preserves canonical replay and
+shows a subset wall-time win. It is still not recommended or default; promotion
+requires a full 351x48 artifact with unchanged replay, zero backend errors, and
+a wall-time win over the current recommended compatible route.
+
 #### Gate before production use
 
 ```text
@@ -1683,16 +1746,31 @@ dCov C++ backend count = 239404
 dCov C++ backend errors/fallbacks = 0 / 0
 Spectra converged/failed = 478808 / 0
 status: full 351x48 guarded residual shadow pass; still not production
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_real_subset_deep_v1 exists
+real 351x48 fixture, 12 hot-column subset, max_conditioning_size = 3
+env gate = FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded
+adjacency identical = TRUE
+n.edgetests identical = TRUE
+5380 / 5380 residual backend targets covered
+native_count = 4894
+r_fallback_count = 486
+fallback_count = 486
+outside_envelope_fallback_count = 486
+error_count = 0
+baseline_elapsed_sec = 90.126
+backend_elapsed_sec = 73.678
+status: real subset env-gated backend prototype pass; still not production
 ```
 
 Next Phase 3 step:
 
 ```text
-use the full 351x48 shadow pass to design the next guarded residual execution
-step. Do not promote cpp_guarded residuals as authoritative yet: production
-requires a separate env-gated backend/prototype with canonical replay unchanged,
-all supported residual targets matched without errors or decision drift, and a
-wall-time win over the current recommended compatible route.
+run the env-gated cpp_guarded residual backend on the full 351x48 compatible
+skeleton using the current recommended C++ dCov + residual cache + S-affinity
+route. Promotion requires canonical replay unchanged, edge_count = 110 / 110,
+n.edgetests exact, zero residual backend errors, and a wall-time win over the
+current recommended compatible route. The default remains legacy R residuals.
 ```
 
 ### 8.4 Continue dCov backend improvement separately
