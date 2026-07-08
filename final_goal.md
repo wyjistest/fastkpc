@@ -1125,6 +1125,56 @@ the `|S|<=2` native C++ fixed-sp residual replay envelope inside the legacy
 scheduler on a real 351-row subset while preserving canonical replay and graph
 output. It is still a subset gate, not the full 351x48 acceptance gate.
 
+Deep real 351x48 subset guarded residual shadow artifact:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_shadow_real_subset_deep_v1
+```
+
+Status:
+
+```text
+status: created
+mode: full legacy-parallel skeleton shadow, not authoritative
+data: real 351x48 fixture, 12 hot-column subset
+columns: 1,2,3,4,5,6,9,12,15,16,17,18
+n / p: 351 / 12
+alpha: 0.1
+max_conditioning_size: 3
+num_cores: 4
+dCov backend: C++ Spectra
+residual authority: legacy regrXonS / mgcv
+shadow solver: cpp_guarded
+native_s_size_limit: 2
+condition_threshold: 1e300
+
+adjacency_identical: TRUE
+n.edgetests_identical: TRUE
+baseline_n.edgetests: 131,994,1453,243
+shadow_n.edgetests:   131,994,1453,243
+baseline_edge_count: 20
+shadow_edge_count:   20
+
+residual_request_count: 5380
+shadow_count: 5380
+native_count: 4894
+fallback_count: 486
+high_condition_fallback_count: 0
+outside_envelope_fallback_count: 486
+error_count: 0
+residual_mismatch_count: 0
+max_abs_diff: 2.103081e-10
+max_rel_l2: 1.145284e-10
+elapsed_ms: 94902
+```
+
+This is the first real-data guarded residual shadow that exercises both the
+native `|S|<=2` C++ fixed-sp envelope and the fail-closed `|S|>2` mgcv
+fallback path inside the legacy scheduler. Canonical replay, adjacency, and
+`n.edgetests` remain unchanged, and all 5,380 residual shadow targets match
+without errors or mismatches. It is still a subset gate, not the full 351x48
+acceptance gate.
+
 #### Gate before production use
 
 ```text
@@ -1542,16 +1592,28 @@ fallback_count = 0
 error_count = 0
 residual_mismatch_count = 0
 status: real subset full-route shadow pass; still not production
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_shadow_real_subset_deep_v1 exists
+real 351x48 fixture, 12 hot-column subset, max_conditioning_size = 3
+adjacency identical = TRUE
+n.edgetests identical = TRUE
+5380 / 5380 residual shadow targets matched
+native_count = 4894
+fallback_count = 486
+outside_envelope_fallback_count = 486
+error_count = 0
+residual_mismatch_count = 0
+status: deep real subset full-route shadow pass with |S|>2 fallback traffic;
+still not production
 ```
 
 Next Phase 3 step:
 
 ```text
-expand the guarded residual shadow from the 8-column real subset to a larger
-real subset that includes |S|>2 fallback traffic, then run the full 351x48
-compatible skeleton shadow. Promotion requires canonical replay to remain
-unchanged and all shadow-supported residual targets to match without errors or
-decision drift. The route remains shadow-only until that gate passes.
+run the guarded residual shadow on the full 351x48 compatible skeleton.
+Promotion requires canonical replay to remain unchanged and all shadow-supported
+residual targets to match without errors or decision drift. The route remains
+shadow-only until that gate passes.
 ```
 
 ### 8.4 Continue dCov backend improvement separately
