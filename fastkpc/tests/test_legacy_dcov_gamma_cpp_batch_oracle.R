@@ -77,5 +77,36 @@ assert_true(identical(as.integer(batch$diagnostics$n), as.integer(nrow(x))),
             "batched C++ oracle should report n")
 assert_true(batch$diagnostics$total_ms >= 0,
             "batched C++ oracle should report elapsed time")
+batch_diag_fields <- c(
+  "input_ms", "distance_ms", "lowrank_ms", "lowrank_eig_ms",
+  "lowrank_select_ms", "lowrank_center_ms", "lowrank_unaccounted_ms",
+  "lowrank_full_eig_count", "lowrank_spectra_count",
+  "lowrank_spectra_converged_count", "lowrank_spectra_failed_count",
+  "lowrank_spectra_fallback_full_eig_count", "statistic_ms", "moment_ms",
+  "pgamma_ms", "accounted_ms", "unaccounted_ms"
+)
+missing_batch_diag <- setdiff(batch_diag_fields, names(batch$diagnostics))
+assert_true(length(missing_batch_diag) == 0L,
+            paste("batched C++ oracle diagnostics missing",
+                  missing_batch_diag[[1L]]))
+assert_true(batch$diagnostics$input_ms >= 0 &&
+              batch$diagnostics$distance_ms > 0 &&
+              batch$diagnostics$lowrank_ms > 0 &&
+              batch$diagnostics$statistic_ms >= 0 &&
+              batch$diagnostics$moment_ms > 0 &&
+              batch$diagnostics$pgamma_ms >= 0,
+            "batched C++ oracle should aggregate stage timings")
+assert_true(as.integer(batch$diagnostics$lowrank_full_eig_count) +
+              as.integer(batch$diagnostics$lowrank_spectra_count) ==
+              2L * ncol(x),
+            "batched C++ oracle should aggregate two lowrank solves per pair")
+accounted_parts <- batch$diagnostics$input_ms +
+  batch$diagnostics$distance_ms +
+  batch$diagnostics$lowrank_ms +
+  batch$diagnostics$statistic_ms +
+  batch$diagnostics$moment_ms +
+  batch$diagnostics$pgamma_ms
+assert_true(abs(accounted_parts - batch$diagnostics$accounted_ms) <= 1e-6,
+            "batched C++ oracle accounted time should sum stage timings")
 
 cat("PASS legacy dCov gamma C++ batch oracle parity\n")

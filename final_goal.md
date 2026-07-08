@@ -511,6 +511,36 @@ per-call Rcpp overhead, repeated allocation, distance/lowrank workspace setup,
 and wrapper dispatch.
 ```
 
+Native batch primitive checkpoint:
+
+```text
+status: implemented as a C++ oracle/batch substrate, not a production backend
+scope:
+  legacy_dcov_gamma_cpp_oracle_export()
+  legacy_dcov_gamma_cpp_oracle_batch_export()
+
+change:
+  scalar and batch exports now share an internal native compute kernel
+  batch export no longer calls the exported scalar/list wrapper per column
+  batch diagnostics now aggregate stage timings and lowrank counters:
+    input / distance / lowrank / statistic / moment / pgamma
+    full eig / Spectra counts and failures
+    accounted / unaccounted / total timing
+
+tests:
+  Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_batch_oracle.R
+  Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_oracle.R
+  Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_spectra_oracle.R
+  Rscript fastkpc/tests/test_precision_compatible_legacy_dcov_cpp_backend.R
+  Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_shadow_route.R
+
+status:
+  This removes the per-column Rcpp list wrapper inside the C++ batch oracle and
+  gives the next scheduler integration enough diagnostics to verify true batch
+  execution. It is still not the production Phase 2A backend because the legacy
+  skeleton does not yet route level-local dCov tasks through the batch export.
+```
+
 #### Artifact
 
 ```text

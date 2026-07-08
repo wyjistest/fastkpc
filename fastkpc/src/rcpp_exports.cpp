@@ -1902,11 +1902,34 @@ double fast_dcov_exact_cpp_export(Rcpp::NumericVector x,
                            index, legacy_index);
 }
 
-// [[Rcpp::export]]
-Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
-                                               Rcpp::NumericVector y,
-                                               int numCol,
-                                               double index = 1.0) {
+struct LegacyDcovGammaCppResult {
+  double p_value = NA_REAL;
+  double nV2 = NA_REAL;
+  double mean = NA_REAL;
+  double variance = NA_REAL;
+  double statistic = NA_REAL;
+  double estimate = NA_REAL;
+  int n = 0;
+  int num_col = 0;
+  double index = 1.0;
+  LegacyDcovLowrankMode lowrank_mode = LegacyDcovLowrankMode::FullEig;
+  double input_ms = 0.0;
+  double distance_ms = 0.0;
+  double lowrank_ms = 0.0;
+  double lowrank_unaccounted_ms = 0.0;
+  double statistic_ms = 0.0;
+  double moment_ms = 0.0;
+  double pgamma_ms = 0.0;
+  double accounted_ms = 0.0;
+  double total_ms = 0.0;
+  LegacyDcovLowrankTimings lowrank_timings;
+};
+
+LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute(
+    Rcpp::NumericVector x,
+    Rcpp::NumericVector y,
+    int numCol,
+    double index = 1.0) {
   const auto total_start = std::chrono::steady_clock::now();
   const auto input_start = std::chrono::steady_clock::now();
   const int n = x.size();
@@ -1977,19 +2000,180 @@ Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
   const double accounted_ms = input_ms + distance_ms + lowrank_ms +
     statistic_ms + moment_ms + pgamma_ms;
 
+  LegacyDcovGammaCppResult result;
+  result.p_value = p_value;
+  result.nV2 = nV2;
+  result.mean = nV2Mean;
+  result.variance = nV2Variance;
+  result.statistic = statistic;
+  result.estimate = dCov;
+  result.n = n;
+  result.num_col = numCol;
+  result.index = index;
+  result.lowrank_mode = lowrank_mode;
+  result.input_ms = input_ms;
+  result.distance_ms = distance_ms;
+  result.lowrank_ms = lowrank_ms;
+  result.lowrank_unaccounted_ms = lowrank_unaccounted_ms;
+  result.statistic_ms = statistic_ms;
+  result.moment_ms = moment_ms;
+  result.pgamma_ms = pgamma_ms;
+  result.accounted_ms = accounted_ms;
+  result.total_ms = total_ms;
+  result.lowrank_timings = lowrank_timings;
+  return result;
+}
+
+Rcpp::List legacy_dcov_gamma_cpp_result_to_list(
+    const LegacyDcovGammaCppResult& result) {
   return Rcpp::List::create(
-    Rcpp::Named("p.value") = p_value,
-    Rcpp::Named("nV2") = nV2,
-    Rcpp::Named("mean") = nV2Mean,
-    Rcpp::Named("variance") = nV2Variance,
-    Rcpp::Named("statistic") = statistic,
-    Rcpp::Named("estimate") = dCov,
+    Rcpp::Named("p.value") = result.p_value,
+    Rcpp::Named("nV2") = result.nV2,
+    Rcpp::Named("mean") = result.mean,
+    Rcpp::Named("variance") = result.variance,
+    Rcpp::Named("statistic") = result.statistic,
+    Rcpp::Named("estimate") = result.estimate,
     Rcpp::Named("estimates") = Rcpp::NumericVector::create(
-      Rcpp::Named("nV^2") = nV2,
-      Rcpp::Named("nV^2 mean") = nV2Mean,
-      Rcpp::Named("nV^2 variance") = nV2Variance),
+      Rcpp::Named("nV^2") = result.nV2,
+      Rcpp::Named("nV^2 mean") = result.mean,
+      Rcpp::Named("nV^2 variance") = result.variance),
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("n") = result.n,
+      Rcpp::Named("numCol") = result.num_col,
+      Rcpp::Named("index") = result.index,
+      Rcpp::Named("lowrank_mode") =
+        std::string(legacy_dcov_lowrank_mode_name(result.lowrank_mode)),
+      Rcpp::Named("input_ms") = result.input_ms,
+      Rcpp::Named("distance_ms") = result.distance_ms,
+      Rcpp::Named("lowrank_ms") = result.lowrank_ms,
+      Rcpp::Named("lowrank_eig_ms") = result.lowrank_timings.eig_ms,
+      Rcpp::Named("lowrank_select_ms") = result.lowrank_timings.select_ms,
+      Rcpp::Named("lowrank_center_ms") = result.lowrank_timings.center_ms,
+      Rcpp::Named("lowrank_unaccounted_ms") =
+        result.lowrank_unaccounted_ms,
+      Rcpp::Named("lowrank_full_eig_count") =
+        result.lowrank_timings.full_eig_count,
+      Rcpp::Named("lowrank_spectra_count") =
+        result.lowrank_timings.spectra_count,
+      Rcpp::Named("lowrank_spectra_converged_count") =
+        result.lowrank_timings.spectra_converged_count,
+      Rcpp::Named("lowrank_spectra_failed_count") =
+        result.lowrank_timings.spectra_failed_count,
+      Rcpp::Named("lowrank_spectra_fallback_full_eig_count") =
+        result.lowrank_timings.spectra_fallback_full_eig_count,
+      Rcpp::Named("lowrank_spectra_iterations") =
+        result.lowrank_timings.spectra_iterations,
+      Rcpp::Named("lowrank_spectra_nconv") =
+        result.lowrank_timings.spectra_nconv,
+      Rcpp::Named("lowrank_spectra_ncv") =
+        result.lowrank_timings.spectra_ncv,
+      Rcpp::Named("lowrank_spectra_tol") =
+        result.lowrank_timings.spectra_tol,
+      Rcpp::Named("statistic_ms") = result.statistic_ms,
+      Rcpp::Named("moment_ms") = result.moment_ms,
+      Rcpp::Named("pgamma_ms") = result.pgamma_ms,
+      Rcpp::Named("accounted_ms") = result.accounted_ms,
+      Rcpp::Named("unaccounted_ms") =
+        std::max(0.0, result.total_ms - result.accounted_ms),
+      Rcpp::Named("total_ms") = result.total_ms
+    )
+  );
+}
+
+// [[Rcpp::export]]
+Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
+                                               Rcpp::NumericVector y,
+                                               int numCol,
+                                               double index = 1.0) {
+  return legacy_dcov_gamma_cpp_result_to_list(
+    legacy_dcov_gamma_cpp_compute(x, y, numCol, index));
+}
+
+// [[Rcpp::export]]
+Rcpp::List legacy_dcov_gamma_cpp_oracle_batch_export(Rcpp::NumericMatrix x,
+                                                     Rcpp::NumericMatrix y,
+                                                     int numCol,
+                                                     double index = 1.0) {
+  const auto total_start = std::chrono::steady_clock::now();
+  if (x.nrow() != y.nrow() || x.ncol() != y.ncol()) {
+    Rcpp::stop("x and y must have matching dimensions");
+  }
+  const int n = x.nrow();
+  const int batch = x.ncol();
+  Rcpp::NumericVector p_values(batch);
+  Rcpp::NumericVector nV2_values(batch);
+  Rcpp::NumericVector mean_values(batch);
+  Rcpp::NumericVector variance_values(batch);
+  Rcpp::NumericVector estimate_values(batch);
+  double scalar_total_ms = 0.0;
+  double input_ms = 0.0;
+  double distance_ms = 0.0;
+  double lowrank_ms = 0.0;
+  double lowrank_eig_ms = 0.0;
+  double lowrank_select_ms = 0.0;
+  double lowrank_center_ms = 0.0;
+  double lowrank_unaccounted_ms = 0.0;
+  double statistic_ms = 0.0;
+  double moment_ms = 0.0;
+  double pgamma_ms = 0.0;
+  LegacyDcovLowrankTimings lowrank_timings;
+  LegacyDcovLowrankMode lowrank_mode = legacy_dcov_lowrank_mode_from_env();
+  for (int col = 0; col < batch; ++col) {
+    Rcpp::NumericVector x_col(n);
+    Rcpp::NumericVector y_col(n);
+    for (int row = 0; row < n; ++row) {
+      x_col[row] = x(row, col);
+      y_col[row] = y(row, col);
+    }
+    const LegacyDcovGammaCppResult result =
+      legacy_dcov_gamma_cpp_compute(x_col, y_col, numCol, index);
+    p_values[col] = result.p_value;
+    nV2_values[col] = result.nV2;
+    mean_values[col] = result.mean;
+    variance_values[col] = result.variance;
+    estimate_values[col] = result.estimate;
+    scalar_total_ms += result.total_ms;
+    input_ms += result.input_ms;
+    distance_ms += result.distance_ms;
+    lowrank_ms += result.lowrank_ms;
+    lowrank_eig_ms += result.lowrank_timings.eig_ms;
+    lowrank_select_ms += result.lowrank_timings.select_ms;
+    lowrank_center_ms += result.lowrank_timings.center_ms;
+    lowrank_unaccounted_ms += result.lowrank_unaccounted_ms;
+    statistic_ms += result.statistic_ms;
+    moment_ms += result.moment_ms;
+    pgamma_ms += result.pgamma_ms;
+    lowrank_timings.full_eig_count +=
+      result.lowrank_timings.full_eig_count;
+    lowrank_timings.spectra_count += result.lowrank_timings.spectra_count;
+    lowrank_timings.spectra_converged_count +=
+      result.lowrank_timings.spectra_converged_count;
+    lowrank_timings.spectra_failed_count +=
+      result.lowrank_timings.spectra_failed_count;
+    lowrank_timings.spectra_fallback_full_eig_count +=
+      result.lowrank_timings.spectra_fallback_full_eig_count;
+    lowrank_timings.spectra_iterations +=
+      result.lowrank_timings.spectra_iterations;
+    lowrank_timings.spectra_nconv += result.lowrank_timings.spectra_nconv;
+    lowrank_timings.spectra_ncv = std::max(
+      lowrank_timings.spectra_ncv, result.lowrank_timings.spectra_ncv);
+    lowrank_timings.spectra_tol = std::max(
+      lowrank_timings.spectra_tol, result.lowrank_timings.spectra_tol);
+    lowrank_mode = result.lowrank_mode;
+  }
+  const double total_ms = elapsed_ms_since(total_start);
+  const double accounted_ms = input_ms + distance_ms + lowrank_ms +
+    statistic_ms + moment_ms + pgamma_ms;
+  return Rcpp::List::create(
+    Rcpp::Named("p.value") = p_values,
+    Rcpp::Named("nV2") = nV2_values,
+    Rcpp::Named("mean") = mean_values,
+    Rcpp::Named("variance") = variance_values,
+    Rcpp::Named("statistic") = nV2_values,
+    Rcpp::Named("estimate") = estimate_values,
     Rcpp::Named("diagnostics") = Rcpp::List::create(
       Rcpp::Named("n") = n,
+      Rcpp::Named("batch_count") = batch,
       Rcpp::Named("numCol") = numCol,
       Rcpp::Named("index") = index,
       Rcpp::Named("lowrank_mode") =
@@ -1997,9 +2181,9 @@ Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
       Rcpp::Named("input_ms") = input_ms,
       Rcpp::Named("distance_ms") = distance_ms,
       Rcpp::Named("lowrank_ms") = lowrank_ms,
-      Rcpp::Named("lowrank_eig_ms") = lowrank_timings.eig_ms,
-      Rcpp::Named("lowrank_select_ms") = lowrank_timings.select_ms,
-      Rcpp::Named("lowrank_center_ms") = lowrank_timings.center_ms,
+      Rcpp::Named("lowrank_eig_ms") = lowrank_eig_ms,
+      Rcpp::Named("lowrank_select_ms") = lowrank_select_ms,
+      Rcpp::Named("lowrank_center_ms") = lowrank_center_ms,
       Rcpp::Named("lowrank_unaccounted_ms") = lowrank_unaccounted_ms,
       Rcpp::Named("lowrank_full_eig_count") =
         lowrank_timings.full_eig_count,
@@ -2024,58 +2208,6 @@ Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
       Rcpp::Named("pgamma_ms") = pgamma_ms,
       Rcpp::Named("accounted_ms") = accounted_ms,
       Rcpp::Named("unaccounted_ms") = std::max(0.0, total_ms - accounted_ms),
-      Rcpp::Named("total_ms") = total_ms
-    )
-  );
-}
-
-// [[Rcpp::export]]
-Rcpp::List legacy_dcov_gamma_cpp_oracle_batch_export(Rcpp::NumericMatrix x,
-                                                     Rcpp::NumericMatrix y,
-                                                     int numCol,
-                                                     double index = 1.0) {
-  const auto total_start = std::chrono::steady_clock::now();
-  if (x.nrow() != y.nrow() || x.ncol() != y.ncol()) {
-    Rcpp::stop("x and y must have matching dimensions");
-  }
-  const int n = x.nrow();
-  const int batch = x.ncol();
-  Rcpp::NumericVector p_values(batch);
-  Rcpp::NumericVector nV2_values(batch);
-  Rcpp::NumericVector mean_values(batch);
-  Rcpp::NumericVector variance_values(batch);
-  Rcpp::NumericVector estimate_values(batch);
-  double scalar_total_ms = 0.0;
-  for (int col = 0; col < batch; ++col) {
-    Rcpp::NumericVector x_col(n);
-    Rcpp::NumericVector y_col(n);
-    for (int row = 0; row < n; ++row) {
-      x_col[row] = x(row, col);
-      y_col[row] = y(row, col);
-    }
-    Rcpp::List result =
-      legacy_dcov_gamma_cpp_oracle_export(x_col, y_col, numCol, index);
-    p_values[col] = Rcpp::as<double>(result["p.value"]);
-    nV2_values[col] = Rcpp::as<double>(result["nV2"]);
-    mean_values[col] = Rcpp::as<double>(result["mean"]);
-    variance_values[col] = Rcpp::as<double>(result["variance"]);
-    estimate_values[col] = Rcpp::as<double>(result["estimate"]);
-    Rcpp::List diagnostics = result["diagnostics"];
-    scalar_total_ms += Rcpp::as<double>(diagnostics["total_ms"]);
-  }
-  const double total_ms = elapsed_ms_since(total_start);
-  return Rcpp::List::create(
-    Rcpp::Named("p.value") = p_values,
-    Rcpp::Named("nV2") = nV2_values,
-    Rcpp::Named("mean") = mean_values,
-    Rcpp::Named("variance") = variance_values,
-    Rcpp::Named("statistic") = nV2_values,
-    Rcpp::Named("estimate") = estimate_values,
-    Rcpp::Named("diagnostics") = Rcpp::List::create(
-      Rcpp::Named("n") = n,
-      Rcpp::Named("batch_count") = batch,
-      Rcpp::Named("numCol") = numCol,
-      Rcpp::Named("index") = index,
       Rcpp::Named("scalar_total_ms") = scalar_total_ms,
       Rcpp::Named("total_ms") = total_ms
     )
