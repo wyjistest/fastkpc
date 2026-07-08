@@ -22,6 +22,7 @@ old_env <- Sys.getenv(c(
   "FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY",
   "FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_PREFILL",
   "FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP",
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_BATCH_SOLVE",
   "FASTKPC_LEGACY_MGCV_RESIDUAL_CPP_SHADOW"
 ), unset = NA_character_)
 restore_env <- function(name, value) {
@@ -64,6 +65,7 @@ Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_PREFILL")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_BATCH_SOLVE")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CPP_SHADOW")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
 baseline <- run_compatible()
@@ -157,6 +159,11 @@ required <- c(
   "legacy_mgcv_cpp_same_s_setup_provider_chunk_cache_insert_count",
   "legacy_mgcv_cpp_same_s_setup_provider_chunk_ms",
   "legacy_mgcv_cpp_same_s_setup_provider_chunk_error_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_batch_solve_enabled",
+  "legacy_mgcv_cpp_same_s_setup_provider_batch_solve_group_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_batch_solve_target_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_batch_solve_ms",
+  "legacy_mgcv_cpp_same_s_setup_provider_batch_solve_error_count",
   "legacy_mgcv_residual_cache_hit_key_count",
   "legacy_mgcv_residual_cache_miss_key_count",
   "legacy_mgcv_residual_cache_miss_s_group_count",

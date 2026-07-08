@@ -2761,6 +2761,35 @@ status:
   same-S setup contract on CPU/C++ before any full skeleton integration.
 ```
 
+Provider integration checkpoint:
+
+```text
+FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_BATCH_SOLVE=cpp
+
+status: implemented as an env-gated same-S setup provider branch
+scope: legacy same-S setup provider only; recommended route unchanged
+behavior:
+  same-S provider still runs per-target mgcv::gam to preserve selected-sp
+    authority
+  when all targets in a provider group have scalar positive sp and pass the
+    condition threshold, the fixed-sp replay step uses
+    fastkpc_mgcv_extract_same_setup_batch_fixed_sp_cpp()
+  if the batch branch cannot safely run, provider falls back to the existing
+    per-target path
+  diagnostics report batch_solve enabled/group/target/ms/error counters
+
+tests:
+  Rscript fastkpc/tests/test_legacy_mgcv_same_s_fixed_sp_batch_provider.R
+  Rscript fastkpc/tests/test_mgcv_extract_same_setup_fixed_sp_batch_cpp.R
+  Rscript fastkpc/tests/test_precision_compatible_legacy_mgcv_residual_cpp_backend.R
+
+status:
+  This connects the fixed-sp batch substrate to the experimental provider path
+  without promoting it. It still does not reduce mgcv::gam selected-sp calls;
+  the next gate is a subset/full artifact showing whether batched fixed-sp
+  replay reduces provider overhead enough to justify wider skeleton use.
+```
+
 ### 8.4 Continue dCov backend improvement separately
 
 Next dCov steps:
