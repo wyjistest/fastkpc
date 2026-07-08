@@ -1300,6 +1300,68 @@ shows a subset wall-time win. It is still not recommended or default; promotion
 requires a full 351x48 artifact with unchanged replay, zero backend errors, and
 a wall-time win over the current recommended compatible route.
 
+Full 351x48 env-gated guarded residual backend artifact:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_full_351x48_v1
+```
+
+Status:
+
+```text
+status: created
+mode: env-gated backend prototype, not default
+data: real 351x48 fixture, all columns
+n / p: 351 / 48
+alpha: 0.1
+max_conditioning_size: 46
+num_cores: 20
+dCov backend: C++ Spectra
+residual cache: enabled
+residual affinity: s
+residual authority: cpp_guarded for native envelope, legacy regrXonS fallback
+native_s_size_limit: 2
+condition_threshold: 1e300
+
+adjacency_identical: TRUE
+n.edgetests_identical: TRUE
+baseline_n.edgetests: 2213,52659,125293,40694,13293,5422,835,80
+backend_n.edgetests:  2213,52659,125293,40694,13293,5422,835,80
+baseline_edge_count: 110
+backend_edge_count:  110
+
+baseline_elapsed_sec: 898.110
+backend_elapsed_sec:  1067.308
+elapsed_speedup: 0.841x
+residual_request_count: 476552
+cache_hit_count: 203268
+cache_miss_count: 273284
+mgcv_fit_count: 273284
+cpp_backend_count: 273284
+native_count: 157122
+r_fallback_count: 116162
+fallback_count: 116162
+high_condition_fallback_count: 0
+outside_envelope_fallback_count: 116162
+error_count: 0
+
+baseline_residual_worker_ms: 9115972
+backend_residual_worker_ms: 12734441
+legacy_dcov_cpp_backend_count: 239404
+legacy_dcov_cpp_backend_error_count: 0
+legacy_dcov_cpp_backend_fallback_count: 0
+legacy_dcov_cpp_lowrank_spectra_count: 478808
+legacy_dcov_cpp_lowrank_spectra_converged_count: 478808
+legacy_dcov_cpp_lowrank_spectra_failed_count: 0
+```
+
+This full gate is correctness-clean but not performance-viable. The guarded
+backend preserves canonical replay, edge count, `n.edgetests`, dCov backend
+selection, and Spectra convergence, with zero residual backend errors. However,
+full wall time regresses from 898.110 sec to 1067.308 sec and residual worker-ms
+increases from 9.12M to 12.73M. Therefore `cpp_guarded` must remain
+experimental and must not become the recommended compatible route.
+
 #### Gate before production use
 
 ```text
@@ -1761,16 +1823,38 @@ error_count = 0
 baseline_elapsed_sec = 90.126
 backend_elapsed_sec = 73.678
 status: real subset env-gated backend prototype pass; still not production
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_full_351x48_v1 exists
+real 351x48 fixture, full compatible skeleton backend prototype
+env gate = FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded
+adjacency identical = TRUE
+n.edgetests identical = TRUE
+edge_count = 110
+273284 / 273284 cache-miss residual backend targets covered
+native_count = 157122
+r_fallback_count = 116162
+fallback_count = 116162
+outside_envelope_fallback_count = 116162
+error_count = 0
+dCov C++ backend count = 239404
+dCov C++ backend errors/fallbacks = 0 / 0
+Spectra converged/failed = 478808 / 0
+baseline_elapsed_sec = 898.110
+backend_elapsed_sec = 1067.308
+elapsed_speedup = 0.841x
+status: full 351x48 backend prototype correctness pass but performance fail;
+not recommended and still not production
 ```
 
 Next Phase 3 step:
 
 ```text
-run the env-gated cpp_guarded residual backend on the full 351x48 compatible
-skeleton using the current recommended C++ dCov + residual cache + S-affinity
-route. Promotion requires canonical replay unchanged, edge_count = 110 / 110,
-n.edgetests exact, zero residual backend errors, and a wall-time win over the
-current recommended compatible route. The default remains legacy R residuals.
+do not promote FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded. Diagnose why
+the full backend route regresses despite subset speedup: split native setup,
+mgcv gam setup, fixed-sp solve, fallback, and cache-hit/cache-miss timing by
+level and |S|. The likely issue is duplicated setup/extraction cost per target;
+the next viable path is same-S setup reuse or batched guarded setup execution,
+not a global cpp_guarded authority switch.
 ```
 
 ### 8.4 Continue dCov backend improvement separately
