@@ -298,6 +298,24 @@ assert_true(identical(
   as.integer(round_batch_summary$legacy_dcov_cpp_backend_count),
   as.integer(round_batch_summary$legacy_dcov_gamma_count)),
   "round-batched C++ backend count should still match dCov call count")
+round_parallel_fields <- c(
+  "legacy_dcov_cpp_batch_round_enabled",
+  "legacy_dcov_cpp_batch_round_prepare_worker_count",
+  "legacy_dcov_cpp_batch_round_prepare_task_count"
+)
+missing_round_parallel <- setdiff(round_parallel_fields,
+                                  names(round_batch_summary))
+assert_true(length(missing_round_parallel) == 0L,
+            paste("legacy dCov round batch summary missing",
+                  missing_round_parallel[[1L]]))
+assert_true(isTRUE(round_batch_summary$legacy_dcov_cpp_batch_round_enabled),
+            "round-batched dCov C++ backend should report round mode enabled")
+assert_true(round_batch_summary$legacy_dcov_cpp_batch_round_prepare_worker_count >
+              1L,
+            "round-batched dCov should prepare residual inputs with workers")
+assert_true(round_batch_summary$legacy_dcov_cpp_batch_round_prepare_task_count >=
+              round_batch_summary$legacy_dcov_cpp_batch_backend_pair_count,
+            "round-batched dCov prepare task count should cover batched pairs")
 assert_true(!isTRUE(
   chunk_batch_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_enabled),
   "chunk-batched dCov should not enable mgcv same-S setup chunk provider")
