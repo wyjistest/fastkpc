@@ -139,6 +139,17 @@ wall time: regressed badly on full 351x48
 status: experimental only; not recommended
 ```
 
+`FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=chunk` with
+`FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_BATCH_SOLVE=cpp`:
+
+```text
+correctness: passed full 351x48
+fixed-sp batch replay: exercised successfully inside same-S provider
+wall time: only slightly better than same-S chunk baseline, still worse than
+           recommended S-affinity route
+status: experimental only; not recommended
+```
+
 `FASTKPC_FASTSPLINE_EDF_TRACE_MODE=cholesky_cuda`:
 
 ```text
@@ -2831,8 +2842,64 @@ status:
   subset correctness and wall-time pass, but this is not yet a recommended
   route. Worker-sum only improves modestly, provider setup time does not fall,
   and mgcv_fit_count is intentionally unchanged because selected-sp authority
-  remains mgcv::gam. The result is enough to justify a full 351x48 artifact for
-  SAME_S_BATCH_SOLVE=cpp before any promotion decision.
+  remains mgcv::gam. The result was enough to justify the full 351x48 artifact
+  below before any promotion decision.
+```
+
+Provider batch-solve full 351x48 gate:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_batch_provider_full_351x48_v1
+
+real 351x48 fixture, full compatible skeleton
+route:
+  FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded
+  FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=chunk
+  FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_BATCH_SOLVE=cpp
+
+correctness:
+  adjacency_identical = TRUE
+  SHD = 0
+  n.edgetests_exact = TRUE
+  n.edgetests = 2213,52659,125293,40694,13293,5422,835,80
+  edge_count = 110 / 110
+
+performance:
+  elapsed_sec = 1045.958
+  chunk baseline elapsed_sec = 1058.716
+  residual_worker_ms = 11122609
+  chunk baseline residual_worker_ms = 11329001
+  mgcv_fit_count = 273284
+  chunk baseline mgcv_fit_count = 273284
+  cache hits / misses = 336507 / 140045
+
+provider:
+  setup provider groups / targets / templates / reuse / errors =
+    46891 / 133239 / 46891 / 86348 / 0
+  setup_provider_setup_ms = 1048208
+  batch_solve enabled / groups / targets / ms / errors =
+    TRUE / 46891 / 133239 / 4844318 / 0
+  chunk groups / targets / inserts / ms / errors =
+    103359 / 247269 / 133239 / 4977699 / 0
+  backend native / fallback / error targets =
+    157122 / 116162 / 0
+
+dCov:
+  dCov cpp backend count / errors / fallbacks = 239404 / 0 / 0
+  Spectra count / converged / failed = 478808 / 478808 / 0
+
+status:
+  full correctness passes and the route is a small improvement over the
+  same-S chunk baseline:
+
+    1058.716s -> 1045.958s
+
+  It is not a promotion candidate because it remains much slower than the
+  current recommended S-affinity route, which is approximately 882-899s on the
+  same 351x48 gate family. The batch fixed-sp replay branch does not reduce
+  mgcv_fit_count, because selected-sp authority remains per-target mgcv::gam,
+  and R-level chunk/provider overhead still dominates. Keep
+  FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_BATCH_SOLVE=cpp as experimental only.
 ```
 
 ### 8.4 Continue dCov backend improvement separately
