@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <numeric>
 #include <vector>
@@ -22,9 +23,11 @@ double legacy_dcov_elapsed_ms_since(
     std::chrono::steady_clock::now() - start).count();
 }
 
-arma::mat legacy_dcov_distance_matrix(Rcpp::NumericVector values) {
-  const int n = values.size();
-  arma::mat out(n, n, arma::fill::zeros);
+void legacy_dcov_fill_distance_matrix(const double* values,
+                                      int n,
+                                      arma::mat& out) {
+  out.set_size(n, n);
+  out.diag().zeros();
   for (int col = 0; col < n; ++col) {
     const double vc = values[col];
     for (int row = col + 1; row < n; ++row) {
@@ -33,6 +36,11 @@ arma::mat legacy_dcov_distance_matrix(Rcpp::NumericVector values) {
       out(col, row) = dist;
     }
   }
+}
+
+arma::mat legacy_dcov_distance_matrix(const double* values, int n) {
+  arma::mat out;
+  legacy_dcov_fill_distance_matrix(values, n, out);
   return out;
 }
 
@@ -202,15 +210,33 @@ const char* legacy_dcov_lowrank_mode_name(LegacyDcovLowrankMode mode) {
   return mode == LegacyDcovLowrankMode::Spectra ? "spectra" : "full_eig";
 }
 
+struct LegacyDcovGammaCppWorkspace {
+  arma::mat x_distance;
+  arma::mat y_distance;
+  int n = 0;
+  int distance_workspace_reuse_count = 0;
+};
+
 LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute(
     Rcpp::NumericVector x,
     Rcpp::NumericVector y,
     int numCol,
     double index) {
+  if (y.size() != x.size()) Rcpp::stop("Sample sizes must agree");
+  return legacy_dcov_gamma_cpp_compute_workspace(
+    x.begin(), y.begin(), x.size(), numCol, index, nullptr);
+}
+
+LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute_workspace(
+    const double* x,
+    const double* y,
+    int n,
+    int numCol,
+    double index,
+    LegacyDcovGammaCppWorkspace* workspace) {
   const auto total_start = std::chrono::steady_clock::now();
   const auto input_start = std::chrono::steady_clock::now();
-  const int n = x.size();
-  if (y.size() != n) Rcpp::stop("Sample sizes must agree");
+  if (x == nullptr || y == nullptr) Rcpp::stop("Sample sizes must agree");
   if (n <= 5) Rcpp::stop("legacy dCov gamma oracle requires n > 5");
   if (numCol <= 0 || numCol >= n) {
     Rcpp::stop("numCol must be positive and less than sample size");
@@ -224,8 +250,16 @@ LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute(
   const double input_ms = legacy_dcov_elapsed_ms_since(input_start);
 
   const auto distance_start = std::chrono::steady_clock::now();
-  const arma::mat matx = legacy_dcov_distance_matrix(x);
-  const arma::mat maty = legacy_dcov_distance_matrix(y);
+  arma::mat local_matx;
+  arma::mat local_maty;
+  arma::mat& matx = workspace == nullptr ? local_matx : workspace->x_distance;
+  arma::mat& maty = workspace == nullptr ? local_maty : workspace->y_distance;
+  legacy_dcov_fill_distance_matrix(x, n, matx);
+  legacy_dcov_fill_distance_matrix(y, n, maty);
+  if (workspace != nullptr) {
+    workspace->n = n;
+    workspace->distance_workspace_reuse_count += 2;
+  }
   const double distance_ms = legacy_dcov_elapsed_ms_since(distance_start);
 
   const auto lowrank_start = std::chrono::steady_clock::now();
@@ -353,6 +387,136 @@ Rcpp::List legacy_dcov_gamma_cpp_result_to_list(
       Rcpp::Named("unaccounted_ms") =
         std::max(0.0, result.total_ms - result.accounted_ms),
       Rcpp::Named("total_ms") = result.total_ms
+    )
+  );
+}
+
+Rcpp::List legacy_dcov_gamma_cpp_compute_batch(Rcpp::NumericMatrix x,
+                                               Rcpp::NumericMatrix y,
+                                               int numCol,
+                                               double index) {
+  const auto total_start = std::chrono::steady_clock::now();
+  if (x.nrow() != y.nrow() || x.ncol() != y.ncol()) {
+    Rcpp::stop("x and y must have matching dimensions");
+  }
+  const int n = x.nrow();
+  const int batch = x.ncol();
+  Rcpp::NumericVector p_values(batch);
+  Rcpp::NumericVector nV2_values(batch);
+  Rcpp::NumericVector mean_values(batch);
+  Rcpp::NumericVector variance_values(batch);
+  Rcpp::NumericVector estimate_values(batch);
+  double scalar_total_ms = 0.0;
+  double input_ms = 0.0;
+  double distance_ms = 0.0;
+  double lowrank_ms = 0.0;
+  double lowrank_eig_ms = 0.0;
+  double lowrank_select_ms = 0.0;
+  double lowrank_center_ms = 0.0;
+  double lowrank_unaccounted_ms = 0.0;
+  double statistic_ms = 0.0;
+  double moment_ms = 0.0;
+  double pgamma_ms = 0.0;
+  LegacyDcovLowrankTimings lowrank_timings;
+  LegacyDcovGammaCppWorkspace workspace;
+  LegacyDcovLowrankMode lowrank_mode = legacy_dcov_lowrank_mode_from_env();
+  for (int col = 0; col < batch; ++col) {
+    const double* x_col = x.begin() + static_cast<std::ptrdiff_t>(col) * n;
+    const double* y_col = y.begin() + static_cast<std::ptrdiff_t>(col) * n;
+    const LegacyDcovGammaCppResult result =
+      legacy_dcov_gamma_cpp_compute_workspace(
+        x_col, y_col, n, numCol, index, &workspace);
+    p_values[col] = result.p_value;
+    nV2_values[col] = result.nV2;
+    mean_values[col] = result.mean;
+    variance_values[col] = result.variance;
+    estimate_values[col] = result.estimate;
+    scalar_total_ms += result.total_ms;
+    input_ms += result.input_ms;
+    distance_ms += result.distance_ms;
+    lowrank_ms += result.lowrank_ms;
+    lowrank_eig_ms += result.lowrank_timings.eig_ms;
+    lowrank_select_ms += result.lowrank_timings.select_ms;
+    lowrank_center_ms += result.lowrank_timings.center_ms;
+    lowrank_unaccounted_ms += result.lowrank_unaccounted_ms;
+    statistic_ms += result.statistic_ms;
+    moment_ms += result.moment_ms;
+    pgamma_ms += result.pgamma_ms;
+    lowrank_timings.full_eig_count +=
+      result.lowrank_timings.full_eig_count;
+    lowrank_timings.spectra_count += result.lowrank_timings.spectra_count;
+    lowrank_timings.spectra_converged_count +=
+      result.lowrank_timings.spectra_converged_count;
+    lowrank_timings.spectra_failed_count +=
+      result.lowrank_timings.spectra_failed_count;
+    lowrank_timings.spectra_fallback_full_eig_count +=
+      result.lowrank_timings.spectra_fallback_full_eig_count;
+    lowrank_timings.spectra_iterations +=
+      result.lowrank_timings.spectra_iterations;
+    lowrank_timings.spectra_nconv += result.lowrank_timings.spectra_nconv;
+    lowrank_timings.spectra_ncv = std::max(
+      lowrank_timings.spectra_ncv, result.lowrank_timings.spectra_ncv);
+    lowrank_timings.spectra_tol = std::max(
+      lowrank_timings.spectra_tol, result.lowrank_timings.spectra_tol);
+    lowrank_mode = result.lowrank_mode;
+  }
+  const double total_ms = legacy_dcov_elapsed_ms_since(total_start);
+  const double accounted_ms = input_ms + distance_ms + lowrank_ms +
+    statistic_ms + moment_ms + pgamma_ms;
+  const double wrapper_overhead_ms = std::max(0.0, total_ms - scalar_total_ms);
+  const double batch_overhead_ms = std::max(0.0, total_ms - accounted_ms);
+  return Rcpp::List::create(
+    Rcpp::Named("p.value") = p_values,
+    Rcpp::Named("nV2") = nV2_values,
+    Rcpp::Named("mean") = mean_values,
+    Rcpp::Named("variance") = variance_values,
+    Rcpp::Named("statistic") = nV2_values,
+    Rcpp::Named("estimate") = estimate_values,
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("n") = n,
+      Rcpp::Named("batch_count") = batch,
+      Rcpp::Named("numCol") = numCol,
+      Rcpp::Named("index") = index,
+      Rcpp::Named("lowrank_mode") =
+        std::string(legacy_dcov_lowrank_mode_name(lowrank_mode)),
+      Rcpp::Named("input_ms") = input_ms,
+      Rcpp::Named("distance_ms") = distance_ms,
+      Rcpp::Named("lowrank_ms") = lowrank_ms,
+      Rcpp::Named("lowrank_eig_ms") = lowrank_eig_ms,
+      Rcpp::Named("lowrank_select_ms") = lowrank_select_ms,
+      Rcpp::Named("lowrank_center_ms") = lowrank_center_ms,
+      Rcpp::Named("lowrank_unaccounted_ms") = lowrank_unaccounted_ms,
+      Rcpp::Named("lowrank_full_eig_count") =
+        lowrank_timings.full_eig_count,
+      Rcpp::Named("lowrank_spectra_count") =
+        lowrank_timings.spectra_count,
+      Rcpp::Named("lowrank_spectra_converged_count") =
+        lowrank_timings.spectra_converged_count,
+      Rcpp::Named("lowrank_spectra_failed_count") =
+        lowrank_timings.spectra_failed_count,
+      Rcpp::Named("lowrank_spectra_fallback_full_eig_count") =
+        lowrank_timings.spectra_fallback_full_eig_count,
+      Rcpp::Named("lowrank_spectra_iterations") =
+        lowrank_timings.spectra_iterations,
+      Rcpp::Named("lowrank_spectra_nconv") =
+        lowrank_timings.spectra_nconv,
+      Rcpp::Named("lowrank_spectra_ncv") =
+        lowrank_timings.spectra_ncv,
+      Rcpp::Named("lowrank_spectra_tol") =
+        lowrank_timings.spectra_tol,
+      Rcpp::Named("statistic_ms") = statistic_ms,
+      Rcpp::Named("moment_ms") = moment_ms,
+      Rcpp::Named("pgamma_ms") = pgamma_ms,
+      Rcpp::Named("accounted_ms") = accounted_ms,
+      Rcpp::Named("scalar_total_ms") = scalar_total_ms,
+      Rcpp::Named("wrapper_overhead_ms") = wrapper_overhead_ms,
+      Rcpp::Named("batch_overhead_ms") = batch_overhead_ms,
+      Rcpp::Named("workspace_reuse_enabled") = true,
+      Rcpp::Named("distance_workspace_reuse_count") =
+        workspace.distance_workspace_reuse_count,
+      Rcpp::Named("column_copy_count") = 0,
+      Rcpp::Named("unaccounted_ms") = std::max(0.0, total_ms - accounted_ms),
+      Rcpp::Named("total_ms") = total_ms
     )
   );
 }

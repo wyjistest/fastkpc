@@ -48,12 +48,28 @@ struct LegacyDcovGammaCppResult {
   LegacyDcovLowrankTimings lowrank_timings;
 };
 
+struct LegacyDcovGammaCppWorkspace;
+
 LegacyDcovLowrankMode legacy_dcov_lowrank_mode_from_env();
 const char* legacy_dcov_lowrank_mode_name(LegacyDcovLowrankMode mode);
+
+LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute_workspace(
+    const double* x,
+    const double* y,
+    int n,
+    int numCol,
+    double index,
+    LegacyDcovGammaCppWorkspace* workspace);
 
 LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute(
     Rcpp::NumericVector x,
     Rcpp::NumericVector y,
+    int numCol,
+    double index = 1.0);
+
+Rcpp::List legacy_dcov_gamma_cpp_compute_batch(
+    Rcpp::NumericMatrix x,
+    Rcpp::NumericMatrix y,
     int numCol,
     double index = 1.0);
 

@@ -84,7 +84,8 @@ batch_diag_fields <- c(
   "lowrank_spectra_converged_count", "lowrank_spectra_failed_count",
   "lowrank_spectra_fallback_full_eig_count", "statistic_ms", "moment_ms",
   "pgamma_ms", "accounted_ms", "scalar_total_ms", "wrapper_overhead_ms",
-  "batch_overhead_ms", "unaccounted_ms"
+  "batch_overhead_ms", "unaccounted_ms", "workspace_reuse_enabled",
+  "distance_workspace_reuse_count", "column_copy_count"
 )
 missing_batch_diag <- setdiff(batch_diag_fields, names(batch$diagnostics))
 assert_true(length(missing_batch_diag) == 0L,
@@ -122,5 +123,13 @@ assert_true(abs(
     batch$diagnostics$wrapper_overhead_ms
 ) <= 1e-6,
 "batched C++ oracle total time should decompose into scalar and wrapper time")
+assert_true(isTRUE(batch$diagnostics$workspace_reuse_enabled),
+            "batched C++ oracle should report reusable workspace mode")
+assert_true(identical(
+  as.integer(batch$diagnostics$distance_workspace_reuse_count),
+  2L * ncol(x)
+), "batched C++ oracle should reuse x/y distance workspaces per pair")
+assert_true(identical(as.integer(batch$diagnostics$column_copy_count), 0L),
+            "batched C++ oracle should avoid per-column Rcpp vector copies")
 
 cat("PASS legacy dCov gamma C++ batch oracle parity\n")

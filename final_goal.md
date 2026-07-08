@@ -3912,13 +3912,23 @@ FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=chunk exists
 FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=round exists
 ```
 
-The C++ batch oracle is still a scalar-loop batch wrapper, not a real shared
-workspace. It now reports:
+The C++ batch oracle has started moving beyond the original scalar-loop
+wrapper. It now keeps a shared C++ distance workspace across batch columns and
+reads matrix columns by pointer, so the oracle avoids per-column Rcpp vector
+copies while preserving the scalar C++ dCov authority for each pair. It still is
+not a promoted skeleton backend batch route: lowrank/Spectra, centering,
+statistics, and moment work remain per pair, and the full chunk/round skeleton
+batch modes remain experimental until they show a full 351x48 wall-time win.
+
+It reports:
 
 ```text
 scalar_total_ms
 wrapper_overhead_ms
 batch_overhead_ms
+workspace_reuse_enabled
+distance_workspace_reuse_count
+column_copy_count
 stage accounted timing
 lowrank Spectra/full-eig aggregate counts
 ```
@@ -3933,9 +3943,10 @@ Rscript fastkpc/tests/test_precision_compatible_legacy_dcov_cpp_backend.R
 Next implementation target:
 
 ```text
-move batch execution from scalar-loop wrapper toward shared n x n distance,
-centering, and lowrank workspaces while preserving legacy C++ scalar parity and
-the env-gated chunk/round skeleton replay semantics.
+continue moving batch execution from the current shared distance workspace
+toward shared centering, lowrank, statistic, and moment workspaces while
+preserving legacy C++ scalar parity and the env-gated chunk/round skeleton
+replay semantics.
 ```
 
 ---
