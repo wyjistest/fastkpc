@@ -30,6 +30,10 @@ fastkpc_mgcv_setup_shadow_rel_l2 <- function(candidate, oracle) {
   sqrt(sum((candidate - oracle)^2)) / denom
 }
 
+fastkpc_mgcv_setup_shadow_case_value <- function(case, name, default = NA) {
+  if (name %in% names(case)) case[[name]][[1L]] else default
+}
+
 fastkpc_mgcv_setup_shadow_fit_data <- function(data, case) {
   x <- as.integer(case$target_x[[1L]])
   y <- as.integer(case$target_y[[1L]])
@@ -97,6 +101,15 @@ fastkpc_mgcv_setup_shadow_unsupported_row <- function(case, entry,
   data.frame(
     case_id = case$case_id,
     role = case$role,
+    source = fastkpc_mgcv_setup_shadow_case_value(case, "source", ""),
+    source_level =
+      fastkpc_mgcv_setup_shadow_case_value(case, "source_level", NA_integer_),
+    source_pmax =
+      fastkpc_mgcv_setup_shadow_case_value(case, "source_pmax", NA_real_),
+    source_distance_to_alpha =
+      fastkpc_mgcv_setup_shadow_case_value(
+        case, "source_distance_to_alpha", NA_real_
+      ),
     target_x = case$target_x,
     target_y = case$target_y,
     S_key = case$S_key,
@@ -175,6 +188,15 @@ fastkpc_mgcv_setup_shadow_case <- function(data, case, entry, alpha, index,
   data.frame(
     case_id = case$case_id,
     role = case$role,
+    source = fastkpc_mgcv_setup_shadow_case_value(case, "source", ""),
+    source_level =
+      fastkpc_mgcv_setup_shadow_case_value(case, "source_level", NA_integer_),
+    source_pmax =
+      fastkpc_mgcv_setup_shadow_case_value(case, "source_pmax", NA_real_),
+    source_distance_to_alpha =
+      fastkpc_mgcv_setup_shadow_case_value(
+        case, "source_distance_to_alpha", NA_real_
+      ),
     target_x = case$target_x,
     target_y = case$target_y,
     S_key = case$S_key,
@@ -233,6 +255,7 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
     residual_tol = 1e-5,
     p_tol = 1e-5,
     solver = c("mgcv_magic", "cpp"),
+    artifact_name = "mgcv_residual_setup_shadow_v1",
     env = fastkpc_legacy_env()) {
   solver <- match.arg(solver)
   if (!requireNamespace("mgcv", quietly = TRUE)) {
@@ -275,12 +298,16 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
 
   case_rows <- do.call(rbind, rows)
   summary <- data.frame(
-    artifact = "mgcv_residual_setup_shadow_v1",
+    artifact = artifact_name,
     case_count = nrow(case_rows),
     setup_supported_count = sum(case_rows$setup_supported),
+    setup_unsupported_count = sum(!case_rows$setup_supported),
     residual_pair_match_count = sum(case_rows$residual_pair_match),
+    residual_pair_mismatch_count = sum(!case_rows$residual_pair_match),
     dcov_p_match_count = sum(case_rows$dcov_p_match),
+    dcov_p_mismatch_count = sum(!case_rows$dcov_p_match),
     decision_match_count = sum(case_rows$decision_match),
+    decision_mismatch_count = sum(!case_rows$decision_match),
     decision_flip_count = sum(case_rows$decision_flip),
     max_residual_x_abs_diff =
       max(case_rows$residual_x_max_abs_diff, na.rm = TRUE),

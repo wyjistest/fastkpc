@@ -75,49 +75,9 @@ fastkpc_mgcv_oracle_log_s <- function(entry) {
 
 fastkpc_mgcv_oracle_cases_from_skeleton_result <- function(
     result, alpha = 0.1, near_alpha_count = 6L) {
-  skeleton <- result$skeleton
-  if (is.null(skeleton) || is.null(skeleton$per.level.log)) {
-    stop("skeleton result must contain skeleton$per.level.log",
-         call. = FALSE)
-  }
-  pMax <- skeleton$pMax
-  rows <- list()
-  for (level_index in seq_along(skeleton$per.level.log)) {
-    level_logs <- skeleton$per.level.log[[level_index]]
-    if (length(level_logs) == 0L) next
-    source_level <- as.integer(level_index - 1L)
-    for (entry in level_logs) {
-      S <- fastkpc_mgcv_oracle_log_s(entry)
-      if (length(S) == 0L) next
-      x <- as.integer(entry$x[[1L]])
-      y <- as.integer(entry$y[[1L]])
-      p_value <- if (is.matrix(pMax) && x <= nrow(pMax) && y <= ncol(pMax)) {
-        as.numeric(pMax[x, y])
-      } else {
-        NA_real_
-      }
-      rows[[length(rows) + 1L]] <- data.frame(
-        x = x,
-        y = y,
-        S = paste(S, collapse = ","),
-        S_size = length(S),
-        source = "full_351x48_skeleton_deletion",
-        source_level = source_level,
-        source_pmax = p_value,
-        source_distance_to_alpha = abs(p_value - alpha),
-        stringsAsFactors = FALSE
-      )
-    }
-  }
-  if (length(rows) == 0L) {
-    stop("skeleton result did not contain conditional deletion cases",
-         call. = FALSE)
-  }
-  cases <- do.call(rbind, rows)
-  cases <- cases[order(cases$source_distance_to_alpha, cases$S_size,
-                       cases$x, cases$y), , drop = FALSE]
-  cases <- cases[!duplicated(paste(cases$x, cases$y, cases$S, sep = "|")),
-                 , drop = FALSE]
+  cases <- fastkpc_mgcv_oracle_all_cases_from_skeleton_result(
+    result, alpha = alpha
+  )
 
   pick_one <- function(predicate, role) {
     subset <- cases[predicate(cases), , drop = FALSE]
@@ -161,17 +121,132 @@ fastkpc_mgcv_oracle_cases_from_skeleton_result <- function(
   selected <- rbind(selected, near)
   selected <- selected[!duplicated(paste(selected$x, selected$y, selected$S,
                                         sep = "|")), , drop = FALSE]
-  selected$source_case_rank <- seq_len(nrow(selected))
-  selected$case_id <- sprintf(
-    "full351_%02d_s%d_x%d_y%d",
-    selected$source_case_rank, selected$S_size, selected$x, selected$y
+  fastkpc_mgcv_oracle_finalize_cases(selected, prefix = "full351")
+}
+
+fastkpc_mgcv_oracle_all_cases_from_skeleton_result <- function(
+    result, alpha = 0.1) {
+  skeleton <- result$skeleton
+  if (is.null(skeleton) || is.null(skeleton$per.level.log)) {
+    stop("skeleton result must contain skeleton$per.level.log",
+         call. = FALSE)
+  }
+  pMax <- skeleton$pMax
+  rows <- list()
+  for (level_index in seq_along(skeleton$per.level.log)) {
+    level_logs <- skeleton$per.level.log[[level_index]]
+    if (length(level_logs) == 0L) next
+    source_level <- as.integer(level_index - 1L)
+    for (entry in level_logs) {
+      S <- fastkpc_mgcv_oracle_log_s(entry)
+      if (length(S) == 0L) next
+      x <- as.integer(entry$x[[1L]])
+      y <- as.integer(entry$y[[1L]])
+      p_value <- if (is.matrix(pMax) && x <= nrow(pMax) && y <= ncol(pMax)) {
+        as.numeric(pMax[x, y])
+      } else {
+        NA_real_
+      }
+      rows[[length(rows) + 1L]] <- data.frame(
+        x = x,
+        y = y,
+        S = paste(S, collapse = ","),
+        S_size = length(S),
+        source = "full_351x48_skeleton_deletion",
+        source_level = source_level,
+        source_pmax = p_value,
+        source_distance_to_alpha = abs(p_value - alpha),
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  if (length(rows) == 0L) {
+    stop("skeleton result did not contain conditional deletion cases",
+         call. = FALSE)
+  }
+  cases <- do.call(rbind, rows)
+  cases <- cases[order(cases$source_distance_to_alpha, cases$S_size,
+                       cases$x, cases$y), , drop = FALSE]
+  cases <- cases[!duplicated(paste(cases$x, cases$y, cases$S, sep = "|")),
+                 , drop = FALSE]
+  rownames(cases) <- NULL
+  cases
+}
+
+fastkpc_mgcv_oracle_finalize_cases <- function(cases, prefix) {
+  cases$source_case_rank <- seq_len(nrow(cases))
+  cases$case_id <- sprintf(
+    "%s_%02d_s%d_x%d_y%d",
+    prefix, cases$source_case_rank, cases$S_size, cases$x, cases$y
   )
-  selected <- selected[, c(
+  cases <- cases[, c(
     "case_id", "x", "y", "S", "role", "source", "source_level",
     "source_pmax", "source_distance_to_alpha", "source_case_rank"
   ), drop = FALSE]
-  rownames(selected) <- NULL
-  selected
+  rownames(cases) <- NULL
+  cases
+}
+
+fastkpc_mgcv_oracle_expanded_cases_from_skeleton_result <- function(
+    result, alpha = 0.1, near_alpha_count = 12L, per_s_size_count = 6L,
+    per_level_count = 4L, max_cases = 48L) {
+  cases <- fastkpc_mgcv_oracle_all_cases_from_skeleton_result(
+    result, alpha = alpha
+  )
+
+  selected <- list()
+  add_rows <- function(rows, role_prefix) {
+    if (is.null(rows) || nrow(rows) == 0L) return(invisible(NULL))
+    rows <- rows[order(rows$source_distance_to_alpha, -rows$S_size,
+                       rows$x, rows$y), , drop = FALSE]
+    rows$role <- paste0(role_prefix, " rank ", seq_len(nrow(rows)))
+    selected[[length(selected) + 1L]] <<- rows
+    invisible(NULL)
+  }
+
+  near <- cases[order(cases$source_distance_to_alpha,
+                      -cases$S_size, cases$x, cases$y), , drop = FALSE]
+  add_rows(
+    near[seq_len(min(as.integer(near_alpha_count), nrow(near))),
+         , drop = FALSE],
+    "expanded near-alpha deletion"
+  )
+
+  for (s_size in sort(unique(cases$S_size))) {
+    rows <- cases[cases$S_size == s_size, , drop = FALSE]
+    rows <- rows[order(rows$source_distance_to_alpha, rows$x, rows$y),
+                 , drop = FALSE]
+    add_rows(
+      rows[seq_len(min(as.integer(per_s_size_count), nrow(rows))),
+           , drop = FALSE],
+      paste0("expanded |S|=", s_size, " deletion")
+    )
+  }
+
+  for (level in sort(unique(cases$source_level))) {
+    rows <- cases[cases$source_level == level, , drop = FALSE]
+    rows <- rows[order(rows$source_distance_to_alpha, -rows$S_size,
+                       rows$x, rows$y), , drop = FALSE]
+    add_rows(
+      rows[seq_len(min(as.integer(per_level_count), nrow(rows))),
+           , drop = FALSE],
+      paste0("expanded level ", level, " deletion")
+    )
+  }
+
+  max_s <- max(cases$S_size, na.rm = TRUE)
+  add_rows(
+    cases[cases$S_size == max_s, , drop = FALSE],
+    paste0("expanded largest |S|=", max_s, " deletion")
+  )
+
+  selected <- do.call(rbind, selected)
+  selected <- selected[!duplicated(paste(selected$x, selected$y, selected$S,
+                                        sep = "|")), , drop = FALSE]
+  if (is.finite(max_cases) && nrow(selected) > as.integer(max_cases)) {
+    selected <- selected[seq_len(as.integer(max_cases)), , drop = FALSE]
+  }
+  fastkpc_mgcv_oracle_finalize_cases(selected, prefix = "expanded351")
 }
 
 fastkpc_mgcv_oracle_default_cases <- function(

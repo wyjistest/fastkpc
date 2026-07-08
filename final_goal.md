@@ -721,6 +721,61 @@ The next Phase 3C step is to expand this C++ numeric shadow across more
 full-skeleton residual requests and unsupported-envelope diagnostics before
 considering any env-gated residual backend.
 
+Expanded explicit C++ numeric shadow artifact:
+
+```text
+fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_expanded_v1
+```
+
+Status:
+
+```text
+status: created
+mode: shadow only, not authoritative
+source: expanded cases from full 351x48 skeleton deletion log
+case_count: 28
+setup_supported_count: 28
+setup_unsupported_count: 0
+residual_pair_match_count: 27
+residual_pair_mismatch_count: 1
+dcov_p_match_count: 27
+dcov_p_mismatch_count: 1
+decision_match_count: 28
+decision_mismatch_count: 0
+decision_flip_count: 0
+max_residual_x_abs_diff: 0.06386512
+max_residual_y_abs_diff: 1.029583e-10
+max_dcov_p_abs_diff: 0.003665505
+residual_tol: 1e-5
+p_tol: 1e-5
+solver: cpp
+pass: FALSE
+```
+
+Mismatch case:
+
+```text
+case_id: expanded351_22_s4_x8_y9
+source_level: 4
+S_size: 4
+S_key: 1|4|5|6
+target_x: 8
+target_y: 9
+source_pmax / oracle p: 0.1130094
+C++ numeric p: 0.1093439
+p_abs_diff: 0.003665505
+decision_match: TRUE
+setup_status: mismatch
+```
+
+This expanded artifact is deliberately not a promotion gate pass. It proves
+the C++ fixed-sp numeric executor has strong coverage on the sampled full
+skeleton cases and no decision flips, but it also exposes a real deeper-level
+numeric drift envelope. The next Phase 3C work is to isolate this `|S|=4`
+drift against the mgcv `C_magic` self-solve and decide whether the C++ normal
+equation solver needs a closer mgcv-equivalent kernel, stricter supported
+envelope, or fallback policy.
+
 #### Gate before production use
 
 ```text
@@ -1075,14 +1130,20 @@ decision_flip_count = 0
 fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_v1 exists
 8 / 8 extracted setup native C++ numeric replays supported
 decision_flip_count = 0
+
+fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_expanded_v1 exists
+28 / 28 expanded extracted setups supported
+27 / 28 residual pairs match under strict tolerance
+decision_flip_count = 0
+status: diagnostic mismatch present; not promotable
 ```
 
 Next Phase 3 step:
 
 ```text
-expand explicit C++ numeric residual shadow coverage beyond the small oracle
-set, record unsupported-envelope reasons, then decide whether an env-gated
-residual backend is justified
+isolate the expanded `|S|=4` native C++ numeric drift case, compare C++ normal
+equation solve against mgcv C_magic fixed-sp replay, and define either a closer
+mgcv-equivalent C++ solve kernel or a supported-envelope fallback rule
 ```
 
 ### 8.4 Continue dCov backend improvement separately
