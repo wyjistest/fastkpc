@@ -65,9 +65,10 @@ struct LegacyDcovLowrank {
   arma::mat centered_vectors;
 };
 
-LegacyDcovLowrank legacy_dcov_lowrank_full_eig(
+void legacy_dcov_lowrank_full_eig(
     const arma::mat& distance,
     int num_col,
+    LegacyDcovLowrank& output,
     LegacyDcovLowrankTimings* timings = nullptr) {
   const auto eig_start = std::chrono::steady_clock::now();
   arma::vec eigenvalues;
@@ -79,17 +80,17 @@ LegacyDcovLowrank legacy_dcov_lowrank_full_eig(
 
   const auto select_start = std::chrono::steady_clock::now();
   const arma::uvec idx = legacy_dcov_top_abs_eigen_indices(eigenvalues, num_col);
-  arma::mat vectors(distance.n_rows, num_col);
-  arma::vec values(num_col);
+  output.centered_vectors.set_size(distance.n_rows, num_col);
+  output.values.set_size(num_col);
   for (int col = 0; col < num_col; ++col) {
     const arma::uword selected = idx(col);
-    values(col) = eigenvalues(selected);
-    vectors.col(col) = eigenvectors.col(selected);
+    output.values(col) = eigenvalues(selected);
+    output.centered_vectors.col(col) = eigenvectors.col(selected);
   }
   const double select_ms = legacy_dcov_elapsed_ms_since(select_start);
 
   const auto center_start = std::chrono::steady_clock::now();
-  vectors.each_row() -= arma::mean(vectors, 0);
+  output.centered_vectors.each_row() -= arma::mean(output.centered_vectors, 0);
   const double center_ms = legacy_dcov_elapsed_ms_since(center_start);
 
   if (timings != nullptr) {
@@ -98,12 +99,12 @@ LegacyDcovLowrank legacy_dcov_lowrank_full_eig(
     timings->center_ms += center_ms;
     timings->full_eig_count += 1;
   }
-  return LegacyDcovLowrank{values, vectors};
 }
 
-LegacyDcovLowrank legacy_dcov_lowrank_spectra(
+void legacy_dcov_lowrank_spectra(
     const arma::mat& distance,
     int num_col,
+    LegacyDcovLowrank& output,
     LegacyDcovLowrankTimings* timings = nullptr) {
   const int n = static_cast<int>(distance.n_rows);
   const int ncv = std::min(n, std::max(2 * num_col + 1, 20));
@@ -142,41 +143,43 @@ LegacyDcovLowrank legacy_dcov_lowrank_spectra(
     }
   }
   if (!ok) {
-    return legacy_dcov_lowrank_full_eig(distance, num_col, timings);
+    legacy_dcov_lowrank_full_eig(distance, num_col, output, timings);
+    return;
   }
 
   const auto select_start = std::chrono::steady_clock::now();
   const Eigen::VectorXd eigenvalues = eigs.eigenvalues();
   const Eigen::MatrixXd eigenvectors = eigs.eigenvectors();
-  arma::mat vectors(distance.n_rows, num_col);
-  arma::vec values(num_col);
+  output.centered_vectors.set_size(distance.n_rows, num_col);
+  output.values.set_size(num_col);
   for (int col = 0; col < num_col; ++col) {
-    values(col) = eigenvalues(col);
+    output.values(col) = eigenvalues(col);
     for (int row = 0; row < n; ++row) {
-      vectors(row, col) = eigenvectors(row, col);
+      output.centered_vectors(row, col) = eigenvectors(row, col);
     }
   }
   const double select_ms = legacy_dcov_elapsed_ms_since(select_start);
 
   const auto center_start = std::chrono::steady_clock::now();
-  vectors.each_row() -= arma::mean(vectors, 0);
+  output.centered_vectors.each_row() -= arma::mean(output.centered_vectors, 0);
   const double center_ms = legacy_dcov_elapsed_ms_since(center_start);
 
   if (timings != nullptr) {
     timings->select_ms += select_ms;
     timings->center_ms += center_ms;
   }
-  return LegacyDcovLowrank{values, vectors};
 }
 
-LegacyDcovLowrank legacy_dcov_lowrank(const arma::mat& distance,
-                                      int num_col,
-                                      LegacyDcovLowrankMode mode,
-                                      LegacyDcovLowrankTimings* timings = nullptr) {
+void legacy_dcov_lowrank(const arma::mat& distance,
+                         int num_col,
+                         LegacyDcovLowrankMode mode,
+                         LegacyDcovLowrank& output,
+                         LegacyDcovLowrankTimings* timings = nullptr) {
   if (mode == LegacyDcovLowrankMode::Spectra) {
-    return legacy_dcov_lowrank_spectra(distance, num_col, timings);
+    legacy_dcov_lowrank_spectra(distance, num_col, output, timings);
+    return;
   }
-  return legacy_dcov_lowrank_full_eig(distance, num_col, timings);
+  legacy_dcov_lowrank_full_eig(distance, num_col, output, timings);
 }
 
 double legacy_dcov_weighted_cross_sum(const arma::mat& left,
@@ -220,9 +223,12 @@ struct LegacyDcovGammaCppWorkspace {
   arma::mat x_distance;
   arma::mat y_distance;
   arma::mat statistic_moment_cross;
+  LegacyDcovLowrank x_lowrank;
+  LegacyDcovLowrank y_lowrank;
   int n = 0;
   int distance_workspace_reuse_count = 0;
   int statistic_moment_workspace_reuse_count = 0;
+  int lowrank_output_workspace_reuse_count = 0;
 };
 
 LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute(
@@ -274,10 +280,15 @@ LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute_workspace(
   const LegacyDcovLowrankMode lowrank_mode =
     legacy_dcov_lowrank_mode_from_env();
   LegacyDcovLowrankTimings lowrank_timings;
-  const LegacyDcovLowrank x_lowrank = legacy_dcov_lowrank(
-    matx, numCol, lowrank_mode, &lowrank_timings);
-  const LegacyDcovLowrank y_lowrank = legacy_dcov_lowrank(
-    maty, numCol, lowrank_mode, &lowrank_timings);
+  LegacyDcovLowrank local_x_lowrank;
+  LegacyDcovLowrank local_y_lowrank;
+  LegacyDcovLowrank& x_lowrank =
+    workspace == nullptr ? local_x_lowrank : workspace->x_lowrank;
+  LegacyDcovLowrank& y_lowrank =
+    workspace == nullptr ? local_y_lowrank : workspace->y_lowrank;
+  legacy_dcov_lowrank(matx, numCol, lowrank_mode, x_lowrank, &lowrank_timings);
+  legacy_dcov_lowrank(maty, numCol, lowrank_mode, y_lowrank, &lowrank_timings);
+  if (workspace != nullptr) workspace->lowrank_output_workspace_reuse_count += 2;
   const double lowrank_ms = legacy_dcov_elapsed_ms_since(lowrank_start);
   const double lowrank_accounted_ms = lowrank_timings.eig_ms +
     lowrank_timings.select_ms + lowrank_timings.center_ms;
@@ -532,6 +543,8 @@ Rcpp::List legacy_dcov_gamma_cpp_compute_batch(Rcpp::NumericMatrix x,
         workspace.distance_workspace_reuse_count,
       Rcpp::Named("statistic_moment_workspace_reuse_count") =
         workspace.statistic_moment_workspace_reuse_count,
+      Rcpp::Named("lowrank_output_workspace_reuse_count") =
+        workspace.lowrank_output_workspace_reuse_count,
       Rcpp::Named("column_copy_count") = 0,
       Rcpp::Named("unaccounted_ms") = std::max(0.0, total_ms - accounted_ms),
       Rcpp::Named("total_ms") = total_ms
