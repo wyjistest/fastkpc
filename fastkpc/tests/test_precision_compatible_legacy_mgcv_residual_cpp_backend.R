@@ -87,6 +87,21 @@ required <- c(
   "legacy_mgcv_cpp_backend_outside_envelope_fallback_count",
   "legacy_mgcv_cpp_backend_error_count",
   "legacy_mgcv_cpp_backend_ms",
+  "legacy_mgcv_cpp_backend_input_setup_ms",
+  "legacy_mgcv_cpp_backend_gam_fit_ms",
+  "legacy_mgcv_cpp_backend_sp_extract_ms",
+  "legacy_mgcv_cpp_backend_setup_extract_ms",
+  "legacy_mgcv_cpp_backend_condition_ms",
+  "legacy_mgcv_cpp_backend_native_solve_ms",
+  "legacy_mgcv_cpp_backend_fallback_ms",
+  "legacy_mgcv_cpp_backend_s_size_0_count",
+  "legacy_mgcv_cpp_backend_s_size_1_count",
+  "legacy_mgcv_cpp_backend_s_size_2_count",
+  "legacy_mgcv_cpp_backend_s_size_gt2_count",
+  "legacy_mgcv_cpp_backend_native_s_size_0_count",
+  "legacy_mgcv_cpp_backend_native_s_size_1_count",
+  "legacy_mgcv_cpp_backend_native_s_size_2_count",
+  "legacy_mgcv_cpp_backend_fallback_s_size_gt2_count",
   "legacy_mgcv_cpp_backend_native_s_size_limit",
   "legacy_mgcv_cpp_backend_condition_threshold"
 )
@@ -110,6 +125,26 @@ assert_true(summary$legacy_mgcv_cpp_backend_native_count > 0L,
             "backend should use native C++ residual replay for supported S")
 assert_true(summary$legacy_mgcv_cpp_backend_fallback_count == 0L,
             "max conditioning size 2 route should stay inside native envelope")
+assert_true(summary$legacy_mgcv_cpp_backend_input_setup_ms > 0,
+            "backend should report input/formula setup time")
+assert_true(summary$legacy_mgcv_cpp_backend_gam_fit_ms > 0,
+            "backend should report mgcv gam fit time")
+assert_true(summary$legacy_mgcv_cpp_backend_setup_extract_ms > 0,
+            "backend should report setup extraction time")
+assert_true(summary$legacy_mgcv_cpp_backend_condition_ms >= 0,
+            "backend should report condition check time")
+assert_true(summary$legacy_mgcv_cpp_backend_native_solve_ms > 0,
+            "backend should report native fixed-sp solve time")
+assert_true(summary$legacy_mgcv_cpp_backend_fallback_ms == 0,
+            "native-envelope skeleton should not spend fallback time")
+assert_true(summary$legacy_mgcv_cpp_backend_s_size_1_count +
+              summary$legacy_mgcv_cpp_backend_s_size_2_count ==
+              summary$legacy_mgcv_cpp_backend_count,
+            "native-envelope skeleton should account for |S| 1 and 2 calls")
+assert_true(summary$legacy_mgcv_cpp_backend_native_s_size_1_count +
+              summary$legacy_mgcv_cpp_backend_native_s_size_2_count ==
+              summary$legacy_mgcv_cpp_backend_native_count,
+            "native |S| counters should account for native backend calls")
 assert_true(summary$legacy_mgcv_cpp_backend_high_condition_fallback_count == 0L,
             "high-condition fallback should not trigger with loose threshold")
 assert_true(summary$legacy_mgcv_cpp_backend_error_count == 0L,
@@ -155,6 +190,16 @@ assert_true(fallback_summary$mgcv_cpp_backend_error_count == 0L,
             "outside-envelope fallback should not report backend errors")
 assert_true(fallback_summary$mgcv_r_backend_count == 2L,
             "R mgcv residual authority should handle guarded fallbacks")
+assert_true(fallback_summary$mgcv_cpp_backend_s_size_gt2_count == 2L,
+            "outside-envelope fallback should report |S| > 2 backend calls")
+assert_true(fallback_summary$mgcv_cpp_backend_fallback_s_size_gt2_count == 2L,
+            "outside-envelope fallback should report |S| > 2 fallbacks")
+assert_true(fallback_summary$mgcv_cpp_backend_fallback_ms > 0,
+            "outside-envelope fallback should report fallback time")
+assert_true(fallback_summary$mgcv_cpp_backend_gam_fit_ms == 0,
+            "outside-envelope early fallback should skip mgcv setup extraction")
+assert_true(fallback_summary$mgcv_cpp_backend_native_solve_ms == 0,
+            "outside-envelope fallback should not run native fixed-sp solve")
 assert_true(ncol(fallback$residuals) == 2L && nrow(fallback$residuals) == n,
             "direct residual pair fallback should return two residual columns")
 

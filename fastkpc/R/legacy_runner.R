@@ -467,6 +467,25 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_cpp_backend_outside_envelope_fallback_count = 0L,
     mgcv_cpp_backend_error_count = 0L,
     mgcv_cpp_backend_ms = 0,
+    mgcv_cpp_backend_input_setup_ms = 0,
+    mgcv_cpp_backend_gam_fit_ms = 0,
+    mgcv_cpp_backend_sp_extract_ms = 0,
+    mgcv_cpp_backend_setup_extract_ms = 0,
+    mgcv_cpp_backend_condition_ms = 0,
+    mgcv_cpp_backend_native_solve_ms = 0,
+    mgcv_cpp_backend_fallback_ms = 0,
+    mgcv_cpp_backend_s_size_0_count = 0L,
+    mgcv_cpp_backend_s_size_1_count = 0L,
+    mgcv_cpp_backend_s_size_2_count = 0L,
+    mgcv_cpp_backend_s_size_gt2_count = 0L,
+    mgcv_cpp_backend_native_s_size_0_count = 0L,
+    mgcv_cpp_backend_native_s_size_1_count = 0L,
+    mgcv_cpp_backend_native_s_size_2_count = 0L,
+    mgcv_cpp_backend_native_s_size_gt2_count = 0L,
+    mgcv_cpp_backend_fallback_s_size_0_count = 0L,
+    mgcv_cpp_backend_fallback_s_size_1_count = 0L,
+    mgcv_cpp_backend_fallback_s_size_2_count = 0L,
+    mgcv_cpp_backend_fallback_s_size_gt2_count = 0L,
     mgcv_cpp_backend_native_s_size_limit = 0,
     mgcv_cpp_backend_condition_threshold = 0,
     mgcv_cpp_shadow_enabled = 0L,
@@ -931,6 +950,63 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     mgcv_cpp_backend_ms =
       as.numeric(a$mgcv_cpp_backend_ms) +
         as.numeric(b$mgcv_cpp_backend_ms),
+    mgcv_cpp_backend_input_setup_ms =
+      as.numeric(a$mgcv_cpp_backend_input_setup_ms) +
+        as.numeric(b$mgcv_cpp_backend_input_setup_ms),
+    mgcv_cpp_backend_gam_fit_ms =
+      as.numeric(a$mgcv_cpp_backend_gam_fit_ms) +
+        as.numeric(b$mgcv_cpp_backend_gam_fit_ms),
+    mgcv_cpp_backend_sp_extract_ms =
+      as.numeric(a$mgcv_cpp_backend_sp_extract_ms) +
+        as.numeric(b$mgcv_cpp_backend_sp_extract_ms),
+    mgcv_cpp_backend_setup_extract_ms =
+      as.numeric(a$mgcv_cpp_backend_setup_extract_ms) +
+        as.numeric(b$mgcv_cpp_backend_setup_extract_ms),
+    mgcv_cpp_backend_condition_ms =
+      as.numeric(a$mgcv_cpp_backend_condition_ms) +
+        as.numeric(b$mgcv_cpp_backend_condition_ms),
+    mgcv_cpp_backend_native_solve_ms =
+      as.numeric(a$mgcv_cpp_backend_native_solve_ms) +
+        as.numeric(b$mgcv_cpp_backend_native_solve_ms),
+    mgcv_cpp_backend_fallback_ms =
+      as.numeric(a$mgcv_cpp_backend_fallback_ms) +
+        as.numeric(b$mgcv_cpp_backend_fallback_ms),
+    mgcv_cpp_backend_s_size_0_count =
+      as.integer(a$mgcv_cpp_backend_s_size_0_count) +
+        as.integer(b$mgcv_cpp_backend_s_size_0_count),
+    mgcv_cpp_backend_s_size_1_count =
+      as.integer(a$mgcv_cpp_backend_s_size_1_count) +
+        as.integer(b$mgcv_cpp_backend_s_size_1_count),
+    mgcv_cpp_backend_s_size_2_count =
+      as.integer(a$mgcv_cpp_backend_s_size_2_count) +
+        as.integer(b$mgcv_cpp_backend_s_size_2_count),
+    mgcv_cpp_backend_s_size_gt2_count =
+      as.integer(a$mgcv_cpp_backend_s_size_gt2_count) +
+        as.integer(b$mgcv_cpp_backend_s_size_gt2_count),
+    mgcv_cpp_backend_native_s_size_0_count =
+      as.integer(a$mgcv_cpp_backend_native_s_size_0_count) +
+        as.integer(b$mgcv_cpp_backend_native_s_size_0_count),
+    mgcv_cpp_backend_native_s_size_1_count =
+      as.integer(a$mgcv_cpp_backend_native_s_size_1_count) +
+        as.integer(b$mgcv_cpp_backend_native_s_size_1_count),
+    mgcv_cpp_backend_native_s_size_2_count =
+      as.integer(a$mgcv_cpp_backend_native_s_size_2_count) +
+        as.integer(b$mgcv_cpp_backend_native_s_size_2_count),
+    mgcv_cpp_backend_native_s_size_gt2_count =
+      as.integer(a$mgcv_cpp_backend_native_s_size_gt2_count) +
+        as.integer(b$mgcv_cpp_backend_native_s_size_gt2_count),
+    mgcv_cpp_backend_fallback_s_size_0_count =
+      as.integer(a$mgcv_cpp_backend_fallback_s_size_0_count) +
+        as.integer(b$mgcv_cpp_backend_fallback_s_size_0_count),
+    mgcv_cpp_backend_fallback_s_size_1_count =
+      as.integer(a$mgcv_cpp_backend_fallback_s_size_1_count) +
+        as.integer(b$mgcv_cpp_backend_fallback_s_size_1_count),
+    mgcv_cpp_backend_fallback_s_size_2_count =
+      as.integer(a$mgcv_cpp_backend_fallback_s_size_2_count) +
+        as.integer(b$mgcv_cpp_backend_fallback_s_size_2_count),
+    mgcv_cpp_backend_fallback_s_size_gt2_count =
+      as.integer(a$mgcv_cpp_backend_fallback_s_size_gt2_count) +
+        as.integer(b$mgcv_cpp_backend_fallback_s_size_gt2_count),
     mgcv_cpp_backend_native_s_size_limit =
       max(as.numeric(a$mgcv_cpp_backend_native_s_size_limit),
           as.numeric(b$mgcv_cpp_backend_native_s_size_limit)),
@@ -1109,6 +1185,25 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       mgcv_result_store_ms = numeric(), mgcv_unaccounted_ms = numeric(),
       mgcv_s_size_0_count = integer(), mgcv_s_size_1_count = integer(),
       mgcv_s_size_2_count = integer(), mgcv_s_size_gt2_count = integer(),
+      mgcv_cpp_backend_input_setup_ms = numeric(),
+      mgcv_cpp_backend_gam_fit_ms = numeric(),
+      mgcv_cpp_backend_sp_extract_ms = numeric(),
+      mgcv_cpp_backend_setup_extract_ms = numeric(),
+      mgcv_cpp_backend_condition_ms = numeric(),
+      mgcv_cpp_backend_native_solve_ms = numeric(),
+      mgcv_cpp_backend_fallback_ms = numeric(),
+      mgcv_cpp_backend_s_size_0_count = integer(),
+      mgcv_cpp_backend_s_size_1_count = integer(),
+      mgcv_cpp_backend_s_size_2_count = integer(),
+      mgcv_cpp_backend_s_size_gt2_count = integer(),
+      mgcv_cpp_backend_native_s_size_0_count = integer(),
+      mgcv_cpp_backend_native_s_size_1_count = integer(),
+      mgcv_cpp_backend_native_s_size_2_count = integer(),
+      mgcv_cpp_backend_native_s_size_gt2_count = integer(),
+      mgcv_cpp_backend_fallback_s_size_0_count = integer(),
+      mgcv_cpp_backend_fallback_s_size_1_count = integer(),
+      mgcv_cpp_backend_fallback_s_size_2_count = integer(),
+      mgcv_cpp_backend_fallback_s_size_gt2_count = integer(),
       mgcv_fit_count = integer(), dcov_gamma_count = integer()
     ))
   }
@@ -1339,6 +1434,44 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       mgcv_s_size_1_count = as.integer(metrics$mgcv_s_size_1_count),
       mgcv_s_size_2_count = as.integer(metrics$mgcv_s_size_2_count),
       mgcv_s_size_gt2_count = as.integer(metrics$mgcv_s_size_gt2_count),
+      mgcv_cpp_backend_input_setup_ms =
+        as.numeric(metrics$mgcv_cpp_backend_input_setup_ms),
+      mgcv_cpp_backend_gam_fit_ms =
+        as.numeric(metrics$mgcv_cpp_backend_gam_fit_ms),
+      mgcv_cpp_backend_sp_extract_ms =
+        as.numeric(metrics$mgcv_cpp_backend_sp_extract_ms),
+      mgcv_cpp_backend_setup_extract_ms =
+        as.numeric(metrics$mgcv_cpp_backend_setup_extract_ms),
+      mgcv_cpp_backend_condition_ms =
+        as.numeric(metrics$mgcv_cpp_backend_condition_ms),
+      mgcv_cpp_backend_native_solve_ms =
+        as.numeric(metrics$mgcv_cpp_backend_native_solve_ms),
+      mgcv_cpp_backend_fallback_ms =
+        as.numeric(metrics$mgcv_cpp_backend_fallback_ms),
+      mgcv_cpp_backend_s_size_0_count =
+        as.integer(metrics$mgcv_cpp_backend_s_size_0_count),
+      mgcv_cpp_backend_s_size_1_count =
+        as.integer(metrics$mgcv_cpp_backend_s_size_1_count),
+      mgcv_cpp_backend_s_size_2_count =
+        as.integer(metrics$mgcv_cpp_backend_s_size_2_count),
+      mgcv_cpp_backend_s_size_gt2_count =
+        as.integer(metrics$mgcv_cpp_backend_s_size_gt2_count),
+      mgcv_cpp_backend_native_s_size_0_count =
+        as.integer(metrics$mgcv_cpp_backend_native_s_size_0_count),
+      mgcv_cpp_backend_native_s_size_1_count =
+        as.integer(metrics$mgcv_cpp_backend_native_s_size_1_count),
+      mgcv_cpp_backend_native_s_size_2_count =
+        as.integer(metrics$mgcv_cpp_backend_native_s_size_2_count),
+      mgcv_cpp_backend_native_s_size_gt2_count =
+        as.integer(metrics$mgcv_cpp_backend_native_s_size_gt2_count),
+      mgcv_cpp_backend_fallback_s_size_0_count =
+        as.integer(metrics$mgcv_cpp_backend_fallback_s_size_0_count),
+      mgcv_cpp_backend_fallback_s_size_1_count =
+        as.integer(metrics$mgcv_cpp_backend_fallback_s_size_1_count),
+      mgcv_cpp_backend_fallback_s_size_2_count =
+        as.integer(metrics$mgcv_cpp_backend_fallback_s_size_2_count),
+      mgcv_cpp_backend_fallback_s_size_gt2_count =
+        as.integer(metrics$mgcv_cpp_backend_fallback_s_size_gt2_count),
       mgcv_fit_count = as.integer(metrics$mgcv_fit_count),
       dcov_gamma_count = as.integer(metrics$dcov_gamma_count)
     )
@@ -1579,15 +1712,29 @@ fastkpc_legacy_mgcv_residual_cpp_guarded_compute <- function(
   target_data <- as.matrix(target_data)
   s_data <- as.matrix(s_data)
   s_size <- ncol(s_data)
+  timings <- list(
+    input_setup_ms = 0,
+    gam_fit_ms = 0,
+    sp_extract_ms = 0,
+    setup_extract_ms = 0,
+    condition_ms = 0,
+    native_solve_ms = 0,
+    fallback_ms = 0
+  )
 
   fallback <- function(reason, error = FALSE, message = "") {
+    fallback_start <- proc.time()[["elapsed"]]
     residual <- as.numeric(env$regrXonS(target_data, s_data)[, 1L])
+    timings$fallback_ms <<- timings$fallback_ms +
+      (proc.time()[["elapsed"]] - fallback_start) * 1000
     list(
       residual = residual,
       fallback_used = TRUE,
       fallback_reason = reason,
       error = isTRUE(error),
-      message = as.character(message)
+      message = as.character(message),
+      s_size = as.integer(s_size),
+      timings = timings
     )
   }
 
@@ -1599,6 +1746,7 @@ fastkpc_legacy_mgcv_residual_cpp_guarded_compute <- function(
     if (!exists("fastkpc_mgcv_extract_setup", mode = "function")) {
       source("fastkpc/R/mgcv_extract_oracle.R")
     }
+    input_start <- proc.time()[["elapsed"]]
     fit_data <- data.frame(cbind(target_data, s_data))
     colnames(fit_data) <- paste0("x", seq_len(ncol(fit_data)))
     pred <- if (s_size > 0L) seq.int(2L, 1L + s_size) else integer()
@@ -1607,7 +1755,15 @@ fastkpc_legacy_mgcv_residual_cpp_guarded_compute <- function(
     } else {
       env$frml.full.smooth(1L, pred)
     }
+    timings$input_setup_ms <- timings$input_setup_ms +
+      (proc.time()[["elapsed"]] - input_start) * 1000
+
+    gam_start <- proc.time()[["elapsed"]]
     fit <- mgcv::gam(formula, data = fit_data)
+    timings$gam_fit_ms <- timings$gam_fit_ms +
+      (proc.time()[["elapsed"]] - gam_start) * 1000
+
+    sp_start <- proc.time()[["elapsed"]]
     sp <- fastkpc_mgcv_selected_sp(fit, fallback = fit$sp)
     if (length(sp) == 0L || any(!is.finite(sp)) || any(sp <= 0)) {
       stop("mgcv fit did not produce fixed positive sp", call. = FALSE)
@@ -1618,6 +1774,10 @@ fastkpc_legacy_mgcv_residual_cpp_guarded_compute <- function(
       ""
     }
     if (!nzchar(method)) method <- "GCV.Cp"
+    timings$sp_extract_ms <- timings$sp_extract_ms +
+      (proc.time()[["elapsed"]] - sp_start) * 1000
+
+    setup_start <- proc.time()[["elapsed"]]
     setup <- fastkpc_mgcv_extract_setup(
       formula = formula,
       data = fit_data,
@@ -1626,20 +1786,32 @@ fastkpc_legacy_mgcv_residual_cpp_guarded_compute <- function(
       target = 1L,
       S = pred
     )
+    timings$setup_extract_ms <- timings$setup_extract_ms +
+      (proc.time()[["elapsed"]] - setup_start) * 1000
+
+    condition_start <- proc.time()[["elapsed"]]
     normal_condition <- fastkpc_mgcv_fixed_sp_normal_matrix_condition(
       setup, sp = setup$sp
     )
+    timings$condition_ms <- timings$condition_ms +
+      (proc.time()[["elapsed"]] - condition_start) * 1000
     if (is.finite(normal_condition) &&
         normal_condition > condition_threshold) {
       return(fallback("high_normal_matrix_condition"))
     }
+
+    solve_start <- proc.time()[["elapsed"]]
     solution <- fastkpc_mgcv_solve_setup_fixed_sp_cpp(setup)
+    timings$native_solve_ms <- timings$native_solve_ms +
+      (proc.time()[["elapsed"]] - solve_start) * 1000
     list(
       residual = as.numeric(solution$residuals),
       fallback_used = FALSE,
       fallback_reason = "",
       error = FALSE,
-      message = ""
+      message = "",
+      s_size = as.integer(s_size),
+      timings = timings
     )
   }, error = function(e) {
     fallback("native_error", error = TRUE, message = conditionMessage(e))
@@ -1665,6 +1837,44 @@ fastkpc_legacy_mgcv_residual_cpp_backend_target <- function(
   metrics$mgcv_cpp_backend_ms <- metrics$mgcv_cpp_backend_ms +
     (proc.time()[["elapsed"]] - backend_start) * 1000
   metrics$mgcv_cpp_backend_count <- metrics$mgcv_cpp_backend_count + 1L
+  timings <- result$timings
+  if (is.null(timings)) timings <- list()
+  metric_time <- function(name) {
+    value <- timings[[name]]
+    if (is.null(value) || !is.finite(value)) 0 else as.numeric(value)
+  }
+  metrics$mgcv_cpp_backend_input_setup_ms <-
+    metrics$mgcv_cpp_backend_input_setup_ms +
+      metric_time("input_setup_ms")
+  metrics$mgcv_cpp_backend_gam_fit_ms <-
+    metrics$mgcv_cpp_backend_gam_fit_ms + metric_time("gam_fit_ms")
+  metrics$mgcv_cpp_backend_sp_extract_ms <-
+    metrics$mgcv_cpp_backend_sp_extract_ms + metric_time("sp_extract_ms")
+  metrics$mgcv_cpp_backend_setup_extract_ms <-
+    metrics$mgcv_cpp_backend_setup_extract_ms +
+      metric_time("setup_extract_ms")
+  metrics$mgcv_cpp_backend_condition_ms <-
+    metrics$mgcv_cpp_backend_condition_ms + metric_time("condition_ms")
+  metrics$mgcv_cpp_backend_native_solve_ms <-
+    metrics$mgcv_cpp_backend_native_solve_ms +
+      metric_time("native_solve_ms")
+  metrics$mgcv_cpp_backend_fallback_ms <-
+    metrics$mgcv_cpp_backend_fallback_ms + metric_time("fallback_ms")
+  s_size <- as.integer(result$s_size)
+  if (length(s_size) != 1L || is.na(s_size)) s_size <- ncol(as.matrix(s_data))
+  if (s_size == 0L) {
+    metrics$mgcv_cpp_backend_s_size_0_count <-
+      metrics$mgcv_cpp_backend_s_size_0_count + 1L
+  } else if (s_size == 1L) {
+    metrics$mgcv_cpp_backend_s_size_1_count <-
+      metrics$mgcv_cpp_backend_s_size_1_count + 1L
+  } else if (s_size == 2L) {
+    metrics$mgcv_cpp_backend_s_size_2_count <-
+      metrics$mgcv_cpp_backend_s_size_2_count + 1L
+  } else {
+    metrics$mgcv_cpp_backend_s_size_gt2_count <-
+      metrics$mgcv_cpp_backend_s_size_gt2_count + 1L
+  }
   if (isTRUE(result$error)) {
     metrics$mgcv_cpp_backend_error_count <-
       metrics$mgcv_cpp_backend_error_count + 1L
@@ -1673,6 +1883,19 @@ fastkpc_legacy_mgcv_residual_cpp_backend_target <- function(
     metrics$mgcv_cpp_backend_fallback_count <-
       metrics$mgcv_cpp_backend_fallback_count + 1L
     metrics$mgcv_r_backend_count <- metrics$mgcv_r_backend_count + 1L
+    if (s_size == 0L) {
+      metrics$mgcv_cpp_backend_fallback_s_size_0_count <-
+        metrics$mgcv_cpp_backend_fallback_s_size_0_count + 1L
+    } else if (s_size == 1L) {
+      metrics$mgcv_cpp_backend_fallback_s_size_1_count <-
+        metrics$mgcv_cpp_backend_fallback_s_size_1_count + 1L
+    } else if (s_size == 2L) {
+      metrics$mgcv_cpp_backend_fallback_s_size_2_count <-
+        metrics$mgcv_cpp_backend_fallback_s_size_2_count + 1L
+    } else {
+      metrics$mgcv_cpp_backend_fallback_s_size_gt2_count <-
+        metrics$mgcv_cpp_backend_fallback_s_size_gt2_count + 1L
+    }
     if (identical(result$fallback_reason, "high_normal_matrix_condition")) {
       metrics$mgcv_cpp_backend_high_condition_fallback_count <-
         metrics$mgcv_cpp_backend_high_condition_fallback_count + 1L
@@ -1684,6 +1907,19 @@ fastkpc_legacy_mgcv_residual_cpp_backend_target <- function(
   } else {
     metrics$mgcv_cpp_backend_native_count <-
       metrics$mgcv_cpp_backend_native_count + 1L
+    if (s_size == 0L) {
+      metrics$mgcv_cpp_backend_native_s_size_0_count <-
+        metrics$mgcv_cpp_backend_native_s_size_0_count + 1L
+    } else if (s_size == 1L) {
+      metrics$mgcv_cpp_backend_native_s_size_1_count <-
+        metrics$mgcv_cpp_backend_native_s_size_1_count + 1L
+    } else if (s_size == 2L) {
+      metrics$mgcv_cpp_backend_native_s_size_2_count <-
+        metrics$mgcv_cpp_backend_native_s_size_2_count + 1L
+    } else {
+      metrics$mgcv_cpp_backend_native_s_size_gt2_count <-
+        metrics$mgcv_cpp_backend_native_s_size_gt2_count + 1L
+    }
   }
   list(residual = as.numeric(result$residual), metrics = metrics)
 }
@@ -3559,6 +3795,44 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$mgcv_cpp_backend_error_count),
         legacy_mgcv_cpp_backend_ms =
           as.numeric(runtime_total$mgcv_cpp_backend_ms),
+        legacy_mgcv_cpp_backend_input_setup_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_input_setup_ms),
+        legacy_mgcv_cpp_backend_gam_fit_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_gam_fit_ms),
+        legacy_mgcv_cpp_backend_sp_extract_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_sp_extract_ms),
+        legacy_mgcv_cpp_backend_setup_extract_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_setup_extract_ms),
+        legacy_mgcv_cpp_backend_condition_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_condition_ms),
+        legacy_mgcv_cpp_backend_native_solve_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_native_solve_ms),
+        legacy_mgcv_cpp_backend_fallback_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_fallback_ms),
+        legacy_mgcv_cpp_backend_s_size_0_count =
+          as.integer(runtime_total$mgcv_cpp_backend_s_size_0_count),
+        legacy_mgcv_cpp_backend_s_size_1_count =
+          as.integer(runtime_total$mgcv_cpp_backend_s_size_1_count),
+        legacy_mgcv_cpp_backend_s_size_2_count =
+          as.integer(runtime_total$mgcv_cpp_backend_s_size_2_count),
+        legacy_mgcv_cpp_backend_s_size_gt2_count =
+          as.integer(runtime_total$mgcv_cpp_backend_s_size_gt2_count),
+        legacy_mgcv_cpp_backend_native_s_size_0_count =
+          as.integer(runtime_total$mgcv_cpp_backend_native_s_size_0_count),
+        legacy_mgcv_cpp_backend_native_s_size_1_count =
+          as.integer(runtime_total$mgcv_cpp_backend_native_s_size_1_count),
+        legacy_mgcv_cpp_backend_native_s_size_2_count =
+          as.integer(runtime_total$mgcv_cpp_backend_native_s_size_2_count),
+        legacy_mgcv_cpp_backend_native_s_size_gt2_count =
+          as.integer(runtime_total$mgcv_cpp_backend_native_s_size_gt2_count),
+        legacy_mgcv_cpp_backend_fallback_s_size_0_count =
+          as.integer(runtime_total$mgcv_cpp_backend_fallback_s_size_0_count),
+        legacy_mgcv_cpp_backend_fallback_s_size_1_count =
+          as.integer(runtime_total$mgcv_cpp_backend_fallback_s_size_1_count),
+        legacy_mgcv_cpp_backend_fallback_s_size_2_count =
+          as.integer(runtime_total$mgcv_cpp_backend_fallback_s_size_2_count),
+        legacy_mgcv_cpp_backend_fallback_s_size_gt2_count =
+          as.integer(runtime_total$mgcv_cpp_backend_fallback_s_size_gt2_count),
         legacy_mgcv_cpp_backend_native_s_size_limit =
           as.numeric(runtime_total$mgcv_cpp_backend_native_s_size_limit),
         legacy_mgcv_cpp_backend_condition_threshold =

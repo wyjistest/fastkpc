@@ -1362,6 +1362,41 @@ full wall time regresses from 898.110 sec to 1067.308 sec and residual worker-ms
 increases from 9.12M to 12.73M. Therefore `cpp_guarded` must remain
 experimental and must not become the recommended compatible route.
 
+Guarded residual backend timing split diagnostic:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_timing_split_subset_v1
+```
+
+Status:
+
+```text
+status: created
+mode: env-gated backend timing diagnostic
+data: real 351x48 fixture, 12 hot-column subset
+max_conditioning_size: 3
+backend targets: 5380
+native / fallback targets: 4894 / 486
+|S| counts 1 / 2 / >2: 1988 / 2906 / 486
+
+backend_worker_ms: 251446
+input_formula_setup_ms: 98314
+mgcv_gam_fit_ms: 65368
+sp_extract_ms: 101
+setup_extract_ms: 53598
+condition_check_ms: 1850
+native_fixed_sp_solve_ms: 2919
+fallback_regrXonS_ms: 28691
+```
+
+This diagnostic explains the full backend regression. The native C++ fixed-sp
+numeric solve is not the expensive part; on the subset it accounts for only
+about 2.9s worker-ms. The dominant costs are repeated per-target input/formula
+setup, `mgcv::gam`, and setup extraction before the native solve. Therefore the
+next acceleration attempt should reuse or batch same-S setup/extraction work.
+Optimizing the scalar native solve alone will not address the full-route
+regression.
+
 #### Gate before production use
 
 ```text
@@ -1844,17 +1879,31 @@ backend_elapsed_sec = 1067.308
 elapsed_speedup = 0.841x
 status: full 351x48 backend prototype correctness pass but performance fail;
 not recommended and still not production
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_timing_split_subset_v1 exists
+real 351x48 fixture, 12 hot-column subset, backend timing diagnostic
+backend targets = 5380
+native / fallback targets = 4894 / 486
+backend_worker_ms = 251446
+input_formula_setup_ms = 98314
+mgcv_gam_fit_ms = 65368
+setup_extract_ms = 53598
+native_fixed_sp_solve_ms = 2919
+fallback_regrXonS_ms = 28691
+status: regression attributed to repeated per-target setup/extraction, not
+native numeric solve
 ```
 
 Next Phase 3 step:
 
 ```text
-do not promote FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded. Diagnose why
-the full backend route regresses despite subset speedup: split native setup,
-mgcv gam setup, fixed-sp solve, fallback, and cache-hit/cache-miss timing by
-level and |S|. The likely issue is duplicated setup/extraction cost per target;
-the next viable path is same-S setup reuse or batched guarded setup execution,
-not a global cpp_guarded authority switch.
+do not promote FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded. The regression
+is now attributed to repeated per-target setup/extraction, not the native
+fixed-sp numeric solve. The next viable Phase 3 step is a same-S guarded setup
+reuse diagnostic/prototype: enumerate targets sharing each conditioning set,
+build or extract setup once per S where semantics allow it, and measure whether
+batched target residual solves can preserve canonical replay while reducing
+setup/gam/extraction worker-ms. Keep the default route unchanged.
 ```
 
 ### 8.4 Continue dCov backend improvement separately
