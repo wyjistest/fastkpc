@@ -62,7 +62,20 @@ required <- c(
   "case_id", "S_size", "formula_route", "residual_x_match",
   "residual_y_match", "residual_pair_match", "dcov_p_oracle",
   "dcov_p_replay", "dcov_p_abs_diff", "decision_oracle",
-  "decision_replay", "decision_match", "replay_status"
+  "decision_replay", "decision_match",
+  "dcov_alpha_oracle", "dcov_alpha_replay",
+  "dcov_log_alpha_distance_oracle", "dcov_log_alpha_distance_replay",
+  "conditioning_rank_oracle", "conditioning_rank_replay",
+  "conditioning_rank_deficient_oracle",
+  "conditioning_rank_deficient_replay",
+  "near_constant_column_count_oracle",
+  "near_constant_column_count_replay",
+  "target_near_constant_count_oracle",
+  "target_near_constant_count_replay",
+  "lpmatrix_rank_x_oracle", "lpmatrix_rank_x_replay",
+  "lpmatrix_rank_y_oracle", "lpmatrix_rank_y_replay",
+  "smooth_labels_x_oracle", "smooth_labels_x_replay",
+  "replay_status"
 )
 missing_fields <- setdiff(required, names(artifact$cases))
 assert_true(length(missing_fields) == 0L,
@@ -76,8 +89,28 @@ assert_true(all(artifact$cases$decision_match),
             "replay spec should not flip oracle decisions")
 assert_true(max(artifact$cases$dcov_p_abs_diff) <= 1e-12,
             "replay spec should reproduce oracle dCov p-values")
+assert_true(all(artifact$cases$dcov_alpha_oracle == 0.1),
+            "replay spec should preserve oracle alpha")
+assert_true(all(artifact$cases$dcov_alpha_replay == 0.1),
+            "replay spec should record replay alpha")
+assert_true(all(is.finite(artifact$cases$dcov_log_alpha_distance_oracle)),
+            "replay spec should preserve oracle log-alpha distance")
+assert_true(all(artifact$cases$conditioning_rank_oracle ==
+                  artifact$cases$conditioning_rank_replay),
+            "replay spec should preserve conditioning rank diagnostics")
+assert_true(all(artifact$cases$lpmatrix_rank_x_replay > 0L),
+            "replay spec should record replay lpmatrix rank diagnostics")
 
 summary <- artifact$summary
+required_summary <- c(
+  "rank_deficient_case_count",
+  "near_constant_case_count",
+  "min_dcov_log_alpha_distance_oracle",
+  "min_dcov_log_alpha_distance_replay"
+)
+missing_summary <- setdiff(required_summary, names(summary))
+assert_true(length(missing_summary) == 0L,
+            paste("replay summary missing", missing_summary[[1L]]))
 assert_true(summary$case_count[[1L]] == nrow(cases),
             "replay summary should count cases")
 assert_true(summary$residual_pair_match_count[[1L]] == nrow(cases),
@@ -86,5 +119,7 @@ assert_true(summary$decision_flip_count[[1L]] == 0L,
             "replay summary should report no decision flips")
 assert_true(summary$pass[[1L]],
             "replay summary should pass when residual and decisions match")
+assert_true(summary$min_dcov_log_alpha_distance_oracle[[1L]] >= 0,
+            "replay summary should record oracle alpha-distance risk")
 
 cat("PASS mgcv residual replay spec\n")

@@ -974,7 +974,22 @@ max_dcov_p_abs_diff: 0
 pass: TRUE
 ```
 
-This is an executable R-level replay spec over the current `mgcv_residual_oracle_v1` cases. It replays the same legacy formula route, residual generation, downstream legacy dCov p-value, and alpha decision. It is not a replacement residual backend.
+Current replay artifact schema also carries the oracle/replay envelope
+diagnostics added to `mgcv_residual_oracle_v1`:
+
+```text
+dcov alpha and log-alpha distance
+conditioning rank / rank-deficient flags
+near-constant conditioning / target counts
+lpmatrix rank / rank-deficient flags
+smooth labels and smooth counts
+summary-level rank-deficient / near-constant counts
+```
+
+This is an executable R-level replay spec over the current
+`mgcv_residual_oracle_v1` cases. It replays the same legacy formula route,
+residual generation, downstream legacy dCov p-value, alpha decision, and
+envelope diagnostics. It is not a replacement residual backend.
 
 #### Gate
 
@@ -3341,6 +3356,11 @@ fastkpc/artifacts/mgcv_residual_replay_spec_v1 exists
 8 / 8 residual pairs match
 8 / 8 dCov p-values match
 decision_flip_count = 0
+rank_deficient_case_count = 0
+lpmatrix_rank_deficient_case_count = 0
+near_constant_case_count = 0
+min_dcov_log_alpha_distance_oracle = 0.0001601918
+min_dcov_log_alpha_distance_replay = 0.0001601918
 
 fastkpc/artifacts/mgcv_residual_cpp_shadow_v1 exists
 8 / 8 captured setup C++ replays supported
@@ -3566,6 +3586,18 @@ dCov cpp backend count / errors / fallbacks = 239404 / 0 / 0
 Spectra count / converged / failed = 478808 / 478808 / 0
 status: full correctness pass but wall-time and residual worker-ms fail; do not
 promote. The current prefill vehicle overcomputes 128735 unused residual keys.
+```
+
+Gate:
+
+```bash
+Rscript fastkpc/tests/test_mgcv_residual_replay_spec.R
+```
+
+Default artifact generation:
+
+```bash
+Rscript fastkpc/tools/run_mgcv_residual_replay_spec.R
 ```
 
 Next Phase 3 step:
