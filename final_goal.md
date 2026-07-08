@@ -659,6 +659,74 @@ use a broader level/round-local dCov batching plan that can approach the
 observed level-local shape groups while preserving canonical replay.
 ```
 
+Round-local batch potential diagnostic:
+
+```text
+fastkpc/artifacts/legacy_dcov_gamma_cpp_round_batch_potential_v1
+
+route:
+  FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=spectra
+  FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE=1
+  FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY=s
+
+correctness:
+  edge_count = 110 / 110
+  adjacency_identical = TRUE
+  SHD = 0
+  n.edgetests exact = TRUE
+  n.edgetests = 2213,52659,125293,40694,13293,5422,835,80
+  dCov cpp backend count / errors / fallbacks = 239404 / 0 / 0
+  Spectra count / converged / failed = 478808 / 478808 / 0
+
+runtime:
+  elapsed_sec = 917.610
+  residual_worker_ms = 9122027
+  mgcv_fit_count = 273284
+  cache hits / misses = 203268 / 273284
+  dCov cpp backend ms = 4200561
+
+level-shape potential:
+  calls / groups = 239404 / 8
+  max / mean group size = 125293 / 29925.5
+  reuse / ratio = 239396 / 0.9999666
+
+round-local potential:
+  calls / rounds = 239404 / 4059
+  max / mean round size = 1128 / 58.9810
+  reuse / ratio = 235345 / 0.9830454
+```
+
+By-level round-local potential:
+
+```text
+level 0: calls 1128   -> rounds    1, max 1128, mean 1128.000
+level 1: calls 52659  -> rounds   92, max 1085, mean  572.380
+level 2: calls 125293 -> rounds 1126, max  539, mean  111.273
+level 3: calls 40694  -> rounds 1529, max  193, mean   26.615
+level 4: calls 13293  -> rounds  750, max  127, mean   17.724
+level 5: calls 5422   -> rounds  468, max   79, mean   11.585
+level 6: calls 835    -> rounds   85, max   23, mean    9.824
+level 7: calls 80     -> rounds    8, max   17, mean   10.000
+```
+
+Conclusion:
+
+```text
+The round-local diagnostic narrows the next implementation target. The
+worker-chunk prototype produced 54,233 batch calls with mean batch size 4.39.
+The synchronous round-local potential reduces that to 4,059 candidate batches
+with mean batch size 58.98 while preserving the exact set of executed dCov
+tests. This is still far from the theoretical 8 level-local shape groups, but
+it is a much more realistic execution boundary because edge deletion can be
+replayed after each round.
+
+The next Phase 2A implementation should target an env-gated round-local dCov
+batch scheduler, not worker-chunk batching. It must preserve per-edge state,
+apply p-values after each synchronous round, and keep the parent canonical
+replay semantics unchanged.
+```
+
 #### Artifact
 
 ```text

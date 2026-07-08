@@ -144,7 +144,13 @@ batch_potential_fields <- c(
   "legacy_dcov_cpp_batch_potential_max_group_size",
   "legacy_dcov_cpp_batch_potential_mean_group_size",
   "legacy_dcov_cpp_batch_potential_reuse_opportunity_count",
-  "legacy_dcov_cpp_batch_potential_reuse_ratio"
+  "legacy_dcov_cpp_batch_potential_reuse_ratio",
+  "legacy_dcov_cpp_round_batch_potential_call_count",
+  "legacy_dcov_cpp_round_batch_potential_round_count",
+  "legacy_dcov_cpp_round_batch_potential_max_round_size",
+  "legacy_dcov_cpp_round_batch_potential_mean_round_size",
+  "legacy_dcov_cpp_round_batch_potential_reuse_opportunity_count",
+  "legacy_dcov_cpp_round_batch_potential_reuse_ratio"
 )
 missing_batch_potential <- setdiff(batch_potential_fields, names(cpp_summary))
 assert_true(length(missing_batch_potential) == 0L,
@@ -172,6 +178,29 @@ assert_true(identical(
 assert_true(cpp_summary$legacy_dcov_cpp_batch_potential_reuse_ratio >= 0 &&
               cpp_summary$legacy_dcov_cpp_batch_potential_reuse_ratio < 1,
             "dCov batch potential reuse ratio should be in [0, 1)")
+assert_true(identical(
+  as.integer(cpp_summary$legacy_dcov_cpp_round_batch_potential_call_count),
+  as.integer(cpp_summary$legacy_dcov_cpp_backend_count)),
+  "dCov round-batch potential call count should match C++ backend calls")
+assert_true(cpp_summary$legacy_dcov_cpp_round_batch_potential_round_count > 0L,
+            "dCov round-batch potential should report rounds")
+assert_true(cpp_summary$legacy_dcov_cpp_round_batch_potential_round_count <=
+              cpp_summary$legacy_dcov_cpp_round_batch_potential_call_count,
+            "dCov round-batch potential rounds should not exceed calls")
+assert_true(cpp_summary$legacy_dcov_cpp_round_batch_potential_max_round_size >=
+              cpp_summary$legacy_dcov_cpp_round_batch_potential_mean_round_size,
+            "dCov round-batch potential max round size should dominate mean")
+assert_true(cpp_summary$legacy_dcov_cpp_round_batch_potential_mean_round_size >=
+              1,
+            "dCov round-batch potential mean round size should be positive")
+assert_true(identical(
+  as.integer(cpp_summary$legacy_dcov_cpp_round_batch_potential_reuse_opportunity_count),
+  as.integer(cpp_summary$legacy_dcov_cpp_round_batch_potential_call_count -
+               cpp_summary$legacy_dcov_cpp_round_batch_potential_round_count)),
+  "dCov round-batch potential reuse should be calls minus rounds")
+assert_true(cpp_summary$legacy_dcov_cpp_round_batch_potential_reuse_ratio >= 0 &&
+              cpp_summary$legacy_dcov_cpp_round_batch_potential_reuse_ratio < 1,
+            "dCov round-batch potential reuse ratio should be in [0, 1)")
 
 Sys.setenv(
   FASTKPC_LEGACY_DCOV_GAMMA_BACKEND = "cpp",

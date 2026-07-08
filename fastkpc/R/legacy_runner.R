@@ -375,6 +375,12 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_cpp_batch_potential_mean_group_size = 0,
     dcov_cpp_batch_potential_reuse_opportunity_count = 0L,
     dcov_cpp_batch_potential_reuse_ratio = 0,
+    dcov_cpp_round_batch_potential_call_count = 0L,
+    dcov_cpp_round_batch_potential_round_count = 0L,
+    dcov_cpp_round_batch_potential_max_round_size = 0L,
+    dcov_cpp_round_batch_potential_mean_round_size = 0,
+    dcov_cpp_round_batch_potential_reuse_opportunity_count = 0L,
+    dcov_cpp_round_batch_potential_reuse_ratio = 0,
     dcov_cpp_batch_backend_enabled = 0L,
     dcov_cpp_batch_backend_count = 0L,
     dcov_cpp_batch_backend_pair_count = 0L,
@@ -763,6 +769,44 @@ fastkpc_legacy_runtime_add <- function(a, b) {
       if (total_calls > 0L) {
         (as.integer(a$dcov_cpp_batch_potential_reuse_opportunity_count) +
            as.integer(b$dcov_cpp_batch_potential_reuse_opportunity_count)) /
+          total_calls
+      } else {
+        0
+      }
+    },
+    dcov_cpp_round_batch_potential_call_count =
+      as.integer(a$dcov_cpp_round_batch_potential_call_count) +
+        as.integer(b$dcov_cpp_round_batch_potential_call_count),
+    dcov_cpp_round_batch_potential_round_count =
+      as.integer(a$dcov_cpp_round_batch_potential_round_count) +
+        as.integer(b$dcov_cpp_round_batch_potential_round_count),
+    dcov_cpp_round_batch_potential_max_round_size =
+      max(as.integer(a$dcov_cpp_round_batch_potential_max_round_size),
+          as.integer(b$dcov_cpp_round_batch_potential_max_round_size)),
+    dcov_cpp_round_batch_potential_mean_round_size = {
+      total_rounds <-
+        as.integer(a$dcov_cpp_round_batch_potential_round_count) +
+        as.integer(b$dcov_cpp_round_batch_potential_round_count)
+      if (total_rounds > 0L) {
+        (as.numeric(a$dcov_cpp_round_batch_potential_mean_round_size) *
+           as.integer(a$dcov_cpp_round_batch_potential_round_count) +
+           as.numeric(b$dcov_cpp_round_batch_potential_mean_round_size) *
+             as.integer(b$dcov_cpp_round_batch_potential_round_count)) /
+          total_rounds
+      } else {
+        0
+      }
+    },
+    dcov_cpp_round_batch_potential_reuse_opportunity_count =
+      as.integer(a$dcov_cpp_round_batch_potential_reuse_opportunity_count) +
+        as.integer(b$dcov_cpp_round_batch_potential_reuse_opportunity_count),
+    dcov_cpp_round_batch_potential_reuse_ratio = {
+      total_calls <-
+        as.integer(a$dcov_cpp_round_batch_potential_call_count) +
+        as.integer(b$dcov_cpp_round_batch_potential_call_count)
+      if (total_calls > 0L) {
+        (as.integer(a$dcov_cpp_round_batch_potential_reuse_opportunity_count) +
+           as.integer(b$dcov_cpp_round_batch_potential_reuse_opportunity_count)) /
           total_calls
       } else {
         0
@@ -1566,6 +1610,12 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_batch_potential_mean_group_size = numeric(),
       dcov_cpp_batch_potential_reuse_opportunity_count = integer(),
       dcov_cpp_batch_potential_reuse_ratio = numeric(),
+      dcov_cpp_round_batch_potential_call_count = integer(),
+      dcov_cpp_round_batch_potential_round_count = integer(),
+      dcov_cpp_round_batch_potential_max_round_size = integer(),
+      dcov_cpp_round_batch_potential_mean_round_size = numeric(),
+      dcov_cpp_round_batch_potential_reuse_opportunity_count = integer(),
+      dcov_cpp_round_batch_potential_reuse_ratio = numeric(),
       dcov_cpp_batch_backend_enabled = integer(),
       dcov_cpp_batch_backend_count = integer(),
       dcov_cpp_batch_backend_pair_count = integer(),
@@ -1815,6 +1865,18 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.integer(metrics$dcov_cpp_batch_potential_reuse_opportunity_count),
       dcov_cpp_batch_potential_reuse_ratio =
         as.numeric(metrics$dcov_cpp_batch_potential_reuse_ratio),
+      dcov_cpp_round_batch_potential_call_count =
+        as.integer(metrics$dcov_cpp_round_batch_potential_call_count),
+      dcov_cpp_round_batch_potential_round_count =
+        as.integer(metrics$dcov_cpp_round_batch_potential_round_count),
+      dcov_cpp_round_batch_potential_max_round_size =
+        as.integer(metrics$dcov_cpp_round_batch_potential_max_round_size),
+      dcov_cpp_round_batch_potential_mean_round_size =
+        as.numeric(metrics$dcov_cpp_round_batch_potential_mean_round_size),
+      dcov_cpp_round_batch_potential_reuse_opportunity_count =
+        as.integer(metrics$dcov_cpp_round_batch_potential_reuse_opportunity_count),
+      dcov_cpp_round_batch_potential_reuse_ratio =
+        as.numeric(metrics$dcov_cpp_round_batch_potential_reuse_ratio),
       dcov_cpp_batch_backend_enabled =
         as.integer(metrics$dcov_cpp_batch_backend_enabled),
       dcov_cpp_batch_backend_count =
@@ -4504,6 +4566,39 @@ fastkpc_legacy_runtime_finalize_dcov_cpp_batch_potential <- function(metrics) {
   metrics
 }
 
+fastkpc_legacy_runtime_add_dcov_cpp_round_batch_potential <- function(
+    metrics, edge_call_counts) {
+  edge_call_counts <- as.integer(edge_call_counts)
+  edge_call_counts <- edge_call_counts[is.finite(edge_call_counts) &
+                                         edge_call_counts > 0L]
+  if (length(edge_call_counts) == 0L) return(metrics)
+
+  call_count <- sum(edge_call_counts)
+  round_count <- max(edge_call_counts)
+  round_sizes <- vapply(
+    seq_len(round_count),
+    function(round_idx) sum(edge_call_counts >= round_idx),
+    integer(1L)
+  )
+  metrics$dcov_cpp_round_batch_potential_call_count <-
+    as.integer(call_count)
+  metrics$dcov_cpp_round_batch_potential_round_count <-
+    as.integer(round_count)
+  metrics$dcov_cpp_round_batch_potential_max_round_size <-
+    as.integer(max(round_sizes))
+  metrics$dcov_cpp_round_batch_potential_mean_round_size <-
+    as.numeric(mean(round_sizes))
+  metrics$dcov_cpp_round_batch_potential_reuse_opportunity_count <-
+    as.integer(call_count - round_count)
+  metrics$dcov_cpp_round_batch_potential_reuse_ratio <-
+    if (call_count > 0L) {
+      as.numeric(call_count - round_count) / as.numeric(call_count)
+    } else {
+      0
+    }
+  metrics
+}
+
 fastkpc_legacy_dcov_cpp_shadow_enabled <- function() {
   identical(Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SHADOW", unset = ""), "1")
 }
@@ -5645,6 +5740,7 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     mgcv_s_key_chunks <- list()
     mgcv_residual_keys_by_worker <- vector("list", workers)
     mgcv_split_residual_keys_by_worker <- vector("list", workers)
+    dcov_call_counts_by_edge <- integer()
     for (p_obj in res) {
       i <- p_obj[[1L]]
       x <- ind[i, 1L]
@@ -5662,6 +5758,12 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
       }
       done <- done & p_obj[[8L]]
       edge_metrics <- p_obj[[9L]]
+      dcov_call_counts_by_edge[[length(dcov_call_counts_by_edge) + 1L]] <-
+        as.integer(max(
+          0L,
+          as.integer(p_obj[[5L]]) -
+            as.integer(edge_metrics$fake_level0_test_count)
+        ))
       if (length(edge_metrics$mgcv_residual_keys) > 0L) {
         if (isTRUE(affinity_enabled)) {
           worker_id <- affinity_worker_by_edge[[as.character(i)]]
@@ -5707,6 +5809,12 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     metrics_level <- fastkpc_legacy_runtime_finalize_dcov_cpp_batch_potential(
       metrics_level
     )
+    if (identical(dcov_backend, "cpp")) {
+      metrics_level <-
+        fastkpc_legacy_runtime_add_dcov_cpp_round_batch_potential(
+          metrics_level, dcov_call_counts_by_edge
+        )
+    }
     metrics_level <- fastkpc_legacy_runtime_finalize_mgcv_keys(metrics_level)
     if (isTRUE(mgcv_residual_prefetch_level_enabled)) {
       prefetched_keys <- mgcv_residual_prefetch_cache$keys
@@ -5987,6 +6095,18 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$dcov_cpp_batch_potential_reuse_opportunity_count),
         legacy_dcov_cpp_batch_potential_reuse_ratio =
           as.numeric(runtime_total$dcov_cpp_batch_potential_reuse_ratio),
+        legacy_dcov_cpp_round_batch_potential_call_count =
+          as.integer(runtime_total$dcov_cpp_round_batch_potential_call_count),
+        legacy_dcov_cpp_round_batch_potential_round_count =
+          as.integer(runtime_total$dcov_cpp_round_batch_potential_round_count),
+        legacy_dcov_cpp_round_batch_potential_max_round_size =
+          as.integer(runtime_total$dcov_cpp_round_batch_potential_max_round_size),
+        legacy_dcov_cpp_round_batch_potential_mean_round_size =
+          as.numeric(runtime_total$dcov_cpp_round_batch_potential_mean_round_size),
+        legacy_dcov_cpp_round_batch_potential_reuse_opportunity_count =
+          as.integer(runtime_total$dcov_cpp_round_batch_potential_reuse_opportunity_count),
+        legacy_dcov_cpp_round_batch_potential_reuse_ratio =
+          as.numeric(runtime_total$dcov_cpp_round_batch_potential_reuse_ratio),
         legacy_dcov_cpp_batch_backend_enabled =
           isTRUE(as.integer(runtime_total$dcov_cpp_batch_backend_enabled) > 0L),
         legacy_dcov_cpp_batch_backend_count =
