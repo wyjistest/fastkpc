@@ -42,6 +42,54 @@ fastkpc_normalize_data <- function(data, labels = NULL) {
   )
 }
 
+fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
+                                             options = list()) {
+  if (!is.list(options)) {
+    stop("options must be a list", call. = FALSE)
+  }
+  allowed_options <- c("max_conditioning_size", "index", "numCol",
+                       "trace_level", "dcov_batch")
+  unknown_options <- setdiff(names(options), allowed_options)
+  if (length(unknown_options) > 0L) {
+    stop("unknown compatible CUDA option(s): ",
+         paste(unknown_options, collapse = ","), call. = FALSE)
+  }
+  if (is.null(options$max_conditioning_size)) {
+    stop("options$max_conditioning_size must be supplied", call. = FALSE)
+  }
+
+  normalized <- fastkpc_normalize_data(data, labels = labels)
+  data <- normalized$data
+  labels <- normalized$info$labels
+  index <- options$index %||% 1
+  numCol <- options$numCol %||% floor(nrow(data) / 10)
+  trace_level <- options$trace_level %||% "summary"
+  dcov_batch <- options$dcov_batch %||% "env"
+
+  result <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
+    data = data,
+    alpha = alpha,
+    max_conditioning_size = as.integer(options$max_conditioning_size),
+    index = index,
+    numCol = numCol,
+    trace_level = trace_level,
+    dcov_batch = dcov_batch
+  )
+  dimnames(result$adjacency) <- list(labels, labels)
+  dimnames(result$pMax) <- list(labels, labels)
+  names(result$sepsets) <- labels
+  result$sepsets <- lapply(result$sepsets, function(row) {
+    names(row) <- labels
+    row
+  })
+  result$summary$native_entrypoint <- result$summary$entrypoint
+  result$summary$compatible_cuda_facade <- TRUE
+  result$summary$compatible_cuda_entrypoint <-
+    "fastkpc-compatible-cuda-skeleton"
+  result$summary$labels <- labels
+  result
+}
+
 fastkpc_resolve_engine <- function(engine) {
   engine <- match.arg(engine, c("auto", "cuda", "cpu"))
   if (engine != "auto") return(engine)

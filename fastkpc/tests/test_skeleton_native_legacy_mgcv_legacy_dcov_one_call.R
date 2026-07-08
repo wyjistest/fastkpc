@@ -87,6 +87,19 @@ one_call_batch <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
   dcov_batch = "level"
 )
 
+facade <- fastkpc_compatible_cuda_skeleton(
+  data = data,
+  alpha = alpha,
+  labels = colnames(data),
+  options = list(
+    max_conditioning_size = max_conditioning_size,
+    index = index,
+    numCol = numCol,
+    trace_level = "full",
+    dcov_batch = "level"
+  )
+)
+
 Sys.setenv(FASTKPC_NATIVE_LEGACY_DCOV_BATCH = "level")
 one_call_none <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
   data = data,
@@ -106,22 +119,31 @@ assert_true(identical(one_call$adjacency, explicit$adjacency),
             "one-call legacy mgcv legacy dCov adjacency should match explicit provider")
 assert_true(identical(one_call_batch$adjacency, explicit$adjacency),
             "one-call level-batched legacy dCov adjacency should match explicit provider")
+assert_true(identical(unname(facade$adjacency), unname(explicit$adjacency)),
+            "compatible CUDA facade adjacency should match explicit provider")
 assert_true(identical(one_call_none$adjacency, explicit$adjacency),
             "one-call dcov_batch='none' adjacency should match explicit provider")
 assert_true(max(abs(one_call$pMax - explicit$pMax)) < 1e-12,
             "one-call legacy mgcv legacy dCov pMax should match explicit provider")
 assert_true(max(abs(one_call_batch$pMax - explicit$pMax)) < 1e-12,
             "one-call level-batched legacy dCov pMax should match explicit provider")
+assert_true(max(abs(unname(facade$pMax) - unname(explicit$pMax))) < 1e-12,
+            "compatible CUDA facade pMax should match explicit provider")
 assert_true(identical(as.integer(one_call$n.edgetests),
                       as.integer(explicit$n.edgetests)),
             "one-call legacy mgcv legacy dCov n.edgetests should match explicit provider")
 assert_true(identical(as.integer(one_call_batch$n.edgetests),
                       as.integer(explicit$n.edgetests)),
             "one-call level-batched legacy dCov n.edgetests should match explicit provider")
+assert_true(identical(as.integer(facade$n.edgetests),
+                      as.integer(explicit$n.edgetests)),
+            "compatible CUDA facade n.edgetests should match explicit provider")
 assert_true(compare_sepsets(one_call$sepsets, explicit$sepsets),
             "one-call legacy mgcv legacy dCov sepsets should match explicit provider")
 assert_true(compare_sepsets(one_call_batch$sepsets, explicit$sepsets),
             "one-call level-batched legacy dCov sepsets should match explicit provider")
+assert_true(compare_sepsets(facade$sepsets, explicit$sepsets),
+            "compatible CUDA facade sepsets should match explicit provider")
 assert_true(provider_counts$level_calls > 0L,
             "explicit provider should be exercised for conditional levels")
 assert_true(identical(as.integer(one_call$summary$residual_provider_request_count),
@@ -149,6 +171,22 @@ assert_true(!isTRUE(one_call$summary$legacy_dcov_native_batch_enabled),
             "one-call default should not enable native dCov batch without env")
 assert_true(isTRUE(one_call_batch$summary$legacy_dcov_native_batch_enabled),
             "one-call dcov_batch='level' should enable native legacy dCov batching")
+assert_true(isTRUE(facade$summary$legacy_dcov_native_batch_enabled),
+            "compatible CUDA facade should pass dcov_batch option through")
+assert_true(isTRUE(facade$summary$compatible_cuda_facade),
+            "compatible CUDA facade should identify the R-facing facade")
+assert_true(identical(facade$summary$compatible_cuda_entrypoint,
+                      "fastkpc-compatible-cuda-skeleton"),
+            "compatible CUDA facade should record the proposed API entrypoint")
+assert_true(identical(facade$summary$native_entrypoint,
+                      "legacy-mgcv-legacy-dcov-native"),
+            "compatible CUDA facade should preserve native entrypoint metadata")
+assert_true(identical(rownames(facade$adjacency), colnames(data)) &&
+              identical(colnames(facade$adjacency), colnames(data)),
+            "compatible CUDA facade should apply labels to adjacency")
+assert_true(identical(rownames(facade$pMax), colnames(data)) &&
+              identical(colnames(facade$pMax), colnames(data)),
+            "compatible CUDA facade should apply labels to pMax")
 assert_true(!isTRUE(one_call_none$summary$legacy_dcov_native_batch_enabled),
             "one-call dcov_batch='none' should disable native dCov batch during call")
 assert_true(identical(as.integer(one_call_batch$summary$legacy_dcov_native_batch_pair_count),

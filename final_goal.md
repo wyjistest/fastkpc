@@ -3084,6 +3084,32 @@ this one-call wrapper on a real 351-row subset or move residual batching/setup
 further behind the native entrypoint.
 ```
 
+Experimental compatible CUDA facade checkpoint:
+
+```text
+fastkpc_compatible_cuda_skeleton(data, alpha, labels = NULL, options = list(...))
+
+status: experimental R-facing facade over the current native one-call wrapper
+scope:
+  accepts the proposed final API shape
+  requires options$max_conditioning_size explicitly
+  passes options$index, options$numCol, options$trace_level, and
+    options$dcov_batch through to the native one-call wrapper
+  applies labels to adjacency and pMax
+  records compatible_cuda_facade = TRUE
+  records compatible_cuda_entrypoint = fastkpc-compatible-cuda-skeleton
+  preserves native_entrypoint = legacy-mgcv-legacy-dcov-native
+
+gate:
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+
+status note:
+  This is an API-shape checkpoint, not a completed compatible.cuda engine.
+  The facade still routes to the R hidden-provider legacy mgcv residual path
+  and native legacy dCov data plane. Full 351x48 SHD=0 / wall-time gates and
+  native/CUDA residual generation remain open.
+```
+
 ### Real 351-row subset one-call checkpoint
 
 The next gate validates the R-facing one-call wrapper on the real 351-row
@@ -3169,6 +3195,15 @@ fastkpc_compatible_cuda_skeleton(
   labels = NULL,
   options = list(...)
 )
+```
+
+Current implementation status:
+
+```text
+An experimental R facade with this name exists and forwards to the current
+legacy-mgcv + legacy-dCov native one-call checkpoint. It is not yet the final
+C++/CUDA engine because residual generation remains behind a hidden R provider
+and full 351x48 promotion gates remain open.
 ```
 
 Internal C++ entrypoint:
