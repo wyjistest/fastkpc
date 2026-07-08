@@ -150,6 +150,13 @@ required <- c(
   "legacy_mgcv_cpp_same_s_setup_provider_reuse_count",
   "legacy_mgcv_cpp_same_s_setup_provider_setup_ms",
   "legacy_mgcv_cpp_same_s_setup_provider_error_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_chunk_enabled",
+  "legacy_mgcv_cpp_same_s_setup_provider_chunk_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_chunk_group_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_chunk_target_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_chunk_cache_insert_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_chunk_ms",
+  "legacy_mgcv_cpp_same_s_setup_provider_chunk_error_count",
   "legacy_mgcv_residual_cache_hit_key_count",
   "legacy_mgcv_residual_cache_miss_key_count",
   "legacy_mgcv_residual_cache_miss_s_group_count",
@@ -405,6 +412,46 @@ assert_true(
   setup_consumed_summary$legacy_mgcv_residual_cache_miss_s_reuse_opportunity_count >=
     setup_consumed_summary$legacy_mgcv_cpp_same_s_setup_provider_reuse_count,
   "consumed route should expose miss-key same-S reuse beyond pair-local provider reuse"
+)
+
+Sys.setenv(FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP = "chunk")
+setup_chunk <- run_compatible(num_cores = 2L)
+setup_chunk_summary <- setup_chunk$scheduler_diagnostics$summary
+
+assert_true(identical(setup_chunk$adjacency, baseline$adjacency),
+            "chunk same-S setup provider must preserve adjacency")
+assert_true(identical(setup_chunk$n.edgetests, baseline$n.edgetests),
+            "chunk same-S setup provider must preserve n.edgetests")
+assert_true(!isTRUE(setup_chunk_summary$legacy_mgcv_cpp_same_s_prefill_enabled),
+            "chunk same-S setup provider must not enable prefill")
+assert_true(isTRUE(setup_chunk_summary$legacy_mgcv_cpp_same_s_setup_provider_enabled),
+            "chunk same-S setup provider env gate should report enabled")
+assert_true(isTRUE(setup_chunk_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_enabled),
+            "chunk same-S setup provider should report chunk mode enabled")
+assert_true(setup_chunk_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_count > 0L,
+            "chunk same-S setup provider should process worker chunks")
+assert_true(setup_chunk_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_group_count > 0L,
+            "chunk same-S setup provider should report grouped actual misses")
+assert_true(setup_chunk_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_target_count > 0L,
+            "chunk same-S setup provider should process actual miss targets")
+assert_true(
+  setup_chunk_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_target_count <=
+    setup_chunk_summary$legacy_mgcv_residual_request_count,
+  "chunk same-S setup provider should not process more targets than consumed requests"
+)
+assert_true(
+  setup_chunk_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_cache_insert_count ==
+    setup_chunk_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_target_count,
+  "chunk same-S setup provider should insert each batched residual once"
+)
+assert_true(
+  setup_chunk_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_group_count <
+    setup_chunk_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_target_count,
+  "chunk same-S setup provider should batch more than one miss per same-S group"
+)
+assert_true(
+  setup_chunk_summary$legacy_mgcv_cpp_same_s_setup_provider_error_count == 0L,
+  "chunk same-S setup provider should not report errors on the native-envelope subset"
 )
 
 fallback_metrics <- fastkpc_legacy_runtime_zero()

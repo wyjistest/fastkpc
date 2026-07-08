@@ -2610,6 +2610,7 @@ are target-specific. An env-gated same-S target-independent setup provider
 prototype exists and passes the 12-column subset gate, but the full 351x48 gate
 fails wall time because it is currently attached to the same-S prefill vehicle.
 Do not promote FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=1.
+```
 
 The consumed-key/on-demand pair-local prototype has now been run:
 
@@ -2670,6 +2671,31 @@ gate:
   n.edgetests exact = TRUE
   elapsed < current recommended S-affinity route
 ```
+
+Implementation checkpoint:
+
+```text
+FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=chunk
+
+status: implemented as env-gated worker-chunk consumed-miss same-S batching
+scope: compatible legacy dcc.gamma residual cache + cpp_guarded residual
+       backend + affinity worker chunks
+behavior:
+  each worker chunk advances edge-local CI states round by round
+  only currently reached CI tests contribute residual miss keys
+  missing target|S keys are grouped by S and computed through the same-S setup
+    provider before the existing CI path consumes worker-local cache hits
+  singleton misses remain on the existing pair path
+  parent level replay remains by canonical edge index
+
+targeted tests:
+  Rscript fastkpc/tests/test_precision_compatible_legacy_mgcv_residual_cpp_backend.R
+  Rscript fastkpc/tests/test_precision_compatible_legacy_mgcv_residual_affinity.R
+  Rscript fastkpc/tests/test_precision_compatible_legacy_mgcv_residual_cpp_shadow.R
+  git diff --check
+
+full 351x48 gate: pending
+recommended route: unchanged until a full artifact beats S-affinity wall time
 ```
 
 ### 8.4 Continue dCov backend improvement separately
