@@ -727,6 +727,82 @@ apply p-values after each synchronous round, and keep the parent canonical
 replay semantics unchanged.
 ```
 
+Env-gated round-local scheduler checkpoint:
+
+```bash
+FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=round
+```
+
+Status:
+
+```text
+status: implemented as an env-gated R-level prototype, not default
+scope:
+  compatible legacy dcc.gamma route
+  C++ legacy dCov backend only
+
+behavior:
+  parent owns the edge-local state machine for the active skeleton level
+  active CI tests are collected synchronously by state-machine round
+  residual/input preparation is parallelized across fork workers
+  parent sends prepared current-round vectors through one C++ batch dCov call
+  p-values are replayed back into the unchanged edge state machine
+  parent level replay remains canonical by edge index
+
+diagnostics:
+  legacy_dcov_cpp_batch_round_enabled
+  legacy_dcov_cpp_batch_round_prepare_worker_count
+  legacy_dcov_cpp_batch_round_prepare_task_count
+
+targeted gate:
+  Rscript fastkpc/tests/test_precision_compatible_legacy_dcov_cpp_backend.R
+  Rscript fastkpc/tests/test_precision_compatible_legacy_parallel_runtime_breakdown.R
+  git diff --check
+
+status:
+  The targeted gate proves the env-gated round batch path preserves adjacency
+  and n.edgetests on the tested compatible skeleton while reporting multi-worker
+  round preparation and zero batch errors/fallbacks.
+```
+
+Full 351x48 gate attempt:
+
+```text
+fastkpc/artifacts/legacy_dcov_gamma_cpp_round_batch_backend_v1
+```
+
+Status:
+
+```text
+status: no completed artifact
+attempt:
+  full 351x48 route was started with:
+    FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+    FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=spectra
+    FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE=1
+    FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY=s
+    FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=round
+
+result:
+  initial parent-serial implementation exposed an architecture flaw:
+    round mode serialized mgcv residual/input preparation in the parent
+  fixed implementation parallelized current-round preparation across workers,
+    but the full route still exceeded the existing negative chunk-batch gate
+    wall-time window before completing
+
+decision:
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=round must remain experimental.
+  It is not a promotion candidate and should not replace the recommended
+  S-affinity route.
+
+reason:
+  R-level synchronous round batching reduces intended dCov batch count, but it
+  introduces too much parent orchestration / per-round fork and materialization
+  overhead for the full 351x48 route. The next dCov batching attempt should
+  move the round/level batch boundary into a C++/persistent-worker scheduler or
+  C++ skeleton data-plane boundary, not continue tuning R-level round batching.
+```
+
 #### Artifact
 
 ```text
