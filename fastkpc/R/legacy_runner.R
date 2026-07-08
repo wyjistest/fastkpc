@@ -414,6 +414,24 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_residual_owner_lost_duplicate_count = 0L,
     mgcv_residual_owner_load_imbalance = 0,
     mgcv_residual_owner_spill_count = 0L,
+    mgcv_residual_owner_schedule_build_ms = 0,
+    mgcv_residual_owner_key_enum_ms = 0,
+    mgcv_residual_owner_key_map_build_ms = 0,
+    mgcv_residual_owner_task_score_ms = 0,
+    mgcv_residual_owner_greedy_assign_ms = 0,
+    mgcv_residual_owner_chunk_sort_ms = 0,
+    mgcv_residual_owner_chunk_materialize_ms = 0,
+    mgcv_residual_owner_worker_max_ms = 0,
+    mgcv_residual_owner_worker_median_ms = 0,
+    mgcv_residual_owner_worker_elapsed_imbalance = 0,
+    mgcv_residual_owner_worker_task_max = 0L,
+    mgcv_residual_owner_worker_task_median = 0,
+    mgcv_residual_owner_worker_fit_max = 0L,
+    mgcv_residual_owner_worker_fit_median = 0,
+    mgcv_residual_owner_worker_cache_hit_max = 0L,
+    mgcv_residual_owner_worker_cache_hit_median = 0,
+    mgcv_residual_owner_worker_residual_ms_max = 0,
+    mgcv_residual_owner_worker_residual_ms_median = 0,
     mgcv_key_build_ms = 0,
     mgcv_cache_lookup_ms = 0,
     mgcv_formula_build_ms = 0,
@@ -722,6 +740,60 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     mgcv_residual_owner_spill_count =
       as.integer(a$mgcv_residual_owner_spill_count) +
         as.integer(b$mgcv_residual_owner_spill_count),
+    mgcv_residual_owner_schedule_build_ms =
+      as.numeric(a$mgcv_residual_owner_schedule_build_ms) +
+        as.numeric(b$mgcv_residual_owner_schedule_build_ms),
+    mgcv_residual_owner_key_enum_ms =
+      as.numeric(a$mgcv_residual_owner_key_enum_ms) +
+        as.numeric(b$mgcv_residual_owner_key_enum_ms),
+    mgcv_residual_owner_key_map_build_ms =
+      as.numeric(a$mgcv_residual_owner_key_map_build_ms) +
+        as.numeric(b$mgcv_residual_owner_key_map_build_ms),
+    mgcv_residual_owner_task_score_ms =
+      as.numeric(a$mgcv_residual_owner_task_score_ms) +
+        as.numeric(b$mgcv_residual_owner_task_score_ms),
+    mgcv_residual_owner_greedy_assign_ms =
+      as.numeric(a$mgcv_residual_owner_greedy_assign_ms) +
+        as.numeric(b$mgcv_residual_owner_greedy_assign_ms),
+    mgcv_residual_owner_chunk_sort_ms =
+      as.numeric(a$mgcv_residual_owner_chunk_sort_ms) +
+        as.numeric(b$mgcv_residual_owner_chunk_sort_ms),
+    mgcv_residual_owner_chunk_materialize_ms =
+      as.numeric(a$mgcv_residual_owner_chunk_materialize_ms) +
+        as.numeric(b$mgcv_residual_owner_chunk_materialize_ms),
+    mgcv_residual_owner_worker_max_ms =
+      max(as.numeric(a$mgcv_residual_owner_worker_max_ms),
+          as.numeric(b$mgcv_residual_owner_worker_max_ms)),
+    mgcv_residual_owner_worker_median_ms =
+      max(as.numeric(a$mgcv_residual_owner_worker_median_ms),
+          as.numeric(b$mgcv_residual_owner_worker_median_ms)),
+    mgcv_residual_owner_worker_elapsed_imbalance =
+      max(as.numeric(a$mgcv_residual_owner_worker_elapsed_imbalance),
+          as.numeric(b$mgcv_residual_owner_worker_elapsed_imbalance)),
+    mgcv_residual_owner_worker_task_max =
+      max(as.integer(a$mgcv_residual_owner_worker_task_max),
+          as.integer(b$mgcv_residual_owner_worker_task_max)),
+    mgcv_residual_owner_worker_task_median =
+      max(as.numeric(a$mgcv_residual_owner_worker_task_median),
+          as.numeric(b$mgcv_residual_owner_worker_task_median)),
+    mgcv_residual_owner_worker_fit_max =
+      max(as.integer(a$mgcv_residual_owner_worker_fit_max),
+          as.integer(b$mgcv_residual_owner_worker_fit_max)),
+    mgcv_residual_owner_worker_fit_median =
+      max(as.numeric(a$mgcv_residual_owner_worker_fit_median),
+          as.numeric(b$mgcv_residual_owner_worker_fit_median)),
+    mgcv_residual_owner_worker_cache_hit_max =
+      max(as.integer(a$mgcv_residual_owner_worker_cache_hit_max),
+          as.integer(b$mgcv_residual_owner_worker_cache_hit_max)),
+    mgcv_residual_owner_worker_cache_hit_median =
+      max(as.numeric(a$mgcv_residual_owner_worker_cache_hit_median),
+          as.numeric(b$mgcv_residual_owner_worker_cache_hit_median)),
+    mgcv_residual_owner_worker_residual_ms_max =
+      max(as.numeric(a$mgcv_residual_owner_worker_residual_ms_max),
+          as.numeric(b$mgcv_residual_owner_worker_residual_ms_max)),
+    mgcv_residual_owner_worker_residual_ms_median =
+      max(as.numeric(a$mgcv_residual_owner_worker_residual_ms_median),
+          as.numeric(b$mgcv_residual_owner_worker_residual_ms_median)),
     mgcv_key_build_ms =
       as.numeric(a$mgcv_key_build_ms) + as.numeric(b$mgcv_key_build_ms),
     mgcv_cache_lookup_ms =
@@ -847,6 +919,24 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       mgcv_residual_owner_lost_duplicate_count = integer(),
       mgcv_residual_owner_load_imbalance = numeric(),
       mgcv_residual_owner_spill_count = integer(),
+      mgcv_residual_owner_schedule_build_ms = numeric(),
+      mgcv_residual_owner_key_enum_ms = numeric(),
+      mgcv_residual_owner_key_map_build_ms = numeric(),
+      mgcv_residual_owner_task_score_ms = numeric(),
+      mgcv_residual_owner_greedy_assign_ms = numeric(),
+      mgcv_residual_owner_chunk_sort_ms = numeric(),
+      mgcv_residual_owner_chunk_materialize_ms = numeric(),
+      mgcv_residual_owner_worker_max_ms = numeric(),
+      mgcv_residual_owner_worker_median_ms = numeric(),
+      mgcv_residual_owner_worker_elapsed_imbalance = numeric(),
+      mgcv_residual_owner_worker_task_max = integer(),
+      mgcv_residual_owner_worker_task_median = numeric(),
+      mgcv_residual_owner_worker_fit_max = integer(),
+      mgcv_residual_owner_worker_fit_median = numeric(),
+      mgcv_residual_owner_worker_cache_hit_max = integer(),
+      mgcv_residual_owner_worker_cache_hit_median = numeric(),
+      mgcv_residual_owner_worker_residual_ms_max = numeric(),
+      mgcv_residual_owner_worker_residual_ms_median = numeric(),
       mgcv_key_build_ms = numeric(), mgcv_cache_lookup_ms = numeric(),
       mgcv_formula_build_ms = numeric(), mgcv_data_subset_ms = numeric(),
       mgcv_fit_call_ms = numeric(), mgcv_residual_extract_ms = numeric(),
@@ -1008,6 +1098,42 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.numeric(metrics$mgcv_residual_owner_load_imbalance),
       mgcv_residual_owner_spill_count =
         as.integer(metrics$mgcv_residual_owner_spill_count),
+      mgcv_residual_owner_schedule_build_ms =
+        as.numeric(metrics$mgcv_residual_owner_schedule_build_ms),
+      mgcv_residual_owner_key_enum_ms =
+        as.numeric(metrics$mgcv_residual_owner_key_enum_ms),
+      mgcv_residual_owner_key_map_build_ms =
+        as.numeric(metrics$mgcv_residual_owner_key_map_build_ms),
+      mgcv_residual_owner_task_score_ms =
+        as.numeric(metrics$mgcv_residual_owner_task_score_ms),
+      mgcv_residual_owner_greedy_assign_ms =
+        as.numeric(metrics$mgcv_residual_owner_greedy_assign_ms),
+      mgcv_residual_owner_chunk_sort_ms =
+        as.numeric(metrics$mgcv_residual_owner_chunk_sort_ms),
+      mgcv_residual_owner_chunk_materialize_ms =
+        as.numeric(metrics$mgcv_residual_owner_chunk_materialize_ms),
+      mgcv_residual_owner_worker_max_ms =
+        as.numeric(metrics$mgcv_residual_owner_worker_max_ms),
+      mgcv_residual_owner_worker_median_ms =
+        as.numeric(metrics$mgcv_residual_owner_worker_median_ms),
+      mgcv_residual_owner_worker_elapsed_imbalance =
+        as.numeric(metrics$mgcv_residual_owner_worker_elapsed_imbalance),
+      mgcv_residual_owner_worker_task_max =
+        as.integer(metrics$mgcv_residual_owner_worker_task_max),
+      mgcv_residual_owner_worker_task_median =
+        as.numeric(metrics$mgcv_residual_owner_worker_task_median),
+      mgcv_residual_owner_worker_fit_max =
+        as.integer(metrics$mgcv_residual_owner_worker_fit_max),
+      mgcv_residual_owner_worker_fit_median =
+        as.numeric(metrics$mgcv_residual_owner_worker_fit_median),
+      mgcv_residual_owner_worker_cache_hit_max =
+        as.integer(metrics$mgcv_residual_owner_worker_cache_hit_max),
+      mgcv_residual_owner_worker_cache_hit_median =
+        as.numeric(metrics$mgcv_residual_owner_worker_cache_hit_median),
+      mgcv_residual_owner_worker_residual_ms_max =
+        as.numeric(metrics$mgcv_residual_owner_worker_residual_ms_max),
+      mgcv_residual_owner_worker_residual_ms_median =
+        as.numeric(metrics$mgcv_residual_owner_worker_residual_ms_median),
       mgcv_key_build_ms = as.numeric(metrics$mgcv_key_build_ms),
       mgcv_cache_lookup_ms = as.numeric(metrics$mgcv_cache_lookup_ms),
       mgcv_formula_build_ms = as.numeric(metrics$mgcv_formula_build_ms),
@@ -1193,8 +1319,10 @@ fastkpc_legacy_mgcv_residual_owner_chunks <- function(edge_indices,
   task_weights <- as.numeric(task_weights)
   task_weights[!is.finite(task_weights) | task_weights <= 0] <- 1
   names(task_weights) <- as.character(edge_indices)
+  key_map_start <- proc.time()[["elapsed"]]
   all_keys <- unlist(edge_keys, use.names = FALSE)
   key_weights <- table(all_keys)
+  key_map_ms <- (proc.time()[["elapsed"]] - key_map_start) * 1000
   key_owner <- integer()
   chunks <- vector("list", workers)
   loads <- numeric(workers)
@@ -1206,6 +1334,8 @@ fastkpc_legacy_mgcv_residual_owner_chunks <- function(edge_indices,
   conflict <- 0L
   predicted_hits <- 0L
   spill <- 0L
+  task_score_ms <- 0
+  greedy_assign_start <- proc.time()[["elapsed"]]
 
   order_idx <- order(-task_weights, as.integer(names(task_weights)))
   for (edge in as.integer(names(task_weights)[order_idx])) {
@@ -1216,6 +1346,7 @@ fastkpc_legacy_mgcv_residual_owner_chunks <- function(edge_indices,
     owners <- owners[!is.na(owners) & owners > 0L]
     if (length(unique(owners)) > 1L) conflict <- conflict + 1L
 
+    score_start <- proc.time()[["elapsed"]]
     local_score <- numeric(workers)
     if (length(keys) > 0L && length(key_owner) > 0L) {
       for (worker in seq_len(workers)) {
@@ -1227,6 +1358,8 @@ fastkpc_legacy_mgcv_residual_owner_chunks <- function(edge_indices,
         }
       }
     }
+    task_score_ms <- task_score_ms +
+      (proc.time()[["elapsed"]] - score_start) * 1000
 
     edge_weight <- task_weights[[edge_name]]
     feasible <- (loads + edge_weight) <= max_load
@@ -1268,8 +1401,13 @@ fastkpc_legacy_mgcv_residual_owner_chunks <- function(edge_indices,
     chunks[[worker]] <- c(chunks[[worker]], edge)
     loads[[worker]] <- loads[[worker]] + edge_weight
   }
+  greedy_assign_ms <- (proc.time()[["elapsed"]] - greedy_assign_start) *
+    1000 - task_score_ms
 
+  chunk_sort_start <- proc.time()[["elapsed"]]
   chunks <- lapply(chunks, sort)
+  chunk_sort_ms <- (proc.time()[["elapsed"]] - chunk_sort_start) * 1000
+  materialize_start <- proc.time()[["elapsed"]]
   worker_by_edge <- integer(length(edge_indices))
   names(worker_by_edge) <- as.character(edge_indices)
   for (worker in seq_along(chunks)) {
@@ -1285,6 +1423,8 @@ fastkpc_legacy_mgcv_residual_owner_chunks <- function(edge_indices,
   split_group_names <- names(workers_per_group[workers_per_group > 1L])
   group_sizes <- table(as.character(group_keys))
   mean_load <- mean(loads)
+  chunk_materialize_ms <- (proc.time()[["elapsed"]] - materialize_start) *
+    1000
 
   list(
     chunks = chunks[lengths(chunks) > 0L],
@@ -1331,7 +1471,12 @@ fastkpc_legacy_mgcv_residual_owner_chunks <- function(edge_indices,
     } else {
       0
     },
-    spill_count = as.integer(spill)
+    spill_count = as.integer(spill),
+    key_map_build_ms = as.numeric(key_map_ms),
+    task_score_ms = as.numeric(task_score_ms),
+    greedy_assign_ms = as.numeric(max(0, greedy_assign_ms)),
+    chunk_sort_ms = as.numeric(chunk_sort_ms),
+    chunk_materialize_ms = as.numeric(chunk_materialize_ms)
   )
 }
 
@@ -1904,6 +2049,7 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     affinity_group_by_edge <- character()
     affinity_split_group_keys <- character()
     res <- if (isTRUE(affinity_enabled)) {
+      affinity_schedule_start <- proc.time()[["elapsed"]]
       edge_s_key_for_xy <- function(x, y) {
         nbrsBool <- G_l[[x]]
         nbrsBool[y] <- FALSE
@@ -1956,8 +2102,11 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
       names(group_keys) <- as.character(edge_indices)
       task_weights <- vapply(edge_indices, edge_affinity_weight, numeric(1L))
       if (identical(mgcv_residual_affinity_mode, "target_s")) {
+        owner_key_enum_start <- proc.time()[["elapsed"]]
         owner_keys <- lapply(edge_indices, edge_owner_keys)
         names(owner_keys) <- as.character(edge_indices)
+        affinity_metrics$mgcv_residual_owner_key_enum_ms <-
+          (proc.time()[["elapsed"]] - owner_key_enum_start) * 1000
         schedule <- fastkpc_legacy_mgcv_residual_owner_chunks(
           edge_indices, group_keys, owner_keys, workers,
           task_weights = task_weights
@@ -1982,6 +2131,16 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           schedule$owner_load_imbalance
         affinity_metrics$mgcv_residual_owner_spill_count <-
           schedule$spill_count
+        affinity_metrics$mgcv_residual_owner_key_map_build_ms <-
+          schedule$key_map_build_ms
+        affinity_metrics$mgcv_residual_owner_task_score_ms <-
+          schedule$task_score_ms
+        affinity_metrics$mgcv_residual_owner_greedy_assign_ms <-
+          schedule$greedy_assign_ms
+        affinity_metrics$mgcv_residual_owner_chunk_sort_ms <-
+          schedule$chunk_sort_ms
+        affinity_metrics$mgcv_residual_owner_chunk_materialize_ms <-
+          schedule$chunk_materialize_ms
       } else {
         schedule <- fastkpc_legacy_mgcv_residual_affinity_chunks(
           edge_indices, group_keys, workers, task_weights = task_weights
@@ -2014,13 +2173,81 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
         schedule$split_group_tasks
       affinity_metrics$mgcv_residual_affinity_split_group_pieces <-
         schedule$split_group_pieces
+      if (identical(mgcv_residual_affinity_mode, "target_s")) {
+        affinity_metrics$mgcv_residual_owner_schedule_build_ms <-
+          (proc.time()[["elapsed"]] - affinity_schedule_start) * 1000
+      }
       res_chunks <- parallel::mclapply(
-        schedule$chunks, function(chunk) lapply(chunk, edge_test),
+        schedule$chunks, function(chunk) {
+          worker_start <- proc.time()[["elapsed"]]
+          chunk_results <- lapply(chunk, edge_test)
+          list(
+            results = chunk_results,
+            elapsed_ms = (proc.time()[["elapsed"]] - worker_start) * 1000
+          )
+        },
         mc.cores = length(schedule$chunks), mc.set.seed = FALSE,
         mc.cleanup = TRUE, mc.allow.recursive = FALSE,
         mc.preschedule = TRUE
       )
-      res <- unlist(res_chunks, recursive = FALSE)
+      if (identical(mgcv_residual_affinity_mode, "target_s")) {
+        worker_elapsed_ms <- vapply(
+          res_chunks,
+          function(chunk) as.numeric(chunk$elapsed_ms),
+          numeric(1L)
+        )
+        worker_results <- lapply(res_chunks, `[[`, "results")
+        worker_metrics <- lapply(worker_results, function(chunk_results) {
+          Reduce(
+            fastkpc_legacy_runtime_add,
+            lapply(chunk_results, function(item) item[[9L]]),
+            init = fastkpc_legacy_runtime_zero()
+          )
+        })
+        worker_task_counts <- lengths(worker_results)
+        worker_fit_counts <- vapply(
+          worker_metrics,
+          function(metrics) as.integer(metrics$mgcv_fit_count),
+          integer(1L)
+        )
+        worker_cache_hits <- vapply(
+          worker_metrics,
+          function(metrics) as.integer(metrics$mgcv_cache_hit_count),
+          integer(1L)
+        )
+        worker_residual_ms <- vapply(
+          worker_metrics,
+          function(metrics) as.numeric(metrics$residual_ms),
+          numeric(1L)
+        )
+        affinity_metrics$mgcv_residual_owner_worker_max_ms <-
+          max(worker_elapsed_ms)
+        affinity_metrics$mgcv_residual_owner_worker_median_ms <-
+          stats::median(worker_elapsed_ms)
+        affinity_metrics$mgcv_residual_owner_worker_elapsed_imbalance <-
+          if (stats::median(worker_elapsed_ms) > 0) {
+            max(worker_elapsed_ms) / stats::median(worker_elapsed_ms)
+          } else {
+            0
+          }
+        affinity_metrics$mgcv_residual_owner_worker_task_max <-
+          max(worker_task_counts)
+        affinity_metrics$mgcv_residual_owner_worker_task_median <-
+          stats::median(worker_task_counts)
+        affinity_metrics$mgcv_residual_owner_worker_fit_max <-
+          max(worker_fit_counts)
+        affinity_metrics$mgcv_residual_owner_worker_fit_median <-
+          stats::median(worker_fit_counts)
+        affinity_metrics$mgcv_residual_owner_worker_cache_hit_max <-
+          max(worker_cache_hits)
+        affinity_metrics$mgcv_residual_owner_worker_cache_hit_median <-
+          stats::median(worker_cache_hits)
+        affinity_metrics$mgcv_residual_owner_worker_residual_ms_max <-
+          max(worker_residual_ms)
+        affinity_metrics$mgcv_residual_owner_worker_residual_ms_median <-
+          stats::median(worker_residual_ms)
+      }
+      res <- unlist(lapply(res_chunks, `[[`, "results"), recursive = FALSE)
       res[order(vapply(res, function(item) as.integer(item[[1L]]),
                        integer(1L)))]
     } else if (.Platform$OS.type == "unix" && workers > 1L) {
@@ -2417,6 +2644,42 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.numeric(runtime_total$mgcv_residual_owner_load_imbalance),
         legacy_mgcv_residual_owner_spill_count =
           as.integer(runtime_total$mgcv_residual_owner_spill_count),
+        legacy_mgcv_residual_owner_schedule_build_ms =
+          as.numeric(runtime_total$mgcv_residual_owner_schedule_build_ms),
+        legacy_mgcv_residual_owner_key_enum_ms =
+          as.numeric(runtime_total$mgcv_residual_owner_key_enum_ms),
+        legacy_mgcv_residual_owner_key_map_build_ms =
+          as.numeric(runtime_total$mgcv_residual_owner_key_map_build_ms),
+        legacy_mgcv_residual_owner_task_score_ms =
+          as.numeric(runtime_total$mgcv_residual_owner_task_score_ms),
+        legacy_mgcv_residual_owner_greedy_assign_ms =
+          as.numeric(runtime_total$mgcv_residual_owner_greedy_assign_ms),
+        legacy_mgcv_residual_owner_chunk_sort_ms =
+          as.numeric(runtime_total$mgcv_residual_owner_chunk_sort_ms),
+        legacy_mgcv_residual_owner_chunk_materialize_ms =
+          as.numeric(runtime_total$mgcv_residual_owner_chunk_materialize_ms),
+        legacy_mgcv_residual_owner_worker_max_ms =
+          as.numeric(runtime_total$mgcv_residual_owner_worker_max_ms),
+        legacy_mgcv_residual_owner_worker_median_ms =
+          as.numeric(runtime_total$mgcv_residual_owner_worker_median_ms),
+        legacy_mgcv_residual_owner_worker_elapsed_imbalance =
+          as.numeric(runtime_total$mgcv_residual_owner_worker_elapsed_imbalance),
+        legacy_mgcv_residual_owner_worker_task_max =
+          as.integer(runtime_total$mgcv_residual_owner_worker_task_max),
+        legacy_mgcv_residual_owner_worker_task_median =
+          as.numeric(runtime_total$mgcv_residual_owner_worker_task_median),
+        legacy_mgcv_residual_owner_worker_fit_max =
+          as.integer(runtime_total$mgcv_residual_owner_worker_fit_max),
+        legacy_mgcv_residual_owner_worker_fit_median =
+          as.numeric(runtime_total$mgcv_residual_owner_worker_fit_median),
+        legacy_mgcv_residual_owner_worker_cache_hit_max =
+          as.integer(runtime_total$mgcv_residual_owner_worker_cache_hit_max),
+        legacy_mgcv_residual_owner_worker_cache_hit_median =
+          as.numeric(runtime_total$mgcv_residual_owner_worker_cache_hit_median),
+        legacy_mgcv_residual_owner_worker_residual_ms_max =
+          as.numeric(runtime_total$mgcv_residual_owner_worker_residual_ms_max),
+        legacy_mgcv_residual_owner_worker_residual_ms_median =
+          as.numeric(runtime_total$mgcv_residual_owner_worker_residual_ms_median),
         legacy_mgcv_fit_avoided_estimated_ms = {
           fit_count <- as.integer(runtime_total$mgcv_fit_count)
           if (fit_count > 0L) {

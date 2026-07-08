@@ -104,7 +104,25 @@ required <- c(
   "legacy_mgcv_residual_owner_realized_hit_count",
   "legacy_mgcv_residual_owner_lost_duplicate_count",
   "legacy_mgcv_residual_owner_load_imbalance",
-  "legacy_mgcv_residual_owner_spill_count"
+  "legacy_mgcv_residual_owner_spill_count",
+  "legacy_mgcv_residual_owner_schedule_build_ms",
+  "legacy_mgcv_residual_owner_key_enum_ms",
+  "legacy_mgcv_residual_owner_key_map_build_ms",
+  "legacy_mgcv_residual_owner_task_score_ms",
+  "legacy_mgcv_residual_owner_greedy_assign_ms",
+  "legacy_mgcv_residual_owner_chunk_sort_ms",
+  "legacy_mgcv_residual_owner_chunk_materialize_ms",
+  "legacy_mgcv_residual_owner_worker_max_ms",
+  "legacy_mgcv_residual_owner_worker_median_ms",
+  "legacy_mgcv_residual_owner_worker_elapsed_imbalance",
+  "legacy_mgcv_residual_owner_worker_task_max",
+  "legacy_mgcv_residual_owner_worker_task_median",
+  "legacy_mgcv_residual_owner_worker_fit_max",
+  "legacy_mgcv_residual_owner_worker_fit_median",
+  "legacy_mgcv_residual_owner_worker_cache_hit_max",
+  "legacy_mgcv_residual_owner_worker_cache_hit_median",
+  "legacy_mgcv_residual_owner_worker_residual_ms_max",
+  "legacy_mgcv_residual_owner_worker_residual_ms_median"
 )
 missing_fields <- setdiff(required, names(affinity_summary))
 assert_true(length(missing_fields) == 0L,
@@ -187,6 +205,37 @@ assert_true(owner_summary$legacy_mgcv_residual_owner_lost_duplicate_count ==
             "target|S owner lost duplicates should match cache lost duplicates")
 assert_true(owner_summary$legacy_mgcv_residual_owner_load_imbalance > 0,
             "target|S owner scheduling should report load imbalance")
+assert_true(owner_summary$legacy_mgcv_residual_owner_schedule_build_ms > 0,
+            "target|S owner scheduling should report schedule build time")
+assert_true(owner_summary$legacy_mgcv_residual_owner_key_enum_ms > 0,
+            "target|S owner scheduling should report owner key enumeration time")
+assert_true(owner_summary$legacy_mgcv_residual_owner_key_map_build_ms >= 0,
+            "target|S owner scheduling should report key map build time")
+assert_true(owner_summary$legacy_mgcv_residual_owner_task_score_ms >= 0,
+            "target|S owner scheduling should report task scoring time")
+assert_true(owner_summary$legacy_mgcv_residual_owner_greedy_assign_ms >= 0,
+            "target|S owner scheduling should report greedy assignment time")
+assert_true(owner_summary$legacy_mgcv_residual_owner_chunk_sort_ms >= 0,
+            "target|S owner scheduling should report chunk sort time")
+assert_true(owner_summary$legacy_mgcv_residual_owner_chunk_materialize_ms >= 0,
+            "target|S owner scheduling should report chunk materialization time")
+assert_true(owner_summary$legacy_mgcv_residual_owner_worker_max_ms >=
+              owner_summary$legacy_mgcv_residual_owner_worker_median_ms,
+            "target|S owner worker max time should dominate median time")
+assert_true(owner_summary$legacy_mgcv_residual_owner_worker_elapsed_imbalance >= 1,
+            "target|S owner scheduling should report worker elapsed imbalance")
+assert_true(owner_summary$legacy_mgcv_residual_owner_worker_task_max >=
+              owner_summary$legacy_mgcv_residual_owner_worker_task_median,
+            "target|S owner worker max task count should dominate median")
+assert_true(owner_summary$legacy_mgcv_residual_owner_worker_fit_max >=
+              owner_summary$legacy_mgcv_residual_owner_worker_fit_median,
+            "target|S owner worker max fit count should dominate median")
+assert_true(owner_summary$legacy_mgcv_residual_owner_worker_cache_hit_max >=
+              owner_summary$legacy_mgcv_residual_owner_worker_cache_hit_median,
+            "target|S owner worker max cache hits should dominate median")
+assert_true(owner_summary$legacy_mgcv_residual_owner_worker_residual_ms_max >=
+              owner_summary$legacy_mgcv_residual_owner_worker_residual_ms_median,
+            "target|S owner worker max residual time should dominate median")
 assert_true(owner_summary$legacy_mgcv_fit_count +
               owner_summary$legacy_mgcv_residual_cache_hit_count ==
               owner_summary$legacy_mgcv_residual_request_count,
