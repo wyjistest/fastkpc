@@ -504,6 +504,13 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_cpp_backend_same_s_setup_native_mean_targets = 0,
     mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count = 0L,
     mgcv_cpp_backend_same_s_setup_native_reuse_ratio = 0,
+    mgcv_cpp_backend_same_s_setup_input_potential_saved_ms = 0,
+    mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms = 0,
+    mgcv_cpp_backend_same_s_setup_condition_potential_saved_ms = 0,
+    mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms = 0,
+    mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms = 0,
+    mgcv_cpp_backend_same_s_sp_native_solve_reuse_ratio = 0,
+    mgcv_cpp_backend_same_s_gam_fit_preserved_ms = 0,
     mgcv_cpp_same_s_prefill_enabled = 0L,
     mgcv_cpp_same_s_prefill_group_count = 0L,
     mgcv_cpp_same_s_prefill_target_count = 0L,
@@ -533,6 +540,12 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_cpp_backend_native_s_keys = character(),
     mgcv_cpp_backend_native_s_sp_keys = character(),
     mgcv_cpp_backend_native_s_setup_keys = character(),
+    mgcv_cpp_backend_native_input_setup_ms = numeric(),
+    mgcv_cpp_backend_native_gam_fit_ms = numeric(),
+    mgcv_cpp_backend_native_sp_extract_ms = numeric(),
+    mgcv_cpp_backend_native_setup_extract_ms = numeric(),
+    mgcv_cpp_backend_native_condition_ms = numeric(),
+    mgcv_cpp_backend_native_solve_call_ms = numeric(),
     direct_ci_count = 0L,
     conditional_ci_count = 0L,
     mgcv_fit_count = 0L,
@@ -1149,6 +1162,35 @@ fastkpc_legacy_runtime_add <- function(a, b) {
         0
       }
     },
+    mgcv_cpp_backend_same_s_setup_input_potential_saved_ms =
+      as.numeric(a$mgcv_cpp_backend_same_s_setup_input_potential_saved_ms) +
+        as.numeric(b$mgcv_cpp_backend_same_s_setup_input_potential_saved_ms),
+    mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms =
+      as.numeric(a$mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms) +
+        as.numeric(b$mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms),
+    mgcv_cpp_backend_same_s_setup_condition_potential_saved_ms =
+      as.numeric(a$mgcv_cpp_backend_same_s_setup_condition_potential_saved_ms) +
+        as.numeric(b$mgcv_cpp_backend_same_s_setup_condition_potential_saved_ms),
+    mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms =
+      as.numeric(a$mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms) +
+        as.numeric(b$mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms),
+    mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms =
+      as.numeric(a$mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms) +
+        as.numeric(b$mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms),
+    mgcv_cpp_backend_same_s_sp_native_solve_reuse_ratio = {
+      total_solve <- as.numeric(a$mgcv_cpp_backend_native_solve_ms) +
+        as.numeric(b$mgcv_cpp_backend_native_solve_ms)
+      if (total_solve > 0) {
+        (as.numeric(a$mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms) +
+           as.numeric(b$mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms)) /
+          total_solve
+      } else {
+        0
+      }
+    },
+    mgcv_cpp_backend_same_s_gam_fit_preserved_ms =
+      as.numeric(a$mgcv_cpp_backend_same_s_gam_fit_preserved_ms) +
+        as.numeric(b$mgcv_cpp_backend_same_s_gam_fit_preserved_ms),
     mgcv_cpp_same_s_prefill_enabled =
       max(as.integer(a$mgcv_cpp_same_s_prefill_enabled),
           as.integer(b$mgcv_cpp_same_s_prefill_enabled)),
@@ -1231,6 +1273,24 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     mgcv_cpp_backend_native_s_setup_keys =
       c(a$mgcv_cpp_backend_native_s_setup_keys,
         b$mgcv_cpp_backend_native_s_setup_keys),
+    mgcv_cpp_backend_native_input_setup_ms =
+      c(a$mgcv_cpp_backend_native_input_setup_ms,
+        b$mgcv_cpp_backend_native_input_setup_ms),
+    mgcv_cpp_backend_native_gam_fit_ms =
+      c(a$mgcv_cpp_backend_native_gam_fit_ms,
+        b$mgcv_cpp_backend_native_gam_fit_ms),
+    mgcv_cpp_backend_native_sp_extract_ms =
+      c(a$mgcv_cpp_backend_native_sp_extract_ms,
+        b$mgcv_cpp_backend_native_sp_extract_ms),
+    mgcv_cpp_backend_native_setup_extract_ms =
+      c(a$mgcv_cpp_backend_native_setup_extract_ms,
+        b$mgcv_cpp_backend_native_setup_extract_ms),
+    mgcv_cpp_backend_native_condition_ms =
+      c(a$mgcv_cpp_backend_native_condition_ms,
+        b$mgcv_cpp_backend_native_condition_ms),
+    mgcv_cpp_backend_native_solve_call_ms =
+      c(a$mgcv_cpp_backend_native_solve_call_ms,
+        b$mgcv_cpp_backend_native_solve_call_ms),
     direct_ci_count =
       as.integer(a$direct_ci_count) + as.integer(b$direct_ci_count),
     conditional_ci_count =
@@ -1399,6 +1459,13 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       mgcv_cpp_backend_same_s_setup_native_mean_targets = numeric(),
       mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count = integer(),
       mgcv_cpp_backend_same_s_setup_native_reuse_ratio = numeric(),
+      mgcv_cpp_backend_same_s_setup_input_potential_saved_ms = numeric(),
+      mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms = numeric(),
+      mgcv_cpp_backend_same_s_setup_condition_potential_saved_ms = numeric(),
+      mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms = numeric(),
+      mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms = numeric(),
+      mgcv_cpp_backend_same_s_sp_native_solve_reuse_ratio = numeric(),
+      mgcv_cpp_backend_same_s_gam_fit_preserved_ms = numeric(),
       mgcv_cpp_same_s_prefill_enabled = integer(),
       mgcv_cpp_same_s_prefill_group_count = integer(),
       mgcv_cpp_same_s_prefill_target_count = integer(),
@@ -1711,6 +1778,20 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.integer(metrics$mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count),
       mgcv_cpp_backend_same_s_setup_native_reuse_ratio =
         as.numeric(metrics$mgcv_cpp_backend_same_s_setup_native_reuse_ratio),
+      mgcv_cpp_backend_same_s_setup_input_potential_saved_ms =
+        as.numeric(metrics$mgcv_cpp_backend_same_s_setup_input_potential_saved_ms),
+      mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms =
+        as.numeric(metrics$mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms),
+      mgcv_cpp_backend_same_s_setup_condition_potential_saved_ms =
+        as.numeric(metrics$mgcv_cpp_backend_same_s_setup_condition_potential_saved_ms),
+      mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms =
+        as.numeric(metrics$mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms),
+      mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms =
+        as.numeric(metrics$mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms),
+      mgcv_cpp_backend_same_s_sp_native_solve_reuse_ratio =
+        as.numeric(metrics$mgcv_cpp_backend_same_s_sp_native_solve_reuse_ratio),
+      mgcv_cpp_backend_same_s_gam_fit_preserved_ms =
+        as.numeric(metrics$mgcv_cpp_backend_same_s_gam_fit_preserved_ms),
       mgcv_cpp_same_s_prefill_enabled =
         as.integer(metrics$mgcv_cpp_same_s_prefill_enabled),
       mgcv_cpp_same_s_prefill_group_count =
@@ -1886,6 +1967,22 @@ fastkpc_legacy_mgcv_setup_structure_key <- function(setup) {
     paste(as.integer(setup$rank), collapse = "|"),
     sep = "||"
   )
+}
+
+fastkpc_legacy_group_reuse_potential_ms <- function(group_keys, values) {
+  group_keys <- as.character(group_keys)
+  values <- as.numeric(values)
+  len <- min(length(group_keys), length(values))
+  if (len == 0L) return(0)
+  group_keys <- group_keys[seq_len(len)]
+  values <- values[seq_len(len)]
+  keep <- nzchar(group_keys) & is.finite(values) & values >= 0
+  if (!any(keep)) return(0)
+  groups <- split(values[keep], group_keys[keep], drop = TRUE)
+  sum(vapply(groups, function(x) {
+    if (length(x) <= 1L) return(0)
+    max(0, sum(x) - min(x))
+  }, numeric(1L)))
 }
 
 fastkpc_legacy_mgcv_residual_cache_enabled <- function() {
@@ -2132,23 +2229,27 @@ fastkpc_legacy_mgcv_residual_cpp_backend_target <- function(
     value <- timings[[name]]
     if (is.null(value) || !is.finite(value)) 0 else as.numeric(value)
   }
+  input_setup_ms <- metric_time("input_setup_ms")
+  gam_fit_ms <- metric_time("gam_fit_ms")
+  sp_extract_ms <- metric_time("sp_extract_ms")
+  setup_extract_ms <- metric_time("setup_extract_ms")
+  condition_ms <- metric_time("condition_ms")
+  native_solve_ms <- metric_time("native_solve_ms")
+  fallback_ms <- metric_time("fallback_ms")
   metrics$mgcv_cpp_backend_input_setup_ms <-
-    metrics$mgcv_cpp_backend_input_setup_ms +
-      metric_time("input_setup_ms")
+    metrics$mgcv_cpp_backend_input_setup_ms + input_setup_ms
   metrics$mgcv_cpp_backend_gam_fit_ms <-
-    metrics$mgcv_cpp_backend_gam_fit_ms + metric_time("gam_fit_ms")
+    metrics$mgcv_cpp_backend_gam_fit_ms + gam_fit_ms
   metrics$mgcv_cpp_backend_sp_extract_ms <-
-    metrics$mgcv_cpp_backend_sp_extract_ms + metric_time("sp_extract_ms")
+    metrics$mgcv_cpp_backend_sp_extract_ms + sp_extract_ms
   metrics$mgcv_cpp_backend_setup_extract_ms <-
-    metrics$mgcv_cpp_backend_setup_extract_ms +
-      metric_time("setup_extract_ms")
+    metrics$mgcv_cpp_backend_setup_extract_ms + setup_extract_ms
   metrics$mgcv_cpp_backend_condition_ms <-
-    metrics$mgcv_cpp_backend_condition_ms + metric_time("condition_ms")
+    metrics$mgcv_cpp_backend_condition_ms + condition_ms
   metrics$mgcv_cpp_backend_native_solve_ms <-
-    metrics$mgcv_cpp_backend_native_solve_ms +
-      metric_time("native_solve_ms")
+    metrics$mgcv_cpp_backend_native_solve_ms + native_solve_ms
   metrics$mgcv_cpp_backend_fallback_ms <-
-    metrics$mgcv_cpp_backend_fallback_ms + metric_time("fallback_ms")
+    metrics$mgcv_cpp_backend_fallback_ms + fallback_ms
   s_size <- as.integer(result$s_size)
   if (length(s_size) != 1L || is.na(s_size)) s_size <- ncol(as.matrix(s_data))
   if (s_size == 0L) {
@@ -2213,6 +2314,30 @@ fastkpc_legacy_mgcv_residual_cpp_backend_target <- function(
       metrics$mgcv_cpp_backend_native_s_setup_keys <- c(
         metrics$mgcv_cpp_backend_native_s_setup_keys,
         paste0(s_key, "||setup=", as.character(result$setup_structure_key))
+      )
+      metrics$mgcv_cpp_backend_native_input_setup_ms <- c(
+        metrics$mgcv_cpp_backend_native_input_setup_ms,
+        input_setup_ms
+      )
+      metrics$mgcv_cpp_backend_native_gam_fit_ms <- c(
+        metrics$mgcv_cpp_backend_native_gam_fit_ms,
+        gam_fit_ms
+      )
+      metrics$mgcv_cpp_backend_native_sp_extract_ms <- c(
+        metrics$mgcv_cpp_backend_native_sp_extract_ms,
+        sp_extract_ms
+      )
+      metrics$mgcv_cpp_backend_native_setup_extract_ms <- c(
+        metrics$mgcv_cpp_backend_native_setup_extract_ms,
+        setup_extract_ms
+      )
+      metrics$mgcv_cpp_backend_native_condition_ms <- c(
+        metrics$mgcv_cpp_backend_native_condition_ms,
+        condition_ms
+      )
+      metrics$mgcv_cpp_backend_native_solve_call_ms <- c(
+        metrics$mgcv_cpp_backend_native_solve_call_ms,
+        native_solve_ms
       )
     }
     if (s_size == 0L) {
@@ -3226,12 +3351,54 @@ fastkpc_legacy_runtime_finalize_mgcv_keys <- function(metrics) {
         0
       }
   }
+  if (length(native_s_setup_keys) > 0L) {
+    input_saved <- fastkpc_legacy_group_reuse_potential_ms(
+      native_s_setup_keys,
+      metrics$mgcv_cpp_backend_native_input_setup_ms
+    )
+    setup_saved <- fastkpc_legacy_group_reuse_potential_ms(
+      native_s_setup_keys,
+      metrics$mgcv_cpp_backend_native_setup_extract_ms
+    )
+    condition_saved <- fastkpc_legacy_group_reuse_potential_ms(
+      native_s_setup_keys,
+      metrics$mgcv_cpp_backend_native_condition_ms
+    )
+    metrics$mgcv_cpp_backend_same_s_setup_input_potential_saved_ms <-
+      input_saved
+    metrics$mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms <-
+      setup_saved
+    metrics$mgcv_cpp_backend_same_s_setup_condition_potential_saved_ms <-
+      condition_saved
+    metrics$mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms <-
+      input_saved + setup_saved + condition_saved
+  }
+  if (length(native_s_sp_keys) > 0L) {
+    solve_saved <- fastkpc_legacy_group_reuse_potential_ms(
+      native_s_sp_keys,
+      metrics$mgcv_cpp_backend_native_solve_call_ms
+    )
+    total_solve <- sum(as.numeric(metrics$mgcv_cpp_backend_native_solve_call_ms),
+                       na.rm = TRUE)
+    metrics$mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms <-
+      solve_saved
+    metrics$mgcv_cpp_backend_same_s_sp_native_solve_reuse_ratio <-
+      if (total_solve > 0) solve_saved / total_solve else 0
+  }
+  metrics$mgcv_cpp_backend_same_s_gam_fit_preserved_ms <-
+    as.numeric(metrics$mgcv_cpp_backend_gam_fit_ms)
   metrics$mgcv_residual_keys <- character()
   metrics$mgcv_s_keys <- character()
   metrics$mgcv_cpp_backend_native_residual_keys <- character()
   metrics$mgcv_cpp_backend_native_s_keys <- character()
   metrics$mgcv_cpp_backend_native_s_sp_keys <- character()
   metrics$mgcv_cpp_backend_native_s_setup_keys <- character()
+  metrics$mgcv_cpp_backend_native_input_setup_ms <- numeric()
+  metrics$mgcv_cpp_backend_native_gam_fit_ms <- numeric()
+  metrics$mgcv_cpp_backend_native_sp_extract_ms <- numeric()
+  metrics$mgcv_cpp_backend_native_setup_extract_ms <- numeric()
+  metrics$mgcv_cpp_backend_native_condition_ms <- numeric()
+  metrics$mgcv_cpp_backend_native_solve_call_ms <- numeric()
   metrics
 }
 
@@ -4420,6 +4587,20 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count),
         legacy_mgcv_cpp_backend_same_s_setup_native_reuse_ratio =
           as.numeric(runtime_total$mgcv_cpp_backend_same_s_setup_native_reuse_ratio),
+        legacy_mgcv_cpp_backend_same_s_setup_input_potential_saved_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_same_s_setup_input_potential_saved_ms),
+        legacy_mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms),
+        legacy_mgcv_cpp_backend_same_s_setup_condition_potential_saved_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_same_s_setup_condition_potential_saved_ms),
+        legacy_mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms),
+        legacy_mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms),
+        legacy_mgcv_cpp_backend_same_s_sp_native_solve_reuse_ratio =
+          as.numeric(runtime_total$mgcv_cpp_backend_same_s_sp_native_solve_reuse_ratio),
+        legacy_mgcv_cpp_backend_same_s_gam_fit_preserved_ms =
+          as.numeric(runtime_total$mgcv_cpp_backend_same_s_gam_fit_preserved_ms),
         legacy_mgcv_cpp_same_s_prefill_enabled =
           isTRUE(as.integer(runtime_total$mgcv_cpp_same_s_prefill_enabled) > 0L),
         legacy_mgcv_cpp_same_s_prefill_group_count =

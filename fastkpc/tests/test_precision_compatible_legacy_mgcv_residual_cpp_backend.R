@@ -124,6 +124,13 @@ required <- c(
   "legacy_mgcv_cpp_backend_same_s_setup_native_mean_targets",
   "legacy_mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count",
   "legacy_mgcv_cpp_backend_same_s_setup_native_reuse_ratio",
+  "legacy_mgcv_cpp_backend_same_s_setup_input_potential_saved_ms",
+  "legacy_mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms",
+  "legacy_mgcv_cpp_backend_same_s_setup_condition_potential_saved_ms",
+  "legacy_mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms",
+  "legacy_mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms",
+  "legacy_mgcv_cpp_backend_same_s_sp_native_solve_reuse_ratio",
+  "legacy_mgcv_cpp_backend_same_s_gam_fit_preserved_ms",
   "legacy_mgcv_cpp_backend_native_s_size_limit",
   "legacy_mgcv_cpp_backend_condition_threshold",
   "legacy_mgcv_cpp_same_s_prefill_enabled",
@@ -214,6 +221,23 @@ assert_true(summary$legacy_mgcv_cpp_backend_same_s_setup_native_reuse_opportunit
 assert_true(summary$legacy_mgcv_cpp_backend_same_s_setup_native_reuse_ratio <=
               summary$legacy_mgcv_cpp_backend_same_s_native_setup_reuse_ratio,
             "same-S+setup reuse ratio should not exceed same-S reuse ratio")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_setup_input_potential_saved_ms >= 0,
+            "same-S setup input potential should be nonnegative")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms >= 0,
+            "same-S setup extraction potential should be nonnegative")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_setup_condition_potential_saved_ms >= 0,
+            "same-S setup condition potential should be nonnegative")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms >=
+              summary$legacy_mgcv_cpp_backend_same_s_setup_extract_potential_saved_ms,
+            "same-S setup structure potential should include setup extraction potential")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms >= 0,
+            "same-S+sp native solve potential should be nonnegative")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_sp_native_solve_reuse_ratio >= 0 &&
+              summary$legacy_mgcv_cpp_backend_same_s_sp_native_solve_reuse_ratio <= 1,
+            "same-S+sp native solve reuse ratio should be bounded")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_gam_fit_preserved_ms ==
+              summary$legacy_mgcv_cpp_backend_gam_fit_ms,
+            "mgcv gam fit time should be reported as preserved by same-S setup reuse")
 assert_true(summary$legacy_mgcv_cpp_backend_high_condition_fallback_count == 0L,
             "high-condition fallback should not trigger with loose threshold")
 assert_true(summary$legacy_mgcv_cpp_backend_error_count == 0L,
@@ -347,5 +371,12 @@ assert_true(
   native_summary$mgcv_cpp_backend_same_s_setup_native_reuse_opportunity_count == 1L,
   "direct same-S+setup reuse opportunity should match same-S opportunity"
 )
+assert_true(native_summary$mgcv_cpp_backend_same_s_setup_structure_potential_saved_ms > 0,
+            "direct same-S setup potential should estimate one repeated setup")
+assert_true(native_summary$mgcv_cpp_backend_same_s_sp_native_solve_potential_saved_ms >= 0,
+            "direct same-S+sp solve potential should be reported")
+assert_true(native_summary$mgcv_cpp_backend_same_s_gam_fit_preserved_ms ==
+              native_summary$mgcv_cpp_backend_gam_fit_ms,
+            "direct same-S setup estimate should preserve mgcv gam fit time")
 
 cat("PASS precision compatible legacy mgcv residual C++ backend\n")
