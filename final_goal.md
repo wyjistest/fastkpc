@@ -2694,8 +2694,43 @@ targeted tests:
   Rscript fastkpc/tests/test_precision_compatible_legacy_mgcv_residual_cpp_shadow.R
   git diff --check
 
-full 351x48 gate: pending
-recommended route: unchanged until a full artifact beats S-affinity wall time
+full 351x48 gate:
+  artifact: fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_setup_provider_chunk_v1
+  correctness: passed
+  edge_count = 110 / 110
+  adjacency_identical = TRUE
+  SHD = 0
+  n.edgetests exact = TRUE
+  elapsed_sec = 1058.716
+  baseline S-affinity elapsed_sec = 899.077
+  result: wall-time failed; do not promote
+
+chunk/provider metrics:
+  residual_worker_ms = 11329001
+  baseline S-affinity residual_worker_ms = 9103781
+  mgcv_fit_count = 273284
+  baseline S-affinity mgcv_fit_count = 273284
+  cache hits/misses = 336507 / 140045
+  chunk groups / targets / inserts / errors = 103359 / 247269 / 133239 / 0
+  setup provider groups / targets / templates / reuse / errors =
+    46891 / 133239 / 46891 / 86348 / 0
+  setup_provider_setup_ms = 1030507
+  chunk_ms = 5095590
+  dCov cpp backend count / errors / fallbacks = 239404 / 0 / 0
+  Spectra count / converged / failed = 478808 / 478808 / 0
+
+status:
+  FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=chunk is correctness-clean but
+  experimental only. It converts many same-S residual misses into provider
+  cache hits, but it does not reduce total mgcv_fit_count versus S-affinity and
+  adds substantial R-level chunk/provider overhead. The recommended route stays
+  unchanged until a full artifact beats S-affinity wall time.
+
+next:
+  stop iterating on R-level worker-local task scheduling without a stronger
+  diagnostic. The remaining mainline should move toward real same-S setup
+  extraction for a C++/CUDA numeric executor, or a true batched same-S executor
+  that reduces setup/extraction overhead without the R chunk state-machine cost.
 ```
 
 ### 8.4 Continue dCov backend improvement separately
