@@ -1154,6 +1154,58 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
   do.call(rbind, rows)
 }
 
+fastkpc_legacy_mgcv_prefetch_potential_frame <- function(runtime_by_level, n) {
+  if (!is.data.frame(runtime_by_level) || nrow(runtime_by_level) == 0L) {
+    return(data.frame(
+      level = integer(),
+      request_count = integer(),
+      current_fit_count = integer(),
+      current_hit_count = integer(),
+      unique_target_s_count = integer(),
+      theoretical_fit_count = integer(),
+      theoretical_hit_count = integer(),
+      lost_duplicate_count = integer(),
+      fit_reduction_potential = integer(),
+      residual_payload_bytes = numeric(),
+      unique_s_count = integer(),
+      task_count = integer()
+    ))
+  }
+  column_or_zero <- function(name) {
+    if (name %in% names(runtime_by_level)) {
+      runtime_by_level[[name]]
+    } else {
+      rep(0L, nrow(runtime_by_level))
+    }
+  }
+  request_count <- as.integer(column_or_zero("mgcv_residual_request_count"))
+  current_fit_count <- as.integer(column_or_zero("mgcv_fit_count"))
+  current_hit_count <- as.integer(column_or_zero("mgcv_cache_hit_count"))
+  unique_target_s_count <- as.integer(column_or_zero("mgcv_unique_target_s_count"))
+  theoretical_hit_count <- as.integer(pmax(0L, request_count - unique_target_s_count))
+  fit_reduction_potential <- as.integer(pmax(
+    0L,
+    current_fit_count - unique_target_s_count
+  ))
+  data.frame(
+    level = as.integer(column_or_zero("level")),
+    request_count = request_count,
+    current_fit_count = current_fit_count,
+    current_hit_count = current_hit_count,
+    unique_target_s_count = unique_target_s_count,
+    theoretical_fit_count = unique_target_s_count,
+    theoretical_hit_count = theoretical_hit_count,
+    lost_duplicate_count = as.integer(column_or_zero(
+      "mgcv_residual_cache_lost_duplicate_count"
+    )),
+    fit_reduction_potential = fit_reduction_potential,
+    residual_payload_bytes = as.numeric(unique_target_s_count) *
+      as.numeric(n) * 8,
+    unique_s_count = as.integer(column_or_zero("mgcv_unique_s_count")),
+    task_count = as.integer(column_or_zero("recorded_tests"))
+  )
+}
+
 fastkpc_legacy_runtime_add_dcov <- function(metrics, diagnostics) {
   metrics$dcov_gamma_ms <- metrics$dcov_gamma_ms +
     as.numeric(diagnostics$total_ms)
@@ -2377,6 +2429,23 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     init = fastkpc_legacy_runtime_zero()
   )
   runtime_by_level <- fastkpc_legacy_runtime_frame(level_metrics, n_edgetests)
+  prefetch_potential_by_level <-
+    fastkpc_legacy_mgcv_prefetch_potential_frame(runtime_by_level, nrow(data))
+  prefetch_sum <- function(name) {
+    if (name %in% names(prefetch_potential_by_level)) {
+      sum(prefetch_potential_by_level[[name]])
+    } else {
+      0
+    }
+  }
+  prefetch_max <- function(name) {
+    if (name %in% names(prefetch_potential_by_level) &&
+        nrow(prefetch_potential_by_level) > 0L) {
+      max(prefetch_potential_by_level[[name]])
+    } else {
+      0
+    }
+  }
   cache <- list(requests = 0L, hits = 0L, computations = 0L)
 
   list(
@@ -2430,6 +2499,7 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     scheduler = "legacy-parallel",
     scheduler_diagnostics = list(
       legacy_runtime_by_level = runtime_by_level,
+      legacy_mgcv_prefetch_potential_by_level = prefetch_potential_by_level,
       summary = list(
         tasks_planned = as.integer(total_tests),
         tasks_evaluated = as.integer(total_tests),
@@ -2707,6 +2777,22 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.numeric(runtime_total$mgcv_same_s_mean_targets),
         legacy_mgcv_same_s_reuse_opportunity_count =
           as.integer(runtime_total$mgcv_same_s_reuse_opportunity_count),
+        legacy_mgcv_level_prefetch_request_count =
+          as.integer(prefetch_sum("request_count")),
+        legacy_mgcv_level_prefetch_unique_key_count =
+          as.integer(prefetch_sum("unique_target_s_count")),
+        legacy_mgcv_level_prefetch_theoretical_hit_count =
+          as.integer(prefetch_sum("theoretical_hit_count")),
+        legacy_mgcv_level_prefetch_current_hit_count =
+          as.integer(prefetch_sum("current_hit_count")),
+        legacy_mgcv_level_prefetch_fit_reduction_potential =
+          as.integer(prefetch_sum("fit_reduction_potential")),
+        legacy_mgcv_level_prefetch_payload_bytes =
+          as.numeric(prefetch_sum("residual_payload_bytes")),
+        legacy_mgcv_level_prefetch_max_level_payload_bytes =
+          as.numeric(prefetch_max("residual_payload_bytes")),
+        legacy_mgcv_level_prefetch_max_level_unique_keys =
+          as.integer(prefetch_max("unique_target_s_count")),
         legacy_mgcv_key_build_ms =
           as.numeric(runtime_total$mgcv_key_build_ms),
         legacy_mgcv_cache_lookup_ms =
