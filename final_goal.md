@@ -651,6 +651,41 @@ in C++ for the current oracle cases without decision flips. The next residual
 work must extract/reconstruct the mgcv setup rather than relying on captured
 R `predict(type = "lpmatrix")` output.
 
+Setup-extracted fixed-sp shadow artifact:
+
+```text
+fastkpc/artifacts/mgcv_residual_setup_shadow_v1
+```
+
+Status:
+
+```text
+status: created
+mode: shadow only, not authoritative
+backend: mgcvExtractCPU fixed-sp setup self-solve
+setup provider: mgcv::gam(fit = FALSE) with selected oracle sp
+solver kernel: mgcv C_magic fixed-sp path
+case_count: 8
+setup_supported_count: 8
+residual_pair_match_count: 8
+dcov_p_match_count: 8
+decision_match_count: 8
+decision_flip_count: 0
+max_residual_x_abs_diff: 0
+max_residual_y_abs_diff: 0
+max_dcov_p_abs_diff: 0
+residual_tol: 1e-5
+p_tol: 1e-5
+pass: TRUE
+```
+
+This is the first setup-extracted replay artifact over the current full
+skeleton oracle cases. It still uses mgcv as the setup provider and the mgcv
+fixed-sp C kernel as the solve authority, so it is not the final C++/CUDA
+numeric executor. It does prove that the current oracle cases can be reduced
+from full `mgcv::gam()` fitting to extracted fixed-sp setup plus replayed
+residual solve without changing downstream legacy dCov decisions.
+
 #### Gate before production use
 
 ```text
@@ -993,12 +1028,21 @@ fastkpc/artifacts/mgcv_residual_replay_spec_v1 exists
 8 / 8 residual pairs match
 8 / 8 dCov p-values match
 decision_flip_count = 0
+
+fastkpc/artifacts/mgcv_residual_cpp_shadow_v1 exists
+8 / 8 captured setup C++ replays supported
+decision_flip_count = 0
+
+fastkpc/artifacts/mgcv_residual_setup_shadow_v1 exists
+8 / 8 extracted fixed-sp setup replays supported
+decision_flip_count = 0
 ```
 
 Next Phase 3 step:
 
 ```text
-start C++ mgcv-compatible replay executor in shadow mode for supported oracle cases
+move from mgcv C_magic fixed-sp replay to an explicit C++ numeric executor
+for extracted supported setups, still in shadow mode
 ```
 
 ### 8.4 Continue dCov backend improvement separately
