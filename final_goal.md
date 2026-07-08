@@ -1032,6 +1032,51 @@ promotion status:
   observable through fallback diagnostics.
 ```
 
+Initial full-route guarded residual shadow artifact:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_shadow_synthetic_v1
+```
+
+Status:
+
+```text
+status: created
+mode: full legacy-parallel skeleton shadow, not authoritative
+data: synthetic n=66, p=6
+alpha: 0.08
+max_conditioning_size: 2
+residual authority: legacy regrXonS / mgcv
+shadow solver: cpp_guarded
+native_s_size_limit: 2
+condition_threshold: 1e300
+
+adjacency_identical: TRUE
+n.edgetests_identical: TRUE
+baseline_n.edgetests: 24,19,0
+shadow_n.edgetests:   24,19,0
+baseline_edge_count: 3
+shadow_edge_count:   3
+
+residual_request_count: 38
+shadow_count: 38
+native_count: 38
+fallback_count: 0
+high_condition_fallback_count: 0
+outside_envelope_fallback_count: 0
+error_count: 0
+residual_mismatch_count: 0
+max_abs_diff: 4.563017e-12
+max_rel_l2: 3.869293e-12
+```
+
+This is the first full-route skeleton replay check for the guarded native
+residual envelope. The authoritative residuals and skeleton decisions still
+come from legacy `regrXonS`; the C++ fixed-sp path only shadows each conditional
+target residual and records parity diagnostics. It verifies that the `|S|<=2`
+native envelope can be exercised inside the legacy scheduler without changing
+canonical replay on a small skeleton. It is not a full 351x48 gate.
+
 #### Gate before production use
 
 ```text
@@ -1427,15 +1472,26 @@ cpp_guarded_count = 128 native |S|<=2 targets
 fallback_count = 104 outside-envelope |S|>=3 targets
 high_condition_fallback_count = 0
 status: strict supported-envelope shadow pass; still not production
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_shadow_synthetic_v1 exists
+full legacy-parallel skeleton shadow
+adjacency identical = TRUE
+n.edgetests identical = TRUE
+38 / 38 residual shadow targets matched
+native_count = 38
+fallback_count = 0
+error_count = 0
+residual_mismatch_count = 0
+status: synthetic full-route shadow pass; still not production
 ```
 
 Next Phase 3 step:
 
 ```text
-expand the strict |S|<=2 native envelope shadow to a full-route residual
-backend experiment only after verifying full skeleton canonical replay remains
-unchanged; for |S|>=3, either keep fail-closed mgcv C_magic fallback or build a
-closer mgcv-equivalent C++ solve kernel before attempting promotion
+run the guarded residual shadow on a real 351x48 subset, then on the full
+351x48 compatible skeleton. Promotion requires canonical replay to remain
+unchanged and all shadow-supported residual targets to match without errors or
+decision drift. The route remains shadow-only until that gate passes.
 ```
 
 ### 8.4 Continue dCov backend improvement separately
