@@ -452,6 +452,65 @@ could be grouped by the same batch shape. The next Phase 2A artifact should
 run the current recommended route and record these fields before implementing
 the real batched C++ workspace.
 
+Full 351x48 diagnostic artifact:
+
+```text
+fastkpc/artifacts/legacy_dcov_gamma_cpp_batch_potential_v1
+
+route:
+  FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=spectra
+  FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE=1
+  FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY=s
+
+correctness:
+  edge_count = 110 / 110
+  adjacency_identical = TRUE
+  SHD = 0
+  n.edgetests exact = TRUE
+  n.edgetests = 2213,52659,125293,40694,13293,5422,835,80
+
+runtime:
+  elapsed_sec = 908.895
+  residual_worker_ms = 9067761
+  mgcv_fit_count = 273284
+  cache hits / misses = 203268 / 273284
+  dCov cpp backend ms = 3977327
+  dCov cpp backend count / errors / fallbacks = 239404 / 0 / 0
+  Spectra count / converged / failed = 478808 / 478808 / 0
+
+batch-potential:
+  scalar C++ dCov calls = 239404
+  level-local batch shape groups = 8
+  max group size = 125293
+  mean group size = 29925.5
+  reuse opportunity = 239396
+  reuse ratio = 0.9999666
+```
+
+By level, each active skeleton level collapses to one dCov batch shape group:
+
+```text
+level 0:   1128 calls -> 1 group
+level 1:  52659 calls -> 1 group
+level 2: 125293 calls -> 1 group
+level 3:  40694 calls -> 1 group
+level 4:  13293 calls -> 1 group
+level 5:   5422 calls -> 1 group
+level 6:    835 calls -> 1 group
+level 7:     80 calls -> 1 group
+```
+
+Conclusion:
+
+```text
+The scalar C++ dCov backend is shape-homogeneous within skeleton levels on the
+full 351x48 route. Phase 2A should proceed to a level-local batched C++ dCov
+workspace that preserves per-level canonical output order while reducing
+per-call Rcpp overhead, repeated allocation, distance/lowrank workspace setup,
+and wrapper dispatch.
+```
+
 #### Artifact
 
 ```text
