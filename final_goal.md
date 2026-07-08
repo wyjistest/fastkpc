@@ -776,6 +776,52 @@ drift against the mgcv `C_magic` self-solve and decide whether the C++ normal
 equation solver needs a closer mgcv-equivalent kernel, stricter supported
 envelope, or fallback policy.
 
+C++ numeric drift isolation artifact:
+
+```text
+fastkpc/artifacts/mgcv_residual_cpp_numeric_drift_isolation_v1
+```
+
+Status:
+
+```text
+status: created
+case_count: 1
+target_count: 2
+case_id: expanded351_22_s4_x8_y9
+S_size: 4
+source_level: 4
+cpp_matches_r_normal_target_count: 2 / 2
+cmagic_matches_oracle_target_count: 2 / 2
+cpp_matches_cmagic_target_count: 1 / 2
+decision_flip_count: 0
+normal_equation_vs_mgcv_magic_count: 1
+max_cpp_vs_r_normal_abs_diff: 1.998401e-13
+max_cpp_vs_cmagic_abs_diff: 0.06386512
+max_cmagic_vs_oracle_abs_diff: 0
+max_normal_matrix_condition: 4.267963e13
+```
+
+Conclusion:
+
+```text
+native C++ normal-equation solve == R normal-equation solve
+mgcv C_magic fixed-sp replay == full mgcv oracle
+drift layer = normal_equation_vs_mgcv_magic
+```
+
+This means the current native C++ normal-equation solver is not simply buggy;
+it is solving a numerically different/unstable path than mgcv's fixed-sp
+kernel for an ill-conditioned deeper-level additive setup. Promotion must
+therefore use one of these routes:
+
+```text
+1. implement a closer mgcv-equivalent C++ solve kernel;
+2. fail closed / fallback for high-condition or deeper additive envelopes;
+3. keep native C++ fixed-sp solve as shadow-only until full expanded shadow
+   has zero strict residual/p mismatches or an accepted fallback policy.
+```
+
 #### Gate before production use
 
 ```text
@@ -1136,14 +1182,20 @@ fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_expanded_v1 exists
 27 / 28 residual pairs match under strict tolerance
 decision_flip_count = 0
 status: diagnostic mismatch present; not promotable
+
+fastkpc/artifacts/mgcv_residual_cpp_numeric_drift_isolation_v1 exists
+1 / 1 mismatch case isolated
+C++ normal solve matches R normal solve
+mgcv C_magic fixed-sp replay matches full mgcv oracle
+drift layer = normal_equation_vs_mgcv_magic
 ```
 
 Next Phase 3 step:
 
 ```text
-isolate the expanded `|S|=4` native C++ numeric drift case, compare C++ normal
-equation solve against mgcv C_magic fixed-sp replay, and define either a closer
-mgcv-equivalent C++ solve kernel or a supported-envelope fallback rule
+define and test the supported-envelope fallback policy for native C++ fixed-sp
+residual solve, starting with high-condition/deeper additive setups that drift
+from mgcv C_magic under strict residual/p-value tolerances
 ```
 
 ### 8.4 Continue dCov backend improvement separately
