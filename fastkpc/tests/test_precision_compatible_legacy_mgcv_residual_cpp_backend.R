@@ -149,7 +149,15 @@ required <- c(
   "legacy_mgcv_cpp_same_s_setup_provider_template_count",
   "legacy_mgcv_cpp_same_s_setup_provider_reuse_count",
   "legacy_mgcv_cpp_same_s_setup_provider_setup_ms",
-  "legacy_mgcv_cpp_same_s_setup_provider_error_count"
+  "legacy_mgcv_cpp_same_s_setup_provider_error_count",
+  "legacy_mgcv_residual_cache_hit_key_count",
+  "legacy_mgcv_residual_cache_miss_key_count",
+  "legacy_mgcv_residual_cache_miss_s_group_count",
+  "legacy_mgcv_residual_cache_miss_s_total_targets",
+  "legacy_mgcv_residual_cache_miss_s_max_targets",
+  "legacy_mgcv_residual_cache_miss_s_mean_targets",
+  "legacy_mgcv_residual_cache_miss_s_reuse_opportunity_count",
+  "legacy_mgcv_residual_cache_miss_s_reuse_ratio"
 )
 missing_fields <- setdiff(required, names(summary))
 assert_true(length(missing_fields) == 0L,
@@ -297,6 +305,26 @@ assert_true(prefill_summary$legacy_mgcv_cpp_same_s_prefill_error_count == 0L,
 assert_true(prefill_summary$legacy_mgcv_residual_request_count ==
               baseline_summary$legacy_mgcv_residual_request_count,
             "same-S prefill should not change residual request count")
+assert_true(prefill_summary$legacy_mgcv_residual_cache_hit_key_count ==
+              prefill_summary$legacy_mgcv_cache_hit_count,
+            "cache hit-key diagnostics should match cache hit count")
+assert_true(prefill_summary$legacy_mgcv_residual_cache_miss_key_count ==
+              prefill_summary$legacy_mgcv_cache_miss_count,
+            "cache miss-key diagnostics should match cache miss count")
+assert_true(
+  prefill_summary$legacy_mgcv_residual_cache_miss_s_total_targets ==
+    prefill_summary$legacy_mgcv_residual_cache_miss_key_count,
+  "cache miss same-S target count should match miss-key count"
+)
+assert_true(
+  prefill_summary$legacy_mgcv_residual_cache_miss_s_reuse_opportunity_count >= 0L,
+  "cache miss same-S reuse opportunity should be reported"
+)
+assert_true(
+  prefill_summary$legacy_mgcv_residual_cache_miss_s_reuse_ratio >= 0 &&
+    prefill_summary$legacy_mgcv_residual_cache_miss_s_reuse_ratio <= 1,
+  "cache miss same-S reuse ratio should be bounded"
+)
 assert_true(!isTRUE(prefill_summary$legacy_mgcv_cpp_same_s_setup_provider_enabled),
             "same-S setup provider should stay disabled without its env gate")
 
@@ -362,6 +390,21 @@ assert_true(
 assert_true(
   setup_consumed_summary$legacy_mgcv_cpp_same_s_setup_provider_error_count == 0L,
   "consumed same-S setup provider should not report errors on the native-envelope subset"
+)
+assert_true(setup_consumed_summary$legacy_mgcv_residual_cache_miss_key_count ==
+              setup_consumed_summary$legacy_mgcv_cache_miss_count,
+            "consumed route should report actual cache miss keys")
+assert_true(setup_consumed_summary$legacy_mgcv_residual_cache_miss_s_group_count > 0L,
+            "consumed route should report cache-miss same-S groups")
+assert_true(
+  setup_consumed_summary$legacy_mgcv_residual_cache_miss_s_total_targets ==
+    setup_consumed_summary$legacy_mgcv_residual_cache_miss_key_count,
+  "consumed route cache-miss same-S targets should match miss-key count"
+)
+assert_true(
+  setup_consumed_summary$legacy_mgcv_residual_cache_miss_s_reuse_opportunity_count >=
+    setup_consumed_summary$legacy_mgcv_cpp_same_s_setup_provider_reuse_count,
+  "consumed route should expose miss-key same-S reuse beyond pair-local provider reuse"
 )
 
 fallback_metrics <- fastkpc_legacy_runtime_zero()

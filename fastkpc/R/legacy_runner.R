@@ -372,6 +372,14 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_residual_request_count = 0L,
     mgcv_cache_hit_count = 0L,
     mgcv_cache_miss_count = 0L,
+    mgcv_residual_cache_hit_key_count = 0L,
+    mgcv_residual_cache_miss_key_count = 0L,
+    mgcv_residual_cache_miss_s_group_count = 0L,
+    mgcv_residual_cache_miss_s_total_targets = 0L,
+    mgcv_residual_cache_miss_s_max_targets = 0L,
+    mgcv_residual_cache_miss_s_mean_targets = 0,
+    mgcv_residual_cache_miss_s_reuse_opportunity_count = 0L,
+    mgcv_residual_cache_miss_s_reuse_ratio = 0,
     mgcv_unique_residual_key_count = 0L,
     mgcv_duplicate_residual_key_count = 0L,
     mgcv_unique_target_s_count = 0L,
@@ -543,6 +551,8 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_cpp_shadow_condition_threshold = 0,
     mgcv_residual_keys = character(),
     mgcv_s_keys = character(),
+    mgcv_residual_cache_hit_keys = character(),
+    mgcv_residual_cache_miss_keys = character(),
     mgcv_cpp_backend_native_residual_keys = character(),
     mgcv_cpp_backend_native_s_keys = character(),
     mgcv_cpp_backend_native_s_sp_keys = character(),
@@ -704,6 +714,48 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     mgcv_cache_miss_count =
       as.integer(a$mgcv_cache_miss_count) +
         as.integer(b$mgcv_cache_miss_count),
+    mgcv_residual_cache_hit_key_count =
+      as.integer(a$mgcv_residual_cache_hit_key_count) +
+        as.integer(b$mgcv_residual_cache_hit_key_count),
+    mgcv_residual_cache_miss_key_count =
+      as.integer(a$mgcv_residual_cache_miss_key_count) +
+        as.integer(b$mgcv_residual_cache_miss_key_count),
+    mgcv_residual_cache_miss_s_group_count =
+      as.integer(a$mgcv_residual_cache_miss_s_group_count) +
+        as.integer(b$mgcv_residual_cache_miss_s_group_count),
+    mgcv_residual_cache_miss_s_total_targets =
+      as.integer(a$mgcv_residual_cache_miss_s_total_targets) +
+        as.integer(b$mgcv_residual_cache_miss_s_total_targets),
+    mgcv_residual_cache_miss_s_max_targets =
+      max(as.integer(a$mgcv_residual_cache_miss_s_max_targets),
+          as.integer(b$mgcv_residual_cache_miss_s_max_targets)),
+    mgcv_residual_cache_miss_s_mean_targets = {
+      total_groups <- as.integer(a$mgcv_residual_cache_miss_s_group_count) +
+        as.integer(b$mgcv_residual_cache_miss_s_group_count)
+      if (total_groups > 0L) {
+        (as.numeric(a$mgcv_residual_cache_miss_s_mean_targets) *
+           as.integer(a$mgcv_residual_cache_miss_s_group_count) +
+           as.numeric(b$mgcv_residual_cache_miss_s_mean_targets) *
+           as.integer(b$mgcv_residual_cache_miss_s_group_count)) /
+          total_groups
+      } else {
+        0
+      }
+    },
+    mgcv_residual_cache_miss_s_reuse_opportunity_count =
+      as.integer(a$mgcv_residual_cache_miss_s_reuse_opportunity_count) +
+        as.integer(b$mgcv_residual_cache_miss_s_reuse_opportunity_count),
+    mgcv_residual_cache_miss_s_reuse_ratio = {
+      total_targets <- as.integer(a$mgcv_residual_cache_miss_s_total_targets) +
+        as.integer(b$mgcv_residual_cache_miss_s_total_targets)
+      if (total_targets > 0L) {
+        (as.integer(a$mgcv_residual_cache_miss_s_reuse_opportunity_count) +
+           as.integer(b$mgcv_residual_cache_miss_s_reuse_opportunity_count)) /
+          total_targets
+      } else {
+        0
+      }
+    },
     mgcv_unique_residual_key_count =
       as.integer(a$mgcv_unique_residual_key_count) +
         as.integer(b$mgcv_unique_residual_key_count),
@@ -1290,6 +1342,10 @@ fastkpc_legacy_runtime_add <- function(a, b) {
           as.numeric(b$mgcv_cpp_shadow_condition_threshold)),
     mgcv_residual_keys = c(a$mgcv_residual_keys, b$mgcv_residual_keys),
     mgcv_s_keys = c(a$mgcv_s_keys, b$mgcv_s_keys),
+    mgcv_residual_cache_hit_keys =
+      c(a$mgcv_residual_cache_hit_keys, b$mgcv_residual_cache_hit_keys),
+    mgcv_residual_cache_miss_keys =
+      c(a$mgcv_residual_cache_miss_keys, b$mgcv_residual_cache_miss_keys),
     mgcv_cpp_backend_native_residual_keys =
       c(a$mgcv_cpp_backend_native_residual_keys,
         b$mgcv_cpp_backend_native_residual_keys),
@@ -1371,6 +1427,14 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_pgamma_ms = numeric(), dcov_cpp_overhead_ms = numeric(),
       mgcv_residual_request_count = integer(),
       mgcv_cache_hit_count = integer(), mgcv_cache_miss_count = integer(),
+      mgcv_residual_cache_hit_key_count = integer(),
+      mgcv_residual_cache_miss_key_count = integer(),
+      mgcv_residual_cache_miss_s_group_count = integer(),
+      mgcv_residual_cache_miss_s_total_targets = integer(),
+      mgcv_residual_cache_miss_s_max_targets = integer(),
+      mgcv_residual_cache_miss_s_mean_targets = numeric(),
+      mgcv_residual_cache_miss_s_reuse_opportunity_count = integer(),
+      mgcv_residual_cache_miss_s_reuse_ratio = numeric(),
       mgcv_unique_residual_key_count = integer(),
       mgcv_duplicate_residual_key_count = integer(),
       mgcv_unique_target_s_count = integer(), mgcv_unique_s_count = integer(),
@@ -1582,6 +1646,22 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.integer(metrics$mgcv_residual_request_count),
       mgcv_cache_hit_count = as.integer(metrics$mgcv_cache_hit_count),
       mgcv_cache_miss_count = as.integer(metrics$mgcv_cache_miss_count),
+      mgcv_residual_cache_hit_key_count =
+        as.integer(metrics$mgcv_residual_cache_hit_key_count),
+      mgcv_residual_cache_miss_key_count =
+        as.integer(metrics$mgcv_residual_cache_miss_key_count),
+      mgcv_residual_cache_miss_s_group_count =
+        as.integer(metrics$mgcv_residual_cache_miss_s_group_count),
+      mgcv_residual_cache_miss_s_total_targets =
+        as.integer(metrics$mgcv_residual_cache_miss_s_total_targets),
+      mgcv_residual_cache_miss_s_max_targets =
+        as.integer(metrics$mgcv_residual_cache_miss_s_max_targets),
+      mgcv_residual_cache_miss_s_mean_targets =
+        as.numeric(metrics$mgcv_residual_cache_miss_s_mean_targets),
+      mgcv_residual_cache_miss_s_reuse_opportunity_count =
+        as.integer(metrics$mgcv_residual_cache_miss_s_reuse_opportunity_count),
+      mgcv_residual_cache_miss_s_reuse_ratio =
+        as.numeric(metrics$mgcv_residual_cache_miss_s_reuse_ratio),
       mgcv_unique_residual_key_count =
         as.integer(metrics$mgcv_unique_residual_key_count),
       mgcv_duplicate_residual_key_count =
@@ -3458,6 +3538,8 @@ fastkpc_legacy_run_mgcv_residual_pair <- function(
         metrics$mgcv_prefetch_ci_phase_ms + lookup_elapsed + extract_elapsed
       metrics$mgcv_cache_hit_count <- metrics$mgcv_cache_hit_count + 2L
       metrics$mgcv_fit_avoided_count <- metrics$mgcv_fit_avoided_count + 2L
+      metrics$mgcv_residual_cache_hit_keys <-
+        c(metrics$mgcv_residual_cache_hit_keys, target_keys)
       metrics$mgcv_residual_cache_hit_ms <-
         metrics$mgcv_residual_cache_hit_ms + lookup_elapsed
       metrics$residual_ms <- (proc.time()[["elapsed"]] - residual_start) * 1000
@@ -3572,6 +3654,8 @@ fastkpc_legacy_run_mgcv_residual_pair <- function(
       hit_elapsed <- (proc.time()[["elapsed"]] - lookup_start) * 1000
       metrics$mgcv_cache_hit_count <- metrics$mgcv_cache_hit_count + 1L
       metrics$mgcv_fit_avoided_count <- metrics$mgcv_fit_avoided_count + 1L
+      metrics$mgcv_residual_cache_hit_keys <-
+        c(metrics$mgcv_residual_cache_hit_keys, key)
       metrics$mgcv_residual_cache_hit_ms <-
         metrics$mgcv_residual_cache_hit_ms + hit_elapsed
       metrics$mgcv_cache_lookup_ms <- metrics$mgcv_cache_lookup_ms +
@@ -3581,6 +3665,8 @@ fastkpc_legacy_run_mgcv_residual_pair <- function(
     metrics$mgcv_cache_lookup_ms <- metrics$mgcv_cache_lookup_ms +
       (proc.time()[["elapsed"]] - lookup_start) * 1000
     metrics$mgcv_cache_miss_count <- metrics$mgcv_cache_miss_count + 1L
+    metrics$mgcv_residual_cache_miss_keys <-
+      c(metrics$mgcv_residual_cache_miss_keys, key)
     miss_indices <- c(miss_indices, idx)
   }
 
@@ -3697,6 +3783,37 @@ fastkpc_legacy_run_mgcv_residual_pair <- function(
 fastkpc_legacy_runtime_finalize_mgcv_keys <- function(metrics) {
   residual_keys <- metrics$mgcv_residual_keys
   s_keys <- metrics$mgcv_s_keys
+  hit_keys <- metrics$mgcv_residual_cache_hit_keys
+  miss_keys <- metrics$mgcv_residual_cache_miss_keys
+  if (length(hit_keys) > 0L) {
+    metrics$mgcv_residual_cache_hit_key_count <- length(hit_keys)
+  }
+  if (length(miss_keys) > 0L) {
+    metrics$mgcv_residual_cache_miss_key_count <- length(miss_keys)
+    miss_s_keys <- sub("^[^:]*:", "", as.character(miss_keys))
+    miss_s_keys <- miss_s_keys[nzchar(miss_s_keys)]
+    if (length(miss_s_keys) > 0L) {
+      miss_per_s <- table(miss_s_keys)
+      metrics$mgcv_residual_cache_miss_s_group_count <-
+        length(miss_per_s)
+      metrics$mgcv_residual_cache_miss_s_total_targets <-
+        sum(as.integer(miss_per_s))
+      metrics$mgcv_residual_cache_miss_s_max_targets <-
+        max(as.integer(miss_per_s))
+      metrics$mgcv_residual_cache_miss_s_mean_targets <-
+        mean(as.integer(miss_per_s))
+      metrics$mgcv_residual_cache_miss_s_reuse_opportunity_count <-
+        metrics$mgcv_residual_cache_miss_s_total_targets -
+          metrics$mgcv_residual_cache_miss_s_group_count
+      metrics$mgcv_residual_cache_miss_s_reuse_ratio <-
+        if (metrics$mgcv_residual_cache_miss_s_total_targets > 0L) {
+          metrics$mgcv_residual_cache_miss_s_reuse_opportunity_count /
+            metrics$mgcv_residual_cache_miss_s_total_targets
+        } else {
+          0
+        }
+    }
+  }
   if (length(residual_keys) > 0L) {
     unique_residual <- unique(residual_keys)
     metrics$mgcv_unique_residual_key_count <- length(unique_residual)
@@ -3816,6 +3933,8 @@ fastkpc_legacy_runtime_finalize_mgcv_keys <- function(metrics) {
     as.numeric(metrics$mgcv_cpp_backend_gam_fit_ms)
   metrics$mgcv_residual_keys <- character()
   metrics$mgcv_s_keys <- character()
+  metrics$mgcv_residual_cache_hit_keys <- character()
+  metrics$mgcv_residual_cache_miss_keys <- character()
   metrics$mgcv_cpp_backend_native_residual_keys <- character()
   metrics$mgcv_cpp_backend_native_s_keys <- character()
   metrics$mgcv_cpp_backend_native_s_sp_keys <- character()
@@ -5079,6 +5198,22 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$mgcv_cache_hit_count),
         legacy_mgcv_cache_miss_count =
           as.integer(runtime_total$mgcv_cache_miss_count),
+        legacy_mgcv_residual_cache_hit_key_count =
+          as.integer(runtime_total$mgcv_residual_cache_hit_key_count),
+        legacy_mgcv_residual_cache_miss_key_count =
+          as.integer(runtime_total$mgcv_residual_cache_miss_key_count),
+        legacy_mgcv_residual_cache_miss_s_group_count =
+          as.integer(runtime_total$mgcv_residual_cache_miss_s_group_count),
+        legacy_mgcv_residual_cache_miss_s_total_targets =
+          as.integer(runtime_total$mgcv_residual_cache_miss_s_total_targets),
+        legacy_mgcv_residual_cache_miss_s_max_targets =
+          as.integer(runtime_total$mgcv_residual_cache_miss_s_max_targets),
+        legacy_mgcv_residual_cache_miss_s_mean_targets =
+          as.numeric(runtime_total$mgcv_residual_cache_miss_s_mean_targets),
+        legacy_mgcv_residual_cache_miss_s_reuse_opportunity_count =
+          as.integer(runtime_total$mgcv_residual_cache_miss_s_reuse_opportunity_count),
+        legacy_mgcv_residual_cache_miss_s_reuse_ratio =
+          as.numeric(runtime_total$mgcv_residual_cache_miss_s_reuse_ratio),
         legacy_mgcv_residual_cache_hit_count =
           as.integer(runtime_total$mgcv_cache_hit_count),
         legacy_mgcv_residual_cache_miss_count =
