@@ -14,6 +14,16 @@ if (length(missing) > 0L) {
 }
 
 Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra")
+old_native_batch <- Sys.getenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH",
+                               unset = NA_character_)
+on.exit({
+  if (is.na(old_native_batch)) {
+    Sys.unsetenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH")
+  } else {
+    Sys.setenv(FASTKPC_NATIVE_LEGACY_DCOV_BATCH = old_native_batch)
+  }
+}, add = TRUE)
+Sys.setenv(FASTKPC_NATIVE_LEGACY_DCOV_BATCH = "level")
 
 compare_sepsets <- function(left, right) {
   if (length(left) != length(right)) return(FALSE)
@@ -220,5 +230,37 @@ assert_true(identical(native$summary$ci_backend,
 assert_true(identical(native$summary$residual_backend,
                       "provider-legacy-mgcv"),
             "native summary should record provider residual backend")
+assert_true(isTRUE(native$summary$legacy_dcov_native_batch_enabled),
+            "native legacy dCov should report level batch mode")
+expected_batch_count <- sum(as.integer(native$levels$tasks_planned) > 0L)
+assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_count),
+                      as.integer(expected_batch_count)),
+            "native legacy dCov should batch each nonempty level")
+assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_pair_count),
+                      as.integer(native$summary$legacy_dcov_native_count)),
+            "native legacy dCov batch pair count should match native task count")
+assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_workspace_reuse_count),
+                      as.integer(native$summary$legacy_dcov_native_batch_count)),
+            "native legacy dCov should report workspace reuse per native batch")
+assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_distance_workspace_reuse_count),
+                      2L * as.integer(native$summary$legacy_dcov_native_batch_pair_count)),
+            "native legacy dCov should report distance workspace reuse per pair")
+assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_statistic_moment_workspace_reuse_count),
+                      3L * as.integer(native$summary$legacy_dcov_native_batch_pair_count)),
+            "native legacy dCov should report statistic/moment workspace reuse per pair")
+assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_lowrank_output_workspace_reuse_count),
+                      2L * as.integer(native$summary$legacy_dcov_native_batch_pair_count)),
+            "native legacy dCov should report lowrank output workspace reuse per pair")
+assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_lowrank_eig_workspace_reuse_count),
+                      2L * as.integer(native$summary$legacy_dcov_native_batch_pair_count)),
+            "native legacy dCov should report lowrank eig workspace reuse per pair")
+assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_oracle_column_copy_count),
+                      0L),
+            "native legacy dCov batch oracle should avoid per-column internal copies")
+assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_column_materialize_count),
+                      2L * as.integer(native$summary$legacy_dcov_native_batch_pair_count)),
+            "native legacy dCov should report C++ skeleton matrix materialization columns")
+assert_true(native$summary$legacy_dcov_native_batch_ms > 0,
+            "native legacy dCov should report batch elapsed time")
 
 cat("PASS skeleton native residual-provider legacy dCov\n")

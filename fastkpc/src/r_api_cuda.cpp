@@ -18,7 +18,9 @@
 #include <Rcpp.h>
 #include <R_ext/Rdynload.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <sstream>
@@ -38,6 +40,32 @@ bool all_finite_vector(Rcpp::NumericVector values) {
     if (!std::isfinite(value)) return false;
   }
   return true;
+}
+
+bool native_legacy_dcov_level_batch_enabled() {
+  const char* raw = std::getenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH");
+  if (raw == nullptr) return false;
+  std::string value(raw);
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::tolower(ch));
+                 });
+  return value == "level";
+}
+
+double list_numeric_value(const Rcpp::List& values, const char* name) {
+  if (!values.containsElementNamed(name)) return 0.0;
+  return Rcpp::as<double>(values[name]);
+}
+
+int list_integer_value(const Rcpp::List& values, const char* name) {
+  if (!values.containsElementNamed(name)) return 0;
+  return Rcpp::as<int>(values[name]);
+}
+
+bool list_logical_value(const Rcpp::List& values, const char* name) {
+  if (!values.containsElementNamed(name)) return false;
+  return Rcpp::as<bool>(values[name]);
 }
 
 Rcpp::LogicalMatrix adjacency_to_matrix(const std::vector<int>& adjacency, int p) {
@@ -3669,6 +3697,18 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   fastkpc::LegacyDcovLowrankTimings legacy_lowrank_timings;
   fastkpc::LegacyDcovLowrankMode legacy_lowrank_mode =
     fastkpc::legacy_dcov_lowrank_mode_from_env();
+  const bool legacy_dcov_native_batch_enabled =
+    native_legacy_dcov_level_batch_enabled();
+  int legacy_dcov_native_batch_count = 0;
+  int legacy_dcov_native_batch_pair_count = 0;
+  int legacy_dcov_native_batch_workspace_reuse_count = 0;
+  int legacy_dcov_native_batch_distance_workspace_reuse_count = 0;
+  int legacy_dcov_native_batch_statistic_moment_workspace_reuse_count = 0;
+  int legacy_dcov_native_batch_lowrank_output_workspace_reuse_count = 0;
+  int legacy_dcov_native_batch_lowrank_eig_workspace_reuse_count = 0;
+  int legacy_dcov_native_batch_oracle_column_copy_count = 0;
+  int legacy_dcov_native_batch_column_materialize_count = 0;
+  double legacy_dcov_native_batch_ms = 0.0;
 
   for (int level = 0; level <= max_conditioning_size; ++level) {
     const LayerPlan plan = make_layer_plan(adjacency, p, level);
@@ -3734,53 +3774,132 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
     }
 
     std::vector<double> pvalues(task_count, NA_REAL);
-    for (int i = 0; i < task_count; ++i) {
-      const LayerCiTask& task = plan.tasks[i];
-      std::vector<double> rx;
-      std::vector<double> ry;
-      if (task.conditioning_set.empty()) {
-        rx = numeric_matrix_column(data, task.orientation_x);
-        ry = numeric_matrix_column(data, task.orientation_y);
-      } else {
-        const std::string x_key =
-          native_residual_key(task.orientation_x, task.conditioning_set);
-        const std::string y_key =
-          native_residual_key(task.orientation_y, task.conditioning_set);
-        rx = residual_columns[request_by_key[x_key]];
-        ry = residual_columns[request_by_key[y_key]];
+    if (legacy_dcov_native_batch_enabled && task_count > 0) {
+      Rcpp::NumericMatrix x_batch(n, task_count);
+      Rcpp::NumericMatrix y_batch(n, task_count);
+      for (int i = 0; i < task_count; ++i) {
+        const LayerCiTask& task = plan.tasks[i];
+        const double* x_ptr = nullptr;
+        const double* y_ptr = nullptr;
+        if (task.conditioning_set.empty()) {
+          x_ptr = data.begin() + static_cast<std::ptrdiff_t>(task.orientation_x) * n;
+          y_ptr = data.begin() + static_cast<std::ptrdiff_t>(task.orientation_y) * n;
+        } else {
+          const std::string x_key =
+            native_residual_key(task.orientation_x, task.conditioning_set);
+          const std::string y_key =
+            native_residual_key(task.orientation_y, task.conditioning_set);
+          x_ptr = residual_columns[request_by_key[x_key]].data();
+          y_ptr = residual_columns[request_by_key[y_key]].data();
+        }
+        for (int row = 0; row < n; ++row) {
+          x_batch(row, i) = x_ptr[row];
+          y_batch(row, i) = y_ptr[row];
+        }
       }
-      Rcpp::NumericVector x_vec(n);
-      Rcpp::NumericVector y_vec(n);
-      for (int row = 0; row < n; ++row) {
-        x_vec[row] = rx[row];
-        y_vec[row] = ry[row];
+
+      Rcpp::List batch_result =
+        fastkpc::legacy_dcov_gamma_cpp_compute_batch(
+          x_batch, y_batch, num_col, index);
+      Rcpp::NumericVector batch_p_values = batch_result["p.value"];
+      Rcpp::List batch_diag = batch_result["diagnostics"];
+      for (int i = 0; i < task_count; ++i) {
+        pvalues[i] = batch_p_values[i];
       }
-      const fastkpc::LegacyDcovGammaCppResult result =
-        fastkpc::legacy_dcov_gamma_cpp_compute(x_vec, y_vec, num_col, index);
-      pvalues[i] = result.p_value;
-      ++legacy_dcov_native_count;
-      legacy_dcov_native_ms += result.total_ms;
+      legacy_dcov_native_count += task_count;
+      legacy_dcov_native_ms +=
+        list_numeric_value(batch_diag, "scalar_total_ms");
+      legacy_dcov_native_batch_count += 1;
+      legacy_dcov_native_batch_pair_count += task_count;
+      legacy_dcov_native_batch_ms +=
+        list_numeric_value(batch_diag, "total_ms");
+      legacy_dcov_native_batch_workspace_reuse_count +=
+        list_logical_value(batch_diag, "workspace_reuse_enabled") ? 1 : 0;
+      legacy_dcov_native_batch_distance_workspace_reuse_count +=
+        list_integer_value(batch_diag, "distance_workspace_reuse_count");
+      legacy_dcov_native_batch_statistic_moment_workspace_reuse_count +=
+        list_integer_value(batch_diag, "statistic_moment_workspace_reuse_count");
+      legacy_dcov_native_batch_lowrank_output_workspace_reuse_count +=
+        list_integer_value(batch_diag, "lowrank_output_workspace_reuse_count");
+      legacy_dcov_native_batch_lowrank_eig_workspace_reuse_count +=
+        list_integer_value(batch_diag, "lowrank_eig_workspace_reuse_count");
+      legacy_dcov_native_batch_oracle_column_copy_count +=
+        list_integer_value(batch_diag, "column_copy_count");
+      legacy_dcov_native_batch_column_materialize_count += 2 * task_count;
       legacy_lowrank_timings.full_eig_count +=
-        result.lowrank_timings.full_eig_count;
+        list_integer_value(batch_diag, "lowrank_full_eig_count");
       legacy_lowrank_timings.spectra_count +=
-        result.lowrank_timings.spectra_count;
+        list_integer_value(batch_diag, "lowrank_spectra_count");
       legacy_lowrank_timings.spectra_converged_count +=
-        result.lowrank_timings.spectra_converged_count;
+        list_integer_value(batch_diag, "lowrank_spectra_converged_count");
       legacy_lowrank_timings.spectra_failed_count +=
-        result.lowrank_timings.spectra_failed_count;
+        list_integer_value(batch_diag, "lowrank_spectra_failed_count");
       legacy_lowrank_timings.spectra_fallback_full_eig_count +=
-        result.lowrank_timings.spectra_fallback_full_eig_count;
+        list_integer_value(batch_diag, "lowrank_spectra_fallback_full_eig_count");
       legacy_lowrank_timings.spectra_iterations +=
-        result.lowrank_timings.spectra_iterations;
+        list_integer_value(batch_diag, "lowrank_spectra_iterations");
       legacy_lowrank_timings.spectra_nconv +=
-        result.lowrank_timings.spectra_nconv;
+        list_integer_value(batch_diag, "lowrank_spectra_nconv");
       legacy_lowrank_timings.spectra_ncv = std::max(
         legacy_lowrank_timings.spectra_ncv,
-        result.lowrank_timings.spectra_ncv);
+        list_integer_value(batch_diag, "lowrank_spectra_ncv"));
       legacy_lowrank_timings.spectra_tol = std::max(
         legacy_lowrank_timings.spectra_tol,
-        result.lowrank_timings.spectra_tol);
-      legacy_lowrank_mode = result.lowrank_mode;
+        list_numeric_value(batch_diag, "lowrank_spectra_tol"));
+      const std::string batch_lowrank_mode =
+        Rcpp::as<std::string>(batch_diag["lowrank_mode"]);
+      legacy_lowrank_mode = batch_lowrank_mode == "spectra"
+        ? fastkpc::LegacyDcovLowrankMode::Spectra
+        : fastkpc::LegacyDcovLowrankMode::FullEig;
+    } else {
+      for (int i = 0; i < task_count; ++i) {
+        const LayerCiTask& task = plan.tasks[i];
+        std::vector<double> rx;
+        std::vector<double> ry;
+        if (task.conditioning_set.empty()) {
+          rx = numeric_matrix_column(data, task.orientation_x);
+          ry = numeric_matrix_column(data, task.orientation_y);
+        } else {
+          const std::string x_key =
+            native_residual_key(task.orientation_x, task.conditioning_set);
+          const std::string y_key =
+            native_residual_key(task.orientation_y, task.conditioning_set);
+          rx = residual_columns[request_by_key[x_key]];
+          ry = residual_columns[request_by_key[y_key]];
+        }
+        Rcpp::NumericVector x_vec(n);
+        Rcpp::NumericVector y_vec(n);
+        for (int row = 0; row < n; ++row) {
+          x_vec[row] = rx[row];
+          y_vec[row] = ry[row];
+        }
+        const fastkpc::LegacyDcovGammaCppResult result =
+          fastkpc::legacy_dcov_gamma_cpp_compute(x_vec, y_vec, num_col, index);
+        pvalues[i] = result.p_value;
+        ++legacy_dcov_native_count;
+        legacy_dcov_native_ms += result.total_ms;
+        legacy_lowrank_timings.full_eig_count +=
+          result.lowrank_timings.full_eig_count;
+        legacy_lowrank_timings.spectra_count +=
+          result.lowrank_timings.spectra_count;
+        legacy_lowrank_timings.spectra_converged_count +=
+          result.lowrank_timings.spectra_converged_count;
+        legacy_lowrank_timings.spectra_failed_count +=
+          result.lowrank_timings.spectra_failed_count;
+        legacy_lowrank_timings.spectra_fallback_full_eig_count +=
+          result.lowrank_timings.spectra_fallback_full_eig_count;
+        legacy_lowrank_timings.spectra_iterations +=
+          result.lowrank_timings.spectra_iterations;
+        legacy_lowrank_timings.spectra_nconv +=
+          result.lowrank_timings.spectra_nconv;
+        legacy_lowrank_timings.spectra_ncv = std::max(
+          legacy_lowrank_timings.spectra_ncv,
+          result.lowrank_timings.spectra_ncv);
+        legacy_lowrank_timings.spectra_tol = std::max(
+          legacy_lowrank_timings.spectra_tol,
+          result.lowrank_timings.spectra_tol);
+        legacy_lowrank_mode = result.lowrank_mode;
+      }
     }
 
     std::map<int, bool> edge_done;
@@ -3917,6 +4036,28 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_lowrank_timings.spectra_failed_count,
       Rcpp::Named("legacy_dcov_native_lowrank_spectra_fallback_full_eig_count") =
         legacy_lowrank_timings.spectra_fallback_full_eig_count,
+      Rcpp::Named("legacy_dcov_native_batch_enabled") =
+        legacy_dcov_native_batch_enabled,
+      Rcpp::Named("legacy_dcov_native_batch_count") =
+        legacy_dcov_native_batch_count,
+      Rcpp::Named("legacy_dcov_native_batch_pair_count") =
+        legacy_dcov_native_batch_pair_count,
+      Rcpp::Named("legacy_dcov_native_batch_ms") =
+        legacy_dcov_native_batch_ms,
+      Rcpp::Named("legacy_dcov_native_batch_workspace_reuse_count") =
+        legacy_dcov_native_batch_workspace_reuse_count,
+      Rcpp::Named("legacy_dcov_native_batch_distance_workspace_reuse_count") =
+        legacy_dcov_native_batch_distance_workspace_reuse_count,
+      Rcpp::Named("legacy_dcov_native_batch_statistic_moment_workspace_reuse_count") =
+        legacy_dcov_native_batch_statistic_moment_workspace_reuse_count,
+      Rcpp::Named("legacy_dcov_native_batch_lowrank_output_workspace_reuse_count") =
+        legacy_dcov_native_batch_lowrank_output_workspace_reuse_count,
+      Rcpp::Named("legacy_dcov_native_batch_lowrank_eig_workspace_reuse_count") =
+        legacy_dcov_native_batch_lowrank_eig_workspace_reuse_count,
+      Rcpp::Named("legacy_dcov_native_batch_oracle_column_copy_count") =
+        legacy_dcov_native_batch_oracle_column_copy_count,
+      Rcpp::Named("legacy_dcov_native_batch_column_materialize_count") =
+        legacy_dcov_native_batch_column_materialize_count,
       Rcpp::Named("residual_provider_level_count") =
         residual_provider_level_count,
       Rcpp::Named("residual_provider_request_count") =

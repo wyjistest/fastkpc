@@ -2988,6 +2988,45 @@ generation or residual batches further behind the native entrypoint while
 preserving this legacy dcov.gamma CI data-plane contract.
 ```
 
+Native legacy dCov level-batch checkpoint:
+
+```text
+env gate: FASTKPC_NATIVE_LEGACY_DCOV_BATCH=level
+scope: precision_run_skeleton_residual_provider_legacy_dcov_native()
+
+behavior:
+  native skeleton control remains unchanged
+  R residual provider remains the legacy mgcv/regrXonS authority
+  C++ batches each nonempty skeleton level through the shared legacy
+    dcov.gamma batch oracle
+  p-values are replayed by the same native canonical state machine
+
+diagnostics:
+  legacy_dcov_native_batch_enabled
+  legacy_dcov_native_batch_count
+  legacy_dcov_native_batch_pair_count
+  legacy_dcov_native_batch_ms
+  legacy_dcov_native_batch_workspace_reuse_count
+  legacy_dcov_native_batch_distance_workspace_reuse_count
+  legacy_dcov_native_batch_statistic_moment_workspace_reuse_count
+  legacy_dcov_native_batch_lowrank_output_workspace_reuse_count
+  legacy_dcov_native_batch_lowrank_eig_workspace_reuse_count
+  legacy_dcov_native_batch_oracle_column_copy_count
+  legacy_dcov_native_batch_column_materialize_count
+
+gate:
+  Rscript fastkpc/tests/test_skeleton_native_residual_provider_legacy_dcov.R
+  FASTKPC_NATIVE_LEGACY_DCOV_BATCH=level \
+    Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+
+status:
+  This moves the level-batch dCov data-plane boundary into the native
+  one-call skeleton checkpoint while preserving legacy dCov authority and
+  canonical replay. It remains experimental: the native path still uses an R
+  residual provider seam, materializes level batch matrices on the host, and
+  has not passed full 351x48 SHD=0 / wall-time gates.
+```
+
 ### R-facing legacy-mgcv + legacy-dCov one-call checkpoint
 
 The next API boundary hides the residual-provider callback behind a single
