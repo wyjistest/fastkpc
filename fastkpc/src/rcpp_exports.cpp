@@ -1717,6 +1717,130 @@ Rcpp::List mgcv_residual_replay_from_setup_export(
 }
 
 // [[Rcpp::export]]
+Rcpp::List mgcv_fixed_sp_solve_export(
+    Rcpp::NumericMatrix X_rcpp,
+    Rcpp::NumericVector y_rcpp,
+    Rcpp::List penalties,
+    Rcpp::IntegerVector off,
+    Rcpp::NumericVector sp,
+    Rcpp::Nullable<Rcpp::NumericMatrix> C_nullable,
+    Rcpp::Nullable<Rcpp::NumericMatrix> H_nullable,
+    Rcpp::Nullable<Rcpp::NumericVector> weights_nullable,
+    double tol) {
+  const int n = X_rcpp.nrow();
+  const int p = X_rcpp.ncol();
+  if (y_rcpp.size() != n) {
+    Rcpp::stop("response length must match setup X rows");
+  }
+  if (penalties.size() != off.size() || penalties.size() != sp.size()) {
+    Rcpp::stop("length(penalties), length(off), and length(sp) must match");
+  }
+  if (!std::isfinite(tol) || tol <= 0.0) {
+    Rcpp::stop("tol must be positive and finite");
+  }
+
+  arma::mat X = rcpp_matrix_to_arma(X_rcpp);
+  arma::vec y(y_rcpp.size());
+  for (int i = 0; i < y_rcpp.size(); ++i) {
+    if (!std::isfinite(y_rcpp[i])) Rcpp::stop("response contains non-finite value");
+    y(i) = y_rcpp[i];
+  }
+
+  arma::mat penalty(p, p, arma::fill::zeros);
+  if (H_nullable.isNotNull()) {
+    Rcpp::NumericMatrix H_rcpp(H_nullable);
+    if (H_rcpp.nrow() != p || H_rcpp.ncol() != p) {
+      Rcpp::stop("H must have dimension p x p");
+    }
+    penalty += rcpp_matrix_to_arma(H_rcpp);
+  }
+  for (int j = 0; j < penalties.size(); ++j) {
+    if (!std::isfinite(sp[j]) || sp[j] <= 0.0) {
+      Rcpp::stop("sp must contain fixed positive finite values");
+    }
+    Rcpp::NumericMatrix Sj(penalties[j]);
+    if (Sj.nrow() != Sj.ncol()) {
+      Rcpp::stop("Each penalty matrix must be square");
+    }
+    const int start = off[j] - 1;
+    const int k = Sj.nrow();
+    if (start < 0 || start + k > p) {
+      Rcpp::stop("Penalty block indexed by off is outside coefficient dimension");
+    }
+    arma::mat Sj_arma = rcpp_matrix_to_arma(Sj);
+    penalty.submat(start, start, start + k - 1, start + k - 1) +=
+      sp[j] * Sj_arma;
+  }
+
+  arma::mat Xw = X;
+  arma::vec yw = y;
+  if (weights_nullable.isNotNull()) {
+    Rcpp::NumericVector weights(weights_nullable);
+    if (weights.size() != n) {
+      Rcpp::stop("weights length must match setup X rows");
+    }
+    for (int row = 0; row < n; ++row) {
+      const double w = weights[row];
+      if (!std::isfinite(w) || w < 0.0) {
+        Rcpp::stop("weights must be finite and nonnegative");
+      }
+      const double sw = std::sqrt(w);
+      Xw.row(row) *= sw;
+      yw(row) *= sw;
+    }
+  }
+
+  arma::mat Z;
+  if (C_nullable.isNotNull()) {
+    Rcpp::NumericMatrix C_rcpp(C_nullable);
+    if (C_rcpp.nrow() == 0) {
+      Z = arma::eye(p, p);
+    } else {
+      if (C_rcpp.ncol() != p) {
+        Rcpp::stop("Constraint matrix C must have ncol(C) equal to coefficient dimension");
+      }
+      Rcpp::NumericMatrix Z_rcpp = constraint_null_space_cpp(C_rcpp, p, tol);
+      Z = rcpp_matrix_to_arma(Z_rcpp);
+    }
+  } else {
+    Z = arma::eye(p, p);
+  }
+  if (Z.n_cols == 0) {
+    Rcpp::stop("Constraint matrix leaves no free coefficient space");
+  }
+
+  const arma::mat XZ = Xw * Z;
+  const arma::mat A = XZ.t() * XZ + Z.t() * penalty * Z;
+  const arma::vec b = XZ.t() * yw;
+  arma::vec theta;
+  const bool solved = arma::solve(
+    theta, A, b, arma::solve_opts::likely_sympd + arma::solve_opts::no_approx
+  );
+  if (!solved) {
+    if (!arma::solve(theta, A, b, arma::solve_opts::fast)) {
+      Rcpp::stop("C++ fixed-sp solve failed");
+    }
+  }
+
+  const arma::vec beta = Z * theta;
+  const arma::vec fitted = X * beta;
+  const arma::vec residuals = y - fitted;
+  return Rcpp::List::create(
+    Rcpp::Named("backend_family") = "mgcvExtractCPP",
+    Rcpp::Named("mode") = "fixed-sp-native-cpp-solve",
+    Rcpp::Named("solve_source") = "fastkpc-native-cpp-fixed-sp",
+    Rcpp::Named("solver_kernel") = "arma-penalized-normal-equations",
+    Rcpp::Named("authoritative") = false,
+    Rcpp::Named("coefficients") = arma_vector_to_rcpp(beta),
+    Rcpp::Named("fitted") = arma_vector_to_rcpp(fitted),
+    Rcpp::Named("residuals") = arma_vector_to_rcpp(residuals),
+    Rcpp::Named("free_rank") = static_cast<int>(Z.n_cols),
+    Rcpp::Named("n") = n,
+    Rcpp::Named("p") = p
+  );
+}
+
+// [[Rcpp::export]]
 Rcpp::List mgcv_extract_gpu_spectral_score_batch_export(
     Rcpp::NumericMatrix eigenvectors,
     Rcpp::NumericMatrix inv_chol,

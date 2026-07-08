@@ -686,6 +686,41 @@ numeric executor. It does prove that the current oracle cases can be reduced
 from full `mgcv::gam()` fitting to extracted fixed-sp setup plus replayed
 residual solve without changing downstream legacy dCov decisions.
 
+Explicit C++ fixed-sp numeric shadow artifact:
+
+```text
+fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_v1
+```
+
+Status:
+
+```text
+status: created
+mode: shadow only, not authoritative
+setup provider: mgcv::gam(fit = FALSE) with selected oracle sp
+numeric executor: native C++ penalized fixed-sp normal-equation solver
+case_count: 8
+setup_supported_count: 8
+residual_pair_match_count: 8
+dcov_p_match_count: 8
+decision_match_count: 8
+decision_flip_count: 0
+max_residual_x_abs_diff: 1.237126e-10
+max_residual_y_abs_diff: 2.477574e-12
+max_dcov_p_abs_diff: 3.99325e-11
+residual_tol: 1e-5
+p_tol: 1e-5
+pass: TRUE
+```
+
+This is the first explicit native C++ numeric executor checkpoint for the
+current extracted fixed-sp oracle cases. It is still not production because
+the setup provider is mgcv and the coverage is the small Phase 3 oracle set,
+but it removes the mgcv `C_magic` solve path from the shadow residual replay.
+The next Phase 3C step is to expand this C++ numeric shadow across more
+full-skeleton residual requests and unsupported-envelope diagnostics before
+considering any env-gated residual backend.
+
 #### Gate before production use
 
 ```text
@@ -1036,13 +1071,18 @@ decision_flip_count = 0
 fastkpc/artifacts/mgcv_residual_setup_shadow_v1 exists
 8 / 8 extracted fixed-sp setup replays supported
 decision_flip_count = 0
+
+fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_v1 exists
+8 / 8 extracted setup native C++ numeric replays supported
+decision_flip_count = 0
 ```
 
 Next Phase 3 step:
 
 ```text
-move from mgcv C_magic fixed-sp replay to an explicit C++ numeric executor
-for extracted supported setups, still in shadow mode
+expand explicit C++ numeric residual shadow coverage beyond the small oracle
+set, record unsupported-envelope reasons, then decide whether an env-gated
+residual backend is justified
 ```
 
 ### 8.4 Continue dCov backend improvement separately

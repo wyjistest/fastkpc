@@ -605,6 +605,59 @@ fastkpc_mgcv_solve_setup_fixed_sp <- function(setup,
   )
 }
 
+fastkpc_mgcv_solve_setup_fixed_sp_cpp <- function(
+    setup, sp = setup$sp, tol = sqrt(.Machine$double.eps)) {
+  if (!exists("fastkpc_mgcv_fixed_sp_solve_cpp", mode = "function")) {
+    source("fastkpc/R/native.R")
+  }
+  sp <- fastkpc_validate_fixed_positive_sp(sp, expected_length = length(setup$S))
+  solved <- fastkpc_mgcv_fixed_sp_solve_cpp(
+    X = setup$X,
+    y = setup$y,
+    penalties = setup$S,
+    off = setup$off,
+    sp = sp,
+    C = setup$C,
+    H = setup$H,
+    weights = setup$w,
+    tol = tol
+  )
+  list(
+    backend_family = solved$backend_family,
+    mode = solved$mode,
+    solve_source = solved$solve_source,
+    sp_source = "fixed-input",
+    gcv_source = "none",
+    is_self_contained_gcv = FALSE,
+    authoritative = FALSE,
+    coefficients = as.numeric(solved$coefficients),
+    fitted = as.numeric(solved$fitted),
+    residuals = as.numeric(solved$residuals),
+    sp = sp,
+    setup_fingerprint = setup$setup_fingerprint,
+    setup_diagnostics = list(
+      n = nrow(setup$X),
+      p = ncol(setup$X),
+      penalty_count = length(setup$S),
+      off = setup$off,
+      has_C = !is.null(setup$C) && length(setup$C) > 0L,
+      has_H = !is.null(setup$H),
+      weights_policy = setup$weights_policy,
+      offset_policy = setup$offset_policy,
+      solver_kernel = solved$solver_kernel,
+      free_rank = solved$free_rank
+    ),
+    penalty_diagnostics = list(
+      sp = sp,
+      penalty_dims = lapply(setup$S, dim)
+    ),
+    constraint_diagnostics = list(
+      C_dim = if (is.null(setup$C)) c(0L, ncol(setup$X)) else dim(as.matrix(setup$C))
+    ),
+    rank_diagnostics = list(rank = setup$rank)
+  )
+}
+
 fastkpc_mgcv_extract_fixed_sp_solve <- function(formula, data, sp,
                                                 method = "GCV.Cp",
                                                 target = 1L,

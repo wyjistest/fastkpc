@@ -71,7 +71,8 @@ fastkpc_mgcv_setup_shadow_sp <- function(entry, suffix) {
 }
 
 fastkpc_mgcv_setup_shadow_solve_one <- function(entry, fit_data_info,
-                                                target_col, suffix, env) {
+                                                target_col, suffix, env,
+                                                solver) {
   formula <- fastkpc_mgcv_oracle_formula(
     target_col, length(fit_data_info$S), env
   )
@@ -83,7 +84,11 @@ fastkpc_mgcv_setup_shadow_solve_one <- function(entry, fit_data_info,
     target = target_col,
     S = fit_data_info$S_fit
   )
-  solution <- fastkpc_mgcv_solve_setup_fixed_sp(setup)
+  solution <- if (identical(solver, "cpp")) {
+    fastkpc_mgcv_solve_setup_fixed_sp_cpp(setup)
+  } else {
+    fastkpc_mgcv_solve_setup_fixed_sp(setup)
+  }
   list(setup = setup, solution = solution)
 }
 
@@ -97,6 +102,7 @@ fastkpc_mgcv_setup_shadow_unsupported_row <- function(case, entry,
     S_key = case$S_key,
     S_size = case$S_size,
     formula_route = case$formula_route,
+    solver = "",
     setup_supported = FALSE,
     authoritative = FALSE,
     backend_family_x = "",
@@ -129,15 +135,18 @@ fastkpc_mgcv_setup_shadow_unsupported_row <- function(case, entry,
 }
 
 fastkpc_mgcv_setup_shadow_case <- function(data, case, entry, alpha, index,
-                                           numCol, env, residual_tol, p_tol) {
+                                           numCol, env, residual_tol, p_tol,
+                                           solver) {
   solved <- tryCatch({
     fit_data_info <- fastkpc_mgcv_setup_shadow_fit_data(data, case)
     list(
       x = fastkpc_mgcv_setup_shadow_solve_one(
-        entry, fit_data_info, target_col = 1L, suffix = "x", env = env
+        entry, fit_data_info, target_col = 1L, suffix = "x", env = env,
+        solver = solver
       ),
       y = fastkpc_mgcv_setup_shadow_solve_one(
-        entry, fit_data_info, target_col = 2L, suffix = "y", env = env
+        entry, fit_data_info, target_col = 2L, suffix = "y", env = env,
+        solver = solver
       )
     )
   }, error = function(e) e)
@@ -171,6 +180,7 @@ fastkpc_mgcv_setup_shadow_case <- function(data, case, entry, alpha, index,
     S_key = case$S_key,
     S_size = case$S_size,
     formula_route = case$formula_route,
+    solver = solver,
     setup_supported = TRUE,
     authoritative = FALSE,
     backend_family_x = solved$x$solution$backend_family,
@@ -222,7 +232,9 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
     numCol = NULL,
     residual_tol = 1e-5,
     p_tol = 1e-5,
+    solver = c("mgcv_magic", "cpp"),
     env = fastkpc_legacy_env()) {
+  solver <- match.arg(solver)
   if (!requireNamespace("mgcv", quietly = TRUE)) {
     stop("mgcv is required for mgcv residual setup shadow", call. = FALSE)
   }
@@ -256,7 +268,8 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
       numCol = numCol,
       env = env,
       residual_tol = residual_tol,
-      p_tol = p_tol
+      p_tol = p_tol,
+      solver = solver
     )
   }
 
@@ -276,6 +289,7 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
     max_dcov_p_abs_diff = max(case_rows$dcov_p_abs_diff, na.rm = TRUE),
     residual_tol = residual_tol,
     p_tol = p_tol,
+    solver = solver,
     authoritative = FALSE,
     pass = all(case_rows$setup_supported) &&
       all(case_rows$residual_pair_match) &&
@@ -299,6 +313,7 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
     "# mgcv Residual Setup Shadow v1",
     "",
     paste0("- cases: ", summary$case_count[[1L]]),
+    paste0("- solver: ", summary$solver[[1L]]),
     paste0("- setup supported: ", summary$setup_supported_count[[1L]]),
     paste0("- residual matches: ",
            summary$residual_pair_match_count[[1L]]),

@@ -101,6 +101,33 @@ fastkpc_mgcv_residual_replay_from_setup_cpp <- function(
   )
 }
 
+fastkpc_mgcv_fixed_sp_solve_cpp <- function(
+    X, y, penalties, off, sp, C = NULL, H = NULL, weights = NULL,
+    tol = sqrt(.Machine$double.eps)) {
+  build_fastkpc_native()
+  X <- as.matrix(X)
+  storage.mode(X) <- "double"
+  if (!is.null(C)) {
+    C <- as.matrix(C)
+    storage.mode(C) <- "double"
+  }
+  if (!is.null(H)) {
+    H <- as.matrix(H)
+    storage.mode(H) <- "double"
+  }
+  mgcv_fixed_sp_solve_export(
+    X,
+    as.numeric(y),
+    penalties,
+    as.integer(off),
+    as.numeric(sp),
+    C,
+    H,
+    if (is.null(weights)) NULL else as.numeric(weights),
+    as.numeric(tol)
+  )
+}
+
 fast_hsic_gamma_cpp <- function(x, y, sig = 1) {
   build_fastkpc_native()
   fast_hsic_gamma_cpp_export(

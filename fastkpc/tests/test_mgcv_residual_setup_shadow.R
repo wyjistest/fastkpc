@@ -53,7 +53,8 @@ artifact <- fastkpc_run_mgcv_residual_setup_shadow(
   data = data,
   oracle_dir = oracle_dir,
   output_dir = out_dir,
-  alpha = 0.1
+  alpha = 0.1,
+  solver = "cpp"
 )
 
 assert_true(file.exists(file.path(out_dir, "summary.csv")),
@@ -83,10 +84,16 @@ assert_true(artifact$summary$decision_flip_count[[1L]] == 0L,
             "setup shadow should not flip oracle decisions")
 assert_true(all(!artifact$cases$authoritative),
             "setup shadow must not be authoritative")
-assert_true(all(artifact$cases$backend_family_x == "mgcvExtractCPU"),
-            "x setup shadow should use mgcvExtractCPU")
-assert_true(all(artifact$cases$backend_family_y == "mgcvExtractCPU"),
-            "y setup shadow should use mgcvExtractCPU")
+assert_true(all(artifact$cases$backend_family_x == "mgcvExtractCPP"),
+            "x setup shadow should use mgcvExtractCPP")
+assert_true(all(artifact$cases$backend_family_y == "mgcvExtractCPP"),
+            "y setup shadow should use mgcvExtractCPP")
+assert_true(all(artifact$cases$solve_source_x ==
+                  "fastkpc-native-cpp-fixed-sp"),
+            "x setup shadow should use native C++ fixed-sp solve")
+assert_true(all(artifact$cases$solve_source_y ==
+                  "fastkpc-native-cpp-fixed-sp"),
+            "y setup shadow should use native C++ fixed-sp solve")
 assert_true(isTRUE(artifact$summary$pass[[1L]]),
             "setup shadow summary should pass")
 
