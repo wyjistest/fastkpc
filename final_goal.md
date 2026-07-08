@@ -1397,6 +1397,41 @@ next acceleration attempt should reuse or batch same-S setup/extraction work.
 Optimizing the scalar native solve alone will not address the full-route
 regression.
 
+Guarded residual same-S setup reuse potential diagnostic:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_reuse_potential_subset_v1
+```
+
+Status:
+
+```text
+status: created
+mode: env-gated backend same-S reuse potential diagnostic
+data: real 351x48 fixture, 12 hot-column subset
+max_conditioning_size: 3
+backend / native / fallback targets: 5380 / 4894 / 486
+native same-S groups: 78
+native same-S targets: 4894
+native same-S max targets: 182
+native same-S mean targets: 62.74359
+native same-S reuse opportunity: 4816
+native same-S setup reuse ratio: 0.9840621
+
+input_formula_setup_ms: 99512
+mgcv_gam_fit_ms: 66999
+setup_extract_ms: 53907
+native_fixed_sp_solve_ms: 5020
+fallback_regrXonS_ms: 28819
+```
+
+This shows that almost all native guarded backend targets share conditioning
+sets with other native targets. On the subset, 4,894 native target residuals
+collapse to only 78 same-S groups, so a same-S setup reuse design has a 98.4%
+setup reuse opportunity before considering load balance and cache boundaries.
+This is the strongest evidence so far that the next residual acceleration path
+should batch or reuse setup by conditioning set, not optimize scalar solves.
+
 #### Gate before production use
 
 ```text
@@ -1892,6 +1927,17 @@ native_fixed_sp_solve_ms = 2919
 fallback_regrXonS_ms = 28691
 status: regression attributed to repeated per-target setup/extraction, not
 native numeric solve
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_reuse_potential_subset_v1 exists
+real 351x48 fixture, 12 hot-column subset, same-S native reuse potential
+backend / native / fallback targets = 5380 / 4894 / 486
+native same-S groups = 78
+native same-S targets = 4894
+native same-S max targets = 182
+native same-S mean targets = 62.74359
+native same-S reuse opportunity = 4816
+native same-S setup reuse ratio = 0.9840621
+status: strong same-S setup reuse opportunity; proceed to prototype
 ```
 
 Next Phase 3 step:
@@ -1899,11 +1945,12 @@ Next Phase 3 step:
 ```text
 do not promote FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded. The regression
 is now attributed to repeated per-target setup/extraction, not the native
-fixed-sp numeric solve. The next viable Phase 3 step is a same-S guarded setup
-reuse diagnostic/prototype: enumerate targets sharing each conditioning set,
-build or extract setup once per S where semantics allow it, and measure whether
-batched target residual solves can preserve canonical replay while reducing
-setup/gam/extraction worker-ms. Keep the default route unchanged.
+fixed-sp numeric solve, and the same-S diagnostic shows a 98.4% setup reuse
+opportunity on the deep real subset. The next viable Phase 3 step is an
+env-gated same-S guarded setup reuse prototype: group native-supported
+target residuals by conditioning set S, build/extract the reusable setup once
+per S where semantics allow it, solve all targets in that group, and preserve
+canonical replay. Keep the default route unchanged.
 ```
 
 ### 8.4 Continue dCov backend improvement separately

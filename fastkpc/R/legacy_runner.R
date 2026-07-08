@@ -486,6 +486,12 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_cpp_backend_fallback_s_size_1_count = 0L,
     mgcv_cpp_backend_fallback_s_size_2_count = 0L,
     mgcv_cpp_backend_fallback_s_size_gt2_count = 0L,
+    mgcv_cpp_backend_same_s_native_group_count = 0L,
+    mgcv_cpp_backend_same_s_native_target_count = 0L,
+    mgcv_cpp_backend_same_s_native_max_targets = 0L,
+    mgcv_cpp_backend_same_s_native_mean_targets = 0,
+    mgcv_cpp_backend_same_s_native_reuse_opportunity_count = 0L,
+    mgcv_cpp_backend_same_s_native_setup_reuse_ratio = 0,
     mgcv_cpp_backend_native_s_size_limit = 0,
     mgcv_cpp_backend_condition_threshold = 0,
     mgcv_cpp_shadow_enabled = 0L,
@@ -503,6 +509,8 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_cpp_shadow_condition_threshold = 0,
     mgcv_residual_keys = character(),
     mgcv_s_keys = character(),
+    mgcv_cpp_backend_native_residual_keys = character(),
+    mgcv_cpp_backend_native_s_keys = character(),
     direct_ci_count = 0L,
     conditional_ci_count = 0L,
     mgcv_fit_count = 0L,
@@ -1007,6 +1015,42 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     mgcv_cpp_backend_fallback_s_size_gt2_count =
       as.integer(a$mgcv_cpp_backend_fallback_s_size_gt2_count) +
         as.integer(b$mgcv_cpp_backend_fallback_s_size_gt2_count),
+    mgcv_cpp_backend_same_s_native_group_count =
+      as.integer(a$mgcv_cpp_backend_same_s_native_group_count) +
+        as.integer(b$mgcv_cpp_backend_same_s_native_group_count),
+    mgcv_cpp_backend_same_s_native_target_count =
+      as.integer(a$mgcv_cpp_backend_same_s_native_target_count) +
+        as.integer(b$mgcv_cpp_backend_same_s_native_target_count),
+    mgcv_cpp_backend_same_s_native_max_targets =
+      max(as.integer(a$mgcv_cpp_backend_same_s_native_max_targets),
+          as.integer(b$mgcv_cpp_backend_same_s_native_max_targets)),
+    mgcv_cpp_backend_same_s_native_mean_targets = {
+      total_groups <- as.integer(a$mgcv_cpp_backend_same_s_native_group_count) +
+        as.integer(b$mgcv_cpp_backend_same_s_native_group_count)
+      if (total_groups > 0L) {
+        (as.numeric(a$mgcv_cpp_backend_same_s_native_mean_targets) *
+           as.integer(a$mgcv_cpp_backend_same_s_native_group_count) +
+           as.numeric(b$mgcv_cpp_backend_same_s_native_mean_targets) *
+             as.integer(b$mgcv_cpp_backend_same_s_native_group_count)) /
+          total_groups
+      } else {
+        0
+      }
+    },
+    mgcv_cpp_backend_same_s_native_reuse_opportunity_count =
+      as.integer(a$mgcv_cpp_backend_same_s_native_reuse_opportunity_count) +
+        as.integer(b$mgcv_cpp_backend_same_s_native_reuse_opportunity_count),
+    mgcv_cpp_backend_same_s_native_setup_reuse_ratio = {
+      total_targets <- as.integer(a$mgcv_cpp_backend_same_s_native_target_count) +
+        as.integer(b$mgcv_cpp_backend_same_s_native_target_count)
+      if (total_targets > 0L) {
+        (as.integer(a$mgcv_cpp_backend_same_s_native_reuse_opportunity_count) +
+           as.integer(b$mgcv_cpp_backend_same_s_native_reuse_opportunity_count)) /
+          total_targets
+      } else {
+        0
+      }
+    },
     mgcv_cpp_backend_native_s_size_limit =
       max(as.numeric(a$mgcv_cpp_backend_native_s_size_limit),
           as.numeric(b$mgcv_cpp_backend_native_s_size_limit)),
@@ -1054,6 +1098,11 @@ fastkpc_legacy_runtime_add <- function(a, b) {
           as.numeric(b$mgcv_cpp_shadow_condition_threshold)),
     mgcv_residual_keys = c(a$mgcv_residual_keys, b$mgcv_residual_keys),
     mgcv_s_keys = c(a$mgcv_s_keys, b$mgcv_s_keys),
+    mgcv_cpp_backend_native_residual_keys =
+      c(a$mgcv_cpp_backend_native_residual_keys,
+        b$mgcv_cpp_backend_native_residual_keys),
+    mgcv_cpp_backend_native_s_keys =
+      c(a$mgcv_cpp_backend_native_s_keys, b$mgcv_cpp_backend_native_s_keys),
     direct_ci_count =
       as.integer(a$direct_ci_count) + as.integer(b$direct_ci_count),
     conditional_ci_count =
@@ -1204,6 +1253,12 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       mgcv_cpp_backend_fallback_s_size_1_count = integer(),
       mgcv_cpp_backend_fallback_s_size_2_count = integer(),
       mgcv_cpp_backend_fallback_s_size_gt2_count = integer(),
+      mgcv_cpp_backend_same_s_native_group_count = integer(),
+      mgcv_cpp_backend_same_s_native_target_count = integer(),
+      mgcv_cpp_backend_same_s_native_max_targets = integer(),
+      mgcv_cpp_backend_same_s_native_mean_targets = numeric(),
+      mgcv_cpp_backend_same_s_native_reuse_opportunity_count = integer(),
+      mgcv_cpp_backend_same_s_native_setup_reuse_ratio = numeric(),
       mgcv_fit_count = integer(), dcov_gamma_count = integer()
     ))
   }
@@ -1472,6 +1527,18 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.integer(metrics$mgcv_cpp_backend_fallback_s_size_2_count),
       mgcv_cpp_backend_fallback_s_size_gt2_count =
         as.integer(metrics$mgcv_cpp_backend_fallback_s_size_gt2_count),
+      mgcv_cpp_backend_same_s_native_group_count =
+        as.integer(metrics$mgcv_cpp_backend_same_s_native_group_count),
+      mgcv_cpp_backend_same_s_native_target_count =
+        as.integer(metrics$mgcv_cpp_backend_same_s_native_target_count),
+      mgcv_cpp_backend_same_s_native_max_targets =
+        as.integer(metrics$mgcv_cpp_backend_same_s_native_max_targets),
+      mgcv_cpp_backend_same_s_native_mean_targets =
+        as.numeric(metrics$mgcv_cpp_backend_same_s_native_mean_targets),
+      mgcv_cpp_backend_same_s_native_reuse_opportunity_count =
+        as.integer(metrics$mgcv_cpp_backend_same_s_native_reuse_opportunity_count),
+      mgcv_cpp_backend_same_s_native_setup_reuse_ratio =
+        as.numeric(metrics$mgcv_cpp_backend_same_s_native_setup_reuse_ratio),
       mgcv_fit_count = as.integer(metrics$mgcv_fit_count),
       dcov_gamma_count = as.integer(metrics$dcov_gamma_count)
     )
@@ -1820,7 +1887,7 @@ fastkpc_legacy_mgcv_residual_cpp_guarded_compute <- function(
 
 fastkpc_legacy_mgcv_residual_cpp_backend_target <- function(
     metrics, target_data, s_data, env, condition_threshold,
-    native_s_size_limit) {
+    native_s_size_limit, target = NA_integer_, S = integer()) {
   backend_start <- proc.time()[["elapsed"]]
   metrics$mgcv_cpp_backend_enabled <- 1L
   metrics$mgcv_cpp_backend_condition_threshold <-
@@ -1907,6 +1974,17 @@ fastkpc_legacy_mgcv_residual_cpp_backend_target <- function(
   } else {
     metrics$mgcv_cpp_backend_native_count <-
       metrics$mgcv_cpp_backend_native_count + 1L
+    if (!is.na(as.integer(target))) {
+      s_key <- fastkpc_legacy_mgcv_s_key(S)
+      metrics$mgcv_cpp_backend_native_residual_keys <- c(
+        metrics$mgcv_cpp_backend_native_residual_keys,
+        fastkpc_legacy_mgcv_residual_key(target, S)
+      )
+      metrics$mgcv_cpp_backend_native_s_keys <- c(
+        metrics$mgcv_cpp_backend_native_s_keys,
+        s_key
+      )
+    }
     if (s_size == 0L) {
       metrics$mgcv_cpp_backend_native_s_size_0_count <-
         metrics$mgcv_cpp_backend_native_s_size_0_count + 1L
@@ -2549,7 +2627,9 @@ fastkpc_legacy_run_mgcv_residual_pair <- function(
         s_data = s_data,
         env = env,
         condition_threshold = cpp_backend_condition_threshold,
-        native_s_size_limit = cpp_backend_native_s_size_limit
+        native_s_size_limit = cpp_backend_native_s_size_limit,
+        target = x,
+        S = S_int
       )
       metrics <- backend_x$metrics
       backend_y <- fastkpc_legacy_mgcv_residual_cpp_backend_target(
@@ -2558,7 +2638,9 @@ fastkpc_legacy_run_mgcv_residual_pair <- function(
         s_data = s_data,
         env = env,
         condition_threshold = cpp_backend_condition_threshold,
-        native_s_size_limit = cpp_backend_native_s_size_limit
+        native_s_size_limit = cpp_backend_native_s_size_limit,
+        target = y,
+        S = S_int
       )
       metrics <- backend_y$metrics
       residuals <- cbind(backend_x$residual, backend_y$residual)
@@ -2647,7 +2729,9 @@ fastkpc_legacy_run_mgcv_residual_pair <- function(
         s_data = s_data,
         env = env,
         condition_threshold = cpp_backend_condition_threshold,
-        native_s_size_limit = cpp_backend_native_s_size_limit
+        native_s_size_limit = cpp_backend_native_s_size_limit,
+        target = targets[[idx]],
+        S = S_int
       )
       metrics <- backend$metrics
       target_residual <- backend$residual
@@ -2722,8 +2806,32 @@ fastkpc_legacy_runtime_finalize_mgcv_keys <- function(metrics) {
     metrics$mgcv_same_s_reuse_opportunity_count <-
       metrics$mgcv_same_s_total_targets - metrics$mgcv_same_s_group_count
   }
+  native_s_keys <- metrics$mgcv_cpp_backend_native_s_keys
+  native_residual_keys <- metrics$mgcv_cpp_backend_native_residual_keys
+  if (length(native_s_keys) > 0L) {
+    native_per_s <- table(native_s_keys)
+    metrics$mgcv_cpp_backend_same_s_native_group_count <-
+      length(native_per_s)
+    metrics$mgcv_cpp_backend_same_s_native_target_count <-
+      length(native_s_keys)
+    metrics$mgcv_cpp_backend_same_s_native_max_targets <-
+      max(as.integer(native_per_s))
+    metrics$mgcv_cpp_backend_same_s_native_mean_targets <-
+      mean(as.integer(native_per_s))
+    metrics$mgcv_cpp_backend_same_s_native_reuse_opportunity_count <-
+      length(native_s_keys) - length(native_per_s)
+    metrics$mgcv_cpp_backend_same_s_native_setup_reuse_ratio <-
+      if (length(native_s_keys) > 0L) {
+        metrics$mgcv_cpp_backend_same_s_native_reuse_opportunity_count /
+          length(native_s_keys)
+      } else {
+        0
+      }
+  }
   metrics$mgcv_residual_keys <- character()
   metrics$mgcv_s_keys <- character()
+  metrics$mgcv_cpp_backend_native_residual_keys <- character()
+  metrics$mgcv_cpp_backend_native_s_keys <- character()
   metrics
 }
 
@@ -3833,6 +3941,18 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$mgcv_cpp_backend_fallback_s_size_2_count),
         legacy_mgcv_cpp_backend_fallback_s_size_gt2_count =
           as.integer(runtime_total$mgcv_cpp_backend_fallback_s_size_gt2_count),
+        legacy_mgcv_cpp_backend_same_s_native_group_count =
+          as.integer(runtime_total$mgcv_cpp_backend_same_s_native_group_count),
+        legacy_mgcv_cpp_backend_same_s_native_target_count =
+          as.integer(runtime_total$mgcv_cpp_backend_same_s_native_target_count),
+        legacy_mgcv_cpp_backend_same_s_native_max_targets =
+          as.integer(runtime_total$mgcv_cpp_backend_same_s_native_max_targets),
+        legacy_mgcv_cpp_backend_same_s_native_mean_targets =
+          as.numeric(runtime_total$mgcv_cpp_backend_same_s_native_mean_targets),
+        legacy_mgcv_cpp_backend_same_s_native_reuse_opportunity_count =
+          as.integer(runtime_total$mgcv_cpp_backend_same_s_native_reuse_opportunity_count),
+        legacy_mgcv_cpp_backend_same_s_native_setup_reuse_ratio =
+          as.numeric(runtime_total$mgcv_cpp_backend_same_s_native_setup_reuse_ratio),
         legacy_mgcv_cpp_backend_native_s_size_limit =
           as.numeric(runtime_total$mgcv_cpp_backend_native_s_size_limit),
         legacy_mgcv_cpp_backend_condition_threshold =

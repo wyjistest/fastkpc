@@ -102,6 +102,12 @@ required <- c(
   "legacy_mgcv_cpp_backend_native_s_size_1_count",
   "legacy_mgcv_cpp_backend_native_s_size_2_count",
   "legacy_mgcv_cpp_backend_fallback_s_size_gt2_count",
+  "legacy_mgcv_cpp_backend_same_s_native_group_count",
+  "legacy_mgcv_cpp_backend_same_s_native_target_count",
+  "legacy_mgcv_cpp_backend_same_s_native_max_targets",
+  "legacy_mgcv_cpp_backend_same_s_native_mean_targets",
+  "legacy_mgcv_cpp_backend_same_s_native_reuse_opportunity_count",
+  "legacy_mgcv_cpp_backend_same_s_native_setup_reuse_ratio",
   "legacy_mgcv_cpp_backend_native_s_size_limit",
   "legacy_mgcv_cpp_backend_condition_threshold"
 )
@@ -145,6 +151,21 @@ assert_true(summary$legacy_mgcv_cpp_backend_native_s_size_1_count +
               summary$legacy_mgcv_cpp_backend_native_s_size_2_count ==
               summary$legacy_mgcv_cpp_backend_native_count,
             "native |S| counters should account for native backend calls")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_native_target_count ==
+              summary$legacy_mgcv_cpp_backend_native_count,
+            "same-S native target count should match native backend calls")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_native_group_count > 0L,
+            "same-S native grouping should report groups")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_native_max_targets >= 1L,
+            "same-S native grouping should report max targets")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_native_mean_targets >= 1,
+            "same-S native grouping should report mean targets")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_native_reuse_opportunity_count >=
+              0L,
+            "same-S native reuse opportunity should be nonnegative")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_native_setup_reuse_ratio >=
+              0,
+            "same-S native setup reuse ratio should be nonnegative")
 assert_true(summary$legacy_mgcv_cpp_backend_high_condition_fallback_count == 0L,
             "high-condition fallback should not trigger with loose threshold")
 assert_true(summary$legacy_mgcv_cpp_backend_error_count == 0L,
@@ -202,5 +223,31 @@ assert_true(fallback_summary$mgcv_cpp_backend_native_solve_ms == 0,
             "outside-envelope fallback should not run native fixed-sp solve")
 assert_true(ncol(fallback$residuals) == 2L && nrow(fallback$residuals) == n,
             "direct residual pair fallback should return two residual columns")
+
+native_metrics <- fastkpc_legacy_runtime_zero()
+native <- fastkpc_legacy_run_mgcv_residual_pair(
+  metrics = native_metrics,
+  data = data,
+  x = 1L,
+  y = 2L,
+  S = c(3L, 4L),
+  env = fastkpc_legacy_env(),
+  cpp_backend_enabled = TRUE,
+  cpp_backend_condition_threshold = 1e300,
+  cpp_backend_native_s_size_limit = 2L
+)
+native_summary <- fastkpc_legacy_runtime_finalize_mgcv_keys(native$metrics)
+assert_true(native_summary$mgcv_cpp_backend_native_count == 2L,
+            "direct native residual pair should use native backend")
+assert_true(native_summary$mgcv_cpp_backend_same_s_native_group_count == 1L,
+            "direct native residual pair should report one same-S group")
+assert_true(native_summary$mgcv_cpp_backend_same_s_native_target_count == 2L,
+            "direct native residual pair should report two same-S targets")
+assert_true(native_summary$mgcv_cpp_backend_same_s_native_reuse_opportunity_count ==
+              1L,
+            "direct native residual pair should expose one setup reuse opportunity")
+assert_true(native_summary$mgcv_cpp_backend_same_s_native_setup_reuse_ratio ==
+              0.5,
+            "direct native residual pair should report exact setup reuse ratio")
 
 cat("PASS precision compatible legacy mgcv residual C++ backend\n")
