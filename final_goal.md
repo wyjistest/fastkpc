@@ -3937,6 +3937,13 @@ stage accounted timing
 lowrank Spectra/full-eig aggregate counts
 ```
 
+The env-gated chunk/round skeleton batch summaries also expose the same
+workspace reuse counters with `legacy_dcov_cpp_batch_*` prefixes, including
+workspace reuse calls, distance/statistic-moment/lowrank workspace reuse, and
+column-copy counts. This is diagnostic plumbing for the experimental batch
+routes only; it does not promote chunk or round batching over the recommended
+S-affinity route without a full 351x48 wall-time win.
+
 Gate:
 
 ```bash

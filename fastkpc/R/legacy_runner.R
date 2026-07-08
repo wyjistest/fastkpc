@@ -389,6 +389,12 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_cpp_batch_backend_fallback_count = 0L,
     dcov_cpp_batch_backend_max_batch_size = 0L,
     dcov_cpp_batch_backend_mean_batch_size = 0,
+    dcov_cpp_batch_workspace_reuse_count = 0L,
+    dcov_cpp_batch_distance_workspace_reuse_count = 0L,
+    dcov_cpp_batch_statistic_moment_workspace_reuse_count = 0L,
+    dcov_cpp_batch_lowrank_output_workspace_reuse_count = 0L,
+    dcov_cpp_batch_lowrank_eig_workspace_reuse_count = 0L,
+    dcov_cpp_batch_column_copy_count = 0L,
     dcov_cpp_batch_round_enabled = 0L,
     dcov_cpp_batch_round_prepare_worker_count = 0L,
     dcov_cpp_batch_round_prepare_task_count = 0L,
@@ -849,6 +855,24 @@ fastkpc_legacy_runtime_add <- function(a, b) {
         0
       }
     },
+    dcov_cpp_batch_workspace_reuse_count =
+      as.integer(a$dcov_cpp_batch_workspace_reuse_count) +
+        as.integer(b$dcov_cpp_batch_workspace_reuse_count),
+    dcov_cpp_batch_distance_workspace_reuse_count =
+      as.integer(a$dcov_cpp_batch_distance_workspace_reuse_count) +
+        as.integer(b$dcov_cpp_batch_distance_workspace_reuse_count),
+    dcov_cpp_batch_statistic_moment_workspace_reuse_count =
+      as.integer(a$dcov_cpp_batch_statistic_moment_workspace_reuse_count) +
+        as.integer(b$dcov_cpp_batch_statistic_moment_workspace_reuse_count),
+    dcov_cpp_batch_lowrank_output_workspace_reuse_count =
+      as.integer(a$dcov_cpp_batch_lowrank_output_workspace_reuse_count) +
+        as.integer(b$dcov_cpp_batch_lowrank_output_workspace_reuse_count),
+    dcov_cpp_batch_lowrank_eig_workspace_reuse_count =
+      as.integer(a$dcov_cpp_batch_lowrank_eig_workspace_reuse_count) +
+        as.integer(b$dcov_cpp_batch_lowrank_eig_workspace_reuse_count),
+    dcov_cpp_batch_column_copy_count =
+      as.integer(a$dcov_cpp_batch_column_copy_count) +
+        as.integer(b$dcov_cpp_batch_column_copy_count),
     dcov_cpp_batch_round_enabled =
       max(as.integer(a$dcov_cpp_batch_round_enabled),
           as.integer(b$dcov_cpp_batch_round_enabled)),
@@ -1636,6 +1660,12 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_batch_backend_fallback_count = integer(),
       dcov_cpp_batch_backend_max_batch_size = integer(),
       dcov_cpp_batch_backend_mean_batch_size = numeric(),
+      dcov_cpp_batch_workspace_reuse_count = integer(),
+      dcov_cpp_batch_distance_workspace_reuse_count = integer(),
+      dcov_cpp_batch_statistic_moment_workspace_reuse_count = integer(),
+      dcov_cpp_batch_lowrank_output_workspace_reuse_count = integer(),
+      dcov_cpp_batch_lowrank_eig_workspace_reuse_count = integer(),
+      dcov_cpp_batch_column_copy_count = integer(),
       dcov_cpp_batch_round_enabled = integer(),
       dcov_cpp_batch_round_prepare_worker_count = integer(),
       dcov_cpp_batch_round_prepare_task_count = integer(),
@@ -1908,6 +1938,18 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.integer(metrics$dcov_cpp_batch_backend_max_batch_size),
       dcov_cpp_batch_backend_mean_batch_size =
         as.numeric(metrics$dcov_cpp_batch_backend_mean_batch_size),
+      dcov_cpp_batch_workspace_reuse_count =
+        as.integer(metrics$dcov_cpp_batch_workspace_reuse_count),
+      dcov_cpp_batch_distance_workspace_reuse_count =
+        as.integer(metrics$dcov_cpp_batch_distance_workspace_reuse_count),
+      dcov_cpp_batch_statistic_moment_workspace_reuse_count =
+        as.integer(metrics$dcov_cpp_batch_statistic_moment_workspace_reuse_count),
+      dcov_cpp_batch_lowrank_output_workspace_reuse_count =
+        as.integer(metrics$dcov_cpp_batch_lowrank_output_workspace_reuse_count),
+      dcov_cpp_batch_lowrank_eig_workspace_reuse_count =
+        as.integer(metrics$dcov_cpp_batch_lowrank_eig_workspace_reuse_count),
+      dcov_cpp_batch_column_copy_count =
+        as.integer(metrics$dcov_cpp_batch_column_copy_count),
       dcov_cpp_batch_round_enabled =
         as.integer(metrics$dcov_cpp_batch_round_enabled),
       dcov_cpp_batch_round_prepare_worker_count =
@@ -4860,6 +4902,28 @@ fastkpc_legacy_run_dcov_cpp_backend_batch <- function(
     metrics <- fastkpc_legacy_runtime_add_dcov_cpp_diagnostics(
       metrics, cpp$diagnostics, wrapper_ms = backend_elapsed_ms
     )
+    cpp_batch_diag_value <- function(name) {
+      value <- cpp$diagnostics[[name]]
+      if (is.null(value)) 0L else as.integer(value)
+    }
+    metrics$dcov_cpp_batch_workspace_reuse_count <-
+      metrics$dcov_cpp_batch_workspace_reuse_count +
+        as.integer(isTRUE(cpp$diagnostics$workspace_reuse_enabled))
+    metrics$dcov_cpp_batch_distance_workspace_reuse_count <-
+      metrics$dcov_cpp_batch_distance_workspace_reuse_count +
+        cpp_batch_diag_value("distance_workspace_reuse_count")
+    metrics$dcov_cpp_batch_statistic_moment_workspace_reuse_count <-
+      metrics$dcov_cpp_batch_statistic_moment_workspace_reuse_count +
+        cpp_batch_diag_value("statistic_moment_workspace_reuse_count")
+    metrics$dcov_cpp_batch_lowrank_output_workspace_reuse_count <-
+      metrics$dcov_cpp_batch_lowrank_output_workspace_reuse_count +
+        cpp_batch_diag_value("lowrank_output_workspace_reuse_count")
+    metrics$dcov_cpp_batch_lowrank_eig_workspace_reuse_count <-
+      metrics$dcov_cpp_batch_lowrank_eig_workspace_reuse_count +
+        cpp_batch_diag_value("lowrank_eig_workspace_reuse_count")
+    metrics$dcov_cpp_batch_column_copy_count <-
+      metrics$dcov_cpp_batch_column_copy_count +
+        cpp_batch_diag_value("column_copy_count")
     return(list(p.value = as.numeric(cpp$p.value),
                 metrics = metrics, used_cpp = TRUE))
   }
@@ -6215,6 +6279,18 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$dcov_cpp_batch_backend_max_batch_size),
         legacy_dcov_cpp_batch_backend_mean_batch_size =
           as.numeric(runtime_total$dcov_cpp_batch_backend_mean_batch_size),
+        legacy_dcov_cpp_batch_workspace_reuse_count =
+          as.integer(runtime_total$dcov_cpp_batch_workspace_reuse_count),
+        legacy_dcov_cpp_batch_distance_workspace_reuse_count =
+          as.integer(runtime_total$dcov_cpp_batch_distance_workspace_reuse_count),
+        legacy_dcov_cpp_batch_statistic_moment_workspace_reuse_count =
+          as.integer(runtime_total$dcov_cpp_batch_statistic_moment_workspace_reuse_count),
+        legacy_dcov_cpp_batch_lowrank_output_workspace_reuse_count =
+          as.integer(runtime_total$dcov_cpp_batch_lowrank_output_workspace_reuse_count),
+        legacy_dcov_cpp_batch_lowrank_eig_workspace_reuse_count =
+          as.integer(runtime_total$dcov_cpp_batch_lowrank_eig_workspace_reuse_count),
+        legacy_dcov_cpp_batch_column_copy_count =
+          as.integer(runtime_total$dcov_cpp_batch_column_copy_count),
         legacy_dcov_cpp_batch_round_enabled =
           isTRUE(as.integer(runtime_total$dcov_cpp_batch_round_enabled) > 0L),
         legacy_dcov_cpp_batch_round_prepare_worker_count =

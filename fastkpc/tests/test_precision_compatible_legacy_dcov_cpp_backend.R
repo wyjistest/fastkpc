@@ -242,7 +242,13 @@ batch_backend_fields <- c(
   "legacy_dcov_cpp_batch_backend_error_count",
   "legacy_dcov_cpp_batch_backend_fallback_count",
   "legacy_dcov_cpp_batch_backend_max_batch_size",
-  "legacy_dcov_cpp_batch_backend_mean_batch_size"
+  "legacy_dcov_cpp_batch_backend_mean_batch_size",
+  "legacy_dcov_cpp_batch_workspace_reuse_count",
+  "legacy_dcov_cpp_batch_distance_workspace_reuse_count",
+  "legacy_dcov_cpp_batch_statistic_moment_workspace_reuse_count",
+  "legacy_dcov_cpp_batch_lowrank_output_workspace_reuse_count",
+  "legacy_dcov_cpp_batch_lowrank_eig_workspace_reuse_count",
+  "legacy_dcov_cpp_batch_column_copy_count"
 )
 missing_batch_backend <- setdiff(batch_backend_fields,
                                  names(chunk_batch_summary))
@@ -271,6 +277,29 @@ assert_true(identical(
   as.integer(chunk_batch_summary$legacy_dcov_cpp_backend_count),
   as.integer(chunk_batch_summary$legacy_dcov_gamma_count)),
   "chunk-batched C++ backend count should still match dCov call count")
+assert_true(identical(
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_workspace_reuse_count),
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_backend_count)),
+  "chunk-batched dCov should report workspace reuse per batch call")
+assert_true(identical(
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_distance_workspace_reuse_count),
+  2L * as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_backend_pair_count)),
+  "chunk-batched dCov should aggregate distance workspace reuse per pair")
+assert_true(identical(
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_statistic_moment_workspace_reuse_count),
+  3L * as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_backend_pair_count)),
+  "chunk-batched dCov should aggregate statistic/moment workspace reuse per pair")
+assert_true(identical(
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_lowrank_output_workspace_reuse_count),
+  2L * as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_backend_pair_count)),
+  "chunk-batched dCov should aggregate lowrank output workspace reuse per pair")
+assert_true(identical(
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_lowrank_eig_workspace_reuse_count),
+  2L * as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_backend_pair_count)),
+  "chunk-batched dCov should aggregate lowrank eig workspace reuse per pair")
+assert_true(identical(
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_column_copy_count), 0L),
+  "chunk-batched dCov should avoid per-column C++ batch copies")
 missing_round_batch_backend <- setdiff(batch_backend_fields,
                                        names(round_batch_summary))
 assert_true(length(missing_round_batch_backend) == 0L,
@@ -298,6 +327,29 @@ assert_true(identical(
   as.integer(round_batch_summary$legacy_dcov_cpp_backend_count),
   as.integer(round_batch_summary$legacy_dcov_gamma_count)),
   "round-batched C++ backend count should still match dCov call count")
+assert_true(identical(
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_workspace_reuse_count),
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_backend_count)),
+  "round-batched dCov should report workspace reuse per batch call")
+assert_true(identical(
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_distance_workspace_reuse_count),
+  2L * as.integer(round_batch_summary$legacy_dcov_cpp_batch_backend_pair_count)),
+  "round-batched dCov should aggregate distance workspace reuse per pair")
+assert_true(identical(
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_statistic_moment_workspace_reuse_count),
+  3L * as.integer(round_batch_summary$legacy_dcov_cpp_batch_backend_pair_count)),
+  "round-batched dCov should aggregate statistic/moment workspace reuse per pair")
+assert_true(identical(
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_lowrank_output_workspace_reuse_count),
+  2L * as.integer(round_batch_summary$legacy_dcov_cpp_batch_backend_pair_count)),
+  "round-batched dCov should aggregate lowrank output workspace reuse per pair")
+assert_true(identical(
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_lowrank_eig_workspace_reuse_count),
+  2L * as.integer(round_batch_summary$legacy_dcov_cpp_batch_backend_pair_count)),
+  "round-batched dCov should aggregate lowrank eig workspace reuse per pair")
+assert_true(identical(
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_column_copy_count), 0L),
+  "round-batched dCov should avoid per-column C++ batch copies")
 round_parallel_fields <- c(
   "legacy_dcov_cpp_batch_round_enabled",
   "legacy_dcov_cpp_batch_round_prepare_worker_count",
