@@ -45,62 +45,109 @@ pmax_max_abs_diff <- function(left, right) {
   max(abs(left[finite] - right[finite]))
 }
 
-data <- readRDS(real_path)
-hot_cols <- c(1L, 2L, 3L, 4L, 5L, 6L, 9L, 12L)
-data <- as.matrix(data[, hot_cols, drop = FALSE])
-storage.mode(data) <- "double"
-
-alpha <- 0.1
-index <- 1
-numCol <- floor(nrow(data) / 10)
-max_conditioning_size <- 2L
-
-provider_counts <- new.env(parent = emptyenv())
-provider_counts$level_calls <- 0L
-provider_counts$request_count <- 0L
-explicit <- precision_run_skeleton_residual_provider_legacy_dcov_native(
-  data = data,
-  alpha = alpha,
-  max_conditioning_size = max_conditioning_size,
-  residual_provider = fastkpc_legacy_mgcv_residual_provider(
-    data = data,
-    counter_env = provider_counts
+real_data <- readRDS(real_path)
+scenarios <- list(
+  hot8 = list(
+    cols = c(1L, 2L, 3L, 4L, 5L, 6L, 9L, 12L),
+    min_requests = 100L
   ),
-  index = index,
-  numCol = numCol,
-  trace_level = "summary"
+  hot12 = list(
+    cols = c(1L, 2L, 3L, 4L, 5L, 6L, 9L, 12L,
+             15L, 16L, 17L, 18L),
+    min_requests = 300L
+  )
 )
 
-one_call <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
-  data = data,
-  alpha = alpha,
-  max_conditioning_size = max_conditioning_size,
-  index = index,
-  numCol = numCol,
-  trace_level = "summary"
+requested <- Sys.getenv(
+  "FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_CASES",
+  unset = ""
 )
+if (nzchar(requested)) {
+  requested_names <- trimws(strsplit(requested, ",", fixed = TRUE)[[1L]])
+  requested_names <- requested_names[nzchar(requested_names)]
+  unknown <- setdiff(requested_names, names(scenarios))
+  assert_true(length(unknown) == 0L,
+              paste("unknown real subset scenario(s):",
+                    paste(unknown, collapse = ",")))
+  scenarios <- scenarios[requested_names]
+}
+scenario_names <- names(scenarios)
+assert_true(length(scenario_names) > 0L,
+            "real subset gate should select at least one scenario")
+if (!nzchar(requested)) {
+  assert_true("hot12" %in% scenario_names,
+              "real subset gate should include the hot12 scenario")
+}
 
-assert_true(identical(one_call$adjacency, explicit$adjacency),
-            "real subset one-call adjacency should match explicit provider")
-assert_true(pmax_max_abs_diff(one_call$pMax, explicit$pMax) < 1e-12,
-            "real subset one-call pMax should match explicit provider")
-assert_true(identical(as.integer(one_call$n.edgetests),
-                      as.integer(explicit$n.edgetests)),
-            "real subset one-call n.edgetests should match explicit provider")
-assert_true(compare_sepsets(one_call$sepsets, explicit$sepsets),
-            "real subset one-call sepsets should match explicit provider")
-assert_true(provider_counts$request_count > 100L,
-            "real subset should exercise nontrivial residual-provider traffic")
-assert_true(identical(as.integer(one_call$summary$residual_provider_request_count),
-                      as.integer(provider_counts$request_count)),
-            "real subset one-call should preserve residual request count")
-assert_true(identical(as.integer(one_call$summary$legacy_dcov_native_count),
-                      as.integer(explicit$summary$legacy_dcov_native_count)),
-            "real subset one-call should preserve legacy dCov task count")
-assert_true(identical(one_call$summary$entrypoint,
-                      "legacy-mgcv-legacy-dcov-native"),
-            "real subset one-call should record its entrypoint")
-assert_true(isTRUE(one_call$summary$residual_provider_hidden),
-            "real subset one-call should report hidden residual-provider seam")
+run_scenario <- function(name, scenario) {
+  data <- as.matrix(real_data[, scenario$cols, drop = FALSE])
+  storage.mode(data) <- "double"
 
-cat("PASS skeleton native legacy mgcv legacy dCov real subset\n")
+  alpha <- 0.1
+  index <- 1
+  numCol <- floor(nrow(data) / 10)
+  max_conditioning_size <- 2L
+
+  provider_counts <- new.env(parent = emptyenv())
+  provider_counts$level_calls <- 0L
+  provider_counts$request_count <- 0L
+  explicit <- precision_run_skeleton_residual_provider_legacy_dcov_native(
+    data = data,
+    alpha = alpha,
+    max_conditioning_size = max_conditioning_size,
+    residual_provider = fastkpc_legacy_mgcv_residual_provider(
+      data = data,
+      counter_env = provider_counts
+    ),
+    index = index,
+    numCol = numCol,
+    trace_level = "summary"
+  )
+
+  one_call <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
+    data = data,
+    alpha = alpha,
+    max_conditioning_size = max_conditioning_size,
+    index = index,
+    numCol = numCol,
+    trace_level = "summary"
+  )
+
+  prefix <- paste0("real subset ", name, " one-call")
+  assert_true(identical(one_call$adjacency, explicit$adjacency),
+              paste(prefix, "adjacency should match explicit provider"))
+  assert_true(pmax_max_abs_diff(one_call$pMax, explicit$pMax) < 1e-12,
+              paste(prefix, "pMax should match explicit provider"))
+  assert_true(identical(as.integer(one_call$n.edgetests),
+                        as.integer(explicit$n.edgetests)),
+              paste(prefix, "n.edgetests should match explicit provider"))
+  assert_true(compare_sepsets(one_call$sepsets, explicit$sepsets),
+              paste(prefix, "sepsets should match explicit provider"))
+  assert_true(provider_counts$request_count > scenario$min_requests,
+              paste(prefix, "should exercise nontrivial residual-provider traffic"))
+  assert_true(identical(as.integer(one_call$summary$residual_provider_request_count),
+                        as.integer(provider_counts$request_count)),
+              paste(prefix, "should preserve residual request count"))
+  assert_true(identical(as.integer(one_call$summary$legacy_dcov_native_count),
+                        as.integer(explicit$summary$legacy_dcov_native_count)),
+              paste(prefix, "should preserve legacy dCov task count"))
+  assert_true(identical(one_call$summary$entrypoint,
+                        "legacy-mgcv-legacy-dcov-native"),
+              paste(prefix, "should record its entrypoint"))
+  assert_true(isTRUE(one_call$summary$residual_provider_hidden),
+              paste(prefix, "should report hidden residual-provider seam"))
+
+  cat(sprintf(
+    "PASS skeleton native legacy mgcv legacy dCov real subset %s p=%d requests=%d\n",
+    name,
+    ncol(data),
+    as.integer(provider_counts$request_count)
+  ))
+}
+
+for (name in scenario_names) {
+  run_scenario(name, scenarios[[name]])
+}
+
+cat("PASS skeleton native legacy mgcv legacy dCov real subset scenarios:",
+    paste(scenario_names, collapse = ","), "\n")

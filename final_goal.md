@@ -3016,7 +3016,8 @@ further behind the native entrypoint.
 ### Real 351-row subset one-call checkpoint
 
 The next gate validates the R-facing one-call wrapper on the real 351-row
-fixture, using the established 8 hot-column subset:
+fixture, using the established 8 hot-column subset plus the 12-column hot
+subset used by earlier residual-backend gates:
 
 ```text
 precision_run_skeleton_legacy_mgcv_legacy_dcov_native()
@@ -3027,8 +3028,10 @@ Status:
 ```text
 status: opt-in real-data subset gate for one-call API wrapper
 scope:
-  data: real 351x48 fixture, columns 1,2,3,4,5,6,9,12
-  n / p: 351 / 8
+  data: real 351x48 fixture
+  hot8 columns:  1,2,3,4,5,6,9,12
+  hot12 columns: 1,2,3,4,5,6,9,12,15,16,17,18
+  n / p: 351 / 8 and 351 / 12
   max_conditioning_size = 2
   wrapper hides the legacy mgcv residual provider
   native entrypoint owns skeleton loop, residual request enumeration,
@@ -3042,11 +3045,19 @@ FASTKPC_RUN_REAL_SUBSET_TESTS=1 \
   Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_real_subset.R
 ```
 
+For quicker local iteration, the gate can be narrowed to one case:
+
+```bash
+FASTKPC_RUN_REAL_SUBSET_TESTS=1 \
+FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_CASES=hot8 \
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_real_subset.R
+```
+
 Coverage:
 
 ```text
 real fixture rows, not synthetic data
-nontrivial residual-provider traffic (>100 target|S requests)
+nontrivial residual-provider traffic on both hot8 and hot12 subsets
 adjacency identical to explicit residual-provider native route
 sepsets identical to explicit residual-provider native route
 n.edgetests identical to explicit residual-provider native route
@@ -3059,10 +3070,11 @@ Decision:
 
 ```text
 This extends the R-facing one-call wrapper from a synthetic smoke gate to a
-real 351-row subset while preserving native skeleton replay and the
+real 351-row subset pair while preserving native skeleton replay and the
 legacy-compatible C++ dcov.gamma data plane. It is still not a promotion route:
-the residual provider remains an R seam, the gate is an 8-column subset, and
-full 351x48 SHD=0 / n.edgetests-exact / wall-time gates remain open.
+the residual provider remains an R seam, the gate is limited to 8- and
+12-column subsets, and full 351x48 SHD=0 / n.edgetests-exact / wall-time gates
+remain open.
 ```
 
 ### CUDA responsibilities
