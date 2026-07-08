@@ -150,6 +150,16 @@ wall time: only slightly better than same-S chunk baseline, still worse than
 status: experimental only; not recommended
 ```
 
+`FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=chunk`:
+
+```text
+correctness: passed full 351x48
+native batch backend: exercised successfully with zero errors/fallbacks
+batch shape: fragmented into 54,233 small worker-chunk batches
+wall time: regressed versus recommended S-affinity route
+status: experimental only; not recommended
+```
+
 `FASTKPC_FASTSPLINE_EDF_TRACE_MODE=cholesky_cuda`:
 
 ```text
@@ -588,14 +598,71 @@ status:
   The targeted gate proves the env-gated chunk batch path preserves adjacency
   and n.edgetests on the tested compatible skeleton while reporting batch
   counters and zero batch errors/fallbacks. This is still not a promoted route.
-  The next gate is a full 351x48 artifact against the current recommended
-  S-affinity baseline.
+```
+
+Full 351x48 worker-chunk batch artifact:
+
+```text
+fastkpc/artifacts/legacy_dcov_gamma_cpp_chunk_batch_backend_v1
+
+route:
+  FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=spectra
+  FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE=1
+  FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY=s
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=chunk
+
+correctness:
+  edge_count = 110 / 110
+  adjacency_identical = TRUE
+  SHD = 0
+  n.edgetests exact = TRUE
+  n.edgetests = 2213,52659,125293,40694,13293,5422,835,80
+
+runtime:
+  elapsed_sec = 933.183
+  baseline elapsed_sec = 908.895
+  elapsed_delta_vs_baseline_sec = +24.288
+  residual_worker_ms = 9137472
+  mgcv_fit_count = 273284
+  cache hits / misses = 203268 / 273284
+
+dCov:
+  dCov cpp backend count / errors / fallbacks = 239404 / 0 / 0
+  level 0 scalar backend ms = 280031
+  chunk batch calls / pairs = 54233 / 238276
+  chunk batch max / mean size = 63 / 4.393561
+  chunk batch ms / errors / fallbacks = 3877138 / 0 / 0
+  scalar plus chunk-batch dCov worker-ms = 4157169
+  Spectra count / converged / failed / fallback full eig =
+    478808 / 478808 / 0 / 0
+
+residual boundary:
+  mgcv same-S setup provider chunk enabled / count = FALSE / 0
+```
+
+Decision:
+
+```text
+FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=chunk is correctness-clean but
+performance-negative on the full 351x48 gate. It must remain experimental and
+must not replace the current recommended S-affinity route.
+
+The negative result explains why: worker-chunk scheduling does not realize the
+level-local batch potential. The theoretical diagnostic found 8 level-local
+shape groups, but the worker-chunk prototype produced 54,233 small batch calls
+with mean batch size 4.39 and late levels near size 1. The extra wrapper,
+matrix materialization, and tiny-batch overhead erase the native batch benefit.
+
+The next Phase 2A attempt should not tune this worker-chunk route. It should
+use a broader level/round-local dCov batching plan that can approach the
+observed level-local shape groups while preserving canonical replay.
 ```
 
 #### Artifact
 
 ```text
-legacy_dcov_gamma_cpp_batched_backend_v1
+legacy_dcov_gamma_cpp_chunk_batch_backend_v1
 ```
 
 #### Gates
@@ -603,8 +670,8 @@ legacy_dcov_gamma_cpp_batched_backend_v1
 ```text
 SHD = 0
 n.edgetests exact = TRUE
-worker-ms lower than scalar C++ backend
-wall time lower than scalar C++ backend
+worker-ms lower than scalar C++ backend: failed
+wall time lower than scalar C++ backend: failed
 ```
 
 ### Phase 2B — CUDA legacy-compatible dCov backend
