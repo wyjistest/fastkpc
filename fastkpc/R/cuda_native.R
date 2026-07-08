@@ -406,6 +406,7 @@ precision_run_skeleton_legacy_mgcv_legacy_dcov_native <- function(
     trace_level = trace_level
   )
   result$summary$entrypoint <- "legacy-mgcv-legacy-dcov-native"
+  result$summary$residual_provider_hidden <- TRUE
   result
 }
 

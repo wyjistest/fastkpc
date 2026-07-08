@@ -3013,6 +3013,58 @@ this one-call wrapper on a real 351-row subset or move residual batching/setup
 further behind the native entrypoint.
 ```
 
+### Real 351-row subset one-call checkpoint
+
+The next gate validates the R-facing one-call wrapper on the real 351-row
+fixture, using the established 8 hot-column subset:
+
+```text
+precision_run_skeleton_legacy_mgcv_legacy_dcov_native()
+```
+
+Status:
+
+```text
+status: opt-in real-data subset gate for one-call API wrapper
+scope:
+  data: real 351x48 fixture, columns 1,2,3,4,5,6,9,12
+  n / p: 351 / 8
+  max_conditioning_size = 2
+  wrapper hides the legacy mgcv residual provider
+  native entrypoint owns skeleton loop, residual request enumeration,
+    legacy-compatible C++ dcov.gamma p-values, canonical replay, and sepsets
+```
+
+Gate:
+
+```text
+FASTKPC_RUN_REAL_SUBSET_TESTS=1 \
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_real_subset.R
+```
+
+Coverage:
+
+```text
+real fixture rows, not synthetic data
+nontrivial residual-provider traffic (>100 target|S requests)
+adjacency identical to explicit residual-provider native route
+sepsets identical to explicit residual-provider native route
+n.edgetests identical to explicit residual-provider native route
+pMax max abs diff < 1e-12 on finite entries
+legacy dCov native task count preserved
+summary records residual_provider_hidden = TRUE
+```
+
+Decision:
+
+```text
+This extends the R-facing one-call wrapper from a synthetic smoke gate to a
+real 351-row subset while preserving native skeleton replay and the
+legacy-compatible C++ dcov.gamma data plane. It is still not a promotion route:
+the residual provider remains an R seam, the gate is an 8-column subset, and
+full 351x48 SHD=0 / n.edgetests-exact / wall-time gates remain open.
+```
+
 ### CUDA responsibilities
 
 ```text
