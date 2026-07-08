@@ -110,4 +110,39 @@ assert_true(identical(
 assert_true(identical(as.integer(cpp_summary$legacy_dcov_cpp_shadow_count), 0L),
             "legacy dCov C++ backend should not run shadow unless requested")
 
+batch_potential_fields <- c(
+  "legacy_dcov_cpp_batch_potential_call_count",
+  "legacy_dcov_cpp_batch_potential_group_count",
+  "legacy_dcov_cpp_batch_potential_max_group_size",
+  "legacy_dcov_cpp_batch_potential_mean_group_size",
+  "legacy_dcov_cpp_batch_potential_reuse_opportunity_count",
+  "legacy_dcov_cpp_batch_potential_reuse_ratio"
+)
+missing_batch_potential <- setdiff(batch_potential_fields, names(cpp_summary))
+assert_true(length(missing_batch_potential) == 0L,
+            paste("legacy dCov C++ backend summary missing batch potential",
+                  missing_batch_potential[[1L]]))
+assert_true(identical(
+  as.integer(cpp_summary$legacy_dcov_cpp_batch_potential_call_count),
+  as.integer(cpp_summary$legacy_dcov_cpp_backend_count)),
+  "dCov batch potential call count should match C++ backend calls")
+assert_true(cpp_summary$legacy_dcov_cpp_batch_potential_group_count > 0L,
+            "dCov batch potential should report at least one shape group")
+assert_true(cpp_summary$legacy_dcov_cpp_batch_potential_group_count <=
+              cpp_summary$legacy_dcov_cpp_batch_potential_call_count,
+            "dCov batch potential groups should not exceed calls")
+assert_true(cpp_summary$legacy_dcov_cpp_batch_potential_max_group_size >=
+              cpp_summary$legacy_dcov_cpp_batch_potential_mean_group_size,
+            "dCov batch potential max group size should dominate mean")
+assert_true(cpp_summary$legacy_dcov_cpp_batch_potential_mean_group_size >= 1,
+            "dCov batch potential mean group size should be positive")
+assert_true(identical(
+  as.integer(cpp_summary$legacy_dcov_cpp_batch_potential_reuse_opportunity_count),
+  as.integer(cpp_summary$legacy_dcov_cpp_batch_potential_call_count -
+               cpp_summary$legacy_dcov_cpp_batch_potential_group_count)),
+  "dCov batch potential reuse opportunity should be calls minus groups")
+assert_true(cpp_summary$legacy_dcov_cpp_batch_potential_reuse_ratio >= 0 &&
+              cpp_summary$legacy_dcov_cpp_batch_potential_reuse_ratio < 1,
+            "dCov batch potential reuse ratio should be in [0, 1)")
+
 cat("PASS precision compatible legacy dCov C++ backend\n")

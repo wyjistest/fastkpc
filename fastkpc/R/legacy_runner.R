@@ -369,6 +369,12 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_cpp_accounted_ms = 0,
     dcov_cpp_unaccounted_ms = 0,
     dcov_cpp_overhead_ms = 0,
+    dcov_cpp_batch_potential_call_count = 0L,
+    dcov_cpp_batch_potential_group_count = 0L,
+    dcov_cpp_batch_potential_max_group_size = 0L,
+    dcov_cpp_batch_potential_mean_group_size = 0,
+    dcov_cpp_batch_potential_reuse_opportunity_count = 0L,
+    dcov_cpp_batch_potential_reuse_ratio = 0,
     mgcv_residual_request_count = 0L,
     mgcv_cache_hit_count = 0L,
     mgcv_cache_miss_count = 0L,
@@ -575,6 +581,7 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_cpp_backend_native_setup_extract_ms = numeric(),
     mgcv_cpp_backend_native_condition_ms = numeric(),
     mgcv_cpp_backend_native_solve_call_ms = numeric(),
+    dcov_cpp_batch_shape_keys = character(),
     direct_ci_count = 0L,
     conditional_ci_count = 0L,
     mgcv_fit_count = 0L,
@@ -717,6 +724,42 @@ fastkpc_legacy_runtime_add <- function(a, b) {
         as.numeric(b$dcov_cpp_unaccounted_ms),
     dcov_cpp_overhead_ms =
       as.numeric(a$dcov_cpp_overhead_ms) + as.numeric(b$dcov_cpp_overhead_ms),
+    dcov_cpp_batch_potential_call_count =
+      as.integer(a$dcov_cpp_batch_potential_call_count) +
+        as.integer(b$dcov_cpp_batch_potential_call_count),
+    dcov_cpp_batch_potential_group_count =
+      as.integer(a$dcov_cpp_batch_potential_group_count) +
+        as.integer(b$dcov_cpp_batch_potential_group_count),
+    dcov_cpp_batch_potential_max_group_size =
+      max(as.integer(a$dcov_cpp_batch_potential_max_group_size),
+          as.integer(b$dcov_cpp_batch_potential_max_group_size)),
+    dcov_cpp_batch_potential_mean_group_size = {
+      total_groups <- as.integer(a$dcov_cpp_batch_potential_group_count) +
+        as.integer(b$dcov_cpp_batch_potential_group_count)
+      if (total_groups > 0L) {
+        (as.numeric(a$dcov_cpp_batch_potential_mean_group_size) *
+           as.integer(a$dcov_cpp_batch_potential_group_count) +
+           as.numeric(b$dcov_cpp_batch_potential_mean_group_size) *
+             as.integer(b$dcov_cpp_batch_potential_group_count)) /
+          total_groups
+      } else {
+        0
+      }
+    },
+    dcov_cpp_batch_potential_reuse_opportunity_count =
+      as.integer(a$dcov_cpp_batch_potential_reuse_opportunity_count) +
+        as.integer(b$dcov_cpp_batch_potential_reuse_opportunity_count),
+    dcov_cpp_batch_potential_reuse_ratio = {
+      total_calls <- as.integer(a$dcov_cpp_batch_potential_call_count) +
+        as.integer(b$dcov_cpp_batch_potential_call_count)
+      if (total_calls > 0L) {
+        (as.integer(a$dcov_cpp_batch_potential_reuse_opportunity_count) +
+           as.integer(b$dcov_cpp_batch_potential_reuse_opportunity_count)) /
+          total_calls
+      } else {
+        0
+      }
+    },
     mgcv_residual_request_count =
       as.integer(a$mgcv_residual_request_count) +
         as.integer(b$mgcv_residual_request_count),
@@ -1423,6 +1466,8 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     mgcv_cpp_backend_native_solve_call_ms =
       c(a$mgcv_cpp_backend_native_solve_call_ms,
         b$mgcv_cpp_backend_native_solve_call_ms),
+    dcov_cpp_batch_shape_keys =
+      c(a$dcov_cpp_batch_shape_keys, b$dcov_cpp_batch_shape_keys),
     direct_ci_count =
       as.integer(a$direct_ci_count) + as.integer(b$direct_ci_count),
     conditional_ci_count =
@@ -1473,6 +1518,12 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_lowrank_spectra_tol = numeric(),
       dcov_cpp_statistic_ms = numeric(), dcov_cpp_moment_ms = numeric(),
       dcov_cpp_pgamma_ms = numeric(), dcov_cpp_overhead_ms = numeric(),
+      dcov_cpp_batch_potential_call_count = integer(),
+      dcov_cpp_batch_potential_group_count = integer(),
+      dcov_cpp_batch_potential_max_group_size = integer(),
+      dcov_cpp_batch_potential_mean_group_size = numeric(),
+      dcov_cpp_batch_potential_reuse_opportunity_count = integer(),
+      dcov_cpp_batch_potential_reuse_ratio = numeric(),
       mgcv_residual_request_count = integer(),
       mgcv_cache_hit_count = integer(), mgcv_cache_miss_count = integer(),
       mgcv_residual_cache_hit_key_count = integer(),
@@ -1702,6 +1753,18 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_moment_ms = as.numeric(metrics$dcov_cpp_moment_ms),
       dcov_cpp_pgamma_ms = as.numeric(metrics$dcov_cpp_pgamma_ms),
       dcov_cpp_overhead_ms = as.numeric(metrics$dcov_cpp_overhead_ms),
+      dcov_cpp_batch_potential_call_count =
+        as.integer(metrics$dcov_cpp_batch_potential_call_count),
+      dcov_cpp_batch_potential_group_count =
+        as.integer(metrics$dcov_cpp_batch_potential_group_count),
+      dcov_cpp_batch_potential_max_group_size =
+        as.integer(metrics$dcov_cpp_batch_potential_max_group_size),
+      dcov_cpp_batch_potential_mean_group_size =
+        as.numeric(metrics$dcov_cpp_batch_potential_mean_group_size),
+      dcov_cpp_batch_potential_reuse_opportunity_count =
+        as.integer(metrics$dcov_cpp_batch_potential_reuse_opportunity_count),
+      dcov_cpp_batch_potential_reuse_ratio =
+        as.numeric(metrics$dcov_cpp_batch_potential_reuse_ratio),
       mgcv_residual_request_count =
         as.integer(metrics$mgcv_residual_request_count),
       mgcv_cache_hit_count = as.integer(metrics$mgcv_cache_hit_count),
@@ -4339,6 +4402,42 @@ fastkpc_legacy_runtime_finalize_mgcv_keys <- function(metrics) {
   metrics
 }
 
+fastkpc_legacy_dcov_cpp_batch_shape_key <- function(x, y, index, numCol) {
+  lowrank_mode <- tolower(Sys.getenv(
+    "FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK", unset = "full"
+  ))
+  paste(
+    paste0("nx=", length(x)),
+    paste0("ny=", length(y)),
+    paste0("numCol=", as.integer(numCol)),
+    paste0("index=", format(as.numeric(index), digits = 17L)),
+    paste0("lowrank=", lowrank_mode),
+    sep = "|"
+  )
+}
+
+fastkpc_legacy_runtime_finalize_dcov_cpp_batch_potential <- function(metrics) {
+  shape_keys <- metrics$dcov_cpp_batch_shape_keys
+  if (length(shape_keys) > 0L) {
+    per_shape <- table(shape_keys)
+    call_count <- length(shape_keys)
+    group_count <- length(per_shape)
+    reuse_opportunity <- call_count - group_count
+    metrics$dcov_cpp_batch_potential_call_count <- as.integer(call_count)
+    metrics$dcov_cpp_batch_potential_group_count <- as.integer(group_count)
+    metrics$dcov_cpp_batch_potential_max_group_size <-
+      as.integer(max(as.integer(per_shape)))
+    metrics$dcov_cpp_batch_potential_mean_group_size <-
+      as.numeric(mean(as.integer(per_shape)))
+    metrics$dcov_cpp_batch_potential_reuse_opportunity_count <-
+      as.integer(reuse_opportunity)
+    metrics$dcov_cpp_batch_potential_reuse_ratio <-
+      if (call_count > 0L) reuse_opportunity / call_count else 0
+  }
+  metrics$dcov_cpp_batch_shape_keys <- character()
+  metrics
+}
+
 fastkpc_legacy_dcov_cpp_shadow_enabled <- function() {
   identical(Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SHADOW", unset = ""), "1")
 }
@@ -4492,6 +4591,10 @@ fastkpc_legacy_run_dcov_cpp_backend <- function(
 
   if (!inherits(cpp, "fastkpc_dcov_cpp_backend_error")) {
     metrics$dcov_cpp_backend_count <- metrics$dcov_cpp_backend_count + 1L
+    metrics$dcov_cpp_batch_shape_keys <- c(
+      metrics$dcov_cpp_batch_shape_keys,
+      fastkpc_legacy_dcov_cpp_batch_shape_key(x, y, index, numCol)
+    )
     metrics <- fastkpc_legacy_runtime_add_dcov_cpp_diagnostics(
       metrics, cpp$diagnostics, wrapper_ms = backend_elapsed_ms
     )
@@ -5340,6 +5443,9 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     } else {
       character()
     }
+    metrics_level <- fastkpc_legacy_runtime_finalize_dcov_cpp_batch_potential(
+      metrics_level
+    )
     metrics_level <- fastkpc_legacy_runtime_finalize_mgcv_keys(metrics_level)
     if (isTRUE(mgcv_residual_prefetch_level_enabled)) {
       prefetched_keys <- mgcv_residual_prefetch_cache$keys
@@ -5608,6 +5714,18 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.numeric(runtime_total$dcov_cpp_unaccounted_ms),
         legacy_dcov_cpp_overhead_ms =
           as.numeric(runtime_total$dcov_cpp_overhead_ms),
+        legacy_dcov_cpp_batch_potential_call_count =
+          as.integer(runtime_total$dcov_cpp_batch_potential_call_count),
+        legacy_dcov_cpp_batch_potential_group_count =
+          as.integer(runtime_total$dcov_cpp_batch_potential_group_count),
+        legacy_dcov_cpp_batch_potential_max_group_size =
+          as.integer(runtime_total$dcov_cpp_batch_potential_max_group_size),
+        legacy_dcov_cpp_batch_potential_mean_group_size =
+          as.numeric(runtime_total$dcov_cpp_batch_potential_mean_group_size),
+        legacy_dcov_cpp_batch_potential_reuse_opportunity_count =
+          as.integer(runtime_total$dcov_cpp_batch_potential_reuse_opportunity_count),
+        legacy_dcov_cpp_batch_potential_reuse_ratio =
+          as.numeric(runtime_total$dcov_cpp_batch_potential_reuse_ratio),
         legacy_direct_ci_count =
           as.integer(runtime_total$direct_ci_count),
         legacy_conditional_ci_count =

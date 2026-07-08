@@ -432,6 +432,26 @@ Reduce per-call C++/R overhead and prepare data layout for CUDA.
 - Reuse C++ workspace for distance, lowrank, centering, statistic, moments.
 - Preserve output order and canonical replay.
 
+#### Diagnostic checkpoint
+
+Initial diagnostic counters are wired into the legacy-compatible C++ dCov
+backend summary:
+
+```text
+legacy_dcov_cpp_batch_potential_call_count
+legacy_dcov_cpp_batch_potential_group_count
+legacy_dcov_cpp_batch_potential_max_group_size
+legacy_dcov_cpp_batch_potential_mean_group_size
+legacy_dcov_cpp_batch_potential_reuse_opportunity_count
+legacy_dcov_cpp_batch_potential_reuse_ratio
+```
+
+These counters do not change dCov authority or execution. They estimate, at
+the current skeleton level boundaries, how many scalar C++ dCov backend calls
+could be grouped by the same batch shape. The next Phase 2A artifact should
+run the current recommended route and record these fields before implementing
+the real batched C++ workspace.
+
 #### Artifact
 
 ```text
