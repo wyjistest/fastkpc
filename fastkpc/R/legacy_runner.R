@@ -519,6 +519,13 @@ fastkpc_legacy_runtime_zero <- function() {
     mgcv_cpp_same_s_prefill_unused_count = 0L,
     mgcv_cpp_same_s_prefill_ms = 0,
     mgcv_cpp_same_s_prefill_error_count = 0L,
+    mgcv_cpp_same_s_setup_provider_enabled = 0L,
+    mgcv_cpp_same_s_setup_provider_group_count = 0L,
+    mgcv_cpp_same_s_setup_provider_target_count = 0L,
+    mgcv_cpp_same_s_setup_provider_template_count = 0L,
+    mgcv_cpp_same_s_setup_provider_reuse_count = 0L,
+    mgcv_cpp_same_s_setup_provider_setup_ms = 0,
+    mgcv_cpp_same_s_setup_provider_error_count = 0L,
     mgcv_cpp_backend_native_s_size_limit = 0,
     mgcv_cpp_backend_condition_threshold = 0,
     mgcv_cpp_shadow_enabled = 0L,
@@ -1215,6 +1222,27 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     mgcv_cpp_same_s_prefill_error_count =
       as.integer(a$mgcv_cpp_same_s_prefill_error_count) +
         as.integer(b$mgcv_cpp_same_s_prefill_error_count),
+    mgcv_cpp_same_s_setup_provider_enabled =
+      max(as.integer(a$mgcv_cpp_same_s_setup_provider_enabled),
+          as.integer(b$mgcv_cpp_same_s_setup_provider_enabled)),
+    mgcv_cpp_same_s_setup_provider_group_count =
+      as.integer(a$mgcv_cpp_same_s_setup_provider_group_count) +
+        as.integer(b$mgcv_cpp_same_s_setup_provider_group_count),
+    mgcv_cpp_same_s_setup_provider_target_count =
+      as.integer(a$mgcv_cpp_same_s_setup_provider_target_count) +
+        as.integer(b$mgcv_cpp_same_s_setup_provider_target_count),
+    mgcv_cpp_same_s_setup_provider_template_count =
+      as.integer(a$mgcv_cpp_same_s_setup_provider_template_count) +
+        as.integer(b$mgcv_cpp_same_s_setup_provider_template_count),
+    mgcv_cpp_same_s_setup_provider_reuse_count =
+      as.integer(a$mgcv_cpp_same_s_setup_provider_reuse_count) +
+        as.integer(b$mgcv_cpp_same_s_setup_provider_reuse_count),
+    mgcv_cpp_same_s_setup_provider_setup_ms =
+      as.numeric(a$mgcv_cpp_same_s_setup_provider_setup_ms) +
+        as.numeric(b$mgcv_cpp_same_s_setup_provider_setup_ms),
+    mgcv_cpp_same_s_setup_provider_error_count =
+      as.integer(a$mgcv_cpp_same_s_setup_provider_error_count) +
+        as.integer(b$mgcv_cpp_same_s_setup_provider_error_count),
     mgcv_cpp_backend_native_s_size_limit =
       max(as.numeric(a$mgcv_cpp_backend_native_s_size_limit),
           as.numeric(b$mgcv_cpp_backend_native_s_size_limit)),
@@ -1474,6 +1502,13 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       mgcv_cpp_same_s_prefill_unused_count = integer(),
       mgcv_cpp_same_s_prefill_ms = numeric(),
       mgcv_cpp_same_s_prefill_error_count = integer(),
+      mgcv_cpp_same_s_setup_provider_enabled = integer(),
+      mgcv_cpp_same_s_setup_provider_group_count = integer(),
+      mgcv_cpp_same_s_setup_provider_target_count = integer(),
+      mgcv_cpp_same_s_setup_provider_template_count = integer(),
+      mgcv_cpp_same_s_setup_provider_reuse_count = integer(),
+      mgcv_cpp_same_s_setup_provider_setup_ms = numeric(),
+      mgcv_cpp_same_s_setup_provider_error_count = integer(),
       mgcv_fit_count = integer(), dcov_gamma_count = integer()
     ))
   }
@@ -1808,6 +1843,20 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.numeric(metrics$mgcv_cpp_same_s_prefill_ms),
       mgcv_cpp_same_s_prefill_error_count =
         as.integer(metrics$mgcv_cpp_same_s_prefill_error_count),
+      mgcv_cpp_same_s_setup_provider_enabled =
+        as.integer(metrics$mgcv_cpp_same_s_setup_provider_enabled),
+      mgcv_cpp_same_s_setup_provider_group_count =
+        as.integer(metrics$mgcv_cpp_same_s_setup_provider_group_count),
+      mgcv_cpp_same_s_setup_provider_target_count =
+        as.integer(metrics$mgcv_cpp_same_s_setup_provider_target_count),
+      mgcv_cpp_same_s_setup_provider_template_count =
+        as.integer(metrics$mgcv_cpp_same_s_setup_provider_template_count),
+      mgcv_cpp_same_s_setup_provider_reuse_count =
+        as.integer(metrics$mgcv_cpp_same_s_setup_provider_reuse_count),
+      mgcv_cpp_same_s_setup_provider_setup_ms =
+        as.numeric(metrics$mgcv_cpp_same_s_setup_provider_setup_ms),
+      mgcv_cpp_same_s_setup_provider_error_count =
+        as.integer(metrics$mgcv_cpp_same_s_setup_provider_error_count),
       mgcv_fit_count = as.integer(metrics$mgcv_fit_count),
       dcov_gamma_count = as.integer(metrics$dcov_gamma_count)
     )
@@ -1999,6 +2048,11 @@ fastkpc_legacy_mgcv_residual_prefetch_mode <- function() {
 
 fastkpc_legacy_mgcv_residual_same_s_prefill_enabled <- function() {
   identical(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_PREFILL",
+                       unset = ""), "1")
+}
+
+fastkpc_legacy_mgcv_residual_same_s_setup_enabled <- function() {
+  identical(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP",
                        unset = ""), "1")
 }
 
@@ -2600,6 +2654,289 @@ fastkpc_legacy_mgcv_residual_prefetch_level <- function(keys, data, env,
   )
 }
 
+fastkpc_legacy_mgcv_cpp_same_s_setup_provider_group <- function(
+    metrics, data, targets, S, env, condition_threshold,
+    native_s_size_limit) {
+  metrics$mgcv_cpp_same_s_setup_provider_enabled <- 1L
+  targets <- as.integer(unique(targets))
+  targets <- targets[!is.na(targets)]
+  if (length(targets) == 0L) {
+    return(list(keys = character(), residuals = list(), metrics = metrics))
+  }
+
+  S <- as.integer(S)
+  s_data <- as.matrix(data[, S, drop = FALSE])
+  s_size <- ncol(s_data)
+  if (is.finite(native_s_size_limit) && s_size > native_s_size_limit) {
+    return(list(keys = character(), residuals = list(), metrics = metrics))
+  }
+
+  if (!exists("fastkpc_mgcv_extract_setup", mode = "function")) {
+    source("fastkpc/R/mgcv_extract_oracle.R")
+  }
+  if (!exists("fastkpc_mgcv_extract_retarget_setup", mode = "function")) {
+    source("fastkpc/R/mgcv_extract_oracle.R")
+  }
+
+  group_start <- proc.time()[["elapsed"]]
+  metrics$mgcv_cpp_same_s_setup_provider_group_count <-
+    metrics$mgcv_cpp_same_s_setup_provider_group_count + 1L
+  metrics$mgcv_cpp_same_s_setup_provider_target_count <-
+    metrics$mgcv_cpp_same_s_setup_provider_target_count + length(targets)
+
+  shared_input_start <- proc.time()[["elapsed"]]
+  pred <- if (s_size > 0L) seq.int(2L, 1L + s_size) else integer()
+  formula <- if (s_size > 2L) {
+    env$frml.additive.smooth(1L, pred)
+  } else {
+    env$frml.full.smooth(1L, pred)
+  }
+  shared_input_ms <- (proc.time()[["elapsed"]] - shared_input_start) * 1000
+  templates <- new.env(parent = emptyenv())
+  template_structure_keys <- new.env(parent = emptyenv())
+  residuals <- list()
+  residual_keys <- character()
+
+  add_s_size_count <- function(native = FALSE, fallback = FALSE) {
+    if (s_size == 0L) {
+      metrics$mgcv_cpp_backend_s_size_0_count <<-
+        metrics$mgcv_cpp_backend_s_size_0_count + 1L
+      if (isTRUE(native)) {
+        metrics$mgcv_cpp_backend_native_s_size_0_count <<-
+          metrics$mgcv_cpp_backend_native_s_size_0_count + 1L
+      }
+      if (isTRUE(fallback)) {
+        metrics$mgcv_cpp_backend_fallback_s_size_0_count <<-
+          metrics$mgcv_cpp_backend_fallback_s_size_0_count + 1L
+      }
+    } else if (s_size == 1L) {
+      metrics$mgcv_cpp_backend_s_size_1_count <<-
+        metrics$mgcv_cpp_backend_s_size_1_count + 1L
+      if (isTRUE(native)) {
+        metrics$mgcv_cpp_backend_native_s_size_1_count <<-
+          metrics$mgcv_cpp_backend_native_s_size_1_count + 1L
+      }
+      if (isTRUE(fallback)) {
+        metrics$mgcv_cpp_backend_fallback_s_size_1_count <<-
+          metrics$mgcv_cpp_backend_fallback_s_size_1_count + 1L
+      }
+    } else if (s_size == 2L) {
+      metrics$mgcv_cpp_backend_s_size_2_count <<-
+        metrics$mgcv_cpp_backend_s_size_2_count + 1L
+      if (isTRUE(native)) {
+        metrics$mgcv_cpp_backend_native_s_size_2_count <<-
+          metrics$mgcv_cpp_backend_native_s_size_2_count + 1L
+      }
+      if (isTRUE(fallback)) {
+        metrics$mgcv_cpp_backend_fallback_s_size_2_count <<-
+          metrics$mgcv_cpp_backend_fallback_s_size_2_count + 1L
+      }
+    } else {
+      metrics$mgcv_cpp_backend_s_size_gt2_count <<-
+        metrics$mgcv_cpp_backend_s_size_gt2_count + 1L
+      if (isTRUE(native)) {
+        metrics$mgcv_cpp_backend_native_s_size_gt2_count <<-
+          metrics$mgcv_cpp_backend_native_s_size_gt2_count + 1L
+      }
+      if (isTRUE(fallback)) {
+        metrics$mgcv_cpp_backend_fallback_s_size_gt2_count <<-
+          metrics$mgcv_cpp_backend_fallback_s_size_gt2_count + 1L
+      }
+    }
+    invisible(TRUE)
+  }
+
+  run_fallback <- function(target_data, reason, error = FALSE) {
+    fallback_start <- proc.time()[["elapsed"]]
+    residual <- as.numeric(env$regrXonS(target_data, s_data)[, 1L])
+    fallback_ms <- (proc.time()[["elapsed"]] - fallback_start) * 1000
+    metrics$mgcv_cpp_backend_fallback_ms <<-
+      metrics$mgcv_cpp_backend_fallback_ms + fallback_ms
+    metrics$mgcv_cpp_backend_fallback_count <<-
+      metrics$mgcv_cpp_backend_fallback_count + 1L
+    metrics$mgcv_r_backend_count <<- metrics$mgcv_r_backend_count + 1L
+    if (isTRUE(error)) {
+      metrics$mgcv_cpp_backend_error_count <<-
+        metrics$mgcv_cpp_backend_error_count + 1L
+      metrics$mgcv_cpp_same_s_setup_provider_error_count <<-
+        metrics$mgcv_cpp_same_s_setup_provider_error_count + 1L
+      metrics$mgcv_cpp_same_s_prefill_error_count <<-
+        metrics$mgcv_cpp_same_s_prefill_error_count + 1L
+    }
+    if (identical(reason, "high_normal_matrix_condition")) {
+      metrics$mgcv_cpp_backend_high_condition_fallback_count <<-
+        metrics$mgcv_cpp_backend_high_condition_fallback_count + 1L
+    } else if (identical(reason, "outside_native_s_size_envelope")) {
+      metrics$mgcv_cpp_backend_outside_envelope_fallback_count <<-
+        metrics$mgcv_cpp_backend_outside_envelope_fallback_count + 1L
+    }
+    add_s_size_count(fallback = TRUE)
+    residual
+  }
+
+  for (target in targets) {
+    key <- fastkpc_legacy_mgcv_residual_key(target, S)
+    backend_start <- proc.time()[["elapsed"]]
+    metrics$mgcv_cpp_backend_enabled <- 1L
+    metrics$mgcv_cpp_backend_condition_threshold <-
+      as.numeric(condition_threshold)
+    metrics$mgcv_cpp_backend_native_s_size_limit <-
+      as.numeric(native_s_size_limit)
+    metrics$mgcv_cpp_backend_count <- metrics$mgcv_cpp_backend_count + 1L
+    target_data <- data[, target, drop = FALSE]
+    input_setup_ms <- 0
+    gam_fit_ms <- 0
+    sp_extract_ms <- 0
+    setup_extract_ms <- 0
+    condition_ms <- 0
+    native_solve_ms <- 0
+    residual <- tryCatch({
+      input_start <- proc.time()[["elapsed"]]
+      fit_data <- data.frame(cbind(target_data, s_data))
+      colnames(fit_data) <- paste0("x", seq_len(ncol(fit_data)))
+      input_setup_ms <- shared_input_ms +
+        (proc.time()[["elapsed"]] - input_start) * 1000
+      shared_input_ms <- 0
+
+      gam_start <- proc.time()[["elapsed"]]
+      fit <- mgcv::gam(formula, data = fit_data)
+      gam_fit_ms <- (proc.time()[["elapsed"]] - gam_start) * 1000
+
+      sp_start <- proc.time()[["elapsed"]]
+      sp <- fastkpc_mgcv_selected_sp(fit, fallback = fit$sp)
+      if (length(sp) == 0L || any(!is.finite(sp)) || any(sp <= 0)) {
+        stop("mgcv fit did not produce fixed positive sp", call. = FALSE)
+      }
+      method <- if (!is.null(fit$method)) {
+        as.character(fit$method[[1L]])
+      } else {
+        ""
+      }
+      if (!nzchar(method)) method <- "GCV.Cp"
+      sp_extract_ms <- (proc.time()[["elapsed"]] - sp_start) * 1000
+
+      template_key <- paste0("method=", method)
+      if (exists(template_key, envir = templates, inherits = FALSE)) {
+        template <- get(template_key, envir = templates, inherits = FALSE)
+        setup_structure_key <- get(
+          template_key, envir = template_structure_keys, inherits = FALSE
+        )
+        metrics$mgcv_cpp_same_s_setup_provider_reuse_count <-
+          metrics$mgcv_cpp_same_s_setup_provider_reuse_count + 1L
+      } else {
+        setup_start <- proc.time()[["elapsed"]]
+        template <- fastkpc_mgcv_extract_setup(
+          formula = formula,
+          data = fit_data,
+          sp = sp,
+          method = method,
+          target = 1L,
+          S = pred
+        )
+        setup_extract_ms <- (proc.time()[["elapsed"]] - setup_start) * 1000
+        setup_structure_key <- fastkpc_legacy_mgcv_setup_structure_key(template)
+        assign(template_key, template, envir = templates)
+        assign(template_key, setup_structure_key,
+               envir = template_structure_keys)
+        metrics$mgcv_cpp_same_s_setup_provider_template_count <-
+          metrics$mgcv_cpp_same_s_setup_provider_template_count + 1L
+        metrics$mgcv_cpp_same_s_setup_provider_setup_ms <-
+          metrics$mgcv_cpp_same_s_setup_provider_setup_ms + setup_extract_ms
+      }
+
+      setup <- fastkpc_mgcv_extract_retarget_setup(
+        setup = template,
+        y = as.numeric(target_data[, 1L]),
+        sp = sp,
+        target = target
+      )
+
+      condition_start <- proc.time()[["elapsed"]]
+      normal_condition <- fastkpc_mgcv_fixed_sp_normal_matrix_condition(
+        setup, sp = setup$sp
+      )
+      condition_ms <- (proc.time()[["elapsed"]] - condition_start) * 1000
+      if (is.finite(normal_condition) &&
+          normal_condition > condition_threshold) {
+        run_fallback(target_data, "high_normal_matrix_condition")
+      } else {
+        solve_start <- proc.time()[["elapsed"]]
+        solution <- fastkpc_mgcv_solve_setup_fixed_sp_cpp(setup)
+        native_solve_ms <- (proc.time()[["elapsed"]] - solve_start) * 1000
+        s_key <- fastkpc_legacy_mgcv_s_key(S)
+        metrics$mgcv_cpp_backend_native_count <-
+          metrics$mgcv_cpp_backend_native_count + 1L
+        metrics$mgcv_cpp_backend_native_residual_keys <- c(
+          metrics$mgcv_cpp_backend_native_residual_keys,
+          key
+        )
+        metrics$mgcv_cpp_backend_native_s_keys <- c(
+          metrics$mgcv_cpp_backend_native_s_keys,
+          s_key
+        )
+        metrics$mgcv_cpp_backend_native_s_sp_keys <- c(
+          metrics$mgcv_cpp_backend_native_s_sp_keys,
+          paste0(s_key, "||sp=", fastkpc_legacy_mgcv_sp_key(sp))
+        )
+        metrics$mgcv_cpp_backend_native_s_setup_keys <- c(
+          metrics$mgcv_cpp_backend_native_s_setup_keys,
+          paste0(s_key, "||setup=", setup_structure_key)
+        )
+        metrics$mgcv_cpp_backend_native_input_setup_ms <- c(
+          metrics$mgcv_cpp_backend_native_input_setup_ms,
+          input_setup_ms
+        )
+        metrics$mgcv_cpp_backend_native_gam_fit_ms <- c(
+          metrics$mgcv_cpp_backend_native_gam_fit_ms,
+          gam_fit_ms
+        )
+        metrics$mgcv_cpp_backend_native_sp_extract_ms <- c(
+          metrics$mgcv_cpp_backend_native_sp_extract_ms,
+          sp_extract_ms
+        )
+        metrics$mgcv_cpp_backend_native_setup_extract_ms <- c(
+          metrics$mgcv_cpp_backend_native_setup_extract_ms,
+          setup_extract_ms
+        )
+        metrics$mgcv_cpp_backend_native_condition_ms <- c(
+          metrics$mgcv_cpp_backend_native_condition_ms,
+          condition_ms
+        )
+        metrics$mgcv_cpp_backend_native_solve_call_ms <- c(
+          metrics$mgcv_cpp_backend_native_solve_call_ms,
+          native_solve_ms
+        )
+        add_s_size_count(native = TRUE)
+        as.numeric(solution$residuals)
+      }
+    }, error = function(e) {
+      run_fallback(target_data, "native_error", error = TRUE)
+    })
+
+    backend_ms <- (proc.time()[["elapsed"]] - backend_start) * 1000
+    metrics$mgcv_cpp_backend_ms <- metrics$mgcv_cpp_backend_ms + backend_ms
+    metrics$mgcv_cpp_backend_input_setup_ms <-
+      metrics$mgcv_cpp_backend_input_setup_ms + input_setup_ms
+    metrics$mgcv_cpp_backend_gam_fit_ms <-
+      metrics$mgcv_cpp_backend_gam_fit_ms + gam_fit_ms
+    metrics$mgcv_cpp_backend_sp_extract_ms <-
+      metrics$mgcv_cpp_backend_sp_extract_ms + sp_extract_ms
+    metrics$mgcv_cpp_backend_setup_extract_ms <-
+      metrics$mgcv_cpp_backend_setup_extract_ms + setup_extract_ms
+    metrics$mgcv_cpp_backend_condition_ms <-
+      metrics$mgcv_cpp_backend_condition_ms + condition_ms
+    metrics$mgcv_cpp_backend_native_solve_ms <-
+      metrics$mgcv_cpp_backend_native_solve_ms + native_solve_ms
+    metrics$mgcv_fit_call_ms <- metrics$mgcv_fit_call_ms + backend_ms
+    metrics$mgcv_fit_count <- metrics$mgcv_fit_count + 1L
+    residual_keys <- c(residual_keys, key)
+    residuals[[key]] <- as.numeric(residual)
+  }
+  metrics$residual_ms <- metrics$residual_ms +
+    (proc.time()[["elapsed"]] - group_start) * 1000
+  list(keys = residual_keys, residuals = residuals, metrics = metrics)
+}
+
 fastkpc_legacy_mgcv_cpp_same_s_prefill_chunk <- function(
     chunk, ind, G_l, seq_p, ord, data, env, cache_env,
     condition_threshold, native_s_size_limit) {
@@ -2665,12 +3002,48 @@ fastkpc_legacy_mgcv_cpp_same_s_prefill_chunk <- function(
   groups <- split(seq_len(compute_count), key_s_key)
   metrics$mgcv_cpp_same_s_prefill_group_count <- length(groups)
   inserted_keys <- character()
+  setup_provider_enabled <-
+    fastkpc_legacy_mgcv_residual_same_s_setup_enabled()
   for (group_idx in groups) {
     S <- key_s[[group_idx[[1L]]]]
     data_subset_start <- proc.time()[["elapsed"]]
     s_data <- data[, S, drop = FALSE]
     metrics$mgcv_data_subset_ms <- metrics$mgcv_data_subset_ms +
       (proc.time()[["elapsed"]] - data_subset_start) * 1000
+    if (isTRUE(setup_provider_enabled) &&
+        !(is.finite(native_s_size_limit) && length(S) > native_s_size_limit)) {
+      provider <- fastkpc_legacy_mgcv_cpp_same_s_setup_provider_group(
+        metrics = metrics,
+        data = data,
+        targets = vapply(group_idx, function(idx) key_target[[idx]],
+                         integer(1L)),
+        S = S,
+        env = env,
+        condition_threshold = condition_threshold,
+        native_s_size_limit = native_s_size_limit
+      )
+      metrics <- provider$metrics
+      for (key in provider$keys) {
+        if (exists(key, envir = cache_env, inherits = FALSE)) {
+          metrics$mgcv_cpp_same_s_prefill_existing_count <-
+            metrics$mgcv_cpp_same_s_prefill_existing_count + 1L
+          next
+        }
+        store_start <- proc.time()[["elapsed"]]
+        assign(key, as.numeric(provider$residuals[[key]]), envir = cache_env)
+        store_elapsed <- (proc.time()[["elapsed"]] - store_start) * 1000
+        metrics$mgcv_residual_cache_store_ms <-
+          metrics$mgcv_residual_cache_store_ms + store_elapsed
+        metrics$mgcv_residual_cache_insert_count <-
+          metrics$mgcv_residual_cache_insert_count + 1L
+        metrics$mgcv_residual_cache_entries <-
+          metrics$mgcv_residual_cache_entries + 1L
+        metrics$mgcv_cpp_same_s_prefill_cache_insert_count <-
+          metrics$mgcv_cpp_same_s_prefill_cache_insert_count + 1L
+        inserted_keys <- c(inserted_keys, key)
+      }
+      next
+    }
     for (idx in group_idx) {
       target <- key_target[[idx]]
       key <- fastkpc_legacy_mgcv_residual_key(target, S)
@@ -4617,6 +4990,20 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.numeric(runtime_total$mgcv_cpp_same_s_prefill_ms),
         legacy_mgcv_cpp_same_s_prefill_error_count =
           as.integer(runtime_total$mgcv_cpp_same_s_prefill_error_count),
+        legacy_mgcv_cpp_same_s_setup_provider_enabled =
+          isTRUE(as.integer(runtime_total$mgcv_cpp_same_s_setup_provider_enabled) > 0L),
+        legacy_mgcv_cpp_same_s_setup_provider_group_count =
+          as.integer(runtime_total$mgcv_cpp_same_s_setup_provider_group_count),
+        legacy_mgcv_cpp_same_s_setup_provider_target_count =
+          as.integer(runtime_total$mgcv_cpp_same_s_setup_provider_target_count),
+        legacy_mgcv_cpp_same_s_setup_provider_template_count =
+          as.integer(runtime_total$mgcv_cpp_same_s_setup_provider_template_count),
+        legacy_mgcv_cpp_same_s_setup_provider_reuse_count =
+          as.integer(runtime_total$mgcv_cpp_same_s_setup_provider_reuse_count),
+        legacy_mgcv_cpp_same_s_setup_provider_setup_ms =
+          as.numeric(runtime_total$mgcv_cpp_same_s_setup_provider_setup_ms),
+        legacy_mgcv_cpp_same_s_setup_provider_error_count =
+          as.integer(runtime_total$mgcv_cpp_same_s_setup_provider_error_count),
         legacy_mgcv_cpp_backend_native_s_size_limit =
           as.numeric(runtime_total$mgcv_cpp_backend_native_s_size_limit),
         legacy_mgcv_cpp_backend_condition_threshold =

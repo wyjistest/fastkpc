@@ -1690,6 +1690,87 @@ experiment. It should remain experimental and must not be promoted without a
 full 351x48 wall-time win. The next serious residual path should reuse or batch
 the same-S setup itself rather than merely precomputing per-target residuals.
 
+Same-S target-independent setup provider prototype:
+
+```bash
+FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded
+FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT=2
+FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD=1e300
+FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE=1
+FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY=s
+FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_PREFILL=1
+FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=1
+```
+
+Artifact:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_setup_provider_subset_v1
+```
+
+Status:
+
+```text
+status: created
+mode: env-gated same-S target-independent setup provider prototype,
+      not default and not recommended yet
+data: real 351x48 fixture, 12 hot-column subset
+max_conditioning_size: 3
+num_cores: 8
+
+adjacency_identical: TRUE
+n.edgetests_identical: TRUE
+baseline_n.edgetests: 131,994,1453,243
+provider_n.edgetests: 131,994,1453,243
+baseline/provider edge_count: 20 / 20
+
+baseline_elapsed_sec: 54.676
+provider_elapsed_sec: 16.793
+
+baseline/provider backend targets: 3488 / 3488
+baseline/provider native targets: 3029 / 3029
+baseline/provider fallback targets: 459 / 459
+provider_error_count: 0
+setup_provider_error_count: 0
+
+setup_provider groups / targets / templates / reuse:
+  599 / 3029 / 599 / 2430
+
+setup_provider_setup_ms: 8283
+baseline/provider setup_extract_ms: 38712 / 8283
+baseline/provider gam_fit_ms:       46113 / 46753
+```
+
+This is the first true same-S setup reuse prototype in the legacy-compatible
+residual line. It reuses target-independent setup structure inside same-S
+groups while preserving per-target `mgcv::gam` selected-sp authority. On the
+real 12-column subset it preserves canonical replay and cuts setup extraction
+worker-ms substantially:
+
+```text
+setup_extract_ms: 38.7s -> 8.3s
+```
+
+The subset wall-time win is large, but this route is still experimental. It is
+implemented through the existing same-S prefill vehicle, so it may still
+overcompute unused residuals and must not be promoted without a full 351x48
+artifact. The next gate is:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_setup_provider_full_351x48_v1
+```
+
+Required full-gate checks:
+
+```text
+edge_count = 110 / 110
+SHD = 0
+n.edgetests exact = TRUE
+setup_provider_error_count = 0
+residual backend error_count = 0
+elapsed < current recommended S-affinity route
+```
+
 #### Gate before production use
 
 ```text
@@ -2214,6 +2295,25 @@ gam_fit_preserved_ms = 34388
 status: same-S target-independent setup reuse has measurable potential, but
 per-target mgcv::gam / selected-sp selection remains preserved and cannot be
 skipped by an S-only setup cache
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_setup_provider_subset_v1 exists
+real 351x48 fixture, 12 hot-column subset, env-gated same-S setup provider
+adjacency_identical = TRUE
+n.edgetests_identical = TRUE
+baseline/provider n.edgetests = 131,994,1453,243 / 131,994,1453,243
+baseline/provider edge_count = 20 / 20
+baseline_elapsed_sec = 54.676
+provider_elapsed_sec = 16.793
+backend targets = 3488
+native targets = 3029
+fallback targets = 459
+provider_error_count = 0
+setup_provider groups / targets / templates / reuse = 599 / 3029 / 599 / 2430
+baseline/provider setup_extract_ms = 38712 / 8283
+baseline/provider gam_fit_ms = 46113 / 46753
+status: subset correctness and wall-time pass; still experimental because the
+same-S setup provider is running through the same-S prefill vehicle and needs
+the full 351x48 gate before promotion
 ```
 
 Next Phase 3 step:
@@ -2223,12 +2323,20 @@ do not promote FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded. The regression
 is now attributed to repeated per-target setup/extraction, not the native
 fixed-sp numeric solve. Same-S diagnostics show strong target-independent setup
 reuse opportunity on the deep real subset, but selected smoothing parameters
-are target-specific. The next viable Phase 3 step is an env-gated same-S
-target-independent setup provider prototype: group native-supported target
-residuals by conditioning set S, reuse only formula/data/model-matrix/basis/
-penalty/constraint structure where semantics allow it, preserve per-target
-mgcv::gam selected-sp authority, batch fixed-sp replay only by same S +
-selected sp, and preserve canonical replay. Keep the default route unchanged.
+are target-specific. An env-gated same-S target-independent setup provider
+prototype now exists and passes the 12-column subset gate. The next viable
+Phase 3 step is the full 351x48 artifact:
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_setup_provider_full_351x48_v1
+
+Use the same env plus:
+
+FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=1
+
+Promotion requires edge_count = 110 / 110, SHD = 0, n.edgetests exact,
+setup_provider_error_count = 0, residual backend error_count = 0, and wall time
+below the current recommended S-affinity route. Keep the default route
+unchanged until that full gate passes.
 ```
 
 ### 8.4 Continue dCov backend improvement separately

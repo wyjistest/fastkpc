@@ -21,6 +21,7 @@ old_env <- Sys.getenv(c(
   "FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE",
   "FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY",
   "FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_PREFILL",
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP",
   "FASTKPC_LEGACY_MGCV_RESIDUAL_CPP_SHADOW"
 ), unset = NA_character_)
 restore_env <- function(name, value) {
@@ -62,6 +63,7 @@ Sys.setenv(FASTKPC_LEGACY_PARALLEL_CORES = "1")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_PREFILL")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CPP_SHADOW")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
 baseline <- run_compatible()
@@ -140,7 +142,14 @@ required <- c(
   "legacy_mgcv_cpp_same_s_prefill_existing_count",
   "legacy_mgcv_cpp_same_s_prefill_unused_count",
   "legacy_mgcv_cpp_same_s_prefill_ms",
-  "legacy_mgcv_cpp_same_s_prefill_error_count"
+  "legacy_mgcv_cpp_same_s_prefill_error_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_enabled",
+  "legacy_mgcv_cpp_same_s_setup_provider_group_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_target_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_template_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_reuse_count",
+  "legacy_mgcv_cpp_same_s_setup_provider_setup_ms",
+  "legacy_mgcv_cpp_same_s_setup_provider_error_count"
 )
 missing_fields <- setdiff(required, names(summary))
 assert_true(length(missing_fields) == 0L,
@@ -258,6 +267,8 @@ assert_true(summary$legacy_mgcv_residual_request_count ==
             "backend should not change residual request count")
 assert_true(!isTRUE(summary$legacy_mgcv_cpp_same_s_prefill_enabled),
             "same-S prefill should remain disabled by default")
+assert_true(!isTRUE(summary$legacy_mgcv_cpp_same_s_setup_provider_enabled),
+            "same-S setup provider should remain disabled by default")
 
 Sys.setenv(
   FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE = "1",
@@ -286,6 +297,45 @@ assert_true(prefill_summary$legacy_mgcv_cpp_same_s_prefill_error_count == 0L,
 assert_true(prefill_summary$legacy_mgcv_residual_request_count ==
               baseline_summary$legacy_mgcv_residual_request_count,
             "same-S prefill should not change residual request count")
+assert_true(!isTRUE(prefill_summary$legacy_mgcv_cpp_same_s_setup_provider_enabled),
+            "same-S setup provider should stay disabled without its env gate")
+
+Sys.setenv(FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP = "1")
+setup_prefill <- run_compatible(num_cores = 2L)
+setup_prefill_summary <- setup_prefill$scheduler_diagnostics$summary
+
+assert_true(identical(setup_prefill$adjacency, baseline$adjacency),
+            "same-S setup provider must preserve adjacency")
+assert_true(identical(setup_prefill$n.edgetests, baseline$n.edgetests),
+            "same-S setup provider must preserve n.edgetests")
+assert_true(isTRUE(setup_prefill_summary$legacy_mgcv_cpp_same_s_prefill_enabled),
+            "same-S setup provider should run inside prefill route")
+assert_true(isTRUE(setup_prefill_summary$legacy_mgcv_cpp_same_s_setup_provider_enabled),
+            "same-S setup provider env gate should report enabled")
+assert_true(
+  setup_prefill_summary$legacy_mgcv_cpp_same_s_setup_provider_group_count > 0L,
+  "same-S setup provider should report grouped conditioning sets"
+)
+assert_true(
+  setup_prefill_summary$legacy_mgcv_cpp_same_s_setup_provider_target_count > 0L,
+  "same-S setup provider should report target residuals"
+)
+assert_true(
+  setup_prefill_summary$legacy_mgcv_cpp_same_s_setup_provider_template_count > 0L,
+  "same-S setup provider should build reusable templates"
+)
+assert_true(
+  setup_prefill_summary$legacy_mgcv_cpp_same_s_setup_provider_reuse_count >= 0L,
+  "same-S setup provider should report template reuse"
+)
+assert_true(
+  setup_prefill_summary$legacy_mgcv_cpp_same_s_setup_provider_setup_ms > 0,
+  "same-S setup provider should report template setup time"
+)
+assert_true(
+  setup_prefill_summary$legacy_mgcv_cpp_same_s_setup_provider_error_count == 0L,
+  "same-S setup provider should not report errors on the native-envelope subset"
+)
 
 fallback_metrics <- fastkpc_legacy_runtime_zero()
 fallback <- fastkpc_legacy_run_mgcv_residual_pair(
