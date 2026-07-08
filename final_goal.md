@@ -2790,6 +2790,51 @@ status:
   replay reduces provider overhead enough to justify wider skeleton use.
 ```
 
+Provider batch-solve subset gate:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_batch_provider_subset_v1
+
+real 351x48 fixture, 16 hot-column subset
+route: FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=chunk
+comparison: SAME_S_BATCH_SOLVE unset vs SAME_S_BATCH_SOLVE=cpp
+
+correctness:
+  adjacency_identical = TRUE
+  n.edgetests_identical = TRUE
+  baseline/batch n.edgetests = 236,2243,3607,641,60 /
+    236,2243,3607,641,60
+  baseline/batch edge_count = 32 / 32
+
+performance:
+  baseline_elapsed_sec = 71.694
+  batch_elapsed_sec = 37.177
+  baseline/batch residual_worker_ms = 172305 / 167086
+  baseline/batch mgcv_fit_count = 6517 / 6517
+  baseline/batch cache_hits = 11087 / 11087
+  baseline/batch chunk_ms = 108801 / 105549
+
+provider:
+  baseline/batch groups = 1555 / 1555
+  baseline/batch targets = 4502 / 4502
+  baseline/batch templates = 1555 / 1555
+  baseline/batch reuse = 2947 / 2947
+  baseline/batch provider_setup_ms = 20340 / 20893
+  batch_solve enabled / groups / targets / ms / errors =
+    TRUE / 1555 / 4502 / 98191 / 0
+  baseline/batch native/fallback/error targets =
+    5161,1356,0 / 5161,1356,0
+  dCov cpp backend count/errors = 6671 / 0
+  Spectra count/failed = 13342 / 0
+
+status:
+  subset correctness and wall-time pass, but this is not yet a recommended
+  route. Worker-sum only improves modestly, provider setup time does not fall,
+  and mgcv_fit_count is intentionally unchanged because selected-sp authority
+  remains mgcv::gam. The result is enough to justify a full 351x48 artifact for
+  SAME_S_BATCH_SOLVE=cpp before any promotion decision.
+```
+
 ### 8.4 Continue dCov backend improvement separately
 
 Next dCov steps:
