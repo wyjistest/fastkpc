@@ -18,13 +18,19 @@ condition_threshold <- if (length(args) >= 5L) {
 } else {
   1e12
 }
+native_s_size_limit <- if (length(args) >= 6L) {
+  as.numeric(args[[6L]])
+} else {
+  Inf
+}
 
 artifact <- fastkpc_run_mgcv_residual_cpp_numeric_shadow_expanded(
   output_dir = output_dir,
   source_result_path = source_result_path,
   max_cases = max_cases,
   solver = solver,
-  condition_threshold = condition_threshold
+  condition_threshold = condition_threshold,
+  native_s_size_limit = native_s_size_limit
 )
 cat("wrote expanded mgcv residual C++ numeric shadow artifact:",
     output_dir, "\n")

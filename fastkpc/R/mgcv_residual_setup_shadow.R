@@ -77,7 +77,8 @@ fastkpc_mgcv_setup_shadow_sp <- function(entry, suffix) {
 fastkpc_mgcv_setup_shadow_solve_one <- function(entry, fit_data_info,
                                                 target_col, suffix, env,
                                                 solver,
-                                                condition_threshold) {
+                                                condition_threshold,
+                                                native_s_size_limit) {
   formula <- fastkpc_mgcv_oracle_formula(
     target_col, length(fit_data_info$S), env
   )
@@ -95,10 +96,16 @@ fastkpc_mgcv_setup_shadow_solve_one <- function(entry, fit_data_info,
   solution <- if (identical(solver, "cpp")) {
     fastkpc_mgcv_solve_setup_fixed_sp_cpp(setup)
   } else if (identical(solver, "cpp_guarded")) {
+    s_size <- length(fit_data_info$S)
     normal_matrix_condition <- fastkpc_mgcv_fixed_sp_normal_matrix_condition(
       setup, sp = setup$sp
     )
-    if (is.finite(normal_matrix_condition) &&
+    if (is.finite(native_s_size_limit) &&
+        s_size > native_s_size_limit) {
+      fallback_used <- TRUE
+      fallback_reason <- "outside_native_s_size_envelope"
+      fastkpc_mgcv_solve_setup_fixed_sp(setup)
+    } else if (is.finite(normal_matrix_condition) &&
         normal_matrix_condition > condition_threshold) {
       fallback_used <- TRUE
       fallback_reason <- "high_normal_matrix_condition"
@@ -177,17 +184,20 @@ fastkpc_mgcv_setup_shadow_unsupported_row <- function(case, entry,
 
 fastkpc_mgcv_setup_shadow_case <- function(data, case, entry, alpha, index,
                                            numCol, env, residual_tol, p_tol,
-                                           solver, condition_threshold) {
+                                           solver, condition_threshold,
+                                           native_s_size_limit) {
   solved <- tryCatch({
     fit_data_info <- fastkpc_mgcv_setup_shadow_fit_data(data, case)
     list(
       x = fastkpc_mgcv_setup_shadow_solve_one(
         entry, fit_data_info, target_col = 1L, suffix = "x", env = env,
-        solver = solver, condition_threshold = condition_threshold
+        solver = solver, condition_threshold = condition_threshold,
+        native_s_size_limit = native_s_size_limit
       ),
       y = fastkpc_mgcv_setup_shadow_solve_one(
         entry, fit_data_info, target_col = 2L, suffix = "y", env = env,
-        solver = solver, condition_threshold = condition_threshold
+        solver = solver, condition_threshold = condition_threshold,
+        native_s_size_limit = native_s_size_limit
       )
     )
   }, error = function(e) e)
@@ -290,6 +300,7 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
     p_tol = 1e-5,
     solver = c("mgcv_magic", "cpp", "cpp_guarded"),
     condition_threshold = 1e12,
+    native_s_size_limit = Inf,
     artifact_name = "mgcv_residual_setup_shadow_v1",
     env = fastkpc_legacy_env()) {
   solver <- match.arg(solver)
@@ -298,6 +309,13 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
       !is.finite(condition_threshold) ||
       condition_threshold < 0) {
     stop("condition_threshold must be a finite nonnegative scalar",
+         call. = FALSE)
+  }
+  native_s_size_limit <- as.numeric(native_s_size_limit)
+  if (length(native_s_size_limit) != 1L ||
+      is.na(native_s_size_limit) ||
+      native_s_size_limit < 0) {
+    stop("native_s_size_limit must be a nonnegative scalar or Inf",
          call. = FALSE)
   }
   if (!requireNamespace("mgcv", quietly = TRUE)) {
@@ -335,7 +353,8 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
       residual_tol = residual_tol,
       p_tol = p_tol,
       solver = solver,
-      condition_threshold = condition_threshold
+      condition_threshold = condition_threshold,
+      native_s_size_limit = native_s_size_limit
     )
   }
 
@@ -351,6 +370,11 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
     sum(case_rows$fallback_reason_x == "high_normal_matrix_condition",
         na.rm = TRUE) +
     sum(case_rows$fallback_reason_y == "high_normal_matrix_condition",
+        na.rm = TRUE)
+  outside_envelope_fallback_count <-
+    sum(case_rows$fallback_reason_x == "outside_native_s_size_envelope",
+        na.rm = TRUE) +
+    sum(case_rows$fallback_reason_y == "outside_native_s_size_envelope",
         na.rm = TRUE)
   supported_target_count <- sum(case_rows$setup_supported, na.rm = TRUE) * 2L
   cpp_guarded_count <- if (identical(solver, "cpp_guarded")) {
@@ -383,8 +407,14 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
     } else {
       NA_real_
     },
+    native_s_size_limit = if (identical(solver, "cpp_guarded")) {
+      native_s_size_limit
+    } else {
+      NA_real_
+    },
     fallback_count = fallback_count,
     high_condition_fallback_count = high_condition_fallback_count,
+    outside_envelope_fallback_count = outside_envelope_fallback_count,
     cpp_guarded_count = cpp_guarded_count,
     max_normal_matrix_condition =
       if (length(finite_normal_conditions)) {
@@ -427,6 +457,8 @@ fastkpc_run_mgcv_residual_setup_shadow <- function(
            summary$fallback_count[[1L]]),
     paste0("- guarded high-condition fallback count: ",
            summary$high_condition_fallback_count[[1L]]),
+    paste0("- guarded outside-envelope fallback count: ",
+           summary$outside_envelope_fallback_count[[1L]]),
     paste0("- guarded native C++ target count: ",
            summary$cpp_guarded_count[[1L]]),
     paste0("- max normal matrix condition: ",

@@ -15,13 +15,19 @@ condition_threshold <- if (length(args) >= 4L) {
 } else {
   1e12
 }
+native_s_size_limit <- if (length(args) >= 5L) {
+  as.numeric(args[[5L]])
+} else {
+  Inf
+}
 
 source("fastkpc/R/mgcv_residual_setup_shadow.R")
 artifact <- fastkpc_run_mgcv_residual_setup_shadow(
   oracle_dir = oracle_dir,
   output_dir = output_dir,
   solver = solver,
-  condition_threshold = condition_threshold
+  condition_threshold = condition_threshold,
+  native_s_size_limit = native_s_size_limit
 )
 cat("wrote mgcv residual setup shadow artifact:", output_dir, "\n")
 print(artifact$summary)

@@ -953,6 +953,85 @@ This strengthens the current supported-envelope interpretation:
   this deeper additive envelope.
 ```
 
+Strict `|S|<=2` guarded envelope artifact:
+
+```text
+fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_guarded_s2_envelope_wide_v1
+```
+
+Selection profile:
+
+```text
+near_alpha_count: 64
+per_s_size_count: 32
+per_level_count: 20
+max_cases: 160
+selected cases: 116
+native_s_size_limit: 2
+```
+
+Status:
+
+```text
+status: created
+mode: shadow only, not authoritative
+source: expanded cases from full 351x48 skeleton deletion log
+solver: cpp_guarded
+condition_threshold: 1e12
+case_count: 116
+setup_supported_count: 116
+setup_unsupported_count: 0
+residual_pair_match_count: 116
+residual_pair_mismatch_count: 0
+dcov_p_match_count: 116
+dcov_p_mismatch_count: 0
+decision_match_count: 116
+decision_flip_count: 0
+fallback_count: 104 targets
+high_condition_fallback_count: 0 targets
+outside_envelope_fallback_count: 104 targets
+cpp_guarded_count: 128 targets
+max_normal_matrix_condition: 2.083868e14
+max_residual_x_abs_diff: 1.387113e-11
+max_residual_y_abs_diff: 2.538347e-11
+max_dcov_p_abs_diff: 1.429523e-12
+pass: TRUE
+```
+
+Fallback distribution:
+
+```text
+cases by |S| / level:
+  |S|=1: 32
+  |S|=2: 32
+  |S|=3: 32
+  |S|=4: 16
+  |S|=5:  3
+  |S|=6:  1
+
+fallback targets by |S| / level:
+  |S|=1:  0
+  |S|=2:  0
+  |S|=3: 64
+  |S|=4: 32
+  |S|=5:  6
+  |S|=6:  2
+```
+
+This gives a concrete fail-closed residual shadow policy:
+
+```text
+native C++ fixed-sp solve:
+  allowed for sampled |S|<=2 full-smooth setups
+
+mgcv C_magic fallback:
+  required for |S|>2 additive setups under this strict envelope
+
+promotion status:
+  still shadow-only, but now the supported native envelope is explicit and
+  observable through fallback diagnostics.
+```
+
 #### Gate before production use
 
 ```text
@@ -1337,15 +1416,26 @@ fallback_count = 52 high-condition targets
 |S|<=2 fallback_count = 0
 |S|>=3 fallback_count = 52
 status: wider guarded shadow pass; still not production
+
+fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_guarded_s2_envelope_wide_v1 exists
+116 / 116 expanded extracted setups supported
+116 / 116 residual pairs match under strict tolerance
+116 / 116 dCov p-values match under strict tolerance
+decision_flip_count = 0
+native_s_size_limit = 2
+cpp_guarded_count = 128 native |S|<=2 targets
+fallback_count = 104 outside-envelope |S|>=3 targets
+high_condition_fallback_count = 0
+status: strict supported-envelope shadow pass; still not production
 ```
 
 Next Phase 3 step:
 
 ```text
-use the wider guarded shadow evidence to define a stricter supported envelope:
-native C++ fixed-sp solve is promising for sampled |S|<=2 full-smooth cases,
-while |S|>=3 additive cases currently require high-condition fallback or a
-closer mgcv-equivalent C++ solve kernel
+expand the strict |S|<=2 native envelope shadow to a full-route residual
+backend experiment only after verifying full skeleton canonical replay remains
+unchanged; for |S|>=3, either keep fail-closed mgcv C_magic fallback or build a
+closer mgcv-equivalent C++ solve kernel before attempting promotion
 ```
 
 ### 8.4 Continue dCov backend improvement separately
