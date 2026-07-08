@@ -5,6 +5,7 @@
 #include "regrvonps_device.hpp"
 #include "residual_backend_registry.hpp"
 #include "skeleton_engine_cuda.hpp"
+#include "skeleton_task_scheduler.hpp"
 #include "wanpdag_engine.hpp"
 #include "cuda/cuda_status.hpp"
 #include "cuda/dcov_batch_cuda.hpp"
@@ -2477,6 +2478,61 @@ extern "C" SEXP C_precision_replay_layer_native(SEXP adjacencys,
   END_RCPP
 }
 
+extern "C" SEXP C_precision_make_layer_plan_native(SEXP adjacencys,
+                                                   SEXP levels) {
+  BEGIN_RCPP
+  Rcpp::IntegerMatrix adjacency_in(adjacencys);
+  const int p = adjacency_in.nrow();
+  const int level = Rf_asInteger(levels);
+  if (p <= 0 || adjacency_in.ncol() != p) {
+    Rcpp::stop("adjacency must be a square matrix");
+  }
+  if (level < 0) {
+    Rcpp::stop("level must be non-negative");
+  }
+
+  std::vector<int> adjacency(static_cast<std::size_t>(p) * p, 0);
+  for (int row = 0; row < p; ++row) {
+    for (int col = 0; col < p; ++col) {
+      adjacency[static_cast<std::size_t>(row) * p + col] =
+        adjacency_in(row, col) != 0 ? 1 : 0;
+    }
+  }
+
+  const LayerPlan plan = make_layer_plan(adjacency, p, level);
+  Rcpp::List tasks(plan.tasks.size());
+  for (int i = 0; i < static_cast<int>(plan.tasks.size()); ++i) {
+    const LayerCiTask& task = plan.tasks[i];
+    Rcpp::IntegerVector cond(task.conditioning_set.size());
+    for (int j = 0; j < cond.size(); ++j) cond[j] = task.conditioning_set[j] + 1;
+    tasks[i] = Rcpp::List::create(
+      Rcpp::Named("task_id") = task.task_id + 1,
+      Rcpp::Named("edge_x") = task.edge_x + 1,
+      Rcpp::Named("edge_y") = task.edge_y + 1,
+      Rcpp::Named("x") = task.orientation_x + 1,
+      Rcpp::Named("y") = task.orientation_y + 1,
+      Rcpp::Named("S") = cond,
+      Rcpp::Named("S_key") = replay_s_key(task.conditioning_set),
+      Rcpp::Named("conditioning_size") =
+        static_cast<int>(task.conditioning_set.size()),
+      Rcpp::Named("conditioning_target_side") =
+        task.orientation_x == task.edge_x ? "x" : "y"
+    );
+  }
+
+  return Rcpp::List::create(
+    Rcpp::Named("tasks") = tasks,
+    Rcpp::Named("summary") = Rcpp::List::create(
+      Rcpp::Named("level") = plan.level,
+      Rcpp::Named("p") = plan.p,
+      Rcpp::Named("tasks_planned") = static_cast<int>(plan.tasks.size()),
+      Rcpp::Named("unconditional_tasks") = plan.unconditional_tasks,
+      Rcpp::Named("conditional_tasks") = plan.conditional_tasks
+    )
+  );
+  END_RCPP
+}
+
 static const R_CallMethodDef call_methods[] = {
   {"C_fastkpc_cuda_available", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_available), 0},
   {"C_fastkpc_cuda_device_info", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_device_info), 0},
@@ -2491,6 +2547,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fast_skeleton_cuda_cached", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda_cached), 7},
   {"C_fast_skeleton_cuda_backend", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda_backend), 18},
   {"C_fast_kpc_wanpdag_cuda", reinterpret_cast<DL_FUNC>(&C_fast_kpc_wanpdag_cuda), 24},
+  {"C_precision_make_layer_plan_native", reinterpret_cast<DL_FUNC>(&C_precision_make_layer_plan_native), 2},
   {"C_precision_replay_layer_native", reinterpret_cast<DL_FUNC>(&C_precision_replay_layer_native), 10},
   {nullptr, nullptr, 0}
 };

@@ -2580,6 +2580,54 @@ CI task generation, residual batching, dCov batching, and full 351x48 execution
 still have to move behind the native entrypoint before Phase 5 can be promoted.
 ```
 
+### Native layer planning checkpoint
+
+The next C++ host boundary exposes the native scheduler layer planner to R:
+
+```text
+precision_make_layer_plan_native()
+```
+
+Status:
+
+```text
+status: targeted task-generation parity gate, not a full skeleton engine
+scope:
+  native C++ make_layer_plan()
+  R reference fastkpc_batched_precision_make_layer_plan()
+  levels 0, 1, and 2 on a p=6 partially pruned adjacency
+```
+
+Gate:
+
+```text
+Rscript fastkpc/tests/test_skeleton_native_layer_plan.R
+```
+
+Coverage:
+
+```text
+task_id
+edge_x / edge_y
+orientation x / y
+conditioning set S
+S_key
+conditioning_size
+conditioning_target_side
+summary task counts
+```
+
+Decision:
+
+```text
+This moves canonical layer task generation behind the native boundary and
+checks it against the existing R planner. Together with the p-table replay
+gate, Phase 5 now has targeted native host parity for task generation and
+p-value replay. Residual generation, dCov p-value generation, full level loop
+ownership, and full 351x48 one-call execution still remain outside the native
+entrypoint.
+```
+
 ### CUDA responsibilities
 
 ```text

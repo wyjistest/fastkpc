@@ -230,6 +230,16 @@ precision_replay_layer_native <- function(adjacency, edge_x, edge_y, x, y,
         PACKAGE = "fastkpc_cuda")
 }
 
+precision_make_layer_plan_native <- function(adjacency, level) {
+  load_fastkpc_cuda_native()
+  adjacency <- as.matrix(adjacency)
+  storage.mode(adjacency) <- "integer"
+  .Call("C_precision_make_layer_plan_native",
+        adjacency,
+        as.integer(level),
+        PACKAGE = "fastkpc_cuda")
+}
+
 fast_kpc_wanpdag_cuda <- function(data, alpha, max_conditioning_size,
                                   residual_backend = "fastSpline",
                                   residual_device = c("auto", "cpu", "cuda"),
