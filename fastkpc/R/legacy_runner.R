@@ -2052,8 +2052,19 @@ fastkpc_legacy_mgcv_residual_same_s_prefill_enabled <- function() {
 }
 
 fastkpc_legacy_mgcv_residual_same_s_setup_enabled <- function() {
-  identical(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP",
-                       unset = ""), "1")
+  identical(fastkpc_legacy_mgcv_residual_same_s_setup_mode(), "prefill")
+}
+
+fastkpc_legacy_mgcv_residual_same_s_setup_mode <- function() {
+  raw <- tolower(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP",
+                            unset = ""))
+  if (raw %in% c("1", "true", "yes", "on")) {
+    "prefill"
+  } else if (identical(raw, "consumed")) {
+    "consumed"
+  } else {
+    "off"
+  }
 }
 
 fastkpc_legacy_mgcv_residual_cpp_shadow_enabled <- function() {
@@ -3387,6 +3398,7 @@ fastkpc_legacy_run_mgcv_residual_pair <- function(
     metrics, data, x, y, S, env, cache_env = NULL, cache_enabled = FALSE,
     prefetch_cache = NULL, prefetch_enabled = FALSE,
     cpp_backend_enabled = FALSE,
+    same_s_setup_consumed_enabled = FALSE,
     cpp_backend_condition_threshold = 1e12,
     cpp_backend_native_s_size_limit = Inf,
     cpp_shadow_enabled = FALSE,
@@ -3550,6 +3562,7 @@ fastkpc_legacy_run_mgcv_residual_pair <- function(
   s_data <- NULL
   residual_cols <- vector("list", 2L)
   targets <- c(as.integer(x), as.integer(y))
+  miss_indices <- integer()
   for (idx in seq_along(targets)) {
     key <- target_keys[[idx]]
     lookup_start <- proc.time()[["elapsed"]]
@@ -3568,7 +3581,48 @@ fastkpc_legacy_run_mgcv_residual_pair <- function(
     metrics$mgcv_cache_lookup_ms <- metrics$mgcv_cache_lookup_ms +
       (proc.time()[["elapsed"]] - lookup_start) * 1000
     metrics$mgcv_cache_miss_count <- metrics$mgcv_cache_miss_count + 1L
+    miss_indices <- c(miss_indices, idx)
+  }
 
+  if (isTRUE(same_s_setup_consumed_enabled) &&
+      isTRUE(cpp_backend_enabled) &&
+      length(miss_indices) > 1L &&
+      !(is.finite(cpp_backend_native_s_size_limit) &&
+          length(S_int) > cpp_backend_native_s_size_limit)) {
+    provider <- fastkpc_legacy_mgcv_cpp_same_s_setup_provider_group(
+      metrics = metrics,
+      data = data,
+      targets = targets[miss_indices],
+      S = S_int,
+      env = env,
+      condition_threshold = cpp_backend_condition_threshold,
+      native_s_size_limit = cpp_backend_native_s_size_limit
+    )
+    metrics <- provider$metrics
+    if (length(provider$keys) > 0L) {
+      for (key in provider$keys) {
+        idx <- match(key, target_keys)
+        if (length(idx) != 1L || is.na(idx)) next
+        target_residual <- as.numeric(provider$residuals[[key]])
+        store_start <- proc.time()[["elapsed"]]
+        assign(key, target_residual, envir = cache_env)
+        metrics$mgcv_residual_cache_store_ms <-
+          metrics$mgcv_residual_cache_store_ms +
+            (proc.time()[["elapsed"]] - store_start) * 1000
+        metrics$mgcv_residual_cache_insert_count <-
+          metrics$mgcv_residual_cache_insert_count + 1L
+        metrics$mgcv_residual_cache_entries <-
+          metrics$mgcv_residual_cache_entries + 1L
+        residual_cols[[idx]] <- target_residual
+      }
+      miss_indices <- miss_indices[
+        !(target_keys[miss_indices] %in% provider$keys)
+      ]
+    }
+  }
+
+  for (idx in miss_indices) {
+    key <- target_keys[[idx]]
     data_subset_start <- proc.time()[["elapsed"]]
     x_data <- data[, targets[[idx]], drop = FALSE]
     if (is.null(s_data)) s_data <- data[, S_int, drop = FALSE]
@@ -4013,6 +4067,13 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     isTRUE(mgcv_residual_cache_enabled) &&
     isTRUE(mgcv_residual_cpp_backend_enabled) &&
     fastkpc_legacy_mgcv_residual_same_s_prefill_enabled()
+  mgcv_residual_same_s_setup_mode <-
+    fastkpc_legacy_mgcv_residual_same_s_setup_mode()
+  mgcv_residual_same_s_setup_consumed_enabled <-
+    identical(ic.method, "dcc.gamma") &&
+    isTRUE(mgcv_residual_cache_enabled) &&
+    isTRUE(mgcv_residual_cpp_backend_enabled) &&
+    identical(mgcv_residual_same_s_setup_mode, "consumed")
   mgcv_residual_cpp_backend_condition_threshold <-
     fastkpc_legacy_mgcv_residual_backend_condition_threshold()
   mgcv_residual_cpp_backend_native_s_size_limit <-
@@ -4089,6 +4150,8 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
             prefetch_cache = mgcv_residual_prefetch_cache,
             prefetch_enabled = mgcv_residual_prefetch_level_enabled,
             cpp_backend_enabled = mgcv_residual_cpp_backend_enabled,
+            same_s_setup_consumed_enabled =
+              mgcv_residual_same_s_setup_consumed_enabled,
             cpp_backend_condition_threshold =
               mgcv_residual_cpp_backend_condition_threshold,
             cpp_backend_native_s_size_limit =

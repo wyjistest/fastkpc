@@ -337,6 +337,33 @@ assert_true(
   "same-S setup provider should not report errors on the native-envelope subset"
 )
 
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_PREFILL")
+Sys.setenv(FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP = "consumed")
+setup_consumed <- run_compatible(num_cores = 2L)
+setup_consumed_summary <- setup_consumed$scheduler_diagnostics$summary
+
+assert_true(identical(setup_consumed$adjacency, baseline$adjacency),
+            "consumed same-S setup provider must preserve adjacency")
+assert_true(identical(setup_consumed$n.edgetests, baseline$n.edgetests),
+            "consumed same-S setup provider must preserve n.edgetests")
+assert_true(!isTRUE(setup_consumed_summary$legacy_mgcv_cpp_same_s_prefill_enabled),
+            "consumed same-S setup provider must not enable prefill")
+assert_true(isTRUE(setup_consumed_summary$legacy_mgcv_cpp_same_s_setup_provider_enabled),
+            "consumed same-S setup provider env gate should report enabled")
+assert_true(
+  setup_consumed_summary$legacy_mgcv_cpp_same_s_setup_provider_target_count > 0L,
+  "consumed same-S setup provider should process actual residual misses"
+)
+assert_true(
+  setup_consumed_summary$legacy_mgcv_cpp_same_s_setup_provider_target_count <=
+    setup_consumed_summary$legacy_mgcv_residual_request_count,
+  "consumed same-S setup provider should not process more targets than consumed requests"
+)
+assert_true(
+  setup_consumed_summary$legacy_mgcv_cpp_same_s_setup_provider_error_count == 0L,
+  "consumed same-S setup provider should not report errors on the native-envelope subset"
+)
+
 fallback_metrics <- fastkpc_legacy_runtime_zero()
 fallback <- fastkpc_legacy_run_mgcv_residual_pair(
   metrics = fallback_metrics,

@@ -1851,6 +1851,100 @@ target|S residuals. It should move same-S setup reuse into an on-demand or
 consumed-key execution path where only residual keys actually required by
 canonical CI tasks are fitted.
 
+Consumed-key same-S setup provider artifact:
+
+```bash
+FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=spectra
+FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE=1
+FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY=s
+FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded
+FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT=2
+FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD=1e300
+FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=consumed
+```
+
+Artifact:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_setup_provider_consumed_keys_v1
+```
+
+Status:
+
+```text
+status: created
+mode: env-gated consumed-key same-S setup provider prototype,
+      not default and not recommended
+data: real 351x48 fixture, all columns
+n / p: 351 / 48
+alpha: 0.1
+max_conditioning_size: 46
+num_cores: 20
+
+adjacency_identical: TRUE
+SHD: 0
+n.edgetests_identical: TRUE
+baseline_n.edgetests: 2213,52659,125293,40694,13293,5422,835,80
+provider_n.edgetests: 2213,52659,125293,40694,13293,5422,835,80
+baseline/provider edge_count: 110 / 110
+
+baseline_elapsed_sec: 909.418
+provider_elapsed_sec: 1075.924
+elapsed_speedup: 0.845x
+
+baseline/provider residual_worker_ms:
+  9083787 / 12154374
+
+baseline/provider mgcv_fit_count:
+  273284 / 273284
+
+baseline/provider cache_hits:
+  203268 / 203268
+
+provider backend / native / fallback / error targets:
+  273284 / 157122 / 116162 / 0
+
+setup_provider groups / targets / templates / reuse:
+  42418 / 84836 / 42418 / 42418
+
+setup_provider_setup_ms: 940660
+setup_provider_error_count: 0
+prefill_enabled: FALSE
+prefill_unused_count: 0
+
+provider input/setup/gam/native/fallback ms:
+  126829 / 2326981 / 3978266 / 240563 / 4877692
+
+dCov cpp backend count / errors / fallbacks:
+  239404 / 0 / 0
+
+Spectra count / converged / failed:
+  478808 / 478808 / 0
+```
+
+This gate proves the consumed-key variant fixes the prefill overcompute problem:
+
+```text
+prefill_unused_count: 128735 -> 0
+mgcv_fit_count:       402019 -> 273284
+```
+
+It is still performance-negative versus the recommended S-affinity route:
+
+```text
+elapsed:            909.418s -> 1075.924s
+residual worker-ms: 9.08M    -> 12.15M
+```
+
+The failure mode changed. It is no longer unused residual precomputation.
+Instead, the provider is still only pair-local in the current consumed path:
+each CI call can reuse setup across at most the two residual targets in that
+pair, so it does not capture the large same-S group opportunity measured in the
+diagnostics. It also still routes all misses through the slower `cpp_guarded`
+residual backend, including many outside-envelope fallbacks. Do not promote
+`FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=consumed`.
+
 #### Gate before production use
 
 ```text
@@ -2432,26 +2526,30 @@ prototype exists and passes the 12-column subset gate, but the full 351x48 gate
 fails wall time because it is currently attached to the same-S prefill vehicle.
 Do not promote FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP=1.
 
-The next viable Phase 3 step is:
+The consumed-key/on-demand pair-local prototype has now been run:
 
-diag/perf: move same-S mgcv setup provider to consumed-key/on-demand execution
-
-The goal is to keep the full 351x48 correctness of the setup provider while
-avoiding prefill overcompute:
-
-  use only residual keys actually consumed by canonical CI tasks
-  preserve per-target mgcv::gam selected-sp authority
-  reuse same-S target-independent setup only within consumed key groups
-  keep parent canonical replay unchanged
-  keep default and recommended routes unchanged
-
-The next artifact should be:
-
+```text
 fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_setup_provider_consumed_keys_v1
 
-Promotion still requires edge_count = 110 / 110, SHD = 0, n.edgetests exact,
-setup_provider_error_count = 0, residual backend error_count = 0, and wall time
-below the current recommended S-affinity route.
+correctness: passed
+prefill overcompute: fixed
+SHD = 0
+edge_count = 110 / 110
+n.edgetests exact = TRUE
+baseline_elapsed_sec = 909.418
+provider_elapsed_sec = 1075.924
+baseline/provider mgcv_fit_count = 273284 / 273284
+prefill_unused_count = 0
+wall time: failed
+status: experimental only; not recommended
+```
+
+The next attempt should not be another pair-local wrapper around
+`fastkpc_legacy_run_mgcv_residual_pair()`. It needs to group actual consumed
+miss keys across a worker chunk or skeleton level by S, then call the setup
+provider once per consumed same-S group. If that still fails wall time, move to
+same-S setup extraction for a C++/CUDA numeric executor rather than further
+R-level task scheduling.
 ```
 
 ### 8.4 Continue dCov backend improvement separately
