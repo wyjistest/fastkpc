@@ -1432,6 +1432,63 @@ setup reuse opportunity before considering load balance and cache boundaries.
 This is the strongest evidence so far that the next residual acceleration path
 should batch or reuse setup by conditioning set, not optimize scalar solves.
 
+Guarded residual same-S plus selected-sp reuse potential diagnostic:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_backend_same_s_sp_reuse_potential_subset_v1
+```
+
+Status:
+
+```text
+status: created
+mode: env-neutral diagnostic over cpp_guarded backend route
+data: real 351x48 fixture, 12 hot-column subset
+max_conditioning_size: 3
+num_cores: 8
+
+edge_count: 20
+n.edgetests: 131,994,1453,243
+
+backend / native / fallback / error targets: 2756 / 2297 / 459 / 0
+
+same-S groups / targets / max / mean:
+  78 / 2297 / 56 / 29.448718
+same-S reuse opportunity / ratio:
+  2219 / 0.96604266
+
+same-S+selected-sp groups / targets / max / mean:
+  765 / 2297 / 7 / 3.0026144
+same-S+selected-sp reuse opportunity / ratio:
+  1532 / 0.6669569
+
+input_formula_setup_ms: 15305
+mgcv_gam_fit_ms:        34600
+setup_extract_ms:       28499
+native_fixed_sp_solve:   2061
+fallback_regrXonS_ms:   17482
+```
+
+This refines the previous same-S diagnostic. Conditioning set alone
+overstates complete fixed-sp setup reuse because selected smoothing parameters
+are target-dependent. On this subset, adding the selected-sp signature splits
+78 same-S groups into 765 same-S+sp groups and reduces the complete fixed-sp
+reuse opportunity from 96.6% to 66.7%. There is still meaningful exact reuse,
+but the next serious design should distinguish:
+
+```text
+target-independent reuse:
+  formula, model frame, basis/penalty metadata for same S
+
+target/sp-dependent reuse:
+  fixed-sp setup/factorization and solve batches for same S + selected sp
+```
+
+Therefore a production attempt should not assume one fixed-sp setup per S.
+It should either batch by same-S+selected-sp for full setup/factorization reuse,
+or split the executor so same-S basis/model-frame work is reused while
+target-specific smoothing parameter selection remains faithful to mgcv.
+
 Same-S guarded residual prefill prototype:
 
 ```bash

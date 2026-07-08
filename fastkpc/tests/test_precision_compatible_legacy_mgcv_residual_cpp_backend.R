@@ -112,6 +112,12 @@ required <- c(
   "legacy_mgcv_cpp_backend_same_s_native_mean_targets",
   "legacy_mgcv_cpp_backend_same_s_native_reuse_opportunity_count",
   "legacy_mgcv_cpp_backend_same_s_native_setup_reuse_ratio",
+  "legacy_mgcv_cpp_backend_same_s_sp_native_group_count",
+  "legacy_mgcv_cpp_backend_same_s_sp_native_target_count",
+  "legacy_mgcv_cpp_backend_same_s_sp_native_max_targets",
+  "legacy_mgcv_cpp_backend_same_s_sp_native_mean_targets",
+  "legacy_mgcv_cpp_backend_same_s_sp_native_reuse_opportunity_count",
+  "legacy_mgcv_cpp_backend_same_s_sp_native_setup_reuse_ratio",
   "legacy_mgcv_cpp_backend_native_s_size_limit",
   "legacy_mgcv_cpp_backend_condition_threshold",
   "legacy_mgcv_cpp_same_s_prefill_enabled",
@@ -178,6 +184,18 @@ assert_true(summary$legacy_mgcv_cpp_backend_same_s_native_reuse_opportunity_coun
 assert_true(summary$legacy_mgcv_cpp_backend_same_s_native_setup_reuse_ratio >=
               0,
             "same-S native setup reuse ratio should be nonnegative")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_sp_native_target_count ==
+              summary$legacy_mgcv_cpp_backend_native_count,
+            "same-S+sp native target count should match native backend calls")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_sp_native_group_count >=
+              summary$legacy_mgcv_cpp_backend_same_s_native_group_count,
+            "same-S+sp grouping should be at least as specific as same-S grouping")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_sp_native_reuse_opportunity_count <=
+              summary$legacy_mgcv_cpp_backend_same_s_native_reuse_opportunity_count,
+            "same-S+sp reuse opportunity should not exceed same-S opportunity")
+assert_true(summary$legacy_mgcv_cpp_backend_same_s_sp_native_setup_reuse_ratio <=
+              summary$legacy_mgcv_cpp_backend_same_s_native_setup_reuse_ratio,
+            "same-S+sp reuse ratio should not exceed same-S reuse ratio")
 assert_true(summary$legacy_mgcv_cpp_backend_high_condition_fallback_count == 0L,
             "high-condition fallback should not trigger with loose threshold")
 assert_true(summary$legacy_mgcv_cpp_backend_error_count == 0L,
@@ -291,5 +309,17 @@ assert_true(native_summary$mgcv_cpp_backend_same_s_native_reuse_opportunity_coun
 assert_true(native_summary$mgcv_cpp_backend_same_s_native_setup_reuse_ratio ==
               0.5,
             "direct native residual pair should report exact setup reuse ratio")
+assert_true(native_summary$mgcv_cpp_backend_same_s_sp_native_target_count == 2L,
+            "direct native residual pair should report same-S+sp targets")
+assert_true(native_summary$mgcv_cpp_backend_same_s_sp_native_group_count >= 1L,
+            "direct native residual pair should report same-S+sp groups")
+assert_true(native_summary$mgcv_cpp_backend_same_s_sp_native_group_count >=
+              native_summary$mgcv_cpp_backend_same_s_native_group_count,
+            "direct same-S+sp grouping should be at least as specific as same-S")
+assert_true(
+  native_summary$mgcv_cpp_backend_same_s_sp_native_reuse_opportunity_count <=
+    native_summary$mgcv_cpp_backend_same_s_native_reuse_opportunity_count,
+  "direct same-S+sp reuse opportunity should not exceed same-S opportunity"
+)
 
 cat("PASS precision compatible legacy mgcv residual C++ backend\n")
