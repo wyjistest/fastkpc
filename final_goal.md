@@ -876,6 +876,83 @@ by falling back to mgcv C_magic replay. The next promotion step must either
 expand this guarded shadow across more full-skeleton cases or replace the
 normal-equation path with a closer mgcv-equivalent numeric kernel.
 
+Wider guarded C++ fixed-sp numeric shadow artifact:
+
+```text
+fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_guarded_expanded_wide_v1
+```
+
+Selection profile:
+
+```text
+near_alpha_count: 64
+per_s_size_count: 32
+per_level_count: 20
+max_cases: 160
+selected cases: 116
+```
+
+Status:
+
+```text
+status: created
+mode: shadow only, not authoritative
+source: expanded cases from full 351x48 skeleton deletion log
+solver: cpp_guarded
+condition_threshold: 1e12
+case_count: 116
+setup_supported_count: 116
+setup_unsupported_count: 0
+residual_pair_match_count: 116
+residual_pair_mismatch_count: 0
+dcov_p_match_count: 116
+dcov_p_mismatch_count: 0
+decision_match_count: 116
+decision_flip_count: 0
+fallback_count: 52 targets
+high_condition_fallback_count: 52 targets
+cpp_guarded_count: 180 targets
+max_normal_matrix_condition: 2.083868e14
+max_residual_x_abs_diff: 1.399334e-10
+max_residual_y_abs_diff: 1.659735e-10
+max_dcov_p_abs_diff: 2.134748e-11
+pass: TRUE
+```
+
+Coverage:
+
+```text
+cases by |S| / level:
+  |S|=1: 32
+  |S|=2: 32
+  |S|=3: 32
+  |S|=4: 16
+  |S|=5:  3
+  |S|=6:  1
+
+fallback targets by |S| / level:
+  |S|=1:  0
+  |S|=2:  0
+  |S|=3: 28
+  |S|=4: 20
+  |S|=5:  3
+  |S|=6:  1
+```
+
+This strengthens the current supported-envelope interpretation:
+
+```text
+|S| <= 2 full-smooth sampled targets:
+  native C++ fixed-sp normal-equation solve matched mgcv oracle under strict
+  residual and p-value tolerances with zero guarded fallback.
+
+|S| >= 3 additive sampled targets:
+  high-condition guardrails are frequently required. The fail-closed fallback
+  policy preserves strict residual/p-value parity and decisions, but native
+  normal-equation solve is not yet a production substitute for mgcv C_magic in
+  this deeper additive envelope.
+```
+
 #### Gate before production use
 
 ```text
@@ -1250,14 +1327,25 @@ fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_guarded_expanded_v1 exists
 decision_flip_count = 0
 fallback_count = 19 high-condition targets
 status: guarded shadow pass; still not production
+
+fastkpc/artifacts/mgcv_residual_cpp_numeric_shadow_guarded_expanded_wide_v1 exists
+116 / 116 expanded extracted setups supported
+116 / 116 residual pairs match under strict tolerance
+116 / 116 dCov p-values match under strict tolerance
+decision_flip_count = 0
+fallback_count = 52 high-condition targets
+|S|<=2 fallback_count = 0
+|S|>=3 fallback_count = 52
+status: wider guarded shadow pass; still not production
 ```
 
 Next Phase 3 step:
 
 ```text
-expand the guarded native C++ fixed-sp residual shadow across a larger
-full-skeleton sample and decide whether to keep the high-condition fallback
-policy or implement a closer mgcv-equivalent C++ solve kernel
+use the wider guarded shadow evidence to define a stricter supported envelope:
+native C++ fixed-sp solve is promising for sampled |S|<=2 full-smooth cases,
+while |S|>=3 additive cases currently require high-condition fallback or a
+closer mgcv-equivalent C++ solve kernel
 ```
 
 ### 8.4 Continue dCov backend improvement separately
