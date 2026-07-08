@@ -3098,6 +3098,9 @@ scope:
   applies labels to adjacency and pMax
   records compatible_cuda_facade = TRUE
   records compatible_cuda_entrypoint = fastkpc-compatible-cuda-skeleton
+  records compatible_cuda_route = legacy-mgcv-provider-native-legacy-dcov
+  records compatible_cuda_residual_authority = legacy-mgcv-regrXonS-provider
+  records compatible_cuda_ci_authority = native-legacy-dcov.gamma
   preserves native_entrypoint = legacy-mgcv-legacy-dcov-native
 
 gate:
@@ -3150,6 +3153,15 @@ FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_CASES=hot8 \
   Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_real_subset.R
 ```
 
+To validate the experimental compatible CUDA facade on the same real subset:
+
+```bash
+FASTKPC_RUN_REAL_SUBSET_TESTS=1 \
+FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_CASES=hot8 \
+FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_ROUTE=facade \
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_real_subset.R
+```
+
 Coverage:
 
 ```text
@@ -3161,6 +3173,21 @@ n.edgetests identical to explicit residual-provider native route
 pMax max abs diff < 1e-12 on finite entries
 legacy dCov native task count preserved
 summary records residual_provider_hidden = TRUE
+```
+
+Facade hot8 checkpoint:
+
+```text
+route = facade
+scenario = hot8
+p = 8
+residual provider requests = 224
+adjacency identical to explicit provider route = TRUE
+n.edgetests identical to explicit provider route = TRUE
+summary compatible_cuda_facade = TRUE
+summary compatible_cuda_route = legacy-mgcv-provider-native-legacy-dcov
+summary legacy_dcov_native_batch_enabled = TRUE
+status: real 351-row subset facade gate pass; still not full 351x48
 ```
 
 Decision:

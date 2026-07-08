@@ -25,6 +25,12 @@ if (!file.exists(real_path)) {
 }
 
 Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra")
+route <- Sys.getenv(
+  "FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_ROUTE",
+  unset = "wrapper"
+)
+assert_true(route %in% c("wrapper", "facade"),
+            "real subset route must be wrapper or facade")
 
 compare_sepsets <- function(left, right) {
   if (length(left) != length(right)) return(FALSE)
@@ -104,19 +110,35 @@ run_scenario <- function(name, scenario) {
     trace_level = "summary"
   )
 
-  one_call <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
-    data = data,
-    alpha = alpha,
-    max_conditioning_size = max_conditioning_size,
-    index = index,
-    numCol = numCol,
-    trace_level = "summary"
-  )
+  one_call <- if (identical(route, "facade")) {
+    fastkpc_compatible_cuda_skeleton(
+      data = data,
+      alpha = alpha,
+      labels = colnames(data),
+      options = list(
+        max_conditioning_size = max_conditioning_size,
+        index = index,
+        numCol = numCol,
+        trace_level = "summary",
+        dcov_batch = "level"
+      )
+    )
+  } else {
+    precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
+      data = data,
+      alpha = alpha,
+      max_conditioning_size = max_conditioning_size,
+      index = index,
+      numCol = numCol,
+      trace_level = "summary"
+    )
+  }
 
   prefix <- paste0("real subset ", name, " one-call")
-  assert_true(identical(one_call$adjacency, explicit$adjacency),
+  assert_true(identical(unname(one_call$adjacency), unname(explicit$adjacency)),
               paste(prefix, "adjacency should match explicit provider"))
-  assert_true(pmax_max_abs_diff(one_call$pMax, explicit$pMax) < 1e-12,
+  assert_true(pmax_max_abs_diff(unname(one_call$pMax),
+                                unname(explicit$pMax)) < 1e-12,
               paste(prefix, "pMax should match explicit provider"))
   assert_true(identical(as.integer(one_call$n.edgetests),
                         as.integer(explicit$n.edgetests)),
@@ -136,10 +158,32 @@ run_scenario <- function(name, scenario) {
               paste(prefix, "should record its entrypoint"))
   assert_true(isTRUE(one_call$summary$residual_provider_hidden),
               paste(prefix, "should report hidden residual-provider seam"))
+  if (identical(route, "facade")) {
+    assert_true(isTRUE(one_call$summary$compatible_cuda_facade),
+                paste(prefix, "facade route should report compatible CUDA facade"))
+    assert_true(identical(one_call$summary$compatible_cuda_route,
+                          "legacy-mgcv-provider-native-legacy-dcov"),
+                paste(prefix, "facade route should record compatible CUDA route"))
+    assert_true(identical(one_call$summary$compatible_cuda_residual_authority,
+                          "legacy-mgcv-regrXonS-provider"),
+                paste(prefix, "facade route should record residual authority"))
+    assert_true(identical(one_call$summary$compatible_cuda_ci_authority,
+                          "native-legacy-dcov.gamma"),
+                paste(prefix, "facade route should record CI authority"))
+    assert_true(isTRUE(one_call$summary$legacy_dcov_native_batch_enabled),
+                paste(prefix, "facade route should pass dcov_batch='level'"))
+    assert_true(identical(rownames(one_call$adjacency), colnames(data)) &&
+                  identical(colnames(one_call$adjacency), colnames(data)),
+                paste(prefix, "facade route should label adjacency"))
+    assert_true(identical(rownames(one_call$pMax), colnames(data)) &&
+                  identical(colnames(one_call$pMax), colnames(data)),
+                paste(prefix, "facade route should label pMax"))
+  }
 
   cat(sprintf(
-    "PASS skeleton native legacy mgcv legacy dCov real subset %s p=%d requests=%d\n",
+    "PASS skeleton native legacy mgcv legacy dCov real subset %s route=%s p=%d requests=%d\n",
     name,
+    route,
     ncol(data),
     as.integer(provider_counts$request_count)
   ))

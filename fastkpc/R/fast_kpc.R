@@ -86,6 +86,11 @@ fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
   result$summary$compatible_cuda_facade <- TRUE
   result$summary$compatible_cuda_entrypoint <-
     "fastkpc-compatible-cuda-skeleton"
+  result$summary$compatible_cuda_route <-
+    "legacy-mgcv-provider-native-legacy-dcov"
+  result$summary$compatible_cuda_residual_authority <-
+    "legacy-mgcv-regrXonS-provider"
+  result$summary$compatible_cuda_ci_authority <- "native-legacy-dcov.gamma"
   result$summary$labels <- labels
   result
 }

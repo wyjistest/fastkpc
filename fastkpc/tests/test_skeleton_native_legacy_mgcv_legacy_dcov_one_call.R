@@ -178,6 +178,15 @@ assert_true(isTRUE(facade$summary$compatible_cuda_facade),
 assert_true(identical(facade$summary$compatible_cuda_entrypoint,
                       "fastkpc-compatible-cuda-skeleton"),
             "compatible CUDA facade should record the proposed API entrypoint")
+assert_true(identical(facade$summary$compatible_cuda_route,
+                      "legacy-mgcv-provider-native-legacy-dcov"),
+            "compatible CUDA facade should record the experimental route")
+assert_true(identical(facade$summary$compatible_cuda_residual_authority,
+                      "legacy-mgcv-regrXonS-provider"),
+            "compatible CUDA facade should record residual authority")
+assert_true(identical(facade$summary$compatible_cuda_ci_authority,
+                      "native-legacy-dcov.gamma"),
+            "compatible CUDA facade should record CI authority")
 assert_true(identical(facade$summary$native_entrypoint,
                       "legacy-mgcv-legacy-dcov-native"),
             "compatible CUDA facade should preserve native entrypoint metadata")
