@@ -1077,6 +1077,54 @@ target residual and records parity diagnostics. It verifies that the `|S|<=2`
 native envelope can be exercised inside the legacy scheduler without changing
 canonical replay on a small skeleton. It is not a full 351x48 gate.
 
+Real 351x48 subset guarded residual shadow artifact:
+
+```text
+fastkpc/artifacts/legacy_mgcv_residual_cpp_shadow_real_subset_v1
+```
+
+Status:
+
+```text
+status: created
+mode: full legacy-parallel skeleton shadow, not authoritative
+data: real 351x48 fixture, 8 hot-column subset
+columns: 1,2,3,4,5,6,9,12
+n / p: 351 / 8
+alpha: 0.1
+max_conditioning_size: 2
+num_cores: 2
+dCov backend: C++ Spectra
+residual authority: legacy regrXonS / mgcv
+shadow solver: cpp_guarded
+native_s_size_limit: 2
+condition_threshold: 1e300
+
+adjacency_identical: TRUE
+n.edgetests_identical: TRUE
+baseline_n.edgetests: 55,274,357
+shadow_n.edgetests:   55,274,357
+baseline_edge_count: 16
+shadow_edge_count:   16
+
+residual_request_count: 1262
+shadow_count: 1262
+native_count: 1262
+fallback_count: 0
+high_condition_fallback_count: 0
+outside_envelope_fallback_count: 0
+error_count: 0
+residual_mismatch_count: 0
+max_abs_diff: 2.103081e-10
+max_rel_l2: 1.145284e-10
+elapsed_ms: 47348
+```
+
+This is the first real-data full-route guarded residual shadow. It validates
+the `|S|<=2` native C++ fixed-sp residual replay envelope inside the legacy
+scheduler on a real 351-row subset while preserving canonical replay and graph
+output. It is still a subset gate, not the full 351x48 acceptance gate.
+
 #### Gate before production use
 
 ```text
@@ -1483,13 +1531,25 @@ fallback_count = 0
 error_count = 0
 residual_mismatch_count = 0
 status: synthetic full-route shadow pass; still not production
+
+fastkpc/artifacts/legacy_mgcv_residual_cpp_shadow_real_subset_v1 exists
+real 351x48 fixture, 8 hot-column subset
+adjacency identical = TRUE
+n.edgetests identical = TRUE
+1262 / 1262 residual shadow targets matched
+native_count = 1262
+fallback_count = 0
+error_count = 0
+residual_mismatch_count = 0
+status: real subset full-route shadow pass; still not production
 ```
 
 Next Phase 3 step:
 
 ```text
-run the guarded residual shadow on a real 351x48 subset, then on the full
-351x48 compatible skeleton. Promotion requires canonical replay to remain
+expand the guarded residual shadow from the 8-column real subset to a larger
+real subset that includes |S|>2 fallback traffic, then run the full 351x48
+compatible skeleton shadow. Promotion requires canonical replay to remain
 unchanged and all shadow-supported residual targets to match without errors or
 decision drift. The route remains shadow-only until that gate passes.
 ```
