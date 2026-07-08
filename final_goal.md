@@ -2845,6 +2845,62 @@ with the mgcv-compatible residual executor/provider path, and then replace the
 exact dCov helper with the legacy-compatible dCov gamma C++/CUDA data plane.
 ```
 
+### Native residual-provider + exact-dCov checkpoint
+
+The next C++ host boundary replaces native linear residualization with a
+residual provider seam that can supply legacy mgcv/regrXonS residuals while
+keeping p-value generation inside native C++:
+
+```text
+precision_run_skeleton_residual_provider_native()
+```
+
+Status:
+
+```text
+status: targeted one-call host-control + mgcv residual-provider + native CI gate
+scope:
+  C++ owns complete graph initialization
+  C++ owns skeleton level loop through max_conditioning_size = 1
+  C++ generates each level with make_layer_plan()
+  C++ enumerates unique target|S residual requests per level
+  R residual provider supplies legacy mgcv/regrXonS residual vectors
+  C++ computes exact dCov p-values from those residuals
+  C++ replays deletion / ignored-after-delete / pMax / sepsets
+```
+
+Gate:
+
+```text
+Rscript fastkpc/tests/test_skeleton_native_residual_provider_exact_dcov.R
+```
+
+Coverage:
+
+```text
+real-valued data
+max_conditioning_size = 1
+legacy mgcv/regrXonS residual authority via provider
+unique target|S residual request table exercised
+native exact dCov p-value generation exercised
+adjacency identical to R residual-provider + exact-dCov reference replay
+sepsets identical to R residual-provider + exact-dCov reference replay
+n.edgetests identical to R residual-provider + exact-dCov reference replay
+pMax max abs diff < 1e-10
+```
+
+Decision:
+
+```text
+This restores mgcv-compatible residual authority behind the native one-call
+skeleton boundary while keeping p-value generation in native C++. It is still
+not the final compatible route because the CI backend is native exact dCov, not
+the legacy-compatible lowrank dcov.gamma C++/CUDA backend. The next Phase 5
+boundary must replace exact dCov with the legacy-compatible dCov gamma data
+plane while preserving native skeleton control and the residual-provider
+request contract.
+```
+
 ### CUDA responsibilities
 
 ```text
