@@ -4310,11 +4310,39 @@ For a promotable full gate, filtering out tiny fragmented batches must not hide
 most of the dCov workload from the batch route; coverage and wall time have to
 be evaluated together.
 
+Min-size sweep artifact runner:
+
+```text
+fastkpc/R/legacy_dcov_cpp_batch_min_size_artifact.R
+```
+
+It runs the current unbatched C++ dCov recommended-compatible reference and
+then a list of `FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE` candidate values
+for either `FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=round` or `chunk`. It writes:
+
+```text
+summary.csv
+runtime_by_level.csv
+result.rds
+summary.md
+```
+
+Full-gate shape:
+
+```bash
+Rscript -e 'source("fastkpc/R/legacy_dcov_cpp_batch_min_size_artifact.R"); fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact(output_dir = "fastkpc/artifacts/legacy_dcov_cpp_batch_round_min_size_sweep_v1", artifact_name = "legacy_dcov_cpp_batch_round_min_size_sweep_v1", batch_mode = "round", min_sizes = c(1L, 4L, 8L, 16L, 32L, 64L), alpha = 0.1, max_conditioning_size = 46L)'
+```
+
+The full artifact should compare elapsed time, SHD, n.edgetests, batch
+coverage, skipped ratio, mean/max batch size, and by-level coverage before any
+min-size policy is considered for promotion.
+
 Gate:
 
 ```bash
 Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_batch_oracle.R
 Rscript fastkpc/tests/test_precision_compatible_legacy_dcov_cpp_backend.R
+Rscript fastkpc/tests/test_legacy_dcov_cpp_batch_min_size_artifact.R
 ```
 
 Next implementation target:
