@@ -3729,6 +3729,46 @@ decision:
   and full 351x48 still needs a dedicated artifact before any recommendation.
 ```
 
+Canonical native legacy dCov batch full 351x48 gate:
+
+```text
+artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_canonical_dcov_batch_full_351x48_v1
+
+route:
+  fastkpc_compatible_cuda_skeleton()
+  dcov_batch = canonical
+  low_rank = spectra
+  reference_result_path =
+    fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/
+    compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds
+
+timeout policy:
+  candidate_timeout_sec = 900
+
+reference:
+  reference_source = rds
+  reference_edge_count = 110
+  reference_n.edgetests = 2213,52659,125293,40694,13293,5422,835,80
+
+result:
+  run_status = timeout
+  timeout = TRUE
+  elapsed_sec = 900.001
+  progress.csv has reference start/complete, facade start, and facade timeout
+  summary.csv / result.rds / summary.md were written
+  correctness fields are NA because the candidate did not complete
+  no matching long-running candidate Rscript remained after timeout inspection
+
+decision:
+  Canonical native dCov batch is not a full 351x48 promotion candidate. It
+  improves the hot12 subset by avoiding ignored dCov tasks, but the full facade
+  still cannot finish inside the current recommended S-affinity route's wall-time
+  envelope. Do not continue optimizing this as a global full-route candidate
+  without a structural reduction in the hidden R residual-provider boundary or
+  the native dCov batch critical path.
+```
+
 ### Gate
 
 ```text
