@@ -287,7 +287,11 @@ cache_required <- c(
   "component_miss_count",
   "component_cross_batch_hit_count",
   "component_eviction_count",
-  "component_level_entry_count_max"
+  "component_level_entry_count_max",
+  "component_distance_ms",
+  "component_lowrank_ms",
+  "component_moment_ms",
+  "component_unaccounted_ms"
 )
 cache_missing_fields <- setdiff(cache_required, names(cache_progress))
 assert_true(length(cache_missing_fields) == 0L,
@@ -308,5 +312,20 @@ assert_true(
     as.integer(summary$legacy_dcov_native_cuda_lowrank_component_cache_level_max_entries[[1L]]),
   "native CUDA lowrank cache progress should expose bounded level entry count"
 )
+cache_component_stage_ms <- c(
+  distance = sum(cache_batches$component_distance_ms),
+  lowrank = sum(cache_batches$component_lowrank_ms),
+  moment = sum(cache_batches$component_moment_ms),
+  unaccounted = sum(cache_batches$component_unaccounted_ms)
+)
+assert_true(all(is.finite(cache_component_stage_ms)),
+            "native CUDA lowrank cache progress component stage timings should be finite")
+assert_true(all(cache_component_stage_ms >= 0),
+            "native CUDA lowrank cache progress component stage timings should be non-negative")
+assert_true(cache_component_stage_ms[["lowrank"]] > 0,
+            "native CUDA lowrank cache progress should expose positive lowrank timing")
+assert_true(sum(cache_component_stage_ms) <=
+              sum(cache_batches$component_total_ms) * 1.05,
+            "native CUDA lowrank cache progress stage timings should fit within component total")
 
 cat("PASS compatible CUDA skeleton native cuda_spectra lowrank\n")

@@ -7620,6 +7620,60 @@ decision:
   full-route promotion.
 ```
 
+Native cuda_spectra progress component-stage timing checkpoint:
+
+```text
+change:
+  extend native_lowrank_component_cache_progress.csv so each component-cache
+  batch progress row includes the same stage split already available in the
+  final native summary:
+
+    component_distance_ms
+    component_lowrank_ms
+    component_moment_ms
+    component_unaccounted_ms
+
+  This is diagnostics only. It does not change residual authority, dCov
+  authority, component-cache behavior, fallback policy, p-value order,
+  skeleton decisions, sepsets, or canonical replay.
+
+TDD gate:
+  RED:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+    failed at:
+      native CUDA lowrank cache progress missing component_distance_ms
+
+  GREEN:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+    result:
+      built: fastkpc/build/fastkpc_cuda.so
+      PASS compatible CUDA skeleton native cuda_spectra lowrank
+
+fresh regression result:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+
+    PASS legacy dCov CUDA lowrank gamma parity cases=6
+    max_p_diff = 4e-15
+    max_nV2_diff = 5.68e-14
+
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+    PASS compatible CUDA skeleton artifact
+
+decision:
+  Timeout/progress artifacts can now attribute component-stage cost even when
+  a long native cuda_spectra full-route run does not reach the final summary.
+  This is not a native cuda_spectra route promotion. The full 351x48 CUDA gate
+  remains open until the one-call route returns edge_count = 110 / 110, SHD =
+  0, n.edgetests exact = TRUE, no unexplained fallback, and materially better
+  wall time than the current compatible CPU/C++ route.
+```
+
 ---
 
 ## 9. Final success definition

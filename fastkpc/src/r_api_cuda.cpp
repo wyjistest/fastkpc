@@ -1176,6 +1176,10 @@ void append_native_cuda_lowrank_component_cache_progress(
     int component_level_entry_count_max,
     int component_count,
     double component_total_ms,
+    double component_distance_ms,
+    double component_lowrank_ms,
+    double component_moment_ms,
+    double component_unaccounted_ms,
     double component_eig_ms,
     double combine_ms,
     double elapsed_ms) {
@@ -1193,7 +1197,10 @@ void append_native_cuda_lowrank_component_cache_progress(
         << "component_miss_count,component_entry_count,"
         << "component_cross_batch_hit_count,component_eviction_count,"
         << "component_level_entry_count_max,component_count,"
-        << "component_total_ms,component_eig_ms,combine_ms,elapsed_ms\n";
+        << "component_total_ms,component_distance_ms,"
+        << "component_lowrank_ms,component_moment_ms,"
+        << "component_unaccounted_ms,component_eig_ms,combine_ms,"
+        << "elapsed_ms\n";
   }
   out << wall_epoch_ms_now() << ","
       << native_progress_pid() << ","
@@ -1211,6 +1218,10 @@ void append_native_cuda_lowrank_component_cache_progress(
       << component_level_entry_count_max << ","
       << component_count << ","
       << std::setprecision(17) << component_total_ms << ","
+      << component_distance_ms << ","
+      << component_lowrank_ms << ","
+      << component_moment_ms << ","
+      << component_unaccounted_ms << ","
       << component_eig_ms << ","
       << combine_ms << ","
       << elapsed_ms << "\n";
@@ -6317,6 +6328,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
                 batch_run.component_cache_level_entry_count_max,
                 batch_run.component_count,
                 batch_run.component_total_ms,
+                batch_run.component_distance_ms,
+                batch_run.component_lowrank_ms,
+                batch_run.component_moment_ms,
+                batch_run.component_unaccounted_ms,
                 batch_run.component_eig_ms,
                 batch_run.combine_ms,
                 elapsed_ms_since(level_start));
