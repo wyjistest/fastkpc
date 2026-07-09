@@ -3456,20 +3456,26 @@ residual_provider_mgcv_cpp_backend_ms
 residual_provider_mgcv_cpp_backend_native_solve_ms
 ```
 
-Full 351x48 attempt status:
+Full 351x48 watchdog gate status:
 
 ```text
-status: attempted, no completed artifact
+status: completed timeout artifact
+artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_full_351x48_v1
 reference: loaded from legacy_mgcv_residual_cache_s_affinity_v1 result.rds
 reference_source: rds
+reference_edge_count: 110
+reference_n.edgetests: 2213,52659,125293,40694,13293,5422,835,80
 candidate: fastkpc_compatible_cuda_skeleton() facade
 candidate route: legacy-mgcv-provider-native-legacy-dcov
+candidate_timeout_sec: 1800
 attempt result:
-  candidate exceeded the current recommended S-affinity wall-time baseline
-  before producing a completed summary
-  process remained CPU-bound and was stopped after the performance gate was
-  already failed
-artifact files written: none
+  run_status = timeout
+  timeout = TRUE
+  elapsed_sec = 1800
+  progress.csv has reference start/complete, facade start, and facade timeout
+  summary.csv / result.rds / summary.md were written
+  correctness fields are NA because the candidate did not complete
 
 decision:
   current facade is a useful API-shape and subset-correctness checkpoint, but
@@ -3525,6 +3531,32 @@ elapsed_sec = 5
 reference_edge_count = 110
 reference_n.edgetests = 2213,52659,125293,40694,13293,5422,835,80
 progress.csv has facade timeout row
+```
+
+Follow-up full run with the Unix child-process watchdog:
+
+```text
+artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_full_351x48_v1
+
+candidate_timeout_sec = 1800
+run_status = timeout
+timeout = TRUE
+elapsed_sec = 1800
+reference_source = rds
+reference_edge_count = 110
+reference_n.edgetests = 2213,52659,125293,40694,13293,5422,835,80
+progress.csv has facade timeout row at 1800 sec
+summary.csv / result.rds / summary.md were written
+no matching Rscript child processes remained after timeout
+
+decision:
+  the watchdog now makes the full 351x48 facade gate auditable, but the facade
+  remains non-promotable. It fails the wall-time gate and does not produce a
+  completed skeleton for SHD / n.edgetests comparison inside the 1800 sec
+  budget. Phase 5 still requires moving residual generation, batching, and the
+  full compatible skeleton route behind the native/CUDA boundary before
+  promotion.
 ```
 
 ### Gate
