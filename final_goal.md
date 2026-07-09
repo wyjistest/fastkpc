@@ -5161,11 +5161,53 @@ targeted gate:
   Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
   Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
 
+full 351x48 artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_threaded_round_dcov_direct_input_full_351x48_v1
+
+full result:
+  run_status:          ok
+  elapsed_sec:         610.966
+  edge_count:          110 / 110
+  SHD:                 0
+  n.edgetests exact:   TRUE
+  pMax max abs diff:   0
+
+  residual provider:
+    request_count:     132,908
+    total_ms:          328,535.6
+    parallel_cores:    20
+
+  native dCov:
+    count:             240,489
+    batch_count:       4,060
+    pair_count:        240,489
+    threaded:          TRUE
+    threads:           20
+    direct_input:      TRUE
+    materialize_cols:  0
+    materialize_ms:    567.212
+    batch_call_ms:     278,963.4
+
+comparison:
+  previous threaded round elapsed_sec:        592.259
+  direct-input threaded round elapsed_sec:    610.966
+  previous materialize_cols:                  480,978
+  direct-input materialize_cols:              0
+  previous materialize_ms:                    1,172.203
+  direct-input materialize_ms:                567.212
+  previous batch_call_ms:                     258,190.6
+  direct-input batch_call_ms:                 278,963.4
+
 status:
-  implemented as a native data-plane cleanup. It preserves the existing scalar
-  C++ legacy dCov authority, native batch replay semantics, residual authority,
-  and env gates. A new full 351x48 artifact is still required before claiming
-  wall-time improvement over the current threaded round checkpoint.
+  implemented and correctness-clean as a native data-plane cleanup. It removes
+  host batch matrix column materialization from the native one-call batch path,
+  while preserving the existing scalar C++ legacy dCov authority, native batch
+  replay semantics, residual authority, and env gates.
+
+  It does not supersede the previous threaded round wall-time checkpoint:
+  materialization drops, but batch call time rises in this full run and elapsed
+  regresses from 592.259s to 610.966s. Treat this as useful substrate cleanup,
+  not as a new promotion or performance recommendation.
 ```
 
 ---
