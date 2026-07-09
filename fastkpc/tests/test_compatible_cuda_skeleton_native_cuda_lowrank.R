@@ -30,6 +30,18 @@ if (!isTRUE(fastkpc_cuda_available())) {
   quit(save = "no", status = 0)
 }
 
+old_cuda_lowrank_threads <- Sys.getenv("FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS",
+                                       unset = NA_character_)
+Sys.setenv(FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS = "2")
+on.exit({
+  if (is.na(old_cuda_lowrank_threads)) {
+    Sys.unsetenv("FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS")
+  } else {
+    Sys.setenv(FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS =
+                 old_cuda_lowrank_threads)
+  }
+}, add = TRUE)
+
 set.seed(261901)
 n <- 54L
 z1 <- stats::runif(n, -2, 2)
@@ -72,7 +84,9 @@ required <- c(
   "legacy_dcov_native_cuda_lowrank_backend_fallback_count",
   "legacy_dcov_native_cuda_lowrank_backend_converged_count",
   "legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count",
-  "legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max"
+  "legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max",
+  "legacy_dcov_native_batch_parallel_enabled",
+  "legacy_dcov_native_batch_parallel_threads"
 )
 missing_fields <- setdiff(required, names(summary))
 assert_true(length(missing_fields) == 0L,
@@ -117,6 +131,10 @@ assert_true(identical(
   as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max[[1L]]),
   0
 ), "native CUDA lowrank backend should not re-upload matrices during compute")
+assert_true(isTRUE(summary$legacy_dcov_native_batch_parallel_enabled[[1L]]),
+            "native CUDA lowrank batch should enable host pair parallelism")
+assert_true(as.integer(summary$legacy_dcov_native_batch_parallel_threads[[1L]]) >= 2L,
+            "native CUDA lowrank batch should report requested host threads")
 
 progress <- utils::read.csv(candidate$paths$native_progress_csv,
                             check.names = FALSE)

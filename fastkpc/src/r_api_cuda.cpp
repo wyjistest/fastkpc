@@ -22,6 +22,7 @@
 #include <Spectra/MatOp/DenseSymMatProd.h>
 #include <Spectra/SymEigsSolver.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -31,8 +32,10 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #ifdef _WIN32
 #include <process.h>
@@ -586,6 +589,18 @@ int native_legacy_cuda_lowrank_progress_interval() {
   if (raw == nullptr) return 256;
   const int value = std::atoi(raw);
   return value > 0 ? value : 256;
+}
+
+int native_legacy_cuda_lowrank_batch_threads(int batch_size) {
+  const char* raw = std::getenv("FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS");
+  if (raw == nullptr) return 1;
+  const int requested = std::atoi(raw);
+  if (requested <= 1 || batch_size <= 1) return 1;
+  const unsigned int hardware = std::thread::hardware_concurrency();
+  const int hardware_limit = hardware > 0
+    ? static_cast<int>(hardware)
+    : requested;
+  return std::max(1, std::min(batch_size, std::min(requested, hardware_limit)));
 }
 
 void append_native_legacy_progress(
@@ -5461,6 +5476,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         if (legacy_dcov_native_cuda_lowrank_metrics.enabled) {
           double pair_total_ms = 0.0;
           double eig_ms = 0.0;
+          const int cuda_lowrank_batch_threads =
+            native_legacy_cuda_lowrank_batch_threads(batch_size);
+          const bool cuda_lowrank_batch_parallel_enabled =
+            cuda_lowrank_batch_threads > 1;
           auto append_cuda_lowrank_progress =
             [&](const std::string& event,
                 int completed_pairs,
@@ -5485,29 +5504,96 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
             legacy_dcov_native_count,
             0.0);
           try {
+            std::vector<LegacyDcovCudaLowrankGammaRun> runs(
+              static_cast<std::size_t>(batch_size));
+            if (cuda_lowrank_batch_parallel_enabled) {
+              std::atomic<int> completed_in_batch(0);
+              std::mutex error_mutex;
+              std::mutex progress_mutex;
+              std::string first_error;
+              auto worker = [&](int thread_id) {
+                for (int i = thread_id; i < batch_size;
+                     i += cuda_lowrank_batch_threads) {
+                  {
+                    std::lock_guard<std::mutex> lock(error_mutex);
+                    if (!first_error.empty()) return;
+                  }
+                  try {
+                    runs[static_cast<std::size_t>(i)] =
+                      legacy_dcov_cuda_lowrank_gamma_compute(
+                        x_columns[static_cast<std::size_t>(i)],
+                        y_columns[static_cast<std::size_t>(i)],
+                        n,
+                        num_col,
+                        index,
+                        legacy_dcov_native_cuda_lowrank_ncv,
+                        legacy_dcov_native_cuda_lowrank_tol,
+                        legacy_dcov_native_cuda_lowrank_maxitr);
+                    const int completed =
+                      completed_in_batch.fetch_add(1) + 1;
+                    if ((completed %
+                         legacy_dcov_native_cuda_lowrank_progress_interval) == 0 ||
+                        completed == batch_size) {
+                      std::lock_guard<std::mutex> lock(progress_mutex);
+                      append_cuda_lowrank_progress(
+                        "dcov_cuda_lowrank_pair_progress",
+                        legacy_dcov_native_count + completed,
+                        elapsed_ms_since(batch_call_start));
+                    }
+                  } catch (const std::exception& error) {
+                    std::lock_guard<std::mutex> lock(error_mutex);
+                    if (first_error.empty()) first_error = error.what();
+                    return;
+                  } catch (...) {
+                    std::lock_guard<std::mutex> lock(error_mutex);
+                    if (first_error.empty()) {
+                      first_error =
+                        "native CUDA lowrank threaded batch failed";
+                    }
+                    return;
+                  }
+                }
+              };
+              std::vector<std::thread> threads;
+              threads.reserve(
+                static_cast<std::size_t>(cuda_lowrank_batch_threads));
+              for (int thread_id = 0;
+                   thread_id < cuda_lowrank_batch_threads;
+                   ++thread_id) {
+                threads.emplace_back(worker, thread_id);
+              }
+              for (std::thread& thread : threads) thread.join();
+              if (!first_error.empty()) Rcpp::stop(first_error);
+            } else {
+              for (int i = 0; i < batch_size; ++i) {
+                runs[static_cast<std::size_t>(i)] =
+                  legacy_dcov_cuda_lowrank_gamma_compute(
+                    x_columns[static_cast<std::size_t>(i)],
+                    y_columns[static_cast<std::size_t>(i)],
+                    n,
+                    num_col,
+                    index,
+                    legacy_dcov_native_cuda_lowrank_ncv,
+                    legacy_dcov_native_cuda_lowrank_tol,
+                    legacy_dcov_native_cuda_lowrank_maxitr);
+                const int completed_pairs = legacy_dcov_native_count + i + 1;
+                if (((i + 1) %
+                     legacy_dcov_native_cuda_lowrank_progress_interval) == 0 ||
+                    i + 1 == batch_size) {
+                  append_cuda_lowrank_progress(
+                    "dcov_cuda_lowrank_pair_progress",
+                    completed_pairs,
+                    elapsed_ms_since(batch_call_start));
+                }
+              }
+            }
             for (int i = 0; i < batch_size; ++i) {
-              const LegacyDcovCudaLowrankGammaRun run =
-                legacy_dcov_cuda_lowrank_gamma_compute(
-                  x_columns[static_cast<std::size_t>(i)],
-                  y_columns[static_cast<std::size_t>(i)],
-                  n,
-                  num_col,
-                  index,
-                  legacy_dcov_native_cuda_lowrank_ncv,
-                  legacy_dcov_native_cuda_lowrank_tol,
-                  legacy_dcov_native_cuda_lowrank_maxitr);
+              const LegacyDcovCudaLowrankGammaRun& run =
+                runs[static_cast<std::size_t>(i)];
               batch_pvalues[i] = run.p_value;
               pair_total_ms += run.total_ms;
               eig_ms += run.eig_ms;
               accumulate_native_cuda_lowrank_run(run);
-              const int completed_pairs = legacy_dcov_native_count + i + 1;
-              if (((i + 1) % legacy_dcov_native_cuda_lowrank_progress_interval) == 0 ||
-                  i + 1 == batch_size) {
-                append_cuda_lowrank_progress(
-                  "dcov_cuda_lowrank_pair_progress",
-                  completed_pairs,
-                  elapsed_ms_since(batch_call_start));
-              }
             }
           } catch (...) {
             legacy_dcov_native_cuda_lowrank_metrics.error_count += 1;
@@ -5523,6 +5609,12 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
           legacy_dcov_native_ms += pair_total_ms;
           legacy_dcov_native_batch_count += 1;
           legacy_dcov_native_batch_pair_count += batch_size;
+          legacy_dcov_native_batch_parallel_enabled =
+            legacy_dcov_native_batch_parallel_enabled ||
+            cuda_lowrank_batch_parallel_enabled;
+          legacy_dcov_native_batch_parallel_threads = std::max(
+            legacy_dcov_native_batch_parallel_threads,
+            cuda_lowrank_batch_threads);
           legacy_dcov_native_batch_ms += call_ms;
           legacy_dcov_native_batch_lowrank_ms += eig_ms;
           legacy_dcov_native_batch_lowrank_eig_ms += eig_ms;
