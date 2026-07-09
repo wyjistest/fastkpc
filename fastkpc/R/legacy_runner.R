@@ -313,7 +313,11 @@ fastkpc_legacy_append_progress <- function(
     task_count = NA_integer_, worker_count = NA_integer_,
     dcov_backend = NA_character_, dcov_lowrank = NA_character_,
     elapsed_sec = NA_real_, n_edgetests = NA_integer_,
-    remaining_edges = NA_real_, message = NA_character_) {
+    remaining_edges = NA_real_, chunk_id = NA_integer_,
+    chunk_size = NA_integer_, edge_index = NA_integer_,
+    completed_edges = NA_integer_, ci_calls = NA_integer_,
+    residual_ms = NA_real_, dcov_ms = NA_real_,
+    message = NA_character_) {
   path <- fastkpc_legacy_progress_path()
   if (!nzchar(path)) return(invisible(FALSE))
   dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
@@ -328,6 +332,13 @@ fastkpc_legacy_append_progress <- function(
     elapsed_sec = as.numeric(elapsed_sec),
     n_edgetests = as.integer(n_edgetests),
     remaining_edges = as.numeric(remaining_edges),
+    chunk_id = as.integer(chunk_id),
+    chunk_size = as.integer(chunk_size),
+    edge_index = as.integer(edge_index),
+    completed_edges = as.integer(completed_edges),
+    ci_calls = as.integer(ci_calls),
+    residual_ms = as.numeric(residual_ms),
+    dcov_ms = as.numeric(dcov_ms),
     pid = Sys.getpid(),
     message = message,
     timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S %z"),
@@ -6542,8 +6553,27 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           !isTRUE(mgcv_residual_prefetch_level_enabled) &&
           ord > 0L
       res_chunks <- parallel::mclapply(
-        schedule$chunks, function(chunk) {
+        seq_along(schedule$chunks), function(chunk_idx) {
+          chunk <- schedule$chunks[[chunk_idx]]
           worker_start <- proc.time()[["elapsed"]]
+          fastkpc_legacy_append_progress(
+            event = "chunk_start",
+            level = ord,
+            edge_count = sum(G) / 2,
+            task_count = length(chunk),
+            worker_count = workers,
+            dcov_backend = dcov_backend,
+            dcov_lowrank = dcov_cpp_lowrank_mode,
+            elapsed_sec = worker_start - total_start,
+            n_edgetests = NA_integer_,
+            remaining_edges = sum(G) / 2,
+            chunk_id = chunk_idx,
+            chunk_size = length(chunk),
+            completed_edges = 0L,
+            ci_calls = 0L,
+            residual_ms = 0,
+            dcov_ms = 0
+          )
           prefill <- if (isTRUE(same_s_prefill_chunk_enabled)) {
             fastkpc_legacy_mgcv_cpp_same_s_prefill_chunk(
               chunk = chunk,
@@ -6566,8 +6596,40 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
                              isTRUE(dcov_cpp_batch_chunk_enabled)) {
             edge_test_chunk_same_s(chunk)
           } else {
+            chunk_results <- vector("list", length(chunk))
+            chunk_progress_metrics <- fastkpc_legacy_runtime_zero()
+            chunk_ci_calls <- 0L
+            for (chunk_pos in seq_along(chunk)) {
+              result <- edge_test(chunk[[chunk_pos]])
+              chunk_results[[chunk_pos]] <- result
+              chunk_progress_metrics <- fastkpc_legacy_runtime_add(
+                chunk_progress_metrics, result[[9L]]
+              )
+              chunk_ci_calls <- chunk_ci_calls + as.integer(result[[5L]])
+              fastkpc_legacy_append_progress(
+                event = "edge_complete",
+                level = ord,
+                edge_count = sum(G) / 2,
+                task_count = length(chunk),
+                worker_count = workers,
+                dcov_backend = dcov_backend,
+                dcov_lowrank = dcov_cpp_lowrank_mode,
+                elapsed_sec = proc.time()[["elapsed"]] - total_start,
+                n_edgetests = as.integer(result[[5L]]),
+                remaining_edges = NA_real_,
+                chunk_id = chunk_idx,
+                chunk_size = length(chunk),
+                edge_index = as.integer(result[[1L]]),
+                completed_edges = chunk_pos,
+                ci_calls = chunk_ci_calls,
+                residual_ms = as.numeric(chunk_progress_metrics$residual_ms),
+                dcov_ms =
+                  as.numeric(chunk_progress_metrics$dcov_cpp_backend_ms) +
+                    as.numeric(chunk_progress_metrics$dcov_gamma_ms)
+              )
+            }
             list(
-              results = lapply(chunk, edge_test),
+              results = chunk_results,
               metrics = fastkpc_legacy_runtime_zero()
             )
           }
@@ -6582,6 +6644,38 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           }
           worker_metrics <- fastkpc_legacy_runtime_add(
             prefill$metrics, chunk_batch$metrics
+          )
+          chunk_edge_metrics <- Reduce(
+            fastkpc_legacy_runtime_add,
+            lapply(chunk_results, function(item) item[[9L]]),
+            init = fastkpc_legacy_runtime_zero()
+          )
+          progress_metrics <- fastkpc_legacy_runtime_add(
+            worker_metrics, chunk_edge_metrics
+          )
+          chunk_ci_calls <- sum(vapply(
+            chunk_results,
+            function(item) as.integer(item[[5L]]),
+            integer(1L)
+          ))
+          fastkpc_legacy_append_progress(
+            event = "chunk_complete",
+            level = ord,
+            edge_count = sum(G) / 2,
+            task_count = length(chunk),
+            worker_count = workers,
+            dcov_backend = dcov_backend,
+            dcov_lowrank = dcov_cpp_lowrank_mode,
+            elapsed_sec = proc.time()[["elapsed"]] - total_start,
+            n_edgetests = chunk_ci_calls,
+            remaining_edges = NA_real_,
+            chunk_id = chunk_idx,
+            chunk_size = length(chunk),
+            completed_edges = length(chunk_results),
+            ci_calls = chunk_ci_calls,
+            residual_ms = as.numeric(progress_metrics$residual_ms),
+            dcov_ms = as.numeric(progress_metrics$dcov_cpp_backend_ms) +
+              as.numeric(progress_metrics$dcov_gamma_ms)
           )
           list(
             results = chunk_results,

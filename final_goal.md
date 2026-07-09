@@ -6429,6 +6429,85 @@ decision:
   promotion gate until level-1 progress explains the critical path.
 ```
 
+CUDA Spectra lowrank current-process worker progress diagnostic:
+
+```text
+change:
+  extend FASTKPC_LEGACY_PROGRESS_CSV with conditional-level worker rows:
+    chunk_start
+    edge_complete
+    chunk_complete
+
+  added columns:
+    chunk_id
+    chunk_size
+    edge_index
+    completed_edges
+    ci_calls
+    residual_ms
+    dcov_ms
+
+  full cuda_spectra artifact timeout mode now records:
+    candidate_timeout_subprocess
+
+artifact:
+  fastkpc/artifacts/
+    legacy_dcov_cuda_lowrank_backend_full_level1_parallel_progress_v1
+
+runner:
+  fastkpc_run_legacy_dcov_cuda_lowrank_backend_full_artifact()
+  candidate_timeout_sec = 180
+  candidate_timeout_subprocess = FALSE
+
+result:
+  run_status = timeout
+  elapsed_sec = 183.112
+  n / p = 351 / 48
+  reference edge_count = 110
+  candidate edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+
+legacy progress:
+  level 0:
+    level_complete elapsed_sec = 18.058
+    n_edgetests = 2213
+    remaining_edges = 1085
+
+  level 1:
+    20 chunk_start rows across 20 worker PIDs
+    1085 edge_complete rows
+    20 chunk_complete rows
+    level_complete elapsed_sec = 115.904
+    n_edgetests = 52659
+    remaining_edges = 539
+    slowest chunk_complete elapsed_sec = 113.498
+
+  level 2:
+    level_start elapsed_sec = 115.905
+    20 chunk_start rows across 20 worker PIDs
+    76 edge_complete rows before timeout
+    no chunk_complete or level_complete before timeout
+
+decision:
+  This explains the earlier 300 second progress artifact: the subprocess
+  watchdog used by the artifact runner created a nested fork context, and the
+  legacy inner mclapply path with mc.allow.recursive=FALSE effectively serialized
+  conditional chunks. That artifact is useful as a timeout-wrapper diagnosis,
+  but not as evidence that normal legacy parallelism stalls in level 1.
+
+  The current-process timeout mode preserves the 20-worker conditional route.
+  Under that mode, cuda_spectra completes level 1 in about 116 seconds and
+  reaches level 2 before the 180 second diagnostic timeout. The original
+  1800 second full gate must therefore be re-run or reinterpreted with
+  candidate_timeout_subprocess=FALSE before treating it as a valid full-route
+  performance failure.
+
+  The route is still not promotable: no full 351x48 candidate skeleton has been
+  returned for cuda_spectra, so SHD, n.edgetests exactness, backend error/fallback
+  totals, and full wall-time remain unproven.
+```
+
 ---
 
 ## 9. Final success definition

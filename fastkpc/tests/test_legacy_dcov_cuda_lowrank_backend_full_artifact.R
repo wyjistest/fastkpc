@@ -12,6 +12,22 @@ if (!identical(Sys.getenv("FASTKPC_RUN_REAL_SUBSET_TESTS", unset = ""), "1")) {
 
 source("fastkpc/R/legacy_dcov_cuda_lowrank_backend_artifact.R")
 
+current_process_timeout <- tryCatch(
+  {
+    fastkpc_legacy_cuda_lowrank_run_with_timeout(
+      function() {
+        repeat Sys.sleep(0.01)
+      },
+      candidate_timeout_sec = 0.2,
+      use_subprocess = FALSE
+    )
+    FALSE
+  },
+  fastkpc_legacy_cuda_lowrank_timeout = function(e) TRUE
+)
+assert_true(isTRUE(current_process_timeout),
+            "current-process CUDA lowrank timeout should raise timeout")
+
 missing <- c("graph", "mgcv", "pcalg", "Rcpp", "RcppArmadillo",
              "RcppEigen", "RSpectra")[
   !vapply(c("graph", "mgcv", "pcalg", "Rcpp", "RcppArmadillo",
@@ -45,6 +61,7 @@ artifact <- fastkpc_run_legacy_dcov_cuda_lowrank_backend_full_artifact(
   data_path = real_path,
   reference_result_path = reference_path,
   candidate_timeout_sec = 0,
+  candidate_timeout_subprocess = FALSE,
   rebuild_cuda = FALSE
 )
 
@@ -69,6 +86,8 @@ assert_true(isTRUE(summary$timeout[[1L]]),
             "full CUDA lowrank backend timeout should mark timeout")
 assert_true(identical(as.numeric(summary$timeout_sec[[1L]]), 0),
             "full CUDA lowrank backend timeout should record timeout_sec")
+assert_true(identical(summary$candidate_timeout_subprocess[[1L]], FALSE),
+            "full CUDA lowrank backend timeout should record current-process timeout mode")
 assert_true(identical(as.integer(summary$n[[1L]]), 351L),
             "full CUDA lowrank backend artifact should use 351 rows")
 assert_true(identical(as.integer(summary$p[[1L]]), 48L),

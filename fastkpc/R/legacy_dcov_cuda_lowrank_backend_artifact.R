@@ -69,7 +69,7 @@ fastkpc_legacy_cuda_lowrank_is_time_limit <- function(error) {
 }
 
 fastkpc_legacy_cuda_lowrank_run_with_timeout <- function(
-    fun, candidate_timeout_sec = NULL) {
+    fun, candidate_timeout_sec = NULL, use_subprocess = TRUE) {
   if (!fastkpc_legacy_cuda_lowrank_timeout_enabled(candidate_timeout_sec)) {
     return(fun())
   }
@@ -83,7 +83,7 @@ fastkpc_legacy_cuda_lowrank_run_with_timeout <- function(
     ))
   }
 
-  if (identical(.Platform$OS.type, "unix")) {
+  if (identical(.Platform$OS.type, "unix") && isTRUE(use_subprocess)) {
     job <- parallel::mcparallel(
       tryCatch(
         list(ok = TRUE, value = fun()),
@@ -217,7 +217,8 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
     reference_result_path = NULL,
     expected_edge_count = NULL,
     expected_n_edgetests = NULL,
-    candidate_timeout_sec = NULL) {
+    candidate_timeout_sec = NULL,
+    candidate_timeout_subprocess = TRUE) {
   if (fastkpc_legacy_cuda_lowrank_timeout_enabled(candidate_timeout_sec)) {
     candidate_timeout_sec <- as.numeric(candidate_timeout_sec[[1L]])
     if (!is.finite(candidate_timeout_sec) || candidate_timeout_sec < 0) {
@@ -359,7 +360,8 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
   candidate <- tryCatch(
     fastkpc_legacy_cuda_lowrank_run_with_timeout(
       function() run_route("cuda_spectra"),
-      candidate_timeout_sec = candidate_timeout_sec
+      candidate_timeout_sec = candidate_timeout_sec,
+      use_subprocess = isTRUE(candidate_timeout_subprocess)
     ),
     fastkpc_legacy_cuda_lowrank_timeout = function(e) {
       timeout_error <<- e
@@ -391,6 +393,7 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
       run_status = "timeout",
       timeout = TRUE,
       timeout_sec = as.numeric(timeout_error$timeout_sec),
+      candidate_timeout_subprocess = isTRUE(candidate_timeout_subprocess),
       expected_edge_count = expected_edge_count %||% NA_integer_,
       expected_n_edgetests = if (is.null(expected_n_edgetests)) {
         NA_character_
@@ -495,6 +498,7 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
       } else {
         NA_real_
       },
+    candidate_timeout_subprocess = isTRUE(candidate_timeout_subprocess),
     expected_edge_count = expected_edge_count %||% NA_integer_,
     expected_n_edgetests = if (is.null(expected_n_edgetests)) {
       NA_character_
@@ -618,7 +622,8 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_hot12_artifact <- function(
     rebuild_cuda = FALSE,
     parallel_cores = 1L,
     reference_result_path = NULL,
-    candidate_timeout_sec = NULL) {
+    candidate_timeout_sec = NULL,
+    candidate_timeout_subprocess = TRUE) {
   fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact(
     output_dir = output_dir,
     artifact_name = artifact_name,
@@ -629,7 +634,8 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_hot12_artifact <- function(
     rebuild_cuda = rebuild_cuda,
     parallel_cores = parallel_cores,
     reference_result_path = reference_result_path,
-    candidate_timeout_sec = candidate_timeout_sec
+    candidate_timeout_sec = candidate_timeout_sec,
+    candidate_timeout_subprocess = candidate_timeout_subprocess
   )
 }
 
@@ -645,6 +651,7 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_full_artifact <- function(
     rebuild_cuda = FALSE,
     parallel_cores = 20L,
     candidate_timeout_sec = NULL,
+    candidate_timeout_subprocess = FALSE,
     expected_edge_count = 110L,
     expected_n_edgetests =
       c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L)) {
@@ -660,6 +667,7 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_full_artifact <- function(
     reference_result_path = reference_result_path,
     expected_edge_count = expected_edge_count,
     expected_n_edgetests = expected_n_edgetests,
-    candidate_timeout_sec = candidate_timeout_sec
+    candidate_timeout_sec = candidate_timeout_sec,
+    candidate_timeout_subprocess = candidate_timeout_subprocess
   )
 }

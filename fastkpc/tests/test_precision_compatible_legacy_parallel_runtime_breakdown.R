@@ -25,17 +25,30 @@ data <- cbind(
   x5 = stats::rnorm(n)
 )
 
-old_progress <- Sys.getenv("FASTKPC_LEGACY_PROGRESS_CSV",
-                           unset = NA_character_)
+tracked_env <- c(
+  "FASTKPC_LEGACY_PROGRESS_CSV",
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE",
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY",
+  "FASTKPC_LEGACY_PARALLEL_CORES"
+)
+old_progress_env <- Sys.getenv(tracked_env, unset = NA_character_)
 on.exit({
-  if (is.na(old_progress)) {
-    Sys.unsetenv("FASTKPC_LEGACY_PROGRESS_CSV")
-  } else {
-    Sys.setenv(FASTKPC_LEGACY_PROGRESS_CSV = old_progress)
+  for (name in names(old_progress_env)) {
+    if (is.na(old_progress_env[[name]])) {
+      Sys.unsetenv(name)
+    } else {
+      do.call(Sys.setenv, stats::setNames(list(old_progress_env[[name]]),
+                                          name))
+    }
   }
 }, add = TRUE)
 progress_csv <- tempfile("legacy-compatible-progress-", fileext = ".csv")
-Sys.setenv(FASTKPC_LEGACY_PROGRESS_CSV = progress_csv)
+Sys.setenv(
+  FASTKPC_LEGACY_PROGRESS_CSV = progress_csv,
+  FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE = "1",
+  FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY = "s",
+  FASTKPC_LEGACY_PARALLEL_CORES = "2"
+)
 
 result <- fast_kpc(
   data,
@@ -103,7 +116,10 @@ assert_true(file.exists(progress_csv),
 progress <- utils::read.csv(progress_csv, stringsAsFactors = FALSE)
 required_progress <- c("event", "level", "edge_count", "task_count",
                        "worker_count", "dcov_backend", "dcov_lowrank",
-                       "elapsed_sec", "n_edgetests", "remaining_edges")
+                       "elapsed_sec", "n_edgetests", "remaining_edges",
+                       "chunk_id", "chunk_size", "edge_index",
+                       "completed_edges", "ci_calls", "residual_ms",
+                       "dcov_ms")
 missing_progress <- setdiff(required_progress, names(progress))
 assert_true(length(missing_progress) == 0L,
             paste("legacy progress missing", missing_progress[[1L]]))
@@ -116,5 +132,21 @@ assert_true(max(progress$level, na.rm = TRUE) >= 0L,
 assert_true(any(progress$event == "level_complete" &
                   progress$n_edgetests > 0),
             "legacy progress should record completed level test counts")
+if (any(progress$level > 0, na.rm = TRUE)) {
+  assert_true(any(progress$event == "chunk_start"),
+              "legacy progress should record chunk_start on conditional levels")
+  assert_true(any(progress$event == "chunk_complete"),
+              "legacy progress should record chunk_complete on conditional levels")
+  assert_true(any(progress$event == "edge_complete"),
+              "legacy progress should record edge_complete on conditional levels")
+  chunk_complete <- progress[progress$event == "chunk_complete", ,
+                             drop = FALSE]
+  assert_true(any(chunk_complete$chunk_size > 0),
+              "legacy progress should record chunk sizes")
+  assert_true(any(chunk_complete$completed_edges > 0),
+              "legacy progress should record completed chunk edges")
+  assert_true(any(chunk_complete$ci_calls > 0),
+              "legacy progress should record chunk CI calls")
+}
 
 cat("PASS precision compatible legacy parallel runtime breakdown\n")
