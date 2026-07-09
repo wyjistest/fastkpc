@@ -6156,6 +6156,52 @@ decision:
   lowrank backend candidate with explicit CPU Spectra fallback diagnostics.
 ```
 
+CUDA Spectra lowrank backend candidate checkpoint:
+
+```text
+scope:
+  env-gated legacy dCov backend candidate under existing cpp authority route
+  FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=cuda_spectra
+  small compatible skeleton route fixture, n = 54, p = 5
+  CPU C++ Spectra remains the baseline comparator
+  mgcv residual authority, skeleton replay, sepsets, and default/recommended
+  route remain unchanged
+
+change:
+  route cuda_spectra lowrank mode to
+    legacy_dcov_spectra_matvec_cuda_lowrank_gamma()
+  keep summary legacy_dcov_backend = cpp
+  count CUDA authority with legacy_dcov_cuda_lowrank_backend_* diagnostics
+  disable existing C++ batch modes for cuda_spectra first prototype
+  on CUDA error or non-convergence, explicitly fall back to CPU C++ Spectra
+  only fall back to R legacy dCov if CPU C++ Spectra also fails
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_route.R
+
+small route result:
+  adjacency identical to CPU C++ Spectra baseline
+  n.edgetests identical to CPU C++ Spectra baseline
+  legacy_dcov_backend = cpp
+  legacy_dcov_cuda_lowrank_backend_enabled = TRUE
+  legacy_dcov_cuda_lowrank_backend_count = legacy_dcov_gamma_count
+  legacy_dcov_cuda_lowrank_backend_error_count = 0
+  legacy_dcov_cuda_lowrank_backend_fallback_count = 0
+  legacy_dcov_cuda_lowrank_backend_converged_count =
+    legacy_dcov_cuda_lowrank_backend_count
+  legacy_dcov_cuda_lowrank_backend_spectra_matvec_count > 0
+  legacy_dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max = 0
+
+decision:
+  This connects the CUDA Spectra lowrank gamma primitive to the legacy
+  compatible dCov authority path as an env-gated candidate. It is not the
+  recommended route and is not a final success claim. The next gate is a
+  broader real-subset/full-route artifact with SHD/n.edgetests proof and
+  explicit fallback diagnostics.
+```
+
 ---
 
 ## 9. Final success definition

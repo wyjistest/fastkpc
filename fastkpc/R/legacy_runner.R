@@ -361,6 +361,18 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_cuda_lowrank_shadow_matrix_h2d_ms_during_compute_max = 0,
     dcov_cuda_lowrank_shadow_matrix_bytes = 0,
     dcov_cuda_lowrank_shadow_workspace_realloc_count = 0L,
+    dcov_cuda_lowrank_backend_enabled = 0L,
+    dcov_cuda_lowrank_backend_ms = 0,
+    dcov_cuda_lowrank_backend_count = 0L,
+    dcov_cuda_lowrank_backend_error_count = 0L,
+    dcov_cuda_lowrank_backend_fallback_count = 0L,
+    dcov_cuda_lowrank_backend_cpu_fallback_count = 0L,
+    dcov_cuda_lowrank_backend_cpu_fallback_ms = 0,
+    dcov_cuda_lowrank_backend_converged_count = 0L,
+    dcov_cuda_lowrank_backend_spectra_matvec_count = 0L,
+    dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max = 0,
+    dcov_cuda_lowrank_backend_matrix_bytes = 0,
+    dcov_cuda_lowrank_backend_workspace_realloc_count = 0L,
     dcov_cpp_input_ms = 0,
     dcov_cpp_distance_ms = 0,
     dcov_cpp_lowrank_ms = 0,
@@ -755,6 +767,42 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     dcov_cuda_lowrank_shadow_workspace_realloc_count =
       as.integer(a$dcov_cuda_lowrank_shadow_workspace_realloc_count) +
         as.integer(b$dcov_cuda_lowrank_shadow_workspace_realloc_count),
+    dcov_cuda_lowrank_backend_enabled =
+      max(as.integer(a$dcov_cuda_lowrank_backend_enabled),
+          as.integer(b$dcov_cuda_lowrank_backend_enabled)),
+    dcov_cuda_lowrank_backend_ms =
+      as.numeric(a$dcov_cuda_lowrank_backend_ms) +
+        as.numeric(b$dcov_cuda_lowrank_backend_ms),
+    dcov_cuda_lowrank_backend_count =
+      as.integer(a$dcov_cuda_lowrank_backend_count) +
+        as.integer(b$dcov_cuda_lowrank_backend_count),
+    dcov_cuda_lowrank_backend_error_count =
+      as.integer(a$dcov_cuda_lowrank_backend_error_count) +
+        as.integer(b$dcov_cuda_lowrank_backend_error_count),
+    dcov_cuda_lowrank_backend_fallback_count =
+      as.integer(a$dcov_cuda_lowrank_backend_fallback_count) +
+        as.integer(b$dcov_cuda_lowrank_backend_fallback_count),
+    dcov_cuda_lowrank_backend_cpu_fallback_count =
+      as.integer(a$dcov_cuda_lowrank_backend_cpu_fallback_count) +
+        as.integer(b$dcov_cuda_lowrank_backend_cpu_fallback_count),
+    dcov_cuda_lowrank_backend_cpu_fallback_ms =
+      as.numeric(a$dcov_cuda_lowrank_backend_cpu_fallback_ms) +
+        as.numeric(b$dcov_cuda_lowrank_backend_cpu_fallback_ms),
+    dcov_cuda_lowrank_backend_converged_count =
+      as.integer(a$dcov_cuda_lowrank_backend_converged_count) +
+        as.integer(b$dcov_cuda_lowrank_backend_converged_count),
+    dcov_cuda_lowrank_backend_spectra_matvec_count =
+      as.integer(a$dcov_cuda_lowrank_backend_spectra_matvec_count) +
+        as.integer(b$dcov_cuda_lowrank_backend_spectra_matvec_count),
+    dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max =
+      max(as.numeric(a$dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max),
+          as.numeric(b$dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max)),
+    dcov_cuda_lowrank_backend_matrix_bytes =
+      as.numeric(a$dcov_cuda_lowrank_backend_matrix_bytes) +
+        as.numeric(b$dcov_cuda_lowrank_backend_matrix_bytes),
+    dcov_cuda_lowrank_backend_workspace_realloc_count =
+      as.integer(a$dcov_cuda_lowrank_backend_workspace_realloc_count) +
+        as.integer(b$dcov_cuda_lowrank_backend_workspace_realloc_count),
     dcov_cpp_input_ms =
       as.numeric(a$dcov_cpp_input_ms) + as.numeric(b$dcov_cpp_input_ms),
     dcov_cpp_distance_ms =
@@ -1758,6 +1806,18 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cuda_lowrank_shadow_matrix_h2d_ms_during_compute_max = numeric(),
       dcov_cuda_lowrank_shadow_matrix_bytes = numeric(),
       dcov_cuda_lowrank_shadow_workspace_realloc_count = integer(),
+      dcov_cuda_lowrank_backend_enabled = integer(),
+      dcov_cuda_lowrank_backend_ms = numeric(),
+      dcov_cuda_lowrank_backend_count = integer(),
+      dcov_cuda_lowrank_backend_error_count = integer(),
+      dcov_cuda_lowrank_backend_fallback_count = integer(),
+      dcov_cuda_lowrank_backend_cpu_fallback_count = integer(),
+      dcov_cuda_lowrank_backend_cpu_fallback_ms = numeric(),
+      dcov_cuda_lowrank_backend_converged_count = integer(),
+      dcov_cuda_lowrank_backend_spectra_matvec_count = integer(),
+      dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max = numeric(),
+      dcov_cuda_lowrank_backend_matrix_bytes = numeric(),
+      dcov_cuda_lowrank_backend_workspace_realloc_count = integer(),
       dcov_cpp_distance_ms = numeric(), dcov_cpp_lowrank_ms = numeric(),
       dcov_cpp_lowrank_eig_ms = numeric(),
       dcov_cpp_lowrank_select_ms = numeric(),
@@ -2034,6 +2094,30 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.numeric(metrics$dcov_cuda_lowrank_shadow_matrix_bytes),
       dcov_cuda_lowrank_shadow_workspace_realloc_count =
         as.integer(metrics$dcov_cuda_lowrank_shadow_workspace_realloc_count),
+      dcov_cuda_lowrank_backend_enabled =
+        as.integer(metrics$dcov_cuda_lowrank_backend_enabled),
+      dcov_cuda_lowrank_backend_ms =
+        as.numeric(metrics$dcov_cuda_lowrank_backend_ms),
+      dcov_cuda_lowrank_backend_count =
+        as.integer(metrics$dcov_cuda_lowrank_backend_count),
+      dcov_cuda_lowrank_backend_error_count =
+        as.integer(metrics$dcov_cuda_lowrank_backend_error_count),
+      dcov_cuda_lowrank_backend_fallback_count =
+        as.integer(metrics$dcov_cuda_lowrank_backend_fallback_count),
+      dcov_cuda_lowrank_backend_cpu_fallback_count =
+        as.integer(metrics$dcov_cuda_lowrank_backend_cpu_fallback_count),
+      dcov_cuda_lowrank_backend_cpu_fallback_ms =
+        as.numeric(metrics$dcov_cuda_lowrank_backend_cpu_fallback_ms),
+      dcov_cuda_lowrank_backend_converged_count =
+        as.integer(metrics$dcov_cuda_lowrank_backend_converged_count),
+      dcov_cuda_lowrank_backend_spectra_matvec_count =
+        as.integer(metrics$dcov_cuda_lowrank_backend_spectra_matvec_count),
+      dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max =
+        as.numeric(metrics$dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max),
+      dcov_cuda_lowrank_backend_matrix_bytes =
+        as.numeric(metrics$dcov_cuda_lowrank_backend_matrix_bytes),
+      dcov_cuda_lowrank_backend_workspace_realloc_count =
+        as.integer(metrics$dcov_cuda_lowrank_backend_workspace_realloc_count),
       dcov_cpp_distance_ms = as.numeric(metrics$dcov_cpp_distance_ms),
       dcov_cpp_lowrank_ms = as.numeric(metrics$dcov_cpp_lowrank_ms),
       dcov_cpp_lowrank_eig_ms =
@@ -4882,6 +4966,23 @@ fastkpc_legacy_dcov_backend <- function() {
   if (backend %in% c("cpp", "c++")) "cpp" else "r"
 }
 
+fastkpc_legacy_dcov_cpp_lowrank_mode <- function() {
+  raw <- tolower(Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK",
+                            unset = "full"))
+  if (raw %in% c("spectra", "selected", "selected_eigs")) {
+    "spectra"
+  } else if (raw %in% c("cuda_spectra", "cuda-spectra",
+                        "cuda_lowrank", "cuda-lowrank")) {
+    "cuda_spectra"
+  } else {
+    "full"
+  }
+}
+
+fastkpc_legacy_dcov_cuda_lowrank_backend_requested <- function() {
+  identical(fastkpc_legacy_dcov_cpp_lowrank_mode(), "cuda_spectra")
+}
+
 fastkpc_legacy_dcov_cpp_batch_mode <- function() {
   raw <- tolower(Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH",
                             unset = ""))
@@ -4943,6 +5044,44 @@ fastkpc_legacy_prepare_dcov_cuda_lowrank_shadow <- function(enabled) {
   }
   invisible(
     exists("legacy_dcov_spectra_matvec_cuda_lowrank_shadow", mode = "function")
+  )
+}
+
+fastkpc_legacy_prepare_dcov_cuda_lowrank_gamma <- function(enabled) {
+  if (!isTRUE(enabled)) return(invisible(FALSE))
+  if (!exists("legacy_dcov_spectra_matvec_cuda_lowrank_gamma",
+              mode = "function")) {
+    try(source("fastkpc/R/cuda_native.R"), silent = TRUE)
+  }
+  if (exists("build_fastkpc_cuda_native", mode = "function")) {
+    try(build_fastkpc_cuda_native(rebuild = FALSE), silent = TRUE)
+  }
+  invisible(
+    exists("legacy_dcov_spectra_matvec_cuda_lowrank_gamma", mode = "function")
+  )
+}
+
+fastkpc_legacy_with_dcov_cpp_lowrank <- function(mode, expr) {
+  old <- Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK",
+                    unset = NA_character_)
+  on.exit({
+    if (is.na(old)) {
+      Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK")
+    } else {
+      Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = old)
+    }
+  }, add = TRUE)
+  Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = mode)
+  force(expr)
+}
+
+fastkpc_legacy_dcov_gamma_cpp_spectra_oracle <- function(
+    x, y, index, numCol) {
+  fastkpc_legacy_with_dcov_cpp_lowrank(
+    "spectra",
+    fastkpc_legacy_dcov_gamma_cpp_oracle(
+      x = x, y = y, index = index, numCol = numCol
+    )
   )
 }
 
@@ -5162,8 +5301,114 @@ fastkpc_legacy_runtime_add_dcov_cuda_lowrank_shadow <- function(
   metrics
 }
 
+fastkpc_legacy_runtime_add_dcov_cuda_lowrank_backend_diagnostics <- function(
+    metrics, cuda) {
+  metrics$dcov_cuda_lowrank_backend_spectra_matvec_count <-
+    metrics$dcov_cuda_lowrank_backend_spectra_matvec_count +
+      as.integer(cuda$spectra_matvec_count %||% 0L)
+  metrics$dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max <- max(
+    metrics$dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max,
+    as.numeric(cuda$matrix_h2d_ms_during_compute %||% 0)
+  )
+  metrics$dcov_cuda_lowrank_backend_matrix_bytes <-
+    metrics$dcov_cuda_lowrank_backend_matrix_bytes +
+      as.numeric(cuda$matrix_bytes %||% 0)
+  metrics$dcov_cuda_lowrank_backend_workspace_realloc_count <-
+    metrics$dcov_cuda_lowrank_backend_workspace_realloc_count +
+      as.integer(cuda$workspace_realloc_count %||% 0L)
+  metrics
+}
+
+fastkpc_legacy_run_dcov_cuda_lowrank_backend <- function(
+    metrics, x, y, index, numCol, env) {
+  metrics$dcov_cuda_lowrank_backend_enabled <- 1L
+  backend_start <- proc.time()[["elapsed"]]
+  cuda <- tryCatch(
+    legacy_dcov_spectra_matvec_cuda_lowrank_gamma(
+      x = x, y = y, index = index, numCol = numCol
+    ),
+    error = function(e) {
+      structure(list(message = conditionMessage(e)),
+                class = "fastkpc_dcov_cuda_lowrank_backend_error")
+    }
+  )
+  backend_elapsed_ms <- (proc.time()[["elapsed"]] - backend_start) * 1000
+  metrics$dcov_cpp_backend_ms <-
+    metrics$dcov_cpp_backend_ms + backend_elapsed_ms
+  metrics$dcov_cuda_lowrank_backend_ms <-
+    metrics$dcov_cuda_lowrank_backend_ms + backend_elapsed_ms
+
+  converged <- !inherits(cuda, "fastkpc_dcov_cuda_lowrank_backend_error") &&
+    isTRUE(cuda$converged_x) && isTRUE(cuda$converged_y)
+  if (isTRUE(converged)) {
+    metrics$dcov_cpp_backend_count <- metrics$dcov_cpp_backend_count + 1L
+    metrics$dcov_cuda_lowrank_backend_count <-
+      metrics$dcov_cuda_lowrank_backend_count + 1L
+    metrics$dcov_cuda_lowrank_backend_converged_count <-
+      metrics$dcov_cuda_lowrank_backend_converged_count + 1L
+    metrics$dcov_cpp_batch_shape_keys <- c(
+      metrics$dcov_cpp_batch_shape_keys,
+      fastkpc_legacy_dcov_cpp_batch_shape_key(x, y, index, numCol)
+    )
+    metrics <- fastkpc_legacy_runtime_add_dcov_cuda_lowrank_backend_diagnostics(
+      metrics, cuda
+    )
+    return(list(result = cuda, metrics = metrics, used_cpp = TRUE))
+  }
+
+  metrics$dcov_cuda_lowrank_backend_error_count <-
+    metrics$dcov_cuda_lowrank_backend_error_count + 1L
+  metrics$dcov_cuda_lowrank_backend_fallback_count <-
+    metrics$dcov_cuda_lowrank_backend_fallback_count + 1L
+  metrics$dcov_cuda_lowrank_backend_cpu_fallback_count <-
+    metrics$dcov_cuda_lowrank_backend_cpu_fallback_count + 1L
+
+  fallback_start <- proc.time()[["elapsed"]]
+  cpp <- tryCatch(
+    fastkpc_legacy_dcov_gamma_cpp_spectra_oracle(
+      x = x, y = y, index = index, numCol = numCol
+    ),
+    error = function(e) structure(list(message = conditionMessage(e)),
+                                  class = "fastkpc_dcov_cpp_backend_error")
+  )
+  fallback_elapsed_ms <- (proc.time()[["elapsed"]] - fallback_start) * 1000
+  metrics$dcov_cpp_backend_ms <-
+    metrics$dcov_cpp_backend_ms + fallback_elapsed_ms
+  metrics$dcov_cuda_lowrank_backend_cpu_fallback_ms <-
+    metrics$dcov_cuda_lowrank_backend_cpu_fallback_ms + fallback_elapsed_ms
+
+  if (!inherits(cpp, "fastkpc_dcov_cpp_backend_error")) {
+    metrics$dcov_cpp_backend_count <- metrics$dcov_cpp_backend_count + 1L
+    metrics$dcov_cpp_batch_shape_keys <- c(
+      metrics$dcov_cpp_batch_shape_keys,
+      fastkpc_legacy_dcov_cpp_batch_shape_key(x, y, index, numCol)
+    )
+    metrics <- fastkpc_legacy_runtime_add_dcov_cpp_diagnostics(
+      metrics, cpp$diagnostics, wrapper_ms = fallback_elapsed_ms
+    )
+    return(list(result = cpp, metrics = metrics, used_cpp = TRUE))
+  }
+
+  metrics$dcov_cpp_backend_error_count <-
+    metrics$dcov_cpp_backend_error_count + 1L
+  metrics$dcov_cpp_backend_fallback_count <-
+    metrics$dcov_cpp_backend_fallback_count + 1L
+  timed <- fastkpc_legacy_dcov_gamma_timed(
+    x = x, y = y, index = index, numCol = numCol, env = env
+  )
+  metrics <- fastkpc_legacy_runtime_add_dcov(metrics, timed$diagnostics)
+  metrics$dcov_r_backend_count <- metrics$dcov_r_backend_count + 1L
+  list(result = timed$result, metrics = metrics, used_cpp = FALSE)
+}
+
 fastkpc_legacy_run_dcov_cpp_backend <- function(
     metrics, x, y, index, numCol, env) {
+  if (isTRUE(fastkpc_legacy_dcov_cuda_lowrank_backend_requested())) {
+    return(fastkpc_legacy_run_dcov_cuda_lowrank_backend(
+      metrics = metrics, x = x, y = y, index = index, numCol = numCol,
+      env = env
+    ))
+  }
   backend_start <- proc.time()[["elapsed"]]
   cpp <- tryCatch(
     fastkpc_legacy_dcov_gamma_cpp_oracle(
@@ -5378,8 +5623,17 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
   } else {
     "r"
   }
+  dcov_cpp_lowrank_mode <- if (identical(dcov_backend, "cpp")) {
+    fastkpc_legacy_dcov_cpp_lowrank_mode()
+  } else {
+    "full"
+  }
+  dcov_cuda_lowrank_backend_requested <- identical(ic.method, "dcc.gamma") &&
+    identical(dcov_backend, "cpp") &&
+    identical(dcov_cpp_lowrank_mode, "cuda_spectra")
   dcov_cpp_batch_mode <- if (identical(ic.method, "dcc.gamma") &&
-                             identical(dcov_backend, "cpp")) {
+                             identical(dcov_backend, "cpp") &&
+                             !isTRUE(dcov_cuda_lowrank_backend_requested)) {
     fastkpc_legacy_dcov_cpp_batch_mode()
   } else {
     ""
@@ -5397,13 +5651,12 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
   dcov_cpp_required <- identical(dcov_backend, "cpp") ||
     isTRUE(dcov_cpp_shadow_enabled)
   fastkpc_legacy_prepare_dcov_cpp(dcov_cpp_required)
+  if (isTRUE(dcov_cuda_lowrank_backend_requested)) {
+    fastkpc_legacy_prepare_dcov_cuda_lowrank_gamma(TRUE)
+  }
   dcov_cuda_lowrank_shadow_requested <- identical(ic.method, "dcc.gamma") &&
     identical(dcov_backend, "cpp") &&
-    identical(
-      tolower(Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK",
-                         unset = "full")),
-      "spectra"
-    ) &&
+    identical(dcov_cpp_lowrank_mode, "spectra") &&
     fastkpc_legacy_dcov_cuda_lowrank_shadow_enabled()
   dcov_cuda_lowrank_shadow_enabled <-
     isTRUE(dcov_cuda_lowrank_shadow_requested) &&
@@ -6694,6 +6947,32 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.numeric(runtime_total$dcov_cuda_lowrank_shadow_matrix_bytes),
         legacy_dcov_cuda_lowrank_shadow_workspace_realloc_count =
           as.integer(runtime_total$dcov_cuda_lowrank_shadow_workspace_realloc_count),
+        legacy_dcov_cuda_lowrank_backend_enabled =
+          isTRUE(as.integer(runtime_total$dcov_cuda_lowrank_backend_enabled) > 0L),
+        legacy_dcov_cuda_lowrank_backend_count =
+          as.integer(runtime_total$dcov_cuda_lowrank_backend_count),
+        legacy_dcov_cuda_lowrank_backend_ms =
+          as.numeric(runtime_total$dcov_cuda_lowrank_backend_ms),
+        legacy_dcov_cuda_lowrank_backend_error_count =
+          as.integer(runtime_total$dcov_cuda_lowrank_backend_error_count),
+        legacy_dcov_cuda_lowrank_backend_fallback_count =
+          as.integer(runtime_total$dcov_cuda_lowrank_backend_fallback_count),
+        legacy_dcov_cuda_lowrank_backend_cpu_fallback_count =
+          as.integer(runtime_total$dcov_cuda_lowrank_backend_cpu_fallback_count),
+        legacy_dcov_cuda_lowrank_backend_cpu_fallback_ms =
+          as.numeric(runtime_total$dcov_cuda_lowrank_backend_cpu_fallback_ms),
+        legacy_dcov_cuda_lowrank_backend_converged_count =
+          as.integer(runtime_total$dcov_cuda_lowrank_backend_converged_count),
+        legacy_dcov_cuda_lowrank_backend_spectra_matvec_count =
+          as.integer(runtime_total$dcov_cuda_lowrank_backend_spectra_matvec_count),
+        legacy_dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max =
+          as.numeric(
+            runtime_total$dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max
+          ),
+        legacy_dcov_cuda_lowrank_backend_matrix_bytes =
+          as.numeric(runtime_total$dcov_cuda_lowrank_backend_matrix_bytes),
+        legacy_dcov_cuda_lowrank_backend_workspace_realloc_count =
+          as.integer(runtime_total$dcov_cuda_lowrank_backend_workspace_realloc_count),
         legacy_dcov_cpp_input_ms =
           as.numeric(runtime_total$dcov_cpp_input_ms),
         legacy_dcov_cpp_distance_ms =
