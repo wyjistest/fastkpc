@@ -6963,6 +6963,92 @@ lowrank implementation, or split native CUDA lowrank work across persistent
 parallel workers without losing canonical replay.
 ```
 
+Native cuda_spectra host pair-parallel timeout artifact:
+
+```text
+change:
+  add an env-gated host-side threaded branch for native cuda_spectra lowrank
+  batches:
+
+    FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS
+
+  The default remains one thread. When set above one, the native CUDA lowrank
+  batch path splits pair computations across host std::thread workers, stores
+  per-pair gamma results, and aggregates p-values/diagnostics on the main
+  thread. Progress writes are mutex-protected in the threaded branch.
+
+artifact:
+  fastkpc/artifacts/
+    compatible_cuda_skeleton_threaded_round_cuda_spectra_batch_threads4_progress_timeout_600s_v1
+
+scope:
+  native one-call compatible CUDA skeleton facade
+  real 351x48 fixture, all columns
+  reference loaded from:
+    fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/
+      compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds
+
+run shape:
+  FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=20
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=20
+  FASTKPC_NATIVE_CUDA_LOWRANK_PROGRESS_INTERVAL=64
+  FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS=4
+  dcov_batch = "round"
+  low_rank = "cuda_spectra"
+  timeout = 600 sec
+
+result:
+  run_status = timeout
+  timeout = TRUE
+  elapsed_sec = 600
+  reference_edge_count = 110
+  candidate_edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+
+comparison against previous 600 sec cuda_spectra progress timeout:
+  max cumulative CUDA lowrank pairs:
+    serial host pair loop:  69,113
+    4 host threads:       108,095
+
+  level 0 dCov:
+    serial host pair loop: 15,974.2 ms
+    4 host threads:       10,192.1 ms
+
+  level 1 dCov:
+    serial host pair loop: 383,348.8 ms
+    4 host threads:       240,826.9 ms
+
+  level 2:
+    provider_complete elapsed_ms: 90,619.3
+    dcov_start elapsed_ms:       90,619.9
+    no level_complete before timeout
+    batch_start / batch_complete / pair_progress = 205 / 204 / 935
+
+small gates:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_route.R
+
+decision:
+  Host-side pair parallelism is a real improvement for native cuda_spectra
+  dCov throughput, but it is not sufficient for promotion. The route still
+  does not return a full 351x48 candidate skeleton inside 600 seconds, so SHD,
+  n.edgetests exactness, and fallback totals remain unproven.
+
+  Keep FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS as an experimental diagnostic
+  and performance knob. The next aligned step is to compare thread counts or
+  move beyond host pair parallelism to a broader native CUDA lowrank data-plane
+  change that reduces per-pair Spectra/device overhead enough for the full
+  one-call gate.
+```
+
 ---
 
 ## 9. Final success definition
