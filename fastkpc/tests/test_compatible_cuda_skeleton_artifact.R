@@ -133,6 +133,26 @@ assert_true(file.exists(artifact$paths$result_rds),
             "artifact runner should write result.rds")
 assert_true(file.exists(artifact$paths$summary_md),
             "artifact runner should write summary.md")
+assert_true(!is.null(artifact$paths$native_progress_csv),
+            "artifact runner should expose native_progress.csv path")
+assert_true(file.exists(artifact$paths$native_progress_csv),
+            "artifact runner should write native_progress.csv")
+native_progress <- utils::read.csv(artifact$paths$native_progress_csv,
+                                   stringsAsFactors = FALSE)
+native_progress_required <- c("event", "level", "task_count",
+                              "residual_request_count", "tests_replayed",
+                              "elapsed_ms")
+native_progress_missing <- setdiff(native_progress_required,
+                                   names(native_progress))
+assert_true(length(native_progress_missing) == 0L,
+            paste("native progress missing",
+                  native_progress_missing[[1L]]))
+assert_true(any(native_progress$event == "level_start"),
+            "native progress should record level_start rows")
+assert_true(any(native_progress$event == "level_complete"),
+            "native progress should record level_complete rows")
+assert_true(max(native_progress$level, na.rm = TRUE) >= 0L,
+            "native progress should record numeric skeleton levels")
 
 required <- c(
   "artifact", "route", "n", "p", "alpha", "max_conditioning_size",

@@ -4788,6 +4788,69 @@ skeleton batch promotion while preserving legacy C++ scalar parity and the
 env-gated chunk/round skeleton replay semantics.
 ```
 
+### 8.11 Native one-call timeout progress guardrail
+
+Native one-call compatible CUDA facade candidates can timeout before returning
+their R summary, which previously left full 351x48 timeout artifacts with only
+parent-side start/timeout rows and no native level context.
+
+Diagnostic guardrail:
+
+```text
+FASTKPC_NATIVE_LEGACY_PROGRESS_CSV=<artifact>/native_progress.csv
+```
+
+When the artifact runner invokes the facade candidate, it scopes this env var to
+the child native run. The native legacy mgcv-provider + legacy dCov one-call
+loop appends level milestone rows:
+
+```text
+level_start
+provider_complete
+dcov_start
+level_complete
+```
+
+Each row records:
+
+```text
+level
+task_count
+residual_request_count
+tests_replayed
+ignored
+deletions
+provider_call_ms
+provider_copy_ms
+dcov_materialize_ms
+dcov_call_ms
+elapsed_ms
+```
+
+This is diagnostic only:
+
+```text
+default behavior unchanged when env is unset
+no skeleton decision changes
+no dCov authority changes
+no mgcv residual authority changes
+```
+
+Purpose:
+
+```text
+full timeout artifacts should reveal the last native level/phase reached
+instead of reporting only NA candidate summary fields.
+```
+
+Gate:
+
+```bash
+Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+git diff --check
+```
+
 ---
 
 ## 9. Final success definition

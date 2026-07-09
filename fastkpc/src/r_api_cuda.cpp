@@ -21,11 +21,19 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -78,6 +86,69 @@ const char* native_legacy_dcov_batch_mode_name(
 double elapsed_ms_since(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - start).count();
+}
+
+long long wall_epoch_ms_now() {
+  return static_cast<long long>(
+    std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+int native_progress_pid() {
+#ifdef _WIN32
+  return static_cast<int>(_getpid());
+#else
+  return static_cast<int>(getpid());
+#endif
+}
+
+std::string native_legacy_progress_csv_path_from_env() {
+  const char* raw = std::getenv("FASTKPC_NATIVE_LEGACY_PROGRESS_CSV");
+  if (raw == nullptr) return std::string();
+  return std::string(raw);
+}
+
+void append_native_legacy_progress(
+    const std::string& path,
+    const std::string& event,
+    int level,
+    int task_count,
+    int residual_request_count,
+    int tests_replayed,
+    int ignored,
+    int deletions,
+    double provider_call_ms,
+    double provider_copy_ms,
+    double dcov_materialize_ms,
+    double dcov_call_ms,
+    double elapsed_ms) {
+  if (path.empty()) return;
+  std::ifstream probe(path.c_str());
+  const bool write_header = !probe.good();
+  probe.close();
+
+  std::ofstream out(path.c_str(), std::ios::out | std::ios::app);
+  if (!out.good()) return;
+  if (write_header) {
+    out << "timestamp_ms,pid,event,level,task_count,"
+        << "residual_request_count,tests_replayed,ignored,deletions,"
+        << "provider_call_ms,provider_copy_ms,dcov_materialize_ms,"
+        << "dcov_call_ms,elapsed_ms\n";
+  }
+  out << wall_epoch_ms_now() << ","
+      << native_progress_pid() << ","
+      << event << ","
+      << level << ","
+      << task_count << ","
+      << residual_request_count << ","
+      << tests_replayed << ","
+      << ignored << ","
+      << deletions << ","
+      << std::setprecision(17) << provider_call_ms << ","
+      << provider_copy_ms << ","
+      << dcov_materialize_ms << ","
+      << dcov_call_ms << ","
+      << elapsed_ms << "\n";
 }
 
 double list_numeric_value(const Rcpp::List& values, const char* name) {
@@ -3798,8 +3869,12 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   double legacy_dcov_native_batch_ms = 0.0;
   double legacy_dcov_native_batch_materialize_ms = 0.0;
   double legacy_dcov_native_batch_call_ms = 0.0;
+  const std::string native_progress_csv_path =
+    native_legacy_progress_csv_path_from_env();
 
   for (int level = 0; level <= max_conditioning_size; ++level) {
+    const std::chrono::steady_clock::time_point level_start =
+      std::chrono::steady_clock::now();
     const LayerPlan plan = make_layer_plan(adjacency, p, level);
     const int task_count = static_cast<int>(plan.tasks.size());
     int level_provider_request_count = 0;
@@ -3823,6 +3898,20 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         request_conditioning_sets.push_back(task.conditioning_set);
       }
     }
+    append_native_legacy_progress(
+      native_progress_csv_path,
+      "level_start",
+      level,
+      task_count,
+      static_cast<int>(request_targets.size()),
+      0,
+      0,
+      0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      elapsed_ms_since(level_start));
 
     std::vector<std::vector<double> > residual_columns(request_targets.size());
     if (!request_targets.empty()) {
@@ -3893,6 +3982,20 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       update_provider_response_label(&residual_provider_response_backend,
                                      provider_response_backend);
     }
+    append_native_legacy_progress(
+      native_progress_csv_path,
+      "provider_complete",
+      level,
+      task_count,
+      static_cast<int>(request_targets.size()),
+      0,
+      0,
+      0,
+      level_provider_call_ms,
+      level_provider_matrix_copy_ms,
+      0.0,
+      0.0,
+      elapsed_ms_since(level_start));
 
     std::map<int, bool> edge_done;
     std::vector<int> delete_edges(static_cast<std::size_t>(p) * p, 0);
@@ -4067,6 +4170,20 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
     };
 
     std::vector<double> pvalues(task_count, NA_REAL);
+    append_native_legacy_progress(
+      native_progress_csv_path,
+      "dcov_start",
+      level,
+      task_count,
+      static_cast<int>(request_targets.size()),
+      0,
+      0,
+      0,
+      level_provider_call_ms,
+      level_provider_matrix_copy_ms,
+      level_dcov_materialize_ms,
+      level_dcov_call_ms,
+      elapsed_ms_since(level_start));
     if (legacy_dcov_native_batch_mode == NativeLegacyDcovBatchMode::Level &&
         task_count > 0) {
       std::vector<int> task_indices(task_count);
@@ -4201,6 +4318,20 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
     level_legacy_dcov_native_materialize_ms.push_back(
       level_dcov_materialize_ms);
     level_legacy_dcov_native_call_ms.push_back(level_dcov_call_ms);
+    append_native_legacy_progress(
+      native_progress_csv_path,
+      "level_complete",
+      level,
+      task_count,
+      level_provider_request_count,
+      tests_replayed,
+      ignored_after_delete,
+      deletions,
+      level_provider_call_ms,
+      level_provider_matrix_copy_ms,
+      level_dcov_materialize_ms,
+      level_dcov_call_ms,
+      elapsed_ms_since(level_start));
   }
 
   Rcpp::DataFrame task_rows = Rcpp::DataFrame::create(
