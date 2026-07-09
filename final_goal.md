@@ -3621,14 +3621,58 @@ tests:
   Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
   Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
 
+hot12 seam timing artifacts:
+  fastkpc/artifacts/compatible_cuda_skeleton_hot12_seam_timing_v1
+  fastkpc/artifacts/compatible_cuda_skeleton_cpp_guarded_hot12_seam_timing_v1
+
+default provider hot12:
+  n / p = 351 / 12
+  columns = 1,2,3,4,5,6,9,12,15,16,17,18
+  max_conditioning_size = 2
+  elapsed_sec = 43.761
+  reference_elapsed_sec = 44.825
+  edge_count = 24 / 24
+  SHD = 0
+  n.edgetests exact = TRUE
+  n.edgetests = 131,994,1453
+  residual_provider_request_count = 792
+  residual_provider_call_ms = 13562.24
+  residual_provider_matrix_copy_ms = 0.66968
+  residual_provider_total_ms = 13562.91
+  legacy_dcov_native_count = 3800
+  legacy_dcov_native_batch_materialize_ms = 12.2819
+  legacy_dcov_native_batch_call_ms = 30172.16
+
+guarded C++ residual provider hot12:
+  elapsed_sec = 74.844
+  reference_elapsed_sec = 44.584
+  edge_count = 24 / 24
+  SHD = 0
+  n.edgetests exact = TRUE
+  n.edgetests = 131,994,1453
+  residual_provider_request_count = 792
+  residual_provider_call_ms = 45109.84
+  residual_provider_matrix_copy_ms = 0.655392
+  residual_provider_total_ms = 45110.5
+  residual_provider_mgcv_cpp_backend_count = 792
+  residual_provider_mgcv_cpp_backend_native_count = 792
+  residual_provider_mgcv_cpp_backend_fallback_count = 0
+  residual_provider_mgcv_cpp_backend_error_count = 0
+  residual_provider_mgcv_cpp_backend_ms = 22627
+  legacy_dcov_native_batch_materialize_ms = 12.2712
+  legacy_dcov_native_batch_call_ms = 29707.65
+
 decision:
   The current facade candidates are non-promotable, but the native one-call
   checkpoint now measures the exact hidden provider seam that Phase 5 must
   replace: R residual-provider callback time, provider matrix copy time, and
-  native dCov materialization/call time. The next implementation step should
-  either satisfy the same level-residual-matrix-v1 contract from a native/CUDA
-  residual executor or use these fields in a full/subset artifact to quantify
-  the cost of the remaining R provider boundary.
+  native dCov materialization/call time. On the hot12 real subset, matrix-copy
+  overhead is negligible, while provider callback/body time and legacy dCov
+  batch calls dominate. The guarded C++ residual provider is correctness-clean
+  on the subset but slower than the default provider. The next implementation
+  step should satisfy the same level-residual-matrix-v1 contract from a
+  native/CUDA residual executor or use these fields in larger artifacts to
+  quantify the cost of the remaining R provider boundary.
 ```
 
 ### Gate
