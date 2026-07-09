@@ -14,8 +14,12 @@ struct LegacyDcovSpectraMatvecCudaResult {
   int rhs_count = 0;
   int kernel_launch_count = 0;
   int device_matrix_reuse_count = 0;
+  int device_workspace_reuse_count = 0;
+  int workspace_realloc_count = 0;
   std::size_t matrix_bytes = 0;
+  std::size_t workspace_bytes = 0;
   double matrix_h2d_ms = 0.0;
+  double workspace_alloc_ms = 0.0;
   double alloc_ms = 0.0;
   double h2d_ms = 0.0;
   double kernel_ms = 0.0;

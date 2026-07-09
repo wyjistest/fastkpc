@@ -5691,6 +5691,73 @@ decision:
   keep the operator on device across iterative Spectra matvecs.
 ```
 
+CUDA dense Spectra-matvec reusable RHS/output workspace checkpoint:
+
+```text
+scope:
+  CUDA substrate for the legacy dCov Spectra lowrank bottleneck
+  reusable device-resident dense matrix handle
+  reusable handle-owned RHS/output device buffers
+  not connected to the skeleton route
+  not connected to RSpectra yet
+
+change:
+  extend the reusable handle API so repeated handle apply calls keep RHS/output
+  device workspace alive across matvecs:
+    same or smaller rhs_count reuses existing d_rhs / d_output buffers
+    larger rhs_count grows both buffers once
+    explicit free and external-pointer finalizer release matrix and workspace
+
+  one-shot legacy_dcov_spectra_matvec_cuda(a, rhs) remains a temporary
+  allocation path. The workspace reuse is scoped to the explicit handle API.
+
+diagnostics:
+  backend = cuda-dense-sym-matvec-handle
+  device_matrix_reuse_count
+  device_workspace_reuse_count
+  workspace_realloc_count
+  workspace_bytes
+  workspace_alloc_ms
+  matrix_bytes
+  matrix_h2d_ms
+  h2d_ms / kernel_ms / d2h_ms / total_ms
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+
+351x8 warm repeated-handle micro-check:
+  n = 351
+  rhs_count = 8
+  max_abs_diff vs host matrix multiply = 5.684342e-14
+  device_workspace_reuse_count = 1
+  workspace_realloc_count = 0
+  workspace_alloc_ms = 0
+  workspace_bytes = 44,928
+  h2d_ms = 0.010219
+  kernel_ms = 0.047503
+  d2h_ms = 0.012232
+  total_ms = 0.071708
+
+workspace growth/shrink check:
+  grow from rhs_count 8 to 10:
+    workspace_realloc_count = 1
+    workspace_alloc_ms = 0.016552
+    workspace_bytes = 56,160
+  shrink from rhs_count 10 to vector:
+    device_workspace_reuse_count = 1
+    workspace_realloc_count = 0
+    workspace_bytes = 56,160
+
+decision:
+  This removes per-apply RHS/output cudaMalloc/cudaFree from the explicit
+  handle path once capacity has been established. It is still CUDA lowrank
+  substrate only: it does not change dCov authority, residual authority,
+  skeleton replay, lowrank route selection, or the current recommended
+  compatible route. The next lowrank step is an eigensolver-compatible operator
+  boundary that can drive repeated matvecs through this handle without copying
+  the dense matrix or reallocating temporary device buffers per iteration.
+```
+
 ---
 
 ## 9. Final success definition

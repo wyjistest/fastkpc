@@ -89,11 +89,37 @@ assert_true(identical(as.numeric(reuse$matrix_h2d_ms), 0),
 assert_true(identical(as.integer(reuse$kernel_launch_count), rhs_count),
             "CUDA handle matvec should launch once per rhs in this prototype")
 
+reuse_again <- legacy_dcov_spectra_matvec_cuda_handle_apply(handle, rhs)
+assert_true(max(abs(reuse_again$values - cpu)) < 1e-10,
+            "CUDA handle repeated matvec should match host dense multiplication")
+assert_true(identical(as.integer(reuse_again$device_workspace_reuse_count), 1L),
+            "CUDA handle repeated matvec should reuse resident RHS/output workspace")
+assert_true(identical(as.integer(reuse_again$workspace_realloc_count), 0L),
+            "CUDA handle repeated matvec should not reallocate RHS/output workspace")
+assert_true(identical(as.numeric(reuse_again$workspace_alloc_ms), 0),
+            "CUDA handle repeated matvec should not spend time allocating reused workspace")
+assert_true(as.numeric(reuse_again$workspace_bytes) >= n * rhs_count * 2 * 8,
+            "CUDA handle should report resident RHS/output workspace bytes")
+
+wide_rhs <- cbind(rhs, rhs[, 1:2, drop = FALSE])
+wide_cpu <- matrix_a %*% wide_rhs
+wide_reuse <- legacy_dcov_spectra_matvec_cuda_handle_apply(handle, wide_rhs)
+assert_true(max(abs(wide_reuse$values - wide_cpu)) < 1e-10,
+            "CUDA handle wider matvec should match host dense multiplication")
+assert_true(identical(as.integer(wide_reuse$workspace_realloc_count), 1L),
+            "CUDA handle wider matvec should grow RHS/output workspace once")
+assert_true(as.numeric(wide_reuse$workspace_bytes) >= n * ncol(wide_rhs) * 2 * 8,
+            "CUDA handle should report grown RHS/output workspace bytes")
+
 reuse_vec <- legacy_dcov_spectra_matvec_cuda_handle_apply(handle, vector_rhs)
 assert_true(is.numeric(reuse_vec$values),
             "CUDA handle matvec should preserve vector rhs shape")
 assert_true(max(abs(reuse_vec$values - cpu_vec)) < 1e-10,
             "CUDA handle vector matvec should match host dense multiplication")
+assert_true(identical(as.integer(reuse_vec$device_workspace_reuse_count), 1L),
+            "CUDA handle vector matvec should reuse the grown RHS/output workspace")
+assert_true(identical(as.integer(reuse_vec$workspace_realloc_count), 0L),
+            "CUDA handle vector matvec should not shrink/reallocate workspace")
 
 legacy_dcov_spectra_matvec_cuda_handle_free(handle)
 assert_error(

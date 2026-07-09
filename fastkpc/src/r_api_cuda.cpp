@@ -1993,8 +1993,15 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_apply(
     Rcpp::Named("kernel_launch_count") = result.kernel_launch_count,
     Rcpp::Named("device_matrix_reuse_count") =
       result.device_matrix_reuse_count,
+    Rcpp::Named("device_workspace_reuse_count") =
+      result.device_workspace_reuse_count,
+    Rcpp::Named("workspace_realloc_count") =
+      result.workspace_realloc_count,
     Rcpp::Named("matrix_bytes") = static_cast<double>(result.matrix_bytes),
+    Rcpp::Named("workspace_bytes") =
+      static_cast<double>(result.workspace_bytes),
     Rcpp::Named("matrix_h2d_ms") = result.matrix_h2d_ms,
+    Rcpp::Named("workspace_alloc_ms") = result.workspace_alloc_ms,
     Rcpp::Named("alloc_ms") = result.alloc_ms,
     Rcpp::Named("h2d_ms") = result.h2d_ms,
     Rcpp::Named("kernel_ms") = result.kernel_ms,
