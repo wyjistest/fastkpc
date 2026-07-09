@@ -32,6 +32,57 @@ data <- cbind(
   x5 = stats::rnorm(n)
 )
 
+timeout_ref_path <- tempfile("legacy-dcov-cpp-batch-timeout-reference-",
+                             fileext = ".rds")
+timeout_reference <- list(
+  skeleton = list(
+    adjacency = matrix(0L, ncol(data), ncol(data)),
+    n.edgetests = integer(),
+    scheduler_diagnostics = list(summary = list())
+  )
+)
+saveRDS(timeout_reference, timeout_ref_path)
+timeout_dir <- tempfile("legacy-dcov-cpp-batch-min-size-timeout-")
+timeout_artifact <- fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact(
+  data = data,
+  output_dir = timeout_dir,
+  artifact_name = "legacy_dcov_cpp_batch_min_size_timeout_test",
+  alpha = 0.08,
+  max_conditioning_size = 3L,
+  batch_mode = "round",
+  min_sizes = c(1L),
+  num_cores = 2L,
+  reference_result_path = timeout_ref_path,
+  candidate_timeout_sec = 0
+)
+timeout_summary <- utils::read.csv(timeout_artifact$paths$summary_csv,
+                                   stringsAsFactors = FALSE)
+timeout_progress <- utils::read.csv(timeout_artifact$paths$progress_csv,
+                                    stringsAsFactors = FALSE)
+timeout_required <- c("run_status", "timeout", "timeout_sec")
+timeout_missing <- setdiff(timeout_required, names(timeout_summary))
+assert_true(length(timeout_missing) == 0L,
+            paste("timeout summary missing", timeout_missing[[1L]]))
+timeout_candidate <- timeout_summary[
+  timeout_summary$route == "candidate", , drop = FALSE
+]
+assert_true(nrow(timeout_candidate) == 1L,
+            "timeout artifact should contain one candidate row")
+assert_true(identical(timeout_candidate$run_status[[1L]], "timeout"),
+            "timeout candidate should record timeout run status")
+assert_true(isTRUE(timeout_candidate$timeout[[1L]]),
+            "timeout candidate should mark timeout TRUE")
+assert_true(timeout_candidate$timeout_sec[[1L]] == 0,
+            "timeout candidate should record configured timeout")
+assert_true(is.na(timeout_candidate$shd[[1L]]),
+            "timeout candidate should leave correctness fields unknown")
+assert_true(any(timeout_progress$route == "candidate" &
+                  timeout_progress$event == "timeout" &
+                  timeout_progress$status == "timeout"),
+            "artifact progress should record candidate timeout")
+assert_true(length(timeout_artifact$candidates) == 0L,
+            "timeout artifact should not store a completed candidate result")
+
 out_dir <- tempfile("legacy-dcov-cpp-batch-min-size-artifact-")
 artifact <- fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact(
   data = data,

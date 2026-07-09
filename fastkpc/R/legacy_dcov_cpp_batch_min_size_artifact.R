@@ -20,6 +20,33 @@ fastkpc_legacy_dcov_batch_summary_value <- function(summary, name, default) {
   if (is.null(value)) default else value
 }
 
+fastkpc_legacy_dcov_batch_timeout_enabled <- function(candidate_timeout_sec) {
+  !is.null(candidate_timeout_sec) &&
+    length(candidate_timeout_sec) > 0L &&
+    !is.na(candidate_timeout_sec[[1L]])
+}
+
+fastkpc_legacy_dcov_batch_timeout_error <- function(
+    timeout_sec, elapsed_sec, message = NULL) {
+  if (is.null(message)) {
+    message <- paste0("candidate exceeded timeout_sec=", timeout_sec)
+  }
+  structure(
+    list(
+      message = message,
+      call = NULL,
+      timeout_sec = as.numeric(timeout_sec),
+      elapsed_sec = as.numeric(elapsed_sec)
+    ),
+    class = c("fastkpc_legacy_dcov_batch_timeout", "error", "condition")
+  )
+}
+
+fastkpc_legacy_dcov_batch_is_time_limit <- function(error) {
+  grepl("reached elapsed time limit|reached CPU time limit",
+        conditionMessage(error))
+}
+
 fastkpc_legacy_dcov_batch_progress_row <- function(
     artifact_name, route, batch_mode, batch_min_size, event, status,
     elapsed_sec = NA_real_, message = NA_character_) {
@@ -116,10 +143,66 @@ fastkpc_legacy_dcov_batch_run_once <- function(
   )
 }
 
+fastkpc_legacy_dcov_batch_run_once_with_timeout <- function(
+    data, alpha, max_conditioning_size, index, numCol, num_cores,
+    batch_mode = "", batch_min_size = NA_integer_, trace_level = "summary",
+    candidate_timeout_sec = NULL) {
+  if (!fastkpc_legacy_dcov_batch_timeout_enabled(candidate_timeout_sec)) {
+    return(fastkpc_legacy_dcov_batch_run_once(
+      data = data,
+      alpha = alpha,
+      max_conditioning_size = max_conditioning_size,
+      index = index,
+      numCol = numCol,
+      num_cores = num_cores,
+      batch_mode = batch_mode,
+      batch_min_size = batch_min_size,
+      trace_level = trace_level
+    ))
+  }
+
+  timeout_sec <- as.numeric(candidate_timeout_sec[[1L]])
+  start <- proc.time()[["elapsed"]]
+  if (timeout_sec <= 0) {
+    stop(fastkpc_legacy_dcov_batch_timeout_error(
+      timeout_sec = timeout_sec,
+      elapsed_sec = 0,
+      message = "candidate timed out before execution"
+    ))
+  }
+
+  setTimeLimit(cpu = Inf, elapsed = timeout_sec, transient = TRUE)
+  on.exit(setTimeLimit(cpu = Inf, elapsed = Inf, transient = FALSE), add = TRUE)
+  tryCatch(
+    fastkpc_legacy_dcov_batch_run_once(
+      data = data,
+      alpha = alpha,
+      max_conditioning_size = max_conditioning_size,
+      index = index,
+      numCol = numCol,
+      num_cores = num_cores,
+      batch_mode = batch_mode,
+      batch_min_size = batch_min_size,
+      trace_level = trace_level
+    ),
+    error = function(e) {
+      if (fastkpc_legacy_dcov_batch_is_time_limit(e)) {
+        stop(fastkpc_legacy_dcov_batch_timeout_error(
+          timeout_sec = timeout_sec,
+          elapsed_sec = proc.time()[["elapsed"]] - start,
+          message = conditionMessage(e)
+        ))
+      }
+      stop(e)
+    }
+  )
+}
+
 fastkpc_legacy_dcov_batch_summary_row <- function(
     artifact_name, route, batch_mode, batch_min_size, run, reference,
     n, p, alpha, max_conditioning_size, index, numCol,
-    reference_source, reference_result_path) {
+    reference_source, reference_result_path,
+    run_status = "ok", timeout = FALSE, timeout_sec = NA_real_) {
   skeleton <- run$value$skeleton
   reference_skeleton <- reference$value$skeleton
   summary <- skeleton$scheduler_diagnostics$summary %||% list()
@@ -136,6 +219,9 @@ fastkpc_legacy_dcov_batch_summary_row <- function(
     p = as.integer(p),
     reference_source = reference_source,
     reference_result_path = reference_result_path %||% NA_character_,
+    run_status = run_status,
+    timeout = isTRUE(timeout),
+    timeout_sec = as.numeric(timeout_sec),
     alpha = as.numeric(alpha),
     max_conditioning_size = as.integer(max_conditioning_size),
     index = as.integer(index),
@@ -217,6 +303,54 @@ fastkpc_legacy_dcov_batch_summary_row <- function(
   )
 }
 
+fastkpc_legacy_dcov_batch_timeout_summary_row <- function(
+    artifact_name, batch_mode, batch_min_size, reference,
+    n, p, alpha, max_conditioning_size, index, numCol,
+    reference_source, reference_result_path, timeout_sec, elapsed_sec) {
+  reference_skeleton <- reference$value$skeleton
+  reference_edge_count <- as.integer(sum(unname(reference_skeleton$adjacency)) / 2L)
+  data.frame(
+    artifact = artifact_name,
+    route = "candidate",
+    batch_mode = if (nzchar(batch_mode)) batch_mode else "none",
+    batch_min_size = as.integer(batch_min_size %||% NA_integer_),
+    n = as.integer(n),
+    p = as.integer(p),
+    reference_source = reference_source,
+    reference_result_path = reference_result_path %||% NA_character_,
+    run_status = "timeout",
+    timeout = TRUE,
+    timeout_sec = as.numeric(timeout_sec),
+    alpha = as.numeric(alpha),
+    max_conditioning_size = as.integer(max_conditioning_size),
+    index = as.integer(index),
+    numCol = as.integer(numCol),
+    edge_count = NA_integer_,
+    reference_edge_count = reference_edge_count,
+    shd = NA_integer_,
+    adjacency_identical = NA,
+    n_edgetests_identical = NA,
+    n_edgetests_exact = NA,
+    n_edgetests = NA_character_,
+    reference_n_edgetests =
+      paste(reference_skeleton$n.edgetests, collapse = "|"),
+    elapsed_sec = as.numeric(elapsed_sec),
+    legacy_dcov_cpp_backend_count = NA_integer_,
+    legacy_dcov_cpp_backend_ms = NA_real_,
+    legacy_dcov_cpp_batch_backend_count = NA_integer_,
+    legacy_dcov_cpp_batch_backend_pair_count = NA_integer_,
+    legacy_dcov_cpp_batch_backend_ms = NA_real_,
+    legacy_dcov_cpp_batch_backend_max_batch_size = NA_integer_,
+    legacy_dcov_cpp_batch_backend_mean_batch_size = NA_real_,
+    legacy_dcov_cpp_batch_candidate_pair_count = NA_integer_,
+    legacy_dcov_cpp_batch_pair_coverage_ratio = NA_real_,
+    legacy_dcov_cpp_batch_skipped_count = NA_integer_,
+    legacy_dcov_cpp_batch_skipped_pair_count = NA_integer_,
+    legacy_dcov_cpp_batch_skipped_pair_ratio = NA_real_,
+    stringsAsFactors = FALSE
+  )
+}
+
 fastkpc_legacy_dcov_batch_level_rows <- function(
     route, batch_mode, batch_min_size, run) {
   skeleton <- run$value$skeleton
@@ -252,8 +386,16 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
     residual_affinity = "s",
     num_cores = NULL,
     trace_level = "summary",
-    reference_result_path = NULL) {
+    reference_result_path = NULL,
+    candidate_timeout_sec = NULL) {
   batch_mode <- match.arg(batch_mode)
+  if (fastkpc_legacy_dcov_batch_timeout_enabled(candidate_timeout_sec)) {
+    candidate_timeout_sec <- as.numeric(candidate_timeout_sec[[1L]])
+    if (!is.finite(candidate_timeout_sec) || candidate_timeout_sec < 0) {
+      stop("candidate_timeout_sec must be NULL or a non-negative finite number",
+           call. = FALSE)
+    }
+  }
   if (is.null(data)) {
     if (!file.exists(data_path)) {
       stop("real data fixture not found: ", data_path, call. = FALSE)
@@ -408,7 +550,7 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
       )
     )
     candidate <- tryCatch(
-      fastkpc_legacy_dcov_batch_run_once(
+      fastkpc_legacy_dcov_batch_run_once_with_timeout(
         data = data,
         alpha = alpha,
         max_conditioning_size = max_conditioning_size,
@@ -417,8 +559,42 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
         num_cores = num_cores,
         batch_mode = batch_mode,
         batch_min_size = min_size,
-        trace_level = trace_level
+        trace_level = trace_level,
+        candidate_timeout_sec = candidate_timeout_sec
       ),
+      fastkpc_legacy_dcov_batch_timeout = function(e) {
+        fastkpc_legacy_dcov_batch_append_progress(
+          paths$progress_csv,
+          fastkpc_legacy_dcov_batch_progress_row(
+            artifact_name = artifact_name,
+            route = "candidate",
+            batch_mode = batch_mode,
+            batch_min_size = min_size,
+            event = "timeout",
+            status = "timeout",
+            elapsed_sec = e$elapsed_sec,
+            message = conditionMessage(e)
+          )
+        )
+        rows[[length(rows) + 1L]] <<-
+          fastkpc_legacy_dcov_batch_timeout_summary_row(
+            artifact_name = artifact_name,
+            batch_mode = batch_mode,
+            batch_min_size = min_size,
+            reference = reference,
+            alpha = alpha,
+            max_conditioning_size = max_conditioning_size,
+            n = nrow(data),
+            p = ncol(data),
+            index = index,
+            numCol = numCol,
+            reference_source = reference_source,
+            reference_result_path = reference_result_path,
+            timeout_sec = e$timeout_sec,
+            elapsed_sec = e$elapsed_sec
+          )
+        NULL
+      },
       error = function(e) {
         fastkpc_legacy_dcov_batch_append_progress(
           paths$progress_csv,
@@ -435,6 +611,9 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
         stop(e)
       }
     )
+    if (is.null(candidate)) {
+      break
+    }
     fastkpc_legacy_dcov_batch_append_progress(
       paths$progress_csv,
       fastkpc_legacy_dcov_batch_progress_row(
@@ -463,7 +642,13 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
       index = index,
       numCol = numCol,
       reference_source = reference_source,
-      reference_result_path = reference_result_path
+      reference_result_path = reference_result_path,
+      timeout_sec =
+        if (fastkpc_legacy_dcov_batch_timeout_enabled(candidate_timeout_sec)) {
+          candidate_timeout_sec
+        } else {
+          NA_real_
+        }
     )
     by_level_rows[[length(by_level_rows) + 1L]] <-
       fastkpc_legacy_dcov_batch_level_rows(
@@ -510,8 +695,12 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
     "",
     paste(
       sprintf(
-        "- min_size=%s: SHD=%s, elapsed=%s sec, batch coverage=%s, skipped=%s",
+        paste0(
+          "- min_size=%s: status=%s, SHD=%s, elapsed=%s sec, ",
+          "batch coverage=%s, skipped=%s"
+        ),
         candidate_md$batch_min_size,
+        candidate_md$run_status,
         candidate_md$shd,
         signif(candidate_md$elapsed_sec, 8L),
         signif(candidate_md$legacy_dcov_cpp_batch_pair_coverage_ratio, 6L),

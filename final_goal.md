@@ -4334,10 +4334,18 @@ batch-mode, min-size, status, elapsed time, and timestamp. If a full candidate
 is terminated before final artifacts are written, `progress.csv` should still
 identify the active route and min-size candidate that was running.
 
+The runner also accepts an optional `candidate_timeout_sec` guard. The default
+is `NULL`, preserving existing behavior. When set, a timed-out candidate writes
+a candidate `timeout` event to `progress.csv` and a `summary.csv` row with
+`run_status = timeout`, `timeout = TRUE`, `timeout_sec`, elapsed time, and
+unknown correctness/batch-counter fields as `NA`, then continues artifact
+finalization instead of leaving no summary files. The sweep stops after a
+timeout rather than launching additional candidates.
+
 Full-gate shape:
 
 ```bash
-Rscript -e 'source("fastkpc/R/legacy_dcov_cpp_batch_min_size_artifact.R"); fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact(output_dir = "fastkpc/artifacts/legacy_dcov_cpp_batch_round_min_size_sweep_v1", artifact_name = "legacy_dcov_cpp_batch_round_min_size_sweep_v1", batch_mode = "round", min_sizes = c(1L, 4L, 8L, 16L, 32L, 64L), alpha = 0.1, max_conditioning_size = 46L, reference_result_path = "fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds")'
+Rscript -e 'source("fastkpc/R/legacy_dcov_cpp_batch_min_size_artifact.R"); fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact(output_dir = "fastkpc/artifacts/legacy_dcov_cpp_batch_round_min_size_sweep_v1", artifact_name = "legacy_dcov_cpp_batch_round_min_size_sweep_v1", batch_mode = "round", min_sizes = c(1L, 4L, 8L, 16L, 32L, 64L), alpha = 0.1, max_conditioning_size = 46L, reference_result_path = "fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds", candidate_timeout_sec = 1800)'
 ```
 
 When `reference_result_path` is provided, the artifact reuses the existing
@@ -4380,6 +4388,10 @@ margin before producing any completed artifact. Do not continue broad
 round-min-size full sweeps without either a stricter timeout/progress mechanism
 or a structural change to round-mode residual/input preparation.
 ```
+
+The artifact runner now has the timeout/progress guardrail via
+`candidate_timeout_sec`; this does not change the conclusion that round
+`min_size=16` is not a promotion candidate.
 
 Gate:
 
