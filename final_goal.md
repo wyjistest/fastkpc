@@ -6875,6 +6875,94 @@ decision:
   device-resident implementation.
 ```
 
+Native one-call cuda_spectra progress timeout artifact:
+
+```text
+artifact:
+  fastkpc/artifacts/
+    compatible_cuda_skeleton_threaded_round_cuda_spectra_progress_timeout_600s_v1
+
+scope:
+  native one-call compatible CUDA skeleton facade
+  real 351x48 fixture, all columns
+  reference loaded from:
+    fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/
+      compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds
+
+run shape:
+  FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=20
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=20
+  FASTKPC_NATIVE_CUDA_LOWRANK_PROGRESS_INTERVAL=64
+  dcov_batch = "round"
+  low_rank = "cuda_spectra"
+  timeout = 600 sec
+
+result:
+  run_status = timeout
+  timeout = TRUE
+  elapsed_sec = 600
+  reference_edge_count = 110
+  candidate_edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+
+native progress totals:
+  native_progress rows = 1422
+  dcov_cuda_lowrank_batch_start = 133
+  dcov_cuda_lowrank_batch_complete = 132
+  dcov_cuda_lowrank_pair_progress = 1146
+  max cumulative CUDA lowrank pairs reported = 69113
+
+level 0:
+  batch_start / batch_complete / pair_progress = 2 / 2 / 35
+  level_complete elapsed_ms = 15975.410
+  tests_replayed = 2213
+  deletions = 43
+
+level 1:
+  batch_start / batch_complete / pair_progress = 92 / 92 / 871
+  provider_call_ms = 5169.496
+  dcov_call_ms = 383348.780
+  level_complete elapsed_ms = 388702.095
+  tests_replayed = 52659
+  ignored = 43461
+  deletions = 546
+  max cumulative CUDA lowrank pairs reported = 54872
+
+level 2:
+  provider_complete elapsed_ms = 90738.961
+  provider_call_ms = 90423.339
+  batch_start / batch_complete / pair_progress = 39 / 38 / 240
+  last event before timeout = dcov_cuda_lowrank_pair_progress
+  last progress elapsed_ms = 195183.900
+  tests_replayed column = 69113 cumulative CUDA lowrank pairs
+  ignored = 127488
+  deletions = 235
+  no level_complete before timeout
+```
+
+Decision:
+
+```text
+The progress rows work on the full native cuda_spectra route and make the
+timeout auditable below level granularity. The route is still not promotable:
+no full 351x48 candidate skeleton was returned, so SHD, n.edgetests exactness,
+and fallback totals remain unproven.
+
+The diagnostic strengthens the structural conclusion from the 900 second gate.
+The native cuda_spectra path is not blocked by residual provider setup alone:
+level 1 spends about 383 seconds in dCov and level 2 continues advancing
+pair-by-pair inside CUDA lowrank batches until timeout. The `tests_replayed`
+field in cuda_spectra batch progress rows is intentionally reused as cumulative
+CUDA lowrank pair count, not canonical skeleton replay count.
+
+The next aligned implementation step is not another full promotion gate and not
+more R-level worker scheduling. It is a native dCov data-plane change: replace
+the current pair-serial CUDA lowrank loop with a batched/device-resident
+lowrank implementation, or split native CUDA lowrank work across persistent
+parallel workers without losing canonical replay.
+```
+
 ---
 
 ## 9. Final success definition
