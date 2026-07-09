@@ -390,8 +390,11 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_cpp_batch_backend_max_batch_size = 0L,
     dcov_cpp_batch_backend_mean_batch_size = 0,
     dcov_cpp_batch_min_size = 1L,
+    dcov_cpp_batch_candidate_pair_count = 0L,
+    dcov_cpp_batch_pair_coverage_ratio = 0,
     dcov_cpp_batch_skipped_count = 0L,
     dcov_cpp_batch_skipped_pair_count = 0L,
+    dcov_cpp_batch_skipped_pair_ratio = 0,
     dcov_cpp_batch_workspace_reuse_count = 0L,
     dcov_cpp_batch_distance_workspace_reuse_count = 0L,
     dcov_cpp_batch_statistic_moment_workspace_reuse_count = 0L,
@@ -861,12 +864,37 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     dcov_cpp_batch_min_size =
       max(as.integer(a$dcov_cpp_batch_min_size),
           as.integer(b$dcov_cpp_batch_min_size)),
+    dcov_cpp_batch_candidate_pair_count =
+      as.integer(a$dcov_cpp_batch_candidate_pair_count) +
+        as.integer(b$dcov_cpp_batch_candidate_pair_count),
+    dcov_cpp_batch_pair_coverage_ratio = {
+      total_candidates <- as.integer(a$dcov_cpp_batch_candidate_pair_count) +
+        as.integer(b$dcov_cpp_batch_candidate_pair_count)
+      if (total_candidates > 0L) {
+        (as.integer(a$dcov_cpp_batch_backend_pair_count) +
+           as.integer(b$dcov_cpp_batch_backend_pair_count)) /
+          total_candidates
+      } else {
+        0
+      }
+    },
     dcov_cpp_batch_skipped_count =
       as.integer(a$dcov_cpp_batch_skipped_count) +
         as.integer(b$dcov_cpp_batch_skipped_count),
     dcov_cpp_batch_skipped_pair_count =
       as.integer(a$dcov_cpp_batch_skipped_pair_count) +
         as.integer(b$dcov_cpp_batch_skipped_pair_count),
+    dcov_cpp_batch_skipped_pair_ratio = {
+      total_candidates <- as.integer(a$dcov_cpp_batch_candidate_pair_count) +
+        as.integer(b$dcov_cpp_batch_candidate_pair_count)
+      if (total_candidates > 0L) {
+        (as.integer(a$dcov_cpp_batch_skipped_pair_count) +
+           as.integer(b$dcov_cpp_batch_skipped_pair_count)) /
+          total_candidates
+      } else {
+        0
+      }
+    },
     dcov_cpp_batch_workspace_reuse_count =
       as.integer(a$dcov_cpp_batch_workspace_reuse_count) +
         as.integer(b$dcov_cpp_batch_workspace_reuse_count),
@@ -1673,8 +1701,11 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_batch_backend_max_batch_size = integer(),
       dcov_cpp_batch_backend_mean_batch_size = numeric(),
       dcov_cpp_batch_min_size = integer(),
+      dcov_cpp_batch_candidate_pair_count = integer(),
+      dcov_cpp_batch_pair_coverage_ratio = numeric(),
       dcov_cpp_batch_skipped_count = integer(),
       dcov_cpp_batch_skipped_pair_count = integer(),
+      dcov_cpp_batch_skipped_pair_ratio = numeric(),
       dcov_cpp_batch_workspace_reuse_count = integer(),
       dcov_cpp_batch_distance_workspace_reuse_count = integer(),
       dcov_cpp_batch_statistic_moment_workspace_reuse_count = integer(),
@@ -1955,10 +1986,16 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.numeric(metrics$dcov_cpp_batch_backend_mean_batch_size),
       dcov_cpp_batch_min_size =
         as.integer(metrics$dcov_cpp_batch_min_size),
+      dcov_cpp_batch_candidate_pair_count =
+        as.integer(metrics$dcov_cpp_batch_candidate_pair_count),
+      dcov_cpp_batch_pair_coverage_ratio =
+        as.numeric(metrics$dcov_cpp_batch_pair_coverage_ratio),
       dcov_cpp_batch_skipped_count =
         as.integer(metrics$dcov_cpp_batch_skipped_count),
       dcov_cpp_batch_skipped_pair_count =
         as.integer(metrics$dcov_cpp_batch_skipped_pair_count),
+      dcov_cpp_batch_skipped_pair_ratio =
+        as.numeric(metrics$dcov_cpp_batch_skipped_pair_ratio),
       dcov_cpp_batch_workspace_reuse_count =
         as.integer(metrics$dcov_cpp_batch_workspace_reuse_count),
       dcov_cpp_batch_distance_workspace_reuse_count =
@@ -4716,6 +4753,22 @@ fastkpc_legacy_dcov_cpp_batch_min_size <- function() {
   }
 }
 
+fastkpc_legacy_runtime_refresh_dcov_cpp_batch_ratios <- function(metrics) {
+  candidate_count <- as.integer(metrics$dcov_cpp_batch_candidate_pair_count)
+  if (candidate_count > 0L) {
+    metrics$dcov_cpp_batch_pair_coverage_ratio <-
+      as.numeric(metrics$dcov_cpp_batch_backend_pair_count) /
+        as.numeric(candidate_count)
+    metrics$dcov_cpp_batch_skipped_pair_ratio <-
+      as.numeric(metrics$dcov_cpp_batch_skipped_pair_count) /
+        as.numeric(candidate_count)
+  } else {
+    metrics$dcov_cpp_batch_pair_coverage_ratio <- 0
+    metrics$dcov_cpp_batch_skipped_pair_ratio <- 0
+  }
+  metrics
+}
+
 fastkpc_legacy_prepare_dcov_cpp <- function(enabled) {
   if (!isTRUE(enabled)) return(invisible(FALSE))
   if (!exists("fastkpc_legacy_dcov_gamma_cpp_oracle", mode = "function")) {
@@ -4904,8 +4957,11 @@ fastkpc_legacy_run_dcov_cpp_backend_batch <- function(
     as.integer(metrics$dcov_cpp_batch_min_size), min_batch_size
   )
   if (batch_size == 0L) {
+    metrics <- fastkpc_legacy_runtime_refresh_dcov_cpp_batch_ratios(metrics)
     return(list(p.value = numeric(), metrics = metrics, used_cpp = TRUE))
   }
+  metrics$dcov_cpp_batch_candidate_pair_count <-
+    metrics$dcov_cpp_batch_candidate_pair_count + batch_size
   if (batch_size < min_batch_size) {
     metrics$dcov_cpp_batch_skipped_count <-
       metrics$dcov_cpp_batch_skipped_count + 1L
@@ -4928,6 +4984,7 @@ fastkpc_legacy_run_dcov_cpp_backend_batch <- function(
     }
     metrics$ci_total_ms <- metrics$ci_total_ms +
       (proc.time()[["elapsed"]] - scalar_start) * 1000
+    metrics <- fastkpc_legacy_runtime_refresh_dcov_cpp_batch_ratios(metrics)
     return(list(p.value = p_values, metrics = metrics, used_cpp = TRUE))
   }
   backend_start <- proc.time()[["elapsed"]]
@@ -4991,6 +5048,7 @@ fastkpc_legacy_run_dcov_cpp_backend_batch <- function(
     metrics$dcov_cpp_batch_column_copy_count <-
       metrics$dcov_cpp_batch_column_copy_count +
         cpp_batch_diag_value("column_copy_count")
+    metrics <- fastkpc_legacy_runtime_refresh_dcov_cpp_batch_ratios(metrics)
     return(list(p.value = as.numeric(cpp$p.value),
                 metrics = metrics, used_cpp = TRUE))
   }
@@ -5013,6 +5071,7 @@ fastkpc_legacy_run_dcov_cpp_backend_batch <- function(
     metrics$dcov_gamma_count <- metrics$dcov_gamma_count + 1L
     p_values[[col]] <- as.numeric(backend$result$p.value)
   }
+  metrics <- fastkpc_legacy_runtime_refresh_dcov_cpp_batch_ratios(metrics)
   list(p.value = p_values, metrics = metrics, used_cpp = FALSE)
 }
 
@@ -6354,10 +6413,16 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.numeric(runtime_total$dcov_cpp_batch_backend_mean_batch_size),
         legacy_dcov_cpp_batch_min_size =
           as.integer(runtime_total$dcov_cpp_batch_min_size),
+        legacy_dcov_cpp_batch_candidate_pair_count =
+          as.integer(runtime_total$dcov_cpp_batch_candidate_pair_count),
+        legacy_dcov_cpp_batch_pair_coverage_ratio =
+          as.numeric(runtime_total$dcov_cpp_batch_pair_coverage_ratio),
         legacy_dcov_cpp_batch_skipped_count =
           as.integer(runtime_total$dcov_cpp_batch_skipped_count),
         legacy_dcov_cpp_batch_skipped_pair_count =
           as.integer(runtime_total$dcov_cpp_batch_skipped_pair_count),
+        legacy_dcov_cpp_batch_skipped_pair_ratio =
+          as.numeric(runtime_total$dcov_cpp_batch_skipped_pair_ratio),
         legacy_dcov_cpp_batch_workspace_reuse_count =
           as.integer(runtime_total$dcov_cpp_batch_workspace_reuse_count),
         legacy_dcov_cpp_batch_distance_workspace_reuse_count =

@@ -251,8 +251,11 @@ batch_backend_fields <- c(
   "legacy_dcov_cpp_batch_backend_max_batch_size",
   "legacy_dcov_cpp_batch_backend_mean_batch_size",
   "legacy_dcov_cpp_batch_min_size",
+  "legacy_dcov_cpp_batch_candidate_pair_count",
+  "legacy_dcov_cpp_batch_pair_coverage_ratio",
   "legacy_dcov_cpp_batch_skipped_count",
   "legacy_dcov_cpp_batch_skipped_pair_count",
+  "legacy_dcov_cpp_batch_skipped_pair_ratio",
   "legacy_dcov_cpp_batch_workspace_reuse_count",
   "legacy_dcov_cpp_batch_distance_workspace_reuse_count",
   "legacy_dcov_cpp_batch_statistic_moment_workspace_reuse_count",
@@ -287,6 +290,19 @@ assert_true(identical(
   as.integer(chunk_batch_summary$legacy_dcov_cpp_backend_count),
   as.integer(chunk_batch_summary$legacy_dcov_gamma_count)),
   "chunk-batched C++ backend count should still match dCov call count")
+assert_true(identical(
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_candidate_pair_count),
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_backend_pair_count +
+               chunk_batch_summary$legacy_dcov_cpp_batch_skipped_pair_count)),
+  "chunk-batched dCov candidate pairs should cover batch and skipped pairs")
+assert_true(identical(
+  as.numeric(chunk_batch_summary$legacy_dcov_cpp_batch_pair_coverage_ratio),
+  1),
+  "chunk-batched dCov should report full pair coverage by default")
+assert_true(identical(
+  as.numeric(chunk_batch_summary$legacy_dcov_cpp_batch_skipped_pair_ratio),
+  0),
+  "chunk-batched dCov should report zero skipped pair ratio by default")
 assert_true(identical(
   as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_workspace_reuse_count),
   as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_backend_count)),
@@ -337,6 +353,19 @@ assert_true(identical(
   as.integer(round_batch_summary$legacy_dcov_cpp_backend_count),
   as.integer(round_batch_summary$legacy_dcov_gamma_count)),
   "round-batched C++ backend count should still match dCov call count")
+assert_true(identical(
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_candidate_pair_count),
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_backend_pair_count +
+               round_batch_summary$legacy_dcov_cpp_batch_skipped_pair_count)),
+  "round-batched dCov candidate pairs should cover batch and skipped pairs")
+assert_true(identical(
+  as.numeric(round_batch_summary$legacy_dcov_cpp_batch_pair_coverage_ratio),
+  1),
+  "round-batched dCov should report full pair coverage by default")
+assert_true(identical(
+  as.numeric(round_batch_summary$legacy_dcov_cpp_batch_skipped_pair_ratio),
+  0),
+  "round-batched dCov should report zero skipped pair ratio by default")
 assert_true(identical(
   as.integer(round_batch_summary$legacy_dcov_cpp_batch_workspace_reuse_count),
   as.integer(round_batch_summary$legacy_dcov_cpp_batch_backend_count)),
@@ -416,6 +445,18 @@ assert_true(identical(
   as.integer(round_min_batch_summary$legacy_dcov_cpp_batch_skipped_pair_count),
   as.integer(round_min_batch_summary$legacy_dcov_cpp_batch_round_prepare_task_count)),
   "min-sized round dCov route should report skipped pairs for prepared tests")
+assert_true(identical(
+  as.integer(round_min_batch_summary$legacy_dcov_cpp_batch_candidate_pair_count),
+  as.integer(round_min_batch_summary$legacy_dcov_cpp_batch_skipped_pair_count)),
+  "min-sized round dCov route candidate pairs should all be skipped")
+assert_true(identical(
+  as.numeric(round_min_batch_summary$legacy_dcov_cpp_batch_pair_coverage_ratio),
+  0),
+  "min-sized round dCov route should report zero batch pair coverage")
+assert_true(identical(
+  as.numeric(round_min_batch_summary$legacy_dcov_cpp_batch_skipped_pair_ratio),
+  1),
+  "min-sized round dCov route should report full skipped pair ratio")
 assert_true(identical(
   as.integer(round_min_batch_summary$legacy_dcov_cpp_backend_count),
   as.integer(round_min_batch_summary$legacy_dcov_gamma_count)),

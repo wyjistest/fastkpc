@@ -4287,13 +4287,28 @@ existing scalar C++ dCov authority. The summary reports:
 
 ```text
 legacy_dcov_cpp_batch_min_size
+legacy_dcov_cpp_batch_candidate_pair_count
+legacy_dcov_cpp_batch_pair_coverage_ratio
 legacy_dcov_cpp_batch_skipped_count
 legacy_dcov_cpp_batch_skipped_pair_count
+legacy_dcov_cpp_batch_skipped_pair_ratio
 ```
 
 This is diagnostic/tuning plumbing for the experimental batch routes only; it
 does not promote chunk or round batching over the recommended S-affinity route
 without a full 351x48 wall-time win.
+
+The coverage fields are intended to make min-size experiments interpretable:
+
+```text
+candidate_pair_count = pairs that reached the experimental batch vehicle
+pair_coverage_ratio  = actually batched pairs / candidate pairs
+skipped_pair_ratio   = min-size skipped pairs / candidate pairs
+```
+
+For a promotable full gate, filtering out tiny fragmented batches must not hide
+most of the dCov workload from the batch route; coverage and wall time have to
+be evaluated together.
 
 Gate:
 
