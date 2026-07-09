@@ -3592,6 +3592,45 @@ decision:
   work must change the execution boundary rather than rerunning facade variants.
 ```
 
+Native residual-provider seam timing checkpoint:
+
+```text
+status: implemented as diagnostics, not a promotion route
+scope:
+  C_precision_run_skeleton_residual_provider_legacy_dcov_native()
+  fastkpc_run_compatible_cuda_skeleton_artifact()
+
+new summary fields:
+  residual_provider_call_ms
+  residual_provider_matrix_copy_ms
+  residual_provider_total_ms
+  legacy_dcov_native_scalar_materialize_ms
+  legacy_dcov_native_scalar_call_ms
+  legacy_dcov_native_batch_materialize_ms
+  legacy_dcov_native_batch_call_ms
+
+new per-level fields:
+  residual_provider_request_count
+  residual_provider_call_ms
+  residual_provider_matrix_copy_ms
+  residual_provider_total_ms
+  legacy_dcov_native_materialize_ms
+  legacy_dcov_native_call_ms
+
+tests:
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+decision:
+  The current facade candidates are non-promotable, but the native one-call
+  checkpoint now measures the exact hidden provider seam that Phase 5 must
+  replace: R residual-provider callback time, provider matrix copy time, and
+  native dCov materialization/call time. The next implementation step should
+  either satisfy the same level-residual-matrix-v1 contract from a native/CUDA
+  residual executor or use these fields in a full/subset artifact to quantify
+  the cost of the remaining R provider boundary.
+```
+
 ### Gate
 
 ```text

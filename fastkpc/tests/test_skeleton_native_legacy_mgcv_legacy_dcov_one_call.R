@@ -276,6 +276,46 @@ assert_true(identical(as.integer(one_call$summary$residual_provider_batch_count)
 assert_true(identical(as.integer(one_call$summary$residual_provider_matrix_cell_count),
                       as.integer(nrow(data) * one_call$summary$residual_provider_request_count)),
             "one-call wrapper should report residual provider matrix cell payload")
+provider_timing_fields <- c(
+  "residual_provider_call_ms",
+  "residual_provider_matrix_copy_ms",
+  "residual_provider_total_ms",
+  "legacy_dcov_native_batch_materialize_ms",
+  "legacy_dcov_native_batch_call_ms"
+)
+missing_provider_timing <- setdiff(provider_timing_fields,
+                                   names(one_call_batch$summary))
+assert_true(length(missing_provider_timing) == 0L,
+            paste("one-call level-batched summary missing provider seam timing",
+                  missing_provider_timing[[1L]]))
+assert_true(one_call_batch$summary$residual_provider_call_ms >= 0,
+            "one-call wrapper should time residual provider calls")
+assert_true(one_call_batch$summary$residual_provider_matrix_copy_ms >= 0,
+            "one-call wrapper should time residual provider matrix copies")
+assert_true(one_call_batch$summary$residual_provider_total_ms >=
+              one_call_batch$summary$residual_provider_call_ms,
+            "one-call wrapper residual provider total should include call time")
+assert_true(one_call_batch$summary$legacy_dcov_native_batch_materialize_ms >= 0,
+            "one-call level-batched wrapper should time dCov batch materialization")
+assert_true(one_call_batch$summary$legacy_dcov_native_batch_call_ms >= 0,
+            "one-call level-batched wrapper should time dCov batch calls")
+level_timing_fields <- c(
+  "residual_provider_request_count",
+  "residual_provider_call_ms",
+  "residual_provider_matrix_copy_ms",
+  "residual_provider_total_ms",
+  "legacy_dcov_native_materialize_ms",
+  "legacy_dcov_native_call_ms"
+)
+missing_level_timing <- setdiff(level_timing_fields, names(one_call_batch$levels))
+assert_true(length(missing_level_timing) == 0L,
+            paste("one-call level rows missing provider seam timing",
+                  missing_level_timing[[1L]]))
+assert_true(sum(as.integer(one_call_batch$levels$residual_provider_request_count)) ==
+              as.integer(one_call_batch$summary$residual_provider_request_count),
+            "one-call level rows should sum residual provider requests")
+assert_true(sum(one_call_batch$levels$residual_provider_call_ms) >= 0,
+            "one-call level rows should expose residual provider call timing")
 assert_true(identical(one_call$summary$entrypoint,
                       "legacy-mgcv-legacy-dcov-native"),
             "one-call wrapper should record its entrypoint")

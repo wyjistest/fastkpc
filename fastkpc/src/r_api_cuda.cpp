@@ -19,6 +19,7 @@
 #include <R_ext/Rdynload.h>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
@@ -51,6 +52,11 @@ bool native_legacy_dcov_level_batch_enabled() {
                    return static_cast<char>(std::tolower(ch));
                  });
   return value == "level";
+}
+
+double elapsed_ms_since(std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - start).count();
 }
 
 double list_numeric_value(const Rcpp::List& values, const char* name) {
@@ -3722,6 +3728,11 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   Rcpp::IntegerVector n_edgetests;
   Rcpp::IntegerVector level_level, level_tasks_planned, level_tests_replayed,
     level_ignored, level_deletions;
+  Rcpp::IntegerVector level_residual_provider_request_count;
+  Rcpp::NumericVector level_residual_provider_call_ms,
+    level_residual_provider_matrix_copy_ms, level_residual_provider_total_ms,
+    level_legacy_dcov_native_materialize_ms,
+    level_legacy_dcov_native_call_ms;
   Rcpp::IntegerVector task_global_id, task_level, task_index, task_edge_x,
     task_edge_y, task_x, task_y, task_conditioning_size;
   Rcpp::CharacterVector task_s_key;
@@ -3739,10 +3750,14 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   int residual_provider_batch_max_requests = 0;
   double residual_provider_batch_request_sum = 0.0;
   int residual_provider_matrix_cell_count = 0;
+  double residual_provider_call_ms = 0.0;
+  double residual_provider_matrix_copy_ms = 0.0;
   std::string residual_provider_response_mode;
   std::string residual_provider_response_backend;
   int legacy_dcov_native_count = 0;
   double legacy_dcov_native_ms = 0.0;
+  double legacy_dcov_native_scalar_materialize_ms = 0.0;
+  double legacy_dcov_native_scalar_call_ms = 0.0;
   fastkpc::LegacyDcovLowrankTimings legacy_lowrank_timings;
   fastkpc::LegacyDcovLowrankMode legacy_lowrank_mode =
     fastkpc::legacy_dcov_lowrank_mode_from_env();
@@ -3758,10 +3773,17 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   int legacy_dcov_native_batch_oracle_column_copy_count = 0;
   int legacy_dcov_native_batch_column_materialize_count = 0;
   double legacy_dcov_native_batch_ms = 0.0;
+  double legacy_dcov_native_batch_materialize_ms = 0.0;
+  double legacy_dcov_native_batch_call_ms = 0.0;
 
   for (int level = 0; level <= max_conditioning_size; ++level) {
     const LayerPlan plan = make_layer_plan(adjacency, p, level);
     const int task_count = static_cast<int>(plan.tasks.size());
+    int level_provider_request_count = 0;
+    double level_provider_call_ms = 0.0;
+    double level_provider_matrix_copy_ms = 0.0;
+    double level_dcov_materialize_ms = 0.0;
+    double level_dcov_call_ms = 0.0;
 
     std::vector<int> request_targets;
     std::vector<std::vector<int> > request_conditioning_sets;
@@ -3809,9 +3831,17 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       );
       std::string provider_response_mode;
       std::string provider_response_backend;
+      const std::chrono::steady_clock::time_point provider_call_start =
+        std::chrono::steady_clock::now();
+      SEXP provider_response = residual_provider(request_table, level);
+      level_provider_call_ms = elapsed_ms_since(provider_call_start);
+      residual_provider_call_ms += level_provider_call_ms;
+
+      const std::chrono::steady_clock::time_point provider_copy_start =
+        std::chrono::steady_clock::now();
       Rcpp::NumericMatrix residual_matrix =
         residual_provider_response_matrix(
-          residual_provider(request_table, level),
+          provider_response,
           &provider_response_mode,
           &provider_response_backend);
       if (residual_matrix.nrow() != n || residual_matrix.ncol() != request_count) {
@@ -3823,8 +3853,11 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
           residual_columns[col][row] = residual_matrix(row, col);
         }
       }
+      level_provider_matrix_copy_ms = elapsed_ms_since(provider_copy_start);
+      residual_provider_matrix_copy_ms += level_provider_matrix_copy_ms;
       ++residual_provider_level_count;
       residual_provider_request_count += request_count;
+      level_provider_request_count = request_count;
       ++residual_provider_batch_count;
       residual_provider_batch_max_requests = std::max(
         residual_provider_batch_max_requests,
@@ -3840,6 +3873,8 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
 
     std::vector<double> pvalues(task_count, NA_REAL);
     if (legacy_dcov_native_batch_enabled && task_count > 0) {
+      const std::chrono::steady_clock::time_point materialize_start =
+        std::chrono::steady_clock::now();
       Rcpp::NumericMatrix x_batch(n, task_count);
       Rcpp::NumericMatrix y_batch(n, task_count);
       for (int i = 0; i < task_count; ++i) {
@@ -3862,10 +3897,16 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
           y_batch(row, i) = y_ptr[row];
         }
       }
+      level_dcov_materialize_ms = elapsed_ms_since(materialize_start);
+      legacy_dcov_native_batch_materialize_ms += level_dcov_materialize_ms;
 
+      const std::chrono::steady_clock::time_point batch_call_start =
+        std::chrono::steady_clock::now();
       Rcpp::List batch_result =
         fastkpc::legacy_dcov_gamma_cpp_compute_batch(
           x_batch, y_batch, num_col, index);
+      level_dcov_call_ms = elapsed_ms_since(batch_call_start);
+      legacy_dcov_native_batch_call_ms += level_dcov_call_ms;
       Rcpp::NumericVector batch_p_values = batch_result["p.value"];
       Rcpp::List batch_diag = batch_result["diagnostics"];
       for (int i = 0; i < task_count; ++i) {
@@ -3918,6 +3959,8 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         : fastkpc::LegacyDcovLowrankMode::FullEig;
     } else {
       for (int i = 0; i < task_count; ++i) {
+        const std::chrono::steady_clock::time_point materialize_start =
+          std::chrono::steady_clock::now();
         const LayerCiTask& task = plan.tasks[i];
         std::vector<double> rx;
         std::vector<double> ry;
@@ -3938,8 +3981,16 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
           x_vec[row] = rx[row];
           y_vec[row] = ry[row];
         }
+        const double materialize_ms = elapsed_ms_since(materialize_start);
+        level_dcov_materialize_ms += materialize_ms;
+        legacy_dcov_native_scalar_materialize_ms += materialize_ms;
+        const std::chrono::steady_clock::time_point scalar_call_start =
+          std::chrono::steady_clock::now();
         const fastkpc::LegacyDcovGammaCppResult result =
           fastkpc::legacy_dcov_gamma_cpp_compute(x_vec, y_vec, num_col, index);
+        const double scalar_call_ms = elapsed_ms_since(scalar_call_start);
+        level_dcov_call_ms += scalar_call_ms;
+        legacy_dcov_native_scalar_call_ms += scalar_call_ms;
         pvalues[i] = result.p_value;
         ++legacy_dcov_native_count;
         legacy_dcov_native_ms += result.total_ms;
@@ -4042,6 +4093,15 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
     level_tests_replayed.push_back(tests_replayed);
     level_ignored.push_back(ignored_after_delete);
     level_deletions.push_back(deletions);
+    level_residual_provider_request_count.push_back(level_provider_request_count);
+    level_residual_provider_call_ms.push_back(level_provider_call_ms);
+    level_residual_provider_matrix_copy_ms.push_back(
+      level_provider_matrix_copy_ms);
+    level_residual_provider_total_ms.push_back(
+      level_provider_call_ms + level_provider_matrix_copy_ms);
+    level_legacy_dcov_native_materialize_ms.push_back(
+      level_dcov_materialize_ms);
+    level_legacy_dcov_native_call_ms.push_back(level_dcov_call_ms);
   }
 
   Rcpp::DataFrame task_rows = Rcpp::DataFrame::create(
@@ -4065,6 +4125,18 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
     Rcpp::Named("tests_replayed") = level_tests_replayed,
     Rcpp::Named("tasks_ignored_after_delete") = level_ignored,
     Rcpp::Named("deletions") = level_deletions,
+    Rcpp::Named("residual_provider_request_count") =
+      level_residual_provider_request_count,
+    Rcpp::Named("residual_provider_call_ms") =
+      level_residual_provider_call_ms,
+    Rcpp::Named("residual_provider_matrix_copy_ms") =
+      level_residual_provider_matrix_copy_ms,
+    Rcpp::Named("residual_provider_total_ms") =
+      level_residual_provider_total_ms,
+    Rcpp::Named("legacy_dcov_native_materialize_ms") =
+      level_legacy_dcov_native_materialize_ms,
+    Rcpp::Named("legacy_dcov_native_call_ms") =
+      level_legacy_dcov_native_call_ms,
     Rcpp::Named("stringsAsFactors") = false
   );
 
@@ -4088,6 +4160,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       Rcpp::Named("ci_native_count") = total_tasks_planned,
       Rcpp::Named("legacy_dcov_native_count") = legacy_dcov_native_count,
       Rcpp::Named("legacy_dcov_native_ms") = legacy_dcov_native_ms,
+      Rcpp::Named("legacy_dcov_native_scalar_materialize_ms") =
+        legacy_dcov_native_scalar_materialize_ms,
+      Rcpp::Named("legacy_dcov_native_scalar_call_ms") =
+        legacy_dcov_native_scalar_call_ms,
       Rcpp::Named("legacy_dcov_native_numCol") = num_col,
       Rcpp::Named("legacy_dcov_native_lowrank_mode") =
         std::string(fastkpc::legacy_dcov_lowrank_mode_name(legacy_lowrank_mode)),
@@ -4109,6 +4185,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_dcov_native_batch_pair_count,
       Rcpp::Named("legacy_dcov_native_batch_ms") =
         legacy_dcov_native_batch_ms,
+      Rcpp::Named("legacy_dcov_native_batch_materialize_ms") =
+        legacy_dcov_native_batch_materialize_ms,
+      Rcpp::Named("legacy_dcov_native_batch_call_ms") =
+        legacy_dcov_native_batch_call_ms,
       Rcpp::Named("legacy_dcov_native_batch_workspace_reuse_count") =
         legacy_dcov_native_batch_workspace_reuse_count,
       Rcpp::Named("legacy_dcov_native_batch_distance_workspace_reuse_count") =
@@ -4127,6 +4207,12 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         residual_provider_level_count,
       Rcpp::Named("residual_provider_request_count") =
         residual_provider_request_count,
+      Rcpp::Named("residual_provider_call_ms") =
+        residual_provider_call_ms,
+      Rcpp::Named("residual_provider_matrix_copy_ms") =
+        residual_provider_matrix_copy_ms,
+      Rcpp::Named("residual_provider_total_ms") =
+        residual_provider_call_ms + residual_provider_matrix_copy_ms,
       Rcpp::Named("residual_provider_contract") =
         "level-residual-matrix-v1",
       Rcpp::Named("residual_provider_response_mode") =

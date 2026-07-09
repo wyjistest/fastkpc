@@ -141,7 +141,11 @@ required <- c(
   "edge_count", "reference_edge_count", "shd", "adjacency_identical",
   "sepsets_identical", "n_edgetests_identical", "n_edgetests_exact",
   "pmax_max_abs_diff", "residual_provider_request_count",
+  "residual_provider_call_ms", "residual_provider_matrix_copy_ms",
+  "residual_provider_total_ms",
   "legacy_dcov_native_count", "legacy_dcov_native_batch_enabled",
+  "legacy_dcov_native_batch_materialize_ms",
+  "legacy_dcov_native_batch_call_ms",
   "compatible_cuda_facade", "compatible_cuda_route",
   "compatible_cuda_residual_authority", "compatible_cuda_ci_authority",
   "mgcv_residual_backend", "residual_provider_response_backend",
@@ -196,8 +200,19 @@ assert_true(summary$pmax_max_abs_diff[[1L]] < 1e-12,
             "artifact facade pMax should match explicit provider reference")
 assert_true(summary$residual_provider_request_count[[1L]] > 0L,
             "artifact should exercise residual-provider requests")
+assert_true(summary$residual_provider_call_ms[[1L]] >= 0,
+            "artifact should report residual provider call timing")
+assert_true(summary$residual_provider_matrix_copy_ms[[1L]] >= 0,
+            "artifact should report residual provider matrix copy timing")
+assert_true(summary$residual_provider_total_ms[[1L]] >=
+              summary$residual_provider_call_ms[[1L]],
+            "artifact residual provider total should include call timing")
 assert_true(summary$legacy_dcov_native_count[[1L]] > 0L,
             "artifact should exercise native legacy dCov tasks")
+assert_true(summary$legacy_dcov_native_batch_materialize_ms[[1L]] >= 0,
+            "artifact should report native dCov batch materialization timing")
+assert_true(summary$legacy_dcov_native_batch_call_ms[[1L]] >= 0,
+            "artifact should report native dCov batch call timing")
 
 reuse_dir <- tempfile("compatible-cuda-skeleton-artifact-reuse-")
 reuse <- fastkpc_run_compatible_cuda_skeleton_artifact(

@@ -254,9 +254,14 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     pmax_max_abs_diff = NA_real_,
     residual_provider_request_count = NA_integer_,
     reference_residual_provider_request_count = NA_integer_,
+    residual_provider_call_ms = NA_real_,
+    residual_provider_matrix_copy_ms = NA_real_,
+    residual_provider_total_ms = NA_real_,
     legacy_dcov_native_count = NA_integer_,
     reference_legacy_dcov_native_count = NA_integer_,
     legacy_dcov_native_batch_enabled = NA,
+    legacy_dcov_native_batch_materialize_ms = NA_real_,
+    legacy_dcov_native_batch_call_ms = NA_real_,
     compatible_cuda_facade = NA,
     compatible_cuda_route = NA_character_,
     compatible_cuda_residual_authority = NA_character_,
@@ -628,12 +633,24 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
       as.integer(facade_summary$residual_provider_request_count %||% NA_integer_),
     reference_residual_provider_request_count =
       as.integer(provider_counts$request_count),
+    residual_provider_call_ms =
+      as.numeric(facade_summary$residual_provider_call_ms %||% NA_real_),
+    residual_provider_matrix_copy_ms =
+      as.numeric(facade_summary$residual_provider_matrix_copy_ms %||% NA_real_),
+    residual_provider_total_ms =
+      as.numeric(facade_summary$residual_provider_total_ms %||% NA_real_),
     legacy_dcov_native_count =
       as.integer(facade_summary$legacy_dcov_native_count %||% NA_integer_),
     reference_legacy_dcov_native_count =
       as.integer(reference_summary$legacy_dcov_native_count %||% NA_integer_),
     legacy_dcov_native_batch_enabled =
       isTRUE(facade_summary$legacy_dcov_native_batch_enabled),
+    legacy_dcov_native_batch_materialize_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_materialize_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_call_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_call_ms %||%
+                   NA_real_),
     compatible_cuda_facade =
       isTRUE(facade_summary$compatible_cuda_facade),
     compatible_cuda_route =
