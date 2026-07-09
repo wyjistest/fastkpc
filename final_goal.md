@@ -171,6 +171,17 @@ status: do not combine cpp_guarded residual provider with round dCov as a
         promotion route; provider setup/extraction still dominates
 ```
 
+Native one-call round dCov with `low_rank=cuda_spectra`:
+
+```text
+correctness: not evaluable on full 351x48 because candidate timed out
+timeout: 900 sec
+last native progress: level 2 dCov start after provider completion
+status: experimental only; not recommended. The native CUDA lowrank branch
+        currently executes pair-serial gamma calls inside native batches and
+        does not beat the CPU Spectra round candidate.
+```
+
 `FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=chunk`:
 
 ```text
@@ -6724,6 +6735,80 @@ decision:
   cuda_spectra lowrank mode, but it is still a smoke checkpoint and substrate
   only. It is not a full 351x48 result, not a promotion of cuda_spectra as the
   recommended compatible route, and not final-goal completion.
+```
+
+Native one-call round cuda_spectra full 351x48 gate attempt:
+
+```text
+artifact:
+  fastkpc/artifacts/
+    compatible_cuda_skeleton_threaded_round_cuda_spectra_full_351x48_v1
+
+scope:
+  native one-call compatible CUDA skeleton facade
+  real 351x48 fixture, all columns
+  reference loaded from:
+    fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/
+      compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds
+
+run shape:
+  FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=20
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=20
+  dcov_batch = "round"
+  low_rank = "cuda_spectra"
+  timeout = 900 sec
+
+result:
+  run_status = timeout
+  timeout = TRUE
+  elapsed_sec = 900
+  reference_edge_count = 110
+  candidate_edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+
+native progress:
+  level 0:
+    level_complete elapsed_ms = 15,643.705
+    tests_replayed = 2,213
+    ignored = 43
+    deletions = 43
+    dcov_call_ms = 15,642.539
+
+  level 1:
+    provider_complete elapsed_ms = 5,213.850
+    level_complete elapsed_ms = 389,793.093
+    tests_replayed = 52,659
+    ignored = 43,461
+    deletions = 546
+    provider_call_ms = 5,145.660
+    dcov_call_ms = 384,464.936
+
+  level 2:
+    level_start task_count = 303,870
+    residual_request_count = 49,919
+    provider_complete elapsed_ms = 90,582.055
+    provider_call_ms = 90,264.055
+    dcov_start elapsed_ms = 90,582.706
+    no level_complete before timeout
+
+decision:
+  Native one-call cuda_spectra is not promotable as implemented. It fails to
+  return a full 351x48 skeleton inside 900 seconds, so full-route SHD,
+  n.edgetests exactness, and fallback totals remain unproven. It is also slower
+  than the existing native one-call CPU Spectra round candidate, which completed
+  the full 351x48 gate in about 592 seconds.
+
+  The failure mode is structural rather than a small wrapper issue: the native
+  cuda_spectra branch currently executes CUDA lowrank gamma one pair at a time
+  inside each native dCov batch, while the CPU Spectra route benefits from the
+  existing batch/threaded path. Level 1 alone spent about 384 seconds in dCov,
+  and level 2 timed out after provider completion and dCov start.
+
+  Do not re-run this as another promotion gate until the native CUDA lowrank
+  path has either batch/round progress diagnostics with partial CUDA counters
+  or a real batched/device-resident lowrank implementation that avoids the
+  current pair-serial Spectra loop.
 ```
 
 ---
