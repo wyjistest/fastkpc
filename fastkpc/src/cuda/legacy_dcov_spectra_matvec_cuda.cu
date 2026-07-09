@@ -1,5 +1,6 @@
 #include "legacy_dcov_spectra_matvec_cuda.hpp"
 
+#include <cublas_v2.h>
 #include <cuda_runtime.h>
 
 #include <chrono>
@@ -10,8 +11,6 @@
 namespace fastkpc {
 namespace {
 
-constexpr int kBlock = 256;
-
 void check_cuda(cudaError_t err, const char* stage) {
   if (err != cudaSuccess) {
     throw std::runtime_error(std::string("CUDA error (") + stage + "): " +
@@ -19,34 +18,16 @@ void check_cuda(cudaError_t err, const char* stage) {
   }
 }
 
+void check_cublas(cublasStatus_t status, const char* stage) {
+  if (status != CUBLAS_STATUS_SUCCESS) {
+    throw std::runtime_error(std::string("cuBLAS error (") + stage +
+                             "): status " + std::to_string(status));
+  }
+}
+
 double elapsed_ms_since(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - start).count();
-}
-
-__global__ void dense_sym_matvec_kernel(const double* matrix,
-                                        const double* rhs,
-                                        int n,
-                                        double* output) {
-  __shared__ double partial[kBlock];
-  const int row = blockIdx.x;
-  if (row >= n) return;
-
-  double sum = 0.0;
-  for (int j = threadIdx.x; j < n; j += blockDim.x) {
-    sum += matrix[row + static_cast<std::size_t>(j) * n] * rhs[j];
-  }
-  partial[threadIdx.x] = sum;
-  __syncthreads();
-
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride) {
-      partial[threadIdx.x] += partial[threadIdx.x + stride];
-    }
-    __syncthreads();
-  }
-
-  if (threadIdx.x == 0) output[row] = partial[0];
 }
 
 LegacyDcovSpectraMatvecCudaResult apply_dense_sym_matvec_device_matrix(
@@ -56,7 +37,8 @@ LegacyDcovSpectraMatvecCudaResult apply_dense_sym_matvec_device_matrix(
     int rhs_count,
     double** d_rhs_workspace = nullptr,
     double** d_output_workspace = nullptr,
-    std::size_t* workspace_capacity = nullptr) {
+    std::size_t* workspace_capacity = nullptr,
+    cublasHandle_t cublas_handle = nullptr) {
   if (d_matrix == nullptr) {
     throw std::runtime_error("CUDA matvec handle has been freed");
   }
@@ -72,6 +54,8 @@ LegacyDcovSpectraMatvecCudaResult apply_dense_sym_matvec_device_matrix(
                              workspace_capacity != nullptr;
   double* local_d_rhs = nullptr;
   double* local_d_output = nullptr;
+  cublasHandle_t local_cublas_handle = nullptr;
+  cublasHandle_t active_cublas_handle = cublas_handle;
   double*& d_rhs = use_workspace ? *d_rhs_workspace : local_d_rhs;
   double*& d_output = use_workspace ? *d_output_workspace : local_d_output;
   LegacyDcovSpectraMatvecCudaResult result;
@@ -81,8 +65,16 @@ LegacyDcovSpectraMatvecCudaResult apply_dense_sym_matvec_device_matrix(
 
   try {
     auto stage = std::chrono::steady_clock::now();
-    if (!use_workspace) {
+    if (active_cublas_handle == nullptr) {
       stage = std::chrono::steady_clock::now();
+      check_cublas(cublasCreate(&local_cublas_handle),
+                   "create dense matvec cuBLAS handle");
+      active_cublas_handle = local_cublas_handle;
+      result.alloc_ms += elapsed_ms_since(stage);
+    }
+
+    stage = std::chrono::steady_clock::now();
+    if (!use_workspace) {
       check_cuda(cudaMalloc(&d_rhs, sizeof(double) * rhs_size),
                  "alloc dense matvec rhs");
       check_cuda(cudaMalloc(&d_output, sizeof(double) * rhs_size),
@@ -126,13 +118,26 @@ LegacyDcovSpectraMatvecCudaResult apply_dense_sym_matvec_device_matrix(
     result.h2d_ms += elapsed_ms_since(stage);
 
     stage = std::chrono::steady_clock::now();
-    for (int k = 0; k < rhs_count; ++k) {
-      const double* rhs_col = d_rhs + static_cast<std::size_t>(k) * n;
-      double* output_col = d_output + static_cast<std::size_t>(k) * n;
-      dense_sym_matvec_kernel<<<n, kBlock>>>(d_matrix, rhs_col, n, output_col);
-      check_cuda(cudaGetLastError(), "launch dense symmetric matvec");
-      ++result.kernel_launch_count;
-    }
+    const double alpha = 1.0;
+    const double beta = 0.0;
+    check_cublas(
+      cublasDgemm(
+        active_cublas_handle,
+        CUBLAS_OP_N,
+        CUBLAS_OP_N,
+        n,
+        rhs_count,
+        n,
+        &alpha,
+        d_matrix,
+        n,
+        d_rhs,
+        n,
+        &beta,
+        d_output,
+        n),
+      "dense symmetric matvec dgemm");
+    result.kernel_launch_count = 1;
     check_cuda(cudaDeviceSynchronize(), "dense symmetric matvec synchronize");
     result.kernel_ms += elapsed_ms_since(stage);
 
@@ -151,7 +156,15 @@ LegacyDcovSpectraMatvecCudaResult apply_dense_sym_matvec_device_matrix(
       d_output = nullptr;
       result.free_ms += elapsed_ms_since(stage);
     }
+    if (local_cublas_handle != nullptr) {
+      stage = std::chrono::steady_clock::now();
+      check_cublas(cublasDestroy(local_cublas_handle),
+                   "destroy dense matvec cuBLAS handle");
+      local_cublas_handle = nullptr;
+      result.free_ms += elapsed_ms_since(stage);
+    }
   } catch (...) {
+    if (local_cublas_handle != nullptr) cublasDestroy(local_cublas_handle);
     if (!use_workspace) {
       if (d_rhs != nullptr) cudaFree(d_rhs);
       if (d_output != nullptr) cudaFree(d_output);
@@ -169,6 +182,7 @@ struct LegacyDcovSpectraMatvecCudaHandle {
   double* d_matrix = nullptr;
   double* d_rhs = nullptr;
   double* d_output = nullptr;
+  cublasHandle_t cublas_handle = nullptr;
   int n = 0;
   std::size_t matrix_size = 0;
   std::size_t workspace_capacity = 0;
@@ -252,8 +266,11 @@ legacy_dcov_spectra_matvec_cuda_handle_create(
                           cudaMemcpyHostToDevice),
                "copy dense matvec handle matrix");
     handle->matrix_h2d_ms = elapsed_ms_since(stage);
+    check_cublas(cublasCreate(&handle->cublas_handle),
+                 "create dense matvec handle cuBLAS handle");
   } catch (...) {
     if (handle->d_matrix != nullptr) cudaFree(handle->d_matrix);
+    if (handle->cublas_handle != nullptr) cublasDestroy(handle->cublas_handle);
     delete handle;
     throw;
   }
@@ -275,6 +292,10 @@ void legacy_dcov_spectra_matvec_cuda_handle_destroy(
   if (handle->d_output != nullptr) {
     cudaFree(handle->d_output);
     handle->d_output = nullptr;
+  }
+  if (handle->cublas_handle != nullptr) {
+    cublasDestroy(handle->cublas_handle);
+    handle->cublas_handle = nullptr;
   }
   delete handle;
 }
@@ -315,7 +336,8 @@ legacy_dcov_spectra_matvec_cuda_handle_apply(
     apply_dense_sym_matvec_device_matrix(handle->d_matrix, rhs, handle->n,
                                          rhs_count, &handle->d_rhs,
                                          &handle->d_output,
-                                         &handle->workspace_capacity);
+                                         &handle->workspace_capacity,
+                                         handle->cublas_handle);
   result.device_matrix_reuse_count = 1;
   result.matrix_bytes = sizeof(double) * handle->matrix_size;
   result.matrix_h2d_ms = 0.0;

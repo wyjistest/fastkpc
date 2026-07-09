@@ -47,8 +47,8 @@ assert_true(identical(as.integer(gpu$n), n),
             "CUDA matvec should report matrix dimension")
 assert_true(identical(as.integer(gpu$rhs_count), rhs_count),
             "CUDA matvec should report rhs count")
-assert_true(identical(as.integer(gpu$kernel_launch_count), rhs_count),
-            "CUDA matvec should launch once per rhs in the first prototype")
+assert_true(identical(as.integer(gpu$kernel_launch_count), 1L),
+            "CUDA multi-RHS matvec should launch one GEMM for all rhs columns")
 assert_true(as.numeric(gpu$kernel_ms) >= 0,
             "CUDA matvec should report kernel timing")
 assert_true(as.numeric(gpu$total_ms) >= as.numeric(gpu$kernel_ms),
@@ -86,8 +86,8 @@ assert_true(identical(as.integer(reuse$device_matrix_reuse_count), 1L),
             "CUDA handle matvec should reuse the resident device matrix")
 assert_true(identical(as.numeric(reuse$matrix_h2d_ms), 0),
             "CUDA handle matvec should not re-upload the matrix during apply")
-assert_true(identical(as.integer(reuse$kernel_launch_count), rhs_count),
-            "CUDA handle matvec should launch once per rhs in this prototype")
+assert_true(identical(as.integer(reuse$kernel_launch_count), 1L),
+            "CUDA handle multi-RHS matvec should launch one GEMM for all rhs columns")
 
 reuse_again <- legacy_dcov_spectra_matvec_cuda_handle_apply(handle, rhs)
 assert_true(max(abs(reuse_again$values - cpu)) < 1e-10,
@@ -108,6 +108,8 @@ assert_true(max(abs(wide_reuse$values - wide_cpu)) < 1e-10,
             "CUDA handle wider matvec should match host dense multiplication")
 assert_true(identical(as.integer(wide_reuse$workspace_realloc_count), 1L),
             "CUDA handle wider matvec should grow RHS/output workspace once")
+assert_true(identical(as.integer(wide_reuse$kernel_launch_count), 1L),
+            "CUDA handle wider multi-RHS matvec should launch one GEMM")
 assert_true(as.numeric(wide_reuse$workspace_bytes) >= n * ncol(wide_rhs) * 2 * 8,
             "CUDA handle should report grown RHS/output workspace bytes")
 

@@ -8227,6 +8227,76 @@ decision:
   final full 351x48 CUDA skeleton goal.
 ```
 
+CUDA dense Spectra-matvec multi-RHS cuBLAS checkpoint:
+
+```text
+scope:
+  CUDA dense Spectra-matvec substrate
+  improves multi-RHS one-shot and handle apply data plane
+  does not change skeleton replay, dCov authority, residual authority, or route
+  selection
+
+change:
+  replace the custom one-kernel-per-RHS-column CUDA loop in
+  legacy_dcov_spectra_matvec_cuda() / handle apply with a single cuBLAS dgemm
+  over the full n x rhs_count RHS block.
+
+  implementation shape:
+    one-shot path creates a temporary cuBLAS handle
+    reusable handle owns a persistent cuBLAS handle
+    handle apply reuses the resident matrix, RHS/output workspace, and cuBLAS
+    handle
+    multi-RHS kernel_launch_count is now 1 for each one-shot or handle apply
+    sequence/operator path still drives one handle apply per Spectra vector
+
+TDD gate:
+  RED:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+
+    failed at:
+      CUDA multi-RHS matvec should launch one GEMM for all rhs columns
+
+  GREEN:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+
+    result:
+      PASS legacy dCov Spectra CUDA matvec
+
+regression gate:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+
+    result:
+      PASS legacy dCov CUDA lowrank gamma parity cases=6
+      max_p_diff = 3.33e-15
+      max_nV2_diff = 1.42e-14
+
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_route.R
+
+    result:
+      PASS legacy dCov CUDA lowrank backend route
+
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+    result:
+      PASS compatible CUDA skeleton native cuda_spectra lowrank
+
+decision:
+  This is a useful eigensolver data-plane substrate improvement for future
+  block or device-resident Spectra work: multi-RHS host calls no longer pay one
+  custom CUDA launch per RHS column.
+
+  It does not solve the current native cuda_spectra full-route bottleneck by
+  itself. The Spectra operator path is still host/Eigen-driven and still calls
+  the CUDA handle one Arnoldi vector at a time, so per-vector H2D/D2H and
+  host/operator boundary costs remain. The final full 351x48 CUDA skeleton gate
+  remains open.
+```
+
 ---
 
 ## 9. Final success definition
