@@ -3352,14 +3352,15 @@ fastkpc/R/compatible_cuda_skeleton_artifact.R
 Current status:
 
 ```text
-status: artifact runner scaffold implemented
+status: artifact runner scaffold implemented with scoped residual backend metadata
 scope:
   runs fastkpc_compatible_cuda_skeleton()
   runs the explicit residual-provider native legacy-dCov route as reference
   writes summary.csv, result.rds, and summary.md
   records SHD, edge counts, n.edgetests exactness, pMax max abs diff,
     residual-provider request counts, native legacy dCov counts,
-    compatible CUDA route metadata, and elapsed seconds
+    compatible CUDA route metadata, scoped mgcv residual backend metadata,
+    provider C++ residual backend counters, and elapsed seconds
 targeted gate:
   Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
 ```
@@ -3368,6 +3369,29 @@ Full 351x48 command:
 
 ```bash
 Rscript -e 'source("fastkpc/R/compatible_cuda_skeleton_artifact.R"); fastkpc_run_compatible_cuda_skeleton_artifact(output_dir = "fastkpc/artifacts/compatible_cuda_skeleton_full_351x48_v1", artifact_name = "compatible_cuda_skeleton_full_351x48_v1", alpha = 0.1, max_conditioning_size = 46L, dcov_batch = "level", reference_result_path = "fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds", expected_edge_count = 110L, expected_n_edgetests = c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L))'
+```
+
+Guarded C++ residual-provider candidate command:
+
+```bash
+Rscript -e 'source("fastkpc/R/compatible_cuda_skeleton_artifact.R"); fastkpc_run_compatible_cuda_skeleton_artifact(output_dir = "fastkpc/artifacts/compatible_cuda_skeleton_cpp_guarded_residual_full_351x48_v1", artifact_name = "compatible_cuda_skeleton_cpp_guarded_residual_full_351x48_v1", alpha = 0.1, max_conditioning_size = 46L, dcov_batch = "level", mgcv_residual_backend = "cpp_guarded", mgcv_residual_backend_native_s_size_limit = Inf, mgcv_residual_backend_condition_threshold = 1e12, reference_result_path = "fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds", expected_edge_count = 110L, expected_n_edgetests = c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L))'
+```
+
+Additional artifact fields:
+
+```text
+mgcv_residual_backend
+mgcv_residual_backend_native_s_size_limit
+mgcv_residual_backend_condition_threshold
+residual_provider_response_backend
+residual_provider_mgcv_backend
+residual_provider_mgcv_cpp_backend_enabled
+residual_provider_mgcv_cpp_backend_count
+residual_provider_mgcv_cpp_backend_native_count
+residual_provider_mgcv_cpp_backend_fallback_count
+residual_provider_mgcv_cpp_backend_error_count
+residual_provider_mgcv_cpp_backend_ms
+residual_provider_mgcv_cpp_backend_native_solve_ms
 ```
 
 Full 351x48 attempt status:
@@ -3388,9 +3412,12 @@ artifact files written: none
 decision:
   current facade is a useful API-shape and subset-correctness checkpoint, but
   it is not a viable full 351x48 promotion route. It still runs the hidden R
-  legacy mgcv residual-provider path in a single candidate pass, so Phase 5
-  must move residual generation/batching further behind the native/CUDA
-  boundary before another full artifact attempt.
+  legacy mgcv residual-provider path in a single candidate pass. The artifact
+  runner can now explicitly scope and measure the guarded C++ residual-provider
+  backend, but no full 351x48 guarded-residual candidate has yet passed the
+  SHD=0 / n.edgetests-exact / wall-time promotion gate. Phase 5 must keep
+  moving residual generation/batching further behind the native/CUDA boundary
+  before promotion.
 ```
 
 ### Gate

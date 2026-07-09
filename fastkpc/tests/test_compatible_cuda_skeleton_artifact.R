@@ -17,6 +17,24 @@ if (length(missing) > 0L) {
   quit(save = "no", status = 0)
 }
 
+old_mgcv_env <- Sys.getenv(c(
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT",
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD"
+), unset = NA_character_)
+on.exit({
+  for (name in names(old_mgcv_env)) {
+    if (is.na(old_mgcv_env[[name]])) {
+      Sys.unsetenv(name)
+    } else {
+      do.call(Sys.setenv, stats::setNames(list(old_mgcv_env[[name]]), name))
+    }
+  }
+}, add = TRUE)
+Sys.setenv(FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND = "caller-sentinel")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD")
+
 set.seed(91573)
 n <- 64L
 z1 <- stats::runif(n, -2, 2)
@@ -57,6 +75,13 @@ required <- c(
   "legacy_dcov_native_count", "legacy_dcov_native_batch_enabled",
   "compatible_cuda_facade", "compatible_cuda_route",
   "compatible_cuda_residual_authority", "compatible_cuda_ci_authority",
+  "mgcv_residual_backend", "residual_provider_response_backend",
+  "residual_provider_mgcv_backend",
+  "residual_provider_mgcv_cpp_backend_enabled",
+  "residual_provider_mgcv_cpp_backend_count",
+  "residual_provider_mgcv_cpp_backend_native_count",
+  "residual_provider_mgcv_cpp_backend_fallback_count",
+  "residual_provider_mgcv_cpp_backend_error_count",
   "elapsed_sec", "reference_elapsed_sec"
 )
 missing_fields <- setdiff(required, names(summary))
@@ -74,6 +99,12 @@ assert_true(identical(summary$compatible_cuda_route[[1L]],
 assert_true(identical(summary$compatible_cuda_residual_authority[[1L]],
                       "legacy-mgcv-regrXonS-provider"),
             "artifact should record residual authority")
+assert_true(identical(summary$mgcv_residual_backend[[1L]], "env"),
+            "artifact should record default mgcv residual backend mode")
+assert_true(identical(summary$residual_provider_mgcv_backend[[1L]], "r"),
+            "artifact should record default provider mgcv backend")
+assert_true(!isTRUE(summary$residual_provider_mgcv_cpp_backend_enabled[[1L]]),
+            "artifact default route should not enable provider C++ residual backend")
 assert_true(identical(summary$compatible_cuda_ci_authority[[1L]],
                       "native-legacy-dcov.gamma"),
             "artifact should record CI authority")
@@ -118,6 +149,48 @@ assert_true(isTRUE(reuse_summary$adjacency_identical[[1L]]),
             "reference reuse artifact should preserve adjacency agreement")
 assert_true(reuse_summary$shd[[1L]] == 0L,
             "reference reuse artifact should preserve zero SHD")
+
+cpp_dir <- tempfile("compatible-cuda-skeleton-artifact-cpp-")
+cpp_artifact <- fastkpc_run_compatible_cuda_skeleton_artifact(
+  data = data,
+  output_dir = cpp_dir,
+  artifact_name = "compatible_cuda_skeleton_artifact_cpp_guarded_test",
+  alpha = 0.08,
+  max_conditioning_size = 1L,
+  dcov_batch = "level",
+  mgcv_residual_backend = "cpp_guarded",
+  mgcv_residual_backend_native_s_size_limit = 1,
+  mgcv_residual_backend_condition_threshold = 1e300
+)
+cpp_summary <- cpp_artifact$summary[1L, , drop = FALSE]
+assert_true(identical(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
+                                 unset = ""),
+                      "caller-sentinel"),
+            "artifact should restore caller mgcv residual backend env")
+assert_true(identical(cpp_summary$mgcv_residual_backend[[1L]], "cpp_guarded"),
+            "artifact should record scoped cpp_guarded mgcv residual backend")
+assert_true(identical(cpp_summary$residual_provider_response_backend[[1L]],
+                      "legacy-mgcv-cpp-guarded-level-batch"),
+            "artifact should record structured cpp guarded provider backend")
+assert_true(identical(cpp_summary$residual_provider_mgcv_backend[[1L]],
+                      "cpp_guarded"),
+            "artifact should record provider selected cpp_guarded backend")
+assert_true(isTRUE(cpp_summary$residual_provider_mgcv_cpp_backend_enabled[[1L]]),
+            "artifact should report provider C++ residual backend enabled")
+assert_true(identical(as.integer(cpp_summary$residual_provider_mgcv_cpp_backend_count[[1L]]),
+                      as.integer(cpp_summary$residual_provider_request_count[[1L]])),
+            "artifact should report provider C++ residual backend coverage")
+assert_true(cpp_summary$residual_provider_mgcv_cpp_backend_native_count[[1L]] > 0L,
+            "artifact should report native fixed-sp residual replay")
+assert_true(identical(as.integer(cpp_summary$residual_provider_mgcv_cpp_backend_fallback_count[[1L]]),
+                      0L),
+            "artifact smoke route should not need provider C++ residual fallback")
+assert_true(identical(as.integer(cpp_summary$residual_provider_mgcv_cpp_backend_error_count[[1L]]),
+                      0L),
+            "artifact smoke route should not report provider C++ residual errors")
+assert_true(isTRUE(cpp_summary$adjacency_identical[[1L]]) &&
+              cpp_summary$shd[[1L]] == 0L,
+            "artifact cpp_guarded route should preserve zero SHD")
 
 full_reference_path <- file.path(
   "fastkpc", "artifacts", "legacy_mgcv_residual_cache_s_affinity_v1",

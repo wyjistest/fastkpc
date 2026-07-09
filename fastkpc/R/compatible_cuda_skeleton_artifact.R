@@ -80,9 +80,13 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     trace_level = "summary",
     dcov_batch = "level",
     low_rank = "spectra",
+    mgcv_residual_backend = c("env", "r", "cpp_guarded"),
+    mgcv_residual_backend_native_s_size_limit = NULL,
+    mgcv_residual_backend_condition_threshold = NULL,
     reference_result_path = NULL,
     expected_edge_count = NULL,
     expected_n_edgetests = NULL) {
+  mgcv_residual_backend <- match.arg(mgcv_residual_backend)
   if (is.null(data)) {
     if (!file.exists(data_path)) {
       stop("real data fixture not found: ", data_path, call. = FALSE)
@@ -112,13 +116,34 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     numCol <- floor(nrow(data) / 10)
   }
 
-  env_names <- c("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK")
+  env_names <- c(
+    "FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK",
+    "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
+    "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT",
+    "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD"
+  )
   old_env <- Sys.getenv(env_names, unset = NA_character_)
   on.exit(fastkpc_compatible_cuda_restore_env(old_env), add = TRUE)
   if (nzchar(low_rank)) {
     Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = low_rank)
   } else {
     Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK")
+  }
+  if (!identical(mgcv_residual_backend, "env")) {
+    Sys.setenv(FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND =
+                 mgcv_residual_backend)
+  }
+  if (!is.null(mgcv_residual_backend_native_s_size_limit)) {
+    Sys.setenv(
+      FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT =
+        as.character(mgcv_residual_backend_native_s_size_limit)
+    )
+  }
+  if (!is.null(mgcv_residual_backend_condition_threshold)) {
+    Sys.setenv(
+      FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD =
+        as.character(mgcv_residual_backend_condition_threshold)
+    )
   }
 
   provider_counts <- new.env(parent = emptyenv())
@@ -135,7 +160,8 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
         max_conditioning_size = max_conditioning_size,
         residual_provider = fastkpc_legacy_mgcv_residual_provider(
           data = data,
-          counter_env = provider_counts
+          counter_env = provider_counts,
+          backend = "r"
         ),
         index = index,
         numCol = numCol,
@@ -209,6 +235,11 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     numCol = as.integer(numCol),
     dcov_batch = dcov_batch,
     low_rank = low_rank,
+    mgcv_residual_backend = mgcv_residual_backend,
+    mgcv_residual_backend_native_s_size_limit =
+      mgcv_residual_backend_native_s_size_limit %||% NA_real_,
+    mgcv_residual_backend_condition_threshold =
+      mgcv_residual_backend_condition_threshold %||% NA_real_,
     reference_source = reference_source,
     reference_result_path = reference_result_path %||% NA_character_,
     reference_result_slot = reference_slot,
@@ -252,6 +283,30 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
       facade_summary$compatible_cuda_residual_authority %||% NA_character_,
     compatible_cuda_ci_authority =
       facade_summary$compatible_cuda_ci_authority %||% NA_character_,
+    residual_provider_response_backend =
+      facade_summary$residual_provider_response_backend %||% NA_character_,
+    residual_provider_mgcv_backend =
+      facade_summary$residual_provider_mgcv_backend %||% NA_character_,
+    residual_provider_mgcv_cpp_backend_enabled =
+      isTRUE(facade_summary$residual_provider_mgcv_cpp_backend_enabled),
+    residual_provider_mgcv_cpp_backend_count =
+      as.integer(facade_summary$residual_provider_mgcv_cpp_backend_count %||%
+                   NA_integer_),
+    residual_provider_mgcv_cpp_backend_native_count =
+      as.integer(facade_summary$residual_provider_mgcv_cpp_backend_native_count %||%
+                   NA_integer_),
+    residual_provider_mgcv_cpp_backend_fallback_count =
+      as.integer(facade_summary$residual_provider_mgcv_cpp_backend_fallback_count %||%
+                   NA_integer_),
+    residual_provider_mgcv_cpp_backend_error_count =
+      as.integer(facade_summary$residual_provider_mgcv_cpp_backend_error_count %||%
+                   NA_integer_),
+    residual_provider_mgcv_cpp_backend_ms =
+      as.numeric(facade_summary$residual_provider_mgcv_cpp_backend_ms %||%
+                   NA_real_),
+    residual_provider_mgcv_cpp_backend_native_solve_ms =
+      as.numeric(facade_summary$residual_provider_mgcv_cpp_backend_native_solve_ms %||%
+                   NA_real_),
     elapsed_sec = as.numeric(facade_timed$elapsed),
     reference_elapsed_sec = as.numeric(reference_timed$elapsed),
     stringsAsFactors = FALSE
@@ -302,6 +357,12 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
            row$legacy_dcov_native_batch_enabled[[1L]]),
     paste0("- compatible CUDA route: ",
            row$compatible_cuda_route[[1L]]),
+    paste0("- mgcv residual backend: ",
+           row$mgcv_residual_backend[[1L]]),
+    paste0("- residual provider backend: ",
+           row$residual_provider_response_backend[[1L]]),
+    paste0("- provider C++ residual backend count: ",
+           row$residual_provider_mgcv_cpp_backend_count[[1L]]),
     paste0("- elapsed sec: ", signif(row$elapsed_sec[[1L]], 8L)),
     paste0("- reference elapsed sec: ",
            signif(row$reference_elapsed_sec[[1L]], 8L))
