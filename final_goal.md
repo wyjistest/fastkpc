@@ -6355,6 +6355,80 @@ decision:
   one-call round dCov data plane rather than the R legacy worker backend.
 ```
 
+CUDA Spectra lowrank full progress diagnostic:
+
+```text
+change:
+  add env-gated parent-side legacy skeleton progress rows:
+    FASTKPC_LEGACY_PROGRESS_CSV=<path>
+
+  rows:
+    skeleton_start
+    level_start
+    level_complete
+    skeleton_complete
+
+  columns:
+    event
+    level
+    edge_count
+    task_count
+    worker_count
+    dcov_backend
+    dcov_lowrank
+    elapsed_sec
+    n_edgetests
+    remaining_edges
+    pid
+    timestamp
+
+artifact:
+  fastkpc/artifacts/legacy_dcov_cuda_lowrank_backend_full_progress_timeout_v1
+
+runner:
+  fastkpc_run_legacy_dcov_cuda_lowrank_backend_full_artifact()
+  candidate_timeout_sec = 300
+
+result:
+  run_status = timeout
+  elapsed_sec = 300
+  n / p = 351 / 48
+  reference edge_count = 110
+  candidate edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+
+legacy progress:
+  skeleton_start:
+    edge_count = 1128
+    worker_count = 20
+    dcov_backend = cpp
+    dcov_lowrank = cuda_spectra
+
+  level 0:
+    level_start elapsed_sec = 0.005
+    level_complete elapsed_sec = 15.380
+    n_edgetests = 2213
+    remaining_edges = 1085
+
+  level 1:
+    level_start elapsed_sec = 15.381
+    no level_complete before 300 sec timeout
+
+decision:
+  The full cuda_spectra backend does not hang in setup or level 0. It reaches
+  level 1 quickly, then fails to finish level 1 within the 300 second diagnostic
+  timeout. This narrows the full 1800 second timeout to the first conditional
+  level where mgcv residuals and CUDA lowrank dCov are combined inside the R
+  legacy worker backend.
+
+  The next diagnostic should split level 1 by worker/chunk and CI phase:
+  residual fit/cache time versus CUDA lowrank backend time, number of dCov
+  calls completed per worker, and whether the CUDA lowrank route is effectively
+  serialized by process/CUDA context behavior. Do not attempt another full
+  promotion gate until level-1 progress explains the critical path.
+```
+
 ---
 
 ## 9. Final success definition

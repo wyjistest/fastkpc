@@ -25,6 +25,18 @@ data <- cbind(
   x5 = stats::rnorm(n)
 )
 
+old_progress <- Sys.getenv("FASTKPC_LEGACY_PROGRESS_CSV",
+                           unset = NA_character_)
+on.exit({
+  if (is.na(old_progress)) {
+    Sys.unsetenv("FASTKPC_LEGACY_PROGRESS_CSV")
+  } else {
+    Sys.setenv(FASTKPC_LEGACY_PROGRESS_CSV = old_progress)
+  }
+}, add = TRUE)
+progress_csv <- tempfile("legacy-compatible-progress-", fileext = ".csv")
+Sys.setenv(FASTKPC_LEGACY_PROGRESS_CSV = progress_csv)
+
 result <- fast_kpc(
   data,
   alpha = 0.05,
@@ -85,5 +97,24 @@ assert_true(all(c("level", "recorded_tests", "ci_calls",
             "legacy runtime by level should include component columns")
 assert_true(nrow(by_level) == length(result$skeleton$n.edgetests),
             "legacy runtime by level should align with n.edgetests levels")
+
+assert_true(file.exists(progress_csv),
+            "legacy progress CSV should be written when env path is set")
+progress <- utils::read.csv(progress_csv, stringsAsFactors = FALSE)
+required_progress <- c("event", "level", "edge_count", "task_count",
+                       "worker_count", "dcov_backend", "dcov_lowrank",
+                       "elapsed_sec", "n_edgetests", "remaining_edges")
+missing_progress <- setdiff(required_progress, names(progress))
+assert_true(length(missing_progress) == 0L,
+            paste("legacy progress missing", missing_progress[[1L]]))
+assert_true(any(progress$event == "level_start"),
+            "legacy progress should record level_start")
+assert_true(any(progress$event == "level_complete"),
+            "legacy progress should record level_complete")
+assert_true(max(progress$level, na.rm = TRUE) >= 0L,
+            "legacy progress should record numeric levels")
+assert_true(any(progress$event == "level_complete" &
+                  progress$n_edgetests > 0),
+            "legacy progress should record completed level test counts")
 
 cat("PASS precision compatible legacy parallel runtime breakdown\n")

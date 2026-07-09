@@ -303,6 +303,48 @@ fastkpc_legacy_parallel_cores <- function(num_cores = NULL) {
   max(1L, as.integer(out))
 }
 
+fastkpc_legacy_progress_path <- function() {
+  path <- Sys.getenv("FASTKPC_LEGACY_PROGRESS_CSV", unset = "")
+  if (!nzchar(path)) "" else path
+}
+
+fastkpc_legacy_append_progress <- function(
+    event, level = NA_integer_, edge_count = NA_real_,
+    task_count = NA_integer_, worker_count = NA_integer_,
+    dcov_backend = NA_character_, dcov_lowrank = NA_character_,
+    elapsed_sec = NA_real_, n_edgetests = NA_integer_,
+    remaining_edges = NA_real_, message = NA_character_) {
+  path <- fastkpc_legacy_progress_path()
+  if (!nzchar(path)) return(invisible(FALSE))
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  row <- data.frame(
+    event = event,
+    level = as.integer(level),
+    edge_count = as.numeric(edge_count),
+    task_count = as.integer(task_count),
+    worker_count = as.integer(worker_count),
+    dcov_backend = dcov_backend,
+    dcov_lowrank = dcov_lowrank,
+    elapsed_sec = as.numeric(elapsed_sec),
+    n_edgetests = as.integer(n_edgetests),
+    remaining_edges = as.numeric(remaining_edges),
+    pid = Sys.getpid(),
+    message = message,
+    timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S %z"),
+    stringsAsFactors = FALSE
+  )
+  utils::write.table(
+    row,
+    file = path,
+    sep = ",",
+    row.names = FALSE,
+    col.names = !file.exists(path),
+    append = file.exists(path),
+    qmethod = "double"
+  )
+  invisible(TRUE)
+}
+
 fastkpc_legacy_sepsets <- function(p) {
   replicate(p, replicate(p, integer(), simplify = FALSE), simplify = FALSE)
 }
@@ -5726,6 +5768,18 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
   suffStat <- list(data = data, ic.method = ic.method, index = index,
                    numCol = numCol)
   total_start <- proc.time()[["elapsed"]]
+  fastkpc_legacy_append_progress(
+    event = "skeleton_start",
+    level = NA_integer_,
+    edge_count = sum(G) / 2,
+    task_count = NA_integer_,
+    worker_count = num_cores,
+    dcov_backend = dcov_backend,
+    dcov_lowrank = dcov_cpp_lowrank_mode,
+    elapsed_sec = 0,
+    n_edgetests = NA_integer_,
+    remaining_edges = sum(G) / 2
+  )
   mgcv_residual_cache_env <- NULL
   mgcv_residual_prefetch_cache <- NULL
   mgcv_residual_prefetch_level_enabled <- FALSE
@@ -5868,6 +5922,18 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     }
     edge_indices <- seq_len(remaining_edge_tests)
     workers <- min(num_cores, length(edge_indices))
+    fastkpc_legacy_append_progress(
+      event = "level_start",
+      level = ord,
+      edge_count = sum(G) / 2,
+      task_count = remaining_edge_tests,
+      worker_count = workers,
+      dcov_backend = dcov_backend,
+      dcov_lowrank = dcov_cpp_lowrank_mode,
+      elapsed_sec = proc.time()[["elapsed"]] - total_start,
+      n_edgetests = NA_integer_,
+      remaining_edges = sum(G) / 2
+    )
     mgcv_residual_prefetch_cache <- NULL
     mgcv_residual_prefetch_level_enabled <- FALSE
     prefetch_metrics <- fastkpc_legacy_runtime_zero()
@@ -6737,6 +6803,18 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
     n_edges[ord1] <- sum(G) / 2
     level_logs[[ord1]] <- level_log
     level_metrics[[ord1]] <- metrics_level
+    fastkpc_legacy_append_progress(
+      event = "level_complete",
+      level = ord,
+      edge_count = n_edges[ord1],
+      task_count = remaining_edge_tests,
+      worker_count = workers,
+      dcov_backend = dcov_backend,
+      dcov_lowrank = dcov_cpp_lowrank_mode,
+      elapsed_sec = proc.time()[["elapsed"]] - total_start,
+      n_edgetests = n_edgetests[ord1],
+      remaining_edges = n_edges[ord1]
+    )
     if (ord > 0L && isTRUE(n_edges[ord1] == n_edges[ord])) break
     ord <- ord + 1L
   }
@@ -6751,6 +6829,18 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
   colnames(G) <- rownames(G) <- labels
   dimnames(pMax) <- list(labels, labels)
   elapsed_ms <- (proc.time()[["elapsed"]] - total_start) * 1000
+  fastkpc_legacy_append_progress(
+    event = "skeleton_complete",
+    level = as.integer(ord - 1L),
+    edge_count = sum(G) / 2,
+    task_count = sum(n_edgetests),
+    worker_count = num_cores,
+    dcov_backend = dcov_backend,
+    dcov_lowrank = dcov_cpp_lowrank_mode,
+    elapsed_sec = elapsed_ms / 1000,
+    n_edgetests = sum(n_edgetests),
+    remaining_edges = sum(G) / 2
+  )
   total_tests <- sum(n_edgetests)
   runtime_total <- Reduce(
     fastkpc_legacy_runtime_add, level_metrics,

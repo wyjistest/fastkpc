@@ -253,10 +253,12 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
   paths <- list(
     summary_csv = file.path(output_dir, "summary.csv"),
     progress_csv = file.path(output_dir, "progress.csv"),
+    legacy_progress_csv = file.path(output_dir, "legacy_progress.csv"),
     summary_md = file.path(output_dir, "summary.md"),
     result_rds = file.path(output_dir, "result.rds")
   )
   if (file.exists(paths$progress_csv)) unlink(paths$progress_csv)
+  if (file.exists(paths$legacy_progress_csv)) unlink(paths$legacy_progress_csv)
 
   tracked_env <- c(
     "FASTKPC_LEGACY_DCOV_GAMMA_BACKEND",
@@ -266,7 +268,8 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
     "FASTKPC_LEGACY_DCOV_GAMMA_CUDA_LOW_RANK_SHADOW_MAX_CALLS",
     "FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE",
     "FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY",
-    "FASTKPC_LEGACY_PARALLEL_CORES"
+    "FASTKPC_LEGACY_PARALLEL_CORES",
+    "FASTKPC_LEGACY_PROGRESS_CSV"
   )
   old_env <- stats::setNames(
     lapply(tracked_env, Sys.getenv, unset = NA_character_),
@@ -285,7 +288,8 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
       FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = lowrank_mode,
       FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE = "1",
       FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY = "s",
-      FASTKPC_LEGACY_PARALLEL_CORES = parallel_value
+      FASTKPC_LEGACY_PARALLEL_CORES = parallel_value,
+      FASTKPC_LEGACY_PROGRESS_CSV = paths$legacy_progress_csv
     )
     Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH")
     Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CUDA_LOW_RANK_SHADOW")
@@ -445,7 +449,8 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
       paste0("- run status: ", row$run_status[[1L]]),
       paste0("- timeout sec: ", row$timeout_sec[[1L]]),
       paste0("- baseline edge count: ", row$baseline_edge_count[[1L]]),
-      paste0("- elapsed sec: ", signif(row$candidate_elapsed_sec[[1L]], 8L))
+      paste0("- elapsed sec: ", signif(row$candidate_elapsed_sec[[1L]], 8L)),
+      paste0("- legacy progress: ", paths$legacy_progress_csv)
     ), paths$summary_md)
     return(list(summary = row, paths = paths, baseline = baseline,
                 candidate = NULL, output_dir = output_dir))
@@ -596,7 +601,8 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
     paste0("- candidate elapsed sec: ",
            signif(row$candidate_elapsed_sec[[1L]], 8L)),
     paste0("- baseline elapsed sec: ",
-           signif(row$baseline_elapsed_sec[[1L]], 8L))
+           signif(row$baseline_elapsed_sec[[1L]], 8L)),
+    paste0("- legacy progress: ", paths$legacy_progress_csv)
   ), paths$summary_md)
 
   list(summary = row, paths = paths, baseline = baseline,

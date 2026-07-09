@@ -60,6 +60,9 @@ assert_true(file.exists(paths$result_rds),
             "full CUDA lowrank backend artifact should write result.rds")
 assert_true(file.exists(paths$progress_csv),
             "full CUDA lowrank backend artifact should write progress.csv")
+assert_true(!is.null(paths$legacy_progress_csv) &&
+              grepl("legacy_progress[.]csv$", paths$legacy_progress_csv),
+            "full CUDA lowrank backend artifact should expose legacy progress path")
 assert_true(identical(summary$run_status[[1L]], "timeout"),
             "full CUDA lowrank backend timeout should record run_status")
 assert_true(isTRUE(summary$timeout[[1L]]),
