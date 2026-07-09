@@ -3559,6 +3559,39 @@ decision:
   promotion.
 ```
 
+Guarded C++ residual-provider full run with the Unix child-process watchdog:
+
+```text
+artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_cpp_guarded_residual_full_351x48_v1
+
+route:
+  fastkpc_compatible_cuda_skeleton() facade
+  mgcv_residual_backend = cpp_guarded
+  mgcv_residual_backend_native_s_size_limit = Inf
+  mgcv_residual_backend_condition_threshold = 1e12
+  dcov_batch = level
+
+candidate_timeout_sec = 1800
+run_status = timeout
+timeout = TRUE
+elapsed_sec = 1800
+reference_source = rds
+reference_edge_count = 110
+reference_n.edgetests = 2213,52659,125293,40694,13293,5422,835,80
+progress.csv has facade timeout row at 1800 sec
+summary.csv / result.rds / summary.md were written
+no matching Rscript child processes remained after timeout
+
+decision:
+  scoping the guarded C++ residual backend through the facade does not produce
+  a promotable full 351x48 route. The candidate times out before producing a
+  skeleton, so SHD / n.edgetests exactness cannot be evaluated for this full
+  gate, and it also fails the wall-time gate. This closes the current
+  R-facing facade candidates as Phase 5 evidence only; the next implementation
+  work must change the execution boundary rather than rerunning facade variants.
+```
+
 ### Gate
 
 ```text
