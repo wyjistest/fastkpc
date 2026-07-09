@@ -490,18 +490,26 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     native_progress_csv = file.path(output_dir, "native_progress.csv"),
     native_dcov_stage_csv = file.path(output_dir,
                                       "native_dcov_stage_timing.csv"),
+    native_lowrank_cache_progress_csv = file.path(
+      output_dir,
+      "native_lowrank_component_cache_progress.csv"
+    ),
     result_rds = file.path(output_dir, "result.rds"),
     summary_md = file.path(output_dir, "summary.md")
   )
   if (file.exists(paths$progress_csv)) unlink(paths$progress_csv)
   if (file.exists(paths$native_progress_csv)) unlink(paths$native_progress_csv)
+  if (file.exists(paths$native_lowrank_cache_progress_csv)) {
+    unlink(paths$native_lowrank_cache_progress_csv)
+  }
 
   env_names <- c(
     "FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK",
     "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
     "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT",
     "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD",
-    "FASTKPC_NATIVE_LEGACY_PROGRESS_CSV"
+    "FASTKPC_NATIVE_LEGACY_PROGRESS_CSV",
+    "FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_PROGRESS_CSV"
   )
   old_env <- Sys.getenv(env_names, unset = NA_character_)
   on.exit(fastkpc_compatible_cuda_restore_env(old_env), add = TRUE)
@@ -578,6 +586,10 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
   )
   Sys.setenv(FASTKPC_NATIVE_LEGACY_PROGRESS_CSV =
                paths$native_progress_csv)
+  Sys.setenv(
+    FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_PROGRESS_CSV =
+      paths$native_lowrank_cache_progress_csv
+  )
   timeout_error <- NULL
   facade_timed <- tryCatch(
     fastkpc_compatible_cuda_run_with_timeout(
@@ -688,7 +700,9 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
              signif(row$reference_elapsed_sec[[1L]], 8L)),
       paste0("- native progress: ", paths$native_progress_csv),
       paste0("- native dCov stage timing: ",
-             paths$native_dcov_stage_csv)
+             paths$native_dcov_stage_csv),
+      paste0("- native lowrank component cache progress: ",
+             paths$native_lowrank_cache_progress_csv)
     ), paths$summary_md)
     return(list(
       summary = row,
@@ -1096,7 +1110,9 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     paste0("- reference elapsed sec: ",
            signif(row$reference_elapsed_sec[[1L]], 8L)),
     paste0("- native progress: ", paths$native_progress_csv),
-    paste0("- native dCov stage timing: ", paths$native_dcov_stage_csv)
+    paste0("- native dCov stage timing: ", paths$native_dcov_stage_csv),
+    paste0("- native lowrank component cache progress: ",
+           paths$native_lowrank_cache_progress_csv)
   ), paths$summary_md)
 
   list(

@@ -243,4 +243,41 @@ assert_true(max(pair_progress$tests_replayed, na.rm = TRUE) ==
               as.integer(summary$legacy_dcov_native_cuda_lowrank_backend_count[[1L]]),
             "native CUDA lowrank pair progress should reach all dCov pairs")
 
+assert_true(file.exists(candidate$paths$native_lowrank_cache_progress_csv),
+            "native CUDA lowrank cache progress CSV should be written")
+cache_progress <- utils::read.csv(
+  candidate$paths$native_lowrank_cache_progress_csv,
+  check.names = FALSE
+)
+cache_required <- c(
+  "event",
+  "level",
+  "batch_size",
+  "component_lookup_count",
+  "component_hit_count",
+  "component_miss_count",
+  "component_cross_batch_hit_count",
+  "component_eviction_count",
+  "component_level_entry_count_max"
+)
+cache_missing_fields <- setdiff(cache_required, names(cache_progress))
+assert_true(length(cache_missing_fields) == 0L,
+            paste("native CUDA lowrank cache progress missing",
+                  cache_missing_fields[[1L]]))
+cache_batches <- cache_progress[
+  cache_progress$event == "component_cache_batch_complete",
+  , drop = FALSE
+]
+assert_true(nrow(cache_batches) > 0L,
+            "native CUDA lowrank cache progress should include batch rows")
+assert_true(
+  max(cache_batches$component_cross_batch_hit_count, na.rm = TRUE) > 0L,
+  "native CUDA lowrank cache progress should expose cross-batch hits"
+)
+assert_true(
+  max(cache_batches$component_level_entry_count_max, na.rm = TRUE) <=
+    as.integer(summary$legacy_dcov_native_cuda_lowrank_component_cache_level_max_entries[[1L]]),
+  "native CUDA lowrank cache progress should expose bounded level entry count"
+)
+
 cat("PASS compatible CUDA skeleton native cuda_spectra lowrank\n")

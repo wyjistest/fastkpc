@@ -657,6 +657,13 @@ std::string native_legacy_progress_csv_path_from_env() {
   return std::string(raw);
 }
 
+std::string native_cuda_lowrank_component_cache_progress_csv_path_from_env() {
+  const char* raw = std::getenv(
+    "FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_PROGRESS_CSV");
+  if (raw == nullptr) return std::string();
+  return std::string(raw);
+}
+
 int native_legacy_cuda_lowrank_progress_interval() {
   const char* raw = std::getenv("FASTKPC_NATIVE_CUDA_LOWRANK_PROGRESS_INTERVAL");
   if (raw == nullptr) return 256;
@@ -810,6 +817,62 @@ void append_native_legacy_progress(
       << provider_copy_ms << ","
       << dcov_materialize_ms << ","
       << dcov_call_ms << ","
+      << elapsed_ms << "\n";
+}
+
+void append_native_cuda_lowrank_component_cache_progress(
+    const std::string& path,
+    const std::string& event,
+    int level,
+    int batch_size,
+    const std::string& scope,
+    int level_max_entries,
+    int component_lookup_count,
+    int component_hit_count,
+    int component_miss_count,
+    int component_entry_count,
+    int component_cross_batch_hit_count,
+    int component_eviction_count,
+    int component_level_entry_count_max,
+    int component_count,
+    double component_total_ms,
+    double component_eig_ms,
+    double combine_ms,
+    double elapsed_ms) {
+  if (path.empty()) return;
+  std::ifstream probe(path.c_str());
+  const bool write_header = !probe.good();
+  probe.close();
+
+  std::ofstream out(path.c_str(), std::ios::out | std::ios::app);
+  if (!out.good()) return;
+  if (write_header) {
+    out << "timestamp_ms,pid,event,level,batch_size,"
+        << "component_cache_scope,component_cache_level_max_entries,"
+        << "component_lookup_count,component_hit_count,"
+        << "component_miss_count,component_entry_count,"
+        << "component_cross_batch_hit_count,component_eviction_count,"
+        << "component_level_entry_count_max,component_count,"
+        << "component_total_ms,component_eig_ms,combine_ms,elapsed_ms\n";
+  }
+  out << wall_epoch_ms_now() << ","
+      << native_progress_pid() << ","
+      << event << ","
+      << level << ","
+      << batch_size << ","
+      << scope << ","
+      << level_max_entries << ","
+      << component_lookup_count << ","
+      << component_hit_count << ","
+      << component_miss_count << ","
+      << component_entry_count << ","
+      << component_cross_batch_hit_count << ","
+      << component_eviction_count << ","
+      << component_level_entry_count_max << ","
+      << component_count << ","
+      << std::setprecision(17) << component_total_ms << ","
+      << component_eig_ms << ","
+      << combine_ms << ","
       << elapsed_ms << "\n";
 }
 
@@ -5327,6 +5390,8 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
     native_legacy_cuda_lowrank_progress_interval();
   const std::string native_progress_csv_path =
     native_legacy_progress_csv_path_from_env();
+  const std::string native_cuda_lowrank_component_cache_progress_csv_path =
+    native_cuda_lowrank_component_cache_progress_csv_path_from_env();
 
   auto accumulate_native_cuda_lowrank_run =
     [&](const LegacyDcovCudaLowrankGammaRun& run) {
@@ -5764,6 +5829,9 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
               std::vector<unsigned char> component_from_level_cache;
               std::vector<const double*> component_miss_columns;
               std::vector<int> component_miss_indices;
+              int component_cross_batch_hit_count = 0;
+              int component_eviction_count = 0;
+              int component_level_entry_count_max = 0;
               std::vector<int> x_component_index(
                 static_cast<std::size_t>(batch_size));
               std::vector<int> y_component_index(
@@ -5776,8 +5844,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
                   const int index = found->second;
                   if (component_from_level_cache[
                         static_cast<std::size_t>(index)] != 0) {
-                    legacy_dcov_native_cuda_lowrank_metrics
-                      .component_cache_cross_batch_hit_count += 1;
+                    component_cross_batch_hit_count += 1;
                   }
                   return index;
                 }
@@ -5794,8 +5861,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
                 if (cached_component) {
                   components.push_back(cached_component);
                   component_from_level_cache.push_back(1);
-                  legacy_dcov_native_cuda_lowrank_metrics
-                    .component_cache_cross_batch_hit_count += 1;
+                  component_cross_batch_hit_count += 1;
                 } else {
                   components.push_back(std::shared_ptr<
                     LegacyDcovCudaLowrankComponentRun>());
@@ -5920,18 +5986,25 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
                   const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(
                     component_miss_columns[
                       static_cast<std::size_t>(component_miss_index)]);
-                  legacy_dcov_native_cuda_lowrank_metrics
-                    .component_cache_eviction_count +=
-                    cuda_lowrank_level_component_cache->insert(
-                      key, component_ptr);
-                  legacy_dcov_native_cuda_lowrank_metrics
-                    .component_cache_level_entry_count_max =
-                    std::max(
-                      legacy_dcov_native_cuda_lowrank_metrics
-                        .component_cache_level_entry_count_max,
-                      cuda_lowrank_level_component_cache->max_entry_count());
+                  component_eviction_count +=
+                    cuda_lowrank_level_component_cache->insert(key,
+                                                               component_ptr);
+                  component_level_entry_count_max = std::max(
+                    component_level_entry_count_max,
+                    cuda_lowrank_level_component_cache->max_entry_count());
                 }
               }
+              legacy_dcov_native_cuda_lowrank_metrics
+                .component_cache_cross_batch_hit_count +=
+                component_cross_batch_hit_count;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .component_cache_eviction_count += component_eviction_count;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .component_cache_level_entry_count_max =
+                std::max(
+                  legacy_dcov_native_cuda_lowrank_metrics
+                    .component_cache_level_entry_count_max,
+                  component_level_entry_count_max);
               for (const std::shared_ptr<
                      LegacyDcovCudaLowrankComponentRun>& component :
                    components) {
@@ -5970,6 +6043,26 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
               eig_ms += component_eig_ms;
               legacy_dcov_native_cuda_lowrank_metrics.ms +=
                 component_total_ms + combine_ms;
+              append_native_cuda_lowrank_component_cache_progress(
+                native_cuda_lowrank_component_cache_progress_csv_path,
+                "component_cache_batch_complete",
+                level,
+                batch_size,
+                legacy_dcov_native_cuda_lowrank_metrics.component_cache_scope,
+                legacy_dcov_native_cuda_lowrank_metrics
+                  .component_cache_level_max_entries,
+                component_lookup_count,
+                component_hit_count,
+                component_miss_count,
+                component_miss_count,
+                component_cross_batch_hit_count,
+                component_eviction_count,
+                component_level_entry_count_max,
+                static_cast<int>(components.size()),
+                component_total_ms,
+                component_eig_ms,
+                combine_ms,
+                elapsed_ms_since(level_start));
             } else {
               std::vector<LegacyDcovCudaLowrankGammaRun> runs(
                 static_cast<std::size_t>(batch_size));
