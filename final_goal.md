@@ -5351,6 +5351,54 @@ decision:
   materialization.
 ```
 
+Real hot12 full-eig lowrank control:
+
+```text
+artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_hot12_native_dcov_full_eig_stage_rdsref_v1
+
+route:
+  same 351-row hot12 fixture and round/20-thread native dCov setup as
+  compatible_cuda_skeleton_hot12_native_dcov_lowrank_substage_v1
+  low_rank = full_eig
+  reference_result_path =
+    fastkpc/artifacts/compatible_cuda_skeleton_hot12_native_dcov_lowrank_substage_v1/result.rds
+
+correctness:
+  run_status = ok
+  reference_source = rds
+  edge_count = 20 / 20
+  SHD = 0
+  adjacency_identical = TRUE
+  sepsets_identical = TRUE
+  n.edgetests exact = TRUE
+  n.edgetests = 131,994,1453,243,35
+  pmax_max_abs_diff = 3.275158e-14
+
+runtime:
+  Spectra elapsed_sec = 18.730
+  full_eig elapsed_sec = 52.881
+  full_eig / Spectra wall ratio = 2.823x
+
+native dCov worker-sum:
+  Spectra scalar_total_ms = 51577.633
+  full_eig scalar_total_ms = 505925.1
+  full_eig / Spectra scalar_total ratio = 9.809x
+
+lowrank eig timing:
+  Spectra lowrank_eig_ms = 44210.708
+  full_eig lowrank_eig_ms = 499726.0
+  full_eig / Spectra eig ratio = 11.303x
+  full_eig count = 5712
+  Spectra count = 0
+
+decision:
+  Full eig is correctness-clean on the real hot12 native dCov route, but it is
+  strongly performance-negative for n=351 / numCol=35. Spectra remains the
+  correct CPU lowrank route. The next dCov work should optimize or replace the
+  Spectra eigensolve path, not fall back to full eig.
+```
+
 ---
 
 ## 9. Final success definition
