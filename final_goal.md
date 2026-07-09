@@ -3285,6 +3285,29 @@ Full 351x48 command:
 Rscript -e 'source("fastkpc/R/compatible_cuda_skeleton_artifact.R"); fastkpc_run_compatible_cuda_skeleton_artifact(output_dir = "fastkpc/artifacts/compatible_cuda_skeleton_full_351x48_v1", artifact_name = "compatible_cuda_skeleton_full_351x48_v1", alpha = 0.1, max_conditioning_size = 46L, dcov_batch = "level", reference_result_path = "fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds", expected_edge_count = 110L, expected_n_edgetests = c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L))'
 ```
 
+Full 351x48 attempt status:
+
+```text
+status: attempted, no completed artifact
+reference: loaded from legacy_mgcv_residual_cache_s_affinity_v1 result.rds
+reference_source: rds
+candidate: fastkpc_compatible_cuda_skeleton() facade
+candidate route: legacy-mgcv-provider-native-legacy-dcov
+attempt result:
+  candidate exceeded the current recommended S-affinity wall-time baseline
+  before producing a completed summary
+  process remained CPU-bound and was stopped after the performance gate was
+  already failed
+artifact files written: none
+
+decision:
+  current facade is a useful API-shape and subset-correctness checkpoint, but
+  it is not a viable full 351x48 promotion route. It still runs the hidden R
+  legacy mgcv residual-provider path in a single candidate pass, so Phase 5
+  must move residual generation/batching further behind the native/CUDA
+  boundary before another full artifact attempt.
+```
+
 ### Gate
 
 ```text
