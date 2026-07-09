@@ -57,6 +57,7 @@ summary <- utils::read.csv(artifact$paths$summary_csv,
                            stringsAsFactors = FALSE)
 required <- c(
   "artifact", "route", "batch_mode", "batch_min_size", "n", "p",
+  "reference_source", "reference_result_path",
   "edge_count", "reference_edge_count", "shd", "adjacency_identical",
   "n_edgetests_identical", "n_edgetests_exact", "elapsed_sec",
   "legacy_dcov_cpp_backend_count",
@@ -128,5 +129,30 @@ assert_true(grepl("legacy_dcov_cpp_batch_min_size_artifact_test",
             "artifact summary markdown should name the artifact")
 assert_true(grepl("batch coverage", summary_md, fixed = TRUE),
             "artifact summary markdown should mention batch coverage")
+
+reuse_dir <- tempfile("legacy-dcov-cpp-batch-min-size-artifact-reuse-")
+reuse <- fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact(
+  data = data,
+  output_dir = reuse_dir,
+  artifact_name = "legacy_dcov_cpp_batch_min_size_artifact_reuse_test",
+  alpha = 0.08,
+  max_conditioning_size = 3L,
+  batch_mode = "round",
+  min_sizes = c(999999L),
+  num_cores = 2L,
+  reference_result_path = artifact$paths$result_rds
+)
+reuse_summary <- utils::read.csv(reuse$paths$summary_csv,
+                                 stringsAsFactors = FALSE)
+assert_true(identical(reuse_summary$reference_source[[1L]], "rds"),
+            "reuse artifact should record loaded reference source")
+assert_true(identical(reuse_summary$reference_result_path[[1L]],
+                      artifact$paths$result_rds),
+            "reuse artifact should record loaded reference path")
+assert_true(reuse_summary$elapsed_sec[[1L]] == 0,
+            "reuse artifact should not recompute reference elapsed time")
+assert_true(reuse_summary$shd[[2L]] == 0L &&
+              isTRUE(reuse_summary$adjacency_identical[[2L]]),
+            "reuse artifact candidate should compare against loaded reference")
 
 cat("PASS legacy dCov C++ batch min-size artifact\n")

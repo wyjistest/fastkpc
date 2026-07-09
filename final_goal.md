@@ -4330,9 +4330,12 @@ summary.md
 Full-gate shape:
 
 ```bash
-Rscript -e 'source("fastkpc/R/legacy_dcov_cpp_batch_min_size_artifact.R"); fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact(output_dir = "fastkpc/artifacts/legacy_dcov_cpp_batch_round_min_size_sweep_v1", artifact_name = "legacy_dcov_cpp_batch_round_min_size_sweep_v1", batch_mode = "round", min_sizes = c(1L, 4L, 8L, 16L, 32L, 64L), alpha = 0.1, max_conditioning_size = 46L)'
+Rscript -e 'source("fastkpc/R/legacy_dcov_cpp_batch_min_size_artifact.R"); fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact(output_dir = "fastkpc/artifacts/legacy_dcov_cpp_batch_round_min_size_sweep_v1", artifact_name = "legacy_dcov_cpp_batch_round_min_size_sweep_v1", batch_mode = "round", min_sizes = c(1L, 4L, 8L, 16L, 32L, 64L), alpha = 0.1, max_conditioning_size = 46L, reference_result_path = "fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds")'
 ```
 
+When `reference_result_path` is provided, the artifact reuses the existing
+S-affinity reference skeleton and records `reference_source = rds` with
+the reference row `elapsed_sec = 0`; candidate rows are still freshly computed.
 The full artifact should compare elapsed time, SHD, n.edgetests, batch
 coverage, skipped ratio, mean/max batch size, and by-level coverage before any
 min-size policy is considered for promotion.

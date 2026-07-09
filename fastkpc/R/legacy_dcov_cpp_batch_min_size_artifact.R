@@ -20,6 +20,36 @@ fastkpc_legacy_dcov_batch_summary_value <- function(summary, name, default) {
   if (is.null(value)) default else value
 }
 
+fastkpc_legacy_dcov_batch_extract_reference <- function(result) {
+  candidates <- list(
+    root = result,
+    reference = result$reference,
+    skeleton = result$skeleton,
+    baseline = result$baseline,
+    backend = result$backend,
+    facade = result$facade
+  )
+  for (name in names(candidates)) {
+    candidate <- candidates[[name]]
+    if (is.list(candidate) &&
+        !is.null(candidate$skeleton) &&
+        !is.null(candidate$skeleton$adjacency) &&
+        !is.null(candidate$skeleton$n.edgetests)) {
+      attr(candidate, "fastkpc_reference_slot") <- name
+      return(candidate)
+    }
+    if (is.list(candidate) &&
+        !is.null(candidate$adjacency) &&
+        !is.null(candidate$n.edgetests)) {
+      wrapped <- list(skeleton = candidate)
+      attr(wrapped, "fastkpc_reference_slot") <- name
+      return(wrapped)
+    }
+  }
+  stop("reference result does not contain a skeleton-like object",
+       call. = FALSE)
+}
+
 fastkpc_legacy_dcov_batch_run_once <- function(
     data, alpha, max_conditioning_size, index, numCol, num_cores,
     batch_mode = "", batch_min_size = NA_integer_, trace_level = "summary") {
@@ -58,7 +88,8 @@ fastkpc_legacy_dcov_batch_run_once <- function(
 
 fastkpc_legacy_dcov_batch_summary_row <- function(
     artifact_name, route, batch_mode, batch_min_size, run, reference,
-    n, p, alpha, max_conditioning_size, index, numCol) {
+    n, p, alpha, max_conditioning_size, index, numCol,
+    reference_source, reference_result_path) {
   skeleton <- run$value$skeleton
   reference_skeleton <- reference$value$skeleton
   summary <- skeleton$scheduler_diagnostics$summary %||% list()
@@ -73,6 +104,8 @@ fastkpc_legacy_dcov_batch_summary_row <- function(
     batch_min_size = as.integer(batch_min_size %||% NA_integer_),
     n = as.integer(n),
     p = as.integer(p),
+    reference_source = reference_source,
+    reference_result_path = reference_result_path %||% NA_character_,
     alpha = as.numeric(alpha),
     max_conditioning_size = as.integer(max_conditioning_size),
     index = as.integer(index),
@@ -188,7 +221,8 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
     use_residual_cache = TRUE,
     residual_affinity = "s",
     num_cores = NULL,
-    trace_level = "summary") {
+    trace_level = "summary",
+    reference_result_path = NULL) {
   batch_mode <- match.arg(batch_mode)
   if (is.null(data)) {
     if (!file.exists(data_path)) {
@@ -245,17 +279,32 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
     Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY")
   }
 
-  reference <- fastkpc_legacy_dcov_batch_run_once(
-    data = data,
-    alpha = alpha,
-    max_conditioning_size = max_conditioning_size,
-    index = index,
-    numCol = numCol,
-    num_cores = num_cores,
-    batch_mode = "",
-    batch_min_size = NA_integer_,
-    trace_level = trace_level
-  )
+  reference_source <- "computed"
+  if (is.null(reference_result_path)) {
+    reference <- fastkpc_legacy_dcov_batch_run_once(
+      data = data,
+      alpha = alpha,
+      max_conditioning_size = max_conditioning_size,
+      index = index,
+      numCol = numCol,
+      num_cores = num_cores,
+      batch_mode = "",
+      batch_min_size = NA_integer_,
+      trace_level = trace_level
+    )
+  } else {
+    if (!file.exists(reference_result_path)) {
+      stop("reference result not found: ", reference_result_path,
+           call. = FALSE)
+    }
+    reference_source <- "rds"
+    reference <- list(
+      value = fastkpc_legacy_dcov_batch_extract_reference(
+        readRDS(reference_result_path)
+      ),
+      elapsed = 0
+    )
+  }
 
   rows <- list(fastkpc_legacy_dcov_batch_summary_row(
     artifact_name = artifact_name,
@@ -269,7 +318,9 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
     n = nrow(data),
     p = ncol(data),
     index = index,
-    numCol = numCol
+    numCol = numCol,
+    reference_source = reference_source,
+    reference_result_path = reference_result_path
   ))
   by_level_rows <- list(fastkpc_legacy_dcov_batch_level_rows(
     route = "reference",
@@ -304,7 +355,9 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
       n = nrow(data),
       p = ncol(data),
       index = index,
-      numCol = numCol
+      numCol = numCol,
+      reference_source = reference_source,
+      reference_result_path = reference_result_path
     )
     by_level_rows[[length(by_level_rows) + 1L]] <-
       fastkpc_legacy_dcov_batch_level_rows(
@@ -332,6 +385,8 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
       summary = summary,
       runtime_by_level = runtime_by_level,
       reference = reference$value,
+      reference_source = reference_source,
+      reference_result_path = reference_result_path,
       candidates = lapply(candidates, function(item) item$value),
       paths = paths
     ),
@@ -347,6 +402,8 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
     paste0("- max conditioning size: ", max_conditioning_size),
     paste0("- batch mode: ", batch_mode),
     paste0("- min sizes: ", paste(min_sizes, collapse = ", ")),
+    paste0("- reference source: ", reference_source),
+    paste0("- reference result path: ", reference_result_path %||% NA_character_),
     paste0("- reference elapsed sec: ",
            signif(summary$elapsed_sec[[1L]], 8L)),
     "",
