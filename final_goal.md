@@ -6020,6 +6020,65 @@ decision:
   inside the legacy dCov route, with fallback and authority unchanged.
 ```
 
+CUDA Spectra lowrank legacy-route shadow checkpoint:
+
+```text
+scope:
+  env-gated diagnostic shadow inside the legacy dcc.gamma route
+  only active for the compatible legacy parallel path when:
+    FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+    FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=spectra
+    FASTKPC_LEGACY_DCOV_GAMMA_CUDA_LOW_RANK_SHADOW=1
+  C++ Spectra legacy dCov remains authoritative
+  CUDA lowrank shadow does not change p-values, skeleton decisions, sepsets,
+  n.edgetests, residual authority, or canonical parent replay
+
+change:
+  add CUDA lowrank shadow runtime counters to legacy diagnostics:
+    legacy_dcov_cuda_lowrank_shadow_enabled
+    legacy_dcov_cuda_lowrank_shadow_count
+    legacy_dcov_cuda_lowrank_shadow_ms
+    legacy_dcov_cuda_lowrank_shadow_error_count
+    legacy_dcov_cuda_lowrank_shadow_converged_count
+    legacy_dcov_cuda_lowrank_shadow_max_eigenvalue_diff
+    legacy_dcov_cuda_lowrank_shadow_min_centered_abs_corr
+    legacy_dcov_cuda_lowrank_shadow_max_statistic_input_abs_diff
+    legacy_dcov_cuda_lowrank_shadow_spectra_matvec_count
+    legacy_dcov_cuda_lowrank_shadow_matrix_h2d_ms_during_compute_max
+    legacy_dcov_cuda_lowrank_shadow_matrix_bytes
+    legacy_dcov_cuda_lowrank_shadow_workspace_realloc_count
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_shadow_route.R
+
+54x5 compatible legacy route shadow check:
+  max_conditioning_size = 3
+  backend = C++ Spectra legacy dCov authority
+  shadow = CUDA Spectra lowrank diagnostic path
+  legacy_dcov_gamma_count = 18
+  legacy_dcov_cpp_backend_count = 18
+  legacy_dcov_r_backend_count = 0
+  legacy_dcov_cuda_lowrank_shadow_enabled = TRUE
+  legacy_dcov_cuda_lowrank_shadow_count = 18
+  legacy_dcov_cuda_lowrank_shadow_error_count = 0
+  legacy_dcov_cuda_lowrank_shadow_converged_count = 18
+  legacy_dcov_cuda_lowrank_shadow_max_eigenvalue_diff = 4.973799e-14
+  legacy_dcov_cuda_lowrank_shadow_min_centered_abs_corr = 1
+  legacy_dcov_cuda_lowrank_shadow_max_statistic_input_abs_diff = 8.867573e-12
+  legacy_dcov_cuda_lowrank_shadow_spectra_matvec_count = 720
+  legacy_dcov_cuda_lowrank_shadow_matrix_h2d_ms_during_compute_max = 0
+  legacy_dcov_cuda_lowrank_shadow_matrix_bytes = 839808
+  legacy_dcov_cuda_lowrank_shadow_workspace_realloc_count = 36
+
+decision:
+  This is the first legacy-route integration for the CUDA Spectra lowrank
+  substrate. It is diagnostic only: authority remains the C++ Spectra dCov
+  backend and the current recommended compatible route is unchanged. The next
+  lowrank step is a broader real/subset route shadow and only then an
+  env-gated CUDA lowrank backend candidate with explicit fallback diagnostics.
+```
+
 ---
 
 ## 9. Final success definition
