@@ -5252,6 +5252,53 @@ status:
   route is promoted by this checkpoint.
 ```
 
+Real hot12 stage timing artifact:
+
+```text
+artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_hot12_native_dcov_stage_timing_v1
+
+route:
+  351-row real fixture
+  columns = 1|2|3|4|5|6|9|12|15|16|17|18
+  dcov_batch = round
+  low_rank = spectra
+  FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES = 20
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS = 20
+
+correctness:
+  run_status = ok
+  edge_count = 20 / 20
+  SHD = 0
+  n.edgetests exact = TRUE
+  n.edgetests = 131,994,1453,243,35
+
+runtime:
+  elapsed_sec = 18.593
+  reference_elapsed_sec = 46.186
+  native dCov batch_count / pair_count = 148 / 2856
+  native dCov batch threads = 20
+  native dCov batch_call_ms = 4020.789
+  native dCov scalar_total_ms = 49810.526
+
+stage timing:
+  lowrank_ms = 44255.941
+  lowrank share of scalar_total = 0.888486
+  distance_ms = 2329.666
+  distance share of scalar_total = 0.046771
+  moment_ms = 1900.295
+  statistic_ms = 1313.491
+  materialize_ms = 5.651
+  materialize share of scalar_total = 0.000113
+
+decision:
+  The new long-form stage artifact confirms that, on a real hot12 subset,
+  native dCov worker-sum is dominated by Spectra/lowrank work, not host batch
+  materialization. Direct-input materialization cleanup is useful substrate
+  work, but the next dCov data-plane optimization should target lowrank/Spectra
+  execution or a CUDA-compatible legacy lowrank path.
+```
+
 ---
 
 ## 9. Final success definition
