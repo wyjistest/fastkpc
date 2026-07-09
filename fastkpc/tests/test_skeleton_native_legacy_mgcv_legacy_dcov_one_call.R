@@ -307,6 +307,12 @@ assert_true(identical(facade_cpp_residual$summary$residual_provider_response_bac
 assert_true(identical(facade_cpp_residual$summary$residual_provider_mgcv_backend,
                       "cpp_guarded"),
             "compatible CUDA facade should record selected guarded mgcv backend")
+assert_true(identical(as.numeric(facade_cpp_residual$summary$compatible_cuda_mgcv_residual_backend_native_s_size_limit),
+                      1),
+            "compatible CUDA facade should record guarded residual native S-size limit")
+assert_true(identical(as.numeric(facade_cpp_residual$summary$compatible_cuda_mgcv_residual_backend_condition_threshold),
+                      1e300),
+            "compatible CUDA facade should record guarded residual condition threshold")
 assert_true(isTRUE(facade_cpp_residual$summary$residual_provider_mgcv_cpp_backend_enabled),
             "compatible CUDA facade should enable guarded C++ residual backend")
 assert_true(identical(as.integer(facade_cpp_residual$summary$residual_provider_mgcv_cpp_backend_count),

@@ -31,6 +31,34 @@ route <- Sys.getenv(
 )
 assert_true(route %in% c("wrapper", "facade"),
             "real subset route must be wrapper or facade")
+mgcv_backend <- Sys.getenv(
+  "FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_MGCV_BACKEND",
+  unset = "env"
+)
+assert_true(mgcv_backend %in% c("env", "r", "cpp_guarded"),
+            "real subset mgcv backend must be env, r, or cpp_guarded")
+mgcv_native_s_size_limit <- suppressWarnings(as.numeric(Sys.getenv(
+  "FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_MGCV_NATIVE_S_SIZE_LIMIT",
+  unset = "Inf"
+)))
+if (length(mgcv_native_s_size_limit) != 1L ||
+    is.na(mgcv_native_s_size_limit) ||
+    mgcv_native_s_size_limit < 0) {
+  mgcv_native_s_size_limit <- Inf
+}
+mgcv_condition_threshold <- suppressWarnings(as.numeric(Sys.getenv(
+  "FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_MGCV_CONDITION_THRESHOLD",
+  unset = "1e12"
+)))
+if (length(mgcv_condition_threshold) != 1L ||
+    !is.finite(mgcv_condition_threshold) ||
+    mgcv_condition_threshold < 0) {
+  mgcv_condition_threshold <- 1e12
+}
+if (!identical(mgcv_backend, "env")) {
+  assert_true(identical(route, "facade"),
+              "real subset mgcv backend override requires route=facade")
+}
 
 compare_sepsets <- function(left, right) {
   if (length(left) != length(right)) return(FALSE)
@@ -103,7 +131,8 @@ run_scenario <- function(name, scenario) {
     max_conditioning_size = max_conditioning_size,
     residual_provider = fastkpc_legacy_mgcv_residual_provider(
       data = data,
-      counter_env = provider_counts
+      counter_env = provider_counts,
+      backend = "r"
     ),
     index = index,
     numCol = numCol,
@@ -120,7 +149,12 @@ run_scenario <- function(name, scenario) {
         index = index,
         numCol = numCol,
         trace_level = "summary",
-        dcov_batch = "level"
+        dcov_batch = "level",
+        mgcv_residual_backend = mgcv_backend,
+        mgcv_residual_backend_native_s_size_limit =
+          if (identical(mgcv_backend, "env")) NULL else mgcv_native_s_size_limit,
+        mgcv_residual_backend_condition_threshold =
+          if (identical(mgcv_backend, "env")) NULL else mgcv_condition_threshold
       )
     )
   } else {
@@ -137,9 +171,10 @@ run_scenario <- function(name, scenario) {
   prefix <- paste0("real subset ", name, " one-call")
   assert_true(identical(unname(one_call$adjacency), unname(explicit$adjacency)),
               paste(prefix, "adjacency should match explicit provider"))
+  pmax_tol <- if (identical(mgcv_backend, "cpp_guarded")) 1e-8 else 1e-12
   assert_true(pmax_max_abs_diff(unname(one_call$pMax),
-                                unname(explicit$pMax)) < 1e-12,
-              paste(prefix, "pMax should match explicit provider"))
+                                unname(explicit$pMax)) < pmax_tol,
+              paste(prefix, "pMax should stay within backend tolerance"))
   assert_true(identical(as.integer(one_call$n.edgetests),
                         as.integer(explicit$n.edgetests)),
               paste(prefix, "n.edgetests should match explicit provider"))
@@ -165,8 +200,27 @@ run_scenario <- function(name, scenario) {
                           "legacy-mgcv-provider-native-legacy-dcov"),
                 paste(prefix, "facade route should record compatible CUDA route"))
     assert_true(identical(one_call$summary$compatible_cuda_residual_authority,
-                          "legacy-mgcv-regrXonS-provider"),
+                          if (identical(mgcv_backend, "cpp_guarded")) {
+                            "legacy-mgcv-cpp-guarded-provider"
+                          } else {
+                            "legacy-mgcv-regrXonS-provider"
+                          }),
                 paste(prefix, "facade route should record residual authority"))
+    assert_true(identical(one_call$summary$compatible_cuda_mgcv_residual_backend,
+                          mgcv_backend),
+                paste(prefix, "facade route should record mgcv backend option"))
+    if (identical(mgcv_backend, "cpp_guarded")) {
+      assert_true(identical(one_call$summary$residual_provider_response_backend,
+                            "legacy-mgcv-cpp-guarded-level-batch"),
+                  paste(prefix, "facade route should record guarded provider backend"))
+      assert_true(isTRUE(one_call$summary$residual_provider_mgcv_cpp_backend_enabled),
+                  paste(prefix, "facade route should enable guarded residual backend"))
+      assert_true(one_call$summary$residual_provider_mgcv_cpp_backend_native_count > 0L,
+                  paste(prefix, "facade route should use native fixed-sp residual replay"))
+      assert_true(identical(as.integer(one_call$summary$residual_provider_mgcv_cpp_backend_error_count),
+                            0L),
+                  paste(prefix, "facade route should not report guarded residual errors"))
+    }
     assert_true(identical(one_call$summary$compatible_cuda_ci_authority,
                           "native-legacy-dcov.gamma"),
                 paste(prefix, "facade route should record CI authority"))
@@ -181,9 +235,10 @@ run_scenario <- function(name, scenario) {
   }
 
   cat(sprintf(
-    "PASS skeleton native legacy mgcv legacy dCov real subset %s route=%s p=%d requests=%d\n",
+    "PASS skeleton native legacy mgcv legacy dCov real subset %s route=%s mgcv_backend=%s p=%d requests=%d\n",
     name,
     route,
+    mgcv_backend,
     ncol(data),
     as.integer(provider_counts$request_count)
   ))

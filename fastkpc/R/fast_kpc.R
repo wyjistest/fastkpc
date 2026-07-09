@@ -94,16 +94,20 @@ fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
     Sys.setenv(FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND =
                  mgcv_residual_backend)
   }
+  mgcv_residual_backend_native_s_size_limit <-
+    options$mgcv_residual_backend_native_s_size_limit %||% NA_real_
+  mgcv_residual_backend_condition_threshold <-
+    options$mgcv_residual_backend_condition_threshold %||% NA_real_
   if (!is.null(options$mgcv_residual_backend_native_s_size_limit)) {
     Sys.setenv(
       FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT =
-        as.character(options$mgcv_residual_backend_native_s_size_limit)
+        as.character(mgcv_residual_backend_native_s_size_limit)
     )
   }
   if (!is.null(options$mgcv_residual_backend_condition_threshold)) {
     Sys.setenv(
       FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD =
-        as.character(options$mgcv_residual_backend_condition_threshold)
+        as.character(mgcv_residual_backend_condition_threshold)
     )
   }
 
@@ -139,6 +143,10 @@ fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
   result$summary$compatible_cuda_ci_authority <- "native-legacy-dcov.gamma"
   result$summary$compatible_cuda_mgcv_residual_backend <-
     mgcv_residual_backend
+  result$summary$compatible_cuda_mgcv_residual_backend_native_s_size_limit <-
+    as.numeric(mgcv_residual_backend_native_s_size_limit)
+  result$summary$compatible_cuda_mgcv_residual_backend_condition_threshold <-
+    as.numeric(mgcv_residual_backend_condition_threshold)
   result$summary$labels <- labels
   result
 }

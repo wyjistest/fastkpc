@@ -3249,6 +3249,18 @@ FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_ROUTE=facade \
   Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_real_subset.R
 ```
 
+To validate the guarded C++ residual backend through the facade on the same
+real subset:
+
+```bash
+FASTKPC_RUN_REAL_SUBSET_TESTS=1 \
+FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_ROUTE=facade \
+FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_MGCV_BACKEND=cpp_guarded \
+FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_MGCV_NATIVE_S_SIZE_LIMIT=2 \
+FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_MGCV_CONDITION_THRESHOLD=1e300 \
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_real_subset.R
+```
+
 For quicker facade iteration, the same gate can be narrowed with
 `FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_CASES=hot8` or
 `FASTKPC_NATIVE_LEGACY_ONE_CALL_REAL_SUBSET_CASES=hot12`.
@@ -3291,6 +3303,26 @@ summary legacy_dcov_native_batch_enabled = TRUE
 status: real 351-row subset facade gate pass for hot8 and hot12; still not full 351x48
 ```
 
+Facade guarded C++ residual hot8 checkpoint:
+
+```text
+route = facade
+mgcv_backend = cpp_guarded
+scenario = hot8
+p = 8
+residual provider requests = 224
+reference residual provider = legacy R regrXonS
+candidate residual provider = legacy-mgcv-cpp-guarded-level-batch
+adjacency identical to explicit R-provider route = TRUE
+n.edgetests identical to explicit R-provider route = TRUE
+summary compatible_cuda_residual_authority = legacy-mgcv-cpp-guarded-provider
+summary residual_provider_mgcv_cpp_backend_enabled = TRUE
+summary residual_provider_mgcv_cpp_backend_native_count > 0
+summary residual_provider_mgcv_cpp_backend_error_count = 0
+
+status: real 351-row hot8 guarded-residual facade gate pass; still not full 351x48
+```
+
 Decision:
 
 ```text
@@ -3298,8 +3330,9 @@ This extends the R-facing one-call wrapper from a synthetic smoke gate to a
 real 351-row subset pair while preserving native skeleton replay and the
 legacy-compatible C++ dcov.gamma data plane. It is still not a promotion route:
 the residual provider remains an R seam, the gate is limited to 8- and
-12-column subsets, and full 351x48 SHD=0 / n.edgetests-exact / wall-time gates
-remain open.
+12-column subsets for the default residual provider and hot8 for the guarded
+C++ residual provider, and full 351x48 SHD=0 / n.edgetests-exact / wall-time
+gates remain open.
 ```
 
 ### CUDA responsibilities
