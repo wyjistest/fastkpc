@@ -19,6 +19,8 @@ struct LegacyDcovLowrankTimings {
   int spectra_nconv = 0;
   int spectra_ncv = 0;
   double spectra_tol = 0.0;
+  int spectra_matvec_count = 0;
+  double spectra_matvec_ms = 0.0;
 };
 
 enum class LegacyDcovLowrankMode {

@@ -223,6 +223,8 @@ required <- c(
   "legacy_dcov_native_lowrank_spectra_nconv",
   "legacy_dcov_native_lowrank_spectra_ncv",
   "legacy_dcov_native_lowrank_spectra_tol",
+  "legacy_dcov_native_lowrank_spectra_matvec_count",
+  "legacy_dcov_native_lowrank_spectra_matvec_ms",
   "legacy_dcov_native_batch_statistic_ms",
   "legacy_dcov_native_batch_moment_ms",
   "legacy_dcov_native_batch_pgamma_ms",
@@ -346,6 +348,10 @@ assert_true(summary$legacy_dcov_native_lowrank_spectra_ncv[[1L]] > 0,
             "artifact should report native dCov Spectra ncv")
 assert_true(summary$legacy_dcov_native_lowrank_spectra_tol[[1L]] > 0,
             "artifact should report native dCov Spectra tolerance")
+assert_true(summary$legacy_dcov_native_lowrank_spectra_matvec_count[[1L]] >= 0,
+            "artifact should report native dCov Spectra matvec count")
+assert_true(summary$legacy_dcov_native_lowrank_spectra_matvec_ms[[1L]] >= 0,
+            "artifact should report native dCov Spectra matvec timing")
 artifact_lowrank_parts <- summary$legacy_dcov_native_batch_lowrank_eig_ms[[1L]] +
   summary$legacy_dcov_native_batch_lowrank_select_ms[[1L]] +
   summary$legacy_dcov_native_batch_lowrank_center_ms[[1L]] +

@@ -5436,7 +5436,7 @@ targeted gate:
   Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
   git diff --check
 
-  status:
+status:
   diagnostics only. This does not change dCov authority, residual authority,
   skeleton replay, route selection, lowrank mode, or the current recommended
   route. It prepares the next CUDA-compatible lowrank/eigensolve work by
@@ -5493,6 +5493,68 @@ decision:
   worker-sum across 10,735 aggregate Spectra iterations on this subset. The
   next CUDA-compatible lowrank step should target this matrix-vector/eigensolve
   work shape directly.
+```
+
+Native Spectra matvec diagnostics checkpoint:
+
+```text
+scope:
+  native one-call residual-provider legacy dCov path
+  env-gated C++ legacy dCov Spectra diagnostics
+  compatible CUDA skeleton artifact summary CSV
+
+env gate:
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_SPECTRA_MATVEC_DIAG=1
+
+change:
+  when the env gate is enabled, the C++ Spectra lowrank route uses a counting
+  matrix product wrapper around the same dense centered distance matrix and
+  reports:
+    lowrank_spectra_matvec_count
+    lowrank_spectra_matvec_ms
+
+  native one-call summaries and compatible CUDA artifact summaries propagate:
+    legacy_dcov_native_lowrank_spectra_matvec_count
+    legacy_dcov_native_lowrank_spectra_matvec_ms
+
+default behavior:
+  unchanged. Without FASTKPC_LEGACY_DCOV_GAMMA_CPP_SPECTRA_MATVEC_DIAG=1,
+  Spectra still uses the existing DenseSymMatProd path. This is diagnostic-only
+  and does not change dCov authority, residual authority, skeleton replay,
+  route selection, or lowrank fallback behavior.
+
+artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_hot12_native_dcov_spectra_matvec_diag_v1
+
+correctness:
+  run_status = ok
+  edge_count = 20 / 20
+  SHD = 0
+  n.edgetests exact = TRUE
+  n.edgetests = 131,994,1453,243,35
+
+runtime:
+  elapsed_sec = 19.793
+  native dCov batch_count / pair_count = 148 / 2856
+  lowrank_eig_ms = 60351.73
+
+Spectra matvec work:
+  spectra_count = 5712
+  spectra_iterations = 10735
+  spectra_matvec_count = 495966
+  spectra_matvec_ms = 40118.11
+  spectra_matvec_per_solve = 86.82878
+  spectra_matvec_per_iteration = 46.20084
+  spectra_matvec_ms_per_op = 0.08088882
+  spectra_matvec_share_of_lowrank_eig = 0.6647384
+
+decision:
+  On the hot12 round/Spectra native dCov route, counted dense symmetric
+  matrix-vector products account for roughly two thirds of lowrank eigensolve
+  worker-sum under the diagnostic wrapper. The next CUDA-compatible lowrank
+  prototype should target the Spectra matvec/eigensolve operator first, while
+  keeping this counter env-gated because the counting wrapper is not the
+  recommended production path.
 ```
 
 ---

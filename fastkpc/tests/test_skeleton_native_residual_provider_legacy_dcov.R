@@ -255,7 +255,9 @@ native_lowrank_work_fields <- c(
   "legacy_dcov_native_lowrank_spectra_iterations",
   "legacy_dcov_native_lowrank_spectra_nconv",
   "legacy_dcov_native_lowrank_spectra_ncv",
-  "legacy_dcov_native_lowrank_spectra_tol"
+  "legacy_dcov_native_lowrank_spectra_tol",
+  "legacy_dcov_native_lowrank_spectra_matvec_count",
+  "legacy_dcov_native_lowrank_spectra_matvec_ms"
 )
 missing_native_lowrank_work <- setdiff(native_lowrank_work_fields,
                                        names(native$summary))
@@ -270,6 +272,10 @@ assert_true(native$summary$legacy_dcov_native_lowrank_spectra_ncv > 0,
             "native legacy dCov should report Spectra ncv")
 assert_true(native$summary$legacy_dcov_native_lowrank_spectra_tol > 0,
             "native legacy dCov should report Spectra tolerance")
+assert_true(native$summary$legacy_dcov_native_lowrank_spectra_matvec_count >= 0,
+            "native legacy dCov should report Spectra matvec count")
+assert_true(native$summary$legacy_dcov_native_lowrank_spectra_matvec_ms >= 0,
+            "native legacy dCov should report Spectra matvec timing")
 expected_batch_count <- sum(as.integer(native$levels$tasks_planned) > 0L)
 assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_count),
                       as.integer(expected_batch_count)),

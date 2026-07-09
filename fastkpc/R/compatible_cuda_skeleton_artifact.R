@@ -349,6 +349,8 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     legacy_dcov_native_lowrank_spectra_nconv = NA_integer_,
     legacy_dcov_native_lowrank_spectra_ncv = NA_integer_,
     legacy_dcov_native_lowrank_spectra_tol = NA_real_,
+    legacy_dcov_native_lowrank_spectra_matvec_count = NA_integer_,
+    legacy_dcov_native_lowrank_spectra_matvec_ms = NA_real_,
     legacy_dcov_native_batch_statistic_ms = NA_real_,
     legacy_dcov_native_batch_moment_ms = NA_real_,
     legacy_dcov_native_batch_pgamma_ms = NA_real_,
@@ -837,6 +839,12 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
                    NA_integer_),
     legacy_dcov_native_lowrank_spectra_tol =
       as.numeric(facade_summary$legacy_dcov_native_lowrank_spectra_tol %||%
+                   NA_real_),
+    legacy_dcov_native_lowrank_spectra_matvec_count =
+      as.integer(facade_summary$legacy_dcov_native_lowrank_spectra_matvec_count %||%
+                   NA_integer_),
+    legacy_dcov_native_lowrank_spectra_matvec_ms =
+      as.numeric(facade_summary$legacy_dcov_native_lowrank_spectra_matvec_ms %||%
                    NA_real_),
     legacy_dcov_native_batch_statistic_ms =
       as.numeric(facade_summary$legacy_dcov_native_batch_statistic_ms %||%

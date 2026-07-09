@@ -4123,6 +4123,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       legacy_lowrank_timings.spectra_tol = std::max(
         legacy_lowrank_timings.spectra_tol,
         list_numeric_value(batch_diag, "lowrank_spectra_tol"));
+      legacy_lowrank_timings.spectra_matvec_count +=
+        list_integer_value(batch_diag, "lowrank_spectra_matvec_count");
+      legacy_lowrank_timings.spectra_matvec_ms +=
+        list_numeric_value(batch_diag, "lowrank_spectra_matvec_ms");
       const std::string batch_lowrank_mode =
         Rcpp::as<std::string>(batch_diag["lowrank_mode"]);
       legacy_lowrank_mode = batch_lowrank_mode == "spectra"
@@ -4303,6 +4307,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_lowrank_timings.spectra_tol = std::max(
           legacy_lowrank_timings.spectra_tol,
           result.lowrank_timings.spectra_tol);
+        legacy_lowrank_timings.spectra_matvec_count +=
+          result.lowrank_timings.spectra_matvec_count;
+        legacy_lowrank_timings.spectra_matvec_ms +=
+          result.lowrank_timings.spectra_matvec_ms;
         legacy_lowrank_mode = result.lowrank_mode;
       }
     }
@@ -4524,6 +4532,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_lowrank_timings.spectra_ncv,
       Rcpp::Named("legacy_dcov_native_lowrank_spectra_tol") =
         legacy_lowrank_timings.spectra_tol,
+      Rcpp::Named("legacy_dcov_native_lowrank_spectra_matvec_count") =
+        legacy_lowrank_timings.spectra_matvec_count,
+      Rcpp::Named("legacy_dcov_native_lowrank_spectra_matvec_ms") =
+        legacy_lowrank_timings.spectra_matvec_ms,
       Rcpp::Named("legacy_dcov_native_batch_enabled") =
         legacy_dcov_native_batch_enabled,
       Rcpp::Named("legacy_dcov_native_batch_mode") =

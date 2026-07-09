@@ -37,6 +37,16 @@ int legacy_dcov_batch_threads_from_env(int batch) {
   return std::max(1, std::min(batch, static_cast<int>(parsed)));
 }
 
+bool legacy_dcov_spectra_matvec_diag_enabled() {
+  const char* raw =
+    std::getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SPECTRA_MATVEC_DIAG");
+  if (raw == nullptr) return false;
+  const std::string value(raw);
+  return !value.empty() && value != "0" && value != "false" &&
+         value != "FALSE" && value != "off" && value != "OFF" &&
+         value != "no" && value != "NO";
+}
+
 void legacy_dcov_fill_distance_matrix(const double* values,
                                       int n,
                                       arma::mat& out) {
@@ -85,6 +95,37 @@ struct LegacyDcovLowrankEigWorkspace {
   Eigen::VectorXd spectra_eigenvalues;
   Eigen::MatrixXd spectra_eigenvectors;
   int reuse_count = 0;
+};
+
+class LegacyDcovSpectraCountingMatProd {
+ public:
+  using MatrixMap = Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic,
+                                                   Eigen::Dynamic,
+                                                   Eigen::ColMajor>>;
+
+  LegacyDcovSpectraCountingMatProd(
+      const MatrixMap& matrix,
+      LegacyDcovLowrankTimings* timings)
+      : matrix_(matrix), timings_(timings) {}
+
+  int rows() const { return static_cast<int>(matrix_.rows()); }
+  int cols() const { return static_cast<int>(matrix_.cols()); }
+
+  void perform_op(const double* x_in, double* y_out) const {
+    const auto matvec_start = std::chrono::steady_clock::now();
+    Eigen::Map<const Eigen::VectorXd> x(x_in, matrix_.cols());
+    Eigen::Map<Eigen::VectorXd> y(y_out, matrix_.rows());
+    y.noalias() = matrix_ * x;
+    if (timings_ != nullptr) {
+      timings_->spectra_matvec_count += 1;
+      timings_->spectra_matvec_ms +=
+        legacy_dcov_elapsed_ms_since(matvec_start);
+    }
+  }
+
+ private:
+  const MatrixMap& matrix_;
+  LegacyDcovLowrankTimings* timings_;
 };
 
 void legacy_dcov_lowrank_full_eig(
@@ -150,42 +191,76 @@ void legacy_dcov_lowrank_spectra(
   Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
                                  Eigen::ColMajor>> mapped(
     distance.memptr(), distance.n_rows, distance.n_cols);
-  Spectra::DenseSymMatProd<double> op(mapped);
-  Spectra::SymEigsSolver<double, Spectra::LARGEST_MAGN,
-                         Spectra::DenseSymMatProd<double>> eigs(
-    &op, num_col, ncv);
-  eigs.init();
-  const int nconv = static_cast<int>(eigs.compute(
-    kMaxIterations, kTol, Spectra::LARGEST_MAGN));
-  const int iterations = static_cast<int>(eigs.num_iterations());
-  const bool ok = eigs.info() == Spectra::SUCCESSFUL && nconv >= num_col;
-  const double spectra_eig_ms = legacy_dcov_elapsed_ms_since(eig_start);
-  if (timings != nullptr) {
-    timings->eig_ms += spectra_eig_ms;
-    timings->spectra_iterations += iterations;
-    timings->spectra_nconv += nconv;
-    if (ok) {
-      timings->spectra_converged_count += 1;
-    } else {
-      timings->spectra_failed_count += 1;
-      timings->spectra_fallback_full_eig_count += 1;
-    }
-  }
-  if (!ok) {
-    legacy_dcov_lowrank_full_eig(
-      distance, num_col, output, eig_workspace, timings);
-    return;
-  }
-
-  const auto select_start = std::chrono::steady_clock::now();
   Eigen::VectorXd local_eigenvalues;
   Eigen::MatrixXd local_eigenvectors;
   Eigen::VectorXd& eigenvalues = eig_workspace == nullptr ?
     local_eigenvalues : eig_workspace->spectra_eigenvalues;
   Eigen::MatrixXd& eigenvectors = eig_workspace == nullptr ?
     local_eigenvectors : eig_workspace->spectra_eigenvectors;
-  eigenvalues = eigs.eigenvalues();
-  eigenvectors = eigs.eigenvectors();
+  std::chrono::steady_clock::time_point select_start;
+
+  if (legacy_dcov_spectra_matvec_diag_enabled()) {
+    LegacyDcovSpectraCountingMatProd op(mapped, timings);
+    Spectra::SymEigsSolver<double, Spectra::LARGEST_MAGN,
+                           LegacyDcovSpectraCountingMatProd> eigs(
+      &op, num_col, ncv);
+    eigs.init();
+    const int nconv = static_cast<int>(eigs.compute(
+      kMaxIterations, kTol, Spectra::LARGEST_MAGN));
+    const int iterations = static_cast<int>(eigs.num_iterations());
+    const bool ok = eigs.info() == Spectra::SUCCESSFUL && nconv >= num_col;
+    const double spectra_eig_ms = legacy_dcov_elapsed_ms_since(eig_start);
+    if (timings != nullptr) {
+      timings->eig_ms += spectra_eig_ms;
+      timings->spectra_iterations += iterations;
+      timings->spectra_nconv += nconv;
+      if (ok) {
+        timings->spectra_converged_count += 1;
+      } else {
+        timings->spectra_failed_count += 1;
+        timings->spectra_fallback_full_eig_count += 1;
+      }
+    }
+    if (!ok) {
+      legacy_dcov_lowrank_full_eig(
+        distance, num_col, output, eig_workspace, timings);
+      return;
+    }
+    select_start = std::chrono::steady_clock::now();
+    eigenvalues = eigs.eigenvalues();
+    eigenvectors = eigs.eigenvectors();
+  } else {
+    Spectra::DenseSymMatProd<double> op(mapped);
+    Spectra::SymEigsSolver<double, Spectra::LARGEST_MAGN,
+                           Spectra::DenseSymMatProd<double>> eigs(
+      &op, num_col, ncv);
+    eigs.init();
+    const int nconv = static_cast<int>(eigs.compute(
+      kMaxIterations, kTol, Spectra::LARGEST_MAGN));
+    const int iterations = static_cast<int>(eigs.num_iterations());
+    const bool ok = eigs.info() == Spectra::SUCCESSFUL && nconv >= num_col;
+    const double spectra_eig_ms = legacy_dcov_elapsed_ms_since(eig_start);
+    if (timings != nullptr) {
+      timings->eig_ms += spectra_eig_ms;
+      timings->spectra_iterations += iterations;
+      timings->spectra_nconv += nconv;
+      if (ok) {
+        timings->spectra_converged_count += 1;
+      } else {
+        timings->spectra_failed_count += 1;
+        timings->spectra_fallback_full_eig_count += 1;
+      }
+    }
+    if (!ok) {
+      legacy_dcov_lowrank_full_eig(
+        distance, num_col, output, eig_workspace, timings);
+      return;
+    }
+    select_start = std::chrono::steady_clock::now();
+    eigenvalues = eigs.eigenvalues();
+    eigenvectors = eigs.eigenvectors();
+  }
+
   if (eig_workspace != nullptr) eig_workspace->reuse_count += 1;
   output.centered_vectors.set_size(distance.n_rows, num_col);
   output.values.set_size(num_col);
@@ -454,6 +529,10 @@ Rcpp::List legacy_dcov_gamma_cpp_result_to_list(
         result.lowrank_timings.spectra_ncv,
       Rcpp::Named("lowrank_spectra_tol") =
         result.lowrank_timings.spectra_tol,
+      Rcpp::Named("lowrank_spectra_matvec_count") =
+        result.lowrank_timings.spectra_matvec_count,
+      Rcpp::Named("lowrank_spectra_matvec_ms") =
+        result.lowrank_timings.spectra_matvec_ms,
       Rcpp::Named("statistic_ms") = result.statistic_ms,
       Rcpp::Named("moment_ms") = result.moment_ms,
       Rcpp::Named("pgamma_ms") = result.pgamma_ms,
@@ -607,6 +686,10 @@ Rcpp::List legacy_dcov_gamma_cpp_compute_batch_ptrs(
       lowrank_timings.spectra_ncv, result.lowrank_timings.spectra_ncv);
     lowrank_timings.spectra_tol = std::max(
       lowrank_timings.spectra_tol, result.lowrank_timings.spectra_tol);
+    lowrank_timings.spectra_matvec_count +=
+      result.lowrank_timings.spectra_matvec_count;
+    lowrank_timings.spectra_matvec_ms +=
+      result.lowrank_timings.spectra_matvec_ms;
     lowrank_mode = result.lowrank_mode;
   }
   const double total_ms = legacy_dcov_elapsed_ms_since(total_start);
@@ -653,6 +736,10 @@ Rcpp::List legacy_dcov_gamma_cpp_compute_batch_ptrs(
         lowrank_timings.spectra_ncv,
       Rcpp::Named("lowrank_spectra_tol") =
         lowrank_timings.spectra_tol,
+      Rcpp::Named("lowrank_spectra_matvec_count") =
+        lowrank_timings.spectra_matvec_count,
+      Rcpp::Named("lowrank_spectra_matvec_ms") =
+        lowrank_timings.spectra_matvec_ms,
       Rcpp::Named("statistic_ms") = statistic_ms,
       Rcpp::Named("moment_ms") = moment_ms,
       Rcpp::Named("pgamma_ms") = pgamma_ms,

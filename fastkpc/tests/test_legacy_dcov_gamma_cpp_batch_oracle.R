@@ -13,19 +13,23 @@ if (length(missing) > 0L) {
   quit(save = "no", status = 0)
 }
 
-old_batch_threads <- Sys.getenv(
+env_names <- c(
   "FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS",
-  unset = NA_character_
+  "FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK",
+  "FASTKPC_LEGACY_DCOV_GAMMA_CPP_SPECTRA_MATVEC_DIAG"
 )
+old_env <- Sys.getenv(env_names, unset = NA_character_)
 on.exit({
-  if (is.na(old_batch_threads)) {
-    Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS")
-  } else {
-    Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS =
-                 old_batch_threads)
+  for (name in names(old_env)) {
+    if (is.na(old_env[[name]])) {
+      Sys.unsetenv(name)
+    } else {
+      do.call(Sys.setenv, stats::setNames(list(old_env[[name]]), name))
+    }
   }
 }, add = TRUE)
 Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS")
+Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SPECTRA_MATVEC_DIAG")
 
 fixture_path <- "fastkpc/tests/fixtures/legacy_dcov_gamma_oracle_v1.rds"
 assert_true(file.exists(fixture_path),
@@ -98,7 +102,9 @@ batch_diag_fields <- c(
   "lowrank_spectra_converged_count", "lowrank_spectra_failed_count",
   "lowrank_spectra_fallback_full_eig_count",
   "lowrank_spectra_iterations", "lowrank_spectra_nconv",
-  "lowrank_spectra_ncv", "lowrank_spectra_tol", "statistic_ms", "moment_ms",
+  "lowrank_spectra_ncv", "lowrank_spectra_tol",
+  "lowrank_spectra_matvec_count", "lowrank_spectra_matvec_ms",
+  "statistic_ms", "moment_ms",
   "pgamma_ms", "accounted_ms", "scalar_total_ms", "wrapper_overhead_ms",
   "batch_overhead_ms", "unaccounted_ms", "workspace_reuse_enabled",
   "distance_workspace_reuse_count", "statistic_moment_workspace_reuse_count",
@@ -189,5 +195,27 @@ assert_true(identical(
   as.integer(threaded_batch$diagnostics$batch_count),
   as.integer(ncol(x))
 ), "threaded batched C++ oracle should preserve batch count")
+
+Sys.setenv(
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS = "1",
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra",
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_SPECTRA_MATVEC_DIAG = "1"
+)
+spectra_matvec_batch <- fastkpc_legacy_dcov_gamma_cpp_oracle_batch(
+  x, y, numCol = num_col, index = index
+)
+assert_true(identical(
+  as.integer(spectra_matvec_batch$diagnostics$lowrank_spectra_count),
+  2L * ncol(x)
+), "Spectra matvec diagnostic batch should use Spectra lowrank solves")
+assert_true(
+  as.integer(spectra_matvec_batch$diagnostics$lowrank_spectra_matvec_count) >
+    0L,
+  "Spectra matvec diagnostic batch should count matrix-vector operations"
+)
+assert_true(
+  spectra_matvec_batch$diagnostics$lowrank_spectra_matvec_ms >= 0,
+  "Spectra matvec diagnostic batch should report matrix-vector timing"
+)
 
 cat("PASS legacy dCov gamma C++ batch oracle parity\n")
