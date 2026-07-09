@@ -260,6 +260,10 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     legacy_dcov_native_count = NA_integer_,
     reference_legacy_dcov_native_count = NA_integer_,
     legacy_dcov_native_batch_enabled = NA,
+    legacy_dcov_native_batch_mode = NA_character_,
+    legacy_dcov_native_batch_count = NA_integer_,
+    legacy_dcov_native_batch_pair_count = NA_integer_,
+    legacy_dcov_native_batch_column_materialize_count = NA_integer_,
     legacy_dcov_native_batch_materialize_ms = NA_real_,
     legacy_dcov_native_batch_call_ms = NA_real_,
     compatible_cuda_facade = NA,
@@ -645,6 +649,16 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
       as.integer(reference_summary$legacy_dcov_native_count %||% NA_integer_),
     legacy_dcov_native_batch_enabled =
       isTRUE(facade_summary$legacy_dcov_native_batch_enabled),
+    legacy_dcov_native_batch_mode =
+      facade_summary$legacy_dcov_native_batch_mode %||% NA_character_,
+    legacy_dcov_native_batch_count =
+      as.integer(facade_summary$legacy_dcov_native_batch_count %||% NA_integer_),
+    legacy_dcov_native_batch_pair_count =
+      as.integer(facade_summary$legacy_dcov_native_batch_pair_count %||%
+                   NA_integer_),
+    legacy_dcov_native_batch_column_materialize_count =
+      as.integer(facade_summary$legacy_dcov_native_batch_column_materialize_count %||%
+                   NA_integer_),
     legacy_dcov_native_batch_materialize_ms =
       as.numeric(facade_summary$legacy_dcov_native_batch_materialize_ms %||%
                    NA_real_),

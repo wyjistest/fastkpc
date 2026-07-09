@@ -43,15 +43,36 @@ bool all_finite_vector(Rcpp::NumericVector values) {
   return true;
 }
 
-bool native_legacy_dcov_level_batch_enabled() {
+enum class NativeLegacyDcovBatchMode {
+  None,
+  Level,
+  Canonical
+};
+
+NativeLegacyDcovBatchMode native_legacy_dcov_batch_mode_from_env() {
   const char* raw = std::getenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH");
-  if (raw == nullptr) return false;
+  if (raw == nullptr) return NativeLegacyDcovBatchMode::None;
   std::string value(raw);
   std::transform(value.begin(), value.end(), value.begin(),
                  [](unsigned char ch) {
                    return static_cast<char>(std::tolower(ch));
                  });
-  return value == "level";
+  if (value == "level") return NativeLegacyDcovBatchMode::Level;
+  if (value == "canonical") return NativeLegacyDcovBatchMode::Canonical;
+  return NativeLegacyDcovBatchMode::None;
+}
+
+const char* native_legacy_dcov_batch_mode_name(
+    NativeLegacyDcovBatchMode mode) {
+  switch (mode) {
+    case NativeLegacyDcovBatchMode::Level:
+      return "level";
+    case NativeLegacyDcovBatchMode::Canonical:
+      return "canonical";
+    case NativeLegacyDcovBatchMode::None:
+    default:
+      return "none";
+  }
 }
 
 double elapsed_ms_since(std::chrono::steady_clock::time_point start) {
@@ -3761,8 +3782,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   fastkpc::LegacyDcovLowrankTimings legacy_lowrank_timings;
   fastkpc::LegacyDcovLowrankMode legacy_lowrank_mode =
     fastkpc::legacy_dcov_lowrank_mode_from_env();
+  const NativeLegacyDcovBatchMode legacy_dcov_native_batch_mode =
+    native_legacy_dcov_batch_mode_from_env();
   const bool legacy_dcov_native_batch_enabled =
-    native_legacy_dcov_level_batch_enabled();
+    legacy_dcov_native_batch_mode != NativeLegacyDcovBatchMode::None;
   int legacy_dcov_native_batch_count = 0;
   int legacy_dcov_native_batch_pair_count = 0;
   int legacy_dcov_native_batch_workspace_reuse_count = 0;
@@ -3871,54 +3894,50 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
                                      provider_response_backend);
     }
 
-    std::vector<double> pvalues(task_count, NA_REAL);
-    if (legacy_dcov_native_batch_enabled && task_count > 0) {
-      const std::chrono::steady_clock::time_point materialize_start =
-        std::chrono::steady_clock::now();
-      Rcpp::NumericMatrix x_batch(n, task_count);
-      Rcpp::NumericMatrix y_batch(n, task_count);
-      for (int i = 0; i < task_count; ++i) {
-        const LayerCiTask& task = plan.tasks[i];
-        const double* x_ptr = nullptr;
-        const double* y_ptr = nullptr;
-        if (task.conditioning_set.empty()) {
-          x_ptr = data.begin() + static_cast<std::ptrdiff_t>(task.orientation_x) * n;
-          y_ptr = data.begin() + static_cast<std::ptrdiff_t>(task.orientation_y) * n;
-        } else {
-          const std::string x_key =
-            native_residual_key(task.orientation_x, task.conditioning_set);
-          const std::string y_key =
-            native_residual_key(task.orientation_y, task.conditioning_set);
-          x_ptr = residual_columns[request_by_key[x_key]].data();
-          y_ptr = residual_columns[request_by_key[y_key]].data();
-        }
-        for (int row = 0; row < n; ++row) {
-          x_batch(row, i) = x_ptr[row];
-          y_batch(row, i) = y_ptr[row];
-        }
-      }
-      level_dcov_materialize_ms = elapsed_ms_since(materialize_start);
-      legacy_dcov_native_batch_materialize_ms += level_dcov_materialize_ms;
+    std::map<int, bool> edge_done;
+    std::vector<int> delete_edges(static_cast<std::size_t>(p) * p, 0);
+    int tests_replayed = 0;
+    int ignored_after_delete = 0;
+    int deletions = 0;
 
-      const std::chrono::steady_clock::time_point batch_call_start =
-        std::chrono::steady_clock::now();
-      Rcpp::List batch_result =
-        fastkpc::legacy_dcov_gamma_cpp_compute_batch(
-          x_batch, y_batch, num_col, index);
-      level_dcov_call_ms = elapsed_ms_since(batch_call_start);
-      legacy_dcov_native_batch_call_ms += level_dcov_call_ms;
-      Rcpp::NumericVector batch_p_values = batch_result["p.value"];
-      Rcpp::List batch_diag = batch_result["diagnostics"];
-      for (int i = 0; i < task_count; ++i) {
-        pvalues[i] = batch_p_values[i];
+    auto copy_task_to_batch = [&](const LayerCiTask& task,
+                                  int batch_col,
+                                  Rcpp::NumericMatrix& x_batch,
+                                  Rcpp::NumericMatrix& y_batch) {
+      const double* x_ptr = nullptr;
+      const double* y_ptr = nullptr;
+      if (task.conditioning_set.empty()) {
+        x_ptr = data.begin() +
+          static_cast<std::ptrdiff_t>(task.orientation_x) * n;
+        y_ptr = data.begin() +
+          static_cast<std::ptrdiff_t>(task.orientation_y) * n;
+      } else {
+        const std::string x_key =
+          native_residual_key(task.orientation_x, task.conditioning_set);
+        const std::string y_key =
+          native_residual_key(task.orientation_y, task.conditioning_set);
+        x_ptr = residual_columns[request_by_key[x_key]].data();
+        y_ptr = residual_columns[request_by_key[y_key]].data();
       }
-      legacy_dcov_native_count += task_count;
+      for (int row = 0; row < n; ++row) {
+        x_batch(row, batch_col) = x_ptr[row];
+        y_batch(row, batch_col) = y_ptr[row];
+      }
+    };
+
+    auto accumulate_batch_diag = [&](const Rcpp::List& batch_diag,
+                                     int pair_count,
+                                     double materialize_ms,
+                                     double call_ms) {
+      legacy_dcov_native_count += pair_count;
       legacy_dcov_native_ms +=
         list_numeric_value(batch_diag, "scalar_total_ms");
       legacy_dcov_native_batch_count += 1;
-      legacy_dcov_native_batch_pair_count += task_count;
+      legacy_dcov_native_batch_pair_count += pair_count;
       legacy_dcov_native_batch_ms +=
         list_numeric_value(batch_diag, "total_ms");
+      legacy_dcov_native_batch_materialize_ms += materialize_ms;
+      legacy_dcov_native_batch_call_ms += call_ms;
       legacy_dcov_native_batch_workspace_reuse_count +=
         list_logical_value(batch_diag, "workspace_reuse_enabled") ? 1 : 0;
       legacy_dcov_native_batch_distance_workspace_reuse_count +=
@@ -3931,7 +3950,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         list_integer_value(batch_diag, "lowrank_eig_workspace_reuse_count");
       legacy_dcov_native_batch_oracle_column_copy_count +=
         list_integer_value(batch_diag, "column_copy_count");
-      legacy_dcov_native_batch_column_materialize_count += 2 * task_count;
+      legacy_dcov_native_batch_column_materialize_count += 2 * pair_count;
       legacy_lowrank_timings.full_eig_count +=
         list_integer_value(batch_diag, "lowrank_full_eig_count");
       legacy_lowrank_timings.spectra_count +=
@@ -3957,7 +3976,104 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       legacy_lowrank_mode = batch_lowrank_mode == "spectra"
         ? fastkpc::LegacyDcovLowrankMode::Spectra
         : fastkpc::LegacyDcovLowrankMode::FullEig;
-    } else {
+    };
+
+    auto run_dcov_batch_for_tasks =
+      [&](const std::vector<int>& task_indices) {
+        const int batch_size = static_cast<int>(task_indices.size());
+        std::vector<double> batch_pvalues(batch_size, NA_REAL);
+        if (batch_size == 0) return batch_pvalues;
+
+        const std::chrono::steady_clock::time_point materialize_start =
+          std::chrono::steady_clock::now();
+        Rcpp::NumericMatrix x_batch(n, batch_size);
+        Rcpp::NumericMatrix y_batch(n, batch_size);
+        for (int batch_col = 0; batch_col < batch_size; ++batch_col) {
+          copy_task_to_batch(plan.tasks[task_indices[batch_col]],
+                             batch_col, x_batch, y_batch);
+        }
+        const double materialize_ms = elapsed_ms_since(materialize_start);
+        level_dcov_materialize_ms += materialize_ms;
+
+        const std::chrono::steady_clock::time_point batch_call_start =
+          std::chrono::steady_clock::now();
+        Rcpp::List batch_result =
+          fastkpc::legacy_dcov_gamma_cpp_compute_batch(
+            x_batch, y_batch, num_col, index);
+        const double call_ms = elapsed_ms_since(batch_call_start);
+        level_dcov_call_ms += call_ms;
+        Rcpp::NumericVector batch_p_values = batch_result["p.value"];
+        for (int i = 0; i < batch_size; ++i) {
+          batch_pvalues[i] = batch_p_values[i];
+        }
+        Rcpp::List batch_diag = batch_result["diagnostics"];
+        accumulate_batch_diag(batch_diag, batch_size, materialize_ms, call_ms);
+        return batch_pvalues;
+      };
+
+    auto replay_task = [&](int i, double pvalue) {
+      const LayerCiTask& task = plan.tasks[i];
+      const int edge_key = task.edge_x < task.edge_y
+        ? task.edge_x * p + task.edge_y
+        : task.edge_y * p + task.edge_x;
+      const bool ignored = edge_done[edge_key] ||
+        adjacency[static_cast<std::size_t>(task.edge_x) * p + task.edge_y] == 0;
+      bool deleted = false;
+      double pval = NA_REAL;
+
+      if (ignored) {
+        ++ignored_after_delete;
+      } else {
+        ++tests_replayed;
+        pval = pvalue;
+        if (!std::isfinite(pval)) pval = 1.0;
+        const std::size_t pmax_idx =
+          static_cast<std::size_t>(task.edge_x) * p + task.edge_y;
+        const std::size_t pmax_rev =
+          static_cast<std::size_t>(task.edge_y) * p + task.edge_x;
+        if (pval > pmax[pmax_idx]) {
+          pmax[pmax_idx] = pval;
+          pmax[pmax_rev] = pval;
+        }
+        deleted = pval >= alpha;
+        if (deleted) {
+          ++deletions;
+          delete_edges[static_cast<std::size_t>(task.edge_x) * p +
+                       task.edge_y] = 1;
+          delete_edges[static_cast<std::size_t>(task.edge_y) * p +
+                       task.edge_x] = 1;
+          sepsets[task.edge_x][task.edge_y] = task.conditioning_set;
+          sepsets[task.edge_y][task.edge_x] = task.conditioning_set;
+          edge_done[edge_key] = true;
+        }
+      }
+
+      if (full_trace) {
+        ++global_task_id;
+        task_global_id.push_back(global_task_id);
+        task_level.push_back(level);
+        task_index.push_back(i + 1);
+        task_edge_x.push_back(task.edge_x + 1);
+        task_edge_y.push_back(task.edge_y + 1);
+        task_x.push_back(task.orientation_x + 1);
+        task_y.push_back(task.orientation_y + 1);
+        task_s_key.push_back(replay_s_key(task.conditioning_set));
+        task_conditioning_size.push_back(
+          static_cast<int>(task.conditioning_set.size()));
+        task_p_used.push_back(pval);
+        task_deleted.push_back(deleted);
+        task_ignored.push_back(ignored);
+      }
+    };
+
+    std::vector<double> pvalues(task_count, NA_REAL);
+    if (legacy_dcov_native_batch_mode == NativeLegacyDcovBatchMode::Level &&
+        task_count > 0) {
+      std::vector<int> task_indices(task_count);
+      for (int i = 0; i < task_count; ++i) task_indices[i] = i;
+      pvalues = run_dcov_batch_for_tasks(task_indices);
+    } else if (legacy_dcov_native_batch_mode !=
+               NativeLegacyDcovBatchMode::Canonical) {
       for (int i = 0; i < task_count; ++i) {
         const std::chrono::steady_clock::time_point materialize_start =
           std::chrono::steady_clock::now();
@@ -4018,64 +4134,47 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       }
     }
 
-    std::map<int, bool> edge_done;
-    std::vector<int> delete_edges(static_cast<std::size_t>(p) * p, 0);
-    int tests_replayed = 0;
-    int ignored_after_delete = 0;
-    int deletions = 0;
-
-    for (int i = 0; i < task_count; ++i) {
-      const LayerCiTask& task = plan.tasks[i];
-      const int edge_key = task.edge_x < task.edge_y
-        ? task.edge_x * p + task.edge_y
-        : task.edge_y * p + task.edge_x;
-      const bool ignored = edge_done[edge_key] ||
-        adjacency[static_cast<std::size_t>(task.edge_x) * p + task.edge_y] == 0;
-      bool deleted = false;
-      double pval = NA_REAL;
-
-      if (ignored) {
-        ++ignored_after_delete;
-      } else {
-        ++tests_replayed;
-        pval = pvalues[i];
-        if (!std::isfinite(pval)) pval = 1.0;
-        const std::size_t pmax_idx =
-          static_cast<std::size_t>(task.edge_x) * p + task.edge_y;
-        const std::size_t pmax_rev =
-          static_cast<std::size_t>(task.edge_y) * p + task.edge_x;
-        if (pval > pmax[pmax_idx]) {
-          pmax[pmax_idx] = pval;
-          pmax[pmax_rev] = pval;
+    if (legacy_dcov_native_batch_mode ==
+        NativeLegacyDcovBatchMode::Canonical) {
+      std::vector<int> pending_task_indices;
+      std::map<int, bool> pending_edge_keys;
+      auto flush_pending = [&]() {
+        if (pending_task_indices.empty()) return;
+        const std::vector<double> pending_pvalues =
+          run_dcov_batch_for_tasks(pending_task_indices);
+        for (int i = 0; i < static_cast<int>(pending_task_indices.size()); ++i) {
+          replay_task(pending_task_indices[i], pending_pvalues[i]);
         }
-        deleted = pval >= alpha;
-        if (deleted) {
-          ++deletions;
-          delete_edges[static_cast<std::size_t>(task.edge_x) * p +
-                       task.edge_y] = 1;
-          delete_edges[static_cast<std::size_t>(task.edge_y) * p +
-                       task.edge_x] = 1;
-          sepsets[task.edge_x][task.edge_y] = task.conditioning_set;
-          sepsets[task.edge_y][task.edge_x] = task.conditioning_set;
-          edge_done[edge_key] = true;
+        pending_task_indices.clear();
+        pending_edge_keys.clear();
+      };
+
+      for (int i = 0; i < task_count; ++i) {
+        const LayerCiTask& task = plan.tasks[i];
+        const int edge_key = task.edge_x < task.edge_y
+          ? task.edge_x * p + task.edge_y
+          : task.edge_y * p + task.edge_x;
+        bool ignored = edge_done[edge_key] ||
+          adjacency[static_cast<std::size_t>(task.edge_x) * p + task.edge_y] == 0;
+        const bool conflicts_with_pending =
+          pending_edge_keys.find(edge_key) != pending_edge_keys.end();
+        if (!pending_task_indices.empty() &&
+            (ignored || conflicts_with_pending)) {
+          flush_pending();
+          ignored = edge_done[edge_key] ||
+            adjacency[static_cast<std::size_t>(task.edge_x) * p + task.edge_y] == 0;
+        }
+        if (ignored) {
+          replay_task(i, NA_REAL);
+        } else {
+          pending_task_indices.push_back(i);
+          pending_edge_keys[edge_key] = true;
         }
       }
-
-      if (full_trace) {
-        ++global_task_id;
-        task_global_id.push_back(global_task_id);
-        task_level.push_back(level);
-        task_index.push_back(i + 1);
-        task_edge_x.push_back(task.edge_x + 1);
-        task_edge_y.push_back(task.edge_y + 1);
-        task_x.push_back(task.orientation_x + 1);
-        task_y.push_back(task.orientation_y + 1);
-        task_s_key.push_back(replay_s_key(task.conditioning_set));
-        task_conditioning_size.push_back(
-          static_cast<int>(task.conditioning_set.size()));
-        task_p_used.push_back(pval);
-        task_deleted.push_back(deleted);
-        task_ignored.push_back(ignored);
+      flush_pending();
+    } else {
+      for (int i = 0; i < task_count; ++i) {
+        replay_task(i, pvalues[i]);
       }
     }
 
@@ -4179,6 +4278,9 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_lowrank_timings.spectra_fallback_full_eig_count,
       Rcpp::Named("legacy_dcov_native_batch_enabled") =
         legacy_dcov_native_batch_enabled,
+      Rcpp::Named("legacy_dcov_native_batch_mode") =
+        std::string(native_legacy_dcov_batch_mode_name(
+          legacy_dcov_native_batch_mode)),
       Rcpp::Named("legacy_dcov_native_batch_count") =
         legacy_dcov_native_batch_count,
       Rcpp::Named("legacy_dcov_native_batch_pair_count") =

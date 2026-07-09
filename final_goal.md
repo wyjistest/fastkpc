@@ -3675,6 +3675,60 @@ decision:
   quantify the cost of the remaining R provider boundary.
 ```
 
+Canonical native legacy dCov batch checkpoint:
+
+```text
+commit:
+  perf: add canonical native legacy dcov batch mode
+
+route:
+  precision_run_skeleton_legacy_mgcv_legacy_dcov_native(...,
+    dcov_batch = "canonical")
+  FASTKPC_NATIVE_LEGACY_DCOV_BATCH=canonical
+
+behavior:
+  native replay remains canonical
+  level batch mode remains unchanged
+  canonical mode batches only tasks that are actually replayed
+  tasks ignored after same-level edge deletion do not call legacy dCov
+  residual provider request count is preserved
+
+artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_hot12_canonical_dcov_batch_v1
+
+hot12 canonical batch result:
+  n / p = 351 / 12
+  columns = 1,2,3,4,5,6,9,12,15,16,17,18
+  max_conditioning_size = 2
+  elapsed_sec = 34.762
+  edge_count = 24 / 24
+  SHD = 0
+  n.edgetests exact = TRUE
+  n.edgetests = 131,994,1453
+  legacy_dcov_native_batch_mode = canonical
+  legacy_dcov_native_count = 2578
+  legacy_dcov_native_batch_pair_count = 2578
+  legacy_dcov_native_batch_count = 2442
+  legacy_dcov_native_batch_column_materialize_count = 5156
+  legacy_dcov_native_batch_call_ms = 21588.79
+  legacy_dcov_native_batch_materialize_ms = 19.23445
+  residual_provider_request_count = 792
+  residual_provider_call_ms = 13096.55
+
+comparison to hot12 level batch:
+  level batch elapsed_sec = 43.761
+  level batch legacy_dcov_native_count = 3800
+  canonical batch elapsed_sec = 34.762
+  canonical batch legacy_dcov_native_count = 2578
+
+decision:
+  Canonical native dCov batch is correctness-clean on the real hot12 subset and
+  proves that dCov work can be aligned with canonical replay instead of planned
+  task count. It is a useful native one-call checkpoint, but it is not a full
+  promotion route: batch_count is high because safe canonical flushes are small,
+  and full 351x48 still needs a dedicated artifact before any recommendation.
+```
+
 ### Gate
 
 ```text

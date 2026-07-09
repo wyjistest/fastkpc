@@ -144,6 +144,9 @@ required <- c(
   "residual_provider_call_ms", "residual_provider_matrix_copy_ms",
   "residual_provider_total_ms",
   "legacy_dcov_native_count", "legacy_dcov_native_batch_enabled",
+  "legacy_dcov_native_batch_mode", "legacy_dcov_native_batch_count",
+  "legacy_dcov_native_batch_pair_count",
+  "legacy_dcov_native_batch_column_materialize_count",
   "legacy_dcov_native_batch_materialize_ms",
   "legacy_dcov_native_batch_call_ms",
   "compatible_cuda_facade", "compatible_cuda_route",
@@ -186,6 +189,11 @@ assert_true(identical(summary$compatible_cuda_ci_authority[[1L]],
             "artifact should record CI authority")
 assert_true(isTRUE(summary$legacy_dcov_native_batch_enabled[[1L]]),
             "artifact should pass dcov_batch='level' to the facade")
+assert_true(identical(summary$legacy_dcov_native_batch_mode[[1L]], "level"),
+            "artifact should record the requested native dCov batch mode")
+assert_true(identical(as.integer(summary$legacy_dcov_native_batch_pair_count[[1L]]),
+                      as.integer(summary$legacy_dcov_native_count[[1L]])),
+            "artifact should record batch pair count for all native dCov computations")
 assert_true(isTRUE(summary$adjacency_identical[[1L]]),
             "artifact facade adjacency should match explicit provider reference")
 assert_true(isTRUE(summary$sepsets_identical[[1L]]),
