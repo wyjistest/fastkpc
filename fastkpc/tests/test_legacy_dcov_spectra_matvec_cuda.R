@@ -226,6 +226,36 @@ assert_true(identical(as.numeric(shadow$matrix_h2d_ms_during_compute), 0),
 assert_true(as.integer(shadow$spectra_matvec_count) > 0L,
             "CUDA Spectra lowrank shadow should report CUDA matvecs")
 
+fixture_grid <- legacy_dcov_spectra_matvec_cuda_lowrank_shadow_grid(
+  readRDS(fixture_path),
+  case_indices = seq_len(6L),
+  sample_sizes = 96L,
+  numCol = 8L
+)
+assert_true(is.data.frame(fixture_grid),
+            "CUDA Spectra lowrank shadow grid should return a data frame")
+assert_true(nrow(fixture_grid) == 6L,
+            "CUDA Spectra lowrank shadow grid should cover all fixture cases")
+assert_true(all(fixture_grid$cpu_converged_x &
+                  fixture_grid$cpu_converged_y &
+                  fixture_grid$cuda_converged_x &
+                  fixture_grid$cuda_converged_y),
+            "CUDA Spectra lowrank shadow grid should converge on fixture cases")
+assert_true(max(fixture_grid$max_abs_eigenvalue_diff_x) < 1e-7,
+            "CUDA Spectra lowrank shadow grid x eigenvalues should match CPU")
+assert_true(max(fixture_grid$max_abs_eigenvalue_diff_y) < 1e-7,
+            "CUDA Spectra lowrank shadow grid y eigenvalues should match CPU")
+assert_true(min(fixture_grid$min_centered_abs_corr_x) > 1 - 1e-7,
+            "CUDA Spectra lowrank shadow grid x vectors should match CPU")
+assert_true(min(fixture_grid$min_centered_abs_corr_y) > 1 - 1e-7,
+            "CUDA Spectra lowrank shadow grid y vectors should match CPU")
+assert_true(max(fixture_grid$statistic_input_max_abs_diff) < 1e-7,
+            "CUDA Spectra lowrank shadow grid statistic inputs should match CPU")
+assert_true(identical(max(fixture_grid$matrix_h2d_ms_during_compute), 0),
+            "CUDA Spectra lowrank shadow grid should not re-upload during compute")
+assert_true(all(fixture_grid$spectra_matvec_count > 0L),
+            "CUDA Spectra lowrank shadow grid should report CUDA matvecs")
+
 legacy_dcov_spectra_matvec_cuda_handle_free(handle)
 assert_error(
   legacy_dcov_spectra_matvec_cuda_handle_apply(handle, rhs),

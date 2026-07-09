@@ -5964,6 +5964,62 @@ decision:
   the legacy dCov route, with fallback kept explicit.
 ```
 
+CUDA Spectra lowrank real-fixture grid checkpoint:
+
+```text
+scope:
+  broader real-matrix parity for CUDA Spectra lowrank substrate
+  all six legacy dcov.gamma oracle fixture residual pairs
+  each case truncated to 96 rows for fast iterative diagnostics
+  CPU Spectra lowrank oracle vs CUDA Spectra matvec-backed lowrank shadow
+  diagnostic/shadow only
+  not connected to production dCov lowrank selection or skeleton route yet
+
+change:
+  add an R diagnostic grid helper:
+    legacy_dcov_spectra_matvec_cuda_lowrank_shadow_grid(cases,
+                                                        case_indices,
+                                                        sample_sizes,
+                                                        numCol,
+                                                        ncv,
+                                                        tol,
+                                                        maxitr)
+
+  implementation shape:
+    iterate existing single-case CUDA lowrank shadow calls
+    support residual fixture cases with residuals$rx/residuals$ry
+    return one summary row per case/sample-size pair
+    report convergence, eigenvalue parity, centered-vector parity,
+    statistic-input parity, and CUDA matvec reuse counters
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+
+six-case 96-row legacy residual fixture grid:
+  case_count = 6
+  n = 96 for every case
+  numCol = 8
+  ncv = 20
+  all_converged = TRUE
+  max_abs_eigenvalue_diff_x = 5.6843419e-14
+  max_abs_eigenvalue_diff_y = 2.1316282e-14
+  min_centered_abs_corr_x = 1
+  min_centered_abs_corr_y = 1
+  max_statistic_input_abs_diff = 9.094947e-12
+  spectra_matvec_count_total = 313
+  matrix_h2d_ms_during_compute_max = 0
+
+decision:
+  This broadens the CUDA Spectra lowrank shadow from one real residual pair to
+  the full oracle fixture set while keeping the test small enough for fast
+  iteration. The CUDA matvec-backed Spectra route still matches the CPU
+  Spectra lowrank oracle at tight tolerance on selected eigenvalues, centered
+  vectors, and downstream statistic inputs. It remains diagnostic substrate:
+  the current recommended compatible route is unchanged. The next lowrank step
+  can now move from standalone diagnostic parity toward an env-gated shadow
+  inside the legacy dCov route, with fallback and authority unchanged.
+```
+
 ---
 
 ## 9. Final success definition

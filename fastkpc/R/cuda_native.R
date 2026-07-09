@@ -222,6 +222,116 @@ legacy_dcov_spectra_matvec_cuda_lowrank_shadow <- function(x, y, numCol,
         PACKAGE = "fastkpc_cuda")
 }
 
+legacy_dcov_spectra_matvec_cuda_lowrank_shadow_grid <- function(cases,
+                                                                case_indices =
+                                                                  NULL,
+                                                                sample_sizes =
+                                                                  NULL,
+                                                                numCol,
+                                                                ncv = NULL,
+                                                                tol = 1e-10,
+                                                                maxitr = 1000L) {
+  if (!is.list(cases) || length(cases) < 1L) {
+    stop("cases must be a non-empty list", call. = FALSE)
+  }
+  if (missing(numCol)) {
+    stop("numCol is required", call. = FALSE)
+  }
+  if (is.null(case_indices)) {
+    case_indices <- seq_along(cases)
+  }
+  case_indices <- as.integer(case_indices)
+  if (length(case_indices) < 1L || anyNA(case_indices) ||
+      any(case_indices < 1L) || any(case_indices > length(cases))) {
+    stop("case_indices must select entries from cases", call. = FALSE)
+  }
+  use_full_sample <- is.null(sample_sizes)
+  sample_sizes <- if (use_full_sample) {
+    NA_integer_
+  } else {
+    as.integer(sample_sizes)
+  }
+  if (length(sample_sizes) < 1L || (!use_full_sample && anyNA(sample_sizes)) ||
+      any(sample_sizes <= 5L, na.rm = TRUE)) {
+    stop("sample_sizes must be greater than 5", call. = FALSE)
+  }
+
+  grid <- expand.grid(case_index = case_indices,
+                      sample_size = sample_sizes,
+                      KEEP.OUT.ATTRS = FALSE)
+  rows <- vector("list", nrow(grid))
+  for (row_index in seq_len(nrow(grid))) {
+    case_index <- grid$case_index[row_index]
+    case <- cases[[case_index]]
+    if (!is.null(case$residuals$rx) && !is.null(case$residuals$ry)) {
+      x <- case$residuals$rx
+      y <- case$residuals$ry
+    } else if (!is.null(case$rx) && !is.null(case$ry)) {
+      x <- case$rx
+      y <- case$ry
+    } else if (!is.null(case$x) && !is.null(case$y)) {
+      x <- case$x
+      y <- case$y
+    } else {
+      stop("case ", case_index,
+           " must contain residuals$rx/residuals$ry, rx/ry, or x/y",
+           call. = FALSE)
+    }
+    sample_size <- grid$sample_size[row_index]
+    n <- length(x)
+    if (length(y) != n) {
+      stop("case ", case_index, " sample sizes must agree", call. = FALSE)
+    }
+    if (is.na(sample_size)) {
+      sample_size <- n
+    }
+    if (sample_size > n) {
+      stop("sample_size exceeds case ", case_index, " sample size",
+           call. = FALSE)
+    }
+    result <- legacy_dcov_spectra_matvec_cuda_lowrank_shadow(
+      x[seq_len(sample_size)],
+      y[seq_len(sample_size)],
+      numCol = numCol,
+      ncv = ncv,
+      tol = tol,
+      maxitr = maxitr
+    )
+    rows[[row_index]] <- data.frame(
+      case_index = case_index,
+      sample_size = sample_size,
+      backend = as.character(result$backend),
+      n = as.integer(result$n),
+      numCol = as.integer(result$numCol),
+      ncv = as.integer(result$ncv),
+      cpu_converged_x = isTRUE(result$cpu_converged_x),
+      cpu_converged_y = isTRUE(result$cpu_converged_y),
+      cuda_converged_x = isTRUE(result$cuda_converged_x),
+      cuda_converged_y = isTRUE(result$cuda_converged_y),
+      max_abs_eigenvalue_diff_x =
+        as.numeric(result$max_abs_eigenvalue_diff_x),
+      max_abs_eigenvalue_diff_y =
+        as.numeric(result$max_abs_eigenvalue_diff_y),
+      min_centered_abs_corr_x =
+        as.numeric(result$min_centered_abs_corr_x),
+      min_centered_abs_corr_y =
+        as.numeric(result$min_centered_abs_corr_y),
+      nV2_abs_diff = as.numeric(result$nV2_abs_diff),
+      x_moment_abs_diff = as.numeric(result$x_moment_abs_diff),
+      y_moment_abs_diff = as.numeric(result$y_moment_abs_diff),
+      statistic_input_max_abs_diff =
+        as.numeric(result$statistic_input_max_abs_diff),
+      spectra_matvec_count = as.integer(result$spectra_matvec_count),
+      matrix_h2d_ms_during_compute =
+        as.numeric(result$matrix_h2d_ms_during_compute),
+      matrix_bytes = as.numeric(result$matrix_bytes),
+      workspace_realloc_count = as.integer(result$workspace_realloc_count),
+      stringsAsFactors = FALSE
+    )
+  }
+  do.call(rbind, rows)
+}
+
 legacy_dcov_spectra_matvec_cuda_handle_free <- function(handle) {
   load_fastkpc_cuda_native()
   if (!is.list(handle) || is.null(handle$ptr)) {
