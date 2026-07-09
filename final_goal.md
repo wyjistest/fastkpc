@@ -3282,7 +3282,7 @@ targeted gate:
 Full 351x48 command:
 
 ```bash
-Rscript -e 'source("fastkpc/R/compatible_cuda_skeleton_artifact.R"); fastkpc_run_compatible_cuda_skeleton_artifact(output_dir = "fastkpc/artifacts/compatible_cuda_skeleton_full_351x48_v1", artifact_name = "compatible_cuda_skeleton_full_351x48_v1", alpha = 0.1, max_conditioning_size = 46L, dcov_batch = "level", expected_edge_count = 110L, expected_n_edgetests = c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L))'
+Rscript -e 'source("fastkpc/R/compatible_cuda_skeleton_artifact.R"); fastkpc_run_compatible_cuda_skeleton_artifact(output_dir = "fastkpc/artifacts/compatible_cuda_skeleton_full_351x48_v1", artifact_name = "compatible_cuda_skeleton_full_351x48_v1", alpha = 0.1, max_conditioning_size = 46L, dcov_batch = "level", reference_result_path = "fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds", expected_edge_count = 110L, expected_n_edgetests = c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L))'
 ```
 
 ### Gate

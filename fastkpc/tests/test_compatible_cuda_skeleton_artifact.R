@@ -50,6 +50,7 @@ assert_true(file.exists(artifact$paths$summary_md),
 
 required <- c(
   "artifact", "route", "n", "p", "alpha", "max_conditioning_size",
+  "reference_source", "reference_result_path",
   "edge_count", "reference_edge_count", "shd", "adjacency_identical",
   "sepsets_identical", "n_edgetests_identical", "n_edgetests_exact",
   "pmax_max_abs_diff", "residual_provider_request_count",
@@ -94,6 +95,45 @@ assert_true(summary$residual_provider_request_count[[1L]] > 0L,
             "artifact should exercise residual-provider requests")
 assert_true(summary$legacy_dcov_native_count[[1L]] > 0L,
             "artifact should exercise native legacy dCov tasks")
+
+reuse_dir <- tempfile("compatible-cuda-skeleton-artifact-reuse-")
+reuse <- fastkpc_run_compatible_cuda_skeleton_artifact(
+  data = data,
+  output_dir = reuse_dir,
+  artifact_name = "compatible_cuda_skeleton_artifact_reuse_test",
+  alpha = 0.08,
+  max_conditioning_size = 2L,
+  dcov_batch = "level",
+  reference_result_path = artifact$paths$result_rds
+)
+reuse_summary <- reuse$summary[1L, , drop = FALSE]
+assert_true(identical(reuse_summary$reference_source[[1L]], "rds"),
+            "artifact should record loaded reference source")
+assert_true(identical(reuse_summary$reference_result_path[[1L]],
+                      artifact$paths$result_rds),
+            "artifact should record loaded reference path")
+assert_true(reuse_summary$reference_elapsed_sec[[1L]] == 0,
+            "loaded reference should not report recompute elapsed time")
+assert_true(isTRUE(reuse_summary$adjacency_identical[[1L]]),
+            "reference reuse artifact should preserve adjacency agreement")
+assert_true(reuse_summary$shd[[1L]] == 0L,
+            "reference reuse artifact should preserve zero SHD")
+
+full_reference_path <- file.path(
+  "fastkpc", "artifacts", "legacy_mgcv_residual_cache_s_affinity_v1",
+  "compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds"
+)
+if (file.exists(full_reference_path)) {
+  full_reference <- fastkpc_compatible_cuda_extract_reference(
+    readRDS(full_reference_path)
+  )
+  assert_true(sum(full_reference$adjacency) / 2L == 110L,
+              "full reference artifact should expose 110 skeleton edges")
+  assert_true(identical(
+    as.integer(full_reference$n.edgetests),
+    c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L)
+  ), "full reference artifact should expose canonical n.edgetests")
+}
 
 summary_md <- paste(readLines(artifact$paths$summary_md, warn = FALSE),
                     collapse = "\n")

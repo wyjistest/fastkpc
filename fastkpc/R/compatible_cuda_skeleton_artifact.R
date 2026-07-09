@@ -38,6 +38,33 @@ fastkpc_compatible_cuda_skeleton_shd <- function(left, right) {
   sum(abs(as.integer(left) - as.integer(right))) / 2L
 }
 
+fastkpc_compatible_cuda_extract_reference <- function(result) {
+  candidates <- list(
+    reference = result$reference,
+    skeleton = result$skeleton,
+    baseline = result$baseline,
+    backend = result$backend,
+    facade = result$facade
+  )
+  for (name in names(candidates)) {
+    candidate <- candidates[[name]]
+    if (is.list(candidate) &&
+        !is.null(candidate$adjacency) &&
+        !is.null(candidate$n.edgetests)) {
+      attr(candidate, "fastkpc_reference_slot") <- name
+      return(candidate)
+    }
+  }
+  if (is.list(result) &&
+      !is.null(result$adjacency) &&
+      !is.null(result$n.edgetests)) {
+    attr(result, "fastkpc_reference_slot") <- "root"
+    return(result)
+  }
+  stop("reference result does not contain a skeleton-like object",
+       call. = FALSE)
+}
+
 fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     data = NULL,
     data_path = file.path("fastkpc", "artifacts", "kpc_tprs_real_zhu",
@@ -53,6 +80,7 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     trace_level = "summary",
     dcov_batch = "level",
     low_rank = "spectra",
+    reference_result_path = NULL,
     expected_edge_count = NULL,
     expected_n_edgetests = NULL) {
   if (is.null(data)) {
@@ -97,20 +125,35 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
   provider_counts$level_calls <- 0L
   provider_counts$request_count <- 0L
 
-  reference_timed <- fastkpc_elapsed(
-    precision_run_skeleton_residual_provider_legacy_dcov_native(
-      data = data,
-      alpha = alpha,
-      max_conditioning_size = max_conditioning_size,
-      residual_provider = fastkpc_legacy_mgcv_residual_provider(
+  reference_source <- "computed"
+  reference_slot <- "computed"
+  if (is.null(reference_result_path)) {
+    reference_timed <- fastkpc_elapsed(
+      precision_run_skeleton_residual_provider_legacy_dcov_native(
         data = data,
-        counter_env = provider_counts
-      ),
-      index = index,
-      numCol = numCol,
-      trace_level = trace_level
+        alpha = alpha,
+        max_conditioning_size = max_conditioning_size,
+        residual_provider = fastkpc_legacy_mgcv_residual_provider(
+          data = data,
+          counter_env = provider_counts
+        ),
+        index = index,
+        numCol = numCol,
+        trace_level = trace_level
+      )
     )
-  )
+    reference <- reference_timed$value
+  } else {
+    if (!file.exists(reference_result_path)) {
+      stop("reference result not found: ", reference_result_path,
+           call. = FALSE)
+    }
+    loaded_reference <- readRDS(reference_result_path)
+    reference <- fastkpc_compatible_cuda_extract_reference(loaded_reference)
+    reference_slot <- attr(reference, "fastkpc_reference_slot", exact = TRUE)
+    reference_source <- "rds"
+    reference_timed <- list(value = reference, elapsed = 0)
+  }
   facade_timed <- fastkpc_elapsed(
     fastkpc_compatible_cuda_skeleton(
       data = data,
@@ -126,10 +169,11 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     )
   )
 
-  reference <- reference_timed$value
   facade <- facade_timed$value
   facade_summary <- facade$summary %||% list()
-  reference_summary <- reference$summary %||% list()
+  reference_summary <- reference$summary %||%
+    reference$scheduler_diagnostics$summary %||%
+    list()
 
   edge_count <- as.integer(sum(unname(facade$adjacency)) / 2L)
   reference_edge_count <- as.integer(sum(unname(reference$adjacency)) / 2L)
@@ -165,6 +209,9 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     numCol = as.integer(numCol),
     dcov_batch = dcov_batch,
     low_rank = low_rank,
+    reference_source = reference_source,
+    reference_result_path = reference_result_path %||% NA_character_,
+    reference_result_slot = reference_slot,
     edge_count = edge_count,
     reference_edge_count = reference_edge_count,
     expected_edge_count = expected_edge_count %||% NA_integer_,
@@ -230,6 +277,9 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     paste0("# ", artifact_name),
     "",
     paste0("- route: ", row$route[[1L]]),
+    paste0("- reference source: ", row$reference_source[[1L]]),
+    paste0("- reference result path: ",
+           row$reference_result_path[[1L]]),
     paste0("- n / p: ", row$n[[1L]], " / ", row$p[[1L]]),
     paste0("- alpha: ", row$alpha[[1L]]),
     paste0("- max conditioning size: ",
