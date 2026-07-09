@@ -19,6 +19,7 @@
 #include <Rcpp.h>
 #include <R_ext/Rdynload.h>
 #include <Eigen/Core>
+#include <Spectra/MatOp/DenseSymMatProd.h>
 #include <Spectra/SymEigsSolver.h>
 #include <algorithm>
 #include <cctype>
@@ -96,6 +97,8 @@ struct LegacyDcovSpectraCudaOperatorDiagnostics {
   double total_ms = 0.0;
 };
 
+double elapsed_ms_since(std::chrono::steady_clock::time_point start);
+
 class LegacyDcovSpectraCudaMatProd {
  public:
   LegacyDcovSpectraCudaMatProd(
@@ -140,6 +143,160 @@ class LegacyDcovSpectraCudaMatProd {
   int n_;
   LegacyDcovSpectraCudaOperatorDiagnostics* diagnostics_;
 };
+
+struct LegacyDcovSpectraLowrankShadowRun {
+  Eigen::VectorXd eigenvalues;
+  Eigen::MatrixXd centered_vectors;
+  LegacyDcovSpectraCudaOperatorDiagnostics cuda_diagnostics;
+  bool converged = false;
+  int nconv = 0;
+  int iterations = 0;
+  int info = -1;
+  double eig_ms = 0.0;
+  double matrix_h2d_ms = 0.0;
+  double matrix_bytes = 0.0;
+};
+
+Eigen::MatrixXd legacy_dcov_distance_matrix_eigen(const double* values,
+                                                  int n) {
+  Eigen::MatrixXd out(n, n);
+  out.diagonal().setZero();
+  for (int col = 0; col < n; ++col) {
+    const double value_col = values[col];
+    for (int row = col + 1; row < n; ++row) {
+      const double dist = std::abs(values[row] - value_col);
+      out(row, col) = dist;
+      out(col, row) = dist;
+    }
+  }
+  return out;
+}
+
+void legacy_dcov_center_lowrank_vectors(Eigen::MatrixXd& vectors) {
+  const Eigen::RowVectorXd means = vectors.colwise().mean();
+  vectors.rowwise() -= means;
+}
+
+LegacyDcovSpectraLowrankShadowRun legacy_dcov_cpu_spectra_lowrank_shadow(
+    const Eigen::MatrixXd& distance,
+    int num_col,
+    int ncv,
+    double tol,
+    int maxitr) {
+  LegacyDcovSpectraLowrankShadowRun run;
+  const auto eig_start = std::chrono::steady_clock::now();
+  Spectra::DenseSymMatProd<double> op(distance);
+  Spectra::SymEigsSolver<double, Spectra::LARGEST_MAGN,
+                         Spectra::DenseSymMatProd<double>> eigs(
+    &op, num_col, ncv);
+  eigs.init();
+  run.nconv = static_cast<int>(
+    eigs.compute(maxitr, tol, Spectra::LARGEST_MAGN));
+  run.iterations = static_cast<int>(eigs.num_iterations());
+  run.info = static_cast<int>(eigs.info());
+  run.converged = eigs.info() == Spectra::SUCCESSFUL &&
+    run.nconv >= num_col;
+  run.eig_ms = elapsed_ms_since(eig_start);
+  if (run.converged) {
+    run.eigenvalues = eigs.eigenvalues();
+    run.centered_vectors = eigs.eigenvectors();
+    legacy_dcov_center_lowrank_vectors(run.centered_vectors);
+  }
+  return run;
+}
+
+LegacyDcovSpectraLowrankShadowRun legacy_dcov_cuda_spectra_lowrank_shadow(
+    const Eigen::MatrixXd& distance,
+    int num_col,
+    int ncv,
+    double tol,
+    int maxitr) {
+  LegacyDcovSpectraLowrankShadowRun run;
+  const int n = static_cast<int>(distance.rows());
+  fastkpc::LegacyDcovSpectraMatvecCudaHandle* handle =
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_create(
+      distance.data(), n);
+  run.matrix_h2d_ms =
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_matrix_h2d_ms(handle);
+  run.matrix_bytes = static_cast<double>(
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_matrix_bytes(handle));
+
+  try {
+    run.cuda_diagnostics.matrix_bytes =
+      static_cast<std::size_t>(run.matrix_bytes);
+    LegacyDcovSpectraCudaMatProd op(handle, n, &run.cuda_diagnostics);
+    const auto eig_start = std::chrono::steady_clock::now();
+    Spectra::SymEigsSolver<double, Spectra::LARGEST_MAGN,
+                           LegacyDcovSpectraCudaMatProd> eigs(
+      &op, num_col, ncv);
+    eigs.init();
+    run.nconv = static_cast<int>(
+      eigs.compute(maxitr, tol, Spectra::LARGEST_MAGN));
+    run.iterations = static_cast<int>(eigs.num_iterations());
+    run.info = static_cast<int>(eigs.info());
+    run.converged = eigs.info() == Spectra::SUCCESSFUL &&
+      run.nconv >= num_col;
+    run.eig_ms = elapsed_ms_since(eig_start);
+    if (run.converged) {
+      run.eigenvalues = eigs.eigenvalues();
+      run.centered_vectors = eigs.eigenvectors();
+      legacy_dcov_center_lowrank_vectors(run.centered_vectors);
+    }
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_destroy(handle);
+    handle = nullptr;
+  } catch (...) {
+    if (handle != nullptr) {
+      fastkpc::legacy_dcov_spectra_matvec_cuda_handle_destroy(handle);
+    }
+    throw;
+  }
+  return run;
+}
+
+double legacy_dcov_weighted_cross_sum_eigen(
+    const Eigen::MatrixXd& left,
+    const Eigen::VectorXd& left_values,
+    const Eigen::MatrixXd& right,
+    const Eigen::VectorXd& right_values) {
+  const Eigen::MatrixXd cross = left.transpose() * right;
+  double total = 0.0;
+  for (int col = 0; col < cross.cols(); ++col) {
+    for (int row = 0; row < cross.rows(); ++row) {
+      const double value = cross(row, col);
+      total += left_values(row) * right_values(col) * value * value;
+    }
+  }
+  return total;
+}
+
+double legacy_dcov_max_abs_vector_diff(const Eigen::VectorXd& left,
+                                       const Eigen::VectorXd& right) {
+  if (left.size() != right.size()) {
+    return std::numeric_limits<double>::infinity();
+  }
+  double out = 0.0;
+  for (int i = 0; i < left.size(); ++i) {
+    out = std::max(out, std::abs(left[i] - right[i]));
+  }
+  return out;
+}
+
+double legacy_dcov_min_centered_abs_corr(const Eigen::MatrixXd& left,
+                                         const Eigen::MatrixXd& right) {
+  if (left.rows() != right.rows() || left.cols() != right.cols()) {
+    return 0.0;
+  }
+  double out = 1.0;
+  for (int col = 0; col < left.cols(); ++col) {
+    const double left_norm = left.col(col).norm();
+    const double right_norm = right.col(col).norm();
+    if (left_norm == 0.0 || right_norm == 0.0) return 0.0;
+    const double corr =
+      std::abs(left.col(col).dot(right.col(col)) / (left_norm * right_norm));
+    out = std::min(out, corr);
+  }
+  return out;
+}
 
 enum class NativeLegacyDcovBatchMode {
   None,
@@ -2281,6 +2438,197 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_operator_eigs(
     }
     throw;
   }
+  END_RCPP
+}
+
+extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow(
+    SEXP xs,
+    SEXP ys,
+    SEXP numCols,
+    SEXP ncvs,
+    SEXP tols,
+    SEXP maxitrs) {
+  BEGIN_RCPP
+  if (!Rf_isReal(xs) || !Rf_isReal(ys)) {
+    Rcpp::stop("x and y must be numeric vectors");
+  }
+  Rcpp::NumericVector x(xs);
+  Rcpp::NumericVector y(ys);
+  if (x.size() != y.size()) Rcpp::stop("Sample sizes must agree");
+  const int n = x.size();
+  if (n <= 5) {
+    Rcpp::stop("legacy dCov gamma lowrank shadow requires n > 5");
+  }
+  if (!all_finite_vector(x) || !all_finite_vector(y)) {
+    Rcpp::stop("Data contains missing or infinite values");
+  }
+  const int num_col = Rcpp::as<int>(numCols);
+  const int ncv = Rcpp::as<int>(ncvs);
+  const double tol = Rcpp::as<double>(tols);
+  const int maxitr = Rcpp::as<int>(maxitrs);
+  if (num_col <= 0 || num_col >= n) {
+    Rcpp::stop("numCol must be positive and less than sample size");
+  }
+  if (ncv <= num_col || ncv > n) {
+    Rcpp::stop("ncv must be greater than numCol and no larger than sample size");
+  }
+  if (!std::isfinite(tol) || tol <= 0.0) {
+    Rcpp::stop("tol must be a positive finite value");
+  }
+  if (maxitr <= 0) Rcpp::stop("maxitr must be positive");
+
+  const Eigen::MatrixXd x_distance =
+    legacy_dcov_distance_matrix_eigen(REAL(xs), n);
+  const Eigen::MatrixXd y_distance =
+    legacy_dcov_distance_matrix_eigen(REAL(ys), n);
+
+  const LegacyDcovSpectraLowrankShadowRun cpu_x =
+    legacy_dcov_cpu_spectra_lowrank_shadow(
+      x_distance, num_col, ncv, tol, maxitr);
+  const LegacyDcovSpectraLowrankShadowRun cpu_y =
+    legacy_dcov_cpu_spectra_lowrank_shadow(
+      y_distance, num_col, ncv, tol, maxitr);
+  const LegacyDcovSpectraLowrankShadowRun cuda_x =
+    legacy_dcov_cuda_spectra_lowrank_shadow(
+      x_distance, num_col, ncv, tol, maxitr);
+  const LegacyDcovSpectraLowrankShadowRun cuda_y =
+    legacy_dcov_cuda_spectra_lowrank_shadow(
+      y_distance, num_col, ncv, tol, maxitr);
+
+  double max_abs_eigenvalue_diff_x = NA_REAL;
+  double max_abs_eigenvalue_diff_y = NA_REAL;
+  double min_centered_abs_corr_x = NA_REAL;
+  double min_centered_abs_corr_y = NA_REAL;
+  double cpu_nV2 = NA_REAL;
+  double cuda_nV2 = NA_REAL;
+  double cpu_x_moment = NA_REAL;
+  double cuda_x_moment = NA_REAL;
+  double cpu_y_moment = NA_REAL;
+  double cuda_y_moment = NA_REAL;
+  double nV2_abs_diff = NA_REAL;
+  double x_moment_abs_diff = NA_REAL;
+  double y_moment_abs_diff = NA_REAL;
+  double statistic_input_max_abs_diff = NA_REAL;
+
+  const bool all_converged = cpu_x.converged && cpu_y.converged &&
+    cuda_x.converged && cuda_y.converged;
+  if (all_converged) {
+    max_abs_eigenvalue_diff_x =
+      legacy_dcov_max_abs_vector_diff(cpu_x.eigenvalues,
+                                      cuda_x.eigenvalues);
+    max_abs_eigenvalue_diff_y =
+      legacy_dcov_max_abs_vector_diff(cpu_y.eigenvalues,
+                                      cuda_y.eigenvalues);
+    min_centered_abs_corr_x =
+      legacy_dcov_min_centered_abs_corr(cpu_x.centered_vectors,
+                                        cuda_x.centered_vectors);
+    min_centered_abs_corr_y =
+      legacy_dcov_min_centered_abs_corr(cpu_y.centered_vectors,
+                                        cuda_y.centered_vectors);
+
+    cpu_nV2 = legacy_dcov_weighted_cross_sum_eigen(
+      cpu_x.centered_vectors, cpu_x.eigenvalues,
+      cpu_y.centered_vectors, cpu_y.eigenvalues) /
+      static_cast<double>(n);
+    cuda_nV2 = legacy_dcov_weighted_cross_sum_eigen(
+      cuda_x.centered_vectors, cuda_x.eigenvalues,
+      cuda_y.centered_vectors, cuda_y.eigenvalues) /
+      static_cast<double>(n);
+    cpu_x_moment = legacy_dcov_weighted_cross_sum_eigen(
+      cpu_x.centered_vectors, cpu_x.eigenvalues,
+      cpu_x.centered_vectors, cpu_x.eigenvalues);
+    cuda_x_moment = legacy_dcov_weighted_cross_sum_eigen(
+      cuda_x.centered_vectors, cuda_x.eigenvalues,
+      cuda_x.centered_vectors, cuda_x.eigenvalues);
+    cpu_y_moment = legacy_dcov_weighted_cross_sum_eigen(
+      cpu_y.centered_vectors, cpu_y.eigenvalues,
+      cpu_y.centered_vectors, cpu_y.eigenvalues);
+    cuda_y_moment = legacy_dcov_weighted_cross_sum_eigen(
+      cuda_y.centered_vectors, cuda_y.eigenvalues,
+      cuda_y.centered_vectors, cuda_y.eigenvalues);
+    nV2_abs_diff = std::abs(cpu_nV2 - cuda_nV2);
+    x_moment_abs_diff = std::abs(cpu_x_moment - cuda_x_moment);
+    y_moment_abs_diff = std::abs(cpu_y_moment - cuda_y_moment);
+    statistic_input_max_abs_diff = std::max(
+      nV2_abs_diff, std::max(x_moment_abs_diff, y_moment_abs_diff));
+  }
+
+  const LegacyDcovSpectraCudaOperatorDiagnostics& dx =
+    cuda_x.cuda_diagnostics;
+  const LegacyDcovSpectraCudaOperatorDiagnostics& dy =
+    cuda_y.cuda_diagnostics;
+
+  return Rcpp::List::create(
+    Rcpp::Named("backend") =
+      "cuda-dense-sym-matvec-spectra-lowrank-shadow",
+    Rcpp::Named("n") = n,
+    Rcpp::Named("numCol") = num_col,
+    Rcpp::Named("ncv") = ncv,
+    Rcpp::Named("tol") = tol,
+    Rcpp::Named("maxitr") = maxitr,
+    Rcpp::Named("cpu_converged_x") = cpu_x.converged,
+    Rcpp::Named("cpu_converged_y") = cpu_y.converged,
+    Rcpp::Named("cuda_converged_x") = cuda_x.converged,
+    Rcpp::Named("cuda_converged_y") = cuda_y.converged,
+    Rcpp::Named("cpu_nconv_x") = cpu_x.nconv,
+    Rcpp::Named("cpu_nconv_y") = cpu_y.nconv,
+    Rcpp::Named("cuda_nconv_x") = cuda_x.nconv,
+    Rcpp::Named("cuda_nconv_y") = cuda_y.nconv,
+    Rcpp::Named("cpu_iterations_x") = cpu_x.iterations,
+    Rcpp::Named("cpu_iterations_y") = cpu_y.iterations,
+    Rcpp::Named("cuda_iterations_x") = cuda_x.iterations,
+    Rcpp::Named("cuda_iterations_y") = cuda_y.iterations,
+    Rcpp::Named("cpu_info_x") = cpu_x.info,
+    Rcpp::Named("cpu_info_y") = cpu_y.info,
+    Rcpp::Named("cuda_info_x") = cuda_x.info,
+    Rcpp::Named("cuda_info_y") = cuda_y.info,
+    Rcpp::Named("max_abs_eigenvalue_diff_x") =
+      max_abs_eigenvalue_diff_x,
+    Rcpp::Named("max_abs_eigenvalue_diff_y") =
+      max_abs_eigenvalue_diff_y,
+    Rcpp::Named("min_centered_abs_corr_x") = min_centered_abs_corr_x,
+    Rcpp::Named("min_centered_abs_corr_y") = min_centered_abs_corr_y,
+    Rcpp::Named("cpu_nV2") = cpu_nV2,
+    Rcpp::Named("cuda_nV2") = cuda_nV2,
+    Rcpp::Named("nV2_abs_diff") = nV2_abs_diff,
+    Rcpp::Named("cpu_x_moment") = cpu_x_moment,
+    Rcpp::Named("cuda_x_moment") = cuda_x_moment,
+    Rcpp::Named("x_moment_abs_diff") = x_moment_abs_diff,
+    Rcpp::Named("cpu_y_moment") = cpu_y_moment,
+    Rcpp::Named("cuda_y_moment") = cuda_y_moment,
+    Rcpp::Named("y_moment_abs_diff") = y_moment_abs_diff,
+    Rcpp::Named("statistic_input_max_abs_diff") =
+      statistic_input_max_abs_diff,
+    Rcpp::Named("cpu_eig_ms") = cpu_x.eig_ms + cpu_y.eig_ms,
+    Rcpp::Named("cuda_eig_ms") = cuda_x.eig_ms + cuda_y.eig_ms,
+    Rcpp::Named("spectra_matvec_count") =
+      dx.spectra_matvec_count + dy.spectra_matvec_count,
+    Rcpp::Named("spectra_matvec_ms") =
+      dx.spectra_matvec_ms + dy.spectra_matvec_ms,
+    Rcpp::Named("kernel_launch_count") =
+      dx.kernel_launch_count + dy.kernel_launch_count,
+    Rcpp::Named("device_matrix_reuse_count") =
+      dx.device_matrix_reuse_count + dy.device_matrix_reuse_count,
+    Rcpp::Named("device_workspace_reuse_count") =
+      dx.device_workspace_reuse_count + dy.device_workspace_reuse_count,
+    Rcpp::Named("workspace_realloc_count") =
+      dx.workspace_realloc_count + dy.workspace_realloc_count,
+    Rcpp::Named("matrix_bytes") =
+      cuda_x.matrix_bytes + cuda_y.matrix_bytes,
+    Rcpp::Named("workspace_bytes") = static_cast<double>(
+      std::max(dx.workspace_bytes, dy.workspace_bytes)),
+    Rcpp::Named("matrix_h2d_ms") =
+      cuda_x.matrix_h2d_ms + cuda_y.matrix_h2d_ms,
+    Rcpp::Named("matrix_h2d_ms_during_compute") =
+      dx.matrix_h2d_ms_during_compute +
+      dy.matrix_h2d_ms_during_compute,
+    Rcpp::Named("workspace_alloc_ms") =
+      dx.workspace_alloc_ms + dy.workspace_alloc_ms,
+    Rcpp::Named("h2d_ms") = dx.h2d_ms + dy.h2d_ms,
+    Rcpp::Named("kernel_ms") = dx.kernel_ms + dy.kernel_ms,
+    Rcpp::Named("d2h_ms") = dx.d2h_ms + dy.d2h_ms,
+    Rcpp::Named("total_ms") = dx.total_ms + dy.total_ms
+  );
   END_RCPP
 }
 
@@ -5097,6 +5445,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_legacy_dcov_spectra_matvec_cuda_handle_apply", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_apply), 2},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence), 2},
   {"C_legacy_dcov_spectra_matvec_cuda_operator_eigs", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_operator_eigs), 5},
+  {"C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow), 6},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_free", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_free), 1},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},

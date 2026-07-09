@@ -5903,6 +5903,67 @@ decision:
   lowrank backend switch.
 ```
 
+CUDA Spectra lowrank shadow checkpoint:
+
+```text
+scope:
+  CUDA substrate for the legacy dCov Spectra lowrank bottleneck
+  real legacy dCov residual fixture, truncated to 96 rows for fast testing
+  CPU Spectra lowrank oracle vs CUDA Spectra matvec-backed lowrank shadow
+  diagnostic/shadow only
+  not connected to production dCov lowrank selection or skeleton route yet
+
+change:
+  add diagnostic R/.Call API:
+    legacy_dcov_spectra_matvec_cuda_lowrank_shadow(x, y, numCol,
+                                                   ncv, tol, maxitr)
+    C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow
+
+  implementation shape:
+    build legacy absolute-distance matrices for x and y
+    run CPU Spectra DenseSymMatProd lowrank solve as the oracle
+    run Spectra::SymEigsSolver through the CUDA dense matvec operator
+    center selected lowrank vectors on both paths
+    compare eigenvalues, centered vectors up to sign, nV2, and moments
+    report CUDA matvec reuse and transfer diagnostics
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+
+96-row legacy residual fixture shadow check:
+  backend = cuda-dense-sym-matvec-spectra-lowrank-shadow
+  n = 96
+  numCol = 8
+  ncv = 20
+  cpu_converged_x = TRUE
+  cpu_converged_y = TRUE
+  cuda_converged_x = TRUE
+  cuda_converged_y = TRUE
+  max_abs_eigenvalue_diff_x = 5.684342e-14
+  max_abs_eigenvalue_diff_y = 1.421085e-14
+  min_centered_abs_corr_x = 1
+  min_centered_abs_corr_y = 1
+  nV2_abs_diff = 5.684342e-14
+  x_moment_abs_diff = 9.094947e-12
+  y_moment_abs_diff = 6.366463e-12
+  spectra_matvec_count = 52
+  matrix_h2d_ms_during_compute = 0
+  matrix_bytes = 147456
+  workspace_realloc_count = 2
+
+decision:
+  This connects the CUDA Spectra-compatible matvec operator to the same
+  lowrank quantities consumed by legacy dcov.gamma on a small real residual
+  fixture. It proves the CUDA operator can reproduce the CPU Spectra selected
+  eigenvalues, centered vectors, and downstream statistic inputs at tight
+  tolerance while keeping the distance matrices resident during iterative
+  compute. It is still diagnostic substrate only: it does not change dCov
+  authority, residual authority, skeleton replay, lowrank route selection, or
+  the current recommended compatible route. The next lowrank step is broader
+  real-matrix parity and then an env-gated shadow/backend integration inside
+  the legacy dCov route, with fallback kept explicit.
+```
+
 ---
 
 ## 9. Final success definition

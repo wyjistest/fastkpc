@@ -189,6 +189,43 @@ assert_true(as.integer(eigs_cuda$workspace_realloc_count) <= 1L,
 assert_true(identical(as.numeric(eigs_cuda$matrix_h2d_ms_during_compute), 0),
             "CUDA Spectra operator eigensolver should not re-upload matrix during compute")
 
+fixture_path <- "fastkpc/tests/fixtures/legacy_dcov_gamma_oracle_v1.rds"
+assert_true(file.exists(fixture_path),
+            "legacy dCov gamma oracle fixture should exist")
+fixture_case <- readRDS(fixture_path)[[1L]]
+rx <- fixture_case$residuals$rx[seq_len(96L)]
+ry <- fixture_case$residuals$ry[seq_len(96L)]
+shadow <- legacy_dcov_spectra_matvec_cuda_lowrank_shadow(
+  rx, ry, numCol = 8L
+)
+assert_true(
+  identical(shadow$backend,
+            "cuda-dense-sym-matvec-spectra-lowrank-shadow"),
+  "CUDA Spectra lowrank shadow should report backend"
+)
+assert_true(isTRUE(shadow$cpu_converged_x) && isTRUE(shadow$cpu_converged_y),
+            "CPU Spectra lowrank oracle should converge on fixture residuals")
+assert_true(isTRUE(shadow$cuda_converged_x) && isTRUE(shadow$cuda_converged_y),
+            "CUDA Spectra lowrank shadow should converge on fixture residuals")
+assert_true(as.numeric(shadow$max_abs_eigenvalue_diff_x) < 1e-7,
+            "CUDA Spectra x lowrank eigenvalues should match CPU Spectra")
+assert_true(as.numeric(shadow$max_abs_eigenvalue_diff_y) < 1e-7,
+            "CUDA Spectra y lowrank eigenvalues should match CPU Spectra")
+assert_true(as.numeric(shadow$min_centered_abs_corr_x) > 1 - 1e-7,
+            "CUDA Spectra x centered vectors should match CPU Spectra up to sign")
+assert_true(as.numeric(shadow$min_centered_abs_corr_y) > 1 - 1e-7,
+            "CUDA Spectra y centered vectors should match CPU Spectra up to sign")
+assert_true(as.numeric(shadow$nV2_abs_diff) < 1e-7,
+            "CUDA Spectra lowrank nV2 input should match CPU Spectra")
+assert_true(as.numeric(shadow$x_moment_abs_diff) < 1e-7,
+            "CUDA Spectra lowrank x moment input should match CPU Spectra")
+assert_true(as.numeric(shadow$y_moment_abs_diff) < 1e-7,
+            "CUDA Spectra lowrank y moment input should match CPU Spectra")
+assert_true(identical(as.numeric(shadow$matrix_h2d_ms_during_compute), 0),
+            "CUDA Spectra lowrank shadow should not re-upload matrices during compute")
+assert_true(as.integer(shadow$spectra_matvec_count) > 0L,
+            "CUDA Spectra lowrank shadow should report CUDA matvecs")
+
 legacy_dcov_spectra_matvec_cuda_handle_free(handle)
 assert_error(
   legacy_dcov_spectra_matvec_cuda_handle_apply(handle, rhs),
