@@ -7203,6 +7203,110 @@ decision:
   finish level 2 and later sparse levels while preserving canonical replay.
 ```
 
+Native cuda_spectra level-local bounded component cache checkpoint:
+
+```text
+change:
+  add an env-gated level-local bounded component cache for the native
+  cuda_spectra lowrank path:
+
+    FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE=1
+    FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_SCOPE=level
+    FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_MAX_ENTRIES=128
+
+  The cache lifetime is one skeleton level. It uses residual/input column
+  pointers as keys, keeps computed CUDA Spectra lowrank components in a bounded
+  LRU, and composes pair p-values from cached component references. The default
+  cache scope remains batch-local unless the level scope env gate is set.
+
+diagnostics:
+  legacy_dcov_native_cuda_lowrank_component_cache_scope
+  legacy_dcov_native_cuda_lowrank_component_cache_level_max_entries
+  legacy_dcov_native_cuda_lowrank_component_cache_cross_batch_hit_count
+  legacy_dcov_native_cuda_lowrank_component_cache_eviction_count
+  legacy_dcov_native_cuda_lowrank_component_cache_level_entry_count_max
+
+small gates:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_route.R
+
+small-gate result:
+  PASS compatible CUDA skeleton native cuda_spectra lowrank
+  PASS compatible CUDA skeleton artifact
+  PASS legacy dCov CUDA lowrank gamma parity cases=6
+    max_p_diff = 4e-15
+    max_nV2_diff = 5.68e-14
+  PASS legacy dCov Spectra CUDA matvec
+  PASS legacy dCov CUDA lowrank backend route
+
+full timeout artifact:
+  fastkpc/artifacts/
+    compatible_cuda_skeleton_threaded_round_cuda_spectra_level_component_cache_progress_timeout_600s_v1
+
+run shape:
+  FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=20
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=20
+  FASTKPC_NATIVE_CUDA_LOWRANK_PROGRESS_INTERVAL=64
+  FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS=4
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE=1
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_SCOPE=level
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_MAX_ENTRIES=128
+  dcov_batch = "round"
+  low_rank = "cuda_spectra"
+  timeout = 600 sec
+
+result:
+  run_status = timeout
+  timeout = TRUE
+  elapsed_sec = 600
+  reference_edge_count = 110
+  candidate_edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+
+progress comparison:
+  max cumulative CUDA lowrank pairs reported:
+    serial host pair loop:                 69,113
+    4 host threads:                       108,095
+    4 threads + batch component cache:    177,422
+    4 threads + level component cache:    179,114
+
+  level 0 dCov:
+    batch component cache:    724.4 ms
+    level component cache:    577.8 ms
+
+  level 1 dCov:
+    batch component cache:  50,472.5 ms
+    level component cache:  34,808.1 ms
+
+  level 2:
+    provider_complete elapsed_ms: 90,880.7
+    provider_call_ms:             90,562.6
+    last event before timeout:    dcov_cuda_lowrank_batch_start
+    last reported cumulative CUDA lowrank pairs: 179,114
+    cumulative pairs needed to complete level 2: 180,165
+    no level_complete before timeout
+
+decision:
+  Level-local bounded component caching gives a small additional full-timeout
+  progress gain over batch-local component caching and improves early-level dCov
+  timings, but it is still not a promotion route. The full 351x48 candidate did
+  not return a skeleton inside 600 seconds, so SHD, n.edgetests exactness, and
+  fallback totals remain unproven.
+
+  Keep the level cache as an env-gated experimental diagnostic/substrate. It is
+  not enough by itself; the next aligned lowrank work still needs a structural
+  device-resident or batched component/eigensolve path that avoids per-batch
+  Spectra/CUDA overhead and finishes level 2 plus later sparse levels.
+```
+
 ---
 
 ## 9. Final success definition

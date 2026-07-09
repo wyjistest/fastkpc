@@ -36,8 +36,18 @@ old_cuda_lowrank_component_cache <- Sys.getenv(
   "FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE",
   unset = NA_character_
 )
+old_cuda_lowrank_component_cache_scope <- Sys.getenv(
+  "FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_SCOPE",
+  unset = NA_character_
+)
+old_cuda_lowrank_component_cache_max_entries <- Sys.getenv(
+  "FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_MAX_ENTRIES",
+  unset = NA_character_
+)
 Sys.setenv(FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS = "2")
 Sys.setenv(FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE = "1")
+Sys.setenv(FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_SCOPE = "level")
+Sys.setenv(FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_MAX_ENTRIES = "128")
 on.exit({
   if (is.na(old_cuda_lowrank_threads)) {
     Sys.unsetenv("FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS")
@@ -50,6 +60,18 @@ on.exit({
   } else {
     Sys.setenv(FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE =
                  old_cuda_lowrank_component_cache)
+  }
+  if (is.na(old_cuda_lowrank_component_cache_scope)) {
+    Sys.unsetenv("FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_SCOPE")
+  } else {
+    Sys.setenv(FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_SCOPE =
+                 old_cuda_lowrank_component_cache_scope)
+  }
+  if (is.na(old_cuda_lowrank_component_cache_max_entries)) {
+    Sys.unsetenv("FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_MAX_ENTRIES")
+  } else {
+    Sys.setenv(FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_MAX_ENTRIES =
+                 old_cuda_lowrank_component_cache_max_entries)
   }
 }, add = TRUE)
 
@@ -81,7 +103,7 @@ candidate <- fastkpc_run_compatible_cuda_skeleton_artifact(
   artifact_name = "compatible_cuda_native_cuda_spectra_test",
   alpha = 0.08,
   max_conditioning_size = 1L,
-  dcov_batch = "level",
+  dcov_batch = "round",
   low_rank = "cuda_spectra",
   reference_result_path = baseline$paths$result_rds
 )
@@ -97,10 +119,15 @@ required <- c(
   "legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count",
   "legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max",
   "legacy_dcov_native_cuda_lowrank_component_cache_enabled",
+  "legacy_dcov_native_cuda_lowrank_component_cache_scope",
+  "legacy_dcov_native_cuda_lowrank_component_cache_level_max_entries",
   "legacy_dcov_native_cuda_lowrank_component_cache_lookup_count",
   "legacy_dcov_native_cuda_lowrank_component_cache_hit_count",
   "legacy_dcov_native_cuda_lowrank_component_cache_miss_count",
   "legacy_dcov_native_cuda_lowrank_component_cache_entry_count",
+  "legacy_dcov_native_cuda_lowrank_component_cache_cross_batch_hit_count",
+  "legacy_dcov_native_cuda_lowrank_component_cache_eviction_count",
+  "legacy_dcov_native_cuda_lowrank_component_cache_level_entry_count_max",
   "legacy_dcov_native_batch_parallel_enabled",
   "legacy_dcov_native_batch_parallel_threads"
 )
@@ -149,6 +176,14 @@ assert_true(identical(
 ), "native CUDA lowrank backend should not re-upload matrices during compute")
 assert_true(isTRUE(summary$legacy_dcov_native_cuda_lowrank_component_cache_enabled[[1L]]),
             "native CUDA lowrank component cache should report enabled")
+assert_true(identical(
+  summary$legacy_dcov_native_cuda_lowrank_component_cache_scope[[1L]],
+  "level"
+), "native CUDA lowrank component cache should report level scope")
+assert_true(identical(
+  as.integer(summary$legacy_dcov_native_cuda_lowrank_component_cache_level_max_entries[[1L]]),
+  128L
+), "native CUDA lowrank component cache should report configured max entries")
 assert_true(
   as.integer(summary$legacy_dcov_native_cuda_lowrank_component_cache_lookup_count[[1L]]) ==
     2L * as.integer(summary$legacy_dcov_native_cuda_lowrank_backend_count[[1L]]),
@@ -168,6 +203,17 @@ assert_true(
     as.integer(summary$legacy_dcov_native_cuda_lowrank_component_cache_miss_count[[1L]]),
   "native CUDA lowrank component cache should count one entry per component miss"
 )
+assert_true(
+  as.integer(summary$legacy_dcov_native_cuda_lowrank_component_cache_cross_batch_hit_count[[1L]]) > 0L,
+  "native CUDA lowrank level component cache should hit components from prior batches"
+)
+assert_true(
+  as.integer(summary$legacy_dcov_native_cuda_lowrank_component_cache_level_entry_count_max[[1L]]) <=
+    as.integer(summary$legacy_dcov_native_cuda_lowrank_component_cache_level_max_entries[[1L]]),
+  "native CUDA lowrank level component cache should respect configured max entries"
+)
+assert_true(as.integer(summary$legacy_dcov_native_batch_count[[1L]]) > 1L,
+            "native CUDA lowrank round mode should exercise multiple dCov batches")
 assert_true(isTRUE(summary$legacy_dcov_native_batch_parallel_enabled[[1L]]),
             "native CUDA lowrank batch should enable host pair parallelism")
 assert_true(as.integer(summary$legacy_dcov_native_batch_parallel_threads[[1L]]) >= 2L,

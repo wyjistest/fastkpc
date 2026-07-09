@@ -30,12 +30,15 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <list>
 #include <limits>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #ifdef _WIN32
 #include <process.h>
@@ -598,6 +601,8 @@ int native_legacy_dcov_cuda_lowrank_ncv(int n, int num_col) {
 struct NativeLegacyDcovCudaLowrankBackendMetrics {
   bool enabled = false;
   bool component_cache_enabled = false;
+  std::string component_cache_scope = "none";
+  int component_cache_level_max_entries = 0;
   int count = 0;
   double ms = 0.0;
   int error_count = 0;
@@ -607,6 +612,9 @@ struct NativeLegacyDcovCudaLowrankBackendMetrics {
   int component_cache_hit_count = 0;
   int component_cache_miss_count = 0;
   int component_cache_entry_count = 0;
+  int component_cache_cross_batch_hit_count = 0;
+  int component_cache_eviction_count = 0;
+  int component_cache_level_entry_count_max = 0;
   int spectra_matvec_count = 0;
   double spectra_matvec_ms = 0.0;
   int kernel_launch_count = 0;
@@ -680,6 +688,87 @@ bool native_legacy_cuda_lowrank_component_cache_enabled() {
   return value == "1" || value == "true" || value == "yes" ||
     value == "on";
 }
+
+std::string native_legacy_cuda_lowrank_component_cache_scope() {
+  const char* raw =
+    std::getenv("FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_SCOPE");
+  if (raw == nullptr) return "batch";
+  std::string value(raw);
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  return value == "level" ? "level" : "batch";
+}
+
+int native_legacy_cuda_lowrank_component_cache_max_entries() {
+  const char* raw =
+    std::getenv("FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_MAX_ENTRIES");
+  if (raw == nullptr) return 128;
+  const int value = std::atoi(raw);
+  return value > 0 ? value : 128;
+}
+
+struct NativeLegacyDcovCudaLowrankLevelComponentCacheEntry {
+  std::shared_ptr<LegacyDcovCudaLowrankComponentRun> component;
+  std::list<std::uintptr_t>::iterator lru_position;
+};
+
+class NativeLegacyDcovCudaLowrankLevelComponentCache {
+ public:
+  explicit NativeLegacyDcovCudaLowrankLevelComponentCache(int max_entries)
+      : max_entries_(max_entries > 0 ? max_entries : 128) {}
+
+  std::shared_ptr<LegacyDcovCudaLowrankComponentRun> find(
+      std::uintptr_t key) {
+    const auto found = entries_.find(key);
+    if (found == entries_.end()) return std::shared_ptr<
+      LegacyDcovCudaLowrankComponentRun>();
+    lru_.erase(found->second.lru_position);
+    lru_.push_front(key);
+    found->second.lru_position = lru_.begin();
+    return found->second.component;
+  }
+
+  int insert(
+      std::uintptr_t key,
+      std::shared_ptr<LegacyDcovCudaLowrankComponentRun> component) {
+    int eviction_count = 0;
+    const auto found = entries_.find(key);
+    if (found != entries_.end()) {
+      lru_.erase(found->second.lru_position);
+      lru_.push_front(key);
+      found->second.lru_position = lru_.begin();
+      found->second.component = component;
+    } else {
+      lru_.push_front(key);
+      NativeLegacyDcovCudaLowrankLevelComponentCacheEntry entry;
+      entry.component = component;
+      entry.lru_position = lru_.begin();
+      entries_[key] = entry;
+    }
+    while (static_cast<int>(entries_.size()) > max_entries_) {
+      const std::uintptr_t evict_key = lru_.back();
+      lru_.pop_back();
+      entries_.erase(evict_key);
+      ++eviction_count;
+    }
+    max_entry_count_ = std::max(
+      max_entry_count_,
+      static_cast<int>(entries_.size()));
+    return eviction_count;
+  }
+
+  int max_entry_count() const { return max_entry_count_; }
+
+ private:
+  int max_entries_;
+  std::list<std::uintptr_t> lru_;
+  std::unordered_map<
+    std::uintptr_t,
+    NativeLegacyDcovCudaLowrankLevelComponentCacheEntry> entries_;
+  int max_entry_count_ = 0;
+};
 
 void append_native_legacy_progress(
     const std::string& path,
@@ -5220,6 +5309,16 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   legacy_dcov_native_cuda_lowrank_metrics.component_cache_enabled =
     legacy_dcov_native_cuda_lowrank_metrics.enabled &&
     native_legacy_cuda_lowrank_component_cache_enabled();
+  if (legacy_dcov_native_cuda_lowrank_metrics.component_cache_enabled) {
+    legacy_dcov_native_cuda_lowrank_metrics.component_cache_scope =
+      native_legacy_cuda_lowrank_component_cache_scope();
+    if (legacy_dcov_native_cuda_lowrank_metrics.component_cache_scope ==
+        "level") {
+      legacy_dcov_native_cuda_lowrank_metrics
+        .component_cache_level_max_entries =
+        native_legacy_cuda_lowrank_component_cache_max_entries();
+    }
+  }
   const int legacy_dcov_native_cuda_lowrank_ncv =
     native_legacy_dcov_cuda_lowrank_ncv(n, num_col);
   const double legacy_dcov_native_cuda_lowrank_tol = 1e-10;
@@ -5500,6 +5599,18 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       return std::make_pair(x_ptr, y_ptr);
     };
 
+    const bool cuda_lowrank_level_component_cache_enabled =
+      legacy_dcov_native_cuda_lowrank_metrics.component_cache_enabled &&
+      legacy_dcov_native_cuda_lowrank_metrics.component_cache_scope == "level";
+    std::unique_ptr<NativeLegacyDcovCudaLowrankLevelComponentCache>
+      cuda_lowrank_level_component_cache;
+    if (cuda_lowrank_level_component_cache_enabled) {
+      cuda_lowrank_level_component_cache.reset(
+        new NativeLegacyDcovCudaLowrankLevelComponentCache(
+          legacy_dcov_native_cuda_lowrank_metrics
+            .component_cache_level_max_entries));
+    }
+
     auto accumulate_batch_diag = [&](const Rcpp::List& batch_diag,
                                      int pair_count,
                                      double materialize_ms,
@@ -5648,7 +5759,11 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
             if (legacy_dcov_native_cuda_lowrank_metrics
                   .component_cache_enabled) {
               std::map<std::uintptr_t, int> component_by_pointer;
-              std::vector<const double*> component_columns;
+              std::vector<std::shared_ptr<
+                LegacyDcovCudaLowrankComponentRun> > components;
+              std::vector<unsigned char> component_from_level_cache;
+              std::vector<const double*> component_miss_columns;
+              std::vector<int> component_miss_indices;
               std::vector<int> x_component_index(
                 static_cast<std::size_t>(batch_size));
               std::vector<int> y_component_index(
@@ -5657,11 +5772,37 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
                 const std::uintptr_t key =
                   reinterpret_cast<std::uintptr_t>(ptr);
                 const auto found = component_by_pointer.find(key);
-                if (found != component_by_pointer.end()) return found->second;
+                if (found != component_by_pointer.end()) {
+                  const int index = found->second;
+                  if (component_from_level_cache[
+                        static_cast<std::size_t>(index)] != 0) {
+                    legacy_dcov_native_cuda_lowrank_metrics
+                      .component_cache_cross_batch_hit_count += 1;
+                  }
+                  return index;
+                }
                 const int component_index =
-                  static_cast<int>(component_columns.size());
+                  static_cast<int>(components.size());
                 component_by_pointer[key] = component_index;
-                component_columns.push_back(ptr);
+                std::shared_ptr<LegacyDcovCudaLowrankComponentRun>
+                  cached_component;
+                if (cuda_lowrank_level_component_cache_enabled &&
+                    cuda_lowrank_level_component_cache) {
+                  cached_component =
+                    cuda_lowrank_level_component_cache->find(key);
+                }
+                if (cached_component) {
+                  components.push_back(cached_component);
+                  component_from_level_cache.push_back(1);
+                  legacy_dcov_native_cuda_lowrank_metrics
+                    .component_cache_cross_batch_hit_count += 1;
+                } else {
+                  components.push_back(std::shared_ptr<
+                    LegacyDcovCudaLowrankComponentRun>());
+                  component_from_level_cache.push_back(0);
+                  component_miss_indices.push_back(component_index);
+                  component_miss_columns.push_back(ptr);
+                }
                 return component_index;
               };
               for (int i = 0; i < batch_size; ++i) {
@@ -5672,7 +5813,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
               }
               const int component_lookup_count = 2 * batch_size;
               const int component_miss_count =
-                static_cast<int>(component_columns.size());
+                static_cast<int>(component_miss_columns.size());
               const int component_hit_count =
                 component_lookup_count - component_miss_count;
               legacy_dcov_native_cuda_lowrank_metrics
@@ -5684,7 +5825,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
               legacy_dcov_native_cuda_lowrank_metrics
                 .component_cache_entry_count += component_miss_count;
 
-              std::vector<LegacyDcovCudaLowrankComponentRun> components(
+              std::vector<LegacyDcovCudaLowrankComponentRun> computed_components(
                 static_cast<std::size_t>(component_miss_count));
               if (cuda_lowrank_batch_parallel_enabled &&
                   component_miss_count > 1) {
@@ -5701,9 +5842,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
                       if (!first_error.empty()) return;
                     }
                     try {
-                      components[static_cast<std::size_t>(component_index)] =
+                      computed_components[
+                        static_cast<std::size_t>(component_index)] =
                         legacy_dcov_cuda_lowrank_component_compute(
-                          component_columns[
+                          component_miss_columns[
                             static_cast<std::size_t>(component_index)],
                           n,
                           num_col,
@@ -5738,9 +5880,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
                 for (int component_index = 0;
                      component_index < component_miss_count;
                      ++component_index) {
-                  components[static_cast<std::size_t>(component_index)] =
+                  computed_components[
+                    static_cast<std::size_t>(component_index)] =
                     legacy_dcov_cuda_lowrank_component_compute(
-                      component_columns[
+                      component_miss_columns[
                         static_cast<std::size_t>(component_index)],
                       n,
                       num_col,
@@ -5752,14 +5895,49 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
 
               double component_total_ms = 0.0;
               double component_eig_ms = 0.0;
-              for (const LegacyDcovCudaLowrankComponentRun& component :
-                   components) {
+              for (int component_miss_index = 0;
+                   component_miss_index < component_miss_count;
+                   ++component_miss_index) {
+                const LegacyDcovCudaLowrankComponentRun& component =
+                  computed_components[
+                    static_cast<std::size_t>(component_miss_index)];
                 if (!component.converged) {
                   Rcpp::stop("CUDA Spectra lowrank did not converge");
                 }
                 component_total_ms += component.total_ms;
                 component_eig_ms += component.eig_ms;
                 accumulate_native_cuda_lowrank_component(component);
+                std::shared_ptr<LegacyDcovCudaLowrankComponentRun>
+                  component_ptr = std::make_shared<
+                    LegacyDcovCudaLowrankComponentRun>(component);
+                const int batch_component_index =
+                  component_miss_indices[
+                    static_cast<std::size_t>(component_miss_index)];
+                components[static_cast<std::size_t>(batch_component_index)] =
+                  component_ptr;
+                if (cuda_lowrank_level_component_cache_enabled &&
+                    cuda_lowrank_level_component_cache) {
+                  const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(
+                    component_miss_columns[
+                      static_cast<std::size_t>(component_miss_index)]);
+                  legacy_dcov_native_cuda_lowrank_metrics
+                    .component_cache_eviction_count +=
+                    cuda_lowrank_level_component_cache->insert(
+                      key, component_ptr);
+                  legacy_dcov_native_cuda_lowrank_metrics
+                    .component_cache_level_entry_count_max =
+                    std::max(
+                      legacy_dcov_native_cuda_lowrank_metrics
+                        .component_cache_level_entry_count_max,
+                      cuda_lowrank_level_component_cache->max_entry_count());
+                }
+              }
+              for (const std::shared_ptr<
+                     LegacyDcovCudaLowrankComponentRun>& component :
+                   components) {
+                if (!component || !component->converged) {
+                  Rcpp::stop("CUDA Spectra lowrank did not converge");
+                }
               }
 
               const std::chrono::steady_clock::time_point combine_start =
@@ -5767,9 +5945,9 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
               for (int i = 0; i < batch_size; ++i) {
                 const LegacyDcovCudaLowrankGammaRun run =
                   legacy_dcov_cuda_lowrank_gamma_from_components(
-                    components[static_cast<std::size_t>(
+                    *components[static_cast<std::size_t>(
                       x_component_index[static_cast<std::size_t>(i)])],
-                    components[static_cast<std::size_t>(
+                    *components[static_cast<std::size_t>(
                       y_component_index[static_cast<std::size_t>(i)])],
                     n,
                     index,
@@ -6339,6 +6517,11 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_dcov_native_cuda_lowrank_metrics.converged_count,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_enabled") =
         legacy_dcov_native_cuda_lowrank_metrics.component_cache_enabled,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_scope") =
+        legacy_dcov_native_cuda_lowrank_metrics.component_cache_scope,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_level_max_entries") =
+        legacy_dcov_native_cuda_lowrank_metrics
+          .component_cache_level_max_entries,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_lookup_count") =
         legacy_dcov_native_cuda_lowrank_metrics.component_cache_lookup_count,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_hit_count") =
@@ -6347,6 +6530,14 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_dcov_native_cuda_lowrank_metrics.component_cache_miss_count,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_entry_count") =
         legacy_dcov_native_cuda_lowrank_metrics.component_cache_entry_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_cross_batch_hit_count") =
+        legacy_dcov_native_cuda_lowrank_metrics
+          .component_cache_cross_batch_hit_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_eviction_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.component_cache_eviction_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_level_entry_count_max") =
+        legacy_dcov_native_cuda_lowrank_metrics
+          .component_cache_level_entry_count_max,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count") =
         legacy_dcov_native_cuda_lowrank_metrics.spectra_matvec_count,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms") =
