@@ -8131,6 +8131,102 @@ decision:
   compatible route. The final full 351x48 CUDA skeleton gate remains open.
 ```
 
+Native cuda_spectra eigensolver-internal timeout artifact checkpoint:
+
+```text
+artifact:
+  fastkpc/artifacts/
+    compatible_cuda_skeleton_threaded_round_cuda_spectra_level_cache512_eig_internals_timeout_120s_v1
+
+run shape:
+  FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=20
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=20
+  FASTKPC_NATIVE_CUDA_LOWRANK_PROGRESS_INTERVAL=64
+  FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS=4
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE=1
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_SCOPE=level
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_MAX_ENTRIES=512
+  dcov_batch = "round"
+  low_rank = "cuda_spectra"
+  timeout = 120 sec
+
+status:
+  run_status = timeout
+  timeout = TRUE
+  elapsed_sec = 120
+  last completed level = 1
+  last native event = dcov_cuda_lowrank_batch_start
+  candidate_edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+
+component-cache progress:
+  native_progress.csv rows = 1211
+  native_lowrank_component_cache_progress.csv rows = 105
+  completed component batches = 105
+  component batch pairs = 59,807
+  cache lookups = 119,614
+  cache hits = 112,617
+  cache misses = 6,997
+  cross-batch hits = 96,081
+  evictions = 5,925
+
+stage timing:
+  component_distance_ms = 999.291
+  component_lowrank_ms = 70,704.790
+  component_moment_ms = 817.436
+  component_unaccounted_ms = 399.793
+  component_eig_ms = 66,177.180
+  combine_ms = 5,056.121
+
+eigensolver internals:
+  spectra_matvec_count = 602,285
+  spectra_matvec_ms = 46,713.120
+  kernel_launch_count = 602,285
+  matrix_h2d_ms = 996.360
+  workspace_alloc_ms = 922.160
+  h2d_ms = 13,466.310
+  kernel_ms = 11,771.320
+  d2h_ms = 19,964.810
+  matrix_bytes = 6,896,299,176
+  workspace_bytes = 5,616
+
+derived ratios:
+  eig / lowrank = 93.60%
+  combine / lowrank = 7.15%
+  spectra matvec / eig = 70.59%
+  kernel / eig = 17.79%
+  H2D / eig = 20.35%
+  D2H / eig = 30.17%
+  H2D + kernel + D2H / eig = 68.31%
+
+per unit:
+  eig_ms_per_component = 9.458
+  matvec_ms_per_component = 6.676
+  matvec_count_per_component = 86.08
+  matvec_ms_per_call = 0.077560
+  kernel_ms_per_call = 0.019544
+  h2d_ms_per_call = 0.022359
+  d2h_ms_per_call = 0.033148
+
+decision:
+  This artifact confirms the previous cache-capacity conclusion with the new
+  CUDA lowrank internals: even after level cache 512, completed work is still
+  dominated by per-component Spectra eigensolve. The new split shows that the
+  repeated Spectra matvec boundary is the right structural target, and that
+  host/device vector traffic is a large part of that boundary cost.
+
+  The next native cuda_spectra cut should not spend effort on cache capacity,
+  distance construction, moment composition, or pair combine first. It should
+  target the eigensolver matvec data plane: keep RHS/output/workspace resident
+  across repeated Spectra matvecs or batch/device-resident component solves so
+  the current per-matvec H2D/D2H traffic and launch overhead are not paid for
+  every Arnoldi operator application.
+
+  This remains a timeout artifact, not a route promotion. It does not prove the
+  final full 351x48 CUDA skeleton goal.
+```
+
 ---
 
 ## 9. Final success definition
