@@ -287,6 +287,10 @@ native_batch_stage_fields <- c(
   "legacy_dcov_native_batch_input_ms",
   "legacy_dcov_native_batch_distance_ms",
   "legacy_dcov_native_batch_lowrank_ms",
+  "legacy_dcov_native_batch_lowrank_eig_ms",
+  "legacy_dcov_native_batch_lowrank_select_ms",
+  "legacy_dcov_native_batch_lowrank_center_ms",
+  "legacy_dcov_native_batch_lowrank_unaccounted_ms",
   "legacy_dcov_native_batch_statistic_ms",
   "legacy_dcov_native_batch_moment_ms",
   "legacy_dcov_native_batch_pgamma_ms",
@@ -302,6 +306,16 @@ assert_true(length(missing_native_batch_stage) == 0L,
                   missing_native_batch_stage[[1L]]))
 assert_true(native$summary$legacy_dcov_native_batch_lowrank_ms > 0,
             "native legacy dCov batch should report lowrank stage timing")
+assert_true(native$summary$legacy_dcov_native_batch_lowrank_eig_ms > 0,
+            "native legacy dCov batch should report lowrank eig timing")
+lowrank_parts <- native$summary$legacy_dcov_native_batch_lowrank_eig_ms +
+  native$summary$legacy_dcov_native_batch_lowrank_select_ms +
+  native$summary$legacy_dcov_native_batch_lowrank_center_ms +
+  native$summary$legacy_dcov_native_batch_lowrank_unaccounted_ms
+assert_true(abs(lowrank_parts -
+                  native$summary$legacy_dcov_native_batch_lowrank_ms) <
+              max(1e-6, native$summary$legacy_dcov_native_batch_lowrank_ms * 1e-6),
+            "native legacy dCov batch lowrank substages should reconcile")
 assert_true(native$summary$legacy_dcov_native_batch_scalar_total_ms > 0,
             "native legacy dCov batch should report aggregate scalar compute time")
 assert_true(native$summary$legacy_dcov_native_batch_accounted_ms > 0,

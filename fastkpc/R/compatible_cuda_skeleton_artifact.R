@@ -188,8 +188,9 @@ fastkpc_compatible_cuda_share <- function(value, total) {
 fastkpc_compatible_cuda_native_dcov_stage_rows <- function(row) {
   stage <- c(
     "materialize", "call_wall", "input", "distance", "lowrank",
-    "statistic", "moment", "pgamma", "accounted", "scalar_total",
-    "wrapper_overhead", "batch_overhead"
+    "lowrank_eig", "lowrank_select", "lowrank_center",
+    "lowrank_unaccounted", "statistic", "moment", "pgamma", "accounted",
+    "scalar_total", "wrapper_overhead", "batch_overhead"
   )
   elapsed_ms <- c(
     row$legacy_dcov_native_batch_materialize_ms[[1L]],
@@ -197,6 +198,10 @@ fastkpc_compatible_cuda_native_dcov_stage_rows <- function(row) {
     row$legacy_dcov_native_batch_input_ms[[1L]],
     row$legacy_dcov_native_batch_distance_ms[[1L]],
     row$legacy_dcov_native_batch_lowrank_ms[[1L]],
+    row$legacy_dcov_native_batch_lowrank_eig_ms[[1L]],
+    row$legacy_dcov_native_batch_lowrank_select_ms[[1L]],
+    row$legacy_dcov_native_batch_lowrank_center_ms[[1L]],
+    row$legacy_dcov_native_batch_lowrank_unaccounted_ms[[1L]],
     row$legacy_dcov_native_batch_statistic_ms[[1L]],
     row$legacy_dcov_native_batch_moment_ms[[1L]],
     row$legacy_dcov_native_batch_pgamma_ms[[1L]],
@@ -330,6 +335,10 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     legacy_dcov_native_batch_input_ms = NA_real_,
     legacy_dcov_native_batch_distance_ms = NA_real_,
     legacy_dcov_native_batch_lowrank_ms = NA_real_,
+    legacy_dcov_native_batch_lowrank_eig_ms = NA_real_,
+    legacy_dcov_native_batch_lowrank_select_ms = NA_real_,
+    legacy_dcov_native_batch_lowrank_center_ms = NA_real_,
+    legacy_dcov_native_batch_lowrank_unaccounted_ms = NA_real_,
     legacy_dcov_native_batch_statistic_ms = NA_real_,
     legacy_dcov_native_batch_moment_ms = NA_real_,
     legacy_dcov_native_batch_pgamma_ms = NA_real_,
@@ -777,6 +786,18 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
                    NA_real_),
     legacy_dcov_native_batch_lowrank_ms =
       as.numeric(facade_summary$legacy_dcov_native_batch_lowrank_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_lowrank_eig_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_lowrank_eig_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_lowrank_select_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_lowrank_select_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_lowrank_center_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_lowrank_center_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_lowrank_unaccounted_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_lowrank_unaccounted_ms %||%
                    NA_real_),
     legacy_dcov_native_batch_statistic_ms =
       as.numeric(facade_summary$legacy_dcov_native_batch_statistic_ms %||%

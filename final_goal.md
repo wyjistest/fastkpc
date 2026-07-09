@@ -5222,6 +5222,7 @@ change:
   native skeleton summary and compatible CUDA skeleton artifact CSV:
     input / distance / lowrank / statistic / moment / pgamma
     accounted / scalar_total / wrapper_overhead / batch_overhead
+    lowrank_eig / lowrank_select / lowrank_center / lowrank_unaccounted
 
   compatible CUDA skeleton artifacts also write:
     native_dcov_stage_timing.csv
@@ -5234,10 +5235,19 @@ change:
     batch_mode
     direct_input
 
+  It includes both aggregate lowrank timing and lowrank substages:
+    lowrank
+    lowrank_eig
+    lowrank_select
+    lowrank_center
+    lowrank_unaccounted
+
 purpose:
   explain the direct-input full gate regression, where host materialization
   dropped but batch call time increased
   provide attribution for the next native dCov data-plane optimization
+  identify whether the lowrank bottleneck is eigensolve, selection, centering,
+  or unaccounted wrapper/kernel overhead
 
 targeted gate:
   Rscript fastkpc/tests/test_skeleton_native_residual_provider_legacy_dcov.R

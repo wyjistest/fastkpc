@@ -3880,6 +3880,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   double legacy_dcov_native_batch_input_ms = 0.0;
   double legacy_dcov_native_batch_distance_ms = 0.0;
   double legacy_dcov_native_batch_lowrank_ms = 0.0;
+  double legacy_dcov_native_batch_lowrank_eig_ms = 0.0;
+  double legacy_dcov_native_batch_lowrank_select_ms = 0.0;
+  double legacy_dcov_native_batch_lowrank_center_ms = 0.0;
+  double legacy_dcov_native_batch_lowrank_unaccounted_ms = 0.0;
   double legacy_dcov_native_batch_statistic_ms = 0.0;
   double legacy_dcov_native_batch_moment_ms = 0.0;
   double legacy_dcov_native_batch_pgamma_ms = 0.0;
@@ -4057,6 +4061,14 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         list_numeric_value(batch_diag, "distance_ms");
       legacy_dcov_native_batch_lowrank_ms +=
         list_numeric_value(batch_diag, "lowrank_ms");
+      legacy_dcov_native_batch_lowrank_eig_ms +=
+        list_numeric_value(batch_diag, "lowrank_eig_ms");
+      legacy_dcov_native_batch_lowrank_select_ms +=
+        list_numeric_value(batch_diag, "lowrank_select_ms");
+      legacy_dcov_native_batch_lowrank_center_ms +=
+        list_numeric_value(batch_diag, "lowrank_center_ms");
+      legacy_dcov_native_batch_lowrank_unaccounted_ms +=
+        list_numeric_value(batch_diag, "lowrank_unaccounted_ms");
       legacy_dcov_native_batch_statistic_ms +=
         list_numeric_value(batch_diag, "statistic_ms");
       legacy_dcov_native_batch_moment_ms +=
@@ -4529,6 +4541,14 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_dcov_native_batch_distance_ms,
       Rcpp::Named("legacy_dcov_native_batch_lowrank_ms") =
         legacy_dcov_native_batch_lowrank_ms,
+      Rcpp::Named("legacy_dcov_native_batch_lowrank_eig_ms") =
+        legacy_dcov_native_batch_lowrank_eig_ms,
+      Rcpp::Named("legacy_dcov_native_batch_lowrank_select_ms") =
+        legacy_dcov_native_batch_lowrank_select_ms,
+      Rcpp::Named("legacy_dcov_native_batch_lowrank_center_ms") =
+        legacy_dcov_native_batch_lowrank_center_ms,
+      Rcpp::Named("legacy_dcov_native_batch_lowrank_unaccounted_ms") =
+        legacy_dcov_native_batch_lowrank_unaccounted_ms,
       Rcpp::Named("legacy_dcov_native_batch_statistic_ms") =
         legacy_dcov_native_batch_statistic_ms,
       Rcpp::Named("legacy_dcov_native_batch_moment_ms") =

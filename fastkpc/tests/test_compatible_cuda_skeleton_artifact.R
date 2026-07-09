@@ -152,8 +152,9 @@ assert_true(length(native_dcov_stage_missing) == 0L,
                   native_dcov_stage_missing[[1L]]))
 required_native_dcov_stages <- c(
   "materialize", "call_wall", "input", "distance", "lowrank",
-  "statistic", "moment", "pgamma", "accounted", "scalar_total",
-  "wrapper_overhead", "batch_overhead"
+  "lowrank_eig", "lowrank_select", "lowrank_center",
+  "lowrank_unaccounted", "statistic", "moment", "pgamma", "accounted",
+  "scalar_total", "wrapper_overhead", "batch_overhead"
 )
 missing_native_dcov_stages <- setdiff(required_native_dcov_stages,
                                       native_dcov_stage$stage)
@@ -208,6 +209,10 @@ required <- c(
   "legacy_dcov_native_batch_input_ms",
   "legacy_dcov_native_batch_distance_ms",
   "legacy_dcov_native_batch_lowrank_ms",
+  "legacy_dcov_native_batch_lowrank_eig_ms",
+  "legacy_dcov_native_batch_lowrank_select_ms",
+  "legacy_dcov_native_batch_lowrank_center_ms",
+  "legacy_dcov_native_batch_lowrank_unaccounted_ms",
   "legacy_dcov_native_batch_statistic_ms",
   "legacy_dcov_native_batch_moment_ms",
   "legacy_dcov_native_batch_pgamma_ms",
@@ -304,6 +309,16 @@ assert_true(summary$legacy_dcov_native_batch_call_ms[[1L]] >= 0,
             "artifact should report native dCov batch call timing")
 assert_true(summary$legacy_dcov_native_batch_lowrank_ms[[1L]] > 0,
             "artifact should report native dCov batch lowrank stage timing")
+assert_true(summary$legacy_dcov_native_batch_lowrank_eig_ms[[1L]] > 0,
+            "artifact should report native dCov batch lowrank eig timing")
+artifact_lowrank_parts <- summary$legacy_dcov_native_batch_lowrank_eig_ms[[1L]] +
+  summary$legacy_dcov_native_batch_lowrank_select_ms[[1L]] +
+  summary$legacy_dcov_native_batch_lowrank_center_ms[[1L]] +
+  summary$legacy_dcov_native_batch_lowrank_unaccounted_ms[[1L]]
+assert_true(abs(artifact_lowrank_parts -
+                  summary$legacy_dcov_native_batch_lowrank_ms[[1L]]) <
+              max(1e-6, summary$legacy_dcov_native_batch_lowrank_ms[[1L]] * 1e-6),
+            "artifact native dCov batch lowrank substages should reconcile")
 assert_true(summary$legacy_dcov_native_batch_scalar_total_ms[[1L]] > 0,
             "artifact should report native dCov batch aggregate scalar timing")
 
