@@ -7560,6 +7560,66 @@ decision:
   compatible CPU/C++ route.
 ```
 
+Native cuda_spectra component-stage timing diagnostics checkpoint:
+
+```text
+change:
+  split CUDA Spectra lowrank component batch timing into distance construction,
+  lowrank/Spectra work, self-moment composition, and positive unaccounted time.
+  The same diagnostics are surfaced both from the exported CUDA lowrank gamma
+  batch helper and from the native one-call cuda_spectra skeleton summary.
+
+  This is diagnostics only. It does not change residual authority, dCov
+  authority, p-value order, cache behavior, canonical replay, fallback policy,
+  or the current recommended CPU/C++ compatible route.
+
+new exported batch diagnostics:
+  component_distance_ms
+  component_lowrank_ms
+  component_moment_ms
+  component_unaccounted_ms
+
+new native one-call summary diagnostics:
+  legacy_dcov_native_cuda_lowrank_backend_component_distance_ms
+  legacy_dcov_native_cuda_lowrank_backend_component_lowrank_ms
+  legacy_dcov_native_cuda_lowrank_backend_component_moment_ms
+  legacy_dcov_native_cuda_lowrank_backend_component_unaccounted_ms
+
+TDD gate:
+  RED:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+
+    failed at:
+      CUDA lowrank gamma batch diagnostics missing component_distance_ms
+
+  GREEN:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+
+    result:
+      PASS legacy dCov CUDA lowrank gamma parity cases=6
+      max_p_diff = 4e-15
+      max_nV2_diff = 5.68e-14
+
+  GREEN:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+    result:
+      PASS compatible CUDA skeleton native cuda_spectra lowrank
+
+decision:
+  This checkpoint makes the remaining native cuda_spectra cost split visible:
+  CPU distance construction, CUDA/Spectra lowrank work, moment composition, and
+  unaccounted overhead can now be attributed separately. It is not a route
+  promotion and it does not prove the final full 351x48 CUDA skeleton goal.
+  The next structural CUDA work should use these fields to decide whether the
+  real bottleneck is distance construction, per-component Spectra setup,
+  moment composition, or surrounding orchestration before attempting another
+  full-route promotion.
+```
+
 ---
 
 ## 9. Final success definition

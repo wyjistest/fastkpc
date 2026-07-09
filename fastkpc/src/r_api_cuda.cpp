@@ -176,6 +176,9 @@ struct LegacyDcovCudaLowrankComponentRun {
   double matrix_bytes = 0.0;
   double distance_sum = 0.0;
   double moment = 0.0;
+  double distance_ms = 0.0;
+  double lowrank_ms = 0.0;
+  double moment_ms = 0.0;
   double total_ms = 0.0;
 };
 
@@ -335,12 +338,16 @@ LegacyDcovCudaLowrankComponentRun legacy_dcov_cuda_lowrank_component_compute(
     int maxitr) {
   const auto total_start = std::chrono::steady_clock::now();
   LegacyDcovCudaLowrankComponentRun out;
+  const auto distance_start = std::chrono::steady_clock::now();
   const Eigen::MatrixXd distance =
     legacy_dcov_distance_matrix_eigen(values, n);
+  out.distance_ms = elapsed_ms_since(distance_start);
   out.distance_sum = distance.sum();
+  const auto lowrank_start = std::chrono::steady_clock::now();
   const LegacyDcovSpectraLowrankShadowRun lowrank =
     legacy_dcov_cuda_spectra_lowrank_shadow(
       distance, num_col, ncv, tol, maxitr);
+  out.lowrank_ms = elapsed_ms_since(lowrank_start);
   out.converged = lowrank.converged;
   out.nconv = lowrank.nconv;
   out.iterations = lowrank.iterations;
@@ -355,9 +362,11 @@ LegacyDcovCudaLowrankComponentRun legacy_dcov_cuda_lowrank_component_compute(
   }
   out.eigenvalues = lowrank.eigenvalues;
   out.centered_vectors = lowrank.centered_vectors;
+  const auto moment_start = std::chrono::steady_clock::now();
   out.moment = legacy_dcov_weighted_cross_sum_eigen(
     out.centered_vectors, out.eigenvalues,
     out.centered_vectors, out.eigenvalues);
+  out.moment_ms = elapsed_ms_since(moment_start);
   out.total_ms = elapsed_ms_since(total_start);
   return out;
 }
@@ -617,6 +626,10 @@ struct NativeLegacyDcovCudaLowrankBackendMetrics {
   int component_cache_level_entry_count_max = 0;
   int component_batch_substrate_count = 0;
   int component_batch_substrate_pair_count = 0;
+  double component_distance_ms = 0.0;
+  double component_lowrank_ms = 0.0;
+  double component_moment_ms = 0.0;
+  double component_unaccounted_ms = 0.0;
   int spectra_matvec_count = 0;
   double spectra_matvec_ms = 0.0;
   int kernel_launch_count = 0;
@@ -819,7 +832,11 @@ struct LegacyDcovCudaLowrankComponentBatchRun {
   int component_iterations = 0;
   int component_nconv = 0;
   double component_total_ms = 0.0;
+  double component_distance_ms = 0.0;
+  double component_lowrank_ms = 0.0;
   double component_eig_ms = 0.0;
+  double component_moment_ms = 0.0;
+  double component_unaccounted_ms = 0.0;
   double combine_ms = 0.0;
   int spectra_matvec_count = 0;
   double spectra_matvec_ms = 0.0;
@@ -846,7 +863,15 @@ void accumulate_cuda_lowrank_component_diagnostics(
   const LegacyDcovSpectraCudaOperatorDiagnostics& diagnostics =
     component.cuda_diagnostics;
   batch->component_total_ms += component.total_ms;
+  batch->component_distance_ms += component.distance_ms;
+  batch->component_lowrank_ms += component.lowrank_ms;
   batch->component_eig_ms += component.eig_ms;
+  batch->component_moment_ms += component.moment_ms;
+  const double accounted_ms =
+    component.distance_ms + component.lowrank_ms + component.moment_ms;
+  if (component.total_ms > accounted_ms) {
+    batch->component_unaccounted_ms += component.total_ms - accounted_ms;
+  }
   batch->component_iterations += component.iterations;
   batch->component_nconv += component.nconv;
   batch->spectra_matvec_count += diagnostics.spectra_matvec_count;
@@ -3587,7 +3612,15 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch(
       Rcpp::Named("component_count") =
         batch_run.component_count,
       Rcpp::Named("component_total_ms") = batch_run.component_total_ms,
+      Rcpp::Named("component_distance_ms") =
+        batch_run.component_distance_ms,
+      Rcpp::Named("component_lowrank_ms") =
+        batch_run.component_lowrank_ms,
       Rcpp::Named("component_eig_ms") = batch_run.component_eig_ms,
+      Rcpp::Named("component_moment_ms") =
+        batch_run.component_moment_ms,
+      Rcpp::Named("component_unaccounted_ms") =
+        batch_run.component_unaccounted_ms,
       Rcpp::Named("combine_ms") = batch_run.combine_ms,
       Rcpp::Named("spectra_matvec_count") = batch_run.spectra_matvec_count,
       Rcpp::Named("spectra_matvec_ms") = batch_run.spectra_matvec_ms,
@@ -6155,6 +6188,15 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
               legacy_dcov_native_cuda_lowrank_metrics
                 .component_batch_substrate_pair_count += batch_size;
               legacy_dcov_native_cuda_lowrank_metrics
+                .component_distance_ms += batch_run.component_distance_ms;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .component_lowrank_ms += batch_run.component_lowrank_ms;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .component_moment_ms += batch_run.component_moment_ms;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .component_unaccounted_ms +=
+                batch_run.component_unaccounted_ms;
+              legacy_dcov_native_cuda_lowrank_metrics
                 .component_cache_lookup_count +=
                 batch_run.component_cache_lookup_count;
               legacy_dcov_native_cuda_lowrank_metrics
@@ -6852,6 +6894,14 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count") =
         legacy_dcov_native_cuda_lowrank_metrics
           .component_batch_substrate_pair_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_component_distance_ms") =
+        legacy_dcov_native_cuda_lowrank_metrics.component_distance_ms,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_component_lowrank_ms") =
+        legacy_dcov_native_cuda_lowrank_metrics.component_lowrank_ms,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_component_moment_ms") =
+        legacy_dcov_native_cuda_lowrank_metrics.component_moment_ms,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_component_unaccounted_ms") =
+        legacy_dcov_native_cuda_lowrank_metrics.component_unaccounted_ms,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count") =
         legacy_dcov_native_cuda_lowrank_metrics.spectra_matvec_count,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms") =

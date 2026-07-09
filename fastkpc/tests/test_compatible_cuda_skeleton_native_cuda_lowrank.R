@@ -130,6 +130,10 @@ required <- c(
   "legacy_dcov_native_cuda_lowrank_component_cache_level_entry_count_max",
   "legacy_dcov_native_cuda_lowrank_component_batch_substrate_count",
   "legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count",
+  "legacy_dcov_native_cuda_lowrank_backend_component_distance_ms",
+  "legacy_dcov_native_cuda_lowrank_backend_component_lowrank_ms",
+  "legacy_dcov_native_cuda_lowrank_backend_component_moment_ms",
+  "legacy_dcov_native_cuda_lowrank_backend_component_unaccounted_ms",
   "legacy_dcov_native_batch_parallel_enabled",
   "legacy_dcov_native_batch_parallel_threads"
 )
@@ -222,6 +226,21 @@ assert_true(identical(
   as.integer(summary$legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count[[1L]]),
   as.integer(summary$legacy_dcov_native_cuda_lowrank_backend_count[[1L]])
 ), "native CUDA lowrank component batch substrate should cover every dCov pair")
+component_stage_ms <- c(
+  distance = as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_component_distance_ms[[1L]]),
+  lowrank = as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_component_lowrank_ms[[1L]]),
+  moment = as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_component_moment_ms[[1L]]),
+  unaccounted = as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_component_unaccounted_ms[[1L]])
+)
+assert_true(all(is.finite(component_stage_ms)),
+            "native CUDA lowrank component stage timings should be finite")
+assert_true(all(component_stage_ms >= 0),
+            "native CUDA lowrank component stage timings should be non-negative")
+assert_true(component_stage_ms[["lowrank"]] > 0,
+            "native CUDA lowrank component lowrank timing should be positive")
+assert_true(sum(component_stage_ms) <=
+              as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_ms[[1L]]) * 1.05,
+            "native CUDA lowrank component stage timings should fit within backend timing")
 assert_true(as.integer(summary$legacy_dcov_native_batch_count[[1L]]) > 1L,
             "native CUDA lowrank round mode should exercise multiple dCov batches")
 assert_true(isTRUE(summary$legacy_dcov_native_batch_parallel_enabled[[1L]]),

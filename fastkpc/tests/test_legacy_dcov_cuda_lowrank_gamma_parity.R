@@ -122,6 +122,31 @@ assert_true(as.integer(cuda_batch$diagnostics$spectra_matvec_count) > 0L,
 assert_true(identical(
   as.numeric(cuda_batch$diagnostics$matrix_h2d_ms_during_compute), 0),
   "CUDA lowrank gamma batch helper should not re-upload during compute")
+component_stage_fields <- c(
+  "component_distance_ms",
+  "component_lowrank_ms",
+  "component_moment_ms",
+  "component_unaccounted_ms"
+)
+missing_component_stage_fields <- setdiff(
+  component_stage_fields,
+  names(cuda_batch$diagnostics)
+)
+assert_true(length(missing_component_stage_fields) == 0L,
+            paste("CUDA lowrank gamma batch diagnostics missing",
+                  missing_component_stage_fields[[1L]]))
+component_stage_ms <- vapply(component_stage_fields, function(field) {
+  as.numeric(cuda_batch$diagnostics[[field]])
+}, numeric(1L))
+assert_true(all(is.finite(component_stage_ms)),
+            "CUDA lowrank gamma batch component stage timings should be finite")
+assert_true(all(component_stage_ms >= 0),
+            "CUDA lowrank gamma batch component stage timings should be non-negative")
+assert_true(component_stage_ms[["component_lowrank_ms"]] > 0,
+            "CUDA lowrank gamma batch component lowrank timing should be positive")
+assert_true(sum(component_stage_ms) <=
+              as.numeric(cuda_batch$diagnostics$component_total_ms) * 1.05,
+            "CUDA lowrank gamma batch component stages should fit within component total")
 
 duplicate_x <- cbind(batch_x[, 1L], batch_x[, 1L], batch_x[, 2L],
                      batch_x[, 1L])
