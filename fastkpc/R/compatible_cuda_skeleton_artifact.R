@@ -129,22 +129,6 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
   } else {
     Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK")
   }
-  if (!identical(mgcv_residual_backend, "env")) {
-    Sys.setenv(FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND =
-                 mgcv_residual_backend)
-  }
-  if (!is.null(mgcv_residual_backend_native_s_size_limit)) {
-    Sys.setenv(
-      FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT =
-        as.character(mgcv_residual_backend_native_s_size_limit)
-    )
-  }
-  if (!is.null(mgcv_residual_backend_condition_threshold)) {
-    Sys.setenv(
-      FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD =
-        as.character(mgcv_residual_backend_condition_threshold)
-    )
-  }
 
   provider_counts <- new.env(parent = emptyenv())
   provider_counts$level_calls <- 0L
@@ -190,7 +174,12 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
         index = index,
         numCol = numCol,
         trace_level = trace_level,
-        dcov_batch = dcov_batch
+        dcov_batch = dcov_batch,
+        mgcv_residual_backend = mgcv_residual_backend,
+        mgcv_residual_backend_native_s_size_limit =
+          mgcv_residual_backend_native_s_size_limit,
+        mgcv_residual_backend_condition_threshold =
+          mgcv_residual_backend_condition_threshold
       )
     )
   )

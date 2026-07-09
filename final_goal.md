@@ -3180,12 +3180,15 @@ scope:
   requires options$max_conditioning_size explicitly
   passes options$index, options$numCol, options$trace_level, and
     options$dcov_batch through to the native one-call wrapper
+  scopes options$mgcv_residual_backend and guarded backend envelope options
+    around the native one-call wrapper without leaking caller env
   applies labels to adjacency and pMax
   records compatible_cuda_facade = TRUE
   records compatible_cuda_entrypoint = fastkpc-compatible-cuda-skeleton
   records compatible_cuda_route = legacy-mgcv-provider-native-legacy-dcov
   records compatible_cuda_residual_authority = legacy-mgcv-regrXonS-provider
   records compatible_cuda_ci_authority = native-legacy-dcov.gamma
+  records compatible_cuda_mgcv_residual_backend
   preserves native_entrypoint = legacy-mgcv-legacy-dcov-native
 
 gate:
@@ -3318,7 +3321,16 @@ fastkpc_compatible_cuda_skeleton(
   data,
   alpha,
   labels = NULL,
-  options = list(...)
+  options = list(
+    max_conditioning_size = <int>,
+    index = 1,
+    numCol = floor(nrow(data) / 10),
+    trace_level = "summary",
+    dcov_batch = "env",
+    mgcv_residual_backend = c("env", "r", "cpp_guarded"),
+    mgcv_residual_backend_native_s_size_limit = NULL,
+    mgcv_residual_backend_condition_threshold = NULL
+  )
 )
 ```
 
@@ -3327,8 +3339,10 @@ Current implementation status:
 ```text
 An experimental R facade with this name exists and forwards to the current
 legacy-mgcv + legacy-dCov native one-call checkpoint. It is not yet the final
-C++/CUDA engine because residual generation remains behind a hidden R provider
-and full 351x48 promotion gates remain open.
+C++/CUDA engine because residual generation remains behind a hidden structured
+provider, although the facade can now explicitly scope the guarded C++
+fixed-sp residual replay backend for candidate artifacts. Full 351x48
+promotion gates remain open.
 ```
 
 Internal C++ entrypoint:

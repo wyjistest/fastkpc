@@ -42,13 +42,27 @@ fastkpc_normalize_data <- function(data, labels = NULL) {
   )
 }
 
+fastkpc_restore_env_vars <- function(old_env) {
+  for (name in names(old_env)) {
+    if (is.na(old_env[[name]])) {
+      Sys.unsetenv(name)
+    } else {
+      do.call(Sys.setenv, stats::setNames(list(old_env[[name]]), name))
+    }
+  }
+  invisible(TRUE)
+}
+
 fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
                                              options = list()) {
   if (!is.list(options)) {
     stop("options must be a list", call. = FALSE)
   }
   allowed_options <- c("max_conditioning_size", "index", "numCol",
-                       "trace_level", "dcov_batch")
+                       "trace_level", "dcov_batch",
+                       "mgcv_residual_backend",
+                       "mgcv_residual_backend_native_s_size_limit",
+                       "mgcv_residual_backend_condition_threshold")
   unknown_options <- setdiff(names(options), allowed_options)
   if (length(unknown_options) > 0L) {
     stop("unknown compatible CUDA option(s): ",
@@ -65,6 +79,33 @@ fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
   numCol <- options$numCol %||% floor(nrow(data) / 10)
   trace_level <- options$trace_level %||% "summary"
   dcov_batch <- options$dcov_batch %||% "env"
+  mgcv_residual_backend <- options$mgcv_residual_backend %||% "env"
+  mgcv_residual_backend <- match.arg(
+    mgcv_residual_backend,
+    c("env", "r", "cpp_guarded")
+  )
+  old_mgcv_env <- Sys.getenv(c(
+    "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
+    "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT",
+    "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD"
+  ), unset = NA_character_)
+  on.exit(fastkpc_restore_env_vars(old_mgcv_env), add = TRUE)
+  if (!identical(mgcv_residual_backend, "env")) {
+    Sys.setenv(FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND =
+                 mgcv_residual_backend)
+  }
+  if (!is.null(options$mgcv_residual_backend_native_s_size_limit)) {
+    Sys.setenv(
+      FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT =
+        as.character(options$mgcv_residual_backend_native_s_size_limit)
+    )
+  }
+  if (!is.null(options$mgcv_residual_backend_condition_threshold)) {
+    Sys.setenv(
+      FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD =
+        as.character(options$mgcv_residual_backend_condition_threshold)
+    )
+  }
 
   result <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
     data = data,
@@ -89,8 +130,15 @@ fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
   result$summary$compatible_cuda_route <-
     "legacy-mgcv-provider-native-legacy-dcov"
   result$summary$compatible_cuda_residual_authority <-
-    "legacy-mgcv-regrXonS-provider"
+    if (identical(result$summary$residual_provider_mgcv_backend,
+                  "cpp_guarded")) {
+      "legacy-mgcv-cpp-guarded-provider"
+    } else {
+      "legacy-mgcv-regrXonS-provider"
+    }
   result$summary$compatible_cuda_ci_authority <- "native-legacy-dcov.gamma"
+  result$summary$compatible_cuda_mgcv_residual_backend <-
+    mgcv_residual_backend
   result$summary$labels <- labels
   result
 }

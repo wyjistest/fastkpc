@@ -101,6 +101,9 @@ assert_true(identical(summary$compatible_cuda_residual_authority[[1L]],
             "artifact should record residual authority")
 assert_true(identical(summary$mgcv_residual_backend[[1L]], "env"),
             "artifact should record default mgcv residual backend mode")
+assert_true(identical(artifact$facade$summary$compatible_cuda_mgcv_residual_backend,
+                      "env"),
+            "artifact facade should record default mgcv residual backend option")
 assert_true(identical(summary$residual_provider_mgcv_backend[[1L]], "r"),
             "artifact should record default provider mgcv backend")
 assert_true(!isTRUE(summary$residual_provider_mgcv_cpp_backend_enabled[[1L]]),
@@ -169,6 +172,9 @@ assert_true(identical(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
             "artifact should restore caller mgcv residual backend env")
 assert_true(identical(cpp_summary$mgcv_residual_backend[[1L]], "cpp_guarded"),
             "artifact should record scoped cpp_guarded mgcv residual backend")
+assert_true(identical(cpp_artifact$facade$summary$compatible_cuda_mgcv_residual_backend,
+                      "cpp_guarded"),
+            "artifact facade should record scoped cpp_guarded residual backend option")
 assert_true(identical(cpp_summary$residual_provider_response_backend[[1L]],
                       "legacy-mgcv-cpp-guarded-level-batch"),
             "artifact should record structured cpp guarded provider backend")
