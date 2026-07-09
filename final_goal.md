@@ -5399,6 +5399,44 @@ decision:
   Spectra eigensolve path, not fall back to full eig.
 ```
 
+Native Spectra lowrank work-shape diagnostics:
+
+```text
+scope:
+  native one-call residual-provider legacy dCov path
+  compatible CUDA skeleton artifact summary CSV
+
+change:
+  native legacy dCov summaries now expose the Spectra work counters already
+  produced by the C++ legacy dCov lowrank backend:
+    legacy_dcov_native_lowrank_spectra_iterations
+    legacy_dcov_native_lowrank_spectra_nconv
+    legacy_dcov_native_lowrank_spectra_ncv
+    legacy_dcov_native_lowrank_spectra_tol
+
+  compatible CUDA skeleton artifacts propagate the same fields into
+  summary.csv for completed and timeout rows, giving future subset/full
+  artifacts enough information to compute per-eigensolve average iterations,
+  convergence work, and configured Krylov subspace width.
+
+purpose:
+  turn the lowrank eigensolve timing conclusion into an actionable work-shape
+  diagnostic for the next Spectra/CUDA-compatible lowrank implementation.
+
+targeted gate:
+  Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_batch_oracle.R
+  Rscript fastkpc/tests/test_skeleton_native_residual_provider_legacy_dcov.R
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+  git diff --check
+
+status:
+  diagnostics only. This does not change dCov authority, residual authority,
+  skeleton replay, route selection, lowrank mode, or the current recommended
+  route. It prepares the next CUDA-compatible lowrank/eigensolve work by
+  exposing how much Spectra iteration work the current correct route performs.
+```
+
 ---
 
 ## 9. Final success definition

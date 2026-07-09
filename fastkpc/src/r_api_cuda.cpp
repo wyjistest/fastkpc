@@ -4516,6 +4516,14 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_lowrank_timings.spectra_failed_count,
       Rcpp::Named("legacy_dcov_native_lowrank_spectra_fallback_full_eig_count") =
         legacy_lowrank_timings.spectra_fallback_full_eig_count,
+      Rcpp::Named("legacy_dcov_native_lowrank_spectra_iterations") =
+        legacy_lowrank_timings.spectra_iterations,
+      Rcpp::Named("legacy_dcov_native_lowrank_spectra_nconv") =
+        legacy_lowrank_timings.spectra_nconv,
+      Rcpp::Named("legacy_dcov_native_lowrank_spectra_ncv") =
+        legacy_lowrank_timings.spectra_ncv,
+      Rcpp::Named("legacy_dcov_native_lowrank_spectra_tol") =
+        legacy_lowrank_timings.spectra_tol,
       Rcpp::Named("legacy_dcov_native_batch_enabled") =
         legacy_dcov_native_batch_enabled,
       Rcpp::Named("legacy_dcov_native_batch_mode") =

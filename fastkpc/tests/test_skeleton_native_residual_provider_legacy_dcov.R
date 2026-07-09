@@ -251,6 +251,25 @@ assert_true(identical(native$summary$residual_backend,
             "native summary should record provider residual backend")
 assert_true(isTRUE(native$summary$legacy_dcov_native_batch_enabled),
             "native legacy dCov should report level batch mode")
+native_lowrank_work_fields <- c(
+  "legacy_dcov_native_lowrank_spectra_iterations",
+  "legacy_dcov_native_lowrank_spectra_nconv",
+  "legacy_dcov_native_lowrank_spectra_ncv",
+  "legacy_dcov_native_lowrank_spectra_tol"
+)
+missing_native_lowrank_work <- setdiff(native_lowrank_work_fields,
+                                       names(native$summary))
+assert_true(length(missing_native_lowrank_work) == 0L,
+            paste("native legacy dCov summary missing lowrank work field",
+                  missing_native_lowrank_work[[1L]]))
+assert_true(native$summary$legacy_dcov_native_lowrank_spectra_iterations > 0,
+            "native legacy dCov should report Spectra iteration work")
+assert_true(native$summary$legacy_dcov_native_lowrank_spectra_nconv > 0,
+            "native legacy dCov should report Spectra convergence count")
+assert_true(native$summary$legacy_dcov_native_lowrank_spectra_ncv > 0,
+            "native legacy dCov should report Spectra ncv")
+assert_true(native$summary$legacy_dcov_native_lowrank_spectra_tol > 0,
+            "native legacy dCov should report Spectra tolerance")
 expected_batch_count <- sum(as.integer(native$levels$tasks_planned) > 0L)
 assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_count),
                       as.integer(expected_batch_count)),
