@@ -7674,6 +7674,72 @@ decision:
   wall time than the current compatible CPU/C++ route.
 ```
 
+Native cuda_spectra timeout summary component-stage checkpoint:
+
+```text
+change:
+  teach the compatible CUDA artifact runner to aggregate
+  native_lowrank_component_cache_progress.csv on timeout. When a native
+  cuda_spectra run times out after emitting component-cache batch rows, the
+  timeout summary row now fills the existing native CUDA lowrank fields from
+  completed progress rows:
+
+    legacy_dcov_native_cuda_lowrank_component_cache_enabled
+    legacy_dcov_native_cuda_lowrank_component_cache_scope
+    legacy_dcov_native_cuda_lowrank_component_cache_level_max_entries
+    legacy_dcov_native_cuda_lowrank_component_cache_lookup_count
+    legacy_dcov_native_cuda_lowrank_component_cache_hit_count
+    legacy_dcov_native_cuda_lowrank_component_cache_miss_count
+    legacy_dcov_native_cuda_lowrank_component_cache_entry_count
+    legacy_dcov_native_cuda_lowrank_component_cache_cross_batch_hit_count
+    legacy_dcov_native_cuda_lowrank_component_cache_eviction_count
+    legacy_dcov_native_cuda_lowrank_component_cache_level_entry_count_max
+    legacy_dcov_native_cuda_lowrank_component_batch_substrate_count
+    legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count
+    legacy_dcov_native_cuda_lowrank_backend_component_distance_ms
+    legacy_dcov_native_cuda_lowrank_backend_component_lowrank_ms
+    legacy_dcov_native_cuda_lowrank_backend_component_moment_ms
+    legacy_dcov_native_cuda_lowrank_backend_component_unaccounted_ms
+
+  This is artifact diagnostics only. It does not change the native skeleton
+  call, residual authority, dCov authority, component-cache behavior, p-value
+  order, canonical replay, or fallback policy.
+
+TDD gate:
+  RED:
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+    failed at:
+      could not find function
+      "fastkpc_compatible_cuda_lowrank_progress_summary"
+
+  GREEN:
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+    result:
+      PASS compatible CUDA skeleton artifact
+
+fresh CUDA regression:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+  result:
+    built: fastkpc/build/fastkpc_cuda.so
+    PASS compatible CUDA skeleton native cuda_spectra lowrank
+
+decision:
+  A timeout artifact can now be inspected from summary.csv alone for the
+  completed native cuda_spectra component-cache work before timeout. This makes
+  future 120/600/900 second full-route timeout artifacts easier to compare and
+  lets the next structural CUDA decision use summary-level distance / lowrank /
+  moment / unaccounted totals without waiting for a completed native summary.
+
+  This still does not prove the final full 351x48 CUDA skeleton goal. The final
+  gate remains unchanged: edge_count = 110 / 110, SHD = 0, n.edgetests exact =
+  TRUE, no unexplained fallback, and materially better wall time than the
+  current compatible CPU/C++ route.
+```
+
 ---
 
 ## 9. Final success definition

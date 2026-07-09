@@ -235,6 +235,169 @@ fastkpc_compatible_cuda_native_dcov_stage_rows <- function(row) {
   )
 }
 
+fastkpc_compatible_cuda_lowrank_progress_empty <- function() {
+  list(
+    component_cache_enabled = NA,
+    component_cache_scope = NA_character_,
+    component_cache_level_max_entries = NA_integer_,
+    component_cache_lookup_count = NA_integer_,
+    component_cache_hit_count = NA_integer_,
+    component_cache_miss_count = NA_integer_,
+    component_cache_entry_count = NA_integer_,
+    component_cache_cross_batch_hit_count = NA_integer_,
+    component_cache_eviction_count = NA_integer_,
+    component_cache_level_entry_count_max = NA_integer_,
+    component_batch_substrate_count = NA_integer_,
+    component_batch_substrate_pair_count = NA_integer_,
+    component_distance_ms = NA_real_,
+    component_lowrank_ms = NA_real_,
+    component_moment_ms = NA_real_,
+    component_unaccounted_ms = NA_real_
+  )
+}
+
+fastkpc_compatible_cuda_progress_sum <- function(rows, name, integer = FALSE) {
+  if (!(name %in% names(rows))) {
+    return(if (integer) NA_integer_ else NA_real_)
+  }
+  values <- suppressWarnings(as.numeric(rows[[name]]))
+  values <- values[is.finite(values)]
+  if (length(values) == 0L) {
+    return(if (integer) NA_integer_ else NA_real_)
+  }
+  total <- sum(values)
+  if (integer) as.integer(round(total)) else as.numeric(total)
+}
+
+fastkpc_compatible_cuda_progress_max <- function(rows, name, integer = FALSE) {
+  if (!(name %in% names(rows))) {
+    return(if (integer) NA_integer_ else NA_real_)
+  }
+  values <- suppressWarnings(as.numeric(rows[[name]]))
+  values <- values[is.finite(values)]
+  if (length(values) == 0L) {
+    return(if (integer) NA_integer_ else NA_real_)
+  }
+  value <- max(values)
+  if (integer) as.integer(round(value)) else as.numeric(value)
+}
+
+fastkpc_compatible_cuda_progress_first <- function(rows, name) {
+  if (!(name %in% names(rows))) return(NA_character_)
+  values <- as.character(rows[[name]])
+  values <- values[!is.na(values) & nzchar(values)]
+  if (length(values) == 0L) NA_character_ else values[[1L]]
+}
+
+fastkpc_compatible_cuda_lowrank_progress_summary <- function(path) {
+  empty <- fastkpc_compatible_cuda_lowrank_progress_empty()
+  if (is.null(path) || length(path) == 0L || is.na(path[[1L]]) ||
+      !file.exists(path[[1L]])) {
+    return(empty)
+  }
+  progress <- tryCatch(
+    utils::read.csv(path[[1L]], stringsAsFactors = FALSE),
+    error = function(e) NULL
+  )
+  if (!is.data.frame(progress) || nrow(progress) == 0L ||
+      !("event" %in% names(progress))) {
+    return(empty)
+  }
+  complete <- !is.na(progress$event) &
+    progress$event == "component_cache_batch_complete"
+  rows <- progress[complete, , drop = FALSE]
+  if (nrow(rows) == 0L) return(empty)
+
+  list(
+    component_cache_enabled = TRUE,
+    component_cache_scope =
+      fastkpc_compatible_cuda_progress_first(rows, "component_cache_scope"),
+    component_cache_level_max_entries =
+      fastkpc_compatible_cuda_progress_max(
+        rows, "component_cache_level_max_entries", integer = TRUE
+      ),
+    component_cache_lookup_count =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "component_cache_lookup_count", integer = TRUE
+      ),
+    component_cache_hit_count =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "component_cache_hit_count", integer = TRUE
+      ),
+    component_cache_miss_count =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "component_cache_miss_count", integer = TRUE
+      ),
+    component_cache_entry_count =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "component_cache_entry_count", integer = TRUE
+      ),
+    component_cache_cross_batch_hit_count =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "component_cache_cross_batch_hit_count", integer = TRUE
+      ),
+    component_cache_eviction_count =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "component_cache_eviction_count", integer = TRUE
+      ),
+    component_cache_level_entry_count_max =
+      fastkpc_compatible_cuda_progress_max(
+        rows, "component_cache_level_entry_count_max", integer = TRUE
+      ),
+    component_batch_substrate_count = as.integer(nrow(rows)),
+    component_batch_substrate_pair_count =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "batch_size", integer = TRUE
+      ),
+    component_distance_ms =
+      fastkpc_compatible_cuda_progress_sum(rows, "component_distance_ms"),
+    component_lowrank_ms =
+      fastkpc_compatible_cuda_progress_sum(rows, "component_lowrank_ms"),
+    component_moment_ms =
+      fastkpc_compatible_cuda_progress_sum(rows, "component_moment_ms"),
+    component_unaccounted_ms =
+      fastkpc_compatible_cuda_progress_sum(rows, "component_unaccounted_ms")
+  )
+}
+
+fastkpc_compatible_cuda_apply_lowrank_progress_summary <- function(
+    row, summary) {
+  if (is.null(summary)) return(row)
+  row$legacy_dcov_native_cuda_lowrank_component_cache_enabled <-
+    summary$component_cache_enabled
+  row$legacy_dcov_native_cuda_lowrank_component_cache_scope <-
+    summary$component_cache_scope
+  row$legacy_dcov_native_cuda_lowrank_component_cache_level_max_entries <-
+    summary$component_cache_level_max_entries
+  row$legacy_dcov_native_cuda_lowrank_component_cache_lookup_count <-
+    summary$component_cache_lookup_count
+  row$legacy_dcov_native_cuda_lowrank_component_cache_hit_count <-
+    summary$component_cache_hit_count
+  row$legacy_dcov_native_cuda_lowrank_component_cache_miss_count <-
+    summary$component_cache_miss_count
+  row$legacy_dcov_native_cuda_lowrank_component_cache_entry_count <-
+    summary$component_cache_entry_count
+  row$legacy_dcov_native_cuda_lowrank_component_cache_cross_batch_hit_count <-
+    summary$component_cache_cross_batch_hit_count
+  row$legacy_dcov_native_cuda_lowrank_component_cache_eviction_count <-
+    summary$component_cache_eviction_count
+  row$legacy_dcov_native_cuda_lowrank_component_cache_level_entry_count_max <-
+    summary$component_cache_level_entry_count_max
+  row$legacy_dcov_native_cuda_lowrank_component_batch_substrate_count <-
+    summary$component_batch_substrate_count
+  row$legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count <-
+    summary$component_batch_substrate_pair_count
+  row$legacy_dcov_native_cuda_lowrank_backend_component_distance_ms <-
+    summary$component_distance_ms
+  row$legacy_dcov_native_cuda_lowrank_backend_component_lowrank_ms <-
+    summary$component_lowrank_ms
+  row$legacy_dcov_native_cuda_lowrank_backend_component_moment_ms <-
+    summary$component_moment_ms
+  row$legacy_dcov_native_cuda_lowrank_backend_component_unaccounted_ms <-
+    summary$component_unaccounted_ms
+  row
+}
+
 fastkpc_compatible_cuda_extract_reference <- function(result) {
   candidates <- list(
     reference = result$reference,
@@ -269,9 +432,9 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     mgcv_residual_backend_condition_threshold, reference,
     reference_source, reference_result_path, reference_slot,
     expected_edge_count, expected_n_edgetests, timeout_sec, elapsed_sec,
-    reference_elapsed_sec) {
+    reference_elapsed_sec, lowrank_progress_summary = NULL) {
   reference_edge_count <- as.integer(sum(unname(reference$adjacency)) / 2L)
-  data.frame(
+  row <- data.frame(
     artifact = artifact_name,
     route = "facade",
     n = nrow(data),
@@ -411,6 +574,10 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     elapsed_sec = as.numeric(elapsed_sec),
     reference_elapsed_sec = as.numeric(reference_elapsed_sec),
     stringsAsFactors = FALSE
+  )
+  fastkpc_compatible_cuda_apply_lowrank_progress_summary(
+    row,
+    lowrank_progress_summary
   )
 }
 
@@ -675,7 +842,11 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
       expected_n_edgetests = expected_n_edgetests,
       timeout_sec = timeout_error$timeout_sec,
       elapsed_sec = timeout_error$elapsed_sec,
-      reference_elapsed_sec = reference_timed$elapsed
+      reference_elapsed_sec = reference_timed$elapsed,
+      lowrank_progress_summary =
+        fastkpc_compatible_cuda_lowrank_progress_summary(
+          paths$native_lowrank_cache_progress_csv
+        )
     )
     utils::write.csv(row, paths$summary_csv, row.names = FALSE)
     utils::write.csv(

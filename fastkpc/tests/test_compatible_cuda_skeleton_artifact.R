@@ -95,6 +95,103 @@ timeout_reference <- list(
   pMax = matrix(0, ncol(data), ncol(data)),
   summary = list()
 )
+
+lowrank_progress_path <- tempfile("compatible-cuda-lowrank-progress-",
+                                  fileext = ".csv")
+utils::write.csv(
+  data.frame(
+    event = c("component_cache_batch_complete",
+              "component_cache_batch_complete",
+              "component_cache_ignored"),
+    batch_size = c(4L, 6L, 99L),
+    component_cache_scope = c("level", "level", "level"),
+    component_cache_level_max_entries = c(128L, 128L, 128L),
+    component_cache_lookup_count = c(8L, 12L, 99L),
+    component_cache_hit_count = c(3L, 5L, 99L),
+    component_cache_miss_count = c(5L, 7L, 99L),
+    component_cache_entry_count = c(5L, 7L, 99L),
+    component_cache_cross_batch_hit_count = c(2L, 4L, 99L),
+    component_cache_eviction_count = c(0L, 2L, 99L),
+    component_cache_level_entry_count_max = c(5L, 7L, 99L),
+    component_count = c(5L, 7L, 99L),
+    component_total_ms = c(13.6, 28.1, 99),
+    component_distance_ms = c(1.25, 2.75, 99),
+    component_lowrank_ms = c(10, 20, 99),
+    component_moment_ms = c(0.5, 1.5, 99),
+    component_unaccounted_ms = c(0.1, 0.2, 99),
+    component_eig_ms = c(7, 14, 99),
+    combine_ms = c(0.25, 0.75, 99),
+    elapsed_ms = c(100, 220, 999),
+    stringsAsFactors = FALSE
+  ),
+  lowrank_progress_path,
+  row.names = FALSE
+)
+lowrank_progress_summary <-
+  fastkpc_compatible_cuda_lowrank_progress_summary(lowrank_progress_path)
+assert_true(lowrank_progress_summary$component_batch_substrate_count == 2L,
+            "lowrank progress summary should count completed component batches")
+assert_true(lowrank_progress_summary$component_batch_substrate_pair_count == 10L,
+            "lowrank progress summary should sum completed batch sizes")
+assert_true(lowrank_progress_summary$component_cache_lookup_count == 20L,
+            "lowrank progress summary should sum cache lookups")
+assert_true(lowrank_progress_summary$component_cache_hit_count == 8L,
+            "lowrank progress summary should sum cache hits")
+assert_true(lowrank_progress_summary$component_cache_cross_batch_hit_count == 6L,
+            "lowrank progress summary should sum cross-batch cache hits")
+assert_true(lowrank_progress_summary$component_cache_eviction_count == 2L,
+            "lowrank progress summary should sum evictions")
+assert_true(lowrank_progress_summary$component_cache_level_entry_count_max == 7L,
+            "lowrank progress summary should keep max level entry count")
+assert_true(abs(lowrank_progress_summary$component_distance_ms - 4) < 1e-12,
+            "lowrank progress summary should sum distance stage ms")
+assert_true(abs(lowrank_progress_summary$component_lowrank_ms - 30) < 1e-12,
+            "lowrank progress summary should sum lowrank stage ms")
+assert_true(abs(lowrank_progress_summary$component_moment_ms - 2) < 1e-12,
+            "lowrank progress summary should sum moment stage ms")
+assert_true(abs(lowrank_progress_summary$component_unaccounted_ms - 0.3) < 1e-12,
+            "lowrank progress summary should sum unaccounted stage ms")
+
+timeout_row_with_lowrank_progress <- fastkpc_compatible_cuda_timeout_summary_row(
+  artifact_name = "compatible_cuda_skeleton_timeout_progress_test",
+  data = data,
+  columns = NULL,
+  alpha = 0.08,
+  max_conditioning_size = 2L,
+  index = 0L,
+  numCol = ncol(data),
+  dcov_batch = "round",
+  low_rank = "cuda_spectra",
+  mgcv_residual_backend = "legacy",
+  mgcv_residual_backend_native_s_size_limit = NULL,
+  mgcv_residual_backend_condition_threshold = NULL,
+  reference = timeout_reference,
+  reference_source = "rds",
+  reference_result_path = timeout_ref_path,
+  reference_slot = "root",
+  expected_edge_count = 0L,
+  expected_n_edgetests = integer(),
+  timeout_sec = 0,
+  elapsed_sec = 0,
+  reference_elapsed_sec = 0,
+  lowrank_progress_summary = lowrank_progress_summary
+)
+assert_true(
+  timeout_row_with_lowrank_progress$
+    legacy_dcov_native_cuda_lowrank_component_batch_substrate_count[[1L]] == 2L,
+  "timeout summary should include component progress batch count"
+)
+assert_true(
+  timeout_row_with_lowrank_progress$
+    legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count[[1L]] == 10L,
+  "timeout summary should include component progress pair count"
+)
+assert_true(
+  abs(timeout_row_with_lowrank_progress$
+        legacy_dcov_native_cuda_lowrank_backend_component_lowrank_ms[[1L]] -
+        30) < 1e-12,
+  "timeout summary should include component progress lowrank timing"
+)
 saveRDS(timeout_reference, timeout_ref_path)
 timeout_dir <- tempfile("compatible-cuda-skeleton-timeout-")
 timeout_artifact <- fastkpc_run_compatible_cuda_skeleton_artifact(
