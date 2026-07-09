@@ -5758,6 +5758,74 @@ decision:
   the dense matrix or reallocating temporary device buffers per iteration.
 ```
 
+CUDA dense Spectra-matvec sequence/operator boundary checkpoint:
+
+```text
+scope:
+  CUDA substrate for the legacy dCov Spectra lowrank bottleneck
+  eigensolver-style repeated matvec boundary over a resident CUDA handle
+  not connected to RSpectra or the skeleton route yet
+
+change:
+  add a native sequence apply API around the reusable handle:
+    legacy_dcov_spectra_matvec_cuda_handle_apply_sequence(handle, rhs)
+
+  implementation shape:
+    rhs is accepted as vector or n x K matrix at the R boundary
+    native bridge drives one handle matvec per RHS column
+    the dense matrix remains device-resident for all sequence calls
+    warm RHS/output device workspace is reused across all sequence calls
+    output preserves vector vs matrix RHS shape
+
+  R/.Call bridge:
+    C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence
+    legacy_dcov_spectra_matvec_cuda_handle_apply_sequence()
+
+diagnostics:
+  backend = cuda-dense-sym-matvec-handle-sequence
+  n
+  rhs_count
+  matvec_call_count
+  kernel_launch_count
+  device_matrix_reuse_count
+  device_workspace_reuse_count
+  workspace_realloc_count
+  workspace_bytes
+  matrix_h2d_ms
+  workspace_alloc_ms
+  h2d_ms / kernel_ms / d2h_ms / total_ms
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+
+351x8 warm sequence micro-check:
+  n = 351
+  rhs_count = 8
+  max_abs_diff vs host matrix multiply = 4.973799e-14
+  matvec_call_count = 8
+  kernel_launch_count = 8
+  device_matrix_reuse_count = 8
+  device_workspace_reuse_count = 8
+  workspace_realloc_count = 0
+  workspace_bytes = 44,928
+  matrix_h2d_ms = 0
+  workspace_alloc_ms = 0
+  h2d_ms = 0.025548
+  kernel_ms = 0.076688
+  d2h_ms = 0.051254
+  total_ms = 0.161152
+
+decision:
+  This provides a concrete eigensolver-compatible operator boundary for the
+  CUDA Spectra-matvec substrate: higher-level code can now drive repeated
+  single-vector matvecs through one resident matrix and one reusable workspace.
+  It is still substrate only and does not change dCov authority, residual
+  authority, skeleton replay, lowrank route selection, or the current
+  recommended compatible route. The next lowrank step is to wire this boundary
+  into a Spectra-compatible matvec adapter or prototype eigensolver route and
+  shadow it against the current C++ Spectra oracle.
+```
+
 ---
 
 ## 9. Final success definition

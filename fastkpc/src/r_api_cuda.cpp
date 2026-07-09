@@ -2012,6 +2012,94 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_apply(
   END_RCPP
 }
 
+extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence(
+    SEXP handles,
+    SEXP rhss) {
+  BEGIN_RCPP
+  if (!Rf_isReal(rhss) || !Rf_isMatrix(rhss)) {
+    Rcpp::stop("rhs must be a numeric matrix");
+  }
+  fastkpc::LegacyDcovSpectraMatvecCudaHandle* handle =
+    legacy_dcov_spectra_matvec_handle_from_externalptr(handles);
+  const int n = fastkpc::legacy_dcov_spectra_matvec_cuda_handle_n(handle);
+  Rcpp::NumericMatrix rhs(rhss);
+  if (rhs.nrow() != n) {
+    Rcpp::stop("rhs row count must match matrix dimension");
+  }
+  if (rhs.ncol() < 1) {
+    Rcpp::stop("rhs must have at least one column");
+  }
+  if (!all_finite(rhs)) {
+    Rcpp::stop("Data contains missing or infinite values");
+  }
+
+  const auto total_start = std::chrono::steady_clock::now();
+  const int rhs_count = rhs.ncol();
+  Rcpp::NumericMatrix values(n, rhs_count);
+  int kernel_launch_count = 0;
+  int device_matrix_reuse_count = 0;
+  int device_workspace_reuse_count = 0;
+  int workspace_realloc_count = 0;
+  std::size_t matrix_bytes = 0;
+  std::size_t workspace_bytes = 0;
+  double matrix_h2d_ms = 0.0;
+  double workspace_alloc_ms = 0.0;
+  double alloc_ms = 0.0;
+  double h2d_ms = 0.0;
+  double kernel_ms = 0.0;
+  double d2h_ms = 0.0;
+  double free_ms = 0.0;
+
+  const double* rhs_data = REAL(rhss);
+  for (int col = 0; col < rhs_count; ++col) {
+    const double* rhs_col = rhs_data + static_cast<std::size_t>(col) * n;
+    const fastkpc::LegacyDcovSpectraMatvecCudaResult result =
+      fastkpc::legacy_dcov_spectra_matvec_cuda_handle_apply(
+        handle, rhs_col, 1);
+    std::copy(result.values.begin(), result.values.end(),
+              values.begin() + static_cast<std::size_t>(col) * n);
+    kernel_launch_count += result.kernel_launch_count;
+    device_matrix_reuse_count += result.device_matrix_reuse_count;
+    device_workspace_reuse_count += result.device_workspace_reuse_count;
+    workspace_realloc_count += result.workspace_realloc_count;
+    matrix_bytes = result.matrix_bytes;
+    workspace_bytes = std::max(workspace_bytes, result.workspace_bytes);
+    matrix_h2d_ms += result.matrix_h2d_ms;
+    workspace_alloc_ms += result.workspace_alloc_ms;
+    alloc_ms += result.alloc_ms;
+    h2d_ms += result.h2d_ms;
+    kernel_ms += result.kernel_ms;
+    d2h_ms += result.d2h_ms;
+    free_ms += result.free_ms;
+  }
+
+  return Rcpp::List::create(
+    Rcpp::Named("values") = values,
+    Rcpp::Named("backend") = "cuda-dense-sym-matvec-handle-sequence",
+    Rcpp::Named("n") = n,
+    Rcpp::Named("rhs_count") = rhs_count,
+    Rcpp::Named("matvec_call_count") = rhs_count,
+    Rcpp::Named("kernel_launch_count") = kernel_launch_count,
+    Rcpp::Named("device_matrix_reuse_count") = device_matrix_reuse_count,
+    Rcpp::Named("device_workspace_reuse_count") =
+      device_workspace_reuse_count,
+    Rcpp::Named("workspace_realloc_count") =
+      workspace_realloc_count,
+    Rcpp::Named("matrix_bytes") = static_cast<double>(matrix_bytes),
+    Rcpp::Named("workspace_bytes") =
+      static_cast<double>(workspace_bytes),
+    Rcpp::Named("matrix_h2d_ms") = matrix_h2d_ms,
+    Rcpp::Named("workspace_alloc_ms") = workspace_alloc_ms,
+    Rcpp::Named("alloc_ms") = alloc_ms,
+    Rcpp::Named("h2d_ms") = h2d_ms,
+    Rcpp::Named("kernel_ms") = kernel_ms,
+    Rcpp::Named("d2h_ms") = d2h_ms,
+    Rcpp::Named("free_ms") = free_ms,
+    Rcpp::Named("total_ms") = elapsed_ms_since(total_start)
+  );
+  END_RCPP
+}
+
 extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_free(
     SEXP handles) {
   BEGIN_RCPP
@@ -4823,6 +4911,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_legacy_dcov_spectra_matvec_cuda", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda), 2},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_create", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_create), 1},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_apply", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_apply), 2},
+  {"C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence), 2},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_free", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_free), 1},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},

@@ -121,6 +121,32 @@ legacy_dcov_spectra_matvec_cuda_handle_apply <- function(handle, rhs) {
   result
 }
 
+legacy_dcov_spectra_matvec_cuda_handle_apply_sequence <- function(handle, rhs) {
+  load_fastkpc_cuda_native()
+  if (!is.list(handle) || is.null(handle$ptr)) {
+    stop("CUDA matvec handle must be a handle object", call. = FALSE)
+  }
+  rhs_was_vector <- is.null(dim(rhs))
+  rhs <- if (rhs_was_vector) {
+    matrix(as.numeric(rhs), ncol = 1L)
+  } else {
+    as.matrix(rhs)
+  }
+  storage.mode(rhs) <- "double"
+  if (nrow(rhs) != as.integer(handle$n)) {
+    stop("rhs row count must match matrix dimension", call. = FALSE)
+  }
+  if (!all(is.finite(rhs))) {
+    stop("Data contains missing or infinite values", call. = FALSE)
+  }
+  result <- .Call("C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence",
+                  handle$ptr, rhs, PACKAGE = "fastkpc_cuda")
+  if (rhs_was_vector) {
+    result$values <- as.numeric(result$values[, 1L])
+  }
+  result
+}
+
 legacy_dcov_spectra_matvec_cuda_handle_free <- function(handle) {
   load_fastkpc_cuda_native()
   if (!is.list(handle) || is.null(handle$ptr)) {
