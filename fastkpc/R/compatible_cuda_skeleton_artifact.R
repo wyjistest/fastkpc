@@ -273,6 +273,16 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     legacy_dcov_native_batch_column_materialize_count = NA_integer_,
     legacy_dcov_native_batch_materialize_ms = NA_real_,
     legacy_dcov_native_batch_call_ms = NA_real_,
+    legacy_dcov_native_batch_input_ms = NA_real_,
+    legacy_dcov_native_batch_distance_ms = NA_real_,
+    legacy_dcov_native_batch_lowrank_ms = NA_real_,
+    legacy_dcov_native_batch_statistic_ms = NA_real_,
+    legacy_dcov_native_batch_moment_ms = NA_real_,
+    legacy_dcov_native_batch_pgamma_ms = NA_real_,
+    legacy_dcov_native_batch_accounted_ms = NA_real_,
+    legacy_dcov_native_batch_scalar_total_ms = NA_real_,
+    legacy_dcov_native_batch_wrapper_overhead_ms = NA_real_,
+    legacy_dcov_native_batch_overhead_ms = NA_real_,
     compatible_cuda_facade = NA,
     compatible_cuda_route = NA_character_,
     compatible_cuda_residual_authority = NA_character_,
@@ -695,6 +705,36 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
                    NA_real_),
     legacy_dcov_native_batch_call_ms =
       as.numeric(facade_summary$legacy_dcov_native_batch_call_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_input_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_input_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_distance_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_distance_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_lowrank_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_lowrank_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_statistic_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_statistic_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_moment_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_moment_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_pgamma_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_pgamma_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_accounted_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_accounted_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_scalar_total_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_scalar_total_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_wrapper_overhead_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_wrapper_overhead_ms %||%
+                   NA_real_),
+    legacy_dcov_native_batch_overhead_ms =
+      as.numeric(facade_summary$legacy_dcov_native_batch_overhead_ms %||%
                    NA_real_),
     compatible_cuda_facade =
       isTRUE(facade_summary$compatible_cuda_facade),

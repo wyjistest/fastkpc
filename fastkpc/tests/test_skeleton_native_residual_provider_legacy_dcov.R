@@ -283,5 +283,28 @@ assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_column_
             "native legacy dCov should avoid C++ skeleton matrix materialization columns")
 assert_true(native$summary$legacy_dcov_native_batch_ms > 0,
             "native legacy dCov should report batch elapsed time")
+native_batch_stage_fields <- c(
+  "legacy_dcov_native_batch_input_ms",
+  "legacy_dcov_native_batch_distance_ms",
+  "legacy_dcov_native_batch_lowrank_ms",
+  "legacy_dcov_native_batch_statistic_ms",
+  "legacy_dcov_native_batch_moment_ms",
+  "legacy_dcov_native_batch_pgamma_ms",
+  "legacy_dcov_native_batch_accounted_ms",
+  "legacy_dcov_native_batch_scalar_total_ms",
+  "legacy_dcov_native_batch_wrapper_overhead_ms",
+  "legacy_dcov_native_batch_overhead_ms"
+)
+missing_native_batch_stage <- setdiff(native_batch_stage_fields,
+                                      names(native$summary))
+assert_true(length(missing_native_batch_stage) == 0L,
+            paste("native legacy dCov batch summary missing stage timing",
+                  missing_native_batch_stage[[1L]]))
+assert_true(native$summary$legacy_dcov_native_batch_lowrank_ms > 0,
+            "native legacy dCov batch should report lowrank stage timing")
+assert_true(native$summary$legacy_dcov_native_batch_scalar_total_ms > 0,
+            "native legacy dCov batch should report aggregate scalar compute time")
+assert_true(native$summary$legacy_dcov_native_batch_accounted_ms > 0,
+            "native legacy dCov batch should report accounted stage timing")
 
 cat("PASS skeleton native residual-provider legacy dCov\n")

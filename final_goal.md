@@ -5210,6 +5210,37 @@ status:
   not as a new promotion or performance recommendation.
 ```
 
+Native dCov batch stage timing diagnostics checkpoint:
+
+```text
+scope:
+  native one-call residual-provider legacy dCov path
+  artifact summary rows for completed and timeout runs
+
+change:
+  native batch diagnostics now surface aggregate stage timings through the
+  native skeleton summary and compatible CUDA skeleton artifact CSV:
+    input / distance / lowrank / statistic / moment / pgamma
+    accounted / scalar_total / wrapper_overhead / batch_overhead
+
+purpose:
+  explain the direct-input full gate regression, where host materialization
+  dropped but batch call time increased
+  provide attribution for the next native dCov data-plane optimization
+
+targeted gate:
+  Rscript fastkpc/tests/test_skeleton_native_residual_provider_legacy_dcov.R
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+  Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_batch_oracle.R
+  git diff --check
+
+status:
+  diagnostics only. This does not change dCov authority, residual authority,
+  skeleton replay, route selection, or the current promotion status. No new
+  route is promoted by this checkpoint.
+```
+
 ---
 
 ## 9. Final success definition

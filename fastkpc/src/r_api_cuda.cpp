@@ -3877,6 +3877,16 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   double legacy_dcov_native_batch_ms = 0.0;
   double legacy_dcov_native_batch_materialize_ms = 0.0;
   double legacy_dcov_native_batch_call_ms = 0.0;
+  double legacy_dcov_native_batch_input_ms = 0.0;
+  double legacy_dcov_native_batch_distance_ms = 0.0;
+  double legacy_dcov_native_batch_lowrank_ms = 0.0;
+  double legacy_dcov_native_batch_statistic_ms = 0.0;
+  double legacy_dcov_native_batch_moment_ms = 0.0;
+  double legacy_dcov_native_batch_pgamma_ms = 0.0;
+  double legacy_dcov_native_batch_accounted_ms = 0.0;
+  double legacy_dcov_native_batch_scalar_total_ms = 0.0;
+  double legacy_dcov_native_batch_wrapper_overhead_ms = 0.0;
+  double legacy_dcov_native_batch_overhead_ms = 0.0;
   const std::string native_progress_csv_path =
     native_legacy_progress_csv_path_from_env();
 
@@ -4041,6 +4051,26 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       legacy_dcov_native_batch_pair_count += pair_count;
       legacy_dcov_native_batch_ms +=
         list_numeric_value(batch_diag, "total_ms");
+      legacy_dcov_native_batch_input_ms +=
+        list_numeric_value(batch_diag, "input_ms");
+      legacy_dcov_native_batch_distance_ms +=
+        list_numeric_value(batch_diag, "distance_ms");
+      legacy_dcov_native_batch_lowrank_ms +=
+        list_numeric_value(batch_diag, "lowrank_ms");
+      legacy_dcov_native_batch_statistic_ms +=
+        list_numeric_value(batch_diag, "statistic_ms");
+      legacy_dcov_native_batch_moment_ms +=
+        list_numeric_value(batch_diag, "moment_ms");
+      legacy_dcov_native_batch_pgamma_ms +=
+        list_numeric_value(batch_diag, "pgamma_ms");
+      legacy_dcov_native_batch_accounted_ms +=
+        list_numeric_value(batch_diag, "accounted_ms");
+      legacy_dcov_native_batch_scalar_total_ms +=
+        list_numeric_value(batch_diag, "scalar_total_ms");
+      legacy_dcov_native_batch_wrapper_overhead_ms +=
+        list_numeric_value(batch_diag, "wrapper_overhead_ms");
+      legacy_dcov_native_batch_overhead_ms +=
+        list_numeric_value(batch_diag, "batch_overhead_ms");
       legacy_dcov_native_batch_materialize_ms += materialize_ms;
       legacy_dcov_native_batch_call_ms += call_ms;
       legacy_dcov_native_batch_parallel_enabled =
@@ -4493,6 +4523,26 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_dcov_native_batch_materialize_ms,
       Rcpp::Named("legacy_dcov_native_batch_call_ms") =
         legacy_dcov_native_batch_call_ms,
+      Rcpp::Named("legacy_dcov_native_batch_input_ms") =
+        legacy_dcov_native_batch_input_ms,
+      Rcpp::Named("legacy_dcov_native_batch_distance_ms") =
+        legacy_dcov_native_batch_distance_ms,
+      Rcpp::Named("legacy_dcov_native_batch_lowrank_ms") =
+        legacy_dcov_native_batch_lowrank_ms,
+      Rcpp::Named("legacy_dcov_native_batch_statistic_ms") =
+        legacy_dcov_native_batch_statistic_ms,
+      Rcpp::Named("legacy_dcov_native_batch_moment_ms") =
+        legacy_dcov_native_batch_moment_ms,
+      Rcpp::Named("legacy_dcov_native_batch_pgamma_ms") =
+        legacy_dcov_native_batch_pgamma_ms,
+      Rcpp::Named("legacy_dcov_native_batch_accounted_ms") =
+        legacy_dcov_native_batch_accounted_ms,
+      Rcpp::Named("legacy_dcov_native_batch_scalar_total_ms") =
+        legacy_dcov_native_batch_scalar_total_ms,
+      Rcpp::Named("legacy_dcov_native_batch_wrapper_overhead_ms") =
+        legacy_dcov_native_batch_wrapper_overhead_ms,
+      Rcpp::Named("legacy_dcov_native_batch_overhead_ms") =
+        legacy_dcov_native_batch_overhead_ms,
       Rcpp::Named("legacy_dcov_native_batch_workspace_reuse_count") =
         legacy_dcov_native_batch_workspace_reuse_count,
       Rcpp::Named("legacy_dcov_native_batch_distance_workspace_reuse_count") =

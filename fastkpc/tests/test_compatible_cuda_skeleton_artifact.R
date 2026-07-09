@@ -175,6 +175,16 @@ required <- c(
   "legacy_dcov_native_batch_column_materialize_count",
   "legacy_dcov_native_batch_materialize_ms",
   "legacy_dcov_native_batch_call_ms",
+  "legacy_dcov_native_batch_input_ms",
+  "legacy_dcov_native_batch_distance_ms",
+  "legacy_dcov_native_batch_lowrank_ms",
+  "legacy_dcov_native_batch_statistic_ms",
+  "legacy_dcov_native_batch_moment_ms",
+  "legacy_dcov_native_batch_pgamma_ms",
+  "legacy_dcov_native_batch_accounted_ms",
+  "legacy_dcov_native_batch_scalar_total_ms",
+  "legacy_dcov_native_batch_wrapper_overhead_ms",
+  "legacy_dcov_native_batch_overhead_ms",
   "compatible_cuda_facade", "compatible_cuda_route",
   "compatible_cuda_residual_authority", "compatible_cuda_ci_authority",
   "mgcv_residual_backend", "residual_provider_response_backend",
@@ -262,6 +272,10 @@ assert_true(summary$legacy_dcov_native_batch_materialize_ms[[1L]] >= 0,
             "artifact should report native dCov batch materialization timing")
 assert_true(summary$legacy_dcov_native_batch_call_ms[[1L]] >= 0,
             "artifact should report native dCov batch call timing")
+assert_true(summary$legacy_dcov_native_batch_lowrank_ms[[1L]] > 0,
+            "artifact should report native dCov batch lowrank stage timing")
+assert_true(summary$legacy_dcov_native_batch_scalar_total_ms[[1L]] > 0,
+            "artifact should report native dCov batch aggregate scalar timing")
 
 reuse_dir <- tempfile("compatible-cuda-skeleton-artifact-reuse-")
 reuse <- fastkpc_run_compatible_cuda_skeleton_artifact(
