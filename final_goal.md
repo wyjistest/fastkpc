@@ -6675,6 +6675,57 @@ decision:
   native cuda_spectra by only setting low_rank="cuda_spectra".
 ```
 
+Native one-call cuda_spectra lowrank smoke checkpoint:
+
+```text
+scope:
+  fastkpc_run_compatible_cuda_skeleton_artifact(
+    dcov_batch = "level",
+    low_rank = "cuda_spectra"
+  )
+
+change:
+  add an env-gated native CUDA Spectra lowrank branch for the native
+  legacy dCov data plane. The branch is selected by:
+
+    FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=cuda_spectra
+
+  It reuses the CUDA dense symmetric matvec Spectra gamma helper inside the
+  native one-call skeleton path, reports native CUDA lowrank backend counters,
+  and leaves default CPU full_eig/Spectra behavior unchanged.
+
+small gate:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+result:
+  PASS compatible CUDA skeleton native cuda_spectra lowrank
+
+  The small artifact compares native cuda_spectra against a CPU Spectra
+  reference and requires:
+    adjacency_identical = TRUE
+    SHD = 0
+    n.edgetests identical = TRUE
+    native lowrank mode = cuda_spectra
+    CUDA backend count = native dCov count
+    CUDA backend error/fallback count = 0
+
+related gates:
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_route.R
+
+decision:
+  This removes the previous native one-call route-integrity blocker for the
+  cuda_spectra lowrank mode, but it is still a smoke checkpoint and substrate
+  only. It is not a full 351x48 result, not a promotion of cuda_spectra as the
+  recommended compatible route, and not final-goal completion.
+```
+
 ---
 
 ## 9. Final success definition

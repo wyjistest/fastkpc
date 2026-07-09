@@ -517,6 +517,45 @@ const char* native_legacy_dcov_batch_mode_name(
   }
 }
 
+bool native_legacy_dcov_cuda_lowrank_requested() {
+  const char* raw = std::getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK");
+  if (raw == nullptr) return false;
+  std::string value(raw);
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::tolower(ch));
+                 });
+  return value == "cuda_spectra";
+}
+
+int native_legacy_dcov_cuda_lowrank_ncv(int n, int num_col) {
+  return std::min(n, std::max(2 * num_col + 1, 20));
+}
+
+struct NativeLegacyDcovCudaLowrankBackendMetrics {
+  bool enabled = false;
+  int count = 0;
+  double ms = 0.0;
+  int error_count = 0;
+  int fallback_count = 0;
+  int converged_count = 0;
+  int spectra_matvec_count = 0;
+  double spectra_matvec_ms = 0.0;
+  int kernel_launch_count = 0;
+  int device_matrix_reuse_count = 0;
+  int device_workspace_reuse_count = 0;
+  int workspace_realloc_count = 0;
+  double matrix_bytes = 0.0;
+  double workspace_bytes = 0.0;
+  double matrix_h2d_ms = 0.0;
+  double matrix_h2d_ms_during_compute = 0.0;
+  double matrix_h2d_ms_during_compute_max = 0.0;
+  double workspace_alloc_ms = 0.0;
+  double h2d_ms = 0.0;
+  double kernel_ms = 0.0;
+  double d2h_ms = 0.0;
+};
+
 double elapsed_ms_since(std::chrono::steady_clock::time_point start) {
   return std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - start).count();
@@ -5074,8 +5113,77 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   double legacy_dcov_native_batch_scalar_total_ms = 0.0;
   double legacy_dcov_native_batch_wrapper_overhead_ms = 0.0;
   double legacy_dcov_native_batch_overhead_ms = 0.0;
+  NativeLegacyDcovCudaLowrankBackendMetrics
+    legacy_dcov_native_cuda_lowrank_metrics;
+  legacy_dcov_native_cuda_lowrank_metrics.enabled =
+    native_legacy_dcov_cuda_lowrank_requested();
+  const int legacy_dcov_native_cuda_lowrank_ncv =
+    native_legacy_dcov_cuda_lowrank_ncv(n, num_col);
+  const double legacy_dcov_native_cuda_lowrank_tol = 1e-10;
+  const int legacy_dcov_native_cuda_lowrank_maxitr = 1000;
   const std::string native_progress_csv_path =
     native_legacy_progress_csv_path_from_env();
+
+  auto accumulate_native_cuda_lowrank_run =
+    [&](const LegacyDcovCudaLowrankGammaRun& run) {
+      legacy_dcov_native_cuda_lowrank_metrics.count += 1;
+      legacy_dcov_native_cuda_lowrank_metrics.ms += run.total_ms;
+      if (run.converged_x && run.converged_y) {
+        legacy_dcov_native_cuda_lowrank_metrics.converged_count += 1;
+      }
+      legacy_dcov_native_cuda_lowrank_metrics.spectra_matvec_count +=
+        run.spectra_matvec_count;
+      legacy_dcov_native_cuda_lowrank_metrics.spectra_matvec_ms +=
+        run.spectra_matvec_ms;
+      legacy_dcov_native_cuda_lowrank_metrics.kernel_launch_count +=
+        run.kernel_launch_count;
+      legacy_dcov_native_cuda_lowrank_metrics.device_matrix_reuse_count +=
+        run.device_matrix_reuse_count;
+      legacy_dcov_native_cuda_lowrank_metrics.device_workspace_reuse_count +=
+        run.device_workspace_reuse_count;
+      legacy_dcov_native_cuda_lowrank_metrics.workspace_realloc_count +=
+        run.workspace_realloc_count;
+      legacy_dcov_native_cuda_lowrank_metrics.matrix_bytes +=
+        run.matrix_bytes;
+      legacy_dcov_native_cuda_lowrank_metrics.workspace_bytes = std::max(
+        legacy_dcov_native_cuda_lowrank_metrics.workspace_bytes,
+        run.workspace_bytes);
+      legacy_dcov_native_cuda_lowrank_metrics.matrix_h2d_ms +=
+        run.matrix_h2d_ms;
+      legacy_dcov_native_cuda_lowrank_metrics.matrix_h2d_ms_during_compute +=
+        run.matrix_h2d_ms_during_compute;
+      const double previous_matrix_h2d_ms_during_compute_max =
+        legacy_dcov_native_cuda_lowrank_metrics.matrix_h2d_ms_during_compute_max;
+      legacy_dcov_native_cuda_lowrank_metrics.matrix_h2d_ms_during_compute_max =
+        std::max(
+          previous_matrix_h2d_ms_during_compute_max,
+          run.matrix_h2d_ms_during_compute);
+      legacy_dcov_native_cuda_lowrank_metrics.workspace_alloc_ms +=
+        run.workspace_alloc_ms;
+      legacy_dcov_native_cuda_lowrank_metrics.h2d_ms += run.h2d_ms;
+      legacy_dcov_native_cuda_lowrank_metrics.kernel_ms += run.kernel_ms;
+      legacy_dcov_native_cuda_lowrank_metrics.d2h_ms += run.d2h_ms;
+
+      legacy_lowrank_timings.eig_ms += run.eig_ms;
+      legacy_lowrank_timings.spectra_count += 2;
+      if (run.converged_x) legacy_lowrank_timings.spectra_converged_count += 1;
+      if (run.converged_y) legacy_lowrank_timings.spectra_converged_count += 1;
+      if (!run.converged_x) legacy_lowrank_timings.spectra_failed_count += 1;
+      if (!run.converged_y) legacy_lowrank_timings.spectra_failed_count += 1;
+      legacy_lowrank_timings.spectra_iterations +=
+        run.iterations_x + run.iterations_y;
+      legacy_lowrank_timings.spectra_nconv += run.nconv_x + run.nconv_y;
+      legacy_lowrank_timings.spectra_ncv = std::max(
+        legacy_lowrank_timings.spectra_ncv,
+        legacy_dcov_native_cuda_lowrank_ncv);
+      legacy_lowrank_timings.spectra_tol = std::max(
+        legacy_lowrank_timings.spectra_tol,
+        legacy_dcov_native_cuda_lowrank_tol);
+      legacy_lowrank_timings.spectra_matvec_count +=
+        run.spectra_matvec_count;
+      legacy_lowrank_timings.spectra_matvec_ms += run.spectra_matvec_ms;
+      legacy_lowrank_mode = fastkpc::LegacyDcovLowrankMode::Spectra;
+    };
 
   for (int level = 0; level <= max_conditioning_size; ++level) {
     const std::chrono::steady_clock::time_point level_start =
@@ -5341,17 +5449,60 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
 
         const std::chrono::steady_clock::time_point batch_call_start =
           std::chrono::steady_clock::now();
-        Rcpp::List batch_result =
-          fastkpc::legacy_dcov_gamma_cpp_compute_batch_ptrs(
-            x_columns, y_columns, n, num_col, index);
-        const double call_ms = elapsed_ms_since(batch_call_start);
-        level_dcov_call_ms += call_ms;
-        Rcpp::NumericVector batch_p_values = batch_result["p.value"];
-        for (int i = 0; i < batch_size; ++i) {
-          batch_pvalues[i] = batch_p_values[i];
+        if (legacy_dcov_native_cuda_lowrank_metrics.enabled) {
+          double pair_total_ms = 0.0;
+          double eig_ms = 0.0;
+          try {
+            for (int i = 0; i < batch_size; ++i) {
+              const LegacyDcovCudaLowrankGammaRun run =
+                legacy_dcov_cuda_lowrank_gamma_compute(
+                  x_columns[static_cast<std::size_t>(i)],
+                  y_columns[static_cast<std::size_t>(i)],
+                  n,
+                  num_col,
+                  index,
+                  legacy_dcov_native_cuda_lowrank_ncv,
+                  legacy_dcov_native_cuda_lowrank_tol,
+                  legacy_dcov_native_cuda_lowrank_maxitr);
+              batch_pvalues[i] = run.p_value;
+              pair_total_ms += run.total_ms;
+              eig_ms += run.eig_ms;
+              accumulate_native_cuda_lowrank_run(run);
+            }
+          } catch (...) {
+            legacy_dcov_native_cuda_lowrank_metrics.error_count += 1;
+            throw;
+          }
+          const double call_ms = elapsed_ms_since(batch_call_start);
+          level_dcov_call_ms += call_ms;
+          legacy_dcov_native_count += batch_size;
+          legacy_dcov_native_ms += pair_total_ms;
+          legacy_dcov_native_batch_count += 1;
+          legacy_dcov_native_batch_pair_count += batch_size;
+          legacy_dcov_native_batch_ms += call_ms;
+          legacy_dcov_native_batch_lowrank_ms += eig_ms;
+          legacy_dcov_native_batch_lowrank_eig_ms += eig_ms;
+          legacy_dcov_native_batch_scalar_total_ms += pair_total_ms;
+          legacy_dcov_native_batch_accounted_ms += eig_ms;
+          legacy_dcov_native_batch_wrapper_overhead_ms +=
+            std::max(0.0, call_ms - pair_total_ms);
+          legacy_dcov_native_batch_overhead_ms +=
+            std::max(0.0, call_ms - eig_ms);
+          legacy_dcov_native_batch_materialize_ms += materialize_ms;
+          legacy_dcov_native_batch_call_ms += call_ms;
+        } else {
+          Rcpp::List batch_result =
+            fastkpc::legacy_dcov_gamma_cpp_compute_batch_ptrs(
+              x_columns, y_columns, n, num_col, index);
+          const double call_ms = elapsed_ms_since(batch_call_start);
+          level_dcov_call_ms += call_ms;
+          Rcpp::NumericVector batch_p_values = batch_result["p.value"];
+          for (int i = 0; i < batch_size; ++i) {
+            batch_pvalues[i] = batch_p_values[i];
+          }
+          Rcpp::List batch_diag = batch_result["diagnostics"];
+          accumulate_batch_diag(batch_diag, batch_size, materialize_ms, call_ms);
         }
-        Rcpp::List batch_diag = batch_result["diagnostics"];
-        accumulate_batch_diag(batch_diag, batch_size, materialize_ms, call_ms);
         return batch_pvalues;
       };
 
@@ -5462,39 +5613,65 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_dcov_native_scalar_materialize_ms += materialize_ms;
         const std::chrono::steady_clock::time_point scalar_call_start =
           std::chrono::steady_clock::now();
-        const fastkpc::LegacyDcovGammaCppResult result =
-          fastkpc::legacy_dcov_gamma_cpp_compute(x_vec, y_vec, num_col, index);
-        const double scalar_call_ms = elapsed_ms_since(scalar_call_start);
-        level_dcov_call_ms += scalar_call_ms;
-        legacy_dcov_native_scalar_call_ms += scalar_call_ms;
-        pvalues[i] = result.p_value;
-        ++legacy_dcov_native_count;
-        legacy_dcov_native_ms += result.total_ms;
-        legacy_lowrank_timings.full_eig_count +=
-          result.lowrank_timings.full_eig_count;
-        legacy_lowrank_timings.spectra_count +=
-          result.lowrank_timings.spectra_count;
-        legacy_lowrank_timings.spectra_converged_count +=
-          result.lowrank_timings.spectra_converged_count;
-        legacy_lowrank_timings.spectra_failed_count +=
-          result.lowrank_timings.spectra_failed_count;
-        legacy_lowrank_timings.spectra_fallback_full_eig_count +=
-          result.lowrank_timings.spectra_fallback_full_eig_count;
-        legacy_lowrank_timings.spectra_iterations +=
-          result.lowrank_timings.spectra_iterations;
-        legacy_lowrank_timings.spectra_nconv +=
-          result.lowrank_timings.spectra_nconv;
-        legacy_lowrank_timings.spectra_ncv = std::max(
-          legacy_lowrank_timings.spectra_ncv,
-          result.lowrank_timings.spectra_ncv);
-        legacy_lowrank_timings.spectra_tol = std::max(
-          legacy_lowrank_timings.spectra_tol,
-          result.lowrank_timings.spectra_tol);
-        legacy_lowrank_timings.spectra_matvec_count +=
-          result.lowrank_timings.spectra_matvec_count;
-        legacy_lowrank_timings.spectra_matvec_ms +=
-          result.lowrank_timings.spectra_matvec_ms;
-        legacy_lowrank_mode = result.lowrank_mode;
+        if (legacy_dcov_native_cuda_lowrank_metrics.enabled) {
+          try {
+            const LegacyDcovCudaLowrankGammaRun run =
+              legacy_dcov_cuda_lowrank_gamma_compute(
+                REAL(x_vec),
+                REAL(y_vec),
+                n,
+                num_col,
+                index,
+                legacy_dcov_native_cuda_lowrank_ncv,
+                legacy_dcov_native_cuda_lowrank_tol,
+                legacy_dcov_native_cuda_lowrank_maxitr);
+            const double scalar_call_ms = elapsed_ms_since(scalar_call_start);
+            level_dcov_call_ms += scalar_call_ms;
+            legacy_dcov_native_scalar_call_ms += scalar_call_ms;
+            pvalues[i] = run.p_value;
+            ++legacy_dcov_native_count;
+            legacy_dcov_native_ms += run.total_ms;
+            accumulate_native_cuda_lowrank_run(run);
+          } catch (...) {
+            legacy_dcov_native_cuda_lowrank_metrics.error_count += 1;
+            throw;
+          }
+        } else {
+          const fastkpc::LegacyDcovGammaCppResult result =
+            fastkpc::legacy_dcov_gamma_cpp_compute(x_vec, y_vec, num_col,
+                                                   index);
+          const double scalar_call_ms = elapsed_ms_since(scalar_call_start);
+          level_dcov_call_ms += scalar_call_ms;
+          legacy_dcov_native_scalar_call_ms += scalar_call_ms;
+          pvalues[i] = result.p_value;
+          ++legacy_dcov_native_count;
+          legacy_dcov_native_ms += result.total_ms;
+          legacy_lowrank_timings.full_eig_count +=
+            result.lowrank_timings.full_eig_count;
+          legacy_lowrank_timings.spectra_count +=
+            result.lowrank_timings.spectra_count;
+          legacy_lowrank_timings.spectra_converged_count +=
+            result.lowrank_timings.spectra_converged_count;
+          legacy_lowrank_timings.spectra_failed_count +=
+            result.lowrank_timings.spectra_failed_count;
+          legacy_lowrank_timings.spectra_fallback_full_eig_count +=
+            result.lowrank_timings.spectra_fallback_full_eig_count;
+          legacy_lowrank_timings.spectra_iterations +=
+            result.lowrank_timings.spectra_iterations;
+          legacy_lowrank_timings.spectra_nconv +=
+            result.lowrank_timings.spectra_nconv;
+          legacy_lowrank_timings.spectra_ncv = std::max(
+            legacy_lowrank_timings.spectra_ncv,
+            result.lowrank_timings.spectra_ncv);
+          legacy_lowrank_timings.spectra_tol = std::max(
+            legacy_lowrank_timings.spectra_tol,
+            result.lowrank_timings.spectra_tol);
+          legacy_lowrank_timings.spectra_matvec_count +=
+            result.lowrank_timings.spectra_matvec_count;
+          legacy_lowrank_timings.spectra_matvec_ms +=
+            result.lowrank_timings.spectra_matvec_ms;
+          legacy_lowrank_mode = result.lowrank_mode;
+        }
       }
     }
 
@@ -5696,7 +5873,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_dcov_native_scalar_call_ms,
       Rcpp::Named("legacy_dcov_native_numCol") = num_col,
       Rcpp::Named("legacy_dcov_native_lowrank_mode") =
-        std::string(fastkpc::legacy_dcov_lowrank_mode_name(legacy_lowrank_mode)),
+        legacy_dcov_native_cuda_lowrank_metrics.enabled
+          ? std::string("cuda_spectra")
+          : std::string(fastkpc::legacy_dcov_lowrank_mode_name(
+              legacy_lowrank_mode)),
       Rcpp::Named("legacy_dcov_native_lowrank_full_eig_count") =
         legacy_lowrank_timings.full_eig_count,
       Rcpp::Named("legacy_dcov_native_lowrank_spectra_count") =
@@ -5719,6 +5899,48 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_lowrank_timings.spectra_matvec_count,
       Rcpp::Named("legacy_dcov_native_lowrank_spectra_matvec_ms") =
         legacy_lowrank_timings.spectra_matvec_ms,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_enabled") =
+        legacy_dcov_native_cuda_lowrank_metrics.enabled,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_ms") =
+        legacy_dcov_native_cuda_lowrank_metrics.ms,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_error_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.error_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_fallback_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.fallback_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_converged_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.converged_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.spectra_matvec_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms") =
+        legacy_dcov_native_cuda_lowrank_metrics.spectra_matvec_ms,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_kernel_launch_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.kernel_launch_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_device_matrix_reuse_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.device_matrix_reuse_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_device_workspace_reuse_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.device_workspace_reuse_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_workspace_realloc_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.workspace_realloc_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_matrix_bytes") =
+        legacy_dcov_native_cuda_lowrank_metrics.matrix_bytes,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_workspace_bytes") =
+        legacy_dcov_native_cuda_lowrank_metrics.workspace_bytes,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms") =
+        legacy_dcov_native_cuda_lowrank_metrics.matrix_h2d_ms,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute") =
+        legacy_dcov_native_cuda_lowrank_metrics.matrix_h2d_ms_during_compute,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max") =
+        legacy_dcov_native_cuda_lowrank_metrics.matrix_h2d_ms_during_compute_max,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_workspace_alloc_ms") =
+        legacy_dcov_native_cuda_lowrank_metrics.workspace_alloc_ms,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_h2d_ms") =
+        legacy_dcov_native_cuda_lowrank_metrics.h2d_ms,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_kernel_ms") =
+        legacy_dcov_native_cuda_lowrank_metrics.kernel_ms,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_d2h_ms") =
+        legacy_dcov_native_cuda_lowrank_metrics.d2h_ms,
       Rcpp::Named("legacy_dcov_native_batch_enabled") =
         legacy_dcov_native_batch_enabled,
       Rcpp::Named("legacy_dcov_native_batch_mode") =

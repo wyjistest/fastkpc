@@ -351,6 +351,27 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     legacy_dcov_native_lowrank_spectra_tol = NA_real_,
     legacy_dcov_native_lowrank_spectra_matvec_count = NA_integer_,
     legacy_dcov_native_lowrank_spectra_matvec_ms = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_enabled = NA,
+    legacy_dcov_native_cuda_lowrank_backend_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_backend_ms = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_error_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_backend_fallback_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_backend_converged_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_kernel_launch_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_backend_device_matrix_reuse_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_backend_device_workspace_reuse_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_backend_workspace_realloc_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_backend_matrix_bytes = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_workspace_bytes = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_workspace_alloc_ms = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_h2d_ms = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_kernel_ms = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_d2h_ms = NA_real_,
     legacy_dcov_native_batch_statistic_ms = NA_real_,
     legacy_dcov_native_batch_moment_ms = NA_real_,
     legacy_dcov_native_batch_pgamma_ms = NA_real_,
@@ -405,7 +426,7 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     stop("low_rank must be a single character value", call. = FALSE)
   }
   supported_low_rank <- c("", "full_eig", "spectra", "selected",
-                          "selected_eigs")
+                          "selected_eigs", "cuda_spectra")
   if (!(low_rank %in% supported_low_rank)) {
     stop(
       "unsupported low_rank for native compatible CUDA skeleton artifact: ",
@@ -861,6 +882,68 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
                    NA_integer_),
     legacy_dcov_native_lowrank_spectra_matvec_ms =
       as.numeric(facade_summary$legacy_dcov_native_lowrank_spectra_matvec_ms %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_enabled =
+      isTRUE(facade_summary$legacy_dcov_native_cuda_lowrank_backend_enabled),
+    legacy_dcov_native_cuda_lowrank_backend_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_backend_ms =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_ms %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_error_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_error_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_backend_fallback_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_fallback_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_backend_converged_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_converged_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_kernel_launch_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_kernel_launch_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_backend_device_matrix_reuse_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_device_matrix_reuse_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_backend_device_workspace_reuse_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_device_workspace_reuse_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_backend_workspace_realloc_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_workspace_realloc_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_backend_matrix_bytes =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_matrix_bytes %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_workspace_bytes =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_workspace_bytes %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_workspace_alloc_ms =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_workspace_alloc_ms %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_h2d_ms =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_h2d_ms %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_kernel_ms =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_kernel_ms %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_d2h_ms =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_d2h_ms %||%
                    NA_real_),
     legacy_dcov_native_batch_statistic_ms =
       as.numeric(facade_summary$legacy_dcov_native_batch_statistic_ms %||%
