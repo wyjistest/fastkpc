@@ -6592,6 +6592,37 @@ decision:
   than treating the legacy R-worker backend as a promotion candidate.
 ```
 
+Native one-call lowrank route-integrity guard:
+
+```text
+scope:
+  fastkpc_run_compatible_cuda_skeleton_artifact()
+
+finding:
+  the native one-call dCov path currently reads
+    FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK
+  through the CPU C++ legacy dCov lowrank enum, which supports only:
+    full_eig
+    spectra / selected / selected_eigs
+
+  It does not yet support cuda_spectra. Passing low_rank="cuda_spectra" to the
+  native one-call artifact would otherwise silently fall through to full_eig in
+  the C++ lowrank parser.
+
+change:
+  validate low_rank in the native compatible CUDA skeleton artifact runner and
+  fail closed for unsupported values such as cuda_spectra.
+
+gate:
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+decision:
+  This is a route-integrity guard, not CUDA acceleration. Native one-call
+  cuda_spectra remains unimplemented until the native dCov batch path has a
+  real CUDA lowrank mode and diagnostics. Future artifacts must not claim
+  native cuda_spectra by only setting low_rank="cuda_spectra".
+```
+
 ---
 
 ## 9. Final success definition

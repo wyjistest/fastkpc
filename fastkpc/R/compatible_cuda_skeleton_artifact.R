@@ -400,6 +400,22 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     expected_n_edgetests = NULL,
     candidate_timeout_sec = NULL) {
   mgcv_residual_backend <- match.arg(mgcv_residual_backend)
+  low_rank <- as.character(low_rank %||% "")
+  if (length(low_rank) != 1L || is.na(low_rank)) {
+    stop("low_rank must be a single character value", call. = FALSE)
+  }
+  supported_low_rank <- c("", "full_eig", "spectra", "selected",
+                          "selected_eigs")
+  if (!(low_rank %in% supported_low_rank)) {
+    stop(
+      "unsupported low_rank for native compatible CUDA skeleton artifact: ",
+      low_rank,
+      ". Supported values are: ",
+      paste(supported_low_rank[nzchar(supported_low_rank)], collapse = ", "),
+      " or empty string to unset the lowrank env.",
+      call. = FALSE
+    )
+  }
   if (fastkpc_compatible_cuda_timeout_enabled(candidate_timeout_sec)) {
     candidate_timeout_sec <- as.numeric(candidate_timeout_sec[[1L]])
     if (!is.finite(candidate_timeout_sec) || candidate_timeout_sec < 0) {

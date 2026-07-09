@@ -67,6 +67,25 @@ data <- cbind(
   x6 = z1 * z2 + stats::rnorm(n, sd = 0.1)
 )
 
+invalid_lowrank <- tryCatch(
+  {
+    fastkpc_run_compatible_cuda_skeleton_artifact(
+      data = data,
+      output_dir = tempfile("compatible-cuda-skeleton-invalid-lowrank-"),
+      artifact_name = "compatible_cuda_skeleton_invalid_lowrank_test",
+      alpha = 0.08,
+      max_conditioning_size = 1L,
+      low_rank = "cuda_spectra"
+    )
+    NULL
+  },
+  error = function(e) e
+)
+assert_true(inherits(invalid_lowrank, "error"),
+            "artifact should reject unsupported native dCov lowrank modes")
+assert_true(grepl("low_rank", conditionMessage(invalid_lowrank), fixed = TRUE),
+            "unsupported lowrank error should name low_rank")
+
 timeout_ref_path <- tempfile("compatible-cuda-skeleton-timeout-reference-",
                              fileext = ".rds")
 timeout_reference <- list(
