@@ -6508,6 +6508,90 @@ decision:
   totals, and full wall-time remain unproven.
 ```
 
+CUDA Spectra lowrank corrected full wall-time gate:
+
+```text
+artifact:
+  fastkpc/artifacts/
+    legacy_dcov_cuda_lowrank_backend_full_current_process_900s_v1
+
+runner:
+  fastkpc_run_legacy_dcov_cuda_lowrank_backend_full_artifact()
+  candidate_timeout_sec = 900
+  candidate_timeout_subprocess = FALSE
+
+result:
+  run_status = timeout
+  timeout = TRUE
+  timeout_sec = 900
+  elapsed_sec = 900.069
+  n / p = 351 / 48
+  reference edge_count = 110
+  candidate edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+
+legacy progress:
+  level 0:
+    complete elapsed_sec = 18.146
+    duration_sec = 18.124
+    n_edgetests = 2213
+    remaining_edges = 1085
+
+  level 1:
+    complete elapsed_sec = 117.568
+    duration_sec = 99.420
+    n_edgetests = 52659
+    remaining_edges = 539
+
+  level 2:
+    complete elapsed_sec = 524.244
+    duration_sec = 406.675
+    n_edgetests = 125293
+    remaining_edges = 193
+
+  level 3:
+    complete elapsed_sec = 740.855
+    duration_sec = 216.609
+    n_edgetests = 40694
+    remaining_edges = 130
+
+  level 4:
+    complete elapsed_sec = 841.033
+    duration_sec = 100.176
+    n_edgetests = 13293
+    remaining_edges = 114
+
+  level 5:
+    start elapsed_sec = 841.034
+    20 chunk_start rows
+    10 chunk_complete rows before timeout
+    no level_complete before timeout
+
+diagnostic counters:
+  chunk_start rows = 100
+  chunk_complete rows = 90
+  edge_complete rows = 2053
+  level_complete rows = 5
+
+decision:
+  This is the corrected wall-time gate for the legacy R-worker cuda_spectra
+  backend path. It preserves internal 20-worker parallelism and therefore
+  replaces the earlier subprocess/nested-fork timeout as performance evidence.
+
+  The route still cannot be promoted. It fails to return a full 351x48 skeleton
+  inside 900 seconds, while the current recommended S-affinity route is in the
+  same wall-time range and the native threaded round dCov candidate is faster.
+  Since no candidate skeleton was returned, full-route SHD, n.edgetests
+  exactness, and CUDA lowrank backend error/fallback totals remain unproven.
+
+  The largest completed critical-path costs are level 2 and level 3. Continuing
+  to run cuda_spectra through the legacy R worker backend is not the shortest
+  path to the final goal. Future CUDA lowrank work should move the data-plane
+  boundary toward the native one-call skeleton / persistent worker path rather
+  than treating the legacy R-worker backend as a promotion candidate.
+```
+
 ---
 
 ## 9. Final success definition
