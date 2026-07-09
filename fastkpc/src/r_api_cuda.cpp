@@ -29,6 +29,7 @@
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 #ifdef _WIN32
 #include <process.h>
 #else
@@ -3872,6 +3873,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   int legacy_dcov_native_batch_lowrank_eig_workspace_reuse_count = 0;
   int legacy_dcov_native_batch_oracle_column_copy_count = 0;
   int legacy_dcov_native_batch_column_materialize_count = 0;
+  bool legacy_dcov_native_batch_direct_input_enabled = false;
   double legacy_dcov_native_batch_ms = 0.0;
   double legacy_dcov_native_batch_materialize_ms = 0.0;
   double legacy_dcov_native_batch_call_ms = 0.0;
@@ -4009,10 +4011,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
     int ignored_after_delete = 0;
     int deletions = 0;
 
-    auto copy_task_to_batch = [&](const LayerCiTask& task,
-                                  int batch_col,
-                                  Rcpp::NumericMatrix& x_batch,
-                                  Rcpp::NumericMatrix& y_batch) {
+    auto task_input_pointers = [&](const LayerCiTask& task) {
       const double* x_ptr = nullptr;
       const double* y_ptr = nullptr;
       if (task.conditioning_set.empty()) {
@@ -4028,10 +4027,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         x_ptr = residual_columns[request_by_key[x_key]].data();
         y_ptr = residual_columns[request_by_key[y_key]].data();
       }
-      for (int row = 0; row < n; ++row) {
-        x_batch(row, batch_col) = x_ptr[row];
-        y_batch(row, batch_col) = y_ptr[row];
-      }
+      return std::make_pair(x_ptr, y_ptr);
     };
 
     auto accumulate_batch_diag = [&](const Rcpp::List& batch_diag,
@@ -4065,7 +4061,6 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         list_integer_value(batch_diag, "lowrank_eig_workspace_reuse_count");
       legacy_dcov_native_batch_oracle_column_copy_count +=
         list_integer_value(batch_diag, "column_copy_count");
-      legacy_dcov_native_batch_column_materialize_count += 2 * pair_count;
       legacy_lowrank_timings.full_eig_count +=
         list_integer_value(batch_diag, "lowrank_full_eig_count");
       legacy_lowrank_timings.spectra_count +=
@@ -4101,20 +4096,25 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
 
         const std::chrono::steady_clock::time_point materialize_start =
           std::chrono::steady_clock::now();
-        Rcpp::NumericMatrix x_batch(n, batch_size);
-        Rcpp::NumericMatrix y_batch(n, batch_size);
+        std::vector<const double*> x_columns(
+          static_cast<std::size_t>(batch_size));
+        std::vector<const double*> y_columns(
+          static_cast<std::size_t>(batch_size));
         for (int batch_col = 0; batch_col < batch_size; ++batch_col) {
-          copy_task_to_batch(plan.tasks[task_indices[batch_col]],
-                             batch_col, x_batch, y_batch);
+          const std::pair<const double*, const double*> inputs =
+            task_input_pointers(plan.tasks[task_indices[batch_col]]);
+          x_columns[static_cast<std::size_t>(batch_col)] = inputs.first;
+          y_columns[static_cast<std::size_t>(batch_col)] = inputs.second;
         }
         const double materialize_ms = elapsed_ms_since(materialize_start);
         level_dcov_materialize_ms += materialize_ms;
+        legacy_dcov_native_batch_direct_input_enabled = true;
 
         const std::chrono::steady_clock::time_point batch_call_start =
           std::chrono::steady_clock::now();
         Rcpp::List batch_result =
-          fastkpc::legacy_dcov_gamma_cpp_compute_batch(
-            x_batch, y_batch, num_col, index);
+          fastkpc::legacy_dcov_gamma_cpp_compute_batch_ptrs(
+            x_columns, y_columns, n, num_col, index);
         const double call_ms = elapsed_ms_since(batch_call_start);
         level_dcov_call_ms += call_ms;
         Rcpp::NumericVector batch_p_values = batch_result["p.value"];
@@ -4505,6 +4505,8 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_dcov_native_batch_lowrank_eig_workspace_reuse_count,
       Rcpp::Named("legacy_dcov_native_batch_oracle_column_copy_count") =
         legacy_dcov_native_batch_oracle_column_copy_count,
+      Rcpp::Named("legacy_dcov_native_batch_direct_input_enabled") =
+        legacy_dcov_native_batch_direct_input_enabled,
       Rcpp::Named("legacy_dcov_native_batch_column_materialize_count") =
         legacy_dcov_native_batch_column_materialize_count,
       Rcpp::Named("residual_provider_level_count") =

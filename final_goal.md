@@ -4632,6 +4632,7 @@ Current dCov batch substrate status:
 
 ```text
 fastkpc_legacy_dcov_gamma_cpp_oracle_batch() exists
+legacy_dcov_gamma_cpp_compute_batch_ptrs() exists for native pointer batches
 FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=chunk exists
 FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=round exists
 FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE=<int> exists
@@ -4645,6 +4646,20 @@ per-column Rcpp vector copies while preserving the scalar C++ dCov authority
 for each pair. It still is not a promoted skeleton backend batch route: the
 full chunk/round skeleton batch modes remain experimental until they show a
 full 351x48 wall-time win.
+
+The native one-call residual-provider legacy dCov path now also calls the same
+batch kernel through a pointer-vector API. Level/canonical/round native batch
+modes collect pointers to existing data or residual-provider columns and avoid
+building per-batch host `x` / `y` matrices before invoking the C++ dCov batch.
+The native summary records:
+
+```text
+legacy_dcov_native_batch_direct_input_enabled
+legacy_dcov_native_batch_column_materialize_count
+```
+
+For direct-input native batches, `legacy_dcov_native_batch_column_materialize_count`
+is expected to be zero.
 
 It reports:
 
@@ -5122,6 +5137,35 @@ decision:
   route. Correctness is not evaluable on full 351x48 because the candidate
   timed out, and the partial progress shows provider setup/extraction still
   dominates before the route reaches the level 2 dCov phase.
+```
+
+Native dCov direct-input batch checkpoint:
+
+```text
+scope:
+  native one-call residual-provider legacy dCov path
+  dcov_batch = level / canonical / round
+
+change:
+  native batch modes pass pointers to existing data or residual-provider
+  columns into the C++ legacy dCov batch kernel
+  per-batch host x/y matrix materialization is removed from the native path
+
+summary:
+  legacy_dcov_native_batch_direct_input_enabled = TRUE for native batches
+  legacy_dcov_native_batch_column_materialize_count = 0
+
+targeted gate:
+  Rscript fastkpc/tests/test_skeleton_native_residual_provider_legacy_dcov.R
+  Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_batch_oracle.R
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+status:
+  implemented as a native data-plane cleanup. It preserves the existing scalar
+  C++ legacy dCov authority, native batch replay semantics, residual authority,
+  and env gates. A new full 351x48 artifact is still required before claiming
+  wall-time improvement over the current threaded round checkpoint.
 ```
 
 ---

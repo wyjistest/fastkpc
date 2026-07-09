@@ -465,16 +465,26 @@ Rcpp::List legacy_dcov_gamma_cpp_result_to_list(
   );
 }
 
-Rcpp::List legacy_dcov_gamma_cpp_compute_batch(Rcpp::NumericMatrix x,
-                                               Rcpp::NumericMatrix y,
-                                               int numCol,
-                                               double index) {
+Rcpp::List legacy_dcov_gamma_cpp_compute_batch_ptrs(
+    const std::vector<const double*>& x_columns,
+    const std::vector<const double*>& y_columns,
+    int n,
+    int numCol,
+    double index) {
   const auto total_start = std::chrono::steady_clock::now();
-  if (x.nrow() != y.nrow() || x.ncol() != y.ncol()) {
-    Rcpp::stop("x and y must have matching dimensions");
+  if (n <= 0) {
+    Rcpp::stop("n must be positive");
   }
-  const int n = x.nrow();
-  const int batch = x.ncol();
+  if (x_columns.size() != y_columns.size()) {
+    Rcpp::stop("x and y column pointer batches must have matching lengths");
+  }
+  const int batch = static_cast<int>(x_columns.size());
+  for (int col = 0; col < batch; ++col) {
+    if (x_columns[static_cast<std::size_t>(col)] == nullptr ||
+        y_columns[static_cast<std::size_t>(col)] == nullptr) {
+      Rcpp::stop("x and y column pointer batches must not contain nulls");
+    }
+  }
   Rcpp::NumericVector p_values(batch);
   Rcpp::NumericVector nV2_values(batch);
   Rcpp::NumericVector mean_values(batch);
@@ -510,9 +520,9 @@ Rcpp::List legacy_dcov_gamma_cpp_compute_batch(Rcpp::NumericMatrix x,
         }
         try {
           const double* x_col =
-            x.begin() + static_cast<std::ptrdiff_t>(col) * n;
+            x_columns[static_cast<std::size_t>(col)];
           const double* y_col =
-            y.begin() + static_cast<std::ptrdiff_t>(col) * n;
+            y_columns[static_cast<std::size_t>(col)];
           results[static_cast<std::size_t>(col)] =
             legacy_dcov_gamma_cpp_compute_workspace(
               x_col, y_col, n, numCol, index,
@@ -540,8 +550,8 @@ Rcpp::List legacy_dcov_gamma_cpp_compute_batch(Rcpp::NumericMatrix x,
     if (!first_error.empty()) Rcpp::stop(first_error);
   } else {
     for (int col = 0; col < batch; ++col) {
-      const double* x_col = x.begin() + static_cast<std::ptrdiff_t>(col) * n;
-      const double* y_col = y.begin() + static_cast<std::ptrdiff_t>(col) * n;
+      const double* x_col = x_columns[static_cast<std::size_t>(col)];
+      const double* y_col = y_columns[static_cast<std::size_t>(col)];
       results[static_cast<std::size_t>(col)] =
         legacy_dcov_gamma_cpp_compute_workspace(
           x_col, y_col, n, numCol, index, &workspaces[0]);
@@ -666,6 +676,27 @@ Rcpp::List legacy_dcov_gamma_cpp_compute_batch(Rcpp::NumericMatrix x,
       Rcpp::Named("total_ms") = total_ms
     )
   );
+}
+
+Rcpp::List legacy_dcov_gamma_cpp_compute_batch(Rcpp::NumericMatrix x,
+                                               Rcpp::NumericMatrix y,
+                                               int numCol,
+                                               double index) {
+  if (x.nrow() != y.nrow() || x.ncol() != y.ncol()) {
+    Rcpp::stop("x and y must have matching dimensions");
+  }
+  const int n = x.nrow();
+  const int batch = x.ncol();
+  std::vector<const double*> x_columns(static_cast<std::size_t>(batch));
+  std::vector<const double*> y_columns(static_cast<std::size_t>(batch));
+  for (int col = 0; col < batch; ++col) {
+    x_columns[static_cast<std::size_t>(col)] =
+      x.begin() + static_cast<std::ptrdiff_t>(col) * n;
+    y_columns[static_cast<std::size_t>(col)] =
+      y.begin() + static_cast<std::ptrdiff_t>(col) * n;
+  }
+  return legacy_dcov_gamma_cpp_compute_batch_ptrs(
+    x_columns, y_columns, n, numCol, index);
 }
 
 }  // namespace fastkpc

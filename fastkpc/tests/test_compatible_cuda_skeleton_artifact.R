@@ -171,6 +171,7 @@ required <- c(
   "legacy_dcov_native_batch_pair_count",
   "legacy_dcov_native_batch_parallel_enabled",
   "legacy_dcov_native_batch_parallel_threads",
+  "legacy_dcov_native_batch_direct_input_enabled",
   "legacy_dcov_native_batch_column_materialize_count",
   "legacy_dcov_native_batch_materialize_ms",
   "legacy_dcov_native_batch_call_ms",
@@ -252,6 +253,11 @@ assert_true(identical(as.integer(summary$residual_provider_parallel_cores[[1L]])
             "artifact default route should record zero parallel provider cores")
 assert_true(summary$legacy_dcov_native_count[[1L]] > 0L,
             "artifact should exercise native legacy dCov tasks")
+assert_true(isTRUE(summary$legacy_dcov_native_batch_direct_input_enabled[[1L]]),
+            "artifact should report direct native dCov batch inputs")
+assert_true(identical(as.integer(summary$legacy_dcov_native_batch_column_materialize_count[[1L]]),
+                      0L),
+            "artifact should report zero native dCov host matrix materialization")
 assert_true(summary$legacy_dcov_native_batch_materialize_ms[[1L]] >= 0,
             "artifact should report native dCov batch materialization timing")
 assert_true(summary$legacy_dcov_native_batch_call_ms[[1L]] >= 0,

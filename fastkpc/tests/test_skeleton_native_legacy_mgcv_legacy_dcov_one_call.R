@@ -544,15 +544,21 @@ assert_true(identical(as.integer(one_call_canonical_batch$summary$legacy_dcov_na
 assert_true(identical(as.integer(one_call_round_batch$summary$legacy_dcov_native_batch_pair_count),
                       as.integer(one_call_round_batch$summary$legacy_dcov_native_count)),
             "one-call round batch should report all computed native dCov tests as batch pairs")
+assert_true(isTRUE(one_call_batch$summary$legacy_dcov_native_batch_direct_input_enabled),
+            "one-call level-batched wrapper should use direct native dCov batch inputs")
+assert_true(isTRUE(one_call_canonical_batch$summary$legacy_dcov_native_batch_direct_input_enabled),
+            "one-call canonical-batched wrapper should use direct native dCov batch inputs")
+assert_true(isTRUE(one_call_round_batch$summary$legacy_dcov_native_batch_direct_input_enabled),
+            "one-call round-batched wrapper should use direct native dCov batch inputs")
 assert_true(identical(as.integer(one_call_batch$summary$legacy_dcov_native_batch_column_materialize_count),
-                      2L * as.integer(one_call_batch$summary$legacy_dcov_native_batch_pair_count)),
-            "one-call level-batched wrapper should report host batch matrix materialization")
+                      0L),
+            "one-call level-batched wrapper should avoid host batch matrix materialization")
 assert_true(identical(as.integer(one_call_canonical_batch$summary$legacy_dcov_native_batch_column_materialize_count),
-                      2L * as.integer(one_call_canonical_batch$summary$legacy_dcov_native_batch_pair_count)),
-            "one-call canonical-batched wrapper should report host batch matrix materialization")
+                      0L),
+            "one-call canonical-batched wrapper should avoid host batch matrix materialization")
 assert_true(identical(as.integer(one_call_round_batch$summary$legacy_dcov_native_batch_column_materialize_count),
-                      2L * as.integer(one_call_round_batch$summary$legacy_dcov_native_batch_pair_count)),
-            "one-call round-batched wrapper should report host batch matrix materialization")
+                      0L),
+            "one-call round-batched wrapper should avoid host batch matrix materialization")
 assert_true(!nzchar(Sys.getenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH", unset = "")),
             "one-call dcov_batch argument should not leak FASTKPC_NATIVE_LEGACY_DCOV_BATCH")
 

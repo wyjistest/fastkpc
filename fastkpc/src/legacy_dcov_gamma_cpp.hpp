@@ -2,6 +2,7 @@
 #define FASTKPC_LEGACY_DCOV_GAMMA_CPP_HPP
 
 #include <Rcpp.h>
+#include <vector>
 
 namespace fastkpc {
 
@@ -70,6 +71,13 @@ LegacyDcovGammaCppResult legacy_dcov_gamma_cpp_compute(
 Rcpp::List legacy_dcov_gamma_cpp_compute_batch(
     Rcpp::NumericMatrix x,
     Rcpp::NumericMatrix y,
+    int numCol,
+    double index = 1.0);
+
+Rcpp::List legacy_dcov_gamma_cpp_compute_batch_ptrs(
+    const std::vector<const double*>& x_columns,
+    const std::vector<const double*>& y_columns,
+    int n,
     int numCol,
     double index = 1.0);
 

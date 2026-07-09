@@ -276,9 +276,11 @@ assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_lowrank
 assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_oracle_column_copy_count),
                       0L),
             "native legacy dCov batch oracle should avoid per-column internal copies")
+assert_true(isTRUE(native$summary$legacy_dcov_native_batch_direct_input_enabled),
+            "native legacy dCov batch should use direct residual/data column inputs")
 assert_true(identical(as.integer(native$summary$legacy_dcov_native_batch_column_materialize_count),
-                      2L * as.integer(native$summary$legacy_dcov_native_batch_pair_count)),
-            "native legacy dCov should report C++ skeleton matrix materialization columns")
+                      0L),
+            "native legacy dCov should avoid C++ skeleton matrix materialization columns")
 assert_true(native$summary$legacy_dcov_native_batch_ms > 0,
             "native legacy dCov should report batch elapsed time")
 
