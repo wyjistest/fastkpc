@@ -133,10 +133,40 @@ assert_true(file.exists(artifact$paths$result_rds),
             "artifact runner should write result.rds")
 assert_true(file.exists(artifact$paths$summary_md),
             "artifact runner should write summary.md")
+assert_true(file.exists(artifact$paths$native_dcov_stage_csv),
+            "artifact runner should write native dCov stage timing CSV")
 assert_true(!is.null(artifact$paths$native_progress_csv),
             "artifact runner should expose native_progress.csv path")
 assert_true(file.exists(artifact$paths$native_progress_csv),
             "artifact runner should write native_progress.csv")
+native_dcov_stage <- utils::read.csv(artifact$paths$native_dcov_stage_csv,
+                                     stringsAsFactors = FALSE)
+native_dcov_stage_required <- c(
+  "artifact", "route", "batch_mode", "direct_input", "stage",
+  "elapsed_ms", "share_of_scalar_total", "share_of_batch_call"
+)
+native_dcov_stage_missing <- setdiff(native_dcov_stage_required,
+                                     names(native_dcov_stage))
+assert_true(length(native_dcov_stage_missing) == 0L,
+            paste("native dCov stage timing missing",
+                  native_dcov_stage_missing[[1L]]))
+required_native_dcov_stages <- c(
+  "materialize", "call_wall", "input", "distance", "lowrank",
+  "statistic", "moment", "pgamma", "accounted", "scalar_total",
+  "wrapper_overhead", "batch_overhead"
+)
+missing_native_dcov_stages <- setdiff(required_native_dcov_stages,
+                                      native_dcov_stage$stage)
+assert_true(length(missing_native_dcov_stages) == 0L,
+            paste("native dCov stage timing missing stage",
+                  missing_native_dcov_stages[[1L]]))
+lowrank_stage <- native_dcov_stage[native_dcov_stage$stage == "lowrank",
+                                   , drop = FALSE]
+assert_true(lowrank_stage$elapsed_ms[[1L]] > 0,
+            "native dCov stage timing should report lowrank elapsed ms")
+assert_true(is.finite(lowrank_stage$share_of_scalar_total[[1L]]) &&
+              lowrank_stage$share_of_scalar_total[[1L]] >= 0,
+            "native dCov stage timing should report lowrank worker-share")
 native_progress <- utils::read.csv(artifact$paths$native_progress_csv,
                                    stringsAsFactors = FALSE)
 native_progress_required <- c("event", "level", "task_count",

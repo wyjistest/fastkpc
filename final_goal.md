@@ -5223,6 +5223,17 @@ change:
     input / distance / lowrank / statistic / moment / pgamma
     accounted / scalar_total / wrapper_overhead / batch_overhead
 
+  compatible CUDA skeleton artifacts also write:
+    native_dcov_stage_timing.csv
+
+  The stage timing CSV is a long-form table with:
+    stage
+    elapsed_ms
+    share_of_scalar_total
+    share_of_batch_call
+    batch_mode
+    direct_input
+
 purpose:
   explain the direct-input full gate regression, where host materialization
   dropped but batch call time increased

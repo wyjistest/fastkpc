@@ -176,6 +176,60 @@ fastkpc_compatible_cuda_append_progress <- function(path, row) {
   invisible(TRUE)
 }
 
+fastkpc_compatible_cuda_share <- function(value, total) {
+  value <- as.numeric(value[[1L]])
+  total <- as.numeric(total[[1L]])
+  if (!is.finite(value) || !is.finite(total) || total <= 0) {
+    return(NA_real_)
+  }
+  value / total
+}
+
+fastkpc_compatible_cuda_native_dcov_stage_rows <- function(row) {
+  stage <- c(
+    "materialize", "call_wall", "input", "distance", "lowrank",
+    "statistic", "moment", "pgamma", "accounted", "scalar_total",
+    "wrapper_overhead", "batch_overhead"
+  )
+  elapsed_ms <- c(
+    row$legacy_dcov_native_batch_materialize_ms[[1L]],
+    row$legacy_dcov_native_batch_call_ms[[1L]],
+    row$legacy_dcov_native_batch_input_ms[[1L]],
+    row$legacy_dcov_native_batch_distance_ms[[1L]],
+    row$legacy_dcov_native_batch_lowrank_ms[[1L]],
+    row$legacy_dcov_native_batch_statistic_ms[[1L]],
+    row$legacy_dcov_native_batch_moment_ms[[1L]],
+    row$legacy_dcov_native_batch_pgamma_ms[[1L]],
+    row$legacy_dcov_native_batch_accounted_ms[[1L]],
+    row$legacy_dcov_native_batch_scalar_total_ms[[1L]],
+    row$legacy_dcov_native_batch_wrapper_overhead_ms[[1L]],
+    row$legacy_dcov_native_batch_overhead_ms[[1L]]
+  )
+  scalar_total <- row$legacy_dcov_native_batch_scalar_total_ms[[1L]]
+  batch_call <- row$legacy_dcov_native_batch_call_ms[[1L]]
+  data.frame(
+    artifact = row$artifact[[1L]],
+    route = row$route[[1L]],
+    batch_mode = row$legacy_dcov_native_batch_mode[[1L]],
+    direct_input = row$legacy_dcov_native_batch_direct_input_enabled[[1L]],
+    stage = stage,
+    elapsed_ms = as.numeric(elapsed_ms),
+    share_of_scalar_total = vapply(
+      elapsed_ms,
+      fastkpc_compatible_cuda_share,
+      numeric(1),
+      total = scalar_total
+    ),
+    share_of_batch_call = vapply(
+      elapsed_ms,
+      fastkpc_compatible_cuda_share,
+      numeric(1),
+      total = batch_call
+    ),
+    stringsAsFactors = FALSE
+  )
+}
+
 fastkpc_compatible_cuda_extract_reference <- function(result) {
   candidates <- list(
     reference = result$reference,
@@ -366,6 +420,8 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     summary_csv = file.path(output_dir, "summary.csv"),
     progress_csv = file.path(output_dir, "progress.csv"),
     native_progress_csv = file.path(output_dir, "native_progress.csv"),
+    native_dcov_stage_csv = file.path(output_dir,
+                                      "native_dcov_stage_timing.csv"),
     result_rds = file.path(output_dir, "result.rds"),
     summary_md = file.path(output_dir, "summary.md")
   )
@@ -536,6 +592,11 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
       reference_elapsed_sec = reference_timed$elapsed
     )
     utils::write.csv(row, paths$summary_csv, row.names = FALSE)
+    utils::write.csv(
+      fastkpc_compatible_cuda_native_dcov_stage_rows(row),
+      paths$native_dcov_stage_csv,
+      row.names = FALSE
+    )
     saveRDS(
       list(
         summary = row,
@@ -557,7 +618,9 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
       paste0("- elapsed sec: ", signif(row$elapsed_sec[[1L]], 8L)),
       paste0("- reference elapsed sec: ",
              signif(row$reference_elapsed_sec[[1L]], 8L)),
-      paste0("- native progress: ", paths$native_progress_csv)
+      paste0("- native progress: ", paths$native_progress_csv),
+      paste0("- native dCov stage timing: ",
+             paths$native_dcov_stage_csv)
     ), paths$summary_md)
     return(list(
       summary = row,
@@ -774,6 +837,11 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
   )
 
   utils::write.csv(row, paths$summary_csv, row.names = FALSE)
+  utils::write.csv(
+    fastkpc_compatible_cuda_native_dcov_stage_rows(row),
+    paths$native_dcov_stage_csv,
+    row.names = FALSE
+  )
   saveRDS(
     list(
       summary = row,
@@ -821,7 +889,8 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     paste0("- elapsed sec: ", signif(row$elapsed_sec[[1L]], 8L)),
     paste0("- reference elapsed sec: ",
            signif(row$reference_elapsed_sec[[1L]], 8L)),
-    paste0("- native progress: ", paths$native_progress_csv)
+    paste0("- native progress: ", paths$native_progress_csv),
+    paste0("- native dCov stage timing: ", paths$native_dcov_stage_csv)
   ), paths$summary_md)
 
   list(
