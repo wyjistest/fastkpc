@@ -121,6 +121,21 @@ utils::write.csv(
     component_unaccounted_ms = c(0.1, 0.2, 99),
     component_eig_ms = c(7, 14, 99),
     combine_ms = c(0.25, 0.75, 99),
+    spectra_matvec_count = c(11L, 19L, 99L),
+    spectra_matvec_ms = c(3.25, 5.75, 99),
+    kernel_launch_count = c(11L, 19L, 99L),
+    device_matrix_reuse_count = c(5L, 7L, 99L),
+    device_workspace_reuse_count = c(4L, 6L, 99L),
+    workspace_realloc_count = c(1L, 2L, 99L),
+    matrix_bytes = c(1024, 2048, 99),
+    workspace_bytes = c(256, 512, 99),
+    matrix_h2d_ms = c(0.1, 0.2, 99),
+    matrix_h2d_ms_during_compute = c(0, 0, 99),
+    matrix_h2d_ms_during_compute_max = c(0, 0, 99),
+    workspace_alloc_ms = c(0.03, 0.04, 99),
+    h2d_ms = c(0.4, 0.6, 99),
+    kernel_ms = c(2.5, 4.5, 99),
+    d2h_ms = c(0.35, 0.65, 99),
     elapsed_ms = c(100, 220, 999),
     stringsAsFactors = FALSE
   ),
@@ -155,6 +170,36 @@ assert_true(abs(lowrank_progress_summary$component_eig_ms - 21) < 1e-12,
             "lowrank progress summary should sum eig stage ms")
 assert_true(abs(lowrank_progress_summary$combine_ms - 1) < 1e-12,
             "lowrank progress summary should sum combine stage ms")
+assert_true(lowrank_progress_summary$spectra_matvec_count == 30L,
+            "lowrank progress summary should sum Spectra matvec count")
+assert_true(abs(lowrank_progress_summary$spectra_matvec_ms - 9) < 1e-12,
+            "lowrank progress summary should sum Spectra matvec ms")
+assert_true(lowrank_progress_summary$kernel_launch_count == 30L,
+            "lowrank progress summary should sum kernel launches")
+assert_true(lowrank_progress_summary$device_matrix_reuse_count == 12L,
+            "lowrank progress summary should sum device matrix reuse")
+assert_true(lowrank_progress_summary$device_workspace_reuse_count == 10L,
+            "lowrank progress summary should sum device workspace reuse")
+assert_true(lowrank_progress_summary$workspace_realloc_count == 3L,
+            "lowrank progress summary should sum workspace reallocations")
+assert_true(abs(lowrank_progress_summary$matrix_bytes - 3072) < 1e-12,
+            "lowrank progress summary should sum matrix bytes")
+assert_true(abs(lowrank_progress_summary$workspace_bytes - 512) < 1e-12,
+            "lowrank progress summary should keep max workspace bytes")
+assert_true(abs(lowrank_progress_summary$matrix_h2d_ms - 0.3) < 1e-12,
+            "lowrank progress summary should sum matrix H2D ms")
+assert_true(abs(lowrank_progress_summary$matrix_h2d_ms_during_compute - 0) < 1e-12,
+            "lowrank progress summary should sum in-compute matrix H2D ms")
+assert_true(abs(lowrank_progress_summary$matrix_h2d_ms_during_compute_max - 0) < 1e-12,
+            "lowrank progress summary should keep max in-compute matrix H2D ms")
+assert_true(abs(lowrank_progress_summary$workspace_alloc_ms - 0.07) < 1e-12,
+            "lowrank progress summary should sum workspace allocation ms")
+assert_true(abs(lowrank_progress_summary$h2d_ms - 1) < 1e-12,
+            "lowrank progress summary should sum RHS H2D ms")
+assert_true(abs(lowrank_progress_summary$kernel_ms - 7) < 1e-12,
+            "lowrank progress summary should sum CUDA kernel ms")
+assert_true(abs(lowrank_progress_summary$d2h_ms - 1) < 1e-12,
+            "lowrank progress summary should sum D2H ms")
 
 timeout_row_with_lowrank_progress <- fastkpc_compatible_cuda_timeout_summary_row(
   artifact_name = "compatible_cuda_skeleton_timeout_progress_test",
@@ -207,6 +252,28 @@ assert_true(
         legacy_dcov_native_cuda_lowrank_backend_combine_ms[[1L]] -
         1) < 1e-12,
   "timeout summary should include component progress combine timing"
+)
+assert_true(
+  timeout_row_with_lowrank_progress$
+    legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count[[1L]] == 30L,
+  "timeout summary should include component progress Spectra matvec count"
+)
+assert_true(
+  abs(timeout_row_with_lowrank_progress$
+        legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms[[1L]] -
+        9) < 1e-12,
+  "timeout summary should include component progress Spectra matvec timing"
+)
+assert_true(
+  timeout_row_with_lowrank_progress$
+    legacy_dcov_native_cuda_lowrank_backend_kernel_launch_count[[1L]] == 30L,
+  "timeout summary should include component progress kernel launch count"
+)
+assert_true(
+  abs(timeout_row_with_lowrank_progress$
+        legacy_dcov_native_cuda_lowrank_backend_kernel_ms[[1L]] -
+        7) < 1e-12,
+  "timeout summary should include component progress kernel timing"
 )
 saveRDS(timeout_reference, timeout_ref_path)
 timeout_dir <- tempfile("compatible-cuda-skeleton-timeout-")

@@ -8041,6 +8041,96 @@ decision:
   compatible CPU/C++ route.
 ```
 
+Native cuda_spectra timeout-visible eigensolver-internal checkpoint:
+
+```text
+change:
+  native_lowrank_component_cache_progress.csv now records CUDA lowrank
+  eigensolver internals for each completed component-cache batch:
+
+    spectra_matvec_count
+    spectra_matvec_ms
+    kernel_launch_count
+    device_matrix_reuse_count
+    device_workspace_reuse_count
+    workspace_realloc_count
+    matrix_bytes
+    workspace_bytes
+    matrix_h2d_ms
+    matrix_h2d_ms_during_compute
+    matrix_h2d_ms_during_compute_max
+    workspace_alloc_ms
+    h2d_ms
+    kernel_ms
+    d2h_ms
+
+  Timeout summary aggregation now fills the existing native CUDA lowrank backend
+  summary fields from completed progress rows:
+
+    legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count
+    legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms
+    legacy_dcov_native_cuda_lowrank_backend_kernel_launch_count
+    legacy_dcov_native_cuda_lowrank_backend_device_matrix_reuse_count
+    legacy_dcov_native_cuda_lowrank_backend_device_workspace_reuse_count
+    legacy_dcov_native_cuda_lowrank_backend_workspace_realloc_count
+    legacy_dcov_native_cuda_lowrank_backend_matrix_bytes
+    legacy_dcov_native_cuda_lowrank_backend_workspace_bytes
+    legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms
+    legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute
+    legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max
+    legacy_dcov_native_cuda_lowrank_backend_workspace_alloc_ms
+    legacy_dcov_native_cuda_lowrank_backend_h2d_ms
+    legacy_dcov_native_cuda_lowrank_backend_kernel_ms
+    legacy_dcov_native_cuda_lowrank_backend_d2h_ms
+
+TDD gate:
+  RED:
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+    failed at:
+      lowrank progress summary should sum Spectra matvec count
+
+  GREEN:
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+    result:
+      PASS compatible CUDA skeleton artifact
+
+  RED:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+    failed at:
+      native CUDA lowrank cache progress missing spectra_matvec_count
+
+  GREEN:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+    result:
+      PASS compatible CUDA skeleton native cuda_spectra lowrank
+
+regression gate:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+
+    result:
+      PASS legacy dCov CUDA lowrank gamma parity cases=6
+      max_p_diff = 4e-15
+      max_nV2_diff = 5.68e-14
+
+decision:
+  This closes another timeout observability gap for native cuda_spectra:
+  completed component-cache progress rows now explain Spectra matvec, CUDA
+  transfer, kernel, reuse, and workspace allocation costs even when the full
+  native one-call route times out before returning a final C++ summary.
+
+  This is diagnostics only. It does not change native execution, residual
+  authority, dCov authority, component-cache behavior, p-value order, canonical
+  replay, fallback policy, route selection, or the current recommended CPU/C++
+  compatible route. The final full 351x48 CUDA skeleton gate remains open.
+```
+
 ---
 
 ## 9. Final success definition

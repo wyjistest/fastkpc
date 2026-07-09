@@ -1184,6 +1184,21 @@ void append_native_cuda_lowrank_component_cache_progress(
     double component_unaccounted_ms,
     double component_eig_ms,
     double combine_ms,
+    int spectra_matvec_count,
+    double spectra_matvec_ms,
+    int kernel_launch_count,
+    int device_matrix_reuse_count,
+    int device_workspace_reuse_count,
+    int workspace_realloc_count,
+    double matrix_bytes,
+    double workspace_bytes,
+    double matrix_h2d_ms,
+    double matrix_h2d_ms_during_compute,
+    double matrix_h2d_ms_during_compute_max,
+    double workspace_alloc_ms,
+    double h2d_ms,
+    double kernel_ms,
+    double d2h_ms,
     double elapsed_ms) {
   if (path.empty()) return;
   std::ifstream probe(path.c_str());
@@ -1202,6 +1217,13 @@ void append_native_cuda_lowrank_component_cache_progress(
         << "component_total_ms,component_distance_ms,"
         << "component_lowrank_ms,component_moment_ms,"
         << "component_unaccounted_ms,component_eig_ms,combine_ms,"
+        << "spectra_matvec_count,spectra_matvec_ms,"
+        << "kernel_launch_count,device_matrix_reuse_count,"
+        << "device_workspace_reuse_count,workspace_realloc_count,"
+        << "matrix_bytes,workspace_bytes,matrix_h2d_ms,"
+        << "matrix_h2d_ms_during_compute,"
+        << "matrix_h2d_ms_during_compute_max,workspace_alloc_ms,"
+        << "h2d_ms,kernel_ms,d2h_ms,"
         << "elapsed_ms\n";
   }
   out << wall_epoch_ms_now() << ","
@@ -1226,6 +1248,21 @@ void append_native_cuda_lowrank_component_cache_progress(
       << component_unaccounted_ms << ","
       << component_eig_ms << ","
       << combine_ms << ","
+      << spectra_matvec_count << ","
+      << spectra_matvec_ms << ","
+      << kernel_launch_count << ","
+      << device_matrix_reuse_count << ","
+      << device_workspace_reuse_count << ","
+      << workspace_realloc_count << ","
+      << matrix_bytes << ","
+      << workspace_bytes << ","
+      << matrix_h2d_ms << ","
+      << matrix_h2d_ms_during_compute << ","
+      << matrix_h2d_ms_during_compute_max << ","
+      << workspace_alloc_ms << ","
+      << h2d_ms << ","
+      << kernel_ms << ","
+      << d2h_ms << ","
       << elapsed_ms << "\n";
 }
 
@@ -6340,6 +6377,21 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
                 batch_run.component_unaccounted_ms,
                 batch_run.component_eig_ms,
                 batch_run.combine_ms,
+                batch_run.spectra_matvec_count,
+                batch_run.spectra_matvec_ms,
+                batch_run.kernel_launch_count,
+                batch_run.device_matrix_reuse_count,
+                batch_run.device_workspace_reuse_count,
+                batch_run.workspace_realloc_count,
+                batch_run.matrix_bytes,
+                batch_run.workspace_bytes,
+                batch_run.matrix_h2d_ms,
+                batch_run.matrix_h2d_ms_during_compute,
+                batch_run.matrix_h2d_ms_during_compute_max,
+                batch_run.workspace_alloc_ms,
+                batch_run.h2d_ms,
+                batch_run.kernel_ms,
+                batch_run.d2h_ms,
                 elapsed_ms_since(level_start));
             } else {
               std::vector<LegacyDcovCudaLowrankGammaRun> runs(

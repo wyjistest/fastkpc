@@ -254,7 +254,22 @@ fastkpc_compatible_cuda_lowrank_progress_empty <- function() {
     component_moment_ms = NA_real_,
     component_unaccounted_ms = NA_real_,
     component_eig_ms = NA_real_,
-    combine_ms = NA_real_
+    combine_ms = NA_real_,
+    spectra_matvec_count = NA_integer_,
+    spectra_matvec_ms = NA_real_,
+    kernel_launch_count = NA_integer_,
+    device_matrix_reuse_count = NA_integer_,
+    device_workspace_reuse_count = NA_integer_,
+    workspace_realloc_count = NA_integer_,
+    matrix_bytes = NA_real_,
+    workspace_bytes = NA_real_,
+    matrix_h2d_ms = NA_real_,
+    matrix_h2d_ms_during_compute = NA_real_,
+    matrix_h2d_ms_during_compute_max = NA_real_,
+    workspace_alloc_ms = NA_real_,
+    h2d_ms = NA_real_,
+    kernel_ms = NA_real_,
+    d2h_ms = NA_real_
   )
 }
 
@@ -362,7 +377,51 @@ fastkpc_compatible_cuda_lowrank_progress_summary <- function(path) {
     component_eig_ms =
       fastkpc_compatible_cuda_progress_sum(rows, "component_eig_ms"),
     combine_ms =
-      fastkpc_compatible_cuda_progress_sum(rows, "combine_ms")
+      fastkpc_compatible_cuda_progress_sum(rows, "combine_ms"),
+    spectra_matvec_count =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "spectra_matvec_count", integer = TRUE
+      ),
+    spectra_matvec_ms =
+      fastkpc_compatible_cuda_progress_sum(rows, "spectra_matvec_ms"),
+    kernel_launch_count =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "kernel_launch_count", integer = TRUE
+      ),
+    device_matrix_reuse_count =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "device_matrix_reuse_count", integer = TRUE
+      ),
+    device_workspace_reuse_count =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "device_workspace_reuse_count", integer = TRUE
+      ),
+    workspace_realloc_count =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "workspace_realloc_count", integer = TRUE
+      ),
+    matrix_bytes =
+      fastkpc_compatible_cuda_progress_sum(rows, "matrix_bytes"),
+    workspace_bytes =
+      fastkpc_compatible_cuda_progress_max(rows, "workspace_bytes"),
+    matrix_h2d_ms =
+      fastkpc_compatible_cuda_progress_sum(rows, "matrix_h2d_ms"),
+    matrix_h2d_ms_during_compute =
+      fastkpc_compatible_cuda_progress_sum(
+        rows, "matrix_h2d_ms_during_compute"
+      ),
+    matrix_h2d_ms_during_compute_max =
+      fastkpc_compatible_cuda_progress_max(
+        rows, "matrix_h2d_ms_during_compute_max"
+      ),
+    workspace_alloc_ms =
+      fastkpc_compatible_cuda_progress_sum(rows, "workspace_alloc_ms"),
+    h2d_ms =
+      fastkpc_compatible_cuda_progress_sum(rows, "h2d_ms"),
+    kernel_ms =
+      fastkpc_compatible_cuda_progress_sum(rows, "kernel_ms"),
+    d2h_ms =
+      fastkpc_compatible_cuda_progress_sum(rows, "d2h_ms")
   )
 }
 
@@ -405,6 +464,36 @@ fastkpc_compatible_cuda_apply_lowrank_progress_summary <- function(
     summary$component_eig_ms
   row$legacy_dcov_native_cuda_lowrank_backend_combine_ms <-
     summary$combine_ms
+  row$legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count <-
+    summary$spectra_matvec_count
+  row$legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms <-
+    summary$spectra_matvec_ms
+  row$legacy_dcov_native_cuda_lowrank_backend_kernel_launch_count <-
+    summary$kernel_launch_count
+  row$legacy_dcov_native_cuda_lowrank_backend_device_matrix_reuse_count <-
+    summary$device_matrix_reuse_count
+  row$legacy_dcov_native_cuda_lowrank_backend_device_workspace_reuse_count <-
+    summary$device_workspace_reuse_count
+  row$legacy_dcov_native_cuda_lowrank_backend_workspace_realloc_count <-
+    summary$workspace_realloc_count
+  row$legacy_dcov_native_cuda_lowrank_backend_matrix_bytes <-
+    summary$matrix_bytes
+  row$legacy_dcov_native_cuda_lowrank_backend_workspace_bytes <-
+    summary$workspace_bytes
+  row$legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms <-
+    summary$matrix_h2d_ms
+  row$legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute <-
+    summary$matrix_h2d_ms_during_compute
+  row$legacy_dcov_native_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max <-
+    summary$matrix_h2d_ms_during_compute_max
+  row$legacy_dcov_native_cuda_lowrank_backend_workspace_alloc_ms <-
+    summary$workspace_alloc_ms
+  row$legacy_dcov_native_cuda_lowrank_backend_h2d_ms <-
+    summary$h2d_ms
+  row$legacy_dcov_native_cuda_lowrank_backend_kernel_ms <-
+    summary$kernel_ms
+  row$legacy_dcov_native_cuda_lowrank_backend_d2h_ms <-
+    summary$d2h_ms
   row
 }
 

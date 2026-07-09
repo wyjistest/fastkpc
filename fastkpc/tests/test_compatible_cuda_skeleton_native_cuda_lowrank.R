@@ -308,7 +308,22 @@ cache_required <- c(
   "component_distance_ms",
   "component_lowrank_ms",
   "component_moment_ms",
-  "component_unaccounted_ms"
+  "component_unaccounted_ms",
+  "spectra_matvec_count",
+  "spectra_matvec_ms",
+  "kernel_launch_count",
+  "device_matrix_reuse_count",
+  "device_workspace_reuse_count",
+  "workspace_realloc_count",
+  "matrix_bytes",
+  "workspace_bytes",
+  "matrix_h2d_ms",
+  "matrix_h2d_ms_during_compute",
+  "matrix_h2d_ms_during_compute_max",
+  "workspace_alloc_ms",
+  "h2d_ms",
+  "kernel_ms",
+  "d2h_ms"
 )
 cache_missing_fields <- setdiff(cache_required, names(cache_progress))
 assert_true(length(cache_missing_fields) == 0L,
@@ -344,5 +359,19 @@ assert_true(cache_component_stage_ms[["lowrank"]] > 0,
 assert_true(sum(cache_component_stage_ms) <=
               sum(cache_batches$component_total_ms) * 1.05,
             "native CUDA lowrank cache progress stage timings should fit within component total")
+assert_true(sum(cache_batches$spectra_matvec_count) ==
+              as.integer(summary$legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count[[1L]]),
+            "native CUDA lowrank cache progress should account Spectra matvec count")
+assert_true(abs(sum(cache_batches$spectra_matvec_ms) -
+                  as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms[[1L]])) <
+              1e-8,
+            "native CUDA lowrank cache progress should account Spectra matvec timing")
+assert_true(sum(cache_batches$kernel_launch_count) ==
+              as.integer(summary$legacy_dcov_native_cuda_lowrank_backend_kernel_launch_count[[1L]]),
+            "native CUDA lowrank cache progress should account CUDA kernel launches")
+assert_true(abs(sum(cache_batches$kernel_ms) -
+                  as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_kernel_ms[[1L]])) <
+              1e-8,
+            "native CUDA lowrank cache progress should account CUDA kernel timing")
 
 cat("PASS compatible CUDA skeleton native cuda_spectra lowrank\n")
