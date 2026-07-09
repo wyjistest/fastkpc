@@ -392,7 +392,13 @@ assert_true(identical(
 round_parallel_fields <- c(
   "legacy_dcov_cpp_batch_round_enabled",
   "legacy_dcov_cpp_batch_round_prepare_worker_count",
-  "legacy_dcov_cpp_batch_round_prepare_task_count"
+  "legacy_dcov_cpp_batch_round_prepare_task_count",
+  "legacy_dcov_cpp_batch_prepare_ms",
+  "legacy_dcov_cpp_batch_materialize_ms",
+  "legacy_dcov_cpp_batch_apply_ms",
+  "legacy_dcov_cpp_batch_round_prepare_worker_max_ms",
+  "legacy_dcov_cpp_batch_round_prepare_worker_median_ms",
+  "legacy_dcov_cpp_batch_round_prepare_worker_elapsed_imbalance"
 )
 missing_round_parallel <- setdiff(round_parallel_fields,
                                   names(round_batch_summary))
@@ -407,6 +413,19 @@ assert_true(round_batch_summary$legacy_dcov_cpp_batch_round_prepare_worker_count
 assert_true(round_batch_summary$legacy_dcov_cpp_batch_round_prepare_task_count >=
               round_batch_summary$legacy_dcov_cpp_batch_backend_pair_count,
             "round-batched dCov prepare task count should cover batched pairs")
+assert_true(round_batch_summary$legacy_dcov_cpp_batch_prepare_ms >= 0,
+            "round-batched dCov should report prepare elapsed time")
+assert_true(round_batch_summary$legacy_dcov_cpp_batch_materialize_ms >= 0,
+            "round-batched dCov should report matrix materialization time")
+assert_true(round_batch_summary$legacy_dcov_cpp_batch_apply_ms >= 0,
+            "round-batched dCov should report p-value apply time")
+assert_true(
+  round_batch_summary$legacy_dcov_cpp_batch_round_prepare_worker_max_ms >=
+    round_batch_summary$legacy_dcov_cpp_batch_round_prepare_worker_median_ms,
+  "round-batched dCov worker max should dominate median prepare elapsed time")
+assert_true(
+  round_batch_summary$legacy_dcov_cpp_batch_round_prepare_worker_elapsed_imbalance >= 0,
+  "round-batched dCov should report non-negative prepare worker imbalance")
 assert_true(identical(
   as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_min_size), 1L),
   "chunk-batched dCov should default to minimum batch size one")

@@ -140,7 +140,13 @@ required <- c(
   "legacy_dcov_cpp_batch_candidate_pair_count",
   "legacy_dcov_cpp_batch_pair_coverage_ratio",
   "legacy_dcov_cpp_batch_skipped_pair_count",
-  "legacy_dcov_cpp_batch_skipped_pair_ratio"
+  "legacy_dcov_cpp_batch_skipped_pair_ratio",
+  "legacy_dcov_cpp_batch_prepare_ms",
+  "legacy_dcov_cpp_batch_materialize_ms",
+  "legacy_dcov_cpp_batch_apply_ms",
+  "legacy_dcov_cpp_batch_round_prepare_worker_max_ms",
+  "legacy_dcov_cpp_batch_round_prepare_worker_median_ms",
+  "legacy_dcov_cpp_batch_round_prepare_worker_elapsed_imbalance"
 )
 missing_fields <- setdiff(required, names(summary))
 assert_true(length(missing_fields) == 0L,

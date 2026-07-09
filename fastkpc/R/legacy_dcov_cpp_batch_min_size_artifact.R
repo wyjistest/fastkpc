@@ -299,6 +299,38 @@ fastkpc_legacy_dcov_batch_summary_row <- function(
         summary, "legacy_dcov_cpp_batch_skipped_pair_ratio", 0
       )
     ),
+    legacy_dcov_cpp_batch_prepare_ms = as.numeric(
+      fastkpc_legacy_dcov_batch_summary_value(
+        summary, "legacy_dcov_cpp_batch_prepare_ms", 0
+      )
+    ),
+    legacy_dcov_cpp_batch_materialize_ms = as.numeric(
+      fastkpc_legacy_dcov_batch_summary_value(
+        summary, "legacy_dcov_cpp_batch_materialize_ms", 0
+      )
+    ),
+    legacy_dcov_cpp_batch_apply_ms = as.numeric(
+      fastkpc_legacy_dcov_batch_summary_value(
+        summary, "legacy_dcov_cpp_batch_apply_ms", 0
+      )
+    ),
+    legacy_dcov_cpp_batch_round_prepare_worker_max_ms = as.numeric(
+      fastkpc_legacy_dcov_batch_summary_value(
+        summary, "legacy_dcov_cpp_batch_round_prepare_worker_max_ms", 0
+      )
+    ),
+    legacy_dcov_cpp_batch_round_prepare_worker_median_ms = as.numeric(
+      fastkpc_legacy_dcov_batch_summary_value(
+        summary, "legacy_dcov_cpp_batch_round_prepare_worker_median_ms", 0
+      )
+    ),
+    legacy_dcov_cpp_batch_round_prepare_worker_elapsed_imbalance = as.numeric(
+      fastkpc_legacy_dcov_batch_summary_value(
+        summary,
+        "legacy_dcov_cpp_batch_round_prepare_worker_elapsed_imbalance",
+        0
+      )
+    ),
     stringsAsFactors = FALSE
   )
 }
@@ -347,6 +379,12 @@ fastkpc_legacy_dcov_batch_timeout_summary_row <- function(
     legacy_dcov_cpp_batch_skipped_count = NA_integer_,
     legacy_dcov_cpp_batch_skipped_pair_count = NA_integer_,
     legacy_dcov_cpp_batch_skipped_pair_ratio = NA_real_,
+    legacy_dcov_cpp_batch_prepare_ms = NA_real_,
+    legacy_dcov_cpp_batch_materialize_ms = NA_real_,
+    legacy_dcov_cpp_batch_apply_ms = NA_real_,
+    legacy_dcov_cpp_batch_round_prepare_worker_max_ms = NA_real_,
+    legacy_dcov_cpp_batch_round_prepare_worker_median_ms = NA_real_,
+    legacy_dcov_cpp_batch_round_prepare_worker_elapsed_imbalance = NA_real_,
     stringsAsFactors = FALSE
   )
 }

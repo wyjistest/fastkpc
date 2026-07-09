@@ -401,9 +401,15 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_cpp_batch_lowrank_output_workspace_reuse_count = 0L,
     dcov_cpp_batch_lowrank_eig_workspace_reuse_count = 0L,
     dcov_cpp_batch_column_copy_count = 0L,
+    dcov_cpp_batch_prepare_ms = 0,
+    dcov_cpp_batch_materialize_ms = 0,
+    dcov_cpp_batch_apply_ms = 0,
     dcov_cpp_batch_round_enabled = 0L,
     dcov_cpp_batch_round_prepare_worker_count = 0L,
     dcov_cpp_batch_round_prepare_task_count = 0L,
+    dcov_cpp_batch_round_prepare_worker_max_ms = 0,
+    dcov_cpp_batch_round_prepare_worker_median_ms = 0,
+    dcov_cpp_batch_round_prepare_worker_elapsed_imbalance = 0,
     mgcv_residual_request_count = 0L,
     mgcv_cache_hit_count = 0L,
     mgcv_cache_miss_count = 0L,
@@ -913,6 +919,15 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     dcov_cpp_batch_column_copy_count =
       as.integer(a$dcov_cpp_batch_column_copy_count) +
         as.integer(b$dcov_cpp_batch_column_copy_count),
+    dcov_cpp_batch_prepare_ms =
+      as.numeric(a$dcov_cpp_batch_prepare_ms) +
+        as.numeric(b$dcov_cpp_batch_prepare_ms),
+    dcov_cpp_batch_materialize_ms =
+      as.numeric(a$dcov_cpp_batch_materialize_ms) +
+        as.numeric(b$dcov_cpp_batch_materialize_ms),
+    dcov_cpp_batch_apply_ms =
+      as.numeric(a$dcov_cpp_batch_apply_ms) +
+        as.numeric(b$dcov_cpp_batch_apply_ms),
     dcov_cpp_batch_round_enabled =
       max(as.integer(a$dcov_cpp_batch_round_enabled),
           as.integer(b$dcov_cpp_batch_round_enabled)),
@@ -922,6 +937,15 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     dcov_cpp_batch_round_prepare_task_count =
       as.integer(a$dcov_cpp_batch_round_prepare_task_count) +
         as.integer(b$dcov_cpp_batch_round_prepare_task_count),
+    dcov_cpp_batch_round_prepare_worker_max_ms =
+      max(as.numeric(a$dcov_cpp_batch_round_prepare_worker_max_ms),
+          as.numeric(b$dcov_cpp_batch_round_prepare_worker_max_ms)),
+    dcov_cpp_batch_round_prepare_worker_median_ms =
+      max(as.numeric(a$dcov_cpp_batch_round_prepare_worker_median_ms),
+          as.numeric(b$dcov_cpp_batch_round_prepare_worker_median_ms)),
+    dcov_cpp_batch_round_prepare_worker_elapsed_imbalance =
+      max(as.numeric(a$dcov_cpp_batch_round_prepare_worker_elapsed_imbalance),
+          as.numeric(b$dcov_cpp_batch_round_prepare_worker_elapsed_imbalance)),
     mgcv_residual_request_count =
       as.integer(a$mgcv_residual_request_count) +
         as.integer(b$mgcv_residual_request_count),
@@ -2008,12 +2032,24 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.integer(metrics$dcov_cpp_batch_lowrank_eig_workspace_reuse_count),
       dcov_cpp_batch_column_copy_count =
         as.integer(metrics$dcov_cpp_batch_column_copy_count),
+      dcov_cpp_batch_prepare_ms =
+        as.numeric(metrics$dcov_cpp_batch_prepare_ms),
+      dcov_cpp_batch_materialize_ms =
+        as.numeric(metrics$dcov_cpp_batch_materialize_ms),
+      dcov_cpp_batch_apply_ms =
+        as.numeric(metrics$dcov_cpp_batch_apply_ms),
       dcov_cpp_batch_round_enabled =
         as.integer(metrics$dcov_cpp_batch_round_enabled),
       dcov_cpp_batch_round_prepare_worker_count =
         as.integer(metrics$dcov_cpp_batch_round_prepare_worker_count),
       dcov_cpp_batch_round_prepare_task_count =
         as.integer(metrics$dcov_cpp_batch_round_prepare_task_count),
+      dcov_cpp_batch_round_prepare_worker_max_ms =
+        as.numeric(metrics$dcov_cpp_batch_round_prepare_worker_max_ms),
+      dcov_cpp_batch_round_prepare_worker_median_ms =
+        as.numeric(metrics$dcov_cpp_batch_round_prepare_worker_median_ms),
+      dcov_cpp_batch_round_prepare_worker_elapsed_imbalance =
+        as.numeric(metrics$dcov_cpp_batch_round_prepare_worker_elapsed_imbalance),
       mgcv_residual_request_count =
         as.integer(metrics$mgcv_residual_request_count),
       mgcv_cache_hit_count = as.integer(metrics$mgcv_cache_hit_count),
@@ -5596,6 +5632,7 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
       if (n_tests == 0L) {
         return(list(prepared = list(), metrics = metrics))
       }
+      prepare_start <- proc.time()[["elapsed"]]
       if (isTRUE(dcov_cpp_batch_round_enabled)) {
         metrics$dcov_cpp_batch_round_enabled <- 1L
         prepare_workers <- min(workers, n_tests)
@@ -5611,9 +5648,14 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           prepared_chunks <- parallel::mclapply(
             indices_by_worker,
             function(indices) {
-              lapply(indices, function(idx) {
+              worker_start <- proc.time()[["elapsed"]]
+              prepared <- lapply(indices, function(idx) {
                 prepare_legacy_ci_dcov_cpp_input(current_tests[[idx]])
               })
+              list(
+                prepared = prepared,
+                elapsed_ms = (proc.time()[["elapsed"]] - worker_start) * 1000
+              )
             },
             mc.cores = prepare_workers, mc.set.seed = FALSE,
             mc.cleanup = TRUE, mc.allow.recursive = FALSE,
@@ -5622,13 +5664,33 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           prepared <- vector("list", n_tests)
           for (chunk_idx in seq_along(indices_by_worker)) {
             prepared[indices_by_worker[[chunk_idx]]] <-
-              prepared_chunks[[chunk_idx]]
+              prepared_chunks[[chunk_idx]]$prepared
           }
+          worker_elapsed_ms <- vapply(
+            prepared_chunks,
+            function(chunk) as.numeric(chunk$elapsed_ms),
+            numeric(1L)
+          )
+          metrics$dcov_cpp_batch_round_prepare_worker_max_ms <-
+            max(worker_elapsed_ms)
+          metrics$dcov_cpp_batch_round_prepare_worker_median_ms <-
+            stats::median(worker_elapsed_ms)
+          metrics$dcov_cpp_batch_round_prepare_worker_elapsed_imbalance <-
+            if (stats::median(worker_elapsed_ms) > 0) {
+              max(worker_elapsed_ms) / stats::median(worker_elapsed_ms)
+            } else {
+              0
+            }
+          metrics$dcov_cpp_batch_prepare_ms <-
+            (proc.time()[["elapsed"]] - prepare_start) * 1000
           return(list(prepared = prepared, metrics = metrics))
         }
       }
+      prepared <- lapply(current_tests, prepare_legacy_ci_dcov_cpp_input)
+      metrics$dcov_cpp_batch_prepare_ms <-
+        (proc.time()[["elapsed"]] - prepare_start) * 1000
       list(
-        prepared = lapply(current_tests, prepare_legacy_ci_dcov_cpp_input),
+        prepared = prepared,
         metrics = metrics
       )
     }
@@ -5672,12 +5734,16 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           p_values <- rep(NA_real_, length(current_tests))
           if (any(valid)) {
             valid_indices <- which(valid)
+            materialize_start <- proc.time()[["elapsed"]]
             x_batch <- do.call(cbind, lapply(
               prepared[valid_indices], function(item) item$x
             ))
             y_batch <- do.call(cbind, lapply(
               prepared[valid_indices], function(item) item$y
             ))
+            batch_metrics$dcov_cpp_batch_materialize_ms <-
+              batch_metrics$dcov_cpp_batch_materialize_ms +
+                (proc.time()[["elapsed"]] - materialize_start) * 1000
             dcov_batch <- fastkpc_legacy_run_dcov_cpp_backend_batch(
               metrics = fastkpc_legacy_runtime_zero(),
               x = x_batch,
@@ -5692,6 +5758,7 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
             )
             p_values[valid_indices] <- as.numeric(dcov_batch$p.value)
           }
+          apply_start <- proc.time()[["elapsed"]]
           for (idx in seq_along(current_tests)) {
             test <- current_tests[[idx]]
             state_name <- as.character(test$state_i)
@@ -5703,6 +5770,9 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
               states[[state_name]], test, pval
             )
           }
+          batch_metrics$dcov_cpp_batch_apply_ms <-
+            batch_metrics$dcov_cpp_batch_apply_ms +
+              (proc.time()[["elapsed"]] - apply_start) * 1000
         } else {
           for (test in current_tests) {
             ci <- run_legacy_ci(test$x, test$y, test$S)
@@ -6435,12 +6505,24 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$dcov_cpp_batch_lowrank_eig_workspace_reuse_count),
         legacy_dcov_cpp_batch_column_copy_count =
           as.integer(runtime_total$dcov_cpp_batch_column_copy_count),
+        legacy_dcov_cpp_batch_prepare_ms =
+          as.numeric(runtime_total$dcov_cpp_batch_prepare_ms),
+        legacy_dcov_cpp_batch_materialize_ms =
+          as.numeric(runtime_total$dcov_cpp_batch_materialize_ms),
+        legacy_dcov_cpp_batch_apply_ms =
+          as.numeric(runtime_total$dcov_cpp_batch_apply_ms),
         legacy_dcov_cpp_batch_round_enabled =
           isTRUE(as.integer(runtime_total$dcov_cpp_batch_round_enabled) > 0L),
         legacy_dcov_cpp_batch_round_prepare_worker_count =
           as.integer(runtime_total$dcov_cpp_batch_round_prepare_worker_count),
         legacy_dcov_cpp_batch_round_prepare_task_count =
           as.integer(runtime_total$dcov_cpp_batch_round_prepare_task_count),
+        legacy_dcov_cpp_batch_round_prepare_worker_max_ms =
+          as.numeric(runtime_total$dcov_cpp_batch_round_prepare_worker_max_ms),
+        legacy_dcov_cpp_batch_round_prepare_worker_median_ms =
+          as.numeric(runtime_total$dcov_cpp_batch_round_prepare_worker_median_ms),
+        legacy_dcov_cpp_batch_round_prepare_worker_elapsed_imbalance =
+          as.numeric(runtime_total$dcov_cpp_batch_round_prepare_worker_elapsed_imbalance),
         legacy_direct_ci_count =
           as.integer(runtime_total$direct_ci_count),
         legacy_conditional_ci_count =

@@ -4292,6 +4292,12 @@ legacy_dcov_cpp_batch_pair_coverage_ratio
 legacy_dcov_cpp_batch_skipped_count
 legacy_dcov_cpp_batch_skipped_pair_count
 legacy_dcov_cpp_batch_skipped_pair_ratio
+legacy_dcov_cpp_batch_prepare_ms
+legacy_dcov_cpp_batch_materialize_ms
+legacy_dcov_cpp_batch_apply_ms
+legacy_dcov_cpp_batch_round_prepare_worker_max_ms
+legacy_dcov_cpp_batch_round_prepare_worker_median_ms
+legacy_dcov_cpp_batch_round_prepare_worker_elapsed_imbalance
 ```
 
 This is diagnostic/tuning plumbing for the experimental batch routes only; it
@@ -4353,7 +4359,15 @@ S-affinity reference skeleton and records `reference_source = rds` with
 the reference row `elapsed_sec = 0`; candidate rows are still freshly computed.
 The full artifact should compare elapsed time, SHD, n.edgetests, batch
 coverage, skipped ratio, mean/max batch size, and by-level coverage before any
-min-size policy is considered for promotion.
+min-size policy is considered for promotion. It should also inspect the batch
+phase split:
+
+```text
+prepare_ms       = residual/direct input preparation before batch dCov
+materialize_ms   = R matrix assembly for the batch dCov call
+apply_ms         = replaying batch p-values into canonical edge states
+round worker max/median/imbalance = round-mode prepare critical-path tail
+```
 
 Single-candidate full attempt:
 
