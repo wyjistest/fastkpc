@@ -252,7 +252,9 @@ fastkpc_compatible_cuda_lowrank_progress_empty <- function() {
     component_distance_ms = NA_real_,
     component_lowrank_ms = NA_real_,
     component_moment_ms = NA_real_,
-    component_unaccounted_ms = NA_real_
+    component_unaccounted_ms = NA_real_,
+    component_eig_ms = NA_real_,
+    combine_ms = NA_real_
   )
 }
 
@@ -356,7 +358,11 @@ fastkpc_compatible_cuda_lowrank_progress_summary <- function(path) {
     component_moment_ms =
       fastkpc_compatible_cuda_progress_sum(rows, "component_moment_ms"),
     component_unaccounted_ms =
-      fastkpc_compatible_cuda_progress_sum(rows, "component_unaccounted_ms")
+      fastkpc_compatible_cuda_progress_sum(rows, "component_unaccounted_ms"),
+    component_eig_ms =
+      fastkpc_compatible_cuda_progress_sum(rows, "component_eig_ms"),
+    combine_ms =
+      fastkpc_compatible_cuda_progress_sum(rows, "combine_ms")
   )
 }
 
@@ -395,6 +401,10 @@ fastkpc_compatible_cuda_apply_lowrank_progress_summary <- function(
     summary$component_moment_ms
   row$legacy_dcov_native_cuda_lowrank_backend_component_unaccounted_ms <-
     summary$component_unaccounted_ms
+  row$legacy_dcov_native_cuda_lowrank_backend_component_eig_ms <-
+    summary$component_eig_ms
+  row$legacy_dcov_native_cuda_lowrank_backend_combine_ms <-
+    summary$combine_ms
   row
 }
 
@@ -536,6 +546,8 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     legacy_dcov_native_cuda_lowrank_backend_component_lowrank_ms = NA_real_,
     legacy_dcov_native_cuda_lowrank_backend_component_moment_ms = NA_real_,
     legacy_dcov_native_cuda_lowrank_backend_component_unaccounted_ms = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_component_eig_ms = NA_real_,
+    legacy_dcov_native_cuda_lowrank_backend_combine_ms = NA_real_,
     legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count = NA_integer_,
     legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms = NA_real_,
     legacy_dcov_native_cuda_lowrank_backend_kernel_launch_count = NA_integer_,
@@ -1147,6 +1159,12 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
                    NA_real_),
     legacy_dcov_native_cuda_lowrank_backend_component_unaccounted_ms =
       as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_component_unaccounted_ms %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_component_eig_ms =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_component_eig_ms %||%
+                   NA_real_),
+    legacy_dcov_native_cuda_lowrank_backend_combine_ms =
+      as.numeric(facade_summary$legacy_dcov_native_cuda_lowrank_backend_combine_ms %||%
                    NA_real_),
     legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count =
       as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count %||%

@@ -7938,6 +7938,53 @@ decision:
   primary target for the next structural cut.
 ```
 
+Native cuda_spectra timeout eig/combine summary checkpoint:
+
+```text
+change:
+  extend timeout aggregation from native_lowrank_component_cache_progress.csv
+  to include the eigensolve and pair-composition fields already emitted by the
+  progress stream:
+
+    legacy_dcov_native_cuda_lowrank_backend_component_eig_ms
+    legacy_dcov_native_cuda_lowrank_backend_combine_ms
+
+  This is artifact diagnostics only. It does not change native execution,
+  residual authority, dCov authority, component-cache behavior, p-value order,
+  canonical replay, fallback policy, or route selection.
+
+TDD gate:
+  RED:
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+    failed at:
+      lowrank progress summary should sum eig stage ms
+
+  GREEN:
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+    result:
+      PASS compatible CUDA skeleton artifact
+
+existing 120s timeout progress CSV split:
+  cache entries        128          512          1024
+  component_eig_ms  110201.400    67324.601    66229.737
+  combine_ms          4304.931     4889.324     4904.941
+  lowrank_ms        116697.802    71904.651    70760.112
+  eig / lowrank       94.43%       93.63%       93.60%
+  combine / lowrank    3.69%        6.80%        6.93%
+
+decision:
+  The larger cache sweep already showed that lowrank/Spectra remains about 97%
+  of completed component-stage time. The eig/combine split makes that sharper:
+  even after level cache capacity improves from 128 to 512/1024, eigensolve
+  work alone remains about 93.6% of lowrank time, while pair composition is
+  single-digit share. The next native cuda_spectra structural cut should target
+  per-component Spectra/eigensolve cost. Cache capacity, distance construction,
+  moment composition, and pair-combine overhead are secondary for the next
+  mainline attempt.
+```
+
 ---
 
 ## 9. Final success definition

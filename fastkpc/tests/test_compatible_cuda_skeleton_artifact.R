@@ -151,6 +151,10 @@ assert_true(abs(lowrank_progress_summary$component_moment_ms - 2) < 1e-12,
             "lowrank progress summary should sum moment stage ms")
 assert_true(abs(lowrank_progress_summary$component_unaccounted_ms - 0.3) < 1e-12,
             "lowrank progress summary should sum unaccounted stage ms")
+assert_true(abs(lowrank_progress_summary$component_eig_ms - 21) < 1e-12,
+            "lowrank progress summary should sum eig stage ms")
+assert_true(abs(lowrank_progress_summary$combine_ms - 1) < 1e-12,
+            "lowrank progress summary should sum combine stage ms")
 
 timeout_row_with_lowrank_progress <- fastkpc_compatible_cuda_timeout_summary_row(
   artifact_name = "compatible_cuda_skeleton_timeout_progress_test",
@@ -191,6 +195,18 @@ assert_true(
         legacy_dcov_native_cuda_lowrank_backend_component_lowrank_ms[[1L]] -
         30) < 1e-12,
   "timeout summary should include component progress lowrank timing"
+)
+assert_true(
+  abs(timeout_row_with_lowrank_progress$
+        legacy_dcov_native_cuda_lowrank_backend_component_eig_ms[[1L]] -
+        21) < 1e-12,
+  "timeout summary should include component progress eig timing"
+)
+assert_true(
+  abs(timeout_row_with_lowrank_progress$
+        legacy_dcov_native_cuda_lowrank_backend_combine_ms[[1L]] -
+        1) < 1e-12,
+  "timeout summary should include component progress combine timing"
 )
 saveRDS(timeout_reference, timeout_ref_path)
 timeout_dir <- tempfile("compatible-cuda-skeleton-timeout-")
