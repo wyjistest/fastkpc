@@ -6202,6 +6202,53 @@ decision:
   explicit fallback diagnostics.
 ```
 
+CUDA Spectra lowrank real-subset backend artifact checkpoint:
+
+```text
+artifact:
+  fastkpc/artifacts/legacy_dcov_cuda_lowrank_backend_real_subset_v1
+
+scope:
+  real 351-row fixture, first 5 columns
+  CPU C++ Spectra legacy dCov backend baseline
+  CUDA Spectra lowrank backend candidate authority
+  FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=cuda_spectra
+  FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE=1
+  FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY=s
+  FASTKPC_LEGACY_PARALLEL_CORES=1
+
+artifact runner:
+  fastkpc/R/legacy_dcov_cuda_lowrank_backend_artifact.R
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 FASTKPC_RUN_REAL_SUBSET_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_real_subset_artifact.R
+
+real subset result:
+  n / p = 351 / 5
+  edge_count = 10 / 10
+  SHD = 0
+  n.edgetests exact = TRUE
+  candidate legacy_dcov_gamma_count = 70
+  candidate CUDA lowrank backend count = 70
+  candidate CUDA lowrank backend error_count = 0
+  candidate CUDA lowrank backend fallback_count = 0
+  candidate CUDA lowrank backend converged_count = 70
+  candidate CUDA lowrank backend matrix_h2d_ms_during_compute_max = 0
+  candidate elapsed_sec = 1.089
+  baseline elapsed_sec = 26.592
+
+decision:
+  This broadens cuda_spectra from the small synthetic route gate to a real
+  351-row subset where all dCov authority calls use the CUDA lowrank backend
+  with no fallback and exact skeleton replay against CPU C++ Spectra. It is
+  still a subset gate, not a full 351x48 success claim. The next gate is a
+  larger hot-column subset or full 351x48 artifact with SHD/n.edgetests proof,
+  fallback diagnostics, and wall-time comparison against the recommended
+  S-affinity route.
+```
+
 ---
 
 ## 9. Final success definition
