@@ -7985,6 +7985,62 @@ decision:
   mainline attempt.
 ```
 
+Native cuda_spectra completed-summary eig/combine checkpoint:
+
+```text
+change:
+  completed native cuda_spectra summaries now expose the same eigensolve and
+  pair-composition fields that timeout artifacts aggregate from
+  native_lowrank_component_cache_progress.csv:
+
+    legacy_dcov_native_cuda_lowrank_backend_component_eig_ms
+    legacy_dcov_native_cuda_lowrank_backend_combine_ms
+
+  This keeps completed and timeout native cuda_spectra artifacts consistent
+  for the lowrank eig/combine attribution used by the cache-capacity sweep.
+
+TDD gate:
+  RED:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+    failed at:
+      native CUDA lowrank component stage timings should be finite
+
+  GREEN:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+    result:
+      PASS compatible CUDA skeleton native cuda_spectra lowrank
+
+regression gates:
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+    result:
+      PASS compatible CUDA skeleton artifact
+
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+
+    result:
+      PASS legacy dCov CUDA lowrank gamma parity cases=6
+      max_p_diff = 4e-15
+      max_nV2_diff = 5.68e-14
+
+decision:
+  Completed and timeout artifact summaries now expose the same lowrank
+  eig/combine attribution. This is diagnostics only: it does not change native
+  execution, residual authority, dCov authority, component-cache behavior,
+  p-value order, canonical replay, fallback policy, route selection, or the
+  current recommended CPU/C++ compatible route.
+
+  This still does not prove the final full 351x48 CUDA skeleton goal. The final
+  gate remains edge_count = 110 / 110, SHD = 0, n.edgetests exact = TRUE, no
+  unexplained fallback, and materially better wall time than the current
+  compatible CPU/C++ route.
+```
+
 ---
 
 ## 9. Final success definition
