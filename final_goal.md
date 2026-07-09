@@ -6297,6 +6297,64 @@ decision:
   the current recommended S-affinity route.
 ```
 
+CUDA Spectra lowrank full 351x48 backend gate attempt:
+
+```text
+artifact:
+  fastkpc/artifacts/legacy_dcov_cuda_lowrank_backend_full_351x48_v1
+
+scope:
+  real 351x48 fixture, all columns
+  reference loaded from:
+    fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/
+      compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds
+  candidate:
+    FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+    FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=cuda_spectra
+    FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE=1
+    FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY=s
+    FASTKPC_LEGACY_PARALLEL_CORES=20
+
+runner:
+  fastkpc_run_legacy_dcov_cuda_lowrank_backend_full_artifact()
+  candidate_timeout_sec = 1800
+
+result:
+  run_status = timeout
+  timeout = TRUE
+  timeout_sec = 1800
+  elapsed_sec = 1800.001
+  n / p = 351 / 48
+  reference edge_count = 110
+  candidate edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+  CUDA lowrank backend count = NA
+  CUDA lowrank fallback/error counts = NA
+
+progress:
+  reference start/complete rows written from RDS
+  candidate start row written
+  candidate timeout row written at 1800.001 sec
+  no matching long-running candidate R processes remained after timeout
+
+decision:
+  The full 351x48 cuda_spectra backend candidate did not complete inside the
+  1800 second watchdog and therefore cannot be promoted. Correctness is not
+  evaluable on the full benchmark because no candidate skeleton was returned.
+  This also fails the wall-time gate by a wide margin relative to the current
+  compatible route and the native threaded round dCov facade. The hot12 subset
+  remains useful evidence that the CUDA lowrank primitive can be correct on a
+  limited route, but the full route is not viable as implemented.
+
+  The next lowrank work should diagnose why the full candidate executes as a
+  long CPU-bound path with little visible GPU utilization before attempting
+  another full promotion gate. Likely directions are progress diagnostics
+  inside the legacy cuda_spectra backend, avoiding timeout-wrapper / nested
+  parallelism interactions, or moving the CUDA lowrank path into the native
+  one-call round dCov data plane rather than the R legacy worker backend.
+```
+
 ---
 
 ## 9. Final success definition

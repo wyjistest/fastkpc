@@ -41,6 +41,170 @@ fastkpc_legacy_cuda_lowrank_summary_value <- function(summary, name,
   if (is.null(value)) default else value
 }
 
+fastkpc_legacy_cuda_lowrank_timeout_enabled <- function(candidate_timeout_sec) {
+  !is.null(candidate_timeout_sec) &&
+    length(candidate_timeout_sec) > 0L &&
+    !is.na(candidate_timeout_sec[[1L]])
+}
+
+fastkpc_legacy_cuda_lowrank_timeout_error <- function(
+    timeout_sec, elapsed_sec, message = NULL) {
+  if (is.null(message)) {
+    message <- paste0("candidate exceeded timeout_sec=", timeout_sec)
+  }
+  structure(
+    list(
+      message = message,
+      call = NULL,
+      timeout_sec = as.numeric(timeout_sec),
+      elapsed_sec = as.numeric(elapsed_sec)
+    ),
+    class = c("fastkpc_legacy_cuda_lowrank_timeout", "error", "condition")
+  )
+}
+
+fastkpc_legacy_cuda_lowrank_is_time_limit <- function(error) {
+  grepl("reached elapsed time limit|reached CPU time limit",
+        conditionMessage(error))
+}
+
+fastkpc_legacy_cuda_lowrank_run_with_timeout <- function(
+    fun, candidate_timeout_sec = NULL) {
+  if (!fastkpc_legacy_cuda_lowrank_timeout_enabled(candidate_timeout_sec)) {
+    return(fun())
+  }
+  timeout_sec <- as.numeric(candidate_timeout_sec[[1L]])
+  start <- proc.time()[["elapsed"]]
+  if (timeout_sec <= 0) {
+    stop(fastkpc_legacy_cuda_lowrank_timeout_error(
+      timeout_sec = timeout_sec,
+      elapsed_sec = 0,
+      message = "candidate timed out before execution"
+    ))
+  }
+
+  if (identical(.Platform$OS.type, "unix")) {
+    job <- parallel::mcparallel(
+      tryCatch(
+        list(ok = TRUE, value = fun()),
+        error = function(e) {
+          list(ok = FALSE, message = conditionMessage(e), class = class(e))
+        }
+      ),
+      mc.set.seed = FALSE,
+      silent = TRUE
+    )
+    cleanup_job <- TRUE
+    on.exit({
+      if (isTRUE(cleanup_job)) {
+        try(tools::pskill(job$pid, 15L), silent = TRUE)
+        try(parallel::mccollect(job, wait = FALSE), silent = TRUE)
+      }
+    }, add = TRUE)
+    collected <- NULL
+    repeat {
+      collected <- parallel::mccollect(job, wait = FALSE)
+      if (!is.null(collected) && length(collected) > 0L &&
+          !is.null(collected[[1L]])) {
+        break
+      }
+      elapsed <- proc.time()[["elapsed"]] - start
+      if (elapsed >= timeout_sec) {
+        cleanup_job <- FALSE
+        try(tools::pskill(job$pid, 15L), silent = TRUE)
+        Sys.sleep(0.2)
+        try(tools::pskill(job$pid, 9L), silent = TRUE)
+        try(parallel::mccollect(job, wait = FALSE), silent = TRUE)
+        stop(fastkpc_legacy_cuda_lowrank_timeout_error(
+          timeout_sec = timeout_sec,
+          elapsed_sec = elapsed,
+          message = paste0("candidate exceeded timeout_sec=", timeout_sec)
+        ))
+      }
+      Sys.sleep(min(0.1, max(0.01, timeout_sec - elapsed)))
+    }
+    cleanup_job <- FALSE
+    payload <- collected[[1L]]
+    if (is.list(payload) && isTRUE(payload$ok)) {
+      return(payload$value)
+    }
+    if (is.list(payload) && identical(payload$ok, FALSE)) {
+      stop(simpleError(payload$message %||% "candidate failed"))
+    }
+    return(payload)
+  }
+
+  setTimeLimit(cpu = Inf, elapsed = timeout_sec, transient = TRUE)
+  on.exit(setTimeLimit(cpu = Inf, elapsed = Inf, transient = FALSE), add = TRUE)
+  tryCatch(
+    fun(),
+    error = function(e) {
+      if (fastkpc_legacy_cuda_lowrank_is_time_limit(e)) {
+        stop(fastkpc_legacy_cuda_lowrank_timeout_error(
+          timeout_sec = timeout_sec,
+          elapsed_sec = proc.time()[["elapsed"]] - start,
+          message = conditionMessage(e)
+        ))
+      }
+      stop(e)
+    }
+  )
+}
+
+fastkpc_legacy_cuda_lowrank_progress_row <- function(
+    artifact_name, route, event, status, elapsed_sec = NA_real_,
+    message = NA_character_) {
+  data.frame(
+    artifact = artifact_name,
+    route = route,
+    event = event,
+    status = status,
+    elapsed_sec = as.numeric(elapsed_sec),
+    message = message %||% NA_character_,
+    timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S %z"),
+    stringsAsFactors = FALSE
+  )
+}
+
+fastkpc_legacy_cuda_lowrank_append_progress <- function(path, row) {
+  utils::write.table(
+    row,
+    file = path,
+    sep = ",",
+    row.names = FALSE,
+    col.names = !file.exists(path),
+    append = file.exists(path),
+    qmethod = "double"
+  )
+  invisible(TRUE)
+}
+
+fastkpc_legacy_cuda_lowrank_extract_reference <- function(result) {
+  candidates <- list(
+    skeleton = result$skeleton,
+    reference = result$reference,
+    baseline = result$baseline,
+    candidate = result$candidate
+  )
+  for (name in names(candidates)) {
+    candidate <- candidates[[name]]
+    if (is.list(candidate) &&
+        !is.null(candidate$adjacency) &&
+        !is.null(candidate$n.edgetests)) {
+      attr(candidate, "fastkpc_reference_slot") <- name
+      return(candidate)
+    }
+  }
+  if (is.list(result) &&
+      !is.null(result$adjacency) &&
+      !is.null(result$n.edgetests)) {
+    attr(result, "fastkpc_reference_slot") <- "root"
+    return(result)
+  }
+  stop("reference result does not contain a skeleton-like object",
+       call. = FALSE)
+}
+
 fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
     output_dir = "fastkpc/artifacts/legacy_dcov_cuda_lowrank_backend_real_subset_v1",
     artifact_name = "legacy_dcov_cuda_lowrank_backend_real_subset_v1",
@@ -48,7 +212,19 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
     columns = c(1L, 2L, 3L, 4L, 5L),
     alpha = 0.1,
     max_conditioning_size = 3L,
-    rebuild_cuda = FALSE) {
+    rebuild_cuda = FALSE,
+    parallel_cores = 1L,
+    reference_result_path = NULL,
+    expected_edge_count = NULL,
+    expected_n_edgetests = NULL,
+    candidate_timeout_sec = NULL) {
+  if (fastkpc_legacy_cuda_lowrank_timeout_enabled(candidate_timeout_sec)) {
+    candidate_timeout_sec <- as.numeric(candidate_timeout_sec[[1L]])
+    if (!is.finite(candidate_timeout_sec) || candidate_timeout_sec < 0) {
+      stop("candidate_timeout_sec must be NULL or a non-negative finite number",
+           call. = FALSE)
+    }
+  }
   if (!file.exists(data_path)) {
     stop("real data fixture not found: ", data_path, call. = FALSE)
   }
@@ -59,10 +235,28 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
   }
 
   real_data <- readRDS(data_path)
-  data <- as.matrix(real_data[, columns, drop = FALSE])
+  if (is.null(columns)) {
+    data <- as.matrix(real_data)
+  } else {
+    data <- as.matrix(real_data[, as.integer(columns), drop = FALSE])
+  }
   storage.mode(data) <- "double"
   n <- nrow(data)
   p <- ncol(data)
+  columns_label <- if (is.null(columns)) {
+    "all"
+  } else {
+    paste(as.integer(columns), collapse = ",")
+  }
+
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  paths <- list(
+    summary_csv = file.path(output_dir, "summary.csv"),
+    progress_csv = file.path(output_dir, "progress.csv"),
+    summary_md = file.path(output_dir, "summary.md"),
+    result_rds = file.path(output_dir, "result.rds")
+  )
+  if (file.exists(paths$progress_csv)) unlink(paths$progress_csv)
 
   tracked_env <- c(
     "FASTKPC_LEGACY_DCOV_GAMMA_BACKEND",
@@ -81,12 +275,17 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
   on.exit(fastkpc_legacy_cuda_lowrank_restore_env(old_env), add = TRUE)
 
   run_route <- function(lowrank_mode) {
+    if (is.null(parallel_cores) || is.na(parallel_cores)) {
+      parallel_value <- "1"
+    } else {
+      parallel_value <- as.character(as.integer(parallel_cores))
+    }
     Sys.setenv(
       FASTKPC_LEGACY_DCOV_GAMMA_BACKEND = "cpp",
       FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = lowrank_mode,
       FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE = "1",
       FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY = "s",
-      FASTKPC_LEGACY_PARALLEL_CORES = "1"
+      FASTKPC_LEGACY_PARALLEL_CORES = parallel_value
     )
     Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH")
     Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CUDA_LOW_RANK_SHADOW")
@@ -110,10 +309,155 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
     )
   }
 
-  baseline <- run_route("spectra")
-  candidate <- run_route("cuda_spectra")
+  fastkpc_legacy_cuda_lowrank_append_progress(
+    paths$progress_csv,
+    fastkpc_legacy_cuda_lowrank_progress_row(
+      artifact_name, "reference", "start",
+      if (is.null(reference_result_path)) "computed" else "rds"
+    )
+  )
+  if (is.null(reference_result_path)) {
+    baseline <- run_route("spectra")
+    reference_slot <- "computed"
+  } else {
+    if (!file.exists(reference_result_path)) {
+      stop("reference result not found: ", reference_result_path,
+           call. = FALSE)
+    }
+    reference <- fastkpc_legacy_cuda_lowrank_extract_reference(
+      readRDS(reference_result_path)
+    )
+    reference_slot <- attr(reference, "fastkpc_reference_slot", exact = TRUE)
+    baseline <- list(
+      result = list(skeleton = reference),
+      elapsed_sec = 0,
+      summary = reference$summary %||%
+        reference$scheduler_diagnostics$summary %||%
+        list()
+    )
+  }
+  fastkpc_legacy_cuda_lowrank_append_progress(
+    paths$progress_csv,
+    fastkpc_legacy_cuda_lowrank_progress_row(
+      artifact_name, "reference", "complete",
+      if (is.null(reference_result_path)) "computed" else "rds",
+      elapsed_sec = baseline$elapsed_sec
+    )
+  )
+
+  fastkpc_legacy_cuda_lowrank_append_progress(
+    paths$progress_csv,
+    fastkpc_legacy_cuda_lowrank_progress_row(
+      artifact_name, "candidate", "start", "running"
+    )
+  )
+  timeout_error <- NULL
+  candidate <- tryCatch(
+    fastkpc_legacy_cuda_lowrank_run_with_timeout(
+      function() run_route("cuda_spectra"),
+      candidate_timeout_sec = candidate_timeout_sec
+    ),
+    fastkpc_legacy_cuda_lowrank_timeout = function(e) {
+      timeout_error <<- e
+      NULL
+    }
+  )
 
   baseline_skeleton <- baseline$result$skeleton
+  if (is.null(candidate)) {
+    fastkpc_legacy_cuda_lowrank_append_progress(
+      paths$progress_csv,
+      fastkpc_legacy_cuda_lowrank_progress_row(
+        artifact_name, "candidate", "timeout", "timeout",
+        elapsed_sec = timeout_error$elapsed_sec,
+        message = conditionMessage(timeout_error)
+      )
+    )
+    row <- data.frame(
+      artifact_name = artifact_name,
+      data_path = data_path,
+      reference_result_path = reference_result_path %||% NA_character_,
+      reference_result_slot = reference_slot,
+      columns = columns_label,
+      n = as.integer(n),
+      p = as.integer(p),
+      alpha = as.numeric(alpha),
+      max_conditioning_size = as.integer(max_conditioning_size),
+      parallel_cores = as.integer(parallel_cores %||% NA_integer_),
+      run_status = "timeout",
+      timeout = TRUE,
+      timeout_sec = as.numeric(timeout_error$timeout_sec),
+      expected_edge_count = expected_edge_count %||% NA_integer_,
+      expected_n_edgetests = if (is.null(expected_n_edgetests)) {
+        NA_character_
+      } else {
+        paste(as.integer(expected_n_edgetests), collapse = ",")
+      },
+      baseline_elapsed_sec = as.numeric(baseline$elapsed_sec),
+      candidate_elapsed_sec = as.numeric(timeout_error$elapsed_sec),
+      baseline_edge_count =
+        fastkpc_legacy_cuda_lowrank_edge_count(baseline_skeleton$adjacency),
+      candidate_edge_count = NA_integer_,
+      adjacency_identical = NA,
+      shd = NA_integer_,
+      n_edgetests_exact = NA,
+      baseline_n_edgetests =
+        paste(as.integer(baseline_skeleton$n.edgetests), collapse = ","),
+      candidate_n_edgetests = NA_character_,
+      pmax_max_abs_diff = NA_real_,
+      baseline_legacy_dcov_gamma_count =
+        as.integer(fastkpc_legacy_cuda_lowrank_summary_value(
+          baseline$summary, "legacy_dcov_gamma_count", 0L)),
+      baseline_legacy_dcov_cpp_backend_count =
+        as.integer(fastkpc_legacy_cuda_lowrank_summary_value(
+          baseline$summary, "legacy_dcov_cpp_backend_count", 0L)),
+      candidate_legacy_dcov_gamma_count = NA_integer_,
+      candidate_legacy_dcov_cpp_backend_count = NA_integer_,
+      candidate_legacy_dcov_r_backend_count = NA_integer_,
+      candidate_legacy_dcov_cuda_lowrank_backend_enabled = NA,
+      candidate_legacy_dcov_cuda_lowrank_backend_count = NA_integer_,
+      candidate_legacy_dcov_cuda_lowrank_backend_ms = NA_real_,
+      candidate_legacy_dcov_cuda_lowrank_backend_error_count = NA_integer_,
+      candidate_legacy_dcov_cuda_lowrank_backend_fallback_count = NA_integer_,
+      candidate_legacy_dcov_cuda_lowrank_backend_cpu_fallback_count =
+        NA_integer_,
+      candidate_legacy_dcov_cuda_lowrank_backend_converged_count =
+        NA_integer_,
+      candidate_legacy_dcov_cuda_lowrank_backend_spectra_matvec_count =
+        NA_integer_,
+      candidate_legacy_dcov_cuda_lowrank_backend_matrix_h2d_ms_during_compute_max =
+        NA_real_,
+      candidate_legacy_dcov_cuda_lowrank_backend_matrix_bytes = NA_real_,
+      candidate_legacy_dcov_cuda_lowrank_backend_workspace_realloc_count =
+        NA_integer_,
+      stringsAsFactors = FALSE
+    )
+    utils::write.csv(row, paths$summary_csv, row.names = FALSE)
+    saveRDS(
+      list(summary = row, baseline = baseline, candidate = NULL,
+           paths = paths),
+      paths$result_rds
+    )
+    writeLines(c(
+      paste0("# ", artifact_name),
+      "",
+      paste0("- n / p: ", row$n[[1L]], " / ", row$p[[1L]]),
+      paste0("- run status: ", row$run_status[[1L]]),
+      paste0("- timeout sec: ", row$timeout_sec[[1L]]),
+      paste0("- baseline edge count: ", row$baseline_edge_count[[1L]]),
+      paste0("- elapsed sec: ", signif(row$candidate_elapsed_sec[[1L]], 8L))
+    ), paths$summary_md)
+    return(list(summary = row, paths = paths, baseline = baseline,
+                candidate = NULL, output_dir = output_dir))
+  }
+  fastkpc_legacy_cuda_lowrank_append_progress(
+    paths$progress_csv,
+    fastkpc_legacy_cuda_lowrank_progress_row(
+      artifact_name, "candidate", "complete", "ok",
+      elapsed_sec = candidate$elapsed_sec
+    )
+  )
+
   candidate_skeleton <- candidate$result$skeleton
   baseline_summary <- baseline$summary
   candidate_summary <- candidate$summary
@@ -130,11 +474,28 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
   row <- data.frame(
     artifact_name = artifact_name,
     data_path = data_path,
-    columns = paste(as.integer(columns), collapse = ","),
+    reference_result_path = reference_result_path %||% NA_character_,
+    reference_result_slot = reference_slot,
+    columns = columns_label,
     n = as.integer(n),
     p = as.integer(p),
     alpha = as.numeric(alpha),
     max_conditioning_size = as.integer(max_conditioning_size),
+    parallel_cores = as.integer(parallel_cores %||% NA_integer_),
+    run_status = "ok",
+    timeout = FALSE,
+    timeout_sec =
+      if (fastkpc_legacy_cuda_lowrank_timeout_enabled(candidate_timeout_sec)) {
+        as.numeric(candidate_timeout_sec)
+      } else {
+        NA_real_
+      },
+    expected_edge_count = expected_edge_count %||% NA_integer_,
+    expected_n_edgetests = if (is.null(expected_n_edgetests)) {
+      NA_character_
+    } else {
+      paste(as.integer(expected_n_edgetests), collapse = ",")
+    },
     baseline_elapsed_sec = as.numeric(baseline$elapsed_sec),
     candidate_elapsed_sec = as.numeric(candidate$elapsed_sec),
     baseline_edge_count =
@@ -210,12 +571,6 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
     stringsAsFactors = FALSE
   )
 
-  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-  paths <- list(
-    summary_csv = file.path(output_dir, "summary.csv"),
-    summary_md = file.path(output_dir, "summary.md"),
-    result_rds = file.path(output_dir, "result.rds")
-  )
   utils::write.csv(row, paths$summary_csv, row.names = FALSE)
   saveRDS(
     list(summary = row, baseline = baseline, candidate = candidate,
@@ -254,7 +609,10 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_hot12_artifact <- function(
     data_path = "fastkpc/artifacts/kpc_tprs_real_zhu/cancer_RD-causalDiscoveryInput.rds",
     alpha = 0.1,
     max_conditioning_size = 3L,
-    rebuild_cuda = FALSE) {
+    rebuild_cuda = FALSE,
+    parallel_cores = 1L,
+    reference_result_path = NULL,
+    candidate_timeout_sec = NULL) {
   fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact(
     output_dir = output_dir,
     artifact_name = artifact_name,
@@ -262,6 +620,40 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_hot12_artifact <- function(
     columns = c(1L, 2L, 3L, 4L, 5L, 6L, 9L, 12L, 15L, 16L, 17L, 18L),
     alpha = alpha,
     max_conditioning_size = max_conditioning_size,
-    rebuild_cuda = rebuild_cuda
+    rebuild_cuda = rebuild_cuda,
+    parallel_cores = parallel_cores,
+    reference_result_path = reference_result_path,
+    candidate_timeout_sec = candidate_timeout_sec
+  )
+}
+
+fastkpc_run_legacy_dcov_cuda_lowrank_backend_full_artifact <- function(
+    output_dir = "fastkpc/artifacts/legacy_dcov_cuda_lowrank_backend_full_351x48_v1",
+    artifact_name = "legacy_dcov_cuda_lowrank_backend_full_351x48_v1",
+    data_path = "fastkpc/artifacts/kpc_tprs_real_zhu/cancer_RD-causalDiscoveryInput.rds",
+    reference_result_path =
+      paste0("fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/",
+             "compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds"),
+    alpha = 0.1,
+    max_conditioning_size = 46L,
+    rebuild_cuda = FALSE,
+    parallel_cores = 20L,
+    candidate_timeout_sec = NULL,
+    expected_edge_count = 110L,
+    expected_n_edgetests =
+      c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L)) {
+  fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact(
+    output_dir = output_dir,
+    artifact_name = artifact_name,
+    data_path = data_path,
+    columns = NULL,
+    alpha = alpha,
+    max_conditioning_size = max_conditioning_size,
+    rebuild_cuda = rebuild_cuda,
+    parallel_cores = parallel_cores,
+    reference_result_path = reference_result_path,
+    expected_edge_count = expected_edge_count,
+    expected_n_edgetests = expected_n_edgetests,
+    candidate_timeout_sec = candidate_timeout_sec
   )
 }
