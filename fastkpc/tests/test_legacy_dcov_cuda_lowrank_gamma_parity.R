@@ -123,6 +123,45 @@ assert_true(identical(
   as.numeric(cuda_batch$diagnostics$matrix_h2d_ms_during_compute), 0),
   "CUDA lowrank gamma batch helper should not re-upload during compute")
 
+duplicate_x <- cbind(batch_x[, 1L], batch_x[, 1L], batch_x[, 2L],
+                     batch_x[, 1L])
+duplicate_y <- cbind(batch_y[, 1L], batch_y[, 1L], batch_y[, 2L],
+                     batch_y[, 1L])
+duplicate_oracles <- list(batch_oracles[[1L]], batch_oracles[[1L]],
+                          batch_oracles[[2L]], batch_oracles[[1L]])
+cuda_duplicate_batch <- legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch(
+  duplicate_x, duplicate_y, numCol = num_col, index = 1
+)
+duplicate_p_diff <- abs(as.numeric(cuda_duplicate_batch$p.value) -
+                          vapply(duplicate_oracles, function(item) {
+                            as.numeric(item$p.value)
+                          }, numeric(1L)))
+duplicate_nV2_diff <- abs(as.numeric(cuda_duplicate_batch$nV2) -
+                            vapply(duplicate_oracles, function(item) {
+                              as.numeric(item$nV2)
+                            }, numeric(1L)))
+assert_true(max(duplicate_p_diff) < 1e-10,
+            "CUDA lowrank duplicate batch p.values should match oracle")
+assert_true(max(duplicate_nV2_diff) < 1e-7,
+            "CUDA lowrank duplicate batch nV2 values should match oracle")
+assert_true(identical(
+  as.integer(cuda_duplicate_batch$diagnostics$component_cache_lookup_count),
+  2L * ncol(duplicate_x)),
+  "CUDA lowrank duplicate batch should look up both components per pair")
+assert_true(
+  as.integer(cuda_duplicate_batch$diagnostics$component_cache_hit_count) > 0L,
+  "CUDA lowrank duplicate batch should hit repeated residual components"
+)
+assert_true(
+  as.integer(cuda_duplicate_batch$diagnostics$component_cache_miss_count) <
+    2L * ncol(duplicate_x),
+  "CUDA lowrank duplicate batch should avoid repeated component solves"
+)
+assert_true(identical(
+  as.integer(cuda_duplicate_batch$diagnostics$component_cache_entry_count),
+  as.integer(cuda_duplicate_batch$diagnostics$component_cache_miss_count)),
+  "CUDA lowrank duplicate batch should count one entry per component miss")
+
 grid_rows <- lapply(seq_len(6L), function(case_index) {
   item <- cases[[case_index]]
   x <- item$residuals$rx[seq_len(96L)]

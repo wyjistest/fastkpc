@@ -7418,6 +7418,82 @@ decision:
   above.
 ```
 
+Native cuda_spectra batch gamma component-cache substrate checkpoint:
+
+```text
+change:
+  update the exported CUDA Spectra lowrank gamma batch helper:
+
+    legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch()
+
+  The batch export no longer computes two complete lowrank gamma components per
+  pair unconditionally. It interns exact residual/input columns within the
+  batch, computes each bit-identical lowrank component once, and composes
+  p-values from cached X/Y components in the original pair order.
+
+  This moves the component-cache idea below the one-call skeleton path into a
+  reusable CUDA lowrank batch substrate. It is exact-by-construction for cache
+  hits because a hit reuses the same computed component for a bit-identical
+  input column. It does not change legacy dCov authority, skeleton replay,
+  residual authority, or route selection.
+
+new batch diagnostics:
+  component_cache_enabled
+  component_cache_lookup_count
+  component_cache_hit_count
+  component_cache_miss_count
+  component_cache_entry_count
+  component_count
+  component_total_ms
+  component_eig_ms
+  combine_ms
+
+TDD gate:
+  RED:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+
+    failed at:
+      CUDA lowrank duplicate batch should look up both components per pair
+
+  GREEN:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+
+    result:
+      PASS legacy dCov CUDA lowrank gamma parity cases=6
+      max_p_diff = 4e-15
+      max_nV2_diff = 5.68e-14
+
+regression gates:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_route.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+
+regression result:
+  PASS compatible CUDA skeleton native cuda_spectra lowrank
+  PASS compatible CUDA skeleton artifact
+  PASS legacy dCov CUDA lowrank backend route
+  PASS legacy dCov Spectra CUDA matvec
+
+decision:
+  This is a real substrate improvement for batched native cuda_spectra
+  lowrank work, not a full-route promotion. The full 351x48 native
+  cuda_spectra skeleton gate remains open until the one-call path returns a
+  complete candidate skeleton with edge_count = 110, SHD = 0,
+  n.edgetests exact = TRUE, no unexplained fallback, and wall time below the
+  current compatible CPU/C++ route.
+
+  The next aligned implementation step is to reuse this exact component-cache
+  batch substrate from the native one-call dCov data plane, then continue toward
+  a more device-resident or batched eigensolve path that avoids per-component
+  Spectra/CUDA setup overhead.
+```
+
 ---
 
 ## 9. Final success definition

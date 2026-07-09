@@ -3226,13 +3226,80 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch(
   double kernel_ms = 0.0;
   double d2h_ms = 0.0;
   double pair_total_ms = 0.0;
+  int component_cache_lookup_count = 0;
+  int component_cache_hit_count = 0;
+  int component_cache_miss_count = 0;
+  int component_cache_entry_count = 0;
+  double component_total_ms = 0.0;
+  double component_eig_ms = 0.0;
+
+  std::unordered_map<std::string, int> component_by_value;
+  std::vector<LegacyDcovCudaLowrankComponentRun> components;
+  components.reserve(static_cast<std::size_t>(2 * batch));
+  std::vector<int> x_component_index(static_cast<std::size_t>(batch));
+  std::vector<int> y_component_index(static_cast<std::size_t>(batch));
+  auto intern_component = [&](const double* values) {
+    ++component_cache_lookup_count;
+    const std::string key(
+      reinterpret_cast<const char*>(values),
+      sizeof(double) * static_cast<std::size_t>(n));
+    const auto found = component_by_value.find(key);
+    if (found != component_by_value.end()) {
+      ++component_cache_hit_count;
+      return found->second;
+    }
+    ++component_cache_miss_count;
+    ++component_cache_entry_count;
+    const int component_index = static_cast<int>(components.size());
+    LegacyDcovCudaLowrankComponentRun component =
+      legacy_dcov_cuda_lowrank_component_compute(
+        values, n, num_col, ncv, tol, maxitr);
+    if (!component.converged) {
+      Rcpp::stop("CUDA Spectra lowrank did not converge");
+    }
+    component_total_ms += component.total_ms;
+    component_eig_ms += component.eig_ms;
+    const LegacyDcovSpectraCudaOperatorDiagnostics& diagnostics =
+      component.cuda_diagnostics;
+    spectra_matvec_count += diagnostics.spectra_matvec_count;
+    spectra_matvec_ms += diagnostics.spectra_matvec_ms;
+    kernel_launch_count += diagnostics.kernel_launch_count;
+    device_matrix_reuse_count += diagnostics.device_matrix_reuse_count;
+    device_workspace_reuse_count += diagnostics.device_workspace_reuse_count;
+    workspace_realloc_count += diagnostics.workspace_realloc_count;
+    matrix_bytes += component.matrix_bytes;
+    workspace_bytes = std::max(workspace_bytes,
+                               static_cast<double>(diagnostics.workspace_bytes));
+    matrix_h2d_ms += component.matrix_h2d_ms;
+    matrix_h2d_ms_during_compute += diagnostics.matrix_h2d_ms_during_compute;
+    workspace_alloc_ms += diagnostics.workspace_alloc_ms;
+    h2d_ms += diagnostics.h2d_ms;
+    kernel_ms += diagnostics.kernel_ms;
+    d2h_ms += diagnostics.d2h_ms;
+    components.push_back(std::move(component));
+    component_by_value.emplace(key, component_index);
+    return component_index;
+  };
 
   for (int col = 0; col < batch; ++col) {
     const std::size_t offset = static_cast<std::size_t>(n) * col;
+    x_component_index[static_cast<std::size_t>(col)] =
+      intern_component(REAL(xs) + offset);
+    y_component_index[static_cast<std::size_t>(col)] =
+      intern_component(REAL(ys) + offset);
+  }
+
+  const auto combine_start = std::chrono::steady_clock::now();
+  for (int col = 0; col < batch; ++col) {
     const LegacyDcovCudaLowrankGammaRun run =
-      legacy_dcov_cuda_lowrank_gamma_compute(
-        REAL(xs) + offset, REAL(ys) + offset, n, num_col, index, ncv, tol,
-        maxitr);
+      legacy_dcov_cuda_lowrank_gamma_from_components(
+        components[static_cast<std::size_t>(
+          x_component_index[static_cast<std::size_t>(col)])],
+        components[static_cast<std::size_t>(
+          y_component_index[static_cast<std::size_t>(col)])],
+        n,
+        index,
+        false);
     p_values[col] = run.p_value;
     nV2[col] = run.nV2;
     means[col] = run.mean;
@@ -3243,23 +3310,10 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch(
     y_moments[col] = run.y_moment;
     converged_count += run.converged_x ? 1 : 0;
     converged_count += run.converged_y ? 1 : 0;
-    spectra_matvec_count += run.spectra_matvec_count;
-    kernel_launch_count += run.kernel_launch_count;
-    device_matrix_reuse_count += run.device_matrix_reuse_count;
-    device_workspace_reuse_count += run.device_workspace_reuse_count;
-    workspace_realloc_count += run.workspace_realloc_count;
-    spectra_matvec_ms += run.spectra_matvec_ms;
-    eig_ms += run.eig_ms;
-    matrix_bytes += run.matrix_bytes;
-    workspace_bytes = std::max(workspace_bytes, run.workspace_bytes);
-    matrix_h2d_ms += run.matrix_h2d_ms;
-    matrix_h2d_ms_during_compute += run.matrix_h2d_ms_during_compute;
-    workspace_alloc_ms += run.workspace_alloc_ms;
-    h2d_ms += run.h2d_ms;
-    kernel_ms += run.kernel_ms;
-    d2h_ms += run.d2h_ms;
-    pair_total_ms += run.total_ms;
   }
+  const double combine_ms = elapsed_ms_since(combine_start);
+  eig_ms = component_eig_ms;
+  pair_total_ms = component_total_ms + combine_ms;
 
   return Rcpp::List::create(
     Rcpp::Named("backend") =
@@ -3281,6 +3335,20 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch(
       Rcpp::Named("maxitr") = maxitr,
       Rcpp::Named("batch_count") = batch,
       Rcpp::Named("converged_count") = converged_count,
+      Rcpp::Named("component_cache_enabled") = true,
+      Rcpp::Named("component_cache_lookup_count") =
+        component_cache_lookup_count,
+      Rcpp::Named("component_cache_hit_count") =
+        component_cache_hit_count,
+      Rcpp::Named("component_cache_miss_count") =
+        component_cache_miss_count,
+      Rcpp::Named("component_cache_entry_count") =
+        component_cache_entry_count,
+      Rcpp::Named("component_count") =
+        static_cast<int>(components.size()),
+      Rcpp::Named("component_total_ms") = component_total_ms,
+      Rcpp::Named("component_eig_ms") = component_eig_ms,
+      Rcpp::Named("combine_ms") = combine_ms,
       Rcpp::Named("spectra_matvec_count") = spectra_matvec_count,
       Rcpp::Named("spectra_matvec_ms") = spectra_matvec_ms,
       Rcpp::Named("kernel_launch_count") = kernel_launch_count,
