@@ -4321,11 +4321,18 @@ then a list of `FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE` candidate values
 for either `FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=round` or `chunk`. It writes:
 
 ```text
+progress.csv
 summary.csv
 runtime_by_level.csv
 result.rds
 summary.md
 ```
+
+`progress.csv` is written incrementally before long work starts. It records
+reference/candidate `start`, `complete`, and error events with route,
+batch-mode, min-size, status, elapsed time, and timestamp. If a full candidate
+is terminated before final artifacts are written, `progress.csv` should still
+identify the active route and min-size candidate that was running.
 
 Full-gate shape:
 

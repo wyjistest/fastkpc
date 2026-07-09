@@ -20,6 +20,36 @@ fastkpc_legacy_dcov_batch_summary_value <- function(summary, name, default) {
   if (is.null(value)) default else value
 }
 
+fastkpc_legacy_dcov_batch_progress_row <- function(
+    artifact_name, route, batch_mode, batch_min_size, event, status,
+    elapsed_sec = NA_real_, message = NA_character_) {
+  data.frame(
+    artifact = artifact_name,
+    route = route,
+    batch_mode = if (nzchar(batch_mode)) batch_mode else "none",
+    batch_min_size = as.integer(batch_min_size %||% NA_integer_),
+    event = event,
+    status = status,
+    elapsed_sec = as.numeric(elapsed_sec),
+    message = message %||% NA_character_,
+    timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S %z"),
+    stringsAsFactors = FALSE
+  )
+}
+
+fastkpc_legacy_dcov_batch_append_progress <- function(path, row) {
+  utils::write.table(
+    row,
+    file = path,
+    sep = ",",
+    row.names = FALSE,
+    col.names = !file.exists(path),
+    append = file.exists(path),
+    qmethod = "double"
+  )
+  invisible(TRUE)
+}
+
 fastkpc_legacy_dcov_batch_extract_reference <- function(result) {
   candidates <- list(
     root = result,
@@ -279,7 +309,29 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
     Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY")
   }
 
-  reference_source <- "computed"
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  paths <- list(
+    summary_csv = file.path(output_dir, "summary.csv"),
+    progress_csv = file.path(output_dir, "progress.csv"),
+    runtime_by_level_csv = file.path(output_dir, "runtime_by_level.csv"),
+    result_rds = file.path(output_dir, "result.rds"),
+    summary_md = file.path(output_dir, "summary.md")
+  )
+  if (file.exists(paths$progress_csv)) unlink(paths$progress_csv)
+
+  reference_source <- if (is.null(reference_result_path)) "computed" else "rds"
+  fastkpc_legacy_dcov_batch_append_progress(
+    paths$progress_csv,
+    fastkpc_legacy_dcov_batch_progress_row(
+      artifact_name = artifact_name,
+      route = "reference",
+      batch_mode = "",
+      batch_min_size = NA_integer_,
+      event = "start",
+      status = reference_source
+    )
+  )
+  reference_start <- proc.time()[["elapsed"]]
   if (is.null(reference_result_path)) {
     reference <- fastkpc_legacy_dcov_batch_run_once(
       data = data,
@@ -292,19 +344,32 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
       batch_min_size = NA_integer_,
       trace_level = trace_level
     )
+    reference_elapsed <- as.numeric(reference$elapsed)
   } else {
     if (!file.exists(reference_result_path)) {
       stop("reference result not found: ", reference_result_path,
            call. = FALSE)
     }
-    reference_source <- "rds"
     reference <- list(
       value = fastkpc_legacy_dcov_batch_extract_reference(
         readRDS(reference_result_path)
       ),
       elapsed = 0
     )
+    reference_elapsed <- proc.time()[["elapsed"]] - reference_start
   }
+  fastkpc_legacy_dcov_batch_append_progress(
+    paths$progress_csv,
+    fastkpc_legacy_dcov_batch_progress_row(
+      artifact_name = artifact_name,
+      route = "reference",
+      batch_mode = "",
+      batch_min_size = NA_integer_,
+      event = "complete",
+      status = reference_source,
+      elapsed_sec = reference_elapsed
+    )
+  )
 
   rows <- list(fastkpc_legacy_dcov_batch_summary_row(
     artifact_name = artifact_name,
@@ -329,17 +394,58 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
     run = reference
   ))
   candidates <- list()
+
   for (min_size in min_sizes) {
-    candidate <- fastkpc_legacy_dcov_batch_run_once(
-      data = data,
-      alpha = alpha,
-      max_conditioning_size = max_conditioning_size,
-      index = index,
-      numCol = numCol,
-      num_cores = num_cores,
-      batch_mode = batch_mode,
-      batch_min_size = min_size,
-      trace_level = trace_level
+    fastkpc_legacy_dcov_batch_append_progress(
+      paths$progress_csv,
+      fastkpc_legacy_dcov_batch_progress_row(
+        artifact_name = artifact_name,
+        route = "candidate",
+        batch_mode = batch_mode,
+        batch_min_size = min_size,
+        event = "start",
+        status = "running"
+      )
+    )
+    candidate <- tryCatch(
+      fastkpc_legacy_dcov_batch_run_once(
+        data = data,
+        alpha = alpha,
+        max_conditioning_size = max_conditioning_size,
+        index = index,
+        numCol = numCol,
+        num_cores = num_cores,
+        batch_mode = batch_mode,
+        batch_min_size = min_size,
+        trace_level = trace_level
+      ),
+      error = function(e) {
+        fastkpc_legacy_dcov_batch_append_progress(
+          paths$progress_csv,
+          fastkpc_legacy_dcov_batch_progress_row(
+            artifact_name = artifact_name,
+            route = "candidate",
+            batch_mode = batch_mode,
+            batch_min_size = min_size,
+            event = "error",
+            status = "error",
+            message = conditionMessage(e)
+          )
+        )
+        stop(e)
+      }
+    )
+    fastkpc_legacy_dcov_batch_append_progress(
+      paths$progress_csv,
+      fastkpc_legacy_dcov_batch_progress_row(
+        artifact_name = artifact_name,
+        route = "candidate",
+        batch_mode = batch_mode,
+        batch_min_size = min_size,
+        event = "complete",
+        status = "ok",
+        elapsed_sec = candidate$elapsed
+      )
     )
     name <- paste0(batch_mode, "_min_", min_size)
     candidates[[name]] <- candidate
@@ -370,13 +476,6 @@ fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact <- function(
 
   summary <- do.call(rbind, rows)
   runtime_by_level <- do.call(rbind, by_level_rows)
-  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-  paths <- list(
-    summary_csv = file.path(output_dir, "summary.csv"),
-    runtime_by_level_csv = file.path(output_dir, "runtime_by_level.csv"),
-    result_rds = file.path(output_dir, "result.rds"),
-    summary_md = file.path(output_dir, "summary.md")
-  )
   utils::write.csv(summary, paths$summary_csv, row.names = FALSE)
   utils::write.csv(runtime_by_level, paths$runtime_by_level_csv,
                    row.names = FALSE)

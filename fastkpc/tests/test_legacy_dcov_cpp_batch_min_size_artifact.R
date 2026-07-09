@@ -46,6 +46,8 @@ artifact <- fastkpc_run_legacy_dcov_cpp_batch_min_size_artifact(
 
 assert_true(file.exists(artifact$paths$summary_csv),
             "artifact runner should write summary.csv")
+assert_true(file.exists(artifact$paths$progress_csv),
+            "artifact runner should write progress.csv")
 assert_true(file.exists(artifact$paths$runtime_by_level_csv),
             "artifact runner should write runtime_by_level.csv")
 assert_true(file.exists(artifact$paths$result_rds),
@@ -55,6 +57,27 @@ assert_true(file.exists(artifact$paths$summary_md),
 
 summary <- utils::read.csv(artifact$paths$summary_csv,
                            stringsAsFactors = FALSE)
+progress <- utils::read.csv(artifact$paths$progress_csv,
+                            stringsAsFactors = FALSE)
+required_progress <- c(
+  "artifact", "route", "batch_mode", "batch_min_size", "event",
+  "elapsed_sec", "status"
+)
+missing_progress <- setdiff(required_progress, names(progress))
+assert_true(length(missing_progress) == 0L,
+            paste("artifact progress missing", missing_progress[[1L]]))
+assert_true(any(progress$route == "reference" &
+                  progress$event == "start"),
+            "artifact progress should record reference start")
+assert_true(any(progress$route == "reference" &
+                  progress$event == "complete"),
+            "artifact progress should record reference completion")
+assert_true(sum(progress$route == "candidate" &
+                  progress$event == "start") == 2L,
+            "artifact progress should record candidate starts")
+assert_true(sum(progress$route == "candidate" &
+                  progress$event == "complete") == 2L,
+            "artifact progress should record candidate completions")
 required <- c(
   "artifact", "route", "batch_mode", "batch_min_size", "n", "p",
   "reference_source", "reference_result_path",
