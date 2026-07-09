@@ -641,11 +641,11 @@ precision_run_skeleton_legacy_mgcv_legacy_dcov_native <- function(
     data, alpha, max_conditioning_size,
     index = 1, numCol = floor(nrow(as.matrix(data)) / 10),
     trace_level = c("summary", "full", "none"),
-    dcov_batch = c("env", "none", "level", "canonical")) {
+    dcov_batch = c("env", "none", "level", "canonical", "round")) {
   dcov_batch <- match.arg(dcov_batch)
   old_dcov_batch <- Sys.getenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH",
                                unset = NA_character_)
-  if (dcov_batch %in% c("level", "canonical")) {
+  if (dcov_batch %in% c("level", "canonical", "round")) {
     Sys.setenv(FASTKPC_NATIVE_LEGACY_DCOV_BATCH = dcov_batch)
     on.exit({
       if (is.na(old_dcov_batch)) {

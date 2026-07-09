@@ -131,6 +131,16 @@ one_call_canonical_batch <- precision_run_skeleton_legacy_mgcv_legacy_dcov_nativ
   dcov_batch = "canonical"
 )
 
+one_call_round_batch <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
+  data = data,
+  alpha = alpha,
+  max_conditioning_size = max_conditioning_size,
+  index = index,
+  numCol = numCol,
+  trace_level = "full",
+  dcov_batch = "round"
+)
+
 Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS = "2")
 one_call_threaded_batch <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
   data = data,
@@ -252,6 +262,8 @@ assert_true(identical(one_call_batch$adjacency, explicit$adjacency),
             "one-call level-batched legacy dCov adjacency should match explicit provider")
 assert_true(identical(one_call_canonical_batch$adjacency, explicit$adjacency),
             "one-call canonical-batched legacy dCov adjacency should match explicit provider")
+assert_true(identical(one_call_round_batch$adjacency, explicit$adjacency),
+            "one-call round-batched legacy dCov adjacency should match explicit provider")
 assert_true(identical(one_call_threaded_batch$adjacency, explicit$adjacency),
             "one-call threaded-batched legacy dCov adjacency should match explicit provider")
 assert_true(identical(one_call_parallel_provider$adjacency, explicit$adjacency),
@@ -271,6 +283,8 @@ assert_true(max(abs(one_call_batch$pMax - explicit$pMax)) < 1e-12,
             "one-call level-batched legacy dCov pMax should match explicit provider")
 assert_true(max(abs(one_call_canonical_batch$pMax - explicit$pMax)) < 1e-12,
             "one-call canonical-batched legacy dCov pMax should match explicit provider")
+assert_true(max(abs(one_call_round_batch$pMax - explicit$pMax)) < 1e-12,
+            "one-call round-batched legacy dCov pMax should match explicit provider")
 assert_true(max(abs(one_call_threaded_batch$pMax - explicit$pMax)) < 1e-12,
             "one-call threaded-batched legacy dCov pMax should match explicit provider")
 assert_true(max(abs(one_call_parallel_provider$pMax - explicit$pMax)) < 1e-12,
@@ -291,6 +305,9 @@ assert_true(identical(as.integer(one_call_batch$n.edgetests),
 assert_true(identical(as.integer(one_call_canonical_batch$n.edgetests),
                       as.integer(explicit$n.edgetests)),
             "one-call canonical-batched legacy dCov n.edgetests should match explicit provider")
+assert_true(identical(as.integer(one_call_round_batch$n.edgetests),
+                      as.integer(explicit$n.edgetests)),
+            "one-call round-batched legacy dCov n.edgetests should match explicit provider")
 assert_true(identical(as.integer(one_call_parallel_provider$n.edgetests),
                       as.integer(explicit$n.edgetests)),
             "one-call parallel residual provider n.edgetests should match explicit provider")
@@ -309,6 +326,8 @@ assert_true(compare_sepsets(one_call_batch$sepsets, explicit$sepsets),
             "one-call level-batched legacy dCov sepsets should match explicit provider")
 assert_true(compare_sepsets(one_call_canonical_batch$sepsets, explicit$sepsets),
             "one-call canonical-batched legacy dCov sepsets should match explicit provider")
+assert_true(compare_sepsets(one_call_round_batch$sepsets, explicit$sepsets),
+            "one-call round-batched legacy dCov sepsets should match explicit provider")
 assert_true(compare_sepsets(one_call_parallel_provider$sepsets, explicit$sepsets),
             "one-call parallel residual provider sepsets should match explicit provider")
 assert_true(compare_sepsets(one_call_cpp_residual$sepsets, explicit$sepsets),
@@ -328,6 +347,9 @@ assert_true(identical(as.integer(one_call_batch$summary$residual_provider_reques
 assert_true(identical(as.integer(one_call_canonical_batch$summary$residual_provider_request_count),
                       as.integer(explicit$summary$residual_provider_request_count)),
             "one-call canonical-batched wrapper should preserve residual request count")
+assert_true(identical(as.integer(one_call_round_batch$summary$residual_provider_request_count),
+                      as.integer(explicit$summary$residual_provider_request_count)),
+            "one-call round-batched wrapper should preserve residual request count")
 assert_true(identical(as.integer(one_call_parallel_provider$summary$residual_provider_request_count),
                       as.integer(explicit$summary$residual_provider_request_count)),
             "one-call parallel residual provider should preserve residual request count")
@@ -432,6 +454,11 @@ assert_true(isTRUE(one_call_canonical_batch$summary$legacy_dcov_native_batch_ena
 assert_true(identical(one_call_canonical_batch$summary$legacy_dcov_native_batch_mode,
                       "canonical"),
             "one-call canonical batch should record canonical mode")
+assert_true(isTRUE(one_call_round_batch$summary$legacy_dcov_native_batch_enabled),
+            "one-call dcov_batch='round' should enable native legacy dCov batching")
+assert_true(identical(one_call_round_batch$summary$legacy_dcov_native_batch_mode,
+                      "round"),
+            "one-call round batch should record round mode")
 assert_true(isTRUE(one_call_threaded_batch$summary$legacy_dcov_native_batch_parallel_enabled),
             "one-call threaded batch should record dCov batch parallel enabled")
 assert_true(identical(as.integer(one_call_threaded_batch$summary$legacy_dcov_native_batch_parallel_threads),
@@ -502,18 +529,30 @@ assert_true(identical(as.integer(one_call_batch$summary$legacy_dcov_native_batch
 assert_true(identical(as.integer(one_call_canonical_batch$summary$legacy_dcov_native_count),
                       sum(as.integer(one_call_canonical_batch$n.edgetests))),
             "one-call canonical batch should only compute replayed native dCov tests")
+assert_true(identical(as.integer(one_call_round_batch$summary$legacy_dcov_native_count),
+                      sum(as.integer(one_call_round_batch$n.edgetests))),
+            "one-call round batch should only compute replayed native dCov tests")
 assert_true(as.integer(one_call_canonical_batch$summary$legacy_dcov_native_count) <=
               as.integer(one_call_batch$summary$legacy_dcov_native_count),
             "one-call canonical batch should not compute more native dCov tests than level batch")
+assert_true(as.integer(one_call_round_batch$summary$legacy_dcov_native_count) <=
+              as.integer(one_call_batch$summary$legacy_dcov_native_count),
+            "one-call round batch should not compute more native dCov tests than level batch")
 assert_true(identical(as.integer(one_call_canonical_batch$summary$legacy_dcov_native_batch_pair_count),
                       as.integer(one_call_canonical_batch$summary$legacy_dcov_native_count)),
             "one-call canonical batch should report all computed native dCov tests as batch pairs")
+assert_true(identical(as.integer(one_call_round_batch$summary$legacy_dcov_native_batch_pair_count),
+                      as.integer(one_call_round_batch$summary$legacy_dcov_native_count)),
+            "one-call round batch should report all computed native dCov tests as batch pairs")
 assert_true(identical(as.integer(one_call_batch$summary$legacy_dcov_native_batch_column_materialize_count),
                       2L * as.integer(one_call_batch$summary$legacy_dcov_native_batch_pair_count)),
             "one-call level-batched wrapper should report host batch matrix materialization")
 assert_true(identical(as.integer(one_call_canonical_batch$summary$legacy_dcov_native_batch_column_materialize_count),
                       2L * as.integer(one_call_canonical_batch$summary$legacy_dcov_native_batch_pair_count)),
             "one-call canonical-batched wrapper should report host batch matrix materialization")
+assert_true(identical(as.integer(one_call_round_batch$summary$legacy_dcov_native_batch_column_materialize_count),
+                      2L * as.integer(one_call_round_batch$summary$legacy_dcov_native_batch_pair_count)),
+            "one-call round-batched wrapper should report host batch matrix materialization")
 assert_true(!nzchar(Sys.getenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH", unset = "")),
             "one-call dcov_batch argument should not leak FASTKPC_NATIVE_LEGACY_DCOV_BATCH")
 

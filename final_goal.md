@@ -109,12 +109,17 @@ C++ Spectra legacy dCov backend:      ~19.8 min, SHD=0
 + target|S residual cache:            ~16.3 min, SHD=0
 + S-affinity residual scheduling:      ~14.8 min, SHD=0
 native one-call threaded level dCov:   ~13.0 min, SHD=0, n.edgetests exact
+native one-call threaded round dCov:   ~9.9 min, SHD=0, n.edgetests exact
 ```
 
 The native one-call threaded level dCov route is a full 351x48 compatible
 facade candidate, not a default route. It keeps legacy mgcv/regrXonS as the
 residual authority and native legacy dCov as the CI authority, with threaded
 C++ batch execution enabled explicitly during the artifact run.
+
+The native one-call threaded round dCov route supersedes level batching as the
+best full one-call facade candidate so far: it computes only replayed dCov
+tests while preserving the same skeleton and `n.edgetests`.
 
 ### 2.3 Experimental or non-recommended routes
 
@@ -4954,6 +4959,138 @@ correctness-clean and faster than the current stable S-affinity reference
 artifact. It is an env-gated compatible one-call candidate, not a default route.
 The residual authority remains legacy mgcv/regrXonS and the CI authority remains
 native legacy dCov.gamma.
+```
+
+### 8.13 Native one-call threaded round dCov checkpoint
+
+The level-batched native dCov route is fast because it uses one large dCov
+batch per skeleton level, but it overcomputes same-level tasks that are later
+ignored after an edge has already been deleted. A new env-gated native dCov
+batch mode addresses this:
+
+```bash
+FASTKPC_NATIVE_LEGACY_DCOV_BATCH=round
+```
+
+R-facing wrapper option:
+
+```r
+dcov_batch = "round"
+```
+
+Execution shape:
+
+```text
+for each skeleton level:
+  keep the same level plan and residual provider request set
+  keep the same edge-local deletion state
+  each round selects at most one unreplayed non-ignored task per edge
+  run one native legacy dCov batch for the selected tasks
+  replay those p-values and mark deleted edges
+  continue until all planned tasks are replayed or ignored
+```
+
+This keeps default behavior unchanged and only changes execution under the
+explicit `round` batch mode. It preserves legacy mgcv/regrXonS residual
+authority and native legacy dCov.gamma CI authority.
+
+Targeted gate:
+
+```bash
+Rscript -e 'source("fastkpc/R/cuda_native.R"); build_fastkpc_cuda_native(rebuild = TRUE)'
+Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_batch_oracle.R
+Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+git diff --check
+```
+
+Hot12 real subset check:
+
+```text
+env:
+  FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=4
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=4
+
+level elapsed:      14.927 sec
+round elapsed:      14.316 sec
+adjacency exact:    TRUE
+n.edgetests exact:  TRUE
+pMax max diff:      0
+
+level dCov count:   3,800
+round dCov count:   2,578
+level batch count:  3
+round batch count:  112
+```
+
+Full 351x48 artifact:
+
+```text
+fastkpc/artifacts/compatible_cuda_skeleton_threaded_round_dcov_full_351x48_v1
+```
+
+Run shape:
+
+```bash
+FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=20
+FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=20
+
+dcov_batch = "round"
+low_rank   = "spectra"
+timeout    = 900 sec
+```
+
+Result:
+
+```text
+run_status:          ok
+elapsed_sec:         592.259
+edge_count:          110 / 110
+SHD:                 0
+n.edgetests exact:   TRUE
+n.edgetests:         2213,52659,125293,40694,13293,5422,835,80
+pMax max abs diff:   0
+
+residual provider:
+  request_count:     132,908
+  total_ms:          330,127.6
+  parallel_cores:    20
+
+native dCov:
+  count:             240,489
+  batch_count:       4,060
+  pair_count:        240,489
+  threaded:          TRUE
+  threads:           20
+  materialize_ms:    1,172.203
+  batch_call_ms:     258,190.6
+```
+
+Comparison:
+
+```text
+S-affinity reference artifact elapsed_sec:    853.847
+threaded level one-call elapsed_sec:          782.695
+threaded round one-call elapsed_sec:          592.259
+
+delta vs S-affinity reference:                -261.588 sec
+delta vs threaded level one-call:             -190.436 sec
+
+level one-call dCov count:                    479,509
+round one-call dCov count:                    240,489
+```
+
+Decision:
+
+```text
+This is the best full 351x48 compatible one-call facade candidate so far:
+correctness-clean, n.edgetests-exact, and materially faster than both the
+S-affinity reference artifact and the threaded level one-call route.
+
+It remains env-gated and non-default. The remaining dominant cost is split
+between the legacy mgcv/regrXonS residual provider and native legacy dCov; the
+final compatible.cuda goal still requires moving more of that data plane toward
+C++/CUDA rather than stopping at this CPU threaded candidate.
 ```
 
 ---

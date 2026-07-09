@@ -54,7 +54,8 @@ bool all_finite_vector(Rcpp::NumericVector values) {
 enum class NativeLegacyDcovBatchMode {
   None,
   Level,
-  Canonical
+  Canonical,
+  Round
 };
 
 NativeLegacyDcovBatchMode native_legacy_dcov_batch_mode_from_env() {
@@ -67,6 +68,7 @@ NativeLegacyDcovBatchMode native_legacy_dcov_batch_mode_from_env() {
                  });
   if (value == "level") return NativeLegacyDcovBatchMode::Level;
   if (value == "canonical") return NativeLegacyDcovBatchMode::Canonical;
+  if (value == "round") return NativeLegacyDcovBatchMode::Round;
   return NativeLegacyDcovBatchMode::None;
 }
 
@@ -77,6 +79,8 @@ const char* native_legacy_dcov_batch_mode_name(
       return "level";
     case NativeLegacyDcovBatchMode::Canonical:
       return "canonical";
+    case NativeLegacyDcovBatchMode::Round:
+      return "round";
     case NativeLegacyDcovBatchMode::None:
     default:
       return "none";
@@ -4198,7 +4202,9 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       for (int i = 0; i < task_count; ++i) task_indices[i] = i;
       pvalues = run_dcov_batch_for_tasks(task_indices);
     } else if (legacy_dcov_native_batch_mode !=
-               NativeLegacyDcovBatchMode::Canonical) {
+                 NativeLegacyDcovBatchMode::Canonical &&
+               legacy_dcov_native_batch_mode !=
+                 NativeLegacyDcovBatchMode::Round) {
       for (int i = 0; i < task_count; ++i) {
         const std::chrono::steady_clock::time_point materialize_start =
           std::chrono::steady_clock::now();
@@ -4297,6 +4303,58 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         }
       }
       flush_pending();
+    } else if (legacy_dcov_native_batch_mode ==
+               NativeLegacyDcovBatchMode::Round) {
+      std::vector<unsigned char> replayed(
+        static_cast<std::size_t>(task_count), 0);
+      int remaining_tasks = task_count;
+
+      while (remaining_tasks > 0) {
+        std::vector<int> pending_task_indices;
+        std::map<int, bool> pending_edge_keys;
+        bool made_progress = false;
+
+        for (int i = 0; i < task_count; ++i) {
+          if (replayed[static_cast<std::size_t>(i)] != 0) continue;
+          const LayerCiTask& task = plan.tasks[i];
+          const int edge_key = task.edge_x < task.edge_y
+            ? task.edge_x * p + task.edge_y
+            : task.edge_y * p + task.edge_x;
+          const bool ignored = edge_done[edge_key] ||
+            adjacency[static_cast<std::size_t>(task.edge_x) * p +
+                      task.edge_y] == 0;
+          if (ignored) {
+            replay_task(i, NA_REAL);
+            replayed[static_cast<std::size_t>(i)] = 1;
+            --remaining_tasks;
+            made_progress = true;
+            continue;
+          }
+          if (pending_edge_keys.find(edge_key) != pending_edge_keys.end()) {
+            continue;
+          }
+          pending_task_indices.push_back(i);
+          pending_edge_keys[edge_key] = true;
+        }
+
+        if (!pending_task_indices.empty()) {
+          const std::vector<double> pending_pvalues =
+            run_dcov_batch_for_tasks(pending_task_indices);
+          for (int i = 0; i < static_cast<int>(pending_task_indices.size()); ++i) {
+            const int task_index = pending_task_indices[i];
+            replay_task(task_index, pending_pvalues[i]);
+            if (replayed[static_cast<std::size_t>(task_index)] == 0) {
+              replayed[static_cast<std::size_t>(task_index)] = 1;
+              --remaining_tasks;
+            }
+          }
+          made_progress = true;
+        }
+
+        if (!made_progress) {
+          Rcpp::stop("native round dCov batch made no replay progress");
+        }
+      }
     } else {
       for (int i = 0; i < task_count; ++i) {
         replay_task(i, pvalues[i]);
