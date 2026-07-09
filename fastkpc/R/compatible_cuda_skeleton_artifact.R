@@ -79,6 +79,58 @@ fastkpc_compatible_cuda_run_with_timeout <- function(
       message = "facade candidate timed out before execution"
     ))
   }
+
+  if (identical(.Platform$OS.type, "unix")) {
+    job <- parallel::mcparallel(
+      tryCatch(
+        list(ok = TRUE, value = fun()),
+        error = function(e) {
+          list(ok = FALSE, message = conditionMessage(e), class = class(e))
+        }
+      ),
+      mc.set.seed = FALSE,
+      silent = TRUE
+    )
+    cleanup_job <- TRUE
+    on.exit({
+      if (isTRUE(cleanup_job)) {
+        try(tools::pskill(job$pid, 15L), silent = TRUE)
+        try(parallel::mccollect(job, wait = FALSE), silent = TRUE)
+      }
+    }, add = TRUE)
+    collected <- NULL
+    repeat {
+      collected <- parallel::mccollect(job, wait = FALSE)
+      if (!is.null(collected) && length(collected) > 0L &&
+          !is.null(collected[[1L]])) {
+        break
+      }
+      elapsed <- proc.time()[["elapsed"]] - start
+      if (elapsed >= timeout_sec) {
+        cleanup_job <- FALSE
+        try(tools::pskill(job$pid, 15L), silent = TRUE)
+        Sys.sleep(0.2)
+        try(tools::pskill(job$pid, 9L), silent = TRUE)
+        try(parallel::mccollect(job, wait = FALSE), silent = TRUE)
+        stop(fastkpc_compatible_cuda_timeout_error(
+          timeout_sec = timeout_sec,
+          elapsed_sec = elapsed,
+          message = paste0("facade candidate exceeded timeout_sec=", timeout_sec)
+        ))
+      }
+      Sys.sleep(min(0.1, max(0.01, timeout_sec - elapsed)))
+    }
+    cleanup_job <- FALSE
+    payload <- collected[[1L]]
+    if (is.list(payload) && isTRUE(payload$ok)) {
+      return(payload$value)
+    }
+    if (is.list(payload) && identical(payload$ok, FALSE)) {
+      stop(simpleError(payload$message %||% "facade candidate failed"))
+    }
+    return(payload)
+  }
+
   setTimeLimit(cpu = Inf, elapsed = timeout_sec, transient = TRUE)
   on.exit(setTimeLimit(cpu = Inf, elapsed = Inf, transient = FALSE), add = TRUE)
   tryCatch(
@@ -310,7 +362,7 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
   provider_counts$level_calls <- 0L
   provider_counts$request_count <- 0L
 
-  reference_source <- "computed"
+  reference_source <- if (is.null(reference_result_path)) "computed" else "rds"
   reference_slot <- "computed"
   fastkpc_compatible_cuda_append_progress(
     paths$progress_csv,
@@ -346,7 +398,6 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     loaded_reference <- readRDS(reference_result_path)
     reference <- fastkpc_compatible_cuda_extract_reference(loaded_reference)
     reference_slot <- attr(reference, "fastkpc_reference_slot", exact = TRUE)
-    reference_source <- "rds"
     reference_timed <- list(
       value = reference,
       elapsed = 0

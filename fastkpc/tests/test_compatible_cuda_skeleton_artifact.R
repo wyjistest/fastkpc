@@ -35,6 +35,25 @@ Sys.setenv(FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND = "caller-sentinel")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD")
 
+if (identical(.Platform$OS.type, "unix")) {
+  timeout_start <- proc.time()[["elapsed"]]
+  timeout_result <- tryCatch(
+    fastkpc_compatible_cuda_run_with_timeout(
+      function() {
+        system("sleep 3")
+        "completed"
+      },
+      candidate_timeout_sec = 1
+    ),
+    fastkpc_compatible_cuda_timeout = function(e) e
+  )
+  timeout_elapsed <- proc.time()[["elapsed"]] - timeout_start
+  assert_true(inherits(timeout_result, "fastkpc_compatible_cuda_timeout"),
+              "compatible CUDA timeout helper should raise timeout condition")
+  assert_true(timeout_elapsed < 2.5,
+              "compatible CUDA timeout helper should interrupt long system calls")
+}
+
 set.seed(91573)
 n <- 64L
 z1 <- stats::runif(n, -2, 2)
@@ -90,6 +109,10 @@ assert_true(any(timeout_progress$route == "facade" &
                   timeout_progress$event == "timeout" &
                   timeout_progress$status == "timeout"),
             "timeout artifact progress should record facade timeout")
+assert_true(any(timeout_progress$route == "reference" &
+                  timeout_progress$event == "start" &
+                  timeout_progress$status == "rds"),
+            "timeout artifact progress should record RDS reference start")
 assert_true(is.null(timeout_artifact$facade),
             "timeout artifact should not return a completed facade result")
 

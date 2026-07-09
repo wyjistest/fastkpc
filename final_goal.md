@@ -3488,6 +3488,45 @@ completion/timeout events, and timeout candidates still produce `summary.csv`,
 `result.rds`, and `summary.md` with `run_status = timeout` and unknown
 correctness fields as `NA`.
 
+Follow-up full run with the initial R-level timeout guard:
+
+```text
+artifact target:
+  fastkpc/artifacts/compatible_cuda_skeleton_full_351x48_v1
+
+candidate_timeout_sec = 1800
+reference_source = rds
+reference_edge_count = 110
+reference_n.edgetests = 2213,52659,125293,40694,13293,5422,835,80
+
+result:
+  facade candidate remained CPU-bound past the 1800 sec timeout threshold
+  process was manually terminated at ~1826 sec elapsed
+  progress.csv only had reference start/complete and facade start
+  no summary.csv / result.rds / summary.md were written
+
+decision:
+  base R setTimeLimit is not a reliable guard for this long one-call facade
+  path. The artifact runner must use a process-level watchdog for full gates.
+```
+
+The artifact runner now uses a Unix child-process watchdog when
+`candidate_timeout_sec` is set. A full-path timeout smoke artifact verifies the
+guardrail:
+
+```text
+artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_full_351x48_timeout_smoke_v1
+
+candidate_timeout_sec = 5
+run_status = timeout
+timeout = TRUE
+elapsed_sec = 5
+reference_edge_count = 110
+reference_n.edgetests = 2213,52659,125293,40694,13293,5422,835,80
+progress.csv has facade timeout row
+```
+
 ### Gate
 
 ```text
