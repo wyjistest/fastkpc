@@ -6811,6 +6811,70 @@ decision:
   current pair-serial Spectra loop.
 ```
 
+Native cuda_spectra batch progress diagnostic checkpoint:
+
+```text
+change:
+  add native progress rows for the CUDA lowrank dCov branch:
+
+    dcov_cuda_lowrank_batch_start
+    dcov_cuda_lowrank_pair_progress
+    dcov_cuda_lowrank_batch_complete
+
+  The rows reuse native_progress.csv and are emitted only when the native
+  progress path is configured. `tests_replayed` records cumulative CUDA
+  lowrank dCov pairs completed, so timeout artifacts can now show batch-internal
+  progress instead of only level-level dCov start/complete rows.
+
+progress interval:
+  FASTKPC_NATIVE_CUDA_LOWRANK_PROGRESS_INTERVAL
+  default = 256 completed pairs
+  final pair in every batch is always reported
+
+small artifact:
+  fastkpc/artifacts/
+    compatible_cuda_skeleton_native_cuda_lowrank_progress_smoke_v1
+
+scope:
+  native one-call compatible CUDA skeleton facade
+  n = 54, p = 5 synthetic route fixture
+  dcov_batch = "level"
+  low_rank = "cuda_spectra"
+  CPU Spectra native facade reference
+
+result:
+  run_status = ok
+  SHD = 0
+  n.edgetests identical = TRUE
+  CUDA lowrank backend count = 46
+
+native progress event counts:
+  dcov_cuda_lowrank_batch_start = 2
+  dcov_cuda_lowrank_pair_progress = 2
+  dcov_cuda_lowrank_batch_complete = 2
+
+gate:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+related verification:
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_route.R
+
+decision:
+  This is diagnostic substrate, not a promotion. It makes the known
+  pair-serial native cuda_spectra bottleneck observable inside long full-route
+  timeout artifacts. The next full-route attempt should use these rows to split
+  large round batches before any new promotion claim. A real performance step
+  still requires replacing the pair-serial CUDA lowrank loop with a batched or
+  device-resident implementation.
+```
+
 ---
 
 ## 9. Final success definition

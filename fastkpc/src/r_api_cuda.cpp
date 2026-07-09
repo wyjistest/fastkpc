@@ -581,6 +581,13 @@ std::string native_legacy_progress_csv_path_from_env() {
   return std::string(raw);
 }
 
+int native_legacy_cuda_lowrank_progress_interval() {
+  const char* raw = std::getenv("FASTKPC_NATIVE_CUDA_LOWRANK_PROGRESS_INTERVAL");
+  if (raw == nullptr) return 256;
+  const int value = std::atoi(raw);
+  return value > 0 ? value : 256;
+}
+
 void append_native_legacy_progress(
     const std::string& path,
     const std::string& event,
@@ -5121,6 +5128,8 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
     native_legacy_dcov_cuda_lowrank_ncv(n, num_col);
   const double legacy_dcov_native_cuda_lowrank_tol = 1e-10;
   const int legacy_dcov_native_cuda_lowrank_maxitr = 1000;
+  const int legacy_dcov_native_cuda_lowrank_progress_interval =
+    native_legacy_cuda_lowrank_progress_interval();
   const std::string native_progress_csv_path =
     native_legacy_progress_csv_path_from_env();
 
@@ -5452,6 +5461,29 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         if (legacy_dcov_native_cuda_lowrank_metrics.enabled) {
           double pair_total_ms = 0.0;
           double eig_ms = 0.0;
+          auto append_cuda_lowrank_progress =
+            [&](const std::string& event,
+                int completed_pairs,
+                double batch_elapsed_ms) {
+              append_native_legacy_progress(
+                native_progress_csv_path,
+                event,
+                level,
+                batch_size,
+                level_provider_request_count,
+                completed_pairs,
+                ignored_after_delete,
+                deletions,
+                level_provider_call_ms,
+                level_provider_matrix_copy_ms,
+                level_dcov_materialize_ms,
+                batch_elapsed_ms,
+                elapsed_ms_since(level_start));
+            };
+          append_cuda_lowrank_progress(
+            "dcov_cuda_lowrank_batch_start",
+            legacy_dcov_native_count,
+            0.0);
           try {
             for (int i = 0; i < batch_size; ++i) {
               const LegacyDcovCudaLowrankGammaRun run =
@@ -5468,12 +5500,24 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
               pair_total_ms += run.total_ms;
               eig_ms += run.eig_ms;
               accumulate_native_cuda_lowrank_run(run);
+              const int completed_pairs = legacy_dcov_native_count + i + 1;
+              if (((i + 1) % legacy_dcov_native_cuda_lowrank_progress_interval) == 0 ||
+                  i + 1 == batch_size) {
+                append_cuda_lowrank_progress(
+                  "dcov_cuda_lowrank_pair_progress",
+                  completed_pairs,
+                  elapsed_ms_since(batch_call_start));
+              }
             }
           } catch (...) {
             legacy_dcov_native_cuda_lowrank_metrics.error_count += 1;
             throw;
           }
           const double call_ms = elapsed_ms_since(batch_call_start);
+          append_cuda_lowrank_progress(
+            "dcov_cuda_lowrank_batch_complete",
+            legacy_dcov_native_count + batch_size,
+            call_ms);
           level_dcov_call_ms += call_ms;
           legacy_dcov_native_count += batch_size;
           legacy_dcov_native_ms += pair_total_ms;

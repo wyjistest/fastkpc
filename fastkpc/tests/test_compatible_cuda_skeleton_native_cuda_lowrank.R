@@ -118,4 +118,28 @@ assert_true(identical(
   0
 ), "native CUDA lowrank backend should not re-upload matrices during compute")
 
+progress <- utils::read.csv(candidate$paths$native_progress_csv,
+                            check.names = FALSE)
+batch_start <- progress[
+  progress$event == "dcov_cuda_lowrank_batch_start",
+  , drop = FALSE
+]
+batch_complete <- progress[
+  progress$event == "dcov_cuda_lowrank_batch_complete",
+  , drop = FALSE
+]
+pair_progress <- progress[
+  progress$event == "dcov_cuda_lowrank_pair_progress",
+  , drop = FALSE
+]
+assert_true(nrow(batch_start) > 0L,
+            "native CUDA lowrank progress should mark batch start")
+assert_true(nrow(batch_complete) > 0L,
+            "native CUDA lowrank progress should mark batch completion")
+assert_true(nrow(pair_progress) > 0L,
+            "native CUDA lowrank progress should mark pair progress")
+assert_true(max(pair_progress$tests_replayed, na.rm = TRUE) ==
+              as.integer(summary$legacy_dcov_native_cuda_lowrank_backend_count[[1L]]),
+            "native CUDA lowrank pair progress should reach all dCov pairs")
+
 cat("PASS compatible CUDA skeleton native cuda_spectra lowrank\n")
