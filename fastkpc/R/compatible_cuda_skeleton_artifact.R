@@ -339,6 +339,12 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     legacy_dcov_native_batch_lowrank_select_ms = NA_real_,
     legacy_dcov_native_batch_lowrank_center_ms = NA_real_,
     legacy_dcov_native_batch_lowrank_unaccounted_ms = NA_real_,
+    legacy_dcov_native_lowrank_mode = NA_character_,
+    legacy_dcov_native_lowrank_full_eig_count = NA_integer_,
+    legacy_dcov_native_lowrank_spectra_count = NA_integer_,
+    legacy_dcov_native_lowrank_spectra_converged_count = NA_integer_,
+    legacy_dcov_native_lowrank_spectra_failed_count = NA_integer_,
+    legacy_dcov_native_lowrank_spectra_fallback_full_eig_count = NA_integer_,
     legacy_dcov_native_lowrank_spectra_iterations = NA_integer_,
     legacy_dcov_native_lowrank_spectra_nconv = NA_integer_,
     legacy_dcov_native_lowrank_spectra_ncv = NA_integer_,
@@ -803,6 +809,23 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     legacy_dcov_native_batch_lowrank_unaccounted_ms =
       as.numeric(facade_summary$legacy_dcov_native_batch_lowrank_unaccounted_ms %||%
                    NA_real_),
+    legacy_dcov_native_lowrank_mode =
+      facade_summary$legacy_dcov_native_lowrank_mode %||% NA_character_,
+    legacy_dcov_native_lowrank_full_eig_count =
+      as.integer(facade_summary$legacy_dcov_native_lowrank_full_eig_count %||%
+                   NA_integer_),
+    legacy_dcov_native_lowrank_spectra_count =
+      as.integer(facade_summary$legacy_dcov_native_lowrank_spectra_count %||%
+                   NA_integer_),
+    legacy_dcov_native_lowrank_spectra_converged_count =
+      as.integer(facade_summary$legacy_dcov_native_lowrank_spectra_converged_count %||%
+                   NA_integer_),
+    legacy_dcov_native_lowrank_spectra_failed_count =
+      as.integer(facade_summary$legacy_dcov_native_lowrank_spectra_failed_count %||%
+                   NA_integer_),
+    legacy_dcov_native_lowrank_spectra_fallback_full_eig_count =
+      as.integer(facade_summary$legacy_dcov_native_lowrank_spectra_fallback_full_eig_count %||%
+                   NA_integer_),
     legacy_dcov_native_lowrank_spectra_iterations =
       as.integer(facade_summary$legacy_dcov_native_lowrank_spectra_iterations %||%
                    NA_integer_),

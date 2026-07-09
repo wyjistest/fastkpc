@@ -213,6 +213,12 @@ required <- c(
   "legacy_dcov_native_batch_lowrank_select_ms",
   "legacy_dcov_native_batch_lowrank_center_ms",
   "legacy_dcov_native_batch_lowrank_unaccounted_ms",
+  "legacy_dcov_native_lowrank_mode",
+  "legacy_dcov_native_lowrank_full_eig_count",
+  "legacy_dcov_native_lowrank_spectra_count",
+  "legacy_dcov_native_lowrank_spectra_converged_count",
+  "legacy_dcov_native_lowrank_spectra_failed_count",
+  "legacy_dcov_native_lowrank_spectra_fallback_full_eig_count",
   "legacy_dcov_native_lowrank_spectra_iterations",
   "legacy_dcov_native_lowrank_spectra_nconv",
   "legacy_dcov_native_lowrank_spectra_ncv",
@@ -315,6 +321,23 @@ assert_true(summary$legacy_dcov_native_batch_lowrank_ms[[1L]] > 0,
             "artifact should report native dCov batch lowrank stage timing")
 assert_true(summary$legacy_dcov_native_batch_lowrank_eig_ms[[1L]] > 0,
             "artifact should report native dCov batch lowrank eig timing")
+assert_true(identical(summary$legacy_dcov_native_lowrank_mode[[1L]],
+                      "spectra"),
+            "artifact should report native dCov lowrank mode")
+assert_true(summary$legacy_dcov_native_lowrank_spectra_count[[1L]] > 0,
+            "artifact should report native dCov Spectra solve count")
+assert_true(identical(
+  as.integer(summary$legacy_dcov_native_lowrank_spectra_count[[1L]]),
+  as.integer(summary$legacy_dcov_native_lowrank_spectra_converged_count[[1L]])
+), "artifact should report converged Spectra solves")
+assert_true(identical(
+  as.integer(summary$legacy_dcov_native_lowrank_spectra_failed_count[[1L]]),
+  0L
+), "artifact should report zero Spectra failures")
+assert_true(identical(
+  as.integer(summary$legacy_dcov_native_lowrank_spectra_fallback_full_eig_count[[1L]]),
+  0L
+), "artifact should report zero Spectra full-eig fallbacks")
 assert_true(summary$legacy_dcov_native_lowrank_spectra_iterations[[1L]] > 0,
             "artifact should report native dCov Spectra iteration work")
 assert_true(summary$legacy_dcov_native_lowrank_spectra_nconv[[1L]] > 0,

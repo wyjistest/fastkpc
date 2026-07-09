@@ -5409,6 +5409,12 @@ scope:
 change:
   native legacy dCov summaries now expose the Spectra work counters already
   produced by the C++ legacy dCov lowrank backend:
+    legacy_dcov_native_lowrank_mode
+    legacy_dcov_native_lowrank_full_eig_count
+    legacy_dcov_native_lowrank_spectra_count
+    legacy_dcov_native_lowrank_spectra_converged_count
+    legacy_dcov_native_lowrank_spectra_failed_count
+    legacy_dcov_native_lowrank_spectra_fallback_full_eig_count
     legacy_dcov_native_lowrank_spectra_iterations
     legacy_dcov_native_lowrank_spectra_nconv
     legacy_dcov_native_lowrank_spectra_ncv
@@ -5430,11 +5436,63 @@ targeted gate:
   Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
   git diff --check
 
-status:
+  status:
   diagnostics only. This does not change dCov authority, residual authority,
   skeleton replay, route selection, lowrank mode, or the current recommended
   route. It prepares the next CUDA-compatible lowrank/eigensolve work by
   exposing how much Spectra iteration work the current correct route performs.
+```
+
+Real hot12 Spectra work-shape artifact:
+
+```text
+artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_hot12_native_dcov_spectra_work_shape_v1
+
+route:
+  same 351-row hot12 fixture and round/Spectra/20-thread native dCov setup as
+  compatible_cuda_skeleton_hot12_native_dcov_lowrank_substage_v1
+  reference_result_path =
+    fastkpc/artifacts/compatible_cuda_skeleton_hot12_native_dcov_lowrank_substage_v1/result.rds
+
+correctness:
+  run_status = ok
+  edge_count = 20 / 20
+  SHD = 0
+  n.edgetests exact = TRUE
+  n.edgetests = 131,994,1453,243,35
+  adjacency_identical = TRUE
+  sepsets_identical = TRUE
+
+runtime:
+  elapsed_sec = 18.881
+  native dCov batch_count / pair_count = 148 / 2856
+  native dCov scalar_total_ms = 53645.6
+  lowrank_ms = 47974.62
+  lowrank share of scalar_total = 0.894288
+  lowrank_eig_ms = 46180.22
+  lowrank_eig share of lowrank = 0.962597
+
+Spectra work shape:
+  lowrank_mode = spectra
+  spectra_count = 5712
+  spectra_converged / failed / fallback_full_eig = 5712 / 0 / 0
+  spectra_iterations = 10735
+  spectra_iterations_per_solve = 1.879377
+  spectra_nconv = 199920
+  spectra_nconv_per_solve = 35
+  spectra_ncv = 71
+  spectra_tol = 1e-10
+  lowrank_eig_ms_per_solve = 8.084773
+  lowrank_eig_ms_per_iteration = 4.301837
+
+decision:
+  The correct hot12 round/Spectra route performs two Spectra lowrank solves per
+  replayed dCov pair, with full convergence and no full-eig fallback. The
+  dominant work is the DenseSymMatProd/Spectra eigensolve itself: roughly 46.2s
+  worker-sum across 10,735 aggregate Spectra iterations on this subset. The
+  next CUDA-compatible lowrank step should target this matrix-vector/eigensolve
+  work shape directly.
 ```
 
 ---
