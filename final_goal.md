@@ -7849,6 +7849,95 @@ decision:
   kernels.
 ```
 
+Native cuda_spectra level-cache capacity sweep checkpoint:
+
+```text
+question:
+  The 128-entry level component cache artifact showed a high hit rate but also
+  saturated level entries and many evictions. This checkpoint tests whether
+  larger bounded level caches materially change the native cuda_spectra timeout
+  work shape before moving to a deeper eigensolve redesign.
+
+artifacts:
+  cache128:
+    fastkpc/artifacts/
+      compatible_cuda_skeleton_threaded_round_cuda_spectra_stage_summary_timeout_120s_v1
+
+  cache512:
+    fastkpc/artifacts/
+      compatible_cuda_skeleton_threaded_round_cuda_spectra_level_cache512_stage_summary_timeout_120s_v1
+
+  cache1024:
+    fastkpc/artifacts/
+      compatible_cuda_skeleton_threaded_round_cuda_spectra_level_cache1024_stage_summary_timeout_120s_v1
+
+run shape:
+  FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=20
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=20
+  FASTKPC_NATIVE_CUDA_LOWRANK_PROGRESS_INTERVAL=64
+  FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS=4
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE=1
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_SCOPE=level
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_MAX_ENTRIES in {128,512,1024}
+  dcov_batch = "round"
+  low_rank = "cuda_spectra"
+  timeout = 120 sec
+
+common correctness status:
+  run_status = timeout
+  candidate_edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+  last completed level = 1
+
+summary comparison:
+  cache entries   128        512        1024
+  entry max       128        512        1024
+  batches          94        106         107
+  pairs         54872      60195       60574
+  lookups      109744     120390      121148
+  hit rate     0.8871     0.9396      0.9411
+  misses        12390       7276        7131
+  evictions     12214       6204        5035
+
+stage totals:
+  cache entries        128          512          1024
+  distance_ms       1636.617     1042.134      1035.127
+  lowrank_ms      116697.802    71904.651     70760.112
+  moment_ms         1314.564      835.888       817.572
+  unaccounted_ms     629.041      410.497       401.912
+  stage_total_ms  120278.024    74193.170     73014.722
+
+throughput:
+  pairs_per_stage_sec:
+    cache128  = 456.21
+    cache512  = 811.33
+    cache1024 = 829.61
+
+stage share:
+  cache entries        128       512       1024
+  lowrank share      97.02%    96.92%    96.91%
+
+decision:
+  Increasing the level component cache from 128 to 512 is a real timeout-window
+  throughput win: it cuts misses and evictions sharply and raises completed
+  pair throughput from about 456 to 811 pairs per stage-second. Increasing from
+  512 to 1024 gives only marginal additional throughput, despite still reducing
+  evictions.
+
+  This is still not a route promotion. All three artifacts timeout before
+  returning a candidate skeleton, so SHD, n.edgetests exactness, fallback
+  totals, and full wall-time success remain unproven.
+
+  The important architectural signal is that even after cache capacity improves
+  reuse, the completed work remains about 97% lowrank/Spectra time. The next
+  native cuda_spectra mainline should use at least a 512/1024 level cache for
+  subsequent attempts, but further large gains need to reduce per-component
+  Spectra/eigensolve cost, for example via a more device-resident or batched
+  eigensolve/data-plane structure. Distance and moment kernels are not the
+  primary target for the next structural cut.
+```
+
 ---
 
 ## 9. Final success definition
