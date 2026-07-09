@@ -7307,6 +7307,117 @@ decision:
   Spectra/CUDA overhead and finishes level 2 plus later sparse levels.
 ```
 
+Native cuda_spectra component-cache progress CSV checkpoint:
+
+```text
+change:
+  add timeout-visible component-cache progress rows for the native
+  cuda_spectra lowrank path:
+
+    FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_PROGRESS_CSV
+
+  The compatible CUDA artifact runner now writes:
+
+    native_lowrank_component_cache_progress.csv
+
+  Completed and timeout artifacts both report the path in summary.md. Rows are
+  appended after each native cuda_spectra component-cache batch completes, so a
+  timeout before the native C++ summary returns still exposes per-batch cache
+  behavior.
+
+recorded fields:
+  event
+  level
+  batch_size
+  component_cache_scope
+  component_cache_level_max_entries
+  component_lookup_count
+  component_hit_count
+  component_miss_count
+  component_entry_count
+  component_cross_batch_hit_count
+  component_eviction_count
+  component_level_entry_count_max
+  component_count
+  component_total_ms
+  component_eig_ms
+  combine_ms
+  elapsed_ms
+
+small gates:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_route.R
+
+small-gate result:
+  PASS compatible CUDA skeleton native cuda_spectra lowrank
+  PASS compatible CUDA skeleton artifact
+  PASS legacy dCov CUDA lowrank gamma parity cases=6
+    max_p_diff = 4e-15
+    max_nV2_diff = 5.68e-14
+  PASS legacy dCov Spectra CUDA matvec
+  PASS legacy dCov CUDA lowrank backend route
+
+timeout-visible diagnostic artifact:
+  fastkpc/artifacts/
+    compatible_cuda_skeleton_threaded_round_cuda_spectra_level_component_cache_progress_timeout_120s_v1
+
+run shape:
+  FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=20
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=20
+  FASTKPC_NATIVE_CUDA_LOWRANK_PROGRESS_INTERVAL=64
+  FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS=4
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE=1
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_SCOPE=level
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_MAX_ENTRIES=128
+  dcov_batch = "round"
+  low_rank = "cuda_spectra"
+  timeout = 120 sec
+
+result:
+  run_status = timeout
+  timeout = TRUE
+  elapsed_sec = 120
+  reference_edge_count = 110
+  candidate_edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+
+native progress:
+  native_progress.csv rows = 1103
+  last completed level = 1
+  level 1 complete elapsed_ms = 39656.4
+  last row before timeout = level_start for level 2
+
+component-cache progress:
+  native_lowrank_component_cache_progress.csv rows = 94
+  event = component_cache_batch_complete
+  max component_cross_batch_hit_count per batch = 2170
+  total component_cross_batch_hit_count = 49681
+  total component_eviction_count = 12214
+  max component_level_entry_count_max = 128
+
+decision:
+  The progress CSV closes an observability gap for native cuda_spectra timeout
+  artifacts. It proves that level-scope component cache behavior is now visible
+  even when the full native C++ summary is unavailable.
+
+  This is diagnostics only and not a promotion route. The 120 sec artifact
+  timed out before returning a candidate skeleton, so SHD, n.edgetests
+  exactness, and fallback totals are still unproven. The eviction count and
+  saturated max level entry count show that the bounded level cache is active
+  and capacity-limited under the current max_entries=128 setting; tuning cache
+  size may help early levels, but the final CUDA route still needs the broader
+  structural device-resident or batched component/eigensolve path called out
+  above.
+```
+
 ---
 
 ## 9. Final success definition
