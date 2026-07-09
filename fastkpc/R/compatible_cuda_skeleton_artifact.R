@@ -318,31 +318,31 @@ fastkpc_compatible_cuda_lowrank_progress_summary <- function(path) {
       ),
     component_cache_lookup_count =
       fastkpc_compatible_cuda_progress_sum(
-        rows, "component_cache_lookup_count", integer = TRUE
+        rows, "component_lookup_count", integer = TRUE
       ),
     component_cache_hit_count =
       fastkpc_compatible_cuda_progress_sum(
-        rows, "component_cache_hit_count", integer = TRUE
+        rows, "component_hit_count", integer = TRUE
       ),
     component_cache_miss_count =
       fastkpc_compatible_cuda_progress_sum(
-        rows, "component_cache_miss_count", integer = TRUE
+        rows, "component_miss_count", integer = TRUE
       ),
     component_cache_entry_count =
       fastkpc_compatible_cuda_progress_sum(
-        rows, "component_cache_entry_count", integer = TRUE
+        rows, "component_entry_count", integer = TRUE
       ),
     component_cache_cross_batch_hit_count =
       fastkpc_compatible_cuda_progress_sum(
-        rows, "component_cache_cross_batch_hit_count", integer = TRUE
+        rows, "component_cross_batch_hit_count", integer = TRUE
       ),
     component_cache_eviction_count =
       fastkpc_compatible_cuda_progress_sum(
-        rows, "component_cache_eviction_count", integer = TRUE
+        rows, "component_eviction_count", integer = TRUE
       ),
     component_cache_level_entry_count_max =
       fastkpc_compatible_cuda_progress_max(
-        rows, "component_cache_level_entry_count_max", integer = TRUE
+        rows, "component_level_entry_count_max", integer = TRUE
       ),
     component_batch_substrate_count = as.integer(nrow(rows)),
     component_batch_substrate_pair_count =

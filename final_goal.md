@@ -7740,6 +7740,115 @@ decision:
   current compatible CPU/C++ route.
 ```
 
+Native cuda_spectra 120s timeout stage-summary artifact checkpoint:
+
+```text
+field-mapping fix:
+  The actual native_lowrank_component_cache_progress.csv uses:
+
+    component_lookup_count
+    component_hit_count
+    component_miss_count
+    component_entry_count
+    component_cross_batch_hit_count
+    component_eviction_count
+    component_level_entry_count_max
+
+  The first timeout-summary aggregation helper expected component_cache_* field
+  names for these counters, so completed timeout artifacts filled stage timings
+  but left cache counters as NA. The artifact test fixture now uses the actual
+  CSV header and verifies cache counter aggregation from completed
+  component_cache_batch_complete rows.
+
+RED:
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+  failed at:
+    lowrank progress summary should sum cache lookups
+
+GREEN:
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+  result:
+    PASS compatible CUDA skeleton artifact
+
+artifact:
+  fastkpc/artifacts/
+    compatible_cuda_skeleton_threaded_round_cuda_spectra_stage_summary_timeout_120s_v1
+
+run shape:
+  FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=20
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=20
+  FASTKPC_NATIVE_CUDA_LOWRANK_PROGRESS_INTERVAL=64
+  FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS=4
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE=1
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_SCOPE=level
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE_MAX_ENTRIES=128
+  dcov_batch = "round"
+  low_rank = "cuda_spectra"
+  timeout = 120 sec
+
+result:
+  run_status = timeout
+  timeout = TRUE
+  elapsed_sec = 120
+  reference_edge_count = 110
+  candidate_edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+
+native progress:
+  native_progress.csv rows = 1103
+  last completed level = 1
+  level 1 complete elapsed_ms = 39603.82
+  last event before timeout = level_start for level 2
+
+component-cache progress:
+  native_lowrank_component_cache_progress.csv rows = 94
+  component batches completed = 94
+  component batch pairs = 54872
+  cache lookups = 109744
+  cache hits = 97354
+  cache misses = 12390
+  hit rate = 0.8871
+  cross-batch hits = 49681
+  evictions = 12214
+  level entry max = 128 / 128
+
+component stage totals:
+  distance_ms = 1636.617
+  lowrank_ms = 116697.802
+  moment_ms = 1314.564
+  unaccounted_ms = 629.041
+  stage_total_ms = 120278.024
+
+component stage share:
+  distance = 1.36%
+  lowrank = 97.02%
+  moment = 1.09%
+  unaccounted = 0.52%
+
+decision:
+  The summary-level timeout aggregation now works on a real full-route
+  native cuda_spectra timeout artifact. The route is still not promotable: the
+  candidate did not return a skeleton, so SHD, n.edgetests exactness, fallback
+  totals, and wall-time success remain unproven.
+
+  The useful new evidence is the bottleneck split. In this 120s slice,
+  distance construction, moment composition, and unaccounted wrapper overhead
+  are not the main problem. The completed component work is dominated by
+  lowrank/Spectra time. The level cache is effective but saturated:
+  hit rate is high, while evictions are almost as large as misses and the
+  level entry count reaches 128 / 128.
+
+  Next aligned diagnostic/perf work should compare a larger bounded level
+  component cache, for example 512 or 1024 entries, before attempting a deeper
+  device-resident eigensolve redesign. If larger cache capacity does not
+  reduce lowrank_ms per timeout window enough, the next structural target is
+  the per-component Spectra/eigensolve path rather than distance or moment
+  kernels.
+```
+
 ---
 
 ## 9. Final success definition
