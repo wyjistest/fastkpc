@@ -5309,6 +5309,48 @@ decision:
   execution or a CUDA-compatible legacy lowrank path.
 ```
 
+Real hot12 lowrank substage artifact:
+
+```text
+artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_hot12_native_dcov_lowrank_substage_v1
+
+route:
+  same 351-row hot12 fixture and round/Spectra/20-thread native dCov setup as
+  compatible_cuda_skeleton_hot12_native_dcov_stage_timing_v1
+
+correctness:
+  run_status = ok
+  edge_count = 20 / 20
+  SHD = 0
+  n.edgetests exact = TRUE
+  n.edgetests = 131,994,1453,243,35
+
+runtime:
+  elapsed_sec = 18.730
+  reference_elapsed_sec = 47.079
+  native dCov batch_count / pair_count = 148 / 2856
+  native dCov batch_call_ms = 4209.388
+  native dCov scalar_total_ms = 51577.633
+
+lowrank substage timing:
+  lowrank_ms = 46084.991
+  lowrank share of scalar_total = 0.893507
+  lowrank_eig_ms = 44210.708
+  lowrank_eig share of lowrank = 0.959330
+  lowrank_select_ms = 1788.670
+  lowrank_select share of lowrank = 0.038812
+  lowrank_center_ms = 75.100
+  lowrank_unaccounted_ms = 10.513
+
+decision:
+  The lowrank bottleneck is the Spectra eigensolve itself. Selection,
+  centering, and unaccounted lowrank overhead are small. The next dCov
+  acceleration attempt should target the eigensolve/lowrank kernel or a
+  CUDA-compatible legacy lowrank path, not lowrank post-processing or host
+  materialization.
+```
+
 ---
 
 ## 9. Final success definition
