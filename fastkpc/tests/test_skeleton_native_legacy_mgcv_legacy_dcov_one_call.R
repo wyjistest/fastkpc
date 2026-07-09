@@ -164,6 +164,21 @@ assert_true(identical(one_call$summary$ci_backend,
 assert_true(identical(one_call$summary$residual_backend,
                       "provider-legacy-mgcv"),
             "one-call wrapper should keep legacy mgcv residual authority")
+assert_true(identical(one_call$summary$residual_provider_contract,
+                      "level-residual-matrix-v1"),
+            "one-call wrapper should record residual provider contract")
+assert_true(identical(one_call$summary$residual_provider_response_mode,
+                      "list"),
+            "one-call wrapper should use structured residual provider response")
+assert_true(identical(one_call$summary$residual_provider_response_backend,
+                      "legacy-mgcv-regrXonS-level-batch"),
+            "one-call wrapper should record hidden residual batch provider backend")
+assert_true(identical(as.integer(one_call$summary$residual_provider_batch_count),
+                      as.integer(one_call$summary$residual_provider_level_count)),
+            "one-call wrapper should count one residual batch per conditional level")
+assert_true(identical(as.integer(one_call$summary$residual_provider_matrix_cell_count),
+                      as.integer(nrow(data) * one_call$summary$residual_provider_request_count)),
+            "one-call wrapper should report residual provider matrix cell payload")
 assert_true(identical(one_call$summary$entrypoint,
                       "legacy-mgcv-legacy-dcov-native"),
             "one-call wrapper should record its entrypoint")

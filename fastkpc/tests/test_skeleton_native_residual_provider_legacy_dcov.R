@@ -216,6 +216,25 @@ assert_true(native_counts$request_count == reference$residual_requests,
 assert_true(identical(as.integer(native$summary$residual_provider_request_count),
                       as.integer(reference$residual_requests)),
             "native summary should count residual provider requests")
+assert_true(identical(native$summary$residual_provider_contract,
+                      "level-residual-matrix-v1"),
+            "native summary should record residual provider contract")
+assert_true(identical(native$summary$residual_provider_response_mode,
+                      "matrix"),
+            "native summary should record matrix residual provider response mode")
+assert_true(identical(native$summary$residual_provider_response_backend,
+                      "matrix-provider"),
+            "native summary should record matrix residual provider backend")
+assert_true(identical(as.integer(native$summary$residual_provider_batch_count),
+                      as.integer(native$summary$residual_provider_level_count)),
+            "native summary should count one residual provider batch per conditional level")
+assert_true(native$summary$residual_provider_batch_max_requests >= 1L,
+            "native summary should record residual provider max batch requests")
+assert_true(native$summary$residual_provider_batch_mean_requests >= 1,
+            "native summary should record residual provider mean batch requests")
+assert_true(identical(as.integer(native$summary$residual_provider_matrix_cell_count),
+                      as.integer(nrow(data) * reference$residual_requests)),
+            "native summary should record residual provider matrix cell payload")
 assert_true(identical(as.integer(native$summary$ci_native_count),
                       as.integer(reference$task_count)),
             "native summary should count planned native legacy dCov tasks")

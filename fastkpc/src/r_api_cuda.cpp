@@ -68,6 +68,49 @@ bool list_logical_value(const Rcpp::List& values, const char* name) {
   return Rcpp::as<bool>(values[name]);
 }
 
+std::string list_string_value(const Rcpp::List& values,
+                              const char* name,
+                              const std::string& fallback) {
+  if (!values.containsElementNamed(name)) return fallback;
+  SEXP value = values[name];
+  if (Rf_isNull(value)) return fallback;
+  return Rcpp::as<std::string>(value);
+}
+
+Rcpp::NumericMatrix residual_provider_response_matrix(
+    SEXP response,
+    std::string* response_mode,
+    std::string* response_backend) {
+  if (Rf_isMatrix(response)) {
+    *response_mode = "matrix";
+    *response_backend = "matrix-provider";
+    return Rcpp::NumericMatrix(response);
+  }
+  if (TYPEOF(response) == VECSXP) {
+    Rcpp::List values(response);
+    if (!values.containsElementNamed("residuals")) {
+      Rcpp::stop("residual provider list response must contain residuals");
+    }
+    SEXP residuals = values["residuals"];
+    if (!Rf_isMatrix(residuals)) {
+      Rcpp::stop("residual provider list residuals must be a matrix");
+    }
+    *response_mode = "list";
+    *response_backend = list_string_value(values, "backend", "list-provider");
+    return Rcpp::NumericMatrix(residuals);
+  }
+  Rcpp::stop("residual provider must return a matrix or list");
+}
+
+void update_provider_response_label(std::string* aggregate,
+                                    const std::string& value) {
+  if (aggregate->empty()) {
+    *aggregate = value;
+  } else if (*aggregate != value) {
+    *aggregate = "mixed";
+  }
+}
+
 Rcpp::LogicalMatrix adjacency_to_matrix(const std::vector<int>& adjacency, int p) {
   Rcpp::LogicalMatrix out(p, p);
   for (int i = 0; i < p; ++i) {
@@ -3692,6 +3735,12 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   int total_deletions = 0;
   int residual_provider_level_count = 0;
   int residual_provider_request_count = 0;
+  int residual_provider_batch_count = 0;
+  int residual_provider_batch_max_requests = 0;
+  double residual_provider_batch_request_sum = 0.0;
+  int residual_provider_matrix_cell_count = 0;
+  std::string residual_provider_response_mode;
+  std::string residual_provider_response_backend;
   int legacy_dcov_native_count = 0;
   double legacy_dcov_native_ms = 0.0;
   fastkpc::LegacyDcovLowrankTimings legacy_lowrank_timings;
@@ -3758,8 +3807,13 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         Rcpp::Named("conditioning_size") = request_conditioning_size,
         Rcpp::Named("stringsAsFactors") = false
       );
+      std::string provider_response_mode;
+      std::string provider_response_backend;
       Rcpp::NumericMatrix residual_matrix =
-        residual_provider(request_table, level);
+        residual_provider_response_matrix(
+          residual_provider(request_table, level),
+          &provider_response_mode,
+          &provider_response_backend);
       if (residual_matrix.nrow() != n || residual_matrix.ncol() != request_count) {
         Rcpp::stop("residual provider returned matrix with wrong dimensions");
       }
@@ -3771,6 +3825,17 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       }
       ++residual_provider_level_count;
       residual_provider_request_count += request_count;
+      ++residual_provider_batch_count;
+      residual_provider_batch_max_requests = std::max(
+        residual_provider_batch_max_requests,
+        request_count);
+      residual_provider_batch_request_sum +=
+        static_cast<double>(request_count);
+      residual_provider_matrix_cell_count += n * request_count;
+      update_provider_response_label(&residual_provider_response_mode,
+                                     provider_response_mode);
+      update_provider_response_label(&residual_provider_response_backend,
+                                     provider_response_backend);
     }
 
     std::vector<double> pvalues(task_count, NA_REAL);
@@ -4062,6 +4127,27 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         residual_provider_level_count,
       Rcpp::Named("residual_provider_request_count") =
         residual_provider_request_count,
+      Rcpp::Named("residual_provider_contract") =
+        "level-residual-matrix-v1",
+      Rcpp::Named("residual_provider_response_mode") =
+        residual_provider_response_mode.empty()
+          ? std::string("none")
+          : residual_provider_response_mode,
+      Rcpp::Named("residual_provider_response_backend") =
+        residual_provider_response_backend.empty()
+          ? std::string("none")
+          : residual_provider_response_backend,
+      Rcpp::Named("residual_provider_batch_count") =
+        residual_provider_batch_count,
+      Rcpp::Named("residual_provider_batch_max_requests") =
+        residual_provider_batch_max_requests,
+      Rcpp::Named("residual_provider_batch_mean_requests") =
+        residual_provider_batch_count == 0
+          ? 0.0
+          : residual_provider_batch_request_sum /
+            static_cast<double>(residual_provider_batch_count),
+      Rcpp::Named("residual_provider_matrix_cell_count") =
+        residual_provider_matrix_cell_count,
       Rcpp::Named("ci_backend") = "native-legacy-dcov.gamma",
       Rcpp::Named("residual_backend") = "provider-legacy-mgcv"
     )
