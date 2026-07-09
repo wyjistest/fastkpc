@@ -4340,6 +4340,40 @@ The full artifact should compare elapsed time, SHD, n.edgetests, batch
 coverage, skipped ratio, mean/max batch size, and by-level coverage before any
 min-size policy is considered for promotion.
 
+Single-candidate full attempt:
+
+```text
+artifact target:
+  fastkpc/artifacts/legacy_dcov_cpp_batch_round_min_size_16_v1
+
+route:
+  FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=spectra
+  FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE=1
+  FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY=s
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=round
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE=16
+  reference_result_path =
+    fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/
+    compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds
+
+result:
+  no completed artifact
+  process manually terminated after approximately 1,942 sec (~32.4 min)
+  no summary.csv / runtime_by_level.csv / result.rds files written
+  interrupted workers emitted SIGPIPE after parent termination
+```
+
+Decision:
+
+```text
+FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=round with min_size=16 is not a promotion
+candidate. It exceeded the recommended S-affinity wall-time range by a large
+margin before producing any completed artifact. Do not continue broad
+round-min-size full sweeps without either a stricter timeout/progress mechanism
+or a structural change to round-mode residual/input preparation.
+```
+
 Gate:
 
 ```bash
