@@ -347,8 +347,77 @@ precision_run_skeleton_residual_provider_legacy_dcov_native <- function(
         PACKAGE = "fastkpc_cuda")
 }
 
+fastkpc_native_legacy_mgcv_residual_backend <- function() {
+  raw <- tolower(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
+                            unset = "r"))
+  if (raw %in% c("", "legacy", "r")) {
+    "r"
+  } else if (identical(raw, "cpp_guarded")) {
+    "cpp_guarded"
+  } else {
+    "r"
+  }
+}
+
+fastkpc_native_legacy_mgcv_backend_condition_threshold <- function() {
+  value <- suppressWarnings(as.numeric(Sys.getenv(
+    "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD",
+    unset = "1e12"
+  )))
+  if (length(value) != 1L || !is.finite(value) || value < 0) 1e12 else value
+}
+
+fastkpc_native_legacy_mgcv_backend_native_s_size_limit <- function() {
+  raw <- Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT",
+                    unset = "Inf")
+  value <- suppressWarnings(as.numeric(raw))
+  if (length(value) != 1L || is.na(value) || value < 0) Inf else value
+}
+
+fastkpc_native_prepare_legacy_mgcv_cpp_backend <- function() {
+  if (!exists("fastkpc_legacy_mgcv_residual_cpp_backend_target",
+              mode = "function")) {
+    source("fastkpc/R/legacy_runner.R")
+  }
+  if (exists("fastkpc_legacy_prepare_mgcv_cpp_shadow",
+             mode = "function")) {
+    fastkpc_legacy_prepare_mgcv_cpp_shadow(TRUE)
+  }
+  required <- c(
+    "fastkpc_legacy_runtime_zero",
+    "fastkpc_legacy_mgcv_residual_cpp_backend_target",
+    "fastkpc_legacy_env"
+  )
+  missing <- required[!vapply(required, exists, logical(1), mode = "function")]
+  if (length(missing) > 0L) {
+    stop("legacy mgcv C++ residual backend missing helper: ",
+         paste(missing, collapse = ","), call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+fastkpc_native_counter_value <- function(counter_env, name, default) {
+  if (is.null(counter_env)) return(default)
+  value <- counter_env[[name]]
+  if (is.null(value)) default else value
+}
+
+fastkpc_native_provider_backend_label <- function(backend) {
+  if (identical(backend, "cpp_guarded")) {
+    "legacy-mgcv-cpp-guarded-level-batch"
+  } else {
+    "legacy-mgcv-regrXonS-level-batch"
+  }
+}
+
 fastkpc_legacy_mgcv_residual_provider_matrix <- function(
-    data, requests, counter_env = NULL) {
+    data, requests, counter_env = NULL,
+    backend = fastkpc_native_legacy_mgcv_residual_backend(),
+    condition_threshold =
+      fastkpc_native_legacy_mgcv_backend_condition_threshold(),
+    native_s_size_limit =
+      fastkpc_native_legacy_mgcv_backend_native_s_size_limit()) {
+  backend <- match.arg(backend, c("r", "cpp_guarded"))
   required <- c("request_index", "target", "conditioning_sets",
                 "S_key", "conditioning_size")
   missing_fields <- setdiff(required, names(requests))
@@ -369,7 +438,26 @@ fastkpc_legacy_mgcv_residual_provider_matrix <- function(
     }
     counter_env$level_calls <- level_calls + 1L
     counter_env$request_count <- request_count + nrow(requests)
+    counter_env$mgcv_backend <- backend
   }
+
+  if (identical(backend, "cpp_guarded")) {
+    fastkpc_native_prepare_legacy_mgcv_cpp_backend()
+    if (is.null(counter_env)) {
+      metrics <- fastkpc_legacy_runtime_zero()
+      legacy_env <- fastkpc_legacy_env()
+    } else {
+      if (is.null(counter_env$mgcv_cpp_metrics)) {
+        counter_env$mgcv_cpp_metrics <- fastkpc_legacy_runtime_zero()
+      }
+      if (is.null(counter_env$mgcv_legacy_env)) {
+        counter_env$mgcv_legacy_env <- fastkpc_legacy_env()
+      }
+      metrics <- counter_env$mgcv_cpp_metrics
+      legacy_env <- counter_env$mgcv_legacy_env
+    }
+  }
+
   out <- matrix(NA_real_, nrow(data), nrow(requests))
   for (i in seq_len(nrow(requests))) {
     S <- as.integer(requests$conditioning_sets[[i]])
@@ -377,48 +465,104 @@ fastkpc_legacy_mgcv_residual_provider_matrix <- function(
       stop("legacy mgcv residual provider received unconditional request",
            call. = FALSE)
     }
-    out[, i] <- fastkpc_legacy_mgcv_residual(
-      data = data,
-      target = as.integer(requests$target[[i]]),
-      S = S
-    )
+    target <- as.integer(requests$target[[i]])
+    if (identical(backend, "cpp_guarded")) {
+      backend_result <- fastkpc_legacy_mgcv_residual_cpp_backend_target(
+        metrics = metrics,
+        target_data = data[, target, drop = FALSE],
+        s_data = data[, S, drop = FALSE],
+        env = legacy_env,
+        condition_threshold = condition_threshold,
+        native_s_size_limit = native_s_size_limit,
+        target = target,
+        S = S
+      )
+      metrics <- backend_result$metrics
+      if (!is.null(counter_env)) counter_env$mgcv_cpp_metrics <- metrics
+      out[, i] <- backend_result$residual
+    } else {
+      out[, i] <- fastkpc_legacy_mgcv_residual(
+        data = data,
+        target = target,
+        S = S
+      )
+    }
   }
   out
 }
 
-fastkpc_legacy_mgcv_residual_provider <- function(data, counter_env = NULL) {
+fastkpc_legacy_mgcv_residual_provider <- function(
+    data, counter_env = NULL,
+    backend = fastkpc_native_legacy_mgcv_residual_backend()) {
   data <- as.matrix(data)
   storage.mode(data) <- "double"
+  backend <- match.arg(backend, c("r", "cpp_guarded"))
   force(counter_env)
   function(requests, level) {
     fastkpc_legacy_mgcv_residual_provider_matrix(
       data = data,
       requests = requests,
-      counter_env = counter_env
+      counter_env = counter_env,
+      backend = backend
     )
   }
 }
 
 fastkpc_legacy_mgcv_residual_batch_provider <- function(data,
-                                                        counter_env = NULL) {
+                                                        counter_env = NULL,
+                                                        backend =
+                                                          fastkpc_native_legacy_mgcv_residual_backend()) {
   data <- as.matrix(data)
   storage.mode(data) <- "double"
+  backend <- match.arg(backend, c("r", "cpp_guarded"))
   force(counter_env)
   function(requests, level) {
     residuals <- fastkpc_legacy_mgcv_residual_provider_matrix(
       data = data,
       requests = requests,
-      counter_env = counter_env
+      counter_env = counter_env,
+      backend = backend
     )
     list(
       residuals = residuals,
       contract = "level-residual-matrix-v1",
-      backend = "legacy-mgcv-regrXonS-level-batch",
+      backend = fastkpc_native_provider_backend_label(backend),
+      mgcv_backend = backend,
       level = as.integer(level),
       request_count = as.integer(nrow(requests)),
       n = as.integer(nrow(data))
     )
   }
+}
+
+fastkpc_native_attach_mgcv_provider_summary <- function(result, counter_env,
+                                                       backend) {
+  backend <- match.arg(backend, c("r", "cpp_guarded"))
+  result$summary$residual_provider_mgcv_backend <- backend
+  enabled <- identical(backend, "cpp_guarded")
+  result$summary$residual_provider_mgcv_cpp_backend_enabled <- enabled
+  metrics <- fastkpc_native_counter_value(counter_env, "mgcv_cpp_metrics", NULL)
+  metric_value <- function(name, default = 0) {
+    if (is.null(metrics) || is.null(metrics[[name]])) return(default)
+    metrics[[name]]
+  }
+  result$summary$residual_provider_mgcv_cpp_backend_count <-
+    as.integer(metric_value("mgcv_cpp_backend_count", 0L))
+  result$summary$residual_provider_mgcv_cpp_backend_native_count <-
+    as.integer(metric_value("mgcv_cpp_backend_native_count", 0L))
+  result$summary$residual_provider_mgcv_cpp_backend_fallback_count <-
+    as.integer(metric_value("mgcv_cpp_backend_fallback_count", 0L))
+  result$summary$residual_provider_mgcv_cpp_backend_error_count <-
+    as.integer(metric_value("mgcv_cpp_backend_error_count", 0L))
+  result$summary$residual_provider_mgcv_cpp_backend_high_condition_fallback_count <-
+    as.integer(metric_value("mgcv_cpp_backend_high_condition_fallback_count", 0L))
+  result$summary$residual_provider_mgcv_cpp_backend_outside_envelope_fallback_count <-
+    as.integer(metric_value("mgcv_cpp_backend_outside_envelope_fallback_count", 0L))
+  result$summary$residual_provider_mgcv_cpp_backend_ms <-
+    as.numeric(metric_value("mgcv_cpp_backend_ms", 0))
+  result$summary$residual_provider_mgcv_cpp_backend_native_solve_ms <-
+    as.numeric(metric_value("mgcv_cpp_backend_native_solve_ms", 0))
+  result
 }
 
 precision_run_skeleton_legacy_mgcv_legacy_dcov_native <- function(
@@ -450,14 +594,25 @@ precision_run_skeleton_legacy_mgcv_legacy_dcov_native <- function(
   }
   data <- as.matrix(data)
   storage.mode(data) <- "double"
+  provider_backend <- fastkpc_native_legacy_mgcv_residual_backend()
+  provider_counter <- new.env(parent = emptyenv())
   result <- precision_run_skeleton_residual_provider_legacy_dcov_native(
     data = data,
     alpha = alpha,
     max_conditioning_size = max_conditioning_size,
-    residual_provider = fastkpc_legacy_mgcv_residual_batch_provider(data),
+    residual_provider = fastkpc_legacy_mgcv_residual_batch_provider(
+      data,
+      counter_env = provider_counter,
+      backend = provider_backend
+    ),
     index = index,
     numCol = numCol,
     trace_level = trace_level
+  )
+  result <- fastkpc_native_attach_mgcv_provider_summary(
+    result = result,
+    counter_env = provider_counter,
+    backend = provider_backend
   )
   result$summary$entrypoint <- "legacy-mgcv-legacy-dcov-native"
   result$summary$residual_provider_hidden <- TRUE

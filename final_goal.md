@@ -3076,6 +3076,46 @@ status:
   recommended compatible acceleration environment.
 ```
 
+Native guarded C++ residual-provider backend checkpoint:
+
+```text
+env gate: FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND=cpp_guarded
+scope: precision_run_skeleton_legacy_mgcv_legacy_dcov_native()
+
+behavior:
+  the hidden structured level residual batch provider now honors the legacy
+    guarded C++ residual backend env gate
+  default backend remains legacy R regrXonS
+  cpp_guarded backend still uses mgcv::gam to select smoothing parameters and
+    extract the compatible setup, then replays the fixed-sp solve through the
+    existing native C++ residual solver when inside the guarded envelope
+  fallback remains legacy R regrXonS for unsupported or high-condition cases
+  native skeleton control, legacy dcov.gamma authority, and canonical replay
+    remain unchanged
+
+summary fields:
+  residual_provider_mgcv_backend
+  residual_provider_mgcv_cpp_backend_enabled
+  residual_provider_mgcv_cpp_backend_count
+  residual_provider_mgcv_cpp_backend_native_count
+  residual_provider_mgcv_cpp_backend_fallback_count
+  residual_provider_mgcv_cpp_backend_error_count
+  residual_provider_mgcv_cpp_backend_high_condition_fallback_count
+  residual_provider_mgcv_cpp_backend_outside_envelope_fallback_count
+  residual_provider_mgcv_cpp_backend_ms
+  residual_provider_mgcv_cpp_backend_native_solve_ms
+
+gate:
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+
+status:
+  Boundary integration checkpoint. It moves the existing guarded C++ residual
+  executor behind the native one-call residual batch-provider contract, but it
+  is not a recommended full 351x48 route: mgcv setup/GCV authority is still R
+  mgcv, the backend remains env-gated, and full compatible.cuda promotion
+  still requires SHD=0 / n.edgetests-exact / wall-time gates.
+```
+
 ### R-facing legacy-mgcv + legacy-dCov one-call checkpoint
 
 The next API boundary hides the residual-provider callback behind a single

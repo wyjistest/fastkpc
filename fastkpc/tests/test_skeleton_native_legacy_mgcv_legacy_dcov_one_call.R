@@ -16,14 +16,29 @@ if (length(missing) > 0L) {
 Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra")
 old_native_batch <- Sys.getenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH",
                                unset = NA_character_)
+old_mgcv_backend <- Sys.getenv(c(
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT",
+  "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD"
+), unset = NA_character_)
 on.exit({
   if (is.na(old_native_batch)) {
     Sys.unsetenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH")
   } else {
     Sys.setenv(FASTKPC_NATIVE_LEGACY_DCOV_BATCH = old_native_batch)
   }
+  for (name in names(old_mgcv_backend)) {
+    if (is.na(old_mgcv_backend[[name]])) {
+      Sys.unsetenv(name)
+    } else {
+      do.call(Sys.setenv, stats::setNames(list(old_mgcv_backend[[name]]), name))
+    }
+  }
 }, add = TRUE)
 Sys.unsetenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD")
 
 compare_sepsets <- function(left, right) {
   if (length(left) != length(right)) return(FALSE)
@@ -87,6 +102,24 @@ one_call_batch <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
   dcov_batch = "level"
 )
 
+Sys.setenv(
+  FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND = "cpp_guarded",
+  FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT = "1",
+  FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD = "1e300"
+)
+one_call_cpp_residual <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
+  data = data,
+  alpha = alpha,
+  max_conditioning_size = max_conditioning_size,
+  index = index,
+  numCol = numCol,
+  trace_level = "full",
+  dcov_batch = "level"
+)
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT")
+Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD")
+
 facade <- fastkpc_compatible_cuda_skeleton(
   data = data,
   alpha = alpha,
@@ -119,6 +152,8 @@ assert_true(identical(one_call$adjacency, explicit$adjacency),
             "one-call legacy mgcv legacy dCov adjacency should match explicit provider")
 assert_true(identical(one_call_batch$adjacency, explicit$adjacency),
             "one-call level-batched legacy dCov adjacency should match explicit provider")
+assert_true(identical(one_call_cpp_residual$adjacency, explicit$adjacency),
+            "one-call guarded C++ residual backend adjacency should match explicit provider")
 assert_true(identical(unname(facade$adjacency), unname(explicit$adjacency)),
             "compatible CUDA facade adjacency should match explicit provider")
 assert_true(identical(one_call_none$adjacency, explicit$adjacency),
@@ -127,6 +162,8 @@ assert_true(max(abs(one_call$pMax - explicit$pMax)) < 1e-12,
             "one-call legacy mgcv legacy dCov pMax should match explicit provider")
 assert_true(max(abs(one_call_batch$pMax - explicit$pMax)) < 1e-12,
             "one-call level-batched legacy dCov pMax should match explicit provider")
+assert_true(max(abs(one_call_cpp_residual$pMax - explicit$pMax)) < 1e-8,
+            "one-call guarded C++ residual backend pMax should match explicit provider")
 assert_true(max(abs(unname(facade$pMax) - unname(explicit$pMax))) < 1e-12,
             "compatible CUDA facade pMax should match explicit provider")
 assert_true(identical(as.integer(one_call$n.edgetests),
@@ -135,6 +172,9 @@ assert_true(identical(as.integer(one_call$n.edgetests),
 assert_true(identical(as.integer(one_call_batch$n.edgetests),
                       as.integer(explicit$n.edgetests)),
             "one-call level-batched legacy dCov n.edgetests should match explicit provider")
+assert_true(identical(as.integer(one_call_cpp_residual$n.edgetests),
+                      as.integer(explicit$n.edgetests)),
+            "one-call guarded C++ residual backend n.edgetests should match explicit provider")
 assert_true(identical(as.integer(facade$n.edgetests),
                       as.integer(explicit$n.edgetests)),
             "compatible CUDA facade n.edgetests should match explicit provider")
@@ -142,6 +182,8 @@ assert_true(compare_sepsets(one_call$sepsets, explicit$sepsets),
             "one-call legacy mgcv legacy dCov sepsets should match explicit provider")
 assert_true(compare_sepsets(one_call_batch$sepsets, explicit$sepsets),
             "one-call level-batched legacy dCov sepsets should match explicit provider")
+assert_true(compare_sepsets(one_call_cpp_residual$sepsets, explicit$sepsets),
+            "one-call guarded C++ residual backend sepsets should match explicit provider")
 assert_true(compare_sepsets(facade$sepsets, explicit$sepsets),
             "compatible CUDA facade sepsets should match explicit provider")
 assert_true(provider_counts$level_calls > 0L,
@@ -152,6 +194,9 @@ assert_true(identical(as.integer(one_call$summary$residual_provider_request_coun
 assert_true(identical(as.integer(one_call_batch$summary$residual_provider_request_count),
                       as.integer(explicit$summary$residual_provider_request_count)),
             "one-call level-batched wrapper should preserve residual request count")
+assert_true(identical(as.integer(one_call_cpp_residual$summary$residual_provider_request_count),
+                      as.integer(explicit$summary$residual_provider_request_count)),
+            "one-call guarded C++ residual backend should preserve residual request count")
 assert_true(identical(as.integer(one_call$summary$legacy_dcov_native_count),
                       as.integer(explicit$summary$legacy_dcov_native_count)),
             "one-call wrapper should preserve legacy dCov task count")
@@ -173,6 +218,25 @@ assert_true(identical(one_call$summary$residual_provider_response_mode,
 assert_true(identical(one_call$summary$residual_provider_response_backend,
                       "legacy-mgcv-regrXonS-level-batch"),
             "one-call wrapper should record hidden residual batch provider backend")
+assert_true(identical(one_call_cpp_residual$summary$residual_provider_response_backend,
+                      "legacy-mgcv-cpp-guarded-level-batch"),
+            "one-call guarded C++ residual backend should record structured provider backend")
+assert_true(identical(one_call_cpp_residual$summary$residual_provider_mgcv_backend,
+                      "cpp_guarded"),
+            "one-call guarded C++ residual backend should record selected mgcv backend")
+assert_true(isTRUE(one_call_cpp_residual$summary$residual_provider_mgcv_cpp_backend_enabled),
+            "one-call guarded C++ residual backend should report enabled")
+assert_true(identical(as.integer(one_call_cpp_residual$summary$residual_provider_mgcv_cpp_backend_count),
+                      as.integer(one_call_cpp_residual$summary$residual_provider_request_count)),
+            "one-call guarded C++ residual backend should cover every provider request")
+assert_true(one_call_cpp_residual$summary$residual_provider_mgcv_cpp_backend_native_count > 0L,
+            "one-call guarded C++ residual backend should use native fixed-sp replay")
+assert_true(identical(as.integer(one_call_cpp_residual$summary$residual_provider_mgcv_cpp_backend_fallback_count),
+                      0L),
+            "one-call guarded C++ residual backend should avoid fallback in the smoke envelope")
+assert_true(identical(as.integer(one_call_cpp_residual$summary$residual_provider_mgcv_cpp_backend_error_count),
+                      0L),
+            "one-call guarded C++ residual backend should not report errors")
 assert_true(identical(as.integer(one_call$summary$residual_provider_batch_count),
                       as.integer(one_call$summary$residual_provider_level_count)),
             "one-call wrapper should count one residual batch per conditional level")
