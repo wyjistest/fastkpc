@@ -3859,6 +3859,8 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
     legacy_dcov_native_batch_mode != NativeLegacyDcovBatchMode::None;
   int legacy_dcov_native_batch_count = 0;
   int legacy_dcov_native_batch_pair_count = 0;
+  bool legacy_dcov_native_batch_parallel_enabled = false;
+  int legacy_dcov_native_batch_parallel_threads = 1;
   int legacy_dcov_native_batch_workspace_reuse_count = 0;
   int legacy_dcov_native_batch_distance_workspace_reuse_count = 0;
   int legacy_dcov_native_batch_statistic_moment_workspace_reuse_count = 0;
@@ -4041,6 +4043,12 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         list_numeric_value(batch_diag, "total_ms");
       legacy_dcov_native_batch_materialize_ms += materialize_ms;
       legacy_dcov_native_batch_call_ms += call_ms;
+      legacy_dcov_native_batch_parallel_enabled =
+        legacy_dcov_native_batch_parallel_enabled ||
+        list_logical_value(batch_diag, "batch_parallel_enabled");
+      legacy_dcov_native_batch_parallel_threads = std::max(
+        legacy_dcov_native_batch_parallel_threads,
+        list_integer_value(batch_diag, "batch_parallel_threads"));
       legacy_dcov_native_batch_workspace_reuse_count +=
         list_logical_value(batch_diag, "workspace_reuse_enabled") ? 1 : 0;
       legacy_dcov_native_batch_distance_workspace_reuse_count +=
@@ -4332,6 +4340,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       level_dcov_materialize_ms,
       level_dcov_call_ms,
       elapsed_ms_since(level_start));
+    if (level > 0 && deletions == 0) break;
   }
 
   Rcpp::DataFrame task_rows = Rcpp::DataFrame::create(
@@ -4382,7 +4391,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       Rcpp::Named("n") = n,
       Rcpp::Named("alpha") = alpha,
       Rcpp::Named("max_conditioning_size") = max_conditioning_size,
-      Rcpp::Named("levels") = max_conditioning_size + 1,
+      Rcpp::Named("levels") = static_cast<int>(level_level.size()),
       Rcpp::Named("tasks_planned") = total_tasks_planned,
       Rcpp::Named("tests_replayed") = total_tests_replayed,
       Rcpp::Named("tasks_ignored_after_delete") = total_ignored,
@@ -4416,6 +4425,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_dcov_native_batch_count,
       Rcpp::Named("legacy_dcov_native_batch_pair_count") =
         legacy_dcov_native_batch_pair_count,
+      Rcpp::Named("legacy_dcov_native_batch_parallel_enabled") =
+        legacy_dcov_native_batch_parallel_enabled,
+      Rcpp::Named("legacy_dcov_native_batch_parallel_threads") =
+        legacy_dcov_native_batch_parallel_threads,
       Rcpp::Named("legacy_dcov_native_batch_ms") =
         legacy_dcov_native_batch_ms,
       Rcpp::Named("legacy_dcov_native_batch_materialize_ms") =

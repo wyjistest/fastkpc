@@ -108,7 +108,13 @@ original compatible legacy:           ~42.5 min, SHD=0
 C++ Spectra legacy dCov backend:      ~19.8 min, SHD=0
 + target|S residual cache:            ~16.3 min, SHD=0
 + S-affinity residual scheduling:      ~14.8 min, SHD=0
+native one-call threaded level dCov:   ~13.0 min, SHD=0, n.edgetests exact
 ```
+
+The native one-call threaded level dCov route is a full 351x48 compatible
+facade candidate, not a default route. It keeps legacy mgcv/regrXonS as the
+residual authority and native legacy dCov as the CI authority, with threaded
+C++ batch execution enabled explicitly during the artifact run.
 
 ### 2.3 Experimental or non-recommended routes
 
@@ -4849,6 +4855,105 @@ Gate:
 Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
 Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
 git diff --check
+```
+
+### 8.12 Native one-call threaded level dCov checkpoint
+
+The native legacy mgcv-provider + legacy dCov one-call facade now has an
+env-gated threaded C++ dCov batch path:
+
+```bash
+FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=<N>
+```
+
+Default behavior is unchanged:
+
+```text
+unset / 1 thread:
+  sequential C++ legacy dCov batch execution
+
+N > 1:
+  std::thread-based batch-column execution with one dCov workspace per thread
+```
+
+The native summary and compatible CUDA artifact summary now record:
+
+```text
+legacy_dcov_native_batch_parallel_enabled
+legacy_dcov_native_batch_parallel_threads
+```
+
+The native one-call level loop also now stops like the legacy skeleton after
+the first nonzero conditioning level with zero deletions. This preserves the
+terminating level's `n.edgetests` entry while avoiding extra zero-test tail
+levels when `max_conditioning_size` is larger than the skeleton actually uses.
+
+Targeted gate:
+
+```bash
+Rscript -e 'source("fastkpc/R/cuda_native.R"); build_fastkpc_cuda_native(rebuild = TRUE)'
+Rscript fastkpc/tests/test_legacy_dcov_gamma_cpp_batch_oracle.R
+Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+```
+
+Full 351x48 artifact:
+
+```text
+fastkpc/artifacts/compatible_cuda_skeleton_threaded_level_dcov_full_351x48_stopfix_v1
+```
+
+Run shape:
+
+```bash
+FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=20
+FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=20
+
+dcov_batch = "level"
+low_rank   = "spectra"
+timeout    = 900 sec
+```
+
+Result:
+
+```text
+run_status:          ok
+elapsed_sec:         782.695
+edge_count:          110 / 110
+SHD:                 0
+n.edgetests exact:   TRUE
+n.edgetests:         2213,52659,125293,40694,13293,5422,835,80
+
+residual provider:
+  request_count:     132,908
+  total_ms:          326,754.1
+  parallel_cores:    20
+
+native dCov:
+  pair_count:        479,509
+  batch_count:       8
+  threaded:          TRUE
+  threads:           20
+  materialize_ms:    1,576.843
+  batch_call_ms:     453,716.2
+```
+
+Comparison:
+
+```text
+S-affinity reference artifact elapsed_sec: 853.847
+threaded native one-call elapsed_sec:      782.695
+wall delta:                                -71.152 sec
+```
+
+Decision:
+
+```text
+This is the first full 351x48 native one-call facade gate that is both
+correctness-clean and faster than the current stable S-affinity reference
+artifact. It is an env-gated compatible one-call candidate, not a default route.
+The residual authority remains legacy mgcv/regrXonS and the CI authority remains
+native legacy dCov.gamma.
 ```
 
 ---

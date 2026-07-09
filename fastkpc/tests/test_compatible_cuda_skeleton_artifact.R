@@ -169,6 +169,8 @@ required <- c(
   "legacy_dcov_native_count", "legacy_dcov_native_batch_enabled",
   "legacy_dcov_native_batch_mode", "legacy_dcov_native_batch_count",
   "legacy_dcov_native_batch_pair_count",
+  "legacy_dcov_native_batch_parallel_enabled",
+  "legacy_dcov_native_batch_parallel_threads",
   "legacy_dcov_native_batch_column_materialize_count",
   "legacy_dcov_native_batch_materialize_ms",
   "legacy_dcov_native_batch_call_ms",
@@ -217,6 +219,11 @@ assert_true(identical(summary$legacy_dcov_native_batch_mode[[1L]], "level"),
 assert_true(identical(as.integer(summary$legacy_dcov_native_batch_pair_count[[1L]]),
                       as.integer(summary$legacy_dcov_native_count[[1L]])),
             "artifact should record batch pair count for all native dCov computations")
+assert_true(!isTRUE(summary$legacy_dcov_native_batch_parallel_enabled[[1L]]),
+            "artifact default route should not enable threaded native dCov batch")
+assert_true(identical(as.integer(summary$legacy_dcov_native_batch_parallel_threads[[1L]]),
+                      1L),
+            "artifact default route should record one native dCov batch thread")
 assert_true(isTRUE(summary$adjacency_identical[[1L]]),
             "artifact facade adjacency should match explicit provider reference")
 assert_true(isTRUE(summary$sepsets_identical[[1L]]),

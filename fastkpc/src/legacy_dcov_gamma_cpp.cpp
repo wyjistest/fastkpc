@@ -11,7 +11,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <exception>
+#include <mutex>
 #include <numeric>
+#include <string>
+#include <thread>
 #include <vector>
 
 namespace fastkpc {
@@ -21,6 +25,16 @@ double legacy_dcov_elapsed_ms_since(
     std::chrono::steady_clock::time_point start) {
   return std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - start).count();
+}
+
+int legacy_dcov_batch_threads_from_env(int batch) {
+  if (batch <= 1) return 1;
+  const char* raw = std::getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS");
+  if (raw == nullptr) return 1;
+  char* end = nullptr;
+  const long parsed = std::strtol(raw, &end, 10);
+  if (end == raw || parsed <= 1) return 1;
+  return std::max(1, std::min(batch, static_cast<int>(parsed)));
 }
 
 void legacy_dcov_fill_distance_matrix(const double* values,
@@ -478,14 +492,79 @@ Rcpp::List legacy_dcov_gamma_cpp_compute_batch(Rcpp::NumericMatrix x,
   double moment_ms = 0.0;
   double pgamma_ms = 0.0;
   LegacyDcovLowrankTimings lowrank_timings;
-  LegacyDcovGammaCppWorkspace workspace;
   LegacyDcovLowrankMode lowrank_mode = legacy_dcov_lowrank_mode_from_env();
+  const int batch_threads = legacy_dcov_batch_threads_from_env(batch);
+  const bool batch_parallel_enabled = batch_threads > 1;
+  std::vector<LegacyDcovGammaCppResult> results(batch);
+  std::vector<LegacyDcovGammaCppWorkspace> workspaces(
+    static_cast<std::size_t>(batch_threads));
+
+  if (batch_parallel_enabled) {
+    std::mutex error_mutex;
+    std::string first_error;
+    auto worker = [&](int thread_id) {
+      for (int col = thread_id; col < batch; col += batch_threads) {
+        {
+          std::lock_guard<std::mutex> lock(error_mutex);
+          if (!first_error.empty()) return;
+        }
+        try {
+          const double* x_col =
+            x.begin() + static_cast<std::ptrdiff_t>(col) * n;
+          const double* y_col =
+            y.begin() + static_cast<std::ptrdiff_t>(col) * n;
+          results[static_cast<std::size_t>(col)] =
+            legacy_dcov_gamma_cpp_compute_workspace(
+              x_col, y_col, n, numCol, index,
+              &workspaces[static_cast<std::size_t>(thread_id)]);
+        } catch (const std::exception& error) {
+          std::lock_guard<std::mutex> lock(error_mutex);
+          if (first_error.empty()) first_error = error.what();
+          return;
+        } catch (...) {
+          std::lock_guard<std::mutex> lock(error_mutex);
+          if (first_error.empty()) {
+            first_error = "legacy dCov gamma threaded batch failed";
+          }
+          return;
+        }
+      }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<std::size_t>(batch_threads));
+    for (int thread_id = 0; thread_id < batch_threads; ++thread_id) {
+      threads.emplace_back(worker, thread_id);
+    }
+    for (std::thread& thread : threads) thread.join();
+    if (!first_error.empty()) Rcpp::stop(first_error);
+  } else {
+    for (int col = 0; col < batch; ++col) {
+      const double* x_col = x.begin() + static_cast<std::ptrdiff_t>(col) * n;
+      const double* y_col = y.begin() + static_cast<std::ptrdiff_t>(col) * n;
+      results[static_cast<std::size_t>(col)] =
+        legacy_dcov_gamma_cpp_compute_workspace(
+          x_col, y_col, n, numCol, index, &workspaces[0]);
+    }
+  }
+
+  int distance_workspace_reuse_count = 0;
+  int statistic_moment_workspace_reuse_count = 0;
+  int lowrank_output_workspace_reuse_count = 0;
+  int lowrank_eig_workspace_reuse_count = 0;
+  for (const LegacyDcovGammaCppWorkspace& workspace : workspaces) {
+    distance_workspace_reuse_count += workspace.distance_workspace_reuse_count;
+    statistic_moment_workspace_reuse_count +=
+      workspace.statistic_moment_workspace_reuse_count;
+    lowrank_output_workspace_reuse_count +=
+      workspace.lowrank_output_workspace_reuse_count;
+    lowrank_eig_workspace_reuse_count +=
+      workspace.lowrank_eig_workspace.reuse_count;
+  }
+
   for (int col = 0; col < batch; ++col) {
-    const double* x_col = x.begin() + static_cast<std::ptrdiff_t>(col) * n;
-    const double* y_col = y.begin() + static_cast<std::ptrdiff_t>(col) * n;
-    const LegacyDcovGammaCppResult result =
-      legacy_dcov_gamma_cpp_compute_workspace(
-        x_col, y_col, n, numCol, index, &workspace);
+    const LegacyDcovGammaCppResult& result =
+      results[static_cast<std::size_t>(col)];
     p_values[col] = result.p_value;
     nV2_values[col] = result.nV2;
     mean_values[col] = result.mean;
@@ -573,14 +652,16 @@ Rcpp::List legacy_dcov_gamma_cpp_compute_batch(Rcpp::NumericMatrix x,
       Rcpp::Named("batch_overhead_ms") = batch_overhead_ms,
       Rcpp::Named("workspace_reuse_enabled") = true,
       Rcpp::Named("distance_workspace_reuse_count") =
-        workspace.distance_workspace_reuse_count,
+        distance_workspace_reuse_count,
       Rcpp::Named("statistic_moment_workspace_reuse_count") =
-        workspace.statistic_moment_workspace_reuse_count,
+        statistic_moment_workspace_reuse_count,
       Rcpp::Named("lowrank_output_workspace_reuse_count") =
-        workspace.lowrank_output_workspace_reuse_count,
+        lowrank_output_workspace_reuse_count,
       Rcpp::Named("lowrank_eig_workspace_reuse_count") =
-        workspace.lowrank_eig_workspace.reuse_count,
+        lowrank_eig_workspace_reuse_count,
       Rcpp::Named("column_copy_count") = 0,
+      Rcpp::Named("batch_parallel_enabled") = batch_parallel_enabled,
+      Rcpp::Named("batch_parallel_threads") = batch_threads,
       Rcpp::Named("unaccounted_ms") = std::max(0.0, total_ms - accounted_ms),
       Rcpp::Named("total_ms") = total_ms
     )

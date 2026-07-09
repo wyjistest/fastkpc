@@ -16,6 +16,10 @@ if (length(missing) > 0L) {
 Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra")
 old_native_batch <- Sys.getenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH",
                                unset = NA_character_)
+old_batch_threads <- Sys.getenv(
+  "FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS",
+  unset = NA_character_
+)
 old_provider_cores <- Sys.getenv("FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES",
                                  unset = NA_character_)
 old_mgcv_backend <- Sys.getenv(c(
@@ -28,6 +32,12 @@ on.exit({
     Sys.unsetenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH")
   } else {
     Sys.setenv(FASTKPC_NATIVE_LEGACY_DCOV_BATCH = old_native_batch)
+  }
+  if (is.na(old_batch_threads)) {
+    Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS")
+  } else {
+    Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS =
+                 old_batch_threads)
   }
   if (is.na(old_provider_cores)) {
     Sys.unsetenv("FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES")
@@ -43,6 +53,7 @@ on.exit({
   }
 }, add = TRUE)
 Sys.unsetenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH")
+Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS")
 Sys.unsetenv("FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT")
@@ -119,6 +130,18 @@ one_call_canonical_batch <- precision_run_skeleton_legacy_mgcv_legacy_dcov_nativ
   trace_level = "full",
   dcov_batch = "canonical"
 )
+
+Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS = "2")
+one_call_threaded_batch <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
+  data = data,
+  alpha = alpha,
+  max_conditioning_size = max_conditioning_size,
+  index = index,
+  numCol = numCol,
+  trace_level = "full",
+  dcov_batch = "level"
+)
+Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS")
 
 Sys.setenv(FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES = "2")
 one_call_parallel_provider <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
@@ -200,12 +223,37 @@ assert_true(identical(Sys.getenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH", unset = "")
             "one-call dcov_batch='none' should restore caller batch env")
 Sys.unsetenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH")
 
+if (requireNamespace("pcalg", quietly = TRUE)) {
+  source("fastkpc/R/legacy_runner.R")
+  native_high_max <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
+    data = data,
+    alpha = alpha,
+    max_conditioning_size = 10L,
+    index = index,
+    numCol = numCol,
+    trace_level = "summary",
+    dcov_batch = "level"
+  )
+  legacy_high_max <- fastkpc_legacy_skeleton(
+    data = data,
+    alpha = alpha,
+    max_conditioning_size = 10L,
+    numCol = numCol
+  )
+  assert_true(identical(
+    as.integer(native_high_max$n.edgetests),
+    as.integer(legacy_high_max@n.edgetests)
+  ), "one-call high-m.max n.edgetests should stop like legacy skeleton")
+}
+
 assert_true(identical(one_call$adjacency, explicit$adjacency),
             "one-call legacy mgcv legacy dCov adjacency should match explicit provider")
 assert_true(identical(one_call_batch$adjacency, explicit$adjacency),
             "one-call level-batched legacy dCov adjacency should match explicit provider")
 assert_true(identical(one_call_canonical_batch$adjacency, explicit$adjacency),
             "one-call canonical-batched legacy dCov adjacency should match explicit provider")
+assert_true(identical(one_call_threaded_batch$adjacency, explicit$adjacency),
+            "one-call threaded-batched legacy dCov adjacency should match explicit provider")
 assert_true(identical(one_call_parallel_provider$adjacency, explicit$adjacency),
             "one-call parallel residual provider adjacency should match explicit provider")
 assert_true(identical(one_call_cpp_residual$adjacency, explicit$adjacency),
@@ -223,6 +271,8 @@ assert_true(max(abs(one_call_batch$pMax - explicit$pMax)) < 1e-12,
             "one-call level-batched legacy dCov pMax should match explicit provider")
 assert_true(max(abs(one_call_canonical_batch$pMax - explicit$pMax)) < 1e-12,
             "one-call canonical-batched legacy dCov pMax should match explicit provider")
+assert_true(max(abs(one_call_threaded_batch$pMax - explicit$pMax)) < 1e-12,
+            "one-call threaded-batched legacy dCov pMax should match explicit provider")
 assert_true(max(abs(one_call_parallel_provider$pMax - explicit$pMax)) < 1e-12,
             "one-call parallel residual provider pMax should match explicit provider")
 assert_true(max(abs(one_call_cpp_residual$pMax - explicit$pMax)) < 1e-8,
@@ -382,6 +432,11 @@ assert_true(isTRUE(one_call_canonical_batch$summary$legacy_dcov_native_batch_ena
 assert_true(identical(one_call_canonical_batch$summary$legacy_dcov_native_batch_mode,
                       "canonical"),
             "one-call canonical batch should record canonical mode")
+assert_true(isTRUE(one_call_threaded_batch$summary$legacy_dcov_native_batch_parallel_enabled),
+            "one-call threaded batch should record dCov batch parallel enabled")
+assert_true(identical(as.integer(one_call_threaded_batch$summary$legacy_dcov_native_batch_parallel_threads),
+                      2L),
+            "one-call threaded batch should record dCov batch thread count")
 assert_true(isTRUE(one_call_parallel_provider$summary$residual_provider_parallel_enabled),
             "one-call provider cores env should enable parallel residual provider")
 assert_true(identical(as.integer(one_call_parallel_provider$summary$residual_provider_parallel_cores),

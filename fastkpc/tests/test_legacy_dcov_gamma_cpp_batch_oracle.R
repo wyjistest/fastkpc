@@ -13,6 +13,20 @@ if (length(missing) > 0L) {
   quit(save = "no", status = 0)
 }
 
+old_batch_threads <- Sys.getenv(
+  "FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS",
+  unset = NA_character_
+)
+on.exit({
+  if (is.na(old_batch_threads)) {
+    Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS")
+  } else {
+    Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS =
+                 old_batch_threads)
+  }
+}, add = TRUE)
+Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS")
+
 fixture_path <- "fastkpc/tests/fixtures/legacy_dcov_gamma_oracle_v1.rds"
 assert_true(file.exists(fixture_path),
             "legacy dCov gamma oracle fixture should exist")
@@ -87,7 +101,8 @@ batch_diag_fields <- c(
   "batch_overhead_ms", "unaccounted_ms", "workspace_reuse_enabled",
   "distance_workspace_reuse_count", "statistic_moment_workspace_reuse_count",
   "lowrank_output_workspace_reuse_count",
-  "lowrank_eig_workspace_reuse_count", "column_copy_count"
+  "lowrank_eig_workspace_reuse_count", "column_copy_count",
+  "batch_parallel_enabled", "batch_parallel_threads"
 )
 missing_batch_diag <- setdiff(batch_diag_fields, names(batch$diagnostics))
 assert_true(length(missing_batch_diag) == 0L,
@@ -145,5 +160,32 @@ assert_true(identical(
 ), "batched C++ oracle should reuse x/y lowrank eig workspaces per pair")
 assert_true(identical(as.integer(batch$diagnostics$column_copy_count), 0L),
             "batched C++ oracle should avoid per-column Rcpp vector copies")
+assert_true(!isTRUE(batch$diagnostics$batch_parallel_enabled),
+            "batched C++ oracle should keep parallel batch disabled by default")
+assert_true(identical(as.integer(batch$diagnostics$batch_parallel_threads), 1L),
+            "batched C++ oracle should report one thread by default")
+
+Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS = "2")
+threaded_batch <- fastkpc_legacy_dcov_gamma_cpp_oracle_batch(
+  x, y, numCol = num_col, index = index
+)
+assert_true(max(abs(threaded_batch$p.value - batch$p.value)) <= scalar_tol,
+            "threaded batched C++ oracle p.values should match sequential batch")
+assert_true(max(abs(threaded_batch$nV2 - batch$nV2)) <= scalar_tol,
+            "threaded batched C++ oracle nV2 should match sequential batch")
+assert_true(max(abs(threaded_batch$mean - batch$mean)) <= scalar_tol,
+            "threaded batched C++ oracle mean should match sequential batch")
+assert_true(max(abs(threaded_batch$variance - batch$variance)) <= scalar_tol,
+            "threaded batched C++ oracle variance should match sequential batch")
+assert_true(isTRUE(threaded_batch$diagnostics$batch_parallel_enabled),
+            "threaded batched C++ oracle should report parallel batch enabled")
+assert_true(identical(
+  as.integer(threaded_batch$diagnostics$batch_parallel_threads),
+  2L
+), "threaded batched C++ oracle should report requested thread count")
+assert_true(identical(
+  as.integer(threaded_batch$diagnostics$batch_count),
+  as.integer(ncol(x))
+), "threaded batched C++ oracle should preserve batch count")
 
 cat("PASS legacy dCov gamma C++ batch oracle parity\n")
