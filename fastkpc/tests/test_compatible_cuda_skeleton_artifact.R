@@ -142,7 +142,10 @@ required <- c(
   "sepsets_identical", "n_edgetests_identical", "n_edgetests_exact",
   "pmax_max_abs_diff", "residual_provider_request_count",
   "residual_provider_call_ms", "residual_provider_matrix_copy_ms",
-  "residual_provider_total_ms",
+  "residual_provider_total_ms", "residual_provider_parallel_enabled",
+  "residual_provider_parallel_cores",
+  "residual_provider_parallel_level_count",
+  "residual_provider_parallel_request_count",
   "legacy_dcov_native_count", "legacy_dcov_native_batch_enabled",
   "legacy_dcov_native_batch_mode", "legacy_dcov_native_batch_count",
   "legacy_dcov_native_batch_pair_count",
@@ -215,6 +218,11 @@ assert_true(summary$residual_provider_matrix_copy_ms[[1L]] >= 0,
 assert_true(summary$residual_provider_total_ms[[1L]] >=
               summary$residual_provider_call_ms[[1L]],
             "artifact residual provider total should include call timing")
+assert_true(!isTRUE(summary$residual_provider_parallel_enabled[[1L]]),
+            "artifact default route should not enable parallel residual provider")
+assert_true(identical(as.integer(summary$residual_provider_parallel_cores[[1L]]),
+                      0L),
+            "artifact default route should record zero parallel provider cores")
 assert_true(summary$legacy_dcov_native_count[[1L]] > 0L,
             "artifact should exercise native legacy dCov tasks")
 assert_true(summary$legacy_dcov_native_batch_materialize_ms[[1L]] >= 0,

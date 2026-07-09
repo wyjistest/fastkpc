@@ -16,6 +16,8 @@ if (length(missing) > 0L) {
 Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra")
 old_native_batch <- Sys.getenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH",
                                unset = NA_character_)
+old_provider_cores <- Sys.getenv("FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES",
+                                 unset = NA_character_)
 old_mgcv_backend <- Sys.getenv(c(
   "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
   "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT",
@@ -27,6 +29,11 @@ on.exit({
   } else {
     Sys.setenv(FASTKPC_NATIVE_LEGACY_DCOV_BATCH = old_native_batch)
   }
+  if (is.na(old_provider_cores)) {
+    Sys.unsetenv("FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES")
+  } else {
+    Sys.setenv(FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES = old_provider_cores)
+  }
   for (name in names(old_mgcv_backend)) {
     if (is.na(old_mgcv_backend[[name]])) {
       Sys.unsetenv(name)
@@ -36,6 +43,7 @@ on.exit({
   }
 }, add = TRUE)
 Sys.unsetenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH")
+Sys.unsetenv("FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_CONDITION_THRESHOLD")
@@ -112,6 +120,18 @@ one_call_canonical_batch <- precision_run_skeleton_legacy_mgcv_legacy_dcov_nativ
   dcov_batch = "canonical"
 )
 
+Sys.setenv(FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES = "2")
+one_call_parallel_provider <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
+  data = data,
+  alpha = alpha,
+  max_conditioning_size = max_conditioning_size,
+  index = index,
+  numCol = numCol,
+  trace_level = "full",
+  dcov_batch = "level"
+)
+Sys.unsetenv("FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES")
+
 Sys.setenv(
   FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND = "cpp_guarded",
   FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND_NATIVE_S_SIZE_LIMIT = "1",
@@ -186,6 +206,8 @@ assert_true(identical(one_call_batch$adjacency, explicit$adjacency),
             "one-call level-batched legacy dCov adjacency should match explicit provider")
 assert_true(identical(one_call_canonical_batch$adjacency, explicit$adjacency),
             "one-call canonical-batched legacy dCov adjacency should match explicit provider")
+assert_true(identical(one_call_parallel_provider$adjacency, explicit$adjacency),
+            "one-call parallel residual provider adjacency should match explicit provider")
 assert_true(identical(one_call_cpp_residual$adjacency, explicit$adjacency),
             "one-call guarded C++ residual backend adjacency should match explicit provider")
 assert_true(identical(unname(facade$adjacency), unname(explicit$adjacency)),
@@ -201,6 +223,8 @@ assert_true(max(abs(one_call_batch$pMax - explicit$pMax)) < 1e-12,
             "one-call level-batched legacy dCov pMax should match explicit provider")
 assert_true(max(abs(one_call_canonical_batch$pMax - explicit$pMax)) < 1e-12,
             "one-call canonical-batched legacy dCov pMax should match explicit provider")
+assert_true(max(abs(one_call_parallel_provider$pMax - explicit$pMax)) < 1e-12,
+            "one-call parallel residual provider pMax should match explicit provider")
 assert_true(max(abs(one_call_cpp_residual$pMax - explicit$pMax)) < 1e-8,
             "one-call guarded C++ residual backend pMax should match explicit provider")
 assert_true(max(abs(unname(facade$pMax) - unname(explicit$pMax))) < 1e-12,
@@ -217,6 +241,9 @@ assert_true(identical(as.integer(one_call_batch$n.edgetests),
 assert_true(identical(as.integer(one_call_canonical_batch$n.edgetests),
                       as.integer(explicit$n.edgetests)),
             "one-call canonical-batched legacy dCov n.edgetests should match explicit provider")
+assert_true(identical(as.integer(one_call_parallel_provider$n.edgetests),
+                      as.integer(explicit$n.edgetests)),
+            "one-call parallel residual provider n.edgetests should match explicit provider")
 assert_true(identical(as.integer(one_call_cpp_residual$n.edgetests),
                       as.integer(explicit$n.edgetests)),
             "one-call guarded C++ residual backend n.edgetests should match explicit provider")
@@ -232,6 +259,8 @@ assert_true(compare_sepsets(one_call_batch$sepsets, explicit$sepsets),
             "one-call level-batched legacy dCov sepsets should match explicit provider")
 assert_true(compare_sepsets(one_call_canonical_batch$sepsets, explicit$sepsets),
             "one-call canonical-batched legacy dCov sepsets should match explicit provider")
+assert_true(compare_sepsets(one_call_parallel_provider$sepsets, explicit$sepsets),
+            "one-call parallel residual provider sepsets should match explicit provider")
 assert_true(compare_sepsets(one_call_cpp_residual$sepsets, explicit$sepsets),
             "one-call guarded C++ residual backend sepsets should match explicit provider")
 assert_true(compare_sepsets(facade$sepsets, explicit$sepsets),
@@ -249,6 +278,9 @@ assert_true(identical(as.integer(one_call_batch$summary$residual_provider_reques
 assert_true(identical(as.integer(one_call_canonical_batch$summary$residual_provider_request_count),
                       as.integer(explicit$summary$residual_provider_request_count)),
             "one-call canonical-batched wrapper should preserve residual request count")
+assert_true(identical(as.integer(one_call_parallel_provider$summary$residual_provider_request_count),
+                      as.integer(explicit$summary$residual_provider_request_count)),
+            "one-call parallel residual provider should preserve residual request count")
 assert_true(identical(as.integer(one_call_cpp_residual$summary$residual_provider_request_count),
                       as.integer(explicit$summary$residual_provider_request_count)),
             "one-call guarded C++ residual backend should preserve residual request count")
@@ -350,6 +382,14 @@ assert_true(isTRUE(one_call_canonical_batch$summary$legacy_dcov_native_batch_ena
 assert_true(identical(one_call_canonical_batch$summary$legacy_dcov_native_batch_mode,
                       "canonical"),
             "one-call canonical batch should record canonical mode")
+assert_true(isTRUE(one_call_parallel_provider$summary$residual_provider_parallel_enabled),
+            "one-call provider cores env should enable parallel residual provider")
+assert_true(identical(as.integer(one_call_parallel_provider$summary$residual_provider_parallel_cores),
+                      2L),
+            "one-call parallel residual provider should record requested worker count")
+assert_true(identical(as.integer(one_call_parallel_provider$summary$residual_provider_parallel_request_count),
+                      as.integer(one_call_parallel_provider$summary$residual_provider_request_count)),
+            "one-call parallel residual provider should report covered residual requests")
 assert_true(isTRUE(facade$summary$legacy_dcov_native_batch_enabled),
             "compatible CUDA facade should pass dcov_batch option through")
 assert_true(isTRUE(facade$summary$compatible_cuda_facade),

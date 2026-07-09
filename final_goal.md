@@ -3769,6 +3769,80 @@ decision:
   the native dCov batch critical path.
 ```
 
+Fork-parallel native mgcv residual-provider checkpoint:
+
+```text
+route:
+  FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=<N>
+  fastkpc_compatible_cuda_skeleton()
+  dcov_batch = canonical
+
+behavior:
+  env-gated only; default provider remains sequential
+  applies only to the R legacy mgcv residual provider
+  preserves request order when assembling the level residual matrix
+  cpp_guarded residual provider is not parallelized by this switch
+
+new summary fields:
+  residual_provider_parallel_enabled
+  residual_provider_parallel_cores
+  residual_provider_parallel_level_count
+  residual_provider_parallel_request_count
+
+tests:
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+hot12 artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_hot12_parallel_provider_v1
+
+hot12 result:
+  provider cores = 4
+  elapsed_sec = 28.929
+  edge_count = 24 / 24
+  SHD = 0
+  n.edgetests exact = TRUE
+  n.edgetests = 131,994,1453
+  residual_provider_request_count = 792
+  residual_provider_call_ms = 7093.829
+  residual_provider_parallel_enabled = TRUE
+  residual_provider_parallel_cores = 4
+  residual_provider_parallel_level_count = 2
+  residual_provider_parallel_request_count = 792
+  legacy_dcov_native_count = 2578
+  legacy_dcov_native_batch_mode = canonical
+
+hot12 comparison:
+  canonical sequential provider elapsed_sec = 34.762
+  canonical sequential provider residual_provider_call_ms = 13096.55
+  parallel provider elapsed_sec = 28.929
+  parallel provider residual_provider_call_ms = 7093.829
+
+full 351x48 artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_parallel_provider_canonical_full_351x48_v1
+
+full 351x48 result:
+  provider cores = 20
+  reference_source = rds
+  reference_edge_count = 110
+  reference_n.edgetests = 2213,52659,125293,40694,13293,5422,835,80
+  candidate_timeout_sec = 900
+  run_status = timeout
+  timeout = TRUE
+  elapsed_sec = 900
+  correctness fields are NA because the candidate did not complete
+  no matching long-running candidate Rscript remained after timeout inspection
+
+decision:
+  Fork-parallel provider is correctness-clean and useful on hot12, but it still
+  does not make the full 351x48 facade promotable. It can remain as an
+  env-gated experiment/diagnostic for the hidden R provider boundary. The next
+  full-route work should avoid returning to this facade shape as the primary
+  acceleration path unless it also changes the residual execution structure or
+  native dCov critical path enough to complete inside the recommended route's
+  wall-time envelope.
+```
+
 ### Gate
 
 ```text

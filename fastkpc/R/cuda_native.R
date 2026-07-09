@@ -374,6 +374,12 @@ fastkpc_native_legacy_mgcv_backend_native_s_size_limit <- function() {
   if (length(value) != 1L || is.na(value) || value < 0) Inf else value
 }
 
+fastkpc_native_legacy_mgcv_provider_cores <- function() {
+  raw <- Sys.getenv("FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES", unset = "1")
+  value <- suppressWarnings(as.integer(raw))
+  if (length(value) != 1L || is.na(value) || value < 1L) 1L else value
+}
+
 fastkpc_native_prepare_legacy_mgcv_cpp_backend <- function() {
   if (!exists("fastkpc_legacy_mgcv_residual_cpp_backend_target",
               mode = "function")) {
@@ -459,6 +465,56 @@ fastkpc_legacy_mgcv_residual_provider_matrix <- function(
   }
 
   out <- matrix(NA_real_, nrow(data), nrow(requests))
+  provider_cores_requested <- fastkpc_native_legacy_mgcv_provider_cores()
+  provider_cores_used <- min(provider_cores_requested, nrow(requests))
+  provider_parallel_enabled <- identical(backend, "r") &&
+    identical(.Platform$OS.type, "unix") &&
+    provider_cores_used > 1L
+  if (!is.null(counter_env)) {
+    parallel_cores_seen <- counter_env$provider_parallel_cores
+    if (is.null(parallel_cores_seen)) parallel_cores_seen <- 0L
+    parallel_level_count <- counter_env$provider_parallel_level_count
+    if (is.null(parallel_level_count)) parallel_level_count <- 0L
+    parallel_request_count <- counter_env$provider_parallel_request_count
+    if (is.null(parallel_request_count)) parallel_request_count <- 0L
+    counter_env$provider_parallel_enabled <-
+      isTRUE(counter_env$provider_parallel_enabled) ||
+      isTRUE(provider_parallel_enabled)
+    counter_env$provider_parallel_cores <- max(
+      as.integer(parallel_cores_seen),
+      if (isTRUE(provider_parallel_enabled)) provider_cores_used else 0L
+    )
+    counter_env$provider_parallel_level_count <-
+      as.integer(parallel_level_count) +
+      as.integer(isTRUE(provider_parallel_enabled))
+    counter_env$provider_parallel_request_count <-
+      as.integer(parallel_request_count) +
+      if (isTRUE(provider_parallel_enabled)) nrow(requests) else 0L
+  }
+  if (isTRUE(provider_parallel_enabled)) {
+    residual_list <- parallel::mclapply(
+      seq_len(nrow(requests)),
+      function(i) {
+        S <- as.integer(requests$conditioning_sets[[i]])
+        if (length(S) == 0L) {
+          stop("legacy mgcv residual provider received unconditional request",
+               call. = FALSE)
+        }
+        target <- as.integer(requests$target[[i]])
+        fastkpc_legacy_mgcv_residual(
+          data = data,
+          target = target,
+          S = S
+        )
+      },
+      mc.cores = provider_cores_used,
+      mc.preschedule = TRUE
+    )
+    for (i in seq_along(residual_list)) {
+      out[, i] <- residual_list[[i]]
+    }
+    return(out)
+  }
   for (i in seq_len(nrow(requests))) {
     S <- as.integer(requests$conditioning_sets[[i]])
     if (length(S) == 0L) {
@@ -562,6 +618,22 @@ fastkpc_native_attach_mgcv_provider_summary <- function(result, counter_env,
     as.numeric(metric_value("mgcv_cpp_backend_ms", 0))
   result$summary$residual_provider_mgcv_cpp_backend_native_solve_ms <-
     as.numeric(metric_value("mgcv_cpp_backend_native_solve_ms", 0))
+  result$summary$residual_provider_parallel_enabled <-
+    isTRUE(fastkpc_native_counter_value(
+      counter_env, "provider_parallel_enabled", FALSE
+    ))
+  result$summary$residual_provider_parallel_cores <-
+    as.integer(fastkpc_native_counter_value(
+      counter_env, "provider_parallel_cores", 0L
+    ))
+  result$summary$residual_provider_parallel_level_count <-
+    as.integer(fastkpc_native_counter_value(
+      counter_env, "provider_parallel_level_count", 0L
+    ))
+  result$summary$residual_provider_parallel_request_count <-
+    as.integer(fastkpc_native_counter_value(
+      counter_env, "provider_parallel_request_count", 0L
+    ))
   result
 }
 

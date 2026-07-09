@@ -257,6 +257,10 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     residual_provider_call_ms = NA_real_,
     residual_provider_matrix_copy_ms = NA_real_,
     residual_provider_total_ms = NA_real_,
+    residual_provider_parallel_enabled = NA,
+    residual_provider_parallel_cores = NA_integer_,
+    residual_provider_parallel_level_count = NA_integer_,
+    residual_provider_parallel_request_count = NA_integer_,
     legacy_dcov_native_count = NA_integer_,
     reference_legacy_dcov_native_count = NA_integer_,
     legacy_dcov_native_batch_enabled = NA,
@@ -643,6 +647,17 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
       as.numeric(facade_summary$residual_provider_matrix_copy_ms %||% NA_real_),
     residual_provider_total_ms =
       as.numeric(facade_summary$residual_provider_total_ms %||% NA_real_),
+    residual_provider_parallel_enabled =
+      isTRUE(facade_summary$residual_provider_parallel_enabled),
+    residual_provider_parallel_cores =
+      as.integer(facade_summary$residual_provider_parallel_cores %||%
+                   NA_integer_),
+    residual_provider_parallel_level_count =
+      as.integer(facade_summary$residual_provider_parallel_level_count %||%
+                   NA_integer_),
+    residual_provider_parallel_request_count =
+      as.integer(facade_summary$residual_provider_parallel_request_count %||%
+                   NA_integer_),
     legacy_dcov_native_count =
       as.integer(facade_summary$legacy_dcov_native_count %||% NA_integer_),
     reference_legacy_dcov_native_count =
