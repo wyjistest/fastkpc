@@ -79,6 +79,57 @@ legacy_dcov_spectra_matvec_cuda <- function(a, rhs) {
   result
 }
 
+legacy_dcov_spectra_matvec_cuda_handle <- function(a) {
+  load_fastkpc_cuda_native()
+  a <- as.matrix(a)
+  storage.mode(a) <- "double"
+  if (nrow(a) != ncol(a)) {
+    stop("matrix must be square", call. = FALSE)
+  }
+  if (!all(is.finite(a))) {
+    stop("Data contains missing or infinite values", call. = FALSE)
+  }
+  handle <- .Call("C_legacy_dcov_spectra_matvec_cuda_handle_create", a,
+                  PACKAGE = "fastkpc_cuda")
+  class(handle) <- c("fastkpc_cuda_matvec_handle", class(handle))
+  handle
+}
+
+legacy_dcov_spectra_matvec_cuda_handle_apply <- function(handle, rhs) {
+  load_fastkpc_cuda_native()
+  if (!is.list(handle) || is.null(handle$ptr)) {
+    stop("CUDA matvec handle must be a handle object", call. = FALSE)
+  }
+  rhs_was_vector <- is.null(dim(rhs))
+  rhs <- if (rhs_was_vector) {
+    matrix(as.numeric(rhs), ncol = 1L)
+  } else {
+    as.matrix(rhs)
+  }
+  storage.mode(rhs) <- "double"
+  if (nrow(rhs) != as.integer(handle$n)) {
+    stop("rhs row count must match matrix dimension", call. = FALSE)
+  }
+  if (!all(is.finite(rhs))) {
+    stop("Data contains missing or infinite values", call. = FALSE)
+  }
+  result <- .Call("C_legacy_dcov_spectra_matvec_cuda_handle_apply",
+                  handle$ptr, rhs, PACKAGE = "fastkpc_cuda")
+  if (rhs_was_vector) {
+    result$values <- as.numeric(result$values[, 1L])
+  }
+  result
+}
+
+legacy_dcov_spectra_matvec_cuda_handle_free <- function(handle) {
+  load_fastkpc_cuda_native()
+  if (!is.list(handle) || is.null(handle$ptr)) {
+    stop("CUDA matvec handle must be a handle object", call. = FALSE)
+  }
+  invisible(.Call("C_legacy_dcov_spectra_matvec_cuda_handle_free",
+                  handle$ptr, PACKAGE = "fastkpc_cuda"))
+}
+
 fast_dcov_batch_cuda <- function(x, y, index = 1, legacy_index = TRUE) {
   load_fastkpc_cuda_native()
   x <- if (is.matrix(x)) x else matrix(as.numeric(x), ncol = 1)

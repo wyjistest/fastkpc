@@ -5622,6 +5622,75 @@ decision:
   eigensolver-compatible path without host round-trips per matvec.
 ```
 
+CUDA dense Spectra-matvec device-resident handle checkpoint:
+
+```text
+scope:
+  CUDA substrate for the legacy dCov Spectra lowrank bottleneck
+  reusable device-resident dense matrix handle
+  not connected to the skeleton route
+  not connected to RSpectra yet
+
+change:
+  add a reusable handle API around the dense symmetric CUDA matvec primitive:
+    legacy_dcov_spectra_matvec_cuda_handle(a)
+    legacy_dcov_spectra_matvec_cuda_handle_apply(handle, rhs)
+    legacy_dcov_spectra_matvec_cuda_handle_free(handle)
+
+  implementation shape:
+    handle creation uploads the n x n dense matrix to device memory once
+    handle apply uploads only RHS vectors/matrices and downloads outputs
+    one CUDA kernel launch per RHS column remains unchanged
+    explicit free and external-pointer finalizer release the device matrix
+    applying after explicit free reports: CUDA matvec handle has been freed
+
+  native backend:
+    fastkpc/src/cuda/legacy_dcov_spectra_matvec_cuda.cu
+    fastkpc/src/cuda/legacy_dcov_spectra_matvec_cuda.hpp
+
+  R/.Call bridge:
+    C_legacy_dcov_spectra_matvec_cuda_handle_create
+    C_legacy_dcov_spectra_matvec_cuda_handle_apply
+    C_legacy_dcov_spectra_matvec_cuda_handle_free
+
+diagnostics:
+  backend = cuda-dense-sym-matvec-handle
+  n
+  rhs_count
+  kernel_launch_count
+  device_matrix_reuse_count
+  matrix_bytes
+  matrix_h2d_ms
+  alloc_ms
+  h2d_ms
+  kernel_ms
+  d2h_ms
+  free_ms
+  total_ms
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+
+351x8 warm handle micro-check:
+  n = 351
+  rhs_count = 8
+  max_abs_diff vs host matrix multiply = 4.973799e-14
+  matrix_h2d_ms during handle apply = 0
+  h2d_ms = 0.00854
+  kernel_ms = 0.047413
+  d2h_ms = 0.012674
+  total_ms = 0.083735
+  device_matrix_reuse_count = 1
+
+decision:
+  This extends the CUDA Spectra-matvec substrate from a one-shot primitive to a
+  device-resident matrix operator. It still does not change dCov authority,
+  residual authority, skeleton replay, lowrank route selection, or the current
+  recommended compatible route. The next lowrank step is to reuse RHS/output
+  workspace and evaluate an eigensolver-compatible integration path that can
+  keep the operator on device across iterative Spectra matvecs.
+```
+
 ---
 
 ## 9. Final success definition

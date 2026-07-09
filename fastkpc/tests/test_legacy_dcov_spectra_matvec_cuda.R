@@ -64,6 +64,43 @@ assert_true(length(gpu_vec$values) == n,
 assert_true(max(abs(gpu_vec$values - cpu_vec)) < 1e-10,
             "CUDA vector matvec should match host dense matrix multiplication")
 
+handle <- legacy_dcov_spectra_matvec_cuda_handle(matrix_a)
+on.exit(try(legacy_dcov_spectra_matvec_cuda_handle_free(handle), silent = TRUE),
+        add = TRUE)
+assert_true(identical(handle$backend, "cuda-dense-sym-matvec-handle"),
+            "CUDA matvec handle should report backend")
+assert_true(identical(as.integer(handle$n), n),
+            "CUDA matvec handle should report matrix dimension")
+assert_true(as.numeric(handle$matrix_h2d_ms) >= 0,
+            "CUDA matvec handle should report matrix upload timing")
+assert_true(as.numeric(handle$matrix_bytes) == n * n * 8,
+            "CUDA matvec handle should report matrix bytes")
+
+reuse <- legacy_dcov_spectra_matvec_cuda_handle_apply(handle, rhs)
+assert_true(is.matrix(reuse$values), "CUDA handle matvec should return a matrix")
+assert_true(max(abs(reuse$values - cpu)) < 1e-10,
+            "CUDA handle matvec should match host dense matrix multiplication")
+assert_true(identical(reuse$backend, "cuda-dense-sym-matvec-handle"),
+            "CUDA handle matvec should report backend")
+assert_true(identical(as.integer(reuse$device_matrix_reuse_count), 1L),
+            "CUDA handle matvec should reuse the resident device matrix")
+assert_true(identical(as.numeric(reuse$matrix_h2d_ms), 0),
+            "CUDA handle matvec should not re-upload the matrix during apply")
+assert_true(identical(as.integer(reuse$kernel_launch_count), rhs_count),
+            "CUDA handle matvec should launch once per rhs in this prototype")
+
+reuse_vec <- legacy_dcov_spectra_matvec_cuda_handle_apply(handle, vector_rhs)
+assert_true(is.numeric(reuse_vec$values),
+            "CUDA handle matvec should preserve vector rhs shape")
+assert_true(max(abs(reuse_vec$values - cpu_vec)) < 1e-10,
+            "CUDA handle vector matvec should match host dense multiplication")
+
+legacy_dcov_spectra_matvec_cuda_handle_free(handle)
+assert_error(
+  legacy_dcov_spectra_matvec_cuda_handle_apply(handle, rhs),
+  "CUDA matvec handle has been freed"
+)
+
 assert_error(
   legacy_dcov_spectra_matvec_cuda(matrix_a[-1L, ], rhs[-1L, ]),
   "matrix must be square"

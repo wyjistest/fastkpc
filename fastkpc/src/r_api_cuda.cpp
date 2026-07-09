@@ -53,6 +53,30 @@ bool all_finite_vector(Rcpp::NumericVector values) {
   return true;
 }
 
+void legacy_dcov_spectra_matvec_handle_finalizer(SEXP ext) {
+  auto* handle =
+    static_cast<fastkpc::LegacyDcovSpectraMatvecCudaHandle*>(
+      R_ExternalPtrAddr(ext));
+  if (handle != nullptr) {
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_destroy(handle);
+    R_ClearExternalPtr(ext);
+  }
+}
+
+fastkpc::LegacyDcovSpectraMatvecCudaHandle*
+legacy_dcov_spectra_matvec_handle_from_externalptr(SEXP ptr) {
+  if (TYPEOF(ptr) != EXTPTRSXP) {
+    Rcpp::stop("CUDA matvec handle must be an external pointer");
+  }
+  auto* handle =
+    static_cast<fastkpc::LegacyDcovSpectraMatvecCudaHandle*>(
+      R_ExternalPtrAddr(ptr));
+  if (handle == nullptr) {
+    Rcpp::stop("CUDA matvec handle has been freed");
+  }
+  return handle;
+}
+
 enum class NativeLegacyDcovBatchMode {
   None,
   Level,
@@ -1895,6 +1919,107 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda(SEXP matrixs,
     Rcpp::Named("free_ms") = result.free_ms,
     Rcpp::Named("total_ms") = result.total_ms
   );
+  END_RCPP
+}
+
+extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_create(
+    SEXP matrixs) {
+  BEGIN_RCPP
+  if (!Rf_isReal(matrixs) || !Rf_isMatrix(matrixs)) {
+    Rcpp::stop("matrix must be a numeric matrix");
+  }
+  Rcpp::NumericMatrix matrix(matrixs);
+  if (matrix.nrow() != matrix.ncol()) {
+    Rcpp::stop("matrix must be square");
+  }
+  if (!all_finite(matrix)) {
+    Rcpp::stop("Data contains missing or infinite values");
+  }
+
+  fastkpc::LegacyDcovSpectraMatvecCudaHandle* handle =
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_create(
+      REAL(matrixs), matrix.nrow());
+  SEXP ext = PROTECT(R_MakeExternalPtr(handle, R_NilValue, R_NilValue));
+  R_RegisterCFinalizerEx(ext, legacy_dcov_spectra_matvec_handle_finalizer,
+                         TRUE);
+  Rcpp::List result = Rcpp::List::create(
+    Rcpp::Named("ptr") = ext,
+    Rcpp::Named("backend") = "cuda-dense-sym-matvec-handle",
+    Rcpp::Named("n") =
+      fastkpc::legacy_dcov_spectra_matvec_cuda_handle_n(handle),
+    Rcpp::Named("matrix_h2d_ms") =
+      fastkpc::legacy_dcov_spectra_matvec_cuda_handle_matrix_h2d_ms(handle),
+    Rcpp::Named("matrix_bytes") =
+      static_cast<double>(
+        fastkpc::legacy_dcov_spectra_matvec_cuda_handle_matrix_bytes(handle))
+  );
+  UNPROTECT(1);
+  return result;
+  END_RCPP
+}
+
+extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_apply(
+    SEXP handles,
+    SEXP rhss) {
+  BEGIN_RCPP
+  if (!Rf_isReal(rhss) || !Rf_isMatrix(rhss)) {
+    Rcpp::stop("rhs must be a numeric matrix");
+  }
+  fastkpc::LegacyDcovSpectraMatvecCudaHandle* handle =
+    legacy_dcov_spectra_matvec_handle_from_externalptr(handles);
+  const int n = fastkpc::legacy_dcov_spectra_matvec_cuda_handle_n(handle);
+  Rcpp::NumericMatrix rhs(rhss);
+  if (rhs.nrow() != n) {
+    Rcpp::stop("rhs row count must match matrix dimension");
+  }
+  if (rhs.ncol() < 1) {
+    Rcpp::stop("rhs must have at least one column");
+  }
+  if (!all_finite(rhs)) {
+    Rcpp::stop("Data contains missing or infinite values");
+  }
+
+  const int rhs_count = rhs.ncol();
+  const fastkpc::LegacyDcovSpectraMatvecCudaResult result =
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_apply(
+      handle, REAL(rhss), rhs_count);
+  Rcpp::NumericMatrix values(n, rhs_count);
+  std::copy(result.values.begin(), result.values.end(), values.begin());
+  return Rcpp::List::create(
+    Rcpp::Named("values") = values,
+    Rcpp::Named("backend") = "cuda-dense-sym-matvec-handle",
+    Rcpp::Named("n") = result.n,
+    Rcpp::Named("rhs_count") = result.rhs_count,
+    Rcpp::Named("kernel_launch_count") = result.kernel_launch_count,
+    Rcpp::Named("device_matrix_reuse_count") =
+      result.device_matrix_reuse_count,
+    Rcpp::Named("matrix_bytes") = static_cast<double>(result.matrix_bytes),
+    Rcpp::Named("matrix_h2d_ms") = result.matrix_h2d_ms,
+    Rcpp::Named("alloc_ms") = result.alloc_ms,
+    Rcpp::Named("h2d_ms") = result.h2d_ms,
+    Rcpp::Named("kernel_ms") = result.kernel_ms,
+    Rcpp::Named("d2h_ms") = result.d2h_ms,
+    Rcpp::Named("free_ms") = result.free_ms,
+    Rcpp::Named("total_ms") = result.total_ms
+  );
+  END_RCPP
+}
+
+extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_free(
+    SEXP handles) {
+  BEGIN_RCPP
+  if (TYPEOF(handles) != EXTPTRSXP) {
+    Rcpp::stop("CUDA matvec handle must be an external pointer");
+  }
+  auto* handle =
+    static_cast<fastkpc::LegacyDcovSpectraMatvecCudaHandle*>(
+      R_ExternalPtrAddr(handles));
+  if (handle != nullptr) {
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_destroy(handle);
+    R_ClearExternalPtr(handles);
+    return Rcpp::wrap(true);
+  }
+  return Rcpp::wrap(false);
   END_RCPP
 }
 
@@ -4689,6 +4814,9 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fastkpc_cuda_available", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_available), 0},
   {"C_fastkpc_cuda_device_info", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_device_info), 0},
   {"C_legacy_dcov_spectra_matvec_cuda", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda), 2},
+  {"C_legacy_dcov_spectra_matvec_cuda_handle_create", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_create), 1},
+  {"C_legacy_dcov_spectra_matvec_cuda_handle_apply", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_apply), 2},
+  {"C_legacy_dcov_spectra_matvec_cuda_handle_free", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_free), 1},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},
   {"C_fast_hsic_perm_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_perm_cuda), 6},
