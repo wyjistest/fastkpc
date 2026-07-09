@@ -367,6 +367,8 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     legacy_dcov_native_cuda_lowrank_component_cache_cross_batch_hit_count = NA_integer_,
     legacy_dcov_native_cuda_lowrank_component_cache_eviction_count = NA_integer_,
     legacy_dcov_native_cuda_lowrank_component_cache_level_entry_count_max = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_component_batch_substrate_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count = NA_integer_,
     legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count = NA_integer_,
     legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms = NA_real_,
     legacy_dcov_native_cuda_lowrank_backend_kernel_launch_count = NA_integer_,
@@ -952,6 +954,12 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
                    NA_integer_),
     legacy_dcov_native_cuda_lowrank_component_cache_level_entry_count_max =
       as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_component_cache_level_entry_count_max %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_component_batch_substrate_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_component_batch_substrate_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count %||%
                    NA_integer_),
     legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count =
       as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count %||%

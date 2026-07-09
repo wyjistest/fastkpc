@@ -128,6 +128,8 @@ required <- c(
   "legacy_dcov_native_cuda_lowrank_component_cache_cross_batch_hit_count",
   "legacy_dcov_native_cuda_lowrank_component_cache_eviction_count",
   "legacy_dcov_native_cuda_lowrank_component_cache_level_entry_count_max",
+  "legacy_dcov_native_cuda_lowrank_component_batch_substrate_count",
+  "legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count",
   "legacy_dcov_native_batch_parallel_enabled",
   "legacy_dcov_native_batch_parallel_threads"
 )
@@ -212,6 +214,14 @@ assert_true(
     as.integer(summary$legacy_dcov_native_cuda_lowrank_component_cache_level_max_entries[[1L]]),
   "native CUDA lowrank level component cache should respect configured max entries"
 )
+assert_true(identical(
+  as.integer(summary$legacy_dcov_native_cuda_lowrank_component_batch_substrate_count[[1L]]),
+  as.integer(summary$legacy_dcov_native_batch_count[[1L]])
+), "native CUDA lowrank should route each dCov batch through the component batch substrate")
+assert_true(identical(
+  as.integer(summary$legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count[[1L]]),
+  as.integer(summary$legacy_dcov_native_cuda_lowrank_backend_count[[1L]])
+), "native CUDA lowrank component batch substrate should cover every dCov pair")
 assert_true(as.integer(summary$legacy_dcov_native_batch_count[[1L]]) > 1L,
             "native CUDA lowrank round mode should exercise multiple dCov batches")
 assert_true(isTRUE(summary$legacy_dcov_native_batch_parallel_enabled[[1L]]),

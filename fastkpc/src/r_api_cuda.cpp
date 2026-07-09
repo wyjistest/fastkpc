@@ -615,6 +615,8 @@ struct NativeLegacyDcovCudaLowrankBackendMetrics {
   int component_cache_cross_batch_hit_count = 0;
   int component_cache_eviction_count = 0;
   int component_cache_level_entry_count_max = 0;
+  int component_batch_substrate_count = 0;
+  int component_batch_substrate_pair_count = 0;
   int spectra_matvec_count = 0;
   double spectra_matvec_ms = 0.0;
   int kernel_launch_count = 0;
@@ -776,6 +778,319 @@ class NativeLegacyDcovCudaLowrankLevelComponentCache {
     NativeLegacyDcovCudaLowrankLevelComponentCacheEntry> entries_;
   int max_entry_count_ = 0;
 };
+
+enum class LegacyDcovCudaLowrankComponentBatchKeyMode {
+  Value,
+  Pointer
+};
+
+struct LegacyDcovCudaLowrankComponentBatchOptions {
+  int n = 0;
+  int num_col = 0;
+  double index = 1.0;
+  int ncv = 0;
+  double tol = 1e-10;
+  int maxitr = 1000;
+  int batch_threads = 1;
+  LegacyDcovCudaLowrankComponentBatchKeyMode key_mode =
+    LegacyDcovCudaLowrankComponentBatchKeyMode::Value;
+  NativeLegacyDcovCudaLowrankLevelComponentCache* level_component_cache =
+    nullptr;
+};
+
+struct LegacyDcovCudaLowrankComponentBatchRun {
+  std::vector<double> p_values;
+  std::vector<double> nV2;
+  std::vector<double> means;
+  std::vector<double> variances;
+  std::vector<double> statistics;
+  std::vector<double> estimates;
+  std::vector<double> x_moments;
+  std::vector<double> y_moments;
+  int converged_count = 0;
+  int component_cache_lookup_count = 0;
+  int component_cache_hit_count = 0;
+  int component_cache_miss_count = 0;
+  int component_cache_entry_count = 0;
+  int component_cache_cross_batch_hit_count = 0;
+  int component_cache_eviction_count = 0;
+  int component_cache_level_entry_count_max = 0;
+  int component_count = 0;
+  int component_iterations = 0;
+  int component_nconv = 0;
+  double component_total_ms = 0.0;
+  double component_eig_ms = 0.0;
+  double combine_ms = 0.0;
+  int spectra_matvec_count = 0;
+  double spectra_matvec_ms = 0.0;
+  int kernel_launch_count = 0;
+  int device_matrix_reuse_count = 0;
+  int device_workspace_reuse_count = 0;
+  int workspace_realloc_count = 0;
+  double matrix_bytes = 0.0;
+  double workspace_bytes = 0.0;
+  double matrix_h2d_ms = 0.0;
+  double matrix_h2d_ms_during_compute = 0.0;
+  double matrix_h2d_ms_during_compute_max = 0.0;
+  double workspace_alloc_ms = 0.0;
+  double h2d_ms = 0.0;
+  double kernel_ms = 0.0;
+  double d2h_ms = 0.0;
+  double pair_total_ms = 0.0;
+  double total_ms = 0.0;
+};
+
+void accumulate_cuda_lowrank_component_diagnostics(
+    LegacyDcovCudaLowrankComponentBatchRun* batch,
+    const LegacyDcovCudaLowrankComponentRun& component) {
+  const LegacyDcovSpectraCudaOperatorDiagnostics& diagnostics =
+    component.cuda_diagnostics;
+  batch->component_total_ms += component.total_ms;
+  batch->component_eig_ms += component.eig_ms;
+  batch->component_iterations += component.iterations;
+  batch->component_nconv += component.nconv;
+  batch->spectra_matvec_count += diagnostics.spectra_matvec_count;
+  batch->spectra_matvec_ms += diagnostics.spectra_matvec_ms;
+  batch->kernel_launch_count += diagnostics.kernel_launch_count;
+  batch->device_matrix_reuse_count += diagnostics.device_matrix_reuse_count;
+  batch->device_workspace_reuse_count += diagnostics.device_workspace_reuse_count;
+  batch->workspace_realloc_count += diagnostics.workspace_realloc_count;
+  batch->matrix_bytes += component.matrix_bytes;
+  batch->workspace_bytes = std::max(
+    batch->workspace_bytes,
+    static_cast<double>(diagnostics.workspace_bytes));
+  batch->matrix_h2d_ms += component.matrix_h2d_ms;
+  batch->matrix_h2d_ms_during_compute +=
+    diagnostics.matrix_h2d_ms_during_compute;
+  batch->matrix_h2d_ms_during_compute_max = std::max(
+    batch->matrix_h2d_ms_during_compute_max,
+    diagnostics.matrix_h2d_ms_during_compute);
+  batch->workspace_alloc_ms += diagnostics.workspace_alloc_ms;
+  batch->h2d_ms += diagnostics.h2d_ms;
+  batch->kernel_ms += diagnostics.kernel_ms;
+  batch->d2h_ms += diagnostics.d2h_ms;
+}
+
+LegacyDcovCudaLowrankComponentBatchRun
+legacy_dcov_cuda_lowrank_gamma_component_batch(
+    const std::vector<const double*>& x_columns,
+    const std::vector<const double*>& y_columns,
+    const LegacyDcovCudaLowrankComponentBatchOptions& options) {
+  if (x_columns.size() != y_columns.size()) {
+    Rcpp::stop("x and y lowrank component batches must have identical size");
+  }
+  const auto total_start = std::chrono::steady_clock::now();
+  const int batch_size = static_cast<int>(x_columns.size());
+  LegacyDcovCudaLowrankComponentBatchRun out;
+  out.p_values.assign(static_cast<std::size_t>(batch_size), NA_REAL);
+  out.nV2.assign(static_cast<std::size_t>(batch_size), NA_REAL);
+  out.means.assign(static_cast<std::size_t>(batch_size), NA_REAL);
+  out.variances.assign(static_cast<std::size_t>(batch_size), NA_REAL);
+  out.statistics.assign(static_cast<std::size_t>(batch_size), NA_REAL);
+  out.estimates.assign(static_cast<std::size_t>(batch_size), NA_REAL);
+  out.x_moments.assign(static_cast<std::size_t>(batch_size), NA_REAL);
+  out.y_moments.assign(static_cast<std::size_t>(batch_size), NA_REAL);
+  if (batch_size == 0) return out;
+
+  std::unordered_map<std::string, int> component_by_value;
+  std::map<std::uintptr_t, int> component_by_pointer;
+  std::vector<std::shared_ptr<LegacyDcovCudaLowrankComponentRun> > components;
+  std::vector<unsigned char> component_from_level_cache;
+  std::vector<const double*> component_miss_columns;
+  std::vector<int> component_miss_indices;
+  std::vector<int> x_component_index(static_cast<std::size_t>(batch_size));
+  std::vector<int> y_component_index(static_cast<std::size_t>(batch_size));
+  components.reserve(static_cast<std::size_t>(2 * batch_size));
+
+  auto intern_component = [&](const double* ptr) {
+    out.component_cache_lookup_count += 1;
+    if (options.key_mode ==
+        LegacyDcovCudaLowrankComponentBatchKeyMode::Pointer) {
+      const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(ptr);
+      const auto found = component_by_pointer.find(key);
+      if (found != component_by_pointer.end()) {
+        const int index = found->second;
+        if (component_from_level_cache[static_cast<std::size_t>(index)] != 0) {
+          out.component_cache_cross_batch_hit_count += 1;
+        }
+        out.component_cache_hit_count += 1;
+        return index;
+      }
+      const int component_index = static_cast<int>(components.size());
+      component_by_pointer[key] = component_index;
+      std::shared_ptr<LegacyDcovCudaLowrankComponentRun> cached_component;
+      if (options.level_component_cache != nullptr) {
+        cached_component = options.level_component_cache->find(key);
+      }
+      if (cached_component) {
+        components.push_back(cached_component);
+        component_from_level_cache.push_back(1);
+        out.component_cache_cross_batch_hit_count += 1;
+        out.component_cache_hit_count += 1;
+      } else {
+        components.push_back(std::shared_ptr<
+          LegacyDcovCudaLowrankComponentRun>());
+        component_from_level_cache.push_back(0);
+        component_miss_indices.push_back(component_index);
+        component_miss_columns.push_back(ptr);
+        out.component_cache_miss_count += 1;
+        out.component_cache_entry_count += 1;
+      }
+      return component_index;
+    }
+
+    const std::string key(
+      reinterpret_cast<const char*>(ptr),
+      sizeof(double) * static_cast<std::size_t>(options.n));
+    const auto found = component_by_value.find(key);
+    if (found != component_by_value.end()) {
+      out.component_cache_hit_count += 1;
+      return found->second;
+    }
+    const int component_index = static_cast<int>(components.size());
+    component_by_value.emplace(key, component_index);
+    components.push_back(std::shared_ptr<LegacyDcovCudaLowrankComponentRun>());
+    component_from_level_cache.push_back(0);
+    component_miss_indices.push_back(component_index);
+    component_miss_columns.push_back(ptr);
+    out.component_cache_miss_count += 1;
+    out.component_cache_entry_count += 1;
+    return component_index;
+  };
+
+  for (int i = 0; i < batch_size; ++i) {
+    x_component_index[static_cast<std::size_t>(i)] =
+      intern_component(x_columns[static_cast<std::size_t>(i)]);
+    y_component_index[static_cast<std::size_t>(i)] =
+      intern_component(y_columns[static_cast<std::size_t>(i)]);
+  }
+
+  const int component_miss_count =
+    static_cast<int>(component_miss_columns.size());
+  std::vector<LegacyDcovCudaLowrankComponentRun> computed_components(
+    static_cast<std::size_t>(component_miss_count));
+  const int batch_threads =
+    std::max(1, std::min(options.batch_threads, component_miss_count));
+  if (batch_threads > 1) {
+    std::atomic<int> next_component(0);
+    std::mutex error_mutex;
+    std::string first_error;
+    auto worker = [&]() {
+      for (;;) {
+        const int component_index = next_component.fetch_add(1);
+        if (component_index >= component_miss_count) return;
+        {
+          std::lock_guard<std::mutex> lock(error_mutex);
+          if (!first_error.empty()) return;
+        }
+        try {
+          computed_components[static_cast<std::size_t>(component_index)] =
+            legacy_dcov_cuda_lowrank_component_compute(
+              component_miss_columns[static_cast<std::size_t>(component_index)],
+              options.n,
+              options.num_col,
+              options.ncv,
+              options.tol,
+              options.maxitr);
+        } catch (const std::exception& error) {
+          std::lock_guard<std::mutex> lock(error_mutex);
+          if (first_error.empty()) first_error = error.what();
+          return;
+        } catch (...) {
+          std::lock_guard<std::mutex> lock(error_mutex);
+          if (first_error.empty()) {
+            first_error = "CUDA lowrank cached component failed";
+          }
+          return;
+        }
+      }
+    };
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<std::size_t>(batch_threads));
+    for (int thread_id = 0; thread_id < batch_threads; ++thread_id) {
+      threads.emplace_back(worker);
+    }
+    for (std::thread& thread : threads) thread.join();
+    if (!first_error.empty()) Rcpp::stop(first_error);
+  } else {
+    for (int component_index = 0;
+         component_index < component_miss_count;
+         ++component_index) {
+      computed_components[static_cast<std::size_t>(component_index)] =
+        legacy_dcov_cuda_lowrank_component_compute(
+          component_miss_columns[static_cast<std::size_t>(component_index)],
+          options.n,
+          options.num_col,
+          options.ncv,
+          options.tol,
+          options.maxitr);
+    }
+  }
+
+  for (int component_miss_index = 0;
+       component_miss_index < component_miss_count;
+       ++component_miss_index) {
+    const LegacyDcovCudaLowrankComponentRun& component =
+      computed_components[static_cast<std::size_t>(component_miss_index)];
+    if (!component.converged) {
+      Rcpp::stop("CUDA Spectra lowrank did not converge");
+    }
+    accumulate_cuda_lowrank_component_diagnostics(&out, component);
+    std::shared_ptr<LegacyDcovCudaLowrankComponentRun> component_ptr =
+      std::make_shared<LegacyDcovCudaLowrankComponentRun>(component);
+    const int batch_component_index =
+      component_miss_indices[static_cast<std::size_t>(component_miss_index)];
+    components[static_cast<std::size_t>(batch_component_index)] =
+      component_ptr;
+    if (options.key_mode ==
+          LegacyDcovCudaLowrankComponentBatchKeyMode::Pointer &&
+        options.level_component_cache != nullptr) {
+      const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(
+        component_miss_columns[static_cast<std::size_t>(component_miss_index)]);
+      out.component_cache_eviction_count +=
+        options.level_component_cache->insert(key, component_ptr);
+      out.component_cache_level_entry_count_max = std::max(
+        out.component_cache_level_entry_count_max,
+        options.level_component_cache->max_entry_count());
+    }
+  }
+
+  for (const std::shared_ptr<LegacyDcovCudaLowrankComponentRun>& component :
+       components) {
+    if (!component || !component->converged) {
+      Rcpp::stop("CUDA Spectra lowrank did not converge");
+    }
+  }
+
+  const std::chrono::steady_clock::time_point combine_start =
+    std::chrono::steady_clock::now();
+  for (int i = 0; i < batch_size; ++i) {
+    const LegacyDcovCudaLowrankGammaRun run =
+      legacy_dcov_cuda_lowrank_gamma_from_components(
+        *components[static_cast<std::size_t>(
+          x_component_index[static_cast<std::size_t>(i)])],
+        *components[static_cast<std::size_t>(
+          y_component_index[static_cast<std::size_t>(i)])],
+        options.n,
+        options.index,
+        false);
+    out.p_values[static_cast<std::size_t>(i)] = run.p_value;
+    out.nV2[static_cast<std::size_t>(i)] = run.nV2;
+    out.means[static_cast<std::size_t>(i)] = run.mean;
+    out.variances[static_cast<std::size_t>(i)] = run.variance;
+    out.statistics[static_cast<std::size_t>(i)] = run.statistic;
+    out.estimates[static_cast<std::size_t>(i)] = run.estimate;
+    out.x_moments[static_cast<std::size_t>(i)] = run.x_moment;
+    out.y_moments[static_cast<std::size_t>(i)] = run.y_moment;
+    out.converged_count += run.converged_x ? 1 : 0;
+    out.converged_count += run.converged_y ? 1 : 0;
+  }
+  out.combine_ms = elapsed_ms_since(combine_start);
+  out.component_count = static_cast<int>(components.size());
+  out.pair_total_ms = out.component_total_ms + out.combine_ms;
+  out.total_ms = elapsed_ms_since(total_start);
+  return out;
+}
 
 void append_native_legacy_progress(
     const std::string& path,
@@ -3209,111 +3524,36 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch(
   Rcpp::NumericVector x_moments(batch);
   Rcpp::NumericVector y_moments(batch);
 
-  int converged_count = 0;
-  int spectra_matvec_count = 0;
-  int kernel_launch_count = 0;
-  int device_matrix_reuse_count = 0;
-  int device_workspace_reuse_count = 0;
-  int workspace_realloc_count = 0;
-  double spectra_matvec_ms = 0.0;
-  double eig_ms = 0.0;
-  double matrix_bytes = 0.0;
-  double workspace_bytes = 0.0;
-  double matrix_h2d_ms = 0.0;
-  double matrix_h2d_ms_during_compute = 0.0;
-  double workspace_alloc_ms = 0.0;
-  double h2d_ms = 0.0;
-  double kernel_ms = 0.0;
-  double d2h_ms = 0.0;
-  double pair_total_ms = 0.0;
-  int component_cache_lookup_count = 0;
-  int component_cache_hit_count = 0;
-  int component_cache_miss_count = 0;
-  int component_cache_entry_count = 0;
-  double component_total_ms = 0.0;
-  double component_eig_ms = 0.0;
-
-  std::unordered_map<std::string, int> component_by_value;
-  std::vector<LegacyDcovCudaLowrankComponentRun> components;
-  components.reserve(static_cast<std::size_t>(2 * batch));
-  std::vector<int> x_component_index(static_cast<std::size_t>(batch));
-  std::vector<int> y_component_index(static_cast<std::size_t>(batch));
-  auto intern_component = [&](const double* values) {
-    ++component_cache_lookup_count;
-    const std::string key(
-      reinterpret_cast<const char*>(values),
-      sizeof(double) * static_cast<std::size_t>(n));
-    const auto found = component_by_value.find(key);
-    if (found != component_by_value.end()) {
-      ++component_cache_hit_count;
-      return found->second;
-    }
-    ++component_cache_miss_count;
-    ++component_cache_entry_count;
-    const int component_index = static_cast<int>(components.size());
-    LegacyDcovCudaLowrankComponentRun component =
-      legacy_dcov_cuda_lowrank_component_compute(
-        values, n, num_col, ncv, tol, maxitr);
-    if (!component.converged) {
-      Rcpp::stop("CUDA Spectra lowrank did not converge");
-    }
-    component_total_ms += component.total_ms;
-    component_eig_ms += component.eig_ms;
-    const LegacyDcovSpectraCudaOperatorDiagnostics& diagnostics =
-      component.cuda_diagnostics;
-    spectra_matvec_count += diagnostics.spectra_matvec_count;
-    spectra_matvec_ms += diagnostics.spectra_matvec_ms;
-    kernel_launch_count += diagnostics.kernel_launch_count;
-    device_matrix_reuse_count += diagnostics.device_matrix_reuse_count;
-    device_workspace_reuse_count += diagnostics.device_workspace_reuse_count;
-    workspace_realloc_count += diagnostics.workspace_realloc_count;
-    matrix_bytes += component.matrix_bytes;
-    workspace_bytes = std::max(workspace_bytes,
-                               static_cast<double>(diagnostics.workspace_bytes));
-    matrix_h2d_ms += component.matrix_h2d_ms;
-    matrix_h2d_ms_during_compute += diagnostics.matrix_h2d_ms_during_compute;
-    workspace_alloc_ms += diagnostics.workspace_alloc_ms;
-    h2d_ms += diagnostics.h2d_ms;
-    kernel_ms += diagnostics.kernel_ms;
-    d2h_ms += diagnostics.d2h_ms;
-    components.push_back(std::move(component));
-    component_by_value.emplace(key, component_index);
-    return component_index;
-  };
-
+  std::vector<const double*> x_columns(static_cast<std::size_t>(batch));
+  std::vector<const double*> y_columns(static_cast<std::size_t>(batch));
   for (int col = 0; col < batch; ++col) {
     const std::size_t offset = static_cast<std::size_t>(n) * col;
-    x_component_index[static_cast<std::size_t>(col)] =
-      intern_component(REAL(xs) + offset);
-    y_component_index[static_cast<std::size_t>(col)] =
-      intern_component(REAL(ys) + offset);
+    x_columns[static_cast<std::size_t>(col)] = REAL(xs) + offset;
+    y_columns[static_cast<std::size_t>(col)] = REAL(ys) + offset;
   }
-
-  const auto combine_start = std::chrono::steady_clock::now();
+  LegacyDcovCudaLowrankComponentBatchOptions batch_options;
+  batch_options.n = n;
+  batch_options.num_col = num_col;
+  batch_options.index = index;
+  batch_options.ncv = ncv;
+  batch_options.tol = tol;
+  batch_options.maxitr = maxitr;
+  batch_options.batch_threads = 1;
+  batch_options.key_mode =
+    LegacyDcovCudaLowrankComponentBatchKeyMode::Value;
+  const LegacyDcovCudaLowrankComponentBatchRun batch_run =
+    legacy_dcov_cuda_lowrank_gamma_component_batch(
+      x_columns, y_columns, batch_options);
   for (int col = 0; col < batch; ++col) {
-    const LegacyDcovCudaLowrankGammaRun run =
-      legacy_dcov_cuda_lowrank_gamma_from_components(
-        components[static_cast<std::size_t>(
-          x_component_index[static_cast<std::size_t>(col)])],
-        components[static_cast<std::size_t>(
-          y_component_index[static_cast<std::size_t>(col)])],
-        n,
-        index,
-        false);
-    p_values[col] = run.p_value;
-    nV2[col] = run.nV2;
-    means[col] = run.mean;
-    variances[col] = run.variance;
-    statistics[col] = run.statistic;
-    estimates[col] = run.estimate;
-    x_moments[col] = run.x_moment;
-    y_moments[col] = run.y_moment;
-    converged_count += run.converged_x ? 1 : 0;
-    converged_count += run.converged_y ? 1 : 0;
+    p_values[col] = batch_run.p_values[static_cast<std::size_t>(col)];
+    nV2[col] = batch_run.nV2[static_cast<std::size_t>(col)];
+    means[col] = batch_run.means[static_cast<std::size_t>(col)];
+    variances[col] = batch_run.variances[static_cast<std::size_t>(col)];
+    statistics[col] = batch_run.statistics[static_cast<std::size_t>(col)];
+    estimates[col] = batch_run.estimates[static_cast<std::size_t>(col)];
+    x_moments[col] = batch_run.x_moments[static_cast<std::size_t>(col)];
+    y_moments[col] = batch_run.y_moments[static_cast<std::size_t>(col)];
   }
-  const double combine_ms = elapsed_ms_since(combine_start);
-  eig_ms = component_eig_ms;
-  pair_total_ms = component_total_ms + combine_ms;
 
   return Rcpp::List::create(
     Rcpp::Named("backend") =
@@ -3334,40 +3574,41 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch(
       Rcpp::Named("tol") = tol,
       Rcpp::Named("maxitr") = maxitr,
       Rcpp::Named("batch_count") = batch,
-      Rcpp::Named("converged_count") = converged_count,
+      Rcpp::Named("converged_count") = batch_run.converged_count,
       Rcpp::Named("component_cache_enabled") = true,
       Rcpp::Named("component_cache_lookup_count") =
-        component_cache_lookup_count,
+        batch_run.component_cache_lookup_count,
       Rcpp::Named("component_cache_hit_count") =
-        component_cache_hit_count,
+        batch_run.component_cache_hit_count,
       Rcpp::Named("component_cache_miss_count") =
-        component_cache_miss_count,
+        batch_run.component_cache_miss_count,
       Rcpp::Named("component_cache_entry_count") =
-        component_cache_entry_count,
+        batch_run.component_cache_entry_count,
       Rcpp::Named("component_count") =
-        static_cast<int>(components.size()),
-      Rcpp::Named("component_total_ms") = component_total_ms,
-      Rcpp::Named("component_eig_ms") = component_eig_ms,
-      Rcpp::Named("combine_ms") = combine_ms,
-      Rcpp::Named("spectra_matvec_count") = spectra_matvec_count,
-      Rcpp::Named("spectra_matvec_ms") = spectra_matvec_ms,
-      Rcpp::Named("kernel_launch_count") = kernel_launch_count,
+        batch_run.component_count,
+      Rcpp::Named("component_total_ms") = batch_run.component_total_ms,
+      Rcpp::Named("component_eig_ms") = batch_run.component_eig_ms,
+      Rcpp::Named("combine_ms") = batch_run.combine_ms,
+      Rcpp::Named("spectra_matvec_count") = batch_run.spectra_matvec_count,
+      Rcpp::Named("spectra_matvec_ms") = batch_run.spectra_matvec_ms,
+      Rcpp::Named("kernel_launch_count") = batch_run.kernel_launch_count,
       Rcpp::Named("device_matrix_reuse_count") =
-        device_matrix_reuse_count,
+        batch_run.device_matrix_reuse_count,
       Rcpp::Named("device_workspace_reuse_count") =
-        device_workspace_reuse_count,
-      Rcpp::Named("workspace_realloc_count") = workspace_realloc_count,
-      Rcpp::Named("matrix_bytes") = matrix_bytes,
-      Rcpp::Named("workspace_bytes") = workspace_bytes,
-      Rcpp::Named("matrix_h2d_ms") = matrix_h2d_ms,
+        batch_run.device_workspace_reuse_count,
+      Rcpp::Named("workspace_realloc_count") =
+        batch_run.workspace_realloc_count,
+      Rcpp::Named("matrix_bytes") = batch_run.matrix_bytes,
+      Rcpp::Named("workspace_bytes") = batch_run.workspace_bytes,
+      Rcpp::Named("matrix_h2d_ms") = batch_run.matrix_h2d_ms,
       Rcpp::Named("matrix_h2d_ms_during_compute") =
-        matrix_h2d_ms_during_compute,
-      Rcpp::Named("workspace_alloc_ms") = workspace_alloc_ms,
-      Rcpp::Named("h2d_ms") = h2d_ms,
-      Rcpp::Named("kernel_ms") = kernel_ms,
-      Rcpp::Named("d2h_ms") = d2h_ms,
-      Rcpp::Named("eig_ms") = eig_ms,
-      Rcpp::Named("pair_total_ms") = pair_total_ms,
+        batch_run.matrix_h2d_ms_during_compute,
+      Rcpp::Named("workspace_alloc_ms") = batch_run.workspace_alloc_ms,
+      Rcpp::Named("h2d_ms") = batch_run.h2d_ms,
+      Rcpp::Named("kernel_ms") = batch_run.kernel_ms,
+      Rcpp::Named("d2h_ms") = batch_run.d2h_ms,
+      Rcpp::Named("eig_ms") = batch_run.component_eig_ms,
+      Rcpp::Named("pair_total_ms") = batch_run.pair_total_ms,
       Rcpp::Named("total_ms") = elapsed_ms_since(batch_start)
     )
   );
@@ -5891,209 +6132,116 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
           try {
             if (legacy_dcov_native_cuda_lowrank_metrics
                   .component_cache_enabled) {
-              std::map<std::uintptr_t, int> component_by_pointer;
-              std::vector<std::shared_ptr<
-                LegacyDcovCudaLowrankComponentRun> > components;
-              std::vector<unsigned char> component_from_level_cache;
-              std::vector<const double*> component_miss_columns;
-              std::vector<int> component_miss_indices;
-              int component_cross_batch_hit_count = 0;
-              int component_eviction_count = 0;
-              int component_level_entry_count_max = 0;
-              std::vector<int> x_component_index(
-                static_cast<std::size_t>(batch_size));
-              std::vector<int> y_component_index(
-                static_cast<std::size_t>(batch_size));
-              auto intern_component = [&](const double* ptr) {
-                const std::uintptr_t key =
-                  reinterpret_cast<std::uintptr_t>(ptr);
-                const auto found = component_by_pointer.find(key);
-                if (found != component_by_pointer.end()) {
-                  const int index = found->second;
-                  if (component_from_level_cache[
-                        static_cast<std::size_t>(index)] != 0) {
-                    component_cross_batch_hit_count += 1;
-                  }
-                  return index;
-                }
-                const int component_index =
-                  static_cast<int>(components.size());
-                component_by_pointer[key] = component_index;
-                std::shared_ptr<LegacyDcovCudaLowrankComponentRun>
-                  cached_component;
-                if (cuda_lowrank_level_component_cache_enabled &&
-                    cuda_lowrank_level_component_cache) {
-                  cached_component =
-                    cuda_lowrank_level_component_cache->find(key);
-                }
-                if (cached_component) {
-                  components.push_back(cached_component);
-                  component_from_level_cache.push_back(1);
-                  component_cross_batch_hit_count += 1;
-                } else {
-                  components.push_back(std::shared_ptr<
-                    LegacyDcovCudaLowrankComponentRun>());
-                  component_from_level_cache.push_back(0);
-                  component_miss_indices.push_back(component_index);
-                  component_miss_columns.push_back(ptr);
-                }
-                return component_index;
-              };
-              for (int i = 0; i < batch_size; ++i) {
-                x_component_index[static_cast<std::size_t>(i)] =
-                  intern_component(x_columns[static_cast<std::size_t>(i)]);
-                y_component_index[static_cast<std::size_t>(i)] =
-                  intern_component(y_columns[static_cast<std::size_t>(i)]);
-              }
-              const int component_lookup_count = 2 * batch_size;
-              const int component_miss_count =
-                static_cast<int>(component_miss_columns.size());
-              const int component_hit_count =
-                component_lookup_count - component_miss_count;
+              LegacyDcovCudaLowrankComponentBatchOptions batch_options;
+              batch_options.n = n;
+              batch_options.num_col = num_col;
+              batch_options.index = index;
+              batch_options.ncv = legacy_dcov_native_cuda_lowrank_ncv;
+              batch_options.tol = legacy_dcov_native_cuda_lowrank_tol;
+              batch_options.maxitr = legacy_dcov_native_cuda_lowrank_maxitr;
+              batch_options.batch_threads = cuda_lowrank_batch_threads;
+              batch_options.key_mode =
+                LegacyDcovCudaLowrankComponentBatchKeyMode::Pointer;
+              batch_options.level_component_cache =
+                (cuda_lowrank_level_component_cache_enabled &&
+                 cuda_lowrank_level_component_cache)
+                  ? cuda_lowrank_level_component_cache.get()
+                  : nullptr;
+              const LegacyDcovCudaLowrankComponentBatchRun batch_run =
+                legacy_dcov_cuda_lowrank_gamma_component_batch(
+                  x_columns, y_columns, batch_options);
               legacy_dcov_native_cuda_lowrank_metrics
-                .component_cache_lookup_count += component_lookup_count;
+                .component_batch_substrate_count += 1;
               legacy_dcov_native_cuda_lowrank_metrics
-                .component_cache_hit_count += component_hit_count;
+                .component_batch_substrate_pair_count += batch_size;
               legacy_dcov_native_cuda_lowrank_metrics
-                .component_cache_miss_count += component_miss_count;
+                .component_cache_lookup_count +=
+                batch_run.component_cache_lookup_count;
               legacy_dcov_native_cuda_lowrank_metrics
-                .component_cache_entry_count += component_miss_count;
-
-              std::vector<LegacyDcovCudaLowrankComponentRun> computed_components(
-                static_cast<std::size_t>(component_miss_count));
-              if (cuda_lowrank_batch_parallel_enabled &&
-                  component_miss_count > 1) {
-                std::atomic<int> next_component(0);
-                std::mutex error_mutex;
-                std::string first_error;
-                auto worker = [&]() {
-                  for (;;) {
-                    const int component_index =
-                      next_component.fetch_add(1);
-                    if (component_index >= component_miss_count) return;
-                    {
-                      std::lock_guard<std::mutex> lock(error_mutex);
-                      if (!first_error.empty()) return;
-                    }
-                    try {
-                      computed_components[
-                        static_cast<std::size_t>(component_index)] =
-                        legacy_dcov_cuda_lowrank_component_compute(
-                          component_miss_columns[
-                            static_cast<std::size_t>(component_index)],
-                          n,
-                          num_col,
-                          legacy_dcov_native_cuda_lowrank_ncv,
-                          legacy_dcov_native_cuda_lowrank_tol,
-                          legacy_dcov_native_cuda_lowrank_maxitr);
-                    } catch (const std::exception& error) {
-                      std::lock_guard<std::mutex> lock(error_mutex);
-                      if (first_error.empty()) first_error = error.what();
-                      return;
-                    } catch (...) {
-                      std::lock_guard<std::mutex> lock(error_mutex);
-                      if (first_error.empty()) {
-                        first_error =
-                          "native CUDA lowrank cached component failed";
-                      }
-                      return;
-                    }
-                  }
-                };
-                std::vector<std::thread> threads;
-                threads.reserve(
-                  static_cast<std::size_t>(cuda_lowrank_batch_threads));
-                for (int thread_id = 0;
-                     thread_id < cuda_lowrank_batch_threads;
-                     ++thread_id) {
-                  threads.emplace_back(worker);
-                }
-                for (std::thread& thread : threads) thread.join();
-                if (!first_error.empty()) Rcpp::stop(first_error);
-              } else {
-                for (int component_index = 0;
-                     component_index < component_miss_count;
-                     ++component_index) {
-                  computed_components[
-                    static_cast<std::size_t>(component_index)] =
-                    legacy_dcov_cuda_lowrank_component_compute(
-                      component_miss_columns[
-                        static_cast<std::size_t>(component_index)],
-                      n,
-                      num_col,
-                      legacy_dcov_native_cuda_lowrank_ncv,
-                      legacy_dcov_native_cuda_lowrank_tol,
-                      legacy_dcov_native_cuda_lowrank_maxitr);
-                }
-              }
-
-              double component_total_ms = 0.0;
-              double component_eig_ms = 0.0;
-              for (int component_miss_index = 0;
-                   component_miss_index < component_miss_count;
-                   ++component_miss_index) {
-                const LegacyDcovCudaLowrankComponentRun& component =
-                  computed_components[
-                    static_cast<std::size_t>(component_miss_index)];
-                if (!component.converged) {
-                  Rcpp::stop("CUDA Spectra lowrank did not converge");
-                }
-                component_total_ms += component.total_ms;
-                component_eig_ms += component.eig_ms;
-                accumulate_native_cuda_lowrank_component(component);
-                std::shared_ptr<LegacyDcovCudaLowrankComponentRun>
-                  component_ptr = std::make_shared<
-                    LegacyDcovCudaLowrankComponentRun>(component);
-                const int batch_component_index =
-                  component_miss_indices[
-                    static_cast<std::size_t>(component_miss_index)];
-                components[static_cast<std::size_t>(batch_component_index)] =
-                  component_ptr;
-                if (cuda_lowrank_level_component_cache_enabled &&
-                    cuda_lowrank_level_component_cache) {
-                  const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(
-                    component_miss_columns[
-                      static_cast<std::size_t>(component_miss_index)]);
-                  component_eviction_count +=
-                    cuda_lowrank_level_component_cache->insert(key,
-                                                               component_ptr);
-                  component_level_entry_count_max = std::max(
-                    component_level_entry_count_max,
-                    cuda_lowrank_level_component_cache->max_entry_count());
-                }
-              }
+                .component_cache_hit_count +=
+                batch_run.component_cache_hit_count;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .component_cache_miss_count +=
+                batch_run.component_cache_miss_count;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .component_cache_entry_count +=
+                batch_run.component_cache_entry_count;
               legacy_dcov_native_cuda_lowrank_metrics
                 .component_cache_cross_batch_hit_count +=
-                component_cross_batch_hit_count;
+                batch_run.component_cache_cross_batch_hit_count;
               legacy_dcov_native_cuda_lowrank_metrics
-                .component_cache_eviction_count += component_eviction_count;
+                .component_cache_eviction_count +=
+                batch_run.component_cache_eviction_count;
               legacy_dcov_native_cuda_lowrank_metrics
                 .component_cache_level_entry_count_max =
                 std::max(
                   legacy_dcov_native_cuda_lowrank_metrics
                     .component_cache_level_entry_count_max,
-                  component_level_entry_count_max);
-              for (const std::shared_ptr<
-                     LegacyDcovCudaLowrankComponentRun>& component :
-                   components) {
-                if (!component || !component->converged) {
-                  Rcpp::stop("CUDA Spectra lowrank did not converge");
-                }
-              }
+                  batch_run.component_cache_level_entry_count_max);
+              legacy_dcov_native_cuda_lowrank_metrics.spectra_matvec_count +=
+                batch_run.spectra_matvec_count;
+              legacy_dcov_native_cuda_lowrank_metrics.spectra_matvec_ms +=
+                batch_run.spectra_matvec_ms;
+              legacy_dcov_native_cuda_lowrank_metrics.kernel_launch_count +=
+                batch_run.kernel_launch_count;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .device_matrix_reuse_count +=
+                batch_run.device_matrix_reuse_count;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .device_workspace_reuse_count +=
+                batch_run.device_workspace_reuse_count;
+              legacy_dcov_native_cuda_lowrank_metrics.workspace_realloc_count +=
+                batch_run.workspace_realloc_count;
+              legacy_dcov_native_cuda_lowrank_metrics.matrix_bytes +=
+                batch_run.matrix_bytes;
+              legacy_dcov_native_cuda_lowrank_metrics.workspace_bytes =
+                std::max(
+                  legacy_dcov_native_cuda_lowrank_metrics.workspace_bytes,
+                  batch_run.workspace_bytes);
+              legacy_dcov_native_cuda_lowrank_metrics.matrix_h2d_ms +=
+                batch_run.matrix_h2d_ms;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .matrix_h2d_ms_during_compute +=
+                batch_run.matrix_h2d_ms_during_compute;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .matrix_h2d_ms_during_compute_max =
+                std::max(
+                  legacy_dcov_native_cuda_lowrank_metrics
+                    .matrix_h2d_ms_during_compute_max,
+                  batch_run.matrix_h2d_ms_during_compute_max);
+              legacy_dcov_native_cuda_lowrank_metrics.workspace_alloc_ms +=
+                batch_run.workspace_alloc_ms;
+              legacy_dcov_native_cuda_lowrank_metrics.h2d_ms +=
+                batch_run.h2d_ms;
+              legacy_dcov_native_cuda_lowrank_metrics.kernel_ms +=
+                batch_run.kernel_ms;
+              legacy_dcov_native_cuda_lowrank_metrics.d2h_ms +=
+                batch_run.d2h_ms;
 
-              const std::chrono::steady_clock::time_point combine_start =
-                std::chrono::steady_clock::now();
+              legacy_lowrank_timings.eig_ms += batch_run.component_eig_ms;
+              legacy_lowrank_timings.spectra_count +=
+                batch_run.component_cache_miss_count;
+              legacy_lowrank_timings.spectra_converged_count +=
+                batch_run.component_cache_miss_count;
+              legacy_lowrank_timings.spectra_iterations +=
+                batch_run.component_iterations;
+              legacy_lowrank_timings.spectra_nconv +=
+                batch_run.component_nconv;
+              legacy_lowrank_timings.spectra_ncv = std::max(
+                legacy_lowrank_timings.spectra_ncv,
+                legacy_dcov_native_cuda_lowrank_ncv);
+              legacy_lowrank_timings.spectra_tol = std::max(
+                legacy_lowrank_timings.spectra_tol,
+                legacy_dcov_native_cuda_lowrank_tol);
+              legacy_lowrank_timings.spectra_matvec_count +=
+                batch_run.spectra_matvec_count;
+              legacy_lowrank_timings.spectra_matvec_ms +=
+                batch_run.spectra_matvec_ms;
+              legacy_lowrank_mode = fastkpc::LegacyDcovLowrankMode::Spectra;
+
               for (int i = 0; i < batch_size; ++i) {
-                const LegacyDcovCudaLowrankGammaRun run =
-                  legacy_dcov_cuda_lowrank_gamma_from_components(
-                    *components[static_cast<std::size_t>(
-                      x_component_index[static_cast<std::size_t>(i)])],
-                    *components[static_cast<std::size_t>(
-                      y_component_index[static_cast<std::size_t>(i)])],
-                    n,
-                    index,
-                    false);
-                batch_pvalues[i] = run.p_value;
+                batch_pvalues[i] =
+                  batch_run.p_values[static_cast<std::size_t>(i)];
                 legacy_dcov_native_cuda_lowrank_metrics.count += 1;
                 legacy_dcov_native_cuda_lowrank_metrics.converged_count += 1;
                 const int completed_pairs = i + 1;
@@ -6106,11 +6254,10 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
                     elapsed_ms_since(batch_call_start));
                 }
               }
-              const double combine_ms = elapsed_ms_since(combine_start);
-              pair_total_ms += component_total_ms + combine_ms;
-              eig_ms += component_eig_ms;
+              pair_total_ms += batch_run.pair_total_ms;
+              eig_ms += batch_run.component_eig_ms;
               legacy_dcov_native_cuda_lowrank_metrics.ms +=
-                component_total_ms + combine_ms;
+                batch_run.pair_total_ms;
               append_native_cuda_lowrank_component_cache_progress(
                 native_cuda_lowrank_component_cache_progress_csv_path,
                 "component_cache_batch_complete",
@@ -6119,17 +6266,17 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
                 legacy_dcov_native_cuda_lowrank_metrics.component_cache_scope,
                 legacy_dcov_native_cuda_lowrank_metrics
                   .component_cache_level_max_entries,
-                component_lookup_count,
-                component_hit_count,
-                component_miss_count,
-                component_miss_count,
-                component_cross_batch_hit_count,
-                component_eviction_count,
-                component_level_entry_count_max,
-                static_cast<int>(components.size()),
-                component_total_ms,
-                component_eig_ms,
-                combine_ms,
+                batch_run.component_cache_lookup_count,
+                batch_run.component_cache_hit_count,
+                batch_run.component_cache_miss_count,
+                batch_run.component_cache_entry_count,
+                batch_run.component_cache_cross_batch_hit_count,
+                batch_run.component_cache_eviction_count,
+                batch_run.component_cache_level_entry_count_max,
+                batch_run.component_count,
+                batch_run.component_total_ms,
+                batch_run.component_eig_ms,
+                batch_run.combine_ms,
                 elapsed_ms_since(level_start));
             } else {
               std::vector<LegacyDcovCudaLowrankGammaRun> runs(
@@ -6699,6 +6846,12 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_level_entry_count_max") =
         legacy_dcov_native_cuda_lowrank_metrics
           .component_cache_level_entry_count_max,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_batch_substrate_count") =
+        legacy_dcov_native_cuda_lowrank_metrics
+          .component_batch_substrate_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count") =
+        legacy_dcov_native_cuda_lowrank_metrics
+          .component_batch_substrate_pair_count,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count") =
         legacy_dcov_native_cuda_lowrank_metrics.spectra_matvec_count,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms") =

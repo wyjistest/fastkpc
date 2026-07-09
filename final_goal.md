@@ -7494,6 +7494,72 @@ decision:
   Spectra/CUDA setup overhead.
 ```
 
+Native one-call cuda_spectra shared component-cache batch substrate checkpoint:
+
+```text
+change:
+  reuse the exact CUDA Spectra lowrank component-cache batch substrate from the
+  native one-call dCov data plane.
+
+  The exported batch helper still uses value-key component interning, preserving
+  duplicate-column parity behavior for the R-facing batch API:
+
+    legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch()
+
+  The native one-call cuda_spectra branch now calls the same internal component
+  batch helper in pointer-key mode, preserving the level-local pointer cache and
+  cross-batch reuse semantics already used by the native skeleton route.
+
+  This removes the separate native pair-composition implementation and keeps
+  native one-call batch accounting, p-value order, canonical replay, residual
+  authority, and dCov authority unchanged.
+
+new native summary diagnostics:
+  legacy_dcov_native_cuda_lowrank_component_batch_substrate_count
+  legacy_dcov_native_cuda_lowrank_component_batch_substrate_pair_count
+
+TDD gate:
+  RED:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+    failed at:
+      native cuda_spectra summary missing
+      legacy_dcov_native_cuda_lowrank_component_batch_substrate_count
+
+  GREEN:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+    result:
+      PASS compatible CUDA skeleton native cuda_spectra lowrank
+
+fresh regression gates:
+  Rscript -e 'source("fastkpc/R/cuda_native.R"); build_fastkpc_cuda_native(rebuild = TRUE)'
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+
+fresh regression result:
+  built: fastkpc/build/fastkpc_cuda.so
+  PASS compatible CUDA skeleton native cuda_spectra lowrank
+  PASS legacy dCov CUDA lowrank gamma parity cases=6
+  max_p_diff = 4e-15
+  max_nV2_diff = 5.68e-14
+  PASS compatible CUDA skeleton artifact
+
+decision:
+  This is a native one-call data-plane substrate refactor and diagnostic
+  checkpoint only. It does not promote native cuda_spectra, does not claim a
+  full 351x48 CUDA skeleton result, and does not change the current recommended
+  CPU/C++ compatible route. The final full CUDA gate remains open until the
+  one-call route returns edge_count = 110 / 110, SHD = 0, n.edgetests exact =
+  TRUE, no unexplained fallback, and materially better wall time than the
+  compatible CPU/C++ route.
+```
+
 ---
 
 ## 9. Final success definition
