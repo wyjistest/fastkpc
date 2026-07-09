@@ -161,6 +161,16 @@ wall time: only slightly better than same-S chunk baseline, still worse than
 status: experimental only; not recommended
 ```
 
+Native one-call round dCov with `mgcv_residual_backend=cpp_guarded`:
+
+```text
+correctness: not evaluable on full 351x48 because candidate timed out
+timeout: 1200 sec
+last native progress: level 2 residual provider
+status: do not combine cpp_guarded residual provider with round dCov as a
+        promotion route; provider setup/extraction still dominates
+```
+
 `FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=chunk`:
 
 ```text
@@ -5091,6 +5101,27 @@ It remains env-gated and non-default. The remaining dominant cost is split
 between the legacy mgcv/regrXonS residual provider and native legacy dCov; the
 final compatible.cuda goal still requires moving more of that data plane toward
 C++/CUDA rather than stopping at this CPU threaded candidate.
+```
+
+Guarded residual follow-up gate:
+
+```text
+artifact:
+  fastkpc/artifacts/compatible_cuda_skeleton_threaded_round_cpp_guarded_full_351x48_v1
+
+mgcv_residual_backend: cpp_guarded
+dcov_batch:            round
+timeout:               1200 sec
+
+run_status:            timeout
+elapsed_sec:           1200.002
+last native progress:  level 2 start, residual_request_count = 49,919
+
+decision:
+  Do not combine cpp_guarded residual provider with round dCov as a promotion
+  route. Correctness is not evaluable on full 351x48 because the candidate
+  timed out, and the partial progress shows provider setup/extraction still
+  dominates before the route reaches the level 2 dCov phase.
 ```
 
 ---
