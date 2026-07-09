@@ -6036,7 +6036,9 @@ scope:
 change:
   add CUDA lowrank shadow runtime counters to legacy diagnostics:
     legacy_dcov_cuda_lowrank_shadow_enabled
+    legacy_dcov_cuda_lowrank_shadow_max_calls
     legacy_dcov_cuda_lowrank_shadow_count
+    legacy_dcov_cuda_lowrank_shadow_skipped_count
     legacy_dcov_cuda_lowrank_shadow_ms
     legacy_dcov_cuda_lowrank_shadow_error_count
     legacy_dcov_cuda_lowrank_shadow_converged_count
@@ -6070,6 +6072,32 @@ targeted gate:
   legacy_dcov_cuda_lowrank_shadow_matrix_h2d_ms_during_compute_max = 0
   legacy_dcov_cuda_lowrank_shadow_matrix_bytes = 839808
   legacy_dcov_cuda_lowrank_shadow_workspace_realloc_count = 36
+
+351-row real 5-column subset capped route shadow check:
+  env:
+    FASTKPC_RUN_CUDA_TESTS=1
+    FASTKPC_RUN_REAL_SUBSET_TESTS=1
+    FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+    FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=spectra
+    FASTKPC_LEGACY_DCOV_GAMMA_CUDA_LOW_RANK_SHADOW=1
+    FASTKPC_LEGACY_DCOV_GAMMA_CUDA_LOW_RANK_SHADOW_MAX_CALLS=5
+    FASTKPC_LEGACY_PARALLEL_CORES=1
+  max_conditioning_size = 3
+  backend = C++ Spectra legacy dCov authority
+  shadow = CUDA Spectra lowrank diagnostic path
+  legacy_dcov_gamma_count = 70
+  legacy_dcov_cpp_backend_count = 70
+  legacy_dcov_r_backend_count = 0
+  legacy_dcov_cuda_lowrank_shadow_enabled = TRUE
+  legacy_dcov_cuda_lowrank_shadow_max_calls = 5
+  legacy_dcov_cuda_lowrank_shadow_count = 5
+  legacy_dcov_cuda_lowrank_shadow_skipped_count = 65
+  legacy_dcov_cuda_lowrank_shadow_error_count = 0
+  legacy_dcov_cuda_lowrank_shadow_converged_count = 5
+  eigenvalue parity < 1e-7
+  centered-vector parity > 1 - 1e-7
+  statistic-input parity < 1e-7
+  matrix_h2d_ms_during_compute_max = 0
 
 decision:
   This is the first legacy-route integration for the CUDA Spectra lowrank

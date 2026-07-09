@@ -348,8 +348,10 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_cpp_shadow_max_mean_diff = 0,
     dcov_cpp_shadow_max_variance_diff = 0,
     dcov_cuda_lowrank_shadow_enabled = 0L,
+    dcov_cuda_lowrank_shadow_max_calls = 0L,
     dcov_cuda_lowrank_shadow_ms = 0,
     dcov_cuda_lowrank_shadow_count = 0L,
+    dcov_cuda_lowrank_shadow_skipped_count = 0L,
     dcov_cuda_lowrank_shadow_error_count = 0L,
     dcov_cuda_lowrank_shadow_converged_count = 0L,
     dcov_cuda_lowrank_shadow_max_eigenvalue_diff = 0,
@@ -714,12 +716,18 @@ fastkpc_legacy_runtime_add <- function(a, b) {
     dcov_cuda_lowrank_shadow_enabled =
       max(as.integer(a$dcov_cuda_lowrank_shadow_enabled),
           as.integer(b$dcov_cuda_lowrank_shadow_enabled)),
+    dcov_cuda_lowrank_shadow_max_calls =
+      max(as.integer(a$dcov_cuda_lowrank_shadow_max_calls),
+          as.integer(b$dcov_cuda_lowrank_shadow_max_calls)),
     dcov_cuda_lowrank_shadow_ms =
       as.numeric(a$dcov_cuda_lowrank_shadow_ms) +
         as.numeric(b$dcov_cuda_lowrank_shadow_ms),
     dcov_cuda_lowrank_shadow_count =
       as.integer(a$dcov_cuda_lowrank_shadow_count) +
         as.integer(b$dcov_cuda_lowrank_shadow_count),
+    dcov_cuda_lowrank_shadow_skipped_count =
+      as.integer(a$dcov_cuda_lowrank_shadow_skipped_count) +
+        as.integer(b$dcov_cuda_lowrank_shadow_skipped_count),
     dcov_cuda_lowrank_shadow_error_count =
       as.integer(a$dcov_cuda_lowrank_shadow_error_count) +
         as.integer(b$dcov_cuda_lowrank_shadow_error_count),
@@ -1737,8 +1745,10 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_shadow_decision_flip_count = integer(),
       dcov_cpp_shadow_error_count = integer(),
       dcov_cuda_lowrank_shadow_enabled = integer(),
+      dcov_cuda_lowrank_shadow_max_calls = integer(),
       dcov_cuda_lowrank_shadow_ms = numeric(),
       dcov_cuda_lowrank_shadow_count = integer(),
+      dcov_cuda_lowrank_shadow_skipped_count = integer(),
       dcov_cuda_lowrank_shadow_error_count = integer(),
       dcov_cuda_lowrank_shadow_converged_count = integer(),
       dcov_cuda_lowrank_shadow_max_eigenvalue_diff = numeric(),
@@ -1998,10 +2008,14 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.integer(metrics$dcov_cpp_shadow_error_count),
       dcov_cuda_lowrank_shadow_enabled =
         as.integer(metrics$dcov_cuda_lowrank_shadow_enabled),
+      dcov_cuda_lowrank_shadow_max_calls =
+        as.integer(metrics$dcov_cuda_lowrank_shadow_max_calls),
       dcov_cuda_lowrank_shadow_ms =
         as.numeric(metrics$dcov_cuda_lowrank_shadow_ms),
       dcov_cuda_lowrank_shadow_count =
         as.integer(metrics$dcov_cuda_lowrank_shadow_count),
+      dcov_cuda_lowrank_shadow_skipped_count =
+        as.integer(metrics$dcov_cuda_lowrank_shadow_skipped_count),
       dcov_cuda_lowrank_shadow_error_count =
         as.integer(metrics$dcov_cuda_lowrank_shadow_error_count),
       dcov_cuda_lowrank_shadow_converged_count =
@@ -4851,6 +4865,17 @@ fastkpc_legacy_dcov_cuda_lowrank_shadow_enabled <- function() {
   )
 }
 
+fastkpc_legacy_dcov_cuda_lowrank_shadow_max_calls <- function() {
+  raw <- Sys.getenv(
+    "FASTKPC_LEGACY_DCOV_GAMMA_CUDA_LOW_RANK_SHADOW_MAX_CALLS",
+    unset = ""
+  )
+  if (!nzchar(raw)) return(0L)
+  value <- suppressWarnings(as.integer(raw))
+  if (length(value) != 1L || is.na(value) || value < 1L) return(0L)
+  value
+}
+
 fastkpc_legacy_dcov_backend <- function() {
   backend <- tolower(Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_BACKEND",
                                 unset = "r"))
@@ -5038,8 +5063,31 @@ fastkpc_legacy_runtime_add_dcov_cpp_shadow <- function(
 }
 
 fastkpc_legacy_runtime_add_dcov_cuda_lowrank_shadow <- function(
-    metrics, x, y, numCol) {
+    metrics, x, y, numCol, shadow_state = NULL) {
   metrics$dcov_cuda_lowrank_shadow_enabled <- 1L
+  max_calls <- if (!is.null(shadow_state)) {
+    as.integer(shadow_state$max_calls)
+  } else {
+    fastkpc_legacy_dcov_cuda_lowrank_shadow_max_calls()
+  }
+  metrics$dcov_cuda_lowrank_shadow_max_calls <- max(
+    as.integer(metrics$dcov_cuda_lowrank_shadow_max_calls),
+    as.integer(max_calls)
+  )
+  attempted <- if (!is.null(shadow_state)) {
+    as.integer(shadow_state$attempted)
+  } else {
+    as.integer(metrics$dcov_cuda_lowrank_shadow_count) +
+      as.integer(metrics$dcov_cuda_lowrank_shadow_error_count)
+  }
+  if (max_calls > 0L && attempted >= max_calls) {
+    metrics$dcov_cuda_lowrank_shadow_skipped_count <-
+      metrics$dcov_cuda_lowrank_shadow_skipped_count + 1L
+    return(metrics)
+  }
+  if (!is.null(shadow_state)) {
+    shadow_state$attempted <- attempted + 1L
+  }
   shadow_start <- proc.time()[["elapsed"]]
   cuda <- tryCatch(
     legacy_dcov_spectra_matvec_cuda_lowrank_shadow(
@@ -5428,6 +5476,14 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
   mgcv_residual_cache_env <- NULL
   mgcv_residual_prefetch_cache <- NULL
   mgcv_residual_prefetch_level_enabled <- FALSE
+  dcov_cuda_lowrank_shadow_state <- if (isTRUE(dcov_cuda_lowrank_shadow_enabled)) {
+    state <- new.env(parent = emptyenv())
+    state$max_calls <- fastkpc_legacy_dcov_cuda_lowrank_shadow_max_calls()
+    state$attempted <- 0L
+    state
+  } else {
+    NULL
+  }
 
   run_legacy_ci <- function(x, y, S) {
     metrics <- fastkpc_legacy_runtime_zero()
@@ -5446,7 +5502,8 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
                 isTRUE(backend$used_cpp)) {
               metrics <- fastkpc_legacy_runtime_add_dcov_cuda_lowrank_shadow(
                 metrics = metrics, x = data[, x], y = data[, y],
-                numCol = numCol
+                numCol = numCol,
+                shadow_state = dcov_cuda_lowrank_shadow_state
               )
             }
             result <- backend$result
@@ -5503,7 +5560,8 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
                 isTRUE(backend$used_cpp)) {
               metrics <- fastkpc_legacy_runtime_add_dcov_cuda_lowrank_shadow(
                 metrics = metrics, x = residuals[, 1L], y = residuals[, 2L],
-                numCol = numCol
+                numCol = numCol,
+                shadow_state = dcov_cuda_lowrank_shadow_state
               )
             }
             result <- backend$result
@@ -6606,8 +6664,12 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$dcov_cpp_shadow_near_alpha_count),
         legacy_dcov_cuda_lowrank_shadow_enabled =
           isTRUE(as.integer(runtime_total$dcov_cuda_lowrank_shadow_enabled) > 0L),
+        legacy_dcov_cuda_lowrank_shadow_max_calls =
+          as.integer(runtime_total$dcov_cuda_lowrank_shadow_max_calls),
         legacy_dcov_cuda_lowrank_shadow_count =
           as.integer(runtime_total$dcov_cuda_lowrank_shadow_count),
+        legacy_dcov_cuda_lowrank_shadow_skipped_count =
+          as.integer(runtime_total$dcov_cuda_lowrank_shadow_skipped_count),
         legacy_dcov_cuda_lowrank_shadow_ms =
           as.numeric(runtime_total$dcov_cuda_lowrank_shadow_ms),
         legacy_dcov_cuda_lowrank_shadow_error_count =
