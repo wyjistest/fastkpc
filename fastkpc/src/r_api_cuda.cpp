@@ -13,6 +13,7 @@
 #include "cuda/dcov_batch_cuda.hpp"
 #include "cuda/fastspline_residual_cuda.hpp"
 #include "cuda/hsic_batch_cuda.hpp"
+#include "cuda/legacy_dcov_spectra_matvec_cuda.hpp"
 #include "cuda/mgcv_extract_fixed_sp_cuda.hpp"
 
 #include <Rcpp.h>
@@ -1846,6 +1847,53 @@ extern "C" SEXP C_fastkpc_cuda_device_info() {
     Rcpp::Named("compute_capability") =
       std::to_string(info.major) + "." + std::to_string(info.minor),
     Rcpp::Named("total_global_mem") = info.total_global_mem
+  );
+  END_RCPP
+}
+
+extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda(SEXP matrixs,
+                                                   SEXP rhss) {
+  BEGIN_RCPP
+  if (!Rf_isReal(matrixs) || !Rf_isMatrix(matrixs)) {
+    Rcpp::stop("matrix must be a numeric matrix");
+  }
+  if (!Rf_isReal(rhss) || !Rf_isMatrix(rhss)) {
+    Rcpp::stop("rhs must be a numeric matrix");
+  }
+  Rcpp::NumericMatrix matrix(matrixs);
+  Rcpp::NumericMatrix rhs(rhss);
+  if (matrix.nrow() != matrix.ncol()) {
+    Rcpp::stop("matrix must be square");
+  }
+  if (rhs.nrow() != matrix.nrow()) {
+    Rcpp::stop("rhs row count must match matrix dimension");
+  }
+  if (rhs.ncol() < 1) {
+    Rcpp::stop("rhs must have at least one column");
+  }
+  if (!all_finite(matrix) || !all_finite(rhs)) {
+    Rcpp::stop("Data contains missing or infinite values");
+  }
+
+  const int n = matrix.nrow();
+  const int rhs_count = rhs.ncol();
+  const fastkpc::LegacyDcovSpectraMatvecCudaResult result =
+    fastkpc::legacy_dcov_spectra_matvec_cuda(REAL(matrixs), REAL(rhss), n,
+                                             rhs_count);
+  Rcpp::NumericMatrix values(n, rhs_count);
+  std::copy(result.values.begin(), result.values.end(), values.begin());
+  return Rcpp::List::create(
+    Rcpp::Named("values") = values,
+    Rcpp::Named("backend") = "cuda-dense-sym-matvec",
+    Rcpp::Named("n") = result.n,
+    Rcpp::Named("rhs_count") = result.rhs_count,
+    Rcpp::Named("kernel_launch_count") = result.kernel_launch_count,
+    Rcpp::Named("alloc_ms") = result.alloc_ms,
+    Rcpp::Named("h2d_ms") = result.h2d_ms,
+    Rcpp::Named("kernel_ms") = result.kernel_ms,
+    Rcpp::Named("d2h_ms") = result.d2h_ms,
+    Rcpp::Named("free_ms") = result.free_ms,
+    Rcpp::Named("total_ms") = result.total_ms
   );
   END_RCPP
 }
@@ -4640,6 +4688,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
 static const R_CallMethodDef call_methods[] = {
   {"C_fastkpc_cuda_available", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_available), 0},
   {"C_fastkpc_cuda_device_info", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_device_info), 0},
+  {"C_legacy_dcov_spectra_matvec_cuda", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda), 2},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},
   {"C_fast_hsic_perm_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_perm_cuda), 6},

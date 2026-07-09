@@ -51,6 +51,34 @@ fastkpc_cuda_device_info <- function() {
   .Call("C_fastkpc_cuda_device_info", PACKAGE = "fastkpc_cuda")
 }
 
+legacy_dcov_spectra_matvec_cuda <- function(a, rhs) {
+  load_fastkpc_cuda_native()
+  a <- as.matrix(a)
+  storage.mode(a) <- "double"
+  rhs_was_vector <- is.null(dim(rhs))
+  rhs <- if (rhs_was_vector) {
+    matrix(as.numeric(rhs), ncol = 1L)
+  } else {
+    as.matrix(rhs)
+  }
+  storage.mode(rhs) <- "double"
+  if (nrow(a) != ncol(a)) {
+    stop("matrix must be square", call. = FALSE)
+  }
+  if (nrow(rhs) != nrow(a)) {
+    stop("rhs row count must match matrix dimension", call. = FALSE)
+  }
+  if (!all(is.finite(a)) || !all(is.finite(rhs))) {
+    stop("Data contains missing or infinite values", call. = FALSE)
+  }
+  result <- .Call("C_legacy_dcov_spectra_matvec_cuda", a, rhs,
+                  PACKAGE = "fastkpc_cuda")
+  if (rhs_was_vector) {
+    result$values <- as.numeric(result$values[, 1L])
+  }
+  result
+}
+
 fast_dcov_batch_cuda <- function(x, y, index = 1, legacy_index = TRUE) {
   load_fastkpc_cuda_native()
   x <- if (is.matrix(x)) x else matrix(as.numeric(x), ncol = 1)

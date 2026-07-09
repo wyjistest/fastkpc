@@ -5557,6 +5557,71 @@ decision:
   recommended production path.
 ```
 
+CUDA dense Spectra-matvec primitive checkpoint:
+
+```text
+scope:
+  CUDA substrate for the legacy dCov Spectra lowrank bottleneck
+  not connected to the skeleton route
+  not connected to RSpectra yet
+
+change:
+  add a minimal CUDA dense symmetric matrix-vector primitive:
+    legacy_dcov_spectra_matvec_cuda(a, rhs)
+
+  implementation shape:
+    input matrix is n x n column-major double
+    rhs can be a vector or n x K matrix
+    one CUDA kernel launch per RHS column
+    output preserves vector vs matrix RHS shape
+
+  native backend:
+    fastkpc/src/cuda/legacy_dcov_spectra_matvec_cuda.cu
+    fastkpc/src/cuda/legacy_dcov_spectra_matvec_cuda.hpp
+
+  R/.Call bridge:
+    C_legacy_dcov_spectra_matvec_cuda
+    legacy_dcov_spectra_matvec_cuda()
+
+diagnostics:
+  backend = cuda-dense-sym-matvec
+  n
+  rhs_count
+  kernel_launch_count
+  alloc_ms
+  h2d_ms
+  kernel_ms
+  d2h_ms
+  free_ms
+  total_ms
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+  Rscript fastkpc/tests/test_skeleton_native_legacy_mgcv_legacy_dcov_one_call.R
+  Rscript fastkpc/tests/test_cuda_build_contract.R
+  git diff --check
+
+351x8 warm micro-check:
+  n = 351
+  rhs_count = 8
+  kernel_launch_count = 8
+  max_abs_diff vs host matrix multiply = 4.973799e-14
+  warm_alloc_ms = 0.068607
+  warm_h2d_ms = 0.214311
+  warm_kernel_ms = 0.049301
+  warm_d2h_ms = 0.012363
+  warm_total_ms = 0.408097
+
+decision:
+  This is the first CUDA primitive aimed directly at the diagnosed Spectra
+  matrix-vector hot path. It is correctness-parity substrate only: it does not
+  change dCov authority, residual authority, skeleton replay, or the current
+  recommended route. The next lowrank step should add workspace/device-resident
+  reuse and then evaluate whether this operator can be wired into an iterative
+  eigensolver-compatible path without host round-trips per matvec.
+```
+
 ---
 
 ## 9. Final success definition
