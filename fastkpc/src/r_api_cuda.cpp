@@ -157,6 +157,41 @@ struct LegacyDcovSpectraLowrankShadowRun {
   double matrix_bytes = 0.0;
 };
 
+struct LegacyDcovCudaLowrankGammaRun {
+  double p_value = NA_REAL;
+  double nV2 = NA_REAL;
+  double mean = NA_REAL;
+  double variance = NA_REAL;
+  double statistic = NA_REAL;
+  double estimate = NA_REAL;
+  double x_moment = NA_REAL;
+  double y_moment = NA_REAL;
+  bool converged_x = false;
+  bool converged_y = false;
+  int nconv_x = 0;
+  int nconv_y = 0;
+  int iterations_x = 0;
+  int iterations_y = 0;
+  int info_x = -1;
+  int info_y = -1;
+  double eig_ms = 0.0;
+  int spectra_matvec_count = 0;
+  double spectra_matvec_ms = 0.0;
+  int kernel_launch_count = 0;
+  int device_matrix_reuse_count = 0;
+  int device_workspace_reuse_count = 0;
+  int workspace_realloc_count = 0;
+  double matrix_bytes = 0.0;
+  double workspace_bytes = 0.0;
+  double matrix_h2d_ms = 0.0;
+  double matrix_h2d_ms_during_compute = 0.0;
+  double workspace_alloc_ms = 0.0;
+  double h2d_ms = 0.0;
+  double kernel_ms = 0.0;
+  double d2h_ms = 0.0;
+  double total_ms = 0.0;
+};
+
 Eigen::MatrixXd legacy_dcov_distance_matrix_eigen(const double* values,
                                                   int n) {
   Eigen::MatrixXd out(n, n);
@@ -267,6 +302,154 @@ double legacy_dcov_weighted_cross_sum_eigen(
     }
   }
   return total;
+}
+
+LegacyDcovCudaLowrankGammaRun legacy_dcov_cuda_lowrank_gamma_compute(
+    const double* x,
+    const double* y,
+    int n,
+    int num_col,
+    double index,
+    int ncv,
+    double tol,
+    int maxitr) {
+  LegacyDcovCudaLowrankGammaRun out;
+  const auto total_start = std::chrono::steady_clock::now();
+  const Eigen::MatrixXd x_distance =
+    legacy_dcov_distance_matrix_eigen(x, n);
+  const Eigen::MatrixXd y_distance =
+    legacy_dcov_distance_matrix_eigen(y, n);
+  const LegacyDcovSpectraLowrankShadowRun cuda_x =
+    legacy_dcov_cuda_spectra_lowrank_shadow(
+      x_distance, num_col, ncv, tol, maxitr);
+  const LegacyDcovSpectraLowrankShadowRun cuda_y =
+    legacy_dcov_cuda_spectra_lowrank_shadow(
+      y_distance, num_col, ncv, tol, maxitr);
+  if (!cuda_x.converged || !cuda_y.converged) {
+    Rcpp::stop("CUDA Spectra lowrank did not converge");
+  }
+
+  const double n_double = static_cast<double>(n);
+  out.nV2 = legacy_dcov_weighted_cross_sum_eigen(
+    cuda_x.centered_vectors, cuda_x.eigenvalues,
+    cuda_y.centered_vectors, cuda_y.eigenvalues) / n_double;
+  out.mean =
+    (x_distance.sum() / (n_double * n_double)) *
+    (y_distance.sum() / (n_double * n_double));
+  out.x_moment = legacy_dcov_weighted_cross_sum_eigen(
+    cuda_x.centered_vectors, cuda_x.eigenvalues,
+    cuda_x.centered_vectors, cuda_x.eigenvalues);
+  out.y_moment = legacy_dcov_weighted_cross_sum_eigen(
+    cuda_y.centered_vectors, cuda_y.eigenvalues,
+    cuda_y.centered_vectors, cuda_y.eigenvalues);
+  const double variance_factor =
+    2.0 * (n_double - 4.0) * (n_double - 5.0) /
+    n_double / (n_double - 1.0) / (n_double - 2.0) / (n_double - 3.0);
+  out.variance =
+    variance_factor * out.x_moment * out.y_moment /
+    std::pow(n_double, 4.0) * std::pow(n_double, 2.0);
+  const double alpha = (out.mean * out.mean) / out.variance;
+  const double beta = out.variance / out.mean;
+  out.p_value = 1.0 - R::pgamma(out.nV2, alpha, beta, true, false);
+  out.statistic = out.nV2;
+  out.estimate = std::sqrt(out.nV2 / n_double);
+  out.converged_x = cuda_x.converged;
+  out.converged_y = cuda_y.converged;
+  out.nconv_x = cuda_x.nconv;
+  out.nconv_y = cuda_y.nconv;
+  out.iterations_x = cuda_x.iterations;
+  out.iterations_y = cuda_y.iterations;
+  out.info_x = cuda_x.info;
+  out.info_y = cuda_y.info;
+  out.eig_ms = cuda_x.eig_ms + cuda_y.eig_ms;
+
+  const LegacyDcovSpectraCudaOperatorDiagnostics& dx =
+    cuda_x.cuda_diagnostics;
+  const LegacyDcovSpectraCudaOperatorDiagnostics& dy =
+    cuda_y.cuda_diagnostics;
+  out.spectra_matvec_count =
+    dx.spectra_matvec_count + dy.spectra_matvec_count;
+  out.spectra_matvec_ms = dx.spectra_matvec_ms + dy.spectra_matvec_ms;
+  out.kernel_launch_count =
+    dx.kernel_launch_count + dy.kernel_launch_count;
+  out.device_matrix_reuse_count =
+    dx.device_matrix_reuse_count + dy.device_matrix_reuse_count;
+  out.device_workspace_reuse_count =
+    dx.device_workspace_reuse_count + dy.device_workspace_reuse_count;
+  out.workspace_realloc_count =
+    dx.workspace_realloc_count + dy.workspace_realloc_count;
+  out.matrix_bytes = cuda_x.matrix_bytes + cuda_y.matrix_bytes;
+  out.workspace_bytes = static_cast<double>(
+    std::max(dx.workspace_bytes, dy.workspace_bytes));
+  out.matrix_h2d_ms = cuda_x.matrix_h2d_ms + cuda_y.matrix_h2d_ms;
+  out.matrix_h2d_ms_during_compute =
+    dx.matrix_h2d_ms_during_compute + dy.matrix_h2d_ms_during_compute;
+  out.workspace_alloc_ms = dx.workspace_alloc_ms + dy.workspace_alloc_ms;
+  out.h2d_ms = dx.h2d_ms + dy.h2d_ms;
+  out.kernel_ms = dx.kernel_ms + dy.kernel_ms;
+  out.d2h_ms = dx.d2h_ms + dy.d2h_ms;
+  out.total_ms = elapsed_ms_since(total_start);
+  (void)index;
+  return out;
+}
+
+Rcpp::List legacy_dcov_cuda_lowrank_gamma_run_to_list(
+    const LegacyDcovCudaLowrankGammaRun& run,
+    int n,
+    int num_col,
+    double index,
+    int ncv,
+    double tol,
+    int maxitr) {
+  return Rcpp::List::create(
+    Rcpp::Named("backend") =
+      "cuda-dense-sym-matvec-spectra-lowrank-gamma",
+    Rcpp::Named("p.value") = run.p_value,
+    Rcpp::Named("nV2") = run.nV2,
+    Rcpp::Named("mean") = run.mean,
+    Rcpp::Named("variance") = run.variance,
+    Rcpp::Named("statistic") = run.statistic,
+    Rcpp::Named("estimate") = run.estimate,
+    Rcpp::Named("estimates") = Rcpp::NumericVector::create(
+      Rcpp::Named("nV^2") = run.nV2,
+      Rcpp::Named("nV^2 mean") = run.mean,
+      Rcpp::Named("nV^2 variance") = run.variance),
+    Rcpp::Named("n") = n,
+    Rcpp::Named("numCol") = num_col,
+    Rcpp::Named("index") = index,
+    Rcpp::Named("ncv") = ncv,
+    Rcpp::Named("tol") = tol,
+    Rcpp::Named("maxitr") = maxitr,
+    Rcpp::Named("converged_x") = run.converged_x,
+    Rcpp::Named("converged_y") = run.converged_y,
+    Rcpp::Named("nconv_x") = run.nconv_x,
+    Rcpp::Named("nconv_y") = run.nconv_y,
+    Rcpp::Named("iterations_x") = run.iterations_x,
+    Rcpp::Named("iterations_y") = run.iterations_y,
+    Rcpp::Named("info_x") = run.info_x,
+    Rcpp::Named("info_y") = run.info_y,
+    Rcpp::Named("x_moment") = run.x_moment,
+    Rcpp::Named("y_moment") = run.y_moment,
+    Rcpp::Named("eig_ms") = run.eig_ms,
+    Rcpp::Named("spectra_matvec_count") = run.spectra_matvec_count,
+    Rcpp::Named("spectra_matvec_ms") = run.spectra_matvec_ms,
+    Rcpp::Named("kernel_launch_count") = run.kernel_launch_count,
+    Rcpp::Named("device_matrix_reuse_count") =
+      run.device_matrix_reuse_count,
+    Rcpp::Named("device_workspace_reuse_count") =
+      run.device_workspace_reuse_count,
+    Rcpp::Named("workspace_realloc_count") = run.workspace_realloc_count,
+    Rcpp::Named("matrix_bytes") = run.matrix_bytes,
+    Rcpp::Named("workspace_bytes") = run.workspace_bytes,
+    Rcpp::Named("matrix_h2d_ms") = run.matrix_h2d_ms,
+    Rcpp::Named("matrix_h2d_ms_during_compute") =
+      run.matrix_h2d_ms_during_compute,
+    Rcpp::Named("workspace_alloc_ms") = run.workspace_alloc_ms,
+    Rcpp::Named("h2d_ms") = run.h2d_ms,
+    Rcpp::Named("kernel_ms") = run.kernel_ms,
+    Rcpp::Named("d2h_ms") = run.d2h_ms,
+    Rcpp::Named("total_ms") = run.total_ms
+  );
 }
 
 double legacy_dcov_max_abs_vector_diff(const Eigen::VectorXd& left,
@@ -2671,108 +2854,163 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma(
   }
   if (maxitr <= 0) Rcpp::stop("maxitr must be positive");
 
-  const auto total_start = std::chrono::steady_clock::now();
-  const Eigen::MatrixXd x_distance =
-    legacy_dcov_distance_matrix_eigen(REAL(xs), n);
-  const Eigen::MatrixXd y_distance =
-    legacy_dcov_distance_matrix_eigen(REAL(ys), n);
-  const LegacyDcovSpectraLowrankShadowRun cuda_x =
-    legacy_dcov_cuda_spectra_lowrank_shadow(
-      x_distance, num_col, ncv, tol, maxitr);
-  const LegacyDcovSpectraLowrankShadowRun cuda_y =
-    legacy_dcov_cuda_spectra_lowrank_shadow(
-      y_distance, num_col, ncv, tol, maxitr);
-  if (!cuda_x.converged || !cuda_y.converged) {
-    Rcpp::stop("CUDA Spectra lowrank did not converge");
-  }
+  const LegacyDcovCudaLowrankGammaRun run =
+    legacy_dcov_cuda_lowrank_gamma_compute(
+      REAL(xs), REAL(ys), n, num_col, index, ncv, tol, maxitr);
+  return legacy_dcov_cuda_lowrank_gamma_run_to_list(
+    run, n, num_col, index, ncv, tol, maxitr);
+  END_RCPP
+}
 
-  const double n_double = static_cast<double>(n);
-  const double nV2 = legacy_dcov_weighted_cross_sum_eigen(
-    cuda_x.centered_vectors, cuda_x.eigenvalues,
-    cuda_y.centered_vectors, cuda_y.eigenvalues) / n_double;
-  const double nV2Mean =
-    (x_distance.sum() / (n_double * n_double)) *
-    (y_distance.sum() / (n_double * n_double));
-  const double x_moment = legacy_dcov_weighted_cross_sum_eigen(
-    cuda_x.centered_vectors, cuda_x.eigenvalues,
-    cuda_x.centered_vectors, cuda_x.eigenvalues);
-  const double y_moment = legacy_dcov_weighted_cross_sum_eigen(
-    cuda_y.centered_vectors, cuda_y.eigenvalues,
-    cuda_y.centered_vectors, cuda_y.eigenvalues);
-  const double variance_factor =
-    2.0 * (n_double - 4.0) * (n_double - 5.0) /
-    n_double / (n_double - 1.0) / (n_double - 2.0) / (n_double - 3.0);
-  const double nV2Variance =
-    variance_factor * x_moment * y_moment /
-    std::pow(n_double, 4.0) * std::pow(n_double, 2.0);
-  const double alpha = (nV2Mean * nV2Mean) / nV2Variance;
-  const double beta = nV2Variance / nV2Mean;
-  const double p_value = 1.0 - R::pgamma(nV2, alpha, beta, true, false);
-  const double dCov = std::sqrt(nV2 / n_double);
-  const LegacyDcovSpectraCudaOperatorDiagnostics& dx =
-    cuda_x.cuda_diagnostics;
-  const LegacyDcovSpectraCudaOperatorDiagnostics& dy =
-    cuda_y.cuda_diagnostics;
+extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch(
+    SEXP xs,
+    SEXP ys,
+    SEXP numCols,
+    SEXP indexs,
+    SEXP ncvs,
+    SEXP tols,
+    SEXP maxitrs) {
+  BEGIN_RCPP
+  if (!Rf_isReal(xs) || !Rf_isReal(ys) ||
+      !Rf_isMatrix(xs) || !Rf_isMatrix(ys)) {
+    Rcpp::stop("x and y must be numeric matrices");
+  }
+  Rcpp::NumericMatrix x(xs);
+  Rcpp::NumericMatrix y(ys);
+  if (x.nrow() != y.nrow() || x.ncol() != y.ncol()) {
+    Rcpp::stop("x and y must have identical dimensions");
+  }
+  const int n = x.nrow();
+  const int batch = x.ncol();
+  if (n <= 5) {
+    Rcpp::stop("legacy dCov gamma lowrank CUDA requires n > 5");
+  }
+  if (batch < 1) {
+    Rcpp::stop("batch must contain at least one pair");
+  }
+  if (!all_finite(x) || !all_finite(y)) {
+    Rcpp::stop("Data contains missing or infinite values");
+  }
+  const int num_col = Rcpp::as<int>(numCols);
+  double index = Rcpp::as<double>(indexs);
+  const int ncv = Rcpp::as<int>(ncvs);
+  const double tol = Rcpp::as<double>(tols);
+  const int maxitr = Rcpp::as<int>(maxitrs);
+  if (num_col <= 0 || num_col >= n) {
+    Rcpp::stop("numCol must be positive and less than sample size");
+  }
+  if (index < 0.0 || index > 2.0) index = 1.0;
+  if (ncv <= num_col || ncv > n) {
+    Rcpp::stop("ncv must be greater than numCol and no larger than sample size");
+  }
+  if (!std::isfinite(tol) || tol <= 0.0) {
+    Rcpp::stop("tol must be a positive finite value");
+  }
+  if (maxitr <= 0) Rcpp::stop("maxitr must be positive");
+
+  const auto batch_start = std::chrono::steady_clock::now();
+  Rcpp::NumericVector p_values(batch);
+  Rcpp::NumericVector nV2(batch);
+  Rcpp::NumericVector means(batch);
+  Rcpp::NumericVector variances(batch);
+  Rcpp::NumericVector statistics(batch);
+  Rcpp::NumericVector estimates(batch);
+  Rcpp::NumericVector x_moments(batch);
+  Rcpp::NumericVector y_moments(batch);
+
+  int converged_count = 0;
+  int spectra_matvec_count = 0;
+  int kernel_launch_count = 0;
+  int device_matrix_reuse_count = 0;
+  int device_workspace_reuse_count = 0;
+  int workspace_realloc_count = 0;
+  double spectra_matvec_ms = 0.0;
+  double eig_ms = 0.0;
+  double matrix_bytes = 0.0;
+  double workspace_bytes = 0.0;
+  double matrix_h2d_ms = 0.0;
+  double matrix_h2d_ms_during_compute = 0.0;
+  double workspace_alloc_ms = 0.0;
+  double h2d_ms = 0.0;
+  double kernel_ms = 0.0;
+  double d2h_ms = 0.0;
+  double pair_total_ms = 0.0;
+
+  for (int col = 0; col < batch; ++col) {
+    const std::size_t offset = static_cast<std::size_t>(n) * col;
+    const LegacyDcovCudaLowrankGammaRun run =
+      legacy_dcov_cuda_lowrank_gamma_compute(
+        REAL(xs) + offset, REAL(ys) + offset, n, num_col, index, ncv, tol,
+        maxitr);
+    p_values[col] = run.p_value;
+    nV2[col] = run.nV2;
+    means[col] = run.mean;
+    variances[col] = run.variance;
+    statistics[col] = run.statistic;
+    estimates[col] = run.estimate;
+    x_moments[col] = run.x_moment;
+    y_moments[col] = run.y_moment;
+    converged_count += run.converged_x ? 1 : 0;
+    converged_count += run.converged_y ? 1 : 0;
+    spectra_matvec_count += run.spectra_matvec_count;
+    kernel_launch_count += run.kernel_launch_count;
+    device_matrix_reuse_count += run.device_matrix_reuse_count;
+    device_workspace_reuse_count += run.device_workspace_reuse_count;
+    workspace_realloc_count += run.workspace_realloc_count;
+    spectra_matvec_ms += run.spectra_matvec_ms;
+    eig_ms += run.eig_ms;
+    matrix_bytes += run.matrix_bytes;
+    workspace_bytes = std::max(workspace_bytes, run.workspace_bytes);
+    matrix_h2d_ms += run.matrix_h2d_ms;
+    matrix_h2d_ms_during_compute += run.matrix_h2d_ms_during_compute;
+    workspace_alloc_ms += run.workspace_alloc_ms;
+    h2d_ms += run.h2d_ms;
+    kernel_ms += run.kernel_ms;
+    d2h_ms += run.d2h_ms;
+    pair_total_ms += run.total_ms;
+  }
 
   return Rcpp::List::create(
     Rcpp::Named("backend") =
-      "cuda-dense-sym-matvec-spectra-lowrank-gamma",
-    Rcpp::Named("p.value") = p_value,
+      "cuda-dense-sym-matvec-spectra-lowrank-gamma-batch",
+    Rcpp::Named("p.value") = p_values,
     Rcpp::Named("nV2") = nV2,
-    Rcpp::Named("mean") = nV2Mean,
-    Rcpp::Named("variance") = nV2Variance,
-    Rcpp::Named("statistic") = nV2,
-    Rcpp::Named("estimate") = dCov,
-    Rcpp::Named("estimates") = Rcpp::NumericVector::create(
-      Rcpp::Named("nV^2") = nV2,
-      Rcpp::Named("nV^2 mean") = nV2Mean,
-      Rcpp::Named("nV^2 variance") = nV2Variance),
-    Rcpp::Named("n") = n,
-    Rcpp::Named("numCol") = num_col,
-    Rcpp::Named("index") = index,
-    Rcpp::Named("ncv") = ncv,
-    Rcpp::Named("tol") = tol,
-    Rcpp::Named("maxitr") = maxitr,
-    Rcpp::Named("converged_x") = cuda_x.converged,
-    Rcpp::Named("converged_y") = cuda_y.converged,
-    Rcpp::Named("nconv_x") = cuda_x.nconv,
-    Rcpp::Named("nconv_y") = cuda_y.nconv,
-    Rcpp::Named("iterations_x") = cuda_x.iterations,
-    Rcpp::Named("iterations_y") = cuda_y.iterations,
-    Rcpp::Named("info_x") = cuda_x.info,
-    Rcpp::Named("info_y") = cuda_y.info,
-    Rcpp::Named("x_moment") = x_moment,
-    Rcpp::Named("y_moment") = y_moment,
-    Rcpp::Named("eig_ms") = cuda_x.eig_ms + cuda_y.eig_ms,
-    Rcpp::Named("spectra_matvec_count") =
-      dx.spectra_matvec_count + dy.spectra_matvec_count,
-    Rcpp::Named("spectra_matvec_ms") =
-      dx.spectra_matvec_ms + dy.spectra_matvec_ms,
-    Rcpp::Named("kernel_launch_count") =
-      dx.kernel_launch_count + dy.kernel_launch_count,
-    Rcpp::Named("device_matrix_reuse_count") =
-      dx.device_matrix_reuse_count + dy.device_matrix_reuse_count,
-    Rcpp::Named("device_workspace_reuse_count") =
-      dx.device_workspace_reuse_count + dy.device_workspace_reuse_count,
-    Rcpp::Named("workspace_realloc_count") =
-      dx.workspace_realloc_count + dy.workspace_realloc_count,
-    Rcpp::Named("matrix_bytes") =
-      cuda_x.matrix_bytes + cuda_y.matrix_bytes,
-    Rcpp::Named("workspace_bytes") = static_cast<double>(
-      std::max(dx.workspace_bytes, dy.workspace_bytes)),
-    Rcpp::Named("matrix_h2d_ms") =
-      cuda_x.matrix_h2d_ms + cuda_y.matrix_h2d_ms,
-    Rcpp::Named("matrix_h2d_ms_during_compute") =
-      dx.matrix_h2d_ms_during_compute +
-      dy.matrix_h2d_ms_during_compute,
-    Rcpp::Named("workspace_alloc_ms") =
-      dx.workspace_alloc_ms + dy.workspace_alloc_ms,
-    Rcpp::Named("h2d_ms") = dx.h2d_ms + dy.h2d_ms,
-    Rcpp::Named("kernel_ms") = dx.kernel_ms + dy.kernel_ms,
-    Rcpp::Named("d2h_ms") = dx.d2h_ms + dy.d2h_ms,
-    Rcpp::Named("total_ms") =
-      std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - total_start).count()
+    Rcpp::Named("mean") = means,
+    Rcpp::Named("variance") = variances,
+    Rcpp::Named("statistic") = statistics,
+    Rcpp::Named("estimate") = estimates,
+    Rcpp::Named("x_moment") = x_moments,
+    Rcpp::Named("y_moment") = y_moments,
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("n") = n,
+      Rcpp::Named("numCol") = num_col,
+      Rcpp::Named("index") = index,
+      Rcpp::Named("ncv") = ncv,
+      Rcpp::Named("tol") = tol,
+      Rcpp::Named("maxitr") = maxitr,
+      Rcpp::Named("batch_count") = batch,
+      Rcpp::Named("converged_count") = converged_count,
+      Rcpp::Named("spectra_matvec_count") = spectra_matvec_count,
+      Rcpp::Named("spectra_matvec_ms") = spectra_matvec_ms,
+      Rcpp::Named("kernel_launch_count") = kernel_launch_count,
+      Rcpp::Named("device_matrix_reuse_count") =
+        device_matrix_reuse_count,
+      Rcpp::Named("device_workspace_reuse_count") =
+        device_workspace_reuse_count,
+      Rcpp::Named("workspace_realloc_count") = workspace_realloc_count,
+      Rcpp::Named("matrix_bytes") = matrix_bytes,
+      Rcpp::Named("workspace_bytes") = workspace_bytes,
+      Rcpp::Named("matrix_h2d_ms") = matrix_h2d_ms,
+      Rcpp::Named("matrix_h2d_ms_during_compute") =
+        matrix_h2d_ms_during_compute,
+      Rcpp::Named("workspace_alloc_ms") = workspace_alloc_ms,
+      Rcpp::Named("h2d_ms") = h2d_ms,
+      Rcpp::Named("kernel_ms") = kernel_ms,
+      Rcpp::Named("d2h_ms") = d2h_ms,
+      Rcpp::Named("eig_ms") = eig_ms,
+      Rcpp::Named("pair_total_ms") = pair_total_ms,
+      Rcpp::Named("total_ms") = elapsed_ms_since(batch_start)
+    )
   );
   END_RCPP
 }
@@ -5592,6 +5830,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_legacy_dcov_spectra_matvec_cuda_operator_eigs", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_operator_eigs), 5},
   {"C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow), 6},
   {"C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma), 7},
+  {"C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch), 7},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_free", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_free), 1},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},

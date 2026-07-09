@@ -270,6 +270,59 @@ legacy_dcov_spectra_matvec_cuda_lowrank_gamma <- function(x, y, numCol,
         PACKAGE = "fastkpc_cuda")
 }
 
+legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch <- function(x, y, numCol,
+                                                                index = 1,
+                                                                ncv = NULL,
+                                                                tol = 1e-10,
+                                                                maxitr = 1000L) {
+  load_fastkpc_cuda_native()
+  x <- as.matrix(x)
+  y <- as.matrix(y)
+  storage.mode(x) <- "double"
+  storage.mode(y) <- "double"
+  if (!identical(dim(x), dim(y))) {
+    stop("x and y must have identical dimensions", call. = FALSE)
+  }
+  if (nrow(x) <= 5L) {
+    stop("legacy dCov gamma lowrank CUDA requires n > 5", call. = FALSE)
+  }
+  if (ncol(x) < 1L) {
+    stop("batch must contain at least one pair", call. = FALSE)
+  }
+  if (!all(is.finite(x)) || !all(is.finite(y))) {
+    stop("Data contains missing or infinite values", call. = FALSE)
+  }
+  numCol <- as.integer(numCol)
+  if (length(numCol) != 1L || is.na(numCol) ||
+      numCol < 1L || numCol >= nrow(x)) {
+    stop("numCol must be positive and less than sample size",
+         call. = FALSE)
+  }
+  index <- as.numeric(index)
+  if (length(index) != 1L || is.na(index) || index < 0 || index > 2) {
+    index <- 1
+  }
+  ncv <- if (is.null(ncv)) {
+    min(nrow(x), max(2L * numCol + 1L, 20L))
+  } else {
+    as.integer(ncv)
+  }
+  if (length(ncv) != 1L || is.na(ncv) || ncv <= numCol || ncv > nrow(x)) {
+    stop("ncv must be greater than numCol and no larger than sample size",
+         call. = FALSE)
+  }
+  if (!is.finite(tol) || tol <= 0) {
+    stop("tol must be a positive finite value", call. = FALSE)
+  }
+  maxitr <- as.integer(maxitr)
+  if (length(maxitr) != 1L || is.na(maxitr) || maxitr <= 0L) {
+    stop("maxitr must be positive", call. = FALSE)
+  }
+  .Call("C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch",
+        x, y, numCol, index, ncv, as.numeric(tol), maxitr,
+        PACKAGE = "fastkpc_cuda")
+}
+
 legacy_dcov_spectra_matvec_cuda_lowrank_shadow_grid <- function(cases,
                                                                 case_indices =
                                                                   NULL,

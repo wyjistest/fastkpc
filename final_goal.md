@@ -6156,6 +6156,58 @@ decision:
   lowrank backend candidate with explicit CPU Spectra fallback diagnostics.
 ```
 
+CUDA Spectra lowrank gamma batch primitive checkpoint:
+
+```text
+scope:
+  batch-shaped CUDA lowrank primitive for legacy dcov.gamma
+  first three legacy dcov.gamma oracle fixture residual pairs
+  each pair truncated to 96 rows for fast iterative diagnostics
+  C++ Spectra legacy dCov remains the oracle
+  substrate only; not connected to native one-call skeleton or route selection
+
+change:
+  add diagnostic R/.Call API:
+    legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch(
+      x, y, numCol, index, ncv, tol, maxitr)
+    C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch
+
+  implementation shape:
+    matrix columns are residual pairs
+    one batch-shaped .Call loops through columns with the same CUDA Spectra
+      matvec-backed lowrank gamma compute path as the scalar primitive
+    return vector p.value, nV2, mean, variance, statistic, and estimate
+    aggregate CUDA matvec / transfer / convergence diagnostics
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+
+additional regression gate:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_route.R
+
+batch fixture parity:
+  batch_count = 3
+  n = 96 for every pair
+  numCol = 8
+  converged_count = 6
+  max_batch_p_value_abs_diff < 1e-10
+  max_batch_nV2_abs_diff < 1e-7
+  spectra_matvec_count > 0
+  matrix_h2d_ms_during_compute = 0
+
+decision:
+  This establishes a batch-shaped CUDA lowrank gamma API for the diagnosed
+  Spectra matvec bottleneck. It is not a promoted backend and does not change
+  dCov authority, residual authority, skeleton replay, lowrank route
+  selection, or the current recommended compatible route. Native one-call
+  cuda_spectra remains unimplemented until the native dCov batch path has a
+  real CUDA lowrank mode and full 351x48 diagnostics.
+```
+
 CUDA Spectra lowrank backend candidate checkpoint:
 
 ```text

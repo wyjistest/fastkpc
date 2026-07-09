@@ -78,6 +78,51 @@ assert_true(as.integer(cuda$spectra_matvec_count) > 0L,
 assert_true(identical(as.numeric(cuda$matrix_h2d_ms_during_compute), 0),
             "CUDA lowrank gamma helper should not re-upload during compute")
 
+batch_case_indices <- seq_len(3L)
+batch_x <- do.call(cbind, lapply(batch_case_indices, function(case_index) {
+  cases[[case_index]]$residuals$rx[seq_len(96L)]
+}))
+batch_y <- do.call(cbind, lapply(batch_case_indices, function(case_index) {
+  cases[[case_index]]$residuals$ry[seq_len(96L)]
+}))
+batch_oracles <- lapply(batch_case_indices, function(case_index) {
+  fastkpc_legacy_dcov_gamma_cpp_oracle(
+    cases[[case_index]]$residuals$rx[seq_len(96L)],
+    cases[[case_index]]$residuals$ry[seq_len(96L)],
+    numCol = num_col,
+    index = 1
+  )
+})
+cuda_batch <- legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch(
+  batch_x, batch_y, numCol = num_col, index = 1
+)
+assert_true(identical(cuda_batch$backend,
+                      "cuda-dense-sym-matvec-spectra-lowrank-gamma-batch"),
+            "CUDA lowrank gamma batch helper should report backend")
+assert_true(identical(as.integer(cuda_batch$diagnostics$batch_count),
+                      length(batch_case_indices)),
+            "CUDA lowrank gamma batch helper should report batch size")
+assert_true(identical(as.integer(cuda_batch$diagnostics$converged_count),
+                      2L * length(batch_case_indices)),
+            "CUDA lowrank gamma batch helper should converge both solves per pair")
+batch_p_diff <- abs(as.numeric(cuda_batch$p.value) -
+                      vapply(batch_oracles, function(item) {
+                        as.numeric(item$p.value)
+                      }, numeric(1L)))
+batch_nV2_diff <- abs(as.numeric(cuda_batch$nV2) -
+                        vapply(batch_oracles, function(item) {
+                          as.numeric(item$nV2)
+                        }, numeric(1L)))
+assert_true(max(batch_p_diff) < 1e-10,
+            "CUDA lowrank gamma batch p.values should match C++ Spectra oracle")
+assert_true(max(batch_nV2_diff) < 1e-7,
+            "CUDA lowrank gamma batch nV2 values should match C++ Spectra oracle")
+assert_true(as.integer(cuda_batch$diagnostics$spectra_matvec_count) > 0L,
+            "CUDA lowrank gamma batch helper should report Spectra matvecs")
+assert_true(identical(
+  as.numeric(cuda_batch$diagnostics$matrix_h2d_ms_during_compute), 0),
+  "CUDA lowrank gamma batch helper should not re-upload during compute")
+
 grid_rows <- lapply(seq_len(6L), function(case_index) {
   item <- cases[[case_index]]
   x <- item$residuals$rx[seq_len(96L)]
