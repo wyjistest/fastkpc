@@ -7049,6 +7049,57 @@ decision:
   one-call gate.
 ```
 
+Native cuda_spectra host thread-count negative checkpoint:
+
+```text
+artifact:
+  fastkpc/artifacts/
+    compatible_cuda_skeleton_threaded_round_cuda_spectra_batch_threads8_progress_timeout_180s_v1
+
+scope:
+  same native one-call compatible CUDA skeleton facade and real 351x48 fixture
+  as the 4-thread timeout artifact, but with:
+
+    FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS=8
+    timeout = 180 sec
+
+result:
+  run_status = timeout
+  timeout = TRUE
+  elapsed_sec = 180
+  reference_edge_count = 110
+  candidate_edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+
+180 sec progress comparison:
+  max cumulative CUDA lowrank pairs:
+    serial host pair loop: 67,043
+    4 host threads:       73,839
+    8 host threads:       17,591
+
+  level 0 dCov:
+    serial host pair loop: 15,974.2 ms
+    4 host threads:       10,192.1 ms
+    8 host threads:       21,738.4 ms
+
+  level completion at 180 sec:
+    serial host pair loop: levels 0 complete, level 1 incomplete at cutoff
+    4 host threads:       levels 0 complete, level 1 incomplete at cutoff
+    8 host threads:       level 0 complete only; still in level 1
+
+decision:
+  Higher host pair parallelism is not monotonically better. At 8 threads the
+  route regresses badly, likely from GPU/context contention or host-side
+  oversubscription around per-pair Spectra/CUDA work. Do not promote 8 threads
+  and do not continue a blind thread-count sweep as the mainline.
+
+  Among tested host pair-thread settings, 4 threads is the only useful
+  diagnostic knob so far, but it still timed out on the 600 sec full-route
+  gate. The next aligned engineering step is a structural native CUDA lowrank
+  data-plane change, not more host-thread fanout.
+```
+
 ---
 
 ## 9. Final success definition
