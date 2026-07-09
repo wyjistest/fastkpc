@@ -48,6 +48,51 @@ data <- cbind(
   x6 = z1 * z2 + stats::rnorm(n, sd = 0.1)
 )
 
+timeout_ref_path <- tempfile("compatible-cuda-skeleton-timeout-reference-",
+                             fileext = ".rds")
+timeout_reference <- list(
+  adjacency = matrix(0L, ncol(data), ncol(data)),
+  n.edgetests = integer(),
+  sepsets = vector("list", ncol(data)),
+  pMax = matrix(0, ncol(data), ncol(data)),
+  summary = list()
+)
+saveRDS(timeout_reference, timeout_ref_path)
+timeout_dir <- tempfile("compatible-cuda-skeleton-timeout-")
+timeout_artifact <- fastkpc_run_compatible_cuda_skeleton_artifact(
+  data = data,
+  output_dir = timeout_dir,
+  artifact_name = "compatible_cuda_skeleton_timeout_test",
+  alpha = 0.08,
+  max_conditioning_size = 2L,
+  dcov_batch = "level",
+  reference_result_path = timeout_ref_path,
+  candidate_timeout_sec = 0
+)
+timeout_summary <- utils::read.csv(timeout_artifact$paths$summary_csv,
+                                   stringsAsFactors = FALSE)
+timeout_progress <- utils::read.csv(timeout_artifact$paths$progress_csv,
+                                    stringsAsFactors = FALSE)
+timeout_required <- c("run_status", "timeout", "timeout_sec")
+timeout_missing <- setdiff(timeout_required, names(timeout_summary))
+assert_true(length(timeout_missing) == 0L,
+            paste("compatible CUDA timeout summary missing",
+                  timeout_missing[[1L]]))
+assert_true(identical(timeout_summary$run_status[[1L]], "timeout"),
+            "timeout artifact should record timeout run status")
+assert_true(isTRUE(timeout_summary$timeout[[1L]]),
+            "timeout artifact should mark timeout TRUE")
+assert_true(timeout_summary$timeout_sec[[1L]] == 0,
+            "timeout artifact should record configured timeout")
+assert_true(is.na(timeout_summary$shd[[1L]]),
+            "timeout artifact should leave correctness fields unknown")
+assert_true(any(timeout_progress$route == "facade" &
+                  timeout_progress$event == "timeout" &
+                  timeout_progress$status == "timeout"),
+            "timeout artifact progress should record facade timeout")
+assert_true(is.null(timeout_artifact$facade),
+            "timeout artifact should not return a completed facade result")
+
 out_dir <- tempfile("compatible-cuda-skeleton-artifact-")
 artifact <- fastkpc_run_compatible_cuda_skeleton_artifact(
   data = data,
@@ -68,7 +113,8 @@ assert_true(file.exists(artifact$paths$summary_md),
 
 required <- c(
   "artifact", "route", "n", "p", "alpha", "max_conditioning_size",
-  "reference_source", "reference_result_path",
+  "reference_source", "reference_result_path", "run_status", "timeout",
+  "timeout_sec",
   "edge_count", "reference_edge_count", "shd", "adjacency_identical",
   "sepsets_identical", "n_edgetests_identical", "n_edgetests_exact",
   "pmax_max_abs_diff", "residual_provider_request_count",

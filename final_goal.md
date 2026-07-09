@@ -3412,14 +3412,17 @@ Current status:
 
 ```text
 status: artifact runner scaffold implemented with scoped residual backend metadata
+        and timeout/progress guardrails
 scope:
   runs fastkpc_compatible_cuda_skeleton()
   runs the explicit residual-provider native legacy-dCov route as reference
-  writes summary.csv, result.rds, and summary.md
+  writes progress.csv, summary.csv, result.rds, and summary.md
   records SHD, edge counts, n.edgetests exactness, pMax max abs diff,
     residual-provider request counts, native legacy dCov counts,
     compatible CUDA route metadata, scoped mgcv residual backend metadata,
     provider C++ residual backend counters, and elapsed seconds
+  optional candidate_timeout_sec writes a timeout row and partial artifact
+    instead of leaving no completed files
 targeted gate:
   Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
 ```
@@ -3427,13 +3430,13 @@ targeted gate:
 Full 351x48 command:
 
 ```bash
-Rscript -e 'source("fastkpc/R/compatible_cuda_skeleton_artifact.R"); fastkpc_run_compatible_cuda_skeleton_artifact(output_dir = "fastkpc/artifacts/compatible_cuda_skeleton_full_351x48_v1", artifact_name = "compatible_cuda_skeleton_full_351x48_v1", alpha = 0.1, max_conditioning_size = 46L, dcov_batch = "level", reference_result_path = "fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds", expected_edge_count = 110L, expected_n_edgetests = c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L))'
+Rscript -e 'source("fastkpc/R/compatible_cuda_skeleton_artifact.R"); fastkpc_run_compatible_cuda_skeleton_artifact(output_dir = "fastkpc/artifacts/compatible_cuda_skeleton_full_351x48_v1", artifact_name = "compatible_cuda_skeleton_full_351x48_v1", alpha = 0.1, max_conditioning_size = 46L, dcov_batch = "level", reference_result_path = "fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds", expected_edge_count = 110L, expected_n_edgetests = c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L), candidate_timeout_sec = 1800)'
 ```
 
 Guarded C++ residual-provider candidate command:
 
 ```bash
-Rscript -e 'source("fastkpc/R/compatible_cuda_skeleton_artifact.R"); fastkpc_run_compatible_cuda_skeleton_artifact(output_dir = "fastkpc/artifacts/compatible_cuda_skeleton_cpp_guarded_residual_full_351x48_v1", artifact_name = "compatible_cuda_skeleton_cpp_guarded_residual_full_351x48_v1", alpha = 0.1, max_conditioning_size = 46L, dcov_batch = "level", mgcv_residual_backend = "cpp_guarded", mgcv_residual_backend_native_s_size_limit = Inf, mgcv_residual_backend_condition_threshold = 1e12, reference_result_path = "fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds", expected_edge_count = 110L, expected_n_edgetests = c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L))'
+Rscript -e 'source("fastkpc/R/compatible_cuda_skeleton_artifact.R"); fastkpc_run_compatible_cuda_skeleton_artifact(output_dir = "fastkpc/artifacts/compatible_cuda_skeleton_cpp_guarded_residual_full_351x48_v1", artifact_name = "compatible_cuda_skeleton_cpp_guarded_residual_full_351x48_v1", alpha = 0.1, max_conditioning_size = 46L, dcov_batch = "level", mgcv_residual_backend = "cpp_guarded", mgcv_residual_backend_native_s_size_limit = Inf, mgcv_residual_backend_condition_threshold = 1e12, reference_result_path = "fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds", expected_edge_count = 110L, expected_n_edgetests = c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L), candidate_timeout_sec = 1800)'
 ```
 
 Additional artifact fields:
@@ -3478,6 +3481,12 @@ decision:
   moving residual generation/batching further behind the native/CUDA boundary
   before promotion.
 ```
+
+The runner now has the same guardrail expected for long full gates:
+`candidate_timeout_sec` writes `progress.csv` reference/facade start and
+completion/timeout events, and timeout candidates still produce `summary.csv`,
+`result.rds`, and `summary.md` with `run_status = timeout` and unknown
+correctness fields as `NA`.
 
 ### Gate
 

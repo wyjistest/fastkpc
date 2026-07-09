@@ -38,6 +38,92 @@ fastkpc_compatible_cuda_skeleton_shd <- function(left, right) {
   sum(abs(as.integer(left) - as.integer(right))) / 2L
 }
 
+fastkpc_compatible_cuda_timeout_enabled <- function(candidate_timeout_sec) {
+  !is.null(candidate_timeout_sec) &&
+    length(candidate_timeout_sec) > 0L &&
+    !is.na(candidate_timeout_sec[[1L]])
+}
+
+fastkpc_compatible_cuda_timeout_error <- function(
+    timeout_sec, elapsed_sec, message = NULL) {
+  if (is.null(message)) {
+    message <- paste0("facade candidate exceeded timeout_sec=", timeout_sec)
+  }
+  structure(
+    list(
+      message = message,
+      call = NULL,
+      timeout_sec = as.numeric(timeout_sec),
+      elapsed_sec = as.numeric(elapsed_sec)
+    ),
+    class = c("fastkpc_compatible_cuda_timeout", "error", "condition")
+  )
+}
+
+fastkpc_compatible_cuda_is_time_limit <- function(error) {
+  grepl("reached elapsed time limit|reached CPU time limit",
+        conditionMessage(error))
+}
+
+fastkpc_compatible_cuda_run_with_timeout <- function(
+    fun, candidate_timeout_sec = NULL) {
+  if (!fastkpc_compatible_cuda_timeout_enabled(candidate_timeout_sec)) {
+    return(fun())
+  }
+  timeout_sec <- as.numeric(candidate_timeout_sec[[1L]])
+  start <- proc.time()[["elapsed"]]
+  if (timeout_sec <= 0) {
+    stop(fastkpc_compatible_cuda_timeout_error(
+      timeout_sec = timeout_sec,
+      elapsed_sec = 0,
+      message = "facade candidate timed out before execution"
+    ))
+  }
+  setTimeLimit(cpu = Inf, elapsed = timeout_sec, transient = TRUE)
+  on.exit(setTimeLimit(cpu = Inf, elapsed = Inf, transient = FALSE), add = TRUE)
+  tryCatch(
+    fun(),
+    error = function(e) {
+      if (fastkpc_compatible_cuda_is_time_limit(e)) {
+        stop(fastkpc_compatible_cuda_timeout_error(
+          timeout_sec = timeout_sec,
+          elapsed_sec = proc.time()[["elapsed"]] - start,
+          message = conditionMessage(e)
+        ))
+      }
+      stop(e)
+    }
+  )
+}
+
+fastkpc_compatible_cuda_progress_row <- function(
+    artifact_name, route, event, status, elapsed_sec = NA_real_,
+    message = NA_character_) {
+  data.frame(
+    artifact = artifact_name,
+    route = route,
+    event = event,
+    status = status,
+    elapsed_sec = as.numeric(elapsed_sec),
+    message = message %||% NA_character_,
+    timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S %z"),
+    stringsAsFactors = FALSE
+  )
+}
+
+fastkpc_compatible_cuda_append_progress <- function(path, row) {
+  utils::write.table(
+    row,
+    file = path,
+    sep = ",",
+    row.names = FALSE,
+    col.names = !file.exists(path),
+    append = file.exists(path),
+    qmethod = "double"
+  )
+  invisible(TRUE)
+}
+
 fastkpc_compatible_cuda_extract_reference <- function(result) {
   candidates <- list(
     reference = result$reference,
@@ -65,6 +151,79 @@ fastkpc_compatible_cuda_extract_reference <- function(result) {
        call. = FALSE)
 }
 
+fastkpc_compatible_cuda_timeout_summary_row <- function(
+    artifact_name, data, columns, alpha, max_conditioning_size, index, numCol,
+    dcov_batch, low_rank, mgcv_residual_backend,
+    mgcv_residual_backend_native_s_size_limit,
+    mgcv_residual_backend_condition_threshold, reference,
+    reference_source, reference_result_path, reference_slot,
+    expected_edge_count, expected_n_edgetests, timeout_sec, elapsed_sec,
+    reference_elapsed_sec) {
+  reference_edge_count <- as.integer(sum(unname(reference$adjacency)) / 2L)
+  data.frame(
+    artifact = artifact_name,
+    route = "facade",
+    n = nrow(data),
+    p = ncol(data),
+    alpha = as.numeric(alpha),
+    max_conditioning_size = as.integer(max_conditioning_size),
+    columns = if (is.null(columns)) "all" else paste(columns, collapse = "|"),
+    index = as.integer(index),
+    numCol = as.integer(numCol),
+    dcov_batch = dcov_batch,
+    low_rank = low_rank,
+    mgcv_residual_backend = mgcv_residual_backend,
+    mgcv_residual_backend_native_s_size_limit =
+      mgcv_residual_backend_native_s_size_limit %||% NA_real_,
+    mgcv_residual_backend_condition_threshold =
+      mgcv_residual_backend_condition_threshold %||% NA_real_,
+    reference_source = reference_source,
+    reference_result_path = reference_result_path %||% NA_character_,
+    reference_result_slot = reference_slot,
+    run_status = "timeout",
+    timeout = TRUE,
+    timeout_sec = as.numeric(timeout_sec),
+    edge_count = NA_integer_,
+    reference_edge_count = reference_edge_count,
+    expected_edge_count = expected_edge_count %||% NA_integer_,
+    expected_edge_count_match = NA,
+    shd = NA_integer_,
+    adjacency_identical = NA,
+    sepsets_identical = NA,
+    n_edgetests_identical = NA,
+    n_edgetests_exact = NA,
+    facade_n_edgetests = NA_character_,
+    reference_n_edgetests = paste(reference$n.edgetests, collapse = "|"),
+    expected_n_edgetests = if (is.null(expected_n_edgetests)) {
+      NA_character_
+    } else {
+      paste(expected_n_edgetests, collapse = "|")
+    },
+    pmax_max_abs_diff = NA_real_,
+    residual_provider_request_count = NA_integer_,
+    reference_residual_provider_request_count = NA_integer_,
+    legacy_dcov_native_count = NA_integer_,
+    reference_legacy_dcov_native_count = NA_integer_,
+    legacy_dcov_native_batch_enabled = NA,
+    compatible_cuda_facade = NA,
+    compatible_cuda_route = NA_character_,
+    compatible_cuda_residual_authority = NA_character_,
+    compatible_cuda_ci_authority = NA_character_,
+    residual_provider_response_backend = NA_character_,
+    residual_provider_mgcv_backend = NA_character_,
+    residual_provider_mgcv_cpp_backend_enabled = NA,
+    residual_provider_mgcv_cpp_backend_count = NA_integer_,
+    residual_provider_mgcv_cpp_backend_native_count = NA_integer_,
+    residual_provider_mgcv_cpp_backend_fallback_count = NA_integer_,
+    residual_provider_mgcv_cpp_backend_error_count = NA_integer_,
+    residual_provider_mgcv_cpp_backend_ms = NA_real_,
+    residual_provider_mgcv_cpp_backend_native_solve_ms = NA_real_,
+    elapsed_sec = as.numeric(elapsed_sec),
+    reference_elapsed_sec = as.numeric(reference_elapsed_sec),
+    stringsAsFactors = FALSE
+  )
+}
+
 fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     data = NULL,
     data_path = file.path("fastkpc", "artifacts", "kpc_tprs_real_zhu",
@@ -85,8 +244,16 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     mgcv_residual_backend_condition_threshold = NULL,
     reference_result_path = NULL,
     expected_edge_count = NULL,
-    expected_n_edgetests = NULL) {
+    expected_n_edgetests = NULL,
+    candidate_timeout_sec = NULL) {
   mgcv_residual_backend <- match.arg(mgcv_residual_backend)
+  if (fastkpc_compatible_cuda_timeout_enabled(candidate_timeout_sec)) {
+    candidate_timeout_sec <- as.numeric(candidate_timeout_sec[[1L]])
+    if (!is.finite(candidate_timeout_sec) || candidate_timeout_sec < 0) {
+      stop("candidate_timeout_sec must be NULL or a non-negative finite number",
+           call. = FALSE)
+    }
+  }
   if (is.null(data)) {
     if (!file.exists(data_path)) {
       stop("real data fixture not found: ", data_path, call. = FALSE)
@@ -116,6 +283,15 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     numCol <- floor(nrow(data) / 10)
   }
 
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  paths <- list(
+    summary_csv = file.path(output_dir, "summary.csv"),
+    progress_csv = file.path(output_dir, "progress.csv"),
+    result_rds = file.path(output_dir, "result.rds"),
+    summary_md = file.path(output_dir, "summary.md")
+  )
+  if (file.exists(paths$progress_csv)) unlink(paths$progress_csv)
+
   env_names <- c(
     "FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK",
     "FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
@@ -136,6 +312,15 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
 
   reference_source <- "computed"
   reference_slot <- "computed"
+  fastkpc_compatible_cuda_append_progress(
+    paths$progress_csv,
+    fastkpc_compatible_cuda_progress_row(
+      artifact_name = artifact_name,
+      route = "reference",
+      event = "start",
+      status = reference_source
+    )
+  )
   if (is.null(reference_result_path)) {
     reference_timed <- fastkpc_elapsed(
       precision_run_skeleton_residual_provider_legacy_dcov_native(
@@ -162,25 +347,151 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     reference <- fastkpc_compatible_cuda_extract_reference(loaded_reference)
     reference_slot <- attr(reference, "fastkpc_reference_slot", exact = TRUE)
     reference_source <- "rds"
-    reference_timed <- list(value = reference, elapsed = 0)
+    reference_timed <- list(
+      value = reference,
+      elapsed = 0
+    )
   }
-  facade_timed <- fastkpc_elapsed(
-    fastkpc_compatible_cuda_skeleton(
-      data = data,
-      alpha = alpha,
-      labels = labels,
-      options = list(
-        max_conditioning_size = max_conditioning_size,
-        index = index,
-        numCol = numCol,
-        trace_level = trace_level,
-        dcov_batch = dcov_batch,
-        mgcv_residual_backend = mgcv_residual_backend,
-        mgcv_residual_backend_native_s_size_limit =
-          mgcv_residual_backend_native_s_size_limit,
-        mgcv_residual_backend_condition_threshold =
-          mgcv_residual_backend_condition_threshold
+  fastkpc_compatible_cuda_append_progress(
+    paths$progress_csv,
+    fastkpc_compatible_cuda_progress_row(
+      artifact_name = artifact_name,
+      route = "reference",
+      event = "complete",
+      status = reference_source,
+      elapsed_sec = reference_timed$elapsed
+    )
+  )
+
+  fastkpc_compatible_cuda_append_progress(
+    paths$progress_csv,
+    fastkpc_compatible_cuda_progress_row(
+      artifact_name = artifact_name,
+      route = "facade",
+      event = "start",
+      status = "running"
+    )
+  )
+  timeout_error <- NULL
+  facade_timed <- tryCatch(
+    fastkpc_compatible_cuda_run_with_timeout(
+      function() {
+        fastkpc_elapsed(
+          fastkpc_compatible_cuda_skeleton(
+            data = data,
+            alpha = alpha,
+            labels = labels,
+            options = list(
+              max_conditioning_size = max_conditioning_size,
+              index = index,
+              numCol = numCol,
+              trace_level = trace_level,
+              dcov_batch = dcov_batch,
+              mgcv_residual_backend = mgcv_residual_backend,
+              mgcv_residual_backend_native_s_size_limit =
+                mgcv_residual_backend_native_s_size_limit,
+              mgcv_residual_backend_condition_threshold =
+                mgcv_residual_backend_condition_threshold
+            )
+          )
+        )
+      },
+      candidate_timeout_sec = candidate_timeout_sec
+    ),
+    fastkpc_compatible_cuda_timeout = function(e) {
+      timeout_error <<- e
+      NULL
+    },
+    error = function(e) {
+      fastkpc_compatible_cuda_append_progress(
+        paths$progress_csv,
+        fastkpc_compatible_cuda_progress_row(
+          artifact_name = artifact_name,
+          route = "facade",
+          event = "error",
+          status = "error",
+          message = conditionMessage(e)
+        )
       )
+      stop(e)
+    }
+  )
+  if (is.null(facade_timed)) {
+    fastkpc_compatible_cuda_append_progress(
+      paths$progress_csv,
+      fastkpc_compatible_cuda_progress_row(
+        artifact_name = artifact_name,
+        route = "facade",
+        event = "timeout",
+        status = "timeout",
+        elapsed_sec = timeout_error$elapsed_sec,
+        message = conditionMessage(timeout_error)
+      )
+    )
+    row <- fastkpc_compatible_cuda_timeout_summary_row(
+      artifact_name = artifact_name,
+      data = data,
+      columns = columns,
+      alpha = alpha,
+      max_conditioning_size = max_conditioning_size,
+      index = index,
+      numCol = numCol,
+      dcov_batch = dcov_batch,
+      low_rank = low_rank,
+      mgcv_residual_backend = mgcv_residual_backend,
+      mgcv_residual_backend_native_s_size_limit =
+        mgcv_residual_backend_native_s_size_limit,
+      mgcv_residual_backend_condition_threshold =
+        mgcv_residual_backend_condition_threshold,
+      reference = reference,
+      reference_source = reference_source,
+      reference_result_path = reference_result_path,
+      reference_slot = reference_slot,
+      expected_edge_count = expected_edge_count,
+      expected_n_edgetests = expected_n_edgetests,
+      timeout_sec = timeout_error$timeout_sec,
+      elapsed_sec = timeout_error$elapsed_sec,
+      reference_elapsed_sec = reference_timed$elapsed
+    )
+    utils::write.csv(row, paths$summary_csv, row.names = FALSE)
+    saveRDS(
+      list(
+        summary = row,
+        facade = NULL,
+        reference = reference,
+        paths = paths
+      ),
+      paths$result_rds
+    )
+    writeLines(c(
+      paste0("# ", artifact_name),
+      "",
+      paste0("- route: ", row$route[[1L]]),
+      paste0("- run status: ", row$run_status[[1L]]),
+      paste0("- timeout sec: ", row$timeout_sec[[1L]]),
+      paste0("- reference source: ", row$reference_source[[1L]]),
+      paste0("- reference result path: ",
+             row$reference_result_path[[1L]]),
+      paste0("- elapsed sec: ", signif(row$elapsed_sec[[1L]], 8L)),
+      paste0("- reference elapsed sec: ",
+             signif(row$reference_elapsed_sec[[1L]], 8L))
+    ), paths$summary_md)
+    return(list(
+      summary = row,
+      facade = NULL,
+      reference = reference,
+      paths = paths,
+      output_dir = output_dir
+    ))
+  }
+  fastkpc_compatible_cuda_append_progress(
+    paths$progress_csv,
+    fastkpc_compatible_cuda_progress_row(
+      artifact_name = artifact_name,
+      route = "facade",
+      event = "complete",
+      status = "ok",
+      elapsed_sec = facade_timed$elapsed
     )
   )
 
@@ -232,6 +543,14 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     reference_source = reference_source,
     reference_result_path = reference_result_path %||% NA_character_,
     reference_result_slot = reference_slot,
+    run_status = "ok",
+    timeout = FALSE,
+    timeout_sec =
+      if (fastkpc_compatible_cuda_timeout_enabled(candidate_timeout_sec)) {
+        as.numeric(candidate_timeout_sec)
+      } else {
+        NA_real_
+      },
     edge_count = edge_count,
     reference_edge_count = reference_edge_count,
     expected_edge_count = expected_edge_count %||% NA_integer_,
@@ -301,12 +620,6 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
     stringsAsFactors = FALSE
   )
 
-  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-  paths <- list(
-    summary_csv = file.path(output_dir, "summary.csv"),
-    result_rds = file.path(output_dir, "result.rds"),
-    summary_md = file.path(output_dir, "summary.md")
-  )
   utils::write.csv(row, paths$summary_csv, row.names = FALSE)
   saveRDS(
     list(
