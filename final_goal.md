@@ -6249,6 +6249,54 @@ decision:
   S-affinity route.
 ```
 
+CUDA Spectra lowrank hot12 backend artifact checkpoint:
+
+```text
+artifact:
+  fastkpc/artifacts/legacy_dcov_cuda_lowrank_backend_hot12_v1
+
+scope:
+  real 351-row fixture, hot12 columns:
+    1,2,3,4,5,6,9,12,15,16,17,18
+  CPU C++ Spectra legacy dCov backend baseline
+  CUDA Spectra lowrank backend candidate authority
+  FASTKPC_LEGACY_DCOV_GAMMA_BACKEND=cpp
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK=cuda_spectra
+  FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE=1
+  FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY=s
+  FASTKPC_LEGACY_PARALLEL_CORES=1
+
+artifact runner:
+  fastkpc/R/legacy_dcov_cuda_lowrank_backend_artifact.R
+  fastkpc_run_legacy_dcov_cuda_lowrank_backend_hot12_artifact()
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 FASTKPC_RUN_REAL_SUBSET_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_hot12_artifact.R
+
+hot12 result:
+  n / p = 351 / 12
+  SHD = 0
+  n.edgetests exact = TRUE
+  candidate legacy_dcov_gamma_count = 2756
+  candidate CUDA lowrank backend count = 2756
+  candidate CUDA lowrank backend error_count = 0
+  candidate CUDA lowrank backend fallback_count = 0
+  candidate CUDA lowrank backend converged_count = 2756
+  candidate CUDA lowrank backend matrix_h2d_ms_during_compute_max = 0
+  candidate elapsed_sec = 45.523
+  baseline elapsed_sec = 68.296
+
+decision:
+  This broadens cuda_spectra from the 5-column real subset to the canonical
+  hot12 real subset used by the native dCov diagnostics. All dCov authority
+  calls use the CUDA lowrank backend with no errors, no fallback, full
+  convergence, and exact skeleton replay against CPU C++ Spectra. It remains a
+  subset gate only. The next gate is the full 351x48 artifact with
+  SHD/n.edgetests proof, fallback diagnostics, and wall-time comparison against
+  the current recommended S-affinity route.
+```
+
 ---
 
 ## 9. Final success definition

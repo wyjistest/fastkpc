@@ -247,3 +247,21 @@ fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact <- function(
   list(summary = row, paths = paths, baseline = baseline,
        candidate = candidate, output_dir = output_dir)
 }
+
+fastkpc_run_legacy_dcov_cuda_lowrank_backend_hot12_artifact <- function(
+    output_dir = "fastkpc/artifacts/legacy_dcov_cuda_lowrank_backend_hot12_v1",
+    artifact_name = "legacy_dcov_cuda_lowrank_backend_hot12_v1",
+    data_path = "fastkpc/artifacts/kpc_tprs_real_zhu/cancer_RD-causalDiscoveryInput.rds",
+    alpha = 0.1,
+    max_conditioning_size = 3L,
+    rebuild_cuda = FALSE) {
+  fastkpc_run_legacy_dcov_cuda_lowrank_backend_real_subset_artifact(
+    output_dir = output_dir,
+    artifact_name = artifact_name,
+    data_path = data_path,
+    columns = c(1L, 2L, 3L, 4L, 5L, 6L, 9L, 12L, 15L, 16L, 17L, 18L),
+    alpha = alpha,
+    max_conditioning_size = max_conditioning_size,
+    rebuild_cuda = rebuild_cuda
+  )
+}
