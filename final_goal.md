@@ -7100,6 +7100,109 @@ decision:
   data-plane change, not more host-thread fanout.
 ```
 
+Native cuda_spectra batch-local component cache checkpoint:
+
+```text
+change:
+  add an env-gated batch-local component cache for the native cuda_spectra
+  lowrank path:
+
+    FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE=1
+
+  Within one native dCov batch, residual/input pointers are interned and each
+  unique lowrank component is computed once. Pair p-values are then composed
+  from cached X/Y components in original batch order. The cache lifetime is one
+  native batch, default remains off, and canonical replay is unchanged.
+
+diagnostics:
+  legacy_dcov_native_cuda_lowrank_component_cache_enabled
+  legacy_dcov_native_cuda_lowrank_component_cache_lookup_count
+  legacy_dcov_native_cuda_lowrank_component_cache_hit_count
+  legacy_dcov_native_cuda_lowrank_component_cache_miss_count
+  legacy_dcov_native_cuda_lowrank_component_cache_entry_count
+
+small gates:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+  Rscript fastkpc/tests/test_compatible_cuda_skeleton_artifact.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_route.R
+
+small-gate result:
+  PASS compatible CUDA skeleton native cuda_spectra lowrank
+  PASS compatible CUDA skeleton artifact
+  PASS legacy dCov CUDA lowrank gamma parity cases=6
+    max_p_diff = 4e-15
+    max_nV2_diff = 5.68e-14
+  PASS legacy dCov Spectra CUDA matvec
+  PASS legacy dCov CUDA lowrank backend route
+
+full timeout artifact:
+  fastkpc/artifacts/
+    compatible_cuda_skeleton_threaded_round_cuda_spectra_component_cache_progress_timeout_600s_v1
+
+run shape:
+  FASTKPC_NATIVE_LEGACY_MGCV_PROVIDER_CORES=20
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_THREADS=20
+  FASTKPC_NATIVE_CUDA_LOWRANK_PROGRESS_INTERVAL=64
+  FASTKPC_NATIVE_CUDA_LOWRANK_BATCH_THREADS=4
+  FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE=1
+  dcov_batch = "round"
+  low_rank = "cuda_spectra"
+  timeout = 600 sec
+
+result:
+  run_status = timeout
+  timeout = TRUE
+  elapsed_sec = 600
+  reference_edge_count = 110
+  candidate_edge_count = NA
+  SHD = NA
+  n.edgetests exact = NA
+
+progress comparison:
+  max cumulative CUDA lowrank pairs reported:
+    serial host pair loop:         69,113
+    4 host threads:              108,095
+    4 threads + component cache: 177,422
+
+  level 0 dCov:
+    serial host pair loop:         15,974.2 ms
+    4 host threads:                10,192.1 ms
+    4 threads + component cache:      724.4 ms
+
+  level 1 dCov:
+    serial host pair loop:        383,348.8 ms
+    4 host threads:              240,826.9 ms
+    4 threads + component cache:  50,472.5 ms
+
+  level 2:
+    provider_complete elapsed_ms: 90,752.2
+    dcov_start elapsed_ms:       90,752.8
+    last event before timeout:   dcov_cuda_lowrank_batch_start
+    last reported cumulative CUDA lowrank pairs: 177,422
+    cumulative pairs needed to complete level 2: 180,165
+    no level_complete before timeout
+
+decision:
+  Batch-local component caching is a real native cuda_spectra throughput win
+  and should remain as an env-gated experimental substrate. It removes most of
+  the previous level-1/level-2 CUDA lowrank duplication, but it is still not a
+  promotion route: the full 351x48 candidate did not return a skeleton inside
+  600 seconds, so SHD, n.edgetests exactness, and fallback totals are still
+  unproven. It also cannot beat the current native one-call CPU Spectra round
+  candidate while it is still incomplete at the 600 second wall-time gate.
+
+  The next aligned step is not more blind host-thread fanout. The remaining
+  native cuda_spectra gap needs either a more structural device-resident /
+  batched component path or a different native dCov data-plane split that can
+  finish level 2 and later sparse levels while preserving canonical replay.
+```
+
 ---
 
 ## 9. Final success definition

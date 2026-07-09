@@ -357,6 +357,11 @@ fastkpc_compatible_cuda_timeout_summary_row <- function(
     legacy_dcov_native_cuda_lowrank_backend_error_count = NA_integer_,
     legacy_dcov_native_cuda_lowrank_backend_fallback_count = NA_integer_,
     legacy_dcov_native_cuda_lowrank_backend_converged_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_component_cache_enabled = NA,
+    legacy_dcov_native_cuda_lowrank_component_cache_lookup_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_component_cache_hit_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_component_cache_miss_count = NA_integer_,
+    legacy_dcov_native_cuda_lowrank_component_cache_entry_count = NA_integer_,
     legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count = NA_integer_,
     legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms = NA_real_,
     legacy_dcov_native_cuda_lowrank_backend_kernel_launch_count = NA_integer_,
@@ -899,6 +904,20 @@ fastkpc_run_compatible_cuda_skeleton_artifact <- function(
                    NA_integer_),
     legacy_dcov_native_cuda_lowrank_backend_converged_count =
       as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_converged_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_component_cache_enabled =
+      isTRUE(facade_summary$legacy_dcov_native_cuda_lowrank_component_cache_enabled),
+    legacy_dcov_native_cuda_lowrank_component_cache_lookup_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_component_cache_lookup_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_component_cache_hit_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_component_cache_hit_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_component_cache_miss_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_component_cache_miss_count %||%
+                   NA_integer_),
+    legacy_dcov_native_cuda_lowrank_component_cache_entry_count =
+      as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_component_cache_entry_count %||%
                    NA_integer_),
     legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count =
       as.integer(facade_summary$legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count %||%

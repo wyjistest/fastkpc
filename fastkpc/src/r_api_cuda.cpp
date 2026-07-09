@@ -160,6 +160,22 @@ struct LegacyDcovSpectraLowrankShadowRun {
   double matrix_bytes = 0.0;
 };
 
+struct LegacyDcovCudaLowrankComponentRun {
+  Eigen::VectorXd eigenvalues;
+  Eigen::MatrixXd centered_vectors;
+  LegacyDcovSpectraCudaOperatorDiagnostics cuda_diagnostics;
+  bool converged = false;
+  int nconv = 0;
+  int iterations = 0;
+  int info = -1;
+  double eig_ms = 0.0;
+  double matrix_h2d_ms = 0.0;
+  double matrix_bytes = 0.0;
+  double distance_sum = 0.0;
+  double moment = 0.0;
+  double total_ms = 0.0;
+};
+
 struct LegacyDcovCudaLowrankGammaRun {
   double p_value = NA_REAL;
   double nV2 = NA_REAL;
@@ -307,44 +323,61 @@ double legacy_dcov_weighted_cross_sum_eigen(
   return total;
 }
 
-LegacyDcovCudaLowrankGammaRun legacy_dcov_cuda_lowrank_gamma_compute(
-    const double* x,
-    const double* y,
+LegacyDcovCudaLowrankComponentRun legacy_dcov_cuda_lowrank_component_compute(
+    const double* values,
     int n,
     int num_col,
-    double index,
     int ncv,
     double tol,
     int maxitr) {
-  LegacyDcovCudaLowrankGammaRun out;
   const auto total_start = std::chrono::steady_clock::now();
-  const Eigen::MatrixXd x_distance =
-    legacy_dcov_distance_matrix_eigen(x, n);
-  const Eigen::MatrixXd y_distance =
-    legacy_dcov_distance_matrix_eigen(y, n);
-  const LegacyDcovSpectraLowrankShadowRun cuda_x =
+  LegacyDcovCudaLowrankComponentRun out;
+  const Eigen::MatrixXd distance =
+    legacy_dcov_distance_matrix_eigen(values, n);
+  out.distance_sum = distance.sum();
+  const LegacyDcovSpectraLowrankShadowRun lowrank =
     legacy_dcov_cuda_spectra_lowrank_shadow(
-      x_distance, num_col, ncv, tol, maxitr);
-  const LegacyDcovSpectraLowrankShadowRun cuda_y =
-    legacy_dcov_cuda_spectra_lowrank_shadow(
-      y_distance, num_col, ncv, tol, maxitr);
-  if (!cuda_x.converged || !cuda_y.converged) {
+      distance, num_col, ncv, tol, maxitr);
+  out.converged = lowrank.converged;
+  out.nconv = lowrank.nconv;
+  out.iterations = lowrank.iterations;
+  out.info = lowrank.info;
+  out.eig_ms = lowrank.eig_ms;
+  out.matrix_h2d_ms = lowrank.matrix_h2d_ms;
+  out.matrix_bytes = lowrank.matrix_bytes;
+  out.cuda_diagnostics = lowrank.cuda_diagnostics;
+  if (!lowrank.converged) {
+    out.total_ms = elapsed_ms_since(total_start);
+    return out;
+  }
+  out.eigenvalues = lowrank.eigenvalues;
+  out.centered_vectors = lowrank.centered_vectors;
+  out.moment = legacy_dcov_weighted_cross_sum_eigen(
+    out.centered_vectors, out.eigenvalues,
+    out.centered_vectors, out.eigenvalues);
+  out.total_ms = elapsed_ms_since(total_start);
+  return out;
+}
+
+LegacyDcovCudaLowrankGammaRun legacy_dcov_cuda_lowrank_gamma_from_components(
+    const LegacyDcovCudaLowrankComponentRun& x_component,
+    const LegacyDcovCudaLowrankComponentRun& y_component,
+    int n,
+    double index,
+    bool include_component_diagnostics) {
+  LegacyDcovCudaLowrankGammaRun out;
+  if (!x_component.converged || !y_component.converged) {
     Rcpp::stop("CUDA Spectra lowrank did not converge");
   }
-
   const double n_double = static_cast<double>(n);
   out.nV2 = legacy_dcov_weighted_cross_sum_eigen(
-    cuda_x.centered_vectors, cuda_x.eigenvalues,
-    cuda_y.centered_vectors, cuda_y.eigenvalues) / n_double;
+    x_component.centered_vectors, x_component.eigenvalues,
+    y_component.centered_vectors, y_component.eigenvalues) / n_double;
   out.mean =
-    (x_distance.sum() / (n_double * n_double)) *
-    (y_distance.sum() / (n_double * n_double));
-  out.x_moment = legacy_dcov_weighted_cross_sum_eigen(
-    cuda_x.centered_vectors, cuda_x.eigenvalues,
-    cuda_x.centered_vectors, cuda_x.eigenvalues);
-  out.y_moment = legacy_dcov_weighted_cross_sum_eigen(
-    cuda_y.centered_vectors, cuda_y.eigenvalues,
-    cuda_y.centered_vectors, cuda_y.eigenvalues);
+    (x_component.distance_sum / (n_double * n_double)) *
+    (y_component.distance_sum / (n_double * n_double));
+  out.x_moment = x_component.moment;
+  out.y_moment = y_component.moment;
   const double variance_factor =
     2.0 * (n_double - 4.0) * (n_double - 5.0) /
     n_double / (n_double - 1.0) / (n_double - 2.0) / (n_double - 3.0);
@@ -356,43 +389,70 @@ LegacyDcovCudaLowrankGammaRun legacy_dcov_cuda_lowrank_gamma_compute(
   out.p_value = 1.0 - R::pgamma(out.nV2, alpha, beta, true, false);
   out.statistic = out.nV2;
   out.estimate = std::sqrt(out.nV2 / n_double);
-  out.converged_x = cuda_x.converged;
-  out.converged_y = cuda_y.converged;
-  out.nconv_x = cuda_x.nconv;
-  out.nconv_y = cuda_y.nconv;
-  out.iterations_x = cuda_x.iterations;
-  out.iterations_y = cuda_y.iterations;
-  out.info_x = cuda_x.info;
-  out.info_y = cuda_y.info;
-  out.eig_ms = cuda_x.eig_ms + cuda_y.eig_ms;
+  out.converged_x = x_component.converged;
+  out.converged_y = y_component.converged;
+  out.nconv_x = x_component.nconv;
+  out.nconv_y = y_component.nconv;
+  out.iterations_x = x_component.iterations;
+  out.iterations_y = y_component.iterations;
+  out.info_x = x_component.info;
+  out.info_y = y_component.info;
+  out.eig_ms = include_component_diagnostics
+    ? x_component.eig_ms + y_component.eig_ms
+    : 0.0;
 
   const LegacyDcovSpectraCudaOperatorDiagnostics& dx =
-    cuda_x.cuda_diagnostics;
+    x_component.cuda_diagnostics;
   const LegacyDcovSpectraCudaOperatorDiagnostics& dy =
-    cuda_y.cuda_diagnostics;
-  out.spectra_matvec_count =
-    dx.spectra_matvec_count + dy.spectra_matvec_count;
-  out.spectra_matvec_ms = dx.spectra_matvec_ms + dy.spectra_matvec_ms;
-  out.kernel_launch_count =
-    dx.kernel_launch_count + dy.kernel_launch_count;
-  out.device_matrix_reuse_count =
-    dx.device_matrix_reuse_count + dy.device_matrix_reuse_count;
-  out.device_workspace_reuse_count =
-    dx.device_workspace_reuse_count + dy.device_workspace_reuse_count;
-  out.workspace_realloc_count =
-    dx.workspace_realloc_count + dy.workspace_realloc_count;
-  out.matrix_bytes = cuda_x.matrix_bytes + cuda_y.matrix_bytes;
-  out.workspace_bytes = static_cast<double>(
-    std::max(dx.workspace_bytes, dy.workspace_bytes));
-  out.matrix_h2d_ms = cuda_x.matrix_h2d_ms + cuda_y.matrix_h2d_ms;
-  out.matrix_h2d_ms_during_compute =
-    dx.matrix_h2d_ms_during_compute + dy.matrix_h2d_ms_during_compute;
-  out.workspace_alloc_ms = dx.workspace_alloc_ms + dy.workspace_alloc_ms;
-  out.h2d_ms = dx.h2d_ms + dy.h2d_ms;
-  out.kernel_ms = dx.kernel_ms + dy.kernel_ms;
-  out.d2h_ms = dx.d2h_ms + dy.d2h_ms;
-  out.total_ms = elapsed_ms_since(total_start);
+    y_component.cuda_diagnostics;
+  if (include_component_diagnostics) {
+    out.spectra_matvec_count =
+      dx.spectra_matvec_count + dy.spectra_matvec_count;
+    out.spectra_matvec_ms = dx.spectra_matvec_ms + dy.spectra_matvec_ms;
+    out.kernel_launch_count =
+      dx.kernel_launch_count + dy.kernel_launch_count;
+    out.device_matrix_reuse_count =
+      dx.device_matrix_reuse_count + dy.device_matrix_reuse_count;
+    out.device_workspace_reuse_count =
+      dx.device_workspace_reuse_count + dy.device_workspace_reuse_count;
+    out.workspace_realloc_count =
+      dx.workspace_realloc_count + dy.workspace_realloc_count;
+    out.matrix_bytes = x_component.matrix_bytes + y_component.matrix_bytes;
+    out.workspace_bytes = static_cast<double>(
+      std::max(dx.workspace_bytes, dy.workspace_bytes));
+    out.matrix_h2d_ms = x_component.matrix_h2d_ms + y_component.matrix_h2d_ms;
+    out.matrix_h2d_ms_during_compute =
+      dx.matrix_h2d_ms_during_compute + dy.matrix_h2d_ms_during_compute;
+    out.workspace_alloc_ms = dx.workspace_alloc_ms + dy.workspace_alloc_ms;
+    out.h2d_ms = dx.h2d_ms + dy.h2d_ms;
+    out.kernel_ms = dx.kernel_ms + dy.kernel_ms;
+    out.d2h_ms = dx.d2h_ms + dy.d2h_ms;
+    out.total_ms = x_component.total_ms + y_component.total_ms;
+  }
   (void)index;
+  return out;
+}
+
+LegacyDcovCudaLowrankGammaRun legacy_dcov_cuda_lowrank_gamma_compute(
+    const double* x,
+    const double* y,
+    int n,
+    int num_col,
+    double index,
+    int ncv,
+    double tol,
+    int maxitr) {
+  const auto total_start = std::chrono::steady_clock::now();
+  const LegacyDcovCudaLowrankComponentRun x_component =
+    legacy_dcov_cuda_lowrank_component_compute(
+      x, n, num_col, ncv, tol, maxitr);
+  const LegacyDcovCudaLowrankComponentRun y_component =
+    legacy_dcov_cuda_lowrank_component_compute(
+      y, n, num_col, ncv, tol, maxitr);
+  LegacyDcovCudaLowrankGammaRun out =
+    legacy_dcov_cuda_lowrank_gamma_from_components(
+      x_component, y_component, n, index, true);
+  out.total_ms = elapsed_ms_since(total_start);
   return out;
 }
 
@@ -537,11 +597,16 @@ int native_legacy_dcov_cuda_lowrank_ncv(int n, int num_col) {
 
 struct NativeLegacyDcovCudaLowrankBackendMetrics {
   bool enabled = false;
+  bool component_cache_enabled = false;
   int count = 0;
   double ms = 0.0;
   int error_count = 0;
   int fallback_count = 0;
   int converged_count = 0;
+  int component_cache_lookup_count = 0;
+  int component_cache_hit_count = 0;
+  int component_cache_miss_count = 0;
+  int component_cache_entry_count = 0;
   int spectra_matvec_count = 0;
   double spectra_matvec_ms = 0.0;
   int kernel_launch_count = 0;
@@ -601,6 +666,19 @@ int native_legacy_cuda_lowrank_batch_threads(int batch_size) {
     ? static_cast<int>(hardware)
     : requested;
   return std::max(1, std::min(batch_size, std::min(requested, hardware_limit)));
+}
+
+bool native_legacy_cuda_lowrank_component_cache_enabled() {
+  const char* raw =
+    std::getenv("FASTKPC_NATIVE_CUDA_LOWRANK_COMPONENT_CACHE");
+  if (raw == nullptr) return false;
+  std::string value(raw);
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::tolower(c));
+                 });
+  return value == "1" || value == "true" || value == "yes" ||
+    value == "on";
 }
 
 void append_native_legacy_progress(
@@ -5139,6 +5217,9 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
     legacy_dcov_native_cuda_lowrank_metrics;
   legacy_dcov_native_cuda_lowrank_metrics.enabled =
     native_legacy_dcov_cuda_lowrank_requested();
+  legacy_dcov_native_cuda_lowrank_metrics.component_cache_enabled =
+    legacy_dcov_native_cuda_lowrank_metrics.enabled &&
+    native_legacy_cuda_lowrank_component_cache_enabled();
   const int legacy_dcov_native_cuda_lowrank_ncv =
     native_legacy_dcov_cuda_lowrank_ncv(n, num_col);
   const double legacy_dcov_native_cuda_lowrank_tol = 1e-10;
@@ -5206,6 +5287,66 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       legacy_lowrank_timings.spectra_matvec_count +=
         run.spectra_matvec_count;
       legacy_lowrank_timings.spectra_matvec_ms += run.spectra_matvec_ms;
+      legacy_lowrank_mode = fastkpc::LegacyDcovLowrankMode::Spectra;
+    };
+
+  auto accumulate_native_cuda_lowrank_component =
+    [&](const LegacyDcovCudaLowrankComponentRun& component) {
+      legacy_dcov_native_cuda_lowrank_metrics.spectra_matvec_count +=
+        component.cuda_diagnostics.spectra_matvec_count;
+      legacy_dcov_native_cuda_lowrank_metrics.spectra_matvec_ms +=
+        component.cuda_diagnostics.spectra_matvec_ms;
+      legacy_dcov_native_cuda_lowrank_metrics.kernel_launch_count +=
+        component.cuda_diagnostics.kernel_launch_count;
+      legacy_dcov_native_cuda_lowrank_metrics.device_matrix_reuse_count +=
+        component.cuda_diagnostics.device_matrix_reuse_count;
+      legacy_dcov_native_cuda_lowrank_metrics.device_workspace_reuse_count +=
+        component.cuda_diagnostics.device_workspace_reuse_count;
+      legacy_dcov_native_cuda_lowrank_metrics.workspace_realloc_count +=
+        component.cuda_diagnostics.workspace_realloc_count;
+      legacy_dcov_native_cuda_lowrank_metrics.matrix_bytes +=
+        component.matrix_bytes;
+      legacy_dcov_native_cuda_lowrank_metrics.workspace_bytes = std::max(
+        legacy_dcov_native_cuda_lowrank_metrics.workspace_bytes,
+        static_cast<double>(component.cuda_diagnostics.workspace_bytes));
+      legacy_dcov_native_cuda_lowrank_metrics.matrix_h2d_ms +=
+        component.matrix_h2d_ms;
+      legacy_dcov_native_cuda_lowrank_metrics.matrix_h2d_ms_during_compute +=
+        component.cuda_diagnostics.matrix_h2d_ms_during_compute;
+      const double previous_matrix_h2d_ms_during_compute_max =
+        legacy_dcov_native_cuda_lowrank_metrics.matrix_h2d_ms_during_compute_max;
+      legacy_dcov_native_cuda_lowrank_metrics.matrix_h2d_ms_during_compute_max =
+        std::max(
+          previous_matrix_h2d_ms_during_compute_max,
+          component.cuda_diagnostics.matrix_h2d_ms_during_compute);
+      legacy_dcov_native_cuda_lowrank_metrics.workspace_alloc_ms +=
+        component.cuda_diagnostics.workspace_alloc_ms;
+      legacy_dcov_native_cuda_lowrank_metrics.h2d_ms +=
+        component.cuda_diagnostics.h2d_ms;
+      legacy_dcov_native_cuda_lowrank_metrics.kernel_ms +=
+        component.cuda_diagnostics.kernel_ms;
+      legacy_dcov_native_cuda_lowrank_metrics.d2h_ms +=
+        component.cuda_diagnostics.d2h_ms;
+
+      legacy_lowrank_timings.eig_ms += component.eig_ms;
+      legacy_lowrank_timings.spectra_count += 1;
+      if (component.converged) {
+        legacy_lowrank_timings.spectra_converged_count += 1;
+      } else {
+        legacy_lowrank_timings.spectra_failed_count += 1;
+      }
+      legacy_lowrank_timings.spectra_iterations += component.iterations;
+      legacy_lowrank_timings.spectra_nconv += component.nconv;
+      legacy_lowrank_timings.spectra_ncv = std::max(
+        legacy_lowrank_timings.spectra_ncv,
+        legacy_dcov_native_cuda_lowrank_ncv);
+      legacy_lowrank_timings.spectra_tol = std::max(
+        legacy_lowrank_timings.spectra_tol,
+        legacy_dcov_native_cuda_lowrank_tol);
+      legacy_lowrank_timings.spectra_matvec_count +=
+        component.cuda_diagnostics.spectra_matvec_count;
+      legacy_lowrank_timings.spectra_matvec_ms +=
+        component.cuda_diagnostics.spectra_matvec_ms;
       legacy_lowrank_mode = fastkpc::LegacyDcovLowrankMode::Spectra;
     };
 
@@ -5504,96 +5645,245 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
             legacy_dcov_native_count,
             0.0);
           try {
-            std::vector<LegacyDcovCudaLowrankGammaRun> runs(
-              static_cast<std::size_t>(batch_size));
-            if (cuda_lowrank_batch_parallel_enabled) {
-              std::atomic<int> completed_in_batch(0);
-              std::mutex error_mutex;
-              std::mutex progress_mutex;
-              std::string first_error;
-              auto worker = [&](int thread_id) {
-                for (int i = thread_id; i < batch_size;
-                     i += cuda_lowrank_batch_threads) {
-                  {
-                    std::lock_guard<std::mutex> lock(error_mutex);
-                    if (!first_error.empty()) return;
-                  }
-                  try {
-                    runs[static_cast<std::size_t>(i)] =
-                      legacy_dcov_cuda_lowrank_gamma_compute(
-                        x_columns[static_cast<std::size_t>(i)],
-                        y_columns[static_cast<std::size_t>(i)],
-                        n,
-                        num_col,
-                        index,
-                        legacy_dcov_native_cuda_lowrank_ncv,
-                        legacy_dcov_native_cuda_lowrank_tol,
-                        legacy_dcov_native_cuda_lowrank_maxitr);
-                    const int completed =
-                      completed_in_batch.fetch_add(1) + 1;
-                    if ((completed %
-                         legacy_dcov_native_cuda_lowrank_progress_interval) == 0 ||
-                        completed == batch_size) {
-                      std::lock_guard<std::mutex> lock(progress_mutex);
-                      append_cuda_lowrank_progress(
-                        "dcov_cuda_lowrank_pair_progress",
-                        legacy_dcov_native_count + completed,
-                        elapsed_ms_since(batch_call_start));
-                    }
-                  } catch (const std::exception& error) {
-                    std::lock_guard<std::mutex> lock(error_mutex);
-                    if (first_error.empty()) first_error = error.what();
-                    return;
-                  } catch (...) {
-                    std::lock_guard<std::mutex> lock(error_mutex);
-                    if (first_error.empty()) {
-                      first_error =
-                        "native CUDA lowrank threaded batch failed";
-                    }
-                    return;
-                  }
-                }
+            if (legacy_dcov_native_cuda_lowrank_metrics
+                  .component_cache_enabled) {
+              std::map<std::uintptr_t, int> component_by_pointer;
+              std::vector<const double*> component_columns;
+              std::vector<int> x_component_index(
+                static_cast<std::size_t>(batch_size));
+              std::vector<int> y_component_index(
+                static_cast<std::size_t>(batch_size));
+              auto intern_component = [&](const double* ptr) {
+                const std::uintptr_t key =
+                  reinterpret_cast<std::uintptr_t>(ptr);
+                const auto found = component_by_pointer.find(key);
+                if (found != component_by_pointer.end()) return found->second;
+                const int component_index =
+                  static_cast<int>(component_columns.size());
+                component_by_pointer[key] = component_index;
+                component_columns.push_back(ptr);
+                return component_index;
               };
-              std::vector<std::thread> threads;
-              threads.reserve(
-                static_cast<std::size_t>(cuda_lowrank_batch_threads));
-              for (int thread_id = 0;
-                   thread_id < cuda_lowrank_batch_threads;
-                   ++thread_id) {
-                threads.emplace_back(worker, thread_id);
-              }
-              for (std::thread& thread : threads) thread.join();
-              if (!first_error.empty()) Rcpp::stop(first_error);
-            } else {
               for (int i = 0; i < batch_size; ++i) {
-                runs[static_cast<std::size_t>(i)] =
-                  legacy_dcov_cuda_lowrank_gamma_compute(
-                    x_columns[static_cast<std::size_t>(i)],
-                    y_columns[static_cast<std::size_t>(i)],
+                x_component_index[static_cast<std::size_t>(i)] =
+                  intern_component(x_columns[static_cast<std::size_t>(i)]);
+                y_component_index[static_cast<std::size_t>(i)] =
+                  intern_component(y_columns[static_cast<std::size_t>(i)]);
+              }
+              const int component_lookup_count = 2 * batch_size;
+              const int component_miss_count =
+                static_cast<int>(component_columns.size());
+              const int component_hit_count =
+                component_lookup_count - component_miss_count;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .component_cache_lookup_count += component_lookup_count;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .component_cache_hit_count += component_hit_count;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .component_cache_miss_count += component_miss_count;
+              legacy_dcov_native_cuda_lowrank_metrics
+                .component_cache_entry_count += component_miss_count;
+
+              std::vector<LegacyDcovCudaLowrankComponentRun> components(
+                static_cast<std::size_t>(component_miss_count));
+              if (cuda_lowrank_batch_parallel_enabled &&
+                  component_miss_count > 1) {
+                std::atomic<int> next_component(0);
+                std::mutex error_mutex;
+                std::string first_error;
+                auto worker = [&]() {
+                  for (;;) {
+                    const int component_index =
+                      next_component.fetch_add(1);
+                    if (component_index >= component_miss_count) return;
+                    {
+                      std::lock_guard<std::mutex> lock(error_mutex);
+                      if (!first_error.empty()) return;
+                    }
+                    try {
+                      components[static_cast<std::size_t>(component_index)] =
+                        legacy_dcov_cuda_lowrank_component_compute(
+                          component_columns[
+                            static_cast<std::size_t>(component_index)],
+                          n,
+                          num_col,
+                          legacy_dcov_native_cuda_lowrank_ncv,
+                          legacy_dcov_native_cuda_lowrank_tol,
+                          legacy_dcov_native_cuda_lowrank_maxitr);
+                    } catch (const std::exception& error) {
+                      std::lock_guard<std::mutex> lock(error_mutex);
+                      if (first_error.empty()) first_error = error.what();
+                      return;
+                    } catch (...) {
+                      std::lock_guard<std::mutex> lock(error_mutex);
+                      if (first_error.empty()) {
+                        first_error =
+                          "native CUDA lowrank cached component failed";
+                      }
+                      return;
+                    }
+                  }
+                };
+                std::vector<std::thread> threads;
+                threads.reserve(
+                  static_cast<std::size_t>(cuda_lowrank_batch_threads));
+                for (int thread_id = 0;
+                     thread_id < cuda_lowrank_batch_threads;
+                     ++thread_id) {
+                  threads.emplace_back(worker);
+                }
+                for (std::thread& thread : threads) thread.join();
+                if (!first_error.empty()) Rcpp::stop(first_error);
+              } else {
+                for (int component_index = 0;
+                     component_index < component_miss_count;
+                     ++component_index) {
+                  components[static_cast<std::size_t>(component_index)] =
+                    legacy_dcov_cuda_lowrank_component_compute(
+                      component_columns[
+                        static_cast<std::size_t>(component_index)],
+                      n,
+                      num_col,
+                      legacy_dcov_native_cuda_lowrank_ncv,
+                      legacy_dcov_native_cuda_lowrank_tol,
+                      legacy_dcov_native_cuda_lowrank_maxitr);
+                }
+              }
+
+              double component_total_ms = 0.0;
+              double component_eig_ms = 0.0;
+              for (const LegacyDcovCudaLowrankComponentRun& component :
+                   components) {
+                if (!component.converged) {
+                  Rcpp::stop("CUDA Spectra lowrank did not converge");
+                }
+                component_total_ms += component.total_ms;
+                component_eig_ms += component.eig_ms;
+                accumulate_native_cuda_lowrank_component(component);
+              }
+
+              const std::chrono::steady_clock::time_point combine_start =
+                std::chrono::steady_clock::now();
+              for (int i = 0; i < batch_size; ++i) {
+                const LegacyDcovCudaLowrankGammaRun run =
+                  legacy_dcov_cuda_lowrank_gamma_from_components(
+                    components[static_cast<std::size_t>(
+                      x_component_index[static_cast<std::size_t>(i)])],
+                    components[static_cast<std::size_t>(
+                      y_component_index[static_cast<std::size_t>(i)])],
                     n,
-                    num_col,
                     index,
-                    legacy_dcov_native_cuda_lowrank_ncv,
-                    legacy_dcov_native_cuda_lowrank_tol,
-                    legacy_dcov_native_cuda_lowrank_maxitr);
-                const int completed_pairs = legacy_dcov_native_count + i + 1;
-                if (((i + 1) %
+                    false);
+                batch_pvalues[i] = run.p_value;
+                legacy_dcov_native_cuda_lowrank_metrics.count += 1;
+                legacy_dcov_native_cuda_lowrank_metrics.converged_count += 1;
+                const int completed_pairs = i + 1;
+                if ((completed_pairs %
                      legacy_dcov_native_cuda_lowrank_progress_interval) == 0 ||
-                    i + 1 == batch_size) {
+                    completed_pairs == batch_size) {
                   append_cuda_lowrank_progress(
                     "dcov_cuda_lowrank_pair_progress",
-                    completed_pairs,
+                    legacy_dcov_native_count + completed_pairs,
                     elapsed_ms_since(batch_call_start));
                 }
               }
-            }
-            for (int i = 0; i < batch_size; ++i) {
-              const LegacyDcovCudaLowrankGammaRun& run =
-                runs[static_cast<std::size_t>(i)];
-              batch_pvalues[i] = run.p_value;
-              pair_total_ms += run.total_ms;
-              eig_ms += run.eig_ms;
-              accumulate_native_cuda_lowrank_run(run);
+              const double combine_ms = elapsed_ms_since(combine_start);
+              pair_total_ms += component_total_ms + combine_ms;
+              eig_ms += component_eig_ms;
+              legacy_dcov_native_cuda_lowrank_metrics.ms +=
+                component_total_ms + combine_ms;
+            } else {
+              std::vector<LegacyDcovCudaLowrankGammaRun> runs(
+                static_cast<std::size_t>(batch_size));
+              if (cuda_lowrank_batch_parallel_enabled) {
+                std::atomic<int> completed_in_batch(0);
+                std::mutex error_mutex;
+                std::mutex progress_mutex;
+                std::string first_error;
+                auto worker = [&](int thread_id) {
+                  for (int i = thread_id; i < batch_size;
+                       i += cuda_lowrank_batch_threads) {
+                    {
+                      std::lock_guard<std::mutex> lock(error_mutex);
+                      if (!first_error.empty()) return;
+                    }
+                    try {
+                      runs[static_cast<std::size_t>(i)] =
+                        legacy_dcov_cuda_lowrank_gamma_compute(
+                          x_columns[static_cast<std::size_t>(i)],
+                          y_columns[static_cast<std::size_t>(i)],
+                          n,
+                          num_col,
+                          index,
+                          legacy_dcov_native_cuda_lowrank_ncv,
+                          legacy_dcov_native_cuda_lowrank_tol,
+                          legacy_dcov_native_cuda_lowrank_maxitr);
+                      const int completed =
+                        completed_in_batch.fetch_add(1) + 1;
+                      if ((completed %
+                           legacy_dcov_native_cuda_lowrank_progress_interval) == 0 ||
+                          completed == batch_size) {
+                        std::lock_guard<std::mutex> lock(progress_mutex);
+                        append_cuda_lowrank_progress(
+                          "dcov_cuda_lowrank_pair_progress",
+                          legacy_dcov_native_count + completed,
+                          elapsed_ms_since(batch_call_start));
+                      }
+                    } catch (const std::exception& error) {
+                      std::lock_guard<std::mutex> lock(error_mutex);
+                      if (first_error.empty()) first_error = error.what();
+                      return;
+                    } catch (...) {
+                      std::lock_guard<std::mutex> lock(error_mutex);
+                      if (first_error.empty()) {
+                        first_error =
+                          "native CUDA lowrank threaded batch failed";
+                      }
+                      return;
+                    }
+                  }
+                };
+                std::vector<std::thread> threads;
+                threads.reserve(
+                  static_cast<std::size_t>(cuda_lowrank_batch_threads));
+                for (int thread_id = 0;
+                     thread_id < cuda_lowrank_batch_threads;
+                     ++thread_id) {
+                  threads.emplace_back(worker, thread_id);
+                }
+                for (std::thread& thread : threads) thread.join();
+                if (!first_error.empty()) Rcpp::stop(first_error);
+              } else {
+                for (int i = 0; i < batch_size; ++i) {
+                  runs[static_cast<std::size_t>(i)] =
+                    legacy_dcov_cuda_lowrank_gamma_compute(
+                      x_columns[static_cast<std::size_t>(i)],
+                      y_columns[static_cast<std::size_t>(i)],
+                      n,
+                      num_col,
+                      index,
+                      legacy_dcov_native_cuda_lowrank_ncv,
+                      legacy_dcov_native_cuda_lowrank_tol,
+                      legacy_dcov_native_cuda_lowrank_maxitr);
+                  const int completed_pairs = legacy_dcov_native_count + i + 1;
+                  if (((i + 1) %
+                       legacy_dcov_native_cuda_lowrank_progress_interval) == 0 ||
+                      i + 1 == batch_size) {
+                    append_cuda_lowrank_progress(
+                      "dcov_cuda_lowrank_pair_progress",
+                      completed_pairs,
+                      elapsed_ms_since(batch_call_start));
+                  }
+                }
+              }
+              for (int i = 0; i < batch_size; ++i) {
+                const LegacyDcovCudaLowrankGammaRun& run =
+                  runs[static_cast<std::size_t>(i)];
+                batch_pvalues[i] = run.p_value;
+                pair_total_ms += run.total_ms;
+                eig_ms += run.eig_ms;
+                accumulate_native_cuda_lowrank_run(run);
+              }
             }
           } catch (...) {
             legacy_dcov_native_cuda_lowrank_metrics.error_count += 1;
@@ -6047,6 +6337,16 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         legacy_dcov_native_cuda_lowrank_metrics.fallback_count,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_converged_count") =
         legacy_dcov_native_cuda_lowrank_metrics.converged_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_enabled") =
+        legacy_dcov_native_cuda_lowrank_metrics.component_cache_enabled,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_lookup_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.component_cache_lookup_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_hit_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.component_cache_hit_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_miss_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.component_cache_miss_count,
+      Rcpp::Named("legacy_dcov_native_cuda_lowrank_component_cache_entry_count") =
+        legacy_dcov_native_cuda_lowrank_metrics.component_cache_entry_count,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_count") =
         legacy_dcov_native_cuda_lowrank_metrics.spectra_matvec_count,
       Rcpp::Named("legacy_dcov_native_cuda_lowrank_backend_spectra_matvec_ms") =
