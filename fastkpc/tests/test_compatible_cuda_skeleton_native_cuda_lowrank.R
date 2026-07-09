@@ -134,6 +134,8 @@ required <- c(
   "legacy_dcov_native_cuda_lowrank_backend_component_lowrank_ms",
   "legacy_dcov_native_cuda_lowrank_backend_component_moment_ms",
   "legacy_dcov_native_cuda_lowrank_backend_component_unaccounted_ms",
+  "legacy_dcov_native_cuda_lowrank_backend_component_eig_ms",
+  "legacy_dcov_native_cuda_lowrank_backend_combine_ms",
   "legacy_dcov_native_batch_parallel_enabled",
   "legacy_dcov_native_batch_parallel_threads"
 )
@@ -232,15 +234,30 @@ component_stage_ms <- c(
   moment = as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_component_moment_ms[[1L]]),
   unaccounted = as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_component_unaccounted_ms[[1L]])
 )
+component_substage_ms <- c(
+  eig = as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_component_eig_ms[[1L]]),
+  combine = as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_combine_ms[[1L]])
+)
 assert_true(all(is.finite(component_stage_ms)),
             "native CUDA lowrank component stage timings should be finite")
+assert_true(all(is.finite(component_substage_ms)),
+            "native CUDA lowrank component substage timings should be finite")
 assert_true(all(component_stage_ms >= 0),
             "native CUDA lowrank component stage timings should be non-negative")
+assert_true(all(component_substage_ms >= 0),
+            "native CUDA lowrank component substage timings should be non-negative")
 assert_true(component_stage_ms[["lowrank"]] > 0,
             "native CUDA lowrank component lowrank timing should be positive")
+assert_true(component_substage_ms[["eig"]] > 0,
+            "native CUDA lowrank component eig timing should be positive")
+assert_true(component_substage_ms[["combine"]] > 0,
+            "native CUDA lowrank component combine timing should be positive")
 assert_true(sum(component_stage_ms) <=
               as.numeric(summary$legacy_dcov_native_cuda_lowrank_backend_ms[[1L]]) * 1.05,
             "native CUDA lowrank component stage timings should fit within backend timing")
+assert_true(component_substage_ms[["eig"]] <=
+              component_stage_ms[["lowrank"]] * 1.05,
+            "native CUDA lowrank eig substage timing should fit within lowrank timing")
 assert_true(as.integer(summary$legacy_dcov_native_batch_count[[1L]]) > 1L,
             "native CUDA lowrank round mode should exercise multiple dCov batches")
 assert_true(isTRUE(summary$legacy_dcov_native_batch_parallel_enabled[[1L]]),
