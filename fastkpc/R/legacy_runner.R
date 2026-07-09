@@ -389,6 +389,9 @@ fastkpc_legacy_runtime_zero <- function() {
     dcov_cpp_batch_backend_fallback_count = 0L,
     dcov_cpp_batch_backend_max_batch_size = 0L,
     dcov_cpp_batch_backend_mean_batch_size = 0,
+    dcov_cpp_batch_min_size = 1L,
+    dcov_cpp_batch_skipped_count = 0L,
+    dcov_cpp_batch_skipped_pair_count = 0L,
     dcov_cpp_batch_workspace_reuse_count = 0L,
     dcov_cpp_batch_distance_workspace_reuse_count = 0L,
     dcov_cpp_batch_statistic_moment_workspace_reuse_count = 0L,
@@ -855,6 +858,15 @@ fastkpc_legacy_runtime_add <- function(a, b) {
         0
       }
     },
+    dcov_cpp_batch_min_size =
+      max(as.integer(a$dcov_cpp_batch_min_size),
+          as.integer(b$dcov_cpp_batch_min_size)),
+    dcov_cpp_batch_skipped_count =
+      as.integer(a$dcov_cpp_batch_skipped_count) +
+        as.integer(b$dcov_cpp_batch_skipped_count),
+    dcov_cpp_batch_skipped_pair_count =
+      as.integer(a$dcov_cpp_batch_skipped_pair_count) +
+        as.integer(b$dcov_cpp_batch_skipped_pair_count),
     dcov_cpp_batch_workspace_reuse_count =
       as.integer(a$dcov_cpp_batch_workspace_reuse_count) +
         as.integer(b$dcov_cpp_batch_workspace_reuse_count),
@@ -1660,6 +1672,9 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
       dcov_cpp_batch_backend_fallback_count = integer(),
       dcov_cpp_batch_backend_max_batch_size = integer(),
       dcov_cpp_batch_backend_mean_batch_size = numeric(),
+      dcov_cpp_batch_min_size = integer(),
+      dcov_cpp_batch_skipped_count = integer(),
+      dcov_cpp_batch_skipped_pair_count = integer(),
       dcov_cpp_batch_workspace_reuse_count = integer(),
       dcov_cpp_batch_distance_workspace_reuse_count = integer(),
       dcov_cpp_batch_statistic_moment_workspace_reuse_count = integer(),
@@ -1938,6 +1953,12 @@ fastkpc_legacy_runtime_frame <- function(level_metrics, n_edgetests) {
         as.integer(metrics$dcov_cpp_batch_backend_max_batch_size),
       dcov_cpp_batch_backend_mean_batch_size =
         as.numeric(metrics$dcov_cpp_batch_backend_mean_batch_size),
+      dcov_cpp_batch_min_size =
+        as.integer(metrics$dcov_cpp_batch_min_size),
+      dcov_cpp_batch_skipped_count =
+        as.integer(metrics$dcov_cpp_batch_skipped_count),
+      dcov_cpp_batch_skipped_pair_count =
+        as.integer(metrics$dcov_cpp_batch_skipped_pair_count),
       dcov_cpp_batch_workspace_reuse_count =
         as.integer(metrics$dcov_cpp_batch_workspace_reuse_count),
       dcov_cpp_batch_distance_workspace_reuse_count =
@@ -4684,6 +4705,17 @@ fastkpc_legacy_dcov_cpp_batch_mode <- function() {
   }
 }
 
+fastkpc_legacy_dcov_cpp_batch_min_size <- function() {
+  raw <- Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE",
+                    unset = "1")
+  value <- suppressWarnings(as.integer(raw))
+  if (length(value) == 0L || is.na(value) || value < 1L) {
+    1L
+  } else {
+    value
+  }
+}
+
 fastkpc_legacy_prepare_dcov_cpp <- function(enabled) {
   if (!isTRUE(enabled)) return(invisible(FALSE))
   if (!exists("fastkpc_legacy_dcov_gamma_cpp_oracle", mode = "function")) {
@@ -4850,7 +4882,7 @@ fastkpc_legacy_run_dcov_cpp_backend <- function(
 }
 
 fastkpc_legacy_run_dcov_cpp_backend_batch <- function(
-    metrics, x, y, index, numCol, env) {
+    metrics, x, y, index, numCol, env, min_batch_size = 1L) {
   x <- as.matrix(x)
   y <- as.matrix(y)
   storage.mode(x) <- "double"
@@ -4860,8 +4892,43 @@ fastkpc_legacy_run_dcov_cpp_backend_batch <- function(
   }
   batch_size <- ncol(x)
   metrics$dcov_cpp_batch_backend_enabled <- 1L
+  min_batch_size <- if (length(min_batch_size) == 0L) {
+    NA_integer_
+  } else {
+    suppressWarnings(as.integer(min_batch_size[[1L]]))
+  }
+  if (is.na(min_batch_size) || min_batch_size < 1L) {
+    min_batch_size <- 1L
+  }
+  metrics$dcov_cpp_batch_min_size <- max(
+    as.integer(metrics$dcov_cpp_batch_min_size), min_batch_size
+  )
   if (batch_size == 0L) {
     return(list(p.value = numeric(), metrics = metrics, used_cpp = TRUE))
+  }
+  if (batch_size < min_batch_size) {
+    metrics$dcov_cpp_batch_skipped_count <-
+      metrics$dcov_cpp_batch_skipped_count + 1L
+    metrics$dcov_cpp_batch_skipped_pair_count <-
+      metrics$dcov_cpp_batch_skipped_pair_count + batch_size
+    scalar_start <- proc.time()[["elapsed"]]
+    p_values <- numeric(batch_size)
+    for (col in seq_len(batch_size)) {
+      backend <- fastkpc_legacy_run_dcov_cpp_backend(
+        metrics = metrics,
+        x = x[, col],
+        y = y[, col],
+        index = index,
+        numCol = numCol,
+        env = env
+      )
+      metrics <- backend$metrics
+      metrics$dcov_gamma_count <- metrics$dcov_gamma_count + 1L
+      p_values[[col]] <- as.numeric(backend$result$p.value)
+    }
+    metrics$ci_total_ms <- metrics$ci_total_ms +
+      (proc.time()[["elapsed"]] - scalar_start) * 1000
+    return(list(p.value = p_values, metrics = metrics, used_cpp = TRUE))
   }
   backend_start <- proc.time()[["elapsed"]]
   cpp <- tryCatch(
@@ -4994,6 +5061,11 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
   }
   dcov_cpp_batch_chunk_requested <- identical(dcov_cpp_batch_mode, "chunk")
   dcov_cpp_batch_round_requested <- identical(dcov_cpp_batch_mode, "round")
+  dcov_cpp_batch_min_size <- if (nzchar(dcov_cpp_batch_mode)) {
+    fastkpc_legacy_dcov_cpp_batch_min_size()
+  } else {
+    1L
+  }
   dcov_cpp_shadow_enabled <- identical(ic.method, "dcc.gamma") &&
     identical(dcov_backend, "r") &&
     fastkpc_legacy_dcov_cpp_shadow_enabled()
@@ -5553,7 +5625,8 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
               y = y_batch,
               index = index,
               numCol = numCol,
-              env = env
+              env = env,
+              min_batch_size = dcov_cpp_batch_min_size
             )
             batch_metrics <- fastkpc_legacy_runtime_add(
               batch_metrics, dcov_batch$metrics
@@ -6279,6 +6352,12 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
           as.integer(runtime_total$dcov_cpp_batch_backend_max_batch_size),
         legacy_dcov_cpp_batch_backend_mean_batch_size =
           as.numeric(runtime_total$dcov_cpp_batch_backend_mean_batch_size),
+        legacy_dcov_cpp_batch_min_size =
+          as.integer(runtime_total$dcov_cpp_batch_min_size),
+        legacy_dcov_cpp_batch_skipped_count =
+          as.integer(runtime_total$dcov_cpp_batch_skipped_count),
+        legacy_dcov_cpp_batch_skipped_pair_count =
+          as.integer(runtime_total$dcov_cpp_batch_skipped_pair_count),
         legacy_dcov_cpp_batch_workspace_reuse_count =
           as.integer(runtime_total$dcov_cpp_batch_workspace_reuse_count),
         legacy_dcov_cpp_batch_distance_workspace_reuse_count =

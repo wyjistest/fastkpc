@@ -24,6 +24,8 @@ old_shadow <- Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SHADOW",
                          unset = NA_character_)
 old_batch <- Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH",
                         unset = NA_character_)
+old_batch_min_size <- Sys.getenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE",
+                                 unset = NA_character_)
 old_cache <- Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE",
                         unset = NA_character_)
 old_affinity <- Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY",
@@ -46,6 +48,8 @@ on.exit({
   restore_env("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK", old_lowrank)
   restore_env("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SHADOW", old_shadow)
   restore_env("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH", old_batch)
+  restore_env("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE",
+              old_batch_min_size)
   restore_env("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE", old_cache)
   restore_env("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY", old_affinity)
   restore_env("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND", old_mgcv_backend)
@@ -83,6 +87,7 @@ Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_BACKEND")
 Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK")
 Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SHADOW")
 Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH")
+Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
@@ -102,6 +107,7 @@ Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_BACKEND = "cpp")
 Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra")
 Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_SHADOW")
 Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH")
+Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_CACHE")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
@@ -212,6 +218,7 @@ Sys.setenv(
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND")
 Sys.unsetenv("FASTKPC_LEGACY_MGCV_RESIDUAL_SAME_S_SETUP")
 Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH")
+Sys.unsetenv("FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE")
 chunk_baseline <- run_compatible()
 Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH = "chunk")
 chunk_batch <- run_compatible()
@@ -243,6 +250,9 @@ batch_backend_fields <- c(
   "legacy_dcov_cpp_batch_backend_fallback_count",
   "legacy_dcov_cpp_batch_backend_max_batch_size",
   "legacy_dcov_cpp_batch_backend_mean_batch_size",
+  "legacy_dcov_cpp_batch_min_size",
+  "legacy_dcov_cpp_batch_skipped_count",
+  "legacy_dcov_cpp_batch_skipped_pair_count",
   "legacy_dcov_cpp_batch_workspace_reuse_count",
   "legacy_dcov_cpp_batch_distance_workspace_reuse_count",
   "legacy_dcov_cpp_batch_statistic_moment_workspace_reuse_count",
@@ -368,6 +378,48 @@ assert_true(round_batch_summary$legacy_dcov_cpp_batch_round_prepare_worker_count
 assert_true(round_batch_summary$legacy_dcov_cpp_batch_round_prepare_task_count >=
               round_batch_summary$legacy_dcov_cpp_batch_backend_pair_count,
             "round-batched dCov prepare task count should cover batched pairs")
+assert_true(identical(
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_min_size), 1L),
+  "chunk-batched dCov should default to minimum batch size one")
+assert_true(identical(
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_min_size), 1L),
+  "round-batched dCov should default to minimum batch size one")
+assert_true(identical(
+  as.integer(chunk_batch_summary$legacy_dcov_cpp_batch_skipped_count), 0L),
+  "chunk-batched dCov should not skip batches by default")
+assert_true(identical(
+  as.integer(round_batch_summary$legacy_dcov_cpp_batch_skipped_count), 0L),
+  "round-batched dCov should not skip batches by default")
+
+Sys.setenv(
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH = "round",
+  FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE = "999999"
+)
+round_min_batch <- run_compatible()
+round_min_batch_summary <-
+  round_min_batch$skeleton$scheduler_diagnostics$summary
+assert_true(identical(round_min_batch$skeleton$adjacency,
+                      chunk_baseline$skeleton$adjacency),
+            "min-sized round dCov route should preserve adjacency")
+assert_true(identical(round_min_batch$skeleton$n.edgetests,
+                      chunk_baseline$skeleton$n.edgetests),
+            "min-sized round dCov route should preserve n.edgetests")
+assert_true(identical(
+  as.integer(round_min_batch_summary$legacy_dcov_cpp_batch_min_size), 999999L),
+  "min-sized round dCov route should report configured minimum batch size")
+assert_true(identical(
+  as.integer(round_min_batch_summary$legacy_dcov_cpp_batch_backend_count), 0L),
+  "min-sized round dCov route should skip all undersized batch calls")
+assert_true(round_min_batch_summary$legacy_dcov_cpp_batch_skipped_count > 0L,
+            "min-sized round dCov route should count skipped batch calls")
+assert_true(identical(
+  as.integer(round_min_batch_summary$legacy_dcov_cpp_batch_skipped_pair_count),
+  as.integer(round_min_batch_summary$legacy_dcov_cpp_batch_round_prepare_task_count)),
+  "min-sized round dCov route should report skipped pairs for prepared tests")
+assert_true(identical(
+  as.integer(round_min_batch_summary$legacy_dcov_cpp_backend_count),
+  as.integer(round_min_batch_summary$legacy_dcov_gamma_count)),
+  "min-sized round dCov route should fall back to scalar C++ backend authority")
 assert_true(!isTRUE(
   chunk_batch_summary$legacy_mgcv_cpp_same_s_setup_provider_chunk_enabled),
   "chunk-batched dCov should not enable mgcv same-S setup chunk provider")

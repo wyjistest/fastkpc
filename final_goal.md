@@ -4249,6 +4249,7 @@ Current dCov batch substrate status:
 fastkpc_legacy_dcov_gamma_cpp_oracle_batch() exists
 FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=chunk exists
 FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH=round exists
+FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE=<int> exists
 ```
 
 The C++ batch oracle has started moving beyond the original scalar-loop
@@ -4279,9 +4280,20 @@ lowrank Spectra/full-eig aggregate counts
 The env-gated chunk/round skeleton batch summaries also expose the same
 workspace reuse counters with `legacy_dcov_cpp_batch_*` prefixes, including
 workspace reuse calls, distance/statistic-moment/lowrank workspace reuse, and
-column-copy counts. This is diagnostic plumbing for the experimental batch
-routes only; it does not promote chunk or round batching over the recommended
-S-affinity route without a full 351x48 wall-time win.
+column-copy counts. The experimental batch skeleton route also supports
+`FASTKPC_LEGACY_DCOV_GAMMA_CPP_BATCH_MIN_SIZE`: batches smaller than the
+configured threshold are counted as skipped and are executed through the
+existing scalar C++ dCov authority. The summary reports:
+
+```text
+legacy_dcov_cpp_batch_min_size
+legacy_dcov_cpp_batch_skipped_count
+legacy_dcov_cpp_batch_skipped_pair_count
+```
+
+This is diagnostic/tuning plumbing for the experimental batch routes only; it
+does not promote chunk or round batching over the recommended S-affinity route
+without a full 351x48 wall-time win.
 
 Gate:
 
