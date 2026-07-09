@@ -6107,6 +6107,55 @@ decision:
   env-gated CUDA lowrank backend candidate with explicit fallback diagnostics.
 ```
 
+CUDA Spectra lowrank gamma primitive checkpoint:
+
+```text
+scope:
+  authority-shaped CUDA lowrank primitive for legacy dcov.gamma
+  all six legacy dcov.gamma oracle fixture residual pairs
+  each case truncated to 96 rows for fast iterative diagnostics
+  CUDA Spectra matvec-backed lowrank computes nV2, gamma moments, and p.value
+  C++ Spectra legacy dCov remains the oracle
+  diagnostic primitive only; not connected to production route selection yet
+
+change:
+  add diagnostic R/.Call API:
+    legacy_dcov_spectra_matvec_cuda_lowrank_gamma(x, y, numCol,
+                                                  index, ncv, tol, maxitr)
+    C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma
+
+  implementation shape:
+    build legacy absolute-distance matrices for x and y
+    run Spectra::SymEigsSolver through the CUDA dense matvec operator
+    center selected lowrank vectors
+    compute legacy nV2, nV2 mean, nV2 variance, gamma p.value, and estimate
+    report CUDA matvec reuse and transfer diagnostics
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+
+six-case 96-row legacy residual fixture parity:
+  case_count = 6
+  n = 96 for every case
+  numCol = 8
+  all_converged = TRUE
+  max_p_value_abs_diff = 4e-15
+  max_nV2_abs_diff = 5.68e-14
+  mean_abs_diff < 1e-10
+  variance_abs_diff < 1e-10
+  spectra_matvec_count > 0 for every case
+  matrix_h2d_ms_during_compute = 0 for the primary fixture case
+
+decision:
+  This is the first CUDA Spectra lowrank primitive that returns the same
+  authority-shaped output as legacy dcov.gamma: p.value, statistic, moments,
+  and diagnostics. It still does not change dCov authority, residual
+  authority, skeleton replay, lowrank route selection, or the current
+  recommended compatible route. The next lowrank step is an env-gated CUDA
+  lowrank backend candidate with explicit CPU Spectra fallback diagnostics.
+```
+
 ---
 
 ## 9. Final success definition

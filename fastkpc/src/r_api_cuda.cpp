@@ -2632,6 +2632,151 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow(
   END_RCPP
 }
 
+extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma(
+    SEXP xs,
+    SEXP ys,
+    SEXP numCols,
+    SEXP indexs,
+    SEXP ncvs,
+    SEXP tols,
+    SEXP maxitrs) {
+  BEGIN_RCPP
+  if (!Rf_isReal(xs) || !Rf_isReal(ys)) {
+    Rcpp::stop("x and y must be numeric vectors");
+  }
+  Rcpp::NumericVector x(xs);
+  Rcpp::NumericVector y(ys);
+  if (x.size() != y.size()) Rcpp::stop("Sample sizes must agree");
+  const int n = x.size();
+  if (n <= 5) {
+    Rcpp::stop("legacy dCov gamma lowrank CUDA requires n > 5");
+  }
+  if (!all_finite_vector(x) || !all_finite_vector(y)) {
+    Rcpp::stop("Data contains missing or infinite values");
+  }
+  const int num_col = Rcpp::as<int>(numCols);
+  double index = Rcpp::as<double>(indexs);
+  const int ncv = Rcpp::as<int>(ncvs);
+  const double tol = Rcpp::as<double>(tols);
+  const int maxitr = Rcpp::as<int>(maxitrs);
+  if (num_col <= 0 || num_col >= n) {
+    Rcpp::stop("numCol must be positive and less than sample size");
+  }
+  if (index < 0.0 || index > 2.0) index = 1.0;
+  if (ncv <= num_col || ncv > n) {
+    Rcpp::stop("ncv must be greater than numCol and no larger than sample size");
+  }
+  if (!std::isfinite(tol) || tol <= 0.0) {
+    Rcpp::stop("tol must be a positive finite value");
+  }
+  if (maxitr <= 0) Rcpp::stop("maxitr must be positive");
+
+  const auto total_start = std::chrono::steady_clock::now();
+  const Eigen::MatrixXd x_distance =
+    legacy_dcov_distance_matrix_eigen(REAL(xs), n);
+  const Eigen::MatrixXd y_distance =
+    legacy_dcov_distance_matrix_eigen(REAL(ys), n);
+  const LegacyDcovSpectraLowrankShadowRun cuda_x =
+    legacy_dcov_cuda_spectra_lowrank_shadow(
+      x_distance, num_col, ncv, tol, maxitr);
+  const LegacyDcovSpectraLowrankShadowRun cuda_y =
+    legacy_dcov_cuda_spectra_lowrank_shadow(
+      y_distance, num_col, ncv, tol, maxitr);
+  if (!cuda_x.converged || !cuda_y.converged) {
+    Rcpp::stop("CUDA Spectra lowrank did not converge");
+  }
+
+  const double n_double = static_cast<double>(n);
+  const double nV2 = legacy_dcov_weighted_cross_sum_eigen(
+    cuda_x.centered_vectors, cuda_x.eigenvalues,
+    cuda_y.centered_vectors, cuda_y.eigenvalues) / n_double;
+  const double nV2Mean =
+    (x_distance.sum() / (n_double * n_double)) *
+    (y_distance.sum() / (n_double * n_double));
+  const double x_moment = legacy_dcov_weighted_cross_sum_eigen(
+    cuda_x.centered_vectors, cuda_x.eigenvalues,
+    cuda_x.centered_vectors, cuda_x.eigenvalues);
+  const double y_moment = legacy_dcov_weighted_cross_sum_eigen(
+    cuda_y.centered_vectors, cuda_y.eigenvalues,
+    cuda_y.centered_vectors, cuda_y.eigenvalues);
+  const double variance_factor =
+    2.0 * (n_double - 4.0) * (n_double - 5.0) /
+    n_double / (n_double - 1.0) / (n_double - 2.0) / (n_double - 3.0);
+  const double nV2Variance =
+    variance_factor * x_moment * y_moment /
+    std::pow(n_double, 4.0) * std::pow(n_double, 2.0);
+  const double alpha = (nV2Mean * nV2Mean) / nV2Variance;
+  const double beta = nV2Variance / nV2Mean;
+  const double p_value = 1.0 - R::pgamma(nV2, alpha, beta, true, false);
+  const double dCov = std::sqrt(nV2 / n_double);
+  const LegacyDcovSpectraCudaOperatorDiagnostics& dx =
+    cuda_x.cuda_diagnostics;
+  const LegacyDcovSpectraCudaOperatorDiagnostics& dy =
+    cuda_y.cuda_diagnostics;
+
+  return Rcpp::List::create(
+    Rcpp::Named("backend") =
+      "cuda-dense-sym-matvec-spectra-lowrank-gamma",
+    Rcpp::Named("p.value") = p_value,
+    Rcpp::Named("nV2") = nV2,
+    Rcpp::Named("mean") = nV2Mean,
+    Rcpp::Named("variance") = nV2Variance,
+    Rcpp::Named("statistic") = nV2,
+    Rcpp::Named("estimate") = dCov,
+    Rcpp::Named("estimates") = Rcpp::NumericVector::create(
+      Rcpp::Named("nV^2") = nV2,
+      Rcpp::Named("nV^2 mean") = nV2Mean,
+      Rcpp::Named("nV^2 variance") = nV2Variance),
+    Rcpp::Named("n") = n,
+    Rcpp::Named("numCol") = num_col,
+    Rcpp::Named("index") = index,
+    Rcpp::Named("ncv") = ncv,
+    Rcpp::Named("tol") = tol,
+    Rcpp::Named("maxitr") = maxitr,
+    Rcpp::Named("converged_x") = cuda_x.converged,
+    Rcpp::Named("converged_y") = cuda_y.converged,
+    Rcpp::Named("nconv_x") = cuda_x.nconv,
+    Rcpp::Named("nconv_y") = cuda_y.nconv,
+    Rcpp::Named("iterations_x") = cuda_x.iterations,
+    Rcpp::Named("iterations_y") = cuda_y.iterations,
+    Rcpp::Named("info_x") = cuda_x.info,
+    Rcpp::Named("info_y") = cuda_y.info,
+    Rcpp::Named("x_moment") = x_moment,
+    Rcpp::Named("y_moment") = y_moment,
+    Rcpp::Named("eig_ms") = cuda_x.eig_ms + cuda_y.eig_ms,
+    Rcpp::Named("spectra_matvec_count") =
+      dx.spectra_matvec_count + dy.spectra_matvec_count,
+    Rcpp::Named("spectra_matvec_ms") =
+      dx.spectra_matvec_ms + dy.spectra_matvec_ms,
+    Rcpp::Named("kernel_launch_count") =
+      dx.kernel_launch_count + dy.kernel_launch_count,
+    Rcpp::Named("device_matrix_reuse_count") =
+      dx.device_matrix_reuse_count + dy.device_matrix_reuse_count,
+    Rcpp::Named("device_workspace_reuse_count") =
+      dx.device_workspace_reuse_count + dy.device_workspace_reuse_count,
+    Rcpp::Named("workspace_realloc_count") =
+      dx.workspace_realloc_count + dy.workspace_realloc_count,
+    Rcpp::Named("matrix_bytes") =
+      cuda_x.matrix_bytes + cuda_y.matrix_bytes,
+    Rcpp::Named("workspace_bytes") = static_cast<double>(
+      std::max(dx.workspace_bytes, dy.workspace_bytes)),
+    Rcpp::Named("matrix_h2d_ms") =
+      cuda_x.matrix_h2d_ms + cuda_y.matrix_h2d_ms,
+    Rcpp::Named("matrix_h2d_ms_during_compute") =
+      dx.matrix_h2d_ms_during_compute +
+      dy.matrix_h2d_ms_during_compute,
+    Rcpp::Named("workspace_alloc_ms") =
+      dx.workspace_alloc_ms + dy.workspace_alloc_ms,
+    Rcpp::Named("h2d_ms") = dx.h2d_ms + dy.h2d_ms,
+    Rcpp::Named("kernel_ms") = dx.kernel_ms + dy.kernel_ms,
+    Rcpp::Named("d2h_ms") = dx.d2h_ms + dy.d2h_ms,
+    Rcpp::Named("total_ms") =
+      std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - total_start).count()
+  );
+  END_RCPP
+}
+
 extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_free(
     SEXP handles) {
   BEGIN_RCPP
@@ -5446,6 +5591,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence), 2},
   {"C_legacy_dcov_spectra_matvec_cuda_operator_eigs", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_operator_eigs), 5},
   {"C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow), 6},
+  {"C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma), 7},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_free", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_free), 1},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},
