@@ -147,6 +147,38 @@ legacy_dcov_spectra_matvec_cuda_handle_apply_sequence <- function(handle, rhs) {
   result
 }
 
+legacy_dcov_spectra_matvec_cuda_operator_eigs <- function(a, nev,
+                                                          ncv = NULL,
+                                                          tol = 1e-10,
+                                                          maxitr = 1000L) {
+  load_fastkpc_cuda_native()
+  a <- as.matrix(a)
+  storage.mode(a) <- "double"
+  if (nrow(a) != ncol(a)) {
+    stop("matrix must be square", call. = FALSE)
+  }
+  if (!all(is.finite(a))) {
+    stop("Data contains missing or infinite values", call. = FALSE)
+  }
+  nev <- as.integer(nev)
+  if (length(nev) != 1L || is.na(nev) || nev < 1L || nev >= nrow(a)) {
+    stop("nev must be positive and smaller than matrix dimension",
+         call. = FALSE)
+  }
+  ncv <- if (is.null(ncv)) {
+    min(nrow(a), max(2L * nev + 1L, 20L))
+  } else {
+    as.integer(ncv)
+  }
+  if (length(ncv) != 1L || is.na(ncv) || ncv <= nev || ncv > nrow(a)) {
+    stop("ncv must be greater than nev and no larger than matrix dimension",
+         call. = FALSE)
+  }
+  .Call("C_legacy_dcov_spectra_matvec_cuda_operator_eigs",
+        a, nev, as.integer(ncv), as.numeric(tol), as.integer(maxitr),
+        PACKAGE = "fastkpc_cuda")
+}
+
 legacy_dcov_spectra_matvec_cuda_handle_free <- function(handle) {
   load_fastkpc_cuda_native()
   if (!is.list(handle) || is.null(handle$ptr)) {

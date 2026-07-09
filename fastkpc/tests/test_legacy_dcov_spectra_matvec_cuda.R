@@ -151,6 +151,44 @@ assert_true(identical(as.numeric(sequence_reuse$matrix_h2d_ms), 0),
 assert_true(as.numeric(sequence_reuse$workspace_bytes) >= n * ncol(wide_rhs) * 2 * 8,
             "CUDA handle sequence matvec should report retained workspace bytes")
 
+eigs_n <- 31L
+eigs_nev <- 3L
+eigs_diag <- seq(1, eigs_n)
+eigs_matrix <- diag(eigs_diag)
+eigs_cuda <- legacy_dcov_spectra_matvec_cuda_operator_eigs(
+  eigs_matrix, nev = eigs_nev
+)
+eigs_cpu <- sort(eigen(eigs_matrix, symmetric = TRUE, only.values = TRUE)$values,
+                 decreasing = TRUE)[seq_len(eigs_nev)]
+assert_true(
+  identical(eigs_cuda$backend, "cuda-dense-sym-matvec-spectra-operator"),
+  "CUDA Spectra operator eigensolver should report backend"
+)
+assert_true(identical(as.integer(eigs_cuda$n), eigs_n),
+            "CUDA Spectra operator eigensolver should report matrix dimension")
+assert_true(identical(as.integer(eigs_cuda$nev), eigs_nev),
+            "CUDA Spectra operator eigensolver should report requested eigen count")
+assert_true(isTRUE(eigs_cuda$converged),
+            "CUDA Spectra operator eigensolver should converge on diagonal input")
+assert_true(max(abs(sort(eigs_cuda$values, decreasing = TRUE) - eigs_cpu)) < 1e-8,
+            "CUDA Spectra operator eigensolver eigenvalues should match CPU eigen")
+assert_true(as.integer(eigs_cuda$spectra_matvec_count) > 0L,
+            "CUDA Spectra operator eigensolver should report matvec count")
+assert_true(
+  identical(as.integer(eigs_cuda$device_matrix_reuse_count),
+            as.integer(eigs_cuda$spectra_matvec_count)),
+  "CUDA Spectra operator eigensolver should reuse the resident matrix per matvec"
+)
+assert_true(
+  as.integer(eigs_cuda$device_workspace_reuse_count) >=
+    as.integer(eigs_cuda$spectra_matvec_count) - 1L,
+  "CUDA Spectra operator eigensolver should reuse warm workspace after first matvec"
+)
+assert_true(as.integer(eigs_cuda$workspace_realloc_count) <= 1L,
+            "CUDA Spectra operator eigensolver should grow workspace at most once")
+assert_true(identical(as.numeric(eigs_cuda$matrix_h2d_ms_during_compute), 0),
+            "CUDA Spectra operator eigensolver should not re-upload matrix during compute")
+
 legacy_dcov_spectra_matvec_cuda_handle_free(handle)
 assert_error(
   legacy_dcov_spectra_matvec_cuda_handle_apply(handle, rhs),

@@ -18,6 +18,8 @@
 
 #include <Rcpp.h>
 #include <R_ext/Rdynload.h>
+#include <Eigen/Core>
+#include <Spectra/SymEigsSolver.h>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -76,6 +78,68 @@ legacy_dcov_spectra_matvec_handle_from_externalptr(SEXP ptr) {
   }
   return handle;
 }
+
+struct LegacyDcovSpectraCudaOperatorDiagnostics {
+  int spectra_matvec_count = 0;
+  int kernel_launch_count = 0;
+  int device_matrix_reuse_count = 0;
+  int device_workspace_reuse_count = 0;
+  int workspace_realloc_count = 0;
+  std::size_t matrix_bytes = 0;
+  std::size_t workspace_bytes = 0;
+  double spectra_matvec_ms = 0.0;
+  double matrix_h2d_ms_during_compute = 0.0;
+  double workspace_alloc_ms = 0.0;
+  double h2d_ms = 0.0;
+  double kernel_ms = 0.0;
+  double d2h_ms = 0.0;
+  double total_ms = 0.0;
+};
+
+class LegacyDcovSpectraCudaMatProd {
+ public:
+  LegacyDcovSpectraCudaMatProd(
+      fastkpc::LegacyDcovSpectraMatvecCudaHandle* handle,
+      int n,
+      LegacyDcovSpectraCudaOperatorDiagnostics* diagnostics)
+      : handle_(handle), n_(n), diagnostics_(diagnostics) {}
+
+  int rows() const { return n_; }
+  int cols() const { return n_; }
+
+  void perform_op(const double* x_in, double* y_out) const {
+    const auto start = std::chrono::steady_clock::now();
+    const fastkpc::LegacyDcovSpectraMatvecCudaResult result =
+      fastkpc::legacy_dcov_spectra_matvec_cuda_handle_apply(
+        handle_, x_in, 1);
+    std::copy(result.values.begin(), result.values.end(), y_out);
+    if (diagnostics_ != nullptr) {
+      diagnostics_->spectra_matvec_count += 1;
+      diagnostics_->kernel_launch_count += result.kernel_launch_count;
+      diagnostics_->device_matrix_reuse_count +=
+        result.device_matrix_reuse_count;
+      diagnostics_->device_workspace_reuse_count +=
+        result.device_workspace_reuse_count;
+      diagnostics_->workspace_realloc_count += result.workspace_realloc_count;
+      diagnostics_->matrix_bytes = result.matrix_bytes;
+      diagnostics_->workspace_bytes =
+        std::max(diagnostics_->workspace_bytes, result.workspace_bytes);
+      diagnostics_->matrix_h2d_ms_during_compute += result.matrix_h2d_ms;
+      diagnostics_->workspace_alloc_ms += result.workspace_alloc_ms;
+      diagnostics_->h2d_ms += result.h2d_ms;
+      diagnostics_->kernel_ms += result.kernel_ms;
+      diagnostics_->d2h_ms += result.d2h_ms;
+      diagnostics_->total_ms += result.total_ms;
+      diagnostics_->spectra_matvec_ms += std::chrono::duration<double,
+        std::milli>(std::chrono::steady_clock::now() - start).count();
+    }
+  }
+
+ private:
+  fastkpc::LegacyDcovSpectraMatvecCudaHandle* handle_;
+  int n_;
+  LegacyDcovSpectraCudaOperatorDiagnostics* diagnostics_;
+};
 
 enum class NativeLegacyDcovBatchMode {
   None,
@@ -2097,6 +2161,126 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence(
     Rcpp::Named("free_ms") = free_ms,
     Rcpp::Named("total_ms") = elapsed_ms_since(total_start)
   );
+  END_RCPP
+}
+
+extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_operator_eigs(
+    SEXP matrixs,
+    SEXP nevs,
+    SEXP ncvs,
+    SEXP tols,
+    SEXP maxitrs) {
+  BEGIN_RCPP
+  if (!Rf_isReal(matrixs) || !Rf_isMatrix(matrixs)) {
+    Rcpp::stop("matrix must be a numeric matrix");
+  }
+  Rcpp::NumericMatrix matrix(matrixs);
+  if (matrix.nrow() != matrix.ncol()) {
+    Rcpp::stop("matrix must be square");
+  }
+  if (!all_finite(matrix)) {
+    Rcpp::stop("Data contains missing or infinite values");
+  }
+  const int n = matrix.nrow();
+  const int nev = Rcpp::as<int>(nevs);
+  const int ncv = Rcpp::as<int>(ncvs);
+  const double tol = Rcpp::as<double>(tols);
+  const int maxitr = Rcpp::as<int>(maxitrs);
+  if (nev < 1 || nev >= n) {
+    Rcpp::stop("nev must be positive and smaller than matrix dimension");
+  }
+  if (ncv <= nev || ncv > n) {
+    Rcpp::stop("ncv must be greater than nev and no larger than matrix dimension");
+  }
+  if (!std::isfinite(tol) || tol <= 0.0) {
+    Rcpp::stop("tol must be a positive finite value");
+  }
+  if (maxitr <= 0) {
+    Rcpp::stop("maxitr must be positive");
+  }
+
+  fastkpc::LegacyDcovSpectraMatvecCudaHandle* handle =
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_create(
+      REAL(matrixs), n);
+  const double matrix_h2d_ms =
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_matrix_h2d_ms(handle);
+  const double matrix_bytes = static_cast<double>(
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_matrix_bytes(handle));
+
+  try {
+    LegacyDcovSpectraCudaOperatorDiagnostics diagnostics;
+    diagnostics.matrix_bytes = static_cast<std::size_t>(matrix_bytes);
+    LegacyDcovSpectraCudaMatProd op(handle, n, &diagnostics);
+    const auto eig_start = std::chrono::steady_clock::now();
+    Spectra::SymEigsSolver<double, Spectra::LARGEST_MAGN,
+                           LegacyDcovSpectraCudaMatProd> eigs(
+      &op, nev, ncv);
+    eigs.init();
+    const int nconv = static_cast<int>(eigs.compute(
+      maxitr, tol, Spectra::LARGEST_MAGN));
+    const int iterations = static_cast<int>(eigs.num_iterations());
+    const bool converged =
+      eigs.info() == Spectra::SUCCESSFUL && nconv >= nev;
+    const double eig_ms = elapsed_ms_since(eig_start);
+
+    const Eigen::VectorXd eigenvalues = eigs.eigenvalues();
+    const Eigen::MatrixXd eigenvectors = eigs.eigenvectors();
+    Rcpp::NumericVector values(eigenvalues.size());
+    for (int i = 0; i < eigenvalues.size(); ++i) values[i] = eigenvalues[i];
+    Rcpp::NumericMatrix vectors(eigenvectors.rows(), eigenvectors.cols());
+    for (int col = 0; col < eigenvectors.cols(); ++col) {
+      for (int row = 0; row < eigenvectors.rows(); ++row) {
+        vectors(row, col) = eigenvectors(row, col);
+      }
+    }
+
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_destroy(handle);
+    handle = nullptr;
+    return Rcpp::List::create(
+      Rcpp::Named("values") = values,
+      Rcpp::Named("vectors") = vectors,
+      Rcpp::Named("backend") = "cuda-dense-sym-matvec-spectra-operator",
+      Rcpp::Named("n") = n,
+      Rcpp::Named("nev") = nev,
+      Rcpp::Named("ncv") = ncv,
+      Rcpp::Named("tol") = tol,
+      Rcpp::Named("maxitr") = maxitr,
+      Rcpp::Named("converged") = converged,
+      Rcpp::Named("nconv") = nconv,
+      Rcpp::Named("iterations") = iterations,
+      Rcpp::Named("info") = static_cast<int>(eigs.info()),
+      Rcpp::Named("eig_ms") = eig_ms,
+      Rcpp::Named("spectra_matvec_count") =
+        diagnostics.spectra_matvec_count,
+      Rcpp::Named("spectra_matvec_ms") =
+        diagnostics.spectra_matvec_ms,
+      Rcpp::Named("kernel_launch_count") =
+        diagnostics.kernel_launch_count,
+      Rcpp::Named("device_matrix_reuse_count") =
+        diagnostics.device_matrix_reuse_count,
+      Rcpp::Named("device_workspace_reuse_count") =
+        diagnostics.device_workspace_reuse_count,
+      Rcpp::Named("workspace_realloc_count") =
+        diagnostics.workspace_realloc_count,
+      Rcpp::Named("matrix_bytes") = matrix_bytes,
+      Rcpp::Named("workspace_bytes") =
+        static_cast<double>(diagnostics.workspace_bytes),
+      Rcpp::Named("matrix_h2d_ms") = matrix_h2d_ms,
+      Rcpp::Named("matrix_h2d_ms_during_compute") =
+        diagnostics.matrix_h2d_ms_during_compute,
+      Rcpp::Named("workspace_alloc_ms") =
+        diagnostics.workspace_alloc_ms,
+      Rcpp::Named("h2d_ms") = diagnostics.h2d_ms,
+      Rcpp::Named("kernel_ms") = diagnostics.kernel_ms,
+      Rcpp::Named("d2h_ms") = diagnostics.d2h_ms,
+      Rcpp::Named("total_ms") = diagnostics.total_ms
+    );
+  } catch (...) {
+    if (handle != nullptr) {
+      fastkpc::legacy_dcov_spectra_matvec_cuda_handle_destroy(handle);
+    }
+    throw;
+  }
   END_RCPP
 }
 
@@ -4912,6 +5096,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_legacy_dcov_spectra_matvec_cuda_handle_create", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_create), 1},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_apply", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_apply), 2},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence), 2},
+  {"C_legacy_dcov_spectra_matvec_cuda_operator_eigs", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_operator_eigs), 5},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_free", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_free), 1},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},

@@ -5826,6 +5826,83 @@ decision:
   shadow it against the current C++ Spectra oracle.
 ```
 
+CUDA Spectra-compatible eigensolver operator prototype checkpoint:
+
+```text
+scope:
+  CUDA substrate for the legacy dCov Spectra lowrank bottleneck
+  Spectra::SymEigsSolver driven by a CUDA-backed matvec operator
+  diagnostic/prototype only
+  not connected to legacy dCov lowrank selection or skeleton route yet
+
+change:
+  add a native Spectra-compatible CUDA operator prototype:
+    legacy_dcov_spectra_matvec_cuda_operator_eigs(a, nev, ncv, tol, maxitr)
+
+  implementation shape:
+    .Call creates one CUDA dense matvec handle for the input symmetric matrix
+    Spectra perform_op() calls the existing CUDA handle apply path
+    each Spectra matvec reuses the resident device matrix
+    warm RHS/output workspace is reused after the first matvec
+    the handle is destroyed before returning to R
+
+  R/.Call bridge:
+    C_legacy_dcov_spectra_matvec_cuda_operator_eigs
+    legacy_dcov_spectra_matvec_cuda_operator_eigs()
+
+diagnostics:
+  backend = cuda-dense-sym-matvec-spectra-operator
+  n / nev / ncv / tol / maxitr
+  converged / nconv / iterations / info
+  eig_ms
+  spectra_matvec_count / spectra_matvec_ms
+  kernel_launch_count
+  device_matrix_reuse_count
+  device_workspace_reuse_count
+  workspace_realloc_count
+  matrix_bytes / workspace_bytes
+  matrix_h2d_ms
+  matrix_h2d_ms_during_compute
+  workspace_alloc_ms
+  h2d_ms / kernel_ms / d2h_ms / total_ms
+
+targeted gate:
+  FASTKPC_RUN_CUDA_TESTS=1 Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+
+31x31 diagonal Spectra/CUDA operator micro-check:
+  n = 31
+  nev = 3
+  nconv = 3
+  converged = TRUE
+  max_abs_eval_diff vs host eigen = 1.882938e-13
+  iterations = 4
+  spectra_matvec_count = 69
+  device_matrix_reuse_count = 69
+  device_workspace_reuse_count = 68
+  workspace_realloc_count = 1
+  matrix_h2d_ms_during_compute = 0
+  workspace_bytes = 496
+  matrix_h2d_ms = 0.018336
+  workspace_alloc_ms = 0.007978
+  h2d_ms = 0.129163
+  kernel_ms = 0.494488
+  d2h_ms = 0.399780
+  eig_ms = 1.248671
+
+decision:
+  This is the first actual Spectra-compatible eigensolver prototype that uses
+  the CUDA dense matvec handle as its matrix operator. It proves the operator
+  boundary can satisfy Spectra's iterative perform_op() contract while keeping
+  the matrix resident on device and avoiding per-matvec workspace allocation
+  after warmup. It is still diagnostic substrate only: it does not change dCov
+  authority, residual authority, skeleton replay, lowrank route selection, or
+  the current recommended compatible route. The next lowrank step is to shadow
+  this operator inside the legacy dCov lowrank path on small real distance
+  matrices and compare selected eigenvalues/eigenvectors/statistic inputs
+  against the current C++ Spectra oracle before considering any env-gated
+  lowrank backend switch.
+```
+
 ---
 
 ## 9. Final success definition
