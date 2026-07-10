@@ -729,6 +729,11 @@ assert_true(
     identical(fixture_setup$weights_policy, "none-or-unit") &&
     is.null(fixture_setup$offset) &&
     identical(fixture_setup$offset_policy, "none-or-zero") &&
+    is.null(fixture_setup$sp_mapping) &&
+    is.numeric(fixture_setup$sp_mapping_offset) &&
+    length(fixture_setup$sp_mapping_offset) == 3L &&
+    all(fixture_setup$sp_mapping_offset == 0) &&
+    is.null(fixture_setup$min_sp) &&
     !any(c("G", "y", "target", "sp", "lsp0", "selected_sp") %in%
          names(fixture_setup)),
   "PreparedSSetup must use compact response-independent neutral encodings"
@@ -898,6 +903,47 @@ assert_setup_error(
   },
   "X must be finite",
   "nonfinite provider matrices must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    value$smooth_shift[[1L]] <- fixture_data[, 1L]
+    refresh_self_fingerprints(value)
+  },
+  "smooth metadata shape mismatch",
+  paste(
+    "response-sized payloads in smooth descriptors must fail after",
+    "semantic and representation fingerprints are refreshed"
+  )
+)
+assert_setup_error(
+  function(value) {
+    value$sp_mapping <- do.call(
+      rbind,
+      rep(list(fixture_data[, 1L]), length(value$penalty_blocks))
+    )
+    refresh_self_fingerprints(value)
+  },
+  "smoothing mapping mismatch",
+  paste(
+    "finite response-bearing smoothing mappings must fail after",
+    "semantic and representation fingerprints are refreshed"
+  )
+)
+assert_setup_error(
+  function(value) {
+    value$sp_mapping_offset[[1L]] <- fixture_data[[1L]]
+    refresh_self_fingerprints(value)
+  },
+  "smoothing mapping mismatch",
+  "nonzero smoothing mapping offsets must fail canonical v1 validation"
+)
+assert_setup_error(
+  function(value) {
+    value$min_sp <- fixture_data[seq_along(value$penalty_blocks), 1L]
+    refresh_self_fingerprints(value)
+  },
+  "smoothing mapping mismatch",
+  "non-NULL minimum smoothing parameters must fail canonical v1 validation"
 )
 assert_setup_error(
   function(value) {

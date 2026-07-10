@@ -1652,6 +1652,34 @@ fastkpc_full_cuda_prepared_s_smooth_state <- function(smooths) {
   )
 }
 
+fastkpc_full_cuda_prepared_s_expected_smooth_state <- function(
+    sorted_S, formula_class) {
+  S_size <- length(as.integer(sorted_S))
+  if (S_size == 0L ||
+      !formula_class %in% c("full-smooth", "additive-smooth")) {
+    stop("PreparedSSetup smooth formula identity is invalid", call. = FALSE)
+  }
+  predictor_terms <- paste0("x", 2L:(1L + S_size))
+  terms <- if (identical(formula_class, "full-smooth")) {
+    list(unname(predictor_terms))
+  } else {
+    lapply(predictor_terms, function(term) unname(term))
+  }
+  names(terms) <- paste0("smooth_", seq_along(terms))
+  labels <- if (identical(formula_class, "full-smooth")) {
+    paste0("s(", paste(predictor_terms, collapse = ","), ")")
+  } else {
+    paste0("s(", predictor_terms, ")")
+  }
+  list(
+    count = as.integer(length(terms)),
+    classes = rep("tprs.smooth", length(terms)),
+    labels = unname(labels),
+    terms = terms,
+    by = rep("NA", length(terms))
+  )
+}
+
 fastkpc_full_cuda_prepared_s_policy_state <- function(
     value, neutral, neutral_policy, nonneutral_label) {
   if (is.null(value) || length(value) == 0L) {
@@ -1861,6 +1889,17 @@ fastkpc_full_cuda_build_prepared_s_setup <- function(inputs, setup_row) {
     NULL
   } else {
     unname(as.numeric(raw$min.sp))
+  }
+  canonical_mapping <- is.null(sp_mapping) &&
+    is.numeric(sp_mapping_offset) &&
+    length(sp_mapping_offset) == penalty_count &&
+    all(is.finite(sp_mapping_offset)) &&
+    all(sp_mapping_offset == 0) && is.null(min_sp)
+  if (!isTRUE(canonical_mapping)) {
+    stop(
+      "PreparedSSetup provider smoothing mapping mismatch",
+      call. = FALSE
+    )
   }
 
   constraint <- if (is.null(raw$C) || length(raw$C) == 0L) {
@@ -2391,17 +2430,11 @@ fastkpc_full_cuda_validate_prepared_s_setup <- function(
     stop("PreparedSSetup penalty label mismatch", call. = FALSE)
   }
   mapping_clean <-
+    is.null(setup$sp_mapping) &&
     is.numeric(setup$sp_mapping_offset) &&
     length(setup$sp_mapping_offset) == penalty_count &&
     all(is.finite(setup$sp_mapping_offset)) &&
-    (is.null(setup$min_sp) ||
-       (is.numeric(setup$min_sp) &&
-        length(setup$min_sp) == penalty_count &&
-        all(is.finite(setup$min_sp)))) &&
-    (is.null(setup$sp_mapping) ||
-       (is.matrix(setup$sp_mapping) && is.numeric(setup$sp_mapping) &&
-        nrow(setup$sp_mapping) == penalty_count &&
-        all(is.finite(setup$sp_mapping))))
+    all(setup$sp_mapping_offset == 0) && is.null(setup$min_sp)
   if (!isTRUE(mapping_clean)) {
     stop("PreparedSSetup smoothing mapping mismatch", call. = FALSE)
   }
@@ -2539,8 +2572,12 @@ fastkpc_full_cuda_validate_prepared_s_setup <- function(
     stop("PreparedSSetup offset policy mismatch", call. = FALSE)
   }
 
+  expected_smooth <- fastkpc_full_cuda_prepared_s_expected_smooth_state(
+    setup$sorted_S, setup$formula_class
+  )
   smooth_count <- length(setup$smooth_classes)
   smooth_atomic_clean <-
+    identical(as.integer(smooth_count), expected_smooth$count) &&
     is.character(setup$smooth_classes) &&
     is.character(setup$smooth_labels) &&
     is.character(setup$smooth_by) &&
@@ -2559,7 +2596,10 @@ fastkpc_full_cuda_validate_prepared_s_setup <- function(
     !anyNA(setup$smooth_classes) && !anyNA(setup$smooth_labels) &&
     !anyNA(setup$smooth_by) &&
     all(is.finite(setup$basis_dimensions)) &&
-    all(is.finite(setup$smooth_null_space_dimensions))
+    all(is.finite(setup$smooth_null_space_dimensions)) &&
+    identical(setup$smooth_classes, expected_smooth$classes) &&
+    identical(setup$smooth_labels, expected_smooth$labels) &&
+    identical(setup$smooth_by, expected_smooth$by)
   if (!isTRUE(smooth_atomic_clean)) {
     stop("PreparedSSetup smooth metadata mismatch", call. = FALSE)
   }
@@ -2597,6 +2637,59 @@ fastkpc_full_cuda_validate_prepared_s_setup <- function(
     all(setup$smooth_sp_ranges[, 1L] <= setup$smooth_sp_ranges[, 2L])
   if (!isTRUE(smooth_lists_finite) || !isTRUE(ranges_clean)) {
     stop("PreparedSSetup smooth ranges mismatch", call. = FALSE)
+  }
+  parameter_widths <- as.integer(
+    setup$smooth_parameter_ranges[, 2L] -
+      setup$smooth_parameter_ranges[, 1L] + 1L
+  )
+  smooth_sp_widths <- as.integer(
+    setup$smooth_sp_ranges[, 2L] -
+      setup$smooth_sp_ranges[, 1L] + 1L
+  )
+  descriptor_shape_clean <-
+    identical(setup$smooth_terms, expected_smooth$terms) &&
+    identical(unname(lengths(setup$smooth_shift)),
+              unname(lengths(expected_smooth$terms))) &&
+    identical(unname(lengths(setup$smooth_p_order)),
+              rep(1L, smooth_count)) &&
+    identical(unname(lengths(setup$smooth_ranks)), smooth_sp_widths) &&
+    identical(unname(lengths(setup$smooth_S_scale)), smooth_sp_widths)
+  parameter_ranges_contiguous <-
+    smooth_count > 0L &&
+    setup$smooth_parameter_ranges[1L, 1L] == 2L &&
+    setup$smooth_parameter_ranges[smooth_count, 2L] == p &&
+    all(parameter_widths > 0L) &&
+    identical(parameter_widths, setup$basis_dimensions - 1L) &&
+    (smooth_count == 1L || all(
+      setup$smooth_parameter_ranges[-1L, 1L] ==
+        setup$smooth_parameter_ranges[-smooth_count, 2L] + 1L
+    ))
+  sp_ranges_contiguous <-
+    smooth_count > 0L && penalty_count > 0L &&
+    setup$smooth_sp_ranges[1L, 1L] == 1L &&
+    setup$smooth_sp_ranges[smooth_count, 2L] == penalty_count &&
+    all(smooth_sp_widths > 0L) &&
+    (smooth_count == 1L || all(
+      setup$smooth_sp_ranges[-1L, 1L] ==
+        setup$smooth_sp_ranges[-smooth_count, 2L] + 1L
+    ))
+  penalty_span_clean <- all(vapply(seq_len(smooth_count), function(index) {
+    sp_index <- seq.int(
+      setup$smooth_sp_ranges[index, 1L],
+      setup$smooth_sp_ranges[index, 2L]
+    )
+    all(vapply(
+      setup$penalty_blocks[sp_index], nrow, integer(1L)
+    ) == parameter_widths[[index]]) &&
+      identical(
+        unname(as.integer(setup$smooth_ranks[[index]])),
+        unname(as.integer(setup$penalty_ranks[sp_index]))
+      )
+  }, logical(1L)))
+  if (!isTRUE(descriptor_shape_clean) ||
+      !isTRUE(parameter_ranges_contiguous) ||
+      !isTRUE(sp_ranges_contiguous) || !isTRUE(penalty_span_clean)) {
+    stop("PreparedSSetup smooth metadata shape mismatch", call. = FALSE)
   }
   smooth_sp_order <- unname(as.integer(unlist(lapply(
     seq_len(smooth_count),
