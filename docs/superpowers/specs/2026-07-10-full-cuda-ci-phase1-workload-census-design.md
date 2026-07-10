@@ -137,6 +137,14 @@ substitute for validation. It must:
 9. record the SHA-256 of every input file and a combined
    `oracle_input_bundle_sha256` in the Phase 1 manifest.
 
+The historical `manifest.json::source_result_path` and
+`source_result_hash` are provenance fields, not additional Phase 1 inputs.
+Do not reopen that mutable/ignored result RDS. When reusing
+`fastkpc_full_cuda_validate_canonical_fixture()`, pass a copy of the canonical
+semantic contract with `source_result_hash = NULL`; the exact Phase 0 oracle
+bundle hashes and independently recomputed graph semantics replace that
+external-file dependency.
+
 The Phase 1 artifact reports inherited oracle evidence with explicit scope:
 
 ```text
