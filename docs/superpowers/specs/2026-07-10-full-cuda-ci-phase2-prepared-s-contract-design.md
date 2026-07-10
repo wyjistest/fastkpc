@@ -4,7 +4,7 @@
 
 Amended after independent contract and corpus review. Phase 1 is complete at
 artifact source commit
-`1560068ba8d635e806612554e11bbed92c0b8843c`. This design freezes the Phase 2
+`1560068ba8d635e806612554e11bbed92c0b8843`. This design freezes the Phase 2
 contract before implementation planning.
 
 ## Decision

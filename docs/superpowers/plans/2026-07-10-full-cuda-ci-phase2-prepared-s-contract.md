@@ -84,7 +84,7 @@ assert_true(
 )
 assert_true(
   identical(contract$phase1_source_commit,
-            "1560068ba8d635e806612554e11bbed92c0b8843c"),
+            "1560068ba8d635e806612554e11bbed92c0b8843"),
   "Phase 2 must pin the artifact-producing Phase 1 commit"
 )
 assert_true(
@@ -167,7 +167,7 @@ fastkpc_full_cuda_prepared_s_input_contract <- function() {
   list(
     schema_version = "full-cuda-ci-phase2-input-v1",
     phase1_source_commit =
-      "1560068ba8d635e806612554e11bbed92c0b8843c",
+      "1560068ba8d635e806612554e11bbed92c0b8843",
     metadata_schema_version = "full-cuda-ci-metadata-v4",
     dataset_file_sha256 =
       "e03cbfafed3336f3da7725878e92af24556b5ebdc6227b94ea84469e62e94036",
