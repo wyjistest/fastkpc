@@ -1199,3 +1199,963 @@ fastkpc_full_cuda_census_write_parity <- function(cases, results, output_dir) {
   utils::write.csv(results, paths$results_csv, row.names = FALSE)
   paths
 }
+
+fastkpc_full_cuda_census_risk_config <- function() {
+  list(
+    risk_schema_version = "full-cuda-ci-risk-v1",
+    near_constant_threshold = sqrt(.Machine$double.eps),
+    rank_estimator = "lapack-svd-v1",
+    rank_tolerance_formula = paste0(
+      "max(dim(A))*max(singular_values(A))*",
+      ".Machine$double.eps"
+    ),
+    condition_estimator = "lapack-svd-ratio-v1",
+    condition_buckets = c(
+      "not_applicable_empty", "finite_lt_1e4",
+      "finite_1e4_to_lt_1e8", "finite_1e8_to_lt_1e12",
+      "finite_ge_1e12", "rank_deficient_inf", "nonfinite_unknown"
+    ),
+    high_condition_threshold = 1e12,
+    near_alpha_tau = log(2),
+    near_alpha_buckets = c(
+      "exact_boundary", "le_1e_minus_12", "le_1e_minus_9",
+      "le_1e_minus_6", "le_1e_minus_3", "le_log_1_01",
+      "le_log_1_1", "le_log_2", "farther"
+    ),
+    p_floor = .Machine$double.xmin,
+    nonfinite_policy = "preserve-and-classify-fail-if-unclassified-v1",
+    selected_sp_policy = "mgcv-first-sp-order-values-and-names-v1",
+    warning_capture_policy =
+      "withCallingHandlers-class-message-order-muffle-v1",
+    convergence_field_policy =
+      "raw-fit-converged-outer.info-mgcv.conv-with-provenance-v1"
+  )
+}
+
+fastkpc_full_cuda_census_condition_bucket <- function(condition, rank,
+                                                       expected_rank) {
+  expected_rank <- as.integer(expected_rank)
+  if (is.na(condition) && identical(as.integer(rank), 0L) &&
+      identical(expected_rank, 0L)) {
+    return("not_applicable_empty")
+  }
+  if (is.na(condition) || is.na(rank)) return("nonfinite_unknown")
+  if (rank < expected_rank || is.infinite(condition)) {
+    return("rank_deficient_inf")
+  }
+  if (condition < 1e4) return("finite_lt_1e4")
+  if (condition < 1e8) return("finite_1e4_to_lt_1e8")
+  if (condition < 1e12) return("finite_1e8_to_lt_1e12")
+  "finite_ge_1e12"
+}
+
+fastkpc_full_cuda_census_svd_diagnostics <- function(
+    A, expected_rank = min(dim(as.matrix(A)))) {
+  A <- as.matrix(A)
+  storage.mode(A) <- "double"
+  dimnames(A) <- NULL
+  expected_rank <- as.integer(expected_rank)
+  if (length(expected_rank) != 1L || is.na(expected_rank) ||
+      expected_rank < 0L) {
+    stop("expected_rank must be one nonnegative integer", call. = FALSE)
+  }
+  if (any(dim(A) == 0L)) {
+    return(list(
+      rank = 0L,
+      condition = NA_real_,
+      bucket = "not_applicable_empty",
+      tolerance = NA_real_
+    ))
+  }
+  if (any(!is.finite(A))) {
+    return(list(
+      rank = NA_integer_,
+      condition = NA_real_,
+      bucket = "nonfinite_unknown",
+      tolerance = NA_real_
+    ))
+  }
+  singular <- La.svd(A, nu = 0L, nv = 0L)$d
+  if (any(!is.finite(singular))) {
+    return(list(
+      rank = NA_integer_,
+      condition = NA_real_,
+      bucket = "nonfinite_unknown",
+      tolerance = NA_real_
+    ))
+  }
+  smax <- max(singular)
+  if (identical(smax, 0)) {
+    return(list(
+      rank = 0L,
+      condition = Inf,
+      bucket = "rank_deficient_inf",
+      tolerance = 0
+    ))
+  }
+  tolerance <- max(dim(A)) * smax * .Machine$double.eps
+  rank <- sum(singular > tolerance)
+  condition <- if (rank < expected_rank) Inf else smax / min(singular)
+  list(
+    rank = as.integer(rank),
+    condition = condition,
+    bucket = fastkpc_full_cuda_census_condition_bucket(
+      condition, as.integer(rank), expected_rank
+    ),
+    tolerance = tolerance
+  )
+}
+
+fastkpc_full_cuda_census_near_constant <- function(value) {
+  value <- as.double(value)
+  sd_value <- if (length(value) < 2L || any(!is.finite(value))) {
+    NA_real_
+  } else {
+    sqrt(sum((value - mean(value))^2) / (length(value) - 1L))
+  }
+  list(
+    sd = sd_value,
+    near_constant = !is.finite(sd_value) ||
+      sd_value <= sqrt(.Machine$double.eps)
+  )
+}
+
+fastkpc_full_cuda_census_near_alpha_bucket <- function(distance) {
+  distance <- as.numeric(distance)
+  if (length(distance) != 1L || !is.finite(distance)) {
+    return("nonfinite_unknown")
+  }
+  if (distance < 0) {
+    stop("near-alpha distance must be nonnegative", call. = FALSE)
+  }
+  if (distance == 0) return("exact_boundary")
+  limits <- c(1e-12, 1e-9, 1e-6, 1e-3,
+              log(1.01), log(1.1), log(2))
+  labels <- c(
+    "le_1e_minus_12", "le_1e_minus_9", "le_1e_minus_6",
+    "le_1e_minus_3", "le_log_1_01", "le_log_1_1", "le_log_2"
+  )
+  index <- which(distance <= limits)[1L]
+  if (is.na(index)) "farther" else labels[[index]]
+}
+
+fastkpc_full_cuda_census_right_nullspace <- function(C) {
+  C <- as.matrix(C)
+  storage.mode(C) <- "double"
+  dimnames(C) <- NULL
+  coefficient_count <- ncol(C)
+  if (nrow(C) == 0L) return(diag(coefficient_count))
+  diagnostics <- fastkpc_full_cuda_census_svd_diagnostics(
+    C, expected_rank = min(dim(C))
+  )
+  if (is.na(diagnostics$rank)) {
+    stop("cannot construct nullspace for non-finite constraints",
+         call. = FALSE)
+  }
+  rank <- diagnostics$rank
+  if (rank >= coefficient_count) {
+    return(matrix(numeric(), nrow = coefficient_count, ncol = 0L))
+  }
+  decomposition <- La.svd(C, nu = 0L, nv = coefficient_count)
+  transpose_v <- decomposition$vt
+  t(transpose_v[seq.int(rank + 1L, coefficient_count), , drop = FALSE])
+}
+
+fastkpc_full_cuda_census_setup_fingerprint <- function(
+    same_S_group_id, n, formula_class, model_matrix_hash,
+    penalty_hashes, penalty_offsets, constraint_hash, H_hash,
+    weights_policy, offset_policy, rank_metadata_hash) {
+  if (!grepl("^[0-9a-f]{64}$", same_S_group_id)) {
+    stop("same-S group id must be one lowercase SHA-256", call. = FALSE)
+  }
+  if (!formula_class %in% c("full-smooth", "additive-smooth")) {
+    stop("setup fingerprint requires a conditional formula class",
+         call. = FALSE)
+  }
+  fields <- c(
+    "schema_version=full-cuda-ci-same-s-setup-fingerprint-v1",
+    paste0(
+      "dataset_sha256=",
+      fastkpc_full_cuda_census_input_contract()$dataset_matrix_sha256
+    ),
+    paste0("same_S_group_id=", same_S_group_id),
+    paste0("n=", as.integer(n)),
+    "canonical_input_p=48",
+    paste0("formula_class=", formula_class),
+    "family=gaussian",
+    "link=identity",
+    "method=GCV.Cp",
+    "optimizer=mgcv-default",
+    "gamma=1",
+    "select=false",
+    "scale=mgcv-default",
+    paste0("model_matrix_hash=", model_matrix_hash),
+    paste0("penalty_hashes=", paste(penalty_hashes, collapse = ",")),
+    paste0("penalty_offsets=", paste(as.integer(penalty_offsets),
+                                      collapse = ",")),
+    paste0("constraint_hash=", constraint_hash),
+    paste0("H_hash=", H_hash),
+    paste0("weights_policy=", weights_policy),
+    paste0("offset_policy=", offset_policy),
+    paste0("rank_metadata_hash=", rank_metadata_hash)
+  )
+  payload <- paste0(paste(fields, collapse = "\n"), "\n")
+  list(
+    payload = payload,
+    sha256 = fastkpc_full_cuda_census_hash_utf8(payload)
+  )
+}
+
+fastkpc_full_cuda_census_request_row <- function(request_row) {
+  request_row <- as.data.frame(request_row, stringsAsFactors = FALSE)
+  required <- c(
+    "residual_key_sha256", "target", "S_key", "S_size",
+    "formula_class", "same_S_group_id"
+  )
+  missing <- setdiff(required, names(request_row))
+  if (nrow(request_row) != 1L || length(missing) > 0L) {
+    stop("metadata extraction requires one complete residual request row",
+         call. = FALSE)
+  }
+  request_row
+}
+
+fastkpc_full_cuda_census_penalty_components <- function(fit,
+                                                         coefficient_count) {
+  blocks <- list()
+  embedded <- list()
+  offsets <- integer()
+  ranks <- integer()
+  dimensions <- character()
+  sp_indices <- integer()
+  smooth_classes <- character()
+  basis_dimensions <- integer()
+  for (smooth in fit$smooth) {
+    smooth_class <- class(smooth)[[1L]]
+    smooth_classes <- c(smooth_classes, smooth_class)
+    basis_dimensions <- c(
+      basis_dimensions,
+      as.integer(if (is.null(smooth$bs.dim)) {
+        smooth$last.para - smooth$first.para + 1L
+      } else {
+        smooth$bs.dim
+      })
+    )
+    penalties <- smooth$S
+    if (is.null(penalties) || length(penalties) == 0L) next
+    coefficient_index <- seq.int(
+      as.integer(smooth$first.para), as.integer(smooth$last.para)
+    )
+    if (is.null(smooth$first.sp) || is.null(smooth$last.sp)) {
+      stop("mgcv smooth is missing penalty-order metadata", call. = FALSE)
+    }
+    smooth_sp_indices <- seq.int(smooth$first.sp, smooth$last.sp)
+    if (length(smooth_sp_indices) != length(penalties)) {
+      stop("mgcv smooth penalty order is inconsistent", call. = FALSE)
+    }
+    for (penalty_index in seq_along(penalties)) {
+      penalty <- penalties[[penalty_index]]
+      penalty <- as.matrix(penalty)
+      storage.mode(penalty) <- "double"
+      dimnames(penalty) <- NULL
+      if (!identical(dim(penalty),
+                     c(length(coefficient_index), length(coefficient_index)))) {
+        stop("mgcv penalty block does not match coefficient range",
+             call. = FALSE)
+      }
+      full <- matrix(0, coefficient_count, coefficient_count)
+      full[coefficient_index, coefficient_index] <- penalty
+      diagnostics <- fastkpc_full_cuda_census_svd_diagnostics(
+        penalty, expected_rank = ncol(penalty)
+      )
+      blocks[[length(blocks) + 1L]] <- penalty
+      embedded[[length(embedded) + 1L]] <- full
+      offsets <- c(offsets, coefficient_index[[1L]])
+      ranks <- c(ranks, diagnostics$rank)
+      dimensions <- c(dimensions, paste(dim(penalty), collapse = "x"))
+      sp_indices <- c(sp_indices, smooth_sp_indices[[penalty_index]])
+    }
+  }
+  if (length(sp_indices) > 0L) {
+    order_id <- order(sp_indices, method = "radix")
+    if (!identical(sort(as.integer(sp_indices), method = "radix"),
+                   seq_along(sp_indices))) {
+      stop("mgcv penalty indices are not canonical contiguous order",
+           call. = FALSE)
+    }
+    blocks <- blocks[order_id]
+    embedded <- embedded[order_id]
+    offsets <- offsets[order_id]
+    ranks <- ranks[order_id]
+    dimensions <- dimensions[order_id]
+    sp_indices <- sp_indices[order_id]
+  }
+  list(
+    blocks = blocks,
+    embedded = embedded,
+    offsets = as.integer(offsets),
+    ranks = as.integer(ranks),
+    dimensions = dimensions,
+    sp_indices = as.integer(sp_indices),
+    hashes = vapply(
+      blocks, fastkpc_full_cuda_census_metadata_hash, character(1L)
+    ),
+    smooth_classes = smooth_classes,
+    basis_dimensions = as.integer(basis_dimensions)
+  )
+}
+
+fastkpc_full_cuda_census_constraint_matrix <- function(fit,
+                                                        coefficient_count) {
+  if (!is.null(fit$C) && length(fit$C) > 0L) {
+    constraint <- as.matrix(fit$C)
+    if (ncol(constraint) != coefficient_count) {
+      stop("fit-level constraint dimension is inconsistent", call. = FALSE)
+    }
+    storage.mode(constraint) <- "double"
+    dimnames(constraint) <- NULL
+    return(constraint)
+  }
+  pieces <- list()
+  for (smooth in fit$smooth) {
+    if (is.null(smooth$C) || length(smooth$C) == 0L) next
+    local <- as.matrix(smooth$C)
+    coefficient_index <- seq.int(
+      as.integer(smooth$first.para), as.integer(smooth$last.para)
+    )
+    if (ncol(local) != length(coefficient_index)) {
+      stop("smooth constraint dimension is inconsistent", call. = FALSE)
+    }
+    full <- matrix(0, nrow(local), coefficient_count)
+    full[, coefficient_index] <- local
+    pieces[[length(pieces) + 1L]] <- full
+  }
+  if (length(pieces) == 0L) {
+    return(matrix(numeric(), nrow = 0L, ncol = coefficient_count))
+  }
+  constraint <- do.call(rbind, pieces)
+  storage.mode(constraint) <- "double"
+  dimnames(constraint) <- NULL
+  constraint
+}
+
+fastkpc_full_cuda_census_fit_policy <- function(value, neutral, label) {
+  if (is.null(value) || length(value) == 0L || all(value == neutral)) {
+    return("none")
+  }
+  paste0(label, ":", fastkpc_full_cuda_census_metadata_hash(value))
+}
+
+fastkpc_full_cuda_census_setup_components <- function(
+    fit, request_row, data) {
+  request_row <- fastkpc_full_cuda_census_request_row(request_row)
+  data <- as.matrix(data)
+  target <- as.integer(request_row$target[[1L]])
+  S <- fastkpc_full_cuda_census_parse_s(request_row$S_key[[1L]])
+  if (target < 1L || target > ncol(data) || length(S) == 0L ||
+      any(S < 1L | S > ncol(data))) {
+    stop("residual request indexes are outside canonical data",
+         call. = FALSE)
+  }
+  model_matrix <- as.matrix(stats::predict(fit, type = "lpmatrix"))
+  storage.mode(model_matrix) <- "double"
+  dimnames(model_matrix) <- NULL
+  coefficient_count <- ncol(model_matrix)
+  model_diagnostics <- fastkpc_full_cuda_census_svd_diagnostics(
+    model_matrix, expected_rank = coefficient_count
+  )
+  conditioning_data <- data[, S, drop = FALSE]
+  conditioning_diagnostics <- fastkpc_full_cuda_census_svd_diagnostics(
+    conditioning_data, expected_rank = ncol(conditioning_data)
+  )
+  near_constant_conditioning <- vapply(
+    seq_len(ncol(conditioning_data)),
+    function(index) fastkpc_full_cuda_census_near_constant(
+      conditioning_data[, index]
+    )$near_constant,
+    logical(1L)
+  )
+
+  penalties <- fastkpc_full_cuda_census_penalty_components(
+    fit, coefficient_count
+  )
+  P_unit <- matrix(0, coefficient_count, coefficient_count)
+  if (length(penalties$embedded) > 0L) {
+    for (penalty in penalties$embedded) P_unit <- P_unit + penalty
+  }
+  constraint <- fastkpc_full_cuda_census_constraint_matrix(
+    fit, coefficient_count
+  )
+  constraint_diagnostics <- fastkpc_full_cuda_census_svd_diagnostics(
+    constraint, expected_rank = min(dim(constraint))
+  )
+  Z <- fastkpc_full_cuda_census_right_nullspace(constraint)
+  projected_penalty <- if (ncol(Z) == 0L) {
+    matrix(numeric(), nrow = 0L, ncol = 0L)
+  } else {
+    crossprod(Z, P_unit %*% Z)
+  }
+  projected_penalty_diagnostics <- fastkpc_full_cuda_census_svd_diagnostics(
+    projected_penalty, expected_rank = ncol(projected_penalty)
+  )
+  penalty_nullity <- ncol(Z) - projected_penalty_diagnostics$rank
+
+  H_present <- !is.null(fit$H) && length(fit$H) > 0L
+  H <- if (H_present) as.matrix(fit$H) else
+    matrix(0, coefficient_count, coefficient_count)
+  if (!identical(dim(H), c(coefficient_count, coefficient_count))) {
+    stop("mgcv H dimension is inconsistent", call. = FALSE)
+  }
+  storage.mode(H) <- "double"
+  dimnames(H) <- NULL
+  weights <- if (!is.null(fit$prior.weights)) {
+    as.numeric(fit$prior.weights)
+  } else {
+    as.numeric(fit$weights)
+  }
+  offset <- if (is.null(fit$offset)) numeric() else as.numeric(fit$offset)
+  weights_policy <- fastkpc_full_cuda_census_fit_policy(
+    weights, 1, "nonunit"
+  )
+  offset_policy <- fastkpc_full_cuda_census_fit_policy(
+    offset, 0, "nonzero"
+  )
+
+  rank_metadata <- list(
+    model_matrix_dimensions = as.integer(dim(model_matrix)),
+    model_matrix_rank = model_diagnostics$rank,
+    penalty_block_dimensions = penalties$dimensions,
+    penalty_ranks = penalties$ranks,
+    penalty_nullity = as.integer(penalty_nullity),
+    constraint_dimensions = as.integer(dim(constraint)),
+    constraint_rank = constraint_diagnostics$rank,
+    constraint_nullspace_dimension = as.integer(ncol(Z)),
+    conditioning_dimensions = as.integer(dim(conditioning_data)),
+    conditioning_rank = conditioning_diagnostics$rank
+  )
+  model_matrix_hash <- fastkpc_full_cuda_census_metadata_hash(model_matrix)
+  constraint_hash <- fastkpc_full_cuda_census_metadata_hash(constraint)
+  H_hash <- if (H_present) {
+    fastkpc_full_cuda_census_metadata_hash(H)
+  } else {
+    "NONE"
+  }
+  rank_metadata_hash <- fastkpc_full_cuda_census_metadata_hash(rank_metadata)
+  fingerprint <- fastkpc_full_cuda_census_setup_fingerprint(
+    same_S_group_id = request_row$same_S_group_id[[1L]],
+    n = nrow(data),
+    formula_class = request_row$formula_class[[1L]],
+    model_matrix_hash = model_matrix_hash,
+    penalty_hashes = penalties$hashes,
+    penalty_offsets = penalties$offsets,
+    constraint_hash = constraint_hash,
+    H_hash = H_hash,
+    weights_policy = weights_policy,
+    offset_policy = offset_policy,
+    rank_metadata_hash = rank_metadata_hash
+  )
+  row <- data.frame(
+    same_S_group_id = request_row$same_S_group_id[[1L]],
+    S_key = request_row$S_key[[1L]],
+    S_size = as.integer(request_row$S_size[[1L]]),
+    formula_class = request_row$formula_class[[1L]],
+    representative_residual_key_sha256 =
+      request_row$residual_key_sha256[[1L]],
+    formula_semantics_version = "kpcalg_regrXonS_v1",
+    model_matrix_nrow = as.integer(nrow(model_matrix)),
+    model_matrix_ncol = as.integer(ncol(model_matrix)),
+    model_matrix_hash = model_matrix_hash,
+    model_matrix_rank = model_diagnostics$rank,
+    model_matrix_condition = model_diagnostics$condition,
+    penalty_count = as.integer(length(penalties$blocks)),
+    penalty_block_dimensions = I(list(penalties$dimensions)),
+    penalty_ranks = I(list(penalties$ranks)),
+    penalty_offsets = I(list(penalties$offsets)),
+    penalty_hashes = I(list(penalties$hashes)),
+    penalty_nullity = as.integer(penalty_nullity),
+    constraint_dimensions = I(list(as.integer(dim(constraint)))),
+    constraint_rank = constraint_diagnostics$rank,
+    constraint_nullspace_dimension = as.integer(ncol(Z)),
+    constraint_hash = constraint_hash,
+    H_dimensions = I(list(if (H_present) as.integer(dim(H)) else
+                            integer())),
+    H_hash = H_hash,
+    weights_policy = weights_policy,
+    offset_policy = offset_policy,
+    smooth_classes = I(list(penalties$smooth_classes)),
+    basis_dimensions = I(list(penalties$basis_dimensions)),
+    conditioning_rank = conditioning_diagnostics$rank,
+    conditioning_condition = conditioning_diagnostics$condition,
+    near_constant_conditioning_count =
+      as.integer(sum(near_constant_conditioning)),
+    setup_fingerprint = fingerprint$sha256,
+    mgcv_version = as.character(utils::packageVersion("mgcv")),
+    R_version = R.version.string,
+    stringsAsFactors = FALSE
+  )
+  list(
+    row = row,
+    model_matrix = model_matrix,
+    model_diagnostics = model_diagnostics,
+    conditioning_diagnostics = conditioning_diagnostics,
+    penalties = penalties,
+    P_unit = P_unit,
+    constraint = constraint,
+    constraint_diagnostics = constraint_diagnostics,
+    Z = Z,
+    H = H,
+    weights = weights,
+    fingerprint_payload = fingerprint$payload
+  )
+}
+
+fastkpc_full_cuda_census_setup_observation <- function(
+    fit, request_row, data) {
+  fastkpc_full_cuda_census_setup_components(fit, request_row, data)$row
+}
+
+fastkpc_full_cuda_census_convergence_fields <- function(fit) {
+  fields <- list()
+  if (!is.null(fit$converged)) {
+    fields$converged <- list(source = "fit$converged", value = fit$converged)
+  }
+  if (!is.null(fit$outer.info)) {
+    fields$outer.info <- list(source = "fit$outer.info",
+                              value = fit$outer.info)
+  }
+  if (!is.null(fit$mgcv.conv)) {
+    fields$mgcv.conv <- list(source = "fit$mgcv.conv", value = fit$mgcv.conv)
+  }
+  fields
+}
+
+fastkpc_full_cuda_census_nonconverged <- function(fit) {
+  flags <- logical()
+  if (!is.null(fit$converged)) flags <- c(flags, !isTRUE(fit$converged))
+  if (!is.null(fit$mgcv.conv$fully.converged)) {
+    flags <- c(flags, !isTRUE(fit$mgcv.conv$fully.converged))
+  }
+  outer_convergence <- fit$outer.info$conv
+  if (!is.null(outer_convergence)) {
+    outer_failed <- if (is.logical(outer_convergence)) {
+      !isTRUE(outer_convergence)
+    } else if (is.numeric(outer_convergence)) {
+      length(outer_convergence) != 1L || !is.finite(outer_convergence) ||
+        outer_convergence != 0
+    } else {
+      value <- tolower(trimws(as.character(outer_convergence)))
+      length(value) != 1L ||
+        !value %in% c("full convergence", "converged",
+                      "successful convergence")
+    }
+    flags <- c(flags, outer_failed)
+  }
+  any(flags)
+}
+
+fastkpc_full_cuda_census_target_error_row <- function(request_row, error) {
+  data.frame(
+    residual_key_sha256 = request_row$residual_key_sha256[[1L]],
+    same_S_group_id = request_row$same_S_group_id[[1L]],
+    setup_fingerprint = NA_character_,
+    target = as.integer(request_row$target[[1L]]),
+    fit_status = "error",
+    fit_error = conditionMessage(error),
+    fit_time_ms = NA_real_,
+    formula = NA_character_,
+    method = "GCV.Cp",
+    optimizer = "mgcv-default",
+    family = "gaussian",
+    link = "identity",
+    selected_sp = I(list(numeric())),
+    selected_sp_names = I(list(character())),
+    selected_sp_hash = NA_character_,
+    GCV_Cp_score = NA_real_,
+    EDF = NA_real_,
+    convergence_fields = I(list(list())),
+    warning_classes = I(list(list())),
+    warning_messages = I(list(character())),
+    coefficient_rank = NA_integer_,
+    penalized_system_condition_at_selected_sp = NA_real_,
+    target_sd = NA_real_,
+    target_near_constant = TRUE,
+    coefficient_hash = NA_character_,
+    fitted_hash = NA_character_,
+    residual_hash = NA_character_,
+    target_fit_fingerprint = NA_character_,
+    stringsAsFactors = FALSE
+  )
+}
+
+fastkpc_full_cuda_census_target_risk_row <- function(
+    request_row, setup, target_row, penalized_diagnostics,
+    mgcv_warning, mgcv_nonconverged, nonfinite_metadata,
+    risk_config) {
+  rank_deficient <- setup$model_diagnostics$bucket ==
+    "rank_deficient_inf" ||
+    setup$conditioning_diagnostics$bucket == "rank_deficient_inf" ||
+    penalized_diagnostics$bucket == "rank_deficient_inf"
+  condition <- target_row$penalized_system_condition_at_selected_sp[[1L]]
+  high_condition <- !is.na(condition) &&
+    (is.infinite(condition) ||
+       condition >= risk_config$high_condition_threshold)
+  data.frame(
+    case_type = "target_key",
+    residual_key_sha256 = request_row$residual_key_sha256[[1L]],
+    logical_sequence_id = NA_integer_,
+    same_S_group_id = request_row$same_S_group_id[[1L]],
+    high_condition = high_condition,
+    rank_deficient = rank_deficient,
+    near_constant_target = target_row$target_near_constant[[1L]],
+    near_constant_conditioner =
+      setup$row$near_constant_conditioning_count[[1L]] > 0L,
+    multi_penalty = setup$row$penalty_count[[1L]] > 1L,
+    near_alpha = FALSE,
+    mgcv_warning = mgcv_warning,
+    mgcv_nonconverged = mgcv_nonconverged,
+    nonfinite_metadata = nonfinite_metadata,
+    condition_bucket = penalized_diagnostics$bucket,
+    near_alpha_bucket = NA_character_,
+    stringsAsFactors = FALSE
+  )
+}
+
+fastkpc_full_cuda_census_fit_key <- function(data, request_row,
+                                              risk_config =
+                                                fastkpc_full_cuda_census_risk_config()) {
+  request_row <- fastkpc_full_cuda_census_request_row(request_row)
+  data <- as.matrix(data)
+  tryCatch({
+    target <- as.integer(request_row$target[[1L]])
+    S <- fastkpc_full_cuda_census_parse_s(request_row$S_key[[1L]])
+    if (target < 1L || target > ncol(data) || any(S < 1L | S > ncol(data))) {
+      stop("residual request indexes are outside canonical data",
+           call. = FALSE)
+    }
+    captured <- fastkpc_full_cuda_census_single_target_fit(
+      data[, target], data[, S, drop = FALSE]
+    )
+    fit <- captured$value
+    setup <- fastkpc_full_cuda_census_setup_components(
+      fit, request_row, data
+    )
+    selected_sp <- fit$sp
+    selected_sp_values <- as.numeric(selected_sp)
+    selected_sp_names <- names(selected_sp)
+    if (length(selected_sp_values) != length(setup$penalties$embedded)) {
+      stop("selected sp does not match mgcv penalty order", call. = FALSE)
+    }
+    P_selected <- matrix(0, ncol(setup$model_matrix),
+                         ncol(setup$model_matrix))
+    if (length(selected_sp_values) > 0L) {
+      for (index in seq_along(selected_sp_values)) {
+        P_selected <- P_selected +
+          selected_sp_values[[index]] * setup$penalties$embedded[[index]]
+      }
+    }
+    weighted_model <- setup$model_matrix * setup$weights
+    normal_system <- crossprod(setup$model_matrix, weighted_model) +
+      P_selected + setup$H
+    A <- if (ncol(setup$Z) == 0L) {
+      matrix(numeric(), nrow = 0L, ncol = 0L)
+    } else {
+      crossprod(setup$Z, normal_system %*% setup$Z)
+    }
+    penalized_diagnostics <- fastkpc_full_cuda_census_svd_diagnostics(
+      A, expected_rank = ncol(A)
+    )
+    target_risk <- fastkpc_full_cuda_census_near_constant(data[, target])
+    coefficients <- as.numeric(stats::coef(fit))
+    fitted <- as.numeric(stats::fitted(fit))
+    residuals <- as.numeric(stats::residuals(fit))
+    selected_sp_hash <- fastkpc_full_cuda_census_metadata_hash(
+      selected_sp_values
+    )
+    coefficient_hash <- fastkpc_full_cuda_census_metadata_hash(coefficients)
+    fitted_hash <- fastkpc_full_cuda_census_metadata_hash(fitted)
+    residual_hash <- fastkpc_full_cuda_census_metadata_hash(residuals)
+    convergence_fields <- fastkpc_full_cuda_census_convergence_fields(fit)
+    warning_classes <- lapply(captured$warnings, `[[`, "class")
+    warning_messages <- vapply(
+      captured$warnings, `[[`, character(1L), "message"
+    )
+    GCV_Cp_score <- as.numeric(fit$gcv.ubre)
+    EDF <- as.numeric(sum(fit$edf))
+    fingerprint <- fastkpc_full_cuda_census_metadata_hash(list(
+      "full-cuda-ci-target-fit-fingerprint-v1",
+      request_row$residual_key_sha256[[1L]],
+      setup$row$setup_fingerprint[[1L]],
+      target,
+      selected_sp_values,
+      selected_sp_names,
+      GCV_Cp_score,
+      EDF,
+      convergence_fields,
+      warning_classes,
+      warning_messages,
+      coefficient_hash,
+      fitted_hash,
+      residual_hash,
+      penalized_diagnostics$condition,
+      target_risk$sd
+    ))
+    target_row <- data.frame(
+      residual_key_sha256 = request_row$residual_key_sha256[[1L]],
+      same_S_group_id = request_row$same_S_group_id[[1L]],
+      setup_fingerprint = setup$row$setup_fingerprint[[1L]],
+      target = target,
+      fit_status = "success",
+      fit_error = "NONE",
+      fit_time_ms = as.numeric(captured$elapsed_ms),
+      formula = paste(deparse(stats::formula(fit), width.cutoff = 500L),
+                      collapse = " "),
+      method = "GCV.Cp",
+      optimizer = "mgcv-default",
+      family = fit$family$family,
+      link = fit$family$link,
+      selected_sp = I(list(selected_sp_values)),
+      selected_sp_names = I(list(selected_sp_names)),
+      selected_sp_hash = selected_sp_hash,
+      GCV_Cp_score = GCV_Cp_score,
+      EDF = EDF,
+      convergence_fields = I(list(convergence_fields)),
+      warning_classes = I(list(warning_classes)),
+      warning_messages = I(list(warning_messages)),
+      coefficient_rank = as.integer(fit$rank),
+      penalized_system_condition_at_selected_sp =
+        penalized_diagnostics$condition,
+      target_sd = target_risk$sd,
+      target_near_constant = target_risk$near_constant,
+      coefficient_hash = coefficient_hash,
+      fitted_hash = fitted_hash,
+      residual_hash = residual_hash,
+      target_fit_fingerprint = fingerprint,
+      stringsAsFactors = FALSE
+    )
+    nonfinite_metadata <- any(!is.finite(c(
+      selected_sp_values, GCV_Cp_score, EDF,
+      penalized_diagnostics$condition, target_risk$sd
+    )))
+    risk_row <- fastkpc_full_cuda_census_target_risk_row(
+      request_row = request_row,
+      setup = setup,
+      target_row = target_row,
+      penalized_diagnostics = penalized_diagnostics,
+      mgcv_warning = length(captured$warnings) > 0L,
+      mgcv_nonconverged = fastkpc_full_cuda_census_nonconverged(fit),
+      nonfinite_metadata = nonfinite_metadata,
+      risk_config = risk_config
+    )
+    list(
+      setup_observation = setup$row,
+      target_fit = target_row,
+      risk_cases = risk_row
+    )
+  }, error = function(error) {
+    target_row <- fastkpc_full_cuda_census_target_error_row(
+      request_row, error
+    )
+    risk_row <- data.frame(
+      case_type = "target_key",
+      residual_key_sha256 = request_row$residual_key_sha256[[1L]],
+      logical_sequence_id = NA_integer_,
+      same_S_group_id = request_row$same_S_group_id[[1L]],
+      high_condition = FALSE,
+      rank_deficient = FALSE,
+      near_constant_target = TRUE,
+      near_constant_conditioner = FALSE,
+      multi_penalty = FALSE,
+      near_alpha = FALSE,
+      mgcv_warning = FALSE,
+      mgcv_nonconverged = FALSE,
+      nonfinite_metadata = TRUE,
+      condition_bucket = "nonfinite_unknown",
+      near_alpha_bucket = NA_character_,
+      stringsAsFactors = FALSE
+    )
+    list(setup_observation = NULL, target_fit = target_row,
+         risk_cases = risk_row)
+  })
+}
+
+fastkpc_full_cuda_census_invariant_value <- function(value) {
+  if (is.list(value)) {
+    vapply(value, fastkpc_full_cuda_census_metadata_hash, character(1L))
+  } else {
+    as.character(value)
+  }
+}
+
+fastkpc_full_cuda_census_compress_setups <- function(observations) {
+  observations <- as.data.frame(observations, stringsAsFactors = FALSE)
+  required <- c(
+    "same_S_group_id", "representative_residual_key_sha256",
+    "model_matrix_hash", "penalty_hashes", "constraint_hash",
+    "setup_fingerprint"
+  )
+  missing <- setdiff(required, names(observations))
+  if (nrow(observations) == 0L || length(missing) > 0L) {
+    stop("same-S setup observations are incomplete", call. = FALSE)
+  }
+  groups <- split(seq_len(nrow(observations)),
+                  observations$same_S_group_id)
+  rows <- lapply(groups, function(index) {
+    group <- observations[index, , drop = FALSE]
+    for (field in c("model_matrix_hash", "penalty_hashes",
+                    "constraint_hash", "setup_fingerprint")) {
+      values <- fastkpc_full_cuda_census_invariant_value(group[[field]])
+      if (length(unique(values)) != 1L) {
+        stop("same-S setup invariant violation", call. = FALSE)
+      }
+    }
+    representative <- order(
+      group$representative_residual_key_sha256, method = "radix"
+    )[[1L]]
+    row <- group[representative, , drop = FALSE]
+    row$representative_residual_key_sha256 <- min(
+      group$representative_residual_key_sha256
+    )
+    row
+  })
+  result <- do.call(rbind, rows)
+  result <- result[order(result$same_S_group_id, method = "radix"),
+                   , drop = FALSE]
+  rownames(result) <- NULL
+  result
+}
+
+fastkpc_full_cuda_census_field_present <- function(column) {
+  if (is.list(column)) {
+    return(vapply(column, function(value) !is.null(value), logical(1L)))
+  }
+  !is.na(column)
+}
+
+fastkpc_full_cuda_census_field_finite <- function(column) {
+  if (is.numeric(column)) return(is.finite(column))
+  if (is.list(column) && all(vapply(column, is.numeric, logical(1L)))) {
+    return(vapply(column, function(value) all(is.finite(value)), logical(1L)))
+  }
+  NULL
+}
+
+fastkpc_full_cuda_census_setup_metadata_fields <- function() {
+  c(
+    "same_S_group_id", "S_key", "S_size", "formula_class",
+    "representative_residual_key_sha256", "formula_semantics_version",
+    "model_matrix_nrow", "model_matrix_ncol", "model_matrix_hash",
+    "model_matrix_rank", "model_matrix_condition", "penalty_count",
+    "penalty_block_dimensions", "penalty_ranks", "penalty_offsets",
+    "penalty_hashes", "penalty_nullity", "constraint_dimensions",
+    "constraint_rank", "constraint_nullspace_dimension", "constraint_hash",
+    "H_dimensions", "H_hash", "weights_policy", "offset_policy",
+    "smooth_classes", "basis_dimensions", "conditioning_rank",
+    "conditioning_condition", "near_constant_conditioning_count",
+    "setup_fingerprint", "mgcv_version", "R_version"
+  )
+}
+
+fastkpc_full_cuda_census_target_metadata_fields <- function() {
+  c(
+    "residual_key_sha256", "same_S_group_id", "setup_fingerprint",
+    "target", "fit_status", "fit_error", "fit_time_ms", "formula",
+    "method", "optimizer", "family", "link", "selected_sp",
+    "selected_sp_names", "selected_sp_hash", "GCV_Cp_score", "EDF",
+    "convergence_fields", "warning_classes", "warning_messages",
+    "coefficient_rank", "penalized_system_condition_at_selected_sp",
+    "target_sd", "target_near_constant", "coefficient_hash",
+    "fitted_hash", "residual_hash", "target_fit_fingerprint"
+  )
+}
+
+fastkpc_full_cuda_census_field_coverage <- function(
+    same_s_setup_metadata, target_fit_metadata) {
+  tables <- list(
+    same_s_setup_metadata = same_s_setup_metadata,
+    target_fit_metadata = target_fit_metadata
+  )
+  required_fields <- list(
+    same_s_setup_metadata =
+      fastkpc_full_cuda_census_setup_metadata_fields(),
+    target_fit_metadata =
+      fastkpc_full_cuda_census_target_metadata_fields()
+  )
+  rows <- list()
+  for (table_name in names(tables)) {
+    table <- as.data.frame(tables[[table_name]], stringsAsFactors = FALSE)
+    missing <- setdiff(required_fields[[table_name]], names(table))
+    if (length(missing) > 0L) {
+      stop("metadata table missing required fields: ",
+           paste(missing, collapse = ","), call. = FALSE)
+    }
+    for (field in names(table)) {
+      present <- fastkpc_full_cuda_census_field_present(table[[field]])
+      finite <- fastkpc_full_cuda_census_field_finite(table[[field]])
+      rows[[length(rows) + 1L]] <- data.frame(
+        table = table_name,
+        field = field,
+        total = as.integer(nrow(table)),
+        present = as.integer(sum(present)),
+        finite = if (is.null(finite)) NA_integer_ else
+          as.integer(sum(finite)),
+        required = field %in% required_fields[[table_name]],
+        coverage_ratio = if (nrow(table) == 0L) NA_real_ else
+          sum(present) / nrow(table),
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  do.call(rbind, rows)
+}
+
+fastkpc_full_cuda_census_risk_cases <- function(target_risks,
+                                                 logical_tests = NULL) {
+  target_risks <- as.data.frame(target_risks, stringsAsFactors = FALSE)
+  flags <- c(
+    "high_condition", "rank_deficient", "near_constant_target",
+    "near_constant_conditioner", "multi_penalty", "near_alpha",
+    "mgcv_warning", "mgcv_nonconverged", "nonfinite_metadata"
+  )
+  missing <- setdiff(flags, names(target_risks))
+  if (length(missing) > 0L) {
+    stop("target risk rows are incomplete", call. = FALSE)
+  }
+  selected <- if (nrow(target_risks) == 0L) {
+    target_risks
+  } else {
+    target_risks[rowSums(target_risks[, flags, drop = FALSE]) > 0L,
+                 , drop = FALSE]
+  }
+  if (!is.null(logical_tests)) {
+    logical_tests <- as.data.frame(logical_tests, stringsAsFactors = FALSE)
+    near <- is.finite(logical_tests$absolute_log_distance_from_alpha) &
+      logical_tests$absolute_log_distance_from_alpha <= log(2)
+    if (any(near)) {
+      distances <- logical_tests$absolute_log_distance_from_alpha[near]
+      logical_rows <- data.frame(
+        case_type = "logical_test",
+        residual_key_sha256 = NA_character_,
+        logical_sequence_id = logical_tests$logical_sequence_id[near],
+        same_S_group_id = NA_character_,
+        high_condition = FALSE,
+        rank_deficient = FALSE,
+        near_constant_target = FALSE,
+        near_constant_conditioner = FALSE,
+        multi_penalty = FALSE,
+        near_alpha = TRUE,
+        mgcv_warning = FALSE,
+        mgcv_nonconverged = FALSE,
+        nonfinite_metadata = FALSE,
+        condition_bucket = NA_character_,
+        near_alpha_bucket = vapply(
+          distances, fastkpc_full_cuda_census_near_alpha_bucket,
+          character(1L)
+        ),
+        stringsAsFactors = FALSE
+      )
+      selected <- rbind(selected, logical_rows)
+    }
+  }
+  rownames(selected) <- NULL
+  selected
+}
