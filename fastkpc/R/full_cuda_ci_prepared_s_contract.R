@@ -2896,6 +2896,14 @@ fastkpc_full_cuda_target_state_require <- function(value, message) {
   invisible(TRUE)
 }
 
+fastkpc_full_cuda_target_state_data_identity_valid <- function(
+    data, dataset_sha256) {
+  is.matrix(data) && is.double(data) && length(dim(data)) == 2L &&
+    nrow(data) > 0L && ncol(data) > 0L && all(is.finite(data)) &&
+    fastkpc_full_cuda_prepared_s_is_sha256(dataset_sha256) &&
+    identical(fastkpc_full_cuda_data_hash(data), dataset_sha256)
+}
+
 fastkpc_full_cuda_target_state_row_value <- function(state_row, field) {
   if (!is.data.frame(state_row) || nrow(state_row) != 1L ||
       !field %in% names(state_row)) {
@@ -2935,15 +2943,12 @@ fastkpc_full_cuda_target_state_context <- function(
     "TargetState inputs are incomplete"
   )
   data <- inputs$data
-  fastkpc_full_cuda_target_state_require(
-    is.matrix(data) && is.numeric(data) && length(dim(data)) == 2L &&
-      nrow(data) > 0L && ncol(data) > 0L && all(is.finite(data)),
-    "TargetState canonical data must be a finite numeric matrix"
-  )
   dataset_sha256 <- inputs$dataset_sha256
   fastkpc_full_cuda_target_state_require(
-    fastkpc_full_cuda_prepared_s_is_sha256(dataset_sha256),
-    "TargetState dataset lineage is invalid"
+    fastkpc_full_cuda_target_state_data_identity_valid(
+      data, dataset_sha256
+    ),
+    "TargetState dataset identity mismatch"
   )
   fastkpc_full_cuda_target_state_require(
     is.list(prepared_setup) &&
@@ -3494,8 +3499,10 @@ fastkpc_full_cuda_materialize_target_state <- function(
     "TargetState schema is malformed"
   )
   fastkpc_full_cuda_target_state_require(
-    fastkpc_full_cuda_prepared_s_is_sha256(dataset_sha256),
-    "TargetState dataset lineage is invalid"
+    fastkpc_full_cuda_target_state_data_identity_valid(
+      data, dataset_sha256
+    ),
+    "TargetState dataset identity mismatch"
   )
   source <- state_row$y_source[[1L]]
   fastkpc_full_cuda_target_state_require(
@@ -3504,11 +3511,6 @@ fastkpc_full_cuda_materialize_target_state <- function(
       fastkpc_full_cuda_prepared_s_is_sha256(source$dataset_sha256) &&
       identical(source$dataset_sha256, as.character(dataset_sha256)),
     "TargetState dataset lineage mismatch"
-  )
-  fastkpc_full_cuda_target_state_require(
-    is.matrix(data) && is.numeric(data) && length(dim(data)) == 2L &&
-      nrow(data) > 0L && ncol(data) > 0L && all(is.finite(data)),
-    "TargetState materialization data must be a finite numeric matrix"
   )
   target <- state_row$target[[1L]]
   fastkpc_full_cuda_target_state_require(

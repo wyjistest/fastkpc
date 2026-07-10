@@ -1287,8 +1287,84 @@ assert_true(
     identical(
       fastkpc_full_cuda_census_metadata_hash(fixture_materialized$y),
       fixture_states$y_hash[[1L]]
-    ),
+  ),
   "TargetState materialization must attach exactly one authenticated y"
+)
+
+capture_target_state_error <- function(expression) {
+  tryCatch({
+    force(expression)
+    NULL
+  }, error = identity)
+}
+
+modified_build_inputs <- fixture_inputs
+modified_build_inputs$data <- fixture_data
+modified_build_inputs$data[1L, fixture_targets[[1L]]] <-
+  modified_build_inputs$data[1L, fixture_targets[[1L]]] + 0.25
+
+modified_validation_inputs <- fixture_inputs
+modified_validation_inputs$data <- fixture_data
+modified_validation_inputs$data[2L, fixture_targets[[2L]]] <-
+  modified_validation_inputs$data[2L, fixture_targets[[2L]]] - 0.25
+
+modified_materializer_data <- fixture_data
+materializer_target <- fixture_states$target[[1L]]
+materializer_non_target <- setdiff(
+  seq_len(ncol(modified_materializer_data)), materializer_target
+)[[1L]]
+modified_materializer_data[3L, materializer_non_target] <-
+  modified_materializer_data[3L, materializer_non_target] + 0.25
+
+assert_true(
+  identical(modified_build_inputs$dataset_sha256, fixture_dataset_sha256) &&
+    identical(
+      modified_validation_inputs$dataset_sha256,
+      fixture_dataset_sha256
+    ),
+  "matrix authentication tests must retain the original dataset hash label"
+)
+matrix_identity_errors <- list(
+  build = capture_target_state_error(
+    fastkpc_full_cuda_build_target_states(
+      inputs = modified_build_inputs,
+      prepared_setup = fixture_setup
+    )
+  ),
+  validate = capture_target_state_error(
+    fastkpc_full_cuda_validate_target_states(
+      states = fixture_states,
+      inputs = modified_validation_inputs,
+      prepared_setup = fixture_setup
+    )
+  ),
+  materialize = capture_target_state_error(
+    fastkpc_full_cuda_materialize_target_state(
+      state_row = fixture_states[1L, , drop = FALSE],
+      data = modified_materializer_data,
+      dataset_sha256 = fixture_dataset_sha256
+    )
+  )
+)
+matrix_identity_messages <- vapply(matrix_identity_errors, function(error) {
+  if (is.null(error)) "<no error>" else conditionMessage(error)
+}, character(1L))
+assert_true(
+  all(vapply(matrix_identity_errors, function(error) {
+    inherits(error, "error") &&
+      identical(
+        conditionMessage(error),
+        "TargetState dataset identity mismatch"
+      )
+  }, logical(1L))),
+  paste0(
+    "TargetState matrix authentication failures: ",
+    paste(
+      paste(names(matrix_identity_messages), matrix_identity_messages,
+            sep = "="),
+      collapse = "; "
+    )
+  )
 )
 
 bad_materializer_target <- fixture_states[1L, , drop = FALSE]
@@ -1304,7 +1380,7 @@ assert_error(
   fastkpc_full_cuda_materialize_target_state(
     fixture_states[1L, , drop = FALSE], fixture_data, strrep("0", 64L)
   ),
-  "TargetState dataset lineage",
+  "TargetState dataset identity mismatch",
   "TargetState materialization must reject the wrong dataset hash"
 )
 bad_materializer_source <- fixture_states[1L, , drop = FALSE]
