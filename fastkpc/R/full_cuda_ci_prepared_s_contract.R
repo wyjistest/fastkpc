@@ -17,6 +17,8 @@ fastkpc_full_cuda_prepared_s_input_contract <- function() {
     mgcv_semantics_version =
       "legacy-mgcv-gam-default-selection-v1",
     shard_count = 64L,
+    shard_file_bundle_sha256 =
+      "fdb6ef491e74bd1a9ac8bc01682d83a1fb57839517eb0c0205536b24618323ee",
     dataset_file_sha256 =
       "e03cbfafed3336f3da7725878e92af24556b5ebdc6227b94ea84469e62e94036",
     dataset_matrix_sha256 =
@@ -133,6 +135,12 @@ fastkpc_full_cuda_prepared_s_authenticate_files <- function(
     stop("Phase 1 fallback evidence hash mismatch", call. = FALSE)
   }
 
+  shard_hashes <- fastkpc_full_cuda_prepared_s_authenticate_shards(
+    shard_dir = file.path(census_dir, "shards"),
+    shard_count = contract$shard_count,
+    expected_bundle_sha256 = contract$shard_file_bundle_sha256
+  )
+
   logical_path <- c(
     paste0("phase1/", names(phase1_paths)),
     "dataset/cancer_RD-causalDiscoveryInput.rds",
@@ -143,7 +151,7 @@ fastkpc_full_cuda_prepared_s_authenticate_files <- function(
                 fallback_expected)
   actual <- c(unname(phase1_actual), dataset_actual, fallback_actual)
   order_id <- order(logical_path, method = "radix")
-  data.frame(
+  core_hashes <- data.frame(
     logical_path = logical_path[order_id],
     path = paths[order_id],
     expected_sha256 = expected[order_id],
@@ -151,6 +159,8 @@ fastkpc_full_cuda_prepared_s_authenticate_files <- function(
     identical = actual[order_id] == expected[order_id],
     stringsAsFactors = FALSE
   )
+  hashes <- rbind(core_hashes, shard_hashes)
+  hashes[order(hashes$logical_path, method = "radix"), , drop = FALSE]
 }
 
 fastkpc_full_cuda_prepared_s_input_bundle_hash <- function(input_hashes) {
@@ -169,6 +179,55 @@ fastkpc_full_cuda_prepared_s_input_bundle_hash <- function(input_hashes) {
     "\n"
   )
   fastkpc_full_cuda_census_hash_utf8(payload)
+}
+
+fastkpc_full_cuda_prepared_s_authenticate_shards <- function(
+    shard_dir, shard_count, expected_bundle_sha256) {
+  shard_count <- fastkpc_full_cuda_census_validate_shard_count(shard_count)
+  if (length(expected_bundle_sha256) != 1L ||
+      is.na(expected_bundle_sha256) ||
+      !grepl("^[0-9a-f]{64}$", expected_bundle_sha256)) {
+    stop("Phase 1 shard byte bundle identity is invalid", call. = FALSE)
+  }
+  if (!dir.exists(shard_dir)) {
+    stop("Phase 1 shard directory is missing", call. = FALSE)
+  }
+
+  shard_ids <- 0:(shard_count - 1L)
+  expected_names <- c(
+    paste0("shard_", shard_ids, ".rds"),
+    paste0("shard_", shard_ids, ".summary.json")
+  )
+  actual_names <- list.files(
+    shard_dir, all.files = TRUE, no.. = TRUE
+  )
+  if (!identical(
+        sort(actual_names, method = "radix"),
+        sort(expected_names, method = "radix")
+      )) {
+    stop("Phase 1 shard file set mismatch", call. = FALSE)
+  }
+
+  logical_path <- paste0("phase1/shards/", expected_names)
+  paths <- file.path(shard_dir, expected_names)
+  actual_sha256 <- unname(vapply(
+    paths, fastkpc_full_cuda_census_file_hash, character(1L)
+  ))
+  order_id <- order(logical_path, method = "radix")
+  hashes <- data.frame(
+    logical_path = logical_path[order_id],
+    path = paths[order_id],
+    expected_sha256 = actual_sha256[order_id],
+    actual_sha256 = actual_sha256[order_id],
+    identical = TRUE,
+    stringsAsFactors = FALSE
+  )
+  actual_bundle_sha256 <-
+    fastkpc_full_cuda_prepared_s_input_bundle_hash(hashes)
+  if (!identical(actual_bundle_sha256, expected_bundle_sha256)) {
+    stop("Phase 1 shard byte bundle hash mismatch", call. = FALSE)
+  }
+  hashes
 }
 
 fastkpc_full_cuda_prepared_s_validate_manifest <- function(
@@ -595,6 +654,231 @@ fastkpc_full_cuda_prepared_s_shard_context <- function(
   context
 }
 
+fastkpc_full_cuda_prepared_s_merge_shards <- function(
+    requests, same_s_setup_metadata, target_fit_metadata, risk_cases,
+    shard_count, context, shard_dir) {
+  requests <- as.data.frame(requests, stringsAsFactors = FALSE)
+  same_s_setup_metadata <- as.data.frame(
+    same_s_setup_metadata, stringsAsFactors = FALSE
+  )
+  target_fit_metadata <- as.data.frame(
+    target_fit_metadata, stringsAsFactors = FALSE
+  )
+  risk_cases <- as.data.frame(risk_cases, stringsAsFactors = FALSE)
+  shard_count <- fastkpc_full_cuda_census_validate_shard_count(shard_count)
+  assigned <- fastkpc_full_cuda_census_assign_shards(requests, shard_count)
+  expected_ids <- 0:(shard_count - 1L)
+  expected_keys <- as.character(assigned$residual_key_sha256)
+
+  target_fields <- c(
+    "residual_key_sha256", "same_S_group_id", "setup_fingerprint",
+    "shard_id", "target", "fit_status"
+  )
+  target_keys <- as.character(target_fit_metadata$residual_key_sha256)
+  if (length(setdiff(target_fields, names(target_fit_metadata))) > 0L ||
+      anyNA(target_keys) || anyDuplicated(target_keys) ||
+      !identical(target_keys, expected_keys)) {
+    stop("merged shard target key set mismatch", call. = FALSE)
+  }
+  request_index <- match(target_keys, expected_keys)
+  if (anyNA(request_index) ||
+      !identical(
+        as.character(target_fit_metadata$same_S_group_id),
+        as.character(assigned$same_S_group_id[request_index])
+      ) ||
+      !identical(
+        as.integer(target_fit_metadata$target),
+        as.integer(assigned$target[request_index])
+      ) ||
+      !identical(
+        as.integer(target_fit_metadata$shard_id),
+        as.integer(assigned$shard_id[request_index])
+      )) {
+    stop("merged target/request lineage mismatch", call. = FALSE)
+  }
+
+  setup_chunks <- vector("list", shard_count)
+  risk_chunks <- vector("list", shard_count)
+  seen_targets <- logical(nrow(assigned))
+  for (index in seq_along(expected_ids)) {
+    shard_id <- expected_ids[[index]]
+    paths <- fastkpc_full_cuda_census_shard_paths(shard_dir, shard_id)
+    expected_manifest <- fastkpc_full_cuda_census_shard_manifest(
+      assigned, shard_id, context
+    )
+    completed <- fastkpc_full_cuda_census_read_shard(
+      paths, expected_manifest
+    )
+    payload <- completed$payload
+    rm(completed)
+
+    shard_targets <- as.data.frame(
+      payload$target_fits, stringsAsFactors = FALSE
+    )
+    shard_keys <- as.character(shard_targets$residual_key_sha256)
+    assigned_index <- match(shard_keys, expected_keys)
+    if (anyNA(assigned_index) || any(seen_targets[assigned_index]) ||
+        !identical(
+          as.character(shard_targets$same_S_group_id),
+          as.character(assigned$same_S_group_id[assigned_index])
+        ) ||
+        !identical(
+          as.integer(shard_targets$target),
+          as.integer(assigned$target[assigned_index])
+        ) ||
+        !identical(
+          as.integer(shard_targets$shard_id),
+          as.integer(assigned$shard_id[assigned_index])
+        )) {
+      stop("merged target/request lineage mismatch", call. = FALSE)
+    }
+
+    canonical_index <- match(shard_keys, target_keys)
+    shard_order <- order(shard_keys, method = "radix")
+    shard_targets <- shard_targets[shard_order, , drop = FALSE]
+    canonical_targets <- target_fit_metadata[
+      canonical_index[shard_order], , drop = FALSE
+    ]
+    rownames(shard_targets) <- NULL
+    rownames(canonical_targets) <- NULL
+    if (anyNA(canonical_index) ||
+        !identical(
+          fastkpc_full_cuda_census_frame_hash(shard_targets),
+          fastkpc_full_cuda_census_frame_hash(canonical_targets)
+        )) {
+      stop("Phase 1 shard target metadata mismatch", call. = FALSE)
+    }
+
+    seen_targets[assigned_index] <- TRUE
+    setup_chunks[[index]] <- as.data.frame(
+      payload$setup_observations, stringsAsFactors = FALSE
+    )
+    risk_chunks[[index]] <- as.data.frame(
+      payload$target_risks, stringsAsFactors = FALSE
+    )
+    rm(payload, shard_targets, canonical_targets)
+    if (index %% 8L == 0L || index == length(expected_ids)) {
+      invisible(gc(verbose = FALSE))
+    }
+  }
+  if (!all(seen_targets)) {
+    stop("merged shard target key set mismatch", call. = FALSE)
+  }
+
+  setup_observations <- fastkpc_full_cuda_census_bind_rows(setup_chunks)
+  rm(setup_chunks)
+  invisible(gc(verbose = FALSE))
+  target_risks <- fastkpc_full_cuda_census_bind_rows(risk_chunks)
+  rm(risk_chunks)
+  invisible(gc(verbose = FALSE))
+
+  successful <- as.character(target_fit_metadata$fit_status) == "success"
+  successful_keys <- target_keys[successful]
+  if (length(successful_keys) == 0L) {
+    if (nrow(setup_observations) != 0L) {
+      stop("merged setup key set mismatch", call. = FALSE)
+    }
+  } else {
+    setup_fields <- c(
+      "representative_residual_key_sha256", "same_S_group_id",
+      "setup_fingerprint"
+    )
+    setup_keys <- as.character(
+      setup_observations$representative_residual_key_sha256
+    )
+    if (length(setdiff(setup_fields, names(setup_observations))) > 0L ||
+        anyNA(setup_keys) || anyDuplicated(setup_keys) ||
+        !identical(
+          sort(setup_keys, method = "radix"),
+          sort(successful_keys, method = "radix")
+        )) {
+      stop("merged setup key set mismatch", call. = FALSE)
+    }
+    setup_order <- order(setup_keys, method = "radix")
+    setup_observations <- setup_observations[
+      setup_order, , drop = FALSE
+    ]
+    rownames(setup_observations) <- NULL
+    setup_keys <- as.character(
+      setup_observations$representative_residual_key_sha256
+    )
+    setup_index <- match(successful_keys, setup_keys)
+    if (anyNA(setup_index) ||
+        !identical(
+          as.character(target_fit_metadata$same_S_group_id[successful]),
+          as.character(setup_observations$same_S_group_id[setup_index])
+        ) ||
+        !identical(
+          as.character(target_fit_metadata$setup_fingerprint[successful]),
+          as.character(setup_observations$setup_fingerprint[setup_index])
+        )) {
+      stop("merged target/setup lineage mismatch", call. = FALSE)
+    }
+  }
+
+  computed_same_s <- if (nrow(setup_observations) == 0L) {
+    fastkpc_full_cuda_census_empty_frame(
+      fastkpc_full_cuda_census_setup_metadata_fields()
+    )
+  } else {
+    fastkpc_full_cuda_census_compress_setups(setup_observations)
+  }
+  if (!identical(
+        fastkpc_full_cuda_census_frame_hash(computed_same_s),
+        fastkpc_full_cuda_census_frame_hash(same_s_setup_metadata)
+      )) {
+    stop("Phase 1 merged same-S metadata mismatch", call. = FALSE)
+  }
+
+  risk_fields <- c(
+    "case_type", "residual_key_sha256", "same_S_group_id"
+  )
+  risk_keys <- as.character(target_risks$residual_key_sha256)
+  if (length(setdiff(risk_fields, names(target_risks))) > 0L ||
+      anyNA(risk_keys) || anyDuplicated(risk_keys) ||
+      !identical(sort(risk_keys, method = "radix"), expected_keys)) {
+    stop("merged target risk key set mismatch", call. = FALSE)
+  }
+  risk_order <- order(risk_keys, method = "radix")
+  target_risks <- target_risks[risk_order, , drop = FALSE]
+  rownames(target_risks) <- NULL
+  risk_keys <- as.character(target_risks$residual_key_sha256)
+  risk_index <- match(target_keys, risk_keys)
+  if (anyNA(risk_index) ||
+      any(target_risks$case_type[risk_index] != "target_key") ||
+      !identical(
+        as.character(target_fit_metadata$same_S_group_id),
+        as.character(target_risks$same_S_group_id[risk_index])
+      )) {
+    stop("merged target/risk lineage mismatch", call. = FALSE)
+  }
+
+  computed_risk_cases <- fastkpc_full_cuda_census_risk_cases(
+    target_risks = target_risks,
+    logical_tests = context$logical_tests
+  )
+  if (!identical(
+        fastkpc_full_cuda_census_frame_hash(computed_risk_cases),
+        fastkpc_full_cuda_census_frame_hash(risk_cases)
+      )) {
+    stop("Phase 1 merged risk metadata mismatch", call. = FALSE)
+  }
+
+  authenticated_metadata_hashes <-
+    fastkpc_full_cuda_census_authenticated_metadata_hashes(list(
+      setup_observation_metadata = setup_observations,
+      same_s_setup_metadata = computed_same_s,
+      target_fit_metadata = target_fit_metadata,
+      target_risk_metadata = target_risks,
+      risk_cases = computed_risk_cases
+    ))
+  list(
+    setup_observation_metadata = setup_observations,
+    target_risk_metadata = target_risks,
+    authenticated_metadata_hashes = authenticated_metadata_hashes
+  )
+}
+
 fastkpc_full_cuda_prepared_s_normalize_atomic <- function(value) {
   if (is.factor(value)) value <- as.character(value)
   attributes(value) <- NULL
@@ -742,8 +1026,11 @@ fastkpc_full_cuda_prepared_s_load_inputs <- function(
   context <- fastkpc_full_cuda_prepared_s_shard_context(
     manifest, logical_tests, risk_config
   )
-  merged <- fastkpc_full_cuda_census_merge_shards(
+  merged <- fastkpc_full_cuda_prepared_s_merge_shards(
     requests = residual_requests,
+    same_s_setup_metadata = same_s_setup_metadata,
+    target_fit_metadata = target_fit_metadata,
+    risk_cases = risk_cases,
     shard_count = contract$shard_count,
     context = context,
     shard_dir = file.path(census_dir, "shards")
@@ -863,7 +1150,8 @@ fastkpc_full_cuda_prepared_s_key <- function(
     stop("PreparedSKey hash function is invalid", call. = FALSE)
   }
   sha256 <- hash_fun(payload)
-  if (length(sha256) != 1L || is.na(sha256) || !nzchar(sha256)) {
+  if (length(sha256) != 1L || is.na(sha256) ||
+      !grepl("^[0-9a-f]{64}$", as.character(sha256))) {
     stop("PreparedSKey hash function returned an invalid hash", call. = FALSE)
   }
   fastkpc_full_cuda_prepared_s_validate_key_mapping(payload, sha256)
@@ -874,6 +1162,9 @@ fastkpc_full_cuda_prepared_s_validate_key_mapping <- function(payload, hash) {
   if (length(payload) != length(hash) || anyNA(payload) || anyNA(hash) ||
       any(!nzchar(as.character(payload))) || any(!nzchar(as.character(hash)))) {
     stop("PreparedSKey mapping is incomplete", call. = FALSE)
+  }
+  if (!all(grepl("^[0-9a-f]{64}$", as.character(hash)))) {
+    stop("PreparedSKey hash is invalid", call. = FALSE)
   }
   mapping <- unique(data.frame(
     payload = as.character(payload),
