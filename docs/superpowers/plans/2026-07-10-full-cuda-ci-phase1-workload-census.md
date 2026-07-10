@@ -234,17 +234,28 @@ hashes <- fastkpc_full_cuda_census_validate_input_hashes(
 )
 oracle <- fastkpc_load_full_cuda_ci_oracle(oracle_dir)
 data <- readRDS(data_path)
-semantic_contract <- fastkpc_full_cuda_canonical_contract()
-semantic_contract$source_result_hash <- NULL
-fastkpc_full_cuda_validate_canonical_fixture(
-  data = data,
-  skeleton = oracle$reference,
-  alpha = oracle$manifest$alpha,
-  index = oracle$manifest$index,
-  numCol = oracle$manifest$numCol,
-  max_conditioning_size = oracle$manifest$max_conditioning_size,
-  contract = semantic_contract
+canonical <- fastkpc_full_cuda_canonical_contract()
+stopifnot(
+  identical(fastkpc_full_cuda_data_hash(data), canonical$data_hash),
+  identical(digest::digest(oracle$reference$adjacency,
+                           algo = "sha256", serialize = TRUE),
+            canonical$adjacency_hash),
+  identical(digest::digest(
+    fastkpc_full_cuda_normalize_sepsets(oracle$reference,
+                                        canonical$column_order),
+    algo = "sha256", serialize = TRUE
+  ), canonical$sepset_hash),
+  identical(as.integer(oracle$reference$n.edgetests),
+            as.integer(canonical$n_edgetests))
 )
+deletion_trace <- utils::read.csv(
+  file.path(oracle_dir, "deletion_trace.csv"), stringsAsFactors = FALSE
+)
+deletion_trace$p_value <- as.numeric(deletion_trace$p_value)
+stopifnot(identical(
+  digest::digest(deletion_trace, algo = "sha256", serialize = TRUE),
+  canonical$deletion_trace_hash
+))
 ```
 
 Then independently read and validate `graph_agreement.csv`,
