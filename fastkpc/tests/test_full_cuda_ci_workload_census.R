@@ -202,6 +202,127 @@ assert_true(identical(inputs$oracle_input_bundle_sha256,
 assert_true(identical(dim(inputs$data), c(351L, 48L)),
             "loaded canonical data must retain the 351x48 dimensions")
 
+runner_path <- "fastkpc/tools/run_full_cuda_ci_oracle.R"
+oracle_result_path <- paste0(
+  "fastkpc/artifacts/legacy_mgcv_residual_cache_s_affinity_v1/",
+  "compatible_legacy_cpp_dcov_mgcv_cache_s_affinity_result.rds"
+)
+candidate_result_path <- paste0(
+  "fastkpc/artifacts/full_cuda_ci/trace_source_351x48_v1/result.rds"
+)
+logical_trace_result_path <- candidate_result_path
+snapshot_oracle <- function(path) {
+  files <- list.files(path, full.names = TRUE, recursive = TRUE)
+  hashes <- vapply(files, fastkpc_full_cuda_census_file_hash, character(1L))
+  names(hashes) <- substring(files, nchar(path) + 2L)
+  hashes[order(names(hashes), method = "radix")]
+}
+run_oracle_gate <- function(output_root, oracle_input_dir = NULL, mode = NULL,
+                            valid_source_inputs = FALSE) {
+  source_result <- if (isTRUE(valid_source_inputs)) {
+    oracle_result_path
+  } else {
+    file.path(output_root, "validate-must-not-read-oracle-result.rds")
+  }
+  trace_result <- if (isTRUE(valid_source_inputs)) {
+    logical_trace_result_path
+  } else {
+    file.path(output_root, "validate-must-not-read-logical-trace.rds")
+  }
+  runner_args <- c(runner_path, data_path, source_result,
+                   candidate_result_path, output_root, trace_result)
+  if (!is.null(mode)) runner_args <- c(runner_args, mode)
+  if (!is.null(oracle_input_dir)) {
+    if (is.null(mode)) {
+      stop("oracle_input_dir requires an explicit runner mode", call. = FALSE)
+    }
+    runner_args <- c(runner_args, oracle_input_dir)
+  }
+  mode_env <- c("FASTKPC_FULL_CUDA_CI_ORACLE_MODE",
+                "FASTKPC_FULL_CUDA_CI_ORACLE_DIR")
+  old_env <- Sys.getenv(mode_env, unset = NA_character_)
+  on.exit({
+    Sys.unsetenv(mode_env)
+    restore <- !is.na(old_env)
+    if (any(restore)) {
+      do.call(Sys.setenv, as.list(stats::setNames(
+        old_env[restore], mode_env[restore]
+      )))
+    }
+  }, add = TRUE)
+  Sys.unsetenv(mode_env)
+  suppressWarnings(system2(
+    file.path(R.home("bin"), "Rscript"),
+    shQuote(runner_args),
+    stdout = TRUE,
+    stderr = TRUE
+  ))
+}
+
+canonical_runner_hashes <- snapshot_oracle(oracle_dir)
+default_runner_output_root <- tempfile("phase1-oracle-default-output-")
+default_runner_output <- run_oracle_gate(default_runner_output_root)
+assert_true(is.null(attr(default_runner_output, "status")) &&
+              any(grepl("oracle_mode: validate", default_runner_output,
+                        fixed = TRUE)),
+            "the standard runner must default to immutable validation")
+assert_true(identical(snapshot_oracle(oracle_dir), canonical_runner_hashes),
+            "default validation must not mutate the pinned oracle")
+
+runner_oracle_root <- tempfile("phase1-oracle-runner-input-")
+runner_oracle_dir <- file.path(runner_oracle_root, "oracle_351x48_v1")
+dir.create(runner_oracle_dir, recursive = TRUE, showWarnings = FALSE)
+copied_oracle <- file.copy(list.files(oracle_dir, full.names = TRUE),
+                           runner_oracle_dir, overwrite = TRUE)
+assert_true(all(copied_oracle),
+            "runner regression fixture must copy the complete oracle")
+runner_output_root <- tempfile("phase1-oracle-runner-output-")
+cat("\n", file = file.path(runner_oracle_dir, "summary.json"), append = TRUE)
+tampered_runner_hashes <- snapshot_oracle(runner_oracle_dir)
+tampered_runner_output <- run_oracle_gate(runner_output_root,
+                                          runner_oracle_dir,
+                                          mode = "validate")
+assert_true(!is.null(attr(tampered_runner_output, "status")) &&
+              any(grepl("Phase 1 input hash mismatch",
+                        tampered_runner_output, fixed = TRUE)),
+            "the standard runner must reject byte-drifted oracle input")
+assert_true(identical(snapshot_oracle(runner_oracle_dir),
+                      tampered_runner_hashes),
+            "failed validation must not repair or mutate oracle input")
+
+missing_runner_output_root <- tempfile("phase1-oracle-runner-missing-output-")
+missing_runner_oracle_dir <- file.path(
+  tempfile("phase1-oracle-runner-missing-input-"), "oracle_351x48_v1"
+)
+missing_runner_output <- run_oracle_gate(missing_runner_output_root,
+                                         missing_runner_oracle_dir,
+                                         mode = "validate",
+                                         valid_source_inputs = TRUE)
+assert_true(!is.null(attr(missing_runner_output, "status")),
+            "the standard runner must fail when the frozen oracle is missing")
+assert_true(!dir.exists(missing_runner_oracle_dir),
+            "standard validation must not create a missing frozen oracle")
+
+refresh_runner_output_root <- tempfile("phase1-oracle-refresh-output-")
+refresh_runner_output <- run_oracle_gate(
+  refresh_runner_output_root,
+  mode = "refresh",
+  valid_source_inputs = TRUE
+)
+refresh_runner_oracle_dir <- file.path(refresh_runner_output_root,
+                                       "oracle_351x48_v1")
+assert_true(is.null(attr(refresh_runner_output, "status")) &&
+              any(grepl("oracle_mode: refresh", refresh_runner_output,
+                        fixed = TRUE)) &&
+              dir.exists(refresh_runner_oracle_dir),
+            "explicit refresh must create an oracle under the output root")
+refresh_summary <- jsonlite::read_json(
+  file.path(refresh_runner_oracle_dir, "summary.json"),
+  simplifyVector = TRUE
+)
+assert_true(isTRUE(refresh_summary$pass) && refresh_summary$SHD == 0L,
+            "explicit refresh must preserve the canonical graph gate")
+
 bad_manifest_oracle <- inputs$oracle
 bad_manifest_oracle$manifest$alpha <- 0.2
 assert_error(

@@ -1,4 +1,4 @@
-source("fastkpc/R/full_cuda_ci_gate.R")
+source("fastkpc/R/full_cuda_ci_oracle_contract.R")
 
 args <- commandArgs(trailingOnly = TRUE)
 
@@ -38,7 +38,27 @@ logical_trace_result_path <- arg_or_env(
   file.path("fastkpc", "artifacts", "full_cuda_ci",
             "trace_source_351x48_v1", "result.rds")
 )
-oracle_dir <- file.path(output_root, "oracle_351x48_v1")
+oracle_mode <- arg_or_env(
+  6L,
+  "FASTKPC_FULL_CUDA_CI_ORACLE_MODE",
+  "validate"
+)
+oracle_mode <- tolower(trimws(oracle_mode))
+if (length(oracle_mode) != 1L || is.na(oracle_mode) ||
+    !oracle_mode %in% c("validate", "refresh")) {
+  stop("FASTKPC_FULL_CUDA_CI_ORACLE_MODE must be validate or refresh",
+       call. = FALSE)
+}
+default_oracle_dir <- if (identical(oracle_mode, "validate")) {
+  file.path("fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1")
+} else {
+  file.path(output_root, "oracle_351x48_v1")
+}
+oracle_dir <- arg_or_env(
+  7L,
+  "FASTKPC_FULL_CUDA_CI_ORACLE_DIR",
+  default_oracle_dir
+)
 comparison_dir <- file.path(
   output_root,
   "current_correct_route_351x48_v1"
@@ -47,8 +67,9 @@ fastkpc_full_cuda_reset_output_dir(comparison_dir)
 
 required_paths <- c(
   data_path,
-  oracle_result_path,
-  if (nzchar(logical_trace_result_path)) logical_trace_result_path
+  if (identical(oracle_mode, "refresh")) oracle_result_path,
+  if (identical(oracle_mode, "refresh") &&
+      nzchar(logical_trace_result_path)) logical_trace_result_path
 )
 missing <- required_paths[!file.exists(required_paths)]
 if (length(missing) > 0L) {
@@ -56,40 +77,15 @@ if (length(missing) > 0L) {
        paste(missing, collapse = ", "), call. = FALSE)
 }
 
-data <- readRDS(data_path)
-oracle_result <- readRDS(oracle_result_path)
-oracle_skeleton <- fastkpc_full_cuda_extract_skeleton(
-  oracle_result, role = "oracle"
-)
-if (!fastkpc_full_cuda_is_skeleton(oracle_skeleton)) {
-  stop("oracle result does not contain a skeleton", call. = FALSE)
-}
-
-config <- oracle_result$config
-alpha <- as.numeric(fastkpc_full_cuda_or(config$alpha, 0.1))
-max_conditioning_size <- as.integer(fastkpc_full_cuda_or(
-  config$max_conditioning_size,
-  length(oracle_skeleton$n.edgetests) - 1L
-))
-index <- as.integer(fastkpc_full_cuda_or(config$index, 1L))
-numCol <- as.integer(floor(nrow(as.matrix(data)) / 10L))
-invisible(fastkpc_full_cuda_validate_canonical_fixture(
-  data = data,
-  skeleton = oracle_skeleton,
-  alpha = alpha,
-  index = index,
-  numCol = numCol,
-  max_conditioning_size = max_conditioning_size,
-  source_result_path = oracle_result_path
-))
-
 invocation_environment <- c(
   FASTKPC_FULL_CUDA_CI_DATA_PATH = data_path,
   FASTKPC_FULL_CUDA_CI_ORACLE_RESULT_PATH = oracle_result_path,
   FASTKPC_FULL_CUDA_CI_CANDIDATE_RESULT_PATH = candidate_result_path,
   FASTKPC_FULL_CUDA_CI_OUTPUT_ROOT = output_root,
   FASTKPC_FULL_CUDA_CI_LOGICAL_TRACE_RESULT_PATH =
-    logical_trace_result_path
+    logical_trace_result_path,
+  FASTKPC_FULL_CUDA_CI_ORACLE_MODE = oracle_mode,
+  FASTKPC_FULL_CUDA_CI_ORACLE_DIR = oracle_dir
 )
 invocation <- paste(
   paste0(names(invocation_environment), "=",
@@ -105,24 +101,58 @@ route_environment <- c(
   FASTKPC_LEGACY_MGCV_RESIDUAL_AFFINITY = "s"
 )
 
-oracle <- fastkpc_write_full_cuda_ci_oracle(
-  reference = oracle_skeleton,
-  data = data,
-  output_dir = oracle_dir,
-  alpha = alpha,
-  index = index,
-  numCol = numCol,
-  max_conditioning_size = max_conditioning_size,
-  source_result_path = oracle_result_path,
-  logical_trace_source = if (nzchar(logical_trace_result_path)) {
-    logical_trace_result_path
-  } else NULL,
-  logical_trace_source_path = if (nzchar(logical_trace_result_path)) {
-    logical_trace_result_path
-  } else NA_character_,
-  oracle_route_environment = route_environment,
-  commands = invocation
-)
+oracle <- if (identical(oracle_mode, "validate")) {
+  fastkpc_full_cuda_census_load_inputs(
+    oracle_dir = oracle_dir,
+    data_path = data_path
+  )$oracle
+} else {
+  data <- readRDS(data_path)
+  oracle_result <- readRDS(oracle_result_path)
+  oracle_skeleton <- fastkpc_full_cuda_extract_skeleton(
+    oracle_result, role = "oracle"
+  )
+  if (!fastkpc_full_cuda_is_skeleton(oracle_skeleton)) {
+    stop("oracle result does not contain a skeleton", call. = FALSE)
+  }
+
+  config <- oracle_result$config
+  alpha <- as.numeric(fastkpc_full_cuda_or(config$alpha, 0.1))
+  max_conditioning_size <- as.integer(fastkpc_full_cuda_or(
+    config$max_conditioning_size,
+    length(oracle_skeleton$n.edgetests) - 1L
+  ))
+  index <- as.integer(fastkpc_full_cuda_or(config$index, 1L))
+  numCol <- as.integer(floor(nrow(as.matrix(data)) / 10L))
+  invisible(fastkpc_full_cuda_validate_canonical_fixture(
+    data = data,
+    skeleton = oracle_skeleton,
+    alpha = alpha,
+    index = index,
+    numCol = numCol,
+    max_conditioning_size = max_conditioning_size,
+    source_result_path = oracle_result_path
+  ))
+
+  fastkpc_write_full_cuda_ci_oracle(
+    reference = oracle_skeleton,
+    data = data,
+    output_dir = oracle_dir,
+    alpha = alpha,
+    index = index,
+    numCol = numCol,
+    max_conditioning_size = max_conditioning_size,
+    source_result_path = oracle_result_path,
+    logical_trace_source = if (nzchar(logical_trace_result_path)) {
+      logical_trace_result_path
+    } else NULL,
+    logical_trace_source_path = if (nzchar(logical_trace_result_path)) {
+      logical_trace_result_path
+    } else NA_character_,
+    oracle_route_environment = route_environment,
+    commands = invocation
+  )
+}
 
 comparison <- fastkpc_compare_full_cuda_ci_candidate(
   oracle = oracle,
@@ -141,6 +171,7 @@ comparison <- fastkpc_compare_full_cuda_ci_candidate(
 summary <- comparison$summary
 cat("full CUDA CI Phase 0 gate\n")
 cat("oracle: ", oracle_dir, "\n", sep = "")
+cat("oracle_mode: ", oracle_mode, "\n", sep = "")
 cat("comparison: ", comparison_dir, "\n", sep = "")
 cat("edge_count: ", summary$edge_count_candidate, " / ",
     summary$edge_count_reference, "\n", sep = "")

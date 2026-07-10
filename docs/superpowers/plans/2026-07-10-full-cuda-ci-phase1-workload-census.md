@@ -31,6 +31,7 @@ comparison in this plan.
 
 ```text
 Create  fastkpc/R/full_cuda_ci_workload_census.R
+Create  fastkpc/R/full_cuda_ci_oracle_contract.R
 Create  fastkpc/tools/run_full_cuda_ci_workload_census.R
 Create  fastkpc/tests/test_full_cuda_ci_workload_census.R
 Create  fastkpc/tests/test_full_cuda_ci_workload_census_parity.R
@@ -41,17 +42,19 @@ Modify  goal-5.6.md only after the full artifact passes
 Artifact fastkpc/artifacts/full_cuda_ci/workload_census_351x48_v1/
 ```
 
-`full_cuda_ci_workload_census.R` owns the Phase 0 input contract, structural
-tables, canonical serialization, parity helpers, metadata extraction, risk
-classification, sharding, merge validation, and artifact writer. This follows
-the repository's existing large-module pattern in `full_cuda_ci_gate.R` while
-keeping each public helper prefixed by `fastkpc_full_cuda_census_`.
+`full_cuda_ci_oracle_contract.R` owns the frozen Phase 0 input contract and
+fail-closed loader shared by the Phase 0 validator and Phase 1 census.
+`full_cuda_ci_workload_census.R` owns structural tables, canonical
+serialization, parity helpers, metadata extraction, risk classification,
+sharding, merge validation, and artifact writing. Public helpers remain
+prefixed by `fastkpc_full_cuda_census_`.
 
 ---
 
 ### Task 1: Structural Census and Canonical Key Corpus
 
 **Files:**
+- Create: `fastkpc/R/full_cuda_ci_oracle_contract.R`
 - Create: `fastkpc/R/full_cuda_ci_workload_census.R`
 - Create: `fastkpc/tests/test_full_cuda_ci_workload_census.R`
 
@@ -400,7 +403,8 @@ Expected: `PASS full CUDA CI structural census`, including the canonical
 - [ ] **Step 9: Commit Stage 1**
 
 ```bash
-git add fastkpc/R/full_cuda_ci_workload_census.R \
+git add fastkpc/R/full_cuda_ci_oracle_contract.R \
+        fastkpc/R/full_cuda_ci_workload_census.R \
         fastkpc/tests/test_full_cuda_ci_workload_census.R
 git commit -m "feat: add canonical full CUDA CI structural census"
 ```
@@ -1060,6 +1064,7 @@ Rscript fastkpc/tests/test_full_cuda_ci_workload_census_parity.R
 Rscript fastkpc/tests/test_full_cuda_ci_workload_census_metadata.R
 Rscript fastkpc/tests/test_full_cuda_ci_workload_census_restart.R
 Rscript fastkpc/tests/test_full_cuda_ci_workload_census_real_subset.R
+FASTKPC_FULL_CUDA_CI_ORACLE_MODE=validate \
 Rscript fastkpc/tools/run_full_cuda_ci_oracle.R
 git diff --check
 ```
@@ -1125,6 +1130,7 @@ peak RSS, disk use, and full runtime. No required row may be absent.
 - [ ] **Step 4: Re-run inherited Phase 0 gate after the full pass**
 
 ```bash
+FASTKPC_FULL_CUDA_CI_ORACLE_MODE=validate \
 Rscript fastkpc/tools/run_full_cuda_ci_oracle.R
 ```
 
@@ -1168,6 +1174,7 @@ Rscript fastkpc/tests/test_full_cuda_ci_workload_census_parity.R
 Rscript fastkpc/tests/test_full_cuda_ci_workload_census_metadata.R
 Rscript fastkpc/tests/test_full_cuda_ci_workload_census_restart.R
 Rscript fastkpc/tests/test_full_cuda_ci_workload_census_real_subset.R
+FASTKPC_FULL_CUDA_CI_ORACLE_MODE=validate \
 Rscript fastkpc/tools/run_full_cuda_ci_oracle.R
 git diff --check
 git status --short
@@ -1179,7 +1186,8 @@ fully reproducible from the recorded command and shard manifests.
 - [ ] **Step 7: Commit and push Phase 1 closure**
 
 ```bash
-git add fastkpc/R/full_cuda_ci_workload_census.R \
+git add fastkpc/R/full_cuda_ci_oracle_contract.R \
+        fastkpc/R/full_cuda_ci_workload_census.R \
         fastkpc/tools/run_full_cuda_ci_workload_census.R \
         fastkpc/tests/test_full_cuda_ci_workload_census.R \
         fastkpc/tests/test_full_cuda_ci_workload_census_parity.R \

@@ -742,6 +742,10 @@ full gate:
 ```
 
 The standard runner is `Rscript fastkpc/tools/run_full_cuda_ci_oracle.R`.
+It defaults to immutable validation of the pinned oracle bundle; regeneration
+requires the explicit opt-in
+`FASTKPC_FULL_CUDA_CI_ORACLE_MODE=refresh`. Validation input can be separated
+from comparison output with `FASTKPC_FULL_CUDA_CI_ORACLE_DIR`.
 Focused mismatch tests prove fail-closed first-divergence output for adjacency,
 sepset, logical test-count, deletion-trace, and missing-candidate failures. The
 native `trace_level="logical"` mode records only canonically consumed tests in
