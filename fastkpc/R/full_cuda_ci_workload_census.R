@@ -2159,3 +2159,504 @@ fastkpc_full_cuda_census_risk_cases <- function(target_risks,
   rownames(selected) <- NULL
   selected
 }
+
+fastkpc_full_cuda_census_validate_shard_count <- function(shard_count) {
+  shard_count <- as.integer(shard_count)
+  if (length(shard_count) != 1L || is.na(shard_count) || shard_count < 1L) {
+    stop("shard_count must be one positive integer", call. = FALSE)
+  }
+  shard_count
+}
+
+fastkpc_full_cuda_census_assign_shards <- function(requests, shard_count) {
+  requests <- as.data.frame(requests, stringsAsFactors = FALSE)
+  shard_count <- fastkpc_full_cuda_census_validate_shard_count(shard_count)
+  if (!"residual_key_sha256" %in% names(requests) || nrow(requests) == 0L) {
+    stop("shard assignment requires residual keys", call. = FALSE)
+  }
+  if (anyNA(requests$residual_key_sha256) ||
+      anyDuplicated(requests$residual_key_sha256)) {
+    stop("duplicate residual key in shard assignment", call. = FALSE)
+  }
+  order_id <- order(requests$residual_key_sha256, method = "radix")
+  requests <- requests[order_id, , drop = FALSE]
+  requests$sorted_rank <- seq_len(nrow(requests))
+  requests$shard_id <- (requests$sorted_rank - 1L) %% shard_count
+  rownames(requests) <- NULL
+  attr(requests, "shard_count") <- shard_count
+  requests
+}
+
+fastkpc_full_cuda_census_key_set_payload <- function(keys) {
+  keys <- as.character(keys)
+  if (length(keys) == 0L) return("")
+  paste0(paste(keys, collapse = "\n"), "\n")
+}
+
+fastkpc_full_cuda_census_key_set_hash <- function(keys) {
+  fastkpc_full_cuda_census_hash_utf8(
+    fastkpc_full_cuda_census_key_set_payload(keys)
+  )
+}
+
+fastkpc_full_cuda_census_blas_thread_count <- function() {
+  variables <- c(
+    "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "BLIS_NUM_THREADS",
+    "OMP_NUM_THREADS"
+  )
+  values <- Sys.getenv(variables, unset = "")
+  values <- suppressWarnings(as.integer(values[nzchar(values)]))
+  values <- unique(values[!is.na(values) & values > 0L])
+  if (length(values) == 1L) return(values[[1L]])
+  if (length(values) > 1L) {
+    stop("conflicting BLAS thread-count environment", call. = FALSE)
+  }
+  blas <- as.character(sessionInfo()$BLAS)
+  if (grepl("libRblas", blas, fixed = TRUE)) return(1L)
+  NA_integer_
+}
+
+fastkpc_full_cuda_census_runtime_identity <- function() {
+  session <- sessionInfo()
+  software <- extSoftVersion()
+  software_identity <- function(name) {
+    if (name %in% names(software)) as.character(software[[name]]) else
+      "unreported"
+  }
+  list(
+    source_commit = fastkpc_full_cuda_source_commit(),
+    R_version = R.version.string,
+    mgcv_version = if (requireNamespace("mgcv", quietly = TRUE)) {
+      as.character(utils::packageVersion("mgcv"))
+    } else {
+      "unavailable"
+    },
+    BLAS_identity = paste(
+      as.character(session$BLAS), software_identity("BLAS"),
+      sep = "|"
+    ),
+    LAPACK_identity = paste(
+      as.character(session$LAPACK), software_identity("LAPACK"),
+      sep = "|"
+    ),
+    BLAS_thread_count = fastkpc_full_cuda_census_blas_thread_count()
+  )
+}
+
+fastkpc_full_cuda_census_manifest_context_fields <- function() {
+  c(
+    "canonical_key_corpus_hash", "dataset_sha256",
+    "oracle_input_bundle_sha256", "source_commit", "R_version",
+    "mgcv_version", "BLAS_identity", "LAPACK_identity",
+    "BLAS_thread_count", "formula_semantics_version",
+    "mgcv_semantics_version", "risk_threshold_config_hash",
+    "metadata_schema_version"
+  )
+}
+
+fastkpc_full_cuda_census_validate_manifest_context <- function(context) {
+  if (!is.list(context)) {
+    stop("shard context must be a list", call. = FALSE)
+  }
+  required <- fastkpc_full_cuda_census_manifest_context_fields()
+  missing <- setdiff(required, names(context))
+  if (length(missing) > 0L) {
+    stop("shard context missing fields: ", paste(missing, collapse = ","),
+         call. = FALSE)
+  }
+  text_fields <- setdiff(required, "BLAS_thread_count")
+  for (field in text_fields) {
+    value <- context[[field]]
+    if (length(value) != 1L || is.na(value) || !nzchar(as.character(value))) {
+      stop("invalid shard context field: ", field, call. = FALSE)
+    }
+  }
+  thread_count <- as.integer(context$BLAS_thread_count)
+  if (length(thread_count) != 1L || is.na(thread_count) ||
+      thread_count < 1L) {
+    stop("invalid shard context field: BLAS_thread_count", call. = FALSE)
+  }
+  for (field in c("canonical_key_corpus_hash", "dataset_sha256",
+                  "oracle_input_bundle_sha256",
+                  "risk_threshold_config_hash")) {
+    if (!grepl("^[0-9a-f]{64}$", context[[field]])) {
+      stop("invalid shard context field: ", field, call. = FALSE)
+    }
+  }
+  if (!grepl("^[0-9a-f]{40}$", context$source_commit)) {
+    stop("invalid shard context field: source_commit", call. = FALSE)
+  }
+  if (is.null(context$risk_config)) {
+    stop("shard context missing risk_config", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_census_shard_manifest <- function(
+    assigned_requests, shard_id, context) {
+  shard_count <- attr(assigned_requests, "shard_count", exact = TRUE)
+  assigned_requests <- as.data.frame(assigned_requests,
+                                     stringsAsFactors = FALSE)
+  fastkpc_full_cuda_census_validate_manifest_context(context)
+  required <- c("residual_key_sha256", "shard_id")
+  if (length(setdiff(required, names(assigned_requests))) > 0L) {
+    stop("assigned request table is incomplete", call. = FALSE)
+  }
+  if (is.null(shard_count)) {
+    stop("assigned request table is missing explicit shard_count lineage",
+         call. = FALSE)
+  }
+  shard_count <- fastkpc_full_cuda_census_validate_shard_count(shard_count)
+  actual_corpus_hash <- fastkpc_full_cuda_census_key_set_hash(
+    sort(assigned_requests$residual_key_sha256, method = "radix")
+  )
+  if (!identical(actual_corpus_hash,
+                 context$canonical_key_corpus_hash)) {
+    stop("canonical key corpus hash mismatch", call. = FALSE)
+  }
+  actual_risk_hash <- fastkpc_full_cuda_census_metadata_hash(
+    context$risk_config
+  )
+  if (!identical(actual_risk_hash,
+                 context$risk_threshold_config_hash)) {
+    stop("risk threshold config hash mismatch", call. = FALSE)
+  }
+  shard_id <- as.integer(shard_id)
+  if (length(shard_id) != 1L || is.na(shard_id) || shard_id < 0L ||
+      shard_id >= shard_count) {
+    stop("shard_id is outside assigned shard range", call. = FALSE)
+  }
+  keys <- assigned_requests$residual_key_sha256[
+    assigned_requests$shard_id == shard_id
+  ]
+  list(
+    canonical_key_corpus_hash = context$canonical_key_corpus_hash,
+    expected_key_count_for_shard = as.integer(length(keys)),
+    expected_key_hash_for_shard =
+      fastkpc_full_cuda_census_key_set_hash(keys),
+    dataset_sha256 = context$dataset_sha256,
+    oracle_input_bundle_sha256 = context$oracle_input_bundle_sha256,
+    source_commit = context$source_commit,
+    R_version = context$R_version,
+    mgcv_version = context$mgcv_version,
+    BLAS_identity = context$BLAS_identity,
+    LAPACK_identity = context$LAPACK_identity,
+    BLAS_thread_count = context$BLAS_thread_count,
+    formula_semantics_version = context$formula_semantics_version,
+    mgcv_semantics_version = context$mgcv_semantics_version,
+    risk_threshold_config_hash = context$risk_threshold_config_hash,
+    metadata_schema_version = context$metadata_schema_version,
+    shard_count = as.integer(shard_count),
+    shard_id = shard_id
+  )
+}
+
+fastkpc_full_cuda_census_manifest_equal <- function(actual, expected) {
+  is.list(actual) && is.list(expected) &&
+    identical(names(actual), names(expected)) &&
+    identical(fastkpc_full_cuda_census_metadata_hash(actual),
+              fastkpc_full_cuda_census_metadata_hash(expected))
+}
+
+fastkpc_full_cuda_census_shard_paths <- function(output_dir, shard_id) {
+  shard_id <- as.integer(shard_id)
+  list(
+    rds = file.path(output_dir, paste0("shard_", shard_id, ".rds")),
+    summary_json = file.path(
+      output_dir, paste0("shard_", shard_id, ".summary.json")
+    )
+  )
+}
+
+fastkpc_full_cuda_census_validate_shard_payload <- function(
+    payload, summary, expected_manifest = NULL) {
+  if (!is.list(payload) || !is.list(summary) ||
+      !identical(summary$status, "complete") ||
+      is.null(payload$manifest) || is.null(summary$manifest)) {
+    stop("completed shard payload is invalid", call. = FALSE)
+  }
+  if (!fastkpc_full_cuda_census_manifest_equal(payload$manifest,
+                                                summary$manifest)) {
+    stop("shard manifest mismatch", call. = FALSE)
+  }
+  if (!is.null(expected_manifest) &&
+      !fastkpc_full_cuda_census_manifest_equal(payload$manifest,
+                                                expected_manifest)) {
+    stop("shard manifest mismatch", call. = FALSE)
+  }
+  manifest_hash <- fastkpc_full_cuda_census_metadata_hash(payload$manifest)
+  if (!identical(as.character(summary$manifest_hash), manifest_hash)) {
+    stop("shard manifest mismatch", call. = FALSE)
+  }
+  keys <- as.character(payload$request_keys)
+  if (anyNA(keys) || anyDuplicated(keys)) {
+    stop("duplicate residual key in shard payload", call. = FALSE)
+  }
+  if (length(keys) != payload$manifest$expected_key_count_for_shard ||
+      !identical(fastkpc_full_cuda_census_key_set_hash(keys),
+                 payload$manifest$expected_key_hash_for_shard)) {
+    stop("shard request key set mismatch", call. = FALSE)
+  }
+  summary_counts <- c(
+    request_key_count = length(keys),
+    setup_observation_count = nrow(as.data.frame(
+      payload$setup_observations, stringsAsFactors = FALSE
+    )),
+    target_fit_count = nrow(as.data.frame(
+      payload$target_fits, stringsAsFactors = FALSE
+    )),
+    target_risk_count = nrow(as.data.frame(
+      payload$target_risks, stringsAsFactors = FALSE
+    ))
+  )
+  if (length(setdiff(names(summary_counts), names(summary))) > 0L ||
+      !identical(as.integer(unlist(summary[names(summary_counts)],
+                                    use.names = FALSE)),
+                 as.integer(unname(summary_counts))) ||
+      !identical(as.character(summary$request_key_hash),
+                 fastkpc_full_cuda_census_key_set_hash(keys))) {
+    stop("shard summary count mismatch", call. = FALSE)
+  }
+  target_fits <- as.data.frame(payload$target_fits,
+                               stringsAsFactors = FALSE)
+  if (length(keys) == 0L) {
+    if (nrow(target_fits) != 0L) {
+      stop("shard target key set mismatch", call. = FALSE)
+    }
+  } else {
+    if (!"residual_key_sha256" %in% names(target_fits) ||
+        anyNA(target_fits$residual_key_sha256) ||
+        anyDuplicated(target_fits$residual_key_sha256)) {
+      stop("duplicate residual key in shard target fits", call. = FALSE)
+    }
+    if (!identical(sort(target_fits$residual_key_sha256, method = "radix"),
+                   sort(keys, method = "radix"))) {
+      stop("shard target key set mismatch", call. = FALSE)
+    }
+  }
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_census_read_shard <- function(
+    paths, expected_manifest = NULL) {
+  fastkpc_full_cuda_require_namespace("jsonlite")
+  if (!file.exists(paths$rds) || !file.exists(paths$summary_json)) {
+    stop("missing shard files", call. = FALSE)
+  }
+  payload <- readRDS(paths$rds)
+  summary <- jsonlite::read_json(paths$summary_json, simplifyVector = TRUE)
+  fastkpc_full_cuda_census_validate_shard_payload(
+    payload, summary, expected_manifest
+  )
+  list(payload = payload, summary = summary)
+}
+
+fastkpc_full_cuda_census_atomic_write_shard <- function(
+    payload, summary, paths) {
+  fastkpc_full_cuda_require_namespace("jsonlite")
+  output_dir <- dirname(paths$rds)
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  rds_tmp <- tempfile(".shard-rds.tmp-", tmpdir = output_dir)
+  json_tmp <- tempfile(".shard-json.tmp-", tmpdir = output_dir)
+  published_rds <- FALSE
+  on.exit({
+    unlink(c(rds_tmp, json_tmp), force = TRUE)
+    if (published_rds && !file.exists(paths$summary_json)) {
+      unlink(paths$rds, force = TRUE)
+    }
+  }, add = TRUE)
+
+  saveRDS(payload, rds_tmp, version = 2)
+  fastkpc_full_cuda_write_json(summary, json_tmp)
+  validation_payload <- readRDS(rds_tmp)
+  validation_summary <- jsonlite::read_json(json_tmp, simplifyVector = TRUE)
+  fastkpc_full_cuda_census_validate_shard_payload(
+    validation_payload, validation_summary, payload$manifest
+  )
+  unlink(c(paths$rds, paths$summary_json), force = TRUE)
+  if (!file.rename(rds_tmp, paths$rds)) {
+    stop("failed to atomically publish shard RDS", call. = FALSE)
+  }
+  published_rds <- TRUE
+  if (!file.rename(json_tmp, paths$summary_json)) {
+    stop("failed to atomically publish shard completion JSON",
+         call. = FALSE)
+  }
+  published_rds <- FALSE
+  invisible(paths)
+}
+
+fastkpc_full_cuda_census_bind_rows <- function(rows) {
+  rows <- Filter(Negate(is.null), rows)
+  if (length(rows) == 0L) return(data.frame())
+  result <- do.call(rbind, rows)
+  rownames(result) <- NULL
+  result
+}
+
+fastkpc_full_cuda_census_run_shard <- function(
+    assigned_requests, shard_id, context, output_dir,
+    fit_fun = fastkpc_full_cuda_census_fit_key) {
+  assigned_requests <- as.data.frame(assigned_requests,
+                                     stringsAsFactors = FALSE)
+  required_context <- c("data", "risk_config")
+  missing_context <- setdiff(required_context, names(context))
+  if (length(missing_context) > 0L) {
+    stop("shard execution context missing data or risk config",
+         call. = FALSE)
+  }
+  manifest <- fastkpc_full_cuda_census_shard_manifest(
+    assigned_requests, shard_id, context
+  )
+  paths <- fastkpc_full_cuda_census_shard_paths(output_dir, shard_id)
+  if (file.exists(paths$summary_json)) {
+    if (!file.exists(paths$rds)) {
+      stop("missing shard RDS for completed summary", call. = FALSE)
+    }
+    completed <- fastkpc_full_cuda_census_read_shard(paths, manifest)
+    return(list(status = "reused", paths = paths,
+                payload = completed$payload))
+  }
+  if (file.exists(paths$rds)) unlink(paths$rds, force = TRUE)
+
+  shard_requests <- assigned_requests[
+    assigned_requests$shard_id == as.integer(shard_id), , drop = FALSE
+  ]
+  shard_requests <- shard_requests[
+    order(shard_requests$sorted_rank, method = "radix"), , drop = FALSE
+  ]
+  results <- lapply(seq_len(nrow(shard_requests)), function(index) {
+    value <- fit_fun(
+      data = context$data,
+      request_row = shard_requests[index, , drop = FALSE],
+      risk_config = context$risk_config
+    )
+    if (!is.list(value) || is.null(value$target_fit) ||
+        is.null(value$risk_cases)) {
+      stop("fit_fun returned an incomplete shard row", call. = FALSE)
+    }
+    target_fit <- as.data.frame(value$target_fit, stringsAsFactors = FALSE)
+    if (nrow(target_fit) != 1L ||
+        !identical(target_fit$residual_key_sha256[[1L]],
+                   shard_requests$residual_key_sha256[[index]])) {
+      stop("fit_fun returned the wrong residual key", call. = FALSE)
+    }
+    value
+  })
+  payload <- list(
+    manifest = manifest,
+    request_keys = shard_requests$residual_key_sha256,
+    setup_observations = fastkpc_full_cuda_census_bind_rows(
+      lapply(results, `[[`, "setup_observation")
+    ),
+    target_fits = fastkpc_full_cuda_census_bind_rows(
+      lapply(results, `[[`, "target_fit")
+    ),
+    target_risks = fastkpc_full_cuda_census_bind_rows(
+      lapply(results, `[[`, "risk_cases")
+    )
+  )
+  summary <- list(
+    status = "complete",
+    manifest = manifest,
+    manifest_hash = fastkpc_full_cuda_census_metadata_hash(manifest),
+    request_key_count = as.integer(length(payload$request_keys)),
+    request_key_hash = fastkpc_full_cuda_census_key_set_hash(
+      payload$request_keys
+    ),
+    setup_observation_count = as.integer(nrow(payload$setup_observations)),
+    target_fit_count = as.integer(nrow(payload$target_fits)),
+    target_risk_count = as.integer(nrow(payload$target_risks))
+  )
+  fastkpc_full_cuda_census_atomic_write_shard(payload, summary, paths)
+  list(status = "written", paths = paths, payload = payload)
+}
+
+fastkpc_full_cuda_census_merge_shards <- function(
+    requests, shard_count, context, shard_dir) {
+  shard_count <- fastkpc_full_cuda_census_validate_shard_count(shard_count)
+  assigned <- fastkpc_full_cuda_census_assign_shards(requests, shard_count)
+  expected_ids <- 0:(shard_count - 1L)
+  summary_files <- list.files(
+    shard_dir, pattern = "^shard_[0-9]+\\.summary\\.json$",
+    full.names = TRUE
+  )
+  file_ids <- suppressWarnings(as.integer(sub(
+    "^shard_([0-9]+)\\.summary\\.json$", "\\1", basename(summary_files)
+  )))
+  if (length(summary_files) != shard_count || anyNA(file_ids) ||
+      !identical(sort(file_ids), expected_ids)) {
+    if (length(setdiff(expected_ids, file_ids)) > 0L) {
+      stop("missing shard completion summary", call. = FALSE)
+    }
+    stop("unexpected shard completion summary", call. = FALSE)
+  }
+
+  loaded <- lapply(expected_ids, function(shard_id) {
+    paths <- fastkpc_full_cuda_census_shard_paths(shard_dir, shard_id)
+    fastkpc_full_cuda_census_read_shard(paths)
+  })
+  declared_ids <- vapply(loaded, function(value) {
+    as.integer(value$payload$manifest$shard_id)
+  }, integer(1L))
+  if (anyDuplicated(declared_ids)) {
+    stop("duplicate shard id in completed payloads", call. = FALSE)
+  }
+  if (!identical(sort(declared_ids), expected_ids)) {
+    stop("missing shard id in completed payloads", call. = FALSE)
+  }
+  for (index in seq_along(loaded)) {
+    shard_id <- expected_ids[[index]]
+    expected_manifest <- fastkpc_full_cuda_census_shard_manifest(
+      assigned, shard_id, context
+    )
+    fastkpc_full_cuda_census_validate_shard_payload(
+      loaded[[index]]$payload, loaded[[index]]$summary, expected_manifest
+    )
+  }
+
+  target_fits <- fastkpc_full_cuda_census_bind_rows(lapply(
+    loaded, function(value) value$payload$target_fits
+  ))
+  if (anyDuplicated(target_fits$residual_key_sha256)) {
+    stop("duplicate residual key across shard target fits", call. = FALSE)
+  }
+  expected_keys <- assigned$residual_key_sha256
+  if (!identical(sort(target_fits$residual_key_sha256, method = "radix"),
+                 expected_keys)) {
+    stop("merged shard target key set mismatch", call. = FALSE)
+  }
+  target_fits <- target_fits[
+    order(target_fits$residual_key_sha256, method = "radix"), , drop = FALSE
+  ]
+  rownames(target_fits) <- NULL
+  setup_observations <- fastkpc_full_cuda_census_bind_rows(lapply(
+    loaded, function(value) value$payload$setup_observations
+  ))
+  same_s_setups <- fastkpc_full_cuda_census_compress_setups(
+    setup_observations
+  )
+  target_risks <- fastkpc_full_cuda_census_bind_rows(lapply(
+    loaded, function(value) value$payload$target_risks
+  ))
+  risk_cases <- fastkpc_full_cuda_census_risk_cases(
+    target_risks = target_risks,
+    logical_tests = context$logical_tests
+  )
+  coverage <- fastkpc_full_cuda_census_field_coverage(
+    same_s_setup_metadata = same_s_setups,
+    target_fit_metadata = target_fits
+  )
+  if (any(coverage$required &
+          (!is.finite(coverage$coverage_ratio) |
+             coverage$coverage_ratio < 1))) {
+    stop("required metadata field coverage is incomplete", call. = FALSE)
+  }
+  list(
+    assigned_requests = assigned,
+    same_s_setup_metadata = same_s_setups,
+    target_fit_metadata = target_fits,
+    risk_cases = risk_cases,
+    field_coverage = coverage
+  )
+}

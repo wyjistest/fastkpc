@@ -1,0 +1,465 @@
+fail <- function(message) stop(message, call. = FALSE)
+assert_true <- function(value, message) if (!isTRUE(value)) fail(message)
+assert_error <- function(expression, pattern, message) {
+  error <- tryCatch({ force(expression); NULL }, error = identity)
+  assert_true(inherits(error, "error") &&
+                grepl(pattern, conditionMessage(error), fixed = TRUE),
+              message)
+}
+
+source("fastkpc/R/full_cuda_ci_workload_census.R")
+
+runtime_identity <- fastkpc_full_cuda_census_runtime_identity()
+assert_true(all(vapply(runtime_identity[c(
+  "source_commit", "R_version", "mgcv_version", "BLAS_identity",
+  "LAPACK_identity"
+)], function(value) length(value) == 1L && !is.na(value) && nzchar(value),
+logical(1L))) &&
+              length(runtime_identity$BLAS_thread_count) == 1L,
+            "runtime identity must contain one scalar value for every field")
+
+hex64 <- function(value) sprintf("%064d", as.integer(value))
+key_values <- c(12L, 1L, 9L, 3L, 11L, 5L, 7L, 2L, 10L, 4L, 8L, 6L)
+group_index <- rep(seq_len(6L), each = 2L)
+requests <- data.frame(
+  residual_key_sha256 = hex64(key_values),
+  target = rep(1:2, 6L),
+  S_key = as.character(group_index),
+  S_size = 1L,
+  formula_class = "full-smooth",
+  same_S_group_id = hex64(100L + group_index),
+  stringsAsFactors = FALSE
+)
+shard_count <- 3L
+assigned <- fastkpc_full_cuda_census_assign_shards(requests, shard_count)
+sorted_keys <- sort(requests$residual_key_sha256, method = "radix")
+assert_true(identical(assigned$residual_key_sha256, sorted_keys) &&
+              identical(assigned$sorted_rank, seq_len(12L)) &&
+              identical(assigned$shard_id, rep(0:2, 4L)),
+            "shards must use lexicographic sorted-rank modulo assignment")
+
+duplicate_requests <- requests
+duplicate_requests$residual_key_sha256[[2L]] <-
+  duplicate_requests$residual_key_sha256[[1L]]
+assert_error(
+  fastkpc_full_cuda_census_assign_shards(duplicate_requests, shard_count),
+  "duplicate residual key",
+  "shard assignment must reject duplicate canonical keys"
+)
+
+corpus_payload <- paste0(paste(sorted_keys, collapse = "\n"), "\n")
+risk_config <- fastkpc_full_cuda_census_risk_config()
+context <- list(
+  canonical_key_corpus_hash =
+    fastkpc_full_cuda_census_hash_utf8(corpus_payload),
+  dataset_sha256 = strrep("a", 64L),
+  oracle_input_bundle_sha256 = strrep("b", 64L),
+  source_commit = strrep("c", 40L),
+  R_version = "R fixture 4.4.1",
+  mgcv_version = "1.9-1-fixture",
+  BLAS_identity = "fixture-blas",
+  LAPACK_identity = "fixture-lapack",
+  BLAS_thread_count = 1L,
+  formula_semantics_version = "kpcalg_regrXonS_v1",
+  mgcv_semantics_version = "legacy-mgcv-gam-default-selection-v1",
+  risk_threshold_config_hash =
+    fastkpc_full_cuda_census_metadata_hash(risk_config),
+  metadata_schema_version = "full-cuda-ci-metadata-v1",
+  data = matrix(0, nrow = 2L, ncol = 2L),
+  risk_config = risk_config,
+  logical_tests = data.frame(
+    logical_sequence_id = integer(),
+    absolute_log_distance_from_alpha = numeric(),
+    stringsAsFactors = FALSE
+  )
+)
+
+invalid_context <- context
+invalid_context$BLAS_thread_count <- NA_integer_
+assert_error(
+  fastkpc_full_cuda_census_shard_manifest(assigned, 0L, invalid_context),
+  "invalid shard context field",
+  "manifest must reject an unresumable unknown BLAS thread count"
+)
+
+sparse_assigned <- fastkpc_full_cuda_census_assign_shards(
+  requests[1:2, , drop = FALSE], 4L
+)
+sparse_context <- context
+sparse_context$canonical_key_corpus_hash <-
+  fastkpc_full_cuda_census_key_set_hash(
+    sparse_assigned$residual_key_sha256
+  )
+sparse_manifest <- fastkpc_full_cuda_census_shard_manifest(
+  sparse_assigned, 3L, sparse_context
+)
+assert_true(sparse_manifest$shard_count == 4L &&
+              sparse_manifest$expected_key_count_for_shard == 0L &&
+              identical(sparse_manifest$expected_key_hash_for_shard,
+                        fastkpc_full_cuda_census_key_set_hash(character())),
+            "manifest must retain explicit empty trailing shards")
+
+for (shard_id in 0:(shard_count - 1L)) {
+  manifest <- fastkpc_full_cuda_census_shard_manifest(
+    assigned, shard_id, context
+  )
+  shard_keys <- assigned$residual_key_sha256[
+    assigned$shard_id == shard_id
+  ]
+  expected_hash <- fastkpc_full_cuda_census_hash_utf8(
+    paste0(paste(shard_keys, collapse = "\n"), "\n")
+  )
+  assert_true(manifest$expected_key_count_for_shard == 4L &&
+                identical(manifest$expected_key_hash_for_shard,
+                          expected_hash) &&
+                identical(manifest$shard_id, as.integer(shard_id)) &&
+                identical(manifest$shard_count, shard_count),
+              "shard manifest must freeze expected key count and hash")
+}
+
+fixture_setup <- function(request_row) {
+  group_id <- request_row$same_S_group_id[[1L]]
+  setup_fingerprint <- fastkpc_full_cuda_census_hash_utf8(
+    paste0("setup:", group_id)
+  )
+  data.frame(
+    same_S_group_id = group_id,
+    S_key = request_row$S_key[[1L]],
+    S_size = 1L,
+    formula_class = "full-smooth",
+    representative_residual_key_sha256 =
+      request_row$residual_key_sha256[[1L]],
+    formula_semantics_version = "kpcalg_regrXonS_v1",
+    model_matrix_nrow = 2L,
+    model_matrix_ncol = 2L,
+    model_matrix_hash = fastkpc_full_cuda_census_hash_utf8(
+      paste0("model:", group_id)
+    ),
+    model_matrix_rank = 2L,
+    model_matrix_condition = 1,
+    penalty_count = 1L,
+    penalty_block_dimensions = I(list("1x1")),
+    penalty_ranks = I(list(1L)),
+    penalty_offsets = I(list(2L)),
+    penalty_hashes = I(list(fastkpc_full_cuda_census_hash_utf8(
+      paste0("penalty:", group_id)
+    ))),
+    penalty_nullity = 1L,
+    constraint_dimensions = I(list(c(0L, 2L))),
+    constraint_rank = 0L,
+    constraint_nullspace_dimension = 2L,
+    constraint_hash = fastkpc_full_cuda_census_hash_utf8(
+      paste0("constraint:", group_id)
+    ),
+    H_dimensions = I(list(integer())),
+    H_hash = "NONE",
+    weights_policy = "none",
+    offset_policy = "none",
+    smooth_classes = I(list("fixture.smooth")),
+    basis_dimensions = I(list(2L)),
+    conditioning_rank = 1L,
+    conditioning_condition = 1,
+    near_constant_conditioning_count = 0L,
+    setup_fingerprint = setup_fingerprint,
+    mgcv_version = "1.9-1-fixture",
+    R_version = "R fixture 4.4.1",
+    stringsAsFactors = FALSE
+  )
+}
+
+fixture_target <- function(request_row, setup) {
+  key <- request_row$residual_key_sha256[[1L]]
+  data.frame(
+    residual_key_sha256 = key,
+    same_S_group_id = request_row$same_S_group_id[[1L]],
+    setup_fingerprint = setup$setup_fingerprint[[1L]],
+    target = as.integer(request_row$target[[1L]]),
+    fit_status = "success",
+    fit_error = "NONE",
+    fit_time_ms = 1,
+    formula = "x1 ~ s(x2)",
+    method = "GCV.Cp",
+    optimizer = "mgcv-default",
+    family = "gaussian",
+    link = "identity",
+    selected_sp = I(list(1)),
+    selected_sp_names = I(list("s(x2)")),
+    selected_sp_hash = fastkpc_full_cuda_census_hash_utf8(
+      paste0("sp:", key)
+    ),
+    GCV_Cp_score = 1,
+    EDF = 1,
+    convergence_fields = I(list(list(
+      converged = list(source = "fit$converged", value = TRUE)
+    ))),
+    warning_classes = I(list(list())),
+    warning_messages = I(list(character())),
+    coefficient_rank = 2L,
+    penalized_system_condition_at_selected_sp = 1,
+    target_sd = 1,
+    target_near_constant = FALSE,
+    coefficient_hash = fastkpc_full_cuda_census_hash_utf8(
+      paste0("coef:", key)
+    ),
+    fitted_hash = fastkpc_full_cuda_census_hash_utf8(
+      paste0("fitted:", key)
+    ),
+    residual_hash = fastkpc_full_cuda_census_hash_utf8(
+      paste0("residual:", key)
+    ),
+    target_fit_fingerprint = fastkpc_full_cuda_census_hash_utf8(
+      paste0("target:", key)
+    ),
+    stringsAsFactors = FALSE
+  )
+}
+
+fit_calls <- new.env(parent = emptyenv())
+fit_calls$count <- 0L
+fixture_fit <- function(data, request_row, risk_config) {
+  fit_calls$count <- fit_calls$count + 1L
+  setup <- fixture_setup(request_row)
+  target <- fixture_target(request_row, setup)
+  risk <- data.frame(
+    case_type = "target_key",
+    residual_key_sha256 = request_row$residual_key_sha256[[1L]],
+    logical_sequence_id = NA_integer_,
+    same_S_group_id = request_row$same_S_group_id[[1L]],
+    high_condition = FALSE,
+    rank_deficient = FALSE,
+    near_constant_target = FALSE,
+    near_constant_conditioner = FALSE,
+    multi_penalty = FALSE,
+    near_alpha = FALSE,
+    mgcv_warning = FALSE,
+    mgcv_nonconverged = FALSE,
+    nonfinite_metadata = FALSE,
+    condition_bucket = "finite_lt_1e4",
+    near_alpha_bucket = NA_character_,
+    stringsAsFactors = FALSE
+  )
+  list(setup_observation = setup, target_fit = target, risk_cases = risk)
+}
+
+sparse_calls_before <- fit_calls$count
+sparse_empty <- fastkpc_full_cuda_census_run_shard(
+  assigned_requests = sparse_assigned,
+  shard_id = 3L,
+  context = sparse_context,
+  output_dir = tempfile("full-cuda-ci-empty-shard-"),
+  fit_fun = fixture_fit
+)
+assert_true(sparse_empty$status == "written" &&
+              fit_calls$count == sparse_calls_before &&
+              length(sparse_empty$payload$request_keys) == 0L &&
+              nrow(sparse_empty$payload$target_fits) == 0L,
+            "zero-key shards must complete without invoking fit_fun")
+
+wrong_initial_context <- context
+wrong_initial_context$canonical_key_corpus_hash <- strrep("f", 64L)
+assert_error(
+  fastkpc_full_cuda_census_run_shard(
+    assigned_requests = assigned,
+    shard_id = 0L,
+    context = wrong_initial_context,
+    output_dir = tempfile("full-cuda-ci-wrong-corpus-"),
+    fit_fun = fixture_fit
+  ),
+  "canonical key corpus hash mismatch",
+  "initial shard execution must reject a wrong corpus hash before fitting"
+)
+wrong_initial_risk <- context
+wrong_initial_risk$risk_threshold_config_hash <- strrep("e", 64L)
+assert_error(
+  fastkpc_full_cuda_census_run_shard(
+    assigned_requests = assigned,
+    shard_id = 0L,
+    context = wrong_initial_risk,
+    output_dir = tempfile("full-cuda-ci-wrong-risk-"),
+    fit_fun = fixture_fit
+  ),
+  "risk threshold config hash mismatch",
+  "initial shard execution must derive the risk-config hash"
+)
+
+output_dir <- tempfile("full-cuda-ci-restart-")
+dir.create(output_dir, recursive = TRUE)
+first <- fastkpc_full_cuda_census_run_shard(
+  assigned_requests = assigned,
+  shard_id = 0L,
+  context = context,
+  output_dir = output_dir,
+  fit_fun = fixture_fit
+)
+assert_true(first$status == "written" && fit_calls$count == 4L &&
+              file.exists(first$paths$rds) &&
+              file.exists(first$paths$summary_json) &&
+              length(list.files(output_dir, pattern = "\\.tmp")) == 0L,
+            "shard writer must atomically publish RDS then completion JSON")
+
+reused <- fastkpc_full_cuda_census_run_shard(
+  assigned_requests = assigned,
+  shard_id = 0L,
+  context = context,
+  output_dir = output_dir,
+  fit_fun = fixture_fit
+)
+assert_true(reused$status == "reused" && fit_calls$count == 4L,
+            "a completed exact-manifest shard must be reused without fitting")
+
+identity_fields <- c(
+  "canonical_key_corpus_hash", "risk_threshold_config_hash", "R_version",
+  "mgcv_version", "source_commit", "BLAS_identity", "LAPACK_identity",
+  "BLAS_thread_count"
+)
+for (field in identity_fields) {
+  wrong <- context
+  wrong[[field]] <- if (field == "BLAS_thread_count") {
+    2L
+  } else if (field == "canonical_key_corpus_hash") {
+    strrep("d", 64L)
+  } else if (field == "risk_threshold_config_hash") {
+    strrep("e", 64L)
+  } else if (field == "source_commit") {
+    strrep("d", 40L)
+  } else {
+    paste0(context[[field]], "-wrong")
+  }
+  assert_error(
+    fastkpc_full_cuda_census_run_shard(
+      assigned_requests = assigned,
+      shard_id = 0L,
+      context = wrong,
+      output_dir = output_dir,
+      fit_fun = fixture_fit
+    ),
+    if (field == "canonical_key_corpus_hash") {
+      "canonical key corpus hash mismatch"
+    } else if (field == "risk_threshold_config_hash") {
+      "risk threshold config hash mismatch"
+    } else {
+      "shard manifest mismatch"
+    },
+    paste("resume must reject changed identity field", field)
+  )
+}
+
+interrupt_dir <- tempfile("full-cuda-ci-interrupt-")
+interrupt_count <- 0L
+interrupt_fit <- function(data, request_row, risk_config) {
+  interrupt_count <<- interrupt_count + 1L
+  if (interrupt_count == 2L) stop("injected interruption", call. = FALSE)
+  fixture_fit(data, request_row, risk_config)
+}
+assert_error(
+  fastkpc_full_cuda_census_run_shard(
+    assigned_requests = assigned,
+    shard_id = 1L,
+    context = context,
+    output_dir = interrupt_dir,
+    fit_fun = interrupt_fit
+  ),
+  "injected interruption",
+  "injected shard interruption must propagate"
+)
+interrupted_paths <- fastkpc_full_cuda_census_shard_paths(interrupt_dir, 1L)
+assert_true(!file.exists(interrupted_paths$rds) &&
+              !file.exists(interrupted_paths$summary_json),
+            "interrupted execution must not leave a completed partial shard")
+
+for (shard_id in c(2L, 1L)) {
+  fastkpc_full_cuda_census_run_shard(
+    assigned_requests = assigned,
+    shard_id = shard_id,
+    context = context,
+    output_dir = output_dir,
+    fit_fun = fixture_fit
+  )
+}
+
+merged <- fastkpc_full_cuda_census_merge_shards(
+  requests = requests,
+  shard_count = shard_count,
+  context = context,
+  shard_dir = output_dir
+)
+assert_true(identical(merged$target_fit_metadata$residual_key_sha256,
+                      sorted_keys) &&
+              nrow(merged$target_fit_metadata) == 12L &&
+              nrow(merged$same_s_setup_metadata) == 6L &&
+              all(merged$field_coverage$coverage_ratio[
+                merged$field_coverage$required
+              ] == 1),
+            "merge must be deterministic and retain exact keys and setups")
+
+summary_tamper_paths <- fastkpc_full_cuda_census_shard_paths(output_dir, 2L)
+summary_tamper <- jsonlite::read_json(
+  summary_tamper_paths$summary_json, simplifyVector = TRUE
+)
+summary_tamper$request_key_count <- summary_tamper$request_key_count + 1L
+fastkpc_full_cuda_write_json(summary_tamper,
+                             summary_tamper_paths$summary_json)
+assert_error(
+  fastkpc_full_cuda_census_merge_shards(
+    requests, shard_count, context, output_dir
+  ),
+  "shard summary count mismatch",
+  "merge must reject a completion summary with false counts"
+)
+summary_tamper$request_key_count <- summary_tamper$request_key_count - 1L
+fastkpc_full_cuda_write_json(summary_tamper,
+                             summary_tamper_paths$summary_json)
+
+missing_paths <- fastkpc_full_cuda_census_shard_paths(output_dir, 2L)
+missing_backup <- paste0(missing_paths$summary_json, ".backup")
+assert_true(file.rename(missing_paths$summary_json, missing_backup),
+            "test fixture must hide one shard summary")
+assert_error(
+  fastkpc_full_cuda_census_merge_shards(
+    requests, shard_count, context, output_dir
+  ),
+  "missing shard",
+  "merge must reject a missing completion summary"
+)
+assert_true(file.rename(missing_backup, missing_paths$summary_json),
+            "test fixture must restore the missing shard summary")
+
+shard_zero <- fastkpc_full_cuda_census_shard_paths(output_dir, 0L)
+shard_one <- fastkpc_full_cuda_census_shard_paths(output_dir, 1L)
+one_rds_backup <- paste0(shard_one$rds, ".backup")
+one_json_backup <- paste0(shard_one$summary_json, ".backup")
+assert_true(file.copy(shard_one$rds, one_rds_backup, overwrite = TRUE) &&
+              file.copy(shard_one$summary_json, one_json_backup,
+                        overwrite = TRUE) &&
+              file.copy(shard_zero$rds, shard_one$rds, overwrite = TRUE) &&
+              file.copy(shard_zero$summary_json, shard_one$summary_json,
+                        overwrite = TRUE),
+            "test fixture must install a duplicate declared shard")
+assert_error(
+  fastkpc_full_cuda_census_merge_shards(
+    requests, shard_count, context, output_dir
+  ),
+  "duplicate shard",
+  "merge must reject two files declaring the same shard id"
+)
+assert_true(file.copy(one_rds_backup, shard_one$rds, overwrite = TRUE) &&
+              file.copy(one_json_backup, shard_one$summary_json,
+                        overwrite = TRUE),
+            "test fixture must restore shard one")
+
+duplicate_payload <- readRDS(shard_one$rds)
+duplicate_payload$target_fits$residual_key_sha256[[2L]] <-
+  duplicate_payload$target_fits$residual_key_sha256[[1L]]
+saveRDS(duplicate_payload, shard_one$rds, version = 2)
+assert_error(
+  fastkpc_full_cuda_census_merge_shards(
+    requests, shard_count, context, output_dir
+  ),
+  "duplicate residual key",
+  "merge must reject duplicate target-fit keys"
+)
+assert_true(file.copy(one_rds_backup, shard_one$rds, overwrite = TRUE),
+            "test fixture must restore the duplicate-key shard")
+unlink(c(one_rds_backup, one_json_backup))
+
+cat("PASS full CUDA CI census restart qualification\n")
