@@ -1,5 +1,13 @@
 # Full-CUDA CI Phase 1 Workload Census Implementation Plan
 
+> **Status: SUPERSEDED. Do not execute this plan.** Expert review identified
+> specification errors in the Phase 0 input contract, trace lineage, formula
+> enum, route-metric gates, metadata schema, key serialization, risk contract,
+> legacy-layout parity, and roadmap terminology. The amended design in
+> `docs/superpowers/specs/2026-07-10-full-cuda-ci-phase1-workload-census-design.md`
+> must be approved before this file is replaced with the required six-stage
+> implementation plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the complete, restartable 351x48 logical-CI and legacy-mgcv workload/risk census required by Phase 1 of `goal-5.6.md`.

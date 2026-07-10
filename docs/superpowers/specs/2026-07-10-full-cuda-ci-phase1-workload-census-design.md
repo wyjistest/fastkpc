@@ -2,184 +2,450 @@
 
 ## Status
 
-Approved direction for the earliest incomplete phase in `goal-5.6.md`.
-Phase 0 is frozen at commit `93ae843` and supplies the immutable logical CI
-trace and graph-semantic oracle used here.
+Amended after expert review. Phase 0 is frozen at commit `93ae843` and
+supplies the immutable logical CI trace and graph-semantic oracle. Phase 1
+implementation beyond the structural census must follow this amended contract.
+
+The previous implementation plan is superseded until this design is approved
+and a replacement plan is written.
 
 ## Decision
 
 Build the census offline from the Phase 0 oracle. Do not instrument or modify
-the skeleton execution path.
+the live skeleton execution path.
 
-The census records two distinct quantities:
+Keep canonical workload counts separate from route-specific execution metrics:
 
 ```text
-canonical_global_unique_target_s_count = 110,617
-s_affinity_executed_mgcv_fit_count      = 273,284
+canonical_global_unique_conditional_target_s_count = 110,617
+s_affinity_executed_mgcv_fit_count                  = 273,284
 ```
 
-`110,617` is the canonical number of distinct `target|S` keys in the logical
-CI workload. `273,284` is a route-specific executed fit count from the current
-S-affinity worker layout. The latter must not be labeled as a unique-key count.
+`110,617` is the canonical number of distinct conditional `target|S` keys in
+the complete logical workload. `273,284` is a historical fit count produced by
+one S-affinity worker/cache layout. It is not a unique-key count and is not a
+Phase 1 hard gate unless a future hash-protected route trace makes it
+independently recountable.
 
-## Why This Approach
+## Why Offline Census
 
-### Approach A: offline canonical census (selected)
-
-Derive every logical test and residual key from the immutable Phase 0 trace,
-then fit each unique residual key once with the legacy mgcv authority.
+The selected approach derives every logical test and residual key from the
+immutable Phase 0 trace, then fits each canonical residual key once with the
+pinned legacy mgcv authority.
 
 Benefits:
 
-- does not alter scheduler, replay, CI decisions, or timings;
-- produces the global canonical key set rather than worker-local observations;
-- supports deterministic sharding, checkpointing, and restart;
-- makes the Phase 2 setup contract consume a stable machine-readable input.
+- no change to scheduler, replay, CI decisions, or production timings;
+- a global canonical key corpus instead of worker-local cache observations;
+- deterministic sharding, checkpointing, and restart;
+- a stable machine-readable input for Phase 2 `PreparedSSetup` work;
+- explicit separation of response-independent setup and target-specific fit
+  metadata.
 
-Cost:
+Live skeleton instrumentation is rejected because worker-local duplication
+obscures the canonical key set and instrumentation can perturb the route being
+described. Sampling-only numerical metadata is rejected because Phase 1 must
+identify every high-risk case in the canonical corpus.
 
-- requires a separate exhaustive mgcv pass over 110,617 keys;
-- setup diagnostics add work beyond the existing residual-only fit path.
+## Phase 0 Input Contract
 
-### Approach B: instrument the live skeleton run
-
-Capture fit/setup metadata inside residual-provider workers.
-
-Rejected for Phase 1 because worker-local duplication would obscure the global
-key set, IPC would be substantial, and instrumentation could perturb the route
-whose behavior the census is supposed to describe.
-
-### Approach C: structural census plus sampled numerical cases
-
-Record every key structurally but collect full mgcv metadata only for selected
-cases.
-
-Rejected because Phase 1 explicitly requires every high-condition,
-rank-deficient, near-constant, multi-penalty, and near-alpha case to be
-identified. Sampling cannot prove that coverage.
-
-## Inputs
-
-The standard runner consumes only pinned Phase 0 and canonical fixture inputs:
+The standard runner receives an oracle artifact directory and the canonical
+dataset path. It must call one unified Phase 0 oracle loader. The loader must
+require and independently validate all of these inputs before any census shard
+is built or resumed:
 
 ```text
-fastkpc/artifacts/full_cuda_ci/oracle_351x48_v1/manifest.json
-fastkpc/artifacts/full_cuda_ci/oracle_351x48_v1/logical_ci_trace.rds
-fastkpc/artifacts/full_cuda_ci/oracle_351x48_v1/deletion_trace.csv
-fastkpc/artifacts/full_cuda_ci/oracle_351x48_v1/adjacency.rds
+manifest.json
+summary.json
+adjacency.rds
+sepsets.rds
+n_edgetests.csv
+logical_ci_trace.rds
+deletion_trace.csv
+pmax.rds
+graph_agreement.csv
+sepset_agreement.csv
+first_divergence.json
+fallbacks.csv
+canonical dataset
+```
+
+The canonical paths are currently:
+
+```text
+fastkpc/artifacts/full_cuda_ci/oracle_351x48_v1/
 fastkpc/artifacts/kpc_tprs_real_zhu/cancer_RD-causalDiscoveryInput.rds
 ```
 
-The runner validates the Phase 0 manifest hashes and canonical contract before
-building or resuming any shard.
+The loader must not trust `summary.json` or `manifest.json` `pass` fields as a
+substitute for validation. It must:
+
+1. match every required file against a versioned, source-controlled
+   `phase1_oracle_input_contract` containing its exact SHA-256 and the frozen
+   Phase 0 source commit;
+2. recompute the canonical dataset SHA-256 and dimensions;
+3. normalize adjacency, sepsets, deletion trace, and logical trace through the
+   Phase 0 contract helpers;
+4. recompute adjacency, normalized-sepset, and deletion-trace hashes and match
+   the pinned canonical contract;
+5. validate logical row counts against `n_edgetests.csv` and rebuild the
+   canonical layer plan independently;
+6. require all graph/sepset/test/deletion agreement rows to pass;
+7. require unknown, approximate, fallback, and backend error counts to be zero;
+8. cross-check the recomputed facts against `summary.json` and `manifest.json`;
+9. record the SHA-256 of every input file and a combined
+   `oracle_input_bundle_sha256` in the Phase 1 manifest.
+
+The Phase 1 artifact reports inherited oracle evidence with explicit scope:
+
+```text
+oracle_inherited_graph_gate = TRUE
+new_candidate_graph_gate    = NOT_APPLICABLE
+```
+
+Phase 1 does not execute a new skeleton and therefore must not claim that it
+performed a new candidate graph comparison. Copied graph, sepset, deletion,
+and `n.edgetests` files must carry `gate_scope = phase0_oracle_inherited`.
 
 ## Architecture
 
-Add three focused files:
+Use focused modules with explicit boundaries:
 
 ```text
 fastkpc/R/full_cuda_ci_workload_census.R
 fastkpc/tools/run_full_cuda_ci_workload_census.R
 fastkpc/tests/test_full_cuda_ci_workload_census.R
+fastkpc/tests/test_full_cuda_ci_workload_census_parity.R
+fastkpc/tests/test_full_cuda_ci_workload_census_restart.R
+fastkpc/tests/test_full_cuda_ci_workload_census_real_subset.R
 ```
 
-The module has four independent responsibilities:
+Responsibilities:
 
-1. normalize and validate Phase 0 inputs;
-2. construct logical-test and residual-request tables;
-3. execute restartable legacy-mgcv metadata shards;
-4. merge shards and write the standard artifact schema and summaries.
+1. load and validate the complete Phase 0 oracle bundle;
+2. construct logical-test and canonical residual-request tables;
+3. prove offline single-target fitting matches the actual `regrXonS` layout;
+4. execute restartable legacy-mgcv metadata shards;
+5. validate and compress response-independent same-S setup metadata;
+6. classify numerical risk and write the standard fail-closed artifact.
 
 ## Stage A: Logical CI Census
 
-Produce one row for each of the 240,489 canonical logical CI tests.
+Produce one row for each canonical logical CI test.
 
 Required fields:
 
 ```text
 logical_sequence_id
+source_sequence_id
 source_task_index
 level
 x
 y
 S_key
 S_size
-formula_route
+formula_class
 reference_p_value
 alpha
+reference_decision
+reference_independent
 deletes_edge
 selected_sepset
+signed_distance_from_alpha
 absolute_distance_from_alpha
-log_distance_from_alpha
+signed_log_ratio_from_alpha
+absolute_log_distance_from_alpha
 residual_key_x
 residual_key_y
 ```
 
-Definitions:
-
-- `formula_route = unconditional` for `S_size = 0`;
-- `formula_route = full_smooth` for `1 <= S_size <= 2`;
-- `formula_route = additive_smooth` for `S_size > 2`;
-- `selected_sepset` is true only for the accepted deleting test recorded by
-  the canonical deletion trace;
-- log distance uses a finite floor for zero p-values and records the floor in
-  the manifest.
-
-Stage A must reproduce exactly:
+Reuse the existing compatibility enum from
+`fastkpc/R/mgcv_compat_contract.R`:
 
 ```text
-logical_test_count              = 240,489
-conditional_logical_test_count  = 238,276
-conditional_residual_requests   = 476,552
-unique_S_count                  = 8,634
+direct-ci
+full-smooth
+additive-smooth
 ```
 
-## Stage B: Canonical Residual Requests
-
-Expand each conditional logical test into `x|S` and `y|S` requests, then dedupe
-by the exact canonical key:
+Level 0 is direct CI and is not part of the GAM residual corpus:
 
 ```text
-target index + sorted S + canonical data/config identity
+formula_class  = direct-ci
+residual_key_x = NA_character_
+residual_key_y = NA_character_
 ```
 
-The canonical residual-request table records:
+Conditional routing is:
 
 ```text
-residual_key
+1 <= |S| <= 2  -> full-smooth
+|S| > 2        -> additive-smooth
+```
+
+### Decision and alpha-distance contract
+
+The pinned legacy replay threshold is `p >= alpha`. For every finite Phase 0
+p-value, the structural census must verify that this threshold result equals
+the explicit `deletes_edge` decision in the trace. It then records:
+
+```text
+reference_independent = deletes_edge
+reference_decision    = independent | dependent
+```
+
+The canonical Phase 0 trace contains only finite p-values. A future non-finite
+p-value is recorded as `reference_decision = nonfinite`,
+`reference_independent = NA`, and fails the canonical Phase 1 gate rather than
+being silently coerced.
+
+Use these versioned formulas:
+
+```text
+signed_distance_from_alpha = reference_p_value - alpha
+absolute_distance_from_alpha = abs(signed_distance_from_alpha)
+
+signed_log_ratio_from_alpha =
+    log(max(reference_p_value, p_floor) / alpha)
+
+absolute_log_distance_from_alpha =
+    abs(signed_log_ratio_from_alpha)
+```
+
+`p_floor = .Machine$double.xmin` for schema v1 and must be written to the
+manifest.
+
+### Trace lineage and selected sepsets
+
+Retain both `source_sequence_id` and `source_task_index` from the logical
+trace. Do not assume that `deletion_trace.csv::source_sequence_id` is a logical
+test identifier: the current Phase 0 deletion trace may use deletion-order
+lineage.
+
+`selected_sepset` is the explicit logical-trace deletion decision. Validate it
+against the deletion trace using the canonical tuple:
+
+```text
+level, unordered(edge_x, edge_y), sorted S
+```
+
+There must be a one-to-one match between logical rows with
+`deletes_edge = TRUE` and canonical deletion rows. Ambiguous, missing, or extra
+matches fail closed.
+
+Stage A canonical counts:
+
+```text
+logical_test_count                 = 240,489
+conditional_logical_test_count     = 238,276
+conditional_residual_request_count = 476,552
+unique_conditional_S_count         = 8,634
+```
+
+## Stage B: Canonical Conditional Residual Requests
+
+Expand every conditional logical test into `x|S` and `y|S`, then deduplicate
+by a frozen key payload. Do not create `target|empty-S` keys.
+
+The canonical request table records:
+
+```text
+residual_key_payload
+residual_key_sha256
 target
 S_key
 S_size
-formula_route
+formula_class
 same_S_group_id
 same_S_group_size
 request_multiplicity
 first_logical_sequence_id
 last_logical_sequence_id
-level
+first_level
+last_level
 ```
 
-The global unique count must be `110,617`. The artifact also records the
-historical S-affinity executed fit count (`273,284`) as a separate route metric.
+### Residual key serialization v1
 
-## Stage C: Legacy mgcv Metadata
-
-Fit each unique key exactly once with the current authoritative legacy formula
-and default `mgcv::gam` selection semantics.
-
-Formula construction must match `regrXonS`:
+The UTF-8 payload has exactly these fields, in this order, separated by LF and
+terminated by one final LF:
 
 ```text
-|S| <= 2: target ~ s(S1, ..., Sk)
-|S| > 2:  target ~ s(S1) + ... + s(Sk)
+schema_version=full-cuda-ci-residual-key-v1
+dataset_sha256=<lowercase 64-hex>
+n=<base-10 integer>
+p=<base-10 integer>
+target_index=<base-10 integer>
+sorted_S=<comma-separated base-10 integers>
+formula_class=<full-smooth|additive-smooth>
+family=gaussian
+link=identity
+method=GCV.Cp
+optimizer=mgcv-default
+gamma=1
+select=false
+scale=mgcv-default
+weights=none
+offset=none
+formula_semantics_version=kpcalg_regrXonS_v1
+mgcv_semantics_version=legacy-mgcv-gam-default-selection-v1
 ```
 
-No fixed-sp replacement, approximate smoother, or CUDA path is allowed in this
-phase.
+Rules:
 
-Per-key metadata:
+- no locale-dependent formatting, whitespace padding, scientific notation,
+  or platform newline conversion;
+- `sorted_S` is strictly increasing and contains no duplicates;
+- hash the raw UTF-8 payload bytes with SHA-256;
+- one hash mapping to two payloads is a collision error;
+- one payload mapping to two hashes is a serialization error.
+
+`same_S_group_id` is the SHA-256 of this response-independent payload, using
+the same byte rules:
 
 ```text
+schema_version=full-cuda-ci-same-s-key-v1
+dataset_sha256=<lowercase 64-hex>
+n=<base-10 integer>
+p=<base-10 integer>
+sorted_S=<comma-separated base-10 integers>
+formula_class=<full-smooth|additive-smooth>
+family=gaussian
+link=identity
+method=GCV.Cp
+optimizer=mgcv-default
+gamma=1
+select=false
+scale=mgcv-default
+weights=none
+offset=none
+formula_semantics_version=kpcalg_regrXonS_v1
+mgcv_semantics_version=legacy-mgcv-gam-default-selection-v1
+```
+
+The global corpus hash is the SHA-256 of the sorted residual SHA-256 values
+joined with LF and terminated by LF.
+
+Canonical Stage B gates:
+
+```text
+sum(request_multiplicity)                                  = 476,552
+nrow(residual_requests)                                    = 110,617
+canonical_global_unique_conditional_target_s_count         = 110,617
+length(unique(same_S_group_id))                            = 8,634
+```
+
+The historical route metric is recorded only as provenance:
+
+```text
+s_affinity_executed_mgcv_fit_count = 273284
+metric_role                        = historical_route_metric
+hard_gate                          = false
+provenance_status                  = no_hash_protected_route_trace
+```
+
+## Stage C: Legacy Layout Parity Subset
+
+Before the full numerical census, prove that the offline one-target fit is
+equivalent to the actual `regrXonS` two-target data layout.
+
+For each parity case:
+
+1. call the real `regrXonS(cbind(x, y), S_data)` and retain its residuals;
+2. reproduce the exact legacy `data.frame(cbind(X, S))`, `x1...` naming, and
+   formula construction to retain both `mgcv::gam` fit objects;
+3. fit `x|S` and `y|S` independently through the offline census helper;
+4. run the same legacy dCov gamma CI authority on both residual pairs.
+
+The required deterministic case set covers:
+
+```text
+canonical |S| = 1
+canonical |S| = 2
+canonical |S| = 3
+canonical large additive multi-penalty case
+canonical conditional logical test nearest alpha
+synthetic rank-deficient conditioning case
+synthetic near-constant target/conditioner case
+```
+
+Compare:
+
+```text
+selected sp in canonical penalty order
+residual vector
+fitted vector
+GCV/Cp score
+EDF
+downstream CI p-value
+downstream independence decision
+```
+
+For the pinned R/mgcv environment, schema v1 requires exact hashes for numeric
+residual and fitted vectors and exact canonicalized numeric values for selected
+sp, GCV/Cp, EDF, and the downstream p-value. Decision equality is mandatory.
+No implementation may silently relax this gate. If pinned mgcv produces a
+documented last-bit layout difference, stop and amend the specification with
+measured absolute/relative tolerances before continuing.
+
+## Stage D: Legacy mgcv Setup and Target-Fit Metadata
+
+Fit each canonical residual key exactly once with the authoritative legacy
+formula and default `mgcv::gam` selection semantics. No fixed-sp replacement,
+approximate smoother, or CUDA path is allowed.
+
+Execution may conservatively extract setup observations per target. The final
+schema must separate response-independent same-S setup from target-specific fit
+state.
+
+### `same_s_setup_metadata` - 8,634 rows
+
+Required fields include:
+
+```text
+same_S_group_id
+S_key
+S_size
+formula_class
+representative_residual_key_sha256
+formula_semantics_version
+model_matrix_nrow
+model_matrix_ncol
+model_matrix_hash
+model_matrix_rank
+model_matrix_condition
+penalty_count
+penalty_block_dimensions
+penalty_ranks
+penalty_offsets
+penalty_hashes
+penalty_nullity
+constraint_dimensions
+constraint_rank
+constraint_nullspace_dimension
+constraint_hash
+H_dimensions
+H_hash
+weights_policy
+offset_policy
+smooth_classes
+basis_dimensions
+conditioning_rank
+conditioning_condition
+near_constant_conditioning_count
+setup_fingerprint
+mgcv_version
+R_version
+```
+
+### `target_fit_metadata` - 110,617 rows
+
+Required fields include:
+
+```text
+residual_key_sha256
+same_S_group_id
+target
 fit_status
 fit_error
 fit_time_ms
@@ -188,72 +454,177 @@ method
 optimizer
 family
 link
-converged
 selected_sp
+selected_sp_names
+selected_sp_hash
 GCV_Cp_score
 EDF
+convergence_fields
+warning_classes
+warning_messages
 coefficient_rank
-model_matrix_nrow
-model_matrix_ncol
-model_matrix_rank
-model_matrix_condition
-penalty_count
-penalty_block_dimensions
-penalty_ranks
-constraint_dimensions
-conditioning_rank
-conditioning_condition
-conditioning_rank_deficient
-near_constant_conditioning_count
+penalized_system_condition_at_selected_sp
 target_sd
 target_near_constant
-residual_hash
-fitted_hash
-model_matrix_hash
 coefficient_hash
-mgcv_version
-R_version
+fitted_hash
+residual_hash
+target_fit_fingerprint
 ```
 
-Large vectors and matrices are not stored in the final artifact. Only hashes,
-dimensions, ranks, conditions, and scalar fit metadata are retained.
+Within every `same_S_group_id`, all per-target setup observations must have
+exactly one value for:
 
-Condition estimation must be deterministic and bounded. Exact SVD is not
-required for every well-conditioned case; the method and thresholds are
-recorded in the manifest. Non-finite or rank-deficient cases are retained as
-explicit census rows, not dropped.
+```text
+model_matrix_hash
+penalty_hashes
+constraint_hash
+setup_fingerprint
+```
+
+Any violation fails closed and prevents compression to the 8,634-row setup
+table. The setup and target-fit tables join through `same_S_group_id` and
+`setup_fingerprint`.
+
+Large vectors and matrices are not stored in the final artifact. Store exact
+numeric hashes, dimensions, ranks, conditions, and scalar/list metadata.
+
+## Numerical Risk Contract
+
+All risk rules are versioned and written to the manifest.
+
+### Thresholds and estimators
+
+```text
+risk_schema_version       = full-cuda-ci-risk-v1
+near_constant_threshold   = sqrt(.Machine$double.eps)
+rank_estimator             = lapack-svd-v1
+rank_tolerance             = max(dim(A)) * max(singular_values(A)) *
+                             .Machine$double.eps
+condition_estimator        = lapack-svd-ratio-v1
+high_condition_threshold   = 1e12
+near_alpha_tau             = log(2)
+p_floor                    = .Machine$double.xmin
+```
+
+For an empty or all-zero matrix, define rank and condition explicitly in the
+implementation and record the case; do not rely on platform defaults. A
+rank-deficient matrix has condition `Inf`.
+
+Condition buckets:
+
+```text
+finite_lt_1e4
+finite_1e4_to_lt_1e8
+finite_1e8_to_lt_1e12
+finite_ge_1e12
+rank_deficient_inf
+nonfinite_unknown
+```
+
+Near-alpha buckets use `absolute_log_distance_from_alpha`:
+
+```text
+exact_boundary
+le_1e_minus_12
+le_1e_minus_9
+le_1e_minus_6
+le_1e_minus_3
+le_log_1_01
+le_log_1_1
+le_log_2
+farther
+```
+
+### Metadata policies
+
+- Selected sp is stored in mgcv penalty order with original names preserved;
+  canonical comparisons use the ordered numeric vector and a separate names
+  vector.
+- Capture warning class and message in emission order with
+  `withCallingHandlers`; warnings are recorded and muffled after capture, not
+  promoted to errors.
+- Record convergence fields with provenance from the exact fit slots that
+  exist (`converged`, `outer.info`, `mgcv.conv`). Do not invent a value when a
+  slot is absent.
+- Preserve explicit `NA`, `NaN`, and `Inf` classifications. Non-finite required
+  metadata without an allowed risk/status classification fails closed.
+- Compute `penalized_system_condition_at_selected_sp` in the constraint
+  nullspace for `X'WX + P(sp) + H`.
+- Compute `penalty_nullity`, `constraint_rank`, and
+  `constraint_nullspace_dimension` with the frozen rank rule.
+
+### Row-level risk artifacts
+
+Write:
+
+```text
+risk_cases.rds
+risk_cases.csv
+field_coverage.csv
+```
+
+Each risk row identifies a residual key or logical test and contains:
+
+```text
+high_condition
+rank_deficient
+near_constant_target
+near_constant_conditioner
+multi_penalty
+near_alpha
+mgcv_warning
+mgcv_nonconverged
+nonfinite_metadata
+```
+
+`field_coverage.csv` records, per metadata field, total rows, present rows,
+finite rows where applicable, required status, and coverage ratio.
 
 ## Sharding and Restart
 
-The numerical pass is partitioned by deterministic hash of `residual_key`.
+Sort the complete `residual_key_sha256` corpus lexicographically, assign a
+one-based rank, and use:
 
 ```text
-shard_id = hash(residual_key) modulo shard_count
+shard_id = (sorted_rank - 1) %% shard_count
 ```
 
-Each shard writes atomically:
+Do not use implementation-dependent integer hashes or modulo arithmetic on R
+integers.
+
+Each shard writes atomically through a temporary file followed by rename:
 
 ```text
 shards/shard_<id>.rds
 shards/shard_<id>.summary.json
 ```
 
-A completed shard is reused only when its manifest matches:
+A completed shard is reusable only when its manifest matches:
 
 ```text
-data hash
-Phase 0 oracle hash
-mgcv version
+canonical_key_corpus_hash
+expected_key_count_for_shard
+expected_key_hash_for_shard
+dataset_sha256
+oracle_input_bundle_sha256
+source_commit
 R version
+mgcv version
+BLAS identity
+LAPACK identity
+BLAS thread count
 formula semantics version
+mgcv semantics version
+risk-threshold config hash
 metadata schema version
 shard count
 shard id
 ```
 
-Unix workers may use `parallel::mclapply`. The parent only merges completed
-rows; it does not share mutable mgcv objects across processes. The default
-worker count comes from an explicit environment variable and is recorded.
+Unix workers may use `parallel::mclapply`. The parent merges only completed
+immutable shard rows. Duplicate shards, duplicate keys, missing keys, wrong
+corpus hashes, stale configuration, and partial files fail closed.
 
 ## Artifact
 
@@ -266,9 +637,11 @@ fastkpc/artifacts/full_cuda_ci/workload_census_351x48_v1/
   summary.md
   commands.txt
   environment.txt
+  oracle_input_hashes.csv
   graph_agreement.csv
   sepset_agreement.csv
   n_edgetests.csv
+  deletion_trace.csv
   first_divergence.json
   fallbacks.csv
   stage_timing.csv
@@ -277,8 +650,15 @@ fastkpc/artifacts/full_cuda_ci/workload_census_351x48_v1/
   logical_ci_tests.csv
   residual_requests.rds
   residual_requests.csv
-  residual_metadata.rds
-  residual_metadata.csv
+  legacy_layout_parity_cases.rds
+  legacy_layout_parity_results.csv
+  same_s_setup_metadata.rds
+  same_s_setup_metadata.csv
+  target_fit_metadata.rds
+  target_fit_metadata.csv
+  risk_cases.rds
+  risk_cases.csv
+  field_coverage.csv
   counts_by_s_size.csv
   counts_by_penalty_count.csv
   counts_by_model_dimension.csv
@@ -289,75 +669,123 @@ fastkpc/artifacts/full_cuda_ci/workload_census_351x48_v1/
   shards/
 ```
 
-CSV outputs are for inspection. RDS files preserve exact integer, logical, and
-list-column data without lossy delimiter parsing.
+CSV files are for inspection. RDS files preserve integer, logical, ordered
+numeric, and list-column data without delimiter loss.
 
 ## Fail-Closed Rules
 
-The runner exits nonzero and writes `pass=false` when any of these occur:
+The runner exits nonzero and writes `pass = false` when any of these occur:
 
 ```text
-Phase 0 manifest/hash mismatch
-logical trace count or canonical-plan mismatch
-request count or unique-key count mismatch
-duplicate residual metadata key
-missing shard
+Phase 0 input, canonical contract, or inherited graph gate mismatch
+logical trace count, layer plan, lineage, or decision mismatch
+deletion/selected-sepset one-to-one mismatch
+conditional request count, unique-key count, or S-group count mismatch
+residual key serialization inconsistency or SHA-256 collision
+legacy two-target versus offline one-target parity failure
+same-S setup invariant violation
+duplicate, missing, stale, partial, or wrong-corpus shard
 mgcv fit error
-non-finite required metadata without an explicit supported status
-graph semantic mismatch against Phase 0
+required non-finite metadata without an explicit supported status
+incomplete required field coverage
 unknown fallback or approximate backend count != 0
 ```
 
-Every failed key remains in `residual_metadata` with its error and shard id.
+Every failed fit key remains in `target_fit_metadata` with its error and shard
+id. No error row may be silently dropped during merge.
 
 ## Correctness and Exit Gates
 
-The census is observational. It must not execute a new skeleton or alter the
-Phase 0 oracle.
-
-Hard gates:
+Canonical structural hard gates:
 
 ```text
-logical tests                         = 240,489
-conditional residual requests         = 476,552
-canonical global unique target|S      = 110,617
-unique S groups                       = 8,634
-S-affinity executed mgcv fits         = 273,284 (separate route metric)
-mgcv metadata rows                    = 110,617
-mgcv fit errors                       = 0
-SHD                                   = 0
-normalized sepsets identical          = TRUE
-n.edgetests exact                     = TRUE
-canonical deletion trace identical    = TRUE
+logical tests                                      = 240,489
+conditional logical tests                          = 238,276
+conditional residual requests                      = 476,552
+canonical global unique conditional target|S       = 110,617
+unique conditional S groups                        = 8,634
+sum(request_multiplicity)                           = 476,552
+```
+
+Numerical hard gates:
+
+```text
+legacy layout parity cases pass                     = TRUE
+same-S setup metadata rows                          = 8,634
+target fit metadata rows                            = 110,617
+same-S invariant violations                         = 0
+mgcv fit errors                                     = 0
+required field coverage                             = 100%
+```
+
+Inherited Phase 0 hard gates:
+
+```text
+oracle_inherited_graph_gate                         = TRUE
+oracle inherited SHD                                = 0
+oracle inherited normalized sepsets identical       = TRUE
+oracle inherited n.edgetests exact                  = TRUE
+oracle inherited deletion trace identical           = TRUE
+new_candidate_graph_gate                            = NOT_APPLICABLE
+```
+
+Historical route sanity metric, not a hard gate:
+
+```text
+s_affinity_executed_mgcv_fit_count                  = 273,284
 ```
 
 The summary must include distributions by `|S|`, penalty count, model
 dimension, rank/condition bucket, same-S group size, near-alpha distance, and
-time weighted by `|S|` and penalty count.
+fit time weighted by `|S|` and penalty count.
+
+## Approved Implementation Sequence
+
+Implementation must proceed as six independently reviewable commits:
+
+1. Structural census: Phase 0 loader, logical table, request expansion,
+   canonical key serialization, deduplication, and structural count gates. No
+   mgcv fits.
+2. Legacy parity subset: metadata extractor plus real `regrXonS` layout parity
+   cases.
+3. Setup/fit schema: per-target extraction, same-S invariant validation, and
+   the 8,634-row/110,617-row split tables.
+4. Shard/restart qualification: interruption, resume, duplicate shard, wrong
+   corpus, missing shard, and atomic-write tests.
+5. Scaled dry runs: deterministic fixed-prefix corpus runs that measure memory,
+   disk, warnings, throughput, and merge determinism.
+6. Full census: run all 110,617 keys and generate the final Phase 1 artifact.
+
+The complete mgcv census must not start before stages 1-5 pass.
 
 ## Tests
 
-Focused tests use a small canonical trace and verify:
+Focused tests must cover:
 
-- logical-test expansion and selected-sepset marking;
-- exact request multiplicity and global deduplication;
-- formula routing at `|S| = 1`, `2`, and `3`;
-- same-S group IDs and sizes;
-- metadata extraction for single- and multi-penalty cases;
-- rank-deficient and near-constant rows remain explicit;
-- shard resume rejects mismatched manifests;
-- duplicate/missing shard rows fail closed;
-- standard artifact schema and first-divergence output.
+- complete Phase 0 input loading and independent inherited-gate validation;
+- source lineage, exact decision recording, alpha formulas, and non-finite
+  fail-closed behavior;
+- level-0 direct-CI rows with `NA` residual keys;
+- exact request multiplicity, canonical payload bytes, SHA-256, collision
+  checks, and global deduplication;
+- formula routing at `|S| = 1`, `2`, and `3` using the shared enum;
+- real-layout parity for all required canonical and synthetic cases;
+- setup/fit split and same-S invariant failures;
+- rank-deficient, near-constant, high-condition, multi-penalty, near-alpha,
+  warning, and nonconverged risk rows;
+- shard interruption/resume, duplicate/missing/wrong-corpus rejection, and
+  atomic writes;
+- deterministic scaled merge and standard artifact schema.
 
-A real-subset test uses keys drawn from the canonical Phase 0 trace. The final
-351x48 artifact is mandatory for Phase 1 completion.
+The final 351x48 artifact is mandatory for Phase 1 completion.
 
 ## Non-Goals
 
 Phase 1 does not:
 
-- change the skeleton scheduler or replay order;
+- execute a new skeleton or claim a new candidate graph gate;
+- change scheduler, replay order, residual values, or dCov authority;
 - cache or accelerate production residual fits;
-- define `PreparedSSetup` (Phase 2);
-- run fixed-sp C++/CUDA solves (Phase 3);
-- change the legacy oracle or tolerance gates.
+- define the final `PreparedSSetup` ABI for Phase 2;
+- run fixed-sp C++/CUDA solves;
+- relax the legacy oracle or numerical gates.

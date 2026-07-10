@@ -325,16 +325,21 @@ R/mgcv still supplies setup semantics
 Historical full-run diagnostics report:
 
 ```text
-conditional residual requests = 476,552
-unique target|S fits/misses   = 273,284
-current native |S|<=2 targets = 157,122
-current |S|>2 fallback targets = 116,162
-actual same-S miss groups     = 8,634
-same-S miss reuse opportunity = 264,650
-same-S miss reuse ratio       = 0.968406
+conditional residual requests                  = 476,552
+canonical global unique conditional target|S  = 110,617
+S-affinity executed mgcv fits                  = 273,284
+S-affinity current native |S|<=2 fits          = 157,122
+S-affinity current |S|>2 fallback fits         = 116,162
+canonical nonempty same-S groups               = 8,634
+S-affinity same-S fit reuse opportunity        = 264,650
+S-affinity same-S fit reuse ratio              = 0.968406
 ```
 
-This means same-S, multi-target execution is the required unit of work. Per-target `mgcv::gam` and per-target CUDA allocation cannot reach the final goal.
+`110,617` is the canonical global key count. `273,284` is a route-specific
+executed-fit count produced by the historical S-affinity worker/cache layout;
+it is not a unique-request count. The evidence still means same-S,
+multi-target execution is the required unit of work. Per-target `mgcv::gam`
+and per-target CUDA allocation cannot reach the final goal.
 
 ### 3.5 Existing dCov substrate
 
@@ -776,33 +781,57 @@ fastkpc/artifacts/full_cuda_ci/workload_census_351x48_v1/
 
 ```text
 logical sequence id
+source sequence id
+source task index
 level
 x
 y
 sorted S
 formula route
 reference p-value
-alpha decision
-absolute and log distance from alpha
+explicit reference decision and independence flag
+signed/absolute distance from alpha
+signed/absolute log ratio from alpha
 whether the test deletes the edge
 selected sepset status
 ```
 
-### Record every unique target|S residual request
+Level 0 uses the existing `direct-ci` formula class and does not create a GAM
+residual key. Conditional rows reuse the existing `full-smooth` and
+`additive-smooth` formula classes.
+
+### Record every unique conditional target|S residual request
 
 ```text
 target
 S
 |S|
-full versus additive formula
+full-smooth versus additive-smooth formula class
+canonical residual-key payload and SHA-256
 same-S group id
 same-S group size
+request multiplicity
+```
+
+### Separate response-independent setup from target-specific fit state
+
+`same_s_setup_metadata` contains one row per nonempty S group:
+
+```text
 model-matrix dimensions
 penalty count and block dimensions
 constraint dimensions
 rank metadata
 condition estimates
-near-constant flags
+penalty nullity
+constraint rank and nullspace dimension
+setup fingerprint and invariant hashes
+```
+
+`target_fit_metadata` contains one row per canonical conditional target|S key:
+
+```text
+near-constant target flags
 selected smoothing parameter vector
 GCV/Cp score
 EDF
@@ -810,6 +839,7 @@ mgcv convergence fields
 fit time
 residual hash
 fitted hash
+penalized-system condition at selected sp
 ```
 
 ### Required summaries
@@ -828,24 +858,37 @@ unsupported-envelope list
 Known historical sanity values include:
 
 ```text
-logical tests total        = 240,489
-conditional residual requests = 476,552
-unique target|S requests   = 273,284
-same-S groups              = 8,634
+logical tests total                                = 240,489
+conditional logical tests                          = 238,276
+conditional residual requests                      = 476,552
+canonical global unique conditional target|S       = 110,617
+nonempty same-S groups                              = 8,634
+S-affinity executed mgcv fits (historical metric)  = 273,284
 ```
 
-If fresh instrumentation produces different values, stop and explain the route or oracle difference before continuing.
+The first five values are canonical hard gates. `273,284` is provenance-only
+unless a hash-protected S-affinity execution trace is supplied and independently
+recounted. If a canonical value differs, stop and explain the oracle or key
+contract difference before continuing.
 
 ### Hard correctness gate
 
-Instrumentation must not change execution:
+Phase 1 is offline and does not execute a new skeleton. It must independently
+validate and inherit the frozen Phase 0 graph evidence:
 
 ```text
-SHD = 0
-sepsets identical = TRUE
-n.edgetests exact = TRUE
-deletions identical = TRUE
+oracle_inherited_graph_gate = TRUE
+oracle inherited SHD = 0
+oracle inherited sepsets identical = TRUE
+oracle inherited n.edgetests exact = TRUE
+oracle inherited deletions identical = TRUE
+new_candidate_graph_gate = NOT_APPLICABLE
 ```
+
+Before the complete metadata pass, a representative parity gate must prove
+that offline one-target fitting matches the actual two-target `regrXonS` data
+layout for `|S|=1,2,3`, a larger additive multi-penalty case, rank-deficient
+and near-constant cases, and a canonical near-alpha case.
 
 ### Exit condition
 
@@ -2170,8 +2213,10 @@ first-divergence reporting are hard-gate fields.
 
 ### Task 3
 
-Active next task: generate the complete Phase 1 target|S and logical-CI census
-from the unchanged correct baseline.
+Active next task: complete Phase 1 in six gated stages from the unchanged
+correct baseline: structural census, legacy-layout parity subset, setup/fit
+schema split, shard/restart qualification, scaled dry runs, and finally the
+complete 110,617-key mgcv census.
 
 ### Task 4
 
