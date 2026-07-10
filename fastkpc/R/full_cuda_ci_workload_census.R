@@ -129,7 +129,35 @@ fastkpc_full_cuda_census_validate_input_hashes <- function(
 
 fastkpc_full_cuda_census_validate_semantic_inputs <- function(
     data, oracle, oracle_dir, contract) {
+  fastkpc_full_cuda_require_namespace("digest")
   canonical <- fastkpc_full_cuda_canonical_contract()
+  manifest <- oracle$manifest
+  manifest_clean <-
+    identical(contract$dataset_matrix_sha256, canonical$data_hash) &&
+    identical(as.character(manifest$schema_version),
+              "full-cuda-ci-oracle-v1") &&
+    identical(as.character(manifest$source_commit),
+              contract$phase0_source_commit) &&
+    identical(as.character(manifest$source_result_hash),
+              canonical$source_result_hash) &&
+    identical(as.character(manifest$data_hash), canonical$data_hash) &&
+    identical(as.integer(manifest$data_dimensions$n), canonical$n) &&
+    identical(as.integer(manifest$data_dimensions$p), canonical$p) &&
+    identical(as.character(manifest$column_order), canonical$column_order) &&
+    identical(as.numeric(manifest$alpha), canonical$alpha) &&
+    identical(as.integer(manifest$max_conditioning_size),
+              canonical$max_conditioning_size) &&
+    identical(as.integer(manifest$index), canonical$index) &&
+    identical(as.integer(manifest$numCol), canonical$numCol) &&
+    isTRUE(manifest$logical_ci_trace_available) &&
+    identical(as.integer(manifest$logical_ci_trace_count), 240489L) &&
+    identical(as.integer(manifest$deletion_trace_count), 1018L) &&
+    nrow(oracle$logical_trace) == 240489L &&
+    nrow(oracle$deletion_trace) == 1018L
+  if (!isTRUE(manifest_clean)) {
+    stop("Phase 1 oracle manifest semantic contract mismatch",
+         call. = FALSE)
+  }
   data <- as.matrix(data)
   storage.mode(data) <- "double"
   if (!identical(dim(data), c(canonical$n, canonical$p)) ||
@@ -180,6 +208,107 @@ fastkpc_full_cuda_census_validate_semantic_inputs <- function(
   invisible(TRUE)
 }
 
+fastkpc_full_cuda_census_validate_inherited_evidence <- function(
+    oracle, oracle_dir,
+    contract = fastkpc_full_cuda_census_input_contract()) {
+  fastkpc_full_cuda_require_namespace("jsonlite")
+  canonical <- fastkpc_full_cuda_canonical_contract()
+  summary <- oracle$summary
+  fallback_counts <- c(
+    unknown = as.integer(summary$unknown_fallback_count),
+    approximate = as.integer(summary$approximate_backend_count),
+    backend = as.integer(summary$backend_fallback_error_count)
+  )
+  if (length(fallback_counts) != 3L || anyNA(fallback_counts) ||
+      any(fallback_counts != 0L)) {
+    stop("Phase 1 inherited fallback counters are missing or nonzero",
+         call. = FALSE)
+  }
+  edge_counts <- c(
+    reference = as.integer(summary$edge_count_reference),
+    candidate = as.integer(summary$edge_count_candidate)
+  )
+  if (length(edge_counts) != 2L || anyNA(edge_counts) ||
+      any(edge_counts != canonical$edge_count)) {
+    stop("Phase 1 inherited edge count evidence is invalid", call. = FALSE)
+  }
+  summary_clean <-
+    identical(as.character(summary$run_status), "ok") &&
+    !isTRUE(summary$timeout) &&
+    identical(as.character(summary$source_commit),
+              contract$phase0_source_commit) &&
+    identical(as.character(summary$candidate_route), "oracle-self") &&
+    identical(as.integer(summary$SHD), 0L) &&
+    isTRUE(summary$adjacency_identical) &&
+    isTRUE(summary$sepsets_identical) &&
+    isTRUE(summary$n_edgetests_identical) &&
+    isTRUE(summary$deletions_identical) &&
+    isTRUE(summary$logical_ci_trace_identical) &&
+    isTRUE(summary$deleting_test_identical) &&
+    isTRUE(summary$pass)
+  if (!isTRUE(summary_clean)) {
+    stop("Phase 1 inherited summary evidence is invalid", call. = FALSE)
+  }
+
+  graph <- utils::read.csv(file.path(oracle_dir, "graph_agreement.csv"),
+                           stringsAsFactors = FALSE)
+  graph_clean <- nrow(graph) == 1L &&
+    identical(as.integer(graph$edge_count_reference), canonical$edge_count) &&
+    identical(as.integer(graph$edge_count_candidate), canonical$edge_count) &&
+    identical(as.integer(graph$SHD), 0L) &&
+    isTRUE(graph$adjacency_identical)
+  if (!isTRUE(graph_clean)) {
+    stop("Phase 1 inherited graph agreement evidence is invalid",
+         call. = FALSE)
+  }
+
+  sepsets <- utils::read.csv(
+    file.path(oracle_dir, "sepset_agreement.csv"),
+    stringsAsFactors = FALSE
+  )
+  if (nrow(sepsets) == 0L || !all(sepsets$identical %in% TRUE) ||
+      any(sepsets$direction_conflict %in% TRUE)) {
+    stop("Phase 1 inherited sepset agreement evidence is invalid",
+         call. = FALSE)
+  }
+
+  tests <- utils::read.csv(file.path(oracle_dir, "n_edgetests.csv"),
+                           stringsAsFactors = FALSE)
+  tests_clean <- identical(as.integer(tests$level),
+                            seq_along(canonical$n_edgetests) - 1L) &&
+    identical(as.integer(tests$n_edgetests),
+              as.integer(canonical$n_edgetests)) &&
+    identical(as.integer(oracle$reference$n.edgetests),
+              as.integer(canonical$n_edgetests))
+  if (!isTRUE(tests_clean)) {
+    stop("Phase 1 inherited n.edgetests evidence is invalid",
+         call. = FALSE)
+  }
+
+  fallbacks <- utils::read.csv(file.path(oracle_dir, "fallbacks.csv"),
+                               stringsAsFactors = FALSE)
+  required_fallbacks <- c("unknown_fallback_count",
+                          "approximate_backend_count")
+  fallback_file_clean <- nrow(fallbacks) >= 2L &&
+    all(required_fallbacks %in% fallbacks$key) &&
+    all(is.finite(as.numeric(fallbacks$count))) &&
+    all(as.numeric(fallbacks$count) == 0)
+  if (!isTRUE(fallback_file_clean)) {
+    stop("Phase 1 inherited fallback file evidence is invalid",
+         call. = FALSE)
+  }
+
+  first <- jsonlite::read_json(
+    file.path(oracle_dir, "first_divergence.json"),
+    simplifyVector = TRUE
+  )
+  if (!identical(first$first_divergence_found, FALSE)) {
+    stop("Phase 1 inherited first-divergence evidence is invalid",
+         call. = FALSE)
+  }
+  TRUE
+}
+
 fastkpc_full_cuda_census_load_inputs <- function(
     oracle_dir, data_path,
     contract = fastkpc_full_cuda_census_input_contract()) {
@@ -192,42 +321,9 @@ fastkpc_full_cuda_census_load_inputs <- function(
   fastkpc_full_cuda_census_validate_semantic_inputs(
     data, oracle, oracle_dir, contract
   )
-  manifest <- oracle$manifest
-  summary <- oracle$summary
-  graph <- utils::read.csv(file.path(oracle_dir, "graph_agreement.csv"),
-                           stringsAsFactors = FALSE)
-  sepsets <- utils::read.csv(
-    file.path(oracle_dir, "sepset_agreement.csv"),
-    stringsAsFactors = FALSE
+  fastkpc_full_cuda_census_validate_inherited_evidence(
+    oracle, oracle_dir, contract
   )
-  tests <- utils::read.csv(file.path(oracle_dir, "n_edgetests.csv"),
-                           stringsAsFactors = FALSE)
-  fallbacks <- utils::read.csv(file.path(oracle_dir, "fallbacks.csv"),
-                               stringsAsFactors = FALSE)
-  first <- jsonlite::read_json(
-    file.path(oracle_dir, "first_divergence.json"),
-    simplifyVector = TRUE
-  )
-  inherited_clean <-
-    identical(as.character(manifest$source_commit),
-              contract$phase0_source_commit) &&
-    isTRUE(summary$pass) && identical(as.integer(summary$SHD), 0L) &&
-    isTRUE(summary$adjacency_identical) &&
-    isTRUE(summary$sepsets_identical) &&
-    isTRUE(summary$n_edgetests_identical) &&
-    isTRUE(summary$deletions_identical) &&
-    isTRUE(summary$logical_ci_trace_identical) &&
-    nrow(graph) == 1L && identical(as.integer(graph$SHD), 0L) &&
-    all(graph$adjacency_identical %in% TRUE) &&
-    nrow(sepsets) > 0L && all(sepsets$identical %in% TRUE) &&
-    !any(sepsets$direction_conflict %in% TRUE) &&
-    identical(as.integer(tests$n_edgetests),
-              as.integer(oracle$reference$n.edgetests)) &&
-    nrow(fallbacks) > 0L && all(as.numeric(fallbacks$count) == 0) &&
-    !isTRUE(first$first_divergence_found)
-  if (!isTRUE(inherited_clean)) {
-    stop("Phase 1 inherited oracle graph gate failed", call. = FALSE)
-  }
   list(
     data = as.matrix(data),
     oracle = oracle,

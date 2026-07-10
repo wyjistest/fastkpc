@@ -202,6 +202,36 @@ assert_true(identical(inputs$oracle_input_bundle_sha256,
 assert_true(identical(dim(inputs$data), c(351L, 48L)),
             "loaded canonical data must retain the 351x48 dimensions")
 
+bad_manifest_oracle <- inputs$oracle
+bad_manifest_oracle$manifest$alpha <- 0.2
+assert_error(
+  fastkpc_full_cuda_census_validate_semantic_inputs(
+    inputs$data, bad_manifest_oracle, oracle_dir, contract
+  ),
+  "manifest",
+  "manifest alpha/config drift must fail independent semantic validation"
+)
+
+bad_summary_oracle <- inputs$oracle
+bad_summary_oracle$summary$unknown_fallback_count <- 1L
+assert_error(
+  fastkpc_full_cuda_census_validate_inherited_evidence(
+    bad_summary_oracle, oracle_dir, contract
+  ),
+  "fallback",
+  "summary fallback counters must be checked independently of pass=true"
+)
+
+bad_edges_oracle <- inputs$oracle
+bad_edges_oracle$summary$edge_count_candidate <- 109L
+assert_error(
+  fastkpc_full_cuda_census_validate_inherited_evidence(
+    bad_edges_oracle, oracle_dir, contract
+  ),
+  "edge count",
+  "summary edge counts must be checked independently of pass=true"
+)
+
 structural <- fastkpc_full_cuda_census_structural(inputs)
 assert_true(nrow(structural$logical_tests) == 240489L,
             "canonical structural census must include every logical test")
