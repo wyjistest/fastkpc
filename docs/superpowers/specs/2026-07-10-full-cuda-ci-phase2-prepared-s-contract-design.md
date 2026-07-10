@@ -290,6 +290,11 @@ smooth_labels
 smooth_terms
 smooth_by
 basis_dimensions
+smooth_p_order
+smooth_null_space_dimensions
+smooth_ranks
+smooth_side_constraints
+smooth_reparameterized
 smooth_parameter_ranges
 smooth_sp_ranges
 smooth_S_scale

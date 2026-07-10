@@ -489,7 +489,12 @@ smooth_descriptors <- lapply(raw$smooth, function(smooth) {
     first_sp = as.integer(smooth$first.sp),
     last_sp = as.integer(smooth$last.sp),
     S_scale = as.numeric(smooth$S.scale),
-    shift = as.numeric(smooth$shift)
+    shift = as.numeric(smooth$shift),
+    p_order = as.numeric(smooth$p.order),
+    null_space_dim = as.integer(smooth$null.space.dim),
+    rank = as.integer(smooth$rank),
+    side_constrain = isTRUE(smooth$side.constrain),
+    reparameterized = isTRUE(smooth$repara)
   )
 })
 ~~~
