@@ -2,21 +2,38 @@
 
 ## Status
 
-Written design for review. Phase 1 is complete at artifact source commit
+Amended after independent contract and corpus review. Phase 1 is complete at
+artifact source commit
 `1560068ba8d635e806612554e11bbed92c0b8843c`. This design freezes the Phase 2
 contract before implementation planning.
 
 ## Decision
 
 Build an explicit, normalized, response-independent `PreparedSSetup` for all
-8,634 canonical nonempty conditioning-set groups. Build a lightweight
-`TargetState` index for all 110,617 canonical conditional `target|S` keys.
+8,634 canonical nonempty conditioning-set groups. Construct each setup with a
+deterministic zero response, no selected smoothing parameter, and
+`mgcv::gam(..., fit = FALSE)`; whitelist-project the raw object into plain
+data and discard the raw mgcv object. Build a lightweight `TargetState` index
+for all 110,617 canonical conditional `target|S` keys.
 
-Validate fixed-smoothing-parameter retargeting on a deterministic,
-risk-complete real subset before running a complete target parity campaign.
-The first qualification subset contains 6,143 target keys and 3,808 logical CI
-tests. It is derived from the authenticated Phase 1 corpus, not maintained as a
-hand-written case list.
+Use two deterministic numerical gates:
+
+~~~text
+iteration gate:
+  PreparedSSetup groups = 44
+  target|S keys         = 270
+  logical dCov pairs    = 44
+
+extended qualification:
+  PreparedSSetup groups = 2,061
+  target|S keys         = 6,143
+  logical dCov pairs    = 3,808
+~~~
+
+The iteration gate is class-complete and intended for normal development. The
+extended qualification remains the Phase 2 artifact gate. Both are derived
+from the authenticated Phase 1 corpus, not maintained as hand-written case
+lists.
 
 Use the version-pinned mgcv `C_magic` fixed-sp kernel as the Phase 2 reference
 adapter. Existing C++ normal-equation and CUDA Cholesky solvers remain shadow
@@ -53,12 +70,24 @@ state and template `lsp0`. The current `fastkpc_prepare_gpu_setup_state()`
 strips `G/y`, but rejects multi-penalty setups. Neither object is the final
 Phase 2 contract.
 
-Canonical exploratory checks showed that a response-free setup plus a new
+The current stripping helper also leaves formula environments capable of
+retaining the complete input data and template target. A public contract
+therefore cannot retain formulas, calls, environments, closures, smooth
+objects, fitted gam objects, or raw `G`.
+
+Canonical exploratory checks showed that a zero-response, no-fixed-sp
+`fit = FALSE` setup plus a new
 target `y` and target-specific selected `sp` reproduces independently built
 fixed-sp mgcv coefficient, fitted, and residual hashes exactly for penalty
 counts 1, 3, 4, 5, 6, and 7, including a rank-deficient case. This makes an
 explicit normalized contract both feasible and testable without weakening
 numeric gates.
+
+The provider `fit = FALSE` model matrix and Phase 1 fitted lpmatrix differ by
+approximately `1e-10` in observed probes while defining the same model and
+producing exact fixed-sp fitted/residual hashes. Phase 2 must therefore retain
+both representation and semantic checks; it must not require those two raw
+matrix hashes to be identical.
 
 ## Phase Boundary
 
@@ -138,13 +167,24 @@ dataset matrix SHA-256                 =
 Named metadata authentication must be recomputed and match:
 
 ```text
+setup observation metadata =
+  5282820451b2658c636132e579859c8c2c8e6497a926b8b6d9c393e0043e667a
 same-S setup metadata =
   07830db88c62aa7658d44373e86d897b254e453773b4c0070460dc20fce91113
 target fit metadata =
   361672b87cd056a689f578a5eb7660a55d056395ac270d3e28dbbe24738bab40
+target risk metadata =
+  95eba27f5ea7904761ae4afbc203c58a84566fc3cc308d1b9c90acca69cc96f2
 risk cases =
   4a2748ba469e039143c482fd4cf0367324886cc526552e9529117cab7c596d91
 ```
+
+The loader also requires all 64 Phase 1 shard RDS/summary pairs. It validates
+their context and payload hashes through the Phase 1 shard validator, merges
+the 110,617 setup-observation and target-risk rows in canonical key order, and
+recomputes the two hashes above. It then verifies every non-lineage setup
+metadata field is invariant within each same-S group, not only model-matrix,
+penalty, constraint, and combined setup hashes.
 
 The Phase 2 loader must not trust a copied `pass` flag. It recomputes file
 hashes, named metadata hashes, key-to-group lineage, selected-sp lengths, and
@@ -214,16 +254,26 @@ family
 link
 method
 optimizer
+provider_fingerprint
 ```
 
 Required response-independent numeric state:
 
 ```text
 X
+coefficient_labels
+intercept
+assign
+cmX
 penalty_blocks
 penalty_offsets
 penalty_ranks
 penalty_order
+penalty_sp_indices
+penalty_sp_labels
+sp_mapping
+sp_mapping_offset
+min_sp
 constraint
 constraint_mode
 constraint_nullspace
@@ -237,12 +287,23 @@ offset_policy
 mgcv_penalty_rank_metadata
 smooth_classes
 smooth_labels
+smooth_terms
+smooth_by
 basis_dimensions
+smooth_parameter_ranges
+smooth_sp_ranges
+smooth_S_scale
+smooth_shift
 model_matrix_rank
 model_matrix_condition
 conditioning_rank
 conditioning_condition
 penalty_nullity
+scoring_n
+scoring_n_true
+scoring_min_edf
+scoring_pearson_extra
+scoring_deviance_extra
 ```
 
 Required static algebra:
@@ -283,7 +344,28 @@ residual_hash
 fitted_hash
 ```
 
-The validator recursively scans names and rejects response-bearing fields.
+The object must also contain no environment, function, formula, call,
+external pointer, fitted `gam`, or raw mgcv smooth object. Smooth metadata is
+whitelist-projected into plain atomic vectors, matrices, and lists. The
+validator recursively scans names, values, classes, and attributes and rejects
+response-bearing or executable objects.
+
+Fingerprints are separated:
+
+```text
+representation_fingerprint:
+  exact hash of the canonical plain-data representation and PreparedSKey
+
+semantic_fingerprint:
+  excludes PreparedSKey, target identity, backend identity, and representative
+  construction inputs; covers model space, constraints, ordered penalty
+  action, provider semantics, and fixed-sp probe behavior
+```
+
+The provider fingerprint covers exact R and mgcv versions, hashes of
+`kpcalg::regrXonS` and both pinned formula-helper bodies, contrasts, NA
+policy, family/link/method defaults, and the Prepared-S extractor schema. It
+does not include the target, selected sp, execution backend, or shard identity.
 
 ## TargetState Contract
 
@@ -337,23 +419,25 @@ must have the same length and order as `penalty_blocks`.
 
 For each Phase 1 same-S row:
 
-1. Select `representative_residual_key_sha256` from the authenticated setup
-   metadata.
-2. Resolve its target and selected-sp vector through authenticated request and
-   target tables.
-3. Recreate the exact single-target `x1, x2, ...` data layout used by the
-   Phase 1 legacy-layout parity contract.
-4. Call `fastkpc_mgcv_extract_setup()` once for the group.
-5. Extract normalized structural fields and all-fixed smoothing mapping
-   semantics.
-6. Discard raw `G`, response, target, and representative selected sp.
-7. Build static Gram/nullspace state.
-8. Validate dimensions, ranks, policies, hashes, and fingerprint against the
-   Phase 1 same-S row.
-9. Write the normalized object to its deterministic shard.
+1. Parse sorted S and construct the exact `x1, x2, ...` conditioning layout
+   with `x1 = rep(0, n)`.
+2. Build the canonical regrXonS formula through the pinned formula helper.
+3. Call `mgcv::gam(..., method = "GCV.Cp", fit = FALSE)` without a fixed
+   smoothing parameter.
+4. Whitelist-project response-independent matrices, penalties, constraints,
+   design metadata, plain smooth descriptors, mapping metadata, and scoring
+   constants.
+5. Discard the formula, formula environment, call, family closure, smooth
+   objects, raw `G`, zero response, and every non-whitelisted attribute.
+6. Build static Gram/nullspace state and provider/representation/semantic
+   fingerprints.
+7. Validate dimensions, ranks, penalty ordering, policies, column-space
+   semantics, and Phase 1 lineage.
+8. Write the normalized object to its deterministic shard.
 
-The representative target is a construction input only. It is not part of the
-PreparedSKey or PreparedSSetup fingerprint.
+`representative_residual_key_sha256` remains Phase 1 lineage metadata only.
+It is not used to construct the setup and is not part of the semantic
+fingerprint.
 
 ## Fixed-Sp Reference Adapter
 
@@ -388,8 +472,10 @@ and residual hashes. A numeric tolerance is not a substitute for these hashes.
 
 ## Semantic Equivalence
 
-Raw matrix hashes are required for canonical lineage but are not the only
-semantic check.
+The provider representation hash is required for restart and artifact
+authentication. The Phase 1 fitted-lpmatrix hash remains lineage evidence, but
+it is not required to equal the `fit = FALSE` provider-X hash. Their model
+space and behavior must be equivalent.
 
 For selected groups the comparator validates:
 
@@ -400,8 +486,8 @@ For selected groups the comparator validates:
 4. equal penalty action in canonical selected-sp order;
 5. exact fixed-sp coefficient, fitted, and residual hashes for selected
    targets;
-6. downstream Phase 0-route dCov p-value drift within the existing `1e-8`
-   oracle tolerance and exact decisions.
+6. downstream Phase 0 C++ Spectra-route dCov p-value drift at most `1e-12`
+   and exact decisions.
 
 The principal-angle tolerance is diagnostic, not an escape from the exact
 behavior gates:
@@ -411,8 +497,51 @@ semantic_angle_tolerance =
   64 * .Machine$double.eps * max(nrow(X), ncol(X))
 ```
 
-It is recorded in the manifest. Canonical raw matrices are expected to match
-Phase 1 exactly.
+It is recorded in the manifest. Exact fixed-sp fitted/residual hashes remain
+the authoritative behavior gate.
+
+## Deterministic Iteration Subset
+
+The default development gate is class-complete and small enough for repeated
+execution:
+
+```text
+PreparedSSetup groups = 44
+target|S keys         = 270
+logical dCov pairs    = 44
+Phase 1 fit-time sum  = 12.745 seconds
+expected iteration    = approximately 30-60 seconds
+```
+
+Selection is deterministic:
+
+1. Include all six conditional tests with
+   `absolute_log_distance_from_alpha <= 1e-3`.
+2. Within conditional tests at most `log(2)` from alpha, select the closest
+   test for every observed `(S_size, reference_decision)`, breaking ties by
+   `logical_sequence_id`.
+3. Select one ordinary logical case for each `S_size = 1..7`; both targets
+   must have finite outputs, condition below `1e8`, no risk or convergence
+   flag, and alpha distance greater than `log(2)`. Choose the lower-median
+   canonical residual-pair key.
+4. Select one numerical-risk target for every observed
+   `(penalty_count, condition_bucket)` in
+   `finite_1e8_to_lt_1e12`, `finite_ge_1e12`, and
+   `rank_deficient_inf`. Finite buckets choose maximum condition then
+   residual key; rank-deficient buckets choose the smallest residual key.
+5. Select one target for every observed
+   `(convergence_signature, S_size, condition_bucket)`, ordered by descending
+   optimizer iteration count then residual key.
+6. Anchor same-S multiplicity at unique-target fan-out `2/9/47` and logical
+   request load `2/16/3092`, choosing the exact or nearest value then the
+   smallest group key. Include every target from those groups.
+7. Attach each risk target and multiplicity group to its closest-alpha
+   canonical consumer, add both residual endpoints, and add representative,
+   lower-median, and maximum targets for any remaining selected setup.
+
+The selector records all reasons and hashes sorted setup IDs, target keys,
+logical IDs, and reason rows into an iteration-subset identity. It must produce
+exactly 44/270/44 on the authenticated corpus.
 
 ## Deterministic Qualification Subset
 
@@ -508,21 +637,22 @@ validation. For each of the 3,808 selected logical tests:
 2. run the pinned legacy `dcov.gamma` implementation with Phase 0 `index` and
    `numCol`;
 3. compare the p-value to `reference_p_value` from the authenticated logical
-   trace using the existing legacy dCov C++ oracle tolerance of `1e-8`;
+   trace through the same C++ Spectra route with a Phase 2 tolerance of
+   `1e-12`;
 4. replay the frozen `p >= alpha` decision;
 5. record p-value identity, signed alpha distance, and decision identity.
 
 Hard gates:
 
 ```text
-legacy dCov max p-value drift   <= 1e-8
+legacy dCov max p-value drift   <= 1e-12
 legacy dCov decision flip count = 0
 ```
 
 The artifact also reports the exact-p-value match count. Bitwise p-value
-identity is informative but is not a hard gate across qualified legacy dCov
-implementations. The tolerance is the existing source-controlled dCov oracle
-contract, not a Phase 2 relaxation.
+identity is informative but is not a hard gate. Phase 2 tightens the existing
+source-controlled `1e-8` dCov oracle envelope because it replays the same
+C++ Spectra route with exact residual vectors.
 
 Parent skeleton replay is not run in Phase 2. Graph evidence remains inherited
 from Phase 0/1 and is reported with the same scope distinction.
@@ -591,6 +721,13 @@ prepared_s_setup_index.rds
 prepared_s_setup_index.csv
 target_state_index.rds
 target_state_index.csv
+iteration_setup_groups.rds
+iteration_setup_groups.csv
+iteration_target_keys.rds
+iteration_target_keys.csv
+iteration_logical_tests.rds
+iteration_logical_tests.csv
+iteration_coverage.csv
 qualification_setup_groups.rds
 qualification_setup_groups.csv
 qualification_target_keys.rds
@@ -639,6 +776,9 @@ approximate_backend_count                  = 0
 Qualification subset:
 
 ```text
+iteration_setup_group_count              = 44
+iteration_target_key_count               = 270
+iteration_logical_test_count             = 44
 seed_target_key_count                  = 2,356
 qualification_target_key_count         = 6,143
 qualification_logical_test_count       = 3,808
@@ -647,7 +787,7 @@ conditional_near_alpha_test_count      = 1,478
 fixed_sp_coefficient_hash_exact        = TRUE
 fixed_sp_fitted_hash_exact             = TRUE
 fixed_sp_residual_hash_exact           = TRUE
-legacy_dcov_max_abs_p_value_diff        <= 1e-8
+legacy_dcov_max_abs_p_value_diff        <= 1e-12
 legacy_dcov_decision_flip_count        = 0
 ```
 
@@ -672,7 +812,7 @@ Fail closed on:
 - Phase 1 setup metadata mismatch;
 - missing rare-risk or near-alpha coverage;
 - fixed-sp coefficient, fitted, or residual hash mismatch;
-- dCov p-value drift above `1e-8` or any decision mismatch;
+- dCov p-value drift above `1e-12` or any decision mismatch;
 - stale, missing, duplicate, or corrupt shard;
 - any fallback, approximation, or unsupported canonical setup.
 
@@ -698,6 +838,7 @@ Reuse without changing production routing:
 fastkpc/R/full_cuda_ci_workload_census.R
 fastkpc/R/mgcv_compat_contract.R
 fastkpc/R/mgcv_extract_oracle.R
+fastkpc/R/native.R
 ```
 
 Do not add Phase 2 logic to `legacy_runner.R` or the live skeleton path.
@@ -716,6 +857,7 @@ fastkpc_full_cuda_build_target_states()
 fastkpc_full_cuda_validate_target_states()
 fastkpc_full_cuda_materialize_target_state()
 fastkpc_mgcv_magic_fixed_sp_from_prepared()
+fastkpc_full_cuda_select_prepared_s_iteration_subset()
 fastkpc_full_cuda_select_prepared_s_qualification_subset()
 fastkpc_full_cuda_run_prepared_s_target_parity()
 fastkpc_full_cuda_run_prepared_s_dcov_parity()
@@ -762,11 +904,12 @@ Every case must fail or rebuild deterministically as specified.
 
 ### Real-subset test
 
-`test_full_cuda_ci_prepared_s_contract_real_subset.R` has two layers:
+`test_full_cuda_ci_prepared_s_contract_real_subset.R` has three layers:
 
-1. a fast smoke solve over deterministic representatives from every penalty
-   count and risk class;
-2. selection-only validation of the complete 2,356/6,143/3,808/2,061
+1. exact selection and numerical execution of the complete 44/270/44
+   iteration corpus;
+2. a focused unit smoke over one representative per penalty count;
+3. selection-only validation of the complete 2,356/6,143/3,808/2,061
    qualification corpus.
 
 The full 6,143-key parity run is performed by the artifact runner, not by every
