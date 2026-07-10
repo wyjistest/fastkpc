@@ -77,6 +77,47 @@ fastkpc/artifacts/full_cuda_ci/oracle_351x48_v1/
 fastkpc/artifacts/kpc_tprs_real_zhu/cancer_RD-causalDiscoveryInput.rds
 ```
 
+The source-controlled input contract v1 pins Phase 0 source commit `93ae843`
+and these file SHA-256 values:
+
+```text
+dataset/cancer_RD-causalDiscoveryInput.rds  e03cbfafed3336f3da7725878e92af24556b5ebdc6227b94ea84469e62e94036
+oracle/adjacency.rds                        6701a033e821f8433842ae825f67715b6c2349e3c36515b45296f125ff7e1d4e
+oracle/deletion_trace.csv                   00eeb3fe843e9f868b133cef9f573430ea9d49fe7b0dd53ba3be51e2e9e94486
+oracle/fallbacks.csv                        dc45430a89ad1c4fb85cf9f4c63b4babe89df8cf2b505759e7389f7b5462beca
+oracle/first_divergence.json                b29373f20a56d99ce76ef4c21f2d508a13ed22ed009a30c902a1e6d23e46fef6
+oracle/graph_agreement.csv                  f1eabdbc578607ee0b124a6dcd3fd8250077493472605583889eb532cd3b85d5
+oracle/logical_ci_trace.rds                 b777c5dc1b9acad08c133ccd668eae5e9444a89d481c7f8adf9b2c2a0dd6cda5
+oracle/manifest.json                        f907559586c4b766f483bdc01b4074d93ce2c8b80972c3199c4493848b2b8750
+oracle/n_edgetests.csv                      6c0e1ccb14c9721e7056aa91e851065877965ab33869867dd130c7ca3d503058
+oracle/pmax.rds                             2fafe1f5084dcb86114adfb86d06855350d36872e59795b6ee604bf4c6e19df5
+oracle/sepset_agreement.csv                 9e57978d03fa0e62526b884e0566d2671d2c74417f117fd420b0fb4afb85a256
+oracle/sepsets.rds                          69853449f95e1486ef237a2b1bd7c3a99d94cac4c0f202d7c509c890a49e1ca6
+oracle/summary.json                         eec6724d9fd69671399783b565c2dd8bbdbc3a4e553ba742ac781d483354ade7
+```
+
+The dataset RDS file hash above protects the input bytes. It is distinct from
+the canonical normalized data-matrix identity used in residual keys:
+
+```text
+dataset_file_sha256       = e03cbfafed3336f3da7725878e92af24556b5ebdc6227b94ea84469e62e94036
+dataset_sha256_in_key     = 971f1e0784817c6febfc84154f19540be02a92f6e4acad784dc7f92b979f1df7
+```
+
+`dataset_sha256_in_key` is the Phase 0 `data_hash`, recomputed after coercing
+the canonical 351x48 matrix to double with the Phase 0 hashing helper. It must
+not be replaced by the RDS file hash.
+
+Construct `oracle_input_bundle_sha256` by sorting the logical paths above with
+bytewise ascending order, serializing each row as
+`<logical_path><TAB><lowercase_sha256><LF>`, concatenating the rows with a
+final LF already supplied by the last row, and hashing the raw UTF-8 bytes.
+Contract v1 requires:
+
+```text
+oracle_input_bundle_sha256 = 7700bc78240984c36f8ae5ca281362a0afb8d7dedd34a5711ce4ab76a2ebee0e
+```
+
 The loader must not trust `summary.json` or `manifest.json` `pass` fields as a
 substitute for validation. It must:
 
@@ -272,7 +313,7 @@ terminated by one final LF:
 
 ```text
 schema_version=full-cuda-ci-residual-key-v1
-dataset_sha256=<lowercase 64-hex>
+dataset_sha256=971f1e0784817c6febfc84154f19540be02a92f6e4acad784dc7f92b979f1df7
 n=<base-10 integer>
 p=<base-10 integer>
 target_index=<base-10 integer>
@@ -305,7 +346,7 @@ the same byte rules:
 
 ```text
 schema_version=full-cuda-ci-same-s-key-v1
-dataset_sha256=<lowercase 64-hex>
+dataset_sha256=971f1e0784817c6febfc84154f19540be02a92f6e4acad784dc7f92b979f1df7
 n=<base-10 integer>
 p=<base-10 integer>
 sorted_S=<comma-separated base-10 integers>
@@ -326,6 +367,12 @@ mgcv_semantics_version=legacy-mgcv-gam-default-selection-v1
 The global corpus hash is the SHA-256 of the sorted residual SHA-256 values
 joined with LF and terminated by LF.
 
+The frozen 351x48 contract produces:
+
+```text
+canonical_key_corpus_hash = b843630969f116da63f7fad095c54de2ff471540159ff97ca56c3871d6b2e1fa
+```
+
 Canonical Stage B gates:
 
 ```text
@@ -333,6 +380,7 @@ sum(request_multiplicity)                                  = 476,552
 nrow(residual_requests)                                    = 110,617
 canonical_global_unique_conditional_target_s_count         = 110,617
 length(unique(same_S_group_id))                            = 8,634
+canonical_key_corpus_hash                                  = b843630969f116da63f7fad095c54de2ff471540159ff97ca56c3871d6b2e1fa
 ```
 
 The historical route metric is recorded only as provenance:
@@ -387,6 +435,12 @@ sp, GCV/Cp, EDF, and the downstream p-value. Decision equality is mandatory.
 No implementation may silently relax this gate. If pinned mgcv produces a
 documented last-bit layout difference, stop and amend the specification with
 measured absolute/relative tolerances before continuing.
+
+Feasibility probes on the pinned canonical environment (`R 4.4.1`, `mgcv 1.9.1`)
+already produced exact equality for canonical `|S| = 1,2,3,7`, the canonical
+conditional test nearest alpha, and synthetic rank-deficient and near-constant
+cases. The committed parity test must reproduce this evidence; the probe does
+not replace the test or final artifact.
 
 ## Stage D: Legacy mgcv Setup and Target-Fit Metadata
 
@@ -485,6 +539,11 @@ setup_fingerprint
 Any violation fails closed and prevents compression to the 8,634-row setup
 table. The setup and target-fit tables join through `same_S_group_id` and
 `setup_fingerprint`.
+
+Feasibility probes across representative canonical `|S| = 1,2,3,7` groups and
+multiple targets produced one exact serialized value per group for `X`,
+penalty blocks, offsets, constraints, `H`, and setup rank. The committed
+invariant tests and full census must reproduce this evidence.
 
 Large vectors and matrices are not stored in the final artifact. Store exact
 numeric hashes, dimensions, ranks, conditions, and scalar/list metadata.
