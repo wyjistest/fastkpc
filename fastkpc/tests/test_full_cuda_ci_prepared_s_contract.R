@@ -748,6 +748,74 @@ assert_setup_error <- function(mutator, pattern, message) {
   )
 }
 
+refresh_self_fingerprints <- function(value) {
+  value$semantic_fingerprint <-
+    fastkpc_full_cuda_prepared_s_semantic_fingerprint(value)
+  value$representation_fingerprint <-
+    fastkpc_full_cuda_prepared_s_representation_fingerprint(value)
+  value
+}
+
+approved_fingerprint_fields <- fixture_setup[c(
+  "provider_fingerprint", "semantic_fingerprint",
+  "representation_fingerprint", "phase1_setup_fingerprint"
+)]
+assert_true(
+  length(fastkpc_full_cuda_prepared_s_find_response_fields(
+    approved_fingerprint_fields
+  )) == 0L,
+  "approved setup and provider fingerprints must remain whitelisted"
+)
+
+assert_setup_error(
+  function(value) {
+    attr(value$smooth_terms[[1L]], "UZ") <- numeric()
+    refresh_self_fingerprints(value)
+  },
+  "response-bearing field",
+  "UZ hidden in smooth attributes must fail the safety scanner"
+)
+assert_setup_error(
+  function(value) {
+    names(value$smooth_terms[[1L]]) <- "Xu"
+    refresh_self_fingerprints(value)
+  },
+  "response-bearing field",
+  "Xu hidden in smooth vector element names must fail the safety scanner"
+)
+assert_setup_error(
+  function(value) {
+    value$smooth_terms[[1L]][[1L]] <- "UZ"
+    refresh_self_fingerprints(value)
+  },
+  "response-bearing field",
+  "UZ hidden in smooth values must fail the safety scanner"
+)
+assert_setup_error(
+  function(value) {
+    value$smooth_terms[[1L]][[1L]] <- "Xu"
+    refresh_self_fingerprints(value)
+  },
+  "response-bearing field",
+  "Xu hidden in smooth values must fail the safety scanner"
+)
+assert_setup_error(
+  function(value) {
+    value$smooth_terms[[1L]][[1L]] <- "target_fingerprint"
+    refresh_self_fingerprints(value)
+  },
+  "response-bearing field",
+  "generic target fingerprints in smooth values must fail the safety scanner"
+)
+assert_setup_error(
+  function(value) {
+    value$smooth_terms[[1L]][[1L]] <- "target_state_fingerprint"
+    refresh_self_fingerprints(value)
+  },
+  "response-bearing field",
+  "target-state fingerprints in smooth values must fail the safety scanner"
+)
+
 assert_setup_error(
   function(value) {
     value$nested <- list(y = fixture_data[, 1L])
@@ -830,6 +898,34 @@ assert_setup_error(
   },
   "X must be finite",
   "nonfinite provider matrices must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    value$weights <- rep(1, nrow(value$X))
+    value$weights_policy <- "none"
+    value$weighted_X_policy <- "sqrt-weights-row-scaled"
+    value$gram_matrix <- fastkpc_full_cuda_prepared_s_matrix(
+      crossprod(value$X * sqrt(value$weights))
+    )
+    refresh_self_fingerprints(value)
+  },
+  "weights policy mismatch",
+  paste(
+    "explicit all-one weights must be rejected after dependent",
+    "algebra and fingerprints are refreshed"
+  )
+)
+assert_setup_error(
+  function(value) {
+    value$offset <- rep(0, nrow(value$X))
+    value$offset_policy <- "none"
+    refresh_self_fingerprints(value)
+  },
+  "offset policy mismatch",
+  paste(
+    "explicit all-zero offset must be rejected after dependent",
+    "fingerprints are refreshed"
+  )
 )
 assert_setup_error(
   function(value) {

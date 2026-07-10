@@ -1365,7 +1365,8 @@ fastkpc_full_cuda_prepared_s_provider_fingerprint <- function(
 fastkpc_full_cuda_prepared_s_response_field_names <- function() {
   c(
     "G", "y", "target", "sp", "lsp0", "Xty", "Xty_null",
-    "target_fit_fingerprint", "residual_hash", "fitted_hash",
+    "UZ", "Xu", "target_fingerprint", "target_fit_fingerprint",
+    "target_state_fingerprint", "residual_hash", "fitted_hash",
     "selected_sp", "selected_sp_names", "selected_sp_hash"
   )
 }
@@ -1665,10 +1666,16 @@ fastkpc_full_cuda_prepared_s_policy_state <- function(
   }
   list(
     value = value,
-    policy = paste0(
-      nonneutral_label, ":",
-      fastkpc_full_cuda_census_metadata_hash(value)
+    policy = fastkpc_full_cuda_prepared_s_nonneutral_policy(
+      value, nonneutral_label
     )
+  )
+}
+
+fastkpc_full_cuda_prepared_s_nonneutral_policy <- function(value, label) {
+  paste0(
+    label, ":",
+    fastkpc_full_cuda_census_metadata_hash(unname(as.numeric(value)))
   )
 }
 
@@ -2494,8 +2501,16 @@ fastkpc_full_cuda_validate_prepared_s_setup <- function(
   } else {
     weights_clean <- is.numeric(setup$weights) &&
       length(setup$weights) == n && all(is.finite(setup$weights)) &&
-      all(setup$weights >= 0) &&
-      identical(setup$weights_policy, phase1_weights_policy)
+      all(setup$weights >= 0) && !all(setup$weights == 1)
+    if (isTRUE(weights_clean)) {
+      expected_weights_policy <-
+        fastkpc_full_cuda_prepared_s_nonneutral_policy(
+          setup$weights, "nonunit"
+        )
+      weights_clean <-
+        identical(setup$weights_policy, expected_weights_policy) &&
+        identical(phase1_weights_policy, expected_weights_policy)
+    }
   }
   if (!isTRUE(weights_clean)) {
     stop("PreparedSSetup weights policy mismatch", call. = FALSE)
@@ -2509,7 +2524,16 @@ fastkpc_full_cuda_validate_prepared_s_setup <- function(
   } else {
     offset_clean <- is.numeric(setup$offset) &&
       length(setup$offset) == n && all(is.finite(setup$offset)) &&
-      identical(setup$offset_policy, phase1_offset_policy)
+      !all(setup$offset == 0)
+    if (isTRUE(offset_clean)) {
+      expected_offset_policy <-
+        fastkpc_full_cuda_prepared_s_nonneutral_policy(
+          setup$offset, "nonzero"
+        )
+      offset_clean <-
+        identical(setup$offset_policy, expected_offset_policy) &&
+        identical(phase1_offset_policy, expected_offset_policy)
+    }
   }
   if (!isTRUE(offset_clean)) {
     stop("PreparedSSetup offset policy mismatch", call. = FALSE)
