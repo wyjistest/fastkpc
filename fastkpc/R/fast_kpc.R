@@ -141,6 +141,8 @@ fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
       "legacy-mgcv-regrXonS-provider"
     }
   result$summary$compatible_cuda_ci_authority <- "native-legacy-dcov.gamma"
+  result$summary$unknown_fallback_count <- 0L
+  result$summary$approximate_backend_count <- 0L
   result$summary$compatible_cuda_mgcv_residual_backend <-
     mgcv_residual_backend
   result$summary$compatible_cuda_mgcv_residual_backend_native_s_size_limit <-

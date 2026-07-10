@@ -512,6 +512,10 @@ assert_true(facade_cpp_residual$summary$residual_provider_mgcv_cpp_backend_nativ
 assert_true(identical(facade$summary$compatible_cuda_ci_authority,
                       "native-legacy-dcov.gamma"),
             "compatible CUDA facade should record CI authority")
+assert_true(identical(as.integer(facade$summary$unknown_fallback_count), 0L),
+            "compatible CUDA facade should explicitly count unknown fallbacks")
+assert_true(identical(as.integer(facade$summary$approximate_backend_count), 0L),
+            "compatible CUDA facade should explicitly count approximate backends")
 assert_true(identical(facade$summary$native_entrypoint,
                       "legacy-mgcv-legacy-dcov-native"),
             "compatible CUDA facade should preserve native entrypoint metadata")

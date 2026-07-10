@@ -200,6 +200,19 @@ native <- precision_run_skeleton_residual_provider_legacy_dcov_native(
   trace_level = "full"
 )
 
+logical_counts <- new.env(parent = emptyenv())
+logical_counts$level_calls <- 0L
+logical_counts$request_count <- 0L
+logical_trace <- precision_run_skeleton_residual_provider_legacy_dcov_native(
+  data = data,
+  alpha = alpha,
+  max_conditioning_size = max_conditioning_size,
+  residual_provider = make_residual_provider(logical_counts),
+  index = index,
+  numCol = numCol,
+  trace_level = "logical"
+)
+
 assert_true(identical(native$adjacency, reference$adjacency),
             "native residual-provider legacy dCov adjacency should match R reference")
 assert_true(max(abs(native$pMax - reference$pMax)) < 1e-10,
@@ -209,6 +222,34 @@ assert_true(identical(as.integer(native$n.edgetests),
             "native residual-provider legacy dCov n.edgetests should match R reference")
 assert_true(compare_sepsets(native$sepsets, reference$sepsets),
             "native residual-provider legacy dCov sepsets should match R reference")
+assert_true(identical(logical_trace$adjacency, reference$adjacency),
+            "logical trace mode should preserve adjacency")
+assert_true(compare_sepsets(logical_trace$sepsets, reference$sepsets),
+            "logical trace mode should preserve sepsets")
+assert_true(identical(as.integer(logical_trace$n.edgetests),
+                      as.integer(reference$n.edgetests)),
+            "logical trace mode should preserve n.edgetests")
+assert_true(identical(nrow(logical_trace$tasks),
+                      sum(as.integer(logical_trace$n.edgetests))),
+            "logical trace mode should retain only consumed tests")
+assert_true(identical(logical_trace$tasks$canonical_test_order_id,
+                      seq_len(nrow(logical_trace$tasks))),
+            "logical trace mode should assign contiguous logical IDs")
+assert_true(!any(logical_trace$tasks$native_edge_ignored),
+            "logical trace mode should omit ignored physical tasks")
+trace_columns <- c(
+  "level", "task_index", "edge_x", "edge_y", "x", "y", "S_key",
+  "conditioning_size", "p_used", "native_edge_deleted",
+  "native_edge_ignored"
+)
+expected_logical_tasks <- native$tasks[
+  !native$tasks$native_edge_ignored, trace_columns, drop = FALSE
+]
+observed_logical_tasks <- logical_trace$tasks[, trace_columns, drop = FALSE]
+rownames(expected_logical_tasks) <- NULL
+rownames(observed_logical_tasks) <- NULL
+assert_true(identical(observed_logical_tasks, expected_logical_tasks),
+            "logical trace should equal the consumed rows of full trace")
 assert_true(native_counts$level_calls > 0L,
             "native residual provider should be called for conditional levels")
 assert_true(native_counts$request_count == reference$residual_requests,

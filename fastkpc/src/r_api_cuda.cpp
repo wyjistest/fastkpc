@@ -5714,6 +5714,8 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
   const int num_col = Rf_asInteger(num_cols);
   const std::string trace_level = Rcpp::as<std::string>(trace_levels);
   const bool full_trace = trace_level == "full";
+  const bool logical_trace = trace_level == "logical";
+  const bool collect_trace = full_trace || logical_trace;
   if (n <= 5) {
     Rcpp::stop("native residual-provider legacy dCov skeleton requires n > 5");
   }
@@ -5751,11 +5753,11 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
     level_residual_provider_matrix_copy_ms, level_residual_provider_total_ms,
     level_legacy_dcov_native_materialize_ms,
     level_legacy_dcov_native_call_ms;
-  Rcpp::IntegerVector task_global_id, task_level, task_index, task_edge_x,
+  std::vector<int> task_global_id, task_level, task_index, task_edge_x,
     task_edge_y, task_x, task_y, task_conditioning_size;
-  Rcpp::CharacterVector task_s_key;
-  Rcpp::NumericVector task_p_used;
-  Rcpp::LogicalVector task_deleted, task_ignored;
+  std::vector<std::string> task_s_key;
+  std::vector<double> task_p_used;
+  std::vector<int> task_deleted, task_ignored;
 
   int global_task_id = 0;
   int total_tasks_planned = 0;
@@ -5966,6 +5968,22 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       std::chrono::steady_clock::now();
     const LayerPlan plan = make_layer_plan(adjacency, p, level);
     const int task_count = static_cast<int>(plan.tasks.size());
+    if (collect_trace && task_count > 0) {
+      const std::size_t capacity = task_global_id.size() +
+        static_cast<std::size_t>(task_count);
+      task_global_id.reserve(capacity);
+      task_level.reserve(capacity);
+      task_index.reserve(capacity);
+      task_edge_x.reserve(capacity);
+      task_edge_y.reserve(capacity);
+      task_x.reserve(capacity);
+      task_y.reserve(capacity);
+      task_s_key.reserve(capacity);
+      task_conditioning_size.reserve(capacity);
+      task_p_used.reserve(capacity);
+      task_deleted.reserve(capacity);
+      task_ignored.reserve(capacity);
+    }
     int level_provider_request_count = 0;
     double level_provider_call_ms = 0.0;
     double level_provider_matrix_copy_ms = 0.0;
@@ -6625,7 +6643,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         }
       }
 
-      if (full_trace) {
+      if (collect_trace && (!logical_trace || !ignored)) {
         ++global_task_id;
         task_global_id.push_back(global_task_id);
         task_level.push_back(level);
@@ -6638,8 +6656,8 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
         task_conditioning_size.push_back(
           static_cast<int>(task.conditioning_set.size()));
         task_p_used.push_back(pval);
-        task_deleted.push_back(deleted);
-        task_ignored.push_back(ignored);
+        task_deleted.push_back(deleted ? 1 : 0);
+        task_ignored.push_back(ignored ? 1 : 0);
       }
     };
 
@@ -6893,19 +6911,26 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
     if (level > 0 && deletions == 0) break;
   }
 
+  Rcpp::LogicalVector task_deleted_out(task_deleted.size());
+  Rcpp::LogicalVector task_ignored_out(task_ignored.size());
+  for (std::size_t i = 0; i < task_deleted.size(); ++i) {
+    task_deleted_out[i] = task_deleted[i] != 0;
+    task_ignored_out[i] = task_ignored[i] != 0;
+  }
   Rcpp::DataFrame task_rows = Rcpp::DataFrame::create(
-    Rcpp::Named("canonical_test_order_id") = task_global_id,
-    Rcpp::Named("level") = task_level,
-    Rcpp::Named("task_index") = task_index,
-    Rcpp::Named("edge_x") = task_edge_x,
-    Rcpp::Named("edge_y") = task_edge_y,
-    Rcpp::Named("x") = task_x,
-    Rcpp::Named("y") = task_y,
-    Rcpp::Named("S_key") = task_s_key,
-    Rcpp::Named("conditioning_size") = task_conditioning_size,
-    Rcpp::Named("p_used") = task_p_used,
-    Rcpp::Named("native_edge_deleted") = task_deleted,
-    Rcpp::Named("native_edge_ignored") = task_ignored,
+    Rcpp::Named("canonical_test_order_id") = Rcpp::wrap(task_global_id),
+    Rcpp::Named("level") = Rcpp::wrap(task_level),
+    Rcpp::Named("task_index") = Rcpp::wrap(task_index),
+    Rcpp::Named("edge_x") = Rcpp::wrap(task_edge_x),
+    Rcpp::Named("edge_y") = Rcpp::wrap(task_edge_y),
+    Rcpp::Named("x") = Rcpp::wrap(task_x),
+    Rcpp::Named("y") = Rcpp::wrap(task_y),
+    Rcpp::Named("S_key") = Rcpp::wrap(task_s_key),
+    Rcpp::Named("conditioning_size") =
+      Rcpp::wrap(task_conditioning_size),
+    Rcpp::Named("p_used") = Rcpp::wrap(task_p_used),
+    Rcpp::Named("native_edge_deleted") = task_deleted_out,
+    Rcpp::Named("native_edge_ignored") = task_ignored_out,
     Rcpp::Named("stringsAsFactors") = false
   );
   Rcpp::DataFrame level_rows = Rcpp::DataFrame::create(

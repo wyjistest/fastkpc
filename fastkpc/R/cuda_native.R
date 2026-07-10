@@ -743,7 +743,7 @@ precision_run_skeleton_residual_provider_native <- function(
 precision_run_skeleton_residual_provider_legacy_dcov_native <- function(
     data, alpha, max_conditioning_size, residual_provider,
     index = 1, numCol = floor(nrow(as.matrix(data)) / 10),
-    trace_level = c("summary", "full", "none")) {
+    trace_level = c("summary", "full", "logical", "none")) {
   load_fastkpc_cuda_native()
   if (!is.function(residual_provider)) {
     stop("residual_provider must be a function", call. = FALSE)
@@ -1055,7 +1055,7 @@ fastkpc_native_attach_mgcv_provider_summary <- function(result, counter_env,
 precision_run_skeleton_legacy_mgcv_legacy_dcov_native <- function(
     data, alpha, max_conditioning_size,
     index = 1, numCol = floor(nrow(as.matrix(data)) / 10),
-    trace_level = c("summary", "full", "none"),
+    trace_level = c("summary", "full", "logical", "none"),
     dcov_batch = c("env", "none", "level", "canonical", "round")) {
   dcov_batch <- match.arg(dcov_batch)
   old_dcov_batch <- Sys.getenv("FASTKPC_NATIVE_LEGACY_DCOV_BATCH",
