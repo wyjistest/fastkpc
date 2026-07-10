@@ -345,4 +345,141 @@ legacy_dcov_spectra_matvec_cuda_handle_apply(
   return result;
 }
 
+LegacyDcovSpectraMatvecCudaResult
+legacy_dcov_spectra_matvec_cuda_handle_project(
+    LegacyDcovSpectraMatvecCudaHandle* handle,
+    const double* basis,
+    int basis_count) {
+  if (handle == nullptr || handle->d_matrix == nullptr) {
+    throw std::runtime_error("CUDA matvec handle has been freed");
+  }
+  if (basis == nullptr) throw std::runtime_error("basis pointer is null");
+  if (basis_count <= 0) {
+    throw std::runtime_error("basis count must be positive");
+  }
+  if (handle->cublas_handle == nullptr) {
+    throw std::runtime_error("CUDA matvec handle cuBLAS handle has been freed");
+  }
+
+  const auto total_start = std::chrono::steady_clock::now();
+  const int n = handle->n;
+  const std::size_t basis_size =
+    static_cast<std::size_t>(n) * basis_count;
+  const std::size_t projection_size =
+    static_cast<std::size_t>(basis_count) * basis_count;
+  double* d_projection = nullptr;
+
+  LegacyDcovSpectraMatvecCudaResult result;
+  result.n = n;
+  result.rhs_count = basis_count;
+  result.values.assign(projection_size, 0.0);
+  result.device_matrix_reuse_count = 1;
+  result.matrix_bytes = sizeof(double) * handle->matrix_size;
+  result.matrix_h2d_ms = 0.0;
+  result.d2h_bytes = sizeof(double) * projection_size;
+
+  try {
+    auto stage = std::chrono::steady_clock::now();
+    if (handle->workspace_capacity < basis_size) {
+      double* new_d_basis = nullptr;
+      double* new_d_aq = nullptr;
+      check_cuda(cudaMalloc(&new_d_basis, sizeof(double) * basis_size),
+                 "alloc dense projection basis workspace");
+      const cudaError_t aq_alloc =
+        cudaMalloc(&new_d_aq, sizeof(double) * basis_size);
+      if (aq_alloc != cudaSuccess) {
+        cudaFree(new_d_basis);
+        check_cuda(aq_alloc, "alloc dense projection aq workspace");
+      }
+      if (handle->d_rhs != nullptr) {
+        check_cuda(cudaFree(handle->d_rhs),
+                   "free dense projection basis workspace");
+      }
+      if (handle->d_output != nullptr) {
+        check_cuda(cudaFree(handle->d_output),
+                   "free dense projection aq workspace");
+      }
+      handle->d_rhs = new_d_basis;
+      handle->d_output = new_d_aq;
+      handle->workspace_capacity = basis_size;
+      result.workspace_realloc_count = 1;
+      result.workspace_alloc_ms = elapsed_ms_since(stage);
+      result.alloc_ms += result.workspace_alloc_ms;
+    } else {
+      result.device_workspace_reuse_count = 1;
+    }
+    result.workspace_bytes = sizeof(double) * handle->workspace_capacity * 2;
+
+    stage = std::chrono::steady_clock::now();
+    check_cuda(cudaMalloc(&d_projection, sizeof(double) * projection_size),
+               "alloc dense projection output");
+    result.alloc_ms += elapsed_ms_since(stage);
+
+    stage = std::chrono::steady_clock::now();
+    check_cuda(cudaMemcpy(handle->d_rhs, basis, sizeof(double) * basis_size,
+                          cudaMemcpyHostToDevice),
+               "copy dense projection basis");
+    result.h2d_ms += elapsed_ms_since(stage);
+
+    stage = std::chrono::steady_clock::now();
+    const double alpha = 1.0;
+    const double beta = 0.0;
+    check_cublas(
+      cublasDgemm(
+        handle->cublas_handle,
+        CUBLAS_OP_N,
+        CUBLAS_OP_N,
+        n,
+        basis_count,
+        n,
+        &alpha,
+        handle->d_matrix,
+        n,
+        handle->d_rhs,
+        n,
+        &beta,
+        handle->d_output,
+        n),
+      "dense projection aq dgemm");
+    check_cublas(
+      cublasDgemm(
+        handle->cublas_handle,
+        CUBLAS_OP_T,
+        CUBLAS_OP_N,
+        basis_count,
+        basis_count,
+        n,
+        &alpha,
+        handle->d_rhs,
+        n,
+        handle->d_output,
+        n,
+        &beta,
+        d_projection,
+        basis_count),
+      "dense projection qtaq dgemm");
+    result.kernel_launch_count = 2;
+    check_cuda(cudaDeviceSynchronize(), "dense projection synchronize");
+    result.kernel_ms += elapsed_ms_since(stage);
+
+    stage = std::chrono::steady_clock::now();
+    check_cuda(cudaMemcpy(result.values.data(), d_projection,
+                          sizeof(double) * projection_size,
+                          cudaMemcpyDeviceToHost),
+               "copy dense projection output");
+    result.d2h_ms += elapsed_ms_since(stage);
+
+    stage = std::chrono::steady_clock::now();
+    check_cuda(cudaFree(d_projection), "free dense projection output");
+    d_projection = nullptr;
+    result.free_ms += elapsed_ms_since(stage);
+  } catch (...) {
+    if (d_projection != nullptr) cudaFree(d_projection);
+    throw;
+  }
+
+  result.total_ms = elapsed_ms_since(total_start);
+  return result;
+}
+
 }  // namespace fastkpc

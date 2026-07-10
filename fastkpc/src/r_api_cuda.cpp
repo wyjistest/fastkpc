@@ -3097,6 +3097,61 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_apply(
   END_RCPP
 }
 
+extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_project(
+    SEXP handles,
+    SEXP basiss) {
+  BEGIN_RCPP
+  if (!Rf_isReal(basiss) || !Rf_isMatrix(basiss)) {
+    Rcpp::stop("basis must be a numeric matrix");
+  }
+  fastkpc::LegacyDcovSpectraMatvecCudaHandle* handle =
+    legacy_dcov_spectra_matvec_handle_from_externalptr(handles);
+  const int n = fastkpc::legacy_dcov_spectra_matvec_cuda_handle_n(handle);
+  Rcpp::NumericMatrix basis(basiss);
+  if (basis.nrow() != n) {
+    Rcpp::stop("basis row count must match matrix dimension");
+  }
+  if (basis.ncol() < 1) {
+    Rcpp::stop("basis must have at least one column");
+  }
+  if (!all_finite(basis)) {
+    Rcpp::stop("Data contains missing or infinite values");
+  }
+
+  const int basis_count = basis.ncol();
+  const fastkpc::LegacyDcovSpectraMatvecCudaResult result =
+    fastkpc::legacy_dcov_spectra_matvec_cuda_handle_project(
+      handle, REAL(basiss), basis_count);
+  Rcpp::NumericMatrix values(basis_count, basis_count);
+  std::copy(result.values.begin(), result.values.end(), values.begin());
+  return Rcpp::List::create(
+    Rcpp::Named("values") = values,
+    Rcpp::Named("backend") = "cuda-dense-sym-matvec-handle-projection",
+    Rcpp::Named("n") = result.n,
+    Rcpp::Named("basis_count") = result.rhs_count,
+    Rcpp::Named("kernel_launch_count") = result.kernel_launch_count,
+    Rcpp::Named("device_matrix_reuse_count") =
+      result.device_matrix_reuse_count,
+    Rcpp::Named("device_workspace_reuse_count") =
+      result.device_workspace_reuse_count,
+    Rcpp::Named("workspace_realloc_count") =
+      result.workspace_realloc_count,
+    Rcpp::Named("matrix_bytes") = static_cast<double>(result.matrix_bytes),
+    Rcpp::Named("workspace_bytes") =
+      static_cast<double>(result.workspace_bytes),
+    Rcpp::Named("d2h_bytes") = static_cast<double>(result.d2h_bytes),
+    Rcpp::Named("matrix_h2d_ms") = result.matrix_h2d_ms,
+    Rcpp::Named("workspace_alloc_ms") = result.workspace_alloc_ms,
+    Rcpp::Named("alloc_ms") = result.alloc_ms,
+    Rcpp::Named("h2d_ms") = result.h2d_ms,
+    Rcpp::Named("kernel_ms") = result.kernel_ms,
+    Rcpp::Named("d2h_ms") = result.d2h_ms,
+    Rcpp::Named("free_ms") = result.free_ms,
+    Rcpp::Named("total_ms") = result.total_ms
+  );
+  END_RCPP
+}
+
 extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence(
     SEXP handles,
     SEXP rhss) {
@@ -7116,6 +7171,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_legacy_dcov_spectra_matvec_cuda", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda), 2},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_create", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_create), 1},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_apply", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_apply), 2},
+  {"C_legacy_dcov_spectra_matvec_cuda_handle_project", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_project), 2},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_apply_sequence), 2},
   {"C_legacy_dcov_spectra_matvec_cuda_operator_eigs", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_operator_eigs), 5},
   {"C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow), 6},

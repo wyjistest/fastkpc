@@ -8297,6 +8297,81 @@ decision:
   remains open.
 ```
 
+CUDA dense Spectra-matvec handle projection checkpoint:
+
+```text
+scope:
+  CUDA dense Spectra-matvec reusable-handle substrate
+  adds a projection primitive for future block/device-resident eigensolvers
+  does not change skeleton replay, dCov authority, residual authority, or route
+  selection
+
+change:
+  add legacy_dcov_spectra_matvec_cuda_handle_project(handle, Q), computing:
+
+    Q -> A Q -> Q' A Q
+
+  implementation shape:
+    reuse the handle-resident dense matrix A
+    reuse the handle RHS/output workspace for Q and A Q
+    launch two cuBLAS dgemm operations
+    download only the k x k projected matrix, not the full n x k A Q block
+    report matrix reuse, workspace reuse/reallocation, timing, and d2h_bytes
+
+TDD gate:
+  RED:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+
+    failed at:
+      could not find function
+      "legacy_dcov_spectra_matvec_cuda_handle_project"
+
+  GREEN:
+    FASTKPC_RUN_CUDA_TESTS=1 \
+      Rscript fastkpc/tests/test_legacy_dcov_spectra_matvec_cuda.R
+
+    result:
+      PASS legacy dCov Spectra CUDA matvec
+
+    assertions include:
+      CUDA Q' A Q matches the host projection within 1e-10
+      kernel_launch_count = 2
+      device_matrix_reuse_count = 1
+      matrix_h2d_ms = 0
+      d2h_bytes = k * k * sizeof(double)
+
+regression gate:
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_gamma_parity.R
+
+    result:
+      PASS legacy dCov CUDA lowrank gamma parity cases=6
+      max_p_diff = 3.33e-15
+      max_nV2_diff = 1.42e-14
+
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_legacy_dcov_cuda_lowrank_backend_route.R
+
+    result:
+      PASS legacy dCov CUDA lowrank backend route
+
+  FASTKPC_RUN_CUDA_TESTS=1 \
+    Rscript fastkpc/tests/test_compatible_cuda_skeleton_native_cuda_lowrank.R
+
+    result:
+      PASS compatible CUDA skeleton native cuda_spectra lowrank
+
+decision:
+  The projection primitive is a useful next substrate for block Krylov or
+  device-resident eigensolver work because it keeps the large A Q result on the
+  device and returns only the small projected matrix.
+
+  It does not change the current host-driven RSpectra Arnoldi path, does not
+  make the native cuda_spectra full 351x48 route complete, and does not promote
+  a new compatible route. The final full CUDA skeleton gate remains open.
+```
+
 ---
 
 ## 9. Final success definition

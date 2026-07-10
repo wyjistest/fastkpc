@@ -113,6 +113,30 @@ assert_true(identical(as.integer(wide_reuse$kernel_launch_count), 1L),
 assert_true(as.numeric(wide_reuse$workspace_bytes) >= n * ncol(wide_rhs) * 2 * 8,
             "CUDA handle should report grown RHS/output workspace bytes")
 
+projection_basis <- qr.Q(qr(matrix(rnorm(n * 6L), n, 6L)))
+projection_cpu <- crossprod(projection_basis, matrix_a %*% projection_basis)
+projection <- legacy_dcov_spectra_matvec_cuda_handle_project(
+  handle, projection_basis
+)
+assert_true(is.matrix(projection$values),
+            "CUDA handle projection should return a matrix")
+assert_true(identical(dim(projection$values), dim(projection_cpu)),
+            "CUDA handle projection should return k by k values")
+assert_true(max(abs(projection$values - projection_cpu)) < 1e-10,
+            "CUDA handle projection should match host Q'AQ")
+assert_true(
+  identical(projection$backend, "cuda-dense-sym-matvec-handle-projection"),
+  "CUDA handle projection should report backend"
+)
+assert_true(identical(as.integer(projection$kernel_launch_count), 2L),
+            "CUDA handle projection should use two GEMM launches")
+assert_true(identical(as.integer(projection$device_matrix_reuse_count), 1L),
+            "CUDA handle projection should reuse the resident device matrix")
+assert_true(identical(as.numeric(projection$matrix_h2d_ms), 0),
+            "CUDA handle projection should not re-upload the matrix")
+assert_true(identical(as.numeric(projection$d2h_bytes), 6 * 6 * 8),
+            "CUDA handle projection should only download the small k by k result")
+
 reuse_vec <- legacy_dcov_spectra_matvec_cuda_handle_apply(handle, vector_rhs)
 assert_true(is.numeric(reuse_vec$values),
             "CUDA handle matvec should preserve vector rhs shape")
