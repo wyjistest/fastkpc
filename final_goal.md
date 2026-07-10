@@ -199,6 +199,84 @@ status: experimental fast CUDA/fastSpline path only
 not relevant to legacy-compatible correctness route
 ```
 
+CUDA device-resident block absolute eigensolver negative checkpoint:
+
+```text
+experiment:
+  A device-resident subspace iteration prototype evaluated the largest-
+  magnitude eigenpairs with this loop:
+
+    A^2 Q
+    device QR
+    Q' A Q Rayleigh projection
+    small device eigensolve
+    Ritz residual convergence
+
+  The matrix, block basis, projected matrices, Ritz vectors, and residuals
+  remained on the device. The implementation uploaded A once, used no host
+  matvecs, and downloaded only small eigenvalue arrays during iteration plus
+  the final n x nev vectors.
+
+focused correctness gate:
+  n = 61
+  nev = 5
+  ncv = 17
+  tol = 1e-8
+
+  result:
+    converged = TRUE
+    eigenvalue and eigenvector parity passed
+    matrix_h2d_count = 1
+    host_matvec_count = 0
+    a_gemm_count = 3 * iterations
+    max relative Ritz residual <= tolerance
+
+representative performance gate:
+  source matrices:
+    x and y distance matrices from the 351-row legacy dCov oracle fixture
+  nev = 35
+  ncv = 71
+  tol = 1e-10
+  repeats = 5 after CUDA-RSpectra warmup
+
+  x component:
+    CUDA-RSpectra median eig_ms = 3.475
+    block eigensolver median total_ms = 42.984
+    ratio = 12.37x slower
+
+  y component:
+    CUDA-RSpectra median eig_ms = 3.414
+    block eigensolver median total_ms = 39.444
+    ratio = 11.55x slower
+
+  block iterations = 8 for every measured run
+  all measured block runs converged
+
+stage diagnosis:
+  A representative seven-run median for the x component showed:
+
+    total_ms = 42.567
+    A GEMMs = 2.138 ms
+    QR = 6.085 ms
+    small eigensolves = 18.854 ms
+    Ritz residuals = 12.428 ms
+
+  Core iteration work excluding allocation, initialization, and release was
+  about 40.2 ms. Reusing handles and workspaces therefore cannot close the
+  roughly 12x gap to the current CUDA-RSpectra operator route.
+
+decision:
+  Reject this block-power/Rayleigh-Ritz design as a lowrank backend candidate.
+  The prototype was not committed and was removed from the working tree after
+  the gate. Do not integrate it into native one-call route selection.
+
+  The next eigensolver experiment should preserve the useful device-resident
+  data plane while matching the much smaller arithmetic footprint of the
+  current Spectra solve, for example a device-resident restarted Lanczos path.
+  It should not repeat full n x ncv QR and dense ncv x ncv eigensolves on every
+  outer iteration.
+```
+
 ---
 
 ## 3. Non-goals
