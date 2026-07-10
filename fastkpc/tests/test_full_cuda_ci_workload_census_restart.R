@@ -392,6 +392,51 @@ assert_true(identical(merged$target_fit_metadata$residual_key_sha256,
               ] == 1),
             "merge must be deterministic and retain exact keys and setups")
 
+error_requests <- requests[1:2, , drop = FALSE]
+error_assigned <- fastkpc_full_cuda_census_assign_shards(error_requests, 1L)
+error_context <- context
+error_context$canonical_key_corpus_hash <-
+  fastkpc_full_cuda_census_key_set_hash(
+    error_assigned$residual_key_sha256
+  )
+error_fit <- function(data, request_row, risk_config) {
+  target <- fastkpc_full_cuda_census_target_error_row(
+    request_row, simpleError("injected fit failure")
+  )
+  risk <- data.frame(
+    case_type = "target_key",
+    residual_key_sha256 = request_row$residual_key_sha256[[1L]],
+    logical_sequence_id = NA_integer_,
+    same_S_group_id = request_row$same_S_group_id[[1L]],
+    high_condition = FALSE,
+    rank_deficient = FALSE,
+    near_constant_target = TRUE,
+    near_constant_conditioner = FALSE,
+    multi_penalty = FALSE,
+    near_alpha = FALSE,
+    mgcv_warning = FALSE,
+    mgcv_nonconverged = FALSE,
+    nonfinite_metadata = TRUE,
+    condition_bucket = "nonfinite_unknown",
+    near_alpha_bucket = NA_character_,
+    stringsAsFactors = FALSE
+  )
+  list(setup_observation = NULL, target_fit = target, risk_cases = risk)
+}
+error_dir <- tempfile("full-cuda-ci-error-row-")
+invisible(fastkpc_full_cuda_census_run_shard(
+  error_assigned, 0L, error_context, error_dir, fit_fun = error_fit
+))
+error_merged <- fastkpc_full_cuda_census_merge_shards(
+  error_requests, 1L, error_context, error_dir
+)
+assert_true(nrow(error_merged$target_fit_metadata) == 2L &&
+              sum(error_merged$target_fit_metadata$fit_status == "error") ==
+                2L &&
+              any(error_merged$field_coverage$required &
+                    error_merged$field_coverage$coverage_ratio < 1),
+            "merge must retain error rows and expose an incomplete gate")
+
 summary_tamper_paths <- fastkpc_full_cuda_census_shard_paths(output_dir, 2L)
 summary_tamper <- jsonlite::read_json(
   summary_tamper_paths$summary_json, simplifyVector = TRUE

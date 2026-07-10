@@ -2494,6 +2494,13 @@ fastkpc_full_cuda_census_bind_rows <- function(rows) {
   result
 }
 
+fastkpc_full_cuda_census_empty_frame <- function(fields) {
+  as.data.frame(
+    setNames(lapply(fields, function(field) logical()), fields),
+    stringsAsFactors = FALSE
+  )
+}
+
 fastkpc_full_cuda_census_run_shard <- function(
     assigned_requests, shard_id, context, output_dir,
     fit_fun = fastkpc_full_cuda_census_fit_key) {
@@ -2633,9 +2640,13 @@ fastkpc_full_cuda_census_merge_shards <- function(
   setup_observations <- fastkpc_full_cuda_census_bind_rows(lapply(
     loaded, function(value) value$payload$setup_observations
   ))
-  same_s_setups <- fastkpc_full_cuda_census_compress_setups(
-    setup_observations
-  )
+  same_s_setups <- if (nrow(setup_observations) == 0L) {
+    fastkpc_full_cuda_census_empty_frame(
+      fastkpc_full_cuda_census_setup_metadata_fields()
+    )
+  } else {
+    fastkpc_full_cuda_census_compress_setups(setup_observations)
+  }
   target_risks <- fastkpc_full_cuda_census_bind_rows(lapply(
     loaded, function(value) value$payload$target_risks
   ))
@@ -2647,16 +2658,739 @@ fastkpc_full_cuda_census_merge_shards <- function(
     same_s_setup_metadata = same_s_setups,
     target_fit_metadata = target_fits
   )
-  if (any(coverage$required &
-          (!is.finite(coverage$coverage_ratio) |
-             coverage$coverage_ratio < 1))) {
-    stop("required metadata field coverage is incomplete", call. = FALSE)
-  }
+  coverage_complete <- !any(
+    coverage$required &
+      (!is.finite(coverage$coverage_ratio) |
+         coverage$coverage_ratio < 1)
+  )
   list(
     assigned_requests = assigned,
     same_s_setup_metadata = same_s_setups,
     target_fit_metadata = target_fits,
     risk_cases = risk_cases,
-    field_coverage = coverage
+    field_coverage = coverage,
+    required_field_coverage_complete = coverage_complete
   )
+}
+
+fastkpc_full_cuda_census_metadata_schema_version <- function() {
+  "full-cuda-ci-metadata-v1"
+}
+
+fastkpc_full_cuda_census_hash_schema_versions <- function() {
+  list(
+    residual_key = "full-cuda-ci-residual-key-v1",
+    same_s_key = "full-cuda-ci-same-s-key-v1",
+    setup_fingerprint = "full-cuda-ci-same-s-setup-fingerprint-v1",
+    target_fit_fingerprint = "full-cuda-ci-target-fit-fingerprint-v1",
+    metadata_numeric_hash = "portable-r-serialization-v2-sha256-v1",
+    metadata_object_hash = "portable-r-serialization-v2-sha256-v1"
+  )
+}
+
+fastkpc_full_cuda_census_artifact_paths <- function(output_dir) {
+  list(
+    manifest_json = file.path(output_dir, "manifest.json"),
+    summary_json = file.path(output_dir, "summary.json"),
+    summary_md = file.path(output_dir, "summary.md"),
+    commands_txt = file.path(output_dir, "commands.txt"),
+    environment_txt = file.path(output_dir, "environment.txt"),
+    oracle_input_hashes_csv = file.path(output_dir,
+                                        "oracle_input_hashes.csv"),
+    graph_agreement_csv = file.path(output_dir, "graph_agreement.csv"),
+    sepset_agreement_csv = file.path(output_dir, "sepset_agreement.csv"),
+    n_edgetests_csv = file.path(output_dir, "n_edgetests.csv"),
+    deletion_trace_csv = file.path(output_dir, "deletion_trace.csv"),
+    first_divergence_json = file.path(output_dir, "first_divergence.json"),
+    fallbacks_csv = file.path(output_dir, "fallbacks.csv"),
+    stage_timing_csv = file.path(output_dir, "stage_timing.csv"),
+    raw_runs_csv = file.path(output_dir, "raw_runs.csv"),
+    logical_tests_rds = file.path(output_dir, "logical_ci_tests.rds"),
+    logical_tests_csv = file.path(output_dir, "logical_ci_tests.csv"),
+    residual_requests_rds = file.path(output_dir, "residual_requests.rds"),
+    residual_requests_csv = file.path(output_dir, "residual_requests.csv"),
+    legacy_layout_parity_cases_rds = file.path(
+      output_dir, "legacy_layout_parity_cases.rds"
+    ),
+    legacy_layout_parity_results_csv = file.path(
+      output_dir, "legacy_layout_parity_results.csv"
+    ),
+    same_s_setup_metadata_rds = file.path(
+      output_dir, "same_s_setup_metadata.rds"
+    ),
+    same_s_setup_metadata_csv = file.path(
+      output_dir, "same_s_setup_metadata.csv"
+    ),
+    target_fit_metadata_rds = file.path(
+      output_dir, "target_fit_metadata.rds"
+    ),
+    target_fit_metadata_csv = file.path(
+      output_dir, "target_fit_metadata.csv"
+    ),
+    risk_cases_rds = file.path(output_dir, "risk_cases.rds"),
+    risk_cases_csv = file.path(output_dir, "risk_cases.csv"),
+    field_coverage_csv = file.path(output_dir, "field_coverage.csv"),
+    counts_by_s_size_csv = file.path(output_dir, "counts_by_s_size.csv"),
+    counts_by_penalty_count_csv = file.path(
+      output_dir, "counts_by_penalty_count.csv"
+    ),
+    counts_by_model_dimension_csv = file.path(
+      output_dir, "counts_by_model_dimension.csv"
+    ),
+    counts_by_condition_bucket_csv = file.path(
+      output_dir, "counts_by_condition_bucket.csv"
+    ),
+    same_s_group_distribution_csv = file.path(
+      output_dir, "same_s_group_distribution.csv"
+    ),
+    near_alpha_tests_csv = file.path(output_dir, "near_alpha_tests.csv"),
+    unsupported_envelope_csv = file.path(
+      output_dir, "unsupported_envelope.csv"
+    ),
+    shards_dir = file.path(output_dir, "shards")
+  )
+}
+
+fastkpc_full_cuda_census_csv_frame <- function(value) {
+  fastkpc_full_cuda_require_namespace("jsonlite")
+  value <- as.data.frame(value, stringsAsFactors = FALSE)
+  for (field in names(value)) {
+    if (is.list(value[[field]])) {
+      value[[field]] <- vapply(value[[field]], function(cell) {
+        as.character(jsonlite::toJSON(
+          cell, auto_unbox = TRUE, null = "null", na = "null",
+          digits = NA
+        ))
+      }, character(1L))
+    }
+  }
+  value
+}
+
+fastkpc_full_cuda_census_write_rds_csv <- function(value, rds_path,
+                                                    csv_path) {
+  saveRDS(value, rds_path, version = 2)
+  utils::write.csv(
+    fastkpc_full_cuda_census_csv_frame(value),
+    csv_path, row.names = FALSE
+  )
+  invisible(list(rds = rds_path, csv = csv_path))
+}
+
+fastkpc_full_cuda_census_build_shard_context <- function(
+    inputs, structural, selected_requests,
+    risk_config = fastkpc_full_cuda_census_risk_config()) {
+  selected_requests <- as.data.frame(selected_requests,
+                                     stringsAsFactors = FALSE)
+  runtime <- fastkpc_full_cuda_census_runtime_identity()
+  list(
+    canonical_key_corpus_hash = fastkpc_full_cuda_census_key_set_hash(
+      sort(selected_requests$residual_key_sha256, method = "radix")
+    ),
+    dataset_sha256 =
+      fastkpc_full_cuda_census_input_contract()$dataset_matrix_sha256,
+    oracle_input_bundle_sha256 = inputs$oracle_input_bundle_sha256,
+    source_commit = runtime$source_commit,
+    R_version = runtime$R_version,
+    mgcv_version = runtime$mgcv_version,
+    BLAS_identity = runtime$BLAS_identity,
+    LAPACK_identity = runtime$LAPACK_identity,
+    BLAS_thread_count = runtime$BLAS_thread_count,
+    formula_semantics_version = "kpcalg_regrXonS_v1",
+    mgcv_semantics_version = "legacy-mgcv-gam-default-selection-v1",
+    risk_threshold_config_hash =
+      fastkpc_full_cuda_census_metadata_hash(risk_config),
+    metadata_schema_version =
+      fastkpc_full_cuda_census_metadata_schema_version(),
+    data = inputs$data,
+    risk_config = risk_config,
+    logical_tests = structural$logical_tests
+  )
+}
+
+fastkpc_full_cuda_census_counts_by_s_size <- function(requests) {
+  groups <- split(seq_len(nrow(requests)), requests$S_size)
+  do.call(rbind, lapply(names(groups), function(size) {
+    index <- groups[[size]]
+    data.frame(
+      S_size = as.integer(size),
+      unique_key_count = as.integer(length(index)),
+      logical_request_count = as.integer(sum(
+        requests$request_multiplicity[index]
+      )),
+      stringsAsFactors = FALSE
+    )
+  }))
+}
+
+fastkpc_full_cuda_census_count_table <- function(value, field) {
+  if (length(value) == 0L) {
+    return(data.frame(
+      field = character(), value = character(), count = integer(),
+      stringsAsFactors = FALSE
+    ))
+  }
+  counts <- table(value, useNA = "ifany")
+  data.frame(
+    field = field,
+    value = names(counts),
+    count = as.integer(counts),
+    stringsAsFactors = FALSE
+  )
+}
+
+fastkpc_full_cuda_census_condition_counts <- function(setups) {
+  if (nrow(setups) == 0L) {
+    return(fastkpc_full_cuda_census_count_table(
+      character(), "model_matrix_condition"
+    ))
+  }
+  buckets <- mapply(
+    fastkpc_full_cuda_census_condition_bucket,
+    condition = setups$model_matrix_condition,
+    rank = setups$model_matrix_rank,
+    expected_rank = setups$model_matrix_ncol,
+    USE.NAMES = FALSE
+  )
+  fastkpc_full_cuda_census_count_table(buckets, "model_matrix_condition")
+}
+
+fastkpc_full_cuda_census_same_s_distribution <- function(requests) {
+  groups <- split(seq_len(nrow(requests)), requests$same_S_group_id)
+  rows <- lapply(names(groups), function(group_id) {
+    index <- groups[[group_id]]
+    data.frame(
+      same_S_group_id = group_id,
+      S_key = requests$S_key[index[[1L]]],
+      S_size = as.integer(requests$S_size[index[[1L]]]),
+      unique_target_count = as.integer(length(index)),
+      logical_request_count = as.integer(sum(
+        requests$request_multiplicity[index]
+      )),
+      stringsAsFactors = FALSE
+    )
+  })
+  result <- do.call(rbind, rows)
+  result <- result[order(result$same_S_group_id, method = "radix"),
+                   , drop = FALSE]
+  rownames(result) <- NULL
+  result
+}
+
+fastkpc_full_cuda_census_fit_time_distribution <- function(
+    group, fit_time_ms, field) {
+  if (length(group) == 0L) {
+    result <- data.frame(
+      value = character(), key_count = integer(), total_fit_ms = numeric(),
+      mean_fit_ms = numeric(), median_fit_ms = numeric(),
+      p95_fit_ms = numeric(), stringsAsFactors = FALSE
+    )
+    names(result)[[1L]] <- field
+    return(result)
+  }
+  groups <- split(seq_along(group), group)
+  result <- do.call(rbind, lapply(names(groups), function(value) {
+    index <- groups[[value]]
+    timings <- as.numeric(fit_time_ms[index])
+    data.frame(
+      value = value,
+      key_count = as.integer(length(index)),
+      total_fit_ms = sum(timings),
+      mean_fit_ms = mean(timings),
+      median_fit_ms = stats::median(timings),
+      p95_fit_ms = as.numeric(stats::quantile(
+        timings, probs = 0.95, names = FALSE, type = 7
+      )),
+      stringsAsFactors = FALSE
+    )
+  }))
+  names(result)[[1L]] <- field
+  if (all(grepl("^[0-9]+$", result[[field]]))) {
+    result[[field]] <- as.integer(result[[field]])
+    result <- result[order(result[[field]]), , drop = FALSE]
+  }
+  rownames(result) <- NULL
+  result
+}
+
+fastkpc_full_cuda_census_fit_time_distributions <- function(
+    target_fits, selected_requests, setups) {
+  if (nrow(target_fits) == 0L) {
+    return(list(
+      by_s_size = fastkpc_full_cuda_census_fit_time_distribution(
+        integer(), numeric(), "S_size"
+      ),
+      by_penalty_count = fastkpc_full_cuda_census_fit_time_distribution(
+        integer(), numeric(), "penalty_count"
+      )
+    ))
+  }
+  request_index <- match(target_fits$residual_key_sha256,
+                         selected_requests$residual_key_sha256)
+  setup_index <- match(target_fits$same_S_group_id,
+                       setups$same_S_group_id)
+  if (anyNA(request_index)) {
+    stop("fit-time distribution request join is incomplete", call. = FALSE)
+  }
+  penalty_count <- rep("unavailable", nrow(target_fits))
+  penalty_count[!is.na(setup_index)] <- as.character(
+    setups$penalty_count[setup_index[!is.na(setup_index)]]
+  )
+  list(
+    by_s_size = fastkpc_full_cuda_census_fit_time_distribution(
+      selected_requests$S_size[request_index], target_fits$fit_time_ms,
+      "S_size"
+    ),
+    by_penalty_count = fastkpc_full_cuda_census_fit_time_distribution(
+      penalty_count, target_fits$fit_time_ms,
+      "penalty_count"
+    )
+  )
+}
+
+fastkpc_full_cuda_census_near_alpha_tests <- function(logical_tests) {
+  near <- is.finite(logical_tests$absolute_log_distance_from_alpha) &
+    logical_tests$absolute_log_distance_from_alpha <= log(2)
+  result <- logical_tests[near, c(
+    "logical_sequence_id", "source_sequence_id", "level", "x", "y",
+    "S_key", "reference_p_value", "alpha", "reference_decision",
+    "absolute_log_distance_from_alpha"
+  ), drop = FALSE]
+  result$near_alpha_bucket <- vapply(
+    result$absolute_log_distance_from_alpha,
+    fastkpc_full_cuda_census_near_alpha_bucket, character(1L)
+  )
+  result
+}
+
+fastkpc_full_cuda_census_metadata_gate <- function(
+    merged, selected_requests) {
+  selected_keys <- sort(selected_requests$residual_key_sha256,
+                        method = "radix")
+  target <- merged$target_fit_metadata
+  setup <- merged$same_s_setup_metadata
+  risks <- merged$risk_cases
+  fit_error_count <- sum(target$fit_status != "success")
+  exact_key_set <- identical(target$residual_key_sha256, selected_keys)
+  expected_group_count <- length(unique(selected_requests$same_S_group_id))
+  exact_group_count <- nrow(setup) == expected_group_count
+  coverage_complete <- all(
+    merged$field_coverage$coverage_ratio[
+      merged$field_coverage$required
+    ] == 1
+  )
+  warning_keys <- target$residual_key_sha256[vapply(
+    target$warning_classes, function(value) length(value) > 0L, logical(1L)
+  )]
+  classified_warning_keys <- risks$residual_key_sha256[
+    risks$case_type == "target_key" & risks$mgcv_warning
+  ]
+  unclassified_warning_count <- length(setdiff(
+    warning_keys, classified_warning_keys
+  ))
+  nonfinite_keys <- target$residual_key_sha256[vapply(
+    seq_len(nrow(target)), function(index) {
+      selected_sp <- target$selected_sp[[index]]
+      any(!is.finite(c(
+        selected_sp, target$GCV_Cp_score[[index]], target$EDF[[index]],
+        target$penalized_system_condition_at_selected_sp[[index]],
+        target$target_sd[[index]]
+      )))
+    }, logical(1L)
+  )]
+  classified_nonfinite_keys <- risks$residual_key_sha256[
+    risks$case_type == "target_key" & risks$nonfinite_metadata
+  ]
+  unclassified_nonfinite_count <- length(setdiff(
+    nonfinite_keys, classified_nonfinite_keys
+  ))
+  pass <- fit_error_count == 0L && exact_key_set && exact_group_count &&
+    coverage_complete && unclassified_warning_count == 0L &&
+    unclassified_nonfinite_count == 0L
+  list(
+    pass = pass,
+    fit_error_count = as.integer(fit_error_count),
+    exact_key_set = exact_key_set,
+    expected_group_count = as.integer(expected_group_count),
+    actual_group_count = as.integer(nrow(setup)),
+    exact_group_count = exact_group_count,
+    coverage_complete = coverage_complete,
+    unclassified_warning_count = as.integer(unclassified_warning_count),
+    unclassified_nonfinite_count =
+      as.integer(unclassified_nonfinite_count)
+  )
+}
+
+fastkpc_full_cuda_census_write_inherited_files <- function(
+    oracle_dir, paths) {
+  mapping <- c(
+    graph_agreement_csv = "graph_agreement.csv",
+    sepset_agreement_csv = "sepset_agreement.csv",
+    n_edgetests_csv = "n_edgetests.csv",
+    deletion_trace_csv = "deletion_trace.csv",
+    first_divergence_json = "first_divergence.json",
+    fallbacks_csv = "fallbacks.csv"
+  )
+  for (field in names(mapping)) {
+    source <- file.path(oracle_dir, mapping[[field]])
+    if (!file.copy(source, paths[[field]], overwrite = TRUE)) {
+      stop("failed to copy inherited Phase 0 evidence: ", source,
+           call. = FALSE)
+    }
+  }
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_census_summary_markdown <- function(summary) {
+  c(
+    "# Full CUDA CI Workload Census",
+    "",
+    paste0("- pass: ", summary$pass),
+    paste0("- run_scope: ", summary$run_scope),
+    paste0("- phase1_complete: ", summary$phase1_complete),
+    paste0("- selected_key_count: ", summary$selected_key_count),
+    paste0("- canonical_key_count: ", summary$canonical_key_count),
+    paste0("- same_S_setup_count: ", summary$same_S_setup_count),
+    paste0("- fit_error_count: ", summary$fit_error_count),
+    paste0("- elapsed_sec: ", format(summary$elapsed_sec, digits = 10)),
+    paste0("- keys_per_sec: ", format(summary$keys_per_sec, digits = 10)),
+    paste0("- estimated_full_elapsed_sec: ",
+           format(summary$estimated_full_elapsed_sec, digits = 10)),
+    paste0("- performance_estimate_source: ",
+           summary$performance_estimate_source),
+    paste0("- oracle_inherited_graph_gate: ",
+           summary$oracle_inherited_graph_gate),
+    paste0("- new_candidate_graph_gate: ",
+           summary$new_candidate_graph_gate)
+  )
+}
+
+fastkpc_full_cuda_census_write_artifact <- function(
+    output_dir, oracle_dir, data_path, inputs, structural,
+    selected_requests, context, mode, requested_workers, actual_workers,
+    shard_count, resume, parity_cases, parity_results, merged,
+    stage_timing, elapsed_sec, command_lines, executed_key_count = 0L,
+    written_shard_count = 0L, reused_shard_count = 0L) {
+  fastkpc_full_cuda_require_namespace("jsonlite")
+  artifact_started <- proc.time()[["elapsed"]]
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  paths <- fastkpc_full_cuda_census_artifact_paths(output_dir)
+  dir.create(paths$shards_dir, recursive = TRUE, showWarnings = FALSE)
+
+  utils::write.csv(inputs$oracle_input_hashes,
+                   paths$oracle_input_hashes_csv, row.names = FALSE)
+  fastkpc_full_cuda_census_write_inherited_files(oracle_dir, paths)
+  fastkpc_full_cuda_census_write_rds_csv(
+    structural$logical_tests, paths$logical_tests_rds,
+    paths$logical_tests_csv
+  )
+  fastkpc_full_cuda_census_write_rds_csv(
+    structural$residual_requests, paths$residual_requests_rds,
+    paths$residual_requests_csv
+  )
+  parity_available <- is.list(parity_cases) && length(parity_cases) > 0L &&
+    is.data.frame(parity_results) && nrow(parity_results) > 0L
+  if (parity_available) {
+    fastkpc_full_cuda_census_write_parity(
+      parity_cases, parity_results, output_dir
+    )
+  } else {
+    saveRDS(list(), paths$legacy_layout_parity_cases_rds, version = 2)
+    utils::write.csv(data.frame(),
+                     paths$legacy_layout_parity_results_csv,
+                     row.names = FALSE)
+  }
+  metadata_available <- is.list(merged) &&
+    all(c("same_s_setup_metadata", "target_fit_metadata", "risk_cases",
+          "field_coverage") %in% names(merged))
+  if (!metadata_available) {
+    merged <- list(
+      same_s_setup_metadata = data.frame(),
+      target_fit_metadata = data.frame(),
+      risk_cases = data.frame(),
+      field_coverage = data.frame(
+        table = character(), field = character(), total = integer(),
+        present = integer(), finite = integer(), required = logical(),
+        coverage_ratio = numeric(), stringsAsFactors = FALSE
+      )
+    )
+  }
+  fastkpc_full_cuda_census_write_rds_csv(
+    merged$same_s_setup_metadata,
+    paths$same_s_setup_metadata_rds,
+    paths$same_s_setup_metadata_csv
+  )
+  fastkpc_full_cuda_census_write_rds_csv(
+    merged$target_fit_metadata,
+    paths$target_fit_metadata_rds,
+    paths$target_fit_metadata_csv
+  )
+  fastkpc_full_cuda_census_write_rds_csv(
+    merged$risk_cases, paths$risk_cases_rds, paths$risk_cases_csv
+  )
+  utils::write.csv(merged$field_coverage, paths$field_coverage_csv,
+                   row.names = FALSE)
+
+  counts_by_s <- fastkpc_full_cuda_census_counts_by_s_size(
+    structural$residual_requests
+  )
+  counts_by_penalty <- fastkpc_full_cuda_census_count_table(
+    merged$same_s_setup_metadata$penalty_count, "penalty_count"
+  )
+  model_dimension <- paste0(
+    merged$same_s_setup_metadata$model_matrix_nrow, "x",
+    merged$same_s_setup_metadata$model_matrix_ncol
+  )
+  counts_by_model <- fastkpc_full_cuda_census_count_table(
+    model_dimension, "model_matrix_dimension"
+  )
+  counts_by_condition <- fastkpc_full_cuda_census_condition_counts(
+    merged$same_s_setup_metadata
+  )
+  same_s_distribution <- fastkpc_full_cuda_census_same_s_distribution(
+    structural$residual_requests
+  )
+  same_s_size_distribution <- fastkpc_full_cuda_census_count_table(
+    same_s_distribution$unique_target_count, "unique_target_count"
+  )
+  near_alpha <- fastkpc_full_cuda_census_near_alpha_tests(
+    structural$logical_tests
+  )
+  near_alpha_bucket_counts <- fastkpc_full_cuda_census_count_table(
+    near_alpha$near_alpha_bucket, "near_alpha_bucket"
+  )
+  fit_time_distributions <- fastkpc_full_cuda_census_fit_time_distributions(
+    merged$target_fit_metadata, selected_requests,
+    merged$same_s_setup_metadata
+  )
+  gate <- if (metadata_available) {
+    fastkpc_full_cuda_census_metadata_gate(merged, selected_requests)
+  } else {
+    list(
+      pass = TRUE,
+      fit_error_count = 0L,
+      exact_key_set = NA,
+      expected_group_count = 0L,
+      actual_group_count = 0L,
+      exact_group_count = NA,
+      coverage_complete = NA,
+      unclassified_warning_count = 0L,
+      unclassified_nonfinite_count = 0L
+    )
+  }
+  unsupported <- data.frame(
+    metric = c(
+      "fit_error_count", "unclassified_warning_count",
+      "unclassified_nonfinite_count", "unknown_fallback_count",
+      "approximate_backend_count"
+    ),
+    count = c(
+      gate$fit_error_count, gate$unclassified_warning_count,
+      gate$unclassified_nonfinite_count, 0L, 0L
+    ),
+    supported = c(FALSE, FALSE, FALSE, FALSE, FALSE),
+    stringsAsFactors = FALSE
+  )
+  utils::write.csv(counts_by_s, paths$counts_by_s_size_csv,
+                   row.names = FALSE)
+  utils::write.csv(counts_by_penalty, paths$counts_by_penalty_count_csv,
+                   row.names = FALSE)
+  utils::write.csv(counts_by_model, paths$counts_by_model_dimension_csv,
+                   row.names = FALSE)
+  utils::write.csv(counts_by_condition,
+                   paths$counts_by_condition_bucket_csv, row.names = FALSE)
+  utils::write.csv(same_s_distribution,
+                   paths$same_s_group_distribution_csv, row.names = FALSE)
+  utils::write.csv(near_alpha, paths$near_alpha_tests_csv, row.names = FALSE)
+  utils::write.csv(unsupported, paths$unsupported_envelope_csv,
+                   row.names = FALSE)
+  artifact_elapsed <- proc.time()[["elapsed"]] - artifact_started
+  stage_timing <- rbind(
+    stage_timing,
+    data.frame(stage = "write_artifact", elapsed_sec = artifact_elapsed,
+               stringsAsFactors = FALSE)
+  )
+  utils::write.csv(stage_timing, paths$stage_timing_csv, row.names = FALSE)
+  elapsed_sec <- elapsed_sec + artifact_elapsed
+
+  canonical_key_count <- nrow(structural$residual_requests)
+  selected_key_count <- nrow(selected_requests)
+  run_scope <- if (selected_key_count == canonical_key_count) {
+    "full"
+  } else {
+    "scaled_prefix"
+  }
+  parity_pass <- parity_available && all(parity_results$pass)
+  phase1_complete <- identical(mode, "metadata") && gate$pass &&
+    selected_key_count == 110617L &&
+    nrow(merged$same_s_setup_metadata) == 8634L
+  inherited_pass <- isTRUE(structural$oracle_inherited_graph_gate) &&
+    identical(structural$new_candidate_graph_gate, "NOT_APPLICABLE")
+  pass <- switch(
+    mode,
+    structural = inherited_pass,
+    parity = inherited_pass && parity_pass,
+    metadata = inherited_pass && parity_pass && gate$pass,
+    FALSE
+  )
+  dataset_file_row <- inputs$oracle_input_hashes$logical_path ==
+    "dataset/cancer_RD-causalDiscoveryInput.rds"
+  raw_run <- data.frame(
+    mode = mode,
+    run_scope = run_scope,
+    selected_key_count = as.integer(selected_key_count),
+    requested_workers = as.integer(requested_workers),
+    actual_workers = as.integer(actual_workers),
+    shard_count = as.integer(shard_count),
+    executed_key_count = as.integer(executed_key_count),
+    written_shard_count = as.integer(written_shard_count),
+    reused_shard_count = as.integer(reused_shard_count),
+    resume = isTRUE(resume),
+    elapsed_sec = as.numeric(elapsed_sec),
+    pass = pass,
+    stringsAsFactors = FALSE
+  )
+  utils::write.csv(raw_run, paths$raw_runs_csv, row.names = FALSE)
+
+  previous_summary <- NULL
+  if (as.integer(executed_key_count) == 0L &&
+      file.exists(paths$summary_json)) {
+    previous_summary <- tryCatch(
+      jsonlite::read_json(paths$summary_json, simplifyVector = TRUE),
+      error = function(error) NULL
+    )
+    if (!is.list(previous_summary) ||
+        !identical(as.character(previous_summary$mode), mode) ||
+        !identical(as.integer(previous_summary$selected_key_count),
+                   as.integer(selected_key_count)) ||
+        !isTRUE(previous_summary$pass)) {
+      previous_summary <- NULL
+    }
+  }
+  keys_per_sec <- if (as.integer(executed_key_count) > 0L &&
+                      elapsed_sec > 0) {
+    as.integer(executed_key_count) / elapsed_sec
+  } else if (!is.null(previous_summary)) {
+    as.numeric(previous_summary$keys_per_sec)
+  } else {
+    NA_real_
+  }
+  estimated_full <- if (as.integer(executed_key_count) == 0L &&
+                        !is.null(previous_summary)) {
+    as.numeric(previous_summary$estimated_full_elapsed_sec)
+  } else if (is.finite(keys_per_sec) && keys_per_sec > 0) {
+    canonical_key_count / keys_per_sec
+  } else {
+    NA_real_
+  }
+  performance_estimate_source <- if (as.integer(executed_key_count) > 0L) {
+    "current_execution"
+  } else if (!is.null(previous_summary)) {
+    "preserved_previous_execution"
+  } else {
+    "unavailable"
+  }
+  performance_basis_elapsed_sec <- if (
+      identical(performance_estimate_source, "current_execution")) {
+    elapsed_sec
+  } else if (!is.null(previous_summary) &&
+             !is.null(previous_summary$performance_basis_elapsed_sec)) {
+    as.numeric(previous_summary$performance_basis_elapsed_sec)
+  } else {
+    NA_real_
+  }
+
+  manifest <- list(
+    schema_version = "full-cuda-ci-workload-census-artifact-v1",
+    mode = mode,
+    run_scope = run_scope,
+    phase1_complete = phase1_complete,
+    p_floor = structural$p_floor,
+    risk_config = context$risk_config,
+    risk_threshold_config_hash = context$risk_threshold_config_hash,
+    metadata_schema_version = context$metadata_schema_version,
+    hash_schema_versions = fastkpc_full_cuda_census_hash_schema_versions(),
+    dataset_matrix_sha256 = context$dataset_sha256,
+    dataset_file_sha256 = inputs$oracle_input_hashes$actual_sha256[
+      dataset_file_row
+    ][[1L]],
+    dataset_path = data_path,
+    oracle_dir = oracle_dir,
+    phase0_source_commit =
+      fastkpc_full_cuda_census_input_contract()$phase0_source_commit,
+    oracle_input_bundle_sha256 = context$oracle_input_bundle_sha256,
+    canonical_key_corpus_hash = structural$canonical_key_corpus_hash,
+    selected_key_corpus_hash = context$canonical_key_corpus_hash,
+    source_commit = context$source_commit,
+    R_version = context$R_version,
+    mgcv_version = context$mgcv_version,
+    BLAS_identity = context$BLAS_identity,
+    LAPACK_identity = context$LAPACK_identity,
+    BLAS_thread_count = context$BLAS_thread_count,
+    formula_semantics_version = context$formula_semantics_version,
+    mgcv_semantics_version = context$mgcv_semantics_version,
+    requested_workers = as.integer(requested_workers),
+    actual_workers = as.integer(actual_workers),
+    shard_count = as.integer(shard_count),
+    executed_key_count = as.integer(executed_key_count),
+    written_shard_count = as.integer(written_shard_count),
+    reused_shard_count = as.integer(reused_shard_count),
+    resume = isTRUE(resume),
+    selected_key_count = as.integer(selected_key_count),
+    canonical_key_count = as.integer(canonical_key_count),
+    oracle_inherited_graph_gate =
+      structural$oracle_inherited_graph_gate,
+    new_candidate_graph_gate = structural$new_candidate_graph_gate,
+    parity_pass = parity_pass
+  )
+  summary <- list(
+    pass = pass,
+    mode = mode,
+    run_scope = run_scope,
+    phase1_complete = phase1_complete,
+    selected_key_count = as.integer(selected_key_count),
+    canonical_key_count = as.integer(canonical_key_count),
+    same_S_setup_count = as.integer(nrow(merged$same_s_setup_metadata)),
+    fit_error_count = gate$fit_error_count,
+    required_field_coverage_complete = gate$coverage_complete,
+    exact_selected_key_set = gate$exact_key_set,
+    exact_selected_same_S_group_count = gate$exact_group_count,
+    unclassified_warning_count = gate$unclassified_warning_count,
+    unclassified_nonfinite_count = gate$unclassified_nonfinite_count,
+    parity_pass = parity_pass,
+    oracle_inherited_graph_gate =
+      structural$oracle_inherited_graph_gate,
+    new_candidate_graph_gate = structural$new_candidate_graph_gate,
+    elapsed_sec = as.numeric(elapsed_sec),
+    keys_per_sec = keys_per_sec,
+    estimated_full_elapsed_sec = estimated_full,
+    performance_estimate_source = performance_estimate_source,
+    performance_basis_elapsed_sec = performance_basis_elapsed_sec,
+    requested_workers = as.integer(requested_workers),
+    actual_workers = as.integer(actual_workers),
+    shard_count = as.integer(shard_count),
+    executed_key_count = as.integer(executed_key_count),
+    written_shard_count = as.integer(written_shard_count),
+    reused_shard_count = as.integer(reused_shard_count),
+    counts_by_s_size = counts_by_s,
+    counts_by_penalty_count = counts_by_penalty,
+    counts_by_model_dimension = counts_by_model,
+    counts_by_condition_bucket = counts_by_condition,
+    same_s_group_size_distribution = same_s_size_distribution,
+    near_alpha_bucket_counts = near_alpha_bucket_counts,
+    fit_time_by_s_size = fit_time_distributions$by_s_size,
+    fit_time_by_penalty_count = fit_time_distributions$by_penalty_count
+  )
+  writeLines(command_lines, paths$commands_txt)
+  writeLines(c(
+    fastkpc_full_cuda_environment_lines(),
+    paste0("CENSUS_BLAS_IDENTITY=", context$BLAS_identity),
+    paste0("CENSUS_LAPACK_IDENTITY=", context$LAPACK_identity),
+    paste0("CENSUS_BLAS_THREAD_COUNT=", context$BLAS_thread_count)
+  ), paths$environment_txt)
+  writeLines(fastkpc_full_cuda_census_summary_markdown(summary),
+             paths$summary_md)
+  fastkpc_full_cuda_write_json(manifest, paths$manifest_json)
+  fastkpc_full_cuda_write_json(summary, paths$summary_json)
+  list(paths = paths, manifest = manifest, summary = summary)
 }
