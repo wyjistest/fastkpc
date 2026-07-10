@@ -851,3 +851,351 @@ fastkpc_full_cuda_census_validate_structural <- function(
   }
   TRUE
 }
+
+fastkpc_full_cuda_census_require_parity_namespaces <- function() {
+  fastkpc_full_cuda_require_namespace("mgcv")
+  fastkpc_full_cuda_require_namespace("kpcalg")
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_census_capture_warnings <- function(expression) {
+  warnings <- list()
+  started <- proc.time()[["elapsed"]]
+  value <- withCallingHandlers(
+    force(expression),
+    warning = function(condition) {
+      warnings[[length(warnings) + 1L]] <<- list(
+        class = class(condition),
+        message = conditionMessage(condition)
+      )
+      invokeRestart("muffleWarning")
+    }
+  )
+  list(
+    value = value,
+    warnings = warnings,
+    elapsed_ms = (proc.time()[["elapsed"]] - started) * 1000
+  )
+}
+
+fastkpc_full_cuda_census_formula_function <- function(S_size) {
+  fastkpc_full_cuda_census_require_parity_namespaces()
+  name <- if (as.integer(S_size) > 2L) {
+    "frml.additive.smooth"
+  } else {
+    "frml.full.smooth"
+  }
+  getFromNamespace(name, "kpcalg")
+}
+
+fastkpc_full_cuda_census_pair_layout_fits <- function(X, S_data) {
+  fastkpc_full_cuda_census_require_parity_namespaces()
+  X <- as.matrix(X)
+  S_data <- as.matrix(S_data)
+  if (ncol(X) != 2L || nrow(X) != nrow(S_data) || ncol(S_data) < 1L) {
+    stop("pair layout requires two targets and a nonempty conditioning set",
+         call. = FALSE)
+  }
+  data <- data.frame(cbind(X, S_data))
+  names(data) <- paste0("x", seq_len(ncol(data)))
+  formula_fun <- fastkpc_full_cuda_census_formula_function(ncol(S_data))
+  predictors <- (ncol(X) + 1L):(ncol(X) + ncol(S_data))
+  lapply(seq_len(ncol(X)), function(i) {
+    formula <- formula_fun(i, predictors)
+    fastkpc_full_cuda_census_capture_warnings(
+      mgcv::gam(formula, data = data)
+    )
+  })
+}
+
+fastkpc_full_cuda_census_single_target_fit <- function(y, S_data) {
+  fastkpc_full_cuda_census_require_parity_namespaces()
+  y <- as.numeric(y)
+  S_data <- as.matrix(S_data)
+  if (length(y) != nrow(S_data) || ncol(S_data) < 1L) {
+    stop("single-target layout requires aligned nonempty conditioning data",
+         call. = FALSE)
+  }
+  data <- data.frame(cbind(y, S_data))
+  names(data) <- paste0("x", seq_len(ncol(data)))
+  formula_fun <- fastkpc_full_cuda_census_formula_function(ncol(S_data))
+  formula <- formula_fun(1L, 2L:(1L + ncol(S_data)))
+  fastkpc_full_cuda_census_capture_warnings(
+    mgcv::gam(formula, data = data)
+  )
+}
+
+fastkpc_full_cuda_census_metadata_hash <- function(value) {
+  normalize <- function(x) {
+    if (is.numeric(x)) storage.mode(x) <- "double"
+    names(x) <- NULL
+    if (!is.null(dim(x))) dimnames(x) <- NULL
+    if (is.list(x)) x <- lapply(x, normalize)
+    x
+  }
+  fastkpc_full_cuda_census_hash_raw(
+    serialize(normalize(value), NULL, version = 2)
+  )
+}
+
+fastkpc_full_cuda_census_make_canonical_parity_case <- function(
+    inputs, trace_row) {
+  S <- fastkpc_full_cuda_census_parse_s(trace_row$S_key[[1L]])
+  list(
+    case_id = paste0("canonical-", trace_row$logical_sequence_id[[1L]]),
+    source_type = "canonical",
+    logical_sequence_id = as.integer(trace_row$logical_sequence_id[[1L]]),
+    S_size = length(S),
+    X = inputs$data[, c(trace_row$x[[1L]], trace_row$y[[1L]]), drop = FALSE],
+    S_data = inputs$data[, S, drop = FALSE],
+    alpha = as.numeric(inputs$oracle$manifest$alpha),
+    index = as.integer(inputs$oracle$manifest$index),
+    numCol = as.integer(inputs$oracle$manifest$numCol)
+  )
+}
+
+fastkpc_full_cuda_census_synthetic_parity_cases <- function() {
+  had_seed <- exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+  if (had_seed) old_seed <- get(".Random.seed", envir = .GlobalEnv)
+  on.exit({
+    if (had_seed) {
+      assign(".Random.seed", old_seed, envir = .GlobalEnv)
+    } else if (exists(".Random.seed", envir = .GlobalEnv,
+                      inherits = FALSE)) {
+      rm(".Random.seed", envir = .GlobalEnv)
+    }
+  }, add = TRUE)
+  set.seed(20260710)
+  n <- 351L
+  z <- stats::rnorm(n)
+  list(
+    list(
+      case_id = "synthetic-rank-deficient",
+      source_type = "synthetic",
+      logical_sequence_id = NA_integer_,
+      S_size = 2L,
+      X = cbind(z + stats::rnorm(n) * 0.2,
+                -z + stats::rnorm(n) * 0.2),
+      S_data = cbind(z, 2 * z),
+      alpha = 0.1,
+      index = 1L,
+      numCol = 35L
+    ),
+    list(
+      case_id = "synthetic-near-constant",
+      source_type = "synthetic",
+      logical_sequence_id = NA_integer_,
+      S_size = 1L,
+      X = cbind(stats::rnorm(n), stats::rnorm(n)),
+      S_data = cbind(1 + stats::rnorm(n) * 1e-10),
+      alpha = 0.1,
+      index = 1L,
+      numCol = 35L
+    )
+  )
+}
+
+fastkpc_full_cuda_census_parity_cases <- function(inputs) {
+  trace <- inputs$oracle$logical_trace
+  conditional <- trace[trace$level > 0L, , drop = FALSE]
+  S_size <- vapply(
+    conditional$S_key,
+    function(value) length(fastkpc_full_cuda_census_parse_s(value)),
+    integer(1L)
+  )
+  p_floor <- .Machine$double.xmin
+  distance <- abs(log(pmax(conditional$p_value, p_floor) /
+                        as.numeric(inputs$oracle$manifest$alpha)))
+  first_for_size <- function(size) {
+    which(S_size == as.integer(size))[[1L]]
+  }
+  selected <- unique(c(
+    first_for_size(1L),
+    first_for_size(2L),
+    first_for_size(3L),
+    which(S_size == max(S_size))[[1L]],
+    which.min(distance)
+  ))
+  canonical <- lapply(
+    selected,
+    function(index) fastkpc_full_cuda_census_make_canonical_parity_case(
+      inputs, conditional[index, , drop = FALSE]
+    )
+  )
+  c(canonical, fastkpc_full_cuda_census_synthetic_parity_cases())
+}
+
+fastkpc_full_cuda_census_fit_values <- function(captured) {
+  fit <- captured$value
+  selected_sp <- fit$sp
+  list(
+    residuals = as.numeric(stats::residuals(fit)),
+    fitted = as.numeric(stats::fitted(fit)),
+    selected_sp = as.numeric(selected_sp),
+    selected_sp_names = names(selected_sp),
+    GCV_Cp = as.numeric(fit$gcv.ubre),
+    EDF = as.numeric(sum(fit$edf)),
+    warning_count = length(captured$warnings),
+    elapsed_ms = as.numeric(captured$elapsed_ms)
+  )
+}
+
+fastkpc_full_cuda_census_max_abs_diff <- function(left, right) {
+  left <- as.double(left)
+  right <- as.double(right)
+  if (length(left) != length(right)) return(Inf)
+  if (identical(left, right) || length(left) == 0L) return(0)
+  if (any(!is.finite(left)) || any(!is.finite(right))) return(Inf)
+  max(abs(left - right))
+}
+
+fastkpc_full_cuda_census_sp_names <- function(fits) {
+  paste(vapply(fits, function(fit) {
+    value <- fit$selected_sp_names
+    if (is.null(value) || length(value) == 0L) "<unnamed>" else
+      paste(value, collapse = "|")
+  }, character(1L)), collapse = ";")
+}
+
+fastkpc_full_cuda_census_parity_case <- function(case) {
+  fastkpc_full_cuda_census_require_parity_namespaces()
+  pair_captured <- fastkpc_full_cuda_census_pair_layout_fits(
+    case$X, case$S_data
+  )
+  single_captured <- lapply(seq_len(ncol(case$X)), function(i) {
+    fastkpc_full_cuda_census_single_target_fit(
+      case$X[, i], case$S_data
+    )
+  })
+  actual_regr <- fastkpc_full_cuda_census_capture_warnings(
+    getFromNamespace("regrXonS", "kpcalg")(case$X, case$S_data)
+  )
+  pair <- lapply(pair_captured, fastkpc_full_cuda_census_fit_values)
+  single <- lapply(single_captured, fastkpc_full_cuda_census_fit_values)
+  pair_residuals <- do.call(cbind, lapply(pair, `[[`, "residuals"))
+  single_residuals <- do.call(cbind, lapply(single, `[[`, "residuals"))
+  pair_fitted <- do.call(cbind, lapply(pair, `[[`, "fitted"))
+  single_fitted <- do.call(cbind, lapply(single, `[[`, "fitted"))
+  regr_residuals <- as.matrix(actual_regr$value)
+  dcov <- getFromNamespace("dcov.gamma", "kpcalg")
+  p_regr <- as.numeric(dcov(
+    regr_residuals[, 1L], regr_residuals[, 2L],
+    index = case$index, numCol = case$numCol
+  )$p.value)
+  p_pair <- as.numeric(dcov(
+    pair_residuals[, 1L], pair_residuals[, 2L],
+    index = case$index, numCol = case$numCol
+  )$p.value)
+  p_single <- as.numeric(dcov(
+    single_residuals[, 1L], single_residuals[, 2L],
+    index = case$index, numCol = case$numCol
+  )$p.value)
+
+  regr_pair_identical <- identical(
+    fastkpc_full_cuda_census_metadata_hash(regr_residuals),
+    fastkpc_full_cuda_census_metadata_hash(pair_residuals)
+  )
+  regr_pair_abs_diff <- fastkpc_full_cuda_census_max_abs_diff(
+    regr_residuals, pair_residuals
+  )
+  pair_single_identical <- identical(
+    fastkpc_full_cuda_census_metadata_hash(pair_residuals),
+    fastkpc_full_cuda_census_metadata_hash(single_residuals)
+  )
+  pair_single_abs_diff <- fastkpc_full_cuda_census_max_abs_diff(
+    pair_residuals, single_residuals
+  )
+  fitted_identical <- identical(
+    fastkpc_full_cuda_census_metadata_hash(pair_fitted),
+    fastkpc_full_cuda_census_metadata_hash(single_fitted)
+  )
+  fitted_abs_diff <- fastkpc_full_cuda_census_max_abs_diff(
+    pair_fitted, single_fitted
+  )
+  sp_identical <- all(vapply(seq_along(pair), function(i) {
+    identical(pair[[i]]$selected_sp, single[[i]]$selected_sp)
+  }, logical(1L)))
+  sp_abs_diff <- max(vapply(seq_along(pair), function(i) {
+    fastkpc_full_cuda_census_max_abs_diff(
+      pair[[i]]$selected_sp, single[[i]]$selected_sp
+    )
+  }, numeric(1L)))
+  gcv_identical <- all(vapply(seq_along(pair), function(i) {
+    identical(pair[[i]]$GCV_Cp, single[[i]]$GCV_Cp)
+  }, logical(1L)))
+  gcv_abs_diff <- max(vapply(seq_along(pair), function(i) {
+    fastkpc_full_cuda_census_max_abs_diff(
+      pair[[i]]$GCV_Cp, single[[i]]$GCV_Cp
+    )
+  }, numeric(1L)))
+  edf_identical <- all(vapply(seq_along(pair), function(i) {
+    identical(pair[[i]]$EDF, single[[i]]$EDF)
+  }, logical(1L)))
+  edf_abs_diff <- max(vapply(seq_along(pair), function(i) {
+    fastkpc_full_cuda_census_max_abs_diff(pair[[i]]$EDF, single[[i]]$EDF)
+  }, numeric(1L)))
+  p_identical <- identical(p_regr, p_pair) && identical(p_pair, p_single)
+  decision_identical <- identical(p_regr >= case$alpha,
+                                  p_single >= case$alpha)
+  pass <- all(c(
+    regr_pair_identical, pair_single_identical, fitted_identical,
+    sp_identical, gcv_identical, edf_identical, p_identical,
+    decision_identical
+  ))
+
+  data.frame(
+    case_id = case$case_id,
+    source_type = case$source_type,
+    logical_sequence_id = as.integer(case$logical_sequence_id),
+    S_size = as.integer(case$S_size),
+    regr_pair_residual_hash_identical = regr_pair_identical,
+    regr_pair_residual_max_abs_diff = regr_pair_abs_diff,
+    pair_single_residual_hash_identical = pair_single_identical,
+    pair_single_residual_max_abs_diff = pair_single_abs_diff,
+    fitted_hash_identical = fitted_identical,
+    fitted_max_abs_diff = fitted_abs_diff,
+    selected_sp_identical = sp_identical,
+    pair_selected_sp_names = fastkpc_full_cuda_census_sp_names(pair),
+    single_selected_sp_names = fastkpc_full_cuda_census_sp_names(single),
+    selected_sp_max_abs_diff = sp_abs_diff,
+    GCV_Cp_identical = gcv_identical,
+    GCV_Cp_max_abs_diff = gcv_abs_diff,
+    EDF_identical = edf_identical,
+    EDF_max_abs_diff = edf_abs_diff,
+    dcov_p_value_identical = p_identical,
+    dcov_p_value_abs_diff = max(abs(c(p_regr - p_pair,
+                                      p_pair - p_single))),
+    decision_identical = decision_identical,
+    pair_warning_count = sum(vapply(pair, `[[`, integer(1L),
+                                      "warning_count")),
+    single_warning_count = sum(vapply(single, `[[`, integer(1L),
+                                        "warning_count")),
+    pair_fit_elapsed_ms = sum(vapply(pair, `[[`, numeric(1L),
+                                      "elapsed_ms")),
+    single_fit_elapsed_ms = sum(vapply(single, `[[`, numeric(1L),
+                                        "elapsed_ms")),
+    regr_elapsed_ms = as.numeric(actual_regr$elapsed_ms),
+    pass = pass,
+    stringsAsFactors = FALSE
+  )
+}
+
+fastkpc_full_cuda_census_write_parity <- function(cases, results, output_dir) {
+  if (!is.list(cases) || length(cases) == 0L ||
+      !is.data.frame(results) || nrow(results) != length(cases)) {
+    stop("parity artifact cases/results are inconsistent", call. = FALSE)
+  }
+  if (!"pass" %in% names(results) || anyNA(results$pass) ||
+      !all(results$pass)) {
+    stop("legacy layout parity failed", call. = FALSE)
+  }
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  paths <- list(
+    cases_rds = file.path(output_dir, "legacy_layout_parity_cases.rds"),
+    results_csv = file.path(output_dir,
+                            "legacy_layout_parity_results.csv")
+  )
+  saveRDS(cases, paths$cases_rds, version = 2)
+  utils::write.csv(results, paths$results_csv, row.names = FALSE)
+  paths
+}
