@@ -72,13 +72,20 @@ assert_true(summary$logical_test_count == 240489L &&
               isTRUE(summary$exact_target_request_lineage) &&
               isTRUE(summary$exact_target_risk_key_set) &&
               isTRUE(summary$exact_target_risk_lineage) &&
+              isTRUE(summary$exact_risk_semantics) &&
               isTRUE(summary$exact_setup_observation_key_set) &&
               isTRUE(summary$exact_target_setup_lineage) &&
+              isTRUE(summary$exact_authenticated_metadata) &&
               isTRUE(summary$exact_warning_classification) &&
               isTRUE(summary$exact_nonfinite_classification) &&
               summary$misclassified_warning_count == 0L &&
               summary$misclassified_nonfinite_count == 0L &&
               isTRUE(summary$legacy_layout_parity_pass) &&
+              identical(summary$canonical_logical_census_hash,
+                        paste0(
+                          "c9b48074dd59a439fceb9d5e64806adda5620cc4abe320953",
+                          "71abc447ef98634"
+                        )) &&
               identical(summary$canonical_key_corpus_hash,
                         paste0(
                           "b843630969f116da63f7fad095c54de2ff471540159ff97ca5",
@@ -86,8 +93,15 @@ assert_true(summary$logical_test_count == 240489L &&
                         )),
             "summary must expose the exact canonical Phase 1 closure schema")
 assert_true(identical(manifest$metadata_schema_version,
-                      "full-cuda-ci-metadata-v2"),
+                      "full-cuda-ci-metadata-v3"),
             "artifact must record the lineage-hardened metadata schema")
+assert_true(identical(manifest$canonical_logical_census_hash,
+                      summary$canonical_logical_census_hash) &&
+              all(c(
+                "setup_observation_metadata", "same_s_setup_metadata",
+                "target_fit_metadata", "target_risk_metadata", "risk_cases"
+              ) %in% names(manifest$authenticated_metadata_hashes)),
+            "artifact must pin logical and metadata payload authentication")
 assert_true(all(c(
   "counts_by_s_size", "counts_by_penalty_count",
   "counts_by_model_dimension", "counts_by_condition_bucket",
@@ -97,6 +111,7 @@ assert_true(all(c(
 "summary must embed every approved structural and fit-time distribution")
 assert_true(nrow(target_fits) == 8L &&
               identical(target_fits$residual_key_sha256, expected_keys) &&
+              all(target_fits$shard_id %in% 0:1) &&
               nrow(same_s_setups) > 0L,
             "metadata runner must fit the fixed first eight SHA keys")
 assert_true(nrow(parity) == 7L && all(parity$pass),

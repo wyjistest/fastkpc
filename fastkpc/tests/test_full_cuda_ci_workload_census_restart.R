@@ -52,6 +52,7 @@ risk_config <- fastkpc_full_cuda_census_risk_config()
 context <- list(
   canonical_key_corpus_hash =
     fastkpc_full_cuda_census_hash_utf8(corpus_payload),
+  canonical_logical_census_hash = strrep("d", 64L),
   dataset_sha256 = strrep("a", 64L),
   oracle_input_bundle_sha256 = strrep("b", 64L),
   source_commit = strrep("c", 40L),
@@ -173,6 +174,7 @@ fixture_target <- function(request_row, setup) {
     residual_key_sha256 = key,
     same_S_group_id = request_row$same_S_group_id[[1L]],
     setup_fingerprint = setup$setup_fingerprint[[1L]],
+    shard_id = as.integer(request_row$shard_id[[1L]]),
     target = as.integer(request_row$target[[1L]]),
     fit_status = "success",
     fit_error = "NONE",
@@ -343,6 +345,32 @@ assert_true(first$status == "written" && fit_calls$count == 4L &&
               length(list.files(output_dir, pattern = "\\.tmp")) == 0L,
             "shard writer must atomically publish RDS then completion JSON")
 
+first_summary <- jsonlite::read_json(
+  first$paths$summary_json, simplifyVector = TRUE
+)
+assert_true(all(c(
+  "setup_observations_hash", "target_fits_hash", "target_risks_hash",
+  "payload_hash"
+) %in% names(first_summary)),
+"completed shard summary must authenticate every persisted metadata table")
+
+tampered_payload <- readRDS(first$paths$rds)
+tampered_payload$target_fits$GCV_Cp_score[[1L]] <-
+  tampered_payload$target_fits$GCV_Cp_score[[1L]] + 1
+saveRDS(tampered_payload, first$paths$rds, version = 2)
+assert_error(
+  fastkpc_full_cuda_census_run_shard(
+    assigned_requests = assigned,
+    shard_id = 0L,
+    context = context,
+    output_dir = output_dir,
+    fit_fun = fixture_fit
+  ),
+  "payload hash mismatch",
+  "resume must reject finite persisted metadata corruption"
+)
+saveRDS(first$payload, first$paths$rds, version = 2)
+
 reused <- fastkpc_full_cuda_census_run_shard(
   assigned_requests = assigned,
   shard_id = 0L,
@@ -354,7 +382,8 @@ assert_true(reused$status == "reused" && fit_calls$count == 4L,
             "a completed exact-manifest shard must be reused without fitting")
 
 identity_fields <- c(
-  "canonical_key_corpus_hash", "risk_threshold_config_hash", "R_version",
+  "canonical_key_corpus_hash", "canonical_logical_census_hash",
+  "risk_threshold_config_hash", "R_version",
   "mgcv_version", "source_commit", "BLAS_identity", "LAPACK_identity",
   "BLAS_thread_count"
 )
@@ -364,6 +393,8 @@ for (field in identity_fields) {
     2L
   } else if (field == "canonical_key_corpus_hash") {
     strrep("d", 64L)
+  } else if (field == "canonical_logical_census_hash") {
+    strrep("c", 64L)
   } else if (field == "risk_threshold_config_hash") {
     strrep("e", 64L)
   } else if (field == "source_commit") {
@@ -443,8 +474,34 @@ valid_gate <- fastkpc_full_cuda_census_metadata_gate(merged, requests)
 assert_true(isTRUE(valid_gate$pass) &&
               isTRUE(valid_gate$exact_target_risk_key_set) &&
               isTRUE(valid_gate$exact_setup_observation_key_set) &&
-              isTRUE(valid_gate$exact_target_setup_lineage),
+              isTRUE(valid_gate$exact_target_setup_lineage) &&
+              isTRUE(valid_gate$exact_authenticated_metadata) &&
+              isTRUE(valid_gate$exact_risk_semantics),
             "metadata gate must expose exact per-request lineage")
+
+finite_metadata_tamper <- merged
+finite_metadata_tamper$target_fit_metadata$GCV_Cp_score[[1L]] <-
+  finite_metadata_tamper$target_fit_metadata$GCV_Cp_score[[1L]] + 1
+finite_metadata_tamper_gate <- fastkpc_full_cuda_census_metadata_gate(
+  finite_metadata_tamper, requests
+)
+assert_true(!isTRUE(finite_metadata_tamper_gate$pass) &&
+              !isTRUE(finite_metadata_tamper_gate$exact_authenticated_metadata),
+            "metadata gate must reject in-memory finite metadata drift")
+
+risk_semantic_tamper <- merged
+risk_semantic_tamper$target_risk_metadata$high_condition[[1L]] <- TRUE
+risk_semantic_tamper$target_risk_metadata$rank_deficient[[1L]] <- TRUE
+risk_semantic_tamper$target_risk_metadata$near_constant_target[[1L]] <- TRUE
+risk_semantic_tamper$target_risk_metadata$near_constant_conditioner[[1L]] <- TRUE
+risk_semantic_tamper$target_risk_metadata$multi_penalty[[1L]] <- TRUE
+risk_semantic_tamper_gate <- fastkpc_full_cuda_census_metadata_gate(
+  risk_semantic_tamper, requests
+)
+assert_true(!isTRUE(risk_semantic_tamper_gate$pass) &&
+              !isTRUE(risk_semantic_tamper_gate$exact_risk_semantics) &&
+              risk_semantic_tamper_gate$risk_semantic_mismatch_count > 0L,
+            "metadata gate must recompute every target risk classification")
 
 missing_risk <- merged
 missing_risk$target_risk_metadata <-
@@ -533,9 +590,11 @@ error_merged <- fastkpc_full_cuda_census_merge_shards(
 assert_true(nrow(error_merged$target_fit_metadata) == 2L &&
               sum(error_merged$target_fit_metadata$fit_status == "error") ==
                 2L &&
+              "shard_id" %in% names(error_merged$target_fit_metadata) &&
+              all(error_merged$target_fit_metadata$shard_id == 0L) &&
               any(error_merged$field_coverage$required &
                     error_merged$field_coverage$coverage_ratio < 1),
-            "merge must retain error rows and expose an incomplete gate")
+            "merge must retain error rows, shard lineage, and an incomplete gate")
 
 summary_tamper_paths <- fastkpc_full_cuda_census_shard_paths(output_dir, 2L)
 summary_tamper <- jsonlite::read_json(

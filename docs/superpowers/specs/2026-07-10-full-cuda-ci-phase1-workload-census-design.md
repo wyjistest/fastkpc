@@ -268,6 +268,18 @@ absolute_log_distance_from_alpha =
 `p_floor = .Machine$double.xmin` for schema v1 and must be written to the
 manifest.
 
+The complete Stage A table is authenticated with
+`full-cuda-ci-logical-census-v1`: hash the ordered field vector above, every
+column in canonical row order, the dataset identity/dimensions, and `p_floor`
+using portable metadata serialization. The frozen 351x48 value is:
+
+```text
+canonical_logical_census_hash = c9b48074dd59a439fceb9d5e64806adda5620cc4abe32095371abc447ef98634
+```
+
+Canonical validation recomputes this hash, so any lineage, p-value, decision,
+distance, order, or residual-key drift fails closed.
+
 ### Trace lineage and selected sepsets
 
 Retain both `source_sequence_id` and `source_task_index` from the logical
@@ -512,6 +524,7 @@ Required fields include:
 residual_key_sha256
 same_S_group_id
 setup_fingerprint
+shard_id
 target
 fit_status
 fit_error
@@ -690,6 +703,10 @@ non-finite metadata and fails the canonical gate.
 
 ### Metadata policies
 
+The final metadata gate independently recomputes every target-risk field from
+the authenticated setup and target-fit tables. Stored risk flags and condition
+buckets are outputs to verify, not self-validating evidence.
+
 - Selected sp is stored in mgcv penalty order with original names preserved;
   canonical comparisons use the ordered numeric vector and a separate names
   vector.
@@ -774,6 +791,7 @@ A completed shard is reusable only when its manifest matches:
 
 ```text
 canonical_key_corpus_hash
+canonical_logical_census_hash
 expected_key_count_for_shard
 expected_key_hash_for_shard
 dataset_sha256
@@ -791,6 +809,11 @@ metadata schema version
 shard count
 shard id
 ```
+
+The completion summary also records SHA-256 hashes for the setup-observation,
+target-fit, and target-risk tables plus a combined shard payload hash. Resume
+and merge recompute these hashes after semantic validation. A finite scalar
+change is corruption even when row counts and key joins remain valid.
 
 Unix workers may use `parallel::mclapply`. The parent merges only completed
 immutable shard rows. Duplicate shards, duplicate keys, missing keys, wrong
@@ -849,13 +872,16 @@ The runner exits nonzero and writes `pass = false` when any of these occur:
 ```text
 Phase 0 input, canonical contract, or inherited graph gate mismatch
 logical trace count, layer plan, lineage, or decision mismatch
+canonical logical-census hash mismatch
 deletion/selected-sepset one-to-one mismatch
 conditional request count, unique-key count, or S-group count mismatch
 residual key serialization inconsistency or SHA-256 collision
 legacy two-target versus offline one-target parity failure
 same-S setup invariant violation
 duplicate, missing, stale, partial, or wrong-corpus shard
+shard payload or merged metadata authentication mismatch
 missing or misjoined target/setup/risk per-key lineage
+stored target-risk semantics disagree with independently recomputed risk
 mgcv fit error
 required non-finite metadata or output evidence without an exact risk status
 incomplete required field coverage
@@ -887,6 +913,8 @@ target fit metadata rows                            = 110,617
 setup observation rows before same-S compression    = 110,617
 target risk rows before risk-case filtering          = 110,617
 target/request, target/setup, and target/risk joins  = exact
+target risk semantics                                = exact
+authenticated metadata tables                       = exact
 warning and non-finite classification                = exact
 same-S invariant violations                         = 0
 mgcv fit errors                                     = 0

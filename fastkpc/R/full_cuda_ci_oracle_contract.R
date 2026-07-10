@@ -16,7 +16,7 @@ fastkpc_full_cuda_census_file_hash <- function(path) {
 
 fastkpc_full_cuda_census_input_contract <- function() {
   list(
-    schema_version = "full-cuda-ci-phase1-input-v1",
+    schema_version = "full-cuda-ci-phase1-input-v2",
     phase0_source_commit =
       "93ae8430aa24ef4458f6ae62451982fb04bab804",
     dataset_matrix_sha256 =
@@ -25,6 +25,8 @@ fastkpc_full_cuda_census_input_contract <- function() {
       "7700bc78240984c36f8ae5ca281362a0afb8d7dedd34a5711ce4ab76a2ebee0e",
     canonical_key_corpus_hash =
       "b843630969f116da63f7fad095c54de2ff471540159ff97ca56c3871d6b2e1fa",
+    canonical_logical_census_hash =
+      "c9b48074dd59a439fceb9d5e64806adda5620cc4abe32095371abc447ef98634",
     file_hashes = c(
       "dataset/cancer_RD-causalDiscoveryInput.rds" =
         "e03cbfafed3336f3da7725878e92af24556b5ebdc6227b94ea84469e62e94036",

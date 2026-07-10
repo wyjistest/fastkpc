@@ -368,6 +368,8 @@ stopifnot(
   sum(structural$residual_requests$request_multiplicity) == 476552L,
   nrow(structural$residual_requests) == 110617L,
   length(unique(structural$residual_requests$same_S_group_id)) == 8634L,
+  identical(structural$canonical_logical_census_hash,
+            "c9b48074dd59a439fceb9d5e64806adda5620cc4abe32095371abc447ef98634"),
   identical(structural$canonical_key_corpus_hash,
             "b843630969f116da63f7fad095c54de2ff471540159ff97ca56c3871d6b2e1fa")
 )
@@ -587,7 +589,7 @@ required_setup_fields <- c(
 )
 required_target_fields <- c(
   "residual_key_sha256", "same_S_group_id", "setup_fingerprint",
-  "target", "fit_status", "fit_time_ms", "selected_sp",
+  "shard_id", "target", "fit_status", "fit_time_ms", "selected_sp",
   "GCV_Cp_score", "EDF", "convergence_fields", "warning_classes",
   "penalized_system_condition_at_selected_sp", "target_sd",
   "coefficient_hash", "fitted_hash", "residual_hash",
@@ -806,6 +808,7 @@ completed shard reuse
 interrupted run leaves no completed partial shard
 wrong corpus hash rejection
 wrong risk-config hash rejection
+finite setup/fit/risk payload corruption rejection
 wrong R/mgcv/source/BLAS identity rejection
 duplicate key rejection
 duplicate shard rejection
@@ -844,6 +847,7 @@ final LF.
 
 ```text
 canonical_key_corpus_hash
+canonical_logical_census_hash
 expected_key_count_for_shard
 expected_key_hash_for_shard
 dataset_sha256
@@ -861,6 +865,10 @@ metadata_schema_version
 shard_count
 shard_id
 ```
+
+Each completion summary must hash the setup-observation, target-fit, and
+target-risk tables and a combined payload identity. Resume and merge must
+recompute those hashes after semantic checks.
 
 Use `sessionInfo()`, `extSoftVersion()`, and the existing environment helpers
 for identities. Require exact manifest equality on resume.
@@ -1119,8 +1127,10 @@ stopifnot(
   isTRUE(s$exact_target_request_lineage),
   isTRUE(s$exact_target_risk_key_set),
   isTRUE(s$exact_target_risk_lineage),
+  isTRUE(s$exact_risk_semantics),
   isTRUE(s$exact_setup_observation_key_set),
   isTRUE(s$exact_target_setup_lineage),
+  isTRUE(s$exact_authenticated_metadata),
   isTRUE(s$exact_warning_classification),
   isTRUE(s$exact_nonfinite_classification),
   s$misclassified_warning_count == 0L,
@@ -1128,6 +1138,8 @@ stopifnot(
   isTRUE(s$legacy_layout_parity_pass),
   isTRUE(s$oracle_inherited_graph_gate),
   identical(s$new_candidate_graph_gate, "NOT_APPLICABLE"),
+  identical(s$canonical_logical_census_hash,
+    "c9b48074dd59a439fceb9d5e64806adda5620cc4abe32095371abc447ef98634"),
   identical(s$canonical_key_corpus_hash,
     "b843630969f116da63f7fad095c54de2ff471540159ff97ca56c3871d6b2e1fa")
 )

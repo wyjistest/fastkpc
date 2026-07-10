@@ -97,6 +97,13 @@ assert_error(
   "canonical sorted unique",
   "unsorted conditioning sets must fail closed"
 )
+for (alias in c("01|2", "+1|2", "1 |2", "0|2")) {
+  assert_error(
+    fastkpc_full_cuda_census_parse_s(alias),
+    "canonical sorted unique",
+    paste("noncanonical conditioning-set alias must fail closed:", alias)
+  )
+}
 
 bad_p <- trace
 bad_p$p_value[[1L]] <- NA_real_
@@ -385,6 +392,37 @@ assert_true(
 assert_true(isTRUE(fastkpc_full_cuda_census_validate_structural(
   structural, canonical = TRUE
 )), "canonical structural hard gates must pass")
+assert_true(
+  is.character(structural$canonical_logical_census_hash) &&
+    length(structural$canonical_logical_census_hash) == 1L &&
+    grepl("^[0-9a-f]{64}$", structural$canonical_logical_census_hash) &&
+    identical(structural$canonical_logical_census_hash,
+              contract$canonical_logical_census_hash),
+  "canonical structural census must reproduce the frozen logical hash"
+)
+
+tampered_lineage <- structural
+tampered_lineage$logical_tests$source_sequence_id[[1L]] <-
+  tampered_lineage$logical_tests$source_sequence_id[[1L]] + 1L
+assert_error(
+  fastkpc_full_cuda_census_validate_structural(
+    tampered_lineage, canonical = TRUE
+  ),
+  "logical census hash",
+  "canonical structural gate must reject source lineage drift"
+)
+
+tampered_decision <- structural
+tampered_decision$logical_tests$reference_decision[[1L]] <-
+  if (tampered_decision$logical_tests$reference_decision[[1L]] ==
+      "independent") "dependent" else "independent"
+assert_error(
+  fastkpc_full_cuda_census_validate_structural(
+    tampered_decision, canonical = TRUE
+  ),
+  "logical census hash",
+  "canonical structural gate must reject alpha decision drift"
+)
 
 tampered_dir <- tempfile("phase1-oracle-tampered-")
 dir.create(tampered_dir, recursive = TRUE, showWarnings = FALSE)

@@ -142,6 +142,7 @@ subset_requests <- do.call(rbind, lapply(selected_groups, function(group_id) {
   rows[seq_len(min(2L, nrow(rows))), , drop = FALSE]
 }))
 rownames(subset_requests) <- NULL
+subset_requests$shard_id <- 0L
 assert_true(nrow(subset_requests) == 8L &&
               length(unique(subset_requests$same_S_group_id)) == 4L,
             "metadata subset must contain two targets from four S groups")
@@ -176,7 +177,7 @@ required_setup_fields <- c(
   "setup_fingerprint", "mgcv_version", "R_version"
 )
 required_target_fields <- c(
-  "residual_key_sha256", "same_S_group_id", "setup_fingerprint",
+  "residual_key_sha256", "same_S_group_id", "setup_fingerprint", "shard_id",
   "target", "fit_status", "fit_error", "fit_time_ms", "formula",
   "method", "optimizer", "family", "link", "selected_sp",
   "selected_sp_names", "selected_sp_hash", "GCV_Cp_score", "EDF",
@@ -275,7 +276,8 @@ failed_fit <- fastkpc_full_cuda_census_fit_key(
 )
 assert_true(is.null(failed_fit$setup_observation) &&
               failed_fit$target_fit$fit_status[[1L]] == "error" &&
-              nzchar(failed_fit$target_fit$fit_error[[1L]]),
+              nzchar(failed_fit$target_fit$fit_error[[1L]]) &&
+              identical(failed_fit$target_fit$shard_id[[1L]], 0L),
             "failed mgcv keys must remain explicit error rows")
 
 cat("PASS full CUDA CI workload census metadata\n")
