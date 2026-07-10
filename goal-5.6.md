@@ -785,9 +785,13 @@ fastkpc/artifacts/full_cuda_ci/workload_census_351x48_v1/
 
 ```text
 status                                  = COMPLETE
-artifact source commit                  = 0d02dffe089dd40724be74beb0c167aa1d4d1699
-artifact manifest SHA-256               = 95e9af9373a59952fddc04693f5976456e91771a6250b5981678e8073edaf124
-artifact summary SHA-256                = db1c6e6625b3f83c00c7807c95e02bb325641d2463509f6793ff0108edfd9d55
+artifact source commit                  = 2dc46ba89414653c17e78ef74fc81c830de6a367
+metadata schema                         = full-cuda-ci-metadata-v2
+artifact manifest SHA-256               = 35c54ff6ecb329f1997bb67eb6c3452a39e43a48152a71ce61b4dc4af89933c3
+artifact summary SHA-256                = 78cb45cc4b2604569ca4b3967ec8b7074d7ae588b603556881c83b71086789ab
+same-S setup RDS SHA-256                = 8b35a463b17a64512d653da949f5ac74f7cc21223f346a304ac52fdfe8434a3f
+target-fit RDS SHA-256                  = 92a6e0fba1f962af7f1a06dc77fb0211df5f42032057e34f56b1b853dcf5f529
+risk-cases RDS SHA-256                  = 1e0951e9856bea3c9a1b7ba83ec03b79a678e7aa60464d7f6808397ab8d9a7bc
 oracle input bundle SHA-256             = 7700bc78240984c36f8ae5ca281362a0afb8d7dedd34a5711ce4ab76a2ebee0e
 canonical key corpus SHA-256            = b843630969f116da63f7fad095c54de2ff471540159ff97ca56c3871d6b2e1fa
 
@@ -798,24 +802,31 @@ canonical conditional target|S keys     = 110,617
 nonempty same-S groups                  = 8,634
 same-S setup metadata rows              = 8,634
 target-fit metadata rows                = 110,617
+pre-compression setup observations      = 110,617
+pre-filter target-risk metadata rows    = 110,617
 
 mgcv fit errors                         = 0
 same-S invariant violations             = 0
 required field coverage                 = 100%
 legacy two-target layout parity          = exact
 all target fit_status values             = success
+target/request/setup/risk joins          = exact
+warning/nonfinite classification         = exact
 unclassified warnings/nonfinite values  = 0 / 0
+coefficient outputs finite               = 110,617 / 110,617
+fitted outputs finite                    = 110,617 / 110,617
+residual outputs finite                  = 110,617 / 110,617
 oracle inherited graph gate             = TRUE
 new candidate graph gate                = NOT_APPLICABLE
 
 requested/actual workers                = 20 / 20
 completed shards                        = 64 / 64
 executed keys                           = 110,617
-internal elapsed                        = 596.796 sec
-external wall                           = 597.47 sec
-maximum RSS                             = 1,890,772 KiB
-artifact size                           = 446,402,243 bytes (425.7 MiB)
-metadata shards / merge / artifact      = 406.008 / 26.822 / 125.427 sec
+internal elapsed                        = 635.253 sec
+external wall                           = 636.01 sec
+maximum RSS                             = 1,820,140 KiB
+artifact size                           = 448,021,504 bytes (427.3 MiB)
+metadata shards / merge / artifact      = 416.627 / 28.204 / 151.783 sec
 ```
 
 The risk corpus contains 68,204 rows; flags overlap:
