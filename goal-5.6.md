@@ -785,14 +785,15 @@ fastkpc/artifacts/full_cuda_ci/workload_census_351x48_v1/
 
 ```text
 status                                  = COMPLETE
-artifact source commit                  = 2dc46ba89414653c17e78ef74fc81c830de6a367
-metadata schema                         = full-cuda-ci-metadata-v2
-artifact manifest SHA-256               = 35c54ff6ecb329f1997bb67eb6c3452a39e43a48152a71ce61b4dc4af89933c3
-artifact summary SHA-256                = 78cb45cc4b2604569ca4b3967ec8b7074d7ae588b603556881c83b71086789ab
+artifact source commit                  = 26362fdd76e6cd1ebb51b1f04318c83cd383e830
+metadata schema                         = full-cuda-ci-metadata-v3
+artifact manifest SHA-256               = b45db72a450a38075451ebe87bd432ae3a025c219ca55c767a0e523effeda35a
+artifact summary SHA-256                = 091ba18d1ddd0e317e52de96eb3159913d771cf4773d9f80d7ce0525fe91b6ab
 same-S setup RDS SHA-256                = 8b35a463b17a64512d653da949f5ac74f7cc21223f346a304ac52fdfe8434a3f
-target-fit RDS SHA-256                  = 92a6e0fba1f962af7f1a06dc77fb0211df5f42032057e34f56b1b853dcf5f529
+target-fit RDS SHA-256                  = 48f3538e38db5394f10e0feefcb25c1b2658ef41d65a4bc0a63a18f28194828a
 risk-cases RDS SHA-256                  = 1e0951e9856bea3c9a1b7ba83ec03b79a678e7aa60464d7f6808397ab8d9a7bc
 oracle input bundle SHA-256             = 7700bc78240984c36f8ae5ca281362a0afb8d7dedd34a5711ce4ab76a2ebee0e
+canonical logical census SHA-256        = c9b48074dd59a439fceb9d5e64806adda5620cc4abe32095371abc447ef98634
 canonical key corpus SHA-256            = b843630969f116da63f7fad095c54de2ff471540159ff97ca56c3871d6b2e1fa
 
 logical tests                           = 240,489
@@ -811,8 +812,12 @@ required field coverage                 = 100%
 legacy two-target layout parity          = exact
 all target fit_status values             = success
 target/request/setup/risk joins          = exact
+target risk semantics                    = exact
+authenticated metadata tables           = exact
+authenticated shard payloads             = 64 / 64
 warning/nonfinite classification         = exact
 unclassified warnings/nonfinite values  = 0 / 0
+unsupported/fallback counters zero       = 14 / 14
 coefficient outputs finite               = 110,617 / 110,617
 fitted outputs finite                    = 110,617 / 110,617
 residual outputs finite                  = 110,617 / 110,617
@@ -822,11 +827,11 @@ new candidate graph gate                = NOT_APPLICABLE
 requested/actual workers                = 20 / 20
 completed shards                        = 64 / 64
 executed keys                           = 110,617
-internal elapsed                        = 635.253 sec
-external wall                           = 636.01 sec
-maximum RSS                             = 1,820,140 KiB
-artifact size                           = 448,021,504 bytes (427.3 MiB)
-metadata shards / merge / artifact      = 416.627 / 28.204 / 151.783 sec
+internal elapsed                        = 763.954 sec
+external wall                           = 764.68 sec
+maximum RSS                             = 2,245,472 KiB
+artifact size                           = 448,380,161 bytes (427.6 MiB)
+metadata shards / merge / artifact      = 420.302 / 48.759 / 253.318 sec
 ```
 
 The risk corpus contains 68,204 rows; flags overlap:
@@ -2284,7 +2289,9 @@ first-divergence reporting are hard-gate fields.
 
 Complete: Phase 1 produced the full 110,617-key mgcv workload/risk census with
 8,634 same-S setup rows, zero fit errors, exact legacy-layout parity, complete
-field coverage, deterministic 64-shard closure, and inherited SHD 0 evidence.
+field coverage, a pinned logical-census hash, authenticated metadata/shard
+payloads, independently recomputed risk semantics, deterministic 64-shard
+closure, and inherited SHD 0 evidence.
 
 ### Task 4
 
