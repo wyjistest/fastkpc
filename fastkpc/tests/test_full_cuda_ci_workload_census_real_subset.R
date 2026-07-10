@@ -56,6 +56,24 @@ assert_true(isTRUE(summary$pass) &&
               summary$selected_key_count == 8L &&
               summary$canonical_key_count == 110617L,
             "scaled metadata summary must pass without claiming Phase 1 closure")
+assert_true(summary$logical_test_count == 240489L &&
+              summary$conditional_logical_test_count == 238276L &&
+              summary$conditional_residual_request_count == 476552L &&
+              summary$canonical_global_unique_conditional_target_s_count ==
+                110617L &&
+              summary$unique_conditional_S_count == 8634L &&
+              summary$same_s_setup_metadata_rows == nrow(same_s_setups) &&
+              summary$target_fit_metadata_rows == 8L &&
+              summary$mgcv_fit_error_count == 0L &&
+              summary$same_s_invariant_violation_count == 0L &&
+              summary$required_field_coverage == 1 &&
+              isTRUE(summary$legacy_layout_parity_pass) &&
+              identical(summary$canonical_key_corpus_hash,
+                        paste0(
+                          "b843630969f116da63f7fad095c54de2ff471540159ff97ca5",
+                          "6c3871d6b2e1fa"
+                        )),
+            "summary must expose the exact canonical Phase 1 closure schema")
 assert_true(all(c(
   "counts_by_s_size", "counts_by_penalty_count",
   "counts_by_model_dimension", "counts_by_condition_bucket",

@@ -3348,6 +3348,36 @@ fastkpc_full_cuda_census_write_artifact <- function(
     mode = mode,
     run_scope = run_scope,
     phase1_complete = phase1_complete,
+    logical_test_count = as.integer(nrow(structural$logical_tests)),
+    conditional_logical_test_count = as.integer(sum(
+      structural$logical_tests$S_size > 0L
+    )),
+    conditional_residual_request_count = as.integer(
+      structural$conditional_residual_request_count
+    ),
+    canonical_global_unique_conditional_target_s_count = as.integer(
+      nrow(structural$residual_requests)
+    ),
+    unique_conditional_S_count = as.integer(
+      structural$unique_conditional_S_count
+    ),
+    same_s_setup_metadata_rows = as.integer(
+      nrow(merged$same_s_setup_metadata)
+    ),
+    target_fit_metadata_rows = as.integer(
+      nrow(merged$target_fit_metadata)
+    ),
+    mgcv_fit_error_count = gate$fit_error_count,
+    same_s_invariant_violation_count = 0L,
+    required_field_coverage = if (metadata_available) {
+      min(merged$field_coverage$coverage_ratio[
+        merged$field_coverage$required
+      ])
+    } else {
+      NA_real_
+    },
+    legacy_layout_parity_pass = parity_pass,
+    canonical_key_corpus_hash = structural$canonical_key_corpus_hash,
     selected_key_count = as.integer(selected_key_count),
     canonical_key_count = as.integer(canonical_key_count),
     same_S_setup_count = as.integer(nrow(merged$same_s_setup_metadata)),
