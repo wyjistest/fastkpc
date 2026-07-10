@@ -423,8 +423,13 @@ data_path <- Sys.getenv(
   )
 )
 artifact_path_present <- c(dir.exists(census_dir), file.exists(data_path))
+skip_real_artifacts <- identical(
+  Sys.getenv("FASTKPC_PHASE2_SKIP_REAL", unset = "0"), "1"
+)
 
-if (!any(artifact_path_present)) {
+if (skip_real_artifacts) {
+  cat("SKIP real-artifact integration: FASTKPC_PHASE2_SKIP_REAL=1\n")
+} else if (!any(artifact_path_present)) {
   cat("SKIP real-artifact integration: exact artifact paths unavailable\n")
 } else {
   assert_true(
@@ -504,6 +509,86 @@ if (!any(artifact_path_present)) {
     "real-artifact PreparedSKey must retain canonical SHA-256"
   )
 
+  penalty_counts <- c(1L, 3L, 4L, 5L, 6L, 7L)
+  representatives <- do.call(rbind, lapply(penalty_counts, function(count) {
+    rows <- inputs$same_s_setup_metadata[
+      inputs$same_s_setup_metadata$penalty_count == count,
+      , drop = FALSE
+    ]
+    rows[
+      order(rows$same_S_group_id, method = "radix")[[1L]],
+      , drop = FALSE
+    ]
+  }))
+  rownames(representatives) <- NULL
+  assert_true(
+    identical(as.integer(representatives$penalty_count), penalty_counts),
+    "real PreparedSSetup representatives must cover canonical penalty counts"
+  )
+
+  prepared <- lapply(seq_len(nrow(representatives)), function(index) {
+    fastkpc_full_cuda_build_prepared_s_setup(
+      inputs = inputs,
+      setup_row = representatives[index, , drop = FALSE]
+    )
+  })
+  for (index in seq_along(prepared)) {
+    fastkpc_full_cuda_validate_prepared_s_setup(
+      setup = prepared[[index]],
+      setup_row = representatives[index, , drop = FALSE],
+      dataset_sha256 = inputs$dataset_sha256
+    )
+  }
+  assert_true(
+    identical(
+      vapply(prepared, function(value) {
+        length(value$penalty_blocks)
+      }, integer(1L)),
+      penalty_counts
+    ),
+    "PreparedSSetup must retain every canonical penalty block"
+  )
+  assert_true(
+    all(vapply(seq_along(prepared), function(index) {
+      identical(
+        prepared[[index]]$phase1_model_matrix_hash,
+        as.character(representatives$model_matrix_hash[[index]])
+      ) &&
+        !identical(
+          fastkpc_full_cuda_census_metadata_hash(prepared[[index]]$X),
+          as.character(representatives$model_matrix_hash[[index]])
+        )
+    }, logical(1L))),
+    paste(
+      "PreparedSSetup must retain the Phase 1 fitted-lpmatrix hash as",
+      "lineage without requiring provider-X raw-hash equality"
+    )
+  )
+
+  leaked <- prepared[[1L]]
+  leaked$nested <- list(y = inputs$data[, 1L])
+  assert_error(
+    fastkpc_full_cuda_validate_prepared_s_setup(
+      leaked,
+      representatives[1L, , drop = FALSE],
+      inputs$dataset_sha256
+    ),
+    "response-bearing field",
+    "PreparedSSetup must reject nested response leakage"
+  )
+
+  leaked_environment <- prepared[[1L]]
+  leaked_environment$formula_environment <- new.env(parent = emptyenv())
+  assert_error(
+    fastkpc_full_cuda_validate_prepared_s_setup(
+      leaked_environment,
+      representatives[1L, , drop = FALSE],
+      inputs$dataset_sha256
+    ),
+    "executable object",
+    "PreparedSSetup must reject retained environments"
+  )
+
   tampered_data_path <- tempfile("fastkpc-prepared-s-data-", fileext = ".rds")
   on.exit(unlink(tampered_data_path, force = TRUE), add = TRUE)
   assert_true(file.copy(data_path, tampered_data_path),
@@ -523,5 +608,305 @@ if (!any(artifact_path_present)) {
 
   cat("PASS real-artifact integration\n")
 }
+
+fixture_index <- seq_len(80L)
+fixture_data <- cbind(
+  sin(fixture_index / 5) + fixture_index / 100,
+  cos(fixture_index / 7) + fixture_index / 200,
+  ((fixture_index * 7L) %% 23L) / 23 + sin(fixture_index / 11),
+  ((fixture_index * 11L) %% 29L) / 29 + cos(fixture_index / 13)
+)
+storage.mode(fixture_data) <- "double"
+fixture_S <- 2:4
+fixture_dataset_sha256 <- fastkpc_full_cuda_data_hash(fixture_data)
+fixture_formula_class <- fastkpc_regrxons_formula_class(fixture_S)
+fixture_group_payload <- fastkpc_full_cuda_census_same_s_payload(
+  S = fixture_S,
+  formula_class = fixture_formula_class,
+  data_hash = fixture_dataset_sha256,
+  n = nrow(fixture_data),
+  p = ncol(fixture_data)
+)
+fixture_group_id <- fastkpc_full_cuda_census_hash_utf8(
+  fixture_group_payload
+)
+fixture_request <- data.frame(
+  residual_key_sha256 = strrep("b", 64L),
+  target = 1L,
+  S_key = paste(fixture_S, collapse = "|"),
+  S_size = length(fixture_S),
+  formula_class = fixture_formula_class,
+  same_S_group_id = fixture_group_id,
+  shard_id = 0L,
+  stringsAsFactors = FALSE
+)
+fixture_frame <- data.frame(
+  fixture_data[, c(1L, fixture_S), drop = FALSE],
+  check.names = FALSE
+)
+names(fixture_frame) <- paste0("x", seq_len(ncol(fixture_frame)))
+fixture_formula <- fastkpc_full_cuda_census_formula_function(
+  length(fixture_S)
+)(1L, 2L:(1L + length(fixture_S)))
+fixture_fit <- mgcv::gam(
+  formula = fixture_formula,
+  data = fixture_frame,
+  method = "GCV.Cp"
+)
+fixture_components <- fastkpc_full_cuda_census_setup_components(
+  fit = fixture_fit,
+  request_row = fixture_request,
+  data = fixture_data
+)
+fixture_setup_row <- fixture_components$row
+fixture_inputs <- list(
+  data = fixture_data,
+  dataset_sha256 = fixture_dataset_sha256,
+  manifest = list(
+    R_version = R.version.string,
+    mgcv_version = as.character(utils::packageVersion("mgcv"))
+  ),
+  same_s_setup_metadata = fixture_setup_row
+)
+
+fixture_provider <- fastkpc_full_cuda_prepared_s_provider_descriptor()
+assert_true(
+  identical(
+    names(fixture_provider$contrasts), c("unordered", "ordered")
+  ) &&
+    identical(
+      unname(fixture_provider$contrasts),
+      c("contr.treatment", "contr.poly")
+    ) &&
+    identical(fixture_provider$runtime_na_action, "na.omit") &&
+    identical(fixture_provider$contract_na_action, "na.fail") &&
+    all(vapply(
+      fixture_provider[c(
+        "regrXonS_body_sha256", "full_smooth_formula_body_sha256",
+        "additive_smooth_formula_body_sha256"
+      )],
+      function(value) grepl("^[0-9a-f]{64}$", value),
+      logical(1L)
+    )),
+  "provider fingerprint inputs must retain exact helper, contrast, and NA lineage"
+)
+
+fixture_layout <- fastkpc_full_cuda_prepared_s_layout(
+  fixture_data, fixture_S
+)
+assert_true(
+    identical(names(fixture_layout$data), paste0("x", 1:4)) &&
+    identical(fixture_layout$data[[1L]], rep(0, nrow(fixture_data))) &&
+    identical(
+      unname(as.matrix(fixture_layout$data[, -1L, drop = FALSE])),
+      unname(fixture_data[, fixture_S, drop = FALSE])
+    ) &&
+    identical(deparse(fixture_layout$formula), deparse(fixture_formula)),
+  "PreparedSSetup layout must use the exact zero-response legacy formula"
+)
+
+fixture_setup <- fastkpc_full_cuda_build_prepared_s_setup(
+  inputs = fixture_inputs,
+  setup_row = fixture_setup_row
+)
+fastkpc_full_cuda_validate_prepared_s_setup(
+  fixture_setup,
+  fixture_setup_row,
+  fixture_dataset_sha256
+)
+assert_true(
+  identical(fixture_setup$schema_version,
+            "full-cuda-ci-prepared-s-setup-v1") &&
+    length(fixture_setup$penalty_blocks) == 3L &&
+    identical(fixture_setup$constraint_mode, "identity") &&
+    identical(dim(fixture_setup$constraint),
+              c(0L, ncol(fixture_setup$X))) &&
+    is.null(fixture_setup$constraint_nullspace) &&
+    identical(fixture_setup$nullspace_gram_policy, "alias-gram") &&
+    is.null(fixture_setup$nullspace_gram_matrix) &&
+    is.null(fixture_setup$H) &&
+    is.null(fixture_setup$weights) &&
+    identical(fixture_setup$weights_policy, "none-or-unit") &&
+    is.null(fixture_setup$offset) &&
+    identical(fixture_setup$offset_policy, "none-or-zero") &&
+    !any(c("G", "y", "target", "sp", "lsp0", "selected_sp") %in%
+         names(fixture_setup)),
+  "PreparedSSetup must use compact response-independent neutral encodings"
+)
+
+assert_setup_error <- function(mutator, pattern, message) {
+  candidate <- fixture_setup
+  candidate <- mutator(candidate)
+  assert_error(
+    fastkpc_full_cuda_validate_prepared_s_setup(
+      candidate,
+      fixture_setup_row,
+      fixture_dataset_sha256
+    ),
+    pattern,
+    message
+  )
+}
+
+assert_setup_error(
+  function(value) {
+    value$nested <- list(y = fixture_data[, 1L])
+    value
+  },
+  "response-bearing field",
+  "nested response fields must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    attr(value$cmX, "target") <- 1L
+    value
+  },
+  "response-bearing field",
+  "response-bearing attribute names must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    attr(value$cmX, "metadata") <- list(alias = "target")
+    value
+  },
+  "response-bearing field",
+  "response-bearing attribute values must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    value$selected_sp <- 1
+    value
+  },
+  "response-bearing field",
+  "selected smoothing parameters belong to TargetState"
+)
+
+executable_injections <- list(
+  environment = new.env(parent = emptyenv()),
+  formula = fixture_formula,
+  call = quote(sum(1, 2)),
+  function_object = function() NULL
+)
+for (label in names(executable_injections)) {
+  object <- executable_injections[[label]]
+  assert_setup_error(
+    function(value) {
+      value$coefficient_labels <- object
+      value
+    },
+    "executable object",
+    paste("PreparedSSetup must reject", label)
+  )
+}
+assert_setup_error(
+  function(value) {
+    attr(value$cmX, "payload") <- new.env(parent = emptyenv())
+    value
+  },
+  "executable object",
+  "executable objects hidden in attributes must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    value$coefficient_labels <- fixture_fit$smooth[[1L]]
+    value
+  },
+  "executable object",
+  "raw mgcv smooth objects must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    value$coefficient_labels <- fixture_fit
+    value
+  },
+  "executable object",
+  "fitted gam objects must fail closed"
+)
+
+assert_setup_error(
+  function(value) {
+    value$X[[1L]] <- Inf
+    value
+  },
+  "X must be finite",
+  "nonfinite provider matrices must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    value$same_S_group_id <- strrep("0", 64L)
+    value
+  },
+  "lineage mismatch",
+  "same-S lineage tampering must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    value$phase1_setup_fingerprint <- "not-a-sha256"
+    value
+  },
+  "lineage fingerprint",
+  "malformed Phase 1 fingerprints must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    value$prepared_s_key_sha256 <- "not-a-sha256"
+    value
+  },
+  "PreparedSKey",
+  "malformed PreparedSKey fingerprints must fail closed"
+)
+
+assert_setup_error(
+  function(value) {
+    value$penalty_order <- rev(value$penalty_order)
+    value
+  },
+  "penalty order mismatch",
+  "penalty order tampering must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    value$penalty_offsets[[1L]] <- value$penalty_offsets[[1L]] + 1L
+    value
+  },
+  "penalty offset mismatch",
+  "penalty offset tampering must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    value$penalty_blocks[[1L]][[1L]] <-
+      value$penalty_blocks[[1L]][[1L]] + 1
+    value
+  },
+  "penalty hash mismatch",
+  "penalty block tampering must fail Phase 1 hash validation"
+)
+
+assert_setup_error(
+  function(value) {
+    value$provider_fingerprint <- strrep("0", 64L)
+    value
+  },
+  "provider fingerprint mismatch",
+  "provider lineage tampering must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    value$representation_fingerprint <- strrep("0", 64L)
+    value
+  },
+  "representation fingerprint mismatch",
+  "representation fingerprint tampering must fail closed"
+)
+assert_setup_error(
+  function(value) {
+    value$semantic_fingerprint <- strrep("0", 64L)
+    value
+  },
+  "semantic fingerprint mismatch",
+  "semantic fingerprint tampering must fail closed"
+)
+
+cat("PASS canonical self-contained PreparedSSetup contract\n")
 
 cat("PASS full CUDA CI Prepared-S input and key contract\n")
