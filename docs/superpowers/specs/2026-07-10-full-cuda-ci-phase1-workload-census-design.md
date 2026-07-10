@@ -499,6 +499,7 @@ Required fields include:
 ```text
 residual_key_sha256
 same_S_group_id
+setup_fingerprint
 target
 fit_status
 fit_error
@@ -525,6 +526,52 @@ fitted_hash
 residual_hash
 target_fit_fingerprint
 ```
+
+### Phase 1 setup fingerprint contract
+
+The setup fingerprint must be response-independent. The current generic
+`fastkpc_setup_fingerprint()` cannot be reused unchanged because existing call
+sites may set `input_p` from the local fit frame: the real two-target
+`regrXonS` layout has `|S| + 2` columns while an offline one-target frame has
+`|S| + 1`. That layout difference is not a setup difference.
+
+Phase 1 uses `full-cuda-ci-same-s-setup-fingerprint-v1`. Its fixed UTF-8
+payload contains, in order:
+
+```text
+schema_version=full-cuda-ci-same-s-setup-fingerprint-v1
+dataset_sha256=971f1e0784817c6febfc84154f19540be02a92f6e4acad784dc7f92b979f1df7
+same_S_group_id=<lowercase SHA-256>
+n=351
+canonical_input_p=48
+formula_class=<full-smooth|additive-smooth>
+family=gaussian
+link=identity
+method=GCV.Cp
+optimizer=mgcv-default
+gamma=1
+select=false
+scale=mgcv-default
+model_matrix_hash=<metadata numeric hash v1>
+penalty_hashes=<comma-separated hashes in mgcv penalty order>
+penalty_offsets=<comma-separated base-10 integers>
+constraint_hash=<metadata numeric hash v1>
+H_hash=<metadata numeric hash v1 or NONE>
+weights_policy=none
+offset_policy=none
+rank_metadata_hash=<metadata object hash v1>
+```
+
+Hash this payload with the same raw UTF-8 SHA-256 rule as residual keys.
+Exclude target index, response values/hash, response name, local fit-frame
+column count, selected sp, coefficients, fitted values, and residuals.
+
+`metadata numeric hash v1` coerces numeric arrays to double, removes names and
+dimnames, retains dimensions and list order, serializes the normalized object
+with portable R serialization version 2, and hashes the returned raw bytes
+with SHA-256. `metadata object hash v1` applies the same serialization/hash
+rule to normalized integer/logical/list metadata. All hash schema versions are
+recorded in the manifest.
 
 Within every `same_S_group_id`, all per-target setup observations must have
 exactly one value for:
@@ -566,13 +613,28 @@ near_alpha_tau             = log(2)
 p_floor                    = .Machine$double.xmin
 ```
 
-For an empty or all-zero matrix, define rank and condition explicitly in the
-implementation and record the case; do not rely on platform defaults. A
-rank-deficient matrix has condition `Inf`.
+For `lapack-svd-v1`, remove names/dimnames, coerce to double, and compute
+singular values with `La.svd(A, nu = 0, nv = 0)$d`. Apply these rules in order:
+
+1. if either dimension is zero, `rank = 0`, `condition = NA`, and bucket is
+   `not_applicable_empty`;
+2. if any matrix entry or singular value is non-finite, `rank = NA`,
+   `condition = NA`, and bucket is `nonfinite_unknown`;
+3. if the largest singular value is zero, `rank = 0`, `condition = Inf`, and
+   bucket is `rank_deficient_inf`;
+4. otherwise set `tol = max(dim(A)) * s_max * .Machine$double.eps` and
+   `rank = sum(s > tol)`;
+5. if `rank < min(dim(A))`, set `condition = Inf`; otherwise set
+   `condition = s_max / s_min`.
+
+For model, conditioning, and penalized-system matrices in this corpus,
+rank-deficient means rank is below the expected column/system dimension, even
+when a generic rectangular SVD would regard the row rank as complete.
 
 Condition buckets:
 
 ```text
+not_applicable_empty
 finite_lt_1e4
 finite_1e4_to_lt_1e8
 finite_1e8_to_lt_1e12
@@ -595,6 +657,22 @@ le_log_2
 farther
 ```
 
+Assign near-alpha buckets from top to bottom; the first matching boundary
+wins. `near_alpha = TRUE` exactly when
+`absolute_log_distance_from_alpha <= log(2)`.
+
+For near-constant classification, compute the ordinary sample standard
+deviation after coercing the vector to double:
+
+```text
+sd_v = sqrt(sum((v - mean(v))^2) / (length(v) - 1))
+near_constant = !is.finite(sd_v) || sd_v <= sqrt(.Machine$double.eps)
+```
+
+Vectors of length less than two have `sd_v = NA` and are near-constant. The
+canonical dataset has no missing values; a missing value in a future corpus is
+non-finite metadata and fails the canonical gate.
+
 ### Metadata policies
 
 - Selected sp is stored in mgcv penalty order with original names preserved;
@@ -609,9 +687,27 @@ farther
 - Preserve explicit `NA`, `NaN`, and `Inf` classifications. Non-finite required
   metadata without an allowed risk/status classification fails closed.
 - Compute `penalized_system_condition_at_selected_sp` in the constraint
-  nullspace for `X'WX + P(sp) + H`.
+  nullspace for `X'WX + P(sp) + H`, where `W` is the exact mgcv setup weight
+  diagonal and each penalty block is embedded at its mgcv offset.
 - Compute `penalty_nullity`, `constraint_rank`, and
   `constraint_nullspace_dimension` with the frozen rank rule.
+
+Let `C` be the extracted constraint matrix and let `Z` be the deterministic
+right-nullspace basis obtained from its SVD under the frozen rank tolerance.
+Then:
+
+```text
+constraint_rank               = rank(C)
+constraint_nullspace_dimension = ncol(X) - constraint_rank
+P_unit                         = sum of all embedded penalty blocks at weight 1
+penalty_nullity                = ncol(Z) - rank(Z' P_unit Z)
+P(selected_sp)                 = sum_j selected_sp[j] * embedded_penalty[j]
+A(selected_sp)                 = Z' (X' W X + P(selected_sp) + H) Z
+```
+
+Treat absent `C` as a zero-row matrix with `Z = I`; treat absent `H` as the
+zero matrix. Penalty order and offsets are exactly those returned by the pinned
+mgcv setup object.
 
 ### Row-level risk artifacts
 
