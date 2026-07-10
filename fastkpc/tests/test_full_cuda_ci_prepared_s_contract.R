@@ -16,6 +16,16 @@ assert_error <- function(expression, pattern, message) {
   )
 }
 
+has_forbidden_response_storage <- function(value) {
+  if (!is.list(value)) return(FALSE)
+  value_names <- names(value)
+  if (!is.null(value_names)) {
+    normalized <- tolower(gsub("[^a-z0-9]", "", value_names))
+    if (any(normalized %in% c("y", "numericy"))) return(TRUE)
+  }
+  any(vapply(value, has_forbidden_response_storage, logical(1L)))
+}
+
 source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")
 
 contract <- fastkpc_full_cuda_prepared_s_input_contract()
@@ -565,6 +575,118 @@ if (skip_real_artifacts) {
     )
   )
 
+  target_count_by_group <- table(as.character(
+    inputs$target_fit_metadata$same_S_group_id
+  ))
+  largest_target_group <- function(penalty_count) {
+    candidates <- inputs$same_s_setup_metadata[
+      inputs$same_s_setup_metadata$penalty_count == penalty_count,
+      , drop = FALSE
+    ]
+    candidate_ids <- as.character(candidates$same_S_group_id)
+    candidate_counts <- as.integer(target_count_by_group[candidate_ids])
+    assert_true(
+      nrow(candidates) > 0L && !anyNA(candidate_counts),
+      "real TargetState penalty groups must have canonical targets"
+    )
+    selected_index <- order(
+      -candidate_counts, candidate_ids, method = "radix"
+    )[[1L]]
+    list(
+      row = candidates[selected_index, , drop = FALSE],
+      target_count = candidate_counts[[selected_index]]
+    )
+  }
+  target_group_selections <- lapply(c(1L, 7L), largest_target_group)
+  target_group_rows <- do.call(rbind, lapply(
+    target_group_selections, `[[`, "row"
+  ))
+  rownames(target_group_rows) <- NULL
+  target_group_counts <- vapply(
+    target_group_selections, `[[`, integer(1L), "target_count"
+  )
+  assert_true(
+    identical(as.integer(target_group_rows$penalty_count), c(1L, 7L)),
+    "real TargetState groups must be the requested penalty-count subset"
+  )
+
+  target_prepared <- lapply(seq_len(nrow(target_group_rows)), function(index) {
+    fastkpc_full_cuda_build_prepared_s_setup(
+      inputs = inputs,
+      setup_row = target_group_rows[index, , drop = FALSE]
+    )
+  })
+  real_target_states <- lapply(seq_along(target_prepared), function(index) {
+    states <- fastkpc_full_cuda_build_target_states(
+      inputs = inputs,
+      prepared_setup = target_prepared[[index]]
+    )
+    fastkpc_full_cuda_validate_target_states(
+      states = states,
+      inputs = inputs,
+      prepared_setup = target_prepared[[index]]
+    )
+    states
+  })
+  assert_true(
+    identical(
+      fastkpc_full_cuda_target_state_schema_version(),
+      "full-cuda-ci-target-state-v1"
+    ),
+    "TargetState must expose its canonical v1 schema"
+  )
+  for (index in seq_along(real_target_states)) {
+    states <- real_target_states[[index]]
+    setup <- target_prepared[[index]]
+    canonical <- inputs$target_fit_metadata[
+      inputs$target_fit_metadata$same_S_group_id == setup$same_S_group_id,
+      , drop = FALSE
+    ]
+    canonical <- canonical[
+      order(canonical$residual_key_sha256, method = "radix"),
+      , drop = FALSE
+    ]
+    assert_true(
+      nrow(states) == target_group_counts[[index]] &&
+        identical(
+          as.character(states$residual_key_sha256),
+          as.character(canonical$residual_key_sha256)
+        ),
+      "real TargetState count and residual-key order must be canonical"
+    )
+    assert_true(
+      length(unique(states$prepared_s_key_sha256)) == 1L &&
+        identical(
+          unique(states$prepared_s_key_sha256),
+          setup$prepared_s_key_sha256
+        ) &&
+        all(lengths(states$selected_sp) == length(setup$penalty_blocks)) &&
+        all(lengths(states$projected_rhs) == ncol(setup$X)) &&
+        all(
+          lengths(states$nullspace_projected_rhs) ==
+            setup$constraint_nullspace_dimension
+        ),
+      "real TargetStates must retain one PreparedSKey and exact dimensions"
+    )
+    assert_true(
+      !any(c("y", "numeric_y") %in% names(states)) &&
+        !has_forbidden_response_storage(states),
+      "real TargetStates must not persist response vectors"
+    )
+  }
+  real_materialized <- fastkpc_full_cuda_materialize_target_state(
+    state_row = real_target_states[[1L]][1L, , drop = FALSE],
+    data = inputs$data,
+    dataset_sha256 = inputs$dataset_sha256
+  )
+  assert_true(
+    identical(
+      fastkpc_full_cuda_census_metadata_hash(real_materialized$y),
+      real_target_states[[1L]]$y_hash[[1L]]
+    ),
+    "real TargetState materialization must reproduce the canonical y hash"
+  )
+
   leaked <- prepared[[1L]]
   leaked$nested <- list(y = inputs$data[, 1L])
   assert_error(
@@ -614,10 +736,13 @@ fixture_data <- cbind(
   sin(fixture_index / 5) + fixture_index / 100,
   cos(fixture_index / 7) + fixture_index / 200,
   ((fixture_index * 7L) %% 23L) / 23 + sin(fixture_index / 11),
-  ((fixture_index * 11L) %% 29L) / 29 + cos(fixture_index / 13)
+  ((fixture_index * 11L) %% 29L) / 29 + cos(fixture_index / 13),
+  sin(fixture_index / 3) + ((fixture_index * 5L) %% 31L) / 31,
+  cos(fixture_index / 4) + ((fixture_index * 13L) %% 37L) / 37
 )
 storage.mode(fixture_data) <- "double"
 fixture_S <- 2:4
+fixture_targets <- c(1L, 5L, 6L)
 fixture_dataset_sha256 <- fastkpc_full_cuda_data_hash(fixture_data)
 fixture_formula_class <- fastkpc_regrxons_formula_class(fixture_S)
 fixture_group_payload <- fastkpc_full_cuda_census_same_s_payload(
@@ -630,16 +755,17 @@ fixture_group_payload <- fastkpc_full_cuda_census_same_s_payload(
 fixture_group_id <- fastkpc_full_cuda_census_hash_utf8(
   fixture_group_payload
 )
-fixture_request <- data.frame(
-  residual_key_sha256 = strrep("b", 64L),
-  target = 1L,
-  S_key = paste(fixture_S, collapse = "|"),
-  S_size = length(fixture_S),
-  formula_class = fixture_formula_class,
-  same_S_group_id = fixture_group_id,
-  shard_id = 0L,
-  stringsAsFactors = FALSE
+fixture_key_map <- fastkpc_full_cuda_census_build_key_map(
+  target = fixture_targets,
+  S_key = rep(paste(fixture_S, collapse = "|"), length(fixture_targets)),
+  formula_class = rep(fixture_formula_class, length(fixture_targets)),
+  data_hash = fixture_dataset_sha256,
+  n = nrow(fixture_data),
+  p = ncol(fixture_data)
 )
+fixture_requests <- fixture_key_map$map
+fixture_requests$shard_id <- 0L
+fixture_request <- fixture_requests[1L, , drop = FALSE]
 fixture_frame <- data.frame(
   fixture_data[, c(1L, fixture_S), drop = FALSE],
   check.names = FALSE
@@ -659,6 +785,23 @@ fixture_components <- fastkpc_full_cuda_census_setup_components(
   data = fixture_data
 )
 fixture_setup_row <- fixture_components$row
+fixture_target_runs <- lapply(seq_len(nrow(fixture_requests)), function(index) {
+  fastkpc_full_cuda_census_fit_key(
+    data = fixture_data,
+    request_row = fixture_requests[index, , drop = FALSE]
+  )
+})
+fixture_target_fit_metadata <- fastkpc_full_cuda_census_bind_rows(lapply(
+  fixture_target_runs, `[[`, "target_fit"
+))
+assert_true(
+  all(fixture_target_fit_metadata$fit_status == "success") &&
+    all(
+      fixture_target_fit_metadata$setup_fingerprint ==
+        fixture_setup_row$setup_fingerprint[[1L]]
+    ),
+  "self-contained TargetState fixtures must retain one successful setup"
+)
 fixture_inputs <- list(
   data = fixture_data,
   dataset_sha256 = fixture_dataset_sha256,
@@ -666,7 +809,9 @@ fixture_inputs <- list(
     R_version = R.version.string,
     mgcv_version = as.character(utils::packageVersion("mgcv"))
   ),
-  same_s_setup_metadata = fixture_setup_row
+  same_s_setup_metadata = fixture_setup_row,
+  residual_requests = fixture_requests,
+  target_fit_metadata = fixture_target_fit_metadata
 )
 
 fixture_provider <- fastkpc_full_cuda_prepared_s_provider_descriptor()
@@ -1049,6 +1194,288 @@ assert_setup_error(
   "semantic fingerprint tampering must fail closed"
 )
 
+target_state_fields <- c(
+  "schema_version", "residual_key_payload", "residual_key_sha256",
+  "prepared_s_key_sha256", "same_S_group_id",
+  "phase1_setup_fingerprint", "target", "y_source", "y_hash",
+  "projected_rhs", "nullspace_projected_rhs", "selected_sp",
+  "selected_sp_names", "selected_sp_hash", "GCV_Cp_score", "EDF",
+  "convergence_fields", "warning_classes", "warning_messages",
+  "coefficient_rank", "coefficient_hash", "fitted_hash",
+  "residual_hash", "target_fit_fingerprint", "target_state_fingerprint"
+)
+assert_true(
+  identical(
+    fastkpc_full_cuda_target_state_schema_version(),
+    "full-cuda-ci-target-state-v1"
+  ),
+  "TargetState schema version must be canonical"
+)
+fixture_states <- fastkpc_full_cuda_build_target_states(
+  inputs = fixture_inputs,
+  prepared_setup = fixture_setup
+)
+fastkpc_full_cuda_validate_target_states(
+  states = fixture_states,
+  inputs = fixture_inputs,
+  prepared_setup = fixture_setup
+)
+fixture_canonical_order <- order(
+  fixture_requests$residual_key_sha256, method = "radix"
+)
+fixture_canonical_requests <- fixture_requests[
+  fixture_canonical_order, , drop = FALSE
+]
+assert_true(
+  identical(names(fixture_states), target_state_fields) &&
+    nrow(fixture_states) == nrow(fixture_canonical_requests) &&
+    identical(
+      as.character(fixture_states$residual_key_sha256),
+      as.character(fixture_canonical_requests$residual_key_sha256)
+    ),
+  "batched TargetStates must retain the exact canonical key set and order"
+)
+assert_true(
+  length(unique(fixture_states$prepared_s_key_sha256)) == 1L &&
+    identical(
+      unique(fixture_states$prepared_s_key_sha256),
+      fixture_setup$prepared_s_key_sha256
+    ) &&
+    all(lengths(fixture_states$selected_sp) ==
+          length(fixture_setup$penalty_blocks)) &&
+    all(lengths(fixture_states$projected_rhs) == ncol(fixture_setup$X)) &&
+    all(
+      lengths(fixture_states$nullspace_projected_rhs) ==
+        fixture_setup$constraint_nullspace_dimension
+    ),
+  "batched TargetStates must retain Prepared-S and vector dimensions"
+)
+assert_true(
+  all(vapply(seq_len(nrow(fixture_states)), function(index) {
+    source <- fixture_states$y_source[[index]]
+    target <- fixture_states$target[[index]]
+    is.list(source) && is.null(attr(source, "class", exact = TRUE)) &&
+      identical(names(source), c("dataset_sha256", "target_column")) &&
+      identical(source$dataset_sha256, fixture_dataset_sha256) &&
+      identical(source$target_column, target) &&
+      identical(
+        fixture_states$y_hash[[index]],
+        fastkpc_full_cuda_census_metadata_hash(
+          as.numeric(fixture_data[, target])
+        )
+      )
+  }, logical(1L))),
+  "TargetState y sources and hashes must identify canonical data columns"
+)
+assert_true(
+  !any(c("y", "numeric_y") %in% names(fixture_states)) &&
+    !has_forbidden_response_storage(fixture_states),
+  "TargetStates must not persist y or numeric_y at any nesting depth"
+)
+
+fixture_materialized <- fastkpc_full_cuda_materialize_target_state(
+  state_row = fixture_states[1L, , drop = FALSE],
+  data = fixture_data,
+  dataset_sha256 = fixture_dataset_sha256
+)
+assert_true(
+  identical(fixture_materialized$row, fixture_states[1L, , drop = FALSE]) &&
+    identical(
+      fixture_materialized$y,
+      as.numeric(fixture_data[, fixture_states$target[[1L]]])
+    ) &&
+    identical(
+      fastkpc_full_cuda_census_metadata_hash(fixture_materialized$y),
+      fixture_states$y_hash[[1L]]
+    ),
+  "TargetState materialization must attach exactly one authenticated y"
+)
+
+bad_materializer_target <- fixture_states[1L, , drop = FALSE]
+bad_materializer_target$target[[1L]] <- ncol(fixture_data) + 1L
+assert_error(
+  fastkpc_full_cuda_materialize_target_state(
+    bad_materializer_target, fixture_data, fixture_dataset_sha256
+  ),
+  "TargetState target index",
+  "TargetState materialization must reject an out-of-range target index"
+)
+assert_error(
+  fastkpc_full_cuda_materialize_target_state(
+    fixture_states[1L, , drop = FALSE], fixture_data, strrep("0", 64L)
+  ),
+  "TargetState dataset lineage",
+  "TargetState materialization must reject the wrong dataset hash"
+)
+bad_materializer_source <- fixture_states[1L, , drop = FALSE]
+bad_materializer_source$y_source[[1L]]$dataset_sha256 <- strrep("0", 64L)
+assert_error(
+  fastkpc_full_cuda_materialize_target_state(
+    bad_materializer_source, fixture_data, fixture_dataset_sha256
+  ),
+  "TargetState dataset lineage",
+  "TargetState materialization must reject a corrupt y source"
+)
+bad_materializer_y_hash <- fixture_states[1L, , drop = FALSE]
+bad_materializer_y_hash$y_hash[[1L]] <- strrep("0", 64L)
+assert_error(
+  fastkpc_full_cuda_materialize_target_state(
+    bad_materializer_y_hash, fixture_data, fixture_dataset_sha256
+  ),
+  "TargetState y hash",
+  "TargetState materialization must reject a corrupt y hash"
+)
+assert_error(
+  fastkpc_full_cuda_materialize_target_state(
+    fixture_states[1:2, , drop = FALSE], fixture_data,
+    fixture_dataset_sha256
+  ),
+  "TargetState requires exactly one row",
+  "TargetState materialization must reject multiple rows"
+)
+bad_materializer_schema <- fixture_states[1L, , drop = FALSE]
+bad_materializer_schema$schema_version[[1L]] <-
+  "full-cuda-ci-target-state-v2"
+assert_error(
+  fastkpc_full_cuda_materialize_target_state(
+    bad_materializer_schema, fixture_data, fixture_dataset_sha256
+  ),
+  "TargetState schema",
+  "TargetState materialization must reject an unknown schema"
+)
+
+refresh_target_state_fingerprints <- function(states) {
+  states$target_state_fingerprint <- vapply(seq_len(nrow(states)), function(index) {
+    fastkpc_full_cuda_target_state_fingerprint(
+      states[index, , drop = FALSE]
+    )
+  }, character(1L))
+  states
+}
+
+assert_target_state_error <- function(mutator, pattern, message) {
+  candidate <- mutator(fixture_states)
+  assert_error(
+    fastkpc_full_cuda_validate_target_states(
+      states = candidate,
+      inputs = fixture_inputs,
+      prepared_setup = fixture_setup
+    ),
+    pattern,
+    message
+  )
+}
+
+assert_target_state_error(
+  function(value) {
+    value$same_S_group_id[[1L]] <- strrep("0", 64L)
+    refresh_target_state_fingerprints(value)
+  },
+  "TargetState group lineage",
+  "wrong TargetState same-S lineage must fail closed"
+)
+assert_target_state_error(
+  function(value) {
+    value$prepared_s_key_sha256[[1L]] <- strrep("0", 64L)
+    refresh_target_state_fingerprints(value)
+  },
+  "TargetState PreparedSKey",
+  "wrong TargetState PreparedSKey must fail closed"
+)
+assert_target_state_error(
+  function(value) {
+    rbind(value[1L, , drop = FALSE], value[1L, , drop = FALSE],
+          value[3L, , drop = FALSE])
+  },
+  "TargetState residual key order",
+  "duplicate TargetState residual keys must fail closed"
+)
+assert_target_state_error(
+  function(value) value[-1L, , drop = FALSE],
+  "TargetState residual key order",
+  "missing TargetState residual keys must fail closed"
+)
+assert_target_state_error(
+  function(value) value[rev(seq_len(nrow(value))), , drop = FALSE],
+  "TargetState residual key order",
+  "reordered TargetState residual keys must fail closed"
+)
+assert_target_state_error(
+  function(value) {
+    value$selected_sp[[1L]] <- rev(value$selected_sp[[1L]])
+    value$selected_sp_names[[1L]] <- rev(value$selected_sp_names[[1L]])
+    value$selected_sp_hash[[1L]] <-
+      fastkpc_full_cuda_census_metadata_hash(value$selected_sp[[1L]])
+    refresh_target_state_fingerprints(value)
+  },
+  "TargetState selected sp mismatch",
+  "reordered selected-sp values and names must fail closed"
+)
+assert_target_state_error(
+  function(value) {
+    value$selected_sp_hash[[1L]] <- strrep("0", 64L)
+    refresh_target_state_fingerprints(value)
+  },
+  "TargetState selected sp hash",
+  "wrong selected-sp hashes must fail closed"
+)
+assert_target_state_error(
+  function(value) {
+    value$selected_sp[[1L]][[1L]] <-
+      value$selected_sp[[1L]][[1L]] * 2
+    value$selected_sp_hash[[1L]] <-
+      fastkpc_full_cuda_census_metadata_hash(value$selected_sp[[1L]])
+    refresh_target_state_fingerprints(value)
+  },
+  "TargetState selected sp mismatch",
+  "changed selected-sp values must fail Phase 1 matching"
+)
+assert_target_state_error(
+  function(value) {
+    value$projected_rhs[[1L]][[1L]] <-
+      value$projected_rhs[[1L]][[1L]] + 1
+    refresh_target_state_fingerprints(value)
+  },
+  "TargetState projected RHS",
+  "RHS tampering must fail after refreshing the TargetState fingerprint"
+)
+assert_target_state_error(
+  function(value) {
+    value$y_source[[1L]]$target_column <- fixture_targets[[2L]]
+    refresh_target_state_fingerprints(value)
+  },
+  "TargetState y_source",
+  "wrong TargetState y sources must fail closed"
+)
+assert_target_state_error(
+  function(value) {
+    value$y_hash[[1L]] <- strrep("0", 64L)
+    refresh_target_state_fingerprints(value)
+  },
+  "TargetState y hash",
+  "wrong TargetState y hashes must fail closed"
+)
+assert_target_state_error(
+  function(value) {
+    nested <- value$convergence_fields[[1L]]
+    names(nested)[[1L]] <- paste0(names(nested)[[1L]], "_tampered")
+    value$convergence_fields[[1L]] <- nested
+    refresh_target_state_fingerprints(value)
+  },
+  "TargetState Phase 1 metadata mismatch: convergence_fields",
+  "nested Phase 1 metadata names must be preserved exactly"
+)
+assert_target_state_error(
+  function(value) {
+    value$projected_rhs[[1L]][[1L]] <- Inf
+    refresh_target_state_fingerprints(value)
+  },
+  "TargetState payload must be finite",
+  "nonfinite TargetState payloads must fail closed"
+)
+
 cat("PASS canonical self-contained PreparedSSetup contract\n")
+
+cat("PASS canonical batched TargetState contract\n")
 
 cat("PASS full CUDA CI Prepared-S input and key contract\n")

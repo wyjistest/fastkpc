@@ -2850,3 +2850,694 @@ fastkpc_full_cuda_validate_prepared_s_setup <- function(
   }
   invisible(TRUE)
 }
+
+fastkpc_full_cuda_target_state_schema_version <- function() {
+  "full-cuda-ci-target-state-v1"
+}
+
+fastkpc_full_cuda_target_state_field_names <- function() {
+  c(
+    "schema_version", "residual_key_payload", "residual_key_sha256",
+    "prepared_s_key_sha256", "same_S_group_id",
+    "phase1_setup_fingerprint", "target", "y_source", "y_hash",
+    "projected_rhs", "nullspace_projected_rhs", "selected_sp",
+    "selected_sp_names", "selected_sp_hash", "GCV_Cp_score", "EDF",
+    "convergence_fields", "warning_classes", "warning_messages",
+    "coefficient_rank", "coefficient_hash", "fitted_hash",
+    "residual_hash", "target_fit_fingerprint",
+    "target_state_fingerprint"
+  )
+}
+
+fastkpc_full_cuda_target_state_fingerprint_field_names <- function(
+    schema_version = fastkpc_full_cuda_target_state_schema_version()) {
+  if (!identical(
+        schema_version, fastkpc_full_cuda_target_state_schema_version()
+      )) {
+    stop("TargetState fingerprint schema is unsupported", call. = FALSE)
+  }
+  setdiff(
+    fastkpc_full_cuda_target_state_field_names(),
+    "target_state_fingerprint"
+  )
+}
+
+fastkpc_full_cuda_target_state_phase1_field_names <- function() {
+  c(
+    "selected_sp", "selected_sp_names", "selected_sp_hash",
+    "GCV_Cp_score", "EDF", "convergence_fields", "warning_classes",
+    "warning_messages", "coefficient_rank", "coefficient_hash",
+    "fitted_hash", "residual_hash", "target_fit_fingerprint"
+  )
+}
+
+fastkpc_full_cuda_target_state_require <- function(value, message) {
+  if (!isTRUE(value)) stop(message, call. = FALSE)
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_target_state_row_value <- function(state_row, field) {
+  if (!is.data.frame(state_row) || nrow(state_row) != 1L ||
+      !field %in% names(state_row)) {
+    stop("TargetState fingerprint row is malformed", call. = FALSE)
+  }
+  state_row[[field]][[1L]]
+}
+
+fastkpc_full_cuda_target_state_fingerprint <- function(state_row) {
+  if (!is.data.frame(state_row) || nrow(state_row) != 1L ||
+      !identical(
+        names(state_row), fastkpc_full_cuda_target_state_field_names()
+      )) {
+    stop("TargetState fingerprint row is malformed", call. = FALSE)
+  }
+  schema_version <- fastkpc_full_cuda_target_state_row_value(
+    state_row, "schema_version"
+  )
+  fields <- fastkpc_full_cuda_target_state_fingerprint_field_names(
+    schema_version
+  )
+  values <- setNames(lapply(fields, function(field) {
+    fastkpc_full_cuda_target_state_row_value(state_row, field)
+  }), fields)
+  fastkpc_full_cuda_prepared_s_field_hash(values, fields)
+}
+
+fastkpc_full_cuda_target_state_context <- function(
+    inputs, prepared_setup) {
+  required_inputs <- c(
+    "data", "dataset_sha256", "same_s_setup_metadata",
+    "residual_requests", "target_fit_metadata"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.list(inputs) &&
+      length(setdiff(required_inputs, names(inputs))) == 0L,
+    "TargetState inputs are incomplete"
+  )
+  data <- inputs$data
+  fastkpc_full_cuda_target_state_require(
+    is.matrix(data) && is.numeric(data) && length(dim(data)) == 2L &&
+      nrow(data) > 0L && ncol(data) > 0L && all(is.finite(data)),
+    "TargetState canonical data must be a finite numeric matrix"
+  )
+  dataset_sha256 <- inputs$dataset_sha256
+  fastkpc_full_cuda_target_state_require(
+    fastkpc_full_cuda_prepared_s_is_sha256(dataset_sha256),
+    "TargetState dataset lineage is invalid"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.list(prepared_setup) &&
+      fastkpc_full_cuda_prepared_s_is_sha256(
+        prepared_setup$same_S_group_id
+      ),
+    "TargetState PreparedSSetup lineage is invalid"
+  )
+  group_id <- as.character(prepared_setup$same_S_group_id)
+
+  setup_rows <- as.data.frame(
+    inputs$same_s_setup_metadata, stringsAsFactors = FALSE
+  )
+  fastkpc_full_cuda_target_state_require(
+    "same_S_group_id" %in% names(setup_rows) &&
+      !anyNA(setup_rows$same_S_group_id),
+    "TargetState canonical same-S metadata is incomplete"
+  )
+  setup_index <- which(as.character(setup_rows$same_S_group_id) == group_id)
+  fastkpc_full_cuda_target_state_require(
+    length(setup_index) == 1L,
+    "TargetState canonical same-S row is not unique"
+  )
+  setup_row <- setup_rows[setup_index, , drop = FALSE]
+  fastkpc_full_cuda_validate_prepared_s_setup(
+    setup = prepared_setup,
+    setup_row = setup_row,
+    dataset_sha256 = dataset_sha256
+  )
+  fastkpc_full_cuda_target_state_require(
+    nrow(prepared_setup$X) == nrow(data),
+    "TargetState PreparedSSetup data dimensions mismatch"
+  )
+
+  requests <- as.data.frame(
+    inputs$residual_requests, stringsAsFactors = FALSE
+  )
+  request_fields <- c(
+    "residual_key_payload", "residual_key_sha256", "target", "S_key",
+    "S_size", "formula_class", "same_S_group_id"
+  )
+  fastkpc_full_cuda_target_state_require(
+    length(setdiff(request_fields, names(requests))) == 0L &&
+      !anyNA(requests[c(
+        "residual_key_payload", "residual_key_sha256", "target", "S_key",
+        "S_size", "formula_class", "same_S_group_id"
+      )]),
+    "TargetState canonical residual requests are incomplete"
+  )
+
+  target_rows <- as.data.frame(
+    inputs$target_fit_metadata, stringsAsFactors = FALSE
+  )
+  target_fields <- c(
+    "residual_key_sha256", "same_S_group_id", "setup_fingerprint",
+    "target", "fit_status", "fit_error",
+    fastkpc_full_cuda_target_state_phase1_field_names()
+  )
+  fastkpc_full_cuda_target_state_require(
+    length(setdiff(target_fields, names(target_rows))) == 0L &&
+      !anyNA(target_rows[c(
+        "residual_key_sha256", "same_S_group_id", "setup_fingerprint",
+        "target", "fit_status", "fit_error"
+      )]),
+    "TargetState canonical target metadata is incomplete"
+  )
+
+  request_rows <- requests[
+    as.character(requests$same_S_group_id) == group_id, , drop = FALSE
+  ]
+  target_rows <- target_rows[
+    as.character(target_rows$same_S_group_id) == group_id, , drop = FALSE
+  ]
+  fastkpc_full_cuda_target_state_require(
+    nrow(request_rows) > 0L && nrow(target_rows) > 0L,
+    "TargetState canonical same-S group has no targets"
+  )
+  request_rows <- request_rows[
+    order(request_rows$residual_key_sha256, method = "radix"),
+    , drop = FALSE
+  ]
+  target_rows <- target_rows[
+    order(target_rows$residual_key_sha256, method = "radix"),
+    , drop = FALSE
+  ]
+  rownames(request_rows) <- NULL
+  rownames(target_rows) <- NULL
+
+  request_keys <- as.character(request_rows$residual_key_sha256)
+  target_keys <- as.character(target_rows$residual_key_sha256)
+  fastkpc_full_cuda_target_state_require(
+    !anyDuplicated(request_keys) && !anyDuplicated(target_keys) &&
+      identical(request_keys, target_keys),
+    "TargetState canonical residual key set mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.integer(request_rows$target) && is.integer(target_rows$target) &&
+      identical(
+        as.integer(request_rows$target), as.integer(target_rows$target)
+      ) &&
+      all(target_rows$target >= 1L & target_rows$target <= ncol(data)),
+    "TargetState canonical target index mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    all(target_rows$fit_status == "success") &&
+      all(target_rows$fit_error == "NONE"),
+    "TargetState requires successful Phase 1 target fits"
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(
+      as.character(target_rows$same_S_group_id),
+      rep(group_id, nrow(target_rows))
+    ) &&
+      identical(
+        as.character(target_rows$setup_fingerprint),
+        rep(
+          as.character(prepared_setup$phase1_setup_fingerprint),
+          nrow(target_rows)
+        )
+      ),
+    "TargetState Phase 1 target lineage mismatch"
+  )
+  setup_S_key <- as.character(
+    fastkpc_full_cuda_prepared_s_row_value(setup_row, "S_key")
+  )
+  setup_S_size <- as.integer(
+    fastkpc_full_cuda_prepared_s_row_value(setup_row, "S_size")
+  )
+  setup_formula <- as.character(
+    fastkpc_full_cuda_prepared_s_row_value(setup_row, "formula_class")
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(
+      as.character(request_rows$same_S_group_id),
+      rep(group_id, nrow(request_rows))
+    ) &&
+      identical(
+        as.character(request_rows$S_key),
+        rep(setup_S_key, nrow(request_rows))
+      ) &&
+      identical(
+        as.integer(request_rows$S_size),
+        rep(setup_S_size, nrow(request_rows))
+      ) &&
+      identical(
+        as.character(request_rows$formula_class),
+        rep(setup_formula, nrow(request_rows))
+      ),
+    "TargetState residual request lineage mismatch"
+  )
+  representative_key <- as.character(
+    fastkpc_full_cuda_prepared_s_row_value(
+      setup_row, "representative_residual_key_sha256"
+    )
+  )
+  fastkpc_full_cuda_target_state_require(
+    representative_key %in% request_keys,
+    "TargetState setup representative lineage mismatch"
+  )
+
+  S <- fastkpc_full_cuda_census_parse_s(setup_S_key)
+  expected_payloads <- vapply(seq_len(nrow(request_rows)), function(index) {
+    fastkpc_full_cuda_census_residual_payload(
+      target = request_rows$target[[index]],
+      S = S,
+      formula_class = setup_formula,
+      data_hash = dataset_sha256,
+      n = nrow(data),
+      p = ncol(data)
+    )
+  }, character(1L))
+  expected_hashes <- unname(vapply(
+    expected_payloads, fastkpc_full_cuda_census_hash_utf8, character(1L)
+  ))
+  fastkpc_full_cuda_target_state_require(
+    identical(
+      as.character(request_rows$residual_key_payload), expected_payloads
+    ) && identical(request_keys, expected_hashes),
+    "TargetState residual key serialization mismatch"
+  )
+
+  list(
+    data = data,
+    dataset_sha256 = as.character(dataset_sha256),
+    setup = prepared_setup,
+    setup_row = setup_row,
+    request_rows = request_rows,
+    target_rows = target_rows
+  )
+}
+
+fastkpc_full_cuda_target_state_projected_rhs <- function(context) {
+  targets <- as.integer(context$target_rows$target)
+  Y <- context$data[, targets, drop = FALSE]
+  projected <- if (is.null(context$setup$weights)) {
+    crossprod(context$setup$X, Y)
+  } else {
+    crossprod(
+      context$setup$X,
+      Y * as.numeric(context$setup$weights)
+    )
+  }
+  null_projected <- if (identical(
+    context$setup$constraint_mode, "identity"
+  )) {
+    projected
+  } else {
+    crossprod(context$setup$constraint_nullspace, projected)
+  }
+  list(Y = Y, projected = projected, null_projected = null_projected)
+}
+
+fastkpc_full_cuda_build_target_states <- function(
+    inputs, prepared_setup) {
+  context <- fastkpc_full_cuda_target_state_context(inputs, prepared_setup)
+  algebra <- fastkpc_full_cuda_target_state_projected_rhs(context)
+  target_rows <- context$target_rows
+  request_rows <- context$request_rows
+  row_count <- nrow(target_rows)
+  list_column <- function(field) {
+    lapply(seq_len(row_count), function(index) {
+      target_rows[[field]][[index]]
+    })
+  }
+  states <- data.frame(
+    schema_version = rep(
+      fastkpc_full_cuda_target_state_schema_version(), row_count
+    ),
+    residual_key_payload = as.character(
+      request_rows$residual_key_payload
+    ),
+    residual_key_sha256 = as.character(
+      request_rows$residual_key_sha256
+    ),
+    prepared_s_key_sha256 = rep(
+      as.character(prepared_setup$prepared_s_key_sha256), row_count
+    ),
+    same_S_group_id = rep(
+      as.character(prepared_setup$same_S_group_id), row_count
+    ),
+    phase1_setup_fingerprint = rep(
+      as.character(prepared_setup$phase1_setup_fingerprint), row_count
+    ),
+    target = as.integer(target_rows$target),
+    y_source = I(lapply(seq_len(row_count), function(index) {
+      list(
+        dataset_sha256 = context$dataset_sha256,
+        target_column = as.integer(target_rows$target[[index]])
+      )
+    })),
+    y_hash = vapply(seq_len(row_count), function(index) {
+      fastkpc_full_cuda_census_metadata_hash(
+        as.numeric(algebra$Y[, index])
+      )
+    }, character(1L)),
+    projected_rhs = I(lapply(seq_len(row_count), function(index) {
+      as.numeric(algebra$projected[, index])
+    })),
+    nullspace_projected_rhs = I(lapply(
+      seq_len(row_count), function(index) {
+        as.numeric(algebra$null_projected[, index])
+      }
+    )),
+    selected_sp = I(list_column("selected_sp")),
+    selected_sp_names = I(list_column("selected_sp_names")),
+    selected_sp_hash = as.character(target_rows$selected_sp_hash),
+    GCV_Cp_score = as.numeric(target_rows$GCV_Cp_score),
+    EDF = as.numeric(target_rows$EDF),
+    convergence_fields = I(list_column("convergence_fields")),
+    warning_classes = I(list_column("warning_classes")),
+    warning_messages = I(list_column("warning_messages")),
+    coefficient_rank = as.integer(target_rows$coefficient_rank),
+    coefficient_hash = as.character(target_rows$coefficient_hash),
+    fitted_hash = as.character(target_rows$fitted_hash),
+    residual_hash = as.character(target_rows$residual_hash),
+    target_fit_fingerprint = as.character(
+      target_rows$target_fit_fingerprint
+    ),
+    target_state_fingerprint = rep(NA_character_, row_count),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  states$target_state_fingerprint <- vapply(
+    seq_len(row_count), function(index) {
+      fastkpc_full_cuda_target_state_fingerprint(
+        states[index, , drop = FALSE]
+      )
+    }, character(1L)
+  )
+  fastkpc_full_cuda_validate_target_states(
+    states = states,
+    inputs = inputs,
+    prepared_setup = prepared_setup
+  )
+  states
+}
+
+fastkpc_full_cuda_validate_target_states <- function(
+    states, inputs, prepared_setup, ...) {
+  dots <- list(...)
+  fastkpc_full_cuda_target_state_require(
+    length(dots) == 0L,
+    "TargetState validation options are unsupported"
+  )
+  context <- fastkpc_full_cuda_target_state_context(inputs, prepared_setup)
+  expected_fields <- fastkpc_full_cuda_target_state_field_names()
+  fastkpc_full_cuda_target_state_require(
+    is.data.frame(states) && identical(names(states), expected_fields),
+    "TargetState schema fields mismatch"
+  )
+  row_count <- nrow(context$target_rows)
+  fastkpc_full_cuda_target_state_require(
+    nrow(states) == row_count,
+    "TargetState residual key order mismatch"
+  )
+  list_fields <- c(
+    "y_source", "projected_rhs", "nullspace_projected_rhs",
+    "selected_sp", "selected_sp_names", "convergence_fields",
+    "warning_classes", "warning_messages"
+  )
+  fastkpc_full_cuda_target_state_require(
+    all(vapply(states[list_fields], is.list, logical(1L))),
+    "TargetState list-column schema mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.character(states$schema_version) &&
+      identical(
+        states$schema_version,
+        rep(fastkpc_full_cuda_target_state_schema_version(), row_count)
+      ),
+    "TargetState schema version mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.character(states$residual_key_sha256) &&
+      identical(
+        states$residual_key_sha256,
+        as.character(context$request_rows$residual_key_sha256)
+      ),
+    "TargetState residual key order mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.character(states$prepared_s_key_sha256) &&
+      identical(
+        states$prepared_s_key_sha256,
+        rep(as.character(prepared_setup$prepared_s_key_sha256), row_count)
+      ),
+    "TargetState PreparedSKey mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.character(states$same_S_group_id) &&
+      identical(
+        states$same_S_group_id,
+        rep(as.character(prepared_setup$same_S_group_id), row_count)
+      ),
+    "TargetState group lineage mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.character(states$phase1_setup_fingerprint) &&
+      identical(
+        states$phase1_setup_fingerprint,
+        rep(
+          as.character(prepared_setup$phase1_setup_fingerprint),
+          row_count
+        )
+      ),
+    "TargetState setup lineage mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.character(states$residual_key_payload) &&
+      identical(
+        states$residual_key_payload,
+        as.character(context$request_rows$residual_key_payload)
+      ) &&
+      all(endsWith(states$residual_key_payload, "\n")) &&
+      identical(
+        unname(vapply(
+          states$residual_key_payload,
+          fastkpc_full_cuda_census_hash_utf8,
+          character(1L)
+        )),
+        states$residual_key_sha256
+      ),
+    "TargetState residual key serialization mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.integer(states$target) &&
+      identical(states$target, as.integer(context$target_rows$target)) &&
+      all(states$target >= 1L & states$target <= ncol(context$data)),
+    "TargetState target index mismatch"
+  )
+
+  fingerprint_fields <-
+    fastkpc_full_cuda_target_state_fingerprint_field_names()
+  nonfinite <- vapply(seq_len(row_count), function(index) {
+    any(vapply(fingerprint_fields, function(field) {
+      fastkpc_full_cuda_census_value_has_nonfinite(
+        fastkpc_full_cuda_target_state_row_value(
+          states[index, , drop = FALSE], field
+        )
+      )
+    }, logical(1L)))
+  }, logical(1L))
+  fastkpc_full_cuda_target_state_require(
+    !any(nonfinite),
+    "TargetState payload must be finite"
+  )
+
+  algebra <- fastkpc_full_cuda_target_state_projected_rhs(context)
+  phase1_rows <- context$target_rows
+  hash_fields <- c(
+    "y_hash", "selected_sp_hash", "coefficient_hash", "fitted_hash",
+    "residual_hash", "target_fit_fingerprint",
+    "target_state_fingerprint"
+  )
+  fastkpc_full_cuda_target_state_require(
+    all(vapply(states[hash_fields], function(value) {
+      is.character(value) && !anyNA(value) &&
+        all(grepl("^[0-9a-f]{64}$", value))
+    }, logical(1L))),
+    "TargetState hash field is invalid"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.numeric(states$GCV_Cp_score) &&
+      is.numeric(states$EDF) &&
+      is.integer(states$coefficient_rank) &&
+      all(is.finite(states$GCV_Cp_score)) &&
+      all(is.finite(states$EDF)) &&
+      all(is.finite(states$coefficient_rank)),
+    "TargetState scalar metadata is invalid"
+  )
+
+  for (index in seq_len(row_count)) {
+    target <- states$target[[index]]
+    expected_source <- list(
+      dataset_sha256 = context$dataset_sha256,
+      target_column = target
+    )
+    source <- states$y_source[[index]]
+    fastkpc_full_cuda_target_state_require(
+      is.list(source) && is.null(attr(source, "class", exact = TRUE)) &&
+        identical(source, expected_source),
+      "TargetState y_source mismatch"
+    )
+    expected_y_hash <- fastkpc_full_cuda_census_metadata_hash(
+      as.numeric(algebra$Y[, index])
+    )
+    fastkpc_full_cuda_target_state_require(
+      identical(states$y_hash[[index]], expected_y_hash),
+      "TargetState y hash mismatch"
+    )
+
+    selected_sp <- states$selected_sp[[index]]
+    selected_sp_names <- states$selected_sp_names[[index]]
+    fastkpc_full_cuda_target_state_require(
+      is.numeric(selected_sp) &&
+        length(selected_sp) == length(prepared_setup$penalty_blocks) &&
+        all(is.finite(selected_sp)) && all(selected_sp > 0) &&
+        is.character(selected_sp_names) &&
+        length(selected_sp_names) == length(selected_sp),
+      "TargetState selected sp is invalid"
+    )
+    fastkpc_full_cuda_target_state_require(
+      identical(
+        states$selected_sp_hash[[index]],
+        fastkpc_full_cuda_census_metadata_hash(selected_sp)
+      ),
+      "TargetState selected sp hash mismatch"
+    )
+    fastkpc_full_cuda_target_state_require(
+      identical(selected_sp, phase1_rows$selected_sp[[index]]) &&
+        identical(
+          selected_sp_names, phase1_rows$selected_sp_names[[index]]
+        ),
+      "TargetState selected sp mismatch"
+    )
+
+    projected_rhs <- states$projected_rhs[[index]]
+    null_projected_rhs <- states$nullspace_projected_rhs[[index]]
+    fastkpc_full_cuda_target_state_require(
+      is.numeric(projected_rhs) &&
+        length(projected_rhs) == ncol(prepared_setup$X) &&
+        all(is.finite(projected_rhs)) &&
+        identical(
+          projected_rhs, as.numeric(algebra$projected[, index])
+        ),
+      "TargetState projected RHS mismatch"
+    )
+    fastkpc_full_cuda_target_state_require(
+      is.numeric(null_projected_rhs) &&
+        length(null_projected_rhs) ==
+          prepared_setup$constraint_nullspace_dimension &&
+        all(is.finite(null_projected_rhs)) &&
+        identical(
+          null_projected_rhs,
+          as.numeric(algebra$null_projected[, index])
+        ),
+      "TargetState nullspace projected RHS mismatch"
+    )
+
+    phase1_fields <- setdiff(
+      fastkpc_full_cuda_target_state_phase1_field_names(),
+      c("selected_sp", "selected_sp_names", "selected_sp_hash")
+    )
+    for (field in phase1_fields) {
+      actual <- fastkpc_full_cuda_target_state_row_value(
+        states[index, , drop = FALSE], field
+      )
+      expected <- phase1_rows[[field]][[index]]
+      fastkpc_full_cuda_target_state_require(
+        identical(actual, expected),
+        paste0("TargetState Phase 1 metadata mismatch: ", field)
+      )
+    }
+    fastkpc_full_cuda_target_state_require(
+      identical(
+        states$selected_sp_hash[[index]],
+        phase1_rows$selected_sp_hash[[index]]
+      ),
+      "TargetState selected sp hash mismatch"
+    )
+    fastkpc_full_cuda_target_state_require(
+      identical(
+        states$target_state_fingerprint[[index]],
+        fastkpc_full_cuda_target_state_fingerprint(
+          states[index, , drop = FALSE]
+        )
+      ),
+      "TargetState fingerprint mismatch"
+    )
+  }
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_materialize_target_state <- function(
+    state_row, data, dataset_sha256) {
+  fastkpc_full_cuda_target_state_require(
+    is.data.frame(state_row) && nrow(state_row) == 1L,
+    "TargetState requires exactly one row"
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(
+      names(state_row), fastkpc_full_cuda_target_state_field_names()
+    ) &&
+      identical(
+        state_row$schema_version[[1L]],
+        fastkpc_full_cuda_target_state_schema_version()
+      ),
+    "TargetState schema is malformed"
+  )
+  fastkpc_full_cuda_target_state_require(
+    fastkpc_full_cuda_prepared_s_is_sha256(dataset_sha256),
+    "TargetState dataset lineage is invalid"
+  )
+  source <- state_row$y_source[[1L]]
+  fastkpc_full_cuda_target_state_require(
+    is.list(source) && is.null(attr(source, "class", exact = TRUE)) &&
+      identical(names(source), c("dataset_sha256", "target_column")) &&
+      fastkpc_full_cuda_prepared_s_is_sha256(source$dataset_sha256) &&
+      identical(source$dataset_sha256, as.character(dataset_sha256)),
+    "TargetState dataset lineage mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.matrix(data) && is.numeric(data) && length(dim(data)) == 2L &&
+      nrow(data) > 0L && ncol(data) > 0L && all(is.finite(data)),
+    "TargetState materialization data must be a finite numeric matrix"
+  )
+  target <- state_row$target[[1L]]
+  fastkpc_full_cuda_target_state_require(
+    is.integer(target) && length(target) == 1L && !is.na(target) &&
+      target >= 1L && target <= ncol(data),
+    "TargetState target index is invalid"
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(source$target_column, target),
+    "TargetState y_source identity mismatch"
+  )
+  y <- as.numeric(data[, target])
+  y_hash <- state_row$y_hash[[1L]]
+  fastkpc_full_cuda_target_state_require(
+    fastkpc_full_cuda_prepared_s_is_sha256(y_hash) &&
+      identical(
+        y_hash, fastkpc_full_cuda_census_metadata_hash(y)
+      ),
+    "TargetState y hash mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    fastkpc_full_cuda_prepared_s_is_sha256(
+      state_row$target_state_fingerprint[[1L]]
+    ) &&
+      identical(
+        state_row$target_state_fingerprint[[1L]],
+        fastkpc_full_cuda_target_state_fingerprint(state_row)
+      ),
+    "TargetState fingerprint mismatch"
+  )
+  list(row = state_row, y = y)
+}
