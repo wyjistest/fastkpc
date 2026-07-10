@@ -23,7 +23,7 @@ assert_true(
   identical(contract$schema_version, "full-cuda-ci-phase2-input-v1") &&
     identical(
       contract$phase1_source_commit,
-      "1560068ba8d635e806612554e11bbed92c0b8843c"
+      "1560068ba8d635e806612554e11bbed92c0b8843"
     ) &&
     identical(
       contract$metadata_schema_version,
@@ -37,6 +37,32 @@ assert_true(
     "b0990cfc932a5fcabc09ad25e352e7babb67fc8a127f11c7d2b88887c4940574"
   ),
   "Phase 2 must pin the Phase 1 manifest bytes"
+)
+
+mutated_schema <- contract
+mutated_schema$schema_version <- "full-cuda-ci-phase2-input-v2"
+assert_error(
+  fastkpc_full_cuda_prepared_s_validate_contract(mutated_schema),
+  "canonical Phase 2 input contract mismatch",
+  "mutated Phase 2 schema must fail before input parsing"
+)
+
+mutated_source <- contract
+mutated_source$phase1_source_commit <- paste0(
+  "0", substring(mutated_source$phase1_source_commit, 2L)
+)
+assert_error(
+  fastkpc_full_cuda_prepared_s_validate_contract(mutated_source),
+  "canonical Phase 2 input contract mismatch",
+  "mutated Phase 1 source commit must fail before input parsing"
+)
+
+mutated_file_hash <- contract
+mutated_file_hash$file_hashes[["manifest.json"]] <- strrep("0", 64L)
+assert_error(
+  fastkpc_full_cuda_prepared_s_validate_contract(mutated_file_hash),
+  "canonical Phase 2 input contract mismatch",
+  "mutated Phase 1 file hash must fail before input parsing"
 )
 
 census_dir <-
@@ -80,7 +106,7 @@ assert_true(
   identical(manifest_hash, unname(contract$file_hashes[["manifest.json"]])) &&
     identical(
       inputs$manifest$source_commit,
-      contract$phase1_artifact_source_commit
+      contract$phase1_source_commit
     ) &&
     grepl("^[0-9a-f]{64}$", inputs$phase1_input_bundle_hash),
   "loaded inputs must retain exact source, manifest, and bundle hashes"

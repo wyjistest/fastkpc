@@ -9,8 +9,6 @@ fastkpc_full_cuda_prepared_s_input_contract <- function() {
     phase1_artifact_schema_version =
       "full-cuda-ci-workload-census-artifact-v1",
     phase1_source_commit =
-      "1560068ba8d635e806612554e11bbed92c0b8843c",
-    phase1_artifact_source_commit =
       "1560068ba8d635e806612554e11bbed92c0b8843",
     metadata_schema_version = "full-cuda-ci-metadata-v4",
     R_version = "R version 4.4.1 (2024-06-14)",
@@ -79,49 +77,11 @@ fastkpc_full_cuda_prepared_s_named_identical <- function(actual, expected) {
 }
 
 fastkpc_full_cuda_prepared_s_validate_contract <- function(contract) {
-  required <- c(
-    "schema_version", "phase1_artifact_schema_version",
-    "phase1_source_commit", "phase1_artifact_source_commit",
-    "metadata_schema_version", "R_version",
-    "mgcv_version", "formula_semantics_version",
-    "mgcv_semantics_version", "shard_count", "dataset_file_sha256",
-    "dataset_matrix_sha256", "canonical_logical_census_hash",
-    "canonical_key_corpus_hash", "file_hashes", "named_metadata_hashes"
-  )
-  missing <- setdiff(required, names(contract))
-  if (!is.list(contract) || length(missing) > 0L) {
-    stop("Phase 2 input contract is incomplete", call. = FALSE)
+  canonical <- fastkpc_full_cuda_prepared_s_input_contract()
+  if (!is.list(contract) || !identical(contract, canonical)) {
+    stop("canonical Phase 2 input contract mismatch", call. = FALSE)
   }
-  expected_files <- c(
-    "manifest.json", "summary.json", "logical_ci_tests.rds",
-    "residual_requests.rds", "same_s_setup_metadata.rds",
-    "target_fit_metadata.rds", "risk_cases.rds"
-  )
-  expected_metadata <- c(
-    "setup_observation_metadata", "same_s_setup_metadata",
-    "target_fit_metadata", "target_risk_metadata", "risk_cases"
-  )
-  hashes <- c(
-    unname(contract$file_hashes),
-    unname(contract$named_metadata_hashes),
-    contract$dataset_file_sha256,
-    contract$dataset_matrix_sha256,
-    contract$canonical_logical_census_hash,
-    contract$canonical_key_corpus_hash
-  )
-  clean <- identical(names(contract$file_hashes), expected_files) &&
-    identical(names(contract$named_metadata_hashes), expected_metadata) &&
-    all(grepl("^[0-9a-f]{64}$", hashes)) &&
-    grepl("^[0-9a-f]{41}$", contract$phase1_source_commit) &&
-    grepl("^[0-9a-f]{40}$", contract$phase1_artifact_source_commit) &&
-    startsWith(
-      contract$phase1_source_commit,
-      contract$phase1_artifact_source_commit
-    ) &&
-    identical(as.integer(contract$shard_count), 64L)
-  fastkpc_full_cuda_prepared_s_require(
-    clean, "Phase 2 input contract identity is invalid"
-  )
+  invisible(TRUE)
 }
 
 fastkpc_full_cuda_prepared_s_authenticate_files <- function(
@@ -225,7 +185,7 @@ fastkpc_full_cuda_prepared_s_validate_manifest <- function(
     identical(as.character(manifest$run_scope), "full") &&
     isTRUE(manifest$phase1_complete) &&
     identical(as.character(manifest$source_commit),
-              contract$phase1_artifact_source_commit) &&
+              contract$phase1_source_commit) &&
     identical(as.character(manifest$metadata_schema_version),
               contract$metadata_schema_version) &&
     identical(as.character(manifest$R_version), contract$R_version) &&
