@@ -18,6 +18,19 @@ logical(1L))) &&
               length(runtime_identity$BLAS_thread_count) == 1L,
             "runtime identity must contain one scalar value for every field")
 
+named_frame <- data.frame(
+  convergence_fields = I(list(list(
+    converged = list(source = "fit$converged", value = TRUE)
+  )))
+)
+renamed_frame <- named_frame
+names(renamed_frame$convergence_fields[[1L]])[[1L]] <- "renamed"
+assert_true(
+  !identical(fastkpc_full_cuda_census_frame_hash(named_frame),
+             fastkpc_full_cuda_census_frame_hash(renamed_frame)),
+  "frame authentication must preserve semantic nested names"
+)
+
 hex64 <- function(value) sprintf("%064d", as.integer(value))
 key_values <- c(12L, 1L, 9L, 3L, 11L, 5L, 7L, 2L, 10L, 4L, 8L, 6L)
 group_index <- rep(seq_len(6L), each = 2L)
@@ -371,6 +384,23 @@ assert_error(
 )
 saveRDS(first$payload, first$paths$rds, version = 2)
 
+nested_name_tamper <- readRDS(first$paths$rds)
+names(nested_name_tamper$target_fits$convergence_fields[[1L]])[[1L]] <-
+  "renamed"
+saveRDS(nested_name_tamper, first$paths$rds, version = 2)
+assert_error(
+  fastkpc_full_cuda_census_run_shard(
+    assigned_requests = assigned,
+    shard_id = 0L,
+    context = context,
+    output_dir = output_dir,
+    fit_fun = fixture_fit
+  ),
+  "payload hash mismatch",
+  "resume must reject semantic nested-name corruption"
+)
+saveRDS(first$payload, first$paths$rds, version = 2)
+
 reused <- fastkpc_full_cuda_census_run_shard(
   assigned_requests = assigned,
   shard_id = 0L,
@@ -488,6 +518,48 @@ finite_metadata_tamper_gate <- fastkpc_full_cuda_census_metadata_gate(
 assert_true(!isTRUE(finite_metadata_tamper_gate$pass) &&
               !isTRUE(finite_metadata_tamper_gate$exact_authenticated_metadata),
             "metadata gate must reject in-memory finite metadata drift")
+
+nested_metadata_tamper <- merged
+names(nested_metadata_tamper$target_fit_metadata$
+        convergence_fields[[1L]])[[1L]] <- "renamed"
+nested_metadata_tamper_gate <- fastkpc_full_cuda_census_metadata_gate(
+  nested_metadata_tamper, requests
+)
+assert_true(!isTRUE(nested_metadata_tamper_gate$pass) &&
+              !isTRUE(
+                nested_metadata_tamper_gate$exact_authenticated_metadata
+              ),
+            "metadata gate must reject in-memory nested-name drift")
+
+near_constant_semantic_tamper <- merged
+near_constant_semantic_tamper$target_fit_metadata$target_sd[[1L]] <- 0
+near_constant_semantic_tamper$target_fit_metadata$
+  target_near_constant[[1L]] <- FALSE
+near_constant_semantic_tamper$target_risk_metadata$
+  near_constant_target[[1L]] <- FALSE
+near_constant_semantic_tamper$risk_cases <-
+  fastkpc_full_cuda_census_risk_cases(
+    near_constant_semantic_tamper$target_risk_metadata,
+    context$logical_tests
+  )
+near_constant_semantic_tamper$authenticated_metadata_hashes <-
+  fastkpc_full_cuda_census_authenticated_metadata_hashes(
+    near_constant_semantic_tamper
+  )
+near_constant_semantic_tamper_gate <-
+  fastkpc_full_cuda_census_metadata_gate(
+    near_constant_semantic_tamper, requests
+  )
+assert_true(
+  !isTRUE(near_constant_semantic_tamper_gate$pass) &&
+    isTRUE(near_constant_semantic_tamper_gate$exact_authenticated_metadata) &&
+    !isTRUE(
+      near_constant_semantic_tamper_gate$exact_target_near_constant_semantics
+    ) &&
+    near_constant_semantic_tamper_gate$
+      target_near_constant_mismatch_count > 0L,
+  "metadata gate must derive near-constant target status from target_sd"
+)
 
 risk_semantic_tamper <- merged
 risk_semantic_tamper$target_risk_metadata$high_condition[[1L]] <- TRUE

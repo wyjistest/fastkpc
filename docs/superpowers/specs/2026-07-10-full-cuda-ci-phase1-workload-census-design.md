@@ -601,6 +601,12 @@ with SHA-256. `metadata object hash v1` applies the same serialization/hash
 rule to normalized integer/logical/list metadata. All hash schema versions are
 recorded in the manifest.
 
+Frame and shard-payload authentication use
+`full-cuda-ci-frame-hash-v2`/`full-cuda-ci-shard-payload-hash-v2`. They retain
+nested list/vector names because convergence and provenance semantics depend
+on names such as `converged`, `outer.info`, `source`, and `value`; only matrix
+dimnames are removed.
+
 Within every `same_S_group_id`, all per-target setup observations must have
 exactly one value for:
 
@@ -706,6 +712,8 @@ non-finite metadata and fails the canonical gate.
 The final metadata gate independently recomputes every target-risk field from
 the authenticated setup and target-fit tables. Stored risk flags and condition
 buckets are outputs to verify, not self-validating evidence.
+`near_constant_target` is derived from persisted `target_sd` and the frozen
+threshold, and the stored `target_near_constant` boolean must agree exactly.
 
 - Selected sp is stored in mgcv penalty order with original names preserved;
   canonical comparisons use the ordered numeric vector and a separate names
@@ -914,6 +922,7 @@ setup observation rows before same-S compression    = 110,617
 target risk rows before risk-case filtering          = 110,617
 target/request, target/setup, and target/risk joins  = exact
 target risk semantics                                = exact
+target near-constant semantics                       = exact
 authenticated metadata tables                       = exact
 warning and non-finite classification                = exact
 same-S invariant violations                         = 0

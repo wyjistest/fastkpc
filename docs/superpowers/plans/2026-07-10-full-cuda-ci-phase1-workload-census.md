@@ -1128,6 +1128,7 @@ stopifnot(
   isTRUE(s$exact_target_risk_key_set),
   isTRUE(s$exact_target_risk_lineage),
   isTRUE(s$exact_risk_semantics),
+  isTRUE(s$exact_target_near_constant_semantics),
   isTRUE(s$exact_setup_observation_key_set),
   isTRUE(s$exact_target_setup_lineage),
   isTRUE(s$exact_authenticated_metadata),

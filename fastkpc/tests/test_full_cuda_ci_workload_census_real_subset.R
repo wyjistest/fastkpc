@@ -73,6 +73,7 @@ assert_true(summary$logical_test_count == 240489L &&
               isTRUE(summary$exact_target_risk_key_set) &&
               isTRUE(summary$exact_target_risk_lineage) &&
               isTRUE(summary$exact_risk_semantics) &&
+              isTRUE(summary$exact_target_near_constant_semantics) &&
               isTRUE(summary$exact_setup_observation_key_set) &&
               isTRUE(summary$exact_target_setup_lineage) &&
               isTRUE(summary$exact_authenticated_metadata) &&
@@ -93,7 +94,7 @@ assert_true(summary$logical_test_count == 240489L &&
                         )),
             "summary must expose the exact canonical Phase 1 closure schema")
 assert_true(identical(manifest$metadata_schema_version,
-                      "full-cuda-ci-metadata-v3"),
+                      "full-cuda-ci-metadata-v4"),
             "artifact must record the lineage-hardened metadata schema")
 assert_true(identical(manifest$canonical_logical_census_hash,
                       summary$canonical_logical_census_hash) &&
