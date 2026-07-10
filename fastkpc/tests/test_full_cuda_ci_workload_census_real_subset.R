@@ -64,9 +64,20 @@ assert_true(summary$logical_test_count == 240489L &&
               summary$unique_conditional_S_count == 8634L &&
               summary$same_s_setup_metadata_rows == nrow(same_s_setups) &&
               summary$target_fit_metadata_rows == 8L &&
+              summary$setup_observation_metadata_rows == 8L &&
+              summary$target_risk_metadata_rows == 8L &&
               summary$mgcv_fit_error_count == 0L &&
               summary$same_s_invariant_violation_count == 0L &&
               summary$required_field_coverage == 1 &&
+              isTRUE(summary$exact_target_request_lineage) &&
+              isTRUE(summary$exact_target_risk_key_set) &&
+              isTRUE(summary$exact_target_risk_lineage) &&
+              isTRUE(summary$exact_setup_observation_key_set) &&
+              isTRUE(summary$exact_target_setup_lineage) &&
+              isTRUE(summary$exact_warning_classification) &&
+              isTRUE(summary$exact_nonfinite_classification) &&
+              summary$misclassified_warning_count == 0L &&
+              summary$misclassified_nonfinite_count == 0L &&
               isTRUE(summary$legacy_layout_parity_pass) &&
               identical(summary$canonical_key_corpus_hash,
                         paste0(
@@ -74,6 +85,9 @@ assert_true(summary$logical_test_count == 240489L &&
                           "6c3871d6b2e1fa"
                         )),
             "summary must expose the exact canonical Phase 1 closure schema")
+assert_true(identical(manifest$metadata_schema_version,
+                      "full-cuda-ci-metadata-v2"),
+            "artifact must record the lineage-hardened metadata schema")
 assert_true(all(c(
   "counts_by_s_size", "counts_by_penalty_count",
   "counts_by_model_dimension", "counts_by_condition_bucket",

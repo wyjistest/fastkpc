@@ -530,6 +530,9 @@ convergence_fields
 warning_classes
 warning_messages
 coefficient_rank
+coefficient_all_finite
+fitted_all_finite
+residual_all_finite
 penalized_system_condition_at_selected_sp
 target_sd
 target_near_constant
@@ -852,8 +855,9 @@ residual key serialization inconsistency or SHA-256 collision
 legacy two-target versus offline one-target parity failure
 same-S setup invariant violation
 duplicate, missing, stale, partial, or wrong-corpus shard
+missing or misjoined target/setup/risk per-key lineage
 mgcv fit error
-required non-finite metadata without an explicit supported status
+required non-finite metadata or output evidence without an exact risk status
 incomplete required field coverage
 unknown fallback or approximate backend count != 0
 ```
@@ -880,6 +884,10 @@ Numerical hard gates:
 legacy layout parity cases pass                     = TRUE
 same-S setup metadata rows                          = 8,634
 target fit metadata rows                            = 110,617
+setup observation rows before same-S compression    = 110,617
+target risk rows before risk-case filtering          = 110,617
+target/request, target/setup, and target/risk joins  = exact
+warning and non-finite classification                = exact
 same-S invariant violations                         = 0
 mgcv fit errors                                     = 0
 required field coverage                             = 100%

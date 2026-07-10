@@ -1442,6 +1442,9 @@ fastkpc_full_cuda_census_target_error_row <- function(request_row, error) {
     warning_classes = I(list(list())),
     warning_messages = I(list(character())),
     coefficient_rank = NA_integer_,
+    coefficient_all_finite = FALSE,
+    fitted_all_finite = FALSE,
+    residual_all_finite = FALSE,
     penalized_system_condition_at_selected_sp = NA_real_,
     target_sd = NA_real_,
     target_near_constant = TRUE,
@@ -1451,6 +1454,32 @@ fastkpc_full_cuda_census_target_error_row <- function(request_row, error) {
     target_fit_fingerprint = NA_character_,
     stringsAsFactors = FALSE
   )
+}
+
+fastkpc_full_cuda_census_value_has_nonfinite <- function(value) {
+  if (is.null(value)) return(FALSE)
+  if (is.numeric(value)) return(any(!is.finite(value)))
+  if (is.list(value)) {
+    return(any(vapply(value,
+                      fastkpc_full_cuda_census_value_has_nonfinite,
+                      logical(1L))))
+  }
+  FALSE
+}
+
+fastkpc_full_cuda_census_nonfinite_rows <- function(table, fields) {
+  table <- as.data.frame(table, stringsAsFactors = FALSE)
+  missing <- setdiff(fields, names(table))
+  if (length(missing) > 0L) {
+    stop("metadata table missing non-finite scan fields: ",
+         paste(missing, collapse = ","), call. = FALSE)
+  }
+  if (nrow(table) == 0L) return(logical())
+  vapply(seq_len(nrow(table)), function(index) {
+    any(vapply(fields, function(field) {
+      fastkpc_full_cuda_census_value_has_nonfinite(table[[field]][[index]])
+    }, logical(1L)))
+  }, logical(1L))
 }
 
 fastkpc_full_cuda_census_target_risk_row <- function(
@@ -1534,6 +1563,9 @@ fastkpc_full_cuda_census_fit_key <- function(data, request_row,
     coefficients <- as.numeric(stats::coef(fit))
     fitted <- as.numeric(stats::fitted(fit))
     residuals <- as.numeric(stats::residuals(fit))
+    coefficient_all_finite <- all(is.finite(coefficients))
+    fitted_all_finite <- all(is.finite(fitted))
+    residual_all_finite <- all(is.finite(residuals))
     selected_sp_hash <- fastkpc_full_cuda_census_metadata_hash(
       selected_sp_values
     )
@@ -1559,6 +1591,9 @@ fastkpc_full_cuda_census_fit_key <- function(data, request_row,
       convergence_fields,
       warning_classes,
       warning_messages,
+      coefficient_all_finite,
+      fitted_all_finite,
+      residual_all_finite,
       coefficient_hash,
       fitted_hash,
       residual_hash,
@@ -1588,6 +1623,9 @@ fastkpc_full_cuda_census_fit_key <- function(data, request_row,
       warning_classes = I(list(warning_classes)),
       warning_messages = I(list(warning_messages)),
       coefficient_rank = as.integer(fit$rank),
+      coefficient_all_finite = coefficient_all_finite,
+      fitted_all_finite = fitted_all_finite,
+      residual_all_finite = residual_all_finite,
       penalized_system_condition_at_selected_sp =
         penalized_diagnostics$condition,
       target_sd = target_risk$sd,
@@ -1598,10 +1636,14 @@ fastkpc_full_cuda_census_fit_key <- function(data, request_row,
       target_fit_fingerprint = fingerprint,
       stringsAsFactors = FALSE
     )
-    nonfinite_metadata <- any(!is.finite(c(
-      selected_sp_values, GCV_Cp_score, EDF,
-      penalized_diagnostics$condition, target_risk$sd
-    )))
+    nonfinite_metadata <-
+      fastkpc_full_cuda_census_nonfinite_rows(
+        setup$row, fastkpc_full_cuda_census_setup_metadata_fields()
+      )[[1L]] ||
+      fastkpc_full_cuda_census_nonfinite_rows(
+        target_row, fastkpc_full_cuda_census_target_metadata_fields()
+      )[[1L]] || !coefficient_all_finite || !fitted_all_finite ||
+      !residual_all_finite
     risk_row <- fastkpc_full_cuda_census_target_risk_row(
       request_row = request_row,
       setup = setup,
@@ -1728,7 +1770,8 @@ fastkpc_full_cuda_census_target_metadata_fields <- function() {
     "method", "optimizer", "family", "link", "selected_sp",
     "selected_sp_names", "selected_sp_hash", "GCV_Cp_score", "EDF",
     "convergence_fields", "warning_classes", "warning_messages",
-    "coefficient_rank", "penalized_system_condition_at_selected_sp",
+    "coefficient_rank", "coefficient_all_finite", "fitted_all_finite",
+    "residual_all_finite", "penalized_system_condition_at_selected_sp",
     "target_sd", "target_near_constant", "coefficient_hash",
     "fitted_hash", "residual_hash", "target_fit_fingerprint"
   )
@@ -2085,12 +2128,19 @@ fastkpc_full_cuda_census_validate_shard_payload <- function(
   }
   target_fits <- as.data.frame(payload$target_fits,
                                stringsAsFactors = FALSE)
+  setup_observations <- as.data.frame(payload$setup_observations,
+                                      stringsAsFactors = FALSE)
+  target_risks <- as.data.frame(payload$target_risks,
+                                stringsAsFactors = FALSE)
   if (length(keys) == 0L) {
-    if (nrow(target_fits) != 0L) {
+    if (nrow(target_fits) != 0L || nrow(setup_observations) != 0L ||
+        nrow(target_risks) != 0L) {
       stop("shard target key set mismatch", call. = FALSE)
     }
   } else {
-    if (!"residual_key_sha256" %in% names(target_fits) ||
+    required_target <- c("residual_key_sha256", "same_S_group_id",
+                         "setup_fingerprint", "fit_status")
+    if (length(setdiff(required_target, names(target_fits))) > 0L ||
         anyNA(target_fits$residual_key_sha256) ||
         anyDuplicated(target_fits$residual_key_sha256)) {
       stop("duplicate residual key in shard target fits", call. = FALSE)
@@ -2098,6 +2148,67 @@ fastkpc_full_cuda_census_validate_shard_payload <- function(
     if (!identical(sort(target_fits$residual_key_sha256, method = "radix"),
                    sort(keys, method = "radix"))) {
       stop("shard target key set mismatch", call. = FALSE)
+    }
+
+    required_risk <- c("case_type", "residual_key_sha256",
+                       "same_S_group_id")
+    if (length(setdiff(required_risk, names(target_risks))) > 0L ||
+        anyNA(target_risks$residual_key_sha256) ||
+        anyDuplicated(target_risks$residual_key_sha256) ||
+        !identical(sort(target_risks$residual_key_sha256, method = "radix"),
+                   sort(keys, method = "radix"))) {
+      stop("shard risk key set mismatch", call. = FALSE)
+    }
+    risk_index <- match(target_fits$residual_key_sha256,
+                        target_risks$residual_key_sha256)
+    if (anyNA(risk_index) ||
+        any(target_risks$case_type[risk_index] != "target_key") ||
+        !identical(as.character(target_fits$same_S_group_id),
+                   as.character(target_risks$same_S_group_id[risk_index]))) {
+      stop("shard target/risk lineage mismatch", call. = FALSE)
+    }
+
+    status <- as.character(target_fits$fit_status)
+    if (any(!status %in% c("success", "error"))) {
+      stop("shard target fit status is invalid", call. = FALSE)
+    }
+    successful <- status == "success"
+    successful_keys <- target_fits$residual_key_sha256[successful]
+    if (length(successful_keys) == 0L) {
+      if (nrow(setup_observations) != 0L) {
+        stop("shard setup key set mismatch", call. = FALSE)
+      }
+    } else {
+      required_setup <- c("representative_residual_key_sha256",
+                          "same_S_group_id", "setup_fingerprint")
+      if (length(setdiff(required_setup, names(setup_observations))) > 0L ||
+          anyNA(setup_observations$representative_residual_key_sha256) ||
+          anyDuplicated(
+            setup_observations$representative_residual_key_sha256
+          ) ||
+          !identical(sort(
+            setup_observations$representative_residual_key_sha256,
+            method = "radix"
+          ), sort(successful_keys, method = "radix"))) {
+        stop("shard setup key set mismatch", call. = FALSE)
+      }
+      setup_index <- match(successful_keys,
+                           setup_observations$representative_residual_key_sha256)
+      successful_targets <- target_fits[successful, , drop = FALSE]
+      if (anyNA(setup_index) ||
+          !identical(as.character(successful_targets$same_S_group_id),
+                     as.character(
+                       setup_observations$same_S_group_id[setup_index]
+                     )) ||
+          !identical(as.character(successful_targets$setup_fingerprint),
+                     as.character(
+                       setup_observations$setup_fingerprint[setup_index]
+                     ))) {
+        stop("shard target/setup lineage mismatch", call. = FALSE)
+      }
+    }
+    if (any(!successful & !is.na(target_fits$setup_fingerprint))) {
+      stop("failed shard target retained setup metadata", call. = FALSE)
     }
   }
   invisible(TRUE)
@@ -2167,6 +2278,73 @@ fastkpc_full_cuda_census_empty_frame <- function(fields) {
   )
 }
 
+fastkpc_full_cuda_census_validate_fit_result <- function(value, request_row) {
+  request_row <- fastkpc_full_cuda_census_request_row(request_row)
+  if (!is.list(value) || is.null(value$target_fit) ||
+      is.null(value$risk_cases)) {
+    stop("fit_fun returned an incomplete shard row", call. = FALSE)
+  }
+  target <- as.data.frame(value$target_fit, stringsAsFactors = FALSE)
+  risk <- as.data.frame(value$risk_cases, stringsAsFactors = FALSE)
+  setup <- if (is.null(value$setup_observation)) {
+    data.frame()
+  } else {
+    as.data.frame(value$setup_observation, stringsAsFactors = FALSE)
+  }
+  required_target <- c("residual_key_sha256", "same_S_group_id",
+                       "setup_fingerprint", "target", "fit_status")
+  required_risk <- c("case_type", "residual_key_sha256", "same_S_group_id")
+  if (nrow(target) != 1L ||
+      length(setdiff(required_target, names(target))) > 0L ||
+      !identical(as.character(target$residual_key_sha256[[1L]]),
+                 as.character(request_row$residual_key_sha256[[1L]]))) {
+    stop("fit_fun returned the wrong residual key", call. = FALSE)
+  }
+  if (!identical(as.character(target$same_S_group_id[[1L]]),
+                 as.character(request_row$same_S_group_id[[1L]])) ||
+      !identical(as.integer(target$target[[1L]]),
+                 as.integer(request_row$target[[1L]]))) {
+    stop("fit_fun target/request lineage mismatch", call. = FALSE)
+  }
+  if (nrow(risk) != 1L ||
+      length(setdiff(required_risk, names(risk))) > 0L ||
+      !identical(as.character(risk$residual_key_sha256[[1L]]),
+                 as.character(request_row$residual_key_sha256[[1L]]))) {
+    stop("fit_fun returned the wrong risk residual key", call. = FALSE)
+  }
+  if (!identical(as.character(risk$case_type[[1L]]), "target_key") ||
+      !identical(as.character(risk$same_S_group_id[[1L]]),
+                 as.character(request_row$same_S_group_id[[1L]]))) {
+    stop("fit_fun target/risk lineage mismatch", call. = FALSE)
+  }
+
+  status <- as.character(target$fit_status[[1L]])
+  if (identical(status, "success")) {
+    required_setup <- c("representative_residual_key_sha256",
+                        "same_S_group_id", "setup_fingerprint")
+    if (nrow(setup) != 1L ||
+        length(setdiff(required_setup, names(setup))) > 0L) {
+      stop("successful fit is missing its setup observation", call. = FALSE)
+    }
+    if (!identical(
+          as.character(setup$representative_residual_key_sha256[[1L]]),
+          as.character(request_row$residual_key_sha256[[1L]])) ||
+        !identical(as.character(setup$same_S_group_id[[1L]]),
+                   as.character(request_row$same_S_group_id[[1L]])) ||
+        !identical(as.character(setup$setup_fingerprint[[1L]]),
+                   as.character(target$setup_fingerprint[[1L]]))) {
+      stop("fit_fun target/setup lineage mismatch", call. = FALSE)
+    }
+  } else if (identical(status, "error")) {
+    if (nrow(setup) != 0L || !is.na(target$setup_fingerprint[[1L]])) {
+      stop("failed fit retained unexpected setup metadata", call. = FALSE)
+    }
+  } else {
+    stop("fit_fun returned an unknown fit status", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
 fastkpc_full_cuda_census_run_shard <- function(
     assigned_requests, shard_id, context, output_dir,
     fit_fun = fastkpc_full_cuda_census_fit_key) {
@@ -2204,16 +2382,9 @@ fastkpc_full_cuda_census_run_shard <- function(
       request_row = shard_requests[index, , drop = FALSE],
       risk_config = context$risk_config
     )
-    if (!is.list(value) || is.null(value$target_fit) ||
-        is.null(value$risk_cases)) {
-      stop("fit_fun returned an incomplete shard row", call. = FALSE)
-    }
-    target_fit <- as.data.frame(value$target_fit, stringsAsFactors = FALSE)
-    if (nrow(target_fit) != 1L ||
-        !identical(target_fit$residual_key_sha256[[1L]],
-                   shard_requests$residual_key_sha256[[index]])) {
-      stop("fit_fun returned the wrong residual key", call. = FALSE)
-    }
+    fastkpc_full_cuda_census_validate_fit_result(
+      value, shard_requests[index, , drop = FALSE]
+    )
     value
   })
   payload <- list(
@@ -2303,9 +2474,56 @@ fastkpc_full_cuda_census_merge_shards <- function(
     order(target_fits$residual_key_sha256, method = "radix"), , drop = FALSE
   ]
   rownames(target_fits) <- NULL
+  request_index <- match(target_fits$residual_key_sha256,
+                         assigned$residual_key_sha256)
+  if (anyNA(request_index) ||
+      !identical(as.character(target_fits$same_S_group_id),
+                 as.character(assigned$same_S_group_id[request_index])) ||
+      !identical(as.integer(target_fits$target),
+                 as.integer(assigned$target[request_index]))) {
+    stop("merged target/request lineage mismatch", call. = FALSE)
+  }
+
   setup_observations <- fastkpc_full_cuda_census_bind_rows(lapply(
     loaded, function(value) value$payload$setup_observations
   ))
+  successful <- target_fits$fit_status == "success"
+  successful_keys <- target_fits$residual_key_sha256[successful]
+  if (length(successful_keys) == 0L) {
+    if (nrow(setup_observations) != 0L) {
+      stop("merged setup key set mismatch", call. = FALSE)
+    }
+  } else {
+    if (!all(c("representative_residual_key_sha256", "same_S_group_id",
+               "setup_fingerprint") %in% names(setup_observations)) ||
+        anyNA(setup_observations$representative_residual_key_sha256) ||
+        anyDuplicated(setup_observations$representative_residual_key_sha256) ||
+        !identical(sort(
+          setup_observations$representative_residual_key_sha256,
+          method = "radix"
+        ), sort(successful_keys, method = "radix"))) {
+      stop("merged setup key set mismatch", call. = FALSE)
+    }
+    setup_observations <- setup_observations[order(
+      setup_observations$representative_residual_key_sha256,
+      method = "radix"
+    ), , drop = FALSE]
+    rownames(setup_observations) <- NULL
+    setup_index <- match(successful_keys,
+                         setup_observations$representative_residual_key_sha256)
+    successful_targets <- target_fits[successful, , drop = FALSE]
+    if (anyNA(setup_index) ||
+        !identical(as.character(successful_targets$same_S_group_id),
+                   as.character(
+                     setup_observations$same_S_group_id[setup_index]
+                   )) ||
+        !identical(as.character(successful_targets$setup_fingerprint),
+                   as.character(
+                     setup_observations$setup_fingerprint[setup_index]
+                   ))) {
+      stop("merged target/setup lineage mismatch", call. = FALSE)
+    }
+  }
   same_s_setups <- if (nrow(setup_observations) == 0L) {
     fastkpc_full_cuda_census_empty_frame(
       fastkpc_full_cuda_census_setup_metadata_fields()
@@ -2316,6 +2534,26 @@ fastkpc_full_cuda_census_merge_shards <- function(
   target_risks <- fastkpc_full_cuda_census_bind_rows(lapply(
     loaded, function(value) value$payload$target_risks
   ))
+  if (!all(c("case_type", "residual_key_sha256", "same_S_group_id") %in%
+           names(target_risks)) ||
+      anyNA(target_risks$residual_key_sha256) ||
+      anyDuplicated(target_risks$residual_key_sha256) ||
+      !identical(sort(target_risks$residual_key_sha256, method = "radix"),
+                 expected_keys)) {
+    stop("merged target risk key set mismatch", call. = FALSE)
+  }
+  target_risks <- target_risks[
+    order(target_risks$residual_key_sha256, method = "radix"), , drop = FALSE
+  ]
+  rownames(target_risks) <- NULL
+  risk_index <- match(target_fits$residual_key_sha256,
+                      target_risks$residual_key_sha256)
+  if (anyNA(risk_index) ||
+      any(target_risks$case_type[risk_index] != "target_key") ||
+      !identical(as.character(target_fits$same_S_group_id),
+                 as.character(target_risks$same_S_group_id[risk_index]))) {
+    stop("merged target/risk lineage mismatch", call. = FALSE)
+  }
   risk_cases <- fastkpc_full_cuda_census_risk_cases(
     target_risks = target_risks,
     logical_tests = context$logical_tests
@@ -2331,8 +2569,10 @@ fastkpc_full_cuda_census_merge_shards <- function(
   )
   list(
     assigned_requests = assigned,
+    setup_observation_metadata = setup_observations,
     same_s_setup_metadata = same_s_setups,
     target_fit_metadata = target_fits,
+    target_risk_metadata = target_risks,
     risk_cases = risk_cases,
     field_coverage = coverage,
     required_field_coverage_complete = coverage_complete
@@ -2340,7 +2580,7 @@ fastkpc_full_cuda_census_merge_shards <- function(
 }
 
 fastkpc_full_cuda_census_metadata_schema_version <- function() {
-  "full-cuda-ci-metadata-v1"
+  "full-cuda-ci-metadata-v2"
 }
 
 fastkpc_full_cuda_census_hash_schema_versions <- function() {
@@ -2631,59 +2871,200 @@ fastkpc_full_cuda_census_near_alpha_tests <- function(logical_tests) {
 
 fastkpc_full_cuda_census_metadata_gate <- function(
     merged, selected_requests) {
-  selected_keys <- sort(selected_requests$residual_key_sha256,
-                        method = "radix")
+  selected_requests <- as.data.frame(selected_requests,
+                                     stringsAsFactors = FALSE)
+  selected_requests <- selected_requests[order(
+    selected_requests$residual_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  rownames(selected_requests) <- NULL
+  selected_keys <- selected_requests$residual_key_sha256
   target <- merged$target_fit_metadata
   setup <- merged$same_s_setup_metadata
-  risks <- merged$risk_cases
-  fit_error_count <- sum(target$fit_status != "success")
+  setup_observations <- merged$setup_observation_metadata
+  target_risks <- merged$target_risk_metadata
+  if (is.null(setup_observations)) setup_observations <- data.frame()
+  if (is.null(target_risks)) target_risks <- data.frame()
+  fit_status <- as.character(target$fit_status)
+  fit_error_count <- sum(is.na(fit_status) | fit_status != "success")
   exact_key_set <- identical(target$residual_key_sha256, selected_keys)
-  expected_group_count <- length(unique(selected_requests$same_S_group_id))
-  exact_group_count <- nrow(setup) == expected_group_count
-  coverage_complete <- all(
-    merged$field_coverage$coverage_ratio[
-      merged$field_coverage$required
-    ] == 1
-  )
+  request_index <- match(target$residual_key_sha256,
+                         selected_requests$residual_key_sha256)
+  request_lineage_mismatch_count <- if (anyNA(request_index)) {
+    nrow(target)
+  } else {
+    mismatch <- as.character(target$same_S_group_id) != as.character(
+      selected_requests$same_S_group_id[request_index]
+    ) | as.integer(target$target) != as.integer(
+      selected_requests$target[request_index]
+    )
+    if (anyNA(mismatch)) nrow(target) else sum(mismatch)
+  }
+  exact_request_lineage <- request_lineage_mismatch_count == 0L
+
+  expected_groups <- sort(unique(selected_requests$same_S_group_id),
+                          method = "radix")
+  actual_groups <- sort(unique(setup$same_S_group_id), method = "radix")
+  expected_group_count <- length(expected_groups)
+  exact_group_count <- nrow(setup) == expected_group_count &&
+    !anyNA(setup$same_S_group_id) &&
+    identical(actual_groups, expected_groups)
+  required_coverage <- merged$field_coverage$coverage_ratio[
+    merged$field_coverage$required
+  ]
+  coverage_complete <- length(required_coverage) > 0L &&
+    all(is.finite(required_coverage) & required_coverage == 1)
+
+  risk_keys <- if ("residual_key_sha256" %in% names(target_risks)) {
+    as.character(target_risks$residual_key_sha256)
+  } else character()
+  target_risk_key_mismatch_count <- length(union(
+    setdiff(selected_keys, risk_keys), setdiff(risk_keys, selected_keys)
+  ))
+  exact_target_risk_key_set <- target_risk_key_mismatch_count == 0L &&
+    !anyNA(risk_keys) && !anyDuplicated(risk_keys)
+  risk_index <- match(target$residual_key_sha256, risk_keys)
+  risk_lineage_mismatch_count <- if (
+      anyNA(risk_index) ||
+      !all(c("case_type", "same_S_group_id") %in% names(target_risks))) {
+    nrow(target)
+  } else {
+    mismatch <- target_risks$case_type[risk_index] != "target_key" |
+      as.character(target$same_S_group_id) != as.character(
+        target_risks$same_S_group_id[risk_index]
+      )
+    if (anyNA(mismatch)) nrow(target) else sum(mismatch)
+  }
+  exact_target_risk_lineage <- risk_lineage_mismatch_count == 0L
+
+  successful <- !is.na(fit_status) & fit_status == "success"
+  successful_keys <- target$residual_key_sha256[successful]
+  setup_observation_keys <- if (
+      "representative_residual_key_sha256" %in% names(setup_observations)) {
+    as.character(setup_observations$representative_residual_key_sha256)
+  } else character()
+  setup_observation_key_mismatch_count <- length(union(
+    setdiff(successful_keys, setup_observation_keys),
+    setdiff(setup_observation_keys, successful_keys)
+  ))
+  exact_setup_observation_key_set <-
+    setup_observation_key_mismatch_count == 0L &&
+    !anyNA(setup_observation_keys) && !anyDuplicated(setup_observation_keys)
+  observation_index <- match(successful_keys, setup_observation_keys)
+  compressed_setup_index <- match(target$same_S_group_id[successful],
+                                  setup$same_S_group_id)
+  target_setup_lineage_mismatch_count <- if (
+      anyNA(observation_index) || anyNA(compressed_setup_index) ||
+      !all(c("same_S_group_id", "setup_fingerprint") %in%
+           names(setup_observations))) {
+    length(successful_keys)
+  } else {
+    mismatch <-
+      as.character(target$same_S_group_id[successful]) != as.character(
+        setup_observations$same_S_group_id[observation_index]
+      ) |
+      as.character(target$setup_fingerprint[successful]) != as.character(
+        setup_observations$setup_fingerprint[observation_index]
+      ) |
+      as.character(target$setup_fingerprint[successful]) != as.character(
+        setup$setup_fingerprint[compressed_setup_index]
+      )
+    if (anyNA(mismatch)) length(successful_keys) else sum(mismatch)
+  }
+  exact_target_setup_lineage <-
+    target_setup_lineage_mismatch_count == 0L
+
   warning_keys <- target$residual_key_sha256[vapply(
     target$warning_classes, function(value) length(value) > 0L, logical(1L)
   )]
-  classified_warning_keys <- risks$residual_key_sha256[
-    risks$case_type == "target_key" & risks$mgcv_warning
-  ]
+  classified_warning_keys <- if (
+      all(c("residual_key_sha256", "mgcv_warning") %in%
+          names(target_risks))) {
+    target_risks$residual_key_sha256[target_risks$mgcv_warning %in% TRUE]
+  } else character()
   unclassified_warning_count <- length(setdiff(
     warning_keys, classified_warning_keys
   ))
-  nonfinite_keys <- target$residual_key_sha256[vapply(
-    seq_len(nrow(target)), function(index) {
-      selected_sp <- target$selected_sp[[index]]
-      any(!is.finite(c(
-        selected_sp, target$GCV_Cp_score[[index]], target$EDF[[index]],
-        target$penalized_system_condition_at_selected_sp[[index]],
-        target$target_sd[[index]]
-      )))
-    }, logical(1L)
-  )]
-  classified_nonfinite_keys <- risks$residual_key_sha256[
-    risks$case_type == "target_key" & risks$nonfinite_metadata
-  ]
+  misclassified_warning_count <- length(setdiff(
+    classified_warning_keys, warning_keys
+  ))
+  exact_warning_classification <- unclassified_warning_count == 0L &&
+    misclassified_warning_count == 0L
+
+  target_nonfinite <- fastkpc_full_cuda_census_nonfinite_rows(
+    target, fastkpc_full_cuda_census_target_metadata_fields()
+  )
+  output_finite_fields <- c("coefficient_all_finite", "fitted_all_finite",
+                            "residual_all_finite")
+  if (!all(output_finite_fields %in% names(target))) {
+    target_nonfinite[] <- TRUE
+  } else {
+    target_nonfinite <- target_nonfinite |
+      !(target$coefficient_all_finite %in% TRUE) |
+      !(target$fitted_all_finite %in% TRUE) |
+      !(target$residual_all_finite %in% TRUE)
+  }
+  setup_nonfinite <- fastkpc_full_cuda_census_nonfinite_rows(
+    setup, fastkpc_full_cuda_census_setup_metadata_fields()
+  )
+  nonfinite_groups <- setup$same_S_group_id[setup_nonfinite]
+  nonfinite_keys <- unique(c(
+    target$residual_key_sha256[target_nonfinite],
+    target$residual_key_sha256[
+      target$same_S_group_id %in% nonfinite_groups
+    ]
+  ))
+  classified_nonfinite_keys <- if (
+      all(c("residual_key_sha256", "nonfinite_metadata") %in%
+          names(target_risks))) {
+    target_risks$residual_key_sha256[
+      target_risks$nonfinite_metadata %in% TRUE
+    ]
+  } else character()
   unclassified_nonfinite_count <- length(setdiff(
     nonfinite_keys, classified_nonfinite_keys
   ))
+  misclassified_nonfinite_count <- length(setdiff(
+    classified_nonfinite_keys, nonfinite_keys
+  ))
+  exact_nonfinite_classification <- unclassified_nonfinite_count == 0L &&
+    misclassified_nonfinite_count == 0L
+
   pass <- fit_error_count == 0L && exact_key_set && exact_group_count &&
-    coverage_complete && unclassified_warning_count == 0L &&
-    unclassified_nonfinite_count == 0L
+    exact_request_lineage && exact_target_risk_key_set &&
+    exact_target_risk_lineage && exact_setup_observation_key_set &&
+    exact_target_setup_lineage && coverage_complete &&
+    exact_warning_classification && exact_nonfinite_classification
   list(
     pass = pass,
     fit_error_count = as.integer(fit_error_count),
     exact_key_set = exact_key_set,
+    exact_request_lineage = exact_request_lineage,
+    request_lineage_mismatch_count =
+      as.integer(request_lineage_mismatch_count),
     expected_group_count = as.integer(expected_group_count),
     actual_group_count = as.integer(nrow(setup)),
     exact_group_count = exact_group_count,
+    exact_target_risk_key_set = exact_target_risk_key_set,
+    target_risk_key_mismatch_count =
+      as.integer(target_risk_key_mismatch_count),
+    exact_target_risk_lineage = exact_target_risk_lineage,
+    risk_lineage_mismatch_count =
+      as.integer(risk_lineage_mismatch_count),
+    exact_setup_observation_key_set = exact_setup_observation_key_set,
+    setup_observation_key_mismatch_count =
+      as.integer(setup_observation_key_mismatch_count),
+    exact_target_setup_lineage = exact_target_setup_lineage,
+    target_setup_lineage_mismatch_count =
+      as.integer(target_setup_lineage_mismatch_count),
     coverage_complete = coverage_complete,
+    exact_warning_classification = exact_warning_classification,
     unclassified_warning_count = as.integer(unclassified_warning_count),
+    misclassified_warning_count = as.integer(misclassified_warning_count),
+    exact_nonfinite_classification = exact_nonfinite_classification,
     unclassified_nonfinite_count =
-      as.integer(unclassified_nonfinite_count)
+      as.integer(unclassified_nonfinite_count),
+    misclassified_nonfinite_count =
+      as.integer(misclassified_nonfinite_count)
   )
 }
 
@@ -2767,12 +3148,15 @@ fastkpc_full_cuda_census_write_artifact <- function(
                      row.names = FALSE)
   }
   metadata_available <- is.list(merged) &&
-    all(c("same_s_setup_metadata", "target_fit_metadata", "risk_cases",
+    all(c("setup_observation_metadata", "same_s_setup_metadata",
+          "target_fit_metadata", "target_risk_metadata", "risk_cases",
           "field_coverage") %in% names(merged))
   if (!metadata_available) {
     merged <- list(
+      setup_observation_metadata = data.frame(),
       same_s_setup_metadata = data.frame(),
       target_fit_metadata = data.frame(),
+      target_risk_metadata = data.frame(),
       risk_cases = data.frame(),
       field_coverage = data.frame(
         table = character(), field = character(), total = integer(),
@@ -2836,25 +3220,49 @@ fastkpc_full_cuda_census_write_artifact <- function(
       pass = TRUE,
       fit_error_count = 0L,
       exact_key_set = NA,
+      exact_request_lineage = NA,
+      request_lineage_mismatch_count = 0L,
       expected_group_count = 0L,
       actual_group_count = 0L,
       exact_group_count = NA,
+      exact_target_risk_key_set = NA,
+      target_risk_key_mismatch_count = 0L,
+      exact_target_risk_lineage = NA,
+      risk_lineage_mismatch_count = 0L,
+      exact_setup_observation_key_set = NA,
+      setup_observation_key_mismatch_count = 0L,
+      exact_target_setup_lineage = NA,
+      target_setup_lineage_mismatch_count = 0L,
       coverage_complete = NA,
+      exact_warning_classification = NA,
       unclassified_warning_count = 0L,
-      unclassified_nonfinite_count = 0L
+      misclassified_warning_count = 0L,
+      exact_nonfinite_classification = NA,
+      unclassified_nonfinite_count = 0L,
+      misclassified_nonfinite_count = 0L
     )
   }
   unsupported <- data.frame(
     metric = c(
-      "fit_error_count", "unclassified_warning_count",
-      "unclassified_nonfinite_count", "unknown_fallback_count",
-      "approximate_backend_count"
+      "fit_error_count", "request_lineage_mismatch_count",
+      "target_risk_key_mismatch_count", "risk_lineage_mismatch_count",
+      "setup_observation_key_mismatch_count",
+      "target_setup_lineage_mismatch_count",
+      "unclassified_warning_count", "misclassified_warning_count",
+      "unclassified_nonfinite_count", "misclassified_nonfinite_count",
+      "unknown_fallback_count", "approximate_backend_count"
     ),
     count = c(
-      gate$fit_error_count, gate$unclassified_warning_count,
-      gate$unclassified_nonfinite_count, 0L, 0L
+      gate$fit_error_count, gate$request_lineage_mismatch_count,
+      gate$target_risk_key_mismatch_count,
+      gate$risk_lineage_mismatch_count,
+      gate$setup_observation_key_mismatch_count,
+      gate$target_setup_lineage_mismatch_count,
+      gate$unclassified_warning_count, gate$misclassified_warning_count,
+      gate$unclassified_nonfinite_count,
+      gate$misclassified_nonfinite_count, 0L, 0L
     ),
-    supported = c(FALSE, FALSE, FALSE, FALSE, FALSE),
+    supported = rep(FALSE, 12L),
     stringsAsFactors = FALSE
   )
   utils::write.csv(counts_by_s, paths$counts_by_s_size_csv,
@@ -3033,6 +3441,12 @@ fastkpc_full_cuda_census_write_artifact <- function(
     target_fit_metadata_rows = as.integer(
       nrow(merged$target_fit_metadata)
     ),
+    setup_observation_metadata_rows = as.integer(
+      nrow(merged$setup_observation_metadata)
+    ),
+    target_risk_metadata_rows = as.integer(
+      nrow(merged$target_risk_metadata)
+    ),
     mgcv_fit_error_count = gate$fit_error_count,
     same_s_invariant_violation_count = 0L,
     required_field_coverage = if (metadata_available) {
@@ -3050,9 +3464,19 @@ fastkpc_full_cuda_census_write_artifact <- function(
     fit_error_count = gate$fit_error_count,
     required_field_coverage_complete = gate$coverage_complete,
     exact_selected_key_set = gate$exact_key_set,
+    exact_target_request_lineage = gate$exact_request_lineage,
     exact_selected_same_S_group_count = gate$exact_group_count,
+    exact_target_risk_key_set = gate$exact_target_risk_key_set,
+    exact_target_risk_lineage = gate$exact_target_risk_lineage,
+    exact_setup_observation_key_set =
+      gate$exact_setup_observation_key_set,
+    exact_target_setup_lineage = gate$exact_target_setup_lineage,
+    exact_warning_classification = gate$exact_warning_classification,
     unclassified_warning_count = gate$unclassified_warning_count,
+    misclassified_warning_count = gate$misclassified_warning_count,
+    exact_nonfinite_classification = gate$exact_nonfinite_classification,
     unclassified_nonfinite_count = gate$unclassified_nonfinite_count,
+    misclassified_nonfinite_count = gate$misclassified_nonfinite_count,
     parity_pass = parity_pass,
     oracle_inherited_graph_gate =
       structural$oracle_inherited_graph_gate,

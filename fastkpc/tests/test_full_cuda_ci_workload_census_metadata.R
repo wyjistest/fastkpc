@@ -181,7 +181,8 @@ required_target_fields <- c(
   "method", "optimizer", "family", "link", "selected_sp",
   "selected_sp_names", "selected_sp_hash", "GCV_Cp_score", "EDF",
   "convergence_fields", "warning_classes", "warning_messages",
-  "coefficient_rank", "penalized_system_condition_at_selected_sp",
+  "coefficient_rank", "coefficient_all_finite", "fitted_all_finite",
+  "residual_all_finite", "penalized_system_condition_at_selected_sp",
   "target_sd", "target_near_constant", "coefficient_hash",
   "fitted_hash", "residual_hash", "target_fit_fingerprint"
 )
@@ -191,7 +192,10 @@ assert_true(identical(names(target_fits), required_target_fields),
             "target fits must expose the approved schema")
 assert_true(all(target_fits$fit_status == "success") &&
               all(is.finite(target_fits$fit_time_ms)) &&
-              all(target_fits$fit_time_ms >= 0),
+              all(target_fits$fit_time_ms >= 0) &&
+              all(target_fits$coefficient_all_finite) &&
+              all(target_fits$fitted_all_finite) &&
+              all(target_fits$residual_all_finite),
             "successful target rows must retain fit status and timing")
 assert_true(all(vapply(target_fits$selected_sp, function(value) {
   is.numeric(value) && length(value) > 0L && all(is.finite(value))

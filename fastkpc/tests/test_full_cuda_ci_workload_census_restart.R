@@ -64,7 +64,7 @@ context <- list(
   mgcv_semantics_version = "legacy-mgcv-gam-default-selection-v1",
   risk_threshold_config_hash =
     fastkpc_full_cuda_census_metadata_hash(risk_config),
-  metadata_schema_version = "full-cuda-ci-metadata-v1",
+  metadata_schema_version = fastkpc_full_cuda_census_metadata_schema_version(),
   data = matrix(0, nrow = 2L, ncol = 2L),
   risk_config = risk_config,
   logical_tests = data.frame(
@@ -195,6 +195,9 @@ fixture_target <- function(request_row, setup) {
     warning_classes = I(list(list())),
     warning_messages = I(list(character())),
     coefficient_rank = 2L,
+    coefficient_all_finite = TRUE,
+    fitted_all_finite = TRUE,
+    residual_all_finite = TRUE,
     penalized_system_condition_at_selected_sp = 1,
     target_sd = 1,
     target_near_constant = FALSE,
@@ -240,6 +243,49 @@ fixture_fit <- function(data, request_row, risk_config) {
   )
   list(setup_observation = setup, target_fit = target, risk_cases = risk)
 }
+
+wrong_risk_fit <- function(data, request_row, risk_config) {
+  value <- fixture_fit(data, request_row, risk_config)
+  value$risk_cases$residual_key_sha256[[1L]] <- hex64(999L)
+  value
+}
+assert_error(
+  fastkpc_full_cuda_census_run_shard(
+    assigned, 0L, context, tempfile("full-cuda-ci-wrong-risk-key-"),
+    fit_fun = wrong_risk_fit
+  ),
+  "fit_fun returned the wrong risk residual key",
+  "shard execution must reject a risk row joined to another key"
+)
+
+missing_setup_fit <- function(data, request_row, risk_config) {
+  value <- fixture_fit(data, request_row, risk_config)
+  value$setup_observation <- NULL
+  value
+}
+assert_error(
+  fastkpc_full_cuda_census_run_shard(
+    assigned, 0L, context, tempfile("full-cuda-ci-missing-setup-"),
+    fit_fun = missing_setup_fit
+  ),
+  "successful fit is missing its setup observation",
+  "successful target rows must retain one setup observation"
+)
+
+wrong_setup_fit <- function(data, request_row, risk_config) {
+  value <- fixture_fit(data, request_row, risk_config)
+  value$setup_observation$setup_fingerprint[[1L]] <- hex64(998L)
+  value
+}
+assert_error(
+  fastkpc_full_cuda_census_run_shard(
+    assigned, 0L, context, tempfile("full-cuda-ci-wrong-setup-"),
+    fit_fun = wrong_setup_fit
+  ),
+  "fit_fun target/setup lineage mismatch",
+  "target rows must reference the setup observation from the same key"
+)
+fit_calls$count <- 0L
 
 sparse_calls_before <- fit_calls$count
 sparse_empty <- fastkpc_full_cuda_census_run_shard(
@@ -387,10 +433,64 @@ assert_true(identical(merged$target_fit_metadata$residual_key_sha256,
                       sorted_keys) &&
               nrow(merged$target_fit_metadata) == 12L &&
               nrow(merged$same_s_setup_metadata) == 6L &&
+              nrow(merged$target_risk_metadata) == 12L &&
               all(merged$field_coverage$coverage_ratio[
                 merged$field_coverage$required
               ] == 1),
-            "merge must be deterministic and retain exact keys and setups")
+            "merge must retain exact target, setup, and risk lineage")
+
+valid_gate <- fastkpc_full_cuda_census_metadata_gate(merged, requests)
+assert_true(isTRUE(valid_gate$pass) &&
+              isTRUE(valid_gate$exact_target_risk_key_set) &&
+              isTRUE(valid_gate$exact_setup_observation_key_set) &&
+              isTRUE(valid_gate$exact_target_setup_lineage),
+            "metadata gate must expose exact per-request lineage")
+
+missing_risk <- merged
+missing_risk$target_risk_metadata <-
+  missing_risk$target_risk_metadata[-1L, , drop = FALSE]
+missing_risk_gate <- fastkpc_full_cuda_census_metadata_gate(
+  missing_risk, requests
+)
+assert_true(!isTRUE(missing_risk_gate$pass) &&
+              !isTRUE(missing_risk_gate$exact_target_risk_key_set),
+            "metadata gate must reject an omitted target risk row")
+
+wrong_lineage <- merged
+wrong_lineage$target_fit_metadata$setup_fingerprint[[1L]] <- hex64(997L)
+wrong_lineage_gate <- fastkpc_full_cuda_census_metadata_gate(
+  wrong_lineage, requests
+)
+assert_true(!isTRUE(wrong_lineage_gate$pass) &&
+              !isTRUE(wrong_lineage_gate$exact_target_setup_lineage),
+            "metadata gate must reject a target joined to another setup")
+
+nonfinite_fit_time <- merged
+nonfinite_fit_time$target_fit_metadata$fit_time_ms[[1L]] <- Inf
+nonfinite_fit_time_gate <- fastkpc_full_cuda_census_metadata_gate(
+  nonfinite_fit_time, requests
+)
+assert_true(!isTRUE(nonfinite_fit_time_gate$pass) &&
+              nonfinite_fit_time_gate$unclassified_nonfinite_count == 1L,
+            "non-finite fit timing must be classified or fail closed")
+
+nonfinite_output <- merged
+nonfinite_output$target_fit_metadata$residual_all_finite[[1L]] <- FALSE
+nonfinite_output_gate <- fastkpc_full_cuda_census_metadata_gate(
+  nonfinite_output, requests
+)
+assert_true(!isTRUE(nonfinite_output_gate$pass) &&
+              nonfinite_output_gate$unclassified_nonfinite_count == 1L,
+            "non-finite residual output evidence must fail closed")
+
+nonfinite_setup <- merged
+nonfinite_setup$same_s_setup_metadata$model_matrix_condition[[1L]] <- Inf
+nonfinite_setup_gate <- fastkpc_full_cuda_census_metadata_gate(
+  nonfinite_setup, requests
+)
+assert_true(!isTRUE(nonfinite_setup_gate$pass) &&
+              nonfinite_setup_gate$unclassified_nonfinite_count > 0L,
+            "non-finite setup diagnostics must be classified or fail closed")
 
 error_requests <- requests[1:2, , drop = FALSE]
 error_assigned <- fastkpc_full_cuda_census_assign_shards(error_requests, 1L)
@@ -505,6 +605,32 @@ assert_error(
 )
 assert_true(file.copy(one_rds_backup, shard_one$rds, overwrite = TRUE),
             "test fixture must restore the duplicate-key shard")
+
+wrong_risk_payload <- readRDS(shard_one$rds)
+wrong_risk_payload$target_risks$residual_key_sha256[[1L]] <- hex64(996L)
+saveRDS(wrong_risk_payload, shard_one$rds, version = 2)
+assert_error(
+  fastkpc_full_cuda_census_merge_shards(
+    requests, shard_count, context, output_dir
+  ),
+  "shard risk key set mismatch",
+  "merge must reject a persisted risk row joined to another key"
+)
+assert_true(file.copy(one_rds_backup, shard_one$rds, overwrite = TRUE),
+            "test fixture must restore the wrong-risk shard")
+
+wrong_setup_payload <- readRDS(shard_one$rds)
+wrong_setup_payload$setup_observations$setup_fingerprint[[1L]] <- hex64(995L)
+saveRDS(wrong_setup_payload, shard_one$rds, version = 2)
+assert_error(
+  fastkpc_full_cuda_census_merge_shards(
+    requests, shard_count, context, output_dir
+  ),
+  "shard target/setup lineage mismatch",
+  "merge must reject persisted target/setup fingerprint drift"
+)
+assert_true(file.copy(one_rds_backup, shard_one$rds, overwrite = TRUE),
+            "test fixture must restore the wrong-setup shard")
 unlink(c(one_rds_backup, one_json_backup))
 
 cat("PASS full CUDA CI census restart qualification\n")
