@@ -602,7 +602,7 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | Phase | Name | Initial status |
 |---|---|---|
 | 0 | Freeze oracle and zero-SHD comparator | COMPLETE — standardized oracle and first-divergence gate pass |
-| 1 | Full workload and risk census | PARTIAL — counts/sample traces exist; full trace required |
+| 1 | Full workload and risk census | COMPLETE - full 110,617-key metadata artifact passes all gates |
 | 2 | Response-independent GAM setup contract | PARTIAL — extraction/retarget helpers exist |
 | 3 | Persistent stable fixed-sp CUDA residual runtime | PARTIAL — prototype solve exists |
 | 4 | Full-CUDA single-penalty GCV for `|S|<=2` | PARTIAL — CPU spectral selection exists |
@@ -780,6 +780,60 @@ Turn the full canonical run into a complete implementation specification, not an
 ```text
 fastkpc/artifacts/full_cuda_ci/workload_census_351x48_v1/
 ```
+
+### Completion evidence (2026-07-10)
+
+```text
+status                                  = COMPLETE
+artifact source commit                  = 0d02dffe089dd40724be74beb0c167aa1d4d1699
+artifact manifest SHA-256               = 95e9af9373a59952fddc04693f5976456e91771a6250b5981678e8073edaf124
+artifact summary SHA-256                = db1c6e6625b3f83c00c7807c95e02bb325641d2463509f6793ff0108edfd9d55
+oracle input bundle SHA-256             = 7700bc78240984c36f8ae5ca281362a0afb8d7dedd34a5711ce4ab76a2ebee0e
+canonical key corpus SHA-256            = b843630969f116da63f7fad095c54de2ff471540159ff97ca56c3871d6b2e1fa
+
+logical tests                           = 240,489
+conditional logical tests               = 238,276
+conditional residual requests           = 476,552
+canonical conditional target|S keys     = 110,617
+nonempty same-S groups                  = 8,634
+same-S setup metadata rows              = 8,634
+target-fit metadata rows                = 110,617
+
+mgcv fit errors                         = 0
+same-S invariant violations             = 0
+required field coverage                 = 100%
+legacy two-target layout parity          = exact
+all target fit_status values             = success
+unclassified warnings/nonfinite values  = 0 / 0
+oracle inherited graph gate             = TRUE
+new candidate graph gate                = NOT_APPLICABLE
+
+requested/actual workers                = 20 / 20
+completed shards                        = 64 / 64
+executed keys                           = 110,617
+internal elapsed                        = 596.796 sec
+external wall                           = 597.47 sec
+maximum RSS                             = 1,890,772 KiB
+artifact size                           = 446,402,243 bytes (425.7 MiB)
+metadata shards / merge / artifact      = 406.008 / 26.822 / 125.427 sec
+```
+
+The risk corpus contains 68,204 rows; flags overlap:
+
+```text
+high penalized-system condition         = 33,249
+rank-deficient / infinite condition     = 1,162
+multi-penalty                           = 65,676
+near-alpha logical tests                = 1,529
+mgcv.conv not fully converged           = 980
+mgcv warnings                           = 0
+near-constant targets/conditioners      = 0 / 0
+```
+
+All 1,162 non-finite penalized-system conditions are classified and coincide
+with rank-deficient cases. Every authoritative fit still reports
+`fit_status=success` and `fit$converged=TRUE`. The historical S-affinity count
+of `273,284` remains a provenance-only route metric and is not a Phase 1 gate.
 
 ### Record every logical CI test
 
@@ -2217,16 +2271,18 @@ first-divergence reporting are hard-gate fields.
 
 ### Task 3
 
-Active next task: complete Phase 1 in six gated stages from the unchanged
-correct baseline: structural census, legacy-layout parity subset, setup/fit
-schema split, shard/restart qualification, scaled dry runs, and finally the
-complete 110,617-key mgcv census.
+Complete: Phase 1 produced the full 110,617-key mgcv workload/risk census with
+8,634 same-S setup rows, zero fit errors, exact legacy-layout parity, complete
+field coverage, deterministic 64-shard closure, and inherited SHD 0 evidence.
 
 ### Task 4
 
-Only after Tasks 1–3 pass, start Phase 2/3 refactoring of `PreparedSSetup` and persistent fixed-sp CUDA resources.
+Active next task: start Phase 2 by freezing the response-independent
+`PreparedSSetup` contract and target-retarget parity corpus from the completed
+Phase 1 artifact. Phase 3 persistent fixed-sp CUDA resources follow that gate.
 
-The current CUDA Spectra projection primitive remains useful substrate for Phase 8, but it is not the immediate critical path while the GAM CI contract and full zero-SHD gate are incomplete.
+The current CUDA Spectra projection primitive remains useful substrate for
+Phase 8, but the immediate critical path is now the Phase 2 GAM setup contract.
 
 ---
 
