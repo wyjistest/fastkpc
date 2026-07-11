@@ -3567,3 +3567,639 @@ fastkpc_full_cuda_materialize_target_state <- function(
   )
   list(row = state_row, y = y)
 }
+
+fastkpc_full_cuda_prepared_s_adapter_setup_row <- function(setup) {
+  expected_fields <- fastkpc_full_cuda_prepared_s_setup_field_names()
+  if (!is.list(setup) || !identical(names(setup), expected_fields)) {
+    stop("PreparedSSetup schema field mismatch", call. = FALSE)
+  }
+  penalty_dimensions <- unname(vapply(
+    setup$penalty_blocks,
+    function(block) paste(dim(block), collapse = "x"),
+    character(1L)
+  ))
+  penalty_hashes <- unname(vapply(
+    setup$penalty_blocks,
+    fastkpc_full_cuda_census_metadata_hash,
+    character(1L)
+  ))
+  constraint_dimensions <- unname(as.integer(dim(setup$constraint)))
+  constraint_hash <- fastkpc_full_cuda_census_metadata_hash(
+    setup$constraint
+  )
+  H_dimensions <- if (is.null(setup$H)) {
+    integer()
+  } else {
+    unname(as.integer(dim(setup$H)))
+  }
+  H_hash <- if (is.null(setup$H)) {
+    "NONE"
+  } else {
+    fastkpc_full_cuda_census_metadata_hash(setup$H)
+  }
+  row <- data.frame(
+    same_S_group_id = as.character(setup$same_S_group_id),
+    S_key = paste(as.integer(setup$sorted_S), collapse = "|"),
+    S_size = as.integer(length(setup$sorted_S)),
+    formula_class = as.character(setup$formula_class),
+    formula_semantics_version = as.character(
+      setup$formula_semantics_version
+    ),
+    model_matrix_nrow = as.integer(nrow(setup$X)),
+    model_matrix_ncol = as.integer(ncol(setup$X)),
+    model_matrix_hash = as.character(setup$phase1_model_matrix_hash),
+    model_matrix_rank = as.integer(setup$model_matrix_rank),
+    model_matrix_condition = as.numeric(setup$model_matrix_condition),
+    penalty_count = as.integer(length(setup$penalty_blocks)),
+    penalty_nullity = as.integer(setup$penalty_nullity),
+    constraint_rank = as.integer(setup$constraint_rank),
+    constraint_nullspace_dimension = as.integer(
+      setup$constraint_nullspace_dimension
+    ),
+    constraint_hash = as.character(constraint_hash),
+    H_hash = as.character(H_hash),
+    weights_policy = if (is.null(setup$weights)) {
+      "none"
+    } else {
+      as.character(setup$weights_policy)
+    },
+    offset_policy = if (is.null(setup$offset)) {
+      "none"
+    } else {
+      as.character(setup$offset_policy)
+    },
+    conditioning_rank = as.integer(setup$conditioning_rank),
+    conditioning_condition = as.numeric(setup$conditioning_condition),
+    setup_fingerprint = as.character(setup$phase1_setup_fingerprint),
+    mgcv_version = as.character(setup$mgcv_version),
+    R_version = as.character(setup$R_version),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  row$penalty_block_dimensions <- I(list(penalty_dimensions))
+  row$penalty_ranks <- I(list(unname(as.integer(setup$penalty_ranks))))
+  row$penalty_offsets <- I(list(unname(as.integer(setup$penalty_offsets))))
+  row$penalty_hashes <- I(list(penalty_hashes))
+  row$constraint_dimensions <- I(list(constraint_dimensions))
+  row$H_dimensions <- I(list(H_dimensions))
+  row$smooth_classes <- I(list(unname(as.character(
+    setup$smooth_classes
+  ))))
+  row$basis_dimensions <- I(list(unname(as.integer(
+    setup$basis_dimensions
+  ))))
+  row
+}
+
+fastkpc_full_cuda_validate_prepared_s_for_adapter <- function(setup) {
+  setup_row <- fastkpc_full_cuda_prepared_s_adapter_setup_row(setup)
+  fastkpc_full_cuda_validate_prepared_s_setup(
+    setup = setup,
+    setup_row = setup_row,
+    dataset_sha256 = setup$dataset_sha256
+  )
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_prepared_s_payload_integer <- function(payload, field) {
+  if (!is.character(payload) || length(payload) != 1L || is.na(payload) ||
+      !endsWith(payload, "\n")) {
+    stop("TargetState residual key serialization mismatch", call. = FALSE)
+  }
+  lines <- strsplit(
+    substring(payload, 1L, nchar(payload) - 1L),
+    "\n", fixed = TRUE
+  )[[1L]]
+  prefix <- paste0(field, "=")
+  matches <- lines[startsWith(lines, prefix)]
+  if (length(matches) != 1L) {
+    stop("TargetState residual key serialization mismatch", call. = FALSE)
+  }
+  text <- substring(matches, nchar(prefix) + 1L)
+  value <- suppressWarnings(as.integer(text))
+  if (length(value) != 1L || is.na(value) || value < 1L ||
+      !identical(text, as.character(value))) {
+    stop("TargetState residual key serialization mismatch", call. = FALSE)
+  }
+  value
+}
+
+fastkpc_full_cuda_validate_target_state_row_for_prepared <- function(
+    prepared_setup, state_row) {
+  expected_fields <- fastkpc_full_cuda_target_state_field_names()
+  fastkpc_full_cuda_target_state_require(
+    is.data.frame(state_row) && nrow(state_row) == 1L &&
+      identical(names(state_row), expected_fields),
+    "TargetState schema fields mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(
+      state_row$schema_version[[1L]],
+      fastkpc_full_cuda_target_state_schema_version()
+    ),
+    "TargetState schema version mismatch"
+  )
+  list_fields <- c(
+    "y_source", "projected_rhs", "nullspace_projected_rhs",
+    "selected_sp", "selected_sp_names", "convergence_fields",
+    "warning_classes", "warning_messages"
+  )
+  fastkpc_full_cuda_target_state_require(
+    all(vapply(state_row[list_fields], is.list, logical(1L))),
+    "TargetState list-column schema mismatch"
+  )
+  hash_fields <- c(
+    "residual_key_sha256", "prepared_s_key_sha256",
+    "same_S_group_id", "phase1_setup_fingerprint", "y_hash",
+    "selected_sp_hash", "coefficient_hash", "fitted_hash",
+    "residual_hash", "target_fit_fingerprint",
+    "target_state_fingerprint"
+  )
+  fastkpc_full_cuda_target_state_require(
+    all(vapply(state_row[hash_fields], function(value) {
+      is.character(value) && length(value) == 1L &&
+        fastkpc_full_cuda_prepared_s_is_sha256(value[[1L]])
+    }, logical(1L))),
+    "TargetState hash field is invalid"
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(
+      state_row$target_state_fingerprint[[1L]],
+      fastkpc_full_cuda_target_state_fingerprint(state_row)
+    ),
+    "TargetState fingerprint mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(
+      state_row$prepared_s_key_sha256[[1L]],
+      prepared_setup$prepared_s_key_sha256
+    ),
+    "TargetState PreparedSKey mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(
+      state_row$same_S_group_id[[1L]],
+      prepared_setup$same_S_group_id
+    ),
+    "TargetState group lineage mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(
+      state_row$phase1_setup_fingerprint[[1L]],
+      prepared_setup$phase1_setup_fingerprint
+    ),
+    "TargetState setup lineage mismatch"
+  )
+
+  target <- state_row$target[[1L]]
+  fastkpc_full_cuda_target_state_require(
+    is.integer(target) && length(target) == 1L && !is.na(target) &&
+      target >= 1L,
+    "TargetState target index is invalid"
+  )
+  source <- state_row$y_source[[1L]]
+  fastkpc_full_cuda_target_state_require(
+    is.list(source) && is.null(attr(source, "class", exact = TRUE)) &&
+      identical(names(source), c("dataset_sha256", "target_column")) &&
+      identical(source$dataset_sha256, prepared_setup$dataset_sha256) &&
+      identical(source$target_column, target),
+    "TargetState y_source mismatch"
+  )
+
+  payload <- state_row$residual_key_payload[[1L]]
+  dataset_p <- fastkpc_full_cuda_prepared_s_payload_integer(payload, "p")
+  fastkpc_full_cuda_target_state_require(
+    dataset_p >= target &&
+      dataset_p >= max(as.integer(prepared_setup$sorted_S)),
+    "TargetState residual key serialization mismatch"
+  )
+  expected_payload <- fastkpc_full_cuda_census_residual_payload(
+    target = target,
+    S = prepared_setup$sorted_S,
+    formula_class = prepared_setup$formula_class,
+    data_hash = prepared_setup$dataset_sha256,
+    n = nrow(prepared_setup$X),
+    p = dataset_p
+  )
+  expected_key <- fastkpc_full_cuda_census_hash_utf8(expected_payload)
+  fastkpc_full_cuda_target_state_require(
+    identical(payload, expected_payload) &&
+      identical(state_row$residual_key_sha256[[1L]], expected_key),
+    "TargetState residual key serialization mismatch"
+  )
+  expected_group_id <- fastkpc_full_cuda_census_hash_utf8(
+    fastkpc_full_cuda_census_same_s_payload(
+      S = prepared_setup$sorted_S,
+      formula_class = prepared_setup$formula_class,
+      data_hash = prepared_setup$dataset_sha256,
+      n = nrow(prepared_setup$X),
+      p = dataset_p
+    )
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(expected_group_id, prepared_setup$same_S_group_id),
+    "TargetState group lineage mismatch"
+  )
+
+  selected_sp <- state_row$selected_sp[[1L]]
+  selected_sp_names <- state_row$selected_sp_names[[1L]]
+  penalty_count <- length(prepared_setup$penalty_blocks)
+  fastkpc_full_cuda_target_state_require(
+    is.numeric(selected_sp) && length(selected_sp) == penalty_count &&
+      all(is.finite(selected_sp)) && all(selected_sp > 0) &&
+      is.character(selected_sp_names) &&
+      length(selected_sp_names) == penalty_count &&
+      identical(
+        as.character(selected_sp_names),
+        as.character(prepared_setup$penalty_sp_labels)
+      ),
+    "TargetState selected sp is invalid"
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(
+      state_row$selected_sp_hash[[1L]],
+      fastkpc_full_cuda_census_metadata_hash(selected_sp)
+    ),
+    "TargetState selected sp hash mismatch"
+  )
+  projected_rhs <- state_row$projected_rhs[[1L]]
+  nullspace_projected_rhs <- state_row$nullspace_projected_rhs[[1L]]
+  fastkpc_full_cuda_target_state_require(
+    is.numeric(projected_rhs) &&
+      length(projected_rhs) == ncol(prepared_setup$X) &&
+      all(is.finite(projected_rhs)),
+    "TargetState projected RHS mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.numeric(nullspace_projected_rhs) &&
+      length(nullspace_projected_rhs) ==
+        prepared_setup$constraint_nullspace_dimension &&
+      all(is.finite(nullspace_projected_rhs)),
+    "TargetState nullspace projected RHS mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    is.numeric(state_row$GCV_Cp_score) &&
+      is.finite(state_row$GCV_Cp_score[[1L]]) &&
+      is.numeric(state_row$EDF) && is.finite(state_row$EDF[[1L]]) &&
+      is.integer(state_row$coefficient_rank) &&
+      is.finite(state_row$coefficient_rank[[1L]]),
+    "TargetState scalar metadata is invalid"
+  )
+  list(
+    row = state_row,
+    target = target,
+    source = source,
+    dataset_p = dataset_p,
+    sp = as.numeric(selected_sp),
+    projected_rhs = projected_rhs,
+    nullspace_projected_rhs = nullspace_projected_rhs
+  )
+}
+
+fastkpc_full_cuda_validate_materialized_target_for_prepared <- function(
+    prepared_setup, target_state) {
+  fastkpc_full_cuda_target_state_require(
+    is.list(target_state) &&
+      is.null(attr(target_state, "class", exact = TRUE)) &&
+      identical(names(target_state), c("row", "y")),
+    "materialized TargetState is malformed"
+  )
+  context <- fastkpc_full_cuda_validate_target_state_row_for_prepared(
+    prepared_setup, target_state$row
+  )
+  y <- target_state$y
+  fastkpc_full_cuda_target_state_require(
+    is.numeric(y) && is.null(attributes(y)),
+    "TargetState y must be numeric"
+  )
+  fastkpc_full_cuda_target_state_require(
+    length(y) == nrow(prepared_setup$X),
+    "TargetState y length mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    all(is.finite(y)),
+    "TargetState y must be finite"
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(
+      target_state$row$y_hash[[1L]],
+      fastkpc_full_cuda_census_metadata_hash(y)
+    ),
+    "TargetState y hash mismatch"
+  )
+  expected_projected <- if (is.null(prepared_setup$weights)) {
+    as.numeric(crossprod(prepared_setup$X, y))
+  } else {
+    as.numeric(crossprod(
+      prepared_setup$X, y * as.numeric(prepared_setup$weights)
+    ))
+  }
+  expected_null_projected <- if (identical(
+    prepared_setup$constraint_mode, "identity"
+  )) {
+    expected_projected
+  } else {
+    as.numeric(crossprod(
+      prepared_setup$constraint_nullspace, expected_projected
+    ))
+  }
+  fastkpc_full_cuda_target_state_require(
+    identical(context$projected_rhs, expected_projected),
+    "TargetState projected RHS mismatch"
+  )
+  fastkpc_full_cuda_target_state_require(
+    identical(context$nullspace_projected_rhs, expected_null_projected),
+    "TargetState nullspace projected RHS mismatch"
+  )
+  context$y <- y
+  context
+}
+
+fastkpc_mgcv_magic_fixed_sp_from_prepared <- function(
+    prepared_setup, target_state) {
+  fastkpc_full_cuda_validate_prepared_s_for_adapter(prepared_setup)
+  target <- fastkpc_full_cuda_validate_materialized_target_for_prepared(
+    prepared_setup, target_state
+  )
+  penalty_count <- length(prepared_setup$penalty_blocks)
+  minimal <- list(
+    G = list(
+      L = matrix(numeric(), nrow = penalty_count, ncol = 0L),
+      lsp0 = log(target$sp)
+    ),
+    X = prepared_setup$X,
+    y = target$y,
+    S = prepared_setup$penalty_blocks,
+    off = prepared_setup$penalty_offsets,
+    rank = prepared_setup$mgcv_penalty_rank_metadata,
+    H = prepared_setup$H,
+    C = prepared_setup$constraint,
+    w = prepared_setup$weights,
+    sp = target$sp,
+    setup_fingerprint = list(
+      schema_version = "prepared-s-fixed-sp-kernel-v1",
+      prepared_s_key_sha256 = prepared_setup$prepared_s_key_sha256,
+      semantic_fingerprint = prepared_setup$semantic_fingerprint,
+      representation_fingerprint =
+        prepared_setup$representation_fingerprint
+    )
+  )
+  beta <- fastkpc_mgcv_magic_kernel_fixed_sp_coefficients(
+    minimal, sp = target$sp
+  )
+  if (!is.numeric(beta) || length(beta) != ncol(prepared_setup$X) ||
+      any(!is.finite(beta))) {
+    stop("Prepared fixed-sp coefficients are invalid", call. = FALSE)
+  }
+  beta <- as.numeric(beta)
+  fitted <- as.numeric(prepared_setup$X %*% beta)
+  residuals <- as.numeric(target$y - fitted)
+  if (any(!is.finite(fitted)) || any(!is.finite(residuals))) {
+    stop("Prepared fixed-sp fitted values are invalid", call. = FALSE)
+  }
+  list(
+    backend_family = "mgcvExtractCPU",
+    mode = "prepared-s-fixed-sp-mgcv-reference",
+    solve_source = "mgcv-C-magic-from-prepared-s",
+    authoritative = TRUE,
+    coefficients = beta,
+    fitted = fitted,
+    residuals = residuals,
+    sp = target$sp,
+    prepared_s_key_sha256 = prepared_setup$prepared_s_key_sha256,
+    residual_key_sha256 = target$row$residual_key_sha256[[1L]]
+  )
+}
+
+fastkpc_full_cuda_prepared_s_semantic_angle_tolerance <- function(X) {
+  if (!is.matrix(X) || !is.numeric(X) || any(dim(X) == 0L) ||
+      any(!is.finite(X))) {
+    stop("semantic angle tolerance requires a finite nonempty matrix",
+         call. = FALSE)
+  }
+  64 * .Machine$double.eps * max(nrow(X), ncol(X))
+}
+
+fastkpc_full_cuda_prepared_s_column_space <- function(X) {
+  X <- fastkpc_full_cuda_prepared_s_matrix(X)
+  diagnostics <- fastkpc_full_cuda_census_svd_diagnostics(
+    X, expected_rank = ncol(X)
+  )
+  if (is.na(diagnostics$rank)) {
+    stop("semantic model matrix rank is unavailable", call. = FALSE)
+  }
+  if (diagnostics$rank == 0L) {
+    return(list(
+      rank = 0L,
+      basis = matrix(numeric(), nrow = nrow(X), ncol = 0L)
+    ))
+  }
+  decomposition <- La.svd(
+    X, nu = min(dim(X)), nv = 0L
+  )
+  list(
+    rank = diagnostics$rank,
+    basis = decomposition$u[, seq_len(diagnostics$rank), drop = FALSE]
+  )
+}
+
+fastkpc_full_cuda_prepared_s_max_principal_angle <- function(left, right) {
+  left <- fastkpc_full_cuda_prepared_s_matrix(left)
+  right <- fastkpc_full_cuda_prepared_s_matrix(right)
+  if (nrow(left) != nrow(right)) return(Inf)
+  if (identical(
+        fastkpc_full_cuda_census_metadata_hash(left),
+        fastkpc_full_cuda_census_metadata_hash(right)
+      )) {
+    return(0)
+  }
+  left_space <- fastkpc_full_cuda_prepared_s_column_space(left)
+  right_space <- fastkpc_full_cuda_prepared_s_column_space(right)
+  if (left_space$rank == 0L && right_space$rank == 0L) return(0)
+  if (left_space$rank == 0L || right_space$rank == 0L) return(pi / 2)
+  cosines <- La.svd(
+    crossprod(left_space$basis, right_space$basis),
+    nu = 0L, nv = 0L
+  )$d
+  cosines <- pmin(1, pmax(0, as.numeric(cosines)))
+  angles <- acos(cosines)
+  if (left_space$rank != right_space$rank) angles <- c(angles, pi / 2)
+  max(angles)
+}
+
+fastkpc_full_cuda_prepared_s_constraint_projector <- function(C, p) {
+  Z <- fastkpc_constraint_nullspace(C = C, p = p)
+  fastkpc_full_cuda_prepared_s_matrix(Z %*% t(Z))
+}
+
+fastkpc_full_cuda_compare_prepared_s_semantics <- function(
+    prepared_setup, reference_setup, solved_result, state_row) {
+  fastkpc_full_cuda_validate_prepared_s_for_adapter(prepared_setup)
+  state <- fastkpc_full_cuda_validate_target_state_row_for_prepared(
+    prepared_setup, state_row
+  )
+  required_reference <- c("X", "S", "off", "C", "rank", "H", "w", "sp")
+  if (!is.list(reference_setup) ||
+      length(setdiff(required_reference, names(reference_setup))) > 0L ||
+      !is.matrix(reference_setup$X) ||
+      !is.numeric(reference_setup$X) ||
+      any(!is.finite(reference_setup$X)) ||
+      nrow(reference_setup$X) != nrow(prepared_setup$X)) {
+    stop("reference setup is malformed", call. = FALSE)
+  }
+  expected_result_fields <- c(
+    "backend_family", "mode", "solve_source", "authoritative",
+    "coefficients", "fitted", "residuals", "sp",
+    "prepared_s_key_sha256", "residual_key_sha256"
+  )
+  if (!is.list(solved_result) ||
+      !identical(names(solved_result), expected_result_fields) ||
+      !identical(
+        solved_result$prepared_s_key_sha256,
+        prepared_setup$prepared_s_key_sha256
+      ) ||
+      !identical(
+        solved_result$residual_key_sha256,
+        state$row$residual_key_sha256[[1L]]
+      ) ||
+      !identical(as.numeric(solved_result$sp), state$sp) ||
+      !is.numeric(solved_result$coefficients) ||
+      length(solved_result$coefficients) != ncol(prepared_setup$X) ||
+      !is.numeric(solved_result$fitted) ||
+      length(solved_result$fitted) != nrow(prepared_setup$X) ||
+      !is.numeric(solved_result$residuals) ||
+      length(solved_result$residuals) != nrow(prepared_setup$X) ||
+      any(!is.finite(c(
+        solved_result$coefficients, solved_result$fitted,
+        solved_result$residuals, solved_result$sp
+      )))) {
+    stop("solved Prepared-S result is malformed", call. = FALSE)
+  }
+
+  prepared_X <- fastkpc_full_cuda_prepared_s_matrix(prepared_setup$X)
+  reference_X <- fastkpc_full_cuda_prepared_s_matrix(reference_setup$X)
+  prepared_model <- fastkpc_full_cuda_prepared_s_column_space(prepared_X)
+  reference_model <- fastkpc_full_cuda_prepared_s_column_space(reference_X)
+  model_matrix_hash_equal <- identical(
+    fastkpc_full_cuda_census_metadata_hash(prepared_X),
+    fastkpc_full_cuda_census_metadata_hash(reference_X)
+  )
+  model_matrix_rank_equal <- identical(
+    prepared_model$rank, reference_model$rank
+  )
+  semantic_angle_tolerance <-
+    fastkpc_full_cuda_prepared_s_semantic_angle_tolerance(prepared_X)
+  max_column_space_principal_angle <-
+    fastkpc_full_cuda_prepared_s_max_principal_angle(
+      prepared_X, reference_X
+    )
+
+  p <- ncol(prepared_X)
+  prepared_constraint_rank <- fastkpc_full_cuda_census_svd_diagnostics(
+    prepared_setup$constraint,
+    expected_rank = min(dim(prepared_setup$constraint))
+  )$rank
+  reference_C <- if (is.null(reference_setup$C) ||
+                     length(reference_setup$C) == 0L) {
+    matrix(numeric(), nrow = 0L, ncol = p)
+  } else {
+    fastkpc_full_cuda_prepared_s_matrix(reference_setup$C)
+  }
+  reference_constraint_rank <- fastkpc_full_cuda_census_svd_diagnostics(
+    reference_C, expected_rank = min(dim(reference_C))
+  )$rank
+  constraint_rank_equal <- identical(
+    prepared_constraint_rank, reference_constraint_rank
+  )
+  prepared_projector <-
+    fastkpc_full_cuda_prepared_s_constraint_projector(
+      prepared_setup$constraint, p
+    )
+  reference_projector <-
+    fastkpc_full_cuda_prepared_s_constraint_projector(reference_C, p)
+  constraint_projector_max_abs_diff <-
+    fastkpc_full_cuda_census_max_abs_diff(
+      prepared_projector, reference_projector
+    )
+  constraint_action_equal <- is.finite(
+    constraint_projector_max_abs_diff
+  ) && constraint_projector_max_abs_diff <= semantic_angle_tolerance
+
+  reference_sp <- fastkpc_validate_fixed_positive_sp(
+    reference_setup$sp,
+    expected_length = length(reference_setup$S)
+  )
+  prepared_penalty_hashes <- unname(vapply(
+    prepared_setup$penalty_blocks,
+    fastkpc_full_cuda_census_metadata_hash,
+    character(1L)
+  ))
+  reference_penalty_hashes <- unname(vapply(
+    reference_setup$S,
+    fastkpc_full_cuda_census_metadata_hash,
+    character(1L)
+  ))
+  prepared_penalty_action <- fastkpc_assemble_penalty(
+    p = p,
+    S = prepared_setup$penalty_blocks,
+    off = prepared_setup$penalty_offsets,
+    sp = state$sp,
+    H = prepared_setup$H
+  )
+  reference_penalty_action <- fastkpc_assemble_penalty(
+    p = ncol(reference_X),
+    S = reference_setup$S,
+    off = reference_setup$off,
+    sp = reference_sp,
+    H = reference_setup$H
+  )
+  penalty_order_equal <-
+    identical(length(prepared_setup$penalty_blocks),
+              length(reference_setup$S)) &&
+    identical(
+      as.integer(prepared_setup$penalty_offsets),
+      as.integer(reference_setup$off)
+    ) &&
+    identical(
+      as.integer(prepared_setup$mgcv_penalty_rank_metadata),
+      as.integer(reference_setup$rank)
+    ) &&
+    identical(prepared_penalty_hashes, reference_penalty_hashes) &&
+    identical(state$sp, as.numeric(reference_sp)) &&
+    identical(
+      fastkpc_full_cuda_census_metadata_hash(prepared_penalty_action),
+      fastkpc_full_cuda_census_metadata_hash(reference_penalty_action)
+    )
+
+  coefficient_hash_equal <- identical(
+    fastkpc_full_cuda_census_metadata_hash(solved_result$coefficients),
+    state$row$coefficient_hash[[1L]]
+  )
+  fitted_hash_equal <- identical(
+    fastkpc_full_cuda_census_metadata_hash(solved_result$fitted),
+    state$row$fitted_hash[[1L]]
+  )
+  residual_hash_equal <- identical(
+    fastkpc_full_cuda_census_metadata_hash(solved_result$residuals),
+    state$row$residual_hash[[1L]]
+  )
+  exact_behavior_gate <- coefficient_hash_equal &&
+    fitted_hash_equal && residual_hash_equal
+
+  list(
+    model_matrix_hash_equal = model_matrix_hash_equal,
+    model_matrix_rank_equal = model_matrix_rank_equal,
+    max_column_space_principal_angle =
+      max_column_space_principal_angle,
+    semantic_angle_tolerance = semantic_angle_tolerance,
+    constraint_rank_equal = constraint_rank_equal,
+    constraint_projector_max_abs_diff =
+      constraint_projector_max_abs_diff,
+    constraint_action_equal = constraint_action_equal,
+    penalty_order_equal = penalty_order_equal,
+    coefficient_hash_equal = coefficient_hash_equal,
+    fitted_hash_equal = fitted_hash_equal,
+    residual_hash_equal = residual_hash_equal,
+    exact_behavior_gate = exact_behavior_gate
+  )
+}
