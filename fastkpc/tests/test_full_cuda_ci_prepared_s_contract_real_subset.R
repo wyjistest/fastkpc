@@ -959,11 +959,468 @@ run_resume_zero_preflight_regression <- function() {
     pattern = "^failed_[0-9]+\\.summary\\.json$",
     full.names = TRUE
   )
+  failure <- jsonlite::read_json(
+    paths$summary_json, simplifyVector = TRUE
+  )
   assert_true(
-    length(failed_paths) == 1L && !file.exists(paths$summary_json),
-    "resume preflight failure must publish only an independent summary"
+    length(failed_paths) == 0L && !isTRUE(failure$pass) &&
+      identical(as.character(failure$stage), "parse_environment"),
+    "partial resume state must receive a top-level failure summary"
   )
   unlink(output_dir, recursive = TRUE, force = TRUE)
+}
+
+write_publication_fixture <- function(output_dir, seed) {
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  paths <- fastkpc_full_cuda_prepared_s_artifact_paths(output_dir)
+  dir.create(paths$shards_dir, recursive = TRUE, showWarnings = FALSE)
+  setup_keys <- sprintf("%064x", seed + 1:2)
+  target_keys <- sprintf("%064x", seed + 3:4)
+  full_target_hash <- sprintf("%064x", seed + 3L)
+  full_prepared_hash <- sprintf("%064x", seed + 5L)
+  setup_corpus_hash <- fastkpc_full_cuda_census_key_set_hash(
+    sort(setup_keys, method = "radix")
+  )
+  target_corpus_hash <- fastkpc_full_cuda_census_key_set_hash(
+    sort(target_keys, method = "radix")
+  )
+  setups <- setNames(lapply(setup_keys, function(key) {
+    list(prepared_s_key_sha256 = key, fixture_seed = as.integer(seed))
+  }), setup_keys)
+  state_fields <- fastkpc_full_cuda_target_state_field_names()
+  state_character_fields <-
+    fastkpc_full_cuda_prepared_s_target_state_character_fields()
+  state_integer_fields <-
+    fastkpc_full_cuda_prepared_s_target_state_integer_fields()
+  state_numeric_fields <-
+    fastkpc_full_cuda_prepared_s_target_state_numeric_fields()
+  state_list_fields <- setdiff(
+    state_fields,
+    c(state_character_fields, state_integer_fields, state_numeric_fields)
+  )
+  state_columns <- setNames(lapply(state_fields, function(field) {
+    if (field %in% state_character_fields) {
+      if (identical(field, "schema_version")) {
+        return(rep(fastkpc_full_cuda_target_state_schema_version(), 2L))
+      }
+      if (identical(field, "residual_key_sha256")) return(target_keys)
+      if (identical(field, "prepared_s_key_sha256")) return(setup_keys)
+      return(rep(paste0("fixture-", field, "-", seed), 2L))
+    }
+    if (field %in% state_integer_fields) return(as.integer(c(1L, 2L)))
+    if (field %in% state_numeric_fields) return(as.numeric(c(1, 2)))
+    NULL
+  }), state_fields)
+  state_columns <- state_columns[setdiff(state_fields, state_list_fields)]
+  states <- as.data.frame(
+    state_columns,
+    stringsAsFactors = FALSE,
+    check.names = FALSE,
+    optional = TRUE
+  )
+  for (field in state_list_fields) {
+    states[[field]] <- I(list(list(), list()))
+  }
+  states <- states[, state_fields, drop = FALSE]
+  rownames(states) <- NULL
+  saveRDS(setups, paths$prepared_s_setup_index_rds, version = 2)
+  saveRDS(states, paths$target_state_index_rds, version = 2)
+
+  semantic_names <-
+    fastkpc_full_cuda_prepared_s_semantic_artifact_path_names()
+  remaining_semantic <- setdiff(
+    semantic_names,
+    c("prepared_s_setup_index_rds", "target_state_index_rds")
+  )
+  for (name in remaining_semantic) {
+    writeLines(
+      paste("semantic", seed, name), paths[[name]], useBytes = TRUE
+    )
+  }
+  nonsemantic_names <- setdiff(
+    names(paths),
+    c("manifest_json", "summary_json", "shards_dir", semantic_names)
+  )
+  for (name in nonsemantic_names) {
+    writeLines(
+      paste("nonsemantic", seed, name), paths[[name]], useBytes = TRUE
+    )
+  }
+
+  shard_count <- 2L
+
+  semantic_hashes <- vapply(
+    paths[semantic_names],
+    fastkpc_full_cuda_census_file_hash,
+    character(1L)
+  )
+  manifest <- list(
+    schema_version = "full-cuda-ci-prepared-s-artifact-v1",
+    phase1_input_bundle_hash = sprintf("%064x", seed + 10L),
+    dataset_file_sha256 = sprintf("%064x", seed + 11L),
+    dataset_matrix_sha256 = sprintf("%064x", seed + 12L),
+    canonical_logical_census_hash = sprintf("%064x", seed + 13L),
+    run_scope = "scaled_iteration",
+    parity_scope = "iteration",
+    phase2_complete = FALSE,
+    canonical_target_key_corpus_hash = full_target_hash,
+    full_canonical_target_key_corpus_hash = full_target_hash,
+    full_canonical_prepared_s_key_corpus_hash = full_prepared_hash,
+    selected_prepared_s_key_corpus_hash = setup_corpus_hash,
+    selected_target_key_corpus_hash = target_corpus_hash,
+    iteration_subset_hash = sprintf("%064x", seed + 5L),
+    qualification_subset_hash = sprintf("%064x", seed + 6L),
+    source_commit = sprintf("%040x", seed + 14L),
+    R_version = "fixture-R",
+    mgcv_version = "fixture-mgcv",
+    BLAS_identity = "fixture-BLAS",
+    LAPACK_identity = "fixture-LAPACK",
+    BLAS_thread_count = 1L,
+    prepared_s_setup_schema_version =
+      fastkpc_full_cuda_prepared_s_setup_schema_version(),
+    target_state_schema_version = fastkpc_full_cuda_target_state_schema_version(),
+    semantic_tolerance_config_hash = fastkpc_full_cuda_prepared_s_context_hash(
+      fastkpc_full_cuda_prepared_s_semantic_tolerance_config()
+    ),
+    qualification_selection_config_hash =
+      fastkpc_full_cuda_prepared_s_context_hash(
+        fastkpc_full_cuda_prepared_s_qualification_selection_config()
+      ),
+    selected_group_count = 2L,
+    target_state_count = 2L,
+    shard_count = shard_count,
+    semantic_file_sha256 = as.list(semantic_hashes),
+    prepared_s_setup_index_rds_sha256 = as.character(
+      semantic_hashes[["prepared_s_setup_index_rds"]]
+    ),
+    target_state_index_rds_sha256 = as.character(
+      semantic_hashes[["target_state_index_rds"]]
+    )
+  )
+  summary <- list(
+    pass = TRUE,
+    phase2_complete = FALSE,
+    run_scope = "scaled_iteration",
+    parity_scope = "iteration",
+    selected_group_count = 2L,
+    target_state_count = 2L,
+    shard_count = shard_count
+  )
+  for (shard_id in 0:(shard_count - 1L)) {
+    shard_setup_key <- setup_keys[[shard_id + 1L]]
+    shard_target_key <- target_keys[[shard_id + 1L]]
+    shard_manifest <- list(
+      phase1_input_bundle_hash = manifest$phase1_input_bundle_hash,
+      dataset_file_sha256 = manifest$dataset_file_sha256,
+      dataset_matrix_sha256 = manifest$dataset_matrix_sha256,
+      canonical_logical_census_hash = manifest$canonical_logical_census_hash,
+      canonical_target_key_corpus_hash =
+        manifest$canonical_target_key_corpus_hash,
+      prepared_s_key_corpus_hash =
+        manifest$selected_prepared_s_key_corpus_hash,
+      source_commit = manifest$source_commit,
+      R_version = manifest$R_version,
+      mgcv_version = manifest$mgcv_version,
+      BLAS_identity = manifest$BLAS_identity,
+      LAPACK_identity = manifest$LAPACK_identity,
+      BLAS_thread_count = manifest$BLAS_thread_count,
+      prepared_s_setup_schema_version =
+        manifest$prepared_s_setup_schema_version,
+      target_state_schema_version = manifest$target_state_schema_version,
+      semantic_tolerance_config_hash =
+        manifest$semantic_tolerance_config_hash,
+      qualification_selection_config_hash =
+        manifest$qualification_selection_config_hash,
+      expected_setup_count_for_shard = 1L,
+      expected_setup_hash_for_shard =
+        fastkpc_full_cuda_census_key_set_hash(shard_setup_key),
+      expected_target_count_for_shard = 1L,
+      expected_target_hash_for_shard =
+        fastkpc_full_cuda_census_key_set_hash(shard_target_key),
+      shard_count = shard_count,
+      shard_id = shard_id
+    )
+    payload <- list(
+      manifest = shard_manifest,
+      ordered_setup_keys = shard_setup_key,
+      prepared_s_setups = setNames(list(setups[[shard_setup_key]]),
+        shard_setup_key),
+      target_states = states[shard_id + 1L, , drop = FALSE]
+    )
+    rownames(payload$target_states) <- NULL
+    authentication <- fastkpc_full_cuda_prepared_s_shard_authentication(
+      payload
+    )
+    shard_paths <- fastkpc_full_cuda_prepared_s_shard_paths(
+      paths$shards_dir, shard_id
+    )
+    saveRDS(payload, shard_paths$rds, version = 2)
+    shard_summary <- list(
+      status = "complete",
+      manifest = shard_manifest,
+      manifest_hash = authentication$manifest_hash,
+      setup_key_count = 1L,
+      setup_key_set_hash = authentication$setup_key_set_hash,
+      target_key_count = 1L,
+      target_key_set_hash = authentication$target_key_set_hash,
+      prepared_s_setup_hashes = as.list(
+        authentication$prepared_s_setup_hashes
+      ),
+      prepared_s_setup_hashes_hash = authentication$prepared_s_setup_hashes_hash,
+      target_state_frame_hash = authentication$target_state_frame_hash,
+      payload_hash = authentication$payload_hash,
+      build_elapsed_seconds = 0,
+      rds_file_sha256 = fastkpc_full_cuda_census_file_hash(shard_paths$rds)
+    )
+    shard_summary$completion_hash <-
+      fastkpc_full_cuda_prepared_s_completion_hash(shard_summary)
+    fastkpc_full_cuda_write_json(shard_summary, shard_paths$summary_json)
+  }
+  fastkpc_full_cuda_write_json(manifest, paths$manifest_json)
+  fastkpc_full_cuda_write_json(summary, paths$summary_json)
+  list(
+    paths = paths,
+    manifest = manifest,
+    summary = summary,
+    semantic_hashes = semantic_hashes
+  )
+}
+
+publication_rename_orders <- function(paths) {
+  payload_names <- setdiff(
+    names(paths), c("shards_dir", "manifest_json", "summary_json")
+  )
+  list(
+    backup = c("summary_json", "manifest_json", payload_names),
+    publish = c(payload_names, "manifest_json", "summary_json")
+  )
+}
+
+run_publication_crash_consistency_regressions <- function() {
+  root <- tempfile("prepared-s-publication-order-")
+  output_dir <- file.path(root, "artifact")
+  staging_dir <- file.path(root, "staging")
+  write_publication_fixture(output_dir, 1000L)
+  staged <- write_publication_fixture(staging_dir, 1000L)
+  orders <- publication_rename_orders(staged$paths)
+  events <- data.frame(
+    phase = character(),
+    name = character(),
+    complete = logical(),
+    stringsAsFactors = FALSE
+  )
+  hook <- function(phase, name, output_dir) {
+    events <<- rbind(
+      events,
+      data.frame(
+        phase = phase,
+        name = name,
+        complete = fastkpc_full_cuda_prepared_s_completed_artifact(
+          output_dir
+        ),
+        stringsAsFactors = FALSE
+      )
+    )
+  }
+  .fastkpc_full_cuda_prepared_s_publish_staging(
+    staging_dir = staging_dir,
+    output_dir = output_dir,
+    expected_summary = staged$summary,
+    expected_manifest = staged$manifest,
+    expected_semantic_hashes = staged$semantic_hashes,
+    rename_hook = hook
+  )
+  backup_events <- events[events$phase == "backup", , drop = FALSE]
+  publish_events <- events[events$phase == "publish", , drop = FALSE]
+  assert_identical(
+    backup_events$name,
+    orders$backup,
+    "publication backup must remove success markers first"
+  )
+  assert_identical(
+    publish_events$name,
+    orders$publish,
+    "publication must write payloads before manifest and summary"
+  )
+  assert_true(
+    !any(backup_events$complete) &&
+      identical(
+        publish_events$complete,
+        c(rep(FALSE, nrow(publish_events) - 1L), TRUE)
+      ) &&
+      fastkpc_full_cuda_prepared_s_completed_artifact(output_dir),
+    "completion must remain false until the final summary rename"
+  )
+  unlink(root, recursive = TRUE, force = TRUE)
+
+  total_renames <- length(orders$backup) + length(orders$publish)
+  for (fail_at in seq_len(total_renames)) {
+    root <- tempfile("prepared-s-publication-rollback-")
+    output_dir <- file.path(root, "artifact")
+    staging_dir <- file.path(root, "staging")
+    old <- write_publication_fixture(output_dir, 3000L + fail_at * 10L)
+    staged <- write_publication_fixture(
+      staging_dir, 3000L + fail_at * 10L
+    )
+    publish_names <- unique(c(orders$backup, orders$publish))
+    old_hashes <- vapply(
+      old$paths[publish_names],
+      fastkpc_full_cuda_census_file_hash,
+      character(1L)
+    )
+    rename_count <- 0L
+    error <- tryCatch({
+      .fastkpc_full_cuda_prepared_s_publish_staging(
+        staging_dir = staging_dir,
+        output_dir = output_dir,
+        expected_summary = staged$summary,
+        expected_manifest = staged$manifest,
+        expected_semantic_hashes = staged$semantic_hashes,
+        rename_hook = function(phase, name, output_dir) {
+          rename_count <<- rename_count + 1L
+          if (rename_count == fail_at) {
+            stop("injected publication rename failure", call. = FALSE)
+          }
+        }
+      )
+      NULL
+    }, error = identity)
+    restored_hashes <- vapply(
+      old$paths[publish_names],
+      fastkpc_full_cuda_census_file_hash,
+      character(1L)
+    )
+    assert_true(
+      inherits(error, "error") && rename_count == fail_at &&
+        identical(restored_hashes, old_hashes) &&
+        fastkpc_full_cuda_prepared_s_completed_artifact(output_dir) &&
+        !dir.exists(file.path(
+          output_dir, paste0(".publication-backup-", Sys.getpid())
+        )),
+      paste("publication rollback must restore rename", fail_at)
+    )
+    unlink(root, recursive = TRUE, force = TRUE)
+  }
+}
+
+run_failure_summary_completion_regressions <- function() {
+  only_shards <- tempfile("prepared-s-failure-only-shards-")
+  only_shard_paths <- fastkpc_full_cuda_prepared_s_artifact_paths(
+    only_shards
+  )
+  dir.create(
+    only_shard_paths$shards_dir,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+  failure_path <- fastkpc_full_cuda_prepared_s_write_failure_summary(
+    output_dir = only_shards,
+    stage = "late_failure",
+    error = simpleError("late failure after shards"),
+    elapsed_seconds = 1
+  )
+  failure <- jsonlite::read_json(failure_path, simplifyVector = TRUE)
+  assert_true(
+    identical(failure_path, only_shard_paths$summary_json) &&
+      !isTRUE(failure$pass) &&
+      !dir.exists(file.path(only_shards, "failed_runs")),
+    "a fresh shards-only failure must publish top-level pass=false"
+  )
+  unlink(only_shards, recursive = TRUE, force = TRUE)
+
+  partial_dir <- tempfile("prepared-s-failure-partial-")
+  partial <- write_publication_fixture(partial_dir, 5000L)
+  unlink(partial$paths$dcov_parity_csv, force = TRUE)
+  partial_manifest_hash <- fastkpc_full_cuda_census_file_hash(
+    partial$paths$manifest_json
+  )
+  assert_true(
+    !fastkpc_full_cuda_prepared_s_completed_artifact(partial_dir),
+    "partial success markers and payloads must not be complete"
+  )
+  failure_path <- fastkpc_full_cuda_prepared_s_write_failure_summary(
+    output_dir = partial_dir,
+    stage = "partial_publication",
+    error = simpleError("partial publication failure"),
+    elapsed_seconds = 2
+  )
+  failure <- jsonlite::read_json(failure_path, simplifyVector = TRUE)
+  assert_true(
+    identical(failure_path, partial$paths$summary_json) &&
+      !isTRUE(failure$pass) &&
+      identical(
+        fastkpc_full_cuda_census_file_hash(partial$paths$manifest_json),
+        partial_manifest_hash
+      ) && !dir.exists(file.path(partial_dir, "failed_runs")),
+    "partial success state must receive a top-level failure summary"
+  )
+  unlink(partial_dir, recursive = TRUE, force = TRUE)
+
+  mismatched_dir <- tempfile("prepared-s-failure-mismatched-marker-")
+  mismatched <- write_publication_fixture(mismatched_dir, 5500L)
+  mismatched$manifest$phase2_complete <- TRUE
+  fastkpc_full_cuda_write_json(
+    mismatched$manifest, mismatched$paths$manifest_json
+  )
+  assert_true(
+    !fastkpc_full_cuda_prepared_s_completed_artifact(mismatched_dir),
+    "a pass marker must not hide manifest completion disagreement"
+  )
+  unlink(mismatched_dir, recursive = TRUE, force = TRUE)
+
+  corrupt_shard_dir <- tempfile("prepared-s-failure-corrupt-shard-")
+  corrupt_shard <- write_publication_fixture(corrupt_shard_dir, 5750L)
+  writeLines(
+    "corrupt shard payload",
+    file.path(corrupt_shard$paths$shards_dir, "shard_0.rds"),
+    useBytes = TRUE
+  )
+  assert_true(
+    !fastkpc_full_cuda_prepared_s_completed_artifact(corrupt_shard_dir),
+    "a corrupt shard RDS must invalidate the completed artifact"
+  )
+  failure_path <- fastkpc_full_cuda_prepared_s_write_failure_summary(
+    output_dir = corrupt_shard_dir,
+    stage = "corrupt_shard",
+    error = simpleError("corrupt shard failure"),
+    elapsed_seconds = 2.5
+  )
+  failure <- jsonlite::read_json(failure_path, simplifyVector = TRUE)
+  assert_true(
+    identical(failure_path, corrupt_shard$paths$summary_json) &&
+      !isTRUE(failure$pass) && !dir.exists(file.path(
+        corrupt_shard_dir, "failed_runs"
+      )),
+    "a corrupt shard pair must receive a top-level failure summary"
+  )
+  unlink(corrupt_shard_dir, recursive = TRUE, force = TRUE)
+
+  completed_dir <- tempfile("prepared-s-failure-completed-")
+  completed <- write_publication_fixture(completed_dir, 6000L)
+  completed_summary_hash <- fastkpc_full_cuda_census_file_hash(
+    completed$paths$summary_json
+  )
+  assert_true(
+    fastkpc_full_cuda_prepared_s_completed_artifact(completed_dir),
+    "synthetic completed artifact must satisfy the completion validator"
+  )
+  failure_path <- fastkpc_full_cuda_prepared_s_write_failure_summary(
+    output_dir = completed_dir,
+    stage = "validation_failure",
+    error = simpleError("completed artifact validation failure"),
+    elapsed_seconds = 3
+  )
+  failure <- jsonlite::read_json(failure_path, simplifyVector = TRUE)
+  assert_true(
+    identical(dirname(failure_path), file.path(completed_dir, "failed_runs")) &&
+      !isTRUE(failure$pass) &&
+      identical(
+        fastkpc_full_cuda_census_file_hash(completed$paths$summary_json),
+        completed_summary_hash
+      ) && fastkpc_full_cuda_prepared_s_completed_artifact(completed_dir),
+    "a validated completed artifact must preserve its success summary"
+  )
+  unlink(completed_dir, recursive = TRUE, force = TRUE)
 }
 
 reason_store <- fastkpc_full_cuda_prepared_s_selection_reason_store()
@@ -990,12 +1447,17 @@ run_scaled_selection_count_regression()
 run_canonical_artifact_evidence_regressions()
 run_empty_environment_regressions()
 run_resume_zero_preflight_regression()
+run_publication_crash_consistency_regressions()
+run_failure_summary_completion_regressions()
 
 if (identical(
       Sys.getenv("FASTKPC_PREPARED_S_TEST_SCOPE", unset = "full"),
       "focused"
     )) {
-  cat("PASS focused Prepared-S reason and Spectra fail-closed tests\n")
+  cat(paste0(
+    "PASS focused Prepared-S publication, failure, reason, and ",
+    "Spectra fail-closed tests\n"
+  ))
   quit(save = "no", status = 0L)
 }
 
@@ -1839,6 +2301,10 @@ assert_identical(
 assert_true(
   all(file.exists(unlist(artifact_paths, use.names = FALSE))),
   "every standard Prepared-S artifact path must exist"
+)
+assert_true(
+  fastkpc_full_cuda_prepared_s_completed_artifact(runner_output_dir),
+  "a bounded Prepared-S artifact with authenticated shard pairs is complete"
 )
 expected_shard_files <- sort(c(
   paste0("shard_", 0:1, ".rds"),
