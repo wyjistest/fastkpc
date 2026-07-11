@@ -3562,13 +3562,43 @@ fastkpc_full_cuda_prepared_s_shard_schema_config <- function() {
   )
 }
 
-fastkpc_full_cuda_prepared_s_validate_shard_count <- function(shard_count) {
-  numeric_count <- suppressWarnings(as.numeric(shard_count))
-  if (length(numeric_count) != 1L || is.na(numeric_count) ||
-      !is.finite(numeric_count) || numeric_count != floor(numeric_count)) {
-    stop("shard_count must be one positive integer", call. = FALSE)
+fastkpc_full_cuda_prepared_s_validate_whole_scalar <- function(
+    value, minimum, message) {
+  clean <- length(value) == 1L && !is.object(value) &&
+    typeof(value) %in% c("integer", "double")
+  if (isTRUE(clean)) {
+    clean <- !is.na(value) && is.finite(value) &&
+      value == floor(value) && value >= minimum &&
+      value <= .Machine$integer.max
   }
-  fastkpc_full_cuda_census_validate_shard_count(as.integer(numeric_count))
+  if (!isTRUE(clean)) stop(message, call. = FALSE)
+  as.integer(value)
+}
+
+fastkpc_full_cuda_prepared_s_validate_shard_count <- function(shard_count) {
+  shard_count <- fastkpc_full_cuda_prepared_s_validate_whole_scalar(
+    shard_count,
+    minimum = 1L,
+    message = "shard_count must be one positive integer"
+  )
+  fastkpc_full_cuda_census_validate_shard_count(shard_count)
+}
+
+fastkpc_full_cuda_prepared_s_validate_shard_id <- function(
+    shard_id, shard_count = NULL) {
+  shard_id <- fastkpc_full_cuda_prepared_s_validate_whole_scalar(
+    shard_id,
+    minimum = 0L,
+    message = "shard_id must be one nonnegative integer"
+  )
+  if (!is.null(shard_count)) {
+    shard_count <-
+      fastkpc_full_cuda_prepared_s_validate_shard_count(shard_count)
+    if (shard_id >= shard_count) {
+      stop("shard_id is outside assigned shard range", call. = FALSE)
+    }
+  }
+  shard_id
 }
 
 fastkpc_full_cuda_prepared_s_setup_index <- function(inputs) {
@@ -4016,7 +4046,7 @@ fastkpc_full_cuda_prepared_s_shard_manifest_fields <- function() {
 fastkpc_full_cuda_prepared_s_validate_shard_manifest_structure <- function(
     manifest) {
   fields <- fastkpc_full_cuda_prepared_s_shard_manifest_fields()
-  if (!is.list(manifest) || !identical(names(manifest), fields)) {
+  if (!fastkpc_full_cuda_prepared_s_exact_named_list(manifest, fields)) {
     stop("Prepared-S shard manifest schema mismatch", call. = FALSE)
   }
   sha_fields <- c(
@@ -4054,20 +4084,27 @@ fastkpc_full_cuda_prepared_s_validate_shard_manifest_structure <- function(
     stop("Prepared-S shard manifest schema context mismatch",
          call. = FALSE)
   }
-  counts <- suppressWarnings(as.numeric(c(
+  fastkpc_full_cuda_prepared_s_validate_whole_scalar(
     manifest$expected_setup_count_for_shard,
+    minimum = 0L,
+    message = "Prepared-S shard manifest count context mismatch"
+  )
+  fastkpc_full_cuda_prepared_s_validate_whole_scalar(
     manifest$expected_target_count_for_shard,
-    manifest$shard_count,
-    manifest$shard_id,
-    manifest$BLAS_thread_count
-  )))
-  if (length(counts) != 5L || anyNA(counts) || any(!is.finite(counts)) ||
-      any(counts != floor(counts)) || any(counts[c(1L, 2L, 4L)] < 0L) ||
-      counts[[3L]] < 1L || counts[[4L]] >= counts[[3L]] ||
-      counts[[5L]] < 1L) {
-    stop("Prepared-S shard manifest count context mismatch",
-         call. = FALSE)
-  }
+    minimum = 0L,
+    message = "Prepared-S shard manifest count context mismatch"
+  )
+  shard_count <- fastkpc_full_cuda_prepared_s_validate_shard_count(
+    manifest$shard_count
+  )
+  fastkpc_full_cuda_prepared_s_validate_shard_id(
+    manifest$shard_id, shard_count
+  )
+  fastkpc_full_cuda_prepared_s_validate_whole_scalar(
+    manifest$BLAS_thread_count,
+    minimum = 1L,
+    message = "Prepared-S shard manifest count context mismatch"
+  )
   invisible(TRUE)
 }
 
@@ -4092,14 +4129,9 @@ fastkpc_full_cuda_prepared_s_shard_manifest <- function(
   fastkpc_full_cuda_prepared_s_validate_output_shard_context(
     inputs, context, assigned_setups
   )
-  shard_id_numeric <- suppressWarnings(as.numeric(shard_id))
-  if (length(shard_id_numeric) != 1L || is.na(shard_id_numeric) ||
-      !is.finite(shard_id_numeric) ||
-      shard_id_numeric != floor(shard_id_numeric) ||
-      shard_id_numeric < 0L || shard_id_numeric >= shard_count) {
-    stop("shard_id is outside assigned shard range", call. = FALSE)
-  }
-  shard_id <- as.integer(shard_id_numeric)
+  shard_id <- fastkpc_full_cuda_prepared_s_validate_shard_id(
+    shard_id, shard_count
+  )
   expected_assignment <- fastkpc_full_cuda_prepared_s_assign_shards(
     assigned_setups[
       , setdiff(names(assigned_setups), c("sorted_rank", "shard_id")),
@@ -4111,9 +4143,13 @@ fastkpc_full_cuda_prepared_s_shard_manifest <- function(
         as.character(assigned_setups$prepared_s_key_sha256),
         as.character(expected_assignment$prepared_s_key_sha256)
       ) ||
-      !identical(as.integer(assigned_setups$sorted_rank),
+      !is.integer(assigned_setups$sorted_rank) ||
+      is.object(assigned_setups$sorted_rank) ||
+      !identical(assigned_setups$sorted_rank,
                  expected_assignment$sorted_rank) ||
-      !identical(as.integer(assigned_setups$shard_id),
+      !is.integer(assigned_setups$shard_id) ||
+      is.object(assigned_setups$shard_id) ||
+      !identical(assigned_setups$shard_id,
                  expected_assignment$shard_id)) {
     stop("Prepared-S shard assignment lineage mismatch", call. = FALSE)
   }
@@ -4172,9 +4208,97 @@ fastkpc_full_cuda_prepared_s_manifest_equal <- function(actual, expected) {
     )
 }
 
+fastkpc_full_cuda_prepared_s_shard_payload_fields <- function() {
+  c(
+    "manifest", "ordered_setup_keys", "prepared_s_setups",
+    "target_states"
+  )
+}
+
+fastkpc_full_cuda_prepared_s_shard_summary_fields <- function() {
+  c(
+    "status", "manifest", "manifest_hash", "setup_key_count",
+    "setup_key_set_hash", "target_key_count", "target_key_set_hash",
+    "prepared_s_setup_hashes", "prepared_s_setup_hashes_hash",
+    "target_state_frame_hash", "payload_hash", "build_elapsed_seconds",
+    "rds_file_sha256", "completion_hash"
+  )
+}
+
+fastkpc_full_cuda_prepared_s_exact_named_list <- function(value, fields) {
+  is.list(value) && !is.object(value) &&
+    identical(names(value), fields) &&
+    identical(attributes(value), list(names = fields))
+}
+
+fastkpc_full_cuda_prepared_s_target_state_list_fields <- function() {
+  c(
+    "y_source", "projected_rhs", "nullspace_projected_rhs",
+    "selected_sp", "selected_sp_names", "convergence_fields",
+    "warning_classes", "warning_messages"
+  )
+}
+
+fastkpc_full_cuda_prepared_s_validate_target_state_frame_schema <- function(
+    states) {
+  fields <- fastkpc_full_cuda_target_state_field_names()
+  attrs <- attributes(states)
+  clean_frame <- is.data.frame(states) &&
+    identical(names(states), fields) &&
+    setequal(names(attrs), c("names", "class", "row.names")) &&
+    identical(attrs$names, fields) &&
+    identical(attrs$class, "data.frame") &&
+    identical(attrs$row.names, seq_len(nrow(states)))
+  if (!isTRUE(clean_frame)) {
+    stop("Prepared-S shard TargetState schema mismatch", call. = FALSE)
+  }
+  list_fields <-
+    fastkpc_full_cuda_prepared_s_target_state_list_fields()
+  for (field in fields) {
+    column <- states[[field]]
+    clean_column <- if (field %in% list_fields) {
+      is.list(column) &&
+        identical(attributes(column), list(class = "AsIs"))
+    } else {
+      is.null(attributes(column))
+    }
+    if (!isTRUE(clean_column)) {
+      stop("Prepared-S shard TargetState schema mismatch", call. = FALSE)
+    }
+  }
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_prepared_s_payload_response_hits <- function(payload) {
+  scan_value <- payload
+  if (is.list(scan_value) && "target_states" %in% names(scan_value)) {
+    scan_value$target_states <- "<canonical-target-state-frame>"
+  }
+  fastkpc_full_cuda_prepared_s_find_response_fields(
+    scan_value, path = "payload"
+  )
+}
+
+fastkpc_full_cuda_prepared_s_validate_artifact_response_scope <- function(
+    payload, summary) {
+  payload_hits <-
+    fastkpc_full_cuda_prepared_s_payload_response_hits(payload)
+  summary_hits <- fastkpc_full_cuda_prepared_s_find_response_fields(
+    summary, path = "summary"
+  )
+  hits <- c(payload_hits, summary_hits)
+  if (length(hits) > 0L) {
+    stop(
+      "Prepared-S shard artifact response-bearing field: ", hits[[1L]],
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
+}
+
 fastkpc_full_cuda_prepared_s_shard_paths <- function(
     output_dir, shard_id) {
-  shard_id <- as.integer(shard_id)
+  shard_id <- fastkpc_full_cuda_prepared_s_validate_shard_id(shard_id)
   list(
     rds = file.path(output_dir, paste0("shard_", shard_id, ".rds")),
     summary_json = file.path(
@@ -4283,18 +4407,22 @@ fastkpc_full_cuda_prepared_s_summary_setup_hashes <- function(value) {
 }
 
 fastkpc_full_cuda_prepared_s_completion_hash <- function(summary) {
-  required <- c(
-    "manifest_hash", "setup_key_count", "setup_key_set_hash",
-    "target_key_count", "target_key_set_hash",
-    "prepared_s_setup_hashes", "prepared_s_setup_hashes_hash",
-    "target_state_frame_hash", "payload_hash", "rds_file_sha256"
+  fields <- setdiff(
+    fastkpc_full_cuda_prepared_s_shard_summary_fields(),
+    "completion_hash"
   )
-  if (!is.list(summary) || length(setdiff(required, names(summary))) > 0L) {
+  if (fastkpc_full_cuda_prepared_s_exact_named_list(
+        summary, fastkpc_full_cuda_prepared_s_shard_summary_fields()
+      )) {
+    summary <- summary[fields]
+  }
+  if (!fastkpc_full_cuda_prepared_s_exact_named_list(summary, fields)) {
     stop("Prepared-S shard completion summary is incomplete",
          call. = FALSE)
   }
-  fastkpc_full_cuda_census_named_metadata_hash(list(
-    schema_version = "full-cuda-ci-prepared-s-shard-completion-hash-v1",
+  canonical <- list(
+    status = as.character(summary$status),
+    manifest = summary$manifest,
     manifest_hash = as.character(summary$manifest_hash),
     setup_key_count = as.integer(summary$setup_key_count),
     setup_key_set_hash = as.character(summary$setup_key_set_hash),
@@ -4310,20 +4438,33 @@ fastkpc_full_cuda_prepared_s_completion_hash <- function(summary) {
     target_state_frame_hash =
       as.character(summary$target_state_frame_hash),
     payload_hash = as.character(summary$payload_hash),
+    build_elapsed_nanoseconds = round(
+      as.numeric(summary$build_elapsed_seconds) * 1e9
+    ),
     rds_file_sha256 = as.character(summary$rds_file_sha256)
+  )
+  fastkpc_full_cuda_census_named_metadata_hash(list(
+    schema_version = "full-cuda-ci-prepared-s-shard-completion-hash-v1",
+    summary = canonical
   ))
 }
 
-fastkpc_full_cuda_validate_prepared_s_shard <- function(
-    payload, summary, expected_manifest = NULL, inputs = NULL,
-    rds_path = NULL) {
-  required_payload <- c(
-    "manifest", "ordered_setup_keys", "prepared_s_setups",
-    "target_states"
+.fastkpc_full_cuda_validate_prepared_s_shard_core <- function(
+    payload, summary, inputs, expected_manifest, rds_path = NULL) {
+  fastkpc_full_cuda_prepared_s_validate_artifact_response_scope(
+    payload, summary
   )
-  if (!is.list(payload) || !identical(names(payload), required_payload) ||
-      !is.list(summary) || !identical(as.character(summary$status),
-                                      "complete") ||
+  if (!fastkpc_full_cuda_prepared_s_exact_named_list(
+        payload, fastkpc_full_cuda_prepared_s_shard_payload_fields()
+      )) {
+    stop("Prepared-S shard payload schema mismatch", call. = FALSE)
+  }
+  if (!fastkpc_full_cuda_prepared_s_exact_named_list(
+        summary, fastkpc_full_cuda_prepared_s_shard_summary_fields()
+      )) {
+    stop("Prepared-S shard summary schema mismatch", call. = FALSE)
+  }
+  if (!identical(as.character(summary$status), "complete") ||
       is.null(summary$manifest) || is.null(inputs)) {
     stop("completed Prepared-S shard payload is invalid", call. = FALSE)
   }
@@ -4336,22 +4477,24 @@ fastkpc_full_cuda_validate_prepared_s_shard <- function(
   if (!fastkpc_full_cuda_prepared_s_manifest_equal(
         payload$manifest, summary$manifest
       ) ||
-      (!is.null(expected_manifest) &&
-       !fastkpc_full_cuda_prepared_s_manifest_equal(
-         payload$manifest, expected_manifest
-       ))) {
+      !fastkpc_full_cuda_prepared_s_manifest_equal(
+        payload$manifest, expected_manifest
+      )) {
     stop("Prepared-S shard manifest mismatch", call. = FALSE)
   }
-  setup_keys <- as.character(payload$ordered_setup_keys)
-  if (anyNA(setup_keys) || anyDuplicated(setup_keys) ||
+  raw_setup_keys <- payload$ordered_setup_keys
+  setup_keys <- as.character(raw_setup_keys)
+  if (!is.character(raw_setup_keys) || is.object(raw_setup_keys) ||
+      !is.null(attributes(raw_setup_keys)) || anyNA(setup_keys) ||
+      anyDuplicated(setup_keys) ||
       any(!grepl("^[0-9a-f]{64}$", setup_keys)) ||
       !identical(setup_keys, sort(setup_keys, method = "radix"))) {
     stop("Prepared-S shard setup key order mismatch", call. = FALSE)
   }
   setups <- payload$prepared_s_setups
-  if (!is.list(setups) || length(setups) != length(setup_keys) ||
-      (length(setup_keys) > 0L &&
-       !identical(names(setups), setup_keys))) {
+  if (!fastkpc_full_cuda_prepared_s_exact_named_list(
+        setups, setup_keys
+      )) {
     stop("Prepared-S shard setup object order mismatch", call. = FALSE)
   }
   if (length(setup_keys) !=
@@ -4363,18 +4506,7 @@ fastkpc_full_cuda_validate_prepared_s_shard <- function(
     stop("Prepared-S shard setup key set mismatch", call. = FALSE)
   }
   states <- payload$target_states
-  if (!is.data.frame(states) ||
-      !identical(names(states), fastkpc_full_cuda_target_state_field_names())) {
-    stop("Prepared-S shard TargetState schema mismatch", call. = FALSE)
-  }
-  if (nrow(states) == 0L) {
-    empty_states <- fastkpc_full_cuda_prepared_s_empty_target_states()
-    if (!identical(lapply(states, typeof), lapply(empty_states, typeof)) ||
-        !identical(lapply(states, class), lapply(empty_states, class))) {
-      stop("Prepared-S shard empty TargetState schema mismatch",
-           call. = FALSE)
-    }
-  }
+  fastkpc_full_cuda_prepared_s_validate_target_state_frame_schema(states)
   target_keys <- as.character(states$residual_key_sha256)
   if (anyNA(target_keys) || anyDuplicated(target_keys) ||
       any(!grepl("^[0-9a-f]{64}$", target_keys)) ||
@@ -4501,8 +4633,36 @@ fastkpc_full_cuda_validate_prepared_s_shard <- function(
   invisible(TRUE)
 }
 
+fastkpc_full_cuda_validate_prepared_s_shard <- function(
+    payload, summary, inputs, rds_path = NULL) {
+  if (!is.list(payload) || is.null(payload$manifest)) {
+    stop("completed Prepared-S shard payload is invalid", call. = FALSE)
+  }
+  fastkpc_full_cuda_prepared_s_validate_shard_manifest_structure(
+    payload$manifest
+  )
+  assigned <- fastkpc_full_cuda_prepared_s_assign_shards(
+    fastkpc_full_cuda_prepared_s_setup_index(inputs),
+    payload$manifest$shard_count
+  )
+  context <- fastkpc_full_cuda_prepared_s_output_shard_context(inputs)
+  expected_manifest <- fastkpc_full_cuda_prepared_s_shard_manifest(
+    assigned_setups = assigned,
+    shard_id = payload$manifest$shard_id,
+    inputs = inputs,
+    context = context
+  )
+  .fastkpc_full_cuda_validate_prepared_s_shard_core(
+    payload = payload,
+    summary = summary,
+    inputs = inputs,
+    expected_manifest = expected_manifest,
+    rds_path = rds_path
+  )
+}
+
 fastkpc_full_cuda_prepared_s_read_shard <- function(
-    paths, inputs, expected_manifest = NULL) {
+    paths, inputs) {
   fastkpc_full_cuda_require_namespace("jsonlite")
   if (!file.exists(paths$rds) || !file.exists(paths$summary_json)) {
     stop("missing Prepared-S shard files", call. = FALSE)
@@ -4523,7 +4683,6 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
   fastkpc_full_cuda_validate_prepared_s_shard(
     payload = payload,
     summary = summary,
-    expected_manifest = expected_manifest,
     inputs = inputs,
     rds_path = paths$rds
   )
@@ -4563,11 +4722,11 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
     json_tmp, simplifyVector = TRUE
   )
   validation_payload <- readRDS(rds_tmp)
-  fastkpc_full_cuda_validate_prepared_s_shard(
+  .fastkpc_full_cuda_validate_prepared_s_shard_core(
     payload = validation_payload,
     summary = validation_summary,
-    expected_manifest = expected_manifest,
     inputs = inputs,
+    expected_manifest = expected_manifest,
     rds_path = rds_tmp
   )
   if (!is.null(interruption_hook)) interruption_hook("before_publish")
@@ -4603,7 +4762,9 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
   manifest <- fastkpc_full_cuda_prepared_s_shard_manifest(
     assigned_setups, shard_id, inputs, context
   )
-  paths <- fastkpc_full_cuda_prepared_s_shard_paths(output_dir, shard_id)
+  paths <- fastkpc_full_cuda_prepared_s_shard_paths(
+    output_dir, manifest$shard_id
+  )
   final_exists <- c(
     rds = file.exists(paths$rds),
     summary = file.exists(paths$summary_json)
@@ -4613,7 +4774,7 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
   }
   if (all(final_exists)) {
     completed <- fastkpc_full_cuda_prepared_s_read_shard(
-      paths, inputs, manifest
+      paths, inputs
     )
     return(list(
       status = "reused", paths = paths, payload = completed$payload
@@ -4624,7 +4785,7 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
     assigned_setups, stringsAsFactors = FALSE
   )
   selected <- assigned_setups[
-    assigned_setups$shard_id == as.integer(shard_id), , drop = FALSE
+    assigned_setups$shard_id == manifest$shard_id, , drop = FALSE
   ]
   selected <- selected[
     order(selected$sorted_rank, method = "radix"), , drop = FALSE
@@ -4766,7 +4927,9 @@ fastkpc_full_cuda_merge_prepared_s_shards <- function(
     )
   })
   declared_ids <- vapply(loaded, function(value) {
-    as.integer(value$payload$manifest$shard_id)
+    fastkpc_full_cuda_prepared_s_validate_shard_id(
+      value$payload$manifest$shard_id, shard_count
+    )
   }, integer(1L))
   if (anyDuplicated(declared_ids)) {
     stop("duplicate Prepared-S shard id", call. = FALSE)
@@ -4780,11 +4943,11 @@ fastkpc_full_cuda_merge_prepared_s_shards <- function(
       assigned, shard_id, inputs, context
     )
     paths <- fastkpc_full_cuda_prepared_s_shard_paths(shard_dir, shard_id)
-    fastkpc_full_cuda_validate_prepared_s_shard(
+    .fastkpc_full_cuda_validate_prepared_s_shard_core(
       payload = loaded[[index]]$payload,
       summary = loaded[[index]]$summary,
-      expected_manifest = expected_manifest,
       inputs = inputs,
+      expected_manifest = expected_manifest,
       rds_path = paths$rds
     )
   }

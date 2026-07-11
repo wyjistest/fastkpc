@@ -498,6 +498,181 @@ assert_true(
   "valid resume must reuse with zero builder calls and byte-identical files"
 )
 
+pristine_rds_backup <- tempfile("prepared-s-pristine-rds-")
+pristine_json_backup <- tempfile("prepared-s-pristine-json-")
+assert_true(
+  file.copy(first$paths$rds, pristine_rds_backup, overwrite = TRUE) &&
+    file.copy(first$paths$summary_json, pristine_json_backup,
+              overwrite = TRUE),
+  "test fixture must preserve a pristine authenticated shard pair"
+)
+restore_pristine_pair <- function() {
+  assert_true(
+    file.copy(pristine_rds_backup, first$paths$rds, overwrite = TRUE) &&
+      file.copy(pristine_json_backup, first$paths$summary_json,
+                overwrite = TRUE),
+    "test fixture must restore the pristine authenticated shard pair"
+  )
+}
+install_payload_attack <- function(payload) {
+  saveRDS(payload, first$paths$rds, version = 2)
+  summary <- jsonlite::read_json(
+    pristine_json_backup, simplifyVector = TRUE
+  )
+  authentication <-
+    fastkpc_full_cuda_prepared_s_shard_authentication(payload)
+  for (field in setdiff(names(authentication), "prepared_s_setup_hashes")) {
+    summary[[field]] <- authentication[[field]]
+  }
+  summary$prepared_s_setup_hashes <-
+    as.list(authentication$prepared_s_setup_hashes)
+  summary$rds_file_sha256 <-
+    fastkpc_full_cuda_census_file_hash(first$paths$rds)
+  summary$completion_hash <-
+    fastkpc_full_cuda_prepared_s_completion_hash(summary)
+  fastkpc_full_cuda_write_json(summary, first$paths$summary_json)
+}
+assert_resume_rejects <- function(pattern, message) {
+  assert_error(
+    .fastkpc_full_cuda_run_prepared_s_shard_core(
+      inputs = fixture_inputs,
+      assigned_setups = assigned,
+      shard_id = 0L,
+      context = context,
+      output_dir = output_dir,
+      setup_builder = fixture_setup_builder,
+      target_builder = fixture_target_builder
+    ),
+    pattern,
+    message
+  )
+}
+
+payload_response_attack <- readRDS(pristine_rds_backup)
+attr(payload_response_attack, "nested") <- list(
+  y = fixture_inputs$data[, 1L]
+)
+install_payload_attack(payload_response_attack)
+assert_resume_rejects(
+  "Prepared-S shard artifact response-bearing field",
+  paste(
+    "artifact-scope validation must reject response-bearing payload",
+    "attributes after all hashes are recomputed"
+  )
+)
+restore_pristine_pair()
+
+payload_attribute_attack <- readRDS(pristine_rds_backup)
+attr(payload_attribute_attack, "note") <- "unallowed"
+install_payload_attack(payload_attribute_attack)
+assert_resume_rejects(
+  "Prepared-S shard payload schema mismatch",
+  "payload attributes outside the exact allowlist must fail closed"
+)
+restore_pristine_pair()
+
+target_state_attribute_attack <- readRDS(pristine_rds_backup)
+attr(target_state_attribute_attack$target_states, "note") <- "unallowed"
+install_payload_attack(target_state_attribute_attack)
+assert_resume_rejects(
+  "Prepared-S shard TargetState schema mismatch",
+  paste(
+    "TargetState must reject extra frame attributes without applying",
+    "the PreparedSSetup forbidden-name policy to canonical fields"
+  )
+)
+restore_pristine_pair()
+
+install_summary_attack <- function(summary) {
+  fastkpc_full_cuda_write_json(summary, first$paths$summary_json)
+}
+clean_summary <- jsonlite::read_json(
+  pristine_json_backup, simplifyVector = TRUE
+)
+summary_response_attack <- clean_summary
+summary_response_attack$nested <- list(y = fixture_inputs$data[, 1L])
+install_summary_attack(summary_response_attack)
+assert_resume_rejects(
+  "Prepared-S shard artifact response-bearing field",
+  "completion JSON response leakage must fail with an unchanged hash"
+)
+restore_pristine_pair()
+
+summary_response_rehashed <- clean_summary
+summary_response_rehashed$nested <- list(y = fixture_inputs$data[, 1L])
+summary_response_rehashed$completion_hash <- tryCatch(
+  fastkpc_full_cuda_prepared_s_completion_hash(summary_response_rehashed),
+  error = function(error) clean_summary$completion_hash
+)
+install_summary_attack(summary_response_rehashed)
+assert_resume_rejects(
+  "Prepared-S shard artifact response-bearing field",
+  "completion JSON response leakage must fail after hash recomputation"
+)
+restore_pristine_pair()
+
+summary_extra_attack <- clean_summary
+summary_extra_attack$note <- "unallowed"
+install_summary_attack(summary_extra_attack)
+assert_resume_rejects(
+  "Prepared-S shard summary schema mismatch",
+  "completion JSON fields outside the exact allowlist must fail closed"
+)
+restore_pristine_pair()
+
+summary_timing_attack <- clean_summary
+summary_timing_attack$build_elapsed_seconds <-
+  summary_timing_attack$build_elapsed_seconds + 1
+install_summary_attack(summary_timing_attack)
+assert_resume_rejects(
+  "Prepared-S shard completion hash mismatch",
+  "completion hash must authenticate build timing"
+)
+restore_pristine_pair()
+
+summary_order_attack <- clean_summary[rev(seq_along(clean_summary))]
+install_summary_attack(summary_order_attack)
+assert_resume_rejects(
+  "Prepared-S shard summary schema mismatch",
+  "completion JSON field order must be canonical after JSON round-trip"
+)
+restore_pristine_pair()
+
+summary_attribute_attack <- clean_summary
+attr(summary_attribute_attack, "note") <- "unallowed"
+assert_error(
+  fastkpc_full_cuda_validate_prepared_s_shard(
+    payload = readRDS(pristine_rds_backup),
+    summary = summary_attribute_attack,
+    inputs = fixture_inputs,
+    rds_path = pristine_rds_backup
+  ),
+  "Prepared-S shard summary schema mismatch",
+  "in-memory completion summary attributes must fail closed"
+)
+
+validator_formals <- names(formals(
+  fastkpc_full_cuda_validate_prepared_s_shard
+))
+validator_body <- paste(
+  deparse(body(fastkpc_full_cuda_validate_prepared_s_shard)),
+  collapse = "\n"
+)
+assert_true(
+  identical(
+    validator_formals, c("payload", "summary", "inputs", "rds_path")
+  ) &&
+    !"expected_manifest" %in% validator_formals &&
+    grepl("fastkpc_full_cuda_prepared_s_setup_index", validator_body,
+          fixed = TRUE) &&
+    grepl("fastkpc_full_cuda_prepared_s_shard_manifest", validator_body,
+          fixed = TRUE),
+  paste(
+    "public shard validator must derive its canonical manifest from inputs",
+    "without expected-manifest authority injection"
+  )
+)
+
 summary_backup <- tempfile("prepared-s-summary-backup-")
 assert_true(
   file.copy(first$paths$summary_json, summary_backup, overwrite = TRUE),
@@ -574,6 +749,98 @@ assert_error(
   ),
   "Prepared-S shard manifest mismatch",
   "resume must reject a stale but internally valid manifest context"
+)
+
+stale_output_dir <- tempfile("prepared-s-stale-public-validator-")
+stale_written <- .fastkpc_full_cuda_run_prepared_s_shard_core(
+  inputs = stale_inputs,
+  assigned_setups = assigned,
+  shard_id = 0L,
+  context = stale_context,
+  output_dir = stale_output_dir,
+  setup_builder = fixture_setup_builder,
+  target_builder = fixture_target_builder
+)
+stale_summary <- jsonlite::read_json(
+  stale_written$paths$summary_json, simplifyVector = TRUE
+)
+assert_error(
+  fastkpc_full_cuda_validate_prepared_s_shard(
+    payload = readRDS(stale_written$paths$rds),
+    summary = stale_summary,
+    inputs = fixture_inputs,
+    rds_path = stale_written$paths$rds
+  ),
+  "Prepared-S shard manifest mismatch",
+  paste(
+    "public validation must reject an internally valid shard whose manifest",
+    "was derived from stale inputs"
+  )
+)
+
+invalid_shard_counts <- list(
+  factor = factor("3"),
+  logical = TRUE,
+  character = "3",
+  list = list(3L),
+  fractional = 1.5,
+  vector = c(1L, 2L),
+  missing = NA_integer_,
+  infinite = Inf
+)
+for (label in names(invalid_shard_counts)) {
+  assert_error(
+    fastkpc_full_cuda_prepared_s_assign_shards(
+      setup_index, invalid_shard_counts[[label]]
+    ),
+    "shard_count must be one positive integer",
+    paste("shard_count must reject", label, "input before coercion")
+  )
+}
+assigned_double_count <- fastkpc_full_cuda_prepared_s_assign_shards(
+  setup_index, 3.0
+)
+assert_true(
+  identical(attr(assigned_double_count, "shard_count"), 3L),
+  "whole scalar double shard_count must remain valid"
+)
+
+invalid_shard_ids <- list(
+  factor = factor("3"),
+  logical = TRUE,
+  character = "1",
+  list = list(1L),
+  fractional = 1.5,
+  vector = c(1L, 2L),
+  missing = NA_integer_,
+  infinite = Inf
+)
+for (label in names(invalid_shard_ids)) {
+  assert_error(
+    fastkpc_full_cuda_prepared_s_shard_manifest(
+      assigned, invalid_shard_ids[[label]], fixture_inputs, context
+    ),
+    "shard_id",
+    paste("shard_id must reject", label, "input before coercion")
+  )
+}
+double_id_manifest <- fastkpc_full_cuda_prepared_s_shard_manifest(
+  assigned, 1.0, fixture_inputs, context
+)
+assert_true(
+  identical(double_id_manifest$shard_id, 1L),
+  "whole scalar double shard_id must remain valid and zero based"
+)
+character_assignment <- assigned
+character_assignment$shard_id <- as.character(
+  character_assignment$shard_id
+)
+assert_error(
+  fastkpc_full_cuda_prepared_s_shard_manifest(
+    character_assignment, 0L, fixture_inputs, context
+  ),
+  "Prepared-S shard assignment lineage mismatch",
+  "assigned shard_id columns must not be accepted through coercion"
 )
 
 builder_calls$setup <- 0L
