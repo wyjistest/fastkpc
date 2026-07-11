@@ -1516,7 +1516,7 @@ fastkpc_full_cuda_prepared_s_validate_plain_data <- function(
     }
     return(invisible(TRUE))
   }
-  if (is.list(value)) {
+  if (typeof(value) == "list") {
     fields <- names(value)
     if (is.null(fields) || length(fields) != length(value) ||
         any(!nzchar(fields)) || anyDuplicated(fields)) {
@@ -1563,7 +1563,13 @@ fastkpc_full_cuda_prepared_s_matrix <- function(value) {
 }
 
 fastkpc_full_cuda_prepared_s_named_list <- function(value, prefix) {
-  names(value) <- paste0(prefix, seq_along(value))
+  if (typeof(value) != "list" || is.object(value) ||
+      length(setdiff(names(attributes(value)), "names")) > 0L) {
+    stop("PreparedSSetup named-list writer requires a plain list",
+         call. = FALSE)
+  }
+  expected_names <- paste0(prefix, seq_along(value))
+  attributes(value) <- list(names = expected_names)
   value
 }
 
@@ -2148,8 +2154,10 @@ fastkpc_full_cuda_prepared_s_require_matrix <- function(
 fastkpc_full_cuda_prepared_s_require_named_list <- function(
     value, count, prefix, label) {
   expected_names <- paste0(prefix, seq_len(count))
-  if (!is.list(value) || length(value) != count ||
-      !identical(names(value), expected_names)) {
+  if (typeof(value) != "list" || is.object(value) ||
+      length(value) != count ||
+      !identical(names(value), expected_names) ||
+      !identical(attributes(value), list(names = expected_names))) {
     stop("PreparedSSetup ", label, " mismatch", call. = FALSE)
   }
   invisible(TRUE)
@@ -2175,7 +2183,9 @@ fastkpc_full_cuda_validate_prepared_s_setup <- function(
   }
   fastkpc_full_cuda_prepared_s_validate_plain_data(setup)
   expected_fields <- fastkpc_full_cuda_prepared_s_setup_field_names()
-  if (!is.list(setup) || !identical(names(setup), expected_fields)) {
+  if (typeof(setup) != "list" || is.object(setup) ||
+      !identical(names(setup), expected_fields) ||
+      !identical(attributes(setup), list(names = expected_fields))) {
     stop("PreparedSSetup schema field mismatch", call. = FALSE)
   }
   if (!identical(

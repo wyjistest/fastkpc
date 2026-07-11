@@ -137,6 +137,27 @@ fixture_states <- lapply(fixture_prepared, function(setup) {
 })
 names(fixture_states) <- fixture_prepared_keys
 
+pairlist_setup_fixture <- as.pairlist(fixture_prepared[[1L]])
+pairlist_setup_row_index <- which(
+  as.character(fixture_setup_rows$same_S_group_id) ==
+    fixture_prepared[[1L]]$same_S_group_id
+)
+assert_true(
+  length(pairlist_setup_row_index) == 1L,
+  "pairlist PreparedSSetup fixture must retain one setup-row lineage"
+)
+assert_error(
+  fastkpc_full_cuda_validate_prepared_s_setup(
+    setup = pairlist_setup_fixture,
+    setup_row = fixture_setup_rows[
+      pairlist_setup_row_index, , drop = FALSE
+    ],
+    dataset_sha256 = fixture_dataset_sha256
+  ),
+  "PreparedSSetup contains non-plain data",
+  "PreparedSSetup validator must reject a pairlist root object"
+)
+
 setup_index <- fastkpc_full_cuda_prepared_s_setup_index(fixture_inputs)
 assert_true(
   nrow(setup_index) == 6L &&
@@ -678,6 +699,33 @@ install_payload_attack(setup_pairlist_attack)
 assert_resume_rejects(
   "Prepared-S shard setup object order mismatch",
   "prepared_s_setups must be an exact named plain list"
+)
+restore_pristine_pair()
+
+setup_root_pairlist_attack <- readRDS(pristine_rds_backup)
+setup_root_pairlist_attack$prepared_s_setups[[1L]] <- as.pairlist(
+  setup_root_pairlist_attack$prepared_s_setups[[1L]]
+)
+install_payload_attack(setup_root_pairlist_attack)
+assert_resume_rejects(
+  "PreparedSSetup contains non-plain data",
+  paste(
+    "resume must reject a pairlist PreparedSSetup root after all",
+    "payload and file authentication is recomputed"
+  )
+)
+pairlist_setup_summary <- jsonlite::read_json(
+  first$paths$summary_json, simplifyVector = TRUE
+)
+assert_error(
+  fastkpc_full_cuda_validate_prepared_s_shard(
+    payload = readRDS(first$paths$rds),
+    summary = pairlist_setup_summary,
+    inputs = fixture_inputs,
+    rds_path = first$paths$rds
+  ),
+  "PreparedSSetup contains non-plain data",
+  "public shard validator must reject a pairlist PreparedSSetup root"
 )
 restore_pristine_pair()
 
