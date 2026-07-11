@@ -261,7 +261,9 @@ merge_setup_observations <- fastkpc_full_cuda_census_bind_rows(lapply(
   merge_runs, function(value) value$payload$setup_observations
 ))
 merge_setup_observations <- merge_setup_observations[order(
-  merge_setup_observations$representative_residual_key_sha256,
+  as.character(
+    merge_setup_observations$representative_residual_key_sha256
+  ),
   method = "radix"
 ), , drop = FALSE]
 rownames(merge_setup_observations) <- NULL
@@ -269,14 +271,14 @@ merge_target_fits <- fastkpc_full_cuda_census_bind_rows(lapply(
   merge_runs, function(value) value$payload$target_fits
 ))
 merge_target_fits <- merge_target_fits[order(
-  merge_target_fits$residual_key_sha256, method = "radix"
+  as.character(merge_target_fits$residual_key_sha256), method = "radix"
 ), , drop = FALSE]
 rownames(merge_target_fits) <- NULL
 merge_target_risks <- fastkpc_full_cuda_census_bind_rows(lapply(
   merge_runs, function(value) value$payload$target_risks
 ))
 merge_target_risks <- merge_target_risks[order(
-  merge_target_risks$residual_key_sha256, method = "radix"
+  as.character(merge_target_risks$residual_key_sha256), method = "radix"
 ), , drop = FALSE]
 rownames(merge_target_risks) <- NULL
 merge_same_s_setups <- fastkpc_full_cuda_census_compress_setups(
@@ -643,7 +645,7 @@ if (skip_real_artifacts) {
       , drop = FALSE
     ]
     canonical <- canonical[
-      order(canonical$residual_key_sha256, method = "radix"),
+      order(as.character(canonical$residual_key_sha256), method = "radix"),
       , drop = FALSE
     ]
     assert_true(
@@ -1221,7 +1223,7 @@ fastkpc_full_cuda_validate_target_states(
   prepared_setup = fixture_setup
 )
 fixture_canonical_order <- order(
-  fixture_requests$residual_key_sha256, method = "radix"
+  as.character(fixture_requests$residual_key_sha256), method = "radix"
 )
 fixture_canonical_requests <- fixture_requests[
   fixture_canonical_order, , drop = FALSE
@@ -1271,6 +1273,64 @@ assert_true(
   !any(c("y", "numeric_y") %in% names(fixture_states)) &&
     !has_forbidden_response_storage(fixture_states),
   "TargetStates must not persist y or numeric_y at any nesting depth"
+)
+
+factor_key_inputs <- fixture_inputs
+factor_key_levels <- rev(sort(
+  unique(as.character(fixture_requests$residual_key_sha256)),
+  method = "radix"
+))
+factor_key_inputs$residual_requests$residual_key_sha256 <- factor(
+  as.character(factor_key_inputs$residual_requests$residual_key_sha256),
+  levels = factor_key_levels
+)
+factor_key_inputs$target_fit_metadata$residual_key_sha256 <- factor(
+  as.character(factor_key_inputs$target_fit_metadata$residual_key_sha256),
+  levels = factor_key_levels
+)
+factor_key_expected_order <- sort(
+  as.character(factor_key_inputs$residual_requests$residual_key_sha256),
+  method = "radix"
+)
+factor_key_states <- fastkpc_full_cuda_build_target_states(
+  inputs = factor_key_inputs,
+  prepared_setup = fixture_setup
+)
+assert_true(
+  identical(
+    factor_key_states$residual_key_sha256,
+    factor_key_expected_order
+  ),
+  "TargetStates must use character radix order for factor residual keys"
+)
+fastkpc_full_cuda_validate_target_states(
+  states = factor_key_states,
+  inputs = factor_key_inputs,
+  prepared_setup = fixture_setup
+)
+
+malformed_request_key_inputs <- fixture_inputs
+malformed_request_key_inputs$residual_requests$residual_key_sha256[[1L]] <-
+  "not-a-sha256"
+assert_error(
+  fastkpc_full_cuda_build_target_states(
+    inputs = malformed_request_key_inputs,
+    prepared_setup = fixture_setup
+  ),
+  "TargetState canonical residual request key is invalid",
+  "TargetStates must reject malformed canonical request keys"
+)
+
+malformed_target_key_inputs <- fixture_inputs
+malformed_target_key_inputs$target_fit_metadata$residual_key_sha256[[1L]] <-
+  "not-a-sha256"
+assert_error(
+  fastkpc_full_cuda_build_target_states(
+    inputs = malformed_target_key_inputs,
+    prepared_setup = fixture_setup
+  ),
+  "TargetState canonical target metadata key is invalid",
+  "TargetStates must reject malformed canonical target metadata keys"
 )
 
 fixture_materialized <- fastkpc_full_cuda_materialize_target_state(

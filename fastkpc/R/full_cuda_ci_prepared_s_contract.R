@@ -2998,6 +2998,17 @@ fastkpc_full_cuda_target_state_context <- function(
       )]),
     "TargetState canonical residual requests are incomplete"
   )
+  requests$residual_key_sha256 <- as.character(
+    requests$residual_key_sha256
+  )
+  fastkpc_full_cuda_target_state_require(
+    all(vapply(
+      requests$residual_key_sha256,
+      fastkpc_full_cuda_prepared_s_is_sha256,
+      logical(1L)
+    )),
+    "TargetState canonical residual request key is invalid"
+  )
 
   target_rows <- as.data.frame(
     inputs$target_fit_metadata, stringsAsFactors = FALSE
@@ -3015,6 +3026,17 @@ fastkpc_full_cuda_target_state_context <- function(
       )]),
     "TargetState canonical target metadata is incomplete"
   )
+  target_rows$residual_key_sha256 <- as.character(
+    target_rows$residual_key_sha256
+  )
+  fastkpc_full_cuda_target_state_require(
+    all(vapply(
+      target_rows$residual_key_sha256,
+      fastkpc_full_cuda_prepared_s_is_sha256,
+      logical(1L)
+    )),
+    "TargetState canonical target metadata key is invalid"
+  )
 
   request_rows <- requests[
     as.character(requests$same_S_group_id) == group_id, , drop = FALSE
@@ -3026,12 +3048,14 @@ fastkpc_full_cuda_target_state_context <- function(
     nrow(request_rows) > 0L && nrow(target_rows) > 0L,
     "TargetState canonical same-S group has no targets"
   )
+  request_keys <- as.character(request_rows$residual_key_sha256)
+  target_keys <- as.character(target_rows$residual_key_sha256)
   request_rows <- request_rows[
-    order(request_rows$residual_key_sha256, method = "radix"),
+    order(request_keys, method = "radix"),
     , drop = FALSE
   ]
   target_rows <- target_rows[
-    order(target_rows$residual_key_sha256, method = "radix"),
+    order(target_keys, method = "radix"),
     , drop = FALSE
   ]
   rownames(request_rows) <- NULL
