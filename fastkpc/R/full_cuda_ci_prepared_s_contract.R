@@ -2453,6 +2453,16 @@ fastkpc_full_cuda_validate_prepared_s_setup <- function(
   constraint_diagnostics <- fastkpc_full_cuda_census_svd_diagnostics(
     setup$constraint, expected_rank = min(dim(setup$constraint))
   )
+  if (identical(expected_constraint_mode, "explicit") &&
+      !identical(
+        constraint_diagnostics$rank,
+        as.integer(nrow(setup$constraint))
+      )) {
+    stop(
+      "PreparedSSetup constraint rows must be independent",
+      call. = FALSE
+    )
+  }
   phase1_constraint_dimensions <- unname(as.integer(
     fastkpc_full_cuda_prepared_s_row_value(
       setup_row, "constraint_dimensions"

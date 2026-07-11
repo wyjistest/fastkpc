@@ -302,6 +302,112 @@ independent_reference_setup <- function(prepared, materialized) {
   )
 }
 
+redundant_constraint_case <- function(prepared, materialized) {
+  prepared <- unserialize(serialize(prepared, NULL, version = 2))
+  materialized <- unserialize(serialize(materialized, NULL, version = 2))
+  p <- ncol(prepared$X)
+  constraint_row <- c(1, numeric(p - 1L))
+  constraint <- fastkpc_full_cuda_prepared_s_matrix(rbind(
+    constraint_row, constraint_row
+  ))
+  constraint_nullspace <- fastkpc_full_cuda_prepared_s_matrix(
+    fastkpc_constraint_nullspace(constraint, p)
+  )
+  prepared$constraint <- constraint
+  prepared$constraint_mode <- "explicit"
+  prepared$constraint_nullspace <- constraint_nullspace
+  prepared$constraint_rank <-
+    fastkpc_full_cuda_census_svd_diagnostics(
+      constraint, expected_rank = nrow(constraint)
+    )$rank
+  prepared$constraint_nullspace_dimension <- as.integer(
+    ncol(constraint_nullspace)
+  )
+  prepared$nullspace_gram_policy <- "explicit-nullspace-gram"
+  X_weighted <- if (is.null(prepared$weights)) {
+    prepared$X
+  } else {
+    prepared$X * sqrt(prepared$weights)
+  }
+  prepared$nullspace_gram_matrix <-
+    fastkpc_full_cuda_prepared_s_matrix(
+      crossprod(X_weighted %*% constraint_nullspace)
+    )
+  P_unit <- fastkpc_assemble_penalty(
+    p = p,
+    S = prepared$penalty_blocks,
+    off = prepared$penalty_offsets,
+    sp = rep(1, length(prepared$penalty_blocks)),
+    H = NULL
+  )
+  projected_penalty <- fastkpc_full_cuda_prepared_s_matrix(
+    crossprod(
+      constraint_nullspace,
+      P_unit %*% constraint_nullspace
+    )
+  )
+  projected_rank <- fastkpc_full_cuda_census_svd_diagnostics(
+    projected_penalty, expected_rank = ncol(projected_penalty)
+  )$rank
+  prepared$penalty_nullity <- as.integer(
+    ncol(constraint_nullspace) - projected_rank
+  )
+  prepared$semantic_fingerprint <-
+    fastkpc_full_cuda_prepared_s_semantic_fingerprint(prepared)
+  prepared$representation_fingerprint <-
+    fastkpc_full_cuda_prepared_s_representation_fingerprint(prepared)
+
+  projected_rhs <- if (is.null(prepared$weights)) {
+    as.numeric(crossprod(prepared$X, materialized$y))
+  } else {
+    as.numeric(crossprod(
+      prepared$X, materialized$y * prepared$weights
+    ))
+  }
+  materialized$row$projected_rhs[[1L]] <- projected_rhs
+  materialized$row$nullspace_projected_rhs[[1L]] <-
+    as.numeric(crossprod(constraint_nullspace, projected_rhs))
+  materialized$row$target_state_fingerprint[[1L]] <-
+    fastkpc_full_cuda_target_state_fingerprint(materialized$row)
+  list(prepared = prepared, materialized = materialized)
+}
+
+assert_redundant_constraint_rejected <- function(prepared, materialized) {
+  case <- redundant_constraint_case(prepared, materialized)
+  kernel_name <- "fastkpc_mgcv_magic_kernel_fixed_sp_coefficients"
+  original_kernel <- get(kernel_name, envir = .GlobalEnv, inherits = FALSE)
+  kernel_reached <- FALSE
+  assign(kernel_name, function(setup, sp = setup$sp, ...) {
+    kernel_reached <<- TRUE
+    numeric(ncol(setup$X))
+  }, envir = .GlobalEnv)
+  on.exit(assign(
+    kernel_name, original_kernel, envir = .GlobalEnv
+  ), add = TRUE)
+  error <- tryCatch({
+    fastkpc_mgcv_magic_fixed_sp_from_prepared(
+      case$prepared, case$materialized
+    )
+    NULL
+  }, error = identity)
+  error_message <- if (inherits(error, "error")) {
+    conditionMessage(error)
+  } else {
+    "NONE"
+  }
+  assert_true(
+    inherits(error, "error") &&
+      grepl(
+        "PreparedSSetup constraint rows must be independent",
+        error_message, fixed = TRUE
+      ) && !kernel_reached,
+    paste0(
+      "redundant Prepared-S constraint must fail before C_magic; ",
+      "kernel_reached=", kernel_reached, "; error=", error_message
+    )
+  )
+}
+
 expected_result_fields <- c(
   "backend_family", "mode", "solve_source", "authoritative",
   "coefficients", "fitted", "residuals", "sp",
@@ -458,6 +564,7 @@ for (selected_key in selection$selected_keys) {
       solved = solved,
       reference = reference
     )
+    assert_redundant_constraint_rejected(prepared, materialized)
   }
 }
 
