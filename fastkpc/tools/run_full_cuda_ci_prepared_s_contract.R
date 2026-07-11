@@ -3,8 +3,8 @@ stage <- "load_module"
 timings <- list()
 
 raw_env_value <- function(name, default) {
-  value <- Sys.getenv(name, unset = "")
-  if (nzchar(value)) value else default
+  value <- Sys.getenv(name, unset = NA_character_)
+  if (is.na(value)) default else value
 }
 
 output_dir <- raw_env_value(
@@ -117,6 +117,17 @@ run <- function() {
       call. = FALSE
     )
   }
+  if (!resume) {
+    existing <-
+      .fastkpc_full_cuda_prepared_s_existing_artifact_entries(output_dir)
+    if (length(existing) > 0L) {
+      stop(
+        "Prepared-S resume is disabled and an artifact entry exists: ",
+        basename(existing[[1L]]),
+        call. = FALSE
+      )
+    }
+  }
 
   command_lines <- c(
     paste0(
@@ -187,20 +198,6 @@ run <- function() {
     recursive = TRUE,
     showWarnings = FALSE
   )
-  if (!resume) {
-    final_shards <- list.files(
-      artifact_paths$shards_dir,
-      pattern = "^shard_[0-9]+\\.(rds|summary\\.json)$",
-      full.names = TRUE
-    )
-    if (length(final_shards) > 0L) {
-      stop(
-        "Prepared-S resume is disabled and a final shard exists",
-        call. = FALSE
-      )
-    }
-  }
-
   actual_workers <- if (requested_workers > 1L) {
     min(requested_workers, shard_count)
   } else {
@@ -424,6 +421,12 @@ error <- tryCatch({
 
 if (!is.null(error)) {
   elapsed <- proc.time()[["elapsed"]] - started
+  failure_output_valid <- is.character(output_dir) &&
+    length(output_dir) == 1L && !is.na(output_dir) && nzchar(output_dir)
+  if (!failure_output_valid) {
+    message(conditionMessage(error))
+    quit(save = "no", status = 1L)
+  }
   published <- tryCatch({
     if (exists(
           "fastkpc_full_cuda_prepared_s_write_failure_summary",
