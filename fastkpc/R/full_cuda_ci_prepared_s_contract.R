@@ -2976,8 +2976,7 @@ fastkpc_full_cuda_target_state_fingerprint <- function(state_row) {
   fastkpc_full_cuda_prepared_s_field_hash(values, fields)
 }
 
-fastkpc_full_cuda_target_state_context <- function(
-    inputs, prepared_setup) {
+.fastkpc_full_cuda_target_state_input_index <- function(inputs) {
   required_inputs <- c(
     "data", "dataset_sha256", "same_s_setup_metadata",
     "residual_requests", "target_fit_metadata"
@@ -2995,39 +2994,21 @@ fastkpc_full_cuda_target_state_context <- function(
     ),
     "TargetState dataset identity mismatch"
   )
-  fastkpc_full_cuda_target_state_require(
-    is.list(prepared_setup) &&
-      fastkpc_full_cuda_prepared_s_is_sha256(
-        prepared_setup$same_S_group_id
-      ),
-    "TargetState PreparedSSetup lineage is invalid"
-  )
-  group_id <- as.character(prepared_setup$same_S_group_id)
-
   setup_rows <- as.data.frame(
     inputs$same_s_setup_metadata, stringsAsFactors = FALSE
   )
+  setup_groups <- as.character(setup_rows$same_S_group_id)
   fastkpc_full_cuda_target_state_require(
     "same_S_group_id" %in% names(setup_rows) &&
-      !anyNA(setup_rows$same_S_group_id),
+      nrow(setup_rows) > 0L && !anyNA(setup_groups) &&
+      !anyDuplicated(setup_groups) &&
+      all(vapply(
+        setup_groups,
+        fastkpc_full_cuda_prepared_s_is_sha256,
+        logical(1L)
+      )),
     "TargetState canonical same-S metadata is incomplete"
   )
-  setup_index <- which(as.character(setup_rows$same_S_group_id) == group_id)
-  fastkpc_full_cuda_target_state_require(
-    length(setup_index) == 1L,
-    "TargetState canonical same-S row is not unique"
-  )
-  setup_row <- setup_rows[setup_index, , drop = FALSE]
-  fastkpc_full_cuda_validate_prepared_s_setup(
-    setup = prepared_setup,
-    setup_row = setup_row,
-    dataset_sha256 = dataset_sha256
-  )
-  fastkpc_full_cuda_target_state_require(
-    nrow(prepared_setup$X) == nrow(data),
-    "TargetState PreparedSSetup data dimensions mismatch"
-  )
-
   requests <- as.data.frame(
     inputs$residual_requests, stringsAsFactors = FALSE
   )
@@ -3046,12 +3027,19 @@ fastkpc_full_cuda_target_state_context <- function(
   requests$residual_key_sha256 <- as.character(
     requests$residual_key_sha256
   )
+  request_keys <- requests$residual_key_sha256
+  request_groups <- as.character(requests$same_S_group_id)
   fastkpc_full_cuda_target_state_require(
     all(vapply(
-      requests$residual_key_sha256,
+      request_keys,
       fastkpc_full_cuda_prepared_s_is_sha256,
       logical(1L)
-    )),
+    )) && !anyDuplicated(request_keys) &&
+      all(vapply(
+        request_groups,
+        fastkpc_full_cuda_prepared_s_is_sha256,
+        logical(1L)
+      )),
     "TargetState canonical residual request key is invalid"
   )
 
@@ -3074,21 +3062,99 @@ fastkpc_full_cuda_target_state_context <- function(
   target_rows$residual_key_sha256 <- as.character(
     target_rows$residual_key_sha256
   )
+  target_keys <- target_rows$residual_key_sha256
+  target_groups <- as.character(target_rows$same_S_group_id)
   fastkpc_full_cuda_target_state_require(
     all(vapply(
-      target_rows$residual_key_sha256,
+      target_keys,
       fastkpc_full_cuda_prepared_s_is_sha256,
       logical(1L)
-    )),
+    )) && !anyDuplicated(target_keys) &&
+      all(vapply(
+        target_groups,
+        fastkpc_full_cuda_prepared_s_is_sha256,
+        logical(1L)
+      )),
     "TargetState canonical target metadata key is invalid"
   )
 
-  request_rows <- requests[
-    as.character(requests$same_S_group_id) == group_id, , drop = FALSE
-  ]
-  target_rows <- target_rows[
-    as.character(target_rows$same_S_group_id) == group_id, , drop = FALSE
-  ]
+  target_request_index <- match(target_keys, request_keys)
+  fastkpc_full_cuda_target_state_require(
+    !anyNA(target_request_index) &&
+      identical(
+        sort(target_keys, method = "radix"),
+        sort(request_keys, method = "radix")
+      ) &&
+      identical(target_groups, request_groups[target_request_index]) &&
+      identical(
+        as.integer(target_rows$target),
+        as.integer(requests$target[target_request_index])
+      ) &&
+      setequal(unique(request_groups), setup_groups) &&
+      setequal(unique(target_groups), setup_groups),
+    "TargetState canonical target table lineage mismatch"
+  )
+
+  list(
+    schema_version = "full-cuda-ci-target-state-input-index-v1",
+    data = data,
+    dataset_sha256 = dataset_sha256,
+    setup_rows = setup_rows,
+    setup_row_indices = setNames(seq_len(nrow(setup_rows)), setup_groups),
+    requests = requests,
+    request_row_indices = split(seq_len(nrow(requests)), request_groups),
+    target_rows = target_rows,
+    target_row_indices = split(seq_len(nrow(target_rows)), target_groups)
+  )
+}
+
+.fastkpc_full_cuda_target_state_context_from_index <- function(
+    index, prepared_setup) {
+  index_fields <- c(
+    "schema_version", "data", "dataset_sha256", "setup_rows",
+    "setup_row_indices", "requests", "request_row_indices",
+    "target_rows", "target_row_indices"
+  )
+  fastkpc_full_cuda_target_state_require(
+    typeof(index) == "list" && !is.object(index) &&
+      identical(names(index), index_fields) &&
+      identical(
+        index$schema_version,
+        "full-cuda-ci-target-state-input-index-v1"
+      ),
+    "TargetState input index is invalid"
+  )
+  data <- index$data
+  dataset_sha256 <- index$dataset_sha256
+  fastkpc_full_cuda_target_state_require(
+    is.list(prepared_setup) &&
+      fastkpc_full_cuda_prepared_s_is_sha256(
+        prepared_setup$same_S_group_id
+      ),
+    "TargetState PreparedSSetup lineage is invalid"
+  )
+  group_id <- as.character(prepared_setup$same_S_group_id)
+  setup_index <- index$setup_row_indices[[group_id]]
+  fastkpc_full_cuda_target_state_require(
+    length(setup_index) == 1L,
+    "TargetState canonical same-S row is not unique"
+  )
+  setup_row <- index$setup_rows[setup_index, , drop = FALSE]
+  fastkpc_full_cuda_validate_prepared_s_setup(
+    setup = prepared_setup,
+    setup_row = setup_row,
+    dataset_sha256 = dataset_sha256
+  )
+  fastkpc_full_cuda_target_state_require(
+    nrow(prepared_setup$X) == nrow(data),
+    "TargetState PreparedSSetup data dimensions mismatch"
+  )
+
+  request_indices <- index$request_row_indices[[group_id]]
+  target_indices <- index$target_row_indices[[group_id]]
+  request_rows <- index$requests[request_indices, , drop = FALSE]
+  target_rows <- index$target_rows[target_indices, , drop = FALSE]
+
   fastkpc_full_cuda_target_state_require(
     nrow(request_rows) > 0L && nrow(target_rows) > 0L,
     "TargetState canonical same-S group has no targets"
@@ -3209,6 +3275,14 @@ fastkpc_full_cuda_target_state_context <- function(
   )
 }
 
+fastkpc_full_cuda_target_state_context <- function(
+    inputs, prepared_setup) {
+  index <- .fastkpc_full_cuda_target_state_input_index(inputs)
+  .fastkpc_full_cuda_target_state_context_from_index(
+    index, prepared_setup
+  )
+}
+
 fastkpc_full_cuda_target_state_projected_rhs <- function(context) {
   targets <- as.integer(context$target_rows$target)
   Y <- context$data[, targets, drop = FALSE]
@@ -3230,9 +3304,8 @@ fastkpc_full_cuda_target_state_projected_rhs <- function(context) {
   list(Y = Y, projected = projected, null_projected = null_projected)
 }
 
-fastkpc_full_cuda_build_target_states <- function(
-    inputs, prepared_setup) {
-  context <- fastkpc_full_cuda_target_state_context(inputs, prepared_setup)
+.fastkpc_full_cuda_build_target_states_from_context <- function(
+    context, prepared_setup = context$setup) {
   algebra <- fastkpc_full_cuda_target_state_projected_rhs(context)
   target_rows <- context$target_rows
   request_rows <- context$request_rows
@@ -3307,22 +3380,11 @@ fastkpc_full_cuda_build_target_states <- function(
       )
     }, character(1L)
   )
-  fastkpc_full_cuda_validate_target_states(
-    states = states,
-    inputs = inputs,
-    prepared_setup = prepared_setup
-  )
   states
 }
 
-fastkpc_full_cuda_validate_target_states <- function(
-    states, inputs, prepared_setup, ...) {
-  dots <- list(...)
-  fastkpc_full_cuda_target_state_require(
-    length(dots) == 0L,
-    "TargetState validation options are unsupported"
-  )
-  context <- fastkpc_full_cuda_target_state_context(inputs, prepared_setup)
+.fastkpc_full_cuda_validate_target_states_with_context <- function(
+    states, context, prepared_setup = context$setup) {
   expected_fields <- fastkpc_full_cuda_target_state_field_names()
   fastkpc_full_cuda_target_state_require(
     is.data.frame(states) && identical(names(states), expected_fields),
@@ -3549,6 +3611,41 @@ fastkpc_full_cuda_validate_target_states <- function(
     )
   }
   invisible(TRUE)
+}
+
+fastkpc_full_cuda_build_target_states <- function(
+    inputs, prepared_setup) {
+  index <- .fastkpc_full_cuda_target_state_input_index(inputs)
+  context <- .fastkpc_full_cuda_target_state_context_from_index(
+    index, prepared_setup
+  )
+  states <- .fastkpc_full_cuda_build_target_states_from_context(
+    context = context, prepared_setup = prepared_setup
+  )
+  .fastkpc_full_cuda_validate_target_states_with_context(
+    states = states,
+    context = context,
+    prepared_setup = prepared_setup
+  )
+  states
+}
+
+fastkpc_full_cuda_validate_target_states <- function(
+    states, inputs, prepared_setup, ...) {
+  dots <- list(...)
+  fastkpc_full_cuda_target_state_require(
+    length(dots) == 0L,
+    "TargetState validation options are unsupported"
+  )
+  index <- .fastkpc_full_cuda_target_state_input_index(inputs)
+  context <- .fastkpc_full_cuda_target_state_context_from_index(
+    index, prepared_setup
+  )
+  .fastkpc_full_cuda_validate_target_states_with_context(
+    states = states,
+    context = context,
+    prepared_setup = prepared_setup
+  )
 }
 
 fastkpc_full_cuda_prepared_s_semantic_tolerance_config <- function() {
@@ -4391,8 +4488,58 @@ fastkpc_full_cuda_prepared_s_shard_paths <- function(
     rds = file.path(output_dir, paste0("shard_", shard_id, ".rds")),
     summary_json = file.path(
       output_dir, paste0("shard_", shard_id, ".summary.json")
+    ),
+    lock_dir = file.path(
+      output_dir, paste0("shard_", shard_id, ".lock")
     )
   )
+}
+
+.fastkpc_full_cuda_prepared_s_acquire_shard_lock <- function(lock_dir) {
+  dir.create(dirname(lock_dir), recursive = TRUE, showWarnings = FALSE)
+  if (!dir.create(lock_dir, showWarnings = FALSE)) {
+    stop("Prepared-S shard lock exists: ", basename(lock_dir),
+         call. = FALSE)
+  }
+  owner_file <- file.path(lock_dir, "owner")
+  owner_token <- basename(tempfile("prepared-s-owner-", tmpdir = lock_dir))
+  written <- tryCatch({
+    writeLines(owner_token, owner_file, useBytes = TRUE)
+    file.exists(owner_file)
+  }, error = function(error) FALSE)
+  if (!isTRUE(written)) {
+    unlink(lock_dir, recursive = TRUE, force = TRUE)
+    stop("failed to initialize Prepared-S shard lock", call. = FALSE)
+  }
+  list(
+    lock_dir = lock_dir,
+    owner_file = owner_file,
+    owner_token = owner_token
+  )
+}
+
+.fastkpc_full_cuda_prepared_s_owns_shard_lock <- function(lock) {
+  if (!is.list(lock) || !dir.exists(lock$lock_dir) ||
+      !file.exists(lock$owner_file)) return(FALSE)
+  actual <- tryCatch(
+    readLines(lock$owner_file, warn = FALSE),
+    error = function(error) character()
+  )
+  identical(actual, lock$owner_token)
+}
+
+.fastkpc_full_cuda_prepared_s_require_shard_lock <- function(lock) {
+  if (!.fastkpc_full_cuda_prepared_s_owns_shard_lock(lock)) {
+    stop("Prepared-S shard lock ownership lost", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_prepared_s_release_shard_lock <- function(lock) {
+  if (.fastkpc_full_cuda_prepared_s_owns_shard_lock(lock)) {
+    unlink(lock$lock_dir, recursive = TRUE, force = TRUE)
+  }
+  invisible(NULL)
 }
 
 fastkpc_full_cuda_prepared_s_empty_target_states <- function() {
@@ -4632,7 +4779,8 @@ fastkpc_full_cuda_prepared_s_completion_hash <- function(summary) {
 }
 
 .fastkpc_full_cuda_validate_prepared_s_shard_core <- function(
-    payload, summary, inputs, expected_manifest, rds_path = NULL) {
+    payload, summary, inputs, expected_manifest, target_state_index,
+    rds_path = NULL) {
   fastkpc_full_cuda_prepared_s_validate_artifact_response_scope(
     payload, summary
   )
@@ -4679,34 +4827,25 @@ fastkpc_full_cuda_prepared_s_completion_hash <- function(summary) {
       )) {
     stop("Prepared-S shard target key set mismatch", call. = FALSE)
   }
-  setup_rows <- as.data.frame(
-    inputs$same_s_setup_metadata, stringsAsFactors = FALSE
-  )
   for (index in seq_along(setup_keys)) {
     setup <- setups[[index]]
-    group_id <- as.character(setup$same_S_group_id)
-    row_index <- which(
-      as.character(setup_rows$same_S_group_id) == group_id
-    )
-    if (length(row_index) != 1L ||
-        !identical(
+    if (!identical(
           as.character(setup$prepared_s_key_sha256),
           setup_keys[[index]]
         )) {
       stop("Prepared-S shard setup lineage mismatch", call. = FALSE)
     }
-    fastkpc_full_cuda_validate_prepared_s_setup(
-      setup = setup,
-      setup_row = setup_rows[row_index, , drop = FALSE],
-      dataset_sha256 = inputs$dataset_sha256
-    )
+    target_context <-
+      .fastkpc_full_cuda_target_state_context_from_index(
+        target_state_index, setup
+      )
     group_states <- states[
       as.character(states$prepared_s_key_sha256) == setup_keys[[index]],
       , drop = FALSE
     ]
-    fastkpc_full_cuda_validate_target_states(
+    .fastkpc_full_cuda_validate_target_states_with_context(
       states = group_states,
-      inputs = inputs,
+      context = target_context,
       prepared_setup = setup
     )
   }
@@ -4765,7 +4904,12 @@ fastkpc_full_cuda_prepared_s_completion_hash <- function(summary) {
 }
 
 fastkpc_full_cuda_validate_prepared_s_shard <- function(
-    payload, summary, inputs, rds_path = NULL) {
+    payload, summary, inputs, shard_count, shard_id, rds_path = NULL) {
+  shard_count <-
+    fastkpc_full_cuda_prepared_s_validate_shard_count(shard_count)
+  shard_id <- fastkpc_full_cuda_prepared_s_validate_shard_id(
+    shard_id, shard_count
+  )
   fastkpc_full_cuda_prepared_s_validate_artifact_response_scope(
     payload, summary
   )
@@ -4779,20 +4923,23 @@ fastkpc_full_cuda_validate_prepared_s_shard <- function(
   )
   assigned <- fastkpc_full_cuda_prepared_s_assign_shards(
     fastkpc_full_cuda_prepared_s_setup_index(inputs),
-    payload$manifest$shard_count
+    shard_count
   )
   context <- fastkpc_full_cuda_prepared_s_output_shard_context(inputs)
   expected_manifest <- fastkpc_full_cuda_prepared_s_shard_manifest(
     assigned_setups = assigned,
-    shard_id = payload$manifest$shard_id,
+    shard_id = shard_id,
     inputs = inputs,
     context = context
   )
+  target_state_index <-
+    .fastkpc_full_cuda_target_state_input_index(inputs)
   .fastkpc_full_cuda_validate_prepared_s_shard_core(
     payload = payload,
     summary = summary,
     inputs = inputs,
     expected_manifest = expected_manifest,
+    target_state_index = target_state_index,
     rds_path = rds_path
   )
 }
@@ -4819,34 +4966,57 @@ fastkpc_full_cuda_validate_prepared_s_shard <- function(
 }
 
 .fastkpc_full_cuda_prepared_s_read_shard_core <- function(
-    paths, inputs, expected_manifest) {
+    paths, inputs, expected_manifest, target_state_index) {
   completed <- .fastkpc_full_cuda_prepared_s_read_shard_files(paths)
   .fastkpc_full_cuda_validate_prepared_s_shard_core(
     payload = completed$payload,
     summary = completed$summary,
     inputs = inputs,
     expected_manifest = expected_manifest,
+    target_state_index = target_state_index,
     rds_path = paths$rds
   )
   completed
 }
 
 fastkpc_full_cuda_prepared_s_read_shard <- function(
-    paths, inputs) {
-  completed <- .fastkpc_full_cuda_prepared_s_read_shard_files(paths)
-  fastkpc_full_cuda_validate_prepared_s_shard(
-    payload = completed$payload,
-    summary = completed$summary,
-    inputs = inputs,
-    rds_path = paths$rds
+    shard_dir, inputs, shard_count, shard_id) {
+  shard_count <-
+    fastkpc_full_cuda_prepared_s_validate_shard_count(shard_count)
+  shard_id <- fastkpc_full_cuda_prepared_s_validate_shard_id(
+    shard_id, shard_count
   )
-  completed
+  assigned <- fastkpc_full_cuda_prepared_s_assign_shards(
+    fastkpc_full_cuda_prepared_s_setup_index(inputs), shard_count
+  )
+  context <- fastkpc_full_cuda_prepared_s_output_shard_context(inputs)
+  expected_manifest <- fastkpc_full_cuda_prepared_s_shard_manifest(
+    assigned_setups = assigned,
+    shard_id = shard_id,
+    inputs = inputs,
+    context = context
+  )
+  paths <- fastkpc_full_cuda_prepared_s_shard_paths(shard_dir, shard_id)
+  if (file.exists(paths$lock_dir)) {
+    stop("Prepared-S shard lock exists: ", basename(paths$lock_dir),
+         call. = FALSE)
+  }
+  target_state_index <-
+    .fastkpc_full_cuda_target_state_input_index(inputs)
+  .fastkpc_full_cuda_prepared_s_read_shard_core(
+    paths = paths,
+    inputs = inputs,
+    expected_manifest = expected_manifest,
+    target_state_index = target_state_index
+  )
 }
 
 .fastkpc_full_cuda_prepared_s_atomic_write_shard <- function(
     payload, summary, paths, inputs, expected_manifest,
+    target_state_index, lock,
     interruption_hook = NULL) {
   fastkpc_full_cuda_require_namespace("jsonlite")
+  .fastkpc_full_cuda_prepared_s_require_shard_lock(lock)
   output_dir <- dirname(paths$rds)
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   rds_tmp <- tempfile(
@@ -4859,7 +5029,8 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
   published_json <- FALSE
   on.exit({
     unlink(c(rds_tmp, json_tmp), force = TRUE)
-    if (published_rds && !published_json) {
+    if (published_rds && !published_json &&
+        .fastkpc_full_cuda_prepared_s_owns_shard_lock(lock)) {
       unlink(paths$rds, force = TRUE)
     }
   }, add = TRUE)
@@ -4881,9 +5052,11 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
     summary = validation_summary,
     inputs = inputs,
     expected_manifest = expected_manifest,
+    target_state_index = target_state_index,
     rds_path = rds_tmp
   )
   if (!is.null(interruption_hook)) interruption_hook("before_publish")
+  .fastkpc_full_cuda_prepared_s_require_shard_lock(lock)
   if (file.exists(paths$rds) || file.exists(paths$summary_json)) {
     stop("Prepared-S shard final path appeared during publish",
          call. = FALSE)
@@ -4893,6 +5066,7 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
   }
   published_rds <- TRUE
   if (!is.null(interruption_hook)) interruption_hook("after_rds_publish")
+  .fastkpc_full_cuda_prepared_s_require_shard_lock(lock)
   if (!file.rename(json_tmp, paths$summary_json)) {
     stop("failed to publish Prepared-S shard completion JSON",
          call. = FALSE)
@@ -4904,8 +5078,12 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
 
 .fastkpc_full_cuda_run_prepared_s_shard_core <- function(
     inputs, assigned_setups, shard_id, context, output_dir,
-    setup_builder, target_builder, interruption_hook = NULL) {
+    setup_builder, target_builder,
+    target_state_index_builder =
+      .fastkpc_full_cuda_target_state_input_index,
+    interruption_hook = NULL) {
   if (!is.function(setup_builder) || !is.function(target_builder) ||
+      !is.function(target_state_index_builder) ||
       (!is.null(interruption_hook) && !is.function(interruption_hook))) {
     stop("private Prepared-S shard builder injection is invalid",
          call. = FALSE)
@@ -4919,6 +5097,14 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
   paths <- fastkpc_full_cuda_prepared_s_shard_paths(
     output_dir, manifest$shard_id
   )
+  lock <- .fastkpc_full_cuda_prepared_s_acquire_shard_lock(
+    paths$lock_dir
+  )
+  on.exit(
+    .fastkpc_full_cuda_prepared_s_release_shard_lock(lock),
+    add = TRUE
+  )
+  target_state_index <- target_state_index_builder(inputs)
   final_exists <- c(
     rds = file.exists(paths$rds),
     summary = file.exists(paths$summary_json)
@@ -4930,7 +5116,8 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
     completed <- .fastkpc_full_cuda_prepared_s_read_shard_core(
       paths = paths,
       inputs = inputs,
-      expected_manifest = manifest
+      expected_manifest = manifest,
+      target_state_index = target_state_index
     )
     return(list(
       status = "reused", paths = paths, payload = completed$payload
@@ -4946,25 +5133,21 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
   selected <- selected[
     order(selected$sorted_rank, method = "radix"), , drop = FALSE
   ]
-  setup_rows <- as.data.frame(
-    inputs$same_s_setup_metadata, stringsAsFactors = FALSE
-  )
   started <- proc.time()[["elapsed"]]
   results <- lapply(seq_len(nrow(selected)), function(index) {
     group_id <- as.character(selected$same_S_group_id[[index]])
-    setup_row_index <- which(
-      as.character(setup_rows$same_S_group_id) == group_id
-    )
+    setup_row_index <- target_state_index$setup_row_indices[[group_id]]
     if (length(setup_row_index) != 1L) {
       stop("Prepared-S shard setup row lineage mismatch", call. = FALSE)
     }
-    setup_row <- setup_rows[setup_row_index, , drop = FALSE]
+    setup_row <- target_state_index$setup_rows[
+      setup_row_index, , drop = FALSE
+    ]
     setup <- setup_builder(inputs = inputs, setup_row = setup_row)
-    fastkpc_full_cuda_validate_prepared_s_setup(
-      setup = setup,
-      setup_row = setup_row,
-      dataset_sha256 = inputs$dataset_sha256
-    )
+    target_context <-
+      .fastkpc_full_cuda_target_state_context_from_index(
+        target_state_index, setup
+      )
     if (!identical(
           as.character(setup$prepared_s_key_sha256),
           as.character(selected$prepared_s_key_sha256[[index]])
@@ -4973,10 +5156,12 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
            call. = FALSE)
     }
     states <- target_builder(
-      inputs = inputs, prepared_setup = setup
+      context = target_context, prepared_setup = setup
     )
-    fastkpc_full_cuda_validate_target_states(
-      states = states, inputs = inputs, prepared_setup = setup
+    .fastkpc_full_cuda_validate_target_states_with_context(
+      states = states,
+      context = target_context,
+      prepared_setup = setup
     )
     list(setup = setup, states = states)
   })
@@ -5017,6 +5202,8 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
     paths = paths,
     inputs = inputs,
     expected_manifest = manifest,
+    target_state_index = target_state_index,
+    lock = lock,
     interruption_hook = interruption_hook
   )
   list(status = "written", paths = paths, payload = payload)
@@ -5035,14 +5222,35 @@ fastkpc_full_cuda_run_prepared_s_shard <- function(
     context = context,
     output_dir = output_dir,
     setup_builder = fastkpc_full_cuda_build_prepared_s_setup,
-    target_builder = fastkpc_full_cuda_build_target_states
+    target_builder = .fastkpc_full_cuda_build_target_states_from_context,
+    target_state_index_builder =
+      .fastkpc_full_cuda_target_state_input_index
   )
 }
 
-fastkpc_full_cuda_merge_prepared_s_shards <- function(
-    inputs, shard_count, shard_dir) {
+.fastkpc_full_cuda_merge_prepared_s_shards_core <- function(
+    inputs, shard_count, shard_dir,
+    target_state_index_builder =
+      .fastkpc_full_cuda_target_state_input_index) {
+  if (!is.function(target_state_index_builder)) {
+    stop("private Prepared-S merge index builder is invalid",
+         call. = FALSE)
+  }
   shard_count <-
     fastkpc_full_cuda_prepared_s_validate_shard_count(shard_count)
+  lock_entries <- if (dir.exists(shard_dir)) {
+    list.files(
+      shard_dir,
+      pattern = "^shard_[0-9]+\\.lock$",
+      full.names = TRUE
+    )
+  } else {
+    character()
+  }
+  if (length(lock_entries) > 0L) {
+    stop("Prepared-S shard lock exists: ", basename(lock_entries[[1L]]),
+         call. = FALSE)
+  }
   assigned <- fastkpc_full_cuda_prepared_s_assign_shards(
     fastkpc_full_cuda_prepared_s_setup_index(inputs), shard_count
   )
@@ -5076,37 +5284,19 @@ fastkpc_full_cuda_merge_prepared_s_shards <- function(
     stop("unexpected Prepared-S shard RDS", call. = FALSE)
   }
 
+  target_state_index <- target_state_index_builder(inputs)
   loaded <- lapply(expected_ids, function(shard_id) {
-    fastkpc_full_cuda_prepared_s_read_shard(
-      fastkpc_full_cuda_prepared_s_shard_paths(shard_dir, shard_id),
-      inputs = inputs
-    )
-  })
-  declared_ids <- vapply(loaded, function(value) {
-    fastkpc_full_cuda_prepared_s_validate_shard_id(
-      value$payload$manifest$shard_id, shard_count
-    )
-  }, integer(1L))
-  if (anyDuplicated(declared_ids)) {
-    stop("duplicate Prepared-S shard id", call. = FALSE)
-  }
-  if (!identical(sort(declared_ids), expected_ids)) {
-    stop("missing Prepared-S shard id", call. = FALSE)
-  }
-  for (index in seq_along(expected_ids)) {
-    shard_id <- expected_ids[[index]]
     expected_manifest <- fastkpc_full_cuda_prepared_s_shard_manifest(
       assigned, shard_id, inputs, context
     )
     paths <- fastkpc_full_cuda_prepared_s_shard_paths(shard_dir, shard_id)
-    .fastkpc_full_cuda_validate_prepared_s_shard_core(
-      payload = loaded[[index]]$payload,
-      summary = loaded[[index]]$summary,
+    .fastkpc_full_cuda_prepared_s_read_shard_core(
+      paths = paths,
       inputs = inputs,
       expected_manifest = expected_manifest,
-      rds_path = paths$rds
+      target_state_index = target_state_index
     )
-  }
+  })
 
   setup_keys <- unlist(lapply(loaded, function(value) {
     value$payload$ordered_setup_keys
@@ -5156,6 +5346,17 @@ fastkpc_full_cuda_merge_prepared_s_shards <- function(
     prepared_s_setups = setups,
     target_states = states,
     shard_summaries = lapply(loaded, `[[`, "summary")
+  )
+}
+
+fastkpc_full_cuda_merge_prepared_s_shards <- function(
+    inputs, shard_count, shard_dir) {
+  .fastkpc_full_cuda_merge_prepared_s_shards_core(
+    inputs = inputs,
+    shard_count = shard_count,
+    shard_dir = shard_dir,
+    target_state_index_builder =
+      .fastkpc_full_cuda_target_state_input_index
   )
 }
 

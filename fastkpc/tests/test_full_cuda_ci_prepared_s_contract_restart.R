@@ -39,9 +39,9 @@ storage.mode(fixture_data) <- "double"
 fixture_dataset_sha256 <- fastkpc_full_cuda_data_hash(fixture_data)
 
 fixture_S <- list(
-  2L, 3L, 4L, c(2L, 3L), c(3L, 4L), c(2L, 3L, 4L)
+  2L, 3L, 4L, c(2L, 3L), c(3L, 4L), c(2L, 3L, 4L), 2L
 )
-fixture_targets <- c(1L, 5L, 6L, 7L, 8L, 1L)
+fixture_targets <- c(1L, 5L, 6L, 7L, 8L, 1L, 5L)
 fixture_S_key <- vapply(
   fixture_S, function(value) paste(value, collapse = "|"), character(1L)
 )
@@ -136,6 +136,47 @@ fixture_states <- lapply(fixture_prepared, function(setup) {
   )
 })
 names(fixture_states) <- fixture_prepared_keys
+
+multi_target_setup_index <- which(vapply(
+  fixture_states, nrow, integer(1L)
+) == 2L)
+assert_true(
+  length(fixture_prepared) == 6L &&
+    length(multi_target_setup_index) == 1L &&
+    sum(vapply(fixture_states, nrow, integer(1L))) == 7L,
+  "fixture must contain six setup groups and one two-target group"
+)
+indexed_fixture_input <- .fastkpc_full_cuda_target_state_input_index(
+  fixture_inputs
+)
+indexed_fixture_context <-
+  .fastkpc_full_cuda_target_state_context_from_index(
+    indexed_fixture_input,
+    fixture_prepared[[multi_target_setup_index]]
+  )
+indexed_fixture_states <-
+  .fastkpc_full_cuda_build_target_states_from_context(
+    context = indexed_fixture_context,
+    prepared_setup = fixture_prepared[[multi_target_setup_index]]
+  )
+.fastkpc_full_cuda_validate_target_states_with_context(
+  states = indexed_fixture_states,
+  context = indexed_fixture_context,
+  prepared_setup = fixture_prepared[[multi_target_setup_index]]
+)
+assert_true(
+  identical(
+    indexed_fixture_states,
+    fixture_states[[multi_target_setup_index]]
+  ) &&
+    identical(
+      fastkpc_full_cuda_census_frame_hash(indexed_fixture_states),
+      fastkpc_full_cuda_census_frame_hash(
+        fixture_states[[multi_target_setup_index]]
+      )
+    ),
+  "indexed and public TargetState paths must be frame/hash exact"
+)
 
 pairlist_setup_fixture <- as.pairlist(fixture_prepared[[1L]])
 pairlist_setup_row_index <- which(
@@ -298,26 +339,74 @@ fixture_setup_builder <- function(inputs, setup_row) {
   }, logical(1L)))
   fixture_prepared[[index]]
 }
-fixture_target_builder <- function(inputs, prepared_setup) {
+fixture_target_builder <- function(
+    inputs = NULL, context = NULL, prepared_setup) {
   builder_calls$target <- builder_calls$target + 1L
   fixture_states[[prepared_setup$prepared_s_key_sha256]]
 }
 
-forbidden_public_formals <- c(
-  "setup_builder", "target_builder", "builder", "validator",
-  "hash_fun", "interruption_hook"
-)
-public_formals <- names(formals(fastkpc_full_cuda_run_prepared_s_shard))
-public_body <- paste(
-  deparse(body(fastkpc_full_cuda_run_prepared_s_shard)), collapse = "\n"
+index_builder_calls <- new.env(parent = emptyenv())
+index_builder_calls$run <- 0L
+counting_run_index_builder <- function(inputs) {
+  index_builder_calls$run <- index_builder_calls$run + 1L
+  .fastkpc_full_cuda_target_state_input_index(inputs)
+}
+indexed_run_dir <- tempfile("prepared-s-indexed-run-")
+indexed_run <- .fastkpc_full_cuda_run_prepared_s_shard_core(
+  inputs = fixture_inputs,
+  assigned_setups = assigned,
+  shard_id = 0L,
+  context = context,
+  output_dir = indexed_run_dir,
+  setup_builder = fixture_setup_builder,
+  target_builder = fixture_target_builder,
+  target_state_index_builder = counting_run_index_builder
 )
 assert_true(
-  length(intersect(public_formals, forbidden_public_formals)) == 0L &&
-    grepl("fastkpc_full_cuda_build_prepared_s_setup", public_body,
-          fixed = TRUE) &&
-    grepl("fastkpc_full_cuda_build_target_states", public_body,
-          fixed = TRUE),
-  "public Prepared-S runner must bind real builders without authority injection"
+  indexed_run$status == "written" && index_builder_calls$run == 1L,
+  "one multi-setup shard run must build the TargetState index once"
+)
+
+forbidden_public_formals <- c(
+  "setup_builder", "target_builder", "builder", "validator",
+  "hash_fun", "interruption_hook", "target_state_index",
+  "target_state_index_builder", "target_state_context"
+)
+public_formals <- names(formals(fastkpc_full_cuda_run_prepared_s_shard))
+assert_true(
+  length(intersect(public_formals, forbidden_public_formals)) == 0L,
+  "public Prepared-S runner must expose no builder or hash authority"
+)
+public_runner_dir <- tempfile("prepared-s-public-runner-")
+public_written <- fastkpc_full_cuda_run_prepared_s_shard(
+  inputs = fixture_inputs,
+  shard_count = 3L,
+  shard_id = 2L,
+  output_dir = public_runner_dir
+)
+public_written_summary <- jsonlite::read_json(
+  public_written$paths$summary_json, simplifyVector = TRUE
+)
+fastkpc_full_cuda_validate_prepared_s_shard(
+  payload = readRDS(public_written$paths$rds),
+  summary = public_written_summary,
+  inputs = fixture_inputs,
+  shard_count = 3L,
+  shard_id = 2L,
+  rds_path = public_written$paths$rds
+)
+public_reused <- fastkpc_full_cuda_run_prepared_s_shard(
+  inputs = fixture_inputs,
+  shard_count = 3L,
+  shard_id = 2L,
+  output_dir = public_runner_dir
+)
+assert_true(
+  public_written$status == "written" && public_reused$status == "reused",
+  paste(
+    "public production runner must write and reuse a shard validated",
+    "against the caller's trusted layout"
+  )
 )
 
 assert_context_error <- function(mutator, pattern, message) {
@@ -408,7 +497,8 @@ response_paths <- fastkpc_full_cuda_prepared_s_shard_paths(
 )
 assert_true(
   !file.exists(response_paths$rds) &&
-    !file.exists(response_paths$summary_json),
+    !file.exists(response_paths$summary_json) &&
+    !file.exists(response_paths$lock_dir),
   "response leakage failure must not publish a reusable final pair"
 )
 
@@ -438,6 +528,7 @@ interrupt_paths <- fastkpc_full_cuda_prepared_s_shard_paths(
 assert_true(
   !file.exists(interrupt_paths$rds) &&
     !file.exists(interrupt_paths$summary_json) &&
+    !file.exists(interrupt_paths$lock_dir) &&
     length(list.files(interrupt_dir, pattern = "\\.tmp")) == 0L,
   "interruption before publish must leave no final pair or temp files"
 )
@@ -455,6 +546,74 @@ assert_true(
     file.exists(interrupt_paths$rds) &&
     file.exists(interrupt_paths$summary_json),
   "rerun after pre-publish interruption must complete deterministically"
+)
+
+lock_race_dir <- tempfile("prepared-s-lock-race-")
+lock_race_path <- file.path(lock_race_dir, "shard_0.lock")
+second_writer_calls <- new.env(parent = emptyenv())
+second_writer_calls$setup <- 0L
+second_writer_calls$target <- 0L
+second_writer_setup_builder <- function(inputs, setup_row) {
+  second_writer_calls$setup <- second_writer_calls$setup + 1L
+  fixture_setup_builder(inputs, setup_row)
+}
+second_writer_target_builder <- function(
+    inputs = NULL, context = NULL, prepared_setup) {
+  second_writer_calls$target <- second_writer_calls$target + 1L
+  fixture_target_builder(
+    inputs = inputs, context = context, prepared_setup = prepared_setup
+  )
+}
+lock_race_hook <- function(stage) {
+  if (!identical(stage, "before_publish")) return(invisible(NULL))
+  assert_true(
+    dir.exists(lock_race_path),
+    "first Prepared-S writer must hold its shard lock before publish"
+  )
+  assert_error(
+    .fastkpc_full_cuda_run_prepared_s_shard_core(
+      inputs = fixture_inputs,
+      assigned_setups = assigned,
+      shard_id = 0L,
+      context = context,
+      output_dir = lock_race_dir,
+      setup_builder = second_writer_setup_builder,
+      target_builder = second_writer_target_builder
+    ),
+    "Prepared-S shard lock exists",
+    "second Prepared-S writer must fail closed while the lock is held"
+  )
+  assert_true(
+    second_writer_calls$setup == 0L &&
+      second_writer_calls$target == 0L,
+    "second writer lock failure must occur before any builder call"
+  )
+  invisible(NULL)
+}
+lock_race_written <- .fastkpc_full_cuda_run_prepared_s_shard_core(
+  inputs = fixture_inputs,
+  assigned_setups = assigned,
+  shard_id = 0L,
+  context = context,
+  output_dir = lock_race_dir,
+  setup_builder = fixture_setup_builder,
+  target_builder = fixture_target_builder,
+  interruption_hook = lock_race_hook
+)
+lock_race_loaded <- fastkpc_full_cuda_prepared_s_read_shard(
+  shard_dir = lock_race_dir,
+  inputs = fixture_inputs,
+  shard_count = 3L,
+  shard_id = 0L
+)
+assert_true(
+  lock_race_written$status == "written" &&
+    !dir.exists(lock_race_path) &&
+    identical(
+      lock_race_loaded$payload$manifest,
+      lock_race_written$payload$manifest
+    ),
+  "first writer must release its lock and publish one valid final pair"
 )
 
 output_dir <- tempfile("prepared-s-restart-")
@@ -555,6 +714,24 @@ assert_true(
   builder_calls$setup == 0L && builder_calls$target == 0L,
   "layout-mismatched resume must fail before any builder call"
 )
+layout_summary <- jsonlite::read_json(
+  layout_written$paths$summary_json, simplifyVector = TRUE
+)
+assert_error(
+  fastkpc_full_cuda_validate_prepared_s_shard(
+    payload = readRDS(layout_written$paths$rds),
+    summary = layout_summary,
+    inputs = fixture_inputs,
+    shard_count = 3L,
+    shard_id = 0L,
+    rds_path = layout_written$paths$rds
+  ),
+  "Prepared-S shard manifest mismatch",
+  paste(
+    "public validator must bind a canonical two-shard payload to the",
+    "caller's trusted three-shard layout"
+  )
+)
 
 misplaced_dir <- tempfile("prepared-s-misplaced-shard-")
 dir.create(misplaced_dir, recursive = TRUE)
@@ -585,6 +762,16 @@ assert_true(
   builder_calls$setup == 0L && builder_calls$target == 0L,
   "misplaced shard resume must fail before any builder call"
 )
+assert_error(
+  fastkpc_full_cuda_prepared_s_read_shard(
+    shard_dir = misplaced_dir,
+    inputs = fixture_inputs,
+    shard_count = 3L,
+    shard_id = 1L
+  ),
+  "Prepared-S shard manifest mismatch",
+  "public reader must bind trusted shard identity to its canonical path"
+)
 
 pristine_rds_backup <- tempfile("prepared-s-pristine-rds-")
 pristine_json_backup <- tempfile("prepared-s-pristine-json-")
@@ -602,6 +789,57 @@ restore_pristine_pair <- function() {
     "test fixture must restore the pristine authenticated shard pair"
   )
 }
+
+prelocked_dir <- tempfile("prepared-s-prelocked-")
+dir.create(prelocked_dir, recursive = TRUE)
+prelocked_paths <- fastkpc_full_cuda_prepared_s_shard_paths(
+  prelocked_dir, 0L
+)
+assert_true(
+  file.copy(first$paths$rds, prelocked_paths$rds) &&
+    file.copy(first$paths$summary_json, prelocked_paths$summary_json),
+  "test fixture must install a valid final pair beside a stale lock"
+)
+prelocked_rds_hash <- fastkpc_full_cuda_census_file_hash(
+  prelocked_paths$rds
+)
+prelocked_json_hash <- fastkpc_full_cuda_census_file_hash(
+  prelocked_paths$summary_json
+)
+prelocked_lock <- file.path(prelocked_dir, "shard_0.lock")
+assert_true(
+  dir.create(prelocked_lock),
+  "test fixture must create a pre-existing shard lock"
+)
+builder_calls$setup <- 0L
+builder_calls$target <- 0L
+assert_error(
+  .fastkpc_full_cuda_run_prepared_s_shard_core(
+    inputs = fixture_inputs,
+    assigned_setups = assigned,
+    shard_id = 0L,
+    context = context,
+    output_dir = prelocked_dir,
+    setup_builder = fixture_setup_builder,
+    target_builder = fixture_target_builder
+  ),
+  "Prepared-S shard lock exists",
+  "pre-existing shard locks must fail closed before resume validation"
+)
+assert_true(
+  builder_calls$setup == 0L && builder_calls$target == 0L &&
+    identical(
+      prelocked_rds_hash,
+      fastkpc_full_cuda_census_file_hash(prelocked_paths$rds)
+    ) &&
+    identical(
+      prelocked_json_hash,
+      fastkpc_full_cuda_census_file_hash(prelocked_paths$summary_json)
+    ),
+  "lock failure must not build, delete, or replace an existing final pair"
+)
+unlink(prelocked_lock, recursive = TRUE)
+
 malformed_payload_authentication <- function(payload) {
   setup_keys <- as.character(payload$ordered_setup_keys)
   setups <- payload$prepared_s_setups
@@ -722,6 +960,8 @@ assert_error(
     payload = readRDS(first$paths$rds),
     summary = pairlist_setup_summary,
     inputs = fixture_inputs,
+    shard_count = 3L,
+    shard_id = 0L,
     rds_path = first$paths$rds
   ),
   "PreparedSSetup contains non-plain data",
@@ -879,6 +1119,8 @@ assert_error(
     payload = readRDS(pristine_rds_backup),
     summary = summary_attribute_attack,
     inputs = fixture_inputs,
+    shard_count = 3L,
+    shard_id = 0L,
     rds_path = pristine_rds_backup
   ),
   "Prepared-S shard summary schema mismatch",
@@ -897,6 +1139,8 @@ assert_error(
     payload = readRDS(pristine_rds_backup),
     summary = summary_hash_attribute_attack,
     inputs = fixture_inputs,
+    shard_count = 3L,
+    shard_id = 0L,
     rds_path = pristine_rds_backup
   ),
   "Prepared-S shard completion field schema mismatch",
@@ -906,23 +1150,35 @@ assert_error(
 validator_formals <- names(formals(
   fastkpc_full_cuda_validate_prepared_s_shard
 ))
-validator_body <- paste(
-  deparse(body(fastkpc_full_cuda_validate_prepared_s_shard)),
-  collapse = "\n"
-)
 assert_true(
   identical(
-    validator_formals, c("payload", "summary", "inputs", "rds_path")
+    validator_formals,
+    c(
+      "payload", "summary", "inputs", "shard_count", "shard_id",
+      "rds_path"
+    )
   ) &&
-    !"expected_manifest" %in% validator_formals &&
-    grepl("fastkpc_full_cuda_prepared_s_setup_index", validator_body,
-          fixed = TRUE) &&
-    grepl("fastkpc_full_cuda_prepared_s_shard_manifest", validator_body,
-          fixed = TRUE),
+    length(intersect(
+      validator_formals,
+      c("expected_manifest", forbidden_public_formals)
+    )) == 0L,
   paste(
-    "public shard validator must derive its canonical manifest from inputs",
-    "without expected-manifest authority injection"
+    "public shard validator must require trusted layout scalars without",
+    "expected-manifest or hash authority injection"
   )
+)
+reader_formals <- names(formals(
+  fastkpc_full_cuda_prepared_s_read_shard
+))
+assert_true(
+  identical(
+    reader_formals, c("shard_dir", "inputs", "shard_count", "shard_id")
+  ) &&
+    length(intersect(
+      reader_formals,
+      c("paths", "expected_manifest", forbidden_public_formals)
+    )) == 0L,
+  "public shard reader must accept only canonical directory and layout"
 )
 
 summary_backup <- tempfile("prepared-s-summary-backup-")
@@ -976,7 +1232,8 @@ assert_error(
   "missing completion JSON must fail closed"
 )
 assert_true(
-  file.exists(first$paths$rds) && !file.exists(first$paths$summary_json),
+  file.exists(first$paths$rds) && !file.exists(first$paths$summary_json) &&
+    !file.exists(first$paths$lock_dir),
   "half-published RDS must not be silently overwritten"
 )
 assert_true(
@@ -1021,6 +1278,8 @@ assert_error(
     payload = readRDS(stale_written$paths$rds),
     summary = stale_summary,
     inputs = fixture_inputs,
+    shard_count = 3L,
+    shard_id = 0L,
     rds_path = stale_written$paths$rds
   ),
   "Prepared-S shard manifest mismatch",
@@ -1101,17 +1360,27 @@ assert_error(
 
 builder_calls$setup <- 0L
 builder_calls$target <- 0L
+empty_dir <- tempfile("prepared-s-empty-shard-")
 empty_run <- .fastkpc_full_cuda_run_prepared_s_shard_core(
   inputs = fixture_inputs,
   assigned_setups = sparse_assigned,
   shard_id = 6L,
   context = context,
-  output_dir = tempfile("prepared-s-empty-shard-"),
+  output_dir = empty_dir,
+  setup_builder = fixture_setup_builder,
+  target_builder = fixture_target_builder
+)
+empty_reused <- .fastkpc_full_cuda_run_prepared_s_shard_core(
+  inputs = fixture_inputs,
+  assigned_setups = sparse_assigned,
+  shard_id = 6L,
+  context = context,
+  output_dir = empty_dir,
   setup_builder = fixture_setup_builder,
   target_builder = fixture_target_builder
 )
 assert_true(
-  empty_run$status == "written" &&
+  empty_run$status == "written" && empty_reused$status == "reused" &&
     builder_calls$setup == 0L && builder_calls$target == 0L &&
     length(empty_run$payload$ordered_setup_keys) == 0L &&
     nrow(empty_run$payload$target_states) == 0L,
@@ -1119,10 +1388,10 @@ assert_true(
 )
 
 merge_dir <- tempfile("prepared-s-merge-")
-for (shard_id in 0:2) {
+for (shard_id in 0:6) {
   .fastkpc_full_cuda_run_prepared_s_shard_core(
     inputs = fixture_inputs,
-    assigned_setups = assigned,
+    assigned_setups = sparse_assigned,
     shard_id = shard_id,
     context = context,
     output_dir = merge_dir,
@@ -1130,19 +1399,71 @@ for (shard_id in 0:2) {
     target_builder = fixture_target_builder
   )
 }
+merge_lock <- file.path(merge_dir, "shard_1.lock")
+assert_true(
+  dir.create(merge_lock),
+  "test fixture must create an active merge shard lock"
+)
+assert_error(
+  fastkpc_full_cuda_merge_prepared_s_shards(
+    inputs = fixture_inputs,
+    shard_count = 7L,
+    shard_dir = merge_dir
+  ),
+  "Prepared-S shard lock exists",
+  "Prepared-S merge must fail closed while any shard lock exists"
+)
+unlink(merge_lock, recursive = TRUE)
 merged <- fastkpc_full_cuda_merge_prepared_s_shards(
   inputs = fixture_inputs,
-  shard_count = 3L,
+  shard_count = 7L,
   shard_dir = merge_dir
+)
+expected_merged_targets <-
+  fastkpc_full_cuda_prepared_s_target_rows_for_setups(
+    fixture_inputs, sparse_assigned
+  )
+merged_target_keys_by_setup <- split(
+  as.character(merged$target_states$residual_key_sha256),
+  as.character(merged$target_states$prepared_s_key_sha256)
 )
 assert_true(
   identical(names(merged$prepared_s_setups), sorted_setup_keys) &&
     identical(
       as.character(merged$target_states$prepared_s_key_sha256),
-      sorted_setup_keys
+      as.character(expected_merged_targets$prepared_s_key_sha256)
     ) &&
-    nrow(merged$target_states) == 6L,
+    identical(
+      as.character(merged$target_states$residual_key_sha256),
+      as.character(expected_merged_targets$residual_key_sha256)
+    ) &&
+    nrow(merged$target_states) == 7L &&
+    sum(vapply(merged_target_keys_by_setup, length, integer(1L)) == 2L) ==
+      1L &&
+    all(vapply(merged_target_keys_by_setup, function(keys) {
+      identical(keys, sort(keys, method = "radix"))
+    }, logical(1L))),
   "Prepared-S merge must restore exact canonical setup and target order"
+)
+
+index_builder_calls$merge <- 0L
+counting_merge_index_builder <- function(inputs) {
+  index_builder_calls$merge <- index_builder_calls$merge + 1L
+  .fastkpc_full_cuda_target_state_input_index(inputs)
+}
+indexed_merged <- .fastkpc_full_cuda_merge_prepared_s_shards_core(
+  inputs = fixture_inputs,
+  shard_count = 7L,
+  shard_dir = merge_dir,
+  target_state_index_builder = counting_merge_index_builder
+)
+assert_true(
+  index_builder_calls$merge == 1L &&
+    identical(
+      fastkpc_full_cuda_census_frame_hash(indexed_merged$target_states),
+      fastkpc_full_cuda_census_frame_hash(merged$target_states)
+    ),
+  "Prepared-S merge must build one index and preserve the target frame"
 )
 
 missing_paths <- fastkpc_full_cuda_prepared_s_shard_paths(merge_dir, 2L)
@@ -1153,7 +1474,7 @@ assert_true(
 )
 assert_error(
   fastkpc_full_cuda_merge_prepared_s_shards(
-    fixture_inputs, 3L, merge_dir
+    fixture_inputs, 7L, merge_dir
   ),
   "missing Prepared-S shard completion",
   "Prepared-S merge must reject a missing shard"
@@ -1177,10 +1498,10 @@ assert_true(
 )
 assert_error(
   fastkpc_full_cuda_merge_prepared_s_shards(
-    fixture_inputs, 3L, merge_dir
+    fixture_inputs, 7L, merge_dir
   ),
-  "duplicate Prepared-S shard id",
-  "Prepared-S merge must reject duplicate declared shards"
+  "Prepared-S shard manifest mismatch",
+  "Prepared-S merge must bind each canonical path to its trusted shard id"
 )
 assert_true(
   file.copy(one_rds_backup, shard_one$rds, overwrite = TRUE) &&
