@@ -28,6 +28,56 @@ assert_sha256 <- function(value, message) {
   )
 }
 
+assert_file_bytes_identical <- function(left, right, message) {
+  left_info <- file.info(left)
+  right_info <- file.info(right)
+  assert_true(
+    file.exists(left) && file.exists(right) &&
+      identical(as.numeric(left_info$size), as.numeric(right_info$size)),
+    message
+  )
+  left_connection <- file(left, open = "rb")
+  right_connection <- file(right, open = "rb")
+  on.exit(close(left_connection), add = TRUE)
+  on.exit(close(right_connection), add = TRUE)
+  repeat {
+    left_bytes <- readBin(left_connection, what = "raw", n = 1024L^2L)
+    right_bytes <- readBin(right_connection, what = "raw", n = 1024L^2L)
+    assert_true(identical(left_bytes, right_bytes), message)
+    if (length(left_bytes) == 0L) break
+  }
+  invisible(TRUE)
+}
+
+runner_status <- function(output) {
+  status <- attr(output, "status", exact = TRUE)
+  if (is.null(status)) 0L else as.integer(status)
+}
+
+run_prepared_s_contract_runner <- function(
+    runner_path, census_dir, data_path, output_dir,
+    max_groups = "64", parity_scope = "iteration", workers = "1",
+    shard_count = "2", resume = "1") {
+  environment <- c(
+    paste0("FASTKPC_FULL_CUDA_PREPARED_S_CENSUS_DIR=", census_dir),
+    paste0("FASTKPC_FULL_CUDA_PREPARED_S_DATA_PATH=", data_path),
+    paste0("FASTKPC_FULL_CUDA_PREPARED_S_OUTPUT_DIR=", output_dir),
+    paste0("FASTKPC_FULL_CUDA_PREPARED_S_MAX_GROUPS=", max_groups),
+    paste0("FASTKPC_FULL_CUDA_PREPARED_S_PARITY_SCOPE=", parity_scope),
+    paste0("FASTKPC_FULL_CUDA_PREPARED_S_WORKERS=", workers),
+    paste0("FASTKPC_FULL_CUDA_PREPARED_S_SHARD_COUNT=", shard_count),
+    paste0("FASTKPC_FULL_CUDA_PREPARED_S_RESUME=", resume)
+  )
+  output <- suppressWarnings(system2(
+    command = file.path(R.home("bin"), "Rscript"),
+    args = runner_path,
+    stdout = TRUE,
+    stderr = TRUE,
+    env = environment
+  ))
+  list(status = runner_status(output), output = output)
+}
+
 assert_sorted_reasons <- function(table, message) {
   assert_true(
     is.data.frame(table) &&
@@ -79,6 +129,13 @@ scramble_selection_inputs <- function(inputs) {
 }
 
 source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")
+
+prepared_s_runner_path <-
+  "fastkpc/tools/run_full_cuda_ci_prepared_s_contract.R"
+assert_true(
+  file.exists(prepared_s_runner_path),
+  "scaled Prepared-S runner does not exist"
+)
 
 run_spectra_fallback_injection <- function() {
   selector_name <-
@@ -215,6 +272,49 @@ run_spectra_fallback_injection <- function() {
   )
 }
 
+run_scaled_selection_count_regression <- function() {
+  function_name <- "fastkpc_full_cuda_prepared_s_setup_index"
+  original <- get(function_name, envir = .GlobalEnv, inherits = FALSE)
+  on.exit(assign(
+    function_name, original, envir = .GlobalEnv
+  ), add = TRUE)
+  keys <- sprintf("%064x", seq_len(80L))
+  groups <- sprintf("%064x", 1000L + seq_len(80L))
+  synthetic_index <- data.frame(
+    setup_row_index = seq_len(80L),
+    same_S_group_id = groups,
+    prepared_s_key_payload = paste0("payload-", seq_len(80L), "\n"),
+    prepared_s_key_sha256 = keys,
+    stringsAsFactors = FALSE
+  )
+  assign(
+    function_name,
+    function(inputs) synthetic_index,
+    envir = .GlobalEnv
+  )
+  iteration <- list(
+    setup_groups = data.frame(
+      same_S_group_id = groups[seq_len(44L)],
+      stringsAsFactors = FALSE
+    )
+  )
+  selected <- fastkpc_full_cuda_prepared_s_select_setup_corpus(
+    inputs = list(),
+    max_groups = 64L,
+    parity_scope = "iteration",
+    iteration = iteration
+  )
+  assert_true(
+    nrow(selected) == 64L &&
+      all(groups[seq_len(44L)] %in% selected$same_S_group_id) &&
+      identical(
+        selected$prepared_s_key_sha256,
+        keys[seq_len(64L)]
+      ),
+    "positive max_groups must select 44 iteration groups plus radix fill"
+  )
+}
+
 reason_store <- fastkpc_full_cuda_prepared_s_selection_reason_store()
 fastkpc_full_cuda_prepared_s_add_selection_reason(
   reason_store, "group-a", c("reason-z", "reason-a", "reason-z")
@@ -235,6 +335,7 @@ assert_identical(
   "selection reasons must support one-to-many and pairwise aggregation"
 )
 run_spectra_fallback_injection()
+run_scaled_selection_count_regression()
 
 if (identical(
       Sys.getenv("FASTKPC_PREPARED_S_TEST_SCOPE", unset = "full"),
@@ -957,6 +1058,521 @@ if (is.na(original_dcov_env)) {
   Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = original_dcov_env)
 }
 
+runner_output_dir <- tempfile("prepared-s-scaled-runner-")
+first_runner <- run_prepared_s_contract_runner(
+  runner_path = prepared_s_runner_path,
+  census_dir = census_dir,
+  data_path = data_path,
+  output_dir = runner_output_dir
+)
+assert_true(
+  first_runner$status == 0L,
+  paste0(
+    "first scaled Prepared-S runner failed: ",
+    paste(first_runner$output, collapse = "\n")
+  )
+)
+
+artifact_paths <- fastkpc_full_cuda_prepared_s_artifact_paths(
+  runner_output_dir
+)
+expected_artifact_path_names <- c(
+  "manifest_json", "summary_json", "summary_md", "commands_txt",
+  "environment_txt", "input_hashes_csv",
+  "prepared_s_setup_index_rds", "prepared_s_setup_index_csv",
+  "target_state_index_rds", "target_state_index_csv",
+  "iteration_setup_groups_rds", "iteration_setup_groups_csv",
+  "iteration_target_keys_rds", "iteration_target_keys_csv",
+  "iteration_logical_tests_rds", "iteration_logical_tests_csv",
+  "iteration_coverage_csv", "qualification_setup_groups_rds",
+  "qualification_setup_groups_csv", "qualification_target_keys_rds",
+  "qualification_target_keys_csv", "qualification_logical_tests_rds",
+  "qualification_logical_tests_csv", "qualification_coverage_csv",
+  "setup_semantic_parity_csv", "target_retarget_parity_csv",
+  "dcov_parity_csv", "unsupported_envelope_csv", "fallbacks_csv",
+  "stage_timing_csv", "shards_dir"
+)
+assert_identical(
+  names(artifact_paths),
+  expected_artifact_path_names,
+  "Prepared-S standard artifact path schema"
+)
+assert_true(
+  all(file.exists(unlist(artifact_paths, use.names = FALSE))),
+  "every standard Prepared-S artifact path must exist"
+)
+expected_shard_files <- sort(c(
+  paste0("shard_", 0:1, ".rds"),
+  paste0("shard_", 0:1, ".summary.json")
+), method = "radix")
+assert_identical(
+  sort(list.files(artifact_paths$shards_dir), method = "radix"),
+  expected_shard_files,
+  "scaled Prepared-S runner must publish exactly two complete shards"
+)
+
+first_summary <- jsonlite::read_json(
+  artifact_paths$summary_json, simplifyVector = TRUE
+)
+first_manifest <- jsonlite::read_json(
+  artifact_paths$manifest_json, simplifyVector = TRUE
+)
+required_summary_fields <- c(
+  "pass", "phase2_complete", "run_scope", "parity_scope",
+  "phase2_input_authenticated", "selected_group_count",
+  "target_state_count", "prepared_s_key_corpus_exact",
+  "target_key_corpus_exact", "setup_lineage_exact",
+  "target_lineage_exact", "response_leakage_count",
+  "prepared_setup_fingerprint_collision_count",
+  "target_state_fingerprint_collision_count",
+  "unsupported_canonical_setup_count", "unknown_fallback_count",
+  "approximate_backend_count", "iteration_setup_group_count",
+  "iteration_target_key_count", "iteration_logical_test_count",
+  "seed_target_key_count", "qualification_target_key_count",
+  "qualification_logical_test_count",
+  "qualification_same_S_group_count",
+  "conditional_near_alpha_test_count",
+  "fixed_sp_coefficient_hash_exact_count",
+  "fixed_sp_fitted_hash_exact_count",
+  "fixed_sp_residual_hash_exact_count",
+  "fixed_sp_coefficient_hash_exact", "fixed_sp_fitted_hash_exact",
+  "fixed_sp_residual_hash_exact",
+  "legacy_dcov_max_abs_p_value_diff",
+  "legacy_dcov_p_value_exact_count",
+  "legacy_dcov_decision_flip_count",
+  "written_shard_count", "reused_shard_count",
+  "executed_group_count", "reused_group_count",
+  "artifact_payload_size_bytes", "stage_timing_total_seconds",
+  "max_rss_kb", "oracle_inherited_graph_gate",
+  "new_candidate_graph_gate"
+)
+assert_true(
+  all(required_summary_fields %in% names(first_summary)),
+  "Prepared-S summary must expose every required gate and metric"
+)
+assert_true(
+  isTRUE(first_summary$pass) && !isTRUE(first_summary$phase2_complete) &&
+    identical(as.character(first_summary$run_scope), "scaled_iteration") &&
+    identical(as.character(first_summary$parity_scope), "iteration") &&
+    isTRUE(first_summary$phase2_input_authenticated) &&
+    as.integer(first_summary$selected_group_count) == 64L &&
+    isTRUE(first_summary$prepared_s_key_corpus_exact) &&
+    isTRUE(first_summary$target_key_corpus_exact) &&
+    isTRUE(first_summary$setup_lineage_exact) &&
+    isTRUE(first_summary$target_lineage_exact),
+  "first scaled Prepared-S summary scope and lineage gates"
+)
+
+canonical_setup_index <-
+  fastkpc_full_cuda_prepared_s_setup_index(inputs)
+iteration_group_ids <- as.character(
+  iteration$setup_groups$same_S_group_id
+)
+iteration_setup_index <- match(
+  iteration_group_ids, canonical_setup_index$same_S_group_id
+)
+assert_true(
+  !anyNA(iteration_setup_index),
+  "iteration groups must resolve to the canonical PreparedSKey index"
+)
+iteration_prepared_keys <- as.character(
+  canonical_setup_index$prepared_s_key_sha256[iteration_setup_index]
+)
+remaining_setup_index <- canonical_setup_index[
+  !canonical_setup_index$same_S_group_id %in% iteration_group_ids,
+  , drop = FALSE
+]
+remaining_setup_index <- remaining_setup_index[order(
+  remaining_setup_index$prepared_s_key_sha256, method = "radix"
+), , drop = FALSE]
+expected_selected_keys <- sort(c(
+  iteration_prepared_keys,
+  head(as.character(remaining_setup_index$prepared_s_key_sha256), 20L)
+), method = "radix")
+expected_selected_index <- canonical_setup_index[match(
+  expected_selected_keys,
+  canonical_setup_index$prepared_s_key_sha256
+), , drop = FALSE]
+rownames(expected_selected_index) <- NULL
+expected_selected_targets <-
+  fastkpc_full_cuda_prepared_s_target_rows_for_setups(
+    inputs, expected_selected_index
+  )
+
+prepared_s_setup_index <- readRDS(
+  artifact_paths$prepared_s_setup_index_rds
+)
+target_state_index <- readRDS(artifact_paths$target_state_index_rds)
+assert_true(
+  is.list(prepared_s_setup_index) &&
+    identical(names(prepared_s_setup_index), expected_selected_keys) &&
+    all(iteration_prepared_keys %in% names(prepared_s_setup_index)),
+  paste(
+    "scaled setup corpus must contain all 44 iteration groups and the",
+    "next 20 PreparedSKeys in radix order"
+  )
+)
+assert_true(
+  is.data.frame(target_state_index) &&
+    nrow(target_state_index) == nrow(expected_selected_targets) &&
+    identical(
+      as.character(target_state_index$residual_key_sha256),
+      as.character(expected_selected_targets$residual_key_sha256)
+    ) &&
+    identical(
+      as.character(target_state_index$prepared_s_key_sha256),
+      as.character(expected_selected_targets$prepared_s_key_sha256)
+    ) &&
+    as.integer(first_summary$target_state_count) ==
+      nrow(expected_selected_targets),
+  "scaled TargetState index must retain exact selected target lineage"
+)
+assert_identical(
+  as.character(first_manifest$canonical_logical_census_hash),
+  as.character(inputs$manifest$canonical_logical_census_hash),
+  "artifact manifest must retain full canonical logical lineage"
+)
+assert_identical(
+  as.character(first_manifest$canonical_target_key_corpus_hash),
+  as.character(inputs$manifest$canonical_key_corpus_hash),
+  "artifact manifest must retain full canonical target lineage"
+)
+assert_identical(
+  as.character(first_manifest$selected_prepared_s_key_corpus_hash),
+  fastkpc_full_cuda_census_key_set_hash(expected_selected_keys),
+  "artifact manifest must authenticate the scaled PreparedSKey corpus"
+)
+assert_identical(
+  as.character(first_manifest$selected_target_key_corpus_hash),
+  fastkpc_full_cuda_census_key_set_hash(sort(
+    as.character(expected_selected_targets$residual_key_sha256),
+    method = "radix"
+  )),
+  "artifact manifest must authenticate the scaled target corpus"
+)
+
+assert_identical(
+  readRDS(artifact_paths$iteration_setup_groups_rds),
+  iteration$setup_groups,
+  "artifact iteration setup selection must be exact"
+)
+assert_identical(
+  readRDS(artifact_paths$iteration_target_keys_rds),
+  iteration$target_keys,
+  "artifact iteration target selection must be exact"
+)
+assert_identical(
+  readRDS(artifact_paths$iteration_logical_tests_rds),
+  iteration$logical_tests,
+  "artifact iteration logical selection must be exact"
+)
+assert_identical(
+  readRDS(artifact_paths$qualification_setup_groups_rds),
+  qualification$setup_groups,
+  "artifact qualification setup selection must be exact"
+)
+assert_identical(
+  readRDS(artifact_paths$qualification_target_keys_rds),
+  qualification$target_keys,
+  "artifact qualification target selection must be exact"
+)
+assert_identical(
+  readRDS(artifact_paths$qualification_logical_tests_rds),
+  qualification$logical_tests,
+  "artifact qualification logical selection must be exact"
+)
+
+setup_semantic_parity <- utils::read.csv(
+  artifact_paths$setup_semantic_parity_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+target_retarget_parity <- utils::read.csv(
+  artifact_paths$target_retarget_parity_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+dcov_artifact_parity <- utils::read.csv(
+  artifact_paths$dcov_parity_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+assert_true(
+  nrow(setup_semantic_parity) == 44L &&
+    all(setup_semantic_parity$validator_pass) &&
+    all(setup_semantic_parity$semantic_fingerprint_exact) &&
+    !any(setup_semantic_parity$independent_reference_comparison) &&
+    all(
+      setup_semantic_parity$independent_reference_scope ==
+        "focused_task4_only"
+    ) &&
+    all(
+      setup_semantic_parity$semantic_evidence_provenance ==
+        "phase2_validator_and_authenticated_fingerprints"
+    ),
+  paste(
+    "setup semantic evidence must be complete and honest about the",
+    "focused-only independent comparator"
+  )
+)
+assert_true(
+  nrow(target_retarget_parity) == 270L &&
+    all(target_retarget_parity$coefficient_hash_exact) &&
+    all(target_retarget_parity$fitted_hash_exact) &&
+    all(target_retarget_parity$residual_hash_exact),
+  "iteration target retarget parity must be complete and exact"
+)
+assert_true(
+  nrow(dcov_artifact_parity) == 44L &&
+    max(dcov_artifact_parity$absolute_p_value_drift) <= 1e-12 &&
+    all(dcov_artifact_parity$decision_identical) &&
+    all(dcov_artifact_parity$spectra_no_fallback),
+  "iteration dCov parity must be complete, bounded, and fallback-free"
+)
+assert_true(
+  as.integer(first_summary$iteration_setup_group_count) == 44L &&
+    as.integer(first_summary$iteration_target_key_count) == 270L &&
+    as.integer(first_summary$iteration_logical_test_count) == 44L &&
+    as.integer(first_summary$seed_target_key_count) == 2356L &&
+    as.integer(first_summary$qualification_target_key_count) == 6143L &&
+    as.integer(first_summary$qualification_logical_test_count) == 3808L &&
+    as.integer(first_summary$qualification_same_S_group_count) == 2061L &&
+    as.integer(first_summary$conditional_near_alpha_test_count) == 1478L &&
+    as.integer(first_summary$fixed_sp_coefficient_hash_exact_count) == 270L &&
+    as.integer(first_summary$fixed_sp_fitted_hash_exact_count) == 270L &&
+    as.integer(first_summary$fixed_sp_residual_hash_exact_count) == 270L &&
+    isTRUE(first_summary$fixed_sp_coefficient_hash_exact) &&
+    isTRUE(first_summary$fixed_sp_fitted_hash_exact) &&
+    isTRUE(first_summary$fixed_sp_residual_hash_exact) &&
+    as.numeric(first_summary$legacy_dcov_max_abs_p_value_diff) <= 1e-12 &&
+    as.integer(first_summary$legacy_dcov_decision_flip_count) == 0L,
+  "scaled artifact parity counts and fixed-sp/dCov gates"
+)
+assert_true(
+  isTRUE(first_summary$oracle_inherited_graph_gate) &&
+    identical(
+      as.character(first_summary$new_candidate_graph_gate),
+      "NOT_APPLICABLE"
+    ) &&
+    as.integer(first_summary$response_leakage_count) == 0L &&
+    as.integer(
+      first_summary$prepared_setup_fingerprint_collision_count
+    ) == 0L &&
+    as.integer(
+      first_summary$target_state_fingerprint_collision_count
+    ) == 0L &&
+    as.integer(first_summary$unsupported_canonical_setup_count) == 0L &&
+    as.integer(first_summary$unknown_fallback_count) == 0L &&
+    as.integer(first_summary$approximate_backend_count) == 0L &&
+    as.integer(first_summary$written_shard_count) == 2L &&
+    as.integer(first_summary$reused_shard_count) == 0L &&
+    as.integer(first_summary$executed_group_count) == 64L &&
+    as.integer(first_summary$reused_group_count) == 0L &&
+    as.numeric(first_summary$artifact_payload_size_bytes) > 0 &&
+    as.numeric(first_summary$stage_timing_total_seconds) > 0 &&
+    as.numeric(first_summary$max_rss_kb) >= 0,
+  "scaled artifact structural, shard, size, and inherited graph gates"
+)
+
+target_csv_header <- names(utils::read.csv(
+  artifact_paths$target_state_index_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE,
+  nrows = 1L
+))
+assert_true(
+  !any(c("projected_rhs", "nullspace_projected_rhs") %in%
+         target_csv_header) &&
+    all(c(
+      "projected_rhs_length", "projected_rhs_sha256",
+      "nullspace_projected_rhs_length",
+      "nullspace_projected_rhs_sha256"
+    ) %in% target_csv_header),
+  "TargetState CSV must replace numeric RHS vectors with lengths and hashes"
+)
+input_hashes_artifact <- utils::read.csv(
+  artifact_paths$input_hashes_csv,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+assert_identical(
+  as.character(input_hashes_artifact$logical_path),
+  as.character(inputs$input_hashes$logical_path),
+  "artifact input hashes must retain canonical logical path order"
+)
+assert_identical(
+  as.character(input_hashes_artifact$actual_sha256),
+  as.character(inputs$input_hashes$actual_sha256),
+  "artifact input hashes must retain authenticated bytes"
+)
+assert_true(
+  nrow(utils::read.csv(
+    artifact_paths$unsupported_envelope_csv,
+    stringsAsFactors = FALSE
+  )) == 0L &&
+    nrow(utils::read.csv(
+      artifact_paths$fallbacks_csv,
+      stringsAsFactors = FALSE
+    )) == 0L,
+  "canonical scaled success must publish zero unsupported/fallback rows"
+)
+expected_commands <- c(
+  paste0("FASTKPC_FULL_CUDA_PREPARED_S_CENSUS_DIR=", census_dir),
+  paste0("FASTKPC_FULL_CUDA_PREPARED_S_DATA_PATH=", data_path),
+  paste0(
+    "FASTKPC_FULL_CUDA_PREPARED_S_OUTPUT_DIR=", runner_output_dir
+  ),
+  "FASTKPC_FULL_CUDA_PREPARED_S_MAX_GROUPS=64",
+  "FASTKPC_FULL_CUDA_PREPARED_S_PARITY_SCOPE=iteration",
+  "FASTKPC_FULL_CUDA_PREPARED_S_WORKERS=1",
+  "FASTKPC_FULL_CUDA_PREPARED_S_SHARD_COUNT=2",
+  "FASTKPC_FULL_CUDA_PREPARED_S_RESUME=1",
+  "Rscript fastkpc/tools/run_full_cuda_ci_prepared_s_contract.R"
+)
+assert_identical(
+  readLines(artifact_paths$commands_txt, warn = FALSE),
+  expected_commands,
+  "Prepared-S artifact commands must exactly reproduce orchestration"
+)
+environment_lines <- readLines(
+  artifact_paths$environment_txt, warn = FALSE
+)
+assert_true(
+  all(c(
+    paste0("R_version=", inputs$manifest$R_version),
+    paste0("mgcv_version=", inputs$manifest$mgcv_version),
+    "requested_workers=1", "actual_workers=1", "shard_count=2",
+    "resume=1", "parity_scope=iteration", "max_groups=64"
+  ) %in% environment_lines),
+  "Prepared-S environment evidence must retain exact runtime controls"
+)
+
+backup_dir <- tempfile("prepared-s-scaled-backup-")
+dir.create(backup_dir, recursive = TRUE)
+deterministic_files <- c(
+  prepared_s_setup_index = artifact_paths$prepared_s_setup_index_rds,
+  target_state_index = artifact_paths$target_state_index_rds,
+  shard_0 = file.path(artifact_paths$shards_dir, "shard_0.rds"),
+  shard_1 = file.path(artifact_paths$shards_dir, "shard_1.rds")
+)
+backup_files <- file.path(
+  backup_dir, paste0(names(deterministic_files), ".rds")
+)
+assert_true(
+  all(file.copy(
+    unname(deterministic_files), backup_files, overwrite = TRUE
+  )),
+  "test must preserve first-run deterministic RDS bytes"
+)
+first_deterministic_hashes <- vapply(
+  deterministic_files,
+  fastkpc_full_cuda_census_file_hash,
+  character(1L)
+)
+
+second_runner <- run_prepared_s_contract_runner(
+  runner_path = prepared_s_runner_path,
+  census_dir = census_dir,
+  data_path = data_path,
+  output_dir = runner_output_dir
+)
+assert_true(
+  second_runner$status == 0L,
+  paste0(
+    "second scaled Prepared-S runner failed: ",
+    paste(second_runner$output, collapse = "\n")
+  )
+)
+second_summary <- jsonlite::read_json(
+  artifact_paths$summary_json, simplifyVector = TRUE
+)
+assert_true(
+  isTRUE(second_summary$pass) &&
+    !isTRUE(second_summary$phase2_complete) &&
+    identical(as.character(second_summary$run_scope),
+              "scaled_iteration") &&
+    as.integer(second_summary$executed_group_count) == 0L &&
+    as.integer(second_summary$reused_group_count) == 64L &&
+    as.integer(second_summary$written_shard_count) == 0L &&
+    as.integer(second_summary$reused_shard_count) == 2L,
+  "second scaled run must be a complete two-shard resume"
+)
+second_deterministic_hashes <- vapply(
+  deterministic_files,
+  fastkpc_full_cuda_census_file_hash,
+  character(1L)
+)
+assert_identical(
+  second_deterministic_hashes,
+  first_deterministic_hashes,
+  "resume must retain merged and shard RDS hashes"
+)
+for (index in seq_along(deterministic_files)) {
+  assert_file_bytes_identical(
+    deterministic_files[[index]], backup_files[[index]],
+    paste0(
+      "resume must retain byte-identical ",
+      names(deterministic_files)[[index]]
+    )
+  )
+}
+
+completed_summary_hash <- fastkpc_full_cuda_census_file_hash(
+  artifact_paths$summary_json
+)
+completed_manifest_hash <- fastkpc_full_cuda_census_file_hash(
+  artifact_paths$manifest_json
+)
+failed_runner <- run_prepared_s_contract_runner(
+  runner_path = prepared_s_runner_path,
+  census_dir = census_dir,
+  data_path = data_path,
+  output_dir = runner_output_dir,
+  max_groups = "64.0"
+)
+assert_true(
+  failed_runner$status != 0L,
+  "runner must reject a non-bare integer environment value"
+)
+assert_identical(
+  fastkpc_full_cuda_census_file_hash(artifact_paths$summary_json),
+  completed_summary_hash,
+  "failed rerun must preserve the prior completed summary"
+)
+assert_identical(
+  fastkpc_full_cuda_census_file_hash(artifact_paths$manifest_json),
+  completed_manifest_hash,
+  "failed rerun must preserve the prior completed manifest"
+)
+failed_summary_paths <- list.files(
+  file.path(runner_output_dir, "failed-runs"),
+  pattern = "^summary\\.json$",
+  recursive = TRUE,
+  full.names = TRUE
+)
+assert_true(
+  length(failed_summary_paths) == 1L,
+  "failed rerun beside a completed artifact must publish one failed-run summary"
+)
+failed_summary <- jsonlite::read_json(
+  failed_summary_paths[[1L]], simplifyVector = TRUE
+)
+assert_true(
+  !isTRUE(failed_summary$pass) &&
+    !isTRUE(failed_summary$phase2_complete) &&
+    identical(as.character(failed_summary$stage), "parse_environment") &&
+    nzchar(as.character(failed_summary$error_class)) &&
+    grepl(
+      "FASTKPC_FULL_CUDA_PREPARED_S_MAX_GROUPS",
+      as.character(failed_summary$error_message), fixed = TRUE
+    ) &&
+    is.finite(as.numeric(failed_summary$elapsed_seconds)),
+  "failed-run summary must retain stage, class, message, and elapsed time"
+)
+
+unlink(backup_dir, recursive = TRUE, force = TRUE)
+unlink(runner_output_dir, recursive = TRUE, force = TRUE)
+
 cat(
   "METRICS iteration_hash=", iteration$iteration_subset_hash,
   " setup_groups=", nrow(iteration$setup_groups),
@@ -977,6 +1593,9 @@ cat(
   ),
   " dcov_exact=", sum(dcov_parity$rows$p_value_exact),
   " dcov_flips=", dcov_parity$decision_flip_count,
+  " runner_first_elapsed=", first_summary$elapsed_seconds,
+  " runner_second_elapsed=", second_summary$elapsed_seconds,
+  " runner_first_max_rss_kb=", first_summary$max_rss_kb,
   "\n",
   sep = ""
 )

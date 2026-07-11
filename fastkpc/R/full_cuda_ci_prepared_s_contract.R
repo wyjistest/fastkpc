@@ -8205,3 +8205,2068 @@ fastkpc_full_cuda_run_prepared_s_dcov_parity <- function(
     oracle_fun = fastkpc_legacy_dcov_gamma_cpp_oracle
   )
 }
+
+fastkpc_full_cuda_prepared_s_validate_parity_scope <- function(
+    scope, allow_none = TRUE) {
+  allowed <- if (isTRUE(allow_none)) {
+    c("none", "iteration", "qualification")
+  } else {
+    c("iteration", "qualification")
+  }
+  clean <- fastkpc_full_cuda_prepared_s_is_bare_character_scalar(scope) &&
+    scope %in% allowed
+  if (!isTRUE(clean)) {
+    stop(
+      "Prepared-S parity scope must be one of: ",
+      paste(allowed, collapse = ","),
+      call. = FALSE
+    )
+  }
+  scope
+}
+
+fastkpc_full_cuda_prepared_s_selection_for_scope <- function(
+    inputs, scope) {
+  scope <- fastkpc_full_cuda_prepared_s_validate_parity_scope(
+    scope, allow_none = FALSE
+  )
+  if (identical(scope, "iteration")) {
+    return(fastkpc_full_cuda_select_prepared_s_iteration_subset(inputs))
+  }
+  fastkpc_full_cuda_select_prepared_s_qualification_subset(inputs)
+}
+
+fastkpc_full_cuda_prepared_s_select_setup_corpus <- function(
+    inputs, max_groups = 0L, parity_scope = "qualification",
+    iteration = NULL, qualification = NULL) {
+  parity_scope <- fastkpc_full_cuda_prepared_s_validate_parity_scope(
+    parity_scope
+  )
+  max_groups <- fastkpc_full_cuda_prepared_s_validate_whole_scalar(
+    max_groups,
+    minimum = 0L,
+    message = "max_groups must be one nonnegative integer"
+  )
+  full_index <- fastkpc_full_cuda_prepared_s_setup_index(inputs)
+  full_index <- full_index[order(
+    full_index$prepared_s_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  rownames(full_index) <- NULL
+  canonical_count <- nrow(full_index)
+  if (max_groups > canonical_count) {
+    stop("max_groups exceeds the canonical PreparedSKey count",
+         call. = FALSE)
+  }
+  if (is.null(iteration)) {
+    iteration <- fastkpc_full_cuda_select_prepared_s_iteration_subset(
+      inputs
+    )
+  }
+  iteration_groups <- as.character(
+    iteration$setup_groups$same_S_group_id
+  )
+  iteration_indices <- match(
+    iteration_groups, full_index$same_S_group_id
+  )
+  if (length(iteration_groups) != 44L || anyNA(iteration_indices)) {
+    stop("canonical iteration setup lineage is incomplete",
+         call. = FALSE)
+  }
+
+  selected <- if (max_groups == 0L) {
+    full_index
+  } else if (max_groups < length(iteration_groups)) {
+    if (!identical(parity_scope, "none")) {
+      stop(
+        "max_groups is smaller than the iteration setup group count",
+        call. = FALSE
+      )
+    }
+    full_index[seq_len(max_groups), , drop = FALSE]
+  } else {
+    iteration_keys <- as.character(
+      full_index$prepared_s_key_sha256[iteration_indices]
+    )
+    fill_count <- max_groups - length(iteration_keys)
+    fill <- full_index[
+      !full_index$prepared_s_key_sha256 %in% iteration_keys,
+      , drop = FALSE
+    ]
+    fill_keys <- if (fill_count == 0L) {
+      character()
+    } else {
+      head(as.character(fill$prepared_s_key_sha256), fill_count)
+    }
+    selected_keys <- sort(
+      c(iteration_keys, fill_keys), method = "radix"
+    )
+    full_index[match(
+      selected_keys, full_index$prepared_s_key_sha256
+    ), , drop = FALSE]
+  }
+  rownames(selected) <- NULL
+  if (nrow(selected) == 0L) {
+    stop("selected Prepared-S setup corpus is empty", call. = FALSE)
+  }
+  expected_selected_count <- if (max_groups == 0L) {
+    canonical_count
+  } else {
+    max_groups
+  }
+  if (nrow(selected) != expected_selected_count ||
+      anyDuplicated(selected$prepared_s_key_sha256) > 0L) {
+    stop("selected Prepared-S setup corpus count mismatch",
+         call. = FALSE)
+  }
+  if (parity_scope %in% c("iteration", "qualification")) {
+    required <- if (identical(parity_scope, "iteration")) {
+      iteration_groups
+    } else {
+      if (is.null(qualification)) {
+        qualification <-
+          fastkpc_full_cuda_select_prepared_s_qualification_subset(inputs)
+      }
+      as.character(qualification$setup_groups$same_S_group_id)
+    }
+    missing <- setdiff(required, selected$same_S_group_id)
+    if (length(missing) > 0L) {
+      stop(
+        "selected Prepared-S corpus does not cover the ",
+        parity_scope, " parity setup groups",
+        call. = FALSE
+      )
+    }
+  }
+  selected
+}
+
+.fastkpc_full_cuda_prepared_s_selected_inputs <- function(
+    inputs, selected_setup_index) {
+  selected_setup_index <- as.data.frame(
+    selected_setup_index, stringsAsFactors = FALSE
+  )
+  required <- c(
+    "prepared_s_key_sha256", "same_S_group_id"
+  )
+  if (!is.list(inputs) ||
+      length(setdiff(required, names(selected_setup_index))) > 0L ||
+      nrow(selected_setup_index) == 0L) {
+    stop("private selected Prepared-S corpus is invalid",
+         call. = FALSE)
+  }
+  group_ids <- as.character(selected_setup_index$same_S_group_id)
+  setup_rows <- as.data.frame(
+    inputs$same_s_setup_metadata, stringsAsFactors = FALSE
+  )
+  setup_match <- match(group_ids, setup_rows$same_S_group_id)
+  if (anyNA(setup_match) || anyDuplicated(group_ids)) {
+    stop("private selected Prepared-S setup lineage mismatch",
+         call. = FALSE)
+  }
+  selected_setup_rows <- setup_rows[setup_match, , drop = FALSE]
+  rownames(selected_setup_rows) <- NULL
+
+  requests <- as.data.frame(
+    inputs$residual_requests, stringsAsFactors = FALSE
+  )
+  selected_requests <- requests[
+    as.character(requests$same_S_group_id) %in% group_ids,
+    , drop = FALSE
+  ]
+  selected_requests <- selected_requests[order(
+    as.character(selected_requests$residual_key_sha256),
+    method = "radix"
+  ), , drop = FALSE]
+  rownames(selected_requests) <- NULL
+  if (nrow(selected_requests) == 0L ||
+      anyDuplicated(selected_requests$residual_key_sha256)) {
+    stop("private selected Prepared-S target lineage mismatch",
+         call. = FALSE)
+  }
+  target_rows <- as.data.frame(
+    inputs$target_fit_metadata, stringsAsFactors = FALSE
+  )
+  target_match <- match(
+    as.character(selected_requests$residual_key_sha256),
+    as.character(target_rows$residual_key_sha256)
+  )
+  if (anyNA(target_match)) {
+    stop("private selected Prepared-S target lineage mismatch",
+         call. = FALSE)
+  }
+  selected_targets <- target_rows[target_match, , drop = FALSE]
+  rownames(selected_targets) <- NULL
+  selected_target_hash <- fastkpc_full_cuda_census_key_set_hash(
+    sort(
+      as.character(selected_requests$residual_key_sha256),
+      method = "radix"
+    )
+  )
+
+  result <- inputs
+  result$same_s_setup_metadata <- selected_setup_rows
+  result$residual_requests <- selected_requests
+  result$target_fit_metadata <- selected_targets
+  result$manifest <- inputs$manifest
+  result$manifest$canonical_key_corpus_hash <- selected_target_hash
+  result
+}
+
+.fastkpc_full_cuda_prepared_s_selected_shard_plan <- function(
+    inputs, selected_setup_index, shard_count) {
+  shard_count <- fastkpc_full_cuda_prepared_s_validate_shard_count(
+    shard_count
+  )
+  selected_inputs <- .fastkpc_full_cuda_prepared_s_selected_inputs(
+    inputs, selected_setup_index
+  )
+  setup_index <- fastkpc_full_cuda_prepared_s_setup_index(
+    selected_inputs
+  )
+  setup_index <- setup_index[order(
+    setup_index$prepared_s_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  rownames(setup_index) <- NULL
+  assigned <- fastkpc_full_cuda_prepared_s_assign_shards(
+    setup_index, shard_count
+  )
+  context <- fastkpc_full_cuda_prepared_s_output_shard_context(
+    selected_inputs
+  )
+  expected_targets <- fastkpc_full_cuda_prepared_s_target_rows_for_setups(
+    selected_inputs, assigned
+  )
+  list(
+    inputs = selected_inputs,
+    setup_index = setup_index,
+    assigned_setups = assigned,
+    context = context,
+    expected_targets = expected_targets,
+    selected_prepared_s_key_corpus_hash =
+      context$prepared_s_key_corpus_hash,
+    selected_target_key_corpus_hash =
+      context$canonical_target_key_corpus_hash,
+    shard_count = shard_count
+  )
+}
+
+.fastkpc_full_cuda_run_selected_prepared_s_shard <- function(
+    plan, shard_id, output_dir, resume = TRUE) {
+  if (!is.list(plan) || !isTRUE(is.logical(resume)) ||
+      length(resume) != 1L || is.na(resume)) {
+    stop("private selected Prepared-S shard plan is invalid",
+         call. = FALSE)
+  }
+  shard_id <- fastkpc_full_cuda_prepared_s_validate_shard_id(
+    shard_id, plan$shard_count
+  )
+  paths <- fastkpc_full_cuda_prepared_s_shard_paths(
+    output_dir, shard_id
+  )
+  if (!resume && any(file.exists(c(paths$rds, paths$summary_json)))) {
+    stop(
+      "Prepared-S resume is disabled and a final shard exists: ",
+      shard_id,
+      call. = FALSE
+    )
+  }
+  .fastkpc_full_cuda_run_prepared_s_shard_core(
+    inputs = plan$inputs,
+    assigned_setups = plan$assigned_setups,
+    shard_id = shard_id,
+    context = plan$context,
+    output_dir = output_dir,
+    setup_builder = fastkpc_full_cuda_build_prepared_s_setup,
+    target_builder = .fastkpc_full_cuda_build_target_states_from_context,
+    target_state_index_builder =
+      .fastkpc_full_cuda_target_state_input_index
+  )
+}
+
+.fastkpc_full_cuda_merge_selected_prepared_s_shards <- function(
+    plan, shard_dir) {
+  if (!is.list(plan)) {
+    stop("private selected Prepared-S merge plan is invalid",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_merge_prepared_s_shards_core(
+    inputs = plan$inputs,
+    shard_count = plan$shard_count,
+    shard_dir = shard_dir,
+    target_state_index_builder =
+      .fastkpc_full_cuda_target_state_input_index
+  )
+}
+
+.fastkpc_full_cuda_run_prepared_s_target_parity_core <- function(
+    inputs, prepared_by_group, target_keys, scope = "iteration",
+    authenticated_target_states = NULL) {
+  scope <- fastkpc_full_cuda_prepared_s_validate_parity_scope(
+    scope, allow_none = FALSE
+  )
+  expected <- fastkpc_full_cuda_prepared_s_selection_for_scope(
+    inputs, scope
+  )
+  if (!is.data.frame(target_keys) ||
+      !"residual_key_sha256" %in% names(target_keys)) {
+    stop("Prepared-S target parity target keys are incomplete",
+         call. = FALSE)
+  }
+  selected_keys <- fastkpc_full_cuda_prepared_s_selection_character(
+    target_keys$residual_key_sha256
+  )
+  expected_keys <- as.character(
+    expected$target_keys$residual_key_sha256
+  )
+  if (anyNA(selected_keys) || anyDuplicated(selected_keys) ||
+      !identical(selected_keys, sort(selected_keys, method = "radix")) ||
+      !identical(selected_keys, expected_keys)) {
+    stop("Prepared-S target key set/order mismatch", call. = FALSE)
+  }
+  expected_groups <- as.character(
+    expected$setup_groups$same_S_group_id
+  )
+  if (!is.list(prepared_by_group) || is.null(names(prepared_by_group)) ||
+      anyNA(names(prepared_by_group)) ||
+      anyDuplicated(names(prepared_by_group)) ||
+      !identical(names(prepared_by_group), expected_groups)) {
+    stop("Prepared-S target parity setup group set/order mismatch",
+         call. = FALSE)
+  }
+
+  target_metadata <-
+    fastkpc_full_cuda_prepared_s_selection_target_rows(inputs)
+  target_index <- match(selected_keys, target_metadata$residual_key_sha256)
+  if (anyNA(target_index)) {
+    stop("Prepared-S target parity lineage is incomplete",
+         call. = FALSE)
+  }
+  target_state_index <-
+    .fastkpc_full_cuda_target_state_input_index(inputs)
+  supplied_indices <- NULL
+  if (!is.null(authenticated_target_states)) {
+    fastkpc_full_cuda_prepared_s_validate_target_state_frame_schema(
+      authenticated_target_states
+    )
+    if (anyDuplicated(authenticated_target_states$residual_key_sha256) ||
+        !all(selected_keys %in%
+               authenticated_target_states$residual_key_sha256)) {
+      stop("Prepared-S authenticated TargetState corpus mismatch",
+           call. = FALSE)
+    }
+    supplied_indices <- split(
+      seq_len(nrow(authenticated_target_states)),
+      as.character(authenticated_target_states$same_S_group_id)
+    )
+  }
+
+  target_state_cache <- new.env(hash = TRUE, parent = emptyenv())
+  residuals <- new.env(hash = TRUE, parent = emptyenv())
+  target_state_build_count <- 0L
+  rows <- vector("list", length(selected_keys))
+
+  for (index in seq_along(selected_keys)) {
+    key <- selected_keys[[index]]
+    metadata_row <- target_metadata[target_index[[index]], , drop = FALSE]
+    group_id <- metadata_row$same_S_group_id[[1L]]
+    if (!exists(group_id, envir = target_state_cache, inherits = FALSE)) {
+      prepared <- prepared_by_group[[group_id]]
+      if (is.null(prepared)) {
+        stop("Prepared-S target parity setup is missing", call. = FALSE)
+      }
+      context <- .fastkpc_full_cuda_target_state_context_from_index(
+        target_state_index, prepared
+      )
+      states <- if (is.null(authenticated_target_states)) {
+        .fastkpc_full_cuda_build_target_states_from_context(
+          context = context, prepared_setup = prepared
+        )
+      } else {
+        indices <- supplied_indices[[group_id]]
+        if (is.null(indices)) {
+          stop("Prepared-S target parity TargetState is missing",
+               call. = FALSE)
+        }
+        authenticated_target_states[indices, , drop = FALSE]
+      }
+      .fastkpc_full_cuda_validate_target_states_with_context(
+        states = states,
+        context = context,
+        prepared_setup = prepared
+      )
+      assign(group_id, states, envir = target_state_cache)
+      target_state_build_count <- target_state_build_count + 1L
+    }
+    states <- get(group_id, envir = target_state_cache, inherits = FALSE)
+    state_index <- match(key, states$residual_key_sha256)
+    if (is.na(state_index)) {
+      stop("Prepared-S target parity TargetState is missing",
+           call. = FALSE)
+    }
+    state <- states[state_index, , drop = FALSE]
+    prepared <- prepared_by_group[[group_id]]
+    materialized <- fastkpc_full_cuda_materialize_target_state(
+      state_row = state,
+      data = inputs$data,
+      dataset_sha256 = inputs$dataset_sha256
+    )
+    solved <- fastkpc_mgcv_magic_fixed_sp_from_prepared(
+      prepared_setup = prepared,
+      target_state = materialized
+    )
+    coefficient_hash <- fastkpc_full_cuda_census_metadata_hash(
+      solved$coefficients
+    )
+    fitted_hash <- fastkpc_full_cuda_census_metadata_hash(
+      solved$fitted
+    )
+    residual_hash <- fastkpc_full_cuda_census_metadata_hash(
+      solved$residuals
+    )
+    coefficient_hash_exact <- identical(
+      coefficient_hash, state$coefficient_hash[[1L]]
+    )
+    fitted_hash_exact <- identical(
+      fitted_hash, state$fitted_hash[[1L]]
+    )
+    residual_hash_exact <- identical(
+      residual_hash, state$residual_hash[[1L]]
+    )
+    assign(key, solved$residuals, envir = residuals)
+    rows[[index]] <- data.frame(
+      parity_scope = scope,
+      residual_key_sha256 = key,
+      same_S_group_id = group_id,
+      target = as.integer(state$target[[1L]]),
+      prepared_s_key_sha256 = solved$prepared_s_key_sha256,
+      target_state_fingerprint =
+        state$target_state_fingerprint[[1L]],
+      coefficient_hash = coefficient_hash,
+      expected_coefficient_hash = state$coefficient_hash[[1L]],
+      coefficient_hash_exact = coefficient_hash_exact,
+      fitted_hash = fitted_hash,
+      expected_fitted_hash = state$fitted_hash[[1L]],
+      fitted_hash_exact = fitted_hash_exact,
+      residual_hash = residual_hash,
+      expected_residual_hash = state$residual_hash[[1L]],
+      residual_hash_exact = residual_hash_exact,
+      residual_length = as.integer(length(solved$residuals)),
+      stringsAsFactors = FALSE
+    )
+  }
+  parity_rows <- do.call(rbind, rows)
+  rownames(parity_rows) <- NULL
+  exact <- parity_rows$coefficient_hash_exact &
+    parity_rows$fitted_hash_exact & parity_rows$residual_hash_exact
+  if (!all(exact)) {
+    stop(
+      "Prepared-S target parity hash mismatch: ",
+      paste(parity_rows$residual_key_sha256[!exact], collapse = ","),
+      call. = FALSE
+    )
+  }
+  cache_group_count <- as.integer(length(ls(
+    target_state_cache, all.names = TRUE
+  )))
+  if (!identical(target_state_build_count, length(expected_groups)) ||
+      !identical(cache_group_count, as.integer(length(expected_groups))) ||
+      length(ls(residuals, all.names = TRUE)) != length(selected_keys)) {
+    stop("Prepared-S target parity cache count mismatch", call. = FALSE)
+  }
+  list(
+    schema_version = "full-cuda-ci-prepared-s-target-parity-v2",
+    parity_scope = scope,
+    rows = parity_rows,
+    residuals = residuals,
+    target_state_build_count = as.integer(target_state_build_count),
+    target_state_cache_group_count = cache_group_count,
+    exact_target_count = as.integer(sum(exact)),
+    target_keys_hash = fastkpc_full_cuda_census_metadata_hash(
+      selected_keys
+    ),
+    parity_rows_hash = fastkpc_full_cuda_census_frame_hash(parity_rows)
+  )
+}
+
+fastkpc_full_cuda_run_prepared_s_target_parity <- function(
+    inputs, prepared_by_group, target_keys, scope = "iteration") {
+  .fastkpc_full_cuda_run_prepared_s_target_parity_core(
+    inputs = inputs,
+    prepared_by_group = prepared_by_group,
+    target_keys = target_keys,
+    scope = scope,
+    authenticated_target_states = NULL
+  )
+}
+
+.fastkpc_full_cuda_run_prepared_s_dcov_parity_core <- function(
+    inputs, logical_tests, residuals, oracle_manifest = NULL,
+    oracle_fun, scope = "iteration") {
+  scope <- fastkpc_full_cuda_prepared_s_validate_parity_scope(
+    scope, allow_none = FALSE
+  )
+  environment_name <- "FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK"
+  prior_environment <- Sys.getenv(
+    environment_name, unset = NA_character_
+  )
+  on.exit(
+    fastkpc_full_cuda_prepared_s_restore_environment(
+      environment_name, prior_environment
+    ),
+    add = TRUE
+  )
+  Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra")
+
+  if (!is.environment(residuals) || !is.data.frame(logical_tests) ||
+      !"logical_sequence_id" %in% names(logical_tests)) {
+    stop("Prepared-S dCov parity inputs are incomplete", call. = FALSE)
+  }
+  if (!is.function(oracle_fun)) {
+    stop("Prepared-S dCov parity oracle function is invalid",
+         call. = FALSE)
+  }
+  logical_tests <- fastkpc_full_cuda_prepared_s_selection_normalize_fields(
+    logical_tests,
+    character_fields = c(
+      "reference_decision", "residual_key_x", "residual_key_y"
+    ),
+    integer_fields = c("logical_sequence_id", "S_size"),
+    numeric_fields = c(
+      "reference_p_value", "alpha",
+      "absolute_log_distance_from_alpha"
+    ),
+    logical_fields = "reference_independent"
+  )
+  selected_ids <- logical_tests$logical_sequence_id
+  expected <- fastkpc_full_cuda_prepared_s_selection_for_scope(
+    inputs, scope
+  )
+  expected_logical <- expected$logical_tests
+  if (anyNA(selected_ids) || anyDuplicated(selected_ids) ||
+      !identical(selected_ids, sort(selected_ids))) {
+    stop("Prepared-S dCov logical test set/order mismatch",
+         call. = FALSE)
+  }
+  expected_fields <- c(
+    "logical_sequence_id", "residual_key_x", "residual_key_y",
+    "reference_p_value", "alpha", "reference_decision",
+    "reference_independent"
+  )
+  if (!identical(
+        logical_tests[expected_fields],
+        expected_logical[expected_fields]
+      )) {
+    stop("Prepared-S dCov logical test set/order mismatch",
+         call. = FALSE)
+  }
+  oracle_identity <- fastkpc_full_cuda_prepared_s_dcov_oracle_identity(
+    inputs = inputs,
+    logical_tests = logical_tests,
+    oracle_manifest = oracle_manifest
+  )
+  if (!is.matrix(inputs$data) || nrow(inputs$data) < 1L ||
+      !identical(
+        fastkpc_full_cuda_data_hash(inputs$data),
+        oracle_identity$dataset_sha256
+      )) {
+    stop("Prepared-S dCov dataset identity mismatch", call. = FALSE)
+  }
+
+  endpoint_keys <- unique(c(
+    logical_tests$residual_key_x, logical_tests$residual_key_y
+  ))
+  missing <- endpoint_keys[!vapply(endpoint_keys, function(key) {
+    exists(key, envir = residuals, inherits = FALSE)
+  }, logical(1L))]
+  if (length(missing) > 0L) {
+    stop(
+      "Prepared-S dCov parity residual is missing: ",
+      paste(sort(missing, method = "radix"), collapse = ","),
+      call. = FALSE
+    )
+  }
+  for (key in endpoint_keys) {
+    value <- get(key, envir = residuals, inherits = FALSE)
+    if (!is.numeric(value) || length(value) != nrow(inputs$data) ||
+        any(!is.finite(value))) {
+      stop("Prepared-S dCov parity residual is invalid: ", key,
+           call. = FALSE)
+    }
+  }
+
+  rows <- vector("list", nrow(logical_tests))
+  for (row_index in seq_len(nrow(logical_tests))) {
+    logical_row <- logical_tests[row_index, , drop = FALSE]
+    key_x <- logical_row$residual_key_x[[1L]]
+    key_y <- logical_row$residual_key_y[[1L]]
+    residual_x <- get(key_x, envir = residuals, inherits = FALSE)
+    residual_y <- get(key_y, envir = residuals, inherits = FALSE)
+    oracle <- oracle_fun(
+      residual_x,
+      residual_y,
+      numCol = oracle_identity$numCol,
+      index = oracle_identity$index
+    )
+    if (!is.list(oracle) || !is.list(oracle$diagnostics) ||
+        length(oracle$diagnostics) == 0L) {
+      stop("Prepared-S dCov oracle result is invalid", call. = FALSE)
+    }
+    fastkpc_full_cuda_prepared_s_validate_dcov_spectra_diagnostics(
+      diagnostics = oracle$diagnostics,
+      numCol = oracle_identity$numCol
+    )
+    if (!is.numeric(oracle$p.value) || length(oracle$p.value) != 1L ||
+        !is.finite(oracle$p.value)) {
+      stop("Prepared-S dCov oracle result is invalid", call. = FALSE)
+    }
+    p_value <- as.numeric(oracle$p.value)
+    reference_p_value <- as.numeric(
+      logical_row$reference_p_value[[1L]]
+    )
+    alpha <- as.numeric(logical_row$alpha[[1L]])
+    reference_independent <- reference_p_value >= alpha
+    reference_decision <- if (reference_independent) {
+      "independent"
+    } else {
+      "dependent"
+    }
+    if (!identical(
+          logical_row$reference_independent[[1L]],
+          reference_independent
+        ) || !identical(
+          logical_row$reference_decision[[1L]], reference_decision
+        )) {
+      stop("Prepared-S dCov reference decision semantics mismatch",
+           call. = FALSE)
+    }
+    independent <- p_value >= alpha
+    p_value_drift <- p_value - reference_p_value
+    result_row <- data.frame(
+      parity_scope = scope,
+      logical_sequence_id = logical_row$logical_sequence_id[[1L]],
+      residual_key_x = key_x,
+      residual_key_y = key_y,
+      index = as.integer(oracle_identity$index),
+      numCol = as.integer(oracle_identity$numCol),
+      alpha = alpha,
+      reference_p_value = reference_p_value,
+      p_value = p_value,
+      p_value_drift = p_value_drift,
+      absolute_p_value_drift = abs(p_value_drift),
+      p_value_exact = identical(p_value, reference_p_value),
+      reference_signed_alpha_distance = reference_p_value - alpha,
+      signed_alpha_distance = p_value - alpha,
+      reference_decision = reference_decision,
+      decision = if (independent) "independent" else "dependent",
+      decision_identical = identical(independent, reference_independent),
+      spectra_no_fallback = TRUE,
+      stringsAsFactors = FALSE
+    )
+    result_row$diagnostics <- I(list(oracle$diagnostics))
+    rows[[row_index]] <- result_row
+  }
+  parity_rows <- do.call(rbind, rows)
+  rownames(parity_rows) <- NULL
+  max_drift <- max(parity_rows$absolute_p_value_drift)
+  exact_count <- as.integer(sum(parity_rows$p_value_exact))
+  flip_count <- as.integer(sum(!parity_rows$decision_identical))
+  if (!is.finite(max_drift) || max_drift > 1e-12) {
+    stop(
+      "Prepared-S dCov p-value drift exceeds 1e-12: ",
+      format(max_drift, scientific = TRUE),
+      call. = FALSE
+    )
+  }
+  if (flip_count != 0L) {
+    stop("Prepared-S dCov decision flip detected", call. = FALSE)
+  }
+  list(
+    schema_version = "full-cuda-ci-prepared-s-dcov-parity-v2",
+    parity_scope = scope,
+    oracle_identity = oracle_identity,
+    rows = parity_rows,
+    max_absolute_p_value_drift = max_drift,
+    exact_p_value_count = exact_count,
+    decision_flip_count = flip_count,
+    logical_test_ids_hash = fastkpc_full_cuda_census_metadata_hash(
+      selected_ids
+    ),
+    parity_rows_hash = fastkpc_full_cuda_census_frame_hash(parity_rows)
+  )
+}
+
+fastkpc_full_cuda_run_prepared_s_dcov_parity <- function(
+    inputs, logical_tests, residuals, oracle_manifest = NULL,
+    scope = "iteration", ...) {
+  dots <- list(...)
+  if (length(dots) > 0L) {
+    stop("Prepared-S dCov parity options are unsupported",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_run_prepared_s_dcov_parity_core(
+    inputs = inputs,
+    logical_tests = logical_tests,
+    residuals = residuals,
+    oracle_manifest = oracle_manifest,
+    oracle_fun = fastkpc_legacy_dcov_gamma_cpp_oracle,
+    scope = scope
+  )
+}
+
+fastkpc_full_cuda_prepared_s_artifact_paths <- function(output_dir) {
+  list(
+    manifest_json = file.path(output_dir, "manifest.json"),
+    summary_json = file.path(output_dir, "summary.json"),
+    summary_md = file.path(output_dir, "summary.md"),
+    commands_txt = file.path(output_dir, "commands.txt"),
+    environment_txt = file.path(output_dir, "environment.txt"),
+    input_hashes_csv = file.path(output_dir, "input_hashes.csv"),
+    prepared_s_setup_index_rds = file.path(
+      output_dir, "prepared_s_setup_index.rds"
+    ),
+    prepared_s_setup_index_csv = file.path(
+      output_dir, "prepared_s_setup_index.csv"
+    ),
+    target_state_index_rds = file.path(
+      output_dir, "target_state_index.rds"
+    ),
+    target_state_index_csv = file.path(
+      output_dir, "target_state_index.csv"
+    ),
+    iteration_setup_groups_rds = file.path(
+      output_dir, "iteration_setup_groups.rds"
+    ),
+    iteration_setup_groups_csv = file.path(
+      output_dir, "iteration_setup_groups.csv"
+    ),
+    iteration_target_keys_rds = file.path(
+      output_dir, "iteration_target_keys.rds"
+    ),
+    iteration_target_keys_csv = file.path(
+      output_dir, "iteration_target_keys.csv"
+    ),
+    iteration_logical_tests_rds = file.path(
+      output_dir, "iteration_logical_tests.rds"
+    ),
+    iteration_logical_tests_csv = file.path(
+      output_dir, "iteration_logical_tests.csv"
+    ),
+    iteration_coverage_csv = file.path(
+      output_dir, "iteration_coverage.csv"
+    ),
+    qualification_setup_groups_rds = file.path(
+      output_dir, "qualification_setup_groups.rds"
+    ),
+    qualification_setup_groups_csv = file.path(
+      output_dir, "qualification_setup_groups.csv"
+    ),
+    qualification_target_keys_rds = file.path(
+      output_dir, "qualification_target_keys.rds"
+    ),
+    qualification_target_keys_csv = file.path(
+      output_dir, "qualification_target_keys.csv"
+    ),
+    qualification_logical_tests_rds = file.path(
+      output_dir, "qualification_logical_tests.rds"
+    ),
+    qualification_logical_tests_csv = file.path(
+      output_dir, "qualification_logical_tests.csv"
+    ),
+    qualification_coverage_csv = file.path(
+      output_dir, "qualification_coverage.csv"
+    ),
+    setup_semantic_parity_csv = file.path(
+      output_dir, "setup_semantic_parity.csv"
+    ),
+    target_retarget_parity_csv = file.path(
+      output_dir, "target_retarget_parity.csv"
+    ),
+    dcov_parity_csv = file.path(output_dir, "dcov_parity.csv"),
+    unsupported_envelope_csv = file.path(
+      output_dir, "unsupported_envelope.csv"
+    ),
+    fallbacks_csv = file.path(output_dir, "fallbacks.csv"),
+    stage_timing_csv = file.path(output_dir, "stage_timing.csv"),
+    shards_dir = file.path(output_dir, "shards")
+  )
+}
+
+fastkpc_full_cuda_prepared_s_csv_numeric <- function(value) {
+  vapply(value, function(cell) {
+    if (is.na(cell)) return(NA_character_)
+    if (is.infinite(cell)) return(if (cell > 0) "Inf" else "-Inf")
+    if (identical(cell, 0) || identical(cell, -0)) return("0")
+    sprintf("%.17g", cell)
+  }, character(1L))
+}
+
+fastkpc_full_cuda_prepared_s_csv_frame <- function(value) {
+  fastkpc_full_cuda_require_namespace("jsonlite")
+  value <- as.data.frame(
+    value, stringsAsFactors = FALSE, check.names = FALSE
+  )
+  for (field in names(value)) {
+    column <- value[[field]]
+    if (is.list(column)) {
+      value[[field]] <- vapply(column, function(cell) {
+        enc2utf8(as.character(jsonlite::toJSON(
+          cell,
+          auto_unbox = TRUE,
+          null = "null",
+          na = "null",
+          digits = NA
+        )))
+      }, character(1L))
+    } else if (is.double(column)) {
+      value[[field]] <- fastkpc_full_cuda_prepared_s_csv_numeric(column)
+    } else if (is.integer(column)) {
+      value[[field]] <- ifelse(
+        is.na(column), NA_character_, as.character(column)
+      )
+    } else if (is.logical(column)) {
+      value[[field]] <- ifelse(
+        is.na(column), NA_character_, ifelse(column, "TRUE", "FALSE")
+      )
+    } else if (is.factor(column)) {
+      value[[field]] <- enc2utf8(as.character(column))
+    } else if (is.character(column)) {
+      value[[field]] <- enc2utf8(column)
+    }
+  }
+  value
+}
+
+fastkpc_full_cuda_prepared_s_write_csv <- function(value, path) {
+  frame <- fastkpc_full_cuda_prepared_s_csv_frame(value)
+  utils::write.table(
+    frame,
+    file = path,
+    sep = ",",
+    dec = ".",
+    quote = TRUE,
+    qmethod = "double",
+    row.names = FALSE,
+    col.names = TRUE,
+    na = "",
+    fileEncoding = "UTF-8"
+  )
+  invisible(path)
+}
+
+fastkpc_full_cuda_prepared_s_write_rds_csv <- function(
+    value, rds_path, csv_path) {
+  saveRDS(value, rds_path, version = 2)
+  fastkpc_full_cuda_prepared_s_write_csv(value, csv_path)
+  invisible(list(rds = rds_path, csv = csv_path))
+}
+
+fastkpc_full_cuda_prepared_s_setup_index_csv <- function(setups) {
+  keys <- names(setups)
+  if (!is.list(setups) || is.null(keys) || anyNA(keys) ||
+      anyDuplicated(keys) ||
+      !identical(keys, sort(keys, method = "radix"))) {
+    stop("Prepared-S artifact setup index order mismatch",
+         call. = FALSE)
+  }
+  rows <- lapply(setups, function(setup) {
+    data.frame(
+      schema_version = as.character(setup$schema_version),
+      prepared_s_key_payload = as.character(
+        setup$prepared_s_key_payload
+      ),
+      prepared_s_key_sha256 = as.character(
+        setup$prepared_s_key_sha256
+      ),
+      same_S_group_id = as.character(setup$same_S_group_id),
+      phase1_setup_fingerprint = as.character(
+        setup$phase1_setup_fingerprint
+      ),
+      semantic_fingerprint = as.character(
+        setup$semantic_fingerprint
+      ),
+      representation_fingerprint = as.character(
+        setup$representation_fingerprint
+      ),
+      normalized_setup_sha256 =
+        fastkpc_full_cuda_prepared_s_normalized_setup_hash(setup),
+      model_matrix_nrow = as.integer(nrow(setup$X)),
+      model_matrix_ncol = as.integer(ncol(setup$X)),
+      model_matrix_rank = as.integer(setup$model_matrix_rank),
+      penalty_count = as.integer(length(setup$penalty_blocks)),
+      constraint_mode = as.character(setup$constraint_mode),
+      constraint_rank = as.integer(setup$constraint_rank),
+      conditioning_rank = as.integer(setup$conditioning_rank),
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  })
+  result <- if (length(rows) == 0L) {
+    data.frame(
+      schema_version = character(),
+      prepared_s_key_payload = character(),
+      prepared_s_key_sha256 = character(),
+      same_S_group_id = character(),
+      phase1_setup_fingerprint = character(),
+      semantic_fingerprint = character(),
+      representation_fingerprint = character(),
+      normalized_setup_sha256 = character(),
+      model_matrix_nrow = integer(),
+      model_matrix_ncol = integer(),
+      model_matrix_rank = integer(),
+      penalty_count = integer(),
+      constraint_mode = character(),
+      constraint_rank = integer(),
+      conditioning_rank = integer(),
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  } else {
+    do.call(rbind, rows)
+  }
+  rownames(result) <- NULL
+  result
+}
+
+fastkpc_full_cuda_prepared_s_target_state_csv <- function(states) {
+  fastkpc_full_cuda_prepared_s_validate_target_state_frame_schema(states)
+  result <- states
+  rhs_fields <- c("projected_rhs", "nullspace_projected_rhs")
+  for (field in rhs_fields) {
+    result[[paste0(field, "_length")]] <- vapply(
+      states[[field]], length, integer(1L)
+    )
+    result[[paste0(field, "_sha256")]] <- vapply(
+      states[[field]],
+      fastkpc_full_cuda_census_metadata_hash,
+      character(1L)
+    )
+  }
+  result[rhs_fields] <- NULL
+  original_fields <- fastkpc_full_cuda_target_state_field_names()
+  output_fields <- character()
+  for (field in original_fields) {
+    if (field %in% rhs_fields) {
+      output_fields <- c(
+        output_fields,
+        paste0(field, "_length"),
+        paste0(field, "_sha256")
+      )
+    } else {
+      output_fields <- c(output_fields, field)
+    }
+  }
+  result[, output_fields, drop = FALSE]
+}
+
+fastkpc_full_cuda_prepared_s_iteration_coverage <- function(
+    inputs, iteration) {
+  data.frame(
+    coverage_type = c("setup_group", "target_key", "logical_test"),
+    coverage_value = rep("iteration_contract", 3L),
+    canonical_count = as.integer(c(
+      nrow(inputs$same_s_setup_metadata),
+      nrow(inputs$residual_requests),
+      sum(as.integer(inputs$logical_tests$S_size) > 0L)
+    )),
+    selected_count = as.integer(c(
+      nrow(iteration$setup_groups),
+      nrow(iteration$target_keys),
+      nrow(iteration$logical_tests)
+    )),
+    coverage_claimed = rep(FALSE, 3L),
+    stringsAsFactors = FALSE
+  )
+}
+
+fastkpc_full_cuda_prepared_s_empty_setup_semantic_parity <- function() {
+  data.frame(
+    parity_scope = character(),
+    same_S_group_id = character(),
+    prepared_s_key_sha256 = character(),
+    phase1_setup_fingerprint = character(),
+    semantic_fingerprint = character(),
+    representation_fingerprint = character(),
+    validator_pass = logical(),
+    semantic_fingerprint_exact = logical(),
+    representation_fingerprint_exact = logical(),
+    independent_reference_comparison = logical(),
+    independent_reference_scope = character(),
+    semantic_evidence_provenance = character(),
+    fixed_sp_behavior_evidence = character(),
+    fixed_sp_behavior_exact = logical(),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+}
+
+fastkpc_full_cuda_prepared_s_empty_target_parity <- function() {
+  data.frame(
+    parity_scope = character(),
+    residual_key_sha256 = character(),
+    same_S_group_id = character(),
+    target = integer(),
+    prepared_s_key_sha256 = character(),
+    target_state_fingerprint = character(),
+    coefficient_hash = character(),
+    expected_coefficient_hash = character(),
+    coefficient_hash_exact = logical(),
+    fitted_hash = character(),
+    expected_fitted_hash = character(),
+    fitted_hash_exact = logical(),
+    residual_hash = character(),
+    expected_residual_hash = character(),
+    residual_hash_exact = logical(),
+    residual_length = integer(),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+}
+
+fastkpc_full_cuda_prepared_s_empty_dcov_parity <- function() {
+  result <- data.frame(
+    parity_scope = character(),
+    logical_sequence_id = integer(),
+    residual_key_x = character(),
+    residual_key_y = character(),
+    index = integer(),
+    numCol = integer(),
+    alpha = numeric(),
+    reference_p_value = numeric(),
+    p_value = numeric(),
+    p_value_drift = numeric(),
+    absolute_p_value_drift = numeric(),
+    p_value_exact = logical(),
+    reference_signed_alpha_distance = numeric(),
+    signed_alpha_distance = numeric(),
+    reference_decision = character(),
+    decision = character(),
+    decision_identical = logical(),
+    spectra_no_fallback = logical(),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  result$diagnostics <- I(vector("list", 0L))
+  result
+}
+
+fastkpc_full_cuda_prepared_s_setup_semantic_parity <- function(
+    inputs, prepared_by_group, target_parity_rows,
+    scope = "iteration") {
+  scope <- fastkpc_full_cuda_prepared_s_validate_parity_scope(
+    scope, allow_none = FALSE
+  )
+  expected <- fastkpc_full_cuda_prepared_s_selection_for_scope(
+    inputs, scope
+  )
+  group_ids <- as.character(expected$setup_groups$same_S_group_id)
+  if (!is.list(prepared_by_group) ||
+      !identical(names(prepared_by_group), group_ids)) {
+    stop("Prepared-S setup semantic parity group order mismatch",
+         call. = FALSE)
+  }
+  setup_rows <- as.data.frame(
+    inputs$same_s_setup_metadata, stringsAsFactors = FALSE
+  )
+  rows <- lapply(group_ids, function(group_id) {
+    setup <- prepared_by_group[[group_id]]
+    setup_row_index <- match(group_id, setup_rows$same_S_group_id)
+    if (is.na(setup_row_index)) {
+      stop("Prepared-S setup semantic parity lineage mismatch",
+           call. = FALSE)
+    }
+    fastkpc_full_cuda_validate_prepared_s_setup(
+      setup = setup,
+      setup_row = setup_rows[setup_row_index, , drop = FALSE],
+      dataset_sha256 = inputs$dataset_sha256
+    )
+    semantic_exact <- identical(
+      setup$semantic_fingerprint,
+      fastkpc_full_cuda_prepared_s_semantic_fingerprint(setup)
+    )
+    representation_exact <- identical(
+      setup$representation_fingerprint,
+      fastkpc_full_cuda_prepared_s_representation_fingerprint(setup)
+    )
+    group_target_rows <- target_parity_rows[
+      as.character(target_parity_rows$same_S_group_id) == group_id,
+      , drop = FALSE
+    ]
+    fixed_sp_exact <- nrow(group_target_rows) > 0L && all(
+      group_target_rows$coefficient_hash_exact &
+        group_target_rows$fitted_hash_exact &
+        group_target_rows$residual_hash_exact
+    )
+    data.frame(
+      parity_scope = scope,
+      same_S_group_id = group_id,
+      prepared_s_key_sha256 = as.character(
+        setup$prepared_s_key_sha256
+      ),
+      phase1_setup_fingerprint = as.character(
+        setup$phase1_setup_fingerprint
+      ),
+      semantic_fingerprint = as.character(
+        setup$semantic_fingerprint
+      ),
+      representation_fingerprint = as.character(
+        setup$representation_fingerprint
+      ),
+      validator_pass = TRUE,
+      semantic_fingerprint_exact = semantic_exact,
+      representation_fingerprint_exact = representation_exact,
+      independent_reference_comparison = FALSE,
+      independent_reference_scope = "focused_task4_only",
+      semantic_evidence_provenance =
+        "phase2_validator_and_authenticated_fingerprints",
+      fixed_sp_behavior_evidence =
+        "selected_scope_target_retarget_exact",
+      fixed_sp_behavior_exact = fixed_sp_exact,
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  })
+  result <- do.call(rbind, rows)
+  rownames(result) <- NULL
+  if (!all(result$validator_pass & result$semantic_fingerprint_exact &
+           result$representation_fingerprint_exact &
+           result$fixed_sp_behavior_exact)) {
+    stop("Prepared-S setup semantic parity failed", call. = FALSE)
+  }
+  result
+}
+
+fastkpc_full_cuda_prepared_s_max_rss_kb <- function() {
+  path <- "/proc/self/status"
+  if (!file.exists(path)) return(0)
+  lines <- readLines(path, warn = FALSE)
+  line <- lines[startsWith(lines, "VmHWM:")]
+  if (length(line) != 1L) return(0)
+  value <- suppressWarnings(as.numeric(sub(
+    "^VmHWM:[[:space:]]*([0-9]+)[[:space:]]+kB$",
+    "\\1",
+    line
+  )))
+  if (length(value) != 1L || !is.finite(value) || value < 0) 0 else value
+}
+
+fastkpc_full_cuda_prepared_s_artifact_gate <- function(
+    inputs, plan, iteration, qualification, merged,
+    setup_semantic_parity, target_parity_rows, dcov_parity_rows,
+    parity_scope) {
+  parity_scope <- fastkpc_full_cuda_prepared_s_validate_parity_scope(
+    parity_scope
+  )
+  required_merged <- c(
+    "prepared_s_setups", "target_states", "shard_summaries"
+  )
+  if (!is.list(plan) || !is.list(merged) ||
+      length(setdiff(required_merged, names(merged))) > 0L) {
+    stop("Prepared-S artifact merge is incomplete", call. = FALSE)
+  }
+  setup_keys <- as.character(plan$setup_index$prepared_s_key_sha256)
+  setup_groups <- as.character(plan$setup_index$same_S_group_id)
+  setups <- merged$prepared_s_setups
+  states <- merged$target_states
+  fastkpc_full_cuda_prepared_s_validate_target_state_frame_schema(states)
+  prepared_s_key_corpus_exact <- is.list(setups) &&
+    identical(names(setups), setup_keys) &&
+    identical(
+      fastkpc_full_cuda_census_key_set_hash(names(setups)),
+      plan$selected_prepared_s_key_corpus_hash
+    )
+  setup_lineage_exact <- prepared_s_key_corpus_exact && all(vapply(
+    seq_along(setups), function(index) {
+      setup <- setups[[index]]
+      is.list(setup) &&
+        identical(
+          as.character(setup$prepared_s_key_sha256),
+          setup_keys[[index]]
+        ) &&
+        identical(
+          as.character(setup$same_S_group_id),
+          setup_groups[[index]]
+        )
+    }, logical(1L)
+  ))
+  expected_targets <- plan$expected_targets
+  target_key_corpus_exact <- nrow(states) == nrow(expected_targets) &&
+    identical(
+      as.character(states$residual_key_sha256),
+      as.character(expected_targets$residual_key_sha256)
+    ) && identical(
+      fastkpc_full_cuda_census_key_set_hash(sort(
+        as.character(states$residual_key_sha256), method = "radix"
+      )),
+      plan$selected_target_key_corpus_hash
+    )
+  target_lineage_exact <- target_key_corpus_exact && identical(
+    as.character(states$prepared_s_key_sha256),
+    as.character(expected_targets$prepared_s_key_sha256)
+  ) && identical(
+    as.character(states$same_S_group_id),
+    as.character(expected_targets$same_S_group_id)
+  )
+
+  response_hits <- unlist(lapply(seq_along(setups), function(index) {
+    fastkpc_full_cuda_prepared_s_find_response_fields(
+      setups[[index]],
+      path = paste0("prepared_s_setups$", setup_keys[[index]])
+    )
+  }), use.names = FALSE)
+  setup_fingerprints <- vapply(
+    setups, `[[`, character(1L), "semantic_fingerprint"
+  )
+  target_fingerprints <- as.character(
+    states$target_state_fingerprint
+  )
+  prepared_setup_fingerprint_collision_count <- as.integer(
+    length(setup_fingerprints) - length(unique(setup_fingerprints))
+  )
+  target_state_fingerprint_collision_count <- as.integer(
+    length(target_fingerprints) - length(unique(target_fingerprints))
+  )
+
+  iteration_setup_group_count <- as.integer(
+    nrow(iteration$setup_groups)
+  )
+  iteration_target_key_count <- as.integer(nrow(iteration$target_keys))
+  iteration_logical_test_count <- as.integer(
+    nrow(iteration$logical_tests)
+  )
+  seed_target_key_count <- as.integer(
+    nrow(qualification$seed_target_keys)
+  )
+  qualification_target_key_count <- as.integer(
+    nrow(qualification$target_keys)
+  )
+  qualification_logical_test_count <- as.integer(
+    nrow(qualification$logical_tests)
+  )
+  qualification_same_S_group_count <- as.integer(
+    nrow(qualification$setup_groups)
+  )
+  conditional_near_alpha_test_count <- as.integer(sum(
+    qualification$logical_tests$near_alpha %in% TRUE
+  ))
+  selection_counts_exact <-
+    iteration_setup_group_count == 44L &&
+    iteration_target_key_count == 270L &&
+    iteration_logical_test_count == 44L &&
+    seed_target_key_count == 2356L &&
+    qualification_target_key_count == 6143L &&
+    qualification_logical_test_count == 3808L &&
+    qualification_same_S_group_count == 2061L &&
+    conditional_near_alpha_test_count == 1478L
+
+  target_parity_rows <- as.data.frame(
+    target_parity_rows, stringsAsFactors = FALSE
+  )
+  dcov_parity_rows <- as.data.frame(
+    dcov_parity_rows, stringsAsFactors = FALSE
+  )
+  expected_setup_parity_count <- switch(
+    parity_scope,
+    none = 0L,
+    iteration = 44L,
+    qualification = 2061L
+  )
+  expected_target_parity_count <- switch(
+    parity_scope,
+    none = 0L,
+    iteration = 270L,
+    qualification = 6143L
+  )
+  expected_dcov_parity_count <- switch(
+    parity_scope,
+    none = 0L,
+    iteration = 44L,
+    qualification = 3808L
+  )
+  fixed_sp_coefficient_hash_exact_count <- if (
+      nrow(target_parity_rows) == 0L) 0L else as.integer(sum(
+        target_parity_rows$coefficient_hash_exact %in% TRUE
+      ))
+  fixed_sp_fitted_hash_exact_count <- if (
+      nrow(target_parity_rows) == 0L) 0L else as.integer(sum(
+        target_parity_rows$fitted_hash_exact %in% TRUE
+      ))
+  fixed_sp_residual_hash_exact_count <- if (
+      nrow(target_parity_rows) == 0L) 0L else as.integer(sum(
+        target_parity_rows$residual_hash_exact %in% TRUE
+      ))
+  fixed_sp_coefficient_hash_exact <-
+    nrow(target_parity_rows) == expected_target_parity_count &&
+    expected_target_parity_count > 0L &&
+    fixed_sp_coefficient_hash_exact_count == expected_target_parity_count
+  fixed_sp_fitted_hash_exact <-
+    nrow(target_parity_rows) == expected_target_parity_count &&
+    expected_target_parity_count > 0L &&
+    fixed_sp_fitted_hash_exact_count == expected_target_parity_count
+  fixed_sp_residual_hash_exact <-
+    nrow(target_parity_rows) == expected_target_parity_count &&
+    expected_target_parity_count > 0L &&
+    fixed_sp_residual_hash_exact_count == expected_target_parity_count
+  legacy_dcov_max_abs_p_value_diff <- if (
+      nrow(dcov_parity_rows) == 0L) {
+    NA_real_
+  } else {
+    max(as.numeric(dcov_parity_rows$absolute_p_value_drift))
+  }
+  legacy_dcov_p_value_exact_count <- if (
+      nrow(dcov_parity_rows) == 0L) 0L else as.integer(sum(
+        dcov_parity_rows$p_value_exact %in% TRUE
+      ))
+  legacy_dcov_decision_flip_count <- if (
+      nrow(dcov_parity_rows) == 0L) 0L else as.integer(sum(
+        !(dcov_parity_rows$decision_identical %in% TRUE)
+      ))
+  spectra_no_fallback <- nrow(dcov_parity_rows) ==
+    expected_dcov_parity_count &&
+    expected_dcov_parity_count > 0L &&
+    all(dcov_parity_rows$spectra_no_fallback %in% TRUE)
+  setup_semantic_exact <- nrow(setup_semantic_parity) ==
+    expected_setup_parity_count &&
+    (expected_setup_parity_count == 0L || all(
+      setup_semantic_parity$validator_pass %in% TRUE &
+        setup_semantic_parity$semantic_fingerprint_exact %in% TRUE &
+        setup_semantic_parity$representation_fingerprint_exact %in% TRUE &
+        setup_semantic_parity$fixed_sp_behavior_exact %in% TRUE
+    ))
+  parity_pass <- if (identical(parity_scope, "none")) {
+    nrow(setup_semantic_parity) == 0L &&
+      nrow(target_parity_rows) == 0L &&
+      nrow(dcov_parity_rows) == 0L
+  } else {
+    setup_semantic_exact &&
+      fixed_sp_coefficient_hash_exact &&
+      fixed_sp_fitted_hash_exact &&
+      fixed_sp_residual_hash_exact &&
+      nrow(dcov_parity_rows) == expected_dcov_parity_count &&
+      is.finite(legacy_dcov_max_abs_p_value_diff) &&
+      legacy_dcov_max_abs_p_value_diff <= 1e-12 &&
+      legacy_dcov_decision_flip_count == 0L &&
+      spectra_no_fallback
+  }
+
+  oracle_inherited_graph_gate <- isTRUE(
+    inputs$summary$oracle_inherited_graph_gate
+  )
+  new_candidate_graph_gate <- as.character(
+    inputs$summary$new_candidate_graph_gate
+  )
+  unsupported_canonical_setup_count <- 0L
+  unknown_fallback_count <- 0L
+  approximate_backend_count <- 0L
+  structural_pass <-
+    prepared_s_key_corpus_exact && target_key_corpus_exact &&
+    setup_lineage_exact && target_lineage_exact &&
+    length(response_hits) == 0L &&
+    prepared_setup_fingerprint_collision_count == 0L &&
+    target_state_fingerprint_collision_count == 0L &&
+    unsupported_canonical_setup_count == 0L &&
+    unknown_fallback_count == 0L &&
+    approximate_backend_count == 0L &&
+    selection_counts_exact && oracle_inherited_graph_gate &&
+    identical(new_candidate_graph_gate, "NOT_APPLICABLE")
+  selected_group_count <- as.integer(length(setups))
+  target_state_count <- as.integer(nrow(states))
+  full_counts <- selected_group_count == 8634L &&
+    target_state_count == 110617L
+  phase2_complete <- structural_pass && parity_pass && full_counts &&
+    identical(parity_scope, "qualification")
+  run_scope <- if (selected_group_count == 8634L) {
+    "full"
+  } else {
+    paste0("scaled_", parity_scope)
+  }
+  list(
+    pass = structural_pass && parity_pass,
+    phase2_complete = phase2_complete,
+    run_scope = run_scope,
+    parity_scope = parity_scope,
+    phase2_input_authenticated = TRUE,
+    selected_group_count = selected_group_count,
+    target_state_count = target_state_count,
+    prepared_s_key_corpus_exact = prepared_s_key_corpus_exact,
+    target_key_corpus_exact = target_key_corpus_exact,
+    setup_lineage_exact = setup_lineage_exact,
+    target_lineage_exact = target_lineage_exact,
+    response_leakage_count = as.integer(length(response_hits)),
+    prepared_setup_fingerprint_collision_count =
+      prepared_setup_fingerprint_collision_count,
+    target_state_fingerprint_collision_count =
+      target_state_fingerprint_collision_count,
+    unsupported_canonical_setup_count =
+      unsupported_canonical_setup_count,
+    unknown_fallback_count = unknown_fallback_count,
+    approximate_backend_count = approximate_backend_count,
+    iteration_setup_group_count = iteration_setup_group_count,
+    iteration_target_key_count = iteration_target_key_count,
+    iteration_logical_test_count = iteration_logical_test_count,
+    seed_target_key_count = seed_target_key_count,
+    qualification_target_key_count = qualification_target_key_count,
+    qualification_logical_test_count =
+      qualification_logical_test_count,
+    qualification_same_S_group_count =
+      qualification_same_S_group_count,
+    conditional_near_alpha_test_count =
+      conditional_near_alpha_test_count,
+    setup_semantic_parity_count = as.integer(
+      nrow(setup_semantic_parity)
+    ),
+    fixed_sp_coefficient_hash_exact_count =
+      fixed_sp_coefficient_hash_exact_count,
+    fixed_sp_fitted_hash_exact_count =
+      fixed_sp_fitted_hash_exact_count,
+    fixed_sp_residual_hash_exact_count =
+      fixed_sp_residual_hash_exact_count,
+    fixed_sp_coefficient_hash_exact =
+      fixed_sp_coefficient_hash_exact,
+    fixed_sp_fitted_hash_exact = fixed_sp_fitted_hash_exact,
+    fixed_sp_residual_hash_exact = fixed_sp_residual_hash_exact,
+    legacy_dcov_max_abs_p_value_diff =
+      legacy_dcov_max_abs_p_value_diff,
+    legacy_dcov_p_value_exact_count =
+      legacy_dcov_p_value_exact_count,
+    legacy_dcov_decision_flip_count =
+      legacy_dcov_decision_flip_count,
+    legacy_dcov_spectra_no_fallback = spectra_no_fallback,
+    oracle_inherited_graph_gate = oracle_inherited_graph_gate,
+    new_candidate_graph_gate = new_candidate_graph_gate
+  )
+}
+
+fastkpc_full_cuda_prepared_s_summary_markdown <- function(summary) {
+  c(
+    "# Full CUDA CI Prepared-S Contract",
+    "",
+    paste0("- pass: ", summary$pass),
+    paste0("- phase2_complete: ", summary$phase2_complete),
+    paste0("- run_scope: ", summary$run_scope),
+    paste0("- parity_scope: ", summary$parity_scope),
+    paste0("- selected_group_count: ", summary$selected_group_count),
+    paste0("- target_state_count: ", summary$target_state_count),
+    paste0(
+      "- fixed_sp_coefficient_hash_exact: ",
+      summary$fixed_sp_coefficient_hash_exact
+    ),
+    paste0(
+      "- fixed_sp_fitted_hash_exact: ",
+      summary$fixed_sp_fitted_hash_exact
+    ),
+    paste0(
+      "- fixed_sp_residual_hash_exact: ",
+      summary$fixed_sp_residual_hash_exact
+    ),
+    paste0(
+      "- legacy_dcov_max_abs_p_value_diff: ",
+      if (is.finite(summary$legacy_dcov_max_abs_p_value_diff)) {
+        sprintf("%.17g", summary$legacy_dcov_max_abs_p_value_diff)
+      } else {
+        "NOT_APPLICABLE"
+      }
+    ),
+    paste0(
+      "- legacy_dcov_decision_flip_count: ",
+      summary$legacy_dcov_decision_flip_count
+    ),
+    paste0(
+      "- oracle_inherited_graph_gate: ",
+      summary$oracle_inherited_graph_gate
+    ),
+    paste0(
+      "- new_candidate_graph_gate: ",
+      summary$new_candidate_graph_gate
+    )
+  )
+}
+
+fastkpc_full_cuda_prepared_s_semantic_artifact_path_names <- function() {
+  c(
+    "input_hashes_csv", "prepared_s_setup_index_rds",
+    "prepared_s_setup_index_csv", "target_state_index_rds",
+    "target_state_index_csv", "iteration_setup_groups_rds",
+    "iteration_setup_groups_csv", "iteration_target_keys_rds",
+    "iteration_target_keys_csv", "iteration_logical_tests_rds",
+    "iteration_logical_tests_csv", "iteration_coverage_csv",
+    "qualification_setup_groups_rds",
+    "qualification_setup_groups_csv",
+    "qualification_target_keys_rds",
+    "qualification_target_keys_csv",
+    "qualification_logical_tests_rds",
+    "qualification_logical_tests_csv", "qualification_coverage_csv",
+    "setup_semantic_parity_csv", "target_retarget_parity_csv",
+    "dcov_parity_csv", "unsupported_envelope_csv", "fallbacks_csv"
+  )
+}
+
+.fastkpc_full_cuda_prepared_s_validate_published_artifact <- function(
+    output_dir, expected_summary, expected_manifest,
+    expected_semantic_hashes) {
+  fastkpc_full_cuda_require_namespace("jsonlite")
+  paths <- fastkpc_full_cuda_prepared_s_artifact_paths(output_dir)
+  if (!all(file.exists(unlist(paths, use.names = FALSE)))) {
+    stop("published Prepared-S artifact path is missing",
+         call. = FALSE)
+  }
+  summary <- jsonlite::read_json(
+    paths$summary_json, simplifyVector = TRUE
+  )
+  manifest <- jsonlite::read_json(
+    paths$manifest_json, simplifyVector = TRUE
+  )
+  if (!isTRUE(summary$pass) ||
+      !identical(as.character(summary$run_scope),
+                 expected_summary$run_scope) ||
+      !identical(as.integer(summary$selected_group_count),
+                 expected_summary$selected_group_count) ||
+      !identical(as.character(
+        manifest$selected_prepared_s_key_corpus_hash
+      ), expected_manifest$selected_prepared_s_key_corpus_hash)) {
+    stop("published Prepared-S summary/manifest validation failed",
+         call. = FALSE)
+  }
+  actual_hashes <- vapply(
+    paths[names(expected_semantic_hashes)],
+    fastkpc_full_cuda_census_file_hash,
+    character(1L)
+  )
+  if (!identical(actual_hashes, expected_semantic_hashes)) {
+    stop("published Prepared-S semantic file hash mismatch",
+         call. = FALSE)
+  }
+  setups <- readRDS(paths$prepared_s_setup_index_rds)
+  states <- readRDS(paths$target_state_index_rds)
+  if (!identical(length(setups), expected_summary$selected_group_count) ||
+      !identical(nrow(states), expected_summary$target_state_count)) {
+    stop("published Prepared-S deterministic RDS count mismatch",
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_prepared_s_publish_staging <- function(
+    staging_dir, output_dir, expected_summary, expected_manifest,
+    expected_semantic_hashes) {
+  staging_paths <- fastkpc_full_cuda_prepared_s_artifact_paths(
+    staging_dir
+  )
+  final_paths <- fastkpc_full_cuda_prepared_s_artifact_paths(output_dir)
+  publish_names <- setdiff(names(staging_paths), "shards_dir")
+  if (!all(file.exists(unlist(
+        staging_paths[publish_names], use.names = FALSE
+      )))) {
+    stop("Prepared-S staging artifact is incomplete", call. = FALSE)
+  }
+  backup_dir <- file.path(
+    output_dir, paste0(".publication-backup-", Sys.getpid())
+  )
+  if (dir.exists(backup_dir)) {
+    stop("Prepared-S publication backup path exists", call. = FALSE)
+  }
+  dir.create(backup_dir, recursive = TRUE, showWarnings = FALSE)
+  backup_paths <- setNames(
+    file.path(backup_dir, basename(unlist(final_paths[publish_names]))),
+    publish_names
+  )
+  moved_old <- setNames(rep(FALSE, length(publish_names)), publish_names)
+  published <- setNames(rep(FALSE, length(publish_names)), publish_names)
+  error <- tryCatch({
+    for (name in publish_names) {
+      final <- final_paths[[name]]
+      if (file.exists(final)) {
+        if (!file.rename(final, backup_paths[[name]])) {
+          stop("failed to back up Prepared-S artifact: ", name,
+               call. = FALSE)
+        }
+        moved_old[[name]] <- TRUE
+      }
+    }
+    for (name in publish_names) {
+      if (!file.rename(staging_paths[[name]], final_paths[[name]])) {
+        stop("failed to publish Prepared-S artifact: ", name,
+             call. = FALSE)
+      }
+      published[[name]] <- TRUE
+    }
+    .fastkpc_full_cuda_prepared_s_validate_published_artifact(
+      output_dir = output_dir,
+      expected_summary = expected_summary,
+      expected_manifest = expected_manifest,
+      expected_semantic_hashes = expected_semantic_hashes
+    )
+    NULL
+  }, error = identity)
+  if (!is.null(error)) {
+    for (name in rev(publish_names[published])) {
+      unlink(final_paths[[name]], force = TRUE)
+    }
+    for (name in rev(publish_names[moved_old])) {
+      if (!file.rename(backup_paths[[name]], final_paths[[name]])) {
+        stop(
+          "Prepared-S publication rollback failed after: ",
+          conditionMessage(error),
+          call. = FALSE
+        )
+      }
+    }
+    unlink(backup_dir, recursive = TRUE, force = TRUE)
+    stop(error)
+  }
+  unlink(backup_dir, recursive = TRUE, force = TRUE)
+  invisible(final_paths)
+}
+
+fastkpc_full_cuda_prepared_s_reusable_parity_artifact <- function(
+    output_dir, inputs, plan, iteration, qualification, merged,
+    parity_scope) {
+  parity_scope <- fastkpc_full_cuda_prepared_s_validate_parity_scope(
+    parity_scope
+  )
+  if (!fastkpc_full_cuda_prepared_s_completed_artifact(output_dir)) {
+    return(NULL)
+  }
+  fastkpc_full_cuda_require_namespace("jsonlite")
+  paths <- fastkpc_full_cuda_prepared_s_artifact_paths(output_dir)
+  result <- tryCatch({
+    summary <- jsonlite::read_json(
+      paths$summary_json, simplifyVector = TRUE
+    )
+    manifest <- jsonlite::read_json(
+      paths$manifest_json, simplifyVector = TRUE
+    )
+    clean_identity <- isTRUE(summary$pass) &&
+      identical(as.character(summary$parity_scope), parity_scope) &&
+      identical(
+        as.integer(summary$selected_group_count),
+        as.integer(nrow(plan$setup_index))
+      ) && identical(
+        as.character(manifest$selected_prepared_s_key_corpus_hash),
+        plan$selected_prepared_s_key_corpus_hash
+      ) && identical(
+        as.character(manifest$selected_target_key_corpus_hash),
+        plan$selected_target_key_corpus_hash
+      ) && identical(
+        as.character(manifest$iteration_subset_hash),
+        iteration$iteration_subset_hash
+      ) && identical(
+        as.character(manifest$qualification_subset_hash),
+        qualification$qualification_subset_hash
+      )
+    if (!clean_identity) {
+      stop("prior Prepared-S artifact identity mismatch",
+           call. = FALSE)
+    }
+    semantic_hashes <- fastkpc_full_cuda_prepared_s_named_character(
+      manifest$semantic_file_sha256
+    )
+    semantic_names <-
+      fastkpc_full_cuda_prepared_s_semantic_artifact_path_names()
+    if (!identical(names(semantic_hashes), semantic_names)) {
+      stop("prior Prepared-S semantic hash schema mismatch",
+           call. = FALSE)
+    }
+    actual_hashes <- vapply(
+      paths[semantic_names],
+      fastkpc_full_cuda_census_file_hash,
+      character(1L)
+    )
+    if (!identical(actual_hashes, semantic_hashes)) {
+      stop("prior Prepared-S semantic file hash mismatch",
+           call. = FALSE)
+    }
+    prior_setups <- readRDS(paths$prepared_s_setup_index_rds)
+    prior_states <- readRDS(paths$target_state_index_rds)
+    if (!identical(prior_setups, merged$prepared_s_setups) ||
+        !identical(prior_states, merged$target_states)) {
+      stop("prior Prepared-S merged RDS identity mismatch",
+           call. = FALSE)
+    }
+    setup_rows <- utils::read.csv(
+      paths$setup_semantic_parity_csv,
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+    target_rows <- utils::read.csv(
+      paths$target_retarget_parity_csv,
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+    dcov_rows <- utils::read.csv(
+      paths$dcov_parity_csv,
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+    expected <- if (identical(parity_scope, "none")) {
+      NULL
+    } else {
+      fastkpc_full_cuda_prepared_s_selection_for_scope(
+        inputs, parity_scope
+      )
+    }
+    if (identical(parity_scope, "none")) {
+      if (nrow(setup_rows) != 0L || nrow(target_rows) != 0L ||
+          nrow(dcov_rows) != 0L) {
+        stop("prior Prepared-S none parity is not empty",
+             call. = FALSE)
+      }
+    } else if (!identical(
+          as.character(setup_rows$same_S_group_id),
+          as.character(expected$setup_groups$same_S_group_id)
+        ) || !identical(
+          as.character(target_rows$residual_key_sha256),
+          as.character(expected$target_keys$residual_key_sha256)
+        ) || !identical(
+          as.integer(dcov_rows$logical_sequence_id),
+          as.integer(expected$logical_tests$logical_sequence_id)
+        )) {
+      stop("prior Prepared-S parity row lineage mismatch",
+           call. = FALSE)
+    }
+    list(
+      setup_semantic_parity = setup_rows,
+      target_parity = list(rows = target_rows),
+      dcov_parity = list(rows = dcov_rows)
+    )
+  }, error = function(error) NULL)
+  result
+}
+
+fastkpc_full_cuda_write_prepared_s_artifact <- function(
+    output_dir, census_dir, data_path, inputs, plan, iteration,
+    qualification, merged, setup_semantic_parity, target_parity,
+    dcov_parity, parity_scope, max_groups, requested_workers,
+    actual_workers, resume, stage_timing, elapsed_seconds,
+    command_lines, environment_lines, executed_group_count,
+    reused_group_count, written_shard_count, reused_shard_count,
+    parity_evidence_reused = FALSE) {
+  fastkpc_full_cuda_require_namespace("jsonlite")
+  started <- proc.time()[["elapsed"]]
+  parity_scope <- fastkpc_full_cuda_prepared_s_validate_parity_scope(
+    parity_scope
+  )
+  target_parity_rows <- target_parity$rows
+  dcov_parity_rows <- dcov_parity$rows
+  gate <- fastkpc_full_cuda_prepared_s_artifact_gate(
+    inputs = inputs,
+    plan = plan,
+    iteration = iteration,
+    qualification = qualification,
+    merged = merged,
+    setup_semantic_parity = setup_semantic_parity,
+    target_parity_rows = target_parity_rows,
+    dcov_parity_rows = dcov_parity_rows,
+    parity_scope = parity_scope
+  )
+  if (!isTRUE(gate$pass)) {
+    stop("Prepared-S artifact gate failed", call. = FALSE)
+  }
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  staging_dir <- file.path(
+    output_dir, paste0(".publication-", Sys.getpid())
+  )
+  if (dir.exists(staging_dir)) {
+    stop("Prepared-S publication staging path exists", call. = FALSE)
+  }
+  dir.create(staging_dir, recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(staging_dir, recursive = TRUE, force = TRUE), add = TRUE)
+  paths <- fastkpc_full_cuda_prepared_s_artifact_paths(staging_dir)
+
+  fastkpc_full_cuda_prepared_s_write_csv(
+    inputs$input_hashes, paths$input_hashes_csv
+  )
+  saveRDS(
+    merged$prepared_s_setups,
+    paths$prepared_s_setup_index_rds,
+    version = 2
+  )
+  fastkpc_full_cuda_prepared_s_write_csv(
+    fastkpc_full_cuda_prepared_s_setup_index_csv(
+      merged$prepared_s_setups
+    ),
+    paths$prepared_s_setup_index_csv
+  )
+  saveRDS(
+    merged$target_states,
+    paths$target_state_index_rds,
+    version = 2
+  )
+  fastkpc_full_cuda_prepared_s_write_csv(
+    fastkpc_full_cuda_prepared_s_target_state_csv(
+      merged$target_states
+    ),
+    paths$target_state_index_csv
+  )
+  fastkpc_full_cuda_prepared_s_write_rds_csv(
+    iteration$setup_groups,
+    paths$iteration_setup_groups_rds,
+    paths$iteration_setup_groups_csv
+  )
+  fastkpc_full_cuda_prepared_s_write_rds_csv(
+    iteration$target_keys,
+    paths$iteration_target_keys_rds,
+    paths$iteration_target_keys_csv
+  )
+  fastkpc_full_cuda_prepared_s_write_rds_csv(
+    iteration$logical_tests,
+    paths$iteration_logical_tests_rds,
+    paths$iteration_logical_tests_csv
+  )
+  fastkpc_full_cuda_prepared_s_write_csv(
+    fastkpc_full_cuda_prepared_s_iteration_coverage(
+      inputs, iteration
+    ),
+    paths$iteration_coverage_csv
+  )
+  fastkpc_full_cuda_prepared_s_write_rds_csv(
+    qualification$setup_groups,
+    paths$qualification_setup_groups_rds,
+    paths$qualification_setup_groups_csv
+  )
+  fastkpc_full_cuda_prepared_s_write_rds_csv(
+    qualification$target_keys,
+    paths$qualification_target_keys_rds,
+    paths$qualification_target_keys_csv
+  )
+  fastkpc_full_cuda_prepared_s_write_rds_csv(
+    qualification$logical_tests,
+    paths$qualification_logical_tests_rds,
+    paths$qualification_logical_tests_csv
+  )
+  fastkpc_full_cuda_prepared_s_write_csv(
+    qualification$coverage,
+    paths$qualification_coverage_csv
+  )
+  fastkpc_full_cuda_prepared_s_write_csv(
+    setup_semantic_parity,
+    paths$setup_semantic_parity_csv
+  )
+  fastkpc_full_cuda_prepared_s_write_csv(
+    target_parity_rows,
+    paths$target_retarget_parity_csv
+  )
+  fastkpc_full_cuda_prepared_s_write_csv(
+    dcov_parity_rows,
+    paths$dcov_parity_csv
+  )
+  unsupported <- data.frame(
+    setup_group_id = character(),
+    reason = character(),
+    stringsAsFactors = FALSE
+  )
+  fallbacks <- data.frame(
+    stage = character(),
+    fallback = character(),
+    count = integer(),
+    stringsAsFactors = FALSE
+  )
+  fastkpc_full_cuda_prepared_s_write_csv(
+    unsupported, paths$unsupported_envelope_csv
+  )
+  fastkpc_full_cuda_prepared_s_write_csv(
+    fallbacks, paths$fallbacks_csv
+  )
+  writeLines(command_lines, paths$commands_txt, useBytes = TRUE)
+  writeLines(environment_lines, paths$environment_txt, useBytes = TRUE)
+
+  write_elapsed <- proc.time()[["elapsed"]] - started
+  stage_timing <- rbind(
+    as.data.frame(stage_timing, stringsAsFactors = FALSE),
+    data.frame(
+      stage = "write_artifact",
+      elapsed_seconds = as.numeric(write_elapsed),
+      stringsAsFactors = FALSE
+    )
+  )
+  rownames(stage_timing) <- NULL
+  fastkpc_full_cuda_prepared_s_write_csv(
+    stage_timing, paths$stage_timing_csv
+  )
+
+  semantic_names <-
+    fastkpc_full_cuda_prepared_s_semantic_artifact_path_names()
+  semantic_hashes <- vapply(
+    paths[semantic_names],
+    fastkpc_full_cuda_census_file_hash,
+    character(1L)
+  )
+  shard_ids <- 0:(plan$shard_count - 1L)
+  shard_rds_paths <- file.path(
+    fastkpc_full_cuda_prepared_s_artifact_paths(output_dir)$shards_dir,
+    paste0("shard_", shard_ids, ".rds")
+  )
+  shard_json_paths <- file.path(
+    fastkpc_full_cuda_prepared_s_artifact_paths(output_dir)$shards_dir,
+    paste0("shard_", shard_ids, ".summary.json")
+  )
+  if (!all(file.exists(c(shard_rds_paths, shard_json_paths)))) {
+    stop("Prepared-S shard publication is incomplete", call. = FALSE)
+  }
+  shard_rds_size_bytes <- setNames(
+    as.numeric(file.info(shard_rds_paths)$size),
+    paste0("shard_", shard_ids)
+  )
+  artifact_payload_size_bytes <- sum(as.numeric(file.info(
+    c(unlist(paths[semantic_names], use.names = FALSE),
+      shard_rds_paths, shard_json_paths)
+  )$size))
+  stage_timing_total_seconds <- sum(
+    as.numeric(stage_timing$elapsed_seconds)
+  )
+  total_elapsed <- as.numeric(elapsed_seconds + write_elapsed)
+
+  summary <- c(gate, list(
+    requested_workers = as.integer(requested_workers),
+    actual_workers = as.integer(actual_workers),
+    shard_count = as.integer(plan$shard_count),
+    resume = isTRUE(resume),
+    max_groups = as.integer(max_groups),
+    written_shard_count = as.integer(written_shard_count),
+    reused_shard_count = as.integer(reused_shard_count),
+    executed_group_count = as.integer(executed_group_count),
+    reused_group_count = as.integer(reused_group_count),
+    parity_evidence_reused = isTRUE(parity_evidence_reused),
+    artifact_payload_size_bytes =
+      as.numeric(artifact_payload_size_bytes),
+    shard_rds_size_bytes = as.list(shard_rds_size_bytes),
+    stage_timing_total_seconds =
+      as.numeric(stage_timing_total_seconds),
+    elapsed_seconds = total_elapsed,
+    max_rss_kb = fastkpc_full_cuda_prepared_s_max_rss_kb()
+  ))
+  manifest <- list(
+    schema_version = "full-cuda-ci-prepared-s-artifact-v1",
+    phase2_input_schema_version =
+      fastkpc_full_cuda_prepared_s_input_contract()$schema_version,
+    run_scope = gate$run_scope,
+    parity_scope = parity_scope,
+    phase2_complete = gate$phase2_complete,
+    phase1_input_bundle_hash = inputs$phase1_input_bundle_hash,
+    dataset_file_sha256 = inputs$dataset_file_sha256,
+    dataset_matrix_sha256 = inputs$dataset_sha256,
+    canonical_logical_census_hash = as.character(
+      inputs$manifest$canonical_logical_census_hash
+    ),
+    canonical_target_key_corpus_hash = as.character(
+      inputs$manifest$canonical_key_corpus_hash
+    ),
+    selected_prepared_s_key_corpus_hash =
+      plan$selected_prepared_s_key_corpus_hash,
+    selected_target_key_corpus_hash =
+      plan$selected_target_key_corpus_hash,
+    iteration_subset_hash = iteration$iteration_subset_hash,
+    qualification_subset_hash = qualification$qualification_subset_hash,
+    source_commit = plan$context$source_commit,
+    R_version = plan$context$R_version,
+    mgcv_version = plan$context$mgcv_version,
+    BLAS_identity = plan$context$BLAS_identity,
+    LAPACK_identity = plan$context$LAPACK_identity,
+    BLAS_thread_count = plan$context$BLAS_thread_count,
+    prepared_s_setup_schema_version =
+      plan$context$schema_config$prepared_s_setup_schema_version,
+    target_state_schema_version =
+      plan$context$schema_config$target_state_schema_version,
+    semantic_tolerance_config_hash =
+      plan$context$semantic_tolerance_config_hash,
+    qualification_selection_config_hash =
+      plan$context$qualification_selection_config_hash,
+    census_dir = census_dir,
+    data_path = data_path,
+    selected_group_count = gate$selected_group_count,
+    target_state_count = gate$target_state_count,
+    requested_workers = as.integer(requested_workers),
+    actual_workers = as.integer(actual_workers),
+    shard_count = as.integer(plan$shard_count),
+    resume = isTRUE(resume),
+    max_groups = as.integer(max_groups),
+    written_shard_count = as.integer(written_shard_count),
+    reused_shard_count = as.integer(reused_shard_count),
+    executed_group_count = as.integer(executed_group_count),
+    reused_group_count = as.integer(reused_group_count),
+    semantic_file_sha256 = as.list(semantic_hashes),
+    prepared_s_setup_index_rds_sha256 = as.character(
+      semantic_hashes[["prepared_s_setup_index_rds"]]
+    ),
+    target_state_index_rds_sha256 = as.character(
+      semantic_hashes[["target_state_index_rds"]]
+    ),
+    oracle_inherited_graph_gate = gate$oracle_inherited_graph_gate,
+    new_candidate_graph_gate = gate$new_candidate_graph_gate
+  )
+  fastkpc_full_cuda_write_json(manifest, paths$manifest_json)
+  fastkpc_full_cuda_write_json(summary, paths$summary_json)
+  writeLines(
+    fastkpc_full_cuda_prepared_s_summary_markdown(summary),
+    paths$summary_md,
+    useBytes = TRUE
+  )
+
+  .fastkpc_full_cuda_prepared_s_publish_staging(
+    staging_dir = staging_dir,
+    output_dir = output_dir,
+    expected_summary = summary,
+    expected_manifest = manifest,
+    expected_semantic_hashes = semantic_hashes
+  )
+  list(
+    manifest = manifest,
+    summary = summary,
+    paths = fastkpc_full_cuda_prepared_s_artifact_paths(output_dir)
+  )
+}
+
+fastkpc_full_cuda_prepared_s_completed_artifact <- function(output_dir) {
+  paths <- fastkpc_full_cuda_prepared_s_artifact_paths(output_dir)
+  if (!file.exists(paths$summary_json) ||
+      !file.exists(paths$manifest_json)) return(FALSE)
+  fastkpc_full_cuda_require_namespace("jsonlite")
+  summary <- tryCatch(
+    jsonlite::read_json(paths$summary_json, simplifyVector = TRUE),
+    error = function(error) NULL
+  )
+  is.list(summary) && isTRUE(summary$pass)
+}
+
+fastkpc_full_cuda_prepared_s_write_failure_summary <- function(
+    output_dir, stage, error, elapsed_seconds) {
+  fastkpc_full_cuda_require_namespace("jsonlite")
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  completed <- fastkpc_full_cuda_prepared_s_completed_artifact(
+    output_dir
+  )
+  failure_dir <- if (completed) {
+    root <- file.path(output_dir, "failed-runs")
+    dir.create(root, recursive = TRUE, showWarnings = FALSE)
+    base <- paste0("run_", Sys.getpid())
+    candidate <- file.path(root, base)
+    suffix <- 0L
+    while (dir.exists(candidate)) {
+      suffix <- suffix + 1L
+      candidate <- file.path(root, paste0(base, "_", suffix))
+    }
+    dir.create(candidate, recursive = TRUE, showWarnings = FALSE)
+    candidate
+  } else {
+    output_dir
+  }
+  summary <- list(
+    pass = FALSE,
+    phase2_complete = FALSE,
+    stage = as.character(stage),
+    error_class = as.character(class(error)[[1L]]),
+    error_message = conditionMessage(error),
+    elapsed_seconds = as.numeric(elapsed_seconds)
+  )
+  path <- file.path(failure_dir, "summary.json")
+  temporary <- tempfile(
+    ".prepared-s-failure-", tmpdir = failure_dir, fileext = ".tmp"
+  )
+  on.exit(unlink(temporary, force = TRUE), add = TRUE)
+  fastkpc_full_cuda_write_json(summary, temporary)
+  if (file.exists(path)) unlink(path, force = TRUE)
+  if (!file.rename(temporary, path)) {
+    stop("failed to publish Prepared-S failure summary",
+         call. = FALSE)
+  }
+  invisible(path)
+}
