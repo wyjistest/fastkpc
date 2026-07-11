@@ -4223,3 +4223,2035 @@ fastkpc_full_cuda_compare_prepared_s_semantics <- function(
     exact_behavior_gate = exact_behavior_gate
   )
 }
+
+fastkpc_full_cuda_prepared_s_selection_character <- function(value) {
+  enc2utf8(as.character(value))
+}
+
+fastkpc_full_cuda_prepared_s_selection_numeric <- function(value) {
+  if (is.factor(value)) value <- as.character(value)
+  suppressWarnings(as.numeric(value))
+}
+
+fastkpc_full_cuda_prepared_s_selection_integer <- function(value) {
+  if (is.factor(value)) value <- as.character(value)
+  suppressWarnings(as.integer(value))
+}
+
+fastkpc_full_cuda_prepared_s_selection_logical <- function(value) {
+  if (is.factor(value)) value <- as.character(value)
+  as.logical(value)
+}
+
+fastkpc_full_cuda_prepared_s_selection_normalize_fields <- function(
+    value, character_fields = character(), integer_fields = character(),
+    numeric_fields = character(), logical_fields = character()) {
+  value <- as.data.frame(value, stringsAsFactors = FALSE)
+  for (field in intersect(character_fields, names(value))) {
+    value[[field]] <-
+      fastkpc_full_cuda_prepared_s_selection_character(value[[field]])
+  }
+  for (field in intersect(integer_fields, names(value))) {
+    value[[field]] <-
+      fastkpc_full_cuda_prepared_s_selection_integer(value[[field]])
+  }
+  for (field in intersect(numeric_fields, names(value))) {
+    value[[field]] <-
+      fastkpc_full_cuda_prepared_s_selection_numeric(value[[field]])
+  }
+  for (field in intersect(logical_fields, names(value))) {
+    value[[field]] <-
+      fastkpc_full_cuda_prepared_s_selection_logical(value[[field]])
+  }
+  value
+}
+
+fastkpc_full_cuda_prepared_s_selection_setup_rows <- function(inputs) {
+  if (!is.list(inputs) || !is.data.frame(inputs$same_s_setup_metadata)) {
+    stop("Prepared-S selection setup metadata is unavailable",
+         call. = FALSE)
+  }
+  rows <- fastkpc_full_cuda_prepared_s_selection_normalize_fields(
+    inputs$same_s_setup_metadata,
+    character_fields = c(
+      "same_S_group_id", "S_key", "formula_class",
+      "representative_residual_key_sha256", "setup_fingerprint"
+    ),
+    integer_fields = c(
+      "S_size", "model_matrix_ncol", "model_matrix_rank",
+      "penalty_count", "conditioning_rank",
+      "near_constant_conditioning_count"
+    ),
+    numeric_fields = c(
+      "model_matrix_condition", "conditioning_condition"
+    )
+  )
+  required <- c(
+    "same_S_group_id", "S_size", "representative_residual_key_sha256",
+    "model_matrix_ncol", "model_matrix_rank", "model_matrix_condition",
+    "penalty_count", "conditioning_rank", "conditioning_condition",
+    "near_constant_conditioning_count"
+  )
+  if (length(setdiff(required, names(rows))) > 0L) {
+    stop("Prepared-S selection setup metadata is incomplete",
+         call. = FALSE)
+  }
+  rows <- rows[
+    order(rows$same_S_group_id, method = "radix"), , drop = FALSE
+  ]
+  rownames(rows) <- NULL
+  if (nrow(rows) == 0L || anyNA(rows$same_S_group_id) ||
+      anyDuplicated(rows$same_S_group_id)) {
+    stop("Prepared-S selection setup keys are invalid", call. = FALSE)
+  }
+  rows
+}
+
+fastkpc_full_cuda_prepared_s_selection_target_rows <- function(inputs) {
+  if (!is.list(inputs) || !is.data.frame(inputs$target_fit_metadata)) {
+    stop("Prepared-S selection target metadata is unavailable",
+         call. = FALSE)
+  }
+  rows <- fastkpc_full_cuda_prepared_s_selection_normalize_fields(
+    inputs$target_fit_metadata,
+    character_fields = c(
+      "residual_key_sha256", "same_S_group_id", "setup_fingerprint",
+      "fit_status", "fit_error", "selected_sp_hash",
+      "coefficient_hash", "fitted_hash", "residual_hash",
+      "target_fit_fingerprint"
+    ),
+    integer_fields = c("target", "coefficient_rank"),
+    numeric_fields = c(
+      "fit_time_ms", "GCV_Cp_score", "EDF",
+      "penalized_system_condition_at_selected_sp", "target_sd"
+    ),
+    logical_fields = c(
+      "target_near_constant", "coefficient_all_finite",
+      "fitted_all_finite", "residual_all_finite"
+    )
+  )
+  rows <- rows[
+    order(rows$residual_key_sha256, method = "radix"), , drop = FALSE
+  ]
+  rownames(rows) <- NULL
+  if (nrow(rows) == 0L || anyNA(rows$residual_key_sha256) ||
+      anyDuplicated(rows$residual_key_sha256)) {
+    stop("Prepared-S selection target keys are invalid", call. = FALSE)
+  }
+  rows
+}
+
+fastkpc_full_cuda_prepared_s_selection_request_rows <- function(inputs) {
+  if (!is.list(inputs) || !is.data.frame(inputs$residual_requests)) {
+    stop("Prepared-S selection residual requests are unavailable",
+         call. = FALSE)
+  }
+  rows <- fastkpc_full_cuda_prepared_s_selection_normalize_fields(
+    inputs$residual_requests,
+    character_fields = c(
+      "residual_key_payload", "residual_key_sha256", "S_key",
+      "formula_class", "same_S_group_id"
+    ),
+    integer_fields = c(
+      "target", "S_size", "same_S_group_size", "request_multiplicity",
+      "first_logical_sequence_id", "last_logical_sequence_id"
+    )
+  )
+  rows <- rows[
+    order(rows$residual_key_sha256, method = "radix"), , drop = FALSE
+  ]
+  rownames(rows) <- NULL
+  if (nrow(rows) == 0L || anyNA(rows$residual_key_sha256) ||
+      anyDuplicated(rows$residual_key_sha256)) {
+    stop("Prepared-S selection residual request keys are invalid",
+         call. = FALSE)
+  }
+  rows
+}
+
+fastkpc_full_cuda_prepared_s_selection_logical_rows <- function(inputs) {
+  if (!is.list(inputs) || !is.data.frame(inputs$logical_tests)) {
+    stop("Prepared-S selection logical tests are unavailable",
+         call. = FALSE)
+  }
+  rows <- fastkpc_full_cuda_prepared_s_selection_normalize_fields(
+    inputs$logical_tests,
+    character_fields = c(
+      "S_key", "formula_class", "reference_decision",
+      "residual_key_x", "residual_key_y"
+    ),
+    integer_fields = c(
+      "logical_sequence_id", "source_sequence_id", "source_task_index",
+      "level", "x", "y", "S_size"
+    ),
+    numeric_fields = c(
+      "reference_p_value", "alpha", "signed_distance_from_alpha",
+      "absolute_distance_from_alpha", "signed_log_ratio_from_alpha",
+      "absolute_log_distance_from_alpha"
+    ),
+    logical_fields = c(
+      "reference_independent", "deletes_edge"
+    )
+  )
+  rows <- rows[
+    order(rows$logical_sequence_id), , drop = FALSE
+  ]
+  rownames(rows) <- NULL
+  if (nrow(rows) == 0L || anyNA(rows$logical_sequence_id) ||
+      anyDuplicated(rows$logical_sequence_id)) {
+    stop("Prepared-S selection logical identities are invalid",
+         call. = FALSE)
+  }
+  rows
+}
+
+fastkpc_full_cuda_prepared_s_convergence_field_value <- function(
+    fields, name) {
+  if (is.null(fields) || !is.list(fields)) return(NULL)
+  field <- fields[[name]]
+  if (is.null(field) || !is.list(field)) return(NULL)
+  field$value
+}
+
+fastkpc_full_cuda_prepared_s_convergence_boolean_tag <- function(value) {
+  if (is.null(value)) return("missing")
+  if (length(value) != 1L || is.na(value)) return("invalid")
+  if (isTRUE(value)) "TRUE" else "FALSE"
+}
+
+fastkpc_full_cuda_prepared_s_convergence_signature <- function(fields) {
+  converged <- fastkpc_full_cuda_prepared_s_convergence_field_value(
+    fields, "converged"
+  )
+  mgcv_conv <- fastkpc_full_cuda_prepared_s_convergence_field_value(
+    fields, "mgcv.conv"
+  )
+  outer_info <- fastkpc_full_cuda_prepared_s_convergence_field_value(
+    fields, "outer.info"
+  )
+  rank_full <- if (is.null(mgcv_conv$rank) ||
+                   is.null(mgcv_conv$full.rank)) {
+    "missing"
+  } else if (identical(
+    as.integer(mgcv_conv$rank), as.integer(mgcv_conv$full.rank)
+  )) {
+    "TRUE"
+  } else {
+    "FALSE"
+  }
+  outer_convergence <- if (is.null(outer_info$conv)) {
+    "missing"
+  } else if (fastkpc_full_cuda_census_nonconverged_values(
+    outer_info = list(conv = outer_info$conv)
+  )) {
+    "failed"
+  } else {
+    "converged"
+  }
+  paste0(
+    "converged=",
+    fastkpc_full_cuda_prepared_s_convergence_boolean_tag(converged),
+    ";fully_converged=",
+    fastkpc_full_cuda_prepared_s_convergence_boolean_tag(
+      mgcv_conv$fully.converged
+    ),
+    ";hessian_positive_definite=",
+    fastkpc_full_cuda_prepared_s_convergence_boolean_tag(
+      mgcv_conv$hess.pos.def
+    ),
+    ";rank_full=", rank_full,
+    ";outer_convergence=", outer_convergence
+  )
+}
+
+fastkpc_full_cuda_prepared_s_optimizer_iterations <- function(fields) {
+  mgcv_conv <- fastkpc_full_cuda_prepared_s_convergence_field_value(
+    fields, "mgcv.conv"
+  )
+  outer_info <- fastkpc_full_cuda_prepared_s_convergence_field_value(
+    fields, "outer.info"
+  )
+  candidates <- list(mgcv_conv$iter, outer_info$iter)
+  for (candidate in candidates) {
+    value <- suppressWarnings(as.numeric(candidate))
+    if (length(value) == 1L && is.finite(value) && value >= 0 &&
+        value == floor(value)) {
+      return(as.integer(value))
+    }
+  }
+  NA_integer_
+}
+
+fastkpc_full_cuda_prepared_s_normalize_risk_rows <- function(value) {
+  fastkpc_full_cuda_prepared_s_selection_normalize_fields(
+    value,
+    character_fields = c(
+      "case_type", "residual_key_sha256", "same_S_group_id",
+      "condition_bucket", "near_alpha_bucket"
+    ),
+    integer_fields = "logical_sequence_id",
+    logical_fields = c(
+      "high_condition", "rank_deficient", "near_constant_target",
+      "near_constant_conditioner", "multi_penalty", "near_alpha",
+      "mgcv_warning", "mgcv_nonconverged", "nonfinite_metadata"
+    )
+  )
+}
+
+fastkpc_full_cuda_reconstruct_prepared_s_target_risk_table <- function(
+    inputs) {
+  required_inputs <- c(
+    "target_fit_metadata", "same_s_setup_metadata", "residual_requests",
+    "target_risks", "risk_cases", "logical_tests"
+  )
+  if (!is.list(inputs) ||
+      length(setdiff(required_inputs, names(inputs))) > 0L) {
+    stop("Prepared-S target-risk inputs are incomplete", call. = FALSE)
+  }
+  target <- fastkpc_full_cuda_prepared_s_selection_target_rows(inputs)
+  setup <- fastkpc_full_cuda_prepared_s_selection_setup_rows(inputs)
+  requests <- fastkpc_full_cuda_prepared_s_selection_request_rows(inputs)
+  logical_tests <-
+    fastkpc_full_cuda_prepared_s_selection_logical_rows(inputs)
+  if (!identical(
+        target$residual_key_sha256, requests$residual_key_sha256
+      )) {
+    stop("Prepared-S target/request key set mismatch", call. = FALSE)
+  }
+  if (any(target$fit_status != "success") ||
+      any(target$fit_error != "NONE")) {
+    stop("Prepared-S target-risk reconstruction requires successful fits",
+         call. = FALSE)
+  }
+
+  risk_config <- fastkpc_full_cuda_census_risk_config()
+  expected <- fastkpc_full_cuda_census_expected_target_risks(
+    target = target, setup = setup, risk_config = risk_config
+  )
+  expected <- fastkpc_full_cuda_prepared_s_normalize_risk_rows(expected)
+  rownames(expected) <- NULL
+
+  actual <- fastkpc_full_cuda_prepared_s_normalize_risk_rows(
+    inputs$target_risks
+  )
+  actual <- actual[
+    order(actual$residual_key_sha256, method = "radix"), , drop = FALSE
+  ]
+  rownames(actual) <- NULL
+  if (!identical(names(actual), names(expected)) ||
+      !identical(actual, expected)) {
+    stop("Prepared-S reconstructed target-risk semantics mismatch",
+         call. = FALSE)
+  }
+
+  expected_cases <- fastkpc_full_cuda_census_risk_cases(
+    target_risks = expected, logical_tests = logical_tests
+  )
+  expected_cases <-
+    fastkpc_full_cuda_prepared_s_normalize_risk_rows(expected_cases)
+  actual_cases <- fastkpc_full_cuda_prepared_s_normalize_risk_rows(
+    inputs$risk_cases
+  )
+  actual_target_cases <- actual_cases[
+    actual_cases$case_type == "target_key", , drop = FALSE
+  ]
+  actual_target_cases <- actual_target_cases[
+    order(actual_target_cases$residual_key_sha256, method = "radix"),
+    , drop = FALSE
+  ]
+  actual_logical_cases <- actual_cases[
+    actual_cases$case_type == "logical_test", , drop = FALSE
+  ]
+  actual_logical_cases <- actual_logical_cases[
+    order(actual_logical_cases$logical_sequence_id), , drop = FALSE
+  ]
+  actual_cases <- rbind(actual_target_cases, actual_logical_cases)
+  rownames(actual_cases) <- NULL
+  rownames(expected_cases) <- NULL
+  if (!identical(names(actual_cases), names(expected_cases)) ||
+      !identical(actual_cases, expected_cases)) {
+    stop("Prepared-S filtered risk-case semantics mismatch",
+         call. = FALSE)
+  }
+
+  setup_index <- match(target$same_S_group_id, setup$same_S_group_id)
+  request_index <- match(
+    target$residual_key_sha256, requests$residual_key_sha256
+  )
+  if (anyNA(setup_index) || anyNA(request_index)) {
+    stop("Prepared-S target-risk metadata joins are incomplete",
+         call. = FALSE)
+  }
+  group_ids <- setup$same_S_group_id
+  request_groups <- requests$same_S_group_id
+  target_counts <- table(request_groups)
+  logical_counts <- tapply(
+    requests$request_multiplicity, request_groups, sum
+  )
+  setup_target_count <- as.integer(target_counts[group_ids])
+  setup_logical_count <- as.integer(logical_counts[group_ids])
+  if (anyNA(setup_target_count) || anyNA(setup_logical_count)) {
+    stop("Prepared-S setup multiplicities are incomplete", call. = FALSE)
+  }
+  expected_group_size <- as.integer(
+    target_counts[requests$same_S_group_id]
+  )
+  if (!identical(requests$same_S_group_size, expected_group_size)) {
+    stop("Prepared-S setup target multiplicity mismatch", call. = FALSE)
+  }
+
+  convergence_signature <- vapply(
+    target$convergence_fields,
+    fastkpc_full_cuda_prepared_s_convergence_signature,
+    character(1L)
+  )
+  optimizer_iterations <- vapply(
+    target$convergence_fields,
+    fastkpc_full_cuda_prepared_s_optimizer_iterations,
+    integer(1L)
+  )
+  if (anyNA(convergence_signature) || any(!nzchar(convergence_signature)) ||
+      anyNA(optimizer_iterations)) {
+    stop("Prepared-S convergence selection metadata is incomplete",
+         call. = FALSE)
+  }
+
+  result <- expected
+  result$target <- target$target
+  result$S_size <- setup$S_size[setup_index]
+  result$penalty_count <- setup$penalty_count[setup_index]
+  result$condition <-
+    target$penalized_system_condition_at_selected_sp
+  result$request_multiplicity <-
+    requests$request_multiplicity[request_index]
+  result$same_S_group_size <-
+    requests$same_S_group_size[request_index]
+  result$setup_target_count <- setup_target_count[setup_index]
+  result$setup_logical_request_count <-
+    setup_logical_count[setup_index]
+  result$representative_residual_key_sha256 <-
+    setup$representative_residual_key_sha256[setup_index]
+  result$convergence_signature <- convergence_signature
+  result$optimizer_iterations <- optimizer_iterations
+  result$selected_sp <- target$selected_sp
+  result$selected_sp_names <- target$selected_sp_names
+  result$selected_sp_hash <- target$selected_sp_hash
+  result$fit_time_ms <- target$fit_time_ms
+  result$coefficient_all_finite <- target$coefficient_all_finite
+  result$fitted_all_finite <- target$fitted_all_finite
+  result$residual_all_finite <- target$residual_all_finite
+  result$coefficient_hash <- target$coefficient_hash
+  result$fitted_hash <- target$fitted_hash
+  result$residual_hash <- target$residual_hash
+  result$target_fit_fingerprint <- target$target_fit_fingerprint
+  result$setup_fingerprint <- target$setup_fingerprint
+
+  rank_deficient <- result$rank_deficient %in% TRUE
+  rank_clean <- !any(rank_deficient) || (
+    all(is.infinite(result$condition[rank_deficient])) &&
+      all(result$condition_bucket[rank_deficient] ==
+            "rank_deficient_inf") &&
+      all(result$nonfinite_metadata[rank_deficient]) &&
+      all(result$coefficient_all_finite[rank_deficient]) &&
+      all(result$fitted_all_finite[rank_deficient]) &&
+      all(result$residual_all_finite[rank_deficient])
+  )
+  if (!rank_clean) {
+    stop("Prepared-S rank-deficient target metadata is invalid",
+         call. = FALSE)
+  }
+  rownames(result) <- NULL
+  attr(result, "schema_version") <-
+    "full-cuda-ci-prepared-s-target-risk-selection-v1"
+  result
+}
+
+fastkpc_full_cuda_prepared_s_lower_median_index <- function(length) {
+  length <- as.integer(length)
+  if (length(length) != 1L || is.na(length) || length < 1L) {
+    stop("Prepared-S lower median requires a positive length",
+         call. = FALSE)
+  }
+  (length + 1L) %/% 2L
+}
+
+fastkpc_full_cuda_prepared_s_selection_reason_store <- function() {
+  new.env(hash = TRUE, parent = emptyenv())
+}
+
+fastkpc_full_cuda_prepared_s_add_selection_reason <- function(
+    store, ids, reasons) {
+  ids <- as.character(ids)
+  reasons <- as.character(reasons)
+  if (length(ids) == 1L && length(reasons) > 1L) {
+    ids <- rep(ids, length(reasons))
+  } else if (length(reasons) == 1L && length(ids) > 1L) {
+    reasons <- rep(reasons, length(ids))
+  }
+  if (!is.environment(store) || length(ids) != length(reasons) ||
+      anyNA(ids) || anyNA(reasons) || any(!nzchar(ids)) ||
+      any(!nzchar(reasons))) {
+    stop("Prepared-S selection reason is invalid", call. = FALSE)
+  }
+  for (index in seq_along(ids)) {
+    id <- ids[[index]]
+    current <- if (exists(id, envir = store, inherits = FALSE)) {
+      get(id, envir = store, inherits = FALSE)
+    } else {
+      character()
+    }
+    assign(
+      id,
+      sort(unique(c(current, reasons[[index]])), method = "radix"),
+      envir = store
+    )
+  }
+  invisible(store)
+}
+
+fastkpc_full_cuda_prepared_s_selection_ids <- function(store) {
+  if (!is.environment(store)) {
+    stop("Prepared-S selection reason store is invalid", call. = FALSE)
+  }
+  sort(ls(store, all.names = TRUE), method = "radix")
+}
+
+fastkpc_full_cuda_prepared_s_selection_reasons <- function(store, ids) {
+  ids <- as.character(ids)
+  lapply(ids, function(id) {
+    if (!exists(id, envir = store, inherits = FALSE)) {
+      stop("Prepared-S selected row has no reason", call. = FALSE)
+    }
+    value <- get(id, envir = store, inherits = FALSE)
+    sort(unique(as.character(value)), method = "radix")
+  })
+}
+
+fastkpc_full_cuda_prepared_s_selection_reason_rows <- function(
+    entity_type, ids, reasons) {
+  chunks <- lapply(seq_along(ids), function(index) {
+    data.frame(
+      entity_type = entity_type,
+      entity_id = as.character(ids[[index]]),
+      reason = as.character(reasons[[index]]),
+      stringsAsFactors = FALSE
+    )
+  })
+  rows <- do.call(rbind, chunks)
+  rows <- rows[order(
+    rows$entity_type, rows$entity_id, rows$reason, method = "radix"
+  ), , drop = FALSE]
+  rownames(rows) <- NULL
+  rows
+}
+
+fastkpc_full_cuda_prepared_s_selection_hash <- function(
+    schema_version, setup_ids, target_keys, logical_ids, reason_rows,
+    seed_target_keys = NULL) {
+  fastkpc_full_cuda_census_metadata_hash(list(
+    schema_version = as.character(schema_version),
+    setup_ids = sort(unique(as.character(setup_ids)), method = "radix"),
+    target_keys = sort(
+      unique(as.character(target_keys)), method = "radix"
+    ),
+    logical_ids = sort(unique(as.integer(logical_ids))),
+    seed_target_keys = if (is.null(seed_target_keys)) {
+      character()
+    } else {
+      sort(unique(as.character(seed_target_keys)), method = "radix")
+    },
+    reason_rows_hash = fastkpc_full_cuda_census_frame_hash(reason_rows)
+  ))
+}
+
+fastkpc_full_cuda_prepared_s_selection_groups <- function(
+    labels, indices = seq_along(labels)) {
+  labels <- as.character(labels)
+  present <- !is.na(labels) & nzchar(labels)
+  labels <- labels[present]
+  indices <- indices[present]
+  unique_labels <- sort(unique(labels), method = "radix")
+  setNames(lapply(unique_labels, function(label) {
+    indices[labels == label]
+  }), unique_labels)
+}
+
+fastkpc_full_cuda_prepared_s_group_selection_metadata <- function(
+    targets, setup_rows) {
+  first_target <- match(
+    setup_rows$same_S_group_id, targets$same_S_group_id
+  )
+  if (anyNA(first_target)) {
+    stop("Prepared-S setup selection metadata is incomplete",
+         call. = FALSE)
+  }
+  result <- data.frame(
+    same_S_group_id = setup_rows$same_S_group_id,
+    setup_target_count = targets$setup_target_count[first_target],
+    setup_logical_request_count =
+      targets$setup_logical_request_count[first_target],
+    penalty_count = setup_rows$penalty_count,
+    S_size = setup_rows$S_size,
+    stringsAsFactors = FALSE
+  )
+  result
+}
+
+fastkpc_full_cuda_prepared_s_closest_consumer_rows <- function(
+    logical_tests) {
+  conditional_index <- which(logical_tests$S_size > 0L)
+  rows <- rbind(
+    data.frame(
+      logical_row = conditional_index,
+      logical_sequence_id =
+        logical_tests$logical_sequence_id[conditional_index],
+      residual_key_sha256 =
+        logical_tests$residual_key_x[conditional_index],
+      absolute_log_distance_from_alpha =
+        logical_tests$absolute_log_distance_from_alpha[conditional_index],
+      endpoint = "x",
+      stringsAsFactors = FALSE
+    ),
+    data.frame(
+      logical_row = conditional_index,
+      logical_sequence_id =
+        logical_tests$logical_sequence_id[conditional_index],
+      residual_key_sha256 =
+        logical_tests$residual_key_y[conditional_index],
+      absolute_log_distance_from_alpha =
+        logical_tests$absolute_log_distance_from_alpha[conditional_index],
+      endpoint = "y",
+      stringsAsFactors = FALSE
+    )
+  )
+  rows <- rows[order(
+    rows$residual_key_sha256,
+    rows$absolute_log_distance_from_alpha,
+    rows$logical_sequence_id,
+    rows$endpoint,
+    method = "radix",
+    na.last = TRUE
+  ), , drop = FALSE]
+  rownames(rows) <- NULL
+  rows
+}
+
+fastkpc_full_cuda_prepared_s_attach_group_reasons <- function(
+    group_store, target_store, logical_store, targets, logical_tests,
+    selected_group_ids) {
+  selected_target_ids <-
+    fastkpc_full_cuda_prepared_s_selection_ids(target_store)
+  target_index <- match(
+    selected_target_ids, targets$residual_key_sha256
+  )
+  if (anyNA(target_index)) {
+    stop("Prepared-S selected target lineage is incomplete",
+         call. = FALSE)
+  }
+  for (index in seq_along(selected_target_ids)) {
+    key <- selected_target_ids[[index]]
+    group_id <- targets$same_S_group_id[[target_index[[index]]]]
+    reasons <- fastkpc_full_cuda_prepared_s_selection_reasons(
+      target_store, key
+    )[[1L]]
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      group_store, group_id, paste0("target:", reasons)
+    )
+  }
+  selected_logical_ids <- as.integer(
+    fastkpc_full_cuda_prepared_s_selection_ids(logical_store)
+  )
+  logical_index <- match(
+    selected_logical_ids, logical_tests$logical_sequence_id
+  )
+  if (anyNA(logical_index)) {
+    stop("Prepared-S selected logical lineage is incomplete",
+         call. = FALSE)
+  }
+  endpoint_index <- match(
+    logical_tests$residual_key_x[logical_index],
+    targets$residual_key_sha256
+  )
+  if (anyNA(endpoint_index)) {
+    stop("Prepared-S selected logical endpoint is incomplete",
+         call. = FALSE)
+  }
+  for (index in seq_along(selected_logical_ids)) {
+    logical_id <- as.character(selected_logical_ids[[index]])
+    group_id <- targets$same_S_group_id[[endpoint_index[[index]]]]
+    reasons <- fastkpc_full_cuda_prepared_s_selection_reasons(
+      logical_store, logical_id
+    )[[1L]]
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      group_store, group_id, paste0("logical:", reasons)
+    )
+  }
+  missing <- setdiff(
+    selected_group_ids,
+    fastkpc_full_cuda_prepared_s_selection_ids(group_store)
+  )
+  if (length(missing) > 0L) {
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      group_store, missing, "selected_setup"
+    )
+  }
+  invisible(group_store)
+}
+
+fastkpc_full_cuda_select_prepared_s_iteration_subset <- function(inputs) {
+  schema_version <- "full-cuda-ci-prepared-s-iteration-subset-v1"
+  targets <-
+    fastkpc_full_cuda_reconstruct_prepared_s_target_risk_table(inputs)
+  setup_rows <- fastkpc_full_cuda_prepared_s_selection_setup_rows(inputs)
+  logical_tests <-
+    fastkpc_full_cuda_prepared_s_selection_logical_rows(inputs)
+  target_keys <- targets$residual_key_sha256
+  conditional <- logical_tests$S_size > 0L
+  endpoint_x <- match(logical_tests$residual_key_x, target_keys)
+  endpoint_y <- match(logical_tests$residual_key_y, target_keys)
+  if (anyNA(endpoint_x[conditional]) || anyNA(endpoint_y[conditional])) {
+    stop("Prepared-S iteration logical endpoints are incomplete",
+         call. = FALSE)
+  }
+
+  logical_reasons <-
+    fastkpc_full_cuda_prepared_s_selection_reason_store()
+  target_reasons <-
+    fastkpc_full_cuda_prepared_s_selection_reason_store()
+  group_reasons <-
+    fastkpc_full_cuda_prepared_s_selection_reason_store()
+
+  tight <- conditional &
+    is.finite(logical_tests$absolute_log_distance_from_alpha) &
+    logical_tests$absolute_log_distance_from_alpha <= 1e-3
+  fastkpc_full_cuda_prepared_s_add_selection_reason(
+    logical_reasons,
+    logical_tests$logical_sequence_id[tight],
+    "conditional_log_distance_le_1e-3"
+  )
+
+  near <- conditional &
+    is.finite(logical_tests$absolute_log_distance_from_alpha) &
+    logical_tests$absolute_log_distance_from_alpha <= log(2)
+  decision_tag <- logical_tests$reference_decision
+  near_labels <- paste(
+    logical_tests$S_size[near], decision_tag[near], sep = "|"
+  )
+  near_groups <- fastkpc_full_cuda_prepared_s_selection_groups(
+    near_labels, which(near)
+  )
+  for (label in names(near_groups)) {
+    candidates <- near_groups[[label]]
+    selected <- candidates[order(
+      logical_tests$absolute_log_distance_from_alpha[candidates],
+      logical_tests$logical_sequence_id[candidates]
+    )[[1L]]]
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      logical_reasons,
+      logical_tests$logical_sequence_id[[selected]],
+      paste0("closest_near_alpha:", label)
+    )
+  }
+
+  finite_ordinary <- with(
+    targets,
+    coefficient_all_finite & fitted_all_finite & residual_all_finite &
+      is.finite(condition) & condition < 1e8 &
+      !high_condition & !rank_deficient & !near_constant_target &
+      !near_constant_conditioner & !mgcv_warning &
+      !mgcv_nonconverged & !nonfinite_metadata
+  )
+  ordinary <- conditional & !is.na(endpoint_x) & !is.na(endpoint_y) &
+    finite_ordinary[endpoint_x] & finite_ordinary[endpoint_y] &
+    is.finite(logical_tests$absolute_log_distance_from_alpha) &
+    logical_tests$absolute_log_distance_from_alpha > log(2)
+  key_x <- logical_tests$residual_key_x
+  key_y <- logical_tests$residual_key_y
+  x_first <- key_x <= key_y
+  pair_key <- paste0(
+    ifelse(x_first, key_x, key_y), "|", ifelse(x_first, key_y, key_x)
+  )
+  for (S_size in seq_len(7L)) {
+    candidates <- which(ordinary & logical_tests$S_size == S_size)
+    if (length(candidates) == 0L) {
+      stop("Prepared-S iteration ordinary stratum is empty",
+           call. = FALSE)
+    }
+    candidates <- candidates[order(
+      pair_key[candidates],
+      logical_tests$logical_sequence_id[candidates],
+      method = "radix"
+    )]
+    selected <- candidates[[
+      fastkpc_full_cuda_prepared_s_lower_median_index(length(candidates))
+    ]]
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      logical_reasons,
+      logical_tests$logical_sequence_id[[selected]],
+      paste0("ordinary_lower_median:S_size=", S_size)
+    )
+  }
+
+  risk_buckets <- c(
+    "finite_1e8_to_lt_1e12", "finite_ge_1e12",
+    "rank_deficient_inf"
+  )
+  risk_index <- which(targets$condition_bucket %in% risk_buckets)
+  risk_labels <- paste(
+    targets$penalty_count[risk_index],
+    targets$condition_bucket[risk_index],
+    sep = "|"
+  )
+  risk_groups <- fastkpc_full_cuda_prepared_s_selection_groups(
+    risk_labels, risk_index
+  )
+  selected_risk_keys <- character()
+  for (label in names(risk_groups)) {
+    candidates <- risk_groups[[label]]
+    if (targets$condition_bucket[[candidates[[1L]]]] ==
+        "rank_deficient_inf") {
+      selected <- candidates[order(
+        targets$residual_key_sha256[candidates], method = "radix"
+      )[[1L]]]
+    } else {
+      selected <- candidates[order(
+        -targets$condition[candidates],
+        targets$residual_key_sha256[candidates],
+        method = "radix"
+      )[[1L]]]
+    }
+    key <- targets$residual_key_sha256[[selected]]
+    selected_risk_keys <- c(selected_risk_keys, key)
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      target_reasons, key, paste0("condition_risk:", label)
+    )
+  }
+
+  convergence_index <- which(targets$mgcv_nonconverged %in% TRUE)
+  convergence_labels <- paste(
+    targets$convergence_signature[convergence_index],
+    targets$S_size[convergence_index],
+    targets$condition_bucket[convergence_index],
+    sep = "|"
+  )
+  convergence_groups <- fastkpc_full_cuda_prepared_s_selection_groups(
+    convergence_labels, convergence_index
+  )
+  selected_convergence_keys <- character()
+  for (label in names(convergence_groups)) {
+    candidates <- convergence_groups[[label]]
+    selected <- candidates[order(
+      -targets$optimizer_iterations[candidates],
+      targets$residual_key_sha256[candidates],
+      method = "radix"
+    )[[1L]]]
+    key <- targets$residual_key_sha256[[selected]]
+    selected_convergence_keys <- c(selected_convergence_keys, key)
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      target_reasons, key, paste0("convergence_risk:", label)
+    )
+  }
+
+  group_metadata <- fastkpc_full_cuda_prepared_s_group_selection_metadata(
+    targets, setup_rows
+  )
+  anchor_groups <- character()
+  select_anchor <- function(metric, anchor, reason) {
+    distance <- abs(metric - anchor)
+    candidates <- which(distance == min(distance))
+    selected <- candidates[[1L]]
+    group_id <- group_metadata$same_S_group_id[[selected]]
+    keys <- targets$residual_key_sha256[
+      targets$same_S_group_id == group_id
+    ]
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      target_reasons, keys, reason
+    )
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      group_reasons, group_id, reason
+    )
+    anchor_groups <<- c(anchor_groups, group_id)
+    invisible(group_id)
+  }
+  for (anchor in c(2L, 9L, 47L)) {
+    select_anchor(
+      group_metadata$setup_target_count,
+      anchor,
+      paste0("setup_target_fanout_anchor=", anchor)
+    )
+  }
+  for (anchor in c(2L, 16L, 3092L)) {
+    select_anchor(
+      group_metadata$setup_logical_request_count,
+      anchor,
+      paste0("setup_logical_request_load_anchor=", anchor)
+    )
+  }
+  anchor_groups <- sort(unique(anchor_groups), method = "radix")
+
+  consumers <-
+    fastkpc_full_cuda_prepared_s_closest_consumer_rows(logical_tests)
+  first_consumer <- consumers[
+    !duplicated(consumers$residual_key_sha256), , drop = FALSE
+  ]
+  attach_target_consumer <- function(keys, reason_prefix) {
+    consumer_index <- match(
+      keys, first_consumer$residual_key_sha256
+    )
+    if (anyNA(consumer_index)) {
+      stop("Prepared-S iteration target has no conditional consumer",
+           call. = FALSE)
+    }
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      logical_reasons,
+      first_consumer$logical_sequence_id[consumer_index],
+      paste0(reason_prefix, keys)
+    )
+  }
+  attach_target_consumer(selected_risk_keys, "condition_risk_consumer:")
+  attach_target_consumer(
+    selected_convergence_keys, "convergence_risk_consumer:"
+  )
+  for (group_id in anchor_groups) {
+    keys <- targets$residual_key_sha256[
+      targets$same_S_group_id == group_id
+    ]
+    candidates <- which(consumers$residual_key_sha256 %in% keys)
+    candidates <- candidates[order(
+      consumers$absolute_log_distance_from_alpha[candidates],
+      consumers$logical_sequence_id[candidates],
+      consumers$residual_key_sha256[candidates],
+      method = "radix",
+      na.last = TRUE
+    )]
+    if (length(candidates) == 0L) {
+      stop("Prepared-S iteration group has no conditional consumer",
+           call. = FALSE)
+    }
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      logical_reasons,
+      consumers$logical_sequence_id[[candidates[[1L]]]],
+      paste0("multiplicity_group_consumer:", group_id)
+    )
+  }
+
+  selected_logical_ids <- sort(as.integer(
+    fastkpc_full_cuda_prepared_s_selection_ids(logical_reasons)
+  ))
+  selected_logical_index <- match(
+    selected_logical_ids, logical_tests$logical_sequence_id
+  )
+  if (anyNA(selected_logical_index)) {
+    stop("Prepared-S iteration logical selection is invalid",
+         call. = FALSE)
+  }
+  for (index in selected_logical_index) {
+    logical_id <- logical_tests$logical_sequence_id[[index]]
+    endpoints <- c(
+      logical_tests$residual_key_x[[index]],
+      logical_tests$residual_key_y[[index]]
+    )
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      target_reasons, endpoints,
+      paste0("logical_endpoint:", logical_id)
+    )
+  }
+
+  selected_target_keys <-
+    fastkpc_full_cuda_prepared_s_selection_ids(target_reasons)
+  selected_target_index <- match(selected_target_keys, target_keys)
+  selected_group_ids <- sort(unique(
+    targets$same_S_group_id[selected_target_index]
+  ), method = "radix")
+  for (group_id in selected_group_ids) {
+    group_keys <- sort(
+      targets$residual_key_sha256[
+        targets$same_S_group_id == group_id
+      ],
+      method = "radix"
+    )
+    representative <- unique(
+      targets$representative_residual_key_sha256[
+        targets$same_S_group_id == group_id
+      ]
+    )
+    if (length(representative) != 1L ||
+        !representative %in% group_keys) {
+      stop("Prepared-S iteration setup representative is invalid",
+           call. = FALSE)
+    }
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      target_reasons, representative, "setup_representative"
+    )
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      target_reasons,
+      group_keys[[
+        fastkpc_full_cuda_prepared_s_lower_median_index(
+          length(group_keys)
+        )
+      ]],
+      "setup_lower_median_target"
+    )
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      target_reasons, group_keys[[length(group_keys)]],
+      "setup_maximum_target"
+    )
+  }
+
+  selected_target_keys <-
+    fastkpc_full_cuda_prepared_s_selection_ids(target_reasons)
+  selected_target_index <- match(selected_target_keys, target_keys)
+  selected_group_ids <- sort(unique(
+    targets$same_S_group_id[selected_target_index]
+  ), method = "radix")
+  if (length(selected_logical_ids) != 44L ||
+      length(selected_target_keys) != 270L ||
+      length(selected_group_ids) != 44L) {
+    stop(
+      "Prepared-S iteration subset count mismatch: setups=",
+      length(selected_group_ids), ", targets=", length(selected_target_keys),
+      ", logical_tests=", length(selected_logical_ids),
+      call. = FALSE
+    )
+  }
+
+  fastkpc_full_cuda_prepared_s_attach_group_reasons(
+    group_store = group_reasons,
+    target_store = target_reasons,
+    logical_store = logical_reasons,
+    targets = targets,
+    logical_tests = logical_tests,
+    selected_group_ids = selected_group_ids
+  )
+
+  selected_targets <- targets[selected_target_index, , drop = FALSE]
+  selected_targets$selection_reasons <- I(
+    fastkpc_full_cuda_prepared_s_selection_reasons(
+      target_reasons, selected_target_keys
+    )
+  )
+  selected_setups <- setup_rows[
+    match(selected_group_ids, setup_rows$same_S_group_id), , drop = FALSE
+  ]
+  selected_setups$setup_target_count <- group_metadata$setup_target_count[
+    match(selected_group_ids, group_metadata$same_S_group_id)
+  ]
+  selected_setups$setup_logical_request_count <-
+    group_metadata$setup_logical_request_count[
+      match(selected_group_ids, group_metadata$same_S_group_id)
+    ]
+  selected_setups$selection_reasons <- I(
+    fastkpc_full_cuda_prepared_s_selection_reasons(
+      group_reasons, selected_group_ids
+    )
+  )
+  selected_logical <- logical_tests[
+    selected_logical_index, , drop = FALSE
+  ]
+  selected_logical$near_alpha <-
+    is.finite(selected_logical$absolute_log_distance_from_alpha) &
+    selected_logical$absolute_log_distance_from_alpha <= log(2)
+  selected_logical$canonical_residual_pair_key <- pair_key[
+    selected_logical_index
+  ]
+  selected_logical$selection_reasons <- I(
+    fastkpc_full_cuda_prepared_s_selection_reasons(
+      logical_reasons, as.character(selected_logical_ids)
+    )
+  )
+  rownames(selected_targets) <- NULL
+  rownames(selected_setups) <- NULL
+  rownames(selected_logical) <- NULL
+
+  reason_rows <- rbind(
+    fastkpc_full_cuda_prepared_s_selection_reason_rows(
+      "setup_group", selected_group_ids,
+      selected_setups$selection_reasons
+    ),
+    fastkpc_full_cuda_prepared_s_selection_reason_rows(
+      "target_key", selected_target_keys,
+      selected_targets$selection_reasons
+    ),
+    fastkpc_full_cuda_prepared_s_selection_reason_rows(
+      "logical_test", selected_logical_ids,
+      selected_logical$selection_reasons
+    )
+  )
+  reason_rows <- reason_rows[order(
+    reason_rows$entity_type, reason_rows$entity_id, reason_rows$reason,
+    method = "radix"
+  ), , drop = FALSE]
+  rownames(reason_rows) <- NULL
+  iteration_subset_hash <-
+    fastkpc_full_cuda_prepared_s_selection_hash(
+      schema_version = schema_version,
+      setup_ids = selected_group_ids,
+      target_keys = selected_target_keys,
+      logical_ids = selected_logical_ids,
+      reason_rows = reason_rows
+    )
+  list(
+    schema_version = schema_version,
+    setup_groups = selected_setups,
+    target_keys = selected_targets,
+    logical_tests = selected_logical,
+    reason_rows = reason_rows,
+    setup_group_ids_hash = fastkpc_full_cuda_census_metadata_hash(
+      selected_group_ids
+    ),
+    target_keys_hash = fastkpc_full_cuda_census_metadata_hash(
+      selected_target_keys
+    ),
+    logical_test_ids_hash = fastkpc_full_cuda_census_metadata_hash(
+      selected_logical_ids
+    ),
+    reason_rows_hash = fastkpc_full_cuda_census_frame_hash(reason_rows),
+    iteration_subset_hash = iteration_subset_hash
+  )
+}
+
+fastkpc_full_cuda_prepared_s_qualification_coverage <- function(
+    targets, selected_targets, logical_tests, selected_logical,
+    selected_group_ids, multiplicity_witnesses) {
+  rows <- list()
+  append_row <- function(
+      coverage_type, coverage_value, canonical_count, selected_count,
+      coverage_claimed) {
+    rows[[length(rows) + 1L]] <<- data.frame(
+      coverage_type = as.character(coverage_type),
+      coverage_value = as.character(coverage_value),
+      canonical_count = as.integer(canonical_count),
+      selected_count = as.integer(selected_count),
+      coverage_claimed = as.logical(coverage_claimed),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  risk_fields <- c(
+    "high_condition", "rank_deficient", "near_constant_target",
+    "near_constant_conditioner", "multi_penalty", "near_alpha",
+    "mgcv_warning", "mgcv_nonconverged", "nonfinite_metadata"
+  )
+  for (field in risk_fields) {
+    canonical_count <- sum(targets[[field]] %in% TRUE)
+    selected_count <- sum(selected_targets[[field]] %in% TRUE)
+    append_row(
+      "risk_class", field, canonical_count, selected_count,
+      canonical_count > 0L && selected_count > 0L
+    )
+  }
+
+  condition_buckets <-
+    fastkpc_full_cuda_census_risk_config()$condition_buckets
+  for (bucket in condition_buckets) {
+    canonical_count <- sum(targets$condition_bucket == bucket)
+    selected_count <- sum(selected_targets$condition_bucket == bucket)
+    append_row(
+      "condition_bucket", bucket, canonical_count, selected_count,
+      canonical_count > 0L && selected_count > 0L
+    )
+  }
+
+  penalty_counts <- sort(unique(targets$penalty_count))
+  for (penalty_count in penalty_counts) {
+    canonical_count <- sum(targets$penalty_count == penalty_count)
+    selected_count <- sum(
+      selected_targets$penalty_count == penalty_count
+    )
+    append_row(
+      "penalty_count", as.character(penalty_count),
+      canonical_count, selected_count,
+      canonical_count > 0L && selected_count > 0L
+    )
+  }
+
+  conditional <- logical_tests$S_size > 0L
+  for (S_size in sort(unique(logical_tests$S_size[conditional]))) {
+    canonical_count <- sum(conditional & logical_tests$S_size == S_size)
+    selected_count <- sum(selected_logical$S_size == S_size)
+    append_row(
+      "S_size", as.character(S_size), canonical_count, selected_count,
+      canonical_count > 0L && selected_count > 0L
+    )
+  }
+  decisions <- sort(unique(
+    logical_tests$reference_decision[conditional]
+  ), method = "radix")
+  for (decision in decisions) {
+    canonical_count <- sum(
+      conditional & logical_tests$reference_decision == decision
+    )
+    selected_count <- sum(
+      selected_logical$reference_decision == decision
+    )
+    append_row(
+      "reference_decision", decision, canonical_count, selected_count,
+      canonical_count > 0L && selected_count > 0L
+    )
+  }
+
+  if (nrow(multiplicity_witnesses) > 0L) {
+    for (index in seq_len(nrow(multiplicity_witnesses))) {
+      witness <- multiplicity_witnesses[index, , drop = FALSE]
+      group_id <- witness$same_S_group_id[[1L]]
+      selected_count <- as.integer(group_id %in% selected_group_ids)
+      append_row(
+        "setup_target_count_quantile",
+        paste0(
+          "penalty_count=", witness$penalty_count[[1L]],
+          ";probability=", witness$probability[[1L]],
+          ";quantile=", witness$target_count_quantile[[1L]],
+          ";selected_count=", witness$selected_target_count[[1L]],
+          ";same_S_group_id=", group_id
+        ),
+        1L, selected_count, selected_count == 1L
+      )
+    }
+  }
+  result <- do.call(rbind, rows)
+  result <- result[order(
+    result$coverage_type, result$coverage_value, method = "radix"
+  ), , drop = FALSE]
+  rownames(result) <- NULL
+  result
+}
+
+fastkpc_full_cuda_select_prepared_s_qualification_subset <- function(
+    inputs) {
+  schema_version <- "full-cuda-ci-prepared-s-qualification-subset-v1"
+  targets <-
+    fastkpc_full_cuda_reconstruct_prepared_s_target_risk_table(inputs)
+  setup_rows <- fastkpc_full_cuda_prepared_s_selection_setup_rows(inputs)
+  logical_tests <-
+    fastkpc_full_cuda_prepared_s_selection_logical_rows(inputs)
+  target_reasons <-
+    fastkpc_full_cuda_prepared_s_selection_reason_store()
+  logical_reasons <-
+    fastkpc_full_cuda_prepared_s_selection_reason_store()
+  group_reasons <-
+    fastkpc_full_cuda_prepared_s_selection_reason_store()
+
+  rare_fields <- c(
+    "rank_deficient", "nonfinite_metadata", "mgcv_nonconverged"
+  )
+  for (field in rare_fields) {
+    keys <- targets$residual_key_sha256[targets[[field]] %in% TRUE]
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      target_reasons, keys, paste0("rare:", field)
+    )
+  }
+  single_penalty_high <- targets$high_condition %in% TRUE &
+    targets$penalty_count == 1L
+  fastkpc_full_cuda_prepared_s_add_selection_reason(
+    target_reasons,
+    targets$residual_key_sha256[single_penalty_high],
+    "rare:single_penalty_high_condition"
+  )
+
+  condition_labels <- paste(
+    targets$penalty_count, targets$condition_bucket, sep = "|"
+  )
+  condition_groups <- fastkpc_full_cuda_prepared_s_selection_groups(
+    condition_labels
+  )
+  for (label in names(condition_groups)) {
+    candidates <- condition_groups[[label]]
+    candidates <- candidates[order(
+      targets$condition[candidates],
+      targets$residual_key_sha256[candidates],
+      method = "radix",
+      na.last = TRUE
+    )]
+    keys <- targets$residual_key_sha256[candidates]
+    selected <- c(
+      keys[[1L]],
+      keys[[fastkpc_full_cuda_prepared_s_lower_median_index(
+        length(keys)
+      )]],
+      keys[[length(keys)]],
+      sort(keys, method = "radix")[[1L]]
+    )
+    reasons <- paste0(
+      c(
+        "condition_min:", "condition_lower_median:",
+        "condition_max:", "condition_lexical_min:"
+      ),
+      label
+    )
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      target_reasons, selected, reasons
+    )
+  }
+
+  penalty_counts <- sort(unique(targets$penalty_count))
+  for (penalty_count in penalty_counts) {
+    candidates <- which(targets$penalty_count == penalty_count)
+    if (any(vapply(targets$selected_sp[candidates], function(value) {
+      !is.numeric(value) || length(value) != penalty_count ||
+        any(!is.finite(value)) || any(value <= 0)
+    }, logical(1L)))) {
+      stop("Prepared-S qualification selected-sp metadata is invalid",
+           call. = FALSE)
+    }
+    for (component in seq_len(penalty_count)) {
+      values <- vapply(candidates, function(index) {
+        as.numeric(targets$selected_sp[[index]][[component]])
+      }, numeric(1L))
+      ordered <- candidates[order(
+        values,
+        targets$residual_key_sha256[candidates],
+        method = "radix"
+      )]
+      keys <- targets$residual_key_sha256[ordered]
+      selected <- c(
+        keys[[1L]],
+        keys[[fastkpc_full_cuda_prepared_s_lower_median_index(
+          length(keys)
+        )]],
+        keys[[length(keys)]]
+      )
+      reasons <- paste0(
+        c("selected_sp_min:", "selected_sp_lower_median:",
+          "selected_sp_max:"),
+        "penalty_count=", penalty_count,
+        ";component=", component
+      )
+      fastkpc_full_cuda_prepared_s_add_selection_reason(
+        target_reasons, selected, reasons
+      )
+    }
+  }
+
+  group_metadata <- fastkpc_full_cuda_prepared_s_group_selection_metadata(
+    targets, setup_rows
+  )
+  witness_chunks <- list()
+  probabilities <- c(0, 0.25, 0.5, 0.75, 1)
+  for (penalty_count in penalty_counts) {
+    setup_index <- which(
+      group_metadata$penalty_count == penalty_count
+    )
+    counts <- group_metadata$setup_target_count[setup_index]
+    for (probability in probabilities) {
+      target_count_quantile <- as.numeric(stats::quantile(
+        counts, probs = probability, type = 1, names = FALSE
+      ))
+      distance <- abs(counts - target_count_quantile)
+      candidates <- setup_index[distance == min(distance)]
+      selected_setup <- candidates[[1L]]
+      group_id <- group_metadata$same_S_group_id[[selected_setup]]
+      group_keys <- sort(
+        targets$residual_key_sha256[
+          targets$same_S_group_id == group_id
+        ],
+        method = "radix"
+      )
+      selected <- c(
+        group_keys[[1L]],
+        group_keys[[fastkpc_full_cuda_prepared_s_lower_median_index(
+          length(group_keys)
+        )]],
+        group_keys[[length(group_keys)]]
+      )
+      reason_suffix <- paste0(
+        "penalty_count=", penalty_count,
+        ";probability=", format(probability, trim = TRUE),
+        ";same_S_group_id=", group_id
+      )
+      fastkpc_full_cuda_prepared_s_add_selection_reason(
+        target_reasons,
+        selected,
+        paste0(
+          c(
+            "setup_quantile_lexical_min:",
+            "setup_quantile_lower_median:",
+            "setup_quantile_max:"
+          ),
+          reason_suffix
+        )
+      )
+      fastkpc_full_cuda_prepared_s_add_selection_reason(
+        group_reasons, group_id,
+        paste0("setup_target_count_quantile:", reason_suffix)
+      )
+      witness_chunks[[length(witness_chunks) + 1L]] <- data.frame(
+        penalty_count = as.integer(penalty_count),
+        probability = as.numeric(probability),
+        target_count_quantile = as.integer(target_count_quantile),
+        same_S_group_id = group_id,
+        selected_target_count = as.integer(
+          group_metadata$setup_target_count[[selected_setup]]
+        ),
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+  multiplicity_witnesses <- do.call(rbind, witness_chunks)
+  multiplicity_witnesses <- multiplicity_witnesses[order(
+    multiplicity_witnesses$penalty_count,
+    multiplicity_witnesses$probability,
+    multiplicity_witnesses$same_S_group_id,
+    method = "radix"
+  ), , drop = FALSE]
+  rownames(multiplicity_witnesses) <- NULL
+
+  seed_target_keys <-
+    fastkpc_full_cuda_prepared_s_selection_ids(target_reasons)
+  if (length(seed_target_keys) != 2356L) {
+    stop(
+      "Prepared-S qualification seed count mismatch: ",
+      length(seed_target_keys),
+      call. = FALSE
+    )
+  }
+  seed_target_index <- match(
+    seed_target_keys, targets$residual_key_sha256
+  )
+  seed_reason_lists <-
+    fastkpc_full_cuda_prepared_s_selection_reasons(
+      target_reasons, seed_target_keys
+    )
+
+  conditional <- logical_tests$S_size > 0L
+  near_alpha <- conditional &
+    is.finite(logical_tests$absolute_log_distance_from_alpha) &
+    logical_tests$absolute_log_distance_from_alpha <= log(2)
+  fastkpc_full_cuda_prepared_s_add_selection_reason(
+    logical_reasons,
+    logical_tests$logical_sequence_id[near_alpha],
+    "conditional_near_alpha"
+  )
+  if (sum(near_alpha) != 1478L) {
+    stop("Prepared-S qualification near-alpha count mismatch",
+         call. = FALSE)
+  }
+
+  consumers <-
+    fastkpc_full_cuda_prepared_s_closest_consumer_rows(logical_tests)
+  canonical_consumers <- consumers[order(
+    consumers$residual_key_sha256,
+    consumers$logical_sequence_id,
+    consumers$endpoint,
+    method = "radix"
+  ), , drop = FALSE]
+  canonical_consumers <- canonical_consumers[
+    !duplicated(canonical_consumers$residual_key_sha256),
+    , drop = FALSE
+  ]
+  consumer_index <- match(
+    seed_target_keys, canonical_consumers$residual_key_sha256
+  )
+  if (anyNA(consumer_index)) {
+    stop("Prepared-S qualification seed has no conditional consumer",
+         call. = FALSE)
+  }
+  fastkpc_full_cuda_prepared_s_add_selection_reason(
+    logical_reasons,
+    canonical_consumers$logical_sequence_id[consumer_index],
+    paste0("seed_consumer:", seed_target_keys)
+  )
+
+  decision_labels <- paste(
+    logical_tests$S_size[conditional],
+    logical_tests$reference_decision[conditional],
+    sep = "|"
+  )
+  decision_groups <- fastkpc_full_cuda_prepared_s_selection_groups(
+    decision_labels, which(conditional)
+  )
+  for (label in names(decision_groups)) {
+    candidates <- decision_groups[[label]]
+    selected <- candidates[order(
+      logical_tests$logical_sequence_id[candidates]
+    )[[1L]]]
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      logical_reasons,
+      logical_tests$logical_sequence_id[[selected]],
+      paste0("first_decision_witness:", label)
+    )
+  }
+
+  selected_logical_ids <- sort(as.integer(
+    fastkpc_full_cuda_prepared_s_selection_ids(logical_reasons)
+  ))
+  selected_logical_index <- match(
+    selected_logical_ids, logical_tests$logical_sequence_id
+  )
+  if (anyNA(selected_logical_index)) {
+    stop("Prepared-S qualification logical selection is invalid",
+         call. = FALSE)
+  }
+  for (index in selected_logical_index) {
+    logical_id <- logical_tests$logical_sequence_id[[index]]
+    endpoints <- c(
+      logical_tests$residual_key_x[[index]],
+      logical_tests$residual_key_y[[index]]
+    )
+    fastkpc_full_cuda_prepared_s_add_selection_reason(
+      target_reasons, endpoints,
+      paste0("logical_endpoint:", logical_id)
+    )
+  }
+
+  selected_target_keys <-
+    fastkpc_full_cuda_prepared_s_selection_ids(target_reasons)
+  selected_target_index <- match(
+    selected_target_keys, targets$residual_key_sha256
+  )
+  selected_group_ids <- sort(unique(
+    targets$same_S_group_id[selected_target_index]
+  ), method = "radix")
+  penalty_distribution <- table(factor(
+    targets$penalty_count[selected_target_index],
+    levels = c(1L, 3L, 4L, 5L, 6L, 7L)
+  ))
+  expected_penalty_distribution <-
+    c(3327L, 872L, 837L, 730L, 312L, 65L)
+  if (length(selected_logical_ids) != 3808L ||
+      length(selected_target_keys) != 6143L ||
+      length(selected_group_ids) != 2061L ||
+      !identical(
+        unname(as.integer(penalty_distribution)),
+        expected_penalty_distribution
+      )) {
+    stop(
+      "Prepared-S qualification subset count mismatch: setups=",
+      length(selected_group_ids), ", targets=", length(selected_target_keys),
+      ", logical_tests=", length(selected_logical_ids),
+      call. = FALSE
+    )
+  }
+
+  rare <- with(
+    targets,
+    rank_deficient | nonfinite_metadata | mgcv_nonconverged |
+      (high_condition & penalty_count == 1L)
+  )
+  if (!all(targets$residual_key_sha256[rare] %in% seed_target_keys) ||
+      !all(
+        logical_tests$logical_sequence_id[near_alpha] %in%
+          selected_logical_ids
+      )) {
+    stop("Prepared-S qualification rare coverage is incomplete",
+         call. = FALSE)
+  }
+  absent_fields <- c(
+    "near_constant_target", "near_constant_conditioner", "mgcv_warning"
+  )
+  if (any(vapply(absent_fields, function(field) {
+    any(targets[[field]] %in% TRUE)
+  }, logical(1L)))) {
+    stop("Prepared-S canonical absent risk class is unexpectedly present",
+         call. = FALSE)
+  }
+
+  fastkpc_full_cuda_prepared_s_attach_group_reasons(
+    group_store = group_reasons,
+    target_store = target_reasons,
+    logical_store = logical_reasons,
+    targets = targets,
+    logical_tests = logical_tests,
+    selected_group_ids = selected_group_ids
+  )
+  selected_targets <- targets[selected_target_index, , drop = FALSE]
+  selected_targets$selection_reasons <- I(
+    fastkpc_full_cuda_prepared_s_selection_reasons(
+      target_reasons, selected_target_keys
+    )
+  )
+  seed_targets <- targets[seed_target_index, , drop = FALSE]
+  seed_targets$selection_reasons <- I(seed_reason_lists)
+  selected_setups <- setup_rows[
+    match(selected_group_ids, setup_rows$same_S_group_id), , drop = FALSE
+  ]
+  selected_setups$setup_target_count <- group_metadata$setup_target_count[
+    match(selected_group_ids, group_metadata$same_S_group_id)
+  ]
+  selected_setups$setup_logical_request_count <-
+    group_metadata$setup_logical_request_count[
+      match(selected_group_ids, group_metadata$same_S_group_id)
+    ]
+  selected_setups$selection_reasons <- I(
+    fastkpc_full_cuda_prepared_s_selection_reasons(
+      group_reasons, selected_group_ids
+    )
+  )
+  selected_logical <- logical_tests[
+    selected_logical_index, , drop = FALSE
+  ]
+  selected_logical$near_alpha <-
+    is.finite(selected_logical$absolute_log_distance_from_alpha) &
+    selected_logical$absolute_log_distance_from_alpha <= log(2)
+  selected_logical$selection_reasons <- I(
+    fastkpc_full_cuda_prepared_s_selection_reasons(
+      logical_reasons, as.character(selected_logical_ids)
+    )
+  )
+  rownames(seed_targets) <- NULL
+  rownames(selected_targets) <- NULL
+  rownames(selected_setups) <- NULL
+  rownames(selected_logical) <- NULL
+
+  coverage <- fastkpc_full_cuda_prepared_s_qualification_coverage(
+    targets = targets,
+    selected_targets = selected_targets,
+    logical_tests = logical_tests,
+    selected_logical = selected_logical,
+    selected_group_ids = selected_group_ids,
+    multiplicity_witnesses = multiplicity_witnesses
+  )
+  required_coverage <- c(
+    "risk_class", "condition_bucket", "penalty_count", "S_size",
+    "reference_decision", "setup_target_count_quantile"
+  )
+  if (!all(required_coverage %in% coverage$coverage_type)) {
+    stop("Prepared-S qualification coverage rows are incomplete",
+         call. = FALSE)
+  }
+
+  reason_rows <- rbind(
+    fastkpc_full_cuda_prepared_s_selection_reason_rows(
+      "setup_group", selected_group_ids,
+      selected_setups$selection_reasons
+    ),
+    fastkpc_full_cuda_prepared_s_selection_reason_rows(
+      "target_key", selected_target_keys,
+      selected_targets$selection_reasons
+    ),
+    fastkpc_full_cuda_prepared_s_selection_reason_rows(
+      "logical_test", selected_logical_ids,
+      selected_logical$selection_reasons
+    )
+  )
+  reason_rows <- reason_rows[order(
+    reason_rows$entity_type, reason_rows$entity_id, reason_rows$reason,
+    method = "radix"
+  ), , drop = FALSE]
+  rownames(reason_rows) <- NULL
+  qualification_subset_hash <-
+    fastkpc_full_cuda_prepared_s_selection_hash(
+      schema_version = schema_version,
+      setup_ids = selected_group_ids,
+      target_keys = selected_target_keys,
+      logical_ids = selected_logical_ids,
+      reason_rows = reason_rows,
+      seed_target_keys = seed_target_keys
+    )
+  list(
+    schema_version = schema_version,
+    seed_target_keys = seed_targets,
+    setup_groups = selected_setups,
+    target_keys = selected_targets,
+    logical_tests = selected_logical,
+    coverage = coverage,
+    multiplicity_witnesses = multiplicity_witnesses,
+    reason_rows = reason_rows,
+    seed_target_keys_hash = fastkpc_full_cuda_census_metadata_hash(
+      seed_target_keys
+    ),
+    setup_group_ids_hash = fastkpc_full_cuda_census_metadata_hash(
+      selected_group_ids
+    ),
+    target_keys_hash = fastkpc_full_cuda_census_metadata_hash(
+      selected_target_keys
+    ),
+    logical_test_ids_hash = fastkpc_full_cuda_census_metadata_hash(
+      selected_logical_ids
+    ),
+    coverage_hash = fastkpc_full_cuda_census_frame_hash(coverage),
+    reason_rows_hash = fastkpc_full_cuda_census_frame_hash(reason_rows),
+    qualification_subset_hash = qualification_subset_hash
+  )
+}
+
+fastkpc_full_cuda_run_prepared_s_target_parity <- function(
+    inputs, prepared_by_group, target_keys) {
+  if (!is.data.frame(target_keys) ||
+      !"residual_key_sha256" %in% names(target_keys)) {
+    stop("Prepared-S target parity target keys are incomplete",
+         call. = FALSE)
+  }
+  selected_keys <- fastkpc_full_cuda_prepared_s_selection_character(
+    target_keys$residual_key_sha256
+  )
+  canonical_order <- sort(selected_keys, method = "radix")
+  if (length(selected_keys) != 270L || anyNA(selected_keys) ||
+      anyDuplicated(selected_keys) ||
+      !identical(selected_keys, canonical_order)) {
+    stop("Prepared-S target key set/order mismatch", call. = FALSE)
+  }
+  expected <- fastkpc_full_cuda_select_prepared_s_iteration_subset(inputs)
+  expected_keys <- as.character(
+    expected$target_keys$residual_key_sha256
+  )
+  if (!identical(selected_keys, expected_keys)) {
+    stop("Prepared-S target key set/order mismatch", call. = FALSE)
+  }
+  expected_groups <- as.character(
+    expected$setup_groups$same_S_group_id
+  )
+  if (!is.list(prepared_by_group) || is.null(names(prepared_by_group)) ||
+      anyNA(names(prepared_by_group)) || anyDuplicated(names(prepared_by_group)) ||
+      !identical(names(prepared_by_group), expected_groups)) {
+    stop("Prepared-S target parity setup group set/order mismatch",
+         call. = FALSE)
+  }
+
+  target_metadata <-
+    fastkpc_full_cuda_prepared_s_selection_target_rows(inputs)
+  target_index <- match(selected_keys, target_metadata$residual_key_sha256)
+  if (anyNA(target_index)) {
+    stop("Prepared-S target parity lineage is incomplete",
+         call. = FALSE)
+  }
+  target_state_cache <- new.env(hash = TRUE, parent = emptyenv())
+  residuals <- new.env(hash = TRUE, parent = emptyenv())
+  target_state_build_count <- 0L
+  rows <- vector("list", length(selected_keys))
+
+  for (index in seq_along(selected_keys)) {
+    key <- selected_keys[[index]]
+    metadata_row <- target_metadata[target_index[[index]], , drop = FALSE]
+    group_id <- metadata_row$same_S_group_id[[1L]]
+    if (!exists(group_id, envir = target_state_cache, inherits = FALSE)) {
+      prepared <- prepared_by_group[[group_id]]
+      if (is.null(prepared)) {
+        stop("Prepared-S target parity setup is missing", call. = FALSE)
+      }
+      states <- fastkpc_full_cuda_build_target_states(inputs, prepared)
+      assign(group_id, states, envir = target_state_cache)
+      target_state_build_count <- target_state_build_count + 1L
+    }
+    states <- get(group_id, envir = target_state_cache, inherits = FALSE)
+    state_index <- match(key, states$residual_key_sha256)
+    if (is.na(state_index)) {
+      stop("Prepared-S target parity TargetState is missing",
+           call. = FALSE)
+    }
+    state <- states[state_index, , drop = FALSE]
+    prepared <- prepared_by_group[[group_id]]
+    materialized <- fastkpc_full_cuda_materialize_target_state(
+      state_row = state,
+      data = inputs$data,
+      dataset_sha256 = inputs$dataset_sha256
+    )
+    start <- proc.time()[["elapsed"]]
+    solved <- fastkpc_mgcv_magic_fixed_sp_from_prepared(
+      prepared_setup = prepared,
+      target_state = materialized
+    )
+    solve_time_ms <- 1000 * (proc.time()[["elapsed"]] - start)
+    coefficient_hash <- fastkpc_full_cuda_census_metadata_hash(
+      solved$coefficients
+    )
+    fitted_hash <- fastkpc_full_cuda_census_metadata_hash(
+      solved$fitted
+    )
+    residual_hash <- fastkpc_full_cuda_census_metadata_hash(
+      solved$residuals
+    )
+    coefficient_hash_exact <- identical(
+      coefficient_hash, state$coefficient_hash[[1L]]
+    )
+    fitted_hash_exact <- identical(
+      fitted_hash, state$fitted_hash[[1L]]
+    )
+    residual_hash_exact <- identical(
+      residual_hash, state$residual_hash[[1L]]
+    )
+    assign(key, solved$residuals, envir = residuals)
+    rows[[index]] <- data.frame(
+      residual_key_sha256 = key,
+      same_S_group_id = group_id,
+      target = as.integer(state$target[[1L]]),
+      prepared_s_key_sha256 = solved$prepared_s_key_sha256,
+      target_state_fingerprint =
+        state$target_state_fingerprint[[1L]],
+      coefficient_hash = coefficient_hash,
+      expected_coefficient_hash = state$coefficient_hash[[1L]],
+      coefficient_hash_exact = coefficient_hash_exact,
+      fitted_hash = fitted_hash,
+      expected_fitted_hash = state$fitted_hash[[1L]],
+      fitted_hash_exact = fitted_hash_exact,
+      residual_hash = residual_hash,
+      expected_residual_hash = state$residual_hash[[1L]],
+      residual_hash_exact = residual_hash_exact,
+      residual_length = as.integer(length(solved$residuals)),
+      solve_time_ms = as.numeric(solve_time_ms),
+      stringsAsFactors = FALSE
+    )
+  }
+  parity_rows <- do.call(rbind, rows)
+  rownames(parity_rows) <- NULL
+  exact <- parity_rows$coefficient_hash_exact &
+    parity_rows$fitted_hash_exact & parity_rows$residual_hash_exact
+  if (!all(exact)) {
+    stop(
+      "Prepared-S target parity hash mismatch: ",
+      paste(parity_rows$residual_key_sha256[!exact], collapse = ","),
+      call. = FALSE
+    )
+  }
+  cache_group_count <- as.integer(length(ls(
+    target_state_cache, all.names = TRUE
+  )))
+  if (!identical(target_state_build_count, 44L) ||
+      !identical(cache_group_count, 44L) ||
+      length(ls(residuals, all.names = TRUE)) != 270L) {
+    stop("Prepared-S target parity cache count mismatch", call. = FALSE)
+  }
+  list(
+    schema_version = "full-cuda-ci-prepared-s-target-parity-v1",
+    rows = parity_rows,
+    residuals = residuals,
+    target_state_build_count = as.integer(target_state_build_count),
+    target_state_cache_group_count = cache_group_count,
+    exact_target_count = as.integer(sum(exact)),
+    target_keys_hash = fastkpc_full_cuda_census_metadata_hash(
+      selected_keys
+    ),
+    parity_rows_hash = fastkpc_full_cuda_census_frame_hash(parity_rows)
+  )
+}
+
+fastkpc_full_cuda_prepared_s_restore_environment <- function(
+    name, value) {
+  if (is.na(value)) {
+    Sys.unsetenv(name)
+  } else {
+    do.call(Sys.setenv, setNames(list(value), name))
+  }
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_prepared_s_dcov_oracle_identity <- function(
+    inputs, logical_tests, oracle_manifest = NULL) {
+  alpha_values <- sort(unique(as.numeric(logical_tests$alpha)))
+  if (length(alpha_values) != 1L || !is.finite(alpha_values) ||
+      !identical(alpha_values, 0.1)) {
+    stop("Prepared-S dCov oracle alpha identity mismatch",
+         call. = FALSE)
+  }
+  expected <- list(
+    index = 1L,
+    numCol = 35L,
+    dataset_sha256 = as.character(inputs$dataset_sha256),
+    alpha = alpha_values[[1L]],
+    source = "pinned-phase0-contract"
+  )
+  if (is.null(oracle_manifest)) return(expected)
+  if (is.character(oracle_manifest) && length(oracle_manifest) == 1L) {
+    if (!file.exists(oracle_manifest)) {
+      stop("Prepared-S dCov oracle manifest is unavailable",
+           call. = FALSE)
+    }
+    fastkpc_full_cuda_require_namespace("jsonlite")
+    oracle_manifest <- jsonlite::read_json(
+      oracle_manifest, simplifyVector = TRUE
+    )
+  }
+  if (!is.list(oracle_manifest)) {
+    stop("Prepared-S dCov oracle manifest is invalid", call. = FALSE)
+  }
+  manifest_hash <- if (!is.null(oracle_manifest$data_hash)) {
+    as.character(oracle_manifest$data_hash)
+  } else {
+    as.character(oracle_manifest$dataset_sha256)
+  }
+  clean <- identical(as.integer(oracle_manifest$index), 1L) &&
+    identical(as.integer(oracle_manifest$numCol), 35L) &&
+    identical(as.numeric(oracle_manifest$alpha), alpha_values[[1L]]) &&
+    identical(manifest_hash, expected$dataset_sha256)
+  if (!isTRUE(clean)) {
+    stop("Prepared-S dCov oracle manifest identity mismatch",
+         call. = FALSE)
+  }
+  expected$source <- "authenticated-oracle-manifest"
+  expected
+}
+
+fastkpc_full_cuda_run_prepared_s_dcov_parity <- function(
+    inputs, logical_tests, residuals, oracle_manifest = NULL, ...) {
+  environment_name <- "FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK"
+  prior_environment <- Sys.getenv(
+    environment_name, unset = NA_character_
+  )
+  on.exit(
+    fastkpc_full_cuda_prepared_s_restore_environment(
+      environment_name, prior_environment
+    ),
+    add = TRUE
+  )
+  Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra")
+
+  dots <- list(...)
+  if (length(dots) > 0L) {
+    stop("Prepared-S dCov parity options are unsupported",
+         call. = FALSE)
+  }
+  if (!is.environment(residuals) || !is.data.frame(logical_tests) ||
+      !"logical_sequence_id" %in% names(logical_tests)) {
+    stop("Prepared-S dCov parity inputs are incomplete", call. = FALSE)
+  }
+  logical_tests <- fastkpc_full_cuda_prepared_s_selection_normalize_fields(
+    logical_tests,
+    character_fields = c(
+      "reference_decision", "residual_key_x", "residual_key_y"
+    ),
+    integer_fields = c("logical_sequence_id", "S_size"),
+    numeric_fields = c(
+      "reference_p_value", "alpha",
+      "absolute_log_distance_from_alpha"
+    ),
+    logical_fields = "reference_independent"
+  )
+  selected_ids <- logical_tests$logical_sequence_id
+  if (length(selected_ids) != 44L || anyNA(selected_ids) ||
+      anyDuplicated(selected_ids) ||
+      !identical(selected_ids, sort(selected_ids))) {
+    stop("Prepared-S dCov logical test set/order mismatch",
+         call. = FALSE)
+  }
+  expected <- fastkpc_full_cuda_select_prepared_s_iteration_subset(inputs)
+  expected_logical <- expected$logical_tests
+  expected_fields <- c(
+    "logical_sequence_id", "residual_key_x", "residual_key_y",
+    "reference_p_value", "alpha", "reference_decision",
+    "reference_independent"
+  )
+  if (!identical(
+        logical_tests[expected_fields],
+        expected_logical[expected_fields]
+      )) {
+    stop("Prepared-S dCov logical test set/order mismatch",
+         call. = FALSE)
+  }
+  oracle_identity <- fastkpc_full_cuda_prepared_s_dcov_oracle_identity(
+    inputs = inputs,
+    logical_tests = logical_tests,
+    oracle_manifest = oracle_manifest
+  )
+  if (!is.matrix(inputs$data) || nrow(inputs$data) < 1L ||
+      !identical(
+        fastkpc_full_cuda_data_hash(inputs$data),
+        oracle_identity$dataset_sha256
+      )) {
+    stop("Prepared-S dCov dataset identity mismatch", call. = FALSE)
+  }
+
+  endpoint_keys <- unique(c(
+    logical_tests$residual_key_x, logical_tests$residual_key_y
+  ))
+  missing <- endpoint_keys[!vapply(endpoint_keys, function(key) {
+    exists(key, envir = residuals, inherits = FALSE)
+  }, logical(1L))]
+  if (length(missing) > 0L) {
+    stop(
+      "Prepared-S dCov parity residual is missing: ",
+      paste(sort(missing, method = "radix"), collapse = ","),
+      call. = FALSE
+    )
+  }
+  for (key in endpoint_keys) {
+    value <- get(key, envir = residuals, inherits = FALSE)
+    if (!is.numeric(value) || length(value) != nrow(inputs$data) ||
+        any(!is.finite(value))) {
+      stop("Prepared-S dCov parity residual is invalid: ", key,
+           call. = FALSE)
+    }
+  }
+
+  rows <- vector("list", nrow(logical_tests))
+  for (row_index in seq_len(nrow(logical_tests))) {
+    logical_row <- logical_tests[row_index, , drop = FALSE]
+    key_x <- logical_row$residual_key_x[[1L]]
+    key_y <- logical_row$residual_key_y[[1L]]
+    residual_x <- get(key_x, envir = residuals, inherits = FALSE)
+    residual_y <- get(key_y, envir = residuals, inherits = FALSE)
+    start <- proc.time()[["elapsed"]]
+    oracle <- fastkpc_legacy_dcov_gamma_cpp_oracle(
+      residual_x,
+      residual_y,
+      numCol = oracle_identity$numCol,
+      index = oracle_identity$index
+    )
+    elapsed_ms <- 1000 * (proc.time()[["elapsed"]] - start)
+    if (!is.list(oracle) || !is.numeric(oracle$p.value) ||
+        length(oracle$p.value) != 1L || !is.finite(oracle$p.value) ||
+        !is.list(oracle$diagnostics) ||
+        length(oracle$diagnostics) == 0L) {
+      stop("Prepared-S dCov oracle result is invalid", call. = FALSE)
+    }
+    p_value <- as.numeric(oracle$p.value)
+    reference_p_value <- as.numeric(
+      logical_row$reference_p_value[[1L]]
+    )
+    alpha <- as.numeric(logical_row$alpha[[1L]])
+    reference_independent <- reference_p_value >= alpha
+    reference_decision <- if (reference_independent) {
+      "independent"
+    } else {
+      "dependent"
+    }
+    if (!identical(
+          logical_row$reference_independent[[1L]],
+          reference_independent
+        ) || !identical(
+          logical_row$reference_decision[[1L]], reference_decision
+        )) {
+      stop("Prepared-S dCov reference decision semantics mismatch",
+           call. = FALSE)
+    }
+    independent <- p_value >= alpha
+    p_value_drift <- p_value - reference_p_value
+    result_row <- data.frame(
+      logical_sequence_id = logical_row$logical_sequence_id[[1L]],
+      residual_key_x = key_x,
+      residual_key_y = key_y,
+      index = as.integer(oracle_identity$index),
+      numCol = as.integer(oracle_identity$numCol),
+      alpha = alpha,
+      reference_p_value = reference_p_value,
+      p_value = p_value,
+      p_value_drift = p_value_drift,
+      absolute_p_value_drift = abs(p_value_drift),
+      p_value_exact = identical(p_value, reference_p_value),
+      reference_signed_alpha_distance = reference_p_value - alpha,
+      signed_alpha_distance = p_value - alpha,
+      reference_decision = reference_decision,
+      decision = if (independent) "independent" else "dependent",
+      decision_identical = identical(independent, reference_independent),
+      elapsed_ms = as.numeric(elapsed_ms),
+      stringsAsFactors = FALSE
+    )
+    result_row$diagnostics <- I(list(oracle$diagnostics))
+    rows[[row_index]] <- result_row
+  }
+  parity_rows <- do.call(rbind, rows)
+  rownames(parity_rows) <- NULL
+  max_drift <- max(parity_rows$absolute_p_value_drift)
+  exact_count <- as.integer(sum(parity_rows$p_value_exact))
+  flip_count <- as.integer(sum(!parity_rows$decision_identical))
+  if (!is.finite(max_drift) || max_drift > 1e-12) {
+    stop(
+      "Prepared-S dCov p-value drift exceeds 1e-12: ",
+      format(max_drift, scientific = TRUE),
+      call. = FALSE
+    )
+  }
+  if (flip_count != 0L) {
+    stop("Prepared-S dCov decision flip detected", call. = FALSE)
+  }
+  list(
+    schema_version = "full-cuda-ci-prepared-s-dcov-parity-v1",
+    oracle_identity = oracle_identity,
+    rows = parity_rows,
+    max_absolute_p_value_drift = max_drift,
+    exact_p_value_count = exact_count,
+    decision_flip_count = flip_count,
+    logical_test_ids_hash = fastkpc_full_cuda_census_metadata_hash(
+      selected_ids
+    ),
+    parity_rows_hash = fastkpc_full_cuda_census_frame_hash(parity_rows)
+  )
+}
