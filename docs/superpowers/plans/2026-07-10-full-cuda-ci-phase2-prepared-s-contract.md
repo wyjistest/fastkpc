@@ -972,12 +972,24 @@ coefficient/fitted/residual outputs must remain finite.
 
 Implement the exact class-complete algorithm from the approved design:
 
+For the ordinary `S_size = 1..7` witness, both targets have finite outputs,
+condition below `1e8`, no numerical or convergence risk flag, and alpha
+distance > `log(2)`; the structural `multi_penalty` flag is allowed because
+canonical `S_size = 3..7` additive smooths necessarily have multiple
+penalties.
+
+Select one target for every observed
+`(convergence_signature,S_size,condition_bucket)` stratum among targets where
+the frozen Phase1 `mgcv_nonconverged` risk flag is `TRUE`.
+
 ~~~text
 all six conditional tests within 1e-3 log-alpha distance
 closest near-alpha test for each observed S_size by decision
-one ordinary lower-median residual pair for every S_size 1..7
+one ordinary lower-median residual pair for every S_size 1..7, allowing the
+  structural multi_penalty flag
 one target for every high/rank condition stratum by penalty count
-one target for every convergence-signature/S-size/condition stratum
+one target for every frozen-mgcv-nonconverged
+  convergence-signature/S-size/condition stratum
 same-S fan-out anchors 2/9/47
 same-S logical-load anchors 2/16/3092
 consumer closure, endpoint closure, and three-target setup closure

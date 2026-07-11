@@ -526,17 +526,20 @@ Selection is deterministic:
    test for every observed `(S_size, reference_decision)`, breaking ties by
    `logical_sequence_id`.
 3. Select one ordinary logical case for each `S_size = 1..7`; both targets
-   must have finite outputs, condition below `1e8`, no risk or convergence
-   flag, and alpha distance greater than `log(2)`. Choose the lower-median
-   canonical residual-pair key.
+   have finite outputs, condition below `1e8`, no numerical or convergence
+   risk flag, and alpha distance > `log(2)`; the structural `multi_penalty`
+   flag is allowed because canonical `S_size = 3..7` additive smooths
+   necessarily have multiple penalties. Choose the lower-median canonical
+   residual-pair key.
 4. Select one numerical-risk target for every observed
    `(penalty_count, condition_bucket)` in
    `finite_1e8_to_lt_1e12`, `finite_ge_1e12`, and
    `rank_deficient_inf`. Finite buckets choose maximum condition then
    residual key; rank-deficient buckets choose the smallest residual key.
 5. Select one target for every observed
-   `(convergence_signature, S_size, condition_bucket)`, ordered by descending
-   optimizer iteration count then residual key.
+   `(convergence_signature,S_size,condition_bucket)` stratum among targets
+   where the frozen Phase1 `mgcv_nonconverged` risk flag is `TRUE`, ordered by
+   descending optimizer iteration count then residual key.
 6. Anchor same-S multiplicity at unique-target fan-out `2/9/47` and logical
    request load `2/16/3092`, choosing the exact or nearest value then the
    smallest group key. Include every target from those groups.

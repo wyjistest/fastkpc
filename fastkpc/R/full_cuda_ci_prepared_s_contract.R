@@ -6070,8 +6070,99 @@ fastkpc_full_cuda_prepared_s_dcov_oracle_identity <- function(
   expected
 }
 
+fastkpc_full_cuda_prepared_s_dcov_diagnostic_integer <- function(
+    diagnostics, field) {
+  if (!field %in% names(diagnostics)) {
+    stop(
+      "Prepared-S dCov Spectra diagnostics mismatch: missing ", field,
+      call. = FALSE
+    )
+  }
+  value <- diagnostics[[field]]
+  if (!is.numeric(value) || length(value) != 1L || !is.finite(value) ||
+      value != floor(value)) {
+    stop(
+      "Prepared-S dCov Spectra diagnostics mismatch: invalid ", field,
+      call. = FALSE
+    )
+  }
+  as.integer(value)
+}
+
+fastkpc_full_cuda_prepared_s_validate_dcov_spectra_diagnostics <- function(
+    diagnostics, numCol) {
+  numCol <- as.integer(numCol)
+  if (!is.list(diagnostics) || is.null(names(diagnostics)) ||
+      length(numCol) != 1L || is.na(numCol) || numCol < 1L) {
+    stop("Prepared-S dCov Spectra diagnostics mismatch: malformed",
+         call. = FALSE)
+  }
+  mode <- diagnostics$lowrank_mode
+  if (!is.character(mode) || length(mode) != 1L || is.na(mode) ||
+      !identical(mode, "spectra")) {
+    stop(
+      "Prepared-S dCov Spectra diagnostics mismatch: lowrank_mode",
+      call. = FALSE
+    )
+  }
+  values <- c(
+    lowrank_full_eig_count =
+      fastkpc_full_cuda_prepared_s_dcov_diagnostic_integer(
+        diagnostics, "lowrank_full_eig_count"
+      ),
+    lowrank_spectra_count =
+      fastkpc_full_cuda_prepared_s_dcov_diagnostic_integer(
+        diagnostics, "lowrank_spectra_count"
+      ),
+    lowrank_spectra_converged_count =
+      fastkpc_full_cuda_prepared_s_dcov_diagnostic_integer(
+        diagnostics, "lowrank_spectra_converged_count"
+      ),
+    lowrank_spectra_failed_count =
+      fastkpc_full_cuda_prepared_s_dcov_diagnostic_integer(
+        diagnostics, "lowrank_spectra_failed_count"
+      ),
+    lowrank_spectra_fallback_full_eig_count =
+      fastkpc_full_cuda_prepared_s_dcov_diagnostic_integer(
+        diagnostics, "lowrank_spectra_fallback_full_eig_count"
+      ),
+    lowrank_spectra_nconv =
+      fastkpc_full_cuda_prepared_s_dcov_diagnostic_integer(
+        diagnostics, "lowrank_spectra_nconv"
+      )
+  )
+  expected <- c(
+    lowrank_full_eig_count = 0L,
+    lowrank_spectra_count = 2L,
+    lowrank_spectra_converged_count = 2L,
+    lowrank_spectra_failed_count = 0L,
+    lowrank_spectra_fallback_full_eig_count = 0L
+  )
+  mismatch <- names(expected)[
+    values[names(expected)] != expected
+  ]
+  if (length(mismatch) > 0L) {
+    stop(
+      "Prepared-S dCov Spectra diagnostics mismatch: ",
+      paste(mismatch, collapse = ","),
+      call. = FALSE
+    )
+  }
+  if (values[["lowrank_spectra_nconv"]] < 2L * numCol) {
+    stop(
+      paste0(
+        "Prepared-S dCov Spectra diagnostics mismatch: ",
+        "lowrank_spectra_nconv"
+      ),
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
+}
+
 fastkpc_full_cuda_run_prepared_s_dcov_parity <- function(
-    inputs, logical_tests, residuals, oracle_manifest = NULL, ...) {
+    inputs, logical_tests, residuals, oracle_manifest = NULL,
+    oracle_fun = fastkpc_legacy_dcov_gamma_cpp_oracle, ...) {
   environment_name <- "FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK"
   prior_environment <- Sys.getenv(
     environment_name, unset = NA_character_
@@ -6092,6 +6183,10 @@ fastkpc_full_cuda_run_prepared_s_dcov_parity <- function(
   if (!is.environment(residuals) || !is.data.frame(logical_tests) ||
       !"logical_sequence_id" %in% names(logical_tests)) {
     stop("Prepared-S dCov parity inputs are incomplete", call. = FALSE)
+  }
+  if (!is.function(oracle_fun)) {
+    stop("Prepared-S dCov parity oracle function is invalid",
+         call. = FALSE)
   }
   logical_tests <- fastkpc_full_cuda_prepared_s_selection_normalize_fields(
     logical_tests,
@@ -6169,17 +6264,23 @@ fastkpc_full_cuda_run_prepared_s_dcov_parity <- function(
     residual_x <- get(key_x, envir = residuals, inherits = FALSE)
     residual_y <- get(key_y, envir = residuals, inherits = FALSE)
     start <- proc.time()[["elapsed"]]
-    oracle <- fastkpc_legacy_dcov_gamma_cpp_oracle(
+    oracle <- oracle_fun(
       residual_x,
       residual_y,
       numCol = oracle_identity$numCol,
       index = oracle_identity$index
     )
     elapsed_ms <- 1000 * (proc.time()[["elapsed"]] - start)
-    if (!is.list(oracle) || !is.numeric(oracle$p.value) ||
-        length(oracle$p.value) != 1L || !is.finite(oracle$p.value) ||
-        !is.list(oracle$diagnostics) ||
+    if (!is.list(oracle) || !is.list(oracle$diagnostics) ||
         length(oracle$diagnostics) == 0L) {
+      stop("Prepared-S dCov oracle result is invalid", call. = FALSE)
+    }
+    fastkpc_full_cuda_prepared_s_validate_dcov_spectra_diagnostics(
+      diagnostics = oracle$diagnostics,
+      numCol = oracle_identity$numCol
+    )
+    if (!is.numeric(oracle$p.value) || length(oracle$p.value) != 1L ||
+        !is.finite(oracle$p.value)) {
       stop("Prepared-S dCov oracle result is invalid", call. = FALSE)
     }
     p_value <- as.numeric(oracle$p.value)

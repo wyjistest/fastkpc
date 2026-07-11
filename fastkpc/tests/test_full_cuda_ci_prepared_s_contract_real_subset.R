@@ -41,6 +41,12 @@ assert_sorted_reasons <- function(table, message) {
   )
 }
 
+rows_with_reason <- function(table, reason) {
+  which(vapply(table$selection_reasons, function(value) {
+    reason %in% value
+  }, logical(1L)))
+}
+
 scramble_selection_inputs <- function(inputs) {
   result <- inputs
   table_names <- c(
@@ -74,6 +80,108 @@ scramble_selection_inputs <- function(inputs) {
 
 source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")
 
+run_spectra_fallback_injection <- function() {
+  selector_name <-
+    "fastkpc_full_cuda_select_prepared_s_iteration_subset"
+  original_selector <- get(
+    selector_name, envir = .GlobalEnv, inherits = FALSE
+  )
+  environment_name <- "FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK"
+  original_environment <- Sys.getenv(
+    environment_name, unset = NA_character_
+  )
+  on.exit({
+    assign(
+      selector_name, original_selector,
+      envir = .GlobalEnv
+    )
+    if (is.na(original_environment)) {
+      Sys.unsetenv(environment_name)
+    } else {
+      Sys.setenv(
+        FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = original_environment
+      )
+    }
+  }, add = TRUE)
+
+  sample_count <- 40L
+  data <- matrix(
+    seq_len(sample_count * 2L) / (sample_count * 2L),
+    nrow = sample_count,
+    ncol = 2L
+  )
+  storage.mode(data) <- "double"
+  keys <- sprintf("%064x", seq_len(88L))
+  logical_tests <- data.frame(
+    logical_sequence_id = seq_len(44L),
+    S_size = rep(1L, 44L),
+    reference_p_value = rep(0.2, 44L),
+    alpha = rep(0.1, 44L),
+    reference_decision = rep("independent", 44L),
+    reference_independent = rep(TRUE, 44L),
+    residual_key_x = keys[seq_len(44L)],
+    residual_key_y = keys[44L + seq_len(44L)],
+    stringsAsFactors = FALSE
+  )
+  assign(
+    selector_name,
+    function(inputs) list(logical_tests = logical_tests),
+    envir = .GlobalEnv
+  )
+  residuals <- new.env(hash = TRUE, parent = emptyenv())
+  for (index in seq_along(keys)) {
+    assign(
+      keys[[index]],
+      as.numeric(seq_len(sample_count) + index),
+      envir = residuals
+    )
+  }
+  valid_diagnostics <- list(
+    lowrank_mode = "spectra",
+    lowrank_full_eig_count = 0L,
+    lowrank_spectra_count = 2L,
+    lowrank_spectra_converged_count = 2L,
+    lowrank_spectra_failed_count = 0L,
+    lowrank_spectra_fallback_full_eig_count = 0L,
+    lowrank_spectra_nconv = 2L * 35L
+  )
+  fastkpc_full_cuda_prepared_s_validate_dcov_spectra_diagnostics(
+    valid_diagnostics, numCol = 35L
+  )
+  fallback_diagnostics <- valid_diagnostics
+  fallback_diagnostics$lowrank_spectra_fallback_full_eig_count <- 1L
+  fallback_oracle <- function(x, y, numCol, index) {
+    list(
+      p.value = 0.2,
+      diagnostics = fallback_diagnostics
+    )
+  }
+  Sys.setenv(
+    FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK =
+      "prepared-s-focused-fallback-sentinel"
+  )
+  assert_error(
+    fastkpc_full_cuda_run_prepared_s_dcov_parity(
+      inputs = list(
+        data = data,
+        dataset_sha256 = fastkpc_full_cuda_data_hash(data)
+      ),
+      logical_tests = logical_tests,
+      residuals = residuals,
+      oracle_fun = fallback_oracle
+    ),
+    "Spectra diagnostics mismatch",
+    paste0(
+      "matching p-value parity must reject a reported full-eigen fallback"
+    )
+  )
+  assert_identical(
+    Sys.getenv(environment_name, unset = NA_character_),
+    "prepared-s-focused-fallback-sentinel",
+    "fallback rejection must restore the prior Spectra environment"
+  )
+}
+
 reason_store <- fastkpc_full_cuda_prepared_s_selection_reason_store()
 fastkpc_full_cuda_prepared_s_add_selection_reason(
   reason_store, "group-a", c("reason-z", "reason-a", "reason-z")
@@ -93,6 +201,15 @@ assert_identical(
   ),
   "selection reasons must support one-to-many and pairwise aggregation"
 )
+run_spectra_fallback_injection()
+
+if (identical(
+      Sys.getenv("FASTKPC_PREPARED_S_TEST_SCOPE", unset = "full"),
+      "focused"
+    )) {
+  cat("PASS focused Prepared-S reason and Spectra fail-closed tests\n")
+  quit(save = "no", status = 0L)
+}
 
 required_packages <- c("mgcv", "jsonlite", "Rcpp")
 missing_packages <- required_packages[!vapply(
@@ -164,6 +281,11 @@ assert_sha256(
   iteration$iteration_subset_hash,
   "iteration subset hash must be versioned and deterministic"
 )
+assert_identical(
+  iteration$iteration_subset_hash,
+  "d69956655e2ee0186aceb4bf2d545b831051c389aed139769d9e5902f433fb96",
+  "iteration subset hash must retain the frozen Task 5 identity"
+)
 
 risk_table <-
   fastkpc_full_cuda_reconstruct_prepared_s_target_risk_table(inputs)
@@ -197,6 +319,266 @@ assert_true(
     all(risk_table$residual_all_finite[rank_deficient]),
   "rank-deficient targets must retain Inf metadata and finite outputs"
 )
+
+all_logical <- as.data.frame(
+  inputs$logical_tests, stringsAsFactors = FALSE
+)
+tight <- all_logical$S_size > 0L &
+  is.finite(all_logical$absolute_log_distance_from_alpha) &
+  all_logical$absolute_log_distance_from_alpha <= 1e-3
+tight_ids <- as.integer(all_logical$logical_sequence_id[tight])
+assert_true(
+  length(tight_ids) == 6L &&
+    all(tight_ids %in% iteration$logical_tests$logical_sequence_id),
+  "iteration must include all six canonical tight-alpha tests"
+)
+
+risk_key_index_x <- match(
+  as.character(all_logical$residual_key_x),
+  as.character(risk_table$residual_key_sha256)
+)
+risk_key_index_y <- match(
+  as.character(all_logical$residual_key_y),
+  as.character(risk_table$residual_key_sha256)
+)
+numerical_or_convergence_risk <- with(
+  risk_table,
+  high_condition | rank_deficient | near_constant_target |
+    near_constant_conditioner | mgcv_warning | mgcv_nonconverged |
+    nonfinite_metadata
+)
+finite_ordinary_target <- with(
+  risk_table,
+  coefficient_all_finite & fitted_all_finite & residual_all_finite &
+    is.finite(condition) & condition < 1e8 &
+    !numerical_or_convergence_risk
+)
+ordinary_eligible <- all_logical$S_size > 0L &
+  !is.na(risk_key_index_x) & !is.na(risk_key_index_y) &
+  finite_ordinary_target[risk_key_index_x] &
+  finite_ordinary_target[risk_key_index_y] &
+  is.finite(all_logical$absolute_log_distance_from_alpha) &
+  all_logical$absolute_log_distance_from_alpha > log(2)
+key_x <- as.character(all_logical$residual_key_x)
+key_y <- as.character(all_logical$residual_key_y)
+x_first <- key_x <= key_y
+canonical_pair_key <- paste0(
+  ifelse(x_first, key_x, key_y), "|",
+  ifelse(x_first, key_y, key_x)
+)
+assert_true(
+  all(risk_table$multi_penalty[risk_table$S_size %in% 3:7]),
+  paste0(
+    "canonical S_size 3..7 targets must retain unavoidable structural ",
+    "multi-penalty classification"
+  )
+)
+for (S_size in seq_len(7L)) {
+  reason <- paste0("ordinary_lower_median:S_size=", S_size)
+  selected_index <- rows_with_reason(iteration$logical_tests, reason)
+  assert_true(
+    length(selected_index) == 1L,
+    paste0("iteration must select one ordinary witness for S_size=", S_size)
+  )
+  selected <- iteration$logical_tests[selected_index, , drop = FALSE]
+  endpoints <- match(
+    c(selected$residual_key_x[[1L]], selected$residual_key_y[[1L]]),
+    risk_table$residual_key_sha256
+  )
+  assert_true(
+    !anyNA(endpoints) && all(finite_ordinary_target[endpoints]) &&
+      selected$absolute_log_distance_from_alpha[[1L]] > log(2),
+    paste0(
+      "ordinary witness endpoints must satisfy frozen numerical and ",
+      "convergence risk rules for S_size=", S_size
+    )
+  )
+  if (S_size >= 3L) {
+    assert_true(
+      all(risk_table$multi_penalty[endpoints]),
+      paste0(
+        "ordinary S_size=", S_size,
+        " witness must allow structural multi_penalty"
+      )
+    )
+  }
+  candidates <- which(
+    ordinary_eligible & all_logical$S_size == S_size
+  )
+  candidates <- candidates[order(
+    canonical_pair_key[candidates],
+    all_logical$logical_sequence_id[candidates],
+    method = "radix"
+  )]
+  expected <- candidates[[(length(candidates) + 1L) %/% 2L]]
+  assert_identical(
+    selected$logical_sequence_id[[1L]],
+    as.integer(all_logical$logical_sequence_id[[expected]]),
+    paste0("ordinary lower-median identity mismatch for S_size=", S_size)
+  )
+}
+
+nonconverged <- risk_table$mgcv_nonconverged %in% TRUE
+convergence_strata <- paste(
+  risk_table$convergence_signature[nonconverged],
+  risk_table$S_size[nonconverged],
+  risk_table$condition_bucket[nonconverged],
+  sep = "|"
+)
+observed_convergence_strata <- sort(
+  unique(convergence_strata), method = "radix"
+)
+assert_true(
+  length(observed_convergence_strata) == 3L,
+  "canonical frozen mgcv_nonconverged target strata must equal three"
+)
+for (stratum in observed_convergence_strata) {
+  reason <- paste0("convergence_risk:", stratum)
+  selected_index <- rows_with_reason(iteration$target_keys, reason)
+  assert_true(
+    length(selected_index) == 1L,
+    paste0("iteration must select one frozen convergence stratum: ", stratum)
+  )
+  candidates <- which(
+    nonconverged & paste(
+      risk_table$convergence_signature,
+      risk_table$S_size,
+      risk_table$condition_bucket,
+      sep = "|"
+    ) == stratum
+  )
+  expected <- candidates[order(
+    -risk_table$optimizer_iterations[candidates],
+    risk_table$residual_key_sha256[candidates],
+    method = "radix"
+  )[[1L]]]
+  assert_identical(
+    iteration$target_keys$residual_key_sha256[[selected_index]],
+    risk_table$residual_key_sha256[[expected]],
+    paste0("frozen convergence stratum ordering mismatch: ", stratum)
+  )
+}
+convergence_reason_count <- sum(vapply(
+  iteration$target_keys$selection_reasons,
+  function(value) sum(startsWith(value, "convergence_risk:")),
+  integer(1L)
+))
+assert_identical(
+  as.integer(convergence_reason_count), 3L,
+  "iteration must record exactly three frozen convergence reasons"
+)
+
+setup_group_ids <- sort(unique(
+  as.character(risk_table$same_S_group_id)
+), method = "radix")
+first_target_by_group <- match(
+  setup_group_ids, risk_table$same_S_group_id
+)
+setup_metrics <- data.frame(
+  same_S_group_id = setup_group_ids,
+  setup_target_count =
+    risk_table$setup_target_count[first_target_by_group],
+  setup_logical_request_count =
+    risk_table$setup_logical_request_count[first_target_by_group],
+  stringsAsFactors = FALSE
+)
+anchor_specs <- list(
+  list("setup_target_fanout_anchor", "setup_target_count", 2L),
+  list("setup_target_fanout_anchor", "setup_target_count", 9L),
+  list("setup_target_fanout_anchor", "setup_target_count", 47L),
+  list(
+    "setup_logical_request_load_anchor",
+    "setup_logical_request_count", 2L
+  ),
+  list(
+    "setup_logical_request_load_anchor",
+    "setup_logical_request_count", 16L
+  ),
+  list(
+    "setup_logical_request_load_anchor",
+    "setup_logical_request_count", 3092L
+  )
+)
+for (spec in anchor_specs) {
+  reason <- paste0(spec[[1L]], "=", spec[[3L]])
+  selected_index <- rows_with_reason(iteration$setup_groups, reason)
+  assert_true(
+    length(selected_index) == 1L,
+    paste0("iteration must record one anchor reason: ", reason)
+  )
+  metric <- setup_metrics[[spec[[2L]]]]
+  distance <- abs(metric - spec[[3L]])
+  candidates <- setup_metrics$same_S_group_id[
+    distance == min(distance)
+  ]
+  expected_group <- sort(candidates, method = "radix")[[1L]]
+  selected_group <-
+    iteration$setup_groups$same_S_group_id[[selected_index]]
+  assert_identical(
+    selected_group, expected_group,
+    paste0("anchor nearest/tie semantics mismatch: ", reason)
+  )
+  canonical_group_keys <- risk_table$residual_key_sha256[
+    risk_table$same_S_group_id == selected_group
+  ]
+  assert_true(
+    all(canonical_group_keys %in%
+          iteration$target_keys$residual_key_sha256),
+    paste0("anchor must include every target in group: ", reason)
+  )
+}
+
+for (index in seq_len(nrow(iteration$logical_tests))) {
+  logical_row <- iteration$logical_tests[index, , drop = FALSE]
+  logical_id <- logical_row$logical_sequence_id[[1L]]
+  endpoints <- c(
+    logical_row$residual_key_x[[1L]],
+    logical_row$residual_key_y[[1L]]
+  )
+  endpoint_index <- match(
+    endpoints, iteration$target_keys$residual_key_sha256
+  )
+  assert_true(
+    !anyNA(endpoint_index) && all(vapply(
+      iteration$target_keys$selection_reasons[endpoint_index],
+      function(value) paste0("logical_endpoint:", logical_id) %in% value,
+      logical(1L)
+    )),
+    paste0("logical endpoint closure mismatch: ", logical_id)
+  )
+}
+
+canonical_setups <- as.data.frame(
+  inputs$same_s_setup_metadata, stringsAsFactors = FALSE
+)
+for (group_id in iteration$setup_groups$same_S_group_id) {
+  group_keys <- sort(
+    risk_table$residual_key_sha256[
+      risk_table$same_S_group_id == group_id
+    ],
+    method = "radix"
+  )
+  setup_index <- match(group_id, canonical_setups$same_S_group_id)
+  representative <-
+    canonical_setups$representative_residual_key_sha256[[setup_index]]
+  lower_median <- group_keys[[(length(group_keys) + 1L) %/% 2L]]
+  maximum <- group_keys[[length(group_keys)]]
+  closure <- c(representative, lower_median, maximum)
+  closure_reasons <- c(
+    "setup_representative", "setup_lower_median_target",
+    "setup_maximum_target"
+  )
+  closure_index <- match(
+    closure, iteration$target_keys$residual_key_sha256
+  )
+  assert_true(
+    !anyNA(closure_index) && all(vapply(seq_along(closure), function(i) {
+      closure_reasons[[i]] %in%
+        iteration$target_keys$selection_reasons[[closure_index[[i]]]]
+    }, logical(1L))),
+    paste0("setup three-target closure mismatch: ", group_id)
+  )
+}
 
 qualification <-
   fastkpc_full_cuda_select_prepared_s_qualification_subset(inputs)
@@ -333,6 +715,14 @@ assert_identical(
   "qualification selected keys must be stable under scrambling"
 )
 
+if (identical(
+      Sys.getenv("FASTKPC_PREPARED_S_TEST_SCOPE", unset = "full"),
+      "selection"
+    )) {
+  cat("PASS exact Prepared-S iteration and qualification selection tests\n")
+  quit(save = "no", status = 0L)
+}
+
 prepared_by_group <- setNames(lapply(
   seq_len(nrow(iteration$setup_groups)),
   function(index) {
@@ -449,6 +839,27 @@ assert_true(
       logical(1L)
     )),
   "dCov parity must retain native diagnostics without fallbacks"
+)
+assert_true(
+  all(vapply(dcov_parity$rows$diagnostics, function(diagnostics) {
+    identical(diagnostics$lowrank_mode, "spectra") &&
+      identical(as.integer(diagnostics$lowrank_full_eig_count), 0L) &&
+      identical(as.integer(diagnostics$lowrank_spectra_count), 2L) &&
+      identical(
+        as.integer(diagnostics$lowrank_spectra_converged_count), 2L
+      ) &&
+      identical(
+        as.integer(diagnostics$lowrank_spectra_failed_count), 0L
+      ) &&
+      identical(
+        as.integer(
+          diagnostics$lowrank_spectra_fallback_full_eig_count
+        ),
+        0L
+      ) &&
+      as.integer(diagnostics$lowrank_spectra_nconv) >= 2L * 35L
+  }, logical(1L))),
+  "all dCov rows must prove the exact no-fallback Spectra route"
 )
 
 missing_residuals <- list2env(
