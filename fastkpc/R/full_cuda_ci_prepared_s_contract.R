@@ -5399,7 +5399,7 @@ fastkpc_full_cuda_prepared_s_qualification_coverage <- function(
         "setup_target_count_quantile",
         paste0(
           "penalty_count=", witness$penalty_count[[1L]],
-          ";probability=", witness$probability[[1L]],
+          ";probability=", witness$probability_label[[1L]],
           ";quantile=", witness$target_count_quantile[[1L]],
           ";selected_count=", witness$selected_target_count[[1L]],
           ";same_S_group_id=", group_id
@@ -5527,12 +5527,15 @@ fastkpc_full_cuda_select_prepared_s_qualification_subset <- function(
   )
   witness_chunks <- list()
   probabilities <- c(0, 0.25, 0.5, 0.75, 1)
+  probability_labels <- c("0", "0.25", "0.5", "0.75", "1")
   for (penalty_count in penalty_counts) {
     setup_index <- which(
       group_metadata$penalty_count == penalty_count
     )
     counts <- group_metadata$setup_target_count[setup_index]
-    for (probability in probabilities) {
+    for (probability_index in seq_along(probabilities)) {
+      probability <- probabilities[[probability_index]]
+      probability_label <- probability_labels[[probability_index]]
       target_count_quantile <- as.numeric(stats::quantile(
         counts, probs = probability, type = 1, names = FALSE
       ))
@@ -5555,7 +5558,7 @@ fastkpc_full_cuda_select_prepared_s_qualification_subset <- function(
       )
       reason_suffix <- paste0(
         "penalty_count=", penalty_count,
-        ";probability=", format(probability, trim = TRUE),
+        ";probability=", probability_label,
         ";same_S_group_id=", group_id
       )
       fastkpc_full_cuda_prepared_s_add_selection_reason(
@@ -5577,6 +5580,7 @@ fastkpc_full_cuda_select_prepared_s_qualification_subset <- function(
       witness_chunks[[length(witness_chunks) + 1L]] <- data.frame(
         penalty_count = as.integer(penalty_count),
         probability = as.numeric(probability),
+        probability_label = probability_label,
         target_count_quantile = as.integer(target_count_quantile),
         same_S_group_id = group_id,
         selected_target_count = as.integer(
@@ -6160,9 +6164,9 @@ fastkpc_full_cuda_prepared_s_validate_dcov_spectra_diagnostics <- function(
   invisible(TRUE)
 }
 
-fastkpc_full_cuda_run_prepared_s_dcov_parity <- function(
+.fastkpc_full_cuda_run_prepared_s_dcov_parity_core <- function(
     inputs, logical_tests, residuals, oracle_manifest = NULL,
-    oracle_fun = fastkpc_legacy_dcov_gamma_cpp_oracle, ...) {
+    oracle_fun) {
   environment_name <- "FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK"
   prior_environment <- Sys.getenv(
     environment_name, unset = NA_character_
@@ -6175,11 +6179,6 @@ fastkpc_full_cuda_run_prepared_s_dcov_parity <- function(
   )
   Sys.setenv(FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra")
 
-  dots <- list(...)
-  if (length(dots) > 0L) {
-    stop("Prepared-S dCov parity options are unsupported",
-         call. = FALSE)
-  }
   if (!is.environment(residuals) || !is.data.frame(logical_tests) ||
       !"logical_sequence_id" %in% names(logical_tests)) {
     stop("Prepared-S dCov parity inputs are incomplete", call. = FALSE)
@@ -6354,5 +6353,21 @@ fastkpc_full_cuda_run_prepared_s_dcov_parity <- function(
       selected_ids
     ),
     parity_rows_hash = fastkpc_full_cuda_census_frame_hash(parity_rows)
+  )
+}
+
+fastkpc_full_cuda_run_prepared_s_dcov_parity <- function(
+    inputs, logical_tests, residuals, oracle_manifest = NULL, ...) {
+  dots <- list(...)
+  if (length(dots) > 0L) {
+    stop("Prepared-S dCov parity options are unsupported",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_run_prepared_s_dcov_parity_core(
+    inputs = inputs,
+    logical_tests = logical_tests,
+    residuals = residuals,
+    oracle_manifest = oracle_manifest,
+    oracle_fun = fastkpc_legacy_dcov_gamma_cpp_oracle
   )
 }

@@ -148,6 +148,14 @@ run_spectra_fallback_injection <- function() {
   fastkpc_full_cuda_prepared_s_validate_dcov_spectra_diagnostics(
     valid_diagnostics, numCol = 35L
   )
+  valid_oracle_call_count <- 0L
+  valid_oracle <- function(x, y, numCol, index) {
+    valid_oracle_call_count <<- valid_oracle_call_count + 1L
+    list(
+      p.value = 0.2,
+      diagnostics = valid_diagnostics
+    )
+  }
   fallback_diagnostics <- valid_diagnostics
   fallback_diagnostics$lowrank_spectra_fallback_full_eig_count <- 1L
   fallback_oracle <- function(x, y, numCol, index) {
@@ -162,6 +170,31 @@ run_spectra_fallback_injection <- function() {
   )
   assert_error(
     fastkpc_full_cuda_run_prepared_s_dcov_parity(
+      inputs = list(
+        data = data,
+        dataset_sha256 = fastkpc_full_cuda_data_hash(data)
+      ),
+      logical_tests = logical_tests,
+      residuals = residuals,
+      oracle_fun = valid_oracle
+    ),
+    "Prepared-S dCov parity options are unsupported",
+    paste0(
+      "public dCov parity must reject a caller-supplied valid oracle"
+    )
+  )
+  assert_identical(
+    valid_oracle_call_count,
+    0L,
+    "public dCov parity must never invoke a caller-supplied oracle"
+  )
+  assert_identical(
+    Sys.getenv(environment_name, unset = NA_character_),
+    "prepared-s-focused-fallback-sentinel",
+    "public oracle rejection must preserve the prior Spectra environment"
+  )
+  assert_error(
+    .fastkpc_full_cuda_run_prepared_s_dcov_parity_core(
       inputs = list(
         data = data,
         dataset_sha256 = fastkpc_full_cuda_data_hash(data)
@@ -662,6 +695,40 @@ assert_sha256(
   qualification$qualification_subset_hash,
   "qualification subset hash must be versioned and deterministic"
 )
+assert_identical(
+  qualification$qualification_subset_hash,
+  "0adea2bac7b31615421f180b6caa5aeef5567bafa0e45a319b358136bf429c61",
+  "qualification subset hash must retain the canonical Task 5 identity"
+)
+qualification_comma_decimal <- local({
+  prior_options <- options(OutDec = ",")
+  on.exit(options(prior_options), add = TRUE)
+  fastkpc_full_cuda_select_prepared_s_qualification_subset(inputs)
+})
+assert_identical(
+  qualification_comma_decimal$qualification_subset_hash,
+  qualification$qualification_subset_hash,
+  "qualification hash must be independent of the decimal output option"
+)
+qualification_hash_fields <- sort(
+  grep("_hash$", names(qualification), value = TRUE),
+  method = "radix"
+)
+assert_identical(
+  qualification_comma_decimal[qualification_hash_fields],
+  qualification[qualification_hash_fields],
+  "all qualification hashes must be independent of output options"
+)
+assert_identical(
+  qualification_comma_decimal$reason_rows,
+  qualification$reason_rows,
+  "qualification reason rows must be byte-identical across decimal options"
+)
+assert_identical(
+  qualification_comma_decimal$coverage,
+  qualification$coverage,
+  "qualification coverage rows must be byte-identical across decimal options"
+)
 
 coverage <- qualification$coverage
 assert_true(
@@ -899,6 +966,7 @@ cat(
   " qualification_targets=", nrow(qualification$target_keys),
   " qualification_logical=", nrow(qualification$logical_tests),
   " qualification_groups=", nrow(qualification$setup_groups),
+  " qualification_hash=", qualification$qualification_subset_hash,
   " target_exact=", sum(
     target_parity$rows$coefficient_hash_exact &
       target_parity$rows$fitted_hash_exact &
