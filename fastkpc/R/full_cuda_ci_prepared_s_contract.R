@@ -2488,6 +2488,16 @@ fastkpc_full_cuda_validate_prepared_s_setup <- function(
       )) {
     stop("PreparedSSetup constraint hash or rank mismatch", call. = FALSE)
   }
+  if (identical(expected_constraint_mode, "explicit") &&
+      !identical(
+        as.integer(qr(t(setup$constraint))$rank),
+        as.integer(nrow(setup$constraint))
+      )) {
+    stop(
+      "PreparedSSetup constraint rows must be independent",
+      call. = FALSE
+    )
+  }
   if (identical(setup$constraint_mode, "identity")) {
     nullspace_clean <- is.null(setup$constraint_nullspace) &&
       identical(setup$constraint_nullspace_dimension, p) &&

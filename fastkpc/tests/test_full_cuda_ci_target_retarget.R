@@ -302,13 +302,20 @@ independent_reference_setup <- function(prepared, materialized) {
   )
 }
 
-redundant_constraint_case <- function(prepared, materialized) {
+explicit_constraint_case <- function(prepared, materialized, epsilon) {
   prepared <- unserialize(serialize(prepared, NULL, version = 2))
   materialized <- unserialize(serialize(materialized, NULL, version = 2))
   p <- ncol(prepared$X)
-  constraint_row <- c(1, numeric(p - 1L))
+  assert_true(
+    p >= 3L && is.numeric(epsilon) && length(epsilon) == 1L &&
+      is.finite(epsilon) && epsilon >= 0,
+    "explicit constraint fixture requires one finite epsilon and p >= 3"
+  )
+  constraint_row_1 <- c(1, numeric(p - 1L))
+  constraint_row_2 <- constraint_row_1
+  constraint_row_2[[2L]] <- epsilon
   constraint <- fastkpc_full_cuda_prepared_s_matrix(rbind(
-    constraint_row, constraint_row
+    constraint_row_1, constraint_row_2
   ))
   constraint_nullspace <- fastkpc_full_cuda_prepared_s_matrix(
     fastkpc_constraint_nullspace(constraint, p)
@@ -372,8 +379,9 @@ redundant_constraint_case <- function(prepared, materialized) {
   list(prepared = prepared, materialized = materialized)
 }
 
-assert_redundant_constraint_rejected <- function(prepared, materialized) {
-  case <- redundant_constraint_case(prepared, materialized)
+assert_constraint_rejected_before_kernel <- function(
+    prepared, materialized, epsilon, label) {
+  case <- explicit_constraint_case(prepared, materialized, epsilon)
   kernel_name <- "fastkpc_mgcv_magic_kernel_fixed_sp_coefficients"
   original_kernel <- get(kernel_name, envir = .GlobalEnv, inherits = FALSE)
   kernel_reached <- FALSE
@@ -402,9 +410,22 @@ assert_redundant_constraint_rejected <- function(prepared, materialized) {
         error_message, fixed = TRUE
       ) && !kernel_reached,
     paste0(
-      "redundant Prepared-S constraint must fail before C_magic; ",
+      label, " Prepared-S constraint must fail before C_magic; ",
       "kernel_reached=", kernel_reached, "; error=", error_message
     )
+  )
+}
+
+assert_redundant_constraint_rejected <- function(prepared, materialized) {
+  assert_constraint_rejected_before_kernel(
+    prepared, materialized, epsilon = 0, label = "redundant"
+  )
+}
+
+assert_near_dependent_constraint_rejected <- function(
+    prepared, materialized) {
+  assert_constraint_rejected_before_kernel(
+    prepared, materialized, epsilon = 1e-8, label = "near-dependent"
   )
 }
 
@@ -565,6 +586,7 @@ for (selected_key in selection$selected_keys) {
       reference = reference
     )
     assert_redundant_constraint_rejected(prepared, materialized)
+    assert_near_dependent_constraint_rejected(prepared, materialized)
   }
 }
 
