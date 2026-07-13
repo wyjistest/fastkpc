@@ -599,11 +599,11 @@ Do not rely only on normal equations for difficult cases. A Cholesky path may be
 
 Existing code may provide substrate for a phase, but a phase is not complete until its explicit artifact and exit gates pass.
 
-| Phase | Name | Initial status |
+| Phase | Name | Current status |
 |---|---|---|
 | 0 | Freeze oracle and zero-SHD comparator | COMPLETE — standardized oracle and first-divergence gate pass |
 | 1 | Full workload and risk census | COMPLETE - full 110,617-key metadata artifact passes all gates |
-| 2 | Response-independent GAM setup contract | PARTIAL — extraction/retarget helpers exist |
+| 2 | Response-independent GAM setup contract | COMPLETE - full structural artifact and qualification exact-parity/restart gates pass |
 | 3 | Persistent stable fixed-sp CUDA residual runtime | PARTIAL — prototype solve exists |
 | 4 | Full-CUDA single-penalty GCV for `|S|<=2` | PARTIAL — CPU spectral selection exists |
 | 5 | C++ multi-penalty GAM semantic replica | NOT COMPLETE |
@@ -1067,6 +1067,29 @@ The phase must include difficult cases from the census, not only `|S|<=2` easy e
 ### Exit condition
 
 A later CUDA solver can accept one `PreparedSSetup` plus a matrix of targets without calling `mgcv::gam` once per target.
+
+### Closure
+
+Phase 2 is complete with the authenticated artifact:
+
+```text
+PreparedSSetup rows             = 8,634
+TargetState rows                = 110,617
+iteration setup groups          = 44
+iteration target keys           = 270
+iteration logical tests         = 44
+qualification target keys       = 6,143
+qualification logical tests     = 3,808
+fixed-sp residual hashes exact  = TRUE
+dCov decision flips             = 0
+unsupported/fallback count      = 0
+artifact path                   =
+  fastkpc/artifacts/full_cuda_ci/prepared_s_contract_v1/
+```
+
+The artifact preserves version-pinned mgcv/regrXonS as the residual authority
+and inherited Phase 0 graph evidence. It does not claim Phase 3 CUDA solve
+authority.
 
 ---
 
@@ -2274,7 +2297,8 @@ The exact script names may be adjusted to repository conventions, but one standa
 
 ## 12. Immediate next actions
 
-Codex should begin with Phase 0, not with another CUDA micro-optimization.
+Codex should begin with the earliest phase whose exit gate is incomplete. Phase
+0 through Phase 2 are complete, so the current starting point is Phase 3.
 
 ### Task 1
 
@@ -2296,12 +2320,20 @@ closure, and inherited SHD 0 evidence.
 
 ### Task 4
 
-Active next task: start Phase 2 by freezing the response-independent
-`PreparedSSetup` contract and target-retarget parity corpus from the completed
-Phase 1 artifact. Phase 3 persistent fixed-sp CUDA resources follow that gate.
+Complete: Phase 2 produced 8,634 authenticated `PreparedSSetup` objects and
+110,617 `TargetState` rows, with exact qualification fixed-sp hashes, zero dCov
+decision flips, zero unsupported/fallback counts, deterministic 64-shard
+restart closure, and inherited Phase 0 graph evidence.
+
+### Task 5
+
+Active next task: start Phase 3 persistent fixed-sp CUDA resources and a stable
+multi-target solve that consumes the completed Phase 2 contract. Phase 3 must
+establish its own CUDA authority and parity gates; Phase 2 does not grant them.
 
 The current CUDA Spectra projection primitive remains useful substrate for
-Phase 8, but the immediate critical path is now the Phase 2 GAM setup contract.
+Phase 8, but the immediate critical path is now the Phase 3 fixed-sp CUDA
+runtime.
 
 ---
 
