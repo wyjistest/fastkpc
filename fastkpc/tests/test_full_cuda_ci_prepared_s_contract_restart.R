@@ -750,6 +750,203 @@ local({
     envir = .GlobalEnv
   )
 
+  traversed_setup_keys <- c(
+    as.character(batch_second$payload$ordered_setup_keys[[1L]]),
+    as.character(batch_first$payload$ordered_setup_keys[[1L]])
+  )
+  traversed_target_keys <- c(
+    as.character(batch_second$payload$target_states$residual_key_sha256[
+      match(
+        traversed_setup_keys[[1L]],
+        batch_second$payload$target_states$prepared_s_key_sha256
+      )
+    ]),
+    as.character(batch_first$payload$target_states$residual_key_sha256[
+      match(
+        traversed_setup_keys[[2L]],
+        batch_first$payload$target_states$prepared_s_key_sha256
+      )
+    ])
+  )
+  selected_setup_keys <- rev(traversed_setup_keys)
+  selected_target_keys <- rev(traversed_target_keys)
+  expected_selected_setups <- c(
+    batch_first$payload$prepared_s_setups[selected_setup_keys[[1L]]],
+    batch_second$payload$prepared_s_setups[selected_setup_keys[[2L]]]
+  )
+  expected_selected_states <- fastkpc_full_cuda_prepared_s_bind_target_states(
+    list(
+      batch_first$payload$target_states[
+        match(
+          selected_target_keys[[1L]],
+          batch_first$payload$target_states$residual_key_sha256
+        ), , drop = FALSE
+      ],
+      batch_second$payload$target_states[
+        match(
+          selected_target_keys[[2L]],
+          batch_second$payload$target_states$residual_key_sha256
+        ), , drop = FALSE
+      ]
+    )
+  )
+  selected_replayed <- fastkpc_full_cuda_prepared_s_read_selected_shards(
+    shard_dir = batch_dir,
+    inputs = fixture_inputs,
+    shard_count = 3L,
+    shard_ids = c(1L, 0L),
+    setup_keys = selected_setup_keys,
+    target_keys = selected_target_keys,
+    expected_source_commit = source_commit_a
+  )
+  assert_true(
+    identical(names(selected_replayed), c(
+      "prepared_s_setups", "target_states", "shard_ids"
+    )) &&
+      identical(selected_replayed$shard_ids, c(1L, 0L)) &&
+      identical(names(selected_replayed$prepared_s_setups),
+                selected_setup_keys) &&
+      identical(selected_replayed$prepared_s_setups,
+                expected_selected_setups) &&
+      identical(
+        as.character(selected_replayed$target_states$residual_key_sha256),
+        selected_target_keys
+      ) &&
+      identical(selected_replayed$target_states, expected_selected_states) &&
+      all(as.character(
+        selected_replayed$target_states$prepared_s_key_sha256
+      ) %in% selected_setup_keys) &&
+      preparation_calls$assignment == 1L &&
+      preparation_calls$output_context == 1L &&
+      preparation_calls$target_state_index == 1L,
+    paste(
+      "selected shard reader must retain only requested exact payloads in",
+      "caller order after one shared preparation"
+    )
+  )
+
+  invalid_selected_keys <- list(
+    missing = paste(rep("f", 64L), collapse = ""),
+    duplicate = rep(selected_setup_keys[[1L]], 2L),
+    empty = character(),
+    attributed = structure(selected_setup_keys[[1L]], note = "unallowed"),
+    malformed = "not-a-sha"
+  )
+  for (label in names(invalid_selected_keys)) {
+    assert_error(
+      fastkpc_full_cuda_prepared_s_read_selected_shards(
+        shard_dir = batch_dir,
+        inputs = fixture_inputs,
+        shard_count = 3L,
+        shard_ids = c(1L, 0L),
+        setup_keys = invalid_selected_keys[[label]],
+        target_keys = selected_target_keys,
+        expected_source_commit = source_commit_a
+      ),
+      "setup_keys",
+      paste("selected shard reader setup_keys must reject", label, "input")
+    )
+    assert_error(
+      fastkpc_full_cuda_prepared_s_read_selected_shards(
+        shard_dir = batch_dir,
+        inputs = fixture_inputs,
+        shard_count = 3L,
+        shard_ids = c(1L, 0L),
+        setup_keys = selected_setup_keys,
+        target_keys = invalid_selected_keys[[label]],
+        expected_source_commit = source_commit_a
+      ),
+      "target_keys",
+      paste("selected shard reader target_keys must reject", label, "input")
+    )
+  }
+
+  selected_corruption_paths <- fastkpc_full_cuda_prepared_s_shard_paths(
+    batch_dir, 1L
+  )
+  selected_corruption_backup <- tempfile("prepared-s-selected-rds-")
+  selected_summary_backup <- tempfile("prepared-s-selected-summary-")
+  assert_true(
+    file.copy(
+      selected_corruption_paths$rds, selected_corruption_backup,
+      overwrite = TRUE
+    ),
+    "selected shard reader test must back up its shard RDS"
+  )
+  assert_true(
+    file.copy(
+      selected_corruption_paths$summary_json, selected_summary_backup,
+      overwrite = TRUE
+    ),
+    "selected shard reader test must back up its completion JSON"
+  )
+  selected_corruption <- readRDS(selected_corruption_paths$rds)
+  unselected_setup_indices <- which(
+    !(as.character(selected_corruption$ordered_setup_keys) %in%
+        selected_setup_keys)
+  )
+  assert_true(
+    length(unselected_setup_indices) > 0L,
+    "selected shard reader corruption fixture must contain an unrequested setup"
+  )
+  unselected_setup_index <- unselected_setup_indices[[1L]]
+  selected_corruption$prepared_s_setups[[unselected_setup_index]]$
+    prepared_s_key_sha256 <- paste(rep("0", 64L), collapse = "")
+  saveRDS(selected_corruption, selected_corruption_paths$rds, version = 2)
+  selected_summary <- jsonlite::read_json(
+    selected_summary_backup, simplifyVector = TRUE
+  )
+  selected_authentication <-
+    fastkpc_full_cuda_prepared_s_shard_authentication(selected_corruption)
+  for (field in setdiff(
+    names(selected_authentication), "prepared_s_setup_hashes"
+  )) {
+    selected_summary[[field]] <- selected_authentication[[field]]
+  }
+  selected_summary$prepared_s_setup_hashes <-
+    as.list(selected_authentication$prepared_s_setup_hashes)
+  selected_summary$rds_file_sha256 <- fastkpc_full_cuda_census_file_hash(
+    selected_corruption_paths$rds
+  )
+  selected_summary$completion_hash <-
+    fastkpc_full_cuda_prepared_s_completion_hash(selected_summary)
+  fastkpc_full_cuda_write_json(
+    selected_summary, selected_corruption_paths$summary_json
+  )
+  assert_error(
+    fastkpc_full_cuda_prepared_s_read_selected_shards(
+      shard_dir = batch_dir,
+      inputs = fixture_inputs,
+      shard_count = 3L,
+      shard_ids = c(1L, 0L),
+      setup_keys = selected_setup_keys,
+      target_keys = selected_target_keys,
+      expected_source_commit = source_commit_a
+    ),
+    "Prepared-S shard setup lineage mismatch",
+    paste(
+      "selected shard reader must fully validate reauthenticated unselected",
+      "payload content before returning filtered results"
+    )
+  )
+  assert_true(
+    file.copy(
+      selected_corruption_backup, selected_corruption_paths$rds,
+      overwrite = TRUE
+    ),
+    "selected shard reader test must restore its shard RDS"
+  )
+  assert_true(
+    file.copy(
+      selected_summary_backup, selected_corruption_paths$summary_json,
+      overwrite = TRUE
+    ),
+    "selected shard reader test must restore its completion JSON"
+  )
+
+  preparation_calls$assignment <- 0L
+  preparation_calls$output_context <- 0L
+  preparation_calls$target_state_index <- 0L
   batch_replayed <- fastkpc_full_cuda_prepared_s_read_shards(
     shard_dir = batch_dir,
     inputs = fixture_inputs,
@@ -1414,6 +1611,9 @@ reader_formals <- names(formals(
 batch_reader_formals <- names(formals(
   fastkpc_full_cuda_prepared_s_read_shards
 ))
+selected_reader_formals <- names(formals(
+  fastkpc_full_cuda_prepared_s_read_selected_shards
+))
 writer_formals <- names(formals(
   fastkpc_full_cuda_run_prepared_s_shard
 ))
@@ -1453,11 +1653,29 @@ assert_true(
     length(intersect(
       writer_formals,
       c("context", "assigned_setups", "expected_manifest",
-        "target_state_index", "target_state_context")
+        "target_state_index", "target_state_context", "setup_keys",
+        "target_keys", "shard_ids")
     )) == 0L,
   paste(
     "only public readers may authorize historical source commits or",
     "accept generic prepared-shard context overrides"
+  )
+)
+assert_true(
+  identical(
+    selected_reader_formals,
+    c(
+      "shard_dir", "inputs", "shard_count", "shard_ids", "setup_keys",
+      "target_keys", "expected_source_commit"
+    )
+  ) &&
+    length(intersect(
+      selected_reader_formals,
+      c("paths", "expected_manifest", forbidden_public_formals)
+    )) == 0L,
+  paste(
+    "selected shard reader must accept canonical layout and selection keys",
+    "without caller-supplied authentication authority"
   )
 )
 assert_true(
@@ -1471,10 +1689,14 @@ assert_true(
     ) &&
     !"expected_source_commit" %in% c(
       context_validator_formals, manifest_constructor_formals
-    ),
+    ) &&
+    length(intersect(
+      c(context_validator_formals, manifest_constructor_formals),
+      c("setup_keys", "target_keys", "shard_ids", "expected_manifest")
+    )) == 0L,
   paste(
-    "historical source commit replay authority must remain on the public",
-    "reader rather than generic context or manifest helpers"
+    "historical replay and selected payload authority must remain on public",
+    "readers rather than generic context or manifest helpers"
   )
 )
 

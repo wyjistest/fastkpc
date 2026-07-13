@@ -5081,14 +5081,23 @@ fastkpc_full_cuda_validate_prepared_s_shard <- function(
   shard_ids
 }
 
-fastkpc_full_cuda_prepared_s_read_shards <- function(
-    shard_dir, inputs, shard_count, shard_ids,
-    expected_source_commit = NULL) {
-  shard_count <-
-    fastkpc_full_cuda_prepared_s_validate_shard_count(shard_count)
-  shard_ids <- .fastkpc_full_cuda_prepared_s_validate_read_shard_ids(
-    shard_ids, shard_count
-  )
+.fastkpc_full_cuda_prepared_s_validate_selected_shard_keys <- function(
+    keys, argument) {
+  if (typeof(keys) != "character" || is.object(keys) ||
+      !is.null(attributes(keys)) || length(keys) == 0L || anyNA(keys) ||
+      anyDuplicated(keys) || any(!grepl("^[0-9a-f]{64}$", keys))) {
+    stop(
+      argument,
+      " must be a non-empty unique bare character vector of lowercase ",
+      "64-hex SHA-256 values",
+      call. = FALSE
+    )
+  }
+  keys
+}
+
+.fastkpc_full_cuda_prepared_s_prepare_shard_read <- function(
+    inputs, shard_count, expected_source_commit) {
   assigned <- fastkpc_full_cuda_prepared_s_assign_shards(
     fastkpc_full_cuda_prepared_s_setup_index(inputs), shard_count
   )
@@ -5103,41 +5112,146 @@ fastkpc_full_cuda_prepared_s_read_shards <- function(
     expected = context,
     assigned_setups = validated$assigned_setups
   )
-  expected_source_commit <-
-    fastkpc_full_cuda_prepared_s_validate_expected_source_commit(
-      expected_source_commit
-    )
-  target_state_index <-
-    .fastkpc_full_cuda_target_state_input_index(inputs)
-  completed <- lapply(shard_ids, function(shard_id) {
-    expected_manifest <-
-      .fastkpc_full_cuda_prepared_s_shard_manifest_from_validated(
-        assigned_setups = validated$assigned_setups,
-        shard_count = validated$shard_count,
-        shard_id = shard_id,
-        inputs = inputs,
-        context = context
-      )
-    if (!is.null(expected_source_commit)) {
-      expected_manifest$source_commit <- expected_source_commit
-      fastkpc_full_cuda_prepared_s_validate_shard_manifest_structure(
-        expected_manifest
-      )
-    }
-    paths <- fastkpc_full_cuda_prepared_s_shard_paths(shard_dir, shard_id)
-    if (file.exists(paths$lock_dir)) {
-      stop("Prepared-S shard lock exists: ", basename(paths$lock_dir),
-           call. = FALSE)
-    }
-    .fastkpc_full_cuda_prepared_s_read_shard_core(
-      paths = paths,
+  list(
+    context = context,
+    validated = validated,
+    expected_source_commit =
+      fastkpc_full_cuda_prepared_s_validate_expected_source_commit(
+        expected_source_commit
+      ),
+    target_state_index =
+      .fastkpc_full_cuda_target_state_input_index(inputs)
+  )
+}
+
+.fastkpc_full_cuda_prepared_s_read_one_shard <- function(
+    shard_dir, shard_id, inputs, preparation) {
+  expected_manifest <-
+    .fastkpc_full_cuda_prepared_s_shard_manifest_from_validated(
+      assigned_setups = preparation$validated$assigned_setups,
+      shard_count = preparation$validated$shard_count,
+      shard_id = shard_id,
       inputs = inputs,
-      expected_manifest = expected_manifest,
-      target_state_index = target_state_index
+      context = preparation$context
+    )
+  if (!is.null(preparation$expected_source_commit)) {
+    expected_manifest$source_commit <- preparation$expected_source_commit
+    fastkpc_full_cuda_prepared_s_validate_shard_manifest_structure(
+      expected_manifest
+    )
+  }
+  paths <- fastkpc_full_cuda_prepared_s_shard_paths(shard_dir, shard_id)
+  if (file.exists(paths$lock_dir)) {
+    stop("Prepared-S shard lock exists: ", basename(paths$lock_dir),
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_prepared_s_read_shard_core(
+    paths = paths,
+    inputs = inputs,
+    expected_manifest = expected_manifest,
+    target_state_index = preparation$target_state_index
+  )
+}
+
+fastkpc_full_cuda_prepared_s_read_shards <- function(
+    shard_dir, inputs, shard_count, shard_ids,
+    expected_source_commit = NULL) {
+  shard_count <-
+    fastkpc_full_cuda_prepared_s_validate_shard_count(shard_count)
+  shard_ids <- .fastkpc_full_cuda_prepared_s_validate_read_shard_ids(
+    shard_ids, shard_count
+  )
+  preparation <- .fastkpc_full_cuda_prepared_s_prepare_shard_read(
+    inputs = inputs,
+    shard_count = shard_count,
+    expected_source_commit = expected_source_commit
+  )
+  completed <- lapply(shard_ids, function(shard_id) {
+    .fastkpc_full_cuda_prepared_s_read_one_shard(
+      shard_dir = shard_dir,
+      shard_id = shard_id,
+      inputs = inputs,
+      preparation = preparation
     )
   })
   names(completed) <- as.character(shard_ids)
   completed
+}
+
+fastkpc_full_cuda_prepared_s_read_selected_shards <- function(
+    shard_dir, inputs, shard_count, shard_ids, setup_keys, target_keys,
+    expected_source_commit = NULL) {
+  shard_count <-
+    fastkpc_full_cuda_prepared_s_validate_shard_count(shard_count)
+  shard_ids <- .fastkpc_full_cuda_prepared_s_validate_read_shard_ids(
+    shard_ids, shard_count
+  )
+  setup_keys <- .fastkpc_full_cuda_prepared_s_validate_selected_shard_keys(
+    setup_keys, "setup_keys"
+  )
+  target_keys <- .fastkpc_full_cuda_prepared_s_validate_selected_shard_keys(
+    target_keys, "target_keys"
+  )
+  preparation <- .fastkpc_full_cuda_prepared_s_prepare_shard_read(
+    inputs = inputs,
+    shard_count = shard_count,
+    expected_source_commit = expected_source_commit
+  )
+  selected_setups <- vector("list", length(setup_keys))
+  names(selected_setups) <- setup_keys
+  selected_target_rows <- vector("list", length(target_keys))
+
+  for (shard_id in shard_ids) {
+    completed <- .fastkpc_full_cuda_prepared_s_read_one_shard(
+      shard_dir = shard_dir,
+      shard_id = shard_id,
+      inputs = inputs,
+      preparation = preparation
+    )
+    payload <- completed$payload
+    setup_matches <- match(setup_keys, payload$ordered_setup_keys, nomatch = 0L)
+    for (index in which(setup_matches != 0L)) {
+      if (!is.null(selected_setups[[index]])) {
+        stop("requested setup_keys were found more than once", call. = FALSE)
+      }
+      selected_setups[[index]] <-
+        payload$prepared_s_setups[[setup_matches[[index]]]]
+    }
+    target_matches <- match(
+      target_keys, payload$target_states$residual_key_sha256,
+      nomatch = 0L
+    )
+    for (index in which(target_matches != 0L)) {
+      if (!is.null(selected_target_rows[[index]])) {
+        stop("requested target_keys were found more than once", call. = FALSE)
+      }
+      selected_target_rows[[index]] <- payload$target_states[
+        target_matches[[index]], , drop = FALSE
+      ]
+    }
+    rm(completed, payload)
+  }
+
+  if (any(vapply(selected_setups, is.null, logical(1L)))) {
+    stop("requested setup_keys were not found exactly once", call. = FALSE)
+  }
+  if (any(vapply(selected_target_rows, is.null, logical(1L)))) {
+    stop("requested target_keys were not found exactly once", call. = FALSE)
+  }
+  target_states <- fastkpc_full_cuda_prepared_s_bind_target_states(
+    selected_target_rows
+  )
+  if (!identical(
+        as.character(target_states$residual_key_sha256), target_keys
+      ) || any(!as.character(target_states$prepared_s_key_sha256) %in%
+               setup_keys)) {
+    stop("selected Prepared-S target state lineage mismatch", call. = FALSE)
+  }
+  list(
+    prepared_s_setups = selected_setups,
+    target_states = target_states,
+    shard_ids = as.integer(shard_ids)
+  )
 }
 
 fastkpc_full_cuda_prepared_s_read_shard <- function(
