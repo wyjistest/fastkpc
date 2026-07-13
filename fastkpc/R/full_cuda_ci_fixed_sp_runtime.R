@@ -991,3 +991,441 @@ fastkpc_full_cuda_fixed_sp_batches <- function(catalog, selected_scope) {
   )
   batches
 }
+
+fastkpc_full_cuda_fixed_sp_native_dto_fields <- function() {
+  c(
+    "schema_version", "dataset_sha256", "prepared_s_key_sha256",
+    "same_S_group_id", "phase1_setup_fingerprint", "provider_fingerprint",
+    "semantic_fingerprint", "representation_fingerprint",
+    "prepared_s_setup_schema_version", "native_dto_schema_version",
+    "data_p", "n", "coefficient_dim", "null_dim", "penalty_count", "X",
+    "constraint_mode", "constraint_nullspace", "gram_matrix",
+    "nullspace_gram_matrix", "penalty_blocks",
+    "penalty_offsets_zero_based", "penalty_ranks",
+    "penalty_sp_indices_zero_based", "penalty_sp_labels", "H",
+    "weights_policy", "offset_policy"
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_is_finite_double_matrix <- function(value) {
+  attribute_names <- names(attributes(value))
+  matrix_attributes_clean <- identical(attribute_names, "dim") ||
+    (length(attribute_names) == 2L && !anyDuplicated(attribute_names) &&
+       setequal(attribute_names, c("dim", "dimnames")))
+  is.matrix(value) && typeof(value) == "double" && !is.object(value) &&
+    matrix_attributes_clean && all(is.finite(value))
+}
+
+fastkpc_full_cuda_fixed_sp_is_bare_integer_vector <- function(value) {
+  typeof(value) == "integer" && !is.object(value) &&
+    is.null(attributes(value)) && !anyNA(value)
+}
+
+fastkpc_full_cuda_fixed_sp_is_bare_character_vector <- function(value) {
+  typeof(value) == "character" && !is.object(value) &&
+    is.null(attributes(value)) && !anyNA(value)
+}
+
+fastkpc_full_cuda_fixed_sp_native_dto <- function(setup) {
+  setup_fields <- fastkpc_full_cuda_prepared_s_setup_field_names()
+  if (!fastkpc_full_cuda_fixed_sp_is_exact_named_bare_list(
+    setup, setup_fields
+  )) {
+    stop("Phase 3 PreparedSSetup is malformed", call. = FALSE)
+  }
+  if (!identical(setup$weights_policy, "none-or-unit")) {
+    stop("Phase 3 unsupported weights policy", call. = FALSE)
+  }
+  if (!identical(setup$offset_policy, "none-or-zero")) {
+    stop("Phase 3 unsupported offset policy", call. = FALSE)
+  }
+  if (!is.null(setup$H)) {
+    stop("Phase 3A non-null H is not implemented", call. = FALSE)
+  }
+  if (!is.null(setup$sp_mapping) || !is.null(setup$min_sp)) {
+    stop("Phase 3A smoothing mapping is not implemented", call. = FALSE)
+  }
+  if (!fastkpc_full_cuda_fixed_sp_is_finite_double_matrix(setup$X)) {
+    stop("Phase 3 X must be a finite double matrix", call. = FALSE)
+  }
+
+  penalty_count <- length(setup$penalty_blocks)
+  block_clean <- typeof(setup$penalty_blocks) == "list" &&
+    !is.object(setup$penalty_blocks) && penalty_count > 0L &&
+    all(vapply(setup$penalty_blocks, function(block) {
+      fastkpc_full_cuda_fixed_sp_is_finite_double_matrix(block) &&
+        nrow(block) == ncol(block)
+    }, logical(1L)))
+  if (!block_clean) {
+    stop(
+      "Phase 3 penalty blocks must be finite square double matrices",
+      call. = FALSE
+    )
+  }
+  if (!fastkpc_full_cuda_fixed_sp_is_bare_integer_vector(
+    setup$penalty_offsets
+  )) {
+    stop("Phase 3 penalty offsets must be a bare integer vector",
+         call. = FALSE)
+  }
+  if (!fastkpc_full_cuda_fixed_sp_is_bare_integer_vector(
+    setup$penalty_sp_indices
+  )) {
+    stop("Phase 3 penalty SP indices must be a bare integer vector",
+         call. = FALSE)
+  }
+  if (!fastkpc_full_cuda_fixed_sp_is_bare_integer_vector(
+    setup$penalty_ranks
+  ) || length(setup$penalty_ranks) != penalty_count) {
+    stop("Phase 3 penalty ranks are malformed", call. = FALSE)
+  }
+  if (!fastkpc_full_cuda_fixed_sp_is_bare_character_vector(
+    setup$penalty_sp_labels
+  ) || length(setup$penalty_sp_labels) != penalty_count ||
+      any(!nzchar(setup$penalty_sp_labels))) {
+    stop("Phase 3 penalty SP labels are malformed", call. = FALSE)
+  }
+  if (length(setup$penalty_offsets) != penalty_count) {
+    stop("Phase 3 penalty offset count is malformed", call. = FALSE)
+  }
+  if (length(setup$penalty_sp_indices) != penalty_count) {
+    stop("Phase 3 penalty SP index count is malformed", call. = FALSE)
+  }
+
+  coefficient_dim <- ncol(setup$X)
+  for (index in seq_len(penalty_count)) {
+    block_size <- nrow(setup$penalty_blocks[[index]])
+    start <- setup$penalty_offsets[[index]]
+    if (start < 1L || block_size > coefficient_dim ||
+        start > coefficient_dim - block_size + 1L) {
+      stop("Phase 3 penalty offset is out of range", call. = FALSE)
+    }
+  }
+  if (any(setup$penalty_sp_indices < 1L |
+          setup$penalty_sp_indices > penalty_count)) {
+    stop("Phase 3 penalty SP index is out of range", call. = FALSE)
+  }
+  if (!identical(setup$penalty_sp_indices, seq_len(penalty_count))) {
+    stop("Phase 3 v1 requires identity penalty-to-SP mapping",
+         call. = FALSE)
+  }
+
+  lineage_fields <- c(
+    "dataset_sha256", "prepared_s_key_sha256", "same_S_group_id",
+    "phase1_setup_fingerprint", "provider_fingerprint",
+    "semantic_fingerprint", "representation_fingerprint"
+  )
+  if (!all(vapply(setup[lineage_fields], function(value) {
+    fastkpc_full_cuda_fixed_sp_is_bare_scalar(value, "character")
+  }, logical(1L)))) {
+    stop("Phase 3 PreparedSSetup lineage is malformed", call. = FALSE)
+  }
+  if (!fastkpc_full_cuda_fixed_sp_is_bare_scalar(
+    setup$constraint_mode, "character"
+  ) || !fastkpc_full_cuda_fixed_sp_is_finite_double_matrix(
+    setup$gram_matrix
+  )) {
+    stop("Phase 3 constraint/Gram data are malformed", call. = FALSE)
+  }
+  if (!is.null(setup$constraint_nullspace) &&
+      !fastkpc_full_cuda_fixed_sp_is_finite_double_matrix(
+        setup$constraint_nullspace
+      )) {
+    stop("Phase 3 constraint/Gram data are malformed", call. = FALSE)
+  }
+  if (!is.null(setup$nullspace_gram_matrix) &&
+      !fastkpc_full_cuda_fixed_sp_is_finite_double_matrix(
+        setup$nullspace_gram_matrix
+      )) {
+    stop("Phase 3 constraint/Gram data are malformed", call. = FALSE)
+  }
+
+  fastkpc_full_cuda_validate_prepared_s_for_adapter(setup)
+  contract <- fastkpc_full_cuda_fixed_sp_contract()
+  canonical <- fastkpc_full_cuda_canonical_contract()
+  setup_n <- as.integer(nrow(setup$X))
+  canonical_identity_clean <-
+    fastkpc_full_cuda_fixed_sp_is_bare_scalar(canonical$n, "integer") &&
+    fastkpc_full_cuda_fixed_sp_is_bare_scalar(canonical$p, "integer") &&
+    identical(canonical$p, 48L) &&
+    fastkpc_full_cuda_fixed_sp_is_bare_sha256(canonical$data_hash) &&
+    identical(setup$dataset_sha256, canonical$data_hash) &&
+    identical(setup_n, canonical$n)
+  if (!canonical_identity_clean) {
+    stop("Phase 3 canonical dataset identity mismatch", call. = FALSE)
+  }
+  data_p <- canonical$p
+  list(
+    schema_version = contract$native_dto_schema_version,
+    dataset_sha256 = setup$dataset_sha256,
+    prepared_s_key_sha256 = setup$prepared_s_key_sha256,
+    same_S_group_id = setup$same_S_group_id,
+    phase1_setup_fingerprint = setup$phase1_setup_fingerprint,
+    provider_fingerprint = setup$provider_fingerprint,
+    semantic_fingerprint = setup$semantic_fingerprint,
+    representation_fingerprint = setup$representation_fingerprint,
+    prepared_s_setup_schema_version = setup$schema_version,
+    native_dto_schema_version = contract$native_dto_schema_version,
+    data_p = data_p,
+    n = setup_n,
+    coefficient_dim = as.integer(coefficient_dim),
+    null_dim = as.integer(setup$constraint_nullspace_dimension),
+    penalty_count = as.integer(penalty_count),
+    X = setup$X,
+    constraint_mode = setup$constraint_mode,
+    constraint_nullspace = setup$constraint_nullspace,
+    gram_matrix = setup$gram_matrix,
+    nullspace_gram_matrix = setup$nullspace_gram_matrix,
+    penalty_blocks = setup$penalty_blocks,
+    penalty_offsets_zero_based = setup$penalty_offsets - 1L,
+    penalty_ranks = setup$penalty_ranks,
+    penalty_sp_indices_zero_based = setup$penalty_sp_indices - 1L,
+    penalty_sp_labels = setup$penalty_sp_labels,
+    H = setup$H,
+    weights_policy = setup$weights_policy,
+    offset_policy = setup$offset_policy
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_validate_numeric_inputs <- function(Y, SP) {
+  if (!fastkpc_full_cuda_fixed_sp_is_finite_double_matrix(Y) ||
+      !fastkpc_full_cuda_fixed_sp_is_finite_double_matrix(SP) ||
+      any(SP < 0)) {
+    stop("Phase 3 native target batch numeric inputs are malformed",
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_fixed_sp_native_batch <- function(batch, dto) {
+  batch_fields <- c(
+    "setup", "target_rows", "Y", "SP", "oracle_nullspace_rhs",
+    "planned_route", "condition", "prepared_s_key_sha256"
+  )
+  if (!fastkpc_full_cuda_fixed_sp_is_exact_named_bare_list(
+    batch, batch_fields
+  )) {
+    stop("Phase 3 native source batch is malformed", call. = FALSE)
+  }
+  if (!fastkpc_full_cuda_fixed_sp_is_exact_named_bare_list(
+    dto, fastkpc_full_cuda_fixed_sp_native_dto_fields()
+  )) {
+    stop("Phase 3 native DTO is malformed", call. = FALSE)
+  }
+  expected_dto <- fastkpc_full_cuda_fixed_sp_native_dto(batch$setup)
+  if (!identical(dto, expected_dto) ||
+      !fastkpc_full_cuda_fixed_sp_is_bare_sha256(
+        batch$prepared_s_key_sha256
+      ) || !identical(
+        batch$prepared_s_key_sha256, dto$prepared_s_key_sha256
+      )) {
+    stop("Phase 3 native batch lineage mismatch", call. = FALSE)
+  }
+
+  Y <- batch$Y
+  SP <- batch$SP
+  fastkpc_full_cuda_fixed_sp_validate_numeric_inputs(Y, SP)
+  target_count <- ncol(Y)
+  if (target_count < 1L || !identical(nrow(Y), dto$n) ||
+      !identical(dim(SP), c(dto$penalty_count, target_count)) ||
+      !is.data.frame(batch$target_rows) ||
+      nrow(batch$target_rows) != target_count) {
+    stop("Phase 3 native target batch is malformed", call. = FALSE)
+  }
+
+  target_keys <- batch$target_rows$residual_key_sha256
+  if (!fastkpc_full_cuda_fixed_sp_is_bare_sha256_vector(target_keys) ||
+      length(target_keys) != target_count) {
+    stop("Phase 3 target keys are malformed", call. = FALSE)
+  }
+  if (!identical(colnames(Y), target_keys) ||
+      !identical(colnames(SP), target_keys)) {
+    stop("Phase 3 native target order mismatch", call. = FALSE)
+  }
+  if (anyDuplicated(target_keys)) {
+    stop("Phase 3 duplicate target identity", call. = FALSE)
+  }
+
+  residual_payloads <- batch$target_rows$residual_key_payload
+  targets <- batch$target_rows$target
+  sorted_S <- batch$setup$sorted_S
+  residual_metadata_clean <-
+    fastkpc_full_cuda_fixed_sp_is_bare_scalar(dto$data_p, "integer") &&
+    dto$data_p >= 1L &&
+    fastkpc_full_cuda_fixed_sp_is_bare_character_vector(
+      residual_payloads
+    ) && length(residual_payloads) == target_count &&
+    all(nzchar(residual_payloads)) &&
+    fastkpc_full_cuda_fixed_sp_is_bare_integer_vector(targets) &&
+    length(targets) == target_count &&
+    all(targets >= 1L & targets <= dto$data_p) &&
+    fastkpc_full_cuda_fixed_sp_is_bare_integer_vector(sorted_S) &&
+    all(sorted_S >= 1L & sorted_S <= dto$data_p)
+  if (!residual_metadata_clean) {
+    stop("Phase 3 residual key metadata is malformed", call. = FALSE)
+  }
+  expected_same_s_payload <- fastkpc_full_cuda_census_same_s_payload(
+    S = sorted_S,
+    formula_class = batch$setup$formula_class,
+    data_hash = dto$dataset_sha256,
+    n = dto$n,
+    p = dto$data_p
+  )
+  expected_same_s_group_id <- fastkpc_full_cuda_census_hash_utf8(
+    expected_same_s_payload
+  )
+  same_s_group_ids <- batch$target_rows$same_S_group_id
+  same_s_identity_exact <-
+    identical(dto$same_S_group_id, expected_same_s_group_id) &&
+    fastkpc_full_cuda_fixed_sp_is_bare_sha256_vector(same_s_group_ids) &&
+    length(same_s_group_ids) == target_count &&
+    identical(
+      same_s_group_ids, rep(expected_same_s_group_id, target_count)
+    )
+  if (!same_s_identity_exact) {
+    stop("Phase 3 same-S group identity mismatch", call. = FALSE)
+  }
+  residual_semantics_exact <- all(vapply(
+    seq_len(target_count), function(index) {
+      payload <- residual_payloads[[index]]
+      payload_p <- fastkpc_full_cuda_prepared_s_payload_integer(payload, "p")
+      expected_payload <- fastkpc_full_cuda_census_residual_payload(
+        target = targets[[index]],
+        S = sorted_S,
+        formula_class = batch$setup$formula_class,
+        data_hash = dto$dataset_sha256,
+        n = dto$n,
+        p = dto$data_p
+      )
+      identical(payload_p, dto$data_p) &&
+        identical(payload, expected_payload) && identical(
+        target_keys[[index]],
+        fastkpc_full_cuda_census_hash_utf8(expected_payload)
+      )
+    }, logical(1L)
+  ))
+  if (!residual_semantics_exact) {
+    stop("Phase 3 residual key serialization mismatch", call. = FALSE)
+  }
+  if (!identical(target_keys, sort(target_keys, method = "radix"))) {
+    stop("Phase 3 canonical target order mismatch", call. = FALSE)
+  }
+
+  lineage_clean <-
+    fastkpc_full_cuda_fixed_sp_is_bare_sha256_vector(
+      batch$target_rows$prepared_s_key_sha256
+    ) && identical(
+      batch$target_rows$prepared_s_key_sha256,
+      rep(dto$prepared_s_key_sha256, target_count)
+    ) && fastkpc_full_cuda_fixed_sp_is_bare_sha256_vector(
+      batch$target_rows$same_S_group_id
+    ) && identical(
+      batch$target_rows$same_S_group_id,
+      rep(dto$same_S_group_id, target_count)
+    ) && fastkpc_full_cuda_fixed_sp_is_bare_sha256_vector(
+      batch$target_rows$phase1_setup_fingerprint
+    ) && identical(
+      batch$target_rows$phase1_setup_fingerprint,
+      rep(dto$phase1_setup_fingerprint, target_count)
+    )
+  if (!lineage_clean) {
+    stop("Phase 3 native batch lineage mismatch", call. = FALSE)
+  }
+
+  sp_name_order_exact <- is.list(batch$target_rows$selected_sp_names) &&
+    length(batch$target_rows$selected_sp_names) == target_count &&
+    all(vapply(batch$target_rows$selected_sp_names, function(value) {
+      fastkpc_full_cuda_fixed_sp_is_bare_character_vector(value) &&
+        identical(value, dto$penalty_sp_labels)
+    }, logical(1L)))
+  if (!sp_name_order_exact) {
+    stop("Phase 3 SP name order mismatch", call. = FALSE)
+  }
+
+  planned_route <- batch$planned_route
+  if (!fastkpc_full_cuda_fixed_sp_is_bare_character_vector(planned_route) ||
+      length(planned_route) != target_count ||
+      any(!planned_route %in%
+            fastkpc_full_cuda_fixed_sp_contract()$route_levels)) {
+    stop("Phase 3 route metadata is malformed", call. = FALSE)
+  }
+  condition <- batch$condition
+  coefficient_rank <- batch$target_rows$coefficient_rank
+  route_inputs_clean <-
+    typeof(condition) %in% c("integer", "double") &&
+    !is.object(condition) && is.null(attributes(condition)) &&
+    length(condition) == target_count &&
+    !any(is.finite(condition) & condition < 0) &&
+    fastkpc_full_cuda_fixed_sp_is_bare_integer_vector(coefficient_rank) &&
+    length(coefficient_rank) == target_count &&
+    all(coefficient_rank >= 0L) &&
+    fastkpc_full_cuda_fixed_sp_is_bare_scalar(dto$null_dim, "integer") &&
+    dto$null_dim >= 0L
+  if (!route_inputs_clean) {
+    stop("Phase 3 route metadata is malformed", call. = FALSE)
+  }
+  expected_routes <- fastkpc_full_cuda_fixed_sp_route(
+    condition = condition,
+    coefficient_rank = coefficient_rank,
+    null_dim = dto$null_dim,
+    authenticated = rep(TRUE, target_count)
+  )
+  if (!identical(planned_route, expected_routes)) {
+    stop("Phase 3 route metadata is malformed", call. = FALSE)
+  }
+
+  y_hashes <- batch$target_rows$y_hash
+  if (!fastkpc_full_cuda_fixed_sp_is_bare_sha256_vector(y_hashes) ||
+      length(y_hashes) != target_count) {
+    stop("Phase 3 Y hash metadata is malformed", call. = FALSE)
+  }
+  expected_y_hashes <- vapply(seq_len(target_count), function(index) {
+    fastkpc_full_cuda_census_metadata_hash(Y[, index])
+  }, character(1L))
+  if (!identical(expected_y_hashes, y_hashes)) {
+    stop("Phase 3 Y hash mismatch", call. = FALSE)
+  }
+
+  selected_sp_hashes <- batch$target_rows$selected_sp_hash
+  if (!fastkpc_full_cuda_fixed_sp_is_bare_sha256_vector(
+    selected_sp_hashes
+  ) || length(selected_sp_hashes) != target_count) {
+    stop("Phase 3 selected-SP hash metadata is malformed", call. = FALSE)
+  }
+  expected_sp_hashes <- vapply(seq_len(target_count), function(index) {
+    fastkpc_full_cuda_census_metadata_hash(stats::setNames(
+      SP[, index], dto$penalty_sp_labels
+    ))
+  }, character(1L))
+  if (!identical(expected_sp_hashes, selected_sp_hashes)) {
+    stop("Phase 3 selected-SP hash mismatch", call. = FALSE)
+  }
+
+  target_state_fingerprints <- batch$target_rows$target_state_fingerprint
+  authenticated_target_rows <-
+    fastkpc_full_cuda_fixed_sp_is_bare_sha256_vector(
+      target_state_fingerprints
+    ) && length(target_state_fingerprints) == target_count &&
+    all(vapply(seq_len(target_count), function(index) {
+      identical(
+        target_state_fingerprints[[index]],
+        fastkpc_full_cuda_target_state_fingerprint(
+          batch$target_rows[index, , drop = FALSE]
+        )
+      )
+    }, logical(1L)))
+  if (!authenticated_target_rows) {
+    stop("Phase 3 authenticated target state mismatch", call. = FALSE)
+  }
+
+  dimnames(Y) <- NULL
+  dimnames(SP) <- NULL
+
+  list(
+    Y = Y,
+    SP = SP,
+    planned_route = planned_route,
+    target_keys = target_keys,
+    target_count = as.integer(target_count)
+  )
+}
