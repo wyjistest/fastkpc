@@ -15,6 +15,10 @@
 Start only after Phase 3B verification and review pass. Re-run the Phase 3B
 iteration test before editing.
 
+The implementation branch must contain `main` at or after `37ce594`, the
+Phase 3 review-amendment commit, and the accepted Phase 3A/3B commits. The
+pre-plan production-code baseline remains `42ef3ef` for provenance only.
+
 Frozen canonical counts:
 
 ```text
@@ -23,7 +27,7 @@ iteration:
   penalty root matrices      = 159
   penalty root rows          = 1,424
   explicit constraints / H   = 0 / 0
-  Cholesky / QR / SVD        = 172 / 31 / 67
+  planned Cholesky / QR / SVD = 172 / 31 / 67
   SVD finite-high / nonfinite= 59 / 8
 
 qualification:
@@ -32,7 +36,7 @@ qualification:
   penalty root matrices      = 6,272
   penalty root rows          = 63,552
   explicit constraints / H   = 0 / 0
-  Cholesky / QR / SVD        = 3,889 / 190 / 2,064
+  planned Cholesky / QR / SVD = 3,889 / 190 / 2,064
   SVD finite-high / nonfinite= 902 / 1,162
   logical dCov pairs         = 3,808
   conditional near-alpha     = 1,478
@@ -47,6 +51,13 @@ qualification batching:
 Phase 3C must reduce `ERR_STABLE_PATH_NOT_IMPLEMENTED` to zero in iteration
 and qualification. It does not run the full 110,617-target or graph artifact;
 that is the closure plan.
+
+Route accounting is never implicit. The condition census supplies
+`planned_route`; the solver writes `executed_route`, `reroute_reason`, and
+`solver_status`. Iteration and qualification require zero Cholesky-to-SVD and
+QR-to-SVD reroutes. The full closure plan uses the safe-reroute policy defined
+in the design spec and validates route conservation rather than overloading
+one route-count field.
 
 ## Files
 
@@ -94,7 +105,7 @@ one-time projected penalty roots and rank validation    Task 2
 augmented B/c construction                              Task 3
 finite [1e8,1e12) QR solve and rank guard               Task 4
 high-condition/rank-deficient SVD solve                 Task 5
-three-route mixed batches and full iteration gate       Task 6
+planned/executed routes and three-route iteration gate  Task 6
 6,143-target qualification numeric/resource gate        Task 7
 3,808 dCov and 1,478 near-alpha decision gate           Task 8
 legacy single API convergence on one solver             Task 9
@@ -299,7 +310,7 @@ assert_true(length(roots$penalty_roots) == dto$penalty_count,
             "one root per penalty")
 for (penalty_index in seq_len(dto$penalty_count)) {
   block <- dto$penalty_blocks[[penalty_index]]
-  offset <- dto$penalty_offsets[[penalty_index]]
+  offset <- dto$penalty_offsets_zero_based[[penalty_index]] + 1L
   full <- matrix(0, dto$coefficient_dim, dto$coefficient_dim)
   rows <- offset:(offset + nrow(block) - 1L)
   full[rows, rows] <- block
@@ -500,6 +511,27 @@ if (!is.null(roots$H_root)) {
 }
 assert_true(max(abs(penalty_from_B - expected_penalty)) < 1e-8,
             "augmented selected-sp penalty")
+
+zero_sp <- native$SP[, target_index]
+zero_sp[[1L]] <- 0
+augmented_zero <- fixed_sp_cuda_build_augmented_for_test(
+  handle, native$Y[, target_index], zero_sp,
+  target_index = target_index
+)
+expected_zero_penalty <- matrix(0, dto$null_dim, dto$null_dim)
+for (penalty_index in seq_len(dto$penalty_count)) {
+  expected_zero_penalty <- expected_zero_penalty +
+    zero_sp[[penalty_index]] *
+      crossprod(roots$penalty_roots[[penalty_index]])
+}
+if (!is.null(roots$H_root)) {
+  expected_zero_penalty <-
+    expected_zero_penalty + crossprod(roots$H_root)
+}
+assert_true(max(abs(
+  crossprod(augmented_zero$B[-seq_len(dto$n), , drop = FALSE]) -
+    expected_zero_penalty
+)) < 1e-8, "zero SP produces zero-scaled penalty rows")
 ```
 
 Run the same assertions on Task 2's synthetic explicit-constraint/non-null-H
@@ -541,7 +573,9 @@ c[0:n]                    weighted(Y[:,target] minus offset)
 c[n:rows]                 0
 ```
 
-Reject nonpositive/nonfinite SP before launch. Use fixed row offsets from the
+Reject negative/nonfinite SP before launch; `SP == 0` is legal and emits a
+zero-scaled root block. Direct `SP[j, target]` indexing is valid only under the
+Phase 3A identity penalty-to-SP invariant. Use fixed row offsets from the
 prepared handle. `B` is column-major with `leading_dimension = rows`; every
 kernel indexes `B[row + col * rows]`. Phase 3 v1 accepts only the authenticated
 `none-or-unit` weight and `none-or-zero` offset policies, so the displayed
@@ -591,10 +625,14 @@ Select all 31 iteration QR targets. Solve their complete setup batches through
 the public mixed-batch API and assert for each QR target:
 
 ```r
-assert_true(info$status[[target_index]] == "OK_AUGMENTED_QR",
+assert_true(info$solver_status[[target_index]] == "OK_AUGMENTED_QR",
             "QR status")
-assert_true(info$route_executed[[target_index]] == "AUGMENTED_QR",
+assert_true(info$planned_route[[target_index]] == "AUGMENTED_QR",
+            "QR planned route")
+assert_true(info$executed_route[[target_index]] == "AUGMENTED_QR",
             "QR executed route")
+assert_true(info$reroute_reason[[target_index]] == "",
+            "QR did not reroute")
 assert_true(!info$target_true_batched[[target_index]],
             "QR must not claim true batching")
 assert_true(info$qr_rank[[target_index]] == dto$null_dim,
@@ -609,7 +647,8 @@ assert_true(relative_l2(shadow$fitted[, target_index], oracle$fitted) <
               1e-7, "QR fitted relative L2 parity")
 ```
 
-Aggregate `qr_target_count == 31L` and `qr_to_svd_reroute_count == 0L`.
+Aggregate `planned_qr_target_count == 31L`,
+`executed_qr_target_count == 31L`, and `qr_to_svd_count == 0L`.
 
 - [ ] **Step 2: Run and verify stable-not-implemented failure**
 
@@ -660,7 +699,9 @@ rank_tol = max(rows, q) * max_diag * double_epsilon
 qr_rank  = count(abs(diag(R)) > rank_tol)
 ```
 
-If `qr_rank != q`, rebuild `B/c`, increment `qr_to_svd_reroute_count`, and
+If `qr_rank != q`, rebuild `B/c`, increment `qr_to_svd_count`, set
+`executed_route = AUGMENTED_SVD` and
+`reroute_reason = "QR_RANK_GUARD_REJECTED"`, and
 call the Task 5 SVD routine. Until Task 5 lands, return
 `ERR_STABLE_PATH_NOT_IMPLEMENTED` for that declared reroute. The 31 iteration
 QR targets must not reroute.
@@ -729,10 +770,16 @@ git commit -m "feat: solve stable fixed-sp targets with augmented CUDA QR"
 Select all 67 iteration SVD targets and require:
 
 ```r
-assert_true(svd_target_count == 67L, "iteration SVD count")
+assert_true(planned_svd_target_count == 67L, "iteration planned SVD count")
+assert_true(executed_svd_target_count == 67L,
+            "iteration executed SVD count")
 assert_true(svd_finite_high_count == 59L, "finite high-condition SVD count")
 assert_true(svd_nonfinite_count == 8L, "nonfinite/rank-deficient SVD count")
-assert_true(all(status == "OK_AUGMENTED_SVD"), "SVD statuses")
+assert_true(all(solver_status == "OK_AUGMENTED_SVD"), "SVD statuses")
+assert_true(all(planned_route == "AUGMENTED_SVD"),
+            "declared SVD planned routes")
+assert_true(all(executed_route == "AUGMENTED_SVD"),
+            "declared SVD executed routes")
 assert_true(all(!target_true_batched), "SVD truthfulness")
 assert_true(all(svd_info == 0L), "SVD cuSOLVER info")
 assert_true(all(effective_rank == expected_augmented_rank),
@@ -812,6 +859,13 @@ Reuse canonical output kernels. Set `OK_AUGMENTED_SVD`, effective rank,
 declared and rerouted SVD targets in the public batch finish; no target-level
 host wait is allowed.
 
+For a planned SVD target, set `executed_route = AUGMENTED_SVD` with an empty
+reroute reason. For a Cholesky or QR reroute, preserve its original
+`planned_route`, set `executed_route = AUGMENTED_SVD`, retain exactly
+`CHOLESKY_NON_POSITIVE_PIVOT` or `QR_RANK_GUARD_REJECTED`, and require the
+final `solver_status = OK_AUGMENTED_SVD` before counting the reroute as
+successfully executed.
+
 - [ ] **Step 6: Run SVD, QR, root, and Phase 3B tests**
 
 ```bash
@@ -857,9 +911,14 @@ expected <- list(
   penalty_root_matrix_count = 159L,
   penalty_root_row_count = 1424L,
   H_root_matrix_count = 0L,
-  cholesky_count = 172L,
-  qr_count = 31L,
-  svd_count = 67L,
+  planned_cholesky_count = 172L,
+  planned_qr_count = 31L,
+  planned_svd_count = 67L,
+  executed_cholesky_count = 172L,
+  executed_qr_count = 31L,
+  executed_svd_count = 67L,
+  cholesky_to_svd_count = 0L,
+  qr_to_svd_count = 0L,
   true_batched_target_count = 160L,
   cholesky_single_target_count = 12L,
   whole_batch_true_batched_count = 5L,
@@ -873,6 +932,8 @@ expected <- list(
   cuda_device_synchronize_count = 0L,
   target_level_stable_sync_count = 0L,
   implicit_residual_d2h_count = 0L,
+  all_output_slot_leases_released = TRUE,
+  invalid_output_init_count = 44L,
   cpu_fallback_count = 0L,
   unknown_fallback_count = 0L,
   approximate_backend_count = 0L
@@ -880,9 +941,14 @@ expected <- list(
 ```
 
 Require every target's residual/fitted max-absolute and relative-L2 error
-`< 1e-7`, finite outputs, canonical key order, and exact repeated route/status
-fields. Require GPU SVD effective rank to equal the independently computed CPU
-augmented-system rank under the frozen threshold. Record Phase 1
+`< 1e-7`, finite outputs, canonical key order, and exact repeated
+planned/executed route, reroute-reason, and solver-status
+fields. Every target row contains `planned_route`, `executed_route`,
+`reroute_reason`, and `solver_status`. Recompute and require the route
+conservation equations even though the iteration corpus currently freezes
+both reroute counts at zero. Require GPU SVD effective rank to equal the
+independently computed CPU augmented-system rank under the frozen threshold.
+Record Phase 1
 `coefficient_rank` separately. QR/SVD checkpoint waits may occur only once per
 affected public batch and may never scale with QR/SVD target count.
 
@@ -912,8 +978,8 @@ FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_phase3c_iteration.R
 ```
 
-Expected: both runs PASS and their target route/status/numeric hashes are
-identical.
+Expected: both runs PASS and their target planned/executed-route,
+reroute-reason, solver-status, and numeric hashes are identical.
 
 - [ ] **Step 5: Commit the iteration closure**
 
@@ -941,9 +1007,14 @@ expected <- list(
   penalty_root_matrix_count = 6272L,
   penalty_root_row_count = 63552L,
   H_root_matrix_count = 0L,
-  cholesky_count = 3889L,
-  qr_count = 190L,
-  svd_count = 2064L,
+  planned_cholesky_count = 3889L,
+  planned_qr_count = 190L,
+  planned_svd_count = 2064L,
+  executed_cholesky_count = 3889L,
+  executed_qr_count = 190L,
+  executed_svd_count = 2064L,
+  cholesky_to_svd_count = 0L,
+  qr_to_svd_count = 0L,
   svd_finite_high_count = 902L,
   svd_nonfinite_count = 1162L,
   all_safe_batch_count = 723L,
@@ -963,6 +1034,8 @@ expected <- list(
   cuda_device_synchronize_count = 0L,
   target_level_stable_sync_count = 0L,
   implicit_residual_d2h_count = 0L,
+  all_output_slot_leases_released = TRUE,
+  invalid_output_init_count = 2061L,
   cpu_fallback_count = 0L,
   unknown_fallback_count = 0L,
   approximate_backend_count = 0L
@@ -1147,7 +1220,8 @@ assert_true(identical(gpu$diagnostics$runtime_version,
             "legacy single delegates to stable runtime")
 assert_true(isTRUE(gpu$diagnostics$compatibility_transient_context),
             "legacy adapter declares transient context")
-assert_true(identical(gpu$diagnostics$route_executed, "AUGMENTED_SVD"),
+assert_true(identical(gpu$diagnostics$planned_route, "AUGMENTED_SVD") &&
+              identical(gpu$diagnostics$executed_route, "AUGMENTED_SVD"),
             "unclassified compatibility call conservatively uses SVD")
 assert_true(gpu$diagnostics$cpu_fallback_count == 0L,
             "compatibility adapter has no CPU fallback")
@@ -1172,7 +1246,8 @@ Gram                 = XtX_null
 penalty_count        = 1
 projected penalty    = assembled penalty_null
 SP                   = matrix(1.0, 1, 1)
-RHS                  = Xty_null
+Y                    = y
+oracle RHS only      = Xty_null
 route metadata       = unauthenticated -> AUGMENTED_SVD
 ```
 
@@ -1181,7 +1256,9 @@ The private adapter also receives the existing `X`, `y`, and `Z`, constructs
 SVD. Before creating CUDA state, independently recompute
 `crossprod(X_null)` and `crossprod(X_null, y)` and require parity with the
 caller-supplied `XtX_null` and `Xty_null` under a fixed `1e-12` relative/absolute
-check. This adapter must not forge canonical Phase 2 fingerprints or pass its
+check. `Xty_null` is compatibility validation evidence only; the production
+solve computes `X_null' * y` on CUDA. This adapter must not forge canonical
+Phase 2 fingerprints or pass its
 synthetic view through the authenticated artifact constructor.
 
 Call `solve_fixed_sp_batch(target_count = 1)`, explicitly materialize legacy
@@ -1297,7 +1374,8 @@ Phase 3C complete:
   augmented QR and deterministic augmented SVD
   iteration 270/270 targets OK
   qualification 6,143/6,143 targets OK
-  route counts 3,889 / 190 / 2,064 exact
+  planned routes 3,889 / 190 / 2,064 exact
+  executed routes 3,889 / 190 / 2,064; declared reroutes 0 / 0
   dCov 3,808 pairs, near-alpha 1,478, decision flips 0
   unknown/CPU/approximate fallback 0
 

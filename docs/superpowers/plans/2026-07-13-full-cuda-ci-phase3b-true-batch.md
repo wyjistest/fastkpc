@@ -4,7 +4,7 @@
 
 **Goal:** Replace repeated safe single-target Cholesky calls with one same-S native batch that uploads target matrices once, builds all safe systems with fused kernels, executes true batched Cholesky, preserves canonical target order, and reports partial versus whole-batch batching truthfully.
 
-**Architecture:** Extend the Phase 3A runtime and prepared handle; do not create a second solver. One public batch uploads `Y`, `SP`, and RHS once, partitions canonical target indices into Cholesky and not-yet-implemented stable routes, gathers the safe subset into contiguous factor/RHS buffers, calls `cusolverDnDpotrfBatched` and `cusolverDnDpotrsBatched`, then scatters coefficients/fitted/residuals back to canonical columns. Stable targets remain explicit `ERR_STABLE_PATH_NOT_IMPLEMENTED` until Phase 3C.
+**Architecture:** Extend the Phase 3A runtime and prepared handle; do not create a second solver. One public batch uploads `Y` and `SP` once, computes all RHS columns as resident `X0' * Y`, partitions canonical target indices into Cholesky and not-yet-implemented stable routes, gathers the safe subset into contiguous factor/RHS buffers, calls `cusolverDnDpotrfBatched` and `cusolverDnDpotrsBatched`, then scatters coefficients/fitted/residuals back to canonical columns. Stable targets remain explicit `ERR_STABLE_PATH_NOT_IMPLEMENTED` until Phase 3C.
 
 **Tech Stack:** Phase 3A catalog/DTO/runtime, C++17, CUDA C++17, CUDA Runtime, cuBLAS, cuSOLVER batched Cholesky, Rcpp `.Call`, Phase 2 `C_magic` oracle.
 
@@ -14,6 +14,10 @@
 
 Start only after the complete Phase 3A plan passes and `goal-5.6.md` records
 the Phase 3A milestone. Re-run the Phase 3A iteration gate before editing.
+
+The implementation branch must contain `main` at or after `37ce594`, the
+Phase 3 review-amendment commit, and the accepted Phase 3A commits. The
+pre-plan production-code baseline remains `42ef3ef` for provenance only.
 
 Phase 3B does not implement QR, SVD, penalty roots, qualification, or full
 artifacts. It must preserve the Phase 3A fail-closed result for stable targets.
@@ -63,7 +67,8 @@ fastkpc/tests/test_mgcv_fixed_sp_cuda_phase3b_iteration.R
 
 ```text
 one same-S native batch API                         existing Phase 3A API
-one H2D upload per Y/SP/RHS batch                  Tasks 1-3
+one H2D upload phase with Y/SP only                Tasks 1-3
+one CUDA X0'Y RHS build per public batch           Task 2
 fused target-specific system construction          Task 2
 true batched potrf/potrs                           Task 3
 batched beta/fitted/residual finalization           Task 4
@@ -115,17 +120,18 @@ catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
 scope <- fastkpc_full_cuda_fixed_sp_scope(catalog, "iteration")
 batches <- fastkpc_full_cuda_fixed_sp_batches(catalog, scope)
 candidate <- which(vapply(batches, function(batch) {
-  sum(batch$route == "CHOLESKY_BATCHED") >= 3L &&
+  sum(batch$planned_route == "CHOLESKY_BATCHED") >= 3L &&
     length(batch$setup$penalty_blocks) > 1L
 }, logical(1L)))[[1L]]
 batch <- batches[[candidate]]
-safe <- which(batch$route == "CHOLESKY_BATCHED")
+safe <- which(batch$planned_route == "CHOLESKY_BATCHED")
 safe <- safe[[1L]]
 batch$target_rows <- batch$target_rows[safe, , drop = FALSE]
 batch$Y <- batch$Y[, safe, drop = FALSE]
 batch$SP <- batch$SP[, safe, drop = FALSE]
-batch$nullspace_rhs <- batch$nullspace_rhs[, safe, drop = FALSE]
-batch$route <- batch$route[safe]
+batch$oracle_nullspace_rhs <-
+  batch$oracle_nullspace_rhs[, safe, drop = FALSE]
+batch$planned_route <- batch$planned_route[safe]
 dto <- fastkpc_full_cuda_fixed_sp_native_dto(batch$setup)
 native <- fastkpc_full_cuda_fixed_sp_native_batch(batch, dto)
 
@@ -136,8 +142,7 @@ handle <- fixed_sp_cuda_prepared_create(runtime, dto)
 on.exit(try(fixed_sp_cuda_prepared_free(handle), silent = TRUE), add = TRUE)
 
 token <- fixed_sp_cuda_solve_batch(
-  handle, native$Y, native$SP, native$nullspace_rhs,
-  native$route, native$target_keys
+  handle, native$Y, native$SP, native$planned_route, native$target_keys
 )
 on.exit(try(fixed_sp_cuda_residual_free(token), silent = TRUE), add = TRUE)
 info <- fixed_sp_cuda_residual_info(token)
@@ -146,8 +151,10 @@ required <- c(
   "native_batch_call", "true_batched_kernel",
   "true_batched_subgroup_count", "true_batched_attempted_target_count",
   "true_batched_target_count", "cholesky_single_target_count",
+  "potrf_batched_call_count", "potrs_batched_call_count",
   "target_batch_h2d_call_count", "target_h2d_copy_count",
-  "canonical_output_order_exact"
+  "canonical_output_order_exact", "planned_route", "executed_route",
+  "reroute_reason", "solver_status"
 )
 assert_true(length(setdiff(required, names(info))) == 0L,
             "Phase 3B diagnostic schema")
@@ -173,6 +180,8 @@ int batch_call_count = 0;
 int true_batched_subgroup_count = 0;
 int true_batched_attempted_target_count = 0;
 int cholesky_single_target_count = 0;
+int potrf_batched_call_count = 0;
+int potrs_batched_call_count = 0;
 int target_batch_h2d_call_count = 0;
 int target_h2d_copy_count = 0;
 std::size_t target_h2d_bytes = 0;
@@ -231,12 +240,15 @@ assert_true(info$native_batch_call, "one native batch call")
 assert_true(info$batch_call_count == 1L, "one public solve call")
 assert_true(info$target_batch_h2d_call_count == 1L,
             "one target batch upload phase")
-assert_true(info$target_h2d_copy_count == 3L,
-            "one Y, one SP, and one RHS copy")
+assert_true(info$target_h2d_copy_count == 2L,
+            "one Y and one SP copy")
 assert_true(info$target_h2d_bytes ==
-              8 * (length(native$Y) + length(native$SP) +
-                   length(native$nullspace_rhs)),
+              8 * (length(native$Y) + length(native$SP)),
             "target H2D byte accounting")
+assert_true(info$rhs_device_build_count == 1L &&
+              identical(info$rhs_authority, "cuda-x0-transpose-y") &&
+              isTRUE(info$full_cuda_data_plane),
+            "one CUDA RHS build")
 ```
 
 Add a temporary assertion that
@@ -247,7 +259,7 @@ Add a temporary assertion that
 Expected: FAIL because Phase 3A uploads and solves target columns one at a
 time.
 
-- [ ] **Step 3: Copy Y, SP, and RHS once per public batch**
+- [ ] **Step 3: Copy Y and SP once, then build RHS on CUDA**
 
 In `solve_fixed_sp_batch()`:
 
@@ -256,8 +268,6 @@ const std::size_t y_count =
   static_cast<std::size_t>(batch.n) * batch.target_count;
 const std::size_t sp_count =
   static_cast<std::size_t>(batch.penalty_count) * batch.target_count;
-const std::size_t rhs_count =
-  static_cast<std::size_t>(batch.null_dim) * batch.target_count;
 
 check_cuda(cudaMemcpyAsync(
   d_Y, batch.Y, sizeof(double) * y_count,
@@ -267,13 +277,23 @@ check_cuda(cudaMemcpyAsync(
   d_SP, batch.SP, sizeof(double) * sp_count,
   cudaMemcpyHostToDevice, context->stream
 ), "copy Phase 3B SP batch");
-check_cuda(cudaMemcpyAsync(
-  d_rhs, batch.nullspace_rhs, sizeof(double) * rhs_count,
-  cudaMemcpyHostToDevice, context->stream
-), "copy Phase 3B RHS batch");
+
+const double one = 1.0;
+const double zero = 0.0;
+check_cublas(cublasDgemm(
+  context->blas, CUBLAS_OP_T, CUBLAS_OP_N,
+  batch.null_dim, batch.target_count, batch.n,
+  &one, handle->d_X_null, batch.n, d_Y, batch.n,
+  &zero, d_rhs, batch.null_dim
+), "build Phase 3B CUDA RHS batch");
 ```
 
-Set H2D counts/bytes from these exact sizes. Do not issue a per-target copy.
+Set H2D counts/bytes from the two exact input sizes. Set
+`rhs_device_build_count = 1`, `rhs_authority = "cuda-x0-transpose-y"`, and
+`full_cuda_data_plane = TRUE`. Compare `d_rhs` with
+`batch$oracle_nullspace_rhs` only through explicit shadow observation. Do not
+issue a per-target input copy or accept a CPU RHS pointer in the native host
+view.
 
 - [ ] **Step 4: Add safe-index and fused system-build kernels**
 
@@ -282,8 +302,14 @@ Add device buffers in the reserved integer arena:
 ```text
 d_safe_target_indices[target_capacity]
 d_stable_target_indices[target_capacity]
-d_info[target_capacity]
+d_potrf_info[target_capacity]
+d_potrs_info[1]
 ```
+
+Update the Phase 3B reserve formula before warm-up to
+`int_required = 3 * targets + 1` for safe indices, stable indices,
+per-target factor info, and the scalar solve info. This remains one reserve
+allocation and cannot grow during solves.
 
 Copy the compact route partition once. Add:
 
@@ -312,6 +338,10 @@ __global__ void build_fixed_sp_systems_kernel(
   systems[element + static_cast<std::size_t>(matrix_index) * q * q] = value;
 }
 ```
+
+The kernel's ordinal SP lookup depends on the Phase 3A adapter invariant
+`penalty_sp_indices_zero_based[penalty] == penalty`; handle creation must have
+rejected every non-identity mapping.
 
 Use a `16 x 16` block and `grid.z = safe_count`. Add a gather kernel that
 copies canonical RHS columns into contiguous `d_theta` columns in safe-index
@@ -357,8 +387,54 @@ assert_true(info$cholesky_single_target_count == 0L,
             "no repeated single Cholesky")
 assert_true(isTRUE(info$true_batched_kernel),
             "all-safe multi-target batch is truly batched")
-assert_true(all(info$status == "OK_CHOLESKY_BATCHED"),
+assert_true(all(info$solver_status == "OK_CHOLESKY_BATCHED"),
             "batched target statuses")
+```
+
+Add test-only `C_fixed_sp_cuda_test_force_next_potrf_info` and
+`C_fixed_sp_cuda_test_force_next_potrs_info` hooks. First force every factor
+info positive and prove the runtime skips `potrsBatched`. Then set the solve
+scalar to `-1`, call the same public batch, and require a batch-level error
+containing `Phase 3B batched potrs info`; no token may be returned and no
+per-target reroute counter may change. Clear the hook immediately after the
+assertion.
+
+```r
+fixed_sp_cuda_residual_release(token)
+fixed_sp_cuda_residual_free(token)
+.Call("C_fixed_sp_cuda_test_force_next_potrf_info",
+      rep.int(1L, ncol(native$Y)), PACKAGE = "fastkpc_cuda")
+all_factor_fail_token <- fixed_sp_cuda_solve_batch(
+  handle, native$Y, native$SP, native$planned_route, native$target_keys
+)
+all_factor_fail_info <- fixed_sp_cuda_residual_info(all_factor_fail_token)
+assert_true(all_factor_fail_info$potrf_batched_call_count == 1L &&
+              all_factor_fail_info$potrs_batched_call_count == 0L &&
+              all_factor_fail_info$cholesky_to_svd_count == ncol(native$Y) &&
+              all(all_factor_fail_info$solver_status ==
+                    "ERR_STABLE_PATH_NOT_IMPLEMENTED"),
+            "all factor failures skip zero-sized potrs")
+fixed_sp_cuda_residual_release(all_factor_fail_token)
+fixed_sp_cuda_residual_free(all_factor_fail_token)
+.Call("C_fixed_sp_cuda_test_force_next_potrf_info", integer(),
+      PACKAGE = "fastkpc_cuda")
+.Call("C_fixed_sp_cuda_test_force_next_potrs_info", -1L,
+      PACKAGE = "fastkpc_cuda")
+potrs_error <- tryCatch(
+  fixed_sp_cuda_solve_batch(
+    handle, native$Y, native$SP, native$planned_route, native$target_keys
+  ),
+  error = identity
+)
+assert_true(inherits(potrs_error, "error") &&
+              grepl("Phase 3B batched potrs info",
+                    conditionMessage(potrs_error), fixed = TRUE),
+            "potrs scalar info is a batch failure")
+.Call("C_fixed_sp_cuda_test_force_next_potrs_info", 0L,
+      PACKAGE = "fastkpc_cuda")
+token <- fixed_sp_cuda_solve_batch(
+  handle, native$Y, native$SP, native$planned_route, native$target_keys
+)
 ```
 
 - [ ] **Step 2: Run and verify true-batch failure**
@@ -392,38 +468,62 @@ For `safe_count >= 2`:
 
 ```cpp
 check_cuda(cudaMemsetAsync(
-  d_info, 0, sizeof(int) * safe_count, context->stream
+  d_potrf_info, 0, sizeof(int) * safe_count, context->stream
 ), "zero Phase 3B batched info");
 check_cusolver(cusolverDnDpotrfBatched(
   context->solver, CUBLAS_FILL_MODE_UPPER, q,
-  d_system_ptrs, q, d_info, safe_count
+  d_system_ptrs, q, d_potrf_info, safe_count
 ), "Phase 3B batched potrf");
 ```
 
 Copy the `safe_count` factor-info integers asynchronously to the preallocated
 host info vector, record the handle event, and wait on that event. Mark failed
-factors `ERR_STABLE_PATH_NOT_IMPLEMENTED`, increment
-`stable_reroute_count`, and build compact system/theta pointer arrays for only
+factors `ERR_STABLE_PATH_NOT_IMPLEMENTED`, set
+`reroute_reason = "CHOLESKY_NON_POSITIVE_PIVOT"`, increment
+`cholesky_to_svd_count` and `stable_reroute_count`, and build compact
+system/theta pointer arrays for only
 the successful factors. Then call:
 
 ```cpp
+check_cuda(cudaMemsetAsync(
+  d_potrs_info, 0, sizeof(int), context->stream
+), "zero Phase 3B potrs scalar info");
 check_cusolver(cusolverDnDpotrsBatched(
   context->solver, CUBLAS_FILL_MODE_UPPER, q, 1,
   d_success_system_ptrs, q, d_success_theta_ptrs, q,
-  d_info, successful_factor_count
+  d_potrs_info, successful_factor_count
 ), "Phase 3B batched potrs");
 ```
 
+Call that block only when `successful_factor_count > 0`. When every factor
+fails, issue no zero-sized `potrsBatched` call: Phase 3B returns the declared
+stable-not-implemented rows, while Phase 3C proceeds directly to the SVD
+reroute phase for those targets.
+
+Reserve these distinct status buffers:
+
+```text
+d_potrf_info[target_capacity]  # one factor status per target
+d_potrs_info[1]                # one scalar API status for the whole solve
+```
+
 For `safe_count == 1`, retain the Phase 3A single `potrf/potrs` path and status
-`OK_CHOLESKY_SINGLE`. For `safe_count == 0`, issue no factorization.
+`OK_CHOLESKY_SINGLE`, set `executed_route = "CHOLESKY_BATCHED"`, and keep the
+reroute reason empty. For `safe_count == 0`, issue no factorization.
 
-- [ ] **Step 5: Copy solve info and assign final statuses**
+- [ ] **Step 5: Interpret factor and scalar solve status correctly**
 
-After `potrsBatched`, copy `successful_factor_count` solve-info integers,
-record/wait on the handle event a second time, and map any solve error to
-`ERR_STABLE_PATH_NOT_IMPLEMENTED`. Successful targets from an original
-`safe_count >= 2` become `OK_CHOLESKY_BATCHED`. Record two compact event waits
-and zero `cudaDeviceSynchronize` calls. Do not expose any failed output.
+After `potrsBatched`, copy exactly one scalar `d_potrs_info` value and
+record/wait on the handle event a second time. If it is nonzero, fail the
+entire public solve as a cuSOLVER API/batch error; do not assign it to a
+target, do not reroute any target, and do not return a partially valid token.
+The error path restores the transient slot to `FREE` before throwing so a
+subsequent valid solve can proceed.
+Successful targets from an original `safe_count >= 2` become
+`OK_CHOLESKY_BATCHED` with `executed_route = "CHOLESKY_BATCHED"` and an empty
+reroute reason. Record two compact event waits and zero
+`cudaDeviceSynchronize` calls. Only positive per-target `potrf_info[i]`
+declares a Cholesky-to-SVD reroute. Do not expose any failed output.
 
 - [ ] **Step 6: Run the true-batch test**
 
@@ -516,10 +616,10 @@ first_hashes <- c(
   residuals = fastkpc_full_cuda_census_metadata_hash(shadow$residuals),
   rss = fastkpc_full_cuda_census_metadata_hash(shadow$rss)
 )
+fixed_sp_cuda_residual_release(token)
 fixed_sp_cuda_residual_free(token)
 token <- fixed_sp_cuda_solve_batch(
-  handle, native$Y, native$SP, native$nullspace_rhs,
-  native$route, native$target_keys
+  handle, native$Y, native$SP, native$planned_route, native$target_keys
 )
 shadow_repeat <- fixed_sp_cuda_materialize_shadow(
   token, outputs = c("coefficients", "fitted", "residuals", "rss")
@@ -564,8 +664,8 @@ info <- fixed_sp_cuda_residual_info(token)
 shadow <- fixed_sp_cuda_materialize_shadow(
   token, outputs = c("fitted", "residuals")
 )
-safe <- which(native$route == "CHOLESKY_BATCHED")
-stable <- which(native$route != "CHOLESKY_BATCHED")
+safe <- which(native$planned_route == "CHOLESKY_BATCHED")
+stable <- which(native$planned_route != "CHOLESKY_BATCHED")
 
 assert_true(info$true_batched_subgroup_count == 1L,
             "mixed batch has one batched safe subgroup")
@@ -573,9 +673,9 @@ assert_true(info$true_batched_target_count == length(safe),
             "mixed safe target count")
 assert_true(!isTRUE(info$true_batched_kernel),
             "mixed batch must not claim whole-batch true batching")
-assert_true(all(info$status[safe] == "OK_CHOLESKY_BATCHED"),
+assert_true(all(info$solver_status[safe] == "OK_CHOLESKY_BATCHED"),
             "mixed safe statuses")
-assert_true(all(info$status[stable] ==
+assert_true(all(info$solver_status[stable] ==
                   "ERR_STABLE_PATH_NOT_IMPLEMENTED"),
             "mixed stable statuses")
 assert_true(isTRUE(info$canonical_output_order_exact),
@@ -594,23 +694,25 @@ that `info$target_keys` exactly equals `native$target_keys`.
 Expected: FAIL until stable outputs are initialized invalid and safe results
 scatter to canonical columns.
 
-- [ ] **Step 3: Initialize all outputs invalid before route execution**
+- [ ] **Step 3: Preserve Phase 3A invalid-output initialization**
 
-At batch start, set coefficients, fitted, residuals, and RSS for all public
-targets to quiet NaN with one kernel/memset-compatible initialization. Only
-successful routes overwrite their canonical columns. Shadow materialization
-converts non-OK target columns to R `NA_real_`.
+Retain the Phase 3A batch-start quiet-NaN initialization for coefficients,
+fitted, residuals, and RSS across all public targets. Only successful routes
+overwrite their canonical columns. Shadow materialization continues to
+convert non-OK target columns to R `NA_real_`. The mixed-batch test is a
+regression gate for this earlier contract, not the first implementation of it.
 
 - [ ] **Step 4: Preserve canonical metadata order**
 
-Store target keys, routes, and statuses in public input order. Safe/stable
+Store target keys, planned/executed routes, reroute reasons, and solver
+statuses in public input order. Safe/stable
 partition arrays are internal only. Set:
 
 ```cpp
 info.canonical_output_order_exact = true;
 info.true_batched_kernel =
   batch.target_count >= 2 &&
-  std::all_of(info.statuses.begin(), info.statuses.end(),
+  std::all_of(info.solver_statuses.begin(), info.solver_statuses.end(),
               [](FixedSpStatus value) {
                 return value == FixedSpStatus::OkCholeskyBatched;
               });
@@ -662,12 +764,16 @@ expected <- list(
   stable_not_implemented_count = 98L,
   setup_h2d_upload_count = 44L,
   target_batch_h2d_call_count = 44L,
-  target_h2d_copy_count = 132L,
+  target_h2d_copy_count = 88L,
+  rhs_device_build_count = 44L,
+  full_cuda_data_plane = TRUE,
+  invalid_output_init_count = 44L,
   workspace_grow_count_after_warmup = 0L,
   per_target_allocation_count_after_warmup = 0L,
   per_target_handle_create_count = 0L,
   cuda_device_synchronize_count = 0L,
   implicit_residual_d2h_count = 0L,
+  all_output_slot_leases_released = TRUE,
   cpu_fallback_count = 0L,
   unknown_fallback_count = 0L
 )
@@ -791,7 +897,8 @@ Append to the Phase 3 roadmap status:
 
 ```text
 Phase 3B complete:
-  one same-S native target upload per setup batch
+  one same-S native Y/SP upload phase per setup batch
+  one CUDA X0'Y RHS build per setup batch
   fused target-specific system construction
   true batched potrf/potrs
   canonical mixed-batch output order

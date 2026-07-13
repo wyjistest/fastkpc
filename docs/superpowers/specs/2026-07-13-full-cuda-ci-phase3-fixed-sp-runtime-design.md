@@ -13,6 +13,11 @@ is not complete until the stable path and both full artifacts pass. A
 Cholesky-only subset, a repeated single-target bridge, or an inherited graph
 gate is not Phase 3 completion.
 
+Implementation starts from a branch containing `main` at or after `37ce594`
+plus the review-amendment commit that incorporates this contract. The last
+pre-Phase-3-plan production-code baseline is `42ef3ef`; it is provenance, not
+a branch-reset target.
+
 ## Decision
 
 Build one process-local, single-GPU `CudaRuntimeContext` and one short-lived
@@ -40,11 +45,13 @@ The condition value is the authenticated Phase 1
 request without an authenticated condition classification takes the
 conservative SVD route. It never defaults to Cholesky.
 
-The solve returns a generation-checked device-resident residual batch token.
-It does not implicitly copy residuals or fitted values to the host. An
+The solve returns a leased, generation-checked device-resident residual batch
+token. It does not implicitly copy residuals or fitted values to the host. An
 explicit shadow-only materializer exists for oracle comparison. A later CUDA
-dCov consumer can wait on the token event and consume the device pointer
-without changing the residual ABI.
+dCov consumer can wait on the token event, register its own completion event,
+and consume the device pointer without changing the residual ABI. The output
+slot cannot be reused until the token lease is explicitly released and every
+registered consumer event has completed.
 
 Use the existing iteration and qualification corpora for development and
 qualification. Run the full 8,634-setup, 110,617-target oracle-sp artifact only
@@ -82,10 +89,11 @@ maximum augmented-system row count     = 407
 The numerical risk is not confined to a few outliers:
 
 ```text
-Cholesky route (< 1e8)                 = 73,158 targets
-augmented QR route [1e8, 1e12)         =  4,210 targets
-augmented SVD route                    = 33,249 targets
-rank-deficient targets                 =  1,162 targets
+planned Cholesky route (< 1e8)         = 73,158 targets
+planned augmented QR [1e8, 1e12)       =  4,210 targets
+planned augmented SVD                  = 33,249 targets
+coefficient-rank-deficient targets     =      1 target
+nonfinite condition targets            =  1,162 targets
 ```
 
 A persistent Cholesky-only runtime would therefore leave roughly thirty
@@ -220,16 +228,19 @@ prepared_setup
 target_state_rows
 Y                              n x target_count
 SP                             penalty_count x target_count
-projected_rhs                  coefficient_dim x target_count
-nullspace_projected_rhs        null_dim x target_count
+oracle_projected_rhs           coefficient_dim x target_count, shadow only
+oracle_nullspace_projected_rhs null_dim x target_count, shadow only
 condition_bucket               one per target
 coefficient_rank               one per target
+planned_route                  one per target
 identity and lineage hashes
 ```
 
 `SP` row order must exactly match `penalty_sp_labels` and
-`penalty_sp_indices`. Targets from different PreparedSKeys cannot share a
-batch.
+`penalty_sp_indices_zero_based`. Targets from different PreparedSKeys cannot
+share a batch. The two oracle RHS matrices are retained only to compare CUDA's
+internally computed `X0' * Y` result; neither is forwarded through the
+production native solve ABI.
 
 The R loader authenticates RDS and list-column semantics. C++ does not parse
 arbitrary R objects or recompute fingerprints from R serialization. The R
@@ -270,9 +281,10 @@ constraint_nullspace
 gram_matrix
 nullspace_gram_matrix
 penalty_blocks
-penalty_offsets
+penalty_offsets_zero_based
 penalty_ranks
-penalty_sp_indices
+penalty_sp_indices_zero_based
+penalty_sp_labels
 H
 weights
 weights_policy
@@ -299,6 +311,50 @@ offset_policy = none-or-zero:
 Unsupported policy values fail at handle creation. They cannot select a CPU
 fallback. The canonical Phase 2 artifact must have zero unsupported setups.
 
+The Phase 2 R representation may use one-based indices. The authenticated R
+adapter converts offsets and smoothing-parameter indices exactly once at the
+DTO boundary and emits zero-based integers to C++/CUDA. Native code never
+performs a second base conversion. DTO validation reconstructs the first,
+last, and multi-penalty blocks and requires exact equality with the Phase 2
+oracle matrices; negative or out-of-range offsets/indices fail closed.
+
+Phase 3 v1 also freezes the canonical identity penalty-to-SP mapping:
+
+```text
+penalty_sp_indices_zero_based = 0:(penalty_count - 1)
+sp_mapping = NULL
+min_sp = NULL
+```
+
+The R adapter and native host-view validator both enforce this invariant.
+Numerical builders may index `SP` by penalty ordinal only after that check.
+Any non-identity mapping fails closed and requires a later schema amendment.
+
+Selected smoothing parameters satisfy:
+
+```text
+is.finite(SP) and SP >= 0
+```
+
+`sp = 0` is a legal fixed-parameter boundary. Negative and nonfinite values
+are invalid.
+
+Hash responsibility is split explicitly:
+
+```text
+R/catalog adapter:
+  dataset and artifact lineage
+  PreparedSKey and residual target key
+  Y hash and oracle selected-SP hash
+
+C++/CUDA runtime:
+  DTO schema, shape, order, dtype, finite/range checks
+  route metadata and device execution status
+```
+
+The native runtime must not claim that it validated a hash that was not
+provided through its host view.
+
 ## Runtime Components
 
 ### CudaRuntimeContext
@@ -314,6 +370,7 @@ one cuSOLVER handle bound to the stream
 one reusable double workspace arena
 one reusable integer/status arena
 one reusable pointer arena
+one user-provided cuBLAS workspace
 one completion event pool
 resource and timing counters
 context generation
@@ -322,6 +379,30 @@ context generation
 The Phase 3 v1 runner is single-threaded with respect to one context. Public
 calls reject concurrent use. cuBLAS uses double precision without TF32 or
 reduced-precision math.
+
+Determinism is configured in code, not inherited from the environment. The
+runtime sets and queries:
+
+```text
+cusolverDnSetDeterministicMode(..., CUSOLVER_DETERMINISTIC_RESULTS)
+cublasSetMathMode(..., CUBLAS_PEDANTIC_MATH)
+cublasSetAtomicsMode(..., CUBLAS_ATOMICS_NOT_ALLOWED)
+```
+
+Initialization order is fixed. Bind the non-default stream first, then install
+the user-provided cuBLAS workspace:
+
+```text
+cublasSetStream(...)
+cublasSetWorkspace(...)
+cusolverDnSetStream(...)
+```
+
+Changing the stream requires reinstalling the cuBLAS workspace before any
+operation. Runtime info records the queried deterministic/math/atomics modes,
+workspace size and alignment, CUDA toolkit and driver versions, GPU compute
+capability, and SM count. RSS, norm, and error reductions use fixed-order
+trees and never unordered cross-block `atomicAdd` accumulation.
 
 The context exposes an explicit reserve operation. The full runner reserves
 the canonical maxima before the measured solve pass:
@@ -376,6 +457,21 @@ rank_tol(A) = max(dim(A)) * max(singular_values(A)) * double_epsilon
 Retain the exact Phase 2 penalty rank and fail if the independently derived
 root rank disagrees. Build an analogous root for non-null `H`.
 
+The prepared handle's static setup payload does not mix in target-dependent
+outputs. At handle creation it is paired with one separate
+`TransientResidualSlot` provisioned outside the solve hot path:
+
+```text
+coefficients, fitted, residual, and RSS buffers
+solve completion event
+optional registered consumer completion event
+generation
+lease state
+```
+
+The slot may be reused by that handle only after its current lease has been
+released and any registered consumer event has completed.
+
 ### DeviceResidualBatch
 
 The solve returns an external-pointer token containing:
@@ -390,13 +486,28 @@ leading dimensions
 target key order
 completion event
 owner generation
-batch generation
-per-target route and status metadata
+slot generation
+per-target planned/executed route, reroute reason, and solver status metadata
+exclusive lease on one TransientResidualSlot
 ```
 
-The output buffers belong to the setup handle workspace. V1 permits one
-in-flight batch per handle. A subsequent solve increments the generation and
-invalidates older tokens. Every consumer checks the generation before use.
+V1 permits one in-flight batch per handle. A solve attempted while a prior
+token still owns the slot, or while its registered consumer event is
+incomplete, fails before writing output with `ERR_OUTPUT_SLOT_BUSY`. Explicit
+token release relinquishes the lease only after the consumer event is
+complete. The next successful solve increments the slot generation; a
+released token from the prior generation remains inspectable for compact
+metadata but every device access or shadow materialization fails as
+`STALE_TOKEN`.
+
+Any solve failure before a valid token is returned restores the slot to
+`FREE`; exception paths cannot strand a lease.
+
+Every acquired slot is initialized to quiet NaN for the requested public
+output region before route execution. Successful routes overwrite their
+canonical columns. Non-OK target columns remain invalid, and the shadow
+materializer returns them only as explicit R `NA_real_`; no error token can
+expose bytes from a prior solve.
 
 An explicit `materialize_for_shadow()` waits on the completion event and
 copies requested outputs to host. Normal `solve_batch()` never returns numeric
@@ -418,10 +529,12 @@ FixedSpBatchResult solve_fixed_sp_batch(
   handle,
   Y,
   SP,
-  nullspace_rhs,
   route_metadata,
   output_mask
 )
+
+void release_fixed_sp_residual(residual_token)
+void register_fixed_sp_consumer_event(residual_token, cuda_event)
 
 ShadowMaterializedBatch materialize_fixed_sp_shadow(
   residual_token,
@@ -445,6 +558,8 @@ fixed_sp_cuda_prepared_free()
 fixed_sp_cuda_solve_batch()
 fixed_sp_cuda_residual_info()
 fixed_sp_cuda_materialize_shadow()
+fixed_sp_cuda_residual_release()
+fixed_sp_cuda_residual_free()
 ```
 
 The old single-target entry point becomes a compatibility adapter that creates
@@ -463,6 +578,13 @@ P_H   = Z' H Z
 A     = X0' X0 + sum_j sp_j P_j + P_H
 b     = X0' weighted(y - offset)
 ```
+
+`b` is production CUDA work. The solve uploads `Y` and `SP`, then computes
+all RHS columns from resident `X0` with cuBLAS on the runtime stream. A Phase 2
+CPU projected RHS may be compared as a shadow oracle, but it is not accepted
+as a production solve input. Artifact diagnostics report
+`rhs_authority = "cuda-x0-transpose-y"` and
+`full_cuda_data_plane = TRUE`.
 
 The Cholesky route solves `A theta = b` in double precision. The stable routes
 do not solve these normal equations. They solve the augmented system:
@@ -512,16 +634,21 @@ by an environment variable during a qualifying or full run.
 
 ### Batched Cholesky
 
-For all Cholesky targets in one setup batch:
+For all planned Cholesky targets in one setup batch:
 
-1. upload `Y`, `SP`, and RHS matrices once;
-2. build all `A_target` matrices with one fused/strided kernel family;
-3. construct one device pointer array;
-4. call `cusolverDnDpotrfBatched` once;
-5. call `cusolverDnDpotrsBatched` once, or one equivalent true batched solve;
-6. build beta, fitted, residual, and compact RSS/status outputs with batched
+1. upload `Y` and `SP` matrices once;
+2. compute all RHS columns as resident `X0' * Y` with one cuBLAS operation;
+3. build all `A_target` matrices with one fused/strided kernel family;
+4. construct device pointer arrays;
+5. call `cusolverDnDpotrfBatched` once;
+6. read the per-target factor info through one compact checkpoint and remove
+   failed factors;
+7. when at least one factor succeeded, call `cusolverDnDpotrsBatched` once,
+   or one equivalent true batched solve;
+8. read its scalar info through one compact solve checkpoint;
+9. build beta, fitted, residual, and compact RSS/status outputs with batched
    kernels;
-7. record one completion event.
+10. record one completion event.
 
 This path may report `true_batched_kernel = TRUE` only when at least two
 targets actually enter the batched factor/solve calls. A one-target call is a
@@ -531,6 +658,14 @@ If `potrf` reports a non-positive pivot, that target's Cholesky output is
 discarded and the target is explicitly rerouted to the CUDA SVD path. The
 transition increments `stable_reroute_count`. It is not a CPU fallback and is
 never silent.
+
+`potrfBatched` owns one `infoArray` element per attempted target.
+`potrsBatched` instead owns one scalar `info` for the whole API call and
+supports `nrhs = 1` in this layout. A nonzero `potrs` info is a batch/API
+failure: it fails the public solve and is never mapped to one target or
+interpreted as a numerical reroute. Factor and solve info use distinct device
+cells; `potrs` may never overwrite an unchecked `potrf` result. If no factor
+succeeds, the runtime skips `potrsBatched` entirely.
 
 ### Augmented QR
 
@@ -575,15 +710,46 @@ Cholesky -> QR -> SVD -> residual/fitted finalization
 Output columns remain in the canonical input target order. Route partitioning
 must not reorder the public result or the logical-CI replay.
 
+Every target records separate planning and execution fields:
+
+```text
+planned_route
+executed_route
+reroute_reason
+solver_status
+```
+
+The authenticated condition census freezes planned counts. Declared CUDA
+stability reroutes are allowed in full artifacts, but they must conserve the
+corpus exactly:
+
+```text
+executed_cholesky = planned_cholesky - cholesky_to_svd_count
+executed_qr       = planned_qr - qr_to_svd_count
+executed_svd      = planned_svd + cholesky_to_svd_count + qr_to_svd_count
+```
+
+Iteration and qualification currently require both reroute counts to be zero.
+Full closure may accept a nonzero declared reroute only when route
+conservation, solver status, numerical gates, zero decision flips, and SHD 0
+all pass. No field named only `route_count` may stand for both meanings.
+The only v1 nonempty reroute reasons are
+`CHOLESKY_NON_POSITIVE_PIVOT` and `QR_RANK_GUARD_REJECTED`.
+
 The batch reports both aggregate and per-target truth:
 
 ```text
 native_batch_call
 true_batched_kernel
 true_batched_target_count
-cholesky_target_count
-qr_target_count
-svd_target_count
+planned_cholesky_target_count
+planned_qr_target_count
+planned_svd_target_count
+executed_cholesky_target_count
+executed_qr_target_count
+executed_svd_target_count
+cholesky_to_svd_count
+qr_to_svd_count
 stable_reroute_count
 ```
 
@@ -625,12 +791,14 @@ Batch-level errors throw before returning a token:
 wrong external-pointer tag or freed object
 wrong PID or device
 context/handle generation mismatch
+ERR_OUTPUT_SLOT_BUSY or STALE_TOKEN lifetime violation
 schema or fingerprint mismatch
 setup/target dimension mismatch
 target key order mismatch
-y or selected-sp hash mismatch
+R-adapter y or selected-sp hash mismatch
 workspace capacity exceeded after warm-up
 CUDA allocation, stream, handle, or event failure
+nonzero batched `potrs` scalar info
 ```
 
 There is no CPU result field, no approximate result field, and no
@@ -647,6 +815,12 @@ External-pointer finalizers are idempotent. Explicit free clears the external
 pointer and increments its generation. Context destruction waits for owned
 completion events only after child handles/tokens release shared ownership.
 
+Residual `release` and residual `free` are distinct operations. `release`
+ends the output-slot lease while preserving compact token metadata for stale
+generation checks; `free` releases if needed, destroys the host token, and
+clears the external pointer. A token with an incomplete registered consumer
+event cannot relinquish its slot.
+
 The runner sets and records one explicit device. Device changes during a run
 fail. Multi-GPU execution requires a later design.
 
@@ -655,11 +829,14 @@ fail. Multi-GPU execution requires a later design.
 The primary solve path:
 
 - uploads setup data once per PreparedSKey;
-- uploads only target `Y`, `SP`, and RHS per batch;
+- uploads only target `Y` and `SP` per batch;
+- computes RHS columns on device from resident `X0`;
 - leaves residuals on device;
 - returns compact status and timing metadata only;
 - never calls `cudaDeviceSynchronize` after every small kernel;
 - uses one final completion event per batch when host status is required;
+- permits one compact Cholesky-factor checkpoint and one scalar `potrs`
+  checkpoint per affected public batch;
 - for a batch containing declared QR targets, permits at most one additional
   compact QR checkpoint so the host can enqueue required CUDA SVD reroutes;
 - never synchronizes or copies diagnostics once per target.
@@ -694,6 +871,13 @@ cusolver_handle_destroy_count
 workspace_reserve_count
 workspace_grow_count
 workspace_bytes
+cusolver_deterministic_mode
+cublas_math_mode
+cublas_atomics_mode
+cublas_user_workspace_installed
+cublas_workspace_bytes and alignment
+cuda_toolkit_version and driver_version
+gpu_compute_capability and sm_count
 ```
 
 Setup lifecycle:
@@ -714,10 +898,20 @@ batch_call_count
 target_count
 true_batched_batch_count
 true_batched_target_count
-cholesky_target_count
-qr_target_count
-svd_target_count
+planned_cholesky_target_count
+planned_qr_target_count
+planned_svd_target_count
+executed_cholesky_target_count
+executed_qr_target_count
+executed_svd_target_count
+cholesky_to_svd_count
+qr_to_svd_count
 stable_reroute_count
+output_slot_acquire_count
+output_slot_release_count
+output_slot_busy_count
+stale_token_reject_count
+invalid_output_init_count
 per_target_allocation_count_after_warmup
 per_target_handle_create_count
 unknown_fallback_count
@@ -730,10 +924,16 @@ Transfer and synchronization:
 
 ```text
 target_h2d_count and bytes
+rhs_device_build_count and bytes
+rhs_authority and full_cuda_data_plane
 implicit_residual_d2h_count and bytes
 shadow_materialize_count and bytes
 batch_event_record_count
 batch_event_wait_count
+cholesky_factor_checkpoint_record_count
+cholesky_factor_checkpoint_wait_count
+cholesky_solve_checkpoint_record_count
+cholesky_solve_checkpoint_wait_count
 qr_checkpoint_record_count
 qr_checkpoint_wait_count
 target_level_stable_sync_count
@@ -778,6 +978,12 @@ target_level_stable_sync_count                    = 0
 unknown_fallback_count                            = 0
 cpu_fallback_count                                = 0
 approximate_backend_count                         = 0
+cusolver deterministic mode                       = enabled
+cuBLAS math mode                                   = pedantic
+cuBLAS atomics mode                                = not allowed
+cuBLAS user workspace installed                    = TRUE
+full_cuda_data_plane                               = TRUE
+rhs_authority                                      = cuda-x0-transpose-y
 ```
 
 Within each execution session that computes at least one shard:
@@ -787,6 +993,7 @@ runtime context creates                           = 1
 runtime context destroys                          = 1
 all prepared handles destroyed                    = TRUE
 all residual tokens released                      = TRUE
+all output-slot leases released                   = TRUE
 ```
 
 A pure resume session that reuses an already complete artifact creates zero
@@ -835,7 +1042,8 @@ near-alpha decision flips                   = 0
 ```
 
 Repeated execution on the same declared GPU, CUDA, driver, and library
-environment must reproduce route/status fields exactly and report zero
+environment must reproduce planned/executed route, reroute-reason, and
+solver-status fields exactly and report zero
 numeric drift between repeated Phase 3 runs.
 
 ## Development and Qualification Corpora
@@ -882,9 +1090,9 @@ near-alpha decisions, resource counters, and artifact restart behavior.
 PreparedSSetup groups   = 8,634
 TargetState rows        = 110,617
 
-Cholesky targets        = 73,158
-QR targets              = 4,210
-SVD targets             = 33,249
+planned Cholesky targets = 73,158
+planned QR targets       = 4,210
+planned SVD targets      = 33,249
 ```
 
 The full run is last. It cannot be replaced by extrapolation from the
@@ -922,9 +1130,9 @@ shards/
 ```
 
 The artifact runs all 110,617 targets. It stores compact per-target parity,
-route, status, hashes, and error metrics; it does not store all residual
-vectors. It runs dCov parity over the authenticated qualification logical-CI
-corpus.
+planned/executed route, reroute reason, solver status, hashes, and error
+metrics; it does not store all residual vectors. It runs dCov parity over the
+authenticated qualification logical-CI corpus.
 
 ### Full fixed-sp CUDA shadow artifact
 
@@ -1017,9 +1225,14 @@ shard pairs.
 
 - authenticate and stream iteration/qualification/full batches;
 - reject malformed DTO fields and reordered SP labels;
+- prove zero-based penalty offsets/SP indices reconstruct exact first, last,
+  and multi-penalty matrices and reject out-of-range values;
+- require the v1 identity penalty-to-SP mapping and reject permutations;
+- accept synthetic `sp = 0` and reject negative/nonfinite smoothing values;
 - reject wrong dataset/setup/target fingerprints;
 - reject missing or duplicate Phase 1 condition metadata;
-- verify canonical route counts and deterministic shard assignment;
+- verify canonical planned-route counts, executed-route conservation, and
+  deterministic shard assignment;
 - reject caller-forged aggregate pass flags.
 
 ### CUDA resource and ABI tests
@@ -1027,21 +1240,27 @@ shard pairs.
 - create/reserve/info/free context;
 - create/info/free prepared handle;
 - solve one and many targets through the same implementation;
-- solve twice and prove no post-warm-up allocation or handle creation;
+- reject a second solve with `ERR_OUTPUT_SLOT_BUSY` while the first token owns
+  the slot;
+- release the first lease, solve again, and prove the first token is stale;
+- prove no post-warm-up allocation or handle creation across released solves;
 - reject freed, stale-generation, wrong-device, and wrong-PID handles;
-- prove old residual tokens become stale after the next solve;
+- prove an incomplete registered consumer event prevents slot reuse;
+- prove a non-OK token materializes only explicit NA after prior safe output;
 - prove explicit shadow materialization is the only residual D2H route.
 
 ### Numerical unit tests
 
 - safe single- and multi-target Cholesky;
+- per-target `potrfBatched` info and scalar batch-level `potrsBatched` info;
 - mixed target-specific multi-penalty SP matrices;
+- CUDA-computed RHS parity against the Phase 2 shadow RHS;
 - QR bucket setup;
 - high-condition SVD setup;
 - rank-deficient SVD setup;
 - QR-to-SVD and Cholesky-to-SVD declared reroutes;
 - target order preservation in mixed batches;
-- exact route/status repeatability.
+- exact planned/executed route, reroute-reason, and solver-status repeatability.
 
 ### Real-corpus gates
 
@@ -1067,9 +1286,10 @@ runner must record the exact command and device id.
 ### Phase 3A - Persistent resources and safe single-target adapter
 
 Deliver the catalog/DTO, runtime context, prepared handle, reserve/warm-up,
-device token, and safe Cholesky path. High-risk targets return an explicit
-`stable path not implemented` failure in 3A tests; they never return a normal
-equation result. 3A is an implementation milestone, not a phase exit.
+leased device token, CUDA-built RHS, and safe Cholesky path. High-risk targets
+return an explicit `stable path not implemented` failure in 3A tests; they
+never return a normal equation result. 3A is an implementation milestone, not
+a phase exit.
 
 ### Phase 3B - True same-S multi-target Cholesky
 
@@ -1096,7 +1316,9 @@ Phase 3 is complete only when current evidence proves all of the following:
 ```text
 all 8,634 PreparedSSetup objects consumed
 all 110,617 TargetState rows solved
-route counts exactly 73,158 / 4,210 / 33,249
+planned route counts exactly 73,158 / 4,210 / 33,249
+executed route counts satisfy declared reroute conservation
+every reroute has a reason and successful CUDA SVD status
 all outputs finite
 numeric tolerances pass
 qualification and full decision flips = 0
@@ -1104,6 +1326,8 @@ unknown/CPU/approximate fallback counts = 0
 post-warm-up per-target allocation and handle creation = 0
 setup upload count = 8,634
 implicit residual D2H count = 0
+all output-slot leases released
+CUDA-built RHS authority and deterministic modes verified
 true_batched diagnostics are truthful
 fixed_sp_cuda_oracle_sp_v1 completed and authenticated
 fixed_sp_cuda_full_shadow_v1 completed and authenticated

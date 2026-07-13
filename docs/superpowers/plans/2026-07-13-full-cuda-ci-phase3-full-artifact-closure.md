@@ -15,6 +15,10 @@
 Start only after every Phase 3C iteration and qualification command passes on
 the declared GPU. Do not use a full run to debug runtime code.
 
+The implementation branch must contain `main` at or after `37ce594`, the
+Phase 3 review-amendment commit, and the accepted Phase 3A/3B/3C commits. The
+pre-plan production-code baseline remains `42ef3ef` for provenance only.
+
 Frozen canonical counts:
 
 ```text
@@ -23,7 +27,7 @@ TargetState rows                              = 110,617
 smooth penalty root matrices                  = 28,527
 smooth penalty root rows                      = 249,610
 explicit constraints / non-null H             = 0 / 0
-Cholesky / QR / SVD targets                    = 73,158 / 4,210 / 33,249
+planned Cholesky / QR / SVD targets            = 73,158 / 4,210 / 33,249
 
 logical CI tests                              = 240,489
 direct level-0 tests                          = 2,213
@@ -35,6 +39,12 @@ n.edgetests by level                          =
   2,213 / 52,659 / 125,293 / 40,694 /
   13,293 / 5,422 / 835 / 80
 ```
+
+Full closure uses the safe-reroute policy. The planned counts above remain
+exact. Declared Cholesky-to-SVD or QR-to-SVD execution reroutes are allowed
+only when every target records `planned_route`, `executed_route`,
+`reroute_reason`, and `solver_status`, the conservation equations hold, all
+numeric and decision gates pass, and SHD remains zero.
 
 Required output directories:
 
@@ -176,6 +186,7 @@ fastkpc_full_cuda_phase3_route_config <- function() {
     fitted_tolerance = 1e-7,
     qualification_dcov_p_tolerance = 1e-10,
     dcov_backend = "legacy-cpp-spectra",
+    reroute_policy = "declared-cuda-svd-reroute-with-conservation",
     cpu_fallback_allowed = FALSE,
     approximate_backend_allowed = FALSE,
     shard_count = 64L
@@ -186,8 +197,10 @@ fastkpc_full_cuda_phase3_route_config <- function() {
 Build `fastkpc_full_cuda_phase3_input_identity(catalog, device_id)` from the
 already validated Phase 0/1/2 manifest hashes, dataset/corpus hashes, Phase 3
 runtime ABI, route-config hash, source commit, R/mgcv versions, CUDA toolkit,
-driver, GPU name/UUID/compute capability, and device id. Missing GPU identity
-fails before a shard can be reused or written.
+driver, GPU name/UUID/compute capability/SM count, device id, queried
+cuSOLVER deterministic mode, cuBLAS math/atomics modes, and user-workspace
+size/alignment. Missing or mismatched execution identity fails before a shard
+can be reused or written.
 
 - [ ] **Step 4: Implement artifact paths and required payload sets**
 
@@ -207,6 +220,7 @@ route-config hash
 runtime ABI
 source commit
 CUDA toolkit/driver/GPU UUID/compute capability
+deterministic/math/atomics modes or cuBLAS workspace identity
 artifact schema version
 shard count
 ```
@@ -288,13 +302,16 @@ session <- list(
   prepared_handle_create_count = 0L,
   prepared_handle_destroy_count = 0L,
   residual_token_release_count = 0L,
+  output_slot_acquire_count = 0L,
+  output_slot_release_count = 0L,
   status = "running"
 )
 ```
 
 Write `sessions/session_<id>.json` atomically after every completed shard.
 Before marking a session `complete`, release every token/handle, destroy the
-single context, require create/destroy `1/1`, and write the final session JSON.
+single context, require create/destroy `1/1`, require output-slot
+acquire/release equality, and write the final session JSON.
 A pure resume with no missing shards creates no session and no CUDA context.
 
 - [ ] **Step 4: Implement shard manifests and atomic pairs**
@@ -369,7 +386,7 @@ with:
 assert_true(nrow(payload$setup_results) == 2L, "two setup rows")
 assert_true(nrow(payload$target_parity) == expected_target_count,
             "all selected target rows")
-assert_true(all(payload$target_parity$status %in% c(
+assert_true(all(payload$target_parity$solver_status %in% c(
   "OK_CHOLESKY_BATCHED", "OK_CHOLESKY_SINGLE",
   "OK_AUGMENTED_QR", "OK_AUGMENTED_SVD"
 )), "all subset targets OK")
@@ -417,8 +434,8 @@ residual_key_sha256
 prepared_s_key_sha256
 target and canonical target rank
 condition value/bucket and coefficient_rank
-declared/executed route and status
-true-batched fields and stable reroute
+planned_route, executed_route, reroute_reason, solver_status
+true-batched fields and Cholesky-to-SVD / QR-to-SVD counters
 GPU augmented effective rank and Phase 1 coefficient rank
 coefficient/fitted/residual/RSS oracle and candidate hashes
 max-absolute and relative-L2 errors
@@ -429,7 +446,8 @@ No residual/fitted vector is stored in the shard.
 
 - [ ] **Step 4: Add setup and resource rows**
 
-Record setup upload/root counts, dimensions, target counts, route counts,
+Record setup upload/root counts, dimensions, target counts, planned/executed
+route counts and declared reroutes,
 root-rank mismatches, post-warm-up allocations, handle creates, event/checkpoint
 counts, implicit/shadow D2H bytes, and stage timings. Recompute shard summaries
 from these rows; never accept a caller-provided `pass` flag.
@@ -446,8 +464,9 @@ FASTKPC_FULL_CUDA_PHASE3_OUTPUT=/tmp/fastkpc_phase3_oracle_iteration \
   Rscript fastkpc/tools/run_full_cuda_ci_fixed_sp_oracle_sp.R
 ```
 
-Expected: subset PASS; iteration solves `270/270`, route counts
-`172/31/67`, and has zero fallback/non-OK rows.
+Expected: subset PASS; iteration solves `270/270`, planned and executed route
+counts are both `172/31/67`, declared reroutes are `0/0`, and fallback/non-OK
+rows are zero.
 
 - [ ] **Step 6: Commit the oracle shard executor**
 
@@ -478,7 +497,16 @@ validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
 )
 assert_true(validated$setup_count == 44L, "iteration setup merge")
 assert_true(validated$target_count == 270L, "iteration target merge")
-assert_true(validated$non_ok_status_count == 0L, "iteration status gate")
+assert_true(validated$non_ok_solver_status_count == 0L,
+            "iteration solver-status gate")
+assert_true(identical(validated$planned_route_counts,
+                      c(172L, 31L, 67L)),
+            "iteration planned route counts")
+assert_true(identical(validated$executed_route_counts,
+                      c(172L, 31L, 67L)) &&
+              validated$cholesky_to_svd_count == 0L &&
+              validated$qr_to_svd_count == 0L,
+            "iteration executed route conservation")
 assert_true(validated$cpu_fallback_count == 0L &&
               validated$unknown_fallback_count == 0L &&
               validated$approximate_backend_count == 0L,
@@ -512,6 +540,13 @@ qualification_dcov_parity: logical_sequence_id numeric order
 Build `risk_cases` by joining Phase 1 risk rows to target parity. Preserve all
 high-condition, rank-deficient, nonfinite-metadata, near-constant, warning,
 nonconverged, and near-alpha selectors even when they overlap.
+
+The validator recomputes planned counts from authenticated condition metadata,
+recomputes executed counts from per-target rows, requires every changed route
+to have the declared Cholesky-pivot or QR-rank-guard reason, and applies the
+three route-conservation equations. It must not require full-run reroute counts
+to be zero; numerical, decision, and graph gates determine whether a declared
+CUDA stability reroute is acceptable.
 
 - [ ] **Step 4: Compute qualification dCov evidence during merge input runs**
 
@@ -567,8 +602,9 @@ FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_phase3c_dcov.R
 ```
 
-Expected: `6,143/6,143` targets OK, route counts `3,889/190/2,064`,
-`3,808` dCov rows, zero decision flips/fallbacks/errors.
+Expected: `6,143/6,143` targets OK, planned/executed route counts both
+`3,889/190/2,064`, declared reroutes `0/0`, `3,808` dCov rows, and zero
+decision flips/fallbacks/errors.
 
 - [ ] **Step 8: Commit oracle publication and validation**
 
@@ -626,14 +662,22 @@ Expected hard gates:
 ```text
 completed shard pairs                         = 64 / 64
 PreparedSSetup / TargetState                  = 8,634 / 110,617
-route counts                                  = 73,158 / 4,210 / 33,249
+planned route counts                          = 73,158 / 4,210 / 33,249
+executed Cholesky = 73,158 - cholesky_to_svd_count
+executed QR       = 4,210 - qr_to_svd_count
+executed SVD      = 33,249 + both reroute counts
+reroute reason/status complete                = TRUE
 smooth root matrices / rows                   = 28,527 / 249,610
 setup uploads / prepared creates              = 8,634 / 8,634
+output-slot acquires / releases                = equal
+invalid-output initializations                 = 8,634
 non-OK / nonfinite output rows                = 0 / 0
 residual/fitted max-abs and relative-L2        < 1e-7
 post-warm-up target allocations/handles       = 0 / 0
 implicit residual D2H / cudaDeviceSynchronize = 0 / 0
 target-level stable sync                      = 0
+RHS authority / full CUDA data plane          = cuda-x0-transpose-y / TRUE
+deterministic / pedantic / no-atomics modes   = enabled / TRUE / TRUE
 unknown / CPU / approximate fallback          = 0 / 0 / 0
 qualification dCov rows / decision flips      = 3,808 / 0
 qualification backend errors / Spectra fallbacks = 0 / 0
@@ -1007,11 +1051,13 @@ decision flips                    = 0
 ```
 
 Do not run graph comparison before row coverage and decision gates pass.
-From the two endpoint route/status columns, reconstruct one row per residual
-key, require every repeated observation of a key to agree, and require the
-resulting 110,617-key corpus hash and `73,158 / 4,210 / 33,249` route counts to
-match the oracle-sp artifact. This proves the shadow consumed the complete
-target corpus without storing a second target-parity table.
+From the two endpoint planned/executed route, reroute-reason, and solver-status
+columns, reconstruct one row per residual key and require every repeated
+observation of a key to agree. Require the resulting 110,617-key corpus hash
+and planned counts `73,158 / 4,210 / 33,249` to match the oracle-sp artifact,
+then independently recompute both reroute counts and the executed-route
+conservation equations. This proves the shadow consumed the complete target
+corpus without storing a second target-parity table.
 
 - [ ] **Step 4: Replay candidate graph and invoke the existing comparator**
 
@@ -1221,7 +1267,9 @@ Record exact artifact paths, manifest hashes, elapsed/resource summaries, and:
 ```text
 Phase 3 complete:
   PreparedSSetup / TargetState solved = 8,634 / 110,617
-  routes                              = 73,158 / 4,210 / 33,249
+  planned routes                      = 73,158 / 4,210 / 33,249
+  executed routes                     = planned counts adjusted by validated reroutes
+  Cholesky->SVD / QR->SVD reroutes    = exact artifact counts with reasons/statuses
   numeric tolerance failures          = 0
   full logical CI rows                = 240,489
   decision flips                      = 0
