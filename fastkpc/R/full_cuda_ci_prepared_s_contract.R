@@ -4059,6 +4059,22 @@ fastkpc_full_cuda_prepared_s_output_shard_context_fields <- function() {
   )
 }
 
+fastkpc_full_cuda_prepared_s_validate_expected_source_commit <- function(
+    expected_source_commit) {
+  if (is.null(expected_source_commit)) return(NULL)
+  if (!is.character(expected_source_commit) ||
+      length(expected_source_commit) != 1L ||
+      !is.null(attributes(expected_source_commit)) ||
+      is.na(expected_source_commit) ||
+      !grepl("^[0-9a-f]{40}$", expected_source_commit)) {
+    stop(
+      "expected_source_commit must be a bare lowercase 40-hex SHA-1 scalar",
+      call. = FALSE
+    )
+  }
+  expected_source_commit
+}
+
 fastkpc_full_cuda_prepared_s_validate_output_shard_context <- function(
     inputs, context, assigned_setups = NULL) {
   if (!is.list(context) || !identical(
@@ -5018,7 +5034,8 @@ fastkpc_full_cuda_validate_prepared_s_shard <- function(
 }
 
 fastkpc_full_cuda_prepared_s_read_shard <- function(
-    shard_dir, inputs, shard_count, shard_id) {
+    shard_dir, inputs, shard_count, shard_id,
+    expected_source_commit = NULL) {
   shard_count <-
     fastkpc_full_cuda_prepared_s_validate_shard_count(shard_count)
   shard_id <- fastkpc_full_cuda_prepared_s_validate_shard_id(
@@ -5034,6 +5051,16 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
     inputs = inputs,
     context = context
   )
+  expected_source_commit <-
+    fastkpc_full_cuda_prepared_s_validate_expected_source_commit(
+      expected_source_commit
+    )
+  if (!is.null(expected_source_commit)) {
+    expected_manifest$source_commit <- expected_source_commit
+    fastkpc_full_cuda_prepared_s_validate_shard_manifest_structure(
+      expected_manifest
+    )
+  }
   paths <- fastkpc_full_cuda_prepared_s_shard_paths(shard_dir, shard_id)
   if (file.exists(paths$lock_dir)) {
     stop("Prepared-S shard lock exists: ", basename(paths$lock_dir),

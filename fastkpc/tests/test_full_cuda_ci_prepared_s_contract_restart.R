@@ -653,6 +653,80 @@ assert_true(
   "completion JSON must authenticate payload semantics and final RDS bytes"
 )
 
+local({
+  source_commit_a <- first$payload$manifest$source_commit
+  source_commit_b <- paste(rep("b", 40L), collapse = "")
+  original_runtime_identity <- fastkpc_full_cuda_census_runtime_identity
+  on.exit(
+    assign(
+      "fastkpc_full_cuda_census_runtime_identity",
+      original_runtime_identity,
+      envir = .GlobalEnv
+    ),
+    add = TRUE
+  )
+  assign(
+    "fastkpc_full_cuda_census_runtime_identity",
+    function() {
+      identity <- original_runtime_identity()
+      identity$source_commit <- source_commit_b
+      identity
+    },
+    envir = .GlobalEnv
+  )
+
+  assert_error(
+    fastkpc_full_cuda_prepared_s_read_shard(
+      shard_dir = output_dir,
+      inputs = fixture_inputs,
+      shard_count = 3L,
+      shard_id = 0L
+    ),
+    "Prepared-S shard manifest mismatch",
+    "default public reader must reject a historical source commit"
+  )
+  replayed <- fastkpc_full_cuda_prepared_s_read_shard(
+    shard_dir = output_dir,
+    inputs = fixture_inputs,
+    shard_count = 3L,
+    shard_id = 0L,
+    expected_source_commit = source_commit_a
+  )
+  assert_true(
+    identical(replayed$payload, first$payload),
+    "public reader must authenticate a requested historical source commit"
+  )
+  assert_error(
+    fastkpc_full_cuda_prepared_s_read_shard(
+      shard_dir = output_dir,
+      inputs = fixture_inputs,
+      shard_count = 3L,
+      shard_id = 0L,
+      expected_source_commit = source_commit_b
+    ),
+    "Prepared-S shard manifest mismatch",
+    "public reader must reject an unauthenticated requested source commit"
+  )
+  invalid_expected_source_commits <- list(
+    uppercase = toupper(source_commit_a),
+    attributed = structure(source_commit_a, note = "unallowed"),
+    malformed = "not-a-sha"
+  )
+  for (label in names(invalid_expected_source_commits)) {
+    assert_error(
+      fastkpc_full_cuda_prepared_s_read_shard(
+        shard_dir = output_dir,
+        inputs = fixture_inputs,
+        shard_count = 3L,
+        shard_id = 0L,
+        expected_source_commit = invalid_expected_source_commits[[label]]
+      ),
+      "expected_source_commit must be a bare lowercase 40-hex SHA-1 scalar",
+      paste("expected_source_commit must reject", label, "input")
+    )
+  }
+})
+
 first_rds_hash <- fastkpc_full_cuda_census_file_hash(first$paths$rds)
 first_json_hash <- fastkpc_full_cuda_census_file_hash(
   first$paths$summary_json
@@ -1170,15 +1244,42 @@ assert_true(
 reader_formals <- names(formals(
   fastkpc_full_cuda_prepared_s_read_shard
 ))
+context_validator_formals <- names(formals(
+  fastkpc_full_cuda_prepared_s_validate_output_shard_context
+))
+manifest_constructor_formals <- names(formals(
+  fastkpc_full_cuda_prepared_s_shard_manifest
+))
 assert_true(
   identical(
-    reader_formals, c("shard_dir", "inputs", "shard_count", "shard_id")
+    reader_formals,
+    c(
+      "shard_dir", "inputs", "shard_count", "shard_id",
+      "expected_source_commit"
+    )
   ) &&
     length(intersect(
       reader_formals,
       c("paths", "expected_manifest", forbidden_public_formals)
     )) == 0L,
   "public shard reader must accept only canonical directory and layout"
+)
+assert_true(
+  identical(
+    context_validator_formals,
+    c("inputs", "context", "assigned_setups")
+  ) &&
+    identical(
+      manifest_constructor_formals,
+      c("assigned_setups", "shard_id", "inputs", "context")
+    ) &&
+    !"expected_source_commit" %in% c(
+      context_validator_formals, manifest_constructor_formals
+    ),
+  paste(
+    "historical source commit replay authority must remain on the public",
+    "reader rather than generic context or manifest helpers"
+  )
 )
 
 summary_backup <- tempfile("prepared-s-summary-backup-")
