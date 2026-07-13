@@ -606,6 +606,7 @@ OK_AUGMENTED_SVD
 ERR_NONFINITE_INPUT
 ERR_SP_SHAPE_OR_ORDER
 ERR_ROUTE_METADATA
+ERR_STABLE_PATH_NOT_IMPLEMENTED
 ERR_QR_FAILED
 ERR_SVD_FAILED
 ERR_NONFINITE_OUTPUT
@@ -613,6 +614,10 @@ ERR_INTERNAL_CUDA
 ```
 
 Only `OK_*` rows contain valid output. Any non-OK target fails the artifact.
+`ERR_STABLE_PATH_NOT_IMPLEMENTED` is a Phase 3A milestone-only status used to
+prove that high-risk targets fail closed before 3C exists. Its count must be
+zero in the iteration gate after 3C, in qualification, and in both full
+artifacts.
 
 Batch-level errors throw before returning a token:
 
