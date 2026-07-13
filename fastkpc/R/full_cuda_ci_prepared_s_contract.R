@@ -4075,8 +4075,8 @@ fastkpc_full_cuda_prepared_s_validate_expected_source_commit <- function(
   expected_source_commit
 }
 
-fastkpc_full_cuda_prepared_s_validate_output_shard_context <- function(
-    inputs, context, assigned_setups = NULL) {
+.fastkpc_full_cuda_prepared_s_validate_output_shard_context_core <- function(
+    inputs, context, expected, assigned_setups = NULL) {
   if (!is.list(context) || !identical(
         names(context),
         fastkpc_full_cuda_prepared_s_output_shard_context_fields()
@@ -4112,7 +4112,6 @@ fastkpc_full_cuda_prepared_s_validate_output_shard_context <- function(
     stop("Prepared-S qualification selection config mismatch",
          call. = FALSE)
   }
-  expected <- fastkpc_full_cuda_prepared_s_output_shard_context(inputs)
   if (!identical(
         as.character(context$phase1_input_bundle_hash),
         expected$phase1_input_bundle_hash
@@ -4155,6 +4154,16 @@ fastkpc_full_cuda_prepared_s_validate_output_shard_context <- function(
     }
   }
   invisible(TRUE)
+}
+
+fastkpc_full_cuda_prepared_s_validate_output_shard_context <- function(
+    inputs, context, assigned_setups = NULL) {
+  .fastkpc_full_cuda_prepared_s_validate_output_shard_context_core(
+    inputs = inputs,
+    context = context,
+    expected = fastkpc_full_cuda_prepared_s_output_shard_context(inputs),
+    assigned_setups = assigned_setups
+  )
 }
 
 fastkpc_full_cuda_prepared_s_target_rows_for_setups <- function(
@@ -4288,8 +4297,8 @@ fastkpc_full_cuda_prepared_s_validate_shard_manifest_structure <- function(
   invisible(TRUE)
 }
 
-fastkpc_full_cuda_prepared_s_shard_manifest <- function(
-    assigned_setups, shard_id, inputs, context) {
+.fastkpc_full_cuda_prepared_s_validate_assigned_shard_setups <- function(
+    assigned_setups, expected_assignment = NULL) {
   shard_count <- attr(assigned_setups, "shard_count", exact = TRUE)
   assigned_setups <- as.data.frame(
     assigned_setups, stringsAsFactors = FALSE
@@ -4306,19 +4315,19 @@ fastkpc_full_cuda_prepared_s_shard_manifest <- function(
   if (length(setdiff(required, names(assigned_setups))) > 0L) {
     stop("assigned Prepared-S setup table is incomplete", call. = FALSE)
   }
-  fastkpc_full_cuda_prepared_s_validate_output_shard_context(
-    inputs, context, assigned_setups
-  )
-  shard_id <- fastkpc_full_cuda_prepared_s_validate_shard_id(
-    shard_id, shard_count
-  )
-  expected_assignment <- fastkpc_full_cuda_prepared_s_assign_shards(
-    assigned_setups[
-      , setdiff(names(assigned_setups), c("sorted_rank", "shard_id")),
-      drop = FALSE
-    ],
-    shard_count
-  )
+  if (is.null(expected_assignment)) {
+    expected_assignment <- fastkpc_full_cuda_prepared_s_assign_shards(
+      assigned_setups[
+        , setdiff(names(assigned_setups), c("sorted_rank", "shard_id")),
+        drop = FALSE
+      ],
+      shard_count
+    )
+  } else {
+    expected_assignment <- as.data.frame(
+      expected_assignment, stringsAsFactors = FALSE
+    )
+  }
   if (!identical(
         as.character(assigned_setups$prepared_s_key_sha256),
         as.character(expected_assignment$prepared_s_key_sha256)
@@ -4333,6 +4342,14 @@ fastkpc_full_cuda_prepared_s_shard_manifest <- function(
                  expected_assignment$shard_id)) {
     stop("Prepared-S shard assignment lineage mismatch", call. = FALSE)
   }
+  list(assigned_setups = assigned_setups, shard_count = shard_count)
+}
+
+.fastkpc_full_cuda_prepared_s_shard_manifest_from_validated <- function(
+    assigned_setups, shard_count, shard_id, inputs, context) {
+  shard_id <- fastkpc_full_cuda_prepared_s_validate_shard_id(
+    shard_id, shard_count
+  )
   selected <- assigned_setups[
     assigned_setups$shard_id == shard_id, , drop = FALSE
   ]
@@ -4377,6 +4394,23 @@ fastkpc_full_cuda_prepared_s_shard_manifest <- function(
   )
   fastkpc_full_cuda_prepared_s_validate_shard_manifest_structure(manifest)
   manifest
+}
+
+fastkpc_full_cuda_prepared_s_shard_manifest <- function(
+    assigned_setups, shard_id, inputs, context) {
+  validated <- .fastkpc_full_cuda_prepared_s_validate_assigned_shard_setups(
+    assigned_setups
+  )
+  fastkpc_full_cuda_prepared_s_validate_output_shard_context(
+    inputs, context, validated$assigned_setups
+  )
+  .fastkpc_full_cuda_prepared_s_shard_manifest_from_validated(
+    assigned_setups = validated$assigned_setups,
+    shard_count = validated$shard_count,
+    shard_id = shard_id,
+    inputs = inputs,
+    context = context
+  )
 }
 
 fastkpc_full_cuda_prepared_s_manifest_equal <- function(actual, expected) {
@@ -5033,6 +5067,79 @@ fastkpc_full_cuda_validate_prepared_s_shard <- function(
   completed
 }
 
+.fastkpc_full_cuda_prepared_s_validate_read_shard_ids <- function(
+    shard_ids, shard_count) {
+  if (typeof(shard_ids) != "integer" || is.object(shard_ids) ||
+      !is.null(attributes(shard_ids)) || length(shard_ids) == 0L ||
+      anyNA(shard_ids) || anyDuplicated(shard_ids) ||
+      any(shard_ids < 0L) || any(shard_ids >= shard_count)) {
+    stop(
+      "shard_ids must be a non-empty unique bare integer vector in range",
+      call. = FALSE
+    )
+  }
+  shard_ids
+}
+
+fastkpc_full_cuda_prepared_s_read_shards <- function(
+    shard_dir, inputs, shard_count, shard_ids,
+    expected_source_commit = NULL) {
+  shard_count <-
+    fastkpc_full_cuda_prepared_s_validate_shard_count(shard_count)
+  shard_ids <- .fastkpc_full_cuda_prepared_s_validate_read_shard_ids(
+    shard_ids, shard_count
+  )
+  assigned <- fastkpc_full_cuda_prepared_s_assign_shards(
+    fastkpc_full_cuda_prepared_s_setup_index(inputs), shard_count
+  )
+  context <- fastkpc_full_cuda_prepared_s_output_shard_context(inputs)
+  validated <- .fastkpc_full_cuda_prepared_s_validate_assigned_shard_setups(
+    assigned,
+    expected_assignment = assigned
+  )
+  .fastkpc_full_cuda_prepared_s_validate_output_shard_context_core(
+    inputs = inputs,
+    context = context,
+    expected = context,
+    assigned_setups = validated$assigned_setups
+  )
+  expected_source_commit <-
+    fastkpc_full_cuda_prepared_s_validate_expected_source_commit(
+      expected_source_commit
+    )
+  target_state_index <-
+    .fastkpc_full_cuda_target_state_input_index(inputs)
+  completed <- lapply(shard_ids, function(shard_id) {
+    expected_manifest <-
+      .fastkpc_full_cuda_prepared_s_shard_manifest_from_validated(
+        assigned_setups = validated$assigned_setups,
+        shard_count = validated$shard_count,
+        shard_id = shard_id,
+        inputs = inputs,
+        context = context
+      )
+    if (!is.null(expected_source_commit)) {
+      expected_manifest$source_commit <- expected_source_commit
+      fastkpc_full_cuda_prepared_s_validate_shard_manifest_structure(
+        expected_manifest
+      )
+    }
+    paths <- fastkpc_full_cuda_prepared_s_shard_paths(shard_dir, shard_id)
+    if (file.exists(paths$lock_dir)) {
+      stop("Prepared-S shard lock exists: ", basename(paths$lock_dir),
+           call. = FALSE)
+    }
+    .fastkpc_full_cuda_prepared_s_read_shard_core(
+      paths = paths,
+      inputs = inputs,
+      expected_manifest = expected_manifest,
+      target_state_index = target_state_index
+    )
+  })
+  names(completed) <- as.character(shard_ids)
+  completed
+}
+
 fastkpc_full_cuda_prepared_s_read_shard <- function(
     shard_dir, inputs, shard_count, shard_id,
     expected_source_commit = NULL) {
@@ -5041,39 +5148,13 @@ fastkpc_full_cuda_prepared_s_read_shard <- function(
   shard_id <- fastkpc_full_cuda_prepared_s_validate_shard_id(
     shard_id, shard_count
   )
-  assigned <- fastkpc_full_cuda_prepared_s_assign_shards(
-    fastkpc_full_cuda_prepared_s_setup_index(inputs), shard_count
-  )
-  context <- fastkpc_full_cuda_prepared_s_output_shard_context(inputs)
-  expected_manifest <- fastkpc_full_cuda_prepared_s_shard_manifest(
-    assigned_setups = assigned,
-    shard_id = shard_id,
+  fastkpc_full_cuda_prepared_s_read_shards(
+    shard_dir = shard_dir,
     inputs = inputs,
-    context = context
-  )
-  expected_source_commit <-
-    fastkpc_full_cuda_prepared_s_validate_expected_source_commit(
-      expected_source_commit
-    )
-  if (!is.null(expected_source_commit)) {
-    expected_manifest$source_commit <- expected_source_commit
-    fastkpc_full_cuda_prepared_s_validate_shard_manifest_structure(
-      expected_manifest
-    )
-  }
-  paths <- fastkpc_full_cuda_prepared_s_shard_paths(shard_dir, shard_id)
-  if (file.exists(paths$lock_dir)) {
-    stop("Prepared-S shard lock exists: ", basename(paths$lock_dir),
-         call. = FALSE)
-  }
-  target_state_index <-
-    .fastkpc_full_cuda_target_state_input_index(inputs)
-  .fastkpc_full_cuda_prepared_s_read_shard_core(
-    paths = paths,
-    inputs = inputs,
-    expected_manifest = expected_manifest,
-    target_state_index = target_state_index
-  )
+    shard_count = shard_count,
+    shard_ids = as.integer(shard_id),
+    expected_source_commit = expected_source_commit
+  )[[1L]]
 }
 
 .fastkpc_full_cuda_prepared_s_atomic_write_shard <- function(

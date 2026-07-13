@@ -656,6 +656,23 @@ assert_true(
 local({
   source_commit_a <- first$payload$manifest$source_commit
   source_commit_b <- paste(rep("b", 40L), collapse = "")
+  batch_dir <- tempfile("prepared-s-batch-reader-")
+  batch_first <- fastkpc_full_cuda_run_prepared_s_shard(
+    inputs = fixture_inputs,
+    shard_count = 3L,
+    shard_id = 0L,
+    output_dir = batch_dir
+  )
+  batch_second <- fastkpc_full_cuda_run_prepared_s_shard(
+    inputs = fixture_inputs,
+    shard_count = 3L,
+    shard_id = 1L,
+    output_dir = batch_dir
+  )
+  assert_true(
+    batch_first$status == "written" && batch_second$status == "written",
+    "batch reader fixture must write two authenticated Prepared-S shards"
+  )
   original_runtime_identity <- fastkpc_full_cuda_census_runtime_identity
   on.exit(
     assign(
@@ -674,6 +691,156 @@ local({
     },
     envir = .GlobalEnv
   )
+
+  preparation_calls <- new.env(parent = emptyenv())
+  preparation_calls$assignment <- 0L
+  preparation_calls$output_context <- 0L
+  preparation_calls$target_state_index <- 0L
+  original_assign_shards <- fastkpc_full_cuda_prepared_s_assign_shards
+  original_output_context <- fastkpc_full_cuda_prepared_s_output_shard_context
+  original_target_state_index <- .fastkpc_full_cuda_target_state_input_index
+  on.exit(
+    assign(
+      "fastkpc_full_cuda_prepared_s_assign_shards",
+      original_assign_shards,
+      envir = .GlobalEnv
+    ),
+    add = TRUE
+  )
+  on.exit(
+    assign(
+      "fastkpc_full_cuda_prepared_s_output_shard_context",
+      original_output_context,
+      envir = .GlobalEnv
+    ),
+    add = TRUE
+  )
+  on.exit(
+    assign(
+      ".fastkpc_full_cuda_target_state_input_index",
+      original_target_state_index,
+      envir = .GlobalEnv
+    ),
+    add = TRUE
+  )
+  assign(
+    "fastkpc_full_cuda_prepared_s_assign_shards",
+    function(setup_index, shard_count) {
+      preparation_calls$assignment <- preparation_calls$assignment + 1L
+      original_assign_shards(setup_index, shard_count)
+    },
+    envir = .GlobalEnv
+  )
+  assign(
+    "fastkpc_full_cuda_prepared_s_output_shard_context",
+    function(inputs) {
+      preparation_calls$output_context <-
+        preparation_calls$output_context + 1L
+      original_output_context(inputs)
+    },
+    envir = .GlobalEnv
+  )
+  assign(
+    ".fastkpc_full_cuda_target_state_input_index",
+    function(inputs) {
+      preparation_calls$target_state_index <-
+        preparation_calls$target_state_index + 1L
+      original_target_state_index(inputs)
+    },
+    envir = .GlobalEnv
+  )
+
+  batch_replayed <- fastkpc_full_cuda_prepared_s_read_shards(
+    shard_dir = batch_dir,
+    inputs = fixture_inputs,
+    shard_count = 3L,
+    shard_ids = c(1L, 0L),
+    expected_source_commit = source_commit_a
+  )
+  assert_true(
+    identical(names(batch_replayed), c("1", "0")) &&
+      identical(batch_replayed[[1L]]$payload, batch_second$payload) &&
+      identical(batch_replayed[[2L]]$payload, batch_first$payload) &&
+      preparation_calls$assignment == 1L &&
+      preparation_calls$output_context == 1L &&
+      preparation_calls$target_state_index == 1L,
+    paste(
+      "batch reader must preserve requested authenticated payload order",
+      "and prepare shared assignment, output context, and target index once"
+    )
+  )
+
+  assert_error(
+    fastkpc_full_cuda_prepared_s_read_shards(
+      shard_dir = batch_dir,
+      inputs = fixture_inputs,
+      shard_count = 3L,
+      shard_ids = c(1L, 0L)
+    ),
+    "Prepared-S shard manifest mismatch",
+    "default batch reader must reject a historical source commit"
+  )
+  assert_error(
+    fastkpc_full_cuda_prepared_s_read_shards(
+      shard_dir = batch_dir,
+      inputs = fixture_inputs,
+      shard_count = 3L,
+      shard_ids = c(1L, 0L),
+      expected_source_commit = source_commit_b
+    ),
+    "Prepared-S shard manifest mismatch",
+    "batch reader must reject an unauthenticated requested source commit"
+  )
+  assign(
+    "fastkpc_full_cuda_census_runtime_identity",
+    function() {
+      identity <- original_runtime_identity()
+      identity$source_commit <- source_commit_b
+      identity$BLAS_identity <- "non-source-runtime-identity-mismatch"
+      identity
+    },
+    envir = .GlobalEnv
+  )
+  assert_error(
+    fastkpc_full_cuda_prepared_s_read_shards(
+      shard_dir = batch_dir,
+      inputs = fixture_inputs,
+      shard_count = 3L,
+      shard_ids = c(1L, 0L),
+      expected_source_commit = source_commit_a
+    ),
+    "Prepared-S shard manifest mismatch",
+    "batch reader must reject a non-source runtime identity mismatch"
+  )
+  assign(
+    "fastkpc_full_cuda_census_runtime_identity",
+    function() {
+      identity <- original_runtime_identity()
+      identity$source_commit <- source_commit_b
+      identity
+    },
+    envir = .GlobalEnv
+  )
+  invalid_batch_shard_ids <- list(
+    duplicate = c(0L, 0L),
+    empty = integer(),
+    out_of_range = c(0L, 3L),
+    attributed = structure(0:1, note = "unallowed"),
+    non_integer = c(0, 1)
+  )
+  for (label in names(invalid_batch_shard_ids)) {
+    assert_error(
+      fastkpc_full_cuda_prepared_s_read_shards(
+        shard_dir = batch_dir,
+        inputs = fixture_inputs,
+        shard_count = 3L,
+        shard_ids = invalid_batch_shard_ids[[label]],
+        expected_source_commit = source_commit_a
+      ),
+      "shard_ids",
+      paste("batch reader shard_ids must reject", label, "input")
+    )
+  }
 
   assert_error(
     fastkpc_full_cuda_prepared_s_read_shard(
@@ -1244,6 +1411,12 @@ assert_true(
 reader_formals <- names(formals(
   fastkpc_full_cuda_prepared_s_read_shard
 ))
+batch_reader_formals <- names(formals(
+  fastkpc_full_cuda_prepared_s_read_shards
+))
+writer_formals <- names(formals(
+  fastkpc_full_cuda_run_prepared_s_shard
+))
 context_validator_formals <- names(formals(
   fastkpc_full_cuda_prepared_s_validate_output_shard_context
 ))
@@ -1263,6 +1436,29 @@ assert_true(
       c("paths", "expected_manifest", forbidden_public_formals)
     )) == 0L,
   "public shard reader must accept only canonical directory and layout"
+)
+assert_true(
+  identical(
+    batch_reader_formals,
+    c(
+      "shard_dir", "inputs", "shard_count", "shard_ids",
+      "expected_source_commit"
+    )
+  ) &&
+    length(intersect(
+      batch_reader_formals,
+      c("paths", "expected_manifest", forbidden_public_formals)
+    )) == 0L &&
+    !"expected_source_commit" %in% writer_formals &&
+    length(intersect(
+      writer_formals,
+      c("context", "assigned_setups", "expected_manifest",
+        "target_state_index", "target_state_context")
+    )) == 0L,
+  paste(
+    "only public readers may authorize historical source commits or",
+    "accept generic prepared-shard context overrides"
+  )
 )
 assert_true(
   identical(
