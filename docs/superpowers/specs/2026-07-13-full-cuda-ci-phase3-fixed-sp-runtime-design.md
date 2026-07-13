@@ -659,8 +659,10 @@ The primary solve path:
 - leaves residuals on device;
 - returns compact status and timing metadata only;
 - never calls `cudaDeviceSynchronize` after every small kernel;
-- uses one event or stream synchronization point per batch when host status is
-  required.
+- uses one final completion event per batch when host status is required;
+- for a batch containing declared QR targets, permits at most one additional
+  compact QR checkpoint so the host can enqueue required CUDA SVD reroutes;
+- never synchronizes or copies diagnostics once per target.
 
 The shadow materializer is an explicit observer. It increments:
 
@@ -732,6 +734,9 @@ implicit_residual_d2h_count and bytes
 shadow_materialize_count and bytes
 batch_event_record_count
 batch_event_wait_count
+qr_checkpoint_record_count
+qr_checkpoint_wait_count
+target_level_stable_sync_count
 cuda_device_synchronize_count
 ```
 
@@ -769,6 +774,7 @@ per_target_allocation_count_after_warmup          = 0
 per_target_handle_create_count                    = 0
 implicit_residual_d2h_count                       = 0
 cuda_device_synchronize_count during solves       = 0
+target_level_stable_sync_count                    = 0
 unknown_fallback_count                            = 0
 cpu_fallback_count                                = 0
 approximate_backend_count                         = 0
