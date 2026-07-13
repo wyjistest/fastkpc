@@ -780,15 +780,22 @@ cpu_fallback_count                                = 0
 approximate_backend_count                         = 0
 ```
 
-Across the full run:
+Within each execution session that computes at least one shard:
 
 ```text
 runtime context creates                           = 1
-setup H2D uploads                                 = 8,634
-prepared handle creates                           = 8,634
+runtime context destroys                          = 1
 all prepared handles destroyed                    = TRUE
 all residual tokens released                      = TRUE
 ```
+
+A pure resume session that reuses an already complete artifact creates zero
+CUDA contexts. An uninterrupted canonical full run therefore has one session
+and one context. A restartable artifact may contain shards from multiple
+cleanly closed sessions; its aggregate context-create count equals its
+execution-session count, while setup uploads and prepared-handle creates
+across accepted shards must still total exactly `8,634`. Shards referencing an
+incomplete session are not reusable and must be recomputed.
 
 ## Numerical Validation Gates
 
