@@ -35,22 +35,31 @@ catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
             "cancer_RD-causalDiscoveryInput.rds")
 )
 iteration <- fastkpc_full_cuda_fixed_sp_scope(catalog, "iteration")
-stable_target <- iteration$target_rows[
-  iteration$target_rows$planned_route != "CHOLESKY_BATCHED",
-  , drop = FALSE
-][1L, , drop = FALSE]
-stable_key <- stable_target$prepared_s_key_sha256[[1L]]
-stable_scope <- iteration
-stable_scope$setup_rows <- iteration$setup_rows[
-  iteration$setup_rows$prepared_s_key_sha256 == stable_key,
+routes_by_setup <- split(
+  as.character(iteration$target_rows$planned_route),
+  as.character(iteration$target_rows$prepared_s_key_sha256)
+)
+mixed_keys <- names(routes_by_setup)[vapply(routes_by_setup, function(routes) {
+  any(routes == "CHOLESKY_BATCHED") &&
+    any(routes != "CHOLESKY_BATCHED")
+}, logical(1L))]
+assert_true(length(mixed_keys) >= 1L,
+            "iteration scope contains an authenticated mixed-route setup")
+mixed_key <- sort(mixed_keys, method = "radix")[[1L]]
+mixed_scope <- iteration
+mixed_scope$setup_rows <- iteration$setup_rows[
+  iteration$setup_rows$prepared_s_key_sha256 == mixed_key,
   , drop = FALSE
 ]
-stable_scope$target_rows <- stable_target
-stable_rank <- match(stable_key, catalog$setup_index$prepared_s_key_sha256)
-stable_scope$shard_ids <- as.integer(
-  (stable_rank - 1L) %% catalog$catalog_contract$shard_count
+mixed_scope$target_rows <- iteration$target_rows[
+  iteration$target_rows$prepared_s_key_sha256 == mixed_key,
+  , drop = FALSE
+]
+mixed_rank <- match(mixed_key, catalog$setup_index$prepared_s_key_sha256)
+mixed_scope$shard_ids <- as.integer(
+  (mixed_rank - 1L) %% catalog$catalog_contract$shard_count
 )
-batches <- fastkpc_full_cuda_fixed_sp_batches(catalog, stable_scope)
+batches <- fastkpc_full_cuda_fixed_sp_batches(catalog, mixed_scope)
 
 subset_target <- function(batch, index) {
   list(
@@ -66,7 +75,20 @@ subset_target <- function(batch, index) {
   )
 }
 
-stable_batch <- subset_target(batches[[1L]], 1L)
+mixed_batch <- batches[[mixed_key]]
+safe_batch <- subset_target(
+  mixed_batch, which(mixed_batch$planned_route == "CHOLESKY_BATCHED")[[1L]]
+)
+stable_batch <- subset_target(
+  mixed_batch, which(mixed_batch$planned_route != "CHOLESKY_BATCHED")[[1L]]
+)
+assert_true(
+  nrow(safe_batch$target_rows) == 1L &&
+    ncol(safe_batch$Y) == 1L && ncol(safe_batch$SP) == 1L &&
+    ncol(safe_batch$oracle_nullspace_rhs) == 1L &&
+    identical(safe_batch$planned_route, "CHOLESKY_BATCHED"),
+  "focused batch preserves exactly one authenticated safe target"
+)
 assert_true(
   nrow(stable_batch$target_rows) == 1L &&
     ncol(stable_batch$Y) == 1L && ncol(stable_batch$SP) == 1L &&
@@ -75,15 +97,37 @@ assert_true(
   "focused batch preserves exactly one stable target"
 )
 stable_dto <- fastkpc_full_cuda_fixed_sp_native_dto(stable_batch$setup)
+safe_native_batch <- fastkpc_full_cuda_fixed_sp_native_batch(
+  safe_batch, stable_dto
+)
 stable_native_batch <- fastkpc_full_cuda_fixed_sp_native_batch(
   stable_batch, stable_dto
 )
 assert_true(
-  identical(names(stable_native_batch),
-            c("Y", "SP", "planned_route", "target_keys", "target_count")) &&
+  identical(names(safe_native_batch), names(stable_native_batch)) &&
+    identical(names(stable_native_batch),
+              c("Y", "SP", "planned_route", "target_keys", "target_count")) &&
+    safe_native_batch$target_count == 1L &&
     stable_native_batch$target_count == 1L,
   "production native batch excludes the CPU oracle RHS"
 )
+safe_oracle <- fastkpc_mgcv_magic_fixed_sp_from_prepared(
+  prepared_setup = safe_batch$setup,
+  target_state = list(
+    row = safe_batch$target_rows,
+    y = as.numeric(safe_batch$Y[, 1L])
+  )
+)
+safe_oracle$rss <- sum(safe_oracle$residuals^2)
+
+max_abs_error <- function(actual, expected) {
+  max(abs(as.numeric(actual) - as.numeric(expected)))
+}
+relative_l2_error <- function(actual, expected) {
+  difference <- as.numeric(actual) - as.numeric(expected)
+  sqrt(sum(difference^2)) / max(sqrt(sum(as.numeric(expected)^2)),
+                                .Machine$double.xmin)
+}
 
 explicit_dto <- stable_dto
 explicit_q <- stable_dto$coefficient_dim - 1L
@@ -172,6 +216,219 @@ assert_error(
   "direct native solve rejects an attributed Y dim vector"
 )
 
+task7_outputs <- c("coefficients", "fitted", "residuals", "rss", "rhs")
+materializer_available <- exists(
+  "fixed_sp_cuda_materialize_shadow", mode = "function", inherits = TRUE
+)
+safe_token <- tryCatch(
+  fixed_sp_cuda_solve_batch(
+    stable_handle, safe_native_batch$Y, safe_native_batch$SP,
+    safe_native_batch$planned_route, safe_native_batch$target_keys,
+    outputs = task7_outputs
+  ),
+  error = identity
+)
+assert_true(
+  materializer_available && !inherits(safe_token, "error"),
+  paste0(
+    "Task 7 safe solve and materializer must be available; materializer=",
+    materializer_available, "; safe_solve=",
+    if (inherits(safe_token, "error")) conditionMessage(safe_token) else "OK"
+  )
+)
+on.exit(try(fixed_sp_cuda_residual_free(safe_token), silent = TRUE),
+        add = TRUE)
+safe_info <- fixed_sp_cuda_residual_info(safe_token)
+safe_runtime_info <- fixed_sp_cuda_runtime_info(runtime)
+safe_prepared_info <- fixed_sp_cuda_prepared_info(stable_handle)
+assert_true(
+  identical(safe_info$planned_route, "CHOLESKY_BATCHED") &&
+    identical(safe_info$executed_route, "CHOLESKY_BATCHED") &&
+    identical(safe_info$reroute_reason, "") &&
+    identical(safe_info$solver_status, "OK_CHOLESKY_SINGLE") &&
+    !isTRUE(safe_info$true_batched_kernel) &&
+    safe_info$true_batched_target_count == 0L &&
+    safe_info$planned_cholesky_target_count == 1L &&
+    safe_info$executed_cholesky_target_count == 1L,
+  "safe target reports a single-target Cholesky execution without batching"
+)
+assert_true(
+  safe_info$rhs_device_build_count == 1L &&
+    identical(safe_info$rhs_authority, "cuda-x0-transpose-y") &&
+    isTRUE(safe_info$full_cuda_data_plane) &&
+    safe_info$implicit_residual_d2h_count == 0L &&
+    safe_info$shadow_materialize_call_count == 0L &&
+    safe_info$shadow_materialize_target_count == 0L &&
+    safe_info$shadow_d2h_bytes == 0,
+  "safe solve builds its RHS on CUDA without an implicit D2H"
+)
+assert_true(
+  safe_runtime_info$cholesky_factor_checkpoint_record_count == 1L &&
+    safe_runtime_info$cholesky_factor_checkpoint_wait_count == 1L &&
+    safe_runtime_info$cholesky_solve_checkpoint_record_count == 1L &&
+    safe_runtime_info$cholesky_solve_checkpoint_wait_count == 1L &&
+    safe_runtime_info$cuda_device_synchronize_count == 0L,
+  "first safe solve uses separate factor and solve checkpoints exactly once"
+)
+
+safe_shadow <- fixed_sp_cuda_materialize_shadow(
+  safe_token, outputs = task7_outputs
+)
+assert_true(
+  identical(names(safe_shadow), task7_outputs) &&
+    identical(dim(safe_shadow$coefficients),
+              c(stable_dto$coefficient_dim, 1L)) &&
+    identical(dim(safe_shadow$fitted), c(stable_dto$n, 1L)) &&
+    identical(dim(safe_shadow$residuals), c(stable_dto$n, 1L)) &&
+    identical(length(safe_shadow$rss), 1L) &&
+    identical(dim(safe_shadow$rhs), c(stable_dto$null_dim, 1L)) &&
+    all(vapply(safe_shadow, function(value) all(is.finite(value)), logical(1L))),
+  "safe shadow materializes finite requested outputs with canonical shapes"
+)
+coefficient_max_abs <- max_abs_error(
+  safe_shadow$coefficients, safe_oracle$coefficients
+)
+coefficient_relative_l2 <- relative_l2_error(
+  safe_shadow$coefficients, safe_oracle$coefficients
+)
+fitted_max_abs <- max_abs_error(safe_shadow$fitted, safe_oracle$fitted)
+fitted_relative_l2 <- relative_l2_error(
+  safe_shadow$fitted, safe_oracle$fitted
+)
+residual_max_abs <- max_abs_error(
+  safe_shadow$residuals, safe_oracle$residuals
+)
+residual_relative_l2 <- relative_l2_error(
+  safe_shadow$residuals, safe_oracle$residuals
+)
+rss_max_abs <- max_abs_error(safe_shadow$rss, safe_oracle$rss)
+rss_relative_l2 <- relative_l2_error(safe_shadow$rss, safe_oracle$rss)
+rhs_max_abs <- max_abs_error(
+  safe_shadow$rhs, safe_batch$oracle_nullspace_rhs
+)
+assert_true(
+  coefficient_max_abs < 1e-7 && coefficient_relative_l2 < 1e-7 &&
+    fitted_max_abs < 1e-7 && fitted_relative_l2 < 1e-7 &&
+    residual_max_abs < 1e-7 && residual_relative_l2 < 1e-7 &&
+    rss_max_abs < 1e-7 && rss_relative_l2 < 1e-7,
+  "safe shadow matches the Phase 2 prepared fixed-sp oracle"
+)
+assert_true(rhs_max_abs < 1e-12,
+            "CUDA X_null transpose Y matches the authenticated RHS oracle")
+
+safe_info_after_shadow <- fixed_sp_cuda_residual_info(safe_token)
+expected_safe_d2h_bytes <- 8 * (
+  stable_dto$coefficient_dim + 2 * stable_dto$n + 1L + stable_dto$null_dim
+)
+assert_true(
+  safe_info_after_shadow$shadow_materialize_call_count == 1L &&
+    safe_info_after_shadow$shadow_materialize_target_count == 1L &&
+    identical(safe_info_after_shadow$shadow_d2h_bytes,
+              as.double(expected_safe_d2h_bytes)) &&
+    safe_info_after_shadow$implicit_residual_d2h_count == 0L &&
+    identical(safe_info_after_shadow$solver_status,
+              safe_info$solver_status) &&
+    identical(safe_info_after_shadow$executed_route,
+              safe_info$executed_route) &&
+    isTRUE(fixed_sp_cuda_prepared_info(stable_handle)$output_slot_leased),
+  "explicit safe shadow counts only requested D2H and preserves ownership"
+)
+
+safe_result_hash <- fastkpc_full_cuda_census_metadata_hash(list(
+  outputs = safe_shadow,
+  planned_route = safe_info$planned_route,
+  executed_route = safe_info$executed_route,
+  reroute_reason = safe_info$reroute_reason,
+  solver_status = safe_info$solver_status
+))
+fixed_sp_cuda_residual_release(safe_token)
+fixed_sp_cuda_residual_free(safe_token)
+assert_true(!isTRUE(fixed_sp_cuda_prepared_info(
+  stable_handle
+)$output_slot_leased), "safe token is released before stable reuse")
+
+stable_after_safe_token <- fixed_sp_cuda_solve_batch(
+  stable_handle, stable_native_batch$Y, stable_native_batch$SP,
+  stable_native_batch$planned_route, stable_native_batch$target_keys,
+  outputs = task7_outputs
+)
+on.exit(try(fixed_sp_cuda_residual_free(stable_after_safe_token), silent = TRUE),
+        add = TRUE)
+stable_after_safe_shadow <- fixed_sp_cuda_materialize_shadow(
+  stable_after_safe_token, outputs = task7_outputs
+)
+stable_after_safe_info <- fixed_sp_cuda_residual_info(stable_after_safe_token)
+assert_true(
+  identical(names(stable_after_safe_shadow), task7_outputs) &&
+    identical(dim(stable_after_safe_shadow$coefficients),
+              c(stable_dto$coefficient_dim, 1L)) &&
+    identical(dim(stable_after_safe_shadow$fitted), c(stable_dto$n, 1L)) &&
+    identical(dim(stable_after_safe_shadow$residuals), c(stable_dto$n, 1L)) &&
+    identical(length(stable_after_safe_shadow$rss), 1L) &&
+    identical(dim(stable_after_safe_shadow$rhs),
+              c(stable_dto$null_dim, 1L)) &&
+    all(vapply(stable_after_safe_shadow, function(value) {
+      all(is.na(value))
+    }, logical(1L))),
+  "same-handle stable shadow returns explicit NA without prior-output leakage"
+)
+assert_true(
+  identical(stable_after_safe_info$solver_status,
+            "ERR_STABLE_PATH_NOT_IMPLEMENTED") &&
+    stable_after_safe_info$shadow_materialize_call_count == 1L &&
+    stable_after_safe_info$shadow_materialize_target_count == 1L &&
+    stable_after_safe_info$shadow_d2h_bytes == 0 &&
+    stable_after_safe_info$implicit_residual_d2h_count == 0L,
+  "stable shadow records the call without reading a failed device column"
+)
+fixed_sp_cuda_residual_release(stable_after_safe_token)
+fixed_sp_cuda_residual_free(stable_after_safe_token)
+
+repeat_token <- fixed_sp_cuda_solve_batch(
+  stable_handle, safe_native_batch$Y, safe_native_batch$SP,
+  safe_native_batch$planned_route, safe_native_batch$target_keys,
+  outputs = task7_outputs
+)
+on.exit(try(fixed_sp_cuda_residual_free(repeat_token), silent = TRUE),
+        add = TRUE)
+repeat_shadow <- fixed_sp_cuda_materialize_shadow(
+  repeat_token, outputs = task7_outputs
+)
+repeat_info <- fixed_sp_cuda_residual_info(repeat_token)
+repeat_result_hash <- fastkpc_full_cuda_census_metadata_hash(list(
+  outputs = repeat_shadow,
+  planned_route = repeat_info$planned_route,
+  executed_route = repeat_info$executed_route,
+  reroute_reason = repeat_info$reroute_reason,
+  solver_status = repeat_info$solver_status
+))
+assert_true(identical(repeat_result_hash, safe_result_hash),
+            "repeated safe solve has an exact same-environment result hash")
+repeat_runtime_info <- fixed_sp_cuda_runtime_info(runtime)
+repeat_prepared_info <- fixed_sp_cuda_prepared_info(stable_handle)
+runtime_reuse_fields <- c(
+  "runtime_context_create_count", "stream_create_count",
+  "cublas_handle_create_count", "cusolver_handle_create_count",
+  "workspace_grow_count", "workspace_bytes", "cublas_workspace_bytes"
+)
+prepared_reuse_fields <- c(
+  "setup_h2d_upload_count", "setup_h2d_bytes",
+  "coefficient_output_capacity", "generation"
+)
+assert_true(
+  identical(safe_runtime_info[runtime_reuse_fields],
+            repeat_runtime_info[runtime_reuse_fields]) &&
+    identical(safe_prepared_info[prepared_reuse_fields],
+              repeat_prepared_info[prepared_reuse_fields]) &&
+    safe_info$per_target_allocation_count_after_warmup == 0L &&
+    repeat_info$per_target_allocation_count_after_warmup == 0L &&
+    safe_info$per_target_handle_create_count == 0L &&
+    repeat_info$per_target_handle_create_count == 0L,
+  "repeat solve reuses workspace, setup uploads, streams, handles, and slots"
+)
+fixed_sp_cuda_residual_release(repeat_token)
+fixed_sp_cuda_residual_free(repeat_token)
+
 solve_stable <- function(Y = stable_native_batch$Y,
                          SP = stable_native_batch$SP,
                          route = stable_native_batch$planned_route) {
@@ -250,15 +507,6 @@ assert_error(
   solve_stable(Y = replace(stable_native_batch$Y, 1L, NA_real_)),
   "Y must be finite", "nonfinite Y must fail closed"
 )
-
-assert_error(
-  solve_stable(route = "CHOLESKY_BATCHED"),
-  "Phase 3A Cholesky solve is not implemented",
-  "Task 6 Cholesky input must throw clearly"
-)
-assert_true(!isTRUE(fixed_sp_cuda_prepared_info(
-  stable_handle
-)$output_slot_leased), "Cholesky exception releases its acquired lease")
 
 stale_token <- solve_stable()
 stale_generation <- fixed_sp_cuda_residual_info(
@@ -356,4 +604,16 @@ assert_true(
 fixed_sp_cuda_prepared_free(poison_handle)
 fixed_sp_cuda_runtime_free(poison_runtime)
 
-cat("PASS Phase 3A stable fixed-sp solve\n")
+cat(sprintf(
+  paste0(
+    "METRICS coefficient_max_abs=%.17g coefficient_relative_l2=%.17g ",
+    "fitted_max_abs=%.17g fitted_relative_l2=%.17g ",
+    "residual_max_abs=%.17g residual_relative_l2=%.17g ",
+    "rss_max_abs=%.17g rss_relative_l2=%.17g rhs_max_abs=%.17g\n"
+  ),
+  coefficient_max_abs, coefficient_relative_l2,
+  fitted_max_abs, fitted_relative_l2,
+  residual_max_abs, residual_relative_l2,
+  rss_max_abs, rss_relative_l2, rhs_max_abs
+))
+cat("PASS Phase 3A safe and stable fixed-sp solve\n")

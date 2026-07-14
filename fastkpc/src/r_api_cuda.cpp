@@ -345,6 +345,8 @@ std::uint32_t fixed_sp_output_mask(SEXP outputs_s) {
       bit = fastkpc::FixedSpOutputResiduals;
     } else if (output == "rss") {
       bit = fastkpc::FixedSpOutputRss;
+    } else if (output == "rhs") {
+      bit = fastkpc::FixedSpOutputRhs;
     } else {
       Rcpp::stop("outputs contains an unknown fixed-sp output");
     }
@@ -3879,6 +3881,77 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
   result["shadow_d2h_bytes"] = static_cast<double>(info.shadow_d2h_bytes);
   result["owner_generation"] = static_cast<double>(info.owner_generation);
   result["slot_generation"] = static_cast<double>(info.slot_generation);
+  return result;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_materialize_shadow(
+    SEXP residual_s,
+    SEXP outputs_s) {
+  BEGIN_RCPP
+  FixedSpResidualHolder* holder =
+    fixed_sp_cuda_residual_holder(residual_s, true);
+  const std::uint32_t output_mask = fixed_sp_output_mask(outputs_s);
+  const fastkpc::FixedSpShadowResult shadow =
+    fastkpc::materialize_fixed_sp_shadow(*holder, output_mask);
+  const std::size_t targets = static_cast<std::size_t>(shadow.target_count);
+  if (shadow.successful_targets.size() != targets) {
+    Rcpp::stop("fixed-sp shadow success metadata size mismatch");
+  }
+
+  auto matrix_from_shadow = [&](const std::vector<double>& values,
+                                int rows,
+                                const char* name) {
+    const std::size_t expected =
+      static_cast<std::size_t>(rows) * targets;
+    if (values.size() != expected) {
+      Rcpp::stop(std::string(name) + " shadow size mismatch");
+    }
+    Rcpp::NumericMatrix matrix(rows, shadow.target_count);
+    std::fill(matrix.begin(), matrix.end(), NA_REAL);
+    for (std::size_t target = 0; target < targets; ++target) {
+      if (shadow.successful_targets[target] == 0U) continue;
+      const std::size_t offset = static_cast<std::size_t>(rows) * target;
+      std::copy(values.begin() + offset,
+                values.begin() + offset + static_cast<std::size_t>(rows),
+                matrix.begin() + offset);
+    }
+    return matrix;
+  };
+
+  Rcpp::List result;
+  if ((output_mask & fastkpc::FixedSpOutputCoefficients) != 0U) {
+    result.push_back(matrix_from_shadow(
+      shadow.coefficients, shadow.coefficient_dim, "coefficient"
+    ), "coefficients");
+  }
+  if ((output_mask & fastkpc::FixedSpOutputFitted) != 0U) {
+    result.push_back(matrix_from_shadow(
+      shadow.fitted, shadow.n, "fitted"
+    ), "fitted");
+  }
+  if ((output_mask & fastkpc::FixedSpOutputResiduals) != 0U) {
+    result.push_back(matrix_from_shadow(
+      shadow.residuals, shadow.n, "residual"
+    ), "residuals");
+  }
+  if ((output_mask & fastkpc::FixedSpOutputRss) != 0U) {
+    if (shadow.rss.size() != targets) {
+      Rcpp::stop("RSS shadow size mismatch");
+    }
+    Rcpp::NumericVector rss(shadow.target_count, NA_REAL);
+    for (std::size_t target = 0; target < targets; ++target) {
+      if (shadow.successful_targets[target] != 0U) {
+        rss[static_cast<R_xlen_t>(target)] = shadow.rss[target];
+      }
+    }
+    result.push_back(rss, "rss");
+  }
+  if ((output_mask & fastkpc::FixedSpOutputRhs) != 0U) {
+    result.push_back(matrix_from_shadow(
+      shadow.rhs, shadow.null_dim, "RHS"
+    ), "rhs");
+  }
   return result;
   END_RCPP
 }
@@ -8098,6 +8171,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fixed_sp_cuda_test_prepared_static_shadow", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_prepared_static_shadow), 1},
   {"C_fixed_sp_cuda_solve_batch", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_solve_batch), 6},
   {"C_fixed_sp_cuda_residual_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_info), 1},
+  {"C_fixed_sp_cuda_materialize_shadow", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_materialize_shadow), 2},
   {"C_fixed_sp_cuda_residual_release", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_release), 1},
   {"C_fixed_sp_cuda_residual_free", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_free), 1},
   {"C_fixed_sp_cuda_test_coefficient_shadow", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_coefficient_shadow), 1},

@@ -19,12 +19,13 @@ enum FixedSpOutputMask : std::uint32_t {
   FixedSpOutputCoefficients = 1U << 0,
   FixedSpOutputFitted = 1U << 1,
   FixedSpOutputResiduals = 1U << 2,
-  FixedSpOutputRss = 1U << 3
+  FixedSpOutputRss = 1U << 3,
+  FixedSpOutputRhs = 1U << 4
 };
 
 constexpr std::uint32_t kFixedSpPublicOutputMask =
   FixedSpOutputCoefficients | FixedSpOutputFitted |
-  FixedSpOutputResiduals | FixedSpOutputRss;
+  FixedSpOutputResiduals | FixedSpOutputRss | FixedSpOutputRhs;
 
 enum class FixedSpStatus : int {
   OkCholeskyBatched = 0,
@@ -180,6 +181,20 @@ struct DeviceCoefficientShadow {
   int coefficient_dim = 0;
   int target_count = 0;
   std::vector<double> coefficients;
+};
+
+struct FixedSpShadowResult {
+  int n = 0;
+  int coefficient_dim = 0;
+  int null_dim = 0;
+  int target_count = 0;
+  std::uint32_t output_mask = 0;
+  std::vector<std::uint8_t> successful_targets;
+  std::vector<double> coefficients;
+  std::vector<double> fitted;
+  std::vector<double> residuals;
+  std::vector<double> rss;
+  std::vector<double> rhs;
 };
 
 const char* fixed_sp_status_name(FixedSpStatus status);

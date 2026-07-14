@@ -1210,6 +1210,15 @@ fixed_sp_cuda_residual_info <- function(token) {
   .Call("C_fixed_sp_cuda_residual_info", token, PACKAGE = "fastkpc_cuda")
 }
 
+fixed_sp_cuda_materialize_shadow <- function(
+    token, outputs = c("residuals")) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_fixed_sp_cuda_materialize_shadow", token, as.character(outputs),
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
 fixed_sp_cuda_residual_release <- function(token) {
   load_fastkpc_cuda_native()
   invisible(.Call("C_fixed_sp_cuda_residual_release", token,

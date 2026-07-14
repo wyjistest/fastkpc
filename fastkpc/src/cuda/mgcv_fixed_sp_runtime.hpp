@@ -35,6 +35,9 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
   const FixedSpBatchHostView& batch);
 DeviceResidualInfo device_residual_info(
   const std::shared_ptr<DeviceResidualBatch>& token);
+FixedSpShadowResult materialize_fixed_sp_shadow(
+  const std::shared_ptr<DeviceResidualBatch>& token,
+  std::uint32_t output_mask);
 void release_device_residual(
   const std::shared_ptr<DeviceResidualBatch>& token);
 void register_device_residual_consumer_event(
