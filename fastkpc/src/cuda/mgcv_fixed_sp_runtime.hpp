@@ -48,6 +48,12 @@ DeviceCoefficientShadow test_device_residual_coefficient_shadow(
   const std::shared_ptr<DeviceResidualBatch>& token);
 void test_inject_device_residual_consumer_registration_failure(
   const std::shared_ptr<DeviceResidualBatch>& token);
+FixedSpResourceSnapshot test_fixed_sp_cuda_resource_snapshot();
+void test_inject_next_fixed_sp_cuda_resource_acquire_failure(
+  const std::string& resource);
+void test_exercise_fixed_sp_cuda_resource_teardown_failure(
+  const std::string& resource);
+void test_inject_next_fixed_sp_cuda_device_free_failure();
 
 }  // namespace fastkpc
 

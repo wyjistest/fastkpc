@@ -441,6 +441,14 @@ assert_true(
             repeat_runtime_info[runtime_reuse_fields]) &&
     identical(safe_prepared_info[prepared_reuse_fields],
               repeat_prepared_info[prepared_reuse_fields]) &&
+    isTRUE(safe_info$resource_snapshot_captured) &&
+    isTRUE(repeat_info$resource_snapshot_captured) &&
+    safe_info$resource_instrumentation_version == 1L &&
+    repeat_info$resource_instrumentation_version == 1L &&
+    safe_info$resource_allocation_count_before_solve >= 0L &&
+    safe_info$resource_allocation_count_after_solve >= 0L &&
+    safe_info$resource_handle_create_count_before_solve >= 0L &&
+    safe_info$resource_handle_create_count_after_solve >= 0L &&
     safe_info$per_target_allocation_count_after_warmup == 0L &&
     repeat_info$per_target_allocation_count_after_warmup == 0L &&
     safe_info$per_target_handle_create_count == 0L &&

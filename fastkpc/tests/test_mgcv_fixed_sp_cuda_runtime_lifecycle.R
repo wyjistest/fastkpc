@@ -19,6 +19,14 @@ if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
 build_fastkpc_cuda_native(rebuild = TRUE)
 assert_true(fastkpc_cuda_available(), "CUDA must be available")
 
+resource_snapshot <- function() {
+  .Call("C_fixed_sp_cuda_test_resource_snapshot", PACKAGE = "fastkpc_cuda")
+}
+resource_delta <- function(before, after, field) {
+  as.numeric(after[[field]] - before[[field]])
+}
+ledger_before <- resource_snapshot()
+
 runtime <- fixed_sp_cuda_runtime_create(device_id = 0L)
 on.exit(try(fixed_sp_cuda_runtime_free(runtime), silent = TRUE), add = TRUE)
 before <- fixed_sp_cuda_runtime_info(runtime)
@@ -141,6 +149,186 @@ fixed_sp_cuda_runtime_free(runtime)
 assert_error(
   fixed_sp_cuda_runtime_info(runtime),
   "freed", "freed runtime must reject use"
+)
+
+ledger_after <- resource_snapshot()
+resources <- list(
+  cuda_device = c("allocate", "free"),
+  cuda_host = c("allocate", "free"),
+  stream = c("create", "destroy"),
+  event = c("create", "destroy"),
+  cublas_handle = c("create", "destroy"),
+  cusolver_handle = c("create", "destroy")
+)
+for (resource in names(resources)) {
+  verbs <- resources[[resource]]
+  acquire_attempt <- paste(resource, verbs[[1L]], "attempt_count", sep = "_")
+  acquire_success <- paste(resource, verbs[[1L]], "success_count", sep = "_")
+  acquire_failure <- paste(resource, verbs[[1L]], "failure_count", sep = "_")
+  teardown_attempt <- paste(resource, verbs[[2L]], "attempt_count", sep = "_")
+  teardown_success <- paste(resource, verbs[[2L]], "success_count", sep = "_")
+  teardown_failure <- paste(resource, verbs[[2L]], "failure_count", sep = "_")
+  active <- paste(resource, "active_count", sep = "_")
+  acquired_delta <- resource_delta(
+    ledger_before, ledger_after, acquire_success
+  )
+  assert_true(
+    acquired_delta > 0 &&
+      resource_delta(ledger_before, ledger_after, acquire_attempt) ==
+        acquired_delta &&
+      resource_delta(ledger_before, ledger_after, acquire_failure) == 0 &&
+      resource_delta(ledger_before, ledger_after, teardown_attempt) ==
+        acquired_delta &&
+      resource_delta(ledger_before, ledger_after, teardown_success) ==
+        acquired_delta &&
+      resource_delta(ledger_before, ledger_after, teardown_failure) == 0 &&
+      resource_delta(ledger_before, ledger_after, active) == 0,
+    paste(resource, "creation and explicit teardown are balanced")
+  )
+}
+assert_true(
+  resource_delta(ledger_before, ledger_after, "cleanup_error_count") == 0,
+  "scoped explicit cleanup records no teardown errors"
+)
+
+exercise_injected_acquire_failure <- function(resource) {
+  .Call(
+    "C_fixed_sp_cuda_test_inject_next_resource_acquire_failure",
+    resource, PACKAGE = "fastkpc_cuda"
+  )
+  failed_runtime <- NULL
+  on.exit({
+    if (!is.null(failed_runtime)) {
+      try(fixed_sp_cuda_runtime_free(failed_runtime), silent = TRUE)
+    }
+  }, add = TRUE)
+  failed_runtime <- fixed_sp_cuda_runtime_create(device_id = 0L)
+  if (resource %in% c("cuda_device", "cuda_host")) {
+    fixed_sp_cuda_runtime_reserve(
+      failed_runtime, n = 16L, null_dim = 8L, target_count = 1L,
+      penalty_count = 1L, augmented_rows = 16L
+    )
+  }
+  fail(paste(resource, "injected acquisition unexpectedly succeeded"))
+}
+
+for (resource in names(resources)) {
+  failure_before <- resource_snapshot()
+  assert_error(
+    exercise_injected_acquire_failure(resource),
+    "injected tracked fixed-sp resource acquire failure",
+    paste(resource, "acquisition failure is surfaced")
+  )
+  failure_after <- resource_snapshot()
+  verbs <- resources[[resource]]
+  acquire_attempt <- paste(resource, verbs[[1L]], "attempt_count", sep = "_")
+  acquire_success <- paste(resource, verbs[[1L]], "success_count", sep = "_")
+  acquire_failure <- paste(resource, verbs[[1L]], "failure_count", sep = "_")
+  assert_true(
+    resource_delta(failure_before, failure_after, acquire_attempt) == 1 &&
+      resource_delta(failure_before, failure_after, acquire_success) == 0 &&
+      resource_delta(failure_before, failure_after, acquire_failure) == 1 &&
+      all(vapply(names(resources), function(candidate) {
+        active <- paste(candidate, "active_count", sep = "_")
+        identical(failure_after[[active]], failure_before[[active]])
+      }, logical(1L))) &&
+      resource_delta(failure_before, failure_after,
+                     "cleanup_error_count") == 0,
+    paste(resource, "failed acquisition is counted and fully unwound")
+  )
+}
+
+for (resource in names(resources)) {
+  teardown_before <- resource_snapshot()
+  invisible(.Call(
+    "C_fixed_sp_cuda_test_exercise_resource_teardown_failure",
+    resource, PACKAGE = "fastkpc_cuda"
+  ))
+  teardown_after <- resource_snapshot()
+  verbs <- resources[[resource]]
+  acquire_attempt <- paste(resource, verbs[[1L]], "attempt_count", sep = "_")
+  acquire_success <- paste(resource, verbs[[1L]], "success_count", sep = "_")
+  acquire_failure <- paste(resource, verbs[[1L]], "failure_count", sep = "_")
+  teardown_attempt <- paste(resource, verbs[[2L]], "attempt_count", sep = "_")
+  teardown_success <- paste(resource, verbs[[2L]], "success_count", sep = "_")
+  teardown_failure <- paste(resource, verbs[[2L]], "failure_count", sep = "_")
+  active <- paste(resource, "active_count", sep = "_")
+  assert_true(
+    resource_delta(teardown_before, teardown_after, acquire_attempt) == 1 &&
+      resource_delta(teardown_before, teardown_after, acquire_success) == 1 &&
+      resource_delta(teardown_before, teardown_after, acquire_failure) == 0 &&
+      resource_delta(teardown_before, teardown_after, teardown_attempt) == 2 &&
+      resource_delta(teardown_before, teardown_after, teardown_success) == 1 &&
+      resource_delta(teardown_before, teardown_after, teardown_failure) == 1 &&
+      resource_delta(teardown_before, teardown_after, active) == 0 &&
+      resource_delta(teardown_before, teardown_after,
+                     "cleanup_error_count") == 1,
+    paste(resource, "failed noexcept teardown retains and retries ownership")
+  )
+}
+
+growth_runtime <- fixed_sp_cuda_runtime_create(device_id = 0L)
+on.exit(try(fixed_sp_cuda_runtime_free(growth_runtime), silent = TRUE),
+        add = TRUE)
+fixed_sp_cuda_runtime_reserve(
+  growth_runtime, n = 16L, null_dim = 8L, target_count = 1L,
+  penalty_count = 1L, augmented_rows = 16L
+)
+growth_before <- fixed_sp_cuda_runtime_info(growth_runtime)
+growth_ledger_before <- resource_snapshot()
+.Call(
+  "C_fixed_sp_cuda_test_inject_next_device_free_failure",
+  PACKAGE = "fastkpc_cuda"
+)
+assert_error(
+  fixed_sp_cuda_runtime_reserve(
+    growth_runtime, n = 32L, null_dim = 8L, target_count = 1L,
+    penalty_count = 1L, augmented_rows = 32L
+  ),
+  "injected tracked CUDA device free failure",
+  "growth fails closed when replacing an arena cannot free its old owner"
+)
+growth_after <- fixed_sp_cuda_runtime_info(growth_runtime)
+growth_ledger_after <- resource_snapshot()
+assert_true(
+  growth_after$workspace_reserve_count ==
+      growth_before$workspace_reserve_count &&
+    growth_after$workspace_grow_count == growth_before$workspace_grow_count &&
+    growth_after$workspace_bytes == growth_before$workspace_bytes &&
+    resource_delta(growth_ledger_before, growth_ledger_after,
+                   "cuda_device_allocate_success_count") == 1 &&
+    resource_delta(growth_ledger_before, growth_ledger_after,
+                   "cuda_device_free_attempt_count") == 2 &&
+    resource_delta(growth_ledger_before, growth_ledger_after,
+                   "cuda_device_free_success_count") == 1 &&
+    resource_delta(growth_ledger_before, growth_ledger_after,
+                   "cuda_device_free_failure_count") == 1 &&
+    resource_delta(growth_ledger_before, growth_ledger_after,
+                   "cuda_device_active_count") == 0 &&
+    resource_delta(growth_ledger_before, growth_ledger_after,
+                   "cleanup_error_count") == 1,
+  "failed growth retains the old arena and cleans the uncommitted allocation"
+)
+fixed_sp_cuda_runtime_reserve(
+  growth_runtime, n = 16L, null_dim = 8L, target_count = 1L,
+  penalty_count = 1L, augmented_rows = 16L
+)
+growth_active_before_free <- resource_snapshot()
+fixed_sp_cuda_runtime_free(growth_runtime)
+growth_active_after_free <- resource_snapshot()
+for (resource in names(resources)) {
+  active <- paste(resource, "active_count", sep = "_")
+  assert_true(
+    growth_active_after_free[[active]] <= growth_active_before_free[[active]],
+    paste(resource, "cleanup does not increase active ownership")
+  )
+}
+assert_true(
+  all(vapply(names(resources), function(resource) {
+    active <- paste(resource, "active_count", sep = "_")
+    identical(growth_active_after_free[[active]], ledger_after[[active]])
+  }, logical(1L))),
+  "explicit cleanup releases every resource retained after failed growth"
 )
 
 cat("PASS Phase 3 CUDA runtime lifecycle\n")

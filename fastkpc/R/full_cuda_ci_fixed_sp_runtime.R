@@ -1492,25 +1492,40 @@ fastkpc_full_cuda_fixed_sp_phase3a_validate_parity <- function(
     "residual_max_abs_diff", "residual_relative_l2_diff",
     "fitted_max_abs_diff", "fitted_relative_l2_diff"
   )
-  required_fields <- c("planned_route", "solver_status", error_fields)
+  required_fields <- c(
+    "residual_key_sha256", "planned_route",
+    "authenticated_planned_route", "solver_status", error_fields
+  )
   parity_ok <- is.data.frame(target_records) &&
     all(required_fields %in% names(target_records)) &&
     nrow(target_records) == 270L
   if (isTRUE(parity_ok)) {
-    parity_ok <- !anyNA(target_records$planned_route) &&
-      !anyNA(target_records$solver_status)
+    keys <- target_records$residual_key_sha256
+    parity_ok <- is.character(keys) && !anyNA(keys) &&
+      !anyDuplicated(keys) && all(grepl("^[0-9a-f]{64}$", keys)) &&
+      is.character(target_records$planned_route) &&
+      is.character(target_records$authenticated_planned_route) &&
+      !anyNA(target_records$planned_route) &&
+      !anyNA(target_records$authenticated_planned_route) &&
+      !anyNA(target_records$solver_status) &&
+      identical(target_records$planned_route,
+                target_records$authenticated_planned_route)
   }
   if (isTRUE(parity_ok)) {
-    safe <- target_records$planned_route == "CHOLESKY_BATCHED"
+    safe <- target_records$authenticated_planned_route ==
+      "CHOLESKY_BATCHED"
     stable <- !safe
     parity_ok <- sum(safe) == 172L && sum(stable) == 98L &&
+      all(target_records$authenticated_planned_route[stable] %in%
+          c("AUGMENTED_QR", "AUGMENTED_SVD")) &&
       all(target_records$solver_status[safe] == "OK_CHOLESKY_SINGLE") &&
       all(target_records$solver_status[stable] ==
           "ERR_STABLE_PATH_NOT_IMPLEMENTED") &&
       all(vapply(error_fields, function(field) {
         values <- target_records[[field]]
         is.numeric(values) && all(is.finite(values[safe])) &&
-          all(values[safe] < 1e-7) && all(is.na(values[stable]))
+          all(values[safe] >= 0 & values[safe] < 1e-7) &&
+          all(is.na(values[stable]) & !is.nan(values[stable]))
       }, logical(1L)))
   }
   if (!isTRUE(parity_ok)) {
@@ -1518,6 +1533,55 @@ fastkpc_full_cuda_fixed_sp_phase3a_validate_parity <- function(
          call. = FALSE)
   }
   list(safe = safe, stable = stable)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity <- function(
+    descriptors, canonical_target_keys) {
+  canonical_target_keys <- as.character(canonical_target_keys)
+  descriptor_keys <- if (is.list(descriptors)) {
+    vapply(descriptors, function(descriptor) {
+      if (!is.list(descriptor) || !is.list(descriptor$native) ||
+          !is.character(descriptor$native$target_keys) ||
+          length(descriptor$native$target_keys) != 1L ||
+          is.na(descriptor$native$target_keys) ||
+          !nzchar(descriptor$native$target_keys)) {
+        return(NA_character_)
+      }
+      descriptor$native$target_keys[[1L]]
+    }, character(1L), USE.NAMES = FALSE)
+  } else {
+    character()
+  }
+  identity_ok <- length(canonical_target_keys) == 172L &&
+    !anyNA(canonical_target_keys) &&
+    !anyDuplicated(canonical_target_keys) &&
+    all(grepl("^[0-9a-f]{64}$", canonical_target_keys)) &&
+    identical(descriptor_keys, canonical_target_keys)
+  if (!isTRUE(identity_ok)) {
+    stop("Phase 3A benchmark target identity mismatch", call. = FALSE)
+  }
+  list(
+    benchmark_target_count = as.integer(length(canonical_target_keys)),
+    ordered_target_keys = canonical_target_keys,
+    target_key_corpus_hash =
+      fastkpc_full_cuda_census_key_set_hash(canonical_target_keys)
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities <- function(
+    persistent_descriptors, prototype_descriptors, canonical_target_keys) {
+  identities <- list(
+    persistent = fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity(
+      persistent_descriptors, canonical_target_keys
+    ),
+    prototype = fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity(
+      prototype_descriptors, canonical_target_keys
+    )
+  )
+  if (!identical(identities$persistent, identities$prototype)) {
+    stop("Phase 3A benchmark path identity mismatch", call. = FALSE)
+  }
+  identities
 }
 
 fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle <- function(
@@ -1711,6 +1775,7 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
       target = as.integer(batch$target_rows$target[[target_index]]),
       target_count = as.integer(info$target_count),
       planned_route = as.character(info$planned_route),
+      authenticated_planned_route = as.character(target$planned_route),
       executed_route = as.character(info$executed_route),
       reroute_reason = as.character(info$reroute_reason),
       solver_status = as.character(info$solver_status),
@@ -1724,6 +1789,10 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
       cpu_fallback_count = as.integer(info$cpu_fallback_count),
       unknown_fallback_count = as.integer(info$unknown_fallback_count),
       approximate_fallback_count = approximate_fallback_count,
+      resource_snapshot_captured =
+        isTRUE(info$resource_snapshot_captured),
+      resource_instrumentation_version =
+        as.integer(info$resource_instrumentation_version),
       resource_allocation_count_before_solve =
         as.integer(info$resource_allocation_count_before_solve),
       resource_allocation_count_after_solve =
@@ -1762,6 +1831,7 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
   prepared_rows <- vector("list", length(setup_keys))
   target_rows <- vector("list", catalog_records$target_count[[1L]])
   target_row_index <- 0L
+  safe_descriptor_inputs <- list()
   for (setup_index in seq_along(setup_keys)) {
     setup_key <- setup_keys[[setup_index]]
     batch <- batches[[setup_key]]
@@ -1808,6 +1878,10 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
       target_rows[[target_row_index]] <- run_checked_target(
         handle, target, batch, target_index
       )
+      if (identical(target$planned_route, "CHOLESKY_BATCHED")) {
+        safe_descriptor_inputs[[length(safe_descriptor_inputs) + 1L]] <-
+          list(handle = handle, native = target, dto = dto)
+      }
     }
     prepared_rows[[setup_index]]$output_slot_leased_at_end <-
       isTRUE(fixed_sp_cuda_prepared_info(handle)$output_slot_leased)
@@ -1821,28 +1895,28 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
   stable <- parity$stable
 
   safe_descriptors <- list()
-  for (setup_key in setup_keys) {
-    batch <- batches[[setup_key]]
-    dto <- dtos[[setup_key]]
-    native_batch <- fastkpc_full_cuda_fixed_sp_native_batch(batch, dto)
-    safe_indices <- which(native_batch$planned_route == "CHOLESKY_BATCHED")
-    for (target_index in safe_indices) {
-      target <- list(
-        Y = native_batch$Y[, target_index, drop = FALSE],
-        SP = native_batch$SP[, target_index, drop = FALSE],
-        planned_route = native_batch$planned_route[[target_index]],
-        target_keys = native_batch$target_keys[[target_index]],
-        target_count = 1L
+  for (descriptor in safe_descriptor_inputs) {
+    safe_descriptors[[length(safe_descriptors) + 1L]] <- list(
+      handle = descriptor$handle,
+      native = descriptor$native,
+      prototype = fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle(
+        descriptor$dto, descriptor$native$Y[, 1L],
+        descriptor$native$SP[, 1L]
       )
-      safe_descriptors[[length(safe_descriptors) + 1L]] <- list(
-        handle = handles[[setup_key]],
-        native = target,
-        prototype = fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle(
-          dto, target$Y[, 1L], target$SP[, 1L]
-        )
-      )
-    }
+    )
   }
+  persistent_descriptors <- lapply(safe_descriptors, function(descriptor) {
+    descriptor[c("handle", "native")]
+  })
+  prototype_descriptors <- lapply(safe_descriptors, function(descriptor) {
+    descriptor[c("native", "prototype")]
+  })
+  benchmark_path_identities <-
+    fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
+      persistent_descriptors, prototype_descriptors,
+      target_records$residual_key_sha256[safe]
+    )
+  benchmark_identity <- benchmark_path_identities$persistent
 
   timed_persistent_solve <- function(descriptor) {
     .Call(
@@ -1872,7 +1946,7 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
     release_ms <- 0
     free_ms <- 0
     started <- proc.time()[["elapsed"]]
-    for (descriptor in safe_descriptors) {
+    for (descriptor in persistent_descriptors) {
       solve_started <- if (profile) proc.time()[["elapsed"]] else 0
       token <- timed_persistent_solve(descriptor)
       if (profile) {
@@ -1922,7 +1996,7 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
   }
   run_prototype_corpus <- function() {
     started <- proc.time()[["elapsed"]]
-    for (descriptor in safe_descriptors) {
+    for (descriptor in prototype_descriptors) {
       timed_prototype_solve(descriptor)
     }
     as.numeric(1000 * (proc.time()[["elapsed"]] - started))
@@ -1980,6 +2054,11 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
   ]
   timing <- list(
     warmup_count = c(persistent = 1L, prototype = 1L),
+    benchmark_target_count = benchmark_identity$benchmark_target_count,
+    ordered_target_keys = benchmark_identity$ordered_target_keys,
+    target_key_corpus_hash = benchmark_identity$target_key_corpus_hash,
+    persistent_workload_identity = benchmark_path_identities$persistent,
+    prototype_workload_identity = benchmark_path_identities$prototype,
     persistent_raw_ms = persistent_raw_ms,
     prototype_raw_ms = prototype_raw_ms,
     persistent_median_ms = persistent_median_ms,
@@ -2100,6 +2179,8 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
     isTRUE(summary$full_cuda_data_plane) &&
     summary$post_warmup_workspace_grow_count == 0L &&
     summary$cuda_device_synchronize_count == 0L &&
+    all(target_records$resource_snapshot_captured) &&
+    all(target_records$resource_instrumentation_version == 1L) &&
     summary$per_target_allocation_count_after_warmup == 0L &&
     summary$per_target_handle_create_count == 0L &&
     summary$cpu_fallback_count == 0L &&

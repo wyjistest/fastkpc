@@ -84,6 +84,26 @@ struct FixedSpRuntimeInfo {
   bool freed = false;
 };
 
+struct FixedSpResourceLifecycleSnapshot {
+  std::int64_t acquire_attempt_count = 0;
+  std::int64_t acquire_success_count = 0;
+  std::int64_t acquire_failure_count = 0;
+  std::int64_t teardown_attempt_count = 0;
+  std::int64_t teardown_success_count = 0;
+  std::int64_t teardown_failure_count = 0;
+  std::int64_t active_count = 0;
+};
+
+struct FixedSpResourceSnapshot {
+  FixedSpResourceLifecycleSnapshot cuda_device;
+  FixedSpResourceLifecycleSnapshot cuda_host;
+  FixedSpResourceLifecycleSnapshot stream;
+  FixedSpResourceLifecycleSnapshot event;
+  FixedSpResourceLifecycleSnapshot cublas_handle;
+  FixedSpResourceLifecycleSnapshot cusolver_handle;
+  std::int64_t cleanup_error_count = 0;
+};
+
 struct PreparedSHostView {
   std::string dataset_sha256;
   std::string prepared_s_key_sha256;
@@ -160,18 +180,20 @@ struct DeviceResidualInfo {
   int nonfinite_output_count = 0;
   int cpu_fallback_count = 0;
   int unknown_fallback_count = 0;
-  int resource_allocation_count_before_solve = 0;
-  int resource_allocation_count_after_solve = 0;
-  int resource_handle_create_count_before_solve = 0;
-  int resource_handle_create_count_after_solve = 0;
-  int cuda_device_allocation_count_during_solve = 0;
-  int cuda_host_allocation_count_during_solve = 0;
-  int stream_create_count_during_solve = 0;
-  int event_create_count_during_solve = 0;
-  int cublas_handle_create_count_during_solve = 0;
-  int cusolver_handle_create_count_during_solve = 0;
-  int per_target_allocation_count_after_warmup = 0;
-  int per_target_handle_create_count = 0;
+  bool resource_snapshot_captured = false;
+  int resource_instrumentation_version = 0;
+  int resource_allocation_count_before_solve = -1;
+  int resource_allocation_count_after_solve = -1;
+  int resource_handle_create_count_before_solve = -1;
+  int resource_handle_create_count_after_solve = -1;
+  int cuda_device_allocation_count_during_solve = -1;
+  int cuda_host_allocation_count_during_solve = -1;
+  int stream_create_count_during_solve = -1;
+  int event_create_count_during_solve = -1;
+  int cublas_handle_create_count_during_solve = -1;
+  int cusolver_handle_create_count_during_solve = -1;
+  int per_target_allocation_count_after_warmup = -1;
+  int per_target_handle_create_count = -1;
   int implicit_residual_d2h_count = 0;
   int rhs_device_build_count = 0;
   std::string rhs_authority = "cuda-x0-transpose-y";

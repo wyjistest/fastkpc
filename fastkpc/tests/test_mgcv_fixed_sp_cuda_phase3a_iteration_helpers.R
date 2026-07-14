@@ -1,3 +1,4 @@
+source("fastkpc/R/full_cuda_ci_workload_census.R")
 source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R")
 
 fail <- function(message) stop(message, call. = FALSE)
@@ -14,7 +15,9 @@ expect_error_contains <- function(expr, text) {
 
 required_helpers <- c(
   "fastkpc_full_cuda_fixed_sp_phase3a_relative_l2_diff",
-  "fastkpc_full_cuda_fixed_sp_phase3a_validate_parity"
+  "fastkpc_full_cuda_fixed_sp_phase3a_validate_parity",
+  "fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity",
+  "fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities"
 )
 missing_helpers <- required_helpers[!vapply(
   required_helpers, exists, logical(1L), mode = "function", inherits = TRUE
@@ -46,10 +49,18 @@ assert_true(
 
 safe_count <- 172L
 stable_count <- 98L
+target_keys <- sprintf("%064x", seq_len(safe_count + stable_count))
+stable_routes <- rep(c("AUGMENTED_QR", "AUGMENTED_SVD"),
+                     length.out = stable_count)
 good_records <- data.frame(
+  residual_key_sha256 = target_keys,
   planned_route = c(
     rep("CHOLESKY_BATCHED", safe_count),
-    rep("AUGMENTED_QR", stable_count)
+    stable_routes
+  ),
+  authenticated_planned_route = c(
+    rep("CHOLESKY_BATCHED", safe_count),
+    stable_routes
   ),
   solver_status = c(
     rep("OK_CHOLESKY_SINGLE", safe_count),
@@ -95,12 +106,119 @@ assert_true(
   "bad numerical parity fails before benchmark work"
 )
 
+bad_authenticated_route <- good_records
+bad_authenticated_route$authenticated_planned_route[[safe_count + 1L]] <-
+  "AUGMENTED_SVD"
+expect_error_contains(
+  validate_then_benchmark(bad_authenticated_route),
+  "Phase 3A iteration status/numerical parity failed"
+)
+assert_true(
+  benchmark_call_count == 0L,
+  "wrong per-key route fails before benchmark work"
+)
+
+bad_stable_route <- good_records
+bad_stable_route$planned_route[[safe_count + 1L]] <- "FORGED_STABLE"
+bad_stable_route$authenticated_planned_route[[safe_count + 1L]] <-
+  "FORGED_STABLE"
+expect_error_contains(
+  validate_then_benchmark(bad_stable_route),
+  "Phase 3A iteration status/numerical parity failed"
+)
+assert_true(
+  benchmark_call_count == 0L,
+  "stable attribution accepts only authenticated QR or SVD routes"
+)
+
+bad_stable_nan <- good_records
+bad_stable_nan$residual_max_abs_diff[[safe_count + 1L]] <- NaN
+expect_error_contains(
+  validate_then_benchmark(bad_stable_nan),
+  "Phase 3A iteration status/numerical parity failed"
+)
+assert_true(
+  benchmark_call_count == 0L,
+  "stable numerical evidence rejects NaN masquerading as NA"
+)
+
 parity <- validate_then_benchmark(good_records)
 assert_true(
   benchmark_call_count == 1L &&
     identical(names(parity), c("safe", "stable")) &&
     sum(parity$safe) == safe_count && sum(parity$stable) == stable_count,
   "valid parity reaches benchmark work with frozen target partitions"
+)
+
+safe_keys <- good_records$residual_key_sha256[parity$safe]
+safe_descriptors <- lapply(safe_keys, function(key) {
+  list(native = list(target_keys = key))
+})
+benchmark_identity <-
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity(
+    safe_descriptors, safe_keys
+  )
+assert_true(
+  identical(names(benchmark_identity), c(
+    "benchmark_target_count", "ordered_target_keys",
+    "target_key_corpus_hash"
+  )) &&
+    identical(benchmark_identity$benchmark_target_count, safe_count) &&
+    identical(benchmark_identity$ordered_target_keys, safe_keys) &&
+    identical(
+      benchmark_identity$target_key_corpus_hash,
+      fastkpc_full_cuda_census_key_set_hash(safe_keys)
+    ),
+  "benchmark identity freezes the exact ordered 172-target corpus"
+)
+expect_error_contains(
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity(
+    safe_descriptors[-length(safe_descriptors)], safe_keys
+  ),
+  "Phase 3A benchmark target identity mismatch"
+)
+expect_error_contains(
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity(
+    safe_descriptors[c(2L, 1L, 3:length(safe_descriptors))], safe_keys
+  ),
+  "Phase 3A benchmark target identity mismatch"
+)
+
+path_identities <-
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
+    safe_descriptors, safe_descriptors, safe_keys
+  )
+assert_true(
+  identical(names(path_identities), c("persistent", "prototype")) &&
+    identical(path_identities$persistent, benchmark_identity) &&
+    identical(path_identities$prototype, benchmark_identity),
+  "persistent and prototype paths independently authenticate one corpus"
+)
+expect_error_contains(
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
+    safe_descriptors[-length(safe_descriptors)], safe_descriptors, safe_keys
+  ),
+  "Phase 3A benchmark target identity mismatch"
+)
+expect_error_contains(
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
+    safe_descriptors, safe_descriptors[-length(safe_descriptors)], safe_keys
+  ),
+  "Phase 3A benchmark target identity mismatch"
+)
+reordered_descriptors <-
+  safe_descriptors[c(2L, 1L, 3:length(safe_descriptors))]
+expect_error_contains(
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
+    reordered_descriptors, safe_descriptors, safe_keys
+  ),
+  "Phase 3A benchmark target identity mismatch"
+)
+expect_error_contains(
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
+    safe_descriptors, reordered_descriptors, safe_keys
+  ),
+  "Phase 3A benchmark target identity mismatch"
 )
 
 runner_body <- paste(

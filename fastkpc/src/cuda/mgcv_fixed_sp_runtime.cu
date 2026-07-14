@@ -43,31 +43,236 @@ void check_cusolver(cusolverStatus_t status, const char* stage) {
   }
 }
 
+struct ResourceLifecycleCounters {
+  int acquire_attempt_count = 0;
+  int acquire_success_count = 0;
+  int acquire_failure_count = 0;
+  int teardown_attempt_count = 0;
+  int teardown_success_count = 0;
+  int teardown_failure_count = 0;
+  int active_count = 0;
+};
+
 struct FixedSpResourceCounters {
-  int cuda_device_allocation_count = 0;
-  int cuda_host_allocation_count = 0;
-  int stream_create_count = 0;
-  int event_create_count = 0;
-  int cublas_handle_create_count = 0;
-  int cusolver_handle_create_count = 0;
+  ResourceLifecycleCounters cuda_device;
+  ResourceLifecycleCounters cuda_host;
+  ResourceLifecycleCounters stream;
+  ResourceLifecycleCounters event;
+  ResourceLifecycleCounters cublas_handle;
+  ResourceLifecycleCounters cusolver_handle;
+  int cleanup_error_count = 0;
 
   int allocation_count() const {
-    return cuda_device_allocation_count + cuda_host_allocation_count;
+    return cuda_device.acquire_success_count +
+      cuda_host.acquire_success_count;
   }
 
   int handle_create_count() const {
-    return stream_create_count + event_create_count +
-      cublas_handle_create_count + cusolver_handle_create_count;
+    return stream.acquire_success_count + event.acquire_success_count +
+      cublas_handle.acquire_success_count +
+      cusolver_handle.acquire_success_count;
   }
 };
+
+struct AtomicResourceLifecycleCounters {
+  std::atomic<std::int64_t> acquire_attempt_count{0};
+  std::atomic<std::int64_t> acquire_success_count{0};
+  std::atomic<std::int64_t> acquire_failure_count{0};
+  std::atomic<std::int64_t> teardown_attempt_count{0};
+  std::atomic<std::int64_t> teardown_success_count{0};
+  std::atomic<std::int64_t> teardown_failure_count{0};
+  std::atomic<std::int64_t> active_count{0};
+};
+
+struct FixedSpGlobalResourceLedger {
+  AtomicResourceLifecycleCounters cuda_device;
+  AtomicResourceLifecycleCounters cuda_host;
+  AtomicResourceLifecycleCounters stream;
+  AtomicResourceLifecycleCounters event;
+  AtomicResourceLifecycleCounters cublas_handle;
+  AtomicResourceLifecycleCounters cusolver_handle;
+  std::atomic<std::int64_t> cleanup_error_count{0};
+  std::atomic<int> inject_next_acquire_failure_kind{-1};
+  std::atomic<int> inject_next_teardown_failure_kind{-1};
+};
+
+enum class FixedSpResourceKind {
+  CudaDevice,
+  CudaHost,
+  Stream,
+  Event,
+  CublasHandle,
+  CusolverHandle
+};
+
+FixedSpGlobalResourceLedger& global_resource_ledger() {
+  static FixedSpGlobalResourceLedger ledger;
+  return ledger;
+}
+
+ResourceLifecycleCounters& local_resource_counters(
+    FixedSpResourceCounters* counters,
+    FixedSpResourceKind kind) {
+  switch (kind) {
+    case FixedSpResourceKind::CudaDevice: return counters->cuda_device;
+    case FixedSpResourceKind::CudaHost: return counters->cuda_host;
+    case FixedSpResourceKind::Stream: return counters->stream;
+    case FixedSpResourceKind::Event: return counters->event;
+    case FixedSpResourceKind::CublasHandle: return counters->cublas_handle;
+    case FixedSpResourceKind::CusolverHandle: return counters->cusolver_handle;
+  }
+  return counters->cuda_device;
+}
+
+AtomicResourceLifecycleCounters& global_resource_counters(
+    FixedSpResourceKind kind) {
+  FixedSpGlobalResourceLedger& ledger = global_resource_ledger();
+  switch (kind) {
+    case FixedSpResourceKind::CudaDevice: return ledger.cuda_device;
+    case FixedSpResourceKind::CudaHost: return ledger.cuda_host;
+    case FixedSpResourceKind::Stream: return ledger.stream;
+    case FixedSpResourceKind::Event: return ledger.event;
+    case FixedSpResourceKind::CublasHandle: return ledger.cublas_handle;
+    case FixedSpResourceKind::CusolverHandle: return ledger.cusolver_handle;
+  }
+  return ledger.cuda_device;
+}
+
+void record_resource_acquire_success(FixedSpResourceCounters* counters,
+                                     FixedSpResourceKind kind) noexcept {
+  ResourceLifecycleCounters& local = local_resource_counters(counters, kind);
+  local.acquire_success_count += 1;
+  local.active_count += 1;
+  AtomicResourceLifecycleCounters& global = global_resource_counters(kind);
+  global.acquire_success_count.fetch_add(1, std::memory_order_relaxed);
+  global.active_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+void record_resource_acquire_attempt(FixedSpResourceCounters* counters,
+                                     FixedSpResourceKind kind) noexcept {
+  local_resource_counters(counters, kind).acquire_attempt_count += 1;
+  global_resource_counters(kind).acquire_attempt_count.fetch_add(
+    1, std::memory_order_relaxed);
+}
+
+void record_resource_acquire_failure(FixedSpResourceCounters* counters,
+                                     FixedSpResourceKind kind) noexcept {
+  local_resource_counters(counters, kind).acquire_failure_count += 1;
+  global_resource_counters(kind).acquire_failure_count.fetch_add(
+    1, std::memory_order_relaxed);
+}
+
+bool consume_injected_resource_acquire_failure(
+    FixedSpResourceKind kind) noexcept {
+  int expected = static_cast<int>(kind);
+  return global_resource_ledger().inject_next_acquire_failure_kind
+    .compare_exchange_strong(expected, -1, std::memory_order_acq_rel);
+}
+
+const char* fixed_sp_resource_kind_name(FixedSpResourceKind kind) noexcept {
+  switch (kind) {
+    case FixedSpResourceKind::CudaDevice: return "cuda_device";
+    case FixedSpResourceKind::CudaHost: return "cuda_host";
+    case FixedSpResourceKind::Stream: return "stream";
+    case FixedSpResourceKind::Event: return "event";
+    case FixedSpResourceKind::CublasHandle: return "cublas_handle";
+    case FixedSpResourceKind::CusolverHandle: return "cusolver_handle";
+  }
+  return "unknown";
+}
+
+FixedSpResourceKind fixed_sp_resource_kind_from_name(
+    const std::string& resource) {
+  if (resource == "cuda_device") return FixedSpResourceKind::CudaDevice;
+  if (resource == "cuda_host") return FixedSpResourceKind::CudaHost;
+  if (resource == "stream") return FixedSpResourceKind::Stream;
+  if (resource == "event") return FixedSpResourceKind::Event;
+  if (resource == "cublas_handle") return FixedSpResourceKind::CublasHandle;
+  if (resource == "cusolver_handle") {
+    return FixedSpResourceKind::CusolverHandle;
+  }
+  throw std::runtime_error("unknown fixed-sp resource failure injection target");
+}
+
+void arm_injected_resource_teardown_failure(FixedSpResourceKind kind) {
+  int expected = -1;
+  if (!global_resource_ledger().inject_next_teardown_failure_kind
+         .compare_exchange_strong(expected, static_cast<int>(kind),
+                                  std::memory_order_acq_rel)) {
+    throw std::runtime_error(
+      "tracked fixed-sp resource teardown failure injection is already pending");
+  }
+}
+
+bool consume_injected_resource_teardown_failure(
+    FixedSpResourceKind kind) noexcept {
+  int expected = static_cast<int>(kind);
+  return global_resource_ledger().inject_next_teardown_failure_kind
+    .compare_exchange_strong(expected, -1, std::memory_order_acq_rel);
+}
+
+[[noreturn]] void throw_injected_resource_acquire_failure(
+    FixedSpResourceKind kind) {
+  throw std::runtime_error(
+    std::string("injected tracked fixed-sp resource acquire failure: ") +
+    fixed_sp_resource_kind_name(kind));
+}
+
+void record_resource_teardown_attempt(FixedSpResourceCounters* counters,
+                                      FixedSpResourceKind kind) noexcept {
+  local_resource_counters(counters, kind).teardown_attempt_count += 1;
+  global_resource_counters(kind).teardown_attempt_count.fetch_add(
+    1, std::memory_order_relaxed);
+}
+
+void record_resource_teardown_success(FixedSpResourceCounters* counters,
+                                      FixedSpResourceKind kind) noexcept {
+  ResourceLifecycleCounters& local = local_resource_counters(counters, kind);
+  local.teardown_success_count += 1;
+  local.active_count -= 1;
+  AtomicResourceLifecycleCounters& global = global_resource_counters(kind);
+  global.teardown_success_count.fetch_add(1, std::memory_order_relaxed);
+  global.active_count.fetch_sub(1, std::memory_order_relaxed);
+}
+
+void record_cleanup_error(FixedSpResourceCounters* counters) noexcept {
+  counters->cleanup_error_count += 1;
+  global_resource_ledger().cleanup_error_count.fetch_add(
+    1, std::memory_order_relaxed);
+}
+
+void record_resource_teardown_failure(FixedSpResourceCounters* counters,
+                                      FixedSpResourceKind kind) noexcept {
+  local_resource_counters(counters, kind).teardown_failure_count += 1;
+  global_resource_counters(kind).teardown_failure_count.fetch_add(
+    1, std::memory_order_relaxed);
+  record_cleanup_error(counters);
+}
 
 template <typename T>
 void tracked_cuda_malloc(FixedSpResourceCounters* counters,
                          T** pointer,
                          std::size_t bytes,
                          const char* stage) {
-  check_cuda(cudaMalloc(reinterpret_cast<void**>(pointer), bytes), stage);
-  counters->cuda_device_allocation_count += 1;
+  record_resource_acquire_attempt(
+    counters, FixedSpResourceKind::CudaDevice);
+  T* acquired = nullptr;
+  const bool injected = consume_injected_resource_acquire_failure(
+    FixedSpResourceKind::CudaDevice);
+  const cudaError_t status = injected ? cudaErrorMemoryAllocation :
+    cudaMalloc(reinterpret_cast<void**>(&acquired), bytes);
+  if (status != cudaSuccess) {
+    record_resource_acquire_failure(
+      counters, FixedSpResourceKind::CudaDevice);
+    if (injected) {
+      throw_injected_resource_acquire_failure(
+        FixedSpResourceKind::CudaDevice);
+    }
+    check_cuda(status, stage);
+  }
+  *pointer = acquired;
+  record_resource_acquire_success(
+    counters, FixedSpResourceKind::CudaDevice);
 }
 
 template <typename T>
@@ -75,49 +280,273 @@ void tracked_cuda_malloc_host(FixedSpResourceCounters* counters,
                               T** pointer,
                               std::size_t bytes,
                               const char* stage) {
-  check_cuda(cudaMallocHost(reinterpret_cast<void**>(pointer), bytes), stage);
-  counters->cuda_host_allocation_count += 1;
+  record_resource_acquire_attempt(counters, FixedSpResourceKind::CudaHost);
+  T* acquired = nullptr;
+  const bool injected = consume_injected_resource_acquire_failure(
+    FixedSpResourceKind::CudaHost);
+  const cudaError_t status = injected ? cudaErrorMemoryAllocation :
+    cudaMallocHost(reinterpret_cast<void**>(&acquired), bytes);
+  if (status != cudaSuccess) {
+    record_resource_acquire_failure(counters, FixedSpResourceKind::CudaHost);
+    if (injected) {
+      throw_injected_resource_acquire_failure(FixedSpResourceKind::CudaHost);
+    }
+    check_cuda(status, stage);
+  }
+  *pointer = acquired;
+  record_resource_acquire_success(counters, FixedSpResourceKind::CudaHost);
 }
 
 void tracked_cuda_stream_create(FixedSpResourceCounters* counters,
                                 cudaStream_t* stream,
                                 unsigned int flags,
                                 const char* stage) {
-  check_cuda(cudaStreamCreateWithFlags(stream, flags), stage);
-  counters->stream_create_count += 1;
+  record_resource_acquire_attempt(counters, FixedSpResourceKind::Stream);
+  cudaStream_t acquired = nullptr;
+  const bool injected = consume_injected_resource_acquire_failure(
+    FixedSpResourceKind::Stream);
+  const cudaError_t status = injected ? cudaErrorMemoryAllocation :
+    cudaStreamCreateWithFlags(&acquired, flags);
+  if (status != cudaSuccess) {
+    record_resource_acquire_failure(counters, FixedSpResourceKind::Stream);
+    if (injected) {
+      throw_injected_resource_acquire_failure(FixedSpResourceKind::Stream);
+    }
+    check_cuda(status, stage);
+  }
+  *stream = acquired;
+  record_resource_acquire_success(counters, FixedSpResourceKind::Stream);
 }
 
 void tracked_cuda_event_create(FixedSpResourceCounters* counters,
                                cudaEvent_t* event,
                                unsigned int flags,
                                const char* stage) {
-  check_cuda(cudaEventCreateWithFlags(event, flags), stage);
-  counters->event_create_count += 1;
+  record_resource_acquire_attempt(counters, FixedSpResourceKind::Event);
+  cudaEvent_t acquired = nullptr;
+  const bool injected = consume_injected_resource_acquire_failure(
+    FixedSpResourceKind::Event);
+  const cudaError_t status = injected ? cudaErrorMemoryAllocation :
+    cudaEventCreateWithFlags(&acquired, flags);
+  if (status != cudaSuccess) {
+    record_resource_acquire_failure(counters, FixedSpResourceKind::Event);
+    if (injected) {
+      throw_injected_resource_acquire_failure(FixedSpResourceKind::Event);
+    }
+    check_cuda(status, stage);
+  }
+  *event = acquired;
+  record_resource_acquire_success(counters, FixedSpResourceKind::Event);
 }
 
 void tracked_cublas_create(FixedSpResourceCounters* counters,
                            cublasHandle_t* handle,
                            const char* stage) {
-  check_cublas(cublasCreate(handle), stage);
-  counters->cublas_handle_create_count += 1;
+  record_resource_acquire_attempt(
+    counters, FixedSpResourceKind::CublasHandle);
+  cublasHandle_t acquired = nullptr;
+  const bool injected = consume_injected_resource_acquire_failure(
+    FixedSpResourceKind::CublasHandle);
+  const cublasStatus_t status = injected ? CUBLAS_STATUS_ALLOC_FAILED :
+    cublasCreate(&acquired);
+  if (status != CUBLAS_STATUS_SUCCESS) {
+    record_resource_acquire_failure(
+      counters, FixedSpResourceKind::CublasHandle);
+    if (injected) {
+      throw_injected_resource_acquire_failure(
+        FixedSpResourceKind::CublasHandle);
+    }
+    check_cublas(status, stage);
+  }
+  *handle = acquired;
+  record_resource_acquire_success(
+    counters, FixedSpResourceKind::CublasHandle);
 }
 
 void tracked_cusolver_create(FixedSpResourceCounters* counters,
                              cusolverDnHandle_t* handle,
                              const char* stage) {
-  check_cusolver(cusolverDnCreate(handle), stage);
-  counters->cusolver_handle_create_count += 1;
+  record_resource_acquire_attempt(
+    counters, FixedSpResourceKind::CusolverHandle);
+  cusolverDnHandle_t acquired = nullptr;
+  const bool injected = consume_injected_resource_acquire_failure(
+    FixedSpResourceKind::CusolverHandle);
+  const cusolverStatus_t status = injected ? CUSOLVER_STATUS_ALLOC_FAILED :
+    cusolverDnCreate(&acquired);
+  if (status != CUSOLVER_STATUS_SUCCESS) {
+    record_resource_acquire_failure(
+      counters, FixedSpResourceKind::CusolverHandle);
+    if (injected) {
+      throw_injected_resource_acquire_failure(
+        FixedSpResourceKind::CusolverHandle);
+    }
+    check_cusolver(status, stage);
+  }
+  *handle = acquired;
+  record_resource_acquire_success(
+    counters, FixedSpResourceKind::CusolverHandle);
+}
+
+template <typename T>
+cudaError_t tracked_cuda_free_noexcept(FixedSpResourceCounters* counters,
+                                       T** pointer,
+                                       bool* injected_failure = nullptr) noexcept {
+  if (injected_failure != nullptr) *injected_failure = false;
+  if (pointer == nullptr || *pointer == nullptr) return cudaSuccess;
+  record_resource_teardown_attempt(
+    counters, FixedSpResourceKind::CudaDevice);
+  const bool inject = consume_injected_resource_teardown_failure(
+    FixedSpResourceKind::CudaDevice);
+  const cudaError_t status = inject ? cudaErrorUnknown : cudaFree(*pointer);
+  if (inject && injected_failure != nullptr) *injected_failure = true;
+  if (status == cudaSuccess) {
+    record_resource_teardown_success(
+      counters, FixedSpResourceKind::CudaDevice);
+    *pointer = nullptr;
+  } else {
+    record_resource_teardown_failure(
+      counters, FixedSpResourceKind::CudaDevice);
+  }
+  return status;
+}
+
+template <typename T>
+void tracked_cuda_free(FixedSpResourceCounters* counters,
+                       T** pointer,
+                       const char* stage) {
+  bool injected_failure = false;
+  const cudaError_t status = tracked_cuda_free_noexcept(
+    counters, pointer, &injected_failure);
+  if (injected_failure) {
+    throw std::runtime_error(
+      "injected tracked CUDA device free failure");
+  }
+  check_cuda(status, stage);
+}
+
+template <typename T>
+cudaError_t tracked_cuda_free_host_noexcept(
+    FixedSpResourceCounters* counters,
+    T** pointer) noexcept {
+  if (pointer == nullptr || *pointer == nullptr) return cudaSuccess;
+  record_resource_teardown_attempt(counters, FixedSpResourceKind::CudaHost);
+  const bool inject = consume_injected_resource_teardown_failure(
+    FixedSpResourceKind::CudaHost);
+  const cudaError_t status = inject ? cudaErrorUnknown : cudaFreeHost(*pointer);
+  if (status == cudaSuccess) {
+    record_resource_teardown_success(counters, FixedSpResourceKind::CudaHost);
+    *pointer = nullptr;
+  } else {
+    record_resource_teardown_failure(counters, FixedSpResourceKind::CudaHost);
+  }
+  return status;
+}
+
+template <typename T>
+void tracked_cuda_free_host(FixedSpResourceCounters* counters,
+                            T** pointer,
+                            const char* stage) {
+  check_cuda(tracked_cuda_free_host_noexcept(counters, pointer), stage);
+}
+
+cudaError_t tracked_cuda_stream_destroy_noexcept(
+    FixedSpResourceCounters* counters,
+    cudaStream_t* stream) noexcept {
+  if (stream == nullptr || *stream == nullptr) return cudaSuccess;
+  record_resource_teardown_attempt(counters, FixedSpResourceKind::Stream);
+  const bool inject = consume_injected_resource_teardown_failure(
+    FixedSpResourceKind::Stream);
+  const cudaError_t status = inject ? cudaErrorUnknown :
+    cudaStreamDestroy(*stream);
+  if (status == cudaSuccess) {
+    record_resource_teardown_success(counters, FixedSpResourceKind::Stream);
+    *stream = nullptr;
+  } else {
+    record_resource_teardown_failure(counters, FixedSpResourceKind::Stream);
+  }
+  return status;
+}
+
+cudaError_t tracked_cuda_event_destroy_noexcept(
+    FixedSpResourceCounters* counters,
+    cudaEvent_t* event) noexcept {
+  if (event == nullptr || *event == nullptr) return cudaSuccess;
+  record_resource_teardown_attempt(counters, FixedSpResourceKind::Event);
+  const bool inject = consume_injected_resource_teardown_failure(
+    FixedSpResourceKind::Event);
+  const cudaError_t status = inject ? cudaErrorUnknown :
+    cudaEventDestroy(*event);
+  if (status == cudaSuccess) {
+    record_resource_teardown_success(counters, FixedSpResourceKind::Event);
+    *event = nullptr;
+  } else {
+    record_resource_teardown_failure(counters, FixedSpResourceKind::Event);
+  }
+  return status;
+}
+
+void tracked_cuda_event_destroy(FixedSpResourceCounters* counters,
+                                cudaEvent_t* event,
+                                const char* stage) {
+  check_cuda(tracked_cuda_event_destroy_noexcept(counters, event), stage);
+}
+
+cublasStatus_t tracked_cublas_destroy_noexcept(
+    FixedSpResourceCounters* counters,
+    cublasHandle_t* handle) noexcept {
+  if (handle == nullptr || *handle == nullptr) return CUBLAS_STATUS_SUCCESS;
+  record_resource_teardown_attempt(
+    counters, FixedSpResourceKind::CublasHandle);
+  const bool inject = consume_injected_resource_teardown_failure(
+    FixedSpResourceKind::CublasHandle);
+  const cublasStatus_t status = inject ? CUBLAS_STATUS_INTERNAL_ERROR :
+    cublasDestroy(*handle);
+  if (status == CUBLAS_STATUS_SUCCESS) {
+    record_resource_teardown_success(
+      counters, FixedSpResourceKind::CublasHandle);
+    *handle = nullptr;
+  } else {
+    record_resource_teardown_failure(
+      counters, FixedSpResourceKind::CublasHandle);
+  }
+  return status;
+}
+
+cusolverStatus_t tracked_cusolver_destroy_noexcept(
+    FixedSpResourceCounters* counters,
+    cusolverDnHandle_t* handle) noexcept {
+  if (handle == nullptr || *handle == nullptr) {
+    return CUSOLVER_STATUS_SUCCESS;
+  }
+  record_resource_teardown_attempt(
+    counters, FixedSpResourceKind::CusolverHandle);
+  const bool inject = consume_injected_resource_teardown_failure(
+    FixedSpResourceKind::CusolverHandle);
+  const cusolverStatus_t status = inject ? CUSOLVER_STATUS_INTERNAL_ERROR :
+    cusolverDnDestroy(*handle);
+  if (status == CUSOLVER_STATUS_SUCCESS) {
+    record_resource_teardown_success(
+      counters, FixedSpResourceKind::CusolverHandle);
+    *handle = nullptr;
+  } else {
+    record_resource_teardown_failure(
+      counters, FixedSpResourceKind::CusolverHandle);
+  }
+  return status;
 }
 
 void copy_resource_counters(const FixedSpResourceCounters& counters,
                             FixedSpRuntimeInfo* info) {
   info->cuda_device_allocation_count =
-    counters.cuda_device_allocation_count;
-  info->cuda_host_allocation_count = counters.cuda_host_allocation_count;
-  info->stream_create_count = counters.stream_create_count;
-  info->event_create_count = counters.event_create_count;
-  info->cublas_handle_create_count = counters.cublas_handle_create_count;
-  info->cusolver_handle_create_count = counters.cusolver_handle_create_count;
+    counters.cuda_device.acquire_success_count;
+  info->cuda_host_allocation_count =
+    counters.cuda_host.acquire_success_count;
+  info->stream_create_count = counters.stream.acquire_success_count;
+  info->event_create_count = counters.event.acquire_success_count;
+  info->cublas_handle_create_count =
+    counters.cublas_handle.acquire_success_count;
+  info->cusolver_handle_create_count =
+    counters.cusolver_handle.acquire_success_count;
 }
 
 void copy_solve_resource_deltas(
@@ -131,23 +560,29 @@ void copy_solve_resource_deltas(
   info->resource_handle_create_count_after_solve =
     after.handle_create_count();
   info->cuda_device_allocation_count_during_solve =
-    after.cuda_device_allocation_count - before.cuda_device_allocation_count;
+    after.cuda_device.acquire_success_count -
+    before.cuda_device.acquire_success_count;
   info->cuda_host_allocation_count_during_solve =
-    after.cuda_host_allocation_count - before.cuda_host_allocation_count;
+    after.cuda_host.acquire_success_count -
+    before.cuda_host.acquire_success_count;
   info->stream_create_count_during_solve =
-    after.stream_create_count - before.stream_create_count;
+    after.stream.acquire_success_count - before.stream.acquire_success_count;
   info->event_create_count_during_solve =
-    after.event_create_count - before.event_create_count;
+    after.event.acquire_success_count - before.event.acquire_success_count;
   info->cublas_handle_create_count_during_solve =
-    after.cublas_handle_create_count - before.cublas_handle_create_count;
+    after.cublas_handle.acquire_success_count -
+    before.cublas_handle.acquire_success_count;
   info->cusolver_handle_create_count_during_solve =
-    after.cusolver_handle_create_count - before.cusolver_handle_create_count;
+    after.cusolver_handle.acquire_success_count -
+    before.cusolver_handle.acquire_success_count;
   info->per_target_allocation_count_after_warmup =
     info->resource_allocation_count_after_solve -
     info->resource_allocation_count_before_solve;
   info->per_target_handle_create_count =
     info->resource_handle_create_count_after_solve -
     info->resource_handle_create_count_before_solve;
+  info->resource_instrumentation_version = 1;
+  info->resource_snapshot_captured = true;
 }
 
 std::size_t checked_add(std::size_t left,
@@ -534,30 +969,24 @@ struct TransientResidualSlot {
   ~TransientResidualSlot() { cleanup_noexcept(); }
   void cleanup_noexcept() noexcept {
     if (freed) return;
-    if (device_id >= 0) cudaSetDevice(device_id);
-    if (consumer_completion_event != nullptr) {
-      cudaEventDestroy(consumer_completion_event);
-      consumer_completion_event = nullptr;
+    if (device_id >= 0 && cudaSetDevice(device_id) != cudaSuccess &&
+        resource_counters != nullptr) {
+      record_cleanup_error(resource_counters);
     }
-    if (solve_completion_event != nullptr) {
-      cudaEventDestroy(solve_completion_event);
-      solve_completion_event = nullptr;
-    }
-    cudaFreeHost(host_finite_status);
-    host_finite_status = nullptr;
-    cudaFree(rss);
-    rss = nullptr;
-    cudaFree(rhs);
-    rhs = nullptr;
-    cudaFree(residuals);
-    residuals = nullptr;
-    cudaFree(fitted);
-    fitted = nullptr;
-    cudaFree(coefficients);
-    coefficients = nullptr;
+    tracked_cuda_event_destroy_noexcept(
+      resource_counters, &consumer_completion_event);
+    tracked_cuda_event_destroy_noexcept(
+      resource_counters, &solve_completion_event);
+    tracked_cuda_free_host_noexcept(resource_counters, &host_finite_status);
+    tracked_cuda_free_noexcept(resource_counters, &rss);
+    tracked_cuda_free_noexcept(resource_counters, &rhs);
+    tracked_cuda_free_noexcept(resource_counters, &residuals);
+    tracked_cuda_free_noexcept(resource_counters, &fitted);
+    tracked_cuda_free_noexcept(resource_counters, &coefficients);
     freed = true;
   }
 
+  FixedSpResourceCounters* resource_counters = nullptr;
   int device_id = -1;
   int target_capacity = 0;
   std::size_t finite_status_capacity = 0;
@@ -585,22 +1014,20 @@ class PreparedSGpuHandle {
 
   void cleanup_noexcept() noexcept {
     if (freed) return;
-    if (device_id >= 0) cudaSetDevice(device_id);
-    if (setup_completion_event != nullptr) {
-      cudaEventDestroy(setup_completion_event);
-      setup_completion_event = nullptr;
+    FixedSpResourceCounters* counters =
+      context ? &context->resource_counters : nullptr;
+    if (device_id >= 0 && cudaSetDevice(device_id) != cudaSuccess &&
+        counters != nullptr) {
+      record_cleanup_error(counters);
     }
+    tracked_cuda_event_destroy_noexcept(counters, &setup_completion_event);
     residual_slot.reset();
-    cudaFree(d_projected_penalties);
-    d_projected_penalties = nullptr;
-    cudaFree(d_gram);
-    d_gram = nullptr;
-    if (d_X_null != d_X) cudaFree(d_X_null);
+    tracked_cuda_free_noexcept(counters, &d_projected_penalties);
+    tracked_cuda_free_noexcept(counters, &d_gram);
+    if (d_X_null != d_X) tracked_cuda_free_noexcept(counters, &d_X_null);
     d_X_null = nullptr;
-    cudaFree(d_Z);
-    d_Z = nullptr;
-    cudaFree(d_X);
-    d_X = nullptr;
+    tracked_cuda_free_noexcept(counters, &d_Z);
+    tracked_cuda_free_noexcept(counters, &d_X);
     if (registered_with_context && context) {
       context->active_prepared_handle_count.fetch_sub(
         1, std::memory_order_acq_rel);
@@ -961,39 +1388,23 @@ CudaRuntimeContext::~CudaRuntimeContext() {
 
 void CudaRuntimeContext::cleanup_noexcept() noexcept {
   if (freed) return;
-  if (device_id >= 0) cudaSetDevice(device_id);
+  if (device_id >= 0 && cudaSetDevice(device_id) != cudaSuccess) {
+    record_cleanup_error(&resource_counters);
+  }
 
-  cudaFree(double_arena);
-  double_arena = nullptr;
-  cudaFree(int_arena);
-  int_arena = nullptr;
-  cudaFreeHost(host_status_arena);
-  host_status_arena = nullptr;
-  cudaFree(pointer_arena);
-  pointer_arena = nullptr;
-  cudaFree(cublas_workspace);
-  cublas_workspace = nullptr;
+  tracked_cuda_free_noexcept(&resource_counters, &double_arena);
+  tracked_cuda_free_noexcept(&resource_counters, &int_arena);
+  tracked_cuda_free_host_noexcept(&resource_counters, &host_status_arena);
+  tracked_cuda_free_noexcept(&resource_counters, &pointer_arena);
+  tracked_cuda_free_noexcept(&resource_counters, &cublas_workspace);
 
-  if (cholesky_solve_checkpoint_event != nullptr) {
-    cudaEventDestroy(cholesky_solve_checkpoint_event);
-    cholesky_solve_checkpoint_event = nullptr;
-  }
-  if (cholesky_factor_checkpoint_event != nullptr) {
-    cudaEventDestroy(cholesky_factor_checkpoint_event);
-    cholesky_factor_checkpoint_event = nullptr;
-  }
-  if (solver != nullptr) {
-    cusolverDnDestroy(solver);
-    solver = nullptr;
-  }
-  if (blas != nullptr) {
-    cublasDestroy(blas);
-    blas = nullptr;
-  }
-  if (stream != nullptr) {
-    cudaStreamDestroy(stream);
-    stream = nullptr;
-  }
+  tracked_cuda_event_destroy_noexcept(
+    &resource_counters, &cholesky_solve_checkpoint_event);
+  tracked_cuda_event_destroy_noexcept(
+    &resource_counters, &cholesky_factor_checkpoint_event);
+  tracked_cusolver_destroy_noexcept(&resource_counters, &solver);
+  tracked_cublas_destroy_noexcept(&resource_counters, &blas);
+  tracked_cuda_stream_destroy_noexcept(&resource_counters, &stream);
 
   freed = true;
   diagnostics.freed = true;
@@ -1057,10 +1468,10 @@ void CudaRuntimeContext::reserve(
         solver, CUBLAS_FILL_MODE_UPPER, merged_capacities.null_dim,
         probe, merged_capacities.null_dim, &requested_potrf_lwork
       ), "query cuSOLVER potrf workspace");
-      check_cuda(cudaFree(probe), "free potrf probe");
-      probe = nullptr;
+      tracked_cuda_free(
+        &resource_counters, &probe, "free potrf probe");
     } catch (...) {
-      cudaFree(probe);
+      tracked_cuda_free_noexcept(&resource_counters, &probe);
       throw;
     }
     if (requested_potrf_lwork < 0) {
@@ -1103,6 +1514,14 @@ void CudaRuntimeContext::reserve(
   void** new_pointer_arena = nullptr;
   void* new_cublas_workspace = nullptr;
   std::size_t new_cublas_alignment = diagnostics.cublas_workspace_alignment;
+  auto cleanup_new_allocations = [&]() noexcept {
+    tracked_cuda_free_noexcept(&resource_counters, &new_double_arena);
+    tracked_cuda_free_noexcept(&resource_counters, &new_int_arena);
+    tracked_cuda_free_host_noexcept(
+      &resource_counters, &new_host_status_arena);
+    tracked_cuda_free_noexcept(&resource_counters, &new_pointer_arena);
+    tracked_cuda_free_noexcept(&resource_counters, &new_cublas_workspace);
+  };
 
   try {
     if (double_required > double_capacity) {
@@ -1142,51 +1561,65 @@ void CudaRuntimeContext::reserve(
         throw std::runtime_error(
           "cuBLAS user workspace alignment is below 256 bytes");
       }
+    }
+  } catch (...) {
+    cleanup_new_allocations();
+    throw;
+  }
+
+  const bool replace_double = new_double_arena != nullptr;
+  const bool replace_int = new_int_arena != nullptr;
+  const bool replace_host_status = new_host_status_arena != nullptr;
+  const bool replace_pointer = new_pointer_arena != nullptr;
+  const bool install_cublas_workspace = new_cublas_workspace != nullptr;
+  try {
+    if (replace_double) {
+      tracked_cuda_free(
+        &resource_counters, &double_arena, "free old fixed-sp double arena");
+      double_arena = new_double_arena;
+      new_double_arena = nullptr;
+    }
+    if (replace_int) {
+      tracked_cuda_free(
+        &resource_counters, &int_arena, "free old fixed-sp int arena");
+      int_arena = new_int_arena;
+      new_int_arena = nullptr;
+    }
+    if (replace_host_status) {
+      tracked_cuda_free_host(
+        &resource_counters, &host_status_arena,
+        "free old fixed-sp host status arena");
+      host_status_arena = new_host_status_arena;
+      new_host_status_arena = nullptr;
+    }
+    if (replace_pointer) {
+      tracked_cuda_free(
+        &resource_counters, &pointer_arena,
+        "free old fixed-sp pointer arena");
+      pointer_arena = new_pointer_arena;
+      new_pointer_arena = nullptr;
+    }
+    if (install_cublas_workspace) {
       check_cublas(cublasSetStream(blas, stream), "rebind cuBLAS stream");
       check_cublas(cublasSetWorkspace(
         blas, new_cublas_workspace, cublas_workspace_bytes
       ), "install cuBLAS workspace");
+      cublas_workspace = new_cublas_workspace;
+      new_cublas_workspace = nullptr;
+      diagnostics.cublas_workspace_alignment = new_cublas_alignment;
+      diagnostics.cublas_user_workspace_installed = true;
     }
   } catch (...) {
-    cudaFree(new_double_arena);
-    cudaFree(new_int_arena);
-    cudaFreeHost(new_host_status_arena);
-    cudaFree(new_pointer_arena);
-    cudaFree(new_cublas_workspace);
+    cleanup_new_allocations();
     throw;
   }
 
-  bool grew = false;
-  if (new_double_arena != nullptr) {
-    cudaFree(double_arena);
-    double_arena = new_double_arena;
-    double_capacity = double_required;
-    grew = true;
-  }
-  if (new_int_arena != nullptr) {
-    cudaFree(int_arena);
-    int_arena = new_int_arena;
-    int_capacity = int_required;
-    grew = true;
-  }
-  if (new_host_status_arena != nullptr) {
-    cudaFreeHost(host_status_arena);
-    host_status_arena = new_host_status_arena;
-    host_status_capacity = int_required;
-    grew = true;
-  }
-  if (new_pointer_arena != nullptr) {
-    cudaFree(pointer_arena);
-    pointer_arena = new_pointer_arena;
-    pointer_capacity = pointer_required;
-    grew = true;
-  }
-  if (new_cublas_workspace != nullptr) {
-    cublas_workspace = new_cublas_workspace;
-    diagnostics.cublas_workspace_alignment = new_cublas_alignment;
-    diagnostics.cublas_user_workspace_installed = true;
-    grew = true;
-  }
+  if (replace_double) double_capacity = double_required;
+  if (replace_int) int_capacity = int_required;
+  if (replace_host_status) host_status_capacity = int_required;
+  if (replace_pointer) pointer_capacity = pointer_required;
+  const bool grew = replace_double || replace_int || replace_host_status ||
+    replace_pointer || install_cublas_workspace;
 
   capacities = merged_capacities;
   potrf_lwork = std::max(potrf_lwork, requested_potrf_lwork);
@@ -1247,6 +1680,184 @@ void free_fixed_sp_runtime(std::shared_ptr<CudaRuntimeContext>* context) {
   if (context != nullptr) context->reset();
 }
 
+FixedSpResourceSnapshot test_fixed_sp_cuda_resource_snapshot() {
+  auto snapshot_one = [](const AtomicResourceLifecycleCounters& counters) {
+    FixedSpResourceLifecycleSnapshot snapshot;
+    snapshot.acquire_attempt_count = counters.acquire_attempt_count.load(
+      std::memory_order_relaxed);
+    snapshot.acquire_success_count = counters.acquire_success_count.load(
+      std::memory_order_relaxed);
+    snapshot.acquire_failure_count = counters.acquire_failure_count.load(
+      std::memory_order_relaxed);
+    snapshot.teardown_attempt_count = counters.teardown_attempt_count.load(
+      std::memory_order_relaxed);
+    snapshot.teardown_success_count = counters.teardown_success_count.load(
+      std::memory_order_relaxed);
+    snapshot.teardown_failure_count = counters.teardown_failure_count.load(
+      std::memory_order_relaxed);
+    snapshot.active_count = counters.active_count.load(
+      std::memory_order_relaxed);
+    return snapshot;
+  };
+
+  const FixedSpGlobalResourceLedger& ledger = global_resource_ledger();
+  FixedSpResourceSnapshot snapshot;
+  snapshot.cuda_device = snapshot_one(ledger.cuda_device);
+  snapshot.cuda_host = snapshot_one(ledger.cuda_host);
+  snapshot.stream = snapshot_one(ledger.stream);
+  snapshot.event = snapshot_one(ledger.event);
+  snapshot.cublas_handle = snapshot_one(ledger.cublas_handle);
+  snapshot.cusolver_handle = snapshot_one(ledger.cusolver_handle);
+  snapshot.cleanup_error_count = ledger.cleanup_error_count.load(
+    std::memory_order_relaxed);
+  return snapshot;
+}
+
+void test_inject_next_fixed_sp_cuda_resource_acquire_failure(
+    const std::string& resource) {
+  const FixedSpResourceKind kind = fixed_sp_resource_kind_from_name(resource);
+  int expected = -1;
+  if (!global_resource_ledger().inject_next_acquire_failure_kind
+         .compare_exchange_strong(expected, static_cast<int>(kind),
+                                  std::memory_order_acq_rel)) {
+    throw std::runtime_error(
+      "tracked fixed-sp resource acquire failure injection is already pending");
+  }
+}
+
+void test_exercise_fixed_sp_cuda_resource_teardown_failure(
+    const std::string& resource) {
+  const FixedSpResourceKind kind = fixed_sp_resource_kind_from_name(resource);
+  FixedSpResourceCounters counters;
+  check_cuda(cudaSetDevice(0), "set CUDA device for teardown failure test");
+
+  auto require_cuda_retry = [&](cudaError_t first, cudaError_t second,
+                                const void* retained) {
+    if (first == cudaSuccess || second != cudaSuccess || retained != nullptr) {
+      throw std::runtime_error(
+        "tracked fixed-sp CUDA teardown failure retry invariant failed");
+    }
+  };
+  switch (kind) {
+    case FixedSpResourceKind::CudaDevice: {
+      void* pointer = nullptr;
+      tracked_cuda_malloc(
+        &counters, &pointer, 1U, "allocate teardown test device byte");
+      arm_injected_resource_teardown_failure(kind);
+      const cudaError_t first = tracked_cuda_free_noexcept(
+        &counters, &pointer);
+      if (first == cudaSuccess || pointer == nullptr) {
+        tracked_cuda_free_noexcept(&counters, &pointer);
+        throw std::runtime_error(
+          "tracked fixed-sp device teardown did not retain ownership");
+      }
+      const cudaError_t second = tracked_cuda_free_noexcept(
+        &counters, &pointer);
+      require_cuda_retry(first, second, pointer);
+      break;
+    }
+    case FixedSpResourceKind::CudaHost: {
+      void* pointer = nullptr;
+      tracked_cuda_malloc_host(
+        &counters, &pointer, 1U, "allocate teardown test host byte");
+      arm_injected_resource_teardown_failure(kind);
+      const cudaError_t first = tracked_cuda_free_host_noexcept(
+        &counters, &pointer);
+      if (first == cudaSuccess || pointer == nullptr) {
+        tracked_cuda_free_host_noexcept(&counters, &pointer);
+        throw std::runtime_error(
+          "tracked fixed-sp host teardown did not retain ownership");
+      }
+      const cudaError_t second = tracked_cuda_free_host_noexcept(
+        &counters, &pointer);
+      require_cuda_retry(first, second, pointer);
+      break;
+    }
+    case FixedSpResourceKind::Stream: {
+      cudaStream_t stream = nullptr;
+      tracked_cuda_stream_create(
+        &counters, &stream, cudaStreamNonBlocking,
+        "create teardown test stream");
+      arm_injected_resource_teardown_failure(kind);
+      const cudaError_t first = tracked_cuda_stream_destroy_noexcept(
+        &counters, &stream);
+      if (first == cudaSuccess || stream == nullptr) {
+        tracked_cuda_stream_destroy_noexcept(&counters, &stream);
+        throw std::runtime_error(
+          "tracked fixed-sp stream teardown did not retain ownership");
+      }
+      const cudaError_t second = tracked_cuda_stream_destroy_noexcept(
+        &counters, &stream);
+      require_cuda_retry(first, second, stream);
+      break;
+    }
+    case FixedSpResourceKind::Event: {
+      cudaEvent_t event = nullptr;
+      tracked_cuda_event_create(
+        &counters, &event, cudaEventDisableTiming,
+        "create teardown test event");
+      arm_injected_resource_teardown_failure(kind);
+      const cudaError_t first = tracked_cuda_event_destroy_noexcept(
+        &counters, &event);
+      if (first == cudaSuccess || event == nullptr) {
+        tracked_cuda_event_destroy_noexcept(&counters, &event);
+        throw std::runtime_error(
+          "tracked fixed-sp event teardown did not retain ownership");
+      }
+      const cudaError_t second = tracked_cuda_event_destroy_noexcept(
+        &counters, &event);
+      require_cuda_retry(first, second, event);
+      break;
+    }
+    case FixedSpResourceKind::CublasHandle: {
+      cublasHandle_t handle = nullptr;
+      tracked_cublas_create(
+        &counters, &handle, "create teardown test cuBLAS handle");
+      arm_injected_resource_teardown_failure(kind);
+      const cublasStatus_t first = tracked_cublas_destroy_noexcept(
+        &counters, &handle);
+      if (first == CUBLAS_STATUS_SUCCESS || handle == nullptr) {
+        tracked_cublas_destroy_noexcept(&counters, &handle);
+        throw std::runtime_error(
+          "tracked fixed-sp cuBLAS teardown did not retain ownership");
+      }
+      const cublasStatus_t second = tracked_cublas_destroy_noexcept(
+        &counters, &handle);
+      if (second != CUBLAS_STATUS_SUCCESS || handle != nullptr) {
+        tracked_cublas_destroy_noexcept(&counters, &handle);
+        throw std::runtime_error(
+          "tracked fixed-sp cuBLAS teardown failure retry invariant failed");
+      }
+      break;
+    }
+    case FixedSpResourceKind::CusolverHandle: {
+      cusolverDnHandle_t handle = nullptr;
+      tracked_cusolver_create(
+        &counters, &handle, "create teardown test cuSOLVER handle");
+      arm_injected_resource_teardown_failure(kind);
+      const cusolverStatus_t first = tracked_cusolver_destroy_noexcept(
+        &counters, &handle);
+      if (first == CUSOLVER_STATUS_SUCCESS || handle == nullptr) {
+        tracked_cusolver_destroy_noexcept(&counters, &handle);
+        throw std::runtime_error(
+          "tracked fixed-sp cuSOLVER teardown did not retain ownership");
+      }
+      const cusolverStatus_t second = tracked_cusolver_destroy_noexcept(
+        &counters, &handle);
+      if (second != CUSOLVER_STATUS_SUCCESS || handle != nullptr) {
+        tracked_cusolver_destroy_noexcept(&counters, &handle);
+        throw std::runtime_error(
+          "tracked fixed-sp cuSOLVER teardown failure retry invariant failed");
+      }
+      break;
+    }
+  }
+}
+
+void test_inject_next_fixed_sp_cuda_device_free_failure() {
+  arm_injected_resource_teardown_failure(FixedSpResourceKind::CudaDevice);
+}
+
 std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
     const std::shared_ptr<CudaRuntimeContext>& context,
     const PreparedSHostView& setup) {
@@ -1305,6 +1916,7 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
   handle->q = setup.null_dim;
   handle->penalty_count = setup.penalty_count;
   handle->residual_slot = std::make_shared<TransientResidualSlot>();
+  handle->residual_slot->resource_counters = &context->resource_counters;
   handle->residual_slot->device_id = context->device_id;
   handle->residual_slot->target_capacity = context->capacities.target_count;
   handle->residual_slot->finite_status_capacity = target_capacity;
@@ -1418,9 +2030,9 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
     ), "record prepared setup completion");
     check_cuda(cudaEventSynchronize(handle->setup_completion_event),
                "wait for prepared setup completion");
-    check_cuda(cudaEventDestroy(handle->setup_completion_event),
-               "destroy prepared setup completion event");
-    handle->setup_completion_event = nullptr;
+    tracked_cuda_event_destroy(
+      &context->resource_counters, &handle->setup_completion_event,
+      "destroy prepared setup completion event");
     handle->setup_h2d_upload_count = 1;
   } catch (...) {
     handle->cleanup_noexcept();
@@ -2339,11 +2951,12 @@ PreparedSStaticShadow test_prepared_s_static_shadow(
                "record prepared test shadow completion");
     check_cuda(cudaEventSynchronize(completion_event),
                "wait for prepared test shadow completion");
-    check_cuda(cudaEventDestroy(completion_event),
-               "destroy prepared test shadow completion event");
-    completion_event = nullptr;
+    tracked_cuda_event_destroy(
+      &context->resource_counters, &completion_event,
+      "destroy prepared test shadow completion event");
   } catch (...) {
-    if (completion_event != nullptr) cudaEventDestroy(completion_event);
+    tracked_cuda_event_destroy_noexcept(
+      &context->resource_counters, &completion_event);
     throw;
   }
   return shadow;

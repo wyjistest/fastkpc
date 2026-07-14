@@ -3388,6 +3388,69 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_create(SEXP device_s) {
   END_RCPP
 }
 
+extern "C" SEXP C_fixed_sp_cuda_test_resource_snapshot() {
+  BEGIN_RCPP
+  const fastkpc::FixedSpResourceSnapshot snapshot =
+    fastkpc::test_fixed_sp_cuda_resource_snapshot();
+  Rcpp::List result;
+  auto append = [&](const fastkpc::FixedSpResourceLifecycleSnapshot& value,
+                    const std::string& resource,
+                    const std::string& acquire,
+                    const std::string& teardown) {
+    result[resource + "_" + acquire + "_attempt_count"] =
+      static_cast<double>(value.acquire_attempt_count);
+    result[resource + "_" + acquire + "_success_count"] =
+      static_cast<double>(value.acquire_success_count);
+    result[resource + "_" + acquire + "_failure_count"] =
+      static_cast<double>(value.acquire_failure_count);
+    result[resource + "_" + teardown + "_attempt_count"] =
+      static_cast<double>(value.teardown_attempt_count);
+    result[resource + "_" + teardown + "_success_count"] =
+      static_cast<double>(value.teardown_success_count);
+    result[resource + "_" + teardown + "_failure_count"] =
+      static_cast<double>(value.teardown_failure_count);
+    result[resource + "_active_count"] =
+      static_cast<double>(value.active_count);
+  };
+  append(snapshot.cuda_device, "cuda_device", "allocate", "free");
+  append(snapshot.cuda_host, "cuda_host", "allocate", "free");
+  append(snapshot.stream, "stream", "create", "destroy");
+  append(snapshot.event, "event", "create", "destroy");
+  append(snapshot.cublas_handle, "cublas_handle", "create", "destroy");
+  append(snapshot.cusolver_handle, "cusolver_handle", "create", "destroy");
+  result["cleanup_error_count"] =
+    static_cast<double>(snapshot.cleanup_error_count);
+  return result;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_test_inject_next_resource_acquire_failure(
+    SEXP resource_s) {
+  BEGIN_RCPP
+  const std::string resource = bare_scalar_string(
+    resource_s, "resource acquire failure injection target");
+  fastkpc::test_inject_next_fixed_sp_cuda_resource_acquire_failure(resource);
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_test_inject_next_device_free_failure() {
+  BEGIN_RCPP
+  fastkpc::test_inject_next_fixed_sp_cuda_device_free_failure();
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_test_exercise_resource_teardown_failure(
+    SEXP resource_s) {
+  BEGIN_RCPP
+  const std::string resource = bare_scalar_string(
+    resource_s, "resource teardown failure test target");
+  fastkpc::test_exercise_fixed_sp_cuda_resource_teardown_failure(resource);
+  return R_NilValue;
+  END_RCPP
+}
+
 extern "C" SEXP C_fixed_sp_cuda_runtime_reserve(
     SEXP runtime_s,
     SEXP n_s,
@@ -3872,6 +3935,9 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
   result["nonfinite_output_count"] = info.nonfinite_output_count;
   result["cpu_fallback_count"] = info.cpu_fallback_count;
   result["unknown_fallback_count"] = info.unknown_fallback_count;
+  result["resource_snapshot_captured"] = info.resource_snapshot_captured;
+  result["resource_instrumentation_version"] =
+    info.resource_instrumentation_version;
   result["resource_allocation_count_before_solve"] =
     info.resource_allocation_count_before_solve;
   result["resource_allocation_count_after_solve"] =
@@ -8189,6 +8255,10 @@ static const R_CallMethodDef call_methods[] = {
   {"C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch), 7},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_free", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_free), 1},
   {"C_fixed_sp_cuda_runtime_create", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_create), 1},
+  {"C_fixed_sp_cuda_test_resource_snapshot", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_resource_snapshot), 0},
+  {"C_fixed_sp_cuda_test_inject_next_resource_acquire_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_resource_acquire_failure), 1},
+  {"C_fixed_sp_cuda_test_inject_next_device_free_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_device_free_failure), 0},
+  {"C_fixed_sp_cuda_test_exercise_resource_teardown_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_exercise_resource_teardown_failure), 1},
   {"C_fixed_sp_cuda_runtime_reserve", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_reserve), 6},
   {"C_fixed_sp_cuda_runtime_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_info), 1},
   {"C_fixed_sp_cuda_runtime_free", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_free), 1},

@@ -71,6 +71,10 @@ stable <- !safe
 ok_status <- startsWith(target_records$solver_status, "OK_")
 assert_true(
   sum(safe) == 172L && sum(stable) == 98L &&
+    identical(target_records$planned_route,
+              target_records$authenticated_planned_route) &&
+    all(target_records$planned_route[stable] %in%
+        c("AUGMENTED_QR", "AUGMENTED_SVD")) &&
     all(target_records$solver_status[safe] == "OK_CHOLESKY_SINGLE") &&
     all(target_records$solver_status[stable] ==
         "ERR_STABLE_PATH_NOT_IMPLEMENTED") &&
@@ -94,7 +98,7 @@ assert_true(
     all(is.finite(x)) && max(x) < 1e-7
   }, logical(1L))) &&
     all(vapply(target_records[stable, error_fields, drop = FALSE], function(x) {
-      all(is.na(x))
+      all(is.na(x) & !is.nan(x))
     }, logical(1L))),
   "persistent safe outputs match the Phase 2 oracle below 1e-7"
 )
@@ -110,7 +114,9 @@ solve_resource_fields <- c(
   "per_target_handle_create_count"
 )
 assert_true(
-  all(vapply(target_records[solve_resource_fields], function(x) {
+  all(target_records$resource_snapshot_captured) &&
+    all(target_records$resource_instrumentation_version == 1L) &&
+    all(vapply(target_records[solve_resource_fields], function(x) {
     all(x == 0L)
   }, logical(1L))) &&
     all(target_records$resource_allocation_count_before_solve ==
@@ -159,6 +165,23 @@ assert_true(
     timing$persistent_median_ms < timing$prototype_median_ms &&
     timing$speedup > 1,
   "three raw repetitions satisfy the frozen median performance rule"
+)
+canonical_safe_keys <- target_records$residual_key_sha256[safe]
+assert_true(
+  timing$benchmark_target_count == 172L &&
+    identical(timing$ordered_target_keys, canonical_safe_keys) &&
+    identical(
+      timing$target_key_corpus_hash,
+      fastkpc_full_cuda_census_key_set_hash(canonical_safe_keys)
+    ) &&
+    identical(timing$persistent_workload_identity,
+              timing$prototype_workload_identity) &&
+    identical(timing$persistent_workload_identity, list(
+      benchmark_target_count = 172L,
+      ordered_target_keys = canonical_safe_keys,
+      target_key_corpus_hash = timing$target_key_corpus_hash
+    )),
+  "both timing paths are bound to the exact ordered safe target corpus"
 )
 assert_true(
   is.list(timing$gpu_identity) &&
