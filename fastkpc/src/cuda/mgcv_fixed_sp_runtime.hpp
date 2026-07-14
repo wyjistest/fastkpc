@@ -41,6 +41,10 @@ void register_device_residual_consumer_event(
   const std::shared_ptr<DeviceResidualBatch>& token,
   cudaEvent_t consumer_completion_event);
 void free_device_residual(std::shared_ptr<DeviceResidualBatch>* token);
+DeviceCoefficientShadow test_device_residual_coefficient_shadow(
+  const std::shared_ptr<DeviceResidualBatch>& token);
+void test_inject_device_residual_consumer_registration_failure(
+  const std::shared_ptr<DeviceResidualBatch>& token);
 
 }  // namespace fastkpc
 

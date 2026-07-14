@@ -301,7 +301,9 @@ class CudaRuntimeContext {
 
 enum class TransientResidualSlotState {
   Free,
-  Leased
+  Leased,
+  ConsumerRegistrationPending,
+  Poisoned
 };
 
 struct TransientResidualSlot {
@@ -330,6 +332,7 @@ struct TransientResidualSlot {
 
   int device_id = -1;
   int target_capacity = 0;
+  std::size_t coefficient_capacity = 0;
   double* coefficients = nullptr;
   double* fitted = nullptr;
   double* residuals = nullptr;
@@ -340,6 +343,7 @@ struct TransientResidualSlot {
   TransientResidualSlotState state = TransientResidualSlotState::Free;
   std::weak_ptr<DeviceResidualBatch> lease_owner;
   bool consumer_event_registered = false;
+  std::string poison_reason;
   bool freed = false;
 };
 
@@ -422,6 +426,46 @@ class DeviceResidualBatch {
 };
 
 namespace {
+
+const char* transient_residual_slot_state_name(
+    TransientResidualSlotState state) {
+  switch (state) {
+    case TransientResidualSlotState::Free: return "free";
+    case TransientResidualSlotState::Leased: return "leased";
+    case TransientResidualSlotState::ConsumerRegistrationPending:
+      return "consumer_registration_pending";
+    case TransientResidualSlotState::Poisoned: return "poisoned";
+  }
+  return "unknown";
+}
+
+void poison_transient_residual_slot(
+    TransientResidualSlot* slot,
+    std::uint64_t expected_generation,
+    const char* reason,
+    bool clear_lease_owner) noexcept {
+  if (slot == nullptr || slot->generation != expected_generation) return;
+  if (slot->state != TransientResidualSlotState::Poisoned) {
+    slot->state = TransientResidualSlotState::Poisoned;
+    try {
+      slot->poison_reason =
+        reason != nullptr && reason[0] != '\0' ? reason :
+          "unknown output-slot failure";
+    } catch (...) {
+    }
+  }
+  if (clear_lease_owner) slot->lease_owner.reset();
+}
+
+[[noreturn]] void throw_output_slot_poisoned(
+    const TransientResidualSlot& slot) {
+  std::string message = "ERR_OUTPUT_SLOT_POISONED";
+  if (!slot.poison_reason.empty()) {
+    message += ": ";
+    message += slot.poison_reason;
+  }
+  throw std::runtime_error(message);
+}
 
 void validate_fixed_sp_batch(const PreparedSGpuHandle& handle,
                              const CudaRuntimeContext& context,
@@ -508,18 +552,41 @@ void DeviceResidualBatch::cleanup_noexcept() noexcept {
   if (!context) return;
   try {
     std::lock_guard<std::mutex> lock(context->mutex);
-    context->require_usable();
     if (owner_generation != owner->generation ||
-        slot_generation != slot->generation ||
-        slot->state != TransientResidualSlotState::Leased) {
+        slot_generation != slot->generation) {
       return;
     }
-    if (slot->consumer_event_registered) {
-      check_cuda(cudaSetDevice(context->device_id),
-                 "set CUDA device for residual token cleanup");
-      check_cuda(cudaEventSynchronize(slot->consumer_completion_event),
-                 "wait for residual consumer during token cleanup");
-      slot->consumer_event_registered = false;
+    if (slot->state == TransientResidualSlotState::Poisoned) {
+      poison_transient_residual_slot(
+        slot.get(), slot_generation, nullptr, true);
+      lease_released = true;
+      freed = true;
+      return;
+    }
+    if (slot->state != TransientResidualSlotState::Leased) return;
+
+    try {
+      context->require_usable();
+      if (slot->consumer_event_registered) {
+        check_cuda(cudaSetDevice(context->device_id),
+                   "set CUDA device for residual token cleanup");
+        check_cuda(cudaEventSynchronize(slot->consumer_completion_event),
+                   "wait for residual consumer during token cleanup");
+        slot->consumer_event_registered = false;
+      }
+    } catch (const std::exception& error) {
+      poison_transient_residual_slot(
+        slot.get(), slot_generation, error.what(), true);
+      lease_released = true;
+      freed = true;
+      return;
+    } catch (...) {
+      poison_transient_residual_slot(
+        slot.get(), slot_generation,
+        "unknown residual token cleanup failure", true);
+      lease_released = true;
+      freed = true;
+      return;
     }
     slot->state = TransientResidualSlotState::Free;
     slot->lease_owner.reset();
@@ -956,6 +1023,7 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
   handle->residual_slot = std::make_shared<TransientResidualSlot>();
   handle->residual_slot->device_id = context->device_id;
   handle->residual_slot->target_capacity = context->capacities.target_count;
+  handle->residual_slot->coefficient_capacity = coefficient_output_count;
 
   check_cuda(cudaSetDevice(context->device_id),
              "set CUDA device for prepared setup");
@@ -1062,6 +1130,12 @@ PreparedSInfo prepared_s_gpu_info(
   if (!handle || handle->freed) {
     throw std::runtime_error("fixed-sp CUDA prepared handle has been freed");
   }
+  const std::shared_ptr<CudaRuntimeContext> context = handle->context;
+  if (!context) {
+    throw std::runtime_error("fixed-sp CUDA prepared runtime has been freed");
+  }
+  std::lock_guard<std::mutex> lock(context->mutex);
+  context->require_usable();
   PreparedSInfo info;
   info.prepared_s_key_sha256 = handle->prepared_s_key_sha256;
   info.n = handle->n;
@@ -1070,10 +1144,18 @@ PreparedSInfo prepared_s_gpu_info(
   info.penalty_count = handle->penalty_count;
   info.setup_h2d_upload_count = handle->setup_h2d_upload_count;
   info.setup_h2d_bytes = handle->setup_h2d_bytes;
+  info.coefficient_output_capacity =
+    handle->residual_slot == nullptr ? 0U :
+      handle->residual_slot->coefficient_capacity;
   info.generation = handle->generation;
   info.output_slot_leased =
     handle->residual_slot != nullptr &&
     handle->residual_slot->state == TransientResidualSlotState::Leased;
+  if (handle->residual_slot != nullptr) {
+    info.output_slot_state = transient_residual_slot_state_name(
+      handle->residual_slot->state);
+    info.output_slot_poison_reason = handle->residual_slot->poison_reason;
+  }
   return info;
 }
 
@@ -1108,6 +1190,9 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
   const std::shared_ptr<TransientResidualSlot> slot = handle->residual_slot;
   if (!slot || slot->freed) {
     throw std::runtime_error("fixed-sp CUDA output slot is unavailable");
+  }
+  if (slot->state == TransientResidualSlotState::Poisoned) {
+    throw_output_slot_poisoned(*slot);
   }
   if (slot->state != TransientResidualSlotState::Free ||
       slot->consumer_event_registered) {
@@ -1284,13 +1369,19 @@ void release_device_residual(
   }
 
   std::lock_guard<std::mutex> lock(context->mutex);
-  context->require_usable();
   if (token->device_id != context->device_id ||
-      token->slot_generation != token->slot->generation ||
-      token->slot->state != TransientResidualSlotState::Leased) {
+      token->slot_generation != token->slot->generation) {
     token->diagnostics.stale_token_reject_count += 1;
     throw std::runtime_error("STALE_TOKEN: residual slot generation mismatch");
   }
+  if (token->slot->state == TransientResidualSlotState::Poisoned) {
+    throw_output_slot_poisoned(*token->slot);
+  }
+  if (token->slot->state != TransientResidualSlotState::Leased) {
+    token->diagnostics.stale_token_reject_count += 1;
+    throw std::runtime_error("STALE_TOKEN: residual slot generation mismatch");
+  }
+  context->require_usable();
   check_cuda(cudaSetDevice(context->device_id),
              "set CUDA device for residual release");
   if (token->slot->consumer_event_registered) {
@@ -1309,17 +1400,103 @@ void release_device_residual(
   token->diagnostics.output_slot_release_count += 1;
 }
 
-void register_device_residual_consumer_event(
+namespace {
+
+void register_device_residual_consumer_event_impl(
     const std::shared_ptr<DeviceResidualBatch>& token,
-    cudaEvent_t consumer_completion_event) {
+    cudaEvent_t consumer_completion_event,
+    bool inject_failure) {
   if (!token || token->freed) {
     throw std::runtime_error("fixed-sp CUDA residual token has been freed");
   }
-  if (consumer_completion_event == nullptr) {
-    throw std::runtime_error("consumer completion event must not be null");
-  }
   if (token->lease_released || !token->owner || !token->slot) {
     token->diagnostics.stale_token_reject_count += 1;
+    throw std::runtime_error("STALE_TOKEN: residual lease has been released");
+  }
+  if (token->creator_pid != static_cast<std::int64_t>(getpid())) {
+    throw std::runtime_error(
+      "fixed-sp CUDA residual token has a different creator PID");
+  }
+  const std::shared_ptr<CudaRuntimeContext> context = token->owner->context;
+  if (!context) {
+    throw std::runtime_error("fixed-sp CUDA residual runtime has been freed");
+  }
+
+  std::lock_guard<std::mutex> lock(context->mutex);
+  if (token->owner_generation != token->owner->generation ||
+      token->slot_generation != token->slot->generation) {
+    token->diagnostics.stale_token_reject_count += 1;
+    throw std::runtime_error("STALE_TOKEN: residual slot generation mismatch");
+  }
+  if (token->slot->state == TransientResidualSlotState::Poisoned) {
+    throw_output_slot_poisoned(*token->slot);
+  }
+  if (token->slot->state != TransientResidualSlotState::Leased) {
+    token->diagnostics.stale_token_reject_count += 1;
+    throw std::runtime_error("STALE_TOKEN: residual slot generation mismatch");
+  }
+
+  token->slot->state =
+    TransientResidualSlotState::ConsumerRegistrationPending;
+  try {
+    if (inject_failure) {
+      throw std::runtime_error(
+        "INJECTED_CONSUMER_REGISTRATION_FAILURE");
+    }
+    context->require_usable();
+    if (consumer_completion_event == nullptr) {
+      throw std::runtime_error("consumer completion event must not be null");
+    }
+    if (token->slot->consumer_event_registered) {
+      throw std::runtime_error(
+        "fixed-sp consumer event is already registered");
+    }
+    check_cuda(cudaSetDevice(context->device_id),
+               "set CUDA device for consumer event registration");
+    check_cuda(cudaStreamWaitEvent(
+      context->stream, consumer_completion_event, 0
+    ), "wait for registered fixed-sp consumer event");
+    check_cuda(cudaEventRecord(
+      token->slot->consumer_completion_event, context->stream
+    ), "record fixed-sp consumer completion proxy");
+    token->slot->consumer_event_registered = true;
+    token->slot->state = TransientResidualSlotState::Leased;
+  } catch (const std::exception& error) {
+    poison_transient_residual_slot(
+      token->slot.get(), token->slot_generation, error.what(), false);
+    throw;
+  } catch (...) {
+    poison_transient_residual_slot(
+      token->slot.get(), token->slot_generation,
+      "unknown consumer registration failure", false);
+    throw;
+  }
+}
+
+}  // namespace
+
+void register_device_residual_consumer_event(
+    const std::shared_ptr<DeviceResidualBatch>& token,
+    cudaEvent_t consumer_completion_event) {
+  register_device_residual_consumer_event_impl(
+    token, consumer_completion_event, false);
+}
+
+void free_device_residual(std::shared_ptr<DeviceResidualBatch>* token) {
+  if (token == nullptr || !*token) return;
+  release_device_residual(*token);
+  (*token)->freed = true;
+  (*token)->owner.reset();
+  (*token)->slot.reset();
+  token->reset();
+}
+
+DeviceCoefficientShadow test_device_residual_coefficient_shadow(
+    const std::shared_ptr<DeviceResidualBatch>& token) {
+  if (!token || token->freed) {
+    throw std::runtime_error("fixed-sp CUDA residual token has been freed");
+  }
+  if (token->lease_released || !token->owner || !token->slot) {
     throw std::runtime_error("STALE_TOKEN: residual lease has been released");
   }
   if (token->creator_pid != static_cast<std::int64_t>(getpid())) {
@@ -1336,30 +1513,42 @@ void register_device_residual_consumer_event(
   if (token->owner_generation != token->owner->generation ||
       token->slot_generation != token->slot->generation ||
       token->slot->state != TransientResidualSlotState::Leased) {
-    token->diagnostics.stale_token_reject_count += 1;
     throw std::runtime_error("STALE_TOKEN: residual slot generation mismatch");
   }
-  if (token->slot->consumer_event_registered) {
-    throw std::runtime_error("fixed-sp consumer event is already registered");
+  if ((token->output_mask & FixedSpOutputCoefficients) == 0) {
+    throw std::runtime_error(
+      "test coefficient shadow requires coefficient output");
   }
+
+  DeviceCoefficientShadow shadow;
+  shadow.coefficient_dim = token->owner->p;
+  shadow.target_count = token->target_count;
+  const std::size_t count = matrix_count(
+    shadow.coefficient_dim, shadow.target_count,
+    "test coefficient shadow");
+  if (token->slot->coefficients == nullptr ||
+      token->slot->solve_completion_event == nullptr ||
+      count > token->slot->coefficient_capacity) {
+    throw std::runtime_error(
+      "test coefficient shadow exceeds allocated coefficient capacity");
+  }
+  shadow.coefficients.resize(count);
+
   check_cuda(cudaSetDevice(context->device_id),
-             "set CUDA device for consumer event registration");
-  check_cuda(cudaStreamWaitEvent(
-    context->stream, consumer_completion_event, 0
-  ), "wait for registered fixed-sp consumer event");
-  check_cuda(cudaEventRecord(
-    token->slot->consumer_completion_event, context->stream
-  ), "record fixed-sp consumer completion proxy");
-  token->slot->consumer_event_registered = true;
+             "set CUDA device for coefficient test shadow");
+  check_cuda(cudaEventSynchronize(token->slot->solve_completion_event),
+             "wait for coefficient test shadow solve completion");
+  check_cuda(cudaMemcpy(
+    shadow.coefficients.data(), token->slot->coefficients,
+    allocation_bytes(count, sizeof(double), "test coefficient shadow"),
+    cudaMemcpyDeviceToHost
+  ), "download coefficient test shadow");
+  return shadow;
 }
 
-void free_device_residual(std::shared_ptr<DeviceResidualBatch>* token) {
-  if (token == nullptr || !*token) return;
-  release_device_residual(*token);
-  (*token)->freed = true;
-  (*token)->owner.reset();
-  (*token)->slot.reset();
-  token->reset();
+void test_inject_device_residual_consumer_registration_failure(
+    const std::shared_ptr<DeviceResidualBatch>& token) {
+  register_device_residual_consumer_event_impl(token, nullptr, true);
 }
 
 PreparedSStaticShadow test_prepared_s_static_shadow(

@@ -267,6 +267,9 @@ void require_bare_double_matrix(SEXP value,
     Rcpp::stop(std::string(name) + " must be a bare double matrix");
   }
   SEXP dimensions = Rf_getAttrib(value, R_DimSymbol);
+  if (Rf_isObject(dimensions) || ATTRIB(dimensions) != R_NilValue) {
+    Rcpp::stop(std::string(name) + " must be a bare double matrix");
+  }
   if (TYPEOF(dimensions) != INTSXP || XLENGTH(dimensions) != 2 ||
       INTEGER(dimensions)[0] != expected_rows ||
       INTEGER(dimensions)[1] != expected_columns) {
@@ -3666,8 +3669,13 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_info(SEXP prepared_s) {
     Rcpp::Named("setup_h2d_upload_count") = info.setup_h2d_upload_count,
     Rcpp::Named("setup_h2d_bytes") =
       static_cast<double>(info.setup_h2d_bytes),
+    Rcpp::Named("coefficient_output_capacity") =
+      static_cast<double>(info.coefficient_output_capacity),
     Rcpp::Named("generation") = static_cast<double>(info.generation),
-    Rcpp::Named("output_slot_leased") = info.output_slot_leased
+    Rcpp::Named("output_slot_leased") = info.output_slot_leased,
+    Rcpp::Named("output_slot_state") = info.output_slot_state,
+    Rcpp::Named("output_slot_poison_reason") =
+      info.output_slot_poison_reason
   );
   END_RCPP
 }
@@ -3892,6 +3900,30 @@ extern "C" SEXP C_fixed_sp_cuda_residual_free(SEXP residual_s) {
   fastkpc::free_device_residual(holder);
   delete holder;
   R_ClearExternalPtr(residual_s);
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_test_coefficient_shadow(SEXP residual_s) {
+  BEGIN_RCPP
+  FixedSpResidualHolder* holder =
+    fixed_sp_cuda_residual_holder(residual_s, true);
+  const fastkpc::DeviceCoefficientShadow shadow =
+    fastkpc::test_device_residual_coefficient_shadow(*holder);
+  Rcpp::NumericMatrix coefficients(
+    shadow.coefficient_dim, shadow.target_count);
+  std::copy(shadow.coefficients.begin(), shadow.coefficients.end(),
+            coefficients.begin());
+  return coefficients;
+  END_RCPP
+}
+
+extern "C" SEXP
+C_fixed_sp_cuda_test_inject_consumer_registration_failure(SEXP residual_s) {
+  BEGIN_RCPP
+  FixedSpResidualHolder* holder =
+    fixed_sp_cuda_residual_holder(residual_s, true);
+  fastkpc::test_inject_device_residual_consumer_registration_failure(*holder);
   return R_NilValue;
   END_RCPP
 }
@@ -8068,6 +8100,8 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fixed_sp_cuda_residual_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_info), 1},
   {"C_fixed_sp_cuda_residual_release", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_release), 1},
   {"C_fixed_sp_cuda_residual_free", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_free), 1},
+  {"C_fixed_sp_cuda_test_coefficient_shadow", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_coefficient_shadow), 1},
+  {"C_fixed_sp_cuda_test_inject_consumer_registration_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_consumer_registration_failure), 1},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},
   {"C_fast_hsic_perm_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_perm_cuda), 6},

@@ -107,8 +107,11 @@ struct PreparedSInfo {
   int penalty_count = 0;
   int setup_h2d_upload_count = 0;
   std::size_t setup_h2d_bytes = 0;
+  std::size_t coefficient_output_capacity = 0;
   std::uint64_t generation = 0;
   bool output_slot_leased = false;
+  std::string output_slot_state = "free";
+  std::string output_slot_poison_reason;
 };
 
 struct FixedSpBatchHostView {
@@ -171,6 +174,12 @@ struct PreparedSStaticShadow {
   std::vector<double> X_null;
   std::vector<double> gram;
   std::vector<double> projected_penalties;
+};
+
+struct DeviceCoefficientShadow {
+  int coefficient_dim = 0;
+  int target_count = 0;
+  std::vector<double> coefficients;
 };
 
 const char* fixed_sp_status_name(FixedSpStatus status);

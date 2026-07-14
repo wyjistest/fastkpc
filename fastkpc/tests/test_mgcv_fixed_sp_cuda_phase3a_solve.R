@@ -109,7 +109,12 @@ fixed_sp_cuda_runtime_reserve(runtime, 351L, 64L, 47L, 7L, 407L)
 stable_handle <- fixed_sp_cuda_prepared_create(runtime, stable_dto)
 on.exit(try(fixed_sp_cuda_prepared_free(stable_handle), silent = TRUE),
         add = TRUE)
-explicit_handle <- fixed_sp_cuda_prepared_create(runtime, explicit_dto)
+
+explicit_runtime <- fixed_sp_cuda_runtime_create(0L)
+on.exit(try(fixed_sp_cuda_runtime_free(explicit_runtime), silent = TRUE),
+        add = TRUE)
+fixed_sp_cuda_runtime_reserve(explicit_runtime, 351L, 64L, 1L, 7L, 407L)
+explicit_handle <- fixed_sp_cuda_prepared_create(explicit_runtime, explicit_dto)
 on.exit(try(fixed_sp_cuda_prepared_free(explicit_handle), silent = TRUE),
         add = TRUE)
 
@@ -121,10 +126,25 @@ explicit_token <- fixed_sp_cuda_solve_batch(
 on.exit(try(fixed_sp_cuda_residual_free(explicit_token), silent = TRUE),
         add = TRUE)
 explicit_info <- fixed_sp_cuda_residual_info(explicit_token)
+explicit_prepared_info <- fixed_sp_cuda_prepared_info(explicit_handle)
 assert_true(
   stable_dto$coefficient_dim > explicit_q &&
-    identical(explicit_info$coefficient_dim, stable_dto$coefficient_dim),
-  "coefficient diagnostics retain full-space p when p exceeds q"
+    identical(explicit_info$coefficient_dim, stable_dto$coefficient_dim) &&
+    identical(explicit_prepared_info$coefficient_output_capacity,
+              as.double(stable_dto$coefficient_dim)),
+  "coefficient diagnostics retain the full-space p allocation bound"
+)
+explicit_coefficients <- .Call(
+  "C_fixed_sp_cuda_test_coefficient_shadow", explicit_token,
+  PACKAGE = "fastkpc_cuda"
+)
+assert_true(
+  identical(dim(explicit_coefficients),
+            c(stable_dto$coefficient_dim, 1L)) &&
+    length(explicit_coefficients) == stable_dto$coefficient_dim &&
+    identical(as.vector(explicit_coefficients),
+              rep(NaN, stable_dto$coefficient_dim)),
+  "coefficient shadow reads p by one initialized NaN values"
 )
 assert_true(
   identical(explicit_info$solver_status,
@@ -135,6 +155,22 @@ assert_true(
 fixed_sp_cuda_residual_release(explicit_token)
 fixed_sp_cuda_residual_free(explicit_token)
 fixed_sp_cuda_prepared_free(explicit_handle)
+fixed_sp_cuda_runtime_free(explicit_runtime)
+
+forged_Y <- stable_native_batch$Y
+forged_dimensions <- attr(forged_Y, "dim")
+attr(forged_dimensions, "forged") <- TRUE
+attr(forged_Y, "dim") <- forged_dimensions
+assert_error(
+  .Call(
+    "C_fixed_sp_cuda_solve_batch", stable_handle, forged_Y,
+    stable_native_batch$SP, as.character(stable_native_batch$planned_route),
+    as.character(stable_native_batch$target_keys), "residuals",
+    PACKAGE = "fastkpc_cuda"
+  ),
+  "Y must be a bare double matrix",
+  "direct native solve rejects an attributed Y dim vector"
+)
 
 solve_stable <- function(Y = stable_native_batch$Y,
                          SP = stable_native_batch$SP,
@@ -254,5 +290,65 @@ assert_error(
 fixed_sp_cuda_residual_free(stable_token)
 fixed_sp_cuda_prepared_free(stable_handle)
 fixed_sp_cuda_runtime_free(runtime)
+
+poison_runtime <- fixed_sp_cuda_runtime_create(0L)
+on.exit(try(fixed_sp_cuda_runtime_free(poison_runtime), silent = TRUE),
+        add = TRUE)
+fixed_sp_cuda_runtime_reserve(poison_runtime, 351L, 64L, 1L, 7L, 407L)
+poison_handle <- fixed_sp_cuda_prepared_create(poison_runtime, stable_dto)
+on.exit(try(fixed_sp_cuda_prepared_free(poison_handle), silent = TRUE),
+        add = TRUE)
+solve_poison_fixture <- function() {
+  fixed_sp_cuda_solve_batch(
+    poison_handle, stable_native_batch$Y, stable_native_batch$SP,
+    stable_native_batch$planned_route, stable_native_batch$target_keys,
+    outputs = c("residuals")
+  )
+}
+poison_token <- solve_poison_fixture()
+assert_error(
+  .Call(
+    "C_fixed_sp_cuda_test_inject_consumer_registration_failure",
+    poison_token, PACKAGE = "fastkpc_cuda"
+  ),
+  "INJECTED_CONSUMER_REGISTRATION_FAILURE",
+  "consumer registration test hook injects after the poison-safe transition"
+)
+poison_info <- fixed_sp_cuda_prepared_info(poison_handle)
+assert_true(
+  identical(poison_info$output_slot_state, "poisoned") &&
+    !isTRUE(poison_info$output_slot_leased) &&
+    grepl("INJECTED_CONSUMER_REGISTRATION_FAILURE",
+          poison_info$output_slot_poison_reason, fixed = TRUE),
+  "prepared diagnostics report the poisoned output slot and first reason"
+)
+assert_error(
+  fixed_sp_cuda_residual_release(poison_token),
+  "ERR_OUTPUT_SLOT_POISONED",
+  "release fails closed for a poisoned output slot"
+)
+assert_error(
+  solve_poison_fixture(), "ERR_OUTPUT_SLOT_POISONED",
+  "the next solve fails closed instead of reporting ordinary contention"
+)
+poison_info_after_errors <- fixed_sp_cuda_prepared_info(poison_handle)
+assert_true(
+  identical(poison_info_after_errors$output_slot_state,
+            poison_info$output_slot_state) &&
+    identical(poison_info_after_errors$output_slot_poison_reason,
+              poison_info$output_slot_poison_reason),
+  "failed release and solve preserve the first poison reason"
+)
+poison_token <- NULL
+invisible(gc())
+poison_info_after_gc <- fixed_sp_cuda_prepared_info(poison_handle)
+assert_true(
+  identical(poison_info_after_gc$output_slot_state, "poisoned") &&
+    identical(poison_info_after_gc$output_slot_poison_reason,
+              poison_info$output_slot_poison_reason),
+  "residual finalizer discards its token without reopening the poisoned slot"
+)
+fixed_sp_cuda_prepared_free(poison_handle)
+fixed_sp_cuda_runtime_free(poison_runtime)
 
 cat("PASS Phase 3A stable fixed-sp solve\n")
