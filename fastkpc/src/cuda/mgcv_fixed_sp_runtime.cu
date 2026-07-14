@@ -8,9 +8,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace fastkpc {
 namespace {
@@ -76,6 +78,157 @@ void validate_capacities(const FixedSpCapacities& capacities) {
   }
 }
 
+std::size_t positive_size(int value, const char* name) {
+  if (value <= 0) {
+    throw std::runtime_error(std::string(name) + " must be positive");
+  }
+  return static_cast<std::size_t>(value);
+}
+
+std::size_t matrix_count(int rows, int columns, const char* name) {
+  return checked_multiply(
+    positive_size(rows, name), positive_size(columns, name), name);
+}
+
+void validate_prepared_host_view(const PreparedSHostView& setup) {
+  const std::size_t penalties =
+    positive_size(setup.penalty_count, "prepared penalty count");
+  positive_size(setup.n, "prepared row count");
+  positive_size(setup.coefficient_dim, "prepared coefficient dimension");
+  positive_size(setup.null_dim, "prepared null dimension");
+  if (setup.X == nullptr || setup.gram == nullptr) {
+    throw std::runtime_error("prepared setup matrix pointers are null");
+  }
+  if (setup.Z == nullptr && setup.null_dim != setup.coefficient_dim) {
+    throw std::runtime_error(
+      "identity prepared setup must preserve coefficient dimension");
+  }
+  if (setup.Z != nullptr && setup.null_dim > setup.coefficient_dim) {
+    throw std::runtime_error(
+      "prepared null dimension exceeds coefficient dimension");
+  }
+  if (setup.penalty_blocks.size() != penalties ||
+      setup.penalty_dimensions.size() != penalties ||
+      setup.penalty_offsets_zero_based.size() != penalties ||
+      setup.penalty_ranks.size() != penalties ||
+      setup.penalty_sp_indices_zero_based.size() != penalties) {
+    throw std::runtime_error("prepared penalty metadata size mismatch");
+  }
+  for (std::size_t index = 0; index < penalties; ++index) {
+    const int dimension = setup.penalty_dimensions[index];
+    const int offset = setup.penalty_offsets_zero_based[index];
+    if (setup.penalty_blocks[index] == nullptr || dimension <= 0 ||
+        offset < 0 || dimension > setup.coefficient_dim ||
+        offset > setup.coefficient_dim - dimension) {
+      throw std::runtime_error("prepared penalty offset is out of range");
+    }
+    if (setup.penalty_ranks[index] < 0 ||
+        setup.penalty_ranks[index] > dimension) {
+      throw std::runtime_error("prepared penalty rank is out of range");
+    }
+    if (setup.penalty_sp_indices_zero_based[index] !=
+        static_cast<int>(index)) {
+      throw std::runtime_error(
+        "prepared penalty-to-SP mapping must be identity");
+    }
+  }
+}
+
+std::vector<double> build_nullspace_design(
+    const PreparedSHostView& setup) {
+  if (setup.Z == nullptr) return {};
+  const std::size_t count =
+    matrix_count(setup.n, setup.null_dim, "nullspace design");
+  std::vector<double> result(count, 0.0);
+  for (int column = 0; column < setup.null_dim; ++column) {
+    for (int inner = 0; inner < setup.coefficient_dim; ++inner) {
+      const double z = setup.Z[
+        static_cast<std::size_t>(inner) +
+        static_cast<std::size_t>(setup.coefficient_dim) * column];
+      for (int row = 0; row < setup.n; ++row) {
+        result[static_cast<std::size_t>(row) +
+               static_cast<std::size_t>(setup.n) * column] +=
+          setup.X[static_cast<std::size_t>(row) +
+                  static_cast<std::size_t>(setup.n) * inner] * z;
+      }
+    }
+  }
+  return result;
+}
+
+std::vector<double> build_projected_penalties(
+    const PreparedSHostView& setup) {
+  const std::size_t p_squared = matrix_count(
+    setup.coefficient_dim, setup.coefficient_dim,
+    "full coefficient penalty");
+  const std::size_t q_squared =
+    matrix_count(setup.null_dim, setup.null_dim, "projected penalty");
+  const std::size_t projected_count = checked_multiply(
+    positive_size(setup.penalty_count, "prepared penalty count"),
+    q_squared, "projected penalties");
+  std::vector<double> projected(projected_count, 0.0);
+  std::vector<double> full(p_squared, 0.0);
+  std::vector<double> penalty_times_z;
+  if (setup.Z != nullptr) {
+    penalty_times_z.assign(matrix_count(
+      setup.coefficient_dim, setup.null_dim, "penalty times nullspace"),
+      0.0);
+  }
+
+  for (int penalty = 0; penalty < setup.penalty_count; ++penalty) {
+    std::fill(full.begin(), full.end(), 0.0);
+    const int dimension = setup.penalty_dimensions[penalty];
+    const int offset = setup.penalty_offsets_zero_based[penalty];
+    const double* block = setup.penalty_blocks[penalty];
+    for (int column = 0; column < dimension; ++column) {
+      for (int row = 0; row < dimension; ++row) {
+        full[static_cast<std::size_t>(offset + row) +
+             static_cast<std::size_t>(setup.coefficient_dim) *
+               (offset + column)] =
+          block[static_cast<std::size_t>(row) +
+                static_cast<std::size_t>(dimension) * column];
+      }
+    }
+
+    double* destination = projected.data() +
+      static_cast<std::size_t>(penalty) * q_squared;
+    if (setup.Z == nullptr) {
+      std::copy(full.begin(), full.end(), destination);
+      continue;
+    }
+
+    std::fill(penalty_times_z.begin(), penalty_times_z.end(), 0.0);
+    for (int column = 0; column < setup.null_dim; ++column) {
+      for (int inner = 0; inner < setup.coefficient_dim; ++inner) {
+        const double z = setup.Z[
+          static_cast<std::size_t>(inner) +
+          static_cast<std::size_t>(setup.coefficient_dim) * column];
+        for (int row = 0; row < setup.coefficient_dim; ++row) {
+          penalty_times_z[static_cast<std::size_t>(row) +
+            static_cast<std::size_t>(setup.coefficient_dim) * column] +=
+            full[static_cast<std::size_t>(row) +
+                 static_cast<std::size_t>(setup.coefficient_dim) * inner] * z;
+        }
+      }
+    }
+    for (int column = 0; column < setup.null_dim; ++column) {
+      for (int row = 0; row < setup.null_dim; ++row) {
+        double value = 0.0;
+        for (int inner = 0; inner < setup.coefficient_dim; ++inner) {
+          value += setup.Z[static_cast<std::size_t>(inner) +
+                           static_cast<std::size_t>(setup.coefficient_dim) *
+                             row] *
+            penalty_times_z[static_cast<std::size_t>(inner) +
+              static_cast<std::size_t>(setup.coefficient_dim) * column];
+        }
+        destination[static_cast<std::size_t>(row) +
+                    static_cast<std::size_t>(setup.null_dim) * column] = value;
+      }
+    }
+  }
+  return projected;
+}
+
 }  // namespace
 
 class CudaRuntimeContext {
@@ -112,6 +265,95 @@ class CudaRuntimeContext {
 
  private:
   void cleanup_noexcept() noexcept;
+};
+
+enum class TransientResidualSlotState {
+  Free,
+  Leased
+};
+
+struct TransientResidualSlot {
+  ~TransientResidualSlot() { cleanup_noexcept(); }
+  void cleanup_noexcept() noexcept {
+    if (freed) return;
+    if (device_id >= 0) cudaSetDevice(device_id);
+    if (consumer_completion_event != nullptr) {
+      cudaEventDestroy(consumer_completion_event);
+      consumer_completion_event = nullptr;
+    }
+    if (solve_completion_event != nullptr) {
+      cudaEventDestroy(solve_completion_event);
+      solve_completion_event = nullptr;
+    }
+    cudaFree(rss);
+    rss = nullptr;
+    cudaFree(residuals);
+    residuals = nullptr;
+    cudaFree(fitted);
+    fitted = nullptr;
+    cudaFree(coefficients);
+    coefficients = nullptr;
+    freed = true;
+  }
+
+  int device_id = -1;
+  double* coefficients = nullptr;
+  double* fitted = nullptr;
+  double* residuals = nullptr;
+  double* rss = nullptr;
+  cudaEvent_t solve_completion_event = nullptr;
+  cudaEvent_t consumer_completion_event = nullptr;
+  std::uint64_t generation = 0;
+  TransientResidualSlotState state = TransientResidualSlotState::Free;
+  bool consumer_event_registered = false;
+  bool freed = false;
+};
+
+class PreparedSGpuHandle {
+ public:
+  ~PreparedSGpuHandle() { cleanup_noexcept(); }
+
+  void cleanup_noexcept() noexcept {
+    if (freed) return;
+    if (device_id >= 0) cudaSetDevice(device_id);
+    if (setup_completion_event != nullptr) {
+      cudaEventDestroy(setup_completion_event);
+      setup_completion_event = nullptr;
+    }
+    residual_slot.reset();
+    cudaFree(d_projected_penalties);
+    d_projected_penalties = nullptr;
+    cudaFree(d_gram);
+    d_gram = nullptr;
+    if (d_X_null != d_X) cudaFree(d_X_null);
+    d_X_null = nullptr;
+    cudaFree(d_Z);
+    d_Z = nullptr;
+    cudaFree(d_X);
+    d_X = nullptr;
+    context.reset();
+    freed = true;
+  }
+
+  std::shared_ptr<CudaRuntimeContext> context;
+  std::int64_t creator_pid = -1;
+  int device_id = -1;
+  std::uint64_t generation = 1;
+  std::string prepared_s_key_sha256;
+  int n = 0;
+  int p = 0;
+  int q = 0;
+  int penalty_count = 0;
+  double* d_X = nullptr;
+  double* d_Z = nullptr;
+  double* d_X_null = nullptr;
+  double* d_gram = nullptr;
+  double* d_projected_penalties = nullptr;
+  std::shared_ptr<TransientResidualSlot> residual_slot;
+  cudaEvent_t setup_completion_event = nullptr;
+  int setup_h2d_upload_count = 0;
+  std::size_t setup_h2d_bytes = 0;
+  bool freed = false;
 };
 
 CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
@@ -477,6 +719,181 @@ FixedSpRuntimeInfo fixed_sp_runtime_info(
 
 void free_fixed_sp_runtime(std::shared_ptr<CudaRuntimeContext>* context) {
   if (context != nullptr) context->reset();
+}
+
+std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
+    const std::shared_ptr<CudaRuntimeContext>& context,
+    const PreparedSHostView& setup) {
+  if (!context) {
+    throw std::runtime_error("fixed-sp CUDA runtime has been freed");
+  }
+  std::lock_guard<std::mutex> lock(context->mutex);
+  context->require_usable();
+  validate_prepared_host_view(setup);
+  if (context->diagnostics.workspace_reserve_count == 0) {
+    throw std::runtime_error(
+      "fixed-sp CUDA runtime must reserve workspace before prepared setup");
+  }
+  if (setup.n > context->capacities.n ||
+      setup.null_dim > context->capacities.null_dim ||
+      setup.penalty_count > context->capacities.penalty_count) {
+    throw std::runtime_error(
+      "prepared setup dimensions exceed reserved CUDA runtime capacity");
+  }
+
+  const std::vector<double> nullspace_design =
+    build_nullspace_design(setup);
+  const std::vector<double> projected_penalties =
+    build_projected_penalties(setup);
+  const std::size_t x_count =
+    matrix_count(setup.n, setup.coefficient_dim, "prepared X");
+  const std::size_t z_count = setup.Z == nullptr ? 0U :
+    matrix_count(setup.coefficient_dim, setup.null_dim, "prepared Z");
+  const std::size_t x_null_count = setup.Z == nullptr ? 0U :
+    matrix_count(setup.n, setup.null_dim, "prepared nullspace design");
+  const std::size_t gram_count =
+    matrix_count(setup.null_dim, setup.null_dim, "prepared Gram");
+  const std::size_t penalty_count = projected_penalties.size();
+  const std::size_t target_capacity = positive_size(
+    context->capacities.target_count, "reserved target capacity");
+  const std::size_t coefficient_output_count = checked_multiply(
+    positive_size(setup.null_dim, "prepared null dimension"),
+    target_capacity, "transient coefficient slot");
+  const std::size_t observation_output_count = checked_multiply(
+    positive_size(setup.n, "prepared row count"), target_capacity,
+    "transient observation slot");
+
+  auto handle = std::make_shared<PreparedSGpuHandle>();
+  handle->context = context;
+  handle->creator_pid = context->creator_pid;
+  handle->device_id = context->device_id;
+  handle->prepared_s_key_sha256 = setup.prepared_s_key_sha256;
+  handle->n = setup.n;
+  handle->p = setup.coefficient_dim;
+  handle->q = setup.null_dim;
+  handle->penalty_count = setup.penalty_count;
+  handle->residual_slot = std::make_shared<TransientResidualSlot>();
+  handle->residual_slot->device_id = context->device_id;
+
+  check_cuda(cudaSetDevice(context->device_id),
+             "set CUDA device for prepared setup");
+  try {
+    check_cuda(cudaMalloc(
+      &handle->d_X,
+      allocation_bytes(x_count, sizeof(double), "prepared X")
+    ), "allocate prepared X");
+    if (setup.Z == nullptr) {
+      handle->d_X_null = handle->d_X;
+    } else {
+      check_cuda(cudaMalloc(
+        &handle->d_Z,
+        allocation_bytes(z_count, sizeof(double), "prepared Z")
+      ), "allocate prepared Z");
+      check_cuda(cudaMalloc(
+        &handle->d_X_null,
+        allocation_bytes(
+          x_null_count, sizeof(double), "prepared nullspace design")
+      ), "allocate prepared nullspace design");
+    }
+    check_cuda(cudaMalloc(
+      &handle->d_gram,
+      allocation_bytes(gram_count, sizeof(double), "prepared Gram")
+    ), "allocate prepared Gram");
+    check_cuda(cudaMalloc(
+      &handle->d_projected_penalties,
+      allocation_bytes(
+        penalty_count, sizeof(double), "prepared projected penalties")
+    ), "allocate prepared projected penalties");
+
+    check_cuda(cudaMalloc(
+      &handle->residual_slot->coefficients,
+      allocation_bytes(
+        coefficient_output_count, sizeof(double),
+        "transient coefficient slot")
+    ), "allocate transient coefficient slot");
+    check_cuda(cudaMalloc(
+      &handle->residual_slot->fitted,
+      allocation_bytes(
+        observation_output_count, sizeof(double), "transient fitted slot")
+    ), "allocate transient fitted slot");
+    check_cuda(cudaMalloc(
+      &handle->residual_slot->residuals,
+      allocation_bytes(
+        observation_output_count, sizeof(double), "transient residual slot")
+    ), "allocate transient residual slot");
+    check_cuda(cudaMalloc(
+      &handle->residual_slot->rss,
+      allocation_bytes(target_capacity, sizeof(double), "transient RSS slot")
+    ), "allocate transient RSS slot");
+    check_cuda(cudaEventCreateWithFlags(
+      &handle->residual_slot->solve_completion_event,
+      cudaEventDisableTiming
+    ), "create transient solve completion event");
+    check_cuda(cudaEventCreateWithFlags(
+      &handle->residual_slot->consumer_completion_event,
+      cudaEventDisableTiming
+    ), "create transient consumer completion event");
+    check_cuda(cudaEventCreateWithFlags(
+      &handle->setup_completion_event, cudaEventDisableTiming
+    ), "create prepared setup completion event");
+
+    auto upload = [&](double* destination, const double* source,
+                      std::size_t count, const char* name) {
+      const std::size_t bytes = allocation_bytes(count, sizeof(double), name);
+      check_cuda(cudaMemcpyAsync(
+        destination, source, bytes, cudaMemcpyHostToDevice, context->stream
+      ), name);
+      handle->setup_h2d_bytes = checked_add(
+        handle->setup_h2d_bytes, bytes, "prepared setup H2D diagnostics");
+    };
+    upload(handle->d_X, setup.X, x_count, "upload prepared X");
+    if (setup.Z != nullptr) {
+      upload(handle->d_Z, setup.Z, z_count, "upload prepared Z");
+      upload(handle->d_X_null, nullspace_design.data(), x_null_count,
+             "upload prepared nullspace design");
+    }
+    upload(handle->d_gram, setup.gram, gram_count,
+           "upload prepared Gram");
+    upload(handle->d_projected_penalties, projected_penalties.data(),
+           penalty_count, "upload prepared projected penalties");
+    check_cuda(cudaEventRecord(
+      handle->setup_completion_event, context->stream
+    ), "record prepared setup completion");
+    check_cuda(cudaEventSynchronize(handle->setup_completion_event),
+               "wait for prepared setup completion");
+    check_cuda(cudaEventDestroy(handle->setup_completion_event),
+               "destroy prepared setup completion event");
+    handle->setup_completion_event = nullptr;
+    handle->setup_h2d_upload_count = 1;
+  } catch (...) {
+    handle->cleanup_noexcept();
+    throw;
+  }
+  return handle;
+}
+
+PreparedSInfo prepared_s_gpu_info(
+    const std::shared_ptr<PreparedSGpuHandle>& handle) {
+  if (!handle || handle->freed) {
+    throw std::runtime_error("fixed-sp CUDA prepared handle has been freed");
+  }
+  PreparedSInfo info;
+  info.prepared_s_key_sha256 = handle->prepared_s_key_sha256;
+  info.n = handle->n;
+  info.coefficient_dim = handle->p;
+  info.null_dim = handle->q;
+  info.penalty_count = handle->penalty_count;
+  info.setup_h2d_upload_count = handle->setup_h2d_upload_count;
+  info.setup_h2d_bytes = handle->setup_h2d_bytes;
+  info.generation = handle->generation;
+  info.output_slot_leased =
+    handle->residual_slot != nullptr &&
+    handle->residual_slot->state == TransientResidualSlotState::Leased;
+  return info;
+}
+
+void free_prepared_s_gpu(std::shared_ptr<PreparedSGpuHandle>* handle) {
+  if (handle != nullptr) handle->reset();
 }
 
 const char* fixed_sp_status_name(FixedSpStatus status) {

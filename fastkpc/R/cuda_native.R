@@ -1176,3 +1176,20 @@ fixed_sp_cuda_runtime_free <- function(runtime) {
   invisible(.Call("C_fixed_sp_cuda_runtime_free", runtime,
                   PACKAGE = "fastkpc_cuda"))
 }
+
+fixed_sp_cuda_prepared_create <- function(runtime, dto) {
+  load_fastkpc_cuda_native()
+  .Call("C_fixed_sp_cuda_prepared_create", runtime, dto,
+        PACKAGE = "fastkpc_cuda")
+}
+
+fixed_sp_cuda_prepared_info <- function(handle) {
+  load_fastkpc_cuda_native()
+  .Call("C_fixed_sp_cuda_prepared_info", handle, PACKAGE = "fastkpc_cuda")
+}
+
+fixed_sp_cuda_prepared_free <- function(handle) {
+  load_fastkpc_cuda_native()
+  invisible(.Call("C_fixed_sp_cuda_prepared_free", handle,
+                  PACKAGE = "fastkpc_cuda"))
+}

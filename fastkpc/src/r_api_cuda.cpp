@@ -84,6 +84,41 @@ void fixed_sp_cuda_runtime_finalizer(SEXP ptr) {
   R_ClearExternalPtr(ptr);
 }
 
+SEXP fixed_sp_cuda_prepared_tag() {
+  static SEXP tag = Rf_install("fastkpc_fixed_sp_cuda_prepared");
+  return tag;
+}
+
+using FixedSpPreparedHolder =
+  std::shared_ptr<fastkpc::PreparedSGpuHandle>;
+
+FixedSpPreparedHolder* fixed_sp_cuda_prepared_holder(SEXP ptr,
+                                                     bool require_live) {
+  if (TYPEOF(ptr) != EXTPTRSXP ||
+      R_ExternalPtrTag(ptr) != fixed_sp_cuda_prepared_tag()) {
+    Rcpp::stop(
+      "fixed-sp CUDA prepared handle must be a tagged external pointer");
+  }
+  auto* holder =
+    static_cast<FixedSpPreparedHolder*>(R_ExternalPtrAddr(ptr));
+  if (holder == nullptr || (require_live && !*holder)) {
+    Rcpp::stop("fixed-sp CUDA prepared handle has been freed");
+  }
+  return holder;
+}
+
+void fixed_sp_cuda_prepared_finalizer(SEXP ptr) {
+  auto* holder =
+    static_cast<FixedSpPreparedHolder*>(R_ExternalPtrAddr(ptr));
+  if (holder == nullptr) return;
+  try {
+    fastkpc::free_prepared_s_gpu(holder);
+  } catch (...) {
+  }
+  delete holder;
+  R_ClearExternalPtr(ptr);
+}
+
 int scalar_integer(SEXP value, const char* name) {
   if (TYPEOF(value) != INTSXP || XLENGTH(value) != 1 ||
       INTEGER(value)[0] == NA_INTEGER) {
@@ -104,6 +139,128 @@ bool all_finite_vector(Rcpp::NumericVector values) {
     if (!std::isfinite(value)) return false;
   }
   return true;
+}
+
+bool has_only_attributes(SEXP value,
+                         const std::vector<SEXP>& allowed_tags) {
+  std::vector<SEXP> seen;
+  for (SEXP node = ATTRIB(value); node != R_NilValue; node = CDR(node)) {
+    const SEXP tag = TAG(node);
+    if (std::find(allowed_tags.begin(), allowed_tags.end(), tag) ==
+          allowed_tags.end() ||
+        std::find(seen.begin(), seen.end(), tag) != seen.end()) {
+      return false;
+    }
+    seen.push_back(tag);
+  }
+  return true;
+}
+
+bool is_bare_scalar_string(SEXP value) {
+  return TYPEOF(value) == STRSXP && XLENGTH(value) == 1 &&
+    !Rf_isObject(value) && ATTRIB(value) == R_NilValue &&
+    STRING_ELT(value, 0) != NA_STRING;
+}
+
+std::string bare_scalar_string(SEXP value, const char* name) {
+  if (!is_bare_scalar_string(value)) {
+    Rcpp::stop(std::string(name) + " must be a bare character scalar");
+  }
+  return Rcpp::as<std::string>(value);
+}
+
+bool is_sha256_string(SEXP value) {
+  if (!is_bare_scalar_string(value)) return false;
+  const std::string text = Rcpp::as<std::string>(value);
+  if (text.size() != 64U) return false;
+  return std::all_of(text.begin(), text.end(), [](unsigned char character) {
+    return (character >= '0' && character <= '9') ||
+      (character >= 'a' && character <= 'f');
+  });
+}
+
+void require_sha256_string(SEXP value, const char* name) {
+  if (!is_sha256_string(value)) {
+    Rcpp::stop(std::string(name) + " must be a lowercase SHA-256 string");
+  }
+}
+
+int positive_scalar_integer(SEXP value, const char* name) {
+  const int result = scalar_integer(value, name);
+  if (result <= 0) {
+    Rcpp::stop(std::string(name) + " must be positive");
+  }
+  return result;
+}
+
+void require_finite_double_matrix(SEXP value,
+                                  int expected_rows,
+                                  int expected_columns,
+                                  const char* name) {
+  if (TYPEOF(value) != REALSXP || !Rf_isMatrix(value) ||
+      Rf_isObject(value) ||
+      !has_only_attributes(value, {R_DimSymbol, R_DimNamesSymbol})) {
+    Rcpp::stop(std::string(name) + " must be a finite double matrix");
+  }
+  SEXP dimensions = Rf_getAttrib(value, R_DimSymbol);
+  if (TYPEOF(dimensions) != INTSXP || XLENGTH(dimensions) != 2 ||
+      INTEGER(dimensions)[0] != expected_rows ||
+      INTEGER(dimensions)[1] != expected_columns) {
+    Rcpp::stop(std::string(name) + " shape mismatch");
+  }
+  const R_xlen_t count = XLENGTH(value);
+  const double* values = REAL(value);
+  for (R_xlen_t index = 0; index < count; ++index) {
+    if (!std::isfinite(values[index])) {
+      Rcpp::stop(std::string(name) + " must be finite");
+    }
+  }
+}
+
+void require_bare_integer_vector(SEXP value,
+                                 int expected_length,
+                                 const char* name) {
+  if (TYPEOF(value) != INTSXP || XLENGTH(value) != expected_length ||
+      Rf_isObject(value) || ATTRIB(value) != R_NilValue) {
+    Rcpp::stop(std::string(name) + " must be a bare integer vector");
+  }
+  for (int index = 0; index < expected_length; ++index) {
+    if (INTEGER(value)[index] == NA_INTEGER) {
+      Rcpp::stop(std::string(name) + " must not contain NA");
+    }
+  }
+}
+
+void require_prepared_dto_fields(SEXP dto_s) {
+  static const char* expected[] = {
+    "schema_version", "dataset_sha256", "prepared_s_key_sha256",
+    "same_S_group_id", "phase1_setup_fingerprint", "provider_fingerprint",
+    "semantic_fingerprint", "representation_fingerprint",
+    "prepared_s_setup_schema_version", "native_dto_schema_version",
+    "data_p", "n", "coefficient_dim", "null_dim", "penalty_count", "X",
+    "constraint_mode", "constraint_nullspace", "gram_matrix",
+    "nullspace_gram_matrix", "penalty_blocks",
+    "penalty_offsets_zero_based", "penalty_ranks",
+    "penalty_sp_indices_zero_based", "penalty_sp_labels", "H",
+    "weights_policy", "offset_policy"
+  };
+  constexpr int expected_count =
+    static_cast<int>(sizeof(expected) / sizeof(expected[0]));
+  if (TYPEOF(dto_s) != VECSXP || XLENGTH(dto_s) != expected_count ||
+      Rf_isObject(dto_s) ||
+      !has_only_attributes(dto_s, {R_NamesSymbol})) {
+    Rcpp::stop("prepared DTO must have exact fields");
+  }
+  SEXP names = Rf_getAttrib(dto_s, R_NamesSymbol);
+  if (TYPEOF(names) != STRSXP || XLENGTH(names) != expected_count) {
+    Rcpp::stop("prepared DTO must have exact fields");
+  }
+  for (int index = 0; index < expected_count; ++index) {
+    if (STRING_ELT(names, index) == NA_STRING ||
+        std::string(CHAR(STRING_ELT(names, index))) != expected[index]) {
+      Rcpp::stop("prepared DTO must have exact fields");
+    }
+  }
 }
 
 void legacy_dcov_spectra_matvec_handle_finalizer(SEXP ext) {
@@ -3185,6 +3342,200 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_free(SEXP runtime_s) {
   FixedSpRuntimeHolder* holder =
     fixed_sp_cuda_runtime_holder(runtime_s, false);
   fastkpc::free_fixed_sp_runtime(holder);
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_prepared_create(SEXP runtime_s,
+                                                 SEXP dto_s) {
+  BEGIN_RCPP
+  FixedSpRuntimeHolder* runtime_holder =
+    fixed_sp_cuda_runtime_holder(runtime_s, true);
+  require_prepared_dto_fields(dto_s);
+  Rcpp::List dto(dto_s);
+
+  const std::string schema_version =
+    bare_scalar_string(dto[0], "schema_version");
+  const std::string prepared_schema =
+    bare_scalar_string(dto[8], "prepared_s_setup_schema_version");
+  const std::string native_schema =
+    bare_scalar_string(dto[9], "native_dto_schema_version");
+  if (schema_version != "full-cuda-ci-prepared-s-native-dto-v1" ||
+      native_schema != schema_version ||
+      prepared_schema != "full-cuda-ci-prepared-s-setup-v1") {
+    Rcpp::stop("prepared DTO schema lineage mismatch");
+  }
+  static const char* lineage_names[] = {
+    "dataset_sha256", "prepared_s_key_sha256", "same_S_group_id",
+    "phase1_setup_fingerprint", "provider_fingerprint",
+    "semantic_fingerprint", "representation_fingerprint"
+  };
+  for (int index = 0; index < 7; ++index) {
+    require_sha256_string(dto[index + 1], lineage_names[index]);
+  }
+
+  const int data_p = positive_scalar_integer(dto[10], "data_p");
+  if (data_p != 48) {
+    Rcpp::stop("canonical prepared DTO data_p must be 48");
+  }
+  const int n = positive_scalar_integer(dto[11], "n");
+  const int p = positive_scalar_integer(dto[12], "coefficient_dim");
+  const int q = positive_scalar_integer(dto[13], "null_dim");
+  const int penalties = positive_scalar_integer(dto[14], "penalty_count");
+  if (q > p) Rcpp::stop("null_dim must not exceed coefficient_dim");
+  require_finite_double_matrix(dto[15], n, p, "X");
+
+  const std::string constraint_mode =
+    bare_scalar_string(dto[16], "constraint_mode");
+  const bool identity_constraint = constraint_mode == "identity";
+  if (!identity_constraint && constraint_mode != "explicit") {
+    Rcpp::stop("constraint_mode must be identity or explicit");
+  }
+  require_finite_double_matrix(dto[18], p, p, "gram_matrix");
+  const double* Z = nullptr;
+  const double* gram = nullptr;
+  if (identity_constraint) {
+    if (q != p || dto[17] != R_NilValue || dto[19] != R_NilValue) {
+      Rcpp::stop("identity constraint DTO shape mismatch");
+    }
+    gram = REAL(dto[18]);
+  } else {
+    if (q >= p || dto[17] == R_NilValue || dto[19] == R_NilValue) {
+      Rcpp::stop("explicit constraint DTO shape mismatch");
+    }
+    require_finite_double_matrix(dto[17], p, q, "constraint_nullspace");
+    require_finite_double_matrix(dto[19], q, q, "nullspace_gram_matrix");
+    Z = REAL(dto[17]);
+    gram = REAL(dto[19]);
+  }
+
+  SEXP penalty_blocks_s = dto[20];
+  if (TYPEOF(penalty_blocks_s) != VECSXP ||
+      XLENGTH(penalty_blocks_s) != penalties ||
+      Rf_isObject(penalty_blocks_s)) {
+    Rcpp::stop("penalty_blocks shape mismatch");
+  }
+  require_bare_integer_vector(
+    dto[21], penalties, "penalty_offsets_zero_based");
+  require_bare_integer_vector(dto[22], penalties, "penalty_ranks");
+  require_bare_integer_vector(
+    dto[23], penalties, "penalty_sp_indices_zero_based");
+  SEXP penalty_labels_s = dto[24];
+  if (TYPEOF(penalty_labels_s) != STRSXP ||
+      XLENGTH(penalty_labels_s) != penalties ||
+      Rf_isObject(penalty_labels_s) || ATTRIB(penalty_labels_s) != R_NilValue) {
+    Rcpp::stop("penalty_sp_labels must be a bare character vector");
+  }
+
+  fastkpc::PreparedSHostView setup;
+  setup.dataset_sha256 = Rcpp::as<std::string>(dto[1]);
+  setup.prepared_s_key_sha256 = Rcpp::as<std::string>(dto[2]);
+  setup.same_s_group_id = Rcpp::as<std::string>(dto[3]);
+  setup.semantic_fingerprint = Rcpp::as<std::string>(dto[6]);
+  setup.representation_fingerprint = Rcpp::as<std::string>(dto[7]);
+  setup.n = n;
+  setup.coefficient_dim = p;
+  setup.null_dim = q;
+  setup.penalty_count = penalties;
+  setup.X = REAL(dto[15]);
+  setup.Z = Z;
+  setup.gram = gram;
+  setup.penalty_blocks.reserve(static_cast<std::size_t>(penalties));
+  setup.penalty_dimensions.reserve(static_cast<std::size_t>(penalties));
+  setup.penalty_offsets_zero_based.reserve(
+    static_cast<std::size_t>(penalties));
+  setup.penalty_ranks.reserve(static_cast<std::size_t>(penalties));
+  setup.penalty_sp_indices_zero_based.reserve(
+    static_cast<std::size_t>(penalties));
+
+  for (int index = 0; index < penalties; ++index) {
+    SEXP block = VECTOR_ELT(penalty_blocks_s, index);
+    if (TYPEOF(block) != REALSXP || !Rf_isMatrix(block) ||
+        Rf_isObject(block) ||
+        !has_only_attributes(block, {R_DimSymbol, R_DimNamesSymbol})) {
+      Rcpp::stop("penalty block must be a finite double matrix");
+    }
+    SEXP dimensions = Rf_getAttrib(block, R_DimSymbol);
+    if (TYPEOF(dimensions) != INTSXP || XLENGTH(dimensions) != 2 ||
+        INTEGER(dimensions)[0] <= 0 ||
+        INTEGER(dimensions)[0] != INTEGER(dimensions)[1]) {
+      Rcpp::stop("penalty block shape mismatch");
+    }
+    const int dimension = INTEGER(dimensions)[0];
+    require_finite_double_matrix(
+      block, dimension, dimension, "penalty block");
+    const int offset = INTEGER(dto[21])[index];
+    if (offset < 0 || dimension > p || offset > p - dimension) {
+      Rcpp::stop("penalty offset is out of range");
+    }
+    const int rank = INTEGER(dto[22])[index];
+    if (rank < 0 || rank > dimension) {
+      Rcpp::stop("penalty rank is out of range");
+    }
+    const int sp_index = INTEGER(dto[23])[index];
+    if (sp_index < 0 || sp_index >= penalties) {
+      Rcpp::stop("penalty SP index is out of range");
+    }
+    if (sp_index != index) {
+      Rcpp::stop("penalty-to-SP mapping must be identity");
+    }
+    if (STRING_ELT(penalty_labels_s, index) == NA_STRING ||
+        CHAR(STRING_ELT(penalty_labels_s, index))[0] == '\0') {
+      Rcpp::stop("penalty SP labels must be non-empty");
+    }
+    setup.penalty_blocks.push_back(REAL(block));
+    setup.penalty_dimensions.push_back(dimension);
+    setup.penalty_offsets_zero_based.push_back(offset);
+    setup.penalty_ranks.push_back(rank);
+    setup.penalty_sp_indices_zero_based.push_back(sp_index);
+  }
+
+  if (dto[25] != R_NilValue) {
+    Rcpp::stop("Phase 3A non-null H is not implemented");
+  }
+  if (bare_scalar_string(dto[26], "weights_policy") != "none-or-unit") {
+    Rcpp::stop("prepared DTO weights policy is unsupported");
+  }
+  if (bare_scalar_string(dto[27], "offset_policy") != "none-or-zero") {
+    Rcpp::stop("prepared DTO offset policy is unsupported");
+  }
+
+  FixedSpPreparedHolder prepared =
+    fastkpc::create_prepared_s_gpu(*runtime_holder, setup);
+  auto* holder = new FixedSpPreparedHolder(std::move(prepared));
+  SEXP ext = PROTECT(R_MakeExternalPtr(
+    holder, fixed_sp_cuda_prepared_tag(), R_NilValue));
+  R_RegisterCFinalizerEx(ext, fixed_sp_cuda_prepared_finalizer, TRUE);
+  UNPROTECT(1);
+  return ext;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_prepared_info(SEXP prepared_s) {
+  BEGIN_RCPP
+  FixedSpPreparedHolder* holder =
+    fixed_sp_cuda_prepared_holder(prepared_s, true);
+  const fastkpc::PreparedSInfo info = fastkpc::prepared_s_gpu_info(*holder);
+  return Rcpp::List::create(
+    Rcpp::Named("prepared_s_key_sha256") = info.prepared_s_key_sha256,
+    Rcpp::Named("n") = info.n,
+    Rcpp::Named("coefficient_dim") = info.coefficient_dim,
+    Rcpp::Named("null_dim") = info.null_dim,
+    Rcpp::Named("penalty_count") = info.penalty_count,
+    Rcpp::Named("setup_h2d_upload_count") = info.setup_h2d_upload_count,
+    Rcpp::Named("setup_h2d_bytes") =
+      static_cast<double>(info.setup_h2d_bytes),
+    Rcpp::Named("generation") = static_cast<double>(info.generation),
+    Rcpp::Named("output_slot_leased") = info.output_slot_leased
+  );
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_prepared_free(SEXP prepared_s) {
+  BEGIN_RCPP
+  FixedSpPreparedHolder* holder =
+    fixed_sp_cuda_prepared_holder(prepared_s, false);
+  fastkpc::free_prepared_s_gpu(holder);
   return R_NilValue;
   END_RCPP
 }
@@ -7353,6 +7704,9 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fixed_sp_cuda_runtime_reserve", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_reserve), 6},
   {"C_fixed_sp_cuda_runtime_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_info), 1},
   {"C_fixed_sp_cuda_runtime_free", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_free), 1},
+  {"C_fixed_sp_cuda_prepared_create", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_create), 2},
+  {"C_fixed_sp_cuda_prepared_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_info), 1},
+  {"C_fixed_sp_cuda_prepared_free", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_free), 1},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},
   {"C_fast_hsic_perm_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_perm_cuda), 6},

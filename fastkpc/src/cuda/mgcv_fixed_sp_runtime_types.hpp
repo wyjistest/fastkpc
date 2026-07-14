@@ -67,6 +67,38 @@ struct FixedSpRuntimeInfo {
   bool freed = false;
 };
 
+struct PreparedSHostView {
+  std::string dataset_sha256;
+  std::string prepared_s_key_sha256;
+  std::string same_s_group_id;
+  std::string semantic_fingerprint;
+  std::string representation_fingerprint;
+  int n = 0;
+  int coefficient_dim = 0;
+  int null_dim = 0;
+  int penalty_count = 0;
+  const double* X = nullptr;
+  const double* Z = nullptr;
+  const double* gram = nullptr;
+  std::vector<const double*> penalty_blocks;
+  std::vector<int> penalty_dimensions;
+  std::vector<int> penalty_offsets_zero_based;
+  std::vector<int> penalty_ranks;
+  std::vector<int> penalty_sp_indices_zero_based;
+};
+
+struct PreparedSInfo {
+  std::string prepared_s_key_sha256;
+  int n = 0;
+  int coefficient_dim = 0;
+  int null_dim = 0;
+  int penalty_count = 0;
+  int setup_h2d_upload_count = 0;
+  std::size_t setup_h2d_bytes = 0;
+  std::uint64_t generation = 0;
+  bool output_slot_leased = false;
+};
+
 const char* fixed_sp_status_name(FixedSpStatus status);
 const char* fixed_sp_route_name(FixedSpRoute route);
 

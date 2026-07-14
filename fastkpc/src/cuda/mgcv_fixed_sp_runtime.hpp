@@ -19,6 +19,13 @@ FixedSpRuntimeInfo fixed_sp_runtime_info(
   const std::shared_ptr<CudaRuntimeContext>& context);
 void free_fixed_sp_runtime(std::shared_ptr<CudaRuntimeContext>* context);
 
+std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
+  const std::shared_ptr<CudaRuntimeContext>& context,
+  const PreparedSHostView& setup);
+PreparedSInfo prepared_s_gpu_info(
+  const std::shared_ptr<PreparedSGpuHandle>& handle);
+void free_prepared_s_gpu(std::shared_ptr<PreparedSGpuHandle>* handle);
+
 }  // namespace fastkpc
 
 #endif
