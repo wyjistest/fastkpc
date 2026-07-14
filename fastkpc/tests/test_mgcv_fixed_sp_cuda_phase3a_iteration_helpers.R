@@ -154,6 +154,28 @@ safe_keys <- good_records$residual_key_sha256[parity$safe]
 safe_descriptors <- lapply(safe_keys, function(key) {
   list(native = list(target_keys = key))
 })
+prototype_payloads <- lapply(seq_along(safe_keys), function(index) {
+  value <- as.numeric(index)
+  list(
+    target_key = safe_keys[[index]],
+    X = matrix(c(value, value + 1), nrow = 2L),
+    y = c(value + 2, value + 3),
+    Z = diag(2L),
+    XtX_null = diag(c(value + 4, value + 5)),
+    penalty_null = diag(c(value + 6, value + 7)),
+    Xty_null = c(value + 8, value + 9)
+  )
+})
+prototype_descriptors <- Map(function(native, prototype) {
+  list(
+    native = native$native,
+    prototype = prototype,
+    prototype_expected = list(
+      target_key = prototype$target_key,
+      payload_hash = fastkpc_full_cuda_census_named_metadata_hash(prototype)
+    )
+  )
+}, safe_descriptors, prototype_payloads)
 benchmark_identity <-
   fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity(
     safe_descriptors, safe_keys
@@ -186,23 +208,35 @@ expect_error_contains(
 
 path_identities <-
   fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
-    safe_descriptors, safe_descriptors, safe_keys
+    safe_descriptors, prototype_descriptors, safe_keys
   )
 assert_true(
   identical(names(path_identities), c("persistent", "prototype")) &&
     identical(path_identities$persistent, benchmark_identity) &&
-    identical(path_identities$prototype, benchmark_identity),
-  "persistent and prototype paths independently authenticate one corpus"
+    identical(path_identities$prototype$benchmark_target_count, safe_count) &&
+    identical(path_identities$prototype$ordered_target_keys, safe_keys) &&
+    identical(path_identities$prototype$ordered_payload_hashes,
+              vapply(prototype_payloads,
+                     fastkpc_full_cuda_census_named_metadata_hash,
+                     character(1L))) &&
+    identical(
+      path_identities$prototype$payload_corpus_hash,
+      fastkpc_full_cuda_census_key_set_hash(
+        path_identities$prototype$ordered_payload_hashes
+      )
+    ),
+  "persistent and prototype paths authenticate the same keys and payloads"
 )
 expect_error_contains(
   fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
-    safe_descriptors[-length(safe_descriptors)], safe_descriptors, safe_keys
+    safe_descriptors[-length(safe_descriptors)], prototype_descriptors, safe_keys
   ),
   "Phase 3A benchmark target identity mismatch"
 )
 expect_error_contains(
   fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
-    safe_descriptors, safe_descriptors[-length(safe_descriptors)], safe_keys
+    safe_descriptors, prototype_descriptors[-length(prototype_descriptors)],
+    safe_keys
   ),
   "Phase 3A benchmark target identity mismatch"
 )
@@ -210,15 +244,41 @@ reordered_descriptors <-
   safe_descriptors[c(2L, 1L, 3:length(safe_descriptors))]
 expect_error_contains(
   fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
-    reordered_descriptors, safe_descriptors, safe_keys
+    reordered_descriptors, prototype_descriptors, safe_keys
   ),
   "Phase 3A benchmark target identity mismatch"
 )
+swapped_prototype_descriptors <- prototype_descriptors
+swapped_prototypes <- lapply(
+  prototype_descriptors[c(2L, 1L, 3:length(prototype_descriptors))],
+  `[[`, "prototype"
+)
+for (index in seq_along(swapped_prototype_descriptors)) {
+  swapped_prototype_descriptors[[index]]$prototype <- swapped_prototypes[[index]]
+}
 expect_error_contains(
   fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
-    safe_descriptors, reordered_descriptors, safe_keys
+    safe_descriptors, swapped_prototype_descriptors, safe_keys
   ),
-  "Phase 3A benchmark target identity mismatch"
+  "Phase 3A prototype payload identity mismatch"
+)
+duplicated_prototype_descriptors <- prototype_descriptors
+duplicated_prototype_descriptors[[2L]]$prototype <-
+  duplicated_prototype_descriptors[[1L]]$prototype
+expect_error_contains(
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
+    safe_descriptors, duplicated_prototype_descriptors, safe_keys
+  ),
+  "Phase 3A prototype payload identity mismatch"
+)
+mutated_prototype_descriptors <- prototype_descriptors
+mutated_prototype_descriptors[[1L]]$prototype$X[[1L]] <-
+  mutated_prototype_descriptors[[1L]]$prototype$X[[1L]] + 1
+expect_error_contains(
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
+    safe_descriptors, mutated_prototype_descriptors, safe_keys
+  ),
+  "Phase 3A prototype payload identity mismatch"
 )
 
 runner_body <- paste(

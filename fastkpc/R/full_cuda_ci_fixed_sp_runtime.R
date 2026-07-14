@@ -1568,17 +1568,79 @@ fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity <- function(
   )
 }
 
+fastkpc_full_cuda_fixed_sp_phase3a_prototype_payload_identity <- function(
+    prototype) {
+  fields <- c(
+    "target_key", "X", "y", "Z", "XtX_null", "penalty_null", "Xty_null"
+  )
+  payload_ok <- is.list(prototype) && identical(names(prototype), fields) &&
+    is.character(prototype$target_key) && length(prototype$target_key) == 1L &&
+    !is.na(prototype$target_key) &&
+    grepl("^[0-9a-f]{64}$", prototype$target_key) &&
+    all(vapply(prototype[fields[-1L]], function(value) {
+      is.numeric(value) && length(value) > 0L && all(is.finite(value))
+    }, logical(1L)))
+  if (!isTRUE(payload_ok)) {
+    stop("Phase 3A prototype payload is malformed", call. = FALSE)
+  }
+  list(
+    target_key = prototype$target_key,
+    payload_hash = fastkpc_full_cuda_census_named_metadata_hash(prototype)
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_phase3a_prototype_benchmark_identity <- function(
+    descriptors, canonical_target_keys) {
+  key_identity <- fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity(
+    descriptors, canonical_target_keys
+  )
+  actual <- lapply(descriptors, function(descriptor) {
+    if (!is.list(descriptor) || is.null(descriptor$prototype)) {
+      stop("Phase 3A prototype payload identity mismatch", call. = FALSE)
+    }
+    fastkpc_full_cuda_fixed_sp_phase3a_prototype_payload_identity(
+      descriptor$prototype
+    )
+  })
+  expected <- lapply(descriptors, function(descriptor) {
+    if (!is.list(descriptor) || !is.list(descriptor$prototype_expected)) {
+      stop("Phase 3A prototype payload identity mismatch", call. = FALSE)
+    }
+    descriptor$prototype_expected
+  })
+  actual_keys <- vapply(actual, `[[`, character(1L), "target_key")
+  actual_hashes <- vapply(actual, `[[`, character(1L), "payload_hash")
+  if (!identical(actual, expected) ||
+      !identical(actual_keys, key_identity$ordered_target_keys)) {
+    stop("Phase 3A prototype payload identity mismatch", call. = FALSE)
+  }
+  c(
+    key_identity,
+    list(
+      ordered_payload_hashes = actual_hashes,
+      payload_corpus_hash = fastkpc_full_cuda_census_key_set_hash(actual_hashes)
+    )
+  )
+}
+
 fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities <- function(
     persistent_descriptors, prototype_descriptors, canonical_target_keys) {
   identities <- list(
     persistent = fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity(
       persistent_descriptors, canonical_target_keys
     ),
-    prototype = fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity(
+    prototype = fastkpc_full_cuda_fixed_sp_phase3a_prototype_benchmark_identity(
       prototype_descriptors, canonical_target_keys
     )
   )
-  if (!identical(identities$persistent, identities$prototype)) {
+  if (!identical(
+    identities$persistent[c(
+      "benchmark_target_count", "ordered_target_keys", "target_key_corpus_hash"
+    )],
+    identities$prototype[c(
+      "benchmark_target_count", "ordered_target_keys", "target_key_corpus_hash"
+    )]
+  )) {
     stop("Phase 3A benchmark path identity mismatch", call. = FALSE)
   }
   identities
@@ -1896,20 +1958,23 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
 
   safe_descriptors <- list()
   for (descriptor in safe_descriptor_inputs) {
+    prototype <- fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle(
+      descriptor$dto, descriptor$native$Y[, 1L], descriptor$native$SP[, 1L]
+    )
+    prototype <- c(list(target_key = descriptor$native$target_keys), prototype)
     safe_descriptors[[length(safe_descriptors) + 1L]] <- list(
       handle = descriptor$handle,
       native = descriptor$native,
-      prototype = fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle(
-        descriptor$dto, descriptor$native$Y[, 1L],
-        descriptor$native$SP[, 1L]
-      )
+      prototype = prototype,
+      prototype_expected =
+        fastkpc_full_cuda_fixed_sp_phase3a_prototype_payload_identity(prototype)
     )
   }
   persistent_descriptors <- lapply(safe_descriptors, function(descriptor) {
     descriptor[c("handle", "native")]
   })
   prototype_descriptors <- lapply(safe_descriptors, function(descriptor) {
-    descriptor[c("native", "prototype")]
+    descriptor[c("native", "prototype", "prototype_expected")]
   })
   benchmark_path_identities <-
     fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(

@@ -174,14 +174,29 @@ assert_true(
       timing$target_key_corpus_hash,
       fastkpc_full_cuda_census_key_set_hash(canonical_safe_keys)
     ) &&
-    identical(timing$persistent_workload_identity,
-              timing$prototype_workload_identity) &&
     identical(timing$persistent_workload_identity, list(
       benchmark_target_count = 172L,
       ordered_target_keys = canonical_safe_keys,
       target_key_corpus_hash = timing$target_key_corpus_hash
-    )),
-  "both timing paths are bound to the exact ordered safe target corpus"
+    )) &&
+    identical(
+      timing$prototype_workload_identity[c(
+        "benchmark_target_count", "ordered_target_keys", "target_key_corpus_hash"
+      )],
+      timing$persistent_workload_identity
+    ) &&
+    length(timing$prototype_workload_identity$ordered_payload_hashes) == 172L &&
+    all(grepl(
+      "^[0-9a-f]{64}$",
+      timing$prototype_workload_identity$ordered_payload_hashes
+    )) &&
+    identical(
+      timing$prototype_workload_identity$payload_corpus_hash,
+      fastkpc_full_cuda_census_key_set_hash(
+        timing$prototype_workload_identity$ordered_payload_hashes
+      )
+    ),
+  "both timing paths bind the exact ordered corpus and prototype payloads"
 )
 assert_true(
   is.list(timing$gpu_identity) &&

@@ -25,6 +25,17 @@ resource_snapshot <- function() {
 resource_delta <- function(before, after, field) {
   as.numeric(after[[field]] - before[[field]])
 }
+runtime_source <- paste(
+  readLines("fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu", warn = FALSE),
+  collapse = "\n"
+)
+assert_true(
+  grepl("std::shared_ptr<FixedSpResourceLedger> resource_ledger",
+        runtime_source, fixed = TRUE) &&
+    !grepl("FixedSpResourceCounters* resource_counters",
+           runtime_source, fixed = TRUE),
+  "teardown-capable objects retain an owning shared resource ledger"
+)
 ledger_before <- resource_snapshot()
 
 runtime <- fixed_sp_cuda_runtime_create(device_id = 0L)

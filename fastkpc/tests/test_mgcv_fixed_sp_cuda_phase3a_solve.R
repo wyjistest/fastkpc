@@ -633,6 +633,78 @@ assert_true(
 fixed_sp_cuda_prepared_free(poison_handle)
 fixed_sp_cuda_runtime_free(poison_runtime)
 
+exercise_late_token_teardown <- function(order) {
+  lifetime_before <- .Call(
+    "C_fixed_sp_cuda_test_resource_snapshot", PACKAGE = "fastkpc_cuda"
+  )
+  lifetime_runtime <- fixed_sp_cuda_runtime_create(0L)
+  fixed_sp_cuda_runtime_reserve(
+    lifetime_runtime, stable_dto$n, stable_dto$null_dim, 1L,
+    stable_dto$penalty_count, stable_dto$n + sum(stable_dto$penalty_ranks)
+  )
+  lifetime_handle <- fixed_sp_cuda_prepared_create(lifetime_runtime, stable_dto)
+  lifetime_token <- fixed_sp_cuda_solve_batch(
+    lifetime_handle, safe_native_batch$Y, safe_native_batch$SP,
+    safe_native_batch$planned_route, safe_native_batch$target_keys,
+    outputs = c("residuals")
+  )
+  fixed_sp_cuda_residual_release(lifetime_token)
+  for (step in order) {
+    if (identical(step, "runtime")) {
+      fixed_sp_cuda_runtime_free(lifetime_runtime)
+    } else if (identical(step, "prepared")) {
+      fixed_sp_cuda_prepared_free(lifetime_handle)
+    } else {
+      fixed_sp_cuda_residual_free(lifetime_token)
+    }
+  }
+  lifetime_after <- .Call(
+    "C_fixed_sp_cuda_test_resource_snapshot", PACKAGE = "fastkpc_cuda"
+  )
+  list(before = lifetime_before, after = lifetime_after)
+}
+
+lifetime_resources <- list(
+  cuda_device = c("allocate", "free"),
+  cuda_host = c("allocate", "free"),
+  stream = c("create", "destroy"),
+  event = c("create", "destroy"),
+  cublas_handle = c("create", "destroy"),
+  cusolver_handle = c("create", "destroy")
+)
+
+for (order in list(
+  c("runtime", "prepared", "token"),
+  c("prepared", "runtime", "token"),
+  c("runtime", "token", "prepared")
+)) {
+  lifetime <- exercise_late_token_teardown(order)
+  assert_true(
+    all(vapply(names(lifetime_resources), function(resource) {
+      verbs <- lifetime_resources[[resource]]
+      acquire_success <- paste(resource, verbs[[1L]], "success_count", sep = "_")
+      acquire_attempt <- paste(resource, verbs[[1L]], "attempt_count", sep = "_")
+      acquire_failure <- paste(resource, verbs[[1L]], "failure_count", sep = "_")
+      teardown_success <- paste(resource, verbs[[2L]], "success_count", sep = "_")
+      teardown_attempt <- paste(resource, verbs[[2L]], "attempt_count", sep = "_")
+      teardown_failure <- paste(resource, verbs[[2L]], "failure_count", sep = "_")
+      active <- paste(resource, "active_count", sep = "_")
+      acquired <- lifetime$after[[acquire_success]] -
+        lifetime$before[[acquire_success]]
+      acquired > 0L &&
+        lifetime$after[[acquire_attempt]] - lifetime$before[[acquire_attempt]] == acquired &&
+        lifetime$after[[acquire_failure]] == lifetime$before[[acquire_failure]] &&
+        lifetime$after[[teardown_attempt]] - lifetime$before[[teardown_attempt]] == acquired &&
+        lifetime$after[[teardown_success]] - lifetime$before[[teardown_success]] == acquired &&
+        lifetime$after[[teardown_failure]] == lifetime$before[[teardown_failure]] &&
+        lifetime$after[[active]] == lifetime$before[[active]]
+    }, logical(1L))) &&
+      lifetime$after$cleanup_error_count == lifetime$before$cleanup_error_count,
+    paste("late residual teardown retains exact event/resource accounting:",
+          paste(order, collapse = " -> "))
+  )
+}
+
 cat(sprintf(
   paste0(
     "METRICS coefficient_max_abs=%.17g coefficient_relative_l2=%.17g ",
