@@ -85,12 +85,56 @@ assert_true(
   "production native batch excludes the CPU oracle RHS"
 )
 
+explicit_dto <- stable_dto
+explicit_q <- stable_dto$coefficient_dim - 1L
+householder_v <- seq_len(stable_dto$coefficient_dim)
+householder_v <- householder_v / sqrt(sum(householder_v^2))
+householder <- diag(stable_dto$coefficient_dim) -
+  2 * tcrossprod(householder_v)
+explicit_Z <- householder[, seq_len(explicit_q), drop = FALSE]
+explicit_X_null <- stable_dto$X %*% explicit_Z
+assert_true(
+  explicit_q > 0L && all(explicit_Z != 0) &&
+    max(abs(crossprod(explicit_Z) - diag(explicit_q))) <= 1e-12,
+  "explicit-Z coefficient fixture is dense and orthonormal"
+)
+explicit_dto$constraint_mode <- "explicit"
+explicit_dto$constraint_nullspace <- explicit_Z
+explicit_dto$null_dim <- explicit_q
+explicit_dto$nullspace_gram_matrix <- crossprod(explicit_X_null)
+
 runtime <- fixed_sp_cuda_runtime_create(0L)
 on.exit(try(fixed_sp_cuda_runtime_free(runtime), silent = TRUE), add = TRUE)
 fixed_sp_cuda_runtime_reserve(runtime, 351L, 64L, 47L, 7L, 407L)
 stable_handle <- fixed_sp_cuda_prepared_create(runtime, stable_dto)
 on.exit(try(fixed_sp_cuda_prepared_free(stable_handle), silent = TRUE),
         add = TRUE)
+explicit_handle <- fixed_sp_cuda_prepared_create(runtime, explicit_dto)
+on.exit(try(fixed_sp_cuda_prepared_free(explicit_handle), silent = TRUE),
+        add = TRUE)
+
+explicit_token <- fixed_sp_cuda_solve_batch(
+  explicit_handle, stable_native_batch$Y, stable_native_batch$SP,
+  stable_native_batch$planned_route, stable_native_batch$target_keys,
+  outputs = c("coefficients")
+)
+on.exit(try(fixed_sp_cuda_residual_free(explicit_token), silent = TRUE),
+        add = TRUE)
+explicit_info <- fixed_sp_cuda_residual_info(explicit_token)
+assert_true(
+  stable_dto$coefficient_dim > explicit_q &&
+    identical(explicit_info$coefficient_dim, stable_dto$coefficient_dim),
+  "coefficient diagnostics retain full-space p when p exceeds q"
+)
+assert_true(
+  identical(explicit_info$solver_status,
+            "ERR_STABLE_PATH_NOT_IMPLEMENTED") &&
+    explicit_info$invalid_output_init_count == 1L,
+  "explicit-Z coefficient request fails closed after one initialization"
+)
+fixed_sp_cuda_residual_release(explicit_token)
+fixed_sp_cuda_residual_free(explicit_token)
+fixed_sp_cuda_prepared_free(explicit_handle)
 
 solve_stable <- function(Y = stable_native_batch$Y,
                          SP = stable_native_batch$SP,

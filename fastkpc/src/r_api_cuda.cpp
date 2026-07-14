@@ -3826,6 +3826,7 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
 
   Rcpp::List result = Rcpp::List::create(
     Rcpp::Named("n") = info.n,
+    Rcpp::Named("coefficient_dim") = info.coefficient_dim,
     Rcpp::Named("target_count") = info.target_count,
     Rcpp::Named("target_keys") = Rcpp::wrap(info.target_keys),
     Rcpp::Named("planned_route") = planned_route,

@@ -937,7 +937,7 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
   const std::size_t target_capacity = positive_size(
     context->capacities.target_count, "reserved target capacity");
   const std::size_t coefficient_output_count = checked_multiply(
-    positive_size(setup.null_dim, "prepared null dimension"),
+    positive_size(setup.coefficient_dim, "prepared coefficient dimension"),
     target_capacity, "transient coefficient slot");
   const std::size_t observation_output_count = checked_multiply(
     positive_size(setup.n, "prepared row count"), target_capacity,
@@ -1154,6 +1154,7 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       static_cast<std::size_t>(batch.target_count));
 
     token->diagnostics.n = batch.n;
+    token->diagnostics.coefficient_dim = handle->p;
     token->diagnostics.target_count = batch.target_count;
     token->diagnostics.native_batch_call = true;
     token->diagnostics.output_slot_acquire_count = 1;
@@ -1165,7 +1166,7 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       static_cast<std::size_t>(batch.target_count);
     const std::size_t coefficient_count =
       (batch.output_mask & FixedSpOutputCoefficients) == 0 ? 0U :
-        checked_multiply(static_cast<std::size_t>(batch.null_dim), targets,
+        checked_multiply(static_cast<std::size_t>(handle->p), targets,
                          "fixed-sp coefficient outputs");
     const std::size_t fitted_count =
       (batch.output_mask & FixedSpOutputFitted) == 0 ? 0U :

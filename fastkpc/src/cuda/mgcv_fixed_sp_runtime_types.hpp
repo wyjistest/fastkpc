@@ -125,6 +125,7 @@ struct FixedSpBatchHostView {
 
 struct DeviceResidualInfo {
   int n = 0;
+  int coefficient_dim = 0;
   int target_count = 0;
   std::vector<std::string> target_keys;
   std::vector<FixedSpRoute> planned_routes;
