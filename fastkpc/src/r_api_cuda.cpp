@@ -121,7 +121,8 @@ void fixed_sp_cuda_prepared_finalizer(SEXP ptr) {
 
 int scalar_integer(SEXP value, const char* name) {
   if (TYPEOF(value) != INTSXP || XLENGTH(value) != 1 ||
-      INTEGER(value)[0] == NA_INTEGER) {
+      INTEGER(value)[0] == NA_INTEGER || Rf_isObject(value) ||
+      ATTRIB(value) != R_NilValue) {
     Rcpp::stop(std::string(name) + " must be a scalar integer");
   }
   return INTEGER(value)[0];
@@ -3412,8 +3413,24 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_create(SEXP runtime_s,
   SEXP penalty_blocks_s = dto[20];
   if (TYPEOF(penalty_blocks_s) != VECSXP ||
       XLENGTH(penalty_blocks_s) != penalties ||
-      Rf_isObject(penalty_blocks_s)) {
-    Rcpp::stop("penalty_blocks shape mismatch");
+      Rf_isObject(penalty_blocks_s) ||
+      !has_only_attributes(penalty_blocks_s, {R_NamesSymbol})) {
+    Rcpp::stop("penalty_blocks must be a canonical named list");
+  }
+  SEXP penalty_block_names =
+    Rf_getAttrib(penalty_blocks_s, R_NamesSymbol);
+  if (TYPEOF(penalty_block_names) != STRSXP ||
+      XLENGTH(penalty_block_names) != penalties) {
+    Rcpp::stop("penalty_blocks must be a canonical named list");
+  }
+  for (int index = 0; index < penalties; ++index) {
+    const std::string expected_name =
+      "penalty_" + std::to_string(index + 1);
+    if (STRING_ELT(penalty_block_names, index) == NA_STRING ||
+        std::string(CHAR(STRING_ELT(penalty_block_names, index))) !=
+          expected_name) {
+      Rcpp::stop("penalty_blocks must be a canonical named list");
+    }
   }
   require_bare_integer_vector(
     dto[21], penalties, "penalty_offsets_zero_based");

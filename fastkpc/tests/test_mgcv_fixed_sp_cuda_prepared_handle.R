@@ -89,6 +89,56 @@ assert_error(
 )
 fixed_sp_cuda_runtime_free(unreserved)
 
+overflow_dto <- dto
+overflow_dto$X <- matrix(
+  .Machine$double.xmax, nrow = dto$n, ncol = dto$coefficient_dim
+)
+overflow_dto$constraint_mode <- "explicit"
+overflow_dto$constraint_nullspace <- matrix(
+  1, nrow = dto$coefficient_dim, ncol = 1L
+)
+overflow_dto$null_dim <- 1L
+overflow_dto$nullspace_gram_matrix <- matrix(1, nrow = 1L, ncol = 1L)
+overflow_runtime <- fixed_sp_cuda_runtime_create(0L)
+on.exit(try(fixed_sp_cuda_runtime_free(overflow_runtime), silent = TRUE),
+        add = TRUE)
+fixed_sp_cuda_runtime_reserve(
+  overflow_runtime, dto$n, 1L, 1L, dto$penalty_count, 407L
+)
+assert_error(
+  fixed_sp_cuda_prepared_create(overflow_runtime, overflow_dto),
+  "derived", "nonfinite derived explicit setup must fail closed"
+)
+fixed_sp_cuda_runtime_free(overflow_runtime)
+
+growth_runtime <- fixed_sp_cuda_runtime_create(0L)
+on.exit(try(fixed_sp_cuda_runtime_free(growth_runtime), silent = TRUE),
+        add = TRUE)
+fixed_sp_cuda_runtime_reserve(
+  growth_runtime, dto$n, dto$null_dim, 1L, dto$penalty_count, 407L
+)
+growth_handle <- fixed_sp_cuda_prepared_create(growth_runtime, dto)
+on.exit(try(fixed_sp_cuda_prepared_free(growth_handle), silent = TRUE),
+        add = TRUE)
+fixed_sp_cuda_runtime_reserve(
+  growth_runtime, dto$n, dto$null_dim, 1L, dto$penalty_count, 407L
+)
+fixed_sp_cuda_runtime_reserve(
+  growth_runtime, dto$n - 1L, dto$null_dim, 1L,
+  dto$penalty_count, 406L
+)
+assert_error(
+  fixed_sp_cuda_runtime_reserve(
+    growth_runtime, dto$n, dto$null_dim, 2L, dto$penalty_count, 407L
+  ),
+  "active prepared", "runtime growth with an active handle must fail closed"
+)
+fixed_sp_cuda_prepared_free(growth_handle)
+fixed_sp_cuda_runtime_reserve(
+  growth_runtime, dto$n, dto$null_dim, 2L, dto$penalty_count, 407L
+)
+fixed_sp_cuda_runtime_free(growth_runtime)
+
 runtime <- fixed_sp_cuda_runtime_create(0L)
 on.exit(try(fixed_sp_cuda_runtime_free(runtime), silent = TRUE), add = TRUE)
 fixed_sp_cuda_runtime_reserve(runtime, 351L, 64L, 47L, 7L, 407L)
@@ -155,6 +205,18 @@ assert_error(
   "data_p", "canonical data_p tamper must fail closed"
 )
 bad_dto <- dto
+bad_dto$n <- structure(dto$n, forged = TRUE)
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "scalar integer", "attributed scalar integer must fail closed"
+)
+bad_dto <- dto
+bad_dto$null_dim <- structure(dto$null_dim, class = "forged_integer")
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "scalar integer", "classed scalar integer must fail closed"
+)
+bad_dto <- dto
 bad_dto$schema_version <- "forged-native-dto-schema"
 assert_error(
   fixed_sp_cuda_prepared_create(runtime, bad_dto),
@@ -184,6 +246,18 @@ bad_dto$penalty_blocks[[1L]] <-
 assert_error(
   fixed_sp_cuda_prepared_create(runtime, bad_dto),
   "shape", "non-square penalty block must fail closed"
+)
+bad_dto <- dto
+attr(bad_dto$penalty_blocks, "forged") <- TRUE
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "canonical named list", "attributed penalty_blocks list must fail closed"
+)
+bad_dto <- dto
+names(bad_dto$penalty_blocks)[[1L]] <- "forged_penalty"
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "canonical named list", "penalty block names must fail closed"
 )
 bad_dto <- dto
 bad_dto$penalty_blocks[[1L]][[1L]] <- Inf

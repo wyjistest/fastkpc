@@ -6,6 +6,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -229,6 +231,16 @@ std::vector<double> build_projected_penalties(
   return projected;
 }
 
+void require_finite_derived(const std::vector<double>& values,
+                            const char* name) {
+  if (!std::all_of(values.begin(), values.end(), [](double value) {
+        return std::isfinite(value);
+      })) {
+    throw std::runtime_error(
+      std::string("derived prepared ") + name + " must be finite");
+  }
+}
+
 }  // namespace
 
 class CudaRuntimeContext {
@@ -260,6 +272,7 @@ class CudaRuntimeContext {
   int potrf_lwork = 0;
   FixedSpCapacities capacities;
   FixedSpRuntimeInfo diagnostics;
+  std::atomic<int> active_prepared_handle_count{0};
   bool freed = false;
   mutable std::mutex mutex;
 
@@ -297,6 +310,7 @@ struct TransientResidualSlot {
   }
 
   int device_id = -1;
+  int target_capacity = 0;
   double* coefficients = nullptr;
   double* fitted = nullptr;
   double* residuals = nullptr;
@@ -331,6 +345,11 @@ class PreparedSGpuHandle {
     d_Z = nullptr;
     cudaFree(d_X);
     d_X = nullptr;
+    if (registered_with_context && context) {
+      context->active_prepared_handle_count.fetch_sub(
+        1, std::memory_order_acq_rel);
+      registered_with_context = false;
+    }
     context.reset();
     freed = true;
   }
@@ -353,6 +372,7 @@ class PreparedSGpuHandle {
   cudaEvent_t setup_completion_event = nullptr;
   int setup_h2d_upload_count = 0;
   std::size_t setup_h2d_bytes = 0;
+  bool registered_with_context = false;
   bool freed = false;
 };
 
@@ -511,6 +531,10 @@ void CudaRuntimeContext::reserve(
   if (within_existing_capacity) {
     diagnostics.workspace_reserve_count += 1;
     return;
+  }
+  if (active_prepared_handle_count.load(std::memory_order_acquire) > 0) {
+    throw std::runtime_error(
+      "fixed-sp CUDA runtime cannot grow with active prepared handles");
   }
 
   FixedSpCapacities merged_capacities;
@@ -745,6 +769,8 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
     build_nullspace_design(setup);
   const std::vector<double> projected_penalties =
     build_projected_penalties(setup);
+  require_finite_derived(nullspace_design, "X_null");
+  require_finite_derived(projected_penalties, "projected penalties");
   const std::size_t x_count =
     matrix_count(setup.n, setup.coefficient_dim, "prepared X");
   const std::size_t z_count = setup.Z == nullptr ? 0U :
@@ -774,6 +800,7 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
   handle->penalty_count = setup.penalty_count;
   handle->residual_slot = std::make_shared<TransientResidualSlot>();
   handle->residual_slot->device_id = context->device_id;
+  handle->residual_slot->target_capacity = context->capacities.target_count;
 
   check_cuda(cudaSetDevice(context->device_id),
              "set CUDA device for prepared setup");
@@ -869,6 +896,9 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
     handle->cleanup_noexcept();
     throw;
   }
+  context->active_prepared_handle_count.fetch_add(
+    1, std::memory_order_release);
+  handle->registered_with_context = true;
   return handle;
 }
 
