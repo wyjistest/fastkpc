@@ -1484,7 +1484,15 @@ void register_device_residual_consumer_event(
 
 void free_device_residual(std::shared_ptr<DeviceResidualBatch>* token) {
   if (token == nullptr || !*token) return;
-  release_device_residual(*token);
+  const bool current_slot_poisoned =
+    (*token)->slot &&
+    (*token)->slot_generation == (*token)->slot->generation &&
+    (*token)->slot->state == TransientResidualSlotState::Poisoned;
+  if (current_slot_poisoned) {
+    (*token)->lease_released = true;
+  } else {
+    release_device_residual(*token);
+  }
   (*token)->freed = true;
   (*token)->owner.reset();
   (*token)->slot.reset();

@@ -339,14 +339,19 @@ assert_true(
               poison_info$output_slot_poison_reason),
   "failed release and solve preserve the first poison reason"
 )
-poison_token <- NULL
-invisible(gc())
-poison_info_after_gc <- fixed_sp_cuda_prepared_info(poison_handle)
+fixed_sp_cuda_residual_free(poison_token)
+fixed_sp_cuda_residual_free(poison_token)
+assert_error(
+  fixed_sp_cuda_residual_info(poison_token), "freed",
+  "explicit residual free clears the poisoned token"
+)
+poison_info_after_free <- fixed_sp_cuda_prepared_info(poison_handle)
 assert_true(
-  identical(poison_info_after_gc$output_slot_state, "poisoned") &&
-    identical(poison_info_after_gc$output_slot_poison_reason,
+  identical(poison_info_after_free$output_slot_state,
+            poison_info$output_slot_state) &&
+    identical(poison_info_after_free$output_slot_poison_reason,
               poison_info$output_slot_poison_reason),
-  "residual finalizer discards its token without reopening the poisoned slot"
+  "explicit residual free preserves the poisoned slot and first reason"
 )
 fixed_sp_cuda_prepared_free(poison_handle)
 fixed_sp_cuda_runtime_free(poison_runtime)
