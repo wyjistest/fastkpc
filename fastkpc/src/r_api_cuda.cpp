@@ -15,6 +15,7 @@
 #include "cuda/hsic_batch_cuda.hpp"
 #include "cuda/legacy_dcov_spectra_matvec_cuda.hpp"
 #include "cuda/mgcv_extract_fixed_sp_cuda.hpp"
+#include "cuda/mgcv_fixed_sp_runtime.hpp"
 
 #include <Rcpp.h>
 #include <R_ext/Rdynload.h>
@@ -47,6 +48,49 @@
 #endif
 
 namespace {
+
+SEXP fixed_sp_cuda_runtime_tag() {
+  static SEXP tag = Rf_install("fastkpc_fixed_sp_cuda_runtime");
+  return tag;
+}
+
+using FixedSpRuntimeHolder =
+  std::shared_ptr<fastkpc::CudaRuntimeContext>;
+
+FixedSpRuntimeHolder* fixed_sp_cuda_runtime_holder(SEXP ptr,
+                                                   bool require_live) {
+  if (TYPEOF(ptr) != EXTPTRSXP ||
+      R_ExternalPtrTag(ptr) != fixed_sp_cuda_runtime_tag()) {
+    Rcpp::stop(
+      "fixed-sp CUDA runtime must be a tagged external pointer");
+  }
+  auto* holder =
+    static_cast<FixedSpRuntimeHolder*>(R_ExternalPtrAddr(ptr));
+  if (holder == nullptr || (require_live && !*holder)) {
+    Rcpp::stop("fixed-sp CUDA runtime has been freed");
+  }
+  return holder;
+}
+
+void fixed_sp_cuda_runtime_finalizer(SEXP ptr) {
+  auto* holder =
+    static_cast<FixedSpRuntimeHolder*>(R_ExternalPtrAddr(ptr));
+  if (holder == nullptr) return;
+  try {
+    fastkpc::free_fixed_sp_runtime(holder);
+  } catch (...) {
+  }
+  delete holder;
+  R_ClearExternalPtr(ptr);
+}
+
+int scalar_integer(SEXP value, const char* name) {
+  if (TYPEOF(value) != INTSXP || XLENGTH(value) != 1 ||
+      INTEGER(value)[0] == NA_INTEGER) {
+    Rcpp::stop(std::string(name) + " must be a scalar integer");
+  }
+  return INTEGER(value)[0];
+}
 
 bool all_finite(Rcpp::NumericMatrix values) {
   for (double value : values) {
@@ -3040,6 +3084,108 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_create(
   );
   UNPROTECT(1);
   return result;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_runtime_create(SEXP device_s) {
+  BEGIN_RCPP
+  const int device_id = scalar_integer(device_s, "device_id");
+  if (device_id < 0) Rcpp::stop("device_id must be non-negative");
+
+  FixedSpRuntimeHolder context =
+    fastkpc::create_fixed_sp_runtime(device_id);
+  auto* holder = new FixedSpRuntimeHolder(std::move(context));
+  SEXP ext = PROTECT(R_MakeExternalPtr(
+    holder, fixed_sp_cuda_runtime_tag(), R_NilValue));
+  R_RegisterCFinalizerEx(ext, fixed_sp_cuda_runtime_finalizer, TRUE);
+  UNPROTECT(1);
+  return ext;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_runtime_reserve(
+    SEXP runtime_s,
+    SEXP n_s,
+    SEXP q_s,
+    SEXP targets_s,
+    SEXP penalties_s,
+    SEXP augmented_rows_s) {
+  BEGIN_RCPP
+  FixedSpRuntimeHolder* holder =
+    fixed_sp_cuda_runtime_holder(runtime_s, true);
+  fastkpc::FixedSpCapacities capacities;
+  capacities.n = scalar_integer(n_s, "n");
+  capacities.null_dim = scalar_integer(q_s, "null_dim");
+  capacities.target_count = scalar_integer(targets_s, "target_count");
+  capacities.penalty_count = scalar_integer(penalties_s, "penalty_count");
+  capacities.augmented_rows =
+    scalar_integer(augmented_rows_s, "augmented_rows");
+  fastkpc::reserve_fixed_sp_runtime(*holder, capacities);
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_runtime_info(SEXP runtime_s) {
+  BEGIN_RCPP
+  FixedSpRuntimeHolder* holder =
+    fixed_sp_cuda_runtime_holder(runtime_s, true);
+  const fastkpc::FixedSpRuntimeInfo info =
+    fastkpc::fixed_sp_runtime_info(*holder);
+  return Rcpp::List::create(
+    Rcpp::Named("device_id") = info.device_id,
+    Rcpp::Named("creator_pid") = static_cast<double>(info.creator_pid),
+    Rcpp::Named("generation") = static_cast<double>(info.generation),
+    Rcpp::Named("runtime_context_create_count") =
+      info.runtime_context_create_count,
+    Rcpp::Named("stream_create_count") = info.stream_create_count,
+    Rcpp::Named("cublas_handle_create_count") =
+      info.cublas_handle_create_count,
+    Rcpp::Named("cusolver_handle_create_count") =
+      info.cusolver_handle_create_count,
+    Rcpp::Named("workspace_reserve_count") = info.workspace_reserve_count,
+    Rcpp::Named("workspace_grow_count") = info.workspace_grow_count,
+    Rcpp::Named("cuda_device_synchronize_count") =
+      info.cuda_device_synchronize_count,
+    Rcpp::Named("cholesky_factor_checkpoint_record_count") =
+      info.cholesky_factor_checkpoint_record_count,
+    Rcpp::Named("cholesky_factor_checkpoint_wait_count") =
+      info.cholesky_factor_checkpoint_wait_count,
+    Rcpp::Named("cholesky_solve_checkpoint_record_count") =
+      info.cholesky_solve_checkpoint_record_count,
+    Rcpp::Named("cholesky_solve_checkpoint_wait_count") =
+      info.cholesky_solve_checkpoint_wait_count,
+    Rcpp::Named("workspace_bytes") =
+      static_cast<double>(info.workspace_bytes),
+    Rcpp::Named("cublas_workspace_bytes") =
+      static_cast<double>(info.cublas_workspace_bytes),
+    Rcpp::Named("cublas_workspace_alignment") =
+      static_cast<double>(info.cublas_workspace_alignment),
+    Rcpp::Named("cuda_toolkit_version") = info.cuda_toolkit_version,
+    Rcpp::Named("cuda_driver_version") = info.cuda_driver_version,
+    Rcpp::Named("compute_capability_major") =
+      info.compute_capability_major,
+    Rcpp::Named("compute_capability_minor") =
+      info.compute_capability_minor,
+    Rcpp::Named("sm_count") = info.sm_count,
+    Rcpp::Named("cusolver_deterministic_mode") =
+      info.cusolver_deterministic_mode_enabled ? "enabled" : "disabled",
+    Rcpp::Named("cublas_math_mode") =
+      info.cublas_pedantic_math_enabled ? "pedantic" : "not_pedantic",
+    Rcpp::Named("cublas_atomics_mode") =
+      info.cublas_atomics_not_allowed ? "not_allowed" : "allowed",
+    Rcpp::Named("cublas_user_workspace_installed") =
+      info.cublas_user_workspace_installed,
+    Rcpp::Named("freed") = info.freed
+  );
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_runtime_free(SEXP runtime_s) {
+  BEGIN_RCPP
+  FixedSpRuntimeHolder* holder =
+    fixed_sp_cuda_runtime_holder(runtime_s, false);
+  fastkpc::free_fixed_sp_runtime(holder);
+  return R_NilValue;
   END_RCPP
 }
 
@@ -7203,6 +7349,10 @@ static const R_CallMethodDef call_methods[] = {
   {"C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma), 7},
   {"C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch), 7},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_free", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_free), 1},
+  {"C_fixed_sp_cuda_runtime_create", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_create), 1},
+  {"C_fixed_sp_cuda_runtime_reserve", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_reserve), 6},
+  {"C_fixed_sp_cuda_runtime_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_info), 1},
+  {"C_fixed_sp_cuda_runtime_free", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_free), 1},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},
   {"C_fast_hsic_perm_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_perm_cuda), 6},

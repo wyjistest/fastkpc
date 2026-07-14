@@ -1150,3 +1150,29 @@ fast_kpc_wanpdag_cuda <- function(data, alpha, max_conditioning_size,
         hsic_params, permutation_params, isTRUE(ci_diagnostics),
         PACKAGE = "fastkpc_cuda")
 }
+
+fixed_sp_cuda_runtime_create <- function(device_id = 0L) {
+  load_fastkpc_cuda_native()
+  .Call("C_fixed_sp_cuda_runtime_create", as.integer(device_id),
+        PACKAGE = "fastkpc_cuda")
+}
+
+fixed_sp_cuda_runtime_reserve <- function(
+    runtime, n, null_dim, target_count, penalty_count, augmented_rows) {
+  invisible(.Call(
+    "C_fixed_sp_cuda_runtime_reserve", runtime, as.integer(n),
+    as.integer(null_dim), as.integer(target_count), as.integer(penalty_count),
+    as.integer(augmented_rows), PACKAGE = "fastkpc_cuda"
+  ))
+}
+
+fixed_sp_cuda_runtime_info <- function(runtime) {
+  load_fastkpc_cuda_native()
+  .Call("C_fixed_sp_cuda_runtime_info", runtime, PACKAGE = "fastkpc_cuda")
+}
+
+fixed_sp_cuda_runtime_free <- function(runtime) {
+  load_fastkpc_cuda_native()
+  invisible(.Call("C_fixed_sp_cuda_runtime_free", runtime,
+                  PACKAGE = "fastkpc_cuda"))
+}
