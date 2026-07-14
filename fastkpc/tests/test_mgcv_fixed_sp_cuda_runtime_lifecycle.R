@@ -22,7 +22,15 @@ assert_true(fastkpc_cuda_available(), "CUDA must be available")
 runtime <- fixed_sp_cuda_runtime_create(device_id = 0L)
 on.exit(try(fixed_sp_cuda_runtime_free(runtime), silent = TRUE), add = TRUE)
 before <- fixed_sp_cuda_runtime_info(runtime)
+assert_true(is.character(before$gpu_name) && length(before$gpu_name) == 1L &&
+              nzchar(before$gpu_name), "GPU name")
+assert_true(before$cuda_device_allocation_count == 0L,
+            "runtime creation performs no device allocation")
+assert_true(before$cuda_host_allocation_count == 0L,
+            "runtime creation performs no pinned-host allocation")
 assert_true(before$stream_create_count == 1L, "one stream")
+assert_true(before$event_create_count == 2L,
+            "two runtime checkpoint events")
 assert_true(before$cublas_handle_create_count == 1L, "one cuBLAS handle")
 assert_true(before$cusolver_handle_create_count == 1L, "one cuSOLVER handle")
 assert_true(identical(before$cusolver_deterministic_mode, "enabled"),
@@ -39,6 +47,12 @@ fixed_sp_cuda_runtime_reserve(
 after <- fixed_sp_cuda_runtime_info(runtime)
 assert_true(after$workspace_reserve_count == 1L, "one reserve")
 assert_true(after$workspace_grow_count == 1L, "one workspace growth")
+assert_true(after$cuda_device_allocation_count >
+              before$cuda_device_allocation_count,
+            "workspace reserve records device allocations")
+assert_true(after$cuda_host_allocation_count >
+              before$cuda_host_allocation_count,
+            "workspace reserve records pinned-host allocations")
 assert_true(after$workspace_bytes > 0, "workspace allocated")
 assert_true(isTRUE(after$cublas_user_workspace_installed),
             "user cuBLAS workspace installed")

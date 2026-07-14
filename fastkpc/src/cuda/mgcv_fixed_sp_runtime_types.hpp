@@ -52,10 +52,14 @@ struct FixedSpCapacities {
 
 struct FixedSpRuntimeInfo {
   int device_id = -1;
+  std::string gpu_name;
   std::int64_t creator_pid = -1;
   std::uint64_t generation = 0;
   int runtime_context_create_count = 0;
+  int cuda_device_allocation_count = 0;
+  int cuda_host_allocation_count = 0;
   int stream_create_count = 0;
+  int event_create_count = 0;
   int cublas_handle_create_count = 0;
   int cusolver_handle_create_count = 0;
   int workspace_reserve_count = 0;
@@ -156,6 +160,16 @@ struct DeviceResidualInfo {
   int nonfinite_output_count = 0;
   int cpu_fallback_count = 0;
   int unknown_fallback_count = 0;
+  int resource_allocation_count_before_solve = 0;
+  int resource_allocation_count_after_solve = 0;
+  int resource_handle_create_count_before_solve = 0;
+  int resource_handle_create_count_after_solve = 0;
+  int cuda_device_allocation_count_during_solve = 0;
+  int cuda_host_allocation_count_during_solve = 0;
+  int stream_create_count_during_solve = 0;
+  int event_create_count_during_solve = 0;
+  int cublas_handle_create_count_during_solve = 0;
+  int cusolver_handle_create_count_during_solve = 0;
   int per_target_allocation_count_after_warmup = 0;
   int per_target_handle_create_count = 0;
   int implicit_residual_d2h_count = 0;

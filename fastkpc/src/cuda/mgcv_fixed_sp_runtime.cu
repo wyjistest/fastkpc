@@ -43,6 +43,113 @@ void check_cusolver(cusolverStatus_t status, const char* stage) {
   }
 }
 
+struct FixedSpResourceCounters {
+  int cuda_device_allocation_count = 0;
+  int cuda_host_allocation_count = 0;
+  int stream_create_count = 0;
+  int event_create_count = 0;
+  int cublas_handle_create_count = 0;
+  int cusolver_handle_create_count = 0;
+
+  int allocation_count() const {
+    return cuda_device_allocation_count + cuda_host_allocation_count;
+  }
+
+  int handle_create_count() const {
+    return stream_create_count + event_create_count +
+      cublas_handle_create_count + cusolver_handle_create_count;
+  }
+};
+
+template <typename T>
+void tracked_cuda_malloc(FixedSpResourceCounters* counters,
+                         T** pointer,
+                         std::size_t bytes,
+                         const char* stage) {
+  check_cuda(cudaMalloc(reinterpret_cast<void**>(pointer), bytes), stage);
+  counters->cuda_device_allocation_count += 1;
+}
+
+template <typename T>
+void tracked_cuda_malloc_host(FixedSpResourceCounters* counters,
+                              T** pointer,
+                              std::size_t bytes,
+                              const char* stage) {
+  check_cuda(cudaMallocHost(reinterpret_cast<void**>(pointer), bytes), stage);
+  counters->cuda_host_allocation_count += 1;
+}
+
+void tracked_cuda_stream_create(FixedSpResourceCounters* counters,
+                                cudaStream_t* stream,
+                                unsigned int flags,
+                                const char* stage) {
+  check_cuda(cudaStreamCreateWithFlags(stream, flags), stage);
+  counters->stream_create_count += 1;
+}
+
+void tracked_cuda_event_create(FixedSpResourceCounters* counters,
+                               cudaEvent_t* event,
+                               unsigned int flags,
+                               const char* stage) {
+  check_cuda(cudaEventCreateWithFlags(event, flags), stage);
+  counters->event_create_count += 1;
+}
+
+void tracked_cublas_create(FixedSpResourceCounters* counters,
+                           cublasHandle_t* handle,
+                           const char* stage) {
+  check_cublas(cublasCreate(handle), stage);
+  counters->cublas_handle_create_count += 1;
+}
+
+void tracked_cusolver_create(FixedSpResourceCounters* counters,
+                             cusolverDnHandle_t* handle,
+                             const char* stage) {
+  check_cusolver(cusolverDnCreate(handle), stage);
+  counters->cusolver_handle_create_count += 1;
+}
+
+void copy_resource_counters(const FixedSpResourceCounters& counters,
+                            FixedSpRuntimeInfo* info) {
+  info->cuda_device_allocation_count =
+    counters.cuda_device_allocation_count;
+  info->cuda_host_allocation_count = counters.cuda_host_allocation_count;
+  info->stream_create_count = counters.stream_create_count;
+  info->event_create_count = counters.event_create_count;
+  info->cublas_handle_create_count = counters.cublas_handle_create_count;
+  info->cusolver_handle_create_count = counters.cusolver_handle_create_count;
+}
+
+void copy_solve_resource_deltas(
+    const FixedSpResourceCounters& before,
+    const FixedSpResourceCounters& after,
+    DeviceResidualInfo* info) {
+  info->resource_allocation_count_before_solve = before.allocation_count();
+  info->resource_allocation_count_after_solve = after.allocation_count();
+  info->resource_handle_create_count_before_solve =
+    before.handle_create_count();
+  info->resource_handle_create_count_after_solve =
+    after.handle_create_count();
+  info->cuda_device_allocation_count_during_solve =
+    after.cuda_device_allocation_count - before.cuda_device_allocation_count;
+  info->cuda_host_allocation_count_during_solve =
+    after.cuda_host_allocation_count - before.cuda_host_allocation_count;
+  info->stream_create_count_during_solve =
+    after.stream_create_count - before.stream_create_count;
+  info->event_create_count_during_solve =
+    after.event_create_count - before.event_create_count;
+  info->cublas_handle_create_count_during_solve =
+    after.cublas_handle_create_count - before.cublas_handle_create_count;
+  info->cusolver_handle_create_count_during_solve =
+    after.cusolver_handle_create_count - before.cusolver_handle_create_count;
+  info->per_target_allocation_count_after_warmup =
+    info->resource_allocation_count_after_solve -
+    info->resource_allocation_count_before_solve;
+  info->per_target_handle_create_count =
+    info->resource_handle_create_count_after_solve -
+    info->resource_handle_create_count_before_solve;
+}
+
 std::size_t checked_add(std::size_t left,
                         std::size_t right,
                         const char* name) {
@@ -406,6 +513,7 @@ class CudaRuntimeContext {
   std::size_t cublas_workspace_bytes = kCublasWorkspaceBytes;
   int potrf_lwork = 0;
   FixedSpCapacities capacities;
+  FixedSpResourceCounters resource_counters;
   FixedSpRuntimeInfo diagnostics;
   std::atomic<int> active_prepared_handle_count{0};
   bool freed = false;
@@ -779,6 +887,7 @@ CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
     cudaDeviceProp properties;
     check_cuda(cudaGetDeviceProperties(&properties, device_id),
                "query CUDA device properties");
+    diagnostics.gpu_name = properties.name;
     diagnostics.compute_capability_major = properties.major;
     diagnostics.compute_capability_minor = properties.minor;
     diagnostics.sm_count = properties.multiProcessorCount;
@@ -787,12 +896,12 @@ CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
     check_cuda(cudaDriverGetVersion(&diagnostics.cuda_driver_version),
                "query CUDA driver version");
 
-    check_cuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
-               "create CUDA stream");
-    diagnostics.stream_create_count = 1;
+    tracked_cuda_stream_create(
+      &resource_counters, &stream, cudaStreamNonBlocking,
+      "create CUDA stream");
 
-    check_cublas(cublasCreate(&blas), "create cuBLAS handle");
-    diagnostics.cublas_handle_create_count = 1;
+    tracked_cublas_create(
+      &resource_counters, &blas, "create cuBLAS handle");
     check_cublas(cublasSetStream(blas, stream), "bind cuBLAS stream");
     check_cublas(cublasSetMathMode(blas, CUBLAS_PEDANTIC_MATH),
                  "set cuBLAS pedantic math");
@@ -815,8 +924,8 @@ CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
     }
     diagnostics.cublas_atomics_not_allowed = true;
 
-    check_cusolver(cusolverDnCreate(&solver), "create cuSOLVER handle");
-    diagnostics.cusolver_handle_create_count = 1;
+    tracked_cusolver_create(
+      &resource_counters, &solver, "create cuSOLVER handle");
     check_cusolver(cusolverDnSetStream(solver, stream),
                    "bind cuSOLVER stream");
     check_cusolver(cusolverDnSetDeterministicMode(
@@ -834,12 +943,12 @@ CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
     }
     diagnostics.cusolver_deterministic_mode_enabled = true;
 
-    check_cuda(cudaEventCreateWithFlags(
-      &cholesky_factor_checkpoint_event, cudaEventDisableTiming
-    ), "create Cholesky factor checkpoint event");
-    check_cuda(cudaEventCreateWithFlags(
-      &cholesky_solve_checkpoint_event, cudaEventDisableTiming
-    ), "create Cholesky solve checkpoint event");
+    tracked_cuda_event_create(
+      &resource_counters, &cholesky_factor_checkpoint_event,
+      cudaEventDisableTiming, "create Cholesky factor checkpoint event");
+    tracked_cuda_event_create(
+      &resource_counters, &cholesky_solve_checkpoint_event,
+      cudaEventDisableTiming, "create Cholesky solve checkpoint event");
   } catch (...) {
     cleanup_noexcept();
     throw;
@@ -942,7 +1051,8 @@ void CudaRuntimeContext::reserve(
       allocation_bytes(probe_count, sizeof(double), "potrf probe");
     double* probe = nullptr;
     try {
-      check_cuda(cudaMalloc(&probe, probe_bytes), "allocate potrf probe");
+      tracked_cuda_malloc(
+        &resource_counters, &probe, probe_bytes, "allocate potrf probe");
       check_cusolver(cusolverDnDpotrf_bufferSize(
         solver, CUBLAS_FILL_MODE_UPPER, merged_capacities.null_dim,
         probe, merged_capacities.null_dim, &requested_potrf_lwork
@@ -996,32 +1106,37 @@ void CudaRuntimeContext::reserve(
 
   try {
     if (double_required > double_capacity) {
-      check_cuda(cudaMalloc(
+      tracked_cuda_malloc(
+        &resource_counters,
         &new_double_arena,
-        allocation_bytes(double_required, sizeof(double), "double arena")
-      ), "allocate fixed-sp double arena");
+        allocation_bytes(double_required, sizeof(double), "double arena"),
+        "allocate fixed-sp double arena");
     }
     if (int_required > int_capacity) {
-      check_cuda(cudaMalloc(
+      tracked_cuda_malloc(
+        &resource_counters,
         &new_int_arena,
-        allocation_bytes(int_required, sizeof(int), "int arena")
-      ), "allocate fixed-sp int arena");
+        allocation_bytes(int_required, sizeof(int), "int arena"),
+        "allocate fixed-sp int arena");
     }
     if (int_required > host_status_capacity) {
-      check_cuda(cudaMallocHost(
+      tracked_cuda_malloc_host(
+        &resource_counters,
         &new_host_status_arena,
-        allocation_bytes(int_required, sizeof(int), "host status arena")
-      ), "allocate fixed-sp host status arena");
+        allocation_bytes(int_required, sizeof(int), "host status arena"),
+        "allocate fixed-sp host status arena");
     }
     if (pointer_required > pointer_capacity) {
-      check_cuda(cudaMalloc(
+      tracked_cuda_malloc(
+        &resource_counters,
         &new_pointer_arena,
-        allocation_bytes(pointer_required, sizeof(void*), "pointer arena")
-      ), "allocate fixed-sp pointer arena");
+        allocation_bytes(pointer_required, sizeof(void*), "pointer arena"),
+        "allocate fixed-sp pointer arena");
     }
     if (cublas_workspace == nullptr) {
-      check_cuda(cudaMalloc(&new_cublas_workspace, cublas_workspace_bytes),
-                 "allocate cuBLAS user workspace");
+      tracked_cuda_malloc(
+        &resource_counters, &new_cublas_workspace,
+        cublas_workspace_bytes, "allocate cuBLAS user workspace");
       new_cublas_alignment = pointer_alignment(new_cublas_workspace);
       if (new_cublas_alignment < 256U) {
         throw std::runtime_error(
@@ -1102,7 +1217,9 @@ void CudaRuntimeContext::reserve(
 FixedSpRuntimeInfo CudaRuntimeContext::info() const {
   std::lock_guard<std::mutex> lock(mutex);
   require_usable();
-  return diagnostics;
+  FixedSpRuntimeInfo result = diagnostics;
+  copy_resource_counters(resource_counters, &result);
+  return result;
 }
 
 std::shared_ptr<CudaRuntimeContext> create_fixed_sp_runtime(int device_id) {
@@ -1197,74 +1314,85 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
   check_cuda(cudaSetDevice(context->device_id),
              "set CUDA device for prepared setup");
   try {
-    check_cuda(cudaMalloc(
+    tracked_cuda_malloc(
+      &context->resource_counters,
       &handle->d_X,
-      allocation_bytes(x_count, sizeof(double), "prepared X")
-    ), "allocate prepared X");
+      allocation_bytes(x_count, sizeof(double), "prepared X"),
+      "allocate prepared X");
     if (setup.Z == nullptr) {
       handle->d_X_null = handle->d_X;
     } else {
-      check_cuda(cudaMalloc(
+      tracked_cuda_malloc(
+        &context->resource_counters,
         &handle->d_Z,
-        allocation_bytes(z_count, sizeof(double), "prepared Z")
-      ), "allocate prepared Z");
-      check_cuda(cudaMalloc(
+        allocation_bytes(z_count, sizeof(double), "prepared Z"),
+        "allocate prepared Z");
+      tracked_cuda_malloc(
+        &context->resource_counters,
         &handle->d_X_null,
         allocation_bytes(
-          x_null_count, sizeof(double), "prepared nullspace design")
-      ), "allocate prepared nullspace design");
+          x_null_count, sizeof(double), "prepared nullspace design"),
+        "allocate prepared nullspace design");
     }
-    check_cuda(cudaMalloc(
+    tracked_cuda_malloc(
+      &context->resource_counters,
       &handle->d_gram,
-      allocation_bytes(gram_count, sizeof(double), "prepared Gram")
-    ), "allocate prepared Gram");
-    check_cuda(cudaMalloc(
+      allocation_bytes(gram_count, sizeof(double), "prepared Gram"),
+      "allocate prepared Gram");
+    tracked_cuda_malloc(
+      &context->resource_counters,
       &handle->d_projected_penalties,
       allocation_bytes(
-        penalty_count, sizeof(double), "prepared projected penalties")
-    ), "allocate prepared projected penalties");
+        penalty_count, sizeof(double), "prepared projected penalties"),
+      "allocate prepared projected penalties");
 
-    check_cuda(cudaMalloc(
+    tracked_cuda_malloc(
+      &context->resource_counters,
       &handle->residual_slot->coefficients,
       allocation_bytes(
         coefficient_output_count, sizeof(double),
-        "transient coefficient slot")
-    ), "allocate transient coefficient slot");
-    check_cuda(cudaMalloc(
+        "transient coefficient slot"),
+      "allocate transient coefficient slot");
+    tracked_cuda_malloc(
+      &context->resource_counters,
       &handle->residual_slot->fitted,
       allocation_bytes(
-        observation_output_count, sizeof(double), "transient fitted slot")
-    ), "allocate transient fitted slot");
-    check_cuda(cudaMalloc(
+        observation_output_count, sizeof(double), "transient fitted slot"),
+      "allocate transient fitted slot");
+    tracked_cuda_malloc(
+      &context->resource_counters,
       &handle->residual_slot->residuals,
       allocation_bytes(
-        observation_output_count, sizeof(double), "transient residual slot")
-    ), "allocate transient residual slot");
-    check_cuda(cudaMalloc(
+        observation_output_count, sizeof(double), "transient residual slot"),
+      "allocate transient residual slot");
+    tracked_cuda_malloc(
+      &context->resource_counters,
       &handle->residual_slot->rss,
-      allocation_bytes(target_capacity, sizeof(double), "transient RSS slot")
-    ), "allocate transient RSS slot");
-    check_cuda(cudaMalloc(
+      allocation_bytes(target_capacity, sizeof(double), "transient RSS slot"),
+      "allocate transient RSS slot");
+    tracked_cuda_malloc(
+      &context->resource_counters,
       &handle->residual_slot->rhs,
       allocation_bytes(
-        rhs_output_count, sizeof(double), "transient RHS slot")
-    ), "allocate transient RHS slot");
-    check_cuda(cudaMallocHost(
+        rhs_output_count, sizeof(double), "transient RHS slot"),
+      "allocate transient RHS slot");
+    tracked_cuda_malloc_host(
+      &context->resource_counters,
       &handle->residual_slot->host_finite_status,
       allocation_bytes(
-        target_capacity, sizeof(int), "transient finite status slot")
-    ), "allocate transient finite status slot");
-    check_cuda(cudaEventCreateWithFlags(
+        target_capacity, sizeof(int), "transient finite status slot"),
+      "allocate transient finite status slot");
+    tracked_cuda_event_create(
+      &context->resource_counters,
       &handle->residual_slot->solve_completion_event,
-      cudaEventDisableTiming
-    ), "create transient solve completion event");
-    check_cuda(cudaEventCreateWithFlags(
+      cudaEventDisableTiming, "create transient solve completion event");
+    tracked_cuda_event_create(
+      &context->resource_counters,
       &handle->residual_slot->consumer_completion_event,
-      cudaEventDisableTiming
-    ), "create transient consumer completion event");
-    check_cuda(cudaEventCreateWithFlags(
-      &handle->setup_completion_event, cudaEventDisableTiming
-    ), "create prepared setup completion event");
+      cudaEventDisableTiming, "create transient consumer completion event");
+    tracked_cuda_event_create(
+      &context->resource_counters, &handle->setup_completion_event,
+      cudaEventDisableTiming, "create prepared setup completion event");
 
     auto upload = [&](double* destination, const double* source,
                       std::size_t count, const char* name) {
@@ -1365,6 +1493,8 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       "fixed-sp CUDA prepared handle ownership mismatch");
   }
   validate_fixed_sp_batch(*handle, *context, batch);
+  const FixedSpResourceCounters resources_before_solve =
+    context->resource_counters;
 
   const std::shared_ptr<TransientResidualSlot> slot = handle->residual_slot;
   if (!slot || slot->freed) {
@@ -1733,6 +1863,9 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
     token->diagnostics.executed_routes = token->executed_routes;
     token->diagnostics.reroute_reasons = token->reroute_reasons;
     token->diagnostics.solver_statuses = token->solver_statuses;
+    copy_solve_resource_deltas(
+      resources_before_solve, context->resource_counters,
+      &token->diagnostics);
     return token;
   } catch (...) {
     restore_slot();
@@ -2184,9 +2317,9 @@ PreparedSStaticShadow test_prepared_s_static_shadow(
              "set CUDA device for prepared test shadow");
   cudaEvent_t completion_event = nullptr;
   try {
-    check_cuda(cudaEventCreateWithFlags(
-      &completion_event, cudaEventDisableTiming
-    ), "create prepared test shadow completion event");
+    tracked_cuda_event_create(
+      &context->resource_counters, &completion_event,
+      cudaEventDisableTiming, "create prepared test shadow completion event");
     auto download = [&](double* destination, const double* source,
                         std::size_t count, const char* name) {
       check_cuda(cudaMemcpyAsync(

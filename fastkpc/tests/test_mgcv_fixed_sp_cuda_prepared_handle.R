@@ -373,6 +373,15 @@ assert_true(repeat_info$setup_h2d_upload_count == 1L &&
               repeat_info$setup_h2d_bytes == info$setup_h2d_bytes,
             "prepared info does not repeat setup upload")
 assert_true(
+  runtime_after_prepared$cuda_device_allocation_count >
+      runtime_before_prepared$cuda_device_allocation_count &&
+    runtime_after_prepared$cuda_host_allocation_count >
+      runtime_before_prepared$cuda_host_allocation_count &&
+    runtime_after_prepared$event_create_count >
+      runtime_before_prepared$event_create_count,
+  "prepared create records device, pinned-host, and event resources"
+)
+assert_true(
   identical(runtime_after_prepared$stream_create_count,
             runtime_before_prepared$stream_create_count) &&
     identical(runtime_after_prepared$cublas_handle_create_count,
@@ -430,9 +439,18 @@ explicit_shadow <- .Call(
   "C_fixed_sp_cuda_test_prepared_static_shadow", explicit_handle,
   PACKAGE = "fastkpc_cuda"
 )
-assert_true(identical(fixed_sp_cuda_runtime_info(runtime),
-                      runtime_before_shadow),
-            "test shadow does not change runtime diagnostics")
+runtime_after_shadow <- fixed_sp_cuda_runtime_info(runtime)
+assert_true(
+  runtime_after_shadow$event_create_count ==
+      runtime_before_shadow$event_create_count + 1L &&
+    identical(
+      runtime_after_shadow[setdiff(names(runtime_after_shadow),
+                                   "event_create_count")],
+      runtime_before_shadow[setdiff(names(runtime_before_shadow),
+                                    "event_create_count")]
+    ),
+  "test shadow event uses the authoritative resource counter"
+)
 assert_true(identical(fixed_sp_cuda_prepared_info(explicit_handle),
                       prepared_before_shadow),
             "test shadow does not change prepared diagnostics")

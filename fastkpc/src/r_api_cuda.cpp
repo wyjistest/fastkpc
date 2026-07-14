@@ -3418,11 +3418,17 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_info(SEXP runtime_s) {
     fastkpc::fixed_sp_runtime_info(*holder);
   return Rcpp::List::create(
     Rcpp::Named("device_id") = info.device_id,
+    Rcpp::Named("gpu_name") = info.gpu_name,
     Rcpp::Named("creator_pid") = static_cast<double>(info.creator_pid),
     Rcpp::Named("generation") = static_cast<double>(info.generation),
     Rcpp::Named("runtime_context_create_count") =
       info.runtime_context_create_count,
+    Rcpp::Named("cuda_device_allocation_count") =
+      info.cuda_device_allocation_count,
+    Rcpp::Named("cuda_host_allocation_count") =
+      info.cuda_host_allocation_count,
     Rcpp::Named("stream_create_count") = info.stream_create_count,
+    Rcpp::Named("event_create_count") = info.event_create_count,
     Rcpp::Named("cublas_handle_create_count") =
       info.cublas_handle_create_count,
     Rcpp::Named("cusolver_handle_create_count") =
@@ -3866,6 +3872,26 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
   result["nonfinite_output_count"] = info.nonfinite_output_count;
   result["cpu_fallback_count"] = info.cpu_fallback_count;
   result["unknown_fallback_count"] = info.unknown_fallback_count;
+  result["resource_allocation_count_before_solve"] =
+    info.resource_allocation_count_before_solve;
+  result["resource_allocation_count_after_solve"] =
+    info.resource_allocation_count_after_solve;
+  result["resource_handle_create_count_before_solve"] =
+    info.resource_handle_create_count_before_solve;
+  result["resource_handle_create_count_after_solve"] =
+    info.resource_handle_create_count_after_solve;
+  result["cuda_device_allocation_count_during_solve"] =
+    info.cuda_device_allocation_count_during_solve;
+  result["cuda_host_allocation_count_during_solve"] =
+    info.cuda_host_allocation_count_during_solve;
+  result["stream_create_count_during_solve"] =
+    info.stream_create_count_during_solve;
+  result["event_create_count_during_solve"] =
+    info.event_create_count_during_solve;
+  result["cublas_handle_create_count_during_solve"] =
+    info.cublas_handle_create_count_during_solve;
+  result["cusolver_handle_create_count_during_solve"] =
+    info.cusolver_handle_create_count_during_solve;
   result["per_target_allocation_count_after_warmup"] =
     info.per_target_allocation_count_after_warmup;
   result["per_target_handle_create_count"] =

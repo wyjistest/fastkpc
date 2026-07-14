@@ -1429,3 +1429,656 @@ fastkpc_full_cuda_fixed_sp_native_batch <- function(batch, dto) {
     target_count = as.integer(target_count)
   )
 }
+
+fastkpc_full_cuda_fixed_sp_phase3a_runtime_record <- function(stage, info) {
+  data.frame(
+    stage = stage,
+    device_id = as.integer(info$device_id),
+    gpu_name = as.character(info$gpu_name),
+    runtime_context_create_count =
+      as.integer(info$runtime_context_create_count),
+    cuda_device_allocation_count =
+      as.integer(info$cuda_device_allocation_count),
+    cuda_host_allocation_count =
+      as.integer(info$cuda_host_allocation_count),
+    stream_create_count = as.integer(info$stream_create_count),
+    event_create_count = as.integer(info$event_create_count),
+    cublas_handle_create_count =
+      as.integer(info$cublas_handle_create_count),
+    cusolver_handle_create_count =
+      as.integer(info$cusolver_handle_create_count),
+    workspace_grow_count = as.integer(info$workspace_grow_count),
+    cuda_device_synchronize_count =
+      as.integer(info$cuda_device_synchronize_count),
+    compute_capability_major =
+      as.integer(info$compute_capability_major),
+    compute_capability_minor =
+      as.integer(info$compute_capability_minor),
+    sm_count = as.integer(info$sm_count),
+    cuda_toolkit_version = as.integer(info$cuda_toolkit_version),
+    cuda_driver_version = as.integer(info$cuda_driver_version),
+    cusolver_deterministic_mode =
+      as.character(info$cusolver_deterministic_mode),
+    cublas_math_mode = as.character(info$cublas_math_mode),
+    cublas_atomics_mode = as.character(info$cublas_atomics_mode),
+    cublas_user_workspace_installed =
+      isTRUE(info$cublas_user_workspace_installed),
+    cublas_workspace_alignment =
+      as.numeric(info$cublas_workspace_alignment),
+    stringsAsFactors = FALSE
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_phase3a_counter_delta <- function(
+    before, after, field) {
+  delta <- as.integer(after[[field]] - before[[field]])
+  if (length(delta) != 1L || is.na(delta) || delta < 0L) {
+    stop(paste("fixed-sp CUDA resource counter regressed:", field),
+         call. = FALSE)
+  }
+  delta
+}
+
+fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle <- function(
+    dto, y, sp) {
+  Z <- if (identical(dto$constraint_mode, "identity")) {
+    diag(dto$coefficient_dim)
+  } else {
+    dto$constraint_nullspace
+  }
+  X_null <- if (identical(dto$constraint_mode, "identity")) {
+    dto$X
+  } else {
+    dto$X %*% Z
+  }
+  XtX_null <- if (identical(dto$constraint_mode, "identity")) {
+    dto$gram_matrix
+  } else {
+    dto$nullspace_gram_matrix
+  }
+  penalty_null <- matrix(0, dto$null_dim, dto$null_dim)
+  for (index in seq_len(dto$penalty_count)) {
+    full_penalty <- matrix(
+      0, dto$coefficient_dim, dto$coefficient_dim
+    )
+    block <- dto$penalty_blocks[[index]]
+    block_indices <- dto$penalty_offsets_zero_based[[index]] +
+      seq_len(nrow(block))
+    full_penalty[block_indices, block_indices] <- block
+    projected <- if (identical(dto$constraint_mode, "identity")) {
+      full_penalty
+    } else {
+      crossprod(Z, full_penalty %*% Z)
+    }
+    penalty_null <- penalty_null + as.numeric(sp[[index]]) * projected
+  }
+  list(
+    X = dto$X,
+    y = as.numeric(y),
+    Z = Z,
+    XtX_null = XtX_null,
+    penalty_null = penalty_null,
+    Xty_null = as.numeric(crossprod(X_null, y))
+  )
+}
+
+fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
+    phase2_dir, census_dir, prepared_dir, data_path, device_id = 0L) {
+  required_functions <- c(
+    "fixed_sp_cuda_runtime_create", "fixed_sp_cuda_runtime_reserve",
+    "fixed_sp_cuda_runtime_info", "fixed_sp_cuda_runtime_free",
+    "fixed_sp_cuda_prepared_create", "fixed_sp_cuda_prepared_info",
+    "fixed_sp_cuda_prepared_free", "fixed_sp_cuda_solve_batch",
+    "fixed_sp_cuda_residual_info", "fixed_sp_cuda_materialize_shadow",
+    "fixed_sp_cuda_residual_release", "fixed_sp_cuda_residual_free",
+    "mgcv_extract_gpu_solve_handle_fixed_sp_cuda"
+  )
+  missing <- required_functions[!vapply(required_functions, exists, logical(1L),
+                                        mode = "function", inherits = TRUE)]
+  if (length(missing) != 0L) {
+    stop(paste("Phase 3A CUDA API is unavailable:", paste(missing,
+                                                           collapse = ", ")),
+         call. = FALSE)
+  }
+  path_values <- c(phase2_dir, census_dir, prepared_dir, data_path)
+  if (length(path_values) != 4L || anyNA(path_values) ||
+      any(!nzchar(path_values))) {
+    stop("Phase 3A iteration paths must be non-empty", call. = FALSE)
+  }
+  if (typeof(device_id) != "integer" || length(device_id) != 1L ||
+      is.na(device_id) || device_id < 0L) {
+    stop("Phase 3A device_id must be one non-negative integer",
+         call. = FALSE)
+  }
+
+  catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
+    phase2_dir, census_dir, prepared_dir, data_path
+  )
+  iteration <- fastkpc_full_cuda_fixed_sp_scope(catalog, "iteration")
+  batches <- fastkpc_full_cuda_fixed_sp_batches(catalog, iteration)
+  setup_keys <- names(batches)
+  if (!identical(setup_keys, sort(setup_keys, method = "radix"))) {
+    stop("Phase 3A iteration PreparedSKey order is not canonical",
+         call. = FALSE)
+  }
+  catalog_records <- data.frame(
+    scope = "iteration",
+    authenticated = TRUE,
+    setup_count = as.integer(length(batches)),
+    target_count = as.integer(sum(vapply(
+      batches, function(batch) nrow(batch$target_rows), integer(1L)
+    ))),
+    stringsAsFactors = FALSE
+  )
+
+  dtos <- lapply(batches, function(batch) {
+    fastkpc_full_cuda_fixed_sp_native_dto(batch$setup)
+  })
+  max_n <- max(vapply(dtos, `[[`, integer(1L), "n"))
+  max_q <- max(vapply(dtos, `[[`, integer(1L), "null_dim"))
+  max_penalties <- max(vapply(dtos, `[[`, integer(1L), "penalty_count"))
+  max_augmented_rows <- max(vapply(dtos, function(dto) {
+    as.integer(dto$n + sum(dto$penalty_ranks))
+  }, integer(1L)))
+
+  runtime <- fixed_sp_cuda_runtime_create(device_id)
+  runtime_freed <- FALSE
+  handles <- setNames(vector("list", length(setup_keys)), setup_keys)
+  on.exit({
+    for (handle in rev(handles)) {
+      if (!is.null(handle)) {
+        try(fixed_sp_cuda_prepared_free(handle), silent = TRUE)
+      }
+    }
+    if (!runtime_freed) {
+      try(fixed_sp_cuda_runtime_free(runtime), silent = TRUE)
+    }
+  }, add = TRUE)
+
+  runtime_rows <- list(fastkpc_full_cuda_fixed_sp_phase3a_runtime_record(
+    "runtime-created", fixed_sp_cuda_runtime_info(runtime)
+  ))
+  fixed_sp_cuda_runtime_reserve(
+    runtime, max_n, max_q, 1L, max_penalties, max_augmented_rows
+  )
+  runtime_rows[[length(runtime_rows) + 1L]] <-
+    fastkpc_full_cuda_fixed_sp_phase3a_runtime_record(
+      "workspace-reserved", fixed_sp_cuda_runtime_info(runtime)
+    )
+
+  max_abs_diff <- function(actual, expected) {
+    max(abs(as.numeric(actual) - as.numeric(expected)))
+  }
+  relative_l2_diff <- function(actual, expected) {
+    difference <- as.numeric(actual) - as.numeric(expected)
+    sqrt(sum(difference^2)) /
+      max(sqrt(sum(as.numeric(expected)^2)), .Machine$double.xmin)
+  }
+  run_checked_target <- function(handle, target, batch, target_index) {
+    token <- fixed_sp_cuda_solve_batch(
+      handle, target$Y, target$SP, target$planned_route,
+      target$target_keys, outputs = c("fitted", "residuals")
+    )
+    released <- FALSE
+    freed <- FALSE
+    on.exit({
+      if (!released) {
+        try(fixed_sp_cuda_residual_release(token), silent = TRUE)
+      }
+      if (!freed) {
+        try(fixed_sp_cuda_residual_free(token), silent = TRUE)
+      }
+    }, add = TRUE)
+
+    info <- fixed_sp_cuda_residual_info(token)
+    residual_max_abs <- NA_real_
+    residual_relative_l2 <- NA_real_
+    fitted_max_abs <- NA_real_
+    fitted_relative_l2 <- NA_real_
+    if (identical(target$planned_route, "CHOLESKY_BATCHED")) {
+      shadow <- fixed_sp_cuda_materialize_shadow(
+        token, outputs = c("fitted", "residuals")
+      )
+      info <- fixed_sp_cuda_residual_info(token)
+      oracle <- fastkpc_mgcv_magic_fixed_sp_from_prepared(
+        prepared_setup = batch$setup,
+        target_state = list(
+          row = batch$target_rows[target_index, , drop = FALSE],
+          y = as.numeric(target$Y[, 1L])
+        )
+      )
+      residual_max_abs <- max_abs_diff(shadow$residuals, oracle$residuals)
+      residual_relative_l2 <- relative_l2_diff(
+        shadow$residuals, oracle$residuals
+      )
+      fitted_max_abs <- max_abs_diff(shadow$fitted, oracle$fitted)
+      fitted_relative_l2 <- relative_l2_diff(shadow$fitted, oracle$fitted)
+    }
+
+    fixed_sp_cuda_residual_release(token)
+    released <- TRUE
+    prepared_after_release <- fixed_sp_cuda_prepared_info(handle)
+    fixed_sp_cuda_residual_free(token)
+    freed <- TRUE
+    approximate_fallback_count <- as.integer(any(grepl(
+      "APPROX", c(info$executed_route, info$reroute_reason,
+                   info$solver_status), ignore.case = TRUE
+    ), na.rm = TRUE))
+
+    data.frame(
+      prepared_s_key_sha256 = batch$prepared_s_key_sha256,
+      residual_key_sha256 = as.character(target$target_keys),
+      target = as.integer(batch$target_rows$target[[target_index]]),
+      target_count = as.integer(info$target_count),
+      planned_route = as.character(info$planned_route),
+      executed_route = as.character(info$executed_route),
+      reroute_reason = as.character(info$reroute_reason),
+      solver_status = as.character(info$solver_status),
+      native_batch_call = isTRUE(info$native_batch_call),
+      rhs_authority = as.character(info$rhs_authority),
+      full_cuda_data_plane = isTRUE(info$full_cuda_data_plane),
+      invalid_output_init_count =
+        as.integer(info$invalid_output_init_count),
+      shadow_materialize_call_count =
+        as.integer(info$shadow_materialize_call_count),
+      cpu_fallback_count = as.integer(info$cpu_fallback_count),
+      unknown_fallback_count = as.integer(info$unknown_fallback_count),
+      approximate_fallback_count = approximate_fallback_count,
+      resource_allocation_count_before_solve =
+        as.integer(info$resource_allocation_count_before_solve),
+      resource_allocation_count_after_solve =
+        as.integer(info$resource_allocation_count_after_solve),
+      resource_handle_create_count_before_solve =
+        as.integer(info$resource_handle_create_count_before_solve),
+      resource_handle_create_count_after_solve =
+        as.integer(info$resource_handle_create_count_after_solve),
+      cuda_device_allocation_count_during_solve =
+        as.integer(info$cuda_device_allocation_count_during_solve),
+      cuda_host_allocation_count_during_solve =
+        as.integer(info$cuda_host_allocation_count_during_solve),
+      stream_create_count_during_solve =
+        as.integer(info$stream_create_count_during_solve),
+      event_create_count_during_solve =
+        as.integer(info$event_create_count_during_solve),
+      cublas_handle_create_count_during_solve =
+        as.integer(info$cublas_handle_create_count_during_solve),
+      cusolver_handle_create_count_during_solve =
+        as.integer(info$cusolver_handle_create_count_during_solve),
+      per_target_allocation_count_after_warmup =
+        as.integer(info$per_target_allocation_count_after_warmup),
+      per_target_handle_create_count =
+        as.integer(info$per_target_handle_create_count),
+      residual_max_abs_diff = residual_max_abs,
+      residual_relative_l2_diff = residual_relative_l2,
+      fitted_max_abs_diff = fitted_max_abs,
+      fitted_relative_l2_diff = fitted_relative_l2,
+      lease_released_before_reuse = released,
+      output_slot_leased_after_release =
+        isTRUE(prepared_after_release$output_slot_leased),
+      stringsAsFactors = FALSE
+    )
+  }
+
+  prepared_rows <- vector("list", length(setup_keys))
+  target_rows <- vector("list", catalog_records$target_count[[1L]])
+  target_row_index <- 0L
+  safe_descriptors <- list()
+  for (setup_index in seq_along(setup_keys)) {
+    setup_key <- setup_keys[[setup_index]]
+    batch <- batches[[setup_key]]
+    dto <- dtos[[setup_key]]
+    native_batch <- fastkpc_full_cuda_fixed_sp_native_batch(batch, dto)
+    resources_before_setup <- fixed_sp_cuda_runtime_info(runtime)
+    handle <- fixed_sp_cuda_prepared_create(runtime, dto)
+    handles[[setup_key]] <- handle
+    prepared_info <- fixed_sp_cuda_prepared_info(handle)
+    resources_after_setup <- fixed_sp_cuda_runtime_info(runtime)
+    prepared_rows[[setup_index]] <- data.frame(
+      prepared_s_key_sha256 = setup_key,
+      setup_h2d_upload_count =
+        as.integer(prepared_info$setup_h2d_upload_count),
+      setup_h2d_bytes = as.numeric(prepared_info$setup_h2d_bytes),
+      cuda_device_allocation_count_during_setup =
+        fastkpc_full_cuda_fixed_sp_phase3a_counter_delta(
+          resources_before_setup, resources_after_setup,
+          "cuda_device_allocation_count"
+        ),
+      cuda_host_allocation_count_during_setup =
+        fastkpc_full_cuda_fixed_sp_phase3a_counter_delta(
+          resources_before_setup, resources_after_setup,
+          "cuda_host_allocation_count"
+        ),
+      event_create_count_during_setup =
+        fastkpc_full_cuda_fixed_sp_phase3a_counter_delta(
+          resources_before_setup, resources_after_setup,
+          "event_create_count"
+        ),
+      output_slot_leased_at_end = NA,
+      stringsAsFactors = FALSE
+    )
+
+    for (target_index in seq_len(native_batch$target_count)) {
+      target <- list(
+        Y = native_batch$Y[, target_index, drop = FALSE],
+        SP = native_batch$SP[, target_index, drop = FALSE],
+        planned_route = native_batch$planned_route[[target_index]],
+        target_keys = native_batch$target_keys[[target_index]],
+        target_count = 1L
+      )
+      target_row_index <- target_row_index + 1L
+      target_rows[[target_row_index]] <- run_checked_target(
+        handle, target, batch, target_index
+      )
+      if (identical(target$planned_route, "CHOLESKY_BATCHED")) {
+        safe_descriptors[[length(safe_descriptors) + 1L]] <- list(
+          handle = handle,
+          native = target,
+          prototype =
+            fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle(
+              dto, target$Y[, 1L], target$SP[, 1L]
+            )
+        )
+      }
+    }
+    prepared_rows[[setup_index]]$output_slot_leased_at_end <-
+      isTRUE(fixed_sp_cuda_prepared_info(handle)$output_slot_leased)
+  }
+  prepared_records <- do.call(rbind, prepared_rows)
+  rownames(prepared_records) <- NULL
+  target_records <- do.call(rbind, target_rows)
+  rownames(target_records) <- NULL
+
+  timed_persistent_solve <- function(descriptor) {
+    .Call(
+      "C_fixed_sp_cuda_solve_batch", descriptor$handle,
+      descriptor$native$Y, descriptor$native$SP,
+      as.character(descriptor$native$planned_route),
+      as.character(descriptor$native$target_keys), "residuals",
+      PACKAGE = "fastkpc_cuda"
+    )
+  }
+  timed_persistent_free <- function(token) {
+    invisible(.Call(
+      "C_fixed_sp_cuda_residual_free", token, PACKAGE = "fastkpc_cuda"
+    ))
+  }
+  timed_prototype_solve <- function(descriptor) {
+    handle <- descriptor$prototype
+    .Call(
+      "C_mgcv_extract_gpu_solve_handle_fixed_sp",
+      handle$X, handle$y, handle$Z, handle$XtX_null,
+      handle$penalty_null, handle$Xty_null, PACKAGE = "fastkpc_cuda"
+    )
+  }
+  run_persistent_corpus <- function(profile = FALSE) {
+    resources_before <- fixed_sp_cuda_runtime_info(runtime)
+    solve_ms <- 0
+    release_ms <- 0
+    free_ms <- 0
+    started <- proc.time()[["elapsed"]]
+    for (descriptor in safe_descriptors) {
+      solve_started <- if (profile) proc.time()[["elapsed"]] else 0
+      token <- timed_persistent_solve(descriptor)
+      if (profile) {
+        solve_ms <- solve_ms +
+          1000 * (proc.time()[["elapsed"]] - solve_started)
+      }
+      freed <- FALSE
+      tryCatch({
+        free_started <- if (profile) proc.time()[["elapsed"]] else 0
+        timed_persistent_free(token)
+        freed <- TRUE
+        if (profile) {
+          free_ms <- free_ms +
+            1000 * (proc.time()[["elapsed"]] - free_started)
+        }
+      }, finally = {
+        if (!freed) {
+          try(timed_persistent_free(token), silent = TRUE)
+        }
+      })
+    }
+    elapsed_ms <- 1000 * (proc.time()[["elapsed"]] - started)
+    resources_after <- fixed_sp_cuda_runtime_info(runtime)
+    allocation_count <-
+      fastkpc_full_cuda_fixed_sp_phase3a_counter_delta(
+        resources_before, resources_after, "cuda_device_allocation_count"
+      ) + fastkpc_full_cuda_fixed_sp_phase3a_counter_delta(
+        resources_before, resources_after, "cuda_host_allocation_count"
+      )
+    handle_create_count <- sum(vapply(
+      c("stream_create_count", "event_create_count",
+        "cublas_handle_create_count", "cusolver_handle_create_count"),
+      function(field) {
+        fastkpc_full_cuda_fixed_sp_phase3a_counter_delta(
+          resources_before, resources_after, field
+        )
+      }, integer(1L)
+    ))
+    list(
+      elapsed_ms = as.numeric(elapsed_ms),
+      allocation_count = as.integer(allocation_count),
+      handle_create_count = as.integer(handle_create_count),
+      solve_ms = as.numeric(solve_ms),
+      release_ms = as.numeric(release_ms),
+      free_ms = as.numeric(free_ms)
+    )
+  }
+  run_prototype_corpus <- function() {
+    started <- proc.time()[["elapsed"]]
+    for (descriptor in safe_descriptors) {
+      timed_prototype_solve(descriptor)
+    }
+    as.numeric(1000 * (proc.time()[["elapsed"]] - started))
+  }
+
+  persistent_resource_rows <- list()
+  persistent_warmup <- run_persistent_corpus(profile = TRUE)
+  persistent_resource_rows[[1L]] <- data.frame(
+    repetition = 0L,
+    allocation_count = persistent_warmup$allocation_count,
+    handle_create_count = persistent_warmup$handle_create_count
+  )
+  run_prototype_corpus()
+  runtime_rows[[length(runtime_rows) + 1L]] <-
+    fastkpc_full_cuda_fixed_sp_phase3a_runtime_record(
+      "post-warmup", fixed_sp_cuda_runtime_info(runtime)
+    )
+
+  persistent_raw_ms <- numeric(3L)
+  prototype_raw_ms <- numeric(3L)
+  for (repetition in seq_len(3L)) {
+    invisible(gc(FALSE))
+    persistent_repetition <- run_persistent_corpus()
+    persistent_raw_ms[[repetition]] <-
+      persistent_repetition$elapsed_ms
+    persistent_resource_rows[[repetition + 1L]] <- data.frame(
+      repetition = as.integer(repetition),
+      allocation_count = persistent_repetition$allocation_count,
+      handle_create_count = persistent_repetition$handle_create_count
+    )
+    invisible(gc(FALSE))
+    prototype_raw_ms[[repetition]] <- run_prototype_corpus()
+  }
+  runtime_rows[[length(runtime_rows) + 1L]] <-
+    fastkpc_full_cuda_fixed_sp_phase3a_runtime_record(
+      "final", fixed_sp_cuda_runtime_info(runtime)
+    )
+  runtime_records <- do.call(rbind, runtime_rows)
+  rownames(runtime_records) <- NULL
+
+  for (setup_index in seq_along(setup_keys)) {
+    prepared_records$output_slot_leased_at_end[[setup_index]] <-
+      isTRUE(fixed_sp_cuda_prepared_info(
+        handles[[setup_keys[[setup_index]]]]
+      )$output_slot_leased)
+  }
+  persistent_median_ms <- as.numeric(stats::median(persistent_raw_ms))
+  prototype_median_ms <- as.numeric(stats::median(prototype_raw_ms))
+  speedup <- prototype_median_ms / persistent_median_ms
+  final_runtime <- runtime_records[
+    runtime_records$stage == "final", , drop = FALSE
+  ]
+  post_warmup_runtime <- runtime_records[
+    runtime_records$stage == "post-warmup", , drop = FALSE
+  ]
+  timing <- list(
+    warmup_count = c(persistent = 1L, prototype = 1L),
+    persistent_raw_ms = persistent_raw_ms,
+    prototype_raw_ms = prototype_raw_ms,
+    persistent_median_ms = persistent_median_ms,
+    prototype_median_ms = prototype_median_ms,
+    speedup = as.numeric(speedup),
+    persistent_warmup_profile_ms = c(
+      solve = persistent_warmup$solve_ms,
+      release = persistent_warmup$release_ms,
+      free = persistent_warmup$free_ms
+    ),
+    gpu_identity = list(
+      device_id = as.integer(final_runtime$device_id[[1L]]),
+      name = final_runtime$gpu_name[[1L]],
+      compute_capability_major =
+        as.integer(final_runtime$compute_capability_major[[1L]]),
+      compute_capability_minor =
+        as.integer(final_runtime$compute_capability_minor[[1L]]),
+      sm_count = as.integer(final_runtime$sm_count[[1L]]),
+      cuda_toolkit_version =
+        as.integer(final_runtime$cuda_toolkit_version[[1L]]),
+      cuda_driver_version =
+        as.integer(final_runtime$cuda_driver_version[[1L]])
+    ),
+    persistent_resource_records = do.call(
+      rbind, persistent_resource_rows
+    )
+  )
+
+  safe <- target_records$planned_route == "CHOLESKY_BATCHED"
+  stable <- !safe
+  summary <- list(
+    catalog_open_count = as.integer(nrow(catalog_records)),
+    setup_count = as.integer(nrow(prepared_records)),
+    target_count = as.integer(nrow(target_records)),
+    cholesky_ok_count = as.integer(sum(
+      target_records$solver_status == "OK_CHOLESKY_SINGLE"
+    )),
+    stable_not_implemented_count = as.integer(sum(
+      target_records$solver_status == "ERR_STABLE_PATH_NOT_IMPLEMENTED"
+    )),
+    residual_max_abs_diff_max = max(
+      target_records$residual_max_abs_diff[safe]
+    ),
+    residual_relative_l2_diff_max = max(
+      target_records$residual_relative_l2_diff[safe]
+    ),
+    fitted_max_abs_diff_max = max(
+      target_records$fitted_max_abs_diff[safe]
+    ),
+    fitted_relative_l2_diff_max = max(
+      target_records$fitted_relative_l2_diff[safe]
+    ),
+    setup_h2d_upload_count = as.integer(sum(
+      prepared_records$setup_h2d_upload_count
+    )),
+    runtime_context_create_count =
+      as.integer(final_runtime$runtime_context_create_count[[1L]]),
+    deterministic_runtime_config_exact =
+      identical(final_runtime$cusolver_deterministic_mode[[1L]], "enabled") &&
+      identical(final_runtime$cublas_math_mode[[1L]], "pedantic") &&
+      identical(final_runtime$cublas_atomics_mode[[1L]], "not_allowed") &&
+      isTRUE(final_runtime$cublas_user_workspace_installed[[1L]]) &&
+      final_runtime$cublas_workspace_alignment[[1L]] >= 256,
+    rhs_authority = if (length(unique(target_records$rhs_authority)) == 1L) {
+      unique(target_records$rhs_authority)
+    } else {
+      "mixed"
+    },
+    full_cuda_data_plane = all(target_records$full_cuda_data_plane),
+    post_warmup_workspace_grow_count = as.integer(
+      final_runtime$workspace_grow_count[[1L]] -
+        post_warmup_runtime$workspace_grow_count[[1L]]
+    ),
+    cuda_device_synchronize_count =
+      as.integer(final_runtime$cuda_device_synchronize_count[[1L]]),
+    per_target_allocation_count_after_warmup = as.integer(max(c(
+      target_records$per_target_allocation_count_after_warmup,
+      timing$persistent_resource_records$allocation_count
+    ))),
+    per_target_handle_create_count = as.integer(max(c(
+      target_records$per_target_handle_create_count,
+      timing$persistent_resource_records$handle_create_count
+    ))),
+    invalid_output_init_count = as.integer(sum(
+      target_records$invalid_output_init_count
+    )),
+    cpu_fallback_count = as.integer(sum(target_records$cpu_fallback_count)),
+    unknown_fallback_count = as.integer(sum(
+      target_records$unknown_fallback_count
+    )),
+    approximate_fallback_count = as.integer(sum(
+      target_records$approximate_fallback_count
+    )),
+    all_output_slot_leases_released =
+      all(target_records$lease_released_before_reuse) &&
+      all(!target_records$output_slot_leased_after_release) &&
+      all(!prepared_records$output_slot_leased_at_end),
+    invalid_output_init_matches_batch_calls =
+      sum(target_records$invalid_output_init_count) ==
+        nrow(target_records),
+    no_non_cholesky_target_ok =
+      !any(startsWith(target_records$solver_status[stable], "OK_")),
+    persistent_faster_than_repeated_prototype =
+      persistent_median_ms < prototype_median_ms && speedup > 1,
+    persistent_speedup = as.numeric(speedup)
+  )
+
+  exact_gate <- summary$catalog_open_count == 1L &&
+    summary$setup_count == 44L && summary$target_count == 270L &&
+    summary$cholesky_ok_count == 172L &&
+    summary$stable_not_implemented_count == 98L &&
+    summary$residual_max_abs_diff_max < 1e-7 &&
+    summary$residual_relative_l2_diff_max < 1e-7 &&
+    summary$fitted_max_abs_diff_max < 1e-7 &&
+    summary$fitted_relative_l2_diff_max < 1e-7 &&
+    summary$setup_h2d_upload_count == 44L &&
+    summary$runtime_context_create_count == 1L &&
+    isTRUE(summary$deterministic_runtime_config_exact) &&
+    identical(summary$rhs_authority, "cuda-x0-transpose-y") &&
+    isTRUE(summary$full_cuda_data_plane) &&
+    summary$post_warmup_workspace_grow_count == 0L &&
+    summary$cuda_device_synchronize_count == 0L &&
+    summary$per_target_allocation_count_after_warmup == 0L &&
+    summary$per_target_handle_create_count == 0L &&
+    summary$cpu_fallback_count == 0L &&
+    summary$unknown_fallback_count == 0L &&
+    summary$approximate_fallback_count == 0L &&
+    isTRUE(summary$all_output_slot_leases_released) &&
+    isTRUE(summary$invalid_output_init_matches_batch_calls) &&
+    isTRUE(summary$no_non_cholesky_target_ok)
+  if (!isTRUE(exact_gate)) {
+    stop("Phase 3A iteration correctness/resource gate failed",
+         call. = FALSE)
+  }
+  if (!isTRUE(summary$persistent_faster_than_repeated_prototype)) {
+    stop(sprintf(
+      paste0(
+        "Phase 3A persistent median gate failed: persistent raw ms=%s; ",
+        "prototype raw ms=%s; medians=%.6f/%.6f; speedup=%.6f; ",
+        "warmup solve/release/free ms=%s"
+      ),
+      paste(format(persistent_raw_ms, digits = 10), collapse = ","),
+      paste(format(prototype_raw_ms, digits = 10), collapse = ","),
+      persistent_median_ms, prototype_median_ms, speedup,
+      paste(format(timing$persistent_warmup_profile_ms, digits = 10),
+            collapse = ",")
+    ), call. = FALSE)
+  }
+
+  list(
+    catalog_records = catalog_records,
+    runtime_records = runtime_records,
+    prepared_records = prepared_records,
+    target_records = target_records,
+    timing = timing,
+    summary = summary
+  )
+}
