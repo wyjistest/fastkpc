@@ -3540,6 +3540,30 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_free(SEXP prepared_s) {
   END_RCPP
 }
 
+extern "C" SEXP C_fixed_sp_cuda_test_prepared_static_shadow(
+    SEXP prepared_s) {
+  BEGIN_RCPP
+  FixedSpPreparedHolder* holder =
+    fixed_sp_cuda_prepared_holder(prepared_s, true);
+  const fastkpc::PreparedSStaticShadow shadow =
+    fastkpc::test_prepared_s_static_shadow(*holder);
+  Rcpp::NumericMatrix X_null(shadow.n, shadow.null_dim);
+  std::copy(shadow.X_null.begin(), shadow.X_null.end(), X_null.begin());
+  Rcpp::NumericMatrix gram(shadow.null_dim, shadow.null_dim);
+  std::copy(shadow.gram.begin(), shadow.gram.end(), gram.begin());
+  Rcpp::NumericVector projected(shadow.projected_penalties.size());
+  std::copy(shadow.projected_penalties.begin(),
+            shadow.projected_penalties.end(), projected.begin());
+  projected.attr("dim") = Rcpp::IntegerVector::create(
+    shadow.null_dim, shadow.null_dim, shadow.penalty_count);
+  return Rcpp::List::create(
+    Rcpp::Named("X_null") = X_null,
+    Rcpp::Named("gram") = gram,
+    Rcpp::Named("projected_penalties") = projected
+  );
+  END_RCPP
+}
+
 extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_apply(
     SEXP handles,
     SEXP rhss) {
@@ -7707,6 +7731,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fixed_sp_cuda_prepared_create", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_create), 2},
   {"C_fixed_sp_cuda_prepared_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_info), 1},
   {"C_fixed_sp_cuda_prepared_free", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_free), 1},
+  {"C_fixed_sp_cuda_test_prepared_static_shadow", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_prepared_static_shadow), 1},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},
   {"C_fast_hsic_perm_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_perm_cuda), 6},

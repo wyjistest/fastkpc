@@ -18,6 +18,13 @@ assert_error <- function(expression, pattern, message) {
   )
   invisible(error)
 }
+assert_close <- function(actual, expected, tolerance, message) {
+  assert_true(identical(dim(actual), dim(expected)),
+              paste0(message, ": dimensions"))
+  error <- max(abs(actual - expected))
+  assert_true(is.finite(error) && error <= tolerance,
+              paste0(message, ": max error ", format(error, digits = 17L)))
+}
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
   cat("SKIP Phase 3 prepared handle\n")
@@ -57,6 +64,22 @@ dto <- fastkpc_full_cuda_fixed_sp_native_dto(batch$setup)
 assert_true(identical(dto$constraint_mode, "identity") &&
               identical(dto$null_dim, dto$coefficient_dim),
             "focused setup uses canonical identity constraint")
+explicit_dto <- dto
+explicit_q <- dto$coefficient_dim - 1L
+householder_v <- seq_len(dto$coefficient_dim)
+householder_v <- householder_v / sqrt(sum(householder_v^2))
+householder <- diag(dto$coefficient_dim) -
+  2 * tcrossprod(householder_v)
+explicit_Z <- householder[
+  , seq_len(explicit_q), drop = FALSE
+]
+explicit_X_null <- dto$X %*% explicit_Z
+assert_close(crossprod(explicit_Z), diag(explicit_q), 1e-12,
+             "dense explicit Z is orthonormal")
+explicit_dto$constraint_mode <- "explicit"
+explicit_dto$constraint_nullspace <- explicit_Z
+explicit_dto$null_dim <- explicit_q
+explicit_dto$nullspace_gram_matrix <- crossprod(explicit_X_null)
 
 unreserved <- fixed_sp_cuda_runtime_create(0L)
 on.exit(try(fixed_sp_cuda_runtime_free(unreserved), silent = TRUE), add = TRUE)
@@ -69,6 +92,45 @@ fixed_sp_cuda_runtime_free(unreserved)
 runtime <- fixed_sp_cuda_runtime_create(0L)
 on.exit(try(fixed_sp_cuda_runtime_free(runtime), silent = TRUE), add = TRUE)
 fixed_sp_cuda_runtime_reserve(runtime, 351L, 64L, 47L, 7L, 407L)
+
+n_limited_runtime <- fixed_sp_cuda_runtime_create(0L)
+on.exit(try(fixed_sp_cuda_runtime_free(n_limited_runtime), silent = TRUE),
+        add = TRUE)
+fixed_sp_cuda_runtime_reserve(
+  n_limited_runtime, dto$n - 1L, dto$null_dim, 1L,
+  dto$penalty_count, 1L
+)
+assert_error(
+  fixed_sp_cuda_prepared_create(n_limited_runtime, dto),
+  "exceed reserved", "n above reserved capacity must fail closed"
+)
+fixed_sp_cuda_runtime_free(n_limited_runtime)
+
+q_limited_runtime <- fixed_sp_cuda_runtime_create(0L)
+on.exit(try(fixed_sp_cuda_runtime_free(q_limited_runtime), silent = TRUE),
+        add = TRUE)
+fixed_sp_cuda_runtime_reserve(
+  q_limited_runtime, dto$n, dto$null_dim - 1L, 1L,
+  dto$penalty_count, 1L
+)
+assert_error(
+  fixed_sp_cuda_prepared_create(q_limited_runtime, dto),
+  "exceed reserved", "null_dim above reserved capacity must fail closed"
+)
+fixed_sp_cuda_runtime_free(q_limited_runtime)
+
+penalty_limited_runtime <- fixed_sp_cuda_runtime_create(0L)
+on.exit(try(fixed_sp_cuda_runtime_free(penalty_limited_runtime),
+            silent = TRUE), add = TRUE)
+fixed_sp_cuda_runtime_reserve(
+  penalty_limited_runtime, dto$n, dto$null_dim, 1L,
+  dto$penalty_count - 1L, 1L
+)
+assert_error(
+  fixed_sp_cuda_prepared_create(penalty_limited_runtime, dto),
+  "exceed reserved", "penalty_count above reserved capacity must fail closed"
+)
+fixed_sp_cuda_runtime_free(penalty_limited_runtime)
 
 bad_dto <- dto[rev(seq_along(dto))]
 assert_error(
@@ -93,6 +155,18 @@ assert_error(
   "data_p", "canonical data_p tamper must fail closed"
 )
 bad_dto <- dto
+bad_dto$schema_version <- "forged-native-dto-schema"
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "schema lineage", "schema version tamper must fail closed"
+)
+bad_dto <- dto
+bad_dto$dataset_sha256 <- "not-a-sha256"
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "SHA-256", "lineage SHA tamper must fail closed"
+)
+bad_dto <- dto
 bad_dto$gram_matrix <- bad_dto$gram_matrix[-1L, , drop = FALSE]
 assert_error(
   fixed_sp_cuda_prepared_create(runtime, bad_dto),
@@ -105,10 +179,29 @@ assert_error(
   "finite", "nonfinite setup matrix must fail closed"
 )
 bad_dto <- dto
+bad_dto$penalty_blocks[[1L]] <-
+  bad_dto$penalty_blocks[[1L]][-1L, , drop = FALSE]
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "shape", "non-square penalty block must fail closed"
+)
+bad_dto <- dto
+bad_dto$penalty_blocks[[1L]][[1L]] <- Inf
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "finite", "nonfinite penalty block must fail closed"
+)
+bad_dto <- dto
 bad_dto$penalty_offsets_zero_based[[1L]] <- dto$coefficient_dim
 assert_error(
   fixed_sp_cuda_prepared_create(runtime, bad_dto),
   "offset", "out-of-range penalty offset must fail closed"
+)
+bad_dto <- dto
+bad_dto$penalty_ranks[[1L]] <- nrow(dto$penalty_blocks[[1L]]) + 1L
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "rank", "out-of-range penalty rank must fail closed"
 )
 bad_dto <- dto
 bad_dto$penalty_sp_indices_zero_based[c(1L, 2L)] <-
@@ -116,6 +209,49 @@ bad_dto$penalty_sp_indices_zero_based[c(1L, 2L)] <-
 assert_error(
   fixed_sp_cuda_prepared_create(runtime, bad_dto),
   "identity", "non-identity penalty-to-SP mapping must fail closed"
+)
+bad_dto <- explicit_dto
+bad_dto$constraint_nullspace <- explicit_Z[-1L, , drop = FALSE]
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "shape", "explicit constraint shape must fail closed"
+)
+bad_dto <- explicit_dto
+bad_dto["constraint_nullspace"] <- list(NULL)
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "explicit constraint", "missing explicit constraint must fail closed"
+)
+bad_dto <- explicit_dto
+bad_dto$nullspace_gram_matrix <-
+  bad_dto$nullspace_gram_matrix[-1L, , drop = FALSE]
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "shape", "explicit nullspace Gram shape must fail closed"
+)
+bad_dto <- explicit_dto
+bad_dto["nullspace_gram_matrix"] <- list(NULL)
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "explicit constraint", "missing nullspace Gram must fail closed"
+)
+bad_dto <- dto
+bad_dto$H <- diag(dto$coefficient_dim)
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "non-null H", "non-null H must fail closed"
+)
+bad_dto <- dto
+bad_dto$weights_policy <- "non-unit-weights"
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "weights policy", "unsupported weights policy must fail closed"
+)
+bad_dto <- dto
+bad_dto$offset_policy <- "non-zero-offset"
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "offset policy", "unsupported offset policy must fail closed"
 )
 assert_error(
   fixed_sp_cuda_prepared_info(runtime),
@@ -158,6 +294,70 @@ assert_error(
   fixed_sp_cuda_prepared_free(runtime),
   "tagged external pointer", "wrong prepared free tag must fail closed"
 )
+
+expected_projected_penalties <- array(
+  0, dim = c(explicit_q, explicit_q, dto$penalty_count)
+)
+truncated_projected_penalties <- expected_projected_penalties
+for (index in seq_len(dto$penalty_count)) {
+  full_penalty <- matrix(0, dto$coefficient_dim, dto$coefficient_dim)
+  block <- dto$penalty_blocks[[index]]
+  block_indices <- dto$penalty_offsets_zero_based[[index]] +
+    seq_len(nrow(block))
+  full_penalty[block_indices, block_indices] <- block
+  expected_projected_penalties[, , index] <-
+    crossprod(explicit_Z, full_penalty %*% explicit_Z)
+  truncated_projected_penalties[, , index] <- full_penalty[
+    seq_len(explicit_q), seq_len(explicit_q), drop = FALSE
+  ]
+}
+assert_true(
+  max(abs(explicit_X_null -
+            dto$X[, seq_len(explicit_q), drop = FALSE])) > 1e-6,
+  "dense explicit fixture distinguishes XZ from column truncation"
+)
+assert_true(
+  max(abs(expected_projected_penalties -
+            truncated_projected_penalties)) > 1e-6,
+  "dense explicit fixture distinguishes Z'PZ from leading submatrices"
+)
+explicit_handle <- fixed_sp_cuda_prepared_create(runtime, explicit_dto)
+on.exit(try(fixed_sp_cuda_prepared_free(explicit_handle), silent = TRUE),
+        add = TRUE)
+explicit_info <- fixed_sp_cuda_prepared_info(explicit_handle)
+expected_explicit_h2d_bytes <- 8 * as.numeric(
+  length(explicit_dto$X) + length(explicit_Z) +
+    length(explicit_X_null) + length(explicit_dto$nullspace_gram_matrix) +
+    explicit_dto$penalty_count * explicit_q * explicit_q
+)
+assert_true(identical(
+  explicit_info$setup_h2d_bytes, expected_explicit_h2d_bytes
+), "explicit setup uploads X, Z, X_null, Gram, and projected penalties")
+runtime_before_shadow <- fixed_sp_cuda_runtime_info(runtime)
+prepared_before_shadow <- fixed_sp_cuda_prepared_info(explicit_handle)
+explicit_shadow <- .Call(
+  "C_fixed_sp_cuda_test_prepared_static_shadow", explicit_handle,
+  PACKAGE = "fastkpc_cuda"
+)
+assert_true(identical(fixed_sp_cuda_runtime_info(runtime),
+                      runtime_before_shadow),
+            "test shadow does not change runtime diagnostics")
+assert_true(identical(fixed_sp_cuda_prepared_info(explicit_handle),
+                      prepared_before_shadow),
+            "test shadow does not change prepared diagnostics")
+assert_true(identical(
+  names(explicit_shadow),
+  c("X_null", "gram", "projected_penalties")
+), "explicit static shadow schema")
+assert_close(explicit_shadow$X_null, explicit_X_null, 1e-12,
+             "explicit X_null projection")
+assert_close(explicit_shadow$gram,
+             explicit_dto$nullspace_gram_matrix, 0,
+             "explicit nullspace Gram")
+assert_close(explicit_shadow$projected_penalties,
+             expected_projected_penalties, 1e-12,
+             "explicit projected penalties")
+fixed_sp_cuda_prepared_free(explicit_handle)
 
 fixed_sp_cuda_runtime_free(runtime)
 retained_info <- fixed_sp_cuda_prepared_info(handle)

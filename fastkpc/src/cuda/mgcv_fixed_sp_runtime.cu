@@ -896,6 +896,73 @@ void free_prepared_s_gpu(std::shared_ptr<PreparedSGpuHandle>* handle) {
   if (handle != nullptr) handle->reset();
 }
 
+PreparedSStaticShadow test_prepared_s_static_shadow(
+    const std::shared_ptr<PreparedSGpuHandle>& handle) {
+  if (!handle || handle->freed) {
+    throw std::runtime_error("fixed-sp CUDA prepared handle has been freed");
+  }
+  const std::shared_ptr<CudaRuntimeContext> context = handle->context;
+  if (!context) {
+    throw std::runtime_error("fixed-sp CUDA prepared runtime has been freed");
+  }
+  std::lock_guard<std::mutex> lock(context->mutex);
+  context->require_usable();
+  if (handle->d_X_null == nullptr || handle->d_gram == nullptr ||
+      handle->d_projected_penalties == nullptr) {
+    throw std::runtime_error("prepared static state is unavailable");
+  }
+
+  PreparedSStaticShadow shadow;
+  shadow.n = handle->n;
+  shadow.null_dim = handle->q;
+  shadow.penalty_count = handle->penalty_count;
+  const std::size_t x_null_count =
+    matrix_count(handle->n, handle->q, "test shadow X_null");
+  const std::size_t gram_count =
+    matrix_count(handle->q, handle->q, "test shadow Gram");
+  const std::size_t projected_count = checked_multiply(
+    positive_size(handle->penalty_count, "test shadow penalty count"),
+    gram_count, "test shadow projected penalties");
+  shadow.X_null.resize(x_null_count);
+  shadow.gram.resize(gram_count);
+  shadow.projected_penalties.resize(projected_count);
+
+  check_cuda(cudaSetDevice(context->device_id),
+             "set CUDA device for prepared test shadow");
+  cudaEvent_t completion_event = nullptr;
+  try {
+    check_cuda(cudaEventCreateWithFlags(
+      &completion_event, cudaEventDisableTiming
+    ), "create prepared test shadow completion event");
+    auto download = [&](double* destination, const double* source,
+                        std::size_t count, const char* name) {
+      check_cuda(cudaMemcpyAsync(
+        destination, source,
+        allocation_bytes(count, sizeof(double), name),
+        cudaMemcpyDeviceToHost, context->stream
+      ), name);
+    };
+    download(shadow.X_null.data(), handle->d_X_null, x_null_count,
+             "download prepared test shadow X_null");
+    download(shadow.gram.data(), handle->d_gram, gram_count,
+             "download prepared test shadow Gram");
+    download(shadow.projected_penalties.data(),
+             handle->d_projected_penalties, projected_count,
+             "download prepared test shadow projected penalties");
+    check_cuda(cudaEventRecord(completion_event, context->stream),
+               "record prepared test shadow completion");
+    check_cuda(cudaEventSynchronize(completion_event),
+               "wait for prepared test shadow completion");
+    check_cuda(cudaEventDestroy(completion_event),
+               "destroy prepared test shadow completion event");
+    completion_event = nullptr;
+  } catch (...) {
+    if (completion_event != nullptr) cudaEventDestroy(completion_event);
+    throw;
+  }
+  return shadow;
+}
+
 const char* fixed_sp_status_name(FixedSpStatus status) {
   switch (status) {
     case FixedSpStatus::OkCholeskyBatched: return "OK_CHOLESKY_BATCHED";

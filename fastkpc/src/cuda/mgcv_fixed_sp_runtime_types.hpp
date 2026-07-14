@@ -99,6 +99,15 @@ struct PreparedSInfo {
   bool output_slot_leased = false;
 };
 
+struct PreparedSStaticShadow {
+  int n = 0;
+  int null_dim = 0;
+  int penalty_count = 0;
+  std::vector<double> X_null;
+  std::vector<double> gram;
+  std::vector<double> projected_penalties;
+};
+
 const char* fixed_sp_status_name(FixedSpStatus status);
 const char* fixed_sp_route_name(FixedSpRoute route);
 

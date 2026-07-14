@@ -25,6 +25,8 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
 PreparedSInfo prepared_s_gpu_info(
   const std::shared_ptr<PreparedSGpuHandle>& handle);
 void free_prepared_s_gpu(std::shared_ptr<PreparedSGpuHandle>* handle);
+PreparedSStaticShadow test_prepared_s_static_shadow(
+  const std::shared_ptr<PreparedSGpuHandle>& handle);
 
 }  // namespace fastkpc
 
