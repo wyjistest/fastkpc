@@ -194,7 +194,7 @@ struct FixedSpShadowResult {
   std::vector<double> fitted;
   std::vector<double> residuals;
   std::vector<double> rss;
-  std::vector<double> rhs;
+  std::vector<double> cuda_nullspace_rhs;
 };
 
 const char* fixed_sp_status_name(FixedSpStatus status);

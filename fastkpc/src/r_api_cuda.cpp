@@ -3949,8 +3949,8 @@ extern "C" SEXP C_fixed_sp_cuda_materialize_shadow(
   }
   if ((output_mask & fastkpc::FixedSpOutputRhs) != 0U) {
     result.push_back(matrix_from_shadow(
-      shadow.rhs, shadow.null_dim, "RHS"
-    ), "rhs");
+      shadow.cuda_nullspace_rhs, shadow.null_dim, "RHS"
+    ), "cuda_nullspace_rhs");
   }
   return result;
   END_RCPP

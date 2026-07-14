@@ -1739,7 +1739,7 @@ FixedSpShadowResult materialize_fixed_sp_shadow(
     result.rss.resize(targets);
   }
   if ((output_mask & FixedSpOutputRhs) != 0U) {
-    result.rhs.resize(checked_multiply(
+    result.cuda_nullspace_rhs.resize(checked_multiply(
       static_cast<std::size_t>(result.null_dim), targets,
       "fixed-sp RHS shadow"));
   }
@@ -1797,7 +1797,7 @@ FixedSpShadowResult materialize_fixed_sp_shadow(
     }
     if ((output_mask & FixedSpOutputRhs) != 0U) {
       download_column(
-        result.rhs.data(), token->slot->rhs,
+        result.cuda_nullspace_rhs.data(), token->slot->rhs,
         static_cast<std::size_t>(result.null_dim), target,
         "download fixed-sp RHS shadow");
     }

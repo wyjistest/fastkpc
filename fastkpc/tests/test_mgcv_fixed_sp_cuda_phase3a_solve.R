@@ -217,6 +217,9 @@ assert_error(
 )
 
 task7_outputs <- c("coefficients", "fitted", "residuals", "rss", "rhs")
+task7_result_names <- c(
+  "coefficients", "fitted", "residuals", "rss", "cuda_nullspace_rhs"
+)
 materializer_available <- exists(
   "fixed_sp_cuda_materialize_shadow", mode = "function", inherits = TRUE
 )
@@ -275,13 +278,14 @@ safe_shadow <- fixed_sp_cuda_materialize_shadow(
   safe_token, outputs = task7_outputs
 )
 assert_true(
-  identical(names(safe_shadow), task7_outputs) &&
+  identical(names(safe_shadow), task7_result_names) &&
     identical(dim(safe_shadow$coefficients),
               c(stable_dto$coefficient_dim, 1L)) &&
     identical(dim(safe_shadow$fitted), c(stable_dto$n, 1L)) &&
     identical(dim(safe_shadow$residuals), c(stable_dto$n, 1L)) &&
     identical(length(safe_shadow$rss), 1L) &&
-    identical(dim(safe_shadow$rhs), c(stable_dto$null_dim, 1L)) &&
+    identical(dim(safe_shadow$cuda_nullspace_rhs),
+              c(stable_dto$null_dim, 1L)) &&
     all(vapply(safe_shadow, function(value) all(is.finite(value)), logical(1L))),
   "safe shadow materializes finite requested outputs with canonical shapes"
 )
@@ -304,7 +308,7 @@ residual_relative_l2 <- relative_l2_error(
 rss_max_abs <- max_abs_error(safe_shadow$rss, safe_oracle$rss)
 rss_relative_l2 <- relative_l2_error(safe_shadow$rss, safe_oracle$rss)
 rhs_max_abs <- max_abs_error(
-  safe_shadow$rhs, safe_batch$oracle_nullspace_rhs
+  safe_shadow$cuda_nullspace_rhs, safe_batch$oracle_nullspace_rhs
 )
 assert_true(
   coefficient_max_abs < 1e-7 && coefficient_relative_l2 < 1e-7 &&
@@ -317,9 +321,9 @@ assert_true(rhs_max_abs < 1e-12,
             "CUDA X_null transpose Y matches the authenticated RHS oracle")
 
 safe_info_after_shadow <- fixed_sp_cuda_residual_info(safe_token)
-expected_safe_d2h_bytes <- 8 * (
-  stable_dto$coefficient_dim + 2 * stable_dto$n + 1L + stable_dto$null_dim
-)
+expected_safe_d2h_bytes <- 8 * sum(vapply(
+  safe_shadow[task7_result_names], length, integer(1L)
+))
 assert_true(
   safe_info_after_shadow$shadow_materialize_call_count == 1L &&
     safe_info_after_shadow$shadow_materialize_target_count == 1L &&
@@ -359,13 +363,13 @@ stable_after_safe_shadow <- fixed_sp_cuda_materialize_shadow(
 )
 stable_after_safe_info <- fixed_sp_cuda_residual_info(stable_after_safe_token)
 assert_true(
-  identical(names(stable_after_safe_shadow), task7_outputs) &&
+  identical(names(stable_after_safe_shadow), task7_result_names) &&
     identical(dim(stable_after_safe_shadow$coefficients),
               c(stable_dto$coefficient_dim, 1L)) &&
     identical(dim(stable_after_safe_shadow$fitted), c(stable_dto$n, 1L)) &&
     identical(dim(stable_after_safe_shadow$residuals), c(stable_dto$n, 1L)) &&
     identical(length(stable_after_safe_shadow$rss), 1L) &&
-    identical(dim(stable_after_safe_shadow$rhs),
+    identical(dim(stable_after_safe_shadow$cuda_nullspace_rhs),
               c(stable_dto$null_dim, 1L)) &&
     all(vapply(stable_after_safe_shadow, function(value) {
       all(is.na(value))
