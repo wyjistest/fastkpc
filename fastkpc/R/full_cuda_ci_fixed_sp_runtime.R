@@ -1568,11 +1568,13 @@ fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity <- function(
   )
 }
 
+fastkpc_full_cuda_fixed_sp_phase3a_prototype_payload_fields <- function() {
+  c("target_key", "X", "y", "Z", "XtX_null", "penalty_null", "Xty_null")
+}
+
 fastkpc_full_cuda_fixed_sp_phase3a_prototype_payload_identity <- function(
     prototype) {
-  fields <- c(
-    "target_key", "X", "y", "Z", "XtX_null", "penalty_null", "Xty_null"
-  )
+  fields <- fastkpc_full_cuda_fixed_sp_phase3a_prototype_payload_fields()
   payload_ok <- is.list(prototype) && identical(names(prototype), fields) &&
     is.character(prototype$target_key) && length(prototype$target_key) == 1L &&
     !is.na(prototype$target_key) &&
@@ -1583,9 +1585,95 @@ fastkpc_full_cuda_fixed_sp_phase3a_prototype_payload_identity <- function(
   if (!isTRUE(payload_ok)) {
     stop("Phase 3A prototype payload is malformed", call. = FALSE)
   }
+  field_hashes <- vapply(prototype[fields[-1L]],
+                         fastkpc_full_cuda_census_metadata_hash,
+                         character(1L))
+  names(field_hashes) <- paste0(fields[-1L], "_hash")
+  c(
+    list(target_key = prototype$target_key),
+    as.list(field_hashes),
+    list(payload_hash = fastkpc_full_cuda_census_named_metadata_hash(prototype))
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_phase3a_prototype_expected_identity <- function(
+    dto, target_key, target_row, y, sp, canonical_nullspace_rhs,
+    planned_route) {
+  if (!is.character(target_key) || length(target_key) != 1L ||
+      is.na(target_key) || !grepl("^[0-9a-f]{64}$", target_key) ||
+      !is.data.frame(target_row) || nrow(target_row) != 1L ||
+      !"residual_key_sha256" %in% names(target_row) ||
+      !identical(as.character(target_row$residual_key_sha256[[1L]]), target_key) ||
+      !is.character(planned_route) || length(planned_route) != 1L ||
+      !planned_route %in% fastkpc_full_cuda_fixed_sp_contract()$route_levels ||
+      !is.numeric(y) || !is.numeric(sp) ||
+      !is.numeric(canonical_nullspace_rhs) || any(!is.finite(y)) ||
+      any(!is.finite(sp)) || any(sp < 0) ||
+      any(!is.finite(canonical_nullspace_rhs)) ||
+      !is.character(dto$prepared_s_key_sha256) ||
+      length(dto$prepared_s_key_sha256) != 1L ||
+      !grepl("^[0-9a-f]{64}$", dto$prepared_s_key_sha256)) {
+    stop("Phase 3A prototype expected source is malformed", call. = FALSE)
+  }
+  # Keep this derivation independent from the timed prototype payload.
+  Z <- if (identical(dto$constraint_mode, "identity")) {
+    diag(dto$coefficient_dim)
+  } else {
+    dto$constraint_nullspace
+  }
+  X_null <- if (identical(dto$constraint_mode, "identity")) {
+    dto$X
+  } else {
+    dto$X %*% Z
+  }
+  XtX_null <- if (identical(dto$constraint_mode, "identity")) {
+    dto$gram_matrix
+  } else {
+    dto$nullspace_gram_matrix
+  }
+  penalty_null <- matrix(0, dto$null_dim, dto$null_dim)
+  for (index in seq_len(dto$penalty_count)) {
+    full_penalty <- matrix(0, dto$coefficient_dim, dto$coefficient_dim)
+    block <- dto$penalty_blocks[[index]]
+    block_indices <- dto$penalty_offsets_zero_based[[index]] +
+      seq_len(nrow(block))
+    full_penalty[block_indices, block_indices] <- block
+    projected <- if (identical(dto$constraint_mode, "identity")) {
+      full_penalty
+    } else {
+      crossprod(Z, full_penalty %*% Z)
+    }
+    penalty_null <- penalty_null + as.numeric(sp[[index]]) * projected
+  }
+  expected_payload <- list(
+    target_key = target_key,
+    X = dto$X,
+    y = as.numeric(y),
+    Z = Z,
+    XtX_null = XtX_null,
+    penalty_null = penalty_null,
+    Xty_null = as.numeric(canonical_nullspace_rhs)
+  )
+  expected_payload_identity <-
+    fastkpc_full_cuda_fixed_sp_phase3a_prototype_payload_identity(
+      expected_payload
+    )
   list(
-    target_key = prototype$target_key,
-    payload_hash = fastkpc_full_cuda_census_named_metadata_hash(prototype)
+    payload = expected_payload_identity,
+    source = list(
+      target_key = target_key,
+      target_row_hash =
+        fastkpc_full_cuda_census_named_metadata_hash(as.list(target_row)),
+      prepared_setup_hash = fastkpc_full_cuda_census_named_metadata_hash(dto),
+      prepared_s_key_sha256 = dto$prepared_s_key_sha256,
+      canonical_y_hash = fastkpc_full_cuda_census_metadata_hash(as.numeric(y)),
+      selected_sp_hash = fastkpc_full_cuda_census_metadata_hash(as.numeric(sp)),
+      canonical_nullspace_rhs_hash =
+        fastkpc_full_cuda_census_metadata_hash(
+          as.numeric(canonical_nullspace_rhs)
+        ),
+      planned_route = planned_route
+    )
   )
 }
 
@@ -1608,9 +1696,26 @@ fastkpc_full_cuda_fixed_sp_phase3a_prototype_benchmark_identity <- function(
     }
     descriptor$prototype_expected
   })
+  expected_payload <- lapply(expected, `[[`, "payload")
+  expected_source <- lapply(expected, `[[`, "source")
   actual_keys <- vapply(actual, `[[`, character(1L), "target_key")
   actual_hashes <- vapply(actual, `[[`, character(1L), "payload_hash")
-  if (!identical(actual, expected) ||
+  source_matches_native <- vapply(seq_along(descriptors), function(index) {
+    native <- descriptors[[index]]$native
+    source <- expected_source[[index]]
+    is.list(native) && is.list(source) &&
+      identical(source$target_key, native$target_keys) &&
+      identical(
+        source$canonical_y_hash,
+        fastkpc_full_cuda_census_metadata_hash(as.numeric(native$Y))
+      ) &&
+      identical(
+        source$selected_sp_hash,
+        fastkpc_full_cuda_census_metadata_hash(as.numeric(native$SP))
+      ) &&
+      identical(source$planned_route, native$planned_route)
+  }, logical(1L))
+  if (!identical(actual, expected_payload) || !all(source_matches_native) ||
       !identical(actual_keys, key_identity$ordered_target_keys)) {
     stop("Phase 3A prototype payload identity mismatch", call. = FALSE)
   }
@@ -1942,7 +2047,17 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
       )
       if (identical(target$planned_route, "CHOLESKY_BATCHED")) {
         safe_descriptor_inputs[[length(safe_descriptor_inputs) + 1L]] <-
-          list(handle = handle, native = target, dto = dto)
+          list(
+            handle = handle,
+            native = target,
+            dto = dto,
+            canonical_target_row = batch$target_rows[
+              target_index, , drop = FALSE
+            ],
+            canonical_nullspace_rhs = as.numeric(
+              batch$oracle_nullspace_rhs[, target_index]
+            )
+          )
       }
     }
     prepared_rows[[setup_index]]$output_slot_leased_at_end <-
@@ -1958,6 +2073,16 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
 
   safe_descriptors <- list()
   for (descriptor in safe_descriptor_inputs) {
+    prototype_expected <-
+      fastkpc_full_cuda_fixed_sp_phase3a_prototype_expected_identity(
+        dto = descriptor$dto,
+        target_key = descriptor$native$target_keys,
+        target_row = descriptor$canonical_target_row,
+        y = descriptor$native$Y[, 1L],
+        sp = descriptor$native$SP[, 1L],
+        canonical_nullspace_rhs = descriptor$canonical_nullspace_rhs,
+        planned_route = descriptor$native$planned_route
+      )
     prototype <- fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle(
       descriptor$dto, descriptor$native$Y[, 1L], descriptor$native$SP[, 1L]
     )
@@ -1966,8 +2091,7 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
       handle = descriptor$handle,
       native = descriptor$native,
       prototype = prototype,
-      prototype_expected =
-        fastkpc_full_cuda_fixed_sp_phase3a_prototype_payload_identity(prototype)
+      prototype_expected = prototype_expected
     )
   }
   persistent_descriptors <- lapply(safe_descriptors, function(descriptor) {

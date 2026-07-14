@@ -154,28 +154,104 @@ safe_keys <- good_records$residual_key_sha256[parity$safe]
 safe_descriptors <- lapply(safe_keys, function(key) {
   list(native = list(target_keys = key))
 })
-prototype_payloads <- lapply(seq_along(safe_keys), function(index) {
-  value <- as.numeric(index)
-  list(
-    target_key = safe_keys[[index]],
-    X = matrix(c(value, value + 1), nrow = 2L),
-    y = c(value + 2, value + 3),
-    Z = diag(2L),
-    XtX_null = diag(c(value + 4, value + 5)),
-    penalty_null = diag(c(value + 6, value + 7)),
-    Xty_null = c(value + 8, value + 9)
-  )
+prototype_dto <- list(
+  prepared_s_key_sha256 = sprintf("%064x", 1L),
+  X = matrix(c(1, 2, 3, 4), nrow = 2L),
+  constraint_mode = "identity",
+  coefficient_dim = 2L,
+  null_dim = 2L,
+  gram_matrix = crossprod(matrix(c(1, 2, 3, 4), nrow = 2L)),
+  nullspace_gram_matrix = NULL,
+  penalty_count = 1L,
+  penalty_blocks = list(diag(2L)),
+  penalty_offsets_zero_based = list(0L),
+  penalty_sp_labels = "sp1"
+)
+canonical_y <- lapply(seq_along(safe_keys), function(index) {
+  c(as.numeric(index), as.numeric(index + 1L))
 })
-prototype_descriptors <- Map(function(native, prototype) {
-  list(
-    native = native$native,
-    prototype = prototype,
-    prototype_expected = list(
-      target_key = prototype$target_key,
-      payload_hash = fastkpc_full_cuda_census_named_metadata_hash(prototype)
+canonical_sp <- lapply(seq_along(safe_keys), function(index) {
+  as.numeric(index)
+})
+canonical_rhs <- lapply(canonical_y, function(y) {
+  as.numeric(crossprod(prototype_dto$X, y))
+})
+canonical_target_rows <- Map(function(key, index) {
+  data.frame(
+    residual_key_sha256 = key,
+    target = as.integer(index),
+    stringsAsFactors = FALSE
+  )
+}, safe_keys, seq_along(safe_keys))
+prototype_payloads <- Map(function(key, y, sp) {
+  c(
+    list(target_key = key),
+    fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle(
+      prototype_dto, y, sp
     )
   )
-}, safe_descriptors, prototype_payloads)
+}, safe_keys, canonical_y, canonical_sp)
+prototype_descriptors <- Map(function(native, prototype, key, target_row,
+                                    y, sp, rhs) {
+  list(
+    native = c(
+      native$native,
+      list(
+        Y = matrix(y, ncol = 1L),
+        SP = matrix(sp, ncol = 1L),
+        planned_route = "CHOLESKY_BATCHED"
+      )
+    ),
+    prototype = prototype,
+    prototype_expected =
+      fastkpc_full_cuda_fixed_sp_phase3a_prototype_expected_identity(
+        dto = prototype_dto,
+        target_key = key,
+        target_row = target_row,
+        y = y,
+        sp = sp,
+        canonical_nullspace_rhs = rhs,
+        planned_route = "CHOLESKY_BATCHED"
+      )
+  )
+}, safe_descriptors, prototype_payloads, safe_keys, canonical_target_rows,
+   canonical_y, canonical_sp, canonical_rhs)
+all_copied_actual_descriptors <- prototype_descriptors
+for (index in seq_along(all_copied_actual_descriptors)) {
+  all_copied_actual_descriptors[[index]]$prototype <- prototype_payloads[[1L]]
+}
+expect_error_contains(
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
+    safe_descriptors, all_copied_actual_descriptors, safe_keys
+  ),
+  "Phase 3A prototype payload identity mismatch"
+)
+wrong_y_descriptors <- prototype_descriptors
+wrong_y_descriptors[[1L]]$prototype <- c(
+  list(target_key = safe_keys[[1L]]),
+  fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle(
+    prototype_dto, canonical_y[[2L]], canonical_sp[[1L]]
+  )
+)
+expect_error_contains(
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
+    safe_descriptors, wrong_y_descriptors, safe_keys
+  ),
+  "Phase 3A prototype payload identity mismatch"
+)
+wrong_sp_descriptors <- prototype_descriptors
+wrong_sp_descriptors[[1L]]$prototype <- c(
+  list(target_key = safe_keys[[1L]]),
+  fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle(
+    prototype_dto, canonical_y[[1L]], canonical_sp[[2L]]
+  )
+)
+expect_error_contains(
+  fastkpc_full_cuda_fixed_sp_phase3a_benchmark_path_identities(
+    safe_descriptors, wrong_sp_descriptors, safe_keys
+  ),
+  "Phase 3A prototype payload identity mismatch"
+)
 benchmark_identity <-
   fastkpc_full_cuda_fixed_sp_phase3a_benchmark_identity(
     safe_descriptors, safe_keys
@@ -216,9 +292,9 @@ assert_true(
     identical(path_identities$prototype$benchmark_target_count, safe_count) &&
     identical(path_identities$prototype$ordered_target_keys, safe_keys) &&
     identical(path_identities$prototype$ordered_payload_hashes,
-              vapply(prototype_payloads,
-                     fastkpc_full_cuda_census_named_metadata_hash,
-                     character(1L))) &&
+              unname(vapply(prototype_payloads,
+                            fastkpc_full_cuda_census_named_metadata_hash,
+                            character(1L)))) &&
     identical(
       path_identities$prototype$payload_corpus_hash,
       fastkpc_full_cuda_census_key_set_hash(
@@ -297,10 +373,19 @@ warmup_position <- regexpr(
   "persistent_warmup <- run_persistent_corpus",
   runner_body, fixed = TRUE
 )[[1L]]
+expected_identity_position <- regexpr(
+  "prototype_expected <-", runner_body, fixed = TRUE
+)[[1L]]
+prototype_payload_position <- regexpr(
+  "prototype <- fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle",
+  runner_body, fixed = TRUE
+)[[1L]]
 assert_true(
   parity_position > 0L && benchmark_setup_position > parity_position &&
-    warmup_position > benchmark_setup_position,
-  "production parity validation precedes benchmark setup and warmup"
+    warmup_position > benchmark_setup_position &&
+    expected_identity_position > benchmark_setup_position &&
+    prototype_payload_position > expected_identity_position,
+  "production authenticates canonical prototype inputs before payload construction"
 )
 
 cat("PASS Phase 3A iteration helper contracts\n")
