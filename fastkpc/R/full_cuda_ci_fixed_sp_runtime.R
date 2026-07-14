@@ -1479,6 +1479,47 @@ fastkpc_full_cuda_fixed_sp_phase3a_counter_delta <- function(
   delta
 }
 
+fastkpc_full_cuda_fixed_sp_phase3a_relative_l2_diff <- function(
+    actual, reference) {
+  difference <- as.numeric(actual) - as.numeric(reference)
+  sqrt(sum(difference^2)) /
+    max(sqrt(sum(as.numeric(reference)^2)), 1e-300)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3a_validate_parity <- function(
+    target_records) {
+  error_fields <- c(
+    "residual_max_abs_diff", "residual_relative_l2_diff",
+    "fitted_max_abs_diff", "fitted_relative_l2_diff"
+  )
+  required_fields <- c("planned_route", "solver_status", error_fields)
+  parity_ok <- is.data.frame(target_records) &&
+    all(required_fields %in% names(target_records)) &&
+    nrow(target_records) == 270L
+  if (isTRUE(parity_ok)) {
+    parity_ok <- !anyNA(target_records$planned_route) &&
+      !anyNA(target_records$solver_status)
+  }
+  if (isTRUE(parity_ok)) {
+    safe <- target_records$planned_route == "CHOLESKY_BATCHED"
+    stable <- !safe
+    parity_ok <- sum(safe) == 172L && sum(stable) == 98L &&
+      all(target_records$solver_status[safe] == "OK_CHOLESKY_SINGLE") &&
+      all(target_records$solver_status[stable] ==
+          "ERR_STABLE_PATH_NOT_IMPLEMENTED") &&
+      all(vapply(error_fields, function(field) {
+        values <- target_records[[field]]
+        is.numeric(values) && all(is.finite(values[safe])) &&
+          all(values[safe] < 1e-7) && all(is.na(values[stable]))
+      }, logical(1L)))
+  }
+  if (!isTRUE(parity_ok)) {
+    stop("Phase 3A iteration status/numerical parity failed",
+         call. = FALSE)
+  }
+  list(safe = safe, stable = stable)
+}
+
 fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle <- function(
     dto, y, sp) {
   Z <- if (identical(dto$constraint_mode, "identity")) {
@@ -1609,11 +1650,6 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
   max_abs_diff <- function(actual, expected) {
     max(abs(as.numeric(actual) - as.numeric(expected)))
   }
-  relative_l2_diff <- function(actual, expected) {
-    difference <- as.numeric(actual) - as.numeric(expected)
-    sqrt(sum(difference^2)) /
-      max(sqrt(sum(as.numeric(expected)^2)), .Machine$double.xmin)
-  }
   run_checked_target <- function(handle, target, batch, target_index) {
     token <- fixed_sp_cuda_solve_batch(
       handle, target$Y, target$SP, target$planned_route,
@@ -1648,11 +1684,15 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
         )
       )
       residual_max_abs <- max_abs_diff(shadow$residuals, oracle$residuals)
-      residual_relative_l2 <- relative_l2_diff(
-        shadow$residuals, oracle$residuals
-      )
+      residual_relative_l2 <-
+        fastkpc_full_cuda_fixed_sp_phase3a_relative_l2_diff(
+          shadow$residuals, oracle$residuals
+        )
       fitted_max_abs <- max_abs_diff(shadow$fitted, oracle$fitted)
-      fitted_relative_l2 <- relative_l2_diff(shadow$fitted, oracle$fitted)
+      fitted_relative_l2 <-
+        fastkpc_full_cuda_fixed_sp_phase3a_relative_l2_diff(
+          shadow$fitted, oracle$fitted
+        )
     }
 
     fixed_sp_cuda_residual_release(token)
@@ -1722,7 +1762,6 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
   prepared_rows <- vector("list", length(setup_keys))
   target_rows <- vector("list", catalog_records$target_count[[1L]])
   target_row_index <- 0L
-  safe_descriptors <- list()
   for (setup_index in seq_along(setup_keys)) {
     setup_key <- setup_keys[[setup_index]]
     batch <- batches[[setup_key]]
@@ -1769,16 +1808,6 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
       target_rows[[target_row_index]] <- run_checked_target(
         handle, target, batch, target_index
       )
-      if (identical(target$planned_route, "CHOLESKY_BATCHED")) {
-        safe_descriptors[[length(safe_descriptors) + 1L]] <- list(
-          handle = handle,
-          native = target,
-          prototype =
-            fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle(
-              dto, target$Y[, 1L], target$SP[, 1L]
-            )
-        )
-      }
     }
     prepared_rows[[setup_index]]$output_slot_leased_at_end <-
       isTRUE(fixed_sp_cuda_prepared_info(handle)$output_slot_leased)
@@ -1787,6 +1816,33 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
   rownames(prepared_records) <- NULL
   target_records <- do.call(rbind, target_rows)
   rownames(target_records) <- NULL
+  parity <- fastkpc_full_cuda_fixed_sp_phase3a_validate_parity(target_records)
+  safe <- parity$safe
+  stable <- parity$stable
+
+  safe_descriptors <- list()
+  for (setup_key in setup_keys) {
+    batch <- batches[[setup_key]]
+    dto <- dtos[[setup_key]]
+    native_batch <- fastkpc_full_cuda_fixed_sp_native_batch(batch, dto)
+    safe_indices <- which(native_batch$planned_route == "CHOLESKY_BATCHED")
+    for (target_index in safe_indices) {
+      target <- list(
+        Y = native_batch$Y[, target_index, drop = FALSE],
+        SP = native_batch$SP[, target_index, drop = FALSE],
+        planned_route = native_batch$planned_route[[target_index]],
+        target_keys = native_batch$target_keys[[target_index]],
+        target_count = 1L
+      )
+      safe_descriptors[[length(safe_descriptors) + 1L]] <- list(
+        handle = handles[[setup_key]],
+        native = target,
+        prototype = fastkpc_full_cuda_fixed_sp_phase3a_prototype_handle(
+          dto, target$Y[, 1L], target$SP[, 1L]
+        )
+      )
+    }
+  }
 
   timed_persistent_solve <- function(descriptor) {
     .Call(
@@ -1952,8 +2008,6 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
     )
   )
 
-  safe <- target_records$planned_route == "CHOLESKY_BATCHED"
-  stable <- !safe
   summary <- list(
     catalog_open_count = as.integer(nrow(catalog_records)),
     setup_count = as.integer(nrow(prepared_records)),
