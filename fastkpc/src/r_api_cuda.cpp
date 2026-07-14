@@ -3863,6 +3863,7 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
   result["output_slot_busy_count"] = info.output_slot_busy_count;
   result["stale_token_reject_count"] = info.stale_token_reject_count;
   result["invalid_output_init_count"] = info.invalid_output_init_count;
+  result["nonfinite_output_count"] = info.nonfinite_output_count;
   result["cpu_fallback_count"] = info.cpu_fallback_count;
   result["unknown_fallback_count"] = info.unknown_fallback_count;
   result["per_target_allocation_count_after_warmup"] =

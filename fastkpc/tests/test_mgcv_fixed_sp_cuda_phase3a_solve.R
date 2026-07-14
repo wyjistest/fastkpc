@@ -163,9 +163,9 @@ on.exit(try(fixed_sp_cuda_prepared_free(explicit_handle), silent = TRUE),
         add = TRUE)
 
 explicit_token <- fixed_sp_cuda_solve_batch(
-  explicit_handle, stable_native_batch$Y, stable_native_batch$SP,
-  stable_native_batch$planned_route, stable_native_batch$target_keys,
-  outputs = c("coefficients")
+  explicit_handle, safe_native_batch$Y, safe_native_batch$SP,
+  safe_native_batch$planned_route, safe_native_batch$target_keys,
+  outputs = c("coefficients", "rhs")
 )
 on.exit(try(fixed_sp_cuda_residual_free(explicit_token), silent = TRUE),
         add = TRUE)
@@ -178,23 +178,40 @@ assert_true(
               as.double(stable_dto$coefficient_dim)),
   "coefficient diagnostics retain the full-space p allocation bound"
 )
-explicit_coefficients <- .Call(
-  "C_fixed_sp_cuda_test_coefficient_shadow", explicit_token,
-  PACKAGE = "fastkpc_cuda"
+explicit_shadow <- fixed_sp_cuda_materialize_shadow(
+  explicit_token, outputs = c("coefficients", "rhs")
 )
+explicit_system <- explicit_dto$nullspace_gram_matrix
+for (index in seq_len(explicit_dto$penalty_count)) {
+  full_penalty <- matrix(
+    0, explicit_dto$coefficient_dim, explicit_dto$coefficient_dim
+  )
+  block <- explicit_dto$penalty_blocks[[index]]
+  block_indices <- explicit_dto$penalty_offsets_zero_based[[index]] +
+    seq_len(nrow(block))
+  full_penalty[block_indices, block_indices] <- block
+  explicit_system <- explicit_system +
+    safe_native_batch$SP[index, 1L] *
+      crossprod(explicit_Z, full_penalty %*% explicit_Z)
+}
+explicit_rhs <- crossprod(explicit_X_null, safe_native_batch$Y[, 1L])
+explicit_theta <- solve(explicit_system, explicit_rhs)
+expected_explicit_coefficients <- explicit_Z %*% explicit_theta
 assert_true(
-  identical(dim(explicit_coefficients),
+  identical(dim(explicit_shadow$coefficients),
             c(stable_dto$coefficient_dim, 1L)) &&
-    length(explicit_coefficients) == stable_dto$coefficient_dim &&
-    identical(as.vector(explicit_coefficients),
-              rep(NaN, stable_dto$coefficient_dim)),
-  "coefficient shadow reads p by one initialized NaN values"
+    identical(dim(explicit_shadow$cuda_nullspace_rhs), c(explicit_q, 1L)) &&
+    max_abs_error(explicit_shadow$cuda_nullspace_rhs, explicit_rhs) < 1e-12 &&
+    max_abs_error(explicit_shadow$coefficients,
+                  expected_explicit_coefficients) < 1e-7,
+  "safe explicit-Z solve expands theta into full-space coefficients"
 )
 assert_true(
-  identical(explicit_info$solver_status,
-            "ERR_STABLE_PATH_NOT_IMPLEMENTED") &&
+  identical(explicit_info$planned_route, "CHOLESKY_BATCHED") &&
+    identical(explicit_info$executed_route, "CHOLESKY_BATCHED") &&
+    identical(explicit_info$solver_status, "OK_CHOLESKY_SINGLE") &&
     explicit_info$invalid_output_init_count == 1L,
-  "explicit-Z coefficient request fails closed after one initialization"
+  "explicit-Z coefficient request executes the safe Cholesky route"
 )
 fixed_sp_cuda_residual_release(explicit_token)
 fixed_sp_cuda_residual_free(explicit_token)

@@ -319,6 +319,63 @@ __global__ void build_fixed_sp_residual_and_rss(
   if (threadIdx.x == 0U && write_rss) *rss = sums[0];
 }
 
+__global__ void check_fixed_sp_outputs_finite(
+    const double* rhs,
+    const double* theta,
+    const double* coefficients,
+    const double* fitted,
+    const double* residuals,
+    const double* rss,
+    int n,
+    int p,
+    int q,
+    int target_count,
+    std::uint32_t output_mask,
+    int* finite_status) {
+  const int target =
+    static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) +
+    static_cast<int>(threadIdx.x);
+  if (target >= target_count) return;
+
+  bool finite = true;
+  const std::size_t target_offset = static_cast<std::size_t>(target);
+  const double* target_rhs = rhs + static_cast<std::size_t>(q) * target_offset;
+  const double* target_theta =
+    theta + static_cast<std::size_t>(q) * target_offset;
+  for (int row = 0; row < q; ++row) {
+    finite = finite && isfinite(target_rhs[row]) && isfinite(target_theta[row]);
+  }
+  if ((output_mask & FixedSpOutputCoefficients) != 0U) {
+    const double* target_coefficients =
+      coefficients + static_cast<std::size_t>(p) * target_offset;
+    for (int row = 0; row < p; ++row) {
+      finite = finite && isfinite(target_coefficients[row]);
+    }
+  }
+  const bool fitted_computed =
+    (output_mask & (FixedSpOutputFitted |
+                    FixedSpOutputResiduals |
+                    FixedSpOutputRss)) != 0U;
+  if (fitted_computed) {
+    const double* target_fitted =
+      fitted + static_cast<std::size_t>(n) * target_offset;
+    for (int row = 0; row < n; ++row) {
+      finite = finite && isfinite(target_fitted[row]);
+    }
+  }
+  if ((output_mask & FixedSpOutputResiduals) != 0U) {
+    const double* target_residuals =
+      residuals + static_cast<std::size_t>(n) * target_offset;
+    for (int row = 0; row < n; ++row) {
+      finite = finite && isfinite(target_residuals[row]);
+    }
+  }
+  if ((output_mask & FixedSpOutputRss) != 0U) {
+    finite = finite && isfinite(rss[target_offset]);
+  }
+  finite_status[target_offset] = finite ? 0 : 1;
+}
+
 }  // namespace
 
 class CudaRuntimeContext {
@@ -378,6 +435,8 @@ struct TransientResidualSlot {
       cudaEventDestroy(solve_completion_event);
       solve_completion_event = nullptr;
     }
+    cudaFreeHost(host_finite_status);
+    host_finite_status = nullptr;
     cudaFree(rss);
     rss = nullptr;
     cudaFree(rhs);
@@ -393,6 +452,7 @@ struct TransientResidualSlot {
 
   int device_id = -1;
   int target_capacity = 0;
+  std::size_t finite_status_capacity = 0;
   std::size_t coefficient_capacity = 0;
   std::size_t rhs_capacity = 0;
   double* coefficients = nullptr;
@@ -400,6 +460,7 @@ struct TransientResidualSlot {
   double* residuals = nullptr;
   double* rss = nullptr;
   double* rhs = nullptr;
+  int* host_finite_status = nullptr;
   cudaEvent_t solve_completion_event = nullptr;
   cudaEvent_t consumer_completion_event = nullptr;
   std::uint64_t generation = 0;
@@ -484,6 +545,7 @@ class DeviceResidualBatch {
   std::vector<std::string> reroute_reasons;
   std::vector<FixedSpStatus> solver_statuses;
   DeviceResidualInfo diagnostics;
+  bool output_status_resolved = false;
   bool lease_released = false;
   bool freed = false;
 };
@@ -600,6 +662,45 @@ void increment_active_slot_busy(TransientResidualSlot* slot) {
   if (std::shared_ptr<DeviceResidualBatch> owner = slot->lease_owner.lock()) {
     owner->diagnostics.output_slot_busy_count += 1;
   }
+}
+
+bool fixed_sp_status_is_successful(FixedSpStatus status) {
+  return status == FixedSpStatus::OkCholeskyBatched ||
+    status == FixedSpStatus::OkCholeskySingle ||
+    status == FixedSpStatus::OkAugmentedQr ||
+    status == FixedSpStatus::OkAugmentedSvd;
+}
+
+void resolve_fixed_sp_output_status_locked(
+    DeviceResidualBatch* token,
+    CudaRuntimeContext* context) {
+  if (token == nullptr || token->output_status_resolved) return;
+  if (context == nullptr || !token->slot ||
+      token->slot_generation != token->slot->generation ||
+      token->slot->solve_completion_event == nullptr ||
+      token->slot->host_finite_status == nullptr ||
+      static_cast<std::size_t>(token->target_count) >
+        token->slot->finite_status_capacity) {
+    throw std::runtime_error(
+      "STALE_TOKEN: fixed-sp output status storage mismatch");
+  }
+
+  check_cuda(cudaSetDevice(context->device_id),
+             "set CUDA device for fixed-sp output status");
+  check_cuda(cudaEventSynchronize(token->slot->solve_completion_event),
+             "wait for fixed-sp output status");
+  for (int target = 0; target < token->target_count; ++target) {
+    const std::size_t target_offset = static_cast<std::size_t>(target);
+    if (fixed_sp_status_is_successful(
+          token->solver_statuses[target_offset]) &&
+        token->slot->host_finite_status[target_offset] != 0) {
+      token->solver_statuses[target_offset] =
+        FixedSpStatus::ErrNonfiniteOutput;
+      token->diagnostics.nonfinite_output_count += 1;
+    }
+  }
+  token->diagnostics.solver_statuses = token->solver_statuses;
+  token->output_status_resolved = true;
 }
 
 }  // namespace
@@ -1089,6 +1190,7 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
   handle->residual_slot = std::make_shared<TransientResidualSlot>();
   handle->residual_slot->device_id = context->device_id;
   handle->residual_slot->target_capacity = context->capacities.target_count;
+  handle->residual_slot->finite_status_capacity = target_capacity;
   handle->residual_slot->coefficient_capacity = coefficient_output_count;
   handle->residual_slot->rhs_capacity = rhs_output_count;
 
@@ -1147,6 +1249,11 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
       allocation_bytes(
         rhs_output_count, sizeof(double), "transient RHS slot")
     ), "allocate transient RHS slot");
+    check_cuda(cudaMallocHost(
+      &handle->residual_slot->host_finite_status,
+      allocation_bytes(
+        target_capacity, sizeof(int), "transient finite status slot")
+    ), "allocate transient finite status slot");
     check_cuda(cudaEventCreateWithFlags(
       &handle->residual_slot->solve_completion_event,
       cudaEventDisableTiming
@@ -1593,6 +1700,31 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       token->diagnostics.executed_cholesky_target_count += 1;
     }
 
+    const std::size_t finite_status_blocks =
+      (targets + threads - 1U) / threads;
+    if (finite_status_blocks == 0U ||
+        finite_status_blocks > std::numeric_limits<unsigned int>::max() ||
+        targets > slot->finite_status_capacity ||
+        slot->host_finite_status == nullptr) {
+      throw std::runtime_error("fixed-sp finite status capacity mismatch");
+    }
+    check_fixed_sp_outputs_finite<<<
+      static_cast<unsigned int>(finite_status_blocks), threads,
+      0, context->stream
+    >>>(
+      d_rhs, d_theta, slot->coefficients, slot->fitted,
+      slot->residuals, slot->rss, batch.n, handle->p, handle->q,
+      batch.target_count, batch.output_mask, context->int_arena);
+    check_cuda(cudaGetLastError(), "launch fixed-sp output finite check");
+
+    // Device flags use reserved context scratch. The pinned destination is
+    // handle-owned so another prepared handle cannot overwrite an unresolved
+    // token's compact status before observation.
+    check_cuda(cudaMemcpyAsync(
+      slot->host_finite_status, context->int_arena,
+      allocation_bytes(targets, sizeof(int), "fixed-sp finite status"),
+      cudaMemcpyDeviceToHost, context->stream
+    ), "copy fixed-sp finite status");
     check_cuda(cudaEventRecord(slot->solve_completion_event, context->stream),
                "record fixed-sp solve completion");
 
@@ -1627,6 +1759,7 @@ DeviceResidualInfo device_residual_info(
   }
   std::lock_guard<std::mutex> lock(context->mutex);
   context->require_usable();
+  resolve_fixed_sp_output_status_locked(token.get(), context.get());
   return token->diagnostics;
 }
 
@@ -1710,6 +1843,7 @@ FixedSpShadowResult materialize_fixed_sp_shadow(
     throw std::runtime_error(
       "fixed-sp shadow exceeds the prepared output slot capacity");
   }
+  resolve_fixed_sp_output_status_locked(token.get(), context.get());
 
   FixedSpShadowResult result;
   result.n = token->n;
@@ -1746,16 +1880,8 @@ FixedSpShadowResult materialize_fixed_sp_shadow(
 
   check_cuda(cudaSetDevice(context->device_id),
              "set CUDA device for fixed-sp shadow");
-  check_cuda(cudaEventSynchronize(token->slot->solve_completion_event),
-             "wait for fixed-sp shadow solve completion");
 
   std::size_t copied_bytes = 0U;
-  auto successful = [](FixedSpStatus status) {
-    return status == FixedSpStatus::OkCholeskyBatched ||
-      status == FixedSpStatus::OkCholeskySingle ||
-      status == FixedSpStatus::OkAugmentedQr ||
-      status == FixedSpStatus::OkAugmentedSvd;
-  };
   auto download_column = [&](double* destination,
                              const double* source,
                              std::size_t rows,
@@ -1770,7 +1896,7 @@ FixedSpShadowResult materialize_fixed_sp_shadow(
                                "fixed-sp shadow D2H diagnostics");
   };
   for (std::size_t target = 0; target < targets; ++target) {
-    if (!successful(token->solver_statuses[target])) continue;
+    if (!fixed_sp_status_is_successful(token->solver_statuses[target])) continue;
     result.successful_targets[target] = 1U;
     if ((output_mask & FixedSpOutputCoefficients) != 0U) {
       download_column(
@@ -1846,6 +1972,7 @@ void release_device_residual(
   context->require_usable();
   check_cuda(cudaSetDevice(context->device_id),
              "set CUDA device for residual release");
+  resolve_fixed_sp_output_status_locked(token.get(), context.get());
   if (token->slot->consumer_event_registered) {
     const cudaError_t query =
       cudaEventQuery(token->slot->consumer_completion_event);
@@ -1897,6 +2024,8 @@ void register_device_residual_consumer_event_impl(
     token->diagnostics.stale_token_reject_count += 1;
     throw std::runtime_error("STALE_TOKEN: residual slot generation mismatch");
   }
+  context->require_usable();
+  resolve_fixed_sp_output_status_locked(token.get(), context.get());
 
   token->slot->state =
     TransientResidualSlotState::ConsumerRegistrationPending;
@@ -1989,6 +2118,7 @@ DeviceCoefficientShadow test_device_residual_coefficient_shadow(
     throw std::runtime_error(
       "test coefficient shadow requires coefficient output");
   }
+  resolve_fixed_sp_output_status_locked(token.get(), context.get());
 
   DeviceCoefficientShadow shadow;
   shadow.coefficient_dim = token->owner->p;
@@ -2006,8 +2136,6 @@ DeviceCoefficientShadow test_device_residual_coefficient_shadow(
 
   check_cuda(cudaSetDevice(context->device_id),
              "set CUDA device for coefficient test shadow");
-  check_cuda(cudaEventSynchronize(token->slot->solve_completion_event),
-             "wait for coefficient test shadow solve completion");
   check_cuda(cudaMemcpy(
     shadow.coefficients.data(), token->slot->coefficients,
     allocation_bytes(count, sizeof(double), "test coefficient shadow"),

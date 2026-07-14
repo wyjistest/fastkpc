@@ -153,6 +153,7 @@ struct DeviceResidualInfo {
   int output_slot_busy_count = 0;
   int stale_token_reject_count = 0;
   int invalid_output_init_count = 0;
+  int nonfinite_output_count = 0;
   int cpu_fallback_count = 0;
   int unknown_fallback_count = 0;
   int per_target_allocation_count_after_warmup = 0;
