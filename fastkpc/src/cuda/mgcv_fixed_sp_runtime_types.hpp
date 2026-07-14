@@ -9,10 +9,22 @@
 namespace fastkpc {
 
 enum class FixedSpRoute : int {
+  Unset = -1,
   CholeskyBatched = 0,
   AugmentedQr = 1,
   AugmentedSvd = 2
 };
+
+enum FixedSpOutputMask : std::uint32_t {
+  FixedSpOutputCoefficients = 1U << 0,
+  FixedSpOutputFitted = 1U << 1,
+  FixedSpOutputResiduals = 1U << 2,
+  FixedSpOutputRss = 1U << 3
+};
+
+constexpr std::uint32_t kFixedSpPublicOutputMask =
+  FixedSpOutputCoefficients | FixedSpOutputFitted |
+  FixedSpOutputResiduals | FixedSpOutputRss;
 
 enum class FixedSpStatus : int {
   OkCholeskyBatched = 0,
@@ -97,6 +109,58 @@ struct PreparedSInfo {
   std::size_t setup_h2d_bytes = 0;
   std::uint64_t generation = 0;
   bool output_slot_leased = false;
+};
+
+struct FixedSpBatchHostView {
+  const double* Y = nullptr;
+  const double* SP = nullptr;
+  int n = 0;
+  int null_dim = 0;
+  int penalty_count = 0;
+  int target_count = 0;
+  std::uint32_t output_mask = 0;
+  std::vector<FixedSpRoute> planned_routes;
+  std::vector<std::string> target_keys;
+};
+
+struct DeviceResidualInfo {
+  int n = 0;
+  int target_count = 0;
+  std::vector<std::string> target_keys;
+  std::vector<FixedSpRoute> planned_routes;
+  std::vector<FixedSpRoute> executed_routes;
+  std::vector<std::string> reroute_reasons;
+  std::vector<FixedSpStatus> solver_statuses;
+  bool native_batch_call = false;
+  bool true_batched_kernel = false;
+  int true_batched_target_count = 0;
+  int stable_reroute_count = 0;
+  int planned_cholesky_target_count = 0;
+  int planned_qr_target_count = 0;
+  int planned_svd_target_count = 0;
+  int executed_cholesky_target_count = 0;
+  int executed_qr_target_count = 0;
+  int executed_svd_target_count = 0;
+  int cholesky_to_svd_count = 0;
+  int qr_to_svd_count = 0;
+  int output_slot_acquire_count = 0;
+  int output_slot_release_count = 0;
+  int output_slot_busy_count = 0;
+  int stale_token_reject_count = 0;
+  int invalid_output_init_count = 0;
+  int cpu_fallback_count = 0;
+  int unknown_fallback_count = 0;
+  int per_target_allocation_count_after_warmup = 0;
+  int per_target_handle_create_count = 0;
+  int implicit_residual_d2h_count = 0;
+  int rhs_device_build_count = 0;
+  std::string rhs_authority = "cuda-x0-transpose-y";
+  bool full_cuda_data_plane = true;
+  int shadow_materialize_call_count = 0;
+  int shadow_materialize_target_count = 0;
+  std::size_t shadow_d2h_bytes = 0;
+  std::uint64_t owner_generation = 0;
+  std::uint64_t slot_generation = 0;
 };
 
 struct PreparedSStaticShadow {

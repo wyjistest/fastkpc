@@ -14,6 +14,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace fastkpc {
@@ -241,6 +242,24 @@ void require_finite_derived(const std::vector<double>& values,
   }
 }
 
+__global__ void initialize_fixed_sp_outputs_invalid(
+    double* coefficients,
+    std::size_t coefficient_count,
+    double* fitted,
+    std::size_t fitted_count,
+    double* residuals,
+    std::size_t residual_count,
+    double* rss,
+    std::size_t rss_count) {
+  const std::size_t index =
+    static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const double invalid = __longlong_as_double(0x7ff8000000000000ULL);
+  if (index < coefficient_count) coefficients[index] = invalid;
+  if (index < fitted_count) fitted[index] = invalid;
+  if (index < residual_count) residuals[index] = invalid;
+  if (index < rss_count) rss[index] = invalid;
+}
+
 }  // namespace
 
 class CudaRuntimeContext {
@@ -319,6 +338,7 @@ struct TransientResidualSlot {
   cudaEvent_t consumer_completion_event = nullptr;
   std::uint64_t generation = 0;
   TransientResidualSlotState state = TransientResidualSlotState::Free;
+  std::weak_ptr<DeviceResidualBatch> lease_owner;
   bool consumer_event_registered = false;
   bool freed = false;
 };
@@ -357,6 +377,7 @@ class PreparedSGpuHandle {
   std::shared_ptr<CudaRuntimeContext> context;
   std::int64_t creator_pid = -1;
   int device_id = -1;
+  std::uint64_t context_generation = 0;
   std::uint64_t generation = 1;
   std::string prepared_s_key_sha256;
   int n = 0;
@@ -375,6 +396,139 @@ class PreparedSGpuHandle {
   bool registered_with_context = false;
   bool freed = false;
 };
+
+class DeviceResidualBatch {
+ public:
+  ~DeviceResidualBatch();
+  void cleanup_noexcept() noexcept;
+
+  std::shared_ptr<PreparedSGpuHandle> owner;
+  std::int64_t creator_pid = -1;
+  int device_id = -1;
+  std::uint64_t owner_generation = 0;
+  std::uint64_t slot_generation = 0;
+  int n = 0;
+  int target_count = 0;
+  std::uint32_t output_mask = 0;
+  std::vector<std::string> target_keys;
+  std::shared_ptr<TransientResidualSlot> slot;
+  std::vector<FixedSpRoute> planned_routes;
+  std::vector<FixedSpRoute> executed_routes;
+  std::vector<std::string> reroute_reasons;
+  std::vector<FixedSpStatus> solver_statuses;
+  DeviceResidualInfo diagnostics;
+  bool lease_released = false;
+  bool freed = false;
+};
+
+namespace {
+
+void validate_fixed_sp_batch(const PreparedSGpuHandle& handle,
+                             const CudaRuntimeContext& context,
+                             const FixedSpBatchHostView& batch) {
+  if (batch.Y == nullptr || batch.SP == nullptr) {
+    throw std::runtime_error("fixed-sp batch matrix pointers are null");
+  }
+  if (batch.n != handle.n || batch.null_dim != handle.q ||
+      batch.penalty_count != handle.penalty_count) {
+    throw std::runtime_error(
+      "fixed-sp batch dimensions do not match prepared handle");
+  }
+  if (batch.target_count <= 0 ||
+      batch.target_count > context.capacities.target_count) {
+    throw std::runtime_error(
+      "fixed-sp batch target count exceeds reserved capacity");
+  }
+  if (batch.output_mask == 0 ||
+      (batch.output_mask & ~kFixedSpPublicOutputMask) != 0) {
+    throw std::runtime_error("fixed-sp output mask is invalid");
+  }
+  const std::size_t targets = static_cast<std::size_t>(batch.target_count);
+  if (batch.planned_routes.size() != targets ||
+      batch.target_keys.size() != targets) {
+    throw std::runtime_error("fixed-sp batch metadata size mismatch");
+  }
+
+  std::unordered_set<std::string> unique_keys;
+  unique_keys.reserve(targets);
+  for (std::size_t index = 0; index < targets; ++index) {
+    const FixedSpRoute route = batch.planned_routes[index];
+    if (route != FixedSpRoute::CholeskyBatched &&
+        route != FixedSpRoute::AugmentedQr &&
+        route != FixedSpRoute::AugmentedSvd) {
+      throw std::runtime_error("fixed-sp planned route metadata is invalid");
+    }
+    const std::string& target_key = batch.target_keys[index];
+    const bool valid_target_key = target_key.size() == 64U &&
+      std::all_of(target_key.begin(), target_key.end(),
+                  [](unsigned char character) {
+        return (character >= '0' && character <= '9') ||
+          (character >= 'a' && character <= 'f');
+      });
+    if (!valid_target_key || !unique_keys.insert(target_key).second) {
+      throw std::runtime_error("fixed-sp target key metadata is invalid");
+    }
+  }
+
+  const std::size_t y_count = checked_multiply(
+    positive_size(batch.n, "fixed-sp batch row count"), targets,
+    "fixed-sp batch Y");
+  const std::size_t sp_count = checked_multiply(
+    positive_size(batch.penalty_count, "fixed-sp batch penalty count"),
+    targets, "fixed-sp batch SP");
+  for (std::size_t index = 0; index < y_count; ++index) {
+    if (!std::isfinite(batch.Y[index])) {
+      throw std::runtime_error("Y must be finite");
+    }
+  }
+  for (std::size_t index = 0; index < sp_count; ++index) {
+    if (!std::isfinite(batch.SP[index]) || batch.SP[index] < 0.0) {
+      throw std::runtime_error("SP must be finite and non-negative");
+    }
+  }
+}
+
+void increment_active_slot_busy(TransientResidualSlot* slot) {
+  if (slot == nullptr) return;
+  if (std::shared_ptr<DeviceResidualBatch> owner = slot->lease_owner.lock()) {
+    owner->diagnostics.output_slot_busy_count += 1;
+  }
+}
+
+}  // namespace
+
+DeviceResidualBatch::~DeviceResidualBatch() {
+  cleanup_noexcept();
+}
+
+void DeviceResidualBatch::cleanup_noexcept() noexcept {
+  if (freed || lease_released || !owner || !slot) return;
+  if (creator_pid != static_cast<std::int64_t>(getpid())) return;
+  const std::shared_ptr<CudaRuntimeContext> context = owner->context;
+  if (!context) return;
+  try {
+    std::lock_guard<std::mutex> lock(context->mutex);
+    context->require_usable();
+    if (owner_generation != owner->generation ||
+        slot_generation != slot->generation ||
+        slot->state != TransientResidualSlotState::Leased) {
+      return;
+    }
+    if (slot->consumer_event_registered) {
+      check_cuda(cudaSetDevice(context->device_id),
+                 "set CUDA device for residual token cleanup");
+      check_cuda(cudaEventSynchronize(slot->consumer_completion_event),
+                 "wait for residual consumer during token cleanup");
+      slot->consumer_event_registered = false;
+    }
+    slot->state = TransientResidualSlotState::Free;
+    slot->lease_owner.reset();
+    lease_released = true;
+    diagnostics.output_slot_release_count += 1;
+    freed = true;
+  } catch (...) {
+  }
+}
 
 CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
   if (requested_device < 0) {
@@ -793,6 +947,7 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
   handle->context = context;
   handle->creator_pid = context->creator_pid;
   handle->device_id = context->device_id;
+  handle->context_generation = context->generation;
   handle->prepared_s_key_sha256 = setup.prepared_s_key_sha256;
   handle->n = setup.n;
   handle->p = setup.coefficient_dim;
@@ -926,6 +1081,286 @@ void free_prepared_s_gpu(std::shared_ptr<PreparedSGpuHandle>* handle) {
   if (handle != nullptr) handle->reset();
 }
 
+std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
+    const std::shared_ptr<PreparedSGpuHandle>& handle,
+    const FixedSpBatchHostView& batch) {
+  if (!handle || handle->freed) {
+    throw std::runtime_error("fixed-sp CUDA prepared handle has been freed");
+  }
+  if (handle->creator_pid != static_cast<std::int64_t>(getpid())) {
+    throw std::runtime_error(
+      "fixed-sp CUDA prepared handle has a different creator PID");
+  }
+  const std::shared_ptr<CudaRuntimeContext> context = handle->context;
+  if (!context) {
+    throw std::runtime_error("fixed-sp CUDA prepared runtime has been freed");
+  }
+
+  std::lock_guard<std::mutex> lock(context->mutex);
+  context->require_usable();
+  if (handle->device_id != context->device_id ||
+      handle->context_generation != context->generation) {
+    throw std::runtime_error(
+      "fixed-sp CUDA prepared handle ownership mismatch");
+  }
+  validate_fixed_sp_batch(*handle, *context, batch);
+
+  const std::shared_ptr<TransientResidualSlot> slot = handle->residual_slot;
+  if (!slot || slot->freed) {
+    throw std::runtime_error("fixed-sp CUDA output slot is unavailable");
+  }
+  if (slot->state != TransientResidualSlotState::Free ||
+      slot->consumer_event_registered) {
+    increment_active_slot_busy(slot.get());
+    throw std::runtime_error("ERR_OUTPUT_SLOT_BUSY");
+  }
+
+  check_cuda(cudaSetDevice(context->device_id),
+             "set CUDA device for fixed-sp solve");
+  slot->generation += 1;
+  const std::uint64_t acquired_generation = slot->generation;
+  slot->state = TransientResidualSlotState::Leased;
+  slot->consumer_event_registered = false;
+
+  std::shared_ptr<DeviceResidualBatch> token;
+  auto restore_slot = [&]() noexcept {
+    if (slot->generation == acquired_generation &&
+        slot->state == TransientResidualSlotState::Leased) {
+      slot->state = TransientResidualSlotState::Free;
+      slot->consumer_event_registered = false;
+      slot->lease_owner.reset();
+    }
+    if (token) token->lease_released = true;
+  };
+
+  try {
+    token = std::make_shared<DeviceResidualBatch>();
+    token->owner = handle;
+    token->creator_pid = handle->creator_pid;
+    token->device_id = handle->device_id;
+    token->owner_generation = handle->generation;
+    token->slot_generation = acquired_generation;
+    token->n = batch.n;
+    token->target_count = batch.target_count;
+    token->output_mask = batch.output_mask;
+    token->target_keys = batch.target_keys;
+    token->slot = slot;
+    token->planned_routes = batch.planned_routes;
+    token->executed_routes.assign(
+      static_cast<std::size_t>(batch.target_count), FixedSpRoute::Unset);
+    token->reroute_reasons.assign(
+      static_cast<std::size_t>(batch.target_count), std::string());
+    token->solver_statuses.reserve(
+      static_cast<std::size_t>(batch.target_count));
+
+    token->diagnostics.n = batch.n;
+    token->diagnostics.target_count = batch.target_count;
+    token->diagnostics.native_batch_call = true;
+    token->diagnostics.output_slot_acquire_count = 1;
+    token->diagnostics.owner_generation = handle->generation;
+    token->diagnostics.slot_generation = acquired_generation;
+    slot->lease_owner = token;
+
+    const std::size_t targets =
+      static_cast<std::size_t>(batch.target_count);
+    const std::size_t coefficient_count =
+      (batch.output_mask & FixedSpOutputCoefficients) == 0 ? 0U :
+        checked_multiply(static_cast<std::size_t>(batch.null_dim), targets,
+                         "fixed-sp coefficient outputs");
+    const std::size_t fitted_count =
+      (batch.output_mask & FixedSpOutputFitted) == 0 ? 0U :
+        checked_multiply(static_cast<std::size_t>(batch.n), targets,
+                         "fixed-sp fitted outputs");
+    const std::size_t residual_count =
+      (batch.output_mask & FixedSpOutputResiduals) == 0 ? 0U :
+        checked_multiply(static_cast<std::size_t>(batch.n), targets,
+                         "fixed-sp residual outputs");
+    const std::size_t rss_count =
+      (batch.output_mask & FixedSpOutputRss) == 0 ? 0U : targets;
+    const std::size_t initialize_count = std::max(
+      std::max(coefficient_count, fitted_count),
+      std::max(residual_count, rss_count));
+    constexpr unsigned int threads = 256U;
+    const std::size_t block_count =
+      (initialize_count + threads - 1U) / threads;
+    if (block_count == 0 ||
+        block_count > std::numeric_limits<unsigned int>::max()) {
+      throw std::runtime_error("fixed-sp output initialization size overflow");
+    }
+    initialize_fixed_sp_outputs_invalid<<<
+      static_cast<unsigned int>(block_count), threads, 0, context->stream
+    >>>(
+      slot->coefficients, coefficient_count,
+      slot->fitted, fitted_count,
+      slot->residuals, residual_count,
+      slot->rss, rss_count);
+    check_cuda(cudaGetLastError(),
+               "launch fixed-sp invalid output initialization");
+    token->diagnostics.invalid_output_init_count = 1;
+
+    bool has_cholesky_target = false;
+    for (FixedSpRoute route : batch.planned_routes) {
+      switch (route) {
+        case FixedSpRoute::CholeskyBatched:
+          token->diagnostics.planned_cholesky_target_count += 1;
+          has_cholesky_target = true;
+          break;
+        case FixedSpRoute::AugmentedQr:
+          token->diagnostics.planned_qr_target_count += 1;
+          token->solver_statuses.push_back(
+            FixedSpStatus::ErrStablePathNotImplemented);
+          break;
+        case FixedSpRoute::AugmentedSvd:
+          token->diagnostics.planned_svd_target_count += 1;
+          token->solver_statuses.push_back(
+            FixedSpStatus::ErrStablePathNotImplemented);
+          break;
+        case FixedSpRoute::Unset:
+          throw std::runtime_error(
+            "fixed-sp planned route metadata is invalid");
+      }
+    }
+
+    check_cuda(cudaEventRecord(slot->solve_completion_event, context->stream),
+               "record fixed-sp output initialization completion");
+    if (has_cholesky_target) {
+      throw std::runtime_error(
+        "Phase 3A Cholesky solve is not implemented");
+    }
+
+    token->diagnostics.target_keys = token->target_keys;
+    token->diagnostics.planned_routes = token->planned_routes;
+    token->diagnostics.executed_routes = token->executed_routes;
+    token->diagnostics.reroute_reasons = token->reroute_reasons;
+    token->diagnostics.solver_statuses = token->solver_statuses;
+    return token;
+  } catch (...) {
+    restore_slot();
+    throw;
+  }
+}
+
+DeviceResidualInfo device_residual_info(
+    const std::shared_ptr<DeviceResidualBatch>& token) {
+  if (!token || token->freed) {
+    throw std::runtime_error("fixed-sp CUDA residual token has been freed");
+  }
+  if (token->creator_pid != static_cast<std::int64_t>(getpid())) {
+    throw std::runtime_error(
+      "fixed-sp CUDA residual token has a different creator PID");
+  }
+  if (!token->owner || token->owner->freed ||
+      token->owner_generation != token->owner->generation) {
+    throw std::runtime_error("STALE_TOKEN: residual owner generation mismatch");
+  }
+  const std::shared_ptr<CudaRuntimeContext> context = token->owner->context;
+  if (!context) {
+    throw std::runtime_error("fixed-sp CUDA residual runtime has been freed");
+  }
+  std::lock_guard<std::mutex> lock(context->mutex);
+  context->require_usable();
+  return token->diagnostics;
+}
+
+void release_device_residual(
+    const std::shared_ptr<DeviceResidualBatch>& token) {
+  if (!token || token->freed) {
+    throw std::runtime_error("fixed-sp CUDA residual token has been freed");
+  }
+  if (token->lease_released) return;
+  if (token->creator_pid != static_cast<std::int64_t>(getpid())) {
+    throw std::runtime_error(
+      "fixed-sp CUDA residual token has a different creator PID");
+  }
+  if (!token->owner || token->owner->freed ||
+      token->owner_generation != token->owner->generation || !token->slot) {
+    token->diagnostics.stale_token_reject_count += 1;
+    throw std::runtime_error("STALE_TOKEN: residual owner generation mismatch");
+  }
+  const std::shared_ptr<CudaRuntimeContext> context = token->owner->context;
+  if (!context) {
+    throw std::runtime_error("fixed-sp CUDA residual runtime has been freed");
+  }
+
+  std::lock_guard<std::mutex> lock(context->mutex);
+  context->require_usable();
+  if (token->device_id != context->device_id ||
+      token->slot_generation != token->slot->generation ||
+      token->slot->state != TransientResidualSlotState::Leased) {
+    token->diagnostics.stale_token_reject_count += 1;
+    throw std::runtime_error("STALE_TOKEN: residual slot generation mismatch");
+  }
+  check_cuda(cudaSetDevice(context->device_id),
+             "set CUDA device for residual release");
+  if (token->slot->consumer_event_registered) {
+    const cudaError_t query =
+      cudaEventQuery(token->slot->consumer_completion_event);
+    if (query == cudaErrorNotReady) {
+      token->diagnostics.output_slot_busy_count += 1;
+      throw std::runtime_error("ERR_OUTPUT_SLOT_BUSY");
+    }
+    check_cuda(query, "query fixed-sp consumer completion event");
+    token->slot->consumer_event_registered = false;
+  }
+  token->slot->state = TransientResidualSlotState::Free;
+  token->slot->lease_owner.reset();
+  token->lease_released = true;
+  token->diagnostics.output_slot_release_count += 1;
+}
+
+void register_device_residual_consumer_event(
+    const std::shared_ptr<DeviceResidualBatch>& token,
+    cudaEvent_t consumer_completion_event) {
+  if (!token || token->freed) {
+    throw std::runtime_error("fixed-sp CUDA residual token has been freed");
+  }
+  if (consumer_completion_event == nullptr) {
+    throw std::runtime_error("consumer completion event must not be null");
+  }
+  if (token->lease_released || !token->owner || !token->slot) {
+    token->diagnostics.stale_token_reject_count += 1;
+    throw std::runtime_error("STALE_TOKEN: residual lease has been released");
+  }
+  if (token->creator_pid != static_cast<std::int64_t>(getpid())) {
+    throw std::runtime_error(
+      "fixed-sp CUDA residual token has a different creator PID");
+  }
+  const std::shared_ptr<CudaRuntimeContext> context = token->owner->context;
+  if (!context) {
+    throw std::runtime_error("fixed-sp CUDA residual runtime has been freed");
+  }
+
+  std::lock_guard<std::mutex> lock(context->mutex);
+  context->require_usable();
+  if (token->owner_generation != token->owner->generation ||
+      token->slot_generation != token->slot->generation ||
+      token->slot->state != TransientResidualSlotState::Leased) {
+    token->diagnostics.stale_token_reject_count += 1;
+    throw std::runtime_error("STALE_TOKEN: residual slot generation mismatch");
+  }
+  if (token->slot->consumer_event_registered) {
+    throw std::runtime_error("fixed-sp consumer event is already registered");
+  }
+  check_cuda(cudaSetDevice(context->device_id),
+             "set CUDA device for consumer event registration");
+  check_cuda(cudaStreamWaitEvent(
+    context->stream, consumer_completion_event, 0
+  ), "wait for registered fixed-sp consumer event");
+  check_cuda(cudaEventRecord(
+    token->slot->consumer_completion_event, context->stream
+  ), "record fixed-sp consumer completion proxy");
+  token->slot->consumer_event_registered = true;
+}
+
+void free_device_residual(std::shared_ptr<DeviceResidualBatch>* token) {
+  if (token == nullptr || !*token) return;
+  release_device_residual(*token);
+  (*token)->freed = true;
+  (*token)->owner.reset();
+  (*token)->slot.reset();
+  token->reset();
+}
+
 PreparedSStaticShadow test_prepared_s_static_shadow(
     const std::shared_ptr<PreparedSGpuHandle>& handle) {
   if (!handle || handle->freed) {
@@ -1014,6 +1449,7 @@ const char* fixed_sp_status_name(FixedSpStatus status) {
 
 const char* fixed_sp_route_name(FixedSpRoute route) {
   switch (route) {
+    case FixedSpRoute::Unset: return "";
     case FixedSpRoute::CholeskyBatched: return "CHOLESKY_BATCHED";
     case FixedSpRoute::AugmentedQr: return "AUGMENTED_QR";
     case FixedSpRoute::AugmentedSvd: return "AUGMENTED_SVD";

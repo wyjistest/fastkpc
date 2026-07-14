@@ -3,6 +3,8 @@
 
 #include "mgcv_fixed_sp_runtime_types.hpp"
 
+#include <cuda_runtime_api.h>
+
 #include <memory>
 
 namespace fastkpc {
@@ -27,6 +29,18 @@ PreparedSInfo prepared_s_gpu_info(
 void free_prepared_s_gpu(std::shared_ptr<PreparedSGpuHandle>* handle);
 PreparedSStaticShadow test_prepared_s_static_shadow(
   const std::shared_ptr<PreparedSGpuHandle>& handle);
+
+std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
+  const std::shared_ptr<PreparedSGpuHandle>& handle,
+  const FixedSpBatchHostView& batch);
+DeviceResidualInfo device_residual_info(
+  const std::shared_ptr<DeviceResidualBatch>& token);
+void release_device_residual(
+  const std::shared_ptr<DeviceResidualBatch>& token);
+void register_device_residual_consumer_event(
+  const std::shared_ptr<DeviceResidualBatch>& token,
+  cudaEvent_t consumer_completion_event);
+void free_device_residual(std::shared_ptr<DeviceResidualBatch>* token);
 
 }  // namespace fastkpc
 

@@ -1193,3 +1193,31 @@ fixed_sp_cuda_prepared_free <- function(handle) {
   invisible(.Call("C_fixed_sp_cuda_prepared_free", handle,
                   PACKAGE = "fastkpc_cuda"))
 }
+
+fixed_sp_cuda_solve_batch <- function(
+    handle, Y, SP, planned_route, target_keys,
+    outputs = c("residuals")) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_fixed_sp_cuda_solve_batch", handle, Y, SP,
+    as.character(planned_route), as.character(target_keys),
+    as.character(outputs), PACKAGE = "fastkpc_cuda"
+  )
+}
+
+fixed_sp_cuda_residual_info <- function(token) {
+  load_fastkpc_cuda_native()
+  .Call("C_fixed_sp_cuda_residual_info", token, PACKAGE = "fastkpc_cuda")
+}
+
+fixed_sp_cuda_residual_release <- function(token) {
+  load_fastkpc_cuda_native()
+  invisible(.Call("C_fixed_sp_cuda_residual_release", token,
+                  PACKAGE = "fastkpc_cuda"))
+}
+
+fixed_sp_cuda_residual_free <- function(token) {
+  load_fastkpc_cuda_native()
+  invisible(.Call("C_fixed_sp_cuda_residual_free", token,
+                  PACKAGE = "fastkpc_cuda"))
+}

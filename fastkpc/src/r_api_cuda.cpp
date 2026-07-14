@@ -119,6 +119,45 @@ void fixed_sp_cuda_prepared_finalizer(SEXP ptr) {
   R_ClearExternalPtr(ptr);
 }
 
+SEXP fixed_sp_cuda_residual_tag() {
+  static SEXP tag = Rf_install("fastkpc_fixed_sp_cuda_residual");
+  return tag;
+}
+
+using FixedSpResidualHolder =
+  std::shared_ptr<fastkpc::DeviceResidualBatch>;
+
+FixedSpResidualHolder* fixed_sp_cuda_residual_holder(SEXP ptr,
+                                                     bool require_live) {
+  if (TYPEOF(ptr) != EXTPTRSXP ||
+      R_ExternalPtrTag(ptr) != fixed_sp_cuda_residual_tag()) {
+    Rcpp::stop(
+      "fixed-sp CUDA residual token must be a tagged external pointer");
+  }
+  auto* holder =
+    static_cast<FixedSpResidualHolder*>(R_ExternalPtrAddr(ptr));
+  if (holder == nullptr) {
+    if (require_live) Rcpp::stop("fixed-sp CUDA residual token has been freed");
+    return nullptr;
+  }
+  if (require_live && !*holder) {
+    Rcpp::stop("fixed-sp CUDA residual token has been freed");
+  }
+  return holder;
+}
+
+void fixed_sp_cuda_residual_finalizer(SEXP ptr) {
+  auto* holder =
+    static_cast<FixedSpResidualHolder*>(R_ExternalPtrAddr(ptr));
+  if (holder == nullptr) return;
+  try {
+    fastkpc::free_device_residual(holder);
+  } catch (...) {
+  }
+  delete holder;
+  R_ClearExternalPtr(ptr);
+}
+
 int scalar_integer(SEXP value, const char* name) {
   if (TYPEOF(value) != INTSXP || XLENGTH(value) != 1 ||
       INTEGER(value)[0] == NA_INTEGER || Rf_isObject(value) ||
@@ -218,6 +257,23 @@ void require_finite_double_matrix(SEXP value,
   }
 }
 
+void require_bare_double_matrix(SEXP value,
+                                int expected_rows,
+                                int expected_columns,
+                                const char* name) {
+  if (TYPEOF(value) != REALSXP || !Rf_isMatrix(value) ||
+      Rf_isObject(value) ||
+      !has_only_attributes(value, {R_DimSymbol})) {
+    Rcpp::stop(std::string(name) + " must be a bare double matrix");
+  }
+  SEXP dimensions = Rf_getAttrib(value, R_DimSymbol);
+  if (TYPEOF(dimensions) != INTSXP || XLENGTH(dimensions) != 2 ||
+      INTEGER(dimensions)[0] != expected_rows ||
+      INTEGER(dimensions)[1] != expected_columns) {
+    Rcpp::stop(std::string(name) + " shape mismatch");
+  }
+}
+
 void require_bare_integer_vector(SEXP value,
                                  int expected_length,
                                  const char* name) {
@@ -230,6 +286,71 @@ void require_bare_integer_vector(SEXP value,
       Rcpp::stop(std::string(name) + " must not contain NA");
     }
   }
+}
+
+std::vector<std::string> bare_character_vector(
+    SEXP value,
+    int expected_length,
+    const char* name) {
+  if (TYPEOF(value) != STRSXP || XLENGTH(value) != expected_length ||
+      Rf_isObject(value) || ATTRIB(value) != R_NilValue) {
+    Rcpp::stop(std::string(name) + " must be a bare character vector");
+  }
+  std::vector<std::string> result;
+  result.reserve(static_cast<std::size_t>(expected_length));
+  for (int index = 0; index < expected_length; ++index) {
+    if (STRING_ELT(value, index) == NA_STRING) {
+      Rcpp::stop(std::string(name) + " must not contain NA");
+    }
+    result.emplace_back(CHAR(STRING_ELT(value, index)));
+  }
+  return result;
+}
+
+fastkpc::FixedSpRoute fixed_sp_route_from_string(
+    const std::string& route) {
+  if (route == "CHOLESKY_BATCHED") {
+    return fastkpc::FixedSpRoute::CholeskyBatched;
+  }
+  if (route == "AUGMENTED_QR") {
+    return fastkpc::FixedSpRoute::AugmentedQr;
+  }
+  if (route == "AUGMENTED_SVD") {
+    return fastkpc::FixedSpRoute::AugmentedSvd;
+  }
+  Rcpp::stop("planned_route contains an unknown fixed-sp route");
+  return fastkpc::FixedSpRoute::Unset;
+}
+
+std::uint32_t fixed_sp_output_mask(SEXP outputs_s) {
+  if (TYPEOF(outputs_s) != STRSXP || XLENGTH(outputs_s) < 1 ||
+      Rf_isObject(outputs_s) || ATTRIB(outputs_s) != R_NilValue) {
+    Rcpp::stop("outputs must be a non-empty bare character vector");
+  }
+  std::uint32_t mask = 0;
+  for (R_xlen_t index = 0; index < XLENGTH(outputs_s); ++index) {
+    if (STRING_ELT(outputs_s, index) == NA_STRING) {
+      Rcpp::stop("outputs must not contain NA");
+    }
+    const std::string output = CHAR(STRING_ELT(outputs_s, index));
+    std::uint32_t bit = 0;
+    if (output == "coefficients") {
+      bit = fastkpc::FixedSpOutputCoefficients;
+    } else if (output == "fitted") {
+      bit = fastkpc::FixedSpOutputFitted;
+    } else if (output == "residuals") {
+      bit = fastkpc::FixedSpOutputResiduals;
+    } else if (output == "rss") {
+      bit = fastkpc::FixedSpOutputRss;
+    } else {
+      Rcpp::stop("outputs contains an unknown fixed-sp output");
+    }
+    if ((mask & bit) != 0) {
+      Rcpp::stop("outputs must not contain duplicates");
+    }
+    mask |= bit;
+  }
+  return mask;
 }
 
 void require_prepared_dto_fields(SEXP dto_s) {
@@ -3581,6 +3702,196 @@ extern "C" SEXP C_fixed_sp_cuda_test_prepared_static_shadow(
     Rcpp::Named("gram") = gram,
     Rcpp::Named("projected_penalties") = projected
   );
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_solve_batch(
+    SEXP prepared_s,
+    SEXP Y_s,
+    SEXP SP_s,
+    SEXP planned_route_s,
+    SEXP target_keys_s,
+    SEXP outputs_s) {
+  BEGIN_RCPP
+  FixedSpPreparedHolder* prepared_holder =
+    fixed_sp_cuda_prepared_holder(prepared_s, true);
+  const fastkpc::PreparedSInfo prepared_info =
+    fastkpc::prepared_s_gpu_info(*prepared_holder);
+
+  if (TYPEOF(Y_s) != REALSXP || !Rf_isMatrix(Y_s) || Rf_isObject(Y_s) ||
+      !has_only_attributes(Y_s, {R_DimSymbol, R_DimNamesSymbol})) {
+    Rcpp::stop("Y must be a finite double matrix");
+  }
+  SEXP Y_dimensions = Rf_getAttrib(Y_s, R_DimSymbol);
+  if (TYPEOF(Y_dimensions) != INTSXP || XLENGTH(Y_dimensions) != 2 ||
+      INTEGER(Y_dimensions)[0] != prepared_info.n ||
+      INTEGER(Y_dimensions)[1] <= 0) {
+    Rcpp::stop("Y shape mismatch");
+  }
+  const int target_count = INTEGER(Y_dimensions)[1];
+  require_bare_double_matrix(
+    Y_s, prepared_info.n, target_count, "Y");
+  require_bare_double_matrix(
+    SP_s, prepared_info.penalty_count, target_count, "SP");
+
+  const std::vector<std::string> route_names = bare_character_vector(
+    planned_route_s, target_count, "planned_route");
+  std::vector<fastkpc::FixedSpRoute> planned_routes;
+  planned_routes.reserve(static_cast<std::size_t>(target_count));
+  for (const std::string& route : route_names) {
+    planned_routes.push_back(fixed_sp_route_from_string(route));
+  }
+
+  const std::vector<std::string> target_keys = bare_character_vector(
+    target_keys_s, target_count, "target_keys");
+  for (int index = 0; index < target_count; ++index) {
+    const std::string& key = target_keys[static_cast<std::size_t>(index)];
+    const bool valid_sha = key.size() == 64U &&
+      std::all_of(key.begin(), key.end(), [](unsigned char character) {
+        return (character >= '0' && character <= '9') ||
+          (character >= 'a' && character <= 'f');
+      });
+    if (!valid_sha) {
+      Rcpp::stop("target_keys must contain lowercase SHA-256 strings");
+    }
+    if (std::find(target_keys.begin(),
+                  target_keys.begin() + index, key) !=
+        target_keys.begin() + index) {
+      Rcpp::stop("target_keys must not contain duplicates");
+    }
+  }
+
+  fastkpc::FixedSpBatchHostView batch;
+  batch.Y = REAL(Y_s);
+  batch.SP = REAL(SP_s);
+  batch.n = prepared_info.n;
+  batch.null_dim = prepared_info.null_dim;
+  batch.penalty_count = prepared_info.penalty_count;
+  batch.target_count = target_count;
+  batch.output_mask = fixed_sp_output_mask(outputs_s);
+  batch.planned_routes = std::move(planned_routes);
+  batch.target_keys = target_keys;
+
+  SEXP ext = PROTECT(R_MakeExternalPtr(
+    nullptr, fixed_sp_cuda_residual_tag(), R_NilValue));
+  R_RegisterCFinalizerEx(ext, fixed_sp_cuda_residual_finalizer, TRUE);
+  auto* holder = new FixedSpResidualHolder();
+  R_SetExternalPtrAddr(ext, holder);
+  try {
+    *holder = fastkpc::solve_fixed_sp_batch(*prepared_holder, batch);
+  } catch (...) {
+    delete holder;
+    R_ClearExternalPtr(ext);
+    UNPROTECT(1);
+    throw;
+  }
+  UNPROTECT(1);
+  return ext;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
+  BEGIN_RCPP
+  FixedSpResidualHolder* holder =
+    fixed_sp_cuda_residual_holder(residual_s, true);
+  const fastkpc::DeviceResidualInfo info =
+    fastkpc::device_residual_info(*holder);
+  const std::size_t targets = static_cast<std::size_t>(info.target_count);
+  if (info.target_keys.size() != targets ||
+      info.planned_routes.size() != targets ||
+      info.executed_routes.size() != targets ||
+      info.reroute_reasons.size() != targets ||
+      info.solver_statuses.size() != targets) {
+    Rcpp::stop("fixed-sp residual diagnostics size mismatch");
+  }
+
+  Rcpp::CharacterVector planned_route(info.target_count);
+  Rcpp::CharacterVector executed_route(info.target_count);
+  Rcpp::CharacterVector reroute_reason(info.target_count);
+  Rcpp::CharacterVector solver_status(info.target_count);
+  for (int index = 0; index < info.target_count; ++index) {
+    const std::size_t offset = static_cast<std::size_t>(index);
+    planned_route[index] =
+      fastkpc::fixed_sp_route_name(info.planned_routes[offset]);
+    if (info.executed_routes[offset] == fastkpc::FixedSpRoute::Unset) {
+      executed_route[index] = NA_STRING;
+    } else {
+      executed_route[index] =
+        fastkpc::fixed_sp_route_name(info.executed_routes[offset]);
+    }
+    reroute_reason[index] = info.reroute_reasons[offset];
+    solver_status[index] =
+      fastkpc::fixed_sp_status_name(info.solver_statuses[offset]);
+  }
+
+  Rcpp::List result = Rcpp::List::create(
+    Rcpp::Named("n") = info.n,
+    Rcpp::Named("target_count") = info.target_count,
+    Rcpp::Named("target_keys") = Rcpp::wrap(info.target_keys),
+    Rcpp::Named("planned_route") = planned_route,
+    Rcpp::Named("executed_route") = executed_route,
+    Rcpp::Named("reroute_reason") = reroute_reason,
+    Rcpp::Named("solver_status") = solver_status
+  );
+  result["native_batch_call"] = info.native_batch_call;
+  result["true_batched_kernel"] = info.true_batched_kernel;
+  result["true_batched_target_count"] = info.true_batched_target_count;
+  result["stable_reroute_count"] = info.stable_reroute_count;
+  result["planned_cholesky_target_count"] =
+    info.planned_cholesky_target_count;
+  result["planned_qr_target_count"] = info.planned_qr_target_count;
+  result["planned_svd_target_count"] = info.planned_svd_target_count;
+  result["executed_cholesky_target_count"] =
+    info.executed_cholesky_target_count;
+  result["executed_qr_target_count"] = info.executed_qr_target_count;
+  result["executed_svd_target_count"] = info.executed_svd_target_count;
+  result["cholesky_to_svd_count"] = info.cholesky_to_svd_count;
+  result["qr_to_svd_count"] = info.qr_to_svd_count;
+  result["output_slot_acquire_count"] = info.output_slot_acquire_count;
+  result["output_slot_release_count"] = info.output_slot_release_count;
+  result["output_slot_busy_count"] = info.output_slot_busy_count;
+  result["stale_token_reject_count"] = info.stale_token_reject_count;
+  result["invalid_output_init_count"] = info.invalid_output_init_count;
+  result["cpu_fallback_count"] = info.cpu_fallback_count;
+  result["unknown_fallback_count"] = info.unknown_fallback_count;
+  result["per_target_allocation_count_after_warmup"] =
+    info.per_target_allocation_count_after_warmup;
+  result["per_target_handle_create_count"] =
+    info.per_target_handle_create_count;
+  result["implicit_residual_d2h_count"] =
+    info.implicit_residual_d2h_count;
+  result["rhs_device_build_count"] = info.rhs_device_build_count;
+  result["rhs_authority"] = info.rhs_authority;
+  result["full_cuda_data_plane"] = info.full_cuda_data_plane;
+  result["shadow_materialize_call_count"] =
+    info.shadow_materialize_call_count;
+  result["shadow_materialize_target_count"] =
+    info.shadow_materialize_target_count;
+  result["shadow_d2h_bytes"] = static_cast<double>(info.shadow_d2h_bytes);
+  result["owner_generation"] = static_cast<double>(info.owner_generation);
+  result["slot_generation"] = static_cast<double>(info.slot_generation);
+  return result;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_residual_release(SEXP residual_s) {
+  BEGIN_RCPP
+  FixedSpResidualHolder* holder =
+    fixed_sp_cuda_residual_holder(residual_s, true);
+  fastkpc::release_device_residual(*holder);
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_residual_free(SEXP residual_s) {
+  BEGIN_RCPP
+  FixedSpResidualHolder* holder =
+    fixed_sp_cuda_residual_holder(residual_s, false);
+  if (holder == nullptr) return R_NilValue;
+  fastkpc::free_device_residual(holder);
+  delete holder;
+  R_ClearExternalPtr(residual_s);
+  return R_NilValue;
   END_RCPP
 }
 
@@ -7752,6 +8063,10 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fixed_sp_cuda_prepared_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_info), 1},
   {"C_fixed_sp_cuda_prepared_free", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_free), 1},
   {"C_fixed_sp_cuda_test_prepared_static_shadow", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_prepared_static_shadow), 1},
+  {"C_fixed_sp_cuda_solve_batch", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_solve_batch), 6},
+  {"C_fixed_sp_cuda_residual_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_info), 1},
+  {"C_fixed_sp_cuda_residual_release", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_release), 1},
+  {"C_fixed_sp_cuda_residual_free", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_free), 1},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},
   {"C_fast_hsic_perm_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_perm_cuda), 6},
