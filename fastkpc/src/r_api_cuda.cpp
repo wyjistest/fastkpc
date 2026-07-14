@@ -253,7 +253,8 @@ void require_prepared_dto_fields(SEXP dto_s) {
     Rcpp::stop("prepared DTO must have exact fields");
   }
   SEXP names = Rf_getAttrib(dto_s, R_NamesSymbol);
-  if (TYPEOF(names) != STRSXP || XLENGTH(names) != expected_count) {
+  if (TYPEOF(names) != STRSXP || XLENGTH(names) != expected_count ||
+      Rf_isObject(names) || ATTRIB(names) != R_NilValue) {
     Rcpp::stop("prepared DTO must have exact fields");
   }
   for (int index = 0; index < expected_count; ++index) {
@@ -3420,7 +3421,9 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_create(SEXP runtime_s,
   SEXP penalty_block_names =
     Rf_getAttrib(penalty_blocks_s, R_NamesSymbol);
   if (TYPEOF(penalty_block_names) != STRSXP ||
-      XLENGTH(penalty_block_names) != penalties) {
+      XLENGTH(penalty_block_names) != penalties ||
+      Rf_isObject(penalty_block_names) ||
+      ATTRIB(penalty_block_names) != R_NilValue) {
     Rcpp::stop("penalty_blocks must be a canonical named list");
   }
   for (int index = 0; index < penalties; ++index) {

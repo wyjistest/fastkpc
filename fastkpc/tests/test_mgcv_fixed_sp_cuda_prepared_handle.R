@@ -199,6 +199,14 @@ assert_error(
   "exact fields", "renamed DTO field must fail closed"
 )
 bad_dto <- dto
+forged_dto_names <- names(bad_dto)
+attr(forged_dto_names, "forged") <- TRUE
+attr(bad_dto, "names") <- forged_dto_names
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "exact fields", "attributed DTO names vector must fail closed"
+)
+bad_dto <- dto
 bad_dto$data_p <- 47L
 assert_error(
   fixed_sp_cuda_prepared_create(runtime, bad_dto),
@@ -258,6 +266,15 @@ names(bad_dto$penalty_blocks)[[1L]] <- "forged_penalty"
 assert_error(
   fixed_sp_cuda_prepared_create(runtime, bad_dto),
   "canonical named list", "penalty block names must fail closed"
+)
+bad_dto <- dto
+forged_penalty_names <- names(bad_dto$penalty_blocks)
+attr(forged_penalty_names, "forged") <- TRUE
+attr(bad_dto$penalty_blocks, "names") <- forged_penalty_names
+assert_error(
+  fixed_sp_cuda_prepared_create(runtime, bad_dto),
+  "canonical named list",
+  "attributed penalty block names vector must fail closed"
 )
 bad_dto <- dto
 bad_dto$penalty_blocks[[1L]][[1L]] <- Inf
