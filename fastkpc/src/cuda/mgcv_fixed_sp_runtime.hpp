@@ -63,6 +63,9 @@ int test_fixed_sp_cuda_device_count();
 void test_fixed_sp_cuda_set_device(int device_id);
 int test_fixed_sp_cuda_get_device();
 void test_inject_next_blocked_consumer_launch_failure();
+void test_force_next_fixed_sp_cuda_potrf_info(
+  const std::vector<int>& info);
+void test_force_next_fixed_sp_cuda_potrs_info(int info);
 void test_register_blocked_device_residual_consumer(
   const std::shared_ptr<DeviceResidualBatch>& token);
 void test_complete_blocked_device_residual_consumer(

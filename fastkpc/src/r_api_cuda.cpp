@@ -3513,6 +3513,31 @@ C_fixed_sp_cuda_test_inject_next_blocked_consumer_launch_failure() {
   END_RCPP
 }
 
+extern "C" SEXP C_fixed_sp_cuda_test_force_next_potrf_info(SEXP info_s) {
+  BEGIN_RCPP
+  if (XLENGTH(info_s) > std::numeric_limits<int>::max()) {
+    Rcpp::stop("forced potrf info is too long");
+  }
+  const int count = static_cast<int>(XLENGTH(info_s));
+  require_bare_integer_vector(info_s, count, "forced potrf info");
+  std::vector<int> info;
+  if (count > 0) {
+    const int* values = INTEGER(info_s);
+    info.assign(values, values + count);
+  }
+  fastkpc::test_force_next_fixed_sp_cuda_potrf_info(info);
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_test_force_next_potrs_info(SEXP info_s) {
+  BEGIN_RCPP
+  fastkpc::test_force_next_fixed_sp_cuda_potrs_info(
+    scalar_integer(info_s, "forced potrs info"));
+  return R_NilValue;
+  END_RCPP
+}
+
 extern "C" SEXP C_fixed_sp_cuda_test_inject_next_device_free_failure() {
   BEGIN_RCPP
   fastkpc::test_inject_next_fixed_sp_cuda_device_free_failure();
@@ -8383,6 +8408,8 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fixed_sp_cuda_test_inject_next_resource_post_call_teardown_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_resource_post_call_teardown_failure), 1},
   {"C_fixed_sp_cuda_test_inject_next_prepared_static_shadow_body_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_prepared_static_shadow_body_failure), 0},
   {"C_fixed_sp_cuda_test_inject_next_blocked_consumer_launch_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_blocked_consumer_launch_failure), 0},
+  {"C_fixed_sp_cuda_test_force_next_potrf_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_force_next_potrf_info), 1},
+  {"C_fixed_sp_cuda_test_force_next_potrs_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_force_next_potrs_info), 1},
   {"C_fixed_sp_cuda_test_inject_next_device_free_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_device_free_failure), 0},
   {"C_fixed_sp_cuda_test_exercise_resource_teardown_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_exercise_resource_teardown_failure), 1},
   {"C_fixed_sp_cuda_runtime_reserve", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_reserve), 6},

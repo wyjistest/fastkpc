@@ -128,10 +128,29 @@ oracle_rss <- vapply(
 runtime <- fixed_sp_cuda_runtime_create(0L)
 handle <- NULL
 token <- NULL
+partial_factor_fail_token <- NULL
+all_factor_fail_token <- NULL
 on.exit({
   if (!is.null(token)) {
     try(fixed_sp_cuda_residual_release(token), silent = TRUE)
     try(fixed_sp_cuda_residual_free(token), silent = TRUE)
+  }
+  if (!is.null(partial_factor_fail_token)) {
+    try(
+      fixed_sp_cuda_residual_release(partial_factor_fail_token),
+      silent = TRUE
+    )
+    try(
+      fixed_sp_cuda_residual_free(partial_factor_fail_token),
+      silent = TRUE
+    )
+  }
+  if (!is.null(all_factor_fail_token)) {
+    try(
+      fixed_sp_cuda_residual_release(all_factor_fail_token),
+      silent = TRUE
+    )
+    try(fixed_sp_cuda_residual_free(all_factor_fail_token), silent = TRUE)
   }
   if (!is.null(handle)) {
     try(fixed_sp_cuda_prepared_free(handle), silent = TRUE)
@@ -146,12 +165,14 @@ fixed_sp_cuda_runtime_reserve(
   as.integer(dto$n + sum(dto$penalty_ranks))
 )
 handle <- fixed_sp_cuda_prepared_create(runtime, dto)
+runtime_info_before_solve <- fixed_sp_cuda_runtime_info(runtime)
 token <- fixed_sp_cuda_solve_batch(
   handle, native_batch$Y, native_batch$SP, native_batch$planned_route,
   native_batch$target_keys,
   outputs = c("coefficients", "fitted", "residuals", "rss", "rhs")
 )
 info <- fixed_sp_cuda_residual_info(token)
+runtime_info_after_solve <- fixed_sp_cuda_runtime_info(runtime)
 
 required_fields <- c(
   "native_batch_call",
@@ -190,23 +211,62 @@ assert_true(
   "one public solve call"
 )
 
-# Task 2 fuses upload and construction but still sends every safe target
-# through the existing single-target factor and solve calls.
 assert_true(
-  info$true_batched_attempted_target_count == 0L &&
-    info$true_batched_target_count == 0L &&
-    info$cholesky_single_target_count == safe_count &&
-    info$potrf_batched_call_count == 0L &&
-    info$potrs_batched_call_count == 0L,
-  "Task 2 retains repeated single Cholesky after fused construction"
+  info$true_batched_subgroup_count == 1L,
+  "one true-batched subgroup"
 )
-
-# True-batch flags remain false until Task 3 replaces these single-target
-# solver calls with potrfBatched and potrsBatched.
 assert_true(
-  !isTRUE(info$true_batched_kernel) &&
-    info$true_batched_subgroup_count == 0L,
-  "Task 2 does not yet execute a true batched kernel"
+  info$true_batched_attempted_target_count == safe_count,
+  "all targets attempted in batched Cholesky"
+)
+assert_true(
+  info$true_batched_target_count == safe_count,
+  "all targets completed in batched Cholesky"
+)
+assert_true(
+  info$cholesky_single_target_count == 0L,
+  "no repeated single Cholesky"
+)
+assert_true(
+  info$potrf_batched_call_count == 1L &&
+    info$potrs_batched_call_count == 1L,
+  "one batched factor and solve call"
+)
+assert_true(
+  isTRUE(info$true_batched_kernel),
+  "all-safe multi-target batch is truly batched"
+)
+assert_true(
+  runtime_info_after_solve$cholesky_factor_checkpoint_record_count -
+      runtime_info_before_solve$cholesky_factor_checkpoint_record_count == 1L &&
+    runtime_info_after_solve$cholesky_factor_checkpoint_wait_count -
+      runtime_info_before_solve$cholesky_factor_checkpoint_wait_count == 1L &&
+    runtime_info_after_solve$cholesky_solve_checkpoint_record_count -
+      runtime_info_before_solve$cholesky_solve_checkpoint_record_count == 1L &&
+    runtime_info_after_solve$cholesky_solve_checkpoint_wait_count -
+      runtime_info_before_solve$cholesky_solve_checkpoint_wait_count == 1L &&
+    runtime_info_after_solve$cuda_device_synchronize_count ==
+      runtime_info_before_solve$cuda_device_synchronize_count,
+  "normal batch records and waits on exactly two events"
+)
+assert_true(
+  runtime_info_after_solve$workspace_grow_count ==
+      runtime_info_before_solve$workspace_grow_count &&
+    runtime_info_after_solve$workspace_bytes ==
+      runtime_info_before_solve$workspace_bytes &&
+    all(c(
+      info$cuda_device_allocation_count_during_solve,
+      info$cuda_host_allocation_count_during_solve,
+      info$stream_create_count_during_solve,
+      info$event_create_count_during_solve,
+      info$cublas_handle_create_count_during_solve,
+      info$cusolver_handle_create_count_during_solve,
+      info$per_target_allocation_count_after_warmup,
+      info$per_target_handle_create_count,
+      info$cpu_fallback_count,
+      info$unknown_fallback_count
+    ) == 0L),
+  "true batch performs no solve-time growth, allocation, or fallback"
 )
 assert_true(
   info$target_batch_h2d_call_count == 1L,
@@ -238,7 +298,7 @@ assert_true(
               rep("CHOLESKY_BATCHED", safe_count)) &&
     identical(info$reroute_reason, rep("", safe_count)) &&
     identical(info$solver_status,
-              rep("OK_CHOLESKY_SINGLE", safe_count)),
+              rep("OK_CHOLESKY_BATCHED", safe_count)),
   "all safe targets preserve canonical route and status order"
 )
 
@@ -275,13 +335,346 @@ assert_true(
 fixed_sp_cuda_residual_release(token)
 fixed_sp_cuda_residual_free(token)
 token <- NULL
+
+clear_forced_info <- function() {
+  try(
+    invisible(.Call(
+      "C_fixed_sp_cuda_test_force_next_potrf_info",
+      integer(), PACKAGE = "fastkpc_cuda"
+    )),
+    silent = TRUE
+  )
+  try(
+    invisible(.Call(
+      "C_fixed_sp_cuda_test_force_next_potrs_info",
+      0L, PACKAGE = "fastkpc_cuda"
+    )),
+    silent = TRUE
+  )
+}
+on.exit(clear_forced_info(), add = TRUE)
+
+middle_ordinal <- as.integer((safe_count + 1L) %/% 2L)
+partial_potrf_info <- integer(safe_count)
+partial_potrf_info[[middle_ordinal]] <- 1L
+invisible(.Call(
+  "C_fixed_sp_cuda_test_force_next_potrf_info",
+  partial_potrf_info, PACKAGE = "fastkpc_cuda"
+))
+partial_factor_fail_token <- fixed_sp_cuda_solve_batch(
+  handle, native_batch$Y, native_batch$SP, native_batch$planned_route,
+  native_batch$target_keys,
+  outputs = c("coefficients", "fitted", "residuals", "rss", "rhs")
+)
+partial_factor_fail_info <- fixed_sp_cuda_residual_info(
+  partial_factor_fail_token
+)
+expected_partial_status <- rep("OK_CHOLESKY_BATCHED", safe_count)
+expected_partial_status[[middle_ordinal]] <-
+  "ERR_STABLE_PATH_NOT_IMPLEMENTED"
+expected_partial_reason <- rep("", safe_count)
+expected_partial_reason[[middle_ordinal]] <-
+  "CHOLESKY_NON_POSITIVE_PIVOT"
+assert_true(
+  partial_factor_fail_info$potrf_batched_call_count == 1L &&
+    partial_factor_fail_info$potrs_batched_call_count == 1L &&
+    partial_factor_fail_info$true_batched_attempted_target_count ==
+      safe_count &&
+    partial_factor_fail_info$true_batched_target_count == safe_count - 1L &&
+    partial_factor_fail_info$cholesky_to_svd_count == 1L &&
+    partial_factor_fail_info$stable_reroute_count == 1L &&
+    partial_factor_fail_info$executed_cholesky_target_count ==
+      safe_count - 1L &&
+    !isTRUE(partial_factor_fail_info$true_batched_kernel) &&
+    isTRUE(partial_factor_fail_info$canonical_output_order_exact) &&
+    identical(
+      partial_factor_fail_info$solver_status,
+      expected_partial_status
+    ) &&
+    identical(
+      partial_factor_fail_info$reroute_reason,
+      expected_partial_reason
+    ),
+  "one middle factor failure preserves canonical batch status accounting"
+)
+partial_shadow <- fixed_sp_cuda_materialize_shadow(
+  partial_factor_fail_token,
+  outputs = c("coefficients", "fitted", "residuals", "rss", "rhs")
+)
+partial_successful <- setdiff(seq_len(safe_count), middle_ordinal)
+partial_output_max_abs_errors <- c(
+  coefficients = max(abs(
+    partial_shadow$coefficients[, partial_successful, drop = FALSE] -
+      oracle_coefficients[, partial_successful, drop = FALSE]
+  )),
+  fitted = max(abs(
+    partial_shadow$fitted[, partial_successful, drop = FALSE] -
+      oracle_fitted[, partial_successful, drop = FALSE]
+  )),
+  residuals = max(abs(
+    partial_shadow$residuals[, partial_successful, drop = FALSE] -
+      oracle_residuals[, partial_successful, drop = FALSE]
+  )),
+  rss = max(abs(
+    partial_shadow$rss[partial_successful] -
+      oracle_rss[partial_successful]
+  )),
+  rhs = max(abs(
+    partial_shadow$cuda_nullspace_rhs[
+      , partial_successful, drop = FALSE
+    ] - safe_batch$oracle_nullspace_rhs[
+      , partial_successful, drop = FALSE
+    ]
+  ))
+)
+partial_numerical_max_abs_error <- max(partial_output_max_abs_errors)
+assert_true(
+  all(partial_output_max_abs_errors[c(
+    "coefficients", "fitted", "residuals", "rss"
+  )] < 1e-7) && partial_output_max_abs_errors[["rhs"]] < 1e-12,
+  paste0(
+    "compacted successful columns match canonical oracles; max=",
+    format(partial_numerical_max_abs_error, digits = 17L)
+  )
+)
+assert_true(
+  all(is.na(partial_shadow$coefficients[, middle_ordinal])) &&
+    all(is.na(partial_shadow$fitted[, middle_ordinal])) &&
+    all(is.na(partial_shadow$residuals[, middle_ordinal])) &&
+    is.na(partial_shadow$rss[[middle_ordinal]]) &&
+    all(is.na(
+      partial_shadow$cuda_nullspace_rhs[, middle_ordinal]
+    )),
+  "failed canonical column is not exposed as a successful output"
+)
+fixed_sp_cuda_residual_release(partial_factor_fail_token)
+fixed_sp_cuda_residual_free(partial_factor_fail_token)
+partial_factor_fail_token <- NULL
+invisible(.Call(
+  "C_fixed_sp_cuda_test_force_next_potrf_info",
+  integer(), PACKAGE = "fastkpc_cuda"
+))
+
+negative_potrf_info <- integer(safe_count)
+negative_potrf_info[[middle_ordinal]] <- -1L
+invisible(.Call(
+  "C_fixed_sp_cuda_test_force_next_potrf_info",
+  negative_potrf_info, PACKAGE = "fastkpc_cuda"
+))
+negative_potrf_error <- tryCatch(
+  fixed_sp_cuda_solve_batch(
+    handle, native_batch$Y, native_batch$SP,
+    native_batch$planned_route, native_batch$target_keys
+  ),
+  error = identity
+)
+invisible(.Call(
+  "C_fixed_sp_cuda_test_force_next_potrf_info",
+  integer(), PACKAGE = "fastkpc_cuda"
+))
+if (!inherits(negative_potrf_error, "error")) {
+  try(fixed_sp_cuda_residual_release(negative_potrf_error), silent = TRUE)
+  try(fixed_sp_cuda_residual_free(negative_potrf_error), silent = TRUE)
+  fail("negative potrf info returned a partial token")
+}
+assert_true(
+  grepl(
+    "Phase 3B batched potrf info contains a negative value",
+    conditionMessage(negative_potrf_error), fixed = TRUE
+  ) &&
+    identical(
+      fixed_sp_cuda_prepared_info(handle)$output_slot_state,
+      "free"
+    ),
+  "negative potrf info is a whole-call error that restores the output slot"
+)
+token <- fixed_sp_cuda_solve_batch(
+  handle, native_batch$Y, native_batch$SP, native_batch$planned_route,
+  native_batch$target_keys
+)
+negative_recovery_info <- fixed_sp_cuda_residual_info(token)
+assert_true(
+  negative_recovery_info$true_batched_target_count == safe_count &&
+    negative_recovery_info$cholesky_to_svd_count == 0L &&
+    negative_recovery_info$stable_reroute_count == 0L &&
+    negative_recovery_info$executed_cholesky_target_count == safe_count &&
+    isTRUE(negative_recovery_info$true_batched_kernel) &&
+    all(negative_recovery_info$reroute_reason == "") &&
+    all(negative_recovery_info$solver_status == "OK_CHOLESKY_BATCHED"),
+  "negative potrf failure leaves no partial reroute and slot is reusable"
+)
+fixed_sp_cuda_residual_release(token)
+fixed_sp_cuda_residual_free(token)
+token <- NULL
+
+invisible(.Call(
+  "C_fixed_sp_cuda_test_force_next_potrf_info",
+  rep.int(1L, safe_count), PACKAGE = "fastkpc_cuda"
+))
+all_factor_fail_token <- fixed_sp_cuda_solve_batch(
+  handle, native_batch$Y, native_batch$SP, native_batch$planned_route,
+  native_batch$target_keys
+)
+all_factor_fail_info <- fixed_sp_cuda_residual_info(all_factor_fail_token)
+assert_true(
+  all_factor_fail_info$potrf_batched_call_count == 1L &&
+    all_factor_fail_info$potrs_batched_call_count == 0L &&
+    all_factor_fail_info$true_batched_attempted_target_count == safe_count &&
+    all_factor_fail_info$true_batched_target_count == 0L &&
+    all_factor_fail_info$cholesky_single_target_count == 0L &&
+    all_factor_fail_info$cholesky_to_svd_count == safe_count &&
+    all_factor_fail_info$stable_reroute_count == safe_count &&
+    all_factor_fail_info$executed_cholesky_target_count == 0L &&
+    !isTRUE(all_factor_fail_info$true_batched_kernel) &&
+    all(all_factor_fail_info$reroute_reason ==
+          "CHOLESKY_NON_POSITIVE_PIVOT") &&
+    all(all_factor_fail_info$solver_status ==
+          "ERR_STABLE_PATH_NOT_IMPLEMENTED"),
+  "all factor failures reroute and skip zero-sized batched solve"
+)
+fixed_sp_cuda_residual_release(all_factor_fail_token)
+fixed_sp_cuda_residual_free(all_factor_fail_token)
+all_factor_fail_token <- NULL
+invisible(.Call(
+  "C_fixed_sp_cuda_test_force_next_potrf_info",
+  integer(), PACKAGE = "fastkpc_cuda"
+))
+
+invisible(.Call(
+  "C_fixed_sp_cuda_test_force_next_potrs_info",
+  -1L, PACKAGE = "fastkpc_cuda"
+))
+potrs_error <- tryCatch(
+  fixed_sp_cuda_solve_batch(
+    handle, native_batch$Y, native_batch$SP, native_batch$planned_route,
+    native_batch$target_keys
+  ),
+  error = identity
+)
+invisible(.Call(
+  "C_fixed_sp_cuda_test_force_next_potrs_info",
+  0L, PACKAGE = "fastkpc_cuda"
+))
+if (!inherits(potrs_error, "error")) {
+  try(fixed_sp_cuda_residual_release(potrs_error), silent = TRUE)
+  try(fixed_sp_cuda_residual_free(potrs_error), silent = TRUE)
+  fail("potrs scalar info returned a partial token")
+}
+assert_true(
+  grepl(
+      "Phase 3B batched potrs info",
+      conditionMessage(potrs_error), fixed = TRUE
+    ),
+  "potrs scalar info is a whole-batch failure"
+)
+
+token <- fixed_sp_cuda_solve_batch(
+  handle, native_batch$Y, native_batch$SP, native_batch$planned_route,
+  native_batch$target_keys
+)
+recovery_info <- fixed_sp_cuda_residual_info(token)
+assert_true(
+  recovery_info$true_batched_target_count == safe_count &&
+    recovery_info$cholesky_to_svd_count == 0L &&
+    recovery_info$stable_reroute_count == 0L &&
+    all(recovery_info$solver_status == "OK_CHOLESKY_BATCHED"),
+  "potrs batch failure leaves the output slot reusable"
+)
+fixed_sp_cuda_residual_release(token)
+fixed_sp_cuda_residual_free(token)
+token <- NULL
+
 fixed_sp_cuda_prepared_free(handle)
 handle <- NULL
 fixed_sp_cuda_runtime_free(runtime)
 runtime <- NULL
 
+multi_target_nonfinite_info <- local({
+  sha <- function(character) strrep(character, 64L)
+  overflow_dto <- list(
+    schema_version = "full-cuda-ci-prepared-s-native-dto-v1",
+    dataset_sha256 = sha("1"),
+    prepared_s_key_sha256 = sha("2"),
+    same_S_group_id = sha("3"),
+    phase1_setup_fingerprint = sha("4"),
+    provider_fingerprint = sha("5"),
+    semantic_fingerprint = sha("6"),
+    representation_fingerprint = sha("7"),
+    prepared_s_setup_schema_version = "full-cuda-ci-prepared-s-setup-v1",
+    native_dto_schema_version = "full-cuda-ci-prepared-s-native-dto-v1",
+    data_p = 48L,
+    n = 2L,
+    coefficient_dim = 1L,
+    null_dim = 1L,
+    penalty_count = 1L,
+    X = matrix(.Machine$double.xmax, nrow = 2L, ncol = 1L),
+    constraint_mode = "identity",
+    constraint_nullspace = NULL,
+    gram_matrix = matrix(1, nrow = 1L, ncol = 1L),
+    nullspace_gram_matrix = NULL,
+    penalty_blocks = list(penalty_1 = matrix(0, 1L, 1L)),
+    penalty_offsets_zero_based = 0L,
+    penalty_ranks = 0L,
+    penalty_sp_indices_zero_based = 0L,
+    penalty_sp_labels = "sp1",
+    H = NULL,
+    weights_policy = "none-or-unit",
+    offset_policy = "none-or-zero"
+  )
+  overflow_runtime <- fixed_sp_cuda_runtime_create(0L)
+  overflow_handle <- NULL
+  overflow_token <- NULL
+  on.exit({
+    if (!is.null(overflow_token)) {
+      try(fixed_sp_cuda_residual_release(overflow_token), silent = TRUE)
+      try(fixed_sp_cuda_residual_free(overflow_token), silent = TRUE)
+    }
+    if (!is.null(overflow_handle)) {
+      try(fixed_sp_cuda_prepared_free(overflow_handle), silent = TRUE)
+    }
+    try(fixed_sp_cuda_runtime_free(overflow_runtime), silent = TRUE)
+  }, add = TRUE)
+  fixed_sp_cuda_runtime_reserve(
+    overflow_runtime, 2L, 1L, 2L, 1L, 3L
+  )
+  overflow_handle <- fixed_sp_cuda_prepared_create(
+    overflow_runtime, overflow_dto
+  )
+  overflow_token <- fixed_sp_cuda_solve_batch(
+    overflow_handle,
+    matrix(2, nrow = 2L, ncol = 2L),
+    matrix(0, nrow = 1L, ncol = 2L),
+    rep("CHOLESKY_BATCHED", 2L),
+    c(sha("8"), sha("9")),
+    outputs = c("coefficients", "fitted", "residuals", "rss", "rhs")
+  )
+  overflow_info <- fixed_sp_cuda_residual_info(overflow_token)
+  fixed_sp_cuda_residual_release(overflow_token)
+  fixed_sp_cuda_residual_free(overflow_token)
+  overflow_token <- NULL
+  fixed_sp_cuda_prepared_free(overflow_handle)
+  overflow_handle <- NULL
+  fixed_sp_cuda_runtime_free(overflow_runtime)
+  overflow_runtime <- NULL
+  overflow_info
+})
+assert_true(
+  identical(
+    multi_target_nonfinite_info$solver_status,
+    rep("ERR_NONFINITE_OUTPUT", 2L)
+  ) &&
+    multi_target_nonfinite_info$true_batched_target_count == 0L &&
+    !isTRUE(multi_target_nonfinite_info$true_batched_kernel),
+  "true-batched count and flag follow final per-target output statuses"
+)
+
 cat(
-  "PASS Phase 3B fixed-sp fused target upload; max abs error: ",
+  "PASS Phase 3B fixed-sp true batched Cholesky; max abs error: ",
   format(numerical_max_abs_error, digits = 17L), "\n",
+  "forced potrf reroutes: ",
+  all_factor_fail_info$cholesky_to_svd_count, "/", safe_count,
+  "; partial compaction max abs error: ",
+  format(partial_numerical_max_abs_error, digits = 17L),
+  "; forced potrs error: ", conditionMessage(potrs_error), "\n",
   sep = ""
 )

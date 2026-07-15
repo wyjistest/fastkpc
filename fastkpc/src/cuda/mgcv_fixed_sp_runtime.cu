@@ -108,6 +108,14 @@ struct FixedSpGlobalResourceLedger {
   std::atomic<bool> inject_next_prepared_static_shadow_body_failure{false};
 };
 
+struct FixedSpBatchedInfoTestState {
+  std::mutex mutex;
+  bool potrf_armed = false;
+  std::vector<int> potrf_info;
+  bool potrs_armed = false;
+  int potrs_info = 0;
+};
+
 enum class FixedSpResourceKind {
   CudaDevice,
   CudaHost,
@@ -120,6 +128,31 @@ enum class FixedSpResourceKind {
 FixedSpGlobalResourceLedger& global_resource_ledger() {
   static FixedSpGlobalResourceLedger ledger;
   return ledger;
+}
+
+FixedSpBatchedInfoTestState& batched_info_test_state() {
+  static FixedSpBatchedInfoTestState state;
+  return state;
+}
+
+std::vector<int> consume_forced_potrf_info() {
+  FixedSpBatchedInfoTestState& state = batched_info_test_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (!state.potrf_armed) return std::vector<int>();
+  state.potrf_armed = false;
+  std::vector<int> info = std::move(state.potrf_info);
+  state.potrf_info.clear();
+  return info;
+}
+
+bool consume_forced_potrs_info(int* info) {
+  FixedSpBatchedInfoTestState& state = batched_info_test_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (!state.potrs_armed) return false;
+  state.potrs_armed = false;
+  *info = state.potrs_info;
+  state.potrs_info = 0;
+  return true;
 }
 
 ResourceLifecycleCounters& local_resource_counters(
@@ -1148,6 +1181,38 @@ __global__ void gather_fixed_sp_safe_rhs_kernel(
     row + static_cast<std::size_t>(q) * static_cast<std::size_t>(target)];
 }
 
+__global__ void make_fixed_sp_pointer_arrays(
+    double* systems,
+    double* theta,
+    int q,
+    int count,
+    double** system_ptrs,
+    double** theta_ptrs) {
+  const int index = static_cast<int>(blockIdx.x) *
+      static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+  if (index >= count) return;
+  const std::size_t ordinal = static_cast<std::size_t>(index);
+  const std::size_t q_size = static_cast<std::size_t>(q);
+  system_ptrs[index] = systems + ordinal * q_size * q_size;
+  theta_ptrs[index] = theta + ordinal * q_size;
+}
+
+__global__ void compact_fixed_sp_success_pointer_arrays(
+    const int* potrf_info,
+    int count,
+    double** system_ptrs,
+    double** theta_ptrs) {
+  if (blockIdx.x != 0U || threadIdx.x != 0U) return;
+  int output = 0;
+  for (int index = 0; index < count; ++index) {
+    if (potrf_info[index] == 0) {
+      system_ptrs[output] = system_ptrs[index];
+      theta_ptrs[output] = theta_ptrs[index];
+      output += 1;
+    }
+  }
+}
+
 __global__ void build_fixed_sp_residual_and_rss(
     const double* y,
     const double* fitted,
@@ -1909,6 +1974,13 @@ void resolve_fixed_sp_output_status_locked(
       token->diagnostics.nonfinite_output_count += 1;
     }
   }
+  token->diagnostics.true_batched_target_count =
+    static_cast<int>(std::count(
+      token->solver_statuses.begin(), token->solver_statuses.end(),
+      FixedSpStatus::OkCholeskyBatched));
+  token->diagnostics.true_batched_kernel =
+    token->target_count >= 2 &&
+    token->diagnostics.true_batched_target_count == token->target_count;
   token->diagnostics.solver_statuses = token->solver_statuses;
   token->output_status_resolved = true;
 }
@@ -2712,6 +2784,39 @@ void test_inject_next_blocked_consumer_launch_failure() {
   }
 }
 
+void test_force_next_fixed_sp_cuda_potrf_info(
+    const std::vector<int>& info) {
+  FixedSpBatchedInfoTestState& state = batched_info_test_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (info.empty()) {
+    state.potrf_armed = false;
+    state.potrf_info.clear();
+    return;
+  }
+  if (state.potrf_armed) {
+    throw std::runtime_error(
+      "Phase 3B forced potrf info is already pending");
+  }
+  state.potrf_info = info;
+  state.potrf_armed = true;
+}
+
+void test_force_next_fixed_sp_cuda_potrs_info(int info) {
+  FixedSpBatchedInfoTestState& state = batched_info_test_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (info == 0) {
+    state.potrs_armed = false;
+    state.potrs_info = 0;
+    return;
+  }
+  if (state.potrs_armed) {
+    throw std::runtime_error(
+      "Phase 3B forced potrs info is already pending");
+  }
+  state.potrs_info = info;
+  state.potrs_armed = true;
+}
+
 std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
     const std::shared_ptr<CudaRuntimeContext>& context,
     const PreparedSHostView& setup) {
@@ -3129,6 +3234,16 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       context->host_status_arena + stable_index_offset;
     int* h_potrf_info = h_stable_target_indices + reserved_targets;
     int* h_potrs_info = h_potrf_info + reserved_targets;
+    const std::size_t pointer_layout_required = checked_multiply(
+      reserved_targets, 2U, "fixed-sp pointer arena layout");
+    if (context->pointer_arena == nullptr ||
+        context->pointer_capacity < pointer_layout_required) {
+      throw std::runtime_error(
+        "fixed-sp pointer arena does not satisfy 2*targets layout");
+    }
+    double** d_system_ptrs =
+      reinterpret_cast<double**>(context->pointer_arena);
+    double** d_theta_ptrs = d_system_ptrs + reserved_targets;
 
     std::fill_n(
       h_safe_target_indices,
@@ -3229,8 +3344,6 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       ), "persist fixed-sp RHS in prepared output slot");
     }
 
-    const std::size_t q_squared = matrix_count(
-      handle->q, handle->q, "fixed-sp solve system");
     if (safe_count > 0) {
       constexpr unsigned int system_tile = 16U;
       const dim3 system_block(system_tile, system_tile, 1U);
@@ -3265,26 +3378,16 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         d_rhs, d_safe_target_indices, handle->q, safe_count, d_theta);
       check_cuda(cudaGetLastError(), "launch fixed-sp safe RHS gather");
     }
-    token->diagnostics.cholesky_single_target_count = safe_count;
-
-    for (int safe_ordinal = 0; safe_ordinal < safe_count; ++safe_ordinal) {
-      const int target = h_safe_target_indices[safe_ordinal];
-      const std::size_t target_offset = static_cast<std::size_t>(target);
-      const std::size_t safe_offset =
-        static_cast<std::size_t>(safe_ordinal);
-      double* system = d_systems + q_squared * safe_offset;
-      double* theta = d_theta +
-        static_cast<std::size_t>(handle->q) * safe_offset;
-
-      int* d_factor_info = d_potrf_info + safe_offset;
-      int* h_factor_info = h_potrf_info + safe_offset;
+    int successful_factor_count = 0;
+    if (safe_count == 1) {
+      token->diagnostics.cholesky_single_target_count = 1;
       check_cusolver(cusolverDnDpotrf(
         context->solver, CUBLAS_FILL_MODE_UPPER, handle->q,
-        system, handle->q, d_potrf_work, context->potrf_lwork,
-        d_factor_info
+        d_systems, handle->q, d_potrf_work, context->potrf_lwork,
+        d_potrf_info
       ), "factor fixed-sp Cholesky system");
       check_cuda(cudaMemcpyAsync(
-        h_factor_info, d_factor_info, sizeof(int),
+        h_potrf_info, d_potrf_info, sizeof(int),
         cudaMemcpyDeviceToHost, context->stream
       ), "copy fixed-sp Cholesky factor status");
       check_cuda(cudaEventRecord(
@@ -3295,38 +3398,177 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         context->cholesky_factor_checkpoint_event
       ), "wait for fixed-sp Cholesky factor checkpoint");
       context->diagnostics.cholesky_factor_checkpoint_wait_count += 1;
-      if (*h_factor_info < 0) {
+      if (*h_potrf_info < 0) {
         throw std::runtime_error(
           "fixed-sp Cholesky potrf reported an invalid argument");
       }
-      if (*h_factor_info > 0) {
+      if (*h_potrf_info > 0) {
+        const std::size_t target_offset = static_cast<std::size_t>(
+          h_safe_target_indices[0]);
         token->reroute_reasons[target_offset] =
           "CHOLESKY_NON_POSITIVE_PIVOT";
         token->diagnostics.stable_reroute_count += 1;
         token->diagnostics.cholesky_to_svd_count += 1;
-        continue;
+      } else {
+        check_cusolver(cusolverDnDpotrs(
+          context->solver, CUBLAS_FILL_MODE_UPPER, handle->q, 1,
+          d_systems, handle->q, d_theta, handle->q, d_potrs_info
+        ), "solve fixed-sp Cholesky system");
+        check_cuda(cudaMemcpyAsync(
+          h_potrs_info, d_potrs_info, sizeof(int),
+          cudaMemcpyDeviceToHost, context->stream
+        ), "copy fixed-sp Cholesky solve status");
+        check_cuda(cudaEventRecord(
+          context->cholesky_solve_checkpoint_event, context->stream
+        ), "record fixed-sp Cholesky solve checkpoint");
+        context->diagnostics.cholesky_solve_checkpoint_record_count += 1;
+        check_cuda(cudaEventSynchronize(
+          context->cholesky_solve_checkpoint_event
+        ), "wait for fixed-sp Cholesky solve checkpoint");
+        context->diagnostics.cholesky_solve_checkpoint_wait_count += 1;
+        if (*h_potrs_info != 0) {
+          throw std::runtime_error(
+            "fixed-sp Cholesky potrs reported a batch failure");
+        }
+        successful_factor_count = 1;
+      }
+    } else if (safe_count >= 2) {
+      token->diagnostics.true_batched_subgroup_count = 1;
+      token->diagnostics.true_batched_attempted_target_count = safe_count;
+
+      const std::size_t pointer_blocks =
+        (static_cast<std::size_t>(safe_count) + threads - 1U) / threads;
+      if (pointer_blocks == 0U ||
+          pointer_blocks > std::numeric_limits<unsigned int>::max()) {
+        throw std::runtime_error("fixed-sp pointer-array launch overflow");
+      }
+      make_fixed_sp_pointer_arrays<<<
+        static_cast<unsigned int>(pointer_blocks), threads,
+        0, context->stream
+      >>>(
+        d_systems, d_theta, handle->q, safe_count,
+        d_system_ptrs, d_theta_ptrs);
+      check_cuda(cudaGetLastError(),
+                 "launch fixed-sp batched pointer arrays");
+      check_cuda(cudaMemsetAsync(
+        d_potrf_info, 0,
+        allocation_bytes(static_cast<std::size_t>(safe_count), sizeof(int),
+                         "Phase 3B batched potrf info"),
+        context->stream
+      ), "zero Phase 3B batched potrf info");
+
+      std::vector<int> forced_potrf_info = consume_forced_potrf_info();
+      if (!forced_potrf_info.empty() &&
+          forced_potrf_info.size() != static_cast<std::size_t>(safe_count)) {
+        throw std::runtime_error(
+          "Phase 3B forced potrf info length mismatch");
+      }
+      check_cusolver(cusolverDnDpotrfBatched(
+        context->solver, CUBLAS_FILL_MODE_UPPER, handle->q,
+        d_system_ptrs, handle->q, d_potrf_info, safe_count
+      ), "Phase 3B batched potrf");
+      token->diagnostics.potrf_batched_call_count = 1;
+      if (!forced_potrf_info.empty()) {
+        std::copy(
+          forced_potrf_info.begin(), forced_potrf_info.end(), h_potrf_info);
+        check_cuda(cudaMemcpyAsync(
+          d_potrf_info, h_potrf_info,
+          allocation_bytes(
+            static_cast<std::size_t>(safe_count), sizeof(int),
+            "forced Phase 3B batched potrf info"),
+          cudaMemcpyHostToDevice, context->stream
+        ), "force Phase 3B batched potrf info");
+      }
+      check_cuda(cudaMemcpyAsync(
+        h_potrf_info, d_potrf_info,
+        allocation_bytes(static_cast<std::size_t>(safe_count), sizeof(int),
+                         "Phase 3B batched potrf info"),
+        cudaMemcpyDeviceToHost, context->stream
+      ), "copy Phase 3B batched potrf info");
+      check_cuda(cudaEventRecord(
+        context->cholesky_factor_checkpoint_event, context->stream
+      ), "record Phase 3B batched factor checkpoint");
+      context->diagnostics.cholesky_factor_checkpoint_record_count += 1;
+      check_cuda(cudaEventSynchronize(
+        context->cholesky_factor_checkpoint_event
+      ), "wait for Phase 3B batched factor checkpoint");
+      context->diagnostics.cholesky_factor_checkpoint_wait_count += 1;
+
+      for (int safe_ordinal = 0; safe_ordinal < safe_count; ++safe_ordinal) {
+        if (h_potrf_info[safe_ordinal] < 0) {
+          throw std::runtime_error(
+            "Phase 3B batched potrf info contains a negative value");
+        }
+      }
+      for (int safe_ordinal = 0; safe_ordinal < safe_count; ++safe_ordinal) {
+        if (h_potrf_info[safe_ordinal] == 0) {
+          successful_factor_count += 1;
+          continue;
+        }
+        const std::size_t target_offset = static_cast<std::size_t>(
+          h_safe_target_indices[safe_ordinal]);
+        token->reroute_reasons[target_offset] =
+          "CHOLESKY_NON_POSITIVE_PIVOT";
+        token->diagnostics.stable_reroute_count += 1;
+        token->diagnostics.cholesky_to_svd_count += 1;
       }
 
-      check_cusolver(cusolverDnDpotrs(
-        context->solver, CUBLAS_FILL_MODE_UPPER, handle->q, 1,
-        system, handle->q, theta, handle->q, d_potrs_info
-      ), "solve fixed-sp Cholesky system");
-      check_cuda(cudaMemcpyAsync(
-        h_potrs_info, d_potrs_info, sizeof(int),
-        cudaMemcpyDeviceToHost, context->stream
-      ), "copy fixed-sp Cholesky solve status");
-      check_cuda(cudaEventRecord(
-        context->cholesky_solve_checkpoint_event, context->stream
-      ), "record fixed-sp Cholesky solve checkpoint");
-      context->diagnostics.cholesky_solve_checkpoint_record_count += 1;
-      check_cuda(cudaEventSynchronize(
-        context->cholesky_solve_checkpoint_event
-      ), "wait for fixed-sp Cholesky solve checkpoint");
-      context->diagnostics.cholesky_solve_checkpoint_wait_count += 1;
-      if (*h_potrs_info != 0) {
-        throw std::runtime_error(
-          "fixed-sp Cholesky potrs reported a batch failure");
+      if (successful_factor_count > 0) {
+        compact_fixed_sp_success_pointer_arrays<<<
+          1U, 1U, 0, context->stream
+        >>>(
+          d_potrf_info, safe_count, d_system_ptrs, d_theta_ptrs);
+        check_cuda(cudaGetLastError(),
+                   "launch fixed-sp successful pointer compaction");
+        check_cuda(cudaMemsetAsync(
+          d_potrs_info, 0, sizeof(int), context->stream
+        ), "zero Phase 3B potrs scalar info");
+
+        int forced_potrs_info = 0;
+        const bool force_potrs_info =
+          consume_forced_potrs_info(&forced_potrs_info);
+        check_cusolver(cusolverDnDpotrsBatched(
+          context->solver, CUBLAS_FILL_MODE_UPPER, handle->q, 1,
+          d_system_ptrs, handle->q, d_theta_ptrs, handle->q,
+          d_potrs_info, successful_factor_count
+        ), "Phase 3B batched potrs");
+        token->diagnostics.potrs_batched_call_count = 1;
+        if (force_potrs_info) {
+          *h_potrs_info = forced_potrs_info;
+          check_cuda(cudaMemcpyAsync(
+            d_potrs_info, h_potrs_info, sizeof(int),
+            cudaMemcpyHostToDevice, context->stream
+          ), "force Phase 3B batched potrs info");
+        }
+        check_cuda(cudaMemcpyAsync(
+          h_potrs_info, d_potrs_info, sizeof(int),
+          cudaMemcpyDeviceToHost, context->stream
+        ), "copy Phase 3B batched potrs info");
+        check_cuda(cudaEventRecord(
+          context->cholesky_solve_checkpoint_event, context->stream
+        ), "record Phase 3B batched solve checkpoint");
+        context->diagnostics.cholesky_solve_checkpoint_record_count += 1;
+        check_cuda(cudaEventSynchronize(
+          context->cholesky_solve_checkpoint_event
+        ), "wait for Phase 3B batched solve checkpoint");
+        context->diagnostics.cholesky_solve_checkpoint_wait_count += 1;
+        if (*h_potrs_info != 0) {
+          throw std::runtime_error(
+            "Phase 3B batched potrs info is nonzero");
+        }
+        token->diagnostics.true_batched_target_count =
+          successful_factor_count;
       }
+    }
+
+    for (int safe_ordinal = 0; safe_ordinal < safe_count; ++safe_ordinal) {
+      if (h_potrf_info[safe_ordinal] != 0) continue;
+      const int target = h_safe_target_indices[safe_ordinal];
+      const std::size_t target_offset = static_cast<std::size_t>(target);
+      const std::size_t safe_offset =
+        static_cast<std::size_t>(safe_ordinal);
+      double* theta = d_theta +
+        static_cast<std::size_t>(handle->q) * safe_offset;
 
       if ((batch.output_mask & FixedSpOutputCoefficients) != 0U) {
         double* coefficients = slot->coefficients +
@@ -3380,10 +3622,10 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       }
 
       token->executed_routes[target_offset] = FixedSpRoute::CholeskyBatched;
-      token->solver_statuses[target_offset] = FixedSpStatus::OkCholeskySingle;
+      token->solver_statuses[target_offset] = safe_count >= 2 ?
+        FixedSpStatus::OkCholeskyBatched : FixedSpStatus::OkCholeskySingle;
       token->diagnostics.executed_cholesky_target_count += 1;
     }
-
     if (targets > slot->finite_status_capacity ||
         slot->host_finite_status == nullptr) {
       throw std::runtime_error("fixed-sp finite status capacity mismatch");
