@@ -162,8 +162,18 @@ struct DeviceResidualInfo {
   std::vector<std::string> reroute_reasons;
   std::vector<FixedSpStatus> solver_statuses;
   bool native_batch_call = false;
+  int batch_call_count = 0;
   bool true_batched_kernel = false;
+  int true_batched_subgroup_count = 0;
+  int true_batched_attempted_target_count = 0;
   int true_batched_target_count = 0;
+  int cholesky_single_target_count = 0;
+  int potrf_batched_call_count = 0;
+  int potrs_batched_call_count = 0;
+  int target_batch_h2d_call_count = 0;
+  int target_h2d_copy_count = 0;
+  std::size_t target_h2d_bytes = 0;
+  bool canonical_output_order_exact = false;
   int stable_reroute_count = 0;
   int planned_cholesky_target_count = 0;
   int planned_qr_target_count = 0;

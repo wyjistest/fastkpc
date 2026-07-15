@@ -3998,8 +3998,23 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
     Rcpp::Named("solver_status") = solver_status
   );
   result["native_batch_call"] = info.native_batch_call;
+  result["batch_call_count"] = info.batch_call_count;
   result["true_batched_kernel"] = info.true_batched_kernel;
+  result["true_batched_subgroup_count"] =
+    info.true_batched_subgroup_count;
+  result["true_batched_attempted_target_count"] =
+    info.true_batched_attempted_target_count;
   result["true_batched_target_count"] = info.true_batched_target_count;
+  result["cholesky_single_target_count"] =
+    info.cholesky_single_target_count;
+  result["potrf_batched_call_count"] = info.potrf_batched_call_count;
+  result["potrs_batched_call_count"] = info.potrs_batched_call_count;
+  result["target_batch_h2d_call_count"] =
+    info.target_batch_h2d_call_count;
+  result["target_h2d_copy_count"] = info.target_h2d_copy_count;
+  result["target_h2d_bytes"] = static_cast<double>(info.target_h2d_bytes);
+  result["canonical_output_order_exact"] =
+    info.canonical_output_order_exact;
   result["stable_reroute_count"] = info.stable_reroute_count;
   result["planned_cholesky_target_count"] =
     info.planned_cholesky_target_count;
