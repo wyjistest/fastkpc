@@ -49,24 +49,35 @@
 
 namespace {
 
+std::int64_t fixed_sp_current_pid() {
+  return static_cast<std::int64_t>(getpid());
+}
+
+template <typename T>
+struct FixedSpExternalHolder {
+  std::shared_ptr<T> value;
+  std::int64_t creator_pid = -1;
+};
+
 SEXP fixed_sp_cuda_runtime_tag() {
   static SEXP tag = Rf_install("fastkpc_fixed_sp_cuda_runtime");
   return tag;
 }
 
 using FixedSpRuntimeHolder =
-  std::shared_ptr<fastkpc::CudaRuntimeContext>;
+  FixedSpExternalHolder<fastkpc::CudaRuntimeContext>;
 
 FixedSpRuntimeHolder* fixed_sp_cuda_runtime_holder(SEXP ptr,
                                                    bool require_live) {
   if (TYPEOF(ptr) != EXTPTRSXP ||
       R_ExternalPtrTag(ptr) != fixed_sp_cuda_runtime_tag()) {
     Rcpp::stop(
-      "fixed-sp CUDA runtime must be a tagged external pointer");
+      "wrong fixed-sp external pointer tag: fixed-sp CUDA runtime must be "
+      "a tagged external pointer");
   }
   auto* holder =
     static_cast<FixedSpRuntimeHolder*>(R_ExternalPtrAddr(ptr));
-  if (holder == nullptr || (require_live && !*holder)) {
+  if (holder == nullptr || (require_live && !holder->value)) {
     Rcpp::stop("fixed-sp CUDA runtime has been freed");
   }
   return holder;
@@ -76,9 +87,11 @@ void fixed_sp_cuda_runtime_finalizer(SEXP ptr) {
   auto* holder =
     static_cast<FixedSpRuntimeHolder*>(R_ExternalPtrAddr(ptr));
   if (holder == nullptr) return;
-  try {
-    fastkpc::free_fixed_sp_runtime(holder);
-  } catch (...) {
+  if (holder->creator_pid == fixed_sp_current_pid()) {
+    try {
+      fastkpc::free_fixed_sp_runtime(&holder->value);
+    } catch (...) {
+    }
   }
   delete holder;
   R_ClearExternalPtr(ptr);
@@ -90,18 +103,19 @@ SEXP fixed_sp_cuda_prepared_tag() {
 }
 
 using FixedSpPreparedHolder =
-  std::shared_ptr<fastkpc::PreparedSGpuHandle>;
+  FixedSpExternalHolder<fastkpc::PreparedSGpuHandle>;
 
 FixedSpPreparedHolder* fixed_sp_cuda_prepared_holder(SEXP ptr,
                                                      bool require_live) {
   if (TYPEOF(ptr) != EXTPTRSXP ||
       R_ExternalPtrTag(ptr) != fixed_sp_cuda_prepared_tag()) {
     Rcpp::stop(
-      "fixed-sp CUDA prepared handle must be a tagged external pointer");
+      "wrong fixed-sp external pointer tag: fixed-sp CUDA prepared handle "
+      "must be a tagged external pointer");
   }
   auto* holder =
     static_cast<FixedSpPreparedHolder*>(R_ExternalPtrAddr(ptr));
-  if (holder == nullptr || (require_live && !*holder)) {
+  if (holder == nullptr || (require_live && !holder->value)) {
     Rcpp::stop("fixed-sp CUDA prepared handle has been freed");
   }
   return holder;
@@ -111,9 +125,11 @@ void fixed_sp_cuda_prepared_finalizer(SEXP ptr) {
   auto* holder =
     static_cast<FixedSpPreparedHolder*>(R_ExternalPtrAddr(ptr));
   if (holder == nullptr) return;
-  try {
-    fastkpc::free_prepared_s_gpu(holder);
-  } catch (...) {
+  if (holder->creator_pid == fixed_sp_current_pid()) {
+    try {
+      fastkpc::free_prepared_s_gpu(&holder->value);
+    } catch (...) {
+    }
   }
   delete holder;
   R_ClearExternalPtr(ptr);
@@ -125,14 +141,15 @@ SEXP fixed_sp_cuda_residual_tag() {
 }
 
 using FixedSpResidualHolder =
-  std::shared_ptr<fastkpc::DeviceResidualBatch>;
+  FixedSpExternalHolder<fastkpc::DeviceResidualBatch>;
 
 FixedSpResidualHolder* fixed_sp_cuda_residual_holder(SEXP ptr,
                                                      bool require_live) {
   if (TYPEOF(ptr) != EXTPTRSXP ||
       R_ExternalPtrTag(ptr) != fixed_sp_cuda_residual_tag()) {
     Rcpp::stop(
-      "fixed-sp CUDA residual token must be a tagged external pointer");
+      "wrong fixed-sp external pointer tag: fixed-sp CUDA residual token "
+      "must be a tagged external pointer");
   }
   auto* holder =
     static_cast<FixedSpResidualHolder*>(R_ExternalPtrAddr(ptr));
@@ -140,7 +157,7 @@ FixedSpResidualHolder* fixed_sp_cuda_residual_holder(SEXP ptr,
     if (require_live) Rcpp::stop("fixed-sp CUDA residual token has been freed");
     return nullptr;
   }
-  if (require_live && !*holder) {
+  if (require_live && !holder->value) {
     Rcpp::stop("fixed-sp CUDA residual token has been freed");
   }
   return holder;
@@ -150,9 +167,11 @@ void fixed_sp_cuda_residual_finalizer(SEXP ptr) {
   auto* holder =
     static_cast<FixedSpResidualHolder*>(R_ExternalPtrAddr(ptr));
   if (holder == nullptr) return;
-  try {
-    fastkpc::free_device_residual(holder);
-  } catch (...) {
+  if (holder->creator_pid == fixed_sp_current_pid()) {
+    try {
+      fastkpc::free_device_residual(&holder->value);
+    } catch (...) {
+    }
   }
   delete holder;
   R_ClearExternalPtr(ptr);
@@ -3378,7 +3397,7 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_create(SEXP device_s) {
   if (device_id < 0) Rcpp::stop("device_id must be non-negative");
 
   FixedSpRuntimeHolder context =
-    fastkpc::create_fixed_sp_runtime(device_id);
+    {fastkpc::create_fixed_sp_runtime(device_id), fixed_sp_current_pid()};
   auto* holder = new FixedSpRuntimeHolder(std::move(context));
   SEXP ext = PROTECT(R_MakeExternalPtr(
     holder, fixed_sp_cuda_runtime_tag(), R_NilValue));
@@ -3421,6 +3440,20 @@ extern "C" SEXP C_fixed_sp_cuda_test_resource_snapshot() {
   result["cleanup_error_count"] =
     static_cast<double>(snapshot.cleanup_error_count);
   return result;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_test_device_count() {
+  BEGIN_RCPP
+  return Rf_ScalarInteger(fastkpc::test_fixed_sp_cuda_device_count());
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_test_set_device(SEXP device_s) {
+  BEGIN_RCPP
+  const int device_id = scalar_integer(device_s, "test device_id");
+  fastkpc::test_fixed_sp_cuda_set_device(device_id);
+  return R_NilValue;
   END_RCPP
 }
 
@@ -3468,7 +3501,7 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_reserve(
   capacities.penalty_count = scalar_integer(penalties_s, "penalty_count");
   capacities.augmented_rows =
     scalar_integer(augmented_rows_s, "augmented_rows");
-  fastkpc::reserve_fixed_sp_runtime(*holder, capacities);
+  fastkpc::reserve_fixed_sp_runtime(holder->value, capacities);
   return R_NilValue;
   END_RCPP
 }
@@ -3478,7 +3511,7 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_info(SEXP runtime_s) {
   FixedSpRuntimeHolder* holder =
     fixed_sp_cuda_runtime_holder(runtime_s, true);
   const fastkpc::FixedSpRuntimeInfo info =
-    fastkpc::fixed_sp_runtime_info(*holder);
+    fastkpc::fixed_sp_runtime_info(holder->value);
   return Rcpp::List::create(
     Rcpp::Named("device_id") = info.device_id,
     Rcpp::Named("gpu_name") = info.gpu_name,
@@ -3538,7 +3571,7 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_free(SEXP runtime_s) {
   BEGIN_RCPP
   FixedSpRuntimeHolder* holder =
     fixed_sp_cuda_runtime_holder(runtime_s, false);
-  fastkpc::free_fixed_sp_runtime(holder);
+  fastkpc::free_fixed_sp_runtime(&holder->value);
   return R_NilValue;
   END_RCPP
 }
@@ -3716,7 +3749,8 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_create(SEXP runtime_s,
   }
 
   FixedSpPreparedHolder prepared =
-    fastkpc::create_prepared_s_gpu(*runtime_holder, setup);
+    {fastkpc::create_prepared_s_gpu(runtime_holder->value, setup),
+     fixed_sp_current_pid()};
   auto* holder = new FixedSpPreparedHolder(std::move(prepared));
   SEXP ext = PROTECT(R_MakeExternalPtr(
     holder, fixed_sp_cuda_prepared_tag(), R_NilValue));
@@ -3730,7 +3764,8 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_info(SEXP prepared_s) {
   BEGIN_RCPP
   FixedSpPreparedHolder* holder =
     fixed_sp_cuda_prepared_holder(prepared_s, true);
-  const fastkpc::PreparedSInfo info = fastkpc::prepared_s_gpu_info(*holder);
+  const fastkpc::PreparedSInfo info =
+    fastkpc::prepared_s_gpu_info(holder->value);
   return Rcpp::List::create(
     Rcpp::Named("prepared_s_key_sha256") = info.prepared_s_key_sha256,
     Rcpp::Named("n") = info.n,
@@ -3755,7 +3790,7 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_free(SEXP prepared_s) {
   BEGIN_RCPP
   FixedSpPreparedHolder* holder =
     fixed_sp_cuda_prepared_holder(prepared_s, false);
-  fastkpc::free_prepared_s_gpu(holder);
+  fastkpc::free_prepared_s_gpu(&holder->value);
   return R_NilValue;
   END_RCPP
 }
@@ -3766,7 +3801,7 @@ extern "C" SEXP C_fixed_sp_cuda_test_prepared_static_shadow(
   FixedSpPreparedHolder* holder =
     fixed_sp_cuda_prepared_holder(prepared_s, true);
   const fastkpc::PreparedSStaticShadow shadow =
-    fastkpc::test_prepared_s_static_shadow(*holder);
+    fastkpc::test_prepared_s_static_shadow(holder->value);
   Rcpp::NumericMatrix X_null(shadow.n, shadow.null_dim);
   std::copy(shadow.X_null.begin(), shadow.X_null.end(), X_null.begin());
   Rcpp::NumericMatrix gram(shadow.null_dim, shadow.null_dim);
@@ -3795,7 +3830,7 @@ extern "C" SEXP C_fixed_sp_cuda_solve_batch(
   FixedSpPreparedHolder* prepared_holder =
     fixed_sp_cuda_prepared_holder(prepared_s, true);
   const fastkpc::PreparedSInfo prepared_info =
-    fastkpc::prepared_s_gpu_info(*prepared_holder);
+    fastkpc::prepared_s_gpu_info(prepared_holder->value);
 
   if (TYPEOF(Y_s) != REALSXP || !Rf_isMatrix(Y_s) || Rf_isObject(Y_s) ||
       !has_only_attributes(Y_s, {R_DimSymbol, R_DimNamesSymbol})) {
@@ -3854,10 +3889,13 @@ extern "C" SEXP C_fixed_sp_cuda_solve_batch(
   SEXP ext = PROTECT(R_MakeExternalPtr(
     nullptr, fixed_sp_cuda_residual_tag(), R_NilValue));
   R_RegisterCFinalizerEx(ext, fixed_sp_cuda_residual_finalizer, TRUE);
-  auto* holder = new FixedSpResidualHolder();
+  auto* holder = new FixedSpResidualHolder{
+    std::shared_ptr<fastkpc::DeviceResidualBatch>(), fixed_sp_current_pid()
+  };
   R_SetExternalPtrAddr(ext, holder);
   try {
-    *holder = fastkpc::solve_fixed_sp_batch(*prepared_holder, batch);
+    holder->value = fastkpc::solve_fixed_sp_batch(
+      prepared_holder->value, batch);
   } catch (...) {
     delete holder;
     R_ClearExternalPtr(ext);
@@ -3874,7 +3912,7 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
   FixedSpResidualHolder* holder =
     fixed_sp_cuda_residual_holder(residual_s, true);
   const fastkpc::DeviceResidualInfo info =
-    fastkpc::device_residual_info(*holder);
+    fastkpc::device_residual_info(holder->value);
   const std::size_t targets = static_cast<std::size_t>(info.target_count);
   if (info.target_keys.size() != targets ||
       info.planned_routes.size() != targets ||
@@ -3986,7 +4024,7 @@ extern "C" SEXP C_fixed_sp_cuda_materialize_shadow(
     fixed_sp_cuda_residual_holder(residual_s, true);
   const std::uint32_t output_mask = fixed_sp_output_mask(outputs_s);
   const fastkpc::FixedSpShadowResult shadow =
-    fastkpc::materialize_fixed_sp_shadow(*holder, output_mask);
+    fastkpc::materialize_fixed_sp_shadow(holder->value, output_mask);
   const std::size_t targets = static_cast<std::size_t>(shadow.target_count);
   if (shadow.successful_targets.size() != targets) {
     Rcpp::stop("fixed-sp shadow success metadata size mismatch");
@@ -4053,7 +4091,7 @@ extern "C" SEXP C_fixed_sp_cuda_residual_release(SEXP residual_s) {
   BEGIN_RCPP
   FixedSpResidualHolder* holder =
     fixed_sp_cuda_residual_holder(residual_s, true);
-  fastkpc::release_device_residual(*holder);
+  fastkpc::release_device_residual(holder->value);
   return R_NilValue;
   END_RCPP
 }
@@ -4063,7 +4101,7 @@ extern "C" SEXP C_fixed_sp_cuda_residual_free(SEXP residual_s) {
   FixedSpResidualHolder* holder =
     fixed_sp_cuda_residual_holder(residual_s, false);
   if (holder == nullptr) return R_NilValue;
-  fastkpc::free_device_residual(holder);
+  fastkpc::free_device_residual(&holder->value);
   delete holder;
   R_ClearExternalPtr(residual_s);
   return R_NilValue;
@@ -4075,7 +4113,7 @@ extern "C" SEXP C_fixed_sp_cuda_test_coefficient_shadow(SEXP residual_s) {
   FixedSpResidualHolder* holder =
     fixed_sp_cuda_residual_holder(residual_s, true);
   const fastkpc::DeviceCoefficientShadow shadow =
-    fastkpc::test_device_residual_coefficient_shadow(*holder);
+    fastkpc::test_device_residual_coefficient_shadow(holder->value);
   Rcpp::NumericMatrix coefficients(
     shadow.coefficient_dim, shadow.target_count);
   std::copy(shadow.coefficients.begin(), shadow.coefficients.end(),
@@ -4089,7 +4127,27 @@ C_fixed_sp_cuda_test_inject_consumer_registration_failure(SEXP residual_s) {
   BEGIN_RCPP
   FixedSpResidualHolder* holder =
     fixed_sp_cuda_residual_holder(residual_s, true);
-  fastkpc::test_inject_device_residual_consumer_registration_failure(*holder);
+  fastkpc::test_inject_device_residual_consumer_registration_failure(
+    holder->value);
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_test_register_blocked_consumer(
+    SEXP residual_s) {
+  BEGIN_RCPP
+  FixedSpResidualHolder* holder =
+    fixed_sp_cuda_residual_holder(residual_s, true);
+  fastkpc::test_register_blocked_device_residual_consumer(holder->value);
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_test_complete_consumer(SEXP residual_s) {
+  BEGIN_RCPP
+  FixedSpResidualHolder* holder =
+    fixed_sp_cuda_residual_holder(residual_s, true);
+  fastkpc::test_complete_blocked_device_residual_consumer(holder->value);
   return R_NilValue;
   END_RCPP
 }
@@ -8256,6 +8314,8 @@ static const R_CallMethodDef call_methods[] = {
   {"C_legacy_dcov_spectra_matvec_cuda_handle_free", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_free), 1},
   {"C_fixed_sp_cuda_runtime_create", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_create), 1},
   {"C_fixed_sp_cuda_test_resource_snapshot", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_resource_snapshot), 0},
+  {"C_fixed_sp_cuda_test_device_count", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_device_count), 0},
+  {"C_fixed_sp_cuda_test_set_device", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_set_device), 1},
   {"C_fixed_sp_cuda_test_inject_next_resource_acquire_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_resource_acquire_failure), 1},
   {"C_fixed_sp_cuda_test_inject_next_device_free_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_device_free_failure), 0},
   {"C_fixed_sp_cuda_test_exercise_resource_teardown_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_exercise_resource_teardown_failure), 1},
@@ -8273,6 +8333,8 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fixed_sp_cuda_residual_free", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_free), 1},
   {"C_fixed_sp_cuda_test_coefficient_shadow", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_coefficient_shadow), 1},
   {"C_fixed_sp_cuda_test_inject_consumer_registration_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_consumer_registration_failure), 1},
+  {"C_fixed_sp_cuda_test_register_blocked_consumer", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_register_blocked_consumer), 1},
+  {"C_fixed_sp_cuda_test_complete_consumer", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_complete_consumer), 1},
   {"C_fast_dcov_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fast_dcov_batch_cuda), 4},
   {"C_fast_hsic_gamma_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_gamma_cuda), 3},
   {"C_fast_hsic_perm_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_perm_cuda), 6},

@@ -54,6 +54,12 @@ void test_inject_next_fixed_sp_cuda_resource_acquire_failure(
 void test_exercise_fixed_sp_cuda_resource_teardown_failure(
   const std::string& resource);
 void test_inject_next_fixed_sp_cuda_device_free_failure();
+int test_fixed_sp_cuda_device_count();
+void test_fixed_sp_cuda_set_device(int device_id);
+void test_register_blocked_device_residual_consumer(
+  const std::shared_ptr<DeviceResidualBatch>& token);
+void test_complete_blocked_device_residual_consumer(
+  const std::shared_ptr<DeviceResidualBatch>& token);
 
 }  // namespace fastkpc
 
