@@ -87,16 +87,42 @@ subset_target <- function(source, index) {
   )
 }
 
-first_safe_target <- subset_target(batch, safe_indices[[1L]])
-dto <- fastkpc_full_cuda_fixed_sp_native_dto(first_safe_target$setup)
+safe_batch <- subset_target(batch, safe_indices)
+safe_count <- length(safe_indices)
+dto <- fastkpc_full_cuda_fixed_sp_native_dto(safe_batch$setup)
 native_batch <- fastkpc_full_cuda_fixed_sp_native_batch(
-  first_safe_target, dto
+  safe_batch, dto
 )
 assert_true(
-  identical(native_batch$target_count, 1L) &&
-    identical(native_batch$planned_route, "CHOLESKY_BATCHED") &&
+  identical(native_batch$target_count, safe_count) &&
+    all(native_batch$planned_route == "CHOLESKY_BATCHED") &&
     nrow(native_batch$SP) > 1L,
-  "Task 1 submits only the first safe target from the selected setup"
+  "Task 2 submits every safe target from the selected setup"
+)
+
+oracle_results <- lapply(
+  seq_len(safe_count),
+  function(index) {
+    fastkpc_mgcv_magic_fixed_sp_from_prepared(
+      prepared_setup = safe_batch$setup,
+      target_state = list(
+        row = safe_batch$target_rows[index, , drop = FALSE],
+        y = as.numeric(safe_batch$Y[, index])
+      )
+    )
+  }
+)
+oracle_coefficients <- vapply(
+  oracle_results, `[[`, numeric(dto$coefficient_dim), "coefficients"
+)
+oracle_fitted <- vapply(oracle_results, `[[`, numeric(dto$n), "fitted")
+oracle_residuals <- vapply(
+  oracle_results, `[[`, numeric(dto$n), "residuals"
+)
+oracle_rss <- vapply(
+  oracle_results,
+  function(result) sum(result$residuals^2),
+  numeric(1L)
 )
 
 runtime <- fixed_sp_cuda_runtime_create(0L)
@@ -116,13 +142,14 @@ on.exit({
 }, add = TRUE)
 
 fixed_sp_cuda_runtime_reserve(
-  runtime, dto$n, dto$null_dim, 1L, dto$penalty_count,
+  runtime, dto$n, dto$null_dim, safe_count, dto$penalty_count,
   as.integer(dto$n + sum(dto$penalty_ranks))
 )
 handle <- fixed_sp_cuda_prepared_create(runtime, dto)
 token <- fixed_sp_cuda_solve_batch(
   handle, native_batch$Y, native_batch$SP, native_batch$planned_route,
-  native_batch$target_keys, outputs = "residuals"
+  native_batch$target_keys,
+  outputs = c("coefficients", "fitted", "residuals", "rss", "rhs")
 )
 info <- fixed_sp_cuda_residual_info(token)
 
@@ -155,41 +182,94 @@ assert_true(
 )
 
 assert_true(
-  isTRUE(info$native_batch_call) && info$batch_call_count == 0L,
-  "Phase 3A remains one native submission without a Phase 3B batch call"
+  isTRUE(info$native_batch_call),
+  "one native batch call"
+)
+assert_true(
+  info$batch_call_count == 1L,
+  "one public solve call"
 )
 
-# Attempted targets are those passed to potrfBatched. Successful targets also
-# require potrfBatched, potrsBatched, and OK_CHOLESKY_BATCHED.
+# Task 2 fuses upload and construction but still sends every safe target
+# through the existing single-target factor and solve calls.
 assert_true(
   info$true_batched_attempted_target_count == 0L &&
     info$true_batched_target_count == 0L &&
-    info$cholesky_single_target_count == 0L &&
+    info$cholesky_single_target_count == safe_count &&
     info$potrf_batched_call_count == 0L &&
     info$potrs_batched_call_count == 0L,
-  "Phase 3A reports no Phase 3B Cholesky batch activity"
+  "Task 2 retains repeated single Cholesky after fused construction"
 )
 
-# The whole-batch flag requires at least two public targets and every target to
-# be OK_CHOLESKY_BATCHED. One subgroup requires two safe targets to enter the
-# batched factor and solve.
+# True-batch flags remain false until Task 3 replaces these single-target
+# solver calls with potrfBatched and potrsBatched.
 assert_true(
   !isTRUE(info$true_batched_kernel) &&
     info$true_batched_subgroup_count == 0L,
-  "single-target Phase 3A execution is not a true batched kernel"
+  "Task 2 does not yet execute a true batched kernel"
 )
 assert_true(
-  info$target_batch_h2d_call_count == 0L &&
-    info$target_h2d_copy_count == 0L && info$target_h2d_bytes == 0 &&
-    !isTRUE(info$canonical_output_order_exact),
-  "Phase 3A reports no fused target upload or batched output ordering"
+  info$target_batch_h2d_call_count == 1L,
+  "one target batch upload phase"
 )
 assert_true(
-  identical(info$planned_route, "CHOLESKY_BATCHED") &&
-    identical(info$executed_route, "CHOLESKY_BATCHED") &&
-    identical(info$reroute_reason, "") &&
-    identical(info$solver_status, "OK_CHOLESKY_SINGLE"),
-  "Phase 3A route and status diagnostics remain unchanged"
+  info$target_h2d_copy_count == 2L,
+  "one Y and one SP copy"
+)
+assert_true(
+  info$target_h2d_bytes == 8 * (length(native_batch$Y) +
+    length(native_batch$SP)),
+  "target H2D byte accounting"
+)
+assert_true(
+  info$rhs_device_build_count == 1L &&
+    identical(info$rhs_authority, "cuda-x0-transpose-y") &&
+    isTRUE(info$full_cuda_data_plane),
+  "one CUDA RHS build"
+)
+assert_true(
+  isTRUE(info$canonical_output_order_exact) &&
+    identical(info$target_keys, native_batch$target_keys),
+  "canonical output mapping preserves target-key order"
+)
+assert_true(
+  identical(info$planned_route, native_batch$planned_route) &&
+    identical(info$executed_route,
+              rep("CHOLESKY_BATCHED", safe_count)) &&
+    identical(info$reroute_reason, rep("", safe_count)) &&
+    identical(info$solver_status,
+              rep("OK_CHOLESKY_SINGLE", safe_count)),
+  "all safe targets preserve canonical route and status order"
+)
+
+shadow <- fixed_sp_cuda_materialize_shadow(
+  token,
+  outputs = c("coefficients", "fitted", "residuals", "rss", "rhs")
+)
+output_max_abs_errors <- c(
+  coefficients = max(abs(shadow$coefficients - oracle_coefficients)),
+  fitted = max(abs(shadow$fitted - oracle_fitted)),
+  residuals = max(abs(shadow$residuals - oracle_residuals)),
+  rss = max(abs(shadow$rss - oracle_rss)),
+  rhs = max(abs(shadow$cuda_nullspace_rhs -
+                  safe_batch$oracle_nullspace_rhs))
+)
+numerical_max_abs_error <- max(output_max_abs_errors)
+assert_true(
+  identical(dim(shadow$coefficients),
+            c(dto$coefficient_dim, safe_count)) &&
+    identical(dim(shadow$fitted), c(dto$n, safe_count)) &&
+    identical(dim(shadow$residuals), c(dto$n, safe_count)) &&
+    identical(length(shadow$rss), safe_count) &&
+    identical(dim(shadow$cuda_nullspace_rhs),
+              c(dto$null_dim, safe_count)) &&
+    all(output_max_abs_errors[c(
+      "coefficients", "fitted", "residuals", "rss"
+    )] < 1e-7) && output_max_abs_errors[["rhs"]] < 1e-12,
+  paste0(
+    "all canonical safe output columns match the fixed-sp oracle; max=",
+    format(numerical_max_abs_error, digits = 17L)
+  )
 )
 
 fixed_sp_cuda_residual_release(token)
@@ -200,4 +280,8 @@ handle <- NULL
 fixed_sp_cuda_runtime_free(runtime)
 runtime <- NULL
 
-cat("PASS Phase 3B fixed-sp true-batch diagnostics\n")
+cat(
+  "PASS Phase 3B fixed-sp fused target upload; max abs error: ",
+  format(numerical_max_abs_error, digits = 17L), "\n",
+  sep = ""
+)

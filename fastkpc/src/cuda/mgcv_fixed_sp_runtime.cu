@@ -1096,32 +1096,56 @@ __global__ void initialize_fixed_sp_outputs_invalid(
   if (index < rhs_count) rhs[index] = invalid;
 }
 
-__global__ void build_fixed_sp_systems(
+__global__ void build_fixed_sp_systems_kernel(
     const double* gram,
     const double* projected_penalties,
     const double* sp,
-    int q,
+    const int* safe_target_indices,
+    int safe_count,
     int penalty_count,
-    int target_count,
+    int q,
     double* systems) {
-  const std::size_t index =
-    static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int safe_ordinal = static_cast<int>(blockIdx.z);
+  const int row = static_cast<int>(blockIdx.x) *
+      static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+  const int column = static_cast<int>(blockIdx.y) *
+      static_cast<int>(blockDim.y) + static_cast<int>(threadIdx.y);
+  if (safe_ordinal >= safe_count || row >= q || column >= q) return;
+
+  const int target = safe_target_indices[safe_ordinal];
   const std::size_t q_squared =
     static_cast<std::size_t>(q) * static_cast<std::size_t>(q);
-  const std::size_t system_count =
-    q_squared * static_cast<std::size_t>(target_count);
-  if (index >= system_count) return;
-
-  const std::size_t target = index / q_squared;
-  const std::size_t element = index - target * q_squared;
+  const std::size_t element = static_cast<std::size_t>(row) +
+    static_cast<std::size_t>(column) * static_cast<std::size_t>(q);
   double value = gram[element];
   for (int penalty = 0; penalty < penalty_count; ++penalty) {
     value += sp[static_cast<std::size_t>(penalty) +
-                static_cast<std::size_t>(penalty_count) * target] *
+                static_cast<std::size_t>(penalty_count) *
+                  static_cast<std::size_t>(target)] *
       projected_penalties[element + q_squared *
         static_cast<std::size_t>(penalty)];
   }
-  systems[index] = value;
+  systems[element + q_squared * static_cast<std::size_t>(safe_ordinal)] =
+    value;
+}
+
+__global__ void gather_fixed_sp_safe_rhs_kernel(
+    const double* canonical_rhs,
+    const int* safe_target_indices,
+    int q,
+    int safe_count,
+    double* safe_theta) {
+  const std::size_t index =
+    static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t count = static_cast<std::size_t>(q) *
+    static_cast<std::size_t>(safe_count);
+  if (index >= count) return;
+
+  const std::size_t safe_ordinal = index / static_cast<std::size_t>(q);
+  const std::size_t row = index - safe_ordinal * static_cast<std::size_t>(q);
+  const int target = safe_target_indices[safe_ordinal];
+  safe_theta[index] = canonical_rhs[
+    row + static_cast<std::size_t>(q) * static_cast<std::size_t>(target)];
 }
 
 __global__ void build_fixed_sp_residual_and_rss(
@@ -1155,6 +1179,7 @@ __global__ void build_fixed_sp_residual_and_rss(
 __global__ void check_fixed_sp_outputs_finite(
     const double* rhs,
     const double* theta,
+    const int* safe_target_indices,
     const double* coefficients,
     const double* fitted,
     const double* residuals,
@@ -1162,19 +1187,21 @@ __global__ void check_fixed_sp_outputs_finite(
     int n,
     int p,
     int q,
-    int target_count,
+    int safe_count,
     std::uint32_t output_mask,
     int* finite_status) {
-  const int target =
+  const int safe_ordinal =
     static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) +
     static_cast<int>(threadIdx.x);
-  if (target >= target_count) return;
+  if (safe_ordinal >= safe_count) return;
 
+  const int target = safe_target_indices[safe_ordinal];
   bool finite = true;
   const std::size_t target_offset = static_cast<std::size_t>(target);
   const double* target_rhs = rhs + static_cast<std::size_t>(q) * target_offset;
   const double* target_theta =
-    theta + static_cast<std::size_t>(q) * target_offset;
+    theta + static_cast<std::size_t>(q) *
+      static_cast<std::size_t>(safe_ordinal);
   for (int row = 0; row < q; ++row) {
     finite = finite && isfinite(target_rhs[row]) && isfinite(target_theta[row]);
   }
@@ -2224,7 +2251,8 @@ void CudaRuntimeContext::reserve(
   double_required = checked_add(
     double_required, static_cast<std::size_t>(requested_potrf_lwork),
     "double arena");
-  const std::size_t int_required = checked_add(targets, 1U, "int arena");
+  const std::size_t int_required = checked_add(
+    checked_multiply(targets, 3U, "int arena"), 1U, "int arena");
   const std::size_t pointer_required =
     checked_multiply(targets, 2U, "pointer arena");
 
@@ -3002,6 +3030,7 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
     token->diagnostics.coefficient_dim = handle->p;
     token->diagnostics.target_count = batch.target_count;
     token->diagnostics.native_batch_call = true;
+    token->diagnostics.batch_call_count = 1;
     token->diagnostics.output_slot_acquire_count = 1;
     token->diagnostics.owner_generation = handle->generation;
     token->diagnostics.slot_generation = acquired_generation;
@@ -3080,21 +3109,102 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
     double* d_theta = d_systems + system_capacity;
     double* d_potrf_work = d_theta + theta_capacity;
 
+    const std::size_t stable_index_offset = reserved_targets;
+    const std::size_t potrs_info_offset = checked_multiply(
+      reserved_targets, 3U, "fixed-sp potrs info offset");
+    const std::size_t int_layout_required = checked_add(
+      potrs_info_offset, 1U, "fixed-sp integer arena layout");
+    if (context->int_capacity < int_layout_required ||
+        context->host_status_capacity < int_layout_required) {
+      throw std::runtime_error(
+        "fixed-sp integer arena does not satisfy 3*targets+1 layout");
+    }
+    int* d_safe_target_indices = context->int_arena;
+    int* d_stable_target_indices =
+      context->int_arena + stable_index_offset;
+    int* d_potrf_info = d_stable_target_indices + reserved_targets;
+    int* d_potrs_info = d_potrf_info + reserved_targets;
+    int* h_safe_target_indices = context->host_status_arena;
+    int* h_stable_target_indices =
+      context->host_status_arena + stable_index_offset;
+    int* h_potrf_info = h_stable_target_indices + reserved_targets;
+    int* h_potrs_info = h_potrf_info + reserved_targets;
+
+    std::fill_n(
+      h_safe_target_indices,
+      checked_multiply(reserved_targets, 2U,
+                       "fixed-sp route partition staging"),
+      0);
+    int safe_count = 0;
+    int stable_count = 0;
+    for (int target = 0; target < batch.target_count; ++target) {
+      const FixedSpRoute route =
+        batch.planned_routes[static_cast<std::size_t>(target)];
+      switch (route) {
+        case FixedSpRoute::CholeskyBatched:
+          h_safe_target_indices[safe_count++] = target;
+          token->diagnostics.planned_cholesky_target_count += 1;
+          break;
+        case FixedSpRoute::AugmentedQr:
+          h_stable_target_indices[stable_count++] = target;
+          token->diagnostics.planned_qr_target_count += 1;
+          break;
+        case FixedSpRoute::AugmentedSvd:
+          h_stable_target_indices[stable_count++] = target;
+          token->diagnostics.planned_svd_target_count += 1;
+          break;
+        case FixedSpRoute::Unset:
+          throw std::runtime_error(
+            "fixed-sp planned route metadata is invalid");
+      }
+    }
+    bool canonical_partition_exact =
+      safe_count + stable_count == batch.target_count;
+    for (int index = 1; index < safe_count; ++index) {
+      canonical_partition_exact = canonical_partition_exact &&
+        h_safe_target_indices[index - 1] < h_safe_target_indices[index];
+    }
+    for (int index = 1; index < stable_count; ++index) {
+      canonical_partition_exact = canonical_partition_exact &&
+        h_stable_target_indices[index - 1] <
+          h_stable_target_indices[index];
+    }
+    if (!canonical_partition_exact) {
+      throw std::runtime_error(
+        "fixed-sp compact route partition is not canonical");
+    }
+    check_cuda(cudaMemcpyAsync(
+      d_safe_target_indices, h_safe_target_indices,
+      allocation_bytes(
+        checked_multiply(reserved_targets, 2U,
+                         "fixed-sp route partition upload"),
+        sizeof(int), "fixed-sp route partition upload"),
+      cudaMemcpyHostToDevice, context->stream
+    ), "upload fixed-sp compact route partition");
+
     const std::size_t y_count = checked_multiply(
       static_cast<std::size_t>(batch.n), targets, "fixed-sp solve Y");
     const std::size_t sp_count = checked_multiply(
       static_cast<std::size_t>(batch.penalty_count), targets,
       "fixed-sp solve SP");
+    const std::size_t y_bytes = allocation_bytes(
+      y_count, sizeof(double), "fixed-sp solve Y");
+    const std::size_t sp_bytes = allocation_bytes(
+      sp_count, sizeof(double), "fixed-sp solve SP");
     check_cuda(cudaMemcpyAsync(
-      d_y, batch.Y,
-      allocation_bytes(y_count, sizeof(double), "fixed-sp solve Y"),
+      d_y, batch.Y, y_bytes,
       cudaMemcpyHostToDevice, context->stream
     ), "upload fixed-sp solve Y");
     check_cuda(cudaMemcpyAsync(
-      d_sp, batch.SP,
-      allocation_bytes(sp_count, sizeof(double), "fixed-sp solve SP"),
+      d_sp, batch.SP, sp_bytes,
       cudaMemcpyHostToDevice, context->stream
     ), "upload fixed-sp solve SP");
+    // Target payload diagnostics cover the numeric Y/SP data plane. The
+    // compact route metadata has its own single upload above.
+    token->diagnostics.target_batch_h2d_call_count = 1;
+    token->diagnostics.target_h2d_copy_count = 2;
+    token->diagnostics.target_h2d_bytes = checked_add(
+      y_bytes, sp_bytes, "fixed-sp target H2D diagnostics");
 
     const double one = 1.0;
     const double zero = 0.0;
@@ -3105,6 +3215,8 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       d_y, batch.n, &zero, d_rhs, handle->q
     ), "build fixed-sp RHS with X_null transpose Y");
     token->diagnostics.rhs_device_build_count = 1;
+    token->diagnostics.rhs_authority = "cuda-x0-transpose-y";
+    token->diagnostics.full_cuda_data_plane = true;
     if (rhs_count != 0U) {
       if (rhs_count > slot->rhs_capacity) {
         throw std::runtime_error(
@@ -3119,59 +3231,53 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
 
     const std::size_t q_squared = matrix_count(
       handle->q, handle->q, "fixed-sp solve system");
-    const std::size_t system_count = checked_multiply(
-      q_squared, targets, "fixed-sp solve systems");
-    const std::size_t system_blocks =
-      (system_count + threads - 1U) / threads;
-    if (system_blocks == 0U ||
-        system_blocks > std::numeric_limits<unsigned int>::max()) {
-      throw std::runtime_error("fixed-sp system build size overflow");
-    }
-    build_fixed_sp_systems<<<
-      static_cast<unsigned int>(system_blocks), threads, 0, context->stream
-    >>>(
-      handle->d_gram, handle->d_projected_penalties, d_sp,
-      handle->q, handle->penalty_count, batch.target_count, d_systems);
-    check_cuda(cudaGetLastError(), "launch fixed-sp system build");
+    if (safe_count > 0) {
+      constexpr unsigned int system_tile = 16U;
+      const dim3 system_block(system_tile, system_tile, 1U);
+      const dim3 system_grid(
+        (static_cast<unsigned int>(handle->q) + system_tile - 1U) /
+          system_tile,
+        (static_cast<unsigned int>(handle->q) + system_tile - 1U) /
+          system_tile,
+        static_cast<unsigned int>(safe_count));
+      build_fixed_sp_systems_kernel<<<
+        system_grid, system_block, 0, context->stream
+      >>>(
+        handle->d_gram, handle->d_projected_penalties, d_sp,
+        d_safe_target_indices, safe_count, handle->penalty_count,
+        handle->q, d_systems);
+      check_cuda(cudaGetLastError(), "launch fixed-sp fused system build");
 
-    for (FixedSpRoute route : batch.planned_routes) {
-      switch (route) {
-        case FixedSpRoute::CholeskyBatched:
-          token->diagnostics.planned_cholesky_target_count += 1;
-          break;
-        case FixedSpRoute::AugmentedQr:
-          token->diagnostics.planned_qr_target_count += 1;
-          break;
-        case FixedSpRoute::AugmentedSvd:
-          token->diagnostics.planned_svd_target_count += 1;
-          break;
-        case FixedSpRoute::Unset:
-          throw std::runtime_error(
-            "fixed-sp planned route metadata is invalid");
+      const std::size_t safe_theta_count = checked_multiply(
+        static_cast<std::size_t>(handle->q),
+        static_cast<std::size_t>(safe_count),
+        "fixed-sp compact safe RHS");
+      const std::size_t gather_blocks =
+        (safe_theta_count + threads - 1U) / threads;
+      if (gather_blocks == 0U ||
+          gather_blocks > std::numeric_limits<unsigned int>::max()) {
+        throw std::runtime_error("fixed-sp safe RHS gather size overflow");
       }
+      gather_fixed_sp_safe_rhs_kernel<<<
+        static_cast<unsigned int>(gather_blocks), threads,
+        0, context->stream
+      >>>(
+        d_rhs, d_safe_target_indices, handle->q, safe_count, d_theta);
+      check_cuda(cudaGetLastError(), "launch fixed-sp safe RHS gather");
     }
+    token->diagnostics.cholesky_single_target_count = safe_count;
 
-    for (int target = 0; target < batch.target_count; ++target) {
+    for (int safe_ordinal = 0; safe_ordinal < safe_count; ++safe_ordinal) {
+      const int target = h_safe_target_indices[safe_ordinal];
       const std::size_t target_offset = static_cast<std::size_t>(target);
-      if (batch.planned_routes[target_offset] !=
-          FixedSpRoute::CholeskyBatched) {
-        continue;
-      }
-
-      double* system = d_systems + q_squared * target_offset;
+      const std::size_t safe_offset =
+        static_cast<std::size_t>(safe_ordinal);
+      double* system = d_systems + q_squared * safe_offset;
       double* theta = d_theta +
-        static_cast<std::size_t>(handle->q) * target_offset;
-      const double* rhs = d_rhs +
-        static_cast<std::size_t>(handle->q) * target_offset;
-      check_cuda(cudaMemcpyAsync(
-        theta, rhs,
-        allocation_bytes(static_cast<std::size_t>(handle->q), sizeof(double),
-                         "fixed-sp working RHS"),
-        cudaMemcpyDeviceToDevice, context->stream
-      ), "copy fixed-sp working RHS");
+        static_cast<std::size_t>(handle->q) * safe_offset;
 
-      int* d_factor_info = context->int_arena + target_offset;
-      int* h_factor_info = context->host_status_arena + target_offset;
+      int* d_factor_info = d_potrf_info + safe_offset;
+      int* h_factor_info = h_potrf_info + safe_offset;
       check_cusolver(cusolverDnDpotrf(
         context->solver, CUBLAS_FILL_MODE_UPPER, handle->q,
         system, handle->q, d_potrf_work, context->potrf_lwork,
@@ -3201,14 +3307,12 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         continue;
       }
 
-      int* d_solve_info = context->int_arena + reserved_targets;
-      int* h_solve_info = context->host_status_arena + reserved_targets;
       check_cusolver(cusolverDnDpotrs(
         context->solver, CUBLAS_FILL_MODE_UPPER, handle->q, 1,
-        system, handle->q, theta, handle->q, d_solve_info
+        system, handle->q, theta, handle->q, d_potrs_info
       ), "solve fixed-sp Cholesky system");
       check_cuda(cudaMemcpyAsync(
-        h_solve_info, d_solve_info, sizeof(int),
+        h_potrs_info, d_potrs_info, sizeof(int),
         cudaMemcpyDeviceToHost, context->stream
       ), "copy fixed-sp Cholesky solve status");
       check_cuda(cudaEventRecord(
@@ -3219,7 +3323,7 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         context->cholesky_solve_checkpoint_event
       ), "wait for fixed-sp Cholesky solve checkpoint");
       context->diagnostics.cholesky_solve_checkpoint_wait_count += 1;
-      if (*h_solve_info != 0) {
+      if (*h_potrs_info != 0) {
         throw std::runtime_error(
           "fixed-sp Cholesky potrs reported a batch failure");
       }
@@ -3280,33 +3384,45 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       token->diagnostics.executed_cholesky_target_count += 1;
     }
 
-    const std::size_t finite_status_blocks =
-      (targets + threads - 1U) / threads;
-    if (finite_status_blocks == 0U ||
-        finite_status_blocks > std::numeric_limits<unsigned int>::max() ||
-        targets > slot->finite_status_capacity ||
+    if (targets > slot->finite_status_capacity ||
         slot->host_finite_status == nullptr) {
       throw std::runtime_error("fixed-sp finite status capacity mismatch");
     }
-    check_fixed_sp_outputs_finite<<<
-      static_cast<unsigned int>(finite_status_blocks), threads,
-      0, context->stream
-    >>>(
-      d_rhs, d_theta, slot->coefficients, slot->fitted,
-      slot->residuals, slot->rss, batch.n, handle->p, handle->q,
-      batch.target_count, batch.output_mask, context->int_arena);
-    check_cuda(cudaGetLastError(), "launch fixed-sp output finite check");
+    check_cuda(cudaMemsetAsync(
+      d_potrf_info, 0,
+      allocation_bytes(targets, sizeof(int), "fixed-sp finite status"),
+      context->stream
+    ), "initialize fixed-sp finite status");
+    if (safe_count > 0) {
+      const std::size_t finite_status_blocks =
+        (static_cast<std::size_t>(safe_count) + threads - 1U) / threads;
+      if (finite_status_blocks == 0U ||
+          finite_status_blocks > std::numeric_limits<unsigned int>::max()) {
+        throw std::runtime_error("fixed-sp finite status launch overflow");
+      }
+      check_fixed_sp_outputs_finite<<<
+        static_cast<unsigned int>(finite_status_blocks), threads,
+        0, context->stream
+      >>>(
+        d_rhs, d_theta, d_safe_target_indices,
+        slot->coefficients, slot->fitted, slot->residuals, slot->rss,
+        batch.n, handle->p, handle->q, safe_count,
+        batch.output_mask, d_potrf_info);
+      check_cuda(cudaGetLastError(), "launch fixed-sp output finite check");
+    }
 
-    // Device flags use reserved context scratch. The pinned destination is
-    // handle-owned so another prepared handle cannot overwrite an unresolved
-    // token's compact status before observation.
+    // Only successful safe ordinals inspect compact theta. Each result is
+    // written to its canonical target status; stable targets stay explicit
+    // errors and never read uninitialized compact solve storage.
     check_cuda(cudaMemcpyAsync(
-      slot->host_finite_status, context->int_arena,
+      slot->host_finite_status, d_potrf_info,
       allocation_bytes(targets, sizeof(int), "fixed-sp finite status"),
       cudaMemcpyDeviceToHost, context->stream
     ), "copy fixed-sp finite status");
     check_cuda(cudaEventRecord(slot->solve_completion_event, context->stream),
                "record fixed-sp solve completion");
+    token->diagnostics.canonical_output_order_exact =
+      canonical_partition_exact;
 
     token->diagnostics.target_keys = token->target_keys;
     token->diagnostics.planned_routes = token->planned_routes;
