@@ -685,10 +685,10 @@ git commit -m "feat: finalize fixed-sp CUDA batch outputs in canonical order"
 ## Task 5: Support Mixed Cholesky and Stable-Error Batches Truthfully
 
 **Files:**
-- Modify: `fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu`
 - Create: `fastkpc/tests/test_mgcv_fixed_sp_cuda_mixed_batch.R`
+- Modify if the gate exposes a defect: `fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu`
 
-- [ ] **Step 1: Write a failing mixed-batch test**
+- [ ] **Step 1: Write the mixed-batch regression test**
 
 Select an iteration setup containing at least two Cholesky targets and at least
 one stable target. Submit the complete batch without reordering. Assert:
@@ -723,10 +723,13 @@ assert_true(all(is.na(shadow$residuals[, stable, drop = FALSE])),
 The test must also compare every safe column to its Phase 2 oracle and verify
 that `info$target_keys` exactly equals `native$target_keys`.
 
-- [ ] **Step 2: Run and verify mixed-order/status failure**
+- [ ] **Step 2: Run the mixed-order/status characterization gate**
 
-Expected: FAIL until stable outputs are initialized invalid and safe results
-scatter to canonical columns.
+Task 2 through Task 4 already initialize invalid public outputs and scatter the
+safe subgroup by canonical index, so this regression test may pass on its
+first run. Record that baseline result. Modify the runtime only if the test
+exposes a concrete mixed-order, status, or masking defect; do not manufacture
+a RED failure by changing already-correct behavior.
 
 - [ ] **Step 3: Preserve Phase 3A invalid-output initialization**
 
@@ -766,9 +769,9 @@ Expected: both PASS.
 - [ ] **Step 6: Commit mixed-batch semantics**
 
 ```bash
-git add fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu \
-  fastkpc/tests/test_mgcv_fixed_sp_cuda_mixed_batch.R
-git commit -m "fix: preserve truthful mixed fixed-sp batch semantics"
+git add fastkpc/tests/test_mgcv_fixed_sp_cuda_mixed_batch.R
+# Add mgcv_fixed_sp_runtime.cu only if the characterization gate required a fix.
+git commit -m "test: gate truthful mixed fixed-sp batch semantics"
 ```
 
 ## Task 6: Gate Phase 3B on the Real Iteration Corpus
