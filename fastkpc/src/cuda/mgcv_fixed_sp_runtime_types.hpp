@@ -92,6 +92,7 @@ struct FixedSpResourceLifecycleSnapshot {
   std::int64_t teardown_success_count = 0;
   std::int64_t teardown_failure_count = 0;
   std::int64_t active_count = 0;
+  std::int64_t ownership_indeterminate_count = 0;
 };
 
 struct FixedSpResourceSnapshot {

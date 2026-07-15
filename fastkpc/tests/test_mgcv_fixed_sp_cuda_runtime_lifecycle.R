@@ -25,6 +25,18 @@ resource_snapshot <- function() {
 resource_delta <- function(before, after, field) {
   as.numeric(after[[field]] - before[[field]])
 }
+inject_teardown_failure <- function(resource) {
+  .Call(
+    "C_fixed_sp_cuda_test_inject_next_resource_teardown_failure",
+    resource, PACKAGE = "fastkpc_cuda"
+  )
+}
+inject_post_call_teardown_failure <- function(resource) {
+  .Call(
+    "C_fixed_sp_cuda_test_inject_next_resource_post_call_teardown_failure",
+    resource, PACKAGE = "fastkpc_cuda"
+  )
+}
 runtime_source <- paste(
   readLines("fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu", warn = FALSE),
   collapse = "\n"
@@ -171,6 +183,31 @@ resources <- list(
   cublas_handle = c("create", "destroy"),
   cusolver_handle = c("create", "destroy")
 )
+assert_resource_invariants <- function(snapshot, message,
+                                       require_quiescent = FALSE) {
+  assert_true(
+    all(vapply(names(resources), function(resource) {
+      verbs <- resources[[resource]]
+      acquired <- snapshot[[paste(
+        resource, verbs[[1L]], "success_count", sep = "_"
+      )]]
+      teardown_success <- snapshot[[paste(
+        resource, verbs[[2L]], "success_count", sep = "_"
+      )]]
+      active <- snapshot[[paste(resource, "active_count", sep = "_")]]
+      indeterminate <- snapshot[[paste(
+        resource, "ownership_indeterminate_count", sep = "_"
+      )]]
+      identical(
+        as.numeric(acquired),
+        as.numeric(teardown_success + active + indeterminate)
+      ) && (!require_quiescent ||
+            (identical(as.numeric(active), 0) &&
+             identical(as.numeric(indeterminate), 0)))
+    }, logical(1L))),
+    message
+  )
+}
 for (resource in names(resources)) {
   verbs <- resources[[resource]]
   acquire_attempt <- paste(resource, verbs[[1L]], "attempt_count", sep = "_")
@@ -200,6 +237,68 @@ for (resource in names(resources)) {
 assert_true(
   resource_delta(ledger_before, ledger_after, "cleanup_error_count") == 0,
   "scoped explicit cleanup records no teardown errors"
+)
+
+runtime_retry_before <- resource_snapshot()
+runtime_retry <- fixed_sp_cuda_runtime_create(device_id = 0L)
+on.exit(try(fixed_sp_cuda_runtime_free(runtime_retry), silent = TRUE),
+        add = TRUE)
+runtime_retry_acquired <- resource_snapshot()
+inject_teardown_failure("stream")
+assert_error(
+  fixed_sp_cuda_runtime_free(runtime_retry),
+  "retryable teardown",
+  "runtime owner retains an injected not-attempted stream teardown"
+)
+assert_error(
+  fixed_sp_cuda_runtime_info(runtime_retry),
+  "TeardownOnly",
+  "runtime info rejects a runtime awaiting teardown retry"
+)
+assert_error(
+  fixed_sp_cuda_runtime_reserve(
+    runtime_retry, n = 16L, null_dim = 8L, target_count = 1L,
+    penalty_count = 1L, augmented_rows = 16L
+  ),
+  "TeardownOnly",
+  "runtime reserve rejects a runtime awaiting teardown retry"
+)
+runtime_retry_partial <- resource_snapshot()
+assert_true(
+  resource_delta(runtime_retry_acquired, runtime_retry_partial,
+                 "stream_destroy_attempt_count") == 1 &&
+    resource_delta(runtime_retry_acquired, runtime_retry_partial,
+                   "stream_destroy_success_count") == 0 &&
+    resource_delta(runtime_retry_acquired, runtime_retry_partial,
+                   "stream_destroy_failure_count") == 1 &&
+    resource_delta(runtime_retry_acquired, runtime_retry_partial,
+                   "stream_active_count") == 0 &&
+    resource_delta(runtime_retry_acquired, runtime_retry_partial,
+                   "stream_ownership_indeterminate_count") == 0,
+  "first runtime close retains only retryable stream ownership"
+)
+fixed_sp_cuda_runtime_free(runtime_retry)
+fixed_sp_cuda_runtime_free(runtime_retry)
+runtime_retry_after <- resource_snapshot()
+assert_true(
+  resource_delta(runtime_retry_acquired, runtime_retry_after,
+                 "stream_destroy_attempt_count") == 2 &&
+    resource_delta(runtime_retry_acquired, runtime_retry_after,
+                   "stream_destroy_success_count") == 1 &&
+    resource_delta(runtime_retry_acquired, runtime_retry_after,
+                   "stream_destroy_failure_count") == 1 &&
+    resource_delta(runtime_retry_acquired, runtime_retry_after,
+                   "stream_active_count") == -1 &&
+    resource_delta(runtime_retry_acquired, runtime_retry_after,
+                   "stream_ownership_indeterminate_count") == 0 &&
+    resource_delta(runtime_retry_before, runtime_retry_after,
+                   "cleanup_error_count") == 1,
+  "second runtime close completes and balances retryable stream ownership"
+)
+assert_resource_invariants(
+  runtime_retry_after,
+  "runtime retry preserves every resource ownership invariant",
+  require_quiescent = TRUE
 )
 
 exercise_injected_acquire_failure <- function(resource) {
@@ -264,6 +363,9 @@ for (resource in names(resources)) {
   teardown_success <- paste(resource, verbs[[2L]], "success_count", sep = "_")
   teardown_failure <- paste(resource, verbs[[2L]], "failure_count", sep = "_")
   active <- paste(resource, "active_count", sep = "_")
+  indeterminate <- paste(
+    resource, "ownership_indeterminate_count", sep = "_"
+  )
   assert_true(
     resource_delta(teardown_before, teardown_after, acquire_attempt) == 1 &&
       resource_delta(teardown_before, teardown_after, acquire_success) == 1 &&
@@ -272,9 +374,50 @@ for (resource in names(resources)) {
       resource_delta(teardown_before, teardown_after, teardown_success) == 1 &&
       resource_delta(teardown_before, teardown_after, teardown_failure) == 1 &&
       resource_delta(teardown_before, teardown_after, active) == 0 &&
+      resource_delta(teardown_before, teardown_after, indeterminate) == 0 &&
       resource_delta(teardown_before, teardown_after,
                      "cleanup_error_count") == 1,
-    paste(resource, "failed noexcept teardown retains and retries ownership")
+    paste(resource,
+          "pre-call teardown failure retains and retries ownership")
+  )
+}
+
+for (resource in names(resources)) {
+  teardown_before <- resource_snapshot()
+  inject_post_call_teardown_failure(resource)
+  invisible(.Call(
+    "C_fixed_sp_cuda_test_exercise_resource_teardown_failure",
+    resource, PACKAGE = "fastkpc_cuda"
+  ))
+  teardown_after <- resource_snapshot()
+  verbs <- resources[[resource]]
+  acquire_attempt <- paste(resource, verbs[[1L]], "attempt_count", sep = "_")
+  acquire_success <- paste(resource, verbs[[1L]], "success_count", sep = "_")
+  acquire_failure <- paste(resource, verbs[[1L]], "failure_count", sep = "_")
+  teardown_attempt <- paste(resource, verbs[[2L]], "attempt_count", sep = "_")
+  teardown_success <- paste(resource, verbs[[2L]], "success_count", sep = "_")
+  teardown_failure <- paste(resource, verbs[[2L]], "failure_count", sep = "_")
+  active <- paste(resource, "active_count", sep = "_")
+  indeterminate <- paste(
+    resource, "ownership_indeterminate_count", sep = "_"
+  )
+  assert_true(
+    resource_delta(teardown_before, teardown_after, acquire_attempt) == 1 &&
+      resource_delta(teardown_before, teardown_after, acquire_success) == 1 &&
+      resource_delta(teardown_before, teardown_after, acquire_failure) == 0 &&
+      resource_delta(teardown_before, teardown_after, teardown_attempt) == 1 &&
+      resource_delta(teardown_before, teardown_after, teardown_success) == 0 &&
+      resource_delta(teardown_before, teardown_after, teardown_failure) == 1 &&
+      resource_delta(teardown_before, teardown_after, active) == 0 &&
+      resource_delta(teardown_before, teardown_after, indeterminate) == 1 &&
+      resource_delta(teardown_before, teardown_after,
+                     "cleanup_error_count") == 1,
+    paste(resource,
+          "post-call teardown failure consumes ownership without retry")
+  )
+  assert_resource_invariants(
+    teardown_after,
+    paste(resource, "post-call failure preserves ownership invariant")
   )
 }
 
@@ -317,6 +460,8 @@ assert_true(
     resource_delta(growth_ledger_before, growth_ledger_after,
                    "cuda_device_active_count") == 0 &&
     resource_delta(growth_ledger_before, growth_ledger_after,
+                   "cuda_device_ownership_indeterminate_count") == 0 &&
+    resource_delta(growth_ledger_before, growth_ledger_after,
                    "cleanup_error_count") == 1,
   "failed growth retains the old arena and cleans the uncommitted allocation"
 )
@@ -340,6 +485,158 @@ assert_true(
     identical(growth_active_after_free[[active]], ledger_after[[active]])
   }, logical(1L))),
   "explicit cleanup releases every resource retained after failed growth"
+)
+
+terminal_runtime_before <- resource_snapshot()
+terminal_runtime <- fixed_sp_cuda_runtime_create(device_id = 0L)
+terminal_runtime_acquired <- resource_snapshot()
+inject_post_call_teardown_failure("stream")
+assert_error(
+  fixed_sp_cuda_runtime_free(terminal_runtime),
+  "ownership is indeterminate",
+  "runtime post-call stream error is surfaced after consuming ownership"
+)
+assert_error(
+  fixed_sp_cuda_runtime_info(terminal_runtime),
+  "freed",
+  "runtime post-call stream error clears the external holder"
+)
+fixed_sp_cuda_runtime_free(terminal_runtime)
+terminal_runtime_after <- resource_snapshot()
+assert_true(
+  resource_delta(terminal_runtime_acquired, terminal_runtime_after,
+                 "stream_destroy_attempt_count") == 1 &&
+    resource_delta(terminal_runtime_acquired, terminal_runtime_after,
+                   "stream_destroy_success_count") == 0 &&
+    resource_delta(terminal_runtime_acquired, terminal_runtime_after,
+                   "stream_destroy_failure_count") == 1 &&
+    resource_delta(terminal_runtime_acquired, terminal_runtime_after,
+                   "stream_active_count") == -1 &&
+    resource_delta(terminal_runtime_acquired, terminal_runtime_after,
+                   "stream_ownership_indeterminate_count") == 1 &&
+    resource_delta(terminal_runtime_before, terminal_runtime_after,
+                   "cleanup_error_count") == 1,
+  "runtime post-call stream failure is terminal and never retried"
+)
+assert_resource_invariants(
+  terminal_runtime_after,
+  "runtime terminal close preserves every ownership invariant"
+)
+
+replacement_runtime <- fixed_sp_cuda_runtime_create(device_id = 0L)
+on.exit(try(fixed_sp_cuda_runtime_free(replacement_runtime), silent = TRUE),
+        add = TRUE)
+fixed_sp_cuda_runtime_reserve(
+  replacement_runtime, n = 16L, null_dim = 8L, target_count = 1L,
+  penalty_count = 1L, augmented_rows = 16L
+)
+replacement_before <- resource_snapshot()
+inject_post_call_teardown_failure("cuda_device")
+assert_error(
+  fixed_sp_cuda_runtime_reserve(
+    replacement_runtime, n = 32L, null_dim = 8L, target_count = 1L,
+    penalty_count = 1L, augmented_rows = 32L
+  ),
+  "free old fixed-sp double arena",
+  "post-call replacement failure is surfaced"
+)
+assert_error(
+  fixed_sp_cuda_runtime_info(replacement_runtime),
+  "TeardownOnly",
+  "post-call replacement failure poisons runtime info"
+)
+assert_error(
+  fixed_sp_cuda_runtime_reserve(
+    replacement_runtime, n = 16L, null_dim = 8L, target_count = 1L,
+    penalty_count = 1L, augmented_rows = 16L
+  ),
+  "TeardownOnly",
+  "post-call replacement failure poisons later reserve"
+)
+replacement_partial <- resource_snapshot()
+assert_true(
+  resource_delta(replacement_before, replacement_partial,
+                 "cuda_device_allocate_success_count") == 1 &&
+    resource_delta(replacement_before, replacement_partial,
+                   "cuda_device_free_attempt_count") == 2 &&
+    resource_delta(replacement_before, replacement_partial,
+                   "cuda_device_free_success_count") == 1 &&
+    resource_delta(replacement_before, replacement_partial,
+                   "cuda_device_free_failure_count") == 1 &&
+    resource_delta(replacement_before, replacement_partial,
+                   "cuda_device_active_count") == -1 &&
+    resource_delta(replacement_before, replacement_partial,
+                   "cuda_device_ownership_indeterminate_count") == 1,
+  "reserve clears the consumed old arena and rolls back its new allocation"
+)
+fixed_sp_cuda_runtime_free(replacement_runtime)
+replacement_after <- resource_snapshot()
+assert_true(
+  resource_delta(replacement_before, replacement_after,
+                 "cuda_device_free_attempt_count") == 5 &&
+    resource_delta(replacement_before, replacement_after,
+                   "cuda_device_free_success_count") == 4 &&
+    resource_delta(replacement_before, replacement_after,
+                   "cuda_device_free_failure_count") == 1 &&
+    resource_delta(replacement_before, replacement_after,
+                   "cuda_device_active_count") == -4 &&
+    resource_delta(replacement_before, replacement_after,
+                   "cuda_device_ownership_indeterminate_count") == 1,
+  "runtime close never retries the arena consumed by replacement failure"
+)
+assert_resource_invariants(
+  replacement_after,
+  "reserve terminal failure preserves every ownership invariant"
+)
+
+finalizer_retry_before <- resource_snapshot()
+finalizer_retry_runtime <- fixed_sp_cuda_runtime_create(device_id = 0L)
+finalizer_retry_acquired <- resource_snapshot()
+inject_teardown_failure("stream")
+rm(finalizer_retry_runtime)
+invisible(gc())
+finalizer_retry_after <- resource_snapshot()
+assert_true(
+  resource_delta(finalizer_retry_acquired, finalizer_retry_after,
+                 "stream_destroy_attempt_count") == 2 &&
+    resource_delta(finalizer_retry_acquired, finalizer_retry_after,
+                   "stream_destroy_success_count") == 1 &&
+    resource_delta(finalizer_retry_acquired, finalizer_retry_after,
+                   "stream_destroy_failure_count") == 1 &&
+    resource_delta(finalizer_retry_acquired, finalizer_retry_after,
+                   "stream_active_count") == -1 &&
+    resource_delta(finalizer_retry_acquired, finalizer_retry_after,
+                   "stream_ownership_indeterminate_count") == 0 &&
+    resource_delta(finalizer_retry_before, finalizer_retry_after,
+                   "cleanup_error_count") == 1,
+  "runtime finalizer retries a one-shot not-attempted stream teardown"
+)
+
+finalizer_terminal_before <- resource_snapshot()
+finalizer_terminal_runtime <- fixed_sp_cuda_runtime_create(device_id = 0L)
+finalizer_terminal_acquired <- resource_snapshot()
+inject_post_call_teardown_failure("stream")
+rm(finalizer_terminal_runtime)
+invisible(gc())
+finalizer_terminal_after <- resource_snapshot()
+assert_true(
+  resource_delta(finalizer_terminal_acquired, finalizer_terminal_after,
+                 "stream_destroy_attempt_count") == 1 &&
+    resource_delta(finalizer_terminal_acquired, finalizer_terminal_after,
+                   "stream_destroy_success_count") == 0 &&
+    resource_delta(finalizer_terminal_acquired, finalizer_terminal_after,
+                   "stream_destroy_failure_count") == 1 &&
+    resource_delta(finalizer_terminal_acquired, finalizer_terminal_after,
+                   "stream_active_count") == -1 &&
+    resource_delta(finalizer_terminal_acquired, finalizer_terminal_after,
+                   "stream_ownership_indeterminate_count") == 1 &&
+    resource_delta(finalizer_terminal_before, finalizer_terminal_after,
+                   "cleanup_error_count") == 1,
+  "runtime finalizer never retries a post-call stream teardown failure"
+)
+assert_resource_invariants(
+  finalizer_terminal_after,
+  "finalizer teardown modes preserve every ownership invariant"
 )
 
 cat("PASS Phase 3 CUDA runtime lifecycle\n")

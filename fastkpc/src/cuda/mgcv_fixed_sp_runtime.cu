@@ -53,6 +53,7 @@ struct ResourceLifecycleCounters {
   int teardown_success_count = 0;
   int teardown_failure_count = 0;
   int active_count = 0;
+  int ownership_indeterminate_count = 0;
 };
 
 struct FixedSpResourceCounters {
@@ -89,6 +90,7 @@ struct AtomicResourceLifecycleCounters {
   std::atomic<std::int64_t> teardown_success_count{0};
   std::atomic<std::int64_t> teardown_failure_count{0};
   std::atomic<std::int64_t> active_count{0};
+  std::atomic<std::int64_t> ownership_indeterminate_count{0};
 };
 
 struct FixedSpGlobalResourceLedger {
@@ -101,6 +103,7 @@ struct FixedSpGlobalResourceLedger {
   std::atomic<std::int64_t> cleanup_error_count{0};
   std::atomic<int> inject_next_acquire_failure_kind{-1};
   std::atomic<int> inject_next_teardown_failure_kind{-1};
+  std::atomic<int> inject_next_post_call_teardown_failure_kind{-1};
   std::atomic<bool> inject_next_blocked_consumer_launch_failure{false};
 };
 
@@ -230,6 +233,33 @@ bool consume_injected_resource_teardown_failure(
     .compare_exchange_strong(expected, -1, std::memory_order_acq_rel);
 }
 
+void arm_injected_resource_post_call_teardown_failure(
+    FixedSpResourceKind kind) {
+  int expected = -1;
+  if (!global_resource_ledger()
+         .inject_next_post_call_teardown_failure_kind.compare_exchange_strong(
+           expected, static_cast<int>(kind), std::memory_order_acq_rel)) {
+    throw std::runtime_error(
+      "tracked fixed-sp resource post-call teardown failure injection is "
+      "already pending");
+  }
+}
+
+bool consume_injected_resource_post_call_teardown_failure(
+    FixedSpResourceKind kind) noexcept {
+  int expected = static_cast<int>(kind);
+  return global_resource_ledger()
+    .inject_next_post_call_teardown_failure_kind.compare_exchange_strong(
+      expected, -1, std::memory_order_acq_rel);
+}
+
+bool has_injected_resource_post_call_teardown_failure(
+    FixedSpResourceKind kind) noexcept {
+  return global_resource_ledger()
+    .inject_next_post_call_teardown_failure_kind.load(
+      std::memory_order_acquire) == static_cast<int>(kind);
+}
+
 [[noreturn]] void throw_injected_resource_acquire_failure(
     FixedSpResourceKind kind) {
   throw std::runtime_error(
@@ -270,7 +300,7 @@ void record_cleanup_error(FixedSpResourceLedger* ledger) noexcept {
 }
 
 void record_resource_teardown_failure(FixedSpResourceLedger* ledger,
-                                      FixedSpResourceKind kind) noexcept {
+                                       FixedSpResourceKind kind) noexcept {
   {
     std::lock_guard<std::mutex> lock(ledger->mutex);
     local_resource_counters(ledger, kind).teardown_failure_count += 1;
@@ -279,6 +309,33 @@ void record_resource_teardown_failure(FixedSpResourceLedger* ledger,
     1, std::memory_order_relaxed);
   record_cleanup_error(ledger);
 }
+
+void record_resource_teardown_indeterminate(
+    FixedSpResourceLedger* ledger,
+    FixedSpResourceKind kind) noexcept {
+  {
+    std::lock_guard<std::mutex> lock(ledger->mutex);
+    ResourceLifecycleCounters& local = local_resource_counters(ledger, kind);
+    local.teardown_failure_count += 1;
+    local.active_count -= 1;
+    local.ownership_indeterminate_count += 1;
+  }
+  AtomicResourceLifecycleCounters& global = global_resource_counters(kind);
+  global.teardown_failure_count.fetch_add(1, std::memory_order_relaxed);
+  global.active_count.fetch_sub(1, std::memory_order_relaxed);
+  global.ownership_indeterminate_count.fetch_add(
+    1, std::memory_order_relaxed);
+  record_cleanup_error(ledger);
+}
+
+struct CleanupCudaDeviceStatus {
+  cudaError_t get_device = cudaSuccess;
+  cudaError_t select_device = cudaSuccess;
+  cudaError_t restore_device = cudaSuccess;
+  bool ready = false;
+  bool restore_required = false;
+  bool restore_attempted = false;
+};
 
 class ScopedCleanupCudaDevice {
  public:
@@ -290,41 +347,49 @@ class ScopedCleanupCudaDevice {
         device_id < 0) {
       return;
     }
-    if (cudaGetDevice(&previous_device_) != cudaSuccess) {
+    status_.get_device = cudaGetDevice(&previous_device_);
+    if (status_.get_device != cudaSuccess) {
       if (ledger_ != nullptr) record_cleanup_error(ledger_);
       return;
     }
     if (previous_device_ != device_id) {
-      if (cudaSetDevice(device_id) != cudaSuccess) {
+      status_.select_device = cudaSetDevice(device_id);
+      if (status_.select_device != cudaSuccess) {
         if (ledger_ != nullptr) record_cleanup_error(ledger_);
         return;
       }
-      restore_device_ = true;
+      status_.restore_required = true;
     }
-    ready_ = true;
+    status_.ready = true;
   }
 
-  ~ScopedCleanupCudaDevice() {
-    if (!restore_device_ ||
+  ~ScopedCleanupCudaDevice() { restore_noexcept(); }
+
+  cudaError_t restore_noexcept() noexcept {
+    if (status_.restore_attempted) return status_.restore_device;
+    status_.restore_attempted = true;
+    if (!status_.restore_required ||
         creator_pid_ != static_cast<std::int64_t>(getpid())) {
-      return;
+      return status_.restore_device;
     }
-    if (cudaSetDevice(previous_device_) != cudaSuccess && ledger_ != nullptr) {
+    status_.restore_device = cudaSetDevice(previous_device_);
+    if (status_.restore_device != cudaSuccess && ledger_ != nullptr) {
       record_cleanup_error(ledger_);
     }
+    return status_.restore_device;
   }
 
   ScopedCleanupCudaDevice(const ScopedCleanupCudaDevice&) = delete;
   ScopedCleanupCudaDevice& operator=(const ScopedCleanupCudaDevice&) = delete;
 
-  bool ready() const noexcept { return ready_; }
+  bool ready() const noexcept { return status_.ready; }
+  const CleanupCudaDeviceStatus& status() const noexcept { return status_; }
 
  private:
   std::int64_t creator_pid_ = -1;
   FixedSpResourceLedger* ledger_ = nullptr;
   int previous_device_ = -1;
-  bool restore_device_ = false;
-  bool ready_ = false;
+  CleanupCudaDeviceStatus status_;
 };
 
 template <typename T>
@@ -465,152 +530,276 @@ void tracked_cusolver_create(FixedSpResourceLedger* ledger,
     ledger, FixedSpResourceKind::CusolverHandle);
 }
 
+enum class TrackedTeardownDisposition {
+  Noop,
+  NotAttemptedRetryable,
+  CalledSuccess,
+  CalledOwnershipIndeterminate
+};
+
+template <typename Status>
+struct TrackedTeardownResult {
+  Status status;
+  TrackedTeardownDisposition disposition;
+};
+
+struct OwnerTeardownStatus {
+  bool not_attempted_retryable = false;
+  bool ownership_indeterminate = false;
+
+  template <typename Status>
+  void observe(const TrackedTeardownResult<Status>& result) noexcept {
+    if (result.disposition ==
+        TrackedTeardownDisposition::NotAttemptedRetryable) {
+      not_attempted_retryable = true;
+    } else if (result.disposition ==
+               TrackedTeardownDisposition::CalledOwnershipIndeterminate) {
+      ownership_indeterminate = true;
+    }
+  }
+
+  void merge(const OwnerTeardownStatus& other) noexcept {
+    not_attempted_retryable =
+      not_attempted_retryable || other.not_attempted_retryable;
+    ownership_indeterminate =
+      ownership_indeterminate || other.ownership_indeterminate;
+  }
+};
+
 template <typename T>
-cudaError_t tracked_cuda_free_noexcept(FixedSpResourceLedger* ledger,
-                                       T** pointer,
-                                       bool* injected_failure = nullptr) noexcept {
-  if (injected_failure != nullptr) *injected_failure = false;
-  if (pointer == nullptr || *pointer == nullptr) return cudaSuccess;
+TrackedTeardownResult<cudaError_t> tracked_cuda_free_noexcept(
+    FixedSpResourceLedger* ledger,
+    T** pointer) noexcept {
+  if (pointer == nullptr || *pointer == nullptr) {
+    return {cudaSuccess, TrackedTeardownDisposition::Noop};
+  }
   record_resource_teardown_attempt(
     ledger, FixedSpResourceKind::CudaDevice);
-  const bool inject = consume_injected_resource_teardown_failure(
-    FixedSpResourceKind::CudaDevice);
-  const cudaError_t status = inject ? cudaErrorUnknown : cudaFree(*pointer);
-  if (inject && injected_failure != nullptr) *injected_failure = true;
+  if (consume_injected_resource_teardown_failure(
+        FixedSpResourceKind::CudaDevice)) {
+    record_resource_teardown_failure(
+      ledger, FixedSpResourceKind::CudaDevice);
+    return {cudaErrorUnknown,
+            TrackedTeardownDisposition::NotAttemptedRetryable};
+  }
+  T* owned = std::exchange(*pointer, nullptr);
+  cudaError_t status = cudaFree(owned);
+  if (consume_injected_resource_post_call_teardown_failure(
+        FixedSpResourceKind::CudaDevice) && status == cudaSuccess) {
+    status = cudaErrorUnknown;
+  }
   if (status == cudaSuccess) {
     record_resource_teardown_success(
       ledger, FixedSpResourceKind::CudaDevice);
-    *pointer = nullptr;
-  } else {
-    record_resource_teardown_failure(
-      ledger, FixedSpResourceKind::CudaDevice);
+    return {status, TrackedTeardownDisposition::CalledSuccess};
   }
-  return status;
+  record_resource_teardown_indeterminate(
+    ledger, FixedSpResourceKind::CudaDevice);
+  return {status,
+          TrackedTeardownDisposition::CalledOwnershipIndeterminate};
 }
 
 template <typename T>
 void tracked_cuda_free(FixedSpResourceLedger* ledger,
                        T** pointer,
                        const char* stage) {
-  bool injected_failure = false;
-  const cudaError_t status = tracked_cuda_free_noexcept(
-    ledger, pointer, &injected_failure);
-  if (injected_failure) {
+  const TrackedTeardownResult<cudaError_t> result =
+    tracked_cuda_free_noexcept(ledger, pointer);
+  if (result.disposition ==
+      TrackedTeardownDisposition::NotAttemptedRetryable) {
     throw std::runtime_error(
       "injected tracked CUDA device free failure");
   }
-  check_cuda(status, stage);
+  check_cuda(result.status, stage);
 }
 
 template <typename T>
-cudaError_t tracked_cuda_free_host_noexcept(
+TrackedTeardownResult<cudaError_t> tracked_cuda_free_host_noexcept(
     FixedSpResourceLedger* ledger,
     T** pointer) noexcept {
-  if (pointer == nullptr || *pointer == nullptr) return cudaSuccess;
+  if (pointer == nullptr || *pointer == nullptr) {
+    return {cudaSuccess, TrackedTeardownDisposition::Noop};
+  }
   record_resource_teardown_attempt(ledger, FixedSpResourceKind::CudaHost);
-  const bool inject = consume_injected_resource_teardown_failure(
-    FixedSpResourceKind::CudaHost);
-  const cudaError_t status = inject ? cudaErrorUnknown : cudaFreeHost(*pointer);
+  if (consume_injected_resource_teardown_failure(
+        FixedSpResourceKind::CudaHost)) {
+    record_resource_teardown_failure(ledger, FixedSpResourceKind::CudaHost);
+    return {cudaErrorUnknown,
+            TrackedTeardownDisposition::NotAttemptedRetryable};
+  }
+  T* owned = std::exchange(*pointer, nullptr);
+  cudaError_t status = cudaFreeHost(owned);
+  if (consume_injected_resource_post_call_teardown_failure(
+        FixedSpResourceKind::CudaHost) && status == cudaSuccess) {
+    status = cudaErrorUnknown;
+  }
   if (status == cudaSuccess) {
     record_resource_teardown_success(ledger, FixedSpResourceKind::CudaHost);
-    *pointer = nullptr;
-  } else {
-    record_resource_teardown_failure(ledger, FixedSpResourceKind::CudaHost);
+    return {status, TrackedTeardownDisposition::CalledSuccess};
   }
-  return status;
+  record_resource_teardown_indeterminate(
+    ledger, FixedSpResourceKind::CudaHost);
+  return {status,
+          TrackedTeardownDisposition::CalledOwnershipIndeterminate};
 }
 
 template <typename T>
 void tracked_cuda_free_host(FixedSpResourceLedger* ledger,
                             T** pointer,
                             const char* stage) {
-  check_cuda(tracked_cuda_free_host_noexcept(ledger, pointer), stage);
+  check_cuda(tracked_cuda_free_host_noexcept(ledger, pointer).status, stage);
 }
 
-cudaError_t tracked_cuda_stream_destroy_noexcept(
+TrackedTeardownResult<cudaError_t> tracked_cuda_stream_destroy_noexcept(
     FixedSpResourceLedger* ledger,
     cudaStream_t* stream) noexcept {
-  if (stream == nullptr || *stream == nullptr) return cudaSuccess;
+  if (stream == nullptr || *stream == nullptr) {
+    return {cudaSuccess, TrackedTeardownDisposition::Noop};
+  }
   record_resource_teardown_attempt(ledger, FixedSpResourceKind::Stream);
-  const bool inject = consume_injected_resource_teardown_failure(
-    FixedSpResourceKind::Stream);
-  const cudaError_t status = inject ? cudaErrorUnknown :
-    cudaStreamDestroy(*stream);
+  if (consume_injected_resource_teardown_failure(
+        FixedSpResourceKind::Stream)) {
+    record_resource_teardown_failure(ledger, FixedSpResourceKind::Stream);
+    return {cudaErrorUnknown,
+            TrackedTeardownDisposition::NotAttemptedRetryable};
+  }
+  cudaStream_t owned = std::exchange(*stream, nullptr);
+  cudaError_t status = cudaStreamDestroy(owned);
+  if (consume_injected_resource_post_call_teardown_failure(
+        FixedSpResourceKind::Stream) && status == cudaSuccess) {
+    status = cudaErrorUnknown;
+  }
   if (status == cudaSuccess) {
     record_resource_teardown_success(ledger, FixedSpResourceKind::Stream);
-    *stream = nullptr;
-  } else {
-    record_resource_teardown_failure(ledger, FixedSpResourceKind::Stream);
+    return {status, TrackedTeardownDisposition::CalledSuccess};
   }
-  return status;
+  record_resource_teardown_indeterminate(ledger, FixedSpResourceKind::Stream);
+  return {status,
+          TrackedTeardownDisposition::CalledOwnershipIndeterminate};
 }
 
-cudaError_t tracked_cuda_event_destroy_noexcept(
+TrackedTeardownResult<cudaError_t> tracked_cuda_event_destroy_noexcept(
     FixedSpResourceLedger* ledger,
     cudaEvent_t* event) noexcept {
-  if (event == nullptr || *event == nullptr) return cudaSuccess;
+  if (event == nullptr || *event == nullptr) {
+    return {cudaSuccess, TrackedTeardownDisposition::Noop};
+  }
   record_resource_teardown_attempt(ledger, FixedSpResourceKind::Event);
-  const bool inject = consume_injected_resource_teardown_failure(
-    FixedSpResourceKind::Event);
-  const cudaError_t status = inject ? cudaErrorUnknown :
-    cudaEventDestroy(*event);
+  if (consume_injected_resource_teardown_failure(
+        FixedSpResourceKind::Event)) {
+    record_resource_teardown_failure(ledger, FixedSpResourceKind::Event);
+    return {cudaErrorUnknown,
+            TrackedTeardownDisposition::NotAttemptedRetryable};
+  }
+  cudaEvent_t owned = std::exchange(*event, nullptr);
+  cudaError_t status = cudaEventDestroy(owned);
+  if (consume_injected_resource_post_call_teardown_failure(
+        FixedSpResourceKind::Event) && status == cudaSuccess) {
+    status = cudaErrorUnknown;
+  }
   if (status == cudaSuccess) {
     record_resource_teardown_success(ledger, FixedSpResourceKind::Event);
-    *event = nullptr;
-  } else {
-    record_resource_teardown_failure(ledger, FixedSpResourceKind::Event);
+    return {status, TrackedTeardownDisposition::CalledSuccess};
   }
-  return status;
+  record_resource_teardown_indeterminate(ledger, FixedSpResourceKind::Event);
+  return {status,
+          TrackedTeardownDisposition::CalledOwnershipIndeterminate};
 }
 
 void tracked_cuda_event_destroy(FixedSpResourceLedger* ledger,
                                 cudaEvent_t* event,
                                 const char* stage) {
-  check_cuda(tracked_cuda_event_destroy_noexcept(ledger, event), stage);
+  check_cuda(tracked_cuda_event_destroy_noexcept(ledger, event).status, stage);
 }
 
-cublasStatus_t tracked_cublas_destroy_noexcept(
+TrackedTeardownResult<cublasStatus_t> tracked_cublas_destroy_noexcept(
     FixedSpResourceLedger* ledger,
     cublasHandle_t* handle) noexcept {
-  if (handle == nullptr || *handle == nullptr) return CUBLAS_STATUS_SUCCESS;
+  if (handle == nullptr || *handle == nullptr) {
+    return {CUBLAS_STATUS_SUCCESS, TrackedTeardownDisposition::Noop};
+  }
   record_resource_teardown_attempt(
     ledger, FixedSpResourceKind::CublasHandle);
-  const bool inject = consume_injected_resource_teardown_failure(
-    FixedSpResourceKind::CublasHandle);
-  const cublasStatus_t status = inject ? CUBLAS_STATUS_INTERNAL_ERROR :
-    cublasDestroy(*handle);
+  if (consume_injected_resource_teardown_failure(
+        FixedSpResourceKind::CublasHandle)) {
+    record_resource_teardown_failure(
+      ledger, FixedSpResourceKind::CublasHandle);
+    return {CUBLAS_STATUS_INTERNAL_ERROR,
+            TrackedTeardownDisposition::NotAttemptedRetryable};
+  }
+  cublasHandle_t owned = std::exchange(*handle, nullptr);
+  cublasStatus_t status = cublasDestroy(owned);
+  if (consume_injected_resource_post_call_teardown_failure(
+        FixedSpResourceKind::CublasHandle) &&
+      status == CUBLAS_STATUS_SUCCESS) {
+    status = CUBLAS_STATUS_INTERNAL_ERROR;
+  }
   if (status == CUBLAS_STATUS_SUCCESS) {
     record_resource_teardown_success(
       ledger, FixedSpResourceKind::CublasHandle);
-    *handle = nullptr;
-  } else {
-    record_resource_teardown_failure(
-      ledger, FixedSpResourceKind::CublasHandle);
+    return {status, TrackedTeardownDisposition::CalledSuccess};
   }
-  return status;
+  record_resource_teardown_indeterminate(
+    ledger, FixedSpResourceKind::CublasHandle);
+  return {status,
+          TrackedTeardownDisposition::CalledOwnershipIndeterminate};
 }
 
-cusolverStatus_t tracked_cusolver_destroy_noexcept(
+TrackedTeardownResult<cusolverStatus_t> tracked_cusolver_destroy_noexcept(
     FixedSpResourceLedger* ledger,
     cusolverDnHandle_t* handle) noexcept {
   if (handle == nullptr || *handle == nullptr) {
-    return CUSOLVER_STATUS_SUCCESS;
+    return {CUSOLVER_STATUS_SUCCESS, TrackedTeardownDisposition::Noop};
   }
   record_resource_teardown_attempt(
     ledger, FixedSpResourceKind::CusolverHandle);
-  const bool inject = consume_injected_resource_teardown_failure(
-    FixedSpResourceKind::CusolverHandle);
-  const cusolverStatus_t status = inject ? CUSOLVER_STATUS_INTERNAL_ERROR :
-    cusolverDnDestroy(*handle);
+  if (consume_injected_resource_teardown_failure(
+        FixedSpResourceKind::CusolverHandle)) {
+    record_resource_teardown_failure(
+      ledger, FixedSpResourceKind::CusolverHandle);
+    return {CUSOLVER_STATUS_INTERNAL_ERROR,
+            TrackedTeardownDisposition::NotAttemptedRetryable};
+  }
+  cusolverDnHandle_t owned = std::exchange(*handle, nullptr);
+  cusolverStatus_t status = cusolverDnDestroy(owned);
+  if (consume_injected_resource_post_call_teardown_failure(
+        FixedSpResourceKind::CusolverHandle) &&
+      status == CUSOLVER_STATUS_SUCCESS) {
+    status = CUSOLVER_STATUS_INTERNAL_ERROR;
+  }
   if (status == CUSOLVER_STATUS_SUCCESS) {
     record_resource_teardown_success(
       ledger, FixedSpResourceKind::CusolverHandle);
-    *handle = nullptr;
-  } else {
-    record_resource_teardown_failure(
-      ledger, FixedSpResourceKind::CusolverHandle);
+    return {status, TrackedTeardownDisposition::CalledSuccess};
   }
-  return status;
+  record_resource_teardown_indeterminate(
+    ledger, FixedSpResourceKind::CusolverHandle);
+  return {status,
+          TrackedTeardownDisposition::CalledOwnershipIndeterminate};
+}
+
+template <typename T>
+void cleanup_local_cuda_allocation_noexcept(
+    FixedSpResourceLedger* ledger,
+    T** pointer) noexcept {
+  const TrackedTeardownResult<cudaError_t> first =
+    tracked_cuda_free_noexcept(ledger, pointer);
+  if (first.disposition ==
+      TrackedTeardownDisposition::NotAttemptedRetryable) {
+    tracked_cuda_free_noexcept(ledger, pointer);
+  }
+}
+
+template <typename T>
+void cleanup_local_cuda_host_allocation_noexcept(
+    FixedSpResourceLedger* ledger,
+    T** pointer) noexcept {
+  const TrackedTeardownResult<cudaError_t> first =
+    tracked_cuda_free_host_noexcept(ledger, pointer);
+  if (first.disposition ==
+      TrackedTeardownDisposition::NotAttemptedRetryable) {
+    tracked_cuda_free_host_noexcept(ledger, pointer);
+  }
 }
 
 void copy_resource_counters(const FixedSpResourceCounters& counters,
@@ -1039,10 +1228,14 @@ void signal_test_blocked_consumer(
 }
 
 struct TestBlockedConsumerTeardownStatus {
-  bool device_ready = false;
+  CleanupCudaDeviceStatus device;
   cudaError_t stream_synchronize = cudaSuccess;
-  cudaError_t event_destroy = cudaSuccess;
-  cudaError_t stream_destroy = cudaSuccess;
+  TrackedTeardownResult<cudaError_t> event_destroy = {
+    cudaSuccess, TrackedTeardownDisposition::Noop
+  };
+  TrackedTeardownResult<cudaError_t> stream_destroy = {
+    cudaSuccess, TrackedTeardownDisposition::Noop
+  };
 };
 
 class TestBlockedConsumerResources {
@@ -1078,7 +1271,8 @@ class TestBlockedConsumerResources {
   TestBlockedConsumerTeardownStatus teardown_once_noexcept() noexcept {
     TestBlockedConsumerTeardownStatus status;
     if (!has_resources()) {
-      status.device_ready = true;
+      status.device.ready = true;
+      status.device.restore_attempted = true;
       return status;
     }
     if (creator_pid_ != static_cast<std::int64_t>(getpid())) return status;
@@ -1087,19 +1281,20 @@ class TestBlockedConsumerResources {
     FixedSpResourceLedger* ledger = resource_ledger_.get();
     ScopedCleanupCudaDevice cleanup_device(
       creator_pid_, device_id_, ledger);
-    if (!cleanup_device.ready()) return status;
-    status.device_ready = true;
-
-    if (stream_ != nullptr) {
-      status.stream_synchronize = cudaStreamSynchronize(stream_);
-      if (status.stream_synchronize != cudaSuccess && ledger != nullptr) {
-        record_cleanup_error(ledger);
+    if (cleanup_device.ready()) {
+      if (stream_ != nullptr) {
+        status.stream_synchronize = cudaStreamSynchronize(stream_);
+        if (status.stream_synchronize != cudaSuccess && ledger != nullptr) {
+          record_cleanup_error(ledger);
+        }
       }
+      status.event_destroy = tracked_cuda_event_destroy_noexcept(
+        ledger, &event_);
+      status.stream_destroy = tracked_cuda_stream_destroy_noexcept(
+        ledger, &stream_);
     }
-    status.event_destroy = tracked_cuda_event_destroy_noexcept(
-      ledger, &event_);
-    status.stream_destroy = tracked_cuda_stream_destroy_noexcept(
-      ledger, &stream_);
+    cleanup_device.restore_noexcept();
+    status.device = cleanup_device.status();
     return status;
   }
 
@@ -1130,17 +1325,30 @@ class TestBlockedConsumerResources {
 
 void check_test_blocked_consumer_teardown(
     const TestBlockedConsumerTeardownStatus& status) {
-  if (!status.device_ready) {
+  check_cuda(status.device.get_device,
+             "query CUDA device for blocked consumer test teardown");
+  check_cuda(status.device.select_device,
+             "select CUDA device for blocked consumer test teardown");
+  if (!status.device.ready) {
     throw std::runtime_error(
       "select CUDA device for blocked consumer test teardown");
   }
   check_cuda(status.stream_synchronize,
              "synchronize blocked consumer test stream");
-  check_cuda(status.event_destroy, "destroy blocked consumer test event");
-  check_cuda(status.stream_destroy, "destroy blocked consumer test stream");
+  check_cuda(status.event_destroy.status, "destroy blocked consumer test event");
+  check_cuda(status.stream_destroy.status,
+             "destroy blocked consumer test stream");
+  check_cuda(status.device.restore_device,
+             "restore CUDA device after blocked consumer test teardown");
 }
 
 }  // namespace
+
+enum class FixedSpOwnerLifecycle {
+  Usable,
+  TeardownOnly,
+  Freed
+};
 
 class CudaRuntimeContext {
  public:
@@ -1149,6 +1357,9 @@ class CudaRuntimeContext {
   void reserve(const FixedSpCapacities& requested_capacities);
   FixedSpRuntimeInfo info() const;
   void require_usable() const;
+  void require_explicit_close_identity() const;
+  OwnerTeardownStatus close_once_noexcept() noexcept;
+  void cleanup_noexcept() noexcept;
 
   int device_id = -1;
   std::int64_t creator_pid = -1;
@@ -1174,11 +1385,8 @@ class CudaRuntimeContext {
     std::make_shared<FixedSpResourceLedger>();
   FixedSpRuntimeInfo diagnostics;
   std::atomic<int> active_prepared_handle_count{0};
-  bool freed = false;
+  FixedSpOwnerLifecycle lifecycle = FixedSpOwnerLifecycle::Usable;
   mutable std::mutex mutex;
-
- private:
-  void cleanup_noexcept() noexcept;
 };
 
 enum class TransientResidualSlotState {
@@ -1190,28 +1398,53 @@ enum class TransientResidualSlotState {
 
 struct TransientResidualSlot {
   ~TransientResidualSlot() { cleanup_noexcept(); }
-  void cleanup_noexcept() noexcept {
-    if (freed) return;
+  OwnerTeardownStatus close_once_noexcept() noexcept {
+    OwnerTeardownStatus status;
+    if (lifecycle == FixedSpOwnerLifecycle::Freed) return status;
     if (creator_pid != static_cast<std::int64_t>(getpid())) {
-      freed = true;
-      return;
+      coefficients = nullptr;
+      fitted = nullptr;
+      residuals = nullptr;
+      rss = nullptr;
+      rhs = nullptr;
+      host_finite_status = nullptr;
+      solve_completion_event = nullptr;
+      consumer_completion_event = nullptr;
+      lifecycle = FixedSpOwnerLifecycle::Freed;
+      return status;
     }
+    lifecycle = FixedSpOwnerLifecycle::TeardownOnly;
     FixedSpResourceLedger* ledger = resource_ledger.get();
     ScopedCleanupCudaDevice cleanup_device(
       creator_pid, device_id, ledger);
     if (cleanup_device.ready()) {
-      tracked_cuda_event_destroy_noexcept(
-        ledger, &consumer_completion_event);
-      tracked_cuda_event_destroy_noexcept(
-        ledger, &solve_completion_event);
-      tracked_cuda_free_host_noexcept(ledger, &host_finite_status);
-      tracked_cuda_free_noexcept(ledger, &rss);
-      tracked_cuda_free_noexcept(ledger, &rhs);
-      tracked_cuda_free_noexcept(ledger, &residuals);
-      tracked_cuda_free_noexcept(ledger, &fitted);
-      tracked_cuda_free_noexcept(ledger, &coefficients);
+      status.observe(tracked_cuda_event_destroy_noexcept(
+        ledger, &consumer_completion_event));
+      status.observe(tracked_cuda_event_destroy_noexcept(
+        ledger, &solve_completion_event));
+      status.observe(
+        tracked_cuda_free_host_noexcept(ledger, &host_finite_status));
+      status.observe(tracked_cuda_free_noexcept(ledger, &rss));
+      status.observe(tracked_cuda_free_noexcept(ledger, &rhs));
+      status.observe(tracked_cuda_free_noexcept(ledger, &residuals));
+      status.observe(tracked_cuda_free_noexcept(ledger, &fitted));
+      status.observe(tracked_cuda_free_noexcept(ledger, &coefficients));
+    } else {
+      status.not_attempted_retryable = true;
     }
-    freed = true;
+    cleanup_device.restore_noexcept();
+    if (!status.not_attempted_retryable) {
+      lifecycle = FixedSpOwnerLifecycle::Freed;
+    }
+    return status;
+  }
+
+  void cleanup_noexcept() noexcept {
+    if (lifecycle == FixedSpOwnerLifecycle::Freed) return;
+    close_once_noexcept();
+    if (lifecycle == FixedSpOwnerLifecycle::TeardownOnly) {
+      close_once_noexcept();
+    }
   }
 
   std::shared_ptr<FixedSpResourceLedger> resource_ledger;
@@ -1234,46 +1467,77 @@ struct TransientResidualSlot {
   std::weak_ptr<DeviceResidualBatch> lease_owner;
   bool consumer_event_registered = false;
   std::string poison_reason;
-  bool freed = false;
+  FixedSpOwnerLifecycle lifecycle = FixedSpOwnerLifecycle::Usable;
 };
 
 class PreparedSGpuHandle {
  public:
   ~PreparedSGpuHandle() { cleanup_noexcept(); }
 
-  void cleanup_noexcept() noexcept {
-    if (freed) return;
+  OwnerTeardownStatus close_once_noexcept() noexcept {
+    OwnerTeardownStatus status;
+    if (lifecycle == FixedSpOwnerLifecycle::Freed) return status;
     if (creator_pid != static_cast<std::int64_t>(getpid())) {
+      d_X = nullptr;
+      d_Z = nullptr;
+      d_X_null = nullptr;
+      d_gram = nullptr;
+      d_projected_penalties = nullptr;
+      setup_completion_event = nullptr;
       residual_slot.reset();
       context.reset();
       resource_ledger.reset();
       registered_with_context = false;
-      freed = true;
-      return;
+      lifecycle = FixedSpOwnerLifecycle::Freed;
+      return status;
     }
-    FixedSpResourceLedger* ledger = resource_ledger.get();
-    ScopedCleanupCudaDevice cleanup_device(
-      creator_pid, device_id, ledger);
-    if (cleanup_device.ready()) {
-      tracked_cuda_event_destroy_noexcept(ledger, &setup_completion_event);
-      residual_slot.reset();
-      tracked_cuda_free_noexcept(ledger, &d_projected_penalties);
-      tracked_cuda_free_noexcept(ledger, &d_gram);
-      if (d_X_null != d_X) tracked_cuda_free_noexcept(ledger, &d_X_null);
-      d_X_null = nullptr;
-      tracked_cuda_free_noexcept(ledger, &d_Z);
-      tracked_cuda_free_noexcept(ledger, &d_X);
-    } else {
-      residual_slot.reset();
-    }
+    lifecycle = FixedSpOwnerLifecycle::TeardownOnly;
     if (registered_with_context && context) {
       context->active_prepared_handle_count.fetch_sub(
         1, std::memory_order_acq_rel);
       registered_with_context = false;
     }
-    context.reset();
-    generation += 1;
-    freed = true;
+    FixedSpResourceLedger* ledger = resource_ledger.get();
+    ScopedCleanupCudaDevice cleanup_device(
+      creator_pid, device_id, ledger);
+    if (cleanup_device.ready()) {
+      status.observe(tracked_cuda_event_destroy_noexcept(
+        ledger, &setup_completion_event));
+      if (residual_slot) {
+        status.merge(residual_slot->close_once_noexcept());
+        if (residual_slot->lifecycle == FixedSpOwnerLifecycle::Freed) {
+          residual_slot.reset();
+        }
+      }
+      status.observe(
+        tracked_cuda_free_noexcept(ledger, &d_projected_penalties));
+      status.observe(tracked_cuda_free_noexcept(ledger, &d_gram));
+      if (d_X_null == d_X) {
+        d_X_null = nullptr;
+      } else {
+        status.observe(tracked_cuda_free_noexcept(ledger, &d_X_null));
+      }
+      status.observe(tracked_cuda_free_noexcept(ledger, &d_Z));
+      status.observe(tracked_cuda_free_noexcept(ledger, &d_X));
+    } else {
+      status.not_attempted_retryable = true;
+    }
+    cleanup_device.restore_noexcept();
+    if (!status.not_attempted_retryable) {
+      residual_slot.reset();
+      context.reset();
+      generation += 1;
+      lifecycle = FixedSpOwnerLifecycle::Freed;
+    }
+    return status;
+  }
+
+  void cleanup_noexcept() noexcept {
+    if (lifecycle == FixedSpOwnerLifecycle::Freed) return;
+    close_once_noexcept();
+    if (lifecycle == FixedSpOwnerLifecycle::TeardownOnly) {
+      close_once_noexcept();
+    }
   }
 
   std::shared_ptr<CudaRuntimeContext> context;
@@ -1297,7 +1561,7 @@ class PreparedSGpuHandle {
   int setup_h2d_upload_count = 0;
   std::size_t setup_h2d_bytes = 0;
   bool registered_with_context = false;
-  bool freed = false;
+  FixedSpOwnerLifecycle lifecycle = FixedSpOwnerLifecycle::Usable;
 };
 
 class DeviceResidualBatch {
@@ -1370,15 +1634,51 @@ void poison_transient_residual_slot(
 
 std::shared_ptr<CudaRuntimeContext> require_prepared_host_identity(
     const std::shared_ptr<PreparedSGpuHandle>& handle) {
-  if (!handle || handle->freed) {
+  if (!handle || handle->lifecycle == FixedSpOwnerLifecycle::Freed) {
     throw std::runtime_error("fixed-sp CUDA prepared handle has been freed");
+  }
+  if (handle->lifecycle == FixedSpOwnerLifecycle::TeardownOnly) {
+    throw std::runtime_error(
+      "fixed-sp CUDA prepared handle is TeardownOnly");
   }
   if (handle->creator_pid != static_cast<std::int64_t>(getpid())) {
     throw std::runtime_error(
       "fixed-sp CUDA prepared handle has a different creator PID");
   }
   const std::shared_ptr<CudaRuntimeContext> context = handle->context;
-  if (!context || context->freed) {
+  if (!context || context->lifecycle == FixedSpOwnerLifecycle::Freed) {
+    throw std::runtime_error("fixed-sp CUDA prepared runtime has been freed");
+  }
+  if (context->lifecycle == FixedSpOwnerLifecycle::TeardownOnly) {
+    throw std::runtime_error("fixed-sp CUDA runtime is TeardownOnly");
+  }
+  if (context->creator_pid != handle->creator_pid ||
+      handle->device_id != context->device_id ||
+      handle->context_generation != context->generation) {
+    throw std::runtime_error(
+      "fixed-sp CUDA prepared handle ownership mismatch");
+  }
+  if (!handle->residual_slot ||
+      handle->residual_slot->lifecycle != FixedSpOwnerLifecycle::Usable ||
+      handle->residual_slot->creator_pid != handle->creator_pid ||
+      handle->residual_slot->device_id != handle->device_id) {
+    throw std::runtime_error(
+      "fixed-sp CUDA prepared output-slot ownership mismatch");
+  }
+  return context;
+}
+
+std::shared_ptr<CudaRuntimeContext> require_prepared_close_identity(
+    const std::shared_ptr<PreparedSGpuHandle>& handle) {
+  if (!handle || handle->lifecycle == FixedSpOwnerLifecycle::Freed) {
+    return std::shared_ptr<CudaRuntimeContext>();
+  }
+  if (handle->creator_pid != static_cast<std::int64_t>(getpid())) {
+    throw std::runtime_error(
+      "fixed-sp CUDA prepared handle has a different creator PID");
+  }
+  const std::shared_ptr<CudaRuntimeContext> context = handle->context;
+  if (!context || context->lifecycle == FixedSpOwnerLifecycle::Freed) {
     throw std::runtime_error("fixed-sp CUDA prepared runtime has been freed");
   }
   if (context->creator_pid != handle->creator_pid ||
@@ -1387,12 +1687,7 @@ std::shared_ptr<CudaRuntimeContext> require_prepared_host_identity(
     throw std::runtime_error(
       "fixed-sp CUDA prepared handle ownership mismatch");
   }
-  if (!handle->residual_slot || handle->residual_slot->freed ||
-      handle->residual_slot->creator_pid != handle->creator_pid ||
-      handle->residual_slot->device_id != handle->device_id) {
-    throw std::runtime_error(
-      "fixed-sp CUDA prepared output-slot ownership mismatch");
-  }
+  context->require_explicit_close_identity();
   return context;
 }
 
@@ -1406,16 +1701,24 @@ std::shared_ptr<CudaRuntimeContext> require_residual_host_identity(
     throw std::runtime_error(
       "fixed-sp CUDA residual token has a different creator PID");
   }
-  if (!token->owner || token->owner->freed ||
+  if (!token->owner ||
+      token->owner->lifecycle == FixedSpOwnerLifecycle::Freed ||
       token->owner->creator_pid != token->creator_pid ||
       token->owner_generation != token->owner->generation) {
     token->diagnostics.stale_token_reject_count += 1;
     throw std::runtime_error(
       "STALE_TOKEN: residual owner generation mismatch");
   }
+  if (token->owner->lifecycle == FixedSpOwnerLifecycle::TeardownOnly) {
+    throw std::runtime_error(
+      "fixed-sp CUDA prepared handle is TeardownOnly");
+  }
   const std::shared_ptr<CudaRuntimeContext> context = token->owner->context;
-  if (!context || context->freed) {
+  if (!context || context->lifecycle == FixedSpOwnerLifecycle::Freed) {
     throw std::runtime_error("fixed-sp CUDA residual runtime has been freed");
+  }
+  if (context->lifecycle == FixedSpOwnerLifecycle::TeardownOnly) {
+    throw std::runtime_error("fixed-sp CUDA runtime is TeardownOnly");
   }
   if (context->creator_pid != token->creator_pid ||
       token->owner->context_generation != context->generation ||
@@ -1426,9 +1729,14 @@ std::shared_ptr<CudaRuntimeContext> require_residual_host_identity(
       "STALE_TOKEN: residual owner generation mismatch");
   }
   if (!require_active_lease) return context;
-  if (token->lease_released || !token->slot || token->slot->freed) {
+  if (token->lease_released || !token->slot ||
+      token->slot->lifecycle == FixedSpOwnerLifecycle::Freed) {
     token->diagnostics.stale_token_reject_count += 1;
     throw std::runtime_error("STALE_TOKEN: residual lease has been released");
+  }
+  if (token->slot->lifecycle == FixedSpOwnerLifecycle::TeardownOnly) {
+    throw std::runtime_error(
+      "fixed-sp CUDA residual slot is TeardownOnly");
   }
   if (token->slot->creator_pid != token->creator_pid ||
       token->slot->device_id != context->device_id ||
@@ -1732,40 +2040,74 @@ CudaRuntimeContext::~CudaRuntimeContext() {
 }
 
 void CudaRuntimeContext::cleanup_noexcept() noexcept {
-  if (freed) return;
-  if (creator_pid != static_cast<std::int64_t>(getpid())) {
-    diagnostics.freed = true;
-    freed = true;
-    return;
+  if (lifecycle == FixedSpOwnerLifecycle::Freed) return;
+  close_once_noexcept();
+  if (lifecycle == FixedSpOwnerLifecycle::TeardownOnly) {
+    close_once_noexcept();
   }
+}
+
+OwnerTeardownStatus CudaRuntimeContext::close_once_noexcept() noexcept {
+  OwnerTeardownStatus status;
+  if (lifecycle == FixedSpOwnerLifecycle::Freed) return status;
+  if (creator_pid != static_cast<std::int64_t>(getpid())) {
+    stream = nullptr;
+    blas = nullptr;
+    solver = nullptr;
+    cholesky_factor_checkpoint_event = nullptr;
+    cholesky_solve_checkpoint_event = nullptr;
+    double_arena = nullptr;
+    int_arena = nullptr;
+    host_status_arena = nullptr;
+    pointer_arena = nullptr;
+    cublas_workspace = nullptr;
+    diagnostics.freed = true;
+    lifecycle = FixedSpOwnerLifecycle::Freed;
+    return status;
+  }
+  lifecycle = FixedSpOwnerLifecycle::TeardownOnly;
   FixedSpResourceLedger* ledger = resource_ledger.get();
   ScopedCleanupCudaDevice cleanup_device(creator_pid, device_id, ledger);
   if (cleanup_device.ready()) {
-    tracked_cuda_free_noexcept(ledger, &double_arena);
-    tracked_cuda_free_noexcept(ledger, &int_arena);
-    tracked_cuda_free_host_noexcept(ledger, &host_status_arena);
-    tracked_cuda_free_noexcept(ledger, &pointer_arena);
-    tracked_cuda_free_noexcept(ledger, &cublas_workspace);
+    status.observe(tracked_cuda_free_noexcept(ledger, &double_arena));
+    status.observe(tracked_cuda_free_noexcept(ledger, &int_arena));
+    status.observe(
+      tracked_cuda_free_host_noexcept(ledger, &host_status_arena));
+    status.observe(tracked_cuda_free_noexcept(ledger, &pointer_arena));
+    status.observe(tracked_cuda_free_noexcept(ledger, &cublas_workspace));
 
-    tracked_cuda_event_destroy_noexcept(
-      ledger, &cholesky_solve_checkpoint_event);
-    tracked_cuda_event_destroy_noexcept(
-      ledger, &cholesky_factor_checkpoint_event);
-    tracked_cusolver_destroy_noexcept(ledger, &solver);
-    tracked_cublas_destroy_noexcept(ledger, &blas);
-    tracked_cuda_stream_destroy_noexcept(ledger, &stream);
+    status.observe(tracked_cuda_event_destroy_noexcept(
+      ledger, &cholesky_solve_checkpoint_event));
+    status.observe(tracked_cuda_event_destroy_noexcept(
+      ledger, &cholesky_factor_checkpoint_event));
+    status.observe(tracked_cusolver_destroy_noexcept(ledger, &solver));
+    status.observe(tracked_cublas_destroy_noexcept(ledger, &blas));
+    status.observe(tracked_cuda_stream_destroy_noexcept(ledger, &stream));
+  } else {
+    status.not_attempted_retryable = true;
   }
-
-  generation += 1;
-  freed = true;
-  diagnostics.freed = true;
-  diagnostics.generation = generation;
+  cleanup_device.restore_noexcept();
+  if (!status.not_attempted_retryable) {
+    generation += 1;
+    lifecycle = FixedSpOwnerLifecycle::Freed;
+    diagnostics.freed = true;
+    diagnostics.generation = generation;
+  }
+  return status;
 }
 
 void CudaRuntimeContext::require_usable() const {
-  if (freed) {
+  if (lifecycle == FixedSpOwnerLifecycle::Freed) {
     throw std::runtime_error("fixed-sp CUDA runtime has been freed");
   }
+  if (lifecycle == FixedSpOwnerLifecycle::TeardownOnly) {
+    throw std::runtime_error("fixed-sp CUDA runtime is TeardownOnly");
+  }
+  require_explicit_close_identity();
+}
+
+void CudaRuntimeContext::require_explicit_close_identity() const {
+  if (lifecycle == FixedSpOwnerLifecycle::Freed) return;
   if (creator_pid != static_cast<std::int64_t>(getpid())) {
     throw std::runtime_error(
       "fixed-sp CUDA runtime has a different creator PID");
@@ -1830,7 +2172,8 @@ void CudaRuntimeContext::reserve(
       tracked_cuda_free(
         resource_ledger.get(), &probe, "free potrf probe");
     } catch (...) {
-      tracked_cuda_free_noexcept(resource_ledger.get(), &probe);
+      cleanup_local_cuda_allocation_noexcept(
+        resource_ledger.get(), &probe);
       throw;
     }
     if (requested_potrf_lwork < 0) {
@@ -1874,12 +2217,16 @@ void CudaRuntimeContext::reserve(
   void* new_cublas_workspace = nullptr;
   std::size_t new_cublas_alignment = diagnostics.cublas_workspace_alignment;
   auto cleanup_new_allocations = [&]() noexcept {
-    tracked_cuda_free_noexcept(resource_ledger.get(), &new_double_arena);
-    tracked_cuda_free_noexcept(resource_ledger.get(), &new_int_arena);
-    tracked_cuda_free_host_noexcept(
+    cleanup_local_cuda_allocation_noexcept(
+      resource_ledger.get(), &new_double_arena);
+    cleanup_local_cuda_allocation_noexcept(
+      resource_ledger.get(), &new_int_arena);
+    cleanup_local_cuda_host_allocation_noexcept(
       resource_ledger.get(), &new_host_status_arena);
-    tracked_cuda_free_noexcept(resource_ledger.get(), &new_pointer_arena);
-    tracked_cuda_free_noexcept(resource_ledger.get(), &new_cublas_workspace);
+    cleanup_local_cuda_allocation_noexcept(
+      resource_ledger.get(), &new_pointer_arena);
+    cleanup_local_cuda_allocation_noexcept(
+      resource_ledger.get(), &new_cublas_workspace);
   };
 
   try {
@@ -1931,29 +2278,58 @@ void CudaRuntimeContext::reserve(
   const bool replace_host_status = new_host_status_arena != nullptr;
   const bool replace_pointer = new_pointer_arena != nullptr;
   const bool install_cublas_workspace = new_cublas_workspace != nullptr;
+  bool old_owned_resource_consumed = false;
+  auto free_old_cuda_owner = [&](auto** pointer, const char* stage) {
+    const bool had_owner = pointer != nullptr && *pointer != nullptr;
+    const TrackedTeardownResult<cudaError_t> result =
+      tracked_cuda_free_noexcept(resource_ledger.get(), pointer);
+    if (had_owner &&
+        (result.disposition == TrackedTeardownDisposition::CalledSuccess ||
+         result.disposition ==
+           TrackedTeardownDisposition::CalledOwnershipIndeterminate)) {
+      old_owned_resource_consumed = true;
+    }
+    if (result.disposition ==
+        TrackedTeardownDisposition::NotAttemptedRetryable) {
+      throw std::runtime_error(
+        "injected tracked CUDA device free failure");
+    }
+    check_cuda(result.status, stage);
+  };
+  auto free_old_cuda_host_owner = [&](auto** pointer, const char* stage) {
+    const bool had_owner = pointer != nullptr && *pointer != nullptr;
+    const TrackedTeardownResult<cudaError_t> result =
+      tracked_cuda_free_host_noexcept(resource_ledger.get(), pointer);
+    if (had_owner &&
+        (result.disposition == TrackedTeardownDisposition::CalledSuccess ||
+         result.disposition ==
+           TrackedTeardownDisposition::CalledOwnershipIndeterminate)) {
+      old_owned_resource_consumed = true;
+    }
+    check_cuda(result.status, stage);
+  };
   try {
     if (replace_double) {
-      tracked_cuda_free(
-        resource_ledger.get(), &double_arena, "free old fixed-sp double arena");
+      free_old_cuda_owner(
+        &double_arena, "free old fixed-sp double arena");
       double_arena = new_double_arena;
       new_double_arena = nullptr;
     }
     if (replace_int) {
-      tracked_cuda_free(
-        resource_ledger.get(), &int_arena, "free old fixed-sp int arena");
+      free_old_cuda_owner(&int_arena, "free old fixed-sp int arena");
       int_arena = new_int_arena;
       new_int_arena = nullptr;
     }
     if (replace_host_status) {
-      tracked_cuda_free_host(
-        resource_ledger.get(), &host_status_arena,
+      free_old_cuda_host_owner(
+        &host_status_arena,
         "free old fixed-sp host status arena");
       host_status_arena = new_host_status_arena;
       new_host_status_arena = nullptr;
     }
     if (replace_pointer) {
-      tracked_cuda_free(
-        resource_ledger.get(), &pointer_arena,
+      free_old_cuda_owner(
+        &pointer_arena,
         "free old fixed-sp pointer arena");
       pointer_arena = new_pointer_arena;
       new_pointer_arena = nullptr;
@@ -1969,6 +2345,9 @@ void CudaRuntimeContext::reserve(
       diagnostics.cublas_user_workspace_installed = true;
     }
   } catch (...) {
+    if (old_owned_resource_consumed) {
+      lifecycle = FixedSpOwnerLifecycle::TeardownOnly;
+    }
     cleanup_new_allocations();
     throw;
   }
@@ -2038,9 +2417,28 @@ FixedSpRuntimeInfo fixed_sp_runtime_info(
 void free_fixed_sp_runtime(std::shared_ptr<CudaRuntimeContext>* context) {
   if (context == nullptr || !*context) return;
   const std::shared_ptr<CudaRuntimeContext> owned_context = *context;
+  OwnerTeardownStatus status;
   {
     std::lock_guard<std::mutex> lock(owned_context->mutex);
-    owned_context->require_usable();
+    owned_context->require_explicit_close_identity();
+    if (owned_context.use_count() > 2) {
+      context->reset();
+      return;
+    }
+    status = owned_context->close_once_noexcept();
+    if (status.ownership_indeterminate &&
+        owned_context->lifecycle == FixedSpOwnerLifecycle::TeardownOnly) {
+      status.merge(owned_context->close_once_noexcept());
+    }
+  }
+  if (status.ownership_indeterminate) {
+    context->reset();
+    throw std::runtime_error(
+      "fixed-sp CUDA runtime teardown ownership is indeterminate");
+  }
+  if (status.not_attempted_retryable) {
+    throw std::runtime_error(
+      "fixed-sp CUDA runtime has retryable teardown work");
   }
   context->reset();
 }
@@ -2062,6 +2460,8 @@ FixedSpResourceSnapshot test_fixed_sp_cuda_resource_snapshot() {
       std::memory_order_relaxed);
     snapshot.active_count = counters.active_count.load(
       std::memory_order_relaxed);
+    snapshot.ownership_indeterminate_count =
+      counters.ownership_indeterminate_count.load(std::memory_order_relaxed);
     return snapshot;
   };
 
@@ -2096,17 +2496,40 @@ void test_inject_next_fixed_sp_cuda_resource_teardown_failure(
     fixed_sp_resource_kind_from_name(resource));
 }
 
+void test_inject_next_fixed_sp_cuda_resource_post_call_teardown_failure(
+    const std::string& resource) {
+  arm_injected_resource_post_call_teardown_failure(
+    fixed_sp_resource_kind_from_name(resource));
+}
+
 void test_exercise_fixed_sp_cuda_resource_teardown_failure(
     const std::string& resource) {
   const FixedSpResourceKind kind = fixed_sp_resource_kind_from_name(resource);
   FixedSpResourceLedger ledger;
   check_cuda(cudaSetDevice(0), "set CUDA device for teardown failure test");
+  const bool post_call_mode =
+    has_injected_resource_post_call_teardown_failure(kind);
+  if (!post_call_mode) arm_injected_resource_teardown_failure(kind);
 
-  auto require_cuda_retry = [&](cudaError_t first, cudaError_t second,
-                                const void* retained) {
-    if (first == cudaSuccess || second != cudaSuccess || retained != nullptr) {
+  auto require_first = [&](TrackedTeardownDisposition disposition,
+                           bool has_raw_owner) {
+    const bool valid = post_call_mode ?
+      disposition ==
+        TrackedTeardownDisposition::CalledOwnershipIndeterminate &&
+        !has_raw_owner :
+      disposition == TrackedTeardownDisposition::NotAttemptedRetryable &&
+        has_raw_owner;
+    if (!valid) {
       throw std::runtime_error(
-        "tracked fixed-sp CUDA teardown failure retry invariant failed");
+        "tracked fixed-sp teardown first-attempt ownership invariant failed");
+    }
+  };
+  auto require_retry = [&](TrackedTeardownDisposition disposition,
+                           bool has_raw_owner) {
+    if (disposition != TrackedTeardownDisposition::CalledSuccess ||
+        has_raw_owner) {
+      throw std::runtime_error(
+        "tracked fixed-sp teardown retry ownership invariant failed");
     }
   };
   switch (kind) {
@@ -2114,34 +2537,28 @@ void test_exercise_fixed_sp_cuda_resource_teardown_failure(
       void* pointer = nullptr;
       tracked_cuda_malloc(
         &ledger, &pointer, 1U, "allocate teardown test device byte");
-      arm_injected_resource_teardown_failure(kind);
-      const cudaError_t first = tracked_cuda_free_noexcept(
-        &ledger, &pointer);
-      if (first == cudaSuccess || pointer == nullptr) {
+      const TrackedTeardownResult<cudaError_t> first =
         tracked_cuda_free_noexcept(&ledger, &pointer);
-        throw std::runtime_error(
-          "tracked fixed-sp device teardown did not retain ownership");
+      require_first(first.disposition, pointer != nullptr);
+      if (!post_call_mode) {
+        const TrackedTeardownResult<cudaError_t> second =
+          tracked_cuda_free_noexcept(&ledger, &pointer);
+        require_retry(second.disposition, pointer != nullptr);
       }
-      const cudaError_t second = tracked_cuda_free_noexcept(
-        &ledger, &pointer);
-      require_cuda_retry(first, second, pointer);
       break;
     }
     case FixedSpResourceKind::CudaHost: {
       void* pointer = nullptr;
       tracked_cuda_malloc_host(
         &ledger, &pointer, 1U, "allocate teardown test host byte");
-      arm_injected_resource_teardown_failure(kind);
-      const cudaError_t first = tracked_cuda_free_host_noexcept(
-        &ledger, &pointer);
-      if (first == cudaSuccess || pointer == nullptr) {
+      const TrackedTeardownResult<cudaError_t> first =
         tracked_cuda_free_host_noexcept(&ledger, &pointer);
-        throw std::runtime_error(
-          "tracked fixed-sp host teardown did not retain ownership");
+      require_first(first.disposition, pointer != nullptr);
+      if (!post_call_mode) {
+        const TrackedTeardownResult<cudaError_t> second =
+          tracked_cuda_free_host_noexcept(&ledger, &pointer);
+        require_retry(second.disposition, pointer != nullptr);
       }
-      const cudaError_t second = tracked_cuda_free_host_noexcept(
-        &ledger, &pointer);
-      require_cuda_retry(first, second, pointer);
       break;
     }
     case FixedSpResourceKind::Stream: {
@@ -2149,17 +2566,14 @@ void test_exercise_fixed_sp_cuda_resource_teardown_failure(
       tracked_cuda_stream_create(
         &ledger, &stream, cudaStreamNonBlocking,
         "create teardown test stream");
-      arm_injected_resource_teardown_failure(kind);
-      const cudaError_t first = tracked_cuda_stream_destroy_noexcept(
-        &ledger, &stream);
-      if (first == cudaSuccess || stream == nullptr) {
+      const TrackedTeardownResult<cudaError_t> first =
         tracked_cuda_stream_destroy_noexcept(&ledger, &stream);
-        throw std::runtime_error(
-          "tracked fixed-sp stream teardown did not retain ownership");
+      require_first(first.disposition, stream != nullptr);
+      if (!post_call_mode) {
+        const TrackedTeardownResult<cudaError_t> second =
+          tracked_cuda_stream_destroy_noexcept(&ledger, &stream);
+        require_retry(second.disposition, stream != nullptr);
       }
-      const cudaError_t second = tracked_cuda_stream_destroy_noexcept(
-        &ledger, &stream);
-      require_cuda_retry(first, second, stream);
       break;
     }
     case FixedSpResourceKind::Event: {
@@ -2167,37 +2581,27 @@ void test_exercise_fixed_sp_cuda_resource_teardown_failure(
       tracked_cuda_event_create(
         &ledger, &event, cudaEventDisableTiming,
         "create teardown test event");
-      arm_injected_resource_teardown_failure(kind);
-      const cudaError_t first = tracked_cuda_event_destroy_noexcept(
-        &ledger, &event);
-      if (first == cudaSuccess || event == nullptr) {
+      const TrackedTeardownResult<cudaError_t> first =
         tracked_cuda_event_destroy_noexcept(&ledger, &event);
-        throw std::runtime_error(
-          "tracked fixed-sp event teardown did not retain ownership");
+      require_first(first.disposition, event != nullptr);
+      if (!post_call_mode) {
+        const TrackedTeardownResult<cudaError_t> second =
+          tracked_cuda_event_destroy_noexcept(&ledger, &event);
+        require_retry(second.disposition, event != nullptr);
       }
-      const cudaError_t second = tracked_cuda_event_destroy_noexcept(
-        &ledger, &event);
-      require_cuda_retry(first, second, event);
       break;
     }
     case FixedSpResourceKind::CublasHandle: {
       cublasHandle_t handle = nullptr;
       tracked_cublas_create(
         &ledger, &handle, "create teardown test cuBLAS handle");
-      arm_injected_resource_teardown_failure(kind);
-      const cublasStatus_t first = tracked_cublas_destroy_noexcept(
-        &ledger, &handle);
-      if (first == CUBLAS_STATUS_SUCCESS || handle == nullptr) {
+      const TrackedTeardownResult<cublasStatus_t> first =
         tracked_cublas_destroy_noexcept(&ledger, &handle);
-        throw std::runtime_error(
-          "tracked fixed-sp cuBLAS teardown did not retain ownership");
-      }
-      const cublasStatus_t second = tracked_cublas_destroy_noexcept(
-        &ledger, &handle);
-      if (second != CUBLAS_STATUS_SUCCESS || handle != nullptr) {
-        tracked_cublas_destroy_noexcept(&ledger, &handle);
-        throw std::runtime_error(
-          "tracked fixed-sp cuBLAS teardown failure retry invariant failed");
+      require_first(first.disposition, handle != nullptr);
+      if (!post_call_mode) {
+        const TrackedTeardownResult<cublasStatus_t> second =
+          tracked_cublas_destroy_noexcept(&ledger, &handle);
+        require_retry(second.disposition, handle != nullptr);
       }
       break;
     }
@@ -2205,20 +2609,13 @@ void test_exercise_fixed_sp_cuda_resource_teardown_failure(
       cusolverDnHandle_t handle = nullptr;
       tracked_cusolver_create(
         &ledger, &handle, "create teardown test cuSOLVER handle");
-      arm_injected_resource_teardown_failure(kind);
-      const cusolverStatus_t first = tracked_cusolver_destroy_noexcept(
-        &ledger, &handle);
-      if (first == CUSOLVER_STATUS_SUCCESS || handle == nullptr) {
+      const TrackedTeardownResult<cusolverStatus_t> first =
         tracked_cusolver_destroy_noexcept(&ledger, &handle);
-        throw std::runtime_error(
-          "tracked fixed-sp cuSOLVER teardown did not retain ownership");
-      }
-      const cusolverStatus_t second = tracked_cusolver_destroy_noexcept(
-        &ledger, &handle);
-      if (second != CUSOLVER_STATUS_SUCCESS || handle != nullptr) {
-        tracked_cusolver_destroy_noexcept(&ledger, &handle);
-        throw std::runtime_error(
-          "tracked fixed-sp cuSOLVER teardown failure retry invariant failed");
+      require_first(first.disposition, handle != nullptr);
+      if (!post_call_mode) {
+        const TrackedTeardownResult<cusolverStatus_t> second =
+          tracked_cusolver_destroy_noexcept(&ledger, &handle);
+        require_retry(second.disposition, handle != nullptr);
       }
       break;
     }
@@ -2481,11 +2878,33 @@ void free_prepared_s_gpu(std::shared_ptr<PreparedSGpuHandle>* handle) {
   if (handle == nullptr || !*handle) return;
   const std::shared_ptr<PreparedSGpuHandle> owned_handle = *handle;
   const std::shared_ptr<CudaRuntimeContext> context =
-    require_prepared_host_identity(owned_handle);
+    require_prepared_close_identity(owned_handle);
+  if (!context) {
+    handle->reset();
+    return;
+  }
+  OwnerTeardownStatus status;
   {
     std::lock_guard<std::mutex> lock(context->mutex);
-    require_prepared_host_identity(owned_handle);
-    context->require_usable();
+    require_prepared_close_identity(owned_handle);
+    if (owned_handle.use_count() > 2) {
+      handle->reset();
+      return;
+    }
+    status = owned_handle->close_once_noexcept();
+    if (status.ownership_indeterminate &&
+        owned_handle->lifecycle == FixedSpOwnerLifecycle::TeardownOnly) {
+      status.merge(owned_handle->close_once_noexcept());
+    }
+  }
+  if (status.ownership_indeterminate) {
+    handle->reset();
+    throw std::runtime_error(
+      "fixed-sp CUDA prepared teardown ownership is indeterminate");
+  }
+  if (status.not_attempted_retryable) {
+    throw std::runtime_error(
+      "fixed-sp CUDA prepared handle has retryable teardown work");
   }
   handle->reset();
 }

@@ -33,12 +33,25 @@ resource_snapshot <- function() {
 resource_delta <- function(before, after, field) {
   as.numeric(after[[field]] - before[[field]])
 }
+inject_teardown_failure <- function(resource) {
+  .Call(
+    "C_fixed_sp_cuda_test_inject_next_resource_teardown_failure",
+    resource, PACKAGE = "fastkpc_cuda"
+  )
+}
+inject_post_call_teardown_failure <- function(resource) {
+  .Call(
+    "C_fixed_sp_cuda_test_inject_next_resource_post_call_teardown_failure",
+    resource, PACKAGE = "fastkpc_cuda"
+  )
+}
 
 test_native_names <- c(
   "fixed_sp_cuda_test_device_count",
   "fixed_sp_cuda_test_set_device",
   "fixed_sp_cuda_test_get_device",
   "fixed_sp_cuda_test_inject_next_resource_teardown_failure",
+  "fixed_sp_cuda_test_inject_next_resource_post_call_teardown_failure",
   "fixed_sp_cuda_test_inject_next_blocked_consumer_launch_failure",
   "fixed_sp_cuda_test_register_blocked_consumer",
   "fixed_sp_cuda_test_complete_consumer"
@@ -113,6 +126,97 @@ expect_error_contains(
   fixed_sp_cuda_prepared_info(freed_handle), "freed",
   "freed prepared handle rejects info"
 )
+
+retry_prepared <- fixed_sp_cuda_prepared_create(runtime, safe_dto)
+on.exit(try(fixed_sp_cuda_prepared_free(retry_prepared), silent = TRUE),
+        add = TRUE)
+retry_prepared_before <- resource_snapshot()
+inject_teardown_failure("event")
+expect_error_contains(
+  fixed_sp_cuda_prepared_free(retry_prepared),
+  "retryable teardown",
+  "prepared owner retains an injected not-attempted event teardown"
+)
+expect_error_contains(
+  fixed_sp_cuda_prepared_info(retry_prepared),
+  "TeardownOnly",
+  "prepared info rejects a handle awaiting teardown retry"
+)
+expect_error_contains(
+  fixed_sp_cuda_solve_batch(
+    retry_prepared, native_batch$Y, native_batch$SP,
+    native_batch$planned_route, native_batch$target_keys
+  ),
+  "TeardownOnly",
+  "solve rejects a prepared handle awaiting teardown retry"
+)
+assert_true(
+  fixed_sp_cuda_runtime_info(runtime)$device_id == 0L,
+  "prepared retryable teardown leaves context accounting usable"
+)
+retry_prepared_partial <- resource_snapshot()
+assert_true(
+  resource_delta(retry_prepared_before, retry_prepared_partial,
+                 "event_destroy_attempt_count") == 2 &&
+    resource_delta(retry_prepared_before, retry_prepared_partial,
+                   "event_destroy_success_count") == 1 &&
+    resource_delta(retry_prepared_before, retry_prepared_partial,
+                   "event_destroy_failure_count") == 1 &&
+    resource_delta(retry_prepared_before, retry_prepared_partial,
+                   "event_active_count") == -1 &&
+    resource_delta(retry_prepared_before, retry_prepared_partial,
+                   "event_ownership_indeterminate_count") == 0,
+  "first prepared close retains only its retryable event owner"
+)
+fixed_sp_cuda_prepared_free(retry_prepared)
+fixed_sp_cuda_prepared_free(retry_prepared)
+retry_prepared_after <- resource_snapshot()
+assert_true(
+  resource_delta(retry_prepared_before, retry_prepared_after,
+                 "event_destroy_attempt_count") == 3 &&
+    resource_delta(retry_prepared_before, retry_prepared_after,
+                   "event_destroy_success_count") == 2 &&
+    resource_delta(retry_prepared_before, retry_prepared_after,
+                   "event_destroy_failure_count") == 1 &&
+    resource_delta(retry_prepared_before, retry_prepared_after,
+                   "event_active_count") == -2 &&
+    resource_delta(retry_prepared_before, retry_prepared_after,
+                   "event_ownership_indeterminate_count") == 0,
+  "second prepared close completes and balances retryable event ownership"
+)
+
+replacement_runtime <- fixed_sp_cuda_runtime_create(0L)
+on.exit(try(fixed_sp_cuda_runtime_free(replacement_runtime), silent = TRUE),
+        add = TRUE)
+fixed_sp_cuda_runtime_reserve(
+  replacement_runtime, 16L, 8L, 1L, 1L, 16L
+)
+inject_post_call_teardown_failure("cuda_device")
+expect_error_contains(
+  fixed_sp_cuda_runtime_reserve(
+    replacement_runtime, 32L, 8L, 1L, 1L, 32L
+  ),
+  "free old fixed-sp double arena",
+  "post-call replacement failure is surfaced to R"
+)
+expect_error_contains(
+  fixed_sp_cuda_runtime_info(replacement_runtime),
+  "TeardownOnly",
+  "post-call replacement failure rejects runtime info"
+)
+expect_error_contains(
+  fixed_sp_cuda_runtime_reserve(
+    replacement_runtime, 16L, 8L, 1L, 1L, 16L
+  ),
+  "TeardownOnly",
+  "post-call replacement failure rejects later reserve"
+)
+expect_error_contains(
+  fixed_sp_cuda_prepared_create(replacement_runtime, safe_dto),
+  "TeardownOnly",
+  "post-call replacement failure rejects prepared creation"
+)
+fixed_sp_cuda_runtime_free(replacement_runtime)
 
 first_token <- fixed_sp_cuda_solve_batch(
   handle, native_batch$Y, native_batch$SP,
@@ -195,12 +299,6 @@ new_consumer_token <- function() {
     native_batch$planned_route, native_batch$target_keys
   )
 }
-inject_teardown_failure <- function(resource) {
-  .Call(
-    "C_fixed_sp_cuda_test_inject_next_resource_teardown_failure",
-    resource, PACKAGE = "fastkpc_cuda"
-  )
-}
 inject_blocked_launch_failure <- function() {
   .Call(
     "C_fixed_sp_cuda_test_inject_next_blocked_consumer_launch_failure",
@@ -232,6 +330,8 @@ assert_blocked_resource_accounting <- function(before, after, failed_resource,
       resource_delta(before, after, "event_destroy_failure_count") ==
         (if (failed_event) 1 else 0) &&
       resource_delta(before, after, "event_active_count") == 0 &&
+      resource_delta(before, after,
+                     "event_ownership_indeterminate_count") == 0 &&
       resource_delta(before, after, "stream_create_attempt_count") == 1 &&
       resource_delta(before, after, "stream_create_success_count") == 1 &&
       resource_delta(before, after, "stream_create_failure_count") == 0 &&
@@ -241,6 +341,8 @@ assert_blocked_resource_accounting <- function(before, after, failed_resource,
       resource_delta(before, after, "stream_destroy_failure_count") ==
         (if (failed_event) 0 else 1) &&
       resource_delta(before, after, "stream_active_count") == 0 &&
+      resource_delta(before, after,
+                     "stream_ownership_indeterminate_count") == 0 &&
       resource_delta(before, after, "cleanup_error_count") == 1,
     message
   )
@@ -285,7 +387,11 @@ for (resource in c("stream", "event")) {
       resource_delta(retry_before, retry_partial,
                      "event_destroy_attempt_count") == 1 &&
       resource_delta(retry_before, retry_partial,
-                     "stream_destroy_attempt_count") == 1,
+                     "stream_destroy_attempt_count") == 1 &&
+      resource_delta(retry_before, retry_partial,
+                     "event_ownership_indeterminate_count") == 0 &&
+      resource_delta(retry_before, retry_partial,
+                     "stream_ownership_indeterminate_count") == 0,
     paste(resource,
           "partial completion teardown retains only the failed resource")
   )

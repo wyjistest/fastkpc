@@ -3430,6 +3430,8 @@ extern "C" SEXP C_fixed_sp_cuda_test_resource_snapshot() {
       static_cast<double>(value.teardown_failure_count);
     result[resource + "_active_count"] =
       static_cast<double>(value.active_count);
+    result[resource + "_ownership_indeterminate_count"] =
+      static_cast<double>(value.ownership_indeterminate_count);
   };
   append(snapshot.cuda_device, "cuda_device", "allocate", "free");
   append(snapshot.cuda_host, "cuda_host", "allocate", "free");
@@ -3479,6 +3481,18 @@ extern "C" SEXP C_fixed_sp_cuda_test_inject_next_resource_teardown_failure(
   const std::string resource = bare_scalar_string(
     resource_s, "resource teardown failure injection target");
   fastkpc::test_inject_next_fixed_sp_cuda_resource_teardown_failure(resource);
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP
+C_fixed_sp_cuda_test_inject_next_resource_post_call_teardown_failure(
+    SEXP resource_s) {
+  BEGIN_RCPP
+  const std::string resource = bare_scalar_string(
+    resource_s, "resource post-call teardown failure injection target");
+  fastkpc::test_inject_next_fixed_sp_cuda_resource_post_call_teardown_failure(
+    resource);
   return R_NilValue;
   END_RCPP
 }
@@ -8343,6 +8357,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fixed_sp_cuda_test_get_device", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_get_device), 0},
   {"C_fixed_sp_cuda_test_inject_next_resource_acquire_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_resource_acquire_failure), 1},
   {"C_fixed_sp_cuda_test_inject_next_resource_teardown_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_resource_teardown_failure), 1},
+  {"C_fixed_sp_cuda_test_inject_next_resource_post_call_teardown_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_resource_post_call_teardown_failure), 1},
   {"C_fixed_sp_cuda_test_inject_next_blocked_consumer_launch_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_blocked_consumer_launch_failure), 0},
   {"C_fixed_sp_cuda_test_inject_next_device_free_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_device_free_failure), 0},
   {"C_fixed_sp_cuda_test_exercise_resource_teardown_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_exercise_resource_teardown_failure), 1},

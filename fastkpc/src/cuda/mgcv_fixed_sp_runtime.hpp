@@ -53,6 +53,8 @@ void test_inject_next_fixed_sp_cuda_resource_acquire_failure(
   const std::string& resource);
 void test_inject_next_fixed_sp_cuda_resource_teardown_failure(
   const std::string& resource);
+void test_inject_next_fixed_sp_cuda_resource_post_call_teardown_failure(
+  const std::string& resource);
 void test_exercise_fixed_sp_cuda_resource_teardown_failure(
   const std::string& resource);
 void test_inject_next_fixed_sp_cuda_device_free_failure();
