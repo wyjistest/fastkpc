@@ -551,8 +551,29 @@ git commit -m "perf: add true batched fixed-sp Cholesky"
 ## Task 4: Batch Coefficients, Fitted Values, and Residuals
 
 **Files:**
+- Modify: `fastkpc/src/cuda/mgcv_fixed_sp_runtime_types.hpp`
 - Modify: `fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu`
+- Modify: `fastkpc/src/r_api_cuda.cpp`
 - Modify: `fastkpc/tests/test_mgcv_fixed_sp_cuda_true_batch.R`
+
+Task 2 already preserved numerical parity with repeated per-target output
+finalization, so Task 4's RED gate must distinguish that bridge from true
+batched output work. Add and expose these truthful per-token diagnostics:
+
+```text
+coefficient_batch_finalize_call_count
+fitted_batch_finalize_call_count
+residual_rss_batch_finalize_call_count
+per_target_output_finalize_call_count
+batch_output_finalized_target_count
+```
+
+For the all-safe test requesting every output, require the three batch call
+counts to equal one, the per-target count to equal zero, and the finalized
+target count to equal the number of successful batched targets. The existing
+Task 3 implementation must report zero batch-finalization calls before this
+task, providing the RED failure without weakening the already-established
+numeric parity gate.
 
 - [ ] **Step 1: Add all-target numerical parity assertions**
 
@@ -590,9 +611,10 @@ for (target_index in seq_len(ncol(native$Y))) {
 }
 ```
 
-- [ ] **Step 2: Run and verify output/scatter failure**
+- [ ] **Step 2: Run and verify batch-finalization diagnostic failure**
 
-Expected: FAIL until solved theta columns are scattered/finalized correctly.
+Expected: FAIL because Task 3 still launches per-target output operations and
+does not report batched output finalization.
 
 - [ ] **Step 3: Add canonical-index finalization kernels**
 
@@ -653,7 +675,9 @@ Run the true-batch test. Expected: PASS with exact repeat hashes.
 - [ ] **Step 6: Commit batched output finalization**
 
 ```bash
-git add fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu \
+git add fastkpc/src/cuda/mgcv_fixed_sp_runtime_types.hpp \
+  fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu \
+  fastkpc/src/r_api_cuda.cpp \
   fastkpc/tests/test_mgcv_fixed_sp_cuda_true_batch.R
 git commit -m "feat: finalize fixed-sp CUDA batch outputs in canonical order"
 ```
