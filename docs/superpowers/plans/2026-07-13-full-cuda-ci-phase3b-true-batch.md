@@ -369,8 +369,16 @@ git commit -m "perf: fuse fixed-sp target upload and system construction"
 ## Task 3: Execute True Batched Cholesky
 
 **Files:**
+- Modify: `fastkpc/src/cuda/mgcv_fixed_sp_runtime.hpp`
 - Modify: `fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu`
+- Modify: `fastkpc/src/r_api_cuda.cpp`
 - Modify: `fastkpc/tests/test_mgcv_fixed_sp_cuda_true_batch.R`
+
+The two test-only forced-info hooks declared below cross the native/R boundary.
+Declare their runtime entry points in `mgcv_fixed_sp_runtime.hpp`, expose and
+register the `.Call` shims in `r_api_cuda.cpp`, and keep dynamic symbols
+disabled. These hooks are test controls only and must not receive production R
+wrappers.
 
 - [ ] **Step 1: Replace temporary assertions with true-batch gates**
 
@@ -534,6 +542,8 @@ Task 4.
 
 ```bash
 git add fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu \
+  fastkpc/src/cuda/mgcv_fixed_sp_runtime.hpp \
+  fastkpc/src/r_api_cuda.cpp \
   fastkpc/tests/test_mgcv_fixed_sp_cuda_true_batch.R
 git commit -m "perf: add true batched fixed-sp Cholesky"
 ```
