@@ -77,45 +77,46 @@ good_records <- data.frame(
   stringsAsFactors = FALSE
 )
 
-benchmark_call_count <- 0L
-validate_then_benchmark <- function(records) {
+benchmark_descriptor_setup_count <- 0L
+validate_then_descriptor_setup <- function(records) {
   parity <- fastkpc_full_cuda_fixed_sp_phase3a_validate_parity(records)
-  benchmark_call_count <<- benchmark_call_count + 1L
+  benchmark_descriptor_setup_count <<-
+    benchmark_descriptor_setup_count + 1L
   parity
 }
 
 bad_status <- good_records
 bad_status$solver_status[[safe_count + 1L]] <- "OK_QR_SINGLE"
 expect_error_contains(
-  validate_then_benchmark(bad_status),
+  validate_then_descriptor_setup(bad_status),
   "Phase 3A iteration status/numerical parity failed"
 )
 assert_true(
-  benchmark_call_count == 0L,
-  "bad stable status fails before benchmark work"
+  benchmark_descriptor_setup_count == 0L,
+  "bad stable status fails before benchmark descriptor setup"
 )
 
 bad_error <- good_records
 bad_error$residual_relative_l2_diff[[1L]] <- 1e-7
 expect_error_contains(
-  validate_then_benchmark(bad_error),
+  validate_then_descriptor_setup(bad_error),
   "Phase 3A iteration status/numerical parity failed"
 )
 assert_true(
-  benchmark_call_count == 0L,
-  "bad numerical parity fails before benchmark work"
+  benchmark_descriptor_setup_count == 0L,
+  "bad numerical parity fails before benchmark descriptor setup"
 )
 
 bad_authenticated_route <- good_records
 bad_authenticated_route$authenticated_planned_route[[safe_count + 1L]] <-
   "AUGMENTED_SVD"
 expect_error_contains(
-  validate_then_benchmark(bad_authenticated_route),
+  validate_then_descriptor_setup(bad_authenticated_route),
   "Phase 3A iteration status/numerical parity failed"
 )
 assert_true(
-  benchmark_call_count == 0L,
-  "wrong per-key route fails before benchmark work"
+  benchmark_descriptor_setup_count == 0L,
+  "wrong per-key route fails before benchmark descriptor setup"
 )
 
 bad_stable_route <- good_records
@@ -123,28 +124,28 @@ bad_stable_route$planned_route[[safe_count + 1L]] <- "FORGED_STABLE"
 bad_stable_route$authenticated_planned_route[[safe_count + 1L]] <-
   "FORGED_STABLE"
 expect_error_contains(
-  validate_then_benchmark(bad_stable_route),
+  validate_then_descriptor_setup(bad_stable_route),
   "Phase 3A iteration status/numerical parity failed"
 )
 assert_true(
-  benchmark_call_count == 0L,
+  benchmark_descriptor_setup_count == 0L,
   "stable attribution accepts only authenticated QR or SVD routes"
 )
 
 bad_stable_nan <- good_records
 bad_stable_nan$residual_max_abs_diff[[safe_count + 1L]] <- NaN
 expect_error_contains(
-  validate_then_benchmark(bad_stable_nan),
+  validate_then_descriptor_setup(bad_stable_nan),
   "Phase 3A iteration status/numerical parity failed"
 )
 assert_true(
-  benchmark_call_count == 0L,
-  "stable numerical evidence rejects NaN masquerading as NA"
+  benchmark_descriptor_setup_count == 0L,
+  "stable numerical evidence rejects NaN before benchmark descriptor setup"
 )
 
-parity <- validate_then_benchmark(good_records)
+parity <- validate_then_descriptor_setup(good_records)
 assert_true(
-  benchmark_call_count == 1L &&
+  benchmark_descriptor_setup_count == 1L &&
     identical(names(parity), c("safe", "stable")) &&
     sum(parity$safe) == safe_count && sum(parity$stable) == stable_count,
   "valid parity reaches benchmark work with frozen target partitions"
@@ -437,6 +438,14 @@ benchmark_setup_position <- regexpr(
   "safe_descriptors <- list()",
   runner_body, fixed = TRUE
 )[[1L]]
+descriptor_initialization_position <- regexpr(
+  "safe_descriptor_inputs <-",
+  runner_body, fixed = TRUE
+)[[1L]]
+descriptor_population_position <- regexpr(
+  "safe_descriptor_inputs[[",
+  runner_body, fixed = TRUE
+)[[1L]]
 warmup_position <- regexpr(
   "persistent_warmup <- run_persistent_corpus",
   runner_body, fixed = TRUE
@@ -450,10 +459,15 @@ prototype_payload_position <- regexpr(
 )[[1L]]
 assert_true(
   parity_position > 0L && benchmark_setup_position > parity_position &&
+    descriptor_initialization_position > parity_position &&
+    descriptor_population_position > descriptor_initialization_position &&
     warmup_position > benchmark_setup_position &&
     expected_identity_position > benchmark_setup_position &&
     prototype_payload_position > expected_identity_position,
-  "production authenticates canonical prototype inputs before payload construction"
+  paste(
+    "production authenticates parity before benchmark descriptor setup",
+    "and prototype payload construction"
+  )
 )
 
 cat("PASS Phase 3A iteration helper contracts\n")

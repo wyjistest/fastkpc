@@ -2029,13 +2029,14 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
 
   prepared_rows <- vector("list", length(setup_keys))
   target_rows <- vector("list", catalog_records$target_count[[1L]])
+  native_batches <- setNames(vector("list", length(setup_keys)), setup_keys)
   target_row_index <- 0L
-  safe_descriptor_inputs <- list()
   for (setup_index in seq_along(setup_keys)) {
     setup_key <- setup_keys[[setup_index]]
     batch <- batches[[setup_key]]
     dto <- dtos[[setup_key]]
     native_batch <- fastkpc_full_cuda_fixed_sp_native_batch(batch, dto)
+    native_batches[[setup_key]] <- native_batch
     resources_before_setup <- fixed_sp_cuda_runtime_info(runtime)
     handle <- fixed_sp_cuda_prepared_create(runtime, dto)
     handles[[setup_key]] <- handle
@@ -2077,20 +2078,6 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
       target_rows[[target_row_index]] <- run_checked_target(
         handle, target, batch, target_index
       )
-      if (identical(target$planned_route, "CHOLESKY_BATCHED")) {
-        safe_descriptor_inputs[[length(safe_descriptor_inputs) + 1L]] <-
-          list(
-            handle = handle,
-            native = target,
-            dto = dto,
-            canonical_target_row = batch$target_rows[
-              target_index, , drop = FALSE
-            ],
-            canonical_nullspace_rhs = as.numeric(
-              batch$oracle_nullspace_rhs[, target_index]
-            )
-          )
-      }
     }
     prepared_rows[[setup_index]]$output_slot_leased_at_end <-
       isTRUE(fixed_sp_cuda_prepared_info(handle)$output_slot_leased)
@@ -2103,6 +2090,50 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
   safe <- parity$safe
   stable <- parity$stable
 
+  safe_record_indices <- which(safe)
+  safe_descriptor_inputs <- vector("list", length(safe_record_indices))
+  for (descriptor_index in seq_along(safe_record_indices)) {
+    target_record <- target_records[
+      safe_record_indices[[descriptor_index]], , drop = FALSE
+    ]
+    setup_key <- target_record$prepared_s_key_sha256[[1L]]
+    batch <- batches[[setup_key]]
+    dto <- dtos[[setup_key]]
+    native_batch <- native_batches[[setup_key]]
+    target_index <- match(
+      target_record$residual_key_sha256[[1L]], native_batch$target_keys
+    )
+    source_is_authenticated <- !is.null(handles[[setup_key]]) &&
+      !is.null(batch) && !is.null(dto) && !is.null(native_batch) &&
+      length(target_index) == 1L && !is.na(target_index) &&
+      identical(
+        native_batch$target_keys[[target_index]],
+        target_record$residual_key_sha256[[1L]]
+      ) && identical(
+        batch$target_rows$residual_key_sha256[[target_index]],
+        target_record$residual_key_sha256[[1L]]
+      )
+    if (!isTRUE(source_is_authenticated)) {
+      stop("Phase 3A authenticated benchmark descriptor source is malformed",
+           call. = FALSE)
+    }
+    native <- list(
+      Y = native_batch$Y[, target_index, drop = FALSE],
+      SP = native_batch$SP[, target_index, drop = FALSE],
+      planned_route = native_batch$planned_route[[target_index]],
+      target_keys = native_batch$target_keys[[target_index]],
+      target_count = 1L
+    )
+    safe_descriptor_inputs[[descriptor_index]] <- list(
+      handle = handles[[setup_key]],
+      native = native,
+      dto = dto,
+      canonical_target_row = batch$target_rows[target_index, , drop = FALSE],
+      canonical_nullspace_rhs = as.numeric(
+        batch$oracle_nullspace_rhs[, target_index]
+      )
+    )
+  }
   safe_descriptors <- list()
   for (descriptor in safe_descriptor_inputs) {
     prototype_expected <-
