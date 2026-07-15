@@ -604,7 +604,7 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 0 | Freeze oracle and zero-SHD comparator | COMPLETE — standardized oracle and first-divergence gate pass |
 | 1 | Full workload and risk census | COMPLETE - full 110,617-key metadata artifact passes all gates |
 | 2 | Response-independent GAM setup contract | COMPLETE - full structural artifact and qualification exact-parity/restart gates pass |
-| 3 | Persistent stable fixed-sp CUDA residual runtime | PARTIAL — prototype solve exists |
+| 3 | Persistent stable fixed-sp CUDA residual runtime | PARTIAL - Phase 3A milestone verified; Phase 3B is next |
 | 4 | Full-CUDA single-penalty GCV for `|S|<=2` | PARTIAL — CPU spectral selection exists |
 | 5 | C++ multi-penalty GAM semantic replica | NOT COMPLETE |
 | 6 | CUDA multi-penalty same-S target batches | NOT STARTED |
@@ -1122,6 +1122,26 @@ upload the same model matrix per target
 download residuals before the dCov stage
 cudaDeviceSynchronize after every small kernel
 ```
+
+#### Verified Phase 3A milestone (2026-07-15)
+
+Phase 3A is complete. This does not complete Phase 3; Phase 3B and Phase 3C
+remain open.
+
+```text
+authenticated Phase 3 catalog and native DTO
+one persistent CUDA stream/cuBLAS/cuSOLVER context
+explicit deterministic cuSOLVER and pedantic/no-atomics cuBLAS config
+one-time Prepared-S uploads
+CUDA-built X0'Y RHS and safe single-target Cholesky
+leased device-resident residual token and explicit shadow materializer
+post-warm-up per-target allocation/handle creation = 0
+persistent path faster than repeated single-target CUDA prototype
+iteration safe targets = 172 with parity < 1e-7
+stable targets = 98 explicit ERR_STABLE_PATH_NOT_IMPLEMENTED
+```
+
+Active next task: Phase 3B true same-S multi-target Cholesky.
 
 ### Phase 3B — True multi-target fixed-sp execution
 
@@ -2327,13 +2347,17 @@ restart closure, and inherited Phase 0 graph evidence.
 
 ### Task 5
 
-Active next task: start Phase 3 persistent fixed-sp CUDA resources and a stable
-multi-target solve that consumes the completed Phase 2 contract. Phase 3 must
-establish its own CUDA authority and parity gates; Phase 2 does not grant them.
+Complete: Phase 3A established the verified persistent fixed-sp CUDA resource
+and safe single-target Cholesky milestone recorded above. This is a Phase 3A
+milestone only and does not complete Phase 3.
+
+### Task 6
+
+Active next task: Phase 3B true same-S multi-target Cholesky.
 
 The current CUDA Spectra projection primitive remains useful substrate for
-Phase 8, but the immediate critical path is now the Phase 3 fixed-sp CUDA
-runtime.
+Phase 8, but the immediate critical path is now Phase 3B true same-S
+multi-target Cholesky.
 
 ---
 
