@@ -1213,21 +1213,104 @@ __global__ void compact_fixed_sp_success_pointer_arrays(
   }
 }
 
-__global__ void build_fixed_sp_residual_and_rss(
+__global__ void finalize_fixed_sp_coefficients_batch(
+    const double* theta,
+    const double* Z,
+    const int* safe_target_indices,
+    const int* potrf_info,
+    int coefficient_dim,
+    int null_dim,
+    int safe_count,
+    double* coefficients) {
+  const int coefficient = static_cast<int>(blockIdx.x) *
+      static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+  const int safe_ordinal = static_cast<int>(blockIdx.y) *
+      static_cast<int>(blockDim.y) + static_cast<int>(threadIdx.y);
+  if (coefficient >= coefficient_dim || safe_ordinal >= safe_count ||
+      potrf_info[safe_ordinal] != 0) {
+    return;
+  }
+
+  double value = 0.0;
+  if (Z == nullptr) {
+    value = theta[static_cast<std::size_t>(coefficient) +
+      static_cast<std::size_t>(null_dim) *
+        static_cast<std::size_t>(safe_ordinal)];
+  } else {
+    for (int inner = 0; inner < null_dim; ++inner) {
+      value += Z[static_cast<std::size_t>(coefficient) +
+        static_cast<std::size_t>(coefficient_dim) *
+          static_cast<std::size_t>(inner)] *
+        theta[static_cast<std::size_t>(inner) +
+          static_cast<std::size_t>(null_dim) *
+            static_cast<std::size_t>(safe_ordinal)];
+    }
+  }
+  const int target = safe_target_indices[safe_ordinal];
+  coefficients[static_cast<std::size_t>(coefficient) +
+    static_cast<std::size_t>(coefficient_dim) *
+      static_cast<std::size_t>(target)] = value;
+}
+
+__global__ void finalize_fixed_sp_fitted_batch(
+    const double* X_null,
+    const double* theta,
+    const int* safe_target_indices,
+    const int* potrf_info,
+    int n,
+    int null_dim,
+    int safe_count,
+    double* fitted) {
+  const int row = static_cast<int>(blockIdx.x) *
+      static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+  const int safe_ordinal = static_cast<int>(blockIdx.y) *
+      static_cast<int>(blockDim.y) + static_cast<int>(threadIdx.y);
+  if (row >= n || safe_ordinal >= safe_count ||
+      potrf_info[safe_ordinal] != 0) {
+    return;
+  }
+
+  double value = 0.0;
+  for (int inner = 0; inner < null_dim; ++inner) {
+    value += X_null[static_cast<std::size_t>(row) +
+      static_cast<std::size_t>(n) * static_cast<std::size_t>(inner)] *
+      theta[static_cast<std::size_t>(inner) +
+        static_cast<std::size_t>(null_dim) *
+          static_cast<std::size_t>(safe_ordinal)];
+  }
+  const int target = safe_target_indices[safe_ordinal];
+  fitted[static_cast<std::size_t>(row) +
+    static_cast<std::size_t>(n) * static_cast<std::size_t>(target)] = value;
+}
+
+__global__ void finalize_fixed_sp_residual_rss_batch(
     const double* y,
     const double* fitted,
+    const int* safe_target_indices,
+    const int* potrf_info,
     int n,
+    int safe_count,
     double* residuals,
     double* rss,
     bool write_residuals,
     bool write_rss) {
+  const int safe_ordinal = static_cast<int>(blockIdx.x);
+  if (safe_ordinal >= safe_count || potrf_info[safe_ordinal] != 0) return;
+
+  const int target = safe_target_indices[safe_ordinal];
+  const std::size_t target_offset = static_cast<std::size_t>(target);
+  const double* target_y = y + static_cast<std::size_t>(n) * target_offset;
+  const double* target_fitted =
+    fitted + static_cast<std::size_t>(n) * target_offset;
+  double* target_residuals =
+    residuals + static_cast<std::size_t>(n) * target_offset;
   extern __shared__ double sums[];
   double local_sum = 0.0;
   for (int row = static_cast<int>(threadIdx.x);
        row < n;
        row += static_cast<int>(blockDim.x)) {
-    const double residual = y[row] - fitted[row];
-    if (write_residuals) residuals[row] = residual;
+    const double residual = target_y[row] - target_fitted[row];
+    if (write_residuals) target_residuals[row] = residual;
     local_sum += residual * residual;
   }
   sums[threadIdx.x] = local_sum;
@@ -1238,7 +1321,7 @@ __global__ void build_fixed_sp_residual_and_rss(
     }
     __syncthreads();
   }
-  if (threadIdx.x == 0U && write_rss) *rss = sums[0];
+  if (threadIdx.x == 0U && write_rss) rss[target_offset] = sums[0];
 }
 
 __global__ void check_fixed_sp_outputs_finite(
@@ -1981,6 +2064,12 @@ void resolve_fixed_sp_output_status_locked(
   token->diagnostics.true_batched_kernel =
     token->target_count >= 2 &&
     token->diagnostics.true_batched_target_count == token->target_count;
+  token->diagnostics.batch_output_finalized_target_count =
+    static_cast<int>(std::count_if(
+      token->solver_statuses.begin(), token->solver_statuses.end(),
+      [](FixedSpStatus status) {
+        return fixed_sp_status_is_successful(status);
+      }));
   token->diagnostics.solver_statuses = token->solver_statuses;
   token->output_status_resolved = true;
 }
@@ -3561,71 +3650,79 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       }
     }
 
+    const bool write_coefficients =
+      (batch.output_mask & FixedSpOutputCoefficients) != 0U;
+    const bool needs_fitted =
+      (batch.output_mask & (FixedSpOutputFitted |
+                            FixedSpOutputResiduals |
+                            FixedSpOutputRss)) != 0U;
+    const bool write_residuals =
+      (batch.output_mask & FixedSpOutputResiduals) != 0U;
+    const bool write_rss =
+      (batch.output_mask & FixedSpOutputRss) != 0U;
+    constexpr unsigned int output_columns_per_block = 32U;
+    constexpr unsigned int output_targets_per_block = 8U;
+    const dim3 output_block(
+      output_columns_per_block, output_targets_per_block, 1U);
+
+    if (successful_factor_count > 0 && write_coefficients) {
+      const dim3 coefficient_grid(
+        (static_cast<unsigned int>(handle->p) +
+          output_columns_per_block - 1U) / output_columns_per_block,
+        (static_cast<unsigned int>(safe_count) +
+          output_targets_per_block - 1U) / output_targets_per_block,
+        1U);
+      finalize_fixed_sp_coefficients_batch<<<
+        coefficient_grid, output_block, 0, context->stream
+      >>>(
+        d_theta, handle->d_Z, d_safe_target_indices, d_potrf_info,
+        handle->p, handle->q, safe_count, slot->coefficients);
+      check_cuda(cudaGetLastError(),
+                 "launch fixed-sp batched coefficient finalization");
+      token->diagnostics.coefficient_batch_finalize_call_count = 1;
+    }
+
+    if (successful_factor_count > 0 && needs_fitted) {
+      const dim3 fitted_grid(
+        (static_cast<unsigned int>(batch.n) +
+          output_columns_per_block - 1U) / output_columns_per_block,
+        (static_cast<unsigned int>(safe_count) +
+          output_targets_per_block - 1U) / output_targets_per_block,
+        1U);
+      finalize_fixed_sp_fitted_batch<<<
+        fitted_grid, output_block, 0, context->stream
+      >>>(
+        handle->d_X_null, d_theta, d_safe_target_indices, d_potrf_info,
+        batch.n, handle->q, safe_count, slot->fitted);
+      check_cuda(cudaGetLastError(),
+                 "launch fixed-sp batched fitted finalization");
+      token->diagnostics.fitted_batch_finalize_call_count = 1;
+    }
+
+    if (successful_factor_count > 0 && (write_residuals || write_rss)) {
+      finalize_fixed_sp_residual_rss_batch<<<
+        static_cast<unsigned int>(safe_count), threads,
+        threads * sizeof(double), context->stream
+      >>>(
+        d_y, slot->fitted, d_safe_target_indices, d_potrf_info,
+        batch.n, safe_count, slot->residuals, slot->rss,
+        write_residuals, write_rss);
+      check_cuda(cudaGetLastError(),
+                 "launch fixed-sp batched residual and RSS finalization");
+      token->diagnostics.residual_rss_batch_finalize_call_count = 1;
+    }
+
     for (int safe_ordinal = 0; safe_ordinal < safe_count; ++safe_ordinal) {
       if (h_potrf_info[safe_ordinal] != 0) continue;
-      const int target = h_safe_target_indices[safe_ordinal];
-      const std::size_t target_offset = static_cast<std::size_t>(target);
-      const std::size_t safe_offset =
-        static_cast<std::size_t>(safe_ordinal);
-      double* theta = d_theta +
-        static_cast<std::size_t>(handle->q) * safe_offset;
-
-      if ((batch.output_mask & FixedSpOutputCoefficients) != 0U) {
-        double* coefficients = slot->coefficients +
-          static_cast<std::size_t>(handle->p) * target_offset;
-        if (handle->d_Z == nullptr) {
-          check_cuda(cudaMemcpyAsync(
-            coefficients, theta,
-            allocation_bytes(static_cast<std::size_t>(handle->p),
-                             sizeof(double), "fixed-sp coefficients"),
-            cudaMemcpyDeviceToDevice, context->stream
-          ), "copy identity-nullspace fixed-sp coefficients");
-        } else {
-          check_cublas(cublasDgemv(
-            context->blas, CUBLAS_OP_N, handle->p, handle->q,
-            &one, handle->d_Z, handle->p, theta, 1,
-            &zero, coefficients, 1
-          ), "expand fixed-sp coefficients through Z");
-        }
-      }
-
-      const bool needs_fitted =
-        (batch.output_mask & (FixedSpOutputFitted |
-                              FixedSpOutputResiduals |
-                              FixedSpOutputRss)) != 0U;
-      if (needs_fitted) {
-        double* fitted = slot->fitted +
-          static_cast<std::size_t>(batch.n) * target_offset;
-        check_cublas(cublasDgemv(
-          context->blas, CUBLAS_OP_N, batch.n, handle->q,
-          &one, handle->d_X_null, batch.n, theta, 1,
-          &zero, fitted, 1
-        ), "build fixed-sp fitted values");
-
-        const bool write_residuals =
-          (batch.output_mask & FixedSpOutputResiduals) != 0U;
-        const bool write_rss =
-          (batch.output_mask & FixedSpOutputRss) != 0U;
-        if (write_residuals || write_rss) {
-          const double* y = d_y +
-            static_cast<std::size_t>(batch.n) * target_offset;
-          double* residuals = slot->residuals +
-            static_cast<std::size_t>(batch.n) * target_offset;
-          build_fixed_sp_residual_and_rss<<<
-            1U, threads, threads * sizeof(double), context->stream
-          >>>(
-            y, fitted, batch.n, residuals, slot->rss + target_offset,
-            write_residuals, write_rss);
-          check_cuda(cudaGetLastError(),
-                     "launch fixed-sp residual and RSS build");
-        }
-      }
-
+      const std::size_t target_offset = static_cast<std::size_t>(
+        h_safe_target_indices[safe_ordinal]);
       token->executed_routes[target_offset] = FixedSpRoute::CholeskyBatched;
       token->solver_statuses[target_offset] = safe_count >= 2 ?
         FixedSpStatus::OkCholeskyBatched : FixedSpStatus::OkCholeskySingle;
       token->diagnostics.executed_cholesky_target_count += 1;
     }
+    token->diagnostics.batch_output_finalized_target_count =
+      token->diagnostics.executed_cholesky_target_count;
     if (targets > slot->finite_status_capacity ||
         slot->host_finite_status == nullptr) {
       throw std::runtime_error("fixed-sp finite status capacity mismatch");

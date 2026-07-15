@@ -6,6 +6,10 @@ source("fastkpc/R/cuda_native.R")
 
 fail <- function(message) stop(message, call. = FALSE)
 assert_true <- function(value, message) if (!isTRUE(value)) fail(message)
+relative_l2 <- function(candidate, reference) {
+  sqrt(sum((candidate - reference)^2)) /
+    max(sqrt(sum(reference^2)), 1e-300)
+}
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
   cat("SKIP Phase 3B fixed-sp true-batch diagnostics\n")
@@ -315,6 +319,38 @@ output_max_abs_errors <- c(
                   safe_batch$oracle_nullspace_rhs))
 )
 numerical_max_abs_error <- max(output_max_abs_errors)
+fitted_column_max_abs_errors <- vapply(
+  seq_len(safe_count),
+  function(index) max(abs(
+    shadow$fitted[, index] - oracle_fitted[, index]
+  )),
+  numeric(1L)
+)
+fitted_column_relative_l2_errors <- vapply(
+  seq_len(safe_count),
+  function(index) relative_l2(
+    shadow$fitted[, index], oracle_fitted[, index]
+  ),
+  numeric(1L)
+)
+residual_column_max_abs_errors <- vapply(
+  seq_len(safe_count),
+  function(index) max(abs(
+    shadow$residuals[, index] - oracle_residuals[, index]
+  )),
+  numeric(1L)
+)
+residual_column_relative_l2_errors <- vapply(
+  seq_len(safe_count),
+  function(index) relative_l2(
+    shadow$residuals[, index], oracle_residuals[, index]
+  ),
+  numeric(1L)
+)
+numerical_max_relative_l2_error <- max(c(
+  fitted_column_relative_l2_errors,
+  residual_column_relative_l2_errors
+))
 assert_true(
   identical(dim(shadow$coefficients),
             c(dto$coefficient_dim, safe_count)) &&
@@ -325,16 +361,133 @@ assert_true(
               c(dto$null_dim, safe_count)) &&
     all(output_max_abs_errors[c(
       "coefficients", "fitted", "residuals", "rss"
-    )] < 1e-7) && output_max_abs_errors[["rhs"]] < 1e-12,
+    )] < 1e-7) && output_max_abs_errors[["rhs"]] < 1e-12 &&
+    all(fitted_column_max_abs_errors < 1e-7) &&
+    all(fitted_column_relative_l2_errors < 1e-7) &&
+    all(residual_column_max_abs_errors < 1e-7) &&
+    all(residual_column_relative_l2_errors < 1e-7),
   paste0(
     "all canonical safe output columns match the fixed-sp oracle; max=",
-    format(numerical_max_abs_error, digits = 17L)
+    format(numerical_max_abs_error, digits = 17L),
+    "; relative_l2=",
+    format(numerical_max_relative_l2_error, digits = 17L)
   )
 )
 
+first_hashes <- c(
+  coefficients = fastkpc_full_cuda_census_metadata_hash(
+    shadow$coefficients
+  ),
+  fitted = fastkpc_full_cuda_census_metadata_hash(shadow$fitted),
+  residuals = fastkpc_full_cuda_census_metadata_hash(shadow$residuals),
+  rss = fastkpc_full_cuda_census_metadata_hash(shadow$rss)
+)
 fixed_sp_cuda_residual_release(token)
 fixed_sp_cuda_residual_free(token)
 token <- NULL
+
+token <- fixed_sp_cuda_solve_batch(
+  handle, native_batch$Y, native_batch$SP, native_batch$planned_route,
+  native_batch$target_keys,
+  outputs = c("coefficients", "fitted", "residuals", "rss", "rhs")
+)
+shadow_repeat <- fixed_sp_cuda_materialize_shadow(
+  token,
+  outputs = c("coefficients", "fitted", "residuals", "rss")
+)
+repeat_hashes <- c(
+  coefficients = fastkpc_full_cuda_census_metadata_hash(
+    shadow_repeat$coefficients
+  ),
+  fitted = fastkpc_full_cuda_census_metadata_hash(shadow_repeat$fitted),
+  residuals = fastkpc_full_cuda_census_metadata_hash(
+    shadow_repeat$residuals
+  ),
+  rss = fastkpc_full_cuda_census_metadata_hash(shadow_repeat$rss)
+)
+assert_true(
+  identical(first_hashes, repeat_hashes),
+  "same-environment batched output hashes"
+)
+fixed_sp_cuda_residual_release(token)
+fixed_sp_cuda_residual_free(token)
+token <- NULL
+
+batch_finalize_fields <- c(
+  "coefficient_batch_finalize_call_count",
+  "fitted_batch_finalize_call_count",
+  "residual_rss_batch_finalize_call_count",
+  "per_target_output_finalize_call_count",
+  "batch_output_finalized_target_count"
+)
+missing_batch_finalize_fields <- setdiff(batch_finalize_fields, names(info))
+assert_true(
+  length(missing_batch_finalize_fields) == 0L,
+  paste0(
+    "Phase 3B batch-finalization fields missing: ",
+    paste(missing_batch_finalize_fields, collapse = ", ")
+  )
+)
+assert_true(
+  identical(info$coefficient_batch_finalize_call_count, 1L) &&
+    identical(info$fitted_batch_finalize_call_count, 1L) &&
+    identical(info$residual_rss_batch_finalize_call_count, 1L) &&
+    identical(info$per_target_output_finalize_call_count, 0L) &&
+    identical(info$batch_output_finalized_target_count, safe_count),
+  "all-output solve uses one canonical batch finalizer per output family"
+)
+
+assert_output_finalize_counts <- function(
+    outputs, coefficient, fitted, residual_rss, finalized, label) {
+  mask_token <- fixed_sp_cuda_solve_batch(
+    handle, native_batch$Y, native_batch$SP, native_batch$planned_route,
+    native_batch$target_keys, outputs = outputs
+  )
+  released <- FALSE
+  freed <- FALSE
+  on.exit({
+    if (!released) {
+      try(fixed_sp_cuda_residual_release(mask_token), silent = TRUE)
+    }
+    if (!freed) {
+      try(fixed_sp_cuda_residual_free(mask_token), silent = TRUE)
+    }
+  }, add = TRUE)
+  mask_info <- fixed_sp_cuda_residual_info(mask_token)
+  assert_true(
+    identical(mask_info$coefficient_batch_finalize_call_count,
+              as.integer(coefficient)) &&
+      identical(mask_info$fitted_batch_finalize_call_count,
+                as.integer(fitted)) &&
+      identical(mask_info$residual_rss_batch_finalize_call_count,
+                as.integer(residual_rss)) &&
+      identical(mask_info$per_target_output_finalize_call_count, 0L) &&
+      identical(mask_info$batch_output_finalized_target_count,
+                as.integer(finalized)),
+    paste0(label, " output-mask batch-finalization accounting")
+  )
+  fixed_sp_cuda_residual_release(mask_token)
+  released <- TRUE
+  fixed_sp_cuda_residual_free(mask_token)
+  freed <- TRUE
+  invisible(mask_info)
+}
+
+assert_output_finalize_counts(
+  "coefficients", 1L, 0L, 0L, safe_count, "coefficient-only"
+)
+assert_output_finalize_counts(
+  "fitted", 0L, 1L, 0L, safe_count, "fitted-only"
+)
+assert_output_finalize_counts(
+  "residuals", 0L, 1L, 1L, safe_count, "residual-only"
+)
+assert_output_finalize_counts(
+  "rss", 0L, 1L, 1L, safe_count, "RSS-only"
+)
+assert_output_finalize_counts(
+  "rhs", 0L, 0L, 0L, safe_count, "RHS-only"
+)
 
 clear_forced_info <- function() {
   try(
@@ -384,6 +537,12 @@ assert_true(
     partial_factor_fail_info$cholesky_to_svd_count == 1L &&
     partial_factor_fail_info$stable_reroute_count == 1L &&
     partial_factor_fail_info$executed_cholesky_target_count ==
+      safe_count - 1L &&
+    partial_factor_fail_info$coefficient_batch_finalize_call_count == 1L &&
+    partial_factor_fail_info$fitted_batch_finalize_call_count == 1L &&
+    partial_factor_fail_info$residual_rss_batch_finalize_call_count == 1L &&
+    partial_factor_fail_info$per_target_output_finalize_call_count == 0L &&
+    partial_factor_fail_info$batch_output_finalized_target_count ==
       safe_count - 1L &&
     !isTRUE(partial_factor_fail_info$true_batched_kernel) &&
     isTRUE(partial_factor_fail_info$canonical_output_order_exact) &&
@@ -525,6 +684,11 @@ assert_true(
     all_factor_fail_info$cholesky_to_svd_count == safe_count &&
     all_factor_fail_info$stable_reroute_count == safe_count &&
     all_factor_fail_info$executed_cholesky_target_count == 0L &&
+    all_factor_fail_info$coefficient_batch_finalize_call_count == 0L &&
+    all_factor_fail_info$fitted_batch_finalize_call_count == 0L &&
+    all_factor_fail_info$residual_rss_batch_finalize_call_count == 0L &&
+    all_factor_fail_info$per_target_output_finalize_call_count == 0L &&
+    all_factor_fail_info$batch_output_finalized_target_count == 0L &&
     !isTRUE(all_factor_fail_info$true_batched_kernel) &&
     all(all_factor_fail_info$reroute_reason ==
           "CHOLESKY_NON_POSITIVE_PIVOT") &&
@@ -664,13 +828,23 @@ assert_true(
     rep("ERR_NONFINITE_OUTPUT", 2L)
   ) &&
     multi_target_nonfinite_info$true_batched_target_count == 0L &&
+    multi_target_nonfinite_info$batch_output_finalized_target_count == 0L &&
     !isTRUE(multi_target_nonfinite_info$true_batched_kernel),
   "true-batched count and flag follow final per-target output statuses"
 )
 
 cat(
-  "PASS Phase 3B fixed-sp true batched Cholesky; max abs error: ",
-  format(numerical_max_abs_error, digits = 17L), "\n",
+  "PASS Phase 3B fixed-sp batched output finalization; max abs error: ",
+  format(numerical_max_abs_error, digits = 17L),
+  "; max relative L2: ",
+  format(numerical_max_relative_l2_error, digits = 17L), "\n",
+  "exact repeat hashes: ", paste(first_hashes, collapse = ", "), "\n",
+  "batch finalize counts: ",
+  info$coefficient_batch_finalize_call_count, "/",
+  info$fitted_batch_finalize_call_count, "/",
+  info$residual_rss_batch_finalize_call_count,
+  "; per-target=", info$per_target_output_finalize_call_count,
+  "; targets=", info$batch_output_finalized_target_count, "\n",
   "forced potrf reroutes: ",
   all_factor_fail_info$cholesky_to_svd_count, "/", safe_count,
   "; partial compaction max abs error: ",

@@ -4038,6 +4038,16 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
     info.target_batch_h2d_call_count;
   result["target_h2d_copy_count"] = info.target_h2d_copy_count;
   result["target_h2d_bytes"] = static_cast<double>(info.target_h2d_bytes);
+  result["coefficient_batch_finalize_call_count"] =
+    info.coefficient_batch_finalize_call_count;
+  result["fitted_batch_finalize_call_count"] =
+    info.fitted_batch_finalize_call_count;
+  result["residual_rss_batch_finalize_call_count"] =
+    info.residual_rss_batch_finalize_call_count;
+  result["per_target_output_finalize_call_count"] =
+    info.per_target_output_finalize_call_count;
+  result["batch_output_finalized_target_count"] =
+    info.batch_output_finalized_target_count;
   result["canonical_output_order_exact"] =
     info.canonical_output_order_exact;
   result["stable_reroute_count"] = info.stable_reroute_count;

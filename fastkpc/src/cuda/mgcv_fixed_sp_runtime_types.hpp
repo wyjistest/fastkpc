@@ -173,6 +173,11 @@ struct DeviceResidualInfo {
   int target_batch_h2d_call_count = 0;
   int target_h2d_copy_count = 0;
   std::size_t target_h2d_bytes = 0;
+  int coefficient_batch_finalize_call_count = 0;
+  int fitted_batch_finalize_call_count = 0;
+  int residual_rss_batch_finalize_call_count = 0;
+  int per_target_output_finalize_call_count = 0;
+  int batch_output_finalized_target_count = 0;
   bool canonical_output_order_exact = false;
   int stable_reroute_count = 0;
   int planned_cholesky_target_count = 0;
