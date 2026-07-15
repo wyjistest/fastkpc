@@ -105,6 +105,7 @@ struct FixedSpGlobalResourceLedger {
   std::atomic<int> inject_next_teardown_failure_kind{-1};
   std::atomic<int> inject_next_post_call_teardown_failure_kind{-1};
   std::atomic<bool> inject_next_blocked_consumer_launch_failure{false};
+  std::atomic<bool> inject_next_prepared_static_shadow_body_failure{false};
 };
 
 enum class FixedSpResourceKind {
@@ -258,6 +259,13 @@ bool has_injected_resource_post_call_teardown_failure(
   return global_resource_ledger()
     .inject_next_post_call_teardown_failure_kind.load(
       std::memory_order_acquire) == static_cast<int>(kind);
+}
+
+bool consume_injected_prepared_static_shadow_body_failure() noexcept {
+  bool expected = true;
+  return global_resource_ledger()
+    .inject_next_prepared_static_shadow_body_failure.compare_exchange_strong(
+      expected, false, std::memory_order_acq_rel);
 }
 
 [[noreturn]] void throw_injected_resource_acquire_failure(
@@ -710,6 +718,16 @@ void tracked_cuda_event_destroy(FixedSpResourceLedger* ledger,
                                 cudaEvent_t* event,
                                 const char* stage) {
   check_cuda(tracked_cuda_event_destroy_noexcept(ledger, event).status, stage);
+}
+
+void cleanup_local_cuda_event_noexcept(FixedSpResourceLedger* ledger,
+                                       cudaEvent_t* event) noexcept {
+  const TrackedTeardownResult<cudaError_t> first =
+    tracked_cuda_event_destroy_noexcept(ledger, event);
+  if (first.disposition ==
+      TrackedTeardownDisposition::NotAttemptedRetryable) {
+    tracked_cuda_event_destroy_noexcept(ledger, event);
+  }
 }
 
 TrackedTeardownResult<cublasStatus_t> tracked_cublas_destroy_noexcept(
@@ -2502,6 +2520,16 @@ void test_inject_next_fixed_sp_cuda_resource_post_call_teardown_failure(
     fixed_sp_resource_kind_from_name(resource));
 }
 
+void test_inject_next_prepared_static_shadow_body_failure() {
+  bool expected = false;
+  if (!global_resource_ledger()
+         .inject_next_prepared_static_shadow_body_failure
+         .compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    throw std::runtime_error(
+      "prepared static-shadow body failure injection is already pending");
+  }
+}
+
 void test_exercise_fixed_sp_cuda_resource_teardown_failure(
     const std::string& resource) {
   const FixedSpResourceKind kind = fixed_sp_resource_kind_from_name(resource);
@@ -3763,6 +3791,10 @@ PreparedSStaticShadow test_prepared_s_static_shadow(
     tracked_cuda_event_create(
       context->resource_ledger.get(), &completion_event,
       cudaEventDisableTiming, "create prepared test shadow completion event");
+    if (consume_injected_prepared_static_shadow_body_failure()) {
+      throw std::runtime_error(
+        "INJECTED_PREPARED_STATIC_SHADOW_BODY_FAILURE");
+    }
     auto download = [&](double* destination, const double* source,
                         std::size_t count, const char* name) {
       check_cuda(cudaMemcpyAsync(
@@ -3786,7 +3818,7 @@ PreparedSStaticShadow test_prepared_s_static_shadow(
       context->resource_ledger.get(), &completion_event,
       "destroy prepared test shadow completion event");
   } catch (...) {
-    tracked_cuda_event_destroy_noexcept(
+    cleanup_local_cuda_event_noexcept(
       context->resource_ledger.get(), &completion_event);
     throw;
   }

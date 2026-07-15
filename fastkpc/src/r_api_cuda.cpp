@@ -3498,6 +3498,14 @@ C_fixed_sp_cuda_test_inject_next_resource_post_call_teardown_failure(
 }
 
 extern "C" SEXP
+C_fixed_sp_cuda_test_inject_next_prepared_static_shadow_body_failure() {
+  BEGIN_RCPP
+  fastkpc::test_inject_next_prepared_static_shadow_body_failure();
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP
 C_fixed_sp_cuda_test_inject_next_blocked_consumer_launch_failure() {
   BEGIN_RCPP
   fastkpc::test_inject_next_blocked_consumer_launch_failure();
@@ -8358,6 +8366,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fixed_sp_cuda_test_inject_next_resource_acquire_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_resource_acquire_failure), 1},
   {"C_fixed_sp_cuda_test_inject_next_resource_teardown_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_resource_teardown_failure), 1},
   {"C_fixed_sp_cuda_test_inject_next_resource_post_call_teardown_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_resource_post_call_teardown_failure), 1},
+  {"C_fixed_sp_cuda_test_inject_next_prepared_static_shadow_body_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_prepared_static_shadow_body_failure), 0},
   {"C_fixed_sp_cuda_test_inject_next_blocked_consumer_launch_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_blocked_consumer_launch_failure), 0},
   {"C_fixed_sp_cuda_test_inject_next_device_free_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_inject_next_device_free_failure), 0},
   {"C_fixed_sp_cuda_test_exercise_resource_teardown_failure", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_exercise_resource_teardown_failure), 1},

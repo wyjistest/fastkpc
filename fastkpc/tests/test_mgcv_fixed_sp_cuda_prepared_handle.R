@@ -25,6 +25,12 @@ assert_close <- function(actual, expected, tolerance, message) {
   assert_true(is.finite(error) && error <= tolerance,
               paste0(message, ": max error ", format(error, digits = 17L)))
 }
+resource_snapshot <- function() {
+  .Call("C_fixed_sp_cuda_test_resource_snapshot", PACKAGE = "fastkpc_cuda")
+}
+resource_delta <- function(before, after, field) {
+  as.numeric(after[[field]] - before[[field]])
+}
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
   cat("SKIP Phase 3 prepared handle\n")
@@ -433,8 +439,67 @@ expected_explicit_h2d_bytes <- 8 * as.numeric(
 assert_true(identical(
   explicit_info$setup_h2d_bytes, expected_explicit_h2d_bytes
 ), "explicit setup uploads X, Z, X_null, Gram, and projected penalties")
-runtime_before_shadow <- fixed_sp_cuda_runtime_info(runtime)
 prepared_before_shadow <- fixed_sp_cuda_prepared_info(explicit_handle)
+failed_shadow_before <- resource_snapshot()
+invisible(.Call(
+  "C_fixed_sp_cuda_test_inject_next_prepared_static_shadow_body_failure",
+  PACKAGE = "fastkpc_cuda"
+))
+invisible(.Call(
+  "C_fixed_sp_cuda_test_inject_next_resource_teardown_failure",
+  "event", PACKAGE = "fastkpc_cuda"
+))
+failed_shadow_error <- assert_error(
+  .Call(
+    "C_fixed_sp_cuda_test_prepared_static_shadow", explicit_handle,
+    PACKAGE = "fastkpc_cuda"
+  ),
+  "INJECTED_PREPARED_STATIC_SHADOW_BODY_FAILURE",
+  "static-shadow body failure is preserved across local event cleanup"
+)
+assert_true(
+  identical(conditionMessage(failed_shadow_error),
+            "INJECTED_PREPARED_STATIC_SHADOW_BODY_FAILURE"),
+  "local event cleanup does not mask the static-shadow body error"
+)
+failed_shadow_after <- resource_snapshot()
+failed_shadow_event_deltas <- c(
+  attempts = resource_delta(
+    failed_shadow_before, failed_shadow_after,
+    "event_destroy_attempt_count"
+  ),
+  failures = resource_delta(
+    failed_shadow_before, failed_shadow_after,
+    "event_destroy_failure_count"
+  ),
+  successes = resource_delta(
+    failed_shadow_before, failed_shadow_after,
+    "event_destroy_success_count"
+  ),
+  active = resource_delta(
+    failed_shadow_before, failed_shadow_after, "event_active_count"
+  ),
+  indeterminate = resource_delta(
+    failed_shadow_before, failed_shadow_after,
+    "event_ownership_indeterminate_count"
+  )
+)
+assert_true(
+  identical(
+    failed_shadow_event_deltas,
+    c(attempts = 2, failures = 1, successes = 1,
+      active = 0, indeterminate = 0)
+  ),
+  paste0(
+    "catch-path event cleanup retries one not-attempted teardown: ",
+    paste(names(failed_shadow_event_deltas), failed_shadow_event_deltas,
+          sep = "=", collapse = ", ")
+  )
+)
+assert_true(identical(fixed_sp_cuda_prepared_info(explicit_handle),
+                      prepared_before_shadow),
+            "prepared handle remains usable after static-shadow body failure")
+runtime_before_shadow <- fixed_sp_cuda_runtime_info(runtime)
 explicit_shadow <- .Call(
   "C_fixed_sp_cuda_test_prepared_static_shadow", explicit_handle,
   PACKAGE = "fastkpc_cuda"
