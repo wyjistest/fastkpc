@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace fastkpc {
@@ -100,6 +101,7 @@ struct FixedSpGlobalResourceLedger {
   std::atomic<std::int64_t> cleanup_error_count{0};
   std::atomic<int> inject_next_acquire_failure_kind{-1};
   std::atomic<int> inject_next_teardown_failure_kind{-1};
+  std::atomic<bool> inject_next_blocked_consumer_launch_failure{false};
 };
 
 enum class FixedSpResourceKind {
@@ -277,6 +279,53 @@ void record_resource_teardown_failure(FixedSpResourceLedger* ledger,
     1, std::memory_order_relaxed);
   record_cleanup_error(ledger);
 }
+
+class ScopedCleanupCudaDevice {
+ public:
+  ScopedCleanupCudaDevice(std::int64_t creator_pid,
+                          int device_id,
+                          FixedSpResourceLedger* ledger) noexcept
+      : creator_pid_(creator_pid), ledger_(ledger) {
+    if (creator_pid_ != static_cast<std::int64_t>(getpid()) ||
+        device_id < 0) {
+      return;
+    }
+    if (cudaGetDevice(&previous_device_) != cudaSuccess) {
+      if (ledger_ != nullptr) record_cleanup_error(ledger_);
+      return;
+    }
+    if (previous_device_ != device_id) {
+      if (cudaSetDevice(device_id) != cudaSuccess) {
+        if (ledger_ != nullptr) record_cleanup_error(ledger_);
+        return;
+      }
+      restore_device_ = true;
+    }
+    ready_ = true;
+  }
+
+  ~ScopedCleanupCudaDevice() {
+    if (!restore_device_ ||
+        creator_pid_ != static_cast<std::int64_t>(getpid())) {
+      return;
+    }
+    if (cudaSetDevice(previous_device_) != cudaSuccess && ledger_ != nullptr) {
+      record_cleanup_error(ledger_);
+    }
+  }
+
+  ScopedCleanupCudaDevice(const ScopedCleanupCudaDevice&) = delete;
+  ScopedCleanupCudaDevice& operator=(const ScopedCleanupCudaDevice&) = delete;
+
+  bool ready() const noexcept { return ready_; }
+
+ private:
+  std::int64_t creator_pid_ = -1;
+  FixedSpResourceLedger* ledger_ = nullptr;
+  int previous_device_ = -1;
+  bool restore_device_ = false;
+  bool ready_ = false;
+};
 
 template <typename T>
 void tracked_cuda_malloc(FixedSpResourceLedger* ledger,
@@ -963,11 +1012,20 @@ struct TestBlockedConsumerState {
 
 namespace {
 
+struct TestBlockedConsumerCallbackPayload {
+  std::shared_ptr<TestBlockedConsumerState> state;
+};
+
 void CUDART_CB wait_for_test_blocked_consumer(void* data) {
-  auto* state = static_cast<TestBlockedConsumerState*>(data);
-  if (state == nullptr) return;
-  std::unique_lock<std::mutex> lock(state->mutex);
-  state->condition.wait(lock, [state]() { return state->completed; });
+  std::unique_ptr<TestBlockedConsumerCallbackPayload> payload(
+    static_cast<TestBlockedConsumerCallbackPayload*>(data));
+  if (!payload || !payload->state) return;
+  const std::shared_ptr<TestBlockedConsumerState> state = payload->state;
+  try {
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->condition.wait(lock, [&state]() { return state->completed; });
+  } catch (...) {
+  }
 }
 
 void signal_test_blocked_consumer(
@@ -978,6 +1036,108 @@ void signal_test_blocked_consumer(
     state->completed = true;
   }
   state->condition.notify_all();
+}
+
+struct TestBlockedConsumerTeardownStatus {
+  bool device_ready = false;
+  cudaError_t stream_synchronize = cudaSuccess;
+  cudaError_t event_destroy = cudaSuccess;
+  cudaError_t stream_destroy = cudaSuccess;
+};
+
+class TestBlockedConsumerResources {
+ public:
+  TestBlockedConsumerResources(
+      std::shared_ptr<FixedSpResourceLedger> resource_ledger,
+      std::int64_t creator_pid,
+      int device_id,
+      std::shared_ptr<TestBlockedConsumerState> state)
+      : resource_ledger_(std::move(resource_ledger)),
+        creator_pid_(creator_pid),
+        device_id_(device_id),
+        state_(std::move(state)) {}
+
+  ~TestBlockedConsumerResources() { cleanup_noexcept(); }
+
+  TestBlockedConsumerResources(const TestBlockedConsumerResources&) = delete;
+  TestBlockedConsumerResources& operator=(
+    const TestBlockedConsumerResources&) = delete;
+
+  cudaStream_t* stream_address() noexcept { return &stream_; }
+  cudaEvent_t* event_address() noexcept { return &event_; }
+  cudaStream_t stream() const noexcept { return stream_; }
+  cudaEvent_t event() const noexcept { return event_; }
+  bool has_resources() const noexcept {
+    return stream_ != nullptr || event_ != nullptr;
+  }
+
+  void signal_noexcept() noexcept {
+    signal_test_blocked_consumer(state_);
+  }
+
+  TestBlockedConsumerTeardownStatus teardown_once_noexcept() noexcept {
+    TestBlockedConsumerTeardownStatus status;
+    if (!has_resources()) {
+      status.device_ready = true;
+      return status;
+    }
+    if (creator_pid_ != static_cast<std::int64_t>(getpid())) return status;
+
+    signal_noexcept();
+    FixedSpResourceLedger* ledger = resource_ledger_.get();
+    ScopedCleanupCudaDevice cleanup_device(
+      creator_pid_, device_id_, ledger);
+    if (!cleanup_device.ready()) return status;
+    status.device_ready = true;
+
+    if (stream_ != nullptr) {
+      status.stream_synchronize = cudaStreamSynchronize(stream_);
+      if (status.stream_synchronize != cudaSuccess && ledger != nullptr) {
+        record_cleanup_error(ledger);
+      }
+    }
+    status.event_destroy = tracked_cuda_event_destroy_noexcept(
+      ledger, &event_);
+    status.stream_destroy = tracked_cuda_stream_destroy_noexcept(
+      ledger, &stream_);
+    return status;
+  }
+
+  void cleanup_noexcept() noexcept {
+    if (creator_pid_ != static_cast<std::int64_t>(getpid())) {
+      stream_ = nullptr;
+      event_ = nullptr;
+      state_.reset();
+      return;
+    }
+    if (!has_resources()) {
+      state_.reset();
+      return;
+    }
+    teardown_once_noexcept();
+    if (has_resources()) teardown_once_noexcept();
+    if (!has_resources()) state_.reset();
+  }
+
+ private:
+  std::shared_ptr<FixedSpResourceLedger> resource_ledger_;
+  std::int64_t creator_pid_ = -1;
+  int device_id_ = -1;
+  std::shared_ptr<TestBlockedConsumerState> state_;
+  cudaStream_t stream_ = nullptr;
+  cudaEvent_t event_ = nullptr;
+};
+
+void check_test_blocked_consumer_teardown(
+    const TestBlockedConsumerTeardownStatus& status) {
+  if (!status.device_ready) {
+    throw std::runtime_error(
+      "select CUDA device for blocked consumer test teardown");
+  }
+  check_cuda(status.stream_synchronize,
+             "synchronize blocked consumer test stream");
+  check_cuda(status.event_destroy, "destroy blocked consumer test event");
+  check_cuda(status.stream_destroy, "destroy blocked consumer test stream");
 }
 
 }  // namespace
@@ -1037,20 +1197,20 @@ struct TransientResidualSlot {
       return;
     }
     FixedSpResourceLedger* ledger = resource_ledger.get();
-    if (device_id >= 0 && cudaSetDevice(device_id) != cudaSuccess &&
-        ledger != nullptr) {
-      record_cleanup_error(ledger);
+    ScopedCleanupCudaDevice cleanup_device(
+      creator_pid, device_id, ledger);
+    if (cleanup_device.ready()) {
+      tracked_cuda_event_destroy_noexcept(
+        ledger, &consumer_completion_event);
+      tracked_cuda_event_destroy_noexcept(
+        ledger, &solve_completion_event);
+      tracked_cuda_free_host_noexcept(ledger, &host_finite_status);
+      tracked_cuda_free_noexcept(ledger, &rss);
+      tracked_cuda_free_noexcept(ledger, &rhs);
+      tracked_cuda_free_noexcept(ledger, &residuals);
+      tracked_cuda_free_noexcept(ledger, &fitted);
+      tracked_cuda_free_noexcept(ledger, &coefficients);
     }
-    tracked_cuda_event_destroy_noexcept(
-      ledger, &consumer_completion_event);
-    tracked_cuda_event_destroy_noexcept(
-      ledger, &solve_completion_event);
-    tracked_cuda_free_host_noexcept(ledger, &host_finite_status);
-    tracked_cuda_free_noexcept(ledger, &rss);
-    tracked_cuda_free_noexcept(ledger, &rhs);
-    tracked_cuda_free_noexcept(ledger, &residuals);
-    tracked_cuda_free_noexcept(ledger, &fitted);
-    tracked_cuda_free_noexcept(ledger, &coefficients);
     freed = true;
   }
 
@@ -1092,18 +1252,20 @@ class PreparedSGpuHandle {
       return;
     }
     FixedSpResourceLedger* ledger = resource_ledger.get();
-    if (device_id >= 0 && cudaSetDevice(device_id) != cudaSuccess &&
-        ledger != nullptr) {
-      record_cleanup_error(ledger);
+    ScopedCleanupCudaDevice cleanup_device(
+      creator_pid, device_id, ledger);
+    if (cleanup_device.ready()) {
+      tracked_cuda_event_destroy_noexcept(ledger, &setup_completion_event);
+      residual_slot.reset();
+      tracked_cuda_free_noexcept(ledger, &d_projected_penalties);
+      tracked_cuda_free_noexcept(ledger, &d_gram);
+      if (d_X_null != d_X) tracked_cuda_free_noexcept(ledger, &d_X_null);
+      d_X_null = nullptr;
+      tracked_cuda_free_noexcept(ledger, &d_Z);
+      tracked_cuda_free_noexcept(ledger, &d_X);
+    } else {
+      residual_slot.reset();
     }
-    tracked_cuda_event_destroy_noexcept(ledger, &setup_completion_event);
-    residual_slot.reset();
-    tracked_cuda_free_noexcept(ledger, &d_projected_penalties);
-    tracked_cuda_free_noexcept(ledger, &d_gram);
-    if (d_X_null != d_X) tracked_cuda_free_noexcept(ledger, &d_X_null);
-    d_X_null = nullptr;
-    tracked_cuda_free_noexcept(ledger, &d_Z);
-    tracked_cuda_free_noexcept(ledger, &d_X);
     if (registered_with_context && context) {
       context->active_prepared_handle_count.fetch_sub(
         1, std::memory_order_acq_rel);
@@ -1158,9 +1320,7 @@ class DeviceResidualBatch {
   std::vector<std::string> reroute_reasons;
   std::vector<FixedSpStatus> solver_statuses;
   DeviceResidualInfo diagnostics;
-  std::shared_ptr<TestBlockedConsumerState> test_blocked_consumer_state;
-  cudaStream_t test_blocked_consumer_stream = nullptr;
-  cudaEvent_t test_blocked_consumer_event = nullptr;
+  std::shared_ptr<TestBlockedConsumerResources> test_blocked_consumer_resources;
   bool output_status_resolved = false;
   bool lease_released = false;
   bool freed = false;
@@ -1407,48 +1567,64 @@ DeviceResidualBatch::~DeviceResidualBatch() {
 }
 
 void DeviceResidualBatch::cleanup_noexcept() noexcept {
-  if (freed || lease_released || !owner || !slot) return;
-  if (creator_pid != static_cast<std::int64_t>(getpid())) return;
-  signal_test_blocked_consumer(test_blocked_consumer_state);
+  if (creator_pid != static_cast<std::int64_t>(getpid())) {
+    test_blocked_consumer_resources.reset();
+    return;
+  }
+  if (test_blocked_consumer_resources) {
+    test_blocked_consumer_resources->signal_noexcept();
+  }
+  if (freed || lease_released || !owner || !slot) {
+    test_blocked_consumer_resources.reset();
+    return;
+  }
   const std::shared_ptr<CudaRuntimeContext> context = owner->context;
-  if (!context) return;
+  if (!context) {
+    test_blocked_consumer_resources.reset();
+    return;
+  }
   try {
     std::lock_guard<std::mutex> lock(context->mutex);
     if (owner_generation != owner->generation ||
         slot_generation != slot->generation) {
+      test_blocked_consumer_resources.reset();
       return;
     }
     if (slot->state == TransientResidualSlotState::Poisoned) {
+      test_blocked_consumer_resources.reset();
       poison_transient_residual_slot(
         slot.get(), slot_generation, nullptr, true);
       lease_released = true;
       freed = true;
       return;
     }
-    if (slot->state != TransientResidualSlotState::Leased) return;
+    if (slot->state != TransientResidualSlotState::Leased) {
+      test_blocked_consumer_resources.reset();
+      return;
+    }
 
     try {
+      ScopedCleanupCudaDevice cleanup_device(
+        creator_pid, context->device_id, context->resource_ledger.get());
+      if (!cleanup_device.ready()) {
+        throw std::runtime_error(
+          "select CUDA device for residual token cleanup");
+      }
       if (slot->consumer_event_registered) {
-        check_cuda(cudaSetDevice(context->device_id),
-                   "set CUDA device for residual token cleanup");
         check_cuda(cudaEventSynchronize(slot->consumer_completion_event),
                    "wait for residual consumer during token cleanup");
         slot->consumer_event_registered = false;
       }
-      tracked_cuda_event_destroy(
-        context->resource_ledger.get(), &test_blocked_consumer_event,
-        "destroy blocked consumer test event during token cleanup");
-      check_cuda(tracked_cuda_stream_destroy_noexcept(
-        context->resource_ledger.get(), &test_blocked_consumer_stream
-      ), "destroy blocked consumer test stream during token cleanup");
-      test_blocked_consumer_state.reset();
+      test_blocked_consumer_resources.reset();
     } catch (const std::exception& error) {
+      test_blocked_consumer_resources.reset();
       poison_transient_residual_slot(
         slot.get(), slot_generation, error.what(), true);
       lease_released = true;
       freed = true;
       return;
     } catch (...) {
+      test_blocked_consumer_resources.reset();
       poison_transient_residual_slot(
         slot.get(), slot_generation,
         "unknown residual token cleanup failure", true);
@@ -1562,23 +1738,23 @@ void CudaRuntimeContext::cleanup_noexcept() noexcept {
     freed = true;
     return;
   }
-  if (device_id >= 0 && cudaSetDevice(device_id) != cudaSuccess) {
-    record_cleanup_error(resource_ledger.get());
+  FixedSpResourceLedger* ledger = resource_ledger.get();
+  ScopedCleanupCudaDevice cleanup_device(creator_pid, device_id, ledger);
+  if (cleanup_device.ready()) {
+    tracked_cuda_free_noexcept(ledger, &double_arena);
+    tracked_cuda_free_noexcept(ledger, &int_arena);
+    tracked_cuda_free_host_noexcept(ledger, &host_status_arena);
+    tracked_cuda_free_noexcept(ledger, &pointer_arena);
+    tracked_cuda_free_noexcept(ledger, &cublas_workspace);
+
+    tracked_cuda_event_destroy_noexcept(
+      ledger, &cholesky_solve_checkpoint_event);
+    tracked_cuda_event_destroy_noexcept(
+      ledger, &cholesky_factor_checkpoint_event);
+    tracked_cusolver_destroy_noexcept(ledger, &solver);
+    tracked_cublas_destroy_noexcept(ledger, &blas);
+    tracked_cuda_stream_destroy_noexcept(ledger, &stream);
   }
-
-  tracked_cuda_free_noexcept(resource_ledger.get(), &double_arena);
-  tracked_cuda_free_noexcept(resource_ledger.get(), &int_arena);
-  tracked_cuda_free_host_noexcept(resource_ledger.get(), &host_status_arena);
-  tracked_cuda_free_noexcept(resource_ledger.get(), &pointer_arena);
-  tracked_cuda_free_noexcept(resource_ledger.get(), &cublas_workspace);
-
-  tracked_cuda_event_destroy_noexcept(
-    resource_ledger.get(), &cholesky_solve_checkpoint_event);
-  tracked_cuda_event_destroy_noexcept(
-    resource_ledger.get(), &cholesky_factor_checkpoint_event);
-  tracked_cusolver_destroy_noexcept(resource_ledger.get(), &solver);
-  tracked_cublas_destroy_noexcept(resource_ledger.get(), &blas);
-  tracked_cuda_stream_destroy_noexcept(resource_ledger.get(), &stream);
 
   generation += 1;
   freed = true;
@@ -1914,6 +2090,12 @@ void test_inject_next_fixed_sp_cuda_resource_acquire_failure(
   }
 }
 
+void test_inject_next_fixed_sp_cuda_resource_teardown_failure(
+    const std::string& resource) {
+  arm_injected_resource_teardown_failure(
+    fixed_sp_resource_kind_from_name(resource));
+}
+
 void test_exercise_fixed_sp_cuda_resource_teardown_failure(
     const std::string& resource) {
   const FixedSpResourceKind kind = fixed_sp_resource_kind_from_name(resource);
@@ -2060,6 +2242,21 @@ void test_fixed_sp_cuda_set_device(int device_id) {
       "fixed-sp CUDA test device id must be non-negative");
   }
   check_cuda(cudaSetDevice(device_id), "set fixed-sp CUDA test device");
+}
+
+int test_fixed_sp_cuda_get_device() {
+  int device_id = -1;
+  check_cuda(cudaGetDevice(&device_id), "get fixed-sp CUDA test device");
+  return device_id;
+}
+
+void test_inject_next_blocked_consumer_launch_failure() {
+  bool expected = false;
+  if (!global_resource_ledger().inject_next_blocked_consumer_launch_failure
+         .compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    throw std::runtime_error(
+      "blocked-consumer launch failure injection is already pending");
+  }
 }
 
 std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
@@ -2956,9 +3153,7 @@ void test_register_blocked_device_residual_consumer(
       throw_output_slot_poisoned(*token->slot);
     }
     if (token->slot->consumer_event_registered ||
-        token->test_blocked_consumer_state ||
-        token->test_blocked_consumer_stream != nullptr ||
-        token->test_blocked_consumer_event != nullptr) {
+        token->test_blocked_consumer_resources) {
       throw std::runtime_error(
         "fixed-sp blocked consumer test is already registered");
     }
@@ -2967,33 +3162,42 @@ void test_register_blocked_device_residual_consumer(
 
   const std::shared_ptr<TestBlockedConsumerState> state =
     std::make_shared<TestBlockedConsumerState>();
-  cudaStream_t consumer_stream = nullptr;
-  cudaEvent_t consumer_event = nullptr;
+  const std::shared_ptr<TestBlockedConsumerResources> resources =
+    std::make_shared<TestBlockedConsumerResources>(
+      context->resource_ledger, token->creator_pid, token->device_id, state);
   try {
     tracked_cuda_stream_create(
-      context->resource_ledger.get(), &consumer_stream,
+      context->resource_ledger.get(), resources->stream_address(),
       cudaStreamNonBlocking, "create blocked consumer test stream");
     tracked_cuda_event_create(
-      context->resource_ledger.get(), &consumer_event,
+      context->resource_ledger.get(), resources->event_address(),
       cudaEventDisableTiming, "create blocked consumer test event");
+    std::unique_ptr<TestBlockedConsumerCallbackPayload> payload(
+      new TestBlockedConsumerCallbackPayload{state});
     check_cuda(cudaLaunchHostFunc(
-      consumer_stream, wait_for_test_blocked_consumer, state.get()
+      resources->stream(), wait_for_test_blocked_consumer, payload.get()
     ), "launch blocked consumer test host gate");
-    check_cuda(cudaEventRecord(consumer_event, consumer_stream),
-               "record blocked consumer test event");
-    register_device_residual_consumer_event(token, consumer_event);
-    token->test_blocked_consumer_state = state;
-    token->test_blocked_consumer_stream = consumer_stream;
-    token->test_blocked_consumer_event = consumer_event;
-  } catch (...) {
-    signal_test_blocked_consumer(state);
-    if (consumer_event != nullptr) {
-      cudaEventSynchronize(consumer_event);
+    payload.release();
+    if (global_resource_ledger()
+          .inject_next_blocked_consumer_launch_failure.exchange(
+            false, std::memory_order_acq_rel)) {
+      throw std::runtime_error(
+        "INJECTED_BLOCKED_CONSUMER_LAUNCH_FAILURE");
     }
-    tracked_cuda_event_destroy_noexcept(
-      context->resource_ledger.get(), &consumer_event);
-    tracked_cuda_stream_destroy_noexcept(
-      context->resource_ledger.get(), &consumer_stream);
+    check_cuda(cudaEventRecord(resources->event(), resources->stream()),
+               "record blocked consumer test event");
+    register_device_residual_consumer_event(token, resources->event());
+    {
+      std::lock_guard<std::mutex> lock(context->mutex);
+      require_residual_host_identity(token, true);
+      token->test_blocked_consumer_resources = resources;
+    }
+  } catch (...) {
+    resources->cleanup_noexcept();
+    if (resources->has_resources()) {
+      std::lock_guard<std::mutex> lock(context->mutex);
+      token->test_blocked_consumer_resources = resources;
+    }
     throw;
   }
 }
@@ -3008,26 +3212,28 @@ void test_complete_blocked_device_residual_consumer(
     throw_output_slot_poisoned(*token->slot);
   }
   if (!token->slot->consumer_event_registered ||
-      !token->test_blocked_consumer_state ||
-      token->test_blocked_consumer_stream == nullptr ||
-      token->test_blocked_consumer_event == nullptr) {
+      !token->test_blocked_consumer_resources ||
+      !token->test_blocked_consumer_resources->has_resources()) {
     throw std::runtime_error(
       "fixed-sp blocked consumer test is not registered");
   }
   context->require_usable();
 
-  signal_test_blocked_consumer(token->test_blocked_consumer_state);
-  check_cuda(cudaEventSynchronize(token->test_blocked_consumer_event),
-             "complete blocked consumer test event");
+  const std::shared_ptr<TestBlockedConsumerResources> resources =
+    token->test_blocked_consumer_resources;
+  resources->signal_noexcept();
+  if (resources->event() != nullptr) {
+    check_cuda(cudaEventSynchronize(resources->event()),
+               "complete blocked consumer test event");
+  }
   check_cuda(cudaEventSynchronize(token->slot->consumer_completion_event),
              "complete blocked consumer test proxy event");
-  tracked_cuda_event_destroy(
-    context->resource_ledger.get(), &token->test_blocked_consumer_event,
-    "destroy blocked consumer test event");
-  check_cuda(tracked_cuda_stream_destroy_noexcept(
-    context->resource_ledger.get(), &token->test_blocked_consumer_stream
-  ), "destroy blocked consumer test stream");
-  token->test_blocked_consumer_state.reset();
+  const TestBlockedConsumerTeardownStatus teardown =
+    resources->teardown_once_noexcept();
+  if (!resources->has_resources()) {
+    token->test_blocked_consumer_resources.reset();
+  }
+  check_test_blocked_consumer_teardown(teardown);
 }
 
 void free_device_residual(std::shared_ptr<DeviceResidualBatch>* token) {

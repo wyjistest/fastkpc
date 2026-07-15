@@ -27,9 +27,19 @@ if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
 build_fastkpc_cuda_native(rebuild = TRUE)
 assert_true(fastkpc_cuda_available(), "CUDA must be available")
 
+resource_snapshot <- function() {
+  .Call("C_fixed_sp_cuda_test_resource_snapshot", PACKAGE = "fastkpc_cuda")
+}
+resource_delta <- function(before, after, field) {
+  as.numeric(after[[field]] - before[[field]])
+}
+
 test_native_names <- c(
   "fixed_sp_cuda_test_device_count",
   "fixed_sp_cuda_test_set_device",
+  "fixed_sp_cuda_test_get_device",
+  "fixed_sp_cuda_test_inject_next_resource_teardown_failure",
+  "fixed_sp_cuda_test_inject_next_blocked_consumer_launch_failure",
   "fixed_sp_cuda_test_register_blocked_consumer",
   "fixed_sp_cuda_test_complete_consumer"
 )
@@ -179,6 +189,137 @@ post_consumer_token <- fixed_sp_cuda_solve_batch(
 fixed_sp_cuda_residual_release(post_consumer_token)
 fixed_sp_cuda_residual_free(post_consumer_token)
 
+new_consumer_token <- function() {
+  fixed_sp_cuda_solve_batch(
+    handle, native_batch$Y, native_batch$SP,
+    native_batch$planned_route, native_batch$target_keys
+  )
+}
+inject_teardown_failure <- function(resource) {
+  .Call(
+    "C_fixed_sp_cuda_test_inject_next_resource_teardown_failure",
+    resource, PACKAGE = "fastkpc_cuda"
+  )
+}
+inject_blocked_launch_failure <- function() {
+  .Call(
+    "C_fixed_sp_cuda_test_inject_next_blocked_consumer_launch_failure",
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+register_blocked_consumer <- function(token) {
+  .Call(
+    "C_fixed_sp_cuda_test_register_blocked_consumer", token,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+complete_blocked_consumer <- function(token) {
+  .Call(
+    "C_fixed_sp_cuda_test_complete_consumer", token,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+assert_blocked_resource_accounting <- function(before, after, failed_resource,
+                                               message) {
+  failed_event <- identical(failed_resource, "event")
+  assert_true(
+    resource_delta(before, after, "event_create_attempt_count") == 1 &&
+      resource_delta(before, after, "event_create_success_count") == 1 &&
+      resource_delta(before, after, "event_create_failure_count") == 0 &&
+      resource_delta(before, after, "event_destroy_attempt_count") ==
+        (if (failed_event) 2 else 1) &&
+      resource_delta(before, after, "event_destroy_success_count") == 1 &&
+      resource_delta(before, after, "event_destroy_failure_count") ==
+        (if (failed_event) 1 else 0) &&
+      resource_delta(before, after, "event_active_count") == 0 &&
+      resource_delta(before, after, "stream_create_attempt_count") == 1 &&
+      resource_delta(before, after, "stream_create_success_count") == 1 &&
+      resource_delta(before, after, "stream_create_failure_count") == 0 &&
+      resource_delta(before, after, "stream_destroy_attempt_count") ==
+        (if (failed_event) 1 else 2) &&
+      resource_delta(before, after, "stream_destroy_success_count") == 1 &&
+      resource_delta(before, after, "stream_destroy_failure_count") ==
+        (if (failed_event) 0 else 1) &&
+      resource_delta(before, after, "stream_active_count") == 0 &&
+      resource_delta(before, after, "cleanup_error_count") == 1,
+    message
+  )
+}
+
+for (resource in c("event", "stream")) {
+  registration_failure_token <- new_consumer_token()
+  registration_before <- resource_snapshot()
+  inject_teardown_failure(resource)
+  inject_blocked_launch_failure()
+  expect_error_contains(
+    register_blocked_consumer(registration_failure_token),
+    "INJECTED_BLOCKED_CONSUMER_LAUNCH_FAILURE",
+    paste(resource, "partial registration failure is surfaced")
+  )
+  registration_after <- resource_snapshot()
+  assert_blocked_resource_accounting(
+    registration_before, registration_after, resource,
+    paste(resource,
+          "partial registration teardown retains callback and handle ownership")
+  )
+  fixed_sp_cuda_residual_release(registration_failure_token)
+  fixed_sp_cuda_residual_free(registration_failure_token)
+}
+
+for (resource in c("stream", "event")) {
+  retry_token <- new_consumer_token()
+  retry_before <- resource_snapshot()
+  register_blocked_consumer(retry_token)
+  inject_teardown_failure(resource)
+  expect_error_contains(
+    complete_blocked_consumer(retry_token),
+    "destroy blocked consumer test",
+    paste(resource, "blocked-consumer teardown failure is surfaced")
+  )
+  retry_partial <- resource_snapshot()
+  assert_true(
+    resource_delta(retry_before, retry_partial, "event_active_count") ==
+        as.integer(identical(resource, "event")) &&
+      resource_delta(retry_before, retry_partial, "stream_active_count") ==
+        as.integer(identical(resource, "stream")) &&
+      resource_delta(retry_before, retry_partial,
+                     "event_destroy_attempt_count") == 1 &&
+      resource_delta(retry_before, retry_partial,
+                     "stream_destroy_attempt_count") == 1,
+    paste(resource,
+          "partial completion teardown retains only the failed resource")
+  )
+  complete_blocked_consumer(retry_token)
+  fixed_sp_cuda_residual_release(retry_token)
+  fixed_sp_cuda_residual_free(retry_token)
+  retry_after <- resource_snapshot()
+  assert_blocked_resource_accounting(
+    retry_before, retry_after, resource,
+    paste(resource, "blocked-consumer teardown retry is exactly balanced")
+  )
+}
+
+final_cleanup_token <- new_consumer_token()
+final_cleanup_before <- resource_snapshot()
+register_blocked_consumer(final_cleanup_token)
+inject_teardown_failure("stream")
+expect_error_contains(
+  complete_blocked_consumer(final_cleanup_token),
+  "destroy blocked consumer test",
+  "failed stream teardown is surfaced before finalizer cleanup"
+)
+rm(final_cleanup_token)
+invisible(gc())
+final_cleanup_after <- resource_snapshot()
+assert_blocked_resource_accounting(
+  final_cleanup_before, final_cleanup_after, "stream",
+  "residual finalizer retries retained blocked-consumer stream ownership"
+)
+
+post_final_cleanup_token <- new_consumer_token()
+fixed_sp_cuda_residual_release(post_final_cleanup_token)
+fixed_sp_cuda_residual_free(post_final_cleanup_token)
+
 wrong_tag_handle <- legacy_dcov_spectra_matvec_cuda_handle(diag(2))
 on.exit(
   try(legacy_dcov_spectra_matvec_cuda_handle_free(wrong_tag_handle),
@@ -275,13 +416,69 @@ if (device_count >= 2L) {
   .Call("C_fixed_sp_cuda_test_set_device", 0L, PACKAGE = "fastkpc_cuda")
   fixed_sp_cuda_residual_release(device_token)
   fixed_sp_cuda_residual_free(device_token)
+
+  current_test_device <- function() {
+    .Call("C_fixed_sp_cuda_test_get_device", PACKAGE = "fastkpc_cuda")
+  }
+
+  finalizer_runtime <- fixed_sp_cuda_runtime_create(0L)
+  .Call("C_fixed_sp_cuda_test_set_device", 1L, PACKAGE = "fastkpc_cuda")
+  rm(finalizer_runtime)
+  invisible(gc())
+  assert_true(
+    identical(current_test_device(), 1L),
+    "runtime finalizer cleanup restores the caller's current CUDA device"
+  )
+
+  .Call("C_fixed_sp_cuda_test_set_device", 0L, PACKAGE = "fastkpc_cuda")
+  finalizer_prepared_runtime <- fixed_sp_cuda_runtime_create(0L)
+  fixed_sp_cuda_runtime_reserve(
+    finalizer_prepared_runtime, 351L, 64L, 47L, 7L, 407L
+  )
+  finalizer_prepared <- fixed_sp_cuda_prepared_create(
+    finalizer_prepared_runtime, safe_dto
+  )
+  .Call("C_fixed_sp_cuda_test_set_device", 1L, PACKAGE = "fastkpc_cuda")
+  rm(finalizer_prepared)
+  invisible(gc())
+  assert_true(
+    identical(current_test_device(), 1L),
+    "prepared and slot finalizer cleanup restores the caller's CUDA device"
+  )
+  .Call("C_fixed_sp_cuda_test_set_device", 0L, PACKAGE = "fastkpc_cuda")
+  fixed_sp_cuda_runtime_free(finalizer_prepared_runtime)
+
+  finalizer_token_runtime <- fixed_sp_cuda_runtime_create(0L)
+  fixed_sp_cuda_runtime_reserve(
+    finalizer_token_runtime, 351L, 64L, 47L, 7L, 407L
+  )
+  finalizer_token_handle <- fixed_sp_cuda_prepared_create(
+    finalizer_token_runtime, safe_dto
+  )
+  finalizer_token <- fixed_sp_cuda_solve_batch(
+    finalizer_token_handle, native_batch$Y, native_batch$SP,
+    native_batch$planned_route, native_batch$target_keys
+  )
+  register_blocked_consumer(finalizer_token)
+  .Call("C_fixed_sp_cuda_test_set_device", 1L, PACKAGE = "fastkpc_cuda")
+  rm(finalizer_token)
+  invisible(gc())
+  assert_true(
+    identical(current_test_device(), 1L),
+    "residual finalizer cleanup restores the caller's current CUDA device"
+  )
+  .Call("C_fixed_sp_cuda_test_set_device", 0L, PACKAGE = "fastkpc_cuda")
+  assert_true(
+    identical(fixed_sp_cuda_prepared_info(
+      finalizer_token_handle
+    )$output_slot_state, "free"),
+    "residual finalizer releases the completed blocked-consumer slot"
+  )
+  fixed_sp_cuda_prepared_free(finalizer_token_handle)
+  fixed_sp_cuda_runtime_free(finalizer_token_runtime)
 }
 
 if (.Platform$OS.type == "unix") {
-  resource_snapshot <- function() {
-    .Call("C_fixed_sp_cuda_test_resource_snapshot",
-          PACKAGE = "fastkpc_cuda")
-  }
   teardown_attempts <- function(snapshot) {
     fields <- grep(
       "_(free|destroy)_attempt_count$", names(snapshot), value = TRUE
