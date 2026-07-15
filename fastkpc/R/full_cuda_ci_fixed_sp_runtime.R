@@ -2469,3 +2469,2008 @@ fastkpc_run_full_cuda_fixed_sp_phase3a_iteration <- function(
     summary = summary
   )
 }
+
+fastkpc_full_cuda_fixed_sp_phase3b_validate_label <- function(
+    value, label) {
+  clean <- typeof(value) == "character" && length(value) == 1L &&
+    !is.object(value) && is.null(attributes(value)) && !is.na(value) &&
+    nzchar(value)
+  if (!isTRUE(clean)) {
+    stop(label, " must be one bare non-empty character scalar",
+         call. = FALSE)
+  }
+  value
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_require_fields <- function(
+    value, fields, context) {
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_label(context, "context")
+  fields_clean <- typeof(fields) == "character" && length(fields) > 0L &&
+    !is.object(fields) && is.null(attributes(fields)) && !anyNA(fields) &&
+    all(nzchar(fields)) && !anyDuplicated(fields)
+  if (!isTRUE(fields_clean)) {
+    stop("fields must be bare non-empty unique character names",
+         call. = FALSE)
+  }
+  value_names <- names(value)
+  value_clean <- typeof(value) == "list" && !is.object(value) &&
+    is.character(value_names) && length(value_names) > 0L &&
+    !anyNA(value_names) && all(nzchar(value_names)) &&
+    !anyDuplicated(value_names) &&
+    identical(attributes(value), list(names = value_names))
+  if (!isTRUE(value_clean)) {
+    stop(context, " must be a bare named list", call. = FALSE)
+  }
+  missing <- setdiff(fields, value_names)
+  if (length(missing) != 0L) {
+    stop(
+      context, " fields are malformed; missing=",
+      paste(missing, collapse = ","), call. = FALSE
+    )
+  }
+  invisible(value)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar <- function(
+    value, name) {
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_label(name, "name")
+  clean <- typeof(value) == "integer" && length(value) == 1L &&
+    !is.object(value) && is.null(attributes(value)) && !is.na(value) &&
+    value >= 0L
+  if (!isTRUE(clean)) {
+    stop(name, " must be one non-negative integer", call. = FALSE)
+  }
+  value
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_double_scalar <- function(value, name) {
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_label(name, "name")
+  clean <- typeof(value) == "double" && length(value) == 1L &&
+    !is.object(value) && is.null(attributes(value)) && !is.na(value) &&
+    is.finite(value) && value >= 0
+  if (!isTRUE(clean)) {
+    stop(name, " must be one non-negative finite double", call. = FALSE)
+  }
+  value
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_logical_scalar <- function(value, name) {
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_label(name, "name")
+  clean <- typeof(value) == "logical" && length(value) == 1L &&
+    !is.object(value) && is.null(attributes(value)) && !is.na(value)
+  if (!isTRUE(clean)) {
+    stop(name, " must be one non-NA logical", call. = FALSE)
+  }
+  value
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_character_scalar <- function(
+    value, name, allow_empty = FALSE) {
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_label(name, "name")
+  allow_empty_clean <- typeof(allow_empty) == "logical" &&
+    length(allow_empty) == 1L && !is.object(allow_empty) &&
+    is.null(attributes(allow_empty)) && !is.na(allow_empty)
+  if (!isTRUE(allow_empty_clean)) {
+    stop("allow_empty must be one non-NA logical scalar", call. = FALSE)
+  }
+  clean <- typeof(value) == "character" && length(value) == 1L &&
+    !is.object(value) && is.null(attributes(value)) && !is.na(value) &&
+    (isTRUE(allow_empty) || nzchar(value))
+  if (!isTRUE(clean)) {
+    stop(name, " must be one valid character scalar", call. = FALSE)
+  }
+  value
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_character_vector <- function(
+    value, size, name, allow_na = FALSE) {
+  size_clean <- typeof(size) == "integer" && length(size) == 1L &&
+    !is.object(size) && is.null(attributes(size)) && !is.na(size) &&
+    size >= 0L
+  if (!isTRUE(size_clean)) {
+    stop("size must be one non-negative integer", call. = FALSE)
+  }
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_label(name, "name")
+  allow_na_clean <- typeof(allow_na) == "logical" &&
+    length(allow_na) == 1L && !is.object(allow_na) &&
+    is.null(attributes(allow_na)) && !is.na(allow_na)
+  if (!isTRUE(allow_na_clean)) {
+    stop("allow_na must be one non-NA logical scalar", call. = FALSE)
+  }
+  clean <- typeof(value) == "character" && length(value) == size &&
+    !is.object(value) && is.null(attributes(value)) &&
+    (isTRUE(allow_na) || !anyNA(value))
+  if (!isTRUE(clean)) {
+    stop(name, " must be one valid character vector", call. = FALSE)
+  }
+  value
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_validate_paths <- function(
+    phase2_dir, census_dir, prepared_dir, data_path) {
+  paths <- list(
+    phase2_dir = phase2_dir,
+    census_dir = census_dir,
+    prepared_dir = prepared_dir,
+    data_path = data_path
+  )
+  for (field in names(paths)) {
+    value <- paths[[field]]
+    clean <- typeof(value) == "character" && length(value) == 1L &&
+      !is.object(value) && is.null(attributes(value)) && !is.na(value) &&
+      nzchar(value)
+    if (!isTRUE(clean)) {
+      stop(field, " must be one bare non-empty character scalar",
+           call. = FALSE)
+    }
+  }
+  paths
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_counter_delta <- function(
+    before, after, field, context) {
+  fastkpc_full_cuda_fixed_sp_phase3b_require_fields(
+    before, field, paste(context, "before")
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_require_fields(
+    after, field, paste(context, "after")
+  )
+  before_value <- fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+    before[[field]], paste(context, field, "before")
+  )
+  after_value <- fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+    after[[field]], paste(context, field, "after")
+  )
+  delta <- as.double(after_value) - as.double(before_value)
+  if (length(delta) != 1L || !is.finite(delta) || delta < 0 ||
+      delta != floor(delta) || delta > .Machine$integer.max) {
+    stop(context, " counter regressed: ", field, call. = FALSE)
+  }
+  as.integer(delta)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_validate_runtime_info <- function(
+    info, context) {
+  integer_fields <- c(
+    "device_id", "runtime_context_create_count",
+    "cuda_device_allocation_count", "cuda_host_allocation_count",
+    "stream_create_count", "event_create_count",
+    "cublas_handle_create_count", "cusolver_handle_create_count",
+    "workspace_reserve_count", "workspace_grow_count",
+    "cuda_device_synchronize_count",
+    "cholesky_factor_checkpoint_record_count",
+    "cholesky_factor_checkpoint_wait_count",
+    "cholesky_solve_checkpoint_record_count",
+    "cholesky_solve_checkpoint_wait_count", "cuda_toolkit_version",
+    "cuda_driver_version", "compute_capability_major",
+    "compute_capability_minor", "sm_count"
+  )
+  double_fields <- c(
+    "creator_pid", "generation", "workspace_bytes",
+    "cublas_workspace_bytes", "cublas_workspace_alignment"
+  )
+  character_fields <- c(
+    "gpu_name", "cusolver_deterministic_mode", "cublas_math_mode",
+    "cublas_atomics_mode"
+  )
+  required <- c(
+    integer_fields, double_fields, character_fields,
+    "cublas_user_workspace_installed", "freed"
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_require_fields(info, required, context)
+  for (field in integer_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  for (field in double_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  for (field in character_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  fastkpc_full_cuda_fixed_sp_phase3b_logical_scalar(
+    info$cublas_user_workspace_installed,
+    paste(context, "cublas_user_workspace_installed")
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_logical_scalar(
+    info$freed, paste(context, "freed")
+  )
+  config_exact <- info$runtime_context_create_count == 1L &&
+    identical(info$cusolver_deterministic_mode, "enabled") &&
+    identical(info$cublas_math_mode, "pedantic") &&
+    identical(info$cublas_atomics_mode, "not_allowed") &&
+    !isTRUE(info$freed)
+  if (!isTRUE(config_exact)) {
+    stop(context, " deterministic runtime configuration is invalid",
+         call. = FALSE)
+  }
+  invisible(info)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_validate_runtime_identity <- function(
+    created, reserved, final, requested_device_id) {
+  identity_fields <- c(
+    "device_id", "creator_pid", "generation", "gpu_name",
+    "compute_capability_major", "compute_capability_minor", "sm_count",
+    "cuda_toolkit_version", "cuda_driver_version",
+    "cusolver_deterministic_mode", "cublas_math_mode",
+    "cublas_atomics_mode"
+  )
+  requested_device_id <-
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      requested_device_id, "requested_device_id"
+    )
+  snapshots <- list(created = created, reserved = reserved, final = final)
+  for (snapshot_name in names(snapshots)) {
+    snapshot <- snapshots[[snapshot_name]]
+    fastkpc_full_cuda_fixed_sp_phase3b_require_fields(
+      snapshot, identity_fields,
+      paste("Phase 3B", snapshot_name, "runtime identity")
+    )
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      snapshot$device_id, paste(snapshot_name, "device_id")
+    )
+    fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+      snapshot$creator_pid, paste(snapshot_name, "creator_pid")
+    )
+    fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+      snapshot$generation, paste(snapshot_name, "generation")
+    )
+    fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+      snapshot$gpu_name, paste(snapshot_name, "gpu_name")
+    )
+    for (field in c(
+      "compute_capability_major", "compute_capability_minor", "sm_count",
+      "cuda_toolkit_version", "cuda_driver_version"
+    )) {
+      fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+        snapshot[[field]], paste(snapshot_name, field)
+      )
+    }
+    for (field in c(
+      "cusolver_deterministic_mode", "cublas_math_mode",
+      "cublas_atomics_mode"
+    )) {
+      fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+        snapshot[[field]], paste(snapshot_name, field)
+      )
+    }
+  }
+  identity_exact <- identical(created$device_id, requested_device_id) &&
+    identical(created[identity_fields], reserved[identity_fields]) &&
+    identical(created[identity_fields], final[identity_fields])
+  if (!isTRUE(identity_exact)) {
+    stop("Phase 3B runtime immutable identity changed", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_runtime_record <- function(stage, info) {
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_runtime_info(
+    info, paste("Phase 3B", stage, "runtime info")
+  )
+  record <- fastkpc_full_cuda_fixed_sp_phase3a_runtime_record(stage, info)
+  record$workspace_reserve_count <- info$workspace_reserve_count
+  record$freed <- info$freed
+  record$creator_pid <- info$creator_pid
+  record$generation <- info$generation
+  record
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_validate_prepared_info <- function(
+    info, dto, context) {
+  integer_fields <- c(
+    "n", "coefficient_dim", "null_dim", "penalty_count",
+    "setup_h2d_upload_count"
+  )
+  double_fields <- c(
+    "setup_h2d_bytes", "coefficient_output_capacity", "generation"
+  )
+  character_fields <- c(
+    "prepared_s_key_sha256", "output_slot_state",
+    "output_slot_poison_reason"
+  )
+  required <- c(
+    integer_fields, double_fields, character_fields, "output_slot_leased"
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_require_fields(info, required, context)
+  for (field in integer_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  for (field in double_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+    info$prepared_s_key_sha256,
+    paste(context, "prepared_s_key_sha256")
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+    info$output_slot_state, paste(context, "output_slot_state")
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+    info$output_slot_poison_reason,
+    paste(context, "output_slot_poison_reason"), allow_empty = TRUE
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_logical_scalar(
+    info$output_slot_leased, paste(context, "output_slot_leased")
+  )
+  identity_exact <- identical(info$prepared_s_key_sha256,
+                              dto$prepared_s_key_sha256) &&
+    identical(info$n, dto$n) &&
+    identical(info$coefficient_dim, dto$coefficient_dim) &&
+    identical(info$null_dim, dto$null_dim) &&
+    identical(info$penalty_count, dto$penalty_count)
+  if (!isTRUE(identity_exact)) {
+    stop(context, " prepared identity is inconsistent", call. = FALSE)
+  }
+  invisible(info)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_validate_prepared_snapshots <- function(
+    before, leased, released, expected_key, required_capacity) {
+  fields <- c(
+    "prepared_s_key_sha256", "setup_h2d_upload_count", "setup_h2d_bytes",
+    "coefficient_output_capacity", "generation", "output_slot_leased",
+    "output_slot_state", "output_slot_poison_reason"
+  )
+  expected_key <- fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+    expected_key, "expected_key"
+  )
+  if (!grepl("^[0-9a-f]{64}$", expected_key)) {
+    stop("expected_key must be one lowercase SHA-256", call. = FALSE)
+  }
+  required_capacity <- fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+    required_capacity, "required_capacity"
+  )
+  snapshots <- list(before = before, leased = leased, released = released)
+  for (snapshot_name in names(snapshots)) {
+    snapshot <- snapshots[[snapshot_name]]
+    fastkpc_full_cuda_fixed_sp_phase3b_require_fields(
+      snapshot, fields, paste("Phase 3B prepared", snapshot_name)
+    )
+    fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+      snapshot$prepared_s_key_sha256,
+      paste("prepared", snapshot_name, "key")
+    )
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      snapshot$setup_h2d_upload_count,
+      paste("prepared", snapshot_name, "setup upload count")
+    )
+    for (field in c(
+      "setup_h2d_bytes", "coefficient_output_capacity", "generation"
+    )) {
+      fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+        snapshot[[field]], paste("prepared", snapshot_name, field)
+      )
+    }
+    fastkpc_full_cuda_fixed_sp_phase3b_logical_scalar(
+      snapshot$output_slot_leased,
+      paste("prepared", snapshot_name, "leased")
+    )
+    fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+      snapshot$output_slot_state,
+      paste("prepared", snapshot_name, "state")
+    )
+    fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+      snapshot$output_slot_poison_reason,
+      paste("prepared", snapshot_name, "poison reason"),
+      allow_empty = TRUE
+    )
+  }
+  identity_fields <- c(
+    "prepared_s_key_sha256", "setup_h2d_upload_count", "setup_h2d_bytes",
+    "coefficient_output_capacity", "generation"
+  )
+  identity_exact <- identical(before$prepared_s_key_sha256, expected_key) &&
+    identical(before[identity_fields], leased[identity_fields]) &&
+    identical(before[identity_fields], released[identity_fields]) &&
+    before$coefficient_output_capacity >= required_capacity
+  lifecycle_exact <-
+    identical(before$output_slot_leased, FALSE) &&
+    identical(before$output_slot_state, "free") &&
+    identical(leased$output_slot_leased, TRUE) &&
+    identical(leased$output_slot_state, "leased") &&
+    identical(released$output_slot_leased, FALSE) &&
+    identical(released$output_slot_state, "free") &&
+    identical(before$output_slot_poison_reason, "") &&
+    identical(leased$output_slot_poison_reason, "") &&
+    identical(released$output_slot_poison_reason, "")
+  if (!isTRUE(identity_exact)) {
+    stop("Phase 3B prepared snapshot identity changed", call. = FALSE)
+  }
+  if (!isTRUE(lifecycle_exact)) {
+    stop("Phase 3B prepared output-slot lifecycle is invalid",
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_cleanup_failure_condition <- function(
+    body_condition, cleanup_condition, context) {
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_label(context, "context")
+  if (!inherits(body_condition, "condition") ||
+      !inherits(cleanup_condition, "condition")) {
+    stop("cleanup failure composition requires two conditions",
+         call. = FALSE)
+  }
+  body_classes <- setdiff(class(body_condition), "condition")
+  structure(
+    list(
+      message = paste0(
+        conditionMessage(body_condition), "; ",
+        conditionMessage(cleanup_condition)
+      ),
+      call = conditionCall(body_condition),
+      parent = body_condition,
+      cleanup = cleanup_condition
+    ),
+    class = unique(c(
+      "fastkpc_phase3b_cleanup_failure", body_classes,
+      "error", "condition"
+    ))
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_cleanup_operations <- function(
+    operations, body_error = NULL, max_attempts = 2L,
+    context = "Phase 3B cleanup") {
+  suspendInterrupts({
+    fastkpc_full_cuda_fixed_sp_phase3b_validate_label(context, "context")
+    max_attempts_clean <- typeof(max_attempts) == "integer" &&
+      length(max_attempts) == 1L && !is.object(max_attempts) &&
+      is.null(attributes(max_attempts)) && !is.na(max_attempts) &&
+      max_attempts >= 1L && max_attempts <= 3L
+    if (!isTRUE(max_attempts_clean)) {
+      stop("max_attempts must be an integer from one to three",
+           call. = FALSE)
+    }
+    if (!is.null(body_error) && !inherits(body_error, "condition")) {
+      stop("body_error must be NULL or a condition", call. = FALSE)
+    }
+    operation_names <- c(
+      "token_release", "token_free", "handle_free", "runtime_free"
+    )
+    fastkpc_full_cuda_fixed_sp_phase3b_require_fields(
+      operations, operation_names, paste(context, "operations")
+    )
+    if (!identical(names(operations), operation_names)) {
+      stop(context, " operations are not in canonical order", call. = FALSE)
+    }
+    for (operation_name in operation_names) {
+      operation <- operations[[operation_name]]
+      fastkpc_full_cuda_fixed_sp_phase3b_require_fields(
+        operation, c("needed", "run"),
+        paste(context, operation_name, "operation")
+      )
+      if (!identical(names(operation), c("needed", "run")) ||
+          typeof(operation$needed) != "closure" ||
+          typeof(operation$run) != "closure") {
+        stop(context, " cleanup operation is malformed: ", operation_name,
+             call. = FALSE)
+      }
+    }
+
+    condition_handler <- function(condition) condition
+    failures <- character()
+    for (operation_name in operation_names) {
+      operation <- operations[[operation_name]]
+      last_error <- NULL
+      for (attempt in seq_len(max_attempts)) {
+        needed <- tryCatch(
+          operation$needed(),
+          error = condition_handler,
+          interrupt = condition_handler
+        )
+        if (inherits(needed, "condition")) {
+          last_error <- needed
+        } else if (typeof(needed) != "logical" || length(needed) != 1L ||
+                   is.object(needed) || !is.null(attributes(needed)) ||
+                   is.na(needed)) {
+          last_error <- simpleError(
+            "needed() did not return a logical scalar"
+          )
+        } else if (!needed) {
+          break
+        } else {
+          run_error <- tryCatch({
+            operation$run()
+            NULL
+          }, error = condition_handler, interrupt = condition_handler)
+          if (!is.null(run_error)) {
+            last_error <- run_error
+          } else {
+            still_needed <- tryCatch(
+              operation$needed(),
+              error = condition_handler,
+              interrupt = condition_handler
+            )
+            if (inherits(still_needed, "condition")) {
+              last_error <- still_needed
+            } else if (!identical(still_needed, FALSE)) {
+              last_error <- simpleError(
+                "operation did not clear ownership state"
+              )
+            } else {
+              last_error <- NULL
+              break
+            }
+          }
+        }
+      }
+      if (!is.null(last_error)) {
+        failures <- c(
+          failures,
+          paste0(operation_name, ": ", conditionMessage(last_error))
+        )
+      }
+    }
+    if (length(failures) != 0L) {
+      cleanup_error <- simpleError(paste0(
+        context, " failures: ", paste(failures, collapse = "; ")
+      ))
+      if (!is.null(body_error)) {
+        stop(
+          fastkpc_full_cuda_fixed_sp_phase3b_cleanup_failure_condition(
+            body_error, cleanup_error, context
+          )
+        )
+      }
+      stop(cleanup_error)
+    }
+    if (!is.null(body_error)) stop(body_error)
+    invisible(TRUE)
+  })
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_run_cleanup_scope <- function(
+    body, operations, context) {
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_label(context, "context")
+  condition_handler <- function(condition) {
+    list(value = NULL, condition = condition)
+  }
+  capture_condition <- function(expression) {
+    tryCatch(
+      list(value = force(expression), condition = NULL),
+      error = condition_handler,
+      interrupt = condition_handler
+    )
+  }
+  run_cleanup <- function() {
+    capture_condition(
+      fastkpc_full_cuda_fixed_sp_phase3b_cleanup_operations(
+        operations, context = context
+      )
+    )
+  }
+
+  cleanup_complete <- FALSE
+  primary_condition <- NULL
+  on.exit({
+    if (!cleanup_complete) {
+      fallback_outcome <- run_cleanup()
+      if (!is.null(fallback_outcome$condition)) {
+        fallback_condition <- fallback_outcome$condition
+        if (!is.null(primary_condition)) {
+          fallback_condition <-
+            fastkpc_full_cuda_fixed_sp_phase3b_cleanup_failure_condition(
+              primary_condition, fallback_condition,
+              paste(context, "on.exit fallback")
+            )
+        }
+        stop(fallback_condition)
+      }
+    }
+  }, add = TRUE)
+
+  body_outcome <- capture_condition(force(body))
+  if (!is.null(body_outcome$condition)) {
+    primary_condition <- body_outcome$condition
+    cleanup_outcome <- run_cleanup()
+    if (is.null(cleanup_outcome$condition)) {
+      cleanup_complete <- TRUE
+      stop(primary_condition)
+    }
+    primary_condition <-
+      fastkpc_full_cuda_fixed_sp_phase3b_cleanup_failure_condition(
+        primary_condition, cleanup_outcome$condition, context
+      )
+    stop(primary_condition)
+  }
+
+  cleanup_outcome <- run_cleanup()
+  if (!is.null(cleanup_outcome$condition)) {
+    primary_condition <- cleanup_outcome$condition
+    stop(primary_condition)
+  }
+  cleanup_complete <- TRUE
+  body_outcome$value
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_validate_batch_info <- function(
+    info, native, dto, expected_shadow_calls,
+    expected_shadow_targets, expected_shadow_bytes,
+    expected_release_count, context) {
+  integer_fields <- c(
+    "n", "coefficient_dim", "target_count", "batch_call_count",
+    "true_batched_subgroup_count", "true_batched_attempted_target_count",
+    "true_batched_target_count", "cholesky_single_target_count",
+    "potrf_batched_call_count", "potrs_batched_call_count",
+    "target_batch_h2d_call_count", "target_h2d_copy_count",
+    "coefficient_batch_finalize_call_count",
+    "fitted_batch_finalize_call_count",
+    "residual_rss_batch_finalize_call_count",
+    "per_target_output_finalize_call_count",
+    "batch_output_finalized_target_count", "stable_reroute_count",
+    "planned_cholesky_target_count", "planned_qr_target_count",
+    "planned_svd_target_count", "executed_cholesky_target_count",
+    "executed_qr_target_count", "executed_svd_target_count",
+    "cholesky_to_svd_count", "qr_to_svd_count",
+    "output_slot_acquire_count", "output_slot_release_count",
+    "output_slot_busy_count", "stale_token_reject_count",
+    "invalid_output_init_count", "nonfinite_output_count",
+    "cpu_fallback_count", "unknown_fallback_count",
+    "resource_instrumentation_version",
+    "resource_allocation_count_before_solve",
+    "resource_allocation_count_after_solve",
+    "resource_handle_create_count_before_solve",
+    "resource_handle_create_count_after_solve",
+    "cuda_device_allocation_count_during_solve",
+    "cuda_host_allocation_count_during_solve",
+    "stream_create_count_during_solve", "event_create_count_during_solve",
+    "cublas_handle_create_count_during_solve",
+    "cusolver_handle_create_count_during_solve",
+    "per_target_allocation_count_after_warmup",
+    "per_target_handle_create_count", "implicit_residual_d2h_count",
+    "rhs_device_build_count", "shadow_materialize_call_count",
+    "shadow_materialize_target_count"
+  )
+  double_fields <- c(
+    "target_h2d_bytes", "shadow_d2h_bytes", "owner_generation",
+    "slot_generation"
+  )
+  logical_fields <- c(
+    "native_batch_call", "true_batched_kernel",
+    "canonical_output_order_exact", "resource_snapshot_captured",
+    "full_cuda_data_plane"
+  )
+  vector_fields <- c(
+    "target_keys", "planned_route", "executed_route", "reroute_reason",
+    "solver_status"
+  )
+  required <- c(
+    integer_fields, double_fields, logical_fields, vector_fields,
+    "rhs_authority"
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_require_fields(info, required, context)
+  for (field in integer_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  for (field in double_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  for (field in logical_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_logical_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  target_count <- native$target_count
+  fastkpc_full_cuda_fixed_sp_phase3b_character_vector(
+    info$target_keys, target_count, paste(context, "target_keys")
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_character_vector(
+    info$planned_route, target_count, paste(context, "planned_route")
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_character_vector(
+    info$executed_route, target_count, paste(context, "executed_route"),
+    allow_na = TRUE
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_character_vector(
+    info$reroute_reason, target_count, paste(context, "reroute_reason")
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_character_vector(
+    info$solver_status, target_count, paste(context, "solver_status")
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+    info$rhs_authority, paste(context, "rhs_authority")
+  )
+  expected_shadow_calls <-
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      expected_shadow_calls, paste(context, "expected shadow calls")
+    )
+  expected_shadow_targets <-
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      expected_shadow_targets, paste(context, "expected shadow targets")
+    )
+  expected_shadow_bytes <-
+    fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+      expected_shadow_bytes, paste(context, "expected shadow bytes")
+    )
+  expected_release_count <-
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      expected_release_count, paste(context, "expected release count")
+    )
+
+  safe <- native$planned_route == "CHOLESKY_BATCHED"
+  stable <- !safe
+  safe_count <- as.integer(sum(safe))
+  batched_subgroup_count <- as.integer(safe_count >= 2L)
+  batched_target_count <- if (safe_count >= 2L) safe_count else 0L
+  single_target_count <- if (safe_count == 1L) 1L else 0L
+  expected_status <- rep("ERR_STABLE_PATH_NOT_IMPLEMENTED", target_count)
+  expected_status[safe] <- if (safe_count >= 2L) {
+    "OK_CHOLESKY_BATCHED"
+  } else {
+    "OK_CHOLESKY_SINGLE"
+  }
+  expected_executed <- rep(NA_character_, target_count)
+  expected_executed[safe] <- "CHOLESKY_BATCHED"
+  planned_counts <- c(
+    CHOLESKY_BATCHED = sum(native$planned_route == "CHOLESKY_BATCHED"),
+    AUGMENTED_QR = sum(native$planned_route == "AUGMENTED_QR"),
+    AUGMENTED_SVD = sum(native$planned_route == "AUGMENTED_SVD")
+  )
+  resource_allocation_delta <-
+    info$resource_allocation_count_after_solve -
+      info$resource_allocation_count_before_solve
+  resource_handle_delta <-
+    info$resource_handle_create_count_after_solve -
+      info$resource_handle_create_count_before_solve
+  route_status_conservation_exact <-
+    identical(info$target_keys, native$target_keys) &&
+    identical(info$planned_route, native$planned_route) &&
+    identical(info$executed_route, expected_executed) &&
+    identical(info$reroute_reason, rep("", target_count)) &&
+    identical(info$solver_status, expected_status) &&
+    isTRUE(info$canonical_output_order_exact) &&
+    info$true_batched_subgroup_count == batched_subgroup_count &&
+    info$true_batched_attempted_target_count == batched_target_count &&
+    info$true_batched_target_count == batched_target_count &&
+    info$cholesky_single_target_count == single_target_count &&
+    info$potrf_batched_call_count == batched_subgroup_count &&
+    info$potrs_batched_call_count == batched_subgroup_count &&
+    identical(
+      info$true_batched_kernel,
+      isTRUE(all(safe) && safe_count >= 2L)
+    ) &&
+    info$planned_cholesky_target_count ==
+      planned_counts[["CHOLESKY_BATCHED"]] &&
+    info$planned_qr_target_count == planned_counts[["AUGMENTED_QR"]] &&
+    info$planned_svd_target_count == planned_counts[["AUGMENTED_SVD"]] &&
+    info$executed_cholesky_target_count == safe_count &&
+    info$executed_qr_target_count == 0L &&
+    info$executed_svd_target_count == 0L &&
+    info$stable_reroute_count == 0L &&
+    info$cholesky_to_svd_count == 0L && info$qr_to_svd_count == 0L
+  semantics_exact <- isTRUE(route_status_conservation_exact) &&
+    identical(info$n, dto$n) &&
+    identical(info$coefficient_dim, dto$coefficient_dim) &&
+    identical(info$target_count, target_count) &&
+    isTRUE(info$native_batch_call) && info$batch_call_count == 1L &&
+    info$output_slot_acquire_count == 1L &&
+    info$output_slot_release_count == expected_release_count &&
+    info$output_slot_busy_count == 0L &&
+    info$stale_token_reject_count == 0L &&
+    info$invalid_output_init_count == 1L &&
+    info$nonfinite_output_count == 0L &&
+    info$target_batch_h2d_call_count == 1L &&
+    info$target_h2d_copy_count == 2L &&
+    identical(
+      info$target_h2d_bytes,
+      8 * as.double(length(native$Y) + length(native$SP))
+    ) &&
+    info$rhs_device_build_count == 1L &&
+    identical(info$rhs_authority, "cuda-x0-transpose-y") &&
+    isTRUE(info$full_cuda_data_plane) &&
+    info$coefficient_batch_finalize_call_count == 0L &&
+    info$fitted_batch_finalize_call_count == as.integer(safe_count > 0L) &&
+    info$residual_rss_batch_finalize_call_count ==
+      as.integer(safe_count > 0L) &&
+    info$per_target_output_finalize_call_count == 0L &&
+    info$batch_output_finalized_target_count == safe_count &&
+    isTRUE(info$resource_snapshot_captured) &&
+    info$resource_instrumentation_version == 1L &&
+    resource_allocation_delta ==
+      info$cuda_device_allocation_count_during_solve +
+        info$cuda_host_allocation_count_during_solve &&
+    resource_handle_delta ==
+      info$stream_create_count_during_solve +
+        info$event_create_count_during_solve +
+        info$cublas_handle_create_count_during_solve +
+        info$cusolver_handle_create_count_during_solve &&
+    all(c(
+      info$cuda_device_allocation_count_during_solve,
+      info$cuda_host_allocation_count_during_solve,
+      info$stream_create_count_during_solve,
+      info$event_create_count_during_solve,
+      info$cublas_handle_create_count_during_solve,
+      info$cusolver_handle_create_count_during_solve,
+      info$per_target_allocation_count_after_warmup,
+      info$per_target_handle_create_count,
+      info$implicit_residual_d2h_count,
+      info$cpu_fallback_count, info$unknown_fallback_count
+    ) == 0L) &&
+    info$shadow_materialize_call_count == expected_shadow_calls &&
+    info$shadow_materialize_target_count == expected_shadow_targets &&
+    identical(info$shadow_d2h_bytes, expected_shadow_bytes) &&
+    all(info$solver_status[stable] ==
+        "ERR_STABLE_PATH_NOT_IMPLEMENTED") &&
+    all(is.na(info$executed_route[stable]))
+  if (!isTRUE(semantics_exact)) {
+    stop(context, " route/status/resource conservation failed",
+         call. = FALSE)
+  }
+  list(
+    safe = safe,
+    route_status_conservation_exact = route_status_conservation_exact
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_is_double_vector <- function(value) {
+  attributes_clean <- is.null(attributes(value)) || {
+    value_names <- names(value)
+    is.character(value_names) && length(value_names) == length(value) &&
+      !anyNA(value_names) && identical(
+        attributes(value), list(names = value_names)
+      )
+  }
+  typeof(value) == "double" && !is.object(value) && length(value) > 0L &&
+    is.null(dim(value)) && isTRUE(attributes_clean) && all(is.finite(value))
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_saturating_product <- function(a, b) {
+  if (a == 0 || b == 0) return(0)
+  if (a > .Machine$double.xmax / b) return(.Machine$double.xmax)
+  a * b
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_scaled_l2_components <- function(value) {
+  scale <- max(abs(value))
+  if (scale == 0) return(c(scale = 0, factor = 0))
+  scaled <- value / scale
+  c(scale = scale, factor = sqrt(sum(scaled * scaled)))
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_log_ratio <- function(
+    numerator_scale, numerator_factor, denominator_log) {
+  if (numerator_scale == 0 || numerator_factor == 0) return(0)
+  log_ratio <- log(numerator_scale) + log(numerator_factor) - denominator_log
+  if (log_ratio >= log(.Machine$double.xmax)) {
+    return(.Machine$double.xmax)
+  }
+  exp(log_ratio)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_numeric_errors <- function(
+    actual, reference, context) {
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_label(context, "context")
+  clean <- fastkpc_full_cuda_fixed_sp_phase3b_is_double_vector(actual) &&
+    fastkpc_full_cuda_fixed_sp_phase3b_is_double_vector(reference) &&
+    identical(length(actual), length(reference))
+  if (!isTRUE(clean)) {
+    stop(
+      context,
+      " requires finite non-empty bare double vectors with equal shape",
+      call. = FALSE
+    )
+  }
+
+  actual <- unname(actual)
+  reference <- unname(reference)
+  joint_scale <- max(abs(actual), abs(reference))
+  difference_scaled <- if (joint_scale == 0) {
+    numeric(length(actual))
+  } else {
+    actual / joint_scale - reference / joint_scale
+  }
+  difference_components <-
+    fastkpc_full_cuda_fixed_sp_phase3b_scaled_l2_components(
+      difference_scaled
+    )
+  difference_factor <- difference_components[["scale"]] *
+    difference_components[["factor"]]
+  max_abs <- fastkpc_full_cuda_fixed_sp_phase3b_saturating_product(
+    joint_scale, max(abs(difference_scaled))
+  )
+
+  reference_components <-
+    fastkpc_full_cuda_fixed_sp_phase3b_scaled_l2_components(reference)
+  reference_log <- if (reference_components[["scale"]] == 0) {
+    -Inf
+  } else {
+    log(reference_components[["scale"]]) +
+      log(reference_components[["factor"]])
+  }
+  denominator_log <- max(reference_log, log(1e-300))
+  relative_l2 <- if (reference_log > log(1e-300)) {
+    scale_ratio <- joint_scale / reference_components[["scale"]]
+    factor_ratio <- difference_factor / reference_components[["factor"]]
+    if (is.finite(scale_ratio) && is.finite(factor_ratio)) {
+      fastkpc_full_cuda_fixed_sp_phase3b_saturating_product(
+        scale_ratio, factor_ratio
+      )
+    } else {
+      fastkpc_full_cuda_fixed_sp_phase3b_log_ratio(
+        joint_scale, difference_factor, denominator_log
+      )
+    }
+  } else {
+    fastkpc_full_cuda_fixed_sp_phase3b_log_ratio(
+      joint_scale, difference_factor, denominator_log
+    )
+  }
+  if (!is.finite(max_abs) || !is.finite(relative_l2) || max_abs < 0 ||
+      relative_l2 < 0) {
+    stop(context, " produced invalid numeric error evidence", call. = FALSE)
+  }
+  c(max_abs = max_abs, relative_l2 = relative_l2)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_require_record_fields <- function(
+    records, fields, context) {
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_label(context, "context")
+  fields_clean <- typeof(fields) == "character" && length(fields) > 0L &&
+    !is.object(fields) && is.null(attributes(fields)) && !anyNA(fields) &&
+    all(nzchar(fields)) && !anyDuplicated(fields)
+  if (!isTRUE(fields_clean)) {
+    stop("record fields must be bare non-empty unique character names",
+         call. = FALSE)
+  }
+  record_names <- names(records)
+  records_clean <- is.data.frame(records) && nrow(records) > 0L &&
+    is.character(record_names) && !anyNA(record_names) &&
+    all(nzchar(record_names)) && !anyDuplicated(record_names)
+  if (!isTRUE(records_clean)) {
+    stop(context, " must be one non-empty data frame", call. = FALSE)
+  }
+  missing <- setdiff(fields, record_names)
+  if (length(missing) != 0L) {
+    stop(
+      context, " fields are malformed; missing=",
+      paste(missing, collapse = ","), call. = FALSE
+    )
+  }
+  row_count <- nrow(records)
+  for (field in fields) {
+    if (!identical(length(records[[field]]), row_count)) {
+      stop(context, " field length is invalid: ", field, call. = FALSE)
+    }
+  }
+  invisible(records)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_is_sha_vector <- function(
+    value, size, allow_na = FALSE) {
+  clean <- typeof(value) == "character" && length(value) == size &&
+    !is.object(value) && is.null(attributes(value)) &&
+    (isTRUE(allow_na) || !anyNA(value))
+  if (!isTRUE(clean)) return(FALSE)
+  present <- value[!is.na(value)]
+  length(present) == 0L || all(grepl("^[0-9a-f]{64}$", present))
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_validate_result_evidence <- function(
+    catalog_records, batch_records, target_records,
+    expected_iteration_subset_hash, tolerance = 1e-7) {
+  expected_iteration_subset_hash <-
+    fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+      expected_iteration_subset_hash, "expected_iteration_subset_hash"
+    )
+  if (!grepl("^[0-9a-f]{64}$", expected_iteration_subset_hash)) {
+    stop("expected iteration subset hash is invalid", call. = FALSE)
+  }
+  tolerance_clean <- typeof(tolerance) == "double" &&
+    length(tolerance) == 1L && !is.object(tolerance) &&
+    is.null(attributes(tolerance)) && !is.na(tolerance) &&
+    is.finite(tolerance) && tolerance > 0
+  if (!isTRUE(tolerance_clean)) {
+    stop("tolerance must be one positive finite double", call. = FALSE)
+  }
+
+  catalog_fields <- c(
+    "iteration_subset_hash", "ordered_setup_key_digest",
+    "ordered_target_key_digest"
+  )
+  batch_fields <- c(
+    "prepared_s_key_sha256", "target_count",
+    "coefficient_batch_finalize_call_count",
+    "fitted_batch_finalize_call_count",
+    "residual_rss_batch_finalize_call_count",
+    "per_target_output_finalize_call_count",
+    "batch_output_finalized_target_count",
+    "route_status_conservation_exact"
+  )
+  target_fields <- c(
+    "prepared_s_key_sha256", "residual_key_sha256", "target",
+    "authenticated_planned_route", "executed_route", "solver_status",
+    "residual_max_abs_diff", "residual_relative_l2_diff",
+    "fitted_max_abs_diff", "fitted_relative_l2_diff",
+    "oracle_call_count", "oracle_fitted_hash", "authenticated_fitted_hash",
+    "oracle_residual_hash", "authenticated_residual_hash",
+    "oracle_fitted_hash_exact", "oracle_residual_hash_exact"
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_require_record_fields(
+    catalog_records, catalog_fields, "Phase 3B catalog evidence"
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_require_record_fields(
+    batch_records, batch_fields, "Phase 3B batch evidence"
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_require_record_fields(
+    target_records, target_fields, "Phase 3B target evidence"
+  )
+  if (nrow(catalog_records) != 1L) {
+    stop("Phase 3B catalog digest evidence is invalid", call. = FALSE)
+  }
+
+  setup_count <- nrow(batch_records)
+  target_count <- nrow(target_records)
+  setup_keys <- batch_records$prepared_s_key_sha256
+  target_keys <- target_records$residual_key_sha256
+  key_evidence_exact <-
+    fastkpc_full_cuda_fixed_sp_phase3b_is_sha_vector(
+      setup_keys, setup_count
+    ) && !anyDuplicated(setup_keys) &&
+    fastkpc_full_cuda_fixed_sp_phase3b_is_sha_vector(
+      target_records$prepared_s_key_sha256, target_count
+    ) &&
+    fastkpc_full_cuda_fixed_sp_phase3b_is_sha_vector(
+      target_keys, target_count
+    ) && !anyDuplicated(target_keys) &&
+    typeof(target_records$target) == "integer" &&
+    !is.object(target_records$target) &&
+    is.null(attributes(target_records$target)) &&
+    !anyNA(target_records$target) &&
+    all(target_records$target >= 1L & target_records$target <= 48L)
+  if (!isTRUE(key_evidence_exact)) {
+    stop("Phase 3B target key evidence is invalid", call. = FALSE)
+  }
+
+  catalog_values <- unlist(catalog_records[1L, catalog_fields], use.names = TRUE)
+  catalog_evidence_exact <- all(vapply(
+    catalog_values, function(value) {
+      typeof(value) == "character" && length(value) == 1L &&
+        !is.na(value) && grepl("^[0-9a-f]{64}$", value)
+    }, logical(1L)
+  )) && identical(
+    catalog_records$iteration_subset_hash[[1L]],
+    expected_iteration_subset_hash
+  ) && identical(
+    catalog_records$ordered_setup_key_digest[[1L]],
+    fastkpc_full_cuda_census_key_set_hash(setup_keys)
+  ) && identical(
+    catalog_records$ordered_target_key_digest[[1L]],
+    fastkpc_full_cuda_census_key_set_hash(target_keys)
+  )
+  if (!isTRUE(catalog_evidence_exact)) {
+    stop("Phase 3B catalog digest evidence is invalid", call. = FALSE)
+  }
+
+  route_fields <- c(
+    "authenticated_planned_route", "executed_route", "solver_status"
+  )
+  route_types_clean <- all(vapply(route_fields, function(field) {
+    value <- target_records[[field]]
+    typeof(value) == "character" && !is.object(value) &&
+      is.null(attributes(value)) && length(value) == target_count
+  }, logical(1L))) && !anyNA(target_records$authenticated_planned_route) &&
+    !anyNA(target_records$solver_status)
+  if (!isTRUE(route_types_clean)) {
+    stop("Phase 3B target route evidence is invalid", call. = FALSE)
+  }
+  safe <- target_records$authenticated_planned_route == "CHOLESKY_BATCHED"
+  stable <- !safe
+  if (!any(safe) || !any(stable)) {
+    stop("Phase 3B target route evidence is invalid", call. = FALSE)
+  }
+  route_evidence_exact <-
+    !anyNA(target_records$executed_route[safe]) &&
+    all(target_records$executed_route[safe] == "CHOLESKY_BATCHED") &&
+    all(is.na(target_records$executed_route[stable])) &&
+    all(target_records$solver_status[safe] %in%
+        c("OK_CHOLESKY_BATCHED", "OK_CHOLESKY_SINGLE")) &&
+    all(target_records$solver_status[stable] ==
+        "ERR_STABLE_PATH_NOT_IMPLEMENTED")
+  if (!isTRUE(route_evidence_exact)) {
+    stop("Phase 3B target route evidence is invalid", call. = FALSE)
+  }
+
+  error_fields <- c(
+    "residual_max_abs_diff", "residual_relative_l2_diff",
+    "fitted_max_abs_diff", "fitted_relative_l2_diff"
+  )
+  numeric_evidence_exact <- all(vapply(error_fields, function(field) {
+    value <- target_records[[field]]
+    typeof(value) == "double" && !is.object(value) &&
+      is.null(attributes(value)) && length(value) == target_count &&
+      all(is.finite(value[safe])) &&
+      all(value[safe] >= 0 & value[safe] < tolerance) &&
+      all(is.na(value[stable]) & !is.nan(value[stable]))
+  }, logical(1L)))
+  if (!isTRUE(numeric_evidence_exact)) {
+    stop("Phase 3B target numeric evidence is invalid", call. = FALSE)
+  }
+
+  oracle_count <- target_records$oracle_call_count
+  oracle_hash_fields <- c(
+    "oracle_fitted_hash", "authenticated_fitted_hash",
+    "oracle_residual_hash", "authenticated_residual_hash"
+  )
+  oracle_flag_fields <- c(
+    "oracle_fitted_hash_exact", "oracle_residual_hash_exact"
+  )
+  oracle_types_clean <- typeof(oracle_count) == "integer" &&
+    !is.object(oracle_count) && is.null(attributes(oracle_count)) &&
+    !anyNA(oracle_count) && all(vapply(oracle_hash_fields, function(field) {
+      value <- target_records[[field]]
+      typeof(value) == "character" && !is.object(value) &&
+        is.null(attributes(value)) && length(value) == target_count
+    }, logical(1L))) && all(vapply(oracle_flag_fields, function(field) {
+      value <- target_records[[field]]
+      typeof(value) == "logical" && !is.object(value) &&
+        is.null(attributes(value)) && length(value) == target_count
+    }, logical(1L)))
+  oracle_evidence_exact <- isTRUE(oracle_types_clean) &&
+    all(oracle_count[safe] == 1L) && all(oracle_count[stable] == 0L) &&
+    fastkpc_full_cuda_fixed_sp_phase3b_is_sha_vector(
+      target_records$authenticated_fitted_hash, target_count
+    ) && fastkpc_full_cuda_fixed_sp_phase3b_is_sha_vector(
+      target_records$authenticated_residual_hash, target_count
+    ) && fastkpc_full_cuda_fixed_sp_phase3b_is_sha_vector(
+      target_records$oracle_fitted_hash[safe], as.integer(sum(safe))
+    ) && fastkpc_full_cuda_fixed_sp_phase3b_is_sha_vector(
+      target_records$oracle_residual_hash[safe], as.integer(sum(safe))
+    ) && all(is.na(target_records$oracle_fitted_hash[stable])) &&
+    all(is.na(target_records$oracle_residual_hash[stable])) &&
+    all(target_records$oracle_fitted_hash_exact[safe] %in% TRUE) &&
+    all(target_records$oracle_residual_hash_exact[safe] %in% TRUE) &&
+    all(is.na(target_records$oracle_fitted_hash_exact[stable])) &&
+    all(is.na(target_records$oracle_residual_hash_exact[stable])) &&
+    identical(
+      target_records$oracle_fitted_hash[safe],
+      target_records$authenticated_fitted_hash[safe]
+    ) && identical(
+      target_records$oracle_residual_hash[safe],
+      target_records$authenticated_residual_hash[safe]
+    )
+  if (!isTRUE(oracle_evidence_exact)) {
+    stop("Phase 3B target oracle evidence is invalid", call. = FALSE)
+  }
+
+  integer_batch_fields <- setdiff(
+    batch_fields,
+    c("prepared_s_key_sha256", "route_status_conservation_exact")
+  )
+  batch_types_clean <- all(vapply(integer_batch_fields, function(field) {
+    value <- batch_records[[field]]
+    typeof(value) == "integer" && !is.object(value) &&
+      is.null(attributes(value)) && !anyNA(value) && all(value >= 0L)
+  }, logical(1L))) &&
+    typeof(batch_records$route_status_conservation_exact) == "logical" &&
+    !is.object(batch_records$route_status_conservation_exact) &&
+    is.null(attributes(batch_records$route_status_conservation_exact)) &&
+    !anyNA(batch_records$route_status_conservation_exact) &&
+    all(batch_records$route_status_conservation_exact)
+  if (!isTRUE(batch_types_clean)) {
+    stop("Phase 3B batch finalize evidence is invalid", call. = FALSE)
+  }
+  target_indices <- lapply(setup_keys, function(setup_key) {
+    which(target_records$prepared_s_key_sha256 == setup_key)
+  })
+  owned_target_count <- vapply(target_indices, length, integer(1L))
+  safe_count <- vapply(target_indices, function(indices) {
+    as.integer(sum(safe[indices]))
+  }, integer(1L))
+  any_safe <- as.integer(safe_count > 0L)
+  finalize_evidence_exact <-
+    identical(batch_records$target_count, owned_target_count) &&
+    all(batch_records$coefficient_batch_finalize_call_count == 0L) &&
+    identical(batch_records$fitted_batch_finalize_call_count, any_safe) &&
+    identical(
+      batch_records$residual_rss_batch_finalize_call_count, any_safe
+    ) &&
+    all(batch_records$per_target_output_finalize_call_count == 0L) &&
+    identical(batch_records$batch_output_finalized_target_count, safe_count)
+  if (!isTRUE(finalize_evidence_exact)) {
+    stop("Phase 3B batch finalize evidence is invalid", call. = FALSE)
+  }
+
+  list(
+    iteration_subset_hash = expected_iteration_subset_hash,
+    ordered_setup_key_digest =
+      catalog_records$ordered_setup_key_digest[[1L]],
+    ordered_target_key_digest =
+      catalog_records$ordered_target_key_digest[[1L]],
+    oracle_call_count = as.integer(sum(oracle_count)),
+    oracle_fitted_hash_exact_count = as.integer(sum(
+      target_records$oracle_fitted_hash_exact[safe]
+    )),
+    oracle_residual_hash_exact_count = as.integer(sum(
+      target_records$oracle_residual_hash_exact[safe]
+    )),
+    coefficient_batch_finalize_call_count = as.integer(sum(
+      batch_records$coefficient_batch_finalize_call_count
+    )),
+    fitted_batch_finalize_call_count = as.integer(sum(
+      batch_records$fitted_batch_finalize_call_count
+    )),
+    residual_rss_batch_finalize_call_count = as.integer(sum(
+      batch_records$residual_rss_batch_finalize_call_count
+    )),
+    per_target_output_finalize_call_count = as.integer(sum(
+      batch_records$per_target_output_finalize_call_count
+    )),
+    batch_output_finalized_target_count = as.integer(sum(
+      batch_records$batch_output_finalized_target_count
+    ))
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_phase3b_summarize <- function(
+    catalog_records, batch_records, target_records) {
+  if (!is.data.frame(catalog_records) || !is.data.frame(batch_records) ||
+      !is.data.frame(target_records) || nrow(catalog_records) != 1L ||
+      nrow(batch_records) < 1L || nrow(target_records) < 1L) {
+    stop("Phase 3B iteration records are malformed", call. = FALSE)
+  }
+  setup_keys <- batch_records$prepared_s_key_sha256
+  target_indices <- lapply(setup_keys, function(setup_key) {
+    which(target_records$prepared_s_key_sha256 == setup_key)
+  })
+  target_count_by_setup <- vapply(target_indices, length, integer(1L))
+  if (any(target_count_by_setup < 1L) ||
+      sum(target_count_by_setup) != nrow(target_records) ||
+      any(!target_records$prepared_s_key_sha256 %in% setup_keys)) {
+    stop("Phase 3B iteration target ownership is malformed", call. = FALSE)
+  }
+  safe_count_by_setup <- vapply(target_indices, function(indices) {
+    as.integer(sum(
+      target_records$authenticated_planned_route[indices] ==
+        "CHOLESKY_BATCHED"
+    ))
+  }, integer(1L))
+  all_safe <- safe_count_by_setup == target_count_by_setup
+  all_stable <- safe_count_by_setup == 0L
+  mixed <- !all_safe & !all_stable
+  evidence <- fastkpc_full_cuda_fixed_sp_phase3b_validate_result_evidence(
+    catalog_records, batch_records, target_records,
+    catalog_records$iteration_subset_hash[[1L]]
+  )
+  list(
+    iteration_subset_hash = evidence$iteration_subset_hash,
+    ordered_setup_key_digest = evidence$ordered_setup_key_digest,
+    ordered_target_key_digest = evidence$ordered_target_key_digest,
+    setup_count = as.integer(nrow(batch_records)),
+    target_count = as.integer(nrow(target_records)),
+    batch_call_count = as.integer(sum(batch_records$batch_call_count)),
+    all_safe_batch_count = as.integer(sum(all_safe)),
+    mixed_batch_count = as.integer(sum(mixed)),
+    all_stable_batch_count = as.integer(sum(all_stable)),
+    cholesky_ok_count = as.integer(sum(
+      target_records$solver_status %in%
+        c("OK_CHOLESKY_BATCHED", "OK_CHOLESKY_SINGLE")
+    )),
+    true_batched_subgroup_count = as.integer(sum(
+      batch_records$true_batched_subgroup_count
+    )),
+    true_batched_target_count = as.integer(sum(
+      target_records$solver_status == "OK_CHOLESKY_BATCHED"
+    )),
+    cholesky_single_target_count = as.integer(sum(
+      target_records$solver_status == "OK_CHOLESKY_SINGLE"
+    )),
+    whole_batch_true_batched_count = as.integer(sum(
+      batch_records$true_batched_kernel
+    )),
+    stable_not_implemented_count = as.integer(sum(
+      target_records$solver_status == "ERR_STABLE_PATH_NOT_IMPLEMENTED"
+    )),
+    oracle_call_count = evidence$oracle_call_count,
+    oracle_fitted_hash_exact_count =
+      evidence$oracle_fitted_hash_exact_count,
+    oracle_residual_hash_exact_count =
+      evidence$oracle_residual_hash_exact_count,
+    setup_h2d_upload_count = as.integer(sum(
+      batch_records$setup_h2d_upload_count
+    )),
+    target_batch_h2d_call_count = as.integer(sum(
+      batch_records$target_batch_h2d_call_count
+    )),
+    target_h2d_copy_count = as.integer(sum(
+      batch_records$target_h2d_copy_count
+    )),
+    rhs_device_build_count = as.integer(sum(
+      batch_records$rhs_device_build_count
+    )),
+    full_cuda_data_plane = all(batch_records$full_cuda_data_plane),
+    invalid_output_init_count = as.integer(sum(
+      batch_records$invalid_output_init_count
+    )),
+    coefficient_batch_finalize_call_count =
+      evidence$coefficient_batch_finalize_call_count,
+    fitted_batch_finalize_call_count =
+      evidence$fitted_batch_finalize_call_count,
+    residual_rss_batch_finalize_call_count =
+      evidence$residual_rss_batch_finalize_call_count,
+    per_target_output_finalize_call_count =
+      evidence$per_target_output_finalize_call_count,
+    batch_output_finalized_target_count =
+      evidence$batch_output_finalized_target_count,
+    workspace_grow_count_after_warmup = as.integer(sum(
+      batch_records$workspace_grow_count_after_warmup
+    )),
+    per_target_allocation_count_after_warmup = as.integer(sum(
+      batch_records$per_target_allocation_count_after_warmup
+    )),
+    per_target_handle_create_count = as.integer(sum(
+      batch_records$per_target_handle_create_count
+    )),
+    cuda_device_synchronize_count = as.integer(sum(
+      batch_records$cuda_device_synchronize_count
+    )),
+    implicit_residual_d2h_count = as.integer(sum(
+      batch_records$implicit_residual_d2h_count
+    )),
+    all_output_slot_leases_released = all(
+      batch_records$output_slot_release_count == 1L &
+        !batch_records$output_slot_leased_after_release
+    ),
+    cpu_fallback_count = as.integer(sum(batch_records$cpu_fallback_count)),
+    unknown_fallback_count = as.integer(sum(
+      batch_records$unknown_fallback_count
+    ))
+  )
+}
+
+fastkpc_run_full_cuda_fixed_sp_phase3b_iteration <- function(
+    phase2_dir, census_dir, prepared_dir, data_path, device_id = 0L) {
+  required_functions <- c(
+    "fixed_sp_cuda_runtime_create", "fixed_sp_cuda_runtime_reserve",
+    "fixed_sp_cuda_runtime_info", "fixed_sp_cuda_runtime_free",
+    "fixed_sp_cuda_prepared_create", "fixed_sp_cuda_prepared_info",
+    "fixed_sp_cuda_prepared_free", "fixed_sp_cuda_solve_batch",
+    "fixed_sp_cuda_residual_info", "fixed_sp_cuda_materialize_shadow",
+    "fixed_sp_cuda_residual_release", "fixed_sp_cuda_residual_free",
+    "fastkpc_mgcv_magic_fixed_sp_from_prepared"
+  )
+  missing <- required_functions[!vapply(
+    required_functions, exists, logical(1L), mode = "function",
+    inherits = TRUE
+  )]
+  if (length(missing) != 0L) {
+    stop(
+      "Phase 3B CUDA API is unavailable: ", paste(missing, collapse = ", "),
+      call. = FALSE
+    )
+  }
+  validated_paths <- fastkpc_full_cuda_fixed_sp_phase3b_validate_paths(
+    phase2_dir, census_dir, prepared_dir, data_path
+  )
+  phase2_dir <- validated_paths$phase2_dir
+  census_dir <- validated_paths$census_dir
+  prepared_dir <- validated_paths$prepared_dir
+  data_path <- validated_paths$data_path
+  if (typeof(device_id) != "integer" || length(device_id) != 1L ||
+      is.object(device_id) || !is.null(attributes(device_id)) ||
+      is.na(device_id) || device_id < 0L) {
+    stop("Phase 3B device_id must be one non-negative integer",
+         call. = FALSE)
+  }
+
+  catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
+    phase2_dir, census_dir, prepared_dir, data_path
+  )
+  iteration <- fastkpc_full_cuda_fixed_sp_scope(catalog, "iteration")
+  batches <- fastkpc_full_cuda_fixed_sp_batches(catalog, iteration)
+  setup_keys <- names(batches)
+  if (length(setup_keys) < 1L ||
+      !identical(setup_keys, sort(setup_keys, method = "radix")) ||
+      anyDuplicated(setup_keys)) {
+    stop("Phase 3B iteration PreparedSKey order is not canonical",
+         call. = FALSE)
+  }
+  ordered_target_keys <- unlist(lapply(batches, function(batch) {
+    as.character(batch$target_rows$residual_key_sha256)
+  }), use.names = FALSE)
+  iteration_subset_hash <- catalog$catalog_contract$iteration_subset_hash
+  catalog_records <- data.frame(
+    scope = "iteration",
+    authenticated = TRUE,
+    catalog_open_count = 1L,
+    setup_count = as.integer(length(batches)),
+    target_count = as.integer(sum(vapply(
+      batches, function(batch) nrow(batch$target_rows), integer(1L)
+    ))),
+    iteration_subset_hash = iteration_subset_hash,
+    ordered_setup_key_digest =
+      fastkpc_full_cuda_census_key_set_hash(setup_keys),
+    ordered_target_key_digest =
+      fastkpc_full_cuda_census_key_set_hash(ordered_target_keys),
+    stringsAsFactors = FALSE
+  )
+
+  dtos <- lapply(batches, function(batch) {
+    fastkpc_full_cuda_fixed_sp_native_dto(batch$setup)
+  })
+  native_batches <- lapply(seq_along(batches), function(index) {
+    fastkpc_full_cuda_fixed_sp_native_batch(
+      batches[[index]], dtos[[index]]
+    )
+  })
+  names(native_batches) <- names(dtos) <- setup_keys
+  max_n <- max(vapply(dtos, `[[`, integer(1L), "n"))
+  max_q <- max(vapply(dtos, `[[`, integer(1L), "null_dim"))
+  max_targets <- max(vapply(
+    native_batches, `[[`, integer(1L), "target_count"
+  ))
+  max_penalties <- max(vapply(dtos, `[[`, integer(1L), "penalty_count"))
+  max_augmented_rows <- max(vapply(dtos, function(dto) {
+    as.integer(dto$n + sum(dto$penalty_ranks))
+  }, integer(1L)))
+
+  runtime <- NULL
+  runtime_freed <- FALSE
+  runtime_cleanup_operations <- list(
+    token_release = list(
+      needed = function() FALSE,
+      run = function() invisible(NULL)
+    ),
+    token_free = list(
+      needed = function() FALSE,
+      run = function() invisible(NULL)
+    ),
+    handle_free = list(
+      needed = function() FALSE,
+      run = function() invisible(NULL)
+    ),
+    runtime_free = list(
+      needed = function() !is.null(runtime) && !runtime_freed,
+      run = function() {
+        fixed_sp_cuda_runtime_free(runtime)
+        runtime_freed <<- TRUE
+        runtime <<- NULL
+      }
+    )
+  )
+  iteration_result <-
+    fastkpc_full_cuda_fixed_sp_phase3b_run_cleanup_scope(
+      body = {
+    runtime <- fixed_sp_cuda_runtime_create(device_id)
+    runtime_created <- fixed_sp_cuda_runtime_info(runtime)
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_runtime_info(
+    runtime_created, "Phase 3B runtime-created info"
+  )
+  fixed_sp_cuda_runtime_reserve(
+    runtime, max_n, max_q, max_targets, max_penalties, max_augmented_rows
+  )
+  runtime_reserved <- fixed_sp_cuda_runtime_info(runtime)
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_runtime_info(
+    runtime_reserved, "Phase 3B workspace-reserved info"
+  )
+  reserve_count_delta <-
+    fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+      runtime_created, runtime_reserved, "workspace_reserve_count",
+      "Phase 3B runtime reserve"
+    )
+  if (runtime_created$workspace_reserve_count != 0L ||
+      reserve_count_delta != 1L ||
+      runtime_created$cuda_device_synchronize_count != 0L ||
+      runtime_reserved$cuda_device_synchronize_count != 0L ||
+      !isTRUE(runtime_reserved$cublas_user_workspace_installed) ||
+      runtime_reserved$cublas_workspace_alignment < 256) {
+    stop("Phase 3B runtime create/reserve lifecycle is invalid",
+         call. = FALSE)
+  }
+
+  run_batch <- function(batch_index) {
+    setup_key <- setup_keys[[batch_index]]
+    batch <- batches[[setup_key]]
+    dto <- dtos[[setup_key]]
+    native <- native_batches[[setup_key]]
+    runtime_before_batch <- fixed_sp_cuda_runtime_info(runtime)
+    fastkpc_full_cuda_fixed_sp_phase3b_validate_runtime_info(
+      runtime_before_batch,
+      paste("Phase 3B batch", batch_index, "runtime before")
+    )
+    handle <- NULL
+    token <- NULL
+    token_released <- FALSE
+    token_freed <- FALSE
+    handle_freed <- FALSE
+    prepared_info <- NULL
+    prepared_after_solve <- NULL
+    prepared_after_release <- NULL
+    pre_shadow_info <- NULL
+    post_shadow_info <- NULL
+    released_info <- NULL
+    safe <- NULL
+    route_status_conservation_exact <- FALSE
+    shadow <- NULL
+    target_count <- native$target_count
+    expected_shadow_calls <- 0L
+    expected_shadow_targets <- 0L
+    expected_shadow_bytes <- 0
+
+    cleanup_operations <- list(
+      token_release = list(
+        needed = function() !is.null(token) && !token_released,
+        run = function() {
+          fixed_sp_cuda_residual_release(token)
+          token_released <<- TRUE
+          released_info <<- fixed_sp_cuda_residual_info(token)
+          if (!is.null(post_shadow_info)) {
+            fastkpc_full_cuda_fixed_sp_phase3b_validate_batch_info(
+              released_info, native, dto, expected_shadow_calls,
+              expected_shadow_targets, expected_shadow_bytes, 1L,
+              paste("Phase 3B batch", batch_index, "released info")
+            )
+            release_fields <- setdiff(
+              names(post_shadow_info), "output_slot_release_count"
+            )
+            if (!identical(post_shadow_info[release_fields],
+                           released_info[release_fields])) {
+              stop("Phase 3B token release changed solve diagnostics",
+                   call. = FALSE)
+            }
+          }
+          prepared_after_release <<- fixed_sp_cuda_prepared_info(handle)
+          fastkpc_full_cuda_fixed_sp_phase3b_validate_prepared_info(
+            prepared_after_release, dto,
+            paste("Phase 3B batch", batch_index, "released prepared info")
+          )
+          if (!is.null(prepared_info) && !is.null(prepared_after_solve)) {
+            fastkpc_full_cuda_fixed_sp_phase3b_validate_prepared_snapshots(
+              prepared_info, prepared_after_solve, prepared_after_release,
+              setup_key,
+              as.double(dto$coefficient_dim) * as.double(target_count)
+            )
+          }
+        }
+      ),
+      token_free = list(
+        needed = function() !is.null(token) && !token_freed,
+        run = function() {
+          fixed_sp_cuda_residual_free(token)
+          token_freed <<- TRUE
+          token_released <<- TRUE
+          token <<- NULL
+        }
+      ),
+      handle_free = list(
+        needed = function() !is.null(handle) && !handle_freed,
+        run = function() {
+          fixed_sp_cuda_prepared_free(handle)
+          handle_freed <<- TRUE
+          handle <<- NULL
+        }
+      ),
+      runtime_free = list(
+        needed = function() FALSE,
+        run = function() invisible(NULL)
+      )
+    )
+
+    fastkpc_full_cuda_fixed_sp_phase3b_run_cleanup_scope(
+      body = {
+      handle <- fixed_sp_cuda_prepared_create(runtime, dto)
+      prepared_info <- fixed_sp_cuda_prepared_info(handle)
+      fastkpc_full_cuda_fixed_sp_phase3b_validate_prepared_info(
+        prepared_info, dto,
+        paste("Phase 3B batch", batch_index, "prepared info")
+      )
+      if (prepared_info$setup_h2d_upload_count != 1L ||
+          isTRUE(prepared_info$output_slot_leased)) {
+        stop("Phase 3B prepared setup/upload lifecycle is invalid",
+             call. = FALSE)
+      }
+
+      token <- fixed_sp_cuda_solve_batch(
+        handle, native$Y, native$SP, native$planned_route,
+        native$target_keys, outputs = c("fitted", "residuals")
+      )
+      pre_shadow_info <- fixed_sp_cuda_residual_info(token)
+      pre_validation <-
+        fastkpc_full_cuda_fixed_sp_phase3b_validate_batch_info(
+          pre_shadow_info, native, dto, 0L, 0L, 0, 0L,
+          paste("Phase 3B batch", batch_index, "pre-shadow info")
+        )
+      safe <- pre_validation$safe
+      route_status_conservation_exact <-
+        pre_validation$route_status_conservation_exact
+      prepared_after_solve <- fixed_sp_cuda_prepared_info(handle)
+      fastkpc_full_cuda_fixed_sp_phase3b_validate_prepared_info(
+        prepared_after_solve, dto,
+        paste("Phase 3B batch", batch_index, "post-solve prepared info")
+      )
+      if (!isTRUE(prepared_after_solve$output_slot_leased)) {
+        stop("Phase 3B solve did not retain its output-slot lease",
+             call. = FALSE)
+      }
+
+      expected_shadow_calls <- as.integer(any(safe))
+      expected_shadow_targets <- if (any(safe)) target_count else 0L
+      expected_shadow_bytes <- if (any(safe)) {
+        8 * as.double(sum(safe)) * as.double(2L * dto$n)
+      } else {
+        0
+      }
+      if (any(safe)) {
+        shadow <- fixed_sp_cuda_materialize_shadow(
+          token, outputs = c("fitted", "residuals")
+        )
+        shadow_clean <- is.list(shadow) &&
+          identical(names(shadow), c("fitted", "residuals")) &&
+          is.matrix(shadow$fitted) && is.double(shadow$fitted) &&
+          identical(dim(shadow$fitted), c(dto$n, target_count)) &&
+          is.matrix(shadow$residuals) && is.double(shadow$residuals) &&
+          identical(dim(shadow$residuals), c(dto$n, target_count))
+        if (!isTRUE(shadow_clean)) {
+          stop("Phase 3B explicit oracle shadow is malformed",
+               call. = FALSE)
+        }
+      }
+
+      post_shadow_info <- fixed_sp_cuda_residual_info(token)
+      fastkpc_full_cuda_fixed_sp_phase3b_validate_batch_info(
+        post_shadow_info, native, dto, expected_shadow_calls,
+        expected_shadow_targets, expected_shadow_bytes, 0L,
+        paste("Phase 3B batch", batch_index, "post-shadow info")
+      )
+      shadow_fields <- c(
+        "shadow_materialize_call_count", "shadow_materialize_target_count",
+        "shadow_d2h_bytes"
+      )
+      unchanged_fields <- setdiff(names(pre_shadow_info), shadow_fields)
+      if (!identical(pre_shadow_info[unchanged_fields],
+                     post_shadow_info[unchanged_fields])) {
+        stop("Phase 3B explicit shadow changed non-shadow diagnostics",
+             call. = FALSE)
+      }
+        NULL
+      },
+      operations = cleanup_operations,
+      context = paste("Phase 3B batch", batch_index, "cleanup")
+    )
+
+    residual_max_abs <- rep(NA_real_, target_count)
+    residual_relative_l2 <- rep(NA_real_, target_count)
+    fitted_max_abs <- rep(NA_real_, target_count)
+    fitted_relative_l2 <- rep(NA_real_, target_count)
+    oracle_call_count <- integer(target_count)
+    oracle_fitted_hash <- rep(NA_character_, target_count)
+    oracle_residual_hash <- rep(NA_character_, target_count)
+    authenticated_fitted_hash <- as.character(batch$target_rows$fitted_hash)
+    authenticated_residual_hash <- as.character(batch$target_rows$residual_hash)
+    oracle_fitted_hash_exact <- rep(NA, target_count)
+    oracle_residual_hash_exact <- rep(NA, target_count)
+    for (target_index in seq_len(target_count)) {
+      if (safe[[target_index]]) {
+        oracle_call_count[[target_index]] <- 1L
+        oracle <- fastkpc_mgcv_magic_fixed_sp_from_prepared(
+          prepared_setup = batch$setup,
+          target_state = list(
+            row = batch$target_rows[target_index, , drop = FALSE],
+            y = as.numeric(native$Y[, target_index])
+          )
+        )
+        residual_errors <-
+          fastkpc_full_cuda_fixed_sp_phase3b_numeric_errors(
+            shadow$residuals[, target_index], oracle$residuals,
+            paste("Phase 3B residual target", native$target_keys[[target_index]])
+          )
+        fitted_errors <-
+          fastkpc_full_cuda_fixed_sp_phase3b_numeric_errors(
+            shadow$fitted[, target_index], oracle$fitted,
+            paste("Phase 3B fitted target", native$target_keys[[target_index]])
+          )
+        errors <- c(residual_errors, fitted_errors)
+        if (any(!is.finite(errors)) || any(errors >= 1e-7)) {
+          stop(
+            "Phase 3B safe target failed numeric oracle parity: ",
+            native$target_keys[[target_index]], call. = FALSE
+          )
+        }
+        residual_max_abs[[target_index]] <- residual_errors[["max_abs"]]
+        residual_relative_l2[[target_index]] <-
+          residual_errors[["relative_l2"]]
+        fitted_max_abs[[target_index]] <- fitted_errors[["max_abs"]]
+        fitted_relative_l2[[target_index]] <-
+          fitted_errors[["relative_l2"]]
+        oracle_fitted_hash[[target_index]] <-
+          fastkpc_full_cuda_census_metadata_hash(oracle$fitted)
+        oracle_residual_hash[[target_index]] <-
+          fastkpc_full_cuda_census_metadata_hash(oracle$residuals)
+        oracle_fitted_hash_exact[[target_index]] <- identical(
+          oracle_fitted_hash[[target_index]],
+          authenticated_fitted_hash[[target_index]]
+        )
+        oracle_residual_hash_exact[[target_index]] <- identical(
+          oracle_residual_hash[[target_index]],
+          authenticated_residual_hash[[target_index]]
+        )
+        if (!isTRUE(oracle_fitted_hash_exact[[target_index]]) ||
+            !isTRUE(oracle_residual_hash_exact[[target_index]])) {
+          stop("Phase 3B safe target oracle hash mismatch: ",
+               native$target_keys[[target_index]], call. = FALSE)
+        }
+      } else if (!is.null(shadow)) {
+        stable_na <-
+          all(is.na(shadow$fitted[, target_index]) &
+              !is.nan(shadow$fitted[, target_index])) &&
+          all(is.na(shadow$residuals[, target_index]) &
+              !is.nan(shadow$residuals[, target_index]))
+        if (!isTRUE(stable_na)) {
+          stop("Phase 3B stable output was presented as executed",
+               call. = FALSE)
+        }
+      }
+    }
+
+    runtime_after_batch <- fixed_sp_cuda_runtime_info(runtime)
+    fastkpc_full_cuda_fixed_sp_phase3b_validate_runtime_info(
+      runtime_after_batch,
+      paste("Phase 3B batch", batch_index, "runtime after")
+    )
+    workspace_grow_delta <-
+      fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+        runtime_before_batch, runtime_after_batch, "workspace_grow_count",
+        paste("Phase 3B batch", batch_index)
+      )
+    device_synchronize_delta <-
+      fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+        runtime_before_batch, runtime_after_batch,
+        "cuda_device_synchronize_count",
+        paste("Phase 3B batch", batch_index)
+      )
+    if (workspace_grow_delta != 0L || device_synchronize_delta != 0L) {
+      stop("Phase 3B batch created an unreserved resource or synchronized",
+           call. = FALSE)
+    }
+
+    target_records <- data.frame(
+      prepared_s_key_sha256 = setup_key,
+      batch_ordinal = as.integer(batch_index),
+      target_ordinal = seq_len(target_count),
+      residual_key_sha256 = native$target_keys,
+      target = as.integer(batch$target_rows$target),
+      planned_route = pre_shadow_info$planned_route,
+      authenticated_planned_route = native$planned_route,
+      executed_route = pre_shadow_info$executed_route,
+      reroute_reason = pre_shadow_info$reroute_reason,
+      solver_status = pre_shadow_info$solver_status,
+      residual_max_abs_diff = residual_max_abs,
+      residual_relative_l2_diff = residual_relative_l2,
+      fitted_max_abs_diff = fitted_max_abs,
+      fitted_relative_l2_diff = fitted_relative_l2,
+      explicit_oracle_shadow_observation = safe,
+      oracle_call_count = oracle_call_count,
+      oracle_fitted_hash = oracle_fitted_hash,
+      authenticated_fitted_hash = authenticated_fitted_hash,
+      oracle_residual_hash = oracle_residual_hash,
+      authenticated_residual_hash = authenticated_residual_hash,
+      oracle_fitted_hash_exact = oracle_fitted_hash_exact,
+      oracle_residual_hash_exact = oracle_residual_hash_exact,
+      stringsAsFactors = FALSE
+    )
+    prepared_record <- data.frame(
+      prepared_s_key_sha256 = setup_key,
+      batch_ordinal = as.integer(batch_index),
+      prepared_handle_create_count = 1L,
+      prepared_handle_free_count = 1L,
+      setup_h2d_upload_count = prepared_info$setup_h2d_upload_count,
+      setup_h2d_bytes = prepared_info$setup_h2d_bytes,
+      coefficient_output_capacity =
+        prepared_info$coefficient_output_capacity,
+      prepared_generation = prepared_info$generation,
+      output_slot_state_before_solve = prepared_info$output_slot_state,
+      output_slot_state_after_solve =
+        prepared_after_solve$output_slot_state,
+      output_slot_state_after_release =
+        prepared_after_release$output_slot_state,
+      output_slot_poison_reason_empty = identical(
+        c(
+          prepared_info$output_slot_poison_reason,
+          prepared_after_solve$output_slot_poison_reason,
+          prepared_after_release$output_slot_poison_reason
+        ),
+        rep("", 3L)
+      ),
+      output_slot_leased_after_release =
+        prepared_after_release$output_slot_leased,
+      stringsAsFactors = FALSE
+    )
+    batch_record <- data.frame(
+      prepared_s_key_sha256 = setup_key,
+      batch_ordinal = as.integer(batch_index),
+      target_count = pre_shadow_info$target_count,
+      batch_call_count = pre_shadow_info$batch_call_count,
+      native_batch_call = pre_shadow_info$native_batch_call,
+      true_batched_kernel = pre_shadow_info$true_batched_kernel,
+      true_batched_subgroup_count =
+        pre_shadow_info$true_batched_subgroup_count,
+      true_batched_attempted_target_count =
+        pre_shadow_info$true_batched_attempted_target_count,
+      true_batched_target_count = pre_shadow_info$true_batched_target_count,
+      cholesky_single_target_count =
+        pre_shadow_info$cholesky_single_target_count,
+      potrf_batched_call_count = pre_shadow_info$potrf_batched_call_count,
+      potrs_batched_call_count = pre_shadow_info$potrs_batched_call_count,
+      planned_cholesky_target_count =
+        pre_shadow_info$planned_cholesky_target_count,
+      planned_qr_target_count = pre_shadow_info$planned_qr_target_count,
+      planned_svd_target_count = pre_shadow_info$planned_svd_target_count,
+      executed_cholesky_target_count =
+        pre_shadow_info$executed_cholesky_target_count,
+      executed_qr_target_count = pre_shadow_info$executed_qr_target_count,
+      executed_svd_target_count = pre_shadow_info$executed_svd_target_count,
+      stable_reroute_count = pre_shadow_info$stable_reroute_count,
+      cholesky_to_svd_count = pre_shadow_info$cholesky_to_svd_count,
+      qr_to_svd_count = pre_shadow_info$qr_to_svd_count,
+      setup_h2d_upload_count = prepared_info$setup_h2d_upload_count,
+      target_batch_h2d_call_count =
+        pre_shadow_info$target_batch_h2d_call_count,
+      target_h2d_copy_count = pre_shadow_info$target_h2d_copy_count,
+      target_h2d_bytes = pre_shadow_info$target_h2d_bytes,
+      rhs_device_build_count = pre_shadow_info$rhs_device_build_count,
+      full_cuda_data_plane = pre_shadow_info$full_cuda_data_plane,
+      invalid_output_init_count = pre_shadow_info$invalid_output_init_count,
+      coefficient_batch_finalize_call_count =
+        pre_shadow_info$coefficient_batch_finalize_call_count,
+      fitted_batch_finalize_call_count =
+        pre_shadow_info$fitted_batch_finalize_call_count,
+      residual_rss_batch_finalize_call_count =
+        pre_shadow_info$residual_rss_batch_finalize_call_count,
+      per_target_output_finalize_call_count =
+        pre_shadow_info$per_target_output_finalize_call_count,
+      batch_output_finalized_target_count =
+        pre_shadow_info$batch_output_finalized_target_count,
+      canonical_output_order_exact =
+        pre_shadow_info$canonical_output_order_exact,
+      target_keys_exact = identical(
+        pre_shadow_info$target_keys, native$target_keys
+      ),
+      route_status_conservation_exact = route_status_conservation_exact,
+      resource_snapshot_captured =
+        pre_shadow_info$resource_snapshot_captured,
+      resource_instrumentation_version =
+        pre_shadow_info$resource_instrumentation_version,
+      resource_allocation_count_before_solve =
+        pre_shadow_info$resource_allocation_count_before_solve,
+      resource_allocation_count_after_solve =
+        pre_shadow_info$resource_allocation_count_after_solve,
+      resource_handle_create_count_before_solve =
+        pre_shadow_info$resource_handle_create_count_before_solve,
+      resource_handle_create_count_after_solve =
+        pre_shadow_info$resource_handle_create_count_after_solve,
+      cuda_device_allocation_count_during_solve =
+        pre_shadow_info$cuda_device_allocation_count_during_solve,
+      cuda_host_allocation_count_during_solve =
+        pre_shadow_info$cuda_host_allocation_count_during_solve,
+      stream_create_count_during_solve =
+        pre_shadow_info$stream_create_count_during_solve,
+      event_create_count_during_solve =
+        pre_shadow_info$event_create_count_during_solve,
+      cublas_handle_create_count_during_solve =
+        pre_shadow_info$cublas_handle_create_count_during_solve,
+      cusolver_handle_create_count_during_solve =
+        pre_shadow_info$cusolver_handle_create_count_during_solve,
+      per_target_allocation_count_after_warmup =
+        pre_shadow_info$per_target_allocation_count_after_warmup,
+      per_target_handle_create_count =
+        pre_shadow_info$per_target_handle_create_count,
+      workspace_grow_count_after_warmup = workspace_grow_delta,
+      cuda_device_synchronize_count = device_synchronize_delta,
+      implicit_residual_d2h_count =
+        released_info$implicit_residual_d2h_count,
+      cpu_fallback_count = pre_shadow_info$cpu_fallback_count,
+      unknown_fallback_count = pre_shadow_info$unknown_fallback_count,
+      pre_shadow_materialize_call_count =
+        pre_shadow_info$shadow_materialize_call_count,
+      pre_shadow_materialize_target_count =
+        pre_shadow_info$shadow_materialize_target_count,
+      pre_shadow_d2h_bytes = pre_shadow_info$shadow_d2h_bytes,
+      explicit_oracle_shadow_observation = any(safe),
+      shadow_observation_purpose = if (any(safe)) {
+        "explicit-oracle-comparison"
+      } else {
+        "none"
+      },
+      post_shadow_materialize_call_count =
+        post_shadow_info$shadow_materialize_call_count,
+      post_shadow_materialize_target_count =
+        post_shadow_info$shadow_materialize_target_count,
+      post_shadow_d2h_bytes = post_shadow_info$shadow_d2h_bytes,
+      output_slot_release_count = released_info$output_slot_release_count,
+      output_slot_leased_after_release =
+        prepared_after_release$output_slot_leased,
+      stringsAsFactors = FALSE
+    )
+    list(
+      prepared_record = prepared_record,
+      batch_record = batch_record,
+      target_records = target_records
+    )
+  }
+
+  batch_results <- lapply(seq_along(setup_keys), run_batch)
+  prepared_records <- do.call(
+    rbind, lapply(batch_results, `[[`, "prepared_record")
+  )
+  batch_records <- do.call(
+    rbind, lapply(batch_results, `[[`, "batch_record")
+  )
+  target_records <- do.call(
+    rbind, lapply(batch_results, `[[`, "target_records")
+  )
+  rownames(prepared_records) <- NULL
+  rownames(batch_records) <- NULL
+  rownames(target_records) <- NULL
+
+  runtime_final <- fixed_sp_cuda_runtime_info(runtime)
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_runtime_info(
+    runtime_final, "Phase 3B final runtime info"
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_runtime_identity(
+    runtime_created, runtime_reserved, runtime_final, device_id
+  )
+  final_workspace_delta <-
+    fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+      runtime_reserved, runtime_final, "workspace_grow_count",
+      "Phase 3B final runtime"
+    )
+  final_synchronize_delta <-
+    fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+      runtime_reserved, runtime_final, "cuda_device_synchronize_count",
+      "Phase 3B final runtime"
+    )
+  lifecycle_exact <- runtime_final$workspace_reserve_count ==
+    runtime_reserved$workspace_reserve_count &&
+    isTRUE(runtime_final$cublas_user_workspace_installed) &&
+    runtime_final$cublas_workspace_alignment >= 256 &&
+    final_workspace_delta ==
+      sum(batch_records$workspace_grow_count_after_warmup) &&
+    final_synchronize_delta ==
+      sum(batch_records$cuda_device_synchronize_count)
+  if (!isTRUE(lifecycle_exact)) {
+    stop("Phase 3B runtime lifecycle does not match batch records",
+         call. = FALSE)
+  }
+  runtime_records <- do.call(rbind, list(
+    fastkpc_full_cuda_fixed_sp_phase3b_runtime_record(
+      "runtime-created", runtime_created
+    ),
+    fastkpc_full_cuda_fixed_sp_phase3b_runtime_record(
+      "workspace-reserved", runtime_reserved
+    ),
+    fastkpc_full_cuda_fixed_sp_phase3b_runtime_record("final", runtime_final)
+  ))
+  rownames(runtime_records) <- NULL
+  summary <- fastkpc_full_cuda_fixed_sp_phase3b_summarize(
+    catalog_records, batch_records, target_records
+  )
+
+        list(
+          catalog_records = catalog_records,
+          runtime_records = runtime_records,
+          prepared_records = prepared_records,
+          batch_records = batch_records,
+          target_records = target_records,
+          summary = summary
+        )
+      },
+      operations = runtime_cleanup_operations,
+      context = "Phase 3B iteration cleanup"
+    )
+  iteration_result
+}
