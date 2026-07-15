@@ -156,11 +156,11 @@ safe_descriptors <- lapply(safe_keys, function(key) {
 })
 prototype_dto <- list(
   prepared_s_key_sha256 = sprintf("%064x", 1L),
-  X = matrix(c(1, 2, 3, 4), nrow = 2L),
+  X = matrix(c(1, 0, 1, 0, 1, 1), nrow = 3L),
   constraint_mode = "identity",
   coefficient_dim = 2L,
   null_dim = 2L,
-  gram_matrix = crossprod(matrix(c(1, 2, 3, 4), nrow = 2L)),
+  gram_matrix = crossprod(matrix(c(1, 0, 1, 0, 1, 1), nrow = 3L)),
   nullspace_gram_matrix = NULL,
   penalty_count = 1L,
   penalty_blocks = list(diag(2L)),
@@ -168,7 +168,7 @@ prototype_dto <- list(
   penalty_sp_labels = "sp1"
 )
 canonical_y <- lapply(seq_along(safe_keys), function(index) {
-  c(as.numeric(index), as.numeric(index + 1L))
+  c(as.numeric(index), as.numeric(index + 1L), as.numeric(index + 2L))
 })
 canonical_sp <- lapply(seq_along(safe_keys), function(index) {
   as.numeric(index)
@@ -176,13 +176,81 @@ canonical_sp <- lapply(seq_along(safe_keys), function(index) {
 canonical_rhs <- lapply(canonical_y, function(y) {
   as.numeric(crossprod(prototype_dto$X, y))
 })
-canonical_target_rows <- Map(function(key, index) {
+canonical_target_rows <- Map(function(key, index, y, sp) {
   data.frame(
     residual_key_sha256 = key,
     target = as.integer(index),
+    y_hash = fastkpc_full_cuda_census_metadata_hash(y),
+    selected_sp_hash = fastkpc_full_cuda_census_metadata_hash(
+      stats::setNames(sp, prototype_dto$penalty_sp_labels)
+    ),
     stringsAsFactors = FALSE
   )
-}, safe_keys, seq_along(safe_keys))
+}, safe_keys, seq_along(safe_keys), canonical_y, canonical_sp)
+wrong_sp_source_error <- tryCatch(
+  fastkpc_full_cuda_fixed_sp_phase3a_prototype_expected_identity(
+    dto = prototype_dto,
+    target_key = safe_keys[[1L]],
+    target_row = canonical_target_rows[[1L]],
+    y = canonical_y[[1L]],
+    sp = canonical_sp[[2L]],
+    canonical_nullspace_rhs = canonical_rhs[[1L]],
+    planned_route = "CHOLESKY_BATCHED"
+  ),
+  error = identity
+)
+assert_true(
+  inherits(wrong_sp_source_error, "error") &&
+    grepl("Phase 3A prototype expected source is malformed",
+          conditionMessage(wrong_sp_source_error), fixed = TRUE),
+  "selected SP must match the authenticated target-row hash"
+)
+wrong_y_nullspace <- canonical_y[[1L]] + c(-1, -1, 1)
+assert_true(
+  identical(
+    as.numeric(crossprod(prototype_dto$X, wrong_y_nullspace)),
+    canonical_rhs[[1L]]
+  ),
+  "wrong-Y adversary preserves the canonical nullspace RHS"
+)
+wrong_y_source_error <- tryCatch(
+  fastkpc_full_cuda_fixed_sp_phase3a_prototype_expected_identity(
+    dto = prototype_dto,
+    target_key = safe_keys[[1L]],
+    target_row = canonical_target_rows[[1L]],
+    y = wrong_y_nullspace,
+    sp = canonical_sp[[1L]],
+    canonical_nullspace_rhs = canonical_rhs[[1L]],
+    planned_route = "CHOLESKY_BATCHED"
+  ),
+  error = identity
+)
+assert_true(
+  inherits(wrong_y_source_error, "error") &&
+    grepl("Phase 3A prototype expected source is malformed",
+          conditionMessage(wrong_y_source_error), fixed = TRUE),
+  "target-row Y hash rejects a wrong response with the same RHS"
+)
+wrong_row_hash <- canonical_target_rows[[1L]]
+wrong_row_hash$y_hash <- sprintf("%064x", safe_count + 1L)
+wrong_row_hash_error <- tryCatch(
+  fastkpc_full_cuda_fixed_sp_phase3a_prototype_expected_identity(
+    dto = prototype_dto,
+    target_key = safe_keys[[1L]],
+    target_row = wrong_row_hash,
+    y = canonical_y[[1L]],
+    sp = canonical_sp[[1L]],
+    canonical_nullspace_rhs = canonical_rhs[[1L]],
+    planned_route = "CHOLESKY_BATCHED"
+  ),
+  error = identity
+)
+assert_true(
+  inherits(wrong_row_hash_error, "error") &&
+    grepl("Phase 3A prototype expected source is malformed",
+          conditionMessage(wrong_row_hash_error), fixed = TRUE),
+  "forged authenticated row hashes are rejected"
+)
 prototype_payloads <- Map(function(key, y, sp) {
   c(
     list(target_key = key),

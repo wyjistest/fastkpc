@@ -1604,16 +1604,44 @@ fastkpc_full_cuda_fixed_sp_phase3a_prototype_expected_identity <- function(
       !is.data.frame(target_row) || nrow(target_row) != 1L ||
       !"residual_key_sha256" %in% names(target_row) ||
       !identical(as.character(target_row$residual_key_sha256[[1L]]), target_key) ||
+      !all(c("y_hash", "selected_sp_hash") %in% names(target_row)) ||
+      !is.character(target_row$y_hash) || length(target_row$y_hash) != 1L ||
+      !grepl("^[0-9a-f]{64}$", target_row$y_hash) ||
+      !is.character(target_row$selected_sp_hash) ||
+      length(target_row$selected_sp_hash) != 1L ||
+      !grepl("^[0-9a-f]{64}$", target_row$selected_sp_hash) ||
       !is.character(planned_route) || length(planned_route) != 1L ||
       !planned_route %in% fastkpc_full_cuda_fixed_sp_contract()$route_levels ||
       !is.numeric(y) || !is.numeric(sp) ||
       !is.numeric(canonical_nullspace_rhs) || any(!is.finite(y)) ||
       any(!is.finite(sp)) || any(sp < 0) ||
       any(!is.finite(canonical_nullspace_rhs)) ||
+      !is.character(dto$penalty_sp_labels) ||
+      length(dto$penalty_sp_labels) != length(sp) ||
       !is.character(dto$prepared_s_key_sha256) ||
       length(dto$prepared_s_key_sha256) != 1L ||
       !grepl("^[0-9a-f]{64}$", dto$prepared_s_key_sha256)) {
     stop("Phase 3A prototype expected source is malformed", call. = FALSE)
+  }
+  candidate_y_hash <- fastkpc_full_cuda_census_metadata_hash(as.numeric(y))
+  candidate_sp_hash <- fastkpc_full_cuda_census_metadata_hash(
+    stats::setNames(as.numeric(sp), dto$penalty_sp_labels)
+  )
+  if (!identical(candidate_y_hash, target_row$y_hash[[1L]]) ||
+      !identical(candidate_sp_hash, target_row$selected_sp_hash[[1L]])) {
+    stop("Phase 3A prototype expected source is malformed", call. = FALSE)
+  }
+  target_state_fingerprint <- if (
+    "target_state_fingerprint" %in% names(target_row)
+  ) {
+    value <- target_row$target_state_fingerprint[[1L]]
+    if (!is.character(value) || length(value) != 1L ||
+        !grepl("^[0-9a-f]{64}$", value)) {
+      stop("Phase 3A prototype expected source is malformed", call. = FALSE)
+    }
+    value
+  } else {
+    NULL
   }
   # Keep this derivation independent from the timed prototype payload.
   Z <- if (identical(dto$constraint_mode, "identity")) {
@@ -1666,8 +1694,10 @@ fastkpc_full_cuda_fixed_sp_phase3a_prototype_expected_identity <- function(
         fastkpc_full_cuda_census_named_metadata_hash(as.list(target_row)),
       prepared_setup_hash = fastkpc_full_cuda_census_named_metadata_hash(dto),
       prepared_s_key_sha256 = dto$prepared_s_key_sha256,
-      canonical_y_hash = fastkpc_full_cuda_census_metadata_hash(as.numeric(y)),
-      selected_sp_hash = fastkpc_full_cuda_census_metadata_hash(as.numeric(sp)),
+      authenticated_y_hash = target_row$y_hash[[1L]],
+      authenticated_selected_sp_hash = target_row$selected_sp_hash[[1L]],
+      penalty_sp_labels = dto$penalty_sp_labels,
+      target_state_fingerprint = target_state_fingerprint,
       canonical_nullspace_rhs_hash =
         fastkpc_full_cuda_census_metadata_hash(
           as.numeric(canonical_nullspace_rhs)
@@ -1706,12 +1736,14 @@ fastkpc_full_cuda_fixed_sp_phase3a_prototype_benchmark_identity <- function(
     is.list(native) && is.list(source) &&
       identical(source$target_key, native$target_keys) &&
       identical(
-        source$canonical_y_hash,
+        source$authenticated_y_hash,
         fastkpc_full_cuda_census_metadata_hash(as.numeric(native$Y))
       ) &&
       identical(
-        source$selected_sp_hash,
-        fastkpc_full_cuda_census_metadata_hash(as.numeric(native$SP))
+        source$authenticated_selected_sp_hash,
+        fastkpc_full_cuda_census_metadata_hash(
+          stats::setNames(as.numeric(native$SP), source$penalty_sp_labels)
+        )
       ) &&
       identical(source$planned_route, native$planned_route)
   }, logical(1L))
