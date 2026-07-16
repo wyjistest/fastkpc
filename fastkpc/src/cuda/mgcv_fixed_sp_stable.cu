@@ -597,6 +597,10 @@ AugmentedSystemView build_fixed_sp_augmented_system(
     throw std::runtime_error("augmented row count overflow");
   }
   const int rows = static_cast<int>(rows_size);
+  if (rows < q) {
+    throw std::runtime_error(
+      "fixed-sp augmented system requires rows >= q");
+  }
 
   if (X_null == nullptr || Y == nullptr || SP == nullptr ||
       host_SP == nullptr || penalty_root_offsets == nullptr ||
