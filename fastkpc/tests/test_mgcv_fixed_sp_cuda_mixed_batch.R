@@ -221,8 +221,11 @@ assert_true(
 
 expected_status <- rep("ERR_STABLE_PATH_NOT_IMPLEMENTED", target_count)
 expected_status[safe] <- "OK_CHOLESKY_BATCHED"
-expected_executed_route <- rep(NA_character_, target_count)
-expected_executed_route[safe] <- "CHOLESKY_BATCHED"
+expected_status[native_batch$planned_route == "AUGMENTED_QR"] <-
+  "OK_AUGMENTED_QR"
+expected_status[native_batch$planned_route == "AUGMENTED_SVD"] <-
+  "OK_AUGMENTED_SVD"
+expected_executed_route <- native_batch$planned_route
 planned_counts <- c(
   CHOLESKY_BATCHED = sum(native_batch$planned_route == "CHOLESKY_BATCHED"),
   AUGMENTED_QR = sum(native_batch$planned_route == "AUGMENTED_QR"),
@@ -267,23 +270,27 @@ assert_true(
               as.integer(planned_counts[["AUGMENTED_SVD"]])) &&
     identical(executed_counts,
               c(CHOLESKY_BATCHED = as.integer(length(safe)),
-                AUGMENTED_QR = 0L, AUGMENTED_SVD = 0L)) &&
+                AUGMENTED_QR =
+                  as.integer(planned_counts[["AUGMENTED_QR"]]),
+                AUGMENTED_SVD =
+                  as.integer(planned_counts[["AUGMENTED_SVD"]]))) &&
     sum(planned_counts) == target_count &&
-    sum(executed_counts) + sum(is.na(info$executed_route)) == target_count &&
-    sum(is.na(info$executed_route)) == length(stable) &&
+    sum(executed_counts) == target_count &&
+    !anyNA(info$executed_route) &&
     identical(info$stable_reroute_count, 0L) &&
     identical(info$cholesky_to_svd_count, 0L) &&
     identical(info$qr_to_svd_count, 0L),
-  "mixed planned, executed, and unimplemented route counts conserve targets"
+  "mixed planned and executed route counts conserve targets"
 )
 assert_true(
   identical(info$coefficient_batch_finalize_call_count, 1L) &&
     identical(info$fitted_batch_finalize_call_count, 1L) &&
     identical(info$residual_rss_batch_finalize_call_count, 1L) &&
-    identical(info$per_target_output_finalize_call_count, 0L) &&
+    identical(info$per_target_output_finalize_call_count,
+              as.integer(length(stable))) &&
     identical(info$batch_output_finalized_target_count,
-              as.integer(length(safe))),
-  "mixed batch finalizes each output family once for safe targets"
+              as.integer(target_count)),
+  "mixed batch finalizes batched and stable targets canonically"
 )
 expected_target_h2d_bytes <- 8 * as.double(
   length(native_batch$Y) + length(native_batch$SP)
@@ -469,9 +476,8 @@ raw_coefficient_shadow <- .Call(
 assert_true(
   identical(dim(raw_coefficient_shadow),
             c(dto$coefficient_dim, target_count)) &&
-    all(is.finite(raw_coefficient_shadow[, safe, drop = FALSE])) &&
-    all(is.nan(raw_coefficient_shadow[, stable, drop = FALSE])),
-  "raw stable coefficient columns retain invalid-output initialization NaNs"
+    all(is.finite(raw_coefficient_shadow)),
+  "raw coefficient columns are finite for every completed route"
 )
 
 shadow <- fixed_sp_cuda_materialize_shadow(
@@ -499,7 +505,7 @@ assert_true(
     paste(missing_after_shadow_fields, collapse = ",")
   )
 )
-expected_shadow_d2h_bytes <- 8 * as.double(length(safe)) *
+expected_shadow_d2h_bytes <- 8 * as.double(target_count) *
   (dto$coefficient_dim + dto$n + dto$n + 1L + dto$null_dim)
 assert_true(
   "output_slot_leased" %in% names(prepared_info_after_shadow) &&
@@ -631,18 +637,14 @@ assert_true(
   )
 )
 
-stable_outputs_are_na <- all(vapply(
+stable_outputs_are_finite <- all(vapply(
   stable,
   function(index) {
-    all(is.na(shadow$coefficients[, index]) &
-          !is.nan(shadow$coefficients[, index])) &&
-      all(is.na(shadow$fitted[, index]) &
-            !is.nan(shadow$fitted[, index])) &&
-      all(is.na(shadow$residuals[, index]) &
-            !is.nan(shadow$residuals[, index])) &&
-      is.na(shadow$rss[[index]]) && !is.nan(shadow$rss[[index]]) &&
-      all(is.na(shadow$cuda_nullspace_rhs[, index]) &
-            !is.nan(shadow$cuda_nullspace_rhs[, index]))
+    all(is.finite(shadow$coefficients[, index])) &&
+      all(is.finite(shadow$fitted[, index])) &&
+      all(is.finite(shadow$residuals[, index])) &&
+      is.finite(shadow$rss[[index]]) &&
+      all(is.finite(shadow$cuda_nullspace_rhs[, index]))
   },
   logical(1L)
 ))
@@ -658,9 +660,8 @@ shadow_successful_target_mask <- vapply(
   logical(1L)
 )
 assert_true(
-  stable_outputs_are_na &&
-    identical(which(shadow_successful_target_mask), safe),
-  "shadow success mask exactly matches safe canonical ordinals"
+  stable_outputs_are_finite && all(shadow_successful_target_mask),
+  "shadow success mask covers every canonical route"
 )
 
 fixed_sp_cuda_residual_release(token)

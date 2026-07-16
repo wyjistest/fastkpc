@@ -27,6 +27,9 @@ namespace {
 constexpr std::size_t kCublasWorkspaceBytes = 16U * 1024U * 1024U;
 constexpr std::size_t kStableIntArraysPerTarget = 6U;
 constexpr std::size_t kStableSigmaArraysPerTarget = 2U;
+static_assert(sizeof(double) % sizeof(int) == 0U,
+              "double diagnostics must fit an integral number of ints");
+constexpr std::size_t kIntsPerDouble = sizeof(double) / sizeof(int);
 
 void check_cuda(cudaError_t status, const char* stage) {
   if (status != cudaSuccess) {
@@ -2797,6 +2800,15 @@ void CudaRuntimeContext::reserve(
     legacy_int_count, stable_compact_int_count, "stable info offset");
   const std::size_t int_required = checked_add(
     stable_info_offset, 1U, "int arena");
+  const std::size_t host_sigma_offset = checked_add(
+    int_required, int_required % kIntsPerDouble == 0U ? 0U :
+      kIntsPerDouble - int_required % kIntsPerDouble,
+    "host stable sigma alignment");
+  const std::size_t host_status_required = checked_add(
+    host_sigma_offset,
+    checked_multiply(stable_sigma_count, kIntsPerDouble,
+                     "host stable sigma diagnostics"),
+    "host status arena");
   const std::size_t pointer_required =
     checked_multiply(targets, 2U, "pointer arena");
 
@@ -2834,11 +2846,12 @@ void CudaRuntimeContext::reserve(
         allocation_bytes(int_required, sizeof(int), "int arena"),
         "allocate fixed-sp int arena");
     }
-    if (int_required > host_status_capacity) {
+    if (host_status_required > host_status_capacity) {
       tracked_cuda_malloc_host(
         resource_ledger.get(),
         &new_host_status_arena,
-        allocation_bytes(int_required, sizeof(int), "host status arena"),
+        allocation_bytes(host_status_required, sizeof(int),
+                         "host status arena"),
         "allocate fixed-sp host status arena");
     }
     if (pointer_required > pointer_capacity) {
@@ -2944,7 +2957,7 @@ void CudaRuntimeContext::reserve(
 
   if (replace_double) double_capacity = double_required;
   if (replace_int) int_capacity = int_required;
-  if (replace_host_status) host_status_capacity = int_required;
+  if (replace_host_status) host_status_capacity = host_status_required;
   if (replace_pointer) pointer_capacity = pointer_required;
   const bool grew = replace_double || replace_int || replace_host_status ||
     replace_pointer || install_cublas_workspace;
@@ -3845,6 +3858,16 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       static_cast<std::size_t>(batch.target_count), -1);
     token->diagnostics.ormqr_info.assign(
       static_cast<std::size_t>(batch.target_count), -1);
+    token->diagnostics.effective_rank.assign(
+      static_cast<std::size_t>(batch.target_count), -1);
+    token->diagnostics.sigma_max.assign(
+      static_cast<std::size_t>(batch.target_count),
+      std::numeric_limits<double>::quiet_NaN());
+    token->diagnostics.smallest_retained_sigma.assign(
+      static_cast<std::size_t>(batch.target_count),
+      std::numeric_limits<double>::quiet_NaN());
+    token->diagnostics.svd_info.assign(
+      static_cast<std::size_t>(batch.target_count), -1);
     token->diagnostics.target_true_batched.assign(
       static_cast<std::size_t>(batch.target_count), false);
     slot->lease_owner = token;
@@ -3921,6 +3944,15 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
     double* d_systems = d_rhs + rhs_capacity;
     double* d_theta = d_systems + system_capacity;
     double* d_potrf_work = d_theta + theta_capacity;
+    double* d_sigma_max = d_potrf_work +
+      static_cast<std::size_t>(context->potrf_lwork);
+    double* d_smallest_retained_sigma =
+      d_sigma_max + reserved_targets;
+    if (d_smallest_retained_sigma + reserved_targets !=
+        context->stable_workspace.B) {
+      throw std::runtime_error(
+        "fixed-sp stable sigma arena binding mismatch");
+    }
 
     const std::size_t stable_index_offset = reserved_targets;
     const std::size_t potrs_info_offset = checked_multiply(
@@ -3935,8 +3967,20 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       "fixed-sp stable shared info offset");
     const std::size_t int_layout_required = checked_add(
       stable_shared_info_offset, 1U, "fixed-sp integer arena layout");
+    const std::size_t host_sigma_offset = checked_add(
+      int_layout_required,
+      int_layout_required % kIntsPerDouble == 0U ? 0U :
+        kIntsPerDouble - int_layout_required % kIntsPerDouble,
+      "fixed-sp host stable sigma alignment");
+    const std::size_t host_layout_required = checked_add(
+      host_sigma_offset,
+      checked_multiply(
+        checked_multiply(reserved_targets, kStableSigmaArraysPerTarget,
+                         "fixed-sp host stable sigma layout"),
+        kIntsPerDouble, "fixed-sp host stable sigma layout"),
+      "fixed-sp host status layout");
     if (context->int_capacity < int_layout_required ||
-        context->host_status_capacity < int_layout_required) {
+        context->host_status_capacity < host_layout_required) {
       throw std::runtime_error(
         "fixed-sp integer arena does not satisfy stable compact layout");
     }
@@ -3962,6 +4006,9 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
     int* h_qr_reroute = h_qr_rank + reserved_targets;
     int* h_qr_finite_status = h_qr_reroute + reserved_targets;
     int* h_svd_info = h_qr_finite_status + reserved_targets;
+    double* h_sigma_max = reinterpret_cast<double*>(
+      context->host_status_arena + host_sigma_offset);
+    double* h_smallest_retained_sigma = h_sigma_max + reserved_targets;
     if (d_svd_info + reserved_targets !=
           context->int_arena + stable_shared_info_offset ||
         h_svd_info + reserved_targets !=
@@ -4040,6 +4087,14 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         "fixed-sp stable compact diagnostics"),
       context->stream
     ), "initialize fixed-sp stable compact diagnostics");
+    check_cuda(cudaMemsetAsync(
+      d_sigma_max, 0,
+      allocation_bytes(
+        checked_multiply(reserved_targets, kStableSigmaArraysPerTarget,
+                         "fixed-sp stable sigma diagnostics"),
+        sizeof(double), "fixed-sp stable sigma diagnostics"),
+      context->stream
+    ), "initialize fixed-sp stable sigma diagnostics");
 
     const std::size_t y_count = checked_multiply(
       static_cast<std::size_t>(batch.n), targets, "fixed-sp solve Y");
@@ -4067,6 +4122,7 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
 
     const double one = 1.0;
     const double zero = 0.0;
+    const double minus_one = -1.0;
     check_cublas(cublasDgemm(
       context->blas, CUBLAS_OP_T, CUBLAS_OP_N,
       handle->q, batch.target_count, batch.n,
@@ -4534,12 +4590,251 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
             "QR_RANK_GUARD_REJECTED";
           token->diagnostics.stable_reroute_count += 1;
           token->diagnostics.qr_to_svd_count += 1;
-          token->diagnostics.executed_svd_target_count += 1;
           continue;
         }
         token->executed_routes[target_offset] = FixedSpRoute::AugmentedQr;
         token->solver_statuses[target_offset] = FixedSpStatus::OkAugmentedQr;
         token->diagnostics.executed_qr_target_count += 1;
+      }
+    }
+
+    auto target_uses_svd = [&](std::size_t target_offset) {
+      const FixedSpRoute route = batch.planned_routes[target_offset];
+      const std::string& reason = token->reroute_reasons[target_offset];
+      return route == FixedSpRoute::AugmentedSvd ||
+        (route == FixedSpRoute::CholeskyBatched &&
+         reason == "CHOLESKY_NON_POSITIVE_PIVOT") ||
+        (route == FixedSpRoute::AugmentedQr &&
+         reason == "QR_RANK_GUARD_REJECTED");
+    };
+    auto device_target_index = [&](int target) -> const int* {
+      const FixedSpRoute route =
+        batch.planned_routes[static_cast<std::size_t>(target)];
+      if (route == FixedSpRoute::CholeskyBatched) {
+        for (int ordinal = 0; ordinal < safe_count; ++ordinal) {
+          if (h_safe_target_indices[ordinal] == target) {
+            return d_safe_target_indices + ordinal;
+          }
+        }
+      } else {
+        for (int ordinal = 0; ordinal < stable_count; ++ordinal) {
+          if (h_stable_target_indices[ordinal] == target) {
+            return d_stable_target_indices + ordinal;
+          }
+        }
+      }
+      throw std::runtime_error(
+        "fixed-sp SVD target is absent from the route partition");
+    };
+
+    int svd_target_count = 0;
+    for (int target = 0; target < batch.target_count; ++target) {
+      const std::size_t target_offset = static_cast<std::size_t>(target);
+      if (!target_uses_svd(target_offset)) continue;
+      svd_target_count += 1;
+
+      const double* target_y = d_y +
+        static_cast<std::size_t>(batch.n) * target_offset;
+      const double* target_sp = d_sp +
+        static_cast<std::size_t>(batch.penalty_count) * target_offset;
+      const double* host_target_sp = batch.SP +
+        static_cast<std::size_t>(batch.penalty_count) * target_offset;
+      AugmentedSystemView augmented = build_fixed_sp_augmented_system(
+        handle->d_X_null, handle->d_penalty_roots,
+        handle->penalty_root_offsets.data(),
+        handle->penalty_root_ranks.data(),
+        handle->total_penalty_root_rows, handle->penalty_count,
+        handle->d_H_root, handle->H_root_rank,
+        target_y, target_sp, host_target_sp,
+        batch.n, handle->q, target,
+        &context->stable_workspace, context->stream);
+
+      check_cusolver(cusolverDnDgesvdj(
+        context->solver, CUSOLVER_EIG_MODE_VECTOR, 1,
+        augmented.rows, handle->q,
+        augmented.B, augmented.leading_dimension,
+        context->stable_workspace.singular_values,
+        context->stable_workspace.U, augmented.leading_dimension,
+        context->stable_workspace.V, handle->q,
+        context->stable_workspace.svd_work,
+        context->stable_workspace.svd_lwork,
+        context->stable_workspace.info, context->svd_params
+      ), "factor fixed-sp augmented SVD system");
+      check_cuda(cudaMemcpyAsync(
+        d_svd_info + target_offset, context->stable_workspace.info,
+        sizeof(int), cudaMemcpyDeviceToDevice, context->stream
+      ), "snapshot fixed-sp SVD info");
+
+      check_cublas(cublasDgemv(
+        context->blas, CUBLAS_OP_T, augmented.rows, handle->q,
+        &one, context->stable_workspace.U, augmented.leading_dimension,
+        augmented.c, 1, &zero,
+        context->stable_workspace.scaled_projection, 1
+      ), "project fixed-sp augmented response onto SVD U");
+      launch_fixed_sp_svd_rank_scale(
+        context->stable_workspace.singular_values,
+        context->stable_workspace.scaled_projection,
+        d_svd_info + target_offset,
+        augmented.rows, handle->q, target,
+        std::numeric_limits<double>::epsilon(),
+        d_qr_rank, d_sigma_max, d_smallest_retained_sigma,
+        context->stream);
+      check_cublas(cublasDgemv(
+        context->blas, CUBLAS_OP_N, handle->q, handle->q,
+        &one, context->stable_workspace.V, handle->q,
+        context->stable_workspace.scaled_projection, 1,
+        &zero, context->stable_workspace.diagonal, 1
+      ), "form fixed-sp augmented SVD coefficients from V");
+
+      AugmentedSystemView correction = build_fixed_sp_augmented_system(
+        handle->d_X_null, handle->d_penalty_roots,
+        handle->penalty_root_offsets.data(),
+        handle->penalty_root_ranks.data(),
+        handle->total_penalty_root_rows, handle->penalty_count,
+        handle->d_H_root, handle->H_root_rank,
+        target_y, target_sp, host_target_sp,
+        batch.n, handle->q, target,
+        &context->stable_workspace, context->stream);
+      check_cublas(cublasDgemv(
+        context->blas, CUBLAS_OP_N, correction.rows, handle->q,
+        &minus_one, correction.B, correction.leading_dimension,
+        context->stable_workspace.diagonal, 1,
+        &one, correction.c, 1
+      ), "form fixed-sp augmented SVD correction residual");
+      check_cublas(cublasDgemv(
+        context->blas, CUBLAS_OP_T, correction.rows, handle->q,
+        &one, context->stable_workspace.U, correction.leading_dimension,
+        correction.c, 1, &zero,
+        context->stable_workspace.scaled_projection, 1
+      ), "project fixed-sp augmented SVD correction onto U");
+      launch_fixed_sp_svd_rank_scale(
+        context->stable_workspace.singular_values,
+        context->stable_workspace.scaled_projection,
+        d_svd_info + target_offset,
+        correction.rows, handle->q, target,
+        std::numeric_limits<double>::epsilon(),
+        d_qr_rank, d_sigma_max, d_smallest_retained_sigma,
+        context->stream);
+      check_cublas(cublasDgemv(
+        context->blas, CUBLAS_OP_N, handle->q, handle->q,
+        &one, context->stable_workspace.V, handle->q,
+        context->stable_workspace.scaled_projection, 1,
+        &zero, context->stable_workspace.tau, 1
+      ), "form fixed-sp augmented SVD correction from V");
+      check_cublas(cublasDaxpy(
+        context->blas, handle->q, &one,
+        context->stable_workspace.tau, 1,
+        context->stable_workspace.diagonal, 1
+      ), "apply fixed-sp augmented SVD correction");
+
+      if (write_coefficients) {
+        const std::size_t coefficient_blocks =
+          (static_cast<std::size_t>(handle->p) + threads - 1U) / threads;
+        finalize_fixed_sp_qr_coefficients<<<
+          static_cast<unsigned int>(coefficient_blocks), threads,
+          0, context->stream
+        >>>(
+          context->stable_workspace.diagonal, handle->d_Z, target,
+          handle->p, handle->q, slot->coefficients);
+        check_cuda(cudaGetLastError(),
+                   "launch fixed-sp SVD coefficient finalization");
+      }
+      if (needs_fitted) {
+        const std::size_t fitted_blocks =
+          (static_cast<std::size_t>(batch.n) + threads - 1U) / threads;
+        finalize_fixed_sp_qr_fitted<<<
+          static_cast<unsigned int>(fitted_blocks), threads,
+          0, context->stream
+        >>>(
+          handle->d_X_null, context->stable_workspace.diagonal, target,
+          batch.n, handle->q, slot->fitted);
+        check_cuda(cudaGetLastError(),
+                   "launch fixed-sp SVD fitted finalization");
+      }
+      if (write_residuals || write_rss) {
+        finalize_fixed_sp_qr_residual_rss<<<
+          1U, threads, threads * sizeof(double), context->stream
+        >>>(
+          d_y, slot->fitted, target, batch.n,
+          slot->residuals, slot->rss, write_residuals, write_rss);
+        check_cuda(cudaGetLastError(),
+                   "launch fixed-sp SVD residual and RSS finalization");
+      }
+      if (write_coefficients || needs_fitted) {
+        token->diagnostics.per_target_output_finalize_call_count += 1;
+      }
+
+      check_fixed_sp_outputs_finite<<<1U, threads, 0, context->stream>>>(
+        d_rhs, context->stable_workspace.diagonal,
+        device_target_index(target),
+        slot->coefficients, slot->fitted, slot->residuals, slot->rss,
+        batch.n, handle->p, handle->q, 1,
+        batch.output_mask, d_qr_finite_status);
+      check_cuda(cudaGetLastError(),
+                 "launch fixed-sp SVD output finite check");
+    }
+
+    if (svd_target_count > 0) {
+      check_cuda(cudaMemcpyAsync(
+        h_geqrf_info, d_geqrf_info,
+        allocation_bytes(
+          stable_compact_count, sizeof(int),
+          "fixed-sp SVD compact integer diagnostics"),
+        cudaMemcpyDeviceToHost, context->stream
+      ), "copy fixed-sp SVD compact integer diagnostics");
+      check_cuda(cudaMemcpyAsync(
+        h_sigma_max, d_sigma_max,
+        allocation_bytes(
+          checked_multiply(
+            reserved_targets, kStableSigmaArraysPerTarget,
+            "fixed-sp SVD compact sigma diagnostics"),
+          sizeof(double), "fixed-sp SVD compact sigma diagnostics"),
+        cudaMemcpyDeviceToHost, context->stream
+      ), "copy fixed-sp SVD compact sigma diagnostics");
+      check_cuda(cudaEventRecord(
+        context->cholesky_factor_checkpoint_event, context->stream
+      ), "record fixed-sp SVD checkpoint");
+      context->diagnostics.svd_checkpoint_record_count += 1;
+      check_cuda(cudaEventSynchronize(
+        context->cholesky_factor_checkpoint_event
+      ), "wait for fixed-sp SVD checkpoint");
+      context->diagnostics.svd_checkpoint_wait_count += 1;
+
+      int observed_svd_count = 0;
+      for (int target = 0; target < batch.target_count; ++target) {
+        const std::size_t target_offset = static_cast<std::size_t>(target);
+        if (!target_uses_svd(target_offset)) continue;
+        observed_svd_count += 1;
+
+        const int info = h_svd_info[target_offset];
+        const int rank = h_qr_rank[target_offset];
+        const double maximum = h_sigma_max[target_offset];
+        const double smallest = h_smallest_retained_sigma[target_offset];
+        token->diagnostics.svd_info[target_offset] = info;
+        token->diagnostics.effective_rank[target_offset] = rank;
+        token->diagnostics.sigma_max[target_offset] = maximum;
+        token->diagnostics.smallest_retained_sigma[target_offset] = smallest;
+        token->executed_routes[target_offset] = FixedSpRoute::AugmentedSvd;
+        token->target_true_batched[target_offset] = false;
+        token->diagnostics.executed_svd_target_count += 1;
+
+        const bool rank_diagnostics_valid =
+          rank >= 0 && rank <= handle->q &&
+          std::isfinite(maximum) && maximum >= 0.0 &&
+          std::isfinite(smallest) && smallest >= 0.0 &&
+          smallest <= maximum &&
+          ((rank == 0 && smallest == 0.0) ||
+           (rank > 0 && smallest > 0.0));
+        if (info != 0 || !rank_diagnostics_valid) {
+          token->solver_statuses[target_offset] =
+            FixedSpStatus::ErrSvdFailed;
+          continue;
+        }
+        token->solver_statuses[target_offset] = FixedSpStatus::OkAugmentedSvd;
+      }
+      if (observed_svd_count != svd_target_count) {
+        throw std::runtime_error(
+          "fixed-sp SVD target accounting mismatch");
       }
     }
 
@@ -4581,25 +4876,25 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         batch.output_mask, d_potrf_info);
       check_cuda(cudaGetLastError(), "launch fixed-sp output finite check");
     }
-    if (token->diagnostics.planned_qr_target_count > 0) {
-      const std::size_t qr_finite_blocks =
+    if (token->diagnostics.planned_qr_target_count > 0 ||
+        token->diagnostics.executed_svd_target_count > 0) {
+      const std::size_t stable_finite_blocks =
         (targets + threads - 1U) / threads;
-      if (qr_finite_blocks == 0U ||
-          qr_finite_blocks > std::numeric_limits<unsigned int>::max()) {
+      if (stable_finite_blocks == 0U ||
+          stable_finite_blocks > std::numeric_limits<unsigned int>::max()) {
         throw std::runtime_error(
-          "fixed-sp QR finite status merge size overflow");
+          "fixed-sp stable finite status merge size overflow");
       }
       merge_fixed_sp_qr_finite_status<<<
-        static_cast<unsigned int>(qr_finite_blocks), threads,
+        static_cast<unsigned int>(stable_finite_blocks), threads,
         0, context->stream
       >>>(d_qr_finite_status, batch.target_count, d_potrf_info);
       check_cuda(cudaGetLastError(),
-                 "launch fixed-sp QR finite status merge");
+                 "launch fixed-sp stable finite status merge");
     }
 
-    // Cholesky and QR finite checks both write canonical target ordinals.
-    // Unimplemented or rejected stable targets remain explicit errors, so
-    // their provisional output status is never exposed.
+    // Every route writes finite status by canonical target ordinal. Failed
+    // solver attempts remain explicit errors, so provisional output is hidden.
     check_cuda(cudaMemcpyAsync(
       slot->host_finite_status, d_potrf_info,
       allocation_bytes(targets, sizeof(int), "fixed-sp finite status"),

@@ -524,10 +524,12 @@ partial_factor_fail_info <- fixed_sp_cuda_residual_info(
 )
 expected_partial_status <- rep("OK_CHOLESKY_BATCHED", safe_count)
 expected_partial_status[[middle_ordinal]] <-
-  "ERR_STABLE_PATH_NOT_IMPLEMENTED"
+  "OK_AUGMENTED_SVD"
 expected_partial_reason <- rep("", safe_count)
 expected_partial_reason[[middle_ordinal]] <-
   "CHOLESKY_NON_POSITIVE_PIVOT"
+expected_partial_route <- rep("CHOLESKY_BATCHED", safe_count)
+expected_partial_route[[middle_ordinal]] <- "AUGMENTED_SVD"
 assert_true(
   partial_factor_fail_info$potrf_batched_call_count == 1L &&
     partial_factor_fail_info$potrs_batched_call_count == 1L &&
@@ -538,12 +540,13 @@ assert_true(
     partial_factor_fail_info$stable_reroute_count == 1L &&
     partial_factor_fail_info$executed_cholesky_target_count ==
       safe_count - 1L &&
+    partial_factor_fail_info$executed_svd_target_count == 1L &&
     partial_factor_fail_info$coefficient_batch_finalize_call_count == 1L &&
     partial_factor_fail_info$fitted_batch_finalize_call_count == 1L &&
     partial_factor_fail_info$residual_rss_batch_finalize_call_count == 1L &&
-    partial_factor_fail_info$per_target_output_finalize_call_count == 0L &&
+    partial_factor_fail_info$per_target_output_finalize_call_count == 1L &&
     partial_factor_fail_info$batch_output_finalized_target_count ==
-      safe_count - 1L &&
+      safe_count &&
     !isTRUE(partial_factor_fail_info$true_batched_kernel) &&
     isTRUE(partial_factor_fail_info$canonical_output_order_exact) &&
     identical(
@@ -553,14 +556,16 @@ assert_true(
     identical(
       partial_factor_fail_info$reroute_reason,
       expected_partial_reason
-    ),
+    ) &&
+    identical(partial_factor_fail_info$executed_route,
+              expected_partial_route),
   "one middle factor failure preserves canonical batch status accounting"
 )
 partial_shadow <- fixed_sp_cuda_materialize_shadow(
   partial_factor_fail_token,
   outputs = c("coefficients", "fitted", "residuals", "rss", "rhs")
 )
-partial_successful <- setdiff(seq_len(safe_count), middle_ordinal)
+partial_successful <- seq_len(safe_count)
 partial_output_max_abs_errors <- c(
   coefficients = max(abs(
     partial_shadow$coefficients[, partial_successful, drop = FALSE] -
@@ -597,14 +602,12 @@ assert_true(
   )
 )
 assert_true(
-  all(is.na(partial_shadow$coefficients[, middle_ordinal])) &&
-    all(is.na(partial_shadow$fitted[, middle_ordinal])) &&
-    all(is.na(partial_shadow$residuals[, middle_ordinal])) &&
-    is.na(partial_shadow$rss[[middle_ordinal]]) &&
-    all(is.na(
-      partial_shadow$cuda_nullspace_rhs[, middle_ordinal]
-    )),
-  "failed canonical column is not exposed as a successful output"
+  all(is.finite(partial_shadow$coefficients[, middle_ordinal])) &&
+    all(is.finite(partial_shadow$fitted[, middle_ordinal])) &&
+    all(is.finite(partial_shadow$residuals[, middle_ordinal])) &&
+    is.finite(partial_shadow$rss[[middle_ordinal]]) &&
+    all(is.finite(partial_shadow$cuda_nullspace_rhs[, middle_ordinal])),
+  "rerouted canonical column exposes the successful SVD output"
 )
 fixed_sp_cuda_residual_release(partial_factor_fail_token)
 fixed_sp_cuda_residual_free(partial_factor_fail_token)
@@ -684,16 +687,18 @@ assert_true(
     all_factor_fail_info$cholesky_to_svd_count == safe_count &&
     all_factor_fail_info$stable_reroute_count == safe_count &&
     all_factor_fail_info$executed_cholesky_target_count == 0L &&
+    all_factor_fail_info$executed_svd_target_count == safe_count &&
     all_factor_fail_info$coefficient_batch_finalize_call_count == 0L &&
     all_factor_fail_info$fitted_batch_finalize_call_count == 0L &&
     all_factor_fail_info$residual_rss_batch_finalize_call_count == 0L &&
-    all_factor_fail_info$per_target_output_finalize_call_count == 0L &&
-    all_factor_fail_info$batch_output_finalized_target_count == 0L &&
+    all_factor_fail_info$per_target_output_finalize_call_count == safe_count &&
+    all_factor_fail_info$batch_output_finalized_target_count == safe_count &&
     !isTRUE(all_factor_fail_info$true_batched_kernel) &&
     all(all_factor_fail_info$reroute_reason ==
           "CHOLESKY_NON_POSITIVE_PIVOT") &&
+    all(all_factor_fail_info$executed_route == "AUGMENTED_SVD") &&
     all(all_factor_fail_info$solver_status ==
-          "ERR_STABLE_PATH_NOT_IMPLEMENTED"),
+          "OK_AUGMENTED_SVD"),
   "all factor failures reroute and skip zero-sized batched solve"
 )
 fixed_sp_cuda_residual_release(all_factor_fail_token)

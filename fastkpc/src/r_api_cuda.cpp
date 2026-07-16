@@ -3623,6 +3623,10 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_info(SEXP runtime_s) {
       info.qr_checkpoint_record_count,
     Rcpp::Named("qr_checkpoint_wait_count") =
       info.qr_checkpoint_wait_count,
+    Rcpp::Named("svd_checkpoint_record_count") =
+      info.svd_checkpoint_record_count,
+    Rcpp::Named("svd_checkpoint_wait_count") =
+      info.svd_checkpoint_wait_count,
     Rcpp::Named("workspace_bytes") =
       static_cast<double>(info.workspace_bytes),
     Rcpp::Named("cublas_workspace_bytes") =
@@ -4125,6 +4129,10 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
       info.qr_rank.size() != targets ||
       info.geqrf_info.size() != targets ||
       info.ormqr_info.size() != targets ||
+      info.effective_rank.size() != targets ||
+      info.sigma_max.size() != targets ||
+      info.smallest_retained_sigma.size() != targets ||
+      info.svd_info.size() != targets ||
       info.target_true_batched.size() != targets) {
     Rcpp::stop("fixed-sp residual diagnostics size mismatch");
   }
@@ -4162,6 +4170,11 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
     Rcpp::Named("qr_rank") = Rcpp::wrap(info.qr_rank),
     Rcpp::Named("geqrf_info") = Rcpp::wrap(info.geqrf_info),
     Rcpp::Named("ormqr_info") = Rcpp::wrap(info.ormqr_info),
+    Rcpp::Named("effective_rank") = Rcpp::wrap(info.effective_rank),
+    Rcpp::Named("sigma_max") = Rcpp::wrap(info.sigma_max),
+    Rcpp::Named("smallest_retained_sigma") =
+      Rcpp::wrap(info.smallest_retained_sigma),
+    Rcpp::Named("svd_info") = Rcpp::wrap(info.svd_info),
     Rcpp::Named("target_true_batched") = target_true_batched
   );
   result["native_batch_call"] = info.native_batch_call;

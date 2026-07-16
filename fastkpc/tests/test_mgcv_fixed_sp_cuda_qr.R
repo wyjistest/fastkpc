@@ -29,6 +29,7 @@ expected_complete_batch <- function(native, null_dim) {
 
   solver_status <- rep("ERR_STABLE_PATH_NOT_IMPLEMENTED", target_count)
   solver_status[qr] <- "OK_AUGMENTED_QR"
+  solver_status[svd] <- "OK_AUGMENTED_SVD"
   solver_status[cholesky] <- if (safe_count >= 2L) {
     "OK_CHOLESKY_BATCHED"
   } else {
@@ -37,6 +38,7 @@ expected_complete_batch <- function(native, null_dim) {
   executed_route <- rep(NA_character_, target_count)
   executed_route[cholesky] <- "CHOLESKY_BATCHED"
   executed_route[qr] <- "AUGMENTED_QR"
+  executed_route[svd] <- "AUGMENTED_SVD"
   qr_rank <- rep(-1L, target_count)
   geqrf_info <- rep(-1L, target_count)
   ormqr_info <- rep(-1L, target_count)
@@ -59,8 +61,8 @@ expected_complete_batch <- function(native, null_dim) {
     planned_svd_target_count = svd_count,
     executed_cholesky_target_count = safe_count,
     executed_qr_target_count = qr_count,
-    executed_svd_target_count = 0L,
-    batch_output_finalized_target_count = safe_count + qr_count,
+    executed_svd_target_count = svd_count,
+    batch_output_finalized_target_count = target_count,
     true_batched_subgroup_count = as.integer(safe_count >= 2L),
     true_batched_attempted_target_count = if (safe_count >= 2L) {
       safe_count
@@ -414,16 +416,20 @@ assert_true(
     identical(rank_guard_info$reroute_reason,
               "QR_RANK_GUARD_REJECTED") &&
     identical(rank_guard_info$solver_status,
-              "ERR_STABLE_PATH_NOT_IMPLEMENTED") &&
+              "OK_AUGMENTED_SVD") &&
     rank_guard_info$qr_rank[[1L]] < synthetic_dto$null_dim &&
     identical(rank_guard_info$geqrf_info, 0L) &&
     identical(rank_guard_info$ormqr_info, 0L) &&
+    identical(rank_guard_info$effective_rank, 0L) &&
+    identical(rank_guard_info$svd_info, 0L) &&
+    identical(rank_guard_info$sigma_max, 0) &&
+    identical(rank_guard_info$smallest_retained_sigma, 0) &&
     identical(rank_guard_info$target_true_batched, FALSE) &&
     identical(rank_guard_info$executed_qr_target_count, 0L) &&
     identical(rank_guard_info$executed_svd_target_count, 1L) &&
     identical(rank_guard_info$stable_reroute_count, 1L) &&
     identical(rank_guard_info$qr_to_svd_count, 1L),
-  "rank-deficient augmented QR reroutes fail-closed to the unimplemented SVD"
+  "rank-deficient augmented QR reroutes successfully through SVD"
 )
 assert_true(
   runtime_after_rank_guard$qr_checkpoint_record_count -
@@ -438,10 +444,9 @@ rank_guard_shadow <- fixed_sp_cuda_materialize_shadow(
   token, outputs = c("fitted", "residuals")
 )
 assert_true(
-  all(is.na(rank_guard_shadow$fitted) & !is.nan(rank_guard_shadow$fitted)) &&
-    all(is.na(rank_guard_shadow$residuals) &
-          !is.nan(rank_guard_shadow$residuals)),
-  "rank-rejected provisional QR output is not publicly exposed"
+  max(abs(rank_guard_shadow$fitted)) < 1e-12 &&
+    max(abs(rank_guard_shadow$residuals - synthetic_Y)) < 1e-12,
+  "rank-rejected provisional QR output is replaced by the SVD solution"
 )
 
 fixed_sp_cuda_residual_release(token)

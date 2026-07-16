@@ -326,6 +326,69 @@ __global__ void fixed_sp_qr_rank_status_kernel(
   finite_status[target] = finite ? 0 : 1;
 }
 
+__global__ void fixed_sp_svd_rank_scale_kernel(
+    const double* singular_values,
+    double* scaled_projection,
+    const int* svd_info,
+    int rows,
+    int q,
+    int target_index,
+    double epsilon,
+    int* effective_rank,
+    double* sigma_max,
+    double* smallest_retained_sigma) {
+  if (blockIdx.x != 0U || threadIdx.x != 0U) return;
+
+  const std::size_t q_size = static_cast<std::size_t>(q);
+  const std::size_t target = static_cast<std::size_t>(target_index);
+  if (*svd_info != 0) {
+    for (std::size_t index = 0U; index < q_size; ++index) {
+      scaled_projection[index] = 0.0;
+    }
+    effective_rank[target] = -1;
+    sigma_max[target] = 0.0;
+    smallest_retained_sigma[target] = 0.0;
+    return;
+  }
+
+  bool finite = true;
+  double maximum = 0.0;
+  for (std::size_t index = 0U; index < q_size; ++index) {
+    const double sigma = singular_values[index];
+    finite = finite && isfinite(sigma) && sigma >= 0.0;
+    maximum = fmax(maximum, sigma);
+  }
+  const double rank_tolerance =
+    static_cast<double>(rows > q ? rows : q) * maximum * epsilon;
+  finite = finite && isfinite(rank_tolerance);
+  if (!finite) {
+    for (std::size_t index = 0U; index < q_size; ++index) {
+      scaled_projection[index] = 0.0;
+    }
+    effective_rank[target] = -1;
+    sigma_max[target] = 0.0;
+    smallest_retained_sigma[target] = 0.0;
+    return;
+  }
+
+  int rank = 0;
+  double smallest_retained = 0.0;
+  for (std::size_t index = 0U; index < q_size; ++index) {
+    const double sigma = singular_values[index];
+    if (sigma > rank_tolerance) {
+      scaled_projection[index] /= sigma;
+      smallest_retained = rank == 0 ? sigma :
+        fmin(smallest_retained, sigma);
+      rank += 1;
+    } else {
+      scaled_projection[index] = 0.0;
+    }
+  }
+  effective_rank[target] = rank;
+  sigma_max[target] = maximum;
+  smallest_retained_sigma[target] = smallest_retained;
+}
+
 unsigned int fixed_sp_augmented_block_count(
     std::size_t element_count,
     const char* name) {
@@ -650,6 +713,31 @@ void launch_fixed_sp_qr_rank_status(
     R, theta, rows, q, target_index, epsilon,
     qr_rank, reroute, finite_status);
   check_cuda(cudaGetLastError(), "launch fixed-sp QR rank status kernel");
+}
+
+void launch_fixed_sp_svd_rank_scale(
+    const double* singular_values,
+    double* scaled_projection,
+    const int* svd_info,
+    int rows,
+    int q,
+    int target_index,
+    double epsilon,
+    int* effective_rank,
+    double* sigma_max,
+    double* smallest_retained_sigma,
+    cudaStream_t stream) {
+  if (singular_values == nullptr || scaled_projection == nullptr ||
+      svd_info == nullptr || rows <= 0 || q <= 0 || rows < q ||
+      target_index < 0 || !std::isfinite(epsilon) || epsilon <= 0.0 ||
+      effective_rank == nullptr || sigma_max == nullptr ||
+      smallest_retained_sigma == nullptr || stream == nullptr) {
+    throw std::runtime_error("fixed-sp SVD rank scale inputs are invalid");
+  }
+  fixed_sp_svd_rank_scale_kernel<<<1U, 1U, 0, stream>>>(
+    singular_values, scaled_projection, svd_info, rows, q, target_index,
+    epsilon, effective_rank, sigma_max, smallest_retained_sigma);
+  check_cuda(cudaGetLastError(), "launch fixed-sp SVD rank scale kernel");
 }
 
 }  // namespace fastkpc

@@ -110,6 +110,18 @@ void launch_fixed_sp_qr_rank_status(
   int* reroute,
   int* finite_status,
   cudaStream_t stream);
+void launch_fixed_sp_svd_rank_scale(
+  const double* singular_values,
+  double* scaled_projection,
+  const int* svd_info,
+  int rows,
+  int q,
+  int target_index,
+  double epsilon,
+  int* effective_rank,
+  double* sigma_max,
+  double* smallest_retained_sigma,
+  cudaStream_t stream);
 
 }  // namespace fastkpc
 

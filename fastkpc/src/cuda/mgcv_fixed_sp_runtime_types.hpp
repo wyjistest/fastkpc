@@ -75,6 +75,8 @@ struct FixedSpRuntimeInfo {
   int cholesky_solve_checkpoint_wait_count = 0;
   int qr_checkpoint_record_count = 0;
   int qr_checkpoint_wait_count = 0;
+  int svd_checkpoint_record_count = 0;
+  int svd_checkpoint_wait_count = 0;
   std::size_t workspace_bytes = 0;
   std::size_t cublas_workspace_bytes = 0;
   std::size_t cublas_workspace_alignment = 0;
@@ -188,6 +190,10 @@ struct DeviceResidualInfo {
   std::vector<int> qr_rank;
   std::vector<int> geqrf_info;
   std::vector<int> ormqr_info;
+  std::vector<int> effective_rank;
+  std::vector<double> sigma_max;
+  std::vector<double> smallest_retained_sigma;
+  std::vector<int> svd_info;
   std::vector<bool> target_true_batched;
   bool native_batch_call = false;
   int batch_call_count = 0;
