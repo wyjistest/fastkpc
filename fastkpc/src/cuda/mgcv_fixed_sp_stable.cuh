@@ -99,6 +99,17 @@ AugmentedSystemView build_fixed_sp_augmented_system(
   int target_index,
   FixedSpStableWorkspace* workspace,
   cudaStream_t stream);
+void launch_fixed_sp_qr_rank_status(
+  const double* R,
+  const double* theta,
+  int rows,
+  int q,
+  int target_index,
+  double epsilon,
+  int* qr_rank,
+  int* reroute,
+  int* finite_status,
+  cudaStream_t stream);
 
 }  // namespace fastkpc
 

@@ -286,6 +286,46 @@ __global__ void copy_fixed_sp_augmented_H_root_kernel(
   B[destination_index] = H_root[source_index];
 }
 
+__global__ void fixed_sp_qr_rank_status_kernel(
+    const double* R,
+    const double* theta,
+    int rows,
+    int q,
+    int target_index,
+    double epsilon,
+    int* qr_rank,
+    int* reroute,
+    int* finite_status) {
+  if (blockIdx.x != 0U || threadIdx.x != 0U) return;
+
+  const std::size_t rows_size = static_cast<std::size_t>(rows);
+  const std::size_t q_size = static_cast<std::size_t>(q);
+  bool diagonal_finite = true;
+  bool finite = true;
+  double max_diag = 0.0;
+  for (std::size_t index = 0U; index < q_size; ++index) {
+    const double diagonal = R[index + rows_size * index];
+    diagonal_finite = diagonal_finite && isfinite(diagonal);
+    finite = finite && isfinite(diagonal) && isfinite(theta[index]);
+    max_diag = fmax(max_diag, fabs(diagonal));
+  }
+  const double rank_tol =
+    static_cast<double>(rows > q ? rows : q) * max_diag * epsilon;
+  diagonal_finite = diagonal_finite && isfinite(rank_tol);
+  finite = finite && isfinite(rank_tol);
+
+  int rank = 0;
+  if (diagonal_finite) {
+    for (std::size_t index = 0U; index < q_size; ++index) {
+      if (fabs(R[index + rows_size * index]) > rank_tol) rank += 1;
+    }
+  }
+  const std::size_t target = static_cast<std::size_t>(target_index);
+  qr_rank[target] = rank;
+  reroute[target] = rank < q ? 1 : 0;
+  finite_status[target] = finite ? 0 : 1;
+}
+
 unsigned int fixed_sp_augmented_block_count(
     std::size_t element_count,
     const char* name) {
@@ -587,6 +627,29 @@ AugmentedSystemView build_fixed_sp_augmented_system(
   view.cols = q;
   view.target_index = target_index;
   return view;
+}
+
+void launch_fixed_sp_qr_rank_status(
+    const double* R,
+    const double* theta,
+    int rows,
+    int q,
+    int target_index,
+    double epsilon,
+    int* qr_rank,
+    int* reroute,
+    int* finite_status,
+    cudaStream_t stream) {
+  if (R == nullptr || theta == nullptr || rows <= 0 || q <= 0 || rows < q ||
+      target_index < 0 || !std::isfinite(epsilon) || epsilon <= 0.0 ||
+      qr_rank == nullptr || reroute == nullptr || finite_status == nullptr ||
+      stream == nullptr) {
+    throw std::runtime_error("fixed-sp QR rank status inputs are invalid");
+  }
+  fixed_sp_qr_rank_status_kernel<<<1U, 1U, 0, stream>>>(
+    R, theta, rows, q, target_index, epsilon,
+    qr_rank, reroute, finite_status);
+  check_cuda(cudaGetLastError(), "launch fixed-sp QR rank status kernel");
 }
 
 }  // namespace fastkpc

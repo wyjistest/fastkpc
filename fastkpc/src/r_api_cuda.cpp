@@ -3619,6 +3619,10 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_info(SEXP runtime_s) {
       info.cholesky_solve_checkpoint_record_count,
     Rcpp::Named("cholesky_solve_checkpoint_wait_count") =
       info.cholesky_solve_checkpoint_wait_count,
+    Rcpp::Named("qr_checkpoint_record_count") =
+      info.qr_checkpoint_record_count,
+    Rcpp::Named("qr_checkpoint_wait_count") =
+      info.qr_checkpoint_wait_count,
     Rcpp::Named("workspace_bytes") =
       static_cast<double>(info.workspace_bytes),
     Rcpp::Named("cublas_workspace_bytes") =
@@ -4117,7 +4121,11 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
       info.planned_routes.size() != targets ||
       info.executed_routes.size() != targets ||
       info.reroute_reasons.size() != targets ||
-      info.solver_statuses.size() != targets) {
+      info.solver_statuses.size() != targets ||
+      info.qr_rank.size() != targets ||
+      info.geqrf_info.size() != targets ||
+      info.ormqr_info.size() != targets ||
+      info.target_true_batched.size() != targets) {
     Rcpp::stop("fixed-sp residual diagnostics size mismatch");
   }
 
@@ -4125,6 +4133,7 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
   Rcpp::CharacterVector executed_route(info.target_count);
   Rcpp::CharacterVector reroute_reason(info.target_count);
   Rcpp::CharacterVector solver_status(info.target_count);
+  Rcpp::LogicalVector target_true_batched(info.target_count);
   for (int index = 0; index < info.target_count; ++index) {
     const std::size_t offset = static_cast<std::size_t>(index);
     planned_route[index] =
@@ -4138,6 +4147,7 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
     reroute_reason[index] = info.reroute_reasons[offset];
     solver_status[index] =
       fastkpc::fixed_sp_status_name(info.solver_statuses[offset]);
+    target_true_batched[index] = info.target_true_batched[offset];
   }
 
   Rcpp::List result = Rcpp::List::create(
@@ -4148,7 +4158,11 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
     Rcpp::Named("planned_route") = planned_route,
     Rcpp::Named("executed_route") = executed_route,
     Rcpp::Named("reroute_reason") = reroute_reason,
-    Rcpp::Named("solver_status") = solver_status
+    Rcpp::Named("solver_status") = solver_status,
+    Rcpp::Named("qr_rank") = Rcpp::wrap(info.qr_rank),
+    Rcpp::Named("geqrf_info") = Rcpp::wrap(info.geqrf_info),
+    Rcpp::Named("ormqr_info") = Rcpp::wrap(info.ormqr_info),
+    Rcpp::Named("target_true_batched") = target_true_batched
   );
   result["native_batch_call"] = info.native_batch_call;
   result["batch_call_count"] = info.batch_call_count;
