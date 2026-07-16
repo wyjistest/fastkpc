@@ -1,4 +1,5 @@
 #include "mgcv_fixed_sp_runtime.hpp"
+#include "mgcv_fixed_sp_stable.cuh"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -23,6 +24,8 @@ namespace fastkpc {
 namespace {
 
 constexpr std::size_t kCublasWorkspaceBytes = 16U * 1024U * 1024U;
+constexpr std::size_t kStableIntArraysPerTarget = 6U;
+constexpr std::size_t kStableSigmaArraysPerTarget = 2U;
 
 void check_cuda(cudaError_t status, const char* stage) {
   if (status != cudaSuccess) {
@@ -63,6 +66,7 @@ struct FixedSpResourceCounters {
   ResourceLifecycleCounters event;
   ResourceLifecycleCounters cublas_handle;
   ResourceLifecycleCounters cusolver_handle;
+  ResourceLifecycleCounters gesvdj_info;
   int cleanup_error_count = 0;
 
   int allocation_count() const {
@@ -73,7 +77,8 @@ struct FixedSpResourceCounters {
   int handle_create_count() const {
     return stream.acquire_success_count + event.acquire_success_count +
       cublas_handle.acquire_success_count +
-      cusolver_handle.acquire_success_count;
+      cusolver_handle.acquire_success_count +
+      gesvdj_info.acquire_success_count;
   }
 };
 
@@ -100,6 +105,7 @@ struct FixedSpGlobalResourceLedger {
   AtomicResourceLifecycleCounters event;
   AtomicResourceLifecycleCounters cublas_handle;
   AtomicResourceLifecycleCounters cusolver_handle;
+  AtomicResourceLifecycleCounters gesvdj_info;
   std::atomic<std::int64_t> cleanup_error_count{0};
   std::atomic<int> inject_next_acquire_failure_kind{-1};
   std::atomic<int> inject_next_teardown_failure_kind{-1};
@@ -122,7 +128,8 @@ enum class FixedSpResourceKind {
   Stream,
   Event,
   CublasHandle,
-  CusolverHandle
+  CusolverHandle,
+  GesvdjInfo
 };
 
 FixedSpGlobalResourceLedger& global_resource_ledger() {
@@ -167,6 +174,8 @@ ResourceLifecycleCounters& local_resource_counters(
       return ledger->counters.cublas_handle;
     case FixedSpResourceKind::CusolverHandle:
       return ledger->counters.cusolver_handle;
+    case FixedSpResourceKind::GesvdjInfo:
+      return ledger->counters.gesvdj_info;
   }
   return ledger->counters.cuda_device;
 }
@@ -181,6 +190,7 @@ AtomicResourceLifecycleCounters& global_resource_counters(
     case FixedSpResourceKind::Event: return ledger.event;
     case FixedSpResourceKind::CublasHandle: return ledger.cublas_handle;
     case FixedSpResourceKind::CusolverHandle: return ledger.cusolver_handle;
+    case FixedSpResourceKind::GesvdjInfo: return ledger.gesvdj_info;
   }
   return ledger.cuda_device;
 }
@@ -233,6 +243,7 @@ const char* fixed_sp_resource_kind_name(FixedSpResourceKind kind) noexcept {
     case FixedSpResourceKind::Event: return "event";
     case FixedSpResourceKind::CublasHandle: return "cublas_handle";
     case FixedSpResourceKind::CusolverHandle: return "cusolver_handle";
+    case FixedSpResourceKind::GesvdjInfo: return "gesvdj_info";
   }
   return "unknown";
 }
@@ -247,6 +258,7 @@ FixedSpResourceKind fixed_sp_resource_kind_from_name(
   if (resource == "cusolver_handle") {
     return FixedSpResourceKind::CusolverHandle;
   }
+  if (resource == "gesvdj_info") return FixedSpResourceKind::GesvdjInfo;
   throw std::runtime_error("unknown fixed-sp resource failure injection target");
 }
 
@@ -571,6 +583,28 @@ void tracked_cusolver_create(FixedSpResourceLedger* ledger,
     ledger, FixedSpResourceKind::CusolverHandle);
 }
 
+void tracked_gesvdj_info_create(FixedSpResourceLedger* ledger,
+                                gesvdjInfo_t* info,
+                                const char* stage) {
+  record_resource_acquire_attempt(ledger, FixedSpResourceKind::GesvdjInfo);
+  gesvdjInfo_t acquired = nullptr;
+  const bool injected = consume_injected_resource_acquire_failure(
+    FixedSpResourceKind::GesvdjInfo);
+  const cusolverStatus_t status = injected ? CUSOLVER_STATUS_ALLOC_FAILED :
+    cusolverDnCreateGesvdjInfo(&acquired);
+  if (status != CUSOLVER_STATUS_SUCCESS) {
+    record_resource_acquire_failure(
+      ledger, FixedSpResourceKind::GesvdjInfo);
+    if (injected) {
+      throw_injected_resource_acquire_failure(
+        FixedSpResourceKind::GesvdjInfo);
+    }
+    check_cusolver(status, stage);
+  }
+  *info = acquired;
+  record_resource_acquire_success(ledger, FixedSpResourceKind::GesvdjInfo);
+}
+
 enum class TrackedTeardownDisposition {
   Noop,
   NotAttemptedRetryable,
@@ -652,6 +686,36 @@ void tracked_cuda_free(FixedSpResourceLedger* ledger,
       "injected tracked CUDA device free failure");
   }
   check_cuda(result.status, stage);
+}
+
+template <typename T>
+TrackedTeardownResult<cudaError_t> tracked_cuda_reserve_probe_free_noexcept(
+    FixedSpResourceLedger* ledger,
+    T** pointer) noexcept {
+  if (pointer == nullptr || *pointer == nullptr) {
+    return {cudaSuccess, TrackedTeardownDisposition::Noop};
+  }
+  record_resource_teardown_attempt(
+    ledger, FixedSpResourceKind::CudaDevice);
+  T* owned = std::exchange(*pointer, nullptr);
+  const cudaError_t status = cudaFree(owned);
+  if (status == cudaSuccess) {
+    record_resource_teardown_success(
+      ledger, FixedSpResourceKind::CudaDevice);
+    return {status, TrackedTeardownDisposition::CalledSuccess};
+  }
+  record_resource_teardown_indeterminate(
+    ledger, FixedSpResourceKind::CudaDevice);
+  return {status,
+          TrackedTeardownDisposition::CalledOwnershipIndeterminate};
+}
+
+template <typename T>
+void tracked_cuda_reserve_probe_free(FixedSpResourceLedger* ledger,
+                                     T** pointer,
+                                     const char* stage) {
+  check_cuda(
+    tracked_cuda_reserve_probe_free_noexcept(ledger, pointer).status, stage);
 }
 
 template <typename T>
@@ -829,6 +893,36 @@ TrackedTeardownResult<cusolverStatus_t> tracked_cusolver_destroy_noexcept(
           TrackedTeardownDisposition::CalledOwnershipIndeterminate};
 }
 
+TrackedTeardownResult<cusolverStatus_t> tracked_gesvdj_info_destroy_noexcept(
+    FixedSpResourceLedger* ledger,
+    gesvdjInfo_t* info) noexcept {
+  if (info == nullptr || *info == nullptr) {
+    return {CUSOLVER_STATUS_SUCCESS, TrackedTeardownDisposition::Noop};
+  }
+  record_resource_teardown_attempt(ledger, FixedSpResourceKind::GesvdjInfo);
+  if (consume_injected_resource_teardown_failure(
+        FixedSpResourceKind::GesvdjInfo)) {
+    record_resource_teardown_failure(ledger, FixedSpResourceKind::GesvdjInfo);
+    return {CUSOLVER_STATUS_INTERNAL_ERROR,
+            TrackedTeardownDisposition::NotAttemptedRetryable};
+  }
+  gesvdjInfo_t owned = std::exchange(*info, nullptr);
+  cusolverStatus_t status = cusolverDnDestroyGesvdjInfo(owned);
+  if (consume_injected_resource_post_call_teardown_failure(
+        FixedSpResourceKind::GesvdjInfo) &&
+      status == CUSOLVER_STATUS_SUCCESS) {
+    status = CUSOLVER_STATUS_INTERNAL_ERROR;
+  }
+  if (status == CUSOLVER_STATUS_SUCCESS) {
+    record_resource_teardown_success(ledger, FixedSpResourceKind::GesvdjInfo);
+    return {status, TrackedTeardownDisposition::CalledSuccess};
+  }
+  record_resource_teardown_indeterminate(
+    ledger, FixedSpResourceKind::GesvdjInfo);
+  return {status,
+          TrackedTeardownDisposition::CalledOwnershipIndeterminate};
+}
+
 template <typename T>
 void cleanup_local_cuda_allocation_noexcept(
     FixedSpResourceLedger* ledger,
@@ -865,6 +959,10 @@ void copy_resource_counters(const FixedSpResourceCounters& counters,
     counters.cublas_handle.acquire_success_count;
   info->cusolver_handle_create_count =
     counters.cusolver_handle.acquire_success_count;
+  info->gesvdj_info_create_count =
+    counters.gesvdj_info.acquire_success_count;
+  info->gesvdj_info_destroy_count =
+    counters.gesvdj_info.teardown_success_count;
 }
 
 FixedSpResourceCounters resource_counters_snapshot(
@@ -1560,6 +1658,7 @@ class CudaRuntimeContext {
   cudaStream_t stream = nullptr;
   cublasHandle_t blas = nullptr;
   cusolverDnHandle_t solver = nullptr;
+  gesvdjInfo_t svd_params = nullptr;
   cudaEvent_t cholesky_factor_checkpoint_event = nullptr;
   cudaEvent_t cholesky_solve_checkpoint_event = nullptr;
   double* double_arena = nullptr;
@@ -1573,6 +1672,7 @@ class CudaRuntimeContext {
   std::size_t pointer_capacity = 0;
   std::size_t cublas_workspace_bytes = kCublasWorkspaceBytes;
   int potrf_lwork = 0;
+  FixedSpStableWorkspace stable_workspace;
   FixedSpCapacities capacities;
   std::shared_ptr<FixedSpResourceLedger> resource_ledger =
     std::make_shared<FixedSpResourceLedger>();
@@ -2229,6 +2329,15 @@ CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
     }
     diagnostics.cusolver_deterministic_mode_enabled = true;
 
+    tracked_gesvdj_info_create(
+      resource_ledger.get(), &svd_params, "create Phase 3C gesvdjInfo");
+    check_cusolver(cusolverDnXgesvdjSetTolerance(svd_params, 1e-12),
+                   "set Phase 3C SVD convergence tolerance");
+    check_cusolver(cusolverDnXgesvdjSetMaxSweeps(svd_params, 100),
+                   "set Phase 3C SVD max sweeps");
+    check_cusolver(cusolverDnXgesvdjSetSortEig(svd_params, 1),
+                   "sort Phase 3C singular values");
+
     tracked_cuda_event_create(
       resource_ledger.get(), &cholesky_factor_checkpoint_event,
       cudaEventDisableTiming, "create Cholesky factor checkpoint event");
@@ -2260,6 +2369,7 @@ OwnerTeardownStatus CudaRuntimeContext::close_once_noexcept() noexcept {
     stream = nullptr;
     blas = nullptr;
     solver = nullptr;
+    svd_params = nullptr;
     cholesky_factor_checkpoint_event = nullptr;
     cholesky_solve_checkpoint_event = nullptr;
     double_arena = nullptr;
@@ -2267,6 +2377,7 @@ OwnerTeardownStatus CudaRuntimeContext::close_once_noexcept() noexcept {
     host_status_arena = nullptr;
     pointer_arena = nullptr;
     cublas_workspace = nullptr;
+    stable_workspace = FixedSpStableWorkspace{};
     diagnostics.freed = true;
     lifecycle = FixedSpOwnerLifecycle::Freed;
     return status;
@@ -2276,6 +2387,7 @@ OwnerTeardownStatus CudaRuntimeContext::close_once_noexcept() noexcept {
   ScopedCleanupCudaDevice cleanup_device(creator_pid, device_id, ledger);
   if (cleanup_device.ready()) {
     status.observe(tracked_cuda_free_noexcept(ledger, &double_arena));
+    if (double_arena == nullptr) stable_workspace = FixedSpStableWorkspace{};
     status.observe(tracked_cuda_free_noexcept(ledger, &int_arena));
     status.observe(
       tracked_cuda_free_host_noexcept(ledger, &host_status_arena));
@@ -2286,6 +2398,7 @@ OwnerTeardownStatus CudaRuntimeContext::close_once_noexcept() noexcept {
       ledger, &cholesky_solve_checkpoint_event));
     status.observe(tracked_cuda_event_destroy_noexcept(
       ledger, &cholesky_factor_checkpoint_event));
+    status.observe(tracked_gesvdj_info_destroy_noexcept(ledger, &svd_params));
     status.observe(tracked_cusolver_destroy_noexcept(ledger, &solver));
     status.observe(tracked_cublas_destroy_noexcept(ledger, &blas));
     status.observe(tracked_cuda_stream_destroy_noexcept(ledger, &stream));
@@ -2387,6 +2500,38 @@ void CudaRuntimeContext::reserve(
     }
   }
 
+  FixedSpStableWorkspace requested_stable_workspace = stable_workspace;
+  const bool stable_dimensions_grow =
+    merged_capacities.augmented_rows > stable_workspace.max_rows ||
+    merged_capacities.null_dim > stable_workspace.max_q;
+  if (stable_dimensions_grow) {
+    double* stable_probe = nullptr;
+    try {
+      const std::size_t probe_count =
+        fixed_sp_stable_probe_double_count(
+          merged_capacities.augmented_rows,
+          merged_capacities.null_dim);
+      tracked_cuda_malloc(
+        resource_ledger.get(), &stable_probe,
+        allocation_bytes(
+          probe_count, sizeof(double), "stable reserve probe"),
+        "allocate stable reserve probe");
+      requested_stable_workspace = fixed_sp_stable_probe_view(
+        stable_probe, merged_capacities.augmented_rows,
+        merged_capacities.null_dim);
+      query_fixed_sp_stable_workspace(
+        solver, svd_params, &requested_stable_workspace);
+      // Scoped probes must not intercept teardown injection armed for a
+      // persistent arena owner, but their real allocation/free is ledgered.
+      tracked_cuda_reserve_probe_free(
+        resource_ledger.get(), &stable_probe, "free stable reserve probe");
+    } catch (...) {
+      tracked_cuda_reserve_probe_free_noexcept(
+        resource_ledger.get(), &stable_probe);
+      throw;
+    }
+  }
+
   const std::size_t targets =
     static_cast<std::size_t>(merged_capacities.target_count);
   const std::size_t n = static_cast<std::size_t>(merged_capacities.n);
@@ -2412,8 +2557,30 @@ void CudaRuntimeContext::reserve(
   double_required = checked_add(
     double_required, static_cast<std::size_t>(requested_potrf_lwork),
     "double arena");
-  const std::size_t int_required = checked_add(
+  const std::size_t stable_sigma_count = checked_multiply(
+    targets, kStableSigmaArraysPerTarget, "stable sigma diagnostics");
+  double_required = checked_add(
+    double_required, stable_sigma_count, "double arena");
+  const std::size_t stable_workspace_offset = double_required;
+  const std::size_t stable_workspace_count =
+    fixed_sp_stable_workspace_double_count(
+      requested_stable_workspace.max_rows,
+      requested_stable_workspace.max_q,
+      requested_stable_workspace.eigen_lwork,
+      requested_stable_workspace.qr_lwork,
+      requested_stable_workspace.ormqr_lwork,
+      requested_stable_workspace.svd_lwork);
+  double_required = checked_add(
+    double_required, stable_workspace_count, "double arena");
+
+  const std::size_t legacy_int_count = checked_add(
     checked_multiply(targets, 3U, "int arena"), 1U, "int arena");
+  const std::size_t stable_compact_int_count = checked_multiply(
+    targets, kStableIntArraysPerTarget, "stable compact int arena");
+  const std::size_t stable_info_offset = checked_add(
+    legacy_int_count, stable_compact_int_count, "stable info offset");
+  const std::size_t int_required = checked_add(
+    stable_info_offset, 1U, "int arena");
   const std::size_t pointer_required =
     checked_multiply(targets, 2U, "pointer arena");
 
@@ -2566,6 +2733,16 @@ void CudaRuntimeContext::reserve(
   const bool grew = replace_double || replace_int || replace_host_status ||
     replace_pointer || install_cublas_workspace;
 
+  stable_workspace = fixed_sp_stable_workspace_view(
+    double_arena + stable_workspace_offset,
+    int_arena + stable_info_offset,
+    requested_stable_workspace.max_rows,
+    requested_stable_workspace.max_q,
+    requested_stable_workspace.eigen_lwork,
+    requested_stable_workspace.qr_lwork,
+    requested_stable_workspace.ormqr_lwork,
+    requested_stable_workspace.svd_lwork);
+
   capacities = merged_capacities;
   potrf_lwork = std::max(potrf_lwork, requested_potrf_lwork);
 
@@ -2588,6 +2765,22 @@ void CudaRuntimeContext::reserve(
   diagnostics.workspace_bytes = workspace_bytes;
   diagnostics.cublas_workspace_bytes =
     diagnostics.cublas_user_workspace_installed ? cublas_workspace_bytes : 0;
+  diagnostics.eigen_workspace_bytes = allocation_bytes(
+    static_cast<std::size_t>(stable_workspace.eigen_lwork), sizeof(double),
+    "eigensolver workspace diagnostics");
+  diagnostics.qr_workspace_bytes = allocation_bytes(
+    static_cast<std::size_t>(std::max(
+      stable_workspace.qr_lwork, stable_workspace.ormqr_lwork)),
+    sizeof(double), "QR workspace diagnostics");
+  diagnostics.svd_workspace_bytes = allocation_bytes(
+    static_cast<std::size_t>(stable_workspace.svd_lwork), sizeof(double),
+    "SVD workspace diagnostics");
+  diagnostics.augmented_workspace_bytes = allocation_bytes(
+    checked_multiply(
+      static_cast<std::size_t>(stable_workspace.max_rows),
+      static_cast<std::size_t>(stable_workspace.max_q),
+      "augmented workspace diagnostics"),
+    sizeof(double), "augmented workspace diagnostics");
   diagnostics.workspace_reserve_count += 1;
   if (grew) diagnostics.workspace_grow_count += 1;
 }
@@ -2680,6 +2873,7 @@ FixedSpResourceSnapshot test_fixed_sp_cuda_resource_snapshot() {
   snapshot.event = snapshot_one(ledger.event);
   snapshot.cublas_handle = snapshot_one(ledger.cublas_handle);
   snapshot.cusolver_handle = snapshot_one(ledger.cusolver_handle);
+  snapshot.gesvdj_info = snapshot_one(ledger.gesvdj_info);
   snapshot.cleanup_error_count = ledger.cleanup_error_count.load(
     std::memory_order_relaxed);
   return snapshot;
@@ -2833,6 +3027,20 @@ void test_exercise_fixed_sp_cuda_resource_teardown_failure(
         const TrackedTeardownResult<cusolverStatus_t> second =
           tracked_cusolver_destroy_noexcept(&ledger, &handle);
         require_retry(second.disposition, handle != nullptr);
+      }
+      break;
+    }
+    case FixedSpResourceKind::GesvdjInfo: {
+      gesvdjInfo_t info = nullptr;
+      tracked_gesvdj_info_create(
+        &ledger, &info, "create teardown test gesvdj info");
+      const TrackedTeardownResult<cusolverStatus_t> first =
+        tracked_gesvdj_info_destroy_noexcept(&ledger, &info);
+      require_first(first.disposition, info != nullptr);
+      if (!post_call_mode) {
+        const TrackedTeardownResult<cusolverStatus_t> second =
+          tracked_gesvdj_info_destroy_noexcept(&ledger, &info);
+        require_retry(second.disposition, info != nullptr);
       }
       break;
     }

@@ -69,6 +69,10 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   -o "$BUILD/fastspline_residual_cuda.o"
 
 "$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
+  $COMMON_INC -c "$ROOT/src/cuda/mgcv_fixed_sp_stable.cu" \
+  -o "$BUILD/mgcv_fixed_sp_stable.o"
+
+"$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
   $COMMON_INC -c "$ROOT/src/cuda/mgcv_fixed_sp_runtime.cu" \
   -o "$BUILD/mgcv_fixed_sp_runtime.o"
 
@@ -101,6 +105,7 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   "$BUILD/hsic_batch_cuda.o" \
   "$BUILD/fastspline_batched_solver.o" \
   "$BUILD/fastspline_residual_cuda.o" \
+  "$BUILD/mgcv_fixed_sp_stable.o" \
   "$BUILD/mgcv_fixed_sp_runtime.o" \
   "$BUILD/mgcv_extract_fixed_sp_cuda.o" \
   $LAPACK_LIBS $BLAS_LIBS $FLIBS \

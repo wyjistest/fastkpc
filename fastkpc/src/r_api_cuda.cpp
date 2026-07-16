@@ -3439,6 +3439,7 @@ extern "C" SEXP C_fixed_sp_cuda_test_resource_snapshot() {
   append(snapshot.event, "event", "create", "destroy");
   append(snapshot.cublas_handle, "cublas_handle", "create", "destroy");
   append(snapshot.cusolver_handle, "cusolver_handle", "create", "destroy");
+  append(snapshot.gesvdj_info, "gesvdj_info", "create", "destroy");
   result["cleanup_error_count"] =
     static_cast<double>(snapshot.cleanup_error_count);
   return result;
@@ -3600,8 +3601,14 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_info(SEXP runtime_s) {
       info.cublas_handle_create_count,
     Rcpp::Named("cusolver_handle_create_count") =
       info.cusolver_handle_create_count,
+    Rcpp::Named("gesvdj_info_create_count") =
+      info.gesvdj_info_create_count,
+    Rcpp::Named("gesvdj_info_destroy_count") =
+      info.gesvdj_info_destroy_count,
     Rcpp::Named("workspace_reserve_count") = info.workspace_reserve_count,
     Rcpp::Named("workspace_grow_count") = info.workspace_grow_count,
+    Rcpp::Named("stable_workspace_grow_count") =
+      info.stable_workspace_grow_count,
     Rcpp::Named("cuda_device_synchronize_count") =
       info.cuda_device_synchronize_count,
     Rcpp::Named("cholesky_factor_checkpoint_record_count") =
@@ -3618,6 +3625,14 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_info(SEXP runtime_s) {
       static_cast<double>(info.cublas_workspace_bytes),
     Rcpp::Named("cublas_workspace_alignment") =
       static_cast<double>(info.cublas_workspace_alignment),
+    Rcpp::Named("eigen_workspace_bytes") =
+      static_cast<double>(info.eigen_workspace_bytes),
+    Rcpp::Named("qr_workspace_bytes") =
+      static_cast<double>(info.qr_workspace_bytes),
+    Rcpp::Named("svd_workspace_bytes") =
+      static_cast<double>(info.svd_workspace_bytes),
+    Rcpp::Named("augmented_workspace_bytes") =
+      static_cast<double>(info.augmented_workspace_bytes),
     Rcpp::Named("cuda_toolkit_version") = info.cuda_toolkit_version,
     Rcpp::Named("cuda_driver_version") = info.cuda_driver_version,
     Rcpp::Named("compute_capability_major") =

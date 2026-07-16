@@ -10,6 +10,21 @@ assert_error <- function(expression, pattern, message) {
     message
   )
 }
+assert_named_scalar <- function(object, name, type, message) {
+  object_names <- names(object)
+  assert_true(
+    is.list(object) && !is.null(object_names) && !anyNA(object_names) &&
+      identical(sum(object_names == name), 1L),
+    paste(message, "has exactly one named field")
+  )
+  value <- object[[name]]
+  assert_true(
+    !is.null(value) && identical(typeof(value), type) &&
+      length(value) == 1L && !is.na(value),
+    paste(message, "has the required scalar type and length")
+  )
+  value
+}
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
   cat("SKIP Phase 3 CUDA runtime lifecycle\n")
@@ -76,6 +91,40 @@ fixed_sp_cuda_runtime_reserve(
   penalty_count = 7L, augmented_rows = 407L
 )
 after <- fixed_sp_cuda_runtime_info(runtime)
+stable_field_types <- c(
+  gesvdj_info_create_count = "integer",
+  gesvdj_info_destroy_count = "integer",
+  eigen_workspace_bytes = "double",
+  qr_workspace_bytes = "double",
+  svd_workspace_bytes = "double",
+  augmented_workspace_bytes = "double",
+  stable_workspace_grow_count = "integer"
+)
+stable_info <- lapply(names(stable_field_types), function(field) {
+  assert_named_scalar(
+    after, field, stable_field_types[[field]],
+    paste("stable runtime diagnostic", field)
+  )
+})
+names(stable_info) <- names(stable_field_types)
+assert_true(
+  !all(vapply(stable_info, is.null, logical(1L))),
+  "stable runtime diagnostics cannot degrade to all NULL"
+)
+assert_true(stable_info$gesvdj_info_create_count == 1L,
+            "one persistent gesvdj info object")
+assert_true(stable_info$gesvdj_info_destroy_count == 0L,
+            "reserve does not destroy the persistent gesvdj info object")
+assert_true(stable_info$eigen_workspace_bytes > 0,
+            "eigensolver workspace is reserved")
+assert_true(stable_info$qr_workspace_bytes > 0,
+            "QR workspace is reserved")
+assert_true(stable_info$svd_workspace_bytes > 0,
+            "SVD workspace is reserved")
+assert_true(stable_info$augmented_workspace_bytes >= 8 * 407 * 64,
+            "augmented stable matrix capacity is reserved")
+assert_true(stable_info$stable_workspace_grow_count == 0L,
+            "canonical reserve performs no solve-time stable growth")
 assert_true(after$workspace_reserve_count == 1L, "one reserve")
 assert_true(after$workspace_grow_count == 1L, "one workspace growth")
 assert_true(after$cuda_device_allocation_count >
@@ -105,6 +154,19 @@ assert_true(equal$workspace_reserve_count == 2L, "equal reserve counted")
 assert_true(equal$workspace_grow_count == 1L, "equal reserve does not grow")
 assert_true(equal$workspace_bytes == after$workspace_bytes,
             "equal reserve keeps workspace")
+assert_true(
+  equal$cuda_device_allocation_count == after$cuda_device_allocation_count &&
+    equal$cuda_host_allocation_count == after$cuda_host_allocation_count,
+  "equal reserve does not allocate or rerun reserve-time probes"
+)
+assert_true(
+  equal$eigen_workspace_bytes == after$eigen_workspace_bytes &&
+    equal$qr_workspace_bytes == after$qr_workspace_bytes &&
+    equal$svd_workspace_bytes == after$svd_workspace_bytes &&
+    equal$augmented_workspace_bytes == after$augmented_workspace_bytes &&
+    equal$stable_workspace_grow_count == 0L,
+  "equal reserve keeps stable workspace diagnostics without growth"
+)
 
 fixed_sp_cuda_runtime_reserve(
   runtime, n = 128L, null_dim = 32L, target_count = 8L,
@@ -181,7 +243,8 @@ resources <- list(
   stream = c("create", "destroy"),
   event = c("create", "destroy"),
   cublas_handle = c("create", "destroy"),
-  cusolver_handle = c("create", "destroy")
+  cusolver_handle = c("create", "destroy"),
+  gesvdj_info = c("create", "destroy")
 )
 assert_resource_invariants <- function(snapshot, message,
                                        require_quiescent = FALSE) {
@@ -235,8 +298,91 @@ for (resource in names(resources)) {
   )
 }
 assert_true(
+  resource_delta(ledger_before, ledger_after,
+                 "gesvdj_info_create_success_count") == 1 &&
+    resource_delta(ledger_before, ledger_after,
+                   "gesvdj_info_destroy_attempt_count") == 1 &&
+    resource_delta(ledger_before, ledger_after,
+                   "gesvdj_info_destroy_success_count") == 1 &&
+    resource_delta(ledger_before, ledger_after,
+                   "gesvdj_info_destroy_failure_count") == 0 &&
+    resource_delta(ledger_before, ledger_after,
+                   "gesvdj_info_active_count") == 0,
+  "persistent gesvdj info object is destroyed exactly once at teardown"
+)
+assert_true(
   resource_delta(ledger_before, ledger_after, "cleanup_error_count") == 0,
   "scoped explicit cleanup records no teardown errors"
+)
+
+for (narrow_q in c(63L, 64L)) {
+  narrow_runtime <- fixed_sp_cuda_runtime_create(device_id = 0L)
+  on.exit(try(fixed_sp_cuda_runtime_free(narrow_runtime), silent = TRUE),
+          add = TRUE)
+  fixed_sp_cuda_runtime_reserve(
+    narrow_runtime, n = 1L, null_dim = narrow_q, target_count = 1L,
+    penalty_count = 1L, augmented_rows = 1L
+  )
+  narrow <- fixed_sp_cuda_runtime_info(narrow_runtime)
+  assert_true(
+    narrow$augmented_workspace_bytes == 8 * narrow_q,
+    paste(
+      "narrow reserve preserves requested augmented capacity for q", narrow_q
+    )
+  )
+  assert_true(
+    narrow$eigen_workspace_bytes > 0 && narrow$qr_workspace_bytes > 0 &&
+      narrow$svd_workspace_bytes > 0 &&
+      narrow$workspace_reserve_count == 1L &&
+      narrow$workspace_grow_count == 1L &&
+      narrow$stable_workspace_grow_count == 0L,
+    paste("narrow reserve creates persistent stable workspace for q", narrow_q)
+  )
+
+  fixed_sp_cuda_runtime_reserve(
+    narrow_runtime, n = 1L, null_dim = narrow_q, target_count = 1L,
+    penalty_count = 1L, augmented_rows = 1L
+  )
+  narrow_equal <- fixed_sp_cuda_runtime_info(narrow_runtime)
+  assert_true(
+    narrow_equal$workspace_reserve_count == 2L &&
+      narrow_equal$workspace_grow_count == narrow$workspace_grow_count &&
+      narrow_equal$stable_workspace_grow_count == 0L &&
+      narrow_equal$cuda_device_allocation_count ==
+        narrow$cuda_device_allocation_count &&
+      narrow_equal$cuda_host_allocation_count ==
+        narrow$cuda_host_allocation_count &&
+      narrow_equal$workspace_bytes == narrow$workspace_bytes &&
+      narrow_equal$eigen_workspace_bytes == narrow$eigen_workspace_bytes &&
+      narrow_equal$qr_workspace_bytes == narrow$qr_workspace_bytes &&
+      narrow_equal$svd_workspace_bytes == narrow$svd_workspace_bytes &&
+      narrow_equal$augmented_workspace_bytes == 8 * narrow_q,
+    paste(
+      "equal narrow reserve does not allocate, query, or grow for q", narrow_q
+    )
+  )
+  fixed_sp_cuda_runtime_free(narrow_runtime)
+}
+stable_source <- paste(
+  readLines("fastkpc/src/cuda/mgcv_fixed_sp_stable.cu", warn = FALSE),
+  collapse = "\n"
+)
+assert_true(
+  grepl(
+    "const int probe_rows = std::max(workspace->max_rows, workspace->max_q);",
+    stable_source, fixed = TRUE
+  ) &&
+    grepl(
+      "return data_double_count(std::max(max_rows, max_q), max_q);",
+      stable_source, fixed = TRUE
+    ) &&
+    grepl("solver, probe_rows, workspace->max_q,", stable_source,
+          fixed = TRUE) &&
+    grepl("probe_rows, 1, workspace->max_q,", stable_source,
+          fixed = TRUE) &&
+    grepl("workspace->c, probe_rows, &workspace->ormqr_lwork", stable_source,
+          fixed = TRUE),
+  "stable workspace queries use a safely allocated tall probe geometry"
 )
 
 runtime_retry_before <- resource_snapshot()
@@ -450,11 +596,11 @@ assert_true(
     growth_after$workspace_grow_count == growth_before$workspace_grow_count &&
     growth_after$workspace_bytes == growth_before$workspace_bytes &&
     resource_delta(growth_ledger_before, growth_ledger_after,
-                   "cuda_device_allocate_success_count") == 1 &&
+                   "cuda_device_allocate_success_count") == 2 &&
     resource_delta(growth_ledger_before, growth_ledger_after,
-                   "cuda_device_free_attempt_count") == 2 &&
+                   "cuda_device_free_attempt_count") == 3 &&
     resource_delta(growth_ledger_before, growth_ledger_after,
-                   "cuda_device_free_success_count") == 1 &&
+                   "cuda_device_free_success_count") == 2 &&
     resource_delta(growth_ledger_before, growth_ledger_after,
                    "cuda_device_free_failure_count") == 1 &&
     resource_delta(growth_ledger_before, growth_ledger_after,
@@ -556,11 +702,11 @@ assert_error(
 replacement_partial <- resource_snapshot()
 assert_true(
   resource_delta(replacement_before, replacement_partial,
-                 "cuda_device_allocate_success_count") == 1 &&
+                 "cuda_device_allocate_success_count") == 2 &&
     resource_delta(replacement_before, replacement_partial,
-                   "cuda_device_free_attempt_count") == 2 &&
+                   "cuda_device_free_attempt_count") == 3 &&
     resource_delta(replacement_before, replacement_partial,
-                   "cuda_device_free_success_count") == 1 &&
+                   "cuda_device_free_success_count") == 2 &&
     resource_delta(replacement_before, replacement_partial,
                    "cuda_device_free_failure_count") == 1 &&
     resource_delta(replacement_before, replacement_partial,
@@ -573,9 +719,9 @@ fixed_sp_cuda_runtime_free(replacement_runtime)
 replacement_after <- resource_snapshot()
 assert_true(
   resource_delta(replacement_before, replacement_after,
-                 "cuda_device_free_attempt_count") == 5 &&
+                 "cuda_device_free_attempt_count") == 6 &&
     resource_delta(replacement_before, replacement_after,
-                   "cuda_device_free_success_count") == 4 &&
+                   "cuda_device_free_success_count") == 5 &&
     resource_delta(replacement_before, replacement_after,
                    "cuda_device_free_failure_count") == 1 &&
     resource_delta(replacement_before, replacement_after,

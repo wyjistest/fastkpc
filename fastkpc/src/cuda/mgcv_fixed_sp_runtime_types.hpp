@@ -62,8 +62,11 @@ struct FixedSpRuntimeInfo {
   int event_create_count = 0;
   int cublas_handle_create_count = 0;
   int cusolver_handle_create_count = 0;
+  int gesvdj_info_create_count = 0;
+  int gesvdj_info_destroy_count = 0;
   int workspace_reserve_count = 0;
   int workspace_grow_count = 0;
+  int stable_workspace_grow_count = 0;
   int cuda_device_synchronize_count = 0;
   int cholesky_factor_checkpoint_record_count = 0;
   int cholesky_factor_checkpoint_wait_count = 0;
@@ -72,6 +75,10 @@ struct FixedSpRuntimeInfo {
   std::size_t workspace_bytes = 0;
   std::size_t cublas_workspace_bytes = 0;
   std::size_t cublas_workspace_alignment = 0;
+  std::size_t eigen_workspace_bytes = 0;
+  std::size_t qr_workspace_bytes = 0;
+  std::size_t svd_workspace_bytes = 0;
+  std::size_t augmented_workspace_bytes = 0;
   int cuda_toolkit_version = 0;
   int cuda_driver_version = 0;
   int compute_capability_major = 0;
@@ -102,6 +109,7 @@ struct FixedSpResourceSnapshot {
   FixedSpResourceLifecycleSnapshot event;
   FixedSpResourceLifecycleSnapshot cublas_handle;
   FixedSpResourceLifecycleSnapshot cusolver_handle;
+  FixedSpResourceLifecycleSnapshot gesvdj_info;
   std::int64_t cleanup_error_count = 0;
 };
 
