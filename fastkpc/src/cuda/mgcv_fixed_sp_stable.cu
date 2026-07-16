@@ -116,17 +116,23 @@ __global__ void build_fixed_sp_root_kernel(
     return;
   }
 
+  const std::size_t q_size = static_cast<std::size_t>(q);
+  const std::size_t eigenvector_count = q_size * q_size;
+  const std::size_t root_leading_dimension_size =
+    static_cast<std::size_t>(root_leading_dimension);
+  const std::size_t root_row_offset_size =
+    static_cast<std::size_t>(root_row_offset);
   bool finite = true;
   bool ascending = true;
   double maximum_absolute_eigenvalue = 0.0;
-  for (int index = 0; index < q; ++index) {
+  for (std::size_t index = 0; index < q_size; ++index) {
     const double value = eigenvalues[index];
     finite = finite && isfinite(value);
-    if (index > 0 && value < eigenvalues[index - 1]) ascending = false;
+    if (index > 0U && value < eigenvalues[index - 1U]) ascending = false;
     maximum_absolute_eigenvalue =
       fmax(maximum_absolute_eigenvalue, fabs(value));
   }
-  for (int index = 0; index < q * q; ++index) {
+  for (std::size_t index = 0; index < eigenvector_count; ++index) {
     finite = finite && isfinite(eigenvectors[index]);
   }
 
@@ -136,7 +142,7 @@ __global__ void build_fixed_sp_root_kernel(
   bool psd = finite;
   int retained_rank = 0;
   if (finite) {
-    for (int index = 0; index < q; ++index) {
+    for (std::size_t index = 0; index < q_size; ++index) {
       if (eigenvalues[index] < -tolerance) psd = false;
       if (eigenvalues[index] > tolerance) retained_rank += 1;
     }
@@ -155,30 +161,32 @@ __global__ void build_fixed_sp_root_kernel(
     return;
   }
 
-  int root_row = 0;
-  for (int eigen_index = 0; eigen_index < q; ++eigen_index) {
+  std::size_t root_row = 0U;
+  for (std::size_t eigen_index = 0; eigen_index < q_size; ++eigen_index) {
     const double eigenvalue = eigenvalues[eigen_index];
     if (eigenvalue <= tolerance) continue;
 
-    int pivot = 0;
+    const std::size_t eigenvector_column_offset = q_size * eigen_index;
+    std::size_t pivot = 0U;
     double pivot_absolute = -1.0;
-    for (int component = 0; component < q; ++component) {
+    for (std::size_t component = 0; component < q_size; ++component) {
       const double candidate = fabs(
-        eigenvectors[component + q * eigen_index]);
+        eigenvectors[component + eigenvector_column_offset]);
       if (candidate > pivot_absolute) {
         pivot = component;
         pivot_absolute = candidate;
       }
     }
     const double sign =
-      eigenvectors[pivot + q * eigen_index] < 0.0 ? -1.0 : 1.0;
+      eigenvectors[pivot + eigenvector_column_offset] < 0.0 ? -1.0 : 1.0;
     const double scale = sign * sqrt(eigenvalue);
-    for (int column = 0; column < q; ++column) {
-      roots[root_row_offset + root_row +
-            root_leading_dimension * column] =
-        scale * eigenvectors[column + q * eigen_index];
+    for (std::size_t column = 0; column < q_size; ++column) {
+      const std::size_t root_index = root_row_offset_size + root_row +
+        root_leading_dimension_size * column;
+      roots[root_index] =
+        scale * eigenvectors[column + eigenvector_column_offset];
     }
-    root_row += 1;
+    root_row += 1U;
   }
 }
 

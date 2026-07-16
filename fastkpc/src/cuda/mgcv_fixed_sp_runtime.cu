@@ -1058,6 +1058,48 @@ std::size_t matrix_count(int rows, int columns, const char* name) {
     positive_size(rows, name), positive_size(columns, name), name);
 }
 
+void require_scale_aware_symmetric(const double* matrix,
+                                   int dimension,
+                                   const char* error_message) {
+  const std::size_t count = matrix_count(
+    dimension, dimension, "prepared symmetric matrix");
+  double scale = 1.0;
+  for (std::size_t index = 0; index < count; ++index) {
+    if (!std::isfinite(matrix[index])) return;
+    scale = std::max(scale, std::abs(matrix[index]));
+  }
+
+  // Dimension-scaled roundoff with an absolute floor near zero.
+  const double tolerance = static_cast<double>(dimension) *
+    std::numeric_limits<double>::epsilon() * scale;
+  const std::size_t leading_dimension =
+    static_cast<std::size_t>(dimension);
+  for (int column = 0; column < dimension; ++column) {
+    for (int row = column + 1; row < dimension; ++row) {
+      const double lower = matrix[static_cast<std::size_t>(row) +
+        leading_dimension * static_cast<std::size_t>(column)];
+      const double upper = matrix[static_cast<std::size_t>(column) +
+        leading_dimension * static_cast<std::size_t>(row)];
+      if (std::abs(lower - upper) > tolerance) {
+        throw std::runtime_error(error_message);
+      }
+    }
+  }
+}
+
+void mirror_lower_triangle(double* matrix, int dimension) {
+  const std::size_t leading_dimension =
+    static_cast<std::size_t>(dimension);
+  for (int column = 0; column < dimension; ++column) {
+    for (int row = column + 1; row < dimension; ++row) {
+      matrix[static_cast<std::size_t>(column) +
+             leading_dimension * static_cast<std::size_t>(row)] =
+        matrix[static_cast<std::size_t>(row) +
+               leading_dimension * static_cast<std::size_t>(column)];
+    }
+  }
+}
+
 void validate_prepared_host_view(const PreparedSHostView& setup) {
   const std::size_t penalties =
     positive_size(setup.penalty_count, "prepared penalty count");
@@ -1099,6 +1141,13 @@ void validate_prepared_host_view(const PreparedSHostView& setup) {
       throw std::runtime_error(
         "prepared penalty-to-SP mapping must be identity");
     }
+    require_scale_aware_symmetric(
+      setup.penalty_blocks[index], dimension,
+      "prepared smooth penalty block must be symmetric");
+  }
+  if (setup.H != nullptr) {
+    require_scale_aware_symmetric(
+      setup.H, setup.coefficient_dim, "prepared H must be symmetric");
   }
 }
 
@@ -1162,6 +1211,7 @@ std::vector<double> build_projected_penalties(
       static_cast<std::size_t>(penalty) * q_squared;
     if (setup.Z == nullptr) {
       std::copy(full.begin(), full.end(), destination);
+      mirror_lower_triangle(destination, setup.null_dim);
       continue;
     }
 
@@ -1193,6 +1243,7 @@ std::vector<double> build_projected_penalties(
                     static_cast<std::size_t>(setup.null_dim) * column] = value;
       }
     }
+    mirror_lower_triangle(destination, setup.null_dim);
   }
   return projected;
 }
@@ -1205,7 +1256,9 @@ std::vector<double> build_projected_H(const PreparedSHostView& setup) {
   const std::size_t q_squared =
     matrix_count(setup.null_dim, setup.null_dim, "projected H");
   if (setup.Z == nullptr) {
-    return std::vector<double>(setup.H, setup.H + p_squared);
+    std::vector<double> projected(setup.H, setup.H + p_squared);
+    mirror_lower_triangle(projected.data(), setup.null_dim);
+    return projected;
   }
 
   const std::size_t p_q = matrix_count(
@@ -1239,6 +1292,7 @@ std::vector<double> build_projected_H(const PreparedSHostView& setup) {
                 static_cast<std::size_t>(setup.null_dim) * column] = value;
     }
   }
+  mirror_lower_triangle(projected.data(), setup.null_dim);
   return projected;
 }
 
@@ -3615,6 +3669,10 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
 
   std::lock_guard<std::mutex> lock(context->mutex);
   require_prepared_host_identity(handle);
+  if (handle->has_H) {
+    throw std::runtime_error(
+      "fixed-sp CUDA solve with non-null H is not implemented");
+  }
   const std::shared_ptr<TransientResidualSlot> slot = handle->residual_slot;
   if (slot->state == TransientResidualSlotState::Poisoned) {
     throw_output_slot_poisoned(*slot);
