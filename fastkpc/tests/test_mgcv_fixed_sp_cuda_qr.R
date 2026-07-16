@@ -16,6 +16,62 @@ relative_l2 <- function(candidate, reference) {
   sqrt(sum((candidate - reference)^2)) /
     max(sqrt(sum(reference^2)), 1e-300)
 }
+expected_complete_batch <- function(native, null_dim) {
+  routes <- native$planned_route
+  target_count <- native$target_count
+  cholesky <- routes == "CHOLESKY_BATCHED"
+  qr <- routes == "AUGMENTED_QR"
+  svd <- routes == "AUGMENTED_SVD"
+  safe_count <- as.integer(sum(cholesky))
+  qr_count <- as.integer(sum(qr))
+  svd_count <- as.integer(sum(svd))
+  true_batched <- cholesky & safe_count >= 2L
+
+  solver_status <- rep("ERR_STABLE_PATH_NOT_IMPLEMENTED", target_count)
+  solver_status[qr] <- "OK_AUGMENTED_QR"
+  solver_status[cholesky] <- if (safe_count >= 2L) {
+    "OK_CHOLESKY_BATCHED"
+  } else {
+    "OK_CHOLESKY_SINGLE"
+  }
+  executed_route <- rep(NA_character_, target_count)
+  executed_route[cholesky] <- "CHOLESKY_BATCHED"
+  executed_route[qr] <- "AUGMENTED_QR"
+  qr_rank <- rep(-1L, target_count)
+  geqrf_info <- rep(-1L, target_count)
+  ormqr_info <- rep(-1L, target_count)
+  qr_rank[qr] <- null_dim
+  geqrf_info[qr] <- 0L
+  ormqr_info[qr] <- 0L
+
+  list(
+    qr_indices = which(qr),
+    non_qr_indices = which(!qr),
+    solver_status = solver_status,
+    executed_route = executed_route,
+    reroute_reason = rep("", target_count),
+    target_true_batched = true_batched,
+    qr_rank = qr_rank,
+    geqrf_info = geqrf_info,
+    ormqr_info = ormqr_info,
+    planned_cholesky_target_count = safe_count,
+    planned_qr_target_count = qr_count,
+    planned_svd_target_count = svd_count,
+    executed_cholesky_target_count = safe_count,
+    executed_qr_target_count = qr_count,
+    executed_svd_target_count = 0L,
+    batch_output_finalized_target_count = safe_count + qr_count,
+    true_batched_subgroup_count = as.integer(safe_count >= 2L),
+    true_batched_attempted_target_count = if (safe_count >= 2L) {
+      safe_count
+    } else {
+      0L
+    },
+    true_batched_target_count = if (safe_count >= 2L) safe_count else 0L,
+    cholesky_single_target_count = as.integer(safe_count == 1L),
+    true_batched_kernel = FALSE
+  )
+}
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
   cat("SKIP Phase 3C fixed-sp augmented QR\n")
@@ -44,10 +100,10 @@ qr_setup_keys <- names(qr_batches)
 qr_batch_count <- as.integer(length(qr_batches))
 
 assert_true(
-  qr_batch_count > 0L && qr_batch_count < 31L &&
+  identical(qr_batch_count, 15L) &&
     identical(qr_setup_keys, sort(qr_setup_keys, method = "radix")) &&
     !anyDuplicated(qr_setup_keys),
-  "QR-bearing setup batches are non-empty, canonical, and fewer than targets"
+  "authenticated iteration scope has exactly 15 canonical QR-bearing batches"
 )
 assert_true(
   all(vapply(qr_batches, function(batch) {
@@ -148,8 +204,8 @@ for (batch_index in seq_along(qr_batches)) {
   batch <- qr_batches[[setup_key]]
   dto <- dtos[[setup_key]]
   native <- native_batches[[setup_key]]
-  qr_indices <- which(native$planned_route == "AUGMENTED_QR")
-  non_qr_indices <- which(native$planned_route != "AUGMENTED_QR")
+  expected <- expected_complete_batch(native, dto$null_dim)
+  qr_indices <- expected$qr_indices
 
   runtime_before <- fixed_sp_cuda_runtime_info(runtime)
   handle <- fixed_sp_cuda_prepared_create(runtime, dto)
@@ -159,15 +215,6 @@ for (batch_index in seq_along(qr_batches)) {
   )
   info <- fixed_sp_cuda_residual_info(token)
   runtime_after <- fixed_sp_cuda_runtime_info(runtime)
-
-  observed_qr_status <- info$solver_status[qr_indices]
-  assert_true(
-    identical(observed_qr_status, rep("OK_AUGMENTED_QR", length(qr_indices))),
-    paste0(
-      "QR targets must complete through augmented QR; setup=", setup_key,
-      "; observed=", paste(observed_qr_status, collapse = ",")
-    )
-  )
 
   missing_target_fields <- setdiff(required_target_fields, names(info))
   missing_runtime_fields <- setdiff(
@@ -187,41 +234,46 @@ for (batch_index in seq_along(qr_batches)) {
     )
   )
   assert_true(
-    identical(info$planned_route[qr_indices],
-              rep("AUGMENTED_QR", length(qr_indices))) &&
-      identical(info$executed_route[qr_indices],
-                rep("AUGMENTED_QR", length(qr_indices))) &&
-      identical(info$reroute_reason[qr_indices],
-                rep("", length(qr_indices))) &&
-      identical(info$target_true_batched[qr_indices],
-                rep(FALSE, length(qr_indices))) &&
-      identical(info$qr_rank[qr_indices],
-                rep(dto$null_dim, length(qr_indices))) &&
-      identical(info$geqrf_info[qr_indices], integer(length(qr_indices))) &&
-      identical(info$ormqr_info[qr_indices], integer(length(qr_indices))),
-    paste("accepted QR metadata is exact for setup", setup_key)
-  )
-  if (length(non_qr_indices) > 0L) {
-    assert_true(
-      identical(info$qr_rank[non_qr_indices],
-                rep(-1L, length(non_qr_indices))) &&
-        identical(info$geqrf_info[non_qr_indices],
-                  rep(-1L, length(non_qr_indices))) &&
-        identical(info$ormqr_info[non_qr_indices],
-                  rep(-1L, length(non_qr_indices))) &&
-        all(!info$target_true_batched[non_qr_indices] |
-              info$solver_status[non_qr_indices] ==
-                "OK_CHOLESKY_BATCHED"),
-      paste("non-QR sentinel diagnostics are exact for setup", setup_key)
-    )
-  }
-  assert_true(
-    identical(info$planned_qr_target_count, as.integer(length(qr_indices))) &&
+    identical(info$target_keys, native$target_keys) &&
+      identical(info$planned_route, native$planned_route) &&
+      identical(info$solver_status, expected$solver_status) &&
+      identical(info$executed_route, expected$executed_route) &&
+      identical(info$reroute_reason, expected$reroute_reason) &&
+      identical(info$target_true_batched,
+                expected$target_true_batched) &&
+      identical(info$qr_rank, expected$qr_rank) &&
+      identical(info$geqrf_info, expected$geqrf_info) &&
+      identical(info$ormqr_info, expected$ormqr_info) &&
+      identical(info$planned_cholesky_target_count,
+                expected$planned_cholesky_target_count) &&
+      identical(info$planned_qr_target_count,
+                expected$planned_qr_target_count) &&
+      identical(info$planned_svd_target_count,
+                expected$planned_svd_target_count) &&
+      identical(info$executed_cholesky_target_count,
+                expected$executed_cholesky_target_count) &&
       identical(info$executed_qr_target_count,
-                as.integer(length(qr_indices))) &&
+                expected$executed_qr_target_count) &&
+      identical(info$executed_svd_target_count,
+                expected$executed_svd_target_count) &&
+      identical(info$batch_output_finalized_target_count,
+                expected$batch_output_finalized_target_count) &&
+      identical(info$true_batched_subgroup_count,
+                expected$true_batched_subgroup_count) &&
+      identical(info$true_batched_attempted_target_count,
+                expected$true_batched_attempted_target_count) &&
+      identical(info$true_batched_target_count,
+                expected$true_batched_target_count) &&
+      identical(info$cholesky_single_target_count,
+                expected$cholesky_single_target_count) &&
+      identical(info$true_batched_kernel,
+                expected$true_batched_kernel) &&
+      isTRUE(info$canonical_output_order_exact) &&
+      identical(info$cholesky_to_svd_count, 0L) &&
       identical(info$qr_to_svd_count, 0L) &&
       identical(info$stable_reroute_count, 0L),
-    paste("QR route accounting is exact for setup", setup_key)
+    paste("complete mixed-batch route/status conservation is exact for setup",
+          setup_key)
   )
 
   assert_true(
@@ -309,14 +361,17 @@ for (batch_index in seq_along(qr_batches)) {
 }
 
 runtime_after_iteration <- fixed_sp_cuda_runtime_info(runtime)
+qr_checkpoint_record_delta <-
+  runtime_after_iteration$qr_checkpoint_record_count -
+    runtime_before_iteration$qr_checkpoint_record_count
+qr_checkpoint_wait_delta <-
+  runtime_after_iteration$qr_checkpoint_wait_count -
+    runtime_before_iteration$qr_checkpoint_wait_count
 assert_true(
   identical(executed_qr_total, 31L) && identical(qr_to_svd_total, 0L) &&
-    runtime_after_iteration$qr_checkpoint_record_count -
-        runtime_before_iteration$qr_checkpoint_record_count ==
-      qr_batch_count &&
-    runtime_after_iteration$qr_checkpoint_wait_count -
-        runtime_before_iteration$qr_checkpoint_wait_count ==
-      qr_batch_count &&
+    identical(qr_batch_count, 15L) &&
+    identical(qr_checkpoint_record_delta, 15L) &&
+    identical(qr_checkpoint_wait_delta, 15L) &&
     identical(runtime_after_iteration$cuda_device_synchronize_count,
               runtime_before_iteration$cuda_device_synchronize_count),
   "aggregate planned/executed QR and event-checkpoint counts are exact"
