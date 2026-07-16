@@ -29,6 +29,13 @@ PreparedSInfo prepared_s_gpu_info(
 void free_prepared_s_gpu(std::shared_ptr<PreparedSGpuHandle>* handle);
 PreparedSStaticShadow test_prepared_s_static_shadow(
   const std::shared_ptr<PreparedSGpuHandle>& handle);
+FixedSpAugmentedSystemShadow test_build_fixed_sp_augmented_shadow(
+  const std::shared_ptr<PreparedSGpuHandle>& handle,
+  const double* Y,
+  std::size_t Y_count,
+  const double* SP,
+  std::size_t SP_count,
+  int target_index);
 
 std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
   const std::shared_ptr<PreparedSGpuHandle>& handle,

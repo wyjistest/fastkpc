@@ -37,6 +37,15 @@ struct FixedSpRootValidationRecord {
   int rank = 0;
 };
 
+struct AugmentedSystemView {
+  double* B = nullptr;
+  double* c = nullptr;
+  int leading_dimension = 0;
+  int rows = 0;
+  int cols = 0;
+  int target_index = -1;
+};
+
 std::size_t fixed_sp_stable_probe_double_count(int max_rows, int max_q);
 FixedSpStableWorkspace fixed_sp_stable_probe_view(
   double* storage, int max_rows, int max_q);
@@ -72,6 +81,23 @@ void launch_fixed_sp_root_build(
   int expected_rank,
   double epsilon,
   FixedSpRootValidationRecord* validation,
+  cudaStream_t stream);
+AugmentedSystemView build_fixed_sp_augmented_system(
+  const double* X_null,
+  const double* penalty_roots,
+  const int* penalty_root_offsets,
+  const int* penalty_root_ranks,
+  int total_penalty_root_rows,
+  int penalty_count,
+  const double* H_root,
+  int H_root_rank,
+  const double* Y,
+  const double* SP,
+  const double* host_SP,
+  int n,
+  int q,
+  int target_index,
+  FixedSpStableWorkspace* workspace,
   cudaStream_t stream);
 
 }  // namespace fastkpc

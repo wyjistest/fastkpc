@@ -190,6 +190,115 @@ __global__ void build_fixed_sp_root_kernel(
   }
 }
 
+__global__ void copy_fixed_sp_augmented_design_kernel(
+    const double* X_null,
+    int n,
+    int q,
+    double* B,
+    int leading_dimension) {
+  const std::size_t flattened_index =
+    static_cast<std::size_t>(blockIdx.x) *
+      static_cast<std::size_t>(blockDim.x) +
+    static_cast<std::size_t>(threadIdx.x);
+  const std::size_t n_size = static_cast<std::size_t>(n);
+  const std::size_t q_size = static_cast<std::size_t>(q);
+  const std::size_t element_count = n_size * q_size;
+  if (flattened_index >= element_count) return;
+
+  const std::size_t row = flattened_index % n_size;
+  const std::size_t column = flattened_index / n_size;
+  const std::size_t source_index = row + n_size * column;
+  const std::size_t destination_index = row +
+    static_cast<std::size_t>(leading_dimension) * column;
+  B[destination_index] = X_null[source_index];
+}
+
+__global__ void build_fixed_sp_augmented_response_kernel(
+    const double* Y,
+    int n,
+    double* c,
+    int rows) {
+  const std::size_t row =
+    static_cast<std::size_t>(blockIdx.x) *
+      static_cast<std::size_t>(blockDim.x) +
+    static_cast<std::size_t>(threadIdx.x);
+  const std::size_t rows_size = static_cast<std::size_t>(rows);
+  if (row >= rows_size) return;
+  c[row] = row < static_cast<std::size_t>(n) ? Y[row] : 0.0;
+}
+
+__global__ void scale_fixed_sp_augmented_root_kernel(
+    const double* penalty_roots,
+    int root_leading_dimension,
+    int root_row_offset,
+    int rank,
+    int q,
+    const double* SP,
+    int sp_index,
+    double* B,
+    int B_leading_dimension,
+    int B_row_offset) {
+  const std::size_t flattened_index =
+    static_cast<std::size_t>(blockIdx.x) *
+      static_cast<std::size_t>(blockDim.x) +
+    static_cast<std::size_t>(threadIdx.x);
+  const std::size_t rank_size = static_cast<std::size_t>(rank);
+  const std::size_t q_size = static_cast<std::size_t>(q);
+  const std::size_t element_count = rank_size * q_size;
+  if (flattened_index >= element_count) return;
+
+  const std::size_t row = flattened_index % rank_size;
+  const std::size_t column = flattened_index / rank_size;
+  const std::size_t source_index =
+    static_cast<std::size_t>(root_row_offset) + row +
+    static_cast<std::size_t>(root_leading_dimension) * column;
+  const std::size_t destination_index =
+    static_cast<std::size_t>(B_row_offset) + row +
+    static_cast<std::size_t>(B_leading_dimension) * column;
+  const double scale = sqrt(SP[static_cast<std::size_t>(sp_index)]);
+  B[destination_index] = scale * penalty_roots[source_index];
+}
+
+__global__ void copy_fixed_sp_augmented_H_root_kernel(
+    const double* H_root,
+    int source_leading_dimension,
+    int rank,
+    int q,
+    double* B,
+    int B_leading_dimension,
+    int B_row_offset) {
+  const std::size_t flattened_index =
+    static_cast<std::size_t>(blockIdx.x) *
+      static_cast<std::size_t>(blockDim.x) +
+    static_cast<std::size_t>(threadIdx.x);
+  const std::size_t rank_size = static_cast<std::size_t>(rank);
+  const std::size_t q_size = static_cast<std::size_t>(q);
+  const std::size_t element_count = rank_size * q_size;
+  if (flattened_index >= element_count) return;
+
+  const std::size_t row = flattened_index % rank_size;
+  const std::size_t column = flattened_index / rank_size;
+  const std::size_t source_index = row +
+    static_cast<std::size_t>(source_leading_dimension) * column;
+  const std::size_t destination_index =
+    static_cast<std::size_t>(B_row_offset) + row +
+    static_cast<std::size_t>(B_leading_dimension) * column;
+  B[destination_index] = H_root[source_index];
+}
+
+unsigned int fixed_sp_augmented_block_count(
+    std::size_t element_count,
+    const char* name) {
+  constexpr std::size_t threads = 256U;
+  const std::size_t blocks = (element_count + threads - 1U) / threads;
+  if (blocks == 0U ||
+      blocks > static_cast<std::size_t>(
+        std::numeric_limits<unsigned int>::max())) {
+    throw std::runtime_error(std::string(name) + " launch size overflow");
+  }
+  return static_cast<unsigned int>(blocks);
+}
+
 }  // namespace
 
 std::size_t fixed_sp_stable_probe_double_count(int max_rows, int max_q) {
@@ -349,6 +458,135 @@ void launch_fixed_sp_root_build(
     root_leading_dimension, root_row_offset, root_row_capacity,
     expected_rank, epsilon, validation);
   check_cuda(cudaGetLastError(), "launch fixed-sp root build kernel");
+}
+
+AugmentedSystemView build_fixed_sp_augmented_system(
+    const double* X_null,
+    const double* penalty_roots,
+    const int* penalty_root_offsets,
+    const int* penalty_root_ranks,
+    int total_penalty_root_rows,
+    int penalty_count,
+    const double* H_root,
+    int H_root_rank,
+    const double* Y,
+    const double* SP,
+    const double* host_SP,
+    int n,
+    int q,
+    int target_index,
+    FixedSpStableWorkspace* workspace,
+    cudaStream_t stream) {
+  const std::size_t n_size = positive_size(n, "augmented row count");
+  const std::size_t q_size = positive_size(q, "augmented column count");
+  const std::size_t penalty_count_size =
+    positive_size(penalty_count, "augmented penalty count");
+  const std::size_t smooth_rows = nonnegative_size(
+    total_penalty_root_rows, "augmented smooth root rows");
+  const std::size_t H_rows =
+    nonnegative_size(H_root_rank, "augmented H root rows");
+  const std::size_t root_rows = checked_add(
+    smooth_rows, H_rows, "augmented root rows");
+  const std::size_t rows_size =
+    checked_add(n_size, root_rows, "augmented rows");
+  if (rows_size >
+      static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::runtime_error("augmented row count overflow");
+  }
+  const int rows = static_cast<int>(rows_size);
+
+  if (X_null == nullptr || Y == nullptr || SP == nullptr ||
+      host_SP == nullptr || penalty_root_offsets == nullptr ||
+      penalty_root_ranks == nullptr || workspace == nullptr ||
+      workspace->B == nullptr || workspace->c == nullptr ||
+      stream == nullptr || target_index < 0 || H_root_rank > q ||
+      rows > workspace->max_rows || q > workspace->max_q ||
+      (smooth_rows > 0U && penalty_roots == nullptr) ||
+      (H_rows > 0U && H_root == nullptr)) {
+    throw std::runtime_error("fixed-sp augmented build inputs are invalid");
+  }
+
+  std::size_t expected_root_offset = 0U;
+  for (std::size_t penalty = 0U; penalty < penalty_count_size; ++penalty) {
+    const int offset = penalty_root_offsets[penalty];
+    const int rank = penalty_root_ranks[penalty];
+    if (offset < 0 || rank < 0 ||
+        static_cast<std::size_t>(offset) != expected_root_offset ||
+        static_cast<std::size_t>(rank) >
+          smooth_rows - expected_root_offset) {
+      throw std::runtime_error(
+        "fixed-sp augmented root metadata is invalid");
+    }
+    expected_root_offset = checked_add(
+      expected_root_offset, static_cast<std::size_t>(rank),
+      "augmented root metadata");
+    if (!std::isfinite(host_SP[penalty]) || host_SP[penalty] < 0.0) {
+      throw std::runtime_error(
+        "augmented SP must contain only finite non-negative values");
+    }
+  }
+  if (expected_root_offset != smooth_rows) {
+    throw std::runtime_error("fixed-sp augmented root metadata is invalid");
+  }
+
+  constexpr unsigned int threads = 256U;
+  const std::size_t design_count = checked_multiply(
+    n_size, q_size, "augmented design");
+  copy_fixed_sp_augmented_design_kernel<<<
+    fixed_sp_augmented_block_count(design_count, "augmented design"),
+    threads, 0, stream
+  >>>(X_null, n, q, workspace->B, rows);
+  check_cuda(cudaGetLastError(),
+             "launch fixed-sp augmented design copy");
+
+  build_fixed_sp_augmented_response_kernel<<<
+    fixed_sp_augmented_block_count(rows_size, "augmented response"),
+    threads, 0, stream
+  >>>(Y, n, workspace->c, rows);
+  check_cuda(cudaGetLastError(),
+             "launch fixed-sp augmented response build");
+
+  for (std::size_t penalty = 0U; penalty < penalty_count_size; ++penalty) {
+    const int rank = penalty_root_ranks[penalty];
+    if (rank == 0) continue;
+    const std::size_t block_count = checked_multiply(
+      static_cast<std::size_t>(rank), q_size,
+      "augmented smooth root block");
+    const int destination_row = static_cast<int>(
+      n_size + static_cast<std::size_t>(penalty_root_offsets[penalty]));
+    scale_fixed_sp_augmented_root_kernel<<<
+      fixed_sp_augmented_block_count(
+        block_count, "augmented smooth root block"),
+      threads, 0, stream
+    >>>(
+      penalty_roots, total_penalty_root_rows,
+      penalty_root_offsets[penalty], rank, q, SP,
+      static_cast<int>(penalty), workspace->B, rows, destination_row);
+    check_cuda(cudaGetLastError(),
+               "launch fixed-sp augmented smooth root scale");
+  }
+
+  if (H_root_rank > 0) {
+    const std::size_t H_count = checked_multiply(
+      H_rows, q_size, "augmented H root block");
+    const int destination_row =
+      static_cast<int>(n_size + smooth_rows);
+    copy_fixed_sp_augmented_H_root_kernel<<<
+      fixed_sp_augmented_block_count(H_count, "augmented H root block"),
+      threads, 0, stream
+    >>>(H_root, q, H_root_rank, q, workspace->B, rows, destination_row);
+    check_cuda(cudaGetLastError(),
+               "launch fixed-sp augmented H root copy");
+  }
+
+  AugmentedSystemView view;
+  view.B = workspace->B;
+  view.c = workspace->c;
+  view.leading_dimension = rows;
+  view.rows = rows;
+  view.cols = q;
+  view.target_index = target_index;
+  return view;
 }
 
 }  // namespace fastkpc

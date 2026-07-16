@@ -1966,6 +1966,8 @@ class PreparedSGpuHandle {
   double penalty_root_build_ms = 0.0;
   int setup_shadow_d2h_count = 0;
   std::size_t setup_shadow_d2h_bytes = 0;
+  int augmented_test_shadow_d2h_count = 0;
+  std::size_t augmented_test_shadow_d2h_bytes = 0;
   std::shared_ptr<TransientResidualSlot> residual_slot;
   cudaEvent_t setup_completion_event = nullptr;
   int setup_h2d_upload_count = 0;
@@ -3611,6 +3613,10 @@ PreparedSInfo prepared_s_gpu_info(
   info.H_root_rank = handle->H_root_rank;
   info.setup_shadow_d2h_count = handle->setup_shadow_d2h_count;
   info.setup_shadow_d2h_bytes = handle->setup_shadow_d2h_bytes;
+  info.augmented_test_shadow_d2h_count =
+    handle->augmented_test_shadow_d2h_count;
+  info.augmented_test_shadow_d2h_bytes =
+    handle->augmented_test_shadow_d2h_bytes;
   info.coefficient_output_capacity =
     handle->residual_slot == nullptr ? 0U :
       handle->residual_slot->coefficient_capacity;
@@ -4716,6 +4722,183 @@ DeviceCoefficientShadow test_device_residual_coefficient_shadow(
 void test_inject_device_residual_consumer_registration_failure(
     const std::shared_ptr<DeviceResidualBatch>& token) {
   register_device_residual_consumer_event_impl(token, nullptr, true);
+}
+
+FixedSpAugmentedSystemShadow test_build_fixed_sp_augmented_shadow(
+    const std::shared_ptr<PreparedSGpuHandle>& handle,
+    const double* Y,
+    std::size_t Y_count,
+    const double* SP,
+    std::size_t SP_count,
+    int target_index) {
+  const std::shared_ptr<CudaRuntimeContext> context =
+    require_prepared_host_identity(handle);
+  std::lock_guard<std::mutex> lock(context->mutex);
+  require_prepared_host_identity(handle);
+  context->require_usable();
+
+  const std::size_t n = positive_size(
+    handle->n, "augmented test-shadow row count");
+  const std::size_t q = positive_size(
+    handle->q, "augmented test-shadow null dimension");
+  const std::size_t penalty_count = positive_size(
+    handle->penalty_count, "augmented test-shadow penalty count");
+  if (Y == nullptr || Y_count != n) {
+    throw std::runtime_error("augmented Y shape mismatch");
+  }
+  if (SP == nullptr || SP_count != penalty_count) {
+    throw std::runtime_error("augmented SP shape mismatch");
+  }
+  if (target_index < 0 ||
+      target_index >= context->capacities.target_count) {
+    throw std::runtime_error(
+      "augmented target_index is out of reserved range");
+  }
+  for (std::size_t index = 0U; index < n; ++index) {
+    if (!std::isfinite(Y[index])) {
+      throw std::runtime_error(
+        "augmented Y must contain only finite values");
+    }
+  }
+  for (std::size_t index = 0U; index < penalty_count; ++index) {
+    if (!std::isfinite(SP[index]) || SP[index] < 0.0) {
+      throw std::runtime_error(
+        "augmented SP must contain only finite non-negative values");
+    }
+  }
+  if (handle->setup_completion_event == nullptr ||
+      handle->penalty_root_build_count != 1 ||
+      handle->d_X_null == nullptr ||
+      handle->penalty_root_offsets.size() != penalty_count ||
+      handle->penalty_root_ranks.size() != penalty_count ||
+      (handle->total_penalty_root_rows > 0 &&
+       handle->d_penalty_roots == nullptr) ||
+      (handle->has_H && handle->d_H_root == nullptr)) {
+    throw std::runtime_error(
+      "prepared augmented-system state is unavailable");
+  }
+
+  if (handle->total_penalty_root_rows < 0 || handle->H_root_rank < 0) {
+    throw std::runtime_error(
+      "augmented test-shadow root row count is invalid");
+  }
+  const std::size_t smooth_rows =
+    static_cast<std::size_t>(handle->total_penalty_root_rows);
+  const std::size_t H_rows =
+    static_cast<std::size_t>(handle->H_root_rank);
+  const std::size_t root_rows = checked_add(
+    smooth_rows, H_rows, "augmented test-shadow root rows");
+  const std::size_t rows_size = checked_add(
+    n, root_rows, "augmented test-shadow rows");
+  if (rows_size >
+      static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::runtime_error("augmented test-shadow row count overflow");
+  }
+  const int rows = static_cast<int>(rows_size);
+  FixedSpStableWorkspace& stable = context->stable_workspace;
+  if (rows > context->capacities.augmented_rows ||
+      rows > stable.max_rows || handle->q > stable.max_q ||
+      stable.B == nullptr || stable.c == nullptr) {
+    throw std::runtime_error(
+      "augmented system exceeds reserved stable workspace capacity");
+  }
+
+  const std::size_t reserved_n = positive_size(
+    context->capacities.n, "reserved augmented Y rows");
+  const std::size_t reserved_targets = positive_size(
+    context->capacities.target_count, "reserved augmented target count");
+  const std::size_t reserved_penalties = positive_size(
+    context->capacities.penalty_count,
+    "reserved augmented penalty count");
+  if (n > reserved_n || penalty_count > reserved_penalties ||
+      context->double_arena == nullptr) {
+    throw std::runtime_error(
+      "augmented inputs exceed reserved CUDA arena capacity");
+  }
+  const std::size_t Y_capacity = checked_multiply(
+    reserved_n, reserved_targets, "reserved augmented Y arena");
+  const std::size_t Y_offset = checked_multiply(
+    static_cast<std::size_t>(target_index), reserved_n,
+    "augmented target Y offset");
+  const std::size_t SP_offset = checked_multiply(
+    static_cast<std::size_t>(target_index), reserved_penalties,
+    "augmented target SP offset");
+  double* device_Y = context->double_arena + Y_offset;
+  double* device_SP = context->double_arena + Y_capacity + SP_offset;
+
+  FixedSpAugmentedSystemShadow shadow;
+  shadow.leading_dimension = rows;
+  shadow.rows = rows;
+  shadow.cols = handle->q;
+  shadow.target_index = target_index;
+  shadow.B.resize(checked_multiply(
+    rows_size, q, "augmented test-shadow B"));
+  shadow.c.resize(rows_size);
+
+  check_cuda(cudaSetDevice(context->device_id),
+             "set CUDA device for augmented test shadow");
+  bool stream_work_enqueued = false;
+  try {
+    check_cuda(cudaStreamWaitEvent(
+      context->stream, handle->setup_completion_event, 0
+    ), "wait for prepared setup before augmented build");
+    check_cuda(cudaMemcpyAsync(
+      device_Y, Y,
+      allocation_bytes(n, sizeof(double), "augmented test Y upload"),
+      cudaMemcpyHostToDevice, context->stream
+    ), "upload augmented test Y");
+    stream_work_enqueued = true;
+    check_cuda(cudaMemcpyAsync(
+      device_SP, SP,
+      allocation_bytes(
+        penalty_count, sizeof(double), "augmented test SP upload"),
+      cudaMemcpyHostToDevice, context->stream
+    ), "upload augmented test SP");
+
+    const AugmentedSystemView view = build_fixed_sp_augmented_system(
+      handle->d_X_null, handle->d_penalty_roots,
+      handle->penalty_root_offsets.data(),
+      handle->penalty_root_ranks.data(),
+      handle->total_penalty_root_rows, handle->penalty_count,
+      handle->d_H_root, handle->H_root_rank, device_Y, device_SP, SP,
+      handle->n, handle->q, target_index, &stable, context->stream);
+    if (view.B != stable.B || view.c != stable.c ||
+        view.leading_dimension != rows || view.rows != rows ||
+        view.cols != handle->q || view.target_index != target_index) {
+      throw std::runtime_error(
+        "augmented system view metadata is inconsistent");
+    }
+    check_cuda(cudaMemcpyAsync(
+      shadow.B.data(), view.B,
+      allocation_bytes(
+        shadow.B.size(), sizeof(double), "augmented test-shadow B"),
+      cudaMemcpyDeviceToHost, context->stream
+    ), "download augmented test-shadow B");
+    check_cuda(cudaMemcpyAsync(
+      shadow.c.data(), view.c,
+      allocation_bytes(
+        shadow.c.size(), sizeof(double), "augmented test-shadow c"),
+      cudaMemcpyDeviceToHost, context->stream
+    ), "download augmented test-shadow c");
+    check_cuda(cudaStreamSynchronize(context->stream),
+               "wait for augmented test shadow");
+    stream_work_enqueued = false;
+  } catch (...) {
+    if (stream_work_enqueued) cudaStreamSynchronize(context->stream);
+    throw;
+  }
+
+  const std::size_t copied_values = checked_add(
+    shadow.B.size(), shadow.c.size(),
+    "augmented test-shadow copied values");
+  const std::size_t copied_bytes = allocation_bytes(
+    copied_values, sizeof(double),
+    "augmented test-shadow D2H diagnostics");
+  handle->augmented_test_shadow_d2h_count += 1;
+  handle->augmented_test_shadow_d2h_bytes = checked_add(
+    handle->augmented_test_shadow_d2h_bytes, copied_bytes,
+    "augmented test-shadow D2H diagnostics");
+  return shadow;
 }
 
 PreparedSRootsShadow test_prepared_s_roots_shadow(

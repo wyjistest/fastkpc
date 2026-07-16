@@ -1194,6 +1194,16 @@ fixed_sp_cuda_prepared_materialize_roots_for_test <- function(handle) {
         PACKAGE = "fastkpc_cuda")
 }
 
+fixed_sp_cuda_build_augmented_for_test <- function(
+    handle, Y, SP, target_index) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_fixed_sp_cuda_build_augmented_for_test", handle,
+    as.double(Y), as.double(SP), as.integer(target_index),
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
 fixed_sp_cuda_prepared_free <- function(handle) {
   load_fastkpc_cuda_native()
   invisible(.Call("C_fixed_sp_cuda_prepared_free", handle,

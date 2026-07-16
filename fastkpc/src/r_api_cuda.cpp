@@ -3882,6 +3882,10 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_info(SEXP prepared_s) {
     Rcpp::Named("setup_shadow_d2h_count") = info.setup_shadow_d2h_count,
     Rcpp::Named("setup_shadow_d2h_bytes") =
       static_cast<double>(info.setup_shadow_d2h_bytes),
+    Rcpp::Named("augmented_test_shadow_d2h_count") =
+      info.augmented_test_shadow_d2h_count,
+    Rcpp::Named("augmented_test_shadow_d2h_bytes") =
+      static_cast<double>(info.augmented_test_shadow_d2h_bytes),
     Rcpp::Named("coefficient_output_capacity") =
       static_cast<double>(info.coefficient_output_capacity),
     Rcpp::Named("generation") = static_cast<double>(info.generation),
@@ -3961,6 +3965,56 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_materialize_roots_for_test(
   }
   result.push_back(shadow.H_root_rank, "H_root_rank");
   return result;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_build_augmented_for_test(
+    SEXP prepared_s,
+    SEXP Y_s,
+    SEXP SP_s,
+    SEXP target_index_s) {
+  BEGIN_RCPP
+  FixedSpPreparedHolder* holder =
+    fixed_sp_cuda_prepared_holder(prepared_s, true);
+  const fastkpc::PreparedSInfo info =
+    fastkpc::prepared_s_gpu_info(holder->value);
+  if (TYPEOF(Y_s) != REALSXP || Rf_isObject(Y_s) ||
+      ATTRIB(Y_s) != R_NilValue) {
+    Rcpp::stop("augmented Y must be a bare double vector");
+  }
+  if (TYPEOF(SP_s) != REALSXP || Rf_isObject(SP_s) ||
+      ATTRIB(SP_s) != R_NilValue) {
+    Rcpp::stop("augmented SP must be a bare double vector");
+  }
+  if (XLENGTH(Y_s) != static_cast<R_xlen_t>(info.n)) {
+    Rcpp::stop("augmented Y shape mismatch");
+  }
+  if (XLENGTH(SP_s) != static_cast<R_xlen_t>(info.penalty_count)) {
+    Rcpp::stop("augmented SP shape mismatch");
+  }
+  const int target_index =
+    scalar_integer(target_index_s, "target_index");
+  if (target_index <= 0) {
+    Rcpp::stop("target_index must be positive");
+  }
+
+  const fastkpc::FixedSpAugmentedSystemShadow shadow =
+    fastkpc::test_build_fixed_sp_augmented_shadow(
+      holder->value, REAL(Y_s), static_cast<std::size_t>(XLENGTH(Y_s)),
+      REAL(SP_s), static_cast<std::size_t>(XLENGTH(SP_s)),
+      target_index - 1);
+  Rcpp::NumericMatrix B(shadow.rows, shadow.cols);
+  std::copy(shadow.B.begin(), shadow.B.end(), B.begin());
+  Rcpp::NumericVector c(shadow.c.size());
+  std::copy(shadow.c.begin(), shadow.c.end(), c.begin());
+  return Rcpp::List::create(
+    Rcpp::Named("B") = B,
+    Rcpp::Named("c") = c,
+    Rcpp::Named("leading_dimension") = shadow.leading_dimension,
+    Rcpp::Named("rows") = shadow.rows,
+    Rcpp::Named("cols") = shadow.cols,
+    Rcpp::Named("target_index") = shadow.target_index + 1
+  );
   END_RCPP
 }
 
@@ -8504,6 +8558,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fixed_sp_cuda_prepared_free", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_free), 1},
   {"C_fixed_sp_cuda_test_prepared_static_shadow", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_prepared_static_shadow), 1},
   {"C_fixed_sp_cuda_prepared_materialize_roots_for_test", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_materialize_roots_for_test), 1},
+  {"C_fixed_sp_cuda_build_augmented_for_test", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_build_augmented_for_test), 4},
   {"C_fixed_sp_cuda_solve_batch", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_solve_batch), 6},
   {"C_fixed_sp_cuda_residual_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_info), 1},
   {"C_fixed_sp_cuda_materialize_shadow", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_materialize_shadow), 2},

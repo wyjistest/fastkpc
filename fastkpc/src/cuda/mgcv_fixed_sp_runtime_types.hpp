@@ -153,6 +153,8 @@ struct PreparedSInfo {
   int H_root_rank = 0;
   int setup_shadow_d2h_count = 0;
   std::size_t setup_shadow_d2h_bytes = 0;
+  int augmented_test_shadow_d2h_count = 0;
+  std::size_t augmented_test_shadow_d2h_bytes = 0;
   std::size_t coefficient_output_capacity = 0;
   std::uint64_t generation = 0;
   bool output_slot_leased = false;
@@ -259,6 +261,15 @@ struct PreparedSRootsShadow {
   bool has_H = false;
   int H_root_rank = 0;
   std::vector<double> H_root;
+};
+
+struct FixedSpAugmentedSystemShadow {
+  int leading_dimension = 0;
+  int rows = 0;
+  int cols = 0;
+  int target_index = -1;
+  std::vector<double> B;
+  std::vector<double> c;
 };
 
 struct DeviceCoefficientShadow {
