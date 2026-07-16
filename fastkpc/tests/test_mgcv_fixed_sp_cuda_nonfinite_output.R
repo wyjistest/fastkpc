@@ -119,4 +119,41 @@ assert_true(
 
 fixed_sp_cuda_prepared_free(handle)
 fixed_sp_cuda_runtime_free(runtime)
+
+svd_dto <- dto
+svd_dto$X <- matrix(1, nrow = 2L, ncol = 1L)
+svd_dto$gram_matrix <- matrix(2, nrow = 1L, ncol = 1L)
+svd_runtime <- fixed_sp_cuda_runtime_create(0L)
+on.exit(try(fixed_sp_cuda_runtime_free(svd_runtime), silent = TRUE), add = TRUE)
+fixed_sp_cuda_runtime_reserve(svd_runtime, 2L, 1L, 1L, 1L, 3L)
+svd_handle <- fixed_sp_cuda_prepared_create(svd_runtime, svd_dto)
+on.exit(try(fixed_sp_cuda_prepared_free(svd_handle), silent = TRUE), add = TRUE)
+svd_token <- fixed_sp_cuda_solve_batch(
+  svd_handle,
+  matrix(c(.Machine$double.xmax, -.Machine$double.xmax), ncol = 1L),
+  matrix(0, nrow = 1L, ncol = 1L),
+  "AUGMENTED_SVD", sha("9"), outputs = outputs
+)
+on.exit(try(fixed_sp_cuda_residual_free(svd_token), silent = TRUE), add = TRUE)
+svd_info <- fixed_sp_cuda_residual_info(svd_token)
+assert_true(
+  identical(svd_info$planned_route, "AUGMENTED_SVD") &&
+    identical(svd_info$executed_route, "AUGMENTED_SVD") &&
+    identical(svd_info$reroute_reason, "") &&
+    identical(svd_info$svd_info, 0L) &&
+    identical(svd_info$effective_rank, 1L) &&
+    identical(svd_info$solver_status, "ERR_NONFINITE_OUTPUT") &&
+    identical(svd_info$executed_svd_target_count, 0L) &&
+    identical(svd_info$batch_output_finalized_target_count, 0L) &&
+    identical(svd_info$nonfinite_output_count, 1L),
+  paste0(
+    "nonfinite planned SVD is excluded from the successful execution count; ",
+    "status=", svd_info$solver_status,
+    "; executed_svd=", svd_info$executed_svd_target_count
+  )
+)
+fixed_sp_cuda_residual_release(svd_token)
+fixed_sp_cuda_residual_free(svd_token)
+fixed_sp_cuda_prepared_free(svd_handle)
+fixed_sp_cuda_runtime_free(svd_runtime)
 cat("PASS Phase 3A nonfinite fixed-sp output\n")

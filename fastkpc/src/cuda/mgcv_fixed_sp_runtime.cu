@@ -2379,6 +2379,10 @@ void resolve_fixed_sp_output_status_locked(
     static_cast<int>(std::count(
       token->solver_statuses.begin(), token->solver_statuses.end(),
       FixedSpStatus::OkCholeskyBatched));
+  token->diagnostics.executed_svd_target_count =
+    static_cast<int>(std::count(
+      token->solver_statuses.begin(), token->solver_statuses.end(),
+      FixedSpStatus::OkAugmentedSvd));
   token->diagnostics.true_batched_kernel =
     token->target_count >= 2 &&
     token->diagnostics.true_batched_target_count == token->target_count;
@@ -4816,7 +4820,6 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         token->diagnostics.smallest_retained_sigma[target_offset] = smallest;
         token->executed_routes[target_offset] = FixedSpRoute::AugmentedSvd;
         token->target_true_batched[target_offset] = false;
-        token->diagnostics.executed_svd_target_count += 1;
 
         const bool rank_diagnostics_valid =
           rank >= 0 && rank <= handle->q &&
@@ -4831,6 +4834,7 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
           continue;
         }
         token->solver_statuses[target_offset] = FixedSpStatus::OkAugmentedSvd;
+        token->diagnostics.executed_svd_target_count += 1;
       }
       if (observed_svd_count != svd_target_count) {
         throw std::runtime_error(
