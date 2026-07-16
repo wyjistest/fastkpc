@@ -3824,9 +3824,15 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_create(SEXP runtime_s,
     setup.penalty_sp_indices_zero_based.push_back(sp_index);
   }
 
+  const double* H = nullptr;
   if (dto[25] != R_NilValue) {
-    Rcpp::stop("Phase 3A non-null H is not implemented");
+    if (identity_constraint) {
+      Rcpp::stop("Phase 3C non-null H requires an explicit constraint");
+    }
+    require_finite_double_matrix(dto[25], p, p, "H");
+    H = REAL(dto[25]);
   }
+  setup.H = H;
   if (bare_scalar_string(dto[26], "weights_policy") != "none-or-unit") {
     Rcpp::stop("prepared DTO weights policy is unsupported");
   }
@@ -3861,6 +3867,21 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_info(SEXP prepared_s) {
     Rcpp::Named("setup_h2d_upload_count") = info.setup_h2d_upload_count,
     Rcpp::Named("setup_h2d_bytes") =
       static_cast<double>(info.setup_h2d_bytes),
+    Rcpp::Named("penalty_root_build_count") =
+      info.penalty_root_build_count,
+    Rcpp::Named("penalty_root_rank_mismatch_count") =
+      info.penalty_root_rank_mismatch_count,
+    Rcpp::Named("penalty_root_bytes") =
+      static_cast<double>(info.penalty_root_bytes),
+    Rcpp::Named("penalty_root_build_ms") = info.penalty_root_build_ms,
+    Rcpp::Named("penalty_root_matrix_count") =
+      info.penalty_root_matrix_count,
+    Rcpp::Named("penalty_root_row_count") = info.penalty_root_row_count,
+    Rcpp::Named("H_root_matrix_count") = info.H_root_matrix_count,
+    Rcpp::Named("H_root_rank") = info.H_root_rank,
+    Rcpp::Named("setup_shadow_d2h_count") = info.setup_shadow_d2h_count,
+    Rcpp::Named("setup_shadow_d2h_bytes") =
+      static_cast<double>(info.setup_shadow_d2h_bytes),
     Rcpp::Named("coefficient_output_capacity") =
       static_cast<double>(info.coefficient_output_capacity),
     Rcpp::Named("generation") = static_cast<double>(info.generation),
@@ -3902,6 +3923,44 @@ extern "C" SEXP C_fixed_sp_cuda_test_prepared_static_shadow(
     Rcpp::Named("gram") = gram,
     Rcpp::Named("projected_penalties") = projected
   );
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_prepared_materialize_roots_for_test(
+    SEXP prepared_s) {
+  BEGIN_RCPP
+  FixedSpPreparedHolder* holder =
+    fixed_sp_cuda_prepared_holder(prepared_s, true);
+  const fastkpc::PreparedSRootsShadow shadow =
+    fastkpc::test_prepared_s_roots_shadow(holder->value);
+
+  Rcpp::List penalty_roots(shadow.penalty_root_ranks.size());
+  for (std::size_t penalty = 0;
+       penalty < shadow.penalty_root_ranks.size(); ++penalty) {
+    const int rank = shadow.penalty_root_ranks[penalty];
+    const int offset = shadow.penalty_root_offsets[penalty];
+    Rcpp::NumericMatrix root(rank, shadow.null_dim);
+    for (int column = 0; column < shadow.null_dim; ++column) {
+      for (int row = 0; row < rank; ++row) {
+        root(row, column) = shadow.penalty_roots[
+          static_cast<std::size_t>(offset + row) +
+          static_cast<std::size_t>(shadow.total_penalty_root_rows) * column];
+      }
+    }
+    penalty_roots[static_cast<R_xlen_t>(penalty)] = root;
+  }
+
+  Rcpp::List result;
+  result.push_back(penalty_roots, "penalty_roots");
+  if (shadow.has_H) {
+    Rcpp::NumericMatrix H_root(shadow.H_root_rank, shadow.null_dim);
+    std::copy(shadow.H_root.begin(), shadow.H_root.end(), H_root.begin());
+    result.push_back(H_root, "H_root");
+  } else {
+    result.push_back(R_NilValue, "H_root");
+  }
+  result.push_back(shadow.H_root_rank, "H_root_rank");
+  return result;
   END_RCPP
 }
 
@@ -8444,6 +8503,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fixed_sp_cuda_prepared_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_info), 1},
   {"C_fixed_sp_cuda_prepared_free", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_free), 1},
   {"C_fixed_sp_cuda_test_prepared_static_shadow", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_prepared_static_shadow), 1},
+  {"C_fixed_sp_cuda_prepared_materialize_roots_for_test", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_materialize_roots_for_test), 1},
   {"C_fixed_sp_cuda_solve_batch", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_solve_batch), 6},
   {"C_fixed_sp_cuda_residual_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_info), 1},
   {"C_fixed_sp_cuda_materialize_shadow", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_materialize_shadow), 2},

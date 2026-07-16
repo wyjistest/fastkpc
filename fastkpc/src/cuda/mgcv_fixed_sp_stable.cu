@@ -1,6 +1,7 @@
 #include "mgcv_fixed_sp_stable.cuh"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -48,6 +49,13 @@ void check_cusolver(cusolverStatus_t status, const char* stage) {
   }
 }
 
+void check_cuda(cudaError_t status, const char* stage) {
+  if (status != cudaSuccess) {
+    throw std::runtime_error(std::string(stage) + ": " +
+                             cudaGetErrorString(status));
+  }
+}
+
 double* take(double** cursor, std::size_t count) {
   double* result = *cursor;
   *cursor += count;
@@ -85,6 +93,93 @@ void bind_data_views(FixedSpStableWorkspace* workspace, double** cursor) {
   workspace->V = take(cursor, q_squared);
   workspace->scaled_projection = take(cursor, q_squared);
   workspace->diagonal = take(cursor, q);
+}
+
+__global__ void build_fixed_sp_root_kernel(
+    const double* eigenvectors,
+    const double* eigenvalues,
+    const int* solver_info,
+    int q,
+    double* roots,
+    int root_leading_dimension,
+    int root_row_offset,
+    int root_row_capacity,
+    int expected_rank,
+    double epsilon,
+    FixedSpRootValidationRecord* validation) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+
+  FixedSpRootValidationRecord record;
+  record.solver_info = *solver_info;
+  if (record.solver_info != 0) {
+    *validation = record;
+    return;
+  }
+
+  bool finite = true;
+  bool ascending = true;
+  double maximum_absolute_eigenvalue = 0.0;
+  for (int index = 0; index < q; ++index) {
+    const double value = eigenvalues[index];
+    finite = finite && isfinite(value);
+    if (index > 0 && value < eigenvalues[index - 1]) ascending = false;
+    maximum_absolute_eigenvalue =
+      fmax(maximum_absolute_eigenvalue, fabs(value));
+  }
+  for (int index = 0; index < q * q; ++index) {
+    finite = finite && isfinite(eigenvectors[index]);
+  }
+
+  const double tolerance =
+    static_cast<double>(q) * maximum_absolute_eigenvalue * epsilon;
+  finite = finite && isfinite(tolerance);
+  bool psd = finite;
+  int retained_rank = 0;
+  if (finite) {
+    for (int index = 0; index < q; ++index) {
+      if (eigenvalues[index] < -tolerance) psd = false;
+      if (eigenvalues[index] > tolerance) retained_rank += 1;
+    }
+  }
+
+  record.finite = finite ? 1 : 0;
+  record.ascending = ascending ? 1 : 0;
+  record.psd = psd ? 1 : 0;
+  record.rank = retained_rank;
+  *validation = record;
+
+  const bool rank_matches =
+    expected_rank < 0 || retained_rank == expected_rank;
+  if (!finite || !ascending || !psd || !rank_matches ||
+      retained_rank > root_row_capacity) {
+    return;
+  }
+
+  int root_row = 0;
+  for (int eigen_index = 0; eigen_index < q; ++eigen_index) {
+    const double eigenvalue = eigenvalues[eigen_index];
+    if (eigenvalue <= tolerance) continue;
+
+    int pivot = 0;
+    double pivot_absolute = -1.0;
+    for (int component = 0; component < q; ++component) {
+      const double candidate = fabs(
+        eigenvectors[component + q * eigen_index]);
+      if (candidate > pivot_absolute) {
+        pivot = component;
+        pivot_absolute = candidate;
+      }
+    }
+    const double sign =
+      eigenvectors[pivot + q * eigen_index] < 0.0 ? -1.0 : 1.0;
+    const double scale = sign * sqrt(eigenvalue);
+    for (int column = 0; column < q; ++column) {
+      roots[root_row_offset + root_row +
+            root_leading_dimension * column] =
+        scale * eigenvectors[column + q * eigen_index];
+    }
+    root_row += 1;
+  }
 }
 
 }  // namespace
@@ -217,6 +312,35 @@ FixedSpStableWorkspace fixed_sp_stable_workspace_view(
   workspace.scaled_projection = take(&cursor, q * q);
   workspace.diagonal = take(&cursor, q);
   return workspace;
+}
+
+void launch_fixed_sp_root_build(
+    const double* eigenvectors,
+    const double* eigenvalues,
+    const int* solver_info,
+    int q,
+    double* roots,
+    int root_leading_dimension,
+    int root_row_offset,
+    int root_row_capacity,
+    int expected_rank,
+    double epsilon,
+    FixedSpRootValidationRecord* validation,
+    cudaStream_t stream) {
+  if (eigenvectors == nullptr || eigenvalues == nullptr ||
+      solver_info == nullptr || validation == nullptr || stream == nullptr ||
+      q <= 0 || root_leading_dimension < 0 || root_row_offset < 0 ||
+      root_row_capacity < 0 ||
+      root_row_offset > root_leading_dimension - root_row_capacity ||
+      (root_row_capacity > 0 && roots == nullptr) ||
+      !std::isfinite(epsilon) || epsilon <= 0.0) {
+    throw std::runtime_error("fixed-sp root build inputs are invalid");
+  }
+  build_fixed_sp_root_kernel<<<1, 1, 0, stream>>>(
+    eigenvectors, eigenvalues, solver_info, q, roots,
+    root_leading_dimension, root_row_offset, root_row_capacity,
+    expected_rank, epsilon, validation);
+  check_cuda(cudaGetLastError(), "launch fixed-sp root build kernel");
 }
 
 }  // namespace fastkpc

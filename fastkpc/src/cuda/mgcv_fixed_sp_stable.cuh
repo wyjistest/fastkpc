@@ -29,6 +29,14 @@ struct FixedSpStableWorkspace {
   int max_q = 0;
 };
 
+struct FixedSpRootValidationRecord {
+  int solver_info = 0;
+  int finite = 0;
+  int ascending = 0;
+  int psd = 0;
+  int rank = 0;
+};
+
 std::size_t fixed_sp_stable_probe_double_count(int max_rows, int max_q);
 FixedSpStableWorkspace fixed_sp_stable_probe_view(
   double* storage, int max_rows, int max_q);
@@ -52,6 +60,19 @@ FixedSpStableWorkspace fixed_sp_stable_workspace_view(
   int qr_lwork,
   int ormqr_lwork,
   int svd_lwork);
+void launch_fixed_sp_root_build(
+  const double* eigenvectors,
+  const double* eigenvalues,
+  const int* solver_info,
+  int q,
+  double* roots,
+  int root_leading_dimension,
+  int root_row_offset,
+  int root_row_capacity,
+  int expected_rank,
+  double epsilon,
+  FixedSpRootValidationRecord* validation,
+  cudaStream_t stream);
 
 }  // namespace fastkpc
 

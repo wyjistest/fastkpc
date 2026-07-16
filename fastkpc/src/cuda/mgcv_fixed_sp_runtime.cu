@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -1196,6 +1197,51 @@ std::vector<double> build_projected_penalties(
   return projected;
 }
 
+std::vector<double> build_projected_H(const PreparedSHostView& setup) {
+  if (setup.H == nullptr) return {};
+  const std::size_t p_squared = matrix_count(
+    setup.coefficient_dim, setup.coefficient_dim,
+    "full coefficient H");
+  const std::size_t q_squared =
+    matrix_count(setup.null_dim, setup.null_dim, "projected H");
+  if (setup.Z == nullptr) {
+    return std::vector<double>(setup.H, setup.H + p_squared);
+  }
+
+  const std::size_t p_q = matrix_count(
+    setup.coefficient_dim, setup.null_dim, "H times nullspace");
+  std::vector<double> H_times_z(p_q, 0.0);
+  std::vector<double> projected(q_squared, 0.0);
+  for (int column = 0; column < setup.null_dim; ++column) {
+    for (int inner = 0; inner < setup.coefficient_dim; ++inner) {
+      const double z = setup.Z[
+        static_cast<std::size_t>(inner) +
+        static_cast<std::size_t>(setup.coefficient_dim) * column];
+      for (int row = 0; row < setup.coefficient_dim; ++row) {
+        H_times_z[static_cast<std::size_t>(row) +
+          static_cast<std::size_t>(setup.coefficient_dim) * column] +=
+          setup.H[static_cast<std::size_t>(row) +
+                  static_cast<std::size_t>(setup.coefficient_dim) * inner] * z;
+      }
+    }
+  }
+  for (int column = 0; column < setup.null_dim; ++column) {
+    for (int row = 0; row < setup.null_dim; ++row) {
+      double value = 0.0;
+      for (int inner = 0; inner < setup.coefficient_dim; ++inner) {
+        value += setup.Z[static_cast<std::size_t>(inner) +
+                         static_cast<std::size_t>(setup.coefficient_dim) *
+                           row] *
+          H_times_z[static_cast<std::size_t>(inner) +
+            static_cast<std::size_t>(setup.coefficient_dim) * column];
+      }
+      projected[static_cast<std::size_t>(row) +
+                static_cast<std::size_t>(setup.null_dim) * column] = value;
+    }
+  }
+  return projected;
+}
+
 void require_finite_derived(const std::vector<double>& values,
                             const char* name) {
   if (!std::all_of(values.begin(), values.end(), [](double value) {
@@ -1776,6 +1822,8 @@ class PreparedSGpuHandle {
       d_X_null = nullptr;
       d_gram = nullptr;
       d_projected_penalties = nullptr;
+      d_penalty_roots = nullptr;
+      d_H_root = nullptr;
       setup_completion_event = nullptr;
       residual_slot.reset();
       context.reset();
@@ -1804,6 +1852,8 @@ class PreparedSGpuHandle {
       }
       status.observe(
         tracked_cuda_free_noexcept(ledger, &d_projected_penalties));
+      status.observe(tracked_cuda_free_noexcept(ledger, &d_H_root));
+      status.observe(tracked_cuda_free_noexcept(ledger, &d_penalty_roots));
       status.observe(tracked_cuda_free_noexcept(ledger, &d_gram));
       if (d_X_null == d_X) {
         d_X_null = nullptr;
@@ -1849,6 +1899,19 @@ class PreparedSGpuHandle {
   double* d_X_null = nullptr;
   double* d_gram = nullptr;
   double* d_projected_penalties = nullptr;
+  double* d_penalty_roots = nullptr;
+  std::vector<int> penalty_root_offsets;
+  std::vector<int> penalty_root_ranks;
+  int total_penalty_root_rows = 0;
+  bool has_H = false;
+  double* d_H_root = nullptr;
+  int H_root_rank = 0;
+  int penalty_root_build_count = 0;
+  int penalty_root_rank_mismatch_count = 0;
+  std::size_t penalty_root_bytes = 0;
+  double penalty_root_build_ms = 0.0;
+  int setup_shadow_d2h_count = 0;
+  std::size_t setup_shadow_d2h_bytes = 0;
   std::shared_ptr<TransientResidualSlot> residual_slot;
   cudaEvent_t setup_completion_event = nullptr;
   int setup_h2d_upload_count = 0;
@@ -3138,8 +3201,10 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
     build_nullspace_design(setup);
   const std::vector<double> projected_penalties =
     build_projected_penalties(setup);
+  const std::vector<double> projected_H = build_projected_H(setup);
   require_finite_derived(nullspace_design, "X_null");
   require_finite_derived(projected_penalties, "projected penalties");
+  require_finite_derived(projected_H, "projected H");
   const std::size_t x_count =
     matrix_count(setup.n, setup.coefficient_dim, "prepared X");
   const std::size_t z_count = setup.Z == nullptr ? 0U :
@@ -3149,6 +3214,32 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
   const std::size_t gram_count =
     matrix_count(setup.null_dim, setup.null_dim, "prepared Gram");
   const std::size_t penalty_count = projected_penalties.size();
+  std::size_t total_penalty_root_rows = 0U;
+  std::vector<int> penalty_root_offsets;
+  penalty_root_offsets.reserve(setup.penalty_ranks.size());
+  for (int rank : setup.penalty_ranks) {
+    if (total_penalty_root_rows >
+        static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::runtime_error("prepared penalty root row count overflow");
+    }
+    penalty_root_offsets.push_back(
+      static_cast<int>(total_penalty_root_rows));
+    total_penalty_root_rows = checked_add(
+      total_penalty_root_rows, static_cast<std::size_t>(rank),
+      "prepared penalty root rows");
+  }
+  if (total_penalty_root_rows >
+      static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::runtime_error("prepared penalty root row count overflow");
+  }
+  const std::size_t penalty_root_count = checked_multiply(
+    total_penalty_root_rows,
+    positive_size(setup.null_dim, "prepared root null dimension"),
+    "prepared penalty roots");
+  const bool has_H = setup.H != nullptr;
+  const std::size_t validation_count = checked_add(
+    positive_size(setup.penalty_count, "prepared penalty count"),
+    has_H ? 1U : 0U, "prepared root validation records");
   const std::size_t target_capacity = positive_size(
     context->capacities.target_count, "reserved target capacity");
   const std::size_t coefficient_output_count = checked_multiply(
@@ -3171,6 +3262,13 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
   handle->p = setup.coefficient_dim;
   handle->q = setup.null_dim;
   handle->penalty_count = setup.penalty_count;
+  handle->penalty_root_offsets = std::move(penalty_root_offsets);
+  handle->penalty_root_ranks = setup.penalty_ranks;
+  handle->total_penalty_root_rows =
+    static_cast<int>(total_penalty_root_rows);
+  handle->has_H = has_H;
+  handle->penalty_root_bytes = allocation_bytes(
+    penalty_root_count, sizeof(double), "prepared penalty root diagnostics");
   handle->resource_ledger = context->resource_ledger;
   handle->residual_slot = std::make_shared<TransientResidualSlot>();
   handle->residual_slot->resource_ledger = handle->resource_ledger;
@@ -3183,6 +3281,8 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
 
   check_cuda(cudaSetDevice(context->device_id),
              "set CUDA device for prepared setup");
+  FixedSpRootValidationRecord* d_root_validation = nullptr;
+  FixedSpRootValidationRecord* host_root_validation = nullptr;
   try {
     tracked_cuda_malloc(
       context->resource_ledger.get(),
@@ -3215,6 +3315,26 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
       allocation_bytes(
         penalty_count, sizeof(double), "prepared projected penalties"),
       "allocate prepared projected penalties");
+    if (penalty_root_count > 0U) {
+      tracked_cuda_malloc(
+        context->resource_ledger.get(), &handle->d_penalty_roots,
+        handle->penalty_root_bytes, "allocate prepared penalty roots");
+    }
+    if (has_H) {
+      tracked_cuda_malloc(
+        context->resource_ledger.get(), &handle->d_H_root,
+        allocation_bytes(gram_count, sizeof(double), "prepared H root"),
+        "allocate prepared H root");
+    }
+    const std::size_t validation_bytes = allocation_bytes(
+      validation_count, sizeof(FixedSpRootValidationRecord),
+      "prepared root validation records");
+    tracked_cuda_malloc(
+      context->resource_ledger.get(), &d_root_validation,
+      validation_bytes, "allocate prepared root validation records");
+    tracked_cuda_malloc_host(
+      context->resource_ledger.get(), &host_root_validation,
+      validation_bytes, "allocate prepared root host validation records");
 
     tracked_cuda_malloc(
       context->resource_ledger.get(),
@@ -3283,16 +3403,125 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
            "upload prepared Gram");
     upload(handle->d_projected_penalties, projected_penalties.data(),
            penalty_count, "upload prepared projected penalties");
+
+    FixedSpStableWorkspace& stable = context->stable_workspace;
+    if (stable.scaled_projection == nullptr || stable.diagonal == nullptr ||
+        stable.eigen_work == nullptr || stable.info == nullptr ||
+        stable.eigen_lwork <= 0 || stable.max_q < setup.null_dim) {
+      throw std::runtime_error(
+        "prepared penalty root eigensolver workspace is unavailable");
+    }
+    const std::size_t square_bytes = allocation_bytes(
+      gram_count, sizeof(double), "prepared root eigensolver matrix");
+    const auto root_build_start = std::chrono::steady_clock::now();
+    auto decompose_and_build = [&](int validation_index,
+                                   double* destination,
+                                   int leading_dimension,
+                                   int row_offset,
+                                   int row_capacity,
+                                   int expected_rank,
+                                   const char* stage) {
+      check_cusolver(cusolverDnDsyevd(
+        context->solver, CUSOLVER_EIG_MODE_VECTOR,
+        CUBLAS_FILL_MODE_LOWER, setup.null_dim,
+        stable.scaled_projection, setup.null_dim, stable.diagonal,
+        stable.eigen_work, stable.eigen_lwork, stable.info
+      ), stage);
+      launch_fixed_sp_root_build(
+        stable.scaled_projection, stable.diagonal, stable.info,
+        setup.null_dim, destination, leading_dimension, row_offset,
+        row_capacity, expected_rank, std::numeric_limits<double>::epsilon(),
+        d_root_validation + validation_index, context->stream);
+    };
+
+    for (int penalty = 0; penalty < setup.penalty_count; ++penalty) {
+      check_cuda(cudaMemcpyAsync(
+        stable.scaled_projection,
+        handle->d_projected_penalties +
+          static_cast<std::size_t>(penalty) * gram_count,
+        square_bytes, cudaMemcpyDeviceToDevice, context->stream
+      ), "copy projected smooth penalty to eigensolver scratch");
+      decompose_and_build(
+        penalty, handle->d_penalty_roots,
+        handle->total_penalty_root_rows,
+        handle->penalty_root_offsets[static_cast<std::size_t>(penalty)],
+        handle->penalty_root_ranks[static_cast<std::size_t>(penalty)],
+        handle->penalty_root_ranks[static_cast<std::size_t>(penalty)],
+        "decompose projected smooth penalty");
+    }
+    if (has_H) {
+      upload(stable.scaled_projection, projected_H.data(), gram_count,
+             "upload projected H to eigensolver scratch");
+      decompose_and_build(
+        setup.penalty_count, handle->d_H_root, setup.null_dim, 0,
+        setup.null_dim, -1, "decompose projected H");
+    }
+
+    check_cuda(cudaMemcpyAsync(
+      host_root_validation, d_root_validation, validation_bytes,
+      cudaMemcpyDeviceToHost, context->stream
+    ), "download prepared root validation records");
     check_cuda(cudaEventRecord(
       handle->setup_completion_event, context->stream
     ), "record prepared setup completion");
     check_cuda(cudaEventSynchronize(handle->setup_completion_event),
                "wait for prepared setup completion");
-    tracked_cuda_event_destroy(
-      context->resource_ledger.get(), &handle->setup_completion_event,
-      "destroy prepared setup completion event");
+
+    auto validate_root_record = [&](int index, const char* name,
+                                    int expected_rank) {
+      const FixedSpRootValidationRecord& record =
+        host_root_validation[index];
+      if (record.solver_info != 0) {
+        throw std::runtime_error(
+          std::string(name) + " eigendecomposition failed with info " +
+          std::to_string(record.solver_info));
+      }
+      if (record.finite == 0) {
+        throw std::runtime_error(
+          std::string(name) + " eigendecomposition is nonfinite");
+      }
+      if (record.ascending == 0) {
+        throw std::runtime_error(
+          std::string(name) + " eigenvalues are not ascending");
+      }
+      if (record.psd == 0) {
+        throw std::runtime_error(std::string("non-PSD ") + name);
+      }
+      if (expected_rank >= 0 && record.rank != expected_rank) {
+        handle->penalty_root_rank_mismatch_count += 1;
+        throw std::runtime_error(
+          std::string(name) + " root rank mismatch: expected " +
+          std::to_string(expected_rank) + ", derived " +
+          std::to_string(record.rank));
+      }
+      return record.rank;
+    };
+    for (int penalty = 0; penalty < setup.penalty_count; ++penalty) {
+      validate_root_record(
+        penalty, "smooth penalty",
+        handle->penalty_root_ranks[static_cast<std::size_t>(penalty)]);
+    }
+    if (has_H) {
+      handle->H_root_rank = validate_root_record(
+        setup.penalty_count, "H", -1);
+    }
+    const auto root_build_end = std::chrono::steady_clock::now();
+    handle->penalty_root_build_ms =
+      std::chrono::duration<double, std::milli>(
+        root_build_end - root_build_start).count();
+    handle->penalty_root_build_count = 1;
     handle->setup_h2d_upload_count = 1;
+    tracked_cuda_free(
+      context->resource_ledger.get(), &d_root_validation,
+      "free prepared root validation records");
+    tracked_cuda_free_host(
+      context->resource_ledger.get(), &host_root_validation,
+      "free prepared root host validation records");
   } catch (...) {
+    cleanup_local_cuda_allocation_noexcept(
+      context->resource_ledger.get(), &d_root_validation);
+    cleanup_local_cuda_host_allocation_noexcept(
+      context->resource_ledger.get(), &host_root_validation);
     handle->cleanup_noexcept();
     throw;
   }
@@ -3317,6 +3546,17 @@ PreparedSInfo prepared_s_gpu_info(
   info.penalty_count = handle->penalty_count;
   info.setup_h2d_upload_count = handle->setup_h2d_upload_count;
   info.setup_h2d_bytes = handle->setup_h2d_bytes;
+  info.penalty_root_build_count = handle->penalty_root_build_count;
+  info.penalty_root_rank_mismatch_count =
+    handle->penalty_root_rank_mismatch_count;
+  info.penalty_root_bytes = handle->penalty_root_bytes;
+  info.penalty_root_build_ms = handle->penalty_root_build_ms;
+  info.penalty_root_matrix_count = handle->penalty_count;
+  info.penalty_root_row_count = handle->total_penalty_root_rows;
+  info.H_root_matrix_count = handle->has_H ? 1 : 0;
+  info.H_root_rank = handle->H_root_rank;
+  info.setup_shadow_d2h_count = handle->setup_shadow_d2h_count;
+  info.setup_shadow_d2h_bytes = handle->setup_shadow_d2h_bytes;
   info.coefficient_output_capacity =
     handle->residual_slot == nullptr ? 0U :
       handle->residual_slot->coefficient_capacity;
@@ -4418,6 +4658,81 @@ DeviceCoefficientShadow test_device_residual_coefficient_shadow(
 void test_inject_device_residual_consumer_registration_failure(
     const std::shared_ptr<DeviceResidualBatch>& token) {
   register_device_residual_consumer_event_impl(token, nullptr, true);
+}
+
+PreparedSRootsShadow test_prepared_s_roots_shadow(
+    const std::shared_ptr<PreparedSGpuHandle>& handle) {
+  const std::shared_ptr<CudaRuntimeContext> context =
+    require_prepared_host_identity(handle);
+  std::lock_guard<std::mutex> lock(context->mutex);
+  require_prepared_host_identity(handle);
+  context->require_usable();
+  if (handle->setup_completion_event == nullptr ||
+      handle->penalty_root_build_count != 1 ||
+      (handle->total_penalty_root_rows > 0 &&
+       handle->d_penalty_roots == nullptr) ||
+      (handle->has_H && handle->d_H_root == nullptr)) {
+    throw std::runtime_error("prepared penalty root state is unavailable");
+  }
+
+  PreparedSRootsShadow shadow;
+  shadow.null_dim = handle->q;
+  shadow.total_penalty_root_rows = handle->total_penalty_root_rows;
+  shadow.penalty_root_offsets = handle->penalty_root_offsets;
+  shadow.penalty_root_ranks = handle->penalty_root_ranks;
+  shadow.has_H = handle->has_H;
+  shadow.H_root_rank = handle->H_root_rank;
+
+  const std::size_t q = positive_size(
+    handle->q, "prepared root shadow null dimension");
+  const std::size_t penalty_root_count = checked_multiply(
+    static_cast<std::size_t>(handle->total_penalty_root_rows), q,
+    "prepared root shadow smooth roots");
+  const std::size_t H_root_count = checked_multiply(
+    static_cast<std::size_t>(handle->H_root_rank), q,
+    "prepared root shadow H root");
+  shadow.penalty_roots.resize(penalty_root_count);
+  if (handle->has_H) shadow.H_root.resize(H_root_count);
+
+  check_cuda(cudaSetDevice(context->device_id),
+             "set CUDA device for prepared root shadow");
+  check_cuda(cudaEventSynchronize(handle->setup_completion_event),
+             "wait for prepared root setup completion");
+  if (penalty_root_count > 0U) {
+    check_cuda(cudaMemcpy(
+      shadow.penalty_roots.data(), handle->d_penalty_roots,
+      allocation_bytes(
+        penalty_root_count, sizeof(double),
+        "prepared root shadow smooth roots"),
+      cudaMemcpyDeviceToHost
+    ), "download prepared smooth penalty roots");
+  }
+  if (H_root_count > 0U) {
+    check_cuda(cudaMemcpy2D(
+      shadow.H_root.data(),
+      allocation_bytes(
+        static_cast<std::size_t>(handle->H_root_rank), sizeof(double),
+        "prepared root shadow H destination pitch"),
+      handle->d_H_root,
+      allocation_bytes(q, sizeof(double),
+                       "prepared root shadow H source pitch"),
+      allocation_bytes(
+        static_cast<std::size_t>(handle->H_root_rank), sizeof(double),
+        "prepared root shadow H width"),
+      q, cudaMemcpyDeviceToHost
+    ), "download prepared H root");
+  }
+
+  const std::size_t copied_values = checked_add(
+    penalty_root_count, H_root_count,
+    "prepared root shadow copied values");
+  const std::size_t copied_bytes = allocation_bytes(
+    copied_values, sizeof(double), "prepared root shadow D2H diagnostics");
+  handle->setup_shadow_d2h_count += 1;
+  handle->setup_shadow_d2h_bytes = checked_add(
+    handle->setup_shadow_d2h_bytes, copied_bytes,
+    "prepared root shadow D2H diagnostics");
+  return shadow;
 }
 
 PreparedSStaticShadow test_prepared_s_static_shadow(

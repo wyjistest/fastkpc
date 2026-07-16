@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -126,6 +127,7 @@ struct PreparedSHostView {
   const double* X = nullptr;
   const double* Z = nullptr;
   const double* gram = nullptr;
+  const double* H = nullptr;
   std::vector<const double*> penalty_blocks;
   std::vector<int> penalty_dimensions;
   std::vector<int> penalty_offsets_zero_based;
@@ -141,6 +143,16 @@ struct PreparedSInfo {
   int penalty_count = 0;
   int setup_h2d_upload_count = 0;
   std::size_t setup_h2d_bytes = 0;
+  int penalty_root_build_count = 0;
+  int penalty_root_rank_mismatch_count = 0;
+  std::size_t penalty_root_bytes = 0;
+  double penalty_root_build_ms = 0.0;
+  int penalty_root_matrix_count = 0;
+  int penalty_root_row_count = 0;
+  int H_root_matrix_count = 0;
+  int H_root_rank = 0;
+  int setup_shadow_d2h_count = 0;
+  std::size_t setup_shadow_d2h_bytes = 0;
   std::size_t coefficient_output_capacity = 0;
   std::uint64_t generation = 0;
   bool output_slot_leased = false;
@@ -238,6 +250,17 @@ struct PreparedSStaticShadow {
   std::vector<double> projected_penalties;
 };
 
+struct PreparedSRootsShadow {
+  int null_dim = 0;
+  int total_penalty_root_rows = 0;
+  std::vector<int> penalty_root_offsets;
+  std::vector<int> penalty_root_ranks;
+  std::vector<double> penalty_roots;
+  bool has_H = false;
+  int H_root_rank = 0;
+  std::vector<double> H_root;
+};
+
 struct DeviceCoefficientShadow {
   int coefficient_dim = 0;
   int target_count = 0;
@@ -260,6 +283,10 @@ struct FixedSpShadowResult {
 
 const char* fixed_sp_status_name(FixedSpStatus status);
 const char* fixed_sp_route_name(FixedSpRoute route);
+
+class PreparedSGpuHandle;
+PreparedSRootsShadow test_prepared_s_roots_shadow(
+  const std::shared_ptr<PreparedSGpuHandle>& handle);
 
 }  // namespace fastkpc
 

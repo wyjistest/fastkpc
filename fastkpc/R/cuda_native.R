@@ -1188,6 +1188,12 @@ fixed_sp_cuda_prepared_info <- function(handle) {
   .Call("C_fixed_sp_cuda_prepared_info", handle, PACKAGE = "fastkpc_cuda")
 }
 
+fixed_sp_cuda_prepared_materialize_roots_for_test <- function(handle) {
+  load_fastkpc_cuda_native()
+  .Call("C_fixed_sp_cuda_prepared_materialize_roots_for_test", handle,
+        PACKAGE = "fastkpc_cuda")
+}
+
 fixed_sp_cuda_prepared_free <- function(handle) {
   load_fastkpc_cuda_native()
   invisible(.Call("C_fixed_sp_cuda_prepared_free", handle,
