@@ -604,7 +604,7 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 0 | Freeze oracle and zero-SHD comparator | COMPLETE — standardized oracle and first-divergence gate pass |
 | 1 | Full workload and risk census | COMPLETE - full 110,617-key metadata artifact passes all gates |
 | 2 | Response-independent GAM setup contract | COMPLETE - full structural artifact and qualification exact-parity/restart gates pass |
-| 3 | Persistent stable fixed-sp CUDA residual runtime | PARTIAL - Phase 3A milestone verified; Phase 3B is next |
+| 3 | Persistent stable fixed-sp CUDA residual runtime | PARTIAL - Phase 3A and Phase 3B milestones verified; Phase 3C is next |
 | 4 | Full-CUDA single-penalty GCV for `|S|<=2` | PARTIAL — CPU spectral selection exists |
 | 5 | C++ multi-penalty GAM semantic replica | NOT COMPLETE |
 | 6 | CUDA multi-penalty same-S target batches | NOT STARTED |
@@ -1125,8 +1125,8 @@ cudaDeviceSynchronize after every small kernel
 
 #### Verified Phase 3A milestone (2026-07-15)
 
-Phase 3A is complete. This does not complete Phase 3; Phase 3B and Phase 3C
-remain open.
+Phase 3A is complete. It did not complete Phase 3; the verified Phase 3B
+milestone is recorded below, and Phase 3C remains open.
 
 ```text
 authenticated Phase 3 catalog and native DTO
@@ -1141,7 +1141,7 @@ iteration safe targets = 172 with parity < 1e-7
 stable targets = 98 explicit ERR_STABLE_PATH_NOT_IMPLEMENTED
 ```
 
-Active next task: Phase 3B true same-S multi-target Cholesky.
+Phase 3B status is recorded below.
 
 ### Phase 3B — True multi-target fixed-sp execution
 
@@ -1156,6 +1156,26 @@ target-specific status
 ```
 
 Set `true_batched_kernel = TRUE` only when the implementation actually launches fused/batched work rather than an R/C++ loop that repeats the old single-fit call.
+
+#### Verified Phase 3B milestone (2026-07-16)
+
+Phase 3B is complete. This does not complete Phase 3. Stable routes have not
+been implemented by this milestone and remain explicit errors until Phase 3C.
+The legacy repeated-handle bridge remains truthfully non-batched.
+
+```text
+one same-S native Y/SP upload phase per setup batch
+one CUDA X0'Y RHS build per setup batch
+fused target-specific system construction
+true batched potrf/potrs
+canonical mixed-batch output order
+iteration true-batched targets = 160
+iteration single safe targets = 12
+iteration stable targets remain explicit errors = 98
+post-warm-up allocation/handle creation = 0
+```
+
+Active next task: Phase 3C penalty roots and augmented QR/SVD.
 
 ### Phase 3C — Stable solve path
 
@@ -2353,11 +2373,15 @@ milestone only and does not complete Phase 3.
 
 ### Task 6
 
-Active next task: Phase 3B true same-S multi-target Cholesky.
+Complete: Phase 3B established the verified true same-S multi-target Cholesky
+milestone recorded above. This is a Phase 3B milestone only and does not
+complete Phase 3; stable routes remain explicit errors.
+
+Active next task: Phase 3C penalty roots and augmented QR/SVD.
 
 The current CUDA Spectra projection primitive remains useful substrate for
-Phase 8, but the immediate critical path is now Phase 3B true same-S
-multi-target Cholesky.
+Phase 8, but the immediate critical path is now Phase 3C penalty roots and
+augmented QR/SVD.
 
 ---
 
