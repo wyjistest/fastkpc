@@ -5,18 +5,28 @@
 Phase 0 through Phase 2 are complete. The authenticated Phase 2 artifact at
 `fastkpc/artifacts/full_cuda_ci/prepared_s_contract_v1/` contains all 8,634
 canonical `PreparedSSetup` objects and all 110,617 canonical `TargetState`
-rows. This design freezes the Phase 3 runtime contract before implementation
-planning.
+rows. This design originally froze the Phase 3 runtime contract before
+implementation planning; the status paragraphs below record later history and
+the Phase 3C correction without rewriting that baseline.
 
 Phase 3 may land in independently reviewable 3A, 3B, and 3C commits. The phase
 is not complete until the stable path and both full artifacts pass. A
 Cholesky-only subset, a repeated single-target bridge, or an inherited graph
 gate is not Phase 3 completion.
 
-Implementation starts from a branch containing `main` at or after `37ce594`
-plus the review-amendment commit that incorporates this contract. The last
-pre-Phase-3-plan production-code baseline is `42ef3ef`; it is provenance, not
-a branch-reset target.
+The original implementation history started from `main` at or after `37ce594`;
+`42ef3ef` remains provenance only. The current correction branch already
+contains Phase 3C Tasks 1-4, the stacked-root Task 5 commit `8bd6142`, and its
+follow-up fixes through `5b5cee0`. Preserve that history. This design amendment
+reopens and corrects Task 5 with follow-up commits; it is not a branch-reset or
+history-rewrite instruction.
+
+The Phase 3C correction in this revision supersedes any earlier text that used
+a CPU stacked augmented SVD as a route-specific numerical reference. Phase 2
+`C_magic` remains the sole fitted/residual numerical oracle for every route.
+Persistent independent penalty roots remain valid setup diagnostics and QR
+inputs, but every planned or rerouted SVD solve uses the target-specific
+aggregate-penalty root defined below.
 
 ## Decision
 
@@ -37,7 +47,7 @@ finite condition >= 1e8 and < 1e12:
   augmented least-squares QR
 
 condition >= 1e12, rank deficient, or nonfinite:
-  augmented SVD with deterministic rank truncation
+  aggregate-penalty augmented SVD with deterministic rank truncation
 ```
 
 The condition value is the authenticated Phase 1
@@ -60,8 +70,8 @@ graph gate.
 
 ## Why This Architecture
 
-The current CUDA fixed-sp implementation is a one-target prototype. Every
-target currently:
+At the original design baseline, the CUDA fixed-sp implementation was a
+one-target prototype. Every target then:
 
 - creates and destroys a cuSOLVER handle;
 - performs thirteen CUDA allocations including factor workspace;
@@ -71,8 +81,9 @@ target currently:
 - copies theta, coefficients, fitted values, residuals, and RSS to the host;
 - frees every device buffer.
 
-The current same-setup native entry point is a C++ `for` loop around that
-single-target function and correctly reports `true_batched_kernel = FALSE`.
+The same-setup native entry point at that baseline was a C++ `for` loop around
+that single-target function and correctly reported
+`true_batched_kernel = FALSE`.
 It does not own persistent device state.
 
 The canonical Phase 2 corpus has small, bounded setup dimensions and useful
@@ -83,7 +94,8 @@ rows per setup                         = 351
 coefficient/nullspace dimension        = 10 through 64
 targets per setup                      = 2 through 47
 penalty count                          = 1, 3, 4, 5, 6, or 7
-maximum augmented-system row count     = 407
+maximum stacked-QR logical row count   = 407
+maximum aggregate-SVD workspace rows   = 415
 ```
 
 The numerical risk is not confined to a few outliers:
@@ -99,6 +111,18 @@ nonfinite condition targets            =  1,162 targets
 A persistent Cholesky-only runtime would therefore leave roughly thirty
 percent of the corpus without a valid stable route. It cannot be promoted as
 the compatible authority.
+
+Phase 3C iteration evidence also rules out treating the mathematically more
+accurate independent-root stacking as a legacy-compatibility oracle. It matched
+a CPU stacked augmented SVD to about `4e-12` for the
+target whose key starts `03de91f`, yet its fitted/residual result differed from
+`C_magic` by `0.0594444`. The same formulation failed `C_magic` parity for
+`14 / 67` iteration SVD targets, with maximum residual absolute error
+`0.52305231`. A CPU upper-DPSTF2-compatible aggregate-root prototype matched
+the LAPACK rank and pivot for `67 / 67` targets and reduced the maximum
+`C_magic` error to about `9.03e-10`. This evidence selects legacy aggregate
+penalty semantics; it does not promote the CPU prototype to a numerical
+oracle.
 
 ## Alternatives Considered
 
@@ -412,8 +436,15 @@ n                      = 351
 null_dim               = 64
 target_count           = 47
 penalty_count          = 7
-augmented_rows         = 407
+augmented_rows         = 415
 ```
+
+The stable reserve also includes one `q x q` aggregate-penalty factor buffer,
+`2q` DPSTF2 work values, `q` pivots, and fixed-capacity per-target aggregate
+rank/pivot diagnostics. These buffers are reserved before warm-up and reused
+for each executed SVD target. QR needs at most the census-frozen `407` rows.
+SVD reserves `n + q = 415` rows so a device-computed rank never has to cross to
+the host to size the cuSOLVER call.
 
 After reserve/warm-up, no solve may grow the workspace. A larger request fails
 closed rather than allocating in the target hot path.
@@ -430,8 +461,8 @@ constraint nullspace when non-identity
 X_null = X Z, or alias X under identity constraints
 Gram/nullspace Gram
 projected penalty components
-projected H
-penalty roots for augmented solves
+exact resident projected H matrix `P_H`
+persistent individual penalty/H roots for QR and setup diagnostics
 setup dimensions and ranks
 setup H2D counters and bytes
 handle generation
@@ -441,8 +472,8 @@ The handle is created once, used for all targets in that setup, and destroyed
 after its logical tests have been consumed. Static setup values are uploaded
 once. Target data must not be stored in the handle.
 
-Penalty roots are created once per setup. For each projected positive
-semidefinite penalty `P_j`, retain a root `R_j` satisfying:
+Individual penalty roots are created once per setup. For each projected
+positive semidefinite penalty `P_j`, retain a root `R_j` satisfying:
 
 ```text
 R_j' R_j = P_j
@@ -456,6 +487,17 @@ rank_tol(A) = max(dim(A)) * max(singular_values(A)) * double_epsilon
 
 Retain the exact Phase 2 penalty rank and fail if the independently derived
 root rank disagrees. Build an analogous root for non-null `H`.
+
+These persistent roots preserve the existing reconstruction/rank diagnostics
+and supply the QR row bands. They are not the numerical root used by an SVD
+target. The resident projected matrices `P_j` and `P_H` remain authoritative
+inputs to each target-specific aggregate factorization.
+
+When `H` is non-null, retain its exact projected `q x q` matrix `P_H = Z' H Z`
+on the prepared handle in addition to the persistent `H` root. Aggregate SVD
+construction starts from that exact resident matrix. It must not reconstruct
+`P_H` as a crossproduct of the eigendecomposition-derived `H` root. When `H` is
+null, `P_H` is the exact zero matrix by contract.
 
 The prepared handle's static setup payload does not mix in target-dependent
 outputs. At handle creation it is paired with one separate
@@ -586,24 +628,113 @@ as a production solve input. Artifact diagnostics report
 `rhs_authority = "cuda-x0-transpose-y"` and
 `full_cuda_data_plane = TRUE`.
 
-The Cholesky route solves `A theta = b` in double precision. The stable routes
-do not solve these normal equations. They solve the augmented system:
+The Cholesky route solves `A theta = b` in double precision. The QR and SVD
+routes do not solve these normal equations, but their penalty-row construction
+is intentionally different.
+
+The QR route uses the persistent independent roots:
 
 ```text
-B = [ X0
-      sqrt(sp_1) R_1
-      ...
-      sqrt(sp_k) R_k
-      R_H ]
+B_QR = [ X0
+         sqrt(sp_1) R_1
+         ...
+         sqrt(sp_k) R_k
+         R_H ]
+```
 
+Every target whose `executed_route` is `AUGMENTED_SVD`, including a declared
+Cholesky/QR reroute, first forms the aggregate projected penalty in canonical
+penalty order:
+
+```text
+P(sp) = P_H + sum_j sp_j P_j
+```
+
+It then applies the upper LAPACK `DPSTRF`/`DPSTF2` pivoted-Cholesky semantics
+to obtain rank `r`, pivot permutation `Pi`, leading upper factor rows `U_r`,
+and the unrepresented rank-revealed remainder `E_r`:
+
+```text
+Pi' P(sp) Pi = U_r' U_r + E_r
+R_aggregate   = U_r Pi'
+B_SVD         = [ X0
+                  R_aggregate ]
+```
+
+`R_aggregate` is an `r x q` compact root whose columns are scattered back to
+original canonical coefficient order. Therefore
+`R_aggregate' R_aggregate = P(sp) - Pi E_r Pi'` in exact arithmetic, plus
+floating-point factorization error. It is the DPSTRF rank-revealed approximation
+selected by `dstop`, not equality with `P(sp)` when `r < q`. Physically, the SVD
+workspace appends `q` root slots after `X0`, writes the compact root into the
+first `r`, and zeros the remaining `q - r`. This fixed `n + q` layout is
+mathematically `[X0; R_aggregate]`, keeps the existing deterministic SVD
+implementation, and does not require an intervening rank D2H checkpoint. The
+common augmented right-hand side is:
+
+```text
 c = [ weighted(y - offset)
       0 ]
 
-theta = argmin ||B theta - c||_2
+theta = argmin ||B_route theta - c||_2
 beta  = Z theta
 fitted = X beta + offset
 residual = y - fitted
 ```
+
+The aggregate factorization freezes the default LAPACK stopping value exactly:
+
+```text
+unit_roundoff = std::numeric_limits<double>::epsilon() / 2
+dstop         = q * unit_roundoff * max(diag(P(sp)))
+```
+
+The maximum is taken from the initial diagonal. Pivots initialize in canonical
+coefficient order. At each upper-DPSTF2 step, update accumulated squared row
+terms and candidate diagonals in increasing remaining position, choose the
+first position attaining the maximum (including the first-pivot tie), apply the
+upper-storage row/column segment swaps followed by the work and pivot swaps,
+take the pivot square root, and update the remaining upper row in that fixed
+order. Stop before a pivot `<= dstop` or a nonfinite pivot; the completed-step
+count is `aggregate_penalty_root_rank`. No alternate epsilon, absolute-value
+diagonal scale, tie rule, lower-factor order, or post-hoc rank tolerance is
+permitted.
+
+The augmented-SVD solve rank follows authoritative `C_magic` `fit_magic`
+semantics, independently of the penalty-root rank:
+
+```text
+svd_rank_tol       = sqrt(std::numeric_limits<double>::epsilon())
+svd_rank_threshold = sigma_max * svd_rank_tol
+effective_rank     = count(sigma_i >= svd_rank_threshold)
+```
+
+Directions with `sigma_i < svd_rank_threshold` are truncated; equality is
+retained. There is no row-count multiplier. The `gesvdj` convergence tolerance
+(`1e-12` in the Phase 3C runtime) controls Jacobi iteration convergence only;
+it is not the solve-rank tolerance. The aggregate-root CPU prototype reporting
+about `9.03e-10` maximum `C_magic` error used this `C_magic` threshold.
+
+CUDA builds `P(sp)` from resident projected matrices and device-resident `SP`,
+factors it, scatters the compact root, and builds `B_SVD` entirely on the
+runtime stream. The path performs no solve-time allocation, CPU fallback,
+factor/root D2H transfer, or host-selected pivot/rank input. A deterministic
+one-block kernel with at most 64 threads is acceptable for the canonical
+`q <= 64` envelope. Device-produced rank/pivot values may be copied only with
+the existing compact post-solve batch diagnostics; the host never feeds them
+back into the solve. A CPU stacked independent-root augmented SVD may be
+recorded as an internal implementation diagnostic, but it cannot supply
+fitted/residual references, rank authority, pass/fail gates, or
+`numeric_reference`.
+
+The aggregate buffer is separate from `B_SVD` and retains the upper factor and
+pivot vector after the first root emission. `gesvdj` overwrites `B_SVD` while
+producing the retained `U`, singular values, and `V`. The existing one-step
+coefficient correction therefore rebuilds `c` and re-emits the same
+original-order aggregate root into `B_SVD`, then uses the retained SVD factors;
+it does not reaggregate or refactor `P(sp)`. Exactly one aggregate factorization
+is performed per executed SVD target, so
+`aggregate_penalty_factor_count == executed_svd_target_count`.
 
 All kernel inputs and outputs are double precision. No TF32, mixed precision,
 iterative approximation, or host solve is permitted.
@@ -686,12 +817,20 @@ targets report `true_batched_kernel = FALSE`.
 
 For the high-condition, rank-deficient, rejected-QR, and unclassified cases:
 
-1. construct the augmented matrix and RHS in reusable device workspace;
-2. call a deterministic cuSOLVER double SVD path;
-3. truncate singular directions at
-   `max(m, q) * sigma_max * double_epsilon`;
-4. form the minimum-norm solution entirely on device;
-5. report effective rank and singular-value diagnostics.
+1. aggregate `P_H + sum_j sp_j P_j` in reusable device workspace;
+2. apply the deterministic upper-DPSTF2-compatible device factorization and
+   emit `R_aggregate` in original coefficient order;
+3. emit `[X0; R_aggregate; zero padding]` and its RHS in the fixed
+   `n + q` reusable device workspace;
+4. call a deterministic cuSOLVER double SVD path;
+5. truncate only singular directions with
+   `sigma_i < sigma_max * sqrt(double_epsilon)`;
+6. form the first minimum-norm solution entirely on device;
+7. rebuild `c` and re-emit the retained aggregate factor into `B_SVD` after
+   `gesvdj` overwrites the first build, without another aggregate factorization;
+8. apply the existing one-step correction with the retained SVD factors;
+9. report aggregate-root rank/pivot separately from effective augmented-SVD
+   rank and singular-value diagnostics.
 
 The SVD implementation must use a deterministic sorted singular-value order.
 It may process targets sequentially within the native batch call in v1 and
@@ -839,6 +978,8 @@ The primary solve path:
   checkpoint per affected public batch;
 - for a batch containing declared QR targets, permits at most one additional
   compact QR checkpoint so the host can enqueue required CUDA SVD reroutes;
+- keeps aggregate-penalty construction, pivoting, root emission, and SVD
+  consumption on device without an intervening host checkpoint;
 - never synchronizes or copies diagnostics once per target.
 
 The shadow materializer is an explicit observer. It increments:
@@ -891,6 +1032,9 @@ penalty_root_build_count
 penalty_root_rank_mismatch_count
 ```
 
+Those setup fields describe only the persistent individual penalty/H roots.
+They are not aggregate SVD-root counters.
+
 Solve lifecycle:
 
 ```text
@@ -918,6 +1062,27 @@ unknown_fallback_count
 cpu_fallback_count
 approximate_backend_count
 nonfinite_output_count
+aggregate_penalty_factor_count
+aggregate_svd_b_build_count
+aggregate_penalty_root_rank per target
+aggregate_penalty_root_pivot per target
+effective_rank per target (augmented-system SVD rank)
+```
+
+The native aggregate pivot is zero-based; the R diagnostic is converted once
+to one-based canonical coefficient positions. Pivots use a fixed-stride
+`target_count x q` device layout; ranks and pivots are device-produced compact
+metadata copied only at the single batch SVD checkpoint after all SVD work is
+enqueued. That compact diagnostic copy is not an aggregate matrix/root copy.
+`aggregate_penalty_root_d2h_count` remains zero. A test-only CPU LAPACK
+comparison may validate rank/pivot but may never provide production factor
+metadata.
+
+Artifact gates recompute and require:
+
+```text
+aggregate_penalty_factor_count = executed_svd_target_count
+aggregate_svd_b_build_count    = 2 * executed_svd_target_count
 ```
 
 Transfer and synchronization:
@@ -927,6 +1092,7 @@ target_h2d_count and bytes
 rhs_device_build_count and bytes
 rhs_authority and full_cuda_data_plane
 implicit_residual_d2h_count and bytes
+aggregate_penalty_root_d2h_count and bytes
 shadow_materialize_count and bytes
 batch_event_record_count
 batch_event_wait_count
@@ -973,6 +1139,7 @@ workspace_grow_count during solves                = 0
 per_target_allocation_count_after_warmup          = 0
 per_target_handle_create_count                    = 0
 implicit_residual_d2h_count                       = 0
+aggregate_penalty_root_d2h_count                  = 0
 cuda_device_synchronize_count during solves       = 0
 target_level_stable_sync_count                    = 0
 unknown_fallback_count                            = 0
@@ -1006,8 +1173,12 @@ incomplete session are not reusable and must be recomputed.
 
 ## Numerical Validation Gates
 
-The Phase 2 fixed-sp `C_magic` adapter remains the oracle. Phase 3 compares
-coefficients, fitted values, residuals, and RSS for every selected target.
+The Phase 2 fixed-sp `C_magic` adapter remains the sole numerical oracle for
+every route. Phase 3 compares coefficients, fitted values, residuals, and RSS
+for every selected target. Every target record, including all planned or
+rerouted SVD targets, must report `numeric_reference = "mgcv-fixed-sp"`. A CPU
+stacked augmented SVD is diagnostic only and cannot replace any of these
+comparisons.
 
 GPU operation ordering is different from the Phase 2 R/mgcv call, so exact
 hash equality remains a reported metric but is not assumed. The initial hard
@@ -1258,6 +1429,17 @@ shard pairs.
 - QR bucket setup;
 - high-condition SVD setup;
 - rank-deficient SVD setup;
+- all 67 iteration SVD targets against `C_magic` at each of the four fitted and
+  residual `< 1e-7` gates;
+- aggregate-penalty root rank and pivot against test-only CPU LAPACK upper
+  pivoted Cholesky, including a synthetic equal-pivot tie that selects the
+  first remaining canonical position;
+- explicit separation of aggregate-root rank from effective augmented-SVD
+  rank;
+- C_magic solve-rank truncation at
+  `sigma_max * sqrt(double_epsilon)`, separately from `gesvdj` convergence;
+- one aggregate factorization and two aggregate `B/c` emissions per executed
+  SVD target, with the second emission reusing the retained factor;
 - QR-to-SVD and Cholesky-to-SVD declared reroutes;
 - target order preservation in mixed batches;
 - exact planned/executed route, reroute-reason, and solver-status repeatability.
@@ -1300,9 +1482,11 @@ batch-size-one adapter.
 
 ### Phase 3C - Stable augmented QR/SVD
 
-Add one-time penalty roots, augmented QR, augmented SVD, deterministic rank
-handling, and mixed-route batches. Remove the 3A high-risk unsupported status
-from the canonical corpus. Run iteration and qualification gates.
+Add one-time individual penalty roots for QR/diagnostics, augmented QR,
+target-specific aggregate-penalty augmented SVD, deterministic DPSTF2 pivoting
+and SVD rank handling, and mixed-route batches. Remove the 3A high-risk
+unsupported status from the canonical corpus. Run iteration and qualification
+gates with `C_magic` as the sole numerical oracle.
 
 ### Phase 3 full closure
 
@@ -1319,6 +1503,8 @@ all 110,617 TargetState rows solved
 planned route counts exactly 73,158 / 4,210 / 33,249
 executed route counts satisfy declared reroute conservation
 every reroute has a reason and successful CUDA SVD status
+every executed SVD uses a device-built DPSTF2-compatible aggregate root
+every target numeric_reference = mgcv-fixed-sp
 all outputs finite
 numeric tolerances pass
 qualification and full decision flips = 0
