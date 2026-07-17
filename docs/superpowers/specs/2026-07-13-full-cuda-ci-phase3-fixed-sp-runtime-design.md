@@ -436,15 +436,60 @@ n                      = 351
 null_dim               = 64
 target_count           = 47
 penalty_count          = 7
-augmented_rows         = 415
+augmented_rows         = 407
 ```
 
+`augmented_rows` remains the caller-facing logical capacity for stacked QR; R
+callers must not inflate it to guess an aggregate root rank. The C++ reserve
+first merges every logical capacity with the context's existing capacities,
+then computes, with checked integer addition:
+
+```text
+effective_stable_rows = max(merged.augmented_rows,
+                            merged.n + merged.null_dim)
+```
+
+The within-capacity fast path must include
+`effective_stable_rows <= stable_workspace.max_rows`; stable probe/growth checks
+use `effective_stable_rows`, not `merged.augmented_rows`. The context retains
+`merged.augmented_rows` as the logical QR capacity, while
+`augmented_workspace_bytes` is computed from the internal stable capacity as
+`sizeof(double) * stable_workspace.max_rows * stable_workspace.max_q`.
+Canonical reserve therefore yields `max(407, 351 + 64) = 415` stable rows.
+This makes declared SVD targets and Cholesky/QR targets rerouted from mixed or
+true-batched batches executable without any caller observing or guessing a
+device-produced rank.
+
 The stable reserve also includes one `q x q` aggregate-penalty factor buffer,
-`2q` DPSTF2 work values, `q` pivots, and fixed-capacity per-target aggregate
-rank/pivot diagnostics. These buffers are reserved before warm-up and reused
-for each executed SVD target. QR needs at most the census-frozen `407` rows.
-SVD reserves `n + q = 415` rows so a device-computed rank never has to cross to
-the host to size the cuSOLVER call.
+`2q` DPSTF2 work values, and fixed-capacity per-target aggregate diagnostics.
+For reserved target capacity `T` and coefficient/nullspace capacity `Q`, append
+the following to the existing six stable integer arrays (`geqrf_info`,
+`ormqr_info`, `qr_rank`, `qr_reroute`, `qr_finite_status`, and `svd_info`) in
+both the device integer arena and its pinned-host mirror:
+
+```text
+aggregate_root_rank[T]
+aggregate_factor_call_count[T]
+aggregate_b_build_count[T]
+aggregate_pivots[T * Q]              # target-major, fixed stride Q
+```
+
+The aggregate addition is exactly `T * (Q + 3)` integers; the complete stable
+compact prefix is `6T + T(Q + 3) = T(Q + 9)` integers. With the existing
+`3T + 1` legacy integer prefix and one shared stable `info`, the mirrored full
+integer prefix is `T(Q + 12) + 2` integers. The per-target pivot slice is both
+factor scratch and retained diagnostic storage; there is no extra hidden
+`Q`-integer allocation.
+
+Reserve device doubles in this order before the reusable stable workspace:
+`sigma_max[T]`, `smallest_retained_sigma[T]`, and `aggregate_dstop[T]`. The
+pinned-host status arena mirrors the full enlarged integer prefix first, rounds
+its byte offset up to `alignof(double)`, and only then stores those same `3T`
+doubles in the same order. Thus the host-double alignment is recomputed after
+the `T(Q + 3)` aggregate integers, never from the old six-array boundary.
+These buffers are reserved before warm-up and reused for every executed SVD
+target. QR needs at most the logical `407` rows; SVD has the fixed internal
+`n + q = 415` slots, so no rank D2H is needed to size a cuSOLVER call.
 
 After reserve/warm-up, no solve may grow the workspace. A larger request fails
 closed rather than allocating in the target hot path.
@@ -498,6 +543,18 @@ on the prepared handle in addition to the persistent `H` root. Aggregate SVD
 construction starts from that exact resident matrix. It must not reconstruct
 `P_H` as a crossproduct of the eigendecomposition-derived `H` root. When `H` is
 null, `P_H` is the exact zero matrix by contract.
+
+The existing test-only prepared/static shadow API makes this ownership directly
+observable. `PreparedSStaticShadow` contains `has_H` and a column-major
+`projected_H` vector of length `q * q`; the R
+`C_fixed_sp_cuda_test_prepared_static_shadow` result exposes it as a `q x q`
+matrix for non-null `H` and `NULL` otherwise. `PreparedSInfo` separately reports
+`projected_H_test_shadow_d2h_count` and
+`projected_H_test_shadow_d2h_bytes`. A successful non-null-H materialization
+increments them by one and exactly `q * q * sizeof(double)` respectively; it
+does not fold this observation into root-shadow counters. Production setup and
+solve code never calls this API, and production aggregate matrix/root D2H
+remains zero.
 
 The prepared handle's static setup payload does not mix in target-dependent
 outputs. At handle creation it is paired with one separate
@@ -733,8 +790,13 @@ producing the retained `U`, singular values, and `V`. The existing one-step
 coefficient correction therefore rebuilds `c` and re-emits the same
 original-order aggregate root into `B_SVD`, then uses the retained SVD factors;
 it does not reaggregate or refactor `P(sp)`. Exactly one aggregate factorization
-is performed per executed SVD target, so
-`aggregate_penalty_factor_count == executed_svd_target_count`.
+and exactly two `B/c` builds are performed per executed SVD target. Device
+per-target counters are authoritative: an executed SVD target has
+`aggregate_factor_call_count = 1` and `aggregate_b_build_count = 2`; every
+non-SVD target has `0` and `0`. The batch/global
+`aggregate_penalty_factor_count` and `aggregate_svd_b_build_count` values are
+recomputed sums of those vectors, never independent counters used as sole
+lifecycle evidence.
 
 All kernel inputs and outputs are double precision. No TF32, mixed precision,
 iterative approximation, or host solve is permitted.
@@ -1030,10 +1092,13 @@ setup_h2d_upload_count
 setup_h2d_bytes
 penalty_root_build_count
 penalty_root_rank_mismatch_count
+projected_H_test_shadow_d2h_count
+projected_H_test_shadow_d2h_bytes
 ```
 
-Those setup fields describe only the persistent individual penalty/H roots.
-They are not aggregate SVD-root counters.
+The penalty-root fields describe only persistent individual penalty/H roots;
+they are not aggregate SVD-root counters. The projected-H fields are explicitly
+test-observer traffic and remain unchanged during production solves.
 
 Solve lifecycle:
 
@@ -1066,14 +1131,38 @@ aggregate_penalty_factor_count
 aggregate_svd_b_build_count
 aggregate_penalty_root_rank per target
 aggregate_penalty_root_pivot per target
+aggregate_factor_call_count per target
+aggregate_b_build_count per target
+aggregate_dstop per target
 effective_rank per target (augmented-system SVD rank)
 ```
 
-The native aggregate pivot is zero-based; the R diagnostic is converted once
-to one-based canonical coefficient positions. Pivots use a fixed-stride
-`target_count x q` device layout; ranks and pivots are device-produced compact
-metadata copied only at the single batch SVD checkpoint after all SVD work is
-enqueued. That compact diagnostic copy is not an aggregate matrix/root copy.
+For `T = target_count` and `Q = null_dim`, `DeviceResidualInfo` has these exact
+aggregate shapes:
+
+```text
+aggregate_penalty_root_rank_native     int[T]
+aggregate_factor_call_count            int[T]
+aggregate_b_build_count                int[T]
+aggregate_penalty_root_pivot_native    int[T * Q]
+aggregate_dstop                        double[T]
+```
+
+Non-SVD device entries initialize to rank/pivot `-1`, count `0/0`, and quiet
+NaN `dstop`. An executed SVD writes rank in `[0,Q]`, one full native zero-based
+permutation in its fixed-stride pivot row, finite nonnegative `dstop`, and counts
+`1/2`. At the R boundary, root rank and both count fields are integer vectors of
+length `T`; rank is `NA_integer_` for non-SVD entries. `aggregate_dstop` is a
+numeric vector of length `T` with `NA_real_` for non-SVD entries.
+`aggregate_penalty_root_pivot` is a list of length `T`: each non-SVD entry is
+`integer(0)`, and each executed-SVD entry is a length-`Q` permutation converted
+exactly once to one-based canonical coefficient positions.
+
+After all declared and rerouted SVD work is enqueued, the one SVD batch
+checkpoint copies the contiguous enlarged integer diagnostics once and the
+contiguous `3T` double diagnostics once into their pinned-host mirrors, then
+waits once. No aggregate field triggers a target-level copy or wait. This
+compact diagnostic copy is not an aggregate matrix/root copy, so
 `aggregate_penalty_root_d2h_count` remains zero. A test-only CPU LAPACK
 comparison may validate rank/pivot but may never provide production factor
 metadata.
@@ -1081,6 +1170,14 @@ metadata.
 Artifact gates recompute and require:
 
 ```text
+for every target i:
+  executed_route[i] == AUGMENTED_SVD =>
+    aggregate_factor_call_count[i] = 1 and aggregate_b_build_count[i] = 2
+  executed_route[i] != AUGMENTED_SVD =>
+    aggregate_factor_call_count[i] = 0 and aggregate_b_build_count[i] = 0
+
+aggregate_penalty_factor_count = sum(aggregate_factor_call_count)
+aggregate_svd_b_build_count    = sum(aggregate_b_build_count)
 aggregate_penalty_factor_count = executed_svd_target_count
 aggregate_svd_b_build_count    = 2 * executed_svd_target_count
 ```
@@ -1102,6 +1199,8 @@ cholesky_solve_checkpoint_record_count
 cholesky_solve_checkpoint_wait_count
 qr_checkpoint_record_count
 qr_checkpoint_wait_count
+svd_checkpoint_record_count
+svd_checkpoint_wait_count
 target_level_stable_sync_count
 cuda_device_synchronize_count
 ```
@@ -1415,6 +1514,10 @@ shard pairs.
   the slot;
 - release the first lease, solve again, and prove the first token is stale;
 - prove no post-warm-up allocation or handle creation across released solves;
+- call canonical reserve with logical `augmented_rows = 407` and require exact
+  internal `augmented_workspace_bytes = 8 * 415 * 64`; exercise merged `n/q`
+  growth and equal-reserve reuse against the internal
+  `max(merged_augmented_rows, merged_n + merged_null_dim)` formula;
 - reject freed, stale-generation, wrong-device, and wrong-PID handles;
 - prove an incomplete registered consumer event prevents slot reuse;
 - prove a non-OK token materializes only explicit NA after prior safe output;
@@ -1434,13 +1537,27 @@ shard pairs.
 - aggregate-penalty root rank and pivot against test-only CPU LAPACK upper
   pivoted Cholesky, including a synthetic equal-pivot tie that selects the
   first remaining canonical position;
+- a constrained synthetic `q = 3` non-null-H setup with
+  `P_H = diag(1, 0.60*q*epsilon, 0.90*q*epsilon)` and zero target SP: both small
+  directions are omitted by the `q*epsilon` eigendecomposition-derived
+  `H_root`, but retained by the aggregate factor's `q*(epsilon/2)` stop. Require
+  the prepared/static shadow to equal exact resident `P_H`, require its separate
+  test-D2H delta to be one matrix, prove `crossprod(H_root) != P_H`, and require
+  GPU aggregate rank/pivot to match exact-`P_H` LAPACK (`3`, `c(1,3,2)`) rather
+  than the truncated-root reconstruction (`1`, canonical trailing order);
 - explicit separation of aggregate-root rank from effective augmented-SVD
   rank;
 - C_magic solve-rank truncation at
   `sigma_max * sqrt(double_epsilon)`, separately from `gesvdj` convergence;
 - one aggregate factorization and two aggregate `B/c` emissions per executed
-  SVD target, with the second emission reusing the retained factor;
+  SVD target, with the second emission reusing the retained factor; assert the
+  per-target vectors are exactly `1/2` for SVD and `0/0` for non-SVD before
+  checking their recomputed iteration `67/134` and qualification `2,064/4,128`
+  sums;
 - QR-to-SVD and Cholesky-to-SVD declared reroutes;
+- mixed-route and forced true-batch-reroute tests that reserve only their logical
+  QR row capacity, still execute SVD reroutes within the internal `n + q`
+  capacity, and perform no solve-time growth;
 - target order preservation in mixed batches;
 - exact planned/executed route, reroute-reason, and solver-status repeatability.
 
