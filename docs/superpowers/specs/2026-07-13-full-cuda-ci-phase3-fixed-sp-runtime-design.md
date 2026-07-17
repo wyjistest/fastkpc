@@ -1544,6 +1544,10 @@ shard pairs.
 - aggregate-penalty root rank and pivot against test-only CPU LAPACK upper
   pivoted Cholesky, including a synthetic equal-pivot tie that selects the
   first remaining canonical position;
+- validate aggregate diagnostic outer lengths per public batch and compare
+  pivot lengths elementwise with that batch's `null_dim`: `q` for each executed
+  SVD target and zero for every non-SVD target, never one global `q` across the
+  67-target corpus;
 - a constrained synthetic `q = 3` non-null-H setup with
   `P_H = diag(1, 0.60*q*epsilon, 0.90*q*epsilon)` and zero target SP: both small
   directions are omitted by the `q*epsilon` eigendecomposition-derived

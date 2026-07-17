@@ -819,9 +819,10 @@ git commit -m "feat: solve stable fixed-sp targets with augmented CUDA QR"
 
 - [ ] **Step 1: Write the failing all-target aggregate-SVD test**
 
-Select all 67 iteration SVD targets, run the public solve, and call the Phase 2
-`C_magic` adapter once per target. Require each target independently to pass all
-four fitted/residual gates; an aggregate maximum alone is insufficient:
+Select all 67 iteration SVD targets through the existing per-batch public solve
+loop and call the Phase 2 `C_magic` adapter once per target. Require each target
+independently to pass all four fitted/residual gates; an aggregate maximum alone
+is insufficient:
 
 ```r
 assert_true(planned_svd_target_count == 67L, "iteration planned SVD count")
@@ -846,25 +847,67 @@ assert_true(all(fitted_max_abs_diff < 1e-7),
             "all SVD fitted max-absolute gates")
 assert_true(all(fitted_relative_l2_diff < 1e-7),
             "all SVD fitted relative-L2 gates")
-assert_true(all(aggregate_penalty_root_rank >= 0L) &&
-              all(aggregate_penalty_root_rank <= coefficient_dim),
-            "aggregate root ranks are valid")
-assert_true(all(effective_rank >= 0L) &&
-              all(effective_rank <= coefficient_dim),
-            "augmented SVD ranks are valid and separately named")
-assert_true(identical(info$aggregate_factor_call_count,
-                      rep.int(1L, length(info$executed_route))),
-            "every selected SVD target factors exactly once")
-assert_true(identical(info$aggregate_b_build_count,
-                      rep.int(2L, length(info$executed_route))),
-            "every selected SVD target builds B/c exactly twice")
-assert_true(length(info$aggregate_penalty_root_rank) == 67L &&
-              length(info$aggregate_penalty_root_pivot) == 67L &&
-              all(lengths(info$aggregate_penalty_root_pivot) == dto$null_dim) &&
-              length(info$aggregate_dstop) == 67L &&
-              all(is.finite(info$aggregate_dstop)) &&
-              all(info$aggregate_dstop >= 0),
-            "aggregate diagnostic API shapes")
+```
+
+The 67 targets span setup batches with different `q`. Before the existing
+`for (batch_index in seq_along(svd_batches))` loop, initialize:
+
+```r
+observed_aggregate_factor_count <- 0L
+observed_aggregate_b_build_count <- 0L
+```
+
+Inside that loop, immediately after `info <- fixed_sp_cuda_residual_info(token)`,
+validate shapes and lifecycle counts against the current batch DTO:
+
+```r
+T <- native$target_count
+executed_svd <- info$executed_route == "AUGMENTED_SVD"
+expected_factor_calls <- as.integer(executed_svd)
+expected_b_builds <- 2L * expected_factor_calls
+expected_pivot_lengths <- dto$null_dim * expected_factor_calls
+
+assert_true(
+  length(info$aggregate_penalty_root_rank) == T &&
+    length(info$aggregate_factor_call_count) == T &&
+    length(info$aggregate_b_build_count) == T &&
+    length(info$aggregate_penalty_root_pivot) == T &&
+    length(info$aggregate_dstop) == T &&
+    length(info$effective_rank) == T &&
+    identical(info$aggregate_factor_call_count, expected_factor_calls) &&
+    identical(info$aggregate_b_build_count, expected_b_builds) &&
+    identical(lengths(info$aggregate_penalty_root_pivot),
+              expected_pivot_lengths) &&
+    all(info$aggregate_penalty_root_rank[executed_svd] >= 0L) &&
+    all(info$aggregate_penalty_root_rank[executed_svd] <= dto$null_dim) &&
+    all(is.na(info$aggregate_penalty_root_rank[!executed_svd])) &&
+    all(info$effective_rank[executed_svd] >= 0L) &&
+    all(info$effective_rank[executed_svd] <= dto$null_dim) &&
+    all(is.finite(info$aggregate_dstop[executed_svd])) &&
+    all(info$aggregate_dstop[executed_svd] >= 0) &&
+    all(is.na(info$aggregate_dstop[!executed_svd])) &&
+    identical(info$aggregate_penalty_factor_count,
+              as.integer(sum(expected_factor_calls))) &&
+    identical(info$aggregate_svd_b_build_count,
+              as.integer(sum(expected_b_builds))),
+  paste("aggregate diagnostic shapes and counts are exact for setup",
+        setup_key)
+)
+
+observed_aggregate_factor_count <- observed_aggregate_factor_count +
+  sum(info$aggregate_factor_call_count)
+observed_aggregate_b_build_count <- observed_aggregate_b_build_count +
+  sum(info$aggregate_b_build_count)
+```
+
+After the loop, require the cross-batch totals without flattening pivots under
+one setup's `q`:
+
+```r
+assert_true(observed_aggregate_factor_count == 67L,
+            "all SVD targets factor exactly once")
+assert_true(observed_aggregate_b_build_count == 134L,
+            "all SVD targets build B/c exactly twice")
 ```
 
 For each of the 67 targets, independently reconstruct
@@ -915,9 +958,9 @@ counts and statuses, zero reroutes, zero post-warm-up allocation/workspace
 growth, zero CPU/unknown/approximate fallback, zero target-level sync, zero
 aggregate matrix/root D2H, exactly one compact SVD checkpoint per affected
 public batch (zero for an unaffected batch),
-`aggregate_penalty_factor_count ==
-sum(info$aggregate_factor_call_count) == 67L`,
-`aggregate_svd_b_build_count == sum(info$aggregate_b_build_count) == 134L`, and
+each per-batch aggregate scalar equal to the sum of its per-target vector,
+`observed_aggregate_factor_count == 67L`, and
+`observed_aggregate_b_build_count == 134L`, and
 unchanged canonical output order. In the mixed-route and forced true-batch
 reroute regressions, apply the same target mask and require exact `1/2` counts
 for every executed SVD target, including reroutes, and exact `0/0` for every
@@ -979,6 +1022,10 @@ FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_penalty_roots.R
 FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_qr.R
+FASTKPC_RUN_CUDA_TESTS=1 \
+  Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_true_batch.R
+FASTKPC_RUN_CUDA_TESTS=1 \
+  Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_mixed_batch.R
 ```
 
 Expected: FAIL because landed commit `8bd6142` uses stacked roots, lacks the
@@ -995,7 +1042,10 @@ not accept the route-specific CPU augmented reference.
 As the reopened-Task-5 resource delta, extend the landed Task 1 workspace with:
 
 ```cpp
-double* aggregate_penalty_factor = nullptr;  // q x q, overwritten by U
+double* aggregate_penalty_factor = nullptr;  // q x q P(sp), overwritten
+                                             // in-place by its upper DPSTF2
+                                             // factor; distinct from retained
+                                             // SVD U matrix
 double* aggregate_factor_work = nullptr;     // 2q DPSTF2 work values
 ```
 
@@ -1244,7 +1294,13 @@ successfully executed.
 
 - [ ] **Step 8: Run SVD, QR, root, and Phase 3B tests**
 
+From the repository root, force one native rebuild before running any GREEN
+regression. This prevents the block from exercising a stale binary left by the
+Step 2 RED run:
+
 ```bash
+Rscript -e 'source("fastkpc/R/cuda_native.R"); build_fastkpc_cuda_native(rebuild = TRUE)'
+
 FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_svd.R
 FASTKPC_RUN_CUDA_TESTS=1 \
