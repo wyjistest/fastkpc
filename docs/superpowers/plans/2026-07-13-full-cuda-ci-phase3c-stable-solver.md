@@ -810,7 +810,9 @@ git commit -m "feat: solve stable fixed-sp targets with augmented CUDA QR"
 - Modify: `fastkpc/src/r_api_cuda.cpp`
 - Modify: `fastkpc/R/cuda_native.R`
 - Modify: `fastkpc/tests/test_mgcv_fixed_sp_cuda_runtime_lifecycle.R`
+- Modify: `fastkpc/tests/test_mgcv_fixed_sp_cuda_prepared_handle.R`
 - Modify: `fastkpc/tests/test_mgcv_fixed_sp_cuda_penalty_roots.R`
+- Modify: `fastkpc/tests/test_mgcv_fixed_sp_cuda_qr.R`
 - Modify: `fastkpc/tests/test_mgcv_fixed_sp_cuda_svd.R`
 - Modify: `fastkpc/tests/test_mgcv_fixed_sp_cuda_true_batch.R`
 - Modify: `fastkpc/tests/test_mgcv_fixed_sp_cuda_mixed_batch.R`
@@ -923,6 +925,13 @@ non-SVD target. Also require all five aggregate vectors/lists to have outer
 length `T`, with non-SVD rank/dstop `NA`, non-SVD pivots `integer(0)`, and every
 executed-SVD pivot a length-`Q` one-based permutation.
 
+In the existing real `QR_RANK_GUARD_REJECTED` regression in
+`test_mgcv_fixed_sp_cuda_qr.R`, require the rerouted target's
+`aggregate_factor_call_count` and `aggregate_b_build_count` entries to be
+exactly `1L` and `2L`. Require accepted QR and every other non-SVD target in
+that test to retain exact `0L/0L` entries. Preserve the existing route, status,
+checkpoint, and provisional-output replacement assertions.
+
 Keep the canonical caller reserve at logical `augmented_rows = 407L`, then
 extend the lifecycle RED assertions to require exactly
 `augmented_workspace_bytes == 8 * max(407L, 351L + 64L) * 64L`, i.e. internal
@@ -932,6 +941,11 @@ must grow the stable row capacity to `464`, and the following explicit
 `n = 400, q = 64` reserve must reuse it without another allocation or query.
 Mixed and true-batch tests continue passing only their logical QR row capacity;
 their declared/rerouted SVD work must fit `n + q` with zero solve-time growth.
+For both existing narrow lifecycle assertions with `n = 1L`,
+`augmented_rows = 1L`, and `q = narrow_q`, replace `8 * narrow_q` with exact
+`8 * (1L + narrow_q) * narrow_q`. Retain the equal-reserve assertions that no
+allocation, workspace query, or workspace growth occurs and that every stable
+workspace byte count remains unchanged.
 
 Extend the synthetic constrained/non-null-H case with `q = 3`, zero target SP,
 and exact projected
@@ -945,6 +959,13 @@ device aggregate rank/pivot to follow exact `projected_H` (`3`, `c(1L,3L,2L)`)
 and not the truncated reconstruction (`1`, canonical trailing pivot order).
 Production aggregate/root D2H counters remain zero.
 
+Also update the exact null-H schema assertion in
+`test_mgcv_fixed_sp_cuda_prepared_handle.R` to require
+`c("X_null", "gram", "projected_penalties", "projected_H")`, with
+`projected_H = NULL`. Preserve the exact values of the other three fields and
+the existing event-resource and prepared-info counter assertions; observing a
+null-H shadow must not increment the projected-H test-shadow D2H counters.
+
 - [ ] **Step 2: Run and verify the landed stacked-SVD failure**
 
 ```bash
@@ -953,15 +974,21 @@ FASTKPC_RUN_CUDA_TESTS=1 \
 FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_runtime_lifecycle.R
 FASTKPC_RUN_CUDA_TESTS=1 \
+  Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_prepared_handle.R
+FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_penalty_roots.R
+FASTKPC_RUN_CUDA_TESTS=1 \
+  Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_qr.R
 ```
 
 Expected: FAIL because landed commit `8bd6142` uses stacked roots, lacks the
 aggregate rank/pivot diagnostics, and misses `C_magic` on the known `14 / 67`
 targets; lifecycle and synthetic-H assertions also fail on missing aggregate
-storage/exact projected-H ownership. This is the required RED for the follow-up
-correction; do not reset to the earlier `ERR_STABLE_PATH_NOT_IMPLEMENTED`
-milestone and do not accept the route-specific CPU augmented reference.
+storage/exact projected-H ownership, the null-H prepared-shadow schema lacks
+`projected_H`, and the real QR-to-SVD reroute lacks exact per-target `1/2`
+factor/build evidence. This is the required RED for the follow-up correction;
+do not reset to the earlier `ERR_STABLE_PATH_NOT_IMPLEMENTED` milestone and do
+not accept the route-specific CPU augmented reference.
 
 - [ ] **Step 3: Build and factor the aggregate penalty entirely on device**
 
@@ -1227,6 +1254,8 @@ FASTKPC_RUN_CUDA_TESTS=1 \
 FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_runtime_lifecycle.R
 FASTKPC_RUN_CUDA_TESTS=1 \
+  Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_prepared_handle.R
+FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_true_batch.R
 FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_mixed_batch.R
@@ -1238,7 +1267,11 @@ aggregate-root rank remains separate from effective SVD rank, and lifecycle
 evidence records per-target SVD `1/2`, non-SVD `0/0`, and recomputed totals of
 exactly 67 factors / 134 `B/c` builds. Canonical, mixed, and true-batch-reroute
 reserves pass logical QR rows while internal stable rows cover `n + q` without
-solve-time growth.
+solve-time growth. The narrow reserve loop uses exact `8 * (1 + q) * q` bytes
+with no equal-reserve query or growth, the null-H prepared shadow exposes
+`projected_H = NULL` without changing its existing fields/counters, and both
+Cholesky-to-SVD and QR-to-SVD reroutes carry per-target `1/2` factor/build
+counts while non-SVD targets retain `0/0`.
 
 - [ ] **Step 9: Commit the aggregate-root SVD correction**
 
@@ -1249,7 +1282,9 @@ git add fastkpc/src/cuda/mgcv_fixed_sp_runtime_types.hpp \
   fastkpc/src/cuda/mgcv_fixed_sp_stable.cu \
   fastkpc/src/r_api_cuda.cpp fastkpc/R/cuda_native.R \
   fastkpc/tests/test_mgcv_fixed_sp_cuda_runtime_lifecycle.R \
+  fastkpc/tests/test_mgcv_fixed_sp_cuda_prepared_handle.R \
   fastkpc/tests/test_mgcv_fixed_sp_cuda_penalty_roots.R \
+  fastkpc/tests/test_mgcv_fixed_sp_cuda_qr.R \
   fastkpc/tests/test_mgcv_fixed_sp_cuda_svd.R \
   fastkpc/tests/test_mgcv_fixed_sp_cuda_true_batch.R \
   fastkpc/tests/test_mgcv_fixed_sp_cuda_mixed_batch.R

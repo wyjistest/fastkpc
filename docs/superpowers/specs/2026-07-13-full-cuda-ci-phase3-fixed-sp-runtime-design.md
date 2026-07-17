@@ -1518,6 +1518,13 @@ shard pairs.
   internal `augmented_workspace_bytes = 8 * 415 * 64`; exercise merged `n/q`
   growth and equal-reserve reuse against the internal
   `max(merged_augmented_rows, merged_n + merged_null_dim)` formula;
+- for narrow `n = 1`, `augmented_rows = 1`, and `q` in `{63, 64}` reserves,
+  require exact `augmented_workspace_bytes = 8 * (1 + q) * q`, then repeat each
+  reserve and require no allocation, workspace query, or workspace growth;
+- require the exact null-H prepared/static-shadow schema `X_null`, `gram`,
+  `projected_penalties`, `projected_H`, with `projected_H = NULL`; preserve the
+  other exact field values and the existing event-resource and prepared-info
+  counter assertions, including zero projected-H test-shadow D2H deltas;
 - reject freed, stale-generation, wrong-device, and wrong-PID handles;
 - prove an incomplete registered consumer event prevents slot reuse;
 - prove a non-OK token materializes only explicit NA after prior safe output;
@@ -1554,7 +1561,9 @@ shard pairs.
   per-target vectors are exactly `1/2` for SVD and `0/0` for non-SVD before
   checking their recomputed iteration `67/134` and qualification `2,064/4,128`
   sums;
-- QR-to-SVD and Cholesky-to-SVD declared reroutes;
+- Cholesky-to-SVD and QR-to-SVD declared reroutes, each with exact per-target
+  factor/build lifecycle counts of `1/2` for the rerouted target and `0/0` for
+  every non-SVD target in that reroute regression;
 - mixed-route and forced true-batch-reroute tests that reserve only their logical
   QR row capacity, still execute SVD reroutes within the internal `n + q`
   capacity, and perform no solve-time growth;
