@@ -5065,9 +5065,78 @@ fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info <- function(
   list(routes = routes, route_status_conservation_exact = TRUE)
 }
 
+fastkpc_full_cuda_fixed_sp_phase3c_expected_counts <- function(scope) {
+  scope <- match.arg(scope, c("iteration", "qualification"))
+  if (identical(scope, "iteration")) {
+    return(list(
+      setup_count = 44L, target_count = 270L,
+      penalty_root_matrix_count = 159L, penalty_root_row_count = 1424L,
+      H_root_matrix_count = 0L,
+      planned_cholesky_count = 172L, planned_qr_count = 31L,
+      planned_svd_count = 67L, executed_cholesky_count = 172L,
+      executed_qr_count = 31L, executed_svd_count = 67L,
+      cholesky_to_svd_count = 0L, qr_to_svd_count = 0L,
+      true_batched_target_count = 160L, cholesky_single_target_count = 12L,
+      whole_batch_true_batched_count = 5L,
+      stable_not_implemented_count = 0L, stable_reroute_count = 0L,
+      non_ok_status_count = 0L, root_rank_mismatch_count = 0L,
+      aggregate_penalty_factor_count = 67L,
+      aggregate_svd_b_build_count = 134L,
+      aggregate_penalty_root_rank_mismatch_count = 0L,
+      aggregate_penalty_root_pivot_mismatch_count = 0L,
+      aggregate_penalty_root_d2h_count = 0L,
+      aggregate_penalty_root_d2h_bytes = 0,
+      workspace_grow_count_after_warmup = 0L,
+      stable_workspace_grow_count_after_warmup = 0L,
+      per_target_allocation_count_after_warmup = 0L,
+      per_target_handle_create_count = 0L,
+      cuda_device_synchronize_count = 0L,
+      target_level_stable_sync_count = 0L,
+      implicit_residual_d2h_count = 0L,
+      all_output_slot_leases_released = TRUE,
+      invalid_output_init_count = 44L, cpu_fallback_count = 0L,
+      unknown_fallback_count = 0L, approximate_backend_count = 0L
+    ))
+  }
+  list(
+    setup_count = 2061L, target_count = 6143L,
+    penalty_root_matrix_count = 6272L, penalty_root_row_count = 63552L,
+    H_root_matrix_count = 0L,
+    planned_cholesky_count = 3889L, planned_qr_count = 190L,
+    planned_svd_count = 2064L, executed_cholesky_count = 3889L,
+    executed_qr_count = 190L, executed_svd_count = 2064L,
+    cholesky_to_svd_count = 0L, qr_to_svd_count = 0L,
+    svd_finite_high_count = 902L, svd_nonfinite_count = 1162L,
+    all_safe_batch_count = 723L, mixed_batch_count = 652L,
+    all_stable_batch_count = 686L, true_batched_subgroup_count = 806L,
+    true_batched_target_count = 3320L,
+    cholesky_single_target_count = 569L,
+    whole_batch_true_batched_count = 723L,
+    non_ok_status_count = 0L, stable_not_implemented_count = 0L,
+    stable_reroute_count = 0L, root_rank_mismatch_count = 0L,
+    aggregate_penalty_factor_count = 2064L,
+    aggregate_svd_b_build_count = 4128L,
+    aggregate_penalty_root_rank_mismatch_count = 0L,
+    aggregate_penalty_root_pivot_mismatch_count = 0L,
+    aggregate_penalty_root_d2h_count = 0L,
+    aggregate_penalty_root_d2h_bytes = 0,
+    workspace_grow_count_after_warmup = 0L,
+    stable_workspace_grow_count_after_warmup = 0L,
+    per_target_allocation_count_after_warmup = 0L,
+    per_target_handle_create_count = 0L,
+    cuda_device_synchronize_count = 0L,
+    target_level_stable_sync_count = 0L,
+    implicit_residual_d2h_count = 0L,
+    all_output_slot_leases_released = TRUE,
+    invalid_output_init_count = 2061L, cpu_fallback_count = 0L,
+    unknown_fallback_count = 0L, approximate_backend_count = 0L
+  )
+}
+
 fastkpc_full_cuda_fixed_sp_phase3c_summarize <- function(
     catalog_records, runtime_records, setup_records,
-    batch_records, target_records) {
+    batch_records, target_records, scope = "iteration") {
+  scope <- match.arg(scope, c("iteration", "qualification"))
   records <- list(
     catalog = catalog_records, runtime = runtime_records,
     setup = setup_records, batch = batch_records, target = target_records
@@ -5091,6 +5160,14 @@ fastkpc_full_cuda_fixed_sp_phase3c_summarize <- function(
       !identical(batch_records$target_count, target_count_by_setup)) {
     stop("Phase 3C target ownership is malformed", call. = FALSE)
   }
+  safe_count_by_setup <- vapply(target_indices, function(indices) {
+    as.integer(sum(
+      target_records$planned_route[indices] == "CHOLESKY_BATCHED"
+    ))
+  }, integer(1L))
+  all_safe <- safe_count_by_setup == target_count_by_setup
+  all_stable <- safe_count_by_setup == 0L
+  mixed <- !all_safe & !all_stable
   routes <- fastkpc_full_cuda_fixed_sp_phase3c_route_counts(
     target_records$planned_route, target_records$executed_route
   )
@@ -5251,7 +5328,8 @@ fastkpc_full_cuda_fixed_sp_phase3c_summarize <- function(
     target_records$residual_numeric_hash
   ))
   summary <- list(
-    iteration_subset_hash = catalog_records$iteration_subset_hash[[1L]],
+    scope = scope,
+    scope_subset_hash = catalog_records$scope_subset_hash[[1L]],
     ordered_setup_key_digest =
       catalog_records$ordered_setup_key_digest[[1L]],
     ordered_target_key_digest =
@@ -5277,6 +5355,18 @@ fastkpc_full_cuda_fixed_sp_phase3c_summarize <- function(
     executed_svd_count = routes$executed_svd,
     cholesky_to_svd_count = routes$cholesky_to_svd,
     qr_to_svd_count = routes$qr_to_svd,
+    svd_finite_high_count = as.integer(sum(
+      svd & is.finite(target_records$phase1_condition)
+    )),
+    svd_nonfinite_count = as.integer(sum(
+      svd & !is.finite(target_records$phase1_condition)
+    )),
+    all_safe_batch_count = as.integer(sum(all_safe)),
+    mixed_batch_count = as.integer(sum(mixed)),
+    all_stable_batch_count = as.integer(sum(all_stable)),
+    true_batched_subgroup_count = as.integer(sum(
+      batch_records$true_batched_subgroup_count
+    )),
     true_batched_target_count = as.integer(sum(
       target_records$target_true_batched
     )),
@@ -5360,43 +5450,19 @@ fastkpc_full_cuda_fixed_sp_phase3c_summarize <- function(
     max_fitted_relative_l2_diff =
       max(target_records$fitted_relative_l2_diff)
   )
-  expected <- list(
-    setup_count = 44L, target_count = 270L,
-    penalty_root_matrix_count = 159L, penalty_root_row_count = 1424L,
-    H_root_matrix_count = 0L,
-    planned_cholesky_count = 172L, planned_qr_count = 31L,
-    planned_svd_count = 67L, executed_cholesky_count = 172L,
-    executed_qr_count = 31L, executed_svd_count = 67L,
-    cholesky_to_svd_count = 0L, qr_to_svd_count = 0L,
-    true_batched_target_count = 160L, cholesky_single_target_count = 12L,
-    whole_batch_true_batched_count = 5L,
-    stable_not_implemented_count = 0L, stable_reroute_count = 0L,
-    non_ok_status_count = 0L, root_rank_mismatch_count = 0L,
-    aggregate_penalty_factor_count = 67L,
-    aggregate_svd_b_build_count = 134L,
-    aggregate_penalty_root_rank_mismatch_count = 0L,
-    aggregate_penalty_root_pivot_mismatch_count = 0L,
-    aggregate_penalty_root_d2h_count = 0L,
-    aggregate_penalty_root_d2h_bytes = 0,
-    workspace_grow_count_after_warmup = 0L,
-    stable_workspace_grow_count_after_warmup = 0L,
-    per_target_allocation_count_after_warmup = 0L,
-    per_target_handle_create_count = 0L,
-    cuda_device_synchronize_count = 0L,
-    target_level_stable_sync_count = 0L,
-    implicit_residual_d2h_count = 0L,
-    all_output_slot_leases_released = TRUE,
-    invalid_output_init_count = 44L, cpu_fallback_count = 0L,
-    unknown_fallback_count = 0L, approximate_backend_count = 0L
-  )
+  subset_name <- paste0(scope, "_subset_hash")
+  summary[[subset_name]] <- summary$scope_subset_hash
+  expected <- fastkpc_full_cuda_fixed_sp_phase3c_expected_counts(scope)
   if (!identical(summary[names(expected)], expected)) {
-    stop("Phase 3C iteration exact aggregate gate failed", call. = FALSE)
+    stop("Phase 3C ", scope, " exact aggregate gate failed", call. = FALSE)
   }
   summary
 }
 
 fastkpc_run_full_cuda_fixed_sp_phase3c_iteration <- function(
-    phase2_dir, census_dir, prepared_dir, data_path, device_id = 0L) {
+    phase2_dir, census_dir, prepared_dir, data_path, device_id = 0L,
+    scope = "iteration") {
+  scope <- match.arg(scope, c("iteration", "qualification"))
   required_functions <- c(
     "fixed_sp_cuda_runtime_create", "fixed_sp_cuda_runtime_reserve",
     "fixed_sp_cuda_runtime_info", "fixed_sp_cuda_runtime_free",
@@ -5433,32 +5499,45 @@ fastkpc_run_full_cuda_fixed_sp_phase3c_iteration <- function(
   catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
     phase2_dir, census_dir, prepared_dir, data_path
   )
-  iteration <- fastkpc_full_cuda_fixed_sp_scope(catalog, "iteration")
-  batches <- fastkpc_full_cuda_fixed_sp_batches(catalog, iteration)
+  selected_scope <- fastkpc_full_cuda_fixed_sp_scope(catalog, scope)
+  batches <- fastkpc_full_cuda_fixed_sp_batches(catalog, selected_scope)
   setup_keys <- names(batches)
   if (length(setup_keys) < 1L ||
       !identical(setup_keys, sort(setup_keys, method = "radix")) ||
       anyDuplicated(setup_keys)) {
-    stop("Phase 3C iteration PreparedSKey order is not canonical",
+    stop("Phase 3C ", scope, " PreparedSKey order is not canonical",
          call. = FALSE)
   }
   ordered_target_keys <- unlist(lapply(batches, function(batch) {
     as.character(batch$target_rows$residual_key_sha256)
   }), use.names = FALSE)
   if (anyDuplicated(ordered_target_keys)) {
-    stop("Phase 3C iteration target-key order is not canonical",
+    stop("Phase 3C ", scope, " target-key order is not canonical",
          call. = FALSE)
   }
-  iteration_subset_hash <- catalog$catalog_contract$iteration_subset_hash
+  scope_target_rows <- catalog$scopes[[scope]]$target_rows
+  condition_bucket_by_target <- setNames(
+    as.character(scope_target_rows$condition_bucket),
+    as.character(scope_target_rows$residual_key_sha256)
+  )
+  if (anyNA(condition_bucket_by_target) ||
+      !setequal(names(condition_bucket_by_target), ordered_target_keys)) {
+    stop("Phase 3C ", scope, " condition-bucket lineage is malformed",
+         call. = FALSE)
+  }
+  scope_subset_hash <- catalog$catalog_contract[[paste0(
+    scope, "_subset_hash"
+  )]]
   catalog_records <- data.frame(
-    scope = "iteration",
+    scope = scope,
     authenticated = TRUE,
     catalog_open_count = 1L,
     setup_count = as.integer(length(batches)),
     target_count = as.integer(sum(vapply(
       batches, function(batch) nrow(batch$target_rows), integer(1L)
     ))),
-    iteration_subset_hash = iteration_subset_hash,
+    scope_subset_hash = scope_subset_hash,
+    iteration_subset_hash = scope_subset_hash,
     ordered_setup_key_digest =
       fastkpc_full_cuda_census_key_set_hash(setup_keys),
     ordered_target_key_digest =
@@ -5952,6 +6031,9 @@ fastkpc_run_full_cuda_fixed_sp_phase3c_iteration <- function(
             target = as.integer(batch$target_rows$target),
             null_dim = rep.int(dto$null_dim, target_count),
             phase1_condition = as.double(batch$condition),
+            condition_bucket = unname(
+              condition_bucket_by_target[native$target_keys]
+            ),
             phase1_coefficient_rank =
               as.integer(batch$target_rows$coefficient_rank),
             planned_route = pre_shadow_info$planned_route,
@@ -6301,7 +6383,7 @@ fastkpc_run_full_cuda_fixed_sp_phase3c_iteration <- function(
         rownames(runtime_records) <- NULL
         summary <- fastkpc_full_cuda_fixed_sp_phase3c_summarize(
           catalog_records, runtime_records, setup_records,
-          batch_records, target_records
+          batch_records, target_records, scope = scope
         )
 
         list(
@@ -6314,7 +6396,1737 @@ fastkpc_run_full_cuda_fixed_sp_phase3c_iteration <- function(
         )
       },
       operations = runtime_cleanup_operations,
-      context = "Phase 3C iteration cleanup"
+      context = paste("Phase 3C", scope, "cleanup")
     )
   iteration_result
+}
+
+fastkpc_run_full_cuda_fixed_sp_phase3c_qualification <- function(
+    phase2_dir, census_dir, prepared_dir, data_path, device_id = 0L) {
+  fastkpc_run_full_cuda_fixed_sp_phase3c_iteration(
+    phase2_dir = phase2_dir,
+    census_dir = census_dir,
+    prepared_dir = prepared_dir,
+    data_path = data_path,
+    device_id = device_id,
+    scope = "qualification"
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_payload_names <- function() {
+  c(
+    "target_parity.rds", "target_parity.csv",
+    "batch_metrics.rds", "batch_metrics.csv",
+    "setup_metrics.rds", "setup_metrics.csv",
+    "runtime_metrics.csv", "stage_timing.csv", "fallbacks.csv",
+    "failures.csv", "commands.txt", "environment.txt"
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_sha256_file <- function(path) {
+  if (!is.character(path) || length(path) != 1L || is.na(path) ||
+      !nzchar(path) || !file.exists(path) || dir.exists(path)) {
+    stop("execution source hash path is invalid", call. = FALSE)
+  }
+  if (!requireNamespace("digest", quietly = TRUE)) {
+    stop("execution source hashing requires digest", call. = FALSE)
+  }
+  unname(digest::digest(
+    file = path, algo = "sha256", serialize = FALSE
+  ))
+}
+
+fastkpc_full_cuda_fixed_sp_git_source_state <- function(path) {
+  status <- suppressWarnings(system2(
+    "git",
+    c("status", "--porcelain=v1", "--untracked-files=all", "--", path),
+    stdout = TRUE, stderr = TRUE
+  ))
+  exit_status <- attr(status, "status")
+  if (!is.null(exit_status) && exit_status != 0L) {
+    stop("failed to inspect execution source git state", call. = FALSE)
+  }
+  if (length(status) == 0L) return("clean")
+  if (any(startsWith(status, "??"))) return("untracked")
+  "tracked-dirty"
+}
+
+fastkpc_full_cuda_fixed_sp_source_call <- function(expression) {
+  if (!is.call(expression)) return(NULL)
+  head <- expression[[1L]]
+  direct <- is.symbol(head) && identical(as.character(head), "source")
+  namespaced <- is.call(head) && length(head) == 3L &&
+    is.symbol(head[[1L]]) && as.character(head[[1L]]) %in% c("::", ":::") &&
+    is.symbol(head[[2L]]) && identical(as.character(head[[2L]]), "base") &&
+    is.symbol(head[[3L]]) && identical(as.character(head[[3L]]), "source")
+  if (!direct && !namespaced) return(NULL)
+
+  arguments <- as.list(expression)[-1L]
+  argument_names <- names(arguments)
+  if (is.null(argument_names)) argument_names <- rep.int("", length(arguments))
+  named_file <- which(argument_names == "file")
+  unnamed <- which(!nzchar(argument_names))
+  if (length(named_file) > 1L ||
+      (length(named_file) == 1L && length(unnamed) > 0L) ||
+      (length(named_file) == 0L && length(unnamed) < 1L)) {
+    stop("execution source has an unsupported source() signature",
+         call. = FALSE)
+  }
+  file_argument <- if (length(named_file) == 1L) {
+    arguments[[named_file]]
+  } else {
+    arguments[[unnamed[[1L]]]]
+  }
+  if (typeof(file_argument) != "character" || length(file_argument) != 1L ||
+      is.object(file_argument) || !is.null(attributes(file_argument)) ||
+      is.na(file_argument) || !nzchar(file_argument)) {
+    stop("execution source contains a dynamic source() call", call. = FALSE)
+  }
+  as.character(file_argument)
+}
+
+fastkpc_full_cuda_fixed_sp_scan_source_ast <- function(expressions) {
+  dependencies <- character()
+  walk <- function(node, load_time) {
+    if (is.call(node)) {
+      source_path <- fastkpc_full_cuda_fixed_sp_source_call(node)
+      if (!is.null(source_path)) {
+        if (load_time) dependencies <<- c(dependencies, source_path)
+        return(invisible(NULL))
+      }
+      head <- node[[1L]]
+      if (is.symbol(head) && identical(as.character(head), "function")) {
+        formals <- node[[2L]]
+        for (formal_name in names(formals)) {
+          if (!identical(formals[[formal_name]], quote(expr = ))) {
+            walk(formals[[formal_name]], FALSE)
+          }
+        }
+        walk(node[[3L]], FALSE)
+        return(invisible(NULL))
+      }
+      for (index in seq_along(node)) {
+        if (!identical(node[[index]], quote(expr = ))) {
+          walk(node[[index]], load_time)
+        }
+      }
+    } else if (is.expression(node) || is.pairlist(node)) {
+      for (index in seq_along(node)) {
+        if (!identical(node[[index]], quote(expr = ))) {
+          walk(node[[index]], load_time)
+        }
+      }
+    }
+    invisible(NULL)
+  }
+  walk(expressions, TRUE)
+  sort(unique(dependencies), method = "radix")
+}
+
+fastkpc_full_cuda_fixed_sp_source_identity <- function(path, project_root) {
+  scalar <- typeof(path) == "character" && length(path) == 1L &&
+    !is.object(path) && is.null(attributes(path)) && !anyNA(path) &&
+    nzchar(path) && !grepl("[\r\n\\]", path)
+  if (!isTRUE(scalar)) {
+    stop("execution source path identity is malformed", call. = FALSE)
+  }
+  root <- normalizePath(project_root, winslash = "/", mustWork = TRUE)
+  absolute_input <- startsWith(path, "/")
+  candidate <- if (absolute_input) path else file.path(root, path)
+  if (!file.exists(candidate) || dir.exists(candidate)) {
+    stop("execution source path does not exist: ", path, call. = FALSE)
+  }
+  normalized <- normalizePath(candidate, winslash = "/", mustWork = TRUE)
+  root_prefix <- paste0(root, "/")
+  if (!startsWith(normalized, root_prefix)) {
+    stop("execution source escapes the project root", call. = FALSE)
+  }
+  source_id <- substring(normalized, nchar(root_prefix) + 1L)
+  canonical_input <- if (absolute_input) normalized else path
+  expected_input <- if (absolute_input) normalized else source_id
+  if (!identical(canonical_input, expected_input) ||
+      !nzchar(source_id) || startsWith(source_id, "../") ||
+      grepl("(^|/)\\.{1,2}(/|$)", source_id)) {
+    stop("execution source identity is ambiguous or noncanonical",
+         call. = FALSE)
+  }
+  list(id = source_id, path = normalized, project_root = root)
+}
+
+fastkpc_full_cuda_fixed_sp_validate_source_closure <- function(closure) {
+  expected_names <- c(
+    "source_closure_schema_version", "source_discovery_semantics",
+    "source_project_root", "direct_source_ids", "source_ids",
+    "source_file_paths", "source_dependency_map", "source_closure_count"
+  )
+  scalar_character <- function(value) {
+    typeof(value) == "character" && length(value) == 1L &&
+      !is.object(value) && is.null(attributes(value)) && !anyNA(value) &&
+      nzchar(value) && !grepl("[\r\n]", value)
+  }
+  source_ids <- closure$source_ids
+  named_character <- function(value, expected_names) {
+    typeof(value) == "character" && !is.object(value) &&
+      identical(names(value), expected_names) &&
+      identical(names(attributes(value)), "names") && !anyNA(value) &&
+      all(nzchar(value)) && !any(grepl("[\r\n]", value))
+  }
+  clean <- is.list(closure) && !is.object(closure) &&
+    identical(names(closure), expected_names) &&
+    identical(
+      closure$source_closure_schema_version,
+      "full-cuda-ci-execution-source-closure-v1"
+    ) && identical(
+      closure$source_discovery_semantics,
+      "parsed-r-ast-load-time-literal-source-v1"
+    ) && scalar_character(closure$source_project_root) &&
+    typeof(source_ids) == "character" && !is.object(source_ids) &&
+    is.null(attributes(source_ids)) && length(source_ids) > 0L &&
+    !anyNA(source_ids) && all(nzchar(source_ids)) &&
+    !any(grepl("[\r\n]", source_ids)) && !anyDuplicated(source_ids) &&
+    identical(source_ids, sort(source_ids, method = "radix")) &&
+    named_character(closure$direct_source_ids,
+                    names(closure$direct_source_ids)) &&
+    length(closure$direct_source_ids) > 0L &&
+    !anyDuplicated(names(closure$direct_source_ids)) &&
+    all(closure$direct_source_ids %in% source_ids) &&
+    named_character(closure$source_file_paths, source_ids) &&
+    all(file.exists(closure$source_file_paths)) &&
+    !any(dir.exists(closure$source_file_paths)) &&
+    is.list(closure$source_dependency_map) &&
+    !is.object(closure$source_dependency_map) &&
+    identical(names(closure$source_dependency_map), source_ids) &&
+    all(vapply(closure$source_dependency_map, function(dependencies) {
+      typeof(dependencies) == "character" && !is.object(dependencies) &&
+        is.null(attributes(dependencies)) && !anyNA(dependencies) &&
+        !anyDuplicated(dependencies) &&
+        identical(dependencies, sort(dependencies, method = "radix")) &&
+        all(dependencies %in% source_ids)
+    }, logical(1L))) &&
+    typeof(closure$source_closure_count) == "integer" &&
+    length(closure$source_closure_count) == 1L &&
+    !is.object(closure$source_closure_count) &&
+    is.null(attributes(closure$source_closure_count)) &&
+    identical(closure$source_closure_count, as.integer(length(source_ids)))
+  if (!isTRUE(clean)) {
+    stop("execution source closure is malformed", call. = FALSE)
+  }
+  TRUE
+}
+
+fastkpc_full_cuda_fixed_sp_discover_execution_source_closure <- function(
+    root_sources, project_root = ".") {
+  root_clean <- typeof(root_sources) == "character" &&
+    !is.object(root_sources) && length(root_sources) > 0L &&
+    !is.null(names(root_sources)) && !anyNA(root_sources) &&
+    all(nzchar(root_sources)) && !anyDuplicated(names(root_sources)) &&
+    all(nzchar(names(root_sources)))
+  if (!isTRUE(root_clean)) {
+    stop("execution source roots are malformed", call. = FALSE)
+  }
+  root <- normalizePath(project_root, winslash = "/", mustWork = TRUE)
+  roots <- lapply(root_sources, function(path) {
+    fastkpc_full_cuda_fixed_sp_source_identity(path, root)
+  })
+  root_ids <- vapply(roots, `[[`, character(1L), "id")
+  if (anyDuplicated(root_ids)) {
+    stop("execution source root identity is ambiguous", call. = FALSE)
+  }
+  direct_source_ids <- setNames(unname(root_ids), names(root_sources))
+  states <- new.env(parent = emptyenv())
+  path_by_id <- new.env(parent = emptyenv())
+  dependencies_by_id <- new.env(parent = emptyenv())
+
+  visit <- function(source_id, source_path) {
+    state <- states[[source_id]]
+    if (identical(state, "visiting")) {
+      stop("execution source cycle detected at ", source_id, call. = FALSE)
+    }
+    if (identical(state, "complete")) {
+      existing <- path_by_id[[source_id]]
+      if (!identical(existing, source_path)) {
+        stop("execution source identity ambiguity detected", call. = FALSE)
+      }
+      return(invisible(NULL))
+    }
+    states[[source_id]] <- "visiting"
+    path_by_id[[source_id]] <- source_path
+    parsed <- tryCatch(
+      parse(file = source_path, keep.source = FALSE),
+      error = function(error) stop(
+        "execution source parse failed for ", source_id, ": ",
+        conditionMessage(error), call. = FALSE
+      )
+    )
+    dependency_literals <-
+      fastkpc_full_cuda_fixed_sp_scan_source_ast(parsed)
+    dependency_ids <- character()
+    for (literal in dependency_literals) {
+      identity <- fastkpc_full_cuda_fixed_sp_source_identity(literal, root)
+      dependency_ids <- c(dependency_ids, identity$id)
+      visit(identity$id, identity$path)
+    }
+    dependency_ids <- sort(unique(dependency_ids), method = "radix")
+    dependencies_by_id[[source_id]] <- dependency_ids
+    states[[source_id]] <- "complete"
+    invisible(NULL)
+  }
+  for (index in seq_along(roots)) {
+    visit(root_ids[[index]], roots[[index]]$path)
+  }
+  source_ids <- sort(ls(path_by_id, all.names = TRUE), method = "radix")
+  source_file_paths <- setNames(vapply(
+    source_ids, function(source_id) path_by_id[[source_id]], character(1L)
+  ), source_ids)
+  source_dependency_map <- setNames(lapply(
+    source_ids, function(source_id) dependencies_by_id[[source_id]]
+  ), source_ids)
+  closure <- list(
+    source_closure_schema_version =
+      "full-cuda-ci-execution-source-closure-v1",
+    source_discovery_semantics =
+      "parsed-r-ast-load-time-literal-source-v1",
+    source_project_root = root,
+    direct_source_ids = direct_source_ids,
+    source_ids = unname(source_ids),
+    source_file_paths = source_file_paths,
+    source_dependency_map = source_dependency_map,
+    source_closure_count = as.integer(length(source_ids))
+  )
+  fastkpc_full_cuda_fixed_sp_validate_source_closure(closure)
+  closure
+}
+
+fastkpc_full_cuda_fixed_sp_source_closure_hash <- function(
+    source_closure, source_file_sha256) {
+  fastkpc_full_cuda_fixed_sp_validate_source_closure(source_closure)
+  source_ids <- source_closure$source_ids
+  hashes_clean <- typeof(source_file_sha256) == "character" &&
+    !is.object(source_file_sha256) &&
+    identical(names(source_file_sha256), source_ids) &&
+    identical(names(attributes(source_file_sha256)), "names") &&
+    !anyNA(source_file_sha256) &&
+    all(grepl("^[0-9a-f]{64}$", source_file_sha256))
+  if (!isTRUE(hashes_clean)) {
+    stop("execution source closure hash map is malformed", call. = FALSE)
+  }
+  lines <- c(
+    paste0("closure.schema=",
+           source_closure$source_closure_schema_version),
+    paste0("closure.discovery=",
+           source_closure$source_discovery_semantics),
+    paste0("closure.project_root=", source_closure$source_project_root),
+    paste0("closure.count=", source_closure$source_closure_count)
+  )
+  for (role in names(source_closure$direct_source_ids)) {
+    lines <- c(lines, paste0(
+      "closure.root.", role, "=",
+      source_closure$direct_source_ids[[role]]
+    ))
+  }
+  for (source_id in source_ids) {
+    lines <- c(
+      lines,
+      paste0("closure.source.", source_id, ".path=",
+             source_closure$source_file_paths[[source_id]]),
+      paste0("closure.source.", source_id, ".sha256=",
+             source_file_sha256[[source_id]]),
+      paste0("closure.source.", source_id, ".dependencies=",
+             paste(source_closure$source_dependency_map[[source_id]],
+                   collapse = ","))
+    )
+  }
+  payload <- charToRaw(enc2utf8(paste0(paste(lines, collapse = "\n"), "\n")))
+  unname(digest::digest(payload, algo = "sha256", serialize = FALSE))
+}
+
+fastkpc_full_cuda_fixed_sp_execution_snapshot_hash <- function(provenance) {
+  source_ids <- names(provenance$source_file_paths)
+  scalar_character <- function(value) {
+    typeof(value) == "character" && length(value) == 1L &&
+      !is.object(value) && is.null(attributes(value)) && !anyNA(value) &&
+      nzchar(value) && !grepl("[\r\n]", value)
+  }
+  named_character_map <- function(value) {
+    typeof(value) == "character" && !is.object(value) &&
+      identical(names(value), source_ids) &&
+      identical(names(attributes(value)), "names") && !anyNA(value) &&
+      all(nzchar(value)) && !any(grepl("[\r\n]", value))
+  }
+  closure <- list(
+    source_closure_schema_version =
+      provenance$source_closure_schema_version,
+    source_discovery_semantics = provenance$source_discovery_semantics,
+    source_project_root = provenance$source_project_root,
+    direct_source_ids = provenance$direct_source_ids,
+    source_ids = unname(source_ids),
+    source_file_paths = provenance$source_file_paths,
+    source_dependency_map = provenance$source_dependency_map,
+    source_closure_count = provenance$source_closure_count
+  )
+  clean <- is.list(provenance) && !is.object(provenance) &&
+    scalar_character(provenance$provenance_schema_version) &&
+    identical(
+      provenance$provenance_schema_version,
+      "full-cuda-ci-execution-source-snapshot-v2"
+    ) && scalar_character(provenance$provenance_mode) &&
+    identical(
+      provenance$provenance_mode, "working-tree-execution-snapshot-v1"
+    ) && scalar_character(provenance$head_base_commit) &&
+    grepl("^[0-9a-f]{40}$", provenance$head_base_commit) &&
+    isTRUE(tryCatch(
+      fastkpc_full_cuda_fixed_sp_validate_source_closure(closure),
+      error = function(error) FALSE
+    )) && scalar_character(provenance$source_closure_sha256) &&
+    grepl("^[0-9a-f]{64}$", provenance$source_closure_sha256) &&
+    named_character_map(provenance$source_file_sha256) &&
+    all(grepl("^[0-9a-f]{64}$", provenance$source_file_sha256)) &&
+    identical(
+      provenance$source_closure_sha256,
+      fastkpc_full_cuda_fixed_sp_source_closure_hash(
+        closure, provenance$source_file_sha256
+      )
+    ) && named_character_map(provenance$source_file_git_state) &&
+    all(provenance$source_file_git_state %in% c(
+      "clean", "tracked-dirty", "untracked"
+    )) && typeof(provenance$relevant_sources_dirty_or_untracked) ==
+      "logical" &&
+    length(provenance$relevant_sources_dirty_or_untracked) == 1L &&
+    !is.object(provenance$relevant_sources_dirty_or_untracked) &&
+    is.null(attributes(
+      provenance$relevant_sources_dirty_or_untracked
+    )) && !anyNA(provenance$relevant_sources_dirty_or_untracked) &&
+    identical(
+      provenance$relevant_sources_dirty_or_untracked,
+      any(provenance$source_file_git_state != "clean")
+    ) && scalar_character(provenance$native_library_identity) &&
+    identical(
+      provenance$native_library_identity,
+      "load-fastkpc-cuda-native-returned-path-v1"
+    ) && scalar_character(provenance$native_library_path) &&
+    scalar_character(provenance$native_library_sha256) &&
+    grepl("^[0-9a-f]{64}$", provenance$native_library_sha256)
+  if (!isTRUE(clean)) {
+    stop("execution source provenance is malformed", call. = FALSE)
+  }
+  lines <- c(
+    paste0("schema_version=", provenance$provenance_schema_version),
+    paste0("provenance_mode=", provenance$provenance_mode),
+    paste0("head_base_commit=", provenance$head_base_commit),
+    paste0("source_closure.schema=",
+           provenance$source_closure_schema_version),
+    paste0("source_closure.discovery=",
+           provenance$source_discovery_semantics),
+    paste0("source_closure.project_root=", provenance$source_project_root),
+    paste0("source_closure.count=", provenance$source_closure_count),
+    paste0("source_closure.sha256=", provenance$source_closure_sha256)
+  )
+  for (role in names(provenance$direct_source_ids)) {
+    lines <- c(lines, paste0(
+      "source_closure.root.", role, "=",
+      provenance$direct_source_ids[[role]]
+    ))
+  }
+  for (source_id in source_ids) {
+    lines <- c(
+      lines,
+      paste0("source.", source_id, ".path=",
+             provenance$source_file_paths[[source_id]]),
+      paste0("source.", source_id, ".sha256=",
+             provenance$source_file_sha256[[source_id]]),
+      paste0("source.", source_id, ".git_state=",
+             provenance$source_file_git_state[[source_id]]),
+      paste0("source.", source_id, ".dependencies=",
+             paste(provenance$source_dependency_map[[source_id]],
+                   collapse = ","))
+    )
+  }
+  lines <- c(
+    lines,
+    paste0(
+      "relevant_sources_dirty_or_untracked=",
+      if (provenance$relevant_sources_dirty_or_untracked) "true" else "false"
+    ),
+    paste0("native.identity=", provenance$native_library_identity),
+    paste0("native.path=", provenance$native_library_path),
+    paste0("native.sha256=", provenance$native_library_sha256)
+  )
+  payload <- charToRaw(enc2utf8(paste0(paste(lines, collapse = "\n"), "\n")))
+  unname(digest::digest(payload, algo = "sha256", serialize = FALSE))
+}
+
+fastkpc_full_cuda_fixed_sp_capture_execution_provenance <- function(
+    source_closure, expected_source_sha256, native_library_path) {
+  fastkpc_full_cuda_fixed_sp_validate_source_closure(source_closure)
+  source_ids <- source_closure$source_ids
+  if (typeof(expected_source_sha256) != "character" ||
+      is.object(expected_source_sha256) ||
+      !identical(names(expected_source_sha256), source_ids) ||
+      !identical(names(attributes(expected_source_sha256)), "names") ||
+      anyNA(expected_source_sha256) ||
+      !all(grepl("^[0-9a-f]{64}$", expected_source_sha256))) {
+    stop("execution source preload snapshot is malformed", call. = FALSE)
+  }
+  current_hashes <- vapply(
+    source_closure$source_file_paths,
+    fastkpc_full_cuda_fixed_sp_sha256_file,
+    character(1L)
+  )
+  if (!identical(unname(current_hashes),
+                 unname(expected_source_sha256))) {
+    stop("execution source changed between preload hash and capture",
+         call. = FALSE)
+  }
+  git_states <- vapply(
+    source_closure$source_file_paths,
+    fastkpc_full_cuda_fixed_sp_git_source_state,
+    character(1L)
+  )
+  native_path <- normalizePath(
+    native_library_path, winslash = "/", mustWork = TRUE
+  )
+  head_base_commit <- system2(
+    "git", c("rev-parse", "HEAD"), stdout = TRUE, stderr = FALSE
+  )
+  if (length(head_base_commit) != 1L ||
+      !grepl("^[0-9a-f]{40}$", head_base_commit)) {
+    stop("execution source base commit is unavailable", call. = FALSE)
+  }
+  provenance <- list(
+    provenance_schema_version =
+      "full-cuda-ci-execution-source-snapshot-v2",
+    provenance_mode = "working-tree-execution-snapshot-v1",
+    head_base_commit = unname(head_base_commit),
+    source_closure_schema_version =
+      source_closure$source_closure_schema_version,
+    source_discovery_semantics =
+      source_closure$source_discovery_semantics,
+    source_project_root = source_closure$source_project_root,
+    source_closure_count = source_closure$source_closure_count,
+    source_closure_sha256 =
+      fastkpc_full_cuda_fixed_sp_source_closure_hash(
+        source_closure, current_hashes
+      ),
+    direct_source_ids = source_closure$direct_source_ids,
+    source_dependency_map = source_closure$source_dependency_map,
+    source_file_paths = source_closure$source_file_paths,
+    source_file_sha256 = current_hashes,
+    source_file_git_state = git_states,
+    relevant_sources_dirty_or_untracked = any(git_states != "clean"),
+    native_library_identity =
+      "load-fastkpc-cuda-native-returned-path-v1",
+    native_library_path = native_path,
+    native_library_sha256 =
+      fastkpc_full_cuda_fixed_sp_sha256_file(native_path)
+  )
+  provenance$execution_snapshot_sha256 <-
+    fastkpc_full_cuda_fixed_sp_execution_snapshot_hash(provenance)
+  provenance$execution_sources_unchanged_after_run <- FALSE
+  provenance
+}
+
+fastkpc_full_cuda_fixed_sp_verify_execution_provenance <- function(
+    provenance) {
+  expected_names <- c(
+    "provenance_schema_version", "provenance_mode", "head_base_commit",
+    "source_closure_schema_version", "source_discovery_semantics",
+    "source_project_root", "source_closure_count", "source_closure_sha256",
+    "direct_source_ids", "source_dependency_map", "source_file_paths",
+    "source_file_sha256", "source_file_git_state",
+    "relevant_sources_dirty_or_untracked", "native_library_identity",
+    "native_library_path", "native_library_sha256",
+    "execution_snapshot_sha256", "execution_sources_unchanged_after_run"
+  )
+  if (!is.list(provenance) || !identical(names(provenance), expected_names) ||
+      typeof(provenance$execution_snapshot_sha256) != "character" ||
+      length(provenance$execution_snapshot_sha256) != 1L ||
+      is.object(provenance$execution_snapshot_sha256) ||
+      !is.null(attributes(provenance$execution_snapshot_sha256)) ||
+      !grepl("^[0-9a-f]{64}$", provenance$execution_snapshot_sha256) ||
+      !identical(
+        provenance$execution_snapshot_sha256,
+        fastkpc_full_cuda_fixed_sp_execution_snapshot_hash(provenance)
+      ) || typeof(provenance$execution_sources_unchanged_after_run) !=
+        "logical" ||
+      length(provenance$execution_sources_unchanged_after_run) != 1L ||
+      !is.null(attributes(
+        provenance$execution_sources_unchanged_after_run
+      ))) {
+    stop("execution source provenance verification input is malformed",
+         call. = FALSE)
+  }
+  unchanged <- tryCatch({
+    current_closure <-
+      fastkpc_full_cuda_fixed_sp_discover_execution_source_closure(
+        root_sources = provenance$direct_source_ids,
+        project_root = provenance$source_project_root
+      )
+    current_source_hashes <- vapply(
+      current_closure$source_file_paths,
+      fastkpc_full_cuda_fixed_sp_sha256_file,
+      character(1L)
+    )
+    current_head <- system2(
+      "git", c("rev-parse", "HEAD"), stdout = TRUE, stderr = FALSE
+    )
+    current_native_hash <- fastkpc_full_cuda_fixed_sp_sha256_file(
+      provenance$native_library_path
+    )
+    identical(unname(current_head), provenance$head_base_commit) &&
+      identical(current_closure$source_ids,
+                names(provenance$source_file_paths)) &&
+      identical(current_closure$direct_source_ids,
+                provenance$direct_source_ids) &&
+      identical(current_closure$source_dependency_map,
+                provenance$source_dependency_map) &&
+      identical(unname(current_source_hashes),
+                unname(provenance$source_file_sha256)) &&
+      identical(
+        fastkpc_full_cuda_fixed_sp_source_closure_hash(
+          current_closure, current_source_hashes
+        ),
+        provenance$source_closure_sha256
+      ) && identical(current_native_hash, provenance$native_library_sha256)
+  }, error = function(error) FALSE)
+  if (!isTRUE(unchanged)) {
+    stop("execution source snapshot changed during qualification",
+         call. = FALSE)
+  }
+  provenance$execution_sources_unchanged_after_run <- TRUE
+  provenance
+}
+
+fastkpc_full_cuda_fixed_sp_guarded_source <- function(
+    file, source_closure, ...) {
+  fastkpc_full_cuda_fixed_sp_validate_source_closure(source_closure)
+  identity <- fastkpc_full_cuda_fixed_sp_source_identity(
+    file, source_closure$source_project_root
+  )
+  if (!identity$id %in% source_closure$source_ids) {
+    stop("runtime source() escaped the authenticated execution closure: ",
+         identity$id, call. = FALSE)
+  }
+  base_source <- get("source", envir = baseenv(), inherits = FALSE)
+  base_source(source_closure$source_file_paths[[identity$id]], ...)
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_csv_frame <- function(value) {
+  if (!is.data.frame(value)) {
+    stop("qualification CSV payload must be a data frame", call. = FALSE)
+  }
+  result <- value
+  list_fields <- names(result)[vapply(result, is.list, logical(1L))]
+  for (field in list_fields) {
+    result[[field]] <- vapply(result[[field]], function(element) {
+      if (length(element) == 0L) "" else paste(element, collapse = ";")
+    }, character(1L))
+  }
+  result
+}
+
+fastkpc_full_cuda_fixed_sp_write_qualification_json <- function(value, path) {
+  if (!is.character(path) || length(path) != 1L || is.na(path) ||
+      !nzchar(path) || dir.exists(path)) {
+    stop("qualification JSON output path is invalid", call. = FALSE)
+  }
+  if (!requireNamespace("jsonlite", quietly = TRUE)) {
+    stop("qualification JSON output requires jsonlite", call. = FALSE)
+  }
+  jsonlite::write_json(
+    value, path, auto_unbox = TRUE, pretty = TRUE,
+    null = "null", na = "null", digits = NA, always_decimal = TRUE
+  )
+  invisible(path)
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_validate_summary_counts <- function(
+    summary) {
+  if (!is.list(summary) || is.object(summary) || is.null(names(summary)) ||
+      anyDuplicated(names(summary)) || "pass" %in% names(summary)) {
+    stop("qualification summary count types are invalid", call. = FALSE)
+  }
+  expected <-
+    fastkpc_full_cuda_fixed_sp_phase3c_expected_counts("qualification")
+  if (!all(names(expected) %in% names(summary))) {
+    stop("qualification summary count types are incomplete", call. = FALSE)
+  }
+  bare_exact <- all(vapply(names(expected), function(field) {
+    value <- summary[[field]]
+    reference <- expected[[field]]
+    typeof(value) == typeof(reference) && length(value) == 1L &&
+      !is.object(value) && is.null(attributes(value)) && !anyNA(value) &&
+      identical(value, reference)
+  }, logical(1L)))
+  if (!isTRUE(bare_exact) ||
+      !identical(summary[names(expected)], expected)) {
+    stop("qualification summary count types or values are invalid",
+         call. = FALSE)
+  }
+  TRUE
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_summary_schema <- function() {
+  input_names <- c(
+    "scope", "scope_subset_hash", "ordered_setup_key_digest",
+    "ordered_target_key_digest", "route_status_hash", "numeric_hash",
+    "setup_count", "target_count", "penalty_root_matrix_count",
+    "penalty_root_row_count", "H_root_matrix_count", "planned_cholesky_count",
+    "planned_qr_count", "planned_svd_count", "executed_cholesky_count",
+    "executed_qr_count", "executed_svd_count", "cholesky_to_svd_count",
+    "qr_to_svd_count", "svd_finite_high_count", "svd_nonfinite_count",
+    "all_safe_batch_count", "mixed_batch_count", "all_stable_batch_count",
+    "true_batched_subgroup_count", "true_batched_target_count",
+    "cholesky_single_target_count", "whole_batch_true_batched_count",
+    "stable_not_implemented_count", "stable_reroute_count",
+    "non_ok_status_count", "root_rank_mismatch_count",
+    "aggregate_penalty_factor_count", "aggregate_svd_b_build_count",
+    "aggregate_penalty_root_rank_mismatch_count",
+    "aggregate_penalty_root_pivot_mismatch_count",
+    "aggregate_penalty_root_d2h_count", "aggregate_penalty_root_d2h_bytes",
+    "workspace_grow_count_after_warmup",
+    "stable_workspace_grow_count_after_warmup",
+    "per_target_allocation_count_after_warmup",
+    "per_target_handle_create_count", "cuda_device_synchronize_count",
+    "target_level_stable_sync_count", "implicit_residual_d2h_count",
+    "all_output_slot_leases_released", "invalid_output_init_count",
+    "cpu_fallback_count", "unknown_fallback_count", "approximate_backend_count",
+    "qr_checkpoint_record_count", "qr_checkpoint_wait_count",
+    "svd_checkpoint_record_count", "svd_checkpoint_wait_count",
+    "max_residual_abs_diff", "max_residual_relative_l2_diff",
+    "max_fitted_abs_diff", "max_fitted_relative_l2_diff",
+    "qualification_subset_hash"
+  )
+  publication_names <- c(
+    "artifact_schema_version", "catalog_authenticated", "provenance_mode",
+    "head_base_commit", "source_closure_schema_version",
+    "source_closure_count", "source_closure_sha256",
+    "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
+    "native_library_sha256", "execution_sources_unchanged_after_run",
+    "elapsed_seconds", "stage_timing_total_seconds", "payload_file_count"
+  )
+  make_types <- function(names, character, double, logical) {
+    types <- setNames(rep.int("integer", length(names)), names)
+    types[character] <- "character"
+    types[double] <- "double"
+    types[logical] <- "logical"
+    types
+  }
+  input_types <- make_types(
+    input_names,
+    character = c(
+      "scope", "scope_subset_hash", "ordered_setup_key_digest",
+      "ordered_target_key_digest", "route_status_hash", "numeric_hash",
+      "qualification_subset_hash"
+    ),
+    double = c(
+      "aggregate_penalty_root_d2h_bytes", "max_residual_abs_diff",
+      "max_residual_relative_l2_diff", "max_fitted_abs_diff",
+      "max_fitted_relative_l2_diff"
+    ),
+    logical = "all_output_slot_leases_released"
+  )
+  publication_types <- make_types(
+    publication_names,
+    character = c(
+      "artifact_schema_version", "provenance_mode", "head_base_commit",
+      "source_closure_schema_version", "source_closure_sha256",
+      "execution_snapshot_sha256", "native_library_sha256"
+    ),
+    double = c("elapsed_seconds", "stage_timing_total_seconds"),
+    logical = c(
+      "catalog_authenticated", "relevant_sources_dirty_or_untracked",
+      "execution_sources_unchanged_after_run"
+    )
+  )
+  final_names <- c(input_names, publication_names)
+  final_types <- c(input_types, publication_types)
+  clean <- !anyDuplicated(input_names) && !anyDuplicated(publication_names) &&
+    !anyDuplicated(final_names) && identical(names(input_types), input_names) &&
+    identical(names(publication_types), publication_names) &&
+    identical(names(final_types), final_names) &&
+    all(input_types %in% c("character", "integer", "double", "logical")) &&
+    all(publication_types %in%
+        c("character", "integer", "double", "logical"))
+  if (!isTRUE(clean)) {
+    stop("internal qualification summary schema is malformed", call. = FALSE)
+  }
+  list(
+    input_names = input_names,
+    input_types = input_types,
+    publication_names = publication_names,
+    publication_types = publication_types,
+    final_names = final_names,
+    final_types = final_types
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_summary_has_schema <- function(
+    summary, expected_names, expected_types) {
+  is.list(summary) && !is.object(summary) &&
+    identical(names(summary), expected_names) &&
+    !anyDuplicated(names(summary)) &&
+    identical(names(expected_types), expected_names) &&
+    all(vapply(expected_names, function(field) {
+      value <- summary[[field]]
+      typeof(value) == expected_types[[field]] && length(value) == 1L &&
+        !is.object(value) && is.null(attributes(value)) && !anyNA(value)
+    }, logical(1L)))
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_validate_input_summary <- function(
+    summary) {
+  schema <- fastkpc_full_cuda_fixed_sp_qualification_summary_schema()
+  clean <- fastkpc_full_cuda_fixed_sp_qualification_summary_has_schema(
+    summary, schema$input_names, schema$input_types
+  ) && identical(summary$scope, "qualification")
+  if (!isTRUE(clean)) {
+    stop("qualification input summary schema is invalid", call. = FALSE)
+  }
+  fastkpc_full_cuda_fixed_sp_qualification_validate_summary_counts(summary)
+  TRUE
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_validate_published_summary <- function(
+    summary) {
+  schema <- fastkpc_full_cuda_fixed_sp_qualification_summary_schema()
+  clean <- fastkpc_full_cuda_fixed_sp_qualification_summary_has_schema(
+    summary, schema$final_names, schema$final_types
+  ) && identical(summary$scope, "qualification") && identical(
+    summary$artifact_schema_version,
+    "full-cuda-ci-fixed-sp-qualification-v1"
+  ) && identical(summary$catalog_authenticated, TRUE) &&
+    identical(summary$execution_sources_unchanged_after_run, TRUE) &&
+    is.finite(summary$elapsed_seconds) && summary$elapsed_seconds >= 0 &&
+    is.finite(summary$stage_timing_total_seconds) &&
+    summary$stage_timing_total_seconds >= 0 &&
+    summary$payload_file_count > 0L
+  if (!isTRUE(clean)) {
+    stop("qualification published summary schema is invalid", call. = FALSE)
+  }
+  fastkpc_full_cuda_fixed_sp_qualification_validate_summary_counts(summary)
+  TRUE
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_validate_catalog_evidence <- function(
+    catalog_records, summary, authoritative) {
+  required <- c(
+    "scope", "authenticated", "catalog_open_count", "setup_count",
+    "target_count", "scope_subset_hash", "ordered_setup_key_digest",
+    "ordered_target_key_digest"
+  )
+  bare_scalar <- function(value, type) {
+    typeof(value) == type && length(value) == 1L && !is.object(value) &&
+      is.null(attributes(value)) && !anyNA(value)
+  }
+  authoritative_names <- c(
+    "qualification_subset_hash", "ordered_setup_key_digest",
+    "ordered_target_key_digest", "setup_count", "target_count"
+  )
+  authoritative_clean <- is.list(authoritative) &&
+    !is.object(authoritative) &&
+    identical(names(authoritative), authoritative_names) &&
+    all(vapply(authoritative_names[seq_len(3L)], function(field) {
+      bare_scalar(authoritative[[field]], "character") &&
+        fastkpc_full_cuda_fixed_sp_is_bare_sha256(authoritative[[field]])
+    }, logical(1L))) &&
+    bare_scalar(authoritative$setup_count, "integer") &&
+    bare_scalar(authoritative$target_count, "integer") &&
+    identical(
+      authoritative$qualification_subset_hash,
+      fastkpc_full_cuda_fixed_sp_catalog_contract()$qualification_subset_hash
+    ) && identical(authoritative$setup_count, 2061L) &&
+    identical(authoritative$target_count, 6143L)
+  summary_clean <- is.list(summary) && !is.object(summary) &&
+    all(authoritative_names[seq_len(3L)] %in% names(summary)) &&
+    all(vapply(authoritative_names[seq_len(3L)], function(field) {
+      bare_scalar(summary[[field]], "character") &&
+        fastkpc_full_cuda_fixed_sp_is_bare_sha256(summary[[field]])
+    }, logical(1L)))
+  records_clean <- is.data.frame(catalog_records) &&
+    nrow(catalog_records) == 1L &&
+    all(required %in% names(catalog_records)) &&
+    bare_scalar(catalog_records$scope, "character") &&
+    identical(catalog_records$scope, "qualification") &&
+    bare_scalar(catalog_records$authenticated, "logical") &&
+    identical(catalog_records$authenticated, TRUE) &&
+    all(vapply(c(
+      "catalog_open_count", "setup_count", "target_count"
+    ), function(field) {
+      bare_scalar(catalog_records[[field]], "integer")
+    }, logical(1L))) &&
+    identical(catalog_records$catalog_open_count, 1L) &&
+    identical(catalog_records$setup_count, 2061L) &&
+    identical(catalog_records$target_count, 6143L) &&
+    bare_scalar(catalog_records$scope_subset_hash, "character") &&
+    fastkpc_full_cuda_fixed_sp_is_bare_sha256(
+      catalog_records$scope_subset_hash
+    ) && all(vapply(c(
+      "ordered_setup_key_digest", "ordered_target_key_digest"
+    ), function(field) {
+      bare_scalar(catalog_records[[field]], "character") &&
+        fastkpc_full_cuda_fixed_sp_is_bare_sha256(catalog_records[[field]])
+    }, logical(1L)))
+  exact <- authoritative_clean && summary_clean && records_clean &&
+    identical(
+      catalog_records$scope_subset_hash,
+      authoritative$qualification_subset_hash
+    ) && identical(
+      summary$qualification_subset_hash,
+      authoritative$qualification_subset_hash
+    ) && identical(
+      summary$ordered_setup_key_digest,
+      authoritative$ordered_setup_key_digest
+    ) && identical(
+      summary$ordered_target_key_digest,
+      authoritative$ordered_target_key_digest
+    ) && identical(
+      catalog_records$ordered_setup_key_digest,
+      authoritative$ordered_setup_key_digest
+    ) && identical(
+      catalog_records$ordered_target_key_digest,
+      authoritative$ordered_target_key_digest
+    ) && identical(catalog_records$setup_count, authoritative$setup_count) &&
+    identical(catalog_records$target_count, authoritative$target_count)
+  if (!isTRUE(exact)) {
+    stop("qualification catalog evidence does not match canonical authentication",
+         call. = FALSE)
+  }
+  TRUE
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_reopen_catalog_evidence <- function(
+    phase0_dir, phase1_dir, phase2_dir, data_path) {
+  catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
+    phase0_dir = phase0_dir,
+    phase1_dir = phase1_dir,
+    phase2_dir = phase2_dir,
+    data_path = data_path
+  )
+  qualification <- fastkpc_full_cuda_fixed_sp_scope(
+    catalog, "qualification"
+  )
+  setup_keys <- as.character(
+    qualification$setup_rows$prepared_s_key_sha256
+  )
+  target_keys <- as.character(
+    qualification$target_rows$residual_key_sha256
+  )
+  target_prepared_s_keys <- as.character(
+    qualification$target_rows$prepared_s_key_sha256
+  )
+  if (length(setup_keys) != 2061L || length(target_keys) != 6143L ||
+      length(target_prepared_s_keys) != 6143L ||
+      anyNA(setup_keys) || anyNA(target_keys) ||
+      anyNA(target_prepared_s_keys) ||
+      anyDuplicated(setup_keys) || anyDuplicated(target_keys) ||
+      !all(grepl("^[0-9a-f]{64}$", setup_keys)) ||
+      !all(grepl("^[0-9a-f]{64}$", target_keys)) ||
+      !all(grepl("^[0-9a-f]{64}$", target_prepared_s_keys)) ||
+      !identical(setup_keys, sort(setup_keys, method = "radix")) ||
+      !all(target_prepared_s_keys %in% setup_keys) ||
+      !identical(
+        order(target_prepared_s_keys, target_keys, method = "radix"),
+        seq_along(target_keys)
+      )) {
+    stop("canonical qualification catalog ordering is malformed",
+         call. = FALSE)
+  }
+  list(
+    qualification_subset_hash =
+      catalog$catalog_contract$qualification_subset_hash,
+    ordered_setup_key_digest =
+      fastkpc_full_cuda_census_key_set_hash(setup_keys),
+    ordered_target_key_digest =
+      fastkpc_full_cuda_census_key_set_hash(target_keys),
+    setup_count = as.integer(length(setup_keys)),
+    target_count = as.integer(length(target_keys)),
+    setup_keys = setup_keys,
+    target_keys = target_keys,
+    target_prepared_s_keys = target_prepared_s_keys
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_validate_record_identity <- function(
+    catalog_records, summary, authoritative, setup_records, batch_records,
+    target_records) {
+  authoritative_names <- c(
+    "qualification_subset_hash", "ordered_setup_key_digest",
+    "ordered_target_key_digest", "setup_count", "target_count",
+    "setup_keys", "target_keys", "target_prepared_s_keys"
+  )
+  bare_sha_vector <- function(value, size, unique = FALSE) {
+    clean <- typeof(value) == "character" && length(value) == size &&
+      !is.object(value) && is.null(attributes(value)) && !anyNA(value) &&
+      all(grepl("^[0-9a-f]{64}$", value))
+    isTRUE(clean) && (!isTRUE(unique) || !anyDuplicated(value))
+  }
+  authoritative_clean <- is.list(authoritative) &&
+    !is.object(authoritative) &&
+    identical(names(authoritative), authoritative_names) &&
+    bare_sha_vector(authoritative$setup_keys, 2061L, unique = TRUE) &&
+    bare_sha_vector(authoritative$target_keys, 6143L, unique = TRUE) &&
+    bare_sha_vector(authoritative$target_prepared_s_keys, 6143L) &&
+    identical(
+      authoritative$setup_keys,
+      sort(authoritative$setup_keys, method = "radix")
+    ) && all(
+      authoritative$target_prepared_s_keys %in% authoritative$setup_keys
+    ) && identical(
+      order(
+        authoritative$target_prepared_s_keys,
+        authoritative$target_keys,
+        method = "radix"
+      ),
+      seq_along(authoritative$target_keys)
+    )
+  if (!isTRUE(authoritative_clean)) {
+    stop("qualification published rows do not match canonical catalog identity",
+         call. = FALSE)
+  }
+  fastkpc_full_cuda_fixed_sp_qualification_validate_catalog_evidence(
+    catalog_records = catalog_records,
+    summary = summary,
+    authoritative = authoritative[seq_len(5L)]
+  )
+
+  summary_identity_names <- c(
+    "scope_subset_hash", "qualification_subset_hash",
+    "ordered_setup_key_digest", "ordered_target_key_digest",
+    "route_status_hash", "numeric_hash", "setup_count", "target_count"
+  )
+  bare_scalar <- function(value, type) {
+    typeof(value) == type && length(value) == 1L && !is.object(value) &&
+      is.null(attributes(value)) && !anyNA(value)
+  }
+  summary_clean <- is.list(summary) && !is.object(summary) &&
+    all(summary_identity_names %in% names(summary)) &&
+    all(vapply(summary_identity_names[seq_len(6L)], function(field) {
+      bare_scalar(summary[[field]], "character") &&
+        fastkpc_full_cuda_fixed_sp_is_bare_sha256(summary[[field]])
+    }, logical(1L))) &&
+    bare_scalar(summary$setup_count, "integer") &&
+    bare_scalar(summary$target_count, "integer")
+  record_keys_clean <- is.data.frame(setup_records) &&
+    is.data.frame(batch_records) && is.data.frame(target_records) &&
+    all(c("prepared_s_key_sha256") %in% names(setup_records)) &&
+    all(c("prepared_s_key_sha256") %in% names(batch_records)) &&
+    all(c(
+      "prepared_s_key_sha256", "residual_key_sha256", "planned_route",
+      "executed_route", "reroute_reason", "solver_status",
+      "fitted_numeric_hash", "residual_numeric_hash"
+    ) %in% names(target_records)) &&
+    identical(
+      setup_records$prepared_s_key_sha256, authoritative$setup_keys
+    ) && identical(
+      batch_records$prepared_s_key_sha256, authoritative$setup_keys
+    ) && identical(
+      target_records$residual_key_sha256, authoritative$target_keys
+    ) && identical(
+      target_records$prepared_s_key_sha256,
+      authoritative$target_prepared_s_keys
+    )
+  if (!isTRUE(summary_clean) || !isTRUE(record_keys_clean)) {
+    stop("qualification published rows do not match canonical catalog identity",
+         call. = FALSE)
+  }
+
+  setup_digest <- fastkpc_full_cuda_census_key_set_hash(
+    setup_records$prepared_s_key_sha256
+  )
+  target_digest <- fastkpc_full_cuda_census_key_set_hash(
+    target_records$residual_key_sha256
+  )
+  route_status_hash <- fastkpc_full_cuda_census_metadata_hash(list(
+    target_records$residual_key_sha256,
+    target_records$planned_route,
+    target_records$executed_route,
+    target_records$reroute_reason,
+    target_records$solver_status
+  ))
+  numeric_hash <- fastkpc_full_cuda_census_metadata_hash(list(
+    target_records$residual_key_sha256,
+    target_records$fitted_numeric_hash,
+    target_records$residual_numeric_hash
+  ))
+  exact <- identical(
+    setup_digest, authoritative$ordered_setup_key_digest
+  ) && identical(
+    target_digest, authoritative$ordered_target_key_digest
+  ) && identical(
+    setup_digest, catalog_records$ordered_setup_key_digest[[1L]]
+  ) && identical(
+    target_digest, catalog_records$ordered_target_key_digest[[1L]]
+  ) && identical(summary$ordered_setup_key_digest, setup_digest) &&
+    identical(summary$ordered_target_key_digest, target_digest) &&
+    identical(
+      summary$scope_subset_hash, authoritative$qualification_subset_hash
+    ) && identical(
+      summary$qualification_subset_hash,
+      authoritative$qualification_subset_hash
+    ) && identical(summary$route_status_hash, route_status_hash) &&
+    identical(summary$numeric_hash, numeric_hash) &&
+    identical(summary$setup_count, authoritative$setup_count) &&
+    identical(summary$target_count, authoritative$target_count)
+  if (!isTRUE(exact)) {
+    stop("qualification published rows do not match canonical catalog identity",
+         call. = FALSE)
+  }
+  list(
+    catalog_authenticated = TRUE,
+    qualification_subset_hash = authoritative$qualification_subset_hash,
+    ordered_setup_key_digest = setup_digest,
+    ordered_target_key_digest = target_digest,
+    route_status_hash = route_status_hash,
+    numeric_hash = numeric_hash,
+    setup_count = authoritative$setup_count,
+    target_count = authoritative$target_count
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_publish_qualification_staging <- function(
+    staging_dir, output_dir, publication_order, expected_sha256,
+    move_file = file.rename) {
+  scalar_path <- function(value) {
+    typeof(value) == "character" && length(value) == 1L &&
+      !is.object(value) && is.null(attributes(value)) && !anyNA(value) &&
+      nzchar(value)
+  }
+  order_clean <- typeof(publication_order) == "character" &&
+    !is.object(publication_order) && is.null(attributes(publication_order)) &&
+    length(publication_order) >= 3L && !anyNA(publication_order) &&
+    all(nzchar(publication_order)) && !anyDuplicated(publication_order) &&
+    identical(tail(publication_order, 2L),
+              c("manifest.json", "summary.json"))
+  hashes_clean <- typeof(expected_sha256) == "character" &&
+    !is.object(expected_sha256) &&
+    identical(names(expected_sha256), publication_order) &&
+    identical(names(attributes(expected_sha256)), "names") &&
+    !anyNA(expected_sha256) &&
+    all(grepl("^[0-9a-f]{64}$", expected_sha256))
+  if (!scalar_path(staging_dir) || !scalar_path(output_dir) ||
+      !isTRUE(order_clean) || !isTRUE(hashes_clean) ||
+      !dir.exists(staging_dir) || !is.function(move_file)) {
+    stop("qualification publication input is malformed", call. = FALSE)
+  }
+  staging_dir <- normalizePath(
+    staging_dir, winslash = "/", mustWork = TRUE
+  )
+  output_parent <- normalizePath(
+    dirname(output_dir), winslash = "/", mustWork = TRUE
+  )
+  output_dir <- file.path(output_parent, basename(output_dir))
+  staged_names <- list.files(staging_dir, all.files = FALSE)
+  staged_paths <- file.path(staging_dir, publication_order)
+  if (!setequal(staged_names, publication_order) ||
+      length(staged_names) != length(publication_order) ||
+      !all(file.exists(staged_paths)) || any(dir.exists(staged_paths))) {
+    stop("qualification staging artifact is incomplete", call. = FALSE)
+  }
+  staged_hashes <- vapply(
+    staged_paths, fastkpc_full_cuda_fixed_sp_sha256_file, character(1L)
+  )
+  if (!identical(unname(staged_hashes), unname(expected_sha256))) {
+    stop("qualification staging artifact hash mismatch", call. = FALSE)
+  }
+
+  reserved <- FALSE
+  published <- FALSE
+  on.exit({
+    if (!published && reserved && dir.exists(output_dir)) {
+      for (name in rev(publication_order)) {
+        owned_path <- file.path(output_dir, name)
+        if (file.exists(owned_path) && !dir.exists(owned_path)) {
+          current_hash <- tryCatch(
+            fastkpc_full_cuda_fixed_sp_sha256_file(owned_path),
+            error = function(error) NA_character_
+          )
+          if (identical(current_hash, expected_sha256[[name]])) {
+            unlink(owned_path, force = TRUE)
+          }
+        }
+      }
+      if (dir.exists(output_dir) &&
+          length(list.files(output_dir, all.files = TRUE,
+                            no.. = TRUE)) == 0L) {
+        suppressWarnings(file.remove(output_dir))
+      }
+    }
+  }, add = TRUE)
+  suspendInterrupts({
+    reserved_now <- suppressWarnings(dir.create(
+      output_dir, recursive = FALSE, showWarnings = FALSE
+    ))
+    if (!isTRUE(reserved_now)) {
+      stop("exclusive qualification output reservation failed", call. = FALSE)
+    }
+    reserved <- TRUE
+  })
+
+  for (name in publication_order) {
+    suspendInterrupts({
+      destination <- file.path(output_dir, name)
+      if (file.exists(destination) || dir.exists(destination) ||
+          !isTRUE(move_file(file.path(staging_dir, name), destination))) {
+        stop("qualification payload move failed for ", name, call. = FALSE)
+      }
+    })
+  }
+  published_names <- list.files(output_dir, all.files = FALSE)
+  if (length(published_names) != length(publication_order) ||
+      !setequal(published_names, publication_order) ||
+      !file.exists(file.path(output_dir, "summary.json"))) {
+    stop("qualification publication surface is incomplete", call. = FALSE)
+  }
+  published_hashes <- vapply(
+    file.path(output_dir, publication_order),
+    fastkpc_full_cuda_fixed_sp_sha256_file,
+    character(1L)
+  )
+  if (!identical(unname(published_hashes), unname(expected_sha256))) {
+    stop("qualification publication hash changed during move",
+         call. = FALSE)
+  }
+  suspendInterrupts({
+    if (length(list.files(staging_dir, all.files = TRUE, no.. = TRUE)) != 0L ||
+        unlink(staging_dir, recursive = TRUE, force = TRUE) != 0L ||
+        dir.exists(staging_dir)) {
+      stop("qualification staging cleanup failed", call. = FALSE)
+    }
+    published <- TRUE
+  })
+  normalizePath(output_dir, winslash = "/", mustWork = TRUE)
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_result_schema <- function() {
+  schema <- function(names, character = character(), integer = character(),
+                     double = character(), logical = character(),
+                     list = character()) {
+    types <- setNames(rep.int(NA_character_, length(names)), names)
+    for (type in c("character", "integer", "double", "logical", "list")) {
+      fields <- get(type, inherits = FALSE)
+      types[fields] <- type
+    }
+    if (anyNA(types) || anyDuplicated(names) ||
+        !setequal(names(types), names)) {
+      stop("internal qualification schema definition is malformed",
+           call. = FALSE)
+    }
+    list(names = names, types = types, list_fields = list)
+  }
+  target_names <- c(
+    "prepared_s_key_sha256", "batch_ordinal", "target_ordinal",
+    "residual_key_sha256", "target", "null_dim", "phase1_condition",
+    "condition_bucket", "phase1_coefficient_rank", "planned_route",
+    "authenticated_planned_route", "executed_route", "reroute_reason",
+    "solver_status", "target_true_batched", "qr_rank", "geqrf_info",
+    "ormqr_info", "effective_rank", "sigma_max", "smallest_retained_sigma",
+    "svd_info", "aggregate_penalty_root_rank",
+    "aggregate_penalty_root_pivot", "aggregate_factor_call_count",
+    "aggregate_b_build_count", "aggregate_dstop",
+    "cpu_aggregate_penalty_root_rank", "cpu_aggregate_penalty_root_pivot",
+    "cpu_aggregate_effective_rank",
+    "cpu_aggregate_effective_rank_threshold", "cpu_aggregate_sigma_max",
+    "aggregate_penalty_root_rank_exact",
+    "aggregate_penalty_root_pivot_exact", "aggregate_effective_rank_exact",
+    "numeric_reference", "outputs_all_finite", "residual_max_abs_diff",
+    "residual_relative_l2_diff", "fitted_max_abs_diff",
+    "fitted_relative_l2_diff", "fitted_numeric_hash",
+    "residual_numeric_hash", "oracle_call_count", "oracle_fitted_hash",
+    "oracle_residual_hash", "authenticated_fitted_hash",
+    "authenticated_residual_hash", "oracle_fitted_hash_exact",
+    "oracle_residual_hash_exact", "approximate_backend"
+  )
+  target <- schema(
+    target_names,
+    character = c(
+      "prepared_s_key_sha256", "residual_key_sha256", "condition_bucket",
+      "planned_route", "authenticated_planned_route", "executed_route",
+      "reroute_reason", "solver_status", "numeric_reference",
+      "fitted_numeric_hash", "residual_numeric_hash", "oracle_fitted_hash",
+      "oracle_residual_hash", "authenticated_fitted_hash",
+      "authenticated_residual_hash"
+    ),
+    integer = c(
+      "batch_ordinal", "target_ordinal", "target", "null_dim",
+      "phase1_coefficient_rank", "qr_rank", "geqrf_info", "ormqr_info",
+      "effective_rank", "svd_info", "aggregate_penalty_root_rank",
+      "aggregate_factor_call_count", "aggregate_b_build_count",
+      "cpu_aggregate_penalty_root_rank", "cpu_aggregate_effective_rank",
+      "oracle_call_count"
+    ),
+    double = c(
+      "phase1_condition", "sigma_max", "smallest_retained_sigma",
+      "aggregate_dstop", "cpu_aggregate_effective_rank_threshold",
+      "cpu_aggregate_sigma_max", "residual_max_abs_diff",
+      "residual_relative_l2_diff", "fitted_max_abs_diff",
+      "fitted_relative_l2_diff"
+    ),
+    logical = c(
+      "target_true_batched", "aggregate_penalty_root_rank_exact",
+      "aggregate_penalty_root_pivot_exact", "aggregate_effective_rank_exact",
+      "outputs_all_finite", "oracle_fitted_hash_exact",
+      "oracle_residual_hash_exact", "approximate_backend"
+    ),
+    list = c(
+      "aggregate_penalty_root_pivot", "cpu_aggregate_penalty_root_pivot"
+    )
+  )
+  batch_names <- c(
+    "prepared_s_key_sha256", "batch_ordinal", "target_count",
+    "batch_call_count", "native_batch_call", "true_batched_kernel",
+    "true_batched_subgroup_count", "true_batched_attempted_target_count",
+    "true_batched_target_count", "cholesky_single_target_count",
+    "potrf_batched_call_count", "potrs_batched_call_count",
+    "planned_cholesky_target_count", "planned_qr_target_count",
+    "planned_svd_target_count", "executed_cholesky_target_count",
+    "executed_qr_target_count", "executed_svd_target_count",
+    "stable_reroute_count", "cholesky_to_svd_count", "qr_to_svd_count",
+    "aggregate_penalty_factor_count", "aggregate_svd_b_build_count",
+    "aggregate_penalty_root_d2h_count", "aggregate_penalty_root_d2h_bytes",
+    "target_batch_h2d_call_count", "target_h2d_copy_count",
+    "target_h2d_bytes", "rhs_device_build_count", "full_cuda_data_plane",
+    "invalid_output_init_count", "coefficient_batch_finalize_call_count",
+    "fitted_batch_finalize_call_count",
+    "residual_rss_batch_finalize_call_count",
+    "per_target_output_finalize_call_count",
+    "batch_output_finalized_target_count", "canonical_output_order_exact",
+    "target_keys_exact", "route_status_conservation_exact",
+    "resource_snapshot_captured", "resource_instrumentation_version",
+    "resource_allocation_count_before_solve",
+    "resource_allocation_count_after_solve",
+    "resource_handle_create_count_before_solve",
+    "resource_handle_create_count_after_solve",
+    "cuda_device_allocation_count_during_solve",
+    "cuda_host_allocation_count_during_solve",
+    "stream_create_count_during_solve", "event_create_count_during_solve",
+    "cublas_handle_create_count_during_solve",
+    "cusolver_handle_create_count_during_solve",
+    "per_target_allocation_count_after_warmup",
+    "per_target_handle_create_count", "workspace_grow_count_after_warmup",
+    "stable_workspace_grow_count_after_warmup",
+    "cuda_device_synchronize_count",
+    "cholesky_factor_checkpoint_record_count",
+    "cholesky_factor_checkpoint_wait_count",
+    "cholesky_solve_checkpoint_record_count",
+    "cholesky_solve_checkpoint_wait_count", "qr_checkpoint_record_count",
+    "qr_checkpoint_wait_count", "svd_checkpoint_record_count",
+    "svd_checkpoint_wait_count", "implicit_residual_d2h_count",
+    "cpu_fallback_count", "unknown_fallback_count", "solve_elapsed_ms",
+    "pre_shadow_materialize_call_count",
+    "pre_shadow_materialize_target_count", "pre_shadow_d2h_bytes",
+    "shadow_materialize_elapsed_ms", "post_shadow_materialize_call_count",
+    "post_shadow_materialize_target_count", "post_shadow_d2h_bytes",
+    "output_slot_release_count", "output_slot_leased_after_release"
+  )
+  batch_logical <- c(
+    "native_batch_call", "true_batched_kernel", "full_cuda_data_plane",
+    "canonical_output_order_exact", "target_keys_exact",
+    "route_status_conservation_exact", "resource_snapshot_captured",
+    "output_slot_leased_after_release"
+  )
+  batch_double <- c(
+    "aggregate_penalty_root_d2h_bytes", "target_h2d_bytes",
+    "solve_elapsed_ms", "pre_shadow_d2h_bytes",
+    "shadow_materialize_elapsed_ms", "post_shadow_d2h_bytes"
+  )
+  batch <- schema(
+    batch_names,
+    character = "prepared_s_key_sha256",
+    integer = setdiff(
+      batch_names,
+      c("prepared_s_key_sha256", batch_logical, batch_double)
+    ),
+    double = batch_double,
+    logical = batch_logical
+  )
+  setup_names <- c(
+    "prepared_s_key_sha256", "batch_ordinal", "prepared_handle_create_count",
+    "prepared_handle_free_count", "setup_h2d_upload_count", "setup_h2d_bytes",
+    "penalty_root_build_count", "penalty_root_rank_mismatch_count",
+    "penalty_root_bytes", "penalty_root_build_ms", "penalty_root_matrix_count",
+    "penalty_root_row_count", "H_root_matrix_count", "H_root_rank",
+    "rank_reference_materialize_call_count",
+    "rank_reference_materialize_elapsed_ms", "setup_shadow_d2h_count",
+    "setup_shadow_d2h_bytes", "coefficient_output_capacity",
+    "prepared_generation", "output_slot_state_before_solve",
+    "output_slot_state_after_solve", "output_slot_state_after_release",
+    "output_slot_leased_after_release", "output_slot_poison_reason_empty"
+  )
+  setup_character <- c(
+    "prepared_s_key_sha256", "output_slot_state_before_solve",
+    "output_slot_state_after_solve", "output_slot_state_after_release"
+  )
+  setup_logical <- c(
+    "output_slot_leased_after_release", "output_slot_poison_reason_empty"
+  )
+  setup_double <- c(
+    "setup_h2d_bytes", "penalty_root_bytes", "penalty_root_build_ms",
+    "rank_reference_materialize_elapsed_ms", "setup_shadow_d2h_bytes",
+    "coefficient_output_capacity", "prepared_generation"
+  )
+  setup <- schema(
+    setup_names,
+    character = setup_character,
+    integer = setdiff(
+      setup_names, c(setup_character, setup_logical, setup_double)
+    ),
+    double = setup_double,
+    logical = setup_logical
+  )
+  runtime_names <- c(
+    "stage", "device_id", "gpu_name", "runtime_context_create_count",
+    "cuda_device_allocation_count", "cuda_host_allocation_count",
+    "stream_create_count", "event_create_count", "cublas_handle_create_count",
+    "cusolver_handle_create_count", "workspace_grow_count",
+    "cuda_device_synchronize_count", "compute_capability_major",
+    "compute_capability_minor", "sm_count", "cuda_toolkit_version",
+    "cuda_driver_version", "cusolver_deterministic_mode", "cublas_math_mode",
+    "cublas_atomics_mode", "cublas_user_workspace_installed",
+    "cublas_workspace_alignment", "workspace_reserve_count", "freed",
+    "creator_pid", "generation", "gesvdj_info_create_count",
+    "gesvdj_info_destroy_count", "stable_workspace_grow_count",
+    "cholesky_factor_checkpoint_record_count",
+    "cholesky_factor_checkpoint_wait_count",
+    "cholesky_solve_checkpoint_record_count",
+    "cholesky_solve_checkpoint_wait_count", "qr_checkpoint_record_count",
+    "qr_checkpoint_wait_count", "svd_checkpoint_record_count",
+    "svd_checkpoint_wait_count", "workspace_bytes", "cublas_workspace_bytes",
+    "eigen_workspace_bytes", "qr_workspace_bytes", "svd_workspace_bytes",
+    "augmented_workspace_bytes", "aggregate_factor_workspace_bytes"
+  )
+  runtime_character <- c(
+    "stage", "gpu_name", "cusolver_deterministic_mode", "cublas_math_mode",
+    "cublas_atomics_mode"
+  )
+  runtime_logical <- c("cublas_user_workspace_installed", "freed")
+  runtime_double <- c(
+    "cublas_workspace_alignment", "creator_pid", "generation",
+    "workspace_bytes", "cublas_workspace_bytes", "eigen_workspace_bytes",
+    "qr_workspace_bytes", "svd_workspace_bytes", "augmented_workspace_bytes",
+    "aggregate_factor_workspace_bytes"
+  )
+  runtime <- schema(
+    runtime_names,
+    character = runtime_character,
+    integer = setdiff(
+      runtime_names, c(runtime_character, runtime_logical, runtime_double)
+    ),
+    double = runtime_double,
+    logical = runtime_logical
+  )
+  list(target = target, batch = batch, setup = setup, runtime = runtime)
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_validate_result_schema <- function(
+    target_records, batch_records, setup_records, runtime_records) {
+  schemas <- fastkpc_full_cuda_fixed_sp_qualification_result_schema()
+  frames <- list(
+    target = target_records, batch = batch_records,
+    setup = setup_records, runtime = runtime_records
+  )
+  row_counts <- c(target = 6143L, batch = 2061L, setup = 2061L, runtime = 3L)
+  valid_frame <- function(frame, schema, row_count) {
+    if (!is.data.frame(frame) || nrow(frame) != row_count ||
+        !identical(names(frame), schema$names)) return(FALSE)
+    all(vapply(schema$names, function(field) {
+      value <- frame[[field]]
+      if (field %in% schema$list_fields) {
+        typeof(value) == "list" && length(value) == row_count &&
+          is.object(value) && identical(attributes(value), list(class = "AsIs")) &&
+          all(vapply(value, function(element) {
+            typeof(element) == "integer" && !is.object(element) &&
+              is.null(attributes(element)) && !anyNA(element)
+          }, logical(1L)))
+      } else {
+        typeof(value) == schema$types[[field]] && length(value) == row_count &&
+          !is.object(value) && is.null(attributes(value))
+      }
+    }, logical(1L)))
+  }
+  clean <- all(vapply(names(frames), function(name) {
+    valid_frame(frames[[name]], schemas[[name]], row_counts[[name]])
+  }, logical(1L))) &&
+    identical(setup_records$prepared_s_key_sha256,
+              batch_records$prepared_s_key_sha256) &&
+    identical(
+      setup_records$prepared_s_key_sha256,
+      sort(setup_records$prepared_s_key_sha256, method = "radix")
+    ) && identical(
+      order(
+        target_records$prepared_s_key_sha256,
+        target_records$residual_key_sha256,
+        method = "radix"
+      ),
+      seq_len(nrow(target_records))
+    ) && identical(
+      runtime_records$stage,
+      c("runtime-created", "workspace-reserved", "final")
+    )
+  if (!isTRUE(clean)) {
+    stop("qualification result schema mismatch", call. = FALSE)
+  }
+  TRUE
+}
+
+fastkpc_full_cuda_write_fixed_sp_qualification_artifact <- function(
+    result, output_dir, phase0_dir, phase1_dir, phase2_dir, data_path,
+    device_id, stage_timing, elapsed_seconds, command_lines,
+    environment_lines, execution_provenance) {
+  if (is.list(result) && is.list(result$summary) &&
+      "pass" %in% names(result$summary)) {
+    stop("qualification writer rejects caller-supplied pass fields",
+         call. = FALSE)
+  }
+  required_result_names <- c(
+    "catalog_records", "runtime_records", "setup_records",
+    "batch_records", "target_records", "summary"
+  )
+  if (!is.list(result) || !identical(names(result), required_result_names) ||
+      !is.data.frame(stage_timing) || nrow(stage_timing) < 1L ||
+      !identical(names(stage_timing), c("stage", "elapsed_seconds")) ||
+      any(!is.finite(stage_timing$elapsed_seconds)) ||
+      any(stage_timing$elapsed_seconds < 0)) {
+    stop("qualification artifact evidence is malformed", call. = FALSE)
+  }
+  fastkpc_full_cuda_fixed_sp_qualification_validate_input_summary(
+    result$summary
+  )
+  fastkpc_full_cuda_fixed_sp_qualification_validate_result_schema(
+    target_records = result$target_records,
+    batch_records = result$batch_records,
+    setup_records = result$setup_records,
+    runtime_records = result$runtime_records
+  )
+  if (!is.list(execution_provenance) ||
+      !isTRUE(
+        execution_provenance$execution_sources_unchanged_after_run
+      )) {
+    stop("qualification execution provenance is not post-run verified",
+         call. = FALSE)
+  }
+  execution_provenance <-
+    fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
+      execution_provenance
+    )
+  scalar_path <- function(value, label, must_work = TRUE) {
+    if (!is.character(value) || length(value) != 1L || is.na(value) ||
+        !nzchar(value)) {
+      stop(label, " must be one nonempty path", call. = FALSE)
+    }
+    normalizePath(value, winslash = "/", mustWork = must_work)
+  }
+  output_dir <- scalar_path(output_dir, "output_dir", must_work = FALSE)
+  phase0_dir <- scalar_path(phase0_dir, "phase0_dir")
+  phase1_dir <- scalar_path(phase1_dir, "phase1_dir")
+  phase2_dir <- scalar_path(phase2_dir, "phase2_dir")
+  data_path <- scalar_path(data_path, "data_path")
+  if (!requireNamespace("jsonlite", quietly = TRUE) ||
+      !requireNamespace("digest", quietly = TRUE)) {
+    stop("qualification artifact requires jsonlite and digest",
+         call. = FALSE)
+  }
+  authoritative_catalog <-
+    fastkpc_full_cuda_fixed_sp_qualification_reopen_catalog_evidence(
+      phase0_dir = phase0_dir,
+      phase1_dir = phase1_dir,
+      phase2_dir = phase2_dir,
+      data_path = data_path
+    )
+  validated_catalog_identity <-
+    fastkpc_full_cuda_fixed_sp_qualification_validate_record_identity(
+      catalog_records = result$catalog_records,
+      summary = result$summary,
+      authoritative = authoritative_catalog,
+      setup_records = result$setup_records,
+      batch_records = result$batch_records,
+      target_records = result$target_records
+    )
+  catalog_authenticated <- validated_catalog_identity$catalog_authenticated
+  if (typeof(device_id) != "integer" || length(device_id) != 1L ||
+      is.na(device_id) || device_id < 0L ||
+      !is.double(elapsed_seconds) || length(elapsed_seconds) != 1L ||
+      !is.finite(elapsed_seconds) || elapsed_seconds < 0 ||
+      !is.character(command_lines) || !is.character(environment_lines) ||
+      anyNA(command_lines) || anyNA(environment_lines)) {
+    stop("qualification artifact scalar metadata is malformed",
+         call. = FALSE)
+  }
+
+  parent_dir <- dirname(output_dir)
+  dir.create(parent_dir, recursive = TRUE, showWarnings = FALSE)
+  staging_dir <- tempfile(
+    pattern = paste0(".", basename(output_dir), ".staging-"),
+    tmpdir = parent_dir
+  )
+  if (!dir.create(staging_dir, recursive = FALSE, showWarnings = FALSE)) {
+    stop("failed to create qualification staging directory",
+         call. = FALSE)
+  }
+  published <- FALSE
+  on.exit({
+    if (!published && dir.exists(staging_dir)) {
+      unlink(staging_dir, recursive = TRUE, force = TRUE)
+    }
+  }, add = TRUE)
+  path <- function(name) file.path(staging_dir, name)
+  write_csv <- function(value, name) {
+    utils::write.csv(
+      fastkpc_full_cuda_fixed_sp_qualification_csv_frame(value),
+      path(name), row.names = FALSE, na = ""
+    )
+  }
+
+  saveRDS(result$target_records, path("target_parity.rds"), version = 3L)
+  write_csv(result$target_records, "target_parity.csv")
+  saveRDS(result$batch_records, path("batch_metrics.rds"), version = 3L)
+  write_csv(result$batch_records, "batch_metrics.csv")
+  saveRDS(result$setup_records, path("setup_metrics.rds"), version = 3L)
+  write_csv(result$setup_records, "setup_metrics.csv")
+  write_csv(result$runtime_records, "runtime_metrics.csv")
+  write_csv(stage_timing, "stage_timing.csv")
+  write_csv(data.frame(
+    residual_key_sha256 = character(),
+    fallback_type = character(),
+    reason = character(),
+    stringsAsFactors = FALSE
+  ), "fallbacks.csv")
+  write_csv(data.frame(
+    stage = character(), prepared_s_key_sha256 = character(),
+    residual_key_sha256 = character(), error_class = character(),
+    error_message = character(), stringsAsFactors = FALSE
+  ), "failures.csv")
+  writeLines(command_lines, path("commands.txt"), useBytes = TRUE)
+  writeLines(environment_lines, path("environment.txt"), useBytes = TRUE)
+
+  payload_names <- fastkpc_full_cuda_fixed_sp_qualification_payload_names()
+  payload_hashes <- vapply(payload_names, function(name) {
+    digest::digest(file = path(name), algo = "sha256", serialize = FALSE)
+  }, character(1L))
+  validated_result_summary <- result$summary
+  validated_result_summary$scope_subset_hash <-
+    validated_catalog_identity$qualification_subset_hash
+  validated_result_summary$qualification_subset_hash <-
+    validated_catalog_identity$qualification_subset_hash
+  for (field in c(
+    "ordered_setup_key_digest", "ordered_target_key_digest",
+    "route_status_hash", "numeric_hash", "setup_count", "target_count"
+  )) {
+    validated_result_summary[[field]] <- validated_catalog_identity[[field]]
+  }
+  publication_summary <- list(
+    artifact_schema_version =
+      "full-cuda-ci-fixed-sp-qualification-v1",
+    catalog_authenticated = catalog_authenticated,
+    provenance_mode = execution_provenance$provenance_mode,
+    head_base_commit = execution_provenance$head_base_commit,
+    source_closure_schema_version =
+      execution_provenance$source_closure_schema_version,
+    source_closure_count = execution_provenance$source_closure_count,
+    source_closure_sha256 = execution_provenance$source_closure_sha256,
+    execution_snapshot_sha256 =
+      execution_provenance$execution_snapshot_sha256,
+    relevant_sources_dirty_or_untracked =
+      execution_provenance$relevant_sources_dirty_or_untracked,
+    native_library_sha256 = execution_provenance$native_library_sha256,
+    execution_sources_unchanged_after_run =
+      execution_provenance$execution_sources_unchanged_after_run,
+    elapsed_seconds = as.double(elapsed_seconds),
+    stage_timing_total_seconds = as.double(sum(stage_timing$elapsed_seconds)),
+    payload_file_count = as.integer(length(payload_names))
+  )
+  summary_schema <- fastkpc_full_cuda_fixed_sp_qualification_summary_schema()
+  if (!identical(
+    names(validated_result_summary), summary_schema$input_names
+  ) || !identical(
+    names(publication_summary), summary_schema$publication_names
+  ) || anyDuplicated(c(
+    names(validated_result_summary), names(publication_summary)
+  ))) {
+    stop("qualification summary composition namespace is invalid",
+         call. = FALSE)
+  }
+  summary <- c(validated_result_summary, publication_summary)
+  fastkpc_full_cuda_fixed_sp_qualification_validate_published_summary(summary)
+  manifest <- list(
+    schema_version = "full-cuda-ci-fixed-sp-qualification-v1",
+    scope = "qualification",
+    catalog_authenticated = catalog_authenticated,
+    provenance_schema_version =
+      execution_provenance$provenance_schema_version,
+    provenance_mode = execution_provenance$provenance_mode,
+    head_base_commit = execution_provenance$head_base_commit,
+    source_closure_schema_version =
+      execution_provenance$source_closure_schema_version,
+    source_discovery_semantics =
+      execution_provenance$source_discovery_semantics,
+    source_project_root = execution_provenance$source_project_root,
+    source_closure_count = execution_provenance$source_closure_count,
+    source_closure_sha256 = execution_provenance$source_closure_sha256,
+    direct_source_ids = as.list(execution_provenance$direct_source_ids),
+    source_dependency_map = lapply(
+      execution_provenance$source_dependency_map, as.list
+    ),
+    source_file_paths = as.list(execution_provenance$source_file_paths),
+    source_file_sha256 = as.list(execution_provenance$source_file_sha256),
+    source_file_git_state =
+      as.list(execution_provenance$source_file_git_state),
+    relevant_sources_dirty_or_untracked =
+      execution_provenance$relevant_sources_dirty_or_untracked,
+    native_library_identity =
+      execution_provenance$native_library_identity,
+    native_library_path = execution_provenance$native_library_path,
+    native_library_sha256 = execution_provenance$native_library_sha256,
+    execution_snapshot_sha256 =
+      execution_provenance$execution_snapshot_sha256,
+    execution_sources_unchanged_after_run =
+      execution_provenance$execution_sources_unchanged_after_run,
+    device_id = device_id,
+    phase0_dir = phase0_dir,
+    phase1_dir = phase1_dir,
+    phase2_dir = phase2_dir,
+    data_path = data_path,
+    qualification_subset_hash =
+      validated_catalog_identity$qualification_subset_hash,
+    ordered_setup_key_digest =
+      validated_catalog_identity$ordered_setup_key_digest,
+    ordered_target_key_digest =
+      validated_catalog_identity$ordered_target_key_digest,
+    route_status_hash = validated_catalog_identity$route_status_hash,
+    numeric_hash = validated_catalog_identity$numeric_hash,
+    payload_file_sha256 = as.list(payload_hashes),
+    publication_order = as.list(c(
+      payload_names, "manifest.json", "summary.json"
+    ))
+  )
+  fastkpc_full_cuda_fixed_sp_write_qualification_json(
+    manifest, path("manifest.json")
+  )
+  fastkpc_full_cuda_fixed_sp_qualification_validate_published_summary(summary)
+  fastkpc_full_cuda_fixed_sp_write_qualification_json(
+    summary, path("summary.json")
+  )
+
+  publication_order <- c(payload_names, "manifest.json", "summary.json")
+  publication_hashes <- c(
+    payload_hashes,
+    manifest.json = fastkpc_full_cuda_fixed_sp_sha256_file(
+      path("manifest.json")
+    ),
+    summary.json = fastkpc_full_cuda_fixed_sp_sha256_file(
+      path("summary.json")
+    )
+  )
+  fastkpc_full_cuda_fixed_sp_publish_qualification_staging(
+    staging_dir = staging_dir,
+    output_dir = output_dir,
+    publication_order = publication_order,
+    expected_sha256 = publication_hashes
+  )
+  published <- TRUE
+  list(
+    output_dir = output_dir,
+    manifest = manifest,
+    summary = summary,
+    payload_file_sha256 = payload_hashes
+  )
 }
