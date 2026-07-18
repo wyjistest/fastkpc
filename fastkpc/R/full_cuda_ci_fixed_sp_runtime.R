@@ -2920,6 +2920,16 @@ fastkpc_full_cuda_fixed_sp_phase3b_cleanup_failure_condition <- function(
   )
 }
 
+fastkpc_full_cuda_fixed_sp_phase3b_cleanup_condition_is_retryable <-
+    function(condition) {
+  inherits(condition, "condition") &&
+    (inherits(condition, "fastkpc_phase3b_cleanup_retryable") ||
+       grepl(
+         "retryable teardown work", conditionMessage(condition),
+         fixed = TRUE
+       ))
+}
+
 fastkpc_full_cuda_fixed_sp_phase3b_cleanup_operations <- function(
     operations, body_error = NULL, max_attempts = 2L,
     context = "Phase 3B cleanup") {
@@ -2972,13 +2982,21 @@ fastkpc_full_cuda_fixed_sp_phase3b_cleanup_operations <- function(
         )
         if (inherits(needed, "condition")) {
           last_error <- needed
+          if (!fastkpc_full_cuda_fixed_sp_phase3b_cleanup_condition_is_retryable(
+                needed
+              ) || attempt == max_attempts) {
+            break
+          }
+          next
         } else if (typeof(needed) != "logical" || length(needed) != 1L ||
                    is.object(needed) || !is.null(attributes(needed)) ||
                    is.na(needed)) {
           last_error <- simpleError(
             "needed() did not return a logical scalar"
           )
+          break
         } else if (!needed) {
+          last_error <- NULL
           break
         } else {
           run_error <- tryCatch({
@@ -2987,6 +3005,12 @@ fastkpc_full_cuda_fixed_sp_phase3b_cleanup_operations <- function(
           }, error = condition_handler, interrupt = condition_handler)
           if (!is.null(run_error)) {
             last_error <- run_error
+            if (!fastkpc_full_cuda_fixed_sp_phase3b_cleanup_condition_is_retryable(
+                  run_error
+                ) || attempt == max_attempts) {
+              break
+            }
+            next
           } else {
             still_needed <- tryCatch(
               operation$needed(),
@@ -2995,10 +3019,17 @@ fastkpc_full_cuda_fixed_sp_phase3b_cleanup_operations <- function(
             )
             if (inherits(still_needed, "condition")) {
               last_error <- still_needed
+              if (!fastkpc_full_cuda_fixed_sp_phase3b_cleanup_condition_is_retryable(
+                    still_needed
+                  ) || attempt == max_attempts) {
+                break
+              }
+              next
             } else if (!identical(still_needed, FALSE)) {
               last_error <- simpleError(
                 "operation did not clear ownership state"
               )
+              break
             } else {
               last_error <- NULL
               break
@@ -4471,6 +4502,1819 @@ fastkpc_run_full_cuda_fixed_sp_phase3b_iteration <- function(
       },
       operations = runtime_cleanup_operations,
       context = "Phase 3B iteration cleanup"
+    )
+  iteration_result
+}
+
+fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info <- function(
+    info, context) {
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_runtime_info(info, context)
+  integer_fields <- c(
+    "gesvdj_info_create_count", "gesvdj_info_destroy_count",
+    "stable_workspace_grow_count", "qr_checkpoint_record_count",
+    "qr_checkpoint_wait_count", "svd_checkpoint_record_count",
+    "svd_checkpoint_wait_count"
+  )
+  double_fields <- c(
+    "eigen_workspace_bytes", "qr_workspace_bytes", "svd_workspace_bytes",
+    "augmented_workspace_bytes", "aggregate_factor_workspace_bytes"
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_require_fields(
+    info, c(integer_fields, double_fields), context
+  )
+  for (field in integer_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  for (field in double_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  invisible(info)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3c_runtime_record <- function(stage, info) {
+  fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
+    info, paste("Phase 3C", stage, "runtime info")
+  )
+  record <- fastkpc_full_cuda_fixed_sp_phase3b_runtime_record(stage, info)
+  integer_fields <- c(
+    "gesvdj_info_create_count", "gesvdj_info_destroy_count",
+    "stable_workspace_grow_count",
+    "cholesky_factor_checkpoint_record_count",
+    "cholesky_factor_checkpoint_wait_count",
+    "cholesky_solve_checkpoint_record_count",
+    "cholesky_solve_checkpoint_wait_count",
+    "qr_checkpoint_record_count", "qr_checkpoint_wait_count",
+    "svd_checkpoint_record_count", "svd_checkpoint_wait_count"
+  )
+  double_fields <- c(
+    "workspace_bytes", "cublas_workspace_bytes", "eigen_workspace_bytes",
+    "qr_workspace_bytes", "svd_workspace_bytes", "augmented_workspace_bytes",
+    "aggregate_factor_workspace_bytes"
+  )
+  for (field in integer_fields) record[[field]] <- as.integer(info[[field]])
+  for (field in double_fields) record[[field]] <- as.double(info[[field]])
+  record
+}
+
+fastkpc_full_cuda_fixed_sp_phase3c_expected_X_null <- function(dto) {
+  if (identical(dto$constraint_mode, "identity")) {
+    dto$X
+  } else {
+    dto$X %*% dto$constraint_nullspace
+  }
+}
+
+fastkpc_full_cuda_fixed_sp_phase3c_expected_Z <- function(dto) {
+  if (identical(dto$constraint_mode, "identity")) {
+    diag(dto$coefficient_dim)
+  } else {
+    dto$constraint_nullspace
+  }
+}
+
+fastkpc_full_cuda_fixed_sp_phase3c_projected_penalty <- function(
+    dto, penalty_index, Z) {
+  block <- dto$penalty_blocks[[penalty_index]]
+  offset <- dto$penalty_offsets_zero_based[[penalty_index]] + 1L
+  indices <- offset:(offset + nrow(block) - 1L)
+  full <- matrix(0, dto$coefficient_dim, dto$coefficient_dim)
+  full[indices, indices] <- block
+  if (identical(dto$constraint_mode, "identity")) {
+    full
+  } else {
+    crossprod(Z, full %*% Z)
+  }
+}
+
+fastkpc_full_cuda_fixed_sp_phase3c_cpu_aggregate_shadow <- function(
+    dto, sp) {
+  if (!is.list(dto) || !is.double(sp) ||
+      length(sp) != dto$penalty_count || any(!is.finite(sp)) ||
+      any(sp < 0)) {
+    stop("Phase 3C CPU aggregate-shadow inputs are malformed",
+         call. = FALSE)
+  }
+  q <- dto$null_dim
+  Z <- fastkpc_full_cuda_fixed_sp_phase3c_expected_Z(dto)
+  aggregate_penalty <- if (is.null(dto$H)) {
+    matrix(0, q, q)
+  } else if (identical(dto$constraint_mode, "identity")) {
+    dto$H
+  } else {
+    crossprod(Z, dto$H %*% Z)
+  }
+  for (penalty_index in seq_len(dto$penalty_count)) {
+    aggregate_penalty <- aggregate_penalty +
+      sp[[penalty_index]] *
+        fastkpc_full_cuda_fixed_sp_phase3c_projected_penalty(
+          dto, penalty_index, Z
+        )
+  }
+  factor <- suppressWarnings(chol(
+    aggregate_penalty, pivot = TRUE, tol = -1
+  ))
+  rank <- as.integer(attr(factor, "rank"))
+  pivot <- as.integer(attr(factor, "pivot"))
+  root <- matrix(0, nrow = rank, ncol = q)
+  if (rank > 0L) {
+    root[, pivot] <- factor[seq_len(rank), , drop = FALSE]
+  }
+  B <- rbind(
+    fastkpc_full_cuda_fixed_sp_phase3c_expected_X_null(dto),
+    root,
+    matrix(0, nrow = q - rank, ncol = q)
+  )
+  if (!identical(dim(B), c(dto$n + q, q))) {
+    stop("Phase 3C CPU aggregate padded B is malformed", call. = FALSE)
+  }
+  singular_values <- svd(B, nu = 0L, nv = 0L)$d
+  sigma_max <- max(singular_values)
+  threshold <- sigma_max * sqrt(.Machine$double.eps)
+  retained <- singular_values > 0 & singular_values >= threshold
+  list(
+    root_rank = rank,
+    root_pivot = pivot,
+    effective_rank = as.integer(sum(retained)),
+    effective_rank_threshold = as.double(threshold),
+    sigma_max = as.double(sigma_max)
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_phase3c_validate_prepared_info <- function(
+    info, dto, expected_rank_shadow_count, context) {
+  fastkpc_full_cuda_fixed_sp_phase3b_validate_prepared_info(
+    info, dto, context
+  )
+  integer_fields <- c(
+    "penalty_root_build_count", "penalty_root_rank_mismatch_count",
+    "penalty_root_matrix_count", "penalty_root_row_count",
+    "H_root_matrix_count", "H_root_rank", "setup_shadow_d2h_count",
+    "augmented_test_shadow_d2h_count"
+  )
+  double_fields <- c(
+    "penalty_root_bytes", "penalty_root_build_ms",
+    "setup_shadow_d2h_bytes", "augmented_test_shadow_d2h_bytes"
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_require_fields(
+    info, c(integer_fields, double_fields), context
+  )
+  for (field in integer_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  for (field in double_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  expected_rank_shadow_count <-
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      expected_rank_shadow_count,
+      paste(context, "expected rank-reference shadow count")
+    )
+  expected_H_count <- as.integer(!is.null(dto$H))
+  metrics_exact <- info$penalty_root_build_count == 1L &&
+    info$penalty_root_matrix_count == dto$penalty_count &&
+    info$penalty_root_row_count == sum(dto$penalty_ranks) &&
+    info$H_root_matrix_count == expected_H_count &&
+    info$setup_shadow_d2h_count == expected_rank_shadow_count &&
+    info$augmented_test_shadow_d2h_count == 0L &&
+    info$augmented_test_shadow_d2h_bytes == 0 &&
+    info$penalty_root_bytes >= 0 && info$penalty_root_build_ms >= 0 &&
+    if (expected_rank_shadow_count == 0L) {
+      info$setup_shadow_d2h_bytes == 0
+    } else {
+      info$setup_shadow_d2h_bytes > 0
+    }
+  if (!isTRUE(metrics_exact)) {
+    stop(context, " root/setup-shadow diagnostics are inconsistent",
+         call. = FALSE)
+  }
+  invisible(info)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3c_route_counts <- function(
+    planned_route, executed_route) {
+  target_count <- length(planned_route)
+  clean <- is.character(planned_route) && is.character(executed_route) &&
+    length(executed_route) == target_count && target_count > 0L &&
+    !anyNA(planned_route) && !anyNA(executed_route) &&
+    all(planned_route %in% c(
+      "CHOLESKY_BATCHED", "AUGMENTED_QR", "AUGMENTED_SVD"
+    )) && all(executed_route %in% c(
+      "CHOLESKY_BATCHED", "AUGMENTED_QR", "AUGMENTED_SVD"
+    ))
+  if (!isTRUE(clean)) {
+    stop("Phase 3C route evidence is malformed", call. = FALSE)
+  }
+  planned_cholesky <- sum(planned_route == "CHOLESKY_BATCHED")
+  planned_qr <- sum(planned_route == "AUGMENTED_QR")
+  planned_svd <- sum(planned_route == "AUGMENTED_SVD")
+  executed_cholesky <- sum(executed_route == "CHOLESKY_BATCHED")
+  executed_qr <- sum(executed_route == "AUGMENTED_QR")
+  executed_svd <- sum(executed_route == "AUGMENTED_SVD")
+  cholesky_to_svd <- sum(
+    planned_route == "CHOLESKY_BATCHED" &
+      executed_route == "AUGMENTED_SVD"
+  )
+  qr_to_svd <- sum(
+    planned_route == "AUGMENTED_QR" &
+      executed_route == "AUGMENTED_SVD"
+  )
+  stable_reroute <- sum(planned_route != executed_route)
+  conserved <-
+    planned_cholesky == executed_cholesky + cholesky_to_svd &&
+    planned_qr == executed_qr + qr_to_svd &&
+    executed_svd == planned_svd + cholesky_to_svd + qr_to_svd &&
+    stable_reroute == cholesky_to_svd + qr_to_svd
+  list(
+    planned_cholesky = as.integer(planned_cholesky),
+    planned_qr = as.integer(planned_qr),
+    planned_svd = as.integer(planned_svd),
+    executed_cholesky = as.integer(executed_cholesky),
+    executed_qr = as.integer(executed_qr),
+    executed_svd = as.integer(executed_svd),
+    cholesky_to_svd = as.integer(cholesky_to_svd),
+    qr_to_svd = as.integer(qr_to_svd),
+    stable_reroute = as.integer(stable_reroute),
+    conserved = isTRUE(conserved)
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info <- function(
+    info, native, dto, expected_shadow_calls,
+    expected_shadow_targets, expected_shadow_bytes,
+    expected_release_count, context) {
+  integer_fields <- c(
+    "n", "coefficient_dim", "target_count", "batch_call_count",
+    "true_batched_subgroup_count", "true_batched_attempted_target_count",
+    "true_batched_target_count", "cholesky_single_target_count",
+    "potrf_batched_call_count", "potrs_batched_call_count",
+    "target_batch_h2d_call_count", "target_h2d_copy_count",
+    "coefficient_batch_finalize_call_count",
+    "fitted_batch_finalize_call_count",
+    "residual_rss_batch_finalize_call_count",
+    "per_target_output_finalize_call_count",
+    "batch_output_finalized_target_count", "stable_reroute_count",
+    "planned_cholesky_target_count", "planned_qr_target_count",
+    "planned_svd_target_count", "executed_cholesky_target_count",
+    "executed_qr_target_count", "executed_svd_target_count",
+    "cholesky_to_svd_count", "qr_to_svd_count",
+    "aggregate_penalty_factor_count", "aggregate_svd_b_build_count",
+    "aggregate_penalty_root_d2h_count",
+    "output_slot_acquire_count", "output_slot_release_count",
+    "output_slot_busy_count", "stale_token_reject_count",
+    "invalid_output_init_count", "nonfinite_output_count",
+    "cpu_fallback_count", "unknown_fallback_count",
+    "resource_instrumentation_version",
+    "resource_allocation_count_before_solve",
+    "resource_allocation_count_after_solve",
+    "resource_handle_create_count_before_solve",
+    "resource_handle_create_count_after_solve",
+    "cuda_device_allocation_count_during_solve",
+    "cuda_host_allocation_count_during_solve",
+    "stream_create_count_during_solve", "event_create_count_during_solve",
+    "cublas_handle_create_count_during_solve",
+    "cusolver_handle_create_count_during_solve",
+    "per_target_allocation_count_after_warmup",
+    "per_target_handle_create_count", "implicit_residual_d2h_count",
+    "rhs_device_build_count", "shadow_materialize_call_count",
+    "shadow_materialize_target_count"
+  )
+  double_fields <- c(
+    "target_h2d_bytes", "shadow_d2h_bytes", "owner_generation",
+    "slot_generation", "aggregate_penalty_root_d2h_bytes"
+  )
+  logical_fields <- c(
+    "native_batch_call", "true_batched_kernel",
+    "canonical_output_order_exact", "resource_snapshot_captured",
+    "full_cuda_data_plane"
+  )
+  character_vectors <- c(
+    "target_keys", "planned_route", "executed_route", "reroute_reason",
+    "solver_status"
+  )
+  integer_vectors <- c(
+    "qr_rank", "geqrf_info", "ormqr_info", "effective_rank", "svd_info",
+    "aggregate_factor_call_count", "aggregate_b_build_count"
+  )
+  double_vectors <- c(
+    "sigma_max", "smallest_retained_sigma"
+  )
+  required <- c(
+    integer_fields, double_fields, logical_fields, character_vectors,
+    integer_vectors, double_vectors, "target_true_batched", "rhs_authority",
+    "aggregate_penalty_root_rank", "aggregate_penalty_root_pivot",
+    "aggregate_dstop"
+  )
+  fastkpc_full_cuda_fixed_sp_phase3b_require_fields(info, required, context)
+  for (field in integer_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  for (field in double_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  for (field in logical_fields) {
+    fastkpc_full_cuda_fixed_sp_phase3b_logical_scalar(
+      info[[field]], paste(context, field)
+    )
+  }
+  target_count <- native$target_count
+  for (field in character_vectors) {
+    fastkpc_full_cuda_fixed_sp_phase3b_character_vector(
+      info[[field]], target_count, paste(context, field)
+    )
+  }
+  for (field in integer_vectors) {
+    value <- info[[field]]
+    if (typeof(value) != "integer" || length(value) != target_count ||
+        is.object(value) || !is.null(attributes(value)) || anyNA(value)) {
+      stop(context, " ", field, " is malformed", call. = FALSE)
+    }
+  }
+  for (field in double_vectors) {
+    value <- info[[field]]
+    if (typeof(value) != "double" || length(value) != target_count ||
+        is.object(value) || !is.null(attributes(value))) {
+      stop(context, " ", field, " is malformed", call. = FALSE)
+    }
+  }
+  target_true_batched <- info$target_true_batched
+  if (typeof(target_true_batched) != "logical" ||
+      length(target_true_batched) != target_count ||
+      is.object(target_true_batched) ||
+      !is.null(attributes(target_true_batched)) ||
+      anyNA(target_true_batched)) {
+    stop(context, " target_true_batched is malformed", call. = FALSE)
+  }
+  aggregate_root_rank <- info$aggregate_penalty_root_rank
+  aggregate_root_pivot <- info$aggregate_penalty_root_pivot
+  aggregate_dstop <- info$aggregate_dstop
+  if (typeof(aggregate_root_rank) != "integer" ||
+      length(aggregate_root_rank) != target_count ||
+      is.object(aggregate_root_rank) ||
+      !is.null(attributes(aggregate_root_rank)) ||
+      !is.list(aggregate_root_pivot) ||
+      length(aggregate_root_pivot) != target_count ||
+      typeof(aggregate_dstop) != "double" ||
+      length(aggregate_dstop) != target_count ||
+      is.object(aggregate_dstop) ||
+      !is.null(attributes(aggregate_dstop))) {
+    stop(context, " aggregate SVD diagnostics are malformed",
+         call. = FALSE)
+  }
+  fastkpc_full_cuda_fixed_sp_phase3b_character_scalar(
+    info$rhs_authority, paste(context, "rhs_authority")
+  )
+  expected_shadow_calls <-
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      expected_shadow_calls, paste(context, "expected shadow calls")
+    )
+  expected_shadow_targets <-
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      expected_shadow_targets, paste(context, "expected shadow targets")
+    )
+  expected_shadow_bytes <-
+    fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+      expected_shadow_bytes, paste(context, "expected shadow bytes")
+    )
+  expected_release_count <-
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      expected_release_count, paste(context, "expected release count")
+    )
+
+  routes <- fastkpc_full_cuda_fixed_sp_phase3c_route_counts(
+    info$planned_route, info$executed_route
+  )
+  same_route <- info$planned_route == info$executed_route
+  cholesky_to_svd <- info$planned_route == "CHOLESKY_BATCHED" &
+    info$executed_route == "AUGMENTED_SVD"
+  qr_to_svd <- info$planned_route == "AUGMENTED_QR" &
+    info$executed_route == "AUGMENTED_SVD"
+  reroute_reason_exact <- all(
+    (same_route & info$reroute_reason == "") |
+      (cholesky_to_svd &
+         info$reroute_reason == "CHOLESKY_NON_POSITIVE_PIVOT") |
+      (qr_to_svd & info$reroute_reason == "QR_RANK_GUARD_REJECTED")
+  )
+  expected_status <- ifelse(
+    info$executed_route == "CHOLESKY_BATCHED",
+    ifelse(info$target_true_batched,
+           "OK_CHOLESKY_BATCHED", "OK_CHOLESKY_SINGLE"),
+    ifelse(info$executed_route == "AUGMENTED_QR",
+           "OK_AUGMENTED_QR", "OK_AUGMENTED_SVD")
+  )
+  planned_cholesky <- info$planned_route == "CHOLESKY_BATCHED"
+  planned_cholesky_count <- as.integer(sum(planned_cholesky))
+  expected_true_batched <- planned_cholesky &
+    info$executed_route == "CHOLESKY_BATCHED" &
+    planned_cholesky_count >= 2L
+  expected_subgroups <- as.integer(planned_cholesky_count >= 2L)
+  expected_attempted <- if (planned_cholesky_count >= 2L) {
+    planned_cholesky_count
+  } else {
+    0L
+  }
+  qr <- info$executed_route == "AUGMENTED_QR"
+  svd <- info$executed_route == "AUGMENTED_SVD"
+  expected_aggregate_factor_calls <- as.integer(svd)
+  expected_aggregate_b_builds <- 2L * expected_aggregate_factor_calls
+  aggregate_row_shapes_exact <- all(vapply(
+    seq_len(target_count), function(index) {
+      pivot <- aggregate_root_pivot[[index]]
+      if (!svd[[index]]) {
+        return(
+          is.na(aggregate_root_rank[[index]]) &&
+            is.integer(pivot) && identical(pivot, integer()) &&
+            is.na(aggregate_dstop[[index]])
+        )
+      }
+      !is.na(aggregate_root_rank[[index]]) &&
+        aggregate_root_rank[[index]] >= 0L &&
+        aggregate_root_rank[[index]] <= dto$null_dim &&
+        is.integer(pivot) && length(pivot) == dto$null_dim &&
+        identical(sort(pivot), seq_len(dto$null_dim)) &&
+        is.finite(aggregate_dstop[[index]]) &&
+        aggregate_dstop[[index]] >= 0
+    }, logical(1L)
+  ))
+  aggregate_lifecycle_exact <-
+    isTRUE(aggregate_row_shapes_exact) &&
+    identical(
+      info$aggregate_factor_call_count,
+      expected_aggregate_factor_calls
+    ) &&
+    identical(info$aggregate_b_build_count, expected_aggregate_b_builds) &&
+    info$aggregate_penalty_factor_count ==
+      sum(expected_aggregate_factor_calls) &&
+    info$aggregate_svd_b_build_count == sum(expected_aggregate_b_builds) &&
+    info$aggregate_penalty_root_d2h_count == 0L &&
+    info$aggregate_penalty_root_d2h_bytes == 0
+  route_diagnostics_exact <-
+    all(info$qr_rank[qr] == dto$null_dim) &&
+    all(info$geqrf_info[qr] == 0L) && all(info$ormqr_info[qr] == 0L) &&
+    all(info$effective_rank[svd] >= 0L) &&
+    all(info$effective_rank[svd] <= dto$null_dim) &&
+    all(info$svd_info[svd] == 0L) &&
+    all(is.finite(info$sigma_max[svd])) && all(info$sigma_max[svd] > 0) &&
+    all(is.finite(info$smallest_retained_sigma[svd])) &&
+    all(info$smallest_retained_sigma[svd] > 0) &&
+    all(info$smallest_retained_sigma[svd] <= info$sigma_max[svd])
+  route_status_exact <-
+    identical(info$target_keys, native$target_keys) &&
+    identical(info$planned_route, native$planned_route) &&
+    identical(info$solver_status, unname(expected_status)) &&
+    identical(info$target_true_batched, expected_true_batched) &&
+    all(startsWith(info$solver_status, "OK_")) &&
+    isTRUE(reroute_reason_exact) && isTRUE(routes$conserved) &&
+    isTRUE(route_diagnostics_exact) &&
+    info$planned_cholesky_target_count == routes$planned_cholesky &&
+    info$planned_qr_target_count == routes$planned_qr &&
+    info$planned_svd_target_count == routes$planned_svd &&
+    info$executed_cholesky_target_count == routes$executed_cholesky &&
+    info$executed_qr_target_count == routes$executed_qr &&
+    info$executed_svd_target_count == routes$executed_svd &&
+    info$cholesky_to_svd_count == routes$cholesky_to_svd &&
+    info$qr_to_svd_count == routes$qr_to_svd &&
+    info$stable_reroute_count == routes$stable_reroute &&
+    info$true_batched_subgroup_count == expected_subgroups &&
+    info$true_batched_attempted_target_count == expected_attempted &&
+    info$true_batched_target_count == sum(expected_true_batched) &&
+    info$cholesky_single_target_count ==
+      sum(info$solver_status == "OK_CHOLESKY_SINGLE") &&
+    info$potrf_batched_call_count == expected_subgroups &&
+    info$potrs_batched_call_count == expected_subgroups &&
+    identical(
+      info$true_batched_kernel,
+      target_count >= 2L && all(expected_true_batched)
+    ) && isTRUE(info$canonical_output_order_exact)
+
+  allocation_delta <- info$resource_allocation_count_after_solve -
+    info$resource_allocation_count_before_solve
+  handle_delta <- info$resource_handle_create_count_after_solve -
+    info$resource_handle_create_count_before_solve
+  resource_exact <- isTRUE(info$resource_snapshot_captured) &&
+    info$resource_instrumentation_version == 1L &&
+    allocation_delta ==
+      info$cuda_device_allocation_count_during_solve +
+        info$cuda_host_allocation_count_during_solve &&
+    handle_delta ==
+      info$stream_create_count_during_solve +
+        info$event_create_count_during_solve +
+        info$cublas_handle_create_count_during_solve +
+        info$cusolver_handle_create_count_during_solve &&
+    all(c(
+      info$cuda_device_allocation_count_during_solve,
+      info$cuda_host_allocation_count_during_solve,
+      info$stream_create_count_during_solve,
+      info$event_create_count_during_solve,
+      info$cublas_handle_create_count_during_solve,
+      info$cusolver_handle_create_count_during_solve,
+      info$per_target_allocation_count_after_warmup,
+      info$per_target_handle_create_count
+    ) == 0L)
+  expected_batch_finalize_calls <- as.integer(
+    routes$executed_cholesky > 0L
+  )
+  semantics_exact <- isTRUE(route_status_exact) && isTRUE(resource_exact) &&
+    isTRUE(aggregate_lifecycle_exact) &&
+    identical(info$n, dto$n) &&
+    identical(info$coefficient_dim, dto$coefficient_dim) &&
+    identical(info$target_count, target_count) &&
+    isTRUE(info$native_batch_call) && info$batch_call_count == 1L &&
+    info$output_slot_acquire_count == 1L &&
+    info$output_slot_release_count == expected_release_count &&
+    info$output_slot_busy_count == 0L &&
+    info$stale_token_reject_count == 0L &&
+    info$invalid_output_init_count == 1L &&
+    info$nonfinite_output_count == 0L &&
+    info$target_batch_h2d_call_count == 1L &&
+    info$target_h2d_copy_count == 2L &&
+    identical(
+      info$target_h2d_bytes,
+      8 * as.double(length(native$Y) + length(native$SP))
+    ) && info$rhs_device_build_count == 1L &&
+    identical(info$rhs_authority, "cuda-x0-transpose-y") &&
+    isTRUE(info$full_cuda_data_plane) &&
+    info$coefficient_batch_finalize_call_count == 0L &&
+    info$fitted_batch_finalize_call_count ==
+      expected_batch_finalize_calls &&
+    info$residual_rss_batch_finalize_call_count ==
+      expected_batch_finalize_calls &&
+    info$per_target_output_finalize_call_count ==
+      routes$executed_qr + routes$executed_svd &&
+    info$batch_output_finalized_target_count == target_count &&
+    info$implicit_residual_d2h_count == 0L &&
+    info$cpu_fallback_count == 0L && info$unknown_fallback_count == 0L &&
+    info$shadow_materialize_call_count == expected_shadow_calls &&
+    info$shadow_materialize_target_count == expected_shadow_targets &&
+    identical(info$shadow_d2h_bytes, expected_shadow_bytes)
+  if (!isTRUE(semantics_exact)) {
+    stop(context, " route/status/resource conservation failed",
+         call. = FALSE)
+  }
+  list(routes = routes, route_status_conservation_exact = TRUE)
+}
+
+fastkpc_full_cuda_fixed_sp_phase3c_summarize <- function(
+    catalog_records, runtime_records, setup_records,
+    batch_records, target_records) {
+  records <- list(
+    catalog = catalog_records, runtime = runtime_records,
+    setup = setup_records, batch = batch_records, target = target_records
+  )
+  if (any(!vapply(records, is.data.frame, logical(1L))) ||
+      nrow(catalog_records) != 1L || nrow(runtime_records) != 3L ||
+      nrow(setup_records) < 1L || nrow(batch_records) < 1L ||
+      nrow(target_records) < 1L) {
+    stop("Phase 3C iteration records are malformed", call. = FALSE)
+  }
+  setup_keys <- setup_records$prepared_s_key_sha256
+  if (!identical(batch_records$prepared_s_key_sha256, setup_keys)) {
+    stop("Phase 3C setup/batch ownership is malformed", call. = FALSE)
+  }
+  target_indices <- lapply(setup_keys, function(setup_key) {
+    which(target_records$prepared_s_key_sha256 == setup_key)
+  })
+  target_count_by_setup <- vapply(target_indices, length, integer(1L))
+  if (any(target_count_by_setup < 1L) ||
+      sum(target_count_by_setup) != nrow(target_records) ||
+      !identical(batch_records$target_count, target_count_by_setup)) {
+    stop("Phase 3C target ownership is malformed", call. = FALSE)
+  }
+  routes <- fastkpc_full_cuda_fixed_sp_phase3c_route_counts(
+    target_records$planned_route, target_records$executed_route
+  )
+  per_batch_routes <- lapply(target_indices, function(indices) {
+    fastkpc_full_cuda_fixed_sp_phase3c_route_counts(
+      target_records$planned_route[indices],
+      target_records$executed_route[indices]
+    )
+  })
+  if (!isTRUE(routes$conserved) ||
+      !all(vapply(per_batch_routes, `[[`, logical(1L), "conserved"))) {
+    stop("Phase 3C route conservation failed", call. = FALSE)
+  }
+  route_field_map <- c(
+    planned_cholesky = "planned_cholesky_target_count",
+    planned_qr = "planned_qr_target_count",
+    planned_svd = "planned_svd_target_count",
+    executed_cholesky = "executed_cholesky_target_count",
+    executed_qr = "executed_qr_target_count",
+    executed_svd = "executed_svd_target_count",
+    cholesky_to_svd = "cholesky_to_svd_count",
+    qr_to_svd = "qr_to_svd_count",
+    stable_reroute = "stable_reroute_count"
+  )
+  batch_routes_exact <- all(vapply(seq_along(per_batch_routes), function(i) {
+    all(vapply(names(route_field_map), function(metric) {
+      identical(
+        per_batch_routes[[i]][[metric]],
+        batch_records[[route_field_map[[metric]]]][[i]]
+      )
+    }, logical(1L)))
+  }, logical(1L)))
+  if (!isTRUE(batch_routes_exact)) {
+    stop("Phase 3C batch route counters are not derived from targets",
+         call. = FALSE)
+  }
+  batch_aggregate_factor_counts <- vapply(
+    target_indices, function(indices) {
+      as.integer(sum(
+        target_records$aggregate_factor_call_count[indices]
+      ))
+    }, integer(1L)
+  )
+  batch_aggregate_b_build_counts <- vapply(
+    target_indices, function(indices) {
+      as.integer(sum(target_records$aggregate_b_build_count[indices]))
+    }, integer(1L)
+  )
+  batch_aggregate_exact <- identical(
+    batch_records$aggregate_penalty_factor_count,
+    batch_aggregate_factor_counts
+  ) && identical(
+    batch_records$aggregate_svd_b_build_count,
+    batch_aggregate_b_build_counts
+  ) && all(batch_records$aggregate_penalty_root_d2h_count == 0L) &&
+    all(batch_records$aggregate_penalty_root_d2h_bytes == 0)
+  if (!isTRUE(batch_aggregate_exact)) {
+    stop("Phase 3C batch aggregate counters are not derived from targets",
+         call. = FALSE)
+  }
+
+  reserved_index <- match("workspace-reserved", runtime_records$stage)
+  final_index <- match("final", runtime_records$stage)
+  if (is.na(reserved_index) || is.na(final_index)) {
+    stop("Phase 3C runtime stages are malformed", call. = FALSE)
+  }
+  workspace_delta <- as.integer(
+    runtime_records$workspace_grow_count[[final_index]] -
+      runtime_records$workspace_grow_count[[reserved_index]]
+  )
+  stable_workspace_delta <- as.integer(
+    runtime_records$stable_workspace_grow_count[[final_index]] -
+      runtime_records$stable_workspace_grow_count[[reserved_index]]
+  )
+  synchronize_delta <- as.integer(
+    runtime_records$cuda_device_synchronize_count[[final_index]] -
+      runtime_records$cuda_device_synchronize_count[[reserved_index]]
+  )
+  qr_affected <- batch_records$planned_qr_target_count > 0L
+  svd_affected <- batch_records$executed_svd_target_count > 0L
+  checkpoints_bounded <-
+    all(batch_records$qr_checkpoint_record_count >= 0L) &&
+    all(batch_records$qr_checkpoint_wait_count >= 0L) &&
+    all(batch_records$svd_checkpoint_record_count >= 0L) &&
+    all(batch_records$svd_checkpoint_wait_count >= 0L) &&
+    all(batch_records$qr_checkpoint_record_count <= as.integer(qr_affected)) &&
+    all(batch_records$qr_checkpoint_wait_count <= as.integer(qr_affected)) &&
+    all(batch_records$svd_checkpoint_record_count <= as.integer(svd_affected)) &&
+    all(batch_records$svd_checkpoint_wait_count <= as.integer(svd_affected))
+  if (!isTRUE(checkpoints_bounded)) {
+    stop("Phase 3C stable checkpoint waits scaled beyond public batches",
+         call. = FALSE)
+  }
+  target_level_stable_sync_count <- as.integer(sum(
+    pmax(
+      batch_records$qr_checkpoint_wait_count - as.integer(qr_affected), 0L
+    ) + pmax(
+      batch_records$svd_checkpoint_wait_count - as.integer(svd_affected), 0L
+    )
+  ))
+  whole_batch_true_batched_count <- as.integer(sum(vapply(
+    target_indices, function(indices) {
+      length(indices) >= 2L && all(target_records$target_true_batched[indices])
+    }, logical(1L)
+  )))
+  error_fields <- c(
+    "residual_max_abs_diff", "residual_relative_l2_diff",
+    "fitted_max_abs_diff", "fitted_relative_l2_diff"
+  )
+  errors_exact <- all(vapply(error_fields, function(field) {
+    value <- target_records[[field]]
+    is.double(value) && length(value) == nrow(target_records) &&
+      all(is.finite(value)) && all(value >= 0) && all(value < 1e-7)
+  }, logical(1L)))
+  svd <- target_records$executed_route == "AUGMENTED_SVD"
+  expected_aggregate_factor_calls <- as.integer(svd)
+  expected_aggregate_b_builds <- 2L * expected_aggregate_factor_calls
+  aggregate_exact <-
+    identical(
+      target_records$aggregate_factor_call_count,
+      expected_aggregate_factor_calls
+    ) &&
+    identical(
+      target_records$aggregate_b_build_count,
+      expected_aggregate_b_builds
+    ) &&
+    all(target_records$aggregate_penalty_root_rank_exact[svd]) &&
+    all(target_records$aggregate_penalty_root_pivot_exact[svd]) &&
+    all(target_records$aggregate_effective_rank_exact[svd]) &&
+    identical(
+      target_records$effective_rank[svd],
+      target_records$cpu_aggregate_effective_rank[svd]
+    )
+  target_evidence_exact <- errors_exact &&
+    all(target_records$outputs_all_finite) &&
+    all(startsWith(target_records$solver_status, "OK_")) &&
+    all(target_records$numeric_reference == "mgcv-fixed-sp") &&
+    identical(
+      target_records$oracle_call_count,
+      rep(1L, nrow(target_records))
+    ) &&
+    all(target_records$oracle_fitted_hash_exact) &&
+    all(target_records$oracle_residual_hash_exact) &&
+    !any(target_records$approximate_backend) && isTRUE(aggregate_exact)
+  if (!isTRUE(target_evidence_exact)) {
+    stop("Phase 3C target numerical/rank evidence failed", call. = FALSE)
+  }
+  route_status_hash <- fastkpc_full_cuda_census_metadata_hash(list(
+    target_records$residual_key_sha256,
+    target_records$planned_route,
+    target_records$executed_route,
+    target_records$reroute_reason,
+    target_records$solver_status
+  ))
+  numeric_hash <- fastkpc_full_cuda_census_metadata_hash(list(
+    target_records$residual_key_sha256,
+    target_records$fitted_numeric_hash,
+    target_records$residual_numeric_hash
+  ))
+  summary <- list(
+    iteration_subset_hash = catalog_records$iteration_subset_hash[[1L]],
+    ordered_setup_key_digest =
+      catalog_records$ordered_setup_key_digest[[1L]],
+    ordered_target_key_digest =
+      catalog_records$ordered_target_key_digest[[1L]],
+    route_status_hash = route_status_hash,
+    numeric_hash = numeric_hash,
+    setup_count = as.integer(nrow(setup_records)),
+    target_count = as.integer(nrow(target_records)),
+    penalty_root_matrix_count = as.integer(sum(
+      setup_records$penalty_root_matrix_count
+    )),
+    penalty_root_row_count = as.integer(sum(
+      setup_records$penalty_root_row_count
+    )),
+    H_root_matrix_count = as.integer(sum(
+      setup_records$H_root_matrix_count
+    )),
+    planned_cholesky_count = routes$planned_cholesky,
+    planned_qr_count = routes$planned_qr,
+    planned_svd_count = routes$planned_svd,
+    executed_cholesky_count = routes$executed_cholesky,
+    executed_qr_count = routes$executed_qr,
+    executed_svd_count = routes$executed_svd,
+    cholesky_to_svd_count = routes$cholesky_to_svd,
+    qr_to_svd_count = routes$qr_to_svd,
+    true_batched_target_count = as.integer(sum(
+      target_records$target_true_batched
+    )),
+    cholesky_single_target_count = as.integer(sum(
+      target_records$solver_status == "OK_CHOLESKY_SINGLE"
+    )),
+    whole_batch_true_batched_count = whole_batch_true_batched_count,
+    stable_not_implemented_count = as.integer(sum(
+      target_records$solver_status == "ERR_STABLE_PATH_NOT_IMPLEMENTED"
+    )),
+    stable_reroute_count = routes$stable_reroute,
+    non_ok_status_count = as.integer(sum(
+      !startsWith(target_records$solver_status, "OK_")
+    )),
+    root_rank_mismatch_count = as.integer(sum(
+      setup_records$penalty_root_rank_mismatch_count
+    )),
+    aggregate_penalty_factor_count = as.integer(sum(
+      target_records$aggregate_factor_call_count
+    )),
+    aggregate_svd_b_build_count = as.integer(sum(
+      target_records$aggregate_b_build_count
+    )),
+    aggregate_penalty_root_rank_mismatch_count = as.integer(sum(
+      !target_records$aggregate_penalty_root_rank_exact[svd]
+    )),
+    aggregate_penalty_root_pivot_mismatch_count = as.integer(sum(
+      !target_records$aggregate_penalty_root_pivot_exact[svd]
+    )),
+    aggregate_penalty_root_d2h_count = as.integer(sum(
+      batch_records$aggregate_penalty_root_d2h_count
+    )),
+    aggregate_penalty_root_d2h_bytes = as.double(sum(
+      batch_records$aggregate_penalty_root_d2h_bytes
+    )),
+    workspace_grow_count_after_warmup = workspace_delta,
+    stable_workspace_grow_count_after_warmup = stable_workspace_delta,
+    per_target_allocation_count_after_warmup = as.integer(sum(
+      batch_records$per_target_allocation_count_after_warmup
+    )),
+    per_target_handle_create_count = as.integer(sum(
+      batch_records$per_target_handle_create_count
+    )),
+    cuda_device_synchronize_count = synchronize_delta,
+    target_level_stable_sync_count = target_level_stable_sync_count,
+    implicit_residual_d2h_count = as.integer(sum(
+      batch_records$implicit_residual_d2h_count
+    )),
+    all_output_slot_leases_released = all(
+      setup_records$output_slot_state_after_release == "free" &
+        !setup_records$output_slot_leased_after_release &
+        batch_records$output_slot_release_count == 1L &
+        !batch_records$output_slot_leased_after_release
+    ),
+    invalid_output_init_count = as.integer(sum(
+      batch_records$invalid_output_init_count
+    )),
+    cpu_fallback_count = as.integer(sum(batch_records$cpu_fallback_count)),
+    unknown_fallback_count = as.integer(sum(
+      batch_records$unknown_fallback_count
+    )),
+    approximate_backend_count = as.integer(sum(
+      target_records$approximate_backend
+    )),
+    qr_checkpoint_record_count = as.integer(sum(
+      batch_records$qr_checkpoint_record_count
+    )),
+    qr_checkpoint_wait_count = as.integer(sum(
+      batch_records$qr_checkpoint_wait_count
+    )),
+    svd_checkpoint_record_count = as.integer(sum(
+      batch_records$svd_checkpoint_record_count
+    )),
+    svd_checkpoint_wait_count = as.integer(sum(
+      batch_records$svd_checkpoint_wait_count
+    )),
+    max_residual_abs_diff = max(target_records$residual_max_abs_diff),
+    max_residual_relative_l2_diff =
+      max(target_records$residual_relative_l2_diff),
+    max_fitted_abs_diff = max(target_records$fitted_max_abs_diff),
+    max_fitted_relative_l2_diff =
+      max(target_records$fitted_relative_l2_diff)
+  )
+  expected <- list(
+    setup_count = 44L, target_count = 270L,
+    penalty_root_matrix_count = 159L, penalty_root_row_count = 1424L,
+    H_root_matrix_count = 0L,
+    planned_cholesky_count = 172L, planned_qr_count = 31L,
+    planned_svd_count = 67L, executed_cholesky_count = 172L,
+    executed_qr_count = 31L, executed_svd_count = 67L,
+    cholesky_to_svd_count = 0L, qr_to_svd_count = 0L,
+    true_batched_target_count = 160L, cholesky_single_target_count = 12L,
+    whole_batch_true_batched_count = 5L,
+    stable_not_implemented_count = 0L, stable_reroute_count = 0L,
+    non_ok_status_count = 0L, root_rank_mismatch_count = 0L,
+    aggregate_penalty_factor_count = 67L,
+    aggregate_svd_b_build_count = 134L,
+    aggregate_penalty_root_rank_mismatch_count = 0L,
+    aggregate_penalty_root_pivot_mismatch_count = 0L,
+    aggregate_penalty_root_d2h_count = 0L,
+    aggregate_penalty_root_d2h_bytes = 0,
+    workspace_grow_count_after_warmup = 0L,
+    stable_workspace_grow_count_after_warmup = 0L,
+    per_target_allocation_count_after_warmup = 0L,
+    per_target_handle_create_count = 0L,
+    cuda_device_synchronize_count = 0L,
+    target_level_stable_sync_count = 0L,
+    implicit_residual_d2h_count = 0L,
+    all_output_slot_leases_released = TRUE,
+    invalid_output_init_count = 44L, cpu_fallback_count = 0L,
+    unknown_fallback_count = 0L, approximate_backend_count = 0L
+  )
+  if (!identical(summary[names(expected)], expected)) {
+    stop("Phase 3C iteration exact aggregate gate failed", call. = FALSE)
+  }
+  summary
+}
+
+fastkpc_run_full_cuda_fixed_sp_phase3c_iteration <- function(
+    phase2_dir, census_dir, prepared_dir, data_path, device_id = 0L) {
+  required_functions <- c(
+    "fixed_sp_cuda_runtime_create", "fixed_sp_cuda_runtime_reserve",
+    "fixed_sp_cuda_runtime_info", "fixed_sp_cuda_runtime_free",
+    "fixed_sp_cuda_prepared_create", "fixed_sp_cuda_prepared_info",
+    "fixed_sp_cuda_prepared_free", "fixed_sp_cuda_solve_batch",
+    "fixed_sp_cuda_residual_info", "fixed_sp_cuda_materialize_shadow",
+    "fixed_sp_cuda_residual_release", "fixed_sp_cuda_residual_free",
+    "fastkpc_mgcv_magic_fixed_sp_from_prepared"
+  )
+  missing <- required_functions[!vapply(
+    required_functions, exists, logical(1L), mode = "function",
+    inherits = TRUE
+  )]
+  if (length(missing) != 0L) {
+    stop(
+      "Phase 3C CUDA API is unavailable: ", paste(missing, collapse = ", "),
+      call. = FALSE
+    )
+  }
+  validated_paths <- fastkpc_full_cuda_fixed_sp_phase3b_validate_paths(
+    phase2_dir, census_dir, prepared_dir, data_path
+  )
+  phase2_dir <- validated_paths$phase2_dir
+  census_dir <- validated_paths$census_dir
+  prepared_dir <- validated_paths$prepared_dir
+  data_path <- validated_paths$data_path
+  if (typeof(device_id) != "integer" || length(device_id) != 1L ||
+      is.object(device_id) || !is.null(attributes(device_id)) ||
+      is.na(device_id) || device_id < 0L) {
+    stop("Phase 3C device_id must be one non-negative integer",
+         call. = FALSE)
+  }
+
+  catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
+    phase2_dir, census_dir, prepared_dir, data_path
+  )
+  iteration <- fastkpc_full_cuda_fixed_sp_scope(catalog, "iteration")
+  batches <- fastkpc_full_cuda_fixed_sp_batches(catalog, iteration)
+  setup_keys <- names(batches)
+  if (length(setup_keys) < 1L ||
+      !identical(setup_keys, sort(setup_keys, method = "radix")) ||
+      anyDuplicated(setup_keys)) {
+    stop("Phase 3C iteration PreparedSKey order is not canonical",
+         call. = FALSE)
+  }
+  ordered_target_keys <- unlist(lapply(batches, function(batch) {
+    as.character(batch$target_rows$residual_key_sha256)
+  }), use.names = FALSE)
+  if (anyDuplicated(ordered_target_keys)) {
+    stop("Phase 3C iteration target-key order is not canonical",
+         call. = FALSE)
+  }
+  iteration_subset_hash <- catalog$catalog_contract$iteration_subset_hash
+  catalog_records <- data.frame(
+    scope = "iteration",
+    authenticated = TRUE,
+    catalog_open_count = 1L,
+    setup_count = as.integer(length(batches)),
+    target_count = as.integer(sum(vapply(
+      batches, function(batch) nrow(batch$target_rows), integer(1L)
+    ))),
+    iteration_subset_hash = iteration_subset_hash,
+    ordered_setup_key_digest =
+      fastkpc_full_cuda_census_key_set_hash(setup_keys),
+    ordered_target_key_digest =
+      fastkpc_full_cuda_census_key_set_hash(ordered_target_keys),
+    stringsAsFactors = FALSE
+  )
+
+  dtos <- lapply(batches, function(batch) {
+    fastkpc_full_cuda_fixed_sp_native_dto(batch$setup)
+  })
+  native_batches <- lapply(seq_along(batches), function(index) {
+    fastkpc_full_cuda_fixed_sp_native_batch(
+      batches[[index]], dtos[[index]]
+    )
+  })
+  names(dtos) <- names(native_batches) <- setup_keys
+  max_n <- max(vapply(dtos, `[[`, integer(1L), "n"))
+  max_q <- max(vapply(dtos, `[[`, integer(1L), "null_dim"))
+  max_targets <- max(vapply(
+    native_batches, `[[`, integer(1L), "target_count"
+  ))
+  max_penalties <- max(vapply(dtos, `[[`, integer(1L), "penalty_count"))
+  max_augmented_rows <- max(vapply(dtos, function(dto) {
+    as.integer(dto$n + sum(dto$penalty_ranks))
+  }, integer(1L)))
+  if (!identical(max_augmented_rows, 407L)) {
+    stop("Phase 3C logical augmented-row reserve must equal 407",
+         call. = FALSE)
+  }
+
+  runtime <- NULL
+  runtime_freed <- FALSE
+  runtime_cleanup_operations <- list(
+    token_release = list(
+      needed = function() FALSE,
+      run = function() invisible(NULL)
+    ),
+    token_free = list(
+      needed = function() FALSE,
+      run = function() invisible(NULL)
+    ),
+    handle_free = list(
+      needed = function() FALSE,
+      run = function() invisible(NULL)
+    ),
+    runtime_free = list(
+      needed = function() !is.null(runtime) && !runtime_freed,
+      run = function() {
+        fixed_sp_cuda_runtime_free(runtime)
+        runtime_freed <<- TRUE
+        runtime <<- NULL
+      }
+    )
+  )
+
+  iteration_result <-
+    fastkpc_full_cuda_fixed_sp_phase3b_run_cleanup_scope(
+      body = {
+        runtime <- fixed_sp_cuda_runtime_create(device_id)
+        runtime_created <- fixed_sp_cuda_runtime_info(runtime)
+        fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
+          runtime_created, "Phase 3C runtime-created info"
+        )
+        fixed_sp_cuda_runtime_reserve(
+          runtime, max_n, max_q, max_targets, max_penalties,
+          max_augmented_rows
+        )
+        runtime_reserved <- fixed_sp_cuda_runtime_info(runtime)
+        fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
+          runtime_reserved, "Phase 3C workspace-reserved info"
+        )
+        reserve_count_delta <-
+          fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+            runtime_created, runtime_reserved, "workspace_reserve_count",
+            "Phase 3C runtime reserve"
+          )
+        if (runtime_created$workspace_reserve_count != 0L ||
+            reserve_count_delta != 1L ||
+            runtime_created$cuda_device_synchronize_count != 0L ||
+            runtime_reserved$cuda_device_synchronize_count != 0L ||
+            !isTRUE(runtime_reserved$cublas_user_workspace_installed) ||
+            runtime_reserved$cublas_workspace_alignment < 256 ||
+            runtime_reserved$augmented_workspace_bytes !=
+              as.double(8 * 415L * 64L) ||
+            runtime_reserved$aggregate_factor_workspace_bytes !=
+              as.double(8 * (64L * 64L + 2L * 64L))) {
+          stop("Phase 3C runtime create/reserve lifecycle is invalid",
+               call. = FALSE)
+        }
+
+        run_batch <- function(batch_index) {
+          setup_key <- setup_keys[[batch_index]]
+          batch <- batches[[setup_key]]
+          dto <- dtos[[setup_key]]
+          native <- native_batches[[setup_key]]
+          target_count <- native$target_count
+          handle <- NULL
+          token <- NULL
+          token_released <- FALSE
+          token_freed <- FALSE
+          handle_freed <- FALSE
+          prepared_created <- NULL
+          prepared_before_solve <- NULL
+          prepared_after_solve <- NULL
+          prepared_after_release <- NULL
+          pre_shadow_info <- NULL
+          post_shadow_info <- NULL
+          released_info <- NULL
+          shadow <- NULL
+          rank_reference_materialize_elapsed_ms <- 0
+          solve_elapsed_ms <- NA_real_
+          shadow_materialize_elapsed_ms <- NA_real_
+          cpu_aggregate_penalty_root_rank <-
+            rep(NA_integer_, target_count)
+          cpu_aggregate_penalty_root_pivot <-
+            rep(list(integer()), target_count)
+          cpu_aggregate_effective_rank <- rep(NA_integer_, target_count)
+          cpu_aggregate_effective_rank_threshold <-
+            rep(NA_real_, target_count)
+          cpu_aggregate_sigma_max <- rep(NA_real_, target_count)
+          expected_shadow_calls <- 0L
+          expected_shadow_targets <- 0L
+          expected_shadow_bytes <- 0
+          route_status_conservation_exact <- FALSE
+
+          cleanup_operations <- list(
+            token_release = list(
+              needed = function() !is.null(token) && !token_released,
+              run = function() {
+                fixed_sp_cuda_residual_release(token)
+                token_released <<- TRUE
+                released_info <<- fixed_sp_cuda_residual_info(token)
+                if (!is.null(post_shadow_info)) {
+                  fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info(
+                    released_info, native, dto, expected_shadow_calls,
+                    expected_shadow_targets, expected_shadow_bytes, 1L,
+                    paste("Phase 3C batch", batch_index, "released info")
+                  )
+                  release_fields <- setdiff(
+                    names(post_shadow_info), "output_slot_release_count"
+                  )
+                  if (!identical(
+                        post_shadow_info[release_fields],
+                        released_info[release_fields]
+                      )) {
+                    stop("Phase 3C token release changed solve diagnostics",
+                         call. = FALSE)
+                  }
+                }
+                prepared_after_release <<- fixed_sp_cuda_prepared_info(handle)
+                fastkpc_full_cuda_fixed_sp_phase3c_validate_prepared_info(
+                  prepared_after_release, dto, 0L,
+                  paste(
+                    "Phase 3C batch", batch_index,
+                    "released prepared info"
+                  )
+                )
+                if (!is.null(prepared_before_solve) &&
+                    !is.null(prepared_after_solve)) {
+                  fastkpc_full_cuda_fixed_sp_phase3b_validate_prepared_snapshots(
+                    prepared_before_solve, prepared_after_solve,
+                    prepared_after_release, setup_key,
+                    as.double(dto$coefficient_dim) * as.double(target_count)
+                  )
+                }
+              }
+            ),
+            token_free = list(
+              needed = function() !is.null(token) && !token_freed,
+              run = function() {
+                fixed_sp_cuda_residual_free(token)
+                token_freed <<- TRUE
+                token_released <<- TRUE
+                token <<- NULL
+              }
+            ),
+            handle_free = list(
+              needed = function() !is.null(handle) && !handle_freed,
+              run = function() {
+                fixed_sp_cuda_prepared_free(handle)
+                handle_freed <<- TRUE
+                handle <<- NULL
+              }
+            ),
+            runtime_free = list(
+              needed = function() FALSE,
+              run = function() invisible(NULL)
+            )
+          )
+
+          runtime_before_solve <- NULL
+          runtime_after_solve <- NULL
+          fastkpc_full_cuda_fixed_sp_phase3b_run_cleanup_scope(
+            body = {
+              handle <- fixed_sp_cuda_prepared_create(runtime, dto)
+              prepared_created <- fixed_sp_cuda_prepared_info(handle)
+              fastkpc_full_cuda_fixed_sp_phase3c_validate_prepared_info(
+                prepared_created, dto, 0L,
+                paste("Phase 3C batch", batch_index, "created prepared info")
+              )
+              if (prepared_created$setup_h2d_upload_count != 1L ||
+                  isTRUE(prepared_created$output_slot_leased)) {
+                stop("Phase 3C prepared setup/upload lifecycle is invalid",
+                     call. = FALSE)
+              }
+
+              prepared_before_solve <- fixed_sp_cuda_prepared_info(handle)
+              fastkpc_full_cuda_fixed_sp_phase3c_validate_prepared_info(
+                prepared_before_solve, dto, 0L,
+                paste("Phase 3C batch", batch_index, "pre-solve prepared info")
+              )
+
+              runtime_before_solve <- fixed_sp_cuda_runtime_info(runtime)
+              fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
+                runtime_before_solve,
+                paste("Phase 3C batch", batch_index, "runtime before")
+              )
+              solve_start <- proc.time()[["elapsed"]]
+              token <- fixed_sp_cuda_solve_batch(
+                handle, native$Y, native$SP, native$planned_route,
+                native$target_keys, outputs = c("fitted", "residuals")
+              )
+              solve_elapsed_ms <- as.double(
+                (proc.time()[["elapsed"]] - solve_start) * 1000
+              )
+              pre_shadow_info <- fixed_sp_cuda_residual_info(token)
+              pre_validation <-
+                fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info(
+                  pre_shadow_info, native, dto, 0L, 0L, 0, 0L,
+                  paste("Phase 3C batch", batch_index, "pre-shadow info")
+                )
+              route_status_conservation_exact <-
+                pre_validation$route_status_conservation_exact
+              runtime_after_solve <- fixed_sp_cuda_runtime_info(runtime)
+              fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
+                runtime_after_solve,
+                paste("Phase 3C batch", batch_index, "runtime after")
+              )
+              prepared_after_solve <- fixed_sp_cuda_prepared_info(handle)
+              fastkpc_full_cuda_fixed_sp_phase3c_validate_prepared_info(
+                prepared_after_solve, dto, 0L,
+                paste("Phase 3C batch", batch_index, "post-solve prepared info")
+              )
+              if (!isTRUE(prepared_after_solve$output_slot_leased)) {
+                stop("Phase 3C solve did not retain its output-slot lease",
+                     call. = FALSE)
+              }
+
+              svd_indices <- which(
+                pre_shadow_info$executed_route == "AUGMENTED_SVD"
+              )
+              for (target_index in svd_indices) {
+                aggregate_reference <-
+                  fastkpc_full_cuda_fixed_sp_phase3c_cpu_aggregate_shadow(
+                    dto, native$SP[, target_index]
+                  )
+                cpu_aggregate_penalty_root_rank[[target_index]] <-
+                  aggregate_reference$root_rank
+                cpu_aggregate_penalty_root_pivot[[target_index]] <-
+                  aggregate_reference$root_pivot
+                cpu_aggregate_effective_rank[[target_index]] <-
+                  aggregate_reference$effective_rank
+                cpu_aggregate_effective_rank_threshold[[target_index]] <-
+                  aggregate_reference$effective_rank_threshold
+                cpu_aggregate_sigma_max[[target_index]] <-
+                  aggregate_reference$sigma_max
+              }
+
+              expected_shadow_calls <- 1L
+              expected_shadow_targets <- target_count
+              expected_shadow_bytes <-
+                8 * as.double(target_count) * as.double(2L * dto$n)
+              shadow_start <- proc.time()[["elapsed"]]
+              shadow <- fixed_sp_cuda_materialize_shadow(
+                token, outputs = c("fitted", "residuals")
+              )
+              shadow_materialize_elapsed_ms <- as.double(
+                (proc.time()[["elapsed"]] - shadow_start) * 1000
+              )
+              shadow_clean <- is.list(shadow) &&
+                identical(names(shadow), c("fitted", "residuals")) &&
+                is.matrix(shadow$fitted) && is.double(shadow$fitted) &&
+                identical(dim(shadow$fitted), c(dto$n, target_count)) &&
+                all(is.finite(shadow$fitted)) &&
+                is.matrix(shadow$residuals) && is.double(shadow$residuals) &&
+                identical(dim(shadow$residuals), c(dto$n, target_count)) &&
+                all(is.finite(shadow$residuals))
+              if (!isTRUE(shadow_clean)) {
+                stop("Phase 3C explicit oracle shadow is malformed",
+                     call. = FALSE)
+              }
+              post_shadow_info <- fixed_sp_cuda_residual_info(token)
+              fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info(
+                post_shadow_info, native, dto, expected_shadow_calls,
+                expected_shadow_targets, expected_shadow_bytes, 0L,
+                paste("Phase 3C batch", batch_index, "post-shadow info")
+              )
+              shadow_fields <- c(
+                "shadow_materialize_call_count",
+                "shadow_materialize_target_count", "shadow_d2h_bytes"
+              )
+              unchanged_fields <- setdiff(names(pre_shadow_info), shadow_fields)
+              if (!identical(
+                    pre_shadow_info[unchanged_fields],
+                    post_shadow_info[unchanged_fields]
+                  )) {
+                stop("Phase 3C explicit shadow changed solve diagnostics",
+                     call. = FALSE)
+              }
+              NULL
+            },
+            operations = cleanup_operations,
+            context = paste("Phase 3C batch", batch_index, "cleanup")
+          )
+
+          if (is.null(runtime_before_solve) || is.null(runtime_after_solve) ||
+              is.null(released_info) || is.null(prepared_after_release)) {
+            stop("Phase 3C batch lifecycle evidence is incomplete",
+                 call. = FALSE)
+          }
+          workspace_grow_delta <-
+            fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+              runtime_before_solve, runtime_after_solve,
+              "workspace_grow_count", paste("Phase 3C batch", batch_index)
+            )
+          stable_workspace_grow_delta <-
+            fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+              runtime_before_solve, runtime_after_solve,
+              "stable_workspace_grow_count",
+              paste("Phase 3C batch", batch_index)
+            )
+          synchronize_delta <-
+            fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+              runtime_before_solve, runtime_after_solve,
+              "cuda_device_synchronize_count",
+              paste("Phase 3C batch", batch_index)
+            )
+          checkpoint_fields <- c(
+            "cholesky_factor_checkpoint_record_count",
+            "cholesky_factor_checkpoint_wait_count",
+            "cholesky_solve_checkpoint_record_count",
+            "cholesky_solve_checkpoint_wait_count",
+            "qr_checkpoint_record_count", "qr_checkpoint_wait_count",
+            "svd_checkpoint_record_count", "svd_checkpoint_wait_count"
+          )
+          checkpoint_deltas <- vapply(checkpoint_fields, function(field) {
+            fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+              runtime_before_solve, runtime_after_solve, field,
+              paste("Phase 3C batch", batch_index)
+            )
+          }, integer(1L))
+          if (workspace_grow_delta != 0L ||
+              stable_workspace_grow_delta != 0L ||
+              synchronize_delta != 0L) {
+            stop("Phase 3C batch grew workspace or synchronized",
+                 call. = FALSE)
+          }
+
+          residual_max_abs <- double(target_count)
+          residual_relative_l2 <- double(target_count)
+          fitted_max_abs <- double(target_count)
+          fitted_relative_l2 <- double(target_count)
+          fitted_numeric_hash <- character(target_count)
+          residual_numeric_hash <- character(target_count)
+          oracle_fitted_hash <- character(target_count)
+          oracle_residual_hash <- character(target_count)
+          authenticated_fitted_hash <-
+            as.character(batch$target_rows$fitted_hash)
+          authenticated_residual_hash <-
+            as.character(batch$target_rows$residual_hash)
+          oracle_fitted_hash_exact <- logical(target_count)
+          oracle_residual_hash_exact <- logical(target_count)
+          outputs_all_finite <- logical(target_count)
+          approximate_backend <- logical(target_count)
+          oracle_call_count <- integer(target_count)
+          numeric_reference <- rep("mgcv-fixed-sp", target_count)
+          for (target_index in seq_len(target_count)) {
+            outputs_all_finite[[target_index]] <-
+              all(is.finite(shadow$fitted[, target_index])) &&
+              all(is.finite(shadow$residuals[, target_index]))
+            if (!isTRUE(outputs_all_finite[[target_index]])) {
+              stop("Phase 3C target output is nonfinite: ",
+                   native$target_keys[[target_index]], call. = FALSE)
+            }
+            oracle_call_count[[target_index]] <- 1L
+            oracle <- fastkpc_mgcv_magic_fixed_sp_from_prepared(
+              prepared_setup = batch$setup,
+              target_state = list(
+                row = batch$target_rows[target_index, , drop = FALSE],
+                y = as.numeric(native$Y[, target_index])
+              )
+            )
+            approximate_backend[[target_index]] <- !(
+              identical(oracle$backend_family, "mgcvExtractCPU") &&
+                identical(
+                  oracle$mode, "prepared-s-fixed-sp-mgcv-reference"
+                ) && isTRUE(oracle$authoritative)
+            )
+            residual_errors <-
+              fastkpc_full_cuda_fixed_sp_phase3b_numeric_errors(
+                shadow$residuals[, target_index], oracle$residuals,
+                paste(
+                  "Phase 3C residual target",
+                  native$target_keys[[target_index]]
+                )
+              )
+            fitted_errors <-
+              fastkpc_full_cuda_fixed_sp_phase3b_numeric_errors(
+                shadow$fitted[, target_index], oracle$fitted,
+                paste(
+                  "Phase 3C fitted target",
+                  native$target_keys[[target_index]]
+                )
+              )
+            errors <- c(residual_errors, fitted_errors)
+            if (any(!is.finite(errors)) || any(errors >= 1e-7)) {
+              stop(
+                "Phase 3C target failed route numeric parity: ",
+                native$target_keys[[target_index]], "; reference=",
+                numeric_reference[[target_index]], "; errors=",
+                paste(format(errors, digits = 17L), collapse = ","),
+                call. = FALSE
+              )
+            }
+            residual_max_abs[[target_index]] <-
+              residual_errors[["max_abs"]]
+            residual_relative_l2[[target_index]] <-
+              residual_errors[["relative_l2"]]
+            fitted_max_abs[[target_index]] <- fitted_errors[["max_abs"]]
+            fitted_relative_l2[[target_index]] <-
+              fitted_errors[["relative_l2"]]
+            fitted_numeric_hash[[target_index]] <-
+              fastkpc_full_cuda_census_metadata_hash(
+                shadow$fitted[, target_index]
+              )
+            residual_numeric_hash[[target_index]] <-
+              fastkpc_full_cuda_census_metadata_hash(
+                shadow$residuals[, target_index]
+              )
+            oracle_fitted_hash[[target_index]] <-
+              fastkpc_full_cuda_census_metadata_hash(oracle$fitted)
+            oracle_residual_hash[[target_index]] <-
+              fastkpc_full_cuda_census_metadata_hash(oracle$residuals)
+            oracle_fitted_hash_exact[[target_index]] <- identical(
+              oracle_fitted_hash[[target_index]],
+              authenticated_fitted_hash[[target_index]]
+            )
+            oracle_residual_hash_exact[[target_index]] <- identical(
+              oracle_residual_hash[[target_index]],
+              authenticated_residual_hash[[target_index]]
+            )
+            if (!isTRUE(oracle_fitted_hash_exact[[target_index]]) ||
+                !isTRUE(oracle_residual_hash_exact[[target_index]]) ||
+                isTRUE(approximate_backend[[target_index]])) {
+              stop("Phase 3C oracle authentication failed: ",
+                   native$target_keys[[target_index]], call. = FALSE)
+            }
+          }
+
+          svd_executed <-
+            pre_shadow_info$executed_route == "AUGMENTED_SVD"
+          aggregate_penalty_root_rank_exact <- rep(NA, target_count)
+          aggregate_penalty_root_pivot_exact <- rep(NA, target_count)
+          aggregate_effective_rank_exact <- rep(NA, target_count)
+          aggregate_penalty_root_rank_exact[svd_executed] <-
+            pre_shadow_info$aggregate_penalty_root_rank[svd_executed] ==
+              cpu_aggregate_penalty_root_rank[svd_executed]
+          aggregate_penalty_root_pivot_exact[svd_executed] <- vapply(
+            which(svd_executed), function(target_index) {
+              identical(
+                pre_shadow_info$aggregate_penalty_root_pivot[[target_index]],
+                cpu_aggregate_penalty_root_pivot[[target_index]]
+              )
+            }, logical(1L)
+          )
+          aggregate_effective_rank_exact[svd_executed] <-
+            pre_shadow_info$effective_rank[svd_executed] ==
+              cpu_aggregate_effective_rank[svd_executed]
+          if (any(!aggregate_penalty_root_rank_exact[svd_executed]) ||
+              any(!aggregate_penalty_root_pivot_exact[svd_executed]) ||
+              any(!aggregate_effective_rank_exact[svd_executed])) {
+            stop("Phase 3C GPU/CPU aggregate SVD diagnostics mismatch",
+                 call. = FALSE)
+          }
+
+          target_records <- data.frame(
+            prepared_s_key_sha256 = setup_key,
+            batch_ordinal = as.integer(batch_index),
+            target_ordinal = seq_len(target_count),
+            residual_key_sha256 = native$target_keys,
+            target = as.integer(batch$target_rows$target),
+            null_dim = rep.int(dto$null_dim, target_count),
+            phase1_condition = as.double(batch$condition),
+            phase1_coefficient_rank =
+              as.integer(batch$target_rows$coefficient_rank),
+            planned_route = pre_shadow_info$planned_route,
+            authenticated_planned_route = native$planned_route,
+            executed_route = pre_shadow_info$executed_route,
+            reroute_reason = pre_shadow_info$reroute_reason,
+            solver_status = pre_shadow_info$solver_status,
+            target_true_batched = pre_shadow_info$target_true_batched,
+            qr_rank = pre_shadow_info$qr_rank,
+            geqrf_info = pre_shadow_info$geqrf_info,
+            ormqr_info = pre_shadow_info$ormqr_info,
+            effective_rank = pre_shadow_info$effective_rank,
+            sigma_max = pre_shadow_info$sigma_max,
+            smallest_retained_sigma =
+              pre_shadow_info$smallest_retained_sigma,
+            svd_info = pre_shadow_info$svd_info,
+            aggregate_penalty_root_rank =
+              pre_shadow_info$aggregate_penalty_root_rank,
+            aggregate_penalty_root_pivot = I(lapply(
+              pre_shadow_info$aggregate_penalty_root_pivot, as.integer
+            )),
+            aggregate_factor_call_count =
+              pre_shadow_info$aggregate_factor_call_count,
+            aggregate_b_build_count =
+              pre_shadow_info$aggregate_b_build_count,
+            aggregate_dstop = pre_shadow_info$aggregate_dstop,
+            cpu_aggregate_penalty_root_rank =
+              cpu_aggregate_penalty_root_rank,
+            cpu_aggregate_penalty_root_pivot = I(lapply(
+              cpu_aggregate_penalty_root_pivot, as.integer
+            )),
+            cpu_aggregate_effective_rank = cpu_aggregate_effective_rank,
+            cpu_aggregate_effective_rank_threshold =
+              cpu_aggregate_effective_rank_threshold,
+            cpu_aggregate_sigma_max = cpu_aggregate_sigma_max,
+            aggregate_penalty_root_rank_exact =
+              aggregate_penalty_root_rank_exact,
+            aggregate_penalty_root_pivot_exact =
+              aggregate_penalty_root_pivot_exact,
+            aggregate_effective_rank_exact = aggregate_effective_rank_exact,
+            numeric_reference = numeric_reference,
+            outputs_all_finite = outputs_all_finite,
+            residual_max_abs_diff = residual_max_abs,
+            residual_relative_l2_diff = residual_relative_l2,
+            fitted_max_abs_diff = fitted_max_abs,
+            fitted_relative_l2_diff = fitted_relative_l2,
+            fitted_numeric_hash = fitted_numeric_hash,
+            residual_numeric_hash = residual_numeric_hash,
+            oracle_call_count = oracle_call_count,
+            oracle_fitted_hash = oracle_fitted_hash,
+            oracle_residual_hash = oracle_residual_hash,
+            authenticated_fitted_hash = authenticated_fitted_hash,
+            authenticated_residual_hash = authenticated_residual_hash,
+            oracle_fitted_hash_exact = oracle_fitted_hash_exact,
+            oracle_residual_hash_exact = oracle_residual_hash_exact,
+            approximate_backend = approximate_backend,
+            stringsAsFactors = FALSE
+          )
+          setup_record <- data.frame(
+            prepared_s_key_sha256 = setup_key,
+            batch_ordinal = as.integer(batch_index),
+            prepared_handle_create_count = 1L,
+            prepared_handle_free_count = 1L,
+            setup_h2d_upload_count = prepared_created$setup_h2d_upload_count,
+            setup_h2d_bytes = prepared_created$setup_h2d_bytes,
+            penalty_root_build_count =
+              prepared_created$penalty_root_build_count,
+            penalty_root_rank_mismatch_count =
+              prepared_created$penalty_root_rank_mismatch_count,
+            penalty_root_bytes = prepared_created$penalty_root_bytes,
+            penalty_root_build_ms = prepared_created$penalty_root_build_ms,
+            penalty_root_matrix_count =
+              prepared_created$penalty_root_matrix_count,
+            penalty_root_row_count =
+              prepared_created$penalty_root_row_count,
+            H_root_matrix_count = prepared_created$H_root_matrix_count,
+            H_root_rank = prepared_created$H_root_rank,
+            rank_reference_materialize_call_count = 0L,
+            rank_reference_materialize_elapsed_ms =
+              rank_reference_materialize_elapsed_ms,
+            setup_shadow_d2h_count =
+              prepared_before_solve$setup_shadow_d2h_count,
+            setup_shadow_d2h_bytes =
+              prepared_before_solve$setup_shadow_d2h_bytes,
+            coefficient_output_capacity =
+              prepared_created$coefficient_output_capacity,
+            prepared_generation = prepared_created$generation,
+            output_slot_state_before_solve =
+              prepared_before_solve$output_slot_state,
+            output_slot_state_after_solve =
+              prepared_after_solve$output_slot_state,
+            output_slot_state_after_release =
+              prepared_after_release$output_slot_state,
+            output_slot_leased_after_release =
+              prepared_after_release$output_slot_leased,
+            output_slot_poison_reason_empty = identical(
+              c(
+                prepared_before_solve$output_slot_poison_reason,
+                prepared_after_solve$output_slot_poison_reason,
+                prepared_after_release$output_slot_poison_reason
+              ),
+              rep("", 3L)
+            ),
+            stringsAsFactors = FALSE
+          )
+          batch_record <- data.frame(
+            prepared_s_key_sha256 = setup_key,
+            batch_ordinal = as.integer(batch_index),
+            target_count = pre_shadow_info$target_count,
+            batch_call_count = pre_shadow_info$batch_call_count,
+            native_batch_call = pre_shadow_info$native_batch_call,
+            true_batched_kernel = pre_shadow_info$true_batched_kernel,
+            true_batched_subgroup_count =
+              pre_shadow_info$true_batched_subgroup_count,
+            true_batched_attempted_target_count =
+              pre_shadow_info$true_batched_attempted_target_count,
+            true_batched_target_count =
+              pre_shadow_info$true_batched_target_count,
+            cholesky_single_target_count =
+              pre_shadow_info$cholesky_single_target_count,
+            potrf_batched_call_count =
+              pre_shadow_info$potrf_batched_call_count,
+            potrs_batched_call_count =
+              pre_shadow_info$potrs_batched_call_count,
+            planned_cholesky_target_count =
+              pre_shadow_info$planned_cholesky_target_count,
+            planned_qr_target_count =
+              pre_shadow_info$planned_qr_target_count,
+            planned_svd_target_count =
+              pre_shadow_info$planned_svd_target_count,
+            executed_cholesky_target_count =
+              pre_shadow_info$executed_cholesky_target_count,
+            executed_qr_target_count =
+              pre_shadow_info$executed_qr_target_count,
+            executed_svd_target_count =
+              pre_shadow_info$executed_svd_target_count,
+            stable_reroute_count = pre_shadow_info$stable_reroute_count,
+            cholesky_to_svd_count = pre_shadow_info$cholesky_to_svd_count,
+            qr_to_svd_count = pre_shadow_info$qr_to_svd_count,
+            aggregate_penalty_factor_count =
+              pre_shadow_info$aggregate_penalty_factor_count,
+            aggregate_svd_b_build_count =
+              pre_shadow_info$aggregate_svd_b_build_count,
+            aggregate_penalty_root_d2h_count =
+              pre_shadow_info$aggregate_penalty_root_d2h_count,
+            aggregate_penalty_root_d2h_bytes =
+              pre_shadow_info$aggregate_penalty_root_d2h_bytes,
+            target_batch_h2d_call_count =
+              pre_shadow_info$target_batch_h2d_call_count,
+            target_h2d_copy_count = pre_shadow_info$target_h2d_copy_count,
+            target_h2d_bytes = pre_shadow_info$target_h2d_bytes,
+            rhs_device_build_count = pre_shadow_info$rhs_device_build_count,
+            full_cuda_data_plane = pre_shadow_info$full_cuda_data_plane,
+            invalid_output_init_count =
+              pre_shadow_info$invalid_output_init_count,
+            coefficient_batch_finalize_call_count =
+              pre_shadow_info$coefficient_batch_finalize_call_count,
+            fitted_batch_finalize_call_count =
+              pre_shadow_info$fitted_batch_finalize_call_count,
+            residual_rss_batch_finalize_call_count =
+              pre_shadow_info$residual_rss_batch_finalize_call_count,
+            per_target_output_finalize_call_count =
+              pre_shadow_info$per_target_output_finalize_call_count,
+            batch_output_finalized_target_count =
+              pre_shadow_info$batch_output_finalized_target_count,
+            canonical_output_order_exact =
+              pre_shadow_info$canonical_output_order_exact,
+            target_keys_exact = identical(
+              pre_shadow_info$target_keys, native$target_keys
+            ),
+            route_status_conservation_exact =
+              route_status_conservation_exact,
+            resource_snapshot_captured =
+              pre_shadow_info$resource_snapshot_captured,
+            resource_instrumentation_version =
+              pre_shadow_info$resource_instrumentation_version,
+            resource_allocation_count_before_solve =
+              pre_shadow_info$resource_allocation_count_before_solve,
+            resource_allocation_count_after_solve =
+              pre_shadow_info$resource_allocation_count_after_solve,
+            resource_handle_create_count_before_solve =
+              pre_shadow_info$resource_handle_create_count_before_solve,
+            resource_handle_create_count_after_solve =
+              pre_shadow_info$resource_handle_create_count_after_solve,
+            cuda_device_allocation_count_during_solve =
+              pre_shadow_info$cuda_device_allocation_count_during_solve,
+            cuda_host_allocation_count_during_solve =
+              pre_shadow_info$cuda_host_allocation_count_during_solve,
+            stream_create_count_during_solve =
+              pre_shadow_info$stream_create_count_during_solve,
+            event_create_count_during_solve =
+              pre_shadow_info$event_create_count_during_solve,
+            cublas_handle_create_count_during_solve =
+              pre_shadow_info$cublas_handle_create_count_during_solve,
+            cusolver_handle_create_count_during_solve =
+              pre_shadow_info$cusolver_handle_create_count_during_solve,
+            per_target_allocation_count_after_warmup =
+              pre_shadow_info$per_target_allocation_count_after_warmup,
+            per_target_handle_create_count =
+              pre_shadow_info$per_target_handle_create_count,
+            workspace_grow_count_after_warmup = workspace_grow_delta,
+            stable_workspace_grow_count_after_warmup =
+              stable_workspace_grow_delta,
+            cuda_device_synchronize_count = synchronize_delta,
+            cholesky_factor_checkpoint_record_count = checkpoint_deltas[[
+              "cholesky_factor_checkpoint_record_count"
+            ]],
+            cholesky_factor_checkpoint_wait_count = checkpoint_deltas[[
+              "cholesky_factor_checkpoint_wait_count"
+            ]],
+            cholesky_solve_checkpoint_record_count = checkpoint_deltas[[
+              "cholesky_solve_checkpoint_record_count"
+            ]],
+            cholesky_solve_checkpoint_wait_count = checkpoint_deltas[[
+              "cholesky_solve_checkpoint_wait_count"
+            ]],
+            qr_checkpoint_record_count = checkpoint_deltas[[
+              "qr_checkpoint_record_count"
+            ]],
+            qr_checkpoint_wait_count = checkpoint_deltas[[
+              "qr_checkpoint_wait_count"
+            ]],
+            svd_checkpoint_record_count = checkpoint_deltas[[
+              "svd_checkpoint_record_count"
+            ]],
+            svd_checkpoint_wait_count = checkpoint_deltas[[
+              "svd_checkpoint_wait_count"
+            ]],
+            implicit_residual_d2h_count =
+              released_info$implicit_residual_d2h_count,
+            cpu_fallback_count = pre_shadow_info$cpu_fallback_count,
+            unknown_fallback_count = pre_shadow_info$unknown_fallback_count,
+            solve_elapsed_ms = solve_elapsed_ms,
+            pre_shadow_materialize_call_count =
+              pre_shadow_info$shadow_materialize_call_count,
+            pre_shadow_materialize_target_count =
+              pre_shadow_info$shadow_materialize_target_count,
+            pre_shadow_d2h_bytes = pre_shadow_info$shadow_d2h_bytes,
+            shadow_materialize_elapsed_ms = shadow_materialize_elapsed_ms,
+            post_shadow_materialize_call_count =
+              post_shadow_info$shadow_materialize_call_count,
+            post_shadow_materialize_target_count =
+              post_shadow_info$shadow_materialize_target_count,
+            post_shadow_d2h_bytes = post_shadow_info$shadow_d2h_bytes,
+            output_slot_release_count =
+              released_info$output_slot_release_count,
+            output_slot_leased_after_release =
+              prepared_after_release$output_slot_leased,
+            stringsAsFactors = FALSE
+          )
+          list(
+            setup_record = setup_record,
+            batch_record = batch_record,
+            target_records = target_records
+          )
+        }
+
+        batch_results <- lapply(seq_along(setup_keys), run_batch)
+        setup_records <- do.call(
+          rbind, lapply(batch_results, `[[`, "setup_record")
+        )
+        batch_records <- do.call(
+          rbind, lapply(batch_results, `[[`, "batch_record")
+        )
+        target_records <- do.call(
+          rbind, lapply(batch_results, `[[`, "target_records")
+        )
+        rownames(setup_records) <- NULL
+        rownames(batch_records) <- NULL
+        rownames(target_records) <- NULL
+
+        runtime_final <- fixed_sp_cuda_runtime_info(runtime)
+        fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
+          runtime_final, "Phase 3C final runtime info"
+        )
+        fastkpc_full_cuda_fixed_sp_phase3b_validate_runtime_identity(
+          runtime_created, runtime_reserved, runtime_final, device_id
+        )
+        final_workspace_delta <-
+          fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+            runtime_reserved, runtime_final, "workspace_grow_count",
+            "Phase 3C final runtime"
+          )
+        final_stable_workspace_delta <-
+          fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+            runtime_reserved, runtime_final, "stable_workspace_grow_count",
+            "Phase 3C final runtime"
+          )
+        final_synchronize_delta <-
+          fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+            runtime_reserved, runtime_final,
+            "cuda_device_synchronize_count", "Phase 3C final runtime"
+          )
+        checkpoint_fields <- c(
+          "cholesky_factor_checkpoint_record_count",
+          "cholesky_factor_checkpoint_wait_count",
+          "cholesky_solve_checkpoint_record_count",
+          "cholesky_solve_checkpoint_wait_count",
+          "qr_checkpoint_record_count", "qr_checkpoint_wait_count",
+          "svd_checkpoint_record_count", "svd_checkpoint_wait_count"
+        )
+        checkpoint_batch_fields <- checkpoint_fields
+        checkpoint_lifecycle_exact <- all(vapply(
+          seq_along(checkpoint_fields), function(index) {
+            field <- checkpoint_fields[[index]]
+            delta <- fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+              runtime_reserved, runtime_final, field,
+              "Phase 3C final runtime"
+            )
+            identical(
+              delta,
+              as.integer(sum(batch_records[[checkpoint_batch_fields[[index]]]]))
+            )
+          }, logical(1L)
+        ))
+        lifecycle_exact <-
+          runtime_final$workspace_reserve_count ==
+            runtime_reserved$workspace_reserve_count &&
+          isTRUE(runtime_final$cublas_user_workspace_installed) &&
+          runtime_final$cublas_workspace_alignment >= 256 &&
+          runtime_final$augmented_workspace_bytes ==
+            as.double(8 * 415L * 64L) &&
+          runtime_final$aggregate_factor_workspace_bytes ==
+            as.double(8 * (64L * 64L + 2L * 64L)) &&
+          final_workspace_delta ==
+            sum(batch_records$workspace_grow_count_after_warmup) &&
+          final_stable_workspace_delta ==
+            sum(batch_records$stable_workspace_grow_count_after_warmup) &&
+          final_synchronize_delta ==
+            sum(batch_records$cuda_device_synchronize_count) &&
+          isTRUE(checkpoint_lifecycle_exact)
+        if (!isTRUE(lifecycle_exact)) {
+          stop("Phase 3C runtime lifecycle does not match batch records",
+               call. = FALSE)
+        }
+        runtime_records <- do.call(rbind, list(
+          fastkpc_full_cuda_fixed_sp_phase3c_runtime_record(
+            "runtime-created", runtime_created
+          ),
+          fastkpc_full_cuda_fixed_sp_phase3c_runtime_record(
+            "workspace-reserved", runtime_reserved
+          ),
+          fastkpc_full_cuda_fixed_sp_phase3c_runtime_record(
+            "final", runtime_final
+          )
+        ))
+        rownames(runtime_records) <- NULL
+        summary <- fastkpc_full_cuda_fixed_sp_phase3c_summarize(
+          catalog_records, runtime_records, setup_records,
+          batch_records, target_records
+        )
+
+        list(
+          catalog_records = catalog_records,
+          runtime_records = runtime_records,
+          setup_records = setup_records,
+          batch_records = batch_records,
+          target_records = target_records,
+          summary = summary
+        )
+      },
+      operations = runtime_cleanup_operations,
+      context = "Phase 3C iteration cleanup"
     )
   iteration_result
 }

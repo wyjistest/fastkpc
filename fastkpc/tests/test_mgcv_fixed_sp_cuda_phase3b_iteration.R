@@ -465,7 +465,14 @@ cleanup_retry_evidence <- local({
       run = function() {
         state$order <- c(state$order, "token_release")
         state$release_attempts <- state$release_attempts + 1L
-        if (state$release_attempts == 1L) stop("retry release")
+        if (state$release_attempts == 1L) {
+          stop(structure(
+            list(message = "retry release", call = NULL),
+            class = c(
+              "fastkpc_phase3b_cleanup_retryable", "error", "condition"
+            )
+          ))
+        }
         state$released <- TRUE
       }
     ),
@@ -513,7 +520,81 @@ assert_true(
     ) &&
     identical(cleanup_retry_evidence$final_order,
               cleanup_retry_evidence$first_order),
-  "cleanup retries once, preserves order, and skips released ownership"
+  paste(
+    "explicitly retryable cleanup retries once, preserves order, and",
+    "skips released ownership"
+  )
+)
+
+cleanup_transition_terminal_evidence <- local({
+  state <- new.env(parent = emptyenv())
+  state$owned <- TRUE
+  state$release_attempts <- 0L
+  state$token_freed <- FALSE
+  state$handle_freed <- FALSE
+  state$runtime_freed <- FALSE
+  state$order <- character()
+  operations <- list(
+    token_release = list(
+      needed = function() state$owned,
+      run = function() {
+        state$order <- c(state$order, "token_release")
+        state$release_attempts <- state$release_attempts + 1L
+        state$owned <- FALSE
+        stop("terminal release after ownership transition", call. = FALSE)
+      }
+    ),
+    token_free = list(
+      needed = function() !state$token_freed,
+      run = function() {
+        state$order <- c(state$order, "token_free")
+        state$token_freed <- TRUE
+      }
+    ),
+    handle_free = list(
+      needed = function() !state$handle_freed,
+      run = function() {
+        state$order <- c(state$order, "handle_free")
+        state$handle_freed <- TRUE
+      }
+    ),
+    runtime_free = list(
+      needed = function() !state$runtime_freed,
+      run = function() {
+        state$order <- c(state$order, "runtime_free")
+        state$runtime_freed <- TRUE
+      }
+    )
+  )
+  error <- tryCatch(
+    fastkpc_full_cuda_fixed_sp_phase3b_cleanup_operations(
+      operations, max_attempts = 3L,
+      context = "cleanup ownership-transition fixture"
+    ),
+    error = identity
+  )
+  list(
+    error = error,
+    release_attempts = state$release_attempts,
+    order = state$order
+  )
+})
+assert_true(
+  inherits(cleanup_transition_terminal_evidence$error, "error") &&
+    grepl(
+      "terminal release after ownership transition",
+      conditionMessage(cleanup_transition_terminal_evidence$error),
+      fixed = TRUE
+    ) &&
+    identical(cleanup_transition_terminal_evidence$release_attempts, 1L) &&
+    identical(
+      cleanup_transition_terminal_evidence$order,
+      c("token_release", "token_free", "handle_free", "runtime_free")
+    ),
+  paste(
+    "terminal cleanup errors survive an ownership transition without",
+    "retry and later cleanup remains ordered best effort"
+  )
 )
 
 cleanup_persistent_evidence <- local({
@@ -570,10 +651,12 @@ assert_true(
     ), fixed = TRUE) &&
     identical(
       cleanup_persistent_evidence$order,
-      c("token_release", "token_release", "token_free", "handle_free",
-        "runtime_free")
+      c("token_release", "token_free", "handle_free", "runtime_free")
     ),
-  "persistent cleanup failure is surfaced after ordered best-effort cleanup"
+  paste(
+    "generic persistent cleanup fails without retry after ordered",
+    "best-effort cleanup and preserves body plus cleanup composition"
+  )
 )
 
 synthetic_interrupt_evidence <- local({
@@ -742,9 +825,13 @@ assert_true(
       conditionMessage(interrupt_cleanup_failure_evidence$propagated),
       fixed = TRUE
     ) &&
-    identical(interrupt_cleanup_failure_evidence$release_attempts, 4L) &&
+    identical(interrupt_cleanup_failure_evidence$release_attempts, 2L) &&
     interrupt_cleanup_failure_evidence$later_cleanup_exact,
-  "interrupt plus cleanup failure remains interrupt-classed and fully visible"
+  paste(
+    "interrupt plus terminal cleanup failure remains interrupt-classed,",
+    "runs once in primary cleanup and once in on.exit fallback, and stays",
+    "fully visible"
+  )
 )
 
 ordinary_error_cleanup_evidence <- local({
@@ -945,6 +1032,14 @@ for (field in finalize_fields) {
     "batch finalize evidence is invalid"
   )
 }
+
+cat(
+  "PASS Phase 3B cleanup fixtures; retryable/transition/persistent/",
+  "on_exit_attempts=", cleanup_retry_evidence$attempts, "/",
+  cleanup_transition_terminal_evidence$release_attempts, "/",
+  sum(cleanup_persistent_evidence$order == "token_release"), "/",
+  interrupt_cleanup_failure_evidence$release_attempts, "\n", sep = ""
+)
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
   cat("SKIP Phase 3B fixed-sp iteration batch gate\n")
