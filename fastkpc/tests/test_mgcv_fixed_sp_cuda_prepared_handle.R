@@ -439,6 +439,15 @@ expected_explicit_h2d_bytes <- 8 * as.numeric(
 assert_true(identical(
   explicit_info$setup_h2d_bytes, expected_explicit_h2d_bytes
 ), "explicit setup uploads X, Z, X_null, Gram, and projected penalties")
+assert_true(
+  is.integer(explicit_info$projected_H_test_shadow_d2h_count) &&
+    length(explicit_info$projected_H_test_shadow_d2h_count) == 1L &&
+    identical(explicit_info$projected_H_test_shadow_d2h_count, 0L) &&
+    is.double(explicit_info$projected_H_test_shadow_d2h_bytes) &&
+    length(explicit_info$projected_H_test_shadow_d2h_bytes) == 1L &&
+    identical(explicit_info$projected_H_test_shadow_d2h_bytes, 0),
+  "null-H projected observer diagnostics start at exact typed zeros"
+)
 prepared_before_shadow <- fixed_sp_cuda_prepared_info(explicit_handle)
 failed_shadow_before <- resource_snapshot()
 invisible(.Call(
@@ -521,8 +530,10 @@ assert_true(identical(fixed_sp_cuda_prepared_info(explicit_handle),
             "test shadow does not change prepared diagnostics")
 assert_true(identical(
   names(explicit_shadow),
-  c("X_null", "gram", "projected_penalties")
+  c("X_null", "gram", "projected_penalties", "projected_H")
 ), "explicit static shadow schema")
+assert_true(is.null(explicit_shadow$projected_H),
+            "null-H static shadow exposes projected_H as NULL")
 assert_close(explicit_shadow$X_null, explicit_X_null, 1e-12,
              "explicit X_null projection")
 assert_close(explicit_shadow$gram,
@@ -531,6 +542,14 @@ assert_close(explicit_shadow$gram,
 assert_close(explicit_shadow$projected_penalties,
              expected_projected_penalties, 1e-12,
              "explicit projected penalties")
+null_H_info_after_shadow <- fixed_sp_cuda_prepared_info(explicit_handle)
+assert_true(
+  identical(null_H_info_after_shadow$projected_H_test_shadow_d2h_count,
+            prepared_before_shadow$projected_H_test_shadow_d2h_count) &&
+    identical(null_H_info_after_shadow$projected_H_test_shadow_d2h_bytes,
+              prepared_before_shadow$projected_H_test_shadow_d2h_bytes),
+  "observing a null-H shadow does not change projected-H counters"
+)
 fixed_sp_cuda_prepared_free(explicit_handle)
 
 fixed_sp_cuda_runtime_free(runtime)

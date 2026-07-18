@@ -10,6 +10,78 @@ relative_l2 <- function(candidate, reference) {
   sqrt(sum((candidate - reference)^2)) /
     max(sqrt(sum(reference^2)), 1e-300)
 }
+assert_aggregate_svd_diagnostics <- function(
+  info, q, expected_executed_svd_count, message
+) {
+  required <- c(
+    "aggregate_penalty_root_rank", "aggregate_penalty_root_pivot",
+    "aggregate_factor_call_count", "aggregate_b_build_count",
+    "aggregate_dstop", "aggregate_penalty_factor_count",
+    "aggregate_svd_b_build_count", "aggregate_penalty_root_d2h_count"
+  )
+  missing <- setdiff(required, names(info))
+  assert_true(
+    length(missing) == 0L,
+    paste0(message, ": missing ", paste(missing, collapse = ","))
+  )
+  target_count <- length(info$executed_route)
+  assert_true(
+    target_count > 0L &&
+      is.integer(expected_executed_svd_count) &&
+      length(expected_executed_svd_count) == 1L &&
+      !is.na(expected_executed_svd_count) &&
+      expected_executed_svd_count >= 0L &&
+      expected_executed_svd_count <= target_count,
+    paste(message, "has a valid positive target count and expected SVD count")
+  )
+  executed_svd <- !is.na(info$executed_route) &
+    info$executed_route == "AUGMENTED_SVD"
+  assert_true(
+    identical(as.integer(sum(executed_svd)), expected_executed_svd_count),
+    paste(message, "executed-SVD mask has the exact expected count")
+  )
+  expected_factor <- as.integer(executed_svd)
+  expected_build <- 2L * expected_factor
+  pivot_shapes <- vapply(seq_len(target_count), function(index) {
+    pivot <- info$aggregate_penalty_root_pivot[[index]]
+    if (!executed_svd[[index]]) {
+      return(is.integer(pivot) && identical(pivot, integer()))
+    }
+    is.integer(pivot) && length(pivot) == q &&
+      identical(sort(pivot), seq_len(q))
+  }, logical(1L))
+  assert_true(
+    is.integer(info$aggregate_penalty_root_rank) &&
+      length(info$aggregate_penalty_root_rank) == target_count &&
+      is.list(info$aggregate_penalty_root_pivot) &&
+      length(info$aggregate_penalty_root_pivot) == target_count &&
+      is.integer(info$aggregate_factor_call_count) &&
+      identical(info$aggregate_factor_call_count, expected_factor) &&
+      is.integer(info$aggregate_b_build_count) &&
+      identical(info$aggregate_b_build_count, expected_build) &&
+      is.double(info$aggregate_dstop) &&
+      length(info$aggregate_dstop) == target_count &&
+      is.integer(info$effective_rank) &&
+      length(info$effective_rank) == target_count &&
+      all(info$aggregate_penalty_root_rank[executed_svd] >= 0L) &&
+      all(info$aggregate_penalty_root_rank[executed_svd] <= q) &&
+      all(is.na(info$aggregate_penalty_root_rank[!executed_svd])) &&
+      all(info$effective_rank[executed_svd] >= 0L) &&
+      all(info$effective_rank[executed_svd] <= q) &&
+      all(is.finite(info$aggregate_dstop[executed_svd])) &&
+      all(info$aggregate_dstop[executed_svd] >= 0) &&
+      all(is.na(info$aggregate_dstop[!executed_svd])) &&
+      identical(lengths(info$aggregate_penalty_root_pivot),
+                q * expected_factor) &&
+      all(pivot_shapes) &&
+      identical(info$aggregate_penalty_factor_count,
+                as.integer(sum(expected_factor))) &&
+      identical(info$aggregate_svd_b_build_count,
+                as.integer(sum(expected_build))) &&
+      identical(info$aggregate_penalty_root_d2h_count, 0L),
+    message
+  )
+}
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
   cat("SKIP Phase 3B fixed-sp true-batch diagnostics\n")
@@ -514,6 +586,7 @@ invisible(.Call(
   "C_fixed_sp_cuda_test_force_next_potrf_info",
   partial_potrf_info, PACKAGE = "fastkpc_cuda"
 ))
+partial_runtime_before <- fixed_sp_cuda_runtime_info(runtime)
 partial_factor_fail_token <- fixed_sp_cuda_solve_batch(
   handle, native_batch$Y, native_batch$SP, native_batch$planned_route,
   native_batch$target_keys,
@@ -522,6 +595,7 @@ partial_factor_fail_token <- fixed_sp_cuda_solve_batch(
 partial_factor_fail_info <- fixed_sp_cuda_residual_info(
   partial_factor_fail_token
 )
+partial_runtime_after <- fixed_sp_cuda_runtime_info(runtime)
 expected_partial_status <- rep("OK_CHOLESKY_BATCHED", safe_count)
 expected_partial_status[[middle_ordinal]] <-
   "OK_AUGMENTED_SVD"
@@ -560,6 +634,28 @@ assert_true(
     identical(partial_factor_fail_info$executed_route,
               expected_partial_route),
   "one middle factor failure preserves canonical batch status accounting"
+)
+assert_aggregate_svd_diagnostics(
+  partial_factor_fail_info, dto$null_dim, 1L,
+  "partial Cholesky-to-SVD reroute aggregate lifecycle"
+)
+logical_augmented_rows <- as.integer(dto$n + sum(dto$penalty_ranks))
+assert_true(
+  partial_runtime_before$augmented_workspace_bytes ==
+      8 * max(logical_augmented_rows, dto$n + dto$null_dim) * dto$null_dim &&
+    identical(partial_runtime_after$workspace_grow_count,
+              partial_runtime_before$workspace_grow_count) &&
+    identical(partial_runtime_after$workspace_bytes,
+              partial_runtime_before$workspace_bytes) &&
+    identical(partial_runtime_after$stable_workspace_grow_count,
+              partial_runtime_before$stable_workspace_grow_count) &&
+    partial_runtime_after$svd_checkpoint_record_count -
+      partial_runtime_before$svd_checkpoint_record_count == 1L &&
+    partial_runtime_after$svd_checkpoint_wait_count -
+      partial_runtime_before$svd_checkpoint_wait_count == 1L &&
+    identical(partial_runtime_after$cuda_device_synchronize_count,
+              partial_runtime_before$cuda_device_synchronize_count),
+  "partial reroute fits n + q behind the logical QR reserve without growth"
 )
 partial_shadow <- fixed_sp_cuda_materialize_shadow(
   partial_factor_fail_token,
@@ -673,11 +769,13 @@ invisible(.Call(
   "C_fixed_sp_cuda_test_force_next_potrf_info",
   rep.int(1L, safe_count), PACKAGE = "fastkpc_cuda"
 ))
+all_factor_runtime_before <- fixed_sp_cuda_runtime_info(runtime)
 all_factor_fail_token <- fixed_sp_cuda_solve_batch(
   handle, native_batch$Y, native_batch$SP, native_batch$planned_route,
   native_batch$target_keys
 )
 all_factor_fail_info <- fixed_sp_cuda_residual_info(all_factor_fail_token)
+all_factor_runtime_after <- fixed_sp_cuda_runtime_info(runtime)
 assert_true(
   all_factor_fail_info$potrf_batched_call_count == 1L &&
     all_factor_fail_info$potrs_batched_call_count == 0L &&
@@ -700,6 +798,25 @@ assert_true(
     all(all_factor_fail_info$solver_status ==
           "OK_AUGMENTED_SVD"),
   "all factor failures reroute and skip zero-sized batched solve"
+)
+assert_aggregate_svd_diagnostics(
+  all_factor_fail_info, dto$null_dim, as.integer(safe_count),
+  "all-target Cholesky-to-SVD reroute aggregate lifecycle"
+)
+assert_true(
+  identical(all_factor_runtime_after$workspace_grow_count,
+            all_factor_runtime_before$workspace_grow_count) &&
+    identical(all_factor_runtime_after$workspace_bytes,
+              all_factor_runtime_before$workspace_bytes) &&
+    identical(all_factor_runtime_after$stable_workspace_grow_count,
+              all_factor_runtime_before$stable_workspace_grow_count) &&
+    all_factor_runtime_after$svd_checkpoint_record_count -
+      all_factor_runtime_before$svd_checkpoint_record_count == 1L &&
+    all_factor_runtime_after$svd_checkpoint_wait_count -
+      all_factor_runtime_before$svd_checkpoint_wait_count == 1L &&
+    identical(all_factor_runtime_after$cuda_device_synchronize_count,
+              all_factor_runtime_before$cuda_device_synchronize_count),
+  "all-target reroute uses one SVD checkpoint and no solve-time growth"
 )
 fixed_sp_cuda_residual_release(all_factor_fail_token)
 fixed_sp_cuda_residual_free(all_factor_fail_token)

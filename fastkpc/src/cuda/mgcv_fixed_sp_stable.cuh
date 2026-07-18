@@ -20,6 +20,8 @@ struct FixedSpStableWorkspace {
   double* V = nullptr;
   double* scaled_projection = nullptr;
   double* diagonal = nullptr;
+  double* aggregate_penalty_factor = nullptr;
+  double* aggregate_factor_work = nullptr;
   int* info = nullptr;
   int eigen_lwork = 0;
   int qr_lwork = 0;
@@ -121,6 +123,40 @@ void launch_fixed_sp_svd_rank_scale(
   int* effective_rank,
   double* sigma_max,
   double* smallest_retained_sigma,
+  cudaStream_t stream);
+void launch_fixed_sp_aggregate_diagnostics_init(
+  int target_capacity,
+  int q,
+  int* aggregate_root_rank,
+  int* aggregate_factor_call_count,
+  int* aggregate_b_build_count,
+  int* aggregate_pivots,
+  double* aggregate_dstop,
+  cudaStream_t stream);
+void launch_fixed_sp_aggregate_factor(
+  const double* projected_penalties,
+  const double* projected_H,
+  const double* SP,
+  int penalty_count,
+  int q,
+  double* aggregate_penalty_factor,
+  double* aggregate_factor_work,
+  int* aggregate_root_rank,
+  int* aggregate_factor_call_count,
+  int* aggregate_pivots,
+  double* aggregate_dstop,
+  cudaStream_t stream);
+AugmentedSystemView build_fixed_sp_aggregate_augmented_system(
+  const double* X_null,
+  const double* aggregate_penalty_factor,
+  const int* aggregate_root_rank,
+  const int* aggregate_pivots,
+  const double* Y,
+  int n,
+  int q,
+  int target_index,
+  int* aggregate_b_build_count,
+  FixedSpStableWorkspace* workspace,
   cudaStream_t stream);
 
 }  // namespace fastkpc

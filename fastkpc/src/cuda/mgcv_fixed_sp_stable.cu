@@ -1,6 +1,7 @@
 #include "mgcv_fixed_sp_stable.cuh"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -75,8 +76,11 @@ std::size_t data_double_count(int max_rows, int max_q) {
   count = checked_add(
     count, checked_multiply(q, 3U, "stable q-vector storage"),
     "stable vector storage");
+  count = checked_add(
+    count, checked_multiply(q_squared, 3U, "stable square storage"),
+    "stable data storage");
   return checked_add(
-    count, checked_multiply(q_squared, 2U, "stable square storage"),
+    count, checked_multiply(q, 2U, "aggregate factor work storage"),
     "stable data storage");
 }
 
@@ -93,6 +97,8 @@ void bind_data_views(FixedSpStableWorkspace* workspace, double** cursor) {
   workspace->V = take(cursor, q_squared);
   workspace->scaled_projection = take(cursor, q_squared);
   workspace->diagonal = take(cursor, q);
+  workspace->aggregate_penalty_factor = take(cursor, q_squared);
+  workspace->aggregate_factor_work = take(cursor, 2U * q);
 }
 
 __global__ void build_fixed_sp_root_kernel(
@@ -358,8 +364,7 @@ __global__ void fixed_sp_svd_rank_scale_kernel(
     finite = finite && isfinite(sigma) && sigma >= 0.0;
     maximum = fmax(maximum, sigma);
   }
-  const double rank_tolerance =
-    static_cast<double>(rows > q ? rows : q) * maximum * epsilon;
+  const double rank_tolerance = maximum * sqrt(epsilon);
   finite = finite && isfinite(rank_tolerance);
   if (!finite) {
     for (std::size_t index = 0U; index < q_size; ++index) {
@@ -370,12 +375,21 @@ __global__ void fixed_sp_svd_rank_scale_kernel(
     smallest_retained_sigma[target] = 0.0;
     return;
   }
+  if (maximum == 0.0) {
+    for (std::size_t index = 0U; index < q_size; ++index) {
+      scaled_projection[index] = 0.0;
+    }
+    effective_rank[target] = 0;
+    sigma_max[target] = 0.0;
+    smallest_retained_sigma[target] = 0.0;
+    return;
+  }
 
   int rank = 0;
   double smallest_retained = 0.0;
   for (std::size_t index = 0U; index < q_size; ++index) {
     const double sigma = singular_values[index];
-    if (sigma > rank_tolerance) {
+    if (sigma > 0.0 && sigma >= rank_tolerance) {
       scaled_projection[index] /= sigma;
       smallest_retained = rank == 0 ? sigma :
         fmin(smallest_retained, sigma);
@@ -387,6 +401,207 @@ __global__ void fixed_sp_svd_rank_scale_kernel(
   effective_rank[target] = rank;
   sigma_max[target] = maximum;
   smallest_retained_sigma[target] = smallest_retained;
+}
+
+__global__ void initialize_fixed_sp_aggregate_diagnostics_kernel(
+    int target_capacity,
+    int q,
+    int* aggregate_root_rank,
+    int* aggregate_factor_call_count,
+    int* aggregate_b_build_count,
+    int* aggregate_pivots,
+    double* aggregate_dstop) {
+  const std::size_t index =
+    static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t targets = static_cast<std::size_t>(target_capacity);
+  const std::size_t pivot_count = targets * static_cast<std::size_t>(q);
+  if (index < targets) {
+    aggregate_root_rank[index] = -1;
+    aggregate_factor_call_count[index] = 0;
+    aggregate_b_build_count[index] = 0;
+    aggregate_dstop[index] = __longlong_as_double(0x7ff8000000000000ULL);
+  }
+  if (index < pivot_count) aggregate_pivots[index] = -1;
+}
+
+__global__ void factor_fixed_sp_aggregate_penalty_kernel(
+    const double* projected_penalties,
+    const double* projected_H,
+    const double* SP,
+    int penalty_count,
+    int q,
+    double* factor,
+    double* work,
+    int* aggregate_root_rank,
+    int* aggregate_factor_call_count,
+    int* pivots,
+    double* aggregate_dstop) {
+  if (blockIdx.x != 0U || threadIdx.x != 0U) return;
+
+  const std::size_t q_size = static_cast<std::size_t>(q);
+  const std::size_t q_squared = q_size * q_size;
+  double max_initial_diagonal = 0.0;
+  int initial_pivot = 0;
+  for (int column = 0; column < q; ++column) {
+    for (int row = 0; row <= column; ++row) {
+      const std::size_t element = static_cast<std::size_t>(row) +
+        q_size * static_cast<std::size_t>(column);
+      double value = projected_H == nullptr ? 0.0 : projected_H[element];
+      for (int penalty = 0; penalty < penalty_count; ++penalty) {
+        value += SP[static_cast<std::size_t>(penalty)] *
+          projected_penalties[element + q_squared *
+            static_cast<std::size_t>(penalty)];
+      }
+      factor[element] = value;
+    }
+    const double diagonal = factor[static_cast<std::size_t>(column) +
+      q_size * static_cast<std::size_t>(column)];
+    if (column == 0 || diagonal > max_initial_diagonal) {
+      max_initial_diagonal = diagonal;
+      initial_pivot = column;
+    }
+    pivots[column] = column;
+    work[column] = 0.0;
+    work[q + column] = 0.0;
+  }
+
+  const double unit_roundoff = DBL_EPSILON / 2.0;
+  const double dstop = static_cast<double>(q) * unit_roundoff *
+    max_initial_diagonal;
+  *aggregate_dstop = dstop;
+  int rank = 0;
+  if (!(max_initial_diagonal > 0.0) || !isfinite(max_initial_diagonal)) {
+    *aggregate_root_rank = 0;
+    *aggregate_factor_call_count += 1;
+    return;
+  }
+
+  int pivot = initial_pivot;
+  double ajj = max_initial_diagonal;
+  for (int j = 0; j < q; ++j) {
+    for (int i = j; i < q; ++i) {
+      if (j > 0) {
+        const double previous = factor[
+          static_cast<std::size_t>(j - 1) + q_size *
+            static_cast<std::size_t>(i)];
+        work[i] += previous * previous;
+      }
+      work[q + i] = factor[static_cast<std::size_t>(i) + q_size *
+        static_cast<std::size_t>(i)] - work[i];
+    }
+    if (j > 0) {
+      pivot = j;
+      ajj = work[q + j];
+      for (int i = j + 1; i < q; ++i) {
+        if (work[q + i] > ajj) {
+          pivot = i;
+          ajj = work[q + i];
+        }
+      }
+      if (!(ajj > dstop) || !isfinite(ajj)) {
+        factor[static_cast<std::size_t>(j) + q_size *
+          static_cast<std::size_t>(j)] = ajj;
+        break;
+      }
+    }
+
+    if (j != pivot) {
+      factor[static_cast<std::size_t>(pivot) + q_size *
+        static_cast<std::size_t>(pivot)] =
+          factor[static_cast<std::size_t>(j) + q_size *
+            static_cast<std::size_t>(j)];
+      for (int i = 0; i < j; ++i) {
+        const std::size_t left = static_cast<std::size_t>(i) +
+          q_size * static_cast<std::size_t>(j);
+        const std::size_t right = static_cast<std::size_t>(i) +
+          q_size * static_cast<std::size_t>(pivot);
+        const double temporary = factor[left];
+        factor[left] = factor[right];
+        factor[right] = temporary;
+      }
+      for (int i = pivot + 1; i < q; ++i) {
+        const std::size_t left = static_cast<std::size_t>(j) +
+          q_size * static_cast<std::size_t>(i);
+        const std::size_t right = static_cast<std::size_t>(pivot) +
+          q_size * static_cast<std::size_t>(i);
+        const double temporary = factor[left];
+        factor[left] = factor[right];
+        factor[right] = temporary;
+      }
+      for (int i = j + 1; i < pivot; ++i) {
+        const std::size_t left = static_cast<std::size_t>(j) +
+          q_size * static_cast<std::size_t>(i);
+        const std::size_t right = static_cast<std::size_t>(i) +
+          q_size * static_cast<std::size_t>(pivot);
+        const double temporary = factor[left];
+        factor[left] = factor[right];
+        factor[right] = temporary;
+      }
+      const double work_temporary = work[j];
+      work[j] = work[pivot];
+      work[pivot] = work_temporary;
+      const int pivot_temporary = pivots[pivot];
+      pivots[pivot] = pivots[j];
+      pivots[j] = pivot_temporary;
+    }
+
+    ajj = sqrt(ajj);
+    factor[static_cast<std::size_t>(j) + q_size *
+      static_cast<std::size_t>(j)] = ajj;
+    for (int column = j + 1; column < q; ++column) {
+      double value = factor[static_cast<std::size_t>(j) +
+        q_size * static_cast<std::size_t>(column)];
+      for (int row = 0; row < j; ++row) {
+        value -= factor[static_cast<std::size_t>(row) +
+          q_size * static_cast<std::size_t>(column)] *
+          factor[static_cast<std::size_t>(row) +
+            q_size * static_cast<std::size_t>(j)];
+      }
+      factor[static_cast<std::size_t>(j) +
+        q_size * static_cast<std::size_t>(column)] = value / ajj;
+    }
+    rank = j + 1;
+  }
+  *aggregate_root_rank = rank;
+  *aggregate_factor_call_count += 1;
+}
+
+__global__ void emit_fixed_sp_aggregate_root_kernel(
+    const double* factor,
+    const int* rank,
+    const int* pivots,
+    int n,
+    int q,
+    double* B,
+    int leading_dimension) {
+  const std::size_t index =
+    static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const std::size_t count = static_cast<std::size_t>(q) *
+    static_cast<std::size_t>(q);
+  if (index >= count) return;
+  const int row = static_cast<int>(index % static_cast<std::size_t>(q));
+  const int original_column = static_cast<int>(
+    index / static_cast<std::size_t>(q));
+  double value = 0.0;
+  if (row < *rank) {
+    for (int factor_column = 0; factor_column < q; ++factor_column) {
+      if (pivots[factor_column] == original_column) {
+        if (row <= factor_column) {
+          value = factor[static_cast<std::size_t>(row) +
+            static_cast<std::size_t>(q) *
+              static_cast<std::size_t>(factor_column)];
+        }
+        break;
+      }
+    }
+  }
+  B[static_cast<std::size_t>(n + row) +
+    static_cast<std::size_t>(leading_dimension) *
+      static_cast<std::size_t>(original_column)] = value;
+}
+
+__global__ void increment_fixed_sp_aggregate_b_build_kernel(int* count) {
+  if (blockIdx.x == 0U && threadIdx.x == 0U) *count += 1;
 }
 
 unsigned int fixed_sp_augmented_block_count(
@@ -433,7 +648,9 @@ void query_fixed_sp_stable_workspace(
       workspace->tau == nullptr || workspace->singular_values == nullptr ||
       workspace->U == nullptr || workspace->V == nullptr ||
       workspace->scaled_projection == nullptr ||
-      workspace->diagonal == nullptr) {
+      workspace->diagonal == nullptr ||
+      workspace->aggregate_penalty_factor == nullptr ||
+      workspace->aggregate_factor_work == nullptr) {
     throw std::runtime_error("stable workspace query inputs are unavailable");
   }
   positive_size(workspace->max_rows, "stable maximum rows");
@@ -531,6 +748,8 @@ FixedSpStableWorkspace fixed_sp_stable_workspace_view(
   workspace.V = take(&cursor, q * q);
   workspace.scaled_projection = take(&cursor, q * q);
   workspace.diagonal = take(&cursor, q);
+  workspace.aggregate_penalty_factor = take(&cursor, q * q);
+  workspace.aggregate_factor_work = take(&cursor, 2U * q);
   return workspace;
 }
 
@@ -742,6 +961,138 @@ void launch_fixed_sp_svd_rank_scale(
     singular_values, scaled_projection, svd_info, rows, q, target_index,
     epsilon, effective_rank, sigma_max, smallest_retained_sigma);
   check_cuda(cudaGetLastError(), "launch fixed-sp SVD rank scale kernel");
+}
+
+void launch_fixed_sp_aggregate_diagnostics_init(
+    int target_capacity,
+    int q,
+    int* aggregate_root_rank,
+    int* aggregate_factor_call_count,
+    int* aggregate_b_build_count,
+    int* aggregate_pivots,
+    double* aggregate_dstop,
+    cudaStream_t stream) {
+  if (target_capacity <= 0 || q <= 0 || aggregate_root_rank == nullptr ||
+      aggregate_factor_call_count == nullptr ||
+      aggregate_b_build_count == nullptr || aggregate_pivots == nullptr ||
+      aggregate_dstop == nullptr || stream == nullptr) {
+    throw std::runtime_error(
+      "fixed-sp aggregate diagnostic initialization inputs are invalid");
+  }
+  const std::size_t count = checked_multiply(
+    static_cast<std::size_t>(target_capacity), static_cast<std::size_t>(q),
+    "aggregate diagnostic initialization");
+  constexpr unsigned int threads = 256U;
+  initialize_fixed_sp_aggregate_diagnostics_kernel<<<
+    fixed_sp_augmented_block_count(
+      count, "aggregate diagnostic initialization"),
+    threads, 0, stream
+  >>>(
+    target_capacity, q, aggregate_root_rank,
+    aggregate_factor_call_count, aggregate_b_build_count,
+    aggregate_pivots, aggregate_dstop);
+  check_cuda(cudaGetLastError(),
+             "launch fixed-sp aggregate diagnostic initialization");
+}
+
+void launch_fixed_sp_aggregate_factor(
+    const double* projected_penalties,
+    const double* projected_H,
+    const double* SP,
+    int penalty_count,
+    int q,
+    double* aggregate_penalty_factor,
+    double* aggregate_factor_work,
+    int* aggregate_root_rank,
+    int* aggregate_factor_call_count,
+    int* aggregate_pivots,
+    double* aggregate_dstop,
+    cudaStream_t stream) {
+  if (projected_penalties == nullptr || SP == nullptr || penalty_count <= 0 ||
+      q <= 0 || aggregate_penalty_factor == nullptr ||
+      aggregate_factor_work == nullptr || aggregate_root_rank == nullptr ||
+      aggregate_factor_call_count == nullptr || aggregate_pivots == nullptr ||
+      aggregate_dstop == nullptr || stream == nullptr) {
+    throw std::runtime_error("fixed-sp aggregate factor inputs are invalid");
+  }
+  factor_fixed_sp_aggregate_penalty_kernel<<<1U, 1U, 0, stream>>>(
+    projected_penalties, projected_H, SP, penalty_count, q,
+    aggregate_penalty_factor, aggregate_factor_work,
+    aggregate_root_rank, aggregate_factor_call_count,
+    aggregate_pivots, aggregate_dstop);
+  check_cuda(cudaGetLastError(), "launch fixed-sp aggregate factor kernel");
+}
+
+AugmentedSystemView build_fixed_sp_aggregate_augmented_system(
+    const double* X_null,
+    const double* aggregate_penalty_factor,
+    const int* aggregate_root_rank,
+    const int* aggregate_pivots,
+    const double* Y,
+    int n,
+    int q,
+    int target_index,
+    int* aggregate_b_build_count,
+    FixedSpStableWorkspace* workspace,
+    cudaStream_t stream) {
+  const std::size_t n_size = positive_size(n, "aggregate augmented row count");
+  const std::size_t q_size = positive_size(q, "aggregate augmented column count");
+  const std::size_t rows_size = checked_add(
+    n_size, q_size, "aggregate augmented rows");
+  if (rows_size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::runtime_error("aggregate augmented row count overflow");
+  }
+  const int rows = static_cast<int>(rows_size);
+  if (X_null == nullptr || aggregate_penalty_factor == nullptr ||
+      aggregate_root_rank == nullptr || aggregate_pivots == nullptr ||
+      Y == nullptr || target_index < 0 || aggregate_b_build_count == nullptr ||
+      workspace == nullptr || workspace->B == nullptr ||
+      workspace->c == nullptr || rows > workspace->max_rows ||
+      q > workspace->max_q || stream == nullptr) {
+    throw std::runtime_error(
+      "fixed-sp aggregate augmented build inputs are invalid");
+  }
+
+  constexpr unsigned int threads = 256U;
+  const std::size_t design_count = checked_multiply(
+    n_size, q_size, "aggregate augmented design");
+  copy_fixed_sp_augmented_design_kernel<<<
+    fixed_sp_augmented_block_count(design_count, "aggregate augmented design"),
+    threads, 0, stream
+  >>>(X_null, n, q, workspace->B, rows);
+  check_cuda(cudaGetLastError(),
+             "launch fixed-sp aggregate augmented design copy");
+
+  build_fixed_sp_augmented_response_kernel<<<
+    fixed_sp_augmented_block_count(rows_size, "aggregate augmented response"),
+    threads, 0, stream
+  >>>(Y, n, workspace->c, rows);
+  check_cuda(cudaGetLastError(),
+             "launch fixed-sp aggregate augmented response build");
+
+  const std::size_t root_count = checked_multiply(
+    q_size, q_size, "aggregate augmented root");
+  emit_fixed_sp_aggregate_root_kernel<<<
+    fixed_sp_augmented_block_count(root_count, "aggregate augmented root"),
+    threads, 0, stream
+  >>>(
+    aggregate_penalty_factor, aggregate_root_rank, aggregate_pivots,
+    n, q, workspace->B, rows);
+  check_cuda(cudaGetLastError(),
+             "launch fixed-sp aggregate augmented root emission");
+  increment_fixed_sp_aggregate_b_build_kernel<<<1U, 1U, 0, stream>>>(
+    aggregate_b_build_count);
+  check_cuda(cudaGetLastError(),
+             "launch fixed-sp aggregate B-build counter increment");
+
+  AugmentedSystemView view;
+  view.B = workspace->B;
+  view.c = workspace->c;
+  view.leading_dimension = rows;
+  view.rows = rows;
+  view.cols = q;
+  view.target_index = target_index;
+  return view;
 }
 
 }  // namespace fastkpc

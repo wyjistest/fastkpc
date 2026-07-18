@@ -31,6 +31,43 @@ if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
   quit(save = "no", status = 0)
 }
 
+runtime_source <- paste(
+  readLines("fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu", warn = FALSE),
+  collapse = "\n"
+)
+compact_runtime_source <- gsub("[[:space:]]+", " ", runtime_source)
+assert_true(
+  grepl(
+    "constexpr std::size_t kStableBaseIntArraysPerTarget = 6U;",
+    compact_runtime_source, fixed = TRUE
+  ),
+  "stable checkpoint base diagnostics retain exactly six integer arrays"
+)
+assert_true(
+  grepl(
+    paste(
+      "allocation_bytes( stable_compact_count, sizeof(int),",
+      "\"fixed-sp SVD compact integer diagnostics\"),",
+      "cudaMemcpyDeviceToHost, context->stream"
+    ),
+    compact_runtime_source, fixed = TRUE
+  ),
+  "SVD checkpoint copies the full stable compact integer diagnostics"
+)
+assert_true(
+  grepl(
+    paste(
+      "allocation_bytes( checked_multiply( reserved_targets,",
+      "kStableBaseIntArraysPerTarget,",
+      "\"fixed-sp QR compact diagnostics\"), sizeof(int),",
+      "\"fixed-sp QR compact diagnostics\"),",
+      "cudaMemcpyDeviceToHost, context->stream"
+    ),
+    compact_runtime_source, fixed = TRUE
+  ),
+  "QR checkpoint copies exactly the six base integer diagnostic arrays"
+)
+
 build_fastkpc_cuda_native(rebuild = TRUE)
 assert_true(fastkpc_cuda_available(), "CUDA must be available")
 
@@ -52,10 +89,6 @@ inject_post_call_teardown_failure <- function(resource) {
     resource, PACKAGE = "fastkpc_cuda"
   )
 }
-runtime_source <- paste(
-  readLines("fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu", warn = FALSE),
-  collapse = "\n"
-)
 assert_true(
   grepl("std::shared_ptr<FixedSpResourceLedger> resource_ledger",
         runtime_source, fixed = TRUE) &&
@@ -98,6 +131,7 @@ stable_field_types <- c(
   qr_workspace_bytes = "double",
   svd_workspace_bytes = "double",
   augmented_workspace_bytes = "double",
+  aggregate_factor_workspace_bytes = "double",
   stable_workspace_grow_count = "integer"
 )
 stable_info <- lapply(names(stable_field_types), function(field) {
@@ -121,8 +155,11 @@ assert_true(stable_info$qr_workspace_bytes > 0,
             "QR workspace is reserved")
 assert_true(stable_info$svd_workspace_bytes > 0,
             "SVD workspace is reserved")
-assert_true(stable_info$augmented_workspace_bytes >= 8 * 407 * 64,
-            "augmented stable matrix capacity is reserved")
+assert_true(stable_info$augmented_workspace_bytes == 8 * 415 * 64,
+            "internal stable matrix reserves max(407, 351 + 64) rows")
+assert_true(stable_info$aggregate_factor_workspace_bytes ==
+              8 * (64 * 64 + 2 * 64),
+            "aggregate factor and DPSTF2 workspaces are reserved")
 assert_true(stable_info$stable_workspace_grow_count == 0L,
             "canonical reserve performs no solve-time stable growth")
 assert_true(after$workspace_reserve_count == 1L, "one reserve")
@@ -164,6 +201,8 @@ assert_true(
     equal$qr_workspace_bytes == after$qr_workspace_bytes &&
     equal$svd_workspace_bytes == after$svd_workspace_bytes &&
     equal$augmented_workspace_bytes == after$augmented_workspace_bytes &&
+    equal$aggregate_factor_workspace_bytes ==
+      after$aggregate_factor_workspace_bytes &&
     equal$stable_workspace_grow_count == 0L,
   "equal reserve keeps stable workspace diagnostics without growth"
 )
@@ -190,6 +229,10 @@ assert_true(cross_growth$workspace_grow_count == 2L,
             "merged cross-dimension capacity grows")
 assert_true(cross_growth$workspace_bytes > after$workspace_bytes,
             "merged cross-dimension workspace is larger")
+assert_true(
+  cross_growth$augmented_workspace_bytes == 8 * 464 * 64,
+  "merged n=400 and q=64 capacities reserve 464 internal stable rows"
+)
 
 fixed_sp_cuda_runtime_reserve(
   runtime, n = 400L, null_dim = 64L, target_count = 47L,
@@ -202,6 +245,20 @@ assert_true(cross_merged$workspace_grow_count == 2L,
             "merged maxima reserve does not grow again")
 assert_true(cross_merged$workspace_bytes == cross_growth$workspace_bytes,
             "merged maxima reserve reuses workspace")
+assert_true(
+  cross_merged$augmented_workspace_bytes == 8 * 464 * 64 &&
+    cross_merged$cuda_device_allocation_count ==
+      cross_growth$cuda_device_allocation_count &&
+    cross_merged$cuda_host_allocation_count ==
+      cross_growth$cuda_host_allocation_count &&
+    cross_merged$eigen_workspace_bytes ==
+      cross_growth$eigen_workspace_bytes &&
+    cross_merged$qr_workspace_bytes == cross_growth$qr_workspace_bytes &&
+    cross_merged$svd_workspace_bytes == cross_growth$svd_workspace_bytes &&
+    cross_merged$aggregate_factor_workspace_bytes ==
+      cross_growth$aggregate_factor_workspace_bytes,
+  "exact merged reserve reuses allocations and stable workspace queries"
+)
 
 assert_error(
   fixed_sp_cuda_runtime_create(c(0L, 1L)),
@@ -325,14 +382,16 @@ for (narrow_q in c(63L, 64L)) {
   )
   narrow <- fixed_sp_cuda_runtime_info(narrow_runtime)
   assert_true(
-    narrow$augmented_workspace_bytes == 8 * narrow_q,
+    narrow$augmented_workspace_bytes == 8 * (1L + narrow_q) * narrow_q,
     paste(
-      "narrow reserve preserves requested augmented capacity for q", narrow_q
+      "narrow reserve includes n + q internal stable rows for q", narrow_q
     )
   )
   assert_true(
     narrow$eigen_workspace_bytes > 0 && narrow$qr_workspace_bytes > 0 &&
       narrow$svd_workspace_bytes > 0 &&
+      narrow$aggregate_factor_workspace_bytes ==
+        8 * (narrow_q * narrow_q + 2L * narrow_q) &&
       narrow$workspace_reserve_count == 1L &&
       narrow$workspace_grow_count == 1L &&
       narrow$stable_workspace_grow_count == 0L,
@@ -356,7 +415,10 @@ for (narrow_q in c(63L, 64L)) {
       narrow_equal$eigen_workspace_bytes == narrow$eigen_workspace_bytes &&
       narrow_equal$qr_workspace_bytes == narrow$qr_workspace_bytes &&
       narrow_equal$svd_workspace_bytes == narrow$svd_workspace_bytes &&
-      narrow_equal$augmented_workspace_bytes == 8 * narrow_q,
+      narrow_equal$aggregate_factor_workspace_bytes ==
+        narrow$aggregate_factor_workspace_bytes &&
+      narrow_equal$augmented_workspace_bytes ==
+        8 * (1L + narrow_q) * narrow_q,
     paste(
       "equal narrow reserve does not allocate, query, or grow for q", narrow_q
     )

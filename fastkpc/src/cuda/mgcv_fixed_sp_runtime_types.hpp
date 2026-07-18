@@ -84,6 +84,7 @@ struct FixedSpRuntimeInfo {
   std::size_t qr_workspace_bytes = 0;
   std::size_t svd_workspace_bytes = 0;
   std::size_t augmented_workspace_bytes = 0;
+  std::size_t aggregate_factor_workspace_bytes = 0;
   int cuda_toolkit_version = 0;
   int cuda_driver_version = 0;
   int compute_capability_major = 0;
@@ -159,6 +160,8 @@ struct PreparedSInfo {
   std::size_t setup_shadow_d2h_bytes = 0;
   int augmented_test_shadow_d2h_count = 0;
   std::size_t augmented_test_shadow_d2h_bytes = 0;
+  int projected_H_test_shadow_d2h_count = 0;
+  std::size_t projected_H_test_shadow_d2h_bytes = 0;
   std::size_t coefficient_output_capacity = 0;
   std::uint64_t generation = 0;
   bool output_slot_leased = false;
@@ -181,6 +184,7 @@ struct FixedSpBatchHostView {
 struct DeviceResidualInfo {
   int n = 0;
   int coefficient_dim = 0;
+  int null_dim = 0;
   int target_count = 0;
   std::vector<std::string> target_keys;
   std::vector<FixedSpRoute> planned_routes;
@@ -194,6 +198,11 @@ struct DeviceResidualInfo {
   std::vector<double> sigma_max;
   std::vector<double> smallest_retained_sigma;
   std::vector<int> svd_info;
+  std::vector<int> aggregate_penalty_root_rank;
+  std::vector<int> aggregate_factor_call_count;
+  std::vector<int> aggregate_b_build_count;
+  std::vector<int> aggregate_penalty_root_pivot;
+  std::vector<double> aggregate_dstop;
   std::vector<bool> target_true_batched;
   bool native_batch_call = false;
   int batch_call_count = 0;
@@ -222,6 +231,10 @@ struct DeviceResidualInfo {
   int executed_svd_target_count = 0;
   int cholesky_to_svd_count = 0;
   int qr_to_svd_count = 0;
+  int aggregate_penalty_factor_count = 0;
+  int aggregate_svd_b_build_count = 0;
+  int aggregate_penalty_root_d2h_count = 0;
+  std::size_t aggregate_penalty_root_d2h_bytes = 0;
   int output_slot_acquire_count = 0;
   int output_slot_release_count = 0;
   int output_slot_busy_count = 0;
@@ -262,6 +275,8 @@ struct PreparedSStaticShadow {
   std::vector<double> X_null;
   std::vector<double> gram;
   std::vector<double> projected_penalties;
+  bool has_H = false;
+  std::vector<double> projected_H;
 };
 
 struct PreparedSRootsShadow {

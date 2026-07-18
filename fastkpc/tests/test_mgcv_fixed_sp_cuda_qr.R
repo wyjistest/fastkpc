@@ -16,6 +16,78 @@ relative_l2 <- function(candidate, reference) {
   sqrt(sum((candidate - reference)^2)) /
     max(sqrt(sum(reference^2)), 1e-300)
 }
+assert_aggregate_svd_diagnostics <- function(
+  info, q, expected_executed_svd_count, message
+) {
+  required <- c(
+    "aggregate_penalty_root_rank", "aggregate_penalty_root_pivot",
+    "aggregate_factor_call_count", "aggregate_b_build_count",
+    "aggregate_dstop", "aggregate_penalty_factor_count",
+    "aggregate_svd_b_build_count", "aggregate_penalty_root_d2h_count"
+  )
+  missing <- setdiff(required, names(info))
+  assert_true(
+    length(missing) == 0L,
+    paste0(message, ": missing ", paste(missing, collapse = ","))
+  )
+  target_count <- length(info$executed_route)
+  assert_true(
+    target_count > 0L &&
+      is.integer(expected_executed_svd_count) &&
+      length(expected_executed_svd_count) == 1L &&
+      !is.na(expected_executed_svd_count) &&
+      expected_executed_svd_count >= 0L &&
+      expected_executed_svd_count <= target_count,
+    paste(message, "has a valid positive target count and expected SVD count")
+  )
+  executed_svd <- !is.na(info$executed_route) &
+    info$executed_route == "AUGMENTED_SVD"
+  assert_true(
+    identical(as.integer(sum(executed_svd)), expected_executed_svd_count),
+    paste(message, "executed-SVD mask has the exact expected count")
+  )
+  expected_factor <- as.integer(executed_svd)
+  expected_build <- 2L * expected_factor
+  pivots_are_exact <- vapply(seq_len(target_count), function(index) {
+    pivot <- info$aggregate_penalty_root_pivot[[index]]
+    if (!executed_svd[[index]]) {
+      return(is.integer(pivot) && identical(pivot, integer()))
+    }
+    is.integer(pivot) && length(pivot) == q &&
+      identical(sort(pivot), seq_len(q))
+  }, logical(1L))
+  assert_true(
+    is.integer(info$aggregate_penalty_root_rank) &&
+      length(info$aggregate_penalty_root_rank) == target_count &&
+      is.list(info$aggregate_penalty_root_pivot) &&
+      length(info$aggregate_penalty_root_pivot) == target_count &&
+      is.integer(info$aggregate_factor_call_count) &&
+      identical(info$aggregate_factor_call_count, expected_factor) &&
+      is.integer(info$aggregate_b_build_count) &&
+      identical(info$aggregate_b_build_count, expected_build) &&
+      is.double(info$aggregate_dstop) &&
+      length(info$aggregate_dstop) == target_count &&
+      is.integer(info$effective_rank) &&
+      length(info$effective_rank) == target_count &&
+      all(info$aggregate_penalty_root_rank[executed_svd] >= 0L) &&
+      all(info$aggregate_penalty_root_rank[executed_svd] <= q) &&
+      all(is.na(info$aggregate_penalty_root_rank[!executed_svd])) &&
+      all(info$effective_rank[executed_svd] >= 0L) &&
+      all(info$effective_rank[executed_svd] <= q) &&
+      all(is.finite(info$aggregate_dstop[executed_svd])) &&
+      all(info$aggregate_dstop[executed_svd] >= 0) &&
+      all(is.na(info$aggregate_dstop[!executed_svd])) &&
+      identical(lengths(info$aggregate_penalty_root_pivot),
+                q * expected_factor) &&
+      all(pivots_are_exact) &&
+      identical(info$aggregate_penalty_factor_count,
+                as.integer(sum(expected_factor))) &&
+      identical(info$aggregate_svd_b_build_count,
+                as.integer(sum(expected_build))) &&
+      identical(info$aggregate_penalty_root_d2h_count, 0L),
+    message
+  )
+}
 expected_complete_batch <- function(native, null_dim) {
   routes <- native$planned_route
   target_count <- native$target_count
@@ -200,6 +272,9 @@ max_residual_abs <- 0
 max_residual_relative_l2 <- 0
 max_fitted_abs <- 0
 max_fitted_relative_l2 <- 0
+regular_batch_infos <- vector("list", length(qr_batches))
+regular_batch_q <- integer(length(qr_batches))
+regular_batch_expected_svd_count <- integer(length(qr_batches))
 
 for (batch_index in seq_along(qr_batches)) {
   setup_key <- qr_setup_keys[[batch_index]]
@@ -217,6 +292,10 @@ for (batch_index in seq_along(qr_batches)) {
   )
   info <- fixed_sp_cuda_residual_info(token)
   runtime_after <- fixed_sp_cuda_runtime_info(runtime)
+  regular_batch_infos[[batch_index]] <- info
+  regular_batch_q[[batch_index]] <- dto$null_dim
+  regular_batch_expected_svd_count[[batch_index]] <-
+    expected$executed_svd_target_count
 
   missing_target_fields <- setdiff(required_target_fields, names(info))
   missing_runtime_fields <- setdiff(
@@ -431,14 +510,40 @@ assert_true(
     identical(rank_guard_info$qr_to_svd_count, 1L),
   "rank-deficient augmented QR reroutes successfully through SVD"
 )
+assert_aggregate_svd_diagnostics(
+  rank_guard_info, synthetic_dto$null_dim, 1L,
+  "real QR_RANK_GUARD_REJECTED aggregate lifecycle"
+)
+for (batch_index in seq_along(regular_batch_infos)) {
+  assert_aggregate_svd_diagnostics(
+    regular_batch_infos[[batch_index]], regular_batch_q[[batch_index]],
+    regular_batch_expected_svd_count[[batch_index]],
+    paste("accepted QR and other canonical target aggregate lifecycle in batch",
+          batch_index)
+  )
+}
 assert_true(
   runtime_after_rank_guard$qr_checkpoint_record_count -
       runtime_before_rank_guard$qr_checkpoint_record_count == 1L &&
     runtime_after_rank_guard$qr_checkpoint_wait_count -
       runtime_before_rank_guard$qr_checkpoint_wait_count == 1L &&
+    runtime_after_rank_guard$svd_checkpoint_record_count -
+      runtime_before_rank_guard$svd_checkpoint_record_count == 1L &&
+    runtime_after_rank_guard$svd_checkpoint_wait_count -
+      runtime_before_rank_guard$svd_checkpoint_wait_count == 1L &&
     identical(runtime_after_rank_guard$cuda_device_synchronize_count,
-              runtime_before_rank_guard$cuda_device_synchronize_count),
-  "rank guard uses one QR event checkpoint without cudaDeviceSynchronize"
+              runtime_before_rank_guard$cuda_device_synchronize_count) &&
+    identical(runtime_after_rank_guard$workspace_grow_count,
+              runtime_before_rank_guard$workspace_grow_count) &&
+    identical(runtime_after_rank_guard$workspace_bytes,
+              runtime_before_rank_guard$workspace_bytes) &&
+    runtime_before_rank_guard$augmented_workspace_bytes >=
+      8 * (synthetic_dto$n + synthetic_dto$null_dim) *
+        synthetic_dto$null_dim,
+  paste0(
+    "rank guard uses one QR/SVD checkpoint pair, logical reserve capacity, ",
+    "and no solve-time growth"
+  )
 )
 rank_guard_shadow <- fixed_sp_cuda_materialize_shadow(
   token, outputs = c("fitted", "residuals")

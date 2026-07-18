@@ -15,6 +15,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -25,8 +26,9 @@ namespace fastkpc {
 namespace {
 
 constexpr std::size_t kCublasWorkspaceBytes = 16U * 1024U * 1024U;
-constexpr std::size_t kStableIntArraysPerTarget = 6U;
-constexpr std::size_t kStableSigmaArraysPerTarget = 2U;
+constexpr std::size_t kStableBaseIntArraysPerTarget = 6U;
+constexpr std::size_t kStableAggregateIntArraysPerTarget = 3U;
+constexpr std::size_t kStableDoubleArraysPerTarget = 3U;
 static_assert(sizeof(double) % sizeof(int) == 0U,
               "double diagnostics must fit an integral number of ints");
 constexpr std::size_t kIntsPerDouble = sizeof(double) / sizeof(int);
@@ -1332,6 +1334,7 @@ __global__ void initialize_fixed_sp_outputs_invalid(
 
 __global__ void build_fixed_sp_systems_kernel(
     const double* gram,
+    const double* projected_H,
     const double* projected_penalties,
     const double* sp,
     const int* safe_target_indices,
@@ -1351,7 +1354,8 @@ __global__ void build_fixed_sp_systems_kernel(
     static_cast<std::size_t>(q) * static_cast<std::size_t>(q);
   const std::size_t element = static_cast<std::size_t>(row) +
     static_cast<std::size_t>(column) * static_cast<std::size_t>(q);
-  double value = gram[element];
+  double value = gram[element] +
+    (projected_H == nullptr ? 0.0 : projected_H[element]);
   for (int penalty = 0; penalty < penalty_count; ++penalty) {
     value += sp[static_cast<std::size_t>(penalty) +
                 static_cast<std::size_t>(penalty_count) *
@@ -1970,6 +1974,7 @@ class PreparedSGpuHandle {
       d_X_null = nullptr;
       d_gram = nullptr;
       d_projected_penalties = nullptr;
+      d_projected_H = nullptr;
       d_penalty_roots = nullptr;
       d_H_root = nullptr;
       setup_completion_event = nullptr;
@@ -2000,6 +2005,7 @@ class PreparedSGpuHandle {
       }
       status.observe(
         tracked_cuda_free_noexcept(ledger, &d_projected_penalties));
+      status.observe(tracked_cuda_free_noexcept(ledger, &d_projected_H));
       status.observe(tracked_cuda_free_noexcept(ledger, &d_H_root));
       status.observe(tracked_cuda_free_noexcept(ledger, &d_penalty_roots));
       status.observe(tracked_cuda_free_noexcept(ledger, &d_gram));
@@ -2047,6 +2053,7 @@ class PreparedSGpuHandle {
   double* d_X_null = nullptr;
   double* d_gram = nullptr;
   double* d_projected_penalties = nullptr;
+  double* d_projected_H = nullptr;
   double* d_penalty_roots = nullptr;
   std::vector<int> penalty_root_offsets;
   std::vector<int> penalty_root_ranks;
@@ -2062,6 +2069,8 @@ class PreparedSGpuHandle {
   std::size_t setup_shadow_d2h_bytes = 0;
   int augmented_test_shadow_d2h_count = 0;
   std::size_t augmented_test_shadow_d2h_bytes = 0;
+  int projected_H_test_shadow_d2h_count = 0;
+  std::size_t projected_H_test_shadow_d2h_bytes = 0;
   std::shared_ptr<TransientResidualSlot> residual_slot;
   cudaEvent_t setup_completion_event = nullptr;
   int setup_h2d_upload_count = 0;
@@ -2670,21 +2679,6 @@ void CudaRuntimeContext::reserve(
   validate_capacities(requested_capacities);
   check_cuda(cudaSetDevice(device_id), "set CUDA device for reserve");
 
-  const bool within_existing_capacity =
-    requested_capacities.n <= capacities.n &&
-    requested_capacities.null_dim <= capacities.null_dim &&
-    requested_capacities.target_count <= capacities.target_count &&
-    requested_capacities.penalty_count <= capacities.penalty_count &&
-    requested_capacities.augmented_rows <= capacities.augmented_rows;
-  if (within_existing_capacity) {
-    diagnostics.workspace_reserve_count += 1;
-    return;
-  }
-  if (active_prepared_handle_count.load(std::memory_order_acquire) > 0) {
-    throw std::runtime_error(
-      "fixed-sp CUDA runtime cannot grow with active prepared handles");
-  }
-
   FixedSpCapacities merged_capacities;
   merged_capacities.n = std::max(capacities.n, requested_capacities.n);
   merged_capacities.null_dim =
@@ -2695,6 +2689,34 @@ void CudaRuntimeContext::reserve(
     std::max(capacities.penalty_count, requested_capacities.penalty_count);
   merged_capacities.augmented_rows =
     std::max(capacities.augmented_rows, requested_capacities.augmented_rows);
+
+  const std::size_t merged_stable_rows = checked_add(
+    static_cast<std::size_t>(merged_capacities.n),
+    static_cast<std::size_t>(merged_capacities.null_dim),
+    "stable n plus null dimension");
+  if (merged_stable_rows >
+      static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::runtime_error("stable row capacity size overflow");
+  }
+  const int effective_stable_rows = std::max(
+    merged_capacities.augmented_rows,
+    static_cast<int>(merged_stable_rows));
+
+  const bool within_existing_capacity =
+    requested_capacities.n <= capacities.n &&
+    requested_capacities.null_dim <= capacities.null_dim &&
+    requested_capacities.target_count <= capacities.target_count &&
+    requested_capacities.penalty_count <= capacities.penalty_count &&
+    requested_capacities.augmented_rows <= capacities.augmented_rows &&
+    effective_stable_rows <= stable_workspace.max_rows;
+  if (within_existing_capacity) {
+    diagnostics.workspace_reserve_count += 1;
+    return;
+  }
+  if (active_prepared_handle_count.load(std::memory_order_acquire) > 0) {
+    throw std::runtime_error(
+      "fixed-sp CUDA runtime cannot grow with active prepared handles");
+  }
 
   int requested_potrf_lwork = potrf_lwork;
   if (merged_capacities.null_dim > capacities.null_dim) {
@@ -2725,14 +2747,14 @@ void CudaRuntimeContext::reserve(
 
   FixedSpStableWorkspace requested_stable_workspace = stable_workspace;
   const bool stable_dimensions_grow =
-    merged_capacities.augmented_rows > stable_workspace.max_rows ||
+    effective_stable_rows > stable_workspace.max_rows ||
     merged_capacities.null_dim > stable_workspace.max_q;
   if (stable_dimensions_grow) {
     double* stable_probe = nullptr;
     try {
       const std::size_t probe_count =
         fixed_sp_stable_probe_double_count(
-          merged_capacities.augmented_rows,
+          effective_stable_rows,
           merged_capacities.null_dim);
       tracked_cuda_malloc(
         resource_ledger.get(), &stable_probe,
@@ -2740,7 +2762,7 @@ void CudaRuntimeContext::reserve(
           probe_count, sizeof(double), "stable reserve probe"),
         "allocate stable reserve probe");
       requested_stable_workspace = fixed_sp_stable_probe_view(
-        stable_probe, merged_capacities.augmented_rows,
+        stable_probe, effective_stable_rows,
         merged_capacities.null_dim);
       query_fixed_sp_stable_workspace(
         solver, svd_params, &requested_stable_workspace);
@@ -2780,10 +2802,10 @@ void CudaRuntimeContext::reserve(
   double_required = checked_add(
     double_required, static_cast<std::size_t>(requested_potrf_lwork),
     "double arena");
-  const std::size_t stable_sigma_count = checked_multiply(
-    targets, kStableSigmaArraysPerTarget, "stable sigma diagnostics");
+  const std::size_t stable_double_count = checked_multiply(
+    targets, kStableDoubleArraysPerTarget, "stable double diagnostics");
   double_required = checked_add(
-    double_required, stable_sigma_count, "double arena");
+    double_required, stable_double_count, "double arena");
   const std::size_t stable_workspace_offset = double_required;
   const std::size_t stable_workspace_count =
     fixed_sp_stable_workspace_double_count(
@@ -2798,8 +2820,15 @@ void CudaRuntimeContext::reserve(
 
   const std::size_t legacy_int_count = checked_add(
     checked_multiply(targets, 3U, "int arena"), 1U, "int arena");
+  const std::size_t stable_compact_width = checked_add(
+    q,
+    checked_add(
+      kStableBaseIntArraysPerTarget,
+      kStableAggregateIntArraysPerTarget,
+      "stable compact int width"),
+    "stable compact int width");
   const std::size_t stable_compact_int_count = checked_multiply(
-    targets, kStableIntArraysPerTarget, "stable compact int arena");
+    targets, stable_compact_width, "stable compact int arena");
   const std::size_t stable_info_offset = checked_add(
     legacy_int_count, stable_compact_int_count, "stable info offset");
   const std::size_t int_required = checked_add(
@@ -2810,8 +2839,8 @@ void CudaRuntimeContext::reserve(
     "host stable sigma alignment");
   const std::size_t host_status_required = checked_add(
     host_sigma_offset,
-    checked_multiply(stable_sigma_count, kIntsPerDouble,
-                     "host stable sigma diagnostics"),
+    checked_multiply(stable_double_count, kIntsPerDouble,
+                     "host stable double diagnostics"),
     "host status arena");
   const std::size_t pointer_required =
     checked_multiply(targets, 2U, "pointer arena");
@@ -3014,6 +3043,17 @@ void CudaRuntimeContext::reserve(
       static_cast<std::size_t>(stable_workspace.max_q),
       "augmented workspace diagnostics"),
     sizeof(double), "augmented workspace diagnostics");
+  diagnostics.aggregate_factor_workspace_bytes = allocation_bytes(
+    checked_add(
+      checked_multiply(
+        static_cast<std::size_t>(stable_workspace.max_q),
+        static_cast<std::size_t>(stable_workspace.max_q),
+        "aggregate factor workspace diagnostics"),
+      checked_multiply(
+        static_cast<std::size_t>(stable_workspace.max_q), 2U,
+        "aggregate factor work diagnostics"),
+      "aggregate factor workspace diagnostics"),
+    sizeof(double), "aggregate factor workspace diagnostics");
   diagnostics.workspace_reserve_count += 1;
   if (grew) diagnostics.workspace_grow_count += 1;
 }
@@ -3492,6 +3532,10 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
     }
     if (has_H) {
       tracked_cuda_malloc(
+        context->resource_ledger.get(), &handle->d_projected_H,
+        allocation_bytes(gram_count, sizeof(double), "prepared projected H"),
+        "allocate prepared projected H");
+      tracked_cuda_malloc(
         context->resource_ledger.get(), &handle->d_H_root,
         allocation_bytes(gram_count, sizeof(double), "prepared H root"),
         "allocate prepared H root");
@@ -3573,6 +3617,10 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
            "upload prepared Gram");
     upload(handle->d_projected_penalties, projected_penalties.data(),
            penalty_count, "upload prepared projected penalties");
+    if (has_H) {
+      upload(handle->d_projected_H, projected_H.data(), gram_count,
+             "upload prepared projected H");
+    }
 
     FixedSpStableWorkspace& stable = context->stable_workspace;
     if (stable.scaled_projection == nullptr || stable.diagonal == nullptr ||
@@ -3620,8 +3668,10 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
         "decompose projected smooth penalty");
     }
     if (has_H) {
-      upload(stable.scaled_projection, projected_H.data(), gram_count,
-             "upload projected H to eigensolver scratch");
+      check_cuda(cudaMemcpyAsync(
+        stable.scaled_projection, handle->d_projected_H, square_bytes,
+        cudaMemcpyDeviceToDevice, context->stream
+      ), "copy projected H to eigensolver scratch");
       decompose_and_build(
         setup.penalty_count, handle->d_H_root, setup.null_dim, 0,
         setup.null_dim, -1, "decompose projected H");
@@ -3731,6 +3781,10 @@ PreparedSInfo prepared_s_gpu_info(
     handle->augmented_test_shadow_d2h_count;
   info.augmented_test_shadow_d2h_bytes =
     handle->augmented_test_shadow_d2h_bytes;
+  info.projected_H_test_shadow_d2h_count =
+    handle->projected_H_test_shadow_d2h_count;
+  info.projected_H_test_shadow_d2h_bytes =
+    handle->projected_H_test_shadow_d2h_bytes;
   info.coefficient_output_capacity =
     handle->residual_slot == nullptr ? 0U :
       handle->residual_slot->coefficient_capacity;
@@ -3789,10 +3843,6 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
 
   std::lock_guard<std::mutex> lock(context->mutex);
   require_prepared_host_identity(handle);
-  if (handle->has_H) {
-    throw std::runtime_error(
-      "fixed-sp CUDA solve with non-null H is not implemented");
-  }
   const std::shared_ptr<TransientResidualSlot> slot = handle->residual_slot;
   if (slot->state == TransientResidualSlotState::Poisoned) {
     throw_output_slot_poisoned(*slot);
@@ -3850,6 +3900,7 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
 
     token->diagnostics.n = batch.n;
     token->diagnostics.coefficient_dim = handle->p;
+    token->diagnostics.null_dim = handle->q;
     token->diagnostics.target_count = batch.target_count;
     token->diagnostics.native_batch_call = true;
     token->diagnostics.batch_call_count = 1;
@@ -3872,6 +3923,21 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       std::numeric_limits<double>::quiet_NaN());
     token->diagnostics.svd_info.assign(
       static_cast<std::size_t>(batch.target_count), -1);
+    token->diagnostics.aggregate_penalty_root_rank.assign(
+      static_cast<std::size_t>(batch.target_count), -1);
+    token->diagnostics.aggregate_factor_call_count.assign(
+      static_cast<std::size_t>(batch.target_count), 0);
+    token->diagnostics.aggregate_b_build_count.assign(
+      static_cast<std::size_t>(batch.target_count), 0);
+    token->diagnostics.aggregate_penalty_root_pivot.assign(
+      checked_multiply(
+        static_cast<std::size_t>(batch.target_count),
+        static_cast<std::size_t>(handle->q),
+        "fixed-sp aggregate pivot diagnostics"),
+      -1);
+    token->diagnostics.aggregate_dstop.assign(
+      static_cast<std::size_t>(batch.target_count),
+      std::numeric_limits<double>::quiet_NaN());
     token->diagnostics.target_true_batched.assign(
       static_cast<std::size_t>(batch.target_count), false);
     slot->lease_owner = token;
@@ -3952,10 +4018,12 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       static_cast<std::size_t>(context->potrf_lwork);
     double* d_smallest_retained_sigma =
       d_sigma_max + reserved_targets;
-    if (d_smallest_retained_sigma + reserved_targets !=
+    double* d_aggregate_dstop =
+      d_smallest_retained_sigma + reserved_targets;
+    if (d_aggregate_dstop + reserved_targets !=
         context->stable_workspace.B) {
       throw std::runtime_error(
-        "fixed-sp stable sigma arena binding mismatch");
+        "fixed-sp stable double arena binding mismatch");
     }
 
     const std::size_t stable_index_offset = reserved_targets;
@@ -3963,8 +4031,15 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       reserved_targets, 3U, "fixed-sp potrs info offset");
     const std::size_t stable_compact_offset = checked_add(
       potrs_info_offset, 1U, "fixed-sp stable compact offset");
+    const std::size_t stable_compact_width = checked_add(
+      reserved_q,
+      checked_add(
+        kStableBaseIntArraysPerTarget,
+        kStableAggregateIntArraysPerTarget,
+        "fixed-sp stable compact width"),
+      "fixed-sp stable compact width");
     const std::size_t stable_compact_count = checked_multiply(
-      reserved_targets, kStableIntArraysPerTarget,
+      reserved_targets, stable_compact_width,
       "fixed-sp stable compact layout");
     const std::size_t stable_shared_info_offset = checked_add(
       stable_compact_offset, stable_compact_count,
@@ -3979,9 +4054,9 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
     const std::size_t host_layout_required = checked_add(
       host_sigma_offset,
       checked_multiply(
-        checked_multiply(reserved_targets, kStableSigmaArraysPerTarget,
-                         "fixed-sp host stable sigma layout"),
-        kIntsPerDouble, "fixed-sp host stable sigma layout"),
+        checked_multiply(reserved_targets, kStableDoubleArraysPerTarget,
+                         "fixed-sp host stable double layout"),
+        kIntsPerDouble, "fixed-sp host stable double layout"),
       "fixed-sp host status layout");
     if (context->int_capacity < int_layout_required ||
         context->host_status_capacity < host_layout_required) {
@@ -3999,6 +4074,13 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
     int* d_qr_reroute = d_qr_rank + reserved_targets;
     int* d_qr_finite_status = d_qr_reroute + reserved_targets;
     int* d_svd_info = d_qr_finite_status + reserved_targets;
+    int* d_aggregate_root_rank = d_svd_info + reserved_targets;
+    int* d_aggregate_factor_call_count =
+      d_aggregate_root_rank + reserved_targets;
+    int* d_aggregate_b_build_count =
+      d_aggregate_factor_call_count + reserved_targets;
+    int* d_aggregate_pivots =
+      d_aggregate_b_build_count + reserved_targets;
     int* h_safe_target_indices = context->host_status_arena;
     int* h_stable_target_indices =
       context->host_status_arena + stable_index_offset;
@@ -4010,13 +4092,28 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
     int* h_qr_reroute = h_qr_rank + reserved_targets;
     int* h_qr_finite_status = h_qr_reroute + reserved_targets;
     int* h_svd_info = h_qr_finite_status + reserved_targets;
+    int* h_aggregate_root_rank = h_svd_info + reserved_targets;
+    int* h_aggregate_factor_call_count =
+      h_aggregate_root_rank + reserved_targets;
+    int* h_aggregate_b_build_count =
+      h_aggregate_factor_call_count + reserved_targets;
+    int* h_aggregate_pivots =
+      h_aggregate_b_build_count + reserved_targets;
     double* h_sigma_max = reinterpret_cast<double*>(
       context->host_status_arena + host_sigma_offset);
     double* h_smallest_retained_sigma = h_sigma_max + reserved_targets;
-    if (d_svd_info + reserved_targets !=
+    double* h_aggregate_dstop =
+      h_smallest_retained_sigma + reserved_targets;
+    if (d_aggregate_pivots +
+          checked_multiply(reserved_targets, reserved_q,
+                           "fixed-sp aggregate pivot layout") !=
           context->int_arena + stable_shared_info_offset ||
-        h_svd_info + reserved_targets !=
+        h_aggregate_pivots +
+          checked_multiply(reserved_targets, reserved_q,
+                           "fixed-sp host aggregate pivot layout") !=
           context->host_status_arena + stable_shared_info_offset ||
+        reinterpret_cast<int*>(h_aggregate_dstop + reserved_targets) !=
+          context->host_status_arena + host_layout_required ||
         context->stable_workspace.info !=
           context->int_arena + stable_shared_info_offset) {
       throw std::runtime_error(
@@ -4087,18 +4184,25 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
     check_cuda(cudaMemsetAsync(
       d_geqrf_info, 0xff,
       allocation_bytes(
-        stable_compact_count, sizeof(int),
-        "fixed-sp stable compact diagnostics"),
+        checked_multiply(
+          reserved_targets, kStableBaseIntArraysPerTarget,
+          "fixed-sp base stable diagnostics"),
+        sizeof(int), "fixed-sp base stable diagnostics"),
       context->stream
     ), "initialize fixed-sp stable compact diagnostics");
     check_cuda(cudaMemsetAsync(
       d_sigma_max, 0,
       allocation_bytes(
-        checked_multiply(reserved_targets, kStableSigmaArraysPerTarget,
+        checked_multiply(reserved_targets, 2U,
                          "fixed-sp stable sigma diagnostics"),
         sizeof(double), "fixed-sp stable sigma diagnostics"),
       context->stream
     ), "initialize fixed-sp stable sigma diagnostics");
+    launch_fixed_sp_aggregate_diagnostics_init(
+      context->capacities.target_count, context->capacities.null_dim,
+      d_aggregate_root_rank, d_aggregate_factor_call_count,
+      d_aggregate_b_build_count, d_aggregate_pivots,
+      d_aggregate_dstop, context->stream);
 
     const std::size_t y_count = checked_multiply(
       static_cast<std::size_t>(batch.n), targets, "fixed-sp solve Y");
@@ -4160,7 +4264,8 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       build_fixed_sp_systems_kernel<<<
         system_grid, system_block, 0, context->stream
       >>>(
-        handle->d_gram, handle->d_projected_penalties, d_sp,
+        handle->d_gram, handle->d_projected_H,
+        handle->d_projected_penalties, d_sp,
         d_safe_target_indices, safe_count, handle->penalty_count,
         handle->q, d_systems);
       check_cuda(cudaGetLastError(), "launch fixed-sp fused system build");
@@ -4546,8 +4651,10 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       check_cuda(cudaMemcpyAsync(
         h_geqrf_info, d_geqrf_info,
         allocation_bytes(
-          stable_compact_count, sizeof(int),
-          "fixed-sp QR compact diagnostics"),
+          checked_multiply(
+            reserved_targets, kStableBaseIntArraysPerTarget,
+            "fixed-sp QR compact diagnostics"),
+          sizeof(int), "fixed-sp QR compact diagnostics"),
         cudaMemcpyDeviceToHost, context->stream
       ), "copy fixed-sp QR compact diagnostics");
       check_cuda(cudaEventRecord(
@@ -4641,16 +4748,25 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         static_cast<std::size_t>(batch.n) * target_offset;
       const double* target_sp = d_sp +
         static_cast<std::size_t>(batch.penalty_count) * target_offset;
-      const double* host_target_sp = batch.SP +
-        static_cast<std::size_t>(batch.penalty_count) * target_offset;
-      AugmentedSystemView augmented = build_fixed_sp_augmented_system(
-        handle->d_X_null, handle->d_penalty_roots,
-        handle->penalty_root_offsets.data(),
-        handle->penalty_root_ranks.data(),
-        handle->total_penalty_root_rows, handle->penalty_count,
-        handle->d_H_root, handle->H_root_rank,
-        target_y, target_sp, host_target_sp,
+      int* target_aggregate_pivots = d_aggregate_pivots +
+        target_offset * reserved_q;
+      launch_fixed_sp_aggregate_factor(
+        handle->d_projected_penalties, handle->d_projected_H,
+        target_sp, handle->penalty_count, handle->q,
+        context->stable_workspace.aggregate_penalty_factor,
+        context->stable_workspace.aggregate_factor_work,
+        d_aggregate_root_rank + target_offset,
+        d_aggregate_factor_call_count + target_offset,
+        target_aggregate_pivots, d_aggregate_dstop + target_offset,
+        context->stream);
+      AugmentedSystemView augmented =
+        build_fixed_sp_aggregate_augmented_system(
+        handle->d_X_null,
+        context->stable_workspace.aggregate_penalty_factor,
+        d_aggregate_root_rank + target_offset,
+        target_aggregate_pivots, target_y,
         batch.n, handle->q, target,
+        d_aggregate_b_build_count + target_offset,
         &context->stable_workspace, context->stream);
 
       check_cusolver(cusolverDnDgesvdj(
@@ -4690,14 +4806,14 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         &zero, context->stable_workspace.diagonal, 1
       ), "form fixed-sp augmented SVD coefficients from V");
 
-      AugmentedSystemView correction = build_fixed_sp_augmented_system(
-        handle->d_X_null, handle->d_penalty_roots,
-        handle->penalty_root_offsets.data(),
-        handle->penalty_root_ranks.data(),
-        handle->total_penalty_root_rows, handle->penalty_count,
-        handle->d_H_root, handle->H_root_rank,
-        target_y, target_sp, host_target_sp,
+      AugmentedSystemView correction =
+        build_fixed_sp_aggregate_augmented_system(
+        handle->d_X_null,
+        context->stable_workspace.aggregate_penalty_factor,
+        d_aggregate_root_rank + target_offset,
+        target_aggregate_pivots, target_y,
         batch.n, handle->q, target,
+        d_aggregate_b_build_count + target_offset,
         &context->stable_workspace, context->stream);
       check_cublas(cublasDgemv(
         context->blas, CUBLAS_OP_N, correction.rows, handle->q,
@@ -4790,11 +4906,11 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         h_sigma_max, d_sigma_max,
         allocation_bytes(
           checked_multiply(
-            reserved_targets, kStableSigmaArraysPerTarget,
-            "fixed-sp SVD compact sigma diagnostics"),
-          sizeof(double), "fixed-sp SVD compact sigma diagnostics"),
+            reserved_targets, kStableDoubleArraysPerTarget,
+            "fixed-sp SVD compact double diagnostics"),
+          sizeof(double), "fixed-sp SVD compact double diagnostics"),
         cudaMemcpyDeviceToHost, context->stream
-      ), "copy fixed-sp SVD compact sigma diagnostics");
+      ), "copy fixed-sp SVD compact double diagnostics");
       check_cuda(cudaEventRecord(
         context->cholesky_factor_checkpoint_event, context->stream
       ), "record fixed-sp SVD checkpoint");
@@ -4814,10 +4930,28 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         const int rank = h_qr_rank[target_offset];
         const double maximum = h_sigma_max[target_offset];
         const double smallest = h_smallest_retained_sigma[target_offset];
+        const int aggregate_rank = h_aggregate_root_rank[target_offset];
+        const int factor_count =
+          h_aggregate_factor_call_count[target_offset];
+        const int b_build_count = h_aggregate_b_build_count[target_offset];
+        const double aggregate_dstop = h_aggregate_dstop[target_offset];
         token->diagnostics.svd_info[target_offset] = info;
         token->diagnostics.effective_rank[target_offset] = rank;
         token->diagnostics.sigma_max[target_offset] = maximum;
         token->diagnostics.smallest_retained_sigma[target_offset] = smallest;
+        token->diagnostics.aggregate_penalty_root_rank[target_offset] =
+          aggregate_rank;
+        token->diagnostics.aggregate_factor_call_count[target_offset] =
+          factor_count;
+        token->diagnostics.aggregate_b_build_count[target_offset] =
+          b_build_count;
+        token->diagnostics.aggregate_dstop[target_offset] = aggregate_dstop;
+        std::copy_n(
+          h_aggregate_pivots + target_offset * reserved_q,
+          static_cast<std::size_t>(handle->q),
+          token->diagnostics.aggregate_penalty_root_pivot.begin() +
+            static_cast<std::ptrdiff_t>(target_offset *
+              static_cast<std::size_t>(handle->q)));
         token->executed_routes[target_offset] = FixedSpRoute::AugmentedSvd;
         token->target_true_batched[target_offset] = false;
 
@@ -4827,7 +4961,10 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
           std::isfinite(smallest) && smallest >= 0.0 &&
           smallest <= maximum &&
           ((rank == 0 && smallest == 0.0) ||
-           (rank > 0 && smallest > 0.0));
+           (rank > 0 && smallest > 0.0)) &&
+          aggregate_rank >= 0 && aggregate_rank <= handle->q &&
+          factor_count == 1 && b_build_count == 2 &&
+          std::isfinite(aggregate_dstop) && aggregate_dstop >= 0.0;
         if (info != 0 || !rank_diagnostics_valid) {
           token->solver_statuses[target_offset] =
             FixedSpStatus::ErrSvdFailed;
@@ -4840,6 +4977,14 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         throw std::runtime_error(
           "fixed-sp SVD target accounting mismatch");
       }
+      token->diagnostics.aggregate_penalty_factor_count =
+        std::accumulate(
+          token->diagnostics.aggregate_factor_call_count.begin(),
+          token->diagnostics.aggregate_factor_call_count.end(), 0);
+      token->diagnostics.aggregate_svd_b_build_count =
+        std::accumulate(
+          token->diagnostics.aggregate_b_build_count.begin(),
+          token->diagnostics.aggregate_b_build_count.end(), 0);
     }
 
     for (int safe_ordinal = 0; safe_ordinal < safe_count; ++safe_ordinal) {
@@ -5619,7 +5764,8 @@ PreparedSStaticShadow test_prepared_s_static_shadow(
   require_prepared_host_identity(handle);
   context->require_usable();
   if (handle->d_X_null == nullptr || handle->d_gram == nullptr ||
-      handle->d_projected_penalties == nullptr) {
+      handle->d_projected_penalties == nullptr ||
+      (handle->has_H && handle->d_projected_H == nullptr)) {
     throw std::runtime_error("prepared static state is unavailable");
   }
 
@@ -5627,6 +5773,7 @@ PreparedSStaticShadow test_prepared_s_static_shadow(
   shadow.n = handle->n;
   shadow.null_dim = handle->q;
   shadow.penalty_count = handle->penalty_count;
+  shadow.has_H = handle->has_H;
   const std::size_t x_null_count =
     matrix_count(handle->n, handle->q, "test shadow X_null");
   const std::size_t gram_count =
@@ -5637,6 +5784,7 @@ PreparedSStaticShadow test_prepared_s_static_shadow(
   shadow.X_null.resize(x_null_count);
   shadow.gram.resize(gram_count);
   shadow.projected_penalties.resize(projected_count);
+  if (handle->has_H) shadow.projected_H.resize(gram_count);
 
   check_cuda(cudaSetDevice(context->device_id),
              "set CUDA device for prepared test shadow");
@@ -5664,6 +5812,10 @@ PreparedSStaticShadow test_prepared_s_static_shadow(
     download(shadow.projected_penalties.data(),
              handle->d_projected_penalties, projected_count,
              "download prepared test shadow projected penalties");
+    if (handle->has_H) {
+      download(shadow.projected_H.data(), handle->d_projected_H, gram_count,
+               "download prepared test shadow projected H");
+    }
     check_cuda(cudaEventRecord(completion_event, context->stream),
                "record prepared test shadow completion");
     check_cuda(cudaEventSynchronize(completion_event),
@@ -5671,6 +5823,14 @@ PreparedSStaticShadow test_prepared_s_static_shadow(
     tracked_cuda_event_destroy(
       context->resource_ledger.get(), &completion_event,
       "destroy prepared test shadow completion event");
+    if (handle->has_H) {
+      handle->projected_H_test_shadow_d2h_count += 1;
+      handle->projected_H_test_shadow_d2h_bytes = checked_add(
+        handle->projected_H_test_shadow_d2h_bytes,
+        allocation_bytes(gram_count, sizeof(double),
+                         "projected H test shadow diagnostics"),
+        "projected H test shadow diagnostics");
+    }
   } catch (...) {
     cleanup_local_cuda_event_noexcept(
       context->resource_ledger.get(), &completion_event);

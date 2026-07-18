@@ -3641,6 +3641,8 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_info(SEXP runtime_s) {
       static_cast<double>(info.svd_workspace_bytes),
     Rcpp::Named("augmented_workspace_bytes") =
       static_cast<double>(info.augmented_workspace_bytes),
+    Rcpp::Named("aggregate_factor_workspace_bytes") =
+      static_cast<double>(info.aggregate_factor_workspace_bytes),
     Rcpp::Named("cuda_toolkit_version") = info.cuda_toolkit_version,
     Rcpp::Named("cuda_driver_version") = info.cuda_driver_version,
     Rcpp::Named("compute_capability_major") =
@@ -3894,6 +3896,10 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_info(SEXP prepared_s) {
       info.augmented_test_shadow_d2h_count,
     Rcpp::Named("augmented_test_shadow_d2h_bytes") =
       static_cast<double>(info.augmented_test_shadow_d2h_bytes),
+    Rcpp::Named("projected_H_test_shadow_d2h_count") =
+      info.projected_H_test_shadow_d2h_count,
+    Rcpp::Named("projected_H_test_shadow_d2h_bytes") =
+      static_cast<double>(info.projected_H_test_shadow_d2h_bytes),
     Rcpp::Named("coefficient_output_capacity") =
       static_cast<double>(info.coefficient_output_capacity),
     Rcpp::Named("generation") = static_cast<double>(info.generation),
@@ -3930,11 +3936,19 @@ extern "C" SEXP C_fixed_sp_cuda_test_prepared_static_shadow(
             shadow.projected_penalties.end(), projected.begin());
   projected.attr("dim") = Rcpp::IntegerVector::create(
     shadow.null_dim, shadow.null_dim, shadow.penalty_count);
-  return Rcpp::List::create(
+  Rcpp::List result = Rcpp::List::create(
     Rcpp::Named("X_null") = X_null,
     Rcpp::Named("gram") = gram,
-    Rcpp::Named("projected_penalties") = projected
+    Rcpp::Named("projected_penalties") = projected,
+    Rcpp::Named("projected_H") = R_NilValue
   );
+  if (shadow.has_H) {
+    Rcpp::NumericMatrix projected_H(shadow.null_dim, shadow.null_dim);
+    std::copy(shadow.projected_H.begin(), shadow.projected_H.end(),
+              projected_H.begin());
+    result["projected_H"] = projected_H;
+  }
+  return result;
   END_RCPP
 }
 
@@ -4121,6 +4135,8 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
   const fastkpc::DeviceResidualInfo info =
     fastkpc::device_residual_info(holder->value);
   const std::size_t targets = static_cast<std::size_t>(info.target_count);
+  const std::size_t aggregate_pivot_count = targets *
+    static_cast<std::size_t>(info.null_dim);
   if (info.target_keys.size() != targets ||
       info.planned_routes.size() != targets ||
       info.executed_routes.size() != targets ||
@@ -4133,6 +4149,11 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
       info.sigma_max.size() != targets ||
       info.smallest_retained_sigma.size() != targets ||
       info.svd_info.size() != targets ||
+      info.aggregate_penalty_root_rank.size() != targets ||
+      info.aggregate_factor_call_count.size() != targets ||
+      info.aggregate_b_build_count.size() != targets ||
+      info.aggregate_penalty_root_pivot.size() != aggregate_pivot_count ||
+      info.aggregate_dstop.size() != targets ||
       info.target_true_batched.size() != targets) {
     Rcpp::stop("fixed-sp residual diagnostics size mismatch");
   }
@@ -4142,6 +4163,9 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
   Rcpp::CharacterVector reroute_reason(info.target_count);
   Rcpp::CharacterVector solver_status(info.target_count);
   Rcpp::LogicalVector target_true_batched(info.target_count);
+  Rcpp::IntegerVector aggregate_penalty_root_rank(info.target_count);
+  Rcpp::List aggregate_penalty_root_pivot(info.target_count);
+  Rcpp::NumericVector aggregate_dstop(info.target_count);
   for (int index = 0; index < info.target_count; ++index) {
     const std::size_t offset = static_cast<std::size_t>(index);
     planned_route[index] =
@@ -4156,6 +4180,31 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
     solver_status[index] =
       fastkpc::fixed_sp_status_name(info.solver_statuses[offset]);
     target_true_batched[index] = info.target_true_batched[offset];
+    const bool executed_svd =
+      info.executed_routes[offset] == fastkpc::FixedSpRoute::AugmentedSvd;
+    if (!executed_svd) {
+      aggregate_penalty_root_rank[index] = NA_INTEGER;
+      aggregate_penalty_root_pivot[index] = Rcpp::IntegerVector(0);
+      aggregate_dstop[index] = NA_REAL;
+      continue;
+    }
+    aggregate_penalty_root_rank[index] =
+      info.aggregate_penalty_root_rank[offset];
+    aggregate_dstop[index] = info.aggregate_dstop[offset];
+    Rcpp::IntegerVector pivot(info.null_dim);
+    std::vector<bool> seen(static_cast<std::size_t>(info.null_dim), false);
+    for (int column = 0; column < info.null_dim; ++column) {
+      const int native_pivot = info.aggregate_penalty_root_pivot[
+        offset * static_cast<std::size_t>(info.null_dim) +
+        static_cast<std::size_t>(column)];
+      if (native_pivot < 0 || native_pivot >= info.null_dim ||
+          seen[static_cast<std::size_t>(native_pivot)]) {
+        Rcpp::stop("fixed-sp aggregate pivot diagnostics are invalid");
+      }
+      seen[static_cast<std::size_t>(native_pivot)] = true;
+      pivot[column] = native_pivot + 1;
+    }
+    aggregate_penalty_root_pivot[index] = pivot;
   }
 
   Rcpp::List result = Rcpp::List::create(
@@ -4175,7 +4224,16 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
     Rcpp::Named("smallest_retained_sigma") =
       Rcpp::wrap(info.smallest_retained_sigma),
     Rcpp::Named("svd_info") = Rcpp::wrap(info.svd_info),
-    Rcpp::Named("target_true_batched") = target_true_batched
+    Rcpp::Named("target_true_batched") = target_true_batched,
+    Rcpp::Named("aggregate_penalty_root_rank") =
+      aggregate_penalty_root_rank,
+    Rcpp::Named("aggregate_penalty_root_pivot") =
+      aggregate_penalty_root_pivot,
+    Rcpp::Named("aggregate_factor_call_count") =
+      Rcpp::wrap(info.aggregate_factor_call_count),
+    Rcpp::Named("aggregate_b_build_count") =
+      Rcpp::wrap(info.aggregate_b_build_count),
+    Rcpp::Named("aggregate_dstop") = aggregate_dstop
   );
   result["native_batch_call"] = info.native_batch_call;
   result["batch_call_count"] = info.batch_call_count;
@@ -4216,6 +4274,14 @@ extern "C" SEXP C_fixed_sp_cuda_residual_info(SEXP residual_s) {
   result["executed_svd_target_count"] = info.executed_svd_target_count;
   result["cholesky_to_svd_count"] = info.cholesky_to_svd_count;
   result["qr_to_svd_count"] = info.qr_to_svd_count;
+  result["aggregate_penalty_factor_count"] =
+    info.aggregate_penalty_factor_count;
+  result["aggregate_svd_b_build_count"] =
+    info.aggregate_svd_b_build_count;
+  result["aggregate_penalty_root_d2h_count"] =
+    info.aggregate_penalty_root_d2h_count;
+  result["aggregate_penalty_root_d2h_bytes"] =
+    static_cast<double>(info.aggregate_penalty_root_d2h_bytes);
   result["output_slot_acquire_count"] = info.output_slot_acquire_count;
   result["output_slot_release_count"] = info.output_slot_release_count;
   result["output_slot_busy_count"] = info.output_slot_busy_count;
