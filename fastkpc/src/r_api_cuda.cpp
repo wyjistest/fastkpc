@@ -3308,6 +3308,21 @@ extern "C" SEXP C_fastkpc_cuda_device_info() {
   END_RCPP
 }
 
+extern "C" SEXP C_fastkpc_cuda_legacy_dcov_gamma_cpp_oracle(
+    SEXP xs,
+    SEXP ys,
+    SEXP numCols,
+    SEXP indexs) {
+  BEGIN_RCPP
+  return fastkpc::legacy_dcov_gamma_cpp_result_to_list(
+    fastkpc::legacy_dcov_gamma_cpp_compute(
+      Rcpp::NumericVector(xs),
+      Rcpp::NumericVector(ys),
+      Rcpp::as<int>(numCols),
+      Rcpp::as<double>(indexs)));
+  END_RCPP
+}
+
 extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda(SEXP matrixs,
                                                    SEXP rhss) {
   BEGIN_RCPP
@@ -8619,6 +8634,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
 static const R_CallMethodDef call_methods[] = {
   {"C_fastkpc_cuda_available", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_available), 0},
   {"C_fastkpc_cuda_device_info", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_device_info), 0},
+  {"C_fastkpc_cuda_legacy_dcov_gamma_cpp_oracle", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_legacy_dcov_gamma_cpp_oracle), 4},
   {"C_legacy_dcov_spectra_matvec_cuda", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda), 2},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_create", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_create), 1},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_apply", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_apply), 2},

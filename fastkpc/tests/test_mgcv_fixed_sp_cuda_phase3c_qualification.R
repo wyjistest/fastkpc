@@ -224,6 +224,12 @@ catalog_artifact_fixture_dir <- file.path(
   "fastkpc", "artifacts", "full_cuda_ci",
   "fixed_sp_cuda_qualification_v1"
 )
+if (!dir.exists(catalog_artifact_fixture_dir)) {
+  catalog_artifact_fixture_dir <- file.path(
+    "fastkpc", "artifacts", "full_cuda_ci",
+    "fixed_sp_cuda_qualification_v1.pre_task8_4692f79_20260719"
+  )
+}
 catalog_target_records_fixture <- readRDS(file.path(
   catalog_artifact_fixture_dir, "target_parity.rds"
 ))
@@ -392,6 +398,19 @@ expected_prepublication_summary_fields <- c(
   "max_fitted_abs_diff", "max_fitted_relative_l2_diff",
   "qualification_subset_hash"
 )
+expected_dcov_summary_fields <- c(
+  "qualification_dcov_logical_test_count",
+  "qualification_dcov_near_alpha_count",
+  "qualification_dcov_unique_residual_key_count",
+  "qualification_dcov_max_absolute_p_value_difference",
+  "qualification_dcov_decision_flip_count",
+  "qualification_dcov_near_alpha_decision_flip_count",
+  "qualification_dcov_backend_error_count",
+  "qualification_dcov_spectra_fallback_count",
+  "qualification_dcov_logical_ids_hash",
+  "qualification_dcov_residual_key_hash",
+  "qualification_dcov_rows_hash"
+)
 expected_publication_summary_fields <- c(
   "artifact_schema_version", "catalog_authenticated", "provenance_mode",
   "head_base_commit", "source_closure_schema_version",
@@ -404,6 +423,38 @@ published_summary_namespace_fixture <- jsonlite::fromJSON(
   file.path(catalog_artifact_fixture_dir, "summary.json"),
   simplifyVector = FALSE
 )
+if (length(setdiff(
+      expected_dcov_summary_fields,
+      names(published_summary_namespace_fixture)
+    )) > 0L) {
+  synthetic_dcov_summary_fixture <- list(
+    qualification_dcov_logical_test_count = 3808L,
+    qualification_dcov_near_alpha_count = 1478L,
+    qualification_dcov_unique_residual_key_count = 6143L,
+    qualification_dcov_max_absolute_p_value_difference = 0,
+    qualification_dcov_decision_flip_count = 0L,
+    qualification_dcov_near_alpha_decision_flip_count = 0L,
+    qualification_dcov_backend_error_count = 0L,
+    qualification_dcov_spectra_fallback_count = 0L,
+    qualification_dcov_logical_ids_hash = strrep("a", 64L),
+    qualification_dcov_residual_key_hash = strrep("b", 64L),
+    qualification_dcov_rows_hash = strrep("c", 64L)
+  )
+  synthetic_publication_summary_fixture <-
+    published_summary_namespace_fixture[
+      expected_publication_summary_fields
+    ]
+  synthetic_publication_summary_fixture$artifact_schema_version <-
+    "full-cuda-ci-fixed-sp-qualification-v2"
+  synthetic_publication_summary_fixture$payload_file_count <- 14L
+  published_summary_namespace_fixture <- c(
+    published_summary_namespace_fixture[
+      expected_prepublication_summary_fields
+    ],
+    synthetic_dcov_summary_fixture,
+    synthetic_publication_summary_fixture
+  )
+}
 canonical_input_summary_fixture <- published_summary_namespace_fixture[
   expected_prepublication_summary_fields
 ]
@@ -417,11 +468,15 @@ wrong_scope_summary_fixture <- canonical_input_summary_fixture
 wrong_scope_summary_fixture$scope <- "iteration"
 input_summary_failure_cases <- c(
   list(scope_iteration = wrong_scope_summary_fixture),
-  setNames(lapply(expected_publication_summary_fields, function(field) {
+  setNames(lapply(c(
+    expected_dcov_summary_fields, expected_publication_summary_fields
+  ), function(field) {
     value <- canonical_input_summary_fixture
     value[[field]] <- published_summary_namespace_fixture[[field]]
     value
-  }), paste0("reserved_", expected_publication_summary_fields)),
+  }), paste0("reserved_", c(
+    expected_dcov_summary_fields, expected_publication_summary_fields
+  ))),
   list(duplicate_scope = c(
     canonical_input_summary_fixture, list(scope = "qualification")
   ))
@@ -545,10 +600,7 @@ assert_identical(
   "qualification JSON preserves exact integer/logical/double scalar types"
 )
 
-schema_fixture_dir <- file.path(
-  "fastkpc", "artifacts", "full_cuda_ci",
-  "fixed_sp_cuda_qualification_v1"
-)
+schema_fixture_dir <- catalog_artifact_fixture_dir
 schema_fixture <- list(
   target_records = readRDS(file.path(schema_fixture_dir, "target_parity.rds")),
   batch_records = readRDS(file.path(schema_fixture_dir, "batch_metrics.rds")),
@@ -1136,6 +1188,7 @@ expected_files <- c(
   "target_parity.rds", "target_parity.csv",
   "batch_metrics.rds", "batch_metrics.csv",
   "setup_metrics.rds", "setup_metrics.csv",
+  "qualification_dcov_parity.rds", "qualification_dcov_parity.csv",
   "runtime_metrics.csv", "stage_timing.csv", "fallbacks.csv",
   "failures.csv", "commands.txt", "environment.txt", "manifest.json",
   "summary.json"
@@ -1149,6 +1202,9 @@ assert_identical(
 target_records <- readRDS(file.path(output_dir, "target_parity.rds"))
 batch_records <- readRDS(file.path(output_dir, "batch_metrics.rds"))
 setup_records <- readRDS(file.path(output_dir, "setup_metrics.rds"))
+dcov_records <- readRDS(file.path(
+  output_dir, "qualification_dcov_parity.rds"
+))
 target_csv <- utils::read.csv(
   file.path(output_dir, "target_parity.csv"),
   stringsAsFactors = FALSE, check.names = FALSE
@@ -1159,6 +1215,10 @@ batch_csv <- utils::read.csv(
 )
 setup_csv <- utils::read.csv(
   file.path(output_dir, "setup_metrics.csv"),
+  stringsAsFactors = FALSE, check.names = FALSE
+)
+dcov_csv <- utils::read.csv(
+  file.path(output_dir, "qualification_dcov_parity.csv"),
   stringsAsFactors = FALSE, check.names = FALSE
 )
 runtime_records <- utils::read.csv(
@@ -1191,6 +1251,7 @@ assert_true(
   is.data.frame(target_records) && nrow(target_records) == 6143L &&
     is.data.frame(batch_records) && nrow(batch_records) == 2061L &&
     is.data.frame(setup_records) && nrow(setup_records) == 2061L &&
+    is.data.frame(dcov_records) && nrow(dcov_records) == 3808L &&
     is.data.frame(runtime_records) && nrow(runtime_records) == 3L &&
     identical(names(runtime_records), expected_runtime_names) &&
     identical(runtime_records$stage,
@@ -1214,6 +1275,8 @@ assert_true(
     nrow(batch_csv) == 2061L &&
     identical(names(setup_csv), expected_setup_rds_names) &&
     nrow(setup_csv) == 2061L &&
+    identical(names(dcov_csv), names(dcov_records)) &&
+    nrow(dcov_csv) == 3808L &&
     identical(target_csv$prepared_s_key_sha256,
               target_records$prepared_s_key_sha256) &&
     identical(target_csv$residual_key_sha256,
@@ -1248,11 +1311,12 @@ assert_true(
   "qualification publishes no fallback or failure rows"
 )
 assert_true(
-  is.data.frame(stage_timing) && nrow(stage_timing) == 4L &&
+  is.data.frame(stage_timing) && nrow(stage_timing) == 5L &&
     identical(names(stage_timing), c("stage", "elapsed_seconds")) &&
     identical(stage_timing$stage, c(
       "cuda_initialize", "capture_execution_provenance",
-      "qualification_numeric_lifecycle", "verify_execution_provenance"
+      "qualification_numeric_lifecycle", "qualification_dcov_parity",
+      "verify_execution_provenance"
     )) && typeof(stage_timing$stage) == "character" &&
     is.null(attributes(stage_timing$stage)) &&
     typeof(stage_timing$elapsed_seconds) == "double" &&
@@ -1293,7 +1357,8 @@ expected_summary_fields <- c(
   "svd_checkpoint_record_count", "svd_checkpoint_wait_count",
   "max_residual_abs_diff", "max_residual_relative_l2_diff",
   "max_fitted_abs_diff", "max_fitted_relative_l2_diff",
-  "qualification_subset_hash", "artifact_schema_version",
+  "qualification_subset_hash", expected_dcov_summary_fields,
+  "artifact_schema_version",
   "catalog_authenticated", "provenance_mode", "head_base_commit",
   "source_closure_schema_version", "source_closure_count",
   "source_closure_sha256", "execution_snapshot_sha256",
@@ -1318,6 +1383,10 @@ expected_manifest_fields <- c(
   "device_id", "phase0_dir", "phase1_dir", "phase2_dir", "data_path",
   "qualification_subset_hash", "ordered_setup_key_digest",
   "ordered_target_key_digest", "route_status_hash", "numeric_hash",
+  "qualification_logical_tests_sha256",
+  "qualification_dcov_logical_ids_hash",
+  "qualification_dcov_residual_key_hash",
+  "qualification_dcov_rows_hash",
   "payload_file_sha256", "publication_order"
 )
 assert_identical(
@@ -1339,7 +1408,11 @@ for (field in c(
   "native_library_sha256",
   "execution_snapshot_sha256", "phase0_dir", "phase1_dir", "phase2_dir",
   "data_path", "qualification_subset_hash", "ordered_setup_key_digest",
-  "ordered_target_key_digest", "route_status_hash", "numeric_hash"
+  "ordered_target_key_digest", "route_status_hash", "numeric_hash",
+  "qualification_logical_tests_sha256",
+  "qualification_dcov_logical_ids_hash",
+  "qualification_dcov_residual_key_hash",
+  "qualification_dcov_rows_hash"
 )) {
   assert_json_scalar(
     manifest[[field]], "character",
@@ -1986,6 +2059,11 @@ assert_true(
     ) && identical(
       environment_metadata[["cuda_driver_version"]],
       as.character(runtime_records$cuda_driver_version[[final_runtime]])
+    ) && identical(
+      environment_metadata[["qualification_dcov_backend"]], "cpp"
+    ) && identical(
+      environment_metadata[["qualification_dcov_low_rank_backend"]],
+      "spectra"
     ),
   "environment CUDA toolkit/driver versions match final runtime evidence"
 )
@@ -2227,7 +2305,9 @@ for (field in c(
   "ordered_setup_key_digest", "ordered_target_key_digest",
   "route_status_hash", "numeric_hash", "artifact_schema_version",
   "provenance_mode", "head_base_commit", "source_closure_schema_version",
-  "source_closure_sha256", "execution_snapshot_sha256", "native_library_sha256"
+  "source_closure_sha256", "execution_snapshot_sha256",
+  "native_library_sha256", "qualification_dcov_logical_ids_hash",
+  "qualification_dcov_residual_key_hash", "qualification_dcov_rows_hash"
 )) {
   assert_json_scalar(
     summary[[field]], "character",
@@ -2246,6 +2326,7 @@ for (field in c(
 for (field in c(
   "max_residual_abs_diff", "max_residual_relative_l2_diff",
   "max_fitted_abs_diff", "max_fitted_relative_l2_diff",
+  "qualification_dcov_max_absolute_p_value_difference",
   "elapsed_seconds", "stage_timing_total_seconds"
 )) {
   assert_json_scalar(
@@ -2261,6 +2342,20 @@ assert_json_scalar(
   summary$source_closure_count, "integer",
   "summary source closure count is one exact integer"
 )
+for (field in setdiff(
+  expected_dcov_summary_fields,
+  c(
+    "qualification_dcov_max_absolute_p_value_difference",
+    "qualification_dcov_logical_ids_hash",
+    "qualification_dcov_residual_key_hash",
+    "qualification_dcov_rows_hash"
+  )
+)) {
+  assert_json_scalar(
+    summary[[field]], "integer",
+    paste("summary dCov integer scalar type is exact", field)
+  )
+}
 assert_identical(
   summary[names(expected)], expected,
   "summary counts match independently recomputed RDS evidence"
@@ -2416,6 +2511,36 @@ assert_identical(
   "manifest numeric hash is recomputed from published target rows"
 )
 
+qualification_logical_tests <- readRDS(file.path(
+  phase2_dir, "qualification_logical_tests.rds"
+))
+recomputed_dcov <-
+  fastkpc_full_cuda_fixed_sp_summarize_qualification_dcov_records(
+    dcov_records, qualification_logical_tests,
+    target_records$residual_key_sha256
+  )
+assert_true(
+  all(vapply(names(recomputed_dcov), function(field) {
+    identical(summary[[field]], recomputed_dcov[[field]])
+  }, logical(1L))) && identical(
+    manifest$qualification_logical_tests_sha256,
+    digest::digest(
+      file = file.path(phase2_dir, "qualification_logical_tests.rds"),
+      algo = "sha256", serialize = FALSE
+    )
+  ) && identical(
+    manifest$qualification_dcov_logical_ids_hash,
+    recomputed_dcov$qualification_dcov_logical_ids_hash
+  ) && identical(
+    manifest$qualification_dcov_residual_key_hash,
+    recomputed_dcov$qualification_dcov_residual_key_hash
+  ) && identical(
+    manifest$qualification_dcov_rows_hash,
+    recomputed_dcov$qualification_dcov_rows_hash
+  ),
+  "qualification dCov summary and manifest are recomputed from RDS rows"
+)
+
 payload_hashes <- unlist(manifest$payload_file_sha256, use.names = TRUE)
 payload_names <- setdiff(expected_files, c("manifest.json", "summary.json"))
 assert_identical(
@@ -2433,7 +2558,7 @@ assert_identical(
 )
 assert_true(
   identical(manifest$schema_version,
-            "full-cuda-ci-fixed-sp-qualification-v1") &&
+            "full-cuda-ci-fixed-sp-qualification-v2") &&
     identical(manifest$scope, "qualification") &&
     identical(unname(unlist(manifest$publication_order, use.names = FALSE)),
               c(payload_names, "manifest.json", "summary.json")) &&

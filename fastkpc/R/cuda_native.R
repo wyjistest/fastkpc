@@ -51,6 +51,33 @@ fastkpc_cuda_device_info <- function() {
   .Call("C_fastkpc_cuda_device_info", PACKAGE = "fastkpc_cuda")
 }
 
+fastkpc_cuda_legacy_dcov_gamma_cpp_oracle <- function(
+    x, y, numCol = as.integer(floor(length(x) / 10)), index = 1) {
+  bare_double_vector <- function(value) {
+    typeof(value) == "double" && length(value) > 5L &&
+      !is.object(value) && is.null(attributes(value)) &&
+      all(is.finite(value))
+  }
+  num_col_clean <- typeof(numCol) == "integer" && length(numCol) == 1L &&
+    !is.object(numCol) && is.null(attributes(numCol)) &&
+    !is.na(numCol) && numCol > 0L && numCol < length(x)
+  index_clean <- typeof(index) %in% c("integer", "double") &&
+    length(index) == 1L &&
+    !is.object(index) && is.null(attributes(index)) &&
+    is.finite(index) && index >= 0 && index <= 2
+  if (!bare_double_vector(x) || !bare_double_vector(y) ||
+      !identical(length(x), length(y)) || !isTRUE(num_col_clean) ||
+      !isTRUE(index_clean)) {
+    stop("registered legacy dCov gamma inputs are malformed", call. = FALSE)
+  }
+  index <- as.double(index)
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_fastkpc_cuda_legacy_dcov_gamma_cpp_oracle",
+    x, y, numCol, index, PACKAGE = "fastkpc_cuda"
+  )
+}
+
 legacy_dcov_spectra_matvec_cuda <- function(a, rhs) {
   load_fastkpc_cuda_native()
   a <- as.matrix(a)

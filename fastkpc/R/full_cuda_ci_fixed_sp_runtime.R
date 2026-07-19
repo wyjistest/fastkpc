@@ -5459,10 +5459,875 @@ fastkpc_full_cuda_fixed_sp_phase3c_summarize <- function(
   summary
 }
 
+fastkpc_full_cuda_fixed_sp_residual_registry_state <- function(registry) {
+  state <- attr(
+    registry, "fastkpc_fixed_sp_residual_registry_state", exact = TRUE
+  )
+  if (!is.environment(registry) || !is.environment(state) ||
+      !identical(parent.env(registry), emptyenv()) ||
+      !identical(parent.env(state), emptyenv()) ||
+      !identical(state$schema_version,
+                 "full-cuda-ci-fixed-sp-residual-registry-v1") ||
+      !is.logical(state$cleared) || length(state$cleared) != 1L ||
+      is.na(state$cleared)) {
+    stop("qualification residual registry is malformed", call. = FALSE)
+  }
+  keys_clean <- typeof(state$expected_keys) == "character" &&
+    !is.object(state$expected_keys) &&
+    is.null(attributes(state$expected_keys)) &&
+    !anyNA(state$expected_keys) && !anyDuplicated(state$expected_keys) &&
+    all(grepl("^[0-9a-f]{64}$", state$expected_keys))
+  owners_clean <- typeof(state$expected_owners) == "character" &&
+    !is.object(state$expected_owners) &&
+    is.null(attributes(state$expected_owners)) &&
+    length(state$expected_owners) == length(state$expected_keys) &&
+    !anyNA(state$expected_owners) &&
+    all(grepl("^[0-9a-f]{64}$", state$expected_owners))
+  hashes_clean <- typeof(state$captured_hashes) == "character" &&
+    !is.object(state$captured_hashes) &&
+    is.null(attributes(state$captured_hashes)) &&
+    length(state$captured_hashes) == length(state$expected_keys) &&
+    all(is.na(state$captured_hashes) |
+          grepl("^[0-9a-f]{64}$", state$captured_hashes))
+  counters_clean <- typeof(state$n) == "integer" &&
+    length(state$n) == 1L && !is.object(state$n) &&
+    is.null(attributes(state$n)) && !is.na(state$n) &&
+    typeof(state$next_index) == "integer" &&
+    length(state$next_index) == 1L && !is.object(state$next_index) &&
+    is.null(attributes(state$next_index)) && !is.na(state$next_index)
+  if (!isTRUE(keys_clean) || !isTRUE(owners_clean) ||
+      !isTRUE(hashes_clean) || !isTRUE(counters_clean)) {
+    stop("qualification residual registry is malformed", call. = FALSE)
+  }
+  if (isTRUE(state$cleared)) {
+    cleared_exact <- identical(state$expected_keys, character()) &&
+      identical(state$expected_owners, character()) &&
+      identical(state$captured_hashes, character()) &&
+      identical(state$n, 0L) && identical(state$next_index, 0L)
+    if (!isTRUE(cleared_exact)) {
+      stop("qualification residual registry is malformed", call. = FALSE)
+    }
+    return(state)
+  }
+  expected_count <- length(state$expected_keys)
+  captured_count <- state$next_index - 1L
+  captured_prefix_exact <- captured_count == 0L || all(!is.na(
+    state$captured_hashes[seq_len(captured_count)]
+  ))
+  uncaptured_suffix_exact <- state$next_index > expected_count || all(is.na(
+    state$captured_hashes[state$next_index:expected_count]
+  ))
+  active_exact <- expected_count > 0L && state$n > 0L &&
+    state$next_index >= 1L &&
+    state$next_index <= expected_count + 1L &&
+    identical(
+      order(state$expected_owners, state$expected_keys, method = "radix"),
+      seq_along(state$expected_keys)
+    ) && captured_prefix_exact && uncaptured_suffix_exact
+  if (!isTRUE(active_exact)) {
+    stop("qualification residual registry is malformed", call. = FALSE)
+  }
+  state
+}
+
+fastkpc_full_cuda_fixed_sp_residual_registry_create <- function(
+    expected_keys, expected_owners, n) {
+  keys_clean <- typeof(expected_keys) == "character" &&
+    !is.object(expected_keys) && is.null(attributes(expected_keys)) &&
+    length(expected_keys) > 0L && !anyNA(expected_keys) &&
+    !anyDuplicated(expected_keys) &&
+    all(grepl("^[0-9a-f]{64}$", expected_keys))
+  owners_clean <- typeof(expected_owners) == "character" &&
+    !is.object(expected_owners) && is.null(attributes(expected_owners)) &&
+    length(expected_owners) == length(expected_keys) &&
+    !anyNA(expected_owners) &&
+    all(grepl("^[0-9a-f]{64}$", expected_owners))
+  n_clean <- typeof(n) == "integer" && length(n) == 1L &&
+    !is.object(n) && is.null(attributes(n)) && !is.na(n) && n > 0L
+  order_clean <- isTRUE(keys_clean) && isTRUE(owners_clean) && identical(
+    order(expected_owners, expected_keys, method = "radix"),
+    seq_along(expected_keys)
+  )
+  if (!isTRUE(keys_clean) || !isTRUE(owners_clean) || !isTRUE(n_clean) ||
+      !isTRUE(order_clean)) {
+    stop("qualification residual registry corpus is malformed",
+         call. = FALSE)
+  }
+  registry <- new.env(hash = TRUE, parent = emptyenv())
+  state <- new.env(hash = FALSE, parent = emptyenv())
+  state$schema_version <- "full-cuda-ci-fixed-sp-residual-registry-v1"
+  state$expected_keys <- expected_keys
+  state$expected_owners <- expected_owners
+  state$captured_hashes <- rep(NA_character_, length(expected_keys))
+  state$n <- n
+  state$next_index <- 1L
+  state$cleared <- FALSE
+  attr(registry, "fastkpc_fixed_sp_residual_registry_state") <- state
+  registry
+}
+
+fastkpc_full_cuda_fixed_sp_residual_registry_capture <- function(
+    registry, owner, target_keys, residuals) {
+  state <- fastkpc_full_cuda_fixed_sp_residual_registry_state(registry)
+  if (isTRUE(state$cleared)) {
+    stop("qualification residual registry was cleared", call. = FALSE)
+  }
+  owner_clean <- typeof(owner) == "character" && length(owner) == 1L &&
+    !is.object(owner) && is.null(attributes(owner)) && !anyNA(owner) &&
+    grepl("^[0-9a-f]{64}$", owner)
+  keys_clean <- typeof(target_keys) == "character" &&
+    !is.object(target_keys) && is.null(attributes(target_keys)) &&
+    length(target_keys) > 0L && !anyNA(target_keys) &&
+    !anyDuplicated(target_keys) &&
+    all(grepl("^[0-9a-f]{64}$", target_keys))
+  matrix_clean <- is.matrix(residuals) && is.double(residuals) &&
+    !is.object(residuals) && identical(
+      dim(residuals), c(state$n, as.integer(length(target_keys)))
+    )
+  if (!isTRUE(owner_clean) || !isTRUE(keys_clean)) {
+    stop("qualification residual registry capture is malformed",
+         call. = FALSE)
+  }
+  if (!isTRUE(matrix_clean)) {
+    stop("qualification residual length or shape is invalid",
+         call. = FALSE)
+  }
+  if (any(!is.finite(residuals))) {
+    stop("qualification residual registry received nonfinite values",
+         call. = FALSE)
+  }
+  duplicate <- target_keys[vapply(target_keys, exists, logical(1L),
+                                  envir = registry, inherits = FALSE)]
+  if (length(duplicate) > 0L) {
+    stop("qualification residual registry duplicate residual key: ",
+         duplicate[[1L]], call. = FALSE)
+  }
+  positions <- match(target_keys, state$expected_keys)
+  if (anyNA(positions)) {
+    stop("qualification residual registry unexpected residual key: ",
+         target_keys[[which(is.na(positions))[[1L]]]], call. = FALSE)
+  }
+  if (any(state$expected_owners[positions] != owner)) {
+    stop("qualification residual owner does not match authenticated owner",
+         call. = FALSE)
+  }
+  end_index <- state$next_index + length(target_keys) - 1L
+  if (end_index > length(state$expected_keys) || !identical(
+        target_keys,
+        state$expected_keys[state$next_index:end_index]
+      )) {
+    stop("qualification canonical residual order mismatch", call. = FALSE)
+  }
+  values <- lapply(seq_along(target_keys), function(column) {
+    as.numeric(residuals[, column])
+  })
+  hashes <- vapply(
+    values, fastkpc_full_cuda_census_metadata_hash, character(1L)
+  )
+  for (column in seq_along(target_keys)) {
+    key <- target_keys[[column]]
+    assign(key, values[[column]], envir = registry)
+    lockBinding(key, registry)
+    state$captured_hashes[[state$next_index + column - 1L]] <-
+      hashes[[column]]
+  }
+  state$next_index <- as.integer(end_index + 1L)
+  invisible(registry)
+}
+
+fastkpc_full_cuda_fixed_sp_residual_registry_validate <- function(
+    registry, target_records = NULL) {
+  state <- fastkpc_full_cuda_fixed_sp_residual_registry_state(registry)
+  if (isTRUE(state$cleared)) {
+    stop("qualification residual registry was cleared", call. = FALSE)
+  }
+  actual <- ls(registry, all.names = TRUE, sorted = TRUE)
+  expected_sorted <- sort(state$expected_keys, method = "radix")
+  extra <- setdiff(actual, expected_sorted)
+  if (length(extra) > 0L) {
+    stop("qualification residual registry has extra vectors: ",
+         extra[[1L]], call. = FALSE)
+  }
+  missing <- setdiff(expected_sorted, actual)
+  if (length(missing) > 0L ||
+      state$next_index != length(state$expected_keys) + 1L) {
+    stop("qualification residual registry has missing residual vectors",
+         call. = FALSE)
+  }
+  valid <- all(vapply(state$expected_keys, function(key) {
+    value <- get(key, envir = registry, inherits = FALSE)
+    is.double(value) && length(value) == state$n &&
+      !is.object(value) && is.null(attributes(value)) &&
+      all(is.finite(value))
+  }, logical(1L)))
+  if (!isTRUE(valid)) {
+    stop("qualification residual registry contains an invalid vector",
+         call. = FALSE)
+  }
+  actual_hashes <- vapply(state$expected_keys, function(key) {
+    fastkpc_full_cuda_census_metadata_hash(
+      get(key, envir = registry, inherits = FALSE)
+    )
+  }, character(1L))
+  names(actual_hashes) <- NULL
+  if (!identical(actual_hashes, state$captured_hashes)) {
+    stop("qualification residual registry residual hash mismatch",
+         call. = FALSE)
+  }
+  bindings_locked <- all(vapply(
+    state$expected_keys, bindingIsLocked, logical(1L), env = registry
+  ))
+  if (!isTRUE(bindings_locked)) {
+    stop("qualification residual registry binding is unlocked",
+         call. = FALSE)
+  }
+  if (!is.null(target_records)) {
+    required_fields <- c("residual_key_sha256", "residual_numeric_hash")
+    target_count <- length(state$expected_keys)
+    target_clean <- is.data.frame(target_records) &&
+      nrow(target_records) == target_count &&
+      all(required_fields %in% names(target_records)) &&
+      all(vapply(required_fields, function(field) {
+        value <- target_records[[field]]
+        typeof(value) == "character" && length(value) == target_count &&
+          !is.object(value) && is.null(attributes(value)) &&
+          !anyNA(value) && all(grepl("^[0-9a-f]{64}$", value))
+      }, logical(1L))) &&
+      !anyDuplicated(target_records$residual_key_sha256)
+    if (!isTRUE(target_clean)) {
+      stop("qualification Task 7 residual hash authority is malformed",
+           call. = FALSE)
+    }
+    if (!identical(
+          target_records$residual_key_sha256, state$expected_keys
+        )) {
+      stop("qualification Task 7 residual key corpus mismatch",
+           call. = FALSE)
+    }
+    if (!identical(
+          target_records$residual_numeric_hash, state$captured_hashes
+        )) {
+      stop("qualification Task 7 residual numeric hash mismatch",
+           call. = FALSE)
+    }
+  }
+  state$expected_keys
+}
+
+fastkpc_full_cuda_fixed_sp_residual_registry_clear <- function(registry) {
+  state <- fastkpc_full_cuda_fixed_sp_residual_registry_state(registry)
+  entries <- ls(registry, all.names = TRUE, sorted = FALSE)
+  for (key in entries) {
+    if (bindingIsLocked(key, registry)) unlockBinding(key, registry)
+  }
+  if (length(entries) > 0L) rm(list = entries, envir = registry)
+  state$expected_keys <- character()
+  state$expected_owners <- character()
+  state$captured_hashes <- character()
+  state$n <- 0L
+  state$next_index <- 0L
+  state$cleared <- TRUE
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_fixed_sp_with_legacy_dcov_backend <- function(fun) {
+  if (!is.function(fun)) {
+    stop("qualification dCov backend callback is invalid", call. = FALSE)
+  }
+  variables <- c(
+    "FASTKPC_LEGACY_DCOV_GAMMA_BACKEND",
+    "FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK"
+  )
+  prior <- Sys.getenv(variables, unset = NA_character_)
+  on.exit({
+    for (index in seq_along(variables)) {
+      name <- variables[[index]]
+      value <- prior[[index]]
+      if (is.na(value)) {
+        Sys.unsetenv(name)
+      } else {
+        do.call(Sys.setenv, setNames(list(value), name))
+      }
+    }
+  }, add = TRUE)
+  Sys.setenv(
+    FASTKPC_LEGACY_DCOV_GAMMA_BACKEND = "cpp",
+    FASTKPC_LEGACY_DCOV_GAMMA_CPP_LOW_RANK = "spectra"
+  )
+  fun()
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_dcov_core <- function() {
+  core_name <- ".fastkpc_full_cuda_run_prepared_s_dcov_parity_core"
+  if (!exists(core_name, mode = "function", inherits = TRUE)) {
+    stop("qualified Prepared-S dCov core is unavailable", call. = FALSE)
+  }
+  core <- get(core_name, mode = "function", inherits = TRUE)
+  expected_formals <- c(
+    "inputs", "logical_tests", "residuals", "oracle_manifest",
+    "oracle_fun", "scope"
+  )
+  if (!identical(names(formals(core)), expected_formals)) {
+    stop("qualified Prepared-S dCov core interface changed",
+         call. = FALSE)
+  }
+  numeric_replacements <- 0L
+  message_replacements <- 0L
+  old_message <- "Prepared-S dCov p-value drift exceeds 1e-12: "
+  new_message <- "Prepared-S dCov p-value drift exceeds 1e-10: "
+  patch_node <- function(node) {
+    if (is.double(node) && length(node) == 1L &&
+        !is.object(node) && is.null(attributes(node)) &&
+        identical(node, 1e-12)) {
+      numeric_replacements <<- numeric_replacements + 1L
+      return(1e-10)
+    }
+    if (is.character(node) && length(node) == 1L &&
+        !is.object(node) && is.null(attributes(node)) &&
+        identical(node, old_message)) {
+      message_replacements <<- message_replacements + 1L
+      return(new_message)
+    }
+    if (is.call(node)) {
+      result <- node
+      for (index in seq_along(node)) {
+        result[index] <- list(patch_node(node[[index]]))
+      }
+      return(result)
+    }
+    if (is.pairlist(node)) {
+      return(as.pairlist(lapply(node, patch_node)))
+    }
+    if (is.expression(node)) {
+      return(as.expression(lapply(node, patch_node)))
+    }
+    node
+  }
+  patched_body <- patch_node(body(core))
+  if (numeric_replacements != 1L || message_replacements != 1L) {
+    stop("qualified Prepared-S dCov core tolerance shape changed",
+         call. = FALSE)
+  }
+  patched <- core
+  body(patched) <- patched_body
+  if (!identical(formals(patched), formals(core)) ||
+      !identical(environment(patched), environment(core))) {
+    stop("qualified Prepared-S dCov core clone is malformed",
+         call. = FALSE)
+  }
+  patched
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_dcov_diagnostic_schema <- function() {
+  names <- c(
+    "n", "numCol", "index", "lowrank_mode",
+    "lowrank_full_eig_count", "lowrank_spectra_count",
+    "lowrank_spectra_converged_count", "lowrank_spectra_failed_count",
+    "lowrank_spectra_fallback_full_eig_count",
+    "lowrank_spectra_iterations", "lowrank_spectra_nconv",
+    "lowrank_spectra_ncv", "lowrank_spectra_tol",
+    "lowrank_spectra_matvec_count"
+  )
+  types <- setNames(rep.int("integer", length(names)), names)
+  types[c("index", "lowrank_spectra_tol")] <- "double"
+  types[["lowrank_mode"]] <- "character"
+  list(names = names, types = types)
+}
+
+fastkpc_full_cuda_fixed_sp_qualification_dcov_schema <- function() {
+  logical_names <- c(
+    "logical_sequence_id", "source_sequence_id", "source_task_index",
+    "level", "x", "y", "S_key", "S_size", "formula_class",
+    "reference_p_value", "alpha", "reference_decision",
+    "reference_independent", "deletes_edge", "selected_sepset",
+    "signed_distance_from_alpha", "absolute_distance_from_alpha",
+    "signed_log_ratio_from_alpha", "absolute_log_distance_from_alpha",
+    "residual_key_x", "residual_key_y", "near_alpha",
+    "selection_reasons"
+  )
+  names <- c(
+    "parity_scope", logical_names, "index", "numCol", "backend",
+    "low_rank_backend", "p_value", "p_value_difference",
+    "absolute_p_value_difference", "p_value_exact",
+    "signed_alpha_distance", "decision", "independent",
+    "decision_flip", "backend_error", "spectra_fallback", "diagnostics"
+  )
+  integer <- c(
+    "logical_sequence_id", "source_sequence_id", "source_task_index",
+    "level", "x", "y", "S_size", "index", "numCol"
+  )
+  double <- c(
+    "reference_p_value", "alpha", "signed_distance_from_alpha",
+    "absolute_distance_from_alpha", "signed_log_ratio_from_alpha",
+    "absolute_log_distance_from_alpha", "p_value",
+    "p_value_difference", "absolute_p_value_difference",
+    "signed_alpha_distance"
+  )
+  logical <- c(
+    "reference_independent", "deletes_edge", "selected_sepset",
+    "near_alpha", "p_value_exact", "independent", "decision_flip",
+    "backend_error", "spectra_fallback"
+  )
+  list_fields <- c("selection_reasons", "diagnostics")
+  character <- setdiff(names, c(integer, double, logical, list_fields))
+  types <- setNames(rep.int(NA_character_, length(names)), names)
+  types[integer] <- "integer"
+  types[double] <- "double"
+  types[logical] <- "logical"
+  types[list_fields] <- "list"
+  types[character] <- "character"
+  if (anyNA(types) || anyDuplicated(names) ||
+      !identical(names(types), names)) {
+    stop("internal qualification dCov schema is malformed", call. = FALSE)
+  }
+  list(
+    names = names, types = types, list_fields = list_fields,
+    logical_names = logical_names
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_sanitize_dcov_diagnostic <- function(value) {
+  schema <-
+    fastkpc_full_cuda_fixed_sp_qualification_dcov_diagnostic_schema()
+  if (!is.list(value) || is.object(value) ||
+      length(setdiff(schema$names, names(value))) > 0L) {
+    stop("qualification dCov diagnostic is malformed", call. = FALSE)
+  }
+  fastkpc_full_cuda_prepared_s_validate_dcov_spectra_diagnostics(
+    value, numCol = 35L
+  )
+  result <- value[schema$names]
+  clean <- identical(names(result), schema$names) &&
+    all(vapply(schema$names, function(field) {
+      field_value <- result[[field]]
+      typeof(field_value) == schema$types[[field]] &&
+        length(field_value) == 1L && !is.object(field_value) &&
+        is.null(attributes(field_value)) && !anyNA(field_value) &&
+        if (typeof(field_value) %in% c("integer", "double")) {
+          is.finite(field_value)
+        } else {
+          nzchar(field_value)
+        }
+    }, logical(1L))) && identical(result$n, 351L) &&
+    identical(result$numCol, 35L) && identical(result$index, 1) &&
+    identical(result$lowrank_mode, "spectra")
+  if (!isTRUE(clean)) {
+    stop("qualification dCov diagnostic is malformed", call. = FALSE)
+  }
+  result
+}
+
+fastkpc_full_cuda_fixed_sp_validate_qualification_dcov_frame <- function(
+    value) {
+  schema <- fastkpc_full_cuda_fixed_sp_qualification_dcov_schema()
+  if (!is.data.frame(value) || nrow(value) < 1L ||
+      !identical(names(value), schema$names)) {
+    stop("qualification dCov row schema mismatch", call. = FALSE)
+  }
+  clean <- all(vapply(schema$names, function(field) {
+    column <- value[[field]]
+    if (field %in% schema$list_fields) {
+      typeof(column) == "list" && length(column) == nrow(value) &&
+        is.object(column) &&
+        identical(attributes(column), list(class = "AsIs"))
+    } else {
+      typeof(column) == schema$types[[field]] &&
+        length(column) == nrow(value) && !is.object(column) &&
+        is.null(attributes(column)) && !anyNA(column)
+    }
+  }, logical(1L))) && all(vapply(
+    value$selection_reasons,
+    function(element) {
+      typeof(element) == "character" && !is.object(element) &&
+        is.null(attributes(element)) && !anyNA(element)
+    }, logical(1L)
+  )) && all(vapply(
+    value$diagnostics,
+    function(element) isTRUE(tryCatch({
+      identical(
+        fastkpc_full_cuda_fixed_sp_sanitize_dcov_diagnostic(element),
+        element
+      )
+    }, error = function(error) FALSE)),
+    logical(1L)
+  ))
+  if (!isTRUE(clean)) {
+    stop("qualification dCov row schema mismatch", call. = FALSE)
+  }
+  TRUE
+}
+
+fastkpc_full_cuda_fixed_sp_build_qualification_dcov_records <- function(
+    logical_tests, parity_rows) {
+  schema <- fastkpc_full_cuda_fixed_sp_qualification_dcov_schema()
+  parity_names <- c(
+    "parity_scope", "logical_sequence_id", "residual_key_x",
+    "residual_key_y", "index", "numCol", "alpha",
+    "reference_p_value", "p_value", "p_value_drift",
+    "absolute_p_value_drift", "p_value_exact",
+    "reference_signed_alpha_distance", "signed_alpha_distance",
+    "reference_decision", "reference_independent", "decision",
+    "decision_identical", "spectra_no_fallback", "diagnostics"
+  )
+  if (!is.data.frame(logical_tests) || nrow(logical_tests) < 1L ||
+      !identical(names(logical_tests), schema$logical_names) ||
+      !is.data.frame(parity_rows) ||
+      nrow(parity_rows) != nrow(logical_tests) ||
+      !identical(names(parity_rows), parity_names)) {
+    stop("qualification dCov build inputs are malformed", call. = FALSE)
+  }
+  logical_ids <- logical_tests$logical_sequence_id
+  logical_clean <- typeof(logical_ids) == "integer" &&
+    !anyNA(logical_ids) && !anyDuplicated(logical_ids) &&
+    identical(logical_ids, sort(logical_ids, method = "radix")) &&
+    all(grepl("^[0-9a-f]{64}$", logical_tests$residual_key_x)) &&
+    all(grepl("^[0-9a-f]{64}$", logical_tests$residual_key_y)) &&
+    identical(parity_rows$parity_scope,
+              rep("qualification", nrow(logical_tests))) &&
+    identical(parity_rows$logical_sequence_id, logical_ids) &&
+    identical(parity_rows$residual_key_x,
+              logical_tests$residual_key_x) &&
+    identical(parity_rows$residual_key_y,
+              logical_tests$residual_key_y) &&
+    identical(parity_rows$alpha, logical_tests$alpha) &&
+    identical(parity_rows$reference_p_value,
+              logical_tests$reference_p_value) &&
+    identical(parity_rows$reference_decision,
+              logical_tests$reference_decision) &&
+    identical(parity_rows$reference_independent,
+              logical_tests$reference_independent) &&
+    identical(parity_rows$index, rep(1L, nrow(logical_tests))) &&
+    identical(parity_rows$numCol, rep(35L, nrow(logical_tests)))
+  if (!isTRUE(logical_clean)) {
+    stop("qualification dCov canonical lineage mismatch", call. = FALSE)
+  }
+  diagnostics <- lapply(
+    parity_rows$diagnostics,
+    fastkpc_full_cuda_fixed_sp_sanitize_dcov_diagnostic
+  )
+  p_value <- as.double(parity_rows$p_value)
+  difference <- p_value - logical_tests$reference_p_value
+  independent <- p_value >= logical_tests$alpha
+  decision <- ifelse(independent, "independent", "dependent")
+  decision_flip <- independent != logical_tests$reference_independent
+  values <- c(
+    list(parity_scope = rep("qualification", nrow(logical_tests))),
+    unclass(logical_tests),
+    list(
+      index = rep(1L, nrow(logical_tests)),
+      numCol = rep(35L, nrow(logical_tests)),
+      backend = rep("cpp", nrow(logical_tests)),
+      low_rank_backend = rep("spectra", nrow(logical_tests)),
+      p_value = p_value,
+      p_value_difference = difference,
+      absolute_p_value_difference = abs(difference),
+      p_value_exact = vapply(seq_along(p_value), function(index) {
+        identical(
+          p_value[[index]], logical_tests$reference_p_value[[index]]
+        )
+      }, logical(1L)),
+      signed_alpha_distance = p_value - logical_tests$alpha,
+      decision = decision,
+      independent = independent,
+      decision_flip = decision_flip,
+      backend_error = rep(FALSE, nrow(logical_tests)),
+      spectra_fallback = !as.logical(parity_rows$spectra_no_fallback),
+      diagnostics = I(diagnostics)
+    )
+  )
+  records <- structure(
+    values[schema$names], class = "data.frame",
+    row.names = .set_row_names(nrow(logical_tests))
+  )
+  fastkpc_full_cuda_fixed_sp_validate_qualification_dcov_frame(records)
+  records
+}
+
+fastkpc_full_cuda_fixed_sp_summarize_qualification_dcov_records <- function(
+    records, logical_tests, target_keys) {
+  schema <- fastkpc_full_cuda_fixed_sp_qualification_dcov_schema()
+  fastkpc_full_cuda_fixed_sp_validate_qualification_dcov_frame(records)
+  target_clean <- typeof(target_keys) == "character" &&
+    !is.object(target_keys) && is.null(attributes(target_keys)) &&
+    length(target_keys) > 0L && !anyNA(target_keys) &&
+    !anyDuplicated(target_keys) &&
+    all(grepl("^[0-9a-f]{64}$", target_keys))
+  if (!isTRUE(target_clean) || !is.data.frame(logical_tests) ||
+      !identical(names(logical_tests), schema$logical_names) ||
+      nrow(logical_tests) != nrow(records)) {
+    stop("qualification dCov summary inputs are malformed", call. = FALSE)
+  }
+  canonical <- records[schema$logical_names]
+  canonical_exact <- identical(names(canonical), names(logical_tests)) &&
+    all(vapply(names(canonical), function(field) {
+      identical(canonical[[field]], logical_tests[[field]])
+    }, logical(1L)))
+  endpoints <- sort(unique(c(
+    logical_tests$residual_key_x, logical_tests$residual_key_y
+  )), method = "radix")
+  target_set <- sort(target_keys, method = "radix")
+  p_value <- records$p_value
+  difference <- p_value - logical_tests$reference_p_value
+  independent <- p_value >= logical_tests$alpha
+  decision <- ifelse(independent, "independent", "dependent")
+  flip <- independent != logical_tests$reference_independent
+  fallback <- vapply(records$diagnostics, function(diagnostic) {
+    diagnostic$lowrank_spectra_failed_count != 0L ||
+      diagnostic$lowrank_spectra_fallback_full_eig_count != 0L ||
+      diagnostic$lowrank_full_eig_count != 0L
+  }, logical(1L))
+  exact <- canonical_exact &&
+    identical(endpoints, target_set) &&
+    identical(records$parity_scope,
+              rep("qualification", nrow(records))) &&
+    identical(records$index, rep(1L, nrow(records))) &&
+    identical(records$numCol, rep(35L, nrow(records))) &&
+    identical(records$backend, rep("cpp", nrow(records))) &&
+    identical(records$low_rank_backend,
+              rep("spectra", nrow(records))) &&
+    identical(records$p_value_difference, difference) &&
+    identical(records$absolute_p_value_difference, abs(difference)) &&
+    identical(records$signed_alpha_distance,
+              p_value - logical_tests$alpha) &&
+    identical(records$decision, decision) &&
+    identical(records$independent, independent) &&
+    identical(records$decision_flip, flip) &&
+    identical(records$spectra_fallback, fallback) &&
+    !any(records$backend_error)
+  if (!isTRUE(exact) || any(!is.finite(p_value)) ||
+      any(!is.finite(records$absolute_p_value_difference))) {
+    stop("qualification dCov rows do not match canonical evidence",
+         call. = FALSE)
+  }
+  list(
+    qualification_dcov_logical_test_count = as.integer(nrow(records)),
+    qualification_dcov_near_alpha_count = as.integer(sum(
+      records$near_alpha
+    )),
+    qualification_dcov_unique_residual_key_count =
+      as.integer(length(endpoints)),
+    qualification_dcov_max_absolute_p_value_difference =
+      as.double(max(records$absolute_p_value_difference)),
+    qualification_dcov_decision_flip_count = as.integer(sum(
+      records$decision_flip
+    )),
+    qualification_dcov_near_alpha_decision_flip_count = as.integer(sum(
+      records$near_alpha & records$decision_flip
+    )),
+    qualification_dcov_backend_error_count = as.integer(sum(
+      records$backend_error
+    )),
+    qualification_dcov_spectra_fallback_count = as.integer(sum(
+      records$spectra_fallback
+    )),
+    qualification_dcov_logical_ids_hash =
+      fastkpc_full_cuda_census_metadata_hash(
+        records$logical_sequence_id
+      ),
+    qualification_dcov_residual_key_hash =
+      fastkpc_full_cuda_census_key_set_hash(endpoints),
+    qualification_dcov_rows_hash =
+      fastkpc_full_cuda_census_frame_hash(records)
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_load_qualification_logical_tests <- function(
+    census_dir, prepared_dir, data_path) {
+  scalar_path <- function(value, label, directory = FALSE) {
+    if (typeof(value) != "character" || length(value) != 1L ||
+        is.object(value) || !is.null(attributes(value)) || anyNA(value) ||
+        !nzchar(value)) {
+      stop(label, " is malformed", call. = FALSE)
+    }
+    normalized <- normalizePath(value, winslash = "/", mustWork = TRUE)
+    if (!identical(dir.exists(normalized), directory)) {
+      stop(label, " has the wrong file type", call. = FALSE)
+    }
+    normalized
+  }
+  census_dir <- scalar_path(census_dir, "qualification census_dir", TRUE)
+  prepared_dir <- scalar_path(
+    prepared_dir, "qualification prepared_dir", TRUE
+  )
+  data_path <- scalar_path(data_path, "qualification data_path", FALSE)
+  contract <- fastkpc_full_cuda_fixed_sp_catalog_contract()
+  logical_path <- file.path(
+    prepared_dir, "qualification_logical_tests.rds"
+  )
+  manifest_path <- file.path(prepared_dir, "manifest.json")
+  logical_sha256 <- fastkpc_full_cuda_fixed_sp_sha256_file(logical_path)
+  expected_sha256 <- unname(contract$phase2_semantic_file_sha256[[
+    "qualification_logical_tests_rds"
+  ]])
+  manifest <- fastkpc_full_cuda_fixed_sp_read_json(manifest_path)
+  manifest_sha256 <- manifest$semantic_file_sha256[[
+    "qualification_logical_tests_rds"
+  ]]
+  if (!fastkpc_full_cuda_fixed_sp_is_bare_sha256(expected_sha256) ||
+      !fastkpc_full_cuda_fixed_sp_is_bare_sha256(manifest_sha256) ||
+      !identical(logical_sha256, expected_sha256) ||
+      !identical(manifest_sha256, expected_sha256)) {
+    stop("qualification logical-test artifact hash mismatch",
+         call. = FALSE)
+  }
+  logical_tests <- readRDS(logical_path)
+  inputs <- fastkpc_full_cuda_prepared_s_load_inputs(
+    census_dir, data_path
+  )
+  expected <- fastkpc_full_cuda_prepared_s_selection_for_scope(
+    inputs, "qualification"
+  )$logical_tests
+  schema <- fastkpc_full_cuda_fixed_sp_qualification_dcov_schema()
+  fields_exact <- is.data.frame(logical_tests) &&
+    is.data.frame(expected) &&
+    identical(names(logical_tests), schema$logical_names) &&
+    identical(names(expected), schema$logical_names) &&
+    nrow(logical_tests) == nrow(expected) &&
+    all(vapply(schema$logical_names, function(field) {
+      identical(logical_tests[[field]], expected[[field]])
+    }, logical(1L)))
+  endpoint_keys <- if (isTRUE(fields_exact)) {
+    sort(unique(c(
+      logical_tests$residual_key_x, logical_tests$residual_key_y
+    )), method = "radix")
+  } else {
+    character()
+  }
+  gates <- fields_exact && nrow(logical_tests) == 3808L &&
+    identical(sum(logical_tests$near_alpha), 1478L) &&
+    identical(
+      logical_tests$logical_sequence_id,
+      sort(logical_tests$logical_sequence_id, method = "radix")
+    ) && !anyDuplicated(logical_tests$logical_sequence_id) &&
+    length(endpoint_keys) == 6143L && !anyDuplicated(endpoint_keys) &&
+    all(grepl("^[0-9a-f]{64}$", endpoint_keys))
+  if (!isTRUE(gates)) {
+    stop("qualification logical-test canonical evidence mismatch",
+         call. = FALSE)
+  }
+  list(
+    inputs = inputs,
+    logical_tests = logical_tests,
+    logical_tests_sha256 = logical_sha256,
+    logical_ids_hash = fastkpc_full_cuda_census_metadata_hash(
+      logical_tests$logical_sequence_id
+    ),
+    endpoint_keys = endpoint_keys,
+    endpoint_key_hash =
+      fastkpc_full_cuda_census_key_set_hash(endpoint_keys)
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_run_qualification_dcov_parity <- function(
+    census_dir, prepared_dir, data_path, phase0_dir, residual_registry,
+    target_records) {
+  phase0_dir <- normalizePath(
+    phase0_dir, winslash = "/", mustWork = TRUE
+  )
+  if (!dir.exists(phase0_dir)) {
+    stop("qualification Phase 0 directory is malformed", call. = FALSE)
+  }
+  cleared <- FALSE
+  on.exit({
+    if (!cleared) {
+      fastkpc_full_cuda_fixed_sp_residual_registry_clear(
+        residual_registry
+      )
+    }
+  }, add = TRUE)
+  registry_keys <-
+    fastkpc_full_cuda_fixed_sp_residual_registry_validate(
+      residual_registry, target_records = target_records
+    )
+  authenticated <-
+    fastkpc_full_cuda_fixed_sp_load_qualification_logical_tests(
+      census_dir = census_dir,
+      prepared_dir = prepared_dir,
+      data_path = data_path
+    )
+  if (!identical(
+        sort(registry_keys, method = "radix"),
+        authenticated$endpoint_keys
+      )) {
+    stop("qualification residual registry does not match logical endpoints",
+         call. = FALSE)
+  }
+  parity <- fastkpc_full_cuda_fixed_sp_with_legacy_dcov_backend(function() {
+    qualification_core <-
+      fastkpc_full_cuda_fixed_sp_qualification_dcov_core()
+    fastkpc_full_cuda_fixed_sp_residual_registry_validate(
+      residual_registry, target_records = target_records
+    )
+    qualification_core(
+      inputs = authenticated$inputs,
+      logical_tests = authenticated$logical_tests,
+      residuals = residual_registry,
+      oracle_manifest = file.path(phase0_dir, "manifest.json"),
+      oracle_fun = fastkpc_cuda_legacy_dcov_gamma_cpp_oracle,
+      scope = "qualification"
+    )
+  })
+  if (!is.list(parity) || !is.data.frame(parity$rows)) {
+    stop("qualification dCov parity core returned malformed evidence",
+         call. = FALSE)
+  }
+  records <-
+    fastkpc_full_cuda_fixed_sp_build_qualification_dcov_records(
+      authenticated$logical_tests, parity$rows
+    )
+  summary <-
+    fastkpc_full_cuda_fixed_sp_summarize_qualification_dcov_records(
+      records, authenticated$logical_tests, registry_keys
+    )
+  canonical <-
+    identical(summary$qualification_dcov_logical_test_count, 3808L) &&
+    identical(summary$qualification_dcov_near_alpha_count, 1478L) &&
+    identical(
+      summary$qualification_dcov_unique_residual_key_count, 6143L
+    ) && is.finite(
+      summary$qualification_dcov_max_absolute_p_value_difference
+    ) && summary$qualification_dcov_max_absolute_p_value_difference <
+      1e-10 &&
+    identical(summary$qualification_dcov_decision_flip_count, 0L) &&
+    identical(
+      summary$qualification_dcov_near_alpha_decision_flip_count, 0L
+    ) &&
+    identical(summary$qualification_dcov_backend_error_count, 0L) &&
+    identical(summary$qualification_dcov_spectra_fallback_count, 0L) &&
+    identical(
+      summary$qualification_dcov_logical_ids_hash,
+      authenticated$logical_ids_hash
+    ) && identical(
+      summary$qualification_dcov_residual_key_hash,
+      authenticated$endpoint_key_hash
+    )
+  if (!isTRUE(canonical)) {
+    stop("qualification dCov canonical gate failed", call. = FALSE)
+  }
+  fastkpc_full_cuda_fixed_sp_residual_registry_clear(residual_registry)
+  cleared <- TRUE
+  list(
+    records = records,
+    summary = summary,
+    logical_tests_sha256 = authenticated$logical_tests_sha256
+  )
+}
+
 fastkpc_run_full_cuda_fixed_sp_phase3c_iteration <- function(
     phase2_dir, census_dir, prepared_dir, data_path, device_id = 0L,
-    scope = "iteration") {
+    scope = "iteration", return_residual_registry = FALSE) {
   scope <- match.arg(scope, c("iteration", "qualification"))
+  registry_flag_clean <- typeof(return_residual_registry) == "logical" &&
+    length(return_residual_registry) == 1L &&
+    !is.object(return_residual_registry) &&
+    is.null(attributes(return_residual_registry)) &&
+    !is.na(return_residual_registry)
+  if (!isTRUE(registry_flag_clean) ||
+      (isTRUE(return_residual_registry) &&
+       !identical(scope, "qualification"))) {
+    stop("Phase 3C residual registry is qualification-only",
+         call. = FALSE)
+  }
   required_functions <- c(
     "fixed_sp_cuda_runtime_create", "fixed_sp_cuda_runtime_reserve",
     "fixed_sp_cuda_runtime_info", "fixed_sp_cuda_runtime_free",
@@ -5510,6 +6375,9 @@ fastkpc_run_full_cuda_fixed_sp_phase3c_iteration <- function(
   }
   ordered_target_keys <- unlist(lapply(batches, function(batch) {
     as.character(batch$target_rows$residual_key_sha256)
+  }), use.names = FALSE)
+  ordered_target_owners <- unlist(lapply(seq_along(batches), function(index) {
+    rep.int(setup_keys[[index]], nrow(batches[[index]]$target_rows))
   }), use.names = FALSE)
   if (anyDuplicated(ordered_target_keys)) {
     stop("Phase 3C ", scope, " target-key order is not canonical",
@@ -5566,6 +6434,20 @@ fastkpc_run_full_cuda_fixed_sp_phase3c_iteration <- function(
   if (!identical(max_augmented_rows, 407L)) {
     stop("Phase 3C logical augmented-row reserve must equal 407",
          call. = FALSE)
+  }
+  registry_n <- unique(vapply(dtos, `[[`, integer(1L), "n"))
+  if (!identical(registry_n, 351L)) {
+    stop("Phase 3C qualification residual length must equal 351",
+         call. = FALSE)
+  }
+  residual_registry <- if (isTRUE(return_residual_registry)) {
+    fastkpc_full_cuda_fixed_sp_residual_registry_create(
+      expected_keys = ordered_target_keys,
+      expected_owners = ordered_target_owners,
+      n = registry_n
+    )
+  } else {
+    NULL
   }
 
   runtime <- NULL
@@ -5828,6 +6710,14 @@ fastkpc_run_full_cuda_fixed_sp_phase3c_iteration <- function(
               if (!isTRUE(shadow_clean)) {
                 stop("Phase 3C explicit oracle shadow is malformed",
                      call. = FALSE)
+              }
+              if (isTRUE(return_residual_registry)) {
+                fastkpc_full_cuda_fixed_sp_residual_registry_capture(
+                  registry = residual_registry,
+                  owner = setup_key,
+                  target_keys = native$target_keys,
+                  residuals = shadow$residuals
+                )
               }
               post_shadow_info <- fixed_sp_cuda_residual_info(token)
               fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info(
@@ -6398,18 +7288,29 @@ fastkpc_run_full_cuda_fixed_sp_phase3c_iteration <- function(
       operations = runtime_cleanup_operations,
       context = paste("Phase 3C", scope, "cleanup")
     )
-  iteration_result
+  if (!isTRUE(return_residual_registry)) return(iteration_result)
+  captured_keys <-
+    fastkpc_full_cuda_fixed_sp_residual_registry_validate(
+      residual_registry
+    )
+  if (!identical(captured_keys, ordered_target_keys)) {
+    stop("Phase 3C qualification residual registry corpus mismatch",
+         call. = FALSE)
+  }
+  list(result = iteration_result, residual_registry = residual_registry)
 }
 
 fastkpc_run_full_cuda_fixed_sp_phase3c_qualification <- function(
-    phase2_dir, census_dir, prepared_dir, data_path, device_id = 0L) {
+    phase2_dir, census_dir, prepared_dir, data_path, device_id = 0L,
+    return_residual_registry = FALSE) {
   fastkpc_run_full_cuda_fixed_sp_phase3c_iteration(
     phase2_dir = phase2_dir,
     census_dir = census_dir,
     prepared_dir = prepared_dir,
     data_path = data_path,
     device_id = device_id,
-    scope = "qualification"
+    scope = "qualification",
+    return_residual_registry = return_residual_registry
   )
 }
 
@@ -6418,6 +7319,8 @@ fastkpc_full_cuda_fixed_sp_qualification_payload_names <- function() {
     "target_parity.rds", "target_parity.csv",
     "batch_metrics.rds", "batch_metrics.csv",
     "setup_metrics.rds", "setup_metrics.csv",
+    "qualification_dcov_parity.rds",
+    "qualification_dcov_parity.csv",
     "runtime_metrics.csv", "stage_timing.csv", "fallbacks.csv",
     "failures.csv", "commands.txt", "environment.txt"
   )
@@ -7034,7 +7937,7 @@ fastkpc_full_cuda_fixed_sp_write_qualification_json <- function(value, path) {
   }
   jsonlite::write_json(
     value, path, auto_unbox = TRUE, pretty = TRUE,
-    null = "null", na = "null", digits = NA, always_decimal = TRUE
+    null = "null", na = "null", digits = 17L, always_decimal = TRUE
   )
   invisible(path)
 }
@@ -7104,6 +8007,19 @@ fastkpc_full_cuda_fixed_sp_qualification_summary_schema <- function() {
     "native_library_sha256", "execution_sources_unchanged_after_run",
     "elapsed_seconds", "stage_timing_total_seconds", "payload_file_count"
   )
+  dcov_names <- c(
+    "qualification_dcov_logical_test_count",
+    "qualification_dcov_near_alpha_count",
+    "qualification_dcov_unique_residual_key_count",
+    "qualification_dcov_max_absolute_p_value_difference",
+    "qualification_dcov_decision_flip_count",
+    "qualification_dcov_near_alpha_decision_flip_count",
+    "qualification_dcov_backend_error_count",
+    "qualification_dcov_spectra_fallback_count",
+    "qualification_dcov_logical_ids_hash",
+    "qualification_dcov_residual_key_hash",
+    "qualification_dcov_rows_hash"
+  )
   make_types <- function(names, character, double, logical) {
     types <- setNames(rep.int("integer", length(names)), names)
     types[character] <- "character"
@@ -7138,10 +8054,22 @@ fastkpc_full_cuda_fixed_sp_qualification_summary_schema <- function() {
       "execution_sources_unchanged_after_run"
     )
   )
-  final_names <- c(input_names, publication_names)
-  final_types <- c(input_types, publication_types)
-  clean <- !anyDuplicated(input_names) && !anyDuplicated(publication_names) &&
+  dcov_types <- make_types(
+    dcov_names,
+    character = c(
+      "qualification_dcov_logical_ids_hash",
+      "qualification_dcov_residual_key_hash",
+      "qualification_dcov_rows_hash"
+    ),
+    double = "qualification_dcov_max_absolute_p_value_difference",
+    logical = character()
+  )
+  final_names <- c(input_names, dcov_names, publication_names)
+  final_types <- c(input_types, dcov_types, publication_types)
+  clean <- !anyDuplicated(input_names) && !anyDuplicated(dcov_names) &&
+    !anyDuplicated(publication_names) &&
     !anyDuplicated(final_names) && identical(names(input_types), input_names) &&
+    identical(names(dcov_types), dcov_names) &&
     identical(names(publication_types), publication_names) &&
     identical(names(final_types), final_names) &&
     all(input_types %in% c("character", "integer", "double", "logical")) &&
@@ -7153,6 +8081,8 @@ fastkpc_full_cuda_fixed_sp_qualification_summary_schema <- function() {
   list(
     input_names = input_names,
     input_types = input_types,
+    dcov_names = dcov_names,
+    dcov_types = dcov_types,
     publication_names = publication_names,
     publication_types = publication_types,
     final_names = final_names,
@@ -7186,6 +8116,47 @@ fastkpc_full_cuda_fixed_sp_qualification_validate_input_summary <- function(
   TRUE
 }
 
+fastkpc_full_cuda_fixed_sp_qualification_validate_dcov_summary <- function(
+    summary) {
+  schema <- fastkpc_full_cuda_fixed_sp_qualification_summary_schema()
+  if (!is.list(summary) ||
+      length(setdiff(schema$dcov_names, names(summary))) > 0L) {
+    stop("qualification dCov summary schema is invalid", call. = FALSE)
+  }
+  values <- summary[schema$dcov_names]
+  clean <-
+    fastkpc_full_cuda_fixed_sp_qualification_summary_has_schema(
+      values, schema$dcov_names, schema$dcov_types
+    ) && identical(
+      values$qualification_dcov_logical_test_count, 3808L
+    ) && identical(
+      values$qualification_dcov_near_alpha_count, 1478L
+    ) && identical(
+      values$qualification_dcov_unique_residual_key_count, 6143L
+    ) && is.finite(
+      values$qualification_dcov_max_absolute_p_value_difference
+    ) && values$qualification_dcov_max_absolute_p_value_difference <
+      1e-10 && identical(
+      values$qualification_dcov_decision_flip_count, 0L
+    ) && identical(
+      values$qualification_dcov_near_alpha_decision_flip_count, 0L
+    ) && identical(
+      values$qualification_dcov_backend_error_count, 0L
+    ) && identical(
+      values$qualification_dcov_spectra_fallback_count, 0L
+    ) && all(vapply(
+      schema$dcov_names[seq.int(length(schema$dcov_names) - 2L,
+                                length(schema$dcov_names))],
+      function(field) fastkpc_full_cuda_fixed_sp_is_bare_sha256(
+        values[[field]]
+      ), logical(1L)
+    ))
+  if (!isTRUE(clean)) {
+    stop("qualification dCov summary schema is invalid", call. = FALSE)
+  }
+  TRUE
+}
+
 fastkpc_full_cuda_fixed_sp_qualification_validate_published_summary <- function(
     summary) {
   schema <- fastkpc_full_cuda_fixed_sp_qualification_summary_schema()
@@ -7193,7 +8164,7 @@ fastkpc_full_cuda_fixed_sp_qualification_validate_published_summary <- function(
     summary, schema$final_names, schema$final_types
   ) && identical(summary$scope, "qualification") && identical(
     summary$artifact_schema_version,
-    "full-cuda-ci-fixed-sp-qualification-v1"
+    "full-cuda-ci-fixed-sp-qualification-v2"
   ) && identical(summary$catalog_authenticated, TRUE) &&
     identical(summary$execution_sources_unchanged_after_run, TRUE) &&
     is.finite(summary$elapsed_seconds) && summary$elapsed_seconds >= 0 &&
@@ -7204,6 +8175,7 @@ fastkpc_full_cuda_fixed_sp_qualification_validate_published_summary <- function(
     stop("qualification published summary schema is invalid", call. = FALSE)
   }
   fastkpc_full_cuda_fixed_sp_qualification_validate_summary_counts(summary)
+  fastkpc_full_cuda_fixed_sp_qualification_validate_dcov_summary(summary)
   TRUE
 }
 
@@ -7871,7 +8843,7 @@ fastkpc_full_cuda_fixed_sp_qualification_validate_result_schema <- function(
 fastkpc_full_cuda_write_fixed_sp_qualification_artifact <- function(
     result, output_dir, phase0_dir, phase1_dir, phase2_dir, data_path,
     device_id, stage_timing, elapsed_seconds, command_lines,
-    environment_lines, execution_provenance) {
+    environment_lines, execution_provenance, dcov_records) {
   if (is.list(result) && is.list(result$summary) &&
       "pass" %in% names(result$summary)) {
     stop("qualification writer rejects caller-supplied pass fields",
@@ -7942,6 +8914,30 @@ fastkpc_full_cuda_write_fixed_sp_qualification_artifact <- function(
       target_records = result$target_records
     )
   catalog_authenticated <- validated_catalog_identity$catalog_authenticated
+  authenticated_dcov <-
+    fastkpc_full_cuda_fixed_sp_load_qualification_logical_tests(
+      census_dir = phase1_dir,
+      prepared_dir = phase2_dir,
+      data_path = data_path
+    )
+  validated_dcov_summary <-
+    fastkpc_full_cuda_fixed_sp_summarize_qualification_dcov_records(
+      records = dcov_records,
+      logical_tests = authenticated_dcov$logical_tests,
+      target_keys = result$target_records$residual_key_sha256
+    )
+  fastkpc_full_cuda_fixed_sp_qualification_validate_dcov_summary(
+    validated_dcov_summary
+  )
+  if (!identical(
+        validated_dcov_summary$qualification_dcov_logical_ids_hash,
+        authenticated_dcov$logical_ids_hash
+      ) || !identical(
+        validated_dcov_summary$qualification_dcov_residual_key_hash,
+        authenticated_dcov$endpoint_key_hash
+      )) {
+    stop("qualification dCov published identity mismatch", call. = FALSE)
+  }
   if (typeof(device_id) != "integer" || length(device_id) != 1L ||
       is.na(device_id) || device_id < 0L ||
       !is.double(elapsed_seconds) || length(elapsed_seconds) != 1L ||
@@ -7982,6 +8978,10 @@ fastkpc_full_cuda_write_fixed_sp_qualification_artifact <- function(
   write_csv(result$batch_records, "batch_metrics.csv")
   saveRDS(result$setup_records, path("setup_metrics.rds"), version = 3L)
   write_csv(result$setup_records, "setup_metrics.csv")
+  saveRDS(
+    dcov_records, path("qualification_dcov_parity.rds"), version = 3L
+  )
+  write_csv(dcov_records, "qualification_dcov_parity.csv")
   write_csv(result$runtime_records, "runtime_metrics.csv")
   write_csv(stage_timing, "stage_timing.csv")
   write_csv(data.frame(
@@ -8015,7 +9015,7 @@ fastkpc_full_cuda_write_fixed_sp_qualification_artifact <- function(
   }
   publication_summary <- list(
     artifact_schema_version =
-      "full-cuda-ci-fixed-sp-qualification-v1",
+      "full-cuda-ci-fixed-sp-qualification-v2",
     catalog_authenticated = catalog_authenticated,
     provenance_mode = execution_provenance$provenance_mode,
     head_base_commit = execution_provenance$head_base_commit,
@@ -8038,17 +9038,23 @@ fastkpc_full_cuda_write_fixed_sp_qualification_artifact <- function(
   if (!identical(
     names(validated_result_summary), summary_schema$input_names
   ) || !identical(
+    names(validated_dcov_summary), summary_schema$dcov_names
+  ) || !identical(
     names(publication_summary), summary_schema$publication_names
   ) || anyDuplicated(c(
-    names(validated_result_summary), names(publication_summary)
+    names(validated_result_summary), names(validated_dcov_summary),
+    names(publication_summary)
   ))) {
     stop("qualification summary composition namespace is invalid",
          call. = FALSE)
   }
-  summary <- c(validated_result_summary, publication_summary)
+  summary <- c(
+    validated_result_summary, validated_dcov_summary,
+    publication_summary
+  )
   fastkpc_full_cuda_fixed_sp_qualification_validate_published_summary(summary)
   manifest <- list(
-    schema_version = "full-cuda-ci-fixed-sp-qualification-v1",
+    schema_version = "full-cuda-ci-fixed-sp-qualification-v2",
     scope = "qualification",
     catalog_authenticated = catalog_authenticated,
     provenance_schema_version =
@@ -8093,6 +9099,14 @@ fastkpc_full_cuda_write_fixed_sp_qualification_artifact <- function(
       validated_catalog_identity$ordered_target_key_digest,
     route_status_hash = validated_catalog_identity$route_status_hash,
     numeric_hash = validated_catalog_identity$numeric_hash,
+    qualification_logical_tests_sha256 =
+      authenticated_dcov$logical_tests_sha256,
+    qualification_dcov_logical_ids_hash =
+      validated_dcov_summary$qualification_dcov_logical_ids_hash,
+    qualification_dcov_residual_key_hash =
+      validated_dcov_summary$qualification_dcov_residual_key_hash,
+    qualification_dcov_rows_hash =
+      validated_dcov_summary$qualification_dcov_rows_hash,
     payload_file_sha256 = as.list(payload_hashes),
     publication_order = as.list(c(
       payload_names, "manifest.json", "summary.json"

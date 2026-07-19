@@ -150,16 +150,43 @@ execution_provenance <- timed(
   )
 )
 
-qualification <- timed(
+qualification_bundle <- timed(
   "qualification_numeric_lifecycle",
   fastkpc_run_full_cuda_fixed_sp_phase3c_qualification(
     phase2_dir = phase0_dir,
     census_dir = phase1_dir,
     prepared_dir = phase2_dir,
     data_path = data_path,
-    device_id = device_id
+    device_id = device_id,
+    return_residual_registry = TRUE
   )
 )
+if (!is.list(qualification_bundle) || !identical(
+      names(qualification_bundle), c("result", "residual_registry")
+    ) || !is.environment(qualification_bundle$residual_registry)) {
+  stop("qualification residual-registry result is malformed",
+       call. = FALSE)
+}
+qualification <- qualification_bundle$result
+residual_registry <- qualification_bundle$residual_registry
+dcov_evidence <- timed(
+  "qualification_dcov_parity",
+  fastkpc_full_cuda_fixed_sp_run_qualification_dcov_parity(
+    census_dir = phase1_dir,
+    prepared_dir = phase2_dir,
+    data_path = data_path,
+    phase0_dir = phase0_dir,
+    residual_registry = residual_registry,
+    target_records = qualification$target_records
+  )
+)
+if (length(ls(residual_registry, all.names = TRUE)) != 0L) {
+  stop("qualification residual registry was not cleared after dCov",
+       call. = FALSE)
+}
+qualification_bundle$residual_registry <- NULL
+residual_registry <- NULL
+gc(verbose = FALSE)
 execution_provenance <- timed(
   "verify_execution_provenance",
   fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
@@ -246,6 +273,8 @@ environment_lines <- c(
   paste0(
     "cuda_driver_version=", final_runtime$cuda_driver_version[[1L]]
   ),
+  "qualification_dcov_backend=cpp",
+  "qualification_dcov_low_rank_backend=spectra",
   "",
   capture.output(sessionInfo())
 )
@@ -262,7 +291,8 @@ artifact <- fastkpc_full_cuda_write_fixed_sp_qualification_artifact(
   elapsed_seconds = elapsed_seconds,
   command_lines = command_lines,
   environment_lines = environment_lines,
-  execution_provenance = execution_provenance
+  execution_provenance = execution_provenance,
+  dcov_records = dcov_evidence$records
 )
 
 summary <- artifact$summary
@@ -284,6 +314,17 @@ cat(
 cat(
   "route_status_hash=", summary$route_status_hash, "\n",
   "numeric_hash=", summary$numeric_hash, "\n",
+  "dcov_rows_hash=", summary$qualification_dcov_rows_hash, "\n",
+  "dcov rows/near_alpha=",
+  summary$qualification_dcov_logical_test_count, "/",
+  summary$qualification_dcov_near_alpha_count, "\n",
+  "dcov max_abs/flips/errors/fallbacks=",
+  format(
+    summary$qualification_dcov_max_absolute_p_value_difference,
+    digits = 17L
+  ), "/", summary$qualification_dcov_decision_flip_count, "/",
+  summary$qualification_dcov_backend_error_count, "/",
+  summary$qualification_dcov_spectra_fallback_count, "\n",
   "elapsed_seconds=", format(summary$elapsed_seconds, digits = 17L),
   "\n", sep = ""
 )
