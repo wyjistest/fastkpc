@@ -139,6 +139,11 @@ independent_ordered_generated_paths <- function(
   )
 }
 
+independent_csv_semantic_frame <- function(value) {
+  rownames(value) <- NULL
+  value
+}
+
 assert_identical(
   independent_generation_open(c(
     "100 openat(AT_FDCWD, \"/tmp/input\", O_RDWR|O_CLOEXEC) = 3</tmp/input>",
@@ -234,6 +239,29 @@ assert_identical(
   )),
   TRUE,
   "independent generation accepts truncation before first access"
+)
+
+csv_semantic_fixture <- data.frame(
+  path = c("/tmp/second", "/tmp/first"),
+  reason = c("generated_output", "pseudo_fs"),
+  stringsAsFactors = FALSE,
+  row.names = c("trace-2", "trace-1")
+)
+csv_semantic_path <- tempfile("fastkpc_phase3c_csv_semantics_", fileext = ".csv")
+utils::write.csv(csv_semantic_fixture, csv_semantic_path, row.names = FALSE)
+published_csv_semantic_fixture <- utils::read.csv(
+  csv_semantic_path, stringsAsFactors = FALSE, check.names = FALSE
+)
+unlink(csv_semantic_path, force = TRUE)
+canonical_csv_semantic_fixture <-
+  independent_csv_semantic_frame(csv_semantic_fixture)
+assert_true(
+  identical(canonical_csv_semantic_fixture, published_csv_semantic_fixture) &&
+    identical(
+      .row_names_info(canonical_csv_semantic_fixture, type = 0L),
+      c(NA_integer_, -2L)
+    ),
+  "independent CSV semantic frames use automatic row names"
 )
 
 pass_fixture_output <- tempfile("fastkpc_phase3c_supplied_pass_")
@@ -2427,8 +2455,8 @@ independent_trace_tables <- function(trace_path, tracer_path) {
   exclusions <- exclusions[
     order(exclusions$path, method = "radix"), , drop = FALSE
   ]
-  rownames(files) <- as.character(seq_len(nrow(files)))
-  rownames(exclusions) <- as.character(seq_len(nrow(exclusions)))
+  files <- independent_csv_semantic_frame(files)
+  exclusions <- independent_csv_semantic_frame(exclusions)
   list(files = files, exclusions = exclusions)
 }
 reparsed_native_build <- independent_trace_tables(
