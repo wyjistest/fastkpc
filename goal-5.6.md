@@ -604,7 +604,7 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 0 | Freeze oracle and zero-SHD comparator | COMPLETE — standardized oracle and first-divergence gate pass |
 | 1 | Full workload and risk census | COMPLETE - full 110,617-key metadata artifact passes all gates |
 | 2 | Response-independent GAM setup contract | COMPLETE - full structural artifact and qualification exact-parity/restart gates pass |
-| 3 | Persistent stable fixed-sp CUDA residual runtime | PARTIAL - Phase 3A and Phase 3B milestones verified; Phase 3C is next |
+| 3 | Persistent stable fixed-sp CUDA residual runtime | PARTIAL - Phase 3A/3B/3C qualification milestones verified; full fixed-sp artifacts and graph closure are next |
 | 4 | Full-CUDA single-penalty GCV for `|S|<=2` | PARTIAL — CPU spectral selection exists |
 | 5 | C++ multi-penalty GAM semantic replica | NOT COMPLETE |
 | 6 | CUDA multi-penalty same-S target batches | NOT STARTED |
@@ -1194,6 +1194,29 @@ stable path:
 ```
 
 High-condition cases must not silently return a normal-equation answer that differs from mgcv.
+
+#### Verified Phase 3C milestone (2026-07-20)
+
+Phase 3C qualification is complete. This does not complete Phase 3; the full
+110,617-target fixed-sp artifacts and canonical graph closure remain open.
+
+```text
+one-time individual QR roots, qualification matrices/rows 6,272 / 63,552
+augmented QR and deterministic aggregate-penalty augmented SVD
+aggregate root rank/pivot exact against test-only CPU LAPACK
+C_magic numeric reference for every route and target
+C_magic sqrt(double epsilon) SVD rank threshold
+aggregate SVD one factor / two B builds per executed target
+iteration 270/270 targets OK
+qualification 6,143/6,143 targets OK
+planned routes 3,889 / 190 / 2,064 exact
+executed routes 3,889 / 190 / 2,064; declared reroutes 0 / 0
+dCov 3,808 pairs, near-alpha 1,478, decision flips 0
+unknown/CPU/approximate fallback 0
+```
+
+Active next task: generate `fixed_sp_cuda_oracle_sp_v1` and
+`fixed_sp_cuda_full_shadow_v1`.
 
 ### Required API shape
 
@@ -2375,13 +2398,21 @@ milestone only and does not complete Phase 3.
 
 Complete: Phase 3B established the verified true same-S multi-target Cholesky
 milestone recorded above. This is a Phase 3B milestone only and does not
-complete Phase 3; stable routes remain explicit errors.
+complete Phase 3.
 
-Active next task: Phase 3C penalty roots and augmented QR/SVD.
+### Task 7
+
+Complete: Phase 3C established the verified augmented QR/SVD stable routes and
+the 6,143-target qualification milestone recorded above, with zero declared
+reroutes and zero dCov decision flips. This is a Phase 3C milestone only and
+does not complete Phase 3.
+
+Active next task: generate `fixed_sp_cuda_oracle_sp_v1` and
+`fixed_sp_cuda_full_shadow_v1`.
 
 The current CUDA Spectra projection primitive remains useful substrate for
-Phase 8, but the immediate critical path is now Phase 3C penalty roots and
-augmented QR/SVD.
+Phase 8, but the immediate critical path is now full fixed-sp artifact and
+canonical graph closure.
 
 ---
 
