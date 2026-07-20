@@ -179,10 +179,13 @@ assert_true(
     all(grepl("^[0-9a-f]{64}$", dependencies$files$sha256)) &&
     identical(
       dependencies$schema_version,
-      "full-cuda-ci-native-build-dependencies-v2"
+      "full-cuda-ci-native-build-dependencies-v3"
     ) && identical(
       dependencies$trace_semantics,
-      "linux-strace-successful-read-exec-evidence-v2"
+      "linux-strace-successful-read-exec-evidence-v3"
+    ) && identical(
+      dependencies$build_working_dir,
+      normalizePath(".", winslash = "/", mustWork = TRUE)
     ) && identical(dependencies$trace_path, normalizePath(
       trace_path, winslash = "/", mustWork = TRUE
     )) && identical(
@@ -229,6 +232,17 @@ assert_true(
     dependencies$aggregate_sha256
   ),
   "native build dependency aggregate binds the exact raw trace hash"
+)
+working_dir_hash_mutation <- dependencies
+working_dir_hash_mutation$build_working_dir <- fixture_dir
+assert_true(
+  !identical(
+    fastkpc_full_cuda_fixed_sp_native_build_dependency_hash(
+      working_dir_hash_mutation
+    ),
+    dependencies$aggregate_sha256
+  ),
+  "native build dependency aggregate binds the normalized build directory"
 )
 exclusion_hash_mutation <- dependencies
 exclusion_hash_mutation$exclusions$reason[[1L]] <- "non_regular"
@@ -495,6 +509,58 @@ assert_error_identical(
   "missing successful non-pseudo reads fail closed with exact evidence"
 )
 
+assert_true(
+  fastkpc_full_cuda_fixed_sp_verify_native_build_dependencies(dependencies),
+  "valid native build evidence reconstructs from its retained raw trace"
+)
+forged_dependencies <- dependencies
+forged_dependencies$files <- rbind(
+  forged_dependencies$files,
+  data.frame(
+    path = output_path,
+    sha256 = fastkpc_full_cuda_fixed_sp_sha256_file(output_path),
+    stringsAsFactors = FALSE
+  )
+)
+forged_dependencies$files <- forged_dependencies$files[
+  order(forged_dependencies$files$path, method = "radix"), , drop = FALSE
+]
+rownames(forged_dependencies$files) <- as.character(seq_len(nrow(
+  forged_dependencies$files
+)))
+forged_dependencies$dependency_count <- as.integer(nrow(
+  forged_dependencies$files
+))
+forged_dependencies$exclusions <- forged_dependencies$exclusions[
+  forged_dependencies$exclusions$path != output_path, , drop = FALSE
+]
+rownames(forged_dependencies$exclusions) <- as.character(seq_len(nrow(
+  forged_dependencies$exclusions
+)))
+forged_dependencies$exclusion_count <- as.integer(nrow(
+  forged_dependencies$exclusions
+))
+forged_dependencies$aggregate_sha256 <-
+  fastkpc_full_cuda_fixed_sp_native_build_dependency_hash(
+    forged_dependencies
+  )
+assert_true(
+  fastkpc_full_cuda_fixed_sp_validate_native_build_dependencies(
+    forged_dependencies
+  ),
+  "forged native build tables remain internally self-consistent"
+)
+assert_error_identical(
+  fastkpc_full_cuda_fixed_sp_verify_native_build_dependencies(
+    forged_dependencies
+  ),
+  "native build dependency evidence does not reconstruct from retained trace",
+  paste0(
+    "verification rejects self-consistent forged dependency/exclusion tables ",
+    "by reparsing the retained trace"
+  )
+)
+
 writeLines("// dependency mutation", header_path, useBytes = TRUE)
 assert_error_matching(
   fastkpc_full_cuda_fixed_sp_verify_native_build_dependencies(dependencies),
@@ -510,6 +576,296 @@ assert_error_identical(
   "native build dependency verification rejects raw trace mutation"
 )
 writeLines(trace_lines, trace_path, useBytes = TRUE)
+
+pin_build_dir <- file.path(fixture_dir, "pin-build")
+dir.create(pin_build_dir)
+canonical_native_path <- file.path(pin_build_dir, "fastkpc_cuda.so")
+original_native_bytes <- charToRaw("qualified native bytes")
+replacement_native_bytes <- charToRaw("replacement native bytes")
+writeBin(original_native_bytes, canonical_native_path)
+canonical_native_path <- normalizePath(
+  canonical_native_path, winslash = "/", mustWork = TRUE
+)
+canonical_native_sha256 <-
+  fastkpc_full_cuda_fixed_sp_sha256_file(canonical_native_path)
+pin_load_state <- new.env(parent = emptyenv())
+pin_load_state$loaded_paths <- character()
+pin_load_state$mapped_paths <- character()
+pin_load_state$loaded_bytes <- raw()
+pin_load_state$load_path <- ""
+pinned_native_path <- .fastkpc_cuda_pin_and_load_built_library(
+  canonical_native_path,
+  expected_sha256 = canonical_native_sha256,
+  loaded_paths = function() pin_load_state$loaded_paths,
+  mapped_paths = function() pin_load_state$mapped_paths,
+  load = function(path) {
+    replacement_path <- file.path(pin_build_dir, "replacement.so")
+    writeBin(replacement_native_bytes, replacement_path)
+    assert_true(
+      file.rename(replacement_path, canonical_native_path),
+      "canonical native fixture replacement succeeds"
+    )
+    pin_load_state$load_path <- path
+    pin_load_state$loaded_bytes <- readBin(
+      path, what = "raw", n = file.info(path)$size
+    )
+    pin_load_state$loaded_paths <- path
+    pin_load_state$mapped_paths <- path
+    invisible(NULL)
+  },
+  unload = function(path) fail("successful pinned load was unloaded")
+)
+assert_true(
+  !identical(pinned_native_path, canonical_native_path) &&
+    identical(pin_load_state$load_path, pinned_native_path) &&
+    identical(basename(pinned_native_path), "fastkpc_cuda.so") &&
+    identical(
+      dirname(dirname(pinned_native_path)),
+      normalizePath(pin_build_dir, winslash = "/", mustWork = TRUE)
+    ) && file.exists(pinned_native_path) &&
+    identical(pin_load_state$loaded_bytes, original_native_bytes) &&
+    identical(
+      readBin(
+        canonical_native_path, what = "raw",
+        n = file.info(canonical_native_path)$size
+      ),
+      replacement_native_bytes
+    ),
+  paste0(
+    "qualified load uses a unique exact-basename hard-link snapshot whose ",
+    "bytes survive canonical replacement"
+  )
+)
+unlink(dirname(pinned_native_path), recursive = TRUE, force = TRUE)
+
+pin_drift_state <- new.env(parent = emptyenv())
+pin_drift_state$load_called <- FALSE
+pin_snapshot_dirs <- function() sort(list.files(
+  pin_build_dir,
+  pattern = "^\\.fastkpc_cuda-qualified-",
+  all.files = TRUE,
+  full.names = TRUE
+), method = "radix")
+pin_drift_dirs_before <- pin_snapshot_dirs()
+assert_error_matching(
+  .fastkpc_cuda_pin_and_load_built_library(
+    canonical_native_path,
+    expected_sha256 = fastkpc_full_cuda_fixed_sp_sha256_file(
+      canonical_native_path
+    ),
+    hash_file = function(path) strrep("a", 64L),
+    loaded_paths = function() character(),
+    mapped_paths = function() character(),
+    load = function(path) pin_drift_state$load_called <- TRUE
+  ),
+  "does not match qualified build hash",
+  "pinned native hash drift fails closed"
+)
+assert_true(
+  !pin_drift_state$load_called &&
+    identical(pin_snapshot_dirs(), pin_drift_dirs_before),
+  "pinned native hash drift fails before load and cleans its private directory"
+)
+
+retry_load_state <- new.env(parent = emptyenv())
+retry_load_state$attempt_paths <- character()
+retry_load_state$loaded_paths <- character()
+retry_load_state$mapped_paths <- character()
+retry_load_state$unloaded_paths <- character()
+retry_load <- function(path) {
+  retry_load_state$attempt_paths <- c(
+    retry_load_state$attempt_paths, path
+  )
+  retry_load_state$loaded_paths <- path
+  if (length(retry_load_state$attempt_paths) > 1L) {
+    retry_load_state$mapped_paths <- c(
+      retry_load_state$mapped_paths, path
+    )
+  }
+  invisible(NULL)
+}
+retry_unload <- function(path) {
+  retry_load_state$unloaded_paths <- c(
+    retry_load_state$unloaded_paths, path
+  )
+  retry_load_state$loaded_paths <- setdiff(
+    retry_load_state$loaded_paths, path
+  )
+  retry_load_state$mapped_paths <- unique(c(
+    retry_load_state$mapped_paths, path
+  ))
+  invisible(NULL)
+}
+retry_native_sha256 <- fastkpc_full_cuda_fixed_sp_sha256_file(
+  canonical_native_path
+)
+assert_error_matching(
+  .fastkpc_cuda_pin_and_load_built_library(
+    canonical_native_path,
+    expected_sha256 = retry_native_sha256,
+    loaded_paths = function() retry_load_state$loaded_paths,
+    mapped_paths = function() retry_load_state$mapped_paths,
+    load = retry_load,
+    unload = retry_unload
+  ),
+  "not mapped after dyn.load",
+  "post-load pinned native verification failure is rethrown"
+)
+first_retry_path <- retry_load_state$attempt_paths[[1L]]
+assert_true(
+  identical(retry_load_state$unloaded_paths, first_retry_path) &&
+    !dir.exists(dirname(first_retry_path)) &&
+    first_retry_path %in% retry_load_state$mapped_paths,
+  "post-load pinned native failure unloads the exact path and cleans staging"
+)
+second_retry_path <- .fastkpc_cuda_pin_and_load_built_library(
+  canonical_native_path,
+  expected_sha256 = retry_native_sha256,
+  loaded_paths = function() retry_load_state$loaded_paths,
+  mapped_paths = function() retry_load_state$mapped_paths,
+  load = retry_load,
+  unload = retry_unload
+)
+assert_true(
+  length(retry_load_state$attempt_paths) == 2L &&
+    !identical(second_retry_path, first_retry_path) &&
+    identical(retry_load_state$loaded_paths, second_retry_path) &&
+    all(c(first_retry_path, second_retry_path) %in%
+        retry_load_state$mapped_paths),
+  "a unique pinned pathname permits retry after residual failed-load mapping"
+)
+unlink(dirname(second_retry_path), recursive = TRUE, force = TRUE)
+
+qualified_loader_fixture <- function() {
+  function_names <- c(
+    "build_fastkpc_cuda_native", ".fastkpc_cuda_sha256_file",
+    ".fastkpc_cuda_load_built_library_exact",
+    ".fastkpc_cuda_pin_and_load_built_library"
+  )
+  originals <- lapply(
+    function_names, get, envir = .GlobalEnv, inherits = FALSE
+  )
+  names(originals) <- function_names
+  on.exit({
+    for (name in function_names) {
+      assign(name, originals[[name]], envir = .GlobalEnv)
+    }
+  }, add = TRUE)
+  state <- new.env(parent = emptyenv())
+  state$legacy_load_path <- ""
+  state$pin_input_path <- ""
+  mock_pinned_dir <- file.path(pin_build_dir, ".mock-qualified-snapshot")
+  dir.create(mock_pinned_dir)
+  mock_pinned_path <- file.path(mock_pinned_dir, "fastkpc_cuda.so")
+  writeBin(original_native_bytes, mock_pinned_path)
+  mock_pinned_path <- normalizePath(
+    mock_pinned_path, winslash = "/", mustWork = TRUE
+  )
+  assign(
+    "build_fastkpc_cuda_native",
+    function(rebuild, trace_path, tracer_path) canonical_native_path,
+    envir = .GlobalEnv
+  )
+  assign(
+    ".fastkpc_cuda_sha256_file",
+    function(path) canonical_native_sha256,
+    envir = .GlobalEnv
+  )
+  assign(
+    ".fastkpc_cuda_load_built_library_exact",
+    function(so, ...) {
+      state$legacy_load_path <- so
+      invisible(so)
+    },
+    envir = .GlobalEnv
+  )
+  assign(
+    ".fastkpc_cuda_pin_and_load_built_library",
+    function(so, expected_sha256, ...) {
+      state$pin_input_path <- so
+      invisible(mock_pinned_path)
+    },
+    envir = .GlobalEnv
+  )
+  result <- load_fastkpc_cuda_native_qualified(
+    trace_path = trace_path, tracer_path = strace_path
+  )
+  list(
+    result = result,
+    state = state,
+    mock_pinned_path = mock_pinned_path
+  )
+}
+qualified_loader_result <- qualified_loader_fixture()
+assert_true(
+  identical(
+    qualified_loader_result$result$native_library_path,
+    qualified_loader_result$mock_pinned_path
+  ) && identical(
+    qualified_loader_result$state$pin_input_path,
+    canonical_native_path
+  ) && !nzchar(qualified_loader_result$state$legacy_load_path),
+  "qualified loader publishes and authenticates only the pinned native path"
+)
+
+registered_loader_fixture <- function() {
+  function_names <- c(
+    "build_fastkpc_cuda_native", "getLoadedDLLs", "dyn.load"
+  )
+  existed <- vapply(
+    function_names, exists, logical(1L), envir = .GlobalEnv,
+    inherits = FALSE
+  )
+  originals <- lapply(function_names[existed], function(name) {
+    get(name, envir = .GlobalEnv, inherits = FALSE)
+  })
+  names(originals) <- function_names[existed]
+  on.exit({
+    for (name in function_names) {
+      if (existed[[name]]) {
+        assign(name, originals[[name]], envir = .GlobalEnv)
+      } else if (exists(name, envir = .GlobalEnv, inherits = FALSE)) {
+        rm(list = name, envir = .GlobalEnv)
+      }
+    }
+  }, add = TRUE)
+  state <- new.env(parent = emptyenv())
+  state$build_called <- FALSE
+  state$load_path <- ""
+  assign(
+    "build_fastkpc_cuda_native",
+    function(rebuild = FALSE, ...) {
+      state$build_called <- TRUE
+      canonical_native_path
+    },
+    envir = .GlobalEnv
+  )
+  assign(
+    "getLoadedDLLs",
+    function() list(fastkpc_cuda = list(path =
+      qualified_loader_result$mock_pinned_path)),
+    envir = .GlobalEnv
+  )
+  assign(
+    "dyn.load",
+    function(path) {
+      state$load_path <- path
+      invisible(NULL)
+    },
+    envir = .GlobalEnv
+  )
+  result <- load_fastkpc_cuda_native(rebuild = FALSE)
+  list(result = result, state = state)
+}
+registered_loader_result <- registered_loader_fixture()
+assert_true(
+  identical(
+    registered_loader_result$result,
+    qualified_loader_result$mock_pinned_path
+  ) && !registered_loader_result$state$build_called &&
+    !nzchar(registered_loader_result$state$load_path),
+  "generic CUDA access reuses the registered pinned package identity"
+)
 
 loaded_state <- compiler_path
 loaded_paths <- function() loaded_state

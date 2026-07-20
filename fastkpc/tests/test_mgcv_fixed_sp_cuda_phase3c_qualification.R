@@ -492,7 +492,7 @@ if (length(setdiff(
       names(published_summary_namespace_fixture)
     )) > 0L || !identical(
       published_summary_namespace_fixture$artifact_schema_version,
-      "full-cuda-ci-fixed-sp-qualification-v5"
+      "full-cuda-ci-fixed-sp-qualification-v6"
     )) {
   synthetic_dcov_summary_fixture <- list(
     qualification_dcov_logical_test_count = 3808L,
@@ -515,7 +515,7 @@ if (length(setdiff(
       )
     ]
   synthetic_publication_summary_fixture$artifact_schema_version <-
-    "full-cuda-ci-fixed-sp-qualification-v5"
+    "full-cuda-ci-fixed-sp-qualification-v6"
   synthetic_publication_summary_fixture$native_build_inputs_sha256 <-
     strrep("d", 64L)
   synthetic_publication_summary_fixture$native_build_dependency_count <- 3L
@@ -1106,7 +1106,13 @@ assert_true(
               expected_provenance_source_ids),
   "execution source discovery closes transitive literal sources in radix order"
 )
-provenance_native_path <- file.path(provenance_fixture_dir, "fixture.so")
+provenance_native_dir <- file.path(
+  provenance_fixture_dir, ".qualified-native-fixture"
+)
+dir.create(provenance_native_dir)
+provenance_native_path <- file.path(
+  provenance_native_dir, "fastkpc_cuda.so"
+)
 writeBin(charToRaw("fixture-native-library"), provenance_native_path)
 provenance_native_build_input_paths <- file.path(
   provenance_fixture_dir, c("build.sh", "native.cu")
@@ -1208,10 +1214,10 @@ assert_true(
       provenance_native_sha256
     ) && identical(
       provenance_fixture$provenance_schema_version,
-      "full-cuda-ci-execution-source-snapshot-v5"
+      "full-cuda-ci-execution-source-snapshot-v6"
     ) && identical(
       provenance_fixture$native_library_identity,
-      "qualified-build-sha-exact-registered-mapped-path-v2"
+      "qualified-pinned-inode-sha-exact-registered-mapped-path-v3"
     ) && identical(
     provenance_fixture$provenance_mode,
     "working-tree-execution-snapshot-v1"
@@ -1640,7 +1646,8 @@ expected_manifest_fields <- c(
   "native_build_input_git_state", "native_build_inputs_sha256",
   "native_build_dependencies_schema_version",
   "native_build_dependency_trace_semantics",
-  "native_build_dependency_trace_invocation", "native_build_trace_path",
+  "native_build_dependency_trace_invocation", "native_build_working_dir",
+  "native_build_trace_path",
   "native_build_trace_sha256", "native_build_tracer_path",
   "native_build_tracer_sha256", "native_build_dependency_count",
   "native_build_exclusion_count", "native_build_dependencies_sha256",
@@ -1674,7 +1681,8 @@ for (field in c(
   "source_closure_sha256", "native_library_identity", "native_library_path",
   "native_build_inputs_sha256", "native_build_dependencies_schema_version",
   "native_build_dependency_trace_semantics",
-  "native_build_dependency_trace_invocation", "native_build_trace_path",
+  "native_build_dependency_trace_invocation", "native_build_working_dir",
+  "native_build_trace_path",
   "native_build_trace_sha256", "native_build_tracer_path",
   "native_build_tracer_sha256", "native_build_dependencies_sha256",
   "native_library_sha256",
@@ -1929,7 +1937,7 @@ assert_true(
 assert_true(
   identical(
     manifest$provenance_schema_version,
-    "full-cuda-ci-execution-source-snapshot-v5"
+    "full-cuda-ci-execution-source-snapshot-v6"
   ) && identical(
     manifest$provenance_mode,
     "working-tree-execution-snapshot-v1"
@@ -1954,10 +1962,18 @@ assert_true(
 assert_true(
   identical(
     manifest$native_library_identity,
-    "qualified-build-sha-exact-registered-mapped-path-v2"
+    "qualified-pinned-inode-sha-exact-registered-mapped-path-v3"
   ) && is.character(manifest$native_library_path) &&
     length(manifest$native_library_path) == 1L &&
     file.exists(manifest$native_library_path) &&
+    identical(basename(manifest$native_library_path), "fastkpc_cuda.so") &&
+    identical(
+      dirname(dirname(manifest$native_library_path)),
+      normalizePath("fastkpc/build", winslash = "/", mustWork = TRUE)
+    ) && startsWith(
+      basename(dirname(manifest$native_library_path)),
+      ".fastkpc_cuda-qualified-"
+    ) &&
     grepl("^[0-9a-f]{64}$", manifest$native_library_sha256) &&
     identical(
       manifest$native_library_sha256,
@@ -2059,10 +2075,13 @@ tracer_index <- match(
 assert_true(
   identical(
     manifest$native_build_dependencies_schema_version,
-    "full-cuda-ci-native-build-dependencies-v2"
+    "full-cuda-ci-native-build-dependencies-v3"
   ) && identical(
     manifest$native_build_dependency_trace_semantics,
-    "linux-strace-successful-read-exec-evidence-v2"
+    "linux-strace-successful-read-exec-evidence-v3"
+  ) && identical(
+    manifest$native_build_working_dir,
+    normalizePath(".", winslash = "/", mustWork = TRUE)
   ) && !is.na(tracer_index) && identical(
     native_build_dependencies$sha256[[tracer_index]],
     manifest$native_build_tracer_sha256
@@ -2079,6 +2098,7 @@ dependency_identity_lines <- c(
   paste0(
     "trace_invocation=", manifest$native_build_dependency_trace_invocation
   ),
+  paste0("build_working_dir=", manifest$native_build_working_dir),
   paste0("trace.sha256=", manifest$native_build_trace_sha256),
   paste0("tracer.path=", manifest$native_build_tracer_path),
   paste0("tracer.sha256=", manifest$native_build_tracer_sha256),
@@ -2361,6 +2381,10 @@ snapshot_lines <- c(
   paste0(
     "native_build_dependencies.trace_invocation=",
     manifest$native_build_dependency_trace_invocation
+  ),
+  paste0(
+    "native_build_dependencies.build_working_dir=",
+    manifest$native_build_working_dir
   ),
   paste0(
     "native_build_dependencies.trace_sha256=",
@@ -2815,6 +2839,9 @@ assert_true(
   ) && identical(
     environment_metadata[["native_build_dependency_trace_invocation"]],
     manifest$native_build_dependency_trace_invocation
+  ) && identical(
+    environment_metadata[["native_build_working_dir"]],
+    manifest$native_build_working_dir
   ) && identical(
     environment_metadata[["native_build_trace_path"]],
     manifest$native_build_trace_path
@@ -3338,7 +3365,7 @@ assert_identical(
 )
 assert_true(
   identical(manifest$schema_version,
-            "full-cuda-ci-fixed-sp-qualification-v5") &&
+            "full-cuda-ci-fixed-sp-qualification-v6") &&
     identical(manifest$scope, "qualification") &&
     identical(unname(unlist(manifest$publication_order, use.names = FALSE)),
               c(payload_names, "manifest.json", "summary.json")) &&

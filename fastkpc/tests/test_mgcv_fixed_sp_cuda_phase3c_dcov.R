@@ -804,7 +804,7 @@ expected_files <- c(expected_payload_names, "manifest.json", "summary.json")
 assert_identical(
   sort(list.files(artifact_dir, all.files = FALSE), method = "radix"),
   sort(expected_files, method = "radix"),
-  "qualification dCov artifact has exact v5 payload surface"
+  "qualification dCov artifact has exact v6 payload surface"
 )
 
 manifest <- jsonlite::fromJSON(
@@ -815,9 +815,9 @@ summary <- jsonlite::fromJSON(
 )
 assert_true(
   identical(manifest$schema_version,
-            "full-cuda-ci-fixed-sp-qualification-v5") &&
+            "full-cuda-ci-fixed-sp-qualification-v6") &&
     identical(summary$artifact_schema_version,
-              "full-cuda-ci-fixed-sp-qualification-v5") &&
+              "full-cuda-ci-fixed-sp-qualification-v6") &&
     identical(manifest$scope, "qualification") &&
     identical(summary$scope, "qualification") &&
     !"pass" %in% names(manifest) && !"pass" %in% names(summary),

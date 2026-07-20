@@ -170,13 +170,46 @@
   ))
 }
 
+.fastkpc_cuda_pin_built_library <- function(
+    so, expected_sha256, hash_file = .fastkpc_cuda_sha256_file) {
+  path <- normalizePath(so, winslash = "/", mustWork = TRUE)
+  staging_dir <- tempfile(
+    pattern = ".fastkpc_cuda-qualified-", tmpdir = dirname(path)
+  )
+  if (!dir.create(
+        staging_dir, recursive = FALSE, showWarnings = FALSE, mode = "0700"
+      )) {
+    stop("failed to create qualified CUDA native snapshot directory",
+         call. = FALSE)
+  }
+  pinned <- FALSE
+  on.exit({
+    if (!pinned && dir.exists(staging_dir)) {
+      unlink(staging_dir, recursive = TRUE, force = TRUE)
+    }
+  }, add = TRUE)
+  pinned_path <- file.path(staging_dir, "fastkpc_cuda.so")
+  if (!identical(file.link(path, pinned_path), TRUE)) {
+    stop("failed to pin qualified CUDA native library", call. = FALSE)
+  }
+  pinned_path <- normalizePath(
+    pinned_path, winslash = "/", mustWork = TRUE
+  )
+  if (!identical(hash_file(pinned_path), expected_sha256)) {
+    stop("pinned CUDA DLL does not match qualified build hash",
+         call. = FALSE)
+  }
+  pinned <- TRUE
+  pinned_path
+}
+
 .fastkpc_cuda_load_built_library_exact <- function(
     so, expected_sha256, hash_file = .fastkpc_cuda_sha256_file,
     loaded_paths = .fastkpc_cuda_loaded_paths,
     mapped_paths = .fastkpc_cuda_mapped_object_paths,
-    load = dyn.load) {
+    load = dyn.load, unload = dyn.unload) {
   if (!is.function(hash_file) || !is.function(loaded_paths) ||
-      !is.function(mapped_paths) || !is.function(load) ||
+      !is.function(mapped_paths) || !is.function(load) || !is.function(unload) ||
       typeof(expected_sha256) != "character" ||
       length(expected_sha256) != 1L || is.object(expected_sha256) ||
       !is.null(attributes(expected_sha256)) || anyNA(expected_sha256) ||
@@ -202,23 +235,59 @@
       call. = FALSE
     )
   }
-  load(path)
-  after <- .fastkpc_cuda_normalize_path_snapshot(
-    loaded_paths(), "loaded CUDA DLL path snapshot"
+  loaded <- FALSE
+  tryCatch({
+    load(path)
+    loaded <- TRUE
+    after <- .fastkpc_cuda_normalize_path_snapshot(
+      loaded_paths(), "loaded CUDA DLL path snapshot"
+    )
+    mapped_after <- .fastkpc_cuda_normalize_path_snapshot(
+      mapped_paths(), "mapped CUDA object path snapshot"
+    )
+    if (!path %in% after) {
+      stop("exact built DLL path is not loaded after dyn.load", call. = FALSE)
+    }
+    if (!path %in% mapped_after) {
+      stop("exact built DLL path is not mapped after dyn.load", call. = FALSE)
+    }
+    if (!identical(hash_file(path), expected_sha256)) {
+      stop("built CUDA DLL changed while loading", call. = FALSE)
+    }
+    invisible(path)
+  }, error = function(error) {
+    if (loaded) {
+      tryCatch(unload(path), error = function(unload_error) NULL)
+    }
+    stop(conditionMessage(error), call. = FALSE)
+  })
+}
+
+.fastkpc_cuda_pin_and_load_built_library <- function(
+    so, expected_sha256, hash_file = .fastkpc_cuda_sha256_file,
+    loaded_paths = .fastkpc_cuda_loaded_paths,
+    mapped_paths = .fastkpc_cuda_mapped_object_paths,
+    load = dyn.load, unload = dyn.unload) {
+  pinned_path <- .fastkpc_cuda_pin_built_library(
+    so, expected_sha256 = expected_sha256, hash_file = hash_file
   )
-  mapped_after <- .fastkpc_cuda_normalize_path_snapshot(
-    mapped_paths(), "mapped CUDA object path snapshot"
+  loaded <- FALSE
+  on.exit({
+    if (!loaded && dir.exists(dirname(pinned_path))) {
+      unlink(dirname(pinned_path), recursive = TRUE, force = TRUE)
+    }
+  }, add = TRUE)
+  .fastkpc_cuda_load_built_library_exact(
+    pinned_path,
+    expected_sha256 = expected_sha256,
+    hash_file = hash_file,
+    loaded_paths = loaded_paths,
+    mapped_paths = mapped_paths,
+    load = load,
+    unload = unload
   )
-  if (!path %in% after) {
-    stop("exact built DLL path is not loaded after dyn.load", call. = FALSE)
-  }
-  if (!path %in% mapped_after) {
-    stop("exact built DLL path is not mapped after dyn.load", call. = FALSE)
-  }
-  if (!identical(hash_file(path), expected_sha256)) {
-    stop("built CUDA DLL changed while loading", call. = FALSE)
-  }
-  invisible(path)
+  loaded <- TRUE
+  invisible(pinned_path)
 }
 
 build_fastkpc_cuda_native <- function(
@@ -278,6 +347,14 @@ load_fastkpc_cuda_native <- function(rebuild = FALSE) {
   if (!requireNamespace("Rcpp", quietly = TRUE)) {
     stop("Rcpp is required to load fastkpc CUDA native code", call. = FALSE)
   }
+  if (!rebuild) {
+    registered <- getLoadedDLLs()[["fastkpc_cuda"]]
+    if (!is.null(registered)) {
+      return(invisible(normalizePath(
+        registered[["path"]], winslash = "/", mustWork = TRUE
+      )))
+    }
+  }
   so <- build_fastkpc_cuda_native(rebuild = rebuild)
   loaded <- vapply(getLoadedDLLs(), function(dll) normalizePath(dll[["path"]],
                                                                mustWork = FALSE),
@@ -298,11 +375,11 @@ load_fastkpc_cuda_native_qualified <- function(
     rebuild = TRUE, trace_path = trace_path, tracer_path = tracer_path
   )
   built_sha256 <- .fastkpc_cuda_sha256_file(so)
-  .fastkpc_cuda_load_built_library_exact(
+  pinned_so <- .fastkpc_cuda_pin_and_load_built_library(
     so, expected_sha256 = built_sha256
   )
   list(
-    native_library_path = so,
+    native_library_path = pinned_so,
     native_library_sha256 = built_sha256,
     trace_path = normalizePath(
       trace_path, winslash = "/", mustWork = TRUE

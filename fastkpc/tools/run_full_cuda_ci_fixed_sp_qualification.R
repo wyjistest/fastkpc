@@ -327,6 +327,10 @@ environment_lines <- c(
     "native_build_dependency_trace_invocation=",
     execution_provenance$native_build_dependencies$trace_invocation
   ),
+  paste0(
+    "native_build_working_dir=",
+    execution_provenance$native_build_dependencies$build_working_dir
+  ),
   "native_build_trace_path=native_build_trace.txt",
   paste0(
     "native_build_trace_sha256=",
