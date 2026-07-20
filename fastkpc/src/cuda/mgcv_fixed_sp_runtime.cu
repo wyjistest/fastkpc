@@ -2402,8 +2402,8 @@ void resolve_fixed_sp_output_status_locked(
       FixedSpStatus::OkCholeskyBatched));
   token->diagnostics.executed_svd_target_count =
     static_cast<int>(std::count(
-      token->solver_statuses.begin(), token->solver_statuses.end(),
-      FixedSpStatus::OkAugmentedSvd));
+      token->executed_routes.begin(), token->executed_routes.end(),
+      FixedSpRoute::AugmentedSvd));
   token->diagnostics.true_batched_kernel =
     token->target_count >= 2 &&
     token->diagnostics.true_batched_target_count == token->target_count;

@@ -143,11 +143,16 @@ assert_true(
     identical(svd_info$svd_info, 0L) &&
     identical(svd_info$effective_rank, 1L) &&
     identical(svd_info$solver_status, "ERR_NONFINITE_OUTPUT") &&
-    identical(svd_info$executed_svd_target_count, 0L) &&
+    identical(svd_info$planned_svd_target_count, 1L) &&
+    identical(svd_info$executed_svd_target_count, 1L) &&
+    identical(svd_info$aggregate_factor_call_count, 1L) &&
+    identical(svd_info$aggregate_b_build_count, 2L) &&
+    identical(svd_info$aggregate_penalty_factor_count, 1L) &&
+    identical(svd_info$aggregate_svd_b_build_count, 2L) &&
     identical(svd_info$batch_output_finalized_target_count, 0L) &&
     identical(svd_info$nonfinite_output_count, 1L),
   paste0(
-    "nonfinite planned SVD is excluded from the successful execution count; ",
+    "nonfinite planned SVD retains truthful executed-route accounting; ",
     "status=", svd_info$solver_status,
     "; executed_svd=", svd_info$executed_svd_target_count
   )

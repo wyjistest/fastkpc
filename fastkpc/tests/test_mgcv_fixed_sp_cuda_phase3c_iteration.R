@@ -27,6 +27,72 @@ assert_error_field <- function(value, size, message) {
     message
   )
 }
+assert_error_matching <- function(expression, pattern, message) {
+  error <- tryCatch({
+    force(expression)
+    NULL
+  }, error = identity)
+  assert_true(
+    inherits(error, "error") && grepl(
+      pattern, conditionMessage(error), fixed = TRUE
+    ),
+    message
+  )
+}
+
+repeat_fixture <- list(
+  target_records = data.frame(
+    residual_key_sha256 = c(strrep("a", 64L), strrep("b", 64L)),
+    planned_route = c("CHOLESKY_BATCHED", "AUGMENTED_SVD"),
+    executed_route = c("CHOLESKY_BATCHED", "AUGMENTED_SVD"),
+    reroute_reason = c("", ""),
+    solver_status = c("OK_CHOLESKY_BATCHED", "OK_AUGMENTED_SVD"),
+    fitted_numeric_hash = c(strrep("c", 64L), strrep("d", 64L)),
+    residual_numeric_hash = c(strrep("e", 64L), strrep("f", 64L)),
+    stringsAsFactors = FALSE
+  ),
+  summary = list()
+)
+repeat_fixture$summary <- list(
+  route_status_hash = fastkpc_full_cuda_census_metadata_hash(list(
+    repeat_fixture$target_records$residual_key_sha256,
+    repeat_fixture$target_records$planned_route,
+    repeat_fixture$target_records$executed_route,
+    repeat_fixture$target_records$reroute_reason,
+    repeat_fixture$target_records$solver_status
+  )),
+  numeric_hash = fastkpc_full_cuda_census_metadata_hash(list(
+    repeat_fixture$target_records$residual_key_sha256,
+    repeat_fixture$target_records$fitted_numeric_hash,
+    repeat_fixture$target_records$residual_numeric_hash
+  ))
+)
+assert_identical(
+  fastkpc_full_cuda_fixed_sp_validate_repeat_exact(
+    repeat_fixture, repeat_fixture
+  ),
+  TRUE,
+  "repeat validator accepts exact route/status and numeric evidence"
+)
+repeat_route_drift <- repeat_fixture
+repeat_route_drift$target_records$executed_route[[2L]] <- "AUGMENTED_QR"
+assert_error_matching(
+  fastkpc_full_cuda_fixed_sp_validate_repeat_exact(
+    repeat_fixture, repeat_route_drift
+  ),
+  "route/status evidence changed",
+  "repeat validator rejects target-level route drift"
+)
+repeat_numeric_drift <- repeat_fixture
+repeat_numeric_drift$target_records$residual_numeric_hash[[1L]] <-
+  strrep("0", 64L)
+assert_error_matching(
+  fastkpc_full_cuda_fixed_sp_validate_repeat_exact(
+    repeat_fixture, repeat_numeric_drift
+  ),
+  "numeric evidence changed",
+  "repeat validator rejects target-level numeric drift"
+)
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
   cat("SKIP Phase 3C fixed-sp three-route iteration gate\n")
@@ -137,6 +203,18 @@ result <- runner(
   prepared_dir = prepared_dir,
   data_path = data_path,
   device_id = 0L
+)
+repeat_result <- runner(
+  phase2_dir = phase2_dir,
+  census_dir = census_dir,
+  prepared_dir = prepared_dir,
+  data_path = data_path,
+  device_id = 0L
+)
+assert_identical(
+  fastkpc_full_cuda_fixed_sp_validate_repeat_exact(result, repeat_result),
+  TRUE,
+  "independent Phase 3C iteration executions are exact"
 )
 
 assert_identical(

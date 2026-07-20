@@ -5503,6 +5503,14 @@ extern "C" SEXP C_fastspline_residual_batch_cuda(SEXP datas,
   END_RCPP
 }
 
+extern "C" SEXP C_mgcv_extract_gpu_test_checked_augmented_rows(
+    SEXP ns, SEXP null_dims) {
+  BEGIN_RCPP
+  return Rcpp::wrap(mgcv_extract_fixed_sp_checked_augmented_rows(
+    Rcpp::as<int>(ns), Rcpp::as<int>(null_dims)));
+  END_RCPP
+}
+
 extern "C" SEXP C_mgcv_extract_gpu_solve_handle_fixed_sp(
     SEXP Xs,
     SEXP ys,
@@ -8693,6 +8701,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fast_hsic_perm_cuda", reinterpret_cast<DL_FUNC>(&C_fast_hsic_perm_cuda), 6},
   {"C_fastspline_residual_cuda", reinterpret_cast<DL_FUNC>(&C_fastspline_residual_cuda), 4},
   {"C_fastspline_residual_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fastspline_residual_batch_cuda), 5},
+  {"C_mgcv_extract_gpu_test_checked_augmented_rows", reinterpret_cast<DL_FUNC>(&C_mgcv_extract_gpu_test_checked_augmented_rows), 2},
   {"C_mgcv_extract_gpu_solve_handle_fixed_sp", reinterpret_cast<DL_FUNC>(&C_mgcv_extract_gpu_solve_handle_fixed_sp), 6},
   {"C_mgcv_extract_gpu_solve_same_setup_batch_fixed_sp", reinterpret_cast<DL_FUNC>(&C_mgcv_extract_gpu_solve_same_setup_batch_fixed_sp), 6},
   {"C_fast_skeleton_cuda", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda), 6},

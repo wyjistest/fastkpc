@@ -25,6 +25,8 @@ struct MgcvExtractGpuFixedSpResult {
   bool full_cuda_data_plane;
 };
 
+int mgcv_extract_fixed_sp_checked_augmented_rows(int n, int null_dim);
+
 MgcvExtractGpuFixedSpResult mgcv_extract_fixed_sp_solve_cuda(
   const double* X,
   int n,

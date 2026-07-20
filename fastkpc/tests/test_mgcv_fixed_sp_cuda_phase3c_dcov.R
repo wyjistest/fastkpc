@@ -592,9 +592,10 @@ assert_identical(
     "qualification_dcov_parity.rds",
     "qualification_dcov_parity.csv",
     "runtime_metrics.csv", "stage_timing.csv", "fallbacks.csv",
-    "failures.csv", "commands.txt", "environment.txt"
+    "failures.csv", "native_build_dependencies.csv", "commands.txt",
+    "environment.txt"
   ),
-  "qualification v2 payload surface includes dCov RDS/CSV in exact order"
+  "qualification v4 payload surface includes provenance and dCov evidence"
 )
 assert_identical(
   fastkpc_full_cuda_fixed_sp_qualification_summary_schema()$dcov_names,
@@ -811,9 +812,9 @@ summary <- jsonlite::fromJSON(
 )
 assert_true(
   identical(manifest$schema_version,
-            "full-cuda-ci-fixed-sp-qualification-v2") &&
+            "full-cuda-ci-fixed-sp-qualification-v4") &&
     identical(summary$artifact_schema_version,
-              "full-cuda-ci-fixed-sp-qualification-v2") &&
+              "full-cuda-ci-fixed-sp-qualification-v4") &&
     identical(manifest$scope, "qualification") &&
     identical(summary$scope, "qualification") &&
     !"pass" %in% names(manifest) && !"pass" %in% names(summary),

@@ -112,6 +112,22 @@ preload_source_sha256 <- vapply(
   fastkpc_full_cuda_fixed_sp_sha256_file,
   character(1L)
 )
+native_build_input_ids <- sort(c(
+  "fastkpc/tools/build_cuda_native.sh",
+  list.files(
+    "fastkpc/src", pattern = "\\.(c|cc|cpp|cu|cuh|h|hpp)$",
+    recursive = TRUE, full.names = TRUE
+  )
+), method = "radix")
+native_build_input_paths <- setNames(vapply(
+  native_build_input_ids,
+  normalizePath, character(1L), winslash = "/", mustWork = TRUE
+), native_build_input_ids)
+preload_native_build_input_sha256 <- vapply(
+  native_build_input_paths,
+  fastkpc_full_cuda_fixed_sp_sha256_file,
+  character(1L)
+)
 source <- function(file, ...) {
   fastkpc_full_cuda_fixed_sp_guarded_source(
     file = file, source_closure = execution_source_closure, ...
@@ -121,13 +137,26 @@ source("fastkpc/R/full_cuda_ci_workload_census.R")
 source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")
 source("fastkpc/R/cuda_native.R")
 
+native_build_trace_path <- tempfile(
+  "fastkpc-phase3c-native-build-", tmpdir = tempdir(), fileext = ".strace"
+)
+on.exit(unlink(native_build_trace_path, force = TRUE), add = TRUE)
 cuda_initialization <- timed("cuda_initialize", {
-  native_library_path <- load_fastkpc_cuda_native(rebuild = FALSE)
+  native_load <- load_fastkpc_cuda_native_qualified(
+    trace_path = native_build_trace_path
+  )
+  native_build_dependencies <-
+    fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies(
+      trace_path = native_load$trace_path,
+      build_working_dir = ".",
+      tracer_path = native_load$tracer_path,
+      trace_invocation = native_load$trace_invocation
+    )
   if (!fastkpc_cuda_available()) {
     stop("CUDA is unavailable for Phase 3C qualification", call. = FALSE)
   }
   normalized_native_path <- normalizePath(
-    native_library_path, winslash = "/", mustWork = TRUE
+    native_load$native_library_path, winslash = "/", mustWork = TRUE
   )
   loaded_paths <- vapply(getLoadedDLLs(), function(dll) {
     normalizePath(dll[["path"]], winslash = "/", mustWork = FALSE)
@@ -137,7 +166,9 @@ cuda_initialization <- timed("cuda_initialize", {
   }
   list(
     device_info = fastkpc_cuda_device_info(),
-    native_library_path = normalized_native_path
+    native_library_path = normalized_native_path,
+    native_library_sha256 = native_load$native_library_sha256,
+    native_build_dependencies = native_build_dependencies
   )
 })
 cuda_device_info <- cuda_initialization$device_info
@@ -146,7 +177,14 @@ execution_provenance <- timed(
   fastkpc_full_cuda_fixed_sp_capture_execution_provenance(
     source_closure = execution_source_closure,
     expected_source_sha256 = preload_source_sha256,
-    native_library_path = cuda_initialization$native_library_path
+    native_library_path = cuda_initialization$native_library_path,
+    native_build_input_paths = native_build_input_paths,
+    expected_native_build_input_sha256 =
+      preload_native_build_input_sha256,
+    native_build_dependencies =
+      cuda_initialization$native_build_dependencies,
+    expected_native_library_sha256 =
+      cuda_initialization$native_library_sha256
   )
 )
 
@@ -232,6 +270,23 @@ source_environment_lines <- unlist(lapply(
     )
   }
 ), use.names = FALSE)
+native_build_environment_lines <- unlist(lapply(
+  names(execution_provenance$native_build_input_paths),
+  function(input_id) c(
+    paste0(
+      "native_build_input.", input_id, ".path=",
+      execution_provenance$native_build_input_paths[[input_id]]
+    ),
+    paste0(
+      "native_build_input.", input_id, ".sha256=",
+      execution_provenance$native_build_input_sha256[[input_id]]
+    ),
+    paste0(
+      "native_build_input.", input_id, ".git_state=",
+      execution_provenance$native_build_input_git_state[[input_id]]
+    )
+  )
+), use.names = FALSE)
 environment_lines <- c(
   paste0("provenance_mode=", execution_provenance$provenance_mode),
   paste0("head_base_commit=", execution_provenance$head_base_commit),
@@ -258,6 +313,39 @@ environment_lines <- c(
     as.integer(execution_provenance$relevant_sources_dirty_or_untracked)
   ),
   source_environment_lines,
+  native_build_environment_lines,
+  paste0(
+    "native_build_inputs_sha256=",
+    execution_provenance$native_build_inputs_sha256
+  ),
+  paste0(
+    "native_build_dependencies_schema_version=",
+    execution_provenance$native_build_dependencies$schema_version
+  ),
+  paste0(
+    "native_build_dependency_trace_semantics=",
+    execution_provenance$native_build_dependencies$trace_semantics
+  ),
+  paste0(
+    "native_build_dependency_trace_invocation=",
+    execution_provenance$native_build_dependencies$trace_invocation
+  ),
+  paste0(
+    "native_build_tracer_path=",
+    execution_provenance$native_build_dependencies$tracer_path
+  ),
+  paste0(
+    "native_build_tracer_sha256=",
+    execution_provenance$native_build_dependencies$tracer_sha256
+  ),
+  paste0(
+    "native_build_dependency_count=",
+    execution_provenance$native_build_dependencies$dependency_count
+  ),
+  paste0(
+    "native_build_dependencies_sha256=",
+    execution_provenance$native_build_dependencies$aggregate_sha256
+  ),
   paste0(
     "native_library_path=", execution_provenance$native_library_path
   ),

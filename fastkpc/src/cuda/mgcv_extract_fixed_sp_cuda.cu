@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <exception>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -134,6 +135,17 @@ void cleanup_compatibility_runtime_noexcept(
 
 }  // namespace
 
+int mgcv_extract_fixed_sp_checked_augmented_rows(int n, int null_dim) {
+  if (n <= 0 || null_dim <= 0) {
+    throw std::runtime_error(
+      "augmented row dimensions must be positive");
+  }
+  if (null_dim > std::numeric_limits<int>::max() - n) {
+    throw std::runtime_error("augmented row count exceeds int range");
+  }
+  return n + null_dim;
+}
+
 MgcvExtractGpuFixedSpResult mgcv_extract_fixed_sp_solve_cuda(
     const double* X,
     int n,
@@ -204,7 +216,8 @@ MgcvExtractGpuFixedSpResult mgcv_extract_fixed_sp_solve_cuda(
     capacities.null_dim = null_dim;
     capacities.target_count = 1;
     capacities.penalty_count = 1;
-    capacities.augmented_rows = n + null_dim;
+    capacities.augmented_rows =
+      mgcv_extract_fixed_sp_checked_augmented_rows(n, null_dim);
     fastkpc::reserve_fixed_sp_runtime(context, capacities);
 
     fastkpc::TransientFixedSpCompatibilityHostView setup;

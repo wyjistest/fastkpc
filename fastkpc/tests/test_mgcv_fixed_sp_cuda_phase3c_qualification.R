@@ -1,6 +1,7 @@
 source("fastkpc/R/full_cuda_ci_workload_census.R")
 source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")
 source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R")
+source("fastkpc/R/cuda_native.R")
 
 fail <- function(message) stop(message, call. = FALSE)
 assert_true <- function(value, message) if (!isTRUE(value)) fail(message)
@@ -416,7 +417,10 @@ expected_publication_summary_fields <- c(
   "head_base_commit", "source_closure_schema_version",
   "source_closure_count", "source_closure_sha256",
   "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
-  "native_library_sha256", "execution_sources_unchanged_after_run",
+  "native_build_inputs_sha256", "native_build_dependency_count",
+  "native_build_dependencies_sha256", "native_build_tracer_sha256",
+  "native_library_sha256",
+  "execution_sources_unchanged_after_run",
   "elapsed_seconds", "stage_timing_total_seconds", "payload_file_count"
 )
 published_summary_namespace_fixture <- jsonlite::fromJSON(
@@ -424,9 +428,16 @@ published_summary_namespace_fixture <- jsonlite::fromJSON(
   simplifyVector = FALSE
 )
 if (length(setdiff(
-      expected_dcov_summary_fields,
+      c(
+        expected_dcov_summary_fields, "native_build_inputs_sha256",
+        "native_build_dependency_count", "native_build_dependencies_sha256",
+        "native_build_tracer_sha256"
+      ),
       names(published_summary_namespace_fixture)
-    )) > 0L) {
+    )) > 0L || !identical(
+      published_summary_namespace_fixture$artifact_schema_version,
+      "full-cuda-ci-fixed-sp-qualification-v4"
+    )) {
   synthetic_dcov_summary_fixture <- list(
     qualification_dcov_logical_test_count = 3808L,
     qualification_dcov_near_alpha_count = 1478L,
@@ -442,11 +453,23 @@ if (length(setdiff(
   )
   synthetic_publication_summary_fixture <-
     published_summary_namespace_fixture[
-      expected_publication_summary_fields
+      intersect(
+        expected_publication_summary_fields,
+        names(published_summary_namespace_fixture)
+      )
     ]
   synthetic_publication_summary_fixture$artifact_schema_version <-
-    "full-cuda-ci-fixed-sp-qualification-v2"
-  synthetic_publication_summary_fixture$payload_file_count <- 14L
+    "full-cuda-ci-fixed-sp-qualification-v4"
+  synthetic_publication_summary_fixture$native_build_inputs_sha256 <-
+    strrep("d", 64L)
+  synthetic_publication_summary_fixture$native_build_dependency_count <- 3L
+  synthetic_publication_summary_fixture$native_build_dependencies_sha256 <-
+    strrep("e", 64L)
+  synthetic_publication_summary_fixture$native_build_tracer_sha256 <-
+    strrep("f", 64L)
+  synthetic_publication_summary_fixture$payload_file_count <- 15L
+  synthetic_publication_summary_fixture <-
+    synthetic_publication_summary_fixture[expected_publication_summary_fields]
   published_summary_namespace_fixture <- c(
     published_summary_namespace_fixture[
       expected_prepublication_summary_fields
@@ -1024,33 +1047,116 @@ assert_true(
 )
 provenance_native_path <- file.path(provenance_fixture_dir, "fixture.so")
 writeBin(charToRaw("fixture-native-library"), provenance_native_path)
+provenance_native_build_input_paths <- file.path(
+  provenance_fixture_dir, c("build.sh", "native.cu")
+)
+names(provenance_native_build_input_paths) <- c("build", "native")
+writeLines("#!/bin/sh\nexit 0", provenance_native_build_input_paths[["build"]],
+           useBytes = TRUE)
+writeLines("// fixture native source",
+           provenance_native_build_input_paths[["native"]], useBytes = TRUE)
+provenance_native_build_input_paths[] <- vapply(
+  provenance_native_build_input_paths,
+  normalizePath, character(1L), winslash = "/", mustWork = TRUE
+)
 provenance_preload_hashes <- vapply(
   provenance_closure$source_file_paths,
   fastkpc_full_cuda_fixed_sp_sha256_file,
   character(1L)
 )
+provenance_native_build_input_hashes <- vapply(
+  provenance_native_build_input_paths,
+  fastkpc_full_cuda_fixed_sp_sha256_file,
+  character(1L)
+)
+provenance_trace_path <- file.path(provenance_fixture_dir, "build.strace")
+provenance_strace_path <- .fastkpc_cuda_resolve_strace(Sys.which("strace"))
+provenance_trace_invocation <-
+  .fastkpc_cuda_trace_invocation(provenance_strace_path)
+provenance_external_dependency_path <- file.path(
+  provenance_fixture_dir, "external-header.hpp"
+)
+writeLines(
+  "// external fixture header", provenance_external_dependency_path,
+  useBytes = TRUE
+)
+provenance_external_dependency_path <- normalizePath(
+  provenance_external_dependency_path, winslash = "/", mustWork = TRUE
+)
+writeLines(c(
+  paste0(
+    "100 execve(\"", provenance_native_build_input_paths[["build"]],
+    "\", [\"build.sh\"], 0x0 /* 0 vars */) = 0"
+  ),
+  paste0(
+    "100 openat(AT_FDCWD, \"",
+    provenance_native_build_input_paths[["native"]],
+    "\", O_RDONLY|O_CLOEXEC) = 3<",
+    provenance_native_build_input_paths[["native"]], ">"
+  ),
+  paste0(
+    "100 openat(AT_FDCWD, \"", provenance_external_dependency_path,
+    "\", O_RDONLY|O_CLOEXEC) = 4<",
+    provenance_external_dependency_path, ">"
+  )
+), provenance_trace_path, useBytes = TRUE)
+provenance_native_build_dependencies <-
+  fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies(
+    trace_path = provenance_trace_path,
+    build_working_dir = ".",
+    tracer_path = provenance_strace_path,
+    trace_invocation = provenance_trace_invocation
+  )
+provenance_native_sha256 <-
+  fastkpc_full_cuda_fixed_sp_sha256_file(provenance_native_path)
+provenance_loaded_paths <- function() provenance_native_path
 provenance_fixture <-
   fastkpc_full_cuda_fixed_sp_capture_execution_provenance(
     source_closure = provenance_closure,
     expected_source_sha256 = provenance_preload_hashes,
-    native_library_path = provenance_native_path
+    native_library_path = provenance_native_path,
+    native_build_input_paths = provenance_native_build_input_paths,
+    expected_native_build_input_sha256 =
+      provenance_native_build_input_hashes,
+    native_build_dependencies = provenance_native_build_dependencies,
+    expected_native_library_sha256 = provenance_native_sha256,
+    loaded_paths = provenance_loaded_paths
   )
 assert_true(
   identical(provenance_fixture$source_closure_count, 3L) &&
     identical(names(provenance_fixture$source_file_sha256),
               expected_provenance_source_ids) &&
     identical(names(provenance_fixture$source_file_git_state),
-              expected_provenance_source_ids) && identical(
+              expected_provenance_source_ids) &&
+    identical(
+      provenance_fixture$native_build_input_paths,
+      provenance_native_build_input_paths
+    ) && identical(
+      provenance_fixture$native_build_input_sha256,
+      provenance_native_build_input_hashes
+    ) && identical(
+      names(provenance_fixture$native_build_input_git_state),
+      names(provenance_native_build_input_paths)
+    ) && identical(
+      provenance_fixture$native_build_dependencies,
+      provenance_native_build_dependencies
+    ) && identical(
+      provenance_fixture$native_library_sha256,
+      provenance_native_sha256
+    ) && identical(
     provenance_fixture$provenance_mode,
     "working-tree-execution-snapshot-v1"
   ) && isTRUE(provenance_fixture$relevant_sources_dirty_or_untracked) &&
     !isTRUE(provenance_fixture$execution_sources_unchanged_after_run),
   "execution provenance captures fixed-order dirty source identity"
 )
-verified_provenance_fixture <-
+verify_provenance_fixture <- function(value) {
   fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
-    provenance_fixture
+    value, loaded_paths = provenance_loaded_paths
   )
+}
+verified_provenance_fixture <-
+  verify_provenance_fixture(provenance_fixture)
 assert_true(
   isTRUE(verified_provenance_fixture$execution_sources_unchanged_after_run),
   "execution provenance verifies unchanged source/native bytes"
@@ -1093,11 +1199,35 @@ writeLines(
   useBytes = TRUE, sep = "\n"
 )
 assert_error_matching(
-  fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
-    provenance_fixture
-  ),
+  verify_provenance_fixture(provenance_fixture),
   "execution source snapshot changed",
   "execution provenance fails closed on source mutation"
+)
+writeLines(
+  "fixture_transitive_numeric <- function(x) x + 1",
+  provenance_source_paths[["transitive"]], useBytes = TRUE
+)
+writeLines(
+  "// mutated fixture native source",
+  provenance_native_build_input_paths[["native"]], useBytes = TRUE
+)
+assert_error_matching(
+  verify_provenance_fixture(provenance_fixture),
+  "native build input snapshot changed",
+  "execution provenance fails closed on native build input mutation"
+)
+writeLines(
+  "// fixture native source",
+  provenance_native_build_input_paths[["native"]], useBytes = TRUE
+)
+writeLines(
+  "// external dependency mutation",
+  provenance_external_dependency_path, useBytes = TRUE
+)
+assert_error_matching(
+  verify_provenance_fixture(provenance_fixture),
+  "native build dependency changed",
+  "execution provenance fails closed on traced dependency mutation"
 )
 
 dynamic_source_path <- file.path(provenance_fixture_dir, "dynamic.R")
@@ -1132,6 +1262,29 @@ unlink(provenance_fixture_dir, recursive = TRUE, force = TRUE)
 assert_true(
   !dir.exists(provenance_fixture_dir),
   "execution provenance fixture is removed after the mutation gate"
+)
+
+qualification_runner_source <- paste(
+  readLines(
+    "fastkpc/tools/run_full_cuda_ci_fixed_sp_qualification.R",
+    warn = FALSE
+  ),
+  collapse = "\n"
+)
+assert_true(
+  grepl(
+    "load_fastkpc_cuda_native_qualified(",
+    qualification_runner_source, fixed = TRUE
+  ) && grepl(
+    "capture_native_build_dependencies(",
+    qualification_runner_source, fixed = TRUE
+  ),
+  "qualification runner traces the clean build and certifies exact bytes"
+)
+assert_true(
+  "native_build_dependencies.csv" %in%
+    fastkpc_full_cuda_fixed_sp_qualification_payload_names(),
+  "qualification payload publishes inspectable native build dependencies"
 )
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
@@ -1190,8 +1343,8 @@ expected_files <- c(
   "setup_metrics.rds", "setup_metrics.csv",
   "qualification_dcov_parity.rds", "qualification_dcov_parity.csv",
   "runtime_metrics.csv", "stage_timing.csv", "fallbacks.csv",
-  "failures.csv", "commands.txt", "environment.txt", "manifest.json",
-  "summary.json"
+  "failures.csv", "native_build_dependencies.csv", "commands.txt",
+  "environment.txt", "manifest.json", "summary.json"
 )
 actual_files <- sort(list.files(output_dir, all.files = FALSE))
 assert_identical(
@@ -1362,7 +1515,9 @@ expected_summary_fields <- c(
   "catalog_authenticated", "provenance_mode", "head_base_commit",
   "source_closure_schema_version", "source_closure_count",
   "source_closure_sha256", "execution_snapshot_sha256",
-  "relevant_sources_dirty_or_untracked", "native_library_sha256",
+  "relevant_sources_dirty_or_untracked", "native_build_inputs_sha256",
+  "native_build_dependency_count", "native_build_dependencies_sha256",
+  "native_build_tracer_sha256", "native_library_sha256",
   "execution_sources_unchanged_after_run", "elapsed_seconds",
   "stage_timing_total_seconds", "payload_file_count"
 )
@@ -1377,6 +1532,13 @@ expected_manifest_fields <- c(
   "source_project_root", "source_closure_count", "source_closure_sha256",
   "direct_source_ids", "source_dependency_map",
   "source_file_paths", "source_file_sha256", "source_file_git_state",
+  "native_build_input_paths", "native_build_input_sha256",
+  "native_build_input_git_state", "native_build_inputs_sha256",
+  "native_build_dependencies_schema_version",
+  "native_build_dependency_trace_semantics",
+  "native_build_dependency_trace_invocation", "native_build_tracer_path",
+  "native_build_tracer_sha256", "native_build_dependency_count",
+  "native_build_dependencies_sha256",
   "relevant_sources_dirty_or_untracked", "native_library_identity",
   "native_library_path", "native_library_sha256",
   "execution_snapshot_sha256", "execution_sources_unchanged_after_run",
@@ -1405,6 +1567,10 @@ for (field in c(
   "provenance_mode", "head_base_commit", "source_closure_schema_version",
   "source_discovery_semantics", "source_project_root",
   "source_closure_sha256", "native_library_identity", "native_library_path",
+  "native_build_inputs_sha256", "native_build_dependencies_schema_version",
+  "native_build_dependency_trace_semantics",
+  "native_build_dependency_trace_invocation", "native_build_tracer_path",
+  "native_build_tracer_sha256", "native_build_dependencies_sha256",
   "native_library_sha256",
   "execution_snapshot_sha256", "phase0_dir", "phase1_dir", "phase2_dir",
   "data_path", "qualification_subset_hash", "ordered_setup_key_digest",
@@ -1434,6 +1600,10 @@ assert_json_scalar(
 assert_json_scalar(
   manifest$source_closure_count, "integer",
   "manifest source closure count is one exact integer"
+)
+assert_json_scalar(
+  manifest$native_build_dependency_count, "integer",
+  "manifest native build dependency count is one exact integer"
 )
 
 expected_execution_source_ids <- c(
@@ -1487,6 +1657,17 @@ expected_execution_source_paths <- setNames(vapply(
   function(path) normalizePath(path, winslash = "/", mustWork = TRUE),
   character(1L)
 ), expected_execution_source_ids)
+expected_native_build_input_ids <- sort(c(
+  "fastkpc/tools/build_cuda_native.sh",
+  list.files(
+    "fastkpc/src", pattern = "\\.(c|cc|cpp|cu|cuh|h|hpp)$",
+    recursive = TRUE, full.names = TRUE
+  )
+), method = "radix")
+expected_native_build_input_paths <- setNames(vapply(
+  expected_native_build_input_ids,
+  normalizePath, character(1L), winslash = "/", mustWork = TRUE
+), expected_native_build_input_ids)
 assert_json_character_map <- function(value, expected_names, message) {
   assert_true(
     is.list(value) && !is.object(value) &&
@@ -1515,6 +1696,18 @@ assert_json_character_map(
   manifest$source_file_git_state, expected_execution_source_ids,
   "manifest source git-state map has fixed names and exact scalar types"
 )
+assert_json_character_map(
+  manifest$native_build_input_paths, expected_native_build_input_ids,
+  "manifest native build-input path map has fixed names and scalar types"
+)
+assert_json_character_map(
+  manifest$native_build_input_sha256, expected_native_build_input_ids,
+  "manifest native build-input hash map has fixed names and scalar types"
+)
+assert_json_character_map(
+  manifest$native_build_input_git_state, expected_native_build_input_ids,
+  "manifest native build-input git-state map has fixed names and scalar types"
+)
 manifest_direct_source_ids <- unlist(
   manifest$direct_source_ids, use.names = TRUE
 )
@@ -1538,6 +1731,15 @@ manifest_source_hashes <- unlist(
 )
 manifest_source_states <- unlist(
   manifest$source_file_git_state, use.names = TRUE
+)
+manifest_native_build_input_paths <- unlist(
+  manifest$native_build_input_paths, use.names = TRUE
+)
+manifest_native_build_input_hashes <- unlist(
+  manifest$native_build_input_sha256, use.names = TRUE
+)
+manifest_native_build_input_states <- unlist(
+  manifest$native_build_input_git_state, use.names = TRUE
 )
 assert_identical(
   manifest_source_paths, expected_execution_source_paths,
@@ -1578,6 +1780,32 @@ assert_identical(
   unname(actual_execution_source_states),
   "manifest records current dirty/untracked state per execution source"
 )
+assert_identical(
+  manifest_native_build_input_paths, expected_native_build_input_paths,
+  "manifest paths identify every native build input"
+)
+actual_native_build_input_hashes <- vapply(
+  expected_native_build_input_paths,
+  function(path) digest::digest(
+    file = path, algo = "sha256", serialize = FALSE
+  ),
+  character(1L)
+)
+assert_identical(
+  unname(manifest_native_build_input_hashes),
+  unname(actual_native_build_input_hashes),
+  "native build-input hashes remain unchanged after the long run"
+)
+actual_native_build_input_states <- vapply(
+  expected_native_build_input_paths,
+  independent_git_state,
+  character(1L)
+)
+assert_identical(
+  unname(manifest_native_build_input_states),
+  unname(actual_native_build_input_states),
+  "manifest records native build-input git state"
+)
 head_base_commit <- base::system2(
   "git", c("rev-parse", "HEAD"), stdout = TRUE, stderr = FALSE
 )
@@ -1591,7 +1819,7 @@ assert_true(
 assert_true(
   identical(
     manifest$provenance_schema_version,
-    "full-cuda-ci-execution-source-snapshot-v2"
+    "full-cuda-ci-execution-source-snapshot-v4"
   ) && identical(
     manifest$provenance_mode,
     "working-tree-execution-snapshot-v1"
@@ -1606,14 +1834,17 @@ assert_true(
     normalizePath(".", winslash = "/", mustWork = TRUE)
   ) && identical(
     manifest$relevant_sources_dirty_or_untracked,
-    any(actual_execution_source_states != "clean")
+    any(c(
+      actual_execution_source_states,
+      actual_native_build_input_states
+    ) != "clean")
   ) && isTRUE(manifest$execution_sources_unchanged_after_run),
   "manifest provenance mode and dirty-source gate are exact"
 )
 assert_true(
   identical(
     manifest$native_library_identity,
-    "load-fastkpc-cuda-native-returned-path-v1"
+    "qualified-build-sha-exact-loaded-path-v1"
   ) && is.character(manifest$native_library_path) &&
     length(manifest$native_library_path) == 1L &&
     file.exists(manifest$native_library_path) &&
@@ -1626,6 +1857,114 @@ assert_true(
       )
     ),
   "manifest binds the actual loaded native shared object bytes"
+)
+native_build_input_identity_lines <- unlist(lapply(
+  expected_native_build_input_ids,
+  function(input_id) c(
+    paste0(
+      "native_build_input.", input_id, ".path=",
+      manifest_native_build_input_paths[[input_id]]
+    ),
+    paste0(
+      "native_build_input.", input_id, ".sha256=",
+      manifest_native_build_input_hashes[[input_id]]
+    )
+  )
+), use.names = FALSE)
+independent_native_build_inputs_sha256 <- unname(digest::digest(
+  charToRaw(enc2utf8(paste0(
+    paste(native_build_input_identity_lines, collapse = "\n"), "\n"
+  ))),
+  algo = "sha256", serialize = FALSE
+))
+assert_identical(
+  manifest$native_build_inputs_sha256,
+  independent_native_build_inputs_sha256,
+  "manifest binds native source and build-script bytes as one identity"
+)
+native_build_dependencies <- utils::read.csv(
+  file.path(output_dir, "native_build_dependencies.csv"),
+  stringsAsFactors = FALSE, check.names = FALSE
+)
+assert_true(
+  identical(names(native_build_dependencies), c("path", "sha256")) &&
+    nrow(native_build_dependencies) == manifest$native_build_dependency_count &&
+    nrow(native_build_dependencies) > 0L &&
+    identical(
+      native_build_dependencies$path,
+      sort(native_build_dependencies$path, method = "radix")
+    ) && !anyDuplicated(native_build_dependencies$path) &&
+    all(fastkpc_full_cuda_fixed_sp_regular_file_mask(
+      native_build_dependencies$path
+    )) &&
+    all(grepl("^[0-9a-f]{64}$", native_build_dependencies$sha256)),
+  "native build dependency payload is canonical and complete"
+)
+actual_native_build_dependency_hashes <- vapply(
+  native_build_dependencies$path,
+  function(path) digest::digest(
+    file = path, algo = "sha256", serialize = FALSE
+  ),
+  character(1L)
+)
+assert_identical(
+  unname(native_build_dependencies$sha256),
+  unname(actual_native_build_dependency_hashes),
+  "native build dependency bytes remain unchanged after qualification"
+)
+tracer_index <- match(
+  manifest$native_build_tracer_path, native_build_dependencies$path
+)
+assert_true(
+  identical(
+    manifest$native_build_dependencies_schema_version,
+    "full-cuda-ci-native-build-dependencies-v1"
+  ) && identical(
+    manifest$native_build_dependency_trace_semantics,
+    "linux-strace-successful-read-exec-regular-files-v1"
+  ) && !is.na(tracer_index) && identical(
+    native_build_dependencies$sha256[[tracer_index]],
+    manifest$native_build_tracer_sha256
+  ),
+  "manifest records the traced dependency semantics and tracer identity"
+)
+dependency_identity_lines <- c(
+  paste0(
+    "schema_version=", manifest$native_build_dependencies_schema_version
+  ),
+  paste0(
+    "trace_semantics=", manifest$native_build_dependency_trace_semantics
+  ),
+  paste0(
+    "trace_invocation=", manifest$native_build_dependency_trace_invocation
+  ),
+  paste0("tracer.path=", manifest$native_build_tracer_path),
+  paste0("tracer.sha256=", manifest$native_build_tracer_sha256),
+  paste0("dependency_count=", manifest$native_build_dependency_count)
+)
+for (index in seq_len(nrow(native_build_dependencies))) {
+  dependency_identity_lines <- c(
+    dependency_identity_lines,
+    paste0(
+      "dependency.", index, ".path=",
+      native_build_dependencies$path[[index]]
+    ),
+    paste0(
+      "dependency.", index, ".sha256=",
+      native_build_dependencies$sha256[[index]]
+    )
+  )
+}
+independent_native_build_dependencies_sha256 <- unname(digest::digest(
+  charToRaw(enc2utf8(paste0(
+    paste(dependency_identity_lines, collapse = "\n"), "\n"
+  ))),
+  algo = "sha256", serialize = FALSE
+))
+assert_identical(
+  manifest$native_build_dependencies_sha256,
+  independent_native_build_dependencies_sha256,
+  "manifest binds the actual traced native build dependency closure"
 )
 closure_lines <- c(
   paste0("closure.schema=", manifest$source_closure_schema_version),
@@ -1685,8 +2024,51 @@ for (source_id in expected_execution_source_ids) {
            paste(manifest_source_dependencies[[source_id]], collapse = ","))
   )
 }
+for (input_id in expected_native_build_input_ids) {
+  snapshot_lines <- c(
+    snapshot_lines,
+    paste0("native_build_input.", input_id, ".path=",
+           manifest_native_build_input_paths[[input_id]]),
+    paste0("native_build_input.", input_id, ".sha256=",
+           manifest_native_build_input_hashes[[input_id]]),
+    paste0("native_build_input.", input_id, ".git_state=",
+           manifest_native_build_input_states[[input_id]])
+  )
+}
 snapshot_lines <- c(
   snapshot_lines,
+  paste0(
+    "native_build_inputs.sha256=",
+    manifest$native_build_inputs_sha256
+  ),
+  paste0(
+    "native_build_dependencies.schema=",
+    manifest$native_build_dependencies_schema_version
+  ),
+  paste0(
+    "native_build_dependencies.trace_semantics=",
+    manifest$native_build_dependency_trace_semantics
+  ),
+  paste0(
+    "native_build_dependencies.trace_invocation=",
+    manifest$native_build_dependency_trace_invocation
+  ),
+  paste0(
+    "native_build_dependencies.tracer_path=",
+    manifest$native_build_tracer_path
+  ),
+  paste0(
+    "native_build_dependencies.tracer_sha256=",
+    manifest$native_build_tracer_sha256
+  ),
+  paste0(
+    "native_build_dependencies.count=",
+    manifest$native_build_dependency_count
+  ),
+  paste0(
+    "native_build_dependencies.sha256=",
+    manifest$native_build_dependencies_sha256
+  ),
   paste0(
     "relevant_sources_dirty_or_untracked=",
     if (manifest$relevant_sources_dirty_or_untracked) "true" else "false"
@@ -1723,6 +2105,18 @@ assert_true(
     ) && identical(
       summary$relevant_sources_dirty_or_untracked,
       manifest$relevant_sources_dirty_or_untracked
+    ) && identical(
+      summary$native_build_inputs_sha256,
+      manifest$native_build_inputs_sha256
+    ) && identical(
+      summary$native_build_dependency_count,
+      manifest$native_build_dependency_count
+    ) && identical(
+      summary$native_build_dependencies_sha256,
+      manifest$native_build_dependencies_sha256
+    ) && identical(
+      summary$native_build_tracer_sha256,
+      manifest$native_build_tracer_sha256
     ) && identical(
       summary$native_library_sha256,
       manifest$native_library_sha256
@@ -2090,6 +2484,30 @@ assert_true(
     environment_metadata[["execution_snapshot_sha256"]],
     manifest$execution_snapshot_sha256
   ) && identical(
+    environment_metadata[["native_build_inputs_sha256"]],
+    manifest$native_build_inputs_sha256
+  ) && identical(
+    environment_metadata[["native_build_dependencies_schema_version"]],
+    manifest$native_build_dependencies_schema_version
+  ) && identical(
+    environment_metadata[["native_build_dependency_trace_semantics"]],
+    manifest$native_build_dependency_trace_semantics
+  ) && identical(
+    environment_metadata[["native_build_dependency_trace_invocation"]],
+    manifest$native_build_dependency_trace_invocation
+  ) && identical(
+    environment_metadata[["native_build_tracer_path"]],
+    manifest$native_build_tracer_path
+  ) && identical(
+    environment_metadata[["native_build_tracer_sha256"]],
+    manifest$native_build_tracer_sha256
+  ) && identical(
+    environment_metadata[["native_build_dependency_count"]],
+    as.character(manifest$native_build_dependency_count)
+  ) && identical(
+    environment_metadata[["native_build_dependencies_sha256"]],
+    manifest$native_build_dependencies_sha256
+  ) && identical(
     environment_metadata[["native_library_path"]],
     manifest$native_library_path
   ) && identical(
@@ -2111,6 +2529,27 @@ for (source_id in expected_execution_source_ids) {
       manifest_source_states[[source_id]]
     ),
     paste("environment source provenance matches manifest", source_id)
+  )
+}
+for (input_id in expected_native_build_input_ids) {
+  assert_true(
+    identical(
+      environment_metadata[[paste0(
+        "native_build_input.", input_id, ".path"
+      )]],
+      manifest_native_build_input_paths[[input_id]]
+    ) && identical(
+      environment_metadata[[paste0(
+        "native_build_input.", input_id, ".sha256"
+      )]],
+      manifest_native_build_input_hashes[[input_id]]
+    ) && identical(
+      environment_metadata[[paste0(
+        "native_build_input.", input_id, ".git_state"
+      )]],
+      manifest_native_build_input_states[[input_id]]
+    ),
+    paste("environment native build provenance matches manifest", input_id)
   )
 }
 runtime_workspace_delta <- as.integer(
@@ -2306,7 +2745,9 @@ for (field in c(
   "route_status_hash", "numeric_hash", "artifact_schema_version",
   "provenance_mode", "head_base_commit", "source_closure_schema_version",
   "source_closure_sha256", "execution_snapshot_sha256",
-  "native_library_sha256", "qualification_dcov_logical_ids_hash",
+  "native_build_inputs_sha256", "native_build_dependencies_sha256",
+  "native_build_tracer_sha256", "native_library_sha256",
+  "qualification_dcov_logical_ids_hash",
   "qualification_dcov_residual_key_hash", "qualification_dcov_rows_hash"
 )) {
   assert_json_scalar(
@@ -2314,6 +2755,10 @@ for (field in c(
     paste("summary character scalar type is exact", field)
   )
 }
+assert_json_scalar(
+  summary$native_build_dependency_count, "integer",
+  "summary native build dependency count is one exact integer"
+)
 for (field in c(
   "catalog_authenticated", "relevant_sources_dirty_or_untracked",
   "execution_sources_unchanged_after_run"
@@ -2558,7 +3003,7 @@ assert_identical(
 )
 assert_true(
   identical(manifest$schema_version,
-            "full-cuda-ci-fixed-sp-qualification-v2") &&
+            "full-cuda-ci-fixed-sp-qualification-v4") &&
     identical(manifest$scope, "qualification") &&
     identical(unname(unlist(manifest$publication_order, use.names = FALSE)),
               c(payload_names, "manifest.json", "summary.json")) &&

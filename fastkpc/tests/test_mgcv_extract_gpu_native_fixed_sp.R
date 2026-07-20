@@ -30,6 +30,25 @@ if (!fastkpc_cuda_available()) {
   quit(save = "no", status = 0)
 }
 
+assert_true(
+  identical(
+    .Call(
+      "C_mgcv_extract_gpu_test_checked_augmented_rows",
+      2L, 1L, PACKAGE = "fastkpc_cuda"
+    ),
+    3L
+  ),
+  "legacy adapter checked augmented-row addition preserves valid dimensions"
+)
+assert_error(
+  .Call(
+    "C_mgcv_extract_gpu_test_checked_augmented_rows",
+    .Machine$integer.max, 1L, PACKAGE = "fastkpc_cuda"
+  ),
+  "augmented row count exceeds int range",
+  "legacy adapter rejects signed augmented-row overflow"
+)
+
 set.seed(245)
 n <- 64
 s1 <- stats::runif(n, -2, 2)

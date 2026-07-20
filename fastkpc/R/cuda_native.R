@@ -8,23 +8,178 @@
   file.path(.fastkpc_cuda_root(), "build", "fastkpc_cuda.so")
 }
 
-build_fastkpc_cuda_native <- function(rebuild = FALSE) {
+.fastkpc_cuda_loaded_paths <- function() {
+  unname(vapply(getLoadedDLLs(), function(dll) {
+    normalizePath(
+      dll[["path"]], winslash = "/", mustWork = FALSE
+    )
+  }, character(1L)))
+}
+
+.fastkpc_cuda_unload_exact_for_rebuild <- function(
+    so, loaded_paths = .fastkpc_cuda_loaded_paths, unload = dyn.unload) {
+  if (!is.function(loaded_paths) || !is.function(unload)) {
+    stop("CUDA rebuild unload callbacks are malformed", call. = FALSE)
+  }
+  path <- normalizePath(so, winslash = "/", mustWork = FALSE)
+  before <- loaded_paths()
+  if (typeof(before) != "character" || anyNA(before)) {
+    stop("loaded CUDA DLL path snapshot is malformed", call. = FALSE)
+  }
+  before <- vapply(
+    before, normalizePath, character(1L), winslash = "/", mustWork = FALSE
+  )
+  if (path %in% before) {
+    tryCatch(
+      unload(path),
+      error = function(error) stop(
+        "failed to unload exact CUDA DLL before rebuild: ",
+        conditionMessage(error), call. = FALSE
+      )
+    )
+  }
+  after <- loaded_paths()
+  if (typeof(after) != "character" || anyNA(after)) {
+    stop("loaded CUDA DLL path snapshot is malformed", call. = FALSE)
+  }
+  after <- vapply(
+    after, normalizePath, character(1L), winslash = "/", mustWork = FALSE
+  )
+  if (path %in% after) {
+    stop("exact old CUDA DLL remains loaded after rebuild unload",
+         call. = FALSE)
+  }
+  invisible(path)
+}
+
+.fastkpc_cuda_resolve_strace <- function(candidate = Sys.which("strace")) {
+  if (typeof(candidate) != "character" || length(candidate) != 1L ||
+      is.object(candidate) || anyNA(candidate)) {
+    stop("strace is required for qualified CUDA native rebuild",
+         call. = FALSE)
+  }
+  candidate <- unname(candidate)
+  if (!nzchar(candidate) || !file.exists(candidate) || dir.exists(candidate)) {
+    stop("strace is required for qualified CUDA native rebuild",
+         call. = FALSE)
+  }
+  normalizePath(candidate, winslash = "/", mustWork = TRUE)
+}
+
+.fastkpc_cuda_trace_invocation <- function(tracer_path) {
+  paste(
+    "LC_ALL=C", tracer_path, "-f -qq -yy -s 65535",
+    "-e trace=%file",
+    "-e status=successful -o <trace> bash <build-script>"
+  )
+}
+
+.fastkpc_cuda_sha256_file <- function(path) {
+  if (!requireNamespace("digest", quietly = TRUE)) {
+    stop("digest is required for qualified CUDA native loading",
+         call. = FALSE)
+  }
+  if (!is.character(path) || length(path) != 1L || is.na(path) ||
+      !nzchar(path) || !file.exists(path) || dir.exists(path)) {
+    stop("qualified CUDA native hash path is invalid", call. = FALSE)
+  }
+  unname(digest::digest(
+    file = path, algo = "sha256", serialize = FALSE
+  ))
+}
+
+.fastkpc_cuda_load_built_library_exact <- function(
+    so, expected_sha256, hash_file = .fastkpc_cuda_sha256_file,
+    loaded_paths = .fastkpc_cuda_loaded_paths, load = dyn.load) {
+  if (!is.function(hash_file) || !is.function(loaded_paths) ||
+      !is.function(load) || typeof(expected_sha256) != "character" ||
+      length(expected_sha256) != 1L || is.object(expected_sha256) ||
+      !is.null(attributes(expected_sha256)) || anyNA(expected_sha256) ||
+      !grepl("^[0-9a-f]{64}$", expected_sha256)) {
+    stop("qualified CUDA native load identity is malformed", call. = FALSE)
+  }
+  path <- normalizePath(so, winslash = "/", mustWork = TRUE)
+  if (!identical(hash_file(path), expected_sha256)) {
+    stop("built CUDA DLL changed before dyn.load", call. = FALSE)
+  }
+  before <- loaded_paths()
+  if (typeof(before) != "character" || anyNA(before)) {
+    stop("loaded CUDA DLL path snapshot is malformed", call. = FALSE)
+  }
+  before <- vapply(
+    before, normalizePath, character(1L), winslash = "/", mustWork = FALSE
+  )
+  if (path %in% before) {
+    stop("exact built CUDA DLL path was already loaded", call. = FALSE)
+  }
+  load(path)
+  after <- loaded_paths()
+  if (typeof(after) != "character" || anyNA(after)) {
+    stop("loaded CUDA DLL path snapshot is malformed", call. = FALSE)
+  }
+  after <- vapply(
+    after, normalizePath, character(1L), winslash = "/", mustWork = FALSE
+  )
+  if (!path %in% after) {
+    stop("exact built DLL path is not loaded after dyn.load", call. = FALSE)
+  }
+  if (!identical(hash_file(path), expected_sha256)) {
+    stop("built CUDA DLL changed while loading", call. = FALSE)
+  }
+  invisible(path)
+}
+
+build_fastkpc_cuda_native <- function(
+    rebuild = FALSE, trace_path = NULL, tracer_path = NULL) {
   root <- .fastkpc_cuda_root()
   so <- .fastkpc_cuda_so()
-  if (rebuild && is.loaded("C_fastkpc_cuda_available")) {
-    try(dyn.unload(so), silent = TRUE)
+  if (rebuild) {
+    .fastkpc_cuda_unload_exact_for_rebuild(so)
   }
   if (rebuild || !file.exists(so)) {
     script <- file.path(root, "tools", "build_cuda_native.sh")
     if (!file.exists(script)) {
       stop("Cannot find CUDA build script: ", script, call. = FALSE)
     }
-    status <- system2("bash", script)
+    if (is.null(trace_path)) {
+      if (!is.null(tracer_path)) {
+        stop("CUDA native tracer requires a trace output path",
+             call. = FALSE)
+      }
+      status <- system2("bash", script)
+    } else {
+      if (!rebuild || !is.character(trace_path) ||
+          length(trace_path) != 1L || is.na(trace_path) ||
+          !nzchar(trace_path) || dir.exists(trace_path)) {
+        stop("qualified CUDA native trace path is malformed",
+             call. = FALSE)
+      }
+      trace_parent <- normalizePath(
+        dirname(trace_path), winslash = "/", mustWork = TRUE
+      )
+      trace_path <- file.path(trace_parent, basename(trace_path))
+      tracer_path <- .fastkpc_cuda_resolve_strace(tracer_path)
+      status <- system2(
+        tracer_path,
+        c(
+          "-f", "-qq", "-yy", "-s", "65535",
+          "-e", "trace=%file",
+          "-e", "status=successful", "-o", shQuote(trace_path),
+          "bash", shQuote(script)
+        ),
+        env = "LC_ALL=C"
+      )
+    }
     if (!identical(status, 0L)) {
       stop("CUDA native build failed with status ", status, call. = FALSE)
     }
+    if (!is.null(trace_path) &&
+        (!file.exists(trace_path) || dir.exists(trace_path))) {
+      stop("qualified CUDA native build trace was not produced",
+           call. = FALSE)
+    }
   }
-  normalizePath(so)
+  normalizePath(so, winslash = "/", mustWork = TRUE)
 }
 
 load_fastkpc_cuda_native <- function(rebuild = FALSE) {
@@ -39,6 +194,30 @@ load_fastkpc_cuda_native <- function(rebuild = FALSE) {
     dyn.load(so)
   }
   invisible(so)
+}
+
+load_fastkpc_cuda_native_qualified <- function(
+    trace_path, tracer_path = Sys.which("strace")) {
+  if (!requireNamespace("Rcpp", quietly = TRUE)) {
+    stop("Rcpp is required to load fastkpc CUDA native code", call. = FALSE)
+  }
+  tracer_path <- .fastkpc_cuda_resolve_strace(tracer_path)
+  so <- build_fastkpc_cuda_native(
+    rebuild = TRUE, trace_path = trace_path, tracer_path = tracer_path
+  )
+  built_sha256 <- .fastkpc_cuda_sha256_file(so)
+  .fastkpc_cuda_load_built_library_exact(
+    so, expected_sha256 = built_sha256
+  )
+  list(
+    native_library_path = so,
+    native_library_sha256 = built_sha256,
+    trace_path = normalizePath(
+      trace_path, winslash = "/", mustWork = TRUE
+    ),
+    tracer_path = tracer_path,
+    trace_invocation = .fastkpc_cuda_trace_invocation(tracer_path)
+  )
 }
 
 fastkpc_cuda_available <- function() {
