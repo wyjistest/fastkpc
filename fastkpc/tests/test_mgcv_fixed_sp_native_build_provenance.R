@@ -376,6 +376,34 @@ assert_true(
   )
 )
 
+pathname_token_paths <- file.path(
+  fixture_dir, c("O_WRONLY_header.hpp", "O_TRUNC_header.hpp")
+)
+for (path in pathname_token_paths) {
+  writeLines("// pathname token fixture", path, useBytes = TRUE)
+}
+pathname_token_paths <- normalizePath(
+  pathname_token_paths, winslash = "/", mustWork = TRUE
+)
+pathname_token_dependencies <- capture_ordered_fixture(
+  "quoted-pathname-flag-tokens",
+  vapply(
+    seq_along(pathname_token_paths),
+    function(index) paste0(
+      "100 openat(AT_FDCWD, \"", pathname_token_paths[[index]],
+      "\", O_RDONLY|O_CLOEXEC) = ", 30L + index, "<",
+      pathname_token_paths[[index]], ">"
+    ),
+    character(1L)
+  )
+)
+assert_true(
+  all(pathname_token_paths %in% pathname_token_dependencies$files$path) &&
+    !any(pathname_token_paths %in%
+         pathname_token_dependencies$exclusions$path),
+  "quoted pathname flag tokens do not alter open flag classification"
+)
+
 actual_build_script <- file.path(fixture_dir, "actual-build.sh")
 actual_trace_path <- file.path(fixture_dir, "actual-build.strace")
 writeLines(c(

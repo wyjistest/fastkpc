@@ -7961,6 +7961,54 @@ fastkpc_full_cuda_fixed_sp_decode_strace_path <- function(value) {
   parsed[[1L]]
 }
 
+fastkpc_full_cuda_fixed_sp_open_flag_tokens <- function(lines, syscalls) {
+  malformed <- function() {
+    stop("native build trace is malformed", call. = FALSE)
+  }
+  if (typeof(lines) != "character" || typeof(syscalls) != "character" ||
+      length(lines) != length(syscalls) || anyNA(lines) || anyNA(syscalls) ||
+      any(!syscalls %in% c("open", "openat", "openat2"))) {
+    malformed()
+  }
+  quoted <- '"(?:[^"\\\\]|\\\\.)*"'
+  flag_expressions <- vapply(
+    seq_along(lines),
+    function(index) {
+      pattern <- switch(
+        syscalls[[index]],
+        open = paste0(
+          "open\\([[:space:]]*", quoted,
+          "[[:space:]]*,[[:space:]]*([^,)]*)"
+        ),
+        openat = paste0(
+          "openat\\([^,]+,[[:space:]]*", quoted,
+          "[[:space:]]*,[[:space:]]*([^,)]*)"
+        ),
+        openat2 = paste0(
+          "openat2\\([^,]+,[[:space:]]*", quoted,
+          "[[:space:]]*,[[:space:]]*\\{[[:space:]]*",
+          "flags[[:space:]]*=[[:space:]]*([^,}]*)"
+        )
+      )
+      matched <- regmatches(
+        lines[[index]], regexec(pattern, lines[[index]], perl = TRUE)
+      )[[1L]]
+      if (length(matched) != 2L) malformed()
+      trimws(matched[[2L]])
+    },
+    character(1L)
+  )
+  unname(lapply(flag_expressions, function(expression) {
+    unname(regmatches(
+      expression,
+      gregexpr(
+        "(?<![[:alnum:]_])O_[A-Z0-9_]+(?![[:alnum:]_])",
+        expression, perl = TRUE
+      )
+    )[[1L]])
+  }))
+}
+
 fastkpc_full_cuda_fixed_sp_reconstruct_native_build_dependencies <- function(
     trace_path, build_working_dir, tracer_path, trace_invocation) {
   scalar_path <- function(value, label) {
@@ -8054,11 +8102,18 @@ fastkpc_full_cuda_fixed_sp_reconstruct_native_build_dependencies <- function(
   }
   open_lines <- traced_lines[open_call]
   open_syscalls <- syscalls[open_call]
-  read_open <- grepl("O_RDONLY|O_RDWR", open_lines) &
-    !grepl("O_WRONLY", open_lines)
-  generation_open <- grepl("O_TRUNC|O_TMPFILE", open_lines) |
-    (grepl("O_CREAT", open_lines) & grepl("O_EXCL", open_lines))
-  directory_open <- read_open & grepl("O_DIRECTORY", open_lines)
+  open_flag_tokens <- fastkpc_full_cuda_fixed_sp_open_flag_tokens(
+    open_lines, open_syscalls
+  )
+  has_open_flag <- function(flag) {
+    vapply(open_flag_tokens, function(tokens) flag %in% tokens, logical(1L))
+  }
+  read_open <- (has_open_flag("O_RDONLY") | has_open_flag("O_RDWR")) &
+    !has_open_flag("O_WRONLY")
+  generation_open <- has_open_flag("O_TRUNC") |
+    has_open_flag("O_TMPFILE") |
+    (has_open_flag("O_CREAT") & has_open_flag("O_EXCL"))
+  directory_open <- read_open & has_open_flag("O_DIRECTORY")
   open_paths <- extract_open_paths(open_lines, open_syscalls)
   exec_lines <- traced_lines[!open_call]
   exec_syscalls <- syscalls[!open_call]

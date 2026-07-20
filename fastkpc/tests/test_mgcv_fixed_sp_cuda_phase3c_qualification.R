@@ -41,9 +41,81 @@ assert_error_matching <- function(expression, pattern, message) {
   )
 }
 
-independent_generation_open <- function(lines) {
-  grepl("O_TRUNC|O_TMPFILE", lines) |
-    (grepl("O_CREAT", lines) & grepl("O_EXCL", lines))
+independent_open_flag_tokens <- function(lines, syscalls = NULL) {
+  if (is.null(syscalls)) {
+    syscall_matches <- regmatches(
+      lines,
+      regexec(
+        "^[[:space:]]*[0-9]+[[:space:]]+(openat2|openat|open)\\(",
+        lines, perl = TRUE
+      )
+    )
+    assert_true(
+      all(lengths(syscall_matches) == 2L),
+      "independent open syscall extraction is complete"
+    )
+    syscalls <- vapply(syscall_matches, `[[`, character(1L), 2L)
+  }
+  assert_true(
+    typeof(lines) == "character" && typeof(syscalls) == "character" &&
+      identical(length(lines), length(syscalls)) &&
+      all(syscalls %in% c("open", "openat", "openat2")),
+    "independent open flag inputs are aligned"
+  )
+  quoted_path <- '"(?:\\\\.|[^"\\\\])*"'
+  expressions <- vapply(seq_along(lines), function(index) {
+    prefix <- switch(
+      syscalls[[index]],
+      open = paste0("open\\([[:space:]]*", quoted_path),
+      openat = paste0(
+        "openat\\([^,]+,[[:space:]]*", quoted_path
+      ),
+      openat2 = paste0(
+        "openat2\\([^,]+,[[:space:]]*", quoted_path
+      )
+    )
+    suffix <- if (identical(syscalls[[index]], "openat2")) {
+      paste0(
+        "[[:space:]]*,[[:space:]]*\\{[[:space:]]*",
+        "flags[[:space:]]*=[[:space:]]*([^,}]*)"
+      )
+    } else {
+      "[[:space:]]*,[[:space:]]*([^,)]*)"
+    }
+    matched <- regmatches(
+      lines[[index]],
+      regexec(paste0(prefix, suffix), lines[[index]], perl = TRUE)
+    )[[1L]]
+    assert_true(
+      length(matched) == 2L,
+      "independent open flag extraction is complete"
+    )
+    trimws(matched[[2L]])
+  }, character(1L))
+  unname(lapply(expressions, function(expression) {
+    pieces <- strsplit(expression, "[^A-Z0-9_]+", perl = TRUE)[[1L]]
+    unname(pieces[grepl("^O_[A-Z0-9_]+$", pieces)])
+  }))
+}
+
+independent_open_events <- function(lines, syscalls = NULL) {
+  tokens <- independent_open_flag_tokens(lines, syscalls)
+  has_flag <- function(flag) {
+    vapply(tokens, function(value) flag %in% value, logical(1L))
+  }
+  read <- (has_flag("O_RDONLY") | has_flag("O_RDWR")) &
+    !has_flag("O_WRONLY")
+  generation <- has_flag("O_TRUNC") | has_flag("O_TMPFILE") |
+    (has_flag("O_CREAT") & has_flag("O_EXCL"))
+  list(
+    read = read,
+    generation = generation,
+    directory = read & has_flag("O_DIRECTORY")
+  )
+}
+
+independent_generation_open <- function(lines, syscalls = NULL) {
+  independent_open_events(lines, syscalls)$generation
 }
 
 independent_ordered_generated_paths <- function(
@@ -69,14 +141,81 @@ independent_ordered_generated_paths <- function(
 
 assert_identical(
   independent_generation_open(c(
-    "openat(..., O_RDWR|O_CLOEXEC) = 3</tmp/input>",
-    "openat(..., O_WRONLY|O_CREAT) = 4</tmp/ambiguous>",
-    "openat(..., O_WRONLY|O_TRUNC) = 5</tmp/truncated>",
-    "openat(..., O_RDWR|O_TMPFILE) = 6</tmp/#1>",
-    "openat(..., O_RDWR|O_CREAT|O_EXCL) = 7</tmp/exclusive>"
+    "100 openat(AT_FDCWD, \"/tmp/input\", O_RDWR|O_CLOEXEC) = 3</tmp/input>",
+    paste0(
+      "100 openat(AT_FDCWD, \"/tmp/ambiguous\", ",
+      "O_WRONLY|O_CREAT) = 4</tmp/ambiguous>"
+    ),
+    paste0(
+      "100 openat(AT_FDCWD, \"/tmp/truncated\", ",
+      "O_WRONLY|O_TRUNC) = 5</tmp/truncated>"
+    ),
+    paste0(
+      "100 openat(AT_FDCWD, \"/tmp/#1\", ",
+      "O_RDWR|O_TMPFILE) = 6</tmp/#1>"
+    ),
+    paste0(
+      "100 openat(AT_FDCWD, \"/tmp/exclusive\", ",
+      "O_RDWR|O_CREAT|O_EXCL) = 7</tmp/exclusive>"
+    )
   )),
   c(FALSE, FALSE, TRUE, TRUE, TRUE),
   "independent generation flags reject O_RDWR and ambiguous O_CREAT"
+)
+pathname_token_open_lines <- c(
+  paste0(
+    "100 openat(AT_FDCWD, \"/tmp/O_WRONLY_header.hpp\", ",
+    "O_RDONLY|O_CLOEXEC) = 31</tmp/O_WRONLY_header.hpp>"
+  ),
+  paste0(
+    "100 openat(AT_FDCWD, \"/tmp/O_TRUNC_header.hpp\", ",
+    "O_RDONLY|O_CLOEXEC) = 32</tmp/O_TRUNC_header.hpp>"
+  ),
+  paste0(
+    "100 openat2(AT_FDCWD, ",
+    "\"/tmp/escaped_\\\"O_TRUNC\\\"_header.hpp\", ",
+    "{flags=O_RDONLY|O_CLOEXEC, mode=0, ",
+    "resolve=RESOLVE_BENEATH}, 24) = 33",
+    "</tmp/escaped_\\\"O_TRUNC\\\"_header.hpp>"
+  ),
+  paste0(
+    "100 openat(AT_FDCWD, \"/tmp/exact-token.hpp\", ",
+    "O_RDONLY_HEADER|O_TRUNCATED|O_DIRECTORYISH|",
+    "O_CREATING|O_EXCLUSIVE) = 34</tmp/exact-token.hpp>"
+  )
+)
+pathname_token_open_syscalls <- c("openat", "openat", "openat2", "openat")
+expected_pathname_token_flags <- c(
+  rep(list(c("O_RDONLY", "O_CLOEXEC")), 3L),
+  list(c(
+    "O_RDONLY_HEADER", "O_TRUNCATED", "O_DIRECTORYISH", "O_CREATING",
+    "O_EXCLUSIVE"
+  ))
+)
+assert_identical(
+  independent_generation_open(pathname_token_open_lines),
+  rep(FALSE, length(pathname_token_open_lines)),
+  "independent generation ignores flag tokens in quoted pathnames"
+)
+production_pathname_token_flags <- tryCatch(
+  fastkpc_full_cuda_fixed_sp_open_flag_tokens(
+    pathname_token_open_lines, pathname_token_open_syscalls
+  ),
+  error = identity
+)
+independent_pathname_token_flags <- tryCatch(
+  independent_open_flag_tokens(
+    pathname_token_open_lines, pathname_token_open_syscalls
+  ),
+  error = identity
+)
+assert_true(
+  identical(production_pathname_token_flags, expected_pathname_token_flags) &&
+    identical(independent_pathname_token_flags,
+              expected_pathname_token_flags) &&
+    identical(production_pathname_token_flags,
+              independent_pathname_token_flags),
+  "raw trace and independent parsers agree on pathname flag tokens"
 )
 assert_identical(
   unname(independent_ordered_generated_paths(
@@ -1391,8 +1530,17 @@ assert_true(
   nzchar(independent_parser_source) && grepl(
     "independent_ordered_generated_paths(",
     independent_parser_source, fixed = TRUE
+  ) && grepl(
+    "independent_open_events(open_lines, open_syscalls)",
+    independent_parser_source, fixed = TRUE
+  ) && !grepl(
+    "fastkpc_full_cuda_fixed_sp_open_flag_tokens",
+    independent_parser_source, fixed = TRUE
   ) && !grepl("write_open <-", independent_parser_source, fixed = TRUE),
-  "independent qualification reparse uses ordered generation evidence"
+  paste0(
+    "independent qualification reparse uses isolated open flags and ",
+    "ordered generation evidence"
+  )
 )
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
@@ -2210,10 +2358,10 @@ independent_trace_tables <- function(trace_path, tracer_path) {
     function(index) exec_path(exec_lines[[index]], exec_syscalls[[index]]),
     character(1L)
   ))
-  read_open <- grepl("O_RDONLY|O_RDWR", open_lines) &
-    !grepl("O_WRONLY", open_lines)
-  generation_open <- independent_generation_open(open_lines)
-  directory_open <- read_open & grepl("O_DIRECTORY", open_lines)
+  open_events <- independent_open_events(open_lines, open_syscalls)
+  read_open <- open_events$read
+  generation_open <- open_events$generation
+  directory_open <- open_events$directory
   event_paths <- character(length(calls))
   event_paths[is_open] <- open_paths
   event_paths[!is_open] <- exec_paths
