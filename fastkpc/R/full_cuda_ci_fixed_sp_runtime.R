@@ -8012,33 +8012,29 @@ fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies <- function(
   extract_open_paths <- function(open_lines, open_syscalls) {
     if (length(open_lines) == 0L) return(character())
     resolved <- grepl(resolved_pattern, open_lines, perl = TRUE)
-    encoded_resolved <- sub(
+    encoded <- character(length(open_lines))
+    encoded[resolved] <- sub(
       resolved_pattern, "\\1", open_lines[resolved], perl = TRUE
     )
-    encoded_fallback <- character()
     if (any(!resolved)) {
       unresolved_lines <- open_lines[!resolved]
       unresolved_syscalls <- open_syscalls[!resolved]
       direct <- unresolved_syscalls == "open"
-      encoded_fallback <- c(
-        extract_paths(
-          unresolved_lines[direct], paste0("open\\(", quoted)
-        ),
-        extract_paths(
-          unresolved_lines[!direct],
-          paste0("(?:openat|openat2)\\([^,]+,[[:space:]]*", quoted)
-        )
+      unresolved_encoded <- character(length(unresolved_lines))
+      unresolved_encoded[direct] <- extract_paths(
+        unresolved_lines[direct], paste0("open\\(", quoted)
       )
+      unresolved_encoded[!direct] <- extract_paths(
+        unresolved_lines[!direct],
+        paste0("(?:openat|openat2)\\([^,]+,[[:space:]]*", quoted)
+      )
+      encoded[!resolved] <- unresolved_encoded
     }
-    decoded <- if (length(c(encoded_resolved, encoded_fallback)) == 0L) {
-      character()
-    } else {
-      unname(vapply(
-        unique(c(encoded_resolved, encoded_fallback)),
-        fastkpc_full_cuda_fixed_sp_decode_strace_path,
-        character(1L)
-      ))
-    }
+    decoded <- unname(vapply(
+      encoded,
+      fastkpc_full_cuda_fixed_sp_decode_strace_path,
+      character(1L)
+    ))
     if (any(!startsWith(decoded, "/"))) {
       stop("relative native build path lacks resolved strace identity",
            call. = FALSE)
@@ -8049,50 +8045,56 @@ fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies <- function(
   open_syscalls <- syscalls[open_call]
   read_open <- grepl("O_RDONLY|O_RDWR", open_lines) &
     !grepl("O_WRONLY", open_lines)
-  write_open <- grepl(
-    "O_WRONLY|O_RDWR|O_CREAT|O_TRUNC", open_lines
-  )
+  generation_open <- grepl("O_TRUNC|O_TMPFILE", open_lines) |
+    (grepl("O_CREAT", open_lines) & grepl("O_EXCL", open_lines))
   directory_open <- read_open & grepl("O_DIRECTORY", open_lines)
-  read_paths <- extract_open_paths(
-    open_lines[read_open], open_syscalls[read_open]
-  )
-  generated_paths <- extract_open_paths(
-    open_lines[write_open], open_syscalls[write_open]
-  )
-  directory_paths <- extract_open_paths(
-    open_lines[directory_open], open_syscalls[directory_open]
-  )
+  open_paths <- extract_open_paths(open_lines, open_syscalls)
   exec_lines <- traced_lines[!open_call]
   exec_syscalls <- syscalls[!open_call]
   exec_direct <- exec_syscalls == "execve"
-  encoded_exec_paths <- c(
-    extract_paths(
+  exec_paths <- if (length(exec_lines) == 0L) {
+    character()
+  } else {
+    encoded_exec_paths <- character(length(exec_lines))
+    encoded_exec_paths[exec_direct] <- extract_paths(
       exec_lines[exec_direct], paste0("execve\\(", quoted)
-    ),
-    extract_paths(
+    )
+    encoded_exec_paths[!exec_direct] <- extract_paths(
       exec_lines[!exec_direct],
       paste0("execveat\\([^,]+,[[:space:]]*", quoted)
     )
-  )
-  exec_paths <- if (length(encoded_exec_paths) == 0L) {
-    character()
-  } else {
-    vapply(
-      unique(encoded_exec_paths),
+    unname(vapply(
+      encoded_exec_paths,
       fastkpc_full_cuda_fixed_sp_decode_strace_path,
       character(1L)
-    )
+    ))
   }
   if (any(!startsWith(exec_paths, "/"))) {
     stop("relative native build path lacks resolved strace identity",
          call. = FALSE)
   }
-  paths <- unique(c(read_paths, exec_paths))
+  event_paths <- character(length(traced_lines))
+  event_paths[open_call] <- open_paths
+  event_paths[!open_call] <- exec_paths
+  access_event <- !open_call
+  access_event[open_call] <- read_open
+  generation_event <- rep.int(FALSE, length(traced_lines))
+  generation_event[open_call] <- generation_open
+  directory_event <- rep.int(FALSE, length(traced_lines))
+  directory_event[open_call] <- directory_open
+  paths <- unique(event_paths[access_event])
+  access_paths <- event_paths
+  access_paths[!access_event] <- NA_character_
+  first_access <- match(paths, access_paths)
+  generation_paths <- event_paths
+  generation_paths[!generation_event] <- NA_character_
+  first_generation <- match(paths, generation_paths)
   reasons <- rep.int(NA_character_, length(paths))
-  reasons[paths %in% generated_paths] <- "generated_output"
+  generated <- !is.na(first_generation) & first_generation <= first_access
+  reasons[generated] <- "generated_output"
   reasons[grepl("^/(?:proc|sys|dev)(?:/|$)", paths, perl = TRUE)] <-
     "pseudo_fs"
-  reasons[is.na(reasons) & paths %in% directory_paths] <- "non_regular"
+  reasons[is.na(reasons) & directory_event[first_access]] <- "non_regular"
   unresolved <- which(is.na(reasons))
   unresolved_exist <- file.exists(paths[unresolved])
   missing_non_pseudo <- sort(paths[unresolved[!unresolved_exist]],

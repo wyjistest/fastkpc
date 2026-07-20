@@ -41,6 +41,62 @@ assert_error_matching <- function(expression, pattern, message) {
   )
 }
 
+independent_generation_open <- function(lines) {
+  grepl("O_TRUNC|O_TMPFILE", lines) |
+    (grepl("O_CREAT", lines) & grepl("O_EXCL", lines))
+}
+
+independent_ordered_generated_paths <- function(
+    event_paths, access_event, generation_event) {
+  assert_true(
+    typeof(event_paths) == "character" &&
+      identical(length(event_paths), length(access_event)) &&
+      identical(length(event_paths), length(generation_event)),
+    "independent ordered generation inputs are aligned"
+  )
+  paths <- unique(event_paths[access_event])
+  access_paths <- event_paths
+  access_paths[!access_event] <- NA_character_
+  generation_paths <- event_paths
+  generation_paths[!generation_event] <- NA_character_
+  first_access <- match(paths, access_paths)
+  first_generation <- match(paths, generation_paths)
+  setNames(
+    !is.na(first_generation) & first_generation <= first_access,
+    paths
+  )
+}
+
+assert_identical(
+  independent_generation_open(c(
+    "openat(..., O_RDWR|O_CLOEXEC) = 3</tmp/input>",
+    "openat(..., O_WRONLY|O_CREAT) = 4</tmp/ambiguous>",
+    "openat(..., O_WRONLY|O_TRUNC) = 5</tmp/truncated>",
+    "openat(..., O_RDWR|O_TMPFILE) = 6</tmp/#1>",
+    "openat(..., O_RDWR|O_CREAT|O_EXCL) = 7</tmp/exclusive>"
+  )),
+  c(FALSE, FALSE, TRUE, TRUE, TRUE),
+  "independent generation flags reject O_RDWR and ambiguous O_CREAT"
+)
+assert_identical(
+  unname(independent_ordered_generated_paths(
+    event_paths = c("/tmp/late", "/tmp/late"),
+    access_event = c(TRUE, FALSE),
+    generation_event = c(FALSE, TRUE)
+  )),
+  FALSE,
+  "independent generation cannot use truncation after first access"
+)
+assert_identical(
+  unname(independent_ordered_generated_paths(
+    event_paths = c("/tmp/prior", "/tmp/prior"),
+    access_event = c(FALSE, TRUE),
+    generation_event = c(TRUE, FALSE)
+  )),
+  TRUE,
+  "independent generation accepts truncation before first access"
+)
+
 pass_fixture_output <- tempfile("fastkpc_phase3c_supplied_pass_")
 assert_error_matching(
   fastkpc_full_cuda_write_fixed_sp_qualification_artifact(
@@ -1302,6 +1358,36 @@ assert_true(
   ) %in% fastkpc_full_cuda_fixed_sp_qualification_payload_names()),
   "qualification payload publishes trace, dependency, and exclusion evidence"
 )
+qualification_test_lines <- readLines(
+  "fastkpc/tests/test_mgcv_fixed_sp_cuda_phase3c_qualification.R",
+  warn = FALSE
+)
+independent_parser_start <- grep(
+  "^independent_trace_tables <- function", qualification_test_lines
+)
+independent_parser_end <- grep(
+  "^reparsed_native_build <-", qualification_test_lines
+)
+independent_parser_source <- if (
+    length(independent_parser_start) == 1L &&
+      length(independent_parser_end) == 1L &&
+      independent_parser_start < independent_parser_end) {
+  paste(
+    qualification_test_lines[
+      seq.int(independent_parser_start, independent_parser_end - 1L)
+    ],
+    collapse = "\n"
+  )
+} else {
+  ""
+}
+assert_true(
+  nzchar(independent_parser_source) && grepl(
+    "independent_ordered_generated_paths(",
+    independent_parser_source, fixed = TRUE
+  ) && !grepl("write_open <-", independent_parser_source, fixed = TRUE),
+  "independent qualification reparse uses ordered generation evidence"
+)
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
   cat("SKIP Phase 3C fixed-sp qualification gate\n")
@@ -2106,23 +2192,34 @@ independent_trace_tables <- function(trace_path, tracer_path) {
   ))
   read_open <- grepl("O_RDONLY|O_RDWR", open_lines) &
     !grepl("O_WRONLY", open_lines)
-  write_open <- grepl(
-    "O_WRONLY|O_RDWR|O_CREAT|O_TRUNC", open_lines
-  )
+  generation_open <- independent_generation_open(open_lines)
   directory_open <- read_open & grepl("O_DIRECTORY", open_lines)
-  candidates <- unique(c(open_paths[read_open], exec_paths))
+  event_paths <- character(length(calls))
+  event_paths[is_open] <- open_paths
+  event_paths[!is_open] <- exec_paths
+  access_event <- !is_open
+  access_event[is_open] <- read_open
+  generation_event <- rep.int(FALSE, length(calls))
+  generation_event[is_open] <- generation_open
+  directory_event <- rep.int(FALSE, length(calls))
+  directory_event[is_open] <- directory_open
+  generated_by_path <- independent_ordered_generated_paths(
+    event_paths, access_event, generation_event
+  )
+  candidates <- names(generated_by_path)
+  access_paths <- event_paths
+  access_paths[!access_event] <- NA_character_
+  first_access <- match(candidates, access_paths)
   assert_true(
-    all(startsWith(c(candidates, open_paths[write_open]), "/")),
+    all(startsWith(event_paths, "/")),
     "independent native build trace paths are absolute"
   )
   reasons <- rep.int(NA_character_, length(candidates))
-  reasons[candidates %in% open_paths[write_open]] <- "generated_output"
+  reasons[unname(generated_by_path)] <- "generated_output"
   reasons[grepl(
     "^/(?:proc|sys|dev)(?:/|$)", candidates, perl = TRUE
   )] <- "pseudo_fs"
-  reasons[
-    is.na(reasons) & candidates %in% open_paths[directory_open]
-  ] <- "non_regular"
+  reasons[is.na(reasons) & directory_event[first_access]] <- "non_regular"
   remaining <- which(is.na(reasons))
   exists <- file.exists(candidates[remaining])
   assert_true(
