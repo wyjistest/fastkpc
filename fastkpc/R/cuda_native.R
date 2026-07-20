@@ -16,19 +16,96 @@
   }, character(1L)))
 }
 
+.fastkpc_cuda_decode_proc_maps_path <- function(value) {
+  if (typeof(value) != "character" || length(value) != 1L ||
+      is.object(value) || !is.null(attributes(value)) || anyNA(value)) {
+    stop("Linux mapped-object path is malformed", call. = FALSE)
+  }
+  input <- charToRaw(value)
+  output <- raw()
+  index <- 1L
+  while (index <= length(input)) {
+    if (input[[index]] == as.raw(92L) && index + 3L <= length(input)) {
+      digits <- as.integer(input[seq.int(index + 1L, index + 3L)]) - 48L
+      if (all(digits >= 0L & digits <= 7L)) {
+        output <- c(output, as.raw(sum(digits * c(64L, 8L, 1L))))
+        index <- index + 4L
+        next
+      }
+    }
+    output <- c(output, input[[index]])
+    index <- index + 1L
+  }
+  rawToChar(output)
+}
+
+.fastkpc_cuda_mapped_object_paths <- function(maps_path = "/proc/self/maps") {
+  if (typeof(maps_path) != "character" || length(maps_path) != 1L ||
+      is.object(maps_path) || !is.null(attributes(maps_path)) ||
+      anyNA(maps_path) || !nzchar(maps_path) || !file.exists(maps_path) ||
+      dir.exists(maps_path)) {
+    stop("Linux mapped-object snapshot is unavailable", call. = FALSE)
+  }
+  lines <- tryCatch(
+    readLines(maps_path, warn = FALSE, encoding = "bytes"),
+    error = function(error) stop(
+      "Linux mapped-object snapshot is unavailable: ",
+      conditionMessage(error), call. = FALSE
+    )
+  )
+  pattern <- paste0(
+    "^[[:xdigit:]]+-[[:xdigit:]]+[[:space:]]+[-rwxsp]{4}",
+    "[[:space:]]+[[:xdigit:]]+[[:space:]]+[[:xdigit:]]+:",
+    "[[:xdigit:]]+[[:space:]]+[0-9]+(?:[[:space:]]+(.*))?$"
+  )
+  if (length(lines) == 0L || any(!grepl(pattern, lines, perl = TRUE))) {
+    stop("Linux mapped-object snapshot is malformed", call. = FALSE)
+  }
+  encoded <- sub(pattern, "\\1", lines, perl = TRUE)
+  paths <- vapply(
+    encoded, .fastkpc_cuda_decode_proc_maps_path, character(1L)
+  )
+  paths <- sub(" \\(deleted\\)$", "", paths)
+  paths <- paths[startsWith(paths, "/")]
+  if (length(paths) == 0L) return(character())
+  paths <- vapply(
+    paths, normalizePath, character(1L),
+    winslash = "/", mustWork = FALSE
+  )
+  sort(unique(unname(paths)), method = "radix")
+}
+
+.fastkpc_cuda_normalize_path_snapshot <- function(value, label) {
+  if (typeof(value) != "character" || anyNA(value)) {
+    stop(label, " is malformed", call. = FALSE)
+  }
+  unname(vapply(
+    value, normalizePath, character(1L),
+    winslash = "/", mustWork = FALSE
+  ))
+}
+
 .fastkpc_cuda_unload_exact_for_rebuild <- function(
-    so, loaded_paths = .fastkpc_cuda_loaded_paths, unload = dyn.unload) {
-  if (!is.function(loaded_paths) || !is.function(unload)) {
+    so, loaded_paths = .fastkpc_cuda_loaded_paths,
+    mapped_paths = .fastkpc_cuda_mapped_object_paths,
+    unload = dyn.unload) {
+  if (!is.function(loaded_paths) || !is.function(mapped_paths) ||
+      !is.function(unload)) {
     stop("CUDA rebuild unload callbacks are malformed", call. = FALSE)
   }
   path <- normalizePath(so, winslash = "/", mustWork = FALSE)
-  before <- loaded_paths()
-  if (typeof(before) != "character" || anyNA(before)) {
-    stop("loaded CUDA DLL path snapshot is malformed", call. = FALSE)
-  }
-  before <- vapply(
-    before, normalizePath, character(1L), winslash = "/", mustWork = FALSE
+  before <- .fastkpc_cuda_normalize_path_snapshot(
+    loaded_paths(), "loaded CUDA DLL path snapshot"
   )
+  mapped_before <- .fastkpc_cuda_normalize_path_snapshot(
+    mapped_paths(), "mapped CUDA object path snapshot"
+  )
+  if (path %in% mapped_before && !path %in% before) {
+    stop(
+      "exact old CUDA DLL remains mapped without R registration; ",
+      "start a fresh R process", call. = FALSE
+    )
+  }
   if (path %in% before) {
     tryCatch(
       unload(path),
@@ -38,16 +115,21 @@
       )
     )
   }
-  after <- loaded_paths()
-  if (typeof(after) != "character" || anyNA(after)) {
-    stop("loaded CUDA DLL path snapshot is malformed", call. = FALSE)
-  }
-  after <- vapply(
-    after, normalizePath, character(1L), winslash = "/", mustWork = FALSE
+  after <- .fastkpc_cuda_normalize_path_snapshot(
+    loaded_paths(), "loaded CUDA DLL path snapshot"
+  )
+  mapped_after <- .fastkpc_cuda_normalize_path_snapshot(
+    mapped_paths(), "mapped CUDA object path snapshot"
   )
   if (path %in% after) {
     stop("exact old CUDA DLL remains loaded after rebuild unload",
          call. = FALSE)
+  }
+  if (path %in% mapped_after) {
+    stop(
+      "exact old CUDA DLL remains mapped after rebuild unload; ",
+      "start a fresh R process", call. = FALSE
+    )
   }
   invisible(path)
 }
@@ -90,9 +172,12 @@
 
 .fastkpc_cuda_load_built_library_exact <- function(
     so, expected_sha256, hash_file = .fastkpc_cuda_sha256_file,
-    loaded_paths = .fastkpc_cuda_loaded_paths, load = dyn.load) {
+    loaded_paths = .fastkpc_cuda_loaded_paths,
+    mapped_paths = .fastkpc_cuda_mapped_object_paths,
+    load = dyn.load) {
   if (!is.function(hash_file) || !is.function(loaded_paths) ||
-      !is.function(load) || typeof(expected_sha256) != "character" ||
+      !is.function(mapped_paths) || !is.function(load) ||
+      typeof(expected_sha256) != "character" ||
       length(expected_sha256) != 1L || is.object(expected_sha256) ||
       !is.null(attributes(expected_sha256)) || anyNA(expected_sha256) ||
       !grepl("^[0-9a-f]{64}$", expected_sha256)) {
@@ -102,26 +187,33 @@
   if (!identical(hash_file(path), expected_sha256)) {
     stop("built CUDA DLL changed before dyn.load", call. = FALSE)
   }
-  before <- loaded_paths()
-  if (typeof(before) != "character" || anyNA(before)) {
-    stop("loaded CUDA DLL path snapshot is malformed", call. = FALSE)
-  }
-  before <- vapply(
-    before, normalizePath, character(1L), winslash = "/", mustWork = FALSE
+  before <- .fastkpc_cuda_normalize_path_snapshot(
+    loaded_paths(), "loaded CUDA DLL path snapshot"
+  )
+  mapped_before <- .fastkpc_cuda_normalize_path_snapshot(
+    mapped_paths(), "mapped CUDA object path snapshot"
   )
   if (path %in% before) {
     stop("exact built CUDA DLL path was already loaded", call. = FALSE)
   }
-  load(path)
-  after <- loaded_paths()
-  if (typeof(after) != "character" || anyNA(after)) {
-    stop("loaded CUDA DLL path snapshot is malformed", call. = FALSE)
+  if (path %in% mapped_before) {
+    stop(
+      "exact built CUDA DLL path was already mapped; start a fresh R process",
+      call. = FALSE
+    )
   }
-  after <- vapply(
-    after, normalizePath, character(1L), winslash = "/", mustWork = FALSE
+  load(path)
+  after <- .fastkpc_cuda_normalize_path_snapshot(
+    loaded_paths(), "loaded CUDA DLL path snapshot"
+  )
+  mapped_after <- .fastkpc_cuda_normalize_path_snapshot(
+    mapped_paths(), "mapped CUDA object path snapshot"
   )
   if (!path %in% after) {
     stop("exact built DLL path is not loaded after dyn.load", call. = FALSE)
+  }
+  if (!path %in% mapped_after) {
+    stop("exact built DLL path is not mapped after dyn.load", call. = FALSE)
   }
   if (!identical(hash_file(path), expected_sha256)) {
     stop("built CUDA DLL changed while loading", call. = FALSE)

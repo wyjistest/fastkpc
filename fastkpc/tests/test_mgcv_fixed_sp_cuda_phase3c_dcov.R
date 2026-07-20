@@ -592,10 +592,11 @@ assert_identical(
     "qualification_dcov_parity.rds",
     "qualification_dcov_parity.csv",
     "runtime_metrics.csv", "stage_timing.csv", "fallbacks.csv",
-    "failures.csv", "native_build_dependencies.csv", "commands.txt",
-    "environment.txt"
+    "failures.csv", "native_build_dependencies.csv",
+    "native_build_exclusions.csv", "native_build_trace.txt",
+    "commands.txt", "environment.txt"
   ),
-  "qualification v4 payload surface includes provenance and dCov evidence"
+  "qualification v5 payload surface includes provenance and dCov evidence"
 )
 assert_identical(
   fastkpc_full_cuda_fixed_sp_qualification_summary_schema()$dcov_names,
@@ -795,13 +796,15 @@ expected_payload_names <- c(
   "setup_metrics.rds", "setup_metrics.csv",
   "qualification_dcov_parity.rds", "qualification_dcov_parity.csv",
   "runtime_metrics.csv", "stage_timing.csv", "fallbacks.csv",
-  "failures.csv", "commands.txt", "environment.txt"
+  "failures.csv", "native_build_dependencies.csv",
+  "native_build_exclusions.csv", "native_build_trace.txt",
+  "commands.txt", "environment.txt"
 )
 expected_files <- c(expected_payload_names, "manifest.json", "summary.json")
 assert_identical(
   sort(list.files(artifact_dir, all.files = FALSE), method = "radix"),
   sort(expected_files, method = "radix"),
-  "qualification dCov artifact has exact v2 payload surface"
+  "qualification dCov artifact has exact v5 payload surface"
 )
 
 manifest <- jsonlite::fromJSON(
@@ -812,9 +815,9 @@ summary <- jsonlite::fromJSON(
 )
 assert_true(
   identical(manifest$schema_version,
-            "full-cuda-ci-fixed-sp-qualification-v4") &&
+            "full-cuda-ci-fixed-sp-qualification-v5") &&
     identical(summary$artifact_schema_version,
-              "full-cuda-ci-fixed-sp-qualification-v4") &&
+              "full-cuda-ci-fixed-sp-qualification-v5") &&
     identical(manifest$scope, "qualification") &&
     identical(summary$scope, "qualification") &&
     !"pass" %in% names(manifest) && !"pass" %in% names(summary),

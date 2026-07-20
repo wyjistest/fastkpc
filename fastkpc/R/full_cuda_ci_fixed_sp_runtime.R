@@ -7384,8 +7384,9 @@ fastkpc_full_cuda_fixed_sp_qualification_payload_names <- function() {
     "qualification_dcov_parity.rds",
     "qualification_dcov_parity.csv",
     "runtime_metrics.csv", "stage_timing.csv", "fallbacks.csv",
-    "failures.csv", "native_build_dependencies.csv", "commands.txt",
-    "environment.txt"
+    "failures.csv", "native_build_dependencies.csv",
+    "native_build_exclusions.csv", "native_build_trace.txt",
+    "commands.txt", "environment.txt"
   )
 }
 
@@ -7730,10 +7731,12 @@ fastkpc_full_cuda_fixed_sp_native_build_input_hash <- function(
 
 fastkpc_full_cuda_fixed_sp_native_build_dependency_hash <- function(value) {
   files <- value$files
+  exclusions <- value$exclusions
   lines <- c(
     paste0("schema_version=", value$schema_version),
     paste0("trace_semantics=", value$trace_semantics),
     paste0("trace_invocation=", value$trace_invocation),
+    paste0("trace.sha256=", value$trace_sha256),
     paste0("tracer.path=", value$tracer_path),
     paste0("tracer.sha256=", value$tracer_sha256),
     paste0("dependency_count=", value$dependency_count)
@@ -7743,6 +7746,14 @@ fastkpc_full_cuda_fixed_sp_native_build_dependency_hash <- function(value) {
       lines,
       paste0("dependency.", index, ".path=", files$path[[index]]),
       paste0("dependency.", index, ".sha256=", files$sha256[[index]])
+    )
+  }
+  lines <- c(lines, paste0("exclusion_count=", value$exclusion_count))
+  for (index in seq_len(nrow(exclusions))) {
+    lines <- c(
+      lines,
+      paste0("exclusion.", index, ".path=", exclusions$path[[index]]),
+      paste0("exclusion.", index, ".reason=", exclusions$reason[[index]])
     )
   }
   payload <- charToRaw(enc2utf8(paste0(paste(lines, collapse = "\n"), "\n")))
@@ -7797,6 +7808,21 @@ fastkpc_full_cuda_fixed_sp_validate_native_build_dependencies <- function(
       !anyNA(element) && nzchar(element) && !grepl("[\r\n]", element)
   }
   files <- value$files
+  exclusions <- value$exclusions
+  normalized_trace_path <- tryCatch(
+    normalizePath(value$trace_path, winslash = "/", mustWork = TRUE),
+    error = function(error) ""
+  )
+  trace_regular <- tryCatch(
+    identical(
+      fastkpc_full_cuda_fixed_sp_regular_file_mask(value$trace_path), TRUE
+    ),
+    error = function(error) FALSE
+  )
+  current_trace_sha256 <- tryCatch(
+    fastkpc_full_cuda_fixed_sp_sha256_file(value$trace_path),
+    error = function(error) ""
+  )
   normalized_file_paths <- tryCatch({
     if (!is.data.frame(files) || !identical(names(files), c("path", "sha256")) ||
         typeof(files$path) != "character" || anyNA(files$path)) {
@@ -7826,15 +7852,21 @@ fastkpc_full_cuda_fixed_sp_validate_native_build_dependencies <- function(
     names(value),
     c(
       "schema_version", "trace_semantics", "trace_invocation",
-      "tracer_path", "tracer_sha256", "dependency_count", "files",
+      "trace_path", "trace_sha256", "tracer_path", "tracer_sha256",
+      "dependency_count", "files", "exclusion_count", "exclusions",
       "aggregate_sha256"
     )
   ) && scalar_character(value$schema_version) && identical(
-    value$schema_version, "full-cuda-ci-native-build-dependencies-v1"
+    value$schema_version, "full-cuda-ci-native-build-dependencies-v2"
   ) && scalar_character(value$trace_semantics) && identical(
     value$trace_semantics,
-    "linux-strace-successful-read-exec-regular-files-v1"
+    "linux-strace-successful-read-exec-evidence-v2"
   ) && scalar_character(value$trace_invocation) &&
+    scalar_character(value$trace_path) && startsWith(value$trace_path, "/") &&
+    identical(value$trace_path, normalized_trace_path) && trace_regular &&
+    scalar_character(value$trace_sha256) &&
+    grepl("^[0-9a-f]{64}$", value$trace_sha256) &&
+    identical(value$trace_sha256, current_trace_sha256) &&
     scalar_character(value$tracer_path) && startsWith(value$tracer_path, "/") &&
     identical(
       value$tracer_path,
@@ -7869,7 +7901,29 @@ fastkpc_full_cuda_fixed_sp_validate_native_build_dependencies <- function(
       files$sha256[[match(value$tracer_path, files$path)]],
       value$tracer_sha256
     ) && scalar_character(value$aggregate_sha256) &&
-    grepl("^[0-9a-f]{64}$", value$aggregate_sha256)
+    grepl("^[0-9a-f]{64}$", value$aggregate_sha256) &&
+    typeof(value$exclusion_count) == "integer" &&
+    length(value$exclusion_count) == 1L &&
+    !is.object(value$exclusion_count) &&
+    is.null(attributes(value$exclusion_count)) &&
+    !is.na(value$exclusion_count) && value$exclusion_count >= 0L &&
+    is.data.frame(exclusions) && !is.object(exclusions$path) &&
+    !is.object(exclusions$reason) &&
+    identical(names(exclusions), c("path", "reason")) &&
+    identical(rownames(exclusions), as.character(seq_len(nrow(exclusions)))) &&
+    nrow(exclusions) == value$exclusion_count &&
+    typeof(exclusions$path) == "character" &&
+    is.null(attributes(exclusions$path)) && !anyNA(exclusions$path) &&
+    all(nzchar(exclusions$path)) &&
+    !any(grepl("[\r\n]", exclusions$path)) &&
+    all(startsWith(exclusions$path, "/")) &&
+    identical(exclusions$path, sort(exclusions$path, method = "radix")) &&
+    !anyDuplicated(exclusions$path) &&
+    typeof(exclusions$reason) == "character" &&
+    is.null(attributes(exclusions$reason)) && !anyNA(exclusions$reason) &&
+    all(exclusions$reason %in% c(
+      "generated_output", "pseudo_fs", "non_regular"
+    )) && !any(exclusions$path %in% files$path)
   if (!isTRUE(clean) || !identical(
         value$aggregate_sha256,
         fastkpc_full_cuda_fixed_sp_native_build_dependency_hash(value)
@@ -7916,6 +7970,7 @@ fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies <- function(
       !nzchar(trace_invocation) || grepl("[\r\n]", trace_invocation)) {
     stop("native build trace metadata is malformed", call. = FALSE)
   }
+  trace_sha256 <- fastkpc_full_cuda_fixed_sp_sha256_file(trace_path)
   lines <- readLines(trace_path, warn = FALSE, encoding = "bytes")
   if (length(lines) == 0L || all(!nzchar(lines))) {
     stop("native build trace is empty", call. = FALSE)
@@ -7943,11 +7998,6 @@ fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies <- function(
   traced_lines <- traced_lines[succeeded]
   syscalls <- syscalls[succeeded]
   open_call <- syscalls %in% c("open", "openat", "openat2")
-  read_open <- grepl("O_RDONLY|O_RDWR", traced_lines) &
-    !grepl("O_WRONLY", traced_lines)
-  selected <- !open_call | read_open
-  traced_lines <- traced_lines[selected]
-  syscalls <- syscalls[selected]
   quoted <- '"((?:[^"\\\\]|\\\\.)*)"'
   extract_paths <- function(group, pattern) {
     if (length(group) == 0L) return(character())
@@ -7957,41 +8007,63 @@ fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies <- function(
     }
     vapply(matches, `[[`, character(1L), 2L)
   }
-  open_lines <- traced_lines[open_call[selected]]
-  open_syscalls <- syscalls[open_call[selected]]
   resolved_pattern <-
     "^.*[[:space:]]= [0-9]+<(/[^>]*)>[[:space:]]*$"
-  resolved <- grepl(resolved_pattern, open_lines, perl = TRUE)
-  resolved_open_paths <- sub(
-    resolved_pattern, "\\1", open_lines[resolved], perl = TRUE
-  )
-  unresolved_open_lines <- open_lines[!resolved]
-  unresolved_open_syscalls <- open_syscalls[!resolved]
-  unresolved_direct <- unresolved_open_syscalls == "open"
-  encoded_open_paths <- c(
-    extract_paths(
-      unresolved_open_lines[unresolved_direct], paste0("open\\(", quoted)
-    ),
-    extract_paths(
-      unresolved_open_lines[!unresolved_direct],
-      paste0("(?:openat|openat2)\\([^,]+,[[:space:]]*", quoted)
+  extract_open_paths <- function(open_lines, open_syscalls) {
+    if (length(open_lines) == 0L) return(character())
+    resolved <- grepl(resolved_pattern, open_lines, perl = TRUE)
+    encoded_resolved <- sub(
+      resolved_pattern, "\\1", open_lines[resolved], perl = TRUE
     )
+    encoded_fallback <- character()
+    if (any(!resolved)) {
+      unresolved_lines <- open_lines[!resolved]
+      unresolved_syscalls <- open_syscalls[!resolved]
+      direct <- unresolved_syscalls == "open"
+      encoded_fallback <- c(
+        extract_paths(
+          unresolved_lines[direct], paste0("open\\(", quoted)
+        ),
+        extract_paths(
+          unresolved_lines[!direct],
+          paste0("(?:openat|openat2)\\([^,]+,[[:space:]]*", quoted)
+        )
+      )
+    }
+    decoded <- if (length(c(encoded_resolved, encoded_fallback)) == 0L) {
+      character()
+    } else {
+      unname(vapply(
+        unique(c(encoded_resolved, encoded_fallback)),
+        fastkpc_full_cuda_fixed_sp_decode_strace_path,
+        character(1L)
+      ))
+    }
+    if (any(!startsWith(decoded, "/"))) {
+      stop("relative native build path lacks resolved strace identity",
+           call. = FALSE)
+    }
+    decoded
+  }
+  open_lines <- traced_lines[open_call]
+  open_syscalls <- syscalls[open_call]
+  read_open <- grepl("O_RDONLY|O_RDWR", open_lines) &
+    !grepl("O_WRONLY", open_lines)
+  write_open <- grepl(
+    "O_WRONLY|O_RDWR|O_CREAT|O_TRUNC", open_lines
   )
-  fallback_open_paths <- if (length(encoded_open_paths) == 0L) {
-    character()
-  } else {
-    vapply(
-      unique(encoded_open_paths),
-      fastkpc_full_cuda_fixed_sp_decode_strace_path,
-      character(1L)
-    )
-  }
-  if (any(!startsWith(fallback_open_paths, "/"))) {
-    stop("relative native build path lacks resolved strace identity",
-         call. = FALSE)
-  }
-  exec_lines <- traced_lines[!open_call[selected]]
-  exec_syscalls <- syscalls[!open_call[selected]]
+  directory_open <- read_open & grepl("O_DIRECTORY", open_lines)
+  read_paths <- extract_open_paths(
+    open_lines[read_open], open_syscalls[read_open]
+  )
+  generated_paths <- extract_open_paths(
+    open_lines[write_open], open_syscalls[write_open]
+  )
+  directory_paths <- extract_open_paths(
+    open_lines[directory_open], open_syscalls[directory_open]
+  )
+  exec_lines <- traced_lines[!open_call]
+  exec_syscalls <- syscalls[!open_call]
   exec_direct <- exec_syscalls == "execve"
   encoded_exec_paths <- c(
     extract_paths(
@@ -8015,37 +8087,74 @@ fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies <- function(
     stop("relative native build path lacks resolved strace identity",
          call. = FALSE)
   }
-  paths <- unique(c(resolved_open_paths, fallback_open_paths, exec_paths))
-  paths <- paths[file.exists(paths)]
-  if (length(paths) > 0L) {
-    paths <- paths[fastkpc_full_cuda_fixed_sp_regular_file_mask(paths)]
+  paths <- unique(c(read_paths, exec_paths))
+  reasons <- rep.int(NA_character_, length(paths))
+  reasons[paths %in% generated_paths] <- "generated_output"
+  reasons[grepl("^/(?:proc|sys|dev)(?:/|$)", paths, perl = TRUE)] <-
+    "pseudo_fs"
+  reasons[is.na(reasons) & paths %in% directory_paths] <- "non_regular"
+  unresolved <- which(is.na(reasons))
+  unresolved_exist <- file.exists(paths[unresolved])
+  missing_non_pseudo <- sort(paths[unresolved[!unresolved_exist]],
+                             method = "radix")
+  if (length(missing_non_pseudo) > 0L) {
+    stop(
+      "native build successful read/exec path disappeared before hash ",
+      "capture: ", missing_non_pseudo[[1L]], call. = FALSE
+    )
   }
-  if (length(paths) > 0L) {
-    paths <- vapply(
-      paths, normalizePath, character(1L),
+  surviving <- unresolved[unresolved_exist]
+  regular <- fastkpc_full_cuda_fixed_sp_regular_file_mask(paths[surviving])
+  reasons[surviving[!regular]] <- "non_regular"
+  dependency_paths <- paths[surviving[regular]]
+  if (length(dependency_paths) > 0L) {
+    dependency_paths <- vapply(
+      dependency_paths, normalizePath, character(1L),
       winslash = "/", mustWork = TRUE
     )
   }
-  if (length(paths) == 0L) {
+  if (length(dependency_paths) == 0L) {
     stop("native build trace has no surviving regular dependencies",
          call. = FALSE)
   }
-  paths <- sort(unique(c(paths, tracer_path)), method = "radix")
+  exclusion_paths <- paths[!is.na(reasons)]
+  exclusions <- data.frame(
+    path = exclusion_paths,
+    reason = reasons[!is.na(reasons)],
+    stringsAsFactors = FALSE
+  )
+  exclusions <- exclusions[
+    order(exclusions$path, method = "radix"), , drop = FALSE
+  ]
+  rownames(exclusions) <- as.character(seq_len(nrow(exclusions)))
+  paths <- sort(
+    unique(c(unname(dependency_paths), tracer_path)), method = "radix"
+  )
   hashes <- unname(vapply(
     paths, fastkpc_full_cuda_fixed_sp_sha256_file, character(1L)
   ))
   files <- data.frame(path = paths, sha256 = hashes, stringsAsFactors = FALSE)
   rownames(files) <- as.character(seq_len(nrow(files)))
   tracer_sha256 <- hashes[[match(tracer_path, paths)]]
+  if (!identical(
+        fastkpc_full_cuda_fixed_sp_sha256_file(trace_path), trace_sha256
+      )) {
+    stop("native build trace changed during dependency capture",
+         call. = FALSE)
+  }
   result <- list(
-    schema_version = "full-cuda-ci-native-build-dependencies-v1",
+    schema_version = "full-cuda-ci-native-build-dependencies-v2",
     trace_semantics =
-      "linux-strace-successful-read-exec-regular-files-v1",
+      "linux-strace-successful-read-exec-evidence-v2",
     trace_invocation = trace_invocation,
+    trace_path = trace_path,
+    trace_sha256 = trace_sha256,
     tracer_path = tracer_path,
     tracer_sha256 = tracer_sha256,
     dependency_count = as.integer(nrow(files)),
     files = files,
+    exclusion_count = as.integer(nrow(exclusions)),
+    exclusions = exclusions,
     aggregate_sha256 = strrep("0", 64L)
   )
   result$aggregate_sha256 <-
@@ -8056,6 +8165,15 @@ fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies <- function(
 
 fastkpc_full_cuda_fixed_sp_verify_native_build_dependencies <- function(
     value) {
+  trace_current <- tryCatch(
+    fastkpc_full_cuda_fixed_sp_sha256_file(value$trace_path),
+    error = function(error) ""
+  )
+  if (typeof(value$trace_sha256) == "character" &&
+      length(value$trace_sha256) == 1L &&
+      !identical(trace_current, value$trace_sha256)) {
+    stop("native build trace changed during qualification", call. = FALSE)
+  }
   fastkpc_full_cuda_fixed_sp_validate_native_build_dependencies(value)
   current <- unname(vapply(
     value$files$path,
@@ -8079,8 +8197,10 @@ fastkpc_full_cuda_fixed_sp_loaded_native_paths <- function() {
 
 fastkpc_full_cuda_fixed_sp_verify_loaded_native_library <- function(
     path, expected_sha256,
-    loaded_paths = fastkpc_full_cuda_fixed_sp_loaded_native_paths) {
-  if (!is.function(loaded_paths) || typeof(expected_sha256) != "character" ||
+    loaded_paths = fastkpc_full_cuda_fixed_sp_loaded_native_paths,
+    mapped_paths = .fastkpc_cuda_mapped_object_paths) {
+  if (!is.function(loaded_paths) || !is.function(mapped_paths) ||
+      typeof(expected_sha256) != "character" ||
       length(expected_sha256) != 1L || is.object(expected_sha256) ||
       !is.null(attributes(expected_sha256)) || anyNA(expected_sha256) ||
       !grepl("^[0-9a-f]{64}$", expected_sha256)) {
@@ -8098,6 +8218,17 @@ fastkpc_full_cuda_fixed_sp_verify_loaded_native_library <- function(
   )
   if (!native_path %in% current_loaded) {
     stop("exact qualified native library path is not loaded", call. = FALSE)
+  }
+  current_mapped <- mapped_paths()
+  if (typeof(current_mapped) != "character" || anyNA(current_mapped)) {
+    stop("mapped native library path snapshot is malformed", call. = FALSE)
+  }
+  current_mapped <- vapply(
+    current_mapped, normalizePath, character(1L),
+    winslash = "/", mustWork = FALSE
+  )
+  if (!native_path %in% current_mapped) {
+    stop("exact qualified native library path is not mapped", call. = FALSE)
   }
   if (!identical(current_sha256, expected_sha256)) {
     stop("qualified native library bytes changed", call. = FALSE)
@@ -8134,7 +8265,7 @@ fastkpc_full_cuda_fixed_sp_execution_snapshot_hash <- function(provenance) {
     scalar_character(provenance$provenance_schema_version) &&
     identical(
       provenance$provenance_schema_version,
-      "full-cuda-ci-execution-source-snapshot-v4"
+      "full-cuda-ci-execution-source-snapshot-v5"
     ) && scalar_character(provenance$provenance_mode) &&
     identical(
       provenance$provenance_mode, "working-tree-execution-snapshot-v1"
@@ -8198,7 +8329,7 @@ fastkpc_full_cuda_fixed_sp_execution_snapshot_hash <- function(provenance) {
     ) && scalar_character(provenance$native_library_identity) &&
     identical(
       provenance$native_library_identity,
-      "qualified-build-sha-exact-loaded-path-v1"
+      "qualified-build-sha-exact-registered-mapped-path-v2"
     ) && scalar_character(provenance$native_library_path) &&
     scalar_character(provenance$native_library_sha256) &&
     grepl("^[0-9a-f]{64}$", provenance$native_library_sha256)
@@ -8265,6 +8396,10 @@ fastkpc_full_cuda_fixed_sp_execution_snapshot_hash <- function(provenance) {
       provenance$native_build_dependencies$trace_invocation
     ),
     paste0(
+      "native_build_dependencies.trace_sha256=",
+      provenance$native_build_dependencies$trace_sha256
+    ),
+    paste0(
       "native_build_dependencies.tracer_path=",
       provenance$native_build_dependencies$tracer_path
     ),
@@ -8275,6 +8410,10 @@ fastkpc_full_cuda_fixed_sp_execution_snapshot_hash <- function(provenance) {
     paste0(
       "native_build_dependencies.count=",
       provenance$native_build_dependencies$dependency_count
+    ),
+    paste0(
+      "native_build_dependencies.exclusion_count=",
+      provenance$native_build_dependencies$exclusion_count
     ),
     paste0(
       "native_build_dependencies.sha256=",
@@ -8296,7 +8435,8 @@ fastkpc_full_cuda_fixed_sp_capture_execution_provenance <- function(
     source_closure, expected_source_sha256, native_library_path,
     native_build_input_paths, expected_native_build_input_sha256,
     native_build_dependencies, expected_native_library_sha256,
-    loaded_paths = fastkpc_full_cuda_fixed_sp_loaded_native_paths) {
+    loaded_paths = fastkpc_full_cuda_fixed_sp_loaded_native_paths,
+    mapped_paths = .fastkpc_cuda_mapped_object_paths) {
   fastkpc_full_cuda_fixed_sp_validate_source_closure(source_closure)
   source_ids <- source_closure$source_ids
   if (typeof(expected_source_sha256) != "character" ||
@@ -8365,7 +8505,7 @@ fastkpc_full_cuda_fixed_sp_capture_execution_provenance <- function(
   )
   fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
     native_path, expected_native_library_sha256,
-    loaded_paths = loaded_paths
+    loaded_paths = loaded_paths, mapped_paths = mapped_paths
   )
   head_base_commit <- system2(
     "git", c("rev-parse", "HEAD"), stdout = TRUE, stderr = FALSE
@@ -8376,7 +8516,7 @@ fastkpc_full_cuda_fixed_sp_capture_execution_provenance <- function(
   }
   provenance <- list(
     provenance_schema_version =
-      "full-cuda-ci-execution-source-snapshot-v4",
+      "full-cuda-ci-execution-source-snapshot-v5",
     provenance_mode = "working-tree-execution-snapshot-v1",
     head_base_commit = unname(head_base_commit),
     source_closure_schema_version =
@@ -8406,7 +8546,7 @@ fastkpc_full_cuda_fixed_sp_capture_execution_provenance <- function(
       git_states, native_input_git_states
     ) != "clean"),
     native_library_identity =
-      "qualified-build-sha-exact-loaded-path-v1",
+      "qualified-build-sha-exact-registered-mapped-path-v2",
     native_library_path = native_path,
     native_library_sha256 = expected_native_library_sha256
   )
@@ -8418,7 +8558,8 @@ fastkpc_full_cuda_fixed_sp_capture_execution_provenance <- function(
 
 fastkpc_full_cuda_fixed_sp_verify_execution_provenance <- function(
     provenance,
-    loaded_paths = fastkpc_full_cuda_fixed_sp_loaded_native_paths) {
+    loaded_paths = fastkpc_full_cuda_fixed_sp_loaded_native_paths,
+    mapped_paths = .fastkpc_cuda_mapped_object_paths) {
   expected_names <- c(
     "provenance_schema_version", "provenance_mode", "head_base_commit",
     "source_closure_schema_version", "source_discovery_semantics",
@@ -8485,7 +8626,7 @@ fastkpc_full_cuda_fixed_sp_verify_execution_provenance <- function(
       isTRUE(fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
         provenance$native_library_path,
         provenance$native_library_sha256,
-        loaded_paths = loaded_paths
+        loaded_paths = loaded_paths, mapped_paths = mapped_paths
       ))
   }, error = function(error) FALSE)
   if (!isTRUE(source_and_library_unchanged)) {
@@ -8625,8 +8766,8 @@ fastkpc_full_cuda_fixed_sp_qualification_summary_schema <- function() {
     "source_closure_count", "source_closure_sha256",
     "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
     "native_build_inputs_sha256", "native_build_dependency_count",
-    "native_build_dependencies_sha256", "native_build_tracer_sha256",
-    "native_library_sha256",
+    "native_build_dependencies_sha256", "native_build_trace_sha256",
+    "native_build_tracer_sha256", "native_library_sha256",
     "execution_sources_unchanged_after_run",
     "elapsed_seconds", "stage_timing_total_seconds", "payload_file_count"
   )
@@ -8670,8 +8811,8 @@ fastkpc_full_cuda_fixed_sp_qualification_summary_schema <- function() {
       "artifact_schema_version", "provenance_mode", "head_base_commit",
       "source_closure_schema_version", "source_closure_sha256",
       "execution_snapshot_sha256", "native_build_inputs_sha256",
-      "native_build_dependencies_sha256", "native_build_tracer_sha256",
-      "native_library_sha256"
+      "native_build_dependencies_sha256", "native_build_trace_sha256",
+      "native_build_tracer_sha256", "native_library_sha256"
     ),
     double = c("elapsed_seconds", "stage_timing_total_seconds"),
     logical = c(
@@ -8789,13 +8930,18 @@ fastkpc_full_cuda_fixed_sp_qualification_validate_published_summary <- function(
     summary, schema$final_names, schema$final_types
   ) && identical(summary$scope, "qualification") && identical(
     summary$artifact_schema_version,
-    "full-cuda-ci-fixed-sp-qualification-v4"
+    "full-cuda-ci-fixed-sp-qualification-v5"
   ) && identical(summary$catalog_authenticated, TRUE) &&
     identical(summary$execution_sources_unchanged_after_run, TRUE) &&
     is.finite(summary$elapsed_seconds) && summary$elapsed_seconds >= 0 &&
     is.finite(summary$stage_timing_total_seconds) &&
     summary$stage_timing_total_seconds >= 0 &&
-    summary$payload_file_count > 0L
+    identical(
+      summary$payload_file_count,
+      as.integer(length(
+        fastkpc_full_cuda_fixed_sp_qualification_payload_names()
+      ))
+    )
   if (!isTRUE(clean)) {
     stop("qualification published summary schema is invalid", call. = FALSE)
   }
@@ -9626,6 +9772,23 @@ fastkpc_full_cuda_write_fixed_sp_qualification_artifact <- function(
     execution_provenance$native_build_dependencies$files,
     "native_build_dependencies.csv"
   )
+  write_csv(
+    execution_provenance$native_build_dependencies$exclusions,
+    "native_build_exclusions.csv"
+  )
+  trace_payload_path <- path("native_build_trace.txt")
+  trace_copied <- file.copy(
+    execution_provenance$native_build_dependencies$trace_path,
+    trace_payload_path,
+    overwrite = FALSE, copy.mode = FALSE, copy.date = FALSE
+  )
+  if (!identical(trace_copied, TRUE) || !identical(
+        fastkpc_full_cuda_fixed_sp_sha256_file(trace_payload_path),
+        execution_provenance$native_build_dependencies$trace_sha256
+      )) {
+    stop("qualification native build trace copy is not byte exact",
+         call. = FALSE)
+  }
 
   payload_names <- fastkpc_full_cuda_fixed_sp_qualification_payload_names()
   payload_hashes <- vapply(payload_names, function(name) {
@@ -9644,7 +9807,7 @@ fastkpc_full_cuda_write_fixed_sp_qualification_artifact <- function(
   }
   publication_summary <- list(
     artifact_schema_version =
-      "full-cuda-ci-fixed-sp-qualification-v4",
+      "full-cuda-ci-fixed-sp-qualification-v5",
     catalog_authenticated = catalog_authenticated,
     provenance_mode = execution_provenance$provenance_mode,
     head_base_commit = execution_provenance$head_base_commit,
@@ -9662,6 +9825,8 @@ fastkpc_full_cuda_write_fixed_sp_qualification_artifact <- function(
       execution_provenance$native_build_dependencies$dependency_count,
     native_build_dependencies_sha256 =
       execution_provenance$native_build_dependencies$aggregate_sha256,
+    native_build_trace_sha256 =
+      execution_provenance$native_build_dependencies$trace_sha256,
     native_build_tracer_sha256 =
       execution_provenance$native_build_dependencies$tracer_sha256,
     native_library_sha256 = execution_provenance$native_library_sha256,
@@ -9691,7 +9856,7 @@ fastkpc_full_cuda_write_fixed_sp_qualification_artifact <- function(
   )
   fastkpc_full_cuda_fixed_sp_qualification_validate_published_summary(summary)
   manifest <- list(
-    schema_version = "full-cuda-ci-fixed-sp-qualification-v4",
+    schema_version = "full-cuda-ci-fixed-sp-qualification-v5",
     scope = "qualification",
     catalog_authenticated = catalog_authenticated,
     provenance_schema_version =
@@ -9727,12 +9892,17 @@ fastkpc_full_cuda_write_fixed_sp_qualification_artifact <- function(
       execution_provenance$native_build_dependencies$trace_semantics,
     native_build_dependency_trace_invocation =
       execution_provenance$native_build_dependencies$trace_invocation,
+    native_build_trace_path = "native_build_trace.txt",
+    native_build_trace_sha256 =
+      execution_provenance$native_build_dependencies$trace_sha256,
     native_build_tracer_path =
       execution_provenance$native_build_dependencies$tracer_path,
     native_build_tracer_sha256 =
       execution_provenance$native_build_dependencies$tracer_sha256,
     native_build_dependency_count =
       execution_provenance$native_build_dependencies$dependency_count,
+    native_build_exclusion_count =
+      execution_provenance$native_build_dependencies$exclusion_count,
     native_build_dependencies_sha256 =
       execution_provenance$native_build_dependencies$aggregate_sha256,
     relevant_sources_dirty_or_untracked =

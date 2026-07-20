@@ -158,12 +158,9 @@ cuda_initialization <- timed("cuda_initialize", {
   normalized_native_path <- normalizePath(
     native_load$native_library_path, winslash = "/", mustWork = TRUE
   )
-  loaded_paths <- vapply(getLoadedDLLs(), function(dll) {
-    normalizePath(dll[["path"]], winslash = "/", mustWork = FALSE)
-  }, character(1L))
-  if (!normalized_native_path %in% loaded_paths) {
-    stop("qualification native library path is not loaded", call. = FALSE)
-  }
+  fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
+    normalized_native_path, native_load$native_library_sha256
+  )
   list(
     device_info = fastkpc_cuda_device_info(),
     native_library_path = normalized_native_path,
@@ -330,6 +327,11 @@ environment_lines <- c(
     "native_build_dependency_trace_invocation=",
     execution_provenance$native_build_dependencies$trace_invocation
   ),
+  "native_build_trace_path=native_build_trace.txt",
+  paste0(
+    "native_build_trace_sha256=",
+    execution_provenance$native_build_dependencies$trace_sha256
+  ),
   paste0(
     "native_build_tracer_path=",
     execution_provenance$native_build_dependencies$tracer_path
@@ -341,6 +343,10 @@ environment_lines <- c(
   paste0(
     "native_build_dependency_count=",
     execution_provenance$native_build_dependencies$dependency_count
+  ),
+  paste0(
+    "native_build_exclusion_count=",
+    execution_provenance$native_build_dependencies$exclusion_count
   ),
   paste0(
     "native_build_dependencies_sha256=",

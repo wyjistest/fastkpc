@@ -418,8 +418,8 @@ expected_publication_summary_fields <- c(
   "source_closure_count", "source_closure_sha256",
   "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
   "native_build_inputs_sha256", "native_build_dependency_count",
-  "native_build_dependencies_sha256", "native_build_tracer_sha256",
-  "native_library_sha256",
+  "native_build_dependencies_sha256", "native_build_trace_sha256",
+  "native_build_tracer_sha256", "native_library_sha256",
   "execution_sources_unchanged_after_run",
   "elapsed_seconds", "stage_timing_total_seconds", "payload_file_count"
 )
@@ -431,12 +431,12 @@ if (length(setdiff(
       c(
         expected_dcov_summary_fields, "native_build_inputs_sha256",
         "native_build_dependency_count", "native_build_dependencies_sha256",
-        "native_build_tracer_sha256"
+        "native_build_trace_sha256", "native_build_tracer_sha256"
       ),
       names(published_summary_namespace_fixture)
     )) > 0L || !identical(
       published_summary_namespace_fixture$artifact_schema_version,
-      "full-cuda-ci-fixed-sp-qualification-v4"
+      "full-cuda-ci-fixed-sp-qualification-v5"
     )) {
   synthetic_dcov_summary_fixture <- list(
     qualification_dcov_logical_test_count = 3808L,
@@ -459,15 +459,17 @@ if (length(setdiff(
       )
     ]
   synthetic_publication_summary_fixture$artifact_schema_version <-
-    "full-cuda-ci-fixed-sp-qualification-v4"
+    "full-cuda-ci-fixed-sp-qualification-v5"
   synthetic_publication_summary_fixture$native_build_inputs_sha256 <-
     strrep("d", 64L)
   synthetic_publication_summary_fixture$native_build_dependency_count <- 3L
   synthetic_publication_summary_fixture$native_build_dependencies_sha256 <-
     strrep("e", 64L)
+  synthetic_publication_summary_fixture$native_build_trace_sha256 <-
+    strrep("1", 64L)
   synthetic_publication_summary_fixture$native_build_tracer_sha256 <-
     strrep("f", 64L)
-  synthetic_publication_summary_fixture$payload_file_count <- 15L
+  synthetic_publication_summary_fixture$payload_file_count <- 17L
   synthetic_publication_summary_fixture <-
     synthetic_publication_summary_fixture[expected_publication_summary_fields]
   published_summary_namespace_fixture <- c(
@@ -535,9 +537,12 @@ final_type_drift_summary_fixture <- published_summary_namespace_fixture
 final_type_drift_summary_fixture$payload_file_count <- as.double(
   final_type_drift_summary_fixture$payload_file_count
 )
+final_count_drift_summary_fixture <- published_summary_namespace_fixture
+final_count_drift_summary_fixture$payload_file_count <- 16L
 final_summary_failure_results <- lapply(list(
   duplicate = duplicate_final_summary_fixture,
-  type_drift = final_type_drift_summary_fixture
+  type_drift = final_type_drift_summary_fixture,
+  count_drift = final_count_drift_summary_fixture
 ), function(summary_fixture) {
   error <- tryCatch({
     fastkpc_full_cuda_fixed_sp_qualification_validate_published_summary(
@@ -552,7 +557,7 @@ final_summary_failure_results <- lapply(list(
 })
 assert_true(
   all(unlist(final_summary_failure_results, use.names = FALSE)),
-  "published summary rejects duplicate names and scalar type drift"
+  "published summary rejects duplicate names, type drift, and count drift"
 )
 assert_identical(
   fastkpc_full_cuda_fixed_sp_qualification_validate_input_summary(
@@ -1110,6 +1115,7 @@ provenance_native_build_dependencies <-
 provenance_native_sha256 <-
   fastkpc_full_cuda_fixed_sp_sha256_file(provenance_native_path)
 provenance_loaded_paths <- function() provenance_native_path
+provenance_mapped_paths <- function() provenance_native_path
 provenance_fixture <-
   fastkpc_full_cuda_fixed_sp_capture_execution_provenance(
     source_closure = provenance_closure,
@@ -1120,7 +1126,8 @@ provenance_fixture <-
       provenance_native_build_input_hashes,
     native_build_dependencies = provenance_native_build_dependencies,
     expected_native_library_sha256 = provenance_native_sha256,
-    loaded_paths = provenance_loaded_paths
+    loaded_paths = provenance_loaded_paths,
+    mapped_paths = provenance_mapped_paths
   )
 assert_true(
   identical(provenance_fixture$source_closure_count, 3L) &&
@@ -1144,6 +1151,12 @@ assert_true(
       provenance_fixture$native_library_sha256,
       provenance_native_sha256
     ) && identical(
+      provenance_fixture$provenance_schema_version,
+      "full-cuda-ci-execution-source-snapshot-v5"
+    ) && identical(
+      provenance_fixture$native_library_identity,
+      "qualified-build-sha-exact-registered-mapped-path-v2"
+    ) && identical(
     provenance_fixture$provenance_mode,
     "working-tree-execution-snapshot-v1"
   ) && isTRUE(provenance_fixture$relevant_sources_dirty_or_untracked) &&
@@ -1152,7 +1165,8 @@ assert_true(
 )
 verify_provenance_fixture <- function(value) {
   fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
-    value, loaded_paths = provenance_loaded_paths
+    value, loaded_paths = provenance_loaded_paths,
+    mapped_paths = provenance_mapped_paths
   )
 }
 verified_provenance_fixture <-
@@ -1282,9 +1296,11 @@ assert_true(
   "qualification runner traces the clean build and certifies exact bytes"
 )
 assert_true(
-  "native_build_dependencies.csv" %in%
-    fastkpc_full_cuda_fixed_sp_qualification_payload_names(),
-  "qualification payload publishes inspectable native build dependencies"
+  all(c(
+    "native_build_dependencies.csv", "native_build_exclusions.csv",
+    "native_build_trace.txt"
+  ) %in% fastkpc_full_cuda_fixed_sp_qualification_payload_names()),
+  "qualification payload publishes trace, dependency, and exclusion evidence"
 )
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
@@ -1343,8 +1359,9 @@ expected_files <- c(
   "setup_metrics.rds", "setup_metrics.csv",
   "qualification_dcov_parity.rds", "qualification_dcov_parity.csv",
   "runtime_metrics.csv", "stage_timing.csv", "fallbacks.csv",
-  "failures.csv", "native_build_dependencies.csv", "commands.txt",
-  "environment.txt", "manifest.json", "summary.json"
+  "failures.csv", "native_build_dependencies.csv",
+  "native_build_exclusions.csv", "native_build_trace.txt",
+  "commands.txt", "environment.txt", "manifest.json", "summary.json"
 )
 actual_files <- sort(list.files(output_dir, all.files = FALSE))
 assert_identical(
@@ -1517,7 +1534,8 @@ expected_summary_fields <- c(
   "source_closure_sha256", "execution_snapshot_sha256",
   "relevant_sources_dirty_or_untracked", "native_build_inputs_sha256",
   "native_build_dependency_count", "native_build_dependencies_sha256",
-  "native_build_tracer_sha256", "native_library_sha256",
+  "native_build_trace_sha256", "native_build_tracer_sha256",
+  "native_library_sha256",
   "execution_sources_unchanged_after_run", "elapsed_seconds",
   "stage_timing_total_seconds", "payload_file_count"
 )
@@ -1536,9 +1554,10 @@ expected_manifest_fields <- c(
   "native_build_input_git_state", "native_build_inputs_sha256",
   "native_build_dependencies_schema_version",
   "native_build_dependency_trace_semantics",
-  "native_build_dependency_trace_invocation", "native_build_tracer_path",
+  "native_build_dependency_trace_invocation", "native_build_trace_path",
+  "native_build_trace_sha256", "native_build_tracer_path",
   "native_build_tracer_sha256", "native_build_dependency_count",
-  "native_build_dependencies_sha256",
+  "native_build_exclusion_count", "native_build_dependencies_sha256",
   "relevant_sources_dirty_or_untracked", "native_library_identity",
   "native_library_path", "native_library_sha256",
   "execution_snapshot_sha256", "execution_sources_unchanged_after_run",
@@ -1569,7 +1588,8 @@ for (field in c(
   "source_closure_sha256", "native_library_identity", "native_library_path",
   "native_build_inputs_sha256", "native_build_dependencies_schema_version",
   "native_build_dependency_trace_semantics",
-  "native_build_dependency_trace_invocation", "native_build_tracer_path",
+  "native_build_dependency_trace_invocation", "native_build_trace_path",
+  "native_build_trace_sha256", "native_build_tracer_path",
   "native_build_tracer_sha256", "native_build_dependencies_sha256",
   "native_library_sha256",
   "execution_snapshot_sha256", "phase0_dir", "phase1_dir", "phase2_dir",
@@ -1604,6 +1624,10 @@ assert_json_scalar(
 assert_json_scalar(
   manifest$native_build_dependency_count, "integer",
   "manifest native build dependency count is one exact integer"
+)
+assert_json_scalar(
+  manifest$native_build_exclusion_count, "integer",
+  "manifest native build exclusion count is one exact integer"
 )
 
 expected_execution_source_ids <- c(
@@ -1819,7 +1843,7 @@ assert_true(
 assert_true(
   identical(
     manifest$provenance_schema_version,
-    "full-cuda-ci-execution-source-snapshot-v4"
+    "full-cuda-ci-execution-source-snapshot-v5"
   ) && identical(
     manifest$provenance_mode,
     "working-tree-execution-snapshot-v1"
@@ -1844,7 +1868,7 @@ assert_true(
 assert_true(
   identical(
     manifest$native_library_identity,
-    "qualified-build-sha-exact-loaded-path-v1"
+    "qualified-build-sha-exact-registered-mapped-path-v2"
   ) && is.character(manifest$native_library_path) &&
     length(manifest$native_library_path) == 1L &&
     file.exists(manifest$native_library_path) &&
@@ -1886,6 +1910,10 @@ native_build_dependencies <- utils::read.csv(
   file.path(output_dir, "native_build_dependencies.csv"),
   stringsAsFactors = FALSE, check.names = FALSE
 )
+native_build_exclusions <- utils::read.csv(
+  file.path(output_dir, "native_build_exclusions.csv"),
+  stringsAsFactors = FALSE, check.names = FALSE
+)
 assert_true(
   identical(names(native_build_dependencies), c("path", "sha256")) &&
     nrow(native_build_dependencies) == manifest$native_build_dependency_count &&
@@ -1899,6 +1927,33 @@ assert_true(
     )) &&
     all(grepl("^[0-9a-f]{64}$", native_build_dependencies$sha256)),
   "native build dependency payload is canonical and complete"
+)
+assert_true(
+  identical(names(native_build_exclusions), c("path", "reason")) &&
+    nrow(native_build_exclusions) == manifest$native_build_exclusion_count &&
+    nrow(native_build_exclusions) > 0L &&
+    identical(
+      native_build_exclusions$path,
+      sort(native_build_exclusions$path, method = "radix")
+    ) && !anyDuplicated(native_build_exclusions$path) &&
+    all(native_build_exclusions$reason %in% c(
+      "generated_output", "pseudo_fs", "non_regular"
+    )) && !any(
+      native_build_exclusions$path %in% native_build_dependencies$path
+    ),
+  "native build exclusion payload is canonical and complete"
+)
+trace_payload_path <- file.path(output_dir, manifest$native_build_trace_path)
+assert_true(
+  identical(manifest$native_build_trace_path, "native_build_trace.txt") &&
+    file.exists(trace_payload_path) && !dir.exists(trace_payload_path) &&
+    identical(
+      digest::digest(
+        file = trace_payload_path, algo = "sha256", serialize = FALSE
+      ),
+      manifest$native_build_trace_sha256
+    ),
+  "manifest binds the independently inspectable raw native build trace"
 )
 actual_native_build_dependency_hashes <- vapply(
   native_build_dependencies$path,
@@ -1918,10 +1973,10 @@ tracer_index <- match(
 assert_true(
   identical(
     manifest$native_build_dependencies_schema_version,
-    "full-cuda-ci-native-build-dependencies-v1"
+    "full-cuda-ci-native-build-dependencies-v2"
   ) && identical(
     manifest$native_build_dependency_trace_semantics,
-    "linux-strace-successful-read-exec-regular-files-v1"
+    "linux-strace-successful-read-exec-evidence-v2"
   ) && !is.na(tracer_index) && identical(
     native_build_dependencies$sha256[[tracer_index]],
     manifest$native_build_tracer_sha256
@@ -1938,6 +1993,7 @@ dependency_identity_lines <- c(
   paste0(
     "trace_invocation=", manifest$native_build_dependency_trace_invocation
   ),
+  paste0("trace.sha256=", manifest$native_build_trace_sha256),
   paste0("tracer.path=", manifest$native_build_tracer_path),
   paste0("tracer.sha256=", manifest$native_build_tracer_sha256),
   paste0("dependency_count=", manifest$native_build_dependency_count)
@@ -1955,6 +2011,23 @@ for (index in seq_len(nrow(native_build_dependencies))) {
     )
   )
 }
+dependency_identity_lines <- c(
+  dependency_identity_lines,
+  paste0("exclusion_count=", manifest$native_build_exclusion_count)
+)
+for (index in seq_len(nrow(native_build_exclusions))) {
+  dependency_identity_lines <- c(
+    dependency_identity_lines,
+    paste0(
+      "exclusion.", index, ".path=",
+      native_build_exclusions$path[[index]]
+    ),
+    paste0(
+      "exclusion.", index, ".reason=",
+      native_build_exclusions$reason[[index]]
+    )
+  )
+}
 independent_native_build_dependencies_sha256 <- unname(digest::digest(
   charToRaw(enc2utf8(paste0(
     paste(dependency_identity_lines, collapse = "\n"), "\n"
@@ -1965,6 +2038,145 @@ assert_identical(
   manifest$native_build_dependencies_sha256,
   independent_native_build_dependencies_sha256,
   "manifest binds the actual traced native build dependency closure"
+)
+independent_trace_tables <- function(trace_path, tracer_path) {
+  lines <- readLines(trace_path, warn = FALSE, encoding = "bytes")
+  call_pattern <- paste0(
+    "^[[:space:]]*(?:[0-9]+|\\[pid[[:space:]]+[0-9]+\\])",
+    "[[:space:]]+(open|openat|openat2|execve|execveat)\\("
+  )
+  traced <- grepl(call_pattern, lines, perl = TRUE)
+  calls <- lines[traced]
+  syscalls <- sub(paste0(call_pattern, ".*$"), "\\1", calls, perl = TRUE)
+  succeeded <- grepl("[[:space:]]= (0|[1-9][0-9]*)", calls)
+  failed <- grepl("[[:space:]]= -[0-9]+", calls)
+  assert_true(
+    length(calls) > 0L && all(succeeded | failed),
+    "independent native build trace parser accepts every traced call"
+  )
+  calls <- calls[succeeded]
+  syscalls <- syscalls[succeeded]
+  quoted <- '"((?:[^"\\\\]|\\\\.)*)"'
+  extract_group <- function(line, pattern) {
+    match <- regmatches(line, regexec(pattern, line, perl = TRUE))[[1L]]
+    assert_true(
+      length(match) == 2L,
+      "independent native build trace path extraction is complete"
+    )
+    fastkpc_full_cuda_fixed_sp_decode_strace_path(match[[2L]])
+  }
+  open_path <- function(line, syscall) {
+    resolved <- regmatches(
+      line,
+      regexec("^.*[[:space:]]= [0-9]+<(/[^>]*)>[[:space:]]*$",
+              line, perl = TRUE)
+    )[[1L]]
+    if (length(resolved) == 2L) {
+      return(fastkpc_full_cuda_fixed_sp_decode_strace_path(resolved[[2L]]))
+    }
+    if (identical(syscall, "open")) {
+      return(extract_group(line, paste0("open\\(", quoted)))
+    }
+    extract_group(
+      line, paste0("(?:openat|openat2)\\([^,]+,[[:space:]]*", quoted)
+    )
+  }
+  exec_path <- function(line, syscall) {
+    if (identical(syscall, "execve")) {
+      return(extract_group(line, paste0("execve\\(", quoted)))
+    }
+    extract_group(
+      line, paste0("execveat\\([^,]+,[[:space:]]*", quoted)
+    )
+  }
+  is_open <- syscalls %in% c("open", "openat", "openat2")
+  open_lines <- calls[is_open]
+  open_syscalls <- syscalls[is_open]
+  open_paths <- unname(vapply(
+    seq_along(open_lines),
+    function(index) open_path(open_lines[[index]], open_syscalls[[index]]),
+    character(1L)
+  ))
+  exec_lines <- calls[!is_open]
+  exec_syscalls <- syscalls[!is_open]
+  exec_paths <- unname(vapply(
+    seq_along(exec_lines),
+    function(index) exec_path(exec_lines[[index]], exec_syscalls[[index]]),
+    character(1L)
+  ))
+  read_open <- grepl("O_RDONLY|O_RDWR", open_lines) &
+    !grepl("O_WRONLY", open_lines)
+  write_open <- grepl(
+    "O_WRONLY|O_RDWR|O_CREAT|O_TRUNC", open_lines
+  )
+  directory_open <- read_open & grepl("O_DIRECTORY", open_lines)
+  candidates <- unique(c(open_paths[read_open], exec_paths))
+  assert_true(
+    all(startsWith(c(candidates, open_paths[write_open]), "/")),
+    "independent native build trace paths are absolute"
+  )
+  reasons <- rep.int(NA_character_, length(candidates))
+  reasons[candidates %in% open_paths[write_open]] <- "generated_output"
+  reasons[grepl(
+    "^/(?:proc|sys|dev)(?:/|$)", candidates, perl = TRUE
+  )] <- "pseudo_fs"
+  reasons[
+    is.na(reasons) & candidates %in% open_paths[directory_open]
+  ] <- "non_regular"
+  remaining <- which(is.na(reasons))
+  exists <- file.exists(candidates[remaining])
+  assert_true(
+    all(exists),
+    "independent trace parse finds no unexplained missing dependency"
+  )
+  surviving <- remaining[exists]
+  regular <- vapply(
+    candidates[surviving],
+    function(path) file_test("-f", path),
+    logical(1L)
+  )
+  reasons[surviving[!regular]] <- "non_regular"
+  dependency_paths <- vapply(
+    candidates[surviving[regular]], normalizePath, character(1L),
+    winslash = "/", mustWork = TRUE
+  )
+  dependency_paths <- sort(
+    unique(c(unname(dependency_paths), tracer_path)), method = "radix"
+  )
+  files <- data.frame(
+    path = dependency_paths,
+    sha256 = unname(vapply(
+      dependency_paths,
+      function(path) digest::digest(
+        file = path, algo = "sha256", serialize = FALSE
+      ),
+      character(1L)
+    )),
+    stringsAsFactors = FALSE
+  )
+  exclusions <- data.frame(
+    path = candidates[!is.na(reasons)],
+    reason = reasons[!is.na(reasons)],
+    stringsAsFactors = FALSE
+  )
+  exclusions <- exclusions[
+    order(exclusions$path, method = "radix"), , drop = FALSE
+  ]
+  rownames(files) <- as.character(seq_len(nrow(files)))
+  rownames(exclusions) <- as.character(seq_len(nrow(exclusions)))
+  list(files = files, exclusions = exclusions)
+}
+reparsed_native_build <- independent_trace_tables(
+  trace_payload_path, manifest$native_build_tracer_path
+)
+assert_true(
+  identical(reparsed_native_build$files, native_build_dependencies) &&
+    identical(reparsed_native_build$exclusions, native_build_exclusions) &&
+    identical(
+      independent_native_build_dependencies_sha256,
+      manifest$native_build_dependencies_sha256
+    ),
+  "published raw trace independently reconstructs dependencies and exclusions"
 )
 closure_lines <- c(
   paste0("closure.schema=", manifest$source_closure_schema_version),
@@ -2054,6 +2266,10 @@ snapshot_lines <- c(
     manifest$native_build_dependency_trace_invocation
   ),
   paste0(
+    "native_build_dependencies.trace_sha256=",
+    manifest$native_build_trace_sha256
+  ),
+  paste0(
     "native_build_dependencies.tracer_path=",
     manifest$native_build_tracer_path
   ),
@@ -2064,6 +2280,10 @@ snapshot_lines <- c(
   paste0(
     "native_build_dependencies.count=",
     manifest$native_build_dependency_count
+  ),
+  paste0(
+    "native_build_dependencies.exclusion_count=",
+    manifest$native_build_exclusion_count
   ),
   paste0(
     "native_build_dependencies.sha256=",
@@ -2114,6 +2334,9 @@ assert_true(
     ) && identical(
       summary$native_build_dependencies_sha256,
       manifest$native_build_dependencies_sha256
+    ) && identical(
+      summary$native_build_trace_sha256,
+      manifest$native_build_trace_sha256
     ) && identical(
       summary$native_build_tracer_sha256,
       manifest$native_build_tracer_sha256
@@ -2496,6 +2719,12 @@ assert_true(
     environment_metadata[["native_build_dependency_trace_invocation"]],
     manifest$native_build_dependency_trace_invocation
   ) && identical(
+    environment_metadata[["native_build_trace_path"]],
+    manifest$native_build_trace_path
+  ) && identical(
+    environment_metadata[["native_build_trace_sha256"]],
+    manifest$native_build_trace_sha256
+  ) && identical(
     environment_metadata[["native_build_tracer_path"]],
     manifest$native_build_tracer_path
   ) && identical(
@@ -2504,6 +2733,9 @@ assert_true(
   ) && identical(
     environment_metadata[["native_build_dependency_count"]],
     as.character(manifest$native_build_dependency_count)
+  ) && identical(
+    environment_metadata[["native_build_exclusion_count"]],
+    as.character(manifest$native_build_exclusion_count)
   ) && identical(
     environment_metadata[["native_build_dependencies_sha256"]],
     manifest$native_build_dependencies_sha256
@@ -2746,7 +2978,8 @@ for (field in c(
   "provenance_mode", "head_base_commit", "source_closure_schema_version",
   "source_closure_sha256", "execution_snapshot_sha256",
   "native_build_inputs_sha256", "native_build_dependencies_sha256",
-  "native_build_tracer_sha256", "native_library_sha256",
+  "native_build_trace_sha256", "native_build_tracer_sha256",
+  "native_library_sha256",
   "qualification_dcov_logical_ids_hash",
   "qualification_dcov_residual_key_hash", "qualification_dcov_rows_hash"
 )) {
@@ -3001,9 +3234,14 @@ assert_identical(
   unname(payload_hashes), unname(actual_hashes),
   "manifest payload hashes match published bytes"
 )
+assert_identical(
+  unname(payload_hashes[["native_build_trace.txt"]]),
+  manifest$native_build_trace_sha256,
+  "native build trace provenance hash matches its payload hash"
+)
 assert_true(
   identical(manifest$schema_version,
-            "full-cuda-ci-fixed-sp-qualification-v4") &&
+            "full-cuda-ci-fixed-sp-qualification-v5") &&
     identical(manifest$scope, "qualification") &&
     identical(unname(unlist(manifest$publication_order, use.names = FALSE)),
               c(payload_names, "manifest.json", "summary.json")) &&
