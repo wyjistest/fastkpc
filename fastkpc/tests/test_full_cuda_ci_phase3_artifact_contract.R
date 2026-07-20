@@ -129,7 +129,12 @@ lineage_fixture <- list(
   dataset_matrix_sha256 = sha("dataset-matrix"),
   canonical_setup_corpus_hash = sha("canonical-setup-corpus"),
   canonical_target_corpus_hash = sha("canonical-target-corpus"),
-  source_commit = strrep("1", 40L),
+  phase0_source_commit = strrep("0", 40L),
+  phase1_source_commit = strrep("1", 40L),
+  phase2_source_commit = "42ef3efa08327056ffe5c9aad7a8953ff6864c7e",
+  phase2_R_version = "R version 4.4.1 (fixture)",
+  phase2_mgcv_version = "1.9.1",
+  source_commit = "42ef3efa08327056ffe5c9aad7a8953ff6864c7e",
   R_version = "R version 4.4.1 (fixture)",
   mgcv_version = "1.9.1"
 )
@@ -168,6 +173,424 @@ assert_true(is.list(identity) && identical(identity$device_id, 2L) &&
               identical(identity$shard_count, 64L) &&
               grepl("^[0-9a-f]{64}$", identity$sha256),
             "authenticated Phase 3 input identity")
+
+current_mgcv_version <- if (requireNamespace("mgcv", quietly = TRUE)) {
+  as.character(utils::packageVersion("mgcv"))
+} else {
+  fail("contract test requires the installed mgcv version")
+}
+execution_fixture <- list(
+  authenticated = TRUE,
+  source_commit = strrep("3", 40L),
+  phase3_source_commit = strrep("3", 40L),
+  R_version = R.version.string,
+  phase3_R_version = R.version.string,
+  mgcv_version = current_mgcv_version,
+  phase3_mgcv_version = current_mgcv_version,
+  provenance_schema_version = "full-cuda-ci-execution-source-snapshot-v6",
+  provenance_mode = "working-tree-execution-snapshot-v1",
+  source_closure_schema_version = "full-cuda-ci-execution-source-closure-v1",
+  source_discovery_semantics = "parsed-r-ast-load-time-literal-source-v1",
+  source_closure_count = 1L,
+  source_closure_sha256 = sha("phase3-source-closure"),
+  execution_snapshot_sha256 = sha("phase3-execution-snapshot"),
+  relevant_sources_dirty_or_untracked = FALSE,
+  execution_sources_unchanged_after_run = TRUE
+)
+default_discoverer_calls <- new.env(parent = emptyenv())
+default_discoverer_calls$catalog <- 0L
+default_discoverer_calls$runtime <- 0L
+default_discoverer_calls$device <- 0L
+default_discoverer_calls$execution <- 0L
+old_discoverers <- lapply(
+  c(
+    "fastkpc_full_cuda_phase3_discover_catalog_evidence",
+    "fastkpc_full_cuda_phase3_discover_runtime_evidence",
+    "fastkpc_full_cuda_phase3_discover_device_evidence",
+    "fastkpc_full_cuda_phase3_discover_execution_evidence"
+  ),
+  function(name) {
+    if (exists(name, envir = .GlobalEnv, inherits = FALSE)) {
+      get(name, envir = .GlobalEnv, inherits = FALSE)
+    } else {
+      NULL
+    }
+  }
+)
+names(old_discoverers) <- c(
+  "fastkpc_full_cuda_phase3_discover_catalog_evidence",
+  "fastkpc_full_cuda_phase3_discover_runtime_evidence",
+  "fastkpc_full_cuda_phase3_discover_device_evidence",
+  "fastkpc_full_cuda_phase3_discover_execution_evidence"
+)
+restore_discoverers <- function() {
+  for (name in names(old_discoverers)) {
+    if (is.null(old_discoverers[[name]])) {
+      if (exists(name, envir = .GlobalEnv, inherits = FALSE)) {
+        rm(list = name, envir = .GlobalEnv)
+      }
+    } else {
+      assign(name, old_discoverers[[name]], envir = .GlobalEnv)
+    }
+  }
+}
+on.exit(restore_discoverers(), add = TRUE)
+assign(
+  "fastkpc_full_cuda_phase3_discover_catalog_evidence",
+  function(catalog) {
+    default_discoverer_calls$catalog <-
+      default_discoverer_calls$catalog + 1L
+    catalog$phase3_lineage
+  },
+  envir = .GlobalEnv
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_runtime_evidence",
+  function(catalog, device_id) {
+    default_discoverer_calls$runtime <-
+      default_discoverer_calls$runtime + 1L
+    runtime_fixture
+  },
+  envir = .GlobalEnv
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_device_evidence",
+  function(catalog, device_id) {
+    default_discoverer_calls$device <-
+      default_discoverer_calls$device + 1L
+    runtime_fixture
+  },
+  envir = .GlobalEnv
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  function(catalog, device_id) {
+    default_discoverer_calls$execution <-
+      default_discoverer_calls$execution + 1L
+    execution_fixture
+  },
+  envir = .GlobalEnv
+)
+default_identity <- fastkpc_full_cuda_phase3_input_identity(
+  catalog_fixture, 2L
+)
+assert_true(
+  default_discoverer_calls$catalog == 1L &&
+    default_discoverer_calls$runtime == 1L &&
+    default_discoverer_calls$device == 1L &&
+    default_discoverer_calls$execution == 1L,
+  "catalog/device_id call dispatches through authenticated default discoverers"
+)
+assert_true(
+  identical(default_identity$phase2_source_commit, lineage_fixture$source_commit) &&
+    identical(default_identity$phase2_R_version, lineage_fixture$R_version) &&
+    identical(default_identity$phase2_mgcv_version, lineage_fixture$mgcv_version) &&
+    identical(default_identity$source_commit, execution_fixture$source_commit) &&
+    identical(default_identity$phase3_source_commit,
+              execution_fixture$phase3_source_commit) &&
+    identical(default_identity$R_version, execution_fixture$R_version) &&
+    identical(default_identity$mgcv_version, execution_fixture$mgcv_version) &&
+    identical(default_identity$phase3_R_version,
+              execution_fixture$phase3_R_version) &&
+    identical(default_identity$phase3_mgcv_version,
+              execution_fixture$phase3_mgcv_version),
+  "Phase 2 lineage and current Phase 3 execution identity remain separate"
+)
+assert_true(
+  identical(default_identity$relevant_sources_dirty_or_untracked, FALSE) &&
+    identical(default_identity$execution_sources_unchanged_after_run, TRUE),
+  "execution provenance dirtiness and post-run authentication are retained"
+)
+test_catalog_discoverer <- get(
+  "fastkpc_full_cuda_phase3_discover_catalog_evidence", envir = .GlobalEnv
+)
+repository_catalog <- list(
+  phase0 = list(
+    summary = list(pass = TRUE),
+    manifest = list(source_commit = lineage_fixture$phase0_source_commit)
+  ),
+  inputs = list(
+    summary = list(pass = TRUE),
+    manifest = list(source_commit = lineage_fixture$phase1_source_commit),
+    dataset_file_sha256 = lineage_fixture$dataset_file_sha256,
+    dataset_sha256 = lineage_fixture$dataset_matrix_sha256
+  ),
+  phase2_manifest = list(
+    phase2_complete = TRUE,
+    full_canonical_prepared_s_key_corpus_hash =
+      lineage_fixture$canonical_setup_corpus_hash,
+    full_canonical_target_key_corpus_hash =
+      lineage_fixture$canonical_target_corpus_hash,
+    source_commit = lineage_fixture$phase2_source_commit,
+    R_version = lineage_fixture$phase2_R_version,
+    mgcv_version = lineage_fixture$phase2_mgcv_version
+  ),
+  phase2_file_hashes = c(
+    manifest.json = lineage_fixture$phase2_manifest_hash
+  ),
+  phase0_manifest_hash = sha("repository-phase0-manifest"),
+  phase1_manifest_hash = sha("repository-phase1-manifest")
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_catalog_evidence",
+  old_discoverers[["fastkpc_full_cuda_phase3_discover_catalog_evidence"]],
+  envir = .GlobalEnv
+)
+repository_catalog_identity <- fastkpc_full_cuda_phase3_input_identity(
+  repository_catalog,
+  2L,
+  runtime_evidence = function(device_id) runtime_fixture,
+  device_evidence = function(device_id) runtime_fixture,
+  execution_evidence = function(catalog, device_id) execution_fixture
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_catalog_evidence",
+  test_catalog_discoverer,
+  envir = .GlobalEnv
+)
+assert_true(
+  identical(
+    repository_catalog_identity$phase0_manifest_hash,
+    repository_catalog$phase0_manifest_hash
+  ) && identical(
+    repository_catalog_identity$phase1_manifest_hash,
+    repository_catalog$phase1_manifest_hash
+  ) && identical(
+    repository_catalog_identity$phase2_manifest_hash,
+    repository_catalog$phase2_file_hashes[["manifest.json"]]
+  ) && identical(
+    repository_catalog_identity$phase0_source_commit,
+    lineage_fixture$phase0_source_commit
+  ) && identical(
+    repository_catalog_identity$phase1_source_commit,
+    lineage_fixture$phase1_source_commit
+  ) && identical(
+    repository_catalog_identity$phase2_source_commit,
+    lineage_fixture$phase2_source_commit
+  ) && identical(
+    repository_catalog_identity$phase2_R_version,
+    lineage_fixture$phase2_R_version
+  ) && identical(
+    repository_catalog_identity$phase2_mgcv_version,
+    lineage_fixture$phase2_mgcv_version
+  ),
+  "repository catalog discovery retains authenticated Phase 0/1/2 lineage"
+)
+repository_execution_discoverer <- old_discoverers[[
+  "fastkpc_full_cuda_phase3_discover_execution_evidence"
+]]
+test_execution_discoverer <- get(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence", envir = .GlobalEnv
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  repository_execution_discoverer,
+  envir = .GlobalEnv
+)
+repository_execution_identity <- fastkpc_full_cuda_phase3_input_identity(
+  catalog_fixture,
+  2L,
+  catalog_evidence = function(catalog) catalog$phase3_lineage,
+  runtime_evidence = function(device_id) runtime_fixture,
+  device_evidence = function(device_id) runtime_fixture
+)
+assert_true(
+  identical(
+    repository_execution_identity$source_commit,
+    fastkpc_full_cuda_source_commit()
+  ) && identical(
+    repository_execution_identity$phase3_source_commit,
+    repository_execution_identity$source_commit
+  ) && identical(repository_execution_identity$R_version, R.version.string) &&
+    identical(repository_execution_identity$mgcv_version,
+              current_mgcv_version) &&
+    identical(repository_execution_identity$phase2_source_commit,
+              lineage_fixture$phase2_source_commit) &&
+    !identical(repository_execution_identity$source_commit,
+                repository_execution_identity$phase2_source_commit),
+  "default execution discovery authenticates current implementation identity"
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  test_execution_discoverer,
+  envir = .GlobalEnv
+)
+valid_runtime_discoverer <- get(
+  "fastkpc_full_cuda_phase3_discover_runtime_evidence", envir = .GlobalEnv
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_runtime_evidence",
+  function(catalog, device_id) {
+    invalid <- runtime_fixture
+    invalid$device_id <- device_id + 1L
+    invalid
+  },
+  envir = .GlobalEnv
+)
+assert_error(
+  fastkpc_full_cuda_phase3_input_identity(catalog_fixture, 2L),
+  "mismatched discovered runtime evidence must fail closed"
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_runtime_evidence",
+  valid_runtime_discoverer,
+  envir = .GlobalEnv
+)
+valid_execution_discoverer <- get(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence", envir = .GlobalEnv
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  function(catalog, device_id) {
+    invalid <- execution_fixture
+    invalid$authenticated <- FALSE
+    invalid
+  },
+  envir = .GlobalEnv
+)
+assert_error(
+  fastkpc_full_cuda_phase3_input_identity(catalog_fixture, 2L),
+  "unauthenticated discovered execution evidence must fail closed"
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  function(catalog, device_id) {
+    invalid <- execution_fixture
+    invalid$execution_sources_unchanged_after_run <- FALSE
+    invalid
+  },
+  envir = .GlobalEnv
+)
+assert_error(
+  fastkpc_full_cuda_phase3_input_identity(catalog_fixture, 2L),
+  "unverified execution source snapshot must fail closed"
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  valid_execution_discoverer,
+  envir = .GlobalEnv
+)
+catalog_with_unmarked_provenance <- catalog_fixture
+catalog_with_unmarked_provenance$phase3_execution_provenance <-
+  execution_fixture
+catalog_with_unmarked_provenance$phase3_execution_provenance$authenticated <-
+  NULL
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  repository_execution_discoverer,
+  envir = .GlobalEnv
+)
+assert_error(
+  fastkpc_full_cuda_phase3_input_identity(
+    catalog_with_unmarked_provenance,
+    2L,
+    catalog_evidence = function(catalog) catalog$phase3_lineage,
+    runtime_evidence = function(device_id) runtime_fixture,
+    device_evidence = function(device_id) runtime_fixture
+  ),
+  "unmarked catalog provenance must fail closed"
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  valid_execution_discoverer,
+  envir = .GlobalEnv
+)
+catalog_with_incomplete_provenance <- catalog_fixture
+catalog_with_incomplete_provenance$phase3_execution_provenance <-
+  execution_fixture
+catalog_with_incomplete_provenance$phase3_execution_provenance$R_version <- NULL
+catalog_with_incomplete_provenance$phase3_execution_provenance$phase3_R_version <-
+  NULL
+catalog_with_incomplete_provenance$phase3_execution_provenance$mgcv_version <-
+  NULL
+catalog_with_incomplete_provenance$phase3_execution_provenance$phase3_mgcv_version <-
+  NULL
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  repository_execution_discoverer,
+  envir = .GlobalEnv
+)
+assert_error(
+  fastkpc_full_cuda_phase3_input_identity(
+    catalog_with_incomplete_provenance,
+    2L,
+    catalog_evidence = function(catalog) catalog$phase3_lineage,
+    runtime_evidence = function(device_id) runtime_fixture,
+    device_evidence = function(device_id) runtime_fixture
+  ),
+  "missing current execution versions must fail closed"
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  valid_execution_discoverer,
+  envir = .GlobalEnv
+)
+full_provenance_fixture <- execution_fixture
+full_provenance_fixture$head_base_commit <- full_provenance_fixture$source_commit
+full_provenance_fixture$authenticated <- NULL
+provenance_verify_calls <- 0L
+old_provenance_verifier <- get(
+  "fastkpc_full_cuda_fixed_sp_verify_execution_provenance",
+  envir = .GlobalEnv
+)
+assign(
+  "fastkpc_full_cuda_fixed_sp_verify_execution_provenance",
+  function(provenance) {
+    provenance_verify_calls <<- provenance_verify_calls + 1L
+    provenance
+  },
+  envir = .GlobalEnv
+)
+catalog_with_full_provenance <- catalog_fixture
+catalog_with_full_provenance$phase3_execution_provenance <-
+  full_provenance_fixture
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  repository_execution_discoverer,
+  envir = .GlobalEnv
+)
+full_provenance_identity <- fastkpc_full_cuda_phase3_input_identity(
+  catalog_with_full_provenance,
+  2L,
+  catalog_evidence = function(catalog) catalog$phase3_lineage,
+  runtime_evidence = function(device_id) runtime_fixture,
+  device_evidence = function(device_id) runtime_fixture
+)
+assert_true(
+  provenance_verify_calls == 1L &&
+    identical(full_provenance_identity$source_commit,
+              full_provenance_fixture$head_base_commit) &&
+    identical(full_provenance_identity$R_version, R.version.string) &&
+    identical(full_provenance_identity$mgcv_version, current_mgcv_version),
+  "default discovery verifies Phase 3C provenance and captures current versions"
+)
+marked_full_provenance <- full_provenance_fixture
+marked_full_provenance$authenticated <- TRUE
+catalog_with_marked_provenance <- catalog_fixture
+catalog_with_marked_provenance$phase3_execution_provenance <-
+  marked_full_provenance
+provenance_verify_calls <- 0L
+invisible(fastkpc_full_cuda_phase3_input_identity(
+  catalog_with_marked_provenance,
+  2L,
+  catalog_evidence = function(catalog) catalog$phase3_lineage,
+  runtime_evidence = function(device_id) runtime_fixture,
+  device_evidence = function(device_id) runtime_fixture
+))
+assert_true(
+  provenance_verify_calls == 1L,
+  "marked Phase 3C provenance still routes through the verifier"
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  valid_execution_discoverer,
+  envir = .GlobalEnv
+)
+assign(
+  "fastkpc_full_cuda_fixed_sp_verify_execution_provenance",
+  old_provenance_verifier,
+  envir = .GlobalEnv
+)
 
 identity_rejected <- function(lineage = lineage_fixture,
                               runtime = runtime_fixture,
@@ -221,21 +644,74 @@ write_fixture_artifact <- function(kind, output_dir, identity,
     "manifest_json", "summary_json", "shards_dir", "sessions_dir"
   ))
   if (isTRUE(include_payload)) {
+    # Task 1 checks serialization and lineage; Task 4/9 own numeric/graph gates.
     for (key in payload_keys) {
       path <- paths[[key]]
       if (grepl("\\.rds$", path)) {
-        saveRDS(list(fixture = key), path, version = 3L)
-      } else if (grepl("\\.json$", path)) {
-        value <- if (key == "route_config_json") {
-          as.list(fastkpc_full_cuda_phase3_route_config())
+        value <- if (identical(key, "adjacency_rds")) {
+          matrix(0, nrow = 1L, ncol = 1L,
+                 dimnames = list("fixture", "fixture"))
         } else {
-          list(fixture = key)
+          list(
+            schema_version = "full-cuda-ci-phase3-contract-fixture-v1",
+            contract_fixture = TRUE,
+            payload = key
+          )
         }
+        saveRDS(value, path, version = 3L)
+      } else if (grepl("\\.json$", path)) {
+        value <- switch(
+          key,
+          route_config_json = as.list(fastkpc_full_cuda_phase3_route_config()),
+          first_divergence_json = list(
+            schema_version =
+              "full-cuda-ci-phase3-contract-fixture-v1",
+            first_divergence_found = FALSE
+          ),
+          direct_ci_summary_json = list(
+            schema_version =
+              "full-cuda-ci-phase3-contract-fixture-v1",
+            contract_fixture = TRUE,
+            pass = TRUE
+          ),
+          list(
+            schema_version = "full-cuda-ci-phase3-contract-fixture-v1",
+            contract_fixture = TRUE,
+            payload = key
+          )
+        )
         jsonlite::write_json(
           value, path, auto_unbox = TRUE, pretty = TRUE
         )
+      } else if (grepl("\\.csv$", path)) {
+        value <- switch(
+          key,
+          input_hashes_csv = data.frame(
+            logical_path = "fixture",
+            sha256 = sha("fixture-input"),
+            stringsAsFactors = FALSE
+          ),
+          fallbacks_csv = data.frame(
+            type = character(), key = character(), reason = character(),
+            count = integer(), stringsAsFactors = FALSE
+          ),
+          failures_csv = data.frame(
+            stage = character(), error_class = character(),
+            error_message = character(), stringsAsFactors = FALSE
+          ),
+          data.frame(
+            schema_version = "full-cuda-ci-phase3-contract-fixture-v1",
+            contract_fixture = TRUE,
+            payload = key,
+            stringsAsFactors = FALSE
+          )
+        )
+        utils::write.csv(value, path, row.names = FALSE)
       } else {
-        writeLines(paste0("fixture-", key), path, useBytes = TRUE)
+        writeLines(
+          c("full-cuda-ci-phase3-contract-fixture-v1", key),
+          path, useBytes = TRUE
+        )
       }
     }
   }
@@ -255,6 +731,10 @@ write_fixture_artifact <- function(kind, output_dir, identity,
       input_identity_schema_version = identity$schema_version,
       input_identity_sha256 = identity$sha256,
       payload_names = vapply(paths[payload_keys], basename, character(1L)),
+      publication_order = c(
+        unname(vapply(paths[payload_keys], basename, character(1L))),
+        "manifest.json", "summary.json"
+      ),
       payload_file_sha256 = if (isTRUE(include_payload)) {
         as.list(setNames(
           unname(payload_hashes),
@@ -285,6 +765,32 @@ write_fixture_artifact <- function(kind, output_dir, identity,
   list(paths = paths, manifest = manifest, summary = summary)
 }
 
+default_artifact_root <- tempfile("phase3-default-discovery-")
+default_artifact <- write_fixture_artifact(
+  "oracle_sp", default_artifact_root, default_identity
+)
+default_validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+  default_artifact_root, catalog = catalog_fixture, device_id = 2L
+)
+assert_true(
+  isTRUE(default_validated$authenticated),
+  "artifact validation uses default catalog/device discoverers"
+)
+explicit_validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+  default_artifact_root,
+  catalog = catalog_fixture,
+  device_id = 2L,
+  catalog_evidence = function(catalog) catalog$phase3_lineage,
+  runtime_evidence = function(device_id) runtime_fixture,
+  device_evidence = function(device_id) runtime_fixture,
+  execution_evidence = function(catalog, device_id) execution_fixture
+)
+assert_true(
+  isTRUE(explicit_validated$authenticated),
+  "artifact validation accepts explicit authenticated evidence seams"
+)
+unlink(default_artifact_root, recursive = TRUE, force = TRUE)
+
 artifact_root <- tempfile("phase3-artifact-contract-")
 on.exit(unlink(artifact_root, recursive = TRUE, force = TRUE), add = TRUE)
 oracle_fixture <- write_fixture_artifact(
@@ -292,6 +798,19 @@ oracle_fixture <- write_fixture_artifact(
 )
 shadow_fixture <- write_fixture_artifact(
   "full_shadow", file.path(artifact_root, "shadow"), identity
+)
+oracle_manifest_order <- jsonlite::read_json(
+  oracle_fixture$paths$manifest_json, simplifyVector = TRUE
+)
+assert_true(
+  identical(
+    oracle_manifest_order$publication_order,
+    c(
+      oracle_manifest_order$payload_names,
+      "manifest.json", "summary.json"
+    )
+  ),
+  "manifest records payload-then-manifest-then-summary publication order"
 )
 oracle_validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
   file.path(artifact_root, "oracle"), expected_identity = identity
@@ -302,6 +821,94 @@ shadow_validated <- fastkpc_validate_full_cuda_fixed_sp_shadow_artifact(
 assert_true(isTRUE(oracle_validated$authenticated) &&
               isTRUE(shadow_validated$authenticated),
             "authenticated oracle and shadow fixtures")
+
+non_authoritative_summary <- jsonlite::read_json(
+  oracle_fixture$paths$summary_json, simplifyVector = TRUE
+)
+non_authoritative_summary$pass <- FALSE
+jsonlite::write_json(
+  non_authoritative_summary, oracle_fixture$paths$summary_json,
+  auto_unbox = TRUE, pretty = TRUE, null = "null", digits = NA
+)
+summary_revalidated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+  file.path(artifact_root, "oracle"), expected_identity = identity
+)
+assert_true(
+  isTRUE(summary_revalidated$pass) &&
+    isTRUE(summary_revalidated$computed_contract_pass),
+  "summary pass is ignored in favor of validator-owned contract result"
+)
+invisible(write_fixture_artifact(
+  "oracle_sp", file.path(artifact_root, "oracle"), identity
+))
+
+common_payload_names <- vapply(
+  oracle_paths[c(
+    "commands_txt", "environment_txt", "input_hashes_csv",
+    "route_config_json", "runtime_lifecycle_csv", "resource_metrics_csv",
+    "stage_timing_csv", "fallbacks_csv", "failures_csv"
+  )],
+  basename,
+  character(1L)
+)
+manifest_for_payload_closure <- jsonlite::read_json(
+  oracle_fixture$paths$manifest_json, simplifyVector = TRUE
+)
+assert_true(
+  all(common_payload_names %in% manifest_for_payload_closure$payload_names) &&
+    identical(
+      sort(unname(common_payload_names), method = "radix"),
+      sort(unname(names(manifest_for_payload_closure$payload_file_sha256)[
+        names(manifest_for_payload_closure$payload_file_sha256) %in%
+          common_payload_names
+      ]), method = "radix")
+    ),
+  "manifest hashes every common top-level payload"
+)
+writeLines(
+  "mutated-common-payload", oracle_fixture$paths$commands_txt,
+  useBytes = TRUE
+)
+assert_error(
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    file.path(artifact_root, "oracle"), expected_identity = identity
+  ),
+  "common payload mutation must invalidate the artifact"
+)
+invisible(write_fixture_artifact(
+  "oracle_sp", file.path(artifact_root, "oracle"), identity
+))
+
+forged_payload_manifest <- jsonlite::read_json(
+  oracle_fixture$paths$manifest_json, simplifyVector = TRUE
+)
+forged_payload_summary <- jsonlite::read_json(
+  oracle_fixture$paths$summary_json, simplifyVector = TRUE
+)
+writeLines("this is not an RDS payload", oracle_fixture$paths$setup_results_rds,
+           useBytes = TRUE)
+forged_payload_manifest$payload_file_sha256[["setup_results.rds"]] <-
+  fastkpc_full_cuda_census_file_hash(oracle_fixture$paths$setup_results_rds)
+jsonlite::write_json(
+  forged_payload_manifest, oracle_fixture$paths$manifest_json,
+  auto_unbox = TRUE, pretty = TRUE, null = "null", digits = NA
+)
+forged_payload_summary$manifest_sha256 <- fastkpc_full_cuda_census_file_hash(
+  oracle_fixture$paths$manifest_json
+)
+jsonlite::write_json(
+  forged_payload_summary, oracle_fixture$paths$summary_json,
+  auto_unbox = TRUE, pretty = TRUE, null = "null", digits = NA
+)
+assert_error(
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    file.path(artifact_root, "oracle"), expected_identity = identity
+  ),
+  "malformed payload must fail even when its manifest hash is forged"
+)
+invisible(write_fixture_artifact(
+  "oracle_sp", file.path(artifact_root, "oracle"), identity
+))
 
 mutated_manifest_rejected <- function(field, value, label) {
   manifest <- jsonlite::read_json(
@@ -360,8 +967,45 @@ mutated_manifest_rejected(
   "runtime ABI mutation must fail"
 )
 mutated_manifest_rejected(
+  "runtime_abi_hash", sha("wrong-runtime-abi-hash"),
+  "runtime ABI hash mutation must fail"
+)
+mutated_manifest_rejected(
   "source_commit", strrep("2", 40L),
   "source commit mutation must fail"
+)
+mutated_manifest_rejected(
+  "phase2_source_commit", strrep("5", 40L),
+  "Phase 2 source lineage mutation must fail"
+)
+mutated_manifest_rejected(
+  "phase3_source_commit", strrep("4", 40L),
+  "current Phase 3 source commit mutation must fail"
+)
+mutated_manifest_rejected(
+  "R_version", "R version forged-for-reuse",
+  "current R version mutation must fail"
+)
+mutated_manifest_rejected(
+  "mgcv_version", "forged-mgcv-version",
+  "current mgcv version mutation must fail"
+)
+mutated_manifest_rejected(
+  "source_closure_sha256", sha("wrong-source-closure"),
+  "source closure hash mutation must fail"
+)
+mutated_manifest_rejected(
+  "execution_snapshot_sha256", sha("wrong-execution-snapshot"),
+  "execution snapshot hash mutation must fail"
+)
+mutated_manifest_rejected(
+  "relevant_sources_dirty_or_untracked",
+  !isTRUE(identity$relevant_sources_dirty_or_untracked),
+  "source dirtiness mutation must fail"
+)
+mutated_manifest_rejected(
+  "execution_sources_unchanged_after_run", FALSE,
+  "post-run source authentication mutation must fail"
 )
 mutated_manifest_rejected(
   "cuda_toolkit_version", 99999L,
@@ -376,8 +1020,20 @@ mutated_manifest_rejected(
   "GPU UUID mutation must fail"
 )
 mutated_manifest_rejected(
+  "gpu_name", "Forged Fixture GPU",
+  "GPU name mutation must fail"
+)
+mutated_manifest_rejected(
   "compute_capability", "9.9",
   "compute capability mutation must fail"
+)
+mutated_manifest_rejected(
+  "sm_count", 1L,
+  "SM count mutation must fail"
+)
+mutated_manifest_rejected(
+  "device_id", 7L,
+  "device id mutation must fail"
 )
 mutated_manifest_rejected(
   "cusolver_deterministic_mode", "disabled",
@@ -394,6 +1050,14 @@ mutated_manifest_rejected(
 mutated_manifest_rejected(
   "cublas_workspace_identity", sha("wrong-workspace"),
   "cuBLAS workspace identity mutation must fail"
+)
+mutated_manifest_rejected(
+  "cublas_workspace_bytes", 8192,
+  "cuBLAS workspace size mutation must fail"
+)
+mutated_manifest_rejected(
+  "cublas_workspace_alignment", 512,
+  "cuBLAS workspace alignment mutation must fail"
 )
 mutated_manifest_rejected(
   "artifact_schema_version", "forged-artifact-schema",
@@ -483,6 +1147,4 @@ assert_error(
   "malformed artifact path must fail"
 )
 
-cat("PASS phase3 artifact contract route and identity scaffold\n")
-
-cat("PASS phase3 artifact contract RED scaffold\n")
+cat("PASS phase3 artifact contract route, identity, and publication validation\n")

@@ -179,8 +179,16 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "schema_version", "phase0_manifest_hash", "phase1_manifest_hash",
     "phase2_manifest_hash", "dataset_file_sha256", "dataset_matrix_sha256",
     "canonical_setup_corpus_hash", "canonical_target_corpus_hash",
+    "phase0_source_commit", "phase1_source_commit", "phase2_source_commit",
+    "phase2_R_version", "phase2_mgcv_version",
     "runtime_abi", "runtime_abi_hash", "route_config_hash",
-    "source_commit", "R_version", "mgcv_version",
+    "source_commit", "phase3_source_commit", "R_version",
+    "phase3_R_version", "mgcv_version", "phase3_mgcv_version",
+    "provenance_schema_version", "provenance_mode",
+    "source_closure_schema_version", "source_discovery_semantics",
+    "source_closure_count", "source_closure_sha256",
+    "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
+    "execution_sources_unchanged_after_run",
     "cuda_toolkit_version", "cuda_driver_version", "gpu_name", "gpu_uuid",
     "compute_capability_major", "compute_capability_minor",
     "compute_capability", "sm_count", "device_id",
@@ -249,9 +257,19 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
       "canonical_target_corpus_hash", "canonical_target_key_corpus_hash",
       "full_canonical_target_key_corpus_hash"
     ),
-    source_commit = c("source_commit", "phase3_source_commit"),
-    R_version = c("R_version", "r_version"),
-    mgcv_version = c("mgcv_version", "MGCV_version")
+    phase0_source_commit = c(
+      "phase0_source_commit", "phase0_source_sha1"
+    ),
+    phase1_source_commit = c(
+      "phase1_source_commit", "phase1_source_sha1"
+    ),
+    phase2_source_commit = c(
+      "phase2_source_commit", "phase2_source_sha1", "source_commit"
+    ),
+    phase2_R_version = c("phase2_R_version", "phase2_r_version"),
+    phase2_mgcv_version = c(
+      "phase2_mgcv_version", "phase2_MGCV_version", "mgcv_version"
+    )
   )
   for (field in names(aliases)) {
     selected <- .fastkpc_full_cuda_phase3_lineage_alias(
@@ -263,7 +281,8 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "authenticated", "phase0_manifest_hash", "phase1_manifest_hash",
     "phase2_manifest_hash", "dataset_file_sha256", "dataset_matrix_sha256",
     "canonical_setup_corpus_hash", "canonical_target_corpus_hash",
-    "source_commit", "R_version", "mgcv_version"
+    "phase0_source_commit", "phase1_source_commit", "phase2_source_commit",
+    "phase2_R_version", "phase2_mgcv_version"
   )
   missing <- setdiff(required, names(value))
   if (length(missing) > 0L) {
@@ -274,19 +293,356 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
       !isTRUE(value$authenticated)) {
     stop("Phase 3 catalog lineage is not authenticated", call. = FALSE)
   }
-  for (field in setdiff(required, c("authenticated", "source_commit",
-                                    "R_version", "mgcv_version"))) {
+  for (field in setdiff(required, c(
+    "authenticated", "phase0_source_commit", "phase1_source_commit",
+    "phase2_source_commit", "phase2_R_version", "phase2_mgcv_version"
+  ))) {
     if (!.fastkpc_full_cuda_phase3_sha256(value[[field]])) {
       stop("Phase 3 catalog lineage hash is malformed: ", field,
            call. = FALSE)
     }
   }
-  if (!.fastkpc_full_cuda_phase3_commit(value$source_commit)) {
-    stop("Phase 3 catalog lineage source commit is malformed", call. = FALSE)
+  for (field in c(
+    "phase0_source_commit", "phase1_source_commit", "phase2_source_commit"
+  )) {
+    if (!.fastkpc_full_cuda_phase3_commit(value[[field]])) {
+      stop("Phase 3 catalog lineage source commit is malformed: ", field,
+           call. = FALSE)
+    }
   }
-  .fastkpc_full_cuda_phase3_scalar_text(value$R_version, "R_version")
-  .fastkpc_full_cuda_phase3_scalar_text(value$mgcv_version, "mgcv_version")
+  .fastkpc_full_cuda_phase3_scalar_text(
+    value$phase2_R_version, "phase2_R_version"
+  )
+  .fastkpc_full_cuda_phase3_scalar_text(
+    value$phase2_mgcv_version, "phase2_mgcv_version"
+  )
+  list(
+    authenticated = TRUE,
+    phase0_manifest_hash = value$phase0_manifest_hash,
+    phase1_manifest_hash = value$phase1_manifest_hash,
+    phase2_manifest_hash = value$phase2_manifest_hash,
+    dataset_file_sha256 = value$dataset_file_sha256,
+    dataset_matrix_sha256 = value$dataset_matrix_sha256,
+    canonical_setup_corpus_hash = value$canonical_setup_corpus_hash,
+    canonical_target_corpus_hash = value$canonical_target_corpus_hash,
+    phase0_source_commit = value$phase0_source_commit,
+    phase1_source_commit = value$phase1_source_commit,
+    phase2_source_commit = value$phase2_source_commit,
+    phase2_R_version = value$phase2_R_version,
+    phase2_mgcv_version = value$phase2_mgcv_version
+  )
+}
+
+.fastkpc_full_cuda_phase3_catalog_value <- function(catalog, candidates) {
+  if (!is.list(catalog)) return(NULL)
+  for (name in candidates) {
+    if (!is.null(catalog[[name]])) return(catalog[[name]])
+  }
+  NULL
+}
+
+.fastkpc_full_cuda_phase3_catalog_hash <- function(
+    catalog, candidates, fallback, label) {
+  present <- candidates[vapply(
+    candidates, function(name) !is.null(catalog[[name]]), logical(1L)
+  )]
+  if (length(present) == 0L) return(unname(fallback))
+  values <- vapply(present, function(name) {
+    value <- catalog[[name]]
+    if (!.fastkpc_full_cuda_phase3_sha256(value)) {
+      stop(label, " is malformed", call. = FALSE)
+    }
+    unname(value)
+  }, character(1L))
+  if (length(values) > 1L && any(values[-1L] != values[[1L]])) {
+    stop(label, " aliases disagree", call. = FALSE)
+  }
+  values[[1L]]
+}
+
+.fastkpc_full_cuda_phase3_validate_execution_evidence <- function(value) {
+  if (!is.list(value) || is.object(value) || is.null(names(value)) ||
+      anyDuplicated(names(value))) {
+    stop("Phase 3 execution provenance is malformed", call. = FALSE)
+  }
+  required <- c(
+    "authenticated", "source_commit", "phase3_source_commit", "R_version",
+    "phase3_R_version", "mgcv_version", "phase3_mgcv_version",
+    "provenance_schema_version", "provenance_mode",
+    "source_closure_schema_version", "source_discovery_semantics",
+    "source_closure_count", "source_closure_sha256",
+    "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
+    "execution_sources_unchanged_after_run"
+  )
+  missing <- setdiff(required, names(value))
+  if (length(missing) > 0L) {
+    stop("Phase 3 execution provenance is missing: ",
+         paste(missing, collapse = ","), call. = FALSE)
+  }
+  if (!.fastkpc_full_cuda_phase3_bare_scalar(value$authenticated, "logical") ||
+      !isTRUE(value$authenticated)) {
+    stop("Phase 3 execution provenance is not authenticated", call. = FALSE)
+  }
+  for (field in c("source_commit", "phase3_source_commit")) {
+    if (!.fastkpc_full_cuda_phase3_commit(value[[field]])) {
+      stop("Phase 3 execution source commit is malformed: ", field,
+           call. = FALSE)
+    }
+  }
+  if (!identical(value$source_commit, value$phase3_source_commit)) {
+    stop("Phase 3 execution source commit aliases disagree", call. = FALSE)
+  }
+  for (field in c(
+    "R_version", "phase3_R_version", "mgcv_version", "phase3_mgcv_version",
+    "provenance_schema_version", "provenance_mode",
+    "source_closure_schema_version", "source_discovery_semantics"
+  )) {
+    .fastkpc_full_cuda_phase3_scalar_text(value[[field]], field)
+  }
+  if (!identical(value$R_version, value$phase3_R_version) ||
+      !identical(value$mgcv_version, value$phase3_mgcv_version)) {
+    stop("Phase 3 execution version aliases disagree", call. = FALSE)
+  }
+  if (!identical(
+        value$provenance_schema_version,
+        "full-cuda-ci-execution-source-snapshot-v6"
+      ) || !identical(
+        value$provenance_mode, "working-tree-execution-snapshot-v1"
+      ) || !identical(
+        value$source_closure_schema_version,
+        "full-cuda-ci-execution-source-closure-v1"
+      ) || !identical(
+        value$source_discovery_semantics,
+        "parsed-r-ast-load-time-literal-source-v1"
+      )) {
+    stop("Phase 3 execution provenance schema is unsupported", call. = FALSE)
+  }
+  if (!.fastkpc_full_cuda_phase3_bare_integer(value$source_closure_count, 1L) ||
+      !.fastkpc_full_cuda_phase3_sha256(value$source_closure_sha256) ||
+      !.fastkpc_full_cuda_phase3_sha256(value$execution_snapshot_sha256)) {
+    stop("Phase 3 execution provenance hash/count is malformed", call. = FALSE)
+  }
+  for (field in c(
+    "relevant_sources_dirty_or_untracked",
+    "execution_sources_unchanged_after_run"
+  )) {
+    if (!.fastkpc_full_cuda_phase3_bare_scalar(value[[field]], "logical")) {
+      stop("Phase 3 execution provenance flag is malformed: ", field,
+           call. = FALSE)
+    }
+  }
+  if (!isTRUE(value$execution_sources_unchanged_after_run)) {
+    stop("Phase 3 execution provenance is not post-run verified",
+         call. = FALSE)
+  }
   value
+}
+
+.fastkpc_full_cuda_phase3_execution_roots <- function() {
+  candidates <- c(
+    phase3_artifacts = "fastkpc/R/full_cuda_ci_phase3_artifacts.R",
+    fixed_sp_runtime = "fastkpc/R/full_cuda_ci_fixed_sp_runtime.R",
+    cuda_gate = "fastkpc/R/full_cuda_ci_gate.R",
+    oracle_contract = "fastkpc/R/full_cuda_ci_oracle_contract.R",
+    prepared_s_contract = "fastkpc/R/full_cuda_ci_prepared_s_contract.R",
+    workload_census = "fastkpc/R/full_cuda_ci_workload_census.R"
+  )
+  candidates[file.exists(candidates)]
+}
+
+.fastkpc_full_cuda_phase3_default_execution_evidence <- function(
+    catalog, device_id) {
+  supplied <- .fastkpc_full_cuda_phase3_catalog_value(
+    catalog,
+    c(
+      "phase3_execution_evidence", "phase3_execution_provenance",
+      "execution_evidence", "execution_provenance"
+    )
+  )
+  if (!is.null(supplied)) {
+    if (!is.list(supplied) || is.object(supplied)) {
+      stop("Phase 3 supplied execution provenance is malformed",
+           call. = FALSE)
+    }
+    if (!is.null(supplied$head_base_commit)) {
+      if (!exists(
+            "fastkpc_full_cuda_fixed_sp_verify_execution_provenance",
+            mode = "function"
+          )) {
+        stop("Phase 3C provenance verifier is unavailable", call. = FALSE)
+      }
+      verifier_input <- supplied
+      if ("authenticated" %in% names(verifier_input)) {
+        verifier_input$authenticated <- NULL
+      }
+      supplied <- tryCatch(
+        fastkpc_full_cuda_fixed_sp_verify_execution_provenance(verifier_input),
+        error = function(error) {
+          stop("Phase 3C execution provenance verification failed: ",
+               conditionMessage(error), call. = FALSE)
+        }
+      )
+      if (!is.list(supplied) ||
+          !isTRUE(supplied$execution_sources_unchanged_after_run)) {
+        stop("Phase 3C execution provenance is not post-run verified",
+             call. = FALSE)
+      }
+      supplied$authenticated <- TRUE
+      supplied$source_commit <- supplied$head_base_commit
+      supplied$phase3_source_commit <- supplied$head_base_commit
+      if (!requireNamespace("mgcv", quietly = TRUE)) {
+        stop("Phase 3 execution requires installed mgcv", call. = FALSE)
+      }
+      supplied$R_version <- R.version.string
+      supplied$phase3_R_version <- R.version.string
+      supplied$mgcv_version <- as.character(utils::packageVersion("mgcv"))
+      supplied$phase3_mgcv_version <- supplied$mgcv_version
+    }
+    if (is.null(supplied$authenticated)) {
+      stop("Phase 3 supplied execution provenance is unmarked",
+           call. = FALSE)
+    }
+    return(.fastkpc_full_cuda_phase3_validate_execution_evidence(supplied))
+  }
+  if (!exists(
+        "fastkpc_full_cuda_fixed_sp_discover_execution_source_closure",
+        mode = "function"
+      ) || !exists(
+        "fastkpc_full_cuda_fixed_sp_source_closure_hash",
+        mode = "function"
+      ) || !exists(
+        "fastkpc_full_cuda_fixed_sp_sha256_file",
+        mode = "function"
+      ) || !exists(
+        "fastkpc_full_cuda_fixed_sp_git_source_state",
+        mode = "function"
+      ) || !exists("fastkpc_full_cuda_source_commit", mode = "function")) {
+    stop("authenticated Phase 3 source discovery helpers are unavailable",
+         call. = FALSE)
+  }
+  roots <- .fastkpc_full_cuda_phase3_execution_roots()
+  if (length(roots) == 0L) {
+    stop("Phase 3 execution source roots are unavailable", call. = FALSE)
+  }
+  project_root <- normalizePath(".", winslash = "/", mustWork = TRUE)
+  closure <- fastkpc_full_cuda_fixed_sp_discover_execution_source_closure(
+    root_sources = roots, project_root = project_root
+  )
+  source_hashes <- vapply(
+    closure$source_file_paths,
+    fastkpc_full_cuda_fixed_sp_sha256_file,
+    character(1L)
+  )
+  source_states <- vapply(
+    closure$source_file_paths,
+    fastkpc_full_cuda_fixed_sp_git_source_state,
+    character(1L)
+  )
+  source_commit <- fastkpc_full_cuda_source_commit()
+  if (!.fastkpc_full_cuda_phase3_commit(source_commit)) {
+    stop("authenticated current Phase 3 source commit is unavailable",
+         call. = FALSE)
+  }
+  if (!requireNamespace("mgcv", quietly = TRUE)) {
+    stop("Phase 3 execution requires installed mgcv", call. = FALSE)
+  }
+  R_version <- R.version.string
+  mgcv_version <- as.character(utils::packageVersion("mgcv"))
+  source_closure_sha256 <- fastkpc_full_cuda_fixed_sp_source_closure_hash(
+    closure, source_hashes
+  )
+  relevant_dirty <- any(source_states != "clean")
+  execution_snapshot_sha256 <- .fastkpc_full_cuda_phase3_named_hash(list(
+    provenance_schema_version =
+      "full-cuda-ci-execution-source-snapshot-v6",
+    provenance_mode = "working-tree-execution-snapshot-v1",
+    head_base_commit = source_commit,
+    source_closure_sha256 = source_closure_sha256,
+    R_version = R_version,
+    mgcv_version = mgcv_version,
+    relevant_sources_dirty_or_untracked = relevant_dirty
+  ))
+  .fastkpc_full_cuda_phase3_validate_execution_evidence(list(
+    authenticated = TRUE,
+    source_commit = source_commit,
+    phase3_source_commit = source_commit,
+    R_version = R_version,
+    phase3_R_version = R_version,
+    mgcv_version = mgcv_version,
+    phase3_mgcv_version = mgcv_version,
+    provenance_schema_version =
+      "full-cuda-ci-execution-source-snapshot-v6",
+    provenance_mode = "working-tree-execution-snapshot-v1",
+    source_closure_schema_version =
+      "full-cuda-ci-execution-source-closure-v1",
+    source_discovery_semantics =
+      "parsed-r-ast-load-time-literal-source-v1",
+    source_closure_count = closure$source_closure_count,
+    source_closure_sha256 = source_closure_sha256,
+    execution_snapshot_sha256 = execution_snapshot_sha256,
+    relevant_sources_dirty_or_untracked = relevant_dirty,
+    execution_sources_unchanged_after_run = TRUE
+  ))
+}
+
+fastkpc_full_cuda_phase3_discover_execution_evidence <- function(
+    catalog, device_id) {
+  .fastkpc_full_cuda_phase3_default_execution_evidence(catalog, device_id)
+}
+
+fastkpc_full_cuda_phase3_discover_runtime_evidence <- function(
+    catalog, device_id) {
+  supplied <- .fastkpc_full_cuda_phase3_catalog_value(
+    catalog,
+    c(
+      "phase3_runtime_evidence", "phase3_runtime_info", "runtime_evidence",
+      "runtime_info"
+    )
+  )
+  if (is.null(supplied)) {
+    handle <- .fastkpc_full_cuda_phase3_catalog_value(
+      catalog, c("phase3_runtime", "runtime_handle")
+    )
+    if (!is.null(handle) && exists("fixed_sp_cuda_runtime_info",
+                                   mode = "function")) {
+      supplied <- fixed_sp_cuda_runtime_info(handle)
+    }
+  }
+  if (is.null(supplied)) {
+    stop("authenticated Phase 3 runtime evidence is unavailable",
+         call. = FALSE)
+  }
+  if (!is.list(supplied) || is.object(supplied)) {
+    stop("Phase 3 runtime evidence is malformed", call. = FALSE)
+  }
+  supplied
+}
+
+fastkpc_full_cuda_phase3_discover_device_evidence <- function(
+    catalog, device_id) {
+  supplied <- .fastkpc_full_cuda_phase3_catalog_value(
+    catalog,
+    c("phase3_device_evidence", "phase3_device_info", "device_evidence",
+      "device_info")
+  )
+  if (!is.null(supplied)) {
+    if (!is.list(supplied) || is.object(supplied)) {
+      stop("Phase 3 device evidence is malformed", call. = FALSE)
+    }
+    return(supplied)
+  }
+  if (!exists("fastkpc_cuda_device_info", mode = "function")) {
+    stop("authenticated Phase 3 device-query API is unavailable",
+         call. = FALSE)
+  }
+  queried <- fastkpc_cuda_device_info()
+  if (!is.list(queried) || is.object(queried)) {
+    stop("Phase 3 device-query result is malformed", call. = FALSE)
+  }
+  if (!is.null(queried$name) && is.null(queried$gpu_name)) {
+    queried$gpu_name <- queried$name
+  }
+  queried
 }
 
 .fastkpc_full_cuda_phase3_validate_runtime_evidence <- function(
@@ -393,6 +749,10 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
   phase0 <- catalog$phase0
   inputs <- catalog$inputs
   phase2 <- catalog$phase2_manifest
+  if (!is.list(phase0) || !is.list(inputs) || !is.list(phase2) ||
+      !is.list(phase0$manifest) || !is.list(inputs$manifest)) {
+    stop("Phase 3 catalog manifests are malformed", call. = FALSE)
+  }
   phase0_summary <- phase0$summary
   phase1_summary <- inputs$summary
   if (!isTRUE(phase0_summary$pass) || !isTRUE(phase1_summary$pass) ||
@@ -400,23 +760,36 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     stop("Phase 3 catalog completion gates are not authenticated",
          call. = FALSE)
   }
-  phase0_hash <- fastkpc_full_cuda_census_input_contract()$file_hashes[[
-    "oracle/manifest.json"
-  ]]
-  phase1_hash <- fastkpc_full_cuda_prepared_s_input_contract()$file_hashes[[
-    "manifest.json"
-  ]]
+  phase0_hash <- .fastkpc_full_cuda_phase3_catalog_hash(
+    catalog,
+    c("phase0_manifest_hash", "phase0_manifest_sha256"),
+    fastkpc_full_cuda_census_input_contract()$file_hashes[[
+      "oracle/manifest.json"
+    ]],
+    "Phase 0 manifest hash"
+  )
+  phase1_hash <- .fastkpc_full_cuda_phase3_catalog_hash(
+    catalog,
+    c("phase1_manifest_hash", "phase1_manifest_sha256"),
+    fastkpc_full_cuda_prepared_s_input_contract()$file_hashes[[
+      "manifest.json"
+    ]],
+    "Phase 1 manifest hash"
+  )
   phase2_hash <- catalog$phase2_file_hashes[["manifest.json"]]
-  required <- c(phase0_hash, phase1_hash, phase2_hash,
-                inputs$dataset_file_sha256, inputs$dataset_sha256,
-                phase2$full_canonical_prepared_s_key_corpus_hash,
-                phase2$full_canonical_target_key_corpus_hash,
-                phase2$source_commit, phase2$R_version, phase2$mgcv_version)
+  required <- c(
+    phase0_hash, phase1_hash, phase2_hash,
+    inputs$dataset_file_sha256, inputs$dataset_sha256,
+    phase2$full_canonical_prepared_s_key_corpus_hash,
+    phase2$full_canonical_target_key_corpus_hash,
+    phase0$manifest$source_commit, inputs$manifest$source_commit,
+    phase2$source_commit, phase2$R_version, phase2$mgcv_version
+  )
   if (any(vapply(required, is.null, logical(1L)))) {
     stop("Phase 3 catalog does not expose complete authenticated lineage",
          call. = FALSE)
   }
-  list(
+  .fastkpc_full_cuda_phase3_validate_lineage(list(
     authenticated = TRUE,
     phase0_manifest_hash = unname(phase0_hash),
     phase1_manifest_hash = unname(phase1_hash),
@@ -429,10 +802,16 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     canonical_target_corpus_hash = as.character(
       phase2$full_canonical_target_key_corpus_hash
     ),
-    source_commit = as.character(phase2$source_commit),
-    R_version = as.character(phase2$R_version),
-    mgcv_version = as.character(phase2$mgcv_version)
-  )
+    phase0_source_commit = as.character(phase0$manifest$source_commit),
+    phase1_source_commit = as.character(inputs$manifest$source_commit),
+    phase2_source_commit = as.character(phase2$source_commit),
+    phase2_R_version = as.character(phase2$R_version),
+    phase2_mgcv_version = as.character(phase2$mgcv_version)
+  ))
+}
+
+fastkpc_full_cuda_phase3_discover_catalog_evidence <- function(catalog) {
+  .fastkpc_full_cuda_phase3_default_catalog_evidence(catalog)
 }
 
 fastkpc_full_cuda_phase3_validate_input_identity <- function(
@@ -452,20 +831,67 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
     "phase0_manifest_hash", "phase1_manifest_hash", "phase2_manifest_hash",
     "dataset_file_sha256", "dataset_matrix_sha256",
     "canonical_setup_corpus_hash", "canonical_target_corpus_hash",
-    "runtime_abi_hash", "route_config_hash", "cublas_workspace_identity"
+    "runtime_abi_hash", "route_config_hash", "cublas_workspace_identity",
+    "source_closure_sha256", "execution_snapshot_sha256"
   )) {
     if (!.fastkpc_full_cuda_phase3_sha256(identity[[field]])) {
       stop("Phase 3 input identity hash is malformed: ", field,
            call. = FALSE)
     }
   }
-  if (!.fastkpc_full_cuda_phase3_commit(identity$source_commit)) {
-    stop("Phase 3 input identity source commit is malformed", call. = FALSE)
+  for (field in c(
+    "phase0_source_commit", "phase1_source_commit", "phase2_source_commit",
+    "source_commit", "phase3_source_commit"
+  )) {
+    if (!.fastkpc_full_cuda_phase3_commit(identity[[field]])) {
+      stop("Phase 3 input identity source commit is malformed: ", field,
+           call. = FALSE)
+    }
+  }
+  if (!identical(identity$source_commit, identity$phase3_source_commit)) {
+    stop("Phase 3 input identity execution source aliases disagree",
+         call. = FALSE)
   }
   for (field in c("runtime_abi", "R_version", "mgcv_version", "gpu_name",
                   "gpu_uuid", "compute_capability", "cusolver_deterministic_mode",
-                  "cublas_math_mode", "cublas_atomics_mode")) {
+                  "cublas_math_mode", "cublas_atomics_mode",
+                  "phase2_R_version", "phase2_mgcv_version",
+                  "phase3_R_version", "phase3_mgcv_version",
+                  "provenance_schema_version", "provenance_mode",
+                  "source_closure_schema_version",
+                  "source_discovery_semantics")) {
     .fastkpc_full_cuda_phase3_scalar_text(identity[[field]], field)
+  }
+  if (!identical(identity$R_version, identity$phase3_R_version) ||
+      !identical(identity$mgcv_version, identity$phase3_mgcv_version)) {
+    stop("Phase 3 input identity execution version aliases disagree",
+         call. = FALSE)
+  }
+  if (!identical(
+        identity$provenance_schema_version,
+        "full-cuda-ci-execution-source-snapshot-v6"
+      ) || !identical(
+        identity$provenance_mode, "working-tree-execution-snapshot-v1"
+      ) || !identical(
+        identity$source_closure_schema_version,
+        "full-cuda-ci-execution-source-closure-v1"
+      ) || !identical(
+        identity$source_discovery_semantics,
+        "parsed-r-ast-load-time-literal-source-v1"
+      ) || !.fastkpc_full_cuda_phase3_bare_integer(
+        identity$source_closure_count, 1L
+      )) {
+    stop("Phase 3 input identity provenance configuration mismatch",
+         call. = FALSE)
+  }
+  for (field in c(
+    "relevant_sources_dirty_or_untracked",
+    "execution_sources_unchanged_after_run"
+  )) {
+    if (!.fastkpc_full_cuda_phase3_bare_scalar(identity[[field]], "logical")) {
+      stop("Phase 3 input identity provenance flag is malformed: ", field,
+           call. = FALSE)
+    }
   }
   for (field in c("cuda_toolkit_version", "cuda_driver_version",
                   "compute_capability_major", "compute_capability_minor",
@@ -524,7 +950,7 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
 
 fastkpc_full_cuda_phase3_input_identity <- function(
     catalog, device_id, catalog_evidence = NULL, runtime_evidence = NULL,
-    device_evidence = NULL, ...) {
+    device_evidence = NULL, execution_evidence = NULL, ...) {
   dots <- list(...)
   if (length(dots) > 0L) {
     if (is.null(names(dots)) || anyDuplicated(names(dots)) ||
@@ -532,7 +958,8 @@ fastkpc_full_cuda_phase3_input_identity <- function(
           "catalog_validator", "runtime_probe", "device_probe",
           "validated_catalog", "catalog_callback", "runtime_callback",
           "device_callback", "runtime_info", "device_info",
-          "runtime_fixture", "device_fixture"
+          "runtime_fixture", "device_fixture", "execution_probe",
+          "execution_callback", "execution_info", "execution_fixture"
         ))) {
       stop("unknown Phase 3 input identity evidence argument", call. = FALSE)
     }
@@ -553,6 +980,18 @@ fastkpc_full_cuda_phase3_input_identity <- function(
     if (is.null(device_evidence)) device_evidence <- dots$device_callback
     if (is.null(device_evidence)) device_evidence <- dots$device_info
     if (is.null(device_evidence)) device_evidence <- dots$device_fixture
+    if (is.null(execution_evidence)) {
+      execution_evidence <- dots$execution_probe
+      if (is.null(execution_evidence)) {
+        execution_evidence <- dots$execution_callback
+      }
+      if (is.null(execution_evidence)) {
+        execution_evidence <- dots$execution_info
+      }
+      if (is.null(execution_evidence)) {
+        execution_evidence <- dots$execution_fixture
+      }
+    }
   }
   resolve <- function(value, argument, input) {
     if (is.null(value)) {
@@ -567,13 +1006,40 @@ fastkpc_full_cuda_phase3_input_identity <- function(
   }
   lineage <- resolve(
     if (is.null(catalog_evidence)) {
-      .fastkpc_full_cuda_phase3_default_catalog_evidence
+      fastkpc_full_cuda_phase3_discover_catalog_evidence
     } else catalog_evidence,
     "catalog_evidence", catalog
   )
   lineage <- .fastkpc_full_cuda_phase3_validate_lineage(lineage)
-  runtime <- resolve(runtime_evidence, "runtime_evidence", device_id)
-  device <- resolve(device_evidence, "device_evidence", device_id)
+  execution <- if (is.null(execution_evidence)) {
+    fastkpc_full_cuda_phase3_discover_execution_evidence(catalog, device_id)
+  } else if (is.function(execution_evidence)) {
+    execution_evidence(catalog, device_id)
+  } else {
+    execution_evidence
+  }
+  execution <- .fastkpc_full_cuda_phase3_validate_execution_evidence(
+    execution
+  )
+  runtime <- if (is.null(runtime_evidence)) {
+    fastkpc_full_cuda_phase3_discover_runtime_evidence(catalog, device_id)
+  } else if (is.function(runtime_evidence)) {
+    runtime_evidence(device_id)
+  } else {
+    runtime_evidence
+  }
+  device <- if (is.null(device_evidence)) {
+    fastkpc_full_cuda_phase3_discover_device_evidence(catalog, device_id)
+  } else if (is.function(device_evidence)) {
+    device_evidence(device_id)
+  } else {
+    device_evidence
+  }
+  if (!is.list(runtime) || is.object(runtime) ||
+      !is.list(device) || is.object(device)) {
+    stop("Phase 3 runtime/device evidence returned malformed evidence",
+         call. = FALSE)
+  }
   runtime <- .fastkpc_full_cuda_phase3_merge_evidence(runtime, device)
   runtime <- .fastkpc_full_cuda_phase3_validate_runtime_evidence(
     runtime, device_id
@@ -589,12 +1055,31 @@ fastkpc_full_cuda_phase3_input_identity <- function(
     dataset_matrix_sha256 = lineage$dataset_matrix_sha256,
     canonical_setup_corpus_hash = lineage$canonical_setup_corpus_hash,
     canonical_target_corpus_hash = lineage$canonical_target_corpus_hash,
+    phase0_source_commit = lineage$phase0_source_commit,
+    phase1_source_commit = lineage$phase1_source_commit,
+    phase2_source_commit = lineage$phase2_source_commit,
+    phase2_R_version = lineage$phase2_R_version,
+    phase2_mgcv_version = lineage$phase2_mgcv_version,
     runtime_abi = abi$schema_version,
     runtime_abi_hash = abi$sha256,
     route_config_hash = route$sha256,
-    source_commit = lineage$source_commit,
-    R_version = lineage$R_version,
-    mgcv_version = lineage$mgcv_version,
+    source_commit = execution$source_commit,
+    phase3_source_commit = execution$phase3_source_commit,
+    R_version = execution$R_version,
+    phase3_R_version = execution$phase3_R_version,
+    mgcv_version = execution$mgcv_version,
+    phase3_mgcv_version = execution$phase3_mgcv_version,
+    provenance_schema_version = execution$provenance_schema_version,
+    provenance_mode = execution$provenance_mode,
+    source_closure_schema_version = execution$source_closure_schema_version,
+    source_discovery_semantics = execution$source_discovery_semantics,
+    source_closure_count = execution$source_closure_count,
+    source_closure_sha256 = execution$source_closure_sha256,
+    execution_snapshot_sha256 = execution$execution_snapshot_sha256,
+    relevant_sources_dirty_or_untracked =
+      execution$relevant_sources_dirty_or_untracked,
+    execution_sources_unchanged_after_run =
+      execution$execution_sources_unchanged_after_run,
     cuda_toolkit_version = runtime$cuda_toolkit_version,
     cuda_driver_version = runtime$cuda_driver_version,
     gpu_name = runtime$gpu_name,
@@ -673,6 +1158,41 @@ fastkpc_full_cuda_phase3_input_identity <- function(
     stop(label, " must be a unique named SHA-256 map", call. = FALSE)
   }
   values
+}
+
+.fastkpc_full_cuda_phase3_validate_payload_encoding <- function(
+    path, label) {
+  extension <- tolower(tools::file_ext(path))
+  if (identical(extension, "rds")) {
+    tryCatch(
+      readRDS(path),
+      error = function(error) {
+        stop(label, " is not a readable RDS payload", call. = FALSE)
+      }
+    )
+  } else if (identical(extension, "json")) {
+    .fastkpc_full_cuda_phase3_read_json(path, label)
+  } else if (identical(extension, "csv")) {
+    parsed <- tryCatch(
+      utils::read.csv(
+        path, stringsAsFactors = FALSE, check.names = FALSE,
+        blank.lines.skip = FALSE
+      ),
+      error = function(error) NULL
+    )
+    if (!is.data.frame(parsed)) {
+      stop(label, " is not a readable CSV payload", call. = FALSE)
+    }
+  } else if (identical(extension, "txt")) {
+    lines <- tryCatch(readLines(path, warn = FALSE, encoding = "bytes"),
+                      error = function(error) character())
+    if (length(lines) == 0L) {
+      stop(label, " is not a readable text payload", call. = FALSE)
+    }
+  } else {
+    stop(label, " has an unsupported payload encoding", call. = FALSE)
+  }
+  invisible(TRUE)
 }
 
 .fastkpc_full_cuda_phase3_identity_value_equal <- function(actual, expected) {
@@ -764,26 +1284,25 @@ fastkpc_full_cuda_phase3_validate_artifact <- function(
   dots <- list(...)
   if (length(dots) > 0L) {
     if (is.null(names(dots)) || anyDuplicated(names(dots)) ||
-        any(!names(dots) %in% c("identity", "catalog", "device_id",
+      any(!names(dots) %in% c("identity", "catalog", "device_id",
                                 "catalog_evidence", "runtime_evidence",
-                                "device_evidence"))) {
+                                "device_evidence", "execution_evidence"))) {
       stop("unknown Phase 3 artifact validation argument", call. = FALSE)
     }
     if (is.null(expected_identity) && !is.null(dots$identity)) {
       expected_identity <- dots$identity
     }
     if (is.null(expected_identity) && !is.null(dots$catalog)) {
-      if (is.null(dots$device_id) || is.null(dots$runtime_evidence) ||
-          is.null(dots$device_evidence)) {
-        stop("catalog validation requires explicit runtime/device evidence",
-             call. = FALSE)
+      if (is.null(dots$device_id)) {
+        stop("catalog validation requires device_id", call. = FALSE)
       }
       expected_identity <- fastkpc_full_cuda_phase3_input_identity(
         catalog = dots$catalog,
         device_id = dots$device_id,
         catalog_evidence = dots$catalog_evidence,
         runtime_evidence = dots$runtime_evidence,
-        device_evidence = dots$device_evidence
+        device_evidence = dots$device_evidence,
+        execution_evidence = dots$execution_evidence
       )
     }
   }
@@ -835,7 +1354,7 @@ fastkpc_full_cuda_phase3_validate_artifact <- function(
   required_manifest <- c(
     "artifact_schema_version", "artifact_kind",
     "input_identity_schema_version", "input_identity_sha256",
-    "payload_names", "payload_file_sha256",
+    "payload_names", "publication_order", "payload_file_sha256",
     setdiff(.fastkpc_full_cuda_phase3_identity_fields(), "schema_version")
   )
   missing_manifest <- setdiff(required_manifest, names(manifest))
@@ -862,6 +1381,16 @@ fastkpc_full_cuda_phase3_validate_artifact <- function(
       !identical(payload_names, expected_payload_names)) {
     stop("Phase 3 manifest payload name set is invalid", call. = FALSE)
   }
+  expected_publication_order <- c(
+    expected_payload_names, "manifest.json", "summary.json"
+  )
+  if (typeof(manifest$publication_order) != "character" ||
+      is.object(manifest$publication_order) ||
+      !is.null(attributes(manifest$publication_order)) ||
+      anyNA(manifest$publication_order) ||
+      !identical(manifest$publication_order, expected_publication_order)) {
+    stop("Phase 3 manifest publication order is invalid", call. = FALSE)
+  }
   payload_hashes <- .fastkpc_full_cuda_phase3_named_sha256(
     manifest$payload_file_sha256, "manifest payload hashes"
   )
@@ -878,6 +1407,13 @@ fastkpc_full_cuda_phase3_validate_artifact <- function(
   if (anyNA(payload_sizes) || any(payload_sizes <= 0)) {
     stop("Phase 3 artifact contains an empty payload", call. = FALSE)
   }
+  # Task 1 authenticates serialization formats; Task 4/9 own kind semantics.
+  invisible(lapply(seq_along(payload_keys), function(index) {
+    .fastkpc_full_cuda_phase3_validate_payload_encoding(
+      unlist(paths[payload_keys], use.names = FALSE)[[index]],
+      expected_payload_names[[index]]
+    )
+  }))
   if (!identical(actual_payload_hashes, payload_hashes)) {
     stop("Phase 3 artifact payload hash mismatch", call. = FALSE)
   }
@@ -887,7 +1423,7 @@ fastkpc_full_cuda_phase3_validate_artifact <- function(
 
   required_summary <- c(
     "artifact_schema_version", "artifact_kind", "manifest_sha256",
-    "shard_count", "payload_count", "pass"
+    "shard_count", "payload_count"
   )
   missing_summary <- setdiff(required_summary, names(summary))
   if (length(missing_summary) > 0L) {
@@ -902,10 +1438,12 @@ fastkpc_full_cuda_phase3_validate_artifact <- function(
       !.fastkpc_full_cuda_phase3_bare_number(summary$shard_count, 0) ||
       as.integer(summary$shard_count) != expected_identity$shard_count ||
       !.fastkpc_full_cuda_phase3_bare_number(summary$payload_count, 0) ||
-      as.integer(summary$payload_count) != length(expected_payload_names) ||
-      !.fastkpc_full_cuda_phase3_bare_scalar(summary$pass, "logical") ||
-      !isTRUE(summary$pass)) {
+      as.integer(summary$payload_count) != length(expected_payload_names)) {
     stop("Phase 3 summary completion evidence is invalid", call. = FALSE)
+  }
+  if ("pass" %in% names(summary) &&
+      !.fastkpc_full_cuda_phase3_bare_scalar(summary$pass, "logical")) {
+    stop("Phase 3 summary pass metadata is malformed", call. = FALSE)
   }
   if (isTRUE(require_full)) {
     if (length(list.files(paths$shards_dir, all.files = TRUE,
@@ -915,10 +1453,12 @@ fastkpc_full_cuda_phase3_validate_artifact <- function(
       stop("full Phase 3 artifact has no shard/session evidence", call. = FALSE)
     }
   }
+  computed_contract_pass <- TRUE
   list(
     authenticated = TRUE,
     complete = TRUE,
-    pass = TRUE,
+    pass = computed_contract_pass,
+    computed_contract_pass = computed_contract_pass,
     artifact_kind = kind,
     artifact_schema_version = expected_schema,
     manifest = manifest,
