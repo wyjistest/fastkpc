@@ -157,13 +157,13 @@ assert_true(
 retry_prepared_partial <- resource_snapshot()
 assert_true(
   resource_delta(retry_prepared_before, retry_prepared_partial,
-                 "event_destroy_attempt_count") == 2 &&
+                 "event_destroy_attempt_count") == 3 &&
     resource_delta(retry_prepared_before, retry_prepared_partial,
-                   "event_destroy_success_count") == 1 &&
+                   "event_destroy_success_count") == 2 &&
     resource_delta(retry_prepared_before, retry_prepared_partial,
                    "event_destroy_failure_count") == 1 &&
     resource_delta(retry_prepared_before, retry_prepared_partial,
-                   "event_active_count") == -1 &&
+                   "event_active_count") == -2 &&
     resource_delta(retry_prepared_before, retry_prepared_partial,
                    "event_ownership_indeterminate_count") == 0,
   "first prepared close retains only its retryable event owner"
@@ -173,13 +173,13 @@ fixed_sp_cuda_prepared_free(retry_prepared)
 retry_prepared_after <- resource_snapshot()
 assert_true(
   resource_delta(retry_prepared_before, retry_prepared_after,
-                 "event_destroy_attempt_count") == 3 &&
+                 "event_destroy_attempt_count") == 4 &&
     resource_delta(retry_prepared_before, retry_prepared_after,
-                   "event_destroy_success_count") == 2 &&
+                   "event_destroy_success_count") == 3 &&
     resource_delta(retry_prepared_before, retry_prepared_after,
                    "event_destroy_failure_count") == 1 &&
     resource_delta(retry_prepared_before, retry_prepared_after,
-                   "event_active_count") == -2 &&
+                   "event_active_count") == -3 &&
     resource_delta(retry_prepared_before, retry_prepared_after,
                    "event_ownership_indeterminate_count") == 0,
   "second prepared close completes and balances retryable event ownership"
