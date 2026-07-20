@@ -14,6 +14,15 @@ struct MgcvExtractGpuFixedSpResult {
   int coefficient_dim;
   int null_dim;
   std::string cholesky_backend;
+  std::string runtime_version;
+  bool compatibility_transient_context;
+  std::string planned_route;
+  std::string executed_route;
+  std::string solver_status;
+  int cpu_fallback_count;
+  int rhs_device_build_count;
+  std::string rhs_authority;
+  bool full_cuda_data_plane;
 };
 
 MgcvExtractGpuFixedSpResult mgcv_extract_fixed_sp_solve_cuda(

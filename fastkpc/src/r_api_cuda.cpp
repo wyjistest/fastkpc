@@ -5575,7 +5575,18 @@ extern "C" SEXP C_mgcv_extract_gpu_solve_handle_fixed_sp(
       Rcpp::Named("coefficient_dim") = result.coefficient_dim,
       Rcpp::Named("null_dim") = result.null_dim,
       Rcpp::Named("solve_stage") = "native-gpu-handle-linear-solve",
-      Rcpp::Named("cholesky_backend") = result.cholesky_backend
+      Rcpp::Named("cholesky_backend") = result.cholesky_backend,
+      Rcpp::Named("runtime_version") = result.runtime_version,
+      Rcpp::Named("compatibility_transient_context") =
+        result.compatibility_transient_context,
+      Rcpp::Named("planned_route") = result.planned_route,
+      Rcpp::Named("executed_route") = result.executed_route,
+      Rcpp::Named("solver_status") = result.solver_status,
+      Rcpp::Named("cpu_fallback_count") = result.cpu_fallback_count,
+      Rcpp::Named("rhs_device_build_count") =
+        result.rhs_device_build_count,
+      Rcpp::Named("rhs_authority") = result.rhs_authority,
+      Rcpp::Named("full_cuda_data_plane") = result.full_cuda_data_plane
     )
   );
   END_RCPP

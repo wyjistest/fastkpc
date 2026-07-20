@@ -13,6 +13,14 @@ class CudaRuntimeContext;
 class PreparedSGpuHandle;
 class DeviceResidualBatch;
 
+struct TransientFixedSpCompatibilityHostView {
+  int n = 0;
+  int null_dim = 0;
+  const double* X_null = nullptr;
+  const double* gram = nullptr;
+  const double* projected_penalty = nullptr;
+};
+
 std::shared_ptr<CudaRuntimeContext> create_fixed_sp_runtime(int device_id);
 void reserve_fixed_sp_runtime(
   const std::shared_ptr<CudaRuntimeContext>& context,
@@ -24,6 +32,10 @@ void free_fixed_sp_runtime(std::shared_ptr<CudaRuntimeContext>* context);
 std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
   const std::shared_ptr<CudaRuntimeContext>& context,
   const PreparedSHostView& setup);
+std::shared_ptr<PreparedSGpuHandle>
+create_transient_fixed_sp_compatibility_prepared_s_gpu(
+  const std::shared_ptr<CudaRuntimeContext>& context,
+  const TransientFixedSpCompatibilityHostView& view);
 PreparedSInfo prepared_s_gpu_info(
   const std::shared_ptr<PreparedSGpuHandle>& handle);
 void free_prepared_s_gpu(std::shared_ptr<PreparedSGpuHandle>* handle);

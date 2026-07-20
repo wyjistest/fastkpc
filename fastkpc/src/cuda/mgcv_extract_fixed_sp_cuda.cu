@@ -1,98 +1,133 @@
 #include "mgcv_extract_fixed_sp_cuda.hpp"
+#include "mgcv_fixed_sp_runtime.hpp"
 
 #include <cuda_runtime.h>
-#include <cusolverDn.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <exception>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace {
 
-constexpr int kBlock = 256;
+constexpr double kCompatibilityTolerance = 1e-12;
+constexpr const char* kCompatibilityTargetKey =
+  "transient-fixed-sp-compatibility-target-v1";
 
-__global__ void build_system_kernel(const double* XtX,
-                                    const double* P,
-                                    int q,
-                                    double* A) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  const int total = q * q;
-  for (int i = idx; i < total; i += gridDim.x * blockDim.x) {
-    A[i] = XtX[i] + P[i];
+void require_finite(const double* values, std::size_t count,
+                    const char* name) {
+  for (std::size_t index = 0; index < count; ++index) {
+    if (!std::isfinite(values[index])) {
+      throw std::runtime_error(
+        std::string(name) + " contains missing or infinite values");
+    }
   }
 }
 
-__global__ void beta_from_nullspace_kernel(const double* Z,
-                                           const double* theta,
-                                           int p,
-                                           int q,
-                                           double* beta) {
-  const int row = blockIdx.x * blockDim.x + threadIdx.x;
-  if (row >= p) return;
-  double value = 0.0;
-  for (int col = 0; col < q; ++col) {
-    value += Z[row + col * p] * theta[col];
-  }
-  beta[row] = value;
+bool compatibility_close(double actual, double expected) {
+  if (!std::isfinite(actual) || !std::isfinite(expected)) return false;
+  const double scale = std::max(std::abs(actual), std::abs(expected));
+  return std::abs(actual - expected) <=
+    kCompatibilityTolerance + kCompatibilityTolerance * scale;
 }
 
-__global__ void fitted_residual_kernel(const double* X,
-                                       const double* y,
-                                       const double* beta,
-                                       int n,
-                                       int p,
-                                       double* fitted,
-                                       double* residuals) {
-  const int row = blockIdx.x * blockDim.x + threadIdx.x;
-  if (row >= n) return;
-  double value = 0.0;
-  for (int col = 0; col < p; ++col) {
-    value += X[row + col * n] * beta[col];
-  }
-  fitted[row] = value;
-  residuals[row] = y[row] - value;
-}
-
-__global__ void rss_kernel(const double* residuals,
-                           int n,
-                           double* rss) {
-  __shared__ double scratch[kBlock];
-  double acc = 0.0;
-  for (int row = blockIdx.x * blockDim.x + threadIdx.x;
-       row < n;
-       row += gridDim.x * blockDim.x) {
-    const double value = residuals[row];
-    acc += value * value;
-  }
-  scratch[threadIdx.x] = acc;
-  __syncthreads();
-
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (threadIdx.x < stride) scratch[threadIdx.x] += scratch[threadIdx.x + stride];
-    __syncthreads();
-  }
-  if (threadIdx.x == 0) atomicAdd(rss, scratch[0]);
-}
-
-void check_cuda(cudaError_t err, const char* stage) {
-  if (err != cudaSuccess) {
-    throw std::runtime_error(std::string(stage) + ": " + cudaGetErrorString(err));
+void require_compatibility_match(const std::vector<double>& actual,
+                                 const double* expected,
+                                 const char* message) {
+  for (std::size_t index = 0; index < actual.size(); ++index) {
+    if (!compatibility_close(actual[index], expected[index])) {
+      throw std::runtime_error(message);
+    }
   }
 }
 
-void check_cusolver(cusolverStatus_t status, const char* stage) {
-  if (status != CUSOLVER_STATUS_SUCCESS) {
-    throw std::runtime_error(std::string(stage) + ": cuSOLVER status " +
-                             std::to_string(static_cast<int>(status)));
+std::vector<double> build_nullspace_design(const double* X,
+                                           const double* Z,
+                                           int n,
+                                           int coefficient_dim,
+                                           int null_dim) {
+  std::vector<double> result(
+    static_cast<std::size_t>(n) * static_cast<std::size_t>(null_dim), 0.0);
+  for (int column = 0; column < null_dim; ++column) {
+    for (int inner = 0; inner < coefficient_dim; ++inner) {
+      const double z = Z[static_cast<std::size_t>(inner) +
+        static_cast<std::size_t>(coefficient_dim) * column];
+      for (int row = 0; row < n; ++row) {
+        result[static_cast<std::size_t>(row) +
+               static_cast<std::size_t>(n) * column] +=
+          X[static_cast<std::size_t>(row) +
+            static_cast<std::size_t>(n) * inner] * z;
+      }
+    }
   }
+  return result;
 }
 
-void require_finite(const double* values, int n, const char* name) {
-  for (int i = 0; i < n; ++i) {
-    if (!std::isfinite(values[i])) {
-      throw std::runtime_error(std::string(name) + " contains missing or infinite values");
+std::vector<double> build_gram(const std::vector<double>& X_null,
+                               int n,
+                               int null_dim) {
+  std::vector<double> result(
+    static_cast<std::size_t>(null_dim) *
+      static_cast<std::size_t>(null_dim), 0.0);
+  for (int column = 0; column < null_dim; ++column) {
+    for (int row = 0; row < null_dim; ++row) {
+      double value = 0.0;
+      for (int observation = 0; observation < n; ++observation) {
+        value += X_null[static_cast<std::size_t>(observation) +
+                        static_cast<std::size_t>(n) * row] *
+          X_null[static_cast<std::size_t>(observation) +
+                 static_cast<std::size_t>(n) * column];
+      }
+      result[static_cast<std::size_t>(row) +
+             static_cast<std::size_t>(null_dim) * column] = value;
+    }
+  }
+  return result;
+}
+
+std::vector<double> build_rhs(const std::vector<double>& X_null,
+                              const double* y,
+                              int n,
+                              int null_dim) {
+  std::vector<double> result(static_cast<std::size_t>(null_dim), 0.0);
+  for (int column = 0; column < null_dim; ++column) {
+    for (int row = 0; row < n; ++row) {
+      result[static_cast<std::size_t>(column)] +=
+        X_null[static_cast<std::size_t>(row) +
+               static_cast<std::size_t>(n) * column] * y[row];
+    }
+  }
+  return result;
+}
+
+void cleanup_compatibility_runtime_noexcept(
+    std::shared_ptr<fastkpc::DeviceResidualBatch>* token,
+    std::shared_ptr<fastkpc::PreparedSGpuHandle>* handle,
+    std::shared_ptr<fastkpc::CudaRuntimeContext>* context) noexcept {
+  if (token != nullptr && *token) {
+    try {
+      fastkpc::release_device_residual(*token);
+    } catch (...) {
+    }
+    try {
+      fastkpc::free_device_residual(token);
+    } catch (...) {
+    }
+  }
+  if (handle != nullptr && *handle) {
+    try {
+      fastkpc::free_prepared_s_gpu(handle);
+    } catch (...) {
+    }
+  }
+  if (context != nullptr && *context) {
+    try {
+      fastkpc::free_fixed_sp_runtime(context);
+    } catch (...) {
     }
   }
 }
@@ -100,175 +135,169 @@ void require_finite(const double* values, int n, const char* name) {
 }  // namespace
 
 MgcvExtractGpuFixedSpResult mgcv_extract_fixed_sp_solve_cuda(
-  const double* X,
-  int n,
-  int coefficient_dim,
-  const double* y,
-  const double* Z,
-  const double* XtX_null,
-  const double* penalty_null,
-  const double* Xty_null,
-  int null_dim) {
+    const double* X,
+    int n,
+    int coefficient_dim,
+    const double* y,
+    const double* Z,
+    const double* XtX_null,
+    const double* penalty_null,
+    const double* Xty_null,
+    int null_dim) {
   if (n <= 0) throw std::runtime_error("n must be positive");
-  if (coefficient_dim <= 0) throw std::runtime_error("coefficient_dim must be positive");
-  if (null_dim <= 0) throw std::runtime_error("null_dim must be positive");
+  if (coefficient_dim <= 0) {
+    throw std::runtime_error("coefficient_dim must be positive");
+  }
+  if (null_dim <= 0 || null_dim > coefficient_dim) {
+    throw std::runtime_error("null_dim must be positive and no larger than coefficient_dim");
+  }
+  if (X == nullptr || y == nullptr || Z == nullptr || XtX_null == nullptr ||
+      penalty_null == nullptr || Xty_null == nullptr) {
+    throw std::runtime_error("fixed-sp compatibility input pointer is null");
+  }
 
-  require_finite(X, n * coefficient_dim, "X");
-  require_finite(y, n, "y");
-  require_finite(Z, coefficient_dim * null_dim, "Z");
-  require_finite(XtX_null, null_dim * null_dim, "XtX_null");
-  require_finite(penalty_null, null_dim * null_dim, "penalty_null");
-  require_finite(Xty_null, null_dim, "Xty_null");
+  const std::size_t x_count = static_cast<std::size_t>(n) *
+    static_cast<std::size_t>(coefficient_dim);
+  const std::size_t z_count = static_cast<std::size_t>(coefficient_dim) *
+    static_cast<std::size_t>(null_dim);
+  const std::size_t square_count = static_cast<std::size_t>(null_dim) *
+    static_cast<std::size_t>(null_dim);
+  require_finite(X, x_count, "X");
+  require_finite(y, static_cast<std::size_t>(n), "y");
+  require_finite(Z, z_count, "Z");
+  require_finite(XtX_null, square_count, "XtX_null");
+  require_finite(penalty_null, square_count, "penalty_null");
+  require_finite(Xty_null, static_cast<std::size_t>(null_dim), "Xty_null");
 
-  double* d_X = nullptr;
-  double* d_y = nullptr;
-  double* d_Z = nullptr;
-  double* d_XtX = nullptr;
-  double* d_P = nullptr;
-  double* d_A = nullptr;
-  double* d_theta = nullptr;
-  double* d_beta = nullptr;
-  double* d_fitted = nullptr;
-  double* d_residuals = nullptr;
-  double* d_rss = nullptr;
-  int* d_info = nullptr;
-  double* d_work = nullptr;
-  cusolverDnHandle_t solver = nullptr;
+  const std::vector<double> X_null = build_nullspace_design(
+    X, Z, n, coefficient_dim, null_dim);
+  const std::vector<double> recomputed_gram =
+    build_gram(X_null, n, null_dim);
+  const std::vector<double> recomputed_rhs =
+    build_rhs(X_null, y, n, null_dim);
+  require_finite(X_null.data(), X_null.size(), "recomputed X_null");
+  require_finite(recomputed_gram.data(), recomputed_gram.size(),
+                 "recomputed XtX_null");
+  require_finite(recomputed_rhs.data(), recomputed_rhs.size(),
+                 "recomputed Xty_null");
+  require_compatibility_match(
+    recomputed_gram, XtX_null,
+    "XtX_null does not match independently recomputed crossprod(X_null)");
+  require_compatibility_match(
+    recomputed_rhs, Xty_null,
+    "Xty_null does not match independently recomputed crossprod(X_null, y)");
 
-  const std::size_t x_size = static_cast<std::size_t>(n) * coefficient_dim;
-  const std::size_t z_size = static_cast<std::size_t>(coefficient_dim) * null_dim;
-  const std::size_t qq_size = static_cast<std::size_t>(null_dim) * null_dim;
-
+  std::shared_ptr<fastkpc::CudaRuntimeContext> context;
+  std::shared_ptr<fastkpc::PreparedSGpuHandle> handle;
+  std::shared_ptr<fastkpc::DeviceResidualBatch> token;
   try {
-    check_cusolver(cusolverDnCreate(&solver), "create cuSOLVER handle");
-    check_cuda(cudaMalloc(&d_X, sizeof(double) * x_size), "alloc X");
-    check_cuda(cudaMalloc(&d_y, sizeof(double) * n), "alloc y");
-    check_cuda(cudaMalloc(&d_Z, sizeof(double) * z_size), "alloc Z");
-    check_cuda(cudaMalloc(&d_XtX, sizeof(double) * qq_size), "alloc XtX");
-    check_cuda(cudaMalloc(&d_P, sizeof(double) * qq_size), "alloc penalty");
-    check_cuda(cudaMalloc(&d_A, sizeof(double) * qq_size), "alloc system");
-    check_cuda(cudaMalloc(&d_theta, sizeof(double) * null_dim), "alloc theta");
-    check_cuda(cudaMalloc(&d_beta, sizeof(double) * coefficient_dim), "alloc beta");
-    check_cuda(cudaMalloc(&d_fitted, sizeof(double) * n), "alloc fitted");
-    check_cuda(cudaMalloc(&d_residuals, sizeof(double) * n), "alloc residuals");
-    check_cuda(cudaMalloc(&d_rss, sizeof(double)), "alloc rss");
-    check_cuda(cudaMalloc(&d_info, sizeof(int)), "alloc cuSOLVER info");
-
-    check_cuda(cudaMemcpy(d_X, X, sizeof(double) * x_size,
-                          cudaMemcpyHostToDevice), "copy X");
-    check_cuda(cudaMemcpy(d_y, y, sizeof(double) * n,
-                          cudaMemcpyHostToDevice), "copy y");
-    check_cuda(cudaMemcpy(d_Z, Z, sizeof(double) * z_size,
-                          cudaMemcpyHostToDevice), "copy Z");
-    check_cuda(cudaMemcpy(d_XtX, XtX_null, sizeof(double) * qq_size,
-                          cudaMemcpyHostToDevice), "copy XtX");
-    check_cuda(cudaMemcpy(d_P, penalty_null, sizeof(double) * qq_size,
-                          cudaMemcpyHostToDevice), "copy penalty");
-    check_cuda(cudaMemcpy(d_theta, Xty_null, sizeof(double) * null_dim,
-                          cudaMemcpyHostToDevice), "copy rhs");
-
-    const int matrix_blocks =
-      std::max(1, static_cast<int>((qq_size + kBlock - 1) / kBlock));
-    build_system_kernel<<<matrix_blocks, kBlock>>>(d_XtX, d_P, null_dim, d_A);
-    check_cuda(cudaGetLastError(), "launch build system");
-    check_cuda(cudaDeviceSynchronize(), "sync build system");
-
-    int work_size = 0;
-    check_cusolver(cusolverDnDpotrf_bufferSize(
-                     solver, CUBLAS_FILL_MODE_UPPER, null_dim, d_A, null_dim,
-                     &work_size),
-                   "cuSOLVER potrf buffer");
-    check_cuda(cudaMalloc(&d_work, sizeof(double) * work_size), "alloc cuSOLVER work");
-    check_cusolver(cusolverDnDpotrf(solver, CUBLAS_FILL_MODE_UPPER, null_dim,
-                                    d_A, null_dim, d_work, work_size, d_info),
-                   "cuSOLVER potrf");
-    int info = 0;
-    check_cuda(cudaMemcpy(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost),
-               "copy potrf info");
-    if (info != 0) {
-      throw std::runtime_error("cuSOLVER potrf failed with info " +
-                               std::to_string(info));
+    int current_device = -1;
+    const cudaError_t device_status = cudaGetDevice(&current_device);
+    if (device_status != cudaSuccess) {
+      throw std::runtime_error(
+        std::string("get current CUDA device: ") +
+        cudaGetErrorString(device_status));
     }
+    context = fastkpc::create_fixed_sp_runtime(current_device);
+    fastkpc::FixedSpCapacities capacities;
+    capacities.n = n;
+    capacities.null_dim = null_dim;
+    capacities.target_count = 1;
+    capacities.penalty_count = 1;
+    capacities.augmented_rows = n + null_dim;
+    fastkpc::reserve_fixed_sp_runtime(context, capacities);
 
-    check_cusolver(cusolverDnDpotrs(solver, CUBLAS_FILL_MODE_UPPER, null_dim, 1,
-                                    d_A, null_dim, d_theta, null_dim, d_info),
-                   "cuSOLVER potrs");
-    check_cuda(cudaMemcpy(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost),
-               "copy potrs info");
-    if (info != 0) {
-      throw std::runtime_error("cuSOLVER potrs failed with info " +
-                               std::to_string(info));
+    fastkpc::TransientFixedSpCompatibilityHostView setup;
+    setup.n = n;
+    setup.null_dim = null_dim;
+    setup.X_null = X_null.data();
+    setup.gram = XtX_null;
+    setup.projected_penalty = penalty_null;
+    handle =
+      fastkpc::create_transient_fixed_sp_compatibility_prepared_s_gpu(
+        context, setup);
+
+    const double sp = 1.0;
+    fastkpc::FixedSpBatchHostView batch;
+    batch.Y = y;
+    batch.SP = &sp;
+    batch.n = n;
+    batch.null_dim = null_dim;
+    batch.penalty_count = 1;
+    batch.target_count = 1;
+    batch.output_mask = fastkpc::FixedSpOutputCoefficients |
+      fastkpc::FixedSpOutputFitted |
+      fastkpc::FixedSpOutputResiduals |
+      fastkpc::FixedSpOutputRss |
+      fastkpc::FixedSpOutputRhs;
+    batch.planned_routes = {fastkpc::FixedSpRoute::AugmentedSvd};
+    batch.target_keys = {kCompatibilityTargetKey};
+    token = fastkpc::solve_fixed_sp_batch(handle, batch);
+
+    const fastkpc::DeviceResidualInfo info =
+      fastkpc::device_residual_info(token);
+    const fastkpc::FixedSpShadowResult shadow =
+      fastkpc::materialize_fixed_sp_shadow(token, batch.output_mask);
+    if (info.target_count != 1 || info.executed_routes.size() != 1U ||
+        info.solver_statuses.size() != 1U ||
+        shadow.successful_targets.size() != 1U ||
+        shadow.successful_targets[0] == 0U ||
+        shadow.coefficients.size() != static_cast<std::size_t>(null_dim) ||
+        shadow.fitted.size() != static_cast<std::size_t>(n) ||
+        shadow.residuals.size() != static_cast<std::size_t>(n) ||
+        shadow.rss.size() != 1U ||
+        shadow.cuda_nullspace_rhs.size() !=
+          static_cast<std::size_t>(null_dim)) {
+      throw std::runtime_error(
+        "stable fixed-sp compatibility result is malformed");
     }
+    require_compatibility_match(
+      shadow.cuda_nullspace_rhs, recomputed_rhs.data(),
+      "CUDA-built fixed-sp RHS does not match compatibility oracle");
 
-    const int beta_blocks =
-      std::max(1, (coefficient_dim + kBlock - 1) / kBlock);
-    beta_from_nullspace_kernel<<<beta_blocks, kBlock>>>(
-      d_Z, d_theta, coefficient_dim, null_dim, d_beta);
-    check_cuda(cudaGetLastError(), "launch beta from nullspace");
+    MgcvExtractGpuFixedSpResult result;
+    result.theta = shadow.coefficients;
+    result.coefficients.assign(
+      static_cast<std::size_t>(coefficient_dim), 0.0);
+    for (int column = 0; column < null_dim; ++column) {
+      for (int row = 0; row < coefficient_dim; ++row) {
+        result.coefficients[static_cast<std::size_t>(row)] +=
+          Z[static_cast<std::size_t>(row) +
+            static_cast<std::size_t>(coefficient_dim) * column] *
+          result.theta[static_cast<std::size_t>(column)];
+      }
+    }
+    require_finite(
+      result.coefficients.data(), result.coefficients.size(),
+      "reconstructed coefficients");
+    result.fitted = shadow.fitted;
+    result.residuals = shadow.residuals;
+    result.rss = shadow.rss[0];
+    result.n = n;
+    result.coefficient_dim = coefficient_dim;
+    result.null_dim = null_dim;
+    result.cholesky_backend = "stable-runtime-augmented-svd";
+    result.runtime_version = "full-cuda-ci-fixed-sp-runtime-v1";
+    result.compatibility_transient_context = true;
+    result.planned_route = fastkpc::fixed_sp_route_name(
+      info.planned_routes[0]);
+    result.executed_route = fastkpc::fixed_sp_route_name(
+      info.executed_routes[0]);
+    result.solver_status = fastkpc::fixed_sp_status_name(
+      info.solver_statuses[0]);
+    result.cpu_fallback_count = info.cpu_fallback_count;
+    result.rhs_device_build_count = info.rhs_device_build_count;
+    result.rhs_authority = info.rhs_authority;
+    result.full_cuda_data_plane = info.full_cuda_data_plane;
 
-    const int row_blocks = std::max(1, (n + kBlock - 1) / kBlock);
-    fitted_residual_kernel<<<row_blocks, kBlock>>>(
-      d_X, d_y, d_beta, n, coefficient_dim, d_fitted, d_residuals);
-    check_cuda(cudaGetLastError(), "launch fitted residual");
-
-    check_cuda(cudaMemset(d_rss, 0, sizeof(double)), "zero rss");
-    rss_kernel<<<row_blocks, kBlock>>>(d_residuals, n, d_rss);
-    check_cuda(cudaGetLastError(), "launch rss");
-    check_cuda(cudaDeviceSynchronize(), "sync mgcvExtractGPU fixed-sp solve");
-
-    MgcvExtractGpuFixedSpResult out;
-    out.theta.resize(null_dim);
-    out.coefficients.resize(coefficient_dim);
-    out.fitted.resize(n);
-    out.residuals.resize(n);
-    out.rss = 0.0;
-    out.n = n;
-    out.coefficient_dim = coefficient_dim;
-    out.null_dim = null_dim;
-    out.cholesky_backend = "cusolver-potrf-potrs";
-
-    check_cuda(cudaMemcpy(out.theta.data(), d_theta, sizeof(double) * null_dim,
-                          cudaMemcpyDeviceToHost), "copy theta");
-    check_cuda(cudaMemcpy(out.coefficients.data(), d_beta,
-                          sizeof(double) * coefficient_dim,
-                          cudaMemcpyDeviceToHost), "copy beta");
-    check_cuda(cudaMemcpy(out.fitted.data(), d_fitted, sizeof(double) * n,
-                          cudaMemcpyDeviceToHost), "copy fitted");
-    check_cuda(cudaMemcpy(out.residuals.data(), d_residuals, sizeof(double) * n,
-                          cudaMemcpyDeviceToHost), "copy residuals");
-    check_cuda(cudaMemcpy(&out.rss, d_rss, sizeof(double),
-                          cudaMemcpyDeviceToHost), "copy rss");
-
-    if (solver != nullptr) cusolverDnDestroy(solver);
-    cudaFree(d_X);
-    cudaFree(d_y);
-    cudaFree(d_Z);
-    cudaFree(d_XtX);
-    cudaFree(d_P);
-    cudaFree(d_A);
-    cudaFree(d_theta);
-    cudaFree(d_beta);
-    cudaFree(d_fitted);
-    cudaFree(d_residuals);
-    cudaFree(d_rss);
-    cudaFree(d_info);
-    cudaFree(d_work);
-    return out;
+    fastkpc::release_device_residual(token);
+    fastkpc::free_device_residual(&token);
+    fastkpc::free_prepared_s_gpu(&handle);
+    fastkpc::free_fixed_sp_runtime(&context);
+    return result;
   } catch (...) {
-    if (solver != nullptr) cusolverDnDestroy(solver);
-    cudaFree(d_X);
-    cudaFree(d_y);
-    cudaFree(d_Z);
-    cudaFree(d_XtX);
-    cudaFree(d_P);
-    cudaFree(d_A);
-    cudaFree(d_theta);
-    cudaFree(d_beta);
-    cudaFree(d_fitted);
-    cudaFree(d_residuals);
-    cudaFree(d_rss);
-    cudaFree(d_info);
-    cudaFree(d_work);
-    throw;
+    const std::exception_ptr error = std::current_exception();
+    cleanup_compatibility_runtime_noexcept(&token, &handle, &context);
+    std::rethrow_exception(error);
   }
 }

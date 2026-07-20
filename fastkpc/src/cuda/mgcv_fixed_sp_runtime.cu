@@ -2075,6 +2075,7 @@ class PreparedSGpuHandle {
   cudaEvent_t setup_completion_event = nullptr;
   int setup_h2d_upload_count = 0;
   std::size_t setup_h2d_bytes = 0;
+  bool transient_fixed_sp_compatibility = false;
   bool registered_with_context = false;
   FixedSpOwnerLifecycle lifecycle = FixedSpOwnerLifecycle::Usable;
 };
@@ -2300,23 +2301,34 @@ void validate_fixed_sp_batch(const PreparedSGpuHandle& handle,
       batch.target_keys.size() != targets) {
     throw std::runtime_error("fixed-sp batch metadata size mismatch");
   }
+  if (handle.transient_fixed_sp_compatibility && batch.target_count != 1) {
+    throw std::runtime_error(
+      "transient fixed-sp compatibility requires exactly one target");
+  }
 
   std::unordered_set<std::string> unique_keys;
   unique_keys.reserve(targets);
   for (std::size_t index = 0; index < targets; ++index) {
     const FixedSpRoute route = batch.planned_routes[index];
+    if (handle.transient_fixed_sp_compatibility &&
+        route != FixedSpRoute::AugmentedSvd) {
+      throw std::runtime_error(
+        "transient fixed-sp compatibility requires AUGMENTED_SVD");
+    }
     if (route != FixedSpRoute::CholeskyBatched &&
         route != FixedSpRoute::AugmentedQr &&
         route != FixedSpRoute::AugmentedSvd) {
       throw std::runtime_error("fixed-sp planned route metadata is invalid");
     }
     const std::string& target_key = batch.target_keys[index];
-    const bool valid_target_key = target_key.size() == 64U &&
-      std::all_of(target_key.begin(), target_key.end(),
-                  [](unsigned char character) {
-        return (character >= '0' && character <= '9') ||
-          (character >= 'a' && character <= 'f');
-      });
+    const bool valid_target_key = handle.transient_fixed_sp_compatibility ?
+      target_key == "transient-fixed-sp-compatibility-target-v1" :
+      target_key.size() == 64U &&
+        std::all_of(target_key.begin(), target_key.end(),
+                    [](unsigned char character) {
+          return (character >= '0' && character <= '9') ||
+            (character >= 'a' && character <= 'f');
+        });
     if (!valid_target_key || !unique_keys.insert(target_key).second) {
       throw std::runtime_error("fixed-sp target key metadata is invalid");
     }
@@ -3387,9 +3399,10 @@ void test_force_next_fixed_sp_cuda_potrs_info(int info) {
   state.potrs_armed = true;
 }
 
-std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
+static std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu_impl(
     const std::shared_ptr<CudaRuntimeContext>& context,
-    const PreparedSHostView& setup) {
+    const PreparedSHostView& setup,
+    bool transient_fixed_sp_compatibility) {
   if (!context) {
     throw std::runtime_error("fixed-sp CUDA runtime has been freed");
   }
@@ -3424,10 +3437,14 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
   const std::size_t gram_count =
     matrix_count(setup.null_dim, setup.null_dim, "prepared Gram");
   const std::size_t penalty_count = projected_penalties.size();
+  const std::vector<int> penalty_root_ranks =
+    transient_fixed_sp_compatibility ?
+      std::vector<int>(static_cast<std::size_t>(setup.penalty_count), 0) :
+      setup.penalty_ranks;
   std::size_t total_penalty_root_rows = 0U;
   std::vector<int> penalty_root_offsets;
-  penalty_root_offsets.reserve(setup.penalty_ranks.size());
-  for (int rank : setup.penalty_ranks) {
+  penalty_root_offsets.reserve(penalty_root_ranks.size());
+  for (int rank : penalty_root_ranks) {
     if (total_penalty_root_rows >
         static_cast<std::size_t>(std::numeric_limits<int>::max())) {
       throw std::runtime_error("prepared penalty root row count overflow");
@@ -3447,9 +3464,10 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
     positive_size(setup.null_dim, "prepared root null dimension"),
     "prepared penalty roots");
   const bool has_H = setup.H != nullptr;
-  const std::size_t validation_count = checked_add(
-    positive_size(setup.penalty_count, "prepared penalty count"),
-    has_H ? 1U : 0U, "prepared root validation records");
+  const std::size_t validation_count = transient_fixed_sp_compatibility ?
+    1U : checked_add(
+      positive_size(setup.penalty_count, "prepared penalty count"),
+      has_H ? 1U : 0U, "prepared root validation records");
   const std::size_t target_capacity = positive_size(
     context->capacities.target_count, "reserved target capacity");
   const std::size_t coefficient_output_count = checked_multiply(
@@ -3473,10 +3491,12 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
   handle->q = setup.null_dim;
   handle->penalty_count = setup.penalty_count;
   handle->penalty_root_offsets = std::move(penalty_root_offsets);
-  handle->penalty_root_ranks = setup.penalty_ranks;
+  handle->penalty_root_ranks = penalty_root_ranks;
   handle->total_penalty_root_rows =
     static_cast<int>(total_penalty_root_rows);
   handle->has_H = has_H;
+  handle->transient_fixed_sp_compatibility =
+    transient_fixed_sp_compatibility;
   handle->penalty_root_bytes = allocation_bytes(
     penalty_root_count, sizeof(double), "prepared penalty root diagnostics");
   handle->resource_ledger = context->resource_ledger;
@@ -3622,6 +3642,7 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
              "upload prepared projected H");
     }
 
+    if (!transient_fixed_sp_compatibility) {
     FixedSpStableWorkspace& stable = context->stable_workspace;
     if (stable.scaled_projection == nullptr || stable.diagonal == nullptr ||
         stable.eigen_work == nullptr || stable.info == nullptr ||
@@ -3730,6 +3751,13 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
       std::chrono::duration<double, std::milli>(
         root_build_end - root_build_start).count();
     handle->penalty_root_build_count = 1;
+    } else {
+      check_cuda(cudaEventRecord(
+        handle->setup_completion_event, context->stream
+      ), "record transient compatibility setup completion");
+      check_cuda(cudaEventSynchronize(handle->setup_completion_event),
+                 "wait for transient compatibility setup completion");
+    }
     handle->setup_h2d_upload_count = 1;
     tracked_cuda_free(
       context->resource_ledger.get(), &d_root_validation,
@@ -3749,6 +3777,63 @@ std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
     1, std::memory_order_release);
   handle->registered_with_context = true;
   return handle;
+}
+
+std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu(
+    const std::shared_ptr<CudaRuntimeContext>& context,
+    const PreparedSHostView& setup) {
+  return create_prepared_s_gpu_impl(context, setup, false);
+}
+
+std::shared_ptr<PreparedSGpuHandle>
+create_transient_fixed_sp_compatibility_prepared_s_gpu(
+    const std::shared_ptr<CudaRuntimeContext>& context,
+    const TransientFixedSpCompatibilityHostView& view) {
+  if (view.n <= 0 || view.null_dim <= 0 || view.X_null == nullptr ||
+      view.gram == nullptr || view.projected_penalty == nullptr) {
+    throw std::runtime_error(
+      "transient fixed-sp compatibility view is malformed");
+  }
+  const std::size_t x_count = matrix_count(
+    view.n, view.null_dim, "transient compatibility X_null");
+  const std::size_t square_count = matrix_count(
+    view.null_dim, view.null_dim, "transient compatibility square matrix");
+  auto require_finite_view = [](const double* values, std::size_t count,
+                                const char* name) {
+    for (std::size_t index = 0; index < count; ++index) {
+      if (!std::isfinite(values[index])) {
+        throw std::runtime_error(std::string(name) + " must be finite");
+      }
+    }
+  };
+  require_finite_view(view.X_null, x_count,
+                      "transient compatibility X_null");
+  require_finite_view(view.gram, square_count,
+                      "transient compatibility Gram");
+  require_finite_view(view.projected_penalty, square_count,
+                      "transient compatibility projected penalty");
+  require_scale_aware_symmetric(
+    view.gram, view.null_dim,
+    "transient compatibility Gram must be symmetric");
+  require_scale_aware_symmetric(
+    view.projected_penalty, view.null_dim,
+    "transient compatibility projected penalty must be symmetric");
+
+  PreparedSHostView setup;
+  setup.n = view.n;
+  setup.coefficient_dim = view.null_dim;
+  setup.null_dim = view.null_dim;
+  setup.penalty_count = 1;
+  setup.X = view.X_null;
+  setup.Z = nullptr;
+  setup.gram = view.gram;
+  setup.H = nullptr;
+  setup.penalty_blocks = {view.projected_penalty};
+  setup.penalty_dimensions = {view.null_dim};
+  setup.penalty_offsets_zero_based = {0};
+  setup.penalty_ranks = {0};
+  setup.penalty_sp_indices_zero_based = {0};
+  return create_prepared_s_gpu_impl(context, setup, true);
 }
 
 PreparedSInfo prepared_s_gpu_info(
