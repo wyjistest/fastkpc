@@ -22,6 +22,23 @@ fastkpc_full_cuda_fixed_sp_contract <- function() {
   )
 }
 
+fastkpc_full_cuda_fixed_sp_runtime_abi <- function() {
+  abi <- list(
+    schema_version = "full-cuda-ci-fixed-sp-runtime-v1",
+    native_dto_schema_version =
+      "full-cuda-ci-prepared-s-native-dto-v1",
+    phase3c_runtime_schema_version =
+      "full-cuda-ci-fixed-sp-phase3c-runtime-v1",
+    resource_instrumentation_version = 1L
+  )
+  c(
+    abi,
+    list(
+      sha256 = fastkpc_full_cuda_census_named_metadata_hash(abi)
+    )
+  )
+}
+
 fastkpc_full_cuda_fixed_sp_catalog_contract <- function() {
   inherited_setup_fields <- c(
     "same_S_group_id", "S_key", "S_size", "formula_class",
