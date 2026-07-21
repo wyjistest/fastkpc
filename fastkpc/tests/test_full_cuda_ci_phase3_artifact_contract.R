@@ -3,8 +3,18 @@ source("fastkpc/R/full_cuda_ci_oracle_contract.R")
 source("fastkpc/R/full_cuda_ci_workload_census.R")
 source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")
 source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R")
+source("fastkpc/R/cuda_native.R")
+cuda_dll_paths_before <- unname(vapply(
+  getLoadedDLLs(), function(dll) normalizePath(
+    dll[["path"]], winslash = "/", mustWork = FALSE
+  ), character(1L)
+))
 if (file.exists("fastkpc/R/full_cuda_ci_phase3_artifacts.R")) {
   source("fastkpc/R/full_cuda_ci_phase3_artifacts.R")
+}
+
+assert_formals <- function(fun, expected, message) {
+  assert_true(identical(names(formals(fun)), expected), message)
 }
 
 fail <- function(message) stop(message, call. = FALSE)
@@ -18,6 +28,18 @@ assert_error <- function(expression, message) {
   }, error = function(error) error)
   assert_true(inherits(error, "error"), message)
 }
+
+assert_formals(
+  fastkpc_full_cuda_phase3_input_identity,
+  c("catalog", "device_id"),
+  "Phase 3 input identity exposes only catalog and device_id"
+)
+assert_formals(
+  fastkpc_full_cuda_phase3_validate_artifact,
+  c("output_dir", "kind", "expected_identity", "require_full", "catalog",
+    "device_id"),
+  "Phase 3 artifact validation exposes no evidence injection arguments"
+)
 
 oracle_paths <- fastkpc_full_cuda_phase3_artifact_paths(
   tempfile("phase3-oracle-"), kind = "oracle_sp"
@@ -146,7 +168,7 @@ runtime_fixture <- list(
   cuda_toolkit_version = 12040L,
   cuda_driver_version = 55054L,
   gpu_name = "Fixture GPU",
-  gpu_uuid = "GPU-fixture-uuid-0001",
+  gpu_uuid = paste0("GPU-", strrep("b", 32L)),
   compute_capability_major = 8L,
   compute_capability_minor = 0L,
   compute_capability = "8.0",
@@ -155,24 +177,80 @@ runtime_fixture <- list(
   cublas_math_mode = "pedantic",
   cublas_atomics_mode = "not_allowed",
   cublas_user_workspace_installed = TRUE,
-  cublas_workspace_bytes = 4096,
+  cublas_workspace_bytes = 16777216,
   cublas_workspace_alignment = 256,
-  cublas_workspace_identity = sha("fixture-cublas-workspace-4096-256")
+  cublas_workspace_identity = NULL,
+  runtime_configuration_schema_version =
+    "full-cuda-ci-fixed-sp-environment-config-v1"
+)
+runtime_fixture$cublas_workspace_identity <-
+  .fastkpc_full_cuda_phase3_workspace_identity(runtime_fixture)
+static_environment_fixture <- list(
+  schema_version = "full-cuda-ci-phase3-environment-identity-v1",
+  runtime_abi_schema_version = runtime_abi$schema_version,
+  configuration_schema_version =
+    "full-cuda-ci-fixed-sp-environment-config-v1",
+  device_id = 2L,
+  cuda_toolkit_version = 12040L,
+  cuda_driver_version = 55054L,
+  gpu_name = "Fixture GPU",
+  gpu_uuid = paste0("GPU-", strrep("a", 32L)),
+  compute_capability_major = 8L,
+  compute_capability_minor = 0L,
+  sm_count = 108L,
+  cusolver_deterministic_mode = "enabled",
+  cublas_math_mode = "pedantic",
+  cublas_atomics_mode = "not_allowed",
+  cublas_user_workspace_installed = TRUE,
+  cublas_workspace_bytes = 16777216,
+  cublas_workspace_alignment = 256
 )
 catalog_fixture <- list(
   phase3_lineage = lineage_fixture
 )
-identity <- fastkpc_full_cuda_phase3_input_identity(
-  catalog = catalog_fixture,
-  device_id = 2L,
-  catalog_evidence = function(catalog) catalog$phase3_lineage,
-  runtime_evidence = function(device_id) runtime_fixture,
-  device_evidence = function(device_id) runtime_fixture
+
+static_probe_calls <- 0L
+old_static_probe <- if (exists(
+  "fastkpc_cuda_phase3_environment_identity", envir = .GlobalEnv,
+  inherits = FALSE
+)) get("fastkpc_cuda_phase3_environment_identity", envir = .GlobalEnv) else NULL
+old_runtime_discoverer <- get(
+  "fastkpc_full_cuda_phase3_discover_runtime_evidence", envir = .GlobalEnv
 )
-assert_true(is.list(identity) && identical(identity$device_id, 2L) &&
-              identical(identity$shard_count, 64L) &&
-              grepl("^[0-9a-f]{64}$", identity$sha256),
-            "authenticated Phase 3 input identity")
+old_runtime_create <- get("fixed_sp_cuda_runtime_create", envir = .GlobalEnv)
+assign(
+  "fastkpc_cuda_phase3_environment_identity",
+  function(device_id) {
+    static_probe_calls <<- static_probe_calls + 1L
+    static_environment_fixture
+  },
+  envir = .GlobalEnv
+)
+assign(
+  "fixed_sp_cuda_runtime_create",
+  function(device_id) stop("runtime context creation is forbidden in probe"),
+  envir = .GlobalEnv
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_runtime_evidence",
+  old_runtime_discoverer,
+  envir = .GlobalEnv
+)
+static_runtime_evidence <- fastkpc_full_cuda_phase3_discover_runtime_evidence(
+  catalog_fixture, 2L
+)
+assert_true(
+  static_probe_calls == 1L &&
+    identical(static_runtime_evidence$device_id, 2L),
+  "default runtime discovery uses static environment query without context"
+)
+if (is.null(old_static_probe)) {
+  rm("fastkpc_cuda_phase3_environment_identity", envir = .GlobalEnv)
+} else {
+  assign("fastkpc_cuda_phase3_environment_identity", old_static_probe,
+         envir = .GlobalEnv)
+}
+assign("fixed_sp_cuda_runtime_create", old_runtime_create, envir = .GlobalEnv)
 
 current_mgcv_version <- if (requireNamespace("mgcv", quietly = TRUE)) {
   as.character(utils::packageVersion("mgcv"))
@@ -181,8 +259,8 @@ current_mgcv_version <- if (requireNamespace("mgcv", quietly = TRUE)) {
 }
 execution_fixture <- list(
   authenticated = TRUE,
-  source_commit = strrep("3", 40L),
-  phase3_source_commit = strrep("3", 40L),
+  source_commit = fastkpc_full_cuda_source_commit(),
+  phase3_source_commit = fastkpc_full_cuda_source_commit(),
   R_version = R.version.string,
   phase3_R_version = R.version.string,
   mgcv_version = current_mgcv_version,
@@ -195,7 +273,18 @@ execution_fixture <- list(
   source_closure_sha256 = sha("phase3-source-closure"),
   execution_snapshot_sha256 = sha("phase3-execution-snapshot"),
   relevant_sources_dirty_or_untracked = FALSE,
-  execution_sources_unchanged_after_run = TRUE
+  execution_sources_unchanged_after_run = TRUE,
+  execution_provenance_state = "post-run-verified"
+)
+default_execution_capture <- fastkpc_full_cuda_phase3_discover_execution_evidence(
+  catalog_fixture, 2L
+)
+assert_true(
+  identical(default_execution_capture$execution_sources_unchanged_after_run,
+            FALSE) &&
+    identical(default_execution_capture$execution_provenance_state,
+              "pre-run-capture"),
+  "pre-run source capture is not labeled post-run verified"
 )
 default_discoverer_calls <- new.env(parent = emptyenv())
 default_discoverer_calls$catalog <- 0L
@@ -274,6 +363,11 @@ assign(
 default_identity <- fastkpc_full_cuda_phase3_input_identity(
   catalog_fixture, 2L
 )
+identity <- default_identity
+assert_true(is.list(identity) && identical(identity$device_id, 2L) &&
+              identical(identity$shard_count, 64L) &&
+              grepl("^[0-9a-f]{64}$", identity$sha256),
+            "authenticated Phase 3 input identity")
 assert_true(
   default_discoverer_calls$catalog == 1L &&
     default_discoverer_calls$runtime == 1L &&
@@ -300,6 +394,26 @@ assert_true(
   identical(default_identity$relevant_sources_dirty_or_untracked, FALSE) &&
     identical(default_identity$execution_sources_unchanged_after_run, TRUE),
   "execution provenance dirtiness and post-run authentication are retained"
+)
+synthetic_non_head_execution <- execution_fixture
+synthetic_non_head_execution$source_commit <- strrep("f", 40L)
+synthetic_non_head_execution$phase3_source_commit <- strrep("f", 40L)
+synthetic_execution_discoverer <- get(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence", envir = .GlobalEnv
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  function(catalog, device_id) synthetic_non_head_execution,
+  envir = .GlobalEnv
+)
+assert_error(
+  fastkpc_full_cuda_phase3_input_identity(catalog_fixture, 2L),
+  "synthetic non-HEAD execution source cannot authenticate"
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_execution_evidence",
+  synthetic_execution_discoverer,
+  envir = .GlobalEnv
 )
 test_catalog_discoverer <- get(
   "fastkpc_full_cuda_phase3_discover_catalog_evidence", envir = .GlobalEnv
@@ -338,10 +452,7 @@ assign(
 )
 repository_catalog_identity <- fastkpc_full_cuda_phase3_input_identity(
   repository_catalog,
-  2L,
-  runtime_evidence = function(device_id) runtime_fixture,
-  device_evidence = function(device_id) runtime_fixture,
-  execution_evidence = function(catalog, device_id) execution_fixture
+  2L
 )
 assign(
   "fastkpc_full_cuda_phase3_discover_catalog_evidence",
@@ -389,10 +500,7 @@ assign(
 )
 repository_execution_identity <- fastkpc_full_cuda_phase3_input_identity(
   catalog_fixture,
-  2L,
-  catalog_evidence = function(catalog) catalog$phase3_lineage,
-  runtime_evidence = function(device_id) runtime_fixture,
-  device_evidence = function(device_id) runtime_fixture
+  2L
 )
 assert_true(
   identical(
@@ -417,6 +525,9 @@ assign(
 )
 valid_runtime_discoverer <- get(
   "fastkpc_full_cuda_phase3_discover_runtime_evidence", envir = .GlobalEnv
+)
+valid_device_discoverer <- get(
+  "fastkpc_full_cuda_phase3_discover_device_evidence", envir = .GlobalEnv
 )
 assign(
   "fastkpc_full_cuda_phase3_discover_runtime_evidence",
@@ -482,11 +593,7 @@ assign(
 )
 assert_error(
   fastkpc_full_cuda_phase3_input_identity(
-    catalog_with_unmarked_provenance,
-    2L,
-    catalog_evidence = function(catalog) catalog$phase3_lineage,
-    runtime_evidence = function(device_id) runtime_fixture,
-    device_evidence = function(device_id) runtime_fixture
+    catalog_with_unmarked_provenance, 2L
   ),
   "unmarked catalog provenance must fail closed"
 )
@@ -512,11 +619,7 @@ assign(
 )
 assert_error(
   fastkpc_full_cuda_phase3_input_identity(
-    catalog_with_incomplete_provenance,
-    2L,
-    catalog_evidence = function(catalog) catalog$phase3_lineage,
-    runtime_evidence = function(device_id) runtime_fixture,
-    device_evidence = function(device_id) runtime_fixture
+    catalog_with_incomplete_provenance, 2L
   ),
   "missing current execution versions must fail closed"
 )
@@ -551,10 +654,7 @@ assign(
 )
 full_provenance_identity <- fastkpc_full_cuda_phase3_input_identity(
   catalog_with_full_provenance,
-  2L,
-  catalog_evidence = function(catalog) catalog$phase3_lineage,
-  runtime_evidence = function(device_id) runtime_fixture,
-  device_evidence = function(device_id) runtime_fixture
+  2L
 )
 assert_true(
   provenance_verify_calls == 1L &&
@@ -571,11 +671,7 @@ catalog_with_marked_provenance$phase3_execution_provenance <-
   marked_full_provenance
 provenance_verify_calls <- 0L
 invisible(fastkpc_full_cuda_phase3_input_identity(
-  catalog_with_marked_provenance,
-  2L,
-  catalog_evidence = function(catalog) catalog$phase3_lineage,
-  runtime_evidence = function(device_id) runtime_fixture,
-  device_evidence = function(device_id) runtime_fixture
+  catalog_with_marked_provenance, 2L
 ))
 assert_true(
   provenance_verify_calls == 1L,
@@ -596,15 +692,39 @@ identity_rejected <- function(lineage = lineage_fixture,
                               runtime = runtime_fixture,
                               device = runtime_fixture,
                               label = "invalid identity") {
+  assign(
+    "fastkpc_full_cuda_phase3_discover_catalog_evidence",
+    function(catalog) lineage,
+    envir = .GlobalEnv
+  )
+  assign(
+    "fastkpc_full_cuda_phase3_discover_runtime_evidence",
+    function(catalog, device_id) runtime,
+    envir = .GlobalEnv
+  )
+  assign(
+    "fastkpc_full_cuda_phase3_discover_device_evidence",
+    function(catalog, device_id) device,
+    envir = .GlobalEnv
+  )
   assert_error(
-    fastkpc_full_cuda_phase3_input_identity(
-      catalog = catalog_fixture,
-      device_id = 2L,
-      catalog_evidence = function(catalog) lineage,
-      runtime_evidence = function(device_id) runtime,
-      device_evidence = function(device_id) device
-    ),
+    fastkpc_full_cuda_phase3_input_identity(catalog_fixture, 2L),
     label
+  )
+  assign(
+    "fastkpc_full_cuda_phase3_discover_catalog_evidence",
+    test_catalog_discoverer,
+    envir = .GlobalEnv
+  )
+  assign(
+    "fastkpc_full_cuda_phase3_discover_runtime_evidence",
+    valid_runtime_discoverer,
+    envir = .GlobalEnv
+  )
+  assign(
+    "fastkpc_full_cuda_phase3_discover_device_evidence",
+    valid_device_discoverer,
+    envir = .GlobalEnv
   )
 }
 missing_lineage <- lineage_fixture
@@ -779,15 +899,30 @@ assert_true(
 explicit_validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
   default_artifact_root,
   catalog = catalog_fixture,
-  device_id = 2L,
-  catalog_evidence = function(catalog) catalog$phase3_lineage,
-  runtime_evidence = function(device_id) runtime_fixture,
-  device_evidence = function(device_id) runtime_fixture,
-  execution_evidence = function(catalog, device_id) execution_fixture
+  device_id = 2L
 )
 assert_true(
   isTRUE(explicit_validated$authenticated),
   "artifact validation accepts explicit authenticated evidence seams"
+)
+assert_error(
+  fastkpc_full_cuda_phase3_input_identity(
+    catalog_fixture, 2L, runtime_evidence = runtime_fixture
+  ),
+  "input identity rejects caller-supplied evidence arguments"
+)
+forged_precomputed_identity <- identity
+forged_precomputed_identity$device_id <- 3L
+forged_precomputed_identity$sha256 <-
+  .fastkpc_full_cuda_phase3_identity_hash(forged_precomputed_identity)
+assert_error(
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    default_artifact_root,
+    expected_identity = forged_precomputed_identity,
+    catalog = catalog_fixture,
+    device_id = 2L
+  ),
+  "catalog validation independently recomputes a precomputed identity"
 )
 unlink(default_artifact_root, recursive = TRUE, force = TRUE)
 
@@ -865,19 +1000,26 @@ assert_true(
     ),
   "manifest hashes every common top-level payload"
 )
-writeLines(
-  "mutated-common-payload", oracle_fixture$paths$commands_txt,
-  useBytes = TRUE
+common_payload_keys <- c(
+  "commands_txt", "environment_txt", "input_hashes_csv",
+  "route_config_json", "runtime_lifecycle_csv", "resource_metrics_csv",
+  "stage_timing_csv", "fallbacks_csv", "failures_csv"
 )
-assert_error(
-  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
-    file.path(artifact_root, "oracle"), expected_identity = identity
-  ),
-  "common payload mutation must invalidate the artifact"
-)
-invisible(write_fixture_artifact(
-  "oracle_sp", file.path(artifact_root, "oracle"), identity
-))
+for (key in common_payload_keys) {
+  writeLines(
+    paste0("mutated-common-payload:", key),
+    oracle_fixture$paths[[key]], useBytes = TRUE
+  )
+  assert_error(
+    fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+      file.path(artifact_root, "oracle"), expected_identity = identity
+    ),
+    paste0("common payload mutation must invalidate ", key)
+  )
+  invisible(write_fixture_artifact(
+    "oracle_sp", file.path(artifact_root, "oracle"), identity
+  ))
+}
 
 forged_payload_manifest <- jsonlite::read_json(
   oracle_fixture$paths$manifest_json, simplifyVector = TRUE
@@ -930,143 +1072,109 @@ mutated_manifest_rejected <- function(field, value, label) {
   ))
 }
 
-mutated_manifest_rejected(
-  "phase0_manifest_hash", sha("wrong-phase0"),
-  "Phase 0 manifest hash mutation must fail"
+manifest_mutations <- list(
+  list("phase0_manifest_hash", sha("wrong-phase0"),
+       "Phase 0 manifest hash mutation must fail"),
+  list("phase1_manifest_hash", sha("wrong-phase1"),
+       "Phase 1 manifest hash mutation must fail"),
+  list("phase2_manifest_hash", sha("wrong-phase2"),
+       "Phase 2 manifest hash mutation must fail"),
+  list("phase0_source_commit", strrep("a", 40L),
+       "Phase 0 source lineage mutation must fail"),
+  list("phase1_source_commit", strrep("b", 40L),
+       "Phase 1 source lineage mutation must fail"),
+  list("phase2_source_commit", strrep("c", 40L),
+       "Phase 2 source lineage mutation must fail"),
+  list("dataset_file_sha256", sha("wrong-dataset-file"),
+       "dataset file hash mutation must fail"),
+  list("dataset_matrix_sha256", sha("wrong-dataset-matrix"),
+       "dataset matrix hash mutation must fail"),
+  list("canonical_setup_corpus_hash", sha("wrong-setup-corpus"),
+       "canonical setup corpus mutation must fail"),
+  list("canonical_target_corpus_hash", sha("wrong-target-corpus"),
+       "canonical target corpus mutation must fail"),
+  list("route_config_hash", sha("wrong-route"),
+       "route configuration hash mutation must fail"),
+  list("runtime_abi", "wrong-runtime-abi",
+       "runtime ABI mutation must fail"),
+  list("runtime_abi_hash", sha("wrong-runtime-abi-hash"),
+       "runtime ABI hash mutation must fail"),
+  list("runtime_configuration_schema_version", "wrong-config-schema",
+       "runtime configuration schema mutation must fail"),
+  list("source_commit", strrep("d", 40L),
+       "current source commit mutation must fail"),
+  list("phase3_source_commit", strrep("e", 40L),
+       "current Phase 3 source commit mutation must fail"),
+  list("phase2_R_version", "forged-Phase-2-R",
+       "Phase 2 R version mutation must fail"),
+  list("phase2_mgcv_version", "forged-Phase-2-mgcv",
+       "Phase 2 mgcv version mutation must fail"),
+  list("R_version", "forged-current-R",
+       "current R version mutation must fail"),
+  list("phase3_R_version", "forged-Phase-3-R",
+       "current Phase 3 R version alias mutation must fail"),
+  list("mgcv_version", "forged-current-mgcv",
+       "current mgcv version mutation must fail"),
+  list("phase3_mgcv_version", "forged-Phase-3-mgcv",
+       "current Phase 3 mgcv version alias mutation must fail"),
+  list("provenance_schema_version", "forged-provenance-schema",
+       "provenance schema mutation must fail"),
+  list("provenance_mode", "forged-provenance-mode",
+       "provenance mode mutation must fail"),
+  list("source_closure_schema_version", "forged-closure-schema",
+       "source closure schema mutation must fail"),
+  list("source_discovery_semantics", "forged-discovery-semantics",
+       "source discovery semantics mutation must fail"),
+  list("source_closure_count", 2L,
+       "source closure count mutation must fail"),
+  list("source_closure_sha256", sha("wrong-source-closure"),
+       "source closure hash mutation must fail"),
+  list("execution_snapshot_sha256", sha("wrong-execution-snapshot"),
+       "execution snapshot hash mutation must fail"),
+  list("execution_provenance_state", "pre-run-capture",
+       "execution provenance state mutation must fail"),
+  list("relevant_sources_dirty_or_untracked",
+       !isTRUE(identity$relevant_sources_dirty_or_untracked),
+       "source dirtiness mutation must fail"),
+  list("execution_sources_unchanged_after_run", FALSE,
+       "post-run source authentication mutation must fail"),
+  list("cuda_toolkit_version", 99999L,
+       "CUDA toolkit mutation must fail"),
+  list("cuda_driver_version", 99999L,
+       "CUDA driver mutation must fail"),
+  list("gpu_uuid", paste0("GPU-", strrep("c", 32L)),
+       "GPU UUID mutation must fail"),
+  list("gpu_name", "Forged Fixture GPU",
+       "GPU name mutation must fail"),
+  list("compute_capability_major", 9L,
+       "compute capability major mutation must fail"),
+  list("compute_capability_minor", 9L,
+       "compute capability minor mutation must fail"),
+  list("compute_capability", "9.9",
+       "compute capability mutation must fail"),
+  list("sm_count", 1L, "SM count mutation must fail"),
+  list("device_id", 7L, "device id mutation must fail"),
+  list("cusolver_deterministic_mode", "disabled",
+       "cuSOLVER deterministic mode mutation must fail"),
+  list("cublas_math_mode", "default",
+       "cuBLAS math mode mutation must fail"),
+  list("cublas_atomics_mode", "allowed",
+       "cuBLAS atomics mode mutation must fail"),
+  list("cublas_user_workspace_installed", FALSE,
+       "cuBLAS workspace installation mutation must fail"),
+  list("cublas_workspace_identity", sha("wrong-workspace"),
+       "cuBLAS workspace identity mutation must fail"),
+  list("cublas_workspace_bytes", 8192,
+       "cuBLAS workspace size mutation must fail"),
+  list("cublas_workspace_alignment", 512,
+       "cuBLAS workspace alignment mutation must fail"),
+  list("artifact_schema_version", "forged-artifact-schema",
+       "artifact schema mutation must fail"),
+  list("shard_count", 4L, "shard count mutation must fail")
 )
-mutated_manifest_rejected(
-  "phase1_manifest_hash", sha("wrong-phase1"),
-  "Phase 1 manifest hash mutation must fail"
-)
-mutated_manifest_rejected(
-  "phase2_manifest_hash", sha("wrong-phase2"),
-  "Phase 2 manifest hash mutation must fail"
-)
-mutated_manifest_rejected(
-  "dataset_file_sha256", sha("wrong-dataset-file"),
-  "dataset file hash mutation must fail"
-)
-mutated_manifest_rejected(
-  "dataset_matrix_sha256", sha("wrong-dataset-matrix"),
-  "dataset matrix hash mutation must fail"
-)
-mutated_manifest_rejected(
-  "canonical_setup_corpus_hash", sha("wrong-setup-corpus"),
-  "canonical setup corpus mutation must fail"
-)
-mutated_manifest_rejected(
-  "canonical_target_corpus_hash", sha("wrong-target-corpus"),
-  "canonical target corpus mutation must fail"
-)
-mutated_manifest_rejected(
-  "route_config_hash", sha("wrong-route"),
-  "route configuration hash mutation must fail"
-)
-mutated_manifest_rejected(
-  "runtime_abi", "wrong-runtime-abi",
-  "runtime ABI mutation must fail"
-)
-mutated_manifest_rejected(
-  "runtime_abi_hash", sha("wrong-runtime-abi-hash"),
-  "runtime ABI hash mutation must fail"
-)
-mutated_manifest_rejected(
-  "source_commit", strrep("2", 40L),
-  "source commit mutation must fail"
-)
-mutated_manifest_rejected(
-  "phase2_source_commit", strrep("5", 40L),
-  "Phase 2 source lineage mutation must fail"
-)
-mutated_manifest_rejected(
-  "phase3_source_commit", strrep("4", 40L),
-  "current Phase 3 source commit mutation must fail"
-)
-mutated_manifest_rejected(
-  "R_version", "R version forged-for-reuse",
-  "current R version mutation must fail"
-)
-mutated_manifest_rejected(
-  "mgcv_version", "forged-mgcv-version",
-  "current mgcv version mutation must fail"
-)
-mutated_manifest_rejected(
-  "source_closure_sha256", sha("wrong-source-closure"),
-  "source closure hash mutation must fail"
-)
-mutated_manifest_rejected(
-  "execution_snapshot_sha256", sha("wrong-execution-snapshot"),
-  "execution snapshot hash mutation must fail"
-)
-mutated_manifest_rejected(
-  "relevant_sources_dirty_or_untracked",
-  !isTRUE(identity$relevant_sources_dirty_or_untracked),
-  "source dirtiness mutation must fail"
-)
-mutated_manifest_rejected(
-  "execution_sources_unchanged_after_run", FALSE,
-  "post-run source authentication mutation must fail"
-)
-mutated_manifest_rejected(
-  "cuda_toolkit_version", 99999L,
-  "CUDA toolkit mutation must fail"
-)
-mutated_manifest_rejected(
-  "cuda_driver_version", 99999L,
-  "CUDA driver mutation must fail"
-)
-mutated_manifest_rejected(
-  "gpu_uuid", "GPU-forged-uuid",
-  "GPU UUID mutation must fail"
-)
-mutated_manifest_rejected(
-  "gpu_name", "Forged Fixture GPU",
-  "GPU name mutation must fail"
-)
-mutated_manifest_rejected(
-  "compute_capability", "9.9",
-  "compute capability mutation must fail"
-)
-mutated_manifest_rejected(
-  "sm_count", 1L,
-  "SM count mutation must fail"
-)
-mutated_manifest_rejected(
-  "device_id", 7L,
-  "device id mutation must fail"
-)
-mutated_manifest_rejected(
-  "cusolver_deterministic_mode", "disabled",
-  "cuSOLVER deterministic mode mutation must fail"
-)
-mutated_manifest_rejected(
-  "cublas_math_mode", "default",
-  "cuBLAS math mode mutation must fail"
-)
-mutated_manifest_rejected(
-  "cublas_atomics_mode", "allowed",
-  "cuBLAS atomics mode mutation must fail"
-)
-mutated_manifest_rejected(
-  "cublas_workspace_identity", sha("wrong-workspace"),
-  "cuBLAS workspace identity mutation must fail"
-)
-mutated_manifest_rejected(
-  "cublas_workspace_bytes", 8192,
-  "cuBLAS workspace size mutation must fail"
-)
-mutated_manifest_rejected(
-  "cublas_workspace_alignment", 512,
-  "cuBLAS workspace alignment mutation must fail"
-)
-mutated_manifest_rejected(
-  "artifact_schema_version", "forged-artifact-schema",
-  "artifact schema mutation must fail"
-)
-mutated_manifest_rejected(
-  "shard_count", 4L,
-  "shard count mutation must fail"
-)
+for (mutation in manifest_mutations) {
+  mutated_manifest_rejected(mutation[[1L]], mutation[[2L]], mutation[[3L]])
+}
 
 empty_completion <- file.path(artifact_root, "empty-completion")
 invisible(write_fixture_artifact(
@@ -1145,6 +1253,19 @@ assert_error(
 assert_error(
   fastkpc_full_cuda_phase3_artifact_paths(factor("bad-path"), "oracle_sp"),
   "malformed artifact path must fail"
+)
+
+cuda_dll_paths_after <- unname(vapply(
+  getLoadedDLLs(), function(dll) normalizePath(
+    dll[["path"]], winslash = "/", mustWork = FALSE
+  ), character(1L)
+))
+assert_true(
+  identical(
+    cuda_dll_paths_before[grepl("fastkpc_cuda", cuda_dll_paths_before)],
+    cuda_dll_paths_after[grepl("fastkpc_cuda", cuda_dll_paths_after)]
+  ) && !any(grepl("fastkpc_cuda", cuda_dll_paths_after)),
+  "no-CUDA contract fixture loads no CUDA DLL"
 )
 
 cat("PASS phase3 artifact contract route, identity, and publication validation\n")

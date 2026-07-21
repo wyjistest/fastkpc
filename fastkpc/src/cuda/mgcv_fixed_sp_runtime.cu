@@ -25,7 +25,6 @@
 namespace fastkpc {
 namespace {
 
-constexpr std::size_t kCublasWorkspaceBytes = 16U * 1024U * 1024U;
 constexpr std::size_t kStableBaseIntArraysPerTarget = 6U;
 constexpr std::size_t kStableAggregateIntArraysPerTarget = 3U;
 constexpr std::size_t kStableDoubleArraysPerTarget = 3U;
@@ -1868,7 +1867,7 @@ class CudaRuntimeContext {
   std::size_t int_capacity = 0;
   std::size_t host_status_capacity = 0;
   std::size_t pointer_capacity = 0;
-  std::size_t cublas_workspace_bytes = kCublasWorkspaceBytes;
+  std::size_t cublas_workspace_bytes = kFixedSpCublasWorkspaceBytes;
   int potrf_lwork = 0;
   FixedSpStableWorkspace stable_workspace;
   FixedSpCapacities capacities;
@@ -2911,7 +2910,7 @@ void CudaRuntimeContext::reserve(
         resource_ledger.get(), &new_cublas_workspace,
         cublas_workspace_bytes, "allocate cuBLAS user workspace");
       new_cublas_alignment = pointer_alignment(new_cublas_workspace);
-      if (new_cublas_alignment < 256U) {
+      if (new_cublas_alignment < kFixedSpCublasWorkspaceAlignment) {
         throw std::runtime_error(
           "cuBLAS user workspace alignment is below 256 bytes");
       }

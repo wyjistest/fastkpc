@@ -9,6 +9,16 @@
 
 namespace fastkpc {
 
+constexpr char kFixedSpRuntimeAbiSchemaVersion[] =
+  "full-cuda-ci-fixed-sp-runtime-v1";
+constexpr char kFixedSpEnvironmentConfigSchemaVersion[] =
+  "full-cuda-ci-fixed-sp-environment-config-v1";
+constexpr char kFixedSpCusolverDeterministicMode[] = "enabled";
+constexpr char kFixedSpCublasMathMode[] = "pedantic";
+constexpr char kFixedSpCublasAtomicsMode[] = "not_allowed";
+constexpr std::size_t kFixedSpCublasWorkspaceBytes = 16U * 1024U * 1024U;
+constexpr std::size_t kFixedSpCublasWorkspaceAlignment = 256U;
+
 enum class FixedSpRoute : int {
   Unset = -1,
   CholeskyBatched = 0,

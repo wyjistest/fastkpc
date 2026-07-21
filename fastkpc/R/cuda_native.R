@@ -399,6 +399,19 @@ fastkpc_cuda_device_info <- function() {
   .Call("C_fastkpc_cuda_device_info", PACKAGE = "fastkpc_cuda")
 }
 
+fastkpc_cuda_phase3_environment_identity <- function(device_id) {
+  if (typeof(device_id) != "integer" || length(device_id) != 1L ||
+      is.object(device_id) || !is.null(attributes(device_id)) ||
+      is.na(device_id) || device_id < 0L) {
+    stop("device_id must be one non-negative integer", call. = FALSE)
+  }
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_fastkpc_cuda_phase3_environment_identity", device_id,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
 fastkpc_cuda_legacy_dcov_gamma_cpp_oracle <- function(
     x, y, numCol = as.integer(floor(length(x) / 10)), index = 1) {
   bare_double_vector <- function(value) {

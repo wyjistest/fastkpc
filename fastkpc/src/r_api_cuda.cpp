@@ -3308,6 +3308,44 @@ extern "C" SEXP C_fastkpc_cuda_device_info() {
   END_RCPP
 }
 
+extern "C" SEXP C_fastkpc_cuda_phase3_environment_identity(SEXP device_s) {
+  BEGIN_RCPP
+  const int device_id = Rcpp::as<int>(device_s);
+  if (device_id < 0 || Rf_length(device_s) != 1) {
+    Rcpp::stop("device_id must be one non-negative integer");
+  }
+  const CudaPhase3EnvironmentIdentity identity =
+    fastkpc_cuda_phase3_environment_identity(device_id);
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") = identity.schema_version,
+    Rcpp::Named("runtime_abi_schema_version") =
+      identity.runtime_abi_schema_version,
+    Rcpp::Named("configuration_schema_version") =
+      identity.configuration_schema_version,
+    Rcpp::Named("device_id") = identity.device_id,
+    Rcpp::Named("cuda_toolkit_version") = identity.cuda_toolkit_version,
+    Rcpp::Named("cuda_driver_version") = identity.cuda_driver_version,
+    Rcpp::Named("gpu_name") = identity.gpu_name,
+    Rcpp::Named("gpu_uuid") = identity.gpu_uuid,
+    Rcpp::Named("compute_capability_major") =
+      identity.compute_capability_major,
+    Rcpp::Named("compute_capability_minor") =
+      identity.compute_capability_minor,
+    Rcpp::Named("sm_count") = identity.sm_count,
+    Rcpp::Named("cusolver_deterministic_mode") =
+      identity.cusolver_deterministic_mode,
+    Rcpp::Named("cublas_math_mode") = identity.cublas_math_mode,
+    Rcpp::Named("cublas_atomics_mode") = identity.cublas_atomics_mode,
+    Rcpp::Named("cublas_user_workspace_installed") =
+      identity.cublas_user_workspace_installed,
+    Rcpp::Named("cublas_workspace_bytes") =
+      static_cast<double>(identity.cublas_workspace_bytes),
+    Rcpp::Named("cublas_workspace_alignment") =
+      static_cast<double>(identity.cublas_workspace_alignment)
+  );
+  END_RCPP
+}
+
 extern "C" SEXP C_fastkpc_cuda_legacy_dcov_gamma_cpp_oracle(
     SEXP xs,
     SEXP ys,
@@ -8653,6 +8691,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
 static const R_CallMethodDef call_methods[] = {
   {"C_fastkpc_cuda_available", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_available), 0},
   {"C_fastkpc_cuda_device_info", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_device_info), 0},
+  {"C_fastkpc_cuda_phase3_environment_identity", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_phase3_environment_identity), 1},
   {"C_fastkpc_cuda_legacy_dcov_gamma_cpp_oracle", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_legacy_dcov_gamma_cpp_oracle), 4},
   {"C_legacy_dcov_spectra_matvec_cuda", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda), 2},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_create", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_create), 1},
