@@ -182,7 +182,7 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "phase0_source_commit", "phase1_source_commit", "phase2_source_commit",
     "phase2_R_version", "phase2_mgcv_version",
     "runtime_abi", "runtime_abi_hash",
-    "runtime_configuration_schema_version", "route_config_hash",
+    "runtime_policy_schema_version", "route_config_hash",
     "source_commit", "phase3_source_commit", "R_version",
     "phase3_R_version", "mgcv_version", "phase3_mgcv_version",
     "provenance_schema_version", "provenance_mode",
@@ -190,12 +190,20 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "source_closure_count", "source_closure_sha256",
     "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
     "execution_sources_unchanged_after_run", "execution_provenance_state",
+    "native_library_identity", "native_library_sha256",
+    "native_build_inputs_sha256",
+    "native_build_dependencies_schema_version",
+    "native_build_trace_semantics", "native_build_trace_invocation",
+    "native_build_tracer_path", "native_build_dependency_count",
+    "native_build_exclusion_count", "native_build_dependencies_sha256",
+    "native_build_trace_sha256", "native_build_tracer_sha256",
     "cuda_toolkit_version", "cuda_driver_version", "gpu_name", "gpu_uuid",
     "compute_capability_major", "compute_capability_minor",
     "compute_capability", "sm_count", "device_id",
-    "cusolver_deterministic_mode", "cublas_math_mode", "cublas_atomics_mode",
-    "cublas_user_workspace_installed", "cublas_workspace_bytes",
-    "cublas_workspace_alignment", "cublas_workspace_identity", "shard_count",
+    "cusolver_deterministic_mode_required", "cublas_math_mode_required",
+    "cublas_atomics_mode_required", "cublas_user_workspace_required",
+    "cublas_workspace_bytes_required",
+    "cublas_workspace_min_alignment_required", "shard_count",
     "authenticated"
   )
 }
@@ -373,7 +381,14 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "source_closure_schema_version", "source_discovery_semantics",
     "source_closure_count", "source_closure_sha256",
     "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
-    "execution_sources_unchanged_after_run"
+    "execution_sources_unchanged_after_run", "execution_provenance_state",
+    "native_library_identity", "native_library_sha256",
+    "native_build_inputs_sha256",
+    "native_build_dependencies_schema_version",
+    "native_build_trace_semantics", "native_build_trace_invocation",
+    "native_build_tracer_path", "native_build_dependency_count",
+    "native_build_exclusion_count", "native_build_dependencies_sha256",
+    "native_build_trace_sha256", "native_build_tracer_sha256"
   )
   missing <- setdiff(required, names(value))
   if (length(missing) > 0L) {
@@ -403,7 +418,10 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
   for (field in c(
     "R_version", "phase3_R_version", "mgcv_version", "phase3_mgcv_version",
     "provenance_schema_version", "provenance_mode",
-    "source_closure_schema_version", "source_discovery_semantics"
+    "source_closure_schema_version", "source_discovery_semantics",
+    "native_library_identity", "native_build_dependencies_schema_version",
+    "native_build_trace_semantics", "native_build_trace_invocation",
+    "native_build_tracer_path"
   )) {
     .fastkpc_full_cuda_phase3_scalar_text(value[[field]], field)
   }
@@ -422,12 +440,34 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
       ) || !identical(
         value$source_discovery_semantics,
         "parsed-r-ast-load-time-literal-source-v1"
+      ) || !identical(
+        value$native_library_identity,
+        "qualified-pinned-inode-sha-exact-registered-mapped-path-v3"
+      ) || !identical(
+        value$native_build_dependencies_schema_version,
+        "full-cuda-ci-native-build-dependencies-v3"
+      ) || !identical(
+        value$native_build_trace_semantics,
+        "linux-strace-successful-read-exec-evidence-v3"
       )) {
     stop("Phase 3 execution provenance schema is unsupported", call. = FALSE)
   }
   if (!.fastkpc_full_cuda_phase3_bare_integer(value$source_closure_count, 1L) ||
       !.fastkpc_full_cuda_phase3_sha256(value$source_closure_sha256) ||
-      !.fastkpc_full_cuda_phase3_sha256(value$execution_snapshot_sha256)) {
+      !.fastkpc_full_cuda_phase3_sha256(value$execution_snapshot_sha256) ||
+      !.fastkpc_full_cuda_phase3_sha256(value$native_library_sha256) ||
+      !.fastkpc_full_cuda_phase3_sha256(value$native_build_inputs_sha256) ||
+      !.fastkpc_full_cuda_phase3_sha256(
+        value$native_build_dependencies_sha256
+      ) || !.fastkpc_full_cuda_phase3_sha256(
+        value$native_build_trace_sha256
+      ) || !.fastkpc_full_cuda_phase3_sha256(
+        value$native_build_tracer_sha256
+      ) || !.fastkpc_full_cuda_phase3_bare_integer(
+        value$native_build_dependency_count, 1L
+      ) || !.fastkpc_full_cuda_phase3_bare_integer(
+        value$native_build_exclusion_count, 0L
+      )) {
     stop("Phase 3 execution provenance hash/count is malformed", call. = FALSE)
   }
   for (field in c(
@@ -453,6 +493,38 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
   if (!isTRUE(state_consistent)) {
     stop("Phase 3 execution provenance state/verification flag disagrees",
          call. = FALSE)
+  }
+  authoritative <- .fastkpc_full_cuda_phase3_execution_projection(
+    fastkpc_full_cuda_phase3_discover_qualified_native_evidence()$provenance
+  )
+  bound_fields <- c(
+    "source_commit", "phase3_source_commit", "R_version",
+    "phase3_R_version", "mgcv_version", "phase3_mgcv_version",
+    "provenance_schema_version", "provenance_mode",
+    "source_closure_schema_version", "source_discovery_semantics",
+    "source_closure_count", "source_closure_sha256",
+    "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
+    "native_library_identity", "native_library_sha256",
+    "native_build_inputs_sha256",
+    "native_build_dependencies_schema_version",
+    "native_build_trace_semantics", "native_build_trace_invocation",
+    "native_build_tracer_path", "native_build_dependency_count",
+    "native_build_exclusion_count", "native_build_dependencies_sha256",
+    "native_build_trace_sha256", "native_build_tracer_sha256"
+  )
+  mismatched <- bound_fields[!vapply(
+    bound_fields,
+    function(field) .fastkpc_full_cuda_phase3_identity_value_equal(
+      value[[field]], authoritative[[field]]
+    ),
+    logical(1L)
+  )]
+  if (length(mismatched) > 0L) {
+    stop(
+      "Phase 3 execution provenance does not match authenticated qualified build: ",
+      mismatched[[1L]],
+      call. = FALSE
+    )
   }
   value
 }
@@ -489,76 +561,45 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
   commit
 }
 
-.fastkpc_full_cuda_phase3_default_execution_evidence <- function(
-    catalog, device_id) {
-  supplied <- .fastkpc_full_cuda_phase3_catalog_value(
-    catalog,
-    c(
-      "phase3_execution_evidence", "phase3_execution_provenance",
-      "execution_evidence", "execution_provenance"
+.fastkpc_full_cuda_phase3_qualified_native_cache <-
+  new.env(parent = emptyenv())
+
+.fastkpc_full_cuda_phase3_native_build_inputs <- function() {
+  ids <- sort(c(
+    "fastkpc/tools/build_cuda_native.sh",
+    list.files(
+      "fastkpc/src", pattern = "\\.(c|cc|cpp|cu|cuh|h|hpp)$",
+      recursive = TRUE, full.names = TRUE
     )
+  ), method = "radix")
+  if (length(ids) == 0L || anyDuplicated(ids) || any(!file.exists(ids)) ||
+      any(dir.exists(ids))) {
+    stop("Phase 3 native build input closure is malformed", call. = FALSE)
+  }
+  setNames(vapply(
+    ids, normalizePath, character(1L), winslash = "/", mustWork = TRUE
+  ), ids)
+}
+
+.fastkpc_full_cuda_phase3_require_qualified_helpers <- function() {
+  required <- c(
+    "load_fastkpc_cuda_native_qualified",
+    "fastkpc_full_cuda_fixed_sp_discover_execution_source_closure",
+    "fastkpc_full_cuda_fixed_sp_sha256_file",
+    "fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies",
+    "fastkpc_full_cuda_fixed_sp_capture_execution_provenance",
+    "fastkpc_full_cuda_fixed_sp_verify_execution_provenance"
   )
-  if (!is.null(supplied)) {
-    if (!is.list(supplied) || is.object(supplied)) {
-      stop("Phase 3 supplied execution provenance is malformed",
-           call. = FALSE)
-    }
-    if (!is.null(supplied$head_base_commit)) {
-      if (!exists(
-            "fastkpc_full_cuda_fixed_sp_verify_execution_provenance",
-            mode = "function"
-          )) {
-        stop("Phase 3C provenance verifier is unavailable", call. = FALSE)
-      }
-      verifier_input <- supplied
-      if ("authenticated" %in% names(verifier_input)) {
-        verifier_input$authenticated <- NULL
-      }
-      supplied <- tryCatch(
-        fastkpc_full_cuda_fixed_sp_verify_execution_provenance(verifier_input),
-        error = function(error) {
-          stop("Phase 3C execution provenance verification failed: ",
-               conditionMessage(error), call. = FALSE)
-        }
-      )
-      if (!is.list(supplied) ||
-          !isTRUE(supplied$execution_sources_unchanged_after_run)) {
-        stop("Phase 3C execution provenance is not post-run verified",
-             call. = FALSE)
-      }
-      supplied$authenticated <- TRUE
-      supplied$source_commit <- supplied$head_base_commit
-      supplied$phase3_source_commit <- supplied$head_base_commit
-      if (!requireNamespace("mgcv", quietly = TRUE)) {
-        stop("Phase 3 execution requires installed mgcv", call. = FALSE)
-      }
-      supplied$R_version <- R.version.string
-      supplied$phase3_R_version <- R.version.string
-      supplied$mgcv_version <- as.character(utils::packageVersion("mgcv"))
-      supplied$phase3_mgcv_version <- supplied$mgcv_version
-      supplied$execution_provenance_state <- "post-run-verified"
-    } else {
-      stop("Phase 3 supplied provenance lacks authenticated verifier input",
-           call. = FALSE)
-    }
-    return(.fastkpc_full_cuda_phase3_validate_execution_evidence(supplied))
+  missing <- required[!vapply(required, exists, logical(1L), mode = "function")]
+  if (length(missing) > 0L) {
+    stop("authenticated Phase 3 qualified-build helpers are unavailable: ",
+         paste(missing, collapse = ","), call. = FALSE)
   }
-  if (!exists(
-        "fastkpc_full_cuda_fixed_sp_discover_execution_source_closure",
-        mode = "function"
-      ) || !exists(
-        "fastkpc_full_cuda_fixed_sp_source_closure_hash",
-        mode = "function"
-      ) || !exists(
-        "fastkpc_full_cuda_fixed_sp_sha256_file",
-        mode = "function"
-      ) || !exists(
-        "fastkpc_full_cuda_fixed_sp_git_source_state",
-        mode = "function"
-      ) || !exists("fastkpc_full_cuda_source_commit", mode = "function")) {
-    stop("authenticated Phase 3 source discovery helpers are unavailable",
-         call. = FALSE)
-  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_capture_qualified_native <- function() {
+  .fastkpc_full_cuda_phase3_require_qualified_helpers()
   roots <- .fastkpc_full_cuda_phase3_execution_roots()
   if (length(roots) == 0L) {
     stop("Phase 3 execution source roots are unavailable", call. = FALSE)
@@ -572,54 +613,126 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     fastkpc_full_cuda_fixed_sp_sha256_file,
     character(1L)
   )
-  source_states <- vapply(
-    closure$source_file_paths,
-    fastkpc_full_cuda_fixed_sp_git_source_state,
-    character(1L)
+  native_inputs <- .fastkpc_full_cuda_phase3_native_build_inputs()
+  native_input_hashes <- vapply(
+    native_inputs, fastkpc_full_cuda_fixed_sp_sha256_file, character(1L)
   )
-  source_commit <- .fastkpc_full_cuda_phase3_current_source_commit()
+  trace_path <- tempfile(
+    "fastkpc-phase3-input-native-build-", tmpdir = tempdir(),
+    fileext = ".strace"
+  )
+  native_load <- load_fastkpc_cuda_native_qualified(trace_path = trace_path)
+  dependencies <-
+    fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies(
+      trace_path = native_load$trace_path,
+      build_working_dir = project_root,
+      tracer_path = native_load$tracer_path,
+      trace_invocation = native_load$trace_invocation
+    )
+  provenance <- fastkpc_full_cuda_fixed_sp_capture_execution_provenance(
+    source_closure = closure,
+    expected_source_sha256 = source_hashes,
+    native_library_path = native_load$native_library_path,
+    native_build_input_paths = native_inputs,
+    expected_native_build_input_sha256 = native_input_hashes,
+    native_build_dependencies = dependencies,
+    expected_native_library_sha256 = native_load$native_library_sha256
+  )
+  provenance <- fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
+    provenance
+  )
+  if (!isTRUE(provenance$execution_sources_unchanged_after_run)) {
+    stop("Phase 3 qualified native provenance did not verify", call. = FALSE)
+  }
+  list(
+    schema_version = "full-cuda-ci-phase3-qualified-native-cache-v1",
+    provenance = provenance
+  )
+}
+
+.fastkpc_full_cuda_phase3_verify_qualified_native <- function(value) {
+  .fastkpc_full_cuda_phase3_require_qualified_helpers()
+  if (!is.list(value) || is.object(value) || !identical(
+        names(value), c("schema_version", "provenance")
+      ) || !identical(
+        value$schema_version, "full-cuda-ci-phase3-qualified-native-cache-v1"
+      )) {
+    stop("Phase 3 qualified native cache is malformed", call. = FALSE)
+  }
+  verified <- fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
+    value$provenance
+  )
+  if (!isTRUE(verified$execution_sources_unchanged_after_run)) {
+    stop("Phase 3 qualified native cache failed verification", call. = FALSE)
+  }
+  value$provenance <- verified
+  value
+}
+
+fastkpc_full_cuda_phase3_discover_qualified_native_evidence <- function() {
+  cache <- .fastkpc_full_cuda_phase3_qualified_native_cache
+  if (!exists("value", envir = cache, inherits = FALSE)) {
+    cache$value <- .fastkpc_full_cuda_phase3_capture_qualified_native()
+  }
+  cache$value <- .fastkpc_full_cuda_phase3_verify_qualified_native(cache$value)
+  cache$value
+}
+
+.fastkpc_full_cuda_phase3_execution_projection <- function(provenance) {
+  dependencies <- provenance$native_build_dependencies
   if (!requireNamespace("mgcv", quietly = TRUE)) {
     stop("Phase 3 execution requires installed mgcv", call. = FALSE)
   }
-  R_version <- R.version.string
-  mgcv_version <- as.character(utils::packageVersion("mgcv"))
-  source_closure_sha256 <- fastkpc_full_cuda_fixed_sp_source_closure_hash(
-    closure, source_hashes
-  )
-  relevant_dirty <- any(source_states != "clean")
-  execution_snapshot_sha256 <- .fastkpc_full_cuda_phase3_named_hash(list(
-    provenance_schema_version =
-      "full-cuda-ci-execution-source-snapshot-v6",
-    provenance_mode = "working-tree-execution-snapshot-v1",
-    head_base_commit = source_commit,
-    source_closure_sha256 = source_closure_sha256,
-    R_version = R_version,
-    mgcv_version = mgcv_version,
-    relevant_sources_dirty_or_untracked = relevant_dirty,
-    execution_provenance_state = "pre-run-capture"
-  ))
-  .fastkpc_full_cuda_phase3_validate_execution_evidence(list(
+  list(
     authenticated = TRUE,
-    source_commit = source_commit,
-    phase3_source_commit = source_commit,
-    R_version = R_version,
-    phase3_R_version = R_version,
-    mgcv_version = mgcv_version,
-    phase3_mgcv_version = mgcv_version,
-    provenance_schema_version =
-      "full-cuda-ci-execution-source-snapshot-v6",
-    provenance_mode = "working-tree-execution-snapshot-v1",
-    source_closure_schema_version =
-      "full-cuda-ci-execution-source-closure-v1",
-    source_discovery_semantics =
-      "parsed-r-ast-load-time-literal-source-v1",
-    source_closure_count = closure$source_closure_count,
-    source_closure_sha256 = source_closure_sha256,
-    execution_snapshot_sha256 = execution_snapshot_sha256,
-    relevant_sources_dirty_or_untracked = relevant_dirty,
+    source_commit = provenance$head_base_commit,
+    phase3_source_commit = provenance$head_base_commit,
+    R_version = R.version.string,
+    phase3_R_version = R.version.string,
+    mgcv_version = as.character(utils::packageVersion("mgcv")),
+    phase3_mgcv_version = as.character(utils::packageVersion("mgcv")),
+    provenance_schema_version = provenance$provenance_schema_version,
+    provenance_mode = provenance$provenance_mode,
+    source_closure_schema_version = provenance$source_closure_schema_version,
+    source_discovery_semantics = provenance$source_discovery_semantics,
+    source_closure_count = provenance$source_closure_count,
+    source_closure_sha256 = provenance$source_closure_sha256,
+    execution_snapshot_sha256 = provenance$execution_snapshot_sha256,
+    relevant_sources_dirty_or_untracked =
+      provenance$relevant_sources_dirty_or_untracked,
     execution_sources_unchanged_after_run = FALSE,
-    execution_provenance_state = "pre-run-capture"
-  ))
+    execution_provenance_state = "pre-run-capture",
+    native_library_identity = provenance$native_library_identity,
+    native_library_sha256 = provenance$native_library_sha256,
+    native_build_inputs_sha256 = provenance$native_build_inputs_sha256,
+    native_build_dependencies_schema_version = dependencies$schema_version,
+    native_build_trace_semantics = dependencies$trace_semantics,
+    native_build_trace_invocation = dependencies$trace_invocation,
+    native_build_tracer_path = dependencies$tracer_path,
+    native_build_dependency_count = dependencies$dependency_count,
+    native_build_exclusion_count = dependencies$exclusion_count,
+    native_build_dependencies_sha256 = dependencies$aggregate_sha256,
+    native_build_trace_sha256 = dependencies$trace_sha256,
+    native_build_tracer_sha256 = dependencies$tracer_sha256
+  )
+}
+
+.fastkpc_full_cuda_phase3_default_execution_evidence <- function(
+    catalog, device_id) {
+  supplied_names <- c(
+    "phase3_execution_evidence", "phase3_execution_provenance",
+    "execution_evidence", "execution_provenance"
+  )
+  if (any(vapply(
+        supplied_names, function(name) !is.null(catalog[[name]]), logical(1L)
+      ))) {
+    stop("catalog-supplied Phase 3 execution evidence is not authoritative",
+         call. = FALSE)
+  }
+  qualified <- fastkpc_full_cuda_phase3_discover_qualified_native_evidence()
+  .fastkpc_full_cuda_phase3_validate_execution_evidence(
+    .fastkpc_full_cuda_phase3_execution_projection(qualified$provenance)
+  )
 }
 
 fastkpc_full_cuda_phase3_discover_execution_evidence <- function(
@@ -643,24 +756,25 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
     "configuration_schema_version", "device_id", "cuda_toolkit_version",
     "cuda_driver_version", "gpu_name", "gpu_uuid",
     "compute_capability_major", "compute_capability_minor", "sm_count",
-    "cusolver_deterministic_mode", "cublas_math_mode",
-    "cublas_atomics_mode", "cublas_user_workspace_installed",
-    "cublas_workspace_bytes", "cublas_workspace_alignment"
+    "cusolver_deterministic_mode_required", "cublas_math_mode_required",
+    "cublas_atomics_mode_required", "cublas_user_workspace_required",
+    "cublas_workspace_bytes_required",
+    "cublas_workspace_min_alignment_required"
   )
 }
 
-.fastkpc_full_cuda_phase3_workspace_identity <- function(value) {
-  .fastkpc_full_cuda_phase3_named_hash(list(
-    runtime_abi_hash = value$runtime_abi_hash,
-    runtime_configuration_schema_version =
-      value$runtime_configuration_schema_version,
-    cusolver_deterministic_mode = value$cusolver_deterministic_mode,
-    cublas_math_mode = value$cublas_math_mode,
-    cublas_atomics_mode = value$cublas_atomics_mode,
-    cublas_user_workspace_installed = value$cublas_user_workspace_installed,
-    cublas_workspace_bytes = value$cublas_workspace_bytes,
-    cublas_workspace_alignment = value$cublas_workspace_alignment
-  ))
+.fastkpc_full_cuda_phase3_policy_contract <- function() {
+  list(
+    schema_version = "full-cuda-ci-phase3-environment-policy-v1",
+    configuration_schema_version =
+      "full-cuda-ci-fixed-sp-environment-policy-v1",
+    cusolver_deterministic_mode_required = "enabled",
+    cublas_math_mode_required = "pedantic",
+    cublas_atomics_mode_required = "not_allowed",
+    cublas_user_workspace_required = TRUE,
+    cublas_workspace_bytes_required = 16 * 1024 * 1024,
+    cublas_workspace_min_alignment_required = 256
+  )
 }
 
 .fastkpc_full_cuda_phase3_static_environment_evidence <- function(
@@ -683,12 +797,12 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
     stop("Phase 3 static environment query result is malformed",
          call. = FALSE)
   }
-  if (!identical(queried$schema_version,
-                 "full-cuda-ci-phase3-environment-identity-v1") ||
+  policy <- .fastkpc_full_cuda_phase3_policy_contract()
+  if (!identical(queried$schema_version, policy$schema_version) ||
       !identical(queried$runtime_abi_schema_version,
                  fastkpc_full_cuda_fixed_sp_runtime_abi()$schema_version) ||
       !identical(queried$configuration_schema_version,
-                 "full-cuda-ci-fixed-sp-environment-config-v1")) {
+                 policy$configuration_schema_version)) {
     stop("Phase 3 static environment configuration is not canonical",
          call. = FALSE)
   }
@@ -707,24 +821,30 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
     }
   }
   for (field in c(
-    "gpu_name", "gpu_uuid", "cusolver_deterministic_mode",
-    "cublas_math_mode", "cublas_atomics_mode"
+    "gpu_name", "gpu_uuid", "cusolver_deterministic_mode_required",
+    "cublas_math_mode_required", "cublas_atomics_mode_required"
   )) {
     .fastkpc_full_cuda_phase3_scalar_text(queried[[field]], field)
   }
   if (!grepl("^GPU-[0-9a-f]{32}$", queried$gpu_uuid) ||
-      !identical(queried$cusolver_deterministic_mode, "enabled") ||
-      !identical(queried$cublas_math_mode, "pedantic") ||
-      !identical(queried$cublas_atomics_mode, "not_allowed") ||
+      !identical(queried$cusolver_deterministic_mode_required,
+                 policy$cusolver_deterministic_mode_required) ||
+      !identical(queried$cublas_math_mode_required,
+                 policy$cublas_math_mode_required) ||
+      !identical(queried$cublas_atomics_mode_required,
+                 policy$cublas_atomics_mode_required) ||
       !.fastkpc_full_cuda_phase3_bare_scalar(
-        queried$cublas_user_workspace_installed, "logical"
-      ) || !isTRUE(queried$cublas_user_workspace_installed) ||
+        queried$cublas_user_workspace_required, "logical"
+      ) || !identical(queried$cublas_user_workspace_required,
+                      policy$cublas_user_workspace_required) ||
       !.fastkpc_full_cuda_phase3_bare_number(
-        queried$cublas_workspace_bytes, 0
+        queried$cublas_workspace_bytes_required, 0
       ) || !.fastkpc_full_cuda_phase3_bare_number(
-        queried$cublas_workspace_alignment, 0
-      ) || queried$cublas_workspace_bytes != 16 * 1024 * 1024 ||
-      queried$cublas_workspace_alignment != 256) {
+        queried$cublas_workspace_min_alignment_required, 0
+      ) || !identical(queried$cublas_workspace_bytes_required,
+                      policy$cublas_workspace_bytes_required) ||
+      !identical(queried$cublas_workspace_min_alignment_required,
+                 policy$cublas_workspace_min_alignment_required)) {
     stop("Phase 3 static environment configuration is invalid",
          call. = FALSE)
   }
@@ -732,7 +852,7 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
   runtime <- list(
     runtime_abi = abi$schema_version,
     runtime_abi_hash = abi$sha256,
-    runtime_configuration_schema_version =
+    runtime_policy_schema_version =
       queried$configuration_schema_version,
     device_id = queried$device_id,
     cuda_toolkit_version = queried$cuda_toolkit_version,
@@ -746,16 +866,15 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
       queried$compute_capability_minor
     ),
     sm_count = queried$sm_count,
-    cusolver_deterministic_mode = queried$cusolver_deterministic_mode,
-    cublas_math_mode = queried$cublas_math_mode,
-    cublas_atomics_mode = queried$cublas_atomics_mode,
-    cublas_user_workspace_installed =
-      queried$cublas_user_workspace_installed,
-    cublas_workspace_bytes = queried$cublas_workspace_bytes,
-    cublas_workspace_alignment = queried$cublas_workspace_alignment
+    cusolver_deterministic_mode_required =
+      queried$cusolver_deterministic_mode_required,
+    cublas_math_mode_required = queried$cublas_math_mode_required,
+    cublas_atomics_mode_required = queried$cublas_atomics_mode_required,
+    cublas_user_workspace_required = queried$cublas_user_workspace_required,
+    cublas_workspace_bytes_required = queried$cublas_workspace_bytes_required,
+    cublas_workspace_min_alignment_required =
+      queried$cublas_workspace_min_alignment_required
   )
-  runtime$cublas_workspace_identity <-
-    .fastkpc_full_cuda_phase3_workspace_identity(runtime)
   runtime
 }
 
@@ -766,15 +885,17 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
     stop("Phase 3 runtime/device evidence is malformed", call. = FALSE)
   }
   abi <- fastkpc_full_cuda_fixed_sp_runtime_abi()
+  policy <- .fastkpc_full_cuda_phase3_policy_contract()
   required <- c(
     "runtime_abi", "runtime_abi_hash",
-    "runtime_configuration_schema_version", "device_id",
+    "runtime_policy_schema_version", "device_id",
     "cuda_toolkit_version", "cuda_driver_version", "gpu_name", "gpu_uuid",
     "compute_capability_major", "compute_capability_minor",
-    "compute_capability", "sm_count", "cusolver_deterministic_mode",
-    "cublas_math_mode", "cublas_atomics_mode",
-    "cublas_user_workspace_installed", "cublas_workspace_bytes",
-    "cublas_workspace_alignment", "cublas_workspace_identity"
+    "compute_capability", "sm_count",
+    "cusolver_deterministic_mode_required", "cublas_math_mode_required",
+    "cublas_atomics_mode_required", "cublas_user_workspace_required",
+    "cublas_workspace_bytes_required",
+    "cublas_workspace_min_alignment_required"
   )
   missing <- setdiff(required, names(runtime))
   if (length(missing) > 0L) {
@@ -807,10 +928,11 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
            call. = FALSE)
     }
   }
-  for (field in c("runtime_configuration_schema_version", "gpu_name",
+  for (field in c("runtime_policy_schema_version", "gpu_name",
                   "gpu_uuid", "compute_capability",
-                  "cusolver_deterministic_mode", "cublas_math_mode",
-                  "cublas_atomics_mode")) {
+                  "cusolver_deterministic_mode_required",
+                  "cublas_math_mode_required",
+                  "cublas_atomics_mode_required")) {
     .fastkpc_full_cuda_phase3_scalar_text(runtime[[field]], field)
   }
   expected_compute <- paste0(
@@ -819,38 +941,33 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
   if (!identical(runtime$compute_capability, expected_compute)) {
     stop("Phase 3 compute capability identity mismatch", call. = FALSE)
   }
-  if (!identical(
-        runtime$runtime_configuration_schema_version,
-        "full-cuda-ci-fixed-sp-environment-config-v1"
-      )) {
-    stop("Phase 3 runtime configuration schema is unsupported", call. = FALSE)
-  }
-  if (!identical(runtime$cusolver_deterministic_mode, "enabled") ||
-      !identical(runtime$cublas_math_mode, "pedantic") ||
-      !identical(runtime$cublas_atomics_mode, "not_allowed") ||
-      !.fastkpc_full_cuda_phase3_bare_scalar(
-        runtime$cublas_user_workspace_installed, "logical"
-      ) || !isTRUE(runtime$cublas_user_workspace_installed)) {
-    stop("Phase 3 deterministic runtime configuration is invalid",
-         call. = FALSE)
-  }
-  for (field in c("cublas_workspace_bytes", "cublas_workspace_alignment")) {
+  for (field in c(
+    "cublas_workspace_bytes_required",
+    "cublas_workspace_min_alignment_required"
+  )) {
     if (!.fastkpc_full_cuda_phase3_bare_number(runtime[[field]], 0)) {
-      stop("Phase 3 workspace evidence is malformed: ", field,
+      stop("Phase 3 runtime policy value is malformed: ", field,
            call. = FALSE)
     }
   }
-  if (runtime$cublas_workspace_alignment < 256 ||
-      runtime$cublas_workspace_alignment !=
-        floor(runtime$cublas_workspace_alignment) ||
-      !.fastkpc_full_cuda_phase3_sha256(runtime$cublas_workspace_identity)) {
-    stop("Phase 3 cuBLAS workspace identity is invalid", call. = FALSE)
-  }
-  if (!identical(
-        runtime$cublas_workspace_identity,
-        .fastkpc_full_cuda_phase3_workspace_identity(runtime)
-      )) {
-    stop("Phase 3 cuBLAS workspace identity mismatch", call. = FALSE)
+  if (!identical(runtime$runtime_policy_schema_version,
+                 policy$configuration_schema_version) ||
+      !grepl("^GPU-[0-9a-f]{32}$", runtime$gpu_uuid) ||
+      !identical(runtime$cusolver_deterministic_mode_required,
+                 policy$cusolver_deterministic_mode_required) ||
+      !identical(runtime$cublas_math_mode_required,
+                 policy$cublas_math_mode_required) ||
+      !identical(runtime$cublas_atomics_mode_required,
+                 policy$cublas_atomics_mode_required) ||
+      !.fastkpc_full_cuda_phase3_bare_scalar(
+        runtime$cublas_user_workspace_required, "logical"
+      ) || !identical(runtime$cublas_user_workspace_required,
+                      policy$cublas_user_workspace_required) ||
+      !identical(runtime$cublas_workspace_bytes_required,
+                 policy$cublas_workspace_bytes_required) ||
+      !identical(runtime$cublas_workspace_min_alignment_required,
+                 policy$cublas_workspace_min_alignment_required)) {
+    stop("Phase 3 runtime policy identity mismatch", call. = FALSE)
   }
   runtime
 }
@@ -866,6 +983,154 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
     result[[field]] <- right[[field]]
   }
   result
+}
+
+.fastkpc_full_cuda_phase3_validate_runtime_attestation_info <- function(
+    info, device_id) {
+  required <- c(
+    "device_id", "gpu_name", "cuda_toolkit_version",
+    "cuda_driver_version", "compute_capability_major",
+    "compute_capability_minor", "sm_count",
+    "cusolver_deterministic_mode", "cublas_math_mode",
+    "cublas_atomics_mode", "cublas_user_workspace_installed",
+    "cublas_workspace_bytes", "cublas_workspace_alignment", "freed"
+  )
+  missing <- setdiff(required, names(info))
+  if (!is.list(info) || is.object(info) || is.null(names(info)) ||
+      anyDuplicated(names(info)) || length(missing) > 0L) {
+    stop("Phase 3 runtime attestation info is malformed", call. = FALSE)
+  }
+  for (field in c(
+    "device_id", "cuda_toolkit_version", "cuda_driver_version",
+    "compute_capability_major", "compute_capability_minor", "sm_count"
+  )) {
+    if (!.fastkpc_full_cuda_phase3_bare_integer(info[[field]], 0L)) {
+      stop("Phase 3 runtime attestation integer is malformed: ", field,
+           call. = FALSE)
+    }
+  }
+  for (field in c("cublas_workspace_bytes", "cublas_workspace_alignment")) {
+    if (!.fastkpc_full_cuda_phase3_bare_number(info[[field]], 0)) {
+      stop("Phase 3 runtime attestation value is malformed: ", field,
+           call. = FALSE)
+    }
+  }
+  for (field in c(
+    "gpu_name", "cusolver_deterministic_mode",
+    "cublas_math_mode", "cublas_atomics_mode"
+  )) {
+    .fastkpc_full_cuda_phase3_scalar_text(info[[field]], field)
+  }
+  for (field in c("cublas_user_workspace_installed", "freed")) {
+    if (!.fastkpc_full_cuda_phase3_bare_scalar(info[[field]], "logical")) {
+      stop("Phase 3 runtime attestation flag is malformed: ", field,
+           call. = FALSE)
+    }
+  }
+  if (!identical(info$device_id, device_id) || isTRUE(info$freed)) {
+    stop("Phase 3 runtime attestation device/lifetime mismatch",
+         call. = FALSE)
+  }
+  info
+}
+
+.fastkpc_full_cuda_phase3_validate_runtime_attestation <- function(
+    runtime, expected_identity) {
+  fastkpc_full_cuda_phase3_validate_input_identity(expected_identity)
+  if (!exists("fixed_sp_cuda_runtime_info", mode = "function")) {
+    stop("Phase 3 runtime attestation requires CUDA runtime info",
+         call. = FALSE)
+  }
+  runtime_info <- tryCatch(
+    fixed_sp_cuda_runtime_info(runtime),
+    error = function(error) {
+      stop("Phase 3 runtime attestation query failed: ",
+           conditionMessage(error), call. = FALSE)
+    }
+  )
+  runtime_info <- .fastkpc_full_cuda_phase3_validate_runtime_attestation_info(
+    runtime_info, expected_identity$device_id
+  )
+  device_evidence <- .fastkpc_full_cuda_phase3_validate_runtime_evidence(
+    fastkpc_full_cuda_phase3_discover_device_evidence(
+      list(), expected_identity$device_id
+    ),
+    expected_identity$device_id
+  )
+  execution_evidence <- .fastkpc_full_cuda_phase3_validate_execution_evidence(
+    fastkpc_full_cuda_phase3_discover_execution_evidence(
+      list(), expected_identity$device_id
+    )
+  )
+  for (field in c(
+    "runtime_abi", "runtime_abi_hash", "runtime_policy_schema_version",
+    "device_id", "cuda_toolkit_version", "cuda_driver_version",
+    "gpu_name", "gpu_uuid", "compute_capability_major",
+    "compute_capability_minor", "compute_capability", "sm_count",
+    "cusolver_deterministic_mode_required", "cublas_math_mode_required",
+    "cublas_atomics_mode_required", "cublas_user_workspace_required",
+    "cublas_workspace_bytes_required",
+    "cublas_workspace_min_alignment_required"
+  )) {
+    if (!.fastkpc_full_cuda_phase3_identity_value_equal(
+          device_evidence[[field]], expected_identity[[field]]
+        )) {
+      stop("Phase 3 static device attestation mismatch: ", field,
+           call. = FALSE)
+    }
+  }
+  for (field in c(
+    "source_commit", "phase3_source_commit", "R_version",
+    "phase3_R_version", "mgcv_version", "phase3_mgcv_version",
+    "provenance_schema_version", "provenance_mode",
+    "source_closure_schema_version", "source_discovery_semantics",
+    "source_closure_count", "source_closure_sha256",
+    "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
+    "execution_sources_unchanged_after_run", "execution_provenance_state",
+    "native_library_identity", "native_library_sha256",
+    "native_build_inputs_sha256",
+    "native_build_dependencies_schema_version",
+    "native_build_trace_semantics", "native_build_trace_invocation",
+    "native_build_tracer_path", "native_build_dependency_count",
+    "native_build_exclusion_count", "native_build_dependencies_sha256",
+    "native_build_trace_sha256", "native_build_tracer_sha256"
+  )) {
+    if (!.fastkpc_full_cuda_phase3_identity_value_equal(
+          execution_evidence[[field]], expected_identity[[field]]
+        )) {
+      stop("Phase 3 execution/native attestation mismatch: ", field,
+           call. = FALSE)
+    }
+  }
+  if (!identical(runtime_info$gpu_name, expected_identity$gpu_name) ||
+      !identical(runtime_info$cuda_toolkit_version,
+                 expected_identity$cuda_toolkit_version) ||
+      !identical(runtime_info$cuda_driver_version,
+                 expected_identity$cuda_driver_version) ||
+      !identical(runtime_info$compute_capability_major,
+                 expected_identity$compute_capability_major) ||
+      !identical(runtime_info$compute_capability_minor,
+                 expected_identity$compute_capability_minor) ||
+      !identical(runtime_info$sm_count, expected_identity$sm_count) ||
+      !identical(runtime_info$cusolver_deterministic_mode,
+                 expected_identity$cusolver_deterministic_mode_required) ||
+      !identical(runtime_info$cublas_math_mode,
+                 expected_identity$cublas_math_mode_required) ||
+      !identical(runtime_info$cublas_atomics_mode,
+                 expected_identity$cublas_atomics_mode_required) ||
+      !isTRUE(runtime_info$cublas_user_workspace_installed) ||
+      !identical(runtime_info$cublas_workspace_bytes,
+                 expected_identity$cublas_workspace_bytes_required) ||
+      runtime_info$cublas_workspace_alignment <
+        expected_identity$cublas_workspace_min_alignment_required) {
+    stop("Phase 3 runtime attestation mismatch", call. = FALSE)
+  }
+  list(
+    runtime_info = runtime_info,
+    device_evidence = device_evidence,
+    execution_evidence = execution_evidence,
+    authenticated = TRUE
+  )
 }
 
 .fastkpc_full_cuda_phase3_default_catalog_evidence <- function(catalog) {
@@ -959,8 +1224,10 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
     "phase0_manifest_hash", "phase1_manifest_hash", "phase2_manifest_hash",
     "dataset_file_sha256", "dataset_matrix_sha256",
     "canonical_setup_corpus_hash", "canonical_target_corpus_hash",
-    "runtime_abi_hash", "route_config_hash", "cublas_workspace_identity",
-    "source_closure_sha256", "execution_snapshot_sha256"
+    "runtime_abi_hash", "route_config_hash", "source_closure_sha256",
+    "execution_snapshot_sha256", "native_library_sha256",
+    "native_build_inputs_sha256", "native_build_dependencies_sha256",
+    "native_build_trace_sha256", "native_build_tracer_sha256"
   )) {
     if (!.fastkpc_full_cuda_phase3_sha256(identity[[field]])) {
       stop("Phase 3 input identity hash is malformed: ", field,
@@ -980,16 +1247,23 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
     stop("Phase 3 input identity execution source aliases disagree",
          call. = FALSE)
   }
-  for (field in c("runtime_abi", "runtime_configuration_schema_version",
+  for (field in c("runtime_abi", "runtime_policy_schema_version",
                   "R_version", "mgcv_version", "gpu_name",
-                  "gpu_uuid", "compute_capability", "cusolver_deterministic_mode",
-                  "cublas_math_mode", "cublas_atomics_mode",
+                  "gpu_uuid", "compute_capability",
+                  "cusolver_deterministic_mode_required",
+                  "cublas_math_mode_required",
+                  "cublas_atomics_mode_required",
                   "phase2_R_version", "phase2_mgcv_version",
                   "phase3_R_version", "phase3_mgcv_version",
                   "execution_provenance_state",
                   "provenance_schema_version", "provenance_mode",
                   "source_closure_schema_version",
-                  "source_discovery_semantics")) {
+                  "source_discovery_semantics",
+                  "native_library_identity",
+                  "native_build_dependencies_schema_version",
+                  "native_build_trace_semantics",
+                  "native_build_trace_invocation",
+                  "native_build_tracer_path")) {
     .fastkpc_full_cuda_phase3_scalar_text(identity[[field]], field)
   }
   if (!identical(identity$R_version, identity$phase3_R_version) ||
@@ -1027,7 +1301,8 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
   }
   for (field in c(
     "relevant_sources_dirty_or_untracked",
-    "execution_sources_unchanged_after_run"
+    "execution_sources_unchanged_after_run",
+    "cublas_user_workspace_required"
   )) {
     if (!.fastkpc_full_cuda_phase3_bare_scalar(identity[[field]], "logical")) {
       stop("Phase 3 input identity provenance flag is malformed: ", field,
@@ -1036,34 +1311,53 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
   }
   for (field in c("cuda_toolkit_version", "cuda_driver_version",
                   "compute_capability_major", "compute_capability_minor",
-                  "sm_count", "device_id", "shard_count")) {
+                  "sm_count", "device_id", "shard_count",
+                  "native_build_dependency_count",
+                  "native_build_exclusion_count")) {
     if (!.fastkpc_full_cuda_phase3_bare_integer(identity[[field]], 0L)) {
       stop("Phase 3 input identity integer is malformed: ", field,
            call. = FALSE)
     }
   }
-  for (field in c("cublas_workspace_bytes", "cublas_workspace_alignment")) {
+  for (field in c(
+    "cublas_workspace_bytes_required",
+    "cublas_workspace_min_alignment_required"
+  )) {
     if (!.fastkpc_full_cuda_phase3_bare_number(identity[[field]], 0)) {
       stop("Phase 3 input identity workspace value is malformed: ", field,
            call. = FALSE)
     }
   }
+  policy <- .fastkpc_full_cuda_phase3_policy_contract()
   if (!identical(identity$runtime_abi,
                  fastkpc_full_cuda_fixed_sp_runtime_abi()$schema_version) ||
       !identical(identity$runtime_abi_hash,
                  fastkpc_full_cuda_fixed_sp_runtime_abi()$sha256) ||
-      !identical(
-        identity$runtime_configuration_schema_version,
-        "full-cuda-ci-fixed-sp-environment-config-v1"
-      ) ||
-      !identical(identity$cusolver_deterministic_mode, "enabled") ||
-      !identical(identity$cublas_math_mode, "pedantic") ||
-      !identical(identity$cublas_atomics_mode, "not_allowed") ||
-      !isTRUE(identity$cublas_user_workspace_installed) ||
-      identity$cublas_workspace_alignment < 256 ||
+      !identical(identity$runtime_policy_schema_version,
+                 policy$configuration_schema_version) ||
+      !identical(identity$cusolver_deterministic_mode_required,
+                 policy$cusolver_deterministic_mode_required) ||
+      !identical(identity$cublas_math_mode_required,
+                 policy$cublas_math_mode_required) ||
+      !identical(identity$cublas_atomics_mode_required,
+                 policy$cublas_atomics_mode_required) ||
+      !identical(identity$cublas_user_workspace_required,
+                 policy$cublas_user_workspace_required) ||
+      !identical(identity$cublas_workspace_bytes_required,
+                 policy$cublas_workspace_bytes_required) ||
+      !identical(identity$cublas_workspace_min_alignment_required,
+                 policy$cublas_workspace_min_alignment_required) ||
       !identical(identity$compute_capability,
                  paste0(identity$compute_capability_major, ".",
                         identity$compute_capability_minor)) ||
+      !grepl("^GPU-[0-9a-f]{32}$", identity$gpu_uuid) ||
+      !identical(identity$native_library_identity,
+                 "qualified-pinned-inode-sha-exact-registered-mapped-path-v3") ||
+      !identical(identity$native_build_dependencies_schema_version,
+                 "full-cuda-ci-native-build-dependencies-v3") ||
+      !identical(identity$native_build_trace_semantics,
+                 "linux-strace-successful-read-exec-evidence-v3") ||
+      identity$native_build_dependency_count < 1L ||
       !identical(identity$shard_count,
                  fastkpc_full_cuda_phase3_route_config()$shard_count) ||
       !identical(identity$route_config_hash,
@@ -1139,8 +1433,7 @@ fastkpc_full_cuda_phase3_input_identity <- function(catalog, device_id) {
     phase2_mgcv_version = lineage$phase2_mgcv_version,
     runtime_abi = abi$schema_version,
     runtime_abi_hash = abi$sha256,
-    runtime_configuration_schema_version =
-      runtime$runtime_configuration_schema_version,
+    runtime_policy_schema_version = runtime$runtime_policy_schema_version,
     route_config_hash = route$sha256,
     source_commit = execution$source_commit,
     phase3_source_commit = execution$phase3_source_commit,
@@ -1160,6 +1453,20 @@ fastkpc_full_cuda_phase3_input_identity <- function(catalog, device_id) {
     execution_sources_unchanged_after_run =
       execution$execution_sources_unchanged_after_run,
     execution_provenance_state = execution$execution_provenance_state,
+    native_library_identity = execution$native_library_identity,
+    native_library_sha256 = execution$native_library_sha256,
+    native_build_inputs_sha256 = execution$native_build_inputs_sha256,
+    native_build_dependencies_schema_version =
+      execution$native_build_dependencies_schema_version,
+    native_build_trace_semantics = execution$native_build_trace_semantics,
+    native_build_trace_invocation = execution$native_build_trace_invocation,
+    native_build_tracer_path = execution$native_build_tracer_path,
+    native_build_dependency_count = execution$native_build_dependency_count,
+    native_build_exclusion_count = execution$native_build_exclusion_count,
+    native_build_dependencies_sha256 =
+      execution$native_build_dependencies_sha256,
+    native_build_trace_sha256 = execution$native_build_trace_sha256,
+    native_build_tracer_sha256 = execution$native_build_tracer_sha256,
     cuda_toolkit_version = runtime$cuda_toolkit_version,
     cuda_driver_version = runtime$cuda_driver_version,
     gpu_name = runtime$gpu_name,
@@ -1169,13 +1476,14 @@ fastkpc_full_cuda_phase3_input_identity <- function(catalog, device_id) {
     compute_capability = runtime$compute_capability,
     sm_count = runtime$sm_count,
     device_id = runtime$device_id,
-    cusolver_deterministic_mode = runtime$cusolver_deterministic_mode,
-    cublas_math_mode = runtime$cublas_math_mode,
-    cublas_atomics_mode = runtime$cublas_atomics_mode,
-    cublas_user_workspace_installed = runtime$cublas_user_workspace_installed,
-    cublas_workspace_bytes = runtime$cublas_workspace_bytes,
-    cublas_workspace_alignment = runtime$cublas_workspace_alignment,
-    cublas_workspace_identity = runtime$cublas_workspace_identity,
+    cusolver_deterministic_mode_required =
+      runtime$cusolver_deterministic_mode_required,
+    cublas_math_mode_required = runtime$cublas_math_mode_required,
+    cublas_atomics_mode_required = runtime$cublas_atomics_mode_required,
+    cublas_user_workspace_required = runtime$cublas_user_workspace_required,
+    cublas_workspace_bytes_required = runtime$cublas_workspace_bytes_required,
+    cublas_workspace_min_alignment_required =
+      runtime$cublas_workspace_min_alignment_required,
     shard_count = route$shard_count,
     authenticated = TRUE
   )

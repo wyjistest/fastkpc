@@ -28,26 +28,27 @@ assert_true(identical(
     "configuration_schema_version", "device_id", "cuda_toolkit_version",
     "cuda_driver_version", "gpu_name", "gpu_uuid",
     "compute_capability_major", "compute_capability_minor", "sm_count",
-    "cusolver_deterministic_mode", "cublas_math_mode",
-    "cublas_atomics_mode", "cublas_user_workspace_installed",
-    "cublas_workspace_bytes", "cublas_workspace_alignment"
+    "cusolver_deterministic_mode_required", "cublas_math_mode_required",
+    "cublas_atomics_mode_required", "cublas_user_workspace_required",
+    "cublas_workspace_bytes_required",
+    "cublas_workspace_min_alignment_required"
   )
-), "static environment query exact schema")
+), "static environment policy query exact schema")
 assert_true(
   identical(identity$schema_version,
-            "full-cuda-ci-phase3-environment-identity-v1") &&
+            "full-cuda-ci-phase3-environment-policy-v1") &&
     identical(identity$runtime_abi_schema_version,
               "full-cuda-ci-fixed-sp-runtime-v1") &&
     identical(identity$configuration_schema_version,
-              "full-cuda-ci-fixed-sp-environment-config-v1") &&
+              "full-cuda-ci-fixed-sp-environment-policy-v1") &&
     identical(identity$device_id, 0L) &&
-    identical(identity$cusolver_deterministic_mode, "enabled") &&
-    identical(identity$cublas_math_mode, "pedantic") &&
-    identical(identity$cublas_atomics_mode, "not_allowed") &&
-    isTRUE(identity$cublas_user_workspace_installed) &&
-    identical(identity$cublas_workspace_bytes, 16777216) &&
-    identical(identity$cublas_workspace_alignment, 256),
-  "static environment query reports authenticated runtime configuration"
+    identical(identity$cusolver_deterministic_mode_required, "enabled") &&
+    identical(identity$cublas_math_mode_required, "pedantic") &&
+    identical(identity$cublas_atomics_mode_required, "not_allowed") &&
+    isTRUE(identity$cublas_user_workspace_required) &&
+    identical(identity$cublas_workspace_bytes_required, 16777216) &&
+    identical(identity$cublas_workspace_min_alignment_required, 256),
+  "static environment query reports immutable runtime policy"
 )
 assert_true(grepl("^GPU-[0-9a-f]{32}$", identity$gpu_uuid),
             "static environment query reports canonical GPU UUID")

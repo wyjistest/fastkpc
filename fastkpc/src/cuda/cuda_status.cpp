@@ -96,7 +96,7 @@ CudaPhase3EnvironmentIdentity fastkpc_cuda_phase3_environment_identity(
   }
 
   CudaPhase3EnvironmentIdentity identity;
-  identity.schema_version = "full-cuda-ci-phase3-environment-identity-v1";
+  identity.schema_version = "full-cuda-ci-phase3-environment-policy-v1";
   identity.runtime_abi_schema_version =
     fastkpc::kFixedSpRuntimeAbiSchemaVersion;
   identity.configuration_schema_version =
@@ -109,13 +109,15 @@ CudaPhase3EnvironmentIdentity fastkpc_cuda_phase3_environment_identity(
   identity.compute_capability_major = properties.major;
   identity.compute_capability_minor = properties.minor;
   identity.sm_count = properties.multiProcessorCount;
-  identity.cusolver_deterministic_mode =
+  identity.cusolver_deterministic_mode_required =
     fastkpc::kFixedSpCusolverDeterministicMode;
-  identity.cublas_math_mode = fastkpc::kFixedSpCublasMathMode;
-  identity.cublas_atomics_mode = fastkpc::kFixedSpCublasAtomicsMode;
-  identity.cublas_user_workspace_installed = true;
-  identity.cublas_workspace_bytes = fastkpc::kFixedSpCublasWorkspaceBytes;
-  identity.cublas_workspace_alignment =
-    fastkpc::kFixedSpCublasWorkspaceAlignment;
+  identity.cublas_math_mode_required = fastkpc::kFixedSpCublasMathMode;
+  identity.cublas_atomics_mode_required = fastkpc::kFixedSpCublasAtomicsMode;
+  identity.cublas_user_workspace_required =
+    fastkpc::kFixedSpCublasUserWorkspaceRequired;
+  identity.cublas_workspace_bytes_required =
+    fastkpc::kFixedSpCublasWorkspaceBytes;
+  identity.cublas_workspace_min_alignment_required =
+    fastkpc::kFixedSpCublasWorkspaceMinAlignment;
   return identity;
 }

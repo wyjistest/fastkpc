@@ -3,6 +3,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cublas_v2.h>
+#include <cusolverDn.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -12,12 +14,18 @@ namespace fastkpc {
 constexpr char kFixedSpRuntimeAbiSchemaVersion[] =
   "full-cuda-ci-fixed-sp-runtime-v1";
 constexpr char kFixedSpEnvironmentConfigSchemaVersion[] =
-  "full-cuda-ci-fixed-sp-environment-config-v1";
+  "full-cuda-ci-fixed-sp-environment-policy-v1";
 constexpr char kFixedSpCusolverDeterministicMode[] = "enabled";
 constexpr char kFixedSpCublasMathMode[] = "pedantic";
 constexpr char kFixedSpCublasAtomicsMode[] = "not_allowed";
+constexpr cusolverDeterministicMode_t kFixedSpCusolverDeterministicModeValue =
+  CUSOLVER_DETERMINISTIC_RESULTS;
+constexpr cublasMath_t kFixedSpCublasMathModeValue = CUBLAS_PEDANTIC_MATH;
+constexpr cublasAtomicsMode_t kFixedSpCublasAtomicsModeValue =
+  CUBLAS_ATOMICS_NOT_ALLOWED;
+constexpr bool kFixedSpCublasUserWorkspaceRequired = true;
 constexpr std::size_t kFixedSpCublasWorkspaceBytes = 16U * 1024U * 1024U;
-constexpr std::size_t kFixedSpCublasWorkspaceAlignment = 256U;
+constexpr std::size_t kFixedSpCublasWorkspaceMinAlignment = 256U;
 
 enum class FixedSpRoute : int {
   Unset = -1,

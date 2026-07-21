@@ -3332,16 +3332,18 @@ extern "C" SEXP C_fastkpc_cuda_phase3_environment_identity(SEXP device_s) {
     Rcpp::Named("compute_capability_minor") =
       identity.compute_capability_minor,
     Rcpp::Named("sm_count") = identity.sm_count,
-    Rcpp::Named("cusolver_deterministic_mode") =
-      identity.cusolver_deterministic_mode,
-    Rcpp::Named("cublas_math_mode") = identity.cublas_math_mode,
-    Rcpp::Named("cublas_atomics_mode") = identity.cublas_atomics_mode,
-    Rcpp::Named("cublas_user_workspace_installed") =
-      identity.cublas_user_workspace_installed,
-    Rcpp::Named("cublas_workspace_bytes") =
-      static_cast<double>(identity.cublas_workspace_bytes),
-    Rcpp::Named("cublas_workspace_alignment") =
-      static_cast<double>(identity.cublas_workspace_alignment)
+    Rcpp::Named("cusolver_deterministic_mode_required") =
+      identity.cusolver_deterministic_mode_required,
+    Rcpp::Named("cublas_math_mode_required") =
+      identity.cublas_math_mode_required,
+    Rcpp::Named("cublas_atomics_mode_required") =
+      identity.cublas_atomics_mode_required,
+    Rcpp::Named("cublas_user_workspace_required") =
+      identity.cublas_user_workspace_required,
+    Rcpp::Named("cublas_workspace_bytes_required") =
+      static_cast<double>(identity.cublas_workspace_bytes_required),
+    Rcpp::Named("cublas_workspace_min_alignment_required") =
+      static_cast<double>(identity.cublas_workspace_min_alignment_required)
   );
   END_RCPP
 }

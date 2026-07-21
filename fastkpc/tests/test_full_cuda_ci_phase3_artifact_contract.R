@@ -161,6 +161,7 @@ lineage_fixture <- list(
   mgcv_version = "1.9.1"
 )
 runtime_abi <- fastkpc_full_cuda_fixed_sp_runtime_abi()
+policy_fixture <- .fastkpc_full_cuda_phase3_policy_contract()
 runtime_fixture <- list(
   runtime_abi = runtime_abi$schema_version,
   runtime_abi_hash = runtime_abi$sha256,
@@ -173,23 +174,23 @@ runtime_fixture <- list(
   compute_capability_minor = 0L,
   compute_capability = "8.0",
   sm_count = 108L,
-  cusolver_deterministic_mode = "enabled",
-  cublas_math_mode = "pedantic",
-  cublas_atomics_mode = "not_allowed",
-  cublas_user_workspace_installed = TRUE,
-  cublas_workspace_bytes = 16777216,
-  cublas_workspace_alignment = 256,
-  cublas_workspace_identity = NULL,
-  runtime_configuration_schema_version =
-    "full-cuda-ci-fixed-sp-environment-config-v1"
+  cusolver_deterministic_mode_required =
+    policy_fixture$cusolver_deterministic_mode_required,
+  cublas_math_mode_required = policy_fixture$cublas_math_mode_required,
+  cublas_atomics_mode_required = policy_fixture$cublas_atomics_mode_required,
+  cublas_user_workspace_required =
+    policy_fixture$cublas_user_workspace_required,
+  cublas_workspace_bytes_required =
+    policy_fixture$cublas_workspace_bytes_required,
+  cublas_workspace_min_alignment_required =
+    policy_fixture$cublas_workspace_min_alignment_required,
+  runtime_policy_schema_version =
+    policy_fixture$configuration_schema_version
 )
-runtime_fixture$cublas_workspace_identity <-
-  .fastkpc_full_cuda_phase3_workspace_identity(runtime_fixture)
 static_environment_fixture <- list(
-  schema_version = "full-cuda-ci-phase3-environment-identity-v1",
+  schema_version = policy_fixture$schema_version,
   runtime_abi_schema_version = runtime_abi$schema_version,
-  configuration_schema_version =
-    "full-cuda-ci-fixed-sp-environment-config-v1",
+  configuration_schema_version = policy_fixture$configuration_schema_version,
   device_id = 2L,
   cuda_toolkit_version = 12040L,
   cuda_driver_version = 55054L,
@@ -198,12 +199,16 @@ static_environment_fixture <- list(
   compute_capability_major = 8L,
   compute_capability_minor = 0L,
   sm_count = 108L,
-  cusolver_deterministic_mode = "enabled",
-  cublas_math_mode = "pedantic",
-  cublas_atomics_mode = "not_allowed",
-  cublas_user_workspace_installed = TRUE,
-  cublas_workspace_bytes = 16777216,
-  cublas_workspace_alignment = 256
+  cusolver_deterministic_mode_required =
+    policy_fixture$cusolver_deterministic_mode_required,
+  cublas_math_mode_required = policy_fixture$cublas_math_mode_required,
+  cublas_atomics_mode_required = policy_fixture$cublas_atomics_mode_required,
+  cublas_user_workspace_required =
+    policy_fixture$cublas_user_workspace_required,
+  cublas_workspace_bytes_required =
+    policy_fixture$cublas_workspace_bytes_required,
+  cublas_workspace_min_alignment_required =
+    policy_fixture$cublas_workspace_min_alignment_required
 )
 catalog_fixture <- list(
   phase3_lineage = lineage_fixture
@@ -257,25 +262,6 @@ current_mgcv_version <- if (requireNamespace("mgcv", quietly = TRUE)) {
 } else {
   fail("contract test requires the installed mgcv version")
 }
-execution_fixture <- list(
-  authenticated = TRUE,
-  source_commit = fastkpc_full_cuda_source_commit(),
-  phase3_source_commit = fastkpc_full_cuda_source_commit(),
-  R_version = R.version.string,
-  phase3_R_version = R.version.string,
-  mgcv_version = current_mgcv_version,
-  phase3_mgcv_version = current_mgcv_version,
-  provenance_schema_version = "full-cuda-ci-execution-source-snapshot-v6",
-  provenance_mode = "working-tree-execution-snapshot-v1",
-  source_closure_schema_version = "full-cuda-ci-execution-source-closure-v1",
-  source_discovery_semantics = "parsed-r-ast-load-time-literal-source-v1",
-  source_closure_count = 1L,
-  source_closure_sha256 = sha("phase3-source-closure"),
-  execution_snapshot_sha256 = sha("phase3-execution-snapshot"),
-  relevant_sources_dirty_or_untracked = FALSE,
-  execution_sources_unchanged_after_run = TRUE,
-  execution_provenance_state = "post-run-verified"
-)
 default_execution_capture <- fastkpc_full_cuda_phase3_discover_execution_evidence(
   catalog_fixture, 2L
 )
@@ -286,6 +272,9 @@ assert_true(
               "pre-run-capture"),
   "pre-run source capture is not labeled post-run verified"
 )
+execution_fixture <- default_execution_capture
+execution_fixture$execution_sources_unchanged_after_run <- TRUE
+execution_fixture$execution_provenance_state <- "post-run-verified"
 default_discoverer_calls <- new.env(parent = emptyenv())
 default_discoverer_calls$catalog <- 0L
 default_discoverer_calls$runtime <- 0L
@@ -369,6 +358,29 @@ assert_true(is.list(identity) && identical(identity$device_id, 2L) &&
               grepl("^[0-9a-f]{64}$", identity$sha256),
             "authenticated Phase 3 input identity")
 assert_true(
+  all(c(
+    "runtime_policy_schema_version",
+    "cusolver_deterministic_mode_required", "cublas_math_mode_required",
+    "cublas_atomics_mode_required", "cublas_user_workspace_required",
+    "cublas_workspace_bytes_required",
+    "cublas_workspace_min_alignment_required",
+    "native_library_identity", "native_library_sha256",
+    "native_build_inputs_sha256",
+    "native_build_dependencies_schema_version",
+    "native_build_trace_semantics", "native_build_trace_invocation",
+    "native_build_tracer_path", "native_build_dependency_count",
+    "native_build_exclusion_count", "native_build_dependencies_sha256",
+    "native_build_trace_sha256", "native_build_tracer_sha256"
+  ) %in% names(identity)) &&
+    !any(c(
+      "cusolver_deterministic_mode", "cublas_math_mode",
+      "cublas_atomics_mode", "cublas_user_workspace_installed",
+      "cublas_workspace_bytes", "cublas_workspace_alignment",
+      "cublas_workspace_identity"
+    ) %in% names(identity)),
+  "input identity separates stable policy from actual runtime attestation"
+)
+assert_true(
   default_discoverer_calls$catalog == 1L &&
     default_discoverer_calls$runtime == 1L &&
     default_discoverer_calls$device == 1L &&
@@ -391,8 +403,13 @@ assert_true(
   "Phase 2 lineage and current Phase 3 execution identity remain separate"
 )
 assert_true(
-  identical(default_identity$relevant_sources_dirty_or_untracked, FALSE) &&
-    identical(default_identity$execution_sources_unchanged_after_run, TRUE),
+  identical(
+    default_identity$relevant_sources_dirty_or_untracked,
+    execution_fixture$relevant_sources_dirty_or_untracked
+  ) && identical(
+    default_identity$execution_sources_unchanged_after_run,
+    execution_fixture$execution_sources_unchanged_after_run
+  ),
   "execution provenance dirtiness and post-run authentication are retained"
 )
 synthetic_non_head_execution <- execution_fixture
@@ -584,8 +601,6 @@ assign(
 catalog_with_unmarked_provenance <- catalog_fixture
 catalog_with_unmarked_provenance$phase3_execution_provenance <-
   execution_fixture
-catalog_with_unmarked_provenance$phase3_execution_provenance$authenticated <-
-  NULL
 assign(
   "fastkpc_full_cuda_phase3_discover_execution_evidence",
   repository_execution_discoverer,
@@ -595,23 +610,15 @@ assert_error(
   fastkpc_full_cuda_phase3_input_identity(
     catalog_with_unmarked_provenance, 2L
   ),
-  "unmarked catalog provenance must fail closed"
+  "catalog-supplied execution provenance must fail closed"
 )
 assign(
   "fastkpc_full_cuda_phase3_discover_execution_evidence",
   valid_execution_discoverer,
   envir = .GlobalEnv
 )
-catalog_with_incomplete_provenance <- catalog_fixture
-catalog_with_incomplete_provenance$phase3_execution_provenance <-
-  execution_fixture
-catalog_with_incomplete_provenance$phase3_execution_provenance$R_version <- NULL
-catalog_with_incomplete_provenance$phase3_execution_provenance$phase3_R_version <-
-  NULL
-catalog_with_incomplete_provenance$phase3_execution_provenance$mgcv_version <-
-  NULL
-catalog_with_incomplete_provenance$phase3_execution_provenance$phase3_mgcv_version <-
-  NULL
+catalog_with_execution_evidence <- catalog_fixture
+catalog_with_execution_evidence$phase3_execution_evidence <- execution_fixture
 assign(
   "fastkpc_full_cuda_phase3_discover_execution_evidence",
   repository_execution_discoverer,
@@ -619,78 +626,20 @@ assign(
 )
 assert_error(
   fastkpc_full_cuda_phase3_input_identity(
-    catalog_with_incomplete_provenance, 2L
+    catalog_with_execution_evidence, 2L
   ),
-  "missing current execution versions must fail closed"
+  "catalog-supplied execution evidence must fail closed"
 )
 assign(
   "fastkpc_full_cuda_phase3_discover_execution_evidence",
   valid_execution_discoverer,
-  envir = .GlobalEnv
-)
-full_provenance_fixture <- execution_fixture
-full_provenance_fixture$head_base_commit <- full_provenance_fixture$source_commit
-full_provenance_fixture$authenticated <- NULL
-provenance_verify_calls <- 0L
-old_provenance_verifier <- get(
-  "fastkpc_full_cuda_fixed_sp_verify_execution_provenance",
-  envir = .GlobalEnv
-)
-assign(
-  "fastkpc_full_cuda_fixed_sp_verify_execution_provenance",
-  function(provenance) {
-    provenance_verify_calls <<- provenance_verify_calls + 1L
-    provenance
-  },
-  envir = .GlobalEnv
-)
-catalog_with_full_provenance <- catalog_fixture
-catalog_with_full_provenance$phase3_execution_provenance <-
-  full_provenance_fixture
-assign(
-  "fastkpc_full_cuda_phase3_discover_execution_evidence",
-  repository_execution_discoverer,
-  envir = .GlobalEnv
-)
-full_provenance_identity <- fastkpc_full_cuda_phase3_input_identity(
-  catalog_with_full_provenance,
-  2L
-)
-assert_true(
-  provenance_verify_calls == 1L &&
-    identical(full_provenance_identity$source_commit,
-              full_provenance_fixture$head_base_commit) &&
-    identical(full_provenance_identity$R_version, R.version.string) &&
-    identical(full_provenance_identity$mgcv_version, current_mgcv_version),
-  "default discovery verifies Phase 3C provenance and captures current versions"
-)
-marked_full_provenance <- full_provenance_fixture
-marked_full_provenance$authenticated <- TRUE
-catalog_with_marked_provenance <- catalog_fixture
-catalog_with_marked_provenance$phase3_execution_provenance <-
-  marked_full_provenance
-provenance_verify_calls <- 0L
-invisible(fastkpc_full_cuda_phase3_input_identity(
-  catalog_with_marked_provenance, 2L
-))
-assert_true(
-  provenance_verify_calls == 1L,
-  "marked Phase 3C provenance still routes through the verifier"
-)
-assign(
-  "fastkpc_full_cuda_phase3_discover_execution_evidence",
-  valid_execution_discoverer,
-  envir = .GlobalEnv
-)
-assign(
-  "fastkpc_full_cuda_fixed_sp_verify_execution_provenance",
-  old_provenance_verifier,
   envir = .GlobalEnv
 )
 
 identity_rejected <- function(lineage = lineage_fixture,
                               runtime = runtime_fixture,
                               device = runtime_fixture,
+                              execution = execution_fixture,
                               label = "invalid identity") {
   assign(
     "fastkpc_full_cuda_phase3_discover_catalog_evidence",
@@ -705,6 +654,11 @@ identity_rejected <- function(lineage = lineage_fixture,
   assign(
     "fastkpc_full_cuda_phase3_discover_device_evidence",
     function(catalog, device_id) device,
+    envir = .GlobalEnv
+  )
+  assign(
+    "fastkpc_full_cuda_phase3_discover_execution_evidence",
+    function(catalog, device_id) execution,
     envir = .GlobalEnv
   )
   assert_error(
@@ -724,6 +678,11 @@ identity_rejected <- function(lineage = lineage_fixture,
   assign(
     "fastkpc_full_cuda_phase3_discover_device_evidence",
     valid_device_discoverer,
+    envir = .GlobalEnv
+  )
+  assign(
+    "fastkpc_full_cuda_phase3_discover_execution_evidence",
+    valid_execution_discoverer,
     envir = .GlobalEnv
   )
 }
@@ -747,6 +706,37 @@ mismatched_runtime <- runtime_fixture
 mismatched_runtime$device_id <- 3L
 identity_rejected(runtime = mismatched_runtime, device = mismatched_runtime,
                   label = "mismatched device identity must fail")
+wrong_native_library <- execution_fixture
+wrong_native_library$native_library_sha256 <- sha("wrong-native-library")
+identity_rejected(
+  execution = wrong_native_library,
+  label = "mutated native library evidence must fail"
+)
+wrong_build_inputs <- execution_fixture
+wrong_build_inputs$native_build_inputs_sha256 <- sha("wrong-build-inputs")
+identity_rejected(
+  execution = wrong_build_inputs,
+  label = "mutated native build input evidence must fail"
+)
+wrong_build_dependencies <- execution_fixture
+wrong_build_dependencies$native_build_dependencies_sha256 <-
+  sha("wrong-build-dependencies")
+identity_rejected(
+  execution = wrong_build_dependencies,
+  label = "mutated native dependency evidence must fail"
+)
+wrong_build_trace <- execution_fixture
+wrong_build_trace$native_build_trace_sha256 <- sha("wrong-build-trace")
+identity_rejected(
+  execution = wrong_build_trace,
+  label = "mutated native build trace evidence must fail"
+)
+wrong_build_tracer <- execution_fixture
+wrong_build_tracer$native_build_tracer_sha256 <- sha("wrong-build-tracer")
+identity_rejected(
+  execution = wrong_build_tracer,
+  label = "mutated native tracer evidence must fail"
+)
 forged_identity <- identity
 forged_identity$route_config_hash <- sha("forged-route")
 assert_error(
@@ -1099,8 +1089,8 @@ manifest_mutations <- list(
        "runtime ABI mutation must fail"),
   list("runtime_abi_hash", sha("wrong-runtime-abi-hash"),
        "runtime ABI hash mutation must fail"),
-  list("runtime_configuration_schema_version", "wrong-config-schema",
-       "runtime configuration schema mutation must fail"),
+  list("runtime_policy_schema_version", "wrong-policy-schema",
+       "runtime policy schema mutation must fail"),
   list("source_commit", strrep("d", 40L),
        "current source commit mutation must fail"),
   list("phase3_source_commit", strrep("e", 40L),
@@ -1138,6 +1128,33 @@ manifest_mutations <- list(
        "source dirtiness mutation must fail"),
   list("execution_sources_unchanged_after_run", FALSE,
        "post-run source authentication mutation must fail"),
+  list("native_library_identity",
+       "qualified-pinned-inode-sha-exact-registered-mapped-path-v2",
+       "native library identity mutation must fail"),
+  list("native_library_sha256", sha("wrong-native-library"),
+       "native library hash mutation must fail"),
+  list("native_build_inputs_sha256", sha("wrong-build-inputs"),
+       "native build input hash mutation must fail"),
+  list("native_build_dependencies_schema_version",
+       "full-cuda-ci-native-build-dependencies-v2",
+       "native build dependency schema mutation must fail"),
+  list("native_build_trace_semantics",
+       "linux-strace-successful-read-exec-evidence-v2",
+       "native build trace semantics mutation must fail"),
+  list("native_build_trace_invocation", "forged trace invocation",
+       "native build trace invocation mutation must fail"),
+  list("native_build_tracer_path", "/tmp/forged-strace",
+       "native build tracer path mutation must fail"),
+  list("native_build_dependency_count", 99L,
+       "native build dependency count mutation must fail"),
+  list("native_build_exclusion_count", 99L,
+       "native build exclusion count mutation must fail"),
+  list("native_build_dependencies_sha256", sha("wrong-build-dependencies"),
+       "native build dependency hash mutation must fail"),
+  list("native_build_trace_sha256", sha("wrong-build-trace"),
+       "native build trace hash mutation must fail"),
+  list("native_build_tracer_sha256", sha("wrong-build-tracer"),
+       "native build tracer hash mutation must fail"),
   list("cuda_toolkit_version", 99999L,
        "CUDA toolkit mutation must fail"),
   list("cuda_driver_version", 99999L,
@@ -1154,20 +1171,18 @@ manifest_mutations <- list(
        "compute capability mutation must fail"),
   list("sm_count", 1L, "SM count mutation must fail"),
   list("device_id", 7L, "device id mutation must fail"),
-  list("cusolver_deterministic_mode", "disabled",
-       "cuSOLVER deterministic mode mutation must fail"),
-  list("cublas_math_mode", "default",
-       "cuBLAS math mode mutation must fail"),
-  list("cublas_atomics_mode", "allowed",
-       "cuBLAS atomics mode mutation must fail"),
-  list("cublas_user_workspace_installed", FALSE,
-       "cuBLAS workspace installation mutation must fail"),
-  list("cublas_workspace_identity", sha("wrong-workspace"),
-       "cuBLAS workspace identity mutation must fail"),
-  list("cublas_workspace_bytes", 8192,
-       "cuBLAS workspace size mutation must fail"),
-  list("cublas_workspace_alignment", 512,
-       "cuBLAS workspace alignment mutation must fail"),
+  list("cusolver_deterministic_mode_required", "disabled",
+       "cuSOLVER deterministic policy mutation must fail"),
+  list("cublas_math_mode_required", "default",
+       "cuBLAS math policy mutation must fail"),
+  list("cublas_atomics_mode_required", "allowed",
+       "cuBLAS atomics policy mutation must fail"),
+  list("cublas_user_workspace_required", FALSE,
+       "cuBLAS workspace requirement mutation must fail"),
+  list("cublas_workspace_bytes_required", 8192,
+       "cuBLAS workspace size policy mutation must fail"),
+  list("cublas_workspace_min_alignment_required", 512,
+       "cuBLAS workspace alignment policy mutation must fail"),
   list("artifact_schema_version", "forged-artifact-schema",
        "artifact schema mutation must fail"),
   list("shard_count", 4L, "shard count mutation must fail")
@@ -1260,12 +1275,32 @@ cuda_dll_paths_after <- unname(vapply(
     dll[["path"]], winslash = "/", mustWork = FALSE
   ), character(1L)
 ))
+loaded_cuda_dll_paths <- cuda_dll_paths_after[grepl(
+  "fastkpc_cuda", cuda_dll_paths_after
+)]
+default_cuda_so <- normalizePath(
+  file.path("fastkpc", "build", "fastkpc_cuda.so"),
+  winslash = "/", mustWork = FALSE
+)
 assert_true(
   identical(
     cuda_dll_paths_before[grepl("fastkpc_cuda", cuda_dll_paths_before)],
-    cuda_dll_paths_after[grepl("fastkpc_cuda", cuda_dll_paths_after)]
-  ) && !any(grepl("fastkpc_cuda", cuda_dll_paths_after)),
-  "no-CUDA contract fixture loads no CUDA DLL"
+    character()
+  ) && !default_cuda_so %in% loaded_cuda_dll_paths &&
+    if (length(loaded_cuda_dll_paths) == 0L) {
+      TRUE
+    } else {
+      resource_snapshot <- .Call(
+        "C_fixed_sp_cuda_test_resource_snapshot", PACKAGE = "fastkpc_cuda"
+      )
+      active_fields <- grep("_active_count$", names(resource_snapshot),
+                            value = TRUE)
+      all(vapply(active_fields, function(field) {
+        identical(as.numeric(resource_snapshot[[field]]), 0)
+      }, logical(1L))) &&
+        identical(as.numeric(resource_snapshot$cleanup_error_count), 0)
+    },
+  "contract fixture leaves no fixed-SP CUDA resources active"
 )
 
 cat("PASS phase3 artifact contract route, identity, and publication validation\n")

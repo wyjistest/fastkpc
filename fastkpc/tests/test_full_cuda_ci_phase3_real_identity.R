@@ -11,8 +11,8 @@ assert_true <- function(value, message) {
   if (!isTRUE(value)) fail(message)
 }
 
-load_fastkpc_cuda_native()
-if (!isTRUE(fastkpc_cuda_available())) {
+fastkpc_full_cuda_phase3_discover_qualified_native_evidence()
+if (!isTRUE(.Call("C_fastkpc_cuda_available", PACKAGE = "fastkpc_cuda"))) {
   cat("SKIP Phase 3 real identity: CUDA unavailable\n")
   quit(save = "no", status = 0L)
 }

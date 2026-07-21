@@ -27,12 +27,12 @@ struct CudaPhase3EnvironmentIdentity {
   int compute_capability_major;
   int compute_capability_minor;
   int sm_count;
-  std::string cusolver_deterministic_mode;
-  std::string cublas_math_mode;
-  std::string cublas_atomics_mode;
-  bool cublas_user_workspace_installed;
-  std::size_t cublas_workspace_bytes;
-  std::size_t cublas_workspace_alignment;
+  std::string cusolver_deterministic_mode_required;
+  std::string cublas_math_mode_required;
+  std::string cublas_atomics_mode_required;
+  bool cublas_user_workspace_required;
+  std::size_t cublas_workspace_bytes_required;
+  std::size_t cublas_workspace_min_alignment_required;
 };
 
 CudaPhase3EnvironmentIdentity fastkpc_cuda_phase3_environment_identity(

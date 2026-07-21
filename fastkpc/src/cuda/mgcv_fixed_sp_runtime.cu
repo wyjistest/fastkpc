@@ -2532,15 +2532,15 @@ CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
     tracked_cublas_create(
       resource_ledger.get(), &blas, "create cuBLAS handle");
     check_cublas(cublasSetStream(blas, stream), "bind cuBLAS stream");
-    check_cublas(cublasSetMathMode(blas, CUBLAS_PEDANTIC_MATH),
+    check_cublas(cublasSetMathMode(blas, kFixedSpCublasMathModeValue),
                  "set cuBLAS pedantic math");
-    check_cublas(cublasSetAtomicsMode(blas, CUBLAS_ATOMICS_NOT_ALLOWED),
+    check_cublas(cublasSetAtomicsMode(blas, kFixedSpCublasAtomicsModeValue),
                  "disable cuBLAS atomics");
 
     cublasMath_t math_mode = CUBLAS_DEFAULT_MATH;
     check_cublas(cublasGetMathMode(blas, &math_mode),
                  "query cuBLAS math mode");
-    if (math_mode != CUBLAS_PEDANTIC_MATH) {
+    if (math_mode != kFixedSpCublasMathModeValue) {
       throw std::runtime_error("cuBLAS pedantic math configuration mismatch");
     }
     diagnostics.cublas_pedantic_math_enabled = true;
@@ -2548,7 +2548,7 @@ CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
     cublasAtomicsMode_t atomics_mode = CUBLAS_ATOMICS_ALLOWED;
     check_cublas(cublasGetAtomicsMode(blas, &atomics_mode),
                  "query cuBLAS atomics mode");
-    if (atomics_mode != CUBLAS_ATOMICS_NOT_ALLOWED) {
+    if (atomics_mode != kFixedSpCublasAtomicsModeValue) {
       throw std::runtime_error("cuBLAS atomics configuration mismatch");
     }
     diagnostics.cublas_atomics_not_allowed = true;
@@ -2558,7 +2558,7 @@ CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
     check_cusolver(cusolverDnSetStream(solver, stream),
                    "bind cuSOLVER stream");
     check_cusolver(cusolverDnSetDeterministicMode(
-      solver, CUSOLVER_DETERMINISTIC_RESULTS
+      solver, kFixedSpCusolverDeterministicModeValue
     ), "enable deterministic cuSOLVER");
 
     cusolverDeterministicMode_t deterministic_mode =
@@ -2566,7 +2566,7 @@ CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
     check_cusolver(cusolverDnGetDeterministicMode(
       solver, &deterministic_mode
     ), "query deterministic cuSOLVER");
-    if (deterministic_mode != CUSOLVER_DETERMINISTIC_RESULTS) {
+    if (deterministic_mode != kFixedSpCusolverDeterministicModeValue) {
       throw std::runtime_error(
         "cuSOLVER deterministic configuration mismatch");
     }
@@ -2910,7 +2910,7 @@ void CudaRuntimeContext::reserve(
         resource_ledger.get(), &new_cublas_workspace,
         cublas_workspace_bytes, "allocate cuBLAS user workspace");
       new_cublas_alignment = pointer_alignment(new_cublas_workspace);
-      if (new_cublas_alignment < kFixedSpCublasWorkspaceAlignment) {
+      if (new_cublas_alignment < kFixedSpCublasWorkspaceMinAlignment) {
         throw std::runtime_error(
           "cuBLAS user workspace alignment is below 256 bytes");
       }
