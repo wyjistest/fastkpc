@@ -960,10 +960,11 @@ load_fastkpc_cuda_native <- function(rebuild = FALSE) {
       cache <- .fastkpc_cuda_registered_identity_cache
       if (exists("path", envir = cache, inherits = FALSE) &&
           exists("sha256", envir = cache, inherits = FALSE) &&
-          identical(registered_path, cache$path)) {
-        .fastkpc_cuda_verify_registered_library_identity(
-          registered_path, cache$sha256
-        )
+          identical(registered_path, cache$path) &&
+          typeof(cache$sha256) == "character" &&
+          length(cache$sha256) == 1L && !is.object(cache$sha256) &&
+          is.null(attributes(cache$sha256)) && !anyNA(cache$sha256) &&
+          grepl("^[0-9a-f]{64}$", cache$sha256)) {
         return(invisible(registered_path))
       }
       canonical_so <- normalizePath(

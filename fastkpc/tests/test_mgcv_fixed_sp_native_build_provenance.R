@@ -984,7 +984,8 @@ assert_true(
 registered_loader_fixture <- function() {
   function_names <- c(
     "build_fastkpc_cuda_native", "getLoadedDLLs",
-    ".fastkpc_cuda_verify_registered_library_identity", "dyn.load"
+    ".fastkpc_cuda_verify_registered_library_identity",
+    ".fastkpc_cuda_sha256_file", "dyn.load"
   )
   existed <- vapply(
     function_names, exists, logical(1L), envir = .GlobalEnv,
@@ -1006,6 +1007,9 @@ registered_loader_fixture <- function() {
   state <- new.env(parent = emptyenv())
   state$build_called <- FALSE
   state$load_path <- ""
+  state$loaded_dll_query_count <- 0L
+  state$full_verification_count <- 0L
+  state$hash_count <- 0L
   assign(
     "build_fastkpc_cuda_native",
     function(rebuild = FALSE, ...) {
@@ -1016,13 +1020,28 @@ registered_loader_fixture <- function() {
   )
   assign(
     "getLoadedDLLs",
-    function() list(fastkpc_cuda = list(path =
-      qualified_loader_result$mock_pinned_path)),
+    function() {
+      state$loaded_dll_query_count <- state$loaded_dll_query_count + 1L
+      list(fastkpc_cuda = list(path =
+        qualified_loader_result$mock_pinned_path))
+    },
+    envir = .GlobalEnv
+  )
+  assign(
+    ".fastkpc_cuda_sha256_file",
+    function(path) {
+      state$hash_count <- state$hash_count + 1L
+      canonical_native_sha256
+    },
     envir = .GlobalEnv
   )
   assign(
     ".fastkpc_cuda_verify_registered_library_identity",
-    function(path, expected_sha256, ...) TRUE,
+    function(path, expected_sha256, ...) {
+      state$full_verification_count <- state$full_verification_count + 1L
+      .fastkpc_cuda_sha256_file(path)
+      TRUE
+    },
     envir = .GlobalEnv
   )
   assign(
@@ -1033,17 +1052,30 @@ registered_loader_fixture <- function() {
     },
     envir = .GlobalEnv
   )
-  result <- load_fastkpc_cuda_native(rebuild = FALSE)
-  list(result = result, state = state)
+  results <- lapply(seq_len(8L), function(index) {
+    load_fastkpc_cuda_native(rebuild = FALSE)
+  })
+  list(results = results, state = state)
 }
 registered_loader_result <- registered_loader_fixture()
 assert_true(
-  identical(
-    registered_loader_result$result,
+  all(vapply(
+    registered_loader_result$results,
+    identical,
+    logical(1L),
     qualified_loader_result$mock_pinned_path
-  ) && !registered_loader_result$state$build_called &&
-    !nzchar(registered_loader_result$state$load_path),
-  "generic CUDA access reuses the registered pinned package identity"
+  )) && !registered_loader_result$state$build_called &&
+    !nzchar(registered_loader_result$state$load_path) &&
+    identical(registered_loader_result$state$loaded_dll_query_count, 8L),
+  "generic CUDA access cheaply guards and reuses the registered pinned package identity"
+)
+assert_true(
+  identical(registered_loader_result$state$full_verification_count, 0L) &&
+    identical(registered_loader_result$state$hash_count, 0L),
+  paste(
+    "cached CUDA access must not repeat full native verification or SHA-256",
+    "on each wrapper call"
+  )
 )
 wrong_registered_loader_fixture <- function() {
   function_names <- c(
