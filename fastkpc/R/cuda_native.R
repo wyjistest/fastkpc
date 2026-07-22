@@ -191,6 +191,295 @@
 }
 
 .fastkpc_cuda_registered_identity_cache <- new.env(parent = emptyenv())
+.fastkpc_cuda_qualified_pin_cache <- new.env(parent = emptyenv())
+
+.fastkpc_cuda_live_owner_snapshot <- function(dlls = getLoadedDLLs,
+                                              call = .Call) {
+  if (!is.function(dlls) || !is.function(call)) {
+    stop("fixed-SP CUDA owner snapshot callbacks are malformed",
+         call. = FALSE)
+  }
+  loaded <- dlls()
+  if (is.null(loaded[["fastkpc_cuda"]])) {
+    return(list(runtime = 0L, prepared = 0L, residual = 0L, total = 0L))
+  }
+  snapshot <- tryCatch(
+    call("C_fixed_sp_cuda_live_owner_snapshot", PACKAGE = "fastkpc_cuda"),
+    error = function(error) stop(
+      "fixed-SP CUDA owner snapshot is unavailable: ",
+      conditionMessage(error), call. = FALSE
+    )
+  )
+  required <- c("runtime", "prepared", "residual", "total")
+  if (!is.list(snapshot) || is.object(snapshot) ||
+      !identical(names(snapshot), required)) {
+    stop("fixed-SP CUDA owner snapshot is malformed", call. = FALSE)
+  }
+  clean <- lapply(required, function(name) {
+    value <- snapshot[[name]]
+    if (typeof(value) == "double" && length(value) == 1L &&
+        !is.object(value) && is.null(attributes(value)) && !anyNA(value) &&
+        is.finite(value) && value >= 0 && value <= .Machine$integer.max &&
+        identical(value, floor(value))) {
+      return(as.integer(value))
+    }
+    if (typeof(value) == "integer" && length(value) == 1L &&
+        !is.object(value) && is.null(attributes(value)) && !anyNA(value) &&
+        value >= 0L) {
+      return(value)
+    }
+    stop("fixed-SP CUDA owner snapshot is malformed", call. = FALSE)
+  })
+  names(clean) <- required
+  if (!identical(
+        clean$total,
+        as.integer(clean$runtime + clean$prepared + clean$residual)
+      )) {
+    stop("fixed-SP CUDA owner snapshot total is inconsistent",
+         call. = FALSE)
+  }
+  clean
+}
+
+.fastkpc_cuda_assert_no_live_fixed_sp_owners <- function(
+    snapshot = .fastkpc_cuda_live_owner_snapshot()) {
+  required <- c("runtime", "prepared", "residual", "total")
+  if (!is.list(snapshot) || !identical(names(snapshot), required)) {
+    stop("fixed-SP CUDA owner snapshot is malformed", call. = FALSE)
+  }
+  total <- snapshot$total
+  if (typeof(total) != "integer" || length(total) != 1L ||
+      is.object(total) || !is.null(attributes(total)) || anyNA(total) ||
+      total < 0L) {
+    stop("fixed-SP CUDA owner snapshot is malformed", call. = FALSE)
+  }
+  if (total != 0L) {
+    stop(
+      "live fixed-SP CUDA external pointers block qualified native ",
+      "unload/rebuild: runtime=", snapshot$runtime,
+      ", prepared=", snapshot$prepared,
+      ", residual=", snapshot$residual,
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_cuda_empty_mapped_records <- function() {
+  data.frame(
+    path = character(), live_path = character(), deleted = logical(),
+    device_major_hex = character(), device_minor_hex = character(),
+    inode = character(), stringsAsFactors = FALSE
+  )
+}
+
+.fastkpc_cuda_pin_root_dirs <- function(
+    roots = dirname(.fastkpc_cuda_so())) {
+  if (typeof(roots) != "character" || is.object(roots) || anyNA(roots) ||
+      length(roots) == 0L) {
+    stop("qualified CUDA pin cleanup roots are malformed", call. = FALSE)
+  }
+  roots <- unique(unname(vapply(
+    roots, normalizePath, character(1L), winslash = "/", mustWork = TRUE
+  )))
+  roots[!grepl("(^|/)artifacts($|/)", roots)]
+}
+
+.fastkpc_cuda_qualified_pin_dirs <- function(
+    roots = dirname(.fastkpc_cuda_so())) {
+  roots <- .fastkpc_cuda_pin_root_dirs(roots)
+  dirs <- unlist(lapply(roots, function(root) {
+    list.files(
+      root, pattern = "^\\.fastkpc_cuda-qualified-", all.files = TRUE,
+      full.names = TRUE, recursive = FALSE, no.. = TRUE
+    )
+  }), use.names = FALSE)
+  if (length(dirs) == 0L) return(character())
+  dirs <- dirs[dir.exists(dirs)]
+  sort(unique(unname(vapply(
+    dirs, normalizePath, character(1L), winslash = "/", mustWork = TRUE
+  ))), method = "radix")
+}
+
+.fastkpc_cuda_validate_pin_path <- function(path) {
+  if (typeof(path) != "character" || length(path) != 1L ||
+      is.object(path) || !is.null(attributes(path)) || anyNA(path) ||
+      !nzchar(path) || !file.exists(path) || dir.exists(path)) {
+    stop("qualified CUDA pin path is malformed", call. = FALSE)
+  }
+  path <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  parent <- basename(dirname(path))
+  if (!identical(basename(path), "fastkpc_cuda.so") ||
+      !grepl("^\\.fastkpc_cuda-qualified-", parent) ||
+      grepl("(^|/)artifacts($|/)", path)) {
+    stop("qualified CUDA pin path is outside the cleanup boundary",
+         call. = FALSE)
+  }
+  path
+}
+
+.fastkpc_cuda_register_pin_cleanup_finalizer <- function() {
+  cache <- .fastkpc_cuda_qualified_pin_cache
+  if (isTRUE(cache$finalizer_registered)) return(invisible(TRUE))
+  reg.finalizer(
+    cache,
+    function(env) {
+      try(.fastkpc_cuda_cleanup_remembered_pins_at_exit(), silent = TRUE)
+      invisible(NULL)
+    },
+    onexit = TRUE
+  )
+  cache$finalizer_registered <- TRUE
+  invisible(TRUE)
+}
+
+.fastkpc_cuda_remember_pinned_library <- function(path, sha256) {
+  path <- .fastkpc_cuda_validate_pin_path(path)
+  if (typeof(sha256) != "character" || length(sha256) != 1L ||
+      is.object(sha256) || !is.null(attributes(sha256)) || anyNA(sha256) ||
+      !grepl("^[0-9a-f]{64}$", sha256)) {
+    stop("qualified CUDA pin hash is malformed", call. = FALSE)
+  }
+  .fastkpc_cuda_register_pin_cleanup_finalizer()
+  cache <- .fastkpc_cuda_qualified_pin_cache
+  paths <- if (exists("paths", envir = cache, inherits = FALSE)) {
+    cache$paths
+  } else character()
+  cache$paths <- sort(unique(c(paths, path)), method = "radix")
+  cache$sha256 <- c(
+    if (exists("sha256", envir = cache, inherits = FALSE)) cache$sha256
+    else setNames(character(), character()),
+    setNames(sha256, path)
+  )
+  invisible(path)
+}
+
+.fastkpc_cuda_forget_pinned_library <- function(path) {
+  path <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  cache <- .fastkpc_cuda_qualified_pin_cache
+  if (exists("paths", envir = cache, inherits = FALSE)) {
+    cache$paths <- setdiff(cache$paths, path)
+  }
+  if (exists("sha256", envir = cache, inherits = FALSE)) {
+    cache$sha256 <- cache$sha256[names(cache$sha256) != path]
+  }
+  invisible(path)
+}
+
+.fastkpc_cuda_pin_cleanup_dir <- function(path) {
+  if (typeof(path) != "character" || length(path) != 1L ||
+      is.object(path) || !is.null(attributes(path)) || anyNA(path) ||
+      !nzchar(path)) {
+    stop("qualified CUDA pin cleanup path is malformed", call. = FALSE)
+  }
+  path <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  parent <- basename(dirname(path))
+  if (!identical(basename(path), "fastkpc_cuda.so") ||
+      !grepl("^\\.fastkpc_cuda-qualified-", parent) ||
+      grepl("(^|/)artifacts($|/)", path)) {
+    stop("qualified CUDA pin cleanup path is outside the cleanup boundary",
+         call. = FALSE)
+  }
+  dirname(path)
+}
+
+.fastkpc_cuda_cleanup_remembered_pins_at_exit <- function() {
+  cache <- .fastkpc_cuda_qualified_pin_cache
+  paths <- if (exists("paths", envir = cache, inherits = FALSE)) {
+    cache$paths
+  } else character()
+  if (length(paths) == 0L) return(character())
+  dirs <- sort(unique(unname(vapply(
+    paths, .fastkpc_cuda_pin_cleanup_dir, character(1L)
+  ))), method = "radix")
+  removed <- character()
+  for (dir in dirs) {
+    if (!dir.exists(dir)) next
+    unlink(dir, recursive = TRUE, force = TRUE)
+    if (!dir.exists(dir)) removed <- c(removed, dir)
+  }
+  if (length(removed) > 0L) {
+    for (dir in removed) {
+      prefix <- paste0(dir, "/")
+      if (exists("paths", envir = cache, inherits = FALSE)) {
+        cache$paths <- cache$paths[!startsWith(cache$paths, prefix)]
+      }
+      if (exists("sha256", envir = cache, inherits = FALSE)) {
+        cache$sha256 <- cache$sha256[!startsWith(names(cache$sha256), prefix)]
+      }
+    }
+  }
+  sort(unique(removed), method = "radix")
+}
+
+.fastkpc_cuda_clear_registered_identity_if_path <- function(path) {
+  path <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  cache <- .fastkpc_cuda_registered_identity_cache
+  if (exists("path", envir = cache, inherits = FALSE) &&
+      identical(normalizePath(cache$path, winslash = "/", mustWork = FALSE),
+                path)) {
+    rm(list = intersect(c("path", "sha256"), ls(cache, all.names = TRUE)),
+       envir = cache)
+  }
+  invisible(path)
+}
+
+.fastkpc_cuda_prune_qualified_pins <- function(
+    roots = dirname(.fastkpc_cuda_so()),
+    loaded_paths = .fastkpc_cuda_loaded_paths,
+    mapped_records = .fastkpc_cuda_mapped_object_records) {
+  if (!is.function(loaded_paths) || !is.function(mapped_records)) {
+    stop("qualified CUDA pin cleanup callbacks are malformed", call. = FALSE)
+  }
+  roots <- .fastkpc_cuda_pin_root_dirs(roots)
+  candidates <- .fastkpc_cuda_qualified_pin_dirs(roots)
+  if (length(candidates) == 0L) return(character())
+  loaded <- .fastkpc_cuda_normalize_path_snapshot(
+    loaded_paths(), "loaded CUDA DLL path snapshot"
+  )
+  records <- mapped_records()
+  required_record_fields <- c(
+    "path", "live_path", "deleted", "device_major_hex",
+    "device_minor_hex", "inode"
+  )
+  if (!is.data.frame(records) ||
+      !all(required_record_fields %in% names(records))) {
+    stop("mapped CUDA object record snapshot is malformed", call. = FALSE)
+  }
+  mapped_live <- records$live_path[!is.na(records$live_path)]
+  deleted_rows <- !is.na(records$deleted) & records$deleted
+  mapped_deleted <- sub(
+    " \\(deleted\\)$", "", records$path[deleted_rows]
+  )
+  protected <- unique(c(loaded, mapped_live, mapped_deleted))
+  protected <- protected[!is.na(protected) & nzchar(protected)]
+  protected <- normalizePath(protected, winslash = "/", mustWork = FALSE)
+  removed <- character()
+  for (dir in candidates) {
+    if (!grepl("^\\.fastkpc_cuda-qualified-", basename(dir))) {
+      next
+    }
+    parent <- normalizePath(dirname(dir), winslash = "/", mustWork = TRUE)
+    if (!parent %in% roots) next
+    prefix <- paste0(dir, "/")
+    active <- any(protected == dir | startsWith(protected, prefix))
+    if (active) next
+    unlink(dir, recursive = TRUE, force = TRUE)
+    if (!dir.exists(dir)) {
+      removed <- c(removed, dir)
+      cache <- .fastkpc_cuda_qualified_pin_cache
+      if (exists("paths", envir = cache, inherits = FALSE)) {
+        stale <- startsWith(cache$paths, prefix)
+        cache$paths <- cache$paths[!stale]
+      }
+      if (exists("sha256", envir = cache, inherits = FALSE)) {
+        stale <- startsWith(names(cache$sha256), prefix)
+        cache$sha256 <- cache$sha256[!stale]
+      }
+    }
+  }
+  sort(unique(removed), method = "radix")
+}
 
 .fastkpc_cuda_phase3_symbol_names <- function() {
   c(
@@ -330,6 +619,7 @@
       !is.function(mapped_records)) {
     stop("CUDA rebuild unload callbacks are malformed", call. = FALSE)
   }
+  .fastkpc_cuda_assert_no_live_fixed_sp_owners()
   path <- normalizePath(so, winslash = "/", mustWork = FALSE)
   before <- .fastkpc_cuda_normalize_path_snapshot(
     loaded_paths(), "loaded CUDA DLL path snapshot"
@@ -361,6 +651,7 @@
     )
   }
   if (path %in% before) {
+    .fastkpc_cuda_assert_no_live_fixed_sp_owners()
     tryCatch(
       unload(path),
       error = function(error) stop(
@@ -575,7 +866,32 @@
     unload = unload
   )
   loaded <- TRUE
+  .fastkpc_cuda_remember_pinned_library(pinned_path, expected_sha256)
   invisible(pinned_path)
+}
+
+.fastkpc_cuda_rollback_qualified_native_load <- function(
+    native_load, loaded_paths = .fastkpc_cuda_loaded_paths,
+    mapped_records = .fastkpc_cuda_mapped_object_records,
+    unload = dyn.unload) {
+  path <- if (is.list(native_load)) {
+    native_load$native_library_path
+  } else native_load
+  path <- .fastkpc_cuda_validate_pin_path(path)
+  .fastkpc_cuda_unload_exact_for_rebuild(
+    path,
+    loaded_paths = loaded_paths,
+    mapped_records = mapped_records,
+    unload = unload
+  )
+  .fastkpc_cuda_clear_registered_identity_if_path(path)
+  removed <- .fastkpc_cuda_prune_qualified_pins(
+    roots = dirname(dirname(path)),
+    loaded_paths = loaded_paths,
+    mapped_records = mapped_records
+  )
+  .fastkpc_cuda_forget_pinned_library(path)
+  invisible(removed)
 }
 
 build_fastkpc_cuda_native <- function(
@@ -1855,6 +2171,11 @@ fixed_sp_cuda_runtime_create <- function(device_id = 0L) {
   load_fastkpc_cuda_native()
   .Call("C_fixed_sp_cuda_runtime_create", as.integer(device_id),
         PACKAGE = "fastkpc_cuda")
+}
+
+fixed_sp_cuda_live_owner_snapshot <- function() {
+  load_fastkpc_cuda_native()
+  .fastkpc_cuda_live_owner_snapshot()
 }
 
 fixed_sp_cuda_runtime_reserve <- function(

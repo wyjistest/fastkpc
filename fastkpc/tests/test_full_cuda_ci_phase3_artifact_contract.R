@@ -496,6 +496,84 @@ default_identity <- fastkpc_full_cuda_phase3_input_identity(
   catalog_fixture, 2L
 )
 identity <- default_identity
+local_session_identity <- default_identity
+local_session_identity$native_library_path <-
+  "/tmp/fastkpc-cross-process-pin/fastkpc_cuda.so"
+local_session_identity$native_library_device_major_hex <- "f"
+local_session_identity$native_library_device_minor_hex <- "e"
+local_session_identity$native_library_inode <- "999999"
+local_session_identity$execution_snapshot_sha256 <-
+  sha("cross-process-local-execution-snapshot")
+local_session_identity$sha256 <-
+  .fastkpc_full_cuda_phase3_identity_hash(local_session_identity)
+assert_true(
+  identical(local_session_identity$sha256, default_identity$sha256),
+  "stable input identity ignores session-local native path/inode evidence"
+)
+stable_child_script <- tempfile("phase3-stable-identity-child-", fileext = ".R")
+writeLines(c(
+  "source('fastkpc/R/full_cuda_ci_gate.R')",
+  "source('fastkpc/R/full_cuda_ci_oracle_contract.R')",
+  "source('fastkpc/R/full_cuda_ci_workload_census.R')",
+  "source('fastkpc/R/full_cuda_ci_prepared_s_contract.R')",
+  "source('fastkpc/R/full_cuda_ci_fixed_sp_runtime.R')",
+  "source('fastkpc/R/cuda_native.R')",
+  "source('fastkpc/R/full_cuda_ci_phase3_artifacts.R')",
+  "sha <- function(label) fastkpc_full_cuda_census_hash_utf8(label)",
+  "policy <- .fastkpc_full_cuda_phase3_policy_contract()",
+  "abi <- fastkpc_full_cuda_fixed_sp_runtime_abi()",
+  "lineage <- list(authenticated = TRUE, phase0_manifest_hash = sha('phase0-manifest'), phase1_manifest_hash = sha('phase1-manifest'), phase2_manifest_hash = sha('phase2-manifest'), dataset_file_sha256 = sha('dataset-file'), dataset_matrix_sha256 = sha('dataset-matrix'), canonical_setup_corpus_hash = sha('canonical-setup-corpus'), canonical_target_corpus_hash = sha('canonical-target-corpus'), phase0_source_commit = strrep('0', 40L), phase1_source_commit = strrep('1', 40L), phase2_source_commit = '42ef3efa08327056ffe5c9aad7a8953ff6864c7e', phase2_R_version = 'R version 4.4.1 (fixture)', phase2_mgcv_version = '1.9.1')",
+  "runtime <- list(runtime_abi = abi$schema_version, runtime_abi_hash = abi$sha256, device_id = 2L, cuda_toolkit_version = 12040L, cuda_driver_version = 55054L, gpu_name = 'Fixture GPU', gpu_uuid = paste0('GPU-', strrep('b', 32L)), compute_capability_major = 8L, compute_capability_minor = 0L, compute_capability = '8.0', sm_count = 108L, cusolver_deterministic_mode_required = policy$cusolver_deterministic_mode_required, cublas_math_mode_required = policy$cublas_math_mode_required, cublas_atomics_mode_required = policy$cublas_atomics_mode_required, cublas_user_workspace_required = policy$cublas_user_workspace_required, cublas_workspace_bytes_required = policy$cublas_workspace_bytes_required, cublas_workspace_min_alignment_required = policy$cublas_workspace_min_alignment_required, runtime_policy_schema_version = policy$configuration_schema_version)",
+  "native_path <- Sys.getenv('FASTKPC_STABLE_NATIVE_PATH')",
+  "native_inode <- Sys.getenv('FASTKPC_STABLE_NATIVE_INODE')",
+  "native_snapshot <- Sys.getenv('FASTKPC_STABLE_EXECUTION_SNAPSHOT')",
+  "qualified <- list(schema_version = 'full-cuda-ci-phase3-qualified-native-cache-v1', provenance = list(head_base_commit = fastkpc_full_cuda_source_commit(), provenance_schema_version = 'full-cuda-ci-execution-source-snapshot-v6', provenance_mode = 'working-tree-execution-snapshot-v1', source_closure_schema_version = 'full-cuda-ci-execution-source-closure-v1', source_discovery_semantics = 'parsed-r-ast-load-time-literal-source-v1', source_closure_count = 7L, source_closure_sha256 = sha('stable-source-closure'), execution_snapshot_sha256 = native_snapshot, relevant_sources_dirty_or_untracked = FALSE, native_library_identity = 'qualified-pinned-inode-sha-exact-registered-mapped-path-v3', native_library_path = native_path, native_library_device_major_hex = Sys.getenv('FASTKPC_STABLE_NATIVE_DEVICE_MAJOR'), native_library_device_minor_hex = Sys.getenv('FASTKPC_STABLE_NATIVE_DEVICE_MINOR'), native_library_inode = native_inode, native_library_sha256 = sha('stable-native-library'), native_build_inputs_sha256 = sha('stable-build-inputs'), native_build_dependencies = list(schema_version = 'full-cuda-ci-native-build-dependencies-v3', trace_semantics = 'linux-strace-successful-read-exec-evidence-v3', trace_invocation = 'stable trace invocation', tracer_path = '/usr/bin/strace', dependency_count = 17L, exclusion_count = 2L, aggregate_sha256 = sha('stable-build-dependencies'), trace_sha256 = sha('stable-build-trace'), tracer_sha256 = sha('stable-build-tracer'))))",
+  "assign('fastkpc_full_cuda_phase3_discover_qualified_native_evidence', function() qualified, envir = .GlobalEnv)",
+  "execution <- .fastkpc_full_cuda_phase3_execution_projection(qualified$provenance)",
+  "execution$execution_sources_unchanged_after_run <- TRUE",
+  "execution$execution_provenance_state <- 'post-run-verified'",
+  "assign('fastkpc_full_cuda_phase3_discover_catalog_evidence', function(catalog) lineage, envir = .GlobalEnv)",
+  "assign('fastkpc_full_cuda_phase3_discover_runtime_evidence', function(catalog, device_id) runtime, envir = .GlobalEnv)",
+  "assign('fastkpc_full_cuda_phase3_discover_device_evidence', function(catalog, device_id) runtime, envir = .GlobalEnv)",
+  "assign('fastkpc_full_cuda_phase3_discover_execution_evidence', function(catalog, device_id) execution, envir = .GlobalEnv)",
+  "identity <- fastkpc_full_cuda_phase3_input_identity(list(), 2L)",
+  "cat(identity$sha256, '\\n', sep = '')"
+), stable_child_script, useBytes = TRUE)
+on.exit(unlink(stable_child_script, force = TRUE), add = TRUE)
+stable_child_identity <- function(path, major, minor, inode, snapshot) {
+  output <- system2(
+    R.home("bin/Rscript"),
+    c("--vanilla", stable_child_script),
+    stdout = TRUE,
+    stderr = TRUE,
+    env = c(
+      paste0("FASTKPC_STABLE_NATIVE_PATH=", path),
+      paste0("FASTKPC_STABLE_NATIVE_DEVICE_MAJOR=", major),
+      paste0("FASTKPC_STABLE_NATIVE_DEVICE_MINOR=", minor),
+      paste0("FASTKPC_STABLE_NATIVE_INODE=", inode),
+      paste0("FASTKPC_STABLE_EXECUTION_SNAPSHOT=", snapshot)
+    )
+  )
+  status <- attr(output, "status", exact = TRUE)
+  assert_true(
+    is.null(status) && length(output) >= 1L,
+    paste0("fresh-process stable identity failed: ",
+           paste(output, collapse = "\n"))
+  )
+  output[[length(output)]]
+}
+stable_child_a <- stable_child_identity(
+  "/tmp/fastkpc-stable-a/fastkpc_cuda.so", "8", "1", "1001",
+  sha("stable-snapshot-a")
+)
+stable_child_b <- stable_child_identity(
+  "/tmp/fastkpc-stable-b/fastkpc_cuda.so", "9", "2", "2002",
+  sha("stable-snapshot-b")
+)
+assert_true(
+  identical(stable_child_a, stable_child_b),
+  "fresh Rscript identities are stable across distinct pin paths and inodes"
+)
 assert_true(is.list(identity) && identical(identity$device_id, 2L) &&
               identical(identity$shard_count, 64L) &&
               grepl("^[0-9a-f]{64}$", identity$sha256),
@@ -615,6 +693,127 @@ assign(
 assert_error(
   fastkpc_full_cuda_phase3_input_identity(repository_catalog, 2L),
   "default catalog discovery must reject forged-shaped catalogs without authority"
+)
+authority_tmp <- tempfile("phase3-authority-contract-")
+dir.create(authority_tmp)
+on.exit(unlink(authority_tmp, recursive = TRUE, force = TRUE), add = TRUE)
+authority_phase0_dir <- file.path(authority_tmp, "phase0")
+authority_phase1_dir <- file.path(authority_tmp, "phase1")
+authority_phase2_dir <- file.path(authority_tmp, "phase2")
+dir.create(authority_phase0_dir)
+dir.create(authority_phase1_dir)
+dir.create(authority_phase2_dir)
+writeLines("phase0 manifest fixture",
+           file.path(authority_phase0_dir, "manifest.json"),
+           useBytes = TRUE)
+writeLines("phase1 manifest fixture",
+           file.path(authority_phase1_dir, "manifest.json"),
+           useBytes = TRUE)
+writeLines("phase2 manifest fixture",
+           file.path(authority_phase2_dir, "manifest.json"),
+           useBytes = TRUE)
+authority_data_path <- file.path(authority_tmp, "data.rds")
+saveRDS(matrix(1, nrow = 1L), authority_data_path, version = 3L)
+authority_catalog <- repository_catalog
+authority_catalog$phase0_dir <- authority_phase0_dir
+authority_catalog$phase1_dir <- authority_phase1_dir
+authority_catalog$phase2_dir <- authority_phase2_dir
+authority_catalog$data_path <- authority_data_path
+authority_catalog$phase0_manifest_hash <- lineage_fixture$phase0_manifest_hash
+authority_catalog$phase1_manifest_hash <- lineage_fixture$phase1_manifest_hash
+authority_record <- .fastkpc_full_cuda_phase3_catalog_authority_snapshot(
+  authority_catalog
+)
+authority_catalog$phase3_catalog_authority_token <-
+  .fastkpc_full_cuda_phase3_register_catalog_authority(authority_record)
+authority_catalog$phase3_catalog_authority_sha256 <- authority_record$sha256
+authority_builder <- get(
+  ".fastkpc_full_cuda_phase3_build_catalog_authority", envir = .GlobalEnv
+)
+authority_builder_calls <- 0L
+assign(
+  ".fastkpc_full_cuda_phase3_build_catalog_authority",
+  function(...) {
+    authority_builder_calls <<- authority_builder_calls + 1L
+    stop("full catalog builder must not run during authority lookup",
+         call. = FALSE)
+  },
+  envir = .GlobalEnv
+)
+on.exit(
+  assign(
+    ".fastkpc_full_cuda_phase3_build_catalog_authority",
+    authority_builder,
+    envir = .GlobalEnv
+  ),
+  add = TRUE
+)
+authority_lookup <- fastkpc_full_cuda_phase3_discover_catalog_authority(
+  authority_catalog
+)
+assert_true(
+  authority_builder_calls == 0L &&
+    identical(authority_lookup$authority_sha256, authority_record$sha256),
+  "catalog authority lookup revalidates registered projection without full rebuild"
+)
+missing_file_identity_authority <- authority_record
+missing_file_identity_authority$data_path <-
+  file.path(authority_tmp, "missing-data.rds")
+missing_file_identity_authority$sha256 <-
+  .fastkpc_full_cuda_phase3_catalog_authority_hash(
+    missing_file_identity_authority
+  )
+assert_error(
+  .fastkpc_full_cuda_phase3_register_catalog_authority(
+    missing_file_identity_authority
+  ),
+  "catalog authority registration requires immutable file identities"
+)
+authority_registry <- get(
+  ".fastkpc_full_cuda_phase3_catalog_authority_registry", envir = .GlobalEnv
+)
+stale_authority <- get(
+  authority_record$sha256, envir = authority_registry, inherits = FALSE
+)
+attr(stale_authority, "file_records") <- NULL
+assign(authority_record$sha256, stale_authority, envir = authority_registry)
+assert_error(
+  fastkpc_full_cuda_phase3_discover_catalog_authority(authority_catalog),
+  "catalog authority lookup rejects stale registry entries without file identity"
+)
+authority_catalog$phase3_catalog_authority_token <-
+  .fastkpc_full_cuda_phase3_register_catalog_authority(authority_record)
+authority_mutated <- authority_catalog
+authority_mutated$phase2_manifest$source_commit <- strrep("c", 40L)
+assert_error(
+  fastkpc_full_cuda_phase3_discover_catalog_authority(authority_mutated),
+  "catalog authority lookup rejects source projection mutation"
+)
+writeLines("phase1 manifest mutated",
+           file.path(authority_phase1_dir, "manifest.json"),
+           useBytes = TRUE)
+assert_error(
+  fastkpc_full_cuda_phase3_discover_catalog_authority(authority_catalog),
+  "catalog authority lookup rejects mutated authority file identity"
+)
+writeLines("phase1 manifest fixture",
+           file.path(authority_phase1_dir, "manifest.json"),
+           useBytes = TRUE)
+authority_registry <- get(
+  ".fastkpc_full_cuda_phase3_catalog_authority_registry", envir = .GlobalEnv
+)
+authority_registry_limit <-
+  .fastkpc_full_cuda_phase3_catalog_authority_registry_max_entries()
+for (index in seq_len(authority_registry_limit + 3L)) {
+  extra_record <- authority_record
+  extra_record$phase2_source_commit <- sprintf("%040x", index)
+  extra_record$sha256 <-
+    .fastkpc_full_cuda_phase3_catalog_authority_hash(extra_record)
+  .fastkpc_full_cuda_phase3_register_catalog_authority(extra_record)
+}
+assert_true(
+  length(ls(authority_registry, all.names = TRUE)) <= authority_registry_limit,
+  "catalog authority registry is bounded"
 )
 assign(
   "fastkpc_full_cuda_phase3_discover_catalog_evidence",

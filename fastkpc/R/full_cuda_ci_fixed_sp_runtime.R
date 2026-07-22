@@ -682,6 +682,10 @@ fastkpc_full_cuda_fixed_sp_validate_phase2_identity <- function(
 .fastkpc_full_cuda_phase3_catalog_authority_registry <-
   new.env(parent = emptyenv())
 
+.fastkpc_full_cuda_phase3_catalog_authority_registry_max_entries <- function() {
+  32L
+}
+
 .fastkpc_full_cuda_phase3_catalog_authority_fields <- function() {
   c(
     "schema_version", "phase0_dir", "phase1_dir", "phase2_dir", "data_path",
@@ -742,6 +746,105 @@ fastkpc_full_cuda_fixed_sp_validate_phase2_identity <- function(
     "Phase 3 catalog authority canonical hash mismatch"
   )
   authority
+}
+
+.fastkpc_full_cuda_phase3_catalog_authority_file_paths <- function(
+    authority) {
+  authority <- .fastkpc_full_cuda_phase3_validate_catalog_authority(authority)
+  paths <- c(
+    phase0_manifest = file.path(authority$phase0_dir, "manifest.json"),
+    phase1_manifest = file.path(authority$phase1_dir, "manifest.json"),
+    phase2_manifest = file.path(authority$phase2_dir, "manifest.json"),
+    data = authority$data_path
+  )
+  normalized <- unname(vapply(
+    paths, normalizePath, character(1L), winslash = "/", mustWork = TRUE
+  ))
+  stats::setNames(normalized, names(paths))
+}
+
+.fastkpc_full_cuda_phase3_catalog_authority_file_records <- function(
+    authority) {
+  paths <- .fastkpc_full_cuda_phase3_catalog_authority_file_paths(authority)
+  fastkpc_full_cuda_fixed_sp_require(
+    all(file.exists(paths)) && !any(dir.exists(paths)),
+    "Phase 3 catalog authority file identity is unavailable"
+  )
+  info <- file.info(paths, extra_cols = FALSE)
+  fastkpc_full_cuda_fixed_sp_require(
+    is.data.frame(info) && nrow(info) == length(paths) &&
+      !anyNA(info$size) && !anyNA(info$mtime) && !anyNA(info$ctime),
+    "Phase 3 catalog authority file identity is malformed"
+  )
+  manifest_rows <- names(paths) != "data"
+  sha256 <- rep(NA_character_, length(paths))
+  sha256[manifest_rows] <- unname(vapply(
+    paths[manifest_rows],
+    fastkpc_full_cuda_fixed_sp_sha256_file,
+    character(1L)
+  ))
+  data.frame(
+    logical_path = names(paths),
+    path = unname(paths),
+    size = as.character(info$size),
+    mtime = sprintf("%.6f", as.numeric(info$mtime)),
+    ctime = sprintf("%.6f", as.numeric(info$ctime)),
+    sha256 = sha256,
+    stringsAsFactors = FALSE
+  )
+}
+
+.fastkpc_full_cuda_phase3_catalog_authority_attach_registry_metadata <-
+  function(authority) {
+    authority <- .fastkpc_full_cuda_phase3_validate_catalog_authority(authority)
+    records <- .fastkpc_full_cuda_phase3_catalog_authority_file_records(
+      authority
+    )
+    attr(authority, "file_records") <- records
+    attr(authority, "registered_at") <- as.numeric(Sys.time())
+    authority
+  }
+
+.fastkpc_full_cuda_phase3_catalog_authority_revalidate_files <- function(
+    authority) {
+  authority <- .fastkpc_full_cuda_phase3_validate_catalog_authority(authority)
+  records <- attr(authority, "file_records", exact = TRUE)
+  fastkpc_full_cuda_fixed_sp_require(
+    !is.null(records),
+    "Phase 3 catalog authority file identity is missing"
+  )
+  current <- .fastkpc_full_cuda_phase3_catalog_authority_file_records(
+    authority
+  )
+  fastkpc_full_cuda_fixed_sp_require(
+    identical(records, current),
+    "Phase 3 catalog authority file identity changed"
+  )
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_prune_catalog_authority_registry <- function(
+    protect = character()) {
+  registry <- .fastkpc_full_cuda_phase3_catalog_authority_registry
+  limit <- .fastkpc_full_cuda_phase3_catalog_authority_registry_max_entries()
+  keys <- ls(registry, all.names = TRUE)
+  if (length(keys) <= limit) return(invisible(keys))
+  ages <- vapply(keys, function(key) {
+    value <- get(key, envir = registry, inherits = FALSE)
+    registered_at <- attr(value, "registered_at", exact = TRUE)
+    if (is.null(registered_at) || length(registered_at) != 1L ||
+        !is.finite(registered_at)) {
+      -Inf
+    } else registered_at
+  }, numeric(1L))
+  removable <- keys[order(ages, method = "radix")]
+  removable <- removable[!removable %in% protect]
+  while (length(ls(registry, all.names = TRUE)) > limit &&
+         length(removable) > 0L) {
+    rm(list = removable[[1L]], envir = registry)
+    removable <- removable[-1L]
+  }
+  invisible(ls(registry, all.names = TRUE))
 }
 
 .fastkpc_full_cuda_phase3_catalog_manifest_hash <- function(
@@ -949,8 +1052,14 @@ fastkpc_full_cuda_fixed_sp_validate_phase2_identity <- function(
 
 .fastkpc_full_cuda_phase3_register_catalog_authority <- function(authority) {
   authority <- .fastkpc_full_cuda_phase3_validate_catalog_authority(authority)
+  authority <- .fastkpc_full_cuda_phase3_catalog_authority_attach_registry_metadata(
+    authority
+  )
   registry <- .fastkpc_full_cuda_phase3_catalog_authority_registry
   registry[[authority$sha256]] <- authority
+  .fastkpc_full_cuda_phase3_prune_catalog_authority_registry(
+    protect = authority$sha256
+  )
   .fastkpc_full_cuda_phase3_catalog_authority_token(authority$sha256)
 }
 
@@ -970,7 +1079,10 @@ fastkpc_full_cuda_fixed_sp_validate_phase2_identity <- function(
     "Phase 3 catalog authority registry entry is missing"
   )
   authority <- get(token$authority_sha256, envir = registry, inherits = FALSE)
-  .fastkpc_full_cuda_phase3_validate_catalog_authority(authority)
+  authority <- .fastkpc_full_cuda_phase3_validate_catalog_authority(authority)
+  attr(authority, "registered_at") <- as.numeric(Sys.time())
+  assign(token$authority_sha256, authority, envir = registry)
+  authority
 }
 
 .fastkpc_full_cuda_phase3_catalog_authority_snapshot <- function(catalog) {
@@ -1019,20 +1131,7 @@ fastkpc_full_cuda_fixed_sp_validate_phase2_identity <- function(
 
 fastkpc_full_cuda_phase3_discover_catalog_authority <- function(catalog) {
   stored <- .fastkpc_full_cuda_phase3_extract_catalog_authority(catalog)
-  rebuilt <- .fastkpc_full_cuda_phase3_build_catalog_authority(
-    stored$phase0_dir,
-    stored$phase1_dir,
-    stored$phase2_dir,
-    stored$data_path,
-    require_full = TRUE
-  )$authority
-  fastkpc_full_cuda_fixed_sp_require(
-    identical(
-      rebuilt[c(.fastkpc_full_cuda_phase3_catalog_authority_fields(), "sha256")],
-      stored[c(.fastkpc_full_cuda_phase3_catalog_authority_fields(), "sha256")]
-    ),
-    "Phase 3 catalog authority registry entry is stale"
-  )
+  .fastkpc_full_cuda_phase3_catalog_authority_revalidate_files(stored)
   current <- .fastkpc_full_cuda_phase3_catalog_authority_snapshot(catalog)
   fastkpc_full_cuda_fixed_sp_require(
     identical(
@@ -1061,6 +1160,34 @@ fastkpc_full_cuda_phase3_discover_catalog_authority <- function(catalog) {
     authority_sha256 = stored$sha256,
     lineage = lineage
   )
+}
+
+fastkpc_full_cuda_phase3_deep_revalidate_catalog_authority <- function(
+    catalog) {
+  stored <- .fastkpc_full_cuda_phase3_extract_catalog_authority(catalog)
+  rebuilt <- .fastkpc_full_cuda_phase3_build_catalog_authority(
+    stored$phase0_dir,
+    stored$phase1_dir,
+    stored$phase2_dir,
+    stored$data_path,
+    require_full = TRUE
+  )$authority
+  fastkpc_full_cuda_fixed_sp_require(
+    identical(
+      rebuilt[c(.fastkpc_full_cuda_phase3_catalog_authority_fields(), "sha256")],
+      stored[c(.fastkpc_full_cuda_phase3_catalog_authority_fields(), "sha256")]
+    ),
+    "Phase 3 catalog authority registry entry is stale"
+  )
+  current <- .fastkpc_full_cuda_phase3_catalog_authority_snapshot(catalog)
+  fastkpc_full_cuda_fixed_sp_require(
+    identical(
+      current[c(.fastkpc_full_cuda_phase3_catalog_authority_fields(), "sha256")],
+      stored[c(.fastkpc_full_cuda_phase3_catalog_authority_fields(), "sha256")]
+    ),
+    "Phase 3 catalog authority does not match authenticated catalog state"
+  )
+  invisible(TRUE)
 }
 
 fastkpc_full_cuda_open_fixed_sp_catalog <- function(

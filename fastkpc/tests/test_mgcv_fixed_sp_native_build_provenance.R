@@ -636,6 +636,44 @@ canonical_native_path <- normalizePath(
 )
 canonical_native_sha256 <-
   fastkpc_full_cuda_fixed_sp_sha256_file(canonical_native_path)
+live_owner_snapshot_original <- if (exists(
+  ".fastkpc_cuda_live_owner_snapshot", envir = .GlobalEnv, inherits = FALSE
+)) get(".fastkpc_cuda_live_owner_snapshot", envir = .GlobalEnv) else NULL
+assign(
+  ".fastkpc_cuda_live_owner_snapshot",
+  function() list(
+    runtime = 1L, prepared = 0L, residual = 0L, total = 1L
+  ),
+  envir = .GlobalEnv
+)
+on.exit({
+  if (is.null(live_owner_snapshot_original)) {
+    if (exists(".fastkpc_cuda_live_owner_snapshot", envir = .GlobalEnv,
+               inherits = FALSE)) {
+      rm(".fastkpc_cuda_live_owner_snapshot", envir = .GlobalEnv)
+    }
+  } else {
+    assign(".fastkpc_cuda_live_owner_snapshot", live_owner_snapshot_original,
+           envir = .GlobalEnv)
+  }
+}, add = TRUE)
+assert_error_matching(
+  .fastkpc_cuda_unload_exact_for_rebuild(
+    canonical_native_path,
+    loaded_paths = function() character(),
+    mapped_paths = function() character(),
+    unload = function(path) fail("live-owner guard must run before unload")
+  ),
+  "live fixed-SP CUDA external pointers",
+  "qualified rebuild unload fails closed while fixed-SP extptr owners are live"
+)
+assign(
+  ".fastkpc_cuda_live_owner_snapshot",
+  function() list(
+    runtime = 0L, prepared = 0L, residual = 0L, total = 0L
+  ),
+  envir = .GlobalEnv
+)
 pin_load_state <- new.env(parent = emptyenv())
 pin_load_state$loaded_paths <- character()
 pin_load_state$mapped_paths <- character()
@@ -684,7 +722,49 @@ assert_true(
     "bytes survive canonical replacement"
   )
 )
-unlink(dirname(pinned_native_path), recursive = TRUE, force = TRUE)
+pin_record_identity <- .fastkpc_cuda_posix_file_identity(pinned_native_path)
+pin_records <- function(paths) {
+  if (length(paths) == 0L) {
+    return(data.frame(
+      path = character(), live_path = character(), deleted = logical(),
+      device_major_hex = character(), device_minor_hex = character(),
+      inode = character(), stringsAsFactors = FALSE
+    ))
+  }
+  data.frame(
+    path = paths,
+    live_path = paths,
+    deleted = rep(FALSE, length(paths)),
+    device_major_hex = rep(
+      pin_record_identity$device_major_hex, length(paths)
+    ),
+    device_minor_hex = rep(
+      pin_record_identity$device_minor_hex, length(paths)
+    ),
+    inode = rep(pin_record_identity$inode, length(paths)),
+    stringsAsFactors = FALSE
+  )
+}
+protected_prune <- .fastkpc_cuda_prune_qualified_pins(
+  roots = pin_build_dir,
+  loaded_paths = function() pinned_native_path,
+  mapped_records = function() pin_records(pinned_native_path)
+)
+assert_true(
+  dir.exists(dirname(pinned_native_path)) &&
+    !dirname(pinned_native_path) %in% protected_prune,
+  "qualified pin cleanup preserves active loaded/mapped pins"
+)
+unmapped_prune <- .fastkpc_cuda_prune_qualified_pins(
+  roots = pin_build_dir,
+  loaded_paths = function() character(),
+  mapped_records = function() pin_records(character())
+)
+assert_true(
+  !dir.exists(dirname(pinned_native_path)) &&
+    dirname(pinned_native_path) %in% unmapped_prune,
+  "qualified pin cleanup removes stale unregistered/unmapped pins"
+)
 
 pin_drift_state <- new.env(parent = emptyenv())
 pin_drift_state$load_called <- FALSE
@@ -782,7 +862,52 @@ assert_true(
         retry_load_state$mapped_paths),
   "a unique pinned pathname permits retry after residual failed-load mapping"
 )
-unlink(dirname(second_retry_path), recursive = TRUE, force = TRUE)
+rollback_loaded <- second_retry_path
+rollback_state <- new.env(parent = emptyenv())
+rollback_state$loaded_paths <- rollback_loaded
+rollback_state$mapped_paths <- rollback_loaded
+rollback_state$unloaded <- character()
+.fastkpc_cuda_rollback_qualified_native_load(
+  list(native_library_path = rollback_loaded,
+       native_library_sha256 = retry_native_sha256),
+  loaded_paths = function() rollback_state$loaded_paths,
+  mapped_records = function() pin_records(rollback_state$mapped_paths),
+  unload = function(path) {
+    rollback_state$unloaded <- c(rollback_state$unloaded, path)
+    rollback_state$loaded_paths <- setdiff(rollback_state$loaded_paths, path)
+    rollback_state$mapped_paths <- setdiff(rollback_state$mapped_paths, path)
+    invisible(NULL)
+  }
+)
+assert_true(
+  identical(rollback_state$unloaded, rollback_loaded) &&
+    !dir.exists(dirname(rollback_loaded)),
+  "post-load qualified provenance failure rollback unloads and removes its pin"
+)
+assert_true(
+  identical(pin_snapshot_dirs(), pin_drift_dirs_before),
+  "qualified load failure and rollback leave no stale pin directory growth"
+)
+exit_cleanup_dir <- file.path(
+  pin_build_dir, ".fastkpc_cuda-qualified-exit-fixture"
+)
+dir.create(exit_cleanup_dir)
+exit_cleanup_path <- file.path(exit_cleanup_dir, "fastkpc_cuda.so")
+writeBin(original_native_bytes, exit_cleanup_path)
+exit_cleanup_path <- normalizePath(
+  exit_cleanup_path, winslash = "/", mustWork = TRUE
+)
+exit_cleanup_sha256 <- fastkpc_full_cuda_fixed_sp_sha256_file(
+  exit_cleanup_path
+)
+.fastkpc_cuda_remember_pinned_library(exit_cleanup_path, exit_cleanup_sha256)
+exit_cleanup_removed <- .fastkpc_cuda_cleanup_remembered_pins_at_exit()
+assert_true(
+  !dir.exists(exit_cleanup_dir) &&
+    normalizePath(exit_cleanup_dir, winslash = "/", mustWork = FALSE) %in%
+      exit_cleanup_removed,
+  "qualified pin process-exit cleanup helper removes remembered pin dirs"
+)
 
 qualified_loader_fixture <- function() {
   function_names <- c(

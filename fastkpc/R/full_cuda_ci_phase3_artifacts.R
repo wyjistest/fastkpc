@@ -210,8 +210,25 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
   )
 }
 
+.fastkpc_full_cuda_phase3_session_identity_fields <- function() {
+  c(
+    "execution_snapshot_sha256",
+    "native_library_path",
+    "native_library_device_major_hex",
+    "native_library_device_minor_hex",
+    "native_library_inode"
+  )
+}
+
+.fastkpc_full_cuda_phase3_stable_identity_fields <- function() {
+  setdiff(
+    .fastkpc_full_cuda_phase3_identity_fields(),
+    .fastkpc_full_cuda_phase3_session_identity_fields()
+  )
+}
+
 .fastkpc_full_cuda_phase3_identity_hash <- function(identity) {
-  fields <- .fastkpc_full_cuda_phase3_identity_fields()
+  fields <- .fastkpc_full_cuda_phase3_stable_identity_fields()
   .fastkpc_full_cuda_phase3_named_hash(identity[fields])
 }
 
@@ -634,33 +651,54 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "fastkpc-phase3-input-native-build-", tmpdir = tempdir(),
     fileext = ".strace"
   )
-  native_load <- load_fastkpc_cuda_native_qualified(trace_path = trace_path)
-  dependencies <-
-    fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies(
-      trace_path = native_load$trace_path,
-      build_working_dir = project_root,
-      tracer_path = native_load$tracer_path,
-      trace_invocation = native_load$trace_invocation
+  native_load <- NULL
+  tryCatch({
+    native_load <- load_fastkpc_cuda_native_qualified(trace_path = trace_path)
+    dependencies <-
+      fastkpc_full_cuda_fixed_sp_capture_native_build_dependencies(
+        trace_path = native_load$trace_path,
+        build_working_dir = project_root,
+        tracer_path = native_load$tracer_path,
+        trace_invocation = native_load$trace_invocation
+      )
+    provenance <- fastkpc_full_cuda_fixed_sp_capture_execution_provenance(
+      source_closure = closure,
+      expected_source_sha256 = source_hashes,
+      native_library_path = native_load$native_library_path,
+      native_build_input_paths = native_inputs,
+      expected_native_build_input_sha256 = native_input_hashes,
+      native_build_dependencies = dependencies,
+      expected_native_library_sha256 = native_load$native_library_sha256
     )
-  provenance <- fastkpc_full_cuda_fixed_sp_capture_execution_provenance(
-    source_closure = closure,
-    expected_source_sha256 = source_hashes,
-    native_library_path = native_load$native_library_path,
-    native_build_input_paths = native_inputs,
-    expected_native_build_input_sha256 = native_input_hashes,
-    native_build_dependencies = dependencies,
-    expected_native_library_sha256 = native_load$native_library_sha256
-  )
-  provenance <- fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
-    provenance
-  )
-  if (!isTRUE(provenance$execution_sources_unchanged_after_run)) {
-    stop("Phase 3 qualified native provenance did not verify", call. = FALSE)
-  }
-  list(
-    schema_version = "full-cuda-ci-phase3-qualified-native-cache-v1",
-    provenance = provenance
-  )
+    provenance <- fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
+      provenance
+    )
+    if (!isTRUE(provenance$execution_sources_unchanged_after_run)) {
+      stop("Phase 3 qualified native provenance did not verify",
+           call. = FALSE)
+    }
+    list(
+      schema_version = "full-cuda-ci-phase3-qualified-native-cache-v1",
+      provenance = provenance
+    )
+  }, error = function(error) {
+    if (!is.null(native_load) &&
+        is.character(native_load$native_library_path)) {
+      rollback <- tryCatch(
+        .fastkpc_cuda_rollback_qualified_native_load(native_load),
+        error = identity
+      )
+      if (inherits(rollback, "error")) {
+        stop(
+          conditionMessage(error),
+          "; qualified native rollback failed: ",
+          conditionMessage(rollback),
+          call. = FALSE
+        )
+      }
+    }
+    stop(conditionMessage(error), call. = FALSE)
+  })
 }
 
 .fastkpc_full_cuda_phase3_verify_qualified_native <- function(value) {
@@ -1471,7 +1509,8 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
       }
     } else {
       fastkpc_full_cuda_phase3_validate_input_identity(expected)
-      if (!identical(identity[fields], expected[fields])) {
+      stable_fields <- .fastkpc_full_cuda_phase3_stable_identity_fields()
+      if (!identical(identity[stable_fields], expected[stable_fields])) {
         stop("Phase 3 input identity does not match expected identity",
              call. = FALSE)
       }

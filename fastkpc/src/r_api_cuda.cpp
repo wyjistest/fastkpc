@@ -61,6 +61,7 @@ template <typename T>
 struct FixedSpExternalHolder {
   std::shared_ptr<T> value;
   std::int64_t creator_pid = -1;
+  bool owner_counted = false;
 };
 
 SEXP fixed_sp_cuda_runtime_tag() {
@@ -70,6 +71,46 @@ SEXP fixed_sp_cuda_runtime_tag() {
 
 using FixedSpRuntimeHolder =
   FixedSpExternalHolder<fastkpc::CudaRuntimeContext>;
+
+enum class FixedSpOwnerKind {
+  Runtime,
+  Prepared,
+  Residual
+};
+
+std::atomic<int> g_fixed_sp_runtime_extptr_owners{0};
+std::atomic<int> g_fixed_sp_prepared_extptr_owners{0};
+std::atomic<int> g_fixed_sp_residual_extptr_owners{0};
+
+std::atomic<int>& fixed_sp_owner_counter(FixedSpOwnerKind kind) {
+  switch (kind) {
+  case FixedSpOwnerKind::Runtime:
+    return g_fixed_sp_runtime_extptr_owners;
+  case FixedSpOwnerKind::Prepared:
+    return g_fixed_sp_prepared_extptr_owners;
+  case FixedSpOwnerKind::Residual:
+    return g_fixed_sp_residual_extptr_owners;
+  }
+  return g_fixed_sp_residual_extptr_owners;
+}
+
+template <typename Holder>
+void fixed_sp_owner_acquire(Holder* holder, FixedSpOwnerKind kind) {
+  if (holder == nullptr || holder->owner_counted) return;
+  fixed_sp_owner_counter(kind).fetch_add(1, std::memory_order_relaxed);
+  holder->owner_counted = true;
+}
+
+template <typename Holder>
+void fixed_sp_owner_release(Holder* holder, FixedSpOwnerKind kind) {
+  if (holder == nullptr || !holder->owner_counted) return;
+  holder->owner_counted = false;
+  std::atomic<int>& counter = fixed_sp_owner_counter(kind);
+  const int previous = counter.fetch_sub(1, std::memory_order_relaxed);
+  if (previous <= 0) {
+    counter.store(0, std::memory_order_relaxed);
+  }
+}
 
 struct NativeSymbolImageIdentity {
   std::string path;
@@ -152,6 +193,7 @@ void fixed_sp_cuda_runtime_finalizer(SEXP ptr) {
     } catch (...) {
     }
   }
+  fixed_sp_owner_release(holder, FixedSpOwnerKind::Runtime);
   delete holder;
   R_ClearExternalPtr(ptr);
 }
@@ -190,6 +232,7 @@ void fixed_sp_cuda_prepared_finalizer(SEXP ptr) {
     } catch (...) {
     }
   }
+  fixed_sp_owner_release(holder, FixedSpOwnerKind::Prepared);
   delete holder;
   R_ClearExternalPtr(ptr);
 }
@@ -232,6 +275,7 @@ void fixed_sp_cuda_residual_finalizer(SEXP ptr) {
     } catch (...) {
     }
   }
+  fixed_sp_owner_release(holder, FixedSpOwnerKind::Residual);
   delete holder;
   R_ClearExternalPtr(ptr);
 }
@@ -3516,8 +3560,26 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_create(SEXP device_s) {
   SEXP ext = PROTECT(R_MakeExternalPtr(
     holder, fixed_sp_cuda_runtime_tag(), R_NilValue));
   R_RegisterCFinalizerEx(ext, fixed_sp_cuda_runtime_finalizer, TRUE);
+  fixed_sp_owner_acquire(holder, FixedSpOwnerKind::Runtime);
   UNPROTECT(1);
   return ext;
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_live_owner_snapshot() {
+  BEGIN_RCPP
+  const int runtime =
+    g_fixed_sp_runtime_extptr_owners.load(std::memory_order_relaxed);
+  const int prepared =
+    g_fixed_sp_prepared_extptr_owners.load(std::memory_order_relaxed);
+  const int residual =
+    g_fixed_sp_residual_extptr_owners.load(std::memory_order_relaxed);
+  return Rcpp::List::create(
+    Rcpp::Named("runtime") = runtime,
+    Rcpp::Named("prepared") = prepared,
+    Rcpp::Named("residual") = residual,
+    Rcpp::Named("total") = runtime + prepared + residual
+  );
   END_RCPP
 }
 
@@ -3815,6 +3877,7 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_free(SEXP runtime_s) {
   FixedSpRuntimeHolder* holder =
     fixed_sp_cuda_runtime_holder(runtime_s, false);
   fastkpc::free_fixed_sp_runtime(&holder->value);
+  fixed_sp_owner_release(holder, FixedSpOwnerKind::Runtime);
   return R_NilValue;
   END_RCPP
 }
@@ -4004,6 +4067,7 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_create(SEXP runtime_s,
   SEXP ext = PROTECT(R_MakeExternalPtr(
     holder, fixed_sp_cuda_prepared_tag(), R_NilValue));
   R_RegisterCFinalizerEx(ext, fixed_sp_cuda_prepared_finalizer, TRUE);
+  fixed_sp_owner_acquire(holder, FixedSpOwnerKind::Prepared);
   UNPROTECT(1);
   return ext;
   END_RCPP
@@ -4063,6 +4127,7 @@ extern "C" SEXP C_fixed_sp_cuda_prepared_free(SEXP prepared_s) {
   FixedSpPreparedHolder* holder =
     fixed_sp_cuda_prepared_holder(prepared_s, false);
   fastkpc::free_prepared_s_gpu(&holder->value);
+  fixed_sp_owner_release(holder, FixedSpOwnerKind::Prepared);
   return R_NilValue;
   END_RCPP
 }
@@ -4270,6 +4335,7 @@ extern "C" SEXP C_fixed_sp_cuda_solve_batch(
     UNPROTECT(1);
     throw;
   }
+  fixed_sp_owner_acquire(holder, FixedSpOwnerKind::Residual);
   UNPROTECT(1);
   return ext;
   END_RCPP
@@ -4566,6 +4632,7 @@ extern "C" SEXP C_fixed_sp_cuda_residual_free(SEXP residual_s) {
     fixed_sp_cuda_residual_holder(residual_s, false);
   if (holder == nullptr) return R_NilValue;
   fastkpc::free_device_residual(&holder->value);
+  fixed_sp_owner_release(holder, FixedSpOwnerKind::Residual);
   delete holder;
   R_ClearExternalPtr(residual_s);
   return R_NilValue;
@@ -8798,6 +8865,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch), 7},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_free", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_free), 1},
   {"C_fixed_sp_cuda_runtime_create", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_create), 1},
+  {"C_fixed_sp_cuda_live_owner_snapshot", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_live_owner_snapshot), 0},
   {"C_fixed_sp_cuda_test_resource_snapshot", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_resource_snapshot), 0},
   {"C_fixed_sp_cuda_test_device_count", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_device_count), 0},
   {"C_fixed_sp_cuda_test_set_device", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_test_set_device), 1},
