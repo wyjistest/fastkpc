@@ -134,11 +134,23 @@ assert_true(identical(route$condition_lt_1e8, "CHOLESKY_BATCHED") &&
             "route condition policy")
 assert_true(identical(
   route$svd_rank_tolerance,
-  "max(augmented_rows,null_dim)*sigma_max*double_epsilon"
+  "sigma_max*sqrt(double_epsilon)"
 ) && identical(route$residual_tolerance, 1e-7) &&
               identical(route$fitted_tolerance, 1e-7) &&
               identical(route$qualification_dcov_p_tolerance, 1e-10),
             "route tolerances")
+superseded_route <- route
+superseded_route$svd_rank_tolerance <-
+  "max(augmented_rows,null_dim)*sigma_max*double_epsilon"
+superseded_route$sha256 <- fastkpc_full_cuda_census_named_metadata_hash(
+  superseded_route[setdiff(names(superseded_route), "sha256")]
+)
+assert_true(
+  !identical(route$svd_rank_tolerance,
+             superseded_route$svd_rank_tolerance) &&
+    !identical(route$sha256, superseded_route$sha256),
+  "route policy and hash reject the superseded SVD rank threshold"
+)
 assert_true(identical(route$dcov_backend, "legacy-cpp-spectra") &&
               identical(
                 route$reroute_policy,

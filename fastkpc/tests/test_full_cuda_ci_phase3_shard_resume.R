@@ -232,8 +232,9 @@ session_fields <- c(
   "route_config_hash", "requested_shard_ids", "completed_shard_ids",
   "runtime_context_create_count", "runtime_context_destroy_count",
   "prepared_handle_create_count", "prepared_handle_destroy_count",
-  "residual_token_release_count", "output_slot_acquire_count",
-  "output_slot_release_count", "status"
+  "residual_token_acquire_count", "residual_token_release_count",
+  "output_slot_acquire_count", "output_slot_release_count",
+  "target_level_stable_sync_count", "status"
 )
 resource_fields <- c(
   "prepared_handle_create_count", "prepared_handle_destroy_count",
@@ -243,6 +244,7 @@ resource_fields <- c(
 
 fake_executor <- function(context, shard_id, setup_keys, target_rows) {
   context$executor_calls <- context$executor_calls + 1L
+  setup_batch_count <- as.integer(length(setup_keys))
   setup_result <- data.frame(
     prepared_s_key_sha256 = setup_keys,
     shard_id = rep.int(as.integer(shard_id), length(setup_keys)),
@@ -255,12 +257,12 @@ fake_executor <- function(context, shard_id, setup_keys, target_rows) {
     as.integer(shard_id), nrow(target_result)
   )
   counts <- list(
-    prepared_handle_create_count = as.integer(length(setup_keys)),
-    prepared_handle_destroy_count = as.integer(length(setup_keys)),
-    residual_token_acquire_count = as.integer(nrow(target_rows)),
-    residual_token_release_count = as.integer(nrow(target_rows)),
-    output_slot_acquire_count = as.integer(nrow(target_rows)),
-    output_slot_release_count = as.integer(nrow(target_rows))
+    prepared_handle_create_count = setup_batch_count,
+    prepared_handle_destroy_count = setup_batch_count,
+    residual_token_acquire_count = setup_batch_count,
+    residual_token_release_count = setup_batch_count,
+    output_slot_acquire_count = setup_batch_count,
+    output_slot_release_count = setup_batch_count
   )
   assert_identical(
     names(counts), resource_fields,
@@ -449,6 +451,13 @@ session_files <- list.files(
 )
 assert_true(length(session_files) == 1L, "first invocation writes one session")
 first_session <- read_json(session_files[[1L]])
+first_completed_shards <- as.integer(first_session$completed_shard_ids)
+first_setup_count <- as.integer(sum(
+  synthetic_plan$assignments$shard_id %in% first_completed_shards
+))
+first_target_count <- as.integer(sum(
+  synthetic_plan$target_rows$shard_id %in% first_completed_shards
+))
 assert_identical(
   names(first_session), session_fields,
   "Phase 3 session JSON schema is exact"
@@ -461,11 +470,21 @@ assert_true(
     identical(as.integer(first_session$completed_shard_ids), 0:1) &&
     as.integer(first_session$runtime_context_create_count) == 1L &&
     as.integer(first_session$runtime_context_destroy_count) == 1L &&
+    first_setup_count != first_target_count &&
     as.integer(first_session$prepared_handle_create_count) ==
-      as.integer(first_session$prepared_handle_destroy_count) &&
+      first_setup_count &&
+    as.integer(first_session$prepared_handle_destroy_count) ==
+      first_setup_count &&
+    as.integer(first_session$residual_token_acquire_count) ==
+      first_setup_count &&
+    as.integer(first_session$residual_token_release_count) ==
+      first_setup_count &&
     as.integer(first_session$output_slot_acquire_count) ==
-      as.integer(first_session$output_slot_release_count),
-  "gracefully stopped session closes every tracked resource"
+      first_setup_count &&
+    as.integer(first_session$output_slot_release_count) ==
+      first_setup_count &&
+    as.integer(first_session$target_level_stable_sync_count) == 0L,
+  "gracefully stopped session conserves one resource per setup batch"
 )
 first_session_hash <- fastkpc_full_cuda_phase3_session_identity_hash(
   first_session
@@ -482,9 +501,11 @@ mutable_session$runtime_context_create_count <- 99L
 mutable_session$runtime_context_destroy_count <- 99L
 mutable_session$prepared_handle_create_count <- 99L
 mutable_session$prepared_handle_destroy_count <- 99L
+mutable_session$residual_token_acquire_count <- 99L
 mutable_session$residual_token_release_count <- 99L
 mutable_session$output_slot_acquire_count <- 99L
 mutable_session$output_slot_release_count <- 99L
+mutable_session$target_level_stable_sync_count <- 99L
 mutable_session$status <- "running"
 assert_identical(
   fastkpc_full_cuda_phase3_session_identity_hash(mutable_session),
@@ -693,11 +714,21 @@ wrong_counters_path <- file.path(
   paste0("session_", wrong_counters_summary$session_id, ".json")
 )
 wrong_counters <- read_json(wrong_counters_path)
-wrong_counters$prepared_handle_create_count <- 99L
-wrong_counters$prepared_handle_destroy_count <- 99L
-wrong_counters$residual_token_release_count <- 99L
-wrong_counters$output_slot_acquire_count <- 99L
-wrong_counters$output_slot_release_count <- 99L
+wrong_completed_shards <- as.integer(wrong_counters$completed_shard_ids)
+wrong_setup_count <- as.integer(sum(
+  synthetic_plan$assignments$shard_id %in% wrong_completed_shards
+))
+wrong_target_count <- as.integer(sum(
+  synthetic_plan$target_rows$shard_id %in% wrong_completed_shards
+))
+assert_true(
+  wrong_setup_count != wrong_target_count,
+  "hostile fixture distinguishes setup batches from logical targets"
+)
+wrong_counters$residual_token_acquire_count <- wrong_target_count
+wrong_counters$residual_token_release_count <- wrong_target_count
+wrong_counters$output_slot_acquire_count <- wrong_target_count
+wrong_counters$output_slot_release_count <- wrong_target_count
 write_json(wrong_counters, wrong_counters_path)
 wrong_counters_run <- run_fixture(wrong_counters_dir)
 assert_true(
@@ -705,7 +736,7 @@ assert_true(
             as.integer(2:3)) &&
     identical(wrong_counters_run$result$written_shard_ids,
               as.integer(0:1)),
-  "session counters that disagree with planned resources reject reuse"
+  "superseded target-count token and lease accounting rejects reuse"
 )
 
 forged_session_id_dir <- clone_fixture("forged-session-id")
