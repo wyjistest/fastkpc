@@ -913,7 +913,8 @@ qualified_loader_fixture <- function() {
   function_names <- c(
     "build_fastkpc_cuda_native", ".fastkpc_cuda_sha256_file",
     ".fastkpc_cuda_load_built_library_exact",
-    ".fastkpc_cuda_pin_and_load_built_library"
+    ".fastkpc_cuda_pin_and_load_built_library",
+    ".fastkpc_cuda_verify_registered_library_identity"
   )
   originals <- lapply(
     function_names, get, envir = .GlobalEnv, inherits = FALSE
@@ -927,6 +928,7 @@ qualified_loader_fixture <- function() {
   state <- new.env(parent = emptyenv())
   state$legacy_load_path <- ""
   state$pin_input_path <- ""
+  state$full_verification_count <- 0L
   mock_pinned_dir <- file.path(pin_build_dir, ".mock-qualified-snapshot")
   dir.create(mock_pinned_dir)
   mock_pinned_path <- file.path(mock_pinned_dir, "fastkpc_cuda.so")
@@ -960,6 +962,14 @@ qualified_loader_fixture <- function() {
     },
     envir = .GlobalEnv
   )
+  assign(
+    ".fastkpc_cuda_verify_registered_library_identity",
+    function(path, expected_sha256, ...) {
+      state$full_verification_count <- state$full_verification_count + 1L
+      TRUE
+    },
+    envir = .GlobalEnv
+  )
   result <- load_fastkpc_cuda_native_qualified(
     trace_path = trace_path, tracer_path = strace_path
   )
@@ -977,8 +987,92 @@ assert_true(
   ) && identical(
     qualified_loader_result$state$pin_input_path,
     canonical_native_path
-  ) && !nzchar(qualified_loader_result$state$legacy_load_path),
-  "qualified loader publishes and authenticates only the pinned native path"
+  ) && !nzchar(qualified_loader_result$state$legacy_load_path) &&
+    identical(qualified_loader_result$state$full_verification_count, 1L),
+  paste(
+    "qualified loader fully verifies the pinned registered identity exactly",
+    "once before publishing it"
+  )
+)
+
+qualified_loader_verification_failure_fixture <- function() {
+  function_names <- c(
+    "build_fastkpc_cuda_native", ".fastkpc_cuda_sha256_file",
+    ".fastkpc_cuda_pin_and_load_built_library",
+    ".fastkpc_cuda_verify_registered_library_identity",
+    ".fastkpc_cuda_rollback_qualified_native_load",
+    ".fastkpc_cuda_remember_identity"
+  )
+  originals <- lapply(
+    function_names, get, envir = .GlobalEnv, inherits = FALSE
+  )
+  names(originals) <- function_names
+  on.exit({
+    for (name in function_names) {
+      assign(name, originals[[name]], envir = .GlobalEnv)
+    }
+  }, add = TRUE)
+  state <- new.env(parent = emptyenv())
+  state$rollback_count <- 0L
+  state$remember_count <- 0L
+  assign(
+    "build_fastkpc_cuda_native",
+    function(rebuild, trace_path, tracer_path) canonical_native_path,
+    envir = .GlobalEnv
+  )
+  assign(
+    ".fastkpc_cuda_sha256_file",
+    function(path) canonical_native_sha256,
+    envir = .GlobalEnv
+  )
+  assign(
+    ".fastkpc_cuda_pin_and_load_built_library",
+    function(so, expected_sha256, ...) {
+      invisible(qualified_loader_result$mock_pinned_path)
+    },
+    envir = .GlobalEnv
+  )
+  assign(
+    ".fastkpc_cuda_verify_registered_library_identity",
+    function(path, expected_sha256, ...) {
+      stop("fixture full verification failure", call. = FALSE)
+    },
+    envir = .GlobalEnv
+  )
+  assign(
+    ".fastkpc_cuda_rollback_qualified_native_load",
+    function(native_load, ...) {
+      state$rollback_count <- state$rollback_count + 1L
+      invisible(native_load$native_library_path)
+    },
+    envir = .GlobalEnv
+  )
+  assign(
+    ".fastkpc_cuda_remember_identity",
+    function(path, sha256) {
+      state$remember_count <- state$remember_count + 1L
+      invisible(path)
+    },
+    envir = .GlobalEnv
+  )
+  assert_error_matching(
+    load_fastkpc_cuda_native_qualified(
+      trace_path = trace_path, tracer_path = strace_path
+    ),
+    "fixture full verification failure",
+    "qualified loader propagates full identity verification failure"
+  )
+  state
+}
+qualified_loader_failure_state <-
+  qualified_loader_verification_failure_fixture()
+assert_true(
+  identical(qualified_loader_failure_state$rollback_count, 1L) &&
+    identical(qualified_loader_failure_state$remember_count, 0L),
+  paste(
+    "qualified loader rolls back a loaded pin and does not cache identity",
+    "when full verification fails"
+  )
 )
 
 registered_loader_fixture <- function() {

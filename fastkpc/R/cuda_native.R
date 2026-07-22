@@ -1003,19 +1003,44 @@ load_fastkpc_cuda_native_qualified <- function(
     rebuild = TRUE, trace_path = trace_path, tracer_path = tracer_path
   )
   built_sha256 <- .fastkpc_cuda_sha256_file(so)
-  pinned_so <- .fastkpc_cuda_pin_and_load_built_library(
-    so, expected_sha256 = built_sha256
-  )
-  .fastkpc_cuda_remember_identity(pinned_so, built_sha256)
-  list(
-    native_library_path = pinned_so,
-    native_library_sha256 = built_sha256,
-    trace_path = normalizePath(
-      trace_path, winslash = "/", mustWork = TRUE
-    ),
-    tracer_path = tracer_path,
-    trace_invocation = .fastkpc_cuda_trace_invocation(tracer_path)
-  )
+  pinned_so <- NULL
+  tryCatch({
+    pinned_so <- .fastkpc_cuda_pin_and_load_built_library(
+      so, expected_sha256 = built_sha256
+    )
+    .fastkpc_cuda_verify_registered_library_identity(
+      pinned_so, built_sha256
+    )
+    .fastkpc_cuda_remember_identity(pinned_so, built_sha256)
+    list(
+      native_library_path = pinned_so,
+      native_library_sha256 = built_sha256,
+      trace_path = normalizePath(
+        trace_path, winslash = "/", mustWork = TRUE
+      ),
+      tracer_path = tracer_path,
+      trace_invocation = .fastkpc_cuda_trace_invocation(tracer_path)
+    )
+  }, error = function(error) {
+    if (!is.null(pinned_so)) {
+      rollback <- tryCatch(
+        .fastkpc_cuda_rollback_qualified_native_load(list(
+          native_library_path = pinned_so,
+          native_library_sha256 = built_sha256
+        )),
+        error = identity
+      )
+      if (inherits(rollback, "error")) {
+        stop(
+          conditionMessage(error),
+          "; qualified native rollback failed: ",
+          conditionMessage(rollback),
+          call. = FALSE
+        )
+      }
+    }
+    stop(conditionMessage(error), call. = FALSE)
+  })
 }
 
 fastkpc_cuda_available <- function() {
