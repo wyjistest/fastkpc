@@ -1281,6 +1281,9 @@ provenance_native_path <- file.path(
   provenance_native_dir, "fastkpc_cuda.so"
 )
 writeBin(charToRaw("fixture-native-library"), provenance_native_path)
+provenance_native_path <- normalizePath(
+  provenance_native_path, winslash = "/", mustWork = TRUE
+)
 provenance_native_build_input_paths <- file.path(
   provenance_fixture_dir, c("build.sh", "native.cu")
 )
@@ -1355,7 +1358,32 @@ provenance_mapped_records <- function() data.frame(
   inode = provenance_native_identity$inode,
   stringsAsFactors = FALSE
 )
-provenance_fixture <-
+with_provenance_symbol_binding <- function(expression) {
+  existed <- exists(
+    "getNativeSymbolInfo", envir = .GlobalEnv, inherits = FALSE
+  )
+  if (existed) {
+    original <- get(
+      "getNativeSymbolInfo", envir = .GlobalEnv, inherits = FALSE
+    )
+  }
+  assign(
+    "getNativeSymbolInfo",
+    function(name, PACKAGE, withRegistrationInfo = FALSE) {
+      list(name = name, dll = list(path = provenance_native_path))
+    },
+    envir = .GlobalEnv
+  )
+  on.exit({
+    if (existed) {
+      assign("getNativeSymbolInfo", original, envir = .GlobalEnv)
+    } else {
+      rm("getNativeSymbolInfo", envir = .GlobalEnv)
+    }
+  }, add = TRUE)
+  force(expression)
+}
+provenance_fixture <- with_provenance_symbol_binding(
   fastkpc_full_cuda_fixed_sp_capture_execution_provenance(
     source_closure = provenance_closure,
     expected_source_sha256 = provenance_preload_hashes,
@@ -1368,6 +1396,7 @@ provenance_fixture <-
     loaded_paths = provenance_loaded_paths,
     mapped_records = provenance_mapped_records
   )
+)
 assert_true(
   identical(provenance_fixture$source_closure_count, 3L) &&
     identical(names(provenance_fixture$source_file_sha256),
@@ -1403,9 +1432,11 @@ assert_true(
   "execution provenance captures fixed-order dirty source identity"
 )
 verify_provenance_fixture <- function(value) {
-  fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
-    value, loaded_paths = provenance_loaded_paths,
-    mapped_records = provenance_mapped_records
+  with_provenance_symbol_binding(
+    fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
+      value, loaded_paths = provenance_loaded_paths,
+      mapped_records = provenance_mapped_records
+    )
   )
 }
 verified_provenance_fixture <-
