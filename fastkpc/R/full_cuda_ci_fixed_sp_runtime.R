@@ -5191,7 +5191,7 @@ fastkpc_full_cuda_fixed_sp_phase3c_route_counts <- function(
 fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info <- function(
     info, native, dto, expected_shadow_calls,
     expected_shadow_targets, expected_shadow_bytes,
-    expected_release_count, context) {
+    expected_release_count, context, expected_coefficients = FALSE) {
   integer_fields <- c(
     "n", "coefficient_dim", "target_count", "batch_call_count",
     "true_batched_subgroup_count", "true_batched_attempted_target_count",
@@ -5333,6 +5333,10 @@ fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info <- function(
     fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
       expected_release_count, paste(context, "expected release count")
     )
+  expected_coefficients <-
+    fastkpc_full_cuda_fixed_sp_phase3b_logical_scalar(
+      expected_coefficients, paste(context, "expected coefficients")
+    )
 
   routes <- fastkpc_full_cuda_fixed_sp_phase3c_route_counts(
     info$planned_route, info$executed_route
@@ -5467,6 +5471,9 @@ fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info <- function(
   expected_batch_finalize_calls <- as.integer(
     routes$executed_cholesky > 0L
   )
+  expected_coefficient_finalize_calls <- as.integer(
+    expected_coefficients && routes$executed_cholesky > 0L
+  )
   semantics_exact <- isTRUE(route_status_exact) && isTRUE(resource_exact) &&
     isTRUE(aggregate_lifecycle_exact) &&
     identical(info$n, dto$n) &&
@@ -5487,7 +5494,8 @@ fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info <- function(
     ) && info$rhs_device_build_count == 1L &&
     identical(info$rhs_authority, "cuda-x0-transpose-y") &&
     isTRUE(info$full_cuda_data_plane) &&
-    info$coefficient_batch_finalize_call_count == 0L &&
+    info$coefficient_batch_finalize_call_count ==
+      expected_coefficient_finalize_calls &&
     info$fitted_batch_finalize_call_count ==
       expected_batch_finalize_calls &&
     info$residual_rss_batch_finalize_call_count ==
@@ -7818,6 +7826,889 @@ fastkpc_run_full_cuda_fixed_sp_phase3c_qualification <- function(
   )
 }
 
+fastkpc_full_cuda_fixed_sp_oracle_row_schemas <- function() {
+  list(
+    setup_results = c(
+      prepared_s_key_sha256 = "character", shard_id = "integer",
+      setup_ordinal = "integer", canonical_setup_rank = "integer",
+      phase2_shard_id = "integer", n = "integer",
+      coefficient_dim = "integer", null_dim = "integer",
+      penalty_count = "integer", target_count = "integer",
+      target_key_set_sha256 = "character",
+      prepared_handle_create_count = "integer",
+      prepared_handle_destroy_count = "integer",
+      setup_h2d_upload_count = "integer", setup_h2d_bytes = "double",
+      penalty_root_build_count = "integer",
+      penalty_root_rank_mismatch_count = "integer",
+      penalty_root_matrix_count = "integer",
+      penalty_root_row_count = "integer",
+      planned_cholesky_target_count = "integer",
+      planned_qr_target_count = "integer",
+      planned_svd_target_count = "integer",
+      executed_cholesky_target_count = "integer",
+      executed_qr_target_count = "integer",
+      executed_svd_target_count = "integer",
+      cholesky_to_svd_count = "integer", qr_to_svd_count = "integer",
+      stable_reroute_count = "integer",
+      true_batched_target_count = "integer",
+      output_slot_leased_after_release = "logical",
+      setup_load_elapsed_ms = "double", total_elapsed_ms = "double"
+    ),
+    target_parity = c(
+      prepared_s_key_sha256 = "character", shard_id = "integer",
+      setup_ordinal = "integer", canonical_setup_rank = "integer",
+      target_ordinal = "integer", canonical_target_rank = "integer",
+      residual_key_sha256 = "character", target = "integer",
+      null_dim = "integer", condition = "double",
+      condition_bucket = "character",
+      phase1_coefficient_rank = "integer",
+      planned_route = "character",
+      authenticated_planned_route = "character",
+      executed_route = "character", reroute_reason = "character",
+      solver_status = "character", target_true_batched = "logical",
+      true_batched_kernel = "logical",
+      true_batched_target_count = "integer",
+      cholesky_to_svd_count = "integer", qr_to_svd_count = "integer",
+      stable_reroute_count = "integer", qr_rank = "integer",
+      geqrf_info = "integer", ormqr_info = "integer",
+      effective_rank = "integer", sigma_max = "double",
+      smallest_retained_sigma = "double", svd_info = "integer",
+      aggregate_penalty_root_rank = "integer",
+      aggregate_penalty_root_pivot_sha256 = "character",
+      aggregate_factor_call_count = "integer",
+      aggregate_b_build_count = "integer", aggregate_dstop = "double",
+      numeric_reference = "character",
+      coefficient_all_finite = "logical", fitted_all_finite = "logical",
+      residual_all_finite = "logical", rss_all_finite = "logical",
+      rhs_all_finite = "logical", output_all_finite = "logical",
+      coefficient_max_abs_diff = "double",
+      coefficient_relative_l2 = "double",
+      fitted_max_abs_diff = "double", fitted_relative_l2 = "double",
+      residual_max_abs_diff = "double",
+      residual_relative_l2 = "double", rss_max_abs_diff = "double",
+      rss_relative_l2 = "double", rhs_max_abs_diff = "double",
+      rhs_relative_l2 = "double",
+      coefficient_candidate_sha256 = "character",
+      coefficient_oracle_sha256 = "character",
+      coefficient_phase2_sha256 = "character",
+      coefficient_oracle_phase2_exact = "logical",
+      fitted_candidate_sha256 = "character",
+      fitted_oracle_sha256 = "character",
+      fitted_phase2_sha256 = "character",
+      fitted_oracle_phase2_exact = "logical",
+      residual_candidate_sha256 = "character",
+      residual_oracle_sha256 = "character",
+      residual_phase2_sha256 = "character",
+      residual_oracle_phase2_exact = "logical",
+      rss_candidate_sha256 = "character", rss_oracle_sha256 = "character",
+      rhs_candidate_sha256 = "character", rhs_oracle_sha256 = "character",
+      selected_sp_sha256 = "character", y_sha256 = "character",
+      target_state_fingerprint = "character", oracle_call_count = "integer",
+      rhs_authority = "character", full_cuda_data_plane = "logical",
+      cpu_fallback_count = "integer", unknown_fallback_count = "integer",
+      approximate_backend = "logical", fallback_type = "character",
+      error_code = "character", error_message_sha256 = "character"
+    ),
+    resource_metrics = c(
+      prepared_s_key_sha256 = "character", shard_id = "integer",
+      setup_ordinal = "integer", canonical_setup_rank = "integer",
+      target_count = "integer", prepared_handle_create_count = "integer",
+      prepared_handle_destroy_count = "integer",
+      residual_token_acquire_count = "integer",
+      residual_token_release_count = "integer",
+      output_slot_acquire_count = "integer",
+      output_slot_release_count = "integer",
+      output_slot_leased_after_release = "logical",
+      setup_h2d_upload_count = "integer", setup_h2d_bytes = "double",
+      target_batch_h2d_call_count = "integer",
+      target_h2d_copy_count = "integer", target_h2d_bytes = "double",
+      rhs_device_build_count = "integer", rhs_authority = "character",
+      full_cuda_data_plane = "logical",
+      coefficient_batch_finalize_call_count = "integer",
+      fitted_batch_finalize_call_count = "integer",
+      residual_rss_batch_finalize_call_count = "integer",
+      per_target_output_finalize_call_count = "integer",
+      batch_output_finalized_target_count = "integer",
+      true_batched_subgroup_count = "integer",
+      true_batched_attempted_target_count = "integer",
+      true_batched_target_count = "integer",
+      planned_cholesky_target_count = "integer",
+      planned_qr_target_count = "integer",
+      planned_svd_target_count = "integer",
+      executed_cholesky_target_count = "integer",
+      executed_qr_target_count = "integer",
+      executed_svd_target_count = "integer",
+      cholesky_to_svd_count = "integer", qr_to_svd_count = "integer",
+      stable_reroute_count = "integer",
+      aggregate_penalty_factor_count = "integer",
+      aggregate_svd_b_build_count = "integer",
+      aggregate_penalty_root_d2h_count = "integer",
+      aggregate_penalty_root_d2h_bytes = "double",
+      resource_allocation_count_before_solve = "integer",
+      resource_allocation_count_after_solve = "integer",
+      resource_handle_create_count_before_solve = "integer",
+      resource_handle_create_count_after_solve = "integer",
+      cuda_device_allocation_count_during_solve = "integer",
+      cuda_host_allocation_count_during_solve = "integer",
+      stream_create_count_during_solve = "integer",
+      event_create_count_during_solve = "integer",
+      cublas_handle_create_count_during_solve = "integer",
+      cusolver_handle_create_count_during_solve = "integer",
+      per_target_allocation_count_after_warmup = "integer",
+      per_target_handle_create_count = "integer",
+      workspace_grow_count_after_warmup = "integer",
+      stable_workspace_grow_count_after_warmup = "integer",
+      cuda_device_synchronize_count = "integer",
+      cholesky_factor_checkpoint_record_count = "integer",
+      cholesky_factor_checkpoint_wait_count = "integer",
+      cholesky_solve_checkpoint_record_count = "integer",
+      cholesky_solve_checkpoint_wait_count = "integer",
+      qr_checkpoint_record_count = "integer",
+      qr_checkpoint_wait_count = "integer",
+      svd_checkpoint_record_count = "integer",
+      svd_checkpoint_wait_count = "integer",
+      implicit_residual_d2h_count = "integer",
+      implicit_residual_d2h_bytes = "double",
+      shadow_materialize_call_count = "integer",
+      shadow_materialize_target_count = "integer",
+      shadow_d2h_bytes = "double", invalid_output_init_count = "integer",
+      nonfinite_output_count = "integer", cpu_fallback_count = "integer",
+      unknown_fallback_count = "integer",
+      approximate_backend_count = "integer",
+      cusolver_deterministic_mode = "character",
+      cublas_math_mode = "character", cublas_atomics_mode = "character",
+      cublas_user_workspace_installed = "logical",
+      cublas_workspace_bytes = "double",
+      cublas_workspace_alignment = "double"
+    ),
+    stage_timing = c(
+      prepared_s_key_sha256 = "character", shard_id = "integer",
+      setup_ordinal = "integer", stage = "character",
+      elapsed_ms = "double"
+    )
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_oracle_empty_frame <- function(name) {
+  schemas <- fastkpc_full_cuda_fixed_sp_oracle_row_schemas()
+  if (typeof(name) != "character" || length(name) != 1L || is.na(name) ||
+      !name %in% names(schemas)) {
+    stop("unknown fixed-sp oracle row schema", call. = FALSE)
+  }
+  schema <- schemas[[name]]
+  columns <- lapply(unname(schema), function(type) switch(
+    type,
+    character = character(), integer = integer(), double = double(),
+    logical = logical(), stop("unsupported oracle row type", call. = FALSE)
+  ))
+  names(columns) <- names(schema)
+  as.data.frame(columns, stringsAsFactors = FALSE, optional = TRUE)
+}
+
+fastkpc_full_cuda_fixed_sp_validate_oracle_frame <- function(value, name) {
+  schemas <- fastkpc_full_cuda_fixed_sp_oracle_row_schemas()
+  if (!name %in% names(schemas) || !is.data.frame(value) ||
+      !identical(names(value), names(schemas[[name]])) ||
+      any(!vapply(names(value), function(field) {
+        identical(typeof(value[[field]]), unname(schemas[[name]][[field]])) &&
+          !is.object(value[[field]])
+      }, logical(1L)))) {
+    stop("fixed-sp oracle ", name, " row schema mismatch", call. = FALSE)
+  }
+  value
+}
+
+fastkpc_full_cuda_fixed_sp_oracle_setup_batch <- function(
+    catalog, setup_key, target_rows) {
+  if (!fastkpc_full_cuda_fixed_sp_is_bare_sha256(setup_key) ||
+      !is.data.frame(target_rows) || nrow(target_rows) < 1L ||
+      !all(c(
+        "prepared_s_key_sha256", "residual_key_sha256", "coefficient_rank",
+        "condition", "planned_route"
+      ) %in% names(target_rows))) {
+    stop("fixed-sp oracle setup selection is malformed", call. = FALSE)
+  }
+  setup_index <- catalog$setup_index
+  setup_rank <- match(setup_key, setup_index$prepared_s_key_sha256)
+  if (is.na(setup_rank) ||
+      !identical(
+        as.character(target_rows$prepared_s_key_sha256),
+        rep(setup_key, nrow(target_rows))
+      )) {
+    stop("fixed-sp oracle setup identity mismatch", call. = FALSE)
+  }
+  target_keys <- as.character(target_rows$residual_key_sha256)
+  if (anyNA(target_keys) || anyDuplicated(target_keys) ||
+      !identical(target_keys, sort(target_keys, method = "radix"))) {
+    stop("fixed-sp oracle target order is not canonical", call. = FALSE)
+  }
+  phase1_targets <- catalog$inputs$target_fit_metadata
+  phase2_shard_id <- as.integer(
+    (setup_rank - 1L) %% catalog$catalog_contract$shard_count
+  )
+  selected_scope <- list(
+    setup_rows = data.frame(
+      prepared_s_key_sha256 = setup_key, stringsAsFactors = FALSE
+    ),
+    target_rows = target_rows,
+    shard_ids = phase2_shard_id
+  )
+  batches <- fastkpc_full_cuda_fixed_sp_batches(catalog, selected_scope)
+  if (!identical(names(batches), setup_key) || length(batches) != 1L) {
+    stop("fixed-sp oracle Phase 2 shard selection is incomplete",
+         call. = FALSE)
+  }
+  batch <- batches[[1L]]
+  dto <- fastkpc_full_cuda_fixed_sp_native_dto(batch$setup)
+  native <- fastkpc_full_cuda_fixed_sp_native_batch(batch, dto)
+  canonical_target_keys <- sort(
+    as.character(phase1_targets$residual_key_sha256), method = "radix"
+  )
+  canonical_target_rank <- match(native$target_keys, canonical_target_keys)
+  if (anyNA(canonical_target_rank)) {
+    stop("fixed-sp oracle canonical target rank is incomplete", call. = FALSE)
+  }
+  list(
+    batch = batch, dto = dto, native = native,
+    canonical_setup_rank = as.integer(setup_rank),
+    canonical_target_rank = as.integer(canonical_target_rank),
+    phase2_shard_id = phase2_shard_id
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
+    context, catalog, setup_key, target_rows, shard_id, setup_ordinal) {
+  shard_id <- fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+    shard_id, "fixed-sp oracle shard_id"
+  )
+  setup_ordinal <- fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+    setup_ordinal, "fixed-sp oracle setup_ordinal"
+  )
+  if (setup_ordinal < 1L) {
+    stop("fixed-sp oracle setup_ordinal must be positive", call. = FALSE)
+  }
+  total_start <- proc.time()[["elapsed"]]
+  load_start <- total_start
+  selected <- fastkpc_full_cuda_fixed_sp_oracle_setup_batch(
+    catalog, setup_key, target_rows
+  )
+  setup_load_elapsed_ms <- as.double(
+    (proc.time()[["elapsed"]] - load_start) * 1000
+  )
+  batch <- selected$batch
+  dto <- selected$dto
+  native <- selected$native
+  target_count <- native$target_count
+  full_outputs <- c("coefficients", "fitted", "residuals", "rss", "rhs")
+  expected_shadow_bytes <- 8 * as.double(target_count) * as.double(
+    dto$coefficient_dim + 2L * dto$n + 1L + dto$null_dim
+  )
+
+  runtime_initial <- fixed_sp_cuda_runtime_info(context)
+  fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
+    runtime_initial, paste("fixed-sp oracle setup", setup_ordinal, "runtime")
+  )
+  handle <- NULL
+  token <- NULL
+  handle_freed <- FALSE
+  token_released <- FALSE
+  token_freed <- FALSE
+  prepared_created <- NULL
+  prepared_before_solve <- NULL
+  prepared_after_solve <- NULL
+  prepared_after_release <- NULL
+  pre_shadow_info <- NULL
+  post_shadow_info <- NULL
+  released_info <- NULL
+  runtime_before_solve <- NULL
+  runtime_after_solve <- NULL
+  comparison <- NULL
+  handle_create_elapsed_ms <- NA_real_
+  solve_elapsed_ms <- NA_real_
+  shadow_elapsed_ms <- NA_real_
+  oracle_elapsed_ms <- NA_real_
+  cleanup_start <- NA_real_
+
+  cleanup_operations <- list(
+    token_release = list(
+      needed = function() !is.null(token) && !token_released,
+      run = function() {
+        fixed_sp_cuda_residual_release(token)
+        token_released <<- TRUE
+        released_info <<- fixed_sp_cuda_residual_info(token)
+        fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info(
+          released_info, native, dto, 1L, target_count,
+          expected_shadow_bytes, 1L,
+          paste("fixed-sp oracle setup", setup_ordinal, "released batch"),
+          expected_coefficients = TRUE
+        )
+        prepared_after_release <<- fixed_sp_cuda_prepared_info(handle)
+        fastkpc_full_cuda_fixed_sp_phase3c_validate_prepared_info(
+          prepared_after_release, dto, 0L,
+          paste("fixed-sp oracle setup", setup_ordinal, "released handle")
+        )
+        if (isTRUE(prepared_after_release$output_slot_leased)) {
+          stop("fixed-sp oracle output-slot lease was not released",
+               call. = FALSE)
+        }
+      }
+    ),
+    token_free = list(
+      needed = function() !is.null(token) && !token_freed,
+      run = function() {
+        fixed_sp_cuda_residual_free(token)
+        token_freed <<- TRUE
+        token_released <<- TRUE
+        token <<- NULL
+      }
+    ),
+    handle_free = list(
+      needed = function() !is.null(handle) && !handle_freed,
+      run = function() {
+        fixed_sp_cuda_prepared_free(handle)
+        handle_freed <<- TRUE
+        handle <<- NULL
+      }
+    ),
+    runtime_free = list(
+      needed = function() FALSE,
+      run = function() invisible(NULL)
+    )
+  )
+
+  fastkpc_full_cuda_fixed_sp_phase3b_run_cleanup_scope(
+    body = {
+      handle_start <- proc.time()[["elapsed"]]
+      handle <- fixed_sp_cuda_prepared_create(context, dto)
+      handle_create_elapsed_ms <- as.double(
+        (proc.time()[["elapsed"]] - handle_start) * 1000
+      )
+      prepared_created <- fixed_sp_cuda_prepared_info(handle)
+      fastkpc_full_cuda_fixed_sp_phase3c_validate_prepared_info(
+        prepared_created, dto, 0L,
+        paste("fixed-sp oracle setup", setup_ordinal, "created handle")
+      )
+      if (prepared_created$setup_h2d_upload_count != 1L ||
+          isTRUE(prepared_created$output_slot_leased)) {
+        stop("fixed-sp oracle prepared setup lifecycle is invalid",
+             call. = FALSE)
+      }
+      prepared_before_solve <- fixed_sp_cuda_prepared_info(handle)
+      runtime_before_solve <- fixed_sp_cuda_runtime_info(context)
+      solve_start <- proc.time()[["elapsed"]]
+      token <- fixed_sp_cuda_solve_batch(
+        handle, native$Y, native$SP, native$planned_route,
+        native$target_keys, outputs = full_outputs
+      )
+      solve_elapsed_ms <- as.double(
+        (proc.time()[["elapsed"]] - solve_start) * 1000
+      )
+      pre_shadow_info <- fixed_sp_cuda_residual_info(token)
+      fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info(
+        pre_shadow_info, native, dto, 0L, 0L, 0, 0L,
+        paste("fixed-sp oracle setup", setup_ordinal, "pre-shadow batch"),
+        expected_coefficients = TRUE
+      )
+      prepared_after_solve <- fixed_sp_cuda_prepared_info(handle)
+      if (!isTRUE(prepared_after_solve$output_slot_leased)) {
+        stop("fixed-sp oracle solve did not retain its output-slot lease",
+             call. = FALSE)
+      }
+      runtime_after_solve <- fixed_sp_cuda_runtime_info(context)
+      shadow_start <- proc.time()[["elapsed"]]
+      shadow <- fixed_sp_cuda_materialize_shadow(
+        token, outputs = full_outputs
+      )
+      shadow_elapsed_ms <- as.double(
+        (proc.time()[["elapsed"]] - shadow_start) * 1000
+      )
+      shadow_clean <- is.list(shadow) && identical(
+        names(shadow),
+        c("coefficients", "fitted", "residuals", "rss", "cuda_nullspace_rhs")
+      ) && is.matrix(shadow$coefficients) &&
+        identical(dim(shadow$coefficients), c(dto$coefficient_dim, target_count)) &&
+        is.matrix(shadow$fitted) &&
+        identical(dim(shadow$fitted), c(dto$n, target_count)) &&
+        is.matrix(shadow$residuals) &&
+        identical(dim(shadow$residuals), c(dto$n, target_count)) &&
+        typeof(shadow$rss) == "double" && length(shadow$rss) == target_count &&
+        is.matrix(shadow$cuda_nullspace_rhs) && identical(
+          dim(shadow$cuda_nullspace_rhs), c(dto$null_dim, target_count)
+        )
+      if (!isTRUE(shadow_clean)) {
+        stop("fixed-sp oracle explicit shadow is malformed", call. = FALSE)
+      }
+      post_shadow_info <- fixed_sp_cuda_residual_info(token)
+      fastkpc_full_cuda_fixed_sp_phase3c_validate_batch_info(
+        post_shadow_info, native, dto, 1L, target_count,
+        expected_shadow_bytes, 0L,
+        paste("fixed-sp oracle setup", setup_ordinal, "post-shadow batch"),
+        expected_coefficients = TRUE
+      )
+
+      output_names <- c("coefficient", "fitted", "residual", "rss", "rhs")
+      max_abs <- relative_l2 <- setNames(
+        lapply(output_names, function(name) double(target_count)), output_names
+      )
+      candidate_hash <- oracle_hash <- setNames(
+        lapply(output_names, function(name) character(target_count)),
+        output_names
+      )
+      finite <- setNames(
+        lapply(output_names, function(name) logical(target_count)), output_names
+      )
+      oracle_call_count <- integer(target_count)
+      approximate_backend <- logical(target_count)
+      coefficient_phase2_exact <- fitted_phase2_exact <-
+        residual_phase2_exact <- logical(target_count)
+      oracle_start <- proc.time()[["elapsed"]]
+      for (target_index in seq_len(target_count)) {
+        candidate_values <- list(
+          coefficient = as.numeric(shadow$coefficients[, target_index]),
+          fitted = as.numeric(shadow$fitted[, target_index]),
+          residual = as.numeric(shadow$residuals[, target_index]),
+          rss = as.double(shadow$rss[[target_index]]),
+          rhs = as.numeric(shadow$cuda_nullspace_rhs[, target_index])
+        )
+        oracle_call_count[[target_index]] <- 1L
+        oracle <- fastkpc_mgcv_magic_fixed_sp_from_prepared(
+          prepared_setup = batch$setup,
+          target_state = list(
+            row = batch$target_rows[target_index, , drop = FALSE],
+            y = as.numeric(native$Y[, target_index])
+          )
+        )
+        approximate_backend[[target_index]] <- !(
+          identical(oracle$backend_family, "mgcvExtractCPU") &&
+            identical(oracle$mode, "prepared-s-fixed-sp-mgcv-reference") &&
+            identical(oracle$solve_source, "mgcv-C-magic-from-prepared-s") &&
+            isTRUE(oracle$authoritative)
+        )
+        oracle_values <- list(
+          coefficient = as.numeric(oracle$coefficients),
+          fitted = as.numeric(oracle$fitted),
+          residual = as.numeric(oracle$residuals),
+          rss = as.double(sum(oracle$residuals^2)),
+          rhs = as.numeric(batch$oracle_nullspace_rhs[, target_index])
+        )
+        for (name in output_names) {
+          finite[[name]][[target_index]] <-
+            all(is.finite(candidate_values[[name]])) &&
+            all(is.finite(oracle_values[[name]]))
+          errors <- fastkpc_full_cuda_fixed_sp_phase3b_numeric_errors(
+            candidate_values[[name]], oracle_values[[name]],
+            paste("fixed-sp oracle", name, native$target_keys[[target_index]])
+          )
+          max_abs[[name]][[target_index]] <- errors[["max_abs"]]
+          relative_l2[[name]][[target_index]] <- errors[["relative_l2"]]
+          candidate_hash[[name]][[target_index]] <-
+            fastkpc_full_cuda_census_metadata_hash(candidate_values[[name]])
+          oracle_hash[[name]][[target_index]] <-
+            fastkpc_full_cuda_census_metadata_hash(oracle_values[[name]])
+        }
+        coefficient_phase2_exact[[target_index]] <- identical(
+          oracle_hash$coefficient[[target_index]],
+          as.character(batch$target_rows$coefficient_hash[[target_index]])
+        )
+        fitted_phase2_exact[[target_index]] <- identical(
+          oracle_hash$fitted[[target_index]],
+          as.character(batch$target_rows$fitted_hash[[target_index]])
+        )
+        residual_phase2_exact[[target_index]] <- identical(
+          oracle_hash$residual[[target_index]],
+          as.character(batch$target_rows$residual_hash[[target_index]])
+        )
+        if (!all(vapply(finite, `[[`, logical(1L), target_index)) ||
+            max_abs$fitted[[target_index]] >= 1e-7 ||
+            relative_l2$fitted[[target_index]] >= 1e-7 ||
+            max_abs$residual[[target_index]] >= 1e-7 ||
+            relative_l2$residual[[target_index]] >= 1e-7 ||
+            max_abs$rhs[[target_index]] >= 1e-12 ||
+            relative_l2$rhs[[target_index]] >= 1e-12 ||
+            !coefficient_phase2_exact[[target_index]] ||
+            !fitted_phase2_exact[[target_index]] ||
+            !residual_phase2_exact[[target_index]] ||
+            approximate_backend[[target_index]]) {
+          stop("fixed-sp oracle target comparison failed: ",
+               native$target_keys[[target_index]], call. = FALSE)
+        }
+      }
+      oracle_elapsed_ms <- as.double(
+        (proc.time()[["elapsed"]] - oracle_start) * 1000
+      )
+      comparison <- list(
+        max_abs = max_abs, relative_l2 = relative_l2,
+        candidate_hash = candidate_hash, oracle_hash = oracle_hash,
+        finite = finite, oracle_call_count = oracle_call_count,
+        approximate_backend = approximate_backend,
+        coefficient_phase2_exact = coefficient_phase2_exact,
+        fitted_phase2_exact = fitted_phase2_exact,
+        residual_phase2_exact = residual_phase2_exact
+      )
+      rm(shadow)
+      cleanup_start <- proc.time()[["elapsed"]]
+      invisible(NULL)
+    },
+    operations = cleanup_operations,
+    context = paste("fixed-sp oracle setup", setup_ordinal, "cleanup")
+  )
+
+  if (!isTRUE(handle_freed) || !isTRUE(token_freed) ||
+      !isTRUE(token_released) || is.null(comparison) ||
+      is.null(prepared_after_release) || is.null(released_info)) {
+    stop("fixed-sp oracle setup cleanup evidence is incomplete",
+         call. = FALSE)
+  }
+  cleanup_elapsed_ms <- as.double(
+    (proc.time()[["elapsed"]] - cleanup_start) * 1000
+  )
+  runtime_final <- fixed_sp_cuda_runtime_info(context)
+  fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
+    runtime_final, paste("fixed-sp oracle setup", setup_ordinal, "final runtime")
+  )
+  counter_fields <- c(
+    "workspace_grow_count", "stable_workspace_grow_count",
+    "cuda_device_synchronize_count",
+    "cholesky_factor_checkpoint_record_count",
+    "cholesky_factor_checkpoint_wait_count",
+    "cholesky_solve_checkpoint_record_count",
+    "cholesky_solve_checkpoint_wait_count",
+    "qr_checkpoint_record_count", "qr_checkpoint_wait_count",
+    "svd_checkpoint_record_count", "svd_checkpoint_wait_count"
+  )
+  counter_deltas <- setNames(vapply(counter_fields, function(field) {
+    fastkpc_full_cuda_fixed_sp_phase3b_counter_delta(
+      runtime_before_solve, runtime_after_solve, field,
+      paste("fixed-sp oracle setup", setup_ordinal)
+    )
+  }, integer(1L)), counter_fields)
+  if (counter_deltas[["workspace_grow_count"]] != 0L ||
+      counter_deltas[["stable_workspace_grow_count"]] != 0L ||
+      counter_deltas[["cuda_device_synchronize_count"]] != 0L) {
+    stop("fixed-sp oracle setup grew workspace or synchronized",
+         call. = FALSE)
+  }
+
+  condition_bucket <- vapply(seq_len(target_count), function(index) {
+    fastkpc_full_cuda_census_condition_bucket(
+      batch$condition[[index]], batch$target_rows$coefficient_rank[[index]],
+      dto$null_dim
+    )
+  }, character(1L))
+  cholesky_to_svd <- as.integer(
+    pre_shadow_info$planned_route == "CHOLESKY_BATCHED" &
+      pre_shadow_info$executed_route == "AUGMENTED_SVD"
+  )
+  qr_to_svd <- as.integer(
+    pre_shadow_info$planned_route == "AUGMENTED_QR" &
+      pre_shadow_info$executed_route == "AUGMENTED_SVD"
+  )
+  stable_reroute <- as.integer(
+    pre_shadow_info$planned_route != pre_shadow_info$executed_route
+  )
+  all_finite <- Reduce(`&`, comparison$finite)
+  empty_error_hash <- fastkpc_full_cuda_census_hash_utf8("")
+  pivot_hash <- vapply(
+    pre_shadow_info$aggregate_penalty_root_pivot,
+    fastkpc_full_cuda_census_metadata_hash, character(1L)
+  )
+  target_parity <- data.frame(
+    prepared_s_key_sha256 = rep(setup_key, target_count),
+    shard_id = rep.int(shard_id, target_count),
+    setup_ordinal = rep.int(setup_ordinal, target_count),
+    canonical_setup_rank = rep.int(
+      selected$canonical_setup_rank, target_count
+    ),
+    target_ordinal = seq_len(target_count),
+    canonical_target_rank = selected$canonical_target_rank,
+    residual_key_sha256 = native$target_keys,
+    target = as.integer(batch$target_rows$target),
+    null_dim = rep.int(dto$null_dim, target_count),
+    condition = as.double(batch$condition),
+    condition_bucket = condition_bucket,
+    phase1_coefficient_rank = as.integer(batch$target_rows$coefficient_rank),
+    planned_route = pre_shadow_info$planned_route,
+    authenticated_planned_route = native$planned_route,
+    executed_route = pre_shadow_info$executed_route,
+    reroute_reason = pre_shadow_info$reroute_reason,
+    solver_status = pre_shadow_info$solver_status,
+    target_true_batched = pre_shadow_info$target_true_batched,
+    true_batched_kernel = rep.int(
+      pre_shadow_info$true_batched_kernel, target_count
+    ),
+    true_batched_target_count = rep.int(
+      pre_shadow_info$true_batched_target_count, target_count
+    ),
+    cholesky_to_svd_count = cholesky_to_svd,
+    qr_to_svd_count = qr_to_svd,
+    stable_reroute_count = stable_reroute,
+    qr_rank = pre_shadow_info$qr_rank,
+    geqrf_info = pre_shadow_info$geqrf_info,
+    ormqr_info = pre_shadow_info$ormqr_info,
+    effective_rank = pre_shadow_info$effective_rank,
+    sigma_max = pre_shadow_info$sigma_max,
+    smallest_retained_sigma = pre_shadow_info$smallest_retained_sigma,
+    svd_info = pre_shadow_info$svd_info,
+    aggregate_penalty_root_rank =
+      pre_shadow_info$aggregate_penalty_root_rank,
+    aggregate_penalty_root_pivot_sha256 = pivot_hash,
+    aggregate_factor_call_count =
+      pre_shadow_info$aggregate_factor_call_count,
+    aggregate_b_build_count = pre_shadow_info$aggregate_b_build_count,
+    aggregate_dstop = pre_shadow_info$aggregate_dstop,
+    numeric_reference = rep("mgcv-fixed-sp", target_count),
+    coefficient_all_finite = comparison$finite$coefficient,
+    fitted_all_finite = comparison$finite$fitted,
+    residual_all_finite = comparison$finite$residual,
+    rss_all_finite = comparison$finite$rss,
+    rhs_all_finite = comparison$finite$rhs,
+    output_all_finite = all_finite,
+    coefficient_max_abs_diff = comparison$max_abs$coefficient,
+    coefficient_relative_l2 = comparison$relative_l2$coefficient,
+    fitted_max_abs_diff = comparison$max_abs$fitted,
+    fitted_relative_l2 = comparison$relative_l2$fitted,
+    residual_max_abs_diff = comparison$max_abs$residual,
+    residual_relative_l2 = comparison$relative_l2$residual,
+    rss_max_abs_diff = comparison$max_abs$rss,
+    rss_relative_l2 = comparison$relative_l2$rss,
+    rhs_max_abs_diff = comparison$max_abs$rhs,
+    rhs_relative_l2 = comparison$relative_l2$rhs,
+    coefficient_candidate_sha256 = comparison$candidate_hash$coefficient,
+    coefficient_oracle_sha256 = comparison$oracle_hash$coefficient,
+    coefficient_phase2_sha256 = as.character(
+      batch$target_rows$coefficient_hash
+    ),
+    coefficient_oracle_phase2_exact = comparison$coefficient_phase2_exact,
+    fitted_candidate_sha256 = comparison$candidate_hash$fitted,
+    fitted_oracle_sha256 = comparison$oracle_hash$fitted,
+    fitted_phase2_sha256 = as.character(batch$target_rows$fitted_hash),
+    fitted_oracle_phase2_exact = comparison$fitted_phase2_exact,
+    residual_candidate_sha256 = comparison$candidate_hash$residual,
+    residual_oracle_sha256 = comparison$oracle_hash$residual,
+    residual_phase2_sha256 = as.character(batch$target_rows$residual_hash),
+    residual_oracle_phase2_exact = comparison$residual_phase2_exact,
+    rss_candidate_sha256 = comparison$candidate_hash$rss,
+    rss_oracle_sha256 = comparison$oracle_hash$rss,
+    rhs_candidate_sha256 = comparison$candidate_hash$rhs,
+    rhs_oracle_sha256 = comparison$oracle_hash$rhs,
+    selected_sp_sha256 = as.character(batch$target_rows$selected_sp_hash),
+    y_sha256 = as.character(batch$target_rows$y_hash),
+    target_state_fingerprint = as.character(
+      batch$target_rows$target_state_fingerprint
+    ),
+    oracle_call_count = comparison$oracle_call_count,
+    rhs_authority = rep(pre_shadow_info$rhs_authority, target_count),
+    full_cuda_data_plane = rep.int(
+      pre_shadow_info$full_cuda_data_plane, target_count
+    ),
+    cpu_fallback_count = integer(target_count),
+    unknown_fallback_count = integer(target_count),
+    approximate_backend = comparison$approximate_backend,
+    fallback_type = rep("NONE", target_count),
+    error_code = rep("NONE", target_count),
+    error_message_sha256 = rep(empty_error_hash, target_count),
+    stringsAsFactors = FALSE
+  )
+  target_parity <- fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
+    target_parity, "target_parity"
+  )
+
+  total_elapsed_ms <- as.double(
+    (proc.time()[["elapsed"]] - total_start) * 1000
+  )
+  setup_results <- data.frame(
+    prepared_s_key_sha256 = setup_key, shard_id = shard_id,
+    setup_ordinal = setup_ordinal,
+    canonical_setup_rank = selected$canonical_setup_rank,
+    phase2_shard_id = selected$phase2_shard_id,
+    n = dto$n, coefficient_dim = dto$coefficient_dim,
+    null_dim = dto$null_dim, penalty_count = dto$penalty_count,
+    target_count = target_count,
+    target_key_set_sha256 = fastkpc_full_cuda_census_key_set_hash(
+      native$target_keys
+    ),
+    prepared_handle_create_count = 1L,
+    prepared_handle_destroy_count = 1L,
+    setup_h2d_upload_count = prepared_created$setup_h2d_upload_count,
+    setup_h2d_bytes = prepared_created$setup_h2d_bytes,
+    penalty_root_build_count = prepared_created$penalty_root_build_count,
+    penalty_root_rank_mismatch_count =
+      prepared_created$penalty_root_rank_mismatch_count,
+    penalty_root_matrix_count = prepared_created$penalty_root_matrix_count,
+    penalty_root_row_count = prepared_created$penalty_root_row_count,
+    planned_cholesky_target_count =
+      pre_shadow_info$planned_cholesky_target_count,
+    planned_qr_target_count = pre_shadow_info$planned_qr_target_count,
+    planned_svd_target_count = pre_shadow_info$planned_svd_target_count,
+    executed_cholesky_target_count =
+      pre_shadow_info$executed_cholesky_target_count,
+    executed_qr_target_count = pre_shadow_info$executed_qr_target_count,
+    executed_svd_target_count = pre_shadow_info$executed_svd_target_count,
+    cholesky_to_svd_count = pre_shadow_info$cholesky_to_svd_count,
+    qr_to_svd_count = pre_shadow_info$qr_to_svd_count,
+    stable_reroute_count = pre_shadow_info$stable_reroute_count,
+    true_batched_target_count = pre_shadow_info$true_batched_target_count,
+    output_slot_leased_after_release =
+      prepared_after_release$output_slot_leased,
+    setup_load_elapsed_ms = setup_load_elapsed_ms,
+    total_elapsed_ms = total_elapsed_ms,
+    stringsAsFactors = FALSE
+  )
+  setup_results <- fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
+    setup_results, "setup_results"
+  )
+
+  resource_metrics <- data.frame(
+    prepared_s_key_sha256 = setup_key, shard_id = shard_id,
+    setup_ordinal = setup_ordinal,
+    canonical_setup_rank = selected$canonical_setup_rank,
+    target_count = target_count, prepared_handle_create_count = 1L,
+    prepared_handle_destroy_count = 1L,
+    residual_token_acquire_count = 1L,
+    residual_token_release_count = released_info$output_slot_release_count,
+    output_slot_acquire_count = pre_shadow_info$output_slot_acquire_count,
+    output_slot_release_count = released_info$output_slot_release_count,
+    output_slot_leased_after_release =
+      prepared_after_release$output_slot_leased,
+    setup_h2d_upload_count = prepared_created$setup_h2d_upload_count,
+    setup_h2d_bytes = prepared_created$setup_h2d_bytes,
+    target_batch_h2d_call_count =
+      pre_shadow_info$target_batch_h2d_call_count,
+    target_h2d_copy_count = pre_shadow_info$target_h2d_copy_count,
+    target_h2d_bytes = pre_shadow_info$target_h2d_bytes,
+    rhs_device_build_count = pre_shadow_info$rhs_device_build_count,
+    rhs_authority = pre_shadow_info$rhs_authority,
+    full_cuda_data_plane = pre_shadow_info$full_cuda_data_plane,
+    coefficient_batch_finalize_call_count =
+      pre_shadow_info$coefficient_batch_finalize_call_count,
+    fitted_batch_finalize_call_count =
+      pre_shadow_info$fitted_batch_finalize_call_count,
+    residual_rss_batch_finalize_call_count =
+      pre_shadow_info$residual_rss_batch_finalize_call_count,
+    per_target_output_finalize_call_count =
+      pre_shadow_info$per_target_output_finalize_call_count,
+    batch_output_finalized_target_count =
+      pre_shadow_info$batch_output_finalized_target_count,
+    true_batched_subgroup_count =
+      pre_shadow_info$true_batched_subgroup_count,
+    true_batched_attempted_target_count =
+      pre_shadow_info$true_batched_attempted_target_count,
+    true_batched_target_count = pre_shadow_info$true_batched_target_count,
+    planned_cholesky_target_count =
+      pre_shadow_info$planned_cholesky_target_count,
+    planned_qr_target_count = pre_shadow_info$planned_qr_target_count,
+    planned_svd_target_count = pre_shadow_info$planned_svd_target_count,
+    executed_cholesky_target_count =
+      pre_shadow_info$executed_cholesky_target_count,
+    executed_qr_target_count = pre_shadow_info$executed_qr_target_count,
+    executed_svd_target_count = pre_shadow_info$executed_svd_target_count,
+    cholesky_to_svd_count = pre_shadow_info$cholesky_to_svd_count,
+    qr_to_svd_count = pre_shadow_info$qr_to_svd_count,
+    stable_reroute_count = pre_shadow_info$stable_reroute_count,
+    aggregate_penalty_factor_count =
+      pre_shadow_info$aggregate_penalty_factor_count,
+    aggregate_svd_b_build_count =
+      pre_shadow_info$aggregate_svd_b_build_count,
+    aggregate_penalty_root_d2h_count =
+      pre_shadow_info$aggregate_penalty_root_d2h_count,
+    aggregate_penalty_root_d2h_bytes =
+      pre_shadow_info$aggregate_penalty_root_d2h_bytes,
+    resource_allocation_count_before_solve =
+      pre_shadow_info$resource_allocation_count_before_solve,
+    resource_allocation_count_after_solve =
+      pre_shadow_info$resource_allocation_count_after_solve,
+    resource_handle_create_count_before_solve =
+      pre_shadow_info$resource_handle_create_count_before_solve,
+    resource_handle_create_count_after_solve =
+      pre_shadow_info$resource_handle_create_count_after_solve,
+    cuda_device_allocation_count_during_solve =
+      pre_shadow_info$cuda_device_allocation_count_during_solve,
+    cuda_host_allocation_count_during_solve =
+      pre_shadow_info$cuda_host_allocation_count_during_solve,
+    stream_create_count_during_solve =
+      pre_shadow_info$stream_create_count_during_solve,
+    event_create_count_during_solve =
+      pre_shadow_info$event_create_count_during_solve,
+    cublas_handle_create_count_during_solve =
+      pre_shadow_info$cublas_handle_create_count_during_solve,
+    cusolver_handle_create_count_during_solve =
+      pre_shadow_info$cusolver_handle_create_count_during_solve,
+    per_target_allocation_count_after_warmup =
+      pre_shadow_info$per_target_allocation_count_after_warmup,
+    per_target_handle_create_count =
+      pre_shadow_info$per_target_handle_create_count,
+    workspace_grow_count_after_warmup =
+      counter_deltas[["workspace_grow_count"]],
+    stable_workspace_grow_count_after_warmup =
+      counter_deltas[["stable_workspace_grow_count"]],
+    cuda_device_synchronize_count =
+      counter_deltas[["cuda_device_synchronize_count"]],
+    cholesky_factor_checkpoint_record_count =
+      counter_deltas[["cholesky_factor_checkpoint_record_count"]],
+    cholesky_factor_checkpoint_wait_count =
+      counter_deltas[["cholesky_factor_checkpoint_wait_count"]],
+    cholesky_solve_checkpoint_record_count =
+      counter_deltas[["cholesky_solve_checkpoint_record_count"]],
+    cholesky_solve_checkpoint_wait_count =
+      counter_deltas[["cholesky_solve_checkpoint_wait_count"]],
+    qr_checkpoint_record_count =
+      counter_deltas[["qr_checkpoint_record_count"]],
+    qr_checkpoint_wait_count = counter_deltas[["qr_checkpoint_wait_count"]],
+    svd_checkpoint_record_count =
+      counter_deltas[["svd_checkpoint_record_count"]],
+    svd_checkpoint_wait_count =
+      counter_deltas[["svd_checkpoint_wait_count"]],
+    implicit_residual_d2h_count =
+      released_info$implicit_residual_d2h_count,
+    implicit_residual_d2h_bytes = 0,
+    shadow_materialize_call_count =
+      post_shadow_info$shadow_materialize_call_count,
+    shadow_materialize_target_count =
+      post_shadow_info$shadow_materialize_target_count,
+    shadow_d2h_bytes = post_shadow_info$shadow_d2h_bytes,
+    invalid_output_init_count = pre_shadow_info$invalid_output_init_count,
+    nonfinite_output_count = pre_shadow_info$nonfinite_output_count,
+    cpu_fallback_count = pre_shadow_info$cpu_fallback_count,
+    unknown_fallback_count = pre_shadow_info$unknown_fallback_count,
+    approximate_backend_count = as.integer(sum(
+      comparison$approximate_backend
+    )),
+    cusolver_deterministic_mode = runtime_final$cusolver_deterministic_mode,
+    cublas_math_mode = runtime_final$cublas_math_mode,
+    cublas_atomics_mode = runtime_final$cublas_atomics_mode,
+    cublas_user_workspace_installed =
+      runtime_final$cublas_user_workspace_installed,
+    cublas_workspace_bytes = runtime_final$cublas_workspace_bytes,
+    cublas_workspace_alignment = runtime_final$cublas_workspace_alignment,
+    stringsAsFactors = FALSE
+  )
+  resource_metrics <- fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
+    resource_metrics, "resource_metrics"
+  )
+
+  stage_timing <- data.frame(
+    prepared_s_key_sha256 = rep(setup_key, 6L),
+    shard_id = rep.int(shard_id, 6L),
+    setup_ordinal = rep.int(setup_ordinal, 6L),
+    stage = c(
+      "phase2_shard_load", "prepared_handle_create", "solve",
+      "shadow_materialize", "cmagic_oracle", "release_and_free"
+    ),
+    elapsed_ms = as.double(c(
+      setup_load_elapsed_ms, handle_create_elapsed_ms, solve_elapsed_ms,
+      shadow_elapsed_ms, oracle_elapsed_ms, cleanup_elapsed_ms
+    )),
+    stringsAsFactors = FALSE
+  )
+  stage_timing <- fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
+    stage_timing, "stage_timing"
+  )
+  list(
+    setup_results = setup_results, target_parity = target_parity,
+    resource_metrics = resource_metrics, stage_timing = stage_timing
+  )
+}
+
 fastkpc_full_cuda_fixed_sp_qualification_payload_names <- function() {
   c(
     "target_parity.rds", "target_parity.csv",
@@ -8198,6 +9089,75 @@ fastkpc_full_cuda_fixed_sp_native_build_dependency_hash <- function(value) {
       paste0("exclusion.", index, ".path=", exclusions$path[[index]]),
       paste0("exclusion.", index, ".reason=", exclusions$reason[[index]])
     )
+  }
+  payload <- charToRaw(enc2utf8(paste0(paste(lines, collapse = "\n"), "\n")))
+  unname(digest::digest(payload, algo = "sha256", serialize = FALSE))
+}
+
+fastkpc_full_cuda_fixed_sp_native_build_attestation_hash <- function(value) {
+  files <- value$files
+  exclusions <- value$exclusions
+  scalar_text <- function(element) {
+    typeof(element) == "character" && length(element) == 1L &&
+      !is.object(element) && is.null(attributes(element)) &&
+      !anyNA(element) && nzchar(element) && !grepl("[\r\n]", element)
+  }
+  clean <- is.list(value) && !is.object(value) &&
+    all(c(
+      "schema_version", "trace_semantics", "build_working_dir",
+      "tracer_path", "tracer_sha256", "dependency_count", "files",
+      "exclusion_count", "exclusions"
+    ) %in% names(value)) &&
+    scalar_text(value$schema_version) && scalar_text(value$trace_semantics) &&
+    scalar_text(value$build_working_dir) && scalar_text(value$tracer_path) &&
+    scalar_text(value$tracer_sha256) &&
+    grepl("^[0-9a-f]{64}$", value$tracer_sha256) &&
+    typeof(value$dependency_count) == "integer" &&
+    length(value$dependency_count) == 1L && !is.na(value$dependency_count) &&
+    value$dependency_count > 0L && is.data.frame(files) &&
+    identical(names(files), c("path", "sha256")) &&
+    nrow(files) == value$dependency_count &&
+    typeof(files$path) == "character" && !anyNA(files$path) &&
+    identical(files$path, sort(files$path, method = "radix")) &&
+    !anyDuplicated(files$path) && typeof(files$sha256) == "character" &&
+    !anyNA(files$sha256) && all(grepl("^[0-9a-f]{64}$", files$sha256)) &&
+    typeof(value$exclusion_count) == "integer" &&
+    length(value$exclusion_count) == 1L && !is.na(value$exclusion_count) &&
+    value$exclusion_count >= 0L && is.data.frame(exclusions) &&
+    identical(names(exclusions), c("path", "reason")) &&
+    nrow(exclusions) == value$exclusion_count &&
+    typeof(exclusions$path) == "character" && !anyNA(exclusions$path) &&
+    identical(exclusions$path, sort(exclusions$path, method = "radix")) &&
+    !anyDuplicated(exclusions$path) &&
+    typeof(exclusions$reason) == "character" && !anyNA(exclusions$reason) &&
+    all(exclusions$reason %in% c(
+      "generated_output", "pseudo_fs", "non_regular"
+    ))
+  if (!isTRUE(clean)) {
+    stop("native build trace attestation input is malformed", call. = FALSE)
+  }
+  lines <- c(
+    "attestation.schema=full-cuda-ci-native-build-trace-attestation-v1",
+    paste0("dependency.schema=", value$schema_version),
+    paste0("trace.semantics=", value$trace_semantics),
+    paste0("build.working_dir=", value$build_working_dir),
+    paste0("tracer.path=", value$tracer_path),
+    paste0("tracer.sha256=", value$tracer_sha256),
+    paste0("dependency_count=", value$dependency_count)
+  )
+  for (index in seq_len(nrow(files))) {
+    lines <- c(
+      lines,
+      paste0("dependency.", index, ".path=", files$path[[index]]),
+      paste0("dependency.", index, ".sha256=", files$sha256[[index]])
+    )
+  }
+  lines <- c(lines, paste0("exclusion_count=", value$exclusion_count))
+  for (reason in c("generated_output", "pseudo_fs", "non_regular")) {
+    lines <- c(lines, paste0(
+      "exclusion.", reason, ".count=",
+      sum(exclusions$reason == reason)
+    ))
   }
   payload <- charToRaw(enc2utf8(paste0(paste(lines, collapse = "\n"), "\n")))
   unname(digest::digest(payload, algo = "sha256", serialize = FALSE))

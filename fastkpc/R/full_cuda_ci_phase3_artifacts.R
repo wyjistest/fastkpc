@@ -138,7 +138,7 @@ fastkpc_full_cuda_phase3_route_config <- function() {
     rank_deficient = "AUGMENTED_SVD",
     unauthenticated = "AUGMENTED_SVD",
     svd_rank_tolerance =
-      "max(augmented_rows,null_dim)*sigma_max*double_epsilon",
+      "sigma_max*sqrt(double_epsilon)",
     residual_tolerance = 1e-7,
     fitted_tolerance = 1e-7,
     qualification_dcov_p_tolerance = 1e-10,
@@ -195,6 +195,8 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "native_library_inode", "native_library_sha256",
     "native_build_inputs_sha256",
     "native_build_dependencies_schema_version",
+    "native_build_attestation_schema_version",
+    "native_build_attestation_sha256",
     "native_build_trace_semantics", "native_build_trace_invocation",
     "native_build_tracer_path", "native_build_dependency_count",
     "native_build_exclusion_count", "native_build_dependencies_sha256",
@@ -223,7 +225,12 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
 .fastkpc_full_cuda_phase3_stable_identity_fields <- function() {
   setdiff(
     .fastkpc_full_cuda_phase3_identity_fields(),
-    .fastkpc_full_cuda_phase3_session_identity_fields()
+    c(
+      .fastkpc_full_cuda_phase3_session_identity_fields(),
+      "native_library_sha256",
+      "native_build_trace_invocation", "native_build_dependencies_sha256",
+      "native_build_trace_sha256"
+    )
   )
 }
 
@@ -406,6 +413,8 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "native_library_inode", "native_library_sha256",
     "native_build_inputs_sha256",
     "native_build_dependencies_schema_version",
+    "native_build_attestation_schema_version",
+    "native_build_attestation_sha256",
     "native_build_trace_semantics", "native_build_trace_invocation",
     "native_build_tracer_path", "native_build_dependency_count",
     "native_build_exclusion_count", "native_build_dependencies_sha256",
@@ -443,6 +452,7 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "native_library_identity", "native_library_path",
     "native_library_device_major_hex", "native_library_device_minor_hex",
     "native_library_inode", "native_build_dependencies_schema_version",
+    "native_build_attestation_schema_version",
     "native_build_trace_semantics", "native_build_trace_invocation",
     "native_build_tracer_path"
   )) {
@@ -475,6 +485,9 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
         value$native_build_dependencies_schema_version,
         "full-cuda-ci-native-build-dependencies-v3"
       ) || !identical(
+        value$native_build_attestation_schema_version,
+        "full-cuda-ci-native-build-trace-attestation-v1"
+      ) || !identical(
         value$native_build_trace_semantics,
         "linux-strace-successful-read-exec-evidence-v3"
       )) {
@@ -485,6 +498,9 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
       !.fastkpc_full_cuda_phase3_sha256(value$execution_snapshot_sha256) ||
       !.fastkpc_full_cuda_phase3_sha256(value$native_library_sha256) ||
       !.fastkpc_full_cuda_phase3_sha256(value$native_build_inputs_sha256) ||
+      !.fastkpc_full_cuda_phase3_sha256(
+        value$native_build_attestation_sha256
+      ) ||
       !.fastkpc_full_cuda_phase3_sha256(
         value$native_build_dependencies_sha256
       ) || !.fastkpc_full_cuda_phase3_sha256(
@@ -537,6 +553,8 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "native_library_inode", "native_library_sha256",
     "native_build_inputs_sha256",
     "native_build_dependencies_schema_version",
+    "native_build_attestation_schema_version",
+    "native_build_attestation_sha256",
     "native_build_trace_semantics", "native_build_trace_invocation",
     "native_build_tracer_path", "native_build_dependency_count",
     "native_build_exclusion_count", "native_build_dependencies_sha256",
@@ -753,6 +771,23 @@ fastkpc_full_cuda_phase3_discover_qualified_native_evidence <- function() {
   native_identity$device_minor_hex <- .fastkpc_cuda_normalize_hex_identity(
     native_identity$device_minor_hex
   )
+  complete_dependency_projection <- all(c(
+    "build_working_dir", "files", "exclusions"
+  ) %in% names(dependencies))
+  native_build_attestation_sha256 <- if (complete_dependency_projection) {
+    fastkpc_full_cuda_fixed_sp_native_build_attestation_hash(dependencies)
+  } else {
+    .fastkpc_full_cuda_phase3_named_hash(list(
+      schema_version = "full-cuda-ci-native-build-trace-attestation-v1",
+      trace_semantics = dependencies$trace_semantics,
+      native_build_inputs_sha256 = provenance$native_build_inputs_sha256,
+      native_library_sha256 = provenance$native_library_sha256,
+      tracer_path = dependencies$tracer_path,
+      tracer_sha256 = dependencies$tracer_sha256,
+      dependency_count = dependencies$dependency_count,
+      exclusion_count = dependencies$exclusion_count
+    ))
+  }
   list(
     authenticated = TRUE,
     source_commit = provenance$head_base_commit,
@@ -780,6 +815,9 @@ fastkpc_full_cuda_phase3_discover_qualified_native_evidence <- function() {
     native_library_sha256 = provenance$native_library_sha256,
     native_build_inputs_sha256 = provenance$native_build_inputs_sha256,
     native_build_dependencies_schema_version = dependencies$schema_version,
+    native_build_attestation_schema_version =
+      "full-cuda-ci-native-build-trace-attestation-v1",
+    native_build_attestation_sha256 = native_build_attestation_sha256,
     native_build_trace_semantics = dependencies$trace_semantics,
     native_build_trace_invocation = dependencies$trace_invocation,
     native_build_tracer_path = dependencies$tracer_path,
@@ -1218,6 +1256,8 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
     "native_library_inode", "native_library_sha256",
     "native_build_inputs_sha256",
     "native_build_dependencies_schema_version",
+    "native_build_attestation_schema_version",
+    "native_build_attestation_sha256",
     "native_build_trace_semantics", "native_build_trace_invocation",
     "native_build_tracer_path", "native_build_dependency_count",
     "native_build_exclusion_count", "native_build_dependencies_sha256",
@@ -1351,7 +1391,8 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
     "runtime_abi_hash", "route_config_hash", "source_closure_sha256",
     "execution_snapshot_sha256", "native_library_sha256",
     "native_build_inputs_sha256", "native_build_dependencies_sha256",
-    "native_build_trace_sha256", "native_build_tracer_sha256"
+    "native_build_trace_sha256", "native_build_tracer_sha256",
+    "native_build_attestation_sha256"
   )) {
     if (!.fastkpc_full_cuda_phase3_sha256(identity[[field]])) {
       stop("Phase 3 input identity hash is malformed: ", field,
@@ -1387,6 +1428,7 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
                   "native_library_device_major_hex",
                   "native_library_device_minor_hex", "native_library_inode",
                   "native_build_dependencies_schema_version",
+                  "native_build_attestation_schema_version",
                   "native_build_trace_semantics",
                   "native_build_trace_invocation",
                   "native_build_tracer_path")) {
@@ -1486,6 +1528,8 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
       !grepl("^[0-9]+$", identity$native_library_inode) ||
       !identical(identity$native_build_dependencies_schema_version,
                  "full-cuda-ci-native-build-dependencies-v3") ||
+      !identical(identity$native_build_attestation_schema_version,
+                 "full-cuda-ci-native-build-trace-attestation-v1") ||
       !identical(identity$native_build_trace_semantics,
                  "linux-strace-successful-read-exec-evidence-v3") ||
       identity$native_build_dependency_count < 1L ||
@@ -1596,6 +1640,10 @@ fastkpc_full_cuda_phase3_input_identity <- function(catalog, device_id) {
     native_build_inputs_sha256 = execution$native_build_inputs_sha256,
     native_build_dependencies_schema_version =
       execution$native_build_dependencies_schema_version,
+    native_build_attestation_schema_version =
+      execution$native_build_attestation_schema_version,
+    native_build_attestation_sha256 =
+      execution$native_build_attestation_sha256,
     native_build_trace_semantics = execution$native_build_trace_semantics,
     native_build_trace_invocation = execution$native_build_trace_invocation,
     native_build_tracer_path = execution$native_build_tracer_path,
@@ -2336,8 +2384,9 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
     "route_config_hash", "requested_shard_ids", "completed_shard_ids",
     "runtime_context_create_count", "runtime_context_destroy_count",
     "prepared_handle_create_count", "prepared_handle_destroy_count",
-    "residual_token_release_count", "output_slot_acquire_count",
-    "output_slot_release_count", "status"
+    "residual_token_acquire_count", "residual_token_release_count",
+    "output_slot_acquire_count", "output_slot_release_count",
+    "target_level_stable_sync_count", "status"
   )
 }
 
@@ -2424,8 +2473,9 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
   counter_fields <- c(
     "runtime_context_create_count", "runtime_context_destroy_count",
     "prepared_handle_create_count", "prepared_handle_destroy_count",
-    "residual_token_release_count", "output_slot_acquire_count",
-    "output_slot_release_count"
+    "residual_token_acquire_count", "residual_token_release_count",
+    "output_slot_acquire_count", "output_slot_release_count",
+    "target_level_stable_sync_count"
   )
   counters <- setNames(vapply(counter_fields, function(field) {
     .fastkpc_full_cuda_phase3_whole_scalar(
@@ -2450,8 +2500,11 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
       counters[["runtime_context_destroy_count"]] != 1L ||
       counters[["prepared_handle_create_count"]] !=
         counters[["prepared_handle_destroy_count"]] ||
+      counters[["residual_token_acquire_count"]] !=
+        counters[["residual_token_release_count"]] ||
       counters[["output_slot_acquire_count"]] !=
-        counters[["output_slot_release_count"]]
+        counters[["output_slot_release_count"]] ||
+      counters[["target_level_stable_sync_count"]] != 0L
   ) {
     stop("complete Phase 3 session resource counters are invalid",
          call. = FALSE)
@@ -2492,20 +2545,20 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
   expected_setup_count <- sum(vapply(
     descriptors, `[[`, integer(1L), "setup_count"
   ))
-  expected_target_count <- sum(vapply(
-    descriptors, `[[`, integer(1L), "target_count"
-  ))
   counters <- validated$counters
   if (counters[["prepared_handle_create_count"]] !=
         expected_setup_count ||
       counters[["prepared_handle_destroy_count"]] !=
         expected_setup_count ||
+      counters[["residual_token_acquire_count"]] !=
+        expected_setup_count ||
       counters[["residual_token_release_count"]] !=
-        expected_target_count ||
+        expected_setup_count ||
       counters[["output_slot_acquire_count"]] !=
-        expected_target_count ||
+        expected_setup_count ||
       counters[["output_slot_release_count"]] !=
-        expected_target_count) {
+        expected_setup_count ||
+      counters[["target_level_stable_sync_count"]] != 0L) {
     stop("complete Phase 3 session counters disagree with planned resources",
          call. = FALSE)
   }
@@ -2849,6 +2902,10 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
       !identical(summary$payload_semantic_hash, actual_hash)) {
     stop("Phase 3 shard payload semantic hash mismatch", call. = FALSE)
   }
+  if (identical(contract$kind, "oracle_sp") &&
+      .fastkpc_full_cuda_phase3_is_oracle_payload(envelope$payload)) {
+    .fastkpc_full_cuda_phase3_validate_oracle_payload(envelope$payload)
+  }
   if (!.fastkpc_full_cuda_phase3_sha256(summary$rds_file_sha256)) {
     stop("Phase 3 shard RDS file hash is malformed", call. = FALSE)
   }
@@ -3075,6 +3132,523 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
   )
 }
 
+.fastkpc_full_cuda_phase3_oracle_fallback_rows <- function(
+    target_parity, resource_metrics) {
+  counts <- c(
+    CPU = as.integer(sum(resource_metrics$cpu_fallback_count)),
+    UNKNOWN = as.integer(sum(resource_metrics$unknown_fallback_count)),
+    APPROXIMATE = as.integer(sum(target_parity$approximate_backend))
+  )
+  data.frame(
+    fallback_type = names(counts), count = unname(counts),
+    stringsAsFactors = FALSE, row.names = NULL
+  )
+}
+
+.fastkpc_full_cuda_phase3_oracle_failure_rows <- function(target_parity) {
+  required <- c(
+    "prepared_s_key_sha256", "residual_key_sha256", "solver_status",
+    "output_all_finite", "fitted_max_abs_diff", "fitted_relative_l2",
+    "residual_max_abs_diff", "residual_relative_l2", "error_code",
+    "error_message_sha256"
+  )
+  if (!is.data.frame(target_parity) ||
+      !all(required %in% names(target_parity))) {
+    stop("Phase 3 oracle target failure inputs are malformed",
+         call. = FALSE)
+  }
+  failed <- !startsWith(target_parity$solver_status, "OK_") |
+    !target_parity$output_all_finite |
+    !is.finite(target_parity$fitted_max_abs_diff) |
+    !is.finite(target_parity$fitted_relative_l2) |
+    !is.finite(target_parity$residual_max_abs_diff) |
+    !is.finite(target_parity$residual_relative_l2) |
+    target_parity$fitted_max_abs_diff >= 1e-7 |
+    target_parity$fitted_relative_l2 >= 1e-7 |
+    target_parity$residual_max_abs_diff >= 1e-7 |
+    target_parity$residual_relative_l2 >= 1e-7
+  data.frame(
+    prepared_s_key_sha256 = target_parity$prepared_s_key_sha256[failed],
+    residual_key_sha256 = target_parity$residual_key_sha256[failed],
+    solver_status = target_parity$solver_status[failed],
+    error_code = target_parity$error_code[failed],
+    error_message_sha256 = target_parity$error_message_sha256[failed],
+    stringsAsFactors = FALSE, row.names = NULL
+  )
+}
+
+.fastkpc_full_cuda_phase3_oracle_target_level_stable_sync <- function(
+    setup_results, resource_metrics) {
+  checkpoint_fields <- c(
+    "qr_checkpoint_record_count", "qr_checkpoint_wait_count",
+    "svd_checkpoint_record_count", "svd_checkpoint_wait_count"
+  )
+  clean <- nrow(setup_results) == nrow(resource_metrics) &&
+    all(checkpoint_fields %in% names(resource_metrics)) &&
+    all(vapply(checkpoint_fields, function(field) {
+      value <- resource_metrics[[field]]
+      typeof(value) == "integer" && !anyNA(value) && all(value >= 0L)
+    }, logical(1L)))
+  if (!isTRUE(clean)) {
+    stop("Phase 3 oracle stable checkpoint rows are malformed", call. = FALSE)
+  }
+  qr_affected <- as.integer(setup_results$planned_qr_target_count > 0L)
+  svd_affected <- as.integer(setup_results$executed_svd_target_count > 0L)
+  per_setup <- pmax(
+    resource_metrics$qr_checkpoint_wait_count - qr_affected, 0L
+  ) + pmax(
+    resource_metrics$svd_checkpoint_wait_count - svd_affected, 0L
+  )
+  count <- sum(as.double(per_setup))
+  if (!is.finite(count) || count > .Machine$integer.max) {
+    stop("Phase 3 oracle target-level stable sync count overflowed",
+         call. = FALSE)
+  }
+  as.integer(count)
+}
+
+fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
+    setup_results, target_parity, resource_metrics, stage_timing,
+    fallbacks, failures) {
+  required_helpers <- c(
+    "fastkpc_full_cuda_fixed_sp_validate_oracle_frame",
+    "fastkpc_full_cuda_census_frame_hash"
+  )
+  missing_helpers <- required_helpers[!vapply(
+    required_helpers, exists, logical(1L), mode = "function", inherits = TRUE
+  )]
+  if (length(missing_helpers) > 0L) {
+    stop("Phase 3 oracle summary helpers are unavailable", call. = FALSE)
+  }
+  setup_results <- fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
+    setup_results, "setup_results"
+  )
+  target_parity <- fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
+    target_parity, "target_parity"
+  )
+  resource_metrics <- fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
+    resource_metrics, "resource_metrics"
+  )
+  stage_timing <- fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
+    stage_timing, "stage_timing"
+  )
+  fallback_clean <- is.data.frame(fallbacks) && identical(
+    names(fallbacks), c("fallback_type", "count")
+  ) && typeof(fallbacks$fallback_type) == "character" &&
+    typeof(fallbacks$count) == "integer" && !anyNA(fallbacks) &&
+    all(fallbacks$fallback_type %in% c("CPU", "UNKNOWN", "APPROXIMATE")) &&
+    all(fallbacks$count >= 0L)
+  failure_clean <- is.data.frame(failures) && identical(
+    names(failures), c(
+      "prepared_s_key_sha256", "residual_key_sha256", "solver_status",
+      "error_code", "error_message_sha256"
+    )
+  ) && all(vapply(failures, function(value) {
+    typeof(value) == "character" && !is.object(value) &&
+      is.null(attributes(value)) && !anyNA(value)
+  }, logical(1L)))
+  if (!isTRUE(fallback_clean) || !isTRUE(failure_clean)) {
+    stop("Phase 3 oracle fallback/failure rows are malformed",
+         call. = FALSE)
+  }
+
+  setup_count <- nrow(setup_results)
+  target_count <- nrow(target_parity)
+  setup_keys <- setup_results$prepared_s_key_sha256
+  target_keys <- target_parity$residual_key_sha256
+  expected_target_order <- if (target_count == 0L) integer() else order(
+    match(target_parity$prepared_s_key_sha256, setup_keys), target_keys,
+    method = "radix"
+  )
+  order_clean <- !anyDuplicated(setup_keys) && !anyDuplicated(target_keys) &&
+    identical(setup_keys, sort(setup_keys, method = "radix")) &&
+    identical(expected_target_order, seq_len(target_count)) &&
+    identical(resource_metrics$prepared_s_key_sha256, setup_keys) &&
+    all(target_parity$prepared_s_key_sha256 %in% setup_keys) &&
+    all(stage_timing$prepared_s_key_sha256 %in% setup_keys)
+  setup_target_counts <- if (setup_count == 0L) integer() else vapply(
+    setup_keys, function(key) sum(
+      target_parity$prepared_s_key_sha256 == key
+    ), integer(1L), USE.NAMES = FALSE
+  )
+  if (!isTRUE(order_clean) ||
+      !identical(setup_results$target_count, setup_target_counts) ||
+      nrow(resource_metrics) != setup_count ||
+      nrow(stage_timing) != 6L * setup_count) {
+    stop("Phase 3 oracle setup/target/resource row identity mismatch",
+         call. = FALSE)
+  }
+
+  planned_cholesky <- target_parity$planned_route == "CHOLESKY_BATCHED"
+  planned_qr <- target_parity$planned_route == "AUGMENTED_QR"
+  planned_svd <- target_parity$planned_route == "AUGMENTED_SVD"
+  executed_cholesky <-
+    target_parity$executed_route == "CHOLESKY_BATCHED"
+  executed_qr <- target_parity$executed_route == "AUGMENTED_QR"
+  executed_svd <- target_parity$executed_route == "AUGMENTED_SVD"
+  cholesky_to_svd <- planned_cholesky & executed_svd
+  qr_to_svd <- planned_qr & executed_svd
+  stable_reroute <- target_parity$planned_route != target_parity$executed_route
+  route_counts <- c(
+    planned_cholesky_target_count = sum(planned_cholesky),
+    planned_qr_target_count = sum(planned_qr),
+    planned_svd_target_count = sum(planned_svd),
+    executed_cholesky_target_count = sum(executed_cholesky),
+    executed_qr_target_count = sum(executed_qr),
+    executed_svd_target_count = sum(executed_svd),
+    cholesky_to_svd_count = sum(cholesky_to_svd),
+    qr_to_svd_count = sum(qr_to_svd),
+    stable_reroute_count = sum(stable_reroute)
+  )
+  route_counts <- as.integer(route_counts)
+  names(route_counts) <- c(
+    "planned_cholesky_target_count", "planned_qr_target_count",
+    "planned_svd_target_count", "executed_cholesky_target_count",
+    "executed_qr_target_count", "executed_svd_target_count",
+    "cholesky_to_svd_count", "qr_to_svd_count", "stable_reroute_count"
+  )
+  route_conserved <-
+    route_counts[["executed_cholesky_target_count"]] ==
+      route_counts[["planned_cholesky_target_count"]] -
+        route_counts[["cholesky_to_svd_count"]] &&
+    route_counts[["executed_qr_target_count"]] ==
+      route_counts[["planned_qr_target_count"]] -
+        route_counts[["qr_to_svd_count"]] &&
+    route_counts[["executed_svd_target_count"]] ==
+      route_counts[["planned_svd_target_count"]] +
+        route_counts[["cholesky_to_svd_count"]] +
+        route_counts[["qr_to_svd_count"]] &&
+    route_counts[["stable_reroute_count"]] ==
+      route_counts[["cholesky_to_svd_count"]] +
+        route_counts[["qr_to_svd_count"]]
+  reroute_rows_exact <- identical(
+    target_parity$cholesky_to_svd_count, as.integer(cholesky_to_svd)
+  ) && identical(
+    target_parity$qr_to_svd_count, as.integer(qr_to_svd)
+  ) && identical(
+    target_parity$stable_reroute_count, as.integer(stable_reroute)
+  )
+  expected_reroute_reason <- rep("", target_count)
+  expected_reroute_reason[cholesky_to_svd] <-
+    "CHOLESKY_NON_POSITIVE_PIVOT"
+  expected_reroute_reason[qr_to_svd] <- "QR_RANK_GUARD_REJECTED"
+  if (!isTRUE(route_conserved) || !isTRUE(reroute_rows_exact) ||
+      !identical(target_parity$reroute_reason, unname(expected_reroute_reason))) {
+    stop("Phase 3 oracle route conservation failed", call. = FALSE)
+  }
+
+  setup_route_exact <- all(vapply(seq_along(setup_keys), function(index) {
+    selected <- target_parity$prepared_s_key_sha256 == setup_keys[[index]]
+    all(vapply(names(route_counts), function(field) {
+      expected <- switch(
+        field,
+        planned_cholesky_target_count = sum(planned_cholesky[selected]),
+        planned_qr_target_count = sum(planned_qr[selected]),
+        planned_svd_target_count = sum(planned_svd[selected]),
+        executed_cholesky_target_count = sum(executed_cholesky[selected]),
+        executed_qr_target_count = sum(executed_qr[selected]),
+        executed_svd_target_count = sum(executed_svd[selected]),
+        cholesky_to_svd_count = sum(cholesky_to_svd[selected]),
+        qr_to_svd_count = sum(qr_to_svd[selected]),
+        stable_reroute_count = sum(stable_reroute[selected])
+      )
+      setup_results[[field]][[index]] == expected &&
+        resource_metrics[[field]][[index]] == expected
+    }, logical(1L)))
+  }, logical(1L)))
+  if (!isTRUE(setup_route_exact)) {
+    stop("Phase 3 oracle setup route summaries are not row-derived",
+         call. = FALSE)
+  }
+
+  recomputed_fallbacks <-
+    .fastkpc_full_cuda_phase3_oracle_fallback_rows(
+      target_parity, resource_metrics
+    )
+  supplied_fallback_counts <- vapply(
+    recomputed_fallbacks$fallback_type, function(type) {
+      as.integer(sum(fallbacks$count[fallbacks$fallback_type == type]))
+    }, integer(1L)
+  )
+  if (!identical(unname(supplied_fallback_counts),
+                 recomputed_fallbacks$count)) {
+    stop("Phase 3 oracle fallback summary is not row-derived", call. = FALSE)
+  }
+  recomputed_failures <-
+    .fastkpc_full_cuda_phase3_oracle_failure_rows(target_parity)
+  if (!identical(failures, recomputed_failures)) {
+    stop("Phase 3 oracle failure summary is not row-derived", call. = FALSE)
+  }
+
+  non_ok <- as.integer(sum(!startsWith(target_parity$solver_status, "OK_")))
+  nonfinite <- as.integer(sum(!target_parity$output_all_finite))
+  max_or_zero <- function(value) {
+    if (length(value) == 0L) 0 else as.double(max(value))
+  }
+  resource_sum <- function(field) as.integer(sum(resource_metrics[[field]]))
+  target_level_stable_sync_count <-
+    .fastkpc_full_cuda_phase3_oracle_target_level_stable_sync(
+      setup_results, resource_metrics
+    )
+  data.frame(
+    setup_count = as.integer(setup_count), target_count = as.integer(target_count),
+    non_ok_solver_status_count = non_ok,
+    nonfinite_output_count = nonfinite,
+    planned_cholesky_target_count =
+      route_counts[["planned_cholesky_target_count"]],
+    planned_qr_target_count = route_counts[["planned_qr_target_count"]],
+    planned_svd_target_count = route_counts[["planned_svd_target_count"]],
+    executed_cholesky_target_count =
+      route_counts[["executed_cholesky_target_count"]],
+    executed_qr_target_count = route_counts[["executed_qr_target_count"]],
+    executed_svd_target_count = route_counts[["executed_svd_target_count"]],
+    cholesky_to_svd_count = route_counts[["cholesky_to_svd_count"]],
+    qr_to_svd_count = route_counts[["qr_to_svd_count"]],
+    stable_reroute_count = route_counts[["stable_reroute_count"]],
+    route_conservation_exact = isTRUE(route_conserved),
+    cpu_fallback_count = recomputed_fallbacks$count[[1L]],
+    unknown_fallback_count = recomputed_fallbacks$count[[2L]],
+    approximate_backend_count = recomputed_fallbacks$count[[3L]],
+    failure_count = as.integer(nrow(failures)),
+    prepared_handle_create_count = resource_sum(
+      "prepared_handle_create_count"
+    ),
+    prepared_handle_destroy_count = resource_sum(
+      "prepared_handle_destroy_count"
+    ),
+    residual_token_acquire_count = resource_sum(
+      "residual_token_acquire_count"
+    ),
+    residual_token_release_count = resource_sum(
+      "residual_token_release_count"
+    ),
+    output_slot_acquire_count = resource_sum("output_slot_acquire_count"),
+    output_slot_release_count = resource_sum("output_slot_release_count"),
+    setup_h2d_upload_count = resource_sum("setup_h2d_upload_count"),
+    per_target_allocation_count_after_warmup = resource_sum(
+      "per_target_allocation_count_after_warmup"
+    ),
+    per_target_handle_create_count = resource_sum(
+      "per_target_handle_create_count"
+    ),
+    implicit_residual_d2h_count = resource_sum(
+      "implicit_residual_d2h_count"
+    ),
+    cuda_device_synchronize_count = resource_sum(
+      "cuda_device_synchronize_count"
+    ),
+    target_level_stable_sync_count = target_level_stable_sync_count,
+    qr_checkpoint_record_count = resource_sum("qr_checkpoint_record_count"),
+    qr_checkpoint_wait_count = resource_sum("qr_checkpoint_wait_count"),
+    svd_checkpoint_record_count = resource_sum("svd_checkpoint_record_count"),
+    svd_checkpoint_wait_count = resource_sum("svd_checkpoint_wait_count"),
+    output_slot_live_count = as.integer(sum(
+      resource_metrics$output_slot_leased_after_release
+    )),
+    shadow_d2h_bytes = as.double(sum(resource_metrics$shadow_d2h_bytes)),
+    max_coefficient_abs_diff = max_or_zero(
+      target_parity$coefficient_max_abs_diff
+    ),
+    max_coefficient_relative_l2 = max_or_zero(
+      target_parity$coefficient_relative_l2
+    ),
+    max_fitted_abs_diff = max_or_zero(target_parity$fitted_max_abs_diff),
+    max_fitted_relative_l2 = max_or_zero(target_parity$fitted_relative_l2),
+    max_residual_abs_diff = max_or_zero(target_parity$residual_max_abs_diff),
+    max_residual_relative_l2 = max_or_zero(
+      target_parity$residual_relative_l2
+    ),
+    max_rss_abs_diff = max_or_zero(target_parity$rss_max_abs_diff),
+    max_rss_relative_l2 = max_or_zero(target_parity$rss_relative_l2),
+    max_rhs_abs_diff = max_or_zero(target_parity$rhs_max_abs_diff),
+    max_rhs_relative_l2 = max_or_zero(target_parity$rhs_relative_l2),
+    setup_rows_sha256 = fastkpc_full_cuda_census_frame_hash(setup_results),
+    target_rows_sha256 = fastkpc_full_cuda_census_frame_hash(target_parity),
+    resource_rows_sha256 = fastkpc_full_cuda_census_frame_hash(
+      resource_metrics
+    ),
+    stage_timing_rows_sha256 = fastkpc_full_cuda_census_frame_hash(
+      stage_timing
+    ),
+    fallback_rows_sha256 = fastkpc_full_cuda_census_frame_hash(fallbacks),
+    failure_rows_sha256 = fastkpc_full_cuda_census_frame_hash(failures),
+    summary_recomputed = TRUE,
+    stringsAsFactors = FALSE
+  )
+}
+
+.fastkpc_full_cuda_phase3_is_oracle_payload <- function(payload) {
+  .fastkpc_full_cuda_phase3_exact_named_list(
+    payload,
+    c(
+      "setup_results", "target_parity", "resource_metrics", "stage_timing",
+      "fallbacks", "failures", "summary"
+    )
+  )
+}
+
+.fastkpc_full_cuda_phase3_validate_oracle_payload <- function(payload) {
+  if (!.fastkpc_full_cuda_phase3_is_oracle_payload(payload)) {
+    stop("Phase 3 oracle shard payload schema is malformed", call. = FALSE)
+  }
+  recomputed <- fastkpc_full_cuda_phase3_summarize_oracle_rows(
+    setup_results = payload$setup_results,
+    target_parity = payload$target_parity,
+    resource_metrics = payload$resource_metrics,
+    stage_timing = payload$stage_timing,
+    fallbacks = payload$fallbacks,
+    failures = payload$failures
+  )
+  if (!identical(payload$summary, recomputed)) {
+    stop("Phase 3 oracle shard summary is not row-derived", call. = FALSE)
+  }
+  if (recomputed$target_level_stable_sync_count != 0L) {
+    stop("Phase 3 oracle target-level stable sync hard gate failed",
+         call. = FALSE)
+  }
+  if (recomputed$cuda_device_synchronize_count != 0L) {
+    stop("Phase 3 oracle cudaDeviceSynchronize hard gate failed",
+         call. = FALSE)
+  }
+  resources_conserved <-
+    recomputed$prepared_handle_create_count == recomputed$setup_count &&
+    recomputed$prepared_handle_destroy_count == recomputed$setup_count &&
+    recomputed$residual_token_acquire_count == recomputed$setup_count &&
+    recomputed$residual_token_release_count == recomputed$setup_count &&
+    recomputed$output_slot_acquire_count == recomputed$setup_count &&
+    recomputed$output_slot_release_count == recomputed$setup_count &&
+    recomputed$output_slot_live_count == 0L
+  if (!isTRUE(resources_conserved)) {
+    stop("Phase 3 oracle shard resource conservation failed", call. = FALSE)
+  }
+  invisible(recomputed)
+}
+
+fastkpc_full_cuda_phase3_run_oracle_shard <- function(
+    context, shard_id, setup_keys, target_rows, catalog) {
+  required_helpers <- c(
+    "fastkpc_full_cuda_fixed_sp_execute_oracle_setup",
+    "fastkpc_full_cuda_fixed_sp_oracle_empty_frame",
+    "fixed_sp_cuda_runtime_info"
+  )
+  missing_helpers <- required_helpers[!vapply(
+    required_helpers, exists, logical(1L), mode = "function", inherits = TRUE
+  )]
+  if (length(missing_helpers) > 0L) {
+    stop("Phase 3 oracle shard runtime helpers are unavailable: ",
+         paste(missing_helpers, collapse = ","), call. = FALSE)
+  }
+  shard_id <- .fastkpc_full_cuda_phase3_whole_scalar(
+    shard_id, 0L, "shard_id"
+  )
+  setup_keys <- .fastkpc_full_cuda_phase3_key_vector(
+    setup_keys, "setup_keys", allow_empty = TRUE, allow_empty_list = TRUE
+  )
+  if (!identical(setup_keys, sort(setup_keys, method = "radix"))) {
+    stop("Phase 3 oracle shard setup order is not canonical", call. = FALSE)
+  }
+  required_target_fields <- c(
+    "prepared_s_key_sha256", "residual_key_sha256", "planned_route"
+  )
+  if (!is.data.frame(target_rows) ||
+      !all(required_target_fields %in% names(target_rows))) {
+    stop("Phase 3 oracle shard target rows are malformed", call. = FALSE)
+  }
+  if (length(setup_keys) == 0L) {
+    if (nrow(target_rows) != 0L) {
+      stop("empty Phase 3 oracle shard has target rows", call. = FALSE)
+    }
+  } else {
+    setup_rank <- match(target_rows$prepared_s_key_sha256, setup_keys)
+    expected_order <- order(
+      setup_rank, target_rows$residual_key_sha256, method = "radix"
+    )
+    if (nrow(target_rows) == 0L || anyNA(setup_rank) ||
+        !identical(expected_order, seq_len(nrow(target_rows))) ||
+        !identical(sort(unique(target_rows$prepared_s_key_sha256),
+                        method = "radix"), setup_keys)) {
+      stop("Phase 3 oracle shard target order/ownership is invalid",
+           call. = FALSE)
+    }
+    if ("shard_id" %in% names(target_rows) &&
+        any(as.integer(target_rows$shard_id) != shard_id)) {
+      stop("Phase 3 oracle shard target assignment mismatch", call. = FALSE)
+    }
+  }
+  fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
+  runtime_info <- fixed_sp_cuda_runtime_info(context)
+  fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
+    runtime_info, paste("Phase 3 oracle shard", shard_id, "runtime")
+  )
+
+  setup_outputs <- lapply(seq_along(setup_keys), function(index) {
+    setup_key <- setup_keys[[index]]
+    selected_targets <- target_rows[
+      target_rows$prepared_s_key_sha256 == setup_key, , drop = FALSE
+    ]
+    rownames(selected_targets) <- NULL
+    fastkpc_full_cuda_fixed_sp_execute_oracle_setup(
+      context = context, catalog = catalog, setup_key = setup_key,
+      target_rows = selected_targets, shard_id = shard_id,
+      setup_ordinal = as.integer(index)
+    )
+  })
+  bind_or_empty <- function(name) {
+    if (length(setup_outputs) == 0L) {
+      return(fastkpc_full_cuda_fixed_sp_oracle_empty_frame(name))
+    }
+    value <- do.call(rbind, lapply(setup_outputs, `[[`, name))
+    rownames(value) <- NULL
+    fastkpc_full_cuda_fixed_sp_validate_oracle_frame(value, name)
+  }
+  setup_results <- bind_or_empty("setup_results")
+  target_parity <- bind_or_empty("target_parity")
+  resource_metrics <- bind_or_empty("resource_metrics")
+  stage_timing <- bind_or_empty("stage_timing")
+  fallbacks <- .fastkpc_full_cuda_phase3_oracle_fallback_rows(
+    target_parity, resource_metrics
+  )
+  failures <- .fastkpc_full_cuda_phase3_oracle_failure_rows(target_parity)
+  summary <- fastkpc_full_cuda_phase3_summarize_oracle_rows(
+    setup_results = setup_results, target_parity = target_parity,
+    resource_metrics = resource_metrics, stage_timing = stage_timing,
+    fallbacks = fallbacks, failures = failures
+  )
+  payload <- list(
+    setup_results = setup_results,
+    target_parity = target_parity,
+    resource_metrics = resource_metrics,
+    stage_timing = stage_timing,
+    fallbacks = fallbacks,
+    failures = failures,
+    summary = summary
+  )
+  .fastkpc_full_cuda_phase3_validate_oracle_payload(payload)
+  resource_count <- function(field) {
+    as.integer(sum(resource_metrics[[field]]))
+  }
+  result <- list(
+    payload = payload,
+    resource_counts = list(
+      prepared_handle_create_count = resource_count(
+        "prepared_handle_create_count"
+      ),
+      prepared_handle_destroy_count = resource_count(
+        "prepared_handle_destroy_count"
+      ),
+      residual_token_acquire_count = resource_count(
+        "residual_token_acquire_count"
+      ),
+      residual_token_release_count = resource_count(
+        "residual_token_release_count"
+      ),
+      output_slot_acquire_count = resource_count("output_slot_acquire_count"),
+      output_slot_release_count = resource_count("output_slot_release_count")
+    )
+  )
+  result
+}
+
 .fastkpc_full_cuda_phase3_resource_fields <- function() {
   c(
     "prepared_handle_create_count", "prepared_handle_destroy_count",
@@ -3234,9 +3808,11 @@ fastkpc_full_cuda_phase3_run_shards <- function(
     runtime_context_destroy_count = 0L,
     prepared_handle_create_count = 0L,
     prepared_handle_destroy_count = 0L,
+    residual_token_acquire_count = 0L,
     residual_token_release_count = 0L,
     output_slot_acquire_count = 0L,
     output_slot_release_count = 0L,
+    target_level_stable_sync_count = 0L,
     status = "running"
   )
   .fastkpc_full_cuda_phase3_atomic_write_session(session, sessions_dir)
@@ -3266,6 +3842,14 @@ fastkpc_full_cuda_phase3_run_shards <- function(
           target_rows = descriptor$target_rows
         )
       )
+      oracle_accounting <- if (
+        identical(contract$kind, "oracle_sp") &&
+          .fastkpc_full_cuda_phase3_is_oracle_payload(result$payload)
+      ) {
+        .fastkpc_full_cuda_phase3_validate_oracle_payload(result$payload)
+      } else {
+        NULL
+      }
       envelope <- .fastkpc_full_cuda_phase3_build_shard_envelope(
         contract = contract,
         descriptor = descriptor,
@@ -3294,6 +3878,10 @@ fastkpc_full_cuda_phase3_run_shards <- function(
         session$prepared_handle_destroy_count +
           counts[["prepared_handle_destroy_count"]]
       )
+      session$residual_token_acquire_count <- as.integer(
+        session$residual_token_acquire_count +
+          counts[["residual_token_acquire_count"]]
+      )
       session$residual_token_release_count <- as.integer(
         session$residual_token_release_count +
           counts[["residual_token_release_count"]]
@@ -3306,6 +3894,12 @@ fastkpc_full_cuda_phase3_run_shards <- function(
         session$output_slot_release_count +
           counts[["output_slot_release_count"]]
       )
+      if (!is.null(oracle_accounting)) {
+        session$target_level_stable_sync_count <- as.integer(
+          session$target_level_stable_sync_count +
+            oracle_accounting$target_level_stable_sync_count
+        )
+      }
       session$completed_shard_ids <- c(
         session$completed_shard_ids, as.integer(shard_id)
       )
