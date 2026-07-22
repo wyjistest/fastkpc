@@ -1343,8 +1343,18 @@ provenance_native_build_dependencies <-
   )
 provenance_native_sha256 <-
   fastkpc_full_cuda_fixed_sp_sha256_file(provenance_native_path)
+provenance_native_identity <-
+  .fastkpc_cuda_posix_file_identity(provenance_native_path)
 provenance_loaded_paths <- function() provenance_native_path
-provenance_mapped_paths <- function() provenance_native_path
+provenance_mapped_records <- function() data.frame(
+  path = provenance_native_path,
+  live_path = provenance_native_path,
+  deleted = FALSE,
+  device_major_hex = provenance_native_identity$device_major_hex,
+  device_minor_hex = provenance_native_identity$device_minor_hex,
+  inode = provenance_native_identity$inode,
+  stringsAsFactors = FALSE
+)
 provenance_fixture <-
   fastkpc_full_cuda_fixed_sp_capture_execution_provenance(
     source_closure = provenance_closure,
@@ -1356,7 +1366,7 @@ provenance_fixture <-
     native_build_dependencies = provenance_native_build_dependencies,
     expected_native_library_sha256 = provenance_native_sha256,
     loaded_paths = provenance_loaded_paths,
-    mapped_paths = provenance_mapped_paths
+    mapped_records = provenance_mapped_records
   )
 assert_true(
   identical(provenance_fixture$source_closure_count, 3L) &&
@@ -1395,7 +1405,7 @@ assert_true(
 verify_provenance_fixture <- function(value) {
   fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
     value, loaded_paths = provenance_loaded_paths,
-    mapped_paths = provenance_mapped_paths
+    mapped_records = provenance_mapped_records
   )
 }
 verified_provenance_fixture <-

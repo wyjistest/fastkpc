@@ -259,33 +259,35 @@
   if (!any(live_rows)) {
     stop("exact qualified native library path is not mapped", call. = FALSE)
   }
-  live_exact_rows <- live_rows & !records$deleted
-  exact_identity_available <- any(
-    !is.na(records$device_major_hex[live_exact_rows]) &
-      !is.na(records$device_minor_hex[live_exact_rows]) &
-      !is.na(records$inode[live_exact_rows])
+  live_exact_rows <- live_rows & !is.na(records$deleted) & !records$deleted
+  missing_identity_rows <- live_exact_rows & (
+    is.na(records$device_major_hex) |
+      is.na(records$device_minor_hex) |
+      is.na(records$inode)
   )
-  if (exact_identity_available) {
-    record_major <- .fastkpc_cuda_normalize_hex_identity(
-      records$device_major_hex
-    )
-    record_minor <- .fastkpc_cuda_normalize_hex_identity(
-      records$device_minor_hex
-    )
-    native_major <- .fastkpc_cuda_normalize_hex_identity(
-      native_identity$device_major_hex
-    )
-    native_minor <- .fastkpc_cuda_normalize_hex_identity(
-      native_identity$device_minor_hex
-    )
-    identity_rows <- live_exact_rows &
-      record_major == native_major &
-      record_minor == native_minor &
-      as.character(records$inode) == as.character(native_identity$inode)
-    if (!any(identity_rows)) {
-      stop("exact qualified native library mapped inode mismatch",
-           call. = FALSE)
-    }
+  if (any(missing_identity_rows) || !any(live_exact_rows)) {
+    stop("exact qualified native library mapped inode identity is missing",
+         call. = FALSE)
+  }
+  record_major <- .fastkpc_cuda_normalize_hex_identity(
+    records$device_major_hex
+  )
+  record_minor <- .fastkpc_cuda_normalize_hex_identity(
+    records$device_minor_hex
+  )
+  native_major <- .fastkpc_cuda_normalize_hex_identity(
+    native_identity$device_major_hex
+  )
+  native_minor <- .fastkpc_cuda_normalize_hex_identity(
+    native_identity$device_minor_hex
+  )
+  identity_rows <- live_exact_rows &
+    record_major == native_major &
+    record_minor == native_minor &
+    as.character(records$inode) == as.character(native_identity$inode)
+  if (!any(identity_rows)) {
+    stop("exact qualified native library mapped inode mismatch",
+         call. = FALSE)
   }
   for (symbol_name in .fastkpc_cuda_phase3_symbol_names()) {
     info <- symbol_info(

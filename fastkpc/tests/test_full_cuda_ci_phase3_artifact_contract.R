@@ -4,11 +4,24 @@ source("fastkpc/R/full_cuda_ci_workload_census.R")
 source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")
 source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R")
 source("fastkpc/R/cuda_native.R")
-cuda_dll_paths_before <- unname(vapply(
-  getLoadedDLLs(), function(dll) normalizePath(
-    dll[["path"]], winslash = "/", mustWork = FALSE
-  ), character(1L)
-))
+fastkpc_cuda_dll_paths <- function(dlls = getLoadedDLLs()) {
+  paths <- unname(vapply(
+    dlls, function(dll) normalizePath(
+      dll[["path"]], winslash = "/", mustWork = FALSE
+    ), character(1L)
+  ))
+  paths[grepl("fastkpc_cuda", paths)]
+}
+cuda_dll_paths_before <- fastkpc_cuda_dll_paths()
+if (length(cuda_dll_paths_before) != 0L) {
+  stop(
+    paste0(
+      "contract fixture requires a fresh Rscript with zero fastkpc_cuda DLLs ",
+      "before source: ", paste(cuda_dll_paths_before, collapse = ",")
+    ),
+    call. = FALSE
+  )
+}
 if (file.exists("fastkpc/R/full_cuda_ci_phase3_artifacts.R")) {
   source("fastkpc/R/full_cuda_ci_phase3_artifacts.R")
 }
@@ -1374,37 +1387,10 @@ assert_error(
   "malformed artifact path must fail"
 )
 
-cuda_dll_paths_after <- unname(vapply(
-  getLoadedDLLs(), function(dll) normalizePath(
-    dll[["path"]], winslash = "/", mustWork = FALSE
-  ), character(1L)
-))
-loaded_cuda_dll_paths <- cuda_dll_paths_after[grepl(
-  "fastkpc_cuda", cuda_dll_paths_after
-)]
-default_cuda_so <- normalizePath(
-  file.path("fastkpc", "build", "fastkpc_cuda.so"),
-  winslash = "/", mustWork = FALSE
-)
+cuda_dll_paths_after <- fastkpc_cuda_dll_paths()
 assert_true(
-  identical(
-    cuda_dll_paths_before[grepl("fastkpc_cuda", cuda_dll_paths_before)],
-    character()
-  ) && !default_cuda_so %in% loaded_cuda_dll_paths &&
-    if (length(loaded_cuda_dll_paths) == 0L) {
-      TRUE
-    } else {
-      resource_snapshot <- .Call(
-        "C_fixed_sp_cuda_test_resource_snapshot", PACKAGE = "fastkpc_cuda"
-      )
-      active_fields <- grep("_active_count$", names(resource_snapshot),
-                            value = TRUE)
-      all(vapply(active_fields, function(field) {
-        identical(as.numeric(resource_snapshot[[field]]), 0)
-      }, logical(1L))) &&
-        identical(as.numeric(resource_snapshot$cleanup_error_count), 0)
-    },
-  "contract fixture leaves no fixed-SP CUDA resources active"
+  identical(cuda_dll_paths_after, character()),
+  "contract fixture loads no fastkpc_cuda DLLs"
 )
 
 cat("PASS phase3 artifact contract route, identity, and publication validation\n")

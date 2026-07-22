@@ -1027,6 +1027,19 @@ mock_file_identity <- function(path, device_major_hex = "08",
     inode = inode
   )
 }
+mock_mapped_record <- function(path, device_major_hex = "08",
+                               device_minor_hex = "01", inode = "42") {
+  normalized <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  data.frame(
+    path = normalized,
+    live_path = normalized,
+    deleted = FALSE,
+    device_major_hex = device_major_hex,
+    device_minor_hex = device_minor_hex,
+    inode = inode,
+    stringsAsFactors = FALSE
+  )
+}
 assert_error_matching(
   fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
     compiler_path,
@@ -1073,6 +1086,51 @@ assert_true(
     }
   ),
   "runtime provenance accepts exact registered, mapped, and symbol-bound native identity"
+)
+assert_error_matching(
+  fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
+    compiler_path,
+    expected_sha256,
+    loaded_dlls = function() list(fastkpc_cuda = mock_dllinfo(
+      "fastkpc_cuda", compiler_path
+    )),
+    mapped_records = function() mock_mapped_record(
+      compiler_path,
+      device_major_hex = NA_character_,
+      device_minor_hex = NA_character_,
+      inode = NA_character_
+    ),
+    file_identity = function(path) mock_file_identity(path),
+    symbol_info = function(name, PACKAGE, withRegistrationInfo = FALSE) {
+      mock_symbol_info(name, compiler_path)
+    }
+  ),
+  "mapped inode identity is missing",
+  "runtime provenance rejects mapped records without inode identity"
+)
+assert_error_matching(
+  fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
+    compiler_path,
+    expected_sha256,
+    loaded_dlls = function() list(fastkpc_cuda = mock_dllinfo(
+      "fastkpc_cuda", compiler_path
+    )),
+    mapped_records = function() rbind(
+      mock_mapped_record(compiler_path),
+      mock_mapped_record(
+        compiler_path,
+        device_major_hex = NA_character_,
+        device_minor_hex = NA_character_,
+        inode = NA_character_
+      )
+    ),
+    file_identity = function(path) mock_file_identity(path),
+    symbol_info = function(name, PACKAGE, withRegistrationInfo = FALSE) {
+      mock_symbol_info(name, compiler_path)
+    }
+  ),
+  "mapped inode identity is missing",
+  "runtime provenance rejects partially missing mapped inode identity"
 )
 assert_error_matching(
   fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
@@ -1146,6 +1204,195 @@ assert_error_matching(
   "symbol",
   "runtime provenance rejects phase3 symbols bound to a different DLL"
 )
+
+default_provenance_dir <- tempfile(
+  "fastkpc_production_mapped_records_", tmpdir = "fastkpc/tests"
+)
+dir.create(default_provenance_dir)
+on.exit(unlink(default_provenance_dir, recursive = TRUE, force = TRUE),
+        add = TRUE)
+default_provenance_source_path <- file.path(
+  default_provenance_dir, "runner.R"
+)
+writeLines("default_provenance_value <- 1L", default_provenance_source_path,
+           useBytes = TRUE)
+default_provenance_closure <-
+  fastkpc_full_cuda_fixed_sp_discover_execution_source_closure(
+    root_sources = c(default_runner = default_provenance_source_path),
+    project_root = "."
+  )
+default_provenance_source_hashes <- vapply(
+  default_provenance_closure$source_file_paths,
+  fastkpc_full_cuda_fixed_sp_sha256_file,
+  character(1L)
+)
+default_provenance_native_path <- file.path(
+  default_provenance_dir, "fastkpc_cuda.so"
+)
+writeBin(charToRaw("strict mapped native fixture"),
+         default_provenance_native_path)
+default_provenance_native_path <- normalizePath(
+  default_provenance_native_path, winslash = "/", mustWork = TRUE
+)
+default_provenance_native_inputs <- file.path(
+  default_provenance_dir, c("build.sh", "native.cu")
+)
+names(default_provenance_native_inputs) <- c("build", "native")
+writeLines("#!/bin/sh\nexit 0", default_provenance_native_inputs[["build"]],
+           useBytes = TRUE)
+writeLines("// strict mapped native input",
+           default_provenance_native_inputs[["native"]], useBytes = TRUE)
+default_provenance_native_inputs[] <- vapply(
+  default_provenance_native_inputs,
+  normalizePath, character(1L), winslash = "/", mustWork = TRUE
+)
+default_provenance_native_input_hashes <- vapply(
+  default_provenance_native_inputs,
+  fastkpc_full_cuda_fixed_sp_sha256_file,
+  character(1L)
+)
+default_provenance_native_sha256 <-
+  fastkpc_full_cuda_fixed_sp_sha256_file(default_provenance_native_path)
+default_provenance_native_identity <-
+  .fastkpc_cuda_posix_file_identity(default_provenance_native_path)
+default_provenance_mapped_records <- function(
+    device_major_hex = default_provenance_native_identity$device_major_hex,
+    device_minor_hex = default_provenance_native_identity$device_minor_hex,
+    inode = default_provenance_native_identity$inode) {
+  force(device_major_hex)
+  force(device_minor_hex)
+  force(inode)
+  function(maps_path = "/proc/self/maps") {
+    data.frame(
+      path = default_provenance_native_path,
+      live_path = default_provenance_native_path,
+      deleted = FALSE,
+      device_major_hex = device_major_hex,
+      device_minor_hex = device_minor_hex,
+      inode = inode,
+      stringsAsFactors = FALSE
+    )
+  }
+}
+default_provenance_loaded_paths <- function() default_provenance_native_path
+with_default_native_observers <- function(mapped_records, expression) {
+  function_names <- c(".fastkpc_cuda_mapped_object_records",
+                      "getNativeSymbolInfo")
+  existed <- vapply(
+    function_names, exists, logical(1L), envir = .GlobalEnv,
+    inherits = FALSE
+  )
+  originals <- lapply(function_names[existed], function(name) {
+    get(name, envir = .GlobalEnv, inherits = FALSE)
+  })
+  names(originals) <- function_names[existed]
+  on.exit({
+    for (name in function_names) {
+      if (existed[[name]]) {
+        assign(name, originals[[name]], envir = .GlobalEnv)
+      } else if (exists(name, envir = .GlobalEnv, inherits = FALSE)) {
+        rm(list = name, envir = .GlobalEnv)
+      }
+    }
+  }, add = TRUE)
+  assign(".fastkpc_cuda_mapped_object_records", mapped_records,
+         envir = .GlobalEnv)
+  assign(
+    "getNativeSymbolInfo",
+    function(name, PACKAGE, withRegistrationInfo = FALSE) {
+      if (!identical(PACKAGE, "fastkpc_cuda")) {
+        fail("unexpected native symbol PACKAGE lookup")
+      }
+      mock_symbol_info(name, default_provenance_native_path)
+    },
+    envir = .GlobalEnv
+  )
+  force(expression)
+}
+capture_default_execution_provenance <- function() {
+  fastkpc_full_cuda_fixed_sp_capture_execution_provenance(
+    source_closure = default_provenance_closure,
+    expected_source_sha256 = default_provenance_source_hashes,
+    native_library_path = default_provenance_native_path,
+    native_build_input_paths = default_provenance_native_inputs,
+    expected_native_build_input_sha256 =
+      default_provenance_native_input_hashes,
+    native_build_dependencies = dependencies,
+    expected_native_library_sha256 = default_provenance_native_sha256,
+    loaded_paths = default_provenance_loaded_paths
+  )
+}
+execution_provenance_formals <- list(
+  capture = names(formals(
+    fastkpc_full_cuda_fixed_sp_capture_execution_provenance
+  )),
+  verify = names(formals(
+    fastkpc_full_cuda_fixed_sp_verify_execution_provenance
+  ))
+)
+assert_true(
+  "mapped_records" %in% execution_provenance_formals$capture &&
+    "mapped_records" %in% execution_provenance_formals$verify &&
+    !"mapped_paths" %in% execution_provenance_formals$capture &&
+    !"mapped_paths" %in% execution_provenance_formals$verify,
+  "execution provenance production API exposes strict mapped records, not path snapshots"
+)
+default_execution_provenance <- with_default_native_observers(
+  default_provenance_mapped_records(),
+  capture_default_execution_provenance()
+)
+assert_true(
+  identical(default_execution_provenance$native_library_path,
+            default_provenance_native_path) &&
+    identical(
+      default_execution_provenance$native_library_identity,
+      "qualified-pinned-inode-sha-exact-registered-mapped-path-v3"
+    ) && !isTRUE(
+      default_execution_provenance$execution_sources_unchanged_after_run
+    ),
+  "execution provenance production default accepts strict mapped-object identity"
+)
+assert_error_matching(
+  with_default_native_observers(
+    default_provenance_mapped_records(
+      device_major_hex = NA_character_,
+      device_minor_hex = NA_character_,
+      inode = NA_character_
+    ),
+    capture_default_execution_provenance()
+  ),
+  "mapped inode identity is missing",
+  "execution provenance production default rejects missing mapped inode identity"
+)
+verified_default_execution_provenance <- with_default_native_observers(
+  default_provenance_mapped_records(),
+  fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
+    default_execution_provenance,
+    loaded_paths = default_provenance_loaded_paths
+  )
+)
+assert_true(
+  isTRUE(
+    verified_default_execution_provenance$execution_sources_unchanged_after_run
+  ),
+  "execution provenance verification default accepts strict mapped-object identity"
+)
+assert_error_matching(
+  with_default_native_observers(
+    default_provenance_mapped_records(
+      device_major_hex = NA_character_,
+      device_minor_hex = NA_character_,
+      inode = NA_character_
+    ),
+    fastkpc_full_cuda_fixed_sp_verify_execution_provenance(
+      default_execution_provenance,
+      loaded_paths = default_provenance_loaded_paths
+    )
+  ),
+  "execution source snapshot changed during qualification",
+  "execution provenance verification default rejects missing mapped inode identity"
+)
+unlink(default_provenance_dir, recursive = TRUE, force = TRUE)
 load_state <- new.env(parent = emptyenv())
 load_state$paths <- character()
 load_state$hash <- expected_sha256

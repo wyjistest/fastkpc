@@ -8865,7 +8865,7 @@ fastkpc_full_cuda_fixed_sp_capture_execution_provenance <- function(
     native_build_input_paths, expected_native_build_input_sha256,
     native_build_dependencies, expected_native_library_sha256,
     loaded_paths = fastkpc_full_cuda_fixed_sp_loaded_native_paths,
-    mapped_paths = .fastkpc_cuda_mapped_object_paths) {
+    mapped_records = .fastkpc_cuda_mapped_object_records) {
   fastkpc_full_cuda_fixed_sp_validate_source_closure(source_closure)
   source_ids <- source_closure$source_ids
   if (typeof(expected_source_sha256) != "character" ||
@@ -8934,7 +8934,7 @@ fastkpc_full_cuda_fixed_sp_capture_execution_provenance <- function(
   )
   fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
     native_path, expected_native_library_sha256,
-    loaded_paths = loaded_paths, mapped_paths = mapped_paths
+    loaded_paths = loaded_paths, mapped_records = mapped_records
   )
   head_base_commit <- system2(
     "git", c("rev-parse", "HEAD"), stdout = TRUE, stderr = FALSE
@@ -8988,7 +8988,7 @@ fastkpc_full_cuda_fixed_sp_capture_execution_provenance <- function(
 fastkpc_full_cuda_fixed_sp_verify_execution_provenance <- function(
     provenance,
     loaded_paths = fastkpc_full_cuda_fixed_sp_loaded_native_paths,
-    mapped_paths = .fastkpc_cuda_mapped_object_paths) {
+    mapped_records = .fastkpc_cuda_mapped_object_records) {
   expected_names <- c(
     "provenance_schema_version", "provenance_mode", "head_base_commit",
     "source_closure_schema_version", "source_discovery_semantics",
@@ -9055,7 +9055,7 @@ fastkpc_full_cuda_fixed_sp_verify_execution_provenance <- function(
       isTRUE(fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
         provenance$native_library_path,
         provenance$native_library_sha256,
-        loaded_paths = loaded_paths, mapped_paths = mapped_paths
+        loaded_paths = loaded_paths, mapped_records = mapped_records
       ))
   }, error = function(error) FALSE)
   if (!isTRUE(source_and_library_unchanged)) {
