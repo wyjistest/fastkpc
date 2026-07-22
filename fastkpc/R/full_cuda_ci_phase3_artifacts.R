@@ -190,7 +190,9 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "source_closure_count", "source_closure_sha256",
     "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
     "execution_sources_unchanged_after_run", "execution_provenance_state",
-    "native_library_identity", "native_library_sha256",
+    "native_library_identity", "native_library_path",
+    "native_library_device_major_hex", "native_library_device_minor_hex",
+    "native_library_inode", "native_library_sha256",
     "native_build_inputs_sha256",
     "native_build_dependencies_schema_version",
     "native_build_trace_semantics", "native_build_trace_invocation",
@@ -382,7 +384,9 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "source_closure_count", "source_closure_sha256",
     "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
     "execution_sources_unchanged_after_run", "execution_provenance_state",
-    "native_library_identity", "native_library_sha256",
+    "native_library_identity", "native_library_path",
+    "native_library_device_major_hex", "native_library_device_minor_hex",
+    "native_library_inode", "native_library_sha256",
     "native_build_inputs_sha256",
     "native_build_dependencies_schema_version",
     "native_build_trace_semantics", "native_build_trace_invocation",
@@ -419,7 +423,9 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "R_version", "phase3_R_version", "mgcv_version", "phase3_mgcv_version",
     "provenance_schema_version", "provenance_mode",
     "source_closure_schema_version", "source_discovery_semantics",
-    "native_library_identity", "native_build_dependencies_schema_version",
+    "native_library_identity", "native_library_path",
+    "native_library_device_major_hex", "native_library_device_minor_hex",
+    "native_library_inode", "native_build_dependencies_schema_version",
     "native_build_trace_semantics", "native_build_trace_invocation",
     "native_build_tracer_path"
   )) {
@@ -443,7 +449,12 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
       ) || !identical(
         value$native_library_identity,
         "qualified-pinned-inode-sha-exact-registered-mapped-path-v3"
-      ) || !identical(
+      ) || !startsWith(value$native_library_path, "/") ||
+      grepl("[\r\n]", value$native_library_path) ||
+      !grepl("^[0-9a-f]+$", value$native_library_device_major_hex) ||
+      !grepl("^[0-9a-f]+$", value$native_library_device_minor_hex) ||
+      !grepl("^[0-9]+$", value$native_library_inode) ||
+      !identical(
         value$native_build_dependencies_schema_version,
         "full-cuda-ci-native-build-dependencies-v3"
       ) || !identical(
@@ -504,7 +515,9 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     "source_closure_schema_version", "source_discovery_semantics",
     "source_closure_count", "source_closure_sha256",
     "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
-    "native_library_identity", "native_library_sha256",
+    "native_library_identity", "native_library_path",
+    "native_library_device_major_hex", "native_library_device_minor_hex",
+    "native_library_inode", "native_library_sha256",
     "native_build_inputs_sha256",
     "native_build_dependencies_schema_version",
     "native_build_trace_semantics", "native_build_trace_invocation",
@@ -683,6 +696,25 @@ fastkpc_full_cuda_phase3_discover_qualified_native_evidence <- function() {
   if (!requireNamespace("mgcv", quietly = TRUE)) {
     stop("Phase 3 execution requires installed mgcv", call. = FALSE)
   }
+  native_identity <- if (all(c(
+    "native_library_path", "native_library_device_major_hex",
+    "native_library_device_minor_hex", "native_library_inode"
+  ) %in% names(provenance))) {
+    list(
+      path = provenance$native_library_path,
+      device_major_hex = provenance$native_library_device_major_hex,
+      device_minor_hex = provenance$native_library_device_minor_hex,
+      inode = provenance$native_library_inode
+    )
+  } else {
+    .fastkpc_cuda_posix_file_identity(provenance$native_library_path)
+  }
+  native_identity$device_major_hex <- .fastkpc_cuda_normalize_hex_identity(
+    native_identity$device_major_hex
+  )
+  native_identity$device_minor_hex <- .fastkpc_cuda_normalize_hex_identity(
+    native_identity$device_minor_hex
+  )
   list(
     authenticated = TRUE,
     source_commit = provenance$head_base_commit,
@@ -703,6 +735,10 @@ fastkpc_full_cuda_phase3_discover_qualified_native_evidence <- function() {
     execution_sources_unchanged_after_run = FALSE,
     execution_provenance_state = "pre-run-capture",
     native_library_identity = provenance$native_library_identity,
+    native_library_path = native_identity$path,
+    native_library_device_major_hex = native_identity$device_major_hex,
+    native_library_device_minor_hex = native_identity$device_minor_hex,
+    native_library_inode = as.character(native_identity$inode),
     native_library_sha256 = provenance$native_library_sha256,
     native_build_inputs_sha256 = provenance$native_build_inputs_sha256,
     native_build_dependencies_schema_version = dependencies$schema_version,
@@ -988,9 +1024,13 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
 .fastkpc_full_cuda_phase3_validate_runtime_attestation_info <- function(
     info, device_id) {
   required <- c(
-    "device_id", "gpu_name", "cuda_toolkit_version",
-    "cuda_driver_version", "compute_capability_major",
-    "compute_capability_minor", "sm_count",
+    "device_id", "gpu_name", "runtime_abi_schema_version",
+    "configuration_schema_version", "gpu_uuid", "create_symbol_image_path",
+    "create_symbol_device_major_hex", "create_symbol_device_minor_hex",
+    "create_symbol_inode", "info_symbol_image_path",
+    "info_symbol_device_major_hex", "info_symbol_device_minor_hex",
+    "info_symbol_inode", "cuda_toolkit_version", "cuda_driver_version",
+    "compute_capability_major", "compute_capability_minor", "sm_count",
     "cusolver_deterministic_mode", "cublas_math_mode",
     "cublas_atomics_mode", "cublas_user_workspace_installed",
     "cublas_workspace_bytes", "cublas_workspace_alignment", "freed"
@@ -1016,7 +1056,12 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
     }
   }
   for (field in c(
-    "gpu_name", "cusolver_deterministic_mode",
+    "gpu_name", "runtime_abi_schema_version",
+    "configuration_schema_version", "gpu_uuid", "create_symbol_image_path",
+    "create_symbol_device_major_hex", "create_symbol_device_minor_hex",
+    "create_symbol_inode", "info_symbol_image_path",
+    "info_symbol_device_major_hex", "info_symbol_device_minor_hex",
+    "info_symbol_inode", "cusolver_deterministic_mode",
     "cublas_math_mode", "cublas_atomics_mode"
   )) {
     .fastkpc_full_cuda_phase3_scalar_text(info[[field]], field)
@@ -1031,12 +1076,55 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
     stop("Phase 3 runtime attestation device/lifetime mismatch",
          call. = FALSE)
   }
+  if (!identical(
+        info$runtime_abi_schema_version,
+        fastkpc_full_cuda_fixed_sp_runtime_abi()$schema_version
+      ) || !identical(
+        info$configuration_schema_version,
+        .fastkpc_full_cuda_phase3_policy_contract()$configuration_schema_version
+      ) || !grepl("^GPU-[0-9a-f]{32}$", info$gpu_uuid) ||
+      !startsWith(info$create_symbol_image_path, "/") ||
+      !startsWith(info$info_symbol_image_path, "/") ||
+      grepl("[\r\n]", info$create_symbol_image_path) ||
+      grepl("[\r\n]", info$info_symbol_image_path) ||
+      !grepl("^[0-9a-f]+$", info$create_symbol_device_major_hex) ||
+      !grepl("^[0-9a-f]+$", info$create_symbol_device_minor_hex) ||
+      !grepl("^[0-9]+$", info$create_symbol_inode) ||
+      !grepl("^[0-9a-f]+$", info$info_symbol_device_major_hex) ||
+      !grepl("^[0-9a-f]+$", info$info_symbol_device_minor_hex) ||
+      !grepl("^[0-9]+$", info$info_symbol_inode)) {
+    stop("Phase 3 runtime attestation context identity is malformed",
+         call. = FALSE)
+  }
+  if (!identical(
+        info[c(
+          "create_symbol_image_path", "create_symbol_device_major_hex",
+          "create_symbol_device_minor_hex", "create_symbol_inode"
+        )],
+        stats::setNames(
+          info[c(
+            "info_symbol_image_path", "info_symbol_device_major_hex",
+            "info_symbol_device_minor_hex", "info_symbol_inode"
+          )],
+          c(
+            "create_symbol_image_path", "create_symbol_device_major_hex",
+            "create_symbol_device_minor_hex", "create_symbol_inode"
+          )
+        )
+      )) {
+    stop("Phase 3 runtime attestation native symbol identities disagree",
+         call. = FALSE)
+  }
   info
 }
 
 .fastkpc_full_cuda_phase3_validate_runtime_attestation <- function(
     runtime, expected_identity) {
   fastkpc_full_cuda_phase3_validate_input_identity(expected_identity)
+  fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
+    expected_identity$native_library_path,
+    expected_identity$native_library_sha256
+  )
   if (!exists("fixed_sp_cuda_runtime_info", mode = "function")) {
     stop("Phase 3 runtime attestation requires CUDA runtime info",
          call. = FALSE)
@@ -1087,7 +1175,9 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
     "source_closure_count", "source_closure_sha256",
     "execution_snapshot_sha256", "relevant_sources_dirty_or_untracked",
     "execution_sources_unchanged_after_run", "execution_provenance_state",
-    "native_library_identity", "native_library_sha256",
+    "native_library_identity", "native_library_path",
+    "native_library_device_major_hex", "native_library_device_minor_hex",
+    "native_library_inode", "native_library_sha256",
     "native_build_inputs_sha256",
     "native_build_dependencies_schema_version",
     "native_build_trace_semantics", "native_build_trace_invocation",
@@ -1103,6 +1193,11 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
     }
   }
   if (!identical(runtime_info$gpu_name, expected_identity$gpu_name) ||
+      !identical(runtime_info$runtime_abi_schema_version,
+                 expected_identity$runtime_abi) ||
+      !identical(runtime_info$configuration_schema_version,
+                 expected_identity$runtime_policy_schema_version) ||
+      !identical(runtime_info$gpu_uuid, expected_identity$gpu_uuid) ||
       !identical(runtime_info$cuda_toolkit_version,
                  expected_identity$cuda_toolkit_version) ||
       !identical(runtime_info$cuda_driver_version,
@@ -1125,6 +1220,62 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
         expected_identity$cublas_workspace_min_alignment_required) {
     stop("Phase 3 runtime attestation mismatch", call. = FALSE)
   }
+  native_symbol_fields <- c(
+    "path", "device_major_hex", "device_minor_hex", "inode"
+  )
+  create_symbol_identity <- list(
+    path = runtime_info$create_symbol_image_path,
+    device_major_hex = .fastkpc_cuda_normalize_hex_identity(
+      runtime_info$create_symbol_device_major_hex
+    ),
+    device_minor_hex = .fastkpc_cuda_normalize_hex_identity(
+      runtime_info$create_symbol_device_minor_hex
+    ),
+    inode = runtime_info$create_symbol_inode
+  )
+  info_symbol_identity <- list(
+    path = runtime_info$info_symbol_image_path,
+    device_major_hex = .fastkpc_cuda_normalize_hex_identity(
+      runtime_info$info_symbol_device_major_hex
+    ),
+    device_minor_hex = .fastkpc_cuda_normalize_hex_identity(
+      runtime_info$info_symbol_device_minor_hex
+    ),
+    inode = runtime_info$info_symbol_inode
+  )
+  expected_symbol_identity <- list(
+    path = expected_identity$native_library_path,
+    device_major_hex = .fastkpc_cuda_normalize_hex_identity(
+      expected_identity$native_library_device_major_hex
+    ),
+    device_minor_hex = .fastkpc_cuda_normalize_hex_identity(
+      expected_identity$native_library_device_minor_hex
+    ),
+    inode = expected_identity$native_library_inode
+  )
+  if (!identical(create_symbol_identity[native_symbol_fields],
+                 expected_symbol_identity[native_symbol_fields]) ||
+      !identical(info_symbol_identity[native_symbol_fields],
+                 expected_symbol_identity[native_symbol_fields])) {
+    stop("Phase 3 runtime native image attestation mismatch",
+         call. = FALSE)
+  }
+  symbol_sha256 <- tryCatch(
+    fastkpc_full_cuda_fixed_sp_sha256_file(
+      runtime_info$create_symbol_image_path
+    ),
+    error = function(error) stop(
+      "Phase 3 runtime native image hash check failed: ",
+      conditionMessage(error), call. = FALSE
+    )
+  )
+  if (!identical(symbol_sha256, expected_identity$native_library_sha256)) {
+    stop("Phase 3 runtime native image SHA mismatch", call. = FALSE)
+  }
+  fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
+    expected_identity$native_library_path,
+    expected_identity$native_library_sha256
+  )
   list(
     runtime_info = runtime_info,
     device_evidence = device_evidence,
@@ -1134,73 +1285,8 @@ fastkpc_full_cuda_phase3_discover_device_evidence <- function(
 }
 
 .fastkpc_full_cuda_phase3_default_catalog_evidence <- function(catalog) {
-  if (!is.list(catalog) || is.null(catalog$phase0) ||
-      is.null(catalog$inputs) || is.null(catalog$phase2_manifest)) {
-    stop("Phase 3 catalog is not an authenticated Phase 0/1/2 catalog",
-         call. = FALSE)
-  }
-  phase0 <- catalog$phase0
-  inputs <- catalog$inputs
-  phase2 <- catalog$phase2_manifest
-  if (!is.list(phase0) || !is.list(inputs) || !is.list(phase2) ||
-      !is.list(phase0$manifest) || !is.list(inputs$manifest)) {
-    stop("Phase 3 catalog manifests are malformed", call. = FALSE)
-  }
-  phase0_summary <- phase0$summary
-  phase1_summary <- inputs$summary
-  if (!isTRUE(phase0_summary$pass) || !isTRUE(phase1_summary$pass) ||
-      !isTRUE(phase2$phase2_complete)) {
-    stop("Phase 3 catalog completion gates are not authenticated",
-         call. = FALSE)
-  }
-  phase0_hash <- .fastkpc_full_cuda_phase3_catalog_hash(
-    catalog,
-    c("phase0_manifest_hash", "phase0_manifest_sha256"),
-    fastkpc_full_cuda_census_input_contract()$file_hashes[[
-      "oracle/manifest.json"
-    ]],
-    "Phase 0 manifest hash"
-  )
-  phase1_hash <- .fastkpc_full_cuda_phase3_catalog_hash(
-    catalog,
-    c("phase1_manifest_hash", "phase1_manifest_sha256"),
-    fastkpc_full_cuda_prepared_s_input_contract()$file_hashes[[
-      "manifest.json"
-    ]],
-    "Phase 1 manifest hash"
-  )
-  phase2_hash <- catalog$phase2_file_hashes[["manifest.json"]]
-  required <- c(
-    phase0_hash, phase1_hash, phase2_hash,
-    inputs$dataset_file_sha256, inputs$dataset_sha256,
-    phase2$full_canonical_prepared_s_key_corpus_hash,
-    phase2$full_canonical_target_key_corpus_hash,
-    phase0$manifest$source_commit, inputs$manifest$source_commit,
-    phase2$source_commit, phase2$R_version, phase2$mgcv_version
-  )
-  if (any(vapply(required, is.null, logical(1L)))) {
-    stop("Phase 3 catalog does not expose complete authenticated lineage",
-         call. = FALSE)
-  }
-  .fastkpc_full_cuda_phase3_validate_lineage(list(
-    authenticated = TRUE,
-    phase0_manifest_hash = unname(phase0_hash),
-    phase1_manifest_hash = unname(phase1_hash),
-    phase2_manifest_hash = as.character(phase2_hash),
-    dataset_file_sha256 = as.character(inputs$dataset_file_sha256),
-    dataset_matrix_sha256 = as.character(inputs$dataset_sha256),
-    canonical_setup_corpus_hash = as.character(
-      phase2$full_canonical_prepared_s_key_corpus_hash
-    ),
-    canonical_target_corpus_hash = as.character(
-      phase2$full_canonical_target_key_corpus_hash
-    ),
-    phase0_source_commit = as.character(phase0$manifest$source_commit),
-    phase1_source_commit = as.character(inputs$manifest$source_commit),
-    phase2_source_commit = as.character(phase2$source_commit),
-    phase2_R_version = as.character(phase2$R_version),
-    phase2_mgcv_version = as.character(phase2$mgcv_version)
-  ))
+  authority <- fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
+  .fastkpc_full_cuda_phase3_validate_lineage(authority$lineage)
 }
 
 fastkpc_full_cuda_phase3_discover_catalog_evidence <- function(catalog) {
@@ -1259,7 +1345,9 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
                   "provenance_schema_version", "provenance_mode",
                   "source_closure_schema_version",
                   "source_discovery_semantics",
-                  "native_library_identity",
+                  "native_library_identity", "native_library_path",
+                  "native_library_device_major_hex",
+                  "native_library_device_minor_hex", "native_library_inode",
                   "native_build_dependencies_schema_version",
                   "native_build_trace_semantics",
                   "native_build_trace_invocation",
@@ -1353,6 +1441,11 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
       !grepl("^GPU-[0-9a-f]{32}$", identity$gpu_uuid) ||
       !identical(identity$native_library_identity,
                  "qualified-pinned-inode-sha-exact-registered-mapped-path-v3") ||
+      !startsWith(identity$native_library_path, "/") ||
+      grepl("[\r\n]", identity$native_library_path) ||
+      !grepl("^[0-9a-f]+$", identity$native_library_device_major_hex) ||
+      !grepl("^[0-9a-f]+$", identity$native_library_device_minor_hex) ||
+      !grepl("^[0-9]+$", identity$native_library_inode) ||
       !identical(identity$native_build_dependencies_schema_version,
                  "full-cuda-ci-native-build-dependencies-v3") ||
       !identical(identity$native_build_trace_semantics,
@@ -1454,6 +1547,12 @@ fastkpc_full_cuda_phase3_input_identity <- function(catalog, device_id) {
       execution$execution_sources_unchanged_after_run,
     execution_provenance_state = execution$execution_provenance_state,
     native_library_identity = execution$native_library_identity,
+    native_library_path = execution$native_library_path,
+    native_library_device_major_hex =
+      execution$native_library_device_major_hex,
+    native_library_device_minor_hex =
+      execution$native_library_device_minor_hex,
+    native_library_inode = execution$native_library_inode,
     native_library_sha256 = execution$native_library_sha256,
     native_build_inputs_sha256 = execution$native_build_inputs_sha256,
     native_build_dependencies_schema_version =

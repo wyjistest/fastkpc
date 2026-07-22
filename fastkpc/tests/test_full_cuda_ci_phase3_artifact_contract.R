@@ -210,6 +210,74 @@ static_environment_fixture <- list(
   cublas_workspace_min_alignment_required =
     policy_fixture$cublas_workspace_min_alignment_required
 )
+runtime_attestation_info_fixture <- list(
+  device_id = 2L,
+  gpu_name = "Fixture GPU",
+  gpu_uuid = paste0("GPU-", strrep("b", 32L)),
+  runtime_abi_schema_version = runtime_abi$schema_version,
+  configuration_schema_version = policy_fixture$configuration_schema_version,
+  create_symbol_image_path = "/tmp/fastkpc_cuda.so",
+  create_symbol_device_major_hex = "8",
+  create_symbol_device_minor_hex = "1",
+  create_symbol_inode = "42",
+  info_symbol_image_path = "/tmp/fastkpc_cuda.so",
+  info_symbol_device_major_hex = "8",
+  info_symbol_device_minor_hex = "1",
+  info_symbol_inode = "42",
+  cuda_toolkit_version = 12040L,
+  cuda_driver_version = 55054L,
+  compute_capability_major = 8L,
+  compute_capability_minor = 0L,
+  sm_count = 108L,
+  cusolver_deterministic_mode = "enabled",
+  cublas_math_mode = "pedantic",
+  cublas_atomics_mode = "not_allowed",
+  cublas_user_workspace_installed = TRUE,
+  cublas_workspace_bytes = 16 * 1024 * 1024,
+  cublas_workspace_alignment = 256,
+  freed = FALSE
+)
+validated_runtime_attestation_info <-
+  .fastkpc_full_cuda_phase3_validate_runtime_attestation_info(
+    runtime_attestation_info_fixture, 2L
+  )
+assert_true(
+  identical(
+    validated_runtime_attestation_info[c(
+      "gpu_uuid", "runtime_abi_schema_version",
+      "configuration_schema_version", "create_symbol_image_path",
+      "create_symbol_device_major_hex", "create_symbol_device_minor_hex",
+      "create_symbol_inode", "info_symbol_image_path",
+      "info_symbol_device_major_hex", "info_symbol_device_minor_hex",
+      "info_symbol_inode"
+    )],
+    runtime_attestation_info_fixture[c(
+      "gpu_uuid", "runtime_abi_schema_version",
+      "configuration_schema_version", "create_symbol_image_path",
+      "create_symbol_device_major_hex", "create_symbol_device_minor_hex",
+      "create_symbol_inode", "info_symbol_image_path",
+      "info_symbol_device_major_hex", "info_symbol_device_minor_hex",
+      "info_symbol_inode"
+    )]
+  ),
+  "runtime attestation validator preserves context-native identity fields"
+)
+runtime_attestation_missing_uuid <- runtime_attestation_info_fixture
+runtime_attestation_missing_uuid$gpu_uuid <- NULL
+assert_error(
+  .fastkpc_full_cuda_phase3_validate_runtime_attestation_info(
+    runtime_attestation_missing_uuid, 2L
+  ),
+  "runtime attestation info missing context GPU UUID must fail"
+)
+runtime_attestation_empty_symbol_path <- runtime_attestation_info_fixture
+runtime_attestation_empty_symbol_path$create_symbol_image_path <- ""
+assert_error(
+  .fastkpc_full_cuda_phase3_validate_runtime_attestation_info(
+    runtime_attestation_empty_symbol_path, 2L
+  ),
+  "runtime attestation info with empty native symbol path must fail"
+)
 catalog_fixture <- list(
   phase3_lineage = lineage_fixture
 )
@@ -262,6 +330,68 @@ current_mgcv_version <- if (requireNamespace("mgcv", quietly = TRUE)) {
 } else {
   fail("contract test requires the installed mgcv version")
 }
+qualified_native_discoverer_original <- get(
+  "fastkpc_full_cuda_phase3_discover_qualified_native_evidence",
+  envir = .GlobalEnv
+)
+on.exit(
+  assign(
+    "fastkpc_full_cuda_phase3_discover_qualified_native_evidence",
+    qualified_native_discoverer_original,
+    envir = .GlobalEnv
+  ),
+  add = TRUE
+)
+qualified_native_fixture_path <- tempfile(
+  "phase3-qualified-native-fixture-", fileext = .Platform$dynlib.ext
+)
+writeBin(charToRaw("qualified-native-fixture"), qualified_native_fixture_path)
+on.exit(unlink(qualified_native_fixture_path, force = TRUE), add = TRUE)
+qualified_native_fixture_identity <- .fastkpc_cuda_posix_file_identity(
+  qualified_native_fixture_path
+)
+qualified_native_fixture <- list(
+  schema_version = "full-cuda-ci-phase3-qualified-native-cache-v1",
+  provenance = list(
+    head_base_commit = fastkpc_full_cuda_source_commit(),
+    provenance_schema_version = "full-cuda-ci-execution-source-snapshot-v6",
+    provenance_mode = "working-tree-execution-snapshot-v1",
+    source_closure_schema_version =
+      "full-cuda-ci-execution-source-closure-v1",
+    source_discovery_semantics =
+      "parsed-r-ast-load-time-literal-source-v1",
+    source_closure_count = 7L,
+    source_closure_sha256 = sha("qualified-source-closure"),
+    execution_snapshot_sha256 = sha("qualified-execution-snapshot"),
+    relevant_sources_dirty_or_untracked = TRUE,
+    native_library_identity =
+      "qualified-pinned-inode-sha-exact-registered-mapped-path-v3",
+    native_library_path = qualified_native_fixture_identity$path,
+    native_library_device_major_hex =
+      qualified_native_fixture_identity$device_major_hex,
+    native_library_device_minor_hex =
+      qualified_native_fixture_identity$device_minor_hex,
+    native_library_inode = qualified_native_fixture_identity$inode,
+    native_library_sha256 = sha("qualified-native-library"),
+    native_build_inputs_sha256 = sha("qualified-build-inputs"),
+    native_build_dependencies = list(
+      schema_version = "full-cuda-ci-native-build-dependencies-v3",
+      trace_semantics = "linux-strace-successful-read-exec-evidence-v3",
+      trace_invocation = "fixture qualified trace invocation",
+      tracer_path = "/usr/bin/strace",
+      dependency_count = 17L,
+      exclusion_count = 2L,
+      aggregate_sha256 = sha("qualified-build-dependencies"),
+      trace_sha256 = sha("qualified-build-trace"),
+      tracer_sha256 = sha("qualified-build-tracer")
+    )
+  )
+)
+assign(
+  "fastkpc_full_cuda_phase3_discover_qualified_native_evidence",
+  function() qualified_native_fixture,
+  envir = .GlobalEnv
+)
 default_execution_capture <- fastkpc_full_cuda_phase3_discover_execution_evidence(
   catalog_fixture, 2L
 )
@@ -364,7 +494,9 @@ assert_true(
     "cublas_atomics_mode_required", "cublas_user_workspace_required",
     "cublas_workspace_bytes_required",
     "cublas_workspace_min_alignment_required",
-    "native_library_identity", "native_library_sha256",
+    "native_library_identity", "native_library_path",
+    "native_library_device_major_hex", "native_library_device_minor_hex",
+    "native_library_inode", "native_library_sha256",
     "native_build_inputs_sha256",
     "native_build_dependencies_schema_version",
     "native_build_trace_semantics", "native_build_trace_invocation",
@@ -467,42 +599,14 @@ assign(
   old_discoverers[["fastkpc_full_cuda_phase3_discover_catalog_evidence"]],
   envir = .GlobalEnv
 )
-repository_catalog_identity <- fastkpc_full_cuda_phase3_input_identity(
-  repository_catalog,
-  2L
+assert_error(
+  fastkpc_full_cuda_phase3_input_identity(repository_catalog, 2L),
+  "default catalog discovery must reject forged-shaped catalogs without authority"
 )
 assign(
   "fastkpc_full_cuda_phase3_discover_catalog_evidence",
   test_catalog_discoverer,
   envir = .GlobalEnv
-)
-assert_true(
-  identical(
-    repository_catalog_identity$phase0_manifest_hash,
-    repository_catalog$phase0_manifest_hash
-  ) && identical(
-    repository_catalog_identity$phase1_manifest_hash,
-    repository_catalog$phase1_manifest_hash
-  ) && identical(
-    repository_catalog_identity$phase2_manifest_hash,
-    repository_catalog$phase2_file_hashes[["manifest.json"]]
-  ) && identical(
-    repository_catalog_identity$phase0_source_commit,
-    lineage_fixture$phase0_source_commit
-  ) && identical(
-    repository_catalog_identity$phase1_source_commit,
-    lineage_fixture$phase1_source_commit
-  ) && identical(
-    repository_catalog_identity$phase2_source_commit,
-    lineage_fixture$phase2_source_commit
-  ) && identical(
-    repository_catalog_identity$phase2_R_version,
-    lineage_fixture$phase2_R_version
-  ) && identical(
-    repository_catalog_identity$phase2_mgcv_version,
-    lineage_fixture$phase2_mgcv_version
-  ),
-  "repository catalog discovery retains authenticated Phase 0/1/2 lineage"
 )
 repository_execution_discoverer <- old_discoverers[[
   "fastkpc_full_cuda_phase3_discover_execution_evidence"

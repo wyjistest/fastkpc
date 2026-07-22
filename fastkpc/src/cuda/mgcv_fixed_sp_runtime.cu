@@ -12,10 +12,12 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -51,6 +53,16 @@ void check_cusolver(cusolverStatus_t status, const char* stage) {
     throw std::runtime_error(std::string(stage) + ": cuSOLVER status " +
                              std::to_string(static_cast<int>(status)));
   }
+}
+
+std::string format_cuda_uuid(const cudaUUID_t& uuid) {
+  std::ostringstream formatted;
+  formatted << "GPU-" << std::hex << std::setfill('0');
+  for (int index = 0; index < 16; ++index) {
+    formatted << std::setw(2) << static_cast<unsigned int>(
+      static_cast<unsigned char>(uuid.bytes[index]));
+  }
+  return formatted.str();
 }
 
 struct ResourceLifecycleCounters {
@@ -2517,6 +2529,10 @@ CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
     check_cuda(cudaGetDeviceProperties(&properties, device_id),
                "query CUDA device properties");
     diagnostics.gpu_name = properties.name;
+    diagnostics.gpu_uuid = format_cuda_uuid(properties.uuid);
+    diagnostics.runtime_abi_schema_version = kFixedSpRuntimeAbiSchemaVersion;
+    diagnostics.configuration_schema_version =
+      kFixedSpEnvironmentConfigSchemaVersion;
     diagnostics.compute_capability_major = properties.major;
     diagnostics.compute_capability_minor = properties.minor;
     diagnostics.sm_count = properties.multiProcessorCount;

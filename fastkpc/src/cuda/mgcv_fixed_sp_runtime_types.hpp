@@ -72,6 +72,17 @@ struct FixedSpCapacities {
 struct FixedSpRuntimeInfo {
   int device_id = -1;
   std::string gpu_name;
+  std::string gpu_uuid;
+  std::string runtime_abi_schema_version;
+  std::string configuration_schema_version;
+  std::string create_symbol_image_path;
+  std::string create_symbol_device_major_hex;
+  std::string create_symbol_device_minor_hex;
+  std::string create_symbol_inode;
+  std::string info_symbol_image_path;
+  std::string info_symbol_device_major_hex;
+  std::string info_symbol_device_minor_hex;
+  std::string info_symbol_inode;
   std::int64_t creator_pid = -1;
   std::uint64_t generation = 0;
   int runtime_context_create_count = 0;

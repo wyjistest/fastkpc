@@ -39,7 +39,7 @@
   rawToChar(output)
 }
 
-.fastkpc_cuda_mapped_object_paths <- function(maps_path = "/proc/self/maps") {
+.fastkpc_cuda_mapped_object_records <- function(maps_path = "/proc/self/maps") {
   if (typeof(maps_path) != "character" || length(maps_path) != 1L ||
       is.object(maps_path) || !is.null(attributes(maps_path)) ||
       anyNA(maps_path) || !nzchar(maps_path) || !file.exists(maps_path) ||
@@ -55,23 +55,54 @@
   )
   pattern <- paste0(
     "^[[:xdigit:]]+-[[:xdigit:]]+[[:space:]]+[-rwxsp]{4}",
-    "[[:space:]]+[[:xdigit:]]+[[:space:]]+[[:xdigit:]]+:",
-    "[[:xdigit:]]+[[:space:]]+[0-9]+(?:[[:space:]]+(.*))?$"
+    "[[:space:]]+[[:xdigit:]]+[[:space:]]+([[:xdigit:]]+):",
+    "([[:xdigit:]]+)[[:space:]]+([0-9]+)(?:[[:space:]]+(.*))?$"
   )
   if (length(lines) == 0L || any(!grepl(pattern, lines, perl = TRUE))) {
     stop("Linux mapped-object snapshot is malformed", call. = FALSE)
   }
-  encoded <- sub(pattern, "\\1", lines, perl = TRUE)
+  encoded <- sub(pattern, "\\4", lines, perl = TRUE)
   paths <- vapply(
     encoded, .fastkpc_cuda_decode_proc_maps_path, character(1L)
   )
-  paths <- sub(" \\(deleted\\)$", "", paths)
-  paths <- paths[startsWith(paths, "/")]
-  if (length(paths) == 0L) return(character())
-  paths <- vapply(
-    paths, normalizePath, character(1L),
+  keep <- startsWith(paths, "/")
+  if (!any(keep)) {
+    return(data.frame(
+      path = character(),
+      live_path = character(),
+      deleted = logical(),
+      device_major_hex = character(),
+      device_minor_hex = character(),
+      inode = character(),
+      stringsAsFactors = FALSE
+    ))
+  }
+  paths <- unname(paths[keep])
+  deleted <- endsWith(paths, " (deleted)")
+  live_source <- sub(" \\(deleted\\)$", "", paths)
+  live_path <- rep.int(NA_character_, length(paths))
+  live_path[!deleted] <- vapply(
+    live_source[!deleted], normalizePath, character(1L),
     winslash = "/", mustWork = FALSE
   )
+  records <- data.frame(
+    path = paths,
+    live_path = live_path,
+    deleted = deleted,
+    device_major_hex = tolower(sub(pattern, "\\1", lines[keep], perl = TRUE)),
+    device_minor_hex = tolower(sub(pattern, "\\2", lines[keep], perl = TRUE)),
+    inode = sub(pattern, "\\3", lines[keep], perl = TRUE),
+    stringsAsFactors = FALSE
+  )
+  records <- unique(records)
+  records[order(records$path, records$inode, method = "radix"), , drop = FALSE]
+}
+
+.fastkpc_cuda_mapped_object_paths <- function(maps_path = "/proc/self/maps") {
+  records <- .fastkpc_cuda_mapped_object_records(maps_path = maps_path)
+  paths <- records$live_path[!records$deleted]
+  paths <- paths[!is.na(paths)]
+  if (length(paths) == 0L) return(character())
   sort(unique(unname(paths)), method = "radix")
 }
 
@@ -85,22 +116,243 @@
   ))
 }
 
+.fastkpc_cuda_normalize_hex_identity <- function(value) {
+  if (typeof(value) != "character" || anyNA(value)) {
+    stop("native library device identity is malformed", call. = FALSE)
+  }
+  normalized <- tolower(value)
+  normalized <- sub("^0+([0-9a-f]+)$", "\\1", normalized)
+  normalized[normalized == ""] <- "0"
+  unname(normalized)
+}
+
+.fastkpc_cuda_posix_file_identity <- function(
+    path, stat_binary = Sys.which("stat")) {
+  if (typeof(path) != "character" || length(path) != 1L ||
+      is.object(path) || !is.null(attributes(path)) || anyNA(path) ||
+      !nzchar(path) || !file.exists(path) || dir.exists(path)) {
+    stop("native library file identity path is invalid", call. = FALSE)
+  }
+  stat_binary <- unname(stat_binary)
+  if (typeof(stat_binary) != "character" || length(stat_binary) != 1L ||
+      is.object(stat_binary) || !is.null(attributes(stat_binary)) ||
+      anyNA(stat_binary) || !nzchar(stat_binary) || !file.exists(stat_binary) ||
+      dir.exists(stat_binary)) {
+    stop("POSIX stat helper is unavailable", call. = FALSE)
+  }
+  normalized <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  bash_binary <- unname(Sys.which("bash"))
+  if (typeof(bash_binary) != "character" || length(bash_binary) != 1L ||
+      is.object(bash_binary) || !is.null(attributes(bash_binary)) ||
+      anyNA(bash_binary) || !nzchar(bash_binary) || !file.exists(bash_binary) ||
+      dir.exists(bash_binary)) {
+    stop("POSIX stat helper shell is unavailable", call. = FALSE)
+  }
+  stat_script <- paste(
+    sprintf("hex=$(%s -Lc %%D %s) || exit 1",
+            shQuote(stat_binary), shQuote(normalized)),
+    sprintf("ino=$(%s -Lc %%i %s) || exit 1",
+            shQuote(stat_binary), shQuote(normalized)),
+    "dev=$((16#$hex))",
+    "maj=$((((dev >> 8) & 0xfff) | ((dev >> 32) & 0xfffff000)))",
+    "min=$(((dev & 0xff) | ((dev >> 12) & 0xffffff00)))",
+    sprintf("printf '%%x,%%x,%%s,%%s\\n' \"$maj\" \"$min\" \"$ino\" %s",
+            shQuote(normalized)),
+    sep = "; "
+  )
+  output <- tryCatch(
+    system2(
+      bash_binary,
+      c("-lc", shQuote(stat_script)),
+      stdout = TRUE, stderr = TRUE
+    ),
+    error = function(error) stop(
+      "native library file identity stat failed: ",
+      conditionMessage(error), call. = FALSE
+    )
+  )
+  if (!identical(attr(output, "status", exact = TRUE), NULL) ||
+      length(output) != 1L || is.na(output[[1L]]) ||
+      !grepl("^[0-9a-fA-F]+,[0-9a-fA-F]+,[0-9]+,", output[[1L]])) {
+    stop("native library file identity stat output is malformed",
+         call. = FALSE)
+  }
+  fields <- strsplit(output[[1L]], ",", fixed = TRUE)[[1L]]
+  if (length(fields) < 4L) {
+    stop("native library file identity stat output is malformed",
+         call. = FALSE)
+  }
+  list(
+    path = normalized,
+    device_major_hex = .fastkpc_cuda_normalize_hex_identity(fields[[1L]]),
+    device_minor_hex = .fastkpc_cuda_normalize_hex_identity(fields[[2L]]),
+    inode = fields[[3L]]
+  )
+}
+
+.fastkpc_cuda_registered_identity_cache <- new.env(parent = emptyenv())
+
+.fastkpc_cuda_phase3_symbol_names <- function() {
+  c(
+    "C_fastkpc_cuda_phase3_environment_identity",
+    "C_fixed_sp_cuda_runtime_create",
+    "C_fixed_sp_cuda_runtime_info"
+  )
+}
+
+.fastkpc_cuda_verify_registered_library_identity <- function(
+    path, expected_sha256, loaded_dlls = getLoadedDLLs,
+    mapped_records = .fastkpc_cuda_mapped_object_records,
+    symbol_info = getNativeSymbolInfo,
+    file_identity = .fastkpc_cuda_posix_file_identity,
+    hash_file = .fastkpc_cuda_sha256_file) {
+  if (!is.function(loaded_dlls) || !is.function(mapped_records) ||
+      !is.function(symbol_info) || !is.function(file_identity) ||
+      !is.function(hash_file) ||
+      typeof(expected_sha256) != "character" ||
+      length(expected_sha256) != 1L || is.object(expected_sha256) ||
+      !is.null(attributes(expected_sha256)) || anyNA(expected_sha256) ||
+      !grepl("^[0-9a-f]{64}$", expected_sha256)) {
+    stop("loaded native library identity is malformed", call. = FALSE)
+  }
+  native_identity <- file_identity(path)
+  current_sha256 <- hash_file(native_identity$path)
+  dlls <- loaded_dlls()
+  registered <- dlls[["fastkpc_cuda"]]
+  if (is.null(registered) || is.null(registered[["path"]])) {
+    stop("registered fastkpc_cuda package entry is missing", call. = FALSE)
+  }
+  registered_identity <- file_identity(registered[["path"]])
+  if (!identical(registered_identity$path, native_identity$path)) {
+    stop("registered fastkpc_cuda package path mismatch", call. = FALSE)
+  }
+  same_file_identity <- function(left, right) {
+    identical(left$path, right$path) &&
+      identical(
+        .fastkpc_cuda_normalize_hex_identity(left$device_major_hex),
+        .fastkpc_cuda_normalize_hex_identity(right$device_major_hex)
+      ) &&
+      identical(
+        .fastkpc_cuda_normalize_hex_identity(left$device_minor_hex),
+        .fastkpc_cuda_normalize_hex_identity(right$device_minor_hex)
+      ) &&
+      identical(as.character(left$inode), as.character(right$inode))
+  }
+  if (!same_file_identity(registered_identity, native_identity)) {
+    stop("registered fastkpc_cuda package inode mismatch", call. = FALSE)
+  }
+  records <- mapped_records()
+  required_record_fields <- c(
+    "path", "live_path", "deleted", "device_major_hex",
+    "device_minor_hex", "inode"
+  )
+  if (!is.data.frame(records) || !all(required_record_fields %in% names(records))) {
+    stop("mapped native library record snapshot is malformed", call. = FALSE)
+  }
+  deleted_record <- paste0(native_identity$path, " (deleted)")
+  if (deleted_record %in% records$path) {
+    stop("exact qualified native library path is mapped only as deleted record",
+         call. = FALSE)
+  }
+  live_rows <- records$live_path == native_identity$path
+  live_rows[is.na(live_rows)] <- FALSE
+  if (!any(live_rows)) {
+    stop("exact qualified native library path is not mapped", call. = FALSE)
+  }
+  live_exact_rows <- live_rows & !records$deleted
+  exact_identity_available <- any(
+    !is.na(records$device_major_hex[live_exact_rows]) &
+      !is.na(records$device_minor_hex[live_exact_rows]) &
+      !is.na(records$inode[live_exact_rows])
+  )
+  if (exact_identity_available) {
+    record_major <- .fastkpc_cuda_normalize_hex_identity(
+      records$device_major_hex
+    )
+    record_minor <- .fastkpc_cuda_normalize_hex_identity(
+      records$device_minor_hex
+    )
+    native_major <- .fastkpc_cuda_normalize_hex_identity(
+      native_identity$device_major_hex
+    )
+    native_minor <- .fastkpc_cuda_normalize_hex_identity(
+      native_identity$device_minor_hex
+    )
+    identity_rows <- live_exact_rows &
+      record_major == native_major &
+      record_minor == native_minor &
+      as.character(records$inode) == as.character(native_identity$inode)
+    if (!any(identity_rows)) {
+      stop("exact qualified native library mapped inode mismatch",
+           call. = FALSE)
+    }
+  }
+  for (symbol_name in .fastkpc_cuda_phase3_symbol_names()) {
+    info <- symbol_info(
+      symbol_name, PACKAGE = "fastkpc_cuda", withRegistrationInfo = TRUE
+    )
+    if (!is.list(info) || is.null(info$dll) || is.null(info$dll[["path"]])) {
+      stop("phase3 native symbol binding is malformed", call. = FALSE)
+    }
+    symbol_identity <- tryCatch(
+      file_identity(info$dll[["path"]]),
+      error = function(error) stop(
+        "phase3 native symbol DLL binding mismatch: ",
+        conditionMessage(error), call. = FALSE
+      )
+    )
+    if (!same_file_identity(symbol_identity, native_identity)) {
+      stop("phase3 native symbol DLL binding mismatch", call. = FALSE)
+    }
+  }
+  if (!identical(current_sha256, expected_sha256)) {
+    stop("qualified native library bytes changed", call. = FALSE)
+  }
+  TRUE
+}
+
+.fastkpc_cuda_remember_identity <- function(path, sha256) {
+  cache <- .fastkpc_cuda_registered_identity_cache
+  cache$path <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  cache$sha256 <- sha256
+  invisible(cache$path)
+}
+
 .fastkpc_cuda_unload_exact_for_rebuild <- function(
     so, loaded_paths = .fastkpc_cuda_loaded_paths,
-    mapped_paths = .fastkpc_cuda_mapped_object_paths,
+    mapped_paths = NULL,
+    mapped_records = .fastkpc_cuda_mapped_object_records,
     unload = dyn.unload) {
-  if (!is.function(loaded_paths) || !is.function(mapped_paths) ||
-      !is.function(unload)) {
+  if (!is.function(loaded_paths) || !is.function(unload) ||
+      (!is.null(mapped_paths) && !is.function(mapped_paths)) ||
+      !is.function(mapped_records)) {
     stop("CUDA rebuild unload callbacks are malformed", call. = FALSE)
   }
   path <- normalizePath(so, winslash = "/", mustWork = FALSE)
   before <- .fastkpc_cuda_normalize_path_snapshot(
     loaded_paths(), "loaded CUDA DLL path snapshot"
   )
-  mapped_before <- .fastkpc_cuda_normalize_path_snapshot(
-    mapped_paths(), "mapped CUDA object path snapshot"
-  )
+  if (is.null(mapped_paths)) {
+    mapped_before_records <- mapped_records()
+    mapped_before <- mapped_before_records$live_path[
+      !mapped_before_records$deleted
+    ]
+    mapped_before <- mapped_before[!is.na(mapped_before)]
+    deleted_before <- paste0(path, " (deleted)") %in%
+      mapped_before_records$path
+  } else {
+    mapped_before <- .fastkpc_cuda_normalize_path_snapshot(
+      mapped_paths(), "mapped CUDA object path snapshot"
+    )
+    deleted_before <- FALSE
+  }
   if (path %in% mapped_before && !path %in% before) {
+    stop(
+      "exact old CUDA DLL remains mapped without R registration; ",
+      "start a fresh R process", call. = FALSE
+    )
+  }
+  if (deleted_before && !path %in% before) {
     stop(
       "exact old CUDA DLL remains mapped without R registration; ",
       "start a fresh R process", call. = FALSE
@@ -118,14 +370,25 @@
   after <- .fastkpc_cuda_normalize_path_snapshot(
     loaded_paths(), "loaded CUDA DLL path snapshot"
   )
-  mapped_after <- .fastkpc_cuda_normalize_path_snapshot(
-    mapped_paths(), "mapped CUDA object path snapshot"
-  )
+  if (is.null(mapped_paths)) {
+    mapped_after_records <- mapped_records()
+    mapped_after <- mapped_after_records$live_path[
+      !mapped_after_records$deleted
+    ]
+    mapped_after <- mapped_after[!is.na(mapped_after)]
+    deleted_after <- paste0(path, " (deleted)") %in%
+      mapped_after_records$path
+  } else {
+    mapped_after <- .fastkpc_cuda_normalize_path_snapshot(
+      mapped_paths(), "mapped CUDA object path snapshot"
+    )
+    deleted_after <- FALSE
+  }
   if (path %in% after) {
     stop("exact old CUDA DLL remains loaded after rebuild unload",
          call. = FALSE)
   }
-  if (path %in% mapped_after) {
+  if (path %in% mapped_after || deleted_after) {
     stop(
       "exact old CUDA DLL remains mapped after rebuild unload; ",
       "start a fresh R process", call. = FALSE
@@ -206,10 +469,12 @@
 .fastkpc_cuda_load_built_library_exact <- function(
     so, expected_sha256, hash_file = .fastkpc_cuda_sha256_file,
     loaded_paths = .fastkpc_cuda_loaded_paths,
-    mapped_paths = .fastkpc_cuda_mapped_object_paths,
+    mapped_paths = NULL,
+    mapped_records = .fastkpc_cuda_mapped_object_records,
     load = dyn.load, unload = dyn.unload) {
   if (!is.function(hash_file) || !is.function(loaded_paths) ||
-      !is.function(mapped_paths) || !is.function(load) || !is.function(unload) ||
+      (!is.null(mapped_paths) && !is.function(mapped_paths)) ||
+      !is.function(mapped_records) || !is.function(load) || !is.function(unload) ||
       typeof(expected_sha256) != "character" ||
       length(expected_sha256) != 1L || is.object(expected_sha256) ||
       !is.null(attributes(expected_sha256)) || anyNA(expected_sha256) ||
@@ -223,13 +488,24 @@
   before <- .fastkpc_cuda_normalize_path_snapshot(
     loaded_paths(), "loaded CUDA DLL path snapshot"
   )
-  mapped_before <- .fastkpc_cuda_normalize_path_snapshot(
-    mapped_paths(), "mapped CUDA object path snapshot"
-  )
+  if (is.null(mapped_paths)) {
+    mapped_before_records <- mapped_records()
+    mapped_before <- mapped_before_records$live_path[
+      !mapped_before_records$deleted
+    ]
+    mapped_before <- mapped_before[!is.na(mapped_before)]
+    deleted_before <- paste0(path, " (deleted)") %in%
+      mapped_before_records$path
+  } else {
+    mapped_before <- .fastkpc_cuda_normalize_path_snapshot(
+      mapped_paths(), "mapped CUDA object path snapshot"
+    )
+    deleted_before <- FALSE
+  }
   if (path %in% before) {
     stop("exact built CUDA DLL path was already loaded", call. = FALSE)
   }
-  if (path %in% mapped_before) {
+  if (path %in% mapped_before || deleted_before) {
     stop(
       "exact built CUDA DLL path was already mapped; start a fresh R process",
       call. = FALSE
@@ -242,9 +518,17 @@
     after <- .fastkpc_cuda_normalize_path_snapshot(
       loaded_paths(), "loaded CUDA DLL path snapshot"
     )
-    mapped_after <- .fastkpc_cuda_normalize_path_snapshot(
-      mapped_paths(), "mapped CUDA object path snapshot"
-    )
+    if (is.null(mapped_paths)) {
+      mapped_after_records <- mapped_records()
+      mapped_after <- mapped_after_records$live_path[
+        !mapped_after_records$deleted
+      ]
+      mapped_after <- mapped_after[!is.na(mapped_after)]
+    } else {
+      mapped_after <- .fastkpc_cuda_normalize_path_snapshot(
+        mapped_paths(), "mapped CUDA object path snapshot"
+      )
+    }
     if (!path %in% after) {
       stop("exact built DLL path is not loaded after dyn.load", call. = FALSE)
     }
@@ -266,7 +550,8 @@
 .fastkpc_cuda_pin_and_load_built_library <- function(
     so, expected_sha256, hash_file = .fastkpc_cuda_sha256_file,
     loaded_paths = .fastkpc_cuda_loaded_paths,
-    mapped_paths = .fastkpc_cuda_mapped_object_paths,
+    mapped_paths = NULL,
+    mapped_records = .fastkpc_cuda_mapped_object_records,
     load = dyn.load, unload = dyn.unload) {
   pinned_path <- .fastkpc_cuda_pin_built_library(
     so, expected_sha256 = expected_sha256, hash_file = hash_file
@@ -283,6 +568,7 @@
     hash_file = hash_file,
     loaded_paths = loaded_paths,
     mapped_paths = mapped_paths,
+    mapped_records = mapped_records,
     load = load,
     unload = unload
   )
@@ -350,9 +636,31 @@ load_fastkpc_cuda_native <- function(rebuild = FALSE) {
   if (!rebuild) {
     registered <- getLoadedDLLs()[["fastkpc_cuda"]]
     if (!is.null(registered)) {
-      return(invisible(normalizePath(
+      registered_path <- normalizePath(
         registered[["path"]], winslash = "/", mustWork = TRUE
-      )))
+      )
+      cache <- .fastkpc_cuda_registered_identity_cache
+      if (exists("path", envir = cache, inherits = FALSE) &&
+          exists("sha256", envir = cache, inherits = FALSE) &&
+          identical(registered_path, cache$path)) {
+        .fastkpc_cuda_verify_registered_library_identity(
+          registered_path, cache$sha256
+        )
+        return(invisible(registered_path))
+      }
+      canonical_so <- normalizePath(
+        .fastkpc_cuda_so(), winslash = "/", mustWork = FALSE
+      )
+      if (file.exists(canonical_so) && identical(registered_path, canonical_so)) {
+        canonical_sha256 <- .fastkpc_cuda_sha256_file(canonical_so)
+        .fastkpc_cuda_verify_registered_library_identity(
+          registered_path, canonical_sha256
+        )
+        .fastkpc_cuda_remember_identity(registered_path, canonical_sha256)
+        return(invisible(registered_path))
+      }
+      stop("registered fastkpc_cuda package does not match current native identity",
+           call. = FALSE)
     }
   }
   so <- build_fastkpc_cuda_native(rebuild = rebuild)
@@ -362,6 +670,7 @@ load_fastkpc_cuda_native <- function(rebuild = FALSE) {
   if (!normalizePath(so, mustWork = FALSE) %in% loaded) {
     dyn.load(so)
   }
+  .fastkpc_cuda_remember_identity(so, .fastkpc_cuda_sha256_file(so))
   invisible(so)
 }
 
@@ -378,6 +687,7 @@ load_fastkpc_cuda_native_qualified <- function(
   pinned_so <- .fastkpc_cuda_pin_and_load_built_library(
     so, expected_sha256 = built_sha256
   )
+  .fastkpc_cuda_remember_identity(pinned_so, built_sha256)
   list(
     native_library_path = pinned_so,
     native_library_sha256 = built_sha256,

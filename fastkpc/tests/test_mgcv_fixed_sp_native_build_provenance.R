@@ -53,10 +53,30 @@ writeLines(c(
   "7f0000001000-7f0000002000 rw-p 00000000 00:00 0 [heap]",
   "7f0000002000-7f0000003000 r-xp 00000000 08:01 43 /tmp/plain.so"
 ), maps_fixture_path, useBytes = TRUE)
+maps_records <- .fastkpc_cuda_mapped_object_records(
+  maps_path = maps_fixture_path
+)
+assert_true(
+  identical(
+    names(maps_records),
+    c(
+      "path", "live_path", "deleted", "device_major_hex",
+      "device_minor_hex", "inode"
+    )
+  ) &&
+    identical(
+      maps_records$path,
+      c(paste0(maps_deleted_path, " (deleted)"), "/tmp/plain.so")
+    ) &&
+    identical(maps_records$live_path, c(NA_character_, "/tmp/plain.so")) &&
+    identical(maps_records$deleted, c(TRUE, FALSE)) &&
+    identical(maps_records$inode, c("42", "43")),
+  "Linux mapped-object records preserve deleted path and inode identity"
+)
 assert_identical(
   .fastkpc_cuda_mapped_object_paths(maps_path = maps_fixture_path),
-  sort(c(maps_deleted_path, "/tmp/plain.so"), method = "radix"),
-  "Linux mapped-object snapshot decodes and retains deleted file mappings"
+  "/tmp/plain.so",
+  "live-path snapshot excludes deleted mappings instead of normalizing them"
 )
 
 compiler_path <- file.path(fixture_dir, "fixture-compiler")
@@ -838,7 +858,8 @@ assert_true(
 
 registered_loader_fixture <- function() {
   function_names <- c(
-    "build_fastkpc_cuda_native", "getLoadedDLLs", "dyn.load"
+    "build_fastkpc_cuda_native", "getLoadedDLLs",
+    ".fastkpc_cuda_verify_registered_library_identity", "dyn.load"
   )
   existed <- vapply(
     function_names, exists, logical(1L), envir = .GlobalEnv,
@@ -875,6 +896,11 @@ registered_loader_fixture <- function() {
     envir = .GlobalEnv
   )
   assign(
+    ".fastkpc_cuda_verify_registered_library_identity",
+    function(path, expected_sha256, ...) TRUE,
+    envir = .GlobalEnv
+  )
+  assign(
     "dyn.load",
     function(path) {
       state$load_path <- path
@@ -894,6 +920,72 @@ assert_true(
     !nzchar(registered_loader_result$state$load_path),
   "generic CUDA access reuses the registered pinned package identity"
 )
+wrong_registered_loader_fixture <- function() {
+  function_names <- c(
+    "build_fastkpc_cuda_native", "getLoadedDLLs", "getNativeSymbolInfo",
+    ".fastkpc_cuda_sha256_file", "dyn.load"
+  )
+  existed <- vapply(
+    function_names, exists, logical(1L), envir = .GlobalEnv,
+    inherits = FALSE
+  )
+  originals <- lapply(function_names[existed], function(name) {
+    get(name, envir = .GlobalEnv, inherits = FALSE)
+  })
+  names(originals) <- function_names[existed]
+  on.exit({
+    for (name in function_names) {
+      if (existed[[name]]) {
+        assign(name, originals[[name]], envir = .GlobalEnv)
+      } else if (exists(name, envir = .GlobalEnv, inherits = FALSE)) {
+        rm(list = name, envir = .GlobalEnv)
+      }
+    }
+  }, add = TRUE)
+  wrong_path <- file.path(pin_build_dir, "wrong-fastkpc_cuda.so")
+  writeBin(charToRaw("wrong-fastkpc_cuda-so"), wrong_path)
+  wrong_path <- normalizePath(wrong_path, winslash = "/", mustWork = TRUE)
+  assign(
+    "build_fastkpc_cuda_native",
+    function(rebuild = FALSE, ...) canonical_native_path,
+    envir = .GlobalEnv
+  )
+  assign(
+    "getLoadedDLLs",
+    function() list(fastkpc_cuda = list(path = wrong_path, name = "fastkpc_cuda")),
+    envir = .GlobalEnv
+  )
+  assign(
+    "getNativeSymbolInfo",
+    function(name, PACKAGE, withRegistrationInfo = FALSE) {
+      list(name = name, dll = list(name = "fastkpc_cuda", path = wrong_path))
+    },
+    envir = .GlobalEnv
+  )
+  assign(
+    ".fastkpc_cuda_sha256_file",
+    function(path) {
+      path <- normalizePath(path, winslash = "/", mustWork = FALSE)
+      if (identical(path, canonical_native_path)) {
+        canonical_native_sha256
+      } else {
+        fastkpc_full_cuda_fixed_sp_sha256_file(path)
+      }
+    },
+    envir = .GlobalEnv
+  )
+  assign(
+    "dyn.load",
+    function(path) fail("wrong registered package must fail before dyn.load"),
+    envir = .GlobalEnv
+  )
+  assert_error_matching(
+    load_fastkpc_cuda_native(rebuild = FALSE),
+    "registered",
+    "generic loader rejects a wrong same-name registered package image"
+  )
+}
+wrong_registered_loader_fixture()
 
 loaded_state <- compiler_path
 loaded_paths <- function() loaded_state
@@ -920,12 +1012,41 @@ assert_error_matching(
 )
 
 expected_sha256 <- fastkpc_full_cuda_fixed_sp_sha256_file(compiler_path)
+mock_dllinfo <- function(name, path) {
+  structure(list(name = name, path = path), class = "DLLInfo")
+}
+mock_symbol_info <- function(name, path, dll_name = "fastkpc_cuda") {
+  list(name = name, dll = mock_dllinfo(dll_name, path))
+}
+mock_file_identity <- function(path, device_major_hex = "08",
+                               device_minor_hex = "01", inode = "42") {
+  list(
+    path = normalizePath(path, winslash = "/", mustWork = FALSE),
+    device_major_hex = device_major_hex,
+    device_minor_hex = device_minor_hex,
+    inode = inode
+  )
+}
 assert_error_matching(
   fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
     compiler_path,
     expected_sha256,
-    loaded_paths = function() compiler_path,
-    mapped_paths = function() character()
+    loaded_dlls = function() list(fastkpc_cuda = mock_dllinfo(
+      "fastkpc_cuda", compiler_path
+    )),
+    mapped_records = function() data.frame(
+      path = character(),
+      live_path = character(),
+      deleted = logical(),
+      device_major_hex = character(),
+      device_minor_hex = character(),
+      inode = character(),
+      stringsAsFactors = FALSE
+    ),
+    file_identity = function(path) mock_file_identity(path),
+    symbol_info = function(name, PACKAGE, withRegistrationInfo = FALSE) {
+      mock_symbol_info(name, compiler_path)
+    }
   ),
   "not mapped",
   "runtime provenance rejects registered but unmapped native identity"
@@ -934,10 +1055,96 @@ assert_true(
   fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
     compiler_path,
     expected_sha256,
-    loaded_paths = function() compiler_path,
-    mapped_paths = function() compiler_path
+    loaded_dlls = function() list(fastkpc_cuda = mock_dllinfo(
+      "fastkpc_cuda", compiler_path
+    )),
+    mapped_records = function() data.frame(
+      path = compiler_path,
+      live_path = compiler_path,
+      deleted = FALSE,
+      device_major_hex = "08",
+      device_minor_hex = "01",
+      inode = "42",
+      stringsAsFactors = FALSE
+    ),
+    file_identity = function(path) mock_file_identity(path),
+    symbol_info = function(name, PACKAGE, withRegistrationInfo = FALSE) {
+      mock_symbol_info(name, compiler_path)
+    }
   ),
-  "runtime provenance accepts exact registered and mapped native identity"
+  "runtime provenance accepts exact registered, mapped, and symbol-bound native identity"
+)
+assert_error_matching(
+  fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
+    compiler_path,
+    expected_sha256,
+    loaded_dlls = function() list(fastkpc_cuda = mock_dllinfo(
+      "fastkpc_cuda", compiler_path
+    )),
+    mapped_records = function() data.frame(
+      path = paste0(compiler_path, " (deleted)"),
+      live_path = NA_character_,
+      deleted = TRUE,
+      device_major_hex = "08",
+      device_minor_hex = "01",
+      inode = "42",
+      stringsAsFactors = FALSE
+    ),
+    file_identity = function(path) mock_file_identity(path),
+    symbol_info = function(name, PACKAGE, withRegistrationInfo = FALSE) {
+      mock_symbol_info(name, compiler_path)
+    }
+  ),
+  "deleted",
+  "runtime provenance rejects deleted mapped-object records as live identity"
+)
+assert_error_matching(
+  fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
+    compiler_path,
+    expected_sha256,
+    loaded_dlls = function() list(fastkpc_cuda = mock_dllinfo(
+      "fastkpc_cuda", compiler_path
+    )),
+    mapped_records = function() data.frame(
+      path = compiler_path,
+      live_path = compiler_path,
+      deleted = FALSE,
+      device_major_hex = "08",
+      device_minor_hex = "01",
+      inode = "999",
+      stringsAsFactors = FALSE
+    ),
+    file_identity = function(path) mock_file_identity(path, inode = "42"),
+    symbol_info = function(name, PACKAGE, withRegistrationInfo = FALSE) {
+      mock_symbol_info(name, compiler_path)
+    }
+  ),
+  "inode",
+  "runtime provenance rejects mapped inode mismatches"
+)
+assert_error_matching(
+  fastkpc_full_cuda_fixed_sp_verify_loaded_native_library(
+    compiler_path,
+    expected_sha256,
+    loaded_dlls = function() list(fastkpc_cuda = mock_dllinfo(
+      "fastkpc_cuda", compiler_path
+    )),
+    mapped_records = function() data.frame(
+      path = compiler_path,
+      live_path = compiler_path,
+      deleted = FALSE,
+      device_major_hex = "08",
+      device_minor_hex = "01",
+      inode = "42",
+      stringsAsFactors = FALSE
+    ),
+    file_identity = function(path) mock_file_identity(path),
+    symbol_info = function(name, PACKAGE, withRegistrationInfo = FALSE) {
+      mock_symbol_info(name, paste0(compiler_path, ".wrong"))
+    }
+  ),
+  "symbol",
+  "runtime provenance rejects phase3 symbols bound to a different DLL"
 )
 load_state <- new.env(parent = emptyenv())
 load_state$paths <- character()
@@ -1049,10 +1256,16 @@ assert_identical(
   unlink(mapping_library, force = TRUE), 0L,
   "no-CUDA mapped-object reproduction unlinks the unloaded pathname"
 )
+mapping_records_after_unload <- .fastkpc_cuda_mapped_object_records()
 assert_true(
   !mapping_library %in% .fastkpc_cuda_loaded_paths() &&
-    mapping_library %in% .fastkpc_cuda_mapped_object_paths(),
-  "real dyn.unload removes registration while GNU-unique ELF stays mapped"
+    paste0(mapping_library, " (deleted)") %in%
+      mapping_records_after_unload$path &&
+    !mapping_library %in% .fastkpc_cuda_mapped_object_paths(),
+  paste(
+    "real dyn.unload removes registration while GNU-unique ELF remains",
+    "mapped only as a deleted record"
+  )
 )
 assert_error_matching(
   .fastkpc_cuda_unload_exact_for_rebuild(mapping_library),

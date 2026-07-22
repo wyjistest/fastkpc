@@ -24,6 +24,7 @@
 #include <Spectra/SymEigsSolver.h>
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -44,6 +45,9 @@
 #ifdef _WIN32
 #include <process.h>
 #else
+#include <dlfcn.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 #endif
 
@@ -66,6 +70,61 @@ SEXP fixed_sp_cuda_runtime_tag() {
 
 using FixedSpRuntimeHolder =
   FixedSpExternalHolder<fastkpc::CudaRuntimeContext>;
+
+struct NativeSymbolImageIdentity {
+  std::string path;
+  std::string device_major_hex;
+  std::string device_minor_hex;
+  std::string inode;
+};
+
+std::string fixed_sp_hex_device_component(unsigned long long value) {
+  std::ostringstream stream;
+  stream << std::hex << std::nouppercase << value;
+  return stream.str();
+}
+
+#ifndef _WIN32
+NativeSymbolImageIdentity native_symbol_image_identity(void* symbol,
+                                                       const char* label) {
+  Dl_info image_info;
+  if (dladdr(symbol, &image_info) == 0 ||
+      image_info.dli_fname == nullptr ||
+      image_info.dli_fname[0] == '\0') {
+    Rcpp::stop(
+      std::string("fixed-sp CUDA native symbol image is unavailable: ") +
+      label);
+  }
+  char* resolved_path = realpath(image_info.dli_fname, nullptr);
+  if (resolved_path == nullptr) {
+    Rcpp::stop(
+      std::string("fixed-sp CUDA native symbol image path is unresolved: ") +
+      label);
+  }
+  const std::string path(resolved_path);
+  std::free(resolved_path);
+
+  struct stat image_stat;
+  if (stat(path.c_str(), &image_stat) != 0) {
+    Rcpp::stop(
+      std::string("fixed-sp CUDA native symbol image stat failed: ") +
+      label);
+  }
+
+  return NativeSymbolImageIdentity{
+    path,
+    fixed_sp_hex_device_component(
+      static_cast<unsigned long long>(major(image_stat.st_dev))),
+    fixed_sp_hex_device_component(
+      static_cast<unsigned long long>(minor(image_stat.st_dev))),
+    std::to_string(static_cast<unsigned long long>(image_stat.st_ino))
+  };
+}
+#else
+NativeSymbolImageIdentity native_symbol_image_identity(void*, const char*) {
+  Rcpp::stop("fixed-sp CUDA native symbol image identity requires POSIX dladdr");
+}
+#endif
 
 FixedSpRuntimeHolder* fixed_sp_cuda_runtime_holder(SEXP ptr,
                                                    bool require_live) {
@@ -3637,11 +3696,44 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_info(SEXP runtime_s) {
   BEGIN_RCPP
   FixedSpRuntimeHolder* holder =
     fixed_sp_cuda_runtime_holder(runtime_s, true);
-  const fastkpc::FixedSpRuntimeInfo info =
+  fastkpc::FixedSpRuntimeInfo info =
     fastkpc::fixed_sp_runtime_info(holder->value);
+  const NativeSymbolImageIdentity create_symbol =
+    native_symbol_image_identity(
+      reinterpret_cast<void*>(&C_fixed_sp_cuda_runtime_create),
+      "C_fixed_sp_cuda_runtime_create");
+  const NativeSymbolImageIdentity info_symbol =
+    native_symbol_image_identity(
+      reinterpret_cast<void*>(&C_fixed_sp_cuda_runtime_info),
+      "C_fixed_sp_cuda_runtime_info");
+  info.create_symbol_image_path = create_symbol.path;
+  info.create_symbol_device_major_hex = create_symbol.device_major_hex;
+  info.create_symbol_device_minor_hex = create_symbol.device_minor_hex;
+  info.create_symbol_inode = create_symbol.inode;
+  info.info_symbol_image_path = info_symbol.path;
+  info.info_symbol_device_major_hex = info_symbol.device_major_hex;
+  info.info_symbol_device_minor_hex = info_symbol.device_minor_hex;
+  info.info_symbol_inode = info_symbol.inode;
   return Rcpp::List::create(
     Rcpp::Named("device_id") = info.device_id,
     Rcpp::Named("gpu_name") = info.gpu_name,
+    Rcpp::Named("runtime_abi_schema_version") =
+      info.runtime_abi_schema_version,
+    Rcpp::Named("configuration_schema_version") =
+      info.configuration_schema_version,
+    Rcpp::Named("gpu_uuid") = info.gpu_uuid,
+    Rcpp::Named("create_symbol_image_path") = info.create_symbol_image_path,
+    Rcpp::Named("create_symbol_device_major_hex") =
+      info.create_symbol_device_major_hex,
+    Rcpp::Named("create_symbol_device_minor_hex") =
+      info.create_symbol_device_minor_hex,
+    Rcpp::Named("create_symbol_inode") = info.create_symbol_inode,
+    Rcpp::Named("info_symbol_image_path") = info.info_symbol_image_path,
+    Rcpp::Named("info_symbol_device_major_hex") =
+      info.info_symbol_device_major_hex,
+    Rcpp::Named("info_symbol_device_minor_hex") =
+      info.info_symbol_device_minor_hex,
+    Rcpp::Named("info_symbol_inode") = info.info_symbol_inode,
     Rcpp::Named("creator_pid") = static_cast<double>(info.creator_pid),
     Rcpp::Named("generation") = static_cast<double>(info.generation),
     Rcpp::Named("runtime_context_create_count") =

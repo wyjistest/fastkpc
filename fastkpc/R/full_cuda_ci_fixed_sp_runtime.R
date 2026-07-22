@@ -679,7 +679,108 @@ fastkpc_full_cuda_fixed_sp_validate_phase2_identity <- function(
   invisible(TRUE)
 }
 
-fastkpc_full_cuda_open_fixed_sp_catalog <- function(
+.fastkpc_full_cuda_phase3_catalog_authority_registry <-
+  new.env(parent = emptyenv())
+
+.fastkpc_full_cuda_phase3_catalog_authority_fields <- function() {
+  c(
+    "schema_version", "phase0_dir", "phase1_dir", "phase2_dir", "data_path",
+    "phase0_manifest_hash", "phase1_manifest_hash", "phase2_manifest_hash",
+    "dataset_file_sha256", "dataset_matrix_sha256",
+    "canonical_setup_corpus_hash", "canonical_target_corpus_hash",
+    "phase0_source_commit", "phase1_source_commit", "phase2_source_commit",
+    "phase2_R_version", "phase2_mgcv_version"
+  )
+}
+
+.fastkpc_full_cuda_phase3_catalog_authority_hash <- function(authority) {
+  fastkpc_full_cuda_census_named_metadata_hash(
+    authority[.fastkpc_full_cuda_phase3_catalog_authority_fields()]
+  )
+}
+
+.fastkpc_full_cuda_phase3_validate_catalog_authority <- function(authority) {
+  fields <- .fastkpc_full_cuda_phase3_catalog_authority_fields()
+  if (!is.list(authority) || is.object(authority) ||
+      !identical(names(authority), c(fields, "sha256")) ||
+      anyDuplicated(names(authority))) {
+    stop("Phase 3 catalog authority is malformed", call. = FALSE)
+  }
+  for (field in c(
+    "phase0_manifest_hash", "phase1_manifest_hash", "phase2_manifest_hash",
+    "dataset_file_sha256", "dataset_matrix_sha256",
+    "canonical_setup_corpus_hash", "canonical_target_corpus_hash", "sha256"
+  )) {
+    fastkpc_full_cuda_fixed_sp_require(
+      fastkpc_full_cuda_fixed_sp_is_bare_sha256(authority[[field]]),
+      paste0("Phase 3 catalog authority hash is malformed: ", field)
+    )
+  }
+  for (field in c(
+    "schema_version", "phase0_dir", "phase1_dir", "phase2_dir", "data_path",
+    "phase0_source_commit", "phase1_source_commit", "phase2_source_commit",
+    "phase2_R_version", "phase2_mgcv_version"
+  )) {
+    fastkpc_full_cuda_fixed_sp_require(
+      fastkpc_full_cuda_fixed_sp_is_bare_scalar(authority[[field]], "character") &&
+        nzchar(authority[[field]]),
+      paste0("Phase 3 catalog authority value is malformed: ", field)
+    )
+  }
+  fastkpc_full_cuda_fixed_sp_require(
+    identical(
+      authority$schema_version,
+      "full-cuda-ci-phase3-catalog-authority-v1"
+    ),
+    "Phase 3 catalog authority schema is unsupported"
+  )
+  fastkpc_full_cuda_fixed_sp_require(
+    identical(
+      authority$sha256,
+      .fastkpc_full_cuda_phase3_catalog_authority_hash(authority)
+    ),
+    "Phase 3 catalog authority canonical hash mismatch"
+  )
+  authority
+}
+
+.fastkpc_full_cuda_phase3_catalog_manifest_hash <- function(
+    hashes, candidates, label) {
+  if (is.data.frame(hashes)) {
+    required_fields <- c("logical_path", "actual_sha256")
+    fastkpc_full_cuda_fixed_sp_require(
+      all(required_fields %in% names(hashes)) &&
+        nrow(hashes) > 0L &&
+        !anyNA(hashes$logical_path) &&
+        !anyDuplicated(hashes$logical_path) &&
+        fastkpc_full_cuda_fixed_sp_is_bare_sha256_vector(
+          as.character(hashes$actual_sha256)
+        ),
+      paste0(label, " hash surface is malformed")
+    )
+    present <- candidates[candidates %in% hashes$logical_path]
+    fastkpc_full_cuda_fixed_sp_require(
+      length(present) == 1L,
+      paste0(label, " hash is unavailable from authenticated file validation")
+    )
+    row <- match(present[[1L]], hashes$logical_path)
+    return(as.character(hashes$actual_sha256[[row]]))
+  }
+  fastkpc_full_cuda_fixed_sp_require(
+    typeof(hashes) == "character" && !is.object(hashes) &&
+      !is.null(names(hashes)) && !anyDuplicated(names(hashes)) &&
+      !anyNA(hashes) && all(grepl("^[0-9a-f]{64}$", hashes)),
+    paste0(label, " hash surface is malformed")
+  )
+  present <- candidates[candidates %in% names(hashes)]
+  fastkpc_full_cuda_fixed_sp_require(
+    length(present) == 1L,
+    paste0(label, " hash is unavailable from authenticated file validation")
+  )
+  unname(hashes[[present[[1L]]]])
+}
+
+.fastkpc_full_cuda_phase3_build_catalog_authority <- function(
     phase0_dir, phase1_dir, phase2_dir, data_path, require_full = TRUE) {
   require_flag <- is.logical(require_full) && length(require_full) == 1L &&
     !is.object(require_full) && is.null(attributes(require_full)) &&
@@ -691,6 +792,11 @@ fastkpc_full_cuda_open_fixed_sp_catalog <- function(
     isTRUE(require_full),
     "fixed-sp catalog only supports the full Phase 2 artifact"
   )
+  phase0_dir <- normalizePath(phase0_dir, winslash = "/", mustWork = TRUE)
+  phase1_dir <- normalizePath(phase1_dir, winslash = "/", mustWork = TRUE)
+  phase2_dir <- normalizePath(phase2_dir, winslash = "/", mustWork = TRUE)
+  data_path <- normalizePath(data_path, winslash = "/", mustWork = TRUE)
+
   phase0_inputs <- fastkpc_full_cuda_census_load_inputs(
     phase0_dir, data_path
   )
@@ -762,18 +868,210 @@ fastkpc_full_cuda_open_fixed_sp_catalog <- function(
     setup_index$prepared_s_key_sha256, method = "radix"
   ), , drop = FALSE]
   rownames(setup_index) <- NULL
-  list(
-    phase0 = phase0,
-    inputs = inputs,
-    phase2_dir = phase2_dir,
-    phase2_file_hashes = captured$hashes,
-    phase2_summary = summary,
-    phase2_manifest = manifest,
-    catalog_contract = contract,
-    setup_index = setup_index,
-    scopes = phase2_objects$scopes,
-    semantic_files = names(contract$phase2_file_sha256)
+
+  phase0_manifest_hash <- .fastkpc_full_cuda_phase3_catalog_manifest_hash(
+    phase0_inputs$oracle_input_hashes,
+    c("oracle/manifest.json", "manifest.json"),
+    "Phase 0 manifest"
   )
+  phase1_manifest_hash <- .fastkpc_full_cuda_phase3_catalog_manifest_hash(
+    inputs$input_hashes,
+    c("phase1/manifest.json", "manifest.json"),
+    "Phase 1 manifest"
+  )
+  phase2_manifest_hash <- .fastkpc_full_cuda_phase3_catalog_manifest_hash(
+    captured$hashes,
+    c("manifest.json"),
+    "Phase 2 manifest"
+  )
+  authority <- list(
+    schema_version = "full-cuda-ci-phase3-catalog-authority-v1",
+    phase0_dir = phase0_dir,
+    phase1_dir = phase1_dir,
+    phase2_dir = phase2_dir,
+    data_path = data_path,
+    phase0_manifest_hash = phase0_manifest_hash,
+    phase1_manifest_hash = phase1_manifest_hash,
+    phase2_manifest_hash = phase2_manifest_hash,
+    dataset_file_sha256 = as.character(inputs$dataset_file_sha256),
+    dataset_matrix_sha256 = as.character(inputs$dataset_sha256),
+    canonical_setup_corpus_hash = as.character(
+      manifest$full_canonical_prepared_s_key_corpus_hash
+    ),
+    canonical_target_corpus_hash = as.character(
+      manifest$full_canonical_target_key_corpus_hash
+    ),
+    phase0_source_commit = as.character(phase0$manifest$source_commit),
+    phase1_source_commit = as.character(inputs$manifest$source_commit),
+    phase2_source_commit = as.character(manifest$source_commit),
+    phase2_R_version = as.character(manifest$R_version),
+    phase2_mgcv_version = as.character(manifest$mgcv_version)
+  )
+  authority$sha256 <- .fastkpc_full_cuda_phase3_catalog_authority_hash(
+    authority
+  )
+  authority <- .fastkpc_full_cuda_phase3_validate_catalog_authority(authority)
+  list(
+    catalog = list(
+      phase0 = phase0,
+      inputs = inputs,
+      phase0_dir = phase0_dir,
+      phase1_dir = phase1_dir,
+      phase2_dir = phase2_dir,
+      data_path = data_path,
+      phase0_manifest_hash = phase0_manifest_hash,
+      phase1_manifest_hash = phase1_manifest_hash,
+      phase2_file_hashes = captured$hashes,
+      phase2_summary = summary,
+      phase2_manifest = manifest,
+      catalog_contract = contract,
+      setup_index = setup_index,
+      scopes = phase2_objects$scopes,
+      semantic_files = names(contract$phase2_file_sha256)
+    ),
+    authority = authority
+  )
+}
+
+.fastkpc_full_cuda_phase3_catalog_authority_token <- function(authority_sha256) {
+  token <- new.env(parent = emptyenv())
+  assign(
+    "schema_version",
+    "full-cuda-ci-phase3-catalog-authority-token-v1",
+    envir = token
+  )
+  assign("authority_sha256", authority_sha256, envir = token)
+  lockBinding("schema_version", token)
+  lockBinding("authority_sha256", token)
+  lockEnvironment(token, bindings = TRUE)
+  token
+}
+
+.fastkpc_full_cuda_phase3_register_catalog_authority <- function(authority) {
+  authority <- .fastkpc_full_cuda_phase3_validate_catalog_authority(authority)
+  registry <- .fastkpc_full_cuda_phase3_catalog_authority_registry
+  registry[[authority$sha256]] <- authority
+  .fastkpc_full_cuda_phase3_catalog_authority_token(authority$sha256)
+}
+
+.fastkpc_full_cuda_phase3_extract_catalog_authority <- function(catalog) {
+  token <- catalog$phase3_catalog_authority_token
+  fastkpc_full_cuda_fixed_sp_require(
+    is.environment(token) && environmentIsLocked(token) &&
+      identical(ls(token, all.names = TRUE), c("authority_sha256", "schema_version")) &&
+      identical(token$schema_version,
+                "full-cuda-ci-phase3-catalog-authority-token-v1") &&
+      fastkpc_full_cuda_fixed_sp_is_bare_sha256(token$authority_sha256),
+    "Phase 3 catalog authority token is missing or malformed"
+  )
+  registry <- .fastkpc_full_cuda_phase3_catalog_authority_registry
+  fastkpc_full_cuda_fixed_sp_require(
+    exists(token$authority_sha256, envir = registry, inherits = FALSE),
+    "Phase 3 catalog authority registry entry is missing"
+  )
+  authority <- get(token$authority_sha256, envir = registry, inherits = FALSE)
+  .fastkpc_full_cuda_phase3_validate_catalog_authority(authority)
+}
+
+.fastkpc_full_cuda_phase3_catalog_authority_snapshot <- function(catalog) {
+  fastkpc_full_cuda_fixed_sp_require(
+    is.list(catalog) && !is.object(catalog) &&
+      is.list(catalog$phase0) && is.list(catalog$inputs) &&
+      is.list(catalog$phase2_manifest) &&
+      fastkpc_full_cuda_fixed_sp_is_bare_sha256(catalog$phase0_manifest_hash) &&
+      fastkpc_full_cuda_fixed_sp_is_bare_sha256(catalog$phase1_manifest_hash) &&
+      typeof(catalog$phase2_file_hashes) == "character" &&
+      !is.object(catalog$phase2_file_hashes) &&
+      !is.null(names(catalog$phase2_file_hashes)) &&
+      "manifest.json" %in% names(catalog$phase2_file_hashes),
+    "Phase 3 catalog does not expose authenticated authority fields"
+  )
+  authority <- list(
+    schema_version = "full-cuda-ci-phase3-catalog-authority-v1",
+    phase0_dir = normalizePath(catalog$phase0_dir, winslash = "/", mustWork = TRUE),
+    phase1_dir = normalizePath(catalog$phase1_dir, winslash = "/", mustWork = TRUE),
+    phase2_dir = normalizePath(catalog$phase2_dir, winslash = "/", mustWork = TRUE),
+    data_path = normalizePath(catalog$data_path, winslash = "/", mustWork = TRUE),
+    phase0_manifest_hash = unname(catalog$phase0_manifest_hash),
+    phase1_manifest_hash = unname(catalog$phase1_manifest_hash),
+    phase2_manifest_hash = unname(as.character(
+      catalog$phase2_file_hashes[["manifest.json"]]
+    )),
+    dataset_file_sha256 = as.character(catalog$inputs$dataset_file_sha256),
+    dataset_matrix_sha256 = as.character(catalog$inputs$dataset_sha256),
+    canonical_setup_corpus_hash = as.character(
+      catalog$phase2_manifest$full_canonical_prepared_s_key_corpus_hash
+    ),
+    canonical_target_corpus_hash = as.character(
+      catalog$phase2_manifest$full_canonical_target_key_corpus_hash
+    ),
+    phase0_source_commit = as.character(catalog$phase0$manifest$source_commit),
+    phase1_source_commit = as.character(catalog$inputs$manifest$source_commit),
+    phase2_source_commit = as.character(catalog$phase2_manifest$source_commit),
+    phase2_R_version = as.character(catalog$phase2_manifest$R_version),
+    phase2_mgcv_version = as.character(catalog$phase2_manifest$mgcv_version)
+  )
+  authority$sha256 <- .fastkpc_full_cuda_phase3_catalog_authority_hash(
+    authority
+  )
+  .fastkpc_full_cuda_phase3_validate_catalog_authority(authority)
+}
+
+fastkpc_full_cuda_phase3_discover_catalog_authority <- function(catalog) {
+  stored <- .fastkpc_full_cuda_phase3_extract_catalog_authority(catalog)
+  rebuilt <- .fastkpc_full_cuda_phase3_build_catalog_authority(
+    stored$phase0_dir,
+    stored$phase1_dir,
+    stored$phase2_dir,
+    stored$data_path,
+    require_full = TRUE
+  )$authority
+  fastkpc_full_cuda_fixed_sp_require(
+    identical(
+      rebuilt[c(.fastkpc_full_cuda_phase3_catalog_authority_fields(), "sha256")],
+      stored[c(.fastkpc_full_cuda_phase3_catalog_authority_fields(), "sha256")]
+    ),
+    "Phase 3 catalog authority registry entry is stale"
+  )
+  current <- .fastkpc_full_cuda_phase3_catalog_authority_snapshot(catalog)
+  fastkpc_full_cuda_fixed_sp_require(
+    identical(
+      current[c(.fastkpc_full_cuda_phase3_catalog_authority_fields(), "sha256")],
+      stored[c(.fastkpc_full_cuda_phase3_catalog_authority_fields(), "sha256")]
+    ),
+    "Phase 3 catalog authority does not match authenticated catalog state"
+  )
+  lineage <- list(
+    authenticated = TRUE,
+    phase0_manifest_hash = stored$phase0_manifest_hash,
+    phase1_manifest_hash = stored$phase1_manifest_hash,
+    phase2_manifest_hash = stored$phase2_manifest_hash,
+    dataset_file_sha256 = stored$dataset_file_sha256,
+    dataset_matrix_sha256 = stored$dataset_matrix_sha256,
+    canonical_setup_corpus_hash = stored$canonical_setup_corpus_hash,
+    canonical_target_corpus_hash = stored$canonical_target_corpus_hash,
+    phase0_source_commit = stored$phase0_source_commit,
+    phase1_source_commit = stored$phase1_source_commit,
+    phase2_source_commit = stored$phase2_source_commit,
+    phase2_R_version = stored$phase2_R_version,
+    phase2_mgcv_version = stored$phase2_mgcv_version
+  )
+  list(
+    schema_version = stored$schema_version,
+    authority_sha256 = stored$sha256,
+    lineage = lineage
+  )
+}
+
+fastkpc_full_cuda_open_fixed_sp_catalog <- function(
+    phase0_dir, phase1_dir, phase2_dir, data_path, require_full = TRUE) {
+  built <- .fastkpc_full_cuda_phase3_build_catalog_authority(
+    phase0_dir, phase1_dir, phase2_dir, data_path, require_full = require_full
+  )
+  built$catalog$phase3_catalog_authority_token <-
+    .fastkpc_full_cuda_phase3_register_catalog_authority(built$authority)
+  built$catalog$phase3_catalog_authority_sha256 <- built$authority$sha256
+  built$catalog
 }
 
 fastkpc_full_cuda_fixed_sp_scope <- function(catalog, scope) {
@@ -8307,43 +8605,60 @@ fastkpc_full_cuda_fixed_sp_loaded_native_paths <- function() {
 
 fastkpc_full_cuda_fixed_sp_verify_loaded_native_library <- function(
     path, expected_sha256,
-    loaded_paths = fastkpc_full_cuda_fixed_sp_loaded_native_paths,
-    mapped_paths = .fastkpc_cuda_mapped_object_paths) {
-  if (!is.function(loaded_paths) || !is.function(mapped_paths) ||
-      typeof(expected_sha256) != "character" ||
-      length(expected_sha256) != 1L || is.object(expected_sha256) ||
-      !is.null(attributes(expected_sha256)) || anyNA(expected_sha256) ||
-      !grepl("^[0-9a-f]{64}$", expected_sha256)) {
-    stop("loaded native library identity is malformed", call. = FALSE)
+    loaded_dlls = getLoadedDLLs,
+    mapped_records = .fastkpc_cuda_mapped_object_records,
+    symbol_info = getNativeSymbolInfo,
+    file_identity = .fastkpc_cuda_posix_file_identity,
+    hash_file = fastkpc_full_cuda_fixed_sp_sha256_file,
+    loaded_paths = NULL,
+    mapped_paths = NULL) {
+  if (!is.null(loaded_paths)) {
+    loaded_dlls <- function() {
+      paths <- loaded_paths()
+      if (typeof(paths) != "character" || anyNA(paths)) {
+        stop("loaded native library path snapshot is malformed", call. = FALSE)
+      }
+      normalized <- unname(vapply(
+        paths, normalizePath, character(1L),
+        winslash = "/", mustWork = FALSE
+      ))
+      target <- normalizePath(path, winslash = "/", mustWork = FALSE)
+      if (!target %in% normalized) {
+        return(list())
+      }
+      list(fastkpc_cuda = list(path = target))
+    }
   }
-  native_path <- normalizePath(path, winslash = "/", mustWork = TRUE)
-  current_sha256 <- fastkpc_full_cuda_fixed_sp_sha256_file(native_path)
-  current_loaded <- loaded_paths()
-  if (typeof(current_loaded) != "character" || anyNA(current_loaded)) {
-    stop("loaded native library path snapshot is malformed", call. = FALSE)
+  if (!is.null(mapped_paths)) {
+    mapped_records <- function() {
+      paths <- mapped_paths()
+      if (typeof(paths) != "character" || anyNA(paths)) {
+        stop("mapped native library path snapshot is malformed", call. = FALSE)
+      }
+      normalized <- unname(vapply(
+        paths, normalizePath, character(1L),
+        winslash = "/", mustWork = FALSE
+      ))
+      data.frame(
+        path = normalized,
+        live_path = normalized,
+        deleted = FALSE,
+        device_major_hex = NA_character_,
+        device_minor_hex = NA_character_,
+        inode = NA_character_,
+        stringsAsFactors = FALSE
+      )
+    }
   }
-  current_loaded <- vapply(
-    current_loaded, normalizePath, character(1L),
-    winslash = "/", mustWork = FALSE
+  .fastkpc_cuda_verify_registered_library_identity(
+    path,
+    expected_sha256,
+    loaded_dlls = loaded_dlls,
+    mapped_records = mapped_records,
+    symbol_info = symbol_info,
+    file_identity = file_identity,
+    hash_file = hash_file
   )
-  if (!native_path %in% current_loaded) {
-    stop("exact qualified native library path is not loaded", call. = FALSE)
-  }
-  current_mapped <- mapped_paths()
-  if (typeof(current_mapped) != "character" || anyNA(current_mapped)) {
-    stop("mapped native library path snapshot is malformed", call. = FALSE)
-  }
-  current_mapped <- vapply(
-    current_mapped, normalizePath, character(1L),
-    winslash = "/", mustWork = FALSE
-  )
-  if (!native_path %in% current_mapped) {
-    stop("exact qualified native library path is not mapped", call. = FALSE)
-  }
-  if (!identical(current_sha256, expected_sha256)) {
-    stop("qualified native library bytes changed", call. = FALSE)
-  }
-  TRUE
 }
 
 fastkpc_full_cuda_fixed_sp_execution_snapshot_hash <- function(provenance) {
