@@ -2011,3 +2011,1528 @@ fastkpc_validate_full_cuda_fixed_sp_shadow_artifact <- function(
     catalog = catalog, device_id = device_id
   )
 }
+
+.fastkpc_full_cuda_phase3_whole_scalar <- function(
+    value, minimum, label) {
+  clean <- typeof(value) %in% c("integer", "double") &&
+    length(value) == 1L && !is.object(value) &&
+    is.null(attributes(value)) && !is.na(value) && is.finite(value) &&
+    value == floor(value) && value >= minimum &&
+    value <= .Machine$integer.max
+  if (!isTRUE(clean)) {
+    stop(label, " must be one whole scalar >= ", minimum, call. = FALSE)
+  }
+  as.integer(value)
+}
+
+.fastkpc_full_cuda_phase3_scope <- function(scope) {
+  clean <- typeof(scope) == "character" && length(scope) == 1L &&
+    !is.object(scope) && is.null(attributes(scope)) && !is.na(scope) &&
+    scope %in% c("iteration", "qualification", "full")
+  if (!isTRUE(clean)) {
+    stop("Phase 3 scope must be iteration, qualification, or full",
+         call. = FALSE)
+  }
+  scope
+}
+
+fastkpc_full_cuda_phase3_resolve_shard_count <- function(
+    scope, shard_count = NULL) {
+  scope <- .fastkpc_full_cuda_phase3_scope(scope)
+  environment_name <- "FASTKPC_FULL_CUDA_PHASE3_TEST_SHARD_COUNT"
+  environment_value <- Sys.getenv(environment_name, unset = NA_character_)
+  environment_set <- !is.na(environment_value)
+
+  if (identical(scope, "full")) {
+    if (!is.null(shard_count) || environment_set) {
+      stop("full Phase 3 scope rejects every shard-count override",
+           call. = FALSE)
+    }
+    return(64L)
+  }
+  if (!is.null(shard_count) && environment_set) {
+    stop("non-full Phase 3 shard count has conflicting overrides",
+         call. = FALSE)
+  }
+  if (!is.null(shard_count)) {
+    return(.fastkpc_full_cuda_phase3_whole_scalar(
+      shard_count, 1L, "shard_count"
+    ))
+  }
+  if (!environment_set) return(64L)
+  if (!grepl("^[1-9][0-9]*$", environment_value) ||
+      nchar(environment_value, type = "bytes") > 10L) {
+    stop(environment_name, " must be a canonical positive integer",
+         call. = FALSE)
+  }
+  parsed <- suppressWarnings(as.numeric(environment_value))
+  .fastkpc_full_cuda_phase3_whole_scalar(
+    parsed, 1L, environment_name
+  )
+}
+
+.fastkpc_full_cuda_phase3_key_vector <- function(
+    value, label, allow_duplicates = FALSE, allow_empty = FALSE,
+    allow_empty_list = FALSE) {
+  if (isTRUE(allow_empty) && isTRUE(allow_empty_list) &&
+      typeof(value) == "list" &&
+      !is.object(value) && is.null(attributes(value)) &&
+      length(value) == 0L) {
+    return(character())
+  }
+  clean <- typeof(value) == "character" && !is.object(value) &&
+    (is.null(attributes(value)) || identical(names(attributes(value)), "names")) &&
+    (length(value) > 0L || isTRUE(allow_empty)) && !anyNA(value) &&
+    all(grepl("^[0-9a-f]{64}$", value))
+  if (!isTRUE(clean) || (!isTRUE(allow_duplicates) && anyDuplicated(value))) {
+    stop(label, " must contain canonical lowercase SHA-256 keys",
+         call. = FALSE)
+  }
+  unname(value)
+}
+
+fastkpc_full_cuda_phase3_assign_setup_shards <- function(
+    setup_keys, shard_count) {
+  keys <- .fastkpc_full_cuda_phase3_key_vector(
+    setup_keys, "setup_keys", allow_duplicates = TRUE
+  )
+  shard_count <- .fastkpc_full_cuda_phase3_whole_scalar(
+    shard_count, 1L, "shard_count"
+  )
+  keys <- sort(unique(keys), method = "radix")
+  rank <- seq_along(keys)
+  data.frame(
+    prepared_s_key_sha256 = keys,
+    sorted_rank = as.integer(rank),
+    shard_id = as.integer((rank - 1L) %% shard_count),
+    stringsAsFactors = FALSE,
+    row.names = seq_along(keys)
+  )
+}
+
+fastkpc_full_cuda_phase3_plan_shards <- function(
+    setup_keys, target_rows, scope, shard_count = NULL) {
+  scope <- .fastkpc_full_cuda_phase3_scope(scope)
+  shard_count <- fastkpc_full_cuda_phase3_resolve_shard_count(
+    scope, shard_count
+  )
+  assignments <- fastkpc_full_cuda_phase3_assign_setup_shards(
+    setup_keys, shard_count
+  )
+  required <- c("prepared_s_key_sha256", "residual_key_sha256")
+  clean_frame <- is.data.frame(target_rows) &&
+    all(required %in% names(target_rows)) &&
+    !anyDuplicated(names(target_rows))
+  if (!isTRUE(clean_frame)) {
+    stop("Phase 3 target rows are malformed", call. = FALSE)
+  }
+  target_setup_keys <- .fastkpc_full_cuda_phase3_key_vector(
+    target_rows$prepared_s_key_sha256,
+    "target_rows$prepared_s_key_sha256", allow_duplicates = TRUE,
+    allow_empty = TRUE
+  )
+  target_keys <- .fastkpc_full_cuda_phase3_key_vector(
+    target_rows$residual_key_sha256,
+    "target_rows$residual_key_sha256", allow_empty = TRUE
+  )
+  setup_index <- match(
+    target_setup_keys, assignments$prepared_s_key_sha256
+  )
+  if (anyNA(setup_index)) {
+    stop("every Phase 3 target must inherit exactly one setup shard",
+         call. = FALSE)
+  }
+  target_rows <- target_rows
+  target_rows$prepared_s_key_sha256 <- target_setup_keys
+  target_rows$residual_key_sha256 <- target_keys
+  target_rows$shard_id <- as.integer(assignments$shard_id[setup_index])
+  order_id <- order(
+    assignments$sorted_rank[setup_index], target_keys, method = "radix"
+  )
+  target_rows <- target_rows[order_id, , drop = FALSE]
+  rownames(target_rows) <- NULL
+  list(
+    assignments = assignments,
+    target_rows = target_rows,
+    shard_count = shard_count
+  )
+}
+
+.fastkpc_full_cuda_phase3_kind_contract <- function(kind) {
+  clean <- typeof(kind) == "character" && length(kind) == 1L &&
+    !is.object(kind) && is.null(attributes(kind)) && !is.na(kind) &&
+    kind %in% c("oracle_sp", "full_shadow")
+  if (!isTRUE(clean)) {
+    stop("unknown Phase 3 shard artifact kind", call. = FALSE)
+  }
+  list(
+    kind = kind,
+    artifact_schema_version = if (identical(kind, "oracle_sp")) {
+      fastkpc_full_cuda_phase3_oracle_schema_version()
+    } else {
+      fastkpc_full_cuda_phase3_shadow_schema_version()
+    }
+  )
+}
+
+.fastkpc_full_cuda_phase3_test_identity_fields <- function() {
+  c(
+    "schema_version", "canonical_setup_corpus_hash",
+    "canonical_target_corpus_hash", "route_config_hash", "source_commit",
+    "cuda_toolkit_version", "cuda_driver_version", "gpu_name", "gpu_uuid",
+    "compute_capability_major", "compute_capability_minor",
+    "compute_capability", "sm_count", "device_id",
+    "cusolver_deterministic_mode_required", "cublas_math_mode_required",
+    "cublas_atomics_mode_required", "cublas_user_workspace_required",
+    "cublas_workspace_bytes_required",
+    "cublas_workspace_min_alignment_required"
+  )
+}
+
+.fastkpc_full_cuda_phase3_gpu_environment_fields <- function() {
+  c(
+    "cuda_toolkit_version", "cuda_driver_version", "gpu_name", "gpu_uuid",
+    "compute_capability_major", "compute_capability_minor",
+    "compute_capability", "sm_count", "device_id",
+    "cusolver_deterministic_mode_required", "cublas_math_mode_required",
+    "cublas_atomics_mode_required", "cublas_user_workspace_required",
+    "cublas_workspace_bytes_required",
+    "cublas_workspace_min_alignment_required"
+  )
+}
+
+.fastkpc_full_cuda_phase3_validate_route_for_shards <- function(
+    route_config, scope) {
+  clean <- is.list(route_config) && !is.object(route_config) &&
+    !is.null(names(route_config)) && !anyDuplicated(names(route_config)) &&
+    identical(
+      attributes(route_config), list(names = names(route_config))
+    ) &&
+    length(route_config) > 1L &&
+    identical(tail(names(route_config), 1L), "sha256") &&
+    .fastkpc_full_cuda_phase3_sha256(route_config$sha256)
+  if (!isTRUE(clean)) {
+    stop("Phase 3 shard route configuration is malformed", call. = FALSE)
+  }
+  expected_hash <- .fastkpc_full_cuda_phase3_named_hash(
+    route_config[setdiff(names(route_config), "sha256")]
+  )
+  if (!identical(route_config$sha256, expected_hash)) {
+    stop("Phase 3 shard route configuration hash mismatch", call. = FALSE)
+  }
+  if (identical(scope, "full") &&
+      !identical(route_config, fastkpc_full_cuda_phase3_route_config())) {
+    stop("full Phase 3 scope requires the canonical route configuration",
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_validate_execution_identity <- function(
+    identity, route_config, scope, plan) {
+  if (!is.list(identity) || is.object(identity) ||
+      is.null(names(identity)) || anyDuplicated(names(identity)) ||
+      !identical(attributes(identity), list(names = names(identity)))) {
+    stop("Phase 3 shard input identity is malformed", call. = FALSE)
+  }
+  canonical <- identical(
+    identity$schema_version, "full-cuda-ci-phase3-input-identity-v1"
+  )
+  if (canonical) {
+    fastkpc_full_cuda_phase3_validate_input_identity(identity)
+  } else {
+    fields <- .fastkpc_full_cuda_phase3_test_identity_fields()
+    if (!identical(names(identity), c(fields, "sha256")) ||
+        !identical(
+          identity$schema_version,
+          "full-cuda-ci-phase3-test-input-identity-v1"
+        )) {
+      stop("Phase 3 shard test identity schema is malformed",
+           call. = FALSE)
+    }
+    for (field in c(
+      "canonical_setup_corpus_hash", "canonical_target_corpus_hash",
+      "route_config_hash", "sha256"
+    )) {
+      if (!.fastkpc_full_cuda_phase3_sha256(identity[[field]])) {
+        stop("Phase 3 shard test identity hash is malformed: ", field,
+             call. = FALSE)
+      }
+    }
+    if (!.fastkpc_full_cuda_phase3_commit(identity$source_commit)) {
+      stop("Phase 3 shard test source commit is malformed", call. = FALSE)
+    }
+    for (field in c(
+      "cuda_toolkit_version", "cuda_driver_version",
+      "compute_capability_major", "compute_capability_minor",
+      "sm_count", "device_id",
+      "cublas_workspace_bytes_required",
+      "cublas_workspace_min_alignment_required"
+    )) {
+      .fastkpc_full_cuda_phase3_whole_scalar(
+        identity[[field]], 0L, paste("identity", field)
+      )
+    }
+    for (field in c(
+      "gpu_name", "gpu_uuid", "compute_capability",
+      "cusolver_deterministic_mode_required", "cublas_math_mode_required",
+      "cublas_atomics_mode_required"
+    )) {
+      .fastkpc_full_cuda_phase3_scalar_text(
+        identity[[field]], paste("identity", field)
+      )
+    }
+    if (!.fastkpc_full_cuda_phase3_bare_scalar(
+          identity$cublas_user_workspace_required, "logical"
+        ) || !grepl("^GPU-[0-9a-f]{32}$", identity$gpu_uuid) ||
+        !identical(
+          identity$compute_capability,
+          paste0(identity$compute_capability_major, ".",
+                 identity$compute_capability_minor)
+        )) {
+      stop("Phase 3 shard test GPU identity is malformed", call. = FALSE)
+    }
+    expected_hash <- .fastkpc_full_cuda_phase3_named_hash(
+      identity[setdiff(names(identity), "sha256")]
+    )
+    if (!identical(identity$sha256, expected_hash)) {
+      stop("Phase 3 shard test identity hash mismatch", call. = FALSE)
+    }
+  }
+  if (identical(scope, "full") && !canonical) {
+    stop("full Phase 3 scope requires an authenticated production identity",
+         call. = FALSE)
+  }
+  if (!identical(identity$route_config_hash, route_config$sha256)) {
+    stop("Phase 3 shard identity route hash mismatch", call. = FALSE)
+  }
+  if (identical(scope, "full")) {
+    setup_hash <- fastkpc_full_cuda_census_key_set_hash(
+      plan$assignments$prepared_s_key_sha256
+    )
+    target_hash <- fastkpc_full_cuda_census_key_set_hash(sort(
+      plan$target_rows$residual_key_sha256, method = "radix"
+    ))
+    if (!identical(identity$canonical_setup_corpus_hash, setup_hash) ||
+        !identical(identity$canonical_target_corpus_hash, target_hash)) {
+      stop("full Phase 3 shard corpus identity mismatch", call. = FALSE)
+    }
+  }
+  gpu_fields <- .fastkpc_full_cuda_phase3_gpu_environment_fields()
+  gpu_environment <- identity[gpu_fields]
+  list(
+    input_identity_hash = identity$sha256,
+    source_commit = identity$source_commit,
+    gpu_environment = gpu_environment,
+    gpu_environment_hash = .fastkpc_full_cuda_phase3_named_hash(
+      gpu_environment
+    )
+  )
+}
+
+.fastkpc_full_cuda_phase3_session_fields <- function() {
+  c(
+    "schema_version", "session_id", "input_identity_hash",
+    "route_config_hash", "requested_shard_ids", "completed_shard_ids",
+    "runtime_context_create_count", "runtime_context_destroy_count",
+    "prepared_handle_create_count", "prepared_handle_destroy_count",
+    "residual_token_release_count", "output_slot_acquire_count",
+    "output_slot_release_count", "status"
+  )
+}
+
+.fastkpc_full_cuda_phase3_integer_vector <- function(
+    value, label, allow_empty = FALSE) {
+  if (is.list(value) && length(value) == 0L && isTRUE(allow_empty)) {
+    return(integer())
+  }
+  clean <- typeof(value) %in% c("integer", "double") && !is.object(value) &&
+    is.null(attributes(value)) && !anyNA(value) && all(is.finite(value)) &&
+    all(value == floor(value)) && all(value >= 0) &&
+    all(value <= .Machine$integer.max) &&
+    (isTRUE(allow_empty) || length(value) > 0L)
+  if (!isTRUE(clean)) {
+    stop(label, " must be a bare nonnegative integer vector", call. = FALSE)
+  }
+  as.integer(value)
+}
+
+.fastkpc_full_cuda_phase3_session_id_valid <- function(value) {
+  .fastkpc_full_cuda_phase3_bare_scalar(value, "character") &&
+    grepl("^[A-Za-z0-9_-]+$", value) && nchar(value, type = "bytes") <= 128L
+}
+
+fastkpc_full_cuda_phase3_session_id <- function() {
+  timestamp <- format(
+    Sys.time(), "%Y%m%dT%H%M%SZ", tz = "UTC", usetz = FALSE
+  )
+  seed <- paste(
+    timestamp, Sys.getpid(), tempfile("phase3-session-seed-"),
+    proc.time()[["elapsed"]], sep = "|"
+  )
+  suffix <- substr(fastkpc_full_cuda_census_hash_utf8(seed), 1L, 16L)
+  paste0(timestamp, "_", Sys.getpid(), "_", suffix)
+}
+
+fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
+  fields <- .fastkpc_full_cuda_phase3_session_fields()
+  if (!.fastkpc_full_cuda_phase3_exact_named_list(session, fields)) {
+    stop("Phase 3 session schema is malformed", call. = FALSE)
+  }
+  requested <- .fastkpc_full_cuda_phase3_integer_vector(
+    session$requested_shard_ids, "requested_shard_ids"
+  )
+  if (anyDuplicated(requested)) {
+    stop("requested_shard_ids must be unique", call. = FALSE)
+  }
+  if (!identical(session$schema_version,
+                 "full-cuda-ci-phase3-session-v1") ||
+      !.fastkpc_full_cuda_phase3_session_id_valid(session$session_id) ||
+      !.fastkpc_full_cuda_phase3_sha256(session$input_identity_hash) ||
+      !.fastkpc_full_cuda_phase3_sha256(session$route_config_hash)) {
+    stop("Phase 3 session immutable identity is malformed", call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_named_hash(list(
+    schema_version = "full-cuda-ci-phase3-session-identity-v1",
+    session = list(
+      schema_version = session$schema_version,
+      session_id = session$session_id,
+      input_identity_hash = session$input_identity_hash,
+      route_config_hash = session$route_config_hash,
+      requested_shard_ids = requested
+    )
+  ))
+}
+
+.fastkpc_full_cuda_phase3_validate_session <- function(
+    session, require_complete = FALSE, shard_id = NULL) {
+  fields <- .fastkpc_full_cuda_phase3_session_fields()
+  if (!.fastkpc_full_cuda_phase3_exact_named_list(session, fields)) {
+    stop("Phase 3 session schema is malformed", call. = FALSE)
+  }
+  fastkpc_full_cuda_phase3_session_identity_hash(session)
+  requested <- .fastkpc_full_cuda_phase3_integer_vector(
+    session$requested_shard_ids, "requested_shard_ids"
+  )
+  completed <- .fastkpc_full_cuda_phase3_integer_vector(
+    session$completed_shard_ids, "completed_shard_ids", allow_empty = TRUE
+  )
+  if (anyDuplicated(requested) || anyDuplicated(completed) ||
+      any(!completed %in% requested)) {
+    stop("Phase 3 session shard-id evidence is malformed", call. = FALSE)
+  }
+  counter_fields <- c(
+    "runtime_context_create_count", "runtime_context_destroy_count",
+    "prepared_handle_create_count", "prepared_handle_destroy_count",
+    "residual_token_release_count", "output_slot_acquire_count",
+    "output_slot_release_count"
+  )
+  counters <- setNames(vapply(counter_fields, function(field) {
+    .fastkpc_full_cuda_phase3_whole_scalar(
+      session[[field]], 0L, paste("session", field)
+    )
+  }, integer(1L)), counter_fields)
+  status_clean <- .fastkpc_full_cuda_phase3_bare_scalar(
+    session$status, "character"
+  ) && session$status %in% c("running", "complete")
+  if (!isTRUE(status_clean)) {
+    stop("Phase 3 session status is malformed", call. = FALSE)
+  }
+  if (identical(session$status, "running")) {
+    if (counters[["runtime_context_create_count"]] > 1L ||
+        counters[["runtime_context_destroy_count"]] >
+          counters[["runtime_context_create_count"]]) {
+      stop("running Phase 3 session context counters are invalid",
+           call. = FALSE)
+    }
+  } else if (
+    counters[["runtime_context_create_count"]] != 1L ||
+      counters[["runtime_context_destroy_count"]] != 1L ||
+      counters[["prepared_handle_create_count"]] !=
+        counters[["prepared_handle_destroy_count"]] ||
+      counters[["output_slot_acquire_count"]] !=
+        counters[["output_slot_release_count"]]
+  ) {
+    stop("complete Phase 3 session resource counters are invalid",
+         call. = FALSE)
+  }
+  if (isTRUE(require_complete) && !identical(session$status, "complete")) {
+    stop("Phase 3 shard references an incomplete session", call. = FALSE)
+  }
+  if (!is.null(shard_id)) {
+    shard_id <- .fastkpc_full_cuda_phase3_whole_scalar(
+      shard_id, 0L, "shard_id"
+    )
+    if (!shard_id %in% completed) {
+      stop("Phase 3 shard is absent from its completed session",
+           call. = FALSE)
+    }
+  }
+  invisible(list(
+    requested_shard_ids = requested,
+    completed_shard_ids = completed,
+    counters = counters
+  ))
+}
+
+.fastkpc_full_cuda_phase3_validate_session_plan_resources <- function(
+    session, plan) {
+  validated <- .fastkpc_full_cuda_phase3_validate_session(
+    session, require_complete = TRUE
+  )
+  completed <- validated$completed_shard_ids
+  if (length(completed) == 0L ||
+      any(completed >= plan$shard_count)) {
+    stop("complete Phase 3 session has no valid completed shards",
+         call. = FALSE)
+  }
+  descriptors <- lapply(completed, function(shard_id) {
+    .fastkpc_full_cuda_phase3_shard_descriptor(plan, shard_id)
+  })
+  expected_setup_count <- sum(vapply(
+    descriptors, `[[`, integer(1L), "setup_count"
+  ))
+  expected_target_count <- sum(vapply(
+    descriptors, `[[`, integer(1L), "target_count"
+  ))
+  counters <- validated$counters
+  if (counters[["prepared_handle_create_count"]] !=
+        expected_setup_count ||
+      counters[["prepared_handle_destroy_count"]] !=
+        expected_setup_count ||
+      counters[["residual_token_release_count"]] !=
+        expected_target_count ||
+      counters[["output_slot_acquire_count"]] !=
+        expected_target_count ||
+      counters[["output_slot_release_count"]] !=
+        expected_target_count) {
+    stop("complete Phase 3 session counters disagree with planned resources",
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_session_path <- function(
+    sessions_dir, session_id) {
+  if (!.fastkpc_full_cuda_phase3_session_id_valid(session_id)) {
+    stop("Phase 3 session id is malformed", call. = FALSE)
+  }
+  file.path(sessions_dir, paste0("session_", session_id, ".json"))
+}
+
+.fastkpc_full_cuda_phase3_atomic_write_session <- function(
+    session, sessions_dir) {
+  .fastkpc_full_cuda_phase3_validate_session(session)
+  dir.create(sessions_dir, recursive = TRUE, showWarnings = FALSE)
+  path <- .fastkpc_full_cuda_phase3_session_path(
+    sessions_dir, session$session_id
+  )
+  temporary <- tempfile(
+    ".phase3-session-", tmpdir = sessions_dir, fileext = ".tmp"
+  )
+  on.exit(unlink(temporary, force = TRUE), add = TRUE)
+  fastkpc_full_cuda_write_json(session, temporary)
+  written <- .fastkpc_full_cuda_phase3_read_json(
+    temporary, "Phase 3 temporary session"
+  )
+  .fastkpc_full_cuda_phase3_validate_session(written)
+  if (!file.rename(temporary, path)) {
+    stop("failed to atomically rewrite Phase 3 session", call. = FALSE)
+  }
+  invisible(path)
+}
+
+.fastkpc_full_cuda_phase3_shard_payload_fields <- function() {
+  c(
+    "schema_version", "artifact_kind", "artifact_schema_version",
+    "shard_id", "session_id", "session_identity_hash",
+    "input_identity_hash", "route_config_hash", "expected_setup_keys",
+    "expected_setup_count", "expected_setup_hash", "expected_target_keys",
+    "expected_target_count", "expected_target_hash", "source_commit",
+    "gpu_environment", "gpu_environment_hash", "payload",
+    "payload_semantic_hashes", "payload_semantic_hash"
+  )
+}
+
+.fastkpc_full_cuda_phase3_shard_summary_fields <- function() {
+  c(
+    "schema_version", "status", "artifact_kind",
+    "artifact_schema_version", "shard_id", "session_id",
+    "session_identity_hash", "input_identity_hash", "route_config_hash",
+    "expected_setup_keys", "expected_setup_count", "expected_setup_hash",
+    "expected_target_keys", "expected_target_count", "expected_target_hash",
+    "source_commit", "gpu_environment", "gpu_environment_hash",
+    "payload_semantic_hashes", "payload_semantic_hash", "rds_file_sha256"
+  )
+}
+
+.fastkpc_full_cuda_phase3_exact_named_list <- function(value, fields) {
+  typeof(value) == "list" && !is.object(value) &&
+    identical(names(value), fields) &&
+    identical(attributes(value), list(names = fields))
+}
+
+.fastkpc_full_cuda_phase3_payload_semantic_hashes <- function(payload) {
+  clean <- is.list(payload) && !is.object(payload) &&
+    !is.null(names(payload)) && length(payload) > 0L &&
+    !anyNA(names(payload)) && !anyDuplicated(names(payload)) &&
+    all(nzchar(names(payload))) &&
+    identical(attributes(payload), list(names = names(payload)))
+  if (!isTRUE(clean)) {
+    stop("Phase 3 shard executor payload must be a nonempty named list",
+         call. = FALSE)
+  }
+  values <- vapply(payload, function(value) {
+    if (is.data.frame(value)) {
+      return(fastkpc_full_cuda_census_frame_hash(value))
+    }
+    .fastkpc_full_cuda_phase3_named_hash(list(
+      schema_version = "full-cuda-ci-phase3-payload-component-hash-v1",
+      value = value
+    ))
+  }, character(1L))
+  unname(values) |> setNames(names(payload))
+}
+
+.fastkpc_full_cuda_phase3_payload_semantic_hash <- function(hashes) {
+  hashes <- .fastkpc_full_cuda_phase3_named_sha256(
+    hashes, "Phase 3 payload semantic hashes"
+  )
+  .fastkpc_full_cuda_phase3_named_hash(list(
+    schema_version = "full-cuda-ci-phase3-payload-semantic-hash-v1",
+    payload_semantic_hashes = as.list(hashes)
+  ))
+}
+
+.fastkpc_full_cuda_phase3_shard_descriptor <- function(plan, shard_id) {
+  shard_id <- .fastkpc_full_cuda_phase3_whole_scalar(
+    shard_id, 0L, "shard_id"
+  )
+  if (shard_id >= plan$shard_count) {
+    stop("shard_id is outside the Phase 3 shard plan", call. = FALSE)
+  }
+  setup_keys <- plan$assignments$prepared_s_key_sha256[
+    plan$assignments$shard_id == shard_id
+  ]
+  target_rows <- plan$target_rows[
+    plan$target_rows$shard_id == shard_id, , drop = FALSE
+  ]
+  target_keys <- sort(
+    as.character(target_rows$residual_key_sha256), method = "radix"
+  )
+  list(
+    shard_id = shard_id,
+    setup_keys = unname(setup_keys),
+    setup_count = as.integer(length(setup_keys)),
+    setup_hash = fastkpc_full_cuda_census_key_set_hash(setup_keys),
+    target_rows = target_rows,
+    target_keys = unname(target_keys),
+    target_count = as.integer(length(target_keys)),
+    target_hash = fastkpc_full_cuda_census_key_set_hash(target_keys)
+  )
+}
+
+.fastkpc_full_cuda_phase3_shard_paths <- function(shards_dir, shard_id) {
+  shard_id <- .fastkpc_full_cuda_phase3_whole_scalar(
+    shard_id, 0L, "shard_id"
+  )
+  list(
+    rds = file.path(shards_dir, paste0("shard_", shard_id, ".rds")),
+    summary_json = file.path(
+      shards_dir, paste0("shard_", shard_id, ".summary.json")
+    )
+  )
+}
+
+.fastkpc_full_cuda_phase3_build_shard_envelope <- function(
+    contract, descriptor, session, identity_info, route_config, payload) {
+  semantic_hashes <- .fastkpc_full_cuda_phase3_payload_semantic_hashes(
+    payload
+  )
+  list(
+    schema_version = "full-cuda-ci-phase3-shard-payload-v1",
+    artifact_kind = contract$kind,
+    artifact_schema_version = contract$artifact_schema_version,
+    shard_id = descriptor$shard_id,
+    session_id = session$session_id,
+    session_identity_hash =
+      fastkpc_full_cuda_phase3_session_identity_hash(session),
+    input_identity_hash = identity_info$input_identity_hash,
+    route_config_hash = route_config$sha256,
+    expected_setup_keys = descriptor$setup_keys,
+    expected_setup_count = descriptor$setup_count,
+    expected_setup_hash = descriptor$setup_hash,
+    expected_target_keys = descriptor$target_keys,
+    expected_target_count = descriptor$target_count,
+    expected_target_hash = descriptor$target_hash,
+    source_commit = identity_info$source_commit,
+    gpu_environment = identity_info$gpu_environment,
+    gpu_environment_hash = identity_info$gpu_environment_hash,
+    payload = payload,
+    payload_semantic_hashes = as.list(semantic_hashes),
+    payload_semantic_hash =
+      .fastkpc_full_cuda_phase3_payload_semantic_hash(semantic_hashes)
+  )
+}
+
+.fastkpc_full_cuda_phase3_build_shard_summary <- function(
+    envelope, rds_file_sha256) {
+  list(
+    schema_version = "full-cuda-ci-phase3-shard-summary-v1",
+    status = "complete",
+    artifact_kind = envelope$artifact_kind,
+    artifact_schema_version = envelope$artifact_schema_version,
+    shard_id = envelope$shard_id,
+    session_id = envelope$session_id,
+    session_identity_hash = envelope$session_identity_hash,
+    input_identity_hash = envelope$input_identity_hash,
+    route_config_hash = envelope$route_config_hash,
+    expected_setup_keys = envelope$expected_setup_keys,
+    expected_setup_count = envelope$expected_setup_count,
+    expected_setup_hash = envelope$expected_setup_hash,
+    expected_target_keys = envelope$expected_target_keys,
+    expected_target_count = envelope$expected_target_count,
+    expected_target_hash = envelope$expected_target_hash,
+    source_commit = envelope$source_commit,
+    gpu_environment = envelope$gpu_environment,
+    gpu_environment_hash = envelope$gpu_environment_hash,
+    payload_semantic_hashes = envelope$payload_semantic_hashes,
+    payload_semantic_hash = envelope$payload_semantic_hash,
+    rds_file_sha256 = rds_file_sha256
+  )
+}
+
+.fastkpc_full_cuda_phase3_gpu_environment_equal <- function(
+    actual, expected) {
+  fields <- .fastkpc_full_cuda_phase3_gpu_environment_fields()
+  .fastkpc_full_cuda_phase3_exact_named_list(actual, fields) &&
+    .fastkpc_full_cuda_phase3_exact_named_list(expected, fields) &&
+    all(vapply(fields, function(field) {
+      .fastkpc_full_cuda_phase3_identity_value_equal(
+        actual[[field]], expected[[field]]
+      )
+    }, logical(1L)))
+}
+
+.fastkpc_full_cuda_phase3_validate_shard_pair <- function(
+    envelope, summary, contract, descriptor, identity_info, route_config,
+    rds_path = NULL) {
+  if (!.fastkpc_full_cuda_phase3_exact_named_list(
+        envelope, .fastkpc_full_cuda_phase3_shard_payload_fields()
+      ) || !.fastkpc_full_cuda_phase3_exact_named_list(
+        summary, .fastkpc_full_cuda_phase3_shard_summary_fields()
+      )) {
+    stop("Phase 3 shard payload/summary schema mismatch", call. = FALSE)
+  }
+  scalar_expected <- list(
+    payload_schema = "full-cuda-ci-phase3-shard-payload-v1",
+    summary_schema = "full-cuda-ci-phase3-shard-summary-v1",
+    status = "complete",
+    artifact_kind = contract$kind,
+    artifact_schema_version = contract$artifact_schema_version,
+    shard_id = descriptor$shard_id,
+    input_identity_hash = identity_info$input_identity_hash,
+    route_config_hash = route_config$sha256,
+    expected_setup_count = descriptor$setup_count,
+    expected_setup_hash = descriptor$setup_hash,
+    expected_target_count = descriptor$target_count,
+    expected_target_hash = descriptor$target_hash,
+    source_commit = identity_info$source_commit,
+    gpu_environment_hash = identity_info$gpu_environment_hash
+  )
+  scalar_clean <- identical(envelope$schema_version,
+                            scalar_expected$payload_schema) &&
+    identical(summary$schema_version, scalar_expected$summary_schema) &&
+    identical(summary$status, scalar_expected$status) &&
+    identical(envelope$artifact_kind, scalar_expected$artifact_kind) &&
+    identical(summary$artifact_kind, scalar_expected$artifact_kind) &&
+    identical(envelope$artifact_schema_version,
+              scalar_expected$artifact_schema_version) &&
+    identical(summary$artifact_schema_version,
+              scalar_expected$artifact_schema_version) &&
+    .fastkpc_full_cuda_phase3_identity_value_equal(
+      envelope$shard_id, scalar_expected$shard_id
+    ) && .fastkpc_full_cuda_phase3_identity_value_equal(
+      summary$shard_id, scalar_expected$shard_id
+    ) &&
+    identical(envelope$input_identity_hash,
+              scalar_expected$input_identity_hash) &&
+    identical(summary$input_identity_hash,
+              scalar_expected$input_identity_hash) &&
+    identical(envelope$route_config_hash,
+              scalar_expected$route_config_hash) &&
+    identical(summary$route_config_hash,
+              scalar_expected$route_config_hash) &&
+    .fastkpc_full_cuda_phase3_identity_value_equal(
+      envelope$expected_setup_count, scalar_expected$expected_setup_count
+    ) && .fastkpc_full_cuda_phase3_identity_value_equal(
+      summary$expected_setup_count, scalar_expected$expected_setup_count
+    ) && identical(envelope$expected_setup_hash,
+                   scalar_expected$expected_setup_hash) &&
+    identical(summary$expected_setup_hash,
+              scalar_expected$expected_setup_hash) &&
+    .fastkpc_full_cuda_phase3_identity_value_equal(
+      envelope$expected_target_count, scalar_expected$expected_target_count
+    ) && .fastkpc_full_cuda_phase3_identity_value_equal(
+      summary$expected_target_count, scalar_expected$expected_target_count
+    ) && identical(envelope$expected_target_hash,
+                   scalar_expected$expected_target_hash) &&
+    identical(summary$expected_target_hash,
+              scalar_expected$expected_target_hash) &&
+    identical(envelope$source_commit, scalar_expected$source_commit) &&
+    identical(summary$source_commit, scalar_expected$source_commit) &&
+    identical(envelope$gpu_environment_hash,
+              scalar_expected$gpu_environment_hash) &&
+    identical(summary$gpu_environment_hash,
+              scalar_expected$gpu_environment_hash)
+  if (!isTRUE(scalar_clean)) {
+    stop("Phase 3 shard immutable identity mismatch", call. = FALSE)
+  }
+  setup_keys <- .fastkpc_full_cuda_phase3_key_vector(
+    envelope$expected_setup_keys, "shard expected setup keys",
+    allow_empty = TRUE, allow_empty_list = TRUE
+  )
+  summary_setup_keys <- .fastkpc_full_cuda_phase3_key_vector(
+    summary$expected_setup_keys, "summary expected setup keys",
+    allow_empty = TRUE, allow_empty_list = TRUE
+  )
+  target_keys <- .fastkpc_full_cuda_phase3_key_vector(
+    envelope$expected_target_keys, "shard expected target keys",
+    allow_empty = TRUE, allow_empty_list = TRUE
+  )
+  summary_target_keys <- .fastkpc_full_cuda_phase3_key_vector(
+    summary$expected_target_keys, "summary expected target keys",
+    allow_empty = TRUE, allow_empty_list = TRUE
+  )
+  if (!identical(setup_keys, descriptor$setup_keys) ||
+      !identical(summary_setup_keys, descriptor$setup_keys) ||
+      !identical(target_keys, descriptor$target_keys) ||
+      !identical(summary_target_keys, descriptor$target_keys)) {
+    stop("Phase 3 shard expected key set mismatch", call. = FALSE)
+  }
+  session_fields <- c(
+    "session_id", "session_identity_hash", "input_identity_hash",
+    "route_config_hash"
+  )
+  if (!.fastkpc_full_cuda_phase3_session_id_valid(envelope$session_id) ||
+      !.fastkpc_full_cuda_phase3_sha256(
+        envelope$session_identity_hash
+      ) || any(!vapply(session_fields, function(field) {
+        identical(envelope[[field]], summary[[field]])
+      }, logical(1L)))) {
+    stop("Phase 3 shard session identity mismatch", call. = FALSE)
+  }
+  if (!.fastkpc_full_cuda_phase3_gpu_environment_equal(
+        envelope$gpu_environment, identity_info$gpu_environment
+      ) || !.fastkpc_full_cuda_phase3_gpu_environment_equal(
+        summary$gpu_environment, identity_info$gpu_environment
+      )) {
+    stop("Phase 3 shard GPU environment mismatch", call. = FALSE)
+  }
+  actual_hashes <- .fastkpc_full_cuda_phase3_payload_semantic_hashes(
+    envelope$payload
+  )
+  envelope_hashes <- .fastkpc_full_cuda_phase3_named_sha256(
+    envelope$payload_semantic_hashes,
+    "Phase 3 shard payload semantic hashes"
+  )
+  summary_hashes <- .fastkpc_full_cuda_phase3_named_sha256(
+    summary$payload_semantic_hashes,
+    "Phase 3 shard summary semantic hashes"
+  )
+  actual_hash <- .fastkpc_full_cuda_phase3_payload_semantic_hash(
+    actual_hashes
+  )
+  if (!identical(envelope_hashes, actual_hashes) ||
+      !identical(summary_hashes, actual_hashes) ||
+      !identical(envelope$payload_semantic_hash, actual_hash) ||
+      !identical(summary$payload_semantic_hash, actual_hash)) {
+    stop("Phase 3 shard payload semantic hash mismatch", call. = FALSE)
+  }
+  if (!.fastkpc_full_cuda_phase3_sha256(summary$rds_file_sha256)) {
+    stop("Phase 3 shard RDS file hash is malformed", call. = FALSE)
+  }
+  if (!is.null(rds_path)) {
+    if (!file.exists(rds_path) || dir.exists(rds_path) ||
+        !identical(
+          summary$rds_file_sha256,
+          fastkpc_full_cuda_census_file_hash(rds_path)
+        )) {
+      stop("Phase 3 shard RDS byte hash mismatch", call. = FALSE)
+    }
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_atomic_write_shard <- function(
+    envelope, contract, descriptor, identity_info, route_config, paths) {
+  dir.create(dirname(paths$rds), recursive = TRUE, showWarnings = FALSE)
+  if (file.exists(paths$rds) || file.exists(paths$summary_json)) {
+    stop("Phase 3 shard final path exists before publication",
+         call. = FALSE)
+  }
+  rds_temporary <- tempfile(
+    ".phase3-shard-rds-", tmpdir = dirname(paths$rds), fileext = ".tmp"
+  )
+  summary_temporary <- tempfile(
+    ".phase3-shard-summary-", tmpdir = dirname(paths$rds), fileext = ".tmp"
+  )
+  rds_published <- FALSE
+  summary_published <- FALSE
+  on.exit({
+    unlink(c(rds_temporary, summary_temporary), force = TRUE)
+    if (rds_published && !summary_published) {
+      unlink(paths$rds, force = TRUE)
+    }
+  }, add = TRUE)
+
+  saveRDS(envelope, rds_temporary, version = 2)
+  summary <- .fastkpc_full_cuda_phase3_build_shard_summary(
+    envelope,
+    fastkpc_full_cuda_census_file_hash(rds_temporary)
+  )
+  .fastkpc_full_cuda_phase3_validate_shard_pair(
+    envelope = envelope,
+    summary = summary,
+    contract = contract,
+    descriptor = descriptor,
+    identity_info = identity_info,
+    route_config = route_config,
+    rds_path = rds_temporary
+  )
+  fastkpc_full_cuda_write_json(summary, summary_temporary)
+  disk_envelope <- tryCatch(
+    readRDS(rds_temporary),
+    error = function(error) {
+      stop("Phase 3 temporary shard RDS is unreadable", call. = FALSE)
+    }
+  )
+  disk_summary <- .fastkpc_full_cuda_phase3_read_json(
+    summary_temporary, "Phase 3 temporary shard summary"
+  )
+  .fastkpc_full_cuda_phase3_validate_shard_pair(
+    envelope = disk_envelope,
+    summary = disk_summary,
+    contract = contract,
+    descriptor = descriptor,
+    identity_info = identity_info,
+    route_config = route_config,
+    rds_path = rds_temporary
+  )
+  if (!file.rename(rds_temporary, paths$rds)) {
+    stop("failed to publish Phase 3 shard RDS", call. = FALSE)
+  }
+  rds_published <- TRUE
+  if (!file.rename(summary_temporary, paths$summary_json)) {
+    stop("failed to publish Phase 3 shard summary", call. = FALSE)
+  }
+  summary_published <- TRUE
+  rds_published <- FALSE
+  invisible(list(envelope = envelope, summary = summary))
+}
+
+.fastkpc_full_cuda_phase3_validate_shard_session_binding <- function(
+    envelope, summary, session) {
+  session_hash <- fastkpc_full_cuda_phase3_session_identity_hash(session)
+  ids_bound <- .fastkpc_full_cuda_phase3_session_id_valid(
+    envelope$session_id
+  ) && .fastkpc_full_cuda_phase3_session_id_valid(
+    summary$session_id
+  ) && .fastkpc_full_cuda_phase3_session_id_valid(
+    session$session_id
+  ) && identical(envelope$session_id, summary$session_id) &&
+    identical(envelope$session_id, session$session_id)
+  hashes_bound <- .fastkpc_full_cuda_phase3_sha256(
+    envelope$session_identity_hash
+  ) && .fastkpc_full_cuda_phase3_sha256(
+    summary$session_identity_hash
+  ) && identical(
+    envelope$session_identity_hash, summary$session_identity_hash
+  ) && identical(envelope$session_identity_hash, session_hash)
+  if (!isTRUE(ids_bound) || !isTRUE(hashes_bound)) {
+    stop("Phase 3 shard/session id and identity binding mismatch",
+         call. = FALSE)
+  }
+  invisible(session_hash)
+}
+
+.fastkpc_full_cuda_phase3_read_reusable_shard <- function(
+    paths, sessions_dir, contract, descriptor, plan, identity_info,
+    route_config) {
+  if (!file.exists(paths$rds) || !file.exists(paths$summary_json) ||
+      dir.exists(paths$rds) || dir.exists(paths$summary_json)) {
+    stop("Phase 3 shard pair is missing", call. = FALSE)
+  }
+  summary <- .fastkpc_full_cuda_phase3_read_json(
+    paths$summary_json, "Phase 3 shard summary"
+  )
+  if (!.fastkpc_full_cuda_phase3_sha256(summary$rds_file_sha256) ||
+      !identical(
+        summary$rds_file_sha256,
+        fastkpc_full_cuda_census_file_hash(paths$rds)
+      )) {
+    stop("Phase 3 shard RDS byte hash mismatch", call. = FALSE)
+  }
+  envelope <- tryCatch(
+    readRDS(paths$rds),
+    error = function(error) {
+      stop("Phase 3 shard RDS is unreadable", call. = FALSE)
+    }
+  )
+  .fastkpc_full_cuda_phase3_validate_shard_pair(
+    envelope = envelope,
+    summary = summary,
+    contract = contract,
+    descriptor = descriptor,
+    identity_info = identity_info,
+    route_config = route_config,
+    rds_path = paths$rds
+  )
+  session_path <- .fastkpc_full_cuda_phase3_session_path(
+    sessions_dir, summary$session_id
+  )
+  session <- .fastkpc_full_cuda_phase3_read_json(
+    session_path, "Phase 3 shard session"
+  )
+  .fastkpc_full_cuda_phase3_validate_session(
+    session, require_complete = TRUE, shard_id = descriptor$shard_id
+  )
+  .fastkpc_full_cuda_phase3_validate_session_plan_resources(
+    session, plan
+  )
+  .fastkpc_full_cuda_phase3_validate_shard_session_binding(
+    envelope, summary, session
+  )
+  if (!identical(
+        session$input_identity_hash, identity_info$input_identity_hash
+      ) || !identical(
+        session$route_config_hash, route_config$sha256
+      )) {
+    stop("Phase 3 shard session authentication mismatch", call. = FALSE)
+  }
+  list(envelope = envelope, summary = summary, session = session)
+}
+
+.fastkpc_full_cuda_phase3_scan_shards <- function(
+    shards_dir, shard_count, require_complete = FALSE) {
+  expected_ids <- as.integer(seq.int(0L, shard_count - 1L))
+  entries <- if (dir.exists(shards_dir)) {
+    list.files(shards_dir, all.files = TRUE, no.. = TRUE)
+  } else {
+    character()
+  }
+  entries <- entries[!startsWith(entries, ".")]
+  rds_entries <- entries[grepl("^shard_[0-9]+\\.rds$", entries)]
+  summary_entries <- entries[grepl(
+    "^shard_[0-9]+\\.summary\\.json$", entries
+  )]
+  unexpected_entries <- setdiff(
+    entries, c(rds_entries, summary_entries)
+  )
+  if (length(unexpected_entries) > 0L) {
+    stop("unexpected Phase 3 shard artifact entry: ",
+         unexpected_entries[[1L]], call. = FALSE)
+  }
+  parse_ids <- function(values, suffix) {
+    suppressWarnings(as.integer(sub(
+      paste0("^shard_([0-9]+)", suffix, "$"), "\\1", values
+    )))
+  }
+  rds_ids <- parse_ids(rds_entries, "\\.rds")
+  summary_ids <- parse_ids(summary_entries, "\\.summary\\.json")
+  if (anyNA(rds_ids) || anyNA(summary_ids) ||
+      any(!rds_ids %in% expected_ids) ||
+      any(!summary_ids %in% expected_ids)) {
+    stop("unexpected Phase 3 shard id", call. = FALSE)
+  }
+  canonical_rds_entries <- sprintf("shard_%d.rds", rds_ids)
+  canonical_summary_entries <- sprintf(
+    "shard_%d.summary.json", summary_ids
+  )
+  if (!identical(rds_entries, canonical_rds_entries) ||
+      !identical(summary_entries, canonical_summary_entries)) {
+    stop("noncanonical Phase 3 shard filename", call. = FALSE)
+  }
+  if (anyDuplicated(rds_ids) || anyDuplicated(summary_ids)) {
+    stop("duplicate Phase 3 shard id", call. = FALSE)
+  }
+  rds_paths <- setNames(
+    file.path(shards_dir, rds_entries), as.character(rds_ids)
+  )
+  summary_paths <- setNames(
+    file.path(shards_dir, summary_entries), as.character(summary_ids)
+  )
+  if (isTRUE(require_complete)) {
+    if (!identical(sort(rds_ids), expected_ids) ||
+        !identical(sort(summary_ids), expected_ids)) {
+      stop("missing Phase 3 shard pair", call. = FALSE)
+    }
+  }
+  list(
+    expected_ids = expected_ids,
+    rds_paths = rds_paths,
+    summary_paths = summary_paths
+  )
+}
+
+.fastkpc_full_cuda_phase3_resource_fields <- function() {
+  c(
+    "prepared_handle_create_count", "prepared_handle_destroy_count",
+    "residual_token_acquire_count", "residual_token_release_count",
+    "output_slot_acquire_count", "output_slot_release_count"
+  )
+}
+
+.fastkpc_full_cuda_phase3_validate_executor_result <- function(value) {
+  if (!.fastkpc_full_cuda_phase3_exact_named_list(
+        value, c("payload", "resource_counts")
+      ) || !.fastkpc_full_cuda_phase3_exact_named_list(
+        value$resource_counts,
+        .fastkpc_full_cuda_phase3_resource_fields()
+      )) {
+    stop("Phase 3 shard executor result schema is malformed",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_payload_semantic_hashes(value$payload)
+  counts <- setNames(vapply(names(value$resource_counts), function(field) {
+    .fastkpc_full_cuda_phase3_whole_scalar(
+      value$resource_counts[[field]], 0L, paste("executor", field)
+    )
+  }, integer(1L)), names(value$resource_counts))
+  if (counts[["prepared_handle_create_count"]] !=
+        counts[["prepared_handle_destroy_count"]] ||
+      counts[["residual_token_acquire_count"]] !=
+        counts[["residual_token_release_count"]] ||
+      counts[["output_slot_acquire_count"]] !=
+        counts[["output_slot_release_count"]]) {
+    stop("Phase 3 shard executor leaked a tracked resource",
+         call. = FALSE)
+  }
+  list(payload = value$payload, resource_counts = counts)
+}
+
+fastkpc_full_cuda_phase3_run_shards <- function(
+    output_dir, kind, setup_keys, target_rows, identity, route_config,
+    executor, runtime_create, runtime_destroy, scope,
+    shard_count = NULL, stop_after = NULL, progress_hook = NULL) {
+  output_clean <- typeof(output_dir) == "character" &&
+    length(output_dir) == 1L && !is.object(output_dir) &&
+    is.null(attributes(output_dir)) && !is.na(output_dir) &&
+    nzchar(output_dir) && !grepl("[\r\n]", output_dir)
+  callback_clean <- is.function(executor) && is.function(runtime_create) &&
+    is.function(runtime_destroy) &&
+    (is.null(progress_hook) || is.function(progress_hook))
+  if (!isTRUE(output_clean) || !isTRUE(callback_clean)) {
+    stop("Phase 3 shard runner inputs are malformed", call. = FALSE)
+  }
+  scope <- .fastkpc_full_cuda_phase3_scope(scope)
+  contract <- .fastkpc_full_cuda_phase3_kind_contract(kind)
+  plan <- fastkpc_full_cuda_phase3_plan_shards(
+    setup_keys = setup_keys,
+    target_rows = target_rows,
+    scope = scope,
+    shard_count = shard_count
+  )
+  .fastkpc_full_cuda_phase3_validate_route_for_shards(
+    route_config, scope
+  )
+  identity_info <- .fastkpc_full_cuda_phase3_validate_execution_identity(
+    identity = identity,
+    route_config = route_config,
+    scope = scope,
+    plan = plan
+  )
+  if (!is.null(stop_after)) {
+    stop_after <- .fastkpc_full_cuda_phase3_whole_scalar(
+      stop_after, 1L, "stop_after"
+    )
+  }
+
+  shards_dir <- file.path(output_dir, "shards")
+  sessions_dir <- file.path(output_dir, "sessions")
+  dir.create(shards_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(sessions_dir, recursive = TRUE, showWarnings = FALSE)
+  scan <- .fastkpc_full_cuda_phase3_scan_shards(
+    shards_dir, plan$shard_count
+  )
+  reused <- integer()
+  missing <- integer()
+  for (shard_id in scan$expected_ids) {
+    id <- as.character(shard_id)
+    pair_exists <- c(
+      rds = id %in% names(scan$rds_paths),
+      summary = id %in% names(scan$summary_paths)
+    )
+    paths <- .fastkpc_full_cuda_phase3_shard_paths(
+      shards_dir, shard_id
+    )
+    reusable <- FALSE
+    if (all(pair_exists)) {
+      descriptor <- .fastkpc_full_cuda_phase3_shard_descriptor(
+        plan, shard_id
+      )
+      reusable <- !is.null(tryCatch(
+        .fastkpc_full_cuda_phase3_read_reusable_shard(
+          paths = paths,
+          sessions_dir = sessions_dir,
+          contract = contract,
+          descriptor = descriptor,
+          plan = plan,
+          identity_info = identity_info,
+          route_config = route_config
+        ),
+        error = function(error) NULL
+      ))
+    }
+    if (reusable) {
+      reused <- c(reused, shard_id)
+    } else {
+      unlink(c(paths$rds, paths$summary_json), force = TRUE)
+      missing <- c(missing, shard_id)
+    }
+  }
+  reused <- as.integer(reused)
+  missing <- as.integer(missing)
+  if (length(missing) == 0L) {
+    return(list(
+      status = "complete",
+      requested_shard_ids = integer(),
+      completed_shard_ids = integer(),
+      reused_shard_ids = reused,
+      written_shard_ids = integer(),
+      missing_shard_ids = integer(),
+      session_id = NULL,
+      runtime_context_create_count = 0L,
+      runtime_context_destroy_count = 0L
+    ))
+  }
+
+  requested <- missing
+  selected <- if (is.null(stop_after)) {
+    requested
+  } else {
+    head(requested, stop_after)
+  }
+  session_id <- fastkpc_full_cuda_phase3_session_id()
+  session_path <- .fastkpc_full_cuda_phase3_session_path(
+    sessions_dir, session_id
+  )
+  while (file.exists(session_path)) {
+    session_id <- fastkpc_full_cuda_phase3_session_id()
+    session_path <- .fastkpc_full_cuda_phase3_session_path(
+      sessions_dir, session_id
+    )
+  }
+  session <- list(
+    schema_version = "full-cuda-ci-phase3-session-v1",
+    session_id = session_id,
+    input_identity_hash = identity_info$input_identity_hash,
+    route_config_hash = route_config$sha256,
+    requested_shard_ids = requested,
+    completed_shard_ids = integer(),
+    runtime_context_create_count = 0L,
+    runtime_context_destroy_count = 0L,
+    prepared_handle_create_count = 0L,
+    prepared_handle_destroy_count = 0L,
+    residual_token_release_count = 0L,
+    output_slot_acquire_count = 0L,
+    output_slot_release_count = 0L,
+    status = "running"
+  )
+  .fastkpc_full_cuda_phase3_atomic_write_session(session, sessions_dir)
+
+  context <- NULL
+  context_open <- FALSE
+  run_error <- NULL
+  written <- integer()
+  tryCatch({
+    context <- runtime_create()
+    if (is.null(context)) {
+      stop("Phase 3 runtime_create returned NULL", call. = FALSE)
+    }
+    context_open <- TRUE
+    session$runtime_context_create_count <- 1L
+    .fastkpc_full_cuda_phase3_atomic_write_session(session, sessions_dir)
+
+    for (shard_id in selected) {
+      descriptor <- .fastkpc_full_cuda_phase3_shard_descriptor(
+        plan, shard_id
+      )
+      result <- .fastkpc_full_cuda_phase3_validate_executor_result(
+        executor(
+          context = context,
+          shard_id = shard_id,
+          setup_keys = descriptor$setup_keys,
+          target_rows = descriptor$target_rows
+        )
+      )
+      envelope <- .fastkpc_full_cuda_phase3_build_shard_envelope(
+        contract = contract,
+        descriptor = descriptor,
+        session = session,
+        identity_info = identity_info,
+        route_config = route_config,
+        payload = result$payload
+      )
+      paths <- .fastkpc_full_cuda_phase3_shard_paths(
+        shards_dir, shard_id
+      )
+      .fastkpc_full_cuda_phase3_atomic_write_shard(
+        envelope = envelope,
+        contract = contract,
+        descriptor = descriptor,
+        identity_info = identity_info,
+        route_config = route_config,
+        paths = paths
+      )
+      counts <- result$resource_counts
+      session$prepared_handle_create_count <- as.integer(
+        session$prepared_handle_create_count +
+          counts[["prepared_handle_create_count"]]
+      )
+      session$prepared_handle_destroy_count <- as.integer(
+        session$prepared_handle_destroy_count +
+          counts[["prepared_handle_destroy_count"]]
+      )
+      session$residual_token_release_count <- as.integer(
+        session$residual_token_release_count +
+          counts[["residual_token_release_count"]]
+      )
+      session$output_slot_acquire_count <- as.integer(
+        session$output_slot_acquire_count +
+          counts[["output_slot_acquire_count"]]
+      )
+      session$output_slot_release_count <- as.integer(
+        session$output_slot_release_count +
+          counts[["output_slot_release_count"]]
+      )
+      session$completed_shard_ids <- c(
+        session$completed_shard_ids, as.integer(shard_id)
+      )
+      written <- c(written, as.integer(shard_id))
+      .fastkpc_full_cuda_phase3_atomic_write_session(
+        session, sessions_dir
+      )
+      if (!is.null(progress_hook)) {
+        progress_hook(session = session, event = "shard_complete")
+      }
+    }
+  }, error = function(error) {
+    run_error <<- error
+  })
+
+  if (context_open) {
+    destroy_error <- tryCatch({
+      runtime_destroy(context)
+      NULL
+    }, error = function(error) error)
+    if (is.null(destroy_error)) {
+      session$runtime_context_destroy_count <- 1L
+    } else if (is.null(run_error)) {
+      run_error <- destroy_error
+    }
+    context_open <- FALSE
+  }
+  if (!is.null(run_error)) {
+    session$status <- "running"
+    .fastkpc_full_cuda_phase3_atomic_write_session(session, sessions_dir)
+    stop(run_error)
+  }
+
+  session$status <- "complete"
+  .fastkpc_full_cuda_phase3_validate_session_plan_resources(
+    session, plan
+  )
+  .fastkpc_full_cuda_phase3_atomic_write_session(session, sessions_dir)
+  if (!is.null(progress_hook)) {
+    progress_hook(session = session, event = "session_complete")
+  }
+  remaining <- setdiff(requested, written)
+  list(
+    status = if (length(remaining) > 0L) "stopped" else "complete",
+    requested_shard_ids = requested,
+    completed_shard_ids = as.integer(written),
+    reused_shard_ids = reused,
+    written_shard_ids = as.integer(written),
+    missing_shard_ids = as.integer(remaining),
+    session_id = session$session_id,
+    runtime_context_create_count =
+      as.integer(session$runtime_context_create_count),
+    runtime_context_destroy_count =
+      as.integer(session$runtime_context_destroy_count)
+  )
+}
+
+.fastkpc_full_cuda_phase3_merge_payloads <- function(
+    payloads, plan) {
+  if (length(payloads) != plan$shard_count ||
+      any(!vapply(payloads, is.list, logical(1L)))) {
+    stop("Phase 3 merge payload set is malformed", call. = FALSE)
+  }
+  payload_names <- names(payloads[[1L]])
+  if (is.null(payload_names) || length(payload_names) == 0L ||
+      anyDuplicated(payload_names) || any(!vapply(payloads, function(value) {
+        identical(names(value), payload_names)
+      }, logical(1L)))) {
+    stop("Phase 3 merge payload schemas disagree", call. = FALSE)
+  }
+  setup_order <- plan$assignments$prepared_s_key_sha256
+  target_order <- sort(
+    plan$target_rows$residual_key_sha256, method = "radix"
+  )
+  merged <- lapply(payload_names, function(name) {
+    values <- lapply(payloads, `[[`, name)
+    if (all(vapply(values, is.data.frame, logical(1L)))) {
+      fields <- names(values[[1L]])
+      if (any(!vapply(values, function(value) {
+            identical(names(value), fields)
+          }, logical(1L)))) {
+        stop("Phase 3 merge data-frame schemas disagree", call. = FALSE)
+      }
+      value <- do.call(rbind, values)
+      rownames(value) <- NULL
+      if ("prepared_s_key_sha256" %in% fields) {
+        setup_rank <- match(value$prepared_s_key_sha256, setup_order)
+        if (anyNA(setup_rank)) {
+          stop("Phase 3 merged payload has an unknown setup key",
+               call. = FALSE)
+        }
+        order_id <- if ("residual_key_sha256" %in% fields) {
+          order(
+            setup_rank, value$residual_key_sha256, method = "radix"
+          )
+        } else {
+          order(setup_rank, method = "radix")
+        }
+        value <- value[order_id, , drop = FALSE]
+        rownames(value) <- NULL
+      } else if ("residual_key_sha256" %in% fields) {
+        target_rank <- match(value$residual_key_sha256, target_order)
+        if (anyNA(target_rank)) {
+          stop("Phase 3 merged payload has an unknown target key",
+               call. = FALSE)
+        }
+        value <- value[order(target_rank, method = "radix"), , drop = FALSE]
+        rownames(value) <- NULL
+      }
+      return(value)
+    }
+    if (all(vapply(values, is.atomic, logical(1L))) &&
+        length(unique(vapply(values, typeof, character(1L)))) == 1L) {
+      return(do.call(c, unname(values)))
+    }
+    if (all(vapply(values, function(value) {
+          is.list(value) && !is.object(value)
+        }, logical(1L)))) {
+      return(unlist(values, recursive = FALSE, use.names = FALSE))
+    }
+    stop("Phase 3 merge payload component is unsupported", call. = FALSE)
+  })
+  names(merged) <- payload_names
+  merged
+}
+
+.fastkpc_full_cuda_phase3_atomic_write_merged_rds <- function(
+    value, output_path) {
+  clean <- typeof(output_path) == "character" &&
+    length(output_path) == 1L && !is.object(output_path) &&
+    is.null(attributes(output_path)) && !is.na(output_path) &&
+    nzchar(output_path) && !grepl("[\r\n]", output_path)
+  if (!isTRUE(clean)) {
+    stop("Phase 3 merged RDS output path is malformed", call. = FALSE)
+  }
+  output_dir <- dirname(output_path)
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  temporary <- tempfile(
+    ".phase3-merged-", tmpdir = output_dir, fileext = ".tmp"
+  )
+  on.exit(unlink(temporary, force = TRUE), add = TRUE)
+  saveRDS(value, temporary, version = 2, compress = FALSE)
+  disk_value <- tryCatch(readRDS(temporary), error = function(error) NULL)
+  if (!identical(disk_value, value)) {
+    stop("Phase 3 merged RDS validation failed", call. = FALSE)
+  }
+  if (!file.rename(temporary, output_path)) {
+    stop("failed to atomically publish Phase 3 merged RDS", call. = FALSE)
+  }
+  invisible(output_path)
+}
+
+fastkpc_full_cuda_phase3_merge_shards <- function(
+    output_dir, kind, setup_keys, target_rows, identity, route_config,
+    scope, shard_count = NULL, output_path = NULL) {
+  scope <- .fastkpc_full_cuda_phase3_scope(scope)
+  contract <- .fastkpc_full_cuda_phase3_kind_contract(kind)
+  plan <- fastkpc_full_cuda_phase3_plan_shards(
+    setup_keys = setup_keys,
+    target_rows = target_rows,
+    scope = scope,
+    shard_count = shard_count
+  )
+  .fastkpc_full_cuda_phase3_validate_route_for_shards(
+    route_config, scope
+  )
+  identity_info <- .fastkpc_full_cuda_phase3_validate_execution_identity(
+    identity = identity,
+    route_config = route_config,
+    scope = scope,
+    plan = plan
+  )
+  shards_dir <- file.path(output_dir, "shards")
+  sessions_dir <- file.path(output_dir, "sessions")
+  scan <- .fastkpc_full_cuda_phase3_scan_shards(
+    shards_dir, plan$shard_count, require_complete = TRUE
+  )
+  loaded <- lapply(scan$expected_ids, function(shard_id) {
+    descriptor <- .fastkpc_full_cuda_phase3_shard_descriptor(
+      plan, shard_id
+    )
+    .fastkpc_full_cuda_phase3_read_reusable_shard(
+      paths = .fastkpc_full_cuda_phase3_shard_paths(
+        shards_dir, shard_id
+      ),
+      sessions_dir = sessions_dir,
+      contract = contract,
+      descriptor = descriptor,
+      plan = plan,
+      identity_info = identity_info,
+      route_config = route_config
+    )
+  })
+  payload <- .fastkpc_full_cuda_phase3_merge_payloads(
+    lapply(loaded, function(value) value$envelope$payload), plan
+  )
+  semantic_hashes <- .fastkpc_full_cuda_phase3_payload_semantic_hashes(
+    payload
+  )
+  setup_keys <- plan$assignments$prepared_s_key_sha256
+  target_keys <- sort(
+    plan$target_rows$residual_key_sha256, method = "radix"
+  )
+  merged <- list(
+    schema_version = "full-cuda-ci-phase3-merged-shards-v1",
+    artifact_kind = contract$kind,
+    artifact_schema_version = contract$artifact_schema_version,
+    input_identity_hash = identity_info$input_identity_hash,
+    route_config_hash = route_config$sha256,
+    shard_count = plan$shard_count,
+    expected_setup_keys = setup_keys,
+    expected_setup_count = as.integer(length(setup_keys)),
+    expected_setup_hash =
+      fastkpc_full_cuda_census_key_set_hash(setup_keys),
+    expected_target_keys = target_keys,
+    expected_target_count = as.integer(length(target_keys)),
+    expected_target_hash =
+      fastkpc_full_cuda_census_key_set_hash(target_keys),
+    payload = payload,
+    payload_semantic_hashes = as.list(semantic_hashes),
+    payload_semantic_hash =
+      .fastkpc_full_cuda_phase3_payload_semantic_hash(semantic_hashes)
+  )
+  if (!is.null(output_path)) {
+    .fastkpc_full_cuda_phase3_atomic_write_merged_rds(
+      merged, output_path
+    )
+  }
+  merged
+}
