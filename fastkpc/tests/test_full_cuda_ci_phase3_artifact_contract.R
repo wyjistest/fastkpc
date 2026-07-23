@@ -167,6 +167,315 @@ assert_true(identical(
 ), "route canonical SHA-256")
 
 sha <- function(label) fastkpc_full_cuda_census_hash_utf8(label)
+
+oracle_fixture_frame <- function(name, row_count) {
+  schema <- fastkpc_full_cuda_fixed_sp_oracle_row_schemas()[[name]]
+  columns <- lapply(unname(schema), function(type) {
+    switch(
+      type,
+      character = rep("", row_count),
+      integer = rep.int(0L, row_count),
+      double = rep(0, row_count),
+      logical = rep.int(FALSE, row_count)
+    )
+  })
+  names(columns) <- names(schema)
+  as.data.frame(columns, stringsAsFactors = FALSE, optional = TRUE)
+}
+
+oracle_setup_key <- sha("authoritative-oracle-setup")
+oracle_target_keys <- sort(vapply(
+  paste0("authoritative-oracle-target-", 1:4), sha, character(1L)
+), method = "radix")
+oracle_routes <- c(
+  "CHOLESKY_BATCHED", "CHOLESKY_BATCHED",
+  "AUGMENTED_QR", "AUGMENTED_SVD"
+)
+oracle_conditions <- c(1e3, 1e4, 1e10, 1e13)
+oracle_target <- oracle_fixture_frame("target_parity", 4L)
+oracle_target$prepared_s_key_sha256 <- rep(oracle_setup_key, 4L)
+oracle_target$shard_id <- rep.int(0L, 4L)
+oracle_target$setup_ordinal <- rep.int(1L, 4L)
+oracle_target$canonical_setup_rank <- rep.int(1L, 4L)
+oracle_target$target_ordinal <- 1:4
+oracle_target$canonical_target_rank <- 1:4
+oracle_target$residual_key_sha256 <- oracle_target_keys
+oracle_target$target <- 1:4
+oracle_target$null_dim <- rep.int(4L, 4L)
+oracle_target$condition <- oracle_conditions
+oracle_target$condition_bucket <- vapply(seq_len(4L), function(index) {
+  fastkpc_full_cuda_census_condition_bucket(
+    oracle_conditions[[index]], 4L, 4L
+  )
+}, character(1L))
+oracle_target$phase1_coefficient_rank <- rep.int(4L, 4L)
+oracle_target$planned_route <- oracle_routes
+oracle_target$authenticated_planned_route <- oracle_routes
+oracle_target$executed_route <- oracle_routes
+oracle_target$reroute_reason <- rep("", 4L)
+oracle_target$solver_status <- c(
+  "OK_CHOLESKY_BATCHED", "OK_CHOLESKY_BATCHED",
+  "OK_AUGMENTED_QR", "OK_AUGMENTED_SVD"
+)
+oracle_target$target_true_batched <- c(TRUE, TRUE, FALSE, FALSE)
+oracle_target$true_batched_kernel <- rep(FALSE, 4L)
+oracle_target$true_batched_target_count <- rep.int(2L, 4L)
+oracle_target$qr_rank <- c(-1L, -1L, 4L, -1L)
+oracle_target$geqrf_info <- c(-1L, -1L, 0L, -1L)
+oracle_target$ormqr_info <- c(-1L, -1L, 0L, -1L)
+oracle_target$effective_rank <- c(-1L, -1L, -1L, 4L)
+oracle_target$sigma_max <- c(NaN, NaN, NaN, 10)
+oracle_target$smallest_retained_sigma <- c(NaN, NaN, NaN, 1)
+oracle_target$svd_info <- c(-1L, -1L, -1L, 0L)
+oracle_target$aggregate_penalty_root_rank <- c(NA_integer_, NA_integer_,
+                                                NA_integer_, 4L)
+oracle_target$aggregate_penalty_root_pivot_sha256 <- c(
+  rep(sha("empty-pivot"), 3L), sha("svd-pivot")
+)
+oracle_target$aggregate_factor_call_count <- c(0L, 0L, 0L, 1L)
+oracle_target$aggregate_b_build_count <- c(0L, 0L, 0L, 2L)
+oracle_target$aggregate_dstop <- c(NA_real_, NA_real_, NA_real_, 1e-12)
+oracle_target$numeric_reference <- rep("mgcv-fixed-sp", 4L)
+for (field in c(
+  "coefficient_all_finite", "fitted_all_finite", "residual_all_finite",
+  "rss_all_finite", "rhs_all_finite", "output_all_finite",
+  "coefficient_oracle_phase2_exact", "fitted_oracle_phase2_exact",
+  "residual_oracle_phase2_exact", "full_cuda_data_plane"
+)) {
+  oracle_target[[field]] <- rep(TRUE, 4L)
+}
+for (field in grep("_(max_abs_diff|relative_l2)$", names(oracle_target),
+                   value = TRUE)) {
+  oracle_target[[field]] <- rep(1e-14, 4L)
+}
+for (field in grep("(sha256|fingerprint)$", names(oracle_target),
+                   value = TRUE)) {
+  if (!field %in% c(
+    "prepared_s_key_sha256", "residual_key_sha256",
+    "aggregate_penalty_root_pivot_sha256"
+  )) {
+    oracle_target[[field]] <- vapply(
+      seq_len(4L), function(index) sha(paste(field, index)), character(1L)
+    )
+  }
+}
+oracle_target$oracle_call_count <- rep.int(1L, 4L)
+oracle_target$rhs_authority <- rep("cuda-x0-transpose-y", 4L)
+oracle_target$approximate_backend <- rep(FALSE, 4L)
+oracle_target$fallback_type <- rep("NONE", 4L)
+oracle_target$error_code <- rep("NONE", 4L)
+oracle_target$error_message_sha256 <- rep(sha(""), 4L)
+
+oracle_setup <- oracle_fixture_frame("setup_results", 1L)
+oracle_setup$prepared_s_key_sha256 <- oracle_setup_key
+oracle_setup$setup_ordinal <- 1L
+oracle_setup$canonical_setup_rank <- 1L
+oracle_setup$phase2_shard_load_count <- 1L
+oracle_setup$phase2_shard_authentication_count <- 1L
+oracle_setup$n <- 351L
+oracle_setup$coefficient_dim <- 5L
+oracle_setup$null_dim <- 4L
+oracle_setup$penalty_count <- 2L
+oracle_setup$target_count <- 4L
+oracle_setup$target_key_set_sha256 <-
+  fastkpc_full_cuda_census_key_set_hash(oracle_target_keys)
+oracle_setup$prepared_handle_create_count <- 1L
+oracle_setup$prepared_handle_destroy_count <- 1L
+oracle_setup$setup_h2d_upload_count <- 1L
+oracle_setup$setup_h2d_bytes <- 1024
+oracle_setup$penalty_root_build_count <- 2L
+oracle_setup$penalty_root_matrix_count <- 2L
+oracle_setup$penalty_root_row_count <- 8L
+oracle_setup$planned_cholesky_target_count <- 2L
+oracle_setup$planned_qr_target_count <- 1L
+oracle_setup$planned_svd_target_count <- 1L
+oracle_setup$executed_cholesky_target_count <- 2L
+oracle_setup$executed_qr_target_count <- 1L
+oracle_setup$executed_svd_target_count <- 1L
+oracle_setup$true_batched_target_count <- 2L
+oracle_setup$setup_load_elapsed_ms <- 1
+oracle_setup$total_elapsed_ms <- 2
+
+oracle_resources <- oracle_fixture_frame("resource_metrics", 1L)
+oracle_resources$prepared_s_key_sha256 <- oracle_setup_key
+oracle_resources$setup_ordinal <- 1L
+oracle_resources$canonical_setup_rank <- 1L
+oracle_resources$target_count <- 4L
+oracle_resources$phase2_shard_load_count <- 1L
+oracle_resources$phase2_shard_authentication_count <- 1L
+for (field in c(
+  "prepared_handle_create_count", "prepared_handle_destroy_count",
+  "residual_token_acquire_count", "residual_token_release_count",
+  "output_slot_acquire_count", "output_slot_release_count",
+  "setup_h2d_upload_count", "target_batch_h2d_call_count",
+  "rhs_device_build_count", "coefficient_batch_finalize_call_count",
+  "fitted_batch_finalize_call_count",
+  "residual_rss_batch_finalize_call_count", "true_batched_subgroup_count",
+  "aggregate_penalty_factor_count", "shadow_materialize_call_count"
+)) {
+  oracle_resources[[field]] <- 1L
+}
+oracle_resources$setup_h2d_bytes <- 1024
+oracle_resources$target_h2d_copy_count <- 2L
+oracle_resources$target_h2d_bytes <- 2048
+oracle_resources$rhs_authority <- "cuda-x0-transpose-y"
+oracle_resources$full_cuda_data_plane <- TRUE
+oracle_resources$batch_output_finalized_target_count <- 4L
+oracle_resources$true_batched_attempted_target_count <- 2L
+oracle_resources$true_batched_target_count <- 2L
+oracle_resources$planned_cholesky_target_count <- 2L
+oracle_resources$planned_qr_target_count <- 1L
+oracle_resources$planned_svd_target_count <- 1L
+oracle_resources$executed_cholesky_target_count <- 2L
+oracle_resources$executed_qr_target_count <- 1L
+oracle_resources$executed_svd_target_count <- 1L
+oracle_resources$aggregate_svd_b_build_count <- 2L
+for (field in c(
+  "cholesky_factor_checkpoint_record_count",
+  "cholesky_factor_checkpoint_wait_count",
+  "cholesky_solve_checkpoint_record_count",
+  "cholesky_solve_checkpoint_wait_count", "qr_checkpoint_record_count",
+  "qr_checkpoint_wait_count", "svd_checkpoint_record_count",
+  "svd_checkpoint_wait_count"
+)) {
+  oracle_resources[[field]] <- 1L
+}
+oracle_resources$shadow_materialize_target_count <- 4L
+oracle_resources$shadow_d2h_bytes <- 4096
+oracle_resources$invalid_output_init_count <- 1L
+oracle_resources$cusolver_deterministic_mode <- "enabled"
+oracle_resources$cublas_math_mode <- "pedantic"
+oracle_resources$cublas_atomics_mode <- "not_allowed"
+oracle_resources$cublas_user_workspace_installed <- TRUE
+oracle_resources$cublas_workspace_bytes <- 16777216
+oracle_resources$cublas_workspace_alignment <- 256
+
+oracle_stages <- oracle_fixture_frame("stage_timing", 6L)
+oracle_stages$prepared_s_key_sha256 <- rep(oracle_setup_key, 6L)
+oracle_stages$setup_ordinal <- rep.int(1L, 6L)
+oracle_stages$stage <- c(
+  "phase2_shard_load", "prepared_handle_create", "solve",
+  "shadow_materialize", "cmagic_oracle", "release_and_free"
+)
+oracle_stages$elapsed_ms <- rep(1, 6L)
+
+refresh_oracle_fixture <- function(payload) {
+  payload$fallbacks <- .fastkpc_full_cuda_phase3_oracle_fallback_rows(
+    payload$target_parity, payload$resource_metrics
+  )
+  payload$failures <- .fastkpc_full_cuda_phase3_oracle_failure_rows(
+    payload$target_parity
+  )
+  payload$summary <- fastkpc_full_cuda_phase3_summarize_oracle_rows(
+    payload$setup_results, payload$target_parity,
+    payload$resource_metrics, payload$stage_timing,
+    payload$fallbacks, payload$failures
+  )
+  payload
+}
+authoritative_oracle_payload <- refresh_oracle_fixture(list(
+  setup_results = oracle_setup,
+  target_parity = oracle_target,
+  resource_metrics = oracle_resources,
+  stage_timing = oracle_stages,
+  fallbacks = data.frame(), failures = data.frame(), summary = data.frame()
+))
+authoritative_target_rows <- data.frame(
+  prepared_s_key_sha256 = rep(oracle_setup_key, 4L),
+  residual_key_sha256 = oracle_target_keys,
+  planned_route = oracle_routes,
+  stringsAsFactors = FALSE
+)
+validate_authoritative_oracle <- function(payload) {
+  .fastkpc_full_cuda_phase3_validate_oracle_payload(
+    payload,
+    expected_setup_keys = oracle_setup_key,
+    expected_target_rows = authoritative_target_rows
+  )
+}
+invisible(validate_authoritative_oracle(authoritative_oracle_payload))
+
+assert_hostile_oracle_rejected <- function(mutator, label) {
+  hostile <- mutator(authoritative_oracle_payload)
+  assert_error({
+    hostile <- refresh_oracle_fixture(hostile)
+    semantic_hashes <- .fastkpc_full_cuda_phase3_payload_semantic_hashes(
+      hostile
+    )
+    assert_true(
+      all(grepl("^[0-9a-f]{64}$", semantic_hashes)),
+      paste(label, "semantic hashes recompute")
+    )
+    validate_authoritative_oracle(hostile)
+  }, label)
+}
+assert_hostile_oracle_rejected(function(payload) {
+  payload$target_parity$solver_status[[1L]] <- "OK_BOGUS"
+  payload
+}, "unknown OK_BOGUS solver status fails closed")
+assert_hostile_oracle_rejected(function(payload) {
+  payload$target_parity$executed_route[[4L]] <- "BOGUS"
+  payload
+}, "unknown executed route fails closed")
+assert_hostile_oracle_rejected(function(payload) {
+  payload$target_parity$authenticated_planned_route[[1L]] <-
+    "AUGMENTED_SVD"
+  payload
+}, "authenticated and reported planned routes must agree")
+assert_hostile_oracle_rejected(function(payload) {
+  svd <- 4L
+  payload$target_parity$effective_rank[[svd]] <- -1L
+  payload$target_parity$sigma_max[[svd]] <- NaN
+  payload$target_parity$smallest_retained_sigma[[svd]] <- NaN
+  payload$target_parity$svd_info[[svd]] <- -1L
+  payload$target_parity$aggregate_penalty_root_rank[[svd]] <- NA_integer_
+  payload$target_parity$aggregate_factor_call_count[[svd]] <- 0L
+  payload$target_parity$aggregate_b_build_count[[svd]] <- 0L
+  payload$target_parity$aggregate_dstop[[svd]] <- NA_real_
+  payload$resource_metrics$aggregate_penalty_factor_count <- 0L
+  payload$resource_metrics$aggregate_svd_b_build_count <- 0L
+  payload
+}, "erased SVD factor/build evidence fails closed")
+assert_hostile_oracle_rejected(function(payload) {
+  payload$resource_metrics$qr_checkpoint_record_count <- 0L
+  payload
+}, "checkpoint record/wait mismatch fails closed")
+assert_hostile_oracle_rejected(function(payload) {
+  payload$target_parity$rhs_authority <- rep("cpu-projected-rhs", 4L)
+  payload$resource_metrics$rhs_authority <- "cpu-projected-rhs"
+  payload
+}, "wrong RHS authority fails closed")
+assert_hostile_oracle_rejected(function(payload) {
+  payload$target_parity$rhs_max_abs_diff[[1L]] <- 1e-4
+  payload
+}, "RHS parity outside its gate fails closed")
+assert_hostile_oracle_rejected(function(payload) {
+  payload$target_parity$target_true_batched[[1L]] <- FALSE
+  payload$resource_metrics$true_batched_attempted_target_count <- 3L
+  payload
+}, "inconsistent true-batch fields fail closed")
+assert_hostile_oracle_rejected(function(payload) {
+  replacement <- strrep("0", 64L)
+  payload$target_parity$residual_key_sha256[[1L]] <- replacement
+  payload$setup_results$target_key_set_sha256 <-
+    fastkpc_full_cuda_census_key_set_hash(
+      payload$target_parity$residual_key_sha256
+    )
+  payload
+}, "00 target-key substitution fails expected-corpus authentication")
+assert_hostile_oracle_rejected(function(payload) {
+  replacement <- strrep("0", 64L)
+  payload$setup_results$prepared_s_key_sha256 <- replacement
+  payload$target_parity$prepared_s_key_sha256 <- rep(replacement, 4L)
+  payload$resource_metrics$prepared_s_key_sha256 <- replacement
+  payload$stage_timing$prepared_s_key_sha256 <- rep(replacement, 6L)
+  payload
+}, "00 setup-key substitution fails expected-corpus authentication")
+assert_hostile_oracle_rejected(function(payload) {
+  payload$setup_results$phase2_shard_id <- 1L
+  payload
+}, "Phase 2 shard id must match canonical setup rank mapping")
+
 lineage_fixture <- list(
   authenticated = TRUE,
   phase0_manifest_hash = sha("phase0-manifest"),
@@ -412,6 +721,78 @@ qualified_native_fixture <- list(
     )
   )
 )
+assert_error(
+  .fastkpc_full_cuda_phase3_execution_projection(
+    qualified_native_fixture$provenance
+  ),
+  "incomplete native command/dependency projection must fail closed"
+)
+qualified_dependency_files <- data.frame(
+  path = c(
+    "/usr/bin/c++", "/usr/bin/strace", "/usr/local/cuda/bin/nvcc",
+    "/worktree/input.cpp"
+  ),
+  sha256 = c(
+    sha("qualified-cxx"), sha("qualified-build-tracer"),
+    sha("qualified-nvcc"), sha("qualified-input")
+  ),
+  stringsAsFactors = FALSE
+)
+qualified_command <- function(role, path, hash, argv) {
+  list(
+    role = role, executable_path = path, executable_sha256 = hash,
+    argv = argv
+  )
+}
+qualified_commands <- list(
+  qualified_command(
+    "cxx_compile", "/usr/bin/c++", sha("qualified-cxx"),
+    c("<EXECUTABLE>", "-O2", "-c", "/worktree/input.cpp",
+      "-o", "<OUTPUT>")
+  ),
+  qualified_command(
+    "cuda_compile", "/usr/local/cuda/bin/nvcc", sha("qualified-nvcc"),
+    c("<EXECUTABLE>", "-O3", "-arch=sm_89", "-c",
+      "/worktree/kernel.cu", "-o", "<OUTPUT>")
+  ),
+  qualified_command(
+    "link", "/usr/bin/c++", sha("qualified-cxx"),
+    c("<EXECUTABLE>", "-shared", "-o", "<OUTPUT>",
+      "/worktree/input.o", "/worktree/kernel.o")
+  )
+)
+qualified_environment_names <-
+  fastkpc_full_cuda_fixed_sp_native_build_environment_names()
+qualified_build_environment <- data.frame(
+  name = qualified_environment_names,
+  is_set = qualified_environment_names == "LC_ALL",
+  value = ifelse(qualified_environment_names == "LC_ALL", "C", ""),
+  stringsAsFactors = FALSE
+)
+qualified_native_fixture$provenance$native_build_dependencies <- list(
+  schema_version = "full-cuda-ci-native-build-dependencies-v3",
+  trace_semantics = "linux-strace-successful-read-exec-evidence-v3",
+  trace_invocation = "LC_ALL=C fixture qualified trace invocation",
+  build_working_dir = "/worktree",
+  tracer_path = "/usr/bin/strace",
+  dependency_count = as.integer(nrow(qualified_dependency_files)),
+  files = qualified_dependency_files,
+  exclusion_count = 2L,
+  exclusions = data.frame(
+    path = c("/tmp/compiler-output.o", "/worktree/native.so.tmp.1234"),
+    reason = rep("generated_output", 2L), stringsAsFactors = FALSE
+  ),
+  command_projection_schema_version =
+    "full-cuda-ci-native-build-command-projection-v1",
+  command_count = as.integer(length(qualified_commands)),
+  commands = qualified_commands,
+  build_environment_schema_version =
+    "full-cuda-ci-native-build-environment-v1",
+  build_environment = qualified_build_environment,
+  aggregate_sha256 = sha("qualified-build-dependencies"),
+  trace_sha256 = sha("qualified-build-trace"),
+  tracer_sha256 = sha("qualified-build-tracer")
+)
 assign(
   "fastkpc_full_cuda_phase3_discover_qualified_native_evidence",
   function() qualified_native_fixture,
@@ -539,7 +920,13 @@ writeLines(c(
   "native_path <- Sys.getenv('FASTKPC_STABLE_NATIVE_PATH')",
   "native_inode <- Sys.getenv('FASTKPC_STABLE_NATIVE_INODE')",
   "native_snapshot <- Sys.getenv('FASTKPC_STABLE_EXECUTION_SNAPSHOT')",
-  "qualified <- list(schema_version = 'full-cuda-ci-phase3-qualified-native-cache-v1', provenance = list(head_base_commit = fastkpc_full_cuda_source_commit(), provenance_schema_version = 'full-cuda-ci-execution-source-snapshot-v6', provenance_mode = 'working-tree-execution-snapshot-v1', source_closure_schema_version = 'full-cuda-ci-execution-source-closure-v1', source_discovery_semantics = 'parsed-r-ast-load-time-literal-source-v1', source_closure_count = 7L, source_closure_sha256 = sha('stable-source-closure'), execution_snapshot_sha256 = native_snapshot, relevant_sources_dirty_or_untracked = FALSE, native_library_identity = 'qualified-pinned-inode-sha-exact-registered-mapped-path-v3', native_library_path = native_path, native_library_device_major_hex = Sys.getenv('FASTKPC_STABLE_NATIVE_DEVICE_MAJOR'), native_library_device_minor_hex = Sys.getenv('FASTKPC_STABLE_NATIVE_DEVICE_MINOR'), native_library_inode = native_inode, native_library_sha256 = sha('stable-native-library'), native_build_inputs_sha256 = sha('stable-build-inputs'), native_build_dependencies = list(schema_version = 'full-cuda-ci-native-build-dependencies-v3', trace_semantics = 'linux-strace-successful-read-exec-evidence-v3', trace_invocation = 'stable trace invocation', tracer_path = '/usr/bin/strace', dependency_count = 17L, exclusion_count = 2L, aggregate_sha256 = sha('stable-build-dependencies'), trace_sha256 = sha('stable-build-trace'), tracer_sha256 = sha('stable-build-tracer'))))",
+  "dep_files <- data.frame(path = c('/usr/bin/c++', '/usr/bin/strace', '/usr/local/cuda/bin/nvcc', '/worktree/input.cpp'), sha256 = c(sha('stable-cxx'), sha('stable-build-tracer'), sha('stable-nvcc'), sha('stable-input')), stringsAsFactors = FALSE)",
+  "command <- function(role, path, hash, argv) list(role = role, executable_path = path, executable_sha256 = hash, argv = argv)",
+  "commands <- list(command('cxx_compile', '/usr/bin/c++', sha('stable-cxx'), c('<EXECUTABLE>', '-O2', '-c', '/worktree/input.cpp', '-o', '<OUTPUT>')), command('cuda_compile', '/usr/local/cuda/bin/nvcc', sha('stable-nvcc'), c('<EXECUTABLE>', '-O3', '-arch=sm_89', '-c', '/worktree/kernel.cu', '-o', '<OUTPUT>')), command('link', '/usr/bin/c++', sha('stable-cxx'), c('<EXECUTABLE>', '-shared', '-o', '<OUTPUT>', '/worktree/input.o', '/worktree/kernel.o')))",
+  "env_names <- fastkpc_full_cuda_fixed_sp_native_build_environment_names()",
+  "build_env <- data.frame(name = env_names, is_set = env_names == 'LC_ALL', value = ifelse(env_names == 'LC_ALL', 'C', ''), stringsAsFactors = FALSE)",
+  "dependencies <- list(schema_version = 'full-cuda-ci-native-build-dependencies-v3', trace_semantics = 'linux-strace-successful-read-exec-evidence-v3', trace_invocation = 'LC_ALL=C stable trace invocation', build_working_dir = '/worktree', tracer_path = '/usr/bin/strace', dependency_count = as.integer(nrow(dep_files)), files = dep_files, exclusion_count = 2L, exclusions = data.frame(path = c('/tmp/compiler-output.o', '/worktree/native.so.tmp.1234'), reason = rep('generated_output', 2L), stringsAsFactors = FALSE), command_projection_schema_version = 'full-cuda-ci-native-build-command-projection-v1', command_count = as.integer(length(commands)), commands = commands, build_environment_schema_version = 'full-cuda-ci-native-build-environment-v1', build_environment = build_env, aggregate_sha256 = sha('stable-build-dependencies'), trace_sha256 = sha('stable-build-trace'), tracer_sha256 = sha('stable-build-tracer'))",
+  "qualified <- list(schema_version = 'full-cuda-ci-phase3-qualified-native-cache-v1', provenance = list(head_base_commit = fastkpc_full_cuda_source_commit(), provenance_schema_version = 'full-cuda-ci-execution-source-snapshot-v6', provenance_mode = 'working-tree-execution-snapshot-v1', source_closure_schema_version = 'full-cuda-ci-execution-source-closure-v1', source_discovery_semantics = 'parsed-r-ast-load-time-literal-source-v1', source_closure_count = 8L, source_closure_sha256 = sha('stable-source-closure'), execution_snapshot_sha256 = native_snapshot, relevant_sources_dirty_or_untracked = FALSE, native_library_identity = 'qualified-pinned-inode-sha-exact-registered-mapped-path-v3', native_library_path = native_path, native_library_device_major_hex = Sys.getenv('FASTKPC_STABLE_NATIVE_DEVICE_MAJOR'), native_library_device_minor_hex = Sys.getenv('FASTKPC_STABLE_NATIVE_DEVICE_MINOR'), native_library_inode = native_inode, native_library_sha256 = sha('stable-native-library'), native_build_inputs_sha256 = sha('stable-build-inputs'), native_build_dependencies = dependencies))",
   "assign('fastkpc_full_cuda_phase3_discover_qualified_native_evidence', function() qualified, envir = .GlobalEnv)",
   "execution <- .fastkpc_full_cuda_phase3_execution_projection(qualified$provenance)",
   "execution$execution_sources_unchanged_after_run <- TRUE",

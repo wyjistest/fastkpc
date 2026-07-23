@@ -39,6 +39,50 @@ assert_sha_columns <- function(value, fields, message) {
 
 hash_utf8 <- function(value) fastkpc_full_cuda_census_hash_utf8(value)
 
+native_command <- function(role, executable_path, executable_label, argv) {
+  list(
+    role = role,
+    executable_path = executable_path,
+    executable_sha256 = hash_utf8(executable_label),
+    argv = argv
+  )
+}
+
+build_environment_names <- sort(c(
+  "AR", "AS", "CC", "CFLAGS", "COMPILER_PATH", "CPATH", "CPPFLAGS",
+  "CUDAFLAGS", "CUDAHOSTCXX", "CUDA_HOME", "CUDA_PATH", "CXX",
+  "CXXFLAGS", "GCC_EXEC_PREFIX", "LANG", "LC_ALL", "LDFLAGS",
+  "LD_LIBRARY_PATH", "LIBRARY_PATH", "MAKEFLAGS", "NVCCFLAGS",
+  "NVCC_APPEND_FLAGS", "NVCC_CCBIN", "NVCC_PREPEND_FLAGS", "PATH",
+  "PKG_CPPFLAGS", "PKG_CXXFLAGS", "PKG_LIBS", "R_ARCH", "R_HOME",
+  "R_LIBS", "R_LIBS_SITE", "R_LIBS_USER", "R_MAKEVARS_SITE",
+  "R_MAKEVARS_USER", "SHLIB_CXXLD", "SHLIB_CXXLDFLAGS",
+  "SOURCE_DATE_EPOCH"
+), method = "radix")
+build_environment <- data.frame(
+  name = build_environment_names,
+  is_set = build_environment_names == "LC_ALL",
+  value = ifelse(build_environment_names == "LC_ALL", "C", ""),
+  stringsAsFactors = FALSE
+)
+build_commands <- list(
+  native_command(
+    "cxx_compile", "/usr/bin/c++", "c++ tool",
+    c("<EXECUTABLE>", "-O3", "-c", "/worktree/input.cpp",
+      "-o", "<OUTPUT>")
+  ),
+  native_command(
+    "cuda_compile", "/usr/local/cuda/bin/nvcc", "nvcc tool",
+    c("<EXECUTABLE>", "-O3", "-arch=sm_89", "-c",
+      "/worktree/kernel.cu", "-o", "<OUTPUT>")
+  ),
+  native_command(
+    "link", "/usr/bin/c++", "c++ tool",
+    c("<EXECUTABLE>", "-shared", "-o", "<OUTPUT>",
+      "/worktree/input.o", "/worktree/kernel.o")
+  )
+)
+
 build_attestation_a <- list(
   schema_version = "full-cuda-ci-native-build-dependencies-v3",
   trace_semantics = "linux-strace-successful-read-exec-evidence-v3",
@@ -48,11 +92,16 @@ build_attestation_a <- list(
   trace_sha256 = hash_utf8("raw trace pid=17301"),
   tracer_path = "/usr/bin/strace",
   tracer_sha256 = hash_utf8("strace tool"),
-  dependency_count = 3L,
+  dependency_count = 4L,
   files = data.frame(
-    path = c("/usr/bin/c++", "/usr/bin/strace", "/worktree/input.cpp"),
+    path = c(
+      "/usr/bin/c++", "/usr/bin/strace", "/usr/local/cuda/bin/nvcc",
+      "/worktree/input.cpp"
+    ),
     sha256 = vapply(
-      c("c++ tool", "strace tool", "canonical build input"),
+      c(
+        "c++ tool", "strace tool", "nvcc tool", "canonical build input"
+      ),
       hash_utf8, character(1L)
     ),
     stringsAsFactors = FALSE
@@ -61,7 +110,14 @@ build_attestation_a <- list(
   exclusions = data.frame(
     path = "/worktree/fastkpc/build/fastkpc_cuda.so.tmp.17301",
     reason = "generated_output", stringsAsFactors = FALSE
-  )
+  ),
+  command_projection_schema_version =
+    "full-cuda-ci-native-build-command-projection-v1",
+  command_count = as.integer(length(build_commands)),
+  commands = build_commands,
+  build_environment_schema_version =
+    "full-cuda-ci-native-build-environment-v1",
+  build_environment = build_environment
 )
 build_attestation_b <- build_attestation_a
 build_attestation_b$trace_invocation <-
@@ -88,6 +144,16 @@ for (semantic_index in seq_len(nrow(build_attestation_b$files))) {
   changed_attestation$files$sha256[[semantic_index]] <- hash_utf8(
     paste("semantic dependency change", semantic_index)
   )
+  changed_path <- changed_attestation$files$path[[semantic_index]]
+  for (command_index in seq_along(changed_attestation$commands)) {
+    if (identical(
+          changed_attestation$commands[[command_index]]$executable_path,
+          changed_path
+        )) {
+      changed_attestation$commands[[command_index]]$executable_sha256 <-
+        changed_attestation$files$sha256[[semantic_index]]
+    }
+  }
   assert_true(
     !identical(
       canonical_attestation_a,
@@ -98,6 +164,167 @@ for (semantic_index in seq_len(nrow(build_attestation_b$files))) {
     "canonical build attestation binds every tool/input dependency"
   )
 }
+command_mutations <- list(
+  optimization = function(value) {
+    value$commands[[1L]]$argv[[2L]] <- "-O0"
+    value
+  },
+  architecture = function(value) {
+    value$commands[[2L]]$argv[[3L]] <- "-arch=sm_75"
+    value
+  },
+  definition = function(value) {
+    value$commands[[1L]]$argv <- append(
+      value$commands[[1L]]$argv, "-DFASTKPC_HOSTILE=1", after = 2L
+    )
+    value
+  },
+  command_order = function(value) {
+    value$commands <- rev(value$commands)
+    value
+  },
+  nvcc_environment = function(value) {
+    row <- match("NVCC_PREPEND_FLAGS", value$build_environment$name)
+    value$build_environment$is_set[[row]] <- TRUE
+    value$build_environment$value[[row]] <- "--use_fast_math"
+    value
+  }
+)
+for (mutation_name in names(command_mutations)) {
+  changed_attestation <- command_mutations[[mutation_name]](
+    build_attestation_b
+  )
+  assert_true(
+    !identical(
+      canonical_attestation_a,
+      fastkpc_full_cuda_fixed_sp_native_build_attestation_hash(
+        changed_attestation
+      )
+    ),
+    paste("canonical build attestation binds", mutation_name)
+  )
+}
+for (missing_field in c(
+  "command_projection_schema_version", "command_count", "commands",
+  "build_environment_schema_version", "build_environment"
+)) {
+  incomplete_attestation <- build_attestation_a
+  incomplete_attestation[[missing_field]] <- NULL
+  assert_error(
+    fastkpc_full_cuda_fixed_sp_native_build_attestation_hash(
+      incomplete_attestation
+    ),
+    paste("incomplete native command projection rejects", missing_field)
+  )
+}
+incomplete_environment <- build_attestation_a
+incomplete_environment$build_environment <-
+  incomplete_environment$build_environment[-1L, , drop = FALSE]
+assert_error(
+  fastkpc_full_cuda_fixed_sp_native_build_attestation_hash(
+    incomplete_environment
+  ),
+  "incomplete native build environment projection fails closed"
+)
+
+execution_roots <- .fastkpc_full_cuda_phase3_execution_roots()
+assert_identical(
+  unname(execution_roots[["oracle_runner"]]),
+  "fastkpc/tools/run_full_cuda_ci_fixed_sp_oracle_sp.R",
+  "executable Phase 3 oracle runner is an authenticated source root"
+)
+execution_closure <-
+  fastkpc_full_cuda_fixed_sp_discover_execution_source_closure(
+    execution_roots, project_root = "."
+  )
+runner_id <- "fastkpc/tools/run_full_cuda_ci_fixed_sp_oracle_sp.R"
+assert_true(
+  runner_id %in% execution_closure$source_ids &&
+    runner_id %in% unname(execution_closure$direct_source_ids),
+  "executable Phase 3 oracle runner is in the authenticated closure"
+)
+closure_hashes <- vapply(
+  execution_closure$source_file_paths,
+  fastkpc_full_cuda_fixed_sp_sha256_file,
+  character(1L)
+)
+dirty_runner_hashes <- closure_hashes
+dirty_runner_hashes[[runner_id]] <- hash_utf8("dirty runner contents")
+assert_true(
+  !identical(
+    fastkpc_full_cuda_fixed_sp_source_closure_hash(
+      execution_closure, closure_hashes
+    ),
+    fastkpc_full_cuda_fixed_sp_source_closure_hash(
+      execution_closure, dirty_runner_hashes
+    )
+  ),
+  "dirty executable runner contents change authenticated source identity"
+)
+
+synthetic_root <- normalizePath(".", winslash = "/", mustWork = TRUE)
+synthetic_cxx <- normalizePath(Sys.which("g++"), winslash = "/",
+                               mustWork = TRUE)
+synthetic_ld <- normalizePath(Sys.which("ld"), winslash = "/",
+                              mustWork = TRUE)
+synthetic_object <- file.path(synthetic_root, "fastkpc", "build", "input.o")
+synthetic_output <- file.path(
+  synthetic_root, "fastkpc", "build", "fastkpc_cuda.so.tmp.17301"
+)
+synthetic_exec_paths <- c(synthetic_cxx, synthetic_ld)
+synthetic_exec_lines <- c(
+  paste0(
+    "17301 execve(\"", synthetic_cxx, "\", [\"g++\", \"-shared\", ",
+    "\"-o\", \"", synthetic_output, "\", \"", synthetic_object,
+    "\"], 0x0 /* 40 vars */) = 0"
+  ),
+  paste0(
+    "17302 execve(\"", synthetic_ld, "\", [\"ld\", \"-shared\", ",
+    "\"-plugin-opt=-fresolution=/tmp/ccPIDnoise.res\", \"-o\", ",
+    "\"", synthetic_output, "\", \"", synthetic_object,
+    "\"], 0x0 /* 40 vars */) = 0"
+  )
+)
+synthetic_tools <- sort(unique(synthetic_exec_paths), method = "radix")
+synthetic_tool_files <- data.frame(
+  path = synthetic_tools,
+  sha256 = vapply(
+    synthetic_tools, fastkpc_full_cuda_fixed_sp_sha256_file, character(1L)
+  ),
+  stringsAsFactors = FALSE
+)
+synthetic_link_projection <-
+  fastkpc_full_cuda_fixed_sp_native_build_commands(
+    exec_lines = synthetic_exec_lines,
+    exec_syscalls = rep("execve", 2L),
+    exec_paths = synthetic_exec_paths,
+    build_working_dir = synthetic_root,
+    files = synthetic_tool_files
+  )
+assert_true(
+  length(synthetic_link_projection) == 1L &&
+    identical(synthetic_link_projection[[1L]]$role, "link") &&
+    !any(grepl("ccPIDnoise", synthetic_link_projection[[1L]]$argv,
+               fixed = TRUE)) &&
+    identical(
+      synthetic_link_projection[[1L]]$argv[
+        match("-o", synthetic_link_projection[[1L]]$argv) + 1L
+      ],
+      "<OUTPUT>"
+    ),
+  "canonical command projection excludes nested linker invocation noise"
+)
+
+oracle_row_schemas <- fastkpc_full_cuda_fixed_sp_oracle_row_schemas()
+for (schema_name in c("setup_results", "resource_metrics")) {
+  assert_true(
+    all(c(
+      "phase2_shard_load_count",
+      "phase2_shard_authentication_count"
+    ) %in% names(oracle_row_schemas[[schema_name]])),
+    paste(schema_name, "exposes authoritative Phase 2 shard load counters")
+  )
+}
 
 stable_identity_fields <- .fastkpc_full_cuda_phase3_identity_fields()
 stable_identity_fixture <- as.list(stats::setNames(
@@ -105,7 +332,7 @@ stable_identity_fixture <- as.list(stats::setNames(
   stable_identity_fields
 ))
 stable_identity_fixture$native_build_attestation_schema_version <-
-  "full-cuda-ci-native-build-trace-attestation-v1"
+  "full-cuda-ci-native-build-trace-attestation-v2"
 stable_identity_fixture$native_build_attestation_sha256 <-
   canonical_attestation_a
 trace_identity_a <- stable_identity_fixture
@@ -205,6 +432,41 @@ if (is.null(summarize_oracle_rows)) {
   fail("fastkpc_full_cuda_phase3_summarize_oracle_rows is missing")
 }
 
+subset_started <- proc.time()[["elapsed"]]
+qualified_native <-
+  fastkpc_full_cuda_phase3_discover_qualified_native_evidence()
+qualified_dependencies <-
+  qualified_native$provenance$native_build_dependencies
+qualified_roles <- vapply(
+  qualified_dependencies$commands, `[[`, character(1L), "role"
+)
+assert_true(
+  all(c("cxx_compile", "cuda_compile", "link") %in% qualified_roles) &&
+    sum(qualified_roles == "link") == 1L &&
+    qualified_dependencies$command_count == length(qualified_roles) &&
+    !any(vapply(qualified_dependencies$commands, function(command) {
+      any(grepl("/tmp/cc", command$argv, fixed = TRUE)) ||
+        any(grepl("fastkpc_cuda.so.tmp.", command$argv, fixed = TRUE))
+    }, logical(1L))) &&
+    "NVCC_PREPEND_FLAGS" %in%
+      qualified_dependencies$build_environment$name,
+  "real qualified build binds canonical driver argv and relevant env"
+)
+assert_true(
+  runner_id %in% names(qualified_native$provenance$source_file_paths) &&
+    runner_id %in% unname(qualified_native$provenance$direct_source_ids),
+  "real qualified provenance authenticates the executable oracle runner"
+)
+qualified_projection <- .fastkpc_full_cuda_phase3_execution_projection(
+  qualified_native$provenance
+)
+assert_identical(
+  qualified_projection$native_build_attestation_sha256,
+  fastkpc_full_cuda_fixed_sp_native_build_attestation_hash(
+    qualified_dependencies
+  ),
+  "real qualified projection binds the complete command attestation"
+)
 build_fastkpc_cuda_native(rebuild = FALSE)
 assert_true(fastkpc_cuda_available(), "CUDA must be available")
 
@@ -232,13 +494,29 @@ routes_by_setup <- split(
 )
 setup_keys <- sort(names(routes_by_setup), method = "radix")
 pairs <- utils::combn(setup_keys, 2L, simplify = FALSE)
+setup_catalog_rank <- match(
+  setup_keys, catalog$setup_index$prepared_s_key_sha256
+)
+assert_true(!anyNA(setup_catalog_rank), "subset setup Phase 2 shard join")
+setup_phase2_shard_id <- stats::setNames(
+  as.integer(
+    (setup_catalog_rank - 1L) %% catalog$catalog_contract$shard_count
+  ),
+  setup_keys
+)
 valid_pair <- vapply(pairs, function(pair) {
   routes <- lapply(pair, function(key) unique(routes_by_setup[[key]]))
   all(lengths(routes) < length(route_levels)) &&
     setequal(unique(unlist(routes, use.names = FALSE)), route_levels)
 }, logical(1L))
-pair_candidates <- pairs[valid_pair]
-assert_true(length(pair_candidates) > 0L, "two-setup three-route fixture")
+shared_source_shard <- vapply(pairs, function(pair) {
+  length(unique(setup_phase2_shard_id[pair])) == 1L
+}, logical(1L))
+pair_candidates <- pairs[valid_pair & shared_source_shard]
+assert_true(
+  length(pair_candidates) > 0L,
+  "two-setup three-route fixture shares one Phase 2 source shard"
+)
 pair_target_counts <- vapply(pair_candidates, function(pair) {
   sum(iteration$target_rows$prepared_s_key_sha256 %in% pair)
 }, integer(1L))
@@ -247,6 +525,10 @@ selected_pair <- pair_candidates[[order(
   pair_target_counts, pair_labels, method = "radix"
 )[[1L]]]]
 selected_pair <- sort(selected_pair, method = "radix")
+assert_true(
+  length(unique(setup_phase2_shard_id[selected_pair])) == 1L,
+  "selected setup pair proves shared Phase 2 source-shard reuse"
+)
 selected_targets <- iteration$target_rows[
   iteration$target_rows$prepared_s_key_sha256 %in% selected_pair,
   , drop = FALSE
@@ -492,6 +774,25 @@ assert_true(
 
 resources <- payload$resource_metrics
 assert_true(nrow(resources) == 2L, "one resource row per setup")
+unique_phase2_shard_count <- as.integer(length(unique(
+  payload$setup_results$phase2_shard_id
+)))
+assert_true(
+  sum(payload$setup_results$phase2_shard_load_count) ==
+    unique_phase2_shard_count &&
+    sum(payload$setup_results$phase2_shard_authentication_count) ==
+      unique_phase2_shard_count &&
+    sum(resources$phase2_shard_load_count) == unique_phase2_shard_count &&
+    sum(resources$phase2_shard_authentication_count) ==
+      unique_phase2_shard_count &&
+    payload$summary$unique_phase2_shard_count ==
+      unique_phase2_shard_count &&
+    payload$summary$phase2_shard_load_count == unique_phase2_shard_count &&
+    payload$summary$phase2_shard_authentication_count ==
+      unique_phase2_shard_count &&
+    unique_phase2_shard_count < nrow(payload$setup_results),
+  "subset authenticates and loads each unique Phase 2 shard exactly once"
+)
 assert_true(
   all(resources$prepared_handle_create_count == 1L) &&
     all(resources$prepared_handle_destroy_count == 1L) &&
@@ -542,21 +843,23 @@ mutated_payload$resource_metrics$qr_checkpoint_wait_count[[qr_setup]] <-
     mutated_payload$resource_metrics$qr_checkpoint_wait_count[[qr_setup]] +
       mutated_payload$resource_metrics$target_count[[qr_setup]]
   )
-mutated_payload$summary <- summarize_oracle_rows(
-  setup_results = mutated_payload$setup_results,
-  target_parity = mutated_payload$target_parity,
-  resource_metrics = mutated_payload$resource_metrics,
-  stage_timing = mutated_payload$stage_timing,
-  fallbacks = mutated_payload$fallbacks,
-  failures = mutated_payload$failures
-)
 validate_oracle_payload <- get0(
   ".fastkpc_full_cuda_phase3_validate_oracle_payload",
   mode = "function", inherits = TRUE
 )
 assert_true(!is.null(validate_oracle_payload), "oracle shard validator is missing")
 assert_error(
-  validate_oracle_payload(mutated_payload),
+  {
+    mutated_payload$summary <- summarize_oracle_rows(
+      setup_results = mutated_payload$setup_results,
+      target_parity = mutated_payload$target_parity,
+      resource_metrics = mutated_payload$resource_metrics,
+      stage_timing = mutated_payload$stage_timing,
+      fallbacks = mutated_payload$fallbacks,
+      failures = mutated_payload$failures
+    )
+    validate_oracle_payload(mutated_payload)
+  },
   "target-level stable-sync mutation must fail shard validation",
   "target-level stable sync"
 )
@@ -648,5 +951,10 @@ assert_true(
 cat(
   "PASS Phase 3 fixed-sp oracle subset:",
   nrow(payload$setup_results), "setups /",
-  nrow(payload$target_parity), "targets\n"
+  nrow(payload$target_parity), "targets /",
+  payload$summary$phase2_shard_load_count, "unique Phase 2 loads /",
+  payload$summary$phase2_shard_authentication_count,
+  "unique Phase 2 authentications /",
+  format(proc.time()[["elapsed"]] - subset_started, digits = 8L),
+  "seconds\n"
 )

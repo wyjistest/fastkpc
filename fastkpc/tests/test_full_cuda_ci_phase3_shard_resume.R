@@ -280,7 +280,8 @@ fake_executor <- function(context, shard_id, setup_keys, target_rows) {
 run_fixture <- function(
     output_dir, identity_value = identity, route_value = route,
     targets = target_rows, setup_values = setup_keys,
-    shard_count_value = 4L, stop_after = NULL) {
+    shard_count_value = 4L, stop_after = NULL,
+    kind_value = "full_shadow") {
   lifecycle <- new.env(parent = emptyenv())
   lifecycle$create_count <- 0L
   lifecycle$destroy_count <- 0L
@@ -304,7 +305,7 @@ run_fixture <- function(
   }
   result <- fastkpc_full_cuda_phase3_run_shards(
     output_dir = output_dir,
-    kind = "oracle_sp",
+    kind = kind_value,
     setup_keys = setup_values,
     target_rows = targets,
     identity = identity_value,
@@ -319,6 +320,129 @@ run_fixture <- function(
   )
   list(result = result, lifecycle = lifecycle)
 }
+
+generic_oracle_dir <- tempfile("phase3-generic-oracle-rejected-")
+on.exit(unlink(generic_oracle_dir, recursive = TRUE, force = TRUE), add = TRUE)
+assert_error(
+  run_fixture(generic_oracle_dir, stop_after = 1L,
+              kind_value = "oracle_sp"),
+  "oracle shard publication rejects a generic non-oracle payload",
+  "oracle"
+)
+
+shared_source_setup_index <- data.frame(
+  prepared_s_key_sha256 = sort(setup_keys[1:3], method = "radix"),
+  stringsAsFactors = FALSE
+)
+shared_source_setup_keys <-
+  shared_source_setup_index$prepared_s_key_sha256[c(1L, 3L)]
+shared_source_targets <- target_rows[
+  target_rows$prepared_s_key_sha256 %in% shared_source_setup_keys,
+  , drop = FALSE
+]
+shared_source_targets <- shared_source_targets[order(
+  match(
+    shared_source_targets$prepared_s_key_sha256,
+    shared_source_setup_keys
+  ),
+  shared_source_targets$residual_key_sha256,
+  method = "radix"
+), , drop = FALSE]
+rownames(shared_source_targets) <- NULL
+loader_evidence <- new.env(parent = emptyenv())
+loader_evidence$call_count <- 0L
+loader_evidence$shard_ids <- list()
+fake_phase2_loader <- function(
+    shard_dir, inputs, shard_count, shard_ids, setup_keys, target_keys,
+    expected_source_commit) {
+  loader_evidence$call_count <- loader_evidence$call_count + 1L
+  loader_evidence$shard_ids[[loader_evidence$call_count]] <- shard_ids
+  list(
+    prepared_s_setups = stats::setNames(
+      lapply(setup_keys, function(key) list(prepared_s_key_sha256 = key)),
+      setup_keys
+    ),
+    target_states = data.frame(
+      prepared_s_key_sha256 = shared_source_targets$prepared_s_key_sha256,
+      residual_key_sha256 = shared_source_targets$residual_key_sha256,
+      stringsAsFactors = FALSE
+    ),
+    shard_ids = as.integer(shard_ids)
+  )
+}
+shared_source_catalog <- list(
+  setup_index = shared_source_setup_index,
+  catalog_contract = list(shard_count = 2L),
+  phase2_dir = "/synthetic/phase2",
+  inputs = list(synthetic = TRUE),
+  phase2_manifest = list(source_commit = strrep("2", 40L))
+)
+shared_source_load <-
+  fastkpc_full_cuda_fixed_sp_load_oracle_phase2_shards(
+    catalog = shared_source_catalog,
+    setup_keys = shared_source_setup_keys,
+    target_rows = shared_source_targets,
+    shard_loader = fake_phase2_loader
+  )
+assert_true(
+  loader_evidence$call_count == 1L &&
+    identical(loader_evidence$shard_ids[[1L]], 0L) &&
+    identical(shared_source_load$phase2_shard_ids, 0L) &&
+    shared_source_load$phase2_shard_load_count == 1L &&
+    shared_source_load$phase2_shard_authentication_count == 1L,
+  "setups sharing one Phase 2 shard perform one read/authentication"
+)
+
+interrupt_dir <- tempfile("phase3-interrupt-cleanup-")
+on.exit(unlink(interrupt_dir, recursive = TRUE, force = TRUE), add = TRUE)
+interrupt_lifecycle <- new.env(parent = emptyenv())
+interrupt_lifecycle$create_count <- 0L
+interrupt_lifecycle$destroy_count <- 0L
+interrupt_runtime_create <- function() {
+  interrupt_lifecycle$create_count <- interrupt_lifecycle$create_count + 1L
+  new.env(parent = emptyenv())
+}
+interrupt_runtime_destroy <- function(context) {
+  interrupt_lifecycle$destroy_count <- interrupt_lifecycle$destroy_count + 1L
+  invisible(NULL)
+}
+synthetic_interrupt <- structure(
+  list(message = "synthetic Phase 3 interrupt", call = NULL),
+  class = c("interrupt", "condition")
+)
+interrupt_executor <- function(...) stop(synthetic_interrupt)
+interrupt_condition <- tryCatch(
+  fastkpc_full_cuda_phase3_run_shards(
+    output_dir = interrupt_dir,
+    kind = "full_shadow",
+    setup_keys = single_setup <- unname(setup_keys[[1L]]),
+    target_rows = target_rows[
+      target_rows$prepared_s_key_sha256 == single_setup,
+      , drop = FALSE
+    ],
+    identity = identity_fixture(
+      route_fixture("interrupt", shard_count = 1L),
+      targets = target_rows[
+        target_rows$prepared_s_key_sha256 == single_setup,
+        , drop = FALSE
+      ],
+      setups = single_setup
+    ),
+    route_config = route_fixture("interrupt", shard_count = 1L),
+    executor = interrupt_executor,
+    runtime_create = interrupt_runtime_create,
+    runtime_destroy = interrupt_runtime_destroy,
+    scope = "qualification",
+    shard_count = 1L
+  ),
+  interrupt = function(condition) condition
+)
+assert_true(
+  inherits(interrupt_condition, "interrupt") &&
+    interrupt_lifecycle$create_count == 1L &&
+    interrupt_lifecycle$destroy_count == 1L,
+  "runtime context is destroyed exactly once on interrupt"
+)
 
 single_setup <- unname(setup_keys[[1L]])
 single_target <- target_rows[
@@ -781,7 +905,7 @@ for (shard_id in forged_shard_ids) {
 assert_error(
   fastkpc_full_cuda_phase3_merge_shards(
     output_dir = forged_session_id_dir,
-    kind = "oracle_sp",
+    kind = "full_shadow",
     setup_keys = setup_keys,
     target_rows = target_rows,
     identity = identity,
@@ -859,7 +983,7 @@ merged_path_1 <- tempfile("phase3-merged-1-", fileext = ".rds")
 merged_path_2 <- tempfile("phase3-merged-2-", fileext = ".rds")
 merged_1 <- fastkpc_full_cuda_phase3_merge_shards(
   output_dir = artifact_dir,
-  kind = "oracle_sp",
+  kind = "full_shadow",
   setup_keys = setup_keys,
   target_rows = target_rows,
   identity = identity,
@@ -870,7 +994,7 @@ merged_1 <- fastkpc_full_cuda_phase3_merge_shards(
 )
 merged_2 <- fastkpc_full_cuda_phase3_merge_shards(
   output_dir = artifact_dir,
-  kind = "oracle_sp",
+  kind = "full_shadow",
   setup_keys = setup_keys,
   target_rows = target_rows,
   identity = identity,
@@ -906,7 +1030,7 @@ unlink(file.path(
 ))
 assert_error(
   fastkpc_full_cuda_phase3_merge_shards(
-    missing_merge_dir, "oracle_sp", setup_keys, target_rows, identity,
+    missing_merge_dir, "full_shadow", setup_keys, target_rows, identity,
     route, "qualification", 4L
   ),
   "merge rejects a missing shard pair", "missing"
@@ -923,7 +1047,7 @@ assert_true(file.copy(
 ), "copy duplicate merge summary fixture")
 assert_error(
   fastkpc_full_cuda_phase3_merge_shards(
-    duplicate_merge_dir, "oracle_sp", setup_keys, target_rows, identity,
+    duplicate_merge_dir, "full_shadow", setup_keys, target_rows, identity,
     route, "qualification", 4L
   ),
   "merge rejects a duplicate spelling of a shard id", "noncanonical"

@@ -1351,7 +1351,93 @@ fastkpc_full_cuda_fixed_sp_scope <- function(catalog, scope) {
   )
 }
 
-fastkpc_full_cuda_fixed_sp_batches <- function(catalog, selected_scope) {
+fastkpc_full_cuda_fixed_sp_load_oracle_phase2_shards <- function(
+    catalog, setup_keys, target_rows,
+    shard_loader = fastkpc_full_cuda_prepared_s_read_selected_shards) {
+  setup_index <- catalog$setup_index
+  shard_count <- catalog$catalog_contract$shard_count
+  clean <- is.data.frame(setup_index) &&
+    "prepared_s_key_sha256" %in% names(setup_index) &&
+    typeof(setup_index$prepared_s_key_sha256) == "character" &&
+    !anyNA(setup_index$prepared_s_key_sha256) &&
+    !anyDuplicated(setup_index$prepared_s_key_sha256) &&
+    typeof(shard_count) == "integer" && length(shard_count) == 1L &&
+    !is.na(shard_count) && shard_count > 0L && is.function(shard_loader) &&
+    fastkpc_full_cuda_fixed_sp_is_bare_sha256_vector(setup_keys) &&
+    length(setup_keys) > 0L && !anyDuplicated(setup_keys) &&
+    identical(setup_keys, sort(setup_keys, method = "radix")) &&
+    is.data.frame(target_rows) && nrow(target_rows) > 0L &&
+    all(c(
+      "prepared_s_key_sha256", "residual_key_sha256"
+    ) %in% names(target_rows))
+  if (!isTRUE(clean)) {
+    stop("fixed-sp oracle Phase 2 shard request is malformed",
+         call. = FALSE)
+  }
+  setup_rank <- match(setup_keys, setup_index$prepared_s_key_sha256)
+  target_setup_rank <- match(
+    as.character(target_rows$prepared_s_key_sha256), setup_keys
+  )
+  target_keys <- as.character(target_rows$residual_key_sha256)
+  expected_target_order <- order(
+    target_setup_rank, target_keys, method = "radix"
+  )
+  if (anyNA(setup_rank) || anyNA(target_setup_rank) ||
+      !fastkpc_full_cuda_fixed_sp_is_bare_sha256_vector(target_keys) ||
+      anyDuplicated(target_keys) ||
+      !identical(expected_target_order, seq_len(nrow(target_rows))) ||
+      !identical(
+        sort(unique(as.character(target_rows$prepared_s_key_sha256)),
+             method = "radix"),
+        setup_keys
+      )) {
+    stop("fixed-sp oracle Phase 2 shard request identity is incomplete",
+         call. = FALSE)
+  }
+  shard_ids <- sort(unique(as.integer(
+    (setup_rank - 1L) %% shard_count
+  )))
+  started <- proc.time()[["elapsed"]]
+  loaded <- shard_loader(
+    shard_dir = file.path(catalog$phase2_dir, "shards"),
+    inputs = catalog$inputs,
+    shard_count = shard_count,
+    shard_ids = shard_ids,
+    setup_keys = setup_keys,
+    target_keys = target_keys,
+    expected_source_commit = catalog$phase2_manifest$source_commit
+  )
+  elapsed_ms <- as.double((proc.time()[["elapsed"]] - started) * 1000)
+  loaded_clean <- is.list(loaded) && all(c(
+    "prepared_s_setups", "target_states", "shard_ids"
+  ) %in% names(loaded)) && is.list(loaded$prepared_s_setups) &&
+    identical(names(loaded$prepared_s_setups), setup_keys) &&
+    is.data.frame(loaded$target_states) &&
+    all(c(
+      "prepared_s_key_sha256", "residual_key_sha256"
+    ) %in% names(loaded$target_states)) &&
+    identical(
+      as.character(loaded$target_states$residual_key_sha256), target_keys
+    ) && identical(
+      as.character(loaded$target_states$prepared_s_key_sha256),
+      as.character(target_rows$prepared_s_key_sha256)
+    ) && identical(as.integer(loaded$shard_ids), shard_ids) &&
+    is.finite(elapsed_ms) && elapsed_ms >= 0
+  if (!isTRUE(loaded_clean)) {
+    stop("fixed-sp oracle authenticated Phase 2 shard payload is incomplete",
+         call. = FALSE)
+  }
+  list(
+    loaded = loaded,
+    phase2_shard_ids = shard_ids,
+    phase2_shard_load_count = as.integer(length(shard_ids)),
+    phase2_shard_authentication_count = as.integer(length(shard_ids)),
+    phase2_shard_load_elapsed_ms = elapsed_ms
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_batches_from_loaded <- function(
+    catalog, selected_scope, loaded) {
   fastkpc_full_cuda_fixed_sp_require(
     is.list(selected_scope) && !is.null(selected_scope$setup_rows) &&
       !is.null(selected_scope$target_rows) && !is.null(selected_scope$shard_ids),
@@ -1359,14 +1445,11 @@ fastkpc_full_cuda_fixed_sp_batches <- function(catalog, selected_scope) {
   )
   setup_keys <- selected_scope$setup_rows$prepared_s_key_sha256
   target_keys <- selected_scope$target_rows$residual_key_sha256
-  loaded <- fastkpc_full_cuda_prepared_s_read_selected_shards(
-    shard_dir = file.path(catalog$phase2_dir, "shards"),
-    inputs = catalog$inputs,
-    shard_count = catalog$catalog_contract$shard_count,
-    shard_ids = selected_scope$shard_ids,
-    setup_keys = setup_keys,
-    target_keys = target_keys,
-    expected_source_commit = catalog$phase2_manifest$source_commit
+  fastkpc_full_cuda_fixed_sp_require(
+    is.list(loaded) && all(c(
+      "prepared_s_setups", "target_states", "shard_ids"
+    ) %in% names(loaded)),
+    "fixed-sp loaded shard payload is malformed"
   )
   setups <- loaded$prepared_s_setups
   states <- loaded$target_states
@@ -1432,6 +1515,28 @@ fastkpc_full_cuda_fixed_sp_batches <- function(catalog, selected_scope) {
     )), "fixed-sp batch order is inconsistent"
   )
   batches
+}
+
+fastkpc_full_cuda_fixed_sp_batches <- function(catalog, selected_scope) {
+  fastkpc_full_cuda_fixed_sp_require(
+    is.list(selected_scope) && !is.null(selected_scope$setup_rows) &&
+      !is.null(selected_scope$target_rows) && !is.null(selected_scope$shard_ids),
+    "fixed-sp selected scope is malformed"
+  )
+  setup_keys <- selected_scope$setup_rows$prepared_s_key_sha256
+  target_keys <- selected_scope$target_rows$residual_key_sha256
+  loaded <- fastkpc_full_cuda_prepared_s_read_selected_shards(
+    shard_dir = file.path(catalog$phase2_dir, "shards"),
+    inputs = catalog$inputs,
+    shard_count = catalog$catalog_contract$shard_count,
+    shard_ids = selected_scope$shard_ids,
+    setup_keys = setup_keys,
+    target_keys = target_keys,
+    expected_source_commit = catalog$phase2_manifest$source_commit
+  )
+  fastkpc_full_cuda_fixed_sp_batches_from_loaded(
+    catalog, selected_scope, loaded
+  )
 }
 
 fastkpc_full_cuda_fixed_sp_native_dto_fields <- function() {
@@ -7831,7 +7936,9 @@ fastkpc_full_cuda_fixed_sp_oracle_row_schemas <- function() {
     setup_results = c(
       prepared_s_key_sha256 = "character", shard_id = "integer",
       setup_ordinal = "integer", canonical_setup_rank = "integer",
-      phase2_shard_id = "integer", n = "integer",
+      phase2_shard_id = "integer",
+      phase2_shard_load_count = "integer",
+      phase2_shard_authentication_count = "integer", n = "integer",
       coefficient_dim = "integer", null_dim = "integer",
       penalty_count = "integer", target_count = "integer",
       target_key_set_sha256 = "character",
@@ -7912,7 +8019,9 @@ fastkpc_full_cuda_fixed_sp_oracle_row_schemas <- function() {
     resource_metrics = c(
       prepared_s_key_sha256 = "character", shard_id = "integer",
       setup_ordinal = "integer", canonical_setup_rank = "integer",
-      target_count = "integer", prepared_handle_create_count = "integer",
+      target_count = "integer", phase2_shard_load_count = "integer",
+      phase2_shard_authentication_count = "integer",
+      prepared_handle_create_count = "integer",
       prepared_handle_destroy_count = "integer",
       residual_token_acquire_count = "integer",
       residual_token_release_count = "integer",
@@ -8019,7 +8128,7 @@ fastkpc_full_cuda_fixed_sp_validate_oracle_frame <- function(value, name) {
 }
 
 fastkpc_full_cuda_fixed_sp_oracle_setup_batch <- function(
-    catalog, setup_key, target_rows) {
+    catalog, setup_key, target_rows, batch = NULL) {
   if (!fastkpc_full_cuda_fixed_sp_is_bare_sha256(setup_key) ||
       !is.data.frame(target_rows) || nrow(target_rows) < 1L ||
       !all(c(
@@ -8046,19 +8155,30 @@ fastkpc_full_cuda_fixed_sp_oracle_setup_batch <- function(
   phase2_shard_id <- as.integer(
     (setup_rank - 1L) %% catalog$catalog_contract$shard_count
   )
-  selected_scope <- list(
-    setup_rows = data.frame(
-      prepared_s_key_sha256 = setup_key, stringsAsFactors = FALSE
-    ),
-    target_rows = target_rows,
-    shard_ids = phase2_shard_id
-  )
-  batches <- fastkpc_full_cuda_fixed_sp_batches(catalog, selected_scope)
-  if (!identical(names(batches), setup_key) || length(batches) != 1L) {
-    stop("fixed-sp oracle Phase 2 shard selection is incomplete",
+  if (is.null(batch)) {
+    selected_scope <- list(
+      setup_rows = data.frame(
+        prepared_s_key_sha256 = setup_key, stringsAsFactors = FALSE
+      ),
+      target_rows = target_rows,
+      shard_ids = phase2_shard_id
+    )
+    batches <- fastkpc_full_cuda_fixed_sp_batches(catalog, selected_scope)
+    if (!identical(names(batches), setup_key) || length(batches) != 1L) {
+      stop("fixed-sp oracle Phase 2 shard selection is incomplete",
+           call. = FALSE)
+    }
+    batch <- batches[[1L]]
+  } else if (!is.list(batch) ||
+             !identical(batch$prepared_s_key_sha256, setup_key) ||
+             !is.data.frame(batch$target_rows) ||
+             !identical(
+               as.character(batch$target_rows$residual_key_sha256),
+               target_keys
+             )) {
+    stop("fixed-sp oracle preloaded setup batch is inconsistent",
          call. = FALSE)
   }
-  batch <- batches[[1L]]
   dto <- fastkpc_full_cuda_fixed_sp_native_dto(batch$setup)
   native <- fastkpc_full_cuda_fixed_sp_native_batch(batch, dto)
   canonical_target_keys <- sort(
@@ -8077,7 +8197,10 @@ fastkpc_full_cuda_fixed_sp_oracle_setup_batch <- function(
 }
 
 fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
-    context, catalog, setup_key, target_rows, shard_id, setup_ordinal) {
+    context, catalog, setup_key, target_rows, shard_id, setup_ordinal,
+    selected = NULL, phase2_shard_load_count = NULL,
+    phase2_shard_authentication_count = NULL,
+    phase2_shard_load_elapsed_ms = NULL) {
   shard_id <- fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
     shard_id, "fixed-sp oracle shard_id"
   )
@@ -8089,12 +8212,38 @@ fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
   }
   total_start <- proc.time()[["elapsed"]]
   load_start <- total_start
-  selected <- fastkpc_full_cuda_fixed_sp_oracle_setup_batch(
-    catalog, setup_key, target_rows
-  )
-  setup_load_elapsed_ms <- as.double(
-    (proc.time()[["elapsed"]] - load_start) * 1000
-  )
+  if (is.null(selected)) {
+    selected <- fastkpc_full_cuda_fixed_sp_oracle_setup_batch(
+      catalog, setup_key, target_rows
+    )
+    setup_load_elapsed_ms <- as.double(
+      (proc.time()[["elapsed"]] - load_start) * 1000
+    )
+    phase2_shard_load_count <- 1L
+    phase2_shard_authentication_count <- 1L
+  } else {
+    setup_load_elapsed_ms <- phase2_shard_load_elapsed_ms
+  }
+  phase2_shard_load_count <-
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      phase2_shard_load_count, "fixed-sp oracle Phase 2 shard load count"
+    )
+  phase2_shard_authentication_count <-
+    fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
+      phase2_shard_authentication_count,
+      "fixed-sp oracle Phase 2 shard authentication count"
+    )
+  setup_load_elapsed_ms <-
+    fastkpc_full_cuda_fixed_sp_phase3b_double_scalar(
+      setup_load_elapsed_ms, "fixed-sp oracle Phase 2 shard load elapsed"
+    )
+  if (phase2_shard_load_count < 0L ||
+      phase2_shard_authentication_count < 0L ||
+      phase2_shard_load_count != phase2_shard_authentication_count ||
+      setup_load_elapsed_ms < 0) {
+    stop("fixed-sp oracle Phase 2 shard load evidence is invalid",
+         call. = FALSE)
+  }
   batch <- selected$batch
   dto <- selected$dto
   native <- selected$native
@@ -8521,6 +8670,9 @@ fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
     setup_ordinal = setup_ordinal,
     canonical_setup_rank = selected$canonical_setup_rank,
     phase2_shard_id = selected$phase2_shard_id,
+    phase2_shard_load_count = phase2_shard_load_count,
+    phase2_shard_authentication_count =
+      phase2_shard_authentication_count,
     n = dto$n, coefficient_dim = dto$coefficient_dim,
     null_dim = dto$null_dim, penalty_count = dto$penalty_count,
     target_count = target_count,
@@ -8562,7 +8714,11 @@ fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
     prepared_s_key_sha256 = setup_key, shard_id = shard_id,
     setup_ordinal = setup_ordinal,
     canonical_setup_rank = selected$canonical_setup_rank,
-    target_count = target_count, prepared_handle_create_count = 1L,
+    target_count = target_count,
+    phase2_shard_load_count = phase2_shard_load_count,
+    phase2_shard_authentication_count =
+      phase2_shard_authentication_count,
+    prepared_handle_create_count = 1L,
     prepared_handle_destroy_count = 1L,
     residual_token_acquire_count = 1L,
     residual_token_release_count = released_info$output_slot_release_count,
@@ -9062,6 +9218,194 @@ fastkpc_full_cuda_fixed_sp_native_build_input_hash <- function(
   unname(digest::digest(payload, algo = "sha256", serialize = FALSE))
 }
 
+fastkpc_full_cuda_fixed_sp_native_build_environment_names <- function() {
+  sort(c(
+    "AR", "AS", "CC", "CFLAGS", "COMPILER_PATH", "CPATH", "CPPFLAGS",
+    "CUDAFLAGS", "CUDAHOSTCXX", "CUDA_HOME", "CUDA_PATH", "CXX",
+    "CXXFLAGS", "GCC_EXEC_PREFIX", "LANG", "LC_ALL", "LDFLAGS",
+    "LD_LIBRARY_PATH", "LIBRARY_PATH", "MAKEFLAGS", "NVCCFLAGS",
+    "NVCC_APPEND_FLAGS", "NVCC_CCBIN", "NVCC_PREPEND_FLAGS", "PATH",
+    "PKG_CPPFLAGS", "PKG_CXXFLAGS", "PKG_LIBS", "R_ARCH", "R_HOME",
+    "R_LIBS", "R_LIBS_SITE", "R_LIBS_USER", "R_MAKEVARS_SITE",
+    "R_MAKEVARS_USER", "SHLIB_CXXLD", "SHLIB_CXXLDFLAGS",
+    "SOURCE_DATE_EPOCH"
+  ), method = "radix")
+}
+
+fastkpc_full_cuda_fixed_sp_native_build_environment <- function(
+    trace_invocation) {
+  if (typeof(trace_invocation) != "character" ||
+      length(trace_invocation) != 1L || is.object(trace_invocation) ||
+      !is.null(attributes(trace_invocation)) || anyNA(trace_invocation) ||
+      !nzchar(trace_invocation) || grepl("[\r\n]", trace_invocation)) {
+    stop("native build trace invocation is malformed", call. = FALSE)
+  }
+  names <- fastkpc_full_cuda_fixed_sp_native_build_environment_names()
+  values <- Sys.getenv(names, unset = NA_character_)
+  if (grepl("(^|[[:space:]])LC_ALL=C([[:space:]]|$)",
+            trace_invocation, perl = TRUE)) {
+    values[[match("LC_ALL", names)]] <- "C"
+  }
+  is_set <- !is.na(values)
+  values[!is_set] <- ""
+  if (any(grepl("[\r\n]", values))) {
+    stop("native build environment contains a newline", call. = FALSE)
+  }
+  data.frame(
+    name = names, is_set = unname(is_set), value = unname(values),
+    stringsAsFactors = FALSE, row.names = as.character(seq_along(names))
+  )
+}
+
+fastkpc_full_cuda_fixed_sp_validate_native_build_commands <- function(
+    value, require_phase3 = FALSE) {
+  scalar_character <- function(element) {
+    typeof(element) == "character" && length(element) == 1L &&
+      !is.object(element) && is.null(attributes(element)) &&
+      !anyNA(element) && nzchar(element) && !grepl("[\r\n]", element)
+  }
+  require_phase3 <- identical(require_phase3, TRUE)
+  commands <- value$commands
+  environment <- value$build_environment
+  expected_environment_names <-
+    fastkpc_full_cuda_fixed_sp_native_build_environment_names()
+  clean <- scalar_character(value$command_projection_schema_version) &&
+    identical(
+      value$command_projection_schema_version,
+      "full-cuda-ci-native-build-command-projection-v1"
+    ) && typeof(value$command_count) == "integer" &&
+    length(value$command_count) == 1L && !is.object(value$command_count) &&
+    is.null(attributes(value$command_count)) &&
+    !is.na(value$command_count) && value$command_count >= 0L &&
+    is.list(commands) && !is.object(commands) &&
+    is.null(attributes(commands)) &&
+    length(commands) == value$command_count &&
+    scalar_character(value$build_environment_schema_version) &&
+    identical(
+      value$build_environment_schema_version,
+      "full-cuda-ci-native-build-environment-v1"
+    ) && is.data.frame(environment) && !is.object(environment$name) &&
+    !is.object(environment$is_set) && !is.object(environment$value) &&
+    identical(names(environment), c("name", "is_set", "value")) &&
+    identical(
+      rownames(environment), as.character(seq_len(nrow(environment)))
+    ) && identical(environment$name, expected_environment_names) &&
+    typeof(environment$is_set) == "logical" &&
+    is.null(attributes(environment$is_set)) &&
+    !anyNA(environment$is_set) &&
+    typeof(environment$value) == "character" &&
+    is.null(attributes(environment$value)) && !anyNA(environment$value) &&
+    !any(grepl("[\r\n]", environment$value)) &&
+    all(environment$is_set | environment$value == "")
+  if (!isTRUE(clean)) {
+    stop("native build command/environment projection is malformed",
+         call. = FALSE)
+  }
+  roles <- character(length(commands))
+  command_clean <- vapply(seq_along(commands), function(index) {
+    command <- commands[[index]]
+    exact <- is.list(command) && !is.object(command) && identical(
+      names(command),
+      c("role", "executable_path", "executable_sha256", "argv")
+    ) && scalar_character(command$role) &&
+      command$role %in% c("cxx_compile", "cuda_compile", "link") &&
+      scalar_character(command$executable_path) &&
+      startsWith(command$executable_path, "/") &&
+      scalar_character(command$executable_sha256) &&
+      grepl("^[0-9a-f]{64}$", command$executable_sha256) &&
+      typeof(command$argv) == "character" && !is.object(command$argv) &&
+      is.null(attributes(command$argv)) && length(command$argv) >= 4L &&
+      !anyNA(command$argv) && all(nzchar(command$argv)) &&
+      !any(grepl("[\r\n]", command$argv)) &&
+      identical(command$argv[[1L]], "<EXECUTABLE>")
+    if (!isTRUE(exact)) return(FALSE)
+    roles[[index]] <<- command$role
+    output_flags <- which(command$argv == "-o")
+    output_markers <- which(command$argv == "<OUTPUT>")
+    output_exact <- length(output_flags) == 1L &&
+      output_flags[[1L]] < length(command$argv) &&
+      identical(output_markers, output_flags + 1L)
+    source_argument <- any(grepl(
+      "\\.(c|cc|cpp|cxx|cu)$", command$argv, perl = TRUE
+    ))
+    role_exact <- switch(
+      command$role,
+      cxx_compile = "-c" %in% command$argv && source_argument,
+      cuda_compile = "-c" %in% command$argv && source_argument,
+      link = "-shared" %in% command$argv &&
+        !"-c" %in% command$argv
+    )
+    file_index <- if (is.data.frame(value$files) &&
+                      all(c("path", "sha256") %in% names(value$files))) {
+      match(command$executable_path, value$files$path)
+    } else {
+      NA_integer_
+    }
+    tool_exact <- !is.na(file_index) && identical(
+      command$executable_sha256, value$files$sha256[[file_index]]
+    )
+    isTRUE(output_exact) && isTRUE(role_exact) && isTRUE(tool_exact)
+  }, logical(1L))
+  if (!all(command_clean) ||
+      (require_phase3 && !identical(
+        sort(unique(roles), method = "radix"),
+        c("cuda_compile", "cxx_compile", "link")
+      ))) {
+    stop("native build command projection is incomplete or malformed",
+         call. = FALSE)
+  }
+  TRUE
+}
+
+.fastkpc_full_cuda_fixed_sp_native_build_command_lines <- function(value) {
+  lines <- c(
+    paste0("command_projection.schema=",
+           value$command_projection_schema_version),
+    paste0("command_count=", value$command_count)
+  )
+  for (index in seq_along(value$commands)) {
+    command <- value$commands[[index]]
+    lines <- c(
+      lines,
+      paste0("command.", index, ".role=", command$role),
+      paste0("command.", index, ".executable_path=",
+             command$executable_path),
+      paste0("command.", index, ".executable_sha256=",
+             command$executable_sha256),
+      paste0("command.", index, ".argc=", length(command$argv))
+    )
+    for (argument_index in seq_along(command$argv)) {
+      argument <- command$argv[[argument_index]]
+      lines <- c(lines, paste0(
+        "command.", index, ".argv.", argument_index, "=",
+        nchar(argument, type = "bytes"), ":", argument
+      ))
+    }
+  }
+  environment <- value$build_environment
+  lines <- c(
+    lines,
+    paste0("build_environment.schema=",
+           value$build_environment_schema_version),
+    paste0("build_environment.count=", nrow(environment))
+  )
+  for (index in seq_len(nrow(environment))) {
+    lines <- c(
+      lines,
+      paste0("build_environment.", index, ".name=",
+             environment$name[[index]]),
+      paste0("build_environment.", index, ".is_set=",
+             if (environment$is_set[[index]]) "true" else "false"),
+      paste0(
+        "build_environment.", index, ".value=",
+        nchar(environment$value[[index]], type = "bytes"), ":",
+        environment$value[[index]]
+      )
+    )
+  }
+  lines
+}
+
 fastkpc_full_cuda_fixed_sp_native_build_dependency_hash <- function(value) {
   files <- value$files
   exclusions <- value$exclusions
@@ -9090,6 +9434,10 @@ fastkpc_full_cuda_fixed_sp_native_build_dependency_hash <- function(value) {
       paste0("exclusion.", index, ".reason=", exclusions$reason[[index]])
     )
   }
+  lines <- c(
+    lines,
+    .fastkpc_full_cuda_fixed_sp_native_build_command_lines(value)
+  )
   payload <- charToRaw(enc2utf8(paste0(paste(lines, collapse = "\n"), "\n")))
   unname(digest::digest(payload, algo = "sha256", serialize = FALSE))
 }
@@ -9106,7 +9454,9 @@ fastkpc_full_cuda_fixed_sp_native_build_attestation_hash <- function(value) {
     all(c(
       "schema_version", "trace_semantics", "build_working_dir",
       "tracer_path", "tracer_sha256", "dependency_count", "files",
-      "exclusion_count", "exclusions"
+      "exclusion_count", "exclusions", "command_projection_schema_version",
+      "command_count", "commands", "build_environment_schema_version",
+      "build_environment"
     ) %in% names(value)) &&
     scalar_text(value$schema_version) && scalar_text(value$trace_semantics) &&
     scalar_text(value$build_working_dir) && scalar_text(value$tracer_path) &&
@@ -9133,11 +9483,16 @@ fastkpc_full_cuda_fixed_sp_native_build_attestation_hash <- function(value) {
     all(exclusions$reason %in% c(
       "generated_output", "pseudo_fs", "non_regular"
     ))
-  if (!isTRUE(clean)) {
+  if (!isTRUE(clean) || !isTRUE(tryCatch(
+        fastkpc_full_cuda_fixed_sp_validate_native_build_commands(
+          value, require_phase3 = TRUE
+        ),
+        error = function(error) FALSE
+      ))) {
     stop("native build trace attestation input is malformed", call. = FALSE)
   }
   lines <- c(
-    "attestation.schema=full-cuda-ci-native-build-trace-attestation-v1",
+    "attestation.schema=full-cuda-ci-native-build-trace-attestation-v2",
     paste0("dependency.schema=", value$schema_version),
     paste0("trace.semantics=", value$trace_semantics),
     paste0("build.working_dir=", value$build_working_dir),
@@ -9159,6 +9514,10 @@ fastkpc_full_cuda_fixed_sp_native_build_attestation_hash <- function(value) {
       sum(exclusions$reason == reason)
     ))
   }
+  lines <- c(
+    lines,
+    .fastkpc_full_cuda_fixed_sp_native_build_command_lines(value)
+  )
   payload <- charToRaw(enc2utf8(paste0(paste(lines, collapse = "\n"), "\n")))
   unname(digest::digest(payload, algo = "sha256", serialize = FALSE))
 }
@@ -9263,7 +9622,9 @@ fastkpc_full_cuda_fixed_sp_validate_native_build_dependencies <- function(
       "schema_version", "trace_semantics", "trace_invocation",
       "build_working_dir", "trace_path", "trace_sha256", "tracer_path",
       "tracer_sha256", "dependency_count", "files", "exclusion_count",
-      "exclusions", "aggregate_sha256"
+      "exclusions", "command_projection_schema_version", "command_count",
+      "commands", "build_environment_schema_version", "build_environment",
+      "aggregate_sha256"
     )
   ) && scalar_character(value$schema_version) && identical(
     value$schema_version, "full-cuda-ci-native-build-dependencies-v3"
@@ -9337,7 +9698,11 @@ fastkpc_full_cuda_fixed_sp_validate_native_build_dependencies <- function(
     all(exclusions$reason %in% c(
       "generated_output", "pseudo_fs", "non_regular"
     )) && !any(exclusions$path %in% files$path)
-  if (!isTRUE(clean) || !identical(
+  command_projection_clean <- tryCatch(
+    fastkpc_full_cuda_fixed_sp_validate_native_build_commands(value),
+    error = function(error) FALSE
+  )
+  if (!isTRUE(clean) || !isTRUE(command_projection_clean) || !identical(
         value$aggregate_sha256,
         fastkpc_full_cuda_fixed_sp_native_build_dependency_hash(value)
       )) {
@@ -9409,6 +9774,125 @@ fastkpc_full_cuda_fixed_sp_open_flag_tokens <- function(lines, syscalls) {
       )
     )[[1L]])
   }))
+}
+
+fastkpc_full_cuda_fixed_sp_decode_strace_argv <- function(lines, syscalls) {
+  malformed <- function() {
+    stop("native build trace command projection is malformed",
+         call. = FALSE)
+  }
+  if (typeof(lines) != "character" || typeof(syscalls) != "character" ||
+      length(lines) != length(syscalls) || anyNA(lines) || anyNA(syscalls) ||
+      any(!syscalls %in% c("execve", "execveat"))) {
+    malformed()
+  }
+  quoted <- '"(?:[^"\\\\]|\\\\.)*"'
+  lapply(seq_along(lines), function(index) {
+    pattern <- switch(
+      syscalls[[index]],
+      execve = paste0(
+        "execve\\(", quoted, ",[[:space:]]*\\[((?:", quoted,
+        "(?:[[:space:]]*,[[:space:]]*", quoted,
+        ")*)?)\\][[:space:]]*,"
+      ),
+      execveat = paste0(
+        "execveat\\([^,]+,[[:space:]]*", quoted,
+        ",[[:space:]]*\\[((?:", quoted,
+        "(?:[[:space:]]*,[[:space:]]*", quoted,
+        ")*)?)\\][[:space:]]*,"
+      )
+    )
+    matched <- regmatches(
+      lines[[index]], regexec(pattern, lines[[index]], perl = TRUE)
+    )[[1L]]
+    if (length(matched) != 2L || grepl("(^|[[:space:],])\\.\\.",
+                                      matched[[2L]], perl = TRUE)) {
+      malformed()
+    }
+    body <- matched[[2L]]
+    if (!nzchar(body)) return(character())
+    tokens <- regmatches(body, gregexpr(quoted, body, perl = TRUE))[[1L]]
+    remainder <- gsub(quoted, "", body, perl = TRUE)
+    remainder <- gsub("[[:space:],]", "", remainder, perl = TRUE)
+    if (length(tokens) == 0L || nzchar(remainder)) malformed()
+    vapply(tokens, function(token) {
+      fastkpc_full_cuda_fixed_sp_decode_strace_path(
+        substring(token, 2L, nchar(token, type = "chars") - 1L)
+      )
+    }, character(1L), USE.NAMES = FALSE)
+  })
+}
+
+fastkpc_full_cuda_fixed_sp_native_build_commands <- function(
+    exec_lines, exec_syscalls, exec_paths, build_working_dir, files) {
+  if (typeof(exec_lines) != "character" ||
+      typeof(exec_syscalls) != "character" ||
+      typeof(exec_paths) != "character" ||
+      length(exec_lines) != length(exec_syscalls) ||
+      length(exec_lines) != length(exec_paths) || anyNA(exec_lines) ||
+      anyNA(exec_syscalls) || anyNA(exec_paths) ||
+      !is.data.frame(files) || !identical(names(files), c("path", "sha256"))) {
+    stop("native build command inputs are malformed", call. = FALSE)
+  }
+  argv <- fastkpc_full_cuda_fixed_sp_decode_strace_argv(
+    exec_lines, exec_syscalls
+  )
+  root_prefix <- paste0(build_working_dir, "/")
+  records <- list()
+  for (index in seq_along(argv)) {
+    arguments <- argv[[index]]
+    if (length(arguments) == 0L) next
+    source_arguments <- arguments[
+      grepl("\\.(c|cc|cpp|cxx|cu)$", arguments, perl = TRUE) &
+        startsWith(arguments, root_prefix)
+    ]
+    executable_name <- tolower(basename(exec_paths[[index]]))
+    cxx_driver <- grepl(
+      "(^|-)(g\\+\\+|c\\+\\+|clang\\+\\+)(-[0-9.]+)?$",
+      executable_name, perl = TRUE
+    )
+    nvcc_driver <- grepl("(^|-)nvcc(-[0-9.]+)?$", executable_name,
+                         perl = TRUE)
+    role <- NULL
+    if ("-c" %in% arguments && length(source_arguments) > 0L) {
+      cuda_source <- any(grepl("\\.cu$", source_arguments, perl = TRUE))
+      role <- if (cuda_source && nvcc_driver) {
+        "cuda_compile"
+      } else if (!cuda_source && cxx_driver) {
+        "cxx_compile"
+      } else {
+        NULL
+      }
+    } else if (cxx_driver && "-shared" %in% arguments &&
+               "-o" %in% arguments) {
+      role <- "link"
+    }
+    if (is.null(role)) next
+    output_flags <- which(arguments == "-o")
+    if (length(output_flags) != 1L ||
+        output_flags[[1L]] >= length(arguments)) {
+      stop("native build command output projection is incomplete",
+           call. = FALSE)
+    }
+    canonical_argv <- arguments
+    canonical_argv[[1L]] <- "<EXECUTABLE>"
+    canonical_argv[[output_flags + 1L]] <- "<OUTPUT>"
+    executable_path <- normalizePath(
+      exec_paths[[index]], winslash = "/", mustWork = TRUE
+    )
+    file_index <- match(executable_path, files$path)
+    if (is.na(file_index)) {
+      stop("native build command executable is absent from dependencies",
+           call. = FALSE)
+    }
+    records[[length(records) + 1L]] <- list(
+      role = role,
+      executable_path = executable_path,
+      executable_sha256 = files$sha256[[file_index]],
+      argv = unname(canonical_argv)
+    )
+  }
+  records
 }
 
 fastkpc_full_cuda_fixed_sp_reconstruct_native_build_dependencies <- function(
@@ -9606,6 +10090,13 @@ fastkpc_full_cuda_fixed_sp_reconstruct_native_build_dependencies <- function(
   files <- data.frame(path = paths, sha256 = hashes, stringsAsFactors = FALSE)
   rownames(files) <- as.character(seq_len(nrow(files)))
   tracer_sha256 <- hashes[[match(tracer_path, paths)]]
+  commands <- fastkpc_full_cuda_fixed_sp_native_build_commands(
+    exec_lines = exec_lines, exec_syscalls = exec_syscalls,
+    exec_paths = exec_paths, build_working_dir = working_dir,
+    files = files
+  )
+  build_environment <-
+    fastkpc_full_cuda_fixed_sp_native_build_environment(trace_invocation)
   if (!identical(
         fastkpc_full_cuda_fixed_sp_sha256_file(trace_path), trace_sha256
       )) {
@@ -9626,6 +10117,13 @@ fastkpc_full_cuda_fixed_sp_reconstruct_native_build_dependencies <- function(
     files = files,
     exclusion_count = as.integer(nrow(exclusions)),
     exclusions = exclusions,
+    command_projection_schema_version =
+      "full-cuda-ci-native-build-command-projection-v1",
+    command_count = as.integer(length(commands)),
+    commands = commands,
+    build_environment_schema_version =
+      "full-cuda-ci-native-build-environment-v1",
+    build_environment = build_environment,
     aggregate_sha256 = strrep("0", 64L)
   )
   result$aggregate_sha256 <-
