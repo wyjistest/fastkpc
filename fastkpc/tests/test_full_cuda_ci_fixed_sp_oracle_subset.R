@@ -607,6 +607,108 @@ subset_lifecycle$runtime_create_count <- 0L
 subset_lifecycle$runtime_destroy_count <- 0L
 subset_lifecycle$executor_count <- 0L
 capacity <- fastkpc_full_cuda_fixed_sp_contract()$canonical_capacities
+callback_setup_key <- selected_pair[[1L]]
+callback_target_rows <- selected_targets[
+  selected_targets$prepared_s_key_sha256 == callback_setup_key,
+  , drop = FALSE
+]
+rownames(callback_target_rows) <- NULL
+callback_selected <- fastkpc_full_cuda_fixed_sp_oracle_setup_batch(
+  catalog, callback_setup_key, callback_target_rows
+)
+callback_runtime <- fixed_sp_cuda_runtime_create(device_id)
+callback_runtime_open <- TRUE
+on.exit({
+  if (isTRUE(callback_runtime_open)) {
+    try(fixed_sp_cuda_runtime_free(callback_runtime), silent = TRUE)
+  }
+}, add = TRUE)
+fixed_sp_cuda_runtime_reserve(
+  callback_runtime, capacity$n, capacity$null_dim, capacity$target_count,
+  capacity$penalty_count, capacity$augmented_rows
+)
+execute_callback_fixture <- function(shadow_callback = NULL) {
+  fastkpc_full_cuda_fixed_sp_execute_oracle_setup(
+    context = callback_runtime, catalog = catalog,
+    setup_key = callback_setup_key, target_rows = callback_target_rows,
+    shard_id = 0L, setup_ordinal = 1L, selected = callback_selected,
+    phase2_shard_load_count = 1L,
+    phase2_shard_authentication_count = 1L,
+    phase2_shard_load_elapsed_ms = 0,
+    shadow_callback = shadow_callback
+  )
+}
+callback_lifecycle <- new.env(parent = emptyenv())
+callback_lifecycle$normal_count <- 0L
+callback_lifecycle$throw_count <- 0L
+callback_lifecycle$forbidden_count <- 0L
+normal_callback_result <- execute_callback_fixture(function(
+    setup_key, target_keys, residuals) {
+  callback_lifecycle$normal_count <- callback_lifecycle$normal_count + 1L
+  assert_true(
+    identical(setup_key, callback_setup_key) &&
+      identical(target_keys, callback_target_rows$residual_key_sha256) &&
+      is.matrix(residuals) &&
+      identical(
+        dim(residuals),
+        c(as.integer(capacity$n), as.integer(nrow(callback_target_rows)))
+      ) && all(is.finite(residuals)),
+    "real callback receives the synchronous explicit residual matrix"
+  )
+  data.frame(
+    setup_key = setup_key,
+    target_count = as.integer(length(target_keys)),
+    residual_sum = as.double(sum(residuals)),
+    stringsAsFactors = FALSE
+  )
+})
+assert_true(
+  callback_lifecycle$normal_count == 1L &&
+    is.data.frame(normal_callback_result$shadow_callback_result) &&
+    nrow(normal_callback_result$shadow_callback_result) == 1L &&
+    all(normal_callback_result$resource_metrics[
+      c(
+        "prepared_handle_destroy_count", "residual_token_release_count",
+        "output_slot_release_count"
+      )
+    ] == 1L),
+  "normal callback returns compact evidence and releases runtime resources"
+)
+assert_error(
+  execute_callback_fixture(function(setup_key, target_keys, residuals) {
+    callback_lifecycle$throw_count <- callback_lifecycle$throw_count + 1L
+    stop("intentional callback failure", call. = FALSE)
+  }),
+  "throwing callback propagates its error",
+  "intentional callback failure"
+)
+assert_error(
+  execute_callback_fixture(function(setup_key, target_keys, residuals) {
+    callback_lifecycle$forbidden_count <-
+      callback_lifecycle$forbidden_count + 1L
+    data.frame(residuals = I(list(residuals)))
+  }),
+  "callback cannot return residual matrices for shard payload injection",
+  "not compact"
+)
+callback_recovery <- execute_callback_fixture()
+assert_true(
+  callback_lifecycle$throw_count == 1L &&
+    callback_lifecycle$forbidden_count == 1L &&
+    identical(
+      names(callback_recovery),
+      c("setup_results", "target_parity", "resource_metrics", "stage_timing")
+    ) && all(callback_recovery$resource_metrics[
+      c(
+        "prepared_handle_destroy_count", "residual_token_release_count",
+        "output_slot_release_count"
+      )
+    ] == 1L),
+  "callback errors release token, slot, and handle before the next solve"
+)
+fixed_sp_cuda_runtime_free(callback_runtime)
+callback_runtime_open <- FALSE
+
 subset_runtime_create <- function() {
   subset_lifecycle$runtime_create_count <-
     subset_lifecycle$runtime_create_count + 1L

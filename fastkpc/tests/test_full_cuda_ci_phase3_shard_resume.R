@@ -229,7 +229,8 @@ assert_error(
 
 session_fields <- c(
   "schema_version", "session_id", "input_identity_hash",
-  "route_config_hash", "requested_shard_ids", "completed_shard_ids",
+  "route_config_hash", "executed_native_library_sha256",
+  "requested_shard_ids", "completed_shard_ids",
   "runtime_context_create_count", "runtime_context_destroy_count",
   "prepared_handle_create_count", "prepared_handle_destroy_count",
   "residual_token_acquire_count", "residual_token_release_count",
@@ -717,17 +718,30 @@ clone_fixture <- function(label) {
   destination
 }
 
+fixture_hashes <- function(path) {
+  files <- sort(list.files(
+    path, recursive = TRUE, full.names = TRUE, all.files = TRUE,
+    no.. = TRUE
+  ), method = "radix")
+  files <- files[!dir.exists(files)]
+  hashes <- vapply(files, fastkpc_full_cuda_census_file_hash, character(1L))
+  names(hashes) <- substring(files, nchar(path, type = "bytes") + 2L)
+  hashes
+}
+
 route_dir <- clone_fixture("route")
 route_changed <- route_fixture("route-b")
 route_identity <- identity_fixture(route_changed)
-route_run <- run_fixture(
-  route_dir, identity_value = route_identity, route_value = route_changed
+route_hashes <- fixture_hashes(route_dir)
+assert_error(
+  run_fixture(
+    route_dir, identity_value = route_identity, route_value = route_changed
+  ),
+  "wrong route identity fails closed without replacing prior shards"
 )
-assert_true(
-  length(route_run$result$reused_shard_ids) == 0L &&
-    length(route_run$result$written_shard_ids) == 4L &&
-    route_run$lifecycle$create_count == 1L,
-  "wrong route identity rejects every prior shard"
+assert_identical(
+  fixture_hashes(route_dir), route_hashes,
+  "wrong route identity preserves shard and session evidence"
 )
 
 gpu_dir <- clone_fixture("gpu")
@@ -735,24 +749,30 @@ gpu_identity <- identity_fixture(
   route, gpu_name = "Different Synthetic GPU",
   gpu_uuid = paste0("GPU-", strrep("b", 32L))
 )
-gpu_run <- run_fixture(gpu_dir, identity_value = gpu_identity)
-assert_true(
-  length(gpu_run$result$reused_shard_ids) == 0L &&
-    length(gpu_run$result$written_shard_ids) == 4L,
-  "wrong GPU identity rejects every prior shard"
+gpu_hashes <- fixture_hashes(gpu_dir)
+assert_error(
+  run_fixture(gpu_dir, identity_value = gpu_identity),
+  "wrong GPU identity fails closed without replacing prior shards"
+)
+assert_identical(
+  fixture_hashes(gpu_dir), gpu_hashes,
+  "wrong GPU identity preserves shard and session evidence"
 )
 
 corpus_dir <- clone_fixture("corpus")
 changed_targets <- target_rows
 changed_targets$residual_key_sha256[[1L]] <- sha("replacement-target")
 corpus_identity <- identity_fixture(route, targets = changed_targets)
-corpus_run <- run_fixture(
-  corpus_dir, identity_value = corpus_identity, targets = changed_targets
+corpus_hashes <- fixture_hashes(corpus_dir)
+assert_error(
+  run_fixture(
+    corpus_dir, identity_value = corpus_identity, targets = changed_targets
+  ),
+  "wrong target corpus fails closed without replacing prior shards"
 )
-assert_true(
-  length(corpus_run$result$reused_shard_ids) == 0L &&
-    length(corpus_run$result$written_shard_ids) == 4L,
-  "wrong target corpus identity rejects every prior shard"
+assert_identical(
+  fixture_hashes(corpus_dir), corpus_hashes,
+  "wrong target corpus preserves shard and session evidence"
 )
 
 corrupt_rds_dir <- clone_fixture("corrupt-rds")
@@ -768,11 +788,14 @@ corrupt_summary$rds_file_sha256 <- fastkpc_full_cuda_census_file_hash(
   corrupt_rds_path
 )
 write_json(corrupt_summary, corrupt_summary_path)
-corrupt_rds_run <- run_fixture(corrupt_rds_dir)
-assert_true(
-  identical(corrupt_rds_run$result$reused_shard_ids, as.integer(1:3)) &&
-    identical(corrupt_rds_run$result$written_shard_ids, 0L),
-  "payload semantic mismatch is recomputed rather than reused"
+corrupt_rds_hashes <- fixture_hashes(corrupt_rds_dir)
+assert_error(
+  run_fixture(corrupt_rds_dir),
+  "payload semantic mismatch fails closed"
+)
+assert_identical(
+  fixture_hashes(corrupt_rds_dir), corrupt_rds_hashes,
+  "payload semantic mismatch preserves the corrupt pair for diagnosis"
 )
 
 corrupt_summary_dir <- clone_fixture("corrupt-summary")
@@ -782,12 +805,14 @@ corrupt_summary_path <- file.path(
 corrupt_summary <- read_json(corrupt_summary_path)
 corrupt_summary$payload_semantic_hash <- strrep("0", 64L)
 write_json(corrupt_summary, corrupt_summary_path)
-corrupt_summary_run <- run_fixture(corrupt_summary_dir)
-assert_true(
-  identical(corrupt_summary_run$result$reused_shard_ids,
-            as.integer(1:3)) &&
-    identical(corrupt_summary_run$result$written_shard_ids, 0L),
-  "corrupt shard summary is recomputed rather than reused"
+corrupt_summary_hashes <- fixture_hashes(corrupt_summary_dir)
+assert_error(
+  run_fixture(corrupt_summary_dir),
+  "corrupt shard summary fails closed"
+)
+assert_identical(
+  fixture_hashes(corrupt_summary_dir), corrupt_summary_hashes,
+  "corrupt shard summary is preserved for diagnosis"
 )
 
 summary_only_dir <- clone_fixture("summary-only")
@@ -854,13 +879,14 @@ wrong_counters$residual_token_release_count <- wrong_target_count
 wrong_counters$output_slot_acquire_count <- wrong_target_count
 wrong_counters$output_slot_release_count <- wrong_target_count
 write_json(wrong_counters, wrong_counters_path)
-wrong_counters_run <- run_fixture(wrong_counters_dir)
-assert_true(
-  identical(wrong_counters_run$result$reused_shard_ids,
-            as.integer(2:3)) &&
-    identical(wrong_counters_run$result$written_shard_ids,
-              as.integer(0:1)),
-  "superseded target-count token and lease accounting rejects reuse"
+wrong_counters_hashes <- fixture_hashes(wrong_counters_dir)
+assert_error(
+  run_fixture(wrong_counters_dir),
+  "invalid complete-session counters fail closed"
+)
+assert_identical(
+  fixture_hashes(wrong_counters_dir), wrong_counters_hashes,
+  "invalid complete-session counters preserve shard/session evidence"
 )
 
 forged_session_id_dir <- clone_fixture("forged-session-id")
@@ -916,16 +942,14 @@ assert_error(
   "merge rejects a session whose internal id differs from shard declarations",
   "session"
 )
-forged_session_id_run <- run_fixture(forged_session_id_dir)
-assert_true(
-  identical(
-    forged_session_id_run$result$written_shard_ids,
-    sort(forged_shard_ids)
-  ) && identical(
-    forged_session_id_run$result$reused_shard_ids,
-    setdiff(as.integer(0:3), forged_shard_ids)
-  ),
-  "forged loaded-session id rejects every shard from that session"
+forged_session_hashes <- fixture_hashes(forged_session_id_dir)
+assert_error(
+  run_fixture(forged_session_id_dir),
+  "forged loaded-session id fails closed"
+)
+assert_identical(
+  fixture_hashes(forged_session_id_dir), forged_session_hashes,
+  "forged loaded-session id preserves shard/session evidence"
 )
 
 noncanonical_name_dir <- clone_fixture("noncanonical-name")

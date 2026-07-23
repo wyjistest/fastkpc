@@ -81,38 +81,38 @@ capacity <- fastkpc_full_cuda_fixed_sp_contract()$canonical_capacities
 artifact_paths <- fastkpc_full_cuda_phase3_artifact_paths(
   output_dir, "oracle_sp"
 )
+runner_command_line <- paste(
+  "Rscript fastkpc/tools/run_full_cuda_ci_fixed_sp_oracle_sp.R",
+  paste(commandArgs(trailingOnly = TRUE), collapse = " ")
+)
 completion_markers <- c(
   manifest = file.exists(artifact_paths$manifest_json),
   summary = file.exists(artifact_paths$summary_json)
 )
-if (all(completion_markers)) {
+if (any(completion_markers)) {
   completed <- tryCatch(
-    fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
-      output_dir = output_dir, expected_identity = identity,
-      require_full = identical(scope, "full"),
-      catalog = catalog, device_id = device_id
+    fastkpc_full_cuda_phase3_publish_oracle_artifact(
+      output_dir = output_dir, setup_keys = setup_keys,
+      target_rows = target_rows, identity = identity,
+      route_config = route_config, scope = scope,
+      catalog = catalog, device_id = device_id,
+      command_lines = runner_command_line
     ),
     error = function(error) error
   )
   if (!inherits(completed, "error")) {
-    cat("Phase 3 oracle artifact: reused\n")
+    cat("Phase 3 oracle artifact:", completed$status, "\n")
     cat(
-      "setups/targets:", completed$row_summary$setup_count, "/",
-      completed$row_summary$target_count, "\n"
+      "setups/targets:", completed$validation$row_summary$setup_count, "/",
+      completed$validation$row_summary$target_count, "\n"
     )
     quit(save = "no", status = 0L, runLast = FALSE)
   }
-  unlink(
-    c(artifact_paths$manifest_json, artifact_paths$summary_json),
-    force = TRUE
+  remaining_markers <- c(
+    manifest = file.exists(artifact_paths$manifest_json),
+    summary = file.exists(artifact_paths$summary_json)
   )
-  completion_markers[] <- FALSE
-}
-if (any(completion_markers)) {
-  unlink(
-    c(artifact_paths$manifest_json, artifact_paths$summary_json),
-    force = TRUE
-  )
+  if (any(remaining_markers)) stop(completed)
 }
 
 runtime_create <- function() {
@@ -245,10 +245,7 @@ publication <- fastkpc_full_cuda_phase3_publish_oracle_artifact(
   target_rows = target_rows, identity = identity,
   route_config = route_config, scope = scope,
   catalog = catalog, device_id = device_id,
-  command_lines = paste(
-    "Rscript fastkpc/tools/run_full_cuda_ci_fixed_sp_oracle_sp.R",
-    paste(commandArgs(trailingOnly = TRUE), collapse = " ")
-  )
+  command_lines = runner_command_line
 )
 if (!identical(publication$status, "published")) {
   stop("Phase 3 oracle top-level publication did not complete",

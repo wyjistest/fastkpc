@@ -8569,9 +8569,19 @@ fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
           setup_key = setup_key, target_keys = native$target_keys,
           residuals = shadow$residuals
         )
+        forbidden_callback_fields <- c(
+          "coefficients", "fitted", "residuals", "rss", "rhs",
+          "cuda_nullspace_rhs"
+        )
         compact_callback_result <- is.null(shadow_callback_result) ||
           (is.data.frame(shadow_callback_result) &&
-             as.numeric(object.size(shadow_callback_result)) <= 67108864)
+             as.numeric(object.size(shadow_callback_result)) <= 67108864 &&
+             !any(names(shadow_callback_result) %in%
+                    forbidden_callback_fields) &&
+             all(vapply(shadow_callback_result, function(column) {
+               is.atomic(column) && !is.object(column) &&
+                 is.null(attributes(column))
+             }, logical(1L))))
         if (!isTRUE(compact_callback_result)) {
           stop("fixed-sp oracle shadow callback result is not compact",
                call. = FALSE)

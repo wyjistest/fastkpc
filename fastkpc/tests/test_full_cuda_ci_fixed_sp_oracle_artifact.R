@@ -92,6 +92,79 @@ assert_identical(
   ),
   "oracle setup appends callback evidence only when a callback is supplied"
 )
+
+runner_source <- readLines(
+  "fastkpc/tools/run_full_cuda_ci_fixed_sp_oracle_sp.R", warn = FALSE
+)
+runner_runtime_line <- which(grepl(
+  "^runtime_create <- function", runner_source
+))[[1L]]
+runner_preflight <- runner_source[seq_len(runner_runtime_line - 1L)]
+assert_true(
+  any(grepl(
+    "fastkpc_full_cuda_phase3_publish_oracle_artifact", runner_preflight,
+    fixed = TRUE
+  )) && !any(grepl("unlink(", runner_preflight, fixed = TRUE)),
+  "runner delegates completion recovery to the locked publisher before CUDA"
+)
+
+large_group_count <- 12000L
+large_setup_keys <- sprintf("%064x", seq_len(large_group_count))
+large_target_setup_keys <- rep(large_setup_keys, each = 3L)
+large_groups <- .fastkpc_full_cuda_phase3_oracle_target_groups(
+  large_setup_keys, large_target_setup_keys
+)
+assert_identical(
+  large_groups$mapped_setup,
+  rep(seq_len(large_group_count), each = 3L),
+  "large oracle target grouping maps each row once"
+)
+assert_identical(
+  large_groups$target_count, rep.int(3L, large_group_count),
+  "large oracle target grouping tabulates setup counts"
+)
+assert_identical(
+  large_groups$first_index,
+  as.integer(seq.int(1L, 3L * large_group_count, by = 3L)),
+  "large oracle target grouping records setup starts"
+)
+assert_identical(
+  large_groups$target_ordinal, rep.int(1:3, large_group_count),
+  "large oracle target grouping derives target ordinals"
+)
+authority_validator_source <- paste(deparse(body(
+  .fastkpc_full_cuda_phase3_validate_oracle_row_authority
+)), collapse = "\n")
+assert_true(
+  !grepl("for (setup_index", authority_validator_source, fixed = TRUE) &&
+    !grepl(
+      "target_parity$prepared_s_key_sha256 == key",
+      authority_validator_source, fixed = TRUE
+    ),
+  "oracle row authority uses mapped linear group reductions"
+)
+
+lock_fixture_output <- tempfile("phase3-oracle-lock-fixture-")
+lock_fixture_path <- .fastkpc_full_cuda_phase3_oracle_artifact_lock_path(
+  lock_fixture_output
+)
+lock_fixture <- .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(
+  lock_fixture_output
+)
+assert_error(
+  .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(
+    lock_fixture_output
+  ),
+  "a second publisher or validator cannot acquire the artifact lock"
+)
+writeLines("foreign-owner", lock_fixture$owner_file, useBytes = TRUE)
+.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(lock_fixture)
+assert_true(
+  dir.exists(lock_fixture_path),
+  "lock cleanup never removes a lock after ownership changes"
+)
+unlink(lock_fixture_path, recursive = TRUE, force = TRUE)
+
 frame <- function(name, row_count) {
   schema <- fastkpc_full_cuda_fixed_sp_oracle_row_schemas()[[name]]
   columns <- lapply(unname(schema), function(type) switch(
@@ -201,54 +274,6 @@ identity <- refresh_hash(list(
   cublas_workspace_bytes_required = 16777216,
   cublas_workspace_min_alignment_required = 256
 ))
-
-canonical_opener_name <-
-  ".fastkpc_full_cuda_phase3_open_canonical_oracle_catalog"
-original_canonical_opener <- get0(
-  canonical_opener_name, envir = .GlobalEnv, inherits = FALSE
-)
-canonical_opener_calls <- 0L
-assign(
-  canonical_opener_name,
-  function() {
-    canonical_opener_calls <<- canonical_opener_calls + 1L
-    stop("canonical full lineage reopened", call. = FALSE)
-  },
-  envir = .GlobalEnv
-)
-assert_error(
-  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
-    tempfile("missing-full-oracle-"), expected_identity = identity,
-    require_full = TRUE
-  ),
-  "full validation without caller inputs attempts canonical lineage reopening"
-)
-assert_error(
-  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
-    tempfile("synthetic-full-oracle-"), expected_identity = identity,
-    require_full = TRUE,
-    catalog = list(
-      risk_summary = list(high_condition_count = 33249L),
-      qualification_summary = list(
-        logical_test_count = 3808L, near_alpha_count = 1478L,
-        unique_residual_key_count = 6143L
-      )
-    ),
-    device_id = 0L
-  ),
-  "synthetic aggregate-only full inputs cannot replace canonical lineage"
-)
-if (is.null(original_canonical_opener)) {
-  rm(list = canonical_opener_name, envir = .GlobalEnv)
-} else {
-  assign(
-    canonical_opener_name, original_canonical_opener, envir = .GlobalEnv
-  )
-}
-assert_identical(
-  canonical_opener_calls, 2L,
-  "every full validation independently reopens canonical catalog lineage"
-)
 
 make_oracle_payload <- function(shard_id, shard_setup_keys, shard_targets) {
   setup_count <- length(shard_setup_keys)
@@ -579,6 +604,8 @@ assert_error(
 
 output_dir <- tempfile("phase3-oracle-artifact-")
 on.exit(unlink(output_dir, recursive = TRUE, force = TRUE), add = TRUE)
+binary_a <- sha("phase3-oracle-executed-native-binary-a")
+binary_b <- sha("phase3-oracle-executed-native-binary-b")
 lifecycle <- new.env(parent = emptyenv())
 lifecycle$create_count <- 0L
 lifecycle$destroy_count <- 0L
@@ -597,10 +624,76 @@ run <- fastkpc_full_cuda_phase3_run_shards(
   setup_keys = setup_keys, target_rows = target_rows,
   identity = identity, route_config = route_config,
   executor = executor, runtime_create = runtime_create,
-  runtime_destroy = runtime_destroy, scope = "iteration", shard_count = 4L
+  runtime_destroy = runtime_destroy, scope = "iteration", shard_count = 4L,
+  executed_native_library_sha256 = binary_a
 )
 assert_identical(run$written_shard_ids, 0:3,
                  "fixture writes four authenticated shards")
+binary_pure_resume <- fastkpc_full_cuda_phase3_run_shards(
+  output_dir = output_dir, kind = "oracle_sp",
+  setup_keys = setup_keys, target_rows = target_rows,
+  identity = identity, route_config = route_config,
+  executor = executor, runtime_create = runtime_create,
+  runtime_destroy = runtime_destroy, scope = "iteration", shard_count = 4L,
+  executed_native_library_sha256 = binary_b
+)
+assert_identical(
+  binary_pure_resume$reused_shard_ids, 0:3,
+  "complete binary-A shard set is reusable under current binary B"
+)
+assert_identical(
+  lifecycle$create_count, 1L,
+  "complete cross-build pure resume creates no runtime context"
+)
+
+binary_mix_dir <- tempfile("phase3-oracle-binary-mix-")
+on.exit(unlink(binary_mix_dir, recursive = TRUE, force = TRUE), add = TRUE)
+binary_mix_lifecycle <- new.env(parent = emptyenv())
+binary_mix_lifecycle$create_count <- 0L
+binary_mix_create <- function() {
+  binary_mix_lifecycle$create_count <- binary_mix_lifecycle$create_count + 1L
+  new.env(parent = emptyenv())
+}
+binary_mix_destroy <- function(context) invisible(NULL)
+binary_partial <- fastkpc_full_cuda_phase3_run_shards(
+  output_dir = binary_mix_dir, kind = "oracle_sp",
+  setup_keys = setup_keys, target_rows = target_rows,
+  identity = identity, route_config = route_config,
+  executor = executor, runtime_create = binary_mix_create,
+  runtime_destroy = binary_mix_destroy, scope = "iteration", shard_count = 4L,
+  stop_after = 1L, executed_native_library_sha256 = binary_a
+)
+assert_identical(binary_partial$written_shard_ids, 0L,
+                 "binary-A partial run writes one shard")
+binary_partial_paths <- c(
+  list.files(file.path(binary_mix_dir, "shards"), full.names = TRUE),
+  list.files(file.path(binary_mix_dir, "sessions"), full.names = TRUE)
+)
+binary_partial_hashes <- vapply(
+  binary_partial_paths, fastkpc_full_cuda_census_file_hash, character(1L)
+)
+assert_error(
+  fastkpc_full_cuda_phase3_run_shards(
+    output_dir = binary_mix_dir, kind = "oracle_sp",
+    setup_keys = setup_keys, target_rows = target_rows,
+    identity = identity, route_config = route_config,
+    executor = executor, runtime_create = binary_mix_create,
+    runtime_destroy = binary_mix_destroy, scope = "iteration", shard_count = 4L,
+    executed_native_library_sha256 = binary_b
+  ),
+  "partial binary-A shards reject current binary B before runtime creation"
+)
+assert_identical(
+  binary_mix_lifecycle$create_count, 1L,
+  "binary mismatch rejection occurs before runtime creation"
+)
+assert_identical(
+  vapply(
+    binary_partial_paths, fastkpc_full_cuda_census_file_hash, character(1L)
+  ),
+  binary_partial_hashes,
+  "binary mismatch preserves existing shard and session evidence"
+)
 
 publish <- get0(
   "fastkpc_full_cuda_phase3_publish_oracle_artifact",
@@ -627,6 +720,124 @@ validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
 )
 assert_true(isTRUE(validated$authenticated) && isTRUE(validated$pass),
             "completed artifact validates independently")
+immutable_hash_reader <- get0(
+  ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
+  mode = "function", inherits = TRUE
+)
+assert_true(!is.null(immutable_hash_reader),
+            "oracle validator exposes immutable file rehashing")
+immutable_hash_read_count <- 0L
+assign(
+  ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
+  function(...) {
+    immutable_hash_read_count <<- immutable_hash_read_count + 1L
+    immutable_hash_reader(...)
+  },
+  envir = .GlobalEnv
+)
+rehash_validation <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+  output_dir, expected_identity = identity, require_full = FALSE
+)
+assign(
+  ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
+  immutable_hash_reader, envir = .GlobalEnv
+)
+assert_identical(
+  immutable_hash_read_count, 2L,
+  "semantic validator rehashes immutable files before locked return"
+)
+assert_identical(
+  validated$manifest$executed_native_library_sha256, binary_a,
+  "published manifest records the shard-executed binary SHA"
+)
+assert_identical(
+  validated$summary$executed_native_library_sha256, binary_a,
+  "published summary records the shard-executed binary SHA"
+)
+held_validation_lock <-
+  .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(output_dir)
+assert_error(
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    output_dir, expected_identity = identity, require_full = FALSE
+  ),
+  "semantic validation serializes with a live publisher lock"
+)
+.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(
+  held_validation_lock
+)
+assert_true(
+  !dir.exists(.fastkpc_full_cuda_phase3_oracle_artifact_lock_path(output_dir)),
+  "artifact validation lock is removed after owned release"
+)
+generic_semantic_validated <- fastkpc_full_cuda_phase3_validate_artifact(
+  output_dir, kind = "oracle_sp", expected_identity = identity,
+  require_full = FALSE
+)
+assert_true(
+  isTRUE(generic_semantic_validated$authenticated) &&
+    identical(
+      generic_semantic_validated$manifest$oracle_semantics_version,
+      .fastkpc_full_cuda_phase3_oracle_semantics_version()
+    ),
+  "generic oracle validator delegates semantic artifacts to strict validation"
+)
+assert_error(
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    output_dir, expected_identity = identity, require_full = TRUE
+  ),
+  "caller require_full=TRUE rejects a non-full semantic artifact"
+)
+
+scope_downgrade_dir <- tempfile("phase3-oracle-full-downgrade-")
+on.exit(unlink(scope_downgrade_dir, recursive = TRUE, force = TRUE), add = TRUE)
+dir.create(scope_downgrade_dir, recursive = TRUE, showWarnings = FALSE)
+assert_true(file.copy(output_dir, scope_downgrade_dir, recursive = TRUE),
+            "full-scope downgrade fixture copy succeeds")
+scope_downgrade_root <- file.path(scope_downgrade_dir, basename(output_dir))
+scope_downgrade_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  scope_downgrade_root, "oracle_sp"
+)
+scope_downgrade_manifest <- jsonlite::read_json(
+  scope_downgrade_paths$manifest_json, simplifyVector = FALSE
+)
+scope_downgrade_manifest$scope <- "full"
+fastkpc_full_cuda_write_json(
+  scope_downgrade_manifest, scope_downgrade_paths$manifest_json
+)
+scope_downgrade_summary <- jsonlite::read_json(
+  scope_downgrade_paths$summary_json, simplifyVector = FALSE
+)
+scope_downgrade_summary$manifest_sha256 <-
+  fastkpc_full_cuda_census_file_hash(scope_downgrade_paths$manifest_json)
+fastkpc_full_cuda_write_json(
+  scope_downgrade_summary, scope_downgrade_paths$summary_json
+)
+canonical_opener_calls <- 0L
+original_canonical_opener <-
+  .fastkpc_full_cuda_phase3_open_canonical_oracle_catalog
+assign(
+  ".fastkpc_full_cuda_phase3_open_canonical_oracle_catalog",
+  function() {
+    canonical_opener_calls <<- canonical_opener_calls + 1L
+    stop("manifest full scope forced canonical reopen", call. = FALSE)
+  },
+  envir = .GlobalEnv
+)
+assert_error(
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    scope_downgrade_root, expected_identity = identity,
+    require_full = FALSE
+  ),
+  "manifest full scope cannot be downgraded by caller require_full=FALSE"
+)
+assign(
+  ".fastkpc_full_cuda_phase3_open_canonical_oracle_catalog",
+  original_canonical_opener, envir = .GlobalEnv
+)
+assert_identical(
+  canonical_opener_calls, 1L,
+  "manifest full scope independently forces canonical catalog reopening"
+)
 
 merged <- fastkpc_full_cuda_phase3_merge_shards(
   output_dir = output_dir, kind = "oracle_sp",
@@ -686,6 +897,9 @@ byte_snapshot <- vapply(
          use.names = FALSE),
   fastkpc_full_cuda_census_file_hash, character(1L)
 )
+foreign_staging_dir <- paste0(output_dir, ".phase3-oracle-publish-foreign")
+dir.create(foreign_staging_dir, recursive = FALSE, showWarnings = FALSE)
+on.exit(unlink(foreign_staging_dir, recursive = TRUE, force = TRUE), add = TRUE)
 resume <- publish(
   output_dir = output_dir, setup_keys = setup_keys,
   target_rows = target_rows, identity = identity,
@@ -706,6 +920,10 @@ assert_identical(file.info(unlist(paths, use.names = FALSE))$mtime,
                  mtime_snapshot, "pure resume leaves mtimes unchanged")
 assert_identical(lifecycle$create_count, 1L,
                  "publication resume creates no CUDA context")
+assert_true(
+  dir.exists(foreign_staging_dir),
+  "publisher never removes another publisher's staging directory"
+)
 
 unlink(paths$summary_json, force = TRUE)
 partial <- publish(
@@ -817,6 +1035,38 @@ assert_error(
     pass_false_root, expected_identity = identity, require_full = FALSE
   ),
   "persisted pass=false cannot replace validator-derived hard-gate success"
+)
+
+binary_forgery_dir <- tempfile("phase3-oracle-binary-forgery-")
+on.exit(unlink(binary_forgery_dir, recursive = TRUE, force = TRUE), add = TRUE)
+dir.create(binary_forgery_dir, recursive = TRUE, showWarnings = FALSE)
+assert_true(file.copy(output_dir, binary_forgery_dir, recursive = TRUE),
+            "binary-forgery fixture copy succeeds")
+binary_forgery_root <- file.path(binary_forgery_dir, basename(output_dir))
+binary_forgery_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  binary_forgery_root, "oracle_sp"
+)
+binary_forgery_manifest <- jsonlite::read_json(
+  binary_forgery_paths$manifest_json, simplifyVector = FALSE
+)
+binary_forgery_manifest$executed_native_library_sha256 <- binary_b
+fastkpc_full_cuda_write_json(
+  binary_forgery_manifest, binary_forgery_paths$manifest_json
+)
+binary_forgery_summary <- jsonlite::read_json(
+  binary_forgery_paths$summary_json, simplifyVector = FALSE
+)
+binary_forgery_summary$executed_native_library_sha256 <- binary_b
+binary_forgery_summary$manifest_sha256 <-
+  fastkpc_full_cuda_census_file_hash(binary_forgery_paths$manifest_json)
+fastkpc_full_cuda_write_json(
+  binary_forgery_summary, binary_forgery_paths$summary_json
+)
+assert_error(
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    binary_forgery_root, expected_identity = identity, require_full = FALSE
+  ),
+  "manifest and summary cannot forge the shard-executed binary SHA"
 )
 
 hostile_dir <- tempfile("phase3-oracle-hostile-")

@@ -1835,6 +1835,24 @@ fastkpc_full_cuda_phase3_validate_artifact <- function(
   if (is.null(kind)) {
     stop("Phase 3 artifact kind is required", call. = FALSE)
   }
+  semantic_manifest_path <- file.path(output_dir, "manifest.json")
+  if (identical(kind, "oracle_sp") &&
+      file.exists(semantic_manifest_path) &&
+      !dir.exists(semantic_manifest_path)) {
+    semantic_manifest <- tryCatch(
+      .fastkpc_full_cuda_phase3_read_json(
+        semantic_manifest_path, "manifest.json"
+      ),
+      error = function(error) NULL
+    )
+    if (is.list(semantic_manifest) &&
+        "oracle_semantics_version" %in% names(semantic_manifest)) {
+      return(.fastkpc_full_cuda_phase3_validate_completed_oracle_artifact(
+        output_dir = output_dir, expected_identity = expected_identity,
+        require_full = require_full, catalog = catalog, device_id = device_id
+      ))
+    }
+  }
   paths <- fastkpc_full_cuda_phase3_artifact_paths(output_dir, kind = kind)
   if (!dir.exists(output_dir)) {
     stop("Phase 3 artifact directory is missing", call. = FALSE)
@@ -2027,13 +2045,79 @@ fastkpc_full_cuda_phase3_validate_artifact <- function(
 fastkpc_validate_full_cuda_phase3_artifact <-
   fastkpc_full_cuda_phase3_validate_artifact
 
+.fastkpc_full_cuda_phase3_oracle_artifact_lock_path <- function(output_dir) {
+  clean <- typeof(output_dir) == "character" && length(output_dir) == 1L &&
+    !is.object(output_dir) && is.null(attributes(output_dir)) &&
+    !is.na(output_dir) && nzchar(output_dir) && !grepl("[\r\n]", output_dir)
+  if (!isTRUE(clean)) {
+    stop("Phase 3 oracle artifact output path is malformed", call. = FALSE)
+  }
+  paste0(normalizePath(output_dir, mustWork = FALSE),
+         ".phase3-oracle.lock")
+}
+
+.fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock <- function(
+    output_dir) {
+  lock_dir <- .fastkpc_full_cuda_phase3_oracle_artifact_lock_path(output_dir)
+  dir.create(dirname(lock_dir), recursive = TRUE, showWarnings = FALSE)
+  if (!dir.create(lock_dir, recursive = FALSE, showWarnings = FALSE)) {
+    stop("Phase 3 oracle artifact lock exists", call. = FALSE)
+  }
+  owner_file <- file.path(lock_dir, "owner")
+  owner_token <- basename(tempfile("phase3-oracle-owner-", tmpdir = lock_dir))
+  initialized <- tryCatch({
+    writeLines(owner_token, owner_file, useBytes = TRUE)
+    file.exists(owner_file)
+  }, error = function(error) FALSE)
+  if (!isTRUE(initialized)) {
+    unlink(lock_dir, recursive = TRUE, force = TRUE)
+    stop("failed to initialize Phase 3 oracle artifact lock",
+         call. = FALSE)
+  }
+  list(
+    lock_dir = lock_dir, owner_file = owner_file, owner_token = owner_token
+  )
+}
+
+.fastkpc_full_cuda_phase3_owns_oracle_artifact_lock <- function(lock) {
+  if (!is.list(lock) || !identical(
+        names(lock), c("lock_dir", "owner_file", "owner_token")
+      ) || !dir.exists(lock$lock_dir) || !file.exists(lock$owner_file)) {
+    return(FALSE)
+  }
+  actual <- tryCatch(
+    readLines(lock$owner_file, warn = FALSE),
+    error = function(error) character()
+  )
+  identical(actual, lock$owner_token)
+}
+
+.fastkpc_full_cuda_phase3_require_oracle_artifact_lock <- function(
+    lock, output_dir) {
+  expected_path <-
+    .fastkpc_full_cuda_phase3_oracle_artifact_lock_path(output_dir)
+  if (!.fastkpc_full_cuda_phase3_owns_oracle_artifact_lock(lock) ||
+      !identical(lock$lock_dir, expected_path)) {
+    stop("Phase 3 oracle artifact lock ownership is invalid", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_release_oracle_artifact_lock <- function(lock) {
+  if (.fastkpc_full_cuda_phase3_owns_oracle_artifact_lock(lock)) {
+    unlink(lock$lock_dir, recursive = TRUE, force = TRUE)
+  }
+  invisible(NULL)
+}
+
 fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact <- function(
     output_dir, expected_identity = NULL, require_full = FALSE,
-    catalog = NULL, device_id = NULL) {
+    catalog = NULL, device_id = NULL, .artifact_lock = NULL) {
   .fastkpc_full_cuda_phase3_validate_completed_oracle_artifact(
     output_dir = output_dir,
     expected_identity = expected_identity, require_full = require_full,
-    catalog = catalog, device_id = device_id
+    catalog = catalog, device_id = device_id,
+    .artifact_lock = .artifact_lock
   )
 }
 
@@ -2534,7 +2618,8 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
 .fastkpc_full_cuda_phase3_session_fields <- function() {
   c(
     "schema_version", "session_id", "input_identity_hash",
-    "route_config_hash", "requested_shard_ids", "completed_shard_ids",
+    "route_config_hash", "executed_native_library_sha256",
+    "requested_shard_ids", "completed_shard_ids",
     "runtime_context_create_count", "runtime_context_destroy_count",
     "prepared_handle_create_count", "prepared_handle_destroy_count",
     "residual_token_acquire_count", "residual_token_release_count",
@@ -2591,7 +2676,10 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
                  "full-cuda-ci-phase3-session-v1") ||
       !.fastkpc_full_cuda_phase3_session_id_valid(session$session_id) ||
       !.fastkpc_full_cuda_phase3_sha256(session$input_identity_hash) ||
-      !.fastkpc_full_cuda_phase3_sha256(session$route_config_hash)) {
+      !.fastkpc_full_cuda_phase3_sha256(session$route_config_hash) ||
+      !.fastkpc_full_cuda_phase3_sha256(
+        session$executed_native_library_sha256
+      )) {
     stop("Phase 3 session immutable identity is malformed", call. = FALSE)
   }
   .fastkpc_full_cuda_phase3_named_hash(list(
@@ -2601,6 +2689,8 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
       session_id = session$session_id,
       input_identity_hash = session$input_identity_hash,
       route_config_hash = session$route_config_hash,
+      executed_native_library_sha256 =
+        session$executed_native_library_sha256,
       requested_shard_ids = requested
     )
   ))
@@ -2752,7 +2842,8 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
   c(
     "schema_version", "artifact_kind", "artifact_schema_version",
     "shard_id", "session_id", "session_identity_hash",
-    "input_identity_hash", "route_config_hash", "expected_setup_keys",
+    "input_identity_hash", "route_config_hash",
+    "executed_native_library_sha256", "expected_setup_keys",
     "expected_setup_count", "expected_setup_hash", "expected_target_keys",
     "expected_target_count", "expected_target_hash", "source_commit",
     "gpu_environment", "gpu_environment_hash", "payload",
@@ -2765,6 +2856,7 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
     "schema_version", "status", "artifact_kind",
     "artifact_schema_version", "shard_id", "session_id",
     "session_identity_hash", "input_identity_hash", "route_config_hash",
+    "executed_native_library_sha256",
     "expected_setup_keys", "expected_setup_count", "expected_setup_hash",
     "expected_target_keys", "expected_target_count", "expected_target_hash",
     "source_commit", "gpu_environment", "gpu_environment_hash",
@@ -2865,6 +2957,8 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
       fastkpc_full_cuda_phase3_session_identity_hash(session),
     input_identity_hash = identity_info$input_identity_hash,
     route_config_hash = route_config$sha256,
+    executed_native_library_sha256 =
+      session$executed_native_library_sha256,
     expected_setup_keys = descriptor$setup_keys,
     expected_setup_count = descriptor$setup_count,
     expected_setup_hash = descriptor$setup_hash,
@@ -2893,6 +2987,8 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
     session_identity_hash = envelope$session_identity_hash,
     input_identity_hash = envelope$input_identity_hash,
     route_config_hash = envelope$route_config_hash,
+    executed_native_library_sha256 =
+      envelope$executed_native_library_sha256,
     expected_setup_keys = envelope$expected_setup_keys,
     expected_setup_count = envelope$expected_setup_count,
     expected_setup_hash = envelope$expected_setup_hash,
@@ -2969,6 +3065,12 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
               scalar_expected$route_config_hash) &&
     identical(summary$route_config_hash,
               scalar_expected$route_config_hash) &&
+    .fastkpc_full_cuda_phase3_sha256(
+      envelope$executed_native_library_sha256
+    ) && identical(
+      envelope$executed_native_library_sha256,
+      summary$executed_native_library_sha256
+    ) &&
     .fastkpc_full_cuda_phase3_identity_value_equal(
       envelope$expected_setup_count, scalar_expected$expected_setup_count
     ) && .fastkpc_full_cuda_phase3_identity_value_equal(
@@ -3018,7 +3120,7 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
   }
   session_fields <- c(
     "session_id", "session_identity_hash", "input_identity_hash",
-    "route_config_hash"
+    "route_config_hash", "executed_native_library_sha256"
   )
   if (!.fastkpc_full_cuda_phase3_session_id_valid(envelope$session_id) ||
       !.fastkpc_full_cuda_phase3_sha256(
@@ -3165,12 +3267,25 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
     summary$session_identity_hash
   ) && identical(
     envelope$session_identity_hash, summary$session_identity_hash
-  ) && identical(envelope$session_identity_hash, session_hash)
+  ) && identical(envelope$session_identity_hash, session_hash) &&
+    identical(
+      envelope$executed_native_library_sha256,
+      session$executed_native_library_sha256
+    )
   if (!isTRUE(ids_bound) || !isTRUE(hashes_bound)) {
     stop("Phase 3 shard/session id and identity binding mismatch",
          call. = FALSE)
   }
   invisible(session_hash)
+}
+
+.fastkpc_full_cuda_phase3_recomputable_shard_error <- function(message) {
+  structure(
+    list(message = message, call = NULL),
+    class = c(
+      "fastkpc_phase3_recomputable_shard", "error", "condition"
+    )
+  )
 }
 
 .fastkpc_full_cuda_phase3_read_reusable_shard <- function(
@@ -3211,11 +3326,8 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
   session <- .fastkpc_full_cuda_phase3_read_json(
     session_path, "Phase 3 shard session"
   )
-  .fastkpc_full_cuda_phase3_validate_session(
-    session, require_complete = TRUE, shard_id = descriptor$shard_id
-  )
-  .fastkpc_full_cuda_phase3_validate_session_plan_resources(
-    session, plan
+  validated_session <- .fastkpc_full_cuda_phase3_validate_session(
+    session, require_complete = FALSE
   )
   .fastkpc_full_cuda_phase3_validate_shard_session_binding(
     envelope, summary, session
@@ -3227,6 +3339,21 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
       )) {
     stop("Phase 3 shard session authentication mismatch", call. = FALSE)
   }
+  if (identical(session$status, "running")) {
+    if (!descriptor$shard_id %in% validated_session$requested_shard_ids) {
+      stop("running Phase 3 session did not request its bound shard",
+           call. = FALSE)
+    }
+    stop(.fastkpc_full_cuda_phase3_recomputable_shard_error(
+      "Phase 3 shard is bound to an incomplete running session"
+    ))
+  }
+  .fastkpc_full_cuda_phase3_validate_session(
+    session, require_complete = TRUE, shard_id = descriptor$shard_id
+  )
+  .fastkpc_full_cuda_phase3_validate_session_plan_resources(
+    session, plan
+  )
   list(envelope = envelope, summary = summary, session = session)
 }
 
@@ -3342,7 +3469,8 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
 }
 
 .fastkpc_full_cuda_phase3_validate_oracle_row_authority <- function(
-    setup_results, target_parity, resource_metrics, stage_timing) {
+    setup_results, target_parity, resource_metrics, stage_timing,
+    target_groups = NULL) {
   route_levels <- c(
     "CHOLESKY_BATCHED", "AUGMENTED_QR", "AUGMENTED_SVD"
   )
@@ -3359,6 +3487,23 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
            call. = FALSE)
     }
     return(invisible(TRUE))
+  }
+  if (is.null(target_groups)) {
+    target_groups <- .fastkpc_full_cuda_phase3_oracle_target_groups(
+      setup_results$prepared_s_key_sha256,
+      target_parity$prepared_s_key_sha256
+    )
+  }
+  mapped_setup <- target_groups$mapped_setup
+  setup_target_count <- target_groups$target_count
+  grouping_clean <- typeof(mapped_setup) == "integer" &&
+    length(mapped_setup) == target_count && !anyNA(mapped_setup) &&
+    all(mapped_setup > 0L & mapped_setup <= setup_count) &&
+    typeof(setup_target_count) == "integer" &&
+    length(setup_target_count) == setup_count &&
+    sum(setup_target_count) == target_count
+  if (!isTRUE(grouping_clean)) {
+    stop("Phase 3 oracle row-authority grouping is invalid", call. = FALSE)
   }
   route_enum_exact <-
     all(target_parity$planned_route %in% route_levels) &&
@@ -3401,35 +3546,33 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
   executed_cholesky <- target_parity$executed_route == "CHOLESKY_BATCHED"
   executed_qr <- target_parity$executed_route == "AUGMENTED_QR"
   executed_svd <- target_parity$executed_route == "AUGMENTED_SVD"
-  expected_true_batched <- logical(target_count)
-  expected_kernel <- logical(target_count)
-  expected_true_count <- integer(target_count)
-  batch_rows_exact <- TRUE
-  for (setup_index in seq_len(setup_count)) {
-    selected <- target_parity$prepared_s_key_sha256 ==
-      setup_results$prepared_s_key_sha256[[setup_index]]
-    planned_cholesky_count <- sum(planned_cholesky[selected])
-    expected_true <- planned_cholesky[selected] &
-      executed_cholesky[selected] & planned_cholesky_count >= 2L
-    expected_true_batched[selected] <- expected_true
-    expected_kernel[selected] <- sum(selected) >= 2L && all(expected_true)
-    expected_true_count[selected] <- sum(expected_true)
-    expected_subgroups <- as.integer(planned_cholesky_count >= 2L)
-    expected_attempted <- if (planned_cholesky_count >= 2L) {
-      as.integer(planned_cholesky_count)
-    } else {
-      0L
-    }
-    batch_rows_exact <- batch_rows_exact &&
-      setup_results$true_batched_target_count[[setup_index]] ==
-        sum(expected_true) &&
-      resource_metrics$true_batched_subgroup_count[[setup_index]] ==
-        expected_subgroups &&
-      resource_metrics$true_batched_attempted_target_count[[setup_index]] ==
-        expected_attempted &&
-      resource_metrics$true_batched_target_count[[setup_index]] ==
-        sum(expected_true)
-  }
+  planned_cholesky_count <- tabulate(
+    mapped_setup[planned_cholesky], nbins = setup_count
+  )
+  expected_true_batched <- planned_cholesky & executed_cholesky &
+    planned_cholesky_count[mapped_setup] >= 2L
+  expected_true_count_by_setup <- tabulate(
+    mapped_setup[expected_true_batched], nbins = setup_count
+  )
+  expected_true_count <- expected_true_count_by_setup[mapped_setup]
+  expected_kernel_by_setup <- setup_target_count >= 2L &
+    expected_true_count_by_setup == setup_target_count
+  expected_kernel <- expected_kernel_by_setup[mapped_setup]
+  expected_subgroups <- as.integer(planned_cholesky_count >= 2L)
+  expected_attempted <- as.integer(ifelse(
+    planned_cholesky_count >= 2L, planned_cholesky_count, 0L
+  ))
+  batch_rows_exact <- identical(
+    setup_results$true_batched_target_count,
+    as.integer(expected_true_count_by_setup)
+  ) && identical(
+    resource_metrics$true_batched_subgroup_count, expected_subgroups
+  ) && identical(
+    resource_metrics$true_batched_attempted_target_count, expected_attempted
+  ) && identical(
+    resource_metrics$true_batched_target_count,
+    as.integer(expected_true_count_by_setup)
+  )
   expected_status <- ifelse(
     executed_cholesky,
     ifelse(expected_true_batched,
@@ -3498,12 +3641,7 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
     )) &&
     identical(
       resource_metrics$aggregate_penalty_factor_count,
-      as.integer(vapply(
-        setup_results$prepared_s_key_sha256,
-        function(key) sum(executed_svd[
-          target_parity$prepared_s_key_sha256 == key
-        ]), integer(1L)
-      ))
+      as.integer(tabulate(mapped_setup[executed_svd], nbins = setup_count))
     ) && identical(
       resource_metrics$aggregate_svd_b_build_count,
       2L * resource_metrics$aggregate_penalty_factor_count
@@ -3527,17 +3665,14 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
               resource_metrics[[fields[[2L]]]])
   }, logical(1L)))
   expected_checkpoint <- function(route, planned = FALSE) {
-    as.integer(vapply(
-      setup_results$prepared_s_key_sha256, function(key) {
-        selected <- target_parity$prepared_s_key_sha256 == key
-        routes <- if (planned) {
-          target_parity$planned_route[selected]
-        } else {
-          target_parity$executed_route[selected]
-        }
-        any(routes == route)
-      }, logical(1L)
-    ))
+    routes <- if (planned) {
+      target_parity$planned_route
+    } else {
+      target_parity$executed_route
+    }
+    as.integer(tabulate(
+      mapped_setup[routes == route], nbins = setup_count
+    ) > 0L)
   }
   checkpoint_exact <- checkpoint_pairs_exact && identical(
     resource_metrics$cholesky_factor_checkpoint_wait_count,
@@ -3776,6 +3911,35 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
   }, logical(1L)))
 }
 
+.fastkpc_full_cuda_phase3_oracle_target_groups <- function(
+    setup_keys, target_setup_keys) {
+  mapped_setup <- match(target_setup_keys, setup_keys)
+  if (anyNA(mapped_setup) ||
+      (length(mapped_setup) > 1L && is.unsorted(mapped_setup))) {
+    stop("Phase 3 oracle target/setup grouping is invalid", call. = FALSE)
+  }
+  setup_count <- length(setup_keys)
+  target_count <- tabulate(mapped_setup, nbins = setup_count)
+  first_index <- if (setup_count == 0L) {
+    integer()
+  } else {
+    starts <- as.integer(cumsum(c(1L, head(target_count, -1L))))
+    starts[target_count == 0L] <- NA_integer_
+    starts
+  }
+  offsets <- if (setup_count == 0L) integer() else {
+    rep.int(
+      as.integer(cumsum(c(0L, head(target_count, -1L)))), target_count
+    )
+  }
+  list(
+    mapped_setup = as.integer(mapped_setup),
+    target_count = as.integer(target_count),
+    first_index = first_index,
+    target_ordinal = as.integer(seq_along(mapped_setup) - offsets)
+  )
+}
+
 fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
     setup_results, target_parity, resource_metrics, stage_timing,
     fallbacks, failures) {
@@ -3825,31 +3989,26 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
   target_count <- nrow(target_parity)
   setup_keys <- setup_results$prepared_s_key_sha256
   target_keys <- target_parity$residual_key_sha256
+  target_groups <- .fastkpc_full_cuda_phase3_oracle_target_groups(
+    setup_keys, target_parity$prepared_s_key_sha256
+  )
+  mapped_setup <- target_groups$mapped_setup
   expected_target_order <- if (target_count == 0L) integer() else order(
-    match(target_parity$prepared_s_key_sha256, setup_keys), target_keys,
+    mapped_setup, target_keys,
     method = "radix"
   )
   order_clean <- !anyDuplicated(setup_keys) && !anyDuplicated(target_keys) &&
     identical(setup_keys, sort(setup_keys, method = "radix")) &&
     identical(expected_target_order, seq_len(target_count)) &&
     identical(resource_metrics$prepared_s_key_sha256, setup_keys) &&
-    all(target_parity$prepared_s_key_sha256 %in% setup_keys) &&
     all(stage_timing$prepared_s_key_sha256 %in% setup_keys)
-  setup_target_counts <- if (setup_count == 0L) integer() else vapply(
-    setup_keys, function(key) sum(
-      target_parity$prepared_s_key_sha256 == key
-    ), integer(1L), USE.NAMES = FALSE
-  )
   if (!isTRUE(order_clean) ||
-      !identical(setup_results$target_count, setup_target_counts) ||
+      !identical(setup_results$target_count, target_groups$target_count) ||
       nrow(resource_metrics) != setup_count ||
       nrow(stage_timing) != 6L * setup_count) {
     stop("Phase 3 oracle setup/target/resource row identity mismatch",
          call. = FALSE)
   }
-  mapped_setup <- match(
-    target_parity$prepared_s_key_sha256, setup_keys
-  )
   mapping_exact <- !anyNA(mapped_setup) &&
     identical(
       resource_metrics$shard_id, setup_results$shard_id
@@ -3906,7 +4065,8 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
          call. = FALSE)
   }
   .fastkpc_full_cuda_phase3_validate_oracle_row_authority(
-    setup_results, target_parity, resource_metrics, stage_timing
+    setup_results, target_parity, resource_metrics, stage_timing,
+    target_groups = target_groups
   )
 
   planned_cholesky <- target_parity$planned_route == "CHOLESKY_BATCHED"
@@ -3967,24 +4127,29 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
     stop("Phase 3 oracle route conservation failed", call. = FALSE)
   }
 
-  setup_route_exact <- all(vapply(seq_along(setup_keys), function(index) {
-    selected <- target_parity$prepared_s_key_sha256 == setup_keys[[index]]
-    all(vapply(names(route_counts), function(field) {
-      expected <- switch(
-        field,
-        planned_cholesky_target_count = sum(planned_cholesky[selected]),
-        planned_qr_target_count = sum(planned_qr[selected]),
-        planned_svd_target_count = sum(planned_svd[selected]),
-        executed_cholesky_target_count = sum(executed_cholesky[selected]),
-        executed_qr_target_count = sum(executed_qr[selected]),
-        executed_svd_target_count = sum(executed_svd[selected]),
-        cholesky_to_svd_count = sum(cholesky_to_svd[selected]),
-        qr_to_svd_count = sum(qr_to_svd[selected]),
-        stable_reroute_count = sum(stable_reroute[selected])
-      )
-      setup_results[[field]][[index]] == expected &&
-        resource_metrics[[field]][[index]] == expected
-    }, logical(1L)))
+  route_indicators <- cbind(
+    planned_cholesky, planned_qr, planned_svd,
+    executed_cholesky, executed_qr, executed_svd,
+    cholesky_to_svd, qr_to_svd, stable_reroute
+  )
+  setup_route_counts <- matrix(
+    0L, nrow = setup_count, ncol = length(route_counts),
+    dimnames = list(NULL, names(route_counts))
+  )
+  if (target_count > 0L) {
+    reduced <- rowsum(
+      matrix(
+        as.integer(route_indicators), nrow = target_count,
+        dimnames = list(NULL, names(route_counts))
+      ),
+      mapped_setup, reorder = FALSE
+    )
+    setup_route_counts[as.integer(rownames(reduced)), ] <- reduced
+  }
+  setup_route_exact <- all(vapply(names(route_counts), function(field) {
+    expected <- as.integer(setup_route_counts[, field])
+    identical(setup_results[[field]], expected) &&
+      identical(resource_metrics[[field]], expected)
   }, logical(1L)))
   if (!isTRUE(setup_route_exact)) {
     stop("Phase 3 oracle setup route summaries are not row-derived",
@@ -4183,9 +4348,10 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
       stop("Phase 3 oracle expected target corpus is malformed",
            call. = FALSE)
     }
-    expected_target_setup_rank <- match(
-      expected_target_rows$prepared_s_key_sha256, expected_setup_keys
+    expected_target_groups <- .fastkpc_full_cuda_phase3_oracle_target_groups(
+      expected_setup_keys, expected_target_rows$prepared_s_key_sha256
     )
+    expected_target_setup_rank <- expected_target_groups$mapped_setup
     expected_target_order <- if (nrow(expected_target_rows) == 0L) {
       integer()
     } else {
@@ -4221,26 +4387,29 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
         )
       }, logical(1L)
     ))
-    expected_setup_rank <- vapply(expected_setup_keys, function(key) {
-      values <- unique(expected_target_rows$canonical_setup_rank[
-        expected_target_rows$prepared_s_key_sha256 == key
-      ])
-      if (length(values) != 1L || is.na(values)) return(NA_integer_)
-      as.integer(values)
-    }, integer(1L), USE.NAMES = FALSE)
-    expected_phase2_shard_id <- vapply(expected_setup_keys, function(key) {
-      values <- unique(expected_target_rows$phase2_shard_id[
-        expected_target_rows$prepared_s_key_sha256 == key
-      ])
-      if (length(values) != 1L || is.na(values)) return(NA_integer_)
-      as.integer(values)
-    }, integer(1L), USE.NAMES = FALSE)
+    expected_setup_rank <- as.integer(
+      expected_target_rows$canonical_setup_rank[
+        expected_target_groups$first_index
+      ]
+    )
+    expected_phase2_shard_id <- as.integer(
+      expected_target_rows$phase2_shard_id[
+        expected_target_groups$first_index
+      ]
+    )
     authenticated_phase2_shard_id <- as.integer(
       (expected_setup_rank - 1L) %%
         fastkpc_full_cuda_fixed_sp_catalog_contract()$shard_count
     )
     expected_setup_projection_exact <-
       !anyNA(expected_setup_rank) && !anyNA(expected_phase2_shard_id) &&
+      identical(
+        expected_target_rows$canonical_setup_rank,
+        expected_setup_rank[expected_target_setup_rank]
+      ) && identical(
+        expected_target_rows$phase2_shard_id,
+        expected_phase2_shard_id[expected_target_setup_rank]
+      ) &&
       identical(expected_phase2_shard_id, authenticated_phase2_shard_id) &&
       identical(
         payload$setup_results$canonical_setup_rank, expected_setup_rank
@@ -4272,18 +4441,24 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
   if (!identical(payload$summary, recomputed)) {
     stop("Phase 3 oracle shard summary is not row-derived", call. = FALSE)
   }
-  setup_target_hashes_exact <- all(vapply(
-    seq_len(nrow(payload$setup_results)), function(index) {
-      key <- payload$setup_results$prepared_s_key_sha256[[index]]
-      target_keys <- payload$target_parity$residual_key_sha256[
-        payload$target_parity$prepared_s_key_sha256 == key
-      ]
-      identical(
-        payload$setup_results$target_key_set_sha256[[index]],
-        fastkpc_full_cuda_census_key_set_hash(target_keys)
-      )
-    }, logical(1L)
-  ))
+  payload_target_groups <- .fastkpc_full_cuda_phase3_oracle_target_groups(
+    payload$setup_results$prepared_s_key_sha256,
+    payload$target_parity$prepared_s_key_sha256
+  )
+  grouped_target_keys <- split(
+    payload$target_parity$residual_key_sha256,
+    factor(
+      payload_target_groups$mapped_setup,
+      levels = seq_len(nrow(payload$setup_results))
+    )
+  )
+  setup_target_hashes_exact <- identical(
+    payload$setup_results$target_key_set_sha256,
+    unname(vapply(
+      grouped_target_keys, fastkpc_full_cuda_census_key_set_hash,
+      character(1L)
+    ))
+  )
   expected_phase2_shard_id <- as.integer(
     (payload$setup_results$canonical_setup_rank - 1L) %%
       fastkpc_full_cuda_fixed_sp_catalog_contract()$shard_count
@@ -4304,16 +4479,10 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
       sort(payload$setup_results$canonical_setup_rank, method = "radix")
     ) && identical(
       payload$setup_results$phase2_shard_id, expected_phase2_shard_id
-    ) &&
-    all(vapply(
-      payload$setup_results$prepared_s_key_sha256, function(key) {
-        rows <- payload$target_parity$prepared_s_key_sha256 == key
-        identical(
-          payload$target_parity$target_ordinal[rows],
-          as.integer(seq_len(sum(rows)))
-        )
-      }, logical(1L)
-    )) && !anyDuplicated(payload$target_parity$canonical_target_rank) &&
+    ) && identical(
+      payload$target_parity$target_ordinal,
+      payload_target_groups$target_ordinal
+    ) && !anyDuplicated(payload$target_parity$canonical_target_rank) &&
     all(payload$target_parity$canonical_target_rank > 0L) &&
     isTRUE(setup_target_hashes_exact)
   if (!isTRUE(row_identity_exact)) {
@@ -4625,6 +4794,31 @@ fastkpc_full_cuda_phase3_run_oracle_shard <- function(
   )
 }
 
+.fastkpc_full_cuda_phase3_executed_native_library_sha256 <- function(
+    identity, value = NULL) {
+  production <- identical(
+    identity$schema_version, "full-cuda-ci-phase3-input-identity-v1"
+  )
+  if (is.null(value)) {
+    value <- if (isTRUE(production)) {
+      identity$native_library_sha256
+    } else {
+      fastkpc_full_cuda_census_hash_utf8(
+        "full-cuda-ci-phase3-test-executed-native-library-v1"
+      )
+    }
+  }
+  if (!.fastkpc_full_cuda_phase3_sha256(value)) {
+    stop("executed native library SHA-256 is malformed", call. = FALSE)
+  }
+  if (isTRUE(production) &&
+      !identical(value, identity$native_library_sha256)) {
+    stop("executed native library disagrees with runtime attestation",
+         call. = FALSE)
+  }
+  value
+}
+
 .fastkpc_full_cuda_phase3_validate_executor_result <- function(value) {
   if (!.fastkpc_full_cuda_phase3_exact_named_list(
         value, c("payload", "resource_counts")
@@ -4656,7 +4850,8 @@ fastkpc_full_cuda_phase3_run_oracle_shard <- function(
 fastkpc_full_cuda_phase3_run_shards <- function(
     output_dir, kind, setup_keys, target_rows, identity, route_config,
     executor, runtime_create, runtime_destroy, scope,
-    shard_count = NULL, stop_after = NULL, progress_hook = NULL) {
+    shard_count = NULL, stop_after = NULL, progress_hook = NULL,
+    executed_native_library_sha256 = NULL) {
   output_clean <- typeof(output_dir) == "character" &&
     length(output_dir) == 1L && !is.object(output_dir) &&
     is.null(attributes(output_dir)) && !is.na(output_dir) &&
@@ -4684,6 +4879,10 @@ fastkpc_full_cuda_phase3_run_shards <- function(
     scope = scope,
     plan = plan
   )
+  executed_native_library_sha256 <-
+    .fastkpc_full_cuda_phase3_executed_native_library_sha256(
+      identity, executed_native_library_sha256
+    )
   if (!is.null(stop_after)) {
     stop_after <- .fastkpc_full_cuda_phase3_whole_scalar(
       stop_after, 1L, "stop_after"
@@ -4698,6 +4897,7 @@ fastkpc_full_cuda_phase3_run_shards <- function(
     shards_dir, plan$shard_count
   )
   reused <- integer()
+  reused_binary_sha256 <- character()
   missing <- integer()
   for (shard_id in scan$expected_ids) {
     id <- as.character(shard_id)
@@ -4709,11 +4909,17 @@ fastkpc_full_cuda_phase3_run_shards <- function(
       shards_dir, shard_id
     )
     reusable <- FALSE
+    recomputable <- FALSE
+    if (xor(pair_exists[["rds"]], pair_exists[["summary"]])) {
+      unlink(c(paths$rds, paths$summary_json), force = TRUE)
+      missing <- c(missing, shard_id)
+      next
+    }
     if (all(pair_exists)) {
       descriptor <- .fastkpc_full_cuda_phase3_shard_descriptor(
         plan, shard_id
       )
-      reusable <- !is.null(tryCatch(
+      loaded <- tryCatch(
         .fastkpc_full_cuda_phase3_read_reusable_shard(
           paths = paths,
           sessions_dir = sessions_dir,
@@ -4723,18 +4929,33 @@ fastkpc_full_cuda_phase3_run_shards <- function(
           identity_info = identity_info,
           route_config = route_config
         ),
-        error = function(error) NULL
-      ))
+        fastkpc_phase3_recomputable_shard = function(error) error
+      )
+      recomputable <- inherits(
+        loaded, "fastkpc_phase3_recomputable_shard"
+      )
+      reusable <- !isTRUE(recomputable)
     }
     if (reusable) {
       reused <- c(reused, shard_id)
-    } else {
+      reused_binary_sha256 <- c(
+        reused_binary_sha256,
+        loaded$envelope$executed_native_library_sha256
+      )
+    } else if (isTRUE(recomputable)) {
       unlink(c(paths$rds, paths$summary_json), force = TRUE)
+      missing <- c(missing, shard_id)
+    } else {
       missing <- c(missing, shard_id)
     }
   }
   reused <- as.integer(reused)
   missing <- as.integer(missing)
+  reused_binary_sha256 <- unique(reused_binary_sha256)
+  if (length(reused_binary_sha256) > 1L) {
+    stop("Phase 3 reusable shards mix executed native libraries",
+         call. = FALSE)
+  }
   if (length(missing) == 0L) {
     return(list(
       status = "complete",
@@ -4747,6 +4968,12 @@ fastkpc_full_cuda_phase3_run_shards <- function(
       runtime_context_create_count = 0L,
       runtime_context_destroy_count = 0L
     ))
+  }
+  if (length(reused_binary_sha256) == 1L && !identical(
+        reused_binary_sha256, executed_native_library_sha256
+      )) {
+    stop("Phase 3 partial resume would mix executed native libraries",
+         call. = FALSE)
   }
 
   requested <- missing
@@ -4770,6 +4997,7 @@ fastkpc_full_cuda_phase3_run_shards <- function(
     session_id = session_id,
     input_identity_hash = identity_info$input_identity_hash,
     route_config_hash = route_config$sha256,
+    executed_native_library_sha256 = executed_native_library_sha256,
     requested_shard_ids = requested,
     completed_shard_ids = integer(),
     runtime_context_create_count = 0L,
@@ -5097,6 +5325,16 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
       route_config = route_config
     )
   })
+  executed_binary_sha256 <- unique(vapply(
+    loaded, function(value) {
+      value$envelope$executed_native_library_sha256
+    }, character(1L)
+  ))
+  if (length(executed_binary_sha256) != 1L ||
+      !.fastkpc_full_cuda_phase3_sha256(executed_binary_sha256)) {
+    stop("Phase 3 shard set does not bind one executed native library",
+         call. = FALSE)
+  }
   payload <- .fastkpc_full_cuda_phase3_merge_payloads(
     lapply(loaded, function(value) value$envelope$payload), plan
   )
@@ -5113,6 +5351,7 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     artifact_schema_version = contract$artifact_schema_version,
     input_identity_hash = identity_info$input_identity_hash,
     route_config_hash = route_config$sha256,
+    executed_native_library_sha256 = executed_binary_sha256,
     shard_count = plan$shard_count,
     expected_setup_keys = setup_keys,
     expected_setup_count = as.integer(length(setup_keys)),
@@ -5806,7 +6045,8 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
 
 .fastkpc_full_cuda_phase3_oracle_summary_list <- function(
     row_summary, dcov_summary, risk_case_count, shard_count,
-    payload_count, manifest_sha256 = NULL, pass = TRUE) {
+    payload_count, executed_native_library_sha256,
+    manifest_sha256 = NULL, pass = TRUE) {
   if (!is.data.frame(row_summary) || nrow(row_summary) != 1L ||
       !is.list(dcov_summary)) {
     stop("Phase 3 oracle summary inputs are malformed", call. = FALSE)
@@ -5818,6 +6058,8 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
       artifact_kind = "oracle_sp",
       oracle_semantics_version =
         .fastkpc_full_cuda_phase3_oracle_semantics_version(),
+      executed_native_library_sha256 =
+        executed_native_library_sha256,
       manifest_sha256 = manifest_sha256,
       shard_count = as.integer(shard_count),
       payload_count = as.integer(payload_count),
@@ -5871,6 +6113,12 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     scope = scope, plan = plan
   )
   paths <- fastkpc_full_cuda_phase3_artifact_paths(output_dir, "oracle_sp")
+  artifact_lock <-
+    .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(output_dir)
+  on.exit(
+    .fastkpc_full_cuda_phase3_release_oracle_artifact_lock(artifact_lock),
+    add = TRUE
+  )
   completion <- c(
     manifest = file.exists(paths$manifest_json),
     summary = file.exists(paths$summary_json)
@@ -5879,7 +6127,8 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     validated <- tryCatch(
       fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
         output_dir = output_dir, expected_identity = identity,
-        require_full = require_full, catalog = catalog, device_id = device_id
+        require_full = require_full, catalog = catalog, device_id = device_id,
+        .artifact_lock = artifact_lock
       ),
       error = function(error) error
     )
@@ -5896,13 +6145,6 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     unlink(c(paths$manifest_json, paths$summary_json), force = TRUE)
   }
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-  stale_temporary <- list.files(
-    output_dir, pattern = "^\\.phase3-oracle-publish-",
-    all.files = TRUE, full.names = TRUE
-  )
-  if (length(stale_temporary) > 0L) {
-    unlink(stale_temporary, recursive = TRUE, force = TRUE)
-  }
 
   merged <- fastkpc_full_cuda_phase3_merge_shards(
     output_dir = output_dir, kind = "oracle_sp",
@@ -5910,6 +6152,14 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     identity = identity, route_config = route_config, scope = scope,
     shard_count = shard_count
   )
+  executed_native_library_sha256 <-
+    merged$executed_native_library_sha256
+  if (!.fastkpc_full_cuda_phase3_sha256(
+        executed_native_library_sha256
+      )) {
+    stop("merged Phase 3 executed native library SHA is malformed",
+         call. = FALSE)
+  }
   payload <- merged$payload
   setup_results <- payload$setup_results
   target_parity_internal <- payload$target_parity
@@ -6042,7 +6292,9 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
          call. = FALSE)
   }
   staging_dir <- tempfile(
-    ".phase3-oracle-publish-", tmpdir = output_dir
+    paste0(basename(normalizePath(output_dir, mustWork = FALSE)),
+           ".phase3-oracle-publish-"),
+    tmpdir = dirname(normalizePath(output_dir, mustWork = FALSE))
   )
   if (!dir.create(staging_dir, recursive = FALSE, showWarnings = FALSE)) {
     stop("failed to create Phase 3 oracle staging directory",
@@ -6095,6 +6347,8 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     artifact_kind = "oracle_sp",
     oracle_semantics_version =
       .fastkpc_full_cuda_phase3_oracle_semantics_version(),
+    executed_native_library_sha256 =
+      executed_native_library_sha256,
     scope = scope,
     shard_count = as.integer(plan$shard_count),
     input_identity_schema_version = identity$schema_version,
@@ -6137,6 +6391,7 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     row_summary = row_summary, dcov_summary = dcov_summary,
     risk_case_count = nrow(risk_cases), shard_count = plan$shard_count,
     payload_count = length(payload_keys),
+    executed_native_library_sha256 = executed_native_library_sha256,
     manifest_sha256 = manifest_sha256, pass = TRUE
   )
   summary_temporary <- file.path(staging_dir, "summary.json")
@@ -6149,7 +6404,8 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
   validated <- tryCatch(
     fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
       output_dir = output_dir, expected_identity = identity,
-      require_full = require_full, catalog = catalog, device_id = device_id
+      require_full = require_full, catalog = catalog, device_id = device_id,
+      .artifact_lock = artifact_lock
     ),
     error = function(error) {
       unlink(c(paths$manifest_json, paths$summary_json), force = TRUE)
@@ -6214,13 +6470,63 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
   )
 }
 
+.fastkpc_full_cuda_phase3_oracle_immutable_file_hashes <- function(
+    paths, payload_keys) {
+  selected <- c(
+    unlist(paths[payload_keys], use.names = FALSE),
+    paths$manifest_json, paths$summary_json
+  )
+  if (any(!file.exists(selected)) || any(dir.exists(selected))) {
+    stop("Phase 3 oracle immutable file set is incomplete", call. = FALSE)
+  }
+  hashes <- vapply(
+    selected, fastkpc_full_cuda_census_file_hash, character(1L)
+  )
+  names(hashes) <- basename(selected)
+  hashes
+}
+
 .fastkpc_full_cuda_phase3_validate_completed_oracle_artifact <- function(
     output_dir, expected_identity = NULL, require_full = FALSE,
-    catalog = NULL, device_id = NULL) {
+    catalog = NULL, device_id = NULL, .artifact_lock = NULL) {
   if (!.fastkpc_full_cuda_phase3_bare_scalar(require_full, "logical")) {
     stop("require_full must be a logical scalar", call. = FALSE)
   }
-  if (isTRUE(require_full)) {
+  acquired_lock <- is.null(.artifact_lock)
+  if (isTRUE(acquired_lock)) {
+    .artifact_lock <-
+      .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(output_dir)
+    on.exit(
+      .fastkpc_full_cuda_phase3_release_oracle_artifact_lock(.artifact_lock),
+      add = TRUE
+    )
+  } else {
+    .fastkpc_full_cuda_phase3_require_oracle_artifact_lock(
+      .artifact_lock, output_dir
+    )
+  }
+  paths <- fastkpc_full_cuda_phase3_artifact_paths(output_dir, "oracle_sp")
+  if (!dir.exists(output_dir)) {
+    stop("Phase 3 oracle artifact directory is missing", call. = FALSE)
+  }
+  manifest <- .fastkpc_full_cuda_phase3_read_json(
+    paths$manifest_json, "manifest.json"
+  )
+  scope <- .fastkpc_full_cuda_phase3_scope(manifest$scope)
+  if (isTRUE(require_full) && !identical(scope, "full")) {
+    stop("full Phase 3 oracle artifact has the wrong scope", call. = FALSE)
+  }
+  semantic_full <- identical(scope, "full")
+  production_schema <- "full-cuda-ci-phase3-input-identity-v1"
+  manifest_production <- identical(
+    manifest$input_identity_schema_version, production_schema
+  )
+  expected_production <- is.list(expected_identity) && identical(
+    expected_identity$schema_version, production_schema
+  )
+  catalog_required <- semantic_full || manifest_production ||
+    expected_production
+  if (isTRUE(catalog_required)) {
     resolved_device_id <- .fastkpc_full_cuda_phase3_full_oracle_device_id(
       output_dir, expected_identity, device_id
     )
@@ -6238,9 +6544,17 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
       )
     }
     if (!is.null(expected_identity)) {
-      .fastkpc_full_cuda_phase3_validate_full_oracle_identity_lineage(
-        expected_identity, discovered
-      )
+      if (isTRUE(expected_production)) {
+        .fastkpc_full_cuda_phase3_validate_full_oracle_identity_lineage(
+          expected_identity, discovered
+        )
+      } else {
+        .fastkpc_full_cuda_phase3_validate_artifact_identity(
+          expected_identity, require_full = semantic_full
+        )
+        stop("production Phase 3 oracle manifest requires catalog identity",
+             call. = FALSE)
+      }
     }
     expected_identity <- discovered
     catalog <- canonical_catalog
@@ -6265,12 +6579,8 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
          call. = FALSE)
   }
   .fastkpc_full_cuda_phase3_validate_artifact_identity(
-    expected_identity, require_full = require_full
+    expected_identity, require_full = semantic_full
   )
-  paths <- fastkpc_full_cuda_phase3_artifact_paths(output_dir, "oracle_sp")
-  if (!dir.exists(output_dir)) {
-    stop("Phase 3 oracle artifact directory is missing", call. = FALSE)
-  }
   final_keys <- setdiff(names(paths), c("shards_dir", "sessions_dir"))
   expected_entries <- c(
     basename(unlist(paths[final_keys], use.names = FALSE)),
@@ -6291,15 +6601,13 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
       any(!file.exists(final_paths)) || any(dir.exists(final_paths))) {
     stop("Phase 3 oracle artifact path set is incomplete", call. = FALSE)
   }
-  manifest <- .fastkpc_full_cuda_phase3_read_json(
-    paths$manifest_json, "manifest.json"
-  )
   summary <- .fastkpc_full_cuda_phase3_read_json(
     paths$summary_json, "summary.json"
   )
   manifest_fields <- c(
     "artifact_schema_version", "artifact_kind",
-    "oracle_semantics_version", "scope", "shard_count",
+    "oracle_semantics_version", "executed_native_library_sha256",
+    "scope", "shard_count",
     "input_identity_schema_version", "input_identity_sha256",
     "expected_setup_count", "expected_setup_hash",
     "expected_target_count", "expected_target_hash", "payload_names",
@@ -6322,6 +6630,8 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
       !identical(
         manifest$oracle_semantics_version,
         .fastkpc_full_cuda_phase3_oracle_semantics_version()
+      ) || !.fastkpc_full_cuda_phase3_sha256(
+        manifest$executed_native_library_sha256
       ) || !identical(
         manifest$input_identity_schema_version,
         expected_identity$schema_version
@@ -6333,10 +6643,6 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
       )) {
     stop("Phase 3 oracle manifest identity/schema is invalid",
          call. = FALSE)
-  }
-  scope <- .fastkpc_full_cuda_phase3_scope(manifest$scope)
-  if (isTRUE(require_full) && !identical(scope, "full")) {
-    stop("full Phase 3 oracle artifact has the wrong scope", call. = FALSE)
   }
   shard_count <- .fastkpc_full_cuda_phase3_whole_scalar(
     manifest$shard_count, 1L, "manifest shard_count"
@@ -6363,11 +6669,11 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("Phase 3 oracle manifest payload hash namespace is invalid",
          call. = FALSE)
   }
-  actual_hashes <- vapply(
-    paths[payload_keys], fastkpc_full_cuda_census_file_hash,
-    character(1L)
-  )
-  names(actual_hashes) <- payload_names
+  immutable_file_hashes <-
+    .fastkpc_full_cuda_phase3_oracle_immutable_file_hashes(
+      paths, payload_keys
+    )
+  actual_hashes <- immutable_file_hashes[payload_names]
   sizes <- as.numeric(file.info(
     unlist(paths[payload_keys], use.names = FALSE)
   )$size)
@@ -6522,6 +6828,13 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     route_config = route_config, scope = scope,
     shard_count = if (identical(scope, "full")) NULL else shard_count
   )
+  if (!identical(
+        manifest$executed_native_library_sha256,
+        authenticated$executed_native_library_sha256
+      )) {
+    stop("Phase 3 manifest executed native library differs from shards",
+         call. = FALSE)
+  }
   authenticated_setup <- authenticated$payload$setup_results
   authenticated_resource <- authenticated$payload$resource_metrics
   authenticated_stage <- authenticated$payload$stage_timing
@@ -6553,7 +6866,7 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
        !identical(qualification_dcov, authenticated_dcov)) ||
       (isTRUE(production_identity) && nrow(qualification_dcov) > 0L &&
        is.null(authenticated_dcov)) ||
-      (isTRUE(require_full) && is.null(authenticated_dcov))) {
+      (isTRUE(semantic_full) && is.null(authenticated_dcov))) {
     stop("Phase 3 qualification dCov rows differ from authenticated shards",
          call. = FALSE)
   }
@@ -6591,7 +6904,7 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     risk_cases, target_parity, expected = expected_risk
   )
   dcov_summary <- .fastkpc_full_cuda_phase3_validate_qualification_dcov(
-    qualification_dcov, require_full = require_full,
+    qualification_dcov, require_full = semantic_full,
     tolerance = route_config$qualification_dcov_p_tolerance
   )
   if (!is.null(catalog)) {
@@ -6680,7 +6993,7 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("Phase 3 command/environment evidence is invalid", call. = FALSE)
   }
 
-  full_gate <- !isTRUE(require_full) || (
+  full_gate <- !isTRUE(semantic_full) || (
     row_summary$setup_count == 8634L &&
       row_summary$target_count == 110617L &&
       identical(
@@ -6707,6 +7020,8 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     row_summary = row_summary, dcov_summary = dcov_summary,
     risk_case_count = nrow(risk_cases), shard_count = shard_count,
     payload_count = length(payload_keys),
+    executed_native_library_sha256 =
+      authenticated$executed_native_library_sha256,
     manifest_sha256 = summary$manifest_sha256, pass = TRUE
   )
   if (!.fastkpc_full_cuda_phase3_summary_claims_exact(
@@ -6731,6 +7046,15 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
       }, logical(1L))][[1L]]
     }
     stop("Phase 3 oracle summary claims are not recomputed: ", mismatched,
+         call. = FALSE)
+  }
+  if (!identical(
+        .fastkpc_full_cuda_phase3_oracle_immutable_file_hashes(
+          paths, payload_keys
+        ),
+        immutable_file_hashes
+      )) {
+    stop("Phase 3 oracle immutable files changed during validation",
          call. = FALSE)
   }
   list(
