@@ -3685,7 +3685,9 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
   expected_stage_keys <- rep(
     setup_results$prepared_s_key_sha256, each = 6L
   )
-  expected_stage_ordinals <- rep(seq_len(setup_count), each = 6L)
+  expected_stage_ordinals <- rep(
+    setup_results$setup_ordinal, each = 6L
+  )
   stage_exact <- identical(stage_timing$stage, expected_stage_names) &&
     identical(stage_timing$prepared_s_key_sha256, expected_stage_keys) &&
     identical(stage_timing$setup_ordinal,
@@ -3726,6 +3728,52 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
          call. = FALSE)
   }
   as.integer(count)
+}
+
+.fastkpc_full_cuda_phase3_oracle_phase2_load_units <- function(
+    setup_results) {
+  required <- c("shard_id", "phase2_shard_id")
+  clean <- is.data.frame(setup_results) &&
+    all(required %in% names(setup_results)) &&
+    all(vapply(required, function(field) {
+      value <- setup_results[[field]]
+      typeof(value) == "integer" && !is.object(value) &&
+        is.null(attributes(value)) && !anyNA(value) && all(value >= 0L)
+    }, logical(1L)))
+  if (!isTRUE(clean)) {
+    stop("Phase 3 oracle Phase 2 load-unit rows are malformed",
+         call. = FALSE)
+  }
+  load_unit_rows <- setup_results[, required, drop = FALSE]
+  expected_load_rows <- as.integer(!duplicated(load_unit_rows))
+  list(
+    expected_load_rows = expected_load_rows,
+    unique_phase2_shard_count = as.integer(length(unique(
+      setup_results$phase2_shard_id
+    ))),
+    phase2_shard_load_unit_count = as.integer(sum(expected_load_rows))
+  )
+}
+
+.fastkpc_full_cuda_phase3_oracle_setup_ordinals_exact <- function(
+    setup_results) {
+  required <- c("shard_id", "setup_ordinal")
+  clean <- is.data.frame(setup_results) &&
+    all(required %in% names(setup_results)) &&
+    all(vapply(required, function(field) {
+      value <- setup_results[[field]]
+      typeof(value) == "integer" && !is.object(value) &&
+        is.null(attributes(value)) && !anyNA(value)
+    }, logical(1L))) && all(setup_results$shard_id >= 0L) &&
+    all(setup_results$setup_ordinal > 0L)
+  if (!isTRUE(clean)) return(FALSE)
+  all(vapply(unique(setup_results$shard_id), function(shard_id) {
+    selected <- setup_results$shard_id == shard_id
+    identical(
+      setup_results$setup_ordinal[selected],
+      as.integer(seq_len(sum(selected)))
+    )
+  }, logical(1L)))
 }
 
 fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
@@ -3828,10 +3876,13 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
     stop("Phase 3 oracle setup/target rank mapping is invalid",
          call. = FALSE)
   }
-  expected_phase2_load_rows <- if (setup_count == 0L) integer() else {
-    as.integer(!duplicated(setup_results$phase2_shard_id))
-  }
-  unique_phase2_shard_count <- as.integer(sum(expected_phase2_load_rows))
+  phase2_load_units <-
+    .fastkpc_full_cuda_phase3_oracle_phase2_load_units(setup_results)
+  expected_phase2_load_rows <- phase2_load_units$expected_load_rows
+  unique_phase2_shard_count <-
+    phase2_load_units$unique_phase2_shard_count
+  phase2_shard_load_unit_count <-
+    phase2_load_units$phase2_shard_load_unit_count
   phase2_load_rows_exact <-
     identical(
       setup_results$phase2_shard_load_count, expected_phase2_load_rows
@@ -3976,6 +4027,7 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
   data.frame(
     setup_count = as.integer(setup_count), target_count = as.integer(target_count),
     unique_phase2_shard_count = unique_phase2_shard_count,
+    phase2_shard_load_unit_count = phase2_shard_load_unit_count,
     phase2_shard_load_count = resource_sum("phase2_shard_load_count"),
     phase2_shard_authentication_count = resource_sum(
       "phase2_shard_authentication_count"
@@ -4211,9 +4263,9 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
       payload$setup_results$prepared_s_key_sha256
     )) && all(grepl(
       "^[0-9a-f]{64}$", payload$target_parity$residual_key_sha256
-    )) && identical(
-      payload$setup_results$setup_ordinal,
-      as.integer(seq_len(nrow(payload$setup_results)))
+    )) &&
+    .fastkpc_full_cuda_phase3_oracle_setup_ordinals_exact(
+      payload$setup_results
     ) && !anyDuplicated(payload$setup_results$canonical_setup_rank) &&
     all(payload$setup_results$canonical_setup_rank > 0L) &&
     identical(
@@ -4245,10 +4297,10 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
          call. = FALSE)
   }
   if (recomputed$phase2_shard_load_count !=
-        recomputed$unique_phase2_shard_count ||
+        recomputed$phase2_shard_load_unit_count ||
       recomputed$phase2_shard_authentication_count !=
-        recomputed$unique_phase2_shard_count) {
-    stop("Phase 3 oracle unique Phase 2 shard load hard gate failed",
+        recomputed$phase2_shard_load_unit_count) {
+    stop("Phase 3 oracle per-execution-shard Phase 2 load hard gate failed",
          call. = FALSE)
   }
   numeric_and_fallback_gates <-

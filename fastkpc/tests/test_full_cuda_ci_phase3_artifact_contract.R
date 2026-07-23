@@ -166,6 +166,41 @@ assert_true(identical(
   )
 ), "route canonical SHA-256")
 
+phase2_load_units <- .fastkpc_full_cuda_phase3_oracle_phase2_load_units(
+  data.frame(
+    shard_id = c(0L, 1L, 0L, 1L, 0L),
+    phase2_shard_id = c(10L, 10L, 10L, 10L, 11L),
+    stringsAsFactors = FALSE
+  )
+)
+assert_true(
+  identical(phase2_load_units$expected_load_rows, c(1L, 1L, 0L, 0L, 1L)) &&
+    phase2_load_units$unique_phase2_shard_count == 2L &&
+    phase2_load_units$phase2_shard_load_unit_count == 3L,
+  paste(
+    "Phase 2 source shards are loaded once per execution shard while",
+    "global source-shard cardinality remains distinct"
+  )
+)
+shard_local_ordinals <- data.frame(
+  shard_id = c(0L, 1L, 0L, 1L),
+  setup_ordinal = c(1L, 1L, 2L, 2L),
+  stringsAsFactors = FALSE
+)
+assert_true(
+  .fastkpc_full_cuda_phase3_oracle_setup_ordinals_exact(
+    shard_local_ordinals
+  ),
+  "merged setup ordinals remain canonical within each execution shard"
+)
+shard_local_ordinals$setup_ordinal[[4L]] <- 3L
+assert_true(
+  !.fastkpc_full_cuda_phase3_oracle_setup_ordinals_exact(
+    shard_local_ordinals
+  ),
+  "a skipped shard-local setup ordinal fails closed"
+)
+
 sha <- function(label) fastkpc_full_cuda_census_hash_utf8(label)
 
 oracle_fixture_frame <- function(name, row_count) {
