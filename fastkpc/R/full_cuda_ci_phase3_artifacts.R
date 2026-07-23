@@ -2030,6 +2030,25 @@ fastkpc_validate_full_cuda_phase3_artifact <-
 fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact <- function(
     output_dir, expected_identity = NULL, require_full = FALSE,
     catalog = NULL, device_id = NULL) {
+  manifest_path <- file.path(output_dir, "manifest.json")
+  semantic_manifest <- if (file.exists(manifest_path) &&
+      !dir.exists(manifest_path)) {
+    tryCatch(
+      .fastkpc_full_cuda_phase3_read_json(manifest_path, "manifest.json"),
+      error = function(error) NULL
+    )
+  } else {
+    NULL
+  }
+  if (is.list(semantic_manifest) && identical(
+        semantic_manifest$oracle_semantics_version,
+        "full-cuda-ci-fixed-sp-oracle-sp-semantics-v1"
+      )) {
+    return(.fastkpc_full_cuda_phase3_validate_completed_oracle_artifact(
+      output_dir = output_dir, expected_identity = expected_identity,
+      require_full = require_full, catalog = catalog, device_id = device_id
+    ))
+  }
   fastkpc_full_cuda_phase3_validate_artifact(
     output_dir = output_dir, kind = "oracle_sp",
     expected_identity = expected_identity, require_full = require_full,
@@ -4118,19 +4137,50 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
 }
 
 .fastkpc_full_cuda_phase3_is_oracle_payload <- function(payload) {
-  .fastkpc_full_cuda_phase3_exact_named_list(
-    payload,
-    c(
-      "setup_results", "target_parity", "resource_metrics", "stage_timing",
-      "fallbacks", "failures", "summary"
-    )
+  base <- c(
+    "setup_results", "target_parity", "resource_metrics", "stage_timing",
+    "fallbacks", "failures", "summary"
   )
+  .fastkpc_full_cuda_phase3_exact_named_list(payload, base) ||
+    .fastkpc_full_cuda_phase3_exact_named_list(
+      payload, c(base, "qualification_dcov_parity")
+    )
 }
 
 .fastkpc_full_cuda_phase3_validate_oracle_payload <- function(
     payload, expected_setup_keys = NULL, expected_target_rows = NULL) {
   if (!.fastkpc_full_cuda_phase3_is_oracle_payload(payload)) {
     stop("Phase 3 oracle shard payload schema is malformed", call. = FALSE)
+  }
+  if ("qualification_dcov_parity" %in% names(payload)) {
+    records <- payload$qualification_dcov_parity
+    if (!is.data.frame(records) ||
+        !"logical_sequence_id" %in% names(records) ||
+        anyDuplicated(records$logical_sequence_id) || !identical(
+          records$logical_sequence_id,
+          sort(records$logical_sequence_id, method = "radix")
+        )) {
+      stop("Phase 3 oracle qualification dCov shard rows are malformed",
+           call. = FALSE)
+    }
+    full_dcov_names <- if (exists(
+          "fastkpc_full_cuda_fixed_sp_qualification_dcov_schema",
+          mode = "function", inherits = TRUE
+        )) {
+      fastkpc_full_cuda_fixed_sp_qualification_dcov_schema()$names
+    } else {
+      character()
+    }
+    if (nrow(records) > 0L && identical(names(records), full_dcov_names) &&
+        exists(
+          "fastkpc_full_cuda_fixed_sp_validate_qualification_dcov_frame",
+          mode = "function", inherits = TRUE
+        )) {
+      fastkpc_full_cuda_fixed_sp_validate_qualification_dcov_frame(records)
+    }
+    .fastkpc_full_cuda_phase3_validate_qualification_dcov(
+      records, require_full = FALSE
+    )
   }
   expected_supplied <- !is.null(expected_setup_keys) ||
     !is.null(expected_target_rows)
@@ -4338,7 +4388,9 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
 }
 
 fastkpc_full_cuda_phase3_run_oracle_shard <- function(
-    context, shard_id, setup_keys, target_rows, catalog) {
+    context, shard_id, setup_keys, target_rows, catalog,
+    scope = "iteration") {
+  scope <- .fastkpc_full_cuda_phase3_scope(scope)
   required_helpers <- c(
     "fastkpc_full_cuda_fixed_sp_execute_oracle_setup",
     "fastkpc_full_cuda_fixed_sp_load_oracle_phase2_shards",
@@ -4392,6 +4444,15 @@ fastkpc_full_cuda_phase3_run_oracle_shard <- function(
     }
   }
   fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
+  qualification <- if (scope %in% c("qualification", "full")) {
+    fastkpc_full_cuda_fixed_sp_load_qualification_logical_tests(
+      census_dir = catalog$phase1_dir,
+      prepared_dir = catalog$phase2_dir,
+      data_path = catalog$data_path
+    )
+  } else {
+    NULL
+  }
   runtime_info <- fixed_sp_cuda_runtime_info(context)
   fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
     runtime_info, paste("Phase 3 oracle shard", shard_id, "runtime")
@@ -4479,6 +4540,13 @@ fastkpc_full_cuda_phase3_run_oracle_shard <- function(
               load_elapsed_ms
             } else {
               0
+            },
+            shadow_callback = if (is.null(qualification)) NULL else {
+              function(setup_key, target_keys, residuals) {
+                .fastkpc_full_cuda_phase3_run_setup_qualification_dcov(
+                  qualification$logical_tests, target_keys, residuals
+                )
+              }
             }
           )
       }
@@ -4519,6 +4587,26 @@ fastkpc_full_cuda_phase3_run_oracle_shard <- function(
     failures = failures,
     summary = summary
   )
+  if (!is.null(qualification)) {
+    qualification_rows <- lapply(
+      setup_outputs, `[[`, "shadow_callback_result"
+    )
+    nonempty <- vapply(qualification_rows, nrow, integer(1L)) > 0L
+    qualification_rows <- if (any(nonempty)) {
+      do.call(rbind, qualification_rows[nonempty])
+    } else {
+      .fastkpc_full_cuda_phase3_empty_full_qualification_dcov()
+    }
+    qualification_rows <- qualification_rows[order(
+      qualification_rows$logical_sequence_id, method = "radix"
+    ), , drop = FALSE]
+    rownames(qualification_rows) <- NULL
+    if (anyDuplicated(qualification_rows$logical_sequence_id)) {
+      stop("Phase 3 shard qualification dCov ownership is duplicated",
+           call. = FALSE)
+    }
+    payload$qualification_dcov_parity <- qualification_rows
+  }
   .fastkpc_full_cuda_phase3_validate_oracle_payload(
     payload, expected_setup_keys = setup_keys,
     expected_target_rows = target_rows
@@ -4934,6 +5022,15 @@ fastkpc_full_cuda_phase3_run_shards <- function(
         }
         value <- value[order(target_rank, method = "radix"), , drop = FALSE]
         rownames(value) <- NULL
+      } else if ("logical_sequence_id" %in% fields) {
+        if (anyDuplicated(value$logical_sequence_id)) {
+          stop("Phase 3 merged payload has duplicate logical test keys",
+               call. = FALSE)
+        }
+        value <- value[order(
+          value$logical_sequence_id, method = "radix"
+        ), , drop = FALSE]
+        rownames(value) <- NULL
       }
       return(value)
     }
@@ -5055,4 +5152,1510 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     )
   }
   merged
+}
+
+.fastkpc_full_cuda_phase3_oracle_semantics_version <- function() {
+  "full-cuda-ci-fixed-sp-oracle-sp-semantics-v1"
+}
+
+.fastkpc_full_cuda_phase3_oracle_risk_fields <- function() {
+  c(
+    "high_condition", "rank_deficient", "nonfinite_metadata",
+    "near_constant_target", "near_constant_conditioner", "mgcv_warning",
+    "mgcv_nonconverged", "near_alpha"
+  )
+}
+
+.fastkpc_full_cuda_phase3_validate_test_identity <- function(identity) {
+  fields <- .fastkpc_full_cuda_phase3_test_identity_fields()
+  if (!.fastkpc_full_cuda_phase3_exact_named_list(
+        identity, c(fields, "sha256")
+      ) || !identical(
+        identity$schema_version,
+        "full-cuda-ci-phase3-test-input-identity-v1"
+      )) {
+    stop("Phase 3 artifact test identity is malformed", call. = FALSE)
+  }
+  expected <- .fastkpc_full_cuda_phase3_named_hash(
+    identity[setdiff(names(identity), "sha256")]
+  )
+  if (!identical(identity$sha256, expected)) {
+    stop("Phase 3 artifact test identity hash mismatch", call. = FALSE)
+  }
+  invisible(identity)
+}
+
+.fastkpc_full_cuda_phase3_validate_artifact_identity <- function(
+    identity, require_full = FALSE) {
+  if (!is.list(identity) || is.object(identity) || is.null(names(identity)) ||
+      anyDuplicated(names(identity))) {
+    stop("Phase 3 artifact identity is malformed", call. = FALSE)
+  }
+  if (identical(
+        identity$schema_version, "full-cuda-ci-phase3-input-identity-v1"
+      )) {
+    fastkpc_full_cuda_phase3_validate_input_identity(identity)
+  } else {
+    if (isTRUE(require_full)) {
+      stop("full Phase 3 artifact requires production identity",
+           call. = FALSE)
+    }
+    .fastkpc_full_cuda_phase3_validate_test_identity(identity)
+  }
+  invisible(identity)
+}
+
+.fastkpc_full_cuda_phase3_identity_json_exact <- function(
+    actual, expected, fields = names(expected)) {
+  is.list(actual) && !is.object(actual) &&
+    identical(names(actual), names(expected)) &&
+    typeof(fields) == "character" && !anyNA(fields) &&
+    !anyDuplicated(fields) && all(fields %in% names(expected)) &&
+    all(vapply(fields, function(field) {
+      .fastkpc_full_cuda_phase3_identity_value_equal(
+        actual[[field]], expected[[field]]
+      )
+    }, logical(1L)))
+}
+
+.fastkpc_full_cuda_phase3_oracle_descriptor_from_parity <- function(
+    target_parity) {
+  fields <- .fastkpc_full_cuda_phase3_oracle_descriptor_target_fields()
+  required <- c(
+    "prepared_s_key_sha256", "residual_key_sha256", "shard_id",
+    "canonical_setup_rank", "canonical_target_rank", "target", "null_dim",
+    "condition", "phase1_coefficient_rank", "planned_route",
+    "selected_sp_sha256", "coefficient_phase2_sha256",
+    "fitted_phase2_sha256", "residual_phase2_sha256",
+    "target_fit_fingerprint"
+  )
+  if (!is.data.frame(target_parity) ||
+      !all(required %in% names(target_parity))) {
+    stop("Phase 3 published target parity cannot form a descriptor",
+         call. = FALSE)
+  }
+  value <- data.frame(
+    prepared_s_key_sha256 = target_parity$prepared_s_key_sha256,
+    residual_key_sha256 = target_parity$residual_key_sha256,
+    shard_id = target_parity$shard_id,
+    canonical_setup_rank = target_parity$canonical_setup_rank,
+    canonical_target_rank = target_parity$canonical_target_rank,
+    phase2_shard_id = as.integer(
+      (target_parity$canonical_setup_rank - 1L) %%
+        fastkpc_full_cuda_fixed_sp_catalog_contract()$shard_count
+    ),
+    target = target_parity$target,
+    null_dim = target_parity$null_dim,
+    condition = target_parity$condition,
+    coefficient_rank = target_parity$phase1_coefficient_rank,
+    planned_route = target_parity$planned_route,
+    selected_sp_hash = target_parity$selected_sp_sha256,
+    coefficient_hash = target_parity$coefficient_phase2_sha256,
+    fitted_hash = target_parity$fitted_phase2_sha256,
+    residual_hash = target_parity$residual_phase2_sha256,
+    target_fit_fingerprint = target_parity$target_fit_fingerprint,
+    stringsAsFactors = FALSE
+  )
+  value <- value[, fields, drop = FALSE]
+  setup_keys <- sort(unique(value$prepared_s_key_sha256), method = "radix")
+  value <- value[order(
+    match(value$prepared_s_key_sha256, setup_keys),
+    value$residual_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  rownames(value) <- NULL
+  value
+}
+
+.fastkpc_full_cuda_phase3_oracle_risk_cases <- function(
+    target_parity, risk_rows = NULL, catalog = NULL) {
+  if (is.null(risk_rows) && !is.null(catalog)) {
+    risk_rows <- catalog$inputs$target_fit_metadata
+  }
+  risk_fields <- .fastkpc_full_cuda_phase3_oracle_risk_fields()
+  if (is.null(risk_rows)) {
+    risk_rows <- data.frame(
+      residual_key_sha256 = target_parity$residual_key_sha256,
+      stringsAsFactors = FALSE
+    )
+    for (field in risk_fields) risk_rows[[field]] <- FALSE
+  }
+  clean <- is.data.frame(risk_rows) &&
+    all(c("residual_key_sha256", risk_fields) %in% names(risk_rows)) &&
+    typeof(risk_rows$residual_key_sha256) == "character" &&
+    !anyNA(risk_rows$residual_key_sha256) &&
+    !anyDuplicated(risk_rows$residual_key_sha256) &&
+    all(vapply(risk_fields, function(field) {
+      typeof(risk_rows[[field]]) == "logical" &&
+        !is.object(risk_rows[[field]]) && !anyNA(risk_rows[[field]])
+    }, logical(1L)))
+  if (!isTRUE(clean)) {
+    stop("Phase 3 oracle risk selector rows are malformed", call. = FALSE)
+  }
+  matched <- match(target_parity$residual_key_sha256,
+                   risk_rows$residual_key_sha256)
+  if (anyNA(matched)) {
+    stop("Phase 3 oracle risk selectors do not cover target parity",
+         call. = FALSE)
+  }
+  selector_rows <- risk_rows[matched, c("residual_key_sha256", risk_fields),
+                             drop = FALSE]
+  selected <- Reduce(`|`, selector_rows[risk_fields])
+  joined <- cbind(
+    selector_rows[selected, , drop = FALSE],
+    target_parity[selected, setdiff(
+      names(target_parity), "residual_key_sha256"
+    ), drop = FALSE]
+  )
+  joined <- joined[order(joined$residual_key_sha256, method = "radix"),
+                   , drop = FALSE]
+  rownames(joined) <- NULL
+  joined
+}
+
+.fastkpc_full_cuda_phase3_validate_oracle_risk_cases <- function(
+    value, target_parity, expected = NULL) {
+  risk_fields <- .fastkpc_full_cuda_phase3_oracle_risk_fields()
+  clean <- is.data.frame(value) &&
+    all(c("residual_key_sha256", risk_fields) %in% names(value)) &&
+    typeof(value$residual_key_sha256) == "character" &&
+    !anyNA(value$residual_key_sha256) &&
+    !anyDuplicated(value$residual_key_sha256) &&
+    identical(
+      value$residual_key_sha256,
+      sort(value$residual_key_sha256, method = "radix")
+    ) && all(value$residual_key_sha256 %in%
+              target_parity$residual_key_sha256) &&
+    all(vapply(risk_fields, function(field) {
+      typeof(value[[field]]) == "logical" && !anyNA(value[[field]])
+    }, logical(1L))) &&
+    (nrow(value) == 0L || all(Reduce(`|`, value[risk_fields])))
+  if (!isTRUE(clean)) {
+    stop("Phase 3 oracle risk-case payload is malformed", call. = FALSE)
+  }
+  if (!is.null(expected) && !identical(value, expected)) {
+    stop("Phase 3 oracle risk-case payload is not Phase 1 derived",
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_empty_qualification_dcov <- function() {
+  data.frame(
+    logical_sequence_id = integer(), residual_key_x = character(),
+    residual_key_y = character(), reference_p_value = double(),
+    alpha = double(), p_value = double(), near_alpha = logical(),
+    backend = character(), low_rank_backend = character(),
+    backend_error = logical(), spectra_fallback = logical(),
+    p_value_difference = double(),
+    absolute_p_value_difference = double(),
+    reference_independent = logical(), independent = logical(),
+    decision_flip = logical(), stringsAsFactors = FALSE
+  )
+}
+
+.fastkpc_full_cuda_phase3_empty_full_qualification_dcov <- function() {
+  schema <- fastkpc_full_cuda_fixed_sp_qualification_dcov_schema()
+  columns <- lapply(schema$names, function(field) {
+    switch(
+      schema$types[[field]],
+      character = character(), integer = integer(), double = double(),
+      logical = logical(), list = I(list()),
+      stop("unsupported qualification dCov field type", call. = FALSE)
+    )
+  })
+  names(columns) <- schema$names
+  structure(columns, class = "data.frame", row.names = integer())
+}
+
+.fastkpc_full_cuda_phase3_run_setup_qualification_dcov <- function(
+    logical_tests, target_keys, residuals) {
+  if (!is.data.frame(logical_tests) || !is.matrix(residuals) ||
+      typeof(residuals) != "double" || ncol(residuals) != length(target_keys) ||
+      any(!is.finite(residuals)) || anyDuplicated(target_keys)) {
+    stop("Phase 3 setup qualification dCov inputs are malformed",
+         call. = FALSE)
+  }
+  selected <- logical_tests$residual_key_x %in% target_keys &
+    logical_tests$residual_key_y %in% target_keys
+  selected_tests <- logical_tests[selected, , drop = FALSE]
+  if (nrow(selected_tests) == 0L) {
+    return(.fastkpc_full_cuda_phase3_empty_full_qualification_dcov())
+  }
+  selected_tests <- selected_tests[order(
+    selected_tests$logical_sequence_id, method = "radix"
+  ), , drop = FALSE]
+  rownames(selected_tests) <- NULL
+  target_index <- setNames(seq_along(target_keys), target_keys)
+  parity_rows <- fastkpc_full_cuda_fixed_sp_with_legacy_dcov_backend(
+    function() {
+      rows <- lapply(seq_len(nrow(selected_tests)), function(index) {
+        logical_row <- selected_tests[index, , drop = FALSE]
+        oracle <- fastkpc_cuda_legacy_dcov_gamma_cpp_oracle(
+          as.double(residuals[, target_index[[
+            logical_row$residual_key_x[[1L]]
+          ]]]),
+          as.double(residuals[, target_index[[
+            logical_row$residual_key_y[[1L]]
+          ]]]),
+          numCol = 35L, index = 1
+        )
+        diagnostic <- fastkpc_full_cuda_fixed_sp_sanitize_dcov_diagnostic(
+          oracle$diagnostics
+        )
+        p_value <- as.double(oracle$p.value)
+        alpha <- as.double(logical_row$alpha[[1L]])
+        reference <- as.double(logical_row$reference_p_value[[1L]])
+        independent <- p_value >= alpha
+        row <- data.frame(
+          parity_scope = "qualification",
+          logical_sequence_id = logical_row$logical_sequence_id[[1L]],
+          residual_key_x = logical_row$residual_key_x[[1L]],
+          residual_key_y = logical_row$residual_key_y[[1L]],
+          index = 1L, numCol = 35L, alpha = alpha,
+          reference_p_value = reference, p_value = p_value,
+          p_value_drift = p_value - reference,
+          absolute_p_value_drift = abs(p_value - reference),
+          p_value_exact = identical(p_value, reference),
+          reference_signed_alpha_distance = reference - alpha,
+          signed_alpha_distance = p_value - alpha,
+          reference_decision = logical_row$reference_decision[[1L]],
+          reference_independent =
+            logical_row$reference_independent[[1L]],
+          decision = if (independent) "independent" else "dependent",
+          decision_identical = identical(
+            independent, logical_row$reference_independent[[1L]]
+          ),
+          spectra_no_fallback = diagnostic$lowrank_full_eig_count == 0L &&
+            diagnostic$lowrank_spectra_failed_count == 0L &&
+            diagnostic$lowrank_spectra_fallback_full_eig_count == 0L,
+          stringsAsFactors = FALSE
+        )
+        row$diagnostics <- I(list(diagnostic))
+        row
+      })
+      value <- do.call(rbind, rows)
+      rownames(value) <- NULL
+      value
+    }
+  )
+  fastkpc_full_cuda_fixed_sp_build_qualification_dcov_records(
+    selected_tests, parity_rows
+  )
+}
+
+.fastkpc_full_cuda_phase3_validate_qualification_dcov <- function(
+    value, require_full = FALSE, tolerance = 1e-10) {
+  common <- names(.fastkpc_full_cuda_phase3_empty_qualification_dcov())
+  clean <- is.data.frame(value) && all(common %in% names(value)) &&
+    typeof(value$logical_sequence_id) == "integer" &&
+    typeof(value$residual_key_x) == "character" &&
+    typeof(value$residual_key_y) == "character" &&
+    typeof(value$reference_p_value) == "double" &&
+    typeof(value$alpha) == "double" && typeof(value$p_value) == "double" &&
+    typeof(value$near_alpha) == "logical" &&
+    typeof(value$backend) == "character" &&
+    typeof(value$low_rank_backend) == "character" &&
+    typeof(value$backend_error) == "logical" &&
+    typeof(value$spectra_fallback) == "logical" &&
+    typeof(value$p_value_difference) == "double" &&
+    typeof(value$absolute_p_value_difference) == "double" &&
+    typeof(value$reference_independent) == "logical" &&
+    typeof(value$independent) == "logical" &&
+    typeof(value$decision_flip) == "logical" &&
+    !anyNA(value[common]) && !anyDuplicated(value$logical_sequence_id) &&
+    identical(
+      value$logical_sequence_id,
+      sort(value$logical_sequence_id, method = "radix")
+    ) && all(grepl("^[0-9a-f]{64}$", value$residual_key_x)) &&
+    all(grepl("^[0-9a-f]{64}$", value$residual_key_y)) &&
+    all(is.finite(value$reference_p_value)) &&
+    all(is.finite(value$alpha)) && all(is.finite(value$p_value)) &&
+    all(value$alpha > 0 & value$alpha < 1) &&
+    identical(
+      value$p_value_difference,
+      value$p_value - value$reference_p_value
+    ) && identical(
+      value$absolute_p_value_difference,
+      abs(value$p_value - value$reference_p_value)
+    ) && identical(
+      value$reference_independent,
+      value$reference_p_value >= value$alpha
+    ) && identical(value$independent, value$p_value >= value$alpha) &&
+    identical(
+      value$decision_flip,
+      value$independent != value$reference_independent
+    ) && all(value$backend == "cpp") &&
+    all(value$low_rank_backend == "spectra") &&
+    !any(value$backend_error) && !any(value$spectra_fallback)
+  if (!isTRUE(clean)) {
+    stop("Phase 3 qualification dCov evidence is malformed", call. = FALSE)
+  }
+  endpoints <- sort(unique(c(value$residual_key_x, value$residual_key_y)),
+                    method = "radix")
+  max_difference <- if (nrow(value) == 0L) 0 else {
+    max(value$absolute_p_value_difference)
+  }
+  summary <- list(
+    qualification_dcov_logical_test_count = as.integer(nrow(value)),
+    qualification_dcov_near_alpha_count =
+      as.integer(sum(value$near_alpha)),
+    qualification_dcov_unique_residual_key_count =
+      as.integer(length(endpoints)),
+    qualification_dcov_max_absolute_p_value_difference =
+      as.double(max_difference),
+    qualification_dcov_decision_flip_count =
+      as.integer(sum(value$decision_flip)),
+    qualification_dcov_backend_error_count =
+      as.integer(sum(value$backend_error)),
+    qualification_dcov_spectra_fallback_count =
+      as.integer(sum(value$spectra_fallback))
+  )
+  hard_gate <- is.finite(max_difference) && max_difference < tolerance &&
+    summary$qualification_dcov_decision_flip_count == 0L &&
+    summary$qualification_dcov_backend_error_count == 0L &&
+    summary$qualification_dcov_spectra_fallback_count == 0L
+  if (isTRUE(require_full)) {
+    hard_gate <- hard_gate &&
+      summary$qualification_dcov_logical_test_count == 3808L &&
+      summary$qualification_dcov_near_alpha_count == 1478L &&
+      summary$qualification_dcov_unique_residual_key_count == 6143L
+  }
+  if (!isTRUE(hard_gate)) {
+    stop("Phase 3 qualification dCov hard gate failed", call. = FALSE)
+  }
+  summary
+}
+
+.fastkpc_full_cuda_phase3_validate_qualification_lineage <- function(
+    value, logical_tests, target_keys) {
+  fields <- c(
+    "logical_sequence_id", "residual_key_x", "residual_key_y",
+    "reference_p_value", "alpha", "near_alpha"
+  )
+  target_clean <- typeof(target_keys) == "character" &&
+    !is.object(target_keys) && is.null(attributes(target_keys)) &&
+    !anyNA(target_keys) && !anyDuplicated(target_keys) &&
+    identical(target_keys, sort(target_keys, method = "radix")) &&
+    all(grepl("^[0-9a-f]{64}$", target_keys))
+  frame_clean <- is.data.frame(value) && is.data.frame(logical_tests) &&
+    all(fields %in% names(value)) && all(fields %in% names(logical_tests)) &&
+    nrow(value) == nrow(logical_tests) &&
+    all(vapply(fields, function(field) {
+      identical(value[[field]], logical_tests[[field]])
+    }, logical(1L)))
+  endpoints <- if (isTRUE(frame_clean)) {
+    sort(unique(c(value$residual_key_x, value$residual_key_y)),
+         method = "radix")
+  } else {
+    character()
+  }
+  if (!isTRUE(target_clean) || !isTRUE(frame_clean) ||
+      !identical(endpoints, target_keys)) {
+    stop("Phase 3 qualification dCov canonical lineage mismatch",
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_csv_frame <- function(value) {
+  if (!is.data.frame(value)) {
+    stop("Phase 3 CSV payload must be a data frame", call. = FALSE)
+  }
+  result <- value
+  for (field in names(result)[vapply(result, is.list, logical(1L))]) {
+    result[[field]] <- vapply(result[[field]], function(element) {
+      if (length(element) == 0L) "" else paste(element, collapse = ";")
+    }, character(1L))
+  }
+  rownames(result) <- NULL
+  result
+}
+
+.fastkpc_full_cuda_phase3_write_csv <- function(value, path) {
+  old_digits <- getOption("digits")
+  on.exit(options(digits = old_digits), add = TRUE)
+  options(digits = 17L)
+  utils::write.table(
+    .fastkpc_full_cuda_phase3_csv_frame(value), path,
+    sep = ",", row.names = FALSE, col.names = TRUE, quote = TRUE,
+    qmethod = "double", na = "NA", fileEncoding = "UTF-8"
+  )
+  invisible(path)
+}
+
+.fastkpc_full_cuda_phase3_read_csv <- function(path, label) {
+  value <- tryCatch(
+    utils::read.csv(
+      path, stringsAsFactors = FALSE, check.names = FALSE,
+      na.strings = "NA", blank.lines.skip = FALSE
+    ),
+    error = function(error) {
+      stop(label, " is not valid CSV: ", conditionMessage(error),
+           call. = FALSE)
+    }
+  )
+  if (!is.data.frame(value) || anyDuplicated(names(value))) {
+    stop(label, " CSV frame is malformed", call. = FALSE)
+  }
+  value
+}
+
+.fastkpc_full_cuda_phase3_coerce_csv_like <- function(
+    actual, expected, label) {
+  if (!is.data.frame(actual) || !is.data.frame(expected) ||
+      !identical(names(actual), names(expected)) ||
+      nrow(actual) != nrow(expected)) {
+    stop(label, " CSV/RDS schema mismatch", call. = FALSE)
+  }
+  result <- actual
+  for (field in names(expected)) {
+    template <- expected[[field]]
+    if (is.list(template)) {
+      next
+    }
+    result[[field]] <- switch(
+      typeof(template),
+      character = {
+        converted <- as.character(result[[field]])
+        converted[is.na(converted) & template == ""] <- ""
+        converted
+      },
+      logical = {
+        if (typeof(result[[field]]) != "logical" || anyNA(result[[field]])) {
+          stop(label, " logical CSV column is malformed: ", field,
+               call. = FALSE)
+        }
+        as.logical(result[[field]])
+      },
+      integer = {
+        numeric <- suppressWarnings(as.double(result[[field]]))
+        if (anyNA(numeric) != anyNA(template) ||
+            any(is.finite(numeric) & numeric != floor(numeric)) ||
+            any(abs(numeric[is.finite(numeric)]) > .Machine$integer.max)) {
+          stop(label, " integer CSV column is malformed: ", field,
+               call. = FALSE)
+        }
+        as.integer(numeric)
+      },
+      double = as.double(result[[field]]),
+      stop(label, " has an unsupported CSV type: ", field, call. = FALSE)
+    )
+  }
+  expected_csv <- .fastkpc_full_cuda_phase3_csv_frame(expected)
+  for (field in names(expected)) {
+    if (is.list(expected[[field]])) {
+      result[[field]] <- as.character(result[[field]])
+    } else if (typeof(expected[[field]]) == "double") {
+      result[[field]][is.nan(result[[field]])] <- NA_real_
+      expected_csv[[field]][is.nan(expected_csv[[field]])] <- NA_real_
+    }
+  }
+  rownames(result) <- NULL
+  mismatched <- names(expected_csv)[!vapply(
+    names(expected_csv), function(field) {
+      if (typeof(expected_csv[[field]]) == "double") {
+        isTRUE(all.equal(
+          result[[field]], expected_csv[[field]],
+          tolerance = 1e-15, check.attributes = FALSE
+        ))
+      } else {
+        identical(result[[field]], expected_csv[[field]])
+      }
+    }, logical(1L)
+  )]
+  if (length(mismatched) > 0L) {
+    stop(label, " CSV values do not match RDS: ", mismatched[[1L]],
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_oracle_runtime_lifecycle <- function(
+    output_dir, shard_count) {
+  shards_dir <- file.path(output_dir, "shards")
+  sessions_dir <- file.path(output_dir, "sessions")
+  scan <- .fastkpc_full_cuda_phase3_scan_shards(
+    shards_dir, shard_count, require_complete = TRUE
+  )
+  session_ids <- unique(vapply(scan$expected_ids, function(shard_id) {
+    summary <- .fastkpc_full_cuda_phase3_read_json(
+      .fastkpc_full_cuda_phase3_shard_paths(
+        shards_dir, shard_id
+      )$summary_json,
+      "Phase 3 shard summary"
+    )
+    summary$session_id
+  }, character(1L)))
+  session_ids <- sort(session_ids, method = "radix")
+  rows <- lapply(session_ids, function(session_id) {
+    session <- .fastkpc_full_cuda_phase3_read_json(
+      .fastkpc_full_cuda_phase3_session_path(sessions_dir, session_id),
+      "Phase 3 shard session"
+    )
+    .fastkpc_full_cuda_phase3_validate_session(
+      session, require_complete = TRUE
+    )
+    data.frame(
+      session_id = session$session_id,
+      requested_shard_count = as.integer(length(
+        .fastkpc_full_cuda_phase3_integer_vector(
+          session$requested_shard_ids, "requested_shard_ids"
+        )
+      )),
+      completed_shard_count = as.integer(length(
+        .fastkpc_full_cuda_phase3_integer_vector(
+          session$completed_shard_ids, "completed_shard_ids"
+        )
+      )),
+      runtime_context_create_count =
+        as.integer(session$runtime_context_create_count),
+      runtime_context_destroy_count =
+        as.integer(session$runtime_context_destroy_count),
+      prepared_handle_create_count =
+        as.integer(session$prepared_handle_create_count),
+      prepared_handle_destroy_count =
+        as.integer(session$prepared_handle_destroy_count),
+      residual_token_acquire_count =
+        as.integer(session$residual_token_acquire_count),
+      residual_token_release_count =
+        as.integer(session$residual_token_release_count),
+      output_slot_acquire_count =
+        as.integer(session$output_slot_acquire_count),
+      output_slot_release_count =
+        as.integer(session$output_slot_release_count),
+      target_level_stable_sync_count =
+        as.integer(session$target_level_stable_sync_count),
+      status = session$status,
+      stringsAsFactors = FALSE
+    )
+  })
+  do.call(rbind, rows)
+}
+
+.fastkpc_full_cuda_phase3_oracle_input_hashes <- function(identity) {
+  selected <- names(identity)[vapply(identity, function(value) {
+    .fastkpc_full_cuda_phase3_sha256(value)
+  }, logical(1L))]
+  selected <- sort(selected, method = "radix")
+  data.frame(
+    logical_path = selected,
+    sha256 = vapply(selected, function(field) identity[[field]],
+                   character(1L)),
+    stringsAsFactors = FALSE
+  )
+}
+
+.fastkpc_full_cuda_phase3_oracle_environment_lines <- function(identity) {
+  fields <- sort(names(identity), method = "radix")
+  unname(vapply(fields, function(field) {
+    value <- identity[[field]]
+    if (length(value) != 1L || is.object(value) || is.list(value) ||
+        is.na(value)) {
+      stop("Phase 3 environment identity field is malformed: ", field,
+           call. = FALSE)
+    }
+    paste0(field, "=", as.character(value))
+  }, character(1L)))
+}
+
+.fastkpc_full_cuda_phase3_oracle_summary_list <- function(
+    row_summary, dcov_summary, risk_case_count, shard_count,
+    payload_count, manifest_sha256 = NULL, pass = TRUE) {
+  if (!is.data.frame(row_summary) || nrow(row_summary) != 1L ||
+      !is.list(dcov_summary)) {
+    stop("Phase 3 oracle summary inputs are malformed", call. = FALSE)
+  }
+  c(
+    list(
+      artifact_schema_version =
+        fastkpc_full_cuda_phase3_oracle_schema_version(),
+      artifact_kind = "oracle_sp",
+      oracle_semantics_version =
+        .fastkpc_full_cuda_phase3_oracle_semantics_version(),
+      manifest_sha256 = manifest_sha256,
+      shard_count = as.integer(shard_count),
+      payload_count = as.integer(payload_count),
+      risk_case_count = as.integer(risk_case_count),
+      pass = as.logical(pass)
+    ),
+    as.list(row_summary[1L, , drop = FALSE]),
+    dcov_summary
+  )
+}
+
+.fastkpc_full_cuda_phase3_summary_claims_exact <- function(
+    actual, expected) {
+  required <- names(expected)
+  if (!is.list(actual) || is.object(actual) ||
+      !identical(names(actual), required)) {
+    return(FALSE)
+  }
+  all(vapply(required, function(field) {
+    expected_value <- expected[[field]]
+    if (typeof(expected_value) == "double" && length(expected_value) == 1L &&
+        is.finite(expected_value)) {
+      isTRUE(all.equal(
+        as.double(actual[[field]]), expected_value,
+        tolerance = 1e-15, check.attributes = FALSE
+      ))
+    } else {
+      .fastkpc_full_cuda_phase3_identity_value_equal(
+        actual[[field]], expected_value
+      )
+    }
+  }, logical(1L)))
+}
+
+fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
+    output_dir, setup_keys, target_rows, identity, route_config, scope,
+    shard_count = NULL, risk_rows = NULL, qualification_dcov = NULL,
+    catalog = NULL, device_id = NULL, command_lines = NULL) {
+  scope <- .fastkpc_full_cuda_phase3_scope(scope)
+  require_full <- identical(scope, "full")
+  .fastkpc_full_cuda_phase3_validate_artifact_identity(
+    identity, require_full = require_full
+  )
+  plan <- fastkpc_full_cuda_phase3_plan_shards(
+    setup_keys = setup_keys, target_rows = target_rows, scope = scope,
+    shard_count = shard_count
+  )
+  .fastkpc_full_cuda_phase3_validate_route_for_shards(route_config, scope)
+  .fastkpc_full_cuda_phase3_validate_execution_identity(
+    identity = identity, route_config = route_config,
+    scope = scope, plan = plan
+  )
+  paths <- fastkpc_full_cuda_phase3_artifact_paths(output_dir, "oracle_sp")
+  completion <- c(
+    manifest = file.exists(paths$manifest_json),
+    summary = file.exists(paths$summary_json)
+  )
+  if (all(completion)) {
+    validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+      output_dir = output_dir, expected_identity = identity,
+      require_full = require_full, catalog = catalog, device_id = device_id
+    )
+    return(list(
+      status = "reused", validation = validated,
+      summary = validated$summary
+    ))
+  }
+  if (any(completion)) {
+    unlink(c(paths$manifest_json, paths$summary_json), force = TRUE)
+  }
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  stale_temporary <- list.files(
+    output_dir, pattern = "^\\.phase3-oracle-publish-",
+    all.files = TRUE, full.names = TRUE
+  )
+  if (length(stale_temporary) > 0L) {
+    unlink(stale_temporary, recursive = TRUE, force = TRUE)
+  }
+
+  merged <- fastkpc_full_cuda_phase3_merge_shards(
+    output_dir = output_dir, kind = "oracle_sp",
+    setup_keys = setup_keys, target_rows = target_rows,
+    identity = identity, route_config = route_config, scope = scope,
+    shard_count = shard_count
+  )
+  payload <- merged$payload
+  setup_results <- payload$setup_results
+  target_parity_internal <- payload$target_parity
+  if (anyDuplicated(setup_results$prepared_s_key_sha256) ||
+      anyDuplicated(target_parity_internal$residual_key_sha256)) {
+    stop("Phase 3 oracle merge contains duplicate setup or target keys",
+         call. = FALSE)
+  }
+  setup_order <- order(
+    setup_results$prepared_s_key_sha256, method = "radix"
+  )
+  setup_results <- setup_results[setup_order, , drop = FALSE]
+  resource_metrics <- payload$resource_metrics[setup_order, , drop = FALSE]
+  stage_rank <- match(
+    payload$stage_timing$prepared_s_key_sha256,
+    setup_results$prepared_s_key_sha256
+  )
+  stage_timing <- payload$stage_timing[order(
+    stage_rank, payload$stage_timing$setup_ordinal, method = "radix"
+  ), , drop = FALSE]
+  rownames(setup_results) <- rownames(resource_metrics) <-
+    rownames(stage_timing) <- NULL
+  internal_setup_rank <- match(
+    target_parity_internal$prepared_s_key_sha256,
+    setup_results$prepared_s_key_sha256
+  )
+  target_parity_internal <- target_parity_internal[order(
+    internal_setup_rank, target_parity_internal$residual_key_sha256,
+    method = "radix"
+  ), , drop = FALSE]
+  rownames(target_parity_internal) <- NULL
+  fallbacks <- .fastkpc_full_cuda_phase3_oracle_fallback_rows(
+    target_parity_internal, resource_metrics
+  )
+  failures <- .fastkpc_full_cuda_phase3_oracle_failure_rows(
+    target_parity_internal
+  )
+  row_summary <- fastkpc_full_cuda_phase3_summarize_oracle_rows(
+    setup_results, target_parity_internal, resource_metrics,
+    stage_timing, fallbacks, failures
+  )
+  descriptor <- .fastkpc_full_cuda_phase3_oracle_descriptor_from_parity(
+    target_parity_internal
+  )
+  checked_payload <- list(
+    setup_results = setup_results,
+    target_parity = target_parity_internal,
+    resource_metrics = resource_metrics,
+    stage_timing = stage_timing,
+    fallbacks = fallbacks,
+    failures = failures,
+    summary = row_summary
+  )
+  .fastkpc_full_cuda_phase3_validate_oracle_payload(
+    checked_payload,
+    expected_setup_keys = setup_results$prepared_s_key_sha256,
+    expected_target_rows = descriptor
+  )
+
+  target_parity <- target_parity_internal[order(
+    target_parity_internal$residual_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  rownames(target_parity) <- NULL
+  risk_cases <- .fastkpc_full_cuda_phase3_oracle_risk_cases(
+    target_parity, risk_rows = risk_rows, catalog = catalog
+  )
+  .fastkpc_full_cuda_phase3_validate_oracle_risk_cases(
+    risk_cases, target_parity
+  )
+  if (is.null(qualification_dcov) &&
+      "qualification_dcov_parity" %in% names(payload)) {
+    qualification_dcov <- payload$qualification_dcov_parity
+  }
+  if (is.null(qualification_dcov)) {
+    qualification_dcov <-
+      .fastkpc_full_cuda_phase3_empty_qualification_dcov()
+  }
+  if (!is.data.frame(qualification_dcov) ||
+      !"logical_sequence_id" %in% names(qualification_dcov)) {
+    stop("Phase 3 qualification dCov merge input is malformed",
+         call. = FALSE)
+  }
+  qualification_dcov <- qualification_dcov[order(
+    qualification_dcov$logical_sequence_id, method = "radix"
+  ), , drop = FALSE]
+  rownames(qualification_dcov) <- NULL
+  dcov_summary <- .fastkpc_full_cuda_phase3_validate_qualification_dcov(
+    qualification_dcov, require_full = require_full,
+    tolerance = route_config$qualification_dcov_p_tolerance
+  )
+  runtime_lifecycle <-
+    .fastkpc_full_cuda_phase3_oracle_runtime_lifecycle(
+      output_dir, plan$shard_count
+    )
+  input_hashes <- .fastkpc_full_cuda_phase3_oracle_input_hashes(identity)
+  if (is.null(command_lines)) {
+    command_lines <- paste(c("Rscript", commandArgs(trailingOnly = FALSE)),
+                           collapse = " ")
+  }
+  if (typeof(command_lines) != "character" || length(command_lines) < 1L ||
+      anyNA(command_lines) || any(!nzchar(command_lines)) ||
+      any(grepl("[\r\n]", command_lines))) {
+    stop("Phase 3 oracle command evidence is malformed", call. = FALSE)
+  }
+  environment_lines <-
+    .fastkpc_full_cuda_phase3_oracle_environment_lines(identity)
+
+  payload_keys <- .fastkpc_full_cuda_phase3_payload_keys("oracle_sp")
+  values <- list(
+    commands_txt = command_lines,
+    environment_txt = environment_lines,
+    input_hashes_csv = input_hashes,
+    route_config_json = route_config,
+    runtime_lifecycle_csv = runtime_lifecycle,
+    resource_metrics_csv = resource_metrics,
+    stage_timing_csv = stage_timing,
+    fallbacks_csv = fallbacks,
+    failures_csv = failures,
+    setup_results_csv = setup_results,
+    setup_results_rds = setup_results,
+    target_parity_csv = target_parity,
+    target_parity_rds = target_parity,
+    risk_cases_csv = risk_cases,
+    risk_cases_rds = risk_cases,
+    qualification_dcov_csv = qualification_dcov,
+    qualification_dcov_rds = qualification_dcov
+  )
+  if (!identical(names(values), payload_keys)) {
+    stop("internal Phase 3 oracle payload namespace mismatch",
+         call. = FALSE)
+  }
+  staging_dir <- tempfile(
+    ".phase3-oracle-publish-", tmpdir = output_dir
+  )
+  if (!dir.create(staging_dir, recursive = FALSE, showWarnings = FALSE)) {
+    stop("failed to create Phase 3 oracle staging directory",
+         call. = FALSE)
+  }
+  on.exit(unlink(staging_dir, recursive = TRUE, force = TRUE), add = TRUE)
+  staged_paths <- setNames(
+    file.path(staging_dir, vapply(
+      paths[payload_keys], basename, character(1L)
+    )), payload_keys
+  )
+  for (key in payload_keys) {
+    path <- staged_paths[[key]]
+    if (endsWith(key, "_rds")) {
+      saveRDS(values[[key]], path, version = 3L)
+      if (!identical(readRDS(path), values[[key]])) {
+        stop("Phase 3 staged RDS readback mismatch: ", key,
+             call. = FALSE)
+      }
+    } else if (endsWith(key, "_csv")) {
+      .fastkpc_full_cuda_phase3_write_csv(values[[key]], path)
+      .fastkpc_full_cuda_phase3_coerce_csv_like(
+        .fastkpc_full_cuda_phase3_read_csv(path, key),
+        values[[key]], key
+      )
+    } else if (endsWith(key, "_json")) {
+      fastkpc_full_cuda_write_json(values[[key]], path)
+      .fastkpc_full_cuda_phase3_read_json(path, key)
+    } else if (endsWith(key, "_txt")) {
+      writeLines(values[[key]], path, useBytes = TRUE)
+      if (!identical(readLines(path, warn = FALSE), values[[key]])) {
+        stop("Phase 3 staged text readback mismatch: ", key,
+             call. = FALSE)
+      }
+    } else {
+      stop("unsupported Phase 3 oracle payload key: ", key,
+           call. = FALSE)
+    }
+  }
+  staged_hashes <- vapply(
+    staged_paths, fastkpc_full_cuda_census_file_hash, character(1L)
+  )
+  payload_names <- vapply(paths[payload_keys], basename, character(1L))
+  names(staged_hashes) <- payload_names
+  expected_setup_hash <- fastkpc_full_cuda_census_key_set_hash(
+    setup_results$prepared_s_key_sha256
+  )
+  manifest <- list(
+    artifact_schema_version = fastkpc_full_cuda_phase3_oracle_schema_version(),
+    artifact_kind = "oracle_sp",
+    oracle_semantics_version =
+      .fastkpc_full_cuda_phase3_oracle_semantics_version(),
+    scope = scope,
+    shard_count = as.integer(plan$shard_count),
+    input_identity_schema_version = identity$schema_version,
+    input_identity_sha256 = identity$sha256,
+    expected_setup_count = as.integer(nrow(setup_results)),
+    expected_setup_hash = expected_setup_hash,
+    expected_target_count = as.integer(nrow(target_parity)),
+    expected_target_hash = fastkpc_full_cuda_census_key_set_hash(
+      target_parity$residual_key_sha256
+    ),
+    payload_names = unname(payload_names),
+    publication_order = c(
+      unname(payload_names), "manifest.json", "summary.json"
+    ),
+    payload_file_sha256 = as.list(staged_hashes),
+    input_identity = identity
+  )
+  if (!.fastkpc_full_cuda_phase3_sha256(expected_setup_hash)) {
+    stop("internal Phase 3 setup hash is malformed", call. = FALSE)
+  }
+
+  for (key in payload_keys) {
+    final_path <- paths[[key]]
+    if (file.exists(final_path)) unlink(final_path, force = TRUE)
+    if (!file.rename(staged_paths[[key]], final_path)) {
+      stop("failed to publish Phase 3 oracle payload: ", key,
+           call. = FALSE)
+    }
+  }
+  manifest_temporary <- file.path(staging_dir, "manifest.json")
+  fastkpc_full_cuda_write_json(manifest, manifest_temporary)
+  if (file.exists(paths$manifest_json)) unlink(paths$manifest_json, force = TRUE)
+  if (!file.rename(manifest_temporary, paths$manifest_json)) {
+    stop("failed to publish Phase 3 oracle manifest", call. = FALSE)
+  }
+  manifest_sha256 <- fastkpc_full_cuda_census_file_hash(
+    paths$manifest_json
+  )
+  summary <- .fastkpc_full_cuda_phase3_oracle_summary_list(
+    row_summary = row_summary, dcov_summary = dcov_summary,
+    risk_case_count = nrow(risk_cases), shard_count = plan$shard_count,
+    payload_count = length(payload_keys),
+    manifest_sha256 = manifest_sha256, pass = TRUE
+  )
+  summary_temporary <- file.path(staging_dir, "summary.json")
+  fastkpc_full_cuda_write_json(summary, summary_temporary)
+  if (file.exists(paths$summary_json)) unlink(paths$summary_json, force = TRUE)
+  if (!file.rename(summary_temporary, paths$summary_json)) {
+    stop("failed to publish Phase 3 oracle summary", call. = FALSE)
+  }
+  unlink(staging_dir, recursive = TRUE, force = TRUE)
+  validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    output_dir = output_dir, expected_identity = identity,
+    require_full = require_full, catalog = catalog, device_id = device_id
+  )
+  list(status = "published", validation = validated, summary = summary)
+}
+
+.fastkpc_full_cuda_phase3_coerce_oracle_csv <- function(value, name) {
+  schemas <- fastkpc_full_cuda_fixed_sp_oracle_row_schemas()
+  if (!name %in% names(schemas) || !is.data.frame(value) ||
+      !identical(names(value), names(schemas[[name]]))) {
+    stop("Phase 3 oracle CSV schema mismatch: ", name, call. = FALSE)
+  }
+  schema <- schemas[[name]]
+  result <- value
+  for (field in names(schema)) {
+    type <- unname(schema[[field]])
+    result[[field]] <- switch(
+      type,
+      character = {
+        converted <- as.character(result[[field]])
+        converted[is.na(converted)] <- ""
+        converted
+      },
+      logical = {
+        if (typeof(result[[field]]) != "logical" || anyNA(result[[field]])) {
+          stop("Phase 3 oracle logical CSV field is malformed: ", field,
+               call. = FALSE)
+        }
+        as.logical(result[[field]])
+      },
+      integer = {
+        numeric <- suppressWarnings(as.double(result[[field]]))
+        finite <- is.finite(numeric)
+        if (any(finite & numeric != floor(numeric)) ||
+            any(abs(numeric[finite]) > .Machine$integer.max)) {
+          stop("Phase 3 oracle integer CSV field is malformed: ", field,
+               call. = FALSE)
+        }
+        as.integer(numeric)
+      },
+      double = as.double(result[[field]]),
+      stop("unsupported Phase 3 oracle CSV field type", call. = FALSE)
+    )
+  }
+  rownames(result) <- NULL
+  fastkpc_full_cuda_fixed_sp_validate_oracle_frame(result, name)
+}
+
+.fastkpc_full_cuda_phase3_read_rds <- function(path, label) {
+  if (!file.exists(path) || dir.exists(path)) {
+    stop(label, " is missing", call. = FALSE)
+  }
+  tryCatch(
+    readRDS(path),
+    error = function(error) {
+      stop(label, " is not readable RDS: ", conditionMessage(error),
+           call. = FALSE)
+    }
+  )
+}
+
+.fastkpc_full_cuda_phase3_validate_completed_oracle_artifact <- function(
+    output_dir, expected_identity = NULL, require_full = FALSE,
+    catalog = NULL, device_id = NULL) {
+  if (!.fastkpc_full_cuda_phase3_bare_scalar(require_full, "logical")) {
+    stop("require_full must be a logical scalar", call. = FALSE)
+  }
+  if (xor(is.null(catalog), is.null(device_id))) {
+    stop("catalog validation requires catalog and device_id together",
+         call. = FALSE)
+  }
+  if (!is.null(catalog)) {
+    discovered <- fastkpc_full_cuda_phase3_input_identity(catalog, device_id)
+    if (!is.null(expected_identity) &&
+        !identical(expected_identity, discovered)) {
+      stop("precomputed Phase 3 identity disagrees with catalog identity",
+           call. = FALSE)
+    }
+    expected_identity <- discovered
+  }
+  if (is.null(expected_identity)) {
+    stop("completed Phase 3 oracle validation requires expected identity",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_validate_artifact_identity(
+    expected_identity, require_full = require_full
+  )
+  paths <- fastkpc_full_cuda_phase3_artifact_paths(output_dir, "oracle_sp")
+  if (!dir.exists(output_dir)) {
+    stop("Phase 3 oracle artifact directory is missing", call. = FALSE)
+  }
+  final_keys <- setdiff(names(paths), c("shards_dir", "sessions_dir"))
+  expected_entries <- c(
+    basename(unlist(paths[final_keys], use.names = FALSE)),
+    basename(paths$shards_dir), basename(paths$sessions_dir)
+  )
+  actual_entries <- list.files(
+    output_dir, all.files = TRUE, no.. = TRUE, full.names = FALSE
+  )
+  if (!identical(
+        sort(actual_entries, method = "radix"),
+        sort(expected_entries, method = "radix")
+      )) {
+    stop("Phase 3 oracle top-level file surface is incomplete or forged",
+         call. = FALSE)
+  }
+  final_paths <- unlist(paths[final_keys], use.names = FALSE)
+  if (!dir.exists(paths$shards_dir) || !dir.exists(paths$sessions_dir) ||
+      any(!file.exists(final_paths)) || any(dir.exists(final_paths))) {
+    stop("Phase 3 oracle artifact path set is incomplete", call. = FALSE)
+  }
+  manifest <- .fastkpc_full_cuda_phase3_read_json(
+    paths$manifest_json, "manifest.json"
+  )
+  summary <- .fastkpc_full_cuda_phase3_read_json(
+    paths$summary_json, "summary.json"
+  )
+  manifest_fields <- c(
+    "artifact_schema_version", "artifact_kind",
+    "oracle_semantics_version", "scope", "shard_count",
+    "input_identity_schema_version", "input_identity_sha256",
+    "expected_setup_count", "expected_setup_hash",
+    "expected_target_count", "expected_target_hash", "payload_names",
+    "publication_order", "payload_file_sha256", "input_identity"
+  )
+  production_identity <- identical(
+    expected_identity$schema_version,
+    "full-cuda-ci-phase3-input-identity-v1"
+  )
+  identity_comparison_fields <- if (isTRUE(production_identity)) {
+    c(.fastkpc_full_cuda_phase3_stable_identity_fields(), "sha256")
+  } else {
+    names(expected_identity)
+  }
+  if (!identical(names(manifest), manifest_fields) ||
+      !identical(
+        manifest$artifact_schema_version,
+        fastkpc_full_cuda_phase3_oracle_schema_version()
+      ) || !identical(manifest$artifact_kind, "oracle_sp") ||
+      !identical(
+        manifest$oracle_semantics_version,
+        .fastkpc_full_cuda_phase3_oracle_semantics_version()
+      ) || !identical(
+        manifest$input_identity_schema_version,
+        expected_identity$schema_version
+      ) || !identical(
+        manifest$input_identity_sha256, expected_identity$sha256
+      ) || !.fastkpc_full_cuda_phase3_identity_json_exact(
+        manifest$input_identity, expected_identity,
+        fields = identity_comparison_fields
+      )) {
+    stop("Phase 3 oracle manifest identity/schema is invalid",
+         call. = FALSE)
+  }
+  scope <- .fastkpc_full_cuda_phase3_scope(manifest$scope)
+  if (isTRUE(require_full) && !identical(scope, "full")) {
+    stop("full Phase 3 oracle artifact has the wrong scope", call. = FALSE)
+  }
+  shard_count <- .fastkpc_full_cuda_phase3_whole_scalar(
+    manifest$shard_count, 1L, "manifest shard_count"
+  )
+  if (identical(scope, "full") && shard_count != 64L) {
+    stop("full Phase 3 oracle shard count is not canonical", call. = FALSE)
+  }
+  payload_keys <- .fastkpc_full_cuda_phase3_payload_keys("oracle_sp")
+  payload_names <- unname(vapply(
+    paths[payload_keys], basename, character(1L)
+  ))
+  if (typeof(manifest$payload_names) != "character" ||
+      !identical(manifest$payload_names, payload_names) ||
+      !identical(
+        manifest$publication_order,
+        c(payload_names, "manifest.json", "summary.json")
+      )) {
+    stop("Phase 3 oracle manifest payload order is invalid", call. = FALSE)
+  }
+  manifest_hashes <- .fastkpc_full_cuda_phase3_named_sha256(
+    manifest$payload_file_sha256, "manifest payload hashes"
+  )
+  if (!identical(names(manifest_hashes), payload_names)) {
+    stop("Phase 3 oracle manifest payload hash namespace is invalid",
+         call. = FALSE)
+  }
+  actual_hashes <- vapply(
+    paths[payload_keys], fastkpc_full_cuda_census_file_hash,
+    character(1L)
+  )
+  names(actual_hashes) <- payload_names
+  sizes <- as.numeric(file.info(
+    unlist(paths[payload_keys], use.names = FALSE)
+  )$size)
+  if (anyNA(sizes) || any(sizes <= 0) ||
+      !identical(actual_hashes, manifest_hashes)) {
+    stop("Phase 3 oracle payload byte hash validation failed",
+         call. = FALSE)
+  }
+  route_config <- .fastkpc_full_cuda_phase3_validate_route_file(
+    paths$route_config_json, expected_identity$route_config_hash
+  )
+
+  setup_results <- .fastkpc_full_cuda_phase3_read_rds(
+    paths$setup_results_rds, "setup_results.rds"
+  )
+  target_parity <- .fastkpc_full_cuda_phase3_read_rds(
+    paths$target_parity_rds, "target_parity.rds"
+  )
+  risk_cases <- .fastkpc_full_cuda_phase3_read_rds(
+    paths$risk_cases_rds, "risk_cases.rds"
+  )
+  qualification_dcov <- .fastkpc_full_cuda_phase3_read_rds(
+    paths$qualification_dcov_rds, "qualification_dcov_parity.rds"
+  )
+  setup_results <- fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
+    setup_results, "setup_results"
+  )
+  target_parity <- fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
+    target_parity, "target_parity"
+  )
+  if (anyDuplicated(setup_results$prepared_s_key_sha256) ||
+      anyDuplicated(target_parity$residual_key_sha256) ||
+      !identical(
+        setup_results$prepared_s_key_sha256,
+        sort(setup_results$prepared_s_key_sha256, method = "radix")
+      ) || !identical(
+        target_parity$residual_key_sha256,
+        sort(target_parity$residual_key_sha256, method = "radix")
+      )) {
+    stop("Phase 3 oracle published key order/uniqueness is invalid",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_coerce_csv_like(
+    .fastkpc_full_cuda_phase3_read_csv(
+      paths$setup_results_csv, "setup_results.csv"
+    ), setup_results, "setup_results"
+  )
+  .fastkpc_full_cuda_phase3_coerce_csv_like(
+    .fastkpc_full_cuda_phase3_read_csv(
+      paths$target_parity_csv, "target_parity.csv"
+    ), target_parity, "target_parity"
+  )
+  .fastkpc_full_cuda_phase3_coerce_csv_like(
+    .fastkpc_full_cuda_phase3_read_csv(
+      paths$risk_cases_csv, "risk_cases.csv"
+    ), risk_cases, "risk_cases"
+  )
+  .fastkpc_full_cuda_phase3_coerce_csv_like(
+    .fastkpc_full_cuda_phase3_read_csv(
+      paths$qualification_dcov_csv, "qualification_dcov_parity.csv"
+    ), qualification_dcov, "qualification_dcov_parity"
+  )
+  resource_metrics <- .fastkpc_full_cuda_phase3_coerce_oracle_csv(
+    .fastkpc_full_cuda_phase3_read_csv(
+      paths$resource_metrics_csv, "resource_metrics.csv"
+    ), "resource_metrics"
+  )
+  stage_timing <- .fastkpc_full_cuda_phase3_coerce_oracle_csv(
+    .fastkpc_full_cuda_phase3_read_csv(
+      paths$stage_timing_csv, "stage_timing.csv"
+    ), "stage_timing"
+  )
+  fallbacks <- .fastkpc_full_cuda_phase3_read_csv(
+    paths$fallbacks_csv, "fallbacks.csv"
+  )
+  failures <- .fastkpc_full_cuda_phase3_read_csv(
+    paths$failures_csv, "failures.csv"
+  )
+  if (!identical(names(fallbacks), c("fallback_type", "count")) ||
+      any(!is.finite(fallbacks$count)) ||
+      any(fallbacks$count != floor(fallbacks$count))) {
+    stop("Phase 3 oracle fallback CSV is malformed", call. = FALSE)
+  }
+  fallbacks$fallback_type <- as.character(fallbacks$fallback_type)
+  fallbacks$count <- as.integer(fallbacks$count)
+  failure_fields <- c(
+    "prepared_s_key_sha256", "residual_key_sha256", "solver_status",
+    "error_code", "error_message_sha256"
+  )
+  if (!identical(names(failures), failure_fields)) {
+    stop("Phase 3 oracle failure CSV is malformed", call. = FALSE)
+  }
+  for (field in failure_fields) failures[[field]] <- as.character(
+    failures[[field]]
+  )
+  rownames(fallbacks) <- rownames(failures) <- NULL
+
+  setup_rank <- match(
+    target_parity$prepared_s_key_sha256,
+    setup_results$prepared_s_key_sha256
+  )
+  target_internal <- target_parity[order(
+    setup_rank, target_parity$residual_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  rownames(target_internal) <- NULL
+  descriptor <- .fastkpc_full_cuda_phase3_oracle_descriptor_from_parity(
+    target_internal
+  )
+  plan <- fastkpc_full_cuda_phase3_plan_shards(
+    setup_keys = setup_results$prepared_s_key_sha256,
+    target_rows = descriptor, scope = scope,
+    shard_count = if (identical(scope, "full")) NULL else shard_count
+  )
+  .fastkpc_full_cuda_phase3_validate_execution_identity(
+    identity = expected_identity, route_config = route_config,
+    scope = scope, plan = plan
+  )
+  if (!identical(
+        manifest$expected_setup_count, as.integer(nrow(setup_results))
+      ) || !identical(
+        manifest$expected_setup_hash,
+        fastkpc_full_cuda_census_key_set_hash(
+          setup_results$prepared_s_key_sha256
+        )
+      ) || !identical(
+        manifest$expected_target_count, as.integer(nrow(target_parity))
+      ) || !identical(
+        manifest$expected_target_hash,
+        fastkpc_full_cuda_census_key_set_hash(
+          target_parity$residual_key_sha256
+        )
+      )) {
+    stop("Phase 3 oracle manifest corpus claims are invalid", call. = FALSE)
+  }
+  if (identical(
+        expected_identity$schema_version,
+        "full-cuda-ci-phase3-test-input-identity-v1"
+      ) && (!identical(
+        expected_identity$canonical_setup_corpus_hash,
+        manifest$expected_setup_hash
+      ) || !identical(
+        expected_identity$canonical_target_corpus_hash,
+        manifest$expected_target_hash
+      ))) {
+    stop("Phase 3 oracle test identity corpus mismatch", call. = FALSE)
+  }
+
+  authenticated <- fastkpc_full_cuda_phase3_merge_shards(
+    output_dir = output_dir, kind = "oracle_sp",
+    setup_keys = setup_results$prepared_s_key_sha256,
+    target_rows = descriptor, identity = expected_identity,
+    route_config = route_config, scope = scope,
+    shard_count = if (identical(scope, "full")) NULL else shard_count
+  )
+  authenticated_setup <- authenticated$payload$setup_results
+  authenticated_resource <- authenticated$payload$resource_metrics
+  authenticated_stage <- authenticated$payload$stage_timing
+  authenticated_target <- authenticated$payload$target_parity
+  authenticated_target <- authenticated_target[order(
+    authenticated_target$residual_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  rownames(authenticated_setup) <- rownames(authenticated_resource) <-
+    rownames(authenticated_stage) <- rownames(authenticated_target) <- NULL
+  if (!identical(setup_results, authenticated_setup) ||
+      !identical(target_parity, authenticated_target) ||
+      !identical(resource_metrics, authenticated_resource) ||
+      !identical(stage_timing, authenticated_stage)) {
+    stop("Phase 3 top-level oracle rows differ from authenticated shards",
+         call. = FALSE)
+  }
+  authenticated_dcov <- if (
+      "qualification_dcov_parity" %in% names(authenticated$payload)
+    ) {
+    value <- authenticated$payload$qualification_dcov_parity
+    value <- value[order(value$logical_sequence_id, method = "radix"),
+                   , drop = FALSE]
+    rownames(value) <- NULL
+    value
+  } else {
+    NULL
+  }
+  if ((!is.null(authenticated_dcov) &&
+       !identical(qualification_dcov, authenticated_dcov)) ||
+      (isTRUE(production_identity) && nrow(qualification_dcov) > 0L &&
+       is.null(authenticated_dcov)) ||
+      (isTRUE(require_full) && is.null(authenticated_dcov))) {
+    stop("Phase 3 qualification dCov rows differ from authenticated shards",
+         call. = FALSE)
+  }
+  recomputed_fallbacks <- .fastkpc_full_cuda_phase3_oracle_fallback_rows(
+    target_internal, resource_metrics
+  )
+  recomputed_failures <- .fastkpc_full_cuda_phase3_oracle_failure_rows(
+    target_internal
+  )
+  if (!identical(fallbacks, recomputed_fallbacks) ||
+      !identical(failures, recomputed_failures)) {
+    stop("Phase 3 fallback/failure payload is not row-derived",
+         call. = FALSE)
+  }
+  row_summary <- fastkpc_full_cuda_phase3_summarize_oracle_rows(
+    setup_results, target_internal, resource_metrics, stage_timing,
+    fallbacks, failures
+  )
+  .fastkpc_full_cuda_phase3_validate_oracle_payload(
+    list(
+      setup_results = setup_results, target_parity = target_internal,
+      resource_metrics = resource_metrics, stage_timing = stage_timing,
+      fallbacks = fallbacks, failures = failures, summary = row_summary
+    ),
+    expected_setup_keys = setup_results$prepared_s_key_sha256,
+    expected_target_rows = descriptor
+  )
+
+  expected_risk <- if (is.null(catalog)) NULL else {
+    .fastkpc_full_cuda_phase3_oracle_risk_cases(
+      target_parity, catalog = catalog
+    )
+  }
+  .fastkpc_full_cuda_phase3_validate_oracle_risk_cases(
+    risk_cases, target_parity, expected = expected_risk
+  )
+  dcov_summary <- .fastkpc_full_cuda_phase3_validate_qualification_dcov(
+    qualification_dcov, require_full = require_full,
+    tolerance = route_config$qualification_dcov_p_tolerance
+  )
+  if (!is.null(catalog)) {
+    if (scope %in% c("qualification", "full")) {
+      canonical_dcov <-
+        fastkpc_full_cuda_fixed_sp_load_qualification_logical_tests(
+          census_dir = catalog$phase1_dir,
+          prepared_dir = catalog$phase2_dir,
+          data_path = catalog$data_path
+        )
+      .fastkpc_full_cuda_phase3_validate_qualification_lineage(
+        qualification_dcov, canonical_dcov$logical_tests,
+        canonical_dcov$endpoint_keys
+      )
+      if (!identical(
+            names(qualification_dcov),
+            fastkpc_full_cuda_fixed_sp_qualification_dcov_schema()$names
+          )) {
+        stop("Phase 3 production qualification dCov schema is incomplete",
+             call. = FALSE)
+      }
+      canonical_dcov_summary <-
+        fastkpc_full_cuda_fixed_sp_summarize_qualification_dcov_records(
+          qualification_dcov, canonical_dcov$logical_tests,
+          canonical_dcov$endpoint_keys
+        )
+      summary_fields <- c(
+        "qualification_dcov_logical_test_count",
+        "qualification_dcov_near_alpha_count",
+        "qualification_dcov_unique_residual_key_count",
+        "qualification_dcov_max_absolute_p_value_difference",
+        "qualification_dcov_decision_flip_count",
+        "qualification_dcov_backend_error_count",
+        "qualification_dcov_spectra_fallback_count"
+      )
+      if (!all(vapply(summary_fields, function(field) {
+            identical(dcov_summary[[field]], canonical_dcov_summary[[field]])
+          }, logical(1L))) || canonical_dcov_summary[[
+            "qualification_dcov_near_alpha_decision_flip_count"
+          ]] != 0L) {
+        stop("Phase 3 qualification dCov canonical summary mismatch",
+             call. = FALSE)
+      }
+    }
+    selected_scope <- fastkpc_full_cuda_fixed_sp_scope(catalog, scope)
+    catalog_descriptor <-
+      .fastkpc_full_cuda_phase3_oracle_descriptor_target_rows(
+        catalog, selected_scope$target_rows
+      )
+    catalog_setup_keys <- sort(as.character(
+      selected_scope$setup_rows$prepared_s_key_sha256
+    ), method = "radix")
+    if (!identical(
+          catalog_setup_keys, setup_results$prepared_s_key_sha256
+        ) || !identical(catalog_descriptor, descriptor)) {
+      stop("Phase 3 oracle rows do not match reopened catalog lineage",
+           call. = FALSE)
+    }
+  }
+
+  lifecycle <- .fastkpc_full_cuda_phase3_oracle_runtime_lifecycle(
+    output_dir, shard_count
+  )
+  .fastkpc_full_cuda_phase3_coerce_csv_like(
+    .fastkpc_full_cuda_phase3_read_csv(
+      paths$runtime_lifecycle_csv, "runtime_lifecycle.csv"
+    ), lifecycle, "runtime_lifecycle"
+  )
+  input_hashes <- .fastkpc_full_cuda_phase3_oracle_input_hashes(
+    manifest$input_identity
+  )
+  .fastkpc_full_cuda_phase3_coerce_csv_like(
+    .fastkpc_full_cuda_phase3_read_csv(
+      paths$input_hashes_csv, "input_hashes.csv"
+    ), input_hashes, "input_hashes"
+  )
+  command_lines <- readLines(paths$commands_txt, warn = FALSE)
+  environment_lines <- readLines(paths$environment_txt, warn = FALSE)
+  if (length(command_lines) < 1L || any(!nzchar(command_lines)) ||
+      !identical(
+        environment_lines,
+        .fastkpc_full_cuda_phase3_oracle_environment_lines(
+          manifest$input_identity
+        )
+      )) {
+    stop("Phase 3 command/environment evidence is invalid", call. = FALSE)
+  }
+
+  full_gate <- !isTRUE(require_full) || (
+    identical(expected_identity$sha256,
+              "e5e801cf806e81ddcab8535ec534df71aaae435f8d480b4ded9d738a5a4d7147") &&
+      row_summary$setup_count == 8634L &&
+      row_summary$target_count == 110617L &&
+      identical(
+        as.integer(row_summary[1L, c(
+          "planned_cholesky_target_count", "planned_qr_target_count",
+          "planned_svd_target_count"
+        )]), c(73158L, 4210L, 33249L)
+      )
+  )
+  if (!isTRUE(full_gate)) {
+    stop("full Phase 3 oracle canonical gate failed", call. = FALSE)
+  }
+  if (!.fastkpc_full_cuda_phase3_bare_scalar(summary$pass, "logical") ||
+      !.fastkpc_full_cuda_phase3_sha256(summary$manifest_sha256) ||
+      !identical(
+        summary$manifest_sha256,
+        fastkpc_full_cuda_census_file_hash(paths$manifest_json)
+      )) {
+    stop("Phase 3 oracle summary completion marker is invalid",
+         call. = FALSE)
+  }
+  expected_summary <- .fastkpc_full_cuda_phase3_oracle_summary_list(
+    row_summary = row_summary, dcov_summary = dcov_summary,
+    risk_case_count = nrow(risk_cases), shard_count = shard_count,
+    payload_count = length(payload_keys),
+    manifest_sha256 = summary$manifest_sha256, pass = summary$pass
+  )
+  if (!.fastkpc_full_cuda_phase3_summary_claims_exact(
+        summary, expected_summary
+      )) {
+    mismatched <- if (!identical(names(summary), names(expected_summary))) {
+      "field_namespace"
+    } else {
+      names(expected_summary)[!vapply(names(expected_summary), function(field) {
+        expected_value <- expected_summary[[field]]
+        if (typeof(expected_value) == "double" &&
+            length(expected_value) == 1L && is.finite(expected_value)) {
+          isTRUE(all.equal(
+            as.double(summary[[field]]), expected_value,
+            tolerance = 1e-15, check.attributes = FALSE
+          ))
+        } else {
+          .fastkpc_full_cuda_phase3_identity_value_equal(
+            summary[[field]], expected_value
+          )
+        }
+      }, logical(1L))][[1L]]
+    }
+    stop("Phase 3 oracle summary claims are not recomputed: ", mismatched,
+         call. = FALSE)
+  }
+  list(
+    authenticated = TRUE, complete = TRUE, pass = TRUE,
+    computed_contract_pass = TRUE, artifact_kind = "oracle_sp",
+    artifact_schema_version =
+      fastkpc_full_cuda_phase3_oracle_schema_version(),
+    manifest = manifest, summary = summary,
+    payload_file_sha256 = actual_hashes,
+    input_identity = expected_identity, row_summary = row_summary,
+    qualification_dcov_summary = dcov_summary
+  )
 }

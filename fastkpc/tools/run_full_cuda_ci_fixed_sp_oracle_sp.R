@@ -78,6 +78,32 @@ target_rows <- .fastkpc_full_cuda_phase3_oracle_descriptor_target_rows(
 route_config <- fastkpc_full_cuda_phase3_route_config()
 identity <- fastkpc_full_cuda_phase3_input_identity(catalog, device_id)
 capacity <- fastkpc_full_cuda_fixed_sp_contract()$canonical_capacities
+artifact_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  output_dir, "oracle_sp"
+)
+completion_markers <- c(
+  manifest = file.exists(artifact_paths$manifest_json),
+  summary = file.exists(artifact_paths$summary_json)
+)
+if (all(completion_markers)) {
+  completed <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    output_dir = output_dir, expected_identity = identity,
+    require_full = identical(scope, "full"),
+    catalog = catalog, device_id = device_id
+  )
+  cat("Phase 3 oracle artifact: reused\n")
+  cat(
+    "setups/targets:", completed$row_summary$setup_count, "/",
+    completed$row_summary$target_count, "\n"
+  )
+  quit(save = "no", status = 0L, runLast = FALSE)
+}
+if (any(completion_markers)) {
+  unlink(
+    c(artifact_paths$manifest_json, artifact_paths$summary_json),
+    force = TRUE
+  )
+}
 
 runtime_create <- function() {
   runtime <- fixed_sp_cuda_runtime_create(device_id)
@@ -116,7 +142,7 @@ runtime_destroy <- function(runtime) {
 executor <- function(context, shard_id, setup_keys, target_rows) {
   fastkpc_full_cuda_phase3_run_oracle_shard(
     context = context, shard_id = shard_id, setup_keys = setup_keys,
-    target_rows = target_rows, catalog = catalog
+    target_rows = target_rows, catalog = catalog, scope = scope
   )
 }
 
@@ -204,8 +230,24 @@ if (identical(scope, "iteration")) {
   }
 }
 
+publication <- fastkpc_full_cuda_phase3_publish_oracle_artifact(
+  output_dir = output_dir, setup_keys = setup_keys,
+  target_rows = target_rows, identity = identity,
+  route_config = route_config, scope = scope,
+  catalog = catalog, device_id = device_id,
+  command_lines = paste(
+    "Rscript fastkpc/tools/run_full_cuda_ci_fixed_sp_oracle_sp.R",
+    paste(commandArgs(trailingOnly = TRUE), collapse = " ")
+  )
+)
+if (!identical(publication$status, "published")) {
+  stop("Phase 3 oracle top-level publication did not complete",
+       call. = FALSE)
+}
+
 elapsed_seconds <- as.double(proc.time()[["elapsed"]] - started)
 cat("Phase 3 oracle shard run:", run$status, "\n")
+cat("Phase 3 oracle artifact:", publication$status, "\n")
 cat("setups/targets:", summary$setup_count, "/", summary$target_count, "\n")
 cat(
   "planned routes:", summary$planned_cholesky_target_count, "/",

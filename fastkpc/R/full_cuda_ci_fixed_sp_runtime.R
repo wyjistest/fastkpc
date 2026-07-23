@@ -1210,7 +1210,70 @@ fastkpc_full_cuda_fixed_sp_scope <- function(catalog, scope) {
   )
   scope <- match.arg(scope, c("iteration", "qualification", "full"))
   if (identical(scope, "full")) {
-    stop("full scope streaming is introduced in the closure plan", call. = FALSE)
+    setup_rows <- catalog$inputs$same_s_setup_metadata
+    target_rows <- catalog$inputs$target_fit_metadata
+    setup_index <- catalog$setup_index
+    setup_match <- match(
+      setup_rows$same_S_group_id, setup_index$same_S_group_id
+    )
+    target_setup_match <- match(
+      target_rows$same_S_group_id, setup_rows$same_S_group_id
+    )
+    clean <- is.data.frame(setup_rows) && is.data.frame(target_rows) &&
+      is.data.frame(setup_index) && nrow(setup_rows) == 8634L &&
+      nrow(target_rows) == 110617L && !anyNA(setup_match) &&
+      !anyNA(target_setup_match) &&
+      !anyDuplicated(setup_rows$same_S_group_id) &&
+      !anyDuplicated(target_rows$residual_key_sha256)
+    if (!isTRUE(clean)) {
+      stop("fixed-sp full scope canonical lineage is malformed",
+           call. = FALSE)
+    }
+    setup_rows$prepared_s_key_sha256 <-
+      setup_index$prepared_s_key_sha256[setup_match]
+    target_rows$prepared_s_key_sha256 <-
+      setup_rows$prepared_s_key_sha256[target_setup_match]
+    target_rows$condition <-
+      target_rows$penalized_system_condition_at_selected_sp
+    target_rows$null_dim <- as.integer(
+      setup_rows$constraint_nullspace_dimension[target_setup_match]
+    )
+    target_rows$planned_route <- fastkpc_full_cuda_fixed_sp_route(
+      condition = target_rows$condition,
+      coefficient_rank = target_rows$coefficient_rank,
+      null_dim = target_rows$null_dim,
+      authenticated = rep(TRUE, nrow(target_rows))
+    )
+    setup_rows <- setup_rows[order(
+      setup_rows$prepared_s_key_sha256, method = "radix"
+    ), , drop = FALSE]
+    target_rows <- target_rows[order(
+      target_rows$prepared_s_key_sha256,
+      target_rows$residual_key_sha256, method = "radix"
+    ), , drop = FALSE]
+    rownames(setup_rows) <- rownames(target_rows) <- NULL
+    setup_hash <- fastkpc_full_cuda_census_key_set_hash(
+      setup_rows$prepared_s_key_sha256
+    )
+    target_hash <- fastkpc_full_cuda_census_key_set_hash(
+      target_rows$residual_key_sha256
+    )
+    if (!identical(
+          setup_hash,
+          catalog$phase2_manifest$full_canonical_prepared_s_key_corpus_hash
+        ) || !identical(
+          target_hash,
+          catalog$phase2_manifest$full_canonical_target_key_corpus_hash
+        )) {
+      stop("fixed-sp full scope corpus authentication failed",
+           call. = FALSE)
+    }
+    return(list(
+      scope = scope, setup_rows = setup_rows, target_rows = target_rows,
+      shard_ids = as.integer(seq.int(
+        0L, catalog$catalog_contract$shard_count - 1L
+      ))
+    ))
   }
   scope_objects <- catalog$scopes[[scope]]
   setup_rows <- scope_objects$setup_rows
@@ -8201,7 +8264,11 @@ fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
     context, catalog, setup_key, target_rows, shard_id, setup_ordinal,
     selected = NULL, phase2_shard_load_count = NULL,
     phase2_shard_authentication_count = NULL,
-    phase2_shard_load_elapsed_ms = NULL) {
+    phase2_shard_load_elapsed_ms = NULL, shadow_callback = NULL) {
+  if (!is.null(shadow_callback) && !is.function(shadow_callback)) {
+    stop("fixed-sp oracle shadow_callback must be NULL or a function",
+         call. = FALSE)
+  }
   shard_id <- fastkpc_full_cuda_fixed_sp_phase3b_integer_scalar(
     shard_id, "fixed-sp oracle shard_id"
   )
@@ -8273,6 +8340,7 @@ fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
   runtime_before_solve <- NULL
   runtime_after_solve <- NULL
   comparison <- NULL
+  shadow_callback_result <- NULL
   handle_create_elapsed_ms <- NA_real_
   solve_elapsed_ms <- NA_real_
   shadow_elapsed_ms <- NA_real_
@@ -8495,6 +8563,23 @@ fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
         fitted_phase2_exact = fitted_phase2_exact,
         residual_phase2_exact = residual_phase2_exact
       )
+      if (!is.null(shadow_callback)) {
+        callback_started <- proc.time()[["elapsed"]]
+        shadow_callback_result <- shadow_callback(
+          setup_key = setup_key, target_keys = native$target_keys,
+          residuals = shadow$residuals
+        )
+        compact_callback_result <- is.null(shadow_callback_result) ||
+          (is.data.frame(shadow_callback_result) &&
+             as.numeric(object.size(shadow_callback_result)) <= 67108864)
+        if (!isTRUE(compact_callback_result)) {
+          stop("fixed-sp oracle shadow callback result is not compact",
+               call. = FALSE)
+        }
+        oracle_elapsed_ms <- oracle_elapsed_ms + as.double(
+          (proc.time()[["elapsed"]] - callback_started) * 1000
+        )
+      }
       rm(shadow)
       cleanup_start <- proc.time()[["elapsed"]]
       invisible(NULL)
@@ -8865,7 +8950,8 @@ fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
   )
   list(
     setup_results = setup_results, target_parity = target_parity,
-    resource_metrics = resource_metrics, stage_timing = stage_timing
+    resource_metrics = resource_metrics, stage_timing = stage_timing,
+    shadow_callback_result = shadow_callback_result
   )
 }
 
