@@ -1107,6 +1107,23 @@ assert_true(is.list(identity) && identical(identity$device_id, 2L) &&
               identical(identity$shard_count, 64L) &&
               grepl("^[0-9a-f]{64}$", identity$sha256),
             "authenticated Phase 3 input identity")
+full_oracle_identity_validator <- get0(
+  ".fastkpc_full_cuda_phase3_validate_full_oracle_identity_lineage",
+  mode = "function", inherits = TRUE
+)
+assert_true(
+  !is.null(full_oracle_identity_validator),
+  "full oracle identity lineage validator is available"
+)
+invisible(full_oracle_identity_validator(identity, identity))
+stale_full_identity <- identity
+stale_full_identity$phase1_manifest_hash <- sha("stale-phase1-lineage")
+stale_full_identity$sha256 <-
+  .fastkpc_full_cuda_phase3_identity_hash(stale_full_identity)
+assert_error(
+  full_oracle_identity_validator(identity, stale_full_identity),
+  "full oracle identity rejects stale independently discovered lineage"
+)
 assert_true(
   all(c(
     "runtime_policy_schema_version",
@@ -1724,14 +1741,25 @@ default_artifact_root <- tempfile("phase3-default-discovery-")
 default_artifact <- write_fixture_artifact(
   "oracle_sp", default_artifact_root, default_identity
 )
-default_validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+validate_generic_oracle <- function(output_dir, ...) {
+  fastkpc_full_cuda_phase3_validate_artifact(
+    output_dir, kind = "oracle_sp", ...
+  )
+}
+assert_error(
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    default_artifact_root, catalog = catalog_fixture, device_id = 2L
+  ),
+  "public oracle validator rejects legacy-shaped manifests without semantics"
+)
+default_validated <- validate_generic_oracle(
   default_artifact_root, catalog = catalog_fixture, device_id = 2L
 )
 assert_true(
   isTRUE(default_validated$authenticated),
   "artifact validation uses default catalog/device discoverers"
 )
-explicit_validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+explicit_validated <- validate_generic_oracle(
   default_artifact_root,
   catalog = catalog_fixture,
   device_id = 2L
@@ -1751,7 +1779,7 @@ forged_precomputed_identity$device_id <- 3L
 forged_precomputed_identity$sha256 <-
   .fastkpc_full_cuda_phase3_identity_hash(forged_precomputed_identity)
 assert_error(
-  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+  validate_generic_oracle(
     default_artifact_root,
     expected_identity = forged_precomputed_identity,
     catalog = catalog_fixture,
@@ -1782,7 +1810,7 @@ assert_true(
   ),
   "manifest records payload-then-manifest-then-summary publication order"
 )
-oracle_validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+oracle_validated <- validate_generic_oracle(
   file.path(artifact_root, "oracle"), expected_identity = identity
 )
 shadow_validated <- fastkpc_validate_full_cuda_fixed_sp_shadow_artifact(
@@ -1800,7 +1828,7 @@ jsonlite::write_json(
   non_authoritative_summary, oracle_fixture$paths$summary_json,
   auto_unbox = TRUE, pretty = TRUE, null = "null", digits = NA
 )
-summary_revalidated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+summary_revalidated <- validate_generic_oracle(
   file.path(artifact_root, "oracle"), expected_identity = identity
 )
 assert_true(
@@ -1846,7 +1874,7 @@ for (key in common_payload_keys) {
     oracle_fixture$paths[[key]], useBytes = TRUE
   )
   assert_error(
-    fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    validate_generic_oracle(
       file.path(artifact_root, "oracle"), expected_identity = identity
     ),
     paste0("common payload mutation must invalidate ", key)
@@ -1878,7 +1906,7 @@ jsonlite::write_json(
   auto_unbox = TRUE, pretty = TRUE, null = "null", digits = NA
 )
 assert_error(
-  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+  validate_generic_oracle(
     file.path(artifact_root, "oracle"), expected_identity = identity
   ),
   "malformed payload must fail even when its manifest hash is forged"
@@ -1897,7 +1925,7 @@ mutated_manifest_rejected <- function(field, value, label) {
     pretty = TRUE, null = "null", digits = NA
   )
   assert_error(
-    fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    validate_generic_oracle(
       file.path(artifact_root, "oracle"), expected_identity = identity
     ),
     label
@@ -2041,7 +2069,7 @@ invisible(write_fixture_artifact(
   "oracle_sp", empty_completion, identity, include_payload = FALSE
 ))
 assert_error(
-  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+  validate_generic_oracle(
     empty_completion, expected_identity = identity
   ),
   "summary pass=true without payload must fail"
@@ -2054,7 +2082,7 @@ missing_paths <- fastkpc_full_cuda_phase3_artifact_paths(
 )
 unlink(missing_paths$manifest_json)
 assert_error(
-  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+  validate_generic_oracle(
     missing_manifest, expected_identity = identity
   ),
   "missing manifest must fail"
@@ -2067,7 +2095,7 @@ partial_paths <- fastkpc_full_cuda_phase3_artifact_paths(
 )
 unlink(partial_paths$target_parity_rds)
 assert_error(
-  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+  validate_generic_oracle(
     partial_completion, expected_identity = identity
   ),
   "partial payload completion must fail"
@@ -2090,7 +2118,7 @@ jsonlite::write_json(
   pretty = TRUE, null = "null", digits = NA
 )
 assert_error(
-  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+  validate_generic_oracle(
     duplicate_payload, expected_identity = identity
   ),
   "duplicate payload names must fail"

@@ -8948,11 +8948,18 @@ fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
   stage_timing <- fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
     stage_timing, "stage_timing"
   )
-  list(
-    setup_results = setup_results, target_parity = target_parity,
-    resource_metrics = resource_metrics, stage_timing = stage_timing,
-    shadow_callback_result = shadow_callback_result
-  )
+  if (is.null(shadow_callback)) {
+    list(
+      setup_results = setup_results, target_parity = target_parity,
+      resource_metrics = resource_metrics, stage_timing = stage_timing
+    )
+  } else {
+    list(
+      setup_results = setup_results, target_parity = target_parity,
+      resource_metrics = resource_metrics, stage_timing = stage_timing,
+      shadow_callback_result = shadow_callback_result
+    )
+  }
 }
 
 fastkpc_full_cuda_fixed_sp_qualification_payload_names <- function() {

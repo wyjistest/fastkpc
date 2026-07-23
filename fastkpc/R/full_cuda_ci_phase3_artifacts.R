@@ -2030,27 +2030,8 @@ fastkpc_validate_full_cuda_phase3_artifact <-
 fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact <- function(
     output_dir, expected_identity = NULL, require_full = FALSE,
     catalog = NULL, device_id = NULL) {
-  manifest_path <- file.path(output_dir, "manifest.json")
-  semantic_manifest <- if (file.exists(manifest_path) &&
-      !dir.exists(manifest_path)) {
-    tryCatch(
-      .fastkpc_full_cuda_phase3_read_json(manifest_path, "manifest.json"),
-      error = function(error) NULL
-    )
-  } else {
-    NULL
-  }
-  if (is.list(semantic_manifest) && identical(
-        semantic_manifest$oracle_semantics_version,
-        "full-cuda-ci-fixed-sp-oracle-sp-semantics-v1"
-      )) {
-    return(.fastkpc_full_cuda_phase3_validate_completed_oracle_artifact(
-      output_dir = output_dir, expected_identity = expected_identity,
-      require_full = require_full, catalog = catalog, device_id = device_id
-    ))
-  }
-  fastkpc_full_cuda_phase3_validate_artifact(
-    output_dir = output_dir, kind = "oracle_sp",
+  .fastkpc_full_cuda_phase3_validate_completed_oracle_artifact(
+    output_dir = output_dir,
     expected_identity = expected_identity, require_full = require_full,
     catalog = catalog, device_id = device_id
   )
@@ -5218,6 +5199,71 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     }, logical(1L)))
 }
 
+.fastkpc_full_cuda_phase3_validate_full_oracle_identity_lineage <- function(
+    recorded, discovered) {
+  fastkpc_full_cuda_phase3_validate_input_identity(recorded)
+  fastkpc_full_cuda_phase3_validate_input_identity(discovered)
+  fields <- c(.fastkpc_full_cuda_phase3_stable_identity_fields(), "sha256")
+  if (!.fastkpc_full_cuda_phase3_identity_json_exact(
+        recorded, discovered, fields = fields
+      )) {
+    stop("full Phase 3 oracle identity disagrees with canonical lineage",
+         call. = FALSE)
+  }
+  invisible(discovered)
+}
+
+.fastkpc_full_cuda_phase3_canonical_oracle_catalog_inputs <- function() {
+  list(
+    phase0_dir = file.path(
+      "fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1"
+    ),
+    phase1_dir = file.path(
+      "fastkpc", "artifacts", "full_cuda_ci",
+      "workload_census_351x48_v1"
+    ),
+    phase2_dir = file.path(
+      "fastkpc", "artifacts", "full_cuda_ci", "prepared_s_contract_v1"
+    ),
+    data_path = file.path(
+      "fastkpc", "artifacts", "kpc_tprs_real_zhu",
+      "cancer_RD-causalDiscoveryInput.rds"
+    )
+  )
+}
+
+.fastkpc_full_cuda_phase3_open_canonical_oracle_catalog <- function() {
+  inputs <- .fastkpc_full_cuda_phase3_canonical_oracle_catalog_inputs()
+  fastkpc_full_cuda_open_fixed_sp_catalog(
+    phase0_dir = inputs$phase0_dir,
+    phase1_dir = inputs$phase1_dir,
+    phase2_dir = inputs$phase2_dir,
+    data_path = inputs$data_path,
+    require_full = TRUE
+  )
+}
+
+.fastkpc_full_cuda_phase3_full_oracle_device_id <- function(
+    output_dir, expected_identity, device_id) {
+  candidate <- device_id
+  if (is.null(candidate) && is.list(expected_identity)) {
+    candidate <- expected_identity$device_id
+  }
+  if (is.null(candidate)) {
+    manifest <- .fastkpc_full_cuda_phase3_read_json(
+      file.path(output_dir, "manifest.json"), "manifest.json"
+    )
+    if (!is.list(manifest$input_identity)) {
+      stop("full Phase 3 oracle manifest has no device identity",
+           call. = FALSE)
+    }
+    candidate <- manifest$input_identity$device_id
+  }
+  .fastkpc_full_cuda_phase3_whole_scalar(
+    candidate, 0L, "full Phase 3 oracle device_id"
+  )
+}
+
 .fastkpc_full_cuda_phase3_oracle_descriptor_from_parity <- function(
     target_parity) {
   fields <- .fastkpc_full_cuda_phase3_oracle_descriptor_target_fields()
@@ -5830,14 +5876,21 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     summary = file.exists(paths$summary_json)
   )
   if (all(completion)) {
-    validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
-      output_dir = output_dir, expected_identity = identity,
-      require_full = require_full, catalog = catalog, device_id = device_id
+    validated <- tryCatch(
+      fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+        output_dir = output_dir, expected_identity = identity,
+        require_full = require_full, catalog = catalog, device_id = device_id
+      ),
+      error = function(error) error
     )
-    return(list(
-      status = "reused", validation = validated,
-      summary = validated$summary
-    ))
+    if (!inherits(validated, "error")) {
+      return(list(
+        status = "reused", validation = validated,
+        summary = validated$summary
+      ))
+    }
+    unlink(c(paths$manifest_json, paths$summary_json), force = TRUE)
+    completion[] <- FALSE
   }
   if (any(completion)) {
     unlink(c(paths$manifest_json, paths$summary_json), force = TRUE)
@@ -6093,9 +6146,15 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("failed to publish Phase 3 oracle summary", call. = FALSE)
   }
   unlink(staging_dir, recursive = TRUE, force = TRUE)
-  validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
-    output_dir = output_dir, expected_identity = identity,
-    require_full = require_full, catalog = catalog, device_id = device_id
+  validated <- tryCatch(
+    fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+      output_dir = output_dir, expected_identity = identity,
+      require_full = require_full, catalog = catalog, device_id = device_id
+    ),
+    error = function(error) {
+      unlink(c(paths$manifest_json, paths$summary_json), force = TRUE)
+      stop(error)
+    }
   )
   list(status = "published", validation = validated, summary = summary)
 }
@@ -6161,18 +6220,45 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
   if (!.fastkpc_full_cuda_phase3_bare_scalar(require_full, "logical")) {
     stop("require_full must be a logical scalar", call. = FALSE)
   }
-  if (xor(is.null(catalog), is.null(device_id))) {
-    stop("catalog validation requires catalog and device_id together",
-         call. = FALSE)
-  }
-  if (!is.null(catalog)) {
-    discovered <- fastkpc_full_cuda_phase3_input_identity(catalog, device_id)
-    if (!is.null(expected_identity) &&
-        !identical(expected_identity, discovered)) {
-      stop("precomputed Phase 3 identity disagrees with catalog identity",
-           call. = FALSE)
+  if (isTRUE(require_full)) {
+    resolved_device_id <- .fastkpc_full_cuda_phase3_full_oracle_device_id(
+      output_dir, expected_identity, device_id
+    )
+    canonical_catalog <-
+      .fastkpc_full_cuda_phase3_open_canonical_oracle_catalog()
+    discovered <- fastkpc_full_cuda_phase3_input_identity(
+      canonical_catalog, resolved_device_id
+    )
+    if (!is.null(catalog)) {
+      supplied <- fastkpc_full_cuda_phase3_input_identity(
+        catalog, resolved_device_id
+      )
+      .fastkpc_full_cuda_phase3_validate_full_oracle_identity_lineage(
+        supplied, discovered
+      )
+    }
+    if (!is.null(expected_identity)) {
+      .fastkpc_full_cuda_phase3_validate_full_oracle_identity_lineage(
+        expected_identity, discovered
+      )
     }
     expected_identity <- discovered
+    catalog <- canonical_catalog
+    device_id <- resolved_device_id
+  } else {
+    if (xor(is.null(catalog), is.null(device_id))) {
+      stop("catalog validation requires catalog and device_id together",
+           call. = FALSE)
+    }
+    if (!is.null(catalog)) {
+      discovered <- fastkpc_full_cuda_phase3_input_identity(catalog, device_id)
+      if (!is.null(expected_identity) &&
+          !identical(expected_identity, discovered)) {
+        stop("precomputed Phase 3 identity disagrees with catalog identity",
+             call. = FALSE)
+      }
+      expected_identity <- discovered
+    }
   }
   if (is.null(expected_identity)) {
     stop("completed Phase 3 oracle validation requires expected identity",
@@ -6595,9 +6681,7 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
   }
 
   full_gate <- !isTRUE(require_full) || (
-    identical(expected_identity$sha256,
-              "e5e801cf806e81ddcab8535ec534df71aaae435f8d480b4ded9d738a5a4d7147") &&
-      row_summary$setup_count == 8634L &&
+    row_summary$setup_count == 8634L &&
       row_summary$target_count == 110617L &&
       identical(
         as.integer(row_summary[1L, c(
@@ -6610,6 +6694,7 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("full Phase 3 oracle canonical gate failed", call. = FALSE)
   }
   if (!.fastkpc_full_cuda_phase3_bare_scalar(summary$pass, "logical") ||
+      !identical(summary$pass, TRUE) ||
       !.fastkpc_full_cuda_phase3_sha256(summary$manifest_sha256) ||
       !identical(
         summary$manifest_sha256,
@@ -6622,7 +6707,7 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     row_summary = row_summary, dcov_summary = dcov_summary,
     risk_case_count = nrow(risk_cases), shard_count = shard_count,
     payload_count = length(payload_keys),
-    manifest_sha256 = summary$manifest_sha256, pass = summary$pass
+    manifest_sha256 = summary$manifest_sha256, pass = TRUE
   )
   if (!.fastkpc_full_cuda_phase3_summary_claims_exact(
         summary, expected_summary

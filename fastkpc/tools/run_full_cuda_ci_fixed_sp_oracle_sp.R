@@ -86,17 +86,27 @@ completion_markers <- c(
   summary = file.exists(artifact_paths$summary_json)
 )
 if (all(completion_markers)) {
-  completed <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
-    output_dir = output_dir, expected_identity = identity,
-    require_full = identical(scope, "full"),
-    catalog = catalog, device_id = device_id
+  completed <- tryCatch(
+    fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+      output_dir = output_dir, expected_identity = identity,
+      require_full = identical(scope, "full"),
+      catalog = catalog, device_id = device_id
+    ),
+    error = function(error) error
   )
-  cat("Phase 3 oracle artifact: reused\n")
-  cat(
-    "setups/targets:", completed$row_summary$setup_count, "/",
-    completed$row_summary$target_count, "\n"
+  if (!inherits(completed, "error")) {
+    cat("Phase 3 oracle artifact: reused\n")
+    cat(
+      "setups/targets:", completed$row_summary$setup_count, "/",
+      completed$row_summary$target_count, "\n"
+    )
+    quit(save = "no", status = 0L, runLast = FALSE)
+  }
+  unlink(
+    c(artifact_paths$manifest_json, artifact_paths$summary_json),
+    force = TRUE
   )
-  quit(save = "no", status = 0L, runLast = FALSE)
+  completion_markers[] <- FALSE
 }
 if (any(completion_markers)) {
   unlink(

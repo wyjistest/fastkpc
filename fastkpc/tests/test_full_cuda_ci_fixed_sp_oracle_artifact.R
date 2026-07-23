@@ -62,6 +62,36 @@ assert_true(
   )),
   "oracle setup execution exposes a synchronous explicit-shadow callback"
 )
+execute_body <- as.list(body(
+  fastkpc_full_cuda_fixed_sp_execute_oracle_setup
+))
+execute_return_expression <- execute_body[[length(execute_body)]]
+execute_return_environment <- list2env(list(
+  setup_results = "setup", target_parity = "target",
+  resource_metrics = "resource", stage_timing = "timing",
+  shadow_callback = NULL, shadow_callback_result = NULL
+), parent = baseenv())
+default_execute_result <- eval(
+  execute_return_expression, envir = execute_return_environment
+)
+assert_identical(
+  names(default_execute_result),
+  c("setup_results", "target_parity", "resource_metrics", "stage_timing"),
+  "oracle setup default return preserves the four-component contract"
+)
+execute_return_environment$shadow_callback <- identity
+execute_return_environment$shadow_callback_result <- "callback-result"
+callback_execute_result <- eval(
+  execute_return_expression, envir = execute_return_environment
+)
+assert_identical(
+  names(callback_execute_result),
+  c(
+    "setup_results", "target_parity", "resource_metrics", "stage_timing",
+    "shadow_callback_result"
+  ),
+  "oracle setup appends callback evidence only when a callback is supplied"
+)
 frame <- function(name, row_count) {
   schema <- fastkpc_full_cuda_fixed_sp_oracle_row_schemas()[[name]]
   columns <- lapply(unname(schema), function(type) switch(
@@ -171,6 +201,54 @@ identity <- refresh_hash(list(
   cublas_workspace_bytes_required = 16777216,
   cublas_workspace_min_alignment_required = 256
 ))
+
+canonical_opener_name <-
+  ".fastkpc_full_cuda_phase3_open_canonical_oracle_catalog"
+original_canonical_opener <- get0(
+  canonical_opener_name, envir = .GlobalEnv, inherits = FALSE
+)
+canonical_opener_calls <- 0L
+assign(
+  canonical_opener_name,
+  function() {
+    canonical_opener_calls <<- canonical_opener_calls + 1L
+    stop("canonical full lineage reopened", call. = FALSE)
+  },
+  envir = .GlobalEnv
+)
+assert_error(
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    tempfile("missing-full-oracle-"), expected_identity = identity,
+    require_full = TRUE
+  ),
+  "full validation without caller inputs attempts canonical lineage reopening"
+)
+assert_error(
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    tempfile("synthetic-full-oracle-"), expected_identity = identity,
+    require_full = TRUE,
+    catalog = list(
+      risk_summary = list(high_condition_count = 33249L),
+      qualification_summary = list(
+        logical_test_count = 3808L, near_alpha_count = 1478L,
+        unique_residual_key_count = 6143L
+      )
+    ),
+    device_id = 0L
+  ),
+  "synthetic aggregate-only full inputs cannot replace canonical lineage"
+)
+if (is.null(original_canonical_opener)) {
+  rm(list = canonical_opener_name, envir = .GlobalEnv)
+} else {
+  assign(
+    canonical_opener_name, original_canonical_opener, envir = .GlobalEnv
+  )
+}
+assert_identical(
+  canonical_opener_calls, 2L,
+  "every full validation independently reopens canonical catalog lineage"
+)
 
 make_oracle_payload <- function(shard_id, shard_setup_keys, shard_targets) {
   setup_count <- length(shard_setup_keys)
@@ -641,6 +719,105 @@ assert_identical(partial$status, "published",
                  "partial completion marker is republished gracefully")
 assert_true(file.exists(paths$manifest_json) && file.exists(paths$summary_json),
             "partial resume restores both completion markers")
+
+shard_session_paths <- c(
+  list.files(paths$shards_dir, full.names = TRUE),
+  list.files(paths$sessions_dir, full.names = TRUE)
+)
+shard_session_hashes <- vapply(
+  shard_session_paths, fastkpc_full_cuda_census_file_hash, character(1L)
+)
+corrupt_manifest <- jsonlite::read_json(
+  paths$manifest_json, simplifyVector = FALSE
+)
+corrupt_manifest$oracle_semantics_version <- "legacy-forged-semantics"
+fastkpc_full_cuda_write_json(corrupt_manifest, paths$manifest_json)
+corrupt_summary <- jsonlite::read_json(
+  paths$summary_json, simplifyVector = FALSE
+)
+corrupt_summary$manifest_sha256 <-
+  fastkpc_full_cuda_census_file_hash(paths$manifest_json)
+fastkpc_full_cuda_write_json(corrupt_summary, paths$summary_json)
+assert_error(
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    output_dir, expected_identity = identity, require_full = FALSE
+  ),
+  "public validator rejects a corrupt pair of completion markers"
+)
+recovered <- publish(
+  output_dir = output_dir, setup_keys = setup_keys,
+  target_rows = target_rows, identity = identity,
+  route_config = route_config, scope = "iteration", shard_count = 4L,
+  risk_rows = risk_rows, qualification_dcov = qualification_dcov,
+  command_lines = "Rscript fastkpc/tests/test_full_cuda_ci_fixed_sp_oracle_artifact.R"
+)
+assert_identical(recovered$status, "published",
+                 "corrupt completion markers are republished")
+assert_identical(
+  vapply(shard_session_paths, fastkpc_full_cuda_census_file_hash, character(1L)),
+  shard_session_hashes,
+  "corrupt-marker recovery retains authenticated shard/session pairs"
+)
+
+unlink(paths$summary_json, force = TRUE)
+original_oracle_validator <-
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact
+assign(
+  "fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact",
+  function(...) stop("forced final artifact validation failure", call. = FALSE),
+  envir = .GlobalEnv
+)
+forced_final_error <- tryCatch({
+  publish(
+    output_dir = output_dir, setup_keys = setup_keys,
+    target_rows = target_rows, identity = identity,
+    route_config = route_config, scope = "iteration", shard_count = 4L,
+    risk_rows = risk_rows, qualification_dcov = qualification_dcov,
+    command_lines = "Rscript fastkpc/tests/test_full_cuda_ci_fixed_sp_oracle_artifact.R"
+  )
+  NULL
+}, error = function(error) error)
+assign(
+  "fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact",
+  original_oracle_validator, envir = .GlobalEnv
+)
+assert_true(inherits(forced_final_error, "error"),
+            "forced final artifact validation fails publication")
+assert_true(!file.exists(paths$manifest_json) &&
+              !file.exists(paths$summary_json),
+            "failed final validation removes both completion markers")
+recovered_after_final_failure <- publish(
+  output_dir = output_dir, setup_keys = setup_keys,
+  target_rows = target_rows, identity = identity,
+  route_config = route_config, scope = "iteration", shard_count = 4L,
+  risk_rows = risk_rows, qualification_dcov = qualification_dcov,
+  command_lines = "Rscript fastkpc/tests/test_full_cuda_ci_fixed_sp_oracle_artifact.R"
+)
+assert_identical(recovered_after_final_failure$status, "published",
+                 "publication resumes after final-validation cleanup")
+
+pass_false_dir <- tempfile("phase3-oracle-pass-false-")
+on.exit(unlink(pass_false_dir, recursive = TRUE, force = TRUE), add = TRUE)
+dir.create(pass_false_dir, recursive = TRUE, showWarnings = FALSE)
+assert_true(file.copy(output_dir, pass_false_dir, recursive = TRUE),
+            "pass=false fixture copy succeeds")
+pass_false_root <- file.path(pass_false_dir, basename(output_dir))
+pass_false_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  pass_false_root, "oracle_sp"
+)
+pass_false_summary <- jsonlite::read_json(
+  pass_false_paths$summary_json, simplifyVector = FALSE
+)
+pass_false_summary$pass <- FALSE
+fastkpc_full_cuda_write_json(
+  pass_false_summary, pass_false_paths$summary_json
+)
+assert_error(
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    pass_false_root, expected_identity = identity, require_full = FALSE
+  ),
+  "persisted pass=false cannot replace validator-derived hard-gate success"
+)
 
 hostile_dir <- tempfile("phase3-oracle-hostile-")
 on.exit(unlink(hostile_dir, recursive = TRUE, force = TRUE), add = TRUE)
