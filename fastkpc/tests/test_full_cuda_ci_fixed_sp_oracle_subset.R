@@ -416,6 +416,138 @@ assert_true(
   "route hash binds the executed CUDA SVD rank threshold"
 )
 
+qualification_callback_schema <-
+  fastkpc_full_cuda_fixed_sp_qualification_dcov_schema()
+qualification_callback_diagnostic <- list(
+  n = 351L, numCol = 35L, index = 1, lowrank_mode = "spectra",
+  lowrank_full_eig_count = 0L, lowrank_spectra_count = 2L,
+  lowrank_spectra_converged_count = 2L,
+  lowrank_spectra_failed_count = 0L,
+  lowrank_spectra_fallback_full_eig_count = 0L,
+  lowrank_spectra_iterations = 4L, lowrank_spectra_nconv = 70L,
+  lowrank_spectra_ncv = 71L, lowrank_spectra_tol = 1e-10,
+  lowrank_spectra_matvec_count = 0L
+)
+qualification_callback_columns <- lapply(
+  qualification_callback_schema$names,
+  function(field) {
+    switch(
+      qualification_callback_schema$types[[field]],
+      character = "fixture", integer = 1L, double = 0,
+      logical = FALSE, list = I(list(character())),
+      fail("unsupported qualification callback fixture type")
+    )
+  }
+)
+names(qualification_callback_columns) <- qualification_callback_schema$names
+qualification_callback_columns$parity_scope <- "qualification"
+qualification_callback_columns$index <- 1L
+qualification_callback_columns$numCol <- 35L
+qualification_callback_columns$selection_reasons <-
+  I(list(c("qualification", "near_alpha")))
+qualification_callback_columns$diagnostics <-
+  I(list(qualification_callback_diagnostic))
+qualification_callback_nonempty <- structure(
+  qualification_callback_columns,
+  class = "data.frame", row.names = 1L
+)
+qualification_callback_empty <-
+  .fastkpc_full_cuda_phase3_empty_full_qualification_dcov()
+assert_true(
+  fastkpc_full_cuda_fixed_sp_validate_qualification_dcov_frame(
+    qualification_callback_nonempty
+  ),
+  "non-empty callback fixture passes the production qualification schema"
+)
+assert_true(
+  identical(names(qualification_callback_empty),
+            qualification_callback_schema$names) &&
+    nrow(qualification_callback_empty) == 0L &&
+    all(vapply(
+      qualification_callback_schema$list_fields,
+      function(field) {
+        identical(
+          attributes(qualification_callback_empty[[field]]),
+          list(class = "AsIs")
+        )
+      }, logical(1L)
+    )),
+  "empty callback fixture has the production qualification schema"
+)
+
+compact_guard_assignments <- list()
+collect_compact_guard <- function(node) {
+  if (is.call(node) && length(node) >= 3L &&
+      identical(node[[1L]], as.name("<-")) &&
+      identical(node[[2L]], as.name("compact_callback_result"))) {
+    compact_guard_assignments[[length(compact_guard_assignments) + 1L]] <<-
+      node[[3L]]
+  }
+  if (is.call(node) || is.expression(node) || is.pairlist(node)) {
+    lapply(as.list(node), collect_compact_guard)
+  }
+  invisible(NULL)
+}
+collect_compact_guard(body(
+  fastkpc_full_cuda_fixed_sp_execute_oracle_setup
+))
+assert_true(
+  length(compact_guard_assignments) == 1L,
+  "oracle setup has exactly one callback compact-result guard"
+)
+callback_forbidden_fields <- c(
+  "coefficients", "fitted", "residuals", "rss", "rhs",
+  "cuda_nullspace_rhs"
+)
+callback_guard_accepts <- function(value) {
+  eval(
+    compact_guard_assignments[[1L]],
+    envir = list2env(
+      list(
+        shadow_callback_result = value,
+        forbidden_callback_fields = callback_forbidden_fields
+      ),
+      parent = environment(
+        fastkpc_full_cuda_fixed_sp_execute_oracle_setup
+      )
+    )
+  )
+}
+forbidden_matrix_frames <- lapply(callback_forbidden_fields, function(field) {
+  structure(
+    stats::setNames(list(I(matrix(1, nrow = 1L))), field),
+    class = "data.frame", row.names = 1L
+  )
+})
+forbidden_list_frames <- lapply(callback_forbidden_fields, function(field) {
+  structure(
+    stats::setNames(list(I(list(matrix(1, nrow = 1L)))), field),
+    class = "data.frame", row.names = 1L
+  )
+})
+alias_frames <- lapply(c("Re-Siduals", "Xty.null"), function(field) {
+  value <- data.frame(injected = 1, stringsAsFactors = FALSE)
+  names(value) <- field
+  value
+})
+valid_guard_results <- vapply(
+  list(qualification_callback_empty, qualification_callback_nonempty),
+  callback_guard_accepts, logical(1L)
+)
+hostile_guard_results <- vapply(
+  c(forbidden_matrix_frames, forbidden_list_frames, alias_frames),
+  callback_guard_accepts, logical(1L)
+)
+assert_true(
+  all(valid_guard_results) && !any(hostile_guard_results),
+  paste0(
+    "callback compact guard accepts exact empty/non-empty qualification ",
+    "frames and rejects response injection; valid=",
+    paste(valid_guard_results, collapse = ","), "; hostile=",
+    paste(hostile_guard_results, collapse = ",")
+  )
+)
+
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
   cat("SKIP Phase 3 fixed-sp oracle subset\n")
   quit(save = "no", status = 0L)
@@ -640,6 +772,7 @@ execute_callback_fixture <- function(shadow_callback = NULL) {
 }
 callback_lifecycle <- new.env(parent = emptyenv())
 callback_lifecycle$normal_count <- 0L
+callback_lifecycle$empty_count <- 0L
 callback_lifecycle$throw_count <- 0L
 callback_lifecycle$forbidden_count <- 0L
 normal_callback_result <- execute_callback_fixture(function(
@@ -655,24 +788,46 @@ normal_callback_result <- execute_callback_fixture(function(
       ) && all(is.finite(residuals)),
     "real callback receives the synchronous explicit residual matrix"
   )
-  data.frame(
-    setup_key = setup_key,
-    target_count = as.integer(length(target_keys)),
-    residual_sum = as.double(sum(residuals)),
-    stringsAsFactors = FALSE
-  )
+  qualification_callback_nonempty
 })
 assert_true(
   callback_lifecycle$normal_count == 1L &&
-    is.data.frame(normal_callback_result$shadow_callback_result) &&
-    nrow(normal_callback_result$shadow_callback_result) == 1L &&
+    identical(
+      normal_callback_result$shadow_callback_result,
+      qualification_callback_nonempty
+    ) &&
     all(normal_callback_result$resource_metrics[
       c(
         "prepared_handle_destroy_count", "residual_token_release_count",
         "output_slot_release_count"
       )
     ] == 1L),
-  "normal callback returns compact evidence and releases runtime resources"
+  paste(
+    "normal callback returns validated qualification evidence and releases",
+    "runtime resources"
+  )
+)
+empty_callback_result <- execute_callback_fixture(function(
+    setup_key, target_keys, residuals) {
+  callback_lifecycle$empty_count <- callback_lifecycle$empty_count + 1L
+  qualification_callback_empty
+})
+assert_true(
+  callback_lifecycle$empty_count == 1L &&
+    identical(
+      empty_callback_result$shadow_callback_result,
+      qualification_callback_empty
+    ) &&
+    all(empty_callback_result$resource_metrics[
+      c(
+        "prepared_handle_destroy_count", "residual_token_release_count",
+        "output_slot_release_count"
+      )
+    ] == 1L),
+  paste(
+    "empty production qualification evidence is compact and releases",
+    "runtime resources"
+  )
 )
 assert_error(
   execute_callback_fixture(function(setup_key, target_keys, residuals) {

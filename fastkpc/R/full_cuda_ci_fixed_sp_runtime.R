@@ -6575,6 +6575,56 @@ fastkpc_full_cuda_fixed_sp_validate_qualification_dcov_frame <- function(
   TRUE
 }
 
+fastkpc_full_cuda_fixed_sp_callback_result_is_compact <- function(value) {
+  if (is.null(value)) return(TRUE)
+  if (!is.data.frame(value) ||
+      as.numeric(object.size(value)) > 67108864) {
+    return(FALSE)
+  }
+
+  schema <- fastkpc_full_cuda_fixed_sp_qualification_dcov_schema()
+  qualification_frame <- if (nrow(value) == 0L) {
+    identical(names(value), schema$names) &&
+      all(vapply(schema$names, function(field) {
+        column <- value[[field]]
+        if (field %in% schema$list_fields) {
+          typeof(column) == "list" && length(column) == 0L &&
+            is.object(column) &&
+            identical(attributes(column), list(class = "AsIs"))
+        } else {
+          typeof(column) == schema$types[[field]] &&
+            length(column) == 0L && !is.object(column) &&
+            is.null(attributes(column))
+        }
+      }, logical(1L)))
+  } else {
+    isTRUE(tryCatch(
+      fastkpc_full_cuda_fixed_sp_validate_qualification_dcov_frame(value),
+      error = function(error) FALSE
+    ))
+  }
+  if (isTRUE(qualification_frame)) return(TRUE)
+
+  atomic_frame <- all(vapply(value, function(column) {
+    is.atomic(column) && !is.object(column) &&
+      is.null(attributes(column))
+  }, logical(1L)))
+  if (!isTRUE(atomic_frame)) return(FALSE)
+
+  normalized_names <- fastkpc_full_cuda_prepared_s_normalize_field_name(
+    names(value)
+  )
+  forbidden_names <- fastkpc_full_cuda_prepared_s_normalize_field_name(c(
+    "coefficients", "fitted", "residuals", "rss", "rhs",
+    "cuda_nullspace_rhs"
+  ))
+  if (any(nzchar(normalized_names) &
+          normalized_names %in% forbidden_names)) {
+    return(FALSE)
+  }
+  length(fastkpc_full_cuda_prepared_s_find_response_fields(value)) == 0L
+}
+
 fastkpc_full_cuda_fixed_sp_build_qualification_dcov_records <- function(
     logical_tests, parity_rows) {
   schema <- fastkpc_full_cuda_fixed_sp_qualification_dcov_schema()
@@ -8569,19 +8619,10 @@ fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
           setup_key = setup_key, target_keys = native$target_keys,
           residuals = shadow$residuals
         )
-        forbidden_callback_fields <- c(
-          "coefficients", "fitted", "residuals", "rss", "rhs",
-          "cuda_nullspace_rhs"
-        )
-        compact_callback_result <- is.null(shadow_callback_result) ||
-          (is.data.frame(shadow_callback_result) &&
-             as.numeric(object.size(shadow_callback_result)) <= 67108864 &&
-             !any(names(shadow_callback_result) %in%
-                    forbidden_callback_fields) &&
-             all(vapply(shadow_callback_result, function(column) {
-               is.atomic(column) && !is.object(column) &&
-                 is.null(attributes(column))
-             }, logical(1L))))
+        compact_callback_result <-
+          fastkpc_full_cuda_fixed_sp_callback_result_is_compact(
+            shadow_callback_result
+          )
         if (!isTRUE(compact_callback_result)) {
           stop("fixed-sp oracle shadow callback result is not compact",
                call. = FALSE)
