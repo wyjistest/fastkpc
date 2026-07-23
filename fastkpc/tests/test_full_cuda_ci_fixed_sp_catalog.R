@@ -749,10 +749,66 @@ assert_true(identical(
   colnames(qualification_batches[[1L]]$oracle_nullspace_rhs),
   qualification_one_setup$target_rows$residual_key_sha256
 ), "one-setup qualification target column order")
-assert_error(
-  fastkpc_full_cuda_fixed_sp_scope(catalog, "full"),
-  "full scope must be explicitly rejected",
-  "full scope streaming is introduced in the closure plan"
+full <- fastkpc_full_cuda_fixed_sp_scope(catalog, "full")
+assert_true(nrow(full$setup_rows) == 8634L, "full setup count")
+assert_true(nrow(full$target_rows) == 110617L, "full target count")
+assert_true(
+  identical(
+    fastkpc_full_cuda_census_key_set_hash(sort(
+      full$setup_rows$prepared_s_key_sha256, method = "radix"
+    )),
+    catalog$phase2_manifest$full_canonical_prepared_s_key_corpus_hash
+  ),
+  "full setup keys authenticate against Phase 2"
+)
+assert_true(
+  identical(
+    fastkpc_full_cuda_census_key_set_hash(sort(
+      full$target_rows$residual_key_sha256, method = "radix"
+    )),
+    catalog$phase2_manifest$full_canonical_target_key_corpus_hash
+  ),
+  "globally sorted full target keys authenticate against Phase 2"
+)
+assert_true(
+  !anyNA(full$setup_rows$prepared_s_key_sha256) &&
+    !anyNA(full$target_rows$prepared_s_key_sha256) &&
+    !anyDuplicated(full$setup_rows$prepared_s_key_sha256) &&
+    !anyDuplicated(full$target_rows$residual_key_sha256) &&
+    setequal(
+      unique(full$target_rows$prepared_s_key_sha256),
+      full$setup_rows$prepared_s_key_sha256
+    ),
+  "full targets have one complete prepared-S ownership mapping"
+)
+assert_true(
+  identical(
+    as.integer(table(factor(
+      full$target_rows$planned_route,
+      levels = c("CHOLESKY_BATCHED", "AUGMENTED_QR", "AUGMENTED_SVD")
+    ))),
+    c(73158L, 4210L, 33249L)
+  ),
+  "full planned route counts are canonical"
+)
+grouped_order <- order(
+  full$target_rows$prepared_s_key_sha256,
+  full$target_rows$residual_key_sha256,
+  method = "radix"
+)
+assert_true(
+  identical(grouped_order, seq_len(nrow(full$target_rows))),
+  "full execution rows retain deterministic prepared-S grouping"
+)
+full_again <- fastkpc_full_cuda_fixed_sp_scope(catalog, "full")
+assert_true(
+  identical(
+    full_again$target_rows[c(
+      "prepared_s_key_sha256", "residual_key_sha256"
+    )],
+    full$target_rows[c("prepared_s_key_sha256", "residual_key_sha256")]
+  ),
+  "full execution grouping is repeatable"
 )
 
-cat("PASS authenticated Phase 3 iteration catalog\n")
+cat("PASS authenticated Phase 3 iteration/qualification/full catalog\n")

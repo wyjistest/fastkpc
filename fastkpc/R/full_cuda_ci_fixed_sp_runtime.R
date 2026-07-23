@@ -1256,7 +1256,7 @@ fastkpc_full_cuda_fixed_sp_scope <- function(catalog, scope) {
       setup_rows$prepared_s_key_sha256
     )
     target_hash <- fastkpc_full_cuda_census_key_set_hash(
-      target_rows$residual_key_sha256
+      sort(target_rows$residual_key_sha256, method = "radix")
     )
     if (!identical(
           setup_hash,
