@@ -383,14 +383,32 @@ authoritative_oracle_payload <- refresh_oracle_fixture(list(
 authoritative_target_rows <- data.frame(
   prepared_s_key_sha256 = rep(oracle_setup_key, 4L),
   residual_key_sha256 = oracle_target_keys,
+  shard_id = rep.int(0L, 4L),
+  canonical_setup_rank = rep.int(1L, 4L),
+  canonical_target_rank = 1:4,
+  phase2_shard_id = rep.int(0L, 4L),
+  target = 1:4,
+  null_dim = rep.int(4L, 4L),
+  condition = oracle_conditions,
+  coefficient_rank = rep.int(4L, 4L),
   planned_route = oracle_routes,
+  selected_sp_hash = oracle_target$selected_sp_sha256,
+  coefficient_hash = oracle_target$coefficient_phase2_sha256,
+  fitted_hash = oracle_target$fitted_phase2_sha256,
+  residual_hash = oracle_target$residual_phase2_sha256,
+  target_fit_fingerprint = vapply(
+    seq_len(4L), function(index) {
+      sha(paste("target_fit_fingerprint", index))
+    }, character(1L)
+  ),
   stringsAsFactors = FALSE
 )
-validate_authoritative_oracle <- function(payload) {
+validate_authoritative_oracle <- function(
+    payload, expected_target_rows = authoritative_target_rows) {
   .fastkpc_full_cuda_phase3_validate_oracle_payload(
     payload,
     expected_setup_keys = oracle_setup_key,
-    expected_target_rows = authoritative_target_rows
+    expected_target_rows = expected_target_rows
   )
 }
 invisible(validate_authoritative_oracle(authoritative_oracle_payload))
@@ -409,6 +427,52 @@ assert_hostile_oracle_rejected <- function(mutator, label) {
     validate_authoritative_oracle(hostile)
   }, label)
 }
+assert_hostile_oracle_rejected(function(payload) {
+  payload$setup_results$shard_id <- 63L
+  payload$target_parity$shard_id <- rep.int(63L, 4L)
+  payload$resource_metrics$shard_id <- 63L
+  payload$stage_timing$shard_id <- rep.int(63L, 6L)
+  payload
+}, "forged consistent shard id fails expected-corpus authentication")
+assert_hostile_oracle_rejected(function(payload) {
+  payload$setup_results$canonical_setup_rank <- 65L
+  payload$target_parity$canonical_setup_rank <- rep.int(65L, 4L)
+  payload$resource_metrics$canonical_setup_rank <- 65L
+  payload$target_parity$canonical_target_rank <-
+    as.integer(payload$target_parity$canonical_target_rank + 64L)
+  payload
+}, "forged global canonical ranks fail expected-corpus authentication")
+assert_hostile_oracle_rejected(function(payload) {
+  payload$target_parity$selected_sp_sha256[[1L]] <-
+    sha("forged selected SP")
+  payload$target_parity$coefficient_phase2_sha256[[1L]] <-
+    sha("forged Phase 1 coefficient")
+  payload$target_parity$fitted_phase2_sha256[[1L]] <-
+    sha("forged Phase 1 fitted")
+  payload$target_parity$residual_phase2_sha256[[1L]] <-
+    sha("forged Phase 1 residual")
+  if ("target_fit_fingerprint" %in% names(payload$target_parity)) {
+    payload$target_parity$target_fit_fingerprint[[1L]] <-
+      sha("forged Phase 1 target fit")
+  }
+  payload
+}, "forged Phase 1 target authority hashes fail expected-corpus authentication")
+assert_hostile_oracle_rejected(function(payload) {
+  payload$setup_results$null_dim <- 3L
+  payload$target_parity$null_dim <- rep.int(3L, 4L)
+  payload$target_parity$condition_bucket <- vapply(
+    seq_len(4L), function(index) {
+      fastkpc_full_cuda_census_condition_bucket(
+        payload$target_parity$condition[[index]],
+        payload$target_parity$phase1_coefficient_rank[[index]], 3L
+      )
+    }, character(1L)
+  )
+  payload$target_parity$qr_rank[[3L]] <- 3L
+  payload$target_parity$effective_rank[[4L]] <- 3L
+  payload$target_parity$aggregate_penalty_root_rank[[4L]] <- 3L
+  payload
+}, "forged null dimension fails expected-corpus authentication")
 assert_hostile_oracle_rejected(function(payload) {
   payload$target_parity$solver_status[[1L]] <- "OK_BOGUS"
   payload
@@ -475,6 +539,37 @@ assert_hostile_oracle_rejected(function(payload) {
   payload$setup_results$phase2_shard_id <- 1L
   payload
 }, "Phase 2 shard id must match canonical setup rank mapping")
+
+assert_true(
+  "target_fit_fingerprint" %in% names(oracle_target),
+  "oracle target parity carries the distinct Phase 1 target-fit fingerprint"
+)
+required_oracle_descriptor_fields <-
+  .fastkpc_full_cuda_phase3_oracle_descriptor_target_fields()
+assert_true(
+  identical(required_oracle_descriptor_fields, names(authoritative_target_rows)),
+  "oracle descriptor requires the exact authenticated provenance projection"
+)
+assert_true(
+  !any(c("y_hash", "target_state_fingerprint") %in%
+         required_oracle_descriptor_fields),
+  paste(
+    "Phase 1 descriptors do not claim Phase 2 y-hash or target-state",
+    "fingerprint authority"
+  )
+)
+for (missing_field in required_oracle_descriptor_fields) {
+  incomplete_descriptor <- authoritative_target_rows[
+    setdiff(names(authoritative_target_rows), missing_field)
+  ]
+  assert_error(
+    validate_authoritative_oracle(
+      authoritative_oracle_payload,
+      expected_target_rows = incomplete_descriptor
+    ),
+    paste("oracle descriptor missing", missing_field, "fails closed")
+  )
+}
 
 lineage_fixture <- list(
   authenticated = TRUE,

@@ -2145,6 +2145,164 @@ fastkpc_full_cuda_phase3_assign_setup_shards <- function(
   )
 }
 
+.fastkpc_full_cuda_phase3_oracle_descriptor_target_fields <- function() {
+  c(
+    "prepared_s_key_sha256", "residual_key_sha256", "shard_id",
+    "canonical_setup_rank", "canonical_target_rank", "phase2_shard_id",
+    "target", "null_dim", "condition", "coefficient_rank",
+    "planned_route", "selected_sp_hash", "coefficient_hash",
+    "fitted_hash", "residual_hash", "target_fit_fingerprint"
+  )
+}
+
+.fastkpc_full_cuda_phase3_oracle_descriptor_target_rows <- function(
+    catalog, target_rows) {
+  required_helpers <- c(
+    "fastkpc_full_cuda_phase3_discover_catalog_authority",
+    "fastkpc_full_cuda_fixed_sp_route"
+  )
+  missing_helpers <- required_helpers[!vapply(
+    required_helpers, exists, logical(1L), mode = "function", inherits = TRUE
+  )]
+  if (length(missing_helpers) > 0L) {
+    stop("Phase 3 oracle descriptor helpers are unavailable", call. = FALSE)
+  }
+  required_target_fields <- c(
+    "prepared_s_key_sha256", "residual_key_sha256", "target", "null_dim",
+    "condition", "coefficient_rank", "planned_route", "selected_sp_hash",
+    "coefficient_hash", "fitted_hash", "residual_hash",
+    "target_fit_fingerprint"
+  )
+  catalog_clean <- is.list(catalog) && !is.object(catalog) &&
+    is.data.frame(catalog$setup_index) &&
+    is.list(catalog$inputs) && !is.object(catalog$inputs) &&
+    is.data.frame(catalog$inputs$target_fit_metadata) &&
+    is.data.frame(catalog$inputs$same_s_setup_metadata) &&
+    is.list(catalog$catalog_contract) &&
+    is.data.frame(target_rows) && !anyDuplicated(names(target_rows)) &&
+    all(required_target_fields %in% names(target_rows))
+  if (!isTRUE(catalog_clean)) {
+    stop("Phase 3 oracle descriptor target rows are malformed", call. = FALSE)
+  }
+  fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
+
+  setup_index <- catalog$setup_index
+  canonical_targets <- catalog$inputs$target_fit_metadata
+  canonical_setups <- catalog$inputs$same_s_setup_metadata
+  setup_fields <- c("same_S_group_id", "prepared_s_key_sha256")
+  canonical_target_fields <- c(
+    "residual_key_sha256", "same_S_group_id", "target",
+    "penalized_system_condition_at_selected_sp", "coefficient_rank",
+    "selected_sp_hash", "coefficient_hash", "fitted_hash", "residual_hash",
+    "target_fit_fingerprint"
+  )
+  canonical_setup_fields <- c(
+    "same_S_group_id", "constraint_nullspace_dimension"
+  )
+  shard_count <- catalog$catalog_contract$shard_count
+  canonical_clean <- all(setup_fields %in% names(setup_index)) &&
+    all(canonical_target_fields %in% names(canonical_targets)) &&
+    all(canonical_setup_fields %in% names(canonical_setups)) &&
+    typeof(shard_count) == "integer" && length(shard_count) == 1L &&
+    !is.na(shard_count) && shard_count > 0L &&
+    !anyDuplicated(setup_index$same_S_group_id) &&
+    !anyDuplicated(setup_index$prepared_s_key_sha256) &&
+    !anyDuplicated(canonical_targets$residual_key_sha256) &&
+    !anyDuplicated(canonical_setups$same_S_group_id)
+  if (!isTRUE(canonical_clean)) {
+    stop("Phase 3 oracle descriptor catalog indexes are malformed",
+         call. = FALSE)
+  }
+
+  target_match <- match(
+    as.character(target_rows$residual_key_sha256),
+    as.character(canonical_targets$residual_key_sha256)
+  )
+  matched_targets <- canonical_targets[target_match, , drop = FALSE]
+  setup_match <- match(
+    as.character(matched_targets$same_S_group_id),
+    as.character(setup_index$same_S_group_id)
+  )
+  phase1_setup_match <- match(
+    as.character(matched_targets$same_S_group_id),
+    as.character(canonical_setups$same_S_group_id)
+  )
+  canonical_target_keys <- sort(
+    as.character(canonical_targets$residual_key_sha256), method = "radix"
+  )
+  canonical_setup_rank <- as.integer(setup_match)
+  canonical_target_rank <- as.integer(match(
+    as.character(matched_targets$residual_key_sha256), canonical_target_keys
+  ))
+  if (anyNA(target_match) || anyNA(canonical_setup_rank) ||
+      anyNA(canonical_target_rank) || anyNA(phase1_setup_match)) {
+    stop("Phase 3 oracle descriptor catalog mapping is incomplete",
+         call. = FALSE)
+  }
+
+  null_dim <- as.integer(
+    canonical_setups$constraint_nullspace_dimension[phase1_setup_match]
+  )
+  condition <- as.double(
+    matched_targets$penalized_system_condition_at_selected_sp
+  )
+  coefficient_rank <- as.integer(matched_targets$coefficient_rank)
+  planned_route <- fastkpc_full_cuda_fixed_sp_route(
+    condition = condition,
+    coefficient_rank = coefficient_rank,
+    null_dim = null_dim,
+    authenticated = rep(TRUE, nrow(target_rows))
+  )
+  projected <- data.frame(
+    prepared_s_key_sha256 = as.character(
+      setup_index$prepared_s_key_sha256[setup_match]
+    ),
+    residual_key_sha256 = as.character(
+      matched_targets$residual_key_sha256
+    ),
+    canonical_setup_rank = canonical_setup_rank,
+    canonical_target_rank = canonical_target_rank,
+    phase2_shard_id = as.integer(
+      (canonical_setup_rank - 1L) %% shard_count
+    ),
+    target = as.integer(matched_targets$target),
+    null_dim = null_dim,
+    condition = condition,
+    coefficient_rank = coefficient_rank,
+    planned_route = as.character(planned_route),
+    selected_sp_hash = as.character(matched_targets$selected_sp_hash),
+    coefficient_hash = as.character(matched_targets$coefficient_hash),
+    fitted_hash = as.character(matched_targets$fitted_hash),
+    residual_hash = as.character(matched_targets$residual_hash),
+    target_fit_fingerprint = as.character(
+      matched_targets$target_fit_fingerprint
+    ),
+    stringsAsFactors = FALSE
+  )
+  authority_exact <- all(vapply(required_target_fields, function(field) {
+    identical(target_rows[[field]], projected[[field]])
+  }, logical(1L)))
+  setup_keys <- sort(
+    unique(projected$prepared_s_key_sha256), method = "radix"
+  )
+  expected_order <- if (nrow(projected) == 0L) integer() else order(
+    match(projected$prepared_s_key_sha256, setup_keys),
+    projected$residual_key_sha256, method = "radix"
+  )
+  if (!isTRUE(authority_exact) ||
+      anyDuplicated(projected$residual_key_sha256) ||
+      !identical(expected_order, seq_len(nrow(projected)))) {
+    stop("Phase 3 oracle descriptor does not match catalog authority",
+         call. = FALSE)
+  }
+  fields <- setdiff(
+    .fastkpc_full_cuda_phase3_oracle_descriptor_target_fields(), "shard_id"
+  )
+  projected <- projected[, fields, drop = FALSE]
+  rownames(projected) <- NULL
+  projected
+}
+
 fastkpc_full_cuda_phase3_plan_shards <- function(
     setup_keys, target_rows, scope, shard_count = NULL) {
   scope <- .fastkpc_full_cuda_phase3_scope(scope)
@@ -2161,6 +2319,11 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
   if (!isTRUE(clean_frame)) {
     stop("Phase 3 target rows are malformed", call. = FALSE)
   }
+  oracle_descriptor_fields <-
+    .fastkpc_full_cuda_phase3_oracle_descriptor_target_fields()
+  oracle_descriptor_input <- identical(
+    names(target_rows), setdiff(oracle_descriptor_fields, "shard_id")
+  ) || identical(names(target_rows), oracle_descriptor_fields)
   target_setup_keys <- .fastkpc_full_cuda_phase3_key_vector(
     target_rows$prepared_s_key_sha256,
     "target_rows$prepared_s_key_sha256", allow_duplicates = TRUE,
@@ -2181,6 +2344,9 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
   target_rows$prepared_s_key_sha256 <- target_setup_keys
   target_rows$residual_key_sha256 <- target_keys
   target_rows$shard_id <- as.integer(assignments$shard_id[setup_index])
+  if (isTRUE(oracle_descriptor_input)) {
+    target_rows <- target_rows[, oracle_descriptor_fields, drop = FALSE]
+  }
   order_id <- order(
     assignments$sorted_rank[setup_index], target_keys, method = "radix"
   )
@@ -3921,11 +4087,11 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
       expected_setup_keys, "oracle expected setup keys",
       allow_empty = TRUE, allow_empty_list = TRUE
     )
-    required_target_fields <- c(
-      "prepared_s_key_sha256", "residual_key_sha256"
-    )
+    required_target_fields <-
+      .fastkpc_full_cuda_phase3_oracle_descriptor_target_fields()
     target_rows_clean <- is.data.frame(expected_target_rows) &&
       all(required_target_fields %in% names(expected_target_rows)) &&
+      !anyDuplicated(names(expected_target_rows)) &&
       typeof(expected_target_rows$prepared_s_key_sha256) == "character" &&
       typeof(expected_target_rows$residual_key_sha256) == "character" &&
       !anyNA(expected_target_rows$prepared_s_key_sha256) &&
@@ -3946,6 +4112,58 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
         method = "radix"
       )
     }
+    expected_field_map <- c(
+      prepared_s_key_sha256 = "prepared_s_key_sha256",
+      residual_key_sha256 = "residual_key_sha256",
+      shard_id = "shard_id",
+      canonical_setup_rank = "canonical_setup_rank",
+      canonical_target_rank = "canonical_target_rank",
+      target = "target",
+      null_dim = "null_dim",
+      condition = "condition",
+      coefficient_rank = "phase1_coefficient_rank",
+      planned_route = "planned_route",
+      selected_sp_hash = "selected_sp_sha256",
+      coefficient_hash = "coefficient_phase2_sha256",
+      fitted_hash = "fitted_phase2_sha256",
+      residual_hash = "residual_phase2_sha256",
+      target_fit_fingerprint = "target_fit_fingerprint"
+    )
+    target_projection_exact <- all(vapply(
+      names(expected_field_map), function(expected_field) {
+        payload_field <- unname(expected_field_map[[expected_field]])
+        identical(
+          payload$target_parity[[payload_field]],
+          expected_target_rows[[expected_field]]
+        )
+      }, logical(1L)
+    ))
+    expected_setup_rank <- vapply(expected_setup_keys, function(key) {
+      values <- unique(expected_target_rows$canonical_setup_rank[
+        expected_target_rows$prepared_s_key_sha256 == key
+      ])
+      if (length(values) != 1L || is.na(values)) return(NA_integer_)
+      as.integer(values)
+    }, integer(1L), USE.NAMES = FALSE)
+    expected_phase2_shard_id <- vapply(expected_setup_keys, function(key) {
+      values <- unique(expected_target_rows$phase2_shard_id[
+        expected_target_rows$prepared_s_key_sha256 == key
+      ])
+      if (length(values) != 1L || is.na(values)) return(NA_integer_)
+      as.integer(values)
+    }, integer(1L), USE.NAMES = FALSE)
+    authenticated_phase2_shard_id <- as.integer(
+      (expected_setup_rank - 1L) %%
+        fastkpc_full_cuda_fixed_sp_catalog_contract()$shard_count
+    )
+    expected_setup_projection_exact <-
+      !anyNA(expected_setup_rank) && !anyNA(expected_phase2_shard_id) &&
+      identical(expected_phase2_shard_id, authenticated_phase2_shard_id) &&
+      identical(
+        payload$setup_results$canonical_setup_rank, expected_setup_rank
+      ) && identical(
+        payload$setup_results$phase2_shard_id, expected_phase2_shard_id
+      )
     expected_corpus_clean <-
       !anyNA(expected_target_setup_rank) &&
       !anyDuplicated(expected_target_rows$residual_key_sha256) &&
@@ -3953,33 +4171,8 @@ fastkpc_full_cuda_phase3_summarize_oracle_rows <- function(
       identical(
         payload$setup_results$prepared_s_key_sha256,
         expected_setup_keys
-      ) && identical(
-        payload$target_parity$prepared_s_key_sha256,
-        as.character(expected_target_rows$prepared_s_key_sha256)
-      ) && identical(
-        payload$target_parity$residual_key_sha256,
-        as.character(expected_target_rows$residual_key_sha256)
-      )
-    if ("planned_route" %in% names(expected_target_rows)) {
-      expected_corpus_clean <- expected_corpus_clean && identical(
-        payload$target_parity$planned_route,
-        as.character(expected_target_rows$planned_route)
-      )
-    }
-    expected_field_map <- c(
-      target = "target",
-      condition = "condition",
-      coefficient_rank = "phase1_coefficient_rank"
-    )
-    for (expected_field in names(expected_field_map)) {
-      if (expected_field %in% names(expected_target_rows)) {
-        payload_field <- unname(expected_field_map[[expected_field]])
-        expected_corpus_clean <- expected_corpus_clean && identical(
-          payload$target_parity[[payload_field]],
-          expected_target_rows[[expected_field]]
-        )
-      }
-    }
+      ) && isTRUE(target_projection_exact) &&
+      isTRUE(expected_setup_projection_exact)
     if (!isTRUE(expected_corpus_clean)) {
       stop("Phase 3 oracle payload does not match its expected corpus",
            call. = FALSE)

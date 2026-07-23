@@ -8009,7 +8009,8 @@ fastkpc_full_cuda_fixed_sp_oracle_row_schemas <- function() {
       residual_oracle_phase2_exact = "logical",
       rss_candidate_sha256 = "character", rss_oracle_sha256 = "character",
       rhs_candidate_sha256 = "character", rhs_oracle_sha256 = "character",
-      selected_sp_sha256 = "character", y_sha256 = "character",
+      selected_sp_sha256 = "character",
+      target_fit_fingerprint = "character", y_sha256 = "character",
       target_state_fingerprint = "character", oracle_call_count = "integer",
       rhs_authority = "character", full_cuda_data_plane = "logical",
       cpu_fallback_count = "integer", unknown_fallback_count = "integer",
@@ -8641,6 +8642,9 @@ fastkpc_full_cuda_fixed_sp_execute_oracle_setup <- function(
     rhs_candidate_sha256 = comparison$candidate_hash$rhs,
     rhs_oracle_sha256 = comparison$oracle_hash$rhs,
     selected_sp_sha256 = as.character(batch$target_rows$selected_sp_hash),
+    target_fit_fingerprint = as.character(
+      batch$target_rows$target_fit_fingerprint
+    ),
     y_sha256 = as.character(batch$target_rows$y_hash),
     target_state_fingerprint = as.character(
       batch$target_rows$target_state_fingerprint

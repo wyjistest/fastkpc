@@ -539,6 +539,10 @@ selected_targets <- selected_targets[order(
   method = "radix"
 ), , drop = FALSE]
 rownames(selected_targets) <- NULL
+selected_targets <-
+  .fastkpc_full_cuda_phase3_oracle_descriptor_target_rows(
+    catalog, selected_targets
+  )
 subset_plan <- fastkpc_full_cuda_phase3_plan_shards(
   setup_keys = selected_pair,
   target_rows = selected_targets,

@@ -72,6 +72,9 @@ setup_keys <- as.character(
   selected_scope$setup_rows$prepared_s_key_sha256
 )
 target_rows <- selected_scope$target_rows
+target_rows <- .fastkpc_full_cuda_phase3_oracle_descriptor_target_rows(
+  catalog, target_rows
+)
 route_config <- fastkpc_full_cuda_phase3_route_config()
 identity <- fastkpc_full_cuda_phase3_input_identity(catalog, device_id)
 capacity <- fastkpc_full_cuda_fixed_sp_contract()$canonical_capacities
