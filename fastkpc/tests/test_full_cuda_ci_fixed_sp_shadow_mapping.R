@@ -85,6 +85,15 @@ assert_true(
     grepl("^[0-9a-f]{64}$", plan$setup_association_sha256),
   "shadow plan binds authenticated Phase 2 setup associations"
 )
+assert_true(
+  identical(
+    plan$phase2_target_state_index_rds_sha256,
+    unname(fastkpc_full_cuda_fixed_sp_catalog_contract()[[
+      "target_state_index_rds_sha256"
+    ]])
+  ) && grepl("^[0-9a-f]{64}$", plan$target_association_sha256),
+  "shadow plan binds authenticated Phase 2 target associations"
+)
 
 association_swap_catalog <- catalog
 association_swap_keys <-
@@ -108,10 +117,68 @@ assert_error(
   )
 )
 
+target_association_swap_catalog <- catalog
+target_setup_shards <- as.integer((match(
+  target_association_swap_catalog$setup_index$prepared_s_key_sha256,
+  sort(catalog$setup_index$prepared_s_key_sha256, method = "radix")
+) - 1L) %% 64L)
+target_setup_a <- 1L
+target_setup_b <- which(target_setup_shards != target_setup_shards[[1L]])[[1L]]
+target_swap_groups <-
+  target_association_swap_catalog$setup_index$same_S_group_id[
+    c(target_setup_a, target_setup_b)
+  ]
+target_setup_metadata <-
+  target_association_swap_catalog$inputs$same_s_setup_metadata
+target_swap_setup_match <- match(
+  target_swap_groups, target_setup_metadata$same_S_group_id
+)
+target_swap_fingerprints <-
+  target_setup_metadata$setup_fingerprint[target_swap_setup_match]
+target_metadata <-
+  target_association_swap_catalog$inputs$target_fit_metadata
+target_rows_a <- which(target_metadata$same_S_group_id == target_swap_groups[[1L]])
+target_rows_b <- which(target_metadata$same_S_group_id == target_swap_groups[[2L]])
+target_swap_rows <- c(target_rows_a, target_rows_b)
+target_swap_identity <- target_metadata[
+  target_swap_rows, c("residual_key_sha256", "target"), drop = FALSE
+]
+assert_true(
+  !anyNA(target_swap_setup_match) &&
+    length(target_rows_a) > 0L && length(target_rows_b) > 0L &&
+    target_setup_shards[[target_setup_a]] !=
+      target_setup_shards[[target_setup_b]],
+  "target-association swap probe must cover populated different-shard setups"
+)
+target_metadata$same_S_group_id[target_rows_a] <- target_swap_groups[[2L]]
+target_metadata$setup_fingerprint[target_rows_a] <-
+  target_swap_fingerprints[[2L]]
+target_metadata$same_S_group_id[target_rows_b] <- target_swap_groups[[1L]]
+target_metadata$setup_fingerprint[target_rows_b] <-
+  target_swap_fingerprints[[1L]]
+target_association_swap_catalog$inputs$target_fit_metadata <- target_metadata
+assert_true(
+  identical(
+    target_association_swap_catalog$inputs$target_fit_metadata[
+      target_swap_rows, c("residual_key_sha256", "target"), drop = FALSE
+    ],
+    target_swap_identity
+  ),
+  "target-association swap probe must preserve residual keys and targets"
+)
+assert_error(
+  fastkpc_full_cuda_shadow_plan(target_association_swap_catalog),
+  "authenticated Phase 2 target association mismatch",
+  paste(
+    "self-consistent residual-key target association swaps must fail closed",
+    "before conditional shard assignment"
+  )
+)
+
 full_scope <- fastkpc_full_cuda_fixed_sp_scope(catalog, "full")
 logical_tests <- catalog$inputs$logical_tests
-authenticated_setup_evidence <-
-  fastkpc_full_cuda_shadow_authenticated_setup_records(catalog)
+authenticated_phase2_evidence <-
+  fastkpc_full_cuda_shadow_authenticated_phase2_records(catalog)
 map_units <- function(
     logical = logical_tests, setup = full_scope$setup_rows,
     target = full_scope$target_rows, setup_index = catalog$setup_index,
@@ -122,7 +189,8 @@ map_units <- function(
     target_rows = target,
     setup_index = setup_index,
     expected_logical_contract = logical_contract,
-    authenticated_setup_evidence = authenticated_setup_evidence,
+    authenticated_setup_evidence = authenticated_phase2_evidence$setup,
+    authenticated_target_evidence = authenticated_phase2_evidence$target,
     shard_count = 64L
   )
 }
@@ -135,7 +203,7 @@ missing_endpoint <- full_scope$target_rows
 missing_endpoint$residual_key_sha256[[endpoint_row]] <- strrep("f", 64L)
 assert_error(
   map_units(target = missing_endpoint),
-  "endpoint residual key is missing",
+  "authenticated Phase 2 target association mismatch",
   "missing conditional endpoint key must fail closed"
 )
 rm(missing_endpoint)
@@ -154,7 +222,7 @@ fingerprint_conflict <- full_scope$target_rows
 fingerprint_conflict$setup_fingerprint[[endpoint_row]] <- strrep("e", 64L)
 assert_error(
   map_units(target = fingerprint_conflict),
-  "fingerprint mapping conflict",
+  "authenticated Phase 2 target association mismatch",
   "target/setup fingerprint conflict must fail closed"
 )
 rm(fingerprint_conflict)

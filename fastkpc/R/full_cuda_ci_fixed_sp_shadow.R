@@ -70,67 +70,161 @@ fastkpc_full_cuda_shadow_validate_logical_contract <- function(
   invisible(TRUE)
 }
 
-fastkpc_full_cuda_shadow_authenticated_setup_records <- function(catalog) {
+fastkpc_full_cuda_shadow_authenticated_phase2_records <- function(catalog) {
   dependencies <- c(
     "fastkpc_full_cuda_fixed_sp_catalog_contract",
     "fastkpc_full_cuda_fixed_sp_capture_phase2_files",
-    "fastkpc_full_cuda_fixed_sp_parse_phase2_files"
+    "fastkpc_full_cuda_fixed_sp_parse_phase2_files",
+    "fastkpc_full_cuda_prepared_s_validate_target_state_frame_schema"
   )
   if (any(!vapply(dependencies, exists, logical(1L), mode = "function",
                   inherits = TRUE))) {
-    stop("authenticated Phase 2 setup evidence helpers are unavailable",
+    stop("authenticated Phase 2 association evidence helpers are unavailable",
          call. = FALSE)
   }
   contract <- fastkpc_full_cuda_fixed_sp_catalog_contract()
-  captured <- fastkpc_full_cuda_fixed_sp_capture_phase2_files(
-    catalog$phase2_dir, contract
+  target_state_file <- "target_state_index.rds"
+  capture_contract <- contract
+  capture_contract$phase2_file_sha256 <- c(
+    contract$phase2_file_sha256,
+    setNames(contract$target_state_index_rds_sha256, target_state_file)
   )
-  setup_index <- fastkpc_full_cuda_fixed_sp_parse_phase2_files(
-    captured
-  )$setup_index
-  fields <- c(
+  captured <- fastkpc_full_cuda_fixed_sp_capture_phase2_files(
+    catalog$phase2_dir, capture_contract
+  )
+  phase2_objects <- fastkpc_full_cuda_fixed_sp_parse_phase2_files(captured)
+  setup_index <- phase2_objects$setup_index
+  setup_fields <- c(
     "same_S_group_id", "prepared_s_key_sha256",
     "phase1_setup_fingerprint"
   )
-  records <- setup_index[, fields, drop = FALSE]
-  sha256_columns <- all(vapply(records, function(column) {
+  setup_records <- setup_index[, setup_fields, drop = FALSE]
+  setup_sha256_columns <- all(vapply(setup_records, function(column) {
     typeof(column) == "character" && !is.object(column) &&
       is.null(attributes(column)) && !anyNA(column) &&
       all(grepl("^[0-9a-f]{64}$", column))
   }, logical(1L)))
-  clean <- is.data.frame(setup_index) && nrow(records) == 8634L &&
-    length(setdiff(c("schema_version", fields), names(setup_index))) == 0L &&
+  setup_clean <- is.data.frame(setup_index) &&
+    nrow(setup_records) == 8634L &&
+    length(setdiff(
+      c("schema_version", setup_fields), names(setup_index)
+    )) == 0L &&
     all(setup_index$schema_version ==
-          "full-cuda-ci-prepared-s-setup-v1") && sha256_columns &&
-    !anyDuplicated(records$same_S_group_id) &&
-    !anyDuplicated(records$prepared_s_key_sha256) &&
+          "full-cuda-ci-prepared-s-setup-v1") && setup_sha256_columns &&
+    !anyDuplicated(setup_records$same_S_group_id) &&
+    !anyDuplicated(setup_records$prepared_s_key_sha256) &&
     identical(
       as.character(captured$hashes[["prepared_s_setup_index.csv"]]),
       as.character(
         contract$phase2_file_sha256[["prepared_s_setup_index.csv"]]
       )
     )
-  if (!isTRUE(clean)) {
+  if (!isTRUE(setup_clean)) {
     stop("authenticated Phase 2 setup association evidence is malformed",
          call. = FALSE)
   }
-  records <- records[order(
-    records$prepared_s_key_sha256, method = "radix"
+  setup_records <- setup_records[order(
+    setup_records$prepared_s_key_sha256, method = "radix"
   ), , drop = FALSE]
-  rownames(records) <- NULL
-  list(
+  rownames(setup_records) <- NULL
+  setup_evidence <- list(
     schema_version = "full-cuda-ci-shadow-setup-association-v1",
     phase2_setup_index_csv_sha256 = unname(
       captured$hashes[["prepared_s_setup_index.csv"]]
     ),
-    association_sha256 = fastkpc_full_cuda_census_frame_hash(records),
-    records = records
+    association_sha256 =
+      fastkpc_full_cuda_census_frame_hash(setup_records),
+    records = setup_records
   )
+
+  target_connection <- gzcon(rawConnection(
+    captured$raw[[target_state_file]], open = "rb"
+  ))
+  on.exit(close(target_connection), add = TRUE)
+  target_state_index <- tryCatch(
+    readRDS(target_connection),
+    error = function(error) {
+      stop("authenticated Phase 2 target association evidence is malformed",
+           call. = FALSE)
+    }
+  )
+  tryCatch(
+    fastkpc_full_cuda_prepared_s_validate_target_state_frame_schema(
+      target_state_index
+    ),
+    error = function(error) {
+      stop("authenticated Phase 2 target association evidence is malformed",
+           call. = FALSE)
+    }
+  )
+  target_fields <- c(
+    "residual_key_sha256", "target", "same_S_group_id",
+    "prepared_s_key_sha256", "phase1_setup_fingerprint"
+  )
+  target_records <- target_state_index[, target_fields, drop = FALSE]
+  target_sha256_fields <- setdiff(target_fields, "target")
+  target_sha256_columns <- all(vapply(
+    target_records[target_sha256_fields], function(column) {
+      typeof(column) == "character" && !is.object(column) &&
+        is.null(attributes(column)) && !anyNA(column) &&
+        all(grepl("^[0-9a-f]{64}$", column))
+    }, logical(1L)
+  ))
+  target_setup_match <- match(
+    target_records$same_S_group_id, setup_records$same_S_group_id
+  )
+  target_clean <- nrow(target_records) == contract$target_state_count &&
+    target_sha256_columns &&
+    typeof(target_records$target) == "integer" &&
+    !is.object(target_records$target) &&
+    is.null(attributes(target_records$target)) &&
+    !anyNA(target_records$target) &&
+    all(target_records$target >= 1L & target_records$target <= 48L) &&
+    !anyDuplicated(target_records$residual_key_sha256) &&
+    !anyNA(target_setup_match) &&
+    identical(
+      target_records$prepared_s_key_sha256,
+      setup_records$prepared_s_key_sha256[target_setup_match]
+    ) && identical(
+      target_records$phase1_setup_fingerprint,
+      setup_records$phase1_setup_fingerprint[target_setup_match]
+    ) && identical(
+      unname(captured$hashes[[target_state_file]]),
+      unname(contract$target_state_index_rds_sha256)
+    ) && identical(
+      unname(contract$target_state_index_rds_sha256),
+      unname(contract$phase2_semantic_file_sha256[[
+        "target_state_index_rds"
+      ]])
+    )
+  if (!isTRUE(target_clean)) {
+    stop("authenticated Phase 2 target association evidence is malformed",
+         call. = FALSE)
+  }
+  target_records <- target_records[order(
+    target_records$residual_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  rownames(target_records) <- NULL
+  target_evidence <- list(
+    schema_version = "full-cuda-ci-shadow-target-association-v1",
+    phase2_target_state_index_rds_sha256 = unname(
+      captured$hashes[[target_state_file]]
+    ),
+    association_sha256 =
+      fastkpc_full_cuda_census_frame_hash(target_records),
+    records = target_records
+  )
+  list(setup = setup_evidence, target = target_evidence)
+}
+
+fastkpc_full_cuda_shadow_authenticated_setup_records <- function(catalog) {
+  fastkpc_full_cuda_shadow_authenticated_phase2_records(catalog)$setup
 }
 
 fastkpc_full_cuda_shadow_map_execution_units <- function(
     logical_tests, setup_rows, target_rows, setup_index,
     expected_logical_contract, authenticated_setup_evidence,
+    authenticated_target_evidence,
     shard_count = 64L) {
   required_logical <- c(
     "logical_sequence_id", "level", "x", "y", "S_key",
@@ -207,6 +301,42 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
     stop("authenticated Phase 2 setup association evidence is malformed",
          call. = FALSE)
   }
+  authenticated_target_fields <- c(
+    "schema_version", "phase2_target_state_index_rds_sha256",
+    "association_sha256", "records"
+  )
+  authenticated_target_record_fields <- c(
+    "residual_key_sha256", "target", "same_S_group_id",
+    "prepared_s_key_sha256", "phase1_setup_fingerprint"
+  )
+  target_contract <- fastkpc_full_cuda_fixed_sp_catalog_contract()
+  authenticated_target_records <- authenticated_target_evidence$records
+  authenticated_target_clean <-
+    is.list(authenticated_target_evidence) &&
+    !is.object(authenticated_target_evidence) && identical(
+      names(authenticated_target_evidence), authenticated_target_fields
+    ) && identical(
+      authenticated_target_evidence$schema_version,
+      "full-cuda-ci-shadow-target-association-v1"
+    ) && is.data.frame(authenticated_target_records) && identical(
+      names(authenticated_target_records), authenticated_target_record_fields
+    ) && nrow(authenticated_target_records) == 110617L &&
+    identical(
+      authenticated_target_evidence$phase2_target_state_index_rds_sha256,
+      unname(target_contract$target_state_index_rds_sha256)
+    ) && identical(
+      authenticated_target_evidence$association_sha256,
+      fastkpc_full_cuda_census_frame_hash(authenticated_target_records)
+    ) && identical(
+      order(
+        authenticated_target_records$residual_key_sha256, method = "radix"
+      ),
+      seq_len(nrow(authenticated_target_records))
+    )
+  if (!isTRUE(authenticated_target_clean)) {
+    stop("authenticated Phase 2 target association evidence is malformed",
+         call. = FALSE)
+  }
 
   sha256_vector <- function(value) {
     typeof(value) == "character" && !is.object(value) &&
@@ -232,6 +362,18 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
   authenticated_fingerprint <- as.character(
     authenticated_records$phase1_setup_fingerprint
   )
+  authenticated_target_key <- as.character(
+    authenticated_target_records$residual_key_sha256
+  )
+  authenticated_target_group <- as.character(
+    authenticated_target_records$same_S_group_id
+  )
+  authenticated_target_setup_key <- as.character(
+    authenticated_target_records$prepared_s_key_sha256
+  )
+  authenticated_target_setup_fingerprint <- as.character(
+    authenticated_target_records$phase1_setup_fingerprint
+  )
   if (anyDuplicated(target_key)) {
     stop("shadow target index contains duplicate residual key",
          call. = FALSE)
@@ -244,7 +386,9 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
         setup_group, setup_key, setup_fingerprint, target_key,
         target_group, target_setup_key, target_setup_fingerprint,
         index_group, index_key, authenticated_group, authenticated_key,
-        authenticated_fingerprint
+        authenticated_fingerprint, authenticated_target_key,
+        authenticated_target_group, authenticated_target_setup_key,
+        authenticated_target_setup_fingerprint
       ),
       sha256_vector, logical(1L)
     )) &&
@@ -264,6 +408,26 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
         authenticated_fingerprint[authenticated_setup_match]
       )) {
     stop("authenticated Phase 2 setup association mismatch",
+         call. = FALSE)
+  }
+  authenticated_target_match <- match(target_key, authenticated_target_key)
+  if (anyNA(authenticated_target_match) ||
+      !identical(
+        target_rows$target,
+        authenticated_target_records$target[authenticated_target_match]
+      ) || !identical(
+        target_group,
+        authenticated_target_group[authenticated_target_match]
+      ) || !identical(
+        target_setup_key,
+        authenticated_target_setup_key[authenticated_target_match]
+      ) || !identical(
+        target_setup_fingerprint,
+        authenticated_target_setup_fingerprint[
+          authenticated_target_match
+        ]
+      )) {
+    stop("authenticated Phase 2 target association mismatch",
          call. = FALSE)
   }
   if (anyNA(setup_index_match) || anyNA(target_setup_match) ||
@@ -364,6 +528,10 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
       authenticated_setup_evidence$phase2_setup_index_csv_sha256,
     setup_association_sha256 =
       authenticated_setup_evidence$association_sha256,
+    phase2_target_state_index_rds_sha256 =
+      authenticated_target_evidence$phase2_target_state_index_rds_sha256,
+    target_association_sha256 =
+      authenticated_target_evidence$association_sha256,
     shard_count = shard_count,
     direct_tests = direct_tests,
     conditional_tests = conditional_tests
@@ -396,15 +564,16 @@ fastkpc_full_cuda_shadow_plan <- function(catalog) {
          call. = FALSE)
   }
   full_scope <- fastkpc_full_cuda_fixed_sp_scope(catalog, "full")
-  authenticated_setup_evidence <-
-    fastkpc_full_cuda_shadow_authenticated_setup_records(catalog)
+  authenticated_phase2_evidence <-
+    fastkpc_full_cuda_shadow_authenticated_phase2_records(catalog)
   fastkpc_full_cuda_shadow_map_execution_units(
     logical_tests = logical_tests,
     setup_rows = full_scope$setup_rows,
     target_rows = full_scope$target_rows,
     setup_index = catalog$setup_index,
     expected_logical_contract = expected_contract,
-    authenticated_setup_evidence = authenticated_setup_evidence,
+    authenticated_setup_evidence = authenticated_phase2_evidence$setup,
+    authenticated_target_evidence = authenticated_phase2_evidence$target,
     shard_count = as.integer(catalog$catalog_contract$shard_count)
   )
 }
@@ -615,6 +784,12 @@ fastkpc_full_cuda_replay_logical_ci <- function(
       ) && identical(
         plan$setup_association_sha256,
         canonical_plan$setup_association_sha256
+      ) && identical(
+        plan$phase2_target_state_index_rds_sha256,
+        canonical_plan$phase2_target_state_index_rds_sha256
+      ) && identical(
+        plan$target_association_sha256,
+        canonical_plan$target_association_sha256
       ) &&
       identical(plan$shard_count, canonical_plan$shard_count) &&
       identical(plan$direct_tests, canonical_plan$direct_tests) &&
