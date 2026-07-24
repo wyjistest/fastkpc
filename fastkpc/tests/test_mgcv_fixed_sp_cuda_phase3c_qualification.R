@@ -464,6 +464,126 @@ independent_native_build_environment <- function(
   )
 }
 
+independent_native_build_rscript_environment <- function(trace_invocation) {
+  rscript <- unname(Sys.which("Rscript"))
+  assert_true(
+    length(rscript) == 1L && nzchar(rscript) && file.exists(rscript) &&
+      !dir.exists(rscript),
+    "independent child environment probe requires Rscript"
+  )
+  output_path <- tempfile(
+    "fastkpc_rscript_build_environment_", fileext = ".rds"
+  )
+  on.exit(unlink(output_path, force = TRUE), add = TRUE)
+  child_expression <- paste(
+    "names <- strsplit(Sys.getenv('FASTKPC_BUILD_ENV_NAMES'), ',',",
+    "fixed = TRUE)[[1L]];",
+    "values <- unname(Sys.getenv(names, unset = NA_character_));",
+    "is_set <- !is.na(values); values[!is_set] <- '';",
+    "saveRDS(data.frame(name = names, is_set = unname(is_set),",
+    "value = unname(values), stringsAsFactors = FALSE,",
+    "row.names = as.character(seq_along(values))),",
+    "Sys.getenv('FASTKPC_BUILD_ENV_OUTPUT'))"
+  )
+  output <- suppressWarnings(system2(
+    rscript,
+    c("--vanilla", "-e", shQuote(child_expression)),
+    env = c(
+      paste0(
+        "FASTKPC_BUILD_ENV_NAMES=",
+        paste(independent_native_build_environment_names, collapse = ",")
+      ),
+      paste0("FASTKPC_BUILD_ENV_OUTPUT=", output_path)
+    ),
+    stdout = TRUE,
+    stderr = TRUE
+  ))
+  status <- attr(output, "status")
+  if (is.null(status)) status <- 0L
+  assert_true(
+    identical(status, 0L) && file.exists(output_path) &&
+      !dir.exists(output_path),
+    paste0(
+      "independent Rscript child environment probe succeeds: ",
+      paste(output, collapse = "\n")
+    )
+  )
+  environment <- readRDS(output_path)
+  assert_true(
+    is.data.frame(environment) && identical(
+      names(environment), c("name", "is_set", "value")
+    ) && identical(
+      environment$name, independent_native_build_environment_names
+    ) && typeof(environment$is_set) == "logical" &&
+      !anyNA(environment$is_set) &&
+      typeof(environment$value) == "character" &&
+      !anyNA(environment$value) &&
+      all(environment$is_set | environment$value == ""),
+    "independent Rscript child environment projection is exact"
+  )
+  if (grepl(
+        "(^|[[:space:]])LC_ALL=C([[:space:]]|$)",
+        trace_invocation, perl = TRUE
+      )) {
+    lc_all_index <- match("LC_ALL", environment$name)
+    environment$is_set[[lc_all_index]] <- TRUE
+    environment$value[[lc_all_index]] <- "C"
+  }
+  assert_true(
+    !any(grepl("[\r\n]", environment$value)),
+    "independent Rscript child environment values have no newline"
+  )
+  environment
+}
+
+independent_native_build_dependency_lines <- function(value) {
+  files <- value$files
+  exclusions <- value$exclusions
+  lines <- c(
+    paste0("schema_version=", value$schema_version),
+    paste0("trace_semantics=", value$trace_semantics),
+    paste0("trace_invocation=", value$trace_invocation),
+    paste0("build_working_dir=", value$build_working_dir),
+    paste0("trace.sha256=", value$trace_sha256),
+    paste0("tracer.path=", value$tracer_path),
+    paste0("tracer.sha256=", value$tracer_sha256),
+    paste0("dependency_count=", value$dependency_count)
+  )
+  for (index in seq_len(nrow(files))) {
+    lines <- c(
+      lines,
+      paste0("dependency.", index, ".path=", files$path[[index]]),
+      paste0("dependency.", index, ".sha256=", files$sha256[[index]])
+    )
+  }
+  lines <- c(lines, paste0("exclusion_count=", value$exclusion_count))
+  for (index in seq_len(nrow(exclusions))) {
+    lines <- c(
+      lines,
+      paste0("exclusion.", index, ".path=", exclusions$path[[index]]),
+      paste0("exclusion.", index, ".reason=", exclusions$reason[[index]])
+    )
+  }
+  c(lines, independent_native_build_command_lines(value))
+}
+
+production_native_build_dependency_lines <- local({
+  production_function <-
+    fastkpc_full_cuda_fixed_sp_native_build_dependency_hash
+  production_body <- body(production_function)
+  final_expression <- production_body[[length(production_body)]]
+  assert_true(
+    grepl(
+      "digest::digest", paste(deparse(final_expression), collapse = " "),
+      fixed = TRUE
+    ),
+    "production native build hash final expression remains digest"
+  )
+  production_body[[length(production_body)]] <- quote(lines)
+  body(production_function) <- production_body
+  production_function
+})
+
 synthetic_multibyte_value <- intToUtf8(0x03bb)
 synthetic_native_build_projection <- list(
   command_projection_schema_version =
@@ -683,6 +803,65 @@ synthetic_independent_native_build_projection <- function() {
   invisible(TRUE)
 }
 synthetic_independent_native_build_projection()
+
+synthetic_full_native_build_aggregate <- function() {
+  trace_invocation <- "LC_ALL=C /usr/bin/strace -f ./build.sh"
+  child_environment <- independent_native_build_rscript_environment(
+    trace_invocation
+  )
+  value <- list(
+    schema_version = "full-cuda-ci-native-build-dependencies-v3",
+    trace_semantics = "linux-strace-successful-read-exec-evidence-v3",
+    trace_invocation = trace_invocation,
+    build_working_dir = "/synthetic/build",
+    trace_sha256 = strrep("b", 64L),
+    tracer_path = "/usr/bin/strace",
+    tracer_sha256 = strrep("c", 64L),
+    dependency_count = 1L,
+    files = data.frame(
+      path = "/opt/cuda/bin/nvcc",
+      sha256 = strrep("a", 64L),
+      stringsAsFactors = FALSE
+    ),
+    exclusion_count = 1L,
+    exclusions = data.frame(
+      path = "/synthetic/build/kernel.o",
+      reason = "generated_output",
+      stringsAsFactors = FALSE
+    ),
+    command_projection_schema_version =
+      synthetic_native_build_projection$command_projection_schema_version,
+    command_count = synthetic_native_build_projection$command_count,
+    commands = synthetic_native_build_projection$commands,
+    build_environment_schema_version =
+      "full-cuda-ci-native-build-environment-v1",
+    build_environment = child_environment,
+    aggregate_sha256 = strrep("0", 64L)
+  )
+  production_lines <- production_native_build_dependency_lines(value)
+  independent_lines <- independent_native_build_dependency_lines(value)
+  production_bytes <- charToRaw(enc2utf8(paste0(
+    paste(production_lines, collapse = "\n"), "\n"
+  )))
+  independent_bytes <- charToRaw(enc2utf8(paste0(
+    paste(independent_lines, collapse = "\n"), "\n"
+  )))
+  assert_true(
+    identical(production_lines, independent_lines) &&
+      identical(production_bytes, independent_bytes) && identical(
+        digest::digest(
+          production_bytes, algo = "sha256", serialize = FALSE
+        ),
+        fastkpc_full_cuda_fixed_sp_native_build_dependency_hash(value)
+      ),
+    paste0(
+      "synthetic full-v3 production and independent aggregate line and ",
+      "byte sequences are exact"
+    )
+  )
+  invisible(TRUE)
+}
+synthetic_full_native_build_aggregate()
 
 assert_identical(
   independent_generation_open(c(
@@ -2855,52 +3034,6 @@ assert_true(
   ),
   "manifest records the traced dependency semantics and tracer identity"
 )
-dependency_identity_lines <- c(
-  paste0(
-    "schema_version=", manifest$native_build_dependencies_schema_version
-  ),
-  paste0(
-    "trace_semantics=", manifest$native_build_dependency_trace_semantics
-  ),
-  paste0(
-    "trace_invocation=", manifest$native_build_dependency_trace_invocation
-  ),
-  paste0("build_working_dir=", manifest$native_build_working_dir),
-  paste0("trace.sha256=", manifest$native_build_trace_sha256),
-  paste0("tracer.path=", manifest$native_build_tracer_path),
-  paste0("tracer.sha256=", manifest$native_build_tracer_sha256),
-  paste0("dependency_count=", manifest$native_build_dependency_count)
-)
-for (index in seq_len(nrow(native_build_dependencies))) {
-  dependency_identity_lines <- c(
-    dependency_identity_lines,
-    paste0(
-      "dependency.", index, ".path=",
-      native_build_dependencies$path[[index]]
-    ),
-    paste0(
-      "dependency.", index, ".sha256=",
-      native_build_dependencies$sha256[[index]]
-    )
-  )
-}
-dependency_identity_lines <- c(
-  dependency_identity_lines,
-  paste0("exclusion_count=", manifest$native_build_exclusion_count)
-)
-for (index in seq_len(nrow(native_build_exclusions))) {
-  dependency_identity_lines <- c(
-    dependency_identity_lines,
-    paste0(
-      "exclusion.", index, ".path=",
-      native_build_exclusions$path[[index]]
-    ),
-    paste0(
-      "exclusion.", index, ".reason=",
-      native_build_exclusions$reason[[index]]
-    )
-  )
-}
 independent_trace_tables <- function(trace_path, tracer_path) {
   lines <- readLines(trace_path, warn = FALSE, encoding = "bytes")
   call_pattern <- paste0(
@@ -3066,9 +3199,18 @@ independent_replayed_commands <- independent_native_build_commands(
   build_working_dir = manifest$native_build_working_dir,
   files = reparsed_native_build$files
 )
-independent_replayed_environment <- independent_native_build_environment(
+independent_parent_build_environment <- independent_native_build_environment(
   manifest$native_build_dependency_trace_invocation
 )
+assert_identical(
+  replayed_native_build$build_environment,
+  independent_parent_build_environment,
+  "ordinary production replay matches the independent parent environment"
+)
+independent_replayed_environment <-
+  independent_native_build_rscript_environment(
+    manifest$native_build_dependency_trace_invocation
+  )
 independent_native_build_projection <- list(
   command_projection_schema_version =
     "full-cuda-ci-native-build-command-projection-v1",
@@ -3078,11 +3220,18 @@ independent_native_build_projection <- list(
     "full-cuda-ci-native-build-environment-v1",
   build_environment = independent_replayed_environment
 )
+manifest_bound_native_build <- replayed_native_build
+manifest_bound_native_build$build_environment <-
+  independent_replayed_environment
+manifest_bound_native_build$aggregate_sha256 <-
+  fastkpc_full_cuda_fixed_sp_native_build_dependency_hash(
+    manifest_bound_native_build
+  )
 independent_projection_lines <- independent_native_build_command_lines(
   independent_native_build_projection
 )
 replayed_projection_lines <- independent_native_build_command_lines(
-  replayed_native_build
+  manifest_bound_native_build
 )
 independent_projection_bytes <- charToRaw(enc2utf8(paste0(
   paste(independent_projection_lines, collapse = "\n"), "\n"
@@ -3093,27 +3242,27 @@ replayed_projection_bytes <- charToRaw(enc2utf8(paste0(
 assert_true(
   identical(
     independent_native_build_projection$command_projection_schema_version,
-    replayed_native_build$command_projection_schema_version
+    manifest_bound_native_build$command_projection_schema_version
   ) && identical(
     independent_native_build_projection$command_count,
-    replayed_native_build$command_count
+    manifest_bound_native_build$command_count
   ) && identical(
     independent_native_build_projection$commands,
-    replayed_native_build$commands
+    manifest_bound_native_build$commands
   ) && identical(
     independent_native_build_projection$build_environment_schema_version,
-    replayed_native_build$build_environment_schema_version
+    manifest_bound_native_build$build_environment_schema_version
   ) && identical(
     independent_native_build_projection$build_environment,
-    replayed_native_build$build_environment
+    manifest_bound_native_build$build_environment
   ) && identical(independent_projection_bytes, replayed_projection_bytes),
   paste0(
-    "independent raw strace and parent environment projection matches ",
+    "independent raw strace and child environment projection matches ",
     "production replay byte-for-byte"
   )
 )
 replayed_command_projection_clean <- tryCatch({
-  commands <- replayed_native_build$commands
+  commands <- manifest_bound_native_build$commands
   command_rows_clean <- vapply(commands, function(command) {
     executable_index <- match(
       command$executable_path, replayed_native_build_files$path
@@ -3148,23 +3297,23 @@ replayed_command_projection_clean <- tryCatch({
   }, logical(1L))
   command_roles <- vapply(commands, `[[`, character(1L), "role")
   identical(
-    replayed_native_build$command_projection_schema_version,
+    manifest_bound_native_build$command_projection_schema_version,
     "full-cuda-ci-native-build-command-projection-v1"
-  ) && typeof(replayed_native_build$command_count) == "integer" &&
-    length(replayed_native_build$command_count) == 1L &&
-    !is.na(replayed_native_build$command_count) &&
-    replayed_native_build$command_count >= 3L && is.list(commands) &&
+  ) && typeof(manifest_bound_native_build$command_count) == "integer" &&
+    length(manifest_bound_native_build$command_count) == 1L &&
+    !is.na(manifest_bound_native_build$command_count) &&
+    manifest_bound_native_build$command_count >= 3L && is.list(commands) &&
     !is.object(commands) && is.null(attributes(commands)) &&
-    length(commands) == replayed_native_build$command_count &&
+    length(commands) == manifest_bound_native_build$command_count &&
     all(command_rows_clean) && identical(
       sort(unique(command_roles), method = "radix"),
       c("cuda_compile", "cxx_compile", "link")
     )
 }, error = function(error) FALSE)
-replayed_environment <- replayed_native_build$build_environment
+replayed_environment <- manifest_bound_native_build$build_environment
 replayed_build_environment_clean <- tryCatch(
   identical(
-    replayed_native_build$build_environment_schema_version,
+    manifest_bound_native_build$build_environment_schema_version,
     "full-cuda-ci-native-build-environment-v1"
   ) && is.data.frame(replayed_environment) && identical(
     names(replayed_environment), c("name", "is_set", "value")
@@ -3239,14 +3388,50 @@ assert_true(
     "replayed dependency tables"
   )
 )
-dependency_identity_lines <- c(
-  dependency_identity_lines,
-  independent_projection_lines
+independent_native_build_value <- list(
+  schema_version = manifest$native_build_dependencies_schema_version,
+  trace_semantics = manifest$native_build_dependency_trace_semantics,
+  trace_invocation = manifest$native_build_dependency_trace_invocation,
+  build_working_dir = manifest$native_build_working_dir,
+  trace_sha256 = manifest$native_build_trace_sha256,
+  tracer_path = manifest$native_build_tracer_path,
+  tracer_sha256 = manifest$native_build_tracer_sha256,
+  dependency_count = manifest$native_build_dependency_count,
+  files = native_build_dependencies,
+  exclusion_count = manifest$native_build_exclusion_count,
+  exclusions = native_build_exclusions,
+  command_projection_schema_version =
+    independent_native_build_projection$command_projection_schema_version,
+  command_count = independent_native_build_projection$command_count,
+  commands = independent_native_build_projection$commands,
+  build_environment_schema_version =
+    independent_native_build_projection$build_environment_schema_version,
+  build_environment = independent_native_build_projection$build_environment
+)
+dependency_identity_lines <- independent_native_build_dependency_lines(
+  independent_native_build_value
+)
+production_dependency_identity_lines <-
+  production_native_build_dependency_lines(manifest_bound_native_build)
+dependency_identity_bytes <- charToRaw(enc2utf8(paste0(
+  paste(dependency_identity_lines, collapse = "\n"), "\n"
+)))
+production_dependency_identity_bytes <- charToRaw(enc2utf8(paste0(
+  paste(production_dependency_identity_lines, collapse = "\n"), "\n"
+)))
+assert_true(
+  identical(
+    dependency_identity_lines, production_dependency_identity_lines
+  ) && identical(
+    dependency_identity_bytes, production_dependency_identity_bytes
+  ),
+  paste0(
+    "full-v3 production and independent aggregate line and byte sequences ",
+    "are exact"
+  )
 )
 independent_native_build_dependencies_sha256 <- unname(digest::digest(
-  charToRaw(enc2utf8(paste0(
-    paste(dependency_identity_lines, collapse = "\n"), "\n"
-  ))),
+  dependency_identity_bytes,
   algo = "sha256", serialize = FALSE
 ))
 assert_identical(
@@ -3259,7 +3444,7 @@ assert_identical(
 )
 assert_true(
   identical(
-    replayed_native_build$aggregate_sha256,
+    manifest_bound_native_build$aggregate_sha256,
     independent_native_build_dependencies_sha256
   ),
   "production raw-trace replay agrees with the independent full-v3 encoder"
