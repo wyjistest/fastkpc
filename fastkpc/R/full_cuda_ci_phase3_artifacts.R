@@ -6283,54 +6283,137 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
   result
 }
 
-.fastkpc_full_cuda_phase3_format_double_exact <- function(value) {
+.fastkpc_full_cuda_phase3_with_c_numeric_context <- function(operation) {
+  if (!is.function(operation)) {
+    stop("Phase 3 numeric formatting operation is invalid", call. = FALSE)
+  }
+  old_locale <- base::Sys.getlocale("LC_NUMERIC")
+  old_options <- base::options()[c("OutDec", "scipen", "digits")]
+  if (typeof(old_locale) != "character" || length(old_locale) != 1L ||
+      is.na(old_locale) || !nzchar(old_locale)) {
+    stop("Phase 3 numeric locale cannot be captured", call. = FALSE)
+  }
+  on.exit({
+    options_restored <- tryCatch({
+      base::options(old_options)
+      TRUE
+    }, error = function(error) FALSE)
+    locale_restored <- tryCatch({
+      suppressWarnings(base::Sys.setlocale("LC_NUMERIC", old_locale))
+      identical(base::Sys.getlocale("LC_NUMERIC"), old_locale)
+    }, error = function(error) FALSE)
+    if (!isTRUE(options_restored) || !isTRUE(locale_restored)) {
+      stop("Phase 3 numeric formatting state cannot be restored",
+           call. = FALSE)
+    }
+  }, add = TRUE)
+  selected <- tryCatch(
+    suppressWarnings(base::Sys.setlocale("LC_NUMERIC", "C")),
+    error = function(error) NA_character_
+  )
+  if (is.na(selected) ||
+      !identical(base::Sys.getlocale("LC_NUMERIC"), "C") ||
+      !identical(base::Sys.localeconv()[["decimal_point"]], ".")) {
+    stop("Phase 3 C numeric locale is unavailable", call. = FALSE)
+  }
+  base::options(OutDec = ".", scipen = 0L, digits = 15L)
+  operation()
+}
+
+.fastkpc_full_cuda_phase3_format_double_with_parser <- function(
+    value, parser, failure_message) {
   if (typeof(value) != "double" || is.object(value)) {
     stop("Phase 3 exact formatter requires bare doubles", call. = FALSE)
   }
-  old_options <- options(OutDec = ".", scipen = 0L, digits = 15L)
-  on.exit(options(old_options), add = TRUE)
-  result <- rep.int(NA_character_, length(value))
-  present <- which(!is.na(value))
-  negative_zero <- .fastkpc_full_cuda_phase3_double_ieee_equal_each(
-    value[present], rep.int(-0.0, length(present))
-  )
-  positive_zero <- .fastkpc_full_cuda_phase3_double_ieee_equal_each(
-    value[present], rep.int(0.0, length(present))
-  )
-  if (any(negative_zero)) {
-    result[present[negative_zero]] <- "-0.0"
+  if (!is.function(parser) || typeof(failure_message) != "character" ||
+      length(failure_message) != 1L || is.na(failure_message) ||
+      !nzchar(failure_message)) {
+    stop("Phase 3 exact formatter configuration is invalid", call. = FALSE)
   }
-  if (any(positive_zero)) {
-    result[present[positive_zero]] <- "0.0"
-  }
-  unresolved <- which(!negative_zero & !positive_zero)
-  candidates <- as.character(value[present[unresolved]])
-  parsed <- suppressWarnings(as.double(candidates))
-  exact <- !is.na(parsed) &
-    .fastkpc_full_cuda_phase3_double_ieee_equal_each(
-      parsed, value[present[unresolved]]
+  .fastkpc_full_cuda_phase3_with_c_numeric_context(function() {
+    result <- rep.int(NA_character_, length(value))
+    present <- which(!is.na(value))
+    negative_zero <- .fastkpc_full_cuda_phase3_double_ieee_equal_each(
+      value[present], rep.int(-0.0, length(present))
     )
-  result[present[unresolved[exact]]] <- candidates[exact]
-  unresolved <- unresolved[!exact]
-  for (digits in 1:17) {
-    if (length(unresolved) == 0L) break
-    candidates <- sprintf(
-      paste0("%.", digits, "g"), value[present[unresolved]]
+    positive_zero <- .fastkpc_full_cuda_phase3_double_ieee_equal_each(
+      value[present], rep.int(0.0, length(present))
     )
-    parsed <- suppressWarnings(as.double(candidates))
+    if (any(negative_zero)) {
+      result[present[negative_zero]] <- "-0.0"
+    }
+    if (any(positive_zero)) {
+      result[present[positive_zero]] <- "0.0"
+    }
+    unresolved <- which(!negative_zero & !positive_zero)
+    candidates <- as.character(value[present[unresolved]])
+    parsed <- parser(candidates)
+    if (typeof(parsed) != "double" || length(parsed) != length(candidates)) {
+      stop("Phase 3 exact formatter parser is invalid", call. = FALSE)
+    }
     exact <- !is.na(parsed) &
       .fastkpc_full_cuda_phase3_double_ieee_equal_each(
         parsed, value[present[unresolved]]
       )
-    if (any(exact)) {
-      result[present[unresolved[exact]]] <- candidates[exact]
-      unresolved <- unresolved[!exact]
+    result[present[unresolved[exact]]] <- candidates[exact]
+    unresolved <- unresolved[!exact]
+    for (digits in seq_len(17L)) {
+      if (length(unresolved) == 0L) break
+      candidates <- sprintf(
+        paste0("%.", digits, "g"), value[present[unresolved]]
+      )
+      parsed <- parser(candidates)
+      if (typeof(parsed) != "double" ||
+          length(parsed) != length(candidates)) {
+        stop("Phase 3 exact formatter parser is invalid", call. = FALSE)
+      }
+      exact <- !is.na(parsed) &
+        .fastkpc_full_cuda_phase3_double_ieee_equal_each(
+          parsed, value[present[unresolved]]
+        )
+      if (any(exact)) {
+        result[present[unresolved[exact]]] <- candidates[exact]
+        unresolved <- unresolved[!exact]
+      }
     }
+    if (length(unresolved) > 0L) {
+      stop(failure_message, call. = FALSE)
+    }
+    result
+  })
+}
+
+.fastkpc_full_cuda_phase3_format_double_exact <- function(value) {
+  .fastkpc_full_cuda_phase3_format_double_with_parser(
+    value,
+    function(tokens) suppressWarnings(as.double(tokens)),
+    "Phase 3 double cannot be formatted exactly"
+  )
+}
+
+.fastkpc_full_cuda_phase3_format_json_double_exact <- function(value) {
+  tokens <- .fastkpc_full_cuda_phase3_format_double_with_parser(
+    value,
+    function(tokens) vapply(tokens, function(token) {
+      parsed <- tryCatch(
+        jsonlite::fromJSON(token, simplifyVector = TRUE),
+        error = function(error) NULL
+      )
+      if (is.null(parsed) || length(parsed) != 1L ||
+          !typeof(parsed) %in% c("integer", "double")) {
+        return(NA_real_)
+      }
+      as.double(parsed)
+    }, double(1L)),
+    "Phase 3 exact JSON number does not round-trip"
+  )
+  if (length(tokens) != 1L || is.na(tokens) || !grepl(
+        "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?$",
+        tokens
+      )) {
+    stop("Phase 3 exact JSON number does not round-trip", call. = FALSE)
   }
-  if (length(unresolved) > 0L) {
-    stop("Phase 3 double cannot be formatted exactly", call. = FALSE)
-  }
-  result
+  tokens
 }
 
 .fastkpc_full_cuda_phase3_write_csv <- function(value, path) {
@@ -6366,46 +6449,7 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     if (length(value) == 0L) return(value)
     if (length(value) == 1L) {
       if (!is.finite(value)) return(value)
-      token <- .fastkpc_full_cuda_phase3_format_double_exact(value)
-      parsed <- tryCatch(
-        jsonlite::fromJSON(token, simplifyVector = TRUE),
-        error = function(error) NULL
-      )
-      if (is.null(parsed) || length(parsed) != 1L ||
-          !.fastkpc_full_cuda_phase3_double_ieee_equal(
-            as.double(parsed), value
-          )) {
-        old_options <- options(
-          OutDec = ".", scipen = 0L, digits = 15L
-        )
-        on.exit(options(old_options), add = TRUE)
-        for (digits in 1:17) {
-          candidate <- sprintf(paste0("%.", digits, "g"), value)
-          candidate_parsed <- tryCatch(
-            jsonlite::fromJSON(candidate, simplifyVector = TRUE),
-            error = function(error) NULL
-          )
-          if (!is.null(candidate_parsed) &&
-              length(candidate_parsed) == 1L &&
-              .fastkpc_full_cuda_phase3_double_ieee_equal(
-                as.double(candidate_parsed), value
-              )) {
-            token <- candidate
-            parsed <- candidate_parsed
-            break
-          }
-        }
-      }
-      if (!grepl(
-            "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?$",
-            token
-          ) || is.null(parsed) || length(parsed) != 1L ||
-          !.fastkpc_full_cuda_phase3_double_ieee_equal(
-            as.double(parsed), value
-          )) {
-        stop("Phase 3 exact JSON number does not round-trip",
-             call. = FALSE)
-      }
+      token <- .fastkpc_full_cuda_phase3_format_json_double_exact(value)
       return(structure(token, class = "json"))
     }
     result <- lapply(seq_along(value), function(index) {
@@ -7177,37 +7221,38 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
       )
     )
   }
-  snapshot_once <- function() {
-    before <- scan_surface()
-    entries <- before$entries
-    hashes <- rep.int(NA_character_, nrow(entries))
-    regular_files <- entries$entry_type == "regular_file"
-    regular_paths <- file.path(
-      output_dir, entries$relative_path[regular_files]
-    )
+  surface <- scan_surface()
+  entries <- surface$entries
+  regular_files <- entries$entry_type == "regular_file"
+  regular_paths <- file.path(
+    output_dir, entries$relative_path[regular_files]
+  )
+  previous_hashes <- NULL
+  for (pass in seq_len(3L)) {
     if (any(nzchar(Sys.readlink(regular_paths)))) {
       stop("Phase 3 oracle evidence path surface is invalid", call. = FALSE)
     }
-    hashes[regular_files] <- vapply(
+    current_hashes <- vapply(
       regular_paths,
       fastkpc_full_cuda_census_file_hash, character(1L)
     )
-    after <- scan_surface()
-    if (!identical(before, after)) {
+    next_surface <- scan_surface()
+    if (!identical(surface, next_surface) ||
+        (!is.null(previous_hashes) &&
+         !identical(previous_hashes, current_hashes))) {
       stop("Phase 3 oracle evidence changed while snapshotting",
            call. = FALSE)
     }
-    result <- entries[c("relative_path", "entry_type", "byte_size")]
-    result$sha256 <- hashes
-    list(evidence = result, stable_metadata = before)
+    previous_hashes <- current_hashes
+    surface <- next_surface
   }
-  first <- snapshot_once()
-  second <- snapshot_once()
-  if (!identical(first, second)) {
-    stop("Phase 3 oracle evidence changed while snapshotting",
-         call. = FALSE)
-  }
-  second$evidence
+  hashes <- rep.int(NA_character_, nrow(entries))
+  hashes[regular_files] <- previous_hashes
+  result <- surface$entries[c(
+    "relative_path", "entry_type", "byte_size"
+  )]
+  result$sha256 <- hashes
+  result
 }
 
 .fastkpc_full_cuda_phase3_validate_completed_oracle_artifact <- function(

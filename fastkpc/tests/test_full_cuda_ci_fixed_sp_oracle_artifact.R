@@ -193,6 +193,91 @@ assert_true(
   "exact double CSV/JSON bytes ignore OutDec, digits, and extreme scipen"
 )
 
+numeric_process_state <- function() {
+  list(
+    locale = Sys.getlocale("LC_NUMERIC"),
+    decimal_point = Sys.localeconv()[["decimal_point"]],
+    options = options()[c("OutDec", "scipen", "digits")]
+  )
+}
+decimal_locale_before <- numeric_process_state()
+decimal_locale_result <- local({
+  selected <- suppressWarnings(Sys.setlocale(
+    "LC_NUMERIC", "en_DK.utf8"
+  ))
+  on.exit(
+    suppressWarnings(Sys.setlocale(
+      "LC_NUMERIC", decimal_locale_before$locale
+    )),
+    add = TRUE
+  )
+  decimal_point <- if (is.na(selected)) {
+    NA_character_
+  } else {
+    Sys.localeconv()[["decimal_point"]]
+  }
+  serialization <- if (!is.na(selected) && decimal_point == ",") {
+    tryCatch(
+      serialize_exact_with_options(999L),
+      error = function(error) error
+    )
+  } else {
+    NULL
+  }
+  list(
+    selected = selected, decimal_point = decimal_point,
+    serialization = serialization
+  )
+})
+decimal_locale_after <- numeric_process_state()
+forced_context_state <- NULL
+forced_context_error <- tryCatch(
+  .fastkpc_full_cuda_phase3_with_c_numeric_context(function() {
+    forced_context_state <<- numeric_process_state()
+    forced_context_state$synthetic_token <<- sprintf("%.1f", 1.5)
+    stop("forced numeric-context failure", call. = FALSE)
+  }),
+  error = function(error) error
+)
+forced_context_after <- numeric_process_state()
+decimal_locale_available <- !is.na(decimal_locale_result$selected) &&
+  identical(decimal_locale_result$decimal_point, ",")
+if (isTRUE(decimal_locale_available)) {
+  assert_true(
+    identical(
+      decimal_locale_result$serialization,
+      default_exact_serialization
+    ),
+    paste0(
+      "exact CSV/JSON bytes ignore decimal-comma LC_NUMERIC; result=",
+      if (inherits(decimal_locale_result$serialization, "error")) {
+        conditionMessage(decimal_locale_result$serialization)
+      } else "different bytes"
+    )
+  )
+} else {
+  assert_true(
+    is.na(decimal_locale_result$selected) ||
+      !identical(decimal_locale_result$decimal_point, ","),
+    "decimal-comma locale skip requires demonstrated unavailability"
+  )
+}
+assert_true(
+  identical(decimal_locale_after, decimal_locale_before) &&
+    inherits(forced_context_error, "error") &&
+    identical(
+      conditionMessage(forced_context_error),
+      "forced numeric-context failure"
+    ) && identical(forced_context_state$locale, "C") &&
+    identical(forced_context_state$decimal_point, ".") &&
+    identical(forced_context_state$synthetic_token, "1.5") &&
+    identical(
+      forced_context_state$options,
+      list(OutDec = ".", scipen = 0L, digits = 15L)
+    ) && identical(forced_context_after, decimal_locale_before),
+  "C numeric formatting context restores locale/options after errors"
+)
+
 sha <- function(label) fastkpc_full_cuda_census_hash_utf8(label)
 key_hash <- function(keys) {
   fastkpc_full_cuda_census_key_set_hash(sort(keys, method = "radix"))
@@ -2107,20 +2192,42 @@ same_size_snapshot_replacement <- same_size_snapshot_bytes
 same_size_snapshot_replacement[[1L]] <- as.raw(bitwXor(
   as.integer(same_size_snapshot_replacement[[1L]]), 1L
 ))
+same_size_snapshot_target_normalized <- normalizePath(
+  same_size_snapshot_target, mustWork = TRUE
+)
+same_size_snapshot_timestamps <- base::file.info(
+  same_size_snapshot_target
+)[c("mtime", "ctime")]
 same_size_target_hash_calls <- 0L
+assign(
+  "file.info",
+  function(...) {
+    info <- base::file.info(...)
+    normalized <- normalizePath(rownames(info), mustWork = FALSE)
+    target <- normalized == same_size_snapshot_target_normalized
+    info$mtime[target] <- same_size_snapshot_timestamps$mtime
+    info$ctime[target] <- same_size_snapshot_timestamps$ctime
+    info
+  },
+  envir = .GlobalEnv
+)
 assign(
   "fastkpc_full_cuda_census_file_hash",
   function(path) {
     hash <- original_file_hash(path)
     if (identical(
           normalizePath(path, mustWork = TRUE),
-          normalizePath(same_size_snapshot_target, mustWork = TRUE)
+          same_size_snapshot_target_normalized
         )) {
       same_size_target_hash_calls <<- same_size_target_hash_calls + 1L
       if (same_size_target_hash_calls == 2L) {
         connection <- file(same_size_snapshot_target, open = "wb")
         writeBin(same_size_snapshot_replacement, connection)
         close(connection)
+        Sys.setFileTime(
+          same_size_snapshot_target,
+          same_size_snapshot_timestamps$mtime
+        )
       }
     }
     hash
@@ -2133,16 +2240,20 @@ same_size_snapshot_error <- tryCatch(
     .fastkpc_full_cuda_phase3_payload_keys("oracle_sp")
   ),
   error = function(error) error,
-  finally = assign(
-    "fastkpc_full_cuda_census_file_hash", original_file_hash,
-    envir = .GlobalEnv
-  )
+  finally = {
+    assign(
+      "fastkpc_full_cuda_census_file_hash", original_file_hash,
+      envir = .GlobalEnv
+    )
+    rm("file.info", envir = .GlobalEnv)
+  }
 )
 assert_true(
   inherits(manifest_race_error, "error") &&
     inherits(evidence_race_error, "error") &&
     inherits(snapshot_acquisition_error, "error") &&
     inherits(same_size_snapshot_error, "error") &&
+    identical(same_size_target_hash_calls, 3L) &&
     grepl(
       "immutable files changed during validation",
       conditionMessage(manifest_race_error), fixed = TRUE
