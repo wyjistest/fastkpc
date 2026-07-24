@@ -606,30 +606,31 @@ validate_native_build_rscript_environment_drift <- function(
   )
   parent_value <- parent_environment$value[[ld_library_path_index]]
   child_value <- child_environment$value[[ld_library_path_index]]
-  parent_components <- strsplit(
-    parent_value, .Platform$path.sep, fixed = TRUE
-  )[[1L]]
-  child_components <- strsplit(
-    child_value, .Platform$path.sep, fixed = TRUE
-  )[[1L]]
-  extra_count <- length(child_components) - length(parent_components)
-  extra_components <- if (extra_count > 0L) {
-    child_components[seq_len(extra_count)]
+  inherited_suffix <- c(
+    charToRaw(.Platform$path.sep),
+    charToRaw(enc2utf8(parent_value))
+  )
+  child_bytes <- charToRaw(enc2utf8(child_value))
+  suffix_clean <- length(child_bytes) > length(inherited_suffix) &&
+    identical(tail(child_bytes, length(inherited_suffix)), inherited_suffix)
+  prefix_bytes <- if (suffix_clean) {
+    head(child_bytes, length(child_bytes) - length(inherited_suffix))
   } else {
-    character()
+    raw()
   }
-  inherited_components <- if (extra_count > 0L) {
-    child_components[extra_count + seq_along(parent_components)]
-  } else {
-    child_components
-  }
-  prefix_clean <- extra_count > 0L &&
-    extra_count <= length(parent_components) &&
-    all(nzchar(parent_components)) && all(nzchar(child_components)) &&
-    identical(inherited_components, parent_components) &&
-    identical(extra_components, head(parent_components, extra_count)) &&
+  prepended_prefix <- rawToChar(prefix_bytes)
+  prefix_components <- strsplit(
+    prepended_prefix, .Platform$path.sep, fixed = TRUE
+  )[[1L]]
+  prefix_clean <- suffix_clean && nzchar(prepended_prefix) &&
+    !startsWith(prepended_prefix, .Platform$path.sep) &&
+    !endsWith(prepended_prefix, .Platform$path.sep) &&
+    !grepl(
+      paste0(.Platform$path.sep, .Platform$path.sep),
+      prepended_prefix, fixed = TRUE
+    ) && all(nzchar(prefix_components)) &&
     normalizePath(R.home("lib"), winslash = "/", mustWork = TRUE) %in%
-      extra_components
+      prefix_components
   assert_true(
     prefix_clean,
     "Rscript child LD_LIBRARY_PATH must prepend exactly one R library prefix"
@@ -936,6 +937,48 @@ synthetic_full_native_build_aggregate <- function() {
     paste0(
       "the real child environment adds one R library prefix and changes ",
       "aggregate bytes"
+    )
+  )
+  ld_library_path_index <- match(
+    "LD_LIBRARY_PATH", independent_native_build_environment_names
+  )
+  inherited_suffix <- paste0(
+    .Platform$path.sep,
+    parent_environment$value[[ld_library_path_index]]
+  )
+  child_value <- child_environment$value[[ld_library_path_index]]
+  assert_true(
+    endsWith(child_value, inherited_suffix),
+    "synthetic drift fixture isolates the prepended R library prefix"
+  )
+  prefix_character_count <- nchar(child_value, type = "chars") -
+    nchar(inherited_suffix, type = "chars")
+  prepended_prefix <- substr(
+    child_value, 1L, prefix_character_count
+  )
+  empty_component_parent <- parent_environment
+  empty_component_child <- child_environment
+  empty_component_parent$value[[ld_library_path_index]] <- paste(
+    c(
+      "", parent_environment$value[[ld_library_path_index]], "",
+      "/synthetic/inherited", ""
+    ),
+    collapse = .Platform$path.sep
+  )
+  empty_component_child$value[[ld_library_path_index]] <- paste0(
+    prepended_prefix,
+    .Platform$path.sep,
+    empty_component_parent$value[[ld_library_path_index]]
+  )
+  assert_true(
+    validate_native_build_rscript_environment_drift(
+      parent_environment = empty_component_parent,
+      child_environment = empty_component_child,
+      aggregate_value = value
+    ),
+    paste0(
+      "inherited leading, interior, and trailing empty LD_LIBRARY_PATH ",
+      "components remain byte-exact"
     )
   )
   production_lines <- production_native_build_dependency_lines(value)
