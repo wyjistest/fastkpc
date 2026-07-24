@@ -1829,29 +1829,11 @@ fastkpc_full_cuda_phase3_input_identity <- function(catalog, device_id) {
   invisible(route)
 }
 
-fastkpc_full_cuda_phase3_validate_artifact <- function(
+.fastkpc_full_cuda_phase3_validate_legacy_artifact_encoding <- function(
     output_dir, kind = NULL, expected_identity = NULL, require_full = FALSE,
     catalog = NULL, device_id = NULL) {
   if (is.null(kind)) {
     stop("Phase 3 artifact kind is required", call. = FALSE)
-  }
-  semantic_manifest_path <- file.path(output_dir, "manifest.json")
-  if (identical(kind, "oracle_sp") &&
-      file.exists(semantic_manifest_path) &&
-      !dir.exists(semantic_manifest_path)) {
-    semantic_manifest <- tryCatch(
-      .fastkpc_full_cuda_phase3_read_json(
-        semantic_manifest_path, "manifest.json"
-      ),
-      error = function(error) NULL
-    )
-    if (is.list(semantic_manifest) &&
-        "oracle_semantics_version" %in% names(semantic_manifest)) {
-      return(.fastkpc_full_cuda_phase3_validate_completed_oracle_artifact(
-        output_dir = output_dir, expected_identity = expected_identity,
-        require_full = require_full, catalog = catalog, device_id = device_id
-      ))
-    }
   }
   paths <- fastkpc_full_cuda_phase3_artifact_paths(output_dir, kind = kind)
   if (!dir.exists(output_dir)) {
@@ -2029,7 +2011,8 @@ fastkpc_full_cuda_phase3_validate_artifact <- function(
   }
   computed_contract_pass <- TRUE
   list(
-    authenticated = TRUE,
+    authenticated = FALSE,
+    encoding_validated = TRUE,
     complete = TRUE,
     pass = computed_contract_pass,
     computed_contract_pass = computed_contract_pass,
@@ -2040,6 +2023,26 @@ fastkpc_full_cuda_phase3_validate_artifact <- function(
     payload_file_sha256 = actual_payload_hashes,
     input_identity = expected_identity
   )
+}
+
+fastkpc_full_cuda_phase3_validate_artifact <- function(
+    output_dir, kind = NULL, expected_identity = NULL, require_full = FALSE,
+    catalog = NULL, device_id = NULL) {
+  if (identical(kind, "oracle_sp")) {
+    return(.fastkpc_full_cuda_phase3_validate_completed_oracle_artifact(
+      output_dir = output_dir, expected_identity = expected_identity,
+      require_full = require_full, catalog = catalog, device_id = device_id
+    ))
+  }
+  validated <- .fastkpc_full_cuda_phase3_validate_legacy_artifact_encoding(
+    output_dir = output_dir, kind = kind,
+    expected_identity = expected_identity, require_full = require_full,
+    catalog = catalog, device_id = device_id
+  )
+  if (identical(kind, "full_shadow")) {
+    validated$authenticated <- TRUE
+  }
+  validated
 }
 
 fastkpc_validate_full_cuda_phase3_artifact <-

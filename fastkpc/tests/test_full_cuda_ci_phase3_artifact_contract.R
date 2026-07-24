@@ -1741,8 +1741,40 @@ default_artifact_root <- tempfile("phase3-default-discovery-")
 default_artifact <- write_fixture_artifact(
   "oracle_sp", default_artifact_root, default_identity
 )
-validate_generic_oracle <- function(output_dir, ...) {
+writeLines(
+  c(
+    readLines(default_artifact$paths$commands_txt, warn = FALSE),
+    "hostile-legacy-oracle-encoding"
+  ),
+  default_artifact$paths$commands_txt,
+  useBytes = TRUE
+)
+hostile_legacy_manifest <- jsonlite::read_json(
+  default_artifact$paths$manifest_json, simplifyVector = FALSE
+)
+hostile_legacy_manifest$oracle_semantics_version <- NULL
+hostile_legacy_manifest$payload_file_sha256[["commands.txt"]] <-
+  fastkpc_full_cuda_census_file_hash(default_artifact$paths$commands_txt)
+jsonlite::write_json(
+  hostile_legacy_manifest, default_artifact$paths$manifest_json,
+  auto_unbox = TRUE, pretty = TRUE, null = "null", digits = NA
+)
+hostile_legacy_summary <- jsonlite::read_json(
+  default_artifact$paths$summary_json, simplifyVector = FALSE
+)
+hostile_legacy_summary$manifest_sha256 <-
+  fastkpc_full_cuda_census_file_hash(default_artifact$paths$manifest_json)
+jsonlite::write_json(
+  hostile_legacy_summary, default_artifact$paths$summary_json,
+  auto_unbox = TRUE, pretty = TRUE, null = "null", digits = NA
+)
+validate_public_oracle <- function(output_dir, ...) {
   fastkpc_full_cuda_phase3_validate_artifact(
+    output_dir, kind = "oracle_sp", ...
+  )
+}
+validate_legacy_oracle_encoding <- function(output_dir, ...) {
+  .fastkpc_full_cuda_phase3_validate_legacy_artifact_encoding(
     output_dir, kind = "oracle_sp", ...
   )
 }
@@ -1752,21 +1784,37 @@ assert_error(
   ),
   "public oracle validator rejects legacy-shaped manifests without semantics"
 )
-default_validated <- validate_generic_oracle(
+generic_hostile_result <- tryCatch(
+  validate_public_oracle(
+    default_artifact_root, catalog = catalog_fixture, device_id = 2L
+  ),
+  error = function(error) error
+)
+assert_true(
+  inherits(generic_hostile_result, "error"),
+  paste0(
+    "public generic oracle validation rejects omitted semantics with ",
+    "refreshed hashes; accepted_authenticated=",
+    isTRUE(generic_hostile_result$authenticated)
+  )
+)
+default_validated <- validate_legacy_oracle_encoding(
   default_artifact_root, catalog = catalog_fixture, device_id = 2L
 )
 assert_true(
-  isTRUE(default_validated$authenticated),
-  "artifact validation uses default catalog/device discoverers"
+  !isTRUE(default_validated$authenticated) &&
+    isTRUE(default_validated$encoding_validated),
+  "legacy encoding validation uses default catalog/device discoverers"
 )
-explicit_validated <- validate_generic_oracle(
+explicit_validated <- validate_legacy_oracle_encoding(
   default_artifact_root,
   catalog = catalog_fixture,
   device_id = 2L
 )
 assert_true(
-  isTRUE(explicit_validated$authenticated),
-  "artifact validation accepts explicit authenticated evidence seams"
+  !isTRUE(explicit_validated$authenticated) &&
+    isTRUE(explicit_validated$encoding_validated),
+  "legacy encoding validation accepts explicit identity evidence"
 )
 assert_error(
   fastkpc_full_cuda_phase3_input_identity(
@@ -1779,7 +1827,7 @@ forged_precomputed_identity$device_id <- 3L
 forged_precomputed_identity$sha256 <-
   .fastkpc_full_cuda_phase3_identity_hash(forged_precomputed_identity)
 assert_error(
-  validate_generic_oracle(
+  validate_legacy_oracle_encoding(
     default_artifact_root,
     expected_identity = forged_precomputed_identity,
     catalog = catalog_fixture,
@@ -1810,15 +1858,18 @@ assert_true(
   ),
   "manifest records payload-then-manifest-then-summary publication order"
 )
-oracle_validated <- validate_generic_oracle(
+oracle_validated <- validate_legacy_oracle_encoding(
   file.path(artifact_root, "oracle"), expected_identity = identity
 )
 shadow_validated <- fastkpc_validate_full_cuda_fixed_sp_shadow_artifact(
   file.path(artifact_root, "shadow"), expected_identity = identity
 )
-assert_true(isTRUE(oracle_validated$authenticated) &&
-              isTRUE(shadow_validated$authenticated),
-            "authenticated oracle and shadow fixtures")
+assert_true(
+  !isTRUE(oracle_validated$authenticated) &&
+    isTRUE(oracle_validated$encoding_validated) &&
+    isTRUE(shadow_validated$authenticated),
+  "legacy oracle encoding is non-authenticating while shadow stays authenticated"
+)
 
 non_authoritative_summary <- jsonlite::read_json(
   oracle_fixture$paths$summary_json, simplifyVector = TRUE
@@ -1828,7 +1879,7 @@ jsonlite::write_json(
   non_authoritative_summary, oracle_fixture$paths$summary_json,
   auto_unbox = TRUE, pretty = TRUE, null = "null", digits = NA
 )
-summary_revalidated <- validate_generic_oracle(
+summary_revalidated <- validate_legacy_oracle_encoding(
   file.path(artifact_root, "oracle"), expected_identity = identity
 )
 assert_true(
@@ -1874,7 +1925,7 @@ for (key in common_payload_keys) {
     oracle_fixture$paths[[key]], useBytes = TRUE
   )
   assert_error(
-    validate_generic_oracle(
+    validate_legacy_oracle_encoding(
       file.path(artifact_root, "oracle"), expected_identity = identity
     ),
     paste0("common payload mutation must invalidate ", key)
@@ -1906,7 +1957,7 @@ jsonlite::write_json(
   auto_unbox = TRUE, pretty = TRUE, null = "null", digits = NA
 )
 assert_error(
-  validate_generic_oracle(
+  validate_legacy_oracle_encoding(
     file.path(artifact_root, "oracle"), expected_identity = identity
   ),
   "malformed payload must fail even when its manifest hash is forged"
@@ -1925,7 +1976,7 @@ mutated_manifest_rejected <- function(field, value, label) {
     pretty = TRUE, null = "null", digits = NA
   )
   assert_error(
-    validate_generic_oracle(
+    validate_legacy_oracle_encoding(
       file.path(artifact_root, "oracle"), expected_identity = identity
     ),
     label
@@ -2069,7 +2120,7 @@ invisible(write_fixture_artifact(
   "oracle_sp", empty_completion, identity, include_payload = FALSE
 ))
 assert_error(
-  validate_generic_oracle(
+  validate_legacy_oracle_encoding(
     empty_completion, expected_identity = identity
   ),
   "summary pass=true without payload must fail"
@@ -2082,7 +2133,7 @@ missing_paths <- fastkpc_full_cuda_phase3_artifact_paths(
 )
 unlink(missing_paths$manifest_json)
 assert_error(
-  validate_generic_oracle(
+  validate_legacy_oracle_encoding(
     missing_manifest, expected_identity = identity
   ),
   "missing manifest must fail"
@@ -2095,7 +2146,7 @@ partial_paths <- fastkpc_full_cuda_phase3_artifact_paths(
 )
 unlink(partial_paths$target_parity_rds)
 assert_error(
-  validate_generic_oracle(
+  validate_legacy_oracle_encoding(
     partial_completion, expected_identity = identity
   ),
   "partial payload completion must fail"
@@ -2118,7 +2169,7 @@ jsonlite::write_json(
   pretty = TRUE, null = "null", digits = NA
 )
 assert_error(
-  validate_generic_oracle(
+  validate_legacy_oracle_encoding(
     duplicate_payload, expected_identity = identity
   ),
   "duplicate payload names must fail"
