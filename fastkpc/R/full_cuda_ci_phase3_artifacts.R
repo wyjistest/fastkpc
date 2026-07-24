@@ -8027,6 +8027,17 @@ fastkpc_full_cuda_phase3_direct_ci_row_schema <- function() {
   catalog_lineage <- .fastkpc_full_cuda_phase3_validate_lineage(
     catalog_lineage
   )
+  data <- catalog$inputs$data
+  if (!is.matrix(data) || typeof(data) != "double" ||
+      !identical(dim(data), c(351L, 48L)) ||
+      any(!is.finite(data)) ||
+      !exists("fastkpc_full_cuda_data_hash", mode = "function",
+              inherits = TRUE) || !identical(
+        fastkpc_full_cuda_data_hash(data),
+        catalog_lineage$dataset_matrix_sha256
+      )) {
+    stop("direct-CI canonical data matrix hash mismatch", call. = FALSE)
+  }
   route <- fastkpc_full_cuda_phase3_route_config()
   route_hash <- fastkpc_full_cuda_phase3_route_config_hash(route)
   logical_hash <- as.character(

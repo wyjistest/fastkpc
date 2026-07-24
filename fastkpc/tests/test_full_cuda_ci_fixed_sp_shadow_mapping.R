@@ -75,9 +75,43 @@ assert_true(
   ) && identical(sort(unique(plan$conditional_tests$shard_id)), 0:63),
   "conditional rows use deterministic canonical 64-shard assignment"
 )
+assert_true(
+  identical(
+    plan$phase2_setup_index_csv_sha256,
+    unname(fastkpc_full_cuda_fixed_sp_catalog_contract()[[
+      "phase2_file_sha256"
+    ]][["prepared_s_setup_index.csv"]])
+  ) &&
+    grepl("^[0-9a-f]{64}$", plan$setup_association_sha256),
+  "shadow plan binds authenticated Phase 2 setup associations"
+)
+
+association_swap_catalog <- catalog
+association_swap_keys <-
+  association_swap_catalog$setup_index$prepared_s_key_sha256[1:2]
+association_swap_shards <- as.integer((match(
+  association_swap_keys,
+  sort(catalog$setup_index$prepared_s_key_sha256, method = "radix")
+) - 1L) %% 64L)
+assert_true(
+  length(unique(association_swap_shards)) == 2L,
+  "association-swap probe must move setup ownership across shards"
+)
+association_swap_catalog$setup_index$same_S_group_id[1:2] <-
+  rev(association_swap_catalog$setup_index$same_S_group_id[1:2])
+assert_error(
+  fastkpc_full_cuda_shadow_plan(association_swap_catalog),
+  "authenticated Phase 2 setup association mismatch",
+  paste(
+    "same-S group to PreparedSKey association swap must fail closed even",
+    "when the canonical key set is unchanged"
+  )
+)
 
 full_scope <- fastkpc_full_cuda_fixed_sp_scope(catalog, "full")
 logical_tests <- catalog$inputs$logical_tests
+authenticated_setup_evidence <-
+  fastkpc_full_cuda_shadow_authenticated_setup_records(catalog)
 map_units <- function(
     logical = logical_tests, setup = full_scope$setup_rows,
     target = full_scope$target_rows, setup_index = catalog$setup_index,
@@ -88,6 +122,7 @@ map_units <- function(
     target_rows = target,
     setup_index = setup_index,
     expected_logical_contract = logical_contract,
+    authenticated_setup_evidence = authenticated_setup_evidence,
     shard_count = 64L
   )
 }
@@ -259,6 +294,47 @@ assert_true(
     validated_direct$payload$lineage$residual_backend, "none"
   ),
   "direct-CI artifact authenticates Phase 0/1/data/route lineage"
+)
+
+assert_true(
+  identical(
+    fastkpc_full_cuda_data_hash(catalog$inputs$data),
+    catalog_lineage$dataset_matrix_sha256
+  ),
+  "canonical in-memory data must match authenticated matrix hash"
+)
+mutated_data_catalog <- catalog
+mutated_data_catalog$inputs$data[[1L]] <-
+  mutated_data_catalog$inputs$data[[1L]] + 1e-8
+assert_true(
+  !identical(
+    fastkpc_full_cuda_data_hash(mutated_data_catalog$inputs$data),
+    catalog_lineage$dataset_matrix_sha256
+  ),
+  "data-mutation probe must change the actual matrix hash"
+)
+mutated_data_output <- tempfile("full-cuda-ci-direct-mutated-data-")
+assert_error(
+  fastkpc_full_cuda_shadow_write_direct_ci(
+    mutated_data_catalog, mutated_data_output
+  ),
+  "direct-CI canonical data matrix hash mismatch",
+  "direct-CI writer must reject mutated in-memory canonical data"
+)
+mutated_data_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  mutated_data_output, kind = "full_shadow"
+)
+assert_true(
+  !file.exists(mutated_data_paths$direct_ci_rds) &&
+    !file.exists(mutated_data_paths$direct_ci_summary_json),
+  "mutated input data must fail before direct-CI publication"
+)
+assert_error(
+  fastkpc_full_cuda_phase3_validate_direct_ci_payload(
+    direct_output_dir, mutated_data_catalog
+  ),
+  "direct-CI canonical data matrix hash mismatch",
+  "direct-CI validator must recompute the actual input matrix hash"
 )
 
 invalid_publish_rows <- direct_artifact$rows
