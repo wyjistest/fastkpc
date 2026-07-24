@@ -103,7 +103,7 @@ artifact schemas and authenticated lineage                 Task 1
 64-shard assignment, sessions, resume, atomic write        Task 2
 oracle-sp target execution and small-subset parity         Task 3
 oracle-sp merge, validator, qualification preflight        Task 4
-full 110,617-target oracle-sp artifact                     Task 5
+oracle-sp full-run preflight; final run after source freeze Task 5 / Task 10
 canonical logical decision/graph replayer                  Task 6
 direct-CI and conditional setup mapping                    Task 7
 conditional shadow shard execution and subset gate         Task 8
@@ -621,6 +621,22 @@ git commit -m "feat: publish authenticated fixed-sp CUDA oracle artifacts"
 - No source changes expected.
 - Output: `fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_oracle_sp_v1/`
 
+> **Execution-order amendment (2026-07-24):** the production identity binds
+> both the current Git `HEAD` and the complete oracle execution-source
+> closure. Tasks 6-9 necessarily change that closure, so an artifact produced
+> here cannot pass the independent validator after those commits. Run the
+> short gates in Step 1 now, but defer Steps 2-5 until Task 9 implementation
+> and review are complete. Execute those steps immediately before Task 10's
+> full shadow run, with no intervening source commit.
+>
+> A pre-freeze run at `7ee938f` completed and authenticated all 64 shard pairs
+> but failed during top-level publication because the risk selector read
+> `target_fit_metadata` instead of the authenticated full `target_risks`
+> table. Preserve those shards as historical execution evidence. Do not adopt
+> them under a different source identity; a truthful adoption would require a
+> new dual execution/publication identity schema. The final artifact must be
+> rerun under the frozen post-Task-9 source.
+
 - [ ] **Step 1: Clean-build and run the short gates once more**
 
 ```bash
@@ -1129,13 +1145,17 @@ git add fastkpc/R/full_cuda_ci_fixed_sp_shadow.R \
 git commit -m "feat: publish authenticated full CUDA CI shadow artifacts"
 ```
 
-## Task 10: Generate the Full 240,489-Test Shadow Artifact
+## Task 10: Generate the Final Oracle and Full 240,489-Test Shadow Artifacts
 
 **Files:**
 - No source changes expected.
 - Output: `fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_full_shadow_v1/`
 
-- [ ] **Step 1: Revalidate the oracle-sp prerequisite**
+- [ ] **Step 1: Generate and revalidate the final oracle-sp prerequisite**
+
+After Task 9 is committed and both reviews pass, run Task 5 Steps 2-5 under
+that exact source identity. Do not make another source commit between the
+oracle run, its pure-resume validation, and the full shadow run below.
 
 ```bash
 Rscript -e 'source("fastkpc/R/full_cuda_ci_gate.R"); source("fastkpc/R/full_cuda_ci_workload_census.R"); source("fastkpc/R/full_cuda_ci_prepared_s_contract.R"); source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R"); source("fastkpc/R/full_cuda_ci_phase3_artifacts.R"); fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact("fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_oracle_sp_v1", require_full = TRUE)'
