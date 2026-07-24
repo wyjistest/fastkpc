@@ -472,7 +472,7 @@ independent_native_build_rscript_environment <- function(trace_invocation) {
     "independent child environment probe requires Rscript"
   )
   output_path <- tempfile(
-    "fastkpc_rscript_build_environment_", fileext = ".rds"
+    "fastkpc rscript build environment ; ", fileext = ".rds"
   )
   on.exit(unlink(output_path, force = TRUE), add = TRUE)
   child_expression <- paste(
@@ -491,9 +491,11 @@ independent_native_build_rscript_environment <- function(trace_invocation) {
     env = c(
       paste0(
         "FASTKPC_BUILD_ENV_NAMES=",
-        paste(independent_native_build_environment_names, collapse = ",")
+        shQuote(paste(
+          independent_native_build_environment_names, collapse = ","
+        ))
       ),
-      paste0("FASTKPC_BUILD_ENV_OUTPUT=", output_path)
+      paste0("FASTKPC_BUILD_ENV_OUTPUT=", shQuote(output_path))
     ),
     stdout = TRUE,
     stderr = TRUE
@@ -583,6 +585,81 @@ production_native_build_dependency_lines <- local({
   body(production_function) <- production_body
   production_function
 })
+
+validate_native_build_rscript_environment_drift <- function(
+    parent_environment, child_environment, aggregate_value) {
+  ld_library_path_index <- match(
+    "LD_LIBRARY_PATH", independent_native_build_environment_names
+  )
+  clean_shape <- is.data.frame(parent_environment) &&
+    is.data.frame(child_environment) && identical(
+      names(parent_environment), c("name", "is_set", "value")
+    ) && identical(names(child_environment), names(parent_environment)) &&
+    identical(
+      parent_environment$name, independent_native_build_environment_names
+    ) && identical(child_environment$name, parent_environment$name) &&
+    isTRUE(parent_environment$is_set[[ld_library_path_index]]) &&
+    isTRUE(child_environment$is_set[[ld_library_path_index]])
+  assert_true(
+    clean_shape,
+    "Rscript parent and child build environments are malformed"
+  )
+  parent_value <- parent_environment$value[[ld_library_path_index]]
+  child_value <- child_environment$value[[ld_library_path_index]]
+  parent_components <- strsplit(
+    parent_value, .Platform$path.sep, fixed = TRUE
+  )[[1L]]
+  child_components <- strsplit(
+    child_value, .Platform$path.sep, fixed = TRUE
+  )[[1L]]
+  extra_count <- length(child_components) - length(parent_components)
+  extra_components <- if (extra_count > 0L) {
+    child_components[seq_len(extra_count)]
+  } else {
+    character()
+  }
+  inherited_components <- if (extra_count > 0L) {
+    child_components[extra_count + seq_along(parent_components)]
+  } else {
+    child_components
+  }
+  prefix_clean <- extra_count > 0L &&
+    extra_count <= length(parent_components) &&
+    all(nzchar(parent_components)) && all(nzchar(child_components)) &&
+    identical(inherited_components, parent_components) &&
+    identical(extra_components, head(parent_components, extra_count)) &&
+    normalizePath(R.home("lib"), winslash = "/", mustWork = TRUE) %in%
+      extra_components
+  assert_true(
+    prefix_clean,
+    "Rscript child LD_LIBRARY_PATH must prepend exactly one R library prefix"
+  )
+  parent_aggregate_value <- aggregate_value
+  parent_aggregate_value$build_environment <- parent_environment
+  child_aggregate_value <- aggregate_value
+  child_aggregate_value$build_environment <- child_environment
+  parent_lines <- independent_native_build_dependency_lines(
+    parent_aggregate_value
+  )
+  child_lines <- independent_native_build_dependency_lines(
+    child_aggregate_value
+  )
+  parent_bytes <- charToRaw(enc2utf8(paste0(
+    paste(parent_lines, collapse = "\n"), "\n"
+  )))
+  child_bytes <- charToRaw(enc2utf8(paste0(
+    paste(child_lines, collapse = "\n"), "\n"
+  )))
+  differing_lines <- which(parent_lines != child_lines)
+  assert_true(
+    !identical(parent_bytes, child_bytes) && any(startsWith(
+      parent_lines[differing_lines],
+      paste0("build_environment.", ld_library_path_index, ".value=")
+    )),
+    "Rscript child LD_LIBRARY_PATH must change full-v3 aggregate bytes"
+  )
+  TRUE
+}
 
 synthetic_multibyte_value <- intToUtf8(0x03bb)
 synthetic_native_build_projection <- list(
@@ -806,6 +883,9 @@ synthetic_independent_native_build_projection()
 
 synthetic_full_native_build_aggregate <- function() {
   trace_invocation <- "LC_ALL=C /usr/bin/strace -f ./build.sh"
+  parent_environment <- independent_native_build_environment(
+    trace_invocation
+  )
   child_environment <- independent_native_build_rscript_environment(
     trace_invocation
   )
@@ -837,6 +917,26 @@ synthetic_full_native_build_aggregate <- function() {
       "full-cuda-ci-native-build-environment-v1",
     build_environment = child_environment,
     aggregate_sha256 = strrep("0", 64L)
+  )
+  assert_error_matching(
+    validate_native_build_rscript_environment_drift(
+      parent_environment = parent_environment,
+      child_environment = parent_environment,
+      aggregate_value = value
+    ),
+    "Rscript child LD_LIBRARY_PATH must prepend exactly one R library prefix",
+    "a deliberately parent-based child environment is rejected"
+  )
+  assert_true(
+    validate_native_build_rscript_environment_drift(
+      parent_environment = parent_environment,
+      child_environment = child_environment,
+      aggregate_value = value
+    ),
+    paste0(
+      "the real child environment adds one R library prefix and changes ",
+      "aggregate bytes"
+    )
   )
   production_lines <- production_native_build_dependency_lines(value)
   independent_lines <- independent_native_build_dependency_lines(value)
