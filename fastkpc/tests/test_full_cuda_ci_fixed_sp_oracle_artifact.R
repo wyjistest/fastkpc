@@ -1591,6 +1591,127 @@ snapshot_artifact_files <- function(root) {
   names(hashes) <- substring(files, nchar(root) + 2L)
   hashes
 }
+
+original_recursive_snapshot <- get0(
+  ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
+  envir = .GlobalEnv, inherits = FALSE
+)
+assert_true(
+  is.function(original_recursive_snapshot),
+  "oracle race tests can intercept immutable evidence snapshots"
+)
+
+manifest_race_root <- clone_completed_artifact("manifest-snapshot-race")
+on.exit(
+  unlink(dirname(manifest_race_root), recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+manifest_race_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  manifest_race_root, "oracle_sp"
+)
+replacement_manifest <- jsonlite::read_json(
+  manifest_race_paths$manifest_json, simplifyVector = FALSE
+)
+replacement_manifest$oracle_semantics_version <- "hostile-race-semantics"
+replacement_manifest_path <- tempfile(
+  "phase3-hostile-manifest-", fileext = ".json"
+)
+on.exit(unlink(replacement_manifest_path, force = TRUE), add = TRUE)
+fastkpc_full_cuda_write_json(
+  replacement_manifest, replacement_manifest_path
+)
+manifest_race_summary <- jsonlite::read_json(
+  manifest_race_paths$summary_json, simplifyVector = FALSE
+)
+manifest_race_summary$manifest_sha256 <-
+  fastkpc_full_cuda_census_file_hash(replacement_manifest_path)
+fastkpc_full_cuda_write_json(
+  manifest_race_summary, manifest_race_paths$summary_json
+)
+manifest_snapshot_calls <- 0L
+assign(
+  ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
+  function(paths, payload_keys) {
+    manifest_snapshot_calls <<- manifest_snapshot_calls + 1L
+    if (manifest_snapshot_calls == 1L) {
+      assert_true(
+        file.copy(
+          replacement_manifest_path, paths$manifest_json,
+          overwrite = TRUE
+        ),
+        "hostile manifest replacement succeeds at the snapshot boundary"
+      )
+    }
+    original_recursive_snapshot(paths, payload_keys)
+  },
+  envir = .GlobalEnv
+)
+manifest_race_error <- tryCatch({
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    manifest_race_root, expected_identity = identity, require_full = FALSE
+  )
+  NULL
+}, error = function(error) error)
+assign(
+  ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
+  original_recursive_snapshot, envir = .GlobalEnv
+)
+
+evidence_race_root <- clone_completed_artifact("recursive-evidence-race")
+on.exit(
+  unlink(dirname(evidence_race_root), recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+evidence_race_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  evidence_race_root, "oracle_sp"
+)
+shard_race_path <- sort(list.files(
+  evidence_race_paths$shards_dir, all.files = TRUE, no.. = TRUE,
+  recursive = TRUE, full.names = TRUE
+), method = "radix")[[1L]]
+session_race_path <- sort(list.files(
+  evidence_race_paths$sessions_dir, all.files = TRUE, no.. = TRUE,
+  recursive = TRUE, full.names = TRUE
+), method = "radix")[[1L]]
+append_hostile_byte <- function(path) {
+  connection <- file(path, open = "ab")
+  on.exit(close(connection), add = TRUE)
+  writeBin(as.raw(0L), connection)
+  invisible(TRUE)
+}
+evidence_snapshot_calls <- 0L
+assign(
+  ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
+  function(paths, payload_keys) {
+    evidence_snapshot_calls <<- evidence_snapshot_calls + 1L
+    if (evidence_snapshot_calls == 2L) {
+      append_hostile_byte(shard_race_path)
+      append_hostile_byte(session_race_path)
+    }
+    original_recursive_snapshot(paths, payload_keys)
+  },
+  envir = .GlobalEnv
+)
+evidence_race_error <- tryCatch({
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    evidence_race_root, expected_identity = identity, require_full = FALSE
+  )
+  NULL
+}, error = function(error) error)
+assign(
+  ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
+  original_recursive_snapshot, envir = .GlobalEnv
+)
+assert_true(
+  inherits(manifest_race_error, "error") &&
+    inherits(evidence_race_error, "error"),
+  paste0(
+    "oracle validation rejects manifest parse/snapshot and recursive ",
+    "evidence races; manifest_accepted=", is.null(manifest_race_error),
+    "; recursive_accepted=", is.null(evidence_race_error)
+  )
+)
+
 incompatible_identity <- identity
 incompatible_identity$gpu_uuid <- paste0("GPU-", strrep("f", 32L))
 incompatible_identity <- refresh_hash(incompatible_identity)

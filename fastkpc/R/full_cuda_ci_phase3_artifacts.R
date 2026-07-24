@@ -6873,18 +6873,48 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
 
 .fastkpc_full_cuda_phase3_oracle_immutable_file_hashes <- function(
     paths, payload_keys) {
-  selected <- c(
-    unlist(paths[payload_keys], use.names = FALSE),
-    paths$manifest_json, paths$summary_json
-  )
-  if (any(!file.exists(selected)) || any(dir.exists(selected))) {
+  output_dir <- dirname(paths$manifest_json)
+  expected_payloads <- unlist(paths[payload_keys], use.names = FALSE)
+  if (!dir.exists(output_dir) || any(!file.exists(expected_payloads)) ||
+      any(dir.exists(expected_payloads))) {
     stop("Phase 3 oracle immutable file set is incomplete", call. = FALSE)
   }
-  hashes <- vapply(
-    selected, fastkpc_full_cuda_census_file_hash, character(1L)
-  )
-  names(hashes) <- basename(selected)
-  hashes
+  snapshot_once <- function() {
+    entries <- sort(list.files(
+      output_dir, all.files = TRUE, no.. = TRUE, recursive = TRUE,
+      full.names = TRUE, include.dirs = TRUE
+    ), method = "radix")
+    if (length(entries) == 0L) {
+      stop("Phase 3 oracle evidence surface is empty", call. = FALSE)
+    }
+    relative_paths <- substring(entries, nchar(output_dir) + 2L)
+    if (any(!nzchar(relative_paths)) || anyDuplicated(relative_paths) ||
+        any(nzchar(Sys.readlink(entries)))) {
+      stop("Phase 3 oracle evidence path surface is invalid", call. = FALSE)
+    }
+    directories <- dir.exists(entries)
+    regular_files <- vapply(
+      entries, function(path) file_test("-f", path), logical(1L)
+    )
+    if (any(directories == regular_files)) {
+      stop("Phase 3 oracle evidence entry type is invalid", call. = FALSE)
+    }
+    identities <- rep.int("@directory", length(entries))
+    identities[regular_files] <- vapply(
+      entries[regular_files],
+      fastkpc_full_cuda_census_file_hash,
+      character(1L)
+    )
+    names(identities) <- relative_paths
+    identities
+  }
+  first <- snapshot_once()
+  second <- snapshot_once()
+  if (!identical(first, second)) {
+    stop("Phase 3 oracle evidence changed while snapshotting",
+         call. = FALSE)
+  }
+  second
 }
 
 .fastkpc_full_cuda_phase3_validate_completed_oracle_artifact <- function(
@@ -6915,6 +6945,11 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
   if (!dir.exists(output_dir)) {
     stop("Phase 3 oracle artifact directory is missing", call. = FALSE)
   }
+  payload_keys <- .fastkpc_full_cuda_phase3_payload_keys("oracle_sp")
+  immutable_file_hashes <-
+    .fastkpc_full_cuda_phase3_oracle_immutable_file_hashes(
+      paths, payload_keys
+    )
   manifest <- .fastkpc_full_cuda_phase3_read_json(
     paths$manifest_json, "manifest.json"
   )
@@ -7056,7 +7091,6 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
   if (identical(scope, "full") && shard_count != 64L) {
     stop("full Phase 3 oracle shard count is not canonical", call. = FALSE)
   }
-  payload_keys <- .fastkpc_full_cuda_phase3_payload_keys("oracle_sp")
   payload_names <- unname(vapply(
     paths[payload_keys], basename, character(1L)
   ))
@@ -7075,10 +7109,6 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("Phase 3 oracle manifest payload hash namespace is invalid",
          call. = FALSE)
   }
-  immutable_file_hashes <-
-    .fastkpc_full_cuda_phase3_oracle_immutable_file_hashes(
-      paths, payload_keys
-    )
   actual_hashes <- immutable_file_hashes[payload_names]
   sizes <- as.numeric(file.info(
     unlist(paths[payload_keys], use.names = FALSE)
