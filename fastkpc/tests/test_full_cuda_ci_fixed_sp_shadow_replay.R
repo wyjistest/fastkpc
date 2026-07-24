@@ -36,6 +36,61 @@ assert_true(
   exists("fastkpc_full_cuda_compare_candidate_skeleton", mode = "function"),
   "in-memory full CUDA candidate skeleton comparator should exist"
 )
+canonical_logical_contract <-
+  fastkpc_full_cuda_shadow_canonical_logical_contract()
+assert_true(
+  identical(canonical_logical_contract$logical_test_count, 240489L) &&
+    identical(
+      canonical_logical_contract$canonical_logical_census_hash,
+      "c9b48074dd59a439fceb9d5e64806adda5620cc4abe32095371abc447ef98634"
+    ),
+  "default replay contract should bind the authenticated canonical corpus"
+)
+
+expect_corpus_identity_error <- function(expression, pattern, case_name) {
+  error <- tryCatch({
+    force(expression)
+    NULL
+  }, error = identity)
+  if (inherits(error, "error") && grepl(pattern, conditionMessage(error))) {
+    return(character())
+  }
+  case_name
+}
+
+suffix_dropped <- phase1$logical_ci_tests[-nrow(phase1$logical_ci_tests),
+                                          , drop = FALSE]
+reordered_renumbered <- phase1$logical_ci_tests
+reordered_renumbered[c(1L, 2L), ] <-
+  reordered_renumbered[c(2L, 1L), ]
+reordered_renumbered$logical_sequence_id <- seq_len(nrow(reordered_renumbered))
+corpus_identity_failures <- c(
+  expect_corpus_identity_error(
+    fastkpc_full_cuda_replay_logical_ci(
+      suffix_dropped,
+      suffix_dropped$reference_p_value,
+      colnames(canonical_data)
+    ),
+    "logical corpus identity count mismatch",
+    "suffix-drop"
+  ),
+  expect_corpus_identity_error(
+    fastkpc_full_cuda_replay_logical_ci(
+      reordered_renumbered,
+      reordered_renumbered$reference_p_value,
+      colnames(canonical_data)
+    ),
+    "logical corpus identity hash mismatch",
+    "reorder-then-renumber"
+  )
+)
+assert_true(
+  length(corpus_identity_failures) == 0L,
+  paste(
+    "logical corpus identity rejection missing for",
+    paste(corpus_identity_failures, collapse = ", ")
+  )
+)
 
 replayed <- fastkpc_full_cuda_replay_logical_ci(
   logical_tests = phase1$logical_ci_tests,
@@ -102,10 +157,12 @@ boundary_tests$alpha <- c(0.1, 0.1)
 boundary_tests$reference_decision <- c("dependent", "independent")
 boundary_tests$reference_independent <- c(FALSE, TRUE)
 boundary_tests$deletes_edge <- c(FALSE, TRUE)
+boundary_contract <- fastkpc_full_cuda_shadow_logical_contract(boundary_tests)
 boundary <- fastkpc_full_cuda_replay_logical_ci(
   logical_tests = boundary_tests,
   candidate_p_value = c(0.1, 0.1000000001),
-  labels = c("A", "B", "C")
+  labels = c("A", "B", "C"),
+  expected_logical_contract = boundary_contract
 )
 assert_true(
   identical(boundary$logical_trace$candidate_independent, c(FALSE, TRUE)) &&

@@ -1,3 +1,75 @@
+if (!exists("fastkpc_full_cuda_census_logical_hash", mode = "function")) {
+  source("fastkpc/R/full_cuda_ci_workload_census.R")
+}
+
+fastkpc_full_cuda_shadow_logical_contract <- function(logical_tests) {
+  if (!is.data.frame(logical_tests) || nrow(logical_tests) == 0L) {
+    stop("logical contract source must be a nonempty data frame",
+         call. = FALSE)
+  }
+  list(
+    schema_version = "full-cuda-ci-shadow-logical-corpus-contract-v1",
+    logical_test_count = as.integer(nrow(logical_tests)),
+    canonical_logical_census_hash =
+      fastkpc_full_cuda_census_logical_hash(logical_tests)
+  )
+}
+
+fastkpc_full_cuda_shadow_canonical_logical_contract <- function() {
+  phase0_contract <- fastkpc_full_cuda_canonical_contract()
+  phase1_contract <- fastkpc_full_cuda_census_input_contract()
+  list(
+    schema_version = "full-cuda-ci-shadow-logical-corpus-contract-v1",
+    logical_test_count = as.integer(sum(phase0_contract$n_edgetests)),
+    canonical_logical_census_hash =
+      as.character(phase1_contract$canonical_logical_census_hash)
+  )
+}
+
+fastkpc_full_cuda_shadow_validate_logical_contract <- function(
+    logical_tests, expected_logical_contract) {
+  required <- c(
+    "schema_version", "logical_test_count",
+    "canonical_logical_census_hash"
+  )
+  if (!is.list(expected_logical_contract) ||
+      length(setdiff(required, names(expected_logical_contract))) > 0L ||
+      !identical(
+        expected_logical_contract$schema_version,
+        "full-cuda-ci-shadow-logical-corpus-contract-v1"
+      )) {
+    stop("expected logical corpus identity contract is invalid",
+         call. = FALSE)
+  }
+  expected_count <- expected_logical_contract$logical_test_count
+  expected_hash <- expected_logical_contract$canonical_logical_census_hash
+  if (!is.integer(expected_count) || length(expected_count) != 1L ||
+      is.na(expected_count) || expected_count < 1L ||
+      !is.character(expected_hash) || length(expected_hash) != 1L ||
+      is.na(expected_hash) ||
+      !grepl("^[0-9a-f]{64}$", expected_hash)) {
+    stop("expected logical corpus identity contract is invalid",
+         call. = FALSE)
+  }
+  actual_count <- as.integer(nrow(logical_tests))
+  if (!identical(actual_count, expected_count)) {
+    stop(
+      "logical corpus identity count mismatch: expected ", expected_count,
+      "; observed ", actual_count,
+      call. = FALSE
+    )
+  }
+  actual_hash <- fastkpc_full_cuda_census_logical_hash(logical_tests)
+  if (!identical(actual_hash, expected_hash)) {
+    stop(
+      "logical corpus identity hash mismatch: expected ", expected_hash,
+      "; observed ", actual_hash,
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
+}
+
 fastkpc_full_cuda_shadow_integer <- function(value, field, minimum = 1L) {
   if (!is.numeric(value)) {
     stop("logical_tests contains invalid ", field, call. = FALSE)
@@ -20,7 +92,9 @@ fastkpc_full_cuda_shadow_labels <- function(labels) {
 }
 
 fastkpc_full_cuda_replay_logical_ci <- function(
-    logical_tests, candidate_p_value, labels) {
+    logical_tests, candidate_p_value, labels,
+    expected_logical_contract =
+      fastkpc_full_cuda_shadow_canonical_logical_contract()) {
   if (!is.data.frame(logical_tests) || nrow(logical_tests) == 0L) {
     stop("logical_tests must be a nonempty data frame", call. = FALSE)
   }
@@ -56,6 +130,9 @@ fastkpc_full_cuda_replay_logical_ci <- function(
     stop("logical_tests must be in complete canonical logical_sequence_id order",
          call. = FALSE)
   }
+  fastkpc_full_cuda_shadow_validate_logical_contract(
+    logical_tests, expected_logical_contract
+  )
   source_sequence_id <- fastkpc_full_cuda_shadow_integer(
     logical_tests$source_sequence_id, "source_sequence_id"
   )
