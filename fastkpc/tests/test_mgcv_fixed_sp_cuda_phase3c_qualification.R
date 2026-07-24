@@ -215,6 +215,255 @@ independent_native_build_environment_names <- sort(c(
   "SOURCE_DATE_EPOCH"
 ), method = "radix")
 
+independent_decode_strace_string <- function(token) {
+  assert_true(
+    typeof(token) == "character" && length(token) == 1L &&
+      !anyNA(token) && nchar(token, type = "chars") >= 2L &&
+      startsWith(token, '"') && endsWith(token, '"'),
+    "independent strace string token is quoted"
+  )
+  value <- substring(token, 2L, nchar(token, type = "chars") - 1L)
+  characters <- strsplit(value, "", fixed = TRUE)[[1L]]
+  bytes <- integer()
+  index <- 1L
+  while (index <= length(characters)) {
+    character <- characters[[index]]
+    if (!identical(character, "\\")) {
+      bytes <- c(bytes, as.integer(charToRaw(enc2utf8(character))))
+      index <- index + 1L
+      next
+    }
+    assert_true(
+      index < length(characters),
+      "independent strace string escape is complete"
+    )
+    escaped <- characters[[index + 1L]]
+    if (grepl("^[0-7]$", escaped)) {
+      end <- index + 1L
+      while (end < length(characters) && end < index + 3L &&
+             grepl("^[0-7]$", characters[[end + 1L]])) {
+        end <- end + 1L
+      }
+      byte <- strtoi(
+        paste(characters[seq.int(index + 1L, end)], collapse = ""),
+        base = 8L
+      )
+      assert_true(
+        !is.na(byte) && byte > 0L && byte <= 255L,
+        "independent strace octal escape is one non-NUL byte"
+      )
+      bytes <- c(bytes, byte)
+      index <- end + 1L
+      next
+    }
+    if (identical(escaped, "x")) {
+      assert_true(
+        index + 3L <= length(characters) &&
+          all(grepl("^[0-9A-Fa-f]$", characters[(index + 2L):(index + 3L)])),
+        "independent strace hexadecimal escape is one byte"
+      )
+      byte <- strtoi(
+        paste(characters[(index + 2L):(index + 3L)], collapse = ""),
+        base = 16L
+      )
+      assert_true(
+        !is.na(byte) && byte > 0L,
+        "independent strace hexadecimal escape is non-NUL"
+      )
+      bytes <- c(bytes, byte)
+      index <- index + 4L
+      next
+    }
+    escaped_bytes <- c(
+      "a" = 7L, "b" = 8L, "f" = 12L, "n" = 10L, "r" = 13L,
+      "t" = 9L, "v" = 11L, "\\" = 92L, '"' = 34L, "'" = 39L,
+      "?" = 63L, "/" = 47L
+    )
+    assert_true(
+      escaped %in% names(escaped_bytes),
+      "independent strace string escape is recognized"
+    )
+    bytes <- c(bytes, unname(escaped_bytes[[escaped]]))
+    index <- index + 2L
+  }
+  decoded <- rawToChar(as.raw(bytes))
+  assert_true(
+    !grepl("[\r\n]", decoded),
+    "independent strace decoded string has no newline"
+  )
+  decoded
+}
+
+independent_strace_exec_event <- function(line, syscall) {
+  assert_true(
+    typeof(line) == "character" && length(line) == 1L && !anyNA(line) &&
+      syscall %in% c("execve", "execveat"),
+    "independent strace exec event input is exact"
+  )
+  quoted <- '"(?:[^"\\\\]|\\\\.)*"'
+  argv <- paste0(
+    "\\[((?:", quoted, "(?:[[:space:]]*,[[:space:]]*", quoted,
+    ")*)?)\\]"
+  )
+  pattern <- if (identical(syscall, "execve")) {
+    paste0("execve\\((", quoted, "),[[:space:]]*", argv, "[[:space:]]*,")
+  } else {
+    paste0(
+      "execveat\\([^,]+,[[:space:]]*", "(", quoted, "),[[:space:]]*",
+      argv, "[[:space:]]*,"
+    )
+  }
+  matched <- regmatches(line, regexec(pattern, line, perl = TRUE))[[1L]]
+  assert_true(
+    length(matched) == 3L &&
+      !grepl("(^|[[:space:],])\\.\\.", matched[[3L]], perl = TRUE),
+    "independent strace exec path and argv are complete"
+  )
+  argv_body <- matched[[3L]]
+  argv_tokens <- if (nzchar(argv_body)) {
+    regmatches(argv_body, gregexpr(quoted, argv_body, perl = TRUE))[[1L]]
+  } else {
+    character()
+  }
+  remainder <- gsub(quoted, "", argv_body, perl = TRUE)
+  remainder <- gsub("[[:space:],]", "", remainder, perl = TRUE)
+  assert_true(
+    !nzchar(remainder),
+    "independent strace argv contains only quoted arguments"
+  )
+  list(
+    executable_path = independent_decode_strace_string(matched[[2L]]),
+    argv = unname(vapply(
+      argv_tokens, independent_decode_strace_string, character(1L)
+    ))
+  )
+}
+
+independent_native_build_commands <- function(
+    exec_lines, exec_syscalls, build_working_dir, files) {
+  assert_true(
+    typeof(exec_lines) == "character" &&
+      typeof(exec_syscalls) == "character" &&
+      identical(length(exec_lines), length(exec_syscalls)) &&
+      !anyNA(exec_lines) && !anyNA(exec_syscalls) &&
+      all(exec_syscalls %in% c("execve", "execveat")) &&
+      is.data.frame(files) && identical(names(files), c("path", "sha256")),
+    "independent native build command inputs are exact"
+  )
+  working_dir <- normalizePath(
+    build_working_dir, winslash = "/", mustWork = TRUE
+  )
+  root_prefix <- paste0(working_dir, "/")
+  records <- list()
+  for (index in seq_along(exec_lines)) {
+    event <- independent_strace_exec_event(
+      exec_lines[[index]], exec_syscalls[[index]]
+    )
+    arguments <- event$argv
+    if (length(arguments) == 0L) next
+    executable_path <- event$executable_path
+    assert_true(
+      startsWith(executable_path, "/"),
+      "independent native build executable path is absolute"
+    )
+    executable_path <- normalizePath(
+      executable_path, winslash = "/", mustWork = TRUE
+    )
+    source_arguments <- arguments[
+      grepl("\\.(c|cc|cpp|cxx|cu)$", arguments, perl = TRUE) &
+        startsWith(arguments, root_prefix)
+    ]
+    executable_name <- tolower(basename(executable_path))
+    cxx_driver <- grepl(
+      "(^|-)(g\\+\\+|c\\+\\+|clang\\+\\+)(-[0-9.]+)?$",
+      executable_name, perl = TRUE
+    )
+    nvcc_driver <- grepl(
+      "(^|-)nvcc(-[0-9.]+)?$", executable_name, perl = TRUE
+    )
+    role <- NULL
+    if ("-c" %in% arguments && length(source_arguments) > 0L) {
+      cuda_source <- any(grepl("\\.cu$", source_arguments, perl = TRUE))
+      role <- if (cuda_source && nvcc_driver) {
+        "cuda_compile"
+      } else if (!cuda_source && cxx_driver) {
+        "cxx_compile"
+      } else {
+        NULL
+      }
+    } else if (cxx_driver && "-shared" %in% arguments &&
+               "-o" %in% arguments) {
+      role <- "link"
+    }
+    if (is.null(role)) next
+    output_flags <- which(arguments == "-o")
+    assert_true(
+      length(output_flags) == 1L &&
+        output_flags[[1L]] < length(arguments),
+      "independent native build command output projection is complete"
+    )
+    file_index <- match(executable_path, files$path)
+    actual_sha256 <- digest::digest(
+      file = executable_path, algo = "sha256", serialize = FALSE
+    )
+    assert_true(
+      !is.na(file_index) && identical(
+        files$sha256[[file_index]], actual_sha256
+      ),
+      "independent native build executable path and bytes are authenticated"
+    )
+    canonical_argv <- arguments
+    canonical_argv[[1L]] <- "<EXECUTABLE>"
+    canonical_argv[[output_flags + 1L]] <- "<OUTPUT>"
+    records[[length(records) + 1L]] <- list(
+      role = role,
+      executable_path = executable_path,
+      executable_sha256 = actual_sha256,
+      argv = unname(canonical_argv)
+    )
+  }
+  records
+}
+
+independent_native_build_environment <- function(
+    trace_invocation, getenv = Sys.getenv) {
+  assert_true(
+    typeof(trace_invocation) == "character" &&
+      length(trace_invocation) == 1L && !anyNA(trace_invocation) &&
+      nzchar(trace_invocation) && !grepl("[\r\n]", trace_invocation) &&
+      is.function(getenv),
+    "independent native build environment inputs are exact"
+  )
+  values <- unname(getenv(
+    independent_native_build_environment_names, unset = NA_character_
+  ))
+  assert_true(
+    typeof(values) == "character" &&
+      length(values) == length(independent_native_build_environment_names),
+    "independent parent build environment has every allowlisted name"
+  )
+  if (grepl(
+        "(^|[[:space:]])LC_ALL=C([[:space:]]|$)",
+        trace_invocation, perl = TRUE
+      )) {
+    values[[match("LC_ALL", independent_native_build_environment_names)]] <-
+      "C"
+  }
+  is_set <- !is.na(values)
+  values[!is_set] <- ""
+  assert_true(
+    !any(grepl("[\r\n]", values)),
+    "independent native build environment values have no newline"
+  )
+  data.frame(
+    name = independent_native_build_environment_names,
+    is_set = unname(is_set),
+    value = unname(values),
+    stringsAsFactors = FALSE,
+    row.names = as.character(seq_along(values))
+  )
+}
+
 synthetic_multibyte_value <- intToUtf8(0x03bb)
 synthetic_native_build_projection <- list(
   command_projection_schema_version =
@@ -260,6 +509,180 @@ assert_identical(
   ),
   "independent v3 encoder length-prefixes command and environment values"
 )
+synthetic_independent_projection_lines <-
+  independent_native_build_command_lines(synthetic_native_build_projection)
+synthetic_production_projection_lines <-
+  .fastkpc_full_cuda_fixed_sp_native_build_command_lines(
+    synthetic_native_build_projection
+  )
+synthetic_independent_projection_bytes <- charToRaw(enc2utf8(paste0(
+  paste(synthetic_independent_projection_lines, collapse = "\n"), "\n"
+)))
+synthetic_production_projection_bytes <- charToRaw(enc2utf8(paste0(
+  paste(synthetic_production_projection_lines, collapse = "\n"), "\n"
+)))
+assert_true(
+  identical(
+    synthetic_independent_projection_bytes,
+    synthetic_production_projection_bytes
+  ) && identical(
+    digest::digest(
+      synthetic_independent_projection_bytes,
+      algo = "sha256", serialize = FALSE
+    ),
+    digest::digest(
+      synthetic_production_projection_bytes,
+      algo = "sha256", serialize = FALSE
+    )
+  ),
+  "production and independent v3 encoders agree on multibyte bytes and hash"
+)
+
+synthetic_independent_native_build_projection <- function() {
+  fixture_dir <- tempfile("fastkpc_independent_native_projection_")
+  dir.create(fixture_dir)
+  on.exit(unlink(fixture_dir, recursive = TRUE, force = TRUE), add = TRUE)
+  cxx_path <- file.path(fixture_dir, "g++")
+  nvcc_path <- file.path(fixture_dir, "nvcc")
+  host_source <- file.path(fixture_dir, "host.cpp")
+  cuda_source <- file.path(fixture_dir, "kernel.cu")
+  host_output <- file.path(fixture_dir, "host.o")
+  cuda_output <- file.path(fixture_dir, "kernel.o")
+  link_output <- file.path(fixture_dir, "fastkpc_cuda.so")
+  writeBin(charToRaw("synthetic-cxx"), cxx_path)
+  writeBin(charToRaw("synthetic-nvcc"), nvcc_path)
+  writeLines("int host_fixture;", host_source, useBytes = TRUE)
+  writeLines("int cuda_fixture;", cuda_source, useBytes = TRUE)
+  fixture_dir <- normalizePath(
+    fixture_dir, winslash = "/", mustWork = TRUE
+  )
+  cxx_path <- normalizePath(cxx_path, winslash = "/", mustWork = TRUE)
+  nvcc_path <- normalizePath(nvcc_path, winslash = "/", mustWork = TRUE)
+  host_source <- normalizePath(
+    host_source, winslash = "/", mustWork = TRUE
+  )
+  cuda_source <- normalizePath(
+    cuda_source, winslash = "/", mustWork = TRUE
+  )
+  files <- data.frame(
+    path = sort(c(cxx_path, nvcc_path), method = "radix"),
+    stringsAsFactors = FALSE
+  )
+  files$sha256 <- unname(vapply(
+    files$path,
+    function(path) digest::digest(
+      file = path, algo = "sha256", serialize = FALSE
+    ),
+    character(1L)
+  ))
+  exec_lines <- c(
+    paste0(
+      '41 execve("', cxx_path,
+      '", ["g++", "-DFASTKPC_HOSTILE=1", "-c", "', host_source,
+      '", "-o", "', host_output, '"], 0x0) = 0'
+    ),
+    paste0(
+      '42 execveat(AT_FDCWD, "', nvcc_path,
+      '", ["nvcc", "-DNVCC_PREPEND_FLAGS=hostile", "-c", "',
+      cuda_source, '", "-o", "', cuda_output, '"], 0x0, 0) = 0'
+    ),
+    paste0(
+      '43 execve("', cxx_path,
+      '", ["g++", "-shared", "', host_output, '", "', cuda_output,
+      '", "-o", "', link_output, '"], 0x0) = 0'
+    )
+  )
+  commands <- independent_native_build_commands(
+    exec_lines = exec_lines,
+    exec_syscalls = c("execve", "execveat", "execve"),
+    build_working_dir = fixture_dir,
+    files = files
+  )
+  production_commands <-
+    fastkpc_full_cuda_fixed_sp_native_build_commands(
+      exec_lines = exec_lines,
+      exec_syscalls = c("execve", "execveat", "execve"),
+      exec_paths = c(cxx_path, nvcc_path, cxx_path),
+      build_working_dir = fixture_dir,
+      files = files
+    )
+  cxx_sha256 <- files$sha256[[match(cxx_path, files$path)]]
+  nvcc_sha256 <- files$sha256[[match(nvcc_path, files$path)]]
+  assert_identical(
+    commands,
+    list(
+      list(
+        role = "cxx_compile", executable_path = cxx_path,
+        executable_sha256 = cxx_sha256,
+        argv = c(
+          "<EXECUTABLE>", "-DFASTKPC_HOSTILE=1", "-c", host_source,
+          "-o", "<OUTPUT>"
+        )
+      ),
+      list(
+        role = "cuda_compile", executable_path = nvcc_path,
+        executable_sha256 = nvcc_sha256,
+        argv = c(
+          "<EXECUTABLE>", "-DNVCC_PREPEND_FLAGS=hostile", "-c",
+          cuda_source, "-o", "<OUTPUT>"
+        )
+      ),
+      list(
+        role = "link", executable_path = cxx_path,
+        executable_sha256 = cxx_sha256,
+        argv = c(
+          "<EXECUTABLE>", "-shared", host_output, cuda_output, "-o",
+          "<OUTPUT>"
+        )
+      )
+    ),
+    "independent raw strace projection preserves every command argument"
+  )
+  assert_identical(
+    production_commands,
+    commands,
+    "production command projection matches independent hostile argv parsing"
+  )
+  old_nvcc_prepend_flags <- Sys.getenv(
+    "NVCC_PREPEND_FLAGS", unset = NA_character_
+  )
+  on.exit({
+    if (is.na(old_nvcc_prepend_flags)) {
+      Sys.unsetenv("NVCC_PREPEND_FLAGS")
+    } else {
+      Sys.setenv(NVCC_PREPEND_FLAGS = old_nvcc_prepend_flags)
+    }
+  }, add = TRUE)
+  Sys.setenv(NVCC_PREPEND_FLAGS = "-DHOSTILE_ENV=1")
+  trace_invocation <- "LC_ALL=C strace -f ./build.sh"
+  environment <- independent_native_build_environment(
+    trace_invocation = trace_invocation
+  )
+  production_environment <-
+    fastkpc_full_cuda_fixed_sp_native_build_environment(
+      trace_invocation = trace_invocation
+    )
+  assert_identical(
+    production_environment,
+    environment,
+    "production frozen environment matches independent parent projection"
+  )
+  assert_true(
+    identical(environment$name, independent_native_build_environment_names) &&
+      isTRUE(environment$is_set[[match("LC_ALL", environment$name)]]) &&
+      identical(
+        environment$value[[match("LC_ALL", environment$name)]], "C"
+      ) && isTRUE(environment$is_set[[match(
+        "NVCC_PREPEND_FLAGS", environment$name
+      )]]) && identical(
+        environment$value[[match("NVCC_PREPEND_FLAGS", environment$name)]],
+        "-DHOSTILE_ENV=1"
+      ),
+    "independent frozen environment retains allowlisted values and LC_ALL=C"
+  )
+  invisible(TRUE)
+}
+synthetic_independent_native_build_projection()
 
 assert_identical(
   independent_generation_open(c(
@@ -1758,7 +2181,7 @@ output_dir <- tempfile("fastkpc_phase3c_qualification_")
 on.exit(unlink(output_dir, recursive = TRUE, force = TRUE), add = TRUE)
 
 runner_output <- suppressWarnings(system2(
-  "Rscript", runner_path,
+  "Rscript", c("--vanilla", runner_path),
   stdout = TRUE, stderr = TRUE,
   env = c(
     "FASTKPC_RUN_CUDA_TESTS=1",
@@ -2614,7 +3037,12 @@ independent_trace_tables <- function(trace_path, tracer_path) {
   ]
   files <- independent_csv_semantic_frame(files)
   exclusions <- independent_csv_semantic_frame(exclusions)
-  list(files = files, exclusions = exclusions)
+  list(
+    files = files,
+    exclusions = exclusions,
+    exec_lines = exec_lines,
+    exec_syscalls = exec_syscalls
+  )
 }
 reparsed_native_build <- independent_trace_tables(
   trace_payload_path, manifest$native_build_tracer_path
@@ -2631,6 +3059,58 @@ replayed_native_build_files <- independent_csv_semantic_frame(
 )
 replayed_native_build_exclusions <- independent_csv_semantic_frame(
   replayed_native_build$exclusions
+)
+independent_replayed_commands <- independent_native_build_commands(
+  exec_lines = reparsed_native_build$exec_lines,
+  exec_syscalls = reparsed_native_build$exec_syscalls,
+  build_working_dir = manifest$native_build_working_dir,
+  files = reparsed_native_build$files
+)
+independent_replayed_environment <- independent_native_build_environment(
+  manifest$native_build_dependency_trace_invocation
+)
+independent_native_build_projection <- list(
+  command_projection_schema_version =
+    "full-cuda-ci-native-build-command-projection-v1",
+  command_count = as.integer(length(independent_replayed_commands)),
+  commands = independent_replayed_commands,
+  build_environment_schema_version =
+    "full-cuda-ci-native-build-environment-v1",
+  build_environment = independent_replayed_environment
+)
+independent_projection_lines <- independent_native_build_command_lines(
+  independent_native_build_projection
+)
+replayed_projection_lines <- independent_native_build_command_lines(
+  replayed_native_build
+)
+independent_projection_bytes <- charToRaw(enc2utf8(paste0(
+  paste(independent_projection_lines, collapse = "\n"), "\n"
+)))
+replayed_projection_bytes <- charToRaw(enc2utf8(paste0(
+  paste(replayed_projection_lines, collapse = "\n"), "\n"
+)))
+assert_true(
+  identical(
+    independent_native_build_projection$command_projection_schema_version,
+    replayed_native_build$command_projection_schema_version
+  ) && identical(
+    independent_native_build_projection$command_count,
+    replayed_native_build$command_count
+  ) && identical(
+    independent_native_build_projection$commands,
+    replayed_native_build$commands
+  ) && identical(
+    independent_native_build_projection$build_environment_schema_version,
+    replayed_native_build$build_environment_schema_version
+  ) && identical(
+    independent_native_build_projection$build_environment,
+    replayed_native_build$build_environment
+  ) && identical(independent_projection_bytes, replayed_projection_bytes),
+  paste0(
+    "independent raw strace and parent environment projection matches ",
+    "production replay byte-for-byte"
+  )
 )
 replayed_command_projection_clean <- tryCatch({
   commands <- replayed_native_build$commands
@@ -2761,7 +3241,7 @@ assert_true(
 )
 dependency_identity_lines <- c(
   dependency_identity_lines,
-  independent_native_build_command_lines(replayed_native_build)
+  independent_projection_lines
 )
 independent_native_build_dependencies_sha256 <- unname(digest::digest(
   charToRaw(enc2utf8(paste0(
