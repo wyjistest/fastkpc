@@ -8428,6 +8428,146 @@ fastkpc_full_cuda_phase3_publish_direct_ci_payload <- function(
   paths <- fastkpc_full_cuda_phase3_artifact_paths(
     resolved_output_dir, kind = "full_shadow"
   )
+  staging_dir <- NULL
+  staging_lock_path <- NULL
+  artifact_lock <- NULL
+  publication_started <- FALSE
+  publication_complete <- FALSE
+  had_existing_pair <- FALSE
+  rollback_hashes <- NULL
+  rollback_paths <- NULL
+
+  rollback_publication <- function(record_error) {
+    record_error(
+      .fastkpc_full_cuda_phase3_checked_direct_ci_cleanup(
+        paths$direct_ci_summary_json,
+        label = "direct-CI rollback summary cleanup failed",
+        .cleanup_function = .cleanup_function
+      )
+    )
+    record_error(
+      .fastkpc_full_cuda_phase3_checked_direct_ci_cleanup(
+        paths$direct_ci_rds,
+        label = "direct-CI rollback RDS cleanup failed",
+        .cleanup_function = .cleanup_function
+      )
+    )
+    if (isTRUE(had_existing_pair)) {
+      record_error(
+        .fastkpc_full_cuda_phase3_checked_direct_ci_rename(
+          rollback_paths$direct_ci_rds, paths$direct_ci_rds,
+          "direct-CI prior RDS restoration failed"
+        )
+      )
+      record_error(
+        .fastkpc_full_cuda_phase3_checked_direct_ci_rename(
+          rollback_paths$direct_ci_summary_json,
+          paths$direct_ci_summary_json,
+          "direct-CI prior summary restoration failed"
+        )
+      )
+      return(record_error({
+        if (!identical(
+              .fastkpc_full_cuda_phase3_direct_ci_pair_disk_hashes(paths),
+              rollback_hashes
+            )) {
+          stop("direct-CI prior pair rollback hash mismatch", call. = FALSE)
+        }
+        fastkpc_full_cuda_phase3_validate_direct_ci_payload(
+          resolved_output_dir, catalog, .artifact_lock = artifact_lock
+        )
+      }))
+    }
+    record_error({
+      pair <- .fastkpc_full_cuda_phase3_direct_ci_pair_paths(paths)
+      if (any(vapply(
+            pair, .fastkpc_full_cuda_phase3_direct_ci_path_present,
+            logical(1L)
+          ))) {
+        stop("direct-CI empty destination rollback failed", call. = FALSE)
+      }
+      invisible(TRUE)
+    })
+  }
+
+  .fastkpc_full_cuda_phase3_direct_ci_finalization_condition <- function(
+      conditions) {
+    interrupt_index <- which(vapply(
+      conditions, inherits, logical(1L), what = "interrupt"
+    ))
+    primary_index <- if (length(interrupt_index)) interrupt_index[[1L]] else 1L
+    primary <- conditions[[primary_index]]
+    structure(
+      list(
+        message = paste(
+          vapply(conditions, conditionMessage, character(1L)),
+          collapse = "; "
+        ),
+        call = conditionCall(primary),
+        parent = primary,
+        conditions = conditions
+      ),
+      class = unique(c(
+        "fastkpc_direct_ci_finalization_failure",
+        setdiff(class(primary), "condition"), "error", "condition"
+      ))
+    )
+  }
+
+  finalize_publication <- function() {
+    suspendInterrupts({
+      conditions <- list()
+      condition_handler <- function(condition) condition
+      record_error <- function(expression) {
+        condition <- tryCatch({
+          force(expression)
+          NULL
+        }, error = condition_handler, interrupt = condition_handler)
+        if (inherits(condition, "condition")) {
+          conditions[[length(conditions) + 1L]] <<- condition
+          return(FALSE)
+        }
+        TRUE
+      }
+      rollback_restored <- TRUE
+      if (!is.null(artifact_lock) && isTRUE(publication_started) &&
+          !isTRUE(publication_complete)) {
+        rollback_restored <- rollback_publication(record_error)
+      }
+      if (!is.null(staging_dir) && isTRUE(rollback_restored)) {
+        record_error(
+          .fastkpc_full_cuda_phase3_checked_direct_ci_cleanup(
+            staging_dir, recursive = TRUE,
+            label = "direct-CI staging cleanup failed",
+            .cleanup_function = .cleanup_function
+          )
+        )
+      }
+      if (!is.null(staging_lock_path)) {
+        record_error(
+          .fastkpc_full_cuda_phase3_checked_direct_ci_cleanup(
+            staging_lock_path,
+            label = "direct-CI staging lock cleanup failed",
+            .cleanup_function = .cleanup_function
+          )
+        )
+      }
+      if (!is.null(artifact_lock)) {
+        record_error(.release_function(artifact_lock))
+      }
+      if (length(conditions) == 1L) {
+        stop(conditions[[1L]])
+      }
+      if (length(conditions) > 1L) {
+        stop(.fastkpc_full_cuda_phase3_direct_ci_finalization_condition(
+          conditions
+        ))
+      }
+      invisible(TRUE)
+    })
+  }
+  on.exit(finalize_publication(), add = TRUE)
+
   staging_dir <- tempfile(
     paste0(".", basename(resolved_output_dir),
            ".phase3-direct-ci-stage-"),
@@ -8438,106 +8578,11 @@ fastkpc_full_cuda_phase3_publish_direct_ci_payload <- function(
   }
   staging_lock_path <-
     .fastkpc_full_cuda_phase3_direct_artifact_lock_path(staging_dir)
-  artifact_lock <- NULL
-  publication_started <- FALSE
-  publication_complete <- FALSE
-  had_existing_pair <- FALSE
-  rollback_hashes <- NULL
   rollback_paths <- list(
     direct_ci_rds = file.path(staging_dir, "previous.direct_ci.rds"),
     direct_ci_summary_json =
       file.path(staging_dir, "previous.direct_ci.summary.json")
   )
-
-  rollback_publication <- function() {
-    .fastkpc_full_cuda_phase3_checked_direct_ci_cleanup(
-      paths$direct_ci_summary_json,
-      label = "direct-CI rollback summary cleanup failed",
-      .cleanup_function = .cleanup_function
-    )
-    .fastkpc_full_cuda_phase3_checked_direct_ci_cleanup(
-      paths$direct_ci_rds,
-      label = "direct-CI rollback RDS cleanup failed",
-      .cleanup_function = .cleanup_function
-    )
-    if (isTRUE(had_existing_pair)) {
-      .fastkpc_full_cuda_phase3_checked_direct_ci_rename(
-        rollback_paths$direct_ci_rds, paths$direct_ci_rds,
-        "direct-CI prior RDS restoration failed"
-      )
-      .fastkpc_full_cuda_phase3_checked_direct_ci_rename(
-        rollback_paths$direct_ci_summary_json,
-        paths$direct_ci_summary_json,
-        "direct-CI prior summary restoration failed"
-      )
-      if (!identical(
-            .fastkpc_full_cuda_phase3_direct_ci_pair_disk_hashes(paths),
-            rollback_hashes
-          )) {
-        stop("direct-CI prior pair rollback hash mismatch", call. = FALSE)
-      }
-      fastkpc_full_cuda_phase3_validate_direct_ci_payload(
-        resolved_output_dir, catalog, .artifact_lock = artifact_lock
-      )
-    } else {
-      pair <- .fastkpc_full_cuda_phase3_direct_ci_pair_paths(paths)
-      if (any(vapply(
-            pair, .fastkpc_full_cuda_phase3_direct_ci_path_present,
-            logical(1L)
-          ))) {
-        stop("direct-CI empty destination rollback failed", call. = FALSE)
-      }
-    }
-    invisible(TRUE)
-  }
-
-  finalize_publication <- function() {
-    errors <- list()
-    rollback_succeeded <- TRUE
-    record_error <- function(expression) {
-      error <- tryCatch({
-        force(expression)
-        NULL
-      }, error = identity)
-      if (inherits(error, "error")) {
-        errors[[length(errors) + 1L]] <<- error
-        return(FALSE)
-      }
-      TRUE
-    }
-    if (!is.null(artifact_lock) && isTRUE(publication_started) &&
-        !isTRUE(publication_complete)) {
-      rollback_succeeded <- record_error(rollback_publication())
-    }
-    if (isTRUE(rollback_succeeded)) {
-      record_error(
-        .fastkpc_full_cuda_phase3_checked_direct_ci_cleanup(
-          staging_dir, recursive = TRUE,
-          label = "direct-CI staging cleanup failed",
-          .cleanup_function = .cleanup_function
-        )
-      )
-    }
-    record_error(
-      .fastkpc_full_cuda_phase3_checked_direct_ci_cleanup(
-        staging_lock_path,
-        label = "direct-CI staging lock cleanup failed",
-        .cleanup_function = .cleanup_function
-      )
-    )
-    if (!is.null(artifact_lock)) {
-      record_error(.release_function(artifact_lock))
-    }
-    if (length(errors) > 0L) {
-      stop(
-        paste(vapply(errors, conditionMessage, character(1L)),
-              collapse = "; "),
-        call. = FALSE
-      )
-    }
-    invisible(TRUE)
-  }
-  on.exit(finalize_publication(), add = TRUE)
 
   staged_paths <- fastkpc_full_cuda_phase3_artifact_paths(
     staging_dir, kind = "full_shadow"

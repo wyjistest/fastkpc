@@ -716,6 +716,108 @@ record_hardening_true(
 )
 unlink(rollback_output, recursive = TRUE, force = TRUE)
 
+interrupt_rollback_output <- tempfile("direct-ci-interrupt-rollback-")
+interrupt_rollback_paths <- copy_direct_pair(
+  direct_paths, interrupt_rollback_output
+)
+interrupt_rollback_hashes <- direct_pair_hashes(interrupt_rollback_paths)
+interrupt_cleanup_calls <- 0L
+interrupt_staging_paths <- character()
+synthetic_cleanup_interrupt <- structure(
+  list(message = "synthetic direct-CI rollback cleanup interrupt", call = NULL),
+  class = c("interrupt", "condition")
+)
+interrupt_rollback_condition <- tryCatch(
+  fastkpc_full_cuda_phase3_publish_direct_ci_payload(
+    rollback_rows, catalog, interrupt_rollback_output,
+    .transition_hook = function(stage, paths, artifact_lock) {
+      if (identical(stage, "after_final_rds_publication")) {
+        stop("trigger interrupt-safe direct-CI rollback", call. = FALSE)
+      }
+    },
+    .cleanup_function = function(paths, recursive = FALSE, force = FALSE) {
+      interrupt_cleanup_calls <<- interrupt_cleanup_calls + 1L
+      if (any(grepl(
+            "phase3-direct-ci-stage", basename(paths), fixed = TRUE
+          ))) {
+        interrupt_staging_paths <<- c(interrupt_staging_paths, paths)
+      }
+      if (identical(interrupt_cleanup_calls, 3L)) {
+        stop(synthetic_cleanup_interrupt)
+      }
+      unlink(paths, recursive = recursive, force = force)
+    }
+  ),
+  interrupt = function(condition) condition,
+  error = function(condition) condition
+)
+record_hardening_true(
+  inherits(interrupt_rollback_condition, "interrupt") &&
+    identical(
+      conditionMessage(interrupt_rollback_condition),
+      "synthetic direct-CI rollback cleanup interrupt"
+    ),
+  "rollback cleanup interrupt must propagate at the publisher boundary"
+)
+record_hardening_true(
+  interrupt_cleanup_calls >= 6L,
+  "rollback cleanup interrupt must not skip later cleanup operations"
+)
+record_hardening_true(
+  direct_pair_matches(interrupt_rollback_paths, interrupt_rollback_hashes),
+  "rollback cleanup interrupt must restore the hash-exact prior pair"
+)
+interrupt_lock_path <-
+  .fastkpc_full_cuda_phase3_direct_artifact_lock_path(
+    interrupt_rollback_output
+  )
+interrupt_registry <- .fastkpc_full_cuda_phase3_lock_registry()
+interrupt_registry_clear <- !exists(
+  interrupt_lock_path, envir = interrupt_registry, inherits = FALSE
+)
+record_hardening_true(
+  interrupt_registry_clear,
+  "rollback cleanup interrupt must clear direct lock registry ownership"
+)
+interrupt_output_resolved <- normalizePath(
+  interrupt_rollback_output, mustWork = TRUE
+)
+interrupt_stage_prefix <- paste0(
+  ".", basename(interrupt_output_resolved), ".phase3-direct-ci-stage-"
+)
+interrupt_stage_entries <- list.files(
+  dirname(interrupt_output_resolved), all.files = TRUE, no.. = TRUE,
+  full.names = TRUE
+)
+interrupt_stage_entries <- interrupt_stage_entries[startsWith(
+  basename(interrupt_stage_entries), interrupt_stage_prefix
+)]
+record_hardening_true(
+  length(interrupt_staging_paths) > 0L &&
+    !any(vapply(
+      interrupt_staging_paths,
+      .fastkpc_full_cuda_phase3_direct_ci_path_present,
+      logical(1L)
+    )) && length(interrupt_stage_entries) == 0L,
+  "rollback cleanup interrupt must remove staging directories and locks"
+)
+
+# Restore test-process ownership after the expected RED implementation leak.
+if (!interrupt_registry_clear && exists(
+      interrupt_lock_path, envir = interrupt_registry, inherits = FALSE
+    )) {
+  interrupt_entry <- get(
+    interrupt_lock_path, envir = interrupt_registry, inherits = FALSE
+  )
+  .fastkpc_full_cuda_phase3_release_direct_artifact_lock(list(
+    lock_path = interrupt_lock_path,
+    purpose = "direct_artifact",
+    state = interrupt_entry$state
+  ))
+}
+unlink(interrupt_stage_entries, recursive = TRUE, force = TRUE)
+unlink(interrupt_rollback_output, recursive = TRUE, force = TRUE)
+
 cleanup_failure_output <- tempfile("direct-ci-cleanup-failure-")
 cleanup_failure_stage <- character()
 record_hardening_error(
