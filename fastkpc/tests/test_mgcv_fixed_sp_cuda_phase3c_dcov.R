@@ -569,6 +569,37 @@ assert_true(
   ),
   "qualification dCov summary derives deterministic rows hash"
 )
+forged_exactness_dcov <- fixture_dcov
+forged_exactness_dcov$p_value_exact[[1L]] <-
+  !forged_exactness_dcov$p_value_exact[[1L]]
+forged_exactness_rows_hash <- fastkpc_full_cuda_census_frame_hash(
+  forged_exactness_dcov
+)
+forged_exactness_public_summary <- fixture_dcov_summary
+forged_exactness_public_summary$qualification_dcov_rows_hash <-
+  forged_exactness_rows_hash
+assert_true(
+  !identical(
+    forged_exactness_rows_hash,
+    fixture_dcov_summary$qualification_dcov_rows_hash
+  ) && identical(
+    forged_exactness_public_summary$qualification_dcov_rows_hash,
+    fastkpc_full_cuda_census_frame_hash(forged_exactness_dcov)
+  ),
+  "hostile qualification fixture refreshes its public rows hash"
+)
+assert_error_matching(
+  fastkpc_full_cuda_fixed_sp_summarize_qualification_dcov_records(
+    forged_exactness_dcov,
+    fixture_logical,
+    sort(unique(c(
+      fixture_logical$residual_key_x,
+      fixture_logical$residual_key_y
+    )), method = "radix")
+  ),
+  "qualification dCov rows do not match canonical evidence",
+  "refreshed public hashes cannot hide forged p_value_exact semantics"
+)
 assert_identical(
   formals(fastkpc_run_full_cuda_fixed_sp_phase3c_iteration)[[
     "return_residual_registry"

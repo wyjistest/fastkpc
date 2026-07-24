@@ -2056,40 +2056,398 @@ fastkpc_validate_full_cuda_phase3_artifact <-
          ".phase3-oracle.lock")
 }
 
-.fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock <- function(
-    output_dir) {
-  lock_dir <- .fastkpc_full_cuda_phase3_oracle_artifact_lock_path(output_dir)
-  dir.create(dirname(lock_dir), recursive = TRUE, showWarnings = FALSE)
-  if (!dir.create(lock_dir, recursive = FALSE, showWarnings = FALSE)) {
-    stop("Phase 3 oracle artifact lock exists", call. = FALSE)
+.fastkpc_full_cuda_phase3_lock_owner_schema_version <- function() {
+  "full-cuda-ci-phase3-lock-owner-v1"
+}
+
+.fastkpc_full_cuda_phase3_lock_lease_duration_seconds <- function() {
+  86400L
+}
+
+.fastkpc_full_cuda_phase3_lock_host <- function() {
+  host <- unname(Sys.info()[["nodename"]])
+  if (typeof(host) != "character" || length(host) != 1L ||
+      is.na(host) || !nzchar(host) || grepl("[\r\n]", host)) {
+    stop("Phase 3 lock host identity is unavailable", call. = FALSE)
   }
-  owner_file <- file.path(lock_dir, "owner")
-  owner_token <- basename(tempfile("phase3-oracle-owner-", tmpdir = lock_dir))
-  initialized <- tryCatch({
-    writeLines(owner_token, owner_file, useBytes = TRUE)
-    file.exists(owner_file)
-  }, error = function(error) FALSE)
-  if (!isTRUE(initialized)) {
-    unlink(lock_dir, recursive = TRUE, force = TRUE)
-    stop("failed to initialize Phase 3 oracle artifact lock",
-         call. = FALSE)
-  }
-  list(
-    lock_dir = lock_dir, owner_file = owner_file, owner_token = owner_token
+  host
+}
+
+.fastkpc_full_cuda_phase3_lock_pid_is_live <- function(pid) {
+  pid <- suppressWarnings(as.integer(pid))
+  if (length(pid) != 1L || is.na(pid) || pid < 1L) return(NA)
+  if (identical(pid, as.integer(Sys.getpid()))) return(TRUE)
+  tryCatch(
+    isTRUE(tools::pskill(pid, 0L)),
+    error = function(error) NA
   )
 }
 
-.fastkpc_full_cuda_phase3_owns_oracle_artifact_lock <- function(lock) {
+.fastkpc_full_cuda_phase3_lock_owner_fields <- function() {
+  c(
+    "schema_version", "purpose", "owner_token", "host", "pid",
+    "acquired_at_unix", "refreshed_at_unix", "lease_duration_seconds"
+  )
+}
+
+.fastkpc_full_cuda_phase3_validate_lock_owner <- function(
+    value, purpose = NULL) {
+  fields <- .fastkpc_full_cuda_phase3_lock_owner_fields()
+  whole <- function(value, minimum = 0) {
+    typeof(value) %in% c("integer", "double") && length(value) == 1L &&
+      !is.object(value) && is.null(attributes(value)) &&
+      !is.na(value) && is.finite(value) && value == floor(value) &&
+      value >= minimum && value <= .Machine$integer.max
+  }
+  timestamp <- function(value) {
+    typeof(value) %in% c("integer", "double") && length(value) == 1L &&
+      !is.object(value) && is.null(attributes(value)) &&
+      !is.na(value) && is.finite(value) && value == floor(value) &&
+      value >= 0 && value <= 2^53
+  }
+  text <- function(value) {
+    typeof(value) == "character" && length(value) == 1L &&
+      !is.object(value) && is.null(attributes(value)) &&
+      !is.na(value) && nzchar(value) && !grepl("[\r\n]", value)
+  }
+  clean <- is.list(value) && !is.object(value) &&
+    identical(names(value), fields) &&
+    identical(
+      value$schema_version,
+      .fastkpc_full_cuda_phase3_lock_owner_schema_version()
+    ) && text(value$purpose) && text(value$owner_token) &&
+    text(value$host) && whole(value$pid, 1L) &&
+    timestamp(value$acquired_at_unix) &&
+    timestamp(value$refreshed_at_unix) &&
+    value$refreshed_at_unix >= value$acquired_at_unix &&
+    whole(value$lease_duration_seconds, 1L) &&
+    identical(
+      as.integer(value$lease_duration_seconds),
+      .fastkpc_full_cuda_phase3_lock_lease_duration_seconds()
+    ) && (is.null(purpose) || identical(value$purpose, purpose))
+  if (!isTRUE(clean)) return(NULL)
+  value$pid <- as.integer(value$pid)
+  value$acquired_at_unix <- as.double(value$acquired_at_unix)
+  value$refreshed_at_unix <- as.double(value$refreshed_at_unix)
+  value$lease_duration_seconds <- as.integer(value$lease_duration_seconds)
+  value
+}
+
+.fastkpc_full_cuda_phase3_read_lock_owner <- function(
+    owner_file, purpose = NULL) {
+  value <- tryCatch(
+    jsonlite::read_json(owner_file, simplifyVector = TRUE),
+    error = function(error) NULL
+  )
+  .fastkpc_full_cuda_phase3_validate_lock_owner(value, purpose)
+}
+
+.fastkpc_full_cuda_phase3_atomic_write_lock_owner <- function(
+    value, owner_file) {
+  validated <- .fastkpc_full_cuda_phase3_validate_lock_owner(
+    value, value$purpose
+  )
+  if (is.null(validated)) {
+    stop("Phase 3 lock owner metadata is malformed", call. = FALSE)
+  }
+  temporary <- tempfile(
+    ".phase3-lock-owner-", tmpdir = dirname(owner_file)
+  )
+  on.exit(unlink(temporary, force = TRUE), add = TRUE)
+  fastkpc_full_cuda_write_json(validated, temporary)
+  if (!file.rename(temporary, owner_file)) {
+    stop("failed to atomically write Phase 3 lock owner", call. = FALSE)
+  }
+  reopened <- .fastkpc_full_cuda_phase3_read_lock_owner(
+    owner_file, validated$purpose
+  )
+  if (is.null(reopened) ||
+      !identical(reopened$owner_token, validated$owner_token) ||
+      !identical(reopened$refreshed_at_unix,
+                 validated$refreshed_at_unix)) {
+    stop("Phase 3 lock owner metadata readback failed", call. = FALSE)
+  }
+  invisible(reopened)
+}
+
+.fastkpc_full_cuda_phase3_lock_owner_signature <- function(lock_dir) {
+  owner_file <- file.path(lock_dir, "owner.json")
+  if (!file.exists(owner_file) || dir.exists(owner_file)) {
+    return("missing-owner")
+  }
+  hash <- tryCatch(
+    fastkpc_full_cuda_census_file_hash(owner_file),
+    error = function(error) NA_character_
+  )
+  if (length(hash) != 1L || is.na(hash)) "unreadable-owner" else hash
+}
+
+.fastkpc_full_cuda_phase3_lock_fallback_expired <- function(
+    lock_dir, now, lease_duration_seconds) {
+  paths <- c(lock_dir, file.path(lock_dir, "owner.json"))
+  existing <- paths[file.exists(paths)]
+  if (length(existing) == 0L) return(FALSE)
+  modified <- suppressWarnings(as.double(file.info(existing)$mtime))
+  if (anyNA(modified) || any(!is.finite(modified))) return(FALSE)
+  as.double(now) > max(modified) + as.double(lease_duration_seconds)
+}
+
+.fastkpc_full_cuda_phase3_transition_lock <- function(
+    lock_dir, expected_signature, label, expected_owner_token = NULL,
+    .after_claim = NULL) {
+  transition_dir <- file.path(lock_dir, ".transition")
+  if (!dir.create(transition_dir, recursive = FALSE, showWarnings = FALSE)) {
+    stop("Phase 3 lock ownership transition is already active",
+         call. = FALSE)
+  }
+  transition_token <- basename(tempfile(
+    paste0("phase3-", label, "-"), tmpdir = transition_dir
+  ))
+  transition_owner <- file.path(transition_dir, "owner")
+  writeLines(transition_token, transition_owner, useBytes = TRUE)
+  transition_owned <- function(path = transition_owner) {
+    file.exists(path) && identical(
+      tryCatch(
+        readLines(path, warn = FALSE),
+        error = function(error) character()
+      ),
+      transition_token
+    )
+  }
+  on.exit({
+    if (transition_owned()) {
+      unlink(transition_dir, recursive = TRUE, force = TRUE)
+    }
+  }, add = TRUE)
+  if (!is.null(.after_claim)) .after_claim(file.path(lock_dir, "owner.json"))
+  if (!is.null(expected_owner_token)) {
+    owner <- .fastkpc_full_cuda_phase3_read_lock_owner(
+      file.path(lock_dir, "owner.json")
+    )
+    if (is.null(owner) ||
+        !identical(owner$owner_token, expected_owner_token)) {
+      stop("Phase 3 lock owner token changed during ownership transition",
+           call. = FALSE)
+    }
+  }
+  if (!identical(
+        .fastkpc_full_cuda_phase3_lock_owner_signature(lock_dir),
+        expected_signature
+      )) {
+    stop("Phase 3 lock owner changed during ownership transition",
+         call. = FALSE)
+  }
+  quarantine <- paste0(
+    lock_dir, ".quarantine-", transition_token
+  )
+  if (file.exists(quarantine) || dir.exists(quarantine) ||
+      !file.rename(lock_dir, quarantine)) {
+    stop("failed to quarantine Phase 3 lock", call. = FALSE)
+  }
+  quarantined_owner <- file.path(quarantine, "owner.json")
+  quarantined_transition_owner <- file.path(
+    quarantine, ".transition", "owner"
+  )
+  quarantine_clean <- identical(
+    .fastkpc_full_cuda_phase3_lock_owner_signature(quarantine),
+    expected_signature
+  ) && transition_owned(quarantined_transition_owner)
+  if (!isTRUE(quarantine_clean)) {
+    if (!dir.exists(lock_dir)) {
+      file.rename(quarantine, lock_dir)
+    }
+    stop("quarantined Phase 3 lock ownership changed", call. = FALSE)
+  }
+  unlink(quarantine, recursive = TRUE, force = TRUE)
+  if (dir.exists(quarantine) || file.exists(quarantine) ||
+      file.exists(quarantined_owner)) {
+    stop("failed to remove quarantined Phase 3 lock", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_acquire_lock <- function(
+    lock_dir, purpose, .host = .fastkpc_full_cuda_phase3_lock_host(),
+    .pid = as.integer(Sys.getpid()), .now = floor(as.double(Sys.time())),
+    .lease_duration_seconds =
+      .fastkpc_full_cuda_phase3_lock_lease_duration_seconds(),
+    .pid_is_live = .fastkpc_full_cuda_phase3_lock_pid_is_live,
+    .reclaim_hook = NULL) {
+  scalar_text <- function(value) {
+    typeof(value) == "character" && length(value) == 1L &&
+      !is.na(value) && nzchar(value) && !grepl("[\r\n]", value)
+  }
+  clean <- scalar_text(lock_dir) && scalar_text(purpose) &&
+    scalar_text(.host) && is.function(.pid_is_live) &&
+    (is.null(.reclaim_hook) || is.function(.reclaim_hook)) &&
+    .fastkpc_full_cuda_phase3_whole_scalar(.pid, 1L, "lock pid") >= 1L &&
+    typeof(.now) %in% c("integer", "double") && length(.now) == 1L &&
+    !is.object(.now) && is.null(attributes(.now)) && !is.na(.now) &&
+    is.finite(.now) && .now == floor(.now) && .now >= 0 &&
+    .now <= 2^53 && identical(
+      .fastkpc_full_cuda_phase3_whole_scalar(
+        .lease_duration_seconds, 1L, "lock lease"
+      ),
+      .fastkpc_full_cuda_phase3_lock_lease_duration_seconds()
+    )
+  if (!isTRUE(clean)) {
+    stop("Phase 3 lock acquisition inputs are malformed", call. = FALSE)
+  }
+  .pid <- as.integer(.pid)
+  .now <- as.double(.now)
+  .lease_duration_seconds <- as.integer(.lease_duration_seconds)
+  dir.create(dirname(lock_dir), recursive = TRUE, showWarnings = FALSE)
+  created <- dir.create(lock_dir, recursive = FALSE, showWarnings = FALSE)
+  if (!isTRUE(created)) {
+    if (!dir.exists(lock_dir)) {
+      stop("failed to create Phase 3 lock", call. = FALSE)
+    }
+    owner_file <- file.path(lock_dir, "owner.json")
+    signature <- .fastkpc_full_cuda_phase3_lock_owner_signature(lock_dir)
+    owner <- .fastkpc_full_cuda_phase3_read_lock_owner(owner_file)
+    reclaim <- FALSE
+    if (is.null(owner)) {
+      reclaim <- .fastkpc_full_cuda_phase3_lock_fallback_expired(
+        lock_dir, .now, .lease_duration_seconds
+      )
+    } else if (identical(owner$host, .host) &&
+               identical(owner$purpose, purpose)) {
+      live <- tryCatch(
+        .pid_is_live(owner$pid), error = function(error) NA
+      )
+      if (identical(live, FALSE)) {
+        reclaim <- TRUE
+      } else if (!identical(live, TRUE)) {
+        reclaim <- .now > owner$refreshed_at_unix +
+          owner$lease_duration_seconds
+      }
+    } else {
+      reclaim <- .now > owner$refreshed_at_unix +
+        owner$lease_duration_seconds
+    }
+    if (!isTRUE(reclaim)) {
+      stop("Phase 3 lock exists", call. = FALSE)
+    }
+    .fastkpc_full_cuda_phase3_transition_lock(
+      lock_dir, signature, "reclaim", .after_claim = .reclaim_hook
+    )
+    if (!dir.create(lock_dir, recursive = FALSE, showWarnings = FALSE)) {
+      stop("Phase 3 lock was acquired during reclamation", call. = FALSE)
+    }
+  }
+
+  owner_file <- file.path(lock_dir, "owner.json")
+  owner_token <- basename(tempfile(
+    paste0("phase3-", purpose, "-owner-"), tmpdir = lock_dir
+  ))
+  owner <- list(
+    schema_version = .fastkpc_full_cuda_phase3_lock_owner_schema_version(),
+    purpose = purpose,
+    owner_token = owner_token,
+    host = .host,
+    pid = .pid,
+    acquired_at_unix = .now,
+    refreshed_at_unix = .now,
+    lease_duration_seconds = .lease_duration_seconds
+  )
+  initialized <- tryCatch({
+    .fastkpc_full_cuda_phase3_atomic_write_lock_owner(owner, owner_file)
+    TRUE
+  }, error = function(error) FALSE)
+  if (!isTRUE(initialized)) {
+    unlink(lock_dir, recursive = TRUE, force = TRUE)
+    stop("failed to initialize Phase 3 lock", call. = FALSE)
+  }
+  list(
+    lock_dir = lock_dir, owner_file = owner_file,
+    owner_token = owner_token, purpose = purpose
+  )
+}
+
+.fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock <- function(
+    output_dir, .host = .fastkpc_full_cuda_phase3_lock_host(),
+    .pid = as.integer(Sys.getpid()), .now = floor(as.double(Sys.time())),
+    .lease_duration_seconds =
+      .fastkpc_full_cuda_phase3_lock_lease_duration_seconds(),
+    .pid_is_live = .fastkpc_full_cuda_phase3_lock_pid_is_live,
+    .reclaim_hook = NULL) {
+  lock_dir <- .fastkpc_full_cuda_phase3_oracle_artifact_lock_path(output_dir)
+  .fastkpc_full_cuda_phase3_acquire_lock(
+    lock_dir = lock_dir, purpose = "oracle_artifact",
+    .host = .host, .pid = .pid, .now = .now,
+    .lease_duration_seconds = .lease_duration_seconds,
+    .pid_is_live = .pid_is_live, .reclaim_hook = .reclaim_hook
+  )
+}
+
+.fastkpc_full_cuda_phase3_owns_lock <- function(lock, purpose) {
   if (!is.list(lock) || !identical(
-        names(lock), c("lock_dir", "owner_file", "owner_token")
+        names(lock),
+        c("lock_dir", "owner_file", "owner_token", "purpose")
       ) || !dir.exists(lock$lock_dir) || !file.exists(lock$owner_file)) {
     return(FALSE)
   }
-  actual <- tryCatch(
-    readLines(lock$owner_file, warn = FALSE),
-    error = function(error) character()
+  actual <- .fastkpc_full_cuda_phase3_read_lock_owner(
+    lock$owner_file, lock$purpose
   )
-  identical(actual, lock$owner_token)
+  !is.null(actual) && identical(lock$purpose, purpose) &&
+    identical(actual$owner_token, lock$owner_token)
+}
+
+.fastkpc_full_cuda_phase3_refresh_lock <- function(
+    lock, purpose, .now = floor(as.double(Sys.time())),
+    .boundary = NULL) {
+  if (!is.null(.boundary) && (
+      typeof(.boundary) != "character" || length(.boundary) != 1L ||
+      is.na(.boundary) || !nzchar(.boundary) ||
+      grepl("[\r\n]", .boundary))) {
+    stop("Phase 3 lock refresh boundary is malformed", call. = FALSE)
+  }
+  if (!.fastkpc_full_cuda_phase3_owns_lock(lock, purpose) ||
+      dir.exists(file.path(lock$lock_dir, ".transition"))) {
+    stop("Phase 3 lock ownership is invalid", call. = FALSE)
+  }
+  timestamp_clean <- typeof(.now) %in% c("integer", "double") &&
+    length(.now) == 1L && !is.object(.now) &&
+    is.null(attributes(.now)) && !is.na(.now) && is.finite(.now) &&
+    .now == floor(.now) && .now >= 0 && .now <= 2^53
+  if (!isTRUE(timestamp_clean)) {
+    stop("lock refresh timestamp is malformed", call. = FALSE)
+  }
+  .now <- as.double(.now)
+  owner <- .fastkpc_full_cuda_phase3_read_lock_owner(
+    lock$owner_file, lock$purpose
+  )
+  if (.now < owner$refreshed_at_unix) {
+    stop("Phase 3 lock refresh timestamp moved backwards", call. = FALSE)
+  }
+  owner$refreshed_at_unix <- as.double(.now)
+  .fastkpc_full_cuda_phase3_atomic_write_lock_owner(
+    owner, lock$owner_file
+  )
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_release_lock <- function(
+    lock, purpose, .release_hook = NULL) {
+  if (.fastkpc_full_cuda_phase3_owns_lock(lock, purpose)) {
+    signature <- .fastkpc_full_cuda_phase3_lock_owner_signature(
+      lock$lock_dir
+    )
+    try(
+      .fastkpc_full_cuda_phase3_transition_lock(
+        lock$lock_dir, signature, "release",
+        expected_owner_token = lock$owner_token,
+        .after_claim = .release_hook
+      ),
+      silent = TRUE
+    )
+  }
+  invisible(NULL)
+}
+
+.fastkpc_full_cuda_phase3_owns_oracle_artifact_lock <- function(lock) {
+  .fastkpc_full_cuda_phase3_owns_lock(lock, "oracle_artifact")
 }
 
 .fastkpc_full_cuda_phase3_require_oracle_artifact_lock <- function(
@@ -2103,11 +2461,55 @@ fastkpc_validate_full_cuda_phase3_artifact <-
   invisible(TRUE)
 }
 
-.fastkpc_full_cuda_phase3_release_oracle_artifact_lock <- function(lock) {
-  if (.fastkpc_full_cuda_phase3_owns_oracle_artifact_lock(lock)) {
-    unlink(lock$lock_dir, recursive = TRUE, force = TRUE)
+.fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock <- function(
+    lock, .now = floor(as.double(Sys.time())), .boundary = NULL) {
+  .fastkpc_full_cuda_phase3_refresh_lock(
+    lock, "oracle_artifact", .now = .now, .boundary = .boundary
+  )
+}
+
+.fastkpc_full_cuda_phase3_release_oracle_artifact_lock <- function(
+    lock, .release_hook = NULL) {
+  .fastkpc_full_cuda_phase3_release_lock(
+    lock, "oracle_artifact", .release_hook = .release_hook
+  )
+}
+
+.fastkpc_full_cuda_phase3_shard_runner_lock_path <- function(output_dir) {
+  clean <- typeof(output_dir) == "character" && length(output_dir) == 1L &&
+    !is.object(output_dir) && is.null(attributes(output_dir)) &&
+    !is.na(output_dir) && nzchar(output_dir) && !grepl("[\r\n]", output_dir)
+  if (!isTRUE(clean)) {
+    stop("Phase 3 shard runner output path is malformed", call. = FALSE)
   }
-  invisible(NULL)
+  paste0(normalizePath(output_dir, mustWork = FALSE),
+         ".phase3-runner.lock")
+}
+
+.fastkpc_full_cuda_phase3_acquire_shard_runner_lock <- function(
+    output_dir, .host = .fastkpc_full_cuda_phase3_lock_host(),
+    .pid = as.integer(Sys.getpid()), .now = floor(as.double(Sys.time())),
+    .lease_duration_seconds =
+      .fastkpc_full_cuda_phase3_lock_lease_duration_seconds(),
+    .pid_is_live = .fastkpc_full_cuda_phase3_lock_pid_is_live,
+    .reclaim_hook = NULL) {
+  .fastkpc_full_cuda_phase3_acquire_lock(
+    lock_dir = .fastkpc_full_cuda_phase3_shard_runner_lock_path(output_dir),
+    purpose = "shard_runner", .host = .host, .pid = .pid, .now = .now,
+    .lease_duration_seconds = .lease_duration_seconds,
+    .pid_is_live = .pid_is_live, .reclaim_hook = .reclaim_hook
+  )
+}
+
+.fastkpc_full_cuda_phase3_refresh_shard_runner_lock <- function(
+    lock, .now = floor(as.double(Sys.time())), .boundary = NULL) {
+  .fastkpc_full_cuda_phase3_refresh_lock(
+    lock, "shard_runner", .now = .now, .boundary = .boundary
+  )
+}
+
+.fastkpc_full_cuda_phase3_release_shard_runner_lock <- function(lock) {
+  .fastkpc_full_cuda_phase3_release_lock(lock, "shard_runner")
 }
 
 fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact <- function(
@@ -4862,6 +5264,15 @@ fastkpc_full_cuda_phase3_run_shards <- function(
   if (!isTRUE(output_clean) || !isTRUE(callback_clean)) {
     stop("Phase 3 shard runner inputs are malformed", call. = FALSE)
   }
+  runner_lock <-
+    .fastkpc_full_cuda_phase3_acquire_shard_runner_lock(output_dir)
+  on.exit(
+    .fastkpc_full_cuda_phase3_release_shard_runner_lock(runner_lock),
+    add = TRUE
+  )
+  .fastkpc_full_cuda_phase3_refresh_shard_runner_lock(
+    runner_lock, .boundary = "runner_start"
+  )
   scope <- .fastkpc_full_cuda_phase3_scope(scope)
   contract <- .fastkpc_full_cuda_phase3_kind_contract(kind)
   plan <- fastkpc_full_cuda_phase3_plan_shards(
@@ -4895,6 +5306,9 @@ fastkpc_full_cuda_phase3_run_shards <- function(
   dir.create(sessions_dir, recursive = TRUE, showWarnings = FALSE)
   scan <- .fastkpc_full_cuda_phase3_scan_shards(
     shards_dir, plan$shard_count
+  )
+  .fastkpc_full_cuda_phase3_refresh_shard_runner_lock(
+    runner_lock, .boundary = "runner_scan_complete"
   )
   reused <- integer()
   reused_binary_sha256 <- character()
@@ -4957,6 +5371,9 @@ fastkpc_full_cuda_phase3_run_shards <- function(
          call. = FALSE)
   }
   if (length(missing) == 0L) {
+    .fastkpc_full_cuda_phase3_refresh_shard_runner_lock(
+      runner_lock, .boundary = "runner_complete"
+    )
     return(list(
       status = "complete",
       requested_shard_ids = integer(),
@@ -5012,6 +5429,9 @@ fastkpc_full_cuda_phase3_run_shards <- function(
     status = "running"
   )
   .fastkpc_full_cuda_phase3_atomic_write_session(session, sessions_dir)
+  .fastkpc_full_cuda_phase3_refresh_shard_runner_lock(
+    runner_lock, .boundary = "runner_before_runtime"
+  )
 
   context <- NULL
   context_open <- FALSE
@@ -5044,7 +5464,7 @@ fastkpc_full_cuda_phase3_run_shards <- function(
         )
       }
     }
-  }, add = TRUE)
+  }, add = TRUE, after = FALSE)
   tryCatch({
     context <- runtime_create()
     if (is.null(context)) {
@@ -5055,6 +5475,9 @@ fastkpc_full_cuda_phase3_run_shards <- function(
     .fastkpc_full_cuda_phase3_atomic_write_session(session, sessions_dir)
 
     for (shard_id in selected) {
+      .fastkpc_full_cuda_phase3_refresh_shard_runner_lock(
+        runner_lock, .boundary = "runner_before_shard"
+      )
       descriptor <- .fastkpc_full_cuda_phase3_shard_descriptor(
         plan, shard_id
       )
@@ -5136,6 +5559,9 @@ fastkpc_full_cuda_phase3_run_shards <- function(
       .fastkpc_full_cuda_phase3_atomic_write_session(
         session, sessions_dir
       )
+      .fastkpc_full_cuda_phase3_refresh_shard_runner_lock(
+        runner_lock, .boundary = "runner_shard_complete"
+      )
       if (!is.null(progress_hook)) {
         progress_hook(session = session, event = "shard_complete")
       }
@@ -5164,6 +5590,9 @@ fastkpc_full_cuda_phase3_run_shards <- function(
   if (!is.null(progress_hook)) {
     progress_hook(session = session, event = "session_complete")
   }
+  .fastkpc_full_cuda_phase3_refresh_shard_runner_lock(
+    runner_lock, .boundary = "runner_complete"
+  )
   remaining <- setdiff(requested, written)
   list(
     status = if (length(remaining) > 0L) "stopped" else "complete",
@@ -6124,33 +6553,36 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     summary = file.exists(paths$summary_json)
   )
   if (all(completion)) {
-    validated <- tryCatch(
-      fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
-        output_dir = output_dir, expected_identity = identity,
-        require_full = require_full, catalog = catalog, device_id = device_id,
-        .artifact_lock = artifact_lock
-      ),
-      error = function(error) error
+    validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+      output_dir = output_dir, expected_identity = identity,
+      require_full = require_full, catalog = catalog, device_id = device_id,
+      .artifact_lock = artifact_lock
     )
-    if (!inherits(validated, "error")) {
-      return(list(
-        status = "reused", validation = validated,
-        summary = validated$summary
-      ))
+    if (!identical(validated$manifest$scope, scope)) {
+      stop("completed Phase 3 oracle artifact scope differs from invocation",
+           call. = FALSE)
     }
-    unlink(c(paths$manifest_json, paths$summary_json), force = TRUE)
-    completion[] <- FALSE
+    return(list(
+      status = "reused", validation = validated,
+      summary = validated$summary
+    ))
   }
   if (any(completion)) {
     unlink(c(paths$manifest_json, paths$summary_json), force = TRUE)
   }
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
+  .fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock(
+    artifact_lock, .boundary = "publication_before_merge"
+  )
   merged <- fastkpc_full_cuda_phase3_merge_shards(
     output_dir = output_dir, kind = "oracle_sp",
     setup_keys = setup_keys, target_rows = target_rows,
     identity = identity, route_config = route_config, scope = scope,
     shard_count = shard_count
+  )
+  .fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock(
+    artifact_lock, .boundary = "publication_after_merge"
   )
   executed_native_library_sha256 <-
     merged$executed_native_library_sha256
@@ -6300,7 +6732,10 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("failed to create Phase 3 oracle staging directory",
          call. = FALSE)
   }
-  on.exit(unlink(staging_dir, recursive = TRUE, force = TRUE), add = TRUE)
+  on.exit(
+    unlink(staging_dir, recursive = TRUE, force = TRUE),
+    add = TRUE, after = FALSE
+  )
   staged_paths <- setNames(
     file.path(staging_dir, vapply(
       paths[payload_keys], basename, character(1L)
@@ -6378,6 +6813,9 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
            call. = FALSE)
     }
   }
+  .fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock(
+    artifact_lock, .boundary = "publication_payloads_published"
+  )
   manifest_temporary <- file.path(staging_dir, "manifest.json")
   fastkpc_full_cuda_write_json(manifest, manifest_temporary)
   if (file.exists(paths$manifest_json)) unlink(paths$manifest_json, force = TRUE)
@@ -6400,6 +6838,9 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
   if (!file.rename(summary_temporary, paths$summary_json)) {
     stop("failed to publish Phase 3 oracle summary", call. = FALSE)
   }
+  .fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock(
+    artifact_lock, .boundary = "publication_markers_published"
+  )
   unlink(staging_dir, recursive = TRUE, force = TRUE)
   validated <- tryCatch(
     fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
@@ -6505,6 +6946,9 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
       .artifact_lock, output_dir
     )
   }
+  .fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock(
+    .artifact_lock, .boundary = "validation_start"
+  )
   paths <- fastkpc_full_cuda_phase3_artifact_paths(output_dir, "oracle_sp")
   if (!dir.exists(output_dir)) {
     stop("Phase 3 oracle artifact directory is missing", call. = FALSE)
@@ -6682,6 +7126,9 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("Phase 3 oracle payload byte hash validation failed",
          call. = FALSE)
   }
+  .fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock(
+    .artifact_lock, .boundary = "validation_payload_hashes"
+  )
   route_config <- .fastkpc_full_cuda_phase3_validate_route_file(
     paths$route_config_json, expected_identity$route_config_hash
   )
@@ -6835,6 +7282,9 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("Phase 3 manifest executed native library differs from shards",
          call. = FALSE)
   }
+  .fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock(
+    .artifact_lock, .boundary = "validation_shards_authenticated"
+  )
   authenticated_setup <- authenticated$payload$setup_results
   authenticated_resource <- authenticated$payload$resource_metrics
   authenticated_stage <- authenticated$payload$stage_timing
@@ -7048,6 +7498,9 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("Phase 3 oracle summary claims are not recomputed: ", mismatched,
          call. = FALSE)
   }
+  .fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock(
+    .artifact_lock, .boundary = "validation_complete"
+  )
   if (!identical(
         .fastkpc_full_cuda_phase3_oracle_immutable_file_hashes(
           paths, payload_keys

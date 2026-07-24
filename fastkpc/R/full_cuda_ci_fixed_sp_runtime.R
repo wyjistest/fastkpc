@@ -6575,6 +6575,23 @@ fastkpc_full_cuda_fixed_sp_validate_qualification_dcov_frame <- function(
   TRUE
 }
 
+fastkpc_full_cuda_fixed_sp_qualification_p_value_exact_v1 <- function(
+    candidate, reference) {
+  clean <- typeof(candidate) == "double" &&
+    typeof(reference) == "double" &&
+    length(candidate) == length(reference) &&
+    !is.object(candidate) && !is.object(reference) &&
+    is.null(attributes(candidate)) && is.null(attributes(reference)) &&
+    !anyNA(candidate) && !anyNA(reference) &&
+    all(is.finite(candidate)) && all(is.finite(reference))
+  if (!isTRUE(clean)) {
+    stop("qualification dCov exactness inputs are malformed", call. = FALSE)
+  }
+  vapply(seq_along(candidate), function(index) {
+    identical(candidate[[index]], reference[[index]])
+  }, logical(1L))
+}
+
 fastkpc_full_cuda_fixed_sp_callback_result_is_compact <- function(value) {
   if (is.null(value)) return(TRUE)
   if (!is.data.frame(value) ||
@@ -6689,11 +6706,10 @@ fastkpc_full_cuda_fixed_sp_build_qualification_dcov_records <- function(
       p_value = p_value,
       p_value_difference = difference,
       absolute_p_value_difference = abs(difference),
-      p_value_exact = vapply(seq_along(p_value), function(index) {
-        identical(
-          p_value[[index]], logical_tests$reference_p_value[[index]]
-        )
-      }, logical(1L)),
+      p_value_exact =
+        fastkpc_full_cuda_fixed_sp_qualification_p_value_exact_v1(
+          p_value, logical_tests$reference_p_value
+        ),
       signed_alpha_distance = p_value - logical_tests$alpha,
       decision = decision,
       independent = independent,
@@ -6736,6 +6752,10 @@ fastkpc_full_cuda_fixed_sp_summarize_qualification_dcov_records <- function(
   target_set <- sort(target_keys, method = "radix")
   p_value <- records$p_value
   difference <- p_value - logical_tests$reference_p_value
+  p_value_exact <-
+    fastkpc_full_cuda_fixed_sp_qualification_p_value_exact_v1(
+      p_value, logical_tests$reference_p_value
+    )
   independent <- p_value >= logical_tests$alpha
   decision <- ifelse(independent, "independent", "dependent")
   flip <- independent != logical_tests$reference_independent
@@ -6755,6 +6775,7 @@ fastkpc_full_cuda_fixed_sp_summarize_qualification_dcov_records <- function(
               rep("spectra", nrow(records))) &&
     identical(records$p_value_difference, difference) &&
     identical(records$absolute_p_value_difference, abs(difference)) &&
+    identical(records$p_value_exact, p_value_exact) &&
     identical(records$signed_alpha_distance,
               p_value - logical_tests$alpha) &&
     identical(records$decision, decision) &&

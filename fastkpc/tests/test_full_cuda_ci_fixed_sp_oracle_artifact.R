@@ -151,19 +151,305 @@ lock_fixture_path <- .fastkpc_full_cuda_phase3_oracle_artifact_lock_path(
 lock_fixture <- .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(
   lock_fixture_output
 )
+lock_owner_fields <- c(
+  "schema_version", "purpose", "owner_token", "host", "pid",
+  "acquired_at_unix", "refreshed_at_unix", "lease_duration_seconds"
+)
+lock_owner <- tryCatch(
+  jsonlite::read_json(lock_fixture$owner_file, simplifyVector = TRUE),
+  error = function(error) NULL
+)
+assert_true(
+  is.list(lock_owner) && identical(names(lock_owner), lock_owner_fields) &&
+    identical(lock_owner$schema_version,
+              "full-cuda-ci-phase3-lock-owner-v1") &&
+    identical(lock_owner$purpose, "oracle_artifact") &&
+    identical(lock_owner$owner_token, lock_fixture$owner_token) &&
+    identical(lock_owner$lease_duration_seconds, 86400L),
+  "artifact lock freezes authenticated owner metadata and lease schema"
+)
+live_lock_hash <- fastkpc_full_cuda_census_file_hash(lock_fixture$owner_file)
 assert_error(
   .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(
     lock_fixture_output
   ),
   "a second publisher or validator cannot acquire the artifact lock"
 )
-writeLines("foreign-owner", lock_fixture$owner_file, useBytes = TRUE)
+assert_identical(
+  fastkpc_full_cuda_census_file_hash(lock_fixture$owner_file),
+  live_lock_hash,
+  "a live lock attempt preserves owner metadata"
+)
+.fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock(lock_fixture)
+refreshed_lock_owner <- jsonlite::read_json(
+  lock_fixture$owner_file, simplifyVector = TRUE
+)
+assert_true(
+  identical(refreshed_lock_owner$owner_token, lock_owner$owner_token) &&
+    identical(refreshed_lock_owner$acquired_at_unix,
+              lock_owner$acquired_at_unix) &&
+    refreshed_lock_owner$refreshed_at_unix >= lock_owner$refreshed_at_unix,
+  "artifact lock refresh renews only the owned lease timestamp"
+)
 .fastkpc_full_cuda_phase3_release_oracle_artifact_lock(lock_fixture)
 assert_true(
-  dir.exists(lock_fixture_path),
-  "lock cleanup never removes a lock after ownership changes"
+  !dir.exists(lock_fixture_path),
+  "owned artifact lock release removes its quarantined lock"
 )
-unlink(lock_fixture_path, recursive = TRUE, force = TRUE)
+
+frozen_host <- "phase3-lock-test-host"
+frozen_foreign_host <- "phase3-lock-foreign-host"
+frozen_now <- 1700000000
+frozen_lease <- 86400L
+pid_live <- function(pid) identical(as.integer(pid), 4101L)
+lock_acquire <- function(
+    output_dir, host, pid, now, live = pid_live,
+    reclaim_hook = NULL) {
+  .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(
+    output_dir, .host = host, .pid = as.integer(pid), .now = now,
+    .lease_duration_seconds = frozen_lease, .pid_is_live = live,
+    .reclaim_hook = reclaim_hook
+  )
+}
+
+live_output <- tempfile("phase3-oracle-lock-live-")
+live_lock <- lock_acquire(
+  live_output, frozen_host, 4101L, frozen_now
+)
+live_owner_hash <- fastkpc_full_cuda_census_file_hash(live_lock$owner_file)
+assert_error(
+  lock_acquire(live_output, frozen_host, 4102L, frozen_now + 1),
+  "a frozen live local owner blocks lock acquisition"
+)
+assert_identical(
+  fastkpc_full_cuda_census_file_hash(live_lock$owner_file), live_owner_hash,
+  "blocked live local acquisition preserves the lock"
+)
+.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(live_lock)
+
+dead_output <- tempfile("phase3-oracle-lock-dead-")
+dead_lock <- lock_acquire(
+  dead_output, frozen_host, 4201L, frozen_now,
+  live = function(pid) FALSE
+)
+dead_token <- dead_lock$owner_token
+reclaimed_dead_lock <- lock_acquire(
+  dead_output, frozen_host, 4202L, frozen_now + 1,
+  live = function(pid) FALSE
+)
+assert_true(
+  !identical(reclaimed_dead_lock$owner_token, dead_token) &&
+    identical(
+      jsonlite::read_json(
+        reclaimed_dead_lock$owner_file, simplifyVector = TRUE
+      )$pid,
+      4202L
+    ),
+  "a provably dead local lock owner is reclaimed"
+)
+.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(reclaimed_dead_lock)
+
+foreign_output <- tempfile("phase3-oracle-lock-foreign-")
+foreign_lock <- lock_acquire(
+  foreign_output, frozen_foreign_host, 4301L, frozen_now,
+  live = function(pid) FALSE
+)
+foreign_hash <- fastkpc_full_cuda_census_file_hash(foreign_lock$owner_file)
+assert_error(
+  lock_acquire(
+    foreign_output, frozen_host, 4302L, frozen_now + frozen_lease,
+    live = function(pid) FALSE
+  ),
+  "a fresh foreign lock is preserved through its full lease"
+)
+assert_identical(
+  fastkpc_full_cuda_census_file_hash(foreign_lock$owner_file), foreign_hash,
+  "fresh foreign lock rejection preserves owner bytes"
+)
+reclaimed_foreign_lock <- lock_acquire(
+  foreign_output, frozen_host, 4302L,
+  frozen_now + frozen_lease + 1,
+  live = function(pid) FALSE
+)
+assert_true(
+  !identical(reclaimed_foreign_lock$owner_token, foreign_lock$owner_token),
+  "an expired foreign lock may be safely reclaimed"
+)
+.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(
+  reclaimed_foreign_lock
+)
+
+malformed_output <- tempfile("phase3-oracle-lock-malformed-")
+malformed_lock <- lock_acquire(
+  malformed_output, frozen_foreign_host, 4401L, frozen_now,
+  live = function(pid) FALSE
+)
+writeLines("malformed-owner", malformed_lock$owner_file, useBytes = TRUE)
+frozen_time <- as.POSIXct(frozen_now, origin = "1970-01-01", tz = "UTC")
+Sys.setFileTime(malformed_lock$owner_file, frozen_time)
+Sys.setFileTime(malformed_lock$lock_dir, frozen_time)
+malformed_hash <- fastkpc_full_cuda_census_file_hash(
+  malformed_lock$owner_file
+)
+assert_error(
+  lock_acquire(
+    malformed_output, frozen_host, 4402L, frozen_now + 1,
+    live = function(pid) FALSE
+  ),
+  "a malformed fresh lock fails closed"
+)
+assert_identical(
+  fastkpc_full_cuda_census_file_hash(malformed_lock$owner_file),
+  malformed_hash,
+  "malformed fresh lock rejection preserves owner bytes"
+)
+reclaimed_malformed_lock <- lock_acquire(
+  malformed_output, frozen_host, 4402L,
+  frozen_now + frozen_lease + 1,
+  live = function(pid) FALSE
+)
+assert_true(
+  identical(
+    jsonlite::read_json(
+      reclaimed_malformed_lock$owner_file, simplifyVector = TRUE
+    )$pid,
+    4402L
+  ),
+  "an expired malformed lock may be quarantined and reclaimed"
+)
+.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(
+  reclaimed_malformed_lock
+)
+
+changed_release_output <- tempfile("phase3-oracle-lock-release-race-")
+changed_release_lock <- lock_acquire(
+  changed_release_output, frozen_host, 4501L, frozen_now,
+  live = function(pid) FALSE
+)
+changed_release_token <- sha("changed-release-owner")
+changed_release_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_release_oracle_artifact_lock(
+    changed_release_lock,
+    .release_hook = function(owner_file) {
+      owner <- jsonlite::read_json(owner_file, simplifyVector = TRUE)
+      owner$owner_token <- changed_release_token
+      fastkpc_full_cuda_write_json(owner, owner_file)
+    }
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  is.null(changed_release_error) &&
+    dir.exists(changed_release_lock$lock_dir) &&
+    !dir.exists(file.path(changed_release_lock$lock_dir, ".transition")) &&
+    identical(
+      jsonlite::read_json(
+        changed_release_lock$owner_file, simplifyVector = TRUE
+      )$owner_token,
+      changed_release_token
+    ),
+  "release never removes a lock after an in-transition owner-token change"
+)
+unlink(changed_release_lock$lock_dir, recursive = TRUE, force = TRUE)
+
+changed_reclaim_output <- tempfile("phase3-oracle-lock-reclaim-race-")
+changed_reclaim_lock <- lock_acquire(
+  changed_reclaim_output, frozen_host, 4601L, frozen_now,
+  live = function(pid) FALSE
+)
+changed_reclaim_token <- sha("changed-reclaim-owner")
+assert_error(
+  lock_acquire(
+    changed_reclaim_output, frozen_host, 4602L, frozen_now + 1,
+    live = function(pid) FALSE,
+    reclaim_hook = function(owner_file) {
+      owner <- jsonlite::read_json(owner_file, simplifyVector = TRUE)
+      owner$owner_token <- changed_reclaim_token
+      fastkpc_full_cuda_write_json(owner, owner_file)
+    }
+  ),
+  "owner-token change during reclaim aborts acquisition"
+)
+assert_true(
+  dir.exists(changed_reclaim_lock$lock_dir) &&
+    !dir.exists(file.path(changed_reclaim_lock$lock_dir, ".transition")) &&
+    identical(
+      jsonlite::read_json(
+        changed_reclaim_lock$owner_file, simplifyVector = TRUE
+      )$owner_token,
+      changed_reclaim_token
+    ),
+  "reclaim never removes a lock after owner-token change"
+)
+unlink(changed_reclaim_lock$lock_dir, recursive = TRUE, force = TRUE)
+
+exactness_schema <- fastkpc_full_cuda_fixed_sp_qualification_dcov_schema()
+exactness_diagnostic <- list(
+  n = 351L, numCol = 35L, index = 1, lowrank_mode = "spectra",
+  lowrank_full_eig_count = 0L, lowrank_spectra_count = 2L,
+  lowrank_spectra_converged_count = 2L,
+  lowrank_spectra_failed_count = 0L,
+  lowrank_spectra_fallback_full_eig_count = 0L,
+  lowrank_spectra_iterations = 4L, lowrank_spectra_nconv = 70L,
+  lowrank_spectra_ncv = 71L, lowrank_spectra_tol = 1e-10,
+  lowrank_spectra_matvec_count = 0L
+)
+exactness_columns <- lapply(exactness_schema$names, function(field) {
+  switch(
+    exactness_schema$types[[field]],
+    character = "fixture", integer = 1L, double = 0,
+    logical = FALSE, list = I(list(character())),
+    fail("unsupported qualification exactness fixture type")
+  )
+})
+names(exactness_columns) <- exactness_schema$names
+exactness_columns$parity_scope <- "qualification"
+exactness_columns$residual_key_x <- sha("qualification-exactness-x")
+exactness_columns$residual_key_y <- sha("qualification-exactness-y")
+exactness_columns$reference_p_value <- 0.5
+exactness_columns$alpha <- 0.05
+exactness_columns$reference_decision <- "independent"
+exactness_columns$reference_independent <- TRUE
+exactness_columns$index <- 1L
+exactness_columns$numCol <- 35L
+exactness_columns$backend <- "cpp"
+exactness_columns$low_rank_backend <- "spectra"
+exactness_columns$p_value <- exactness_columns$reference_p_value
+exactness_columns$p_value_difference <- 0
+exactness_columns$absolute_p_value_difference <- 0
+exactness_columns$p_value_exact <- TRUE
+exactness_columns$signed_alpha_distance <-
+  exactness_columns$p_value - exactness_columns$alpha
+exactness_columns$decision <- "independent"
+exactness_columns$independent <- TRUE
+exactness_columns$decision_flip <- FALSE
+exactness_columns$backend_error <- FALSE
+exactness_columns$spectra_fallback <- FALSE
+exactness_columns$selection_reasons <- I(list(character()))
+exactness_columns$diagnostics <- I(list(exactness_diagnostic))
+exactness_records <- structure(
+  exactness_columns, class = "data.frame", row.names = 1L
+)
+exactness_logical <- exactness_records[exactness_schema$logical_names]
+exactness_target_keys <- sort(c(
+  exactness_records$residual_key_x, exactness_records$residual_key_y
+), method = "radix")
+exactness_summary <-
+  fastkpc_full_cuda_fixed_sp_summarize_qualification_dcov_records(
+    exactness_records, exactness_logical, exactness_target_keys
+  )
+assert_identical(
+  exactness_summary$qualification_dcov_logical_test_count, 1L,
+  "valid production qualification exactness row summarizes"
+)
+forged_exactness_records <- exactness_records
+forged_exactness_records$p_value_exact[[1L]] <- FALSE
+assert_error(
+  fastkpc_full_cuda_fixed_sp_summarize_qualification_dcov_records(
+    forged_exactness_records, exactness_logical, exactness_target_keys
+  ),
+  "qualification summary rejects a forged p_value_exact flag"
+)
 
 frame <- function(name, row_count) {
   schema <- fastkpc_full_cuda_fixed_sp_oracle_row_schemas()[[name]]
@@ -727,11 +1013,27 @@ immutable_hash_reader <- get0(
 assert_true(!is.null(immutable_hash_reader),
             "oracle validator exposes immutable file rehashing")
 immutable_hash_read_count <- 0L
+lock_refresh <- .fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock
+validation_lock_boundaries <- character()
 assign(
   ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
   function(...) {
     immutable_hash_read_count <<- immutable_hash_read_count + 1L
     immutable_hash_reader(...)
+  },
+  envir = .GlobalEnv
+)
+assign(
+  ".fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock",
+  function(lock, ...) {
+    arguments <- list(...)
+    boundary <- arguments$.boundary
+    arguments$.boundary <- NULL
+    if (!is.null(boundary)) {
+      validation_lock_boundaries <<-
+        c(validation_lock_boundaries, boundary)
+    }
+    do.call(lock_refresh, c(list(lock = lock), arguments))
   },
   envir = .GlobalEnv
 )
@@ -742,9 +1044,23 @@ assign(
   ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
   immutable_hash_reader, envir = .GlobalEnv
 )
+assign(
+  ".fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock",
+  lock_refresh, envir = .GlobalEnv
+)
 assert_identical(
   immutable_hash_read_count, 2L,
   "semantic validator rehashes immutable files before locked return"
+)
+assert_true(
+  all(c(
+    "validation_start", "validation_payload_hashes",
+    "validation_shards_authenticated", "validation_complete"
+  ) %in% validation_lock_boundaries),
+  paste0(
+    "semantic validator refreshes the artifact lease at long boundaries; ",
+    "actual=", paste(validation_lock_boundaries, collapse = ",")
+  )
 )
 assert_identical(
   validated$manifest$executed_native_library_sha256, binary_a,
@@ -926,6 +1242,21 @@ assert_true(
 )
 
 unlink(paths$summary_json, force = TRUE)
+publication_lock_boundaries <- character()
+assign(
+  ".fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock",
+  function(lock, ...) {
+    arguments <- list(...)
+    boundary <- arguments$.boundary
+    arguments$.boundary <- NULL
+    if (!is.null(boundary)) {
+      publication_lock_boundaries <<-
+        c(publication_lock_boundaries, boundary)
+    }
+    do.call(lock_refresh, c(list(lock = lock), arguments))
+  },
+  envir = .GlobalEnv
+)
 partial <- publish(
   output_dir = output_dir, setup_keys = setup_keys,
   target_rows = target_rows, identity = identity,
@@ -933,48 +1264,137 @@ partial <- publish(
   risk_rows = risk_rows, qualification_dcov = qualification_dcov,
   command_lines = "Rscript fastkpc/tests/test_full_cuda_ci_fixed_sp_oracle_artifact.R"
 )
+assign(
+  ".fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock",
+  lock_refresh, envir = .GlobalEnv
+)
 assert_identical(partial$status, "published",
                  "partial completion marker is republished gracefully")
 assert_true(file.exists(paths$manifest_json) && file.exists(paths$summary_json),
             "partial resume restores both completion markers")
-
-shard_session_paths <- c(
-  list.files(paths$shards_dir, full.names = TRUE),
-  list.files(paths$sessions_dir, full.names = TRUE)
+assert_true(
+  all(c(
+    "publication_before_merge", "publication_after_merge",
+    "publication_payloads_published", "publication_markers_published"
+  ) %in% publication_lock_boundaries),
+  paste0(
+    "publisher refreshes the artifact lease at merge/publication boundaries; ",
+    "actual=", paste(publication_lock_boundaries, collapse = ",")
+  )
 )
-shard_session_hashes <- vapply(
-  shard_session_paths, fastkpc_full_cuda_census_file_hash, character(1L)
+
+clone_completed_artifact <- function(label) {
+  parent <- tempfile(paste0("phase3-oracle-", label, "-"))
+  dir.create(parent, recursive = TRUE, showWarnings = FALSE)
+  assert_true(
+    file.copy(output_dir, parent, recursive = TRUE),
+    paste(label, "completed artifact fixture copy succeeds")
+  )
+  file.path(parent, basename(output_dir))
+}
+snapshot_artifact_files <- function(root) {
+  files <- sort(list.files(
+    root, all.files = TRUE, no.. = TRUE, recursive = TRUE,
+    full.names = TRUE, include.dirs = FALSE
+  ), method = "radix")
+  hashes <- vapply(
+    files, fastkpc_full_cuda_census_file_hash, character(1L)
+  )
+  names(hashes) <- substring(files, nchar(root) + 2L)
+  hashes
+}
+incompatible_identity <- identity
+incompatible_identity$gpu_uuid <- paste0("GPU-", strrep("f", 32L))
+incompatible_identity <- refresh_hash(incompatible_identity)
+incompatible_invocations <- list(
+  scope = list(scope = "qualification"),
+  identity = list(identity = incompatible_identity),
+  catalog = list(catalog = list(malformed = TRUE), device_id = 0L),
+  device = list(device_id = 0L)
+)
+incompatible_results <- lapply(
+  names(incompatible_invocations),
+  function(label) {
+    root <- clone_completed_artifact(label)
+    on.exit(unlink(dirname(root), recursive = TRUE, force = TRUE), add = TRUE)
+    before <- snapshot_artifact_files(root)
+    arguments <- list(
+      output_dir = root, setup_keys = setup_keys,
+      target_rows = target_rows, identity = identity,
+      route_config = route_config, scope = "iteration", shard_count = 4L,
+      risk_rows = risk_rows, qualification_dcov = qualification_dcov,
+      command_lines = paste("incompatible", label)
+    )
+    arguments[names(incompatible_invocations[[label]])] <-
+      incompatible_invocations[[label]]
+    error <- tryCatch({
+      do.call(publish, arguments)
+      NULL
+    }, error = function(error) error)
+    after <- snapshot_artifact_files(root)
+    c(
+      rejected = inherits(error, "error"),
+      unchanged = identical(after, before)
+    )
+  }
+)
+names(incompatible_results) <- names(incompatible_invocations)
+incompatible_matrix <- do.call(rbind, incompatible_results)
+assert_true(
+  all(incompatible_matrix[, "rejected"]) &&
+    all(incompatible_matrix[, "unchanged"]),
+  paste0(
+    "incompatible completed-artifact invocation is rejected without byte ",
+    "mutation; rejected=",
+    paste(incompatible_matrix[, "rejected"], collapse = ","),
+    "; unchanged=",
+    paste(incompatible_matrix[, "unchanged"], collapse = ",")
+  )
+)
+
+corrupt_marker_root <- clone_completed_artifact("corrupt-markers")
+on.exit(
+  unlink(dirname(corrupt_marker_root), recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+corrupt_marker_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  corrupt_marker_root, "oracle_sp"
 )
 corrupt_manifest <- jsonlite::read_json(
-  paths$manifest_json, simplifyVector = FALSE
+  corrupt_marker_paths$manifest_json, simplifyVector = FALSE
 )
 corrupt_manifest$oracle_semantics_version <- "legacy-forged-semantics"
-fastkpc_full_cuda_write_json(corrupt_manifest, paths$manifest_json)
+fastkpc_full_cuda_write_json(
+  corrupt_manifest, corrupt_marker_paths$manifest_json
+)
 corrupt_summary <- jsonlite::read_json(
-  paths$summary_json, simplifyVector = FALSE
+  corrupt_marker_paths$summary_json, simplifyVector = FALSE
 )
 corrupt_summary$manifest_sha256 <-
-  fastkpc_full_cuda_census_file_hash(paths$manifest_json)
-fastkpc_full_cuda_write_json(corrupt_summary, paths$summary_json)
+  fastkpc_full_cuda_census_file_hash(corrupt_marker_paths$manifest_json)
+fastkpc_full_cuda_write_json(
+  corrupt_summary, corrupt_marker_paths$summary_json
+)
+corrupt_marker_hashes <- snapshot_artifact_files(corrupt_marker_root)
 assert_error(
   fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
-    output_dir, expected_identity = identity, require_full = FALSE
+    corrupt_marker_root, expected_identity = identity, require_full = FALSE
   ),
   "public validator rejects a corrupt pair of completion markers"
 )
-recovered <- publish(
-  output_dir = output_dir, setup_keys = setup_keys,
-  target_rows = target_rows, identity = identity,
-  route_config = route_config, scope = "iteration", shard_count = 4L,
-  risk_rows = risk_rows, qualification_dcov = qualification_dcov,
-  command_lines = "Rscript fastkpc/tests/test_full_cuda_ci_fixed_sp_oracle_artifact.R"
+assert_error(
+  publish(
+    output_dir = corrupt_marker_root, setup_keys = setup_keys,
+    target_rows = target_rows, identity = identity,
+    route_config = route_config, scope = "iteration", shard_count = 4L,
+    risk_rows = risk_rows, qualification_dcov = qualification_dcov,
+    command_lines = "corrupt complete markers"
+  ),
+  "publisher fails closed on corrupt complete markers"
 )
-assert_identical(recovered$status, "published",
-                 "corrupt completion markers are republished")
 assert_identical(
-  vapply(shard_session_paths, fastkpc_full_cuda_census_file_hash, character(1L)),
-  shard_session_hashes,
-  "corrupt-marker recovery retains authenticated shard/session pairs"
+  snapshot_artifact_files(corrupt_marker_root), corrupt_marker_hashes,
+  "corrupt complete marker failure preserves every existing byte"
 )
 
 unlink(paths$summary_json, force = TRUE)
