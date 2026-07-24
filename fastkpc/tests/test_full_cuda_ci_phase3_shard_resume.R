@@ -399,15 +399,25 @@ on.exit(unlink(interrupt_dir, recursive = TRUE, force = TRUE), add = TRUE)
 interrupt_lifecycle <- new.env(parent = emptyenv())
 interrupt_lifecycle$create_count <- 0L
 interrupt_lifecycle$destroy_count <- 0L
-interrupt_lifecycle$runner_lock_held_during_destroy <- FALSE
+interrupt_lifecycle$runner_unlock_started <- FALSE
+interrupt_lifecycle$runner_unlock_started_during_destroy <- NA
+interrupt_release_runner_lock <-
+  .fastkpc_full_cuda_phase3_release_shard_runner_lock
+assign(
+  ".fastkpc_full_cuda_phase3_release_shard_runner_lock",
+  function(lock) {
+    interrupt_lifecycle$runner_unlock_started <- TRUE
+    interrupt_release_runner_lock(lock)
+  },
+  envir = .GlobalEnv
+)
 interrupt_runtime_create <- function() {
   interrupt_lifecycle$create_count <- interrupt_lifecycle$create_count + 1L
   new.env(parent = emptyenv())
 }
 interrupt_runtime_destroy <- function(context) {
-  interrupt_lifecycle$runner_lock_held_during_destroy <- dir.exists(
-    .fastkpc_full_cuda_phase3_shard_runner_lock_path(interrupt_dir)
-  )
+  interrupt_lifecycle$runner_unlock_started_during_destroy <-
+    interrupt_lifecycle$runner_unlock_started
   interrupt_lifecycle$destroy_count <- interrupt_lifecycle$destroy_count + 1L
   invisible(NULL)
 }
@@ -442,15 +452,24 @@ interrupt_condition <- tryCatch(
   ),
   interrupt = function(condition) condition
 )
+assign(
+  ".fastkpc_full_cuda_phase3_release_shard_runner_lock",
+  interrupt_release_runner_lock,
+  envir = .GlobalEnv
+)
 assert_true(
   inherits(interrupt_condition, "interrupt") &&
     interrupt_lifecycle$create_count == 1L &&
     interrupt_lifecycle$destroy_count == 1L &&
-    isTRUE(interrupt_lifecycle$runner_lock_held_during_destroy) &&
-    !dir.exists(.fastkpc_full_cuda_phase3_shard_runner_lock_path(
+    identical(
+      interrupt_lifecycle$runner_unlock_started_during_destroy, FALSE
+    ) && isTRUE(interrupt_lifecycle$runner_unlock_started) &&
+    file.exists(.fastkpc_full_cuda_phase3_shard_runner_lock_path(
+      interrupt_dir
+    )) && !dir.exists(.fastkpc_full_cuda_phase3_shard_runner_lock_path(
       interrupt_dir
     )),
-  "runtime context is destroyed exactly once on interrupt"
+  "runtime context is destroyed before runner unlock on interrupt"
 )
 
 single_setup <- unname(setup_keys[[1L]])
@@ -741,10 +760,57 @@ runner_live_dir <- clone_fixture("runner-live")
 runner_lock_path <- .fastkpc_full_cuda_phase3_shard_runner_lock_path(
   runner_live_dir
 )
-runner_live_lock <- .fastkpc_full_cuda_phase3_acquire_shard_runner_lock(
-  runner_live_dir
+runner_lock_inode <- function(path) {
+  output <- system2(
+    "stat", c("-c", "%i", path), stdout = TRUE, stderr = TRUE
+  )
+  assert_true(is.null(attr(output, "status")) && length(output) == 1L,
+              "runner lock inode is readable")
+  output[[1L]]
+}
+runner_ready_path <- tempfile("phase3-runner-child-ready-")
+runner_release_path <- tempfile("phase3-runner-child-release-")
+runner_job <- parallel::mcparallel({
+  lock <- .fastkpc_full_cuda_phase3_acquire_shard_runner_lock(
+    runner_live_dir
+  )
+  writeLines(as.character(Sys.getpid()), runner_ready_path, useBytes = TRUE)
+  while (!file.exists(runner_release_path)) Sys.sleep(0.01)
+  .fastkpc_full_cuda_phase3_release_shard_runner_lock(lock)
+  TRUE
+}, silent = TRUE)
+runner_child_open <- TRUE
+on.exit({
+  if (isTRUE(runner_child_open)) {
+    try(tools::pskill(runner_job$pid, 9L), silent = TRUE)
+    try(suppressWarnings(parallel::mccollect(runner_job)), silent = TRUE)
+  }
+  unlink(c(runner_ready_path, runner_release_path), force = TRUE)
+}, add = TRUE)
+runner_deadline <- proc.time()[["elapsed"]] + 10
+while (!file.exists(runner_ready_path) &&
+       proc.time()[["elapsed"]] < runner_deadline) {
+  runner_completed <- parallel::mccollect(runner_job, wait = FALSE)
+  if (!is.null(runner_completed)) {
+    fail("runner lock child exited before signaling readiness")
+  }
+  Sys.sleep(0.01)
+}
+assert_true(file.exists(runner_ready_path),
+            "runner child signals lock readiness")
+runner_child_pid <- as.integer(readLines(
+  runner_ready_path, warn = FALSE
+)[[1L]])
+assert_true(
+  runner_child_pid == runner_job$pid &&
+    runner_child_pid != Sys.getpid(),
+  "runner lock is held by an independent child process"
 )
 runner_live_hashes <- fixture_hashes(runner_live_dir)
+runner_inode_before <- runner_lock_inode(runner_lock_path)
+runner_lock_hash_before <- fastkpc_full_cuda_census_file_hash(
+  runner_lock_path
+)
 assert_error(
   run_fixture(runner_live_dir),
   "a live runner lock blocks a second shard invocation",
@@ -755,60 +821,33 @@ assert_identical(
   "blocked runner invocation preserves every shard/session byte"
 )
 assert_true(
-  dir.exists(runner_lock_path),
-  "blocked runner invocation preserves the live lock"
+  identical(runner_lock_inode(runner_lock_path), runner_inode_before) &&
+    identical(
+      fastkpc_full_cuda_census_file_hash(
+        runner_lock_path
+      ),
+      runner_lock_hash_before
+    ),
+  "blocked runner invocation preserves live lock inode and evidence"
 )
-.fastkpc_full_cuda_phase3_release_shard_runner_lock(runner_live_lock)
+writeLines("release", runner_release_path, useBytes = TRUE)
+runner_child_result <- suppressWarnings(parallel::mccollect(runner_job))
+runner_child_open <- FALSE
+unlink(c(runner_ready_path, runner_release_path), force = TRUE)
 assert_true(
-  !dir.exists(runner_lock_path),
-  "owned live runner lock is released"
+  identical(unname(runner_child_result), list(TRUE)) &&
+    file.exists(runner_lock_path) && !dir.exists(runner_lock_path) &&
+    identical(runner_lock_inode(runner_lock_path), runner_inode_before),
+  "child unlock preserves the persistent runner lock file and inode"
 )
-
-runner_dead_dir <- clone_fixture("runner-dead")
-runner_dead_path <- .fastkpc_full_cuda_phase3_shard_runner_lock_path(
-  runner_dead_dir
-)
-runner_dead_lock <- .fastkpc_full_cuda_phase3_acquire_shard_runner_lock(
-  runner_dead_dir,
-  .host = .fastkpc_full_cuda_phase3_lock_host(),
-  .pid = 2147483647L, .now = floor(as.double(Sys.time())),
-  .pid_is_live = function(pid) FALSE
-)
-runner_refresh <- .fastkpc_full_cuda_phase3_refresh_shard_runner_lock
-runner_refresh_boundaries <- character()
-assign(
-  ".fastkpc_full_cuda_phase3_refresh_shard_runner_lock",
-  function(lock, ...) {
-    arguments <- list(...)
-    boundary <- arguments$.boundary
-    arguments$.boundary <- NULL
-    if (!is.null(boundary)) {
-      runner_refresh_boundaries <<- c(runner_refresh_boundaries, boundary)
-    }
-    do.call(runner_refresh, c(list(lock = lock), arguments))
-  },
-  envir = .GlobalEnv
-)
-runner_dead_resume <- run_fixture(runner_dead_dir)
-assign(
-  ".fastkpc_full_cuda_phase3_refresh_shard_runner_lock",
-  runner_refresh, envir = .GlobalEnv
-)
+runner_unlocked_resume <- run_fixture(runner_live_dir)
 assert_true(
-  identical(runner_dead_resume$result$reused_shard_ids,
+  identical(runner_unlocked_resume$result$reused_shard_ids,
             as.integer(0:3)) &&
-    runner_dead_resume$lifecycle$create_count == 0L &&
-    !dir.exists(runner_dead_path),
-  "a dead local runner owner is reclaimed and pure resume releases the lock"
-)
-assert_true(
-  all(c(
-    "runner_start", "runner_scan_complete", "runner_complete"
-  ) %in% runner_refresh_boundaries),
-  paste0(
-    "runner refreshes its lease across a pure-resume scan; actual=",
-    paste(runner_refresh_boundaries, collapse = ",")
-  )
+    runner_unlocked_resume$lifecycle$create_count == 0L &&
+    file.exists(runner_lock_path) && !dir.exists(runner_lock_path) &&
+    identical(runner_lock_inode(runner_lock_path), runner_inode_before),
+  "pure resume unlocks without deleting or replacing the runner lock file"
 )
 runner_error_dir <- clone_fixture("runner-error-release")
 runner_error_route <- route_fixture("runner-error", shard_count = 4L)
@@ -821,10 +860,12 @@ assert_error(
   "runner releases its lock when shard validation fails"
 )
 assert_true(
-  !dir.exists(.fastkpc_full_cuda_phase3_shard_runner_lock_path(
+  file.exists(.fastkpc_full_cuda_phase3_shard_runner_lock_path(
+    runner_error_dir
+  )) && !dir.exists(.fastkpc_full_cuda_phase3_shard_runner_lock_path(
     runner_error_dir
   )),
-  "runner lock is absent after an error"
+  "runner error unlocks without deleting its persistent lock file"
 )
 
 route_dir <- clone_fixture("route")
@@ -944,8 +985,36 @@ running_session <- read_json(running_session_path)
 running_session$status <- "running"
 write_json(running_session, running_session_path)
 running_session_hashes <- fixture_hashes(running_session_dir)
-running_session_lock <-
-  .fastkpc_full_cuda_phase3_acquire_shard_runner_lock(running_session_dir)
+running_ready_path <- tempfile("phase3-running-session-ready-")
+running_release_path <- tempfile("phase3-running-session-release-")
+running_lock_job <- parallel::mcparallel({
+  lock <- .fastkpc_full_cuda_phase3_acquire_shard_runner_lock(
+    running_session_dir
+  )
+  writeLines(as.character(Sys.getpid()), running_ready_path, useBytes = TRUE)
+  while (!file.exists(running_release_path)) Sys.sleep(0.01)
+  .fastkpc_full_cuda_phase3_release_shard_runner_lock(lock)
+  TRUE
+}, silent = TRUE)
+running_child_open <- TRUE
+on.exit({
+  if (isTRUE(running_child_open)) {
+    try(tools::pskill(running_lock_job$pid, 9L), silent = TRUE)
+    try(suppressWarnings(parallel::mccollect(running_lock_job)), silent = TRUE)
+  }
+  unlink(c(running_ready_path, running_release_path), force = TRUE)
+}, add = TRUE)
+running_deadline <- proc.time()[["elapsed"]] + 10
+while (!file.exists(running_ready_path) &&
+       proc.time()[["elapsed"]] < running_deadline) {
+  running_completed <- parallel::mccollect(running_lock_job, wait = FALSE)
+  if (!is.null(running_completed)) {
+    fail("interrupted-session lock child exited before readiness")
+  }
+  Sys.sleep(0.01)
+}
+assert_true(file.exists(running_ready_path),
+            "interrupted-session lock child signals readiness")
 assert_error(
   run_fixture(running_session_dir),
   "live runner ownership blocks interrupted-session recomputation",
@@ -955,7 +1024,16 @@ assert_identical(
   fixture_hashes(running_session_dir), running_session_hashes,
   "blocked interrupted-session resume preserves shard/session bytes"
 )
-.fastkpc_full_cuda_phase3_release_shard_runner_lock(running_session_lock)
+writeLines("release", running_release_path, useBytes = TRUE)
+running_child_result <- suppressWarnings(parallel::mccollect(
+  running_lock_job
+))
+running_child_open <- FALSE
+unlink(c(running_ready_path, running_release_path), force = TRUE)
+assert_true(
+  identical(unname(running_child_result), list(TRUE)),
+  "interrupted-session lock child releases normally"
+)
 running_session_run <- run_fixture(running_session_dir)
 assert_true(
   identical(running_session_run$result$reused_shard_ids,
@@ -965,10 +1043,15 @@ assert_true(
   "shards from a running session are recomputed"
 )
 assert_true(
-  !dir.exists(.fastkpc_full_cuda_phase3_shard_runner_lock_path(
+  file.exists(.fastkpc_full_cuda_phase3_shard_runner_lock_path(
+    running_session_dir
+  )) && !dir.exists(.fastkpc_full_cuda_phase3_shard_runner_lock_path(
     running_session_dir
   )),
-  "interrupted-session recomputation releases the exclusive runner lock"
+  paste0(
+    "interrupted-session recomputation unlocks without deleting the ",
+    "persistent runner lock file"
+  )
 )
 
 wrong_counters_dir <- clone_fixture("wrong-counters")

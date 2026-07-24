@@ -144,244 +144,149 @@ assert_true(
   "oracle row authority uses mapped linear group reductions"
 )
 
-lock_fixture_output <- tempfile("phase3-oracle-lock-fixture-")
-lock_fixture_path <- .fastkpc_full_cuda_phase3_oracle_artifact_lock_path(
-  lock_fixture_output
-)
-lock_fixture <- .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(
-  lock_fixture_output
-)
-lock_owner_fields <- c(
-  "schema_version", "purpose", "owner_token", "host", "pid",
-  "acquired_at_unix", "refreshed_at_unix", "lease_duration_seconds"
-)
-lock_owner <- tryCatch(
-  jsonlite::read_json(lock_fixture$owner_file, simplifyVector = TRUE),
-  error = function(error) NULL
-)
-assert_true(
-  is.list(lock_owner) && identical(names(lock_owner), lock_owner_fields) &&
-    identical(lock_owner$schema_version,
-              "full-cuda-ci-phase3-lock-owner-v1") &&
-    identical(lock_owner$purpose, "oracle_artifact") &&
-    identical(lock_owner$owner_token, lock_fixture$owner_token) &&
-    identical(lock_owner$lease_duration_seconds, 86400L),
-  "artifact lock freezes authenticated owner metadata and lease schema"
-)
-live_lock_hash <- fastkpc_full_cuda_census_file_hash(lock_fixture$owner_file)
-assert_error(
-  .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(
-    lock_fixture_output
+assert_true(.Platform$OS.type == "unix",
+            "Phase 3 advisory-lock process tests require Unix fork")
+lock_inode <- function(path) {
+  output <- system2(
+    "stat", c("-c", "%i", path), stdout = TRUE, stderr = TRUE
+  )
+  assert_true(is.null(attr(output, "status")) && length(output) == 1L,
+              "lock inode is readable")
+  output[[1L]]
+}
+lock_evidence_hash <- function(path) {
+  fastkpc_full_cuda_census_file_hash(path)
+}
+lock_children <- new.env(parent = emptyenv())
+on.exit({
+  for (name in ls(lock_children, all.names = TRUE)) {
+    child <- lock_children[[name]]
+    try(tools::pskill(child$job$pid, 9L), silent = TRUE)
+    try(suppressWarnings(parallel::mccollect(child$job)), silent = TRUE)
+    unlink(c(child$ready_path, child$release_path), force = TRUE)
+  }
+}, add = TRUE)
+start_lock_child <- function(lock_case, output_dir) {
+  ready_path <- tempfile("phase3-lock-child-ready-")
+  release_path <- tempfile("phase3-lock-child-release-")
+  job <- parallel::mcparallel({
+    lock <- lock_case$acquire(output_dir)
+    writeLines(as.character(Sys.getpid()), ready_path, useBytes = TRUE)
+    while (!file.exists(release_path)) Sys.sleep(0.01)
+    lock_case$release(lock)
+    TRUE
+  }, silent = TRUE)
+  child <- list(
+    job = job, ready_path = ready_path, release_path = release_path
+  )
+  lock_children[[as.character(job$pid)]] <- child
+  deadline <- proc.time()[["elapsed"]] + 10
+  while (!file.exists(ready_path) &&
+         proc.time()[["elapsed"]] < deadline) {
+    completed <- parallel::mccollect(job, wait = FALSE)
+    if (!is.null(completed)) {
+      fail("lock child exited before signaling readiness")
+    }
+    Sys.sleep(0.01)
+  }
+  assert_true(file.exists(ready_path), "lock child signals readiness")
+  child$pid <- as.integer(readLines(ready_path, warn = FALSE)[[1L]])
+  assert_true(
+    child$pid == job$pid && child$pid != Sys.getpid(),
+    "lock owner is an independent child process"
+  )
+  child
+}
+finish_lock_child <- function(child, crash = FALSE) {
+  if (isTRUE(crash)) {
+    tools::pskill(child$job$pid, 9L)
+  } else {
+    writeLines("release", child$release_path, useBytes = TRUE)
+  }
+  result <- suppressWarnings(parallel::mccollect(child$job))
+  rm(list = as.character(child$job$pid), envir = lock_children)
+  unlink(c(child$ready_path, child$release_path), force = TRUE)
+  if (!isTRUE(crash)) {
+    assert_true(identical(unname(result), list(TRUE)),
+                "lock child releases normally")
+  }
+  invisible(result)
+}
+lock_cases <- list(
+  artifact = list(
+    path = .fastkpc_full_cuda_phase3_oracle_artifact_lock_path,
+    acquire = .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock,
+    owns = .fastkpc_full_cuda_phase3_owns_oracle_artifact_lock,
+    release = .fastkpc_full_cuda_phase3_release_oracle_artifact_lock
   ),
-  "a second publisher or validator cannot acquire the artifact lock"
+  runner = list(
+    path = .fastkpc_full_cuda_phase3_shard_runner_lock_path,
+    acquire = .fastkpc_full_cuda_phase3_acquire_shard_runner_lock,
+    owns = function(lock) {
+      .fastkpc_full_cuda_phase3_owns_lock(lock, "shard_runner")
+    },
+    release = .fastkpc_full_cuda_phase3_release_shard_runner_lock
+  )
 )
-assert_identical(
-  fastkpc_full_cuda_census_file_hash(lock_fixture$owner_file),
-  live_lock_hash,
-  "a live lock attempt preserves owner metadata"
-)
-.fastkpc_full_cuda_phase3_refresh_oracle_artifact_lock(lock_fixture)
-refreshed_lock_owner <- jsonlite::read_json(
-  lock_fixture$owner_file, simplifyVector = TRUE
-)
-assert_true(
-  identical(refreshed_lock_owner$owner_token, lock_owner$owner_token) &&
-    identical(refreshed_lock_owner$acquired_at_unix,
-              lock_owner$acquired_at_unix) &&
-    refreshed_lock_owner$refreshed_at_unix >= lock_owner$refreshed_at_unix,
-  "artifact lock refresh renews only the owned lease timestamp"
-)
-.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(lock_fixture)
-assert_true(
-  !dir.exists(lock_fixture_path),
-  "owned artifact lock release removes its quarantined lock"
-)
-
-frozen_host <- "phase3-lock-test-host"
-frozen_foreign_host <- "phase3-lock-foreign-host"
-frozen_now <- 1700000000
-frozen_lease <- 86400L
-pid_live <- function(pid) identical(as.integer(pid), 4101L)
-lock_acquire <- function(
-    output_dir, host, pid, now, live = pid_live,
-    reclaim_hook = NULL) {
-  .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(
-    output_dir, .host = host, .pid = as.integer(pid), .now = now,
-    .lease_duration_seconds = frozen_lease, .pid_is_live = live,
-    .reclaim_hook = reclaim_hook
+for (purpose in names(lock_cases)) {
+  lock_case <- lock_cases[[purpose]]
+  lock_output <- tempfile(paste0("phase3-", purpose, "-os-lock-"))
+  lock_path <- lock_case$path(lock_output)
+  child <- start_lock_child(lock_case, lock_output)
+  inode_before <- lock_inode(lock_path)
+  evidence_before <- lock_evidence_hash(lock_path)
+  assert_error(
+    lock_case$acquire(lock_output),
+    paste("live child excludes parent", purpose, "lock")
+  )
+  assert_true(
+    identical(lock_inode(lock_path), inode_before) &&
+      identical(lock_evidence_hash(lock_path), evidence_before),
+    paste("failed parent acquisition preserves", purpose, "lock evidence")
+  )
+  finish_lock_child(child, crash = TRUE)
+  recovered <- lock_case$acquire(lock_output)
+  on.exit(try(lock_case$release(recovered), silent = TRUE), add = TRUE)
+  invisible(gc())
+  assert_true(
+    file.exists(lock_path) && !dir.exists(lock_path) &&
+      identical(lock_inode(lock_path), inode_before) &&
+      isTRUE(lock_case$owns(recovered)),
+    paste(
+      purpose,
+      "lock is immediately recovered after SIGKILL without inode replacement"
+    )
+  )
+  lock_case$release(recovered)
+  lock_case$release(recovered)
+  assert_true(
+    file.exists(lock_path) && !dir.exists(lock_path) &&
+      identical(lock_inode(lock_path), inode_before) &&
+      !isTRUE(lock_case$owns(recovered)),
+    paste(purpose, "lock release is idempotent and keeps its inode")
   )
 }
 
-live_output <- tempfile("phase3-oracle-lock-live-")
-live_lock <- lock_acquire(
-  live_output, frozen_host, 4101L, frozen_now
-)
-live_owner_hash <- fastkpc_full_cuda_census_file_hash(live_lock$owner_file)
-assert_error(
-  lock_acquire(live_output, frozen_host, 4102L, frozen_now + 1),
-  "a frozen live local owner blocks lock acquisition"
-)
-assert_identical(
-  fastkpc_full_cuda_census_file_hash(live_lock$owner_file), live_owner_hash,
-  "blocked live local acquisition preserves the lock"
-)
-.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(live_lock)
-
-dead_output <- tempfile("phase3-oracle-lock-dead-")
-dead_lock <- lock_acquire(
-  dead_output, frozen_host, 4201L, frozen_now,
-  live = function(pid) FALSE
-)
-dead_token <- dead_lock$owner_token
-reclaimed_dead_lock <- lock_acquire(
-  dead_output, frozen_host, 4202L, frozen_now + 1,
-  live = function(pid) FALSE
-)
-assert_true(
-  !identical(reclaimed_dead_lock$owner_token, dead_token) &&
-    identical(
-      jsonlite::read_json(
-        reclaimed_dead_lock$owner_file, simplifyVector = TRUE
-      )$pid,
-      4202L
-    ),
-  "a provably dead local lock owner is reclaimed"
-)
-.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(reclaimed_dead_lock)
-
-foreign_output <- tempfile("phase3-oracle-lock-foreign-")
-foreign_lock <- lock_acquire(
-  foreign_output, frozen_foreign_host, 4301L, frozen_now,
-  live = function(pid) FALSE
-)
-foreign_hash <- fastkpc_full_cuda_census_file_hash(foreign_lock$owner_file)
-assert_error(
-  lock_acquire(
-    foreign_output, frozen_host, 4302L, frozen_now + frozen_lease,
-    live = function(pid) FALSE
-  ),
-  "a fresh foreign lock is preserved through its full lease"
-)
-assert_identical(
-  fastkpc_full_cuda_census_file_hash(foreign_lock$owner_file), foreign_hash,
-  "fresh foreign lock rejection preserves owner bytes"
-)
-reclaimed_foreign_lock <- lock_acquire(
-  foreign_output, frozen_host, 4302L,
-  frozen_now + frozen_lease + 1,
-  live = function(pid) FALSE
-)
-assert_true(
-  !identical(reclaimed_foreign_lock$owner_token, foreign_lock$owner_token),
-  "an expired foreign lock may be safely reclaimed"
-)
-.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(
-  reclaimed_foreign_lock
-)
-
-malformed_output <- tempfile("phase3-oracle-lock-malformed-")
-malformed_lock <- lock_acquire(
-  malformed_output, frozen_foreign_host, 4401L, frozen_now,
-  live = function(pid) FALSE
-)
-writeLines("malformed-owner", malformed_lock$owner_file, useBytes = TRUE)
-frozen_time <- as.POSIXct(frozen_now, origin = "1970-01-01", tz = "UTC")
-Sys.setFileTime(malformed_lock$owner_file, frozen_time)
-Sys.setFileTime(malformed_lock$lock_dir, frozen_time)
-malformed_hash <- fastkpc_full_cuda_census_file_hash(
-  malformed_lock$owner_file
-)
-assert_error(
-  lock_acquire(
-    malformed_output, frozen_host, 4402L, frozen_now + 1,
-    live = function(pid) FALSE
-  ),
-  "a malformed fresh lock fails closed"
-)
-assert_identical(
-  fastkpc_full_cuda_census_file_hash(malformed_lock$owner_file),
-  malformed_hash,
-  "malformed fresh lock rejection preserves owner bytes"
-)
-reclaimed_malformed_lock <- lock_acquire(
-  malformed_output, frozen_host, 4402L,
-  frozen_now + frozen_lease + 1,
-  live = function(pid) FALSE
-)
-assert_true(
-  identical(
-    jsonlite::read_json(
-      reclaimed_malformed_lock$owner_file, simplifyVector = TRUE
-    )$pid,
-    4402L
-  ),
-  "an expired malformed lock may be quarantined and reclaimed"
-)
-.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(
-  reclaimed_malformed_lock
-)
-
-changed_release_output <- tempfile("phase3-oracle-lock-release-race-")
-changed_release_lock <- lock_acquire(
-  changed_release_output, frozen_host, 4501L, frozen_now,
-  live = function(pid) FALSE
-)
-changed_release_token <- sha("changed-release-owner")
-changed_release_error <- tryCatch({
-  .fastkpc_full_cuda_phase3_release_oracle_artifact_lock(
-    changed_release_lock,
-    .release_hook = function(owner_file) {
-      owner <- jsonlite::read_json(owner_file, simplifyVector = TRUE)
-      owner$owner_token <- changed_release_token
-      fastkpc_full_cuda_write_json(owner, owner_file)
-    }
+unavailable_namespace <- function(package, quietly = FALSE) FALSE
+for (purpose in names(lock_cases)) {
+  lock_case <- lock_cases[[purpose]]
+  dependency_output <- tempfile(
+    paste0("phase3-", purpose, "-missing-filelock-")
   )
-  NULL
-}, error = function(error) error)
-assert_true(
-  is.null(changed_release_error) &&
-    dir.exists(changed_release_lock$lock_dir) &&
-    !dir.exists(file.path(changed_release_lock$lock_dir, ".transition")) &&
-    identical(
-      jsonlite::read_json(
-        changed_release_lock$owner_file, simplifyVector = TRUE
-      )$owner_token,
-      changed_release_token
-    ),
-  "release never removes a lock after an in-transition owner-token change"
-)
-unlink(changed_release_lock$lock_dir, recursive = TRUE, force = TRUE)
-
-changed_reclaim_output <- tempfile("phase3-oracle-lock-reclaim-race-")
-changed_reclaim_lock <- lock_acquire(
-  changed_reclaim_output, frozen_host, 4601L, frozen_now,
-  live = function(pid) FALSE
-)
-changed_reclaim_token <- sha("changed-reclaim-owner")
-assert_error(
-  lock_acquire(
-    changed_reclaim_output, frozen_host, 4602L, frozen_now + 1,
-    live = function(pid) FALSE,
-    reclaim_hook = function(owner_file) {
-      owner <- jsonlite::read_json(owner_file, simplifyVector = TRUE)
-      owner$owner_token <- changed_reclaim_token
-      fastkpc_full_cuda_write_json(owner, owner_file)
-    }
-  ),
-  "owner-token change during reclaim aborts acquisition"
-)
-assert_true(
-  dir.exists(changed_reclaim_lock$lock_dir) &&
-    !dir.exists(file.path(changed_reclaim_lock$lock_dir, ".transition")) &&
-    identical(
-      jsonlite::read_json(
-        changed_reclaim_lock$owner_file, simplifyVector = TRUE
-      )$owner_token,
-      changed_reclaim_token
-    ),
-  "reclaim never removes a lock after owner-token change"
-)
-unlink(changed_reclaim_lock$lock_dir, recursive = TRUE, force = TRUE)
+  error <- tryCatch({
+    lock_case$acquire(
+      dependency_output, .namespace_checker = unavailable_namespace
+    )
+    NULL
+  }, error = function(error) error)
+  assert_true(
+    inherits(error, "error") &&
+      grepl("filelock", conditionMessage(error), fixed = TRUE) &&
+      !dir.exists(dependency_output) &&
+      !file.exists(lock_case$path(dependency_output)),
+    paste("missing filelock fails before", purpose, "output mutation")
+  )
+}
 
 exactness_schema <- fastkpc_full_cuda_fixed_sp_qualification_dcov_schema()
 exactness_diagnostic <- list(
@@ -1058,7 +963,7 @@ assert_true(
     "validation_shards_authenticated", "validation_complete"
   ) %in% validation_lock_boundaries),
   paste0(
-    "semantic validator refreshes the artifact lease at long boundaries; ",
+    "semantic validator asserts artifact-lock ownership at long boundaries; ",
     "actual=", paste(validation_lock_boundaries, collapse = ",")
   )
 )
@@ -1070,20 +975,41 @@ assert_identical(
   validated$summary$executed_native_library_sha256, binary_a,
   "published summary records the shard-executed binary SHA"
 )
-held_validation_lock <-
-  .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(output_dir)
+completed_hashes_before_lock <- vapply(
+  unlist(paths[setdiff(names(paths), c("shards_dir", "sessions_dir"))],
+         use.names = FALSE),
+  fastkpc_full_cuda_census_file_hash, character(1L)
+)
+artifact_lock_path <-
+  .fastkpc_full_cuda_phase3_oracle_artifact_lock_path(output_dir)
+artifact_lock_inode <- lock_inode(artifact_lock_path)
+artifact_lock_hash <- lock_evidence_hash(artifact_lock_path)
+held_validation_child <- start_lock_child(lock_cases$artifact, output_dir)
 assert_error(
   fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
     output_dir, expected_identity = identity, require_full = FALSE
   ),
   "semantic validation serializes with a live publisher lock"
 )
-.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(
-  held_validation_lock
+assert_identical(
+  vapply(
+    unlist(paths[setdiff(names(paths), c("shards_dir", "sessions_dir"))],
+           use.names = FALSE),
+    fastkpc_full_cuda_census_file_hash, character(1L)
+  ),
+  completed_hashes_before_lock,
+  "blocked semantic validation preserves every marker and payload byte"
 )
 assert_true(
-  !dir.exists(.fastkpc_full_cuda_phase3_oracle_artifact_lock_path(output_dir)),
-  "artifact validation lock is removed after owned release"
+  identical(lock_inode(artifact_lock_path), artifact_lock_inode) &&
+    identical(lock_evidence_hash(artifact_lock_path), artifact_lock_hash),
+  "blocked semantic validation preserves artifact lock inode and evidence"
+)
+finish_lock_child(held_validation_child)
+assert_true(
+  file.exists(artifact_lock_path) && !dir.exists(artifact_lock_path) &&
+    identical(lock_inode(artifact_lock_path), artifact_lock_inode),
+  "artifact validation unlock keeps the persistent lock file and inode"
 )
 generic_semantic_validated <- fastkpc_full_cuda_phase3_validate_artifact(
   output_dir, kind = "oracle_sp", expected_identity = identity,
@@ -1278,7 +1204,8 @@ assert_true(
     "publication_payloads_published", "publication_markers_published"
   ) %in% publication_lock_boundaries),
   paste0(
-    "publisher refreshes the artifact lease at merge/publication boundaries; ",
+    "publisher asserts artifact-lock ownership at merge/publication ",
+    "boundaries; ",
     "actual=", paste(publication_lock_boundaries, collapse = ",")
   )
 )
