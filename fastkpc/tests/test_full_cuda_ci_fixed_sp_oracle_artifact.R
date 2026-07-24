@@ -278,6 +278,104 @@ assert_true(
   "C numeric formatting context restores locale/options after errors"
 )
 
+list_csv_frame <- data.frame(
+  row_id = seq_len(6L), stringsAsFactors = FALSE
+)
+list_csv_frame$diagnostics <- I(list(
+  c(pi, 0.2, 1),
+  double(),
+  c(1L, NA_integer_),
+  c(TRUE, FALSE, NA),
+  c("text", "NA", ""),
+  c(NA_real_, NaN)
+))
+expected_list_tokens <- c(
+  "3.141592653589793;0.2;1", "", "1;NA", "TRUE;FALSE;NA",
+  "text;NA;", "NA;NaN"
+)
+with_test_numeric_locale <- function(locale, operation) {
+  before <- numeric_process_state()
+  on.exit({
+    suppressWarnings(Sys.setlocale("LC_NUMERIC", before$locale))
+    if (!identical(numeric_process_state(), before)) {
+      stop("test numeric locale was not restored", call. = FALSE)
+    }
+  }, add = TRUE)
+  selected <- suppressWarnings(Sys.setlocale("LC_NUMERIC", locale))
+  if (is.na(selected) || !nzchar(selected)) {
+    return(list(available = FALSE, selected = selected, value = NULL))
+  }
+  list(
+    available = TRUE, selected = selected,
+    decimal_point = Sys.localeconv()[["decimal_point"]],
+    value = operation()
+  )
+}
+list_csv_c_path <- tempfile("phase3-list-column-c-", fileext = ".csv")
+list_csv_rds_path <- tempfile("phase3-list-column-", fileext = ".rds")
+on.exit(
+  unlink(c(list_csv_c_path, list_csv_rds_path), force = TRUE),
+  add = TRUE
+)
+saveRDS(list_csv_frame, list_csv_rds_path, version = 3L)
+list_csv_c <- with_test_numeric_locale("C", function() {
+  .fastkpc_full_cuda_phase3_write_csv(list_csv_frame, list_csv_c_path)
+  read_file_bytes(list_csv_c_path)
+})
+list_csv_comma <- tryCatch(
+  with_test_numeric_locale("en_DK.utf8", function() {
+    path <- tempfile("phase3-list-column-comma-", fileext = ".csv")
+    on.exit(unlink(path, force = TRUE), add = TRUE)
+    .fastkpc_full_cuda_phase3_write_csv(list_csv_frame, path)
+    read_file_bytes(path)
+  }),
+  error = function(error) error
+)
+list_csv_cross_locale_validation <- tryCatch(
+  with_test_numeric_locale("en_DK.utf8", function() {
+    .fastkpc_full_cuda_phase3_coerce_csv_like(
+      .fastkpc_full_cuda_phase3_read_csv(
+        list_csv_c_path, "list-column.csv"
+      ),
+      readRDS(list_csv_rds_path), "list-column"
+    )
+    TRUE
+  }),
+  error = function(error) error
+)
+list_csv_flattened <- .fastkpc_full_cuda_phase3_csv_frame(list_csv_frame)
+comma_list_locale_available <- is.list(list_csv_comma) &&
+  !inherits(list_csv_comma, "error") &&
+  isTRUE(list_csv_comma$available) &&
+  identical(list_csv_comma$decimal_point, ",")
+if (isTRUE(comma_list_locale_available)) {
+  assert_true(
+    identical(list_csv_comma$value, list_csv_c$value) &&
+      is.list(list_csv_cross_locale_validation) &&
+      isTRUE(list_csv_cross_locale_validation$value),
+    paste0(
+      "list-column CSV bytes and CSV/RDS validation ignore LC_NUMERIC; ",
+      "bytes_equal=", identical(list_csv_comma$value, list_csv_c$value),
+      "; validation=",
+      if (inherits(list_csv_cross_locale_validation, "error")) {
+        conditionMessage(list_csv_cross_locale_validation)
+      } else "rejected"
+    )
+  )
+} else {
+  assert_true(
+    !inherits(list_csv_comma, "error") &&
+      ((is.list(list_csv_comma) && !isTRUE(list_csv_comma$available)) ||
+       (is.list(list_csv_comma) &&
+        !identical(list_csv_comma$decimal_point, ","))),
+    "list-column comma-locale skip requires demonstrated unavailability"
+  )
+}
+assert_identical(
+  list_csv_flattened$diagnostics, expected_list_tokens,
+  "list-column flattening preserves exact type and missing-value semantics"
+)
+
 sha <- function(label) fastkpc_full_cuda_census_hash_utf8(label)
 key_hash <- function(keys) {
   fastkpc_full_cuda_census_key_set_hash(sort(keys, method = "radix"))

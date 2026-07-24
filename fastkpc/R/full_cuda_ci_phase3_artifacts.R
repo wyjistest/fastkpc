@@ -6274,10 +6274,28 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     stop("Phase 3 CSV payload must be a data frame", call. = FALSE)
   }
   result <- value
-  for (field in names(result)[vapply(result, is.list, logical(1L))]) {
-    result[[field]] <- vapply(result[[field]], function(element) {
-      if (length(element) == 0L) "" else paste(element, collapse = ";")
-    }, character(1L))
+  list_fields <- names(result)[vapply(result, is.list, logical(1L))]
+  if (length(list_fields) > 0L) {
+    result <- .fastkpc_full_cuda_phase3_with_c_numeric_context(function() {
+      converted <- result
+      for (field in list_fields) {
+        converted[[field]] <- vapply(result[[field]], function(element) {
+          if (length(element) == 0L) return("")
+          if (typeof(element) == "double" && !is.object(element)) {
+            tokens <-
+              .fastkpc_full_cuda_phase3_format_double_with_parser_in_c_context(
+                element,
+                function(values) suppressWarnings(as.double(values)),
+                "Phase 3 CSV list element cannot be formatted exactly"
+              )
+            tokens[is.nan(element)] <- "NaN"
+            return(paste(tokens, collapse = ";"))
+          }
+          paste(element, collapse = ";")
+        }, character(1L))
+      }
+      converted
+    })
   }
   rownames(result) <- NULL
   result
@@ -6320,6 +6338,59 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
   operation()
 }
 
+.fastkpc_full_cuda_phase3_format_double_with_parser_in_c_context <- function(
+    value, parser, failure_message) {
+  result <- rep.int(NA_character_, length(value))
+  present <- which(!is.na(value))
+  negative_zero <- .fastkpc_full_cuda_phase3_double_ieee_equal_each(
+    value[present], rep.int(-0.0, length(present))
+  )
+  positive_zero <- .fastkpc_full_cuda_phase3_double_ieee_equal_each(
+    value[present], rep.int(0.0, length(present))
+  )
+  if (any(negative_zero)) {
+    result[present[negative_zero]] <- "-0.0"
+  }
+  if (any(positive_zero)) {
+    result[present[positive_zero]] <- "0.0"
+  }
+  unresolved <- which(!negative_zero & !positive_zero)
+  candidates <- as.character(value[present[unresolved]])
+  parsed <- parser(candidates)
+  if (typeof(parsed) != "double" || length(parsed) != length(candidates)) {
+    stop("Phase 3 exact formatter parser is invalid", call. = FALSE)
+  }
+  exact <- !is.na(parsed) &
+    .fastkpc_full_cuda_phase3_double_ieee_equal_each(
+      parsed, value[present[unresolved]]
+    )
+  result[present[unresolved[exact]]] <- candidates[exact]
+  unresolved <- unresolved[!exact]
+  for (digits in seq_len(17L)) {
+    if (length(unresolved) == 0L) break
+    candidates <- sprintf(
+      paste0("%.", digits, "g"), value[present[unresolved]]
+    )
+    parsed <- parser(candidates)
+    if (typeof(parsed) != "double" ||
+        length(parsed) != length(candidates)) {
+      stop("Phase 3 exact formatter parser is invalid", call. = FALSE)
+    }
+    exact <- !is.na(parsed) &
+      .fastkpc_full_cuda_phase3_double_ieee_equal_each(
+        parsed, value[present[unresolved]]
+      )
+    if (any(exact)) {
+      result[present[unresolved[exact]]] <- candidates[exact]
+      unresolved <- unresolved[!exact]
+    }
+  }
+  if (length(unresolved) > 0L) {
+    stop(failure_message, call. = FALSE)
+  }
+  result
+}
+
 .fastkpc_full_cuda_phase3_format_double_with_parser <- function(
     value, parser, failure_message) {
   if (typeof(value) != "double" || is.object(value)) {
@@ -6331,55 +6402,9 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     stop("Phase 3 exact formatter configuration is invalid", call. = FALSE)
   }
   .fastkpc_full_cuda_phase3_with_c_numeric_context(function() {
-    result <- rep.int(NA_character_, length(value))
-    present <- which(!is.na(value))
-    negative_zero <- .fastkpc_full_cuda_phase3_double_ieee_equal_each(
-      value[present], rep.int(-0.0, length(present))
+    .fastkpc_full_cuda_phase3_format_double_with_parser_in_c_context(
+      value, parser, failure_message
     )
-    positive_zero <- .fastkpc_full_cuda_phase3_double_ieee_equal_each(
-      value[present], rep.int(0.0, length(present))
-    )
-    if (any(negative_zero)) {
-      result[present[negative_zero]] <- "-0.0"
-    }
-    if (any(positive_zero)) {
-      result[present[positive_zero]] <- "0.0"
-    }
-    unresolved <- which(!negative_zero & !positive_zero)
-    candidates <- as.character(value[present[unresolved]])
-    parsed <- parser(candidates)
-    if (typeof(parsed) != "double" || length(parsed) != length(candidates)) {
-      stop("Phase 3 exact formatter parser is invalid", call. = FALSE)
-    }
-    exact <- !is.na(parsed) &
-      .fastkpc_full_cuda_phase3_double_ieee_equal_each(
-        parsed, value[present[unresolved]]
-      )
-    result[present[unresolved[exact]]] <- candidates[exact]
-    unresolved <- unresolved[!exact]
-    for (digits in seq_len(17L)) {
-      if (length(unresolved) == 0L) break
-      candidates <- sprintf(
-        paste0("%.", digits, "g"), value[present[unresolved]]
-      )
-      parsed <- parser(candidates)
-      if (typeof(parsed) != "double" ||
-          length(parsed) != length(candidates)) {
-        stop("Phase 3 exact formatter parser is invalid", call. = FALSE)
-      }
-      exact <- !is.na(parsed) &
-        .fastkpc_full_cuda_phase3_double_ieee_equal_each(
-          parsed, value[present[unresolved]]
-        )
-      if (any(exact)) {
-        result[present[unresolved[exact]]] <- candidates[exact]
-        unresolved <- unresolved[!exact]
-      }
-    }
-    if (length(unresolved) > 0L) {
-      stop(failure_message, call. = FALSE)
-    }
-    result
   })
 }
 
