@@ -2176,13 +2176,19 @@ assert_true(
   ) && isTRUE(manifest$execution_sources_unchanged_after_run),
   "manifest provenance mode and dirty-source gate are exact"
 )
+canonical_native_library_path <- file.path(
+  normalizePath("fastkpc/build", winslash = "/", mustWork = TRUE),
+  "fastkpc_cuda.so"
+)
+qualified_native_library_dir <- dirname(manifest$native_library_path)
 assert_true(
   identical(
     manifest$native_library_identity,
     "qualified-pinned-inode-sha-exact-registered-mapped-path-v3"
   ) && is.character(manifest$native_library_path) &&
     length(manifest$native_library_path) == 1L &&
-    file.exists(manifest$native_library_path) &&
+    !file.exists(manifest$native_library_path) &&
+    !dir.exists(qualified_native_library_dir) &&
     identical(basename(manifest$native_library_path), "fastkpc_cuda.so") &&
     identical(
       dirname(dirname(manifest$native_library_path)),
@@ -2192,14 +2198,18 @@ assert_true(
       ".fastkpc_cuda-qualified-"
     ) &&
     grepl("^[0-9a-f]{64}$", manifest$native_library_sha256) &&
+    file.exists(canonical_native_library_path) &&
     identical(
       manifest$native_library_sha256,
       digest::digest(
-        file = manifest$native_library_path, algo = "sha256",
+        file = canonical_native_library_path, algo = "sha256",
         serialize = FALSE
       )
     ),
-  "manifest binds the actual loaded native shared object bytes"
+  paste0(
+    "manifest records the execution-time pinned native path, post-exit ",
+    "cleanup, and canonical published bytes"
+  )
 )
 native_build_input_identity_lines <- unlist(lapply(
   expected_native_build_input_ids,
