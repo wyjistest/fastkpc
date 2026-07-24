@@ -5981,7 +5981,7 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
 .fastkpc_full_cuda_phase3_oracle_risk_cases <- function(
     target_parity, risk_rows = NULL, catalog = NULL) {
   if (is.null(risk_rows) && !is.null(catalog)) {
-    risk_rows <- catalog$inputs$target_fit_metadata
+    risk_rows <- catalog$inputs$target_risks
   }
   risk_fields <- .fastkpc_full_cuda_phase3_oracle_risk_fields()
   if (is.null(risk_rows)) {
