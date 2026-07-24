@@ -212,33 +212,36 @@ finish_lock_child <- function(child, crash = FALSE) {
   }
   invisible(result)
 }
-inspect_inherited_lock_in_child <- function(lock_case, inherited_lock) {
+inspect_inherited_lock_in_child <- function(
+    lock_case, output_dir, inherited_lock) {
   parent_pid <- as.integer(Sys.getpid())
   job <- parallel::mcparallel({
     inherited_owns <- lock_case$owns(inherited_lock)
-    os_attempt_count <- 0L
+    acquired_lock <- NULL
     acquisition_error <- tryCatch({
-      .fastkpc_full_cuda_phase3_acquire_lock(
-        lock_path = inherited_lock$lock_path,
-        purpose = lock_case$purpose,
-        .lock_function = function(...) {
-          os_attempt_count <<- os_attempt_count + 1L
-          NULL
-        }
-      )
+      acquired_lock <- lock_case$acquire(output_dir)
       NULL
     }, error = function(error) conditionMessage(error))
-    registry_cleared <- !exists(
-      inherited_lock$lock_path,
-      envir = .fastkpc_full_cuda_phase3_lock_registry(),
-      inherits = FALSE
+    acquired <- !is.null(acquired_lock)
+    if (isTRUE(acquired)) lock_case$release(acquired_lock)
+    registry <- .fastkpc_full_cuda_phase3_lock_registry()
+    inherited_entry_preserved <- exists(
+      inherited_lock$lock_path, envir = registry, inherits = FALSE
     )
+    if (isTRUE(inherited_entry_preserved)) {
+      entry <- get(
+        inherited_lock$lock_path, envir = registry, inherits = FALSE
+      )
+      inherited_entry_preserved <-
+        identical(entry$owner_pid, parent_pid) &&
+        identical(entry$state, inherited_lock$state)
+    }
     lock_case$release(inherited_lock)
     list(
       pid = as.integer(Sys.getpid()),
       inherited_owns = inherited_owns,
-      os_attempt_count = os_attempt_count,
-      registry_cleared = registry_cleared,
+      acquired = acquired,
+      inherited_entry_preserved = inherited_entry_preserved,
       inherited_released = inherited_lock$state$released,
       error = acquisition_error
     )
@@ -290,6 +293,74 @@ lock_cases <- list(
     release = .fastkpc_full_cuda_phase3_release_shard_runner_lock
   )
 )
+synthetic_lock_interrupt <- structure(
+  list(message = "synthetic Phase 3 lock transition interrupt", call = NULL),
+  class = c("interrupt", "condition")
+)
+for (stage in c("after_os_acquire", "after_registry_assign")) {
+  interrupted_output <- tempfile(paste0("phase3-lock-", stage, "-"))
+  interrupted_path <-
+    .fastkpc_full_cuda_phase3_oracle_artifact_lock_path(interrupted_output)
+  interrupted_condition <- tryCatch(
+    .fastkpc_full_cuda_phase3_acquire_lock(
+      lock_path = interrupted_path, purpose = "oracle_artifact",
+      .transition_hook = function(actual_stage, lock) {
+        if (identical(actual_stage, stage)) stop(synthetic_lock_interrupt)
+      }
+    ),
+    interrupt = function(condition) condition,
+    error = function(condition) condition
+  )
+  normalized_interrupted_path <-
+    .fastkpc_full_cuda_phase3_normalize_lock_path(interrupted_path)
+  assert_true(
+    inherits(interrupted_condition, "interrupt") &&
+      !exists(
+        normalized_interrupted_path,
+        envir = .fastkpc_full_cuda_phase3_lock_registry(),
+        inherits = FALSE
+      ) && identical(
+        attempt_os_lock_in_rscript(normalized_interrupted_path), "acquired"
+      ),
+    paste(stage, "interrupt cleans incomplete lock acquisition")
+  )
+}
+
+release_interrupt_output <- tempfile("phase3-lock-release-interrupt-")
+release_interrupt_lock <-
+  .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(
+    release_interrupt_output
+  )
+release_interrupt_condition <- tryCatch(
+  .fastkpc_full_cuda_phase3_release_lock(
+    release_interrupt_lock, "oracle_artifact",
+    .transition_hook = function(stage, lock) {
+      if (identical(stage, "after_os_unlock")) {
+        stop(synthetic_lock_interrupt)
+      }
+    }
+  ),
+  interrupt = function(condition) condition,
+  error = function(condition) condition
+)
+assert_true(
+  inherits(release_interrupt_condition, "interrupt") &&
+    identical(release_interrupt_lock$state$released, TRUE) &&
+    is.null(release_interrupt_lock$state$handle) &&
+    !exists(
+      release_interrupt_lock$lock_path,
+      envir = .fastkpc_full_cuda_phase3_lock_registry(),
+      inherits = FALSE
+    ) && identical(
+      attempt_os_lock_in_rscript(release_interrupt_lock$lock_path),
+      "acquired"
+    ),
+  "interrupt after OS unlock cannot leave active local ownership"
+)
+.fastkpc_full_cuda_phase3_release_oracle_artifact_lock(
+  release_interrupt_lock
+)
+
 for (label in names(lock_cases)) {
   lock_case <- lock_cases[[label]]
   registry_output <- tempfile(paste0("phase3-", label, "-registry-"))
@@ -331,18 +402,23 @@ for (label in names(lock_cases)) {
     paste(label, "normalized lock-path aliases collide before OS acquisition")
   )
 
-  inherited_child <- inspect_inherited_lock_in_child(lock_case, outer)
+  inherited_child <- inspect_inherited_lock_in_child(
+    lock_case, registry_output, outer
+  )
   assert_true(
     identical(inherited_child$inherited_owns, FALSE) &&
-      identical(inherited_child$os_attempt_count, 1L) &&
-      isTRUE(inherited_child$registry_cleared) &&
+      identical(inherited_child$acquired, FALSE) &&
+      isTRUE(inherited_child$inherited_entry_preserved) &&
       identical(inherited_child$inherited_released, FALSE) &&
-      grepl("another process", inherited_child$error, fixed = TRUE) &&
+      grepl(
+        "active inherited parent lock", inherited_child$error,
+        fixed = TRUE
+      ) &&
       identical(attempt_os_lock_in_rscript(lock_path), "blocked") &&
       isTRUE(lock_case$owns(outer)),
     paste(
       label,
-      "fork ignores inherited registry state while OS locking stays authoritative"
+      "fork rejects and preserves an active inherited parent lock"
     )
   )
 
@@ -1068,6 +1144,62 @@ validated <- fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
 )
 assert_true(isTRUE(validated$authenticated) && isTRUE(validated$pass),
             "completed artifact validates independently")
+interrupting_artifact_acquire <-
+  .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock
+artifact_handoff_calls <- list(
+  validator = function() {
+    fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+      output_dir, expected_identity = identity, require_full = FALSE
+    )
+  },
+  publisher = function() {
+    publish(
+      output_dir = output_dir, setup_keys = setup_keys,
+      target_rows = target_rows, identity = identity,
+      route_config = route_config, scope = "iteration", shard_count = 4L,
+      risk_rows = risk_rows, qualification_dcov = qualification_dcov,
+      command_lines = paste0(
+        "Rscript ",
+        "fastkpc/tests/test_full_cuda_ci_fixed_sp_oracle_artifact.R"
+      )
+    )
+  }
+)
+for (caller in names(artifact_handoff_calls)) {
+  assign(
+    ".fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock",
+    function(...) {
+      lock <- interrupting_artifact_acquire(...)
+      tools::pskill(Sys.getpid(), 2L)
+      for (index in seq_len(100000L)) sqrt(index)
+      lock
+    },
+    envir = .GlobalEnv
+  )
+  handoff_condition <- tryCatch(
+    artifact_handoff_calls[[caller]](),
+    interrupt = function(condition) condition,
+    error = function(condition) condition
+  )
+  assign(
+    ".fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock",
+    interrupting_artifact_acquire,
+    envir = .GlobalEnv
+  )
+  handoff_lock_path <-
+    .fastkpc_full_cuda_phase3_oracle_artifact_lock_path(output_dir)
+  assert_true(
+    inherits(handoff_condition, "interrupt") &&
+      !exists(
+        handoff_lock_path,
+        envir = .fastkpc_full_cuda_phase3_lock_registry(),
+        inherits = FALSE
+      ) && identical(
+        attempt_os_lock_in_rscript(handoff_lock_path), "acquired"
+      ),
+    paste(caller, "registers artifact cleanup before interrupt delivery")
+  )
+}
 immutable_hash_reader <- get0(
   ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
   mode = "function", inherits = TRUE

@@ -394,6 +394,45 @@ assert_true(
   "setups sharing one Phase 2 shard perform one read/authentication"
 )
 
+runner_handoff_dir <- tempfile("phase3-runner-interrupt-handoff-")
+on.exit(unlink(runner_handoff_dir, recursive = TRUE, force = TRUE), add = TRUE)
+runner_handoff_acquire <-
+  .fastkpc_full_cuda_phase3_acquire_shard_runner_lock
+assign(
+  ".fastkpc_full_cuda_phase3_acquire_shard_runner_lock",
+  function(...) {
+    lock <- runner_handoff_acquire(...)
+    tools::pskill(Sys.getpid(), 2L)
+    for (index in seq_len(100000L)) sqrt(index)
+    lock
+  },
+  envir = .GlobalEnv
+)
+runner_handoff_condition <- tryCatch(
+  run_fixture(runner_handoff_dir),
+  interrupt = function(condition) condition,
+  error = function(condition) condition
+)
+assign(
+  ".fastkpc_full_cuda_phase3_acquire_shard_runner_lock",
+  runner_handoff_acquire,
+  envir = .GlobalEnv
+)
+runner_handoff_probe <- tryCatch(
+  runner_handoff_acquire(runner_handoff_dir),
+  error = function(condition) condition
+)
+if (!inherits(runner_handoff_probe, "error")) {
+  .fastkpc_full_cuda_phase3_release_shard_runner_lock(
+    runner_handoff_probe
+  )
+}
+assert_true(
+  inherits(runner_handoff_condition, "interrupt") &&
+    !inherits(runner_handoff_probe, "error"),
+  "runner registers lock cleanup before interrupt delivery"
+)
+
 interrupt_dir <- tempfile("phase3-interrupt-cleanup-")
 on.exit(unlink(interrupt_dir, recursive = TRUE, force = TRUE), add = TRUE)
 interrupt_lifecycle <- new.env(parent = emptyenv())

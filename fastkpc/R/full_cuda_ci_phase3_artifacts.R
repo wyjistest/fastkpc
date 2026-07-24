@@ -2104,13 +2104,38 @@ fastkpc_validate_full_cuda_phase3_artifact <-
     inherits(state$handle, "filelock_lock")
 }
 
+.fastkpc_full_cuda_phase3_released_lock_state <- function(state, owner_pid) {
+  is.environment(state) &&
+    identical(sort(ls(state, all.names = TRUE)),
+              c("handle", "owner_pid", "released")) &&
+    identical(state$owner_pid, owner_pid) &&
+    identical(state$released, TRUE) && is.null(state$handle)
+}
+
+.fastkpc_full_cuda_phase3_remove_exact_lock_registry_entry <- function(
+    registry, lock_path, owner_pid, state) {
+  if (!exists(lock_path, envir = registry, inherits = FALSE)) {
+    return(invisible(FALSE))
+  }
+  entry <- get(lock_path, envir = registry, inherits = FALSE)
+  if (!is.list(entry) || is.object(entry) ||
+      !identical(names(entry), c("owner_pid", "state")) ||
+      !identical(entry$owner_pid, owner_pid) ||
+      !identical(entry$state, state)) {
+    return(invisible(FALSE))
+  }
+  rm(list = lock_path, envir = registry)
+  invisible(TRUE)
+}
+
 .fastkpc_full_cuda_phase3_acquire_lock <- function(
     lock_path, purpose, .namespace_checker = requireNamespace,
-    .lock_function = filelock::lock) {
+    .lock_function = filelock::lock, .transition_hook = NULL) {
   .fastkpc_full_cuda_phase3_require_filelock(.namespace_checker)
   if (!.fastkpc_full_cuda_phase3_scalar_lock_text(lock_path) ||
       !.fastkpc_full_cuda_phase3_scalar_lock_text(purpose) ||
-      !is.function(.lock_function)) {
+      !is.function(.lock_function) ||
+      (!is.null(.transition_hook) && !is.function(.transition_hook))) {
     stop("Phase 3 lock acquisition inputs are malformed", call. = FALSE)
   }
   lock_path <- .fastkpc_full_cuda_phase3_normalize_lock_path(lock_path)
@@ -2128,48 +2153,93 @@ fastkpc_validate_full_cuda_phase3_artifact <-
            call. = FALSE)
     }
     if (!identical(existing$owner_pid, owner_pid)) {
+      if (.fastkpc_full_cuda_phase3_active_lock_state(
+            existing$state, existing$owner_pid
+          )) {
+        stop("Phase 3 ", purpose,
+             " lock has an active inherited parent lock", call. = FALSE)
+      }
+      if (!.fastkpc_full_cuda_phase3_released_lock_state(
+            existing$state, existing$owner_pid
+          )) {
+        stop("Phase 3 inherited lock registry state is malformed",
+             call. = FALSE)
+      }
       rm(list = lock_path, envir = registry)
     } else if (.fastkpc_full_cuda_phase3_active_lock_state(
                  existing$state, owner_pid
                )) {
       stop("Phase 3 ", purpose,
            " lock is already held by this process", call. = FALSE)
-    } else if (identical(existing$state$owner_pid, owner_pid) &&
-               identical(existing$state$released, TRUE) &&
-               is.null(existing$state$handle)) {
+    } else if (.fastkpc_full_cuda_phase3_released_lock_state(
+                 existing$state, owner_pid
+               )) {
       rm(list = lock_path, envir = registry)
     } else {
       stop("Phase 3 process-local lock registry state is invalid",
            call. = FALSE)
     }
   }
-  handle <- tryCatch(
-    .lock_function(lock_path, exclusive = TRUE, timeout = 0),
-    error = function(error) {
-      stop("failed to acquire Phase 3 ", purpose, " lock: ",
-           conditionMessage(error), call. = FALSE)
-    }
-  )
-  if (is.null(handle)) {
-    stop("Phase 3 ", purpose,
-         " lock is already held by another process", call. = FALSE)
-  }
+  handle <- NULL
+  state <- NULL
   registered <- FALSE
+  completed <- FALSE
   on.exit({
-    if (!isTRUE(registered)) {
-      try(filelock::unlock(handle), silent = TRUE)
+    if (!isTRUE(completed) && inherits(handle, "filelock_lock")) {
+      suspendInterrupts({
+        unlocked <- tryCatch(
+          filelock::unlock(handle), error = function(error) FALSE
+        )
+        if (isTRUE(unlocked)) {
+          if (is.environment(state)) {
+            state$handle <- NULL
+            state$released <- TRUE
+            .fastkpc_full_cuda_phase3_remove_exact_lock_registry_entry(
+              registry, lock_path, owner_pid, state
+            )
+          }
+        }
+      })
     }
   }, add = TRUE)
-  state <- new.env(parent = emptyenv())
-  state$handle <- handle
-  state$owner_pid <- owner_pid
-  state$released <- FALSE
-  assign(
-    lock_path, list(owner_pid = owner_pid, state = state),
-    envir = registry
-  )
-  registered <- TRUE
-  list(lock_path = lock_path, purpose = purpose, state = state)
+  result <- suspendInterrupts({
+    handle <- tryCatch(
+      .lock_function(lock_path, exclusive = TRUE, timeout = 0),
+      error = function(error) {
+        stop("failed to acquire Phase 3 ", purpose, " lock: ",
+             conditionMessage(error), call. = FALSE)
+      }
+    )
+    if (is.null(handle)) {
+      stop("Phase 3 ", purpose,
+           " lock is already held by another process", call. = FALSE)
+    }
+    state <- new.env(parent = emptyenv())
+    state$handle <- handle
+    state$owner_pid <- owner_pid
+    state$released <- FALSE
+    lock <- list(lock_path = lock_path, purpose = purpose, state = state)
+    if (!is.null(.transition_hook)) {
+      .transition_hook("after_os_acquire", lock)
+    }
+    assign(
+      lock_path, list(owner_pid = owner_pid, state = state),
+      envir = registry
+    )
+    registered_entry <- get(lock_path, envir = registry, inherits = FALSE)
+    registered <- is.list(registered_entry) &&
+      identical(registered_entry$owner_pid, owner_pid) &&
+      identical(registered_entry$state, state)
+    if (!isTRUE(registered)) {
+      stop("failed to register Phase 3 process-local lock", call. = FALSE)
+    }
+    if (!is.null(.transition_hook)) {
+      .transition_hook("after_registry_assign", lock)
+    }
+    completed <- TRUE
+    lock
+  })
+  result
 }
 
 .fastkpc_full_cuda_phase3_lock_shape_valid <- function(lock, purpose) {
@@ -2210,7 +2280,8 @@ fastkpc_validate_full_cuda_phase3_artifact <-
   invisible(TRUE)
 }
 
-.fastkpc_full_cuda_phase3_release_lock <- function(lock, purpose) {
+.fastkpc_full_cuda_phase3_release_lock <- function(
+    lock, purpose, .transition_hook = NULL) {
   if (!is.list(lock) || !identical(
         names(lock), c("lock_path", "purpose", "state")
       ) || !identical(lock$purpose, purpose) || !is.environment(lock$state) ||
@@ -2219,22 +2290,38 @@ fastkpc_validate_full_cuda_phase3_artifact <-
       !inherits(lock$state$handle, "filelock_lock")) {
     return(invisible(NULL))
   }
-  unlocked <- filelock::unlock(lock$state$handle)
-  if (!isTRUE(unlocked)) {
-    stop("failed to release Phase 3 ", purpose, " lock", call. = FALSE)
+  if (!is.null(.transition_hook) && !is.function(.transition_hook)) {
+    stop("Phase 3 lock release transition hook is malformed",
+         call. = FALSE)
   }
-  lock$state$handle <- NULL
-  lock$state$released <- TRUE
+  owner_pid <- as.integer(Sys.getpid())
   registry <- .fastkpc_full_cuda_phase3_lock_registry()
-  if (exists(lock$lock_path, envir = registry, inherits = FALSE)) {
-    entry <- get(lock$lock_path, envir = registry, inherits = FALSE)
-    if (is.list(entry) && !is.object(entry) &&
-        identical(names(entry), c("owner_pid", "state")) &&
-        identical(entry$owner_pid, as.integer(Sys.getpid())) &&
-        identical(entry$state, lock$state)) {
-      rm(list = lock$lock_path, envir = registry)
-    }
+  unlocked <- FALSE
+  completed <- FALSE
+  finalize_release <- function() {
+    lock$state$handle <- NULL
+    lock$state$released <- TRUE
+    .fastkpc_full_cuda_phase3_remove_exact_lock_registry_entry(
+      registry, lock$lock_path, owner_pid, lock$state
+    )
+    completed <<- TRUE
+    invisible(NULL)
   }
+  on.exit({
+    if (isTRUE(unlocked) && !isTRUE(completed)) {
+      suspendInterrupts(finalize_release())
+    }
+  }, add = TRUE)
+  suspendInterrupts({
+    unlocked <- filelock::unlock(lock$state$handle)
+    if (!isTRUE(unlocked)) {
+      stop("failed to release Phase 3 ", purpose, " lock", call. = FALSE)
+    }
+    if (!is.null(.transition_hook)) {
+      .transition_hook("after_os_unlock", lock)
+    }
+    finalize_release()
+  })
   invisible(NULL)
 }
 
@@ -5055,12 +5142,15 @@ fastkpc_full_cuda_phase3_run_shards <- function(
   if (!isTRUE(output_clean) || !isTRUE(callback_clean)) {
     stop("Phase 3 shard runner inputs are malformed", call. = FALSE)
   }
-  runner_lock <-
-    .fastkpc_full_cuda_phase3_acquire_shard_runner_lock(output_dir)
-  on.exit(
-    .fastkpc_full_cuda_phase3_release_shard_runner_lock(runner_lock),
-    add = TRUE
-  )
+  runner_lock <- NULL
+  suspendInterrupts({
+    runner_lock <-
+      .fastkpc_full_cuda_phase3_acquire_shard_runner_lock(output_dir)
+    on.exit(
+      .fastkpc_full_cuda_phase3_release_shard_runner_lock(runner_lock),
+      add = TRUE
+    )
+  })
   .fastkpc_full_cuda_phase3_refresh_shard_runner_lock(
     runner_lock, .boundary = "runner_start"
   )
@@ -6333,12 +6423,15 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     scope = scope, plan = plan
   )
   paths <- fastkpc_full_cuda_phase3_artifact_paths(output_dir, "oracle_sp")
-  artifact_lock <-
-    .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(output_dir)
-  on.exit(
-    .fastkpc_full_cuda_phase3_release_oracle_artifact_lock(artifact_lock),
-    add = TRUE
-  )
+  artifact_lock <- NULL
+  suspendInterrupts({
+    artifact_lock <-
+      .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(output_dir)
+    on.exit(
+      .fastkpc_full_cuda_phase3_release_oracle_artifact_lock(artifact_lock),
+      add = TRUE
+    )
+  })
   completion <- c(
     manifest = file.exists(paths$manifest_json),
     summary = file.exists(paths$summary_json)
@@ -6726,12 +6819,14 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
   }
   acquired_lock <- is.null(.artifact_lock)
   if (isTRUE(acquired_lock)) {
-    .artifact_lock <-
-      .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(output_dir)
-    on.exit(
-      .fastkpc_full_cuda_phase3_release_oracle_artifact_lock(.artifact_lock),
-      add = TRUE
-    )
+    suspendInterrupts({
+      .artifact_lock <-
+        .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock(output_dir)
+      on.exit(
+        .fastkpc_full_cuda_phase3_release_oracle_artifact_lock(.artifact_lock),
+        add = TRUE
+      )
+    })
   } else {
     .fastkpc_full_cuda_phase3_require_oracle_artifact_lock(
       .artifact_lock, output_dir
