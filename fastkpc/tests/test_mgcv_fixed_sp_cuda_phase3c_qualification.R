@@ -144,6 +144,123 @@ independent_csv_semantic_frame <- function(value) {
   value
 }
 
+independent_native_build_command_lines <- function(value) {
+  lines <- c(
+    paste0(
+      "command_projection.schema=",
+      value$command_projection_schema_version
+    ),
+    paste0("command_count=", value$command_count)
+  )
+  for (index in seq_along(value$commands)) {
+    command <- value$commands[[index]]
+    lines <- c(
+      lines,
+      paste0("command.", index, ".role=", command$role),
+      paste0(
+        "command.", index, ".executable_path=", command$executable_path
+      ),
+      paste0(
+        "command.", index, ".executable_sha256=",
+        command$executable_sha256
+      ),
+      paste0("command.", index, ".argc=", length(command$argv))
+    )
+    for (argument_index in seq_along(command$argv)) {
+      argument <- command$argv[[argument_index]]
+      lines <- c(lines, paste0(
+        "command.", index, ".argv.", argument_index, "=",
+        nchar(argument, type = "bytes"), ":", argument
+      ))
+    }
+  }
+  environment <- value$build_environment
+  lines <- c(
+    lines,
+    paste0(
+      "build_environment.schema=",
+      value$build_environment_schema_version
+    ),
+    paste0("build_environment.count=", nrow(environment))
+  )
+  for (index in seq_len(nrow(environment))) {
+    lines <- c(
+      lines,
+      paste0(
+        "build_environment.", index, ".name=", environment$name[[index]]
+      ),
+      paste0(
+        "build_environment.", index, ".is_set=",
+        if (environment$is_set[[index]]) "true" else "false"
+      ),
+      paste0(
+        "build_environment.", index, ".value=",
+        nchar(environment$value[[index]], type = "bytes"), ":",
+        environment$value[[index]]
+      )
+    )
+  }
+  lines
+}
+
+independent_native_build_environment_names <- sort(c(
+  "AR", "AS", "CC", "CFLAGS", "COMPILER_PATH", "CPATH", "CPPFLAGS",
+  "CUDAFLAGS", "CUDAHOSTCXX", "CUDA_HOME", "CUDA_PATH", "CXX",
+  "CXXFLAGS", "GCC_EXEC_PREFIX", "LANG", "LC_ALL", "LDFLAGS",
+  "LD_LIBRARY_PATH", "LIBRARY_PATH", "MAKEFLAGS", "NVCCFLAGS",
+  "NVCC_APPEND_FLAGS", "NVCC_CCBIN", "NVCC_PREPEND_FLAGS", "PATH",
+  "PKG_CPPFLAGS", "PKG_CXXFLAGS", "PKG_LIBS", "R_ARCH", "R_HOME",
+  "R_LIBS", "R_LIBS_SITE", "R_LIBS_USER", "R_MAKEVARS_SITE",
+  "R_MAKEVARS_USER", "SHLIB_CXXLD", "SHLIB_CXXLDFLAGS",
+  "SOURCE_DATE_EPOCH"
+), method = "radix")
+
+synthetic_multibyte_value <- intToUtf8(0x03bb)
+synthetic_native_build_projection <- list(
+  command_projection_schema_version =
+    "full-cuda-ci-native-build-command-projection-v1",
+  command_count = 1L,
+  commands = list(list(
+    role = "cuda_compile",
+    executable_path = "/opt/cuda/bin/nvcc",
+    executable_sha256 = strrep("a", 64L),
+    argv = c("<EXECUTABLE>", "-c", "src.cu", "-o", "<OUTPUT>")
+  )),
+  build_environment_schema_version =
+    "full-cuda-ci-native-build-environment-v1",
+  build_environment = data.frame(
+    name = c("LC_ALL", "PATH"),
+    is_set = c(TRUE, FALSE),
+    value = c(synthetic_multibyte_value, ""),
+    stringsAsFactors = FALSE
+  )
+)
+assert_identical(
+  independent_native_build_command_lines(synthetic_native_build_projection),
+  c(
+    "command_projection.schema=full-cuda-ci-native-build-command-projection-v1",
+    "command_count=1",
+    "command.1.role=cuda_compile",
+    "command.1.executable_path=/opt/cuda/bin/nvcc",
+    paste0("command.1.executable_sha256=", strrep("a", 64L)),
+    "command.1.argc=5",
+    "command.1.argv.1=12:<EXECUTABLE>",
+    "command.1.argv.2=2:-c",
+    "command.1.argv.3=6:src.cu",
+    "command.1.argv.4=2:-o",
+    "command.1.argv.5=8:<OUTPUT>",
+    "build_environment.schema=full-cuda-ci-native-build-environment-v1",
+    "build_environment.count=2",
+    "build_environment.1.name=LC_ALL",
+    "build_environment.1.is_set=true",
+    paste0("build_environment.1.value=2:", synthetic_multibyte_value),
+    "build_environment.2.name=PATH",
+    "build_environment.2.is_set=false",
+    "build_environment.2.value=0:"
+  ),
+  "independent v3 encoder length-prefixes command and environment values"
+)
+
 assert_identical(
   independent_generation_open(c(
     "100 openat(AT_FDCWD, \"/tmp/input\", O_RDWR|O_CLOEXEC) = 3</tmp/input>",
@@ -2361,17 +2478,6 @@ for (index in seq_len(nrow(native_build_exclusions))) {
     )
   )
 }
-independent_native_build_dependencies_sha256 <- unname(digest::digest(
-  charToRaw(enc2utf8(paste0(
-    paste(dependency_identity_lines, collapse = "\n"), "\n"
-  ))),
-  algo = "sha256", serialize = FALSE
-))
-assert_identical(
-  manifest$native_build_dependencies_sha256,
-  independent_native_build_dependencies_sha256,
-  "manifest binds the actual traced native build dependency closure"
-)
 independent_trace_tables <- function(trace_path, tracer_path) {
   lines <- readLines(trace_path, warn = FALSE, encoding = "bytes")
   call_pattern <- paste0(
@@ -2513,14 +2619,170 @@ independent_trace_tables <- function(trace_path, tracer_path) {
 reparsed_native_build <- independent_trace_tables(
   trace_payload_path, manifest$native_build_tracer_path
 )
+replayed_native_build <-
+  fastkpc_full_cuda_fixed_sp_reconstruct_native_build_dependencies(
+    trace_path = trace_payload_path,
+    build_working_dir = manifest$native_build_working_dir,
+    tracer_path = manifest$native_build_tracer_path,
+    trace_invocation = manifest$native_build_dependency_trace_invocation
+  )
+replayed_native_build_files <- independent_csv_semantic_frame(
+  replayed_native_build$files
+)
+replayed_native_build_exclusions <- independent_csv_semantic_frame(
+  replayed_native_build$exclusions
+)
+replayed_command_projection_clean <- tryCatch({
+  commands <- replayed_native_build$commands
+  command_rows_clean <- vapply(commands, function(command) {
+    executable_index <- match(
+      command$executable_path, replayed_native_build_files$path
+    )
+    output_flags <- which(command$argv == "-o")
+    output_markers <- which(command$argv == "<OUTPUT>")
+    is.list(command) && !is.object(command) && identical(
+      names(command),
+      c("role", "executable_path", "executable_sha256", "argv")
+    ) && typeof(command$role) == "character" &&
+      length(command$role) == 1L && !anyNA(command$role) &&
+      command$role %in% c("cxx_compile", "cuda_compile", "link") &&
+      typeof(command$executable_path) == "character" &&
+      length(command$executable_path) == 1L &&
+      !anyNA(command$executable_path) &&
+      startsWith(command$executable_path, "/") &&
+      typeof(command$executable_sha256) == "character" &&
+      length(command$executable_sha256) == 1L &&
+      grepl("^[0-9a-f]{64}$", command$executable_sha256) &&
+      typeof(command$argv) == "character" && !is.object(command$argv) &&
+      is.null(attributes(command$argv)) && length(command$argv) >= 4L &&
+      !anyNA(command$argv) && all(nzchar(command$argv)) &&
+      !any(grepl("[\r\n]", command$argv)) &&
+      identical(command$argv[[1L]], "<EXECUTABLE>") &&
+      length(output_flags) == 1L &&
+      output_flags[[1L]] < length(command$argv) &&
+      identical(output_markers, output_flags + 1L) &&
+      !is.na(executable_index) && identical(
+        command$executable_sha256,
+        replayed_native_build_files$sha256[[executable_index]]
+      )
+  }, logical(1L))
+  command_roles <- vapply(commands, `[[`, character(1L), "role")
+  identical(
+    replayed_native_build$command_projection_schema_version,
+    "full-cuda-ci-native-build-command-projection-v1"
+  ) && typeof(replayed_native_build$command_count) == "integer" &&
+    length(replayed_native_build$command_count) == 1L &&
+    !is.na(replayed_native_build$command_count) &&
+    replayed_native_build$command_count >= 3L && is.list(commands) &&
+    !is.object(commands) && is.null(attributes(commands)) &&
+    length(commands) == replayed_native_build$command_count &&
+    all(command_rows_clean) && identical(
+      sort(unique(command_roles), method = "radix"),
+      c("cuda_compile", "cxx_compile", "link")
+    )
+}, error = function(error) FALSE)
+replayed_environment <- replayed_native_build$build_environment
+replayed_build_environment_clean <- tryCatch(
+  identical(
+    replayed_native_build$build_environment_schema_version,
+    "full-cuda-ci-native-build-environment-v1"
+  ) && is.data.frame(replayed_environment) && identical(
+    names(replayed_environment), c("name", "is_set", "value")
+  ) && identical(
+    replayed_environment$name, independent_native_build_environment_names
+  ) && nrow(replayed_environment) ==
+    length(independent_native_build_environment_names) && identical(
+    rownames(replayed_environment),
+    as.character(seq_len(nrow(replayed_environment)))
+  ) && typeof(replayed_environment$is_set) == "logical" &&
+    !is.object(replayed_environment$is_set) &&
+    is.null(attributes(replayed_environment$is_set)) &&
+    !anyNA(replayed_environment$is_set) &&
+    typeof(replayed_environment$value) == "character" &&
+    !is.object(replayed_environment$value) &&
+    is.null(attributes(replayed_environment$value)) &&
+    !anyNA(replayed_environment$value) &&
+    !any(grepl("[\r\n]", replayed_environment$value)) &&
+    all(replayed_environment$is_set | replayed_environment$value == ""),
+  error = function(error) FALSE
+)
+assert_true(
+  isTRUE(replayed_command_projection_clean) &&
+    isTRUE(replayed_build_environment_clean),
+  paste0(
+    "raw trace replay reconstructs the complete native build command and ",
+    "environment projection"
+  )
+)
+assert_true(
+  identical(
+    replayed_native_build$schema_version,
+    manifest$native_build_dependencies_schema_version
+  ) && identical(
+    replayed_native_build$trace_semantics,
+    manifest$native_build_dependency_trace_semantics
+  ) && identical(
+    replayed_native_build$trace_invocation,
+    manifest$native_build_dependency_trace_invocation
+  ) && identical(
+    replayed_native_build$build_working_dir,
+    manifest$native_build_working_dir
+  ) && identical(
+    replayed_native_build$trace_sha256,
+    manifest$native_build_trace_sha256
+  ) && identical(
+    replayed_native_build$tracer_path,
+    manifest$native_build_tracer_path
+  ) && identical(
+    replayed_native_build$tracer_sha256,
+    manifest$native_build_tracer_sha256
+  ) && identical(
+    replayed_native_build$dependency_count,
+    manifest$native_build_dependency_count
+  ) && identical(
+    replayed_native_build$exclusion_count,
+    manifest$native_build_exclusion_count
+  ),
+  "raw trace replay binds the manifest native build trace metadata"
+)
 assert_true(
   identical(reparsed_native_build$files, native_build_dependencies) &&
-    identical(reparsed_native_build$exclusions, native_build_exclusions) &&
     identical(
-      independent_native_build_dependencies_sha256,
-      manifest$native_build_dependencies_sha256
+      reparsed_native_build$exclusions, native_build_exclusions
+    ) && identical(
+      replayed_native_build_files, reparsed_native_build$files
+    ) && identical(
+      replayed_native_build_exclusions, reparsed_native_build$exclusions
     ),
-  "published raw trace independently reconstructs dependencies and exclusions"
+  paste0(
+    "published raw trace independently reconstructs the published and ",
+    "replayed dependency tables"
+  )
+)
+dependency_identity_lines <- c(
+  dependency_identity_lines,
+  independent_native_build_command_lines(replayed_native_build)
+)
+independent_native_build_dependencies_sha256 <- unname(digest::digest(
+  charToRaw(enc2utf8(paste0(
+    paste(dependency_identity_lines, collapse = "\n"), "\n"
+  ))),
+  algo = "sha256", serialize = FALSE
+))
+assert_identical(
+  manifest$native_build_dependencies_sha256,
+  independent_native_build_dependencies_sha256,
+  paste0(
+    "manifest binds the actual traced native build dependency closure, ",
+    "command projection, and frozen environment"
+  )
+)
+assert_true(
+  identical(
+    replayed_native_build$aggregate_sha256,
+    independent_native_build_dependencies_sha256
+  ),
+  "production raw-trace replay agrees with the independent full-v3 encoder"
 )
 closure_lines <- c(
   paste0("closure.schema=", manifest$source_closure_schema_version),
