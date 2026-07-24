@@ -2076,27 +2076,99 @@ fastkpc_validate_full_cuda_phase3_artifact <-
     !is.na(value) && nzchar(value) && !grepl("[\r\n]", value)
 }
 
+.fastkpc_full_cuda_phase3_lock_registry <- local({
+  registry <- new.env(hash = TRUE, parent = emptyenv())
+  function() registry
+})
+
+.fastkpc_full_cuda_phase3_normalize_lock_path <- function(lock_path) {
+  if (!.fastkpc_full_cuda_phase3_scalar_lock_text(lock_path)) {
+    stop("Phase 3 lock path is malformed", call. = FALSE)
+  }
+  parent <- dirname(lock_path)
+  dir.create(parent, recursive = TRUE, showWarnings = FALSE)
+  if (!dir.exists(parent)) {
+    stop("failed to create Phase 3 lock parent directory", call. = FALSE)
+  }
+  file.path(
+    normalizePath(parent, mustWork = TRUE), basename(lock_path)
+  )
+}
+
+.fastkpc_full_cuda_phase3_active_lock_state <- function(state, owner_pid) {
+  is.environment(state) &&
+    identical(sort(ls(state, all.names = TRUE)),
+              c("handle", "owner_pid", "released")) &&
+    identical(state$owner_pid, owner_pid) &&
+    identical(state$released, FALSE) &&
+    inherits(state$handle, "filelock_lock")
+}
+
 .fastkpc_full_cuda_phase3_acquire_lock <- function(
-    lock_path, purpose, .namespace_checker = requireNamespace) {
+    lock_path, purpose, .namespace_checker = requireNamespace,
+    .lock_function = filelock::lock) {
   .fastkpc_full_cuda_phase3_require_filelock(.namespace_checker)
   if (!.fastkpc_full_cuda_phase3_scalar_lock_text(lock_path) ||
-      !.fastkpc_full_cuda_phase3_scalar_lock_text(purpose)) {
+      !.fastkpc_full_cuda_phase3_scalar_lock_text(purpose) ||
+      !is.function(.lock_function)) {
     stop("Phase 3 lock acquisition inputs are malformed", call. = FALSE)
   }
-  dir.create(dirname(lock_path), recursive = TRUE, showWarnings = FALSE)
+  lock_path <- .fastkpc_full_cuda_phase3_normalize_lock_path(lock_path)
+  owner_pid <- as.integer(Sys.getpid())
+  registry <- .fastkpc_full_cuda_phase3_lock_registry()
+  if (exists(lock_path, envir = registry, inherits = FALSE)) {
+    existing <- get(lock_path, envir = registry, inherits = FALSE)
+    clean_entry <- is.list(existing) && !is.object(existing) &&
+      identical(names(existing), c("owner_pid", "state")) &&
+      typeof(existing$owner_pid) == "integer" &&
+      length(existing$owner_pid) == 1L && !is.na(existing$owner_pid) &&
+      is.environment(existing$state)
+    if (!isTRUE(clean_entry)) {
+      stop("Phase 3 process-local lock registry is malformed",
+           call. = FALSE)
+    }
+    if (!identical(existing$owner_pid, owner_pid)) {
+      rm(list = lock_path, envir = registry)
+    } else if (.fastkpc_full_cuda_phase3_active_lock_state(
+                 existing$state, owner_pid
+               )) {
+      stop("Phase 3 ", purpose,
+           " lock is already held by this process", call. = FALSE)
+    } else if (identical(existing$state$owner_pid, owner_pid) &&
+               identical(existing$state$released, TRUE) &&
+               is.null(existing$state$handle)) {
+      rm(list = lock_path, envir = registry)
+    } else {
+      stop("Phase 3 process-local lock registry state is invalid",
+           call. = FALSE)
+    }
+  }
   handle <- tryCatch(
-    filelock::lock(lock_path, exclusive = TRUE, timeout = 0),
+    .lock_function(lock_path, exclusive = TRUE, timeout = 0),
     error = function(error) {
       stop("failed to acquire Phase 3 ", purpose, " lock: ",
            conditionMessage(error), call. = FALSE)
     }
   )
   if (is.null(handle)) {
-    stop("Phase 3 ", purpose, " lock is already held", call. = FALSE)
+    stop("Phase 3 ", purpose,
+         " lock is already held by another process", call. = FALSE)
   }
+  registered <- FALSE
+  on.exit({
+    if (!isTRUE(registered)) {
+      try(filelock::unlock(handle), silent = TRUE)
+    }
+  }, add = TRUE)
   state <- new.env(parent = emptyenv())
   state$handle <- handle
+  state$owner_pid <- owner_pid
   state$released <- FALSE
+  assign(
+    lock_path, list(owner_pid = owner_pid, state = state),
+    envir = registry
+  )
+  registered <- TRUE
   list(lock_path = lock_path, purpose = purpose, state = state)
 }
 
@@ -2104,16 +2176,26 @@ fastkpc_validate_full_cuda_phase3_artifact <-
   is.list(lock) && !is.object(lock) &&
     identical(names(lock), c("lock_path", "purpose", "state")) &&
     .fastkpc_full_cuda_phase3_scalar_lock_text(lock$lock_path) &&
-    identical(lock$purpose, purpose) && is.environment(lock$state) &&
-    identical(sort(ls(lock$state, all.names = TRUE)),
-              c("handle", "released")) &&
-    identical(lock$state$released, FALSE) &&
-    inherits(lock$state$handle, "filelock_lock")
+    identical(lock$purpose, purpose) &&
+    .fastkpc_full_cuda_phase3_active_lock_state(
+      lock$state, as.integer(Sys.getpid())
+    )
 }
 
 .fastkpc_full_cuda_phase3_owns_lock <- function(lock, purpose) {
-  .fastkpc_full_cuda_phase3_lock_shape_valid(lock, purpose) &&
-    file.exists(lock$lock_path) && !dir.exists(lock$lock_path)
+  if (!.fastkpc_full_cuda_phase3_lock_shape_valid(lock, purpose) ||
+      !file.exists(lock$lock_path) || dir.exists(lock$lock_path)) {
+    return(FALSE)
+  }
+  registry <- .fastkpc_full_cuda_phase3_lock_registry()
+  if (!exists(lock$lock_path, envir = registry, inherits = FALSE)) {
+    return(FALSE)
+  }
+  entry <- get(lock$lock_path, envir = registry, inherits = FALSE)
+  is.list(entry) && !is.object(entry) &&
+    identical(names(entry), c("owner_pid", "state")) &&
+    identical(entry$owner_pid, as.integer(Sys.getpid())) &&
+    identical(entry$state, lock$state)
 }
 
 .fastkpc_full_cuda_phase3_refresh_lock <- function(
@@ -2132,13 +2214,27 @@ fastkpc_validate_full_cuda_phase3_artifact <-
   if (!is.list(lock) || !identical(
         names(lock), c("lock_path", "purpose", "state")
       ) || !identical(lock$purpose, purpose) || !is.environment(lock$state) ||
+      !identical(lock$state$owner_pid, as.integer(Sys.getpid())) ||
       !identical(lock$state$released, FALSE) ||
       !inherits(lock$state$handle, "filelock_lock")) {
     return(invisible(NULL))
   }
-  filelock::unlock(lock$state$handle)
+  unlocked <- filelock::unlock(lock$state$handle)
+  if (!isTRUE(unlocked)) {
+    stop("failed to release Phase 3 ", purpose, " lock", call. = FALSE)
+  }
   lock$state$handle <- NULL
   lock$state$released <- TRUE
+  registry <- .fastkpc_full_cuda_phase3_lock_registry()
+  if (exists(lock$lock_path, envir = registry, inherits = FALSE)) {
+    entry <- get(lock$lock_path, envir = registry, inherits = FALSE)
+    if (is.list(entry) && !is.object(entry) &&
+        identical(names(entry), c("owner_pid", "state")) &&
+        identical(entry$owner_pid, as.integer(Sys.getpid())) &&
+        identical(entry$state, lock$state)) {
+      rm(list = lock$lock_path, envir = registry)
+    }
+  }
   invisible(NULL)
 }
 

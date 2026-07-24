@@ -212,14 +212,76 @@ finish_lock_child <- function(child, crash = FALSE) {
   }
   invisible(result)
 }
+inspect_inherited_lock_in_child <- function(lock_case, inherited_lock) {
+  parent_pid <- as.integer(Sys.getpid())
+  job <- parallel::mcparallel({
+    inherited_owns <- lock_case$owns(inherited_lock)
+    os_attempt_count <- 0L
+    acquisition_error <- tryCatch({
+      .fastkpc_full_cuda_phase3_acquire_lock(
+        lock_path = inherited_lock$lock_path,
+        purpose = lock_case$purpose,
+        .lock_function = function(...) {
+          os_attempt_count <<- os_attempt_count + 1L
+          NULL
+        }
+      )
+      NULL
+    }, error = function(error) conditionMessage(error))
+    registry_cleared <- !exists(
+      inherited_lock$lock_path,
+      envir = .fastkpc_full_cuda_phase3_lock_registry(),
+      inherits = FALSE
+    )
+    lock_case$release(inherited_lock)
+    list(
+      pid = as.integer(Sys.getpid()),
+      inherited_owns = inherited_owns,
+      os_attempt_count = os_attempt_count,
+      registry_cleared = registry_cleared,
+      inherited_released = inherited_lock$state$released,
+      error = acquisition_error
+    )
+  }, silent = TRUE)
+  result <- suppressWarnings(parallel::mccollect(job))
+  assert_true(
+    length(result) == 1L && is.list(result[[1L]]) &&
+      result[[1L]]$pid != parent_pid,
+    "lock attempt executes in an independent child"
+  )
+  result[[1L]]
+}
+attempt_os_lock_in_rscript <- function(lock_path) {
+  script <- tempfile("phase3-filelock-child-", fileext = ".R")
+  on.exit(unlink(script, force = TRUE), add = TRUE)
+  writeLines(c(
+    "args <- commandArgs(trailingOnly = TRUE)",
+    "handle <- filelock::lock(args[[1L]], exclusive = TRUE, timeout = 0)",
+    "if (is.null(handle)) {",
+    "  cat('blocked')",
+    "} else {",
+    "  filelock::unlock(handle)",
+    "  cat('acquired')",
+    "}"
+  ), script, useBytes = TRUE)
+  result <- system2(
+    file.path(R.home("bin"), "Rscript"), c(script, lock_path),
+    stdout = TRUE, stderr = TRUE
+  )
+  assert_true(is.null(attr(result, "status")) && length(result) == 1L,
+              "independent Rscript lock attempt completes")
+  result[[1L]]
+}
 lock_cases <- list(
   artifact = list(
+    purpose = "oracle_artifact",
     path = .fastkpc_full_cuda_phase3_oracle_artifact_lock_path,
     acquire = .fastkpc_full_cuda_phase3_acquire_oracle_artifact_lock,
     owns = .fastkpc_full_cuda_phase3_owns_oracle_artifact_lock,
     release = .fastkpc_full_cuda_phase3_release_oracle_artifact_lock
   ),
   runner = list(
+    purpose = "shard_runner",
     path = .fastkpc_full_cuda_phase3_shard_runner_lock_path,
     acquire = .fastkpc_full_cuda_phase3_acquire_shard_runner_lock,
     owns = function(lock) {
@@ -228,6 +290,101 @@ lock_cases <- list(
     release = .fastkpc_full_cuda_phase3_release_shard_runner_lock
   )
 )
+for (label in names(lock_cases)) {
+  lock_case <- lock_cases[[label]]
+  registry_output <- tempfile(paste0("phase3-", label, "-registry-"))
+  outer <- lock_case$acquire(registry_output)
+  on.exit(try(lock_case$release(outer), silent = TRUE), add = TRUE)
+  lock_path <- outer$lock_path
+  lock_function_call_count <- 0L
+  counting_lock <- function(path, exclusive, timeout) {
+    lock_function_call_count <<- lock_function_call_count + 1L
+    filelock::lock(path, exclusive = exclusive, timeout = timeout)
+  }
+  duplicate_error <- tryCatch({
+    .fastkpc_full_cuda_phase3_acquire_lock(
+      lock_path = lock_path, purpose = lock_case$purpose,
+      .lock_function = counting_lock
+    )
+    NULL
+  }, error = function(error) error)
+  assert_true(
+    inherits(duplicate_error, "error") && grepl(
+      "already held by this process", conditionMessage(duplicate_error),
+      fixed = TRUE
+    ) && lock_function_call_count == 0L,
+    paste(label, "same-process duplicate is rejected before OS acquisition")
+  )
+  alias_path <- file.path(dirname(lock_path), ".", basename(lock_path))
+  alias_error <- tryCatch({
+    .fastkpc_full_cuda_phase3_acquire_lock(
+      lock_path = alias_path, purpose = lock_case$purpose,
+      .lock_function = counting_lock
+    )
+    NULL
+  }, error = function(error) error)
+  assert_true(
+    inherits(alias_error, "error") && grepl(
+      "already held by this process", conditionMessage(alias_error),
+      fixed = TRUE
+    ) && lock_function_call_count == 0L,
+    paste(label, "normalized lock-path aliases collide before OS acquisition")
+  )
+
+  inherited_child <- inspect_inherited_lock_in_child(lock_case, outer)
+  assert_true(
+    identical(inherited_child$inherited_owns, FALSE) &&
+      identical(inherited_child$os_attempt_count, 1L) &&
+      isTRUE(inherited_child$registry_cleared) &&
+      identical(inherited_child$inherited_released, FALSE) &&
+      grepl("another process", inherited_child$error, fixed = TRUE) &&
+      identical(attempt_os_lock_in_rscript(lock_path), "blocked") &&
+      isTRUE(lock_case$owns(outer)),
+    paste(
+      label,
+      "fork ignores inherited registry state while OS locking stays authoritative"
+    )
+  )
+
+  lock_registry <- .fastkpc_full_cuda_phase3_lock_registry()
+  registry_entry <- get(lock_path, envir = lock_registry, inherits = FALSE)
+  assert_true(
+    identical(registry_entry$owner_pid, as.integer(Sys.getpid())) &&
+      identical(registry_entry$state, outer$state),
+    paste(label, "registry binds the normalized path to the outer state")
+  )
+  lock_case$release(outer)
+  lock_case$release(outer)
+  assert_true(
+    !exists(lock_path, envir = lock_registry, inherits = FALSE) &&
+      !isTRUE(lock_case$owns(outer)),
+    paste(label, "exact-state release clears the registry idempotently")
+  )
+  assert_true(
+    identical(attempt_os_lock_in_rscript(lock_path), "acquired"),
+    paste(label, "independent child acquires immediately after outer release")
+  )
+
+  remapped <- lock_case$acquire(registry_output)
+  replacement_state <- new.env(parent = emptyenv())
+  assign(
+    remapped$lock_path,
+    list(owner_pid = as.integer(Sys.getpid()), state = replacement_state),
+    envir = lock_registry
+  )
+  lock_case$release(remapped)
+  preserved_entry <- get(
+    remapped$lock_path, envir = lock_registry, inherits = FALSE
+  )
+  assert_true(
+    identical(preserved_entry$state, replacement_state) &&
+      identical(remapped$state$released, TRUE),
+    paste(label, "release never removes a registry entry for another state")
+  )
+  rm(list = remapped$lock_path, envir = lock_registry)
+  final_lock <- lock_case$acquire(registry_output)
+  lock_case$release(final_lock)
+}
 for (purpose in names(lock_cases)) {
   lock_case <- lock_cases[[purpose]]
   lock_output <- tempfile(paste0("phase3-", purpose, "-os-lock-"))
