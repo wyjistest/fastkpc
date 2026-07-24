@@ -305,11 +305,296 @@ assert_error(
 )
 
 direct_output_dir <- tempfile("full-cuda-ci-direct-")
-direct_artifact <- fastkpc_full_cuda_shadow_write_direct_ci(
-  catalog = catalog,
-  output_dir = direct_output_dir,
-  plan = plan
+supplied_plan_calls <- new.env(parent = emptyenv())
+supplied_plan_calls$canonical_plan <- 0L
+supplied_plan_calls$authenticated_phase2 <- 0L
+supplied_plan_calls$phase2_capture <- 0L
+run_supplied_plan_direct_ci <- function() {
+  instrumented <- c(
+    canonical_plan = "fastkpc_full_cuda_shadow_plan",
+    authenticated_phase2 =
+      "fastkpc_full_cuda_shadow_authenticated_phase2_records",
+    phase2_capture = "fastkpc_full_cuda_fixed_sp_capture_phase2_files"
+  )
+  originals <- mget(instrumented, envir = .GlobalEnv, inherits = FALSE)
+  on.exit({
+    for (index in seq_along(instrumented)) {
+      assign(
+        instrumented[[index]], originals[[index]], envir = .GlobalEnv
+      )
+    }
+  }, add = TRUE)
+  for (field in names(instrumented)) {
+    local({
+      call_field <- field
+      call_name <- instrumented[[field]]
+      assign(call_name, function(...) {
+        supplied_plan_calls[[call_field]] <-
+          supplied_plan_calls[[call_field]] + 1L
+        stop(
+          "supplied-plan direct CI called forbidden ", call_field,
+          call. = FALSE
+        )
+      }, envir = .GlobalEnv)
+    })
+  }
+  fastkpc_full_cuda_shadow_write_direct_ci(
+    catalog = catalog,
+    output_dir = direct_output_dir,
+    plan = plan
+  )
+}
+direct_artifact <- run_supplied_plan_direct_ci()
+assert_true(
+  identical(
+    unlist(as.list(supplied_plan_calls), use.names = TRUE)[
+      c("canonical_plan", "authenticated_phase2", "phase2_capture")
+    ],
+    c(canonical_plan = 0L, authenticated_phase2 = 0L, phase2_capture = 0L)
+  ),
+  "supplied-plan direct CI must not rebuild or recapture Phase 2 evidence"
 )
+
+assert_supplied_plan_rejected <- function(
+    candidate_plan, message, candidate_catalog = catalog) {
+  original_backend <- fastkpc_legacy_dcov_gamma_cpp_oracle_batch
+  backend_calls <- 0L
+  assign(
+    "fastkpc_legacy_dcov_gamma_cpp_oracle_batch",
+    function(...) {
+      backend_calls <<- backend_calls + 1L
+      stop("hostile supplied plan reached direct-CI backend", call. = FALSE)
+    },
+    envir = .GlobalEnv
+  )
+  on.exit(assign(
+    "fastkpc_legacy_dcov_gamma_cpp_oracle_batch", original_backend,
+    envir = .GlobalEnv
+  ), add = TRUE)
+  error <- tryCatch(
+    .fastkpc_full_cuda_shadow_direct_ci_rows(
+      candidate_catalog, candidate_plan
+    ),
+    error = identity
+  )
+  record_hardening_true(
+    inherits(error, "error") && identical(
+      conditionMessage(error),
+      "direct-CI execution plan does not match authenticated catalog"
+    ),
+    paste0(message, " must fail closed at plan authentication")
+  )
+  record_hardening_true(
+    identical(backend_calls, 0L),
+    paste0(message, " must fail before the direct-CI backend")
+  )
+  invisible(error)
+}
+
+resign_supplied_plan <- function(
+    candidate_plan, rehash_direct = FALSE,
+    rehash_conditional = FALSE) {
+  if (isTRUE(rehash_direct)) {
+    candidate_plan$direct_tests_sha256 <-
+      fastkpc_full_cuda_census_frame_hash(candidate_plan$direct_tests)
+  }
+  if (isTRUE(rehash_conditional)) {
+    candidate_plan$conditional_tests_sha256 <-
+      fastkpc_full_cuda_census_frame_hash(candidate_plan$conditional_tests)
+  }
+  candidate_plan$plan_identity_sha256 <-
+    .fastkpc_full_cuda_shadow_plan_metadata_hash(candidate_plan)
+  forged_token <- new.env(parent = emptyenv())
+  for (field in ls(candidate_plan$authentication_token, all.names = TRUE)) {
+    value <- candidate_plan$authentication_token[[field]]
+    if (identical(field, "plan_identity_sha256")) {
+      value <- candidate_plan$plan_identity_sha256
+    }
+    assign(field, value, envir = forged_token)
+  }
+  lockEnvironment(forged_token, bindings = TRUE)
+  candidate_plan$authentication_token <- forged_token
+  candidate_plan
+}
+
+hostile_direct_plan <- plan
+hostile_direct_plan$direct_tests$source_task_index[[1L]] <-
+  hostile_direct_plan$direct_tests$source_task_index[[1L]] + 1L
+assert_supplied_plan_rejected(
+  hostile_direct_plan, "mutated direct plan row"
+)
+resigned_direct_plan <- resign_supplied_plan(
+  hostile_direct_plan, rehash_direct = TRUE
+)
+assert_supplied_plan_rejected(
+  resigned_direct_plan, "self-consistently re-signed direct plan row"
+)
+rm(hostile_direct_plan, resigned_direct_plan)
+
+hostile_conditional_plan <- plan
+hostile_conditional_plan$conditional_tests$shard_id[[1L]] <- as.integer(
+  (hostile_conditional_plan$conditional_tests$shard_id[[1L]] + 1L) %% 64L
+)
+assert_supplied_plan_rejected(
+  hostile_conditional_plan, "mutated conditional plan row"
+)
+resigned_conditional_plan <- resign_supplied_plan(
+  hostile_conditional_plan, rehash_conditional = TRUE
+)
+assert_supplied_plan_rejected(
+  resigned_conditional_plan,
+  "self-consistently re-signed conditional plan row"
+)
+rm(hostile_conditional_plan, resigned_conditional_plan)
+
+hostile_setup_association_plan <- plan
+hostile_setup_association_plan$setup_association_sha256 <- strrep("0", 64L)
+assert_supplied_plan_rejected(
+  hostile_setup_association_plan, "mutated setup association metadata"
+)
+resigned_association_plan <- resign_supplied_plan(
+  hostile_setup_association_plan
+)
+assert_supplied_plan_rejected(
+  resigned_association_plan,
+  "self-consistently re-signed setup association metadata"
+)
+rm(hostile_setup_association_plan, resigned_association_plan)
+
+hostile_target_association_plan <- plan
+hostile_target_association_plan$target_association_sha256 <- strrep("1", 64L)
+assert_supplied_plan_rejected(
+  hostile_target_association_plan, "mutated target association metadata"
+)
+rm(hostile_target_association_plan)
+
+hostile_setup_file_plan <- plan
+hostile_setup_file_plan$phase2_setup_index_csv_sha256 <- strrep("7", 64L)
+assert_supplied_plan_rejected(
+  hostile_setup_file_plan, "mutated Phase 2 setup file identity"
+)
+rm(hostile_setup_file_plan)
+
+hostile_target_file_plan <- plan
+hostile_target_file_plan$phase2_target_state_index_rds_sha256 <-
+  strrep("8", 64L)
+assert_supplied_plan_rejected(
+  hostile_target_file_plan, "mutated Phase 2 target file identity"
+)
+rm(hostile_target_file_plan)
+
+hostile_route_plan <- plan
+hostile_route_plan$route_config_sha256 <- strrep("2", 64L)
+assert_supplied_plan_rejected(
+  hostile_route_plan, "mutated route metadata"
+)
+rm(hostile_route_plan)
+
+hostile_catalog_binding_plan <- plan
+hostile_catalog_binding_plan$catalog_authority_sha256 <- strrep("3", 64L)
+assert_supplied_plan_rejected(
+  hostile_catalog_binding_plan, "mutated plan catalog binding"
+)
+rm(hostile_catalog_binding_plan)
+
+hostile_logical_catalog <- catalog
+hostile_logical_catalog$inputs$logical_tests$x[[1L]] <-
+  hostile_logical_catalog$inputs$logical_tests$y[[1L]]
+assert_supplied_plan_rejected(
+  plan, "mutated canonical direct catalog row",
+  candidate_catalog = hostile_logical_catalog
+)
+rm(hostile_logical_catalog)
+
+missing_token_plan <- plan
+missing_token_plan$authentication_token <- NULL
+assert_supplied_plan_rejected(missing_token_plan, "missing plan token")
+rm(missing_token_plan)
+
+forged_token <- new.env(parent = emptyenv())
+if (is.environment(plan$authentication_token)) {
+  for (field in ls(plan$authentication_token, all.names = TRUE)) {
+    assign(field, plan$authentication_token[[field]], envir = forged_token)
+  }
+} else {
+  forged_token$schema_version <- "full-cuda-ci-shadow-plan-token-v1"
+  forged_token$registry_id <- strrep("4", 64L)
+  forged_token$catalog_authority_sha256 <- strrep("5", 64L)
+}
+lockEnvironment(forged_token, bindings = TRUE)
+forged_token_plan <- plan
+forged_token_plan$authentication_token <- forged_token
+assert_supplied_plan_rejected(forged_token_plan, "forged plan token")
+rm(forged_token_plan, forged_token)
+
+shadow_registry_available <-
+  exists(
+    ".fastkpc_full_cuda_shadow_plan_registry", envir = .GlobalEnv,
+    inherits = FALSE
+  ) && is.environment(plan$authentication_token) &&
+  exists("registry_id", envir = plan$authentication_token, inherits = FALSE)
+record_hardening_true(
+  shadow_registry_available,
+  "authenticated plan must expose a process-local registry token"
+)
+if (isTRUE(shadow_registry_available)) {
+  shadow_registry <- get(
+    ".fastkpc_full_cuda_shadow_plan_registry", envir = .GlobalEnv,
+    inherits = FALSE
+  )
+  stale_registry_id <- plan$authentication_token$registry_id
+  stale_registry_entry <- get(
+    stale_registry_id, envir = shadow_registry, inherits = FALSE
+  )
+  record_hardening_true(
+    !any(c("direct_tests", "conditional_tests", "setup", "target") %in%
+           names(stale_registry_entry)) &&
+      is.data.frame(stale_registry_entry$phase2_file_records) &&
+      nrow(stale_registry_entry$phase2_file_records) == 2L &&
+      as.numeric(object.size(stale_registry_entry)) < 1000000,
+    "shadow plan registry entry must retain only compact authenticated identity"
+  )
+  stale_binding_locked <- bindingIsLocked(stale_registry_id, shadow_registry)
+  if (stale_binding_locked) unlockBinding(stale_registry_id, shadow_registry)
+  rm(list = stale_registry_id, envir = shadow_registry)
+  assert_supplied_plan_rejected(plan, "stale plan token")
+  assign(stale_registry_id, stale_registry_entry, envir = shadow_registry)
+  if (stale_binding_locked) lockBinding(stale_registry_id, shadow_registry)
+}
+
+catalog_authority <- fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
+catalog_authority_registry <- get(
+  ".fastkpc_full_cuda_phase3_catalog_authority_registry", envir = .GlobalEnv,
+  inherits = FALSE
+)
+cross_authority <- get(
+  catalog_authority$authority_sha256,
+  envir = catalog_authority_registry,
+  inherits = FALSE
+)
+cross_authority$phase2_source_commit <- strrep("6", 40L)
+cross_authority$sha256 <-
+  .fastkpc_full_cuda_phase3_catalog_authority_hash(cross_authority)
+cross_catalog <- catalog
+cross_catalog$phase2_manifest$source_commit <-
+  cross_authority$phase2_source_commit
+cross_catalog$phase3_catalog_authority_token <-
+  .fastkpc_full_cuda_phase3_register_catalog_authority(cross_authority)
+cross_catalog$phase3_catalog_authority_sha256 <- cross_authority$sha256
+cross_catalog_authority <-
+  fastkpc_full_cuda_phase3_discover_catalog_authority(cross_catalog)
+assert_true(
+  !identical(
+    cross_catalog_authority$authority_sha256,
+    catalog_authority$authority_sha256
+  ),
+  "cross-catalog probe must have a distinct authenticated authority"
+)
+assert_supplied_plan_rejected(
+  plan, "cross-catalog supplied plan", candidate_catalog = cross_catalog
+)
+rm(list = cross_authority$sha256, envir = catalog_authority_registry)
+
 validated_direct <- fastkpc_full_cuda_phase3_validate_direct_ci_payload(
   output_dir = direct_output_dir,
   catalog = catalog
