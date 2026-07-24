@@ -1561,6 +1561,15 @@ fastkpc_load_full_cuda_ci_oracle <- function(output_dir) {
   )
 }
 
+fastkpc_full_cuda_compare_candidate_skeleton <- function(oracle, candidate) {
+  fastkpc_full_cuda_compare_core(
+    reference = oracle$reference,
+    candidate = candidate,
+    reference_deletions = oracle$deletion_trace,
+    reference_logical = oracle$logical_trace
+  )
+}
+
 fastkpc_compare_full_cuda_ci_candidate <- function(
     oracle, candidate, output_dir, candidate_route = "candidate",
     commands = character()) {
@@ -1574,11 +1583,8 @@ fastkpc_compare_full_cuda_ci_candidate <- function(
   }
   candidate <- fastkpc_full_cuda_extract_skeleton(candidate,
                                                   role = "candidate")
-  comparison <- fastkpc_full_cuda_compare_core(
-    reference = oracle$reference,
-    candidate = candidate,
-    reference_deletions = oracle$deletion_trace,
-    reference_logical = oracle$logical_trace
+  comparison <- fastkpc_full_cuda_compare_candidate_skeleton(
+    oracle = oracle, candidate = candidate
   )
   elapsed <- if (fastkpc_full_cuda_is_skeleton(candidate)) {
     fastkpc_full_cuda_summary_value(candidate, "elapsed_sec", NA_real_)

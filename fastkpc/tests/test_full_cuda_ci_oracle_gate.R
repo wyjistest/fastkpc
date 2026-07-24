@@ -22,6 +22,10 @@ assert_true(
   exists("fastkpc_compare_full_cuda_ci_candidate", mode = "function"),
   "full CUDA CI candidate comparator should exist"
 )
+assert_true(
+  exists("fastkpc_full_cuda_compare_candidate_skeleton", mode = "function"),
+  "in-memory full CUDA CI candidate skeleton comparator should exist"
+)
 assert_true(file.exists(runner_path),
             "full CUDA CI oracle runner should exist")
 
@@ -330,6 +334,18 @@ assert_error(
   fastkpc_load_full_cuda_ci_oracle(tampered_oracle_dir),
   "n.edgetests",
   "oracle loader should reject a truncated logical trace artifact"
+)
+
+in_memory_comparison <- fastkpc_full_cuda_compare_candidate_skeleton(
+  oracle, candidate
+)
+assert_true(
+  isTRUE(in_memory_comparison$summary$pass) &&
+    isTRUE(in_memory_comparison$summary$adjacency_identical) &&
+    isTRUE(in_memory_comparison$summary$sepsets_identical) &&
+    isTRUE(in_memory_comparison$summary$n_edgetests_identical) &&
+    isTRUE(in_memory_comparison$summary$deletions_identical),
+  "in-memory candidate skeleton comparison should use the oracle core"
 )
 
 comparison <- fastkpc_compare_full_cuda_ci_candidate(
