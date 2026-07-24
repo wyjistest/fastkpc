@@ -6242,14 +6242,110 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
   result
 }
 
+.fastkpc_full_cuda_phase3_format_double_exact <- function(value) {
+  if (typeof(value) != "double" || is.object(value)) {
+    stop("Phase 3 exact formatter requires bare doubles", call. = FALSE)
+  }
+  result <- rep.int(NA_character_, length(value))
+  present <- which(!is.na(value))
+  candidates <- as.character(value[present])
+  parsed <- suppressWarnings(as.double(candidates))
+  exact <- !is.na(parsed) & parsed == value[present]
+  result[present[exact]] <- candidates[exact]
+  unresolved <- which(!exact)
+  for (digits in 16:17) {
+    if (length(unresolved) == 0L) break
+    candidates <- sprintf(
+      paste0("%.", digits, "g"), value[present[unresolved]]
+    )
+    parsed <- suppressWarnings(as.double(candidates))
+    exact <- !is.na(parsed) & parsed == value[present[unresolved]]
+    if (any(exact)) {
+      result[present[unresolved[exact]]] <- candidates[exact]
+      unresolved <- unresolved[!exact]
+    }
+  }
+  if (length(unresolved) > 0L) {
+    stop("Phase 3 double cannot be formatted exactly", call. = FALSE)
+  }
+  result
+}
+
 .fastkpc_full_cuda_phase3_write_csv <- function(value, path) {
-  old_digits <- getOption("digits")
-  on.exit(options(digits = old_digits), add = TRUE)
-  options(digits = 17L)
+  serialized <- .fastkpc_full_cuda_phase3_csv_frame(value)
+  quote_columns <- which(vapply(serialized, function(column) {
+    is.character(column) || is.factor(column)
+  }, logical(1L)))
+  for (field in names(serialized)[vapply(
+      serialized, typeof, character(1L)
+    ) == "double"]) {
+    serialized[[field]] <- .fastkpc_full_cuda_phase3_format_double_exact(
+      serialized[[field]]
+    )
+  }
   utils::write.table(
-    .fastkpc_full_cuda_phase3_csv_frame(value), path,
+    serialized[0L, , drop = FALSE], path,
     sep = ",", row.names = FALSE, col.names = TRUE, quote = TRUE,
     qmethod = "double", na = "NA", fileEncoding = "UTF-8"
+  )
+  if (nrow(serialized) > 0L) {
+    utils::write.table(
+      serialized, path, append = TRUE,
+      sep = ",", row.names = FALSE, col.names = FALSE,
+      quote = quote_columns, qmethod = "double", na = "NA",
+      fileEncoding = "UTF-8"
+    )
+  }
+  invisible(path)
+}
+
+.fastkpc_full_cuda_phase3_exact_json_numbers <- function(value) {
+  if (typeof(value) == "double" && !is.object(value)) {
+    if (length(value) == 0L) return(value)
+    if (length(value) == 1L) {
+      if (!is.finite(value)) return(value)
+      token <- .fastkpc_full_cuda_phase3_format_double_exact(value)
+      parsed <- tryCatch(
+        jsonlite::fromJSON(token, simplifyVector = TRUE),
+        error = function(error) NULL
+      )
+      if (is.null(parsed) || length(parsed) != 1L ||
+          !identical(as.double(parsed), value)) {
+        token <- format(value, digits = 17L, trim = TRUE)
+        parsed <- tryCatch(
+          jsonlite::fromJSON(token, simplifyVector = TRUE),
+          error = function(error) NULL
+        )
+      }
+      if (!grepl(
+            "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?$",
+            token
+          ) || is.null(parsed) || length(parsed) != 1L ||
+          !identical(as.double(parsed), value)) {
+        stop("Phase 3 exact JSON number does not round-trip",
+             call. = FALSE)
+      }
+      return(structure(token, class = "json"))
+    }
+    result <- lapply(seq_along(value), function(index) {
+      .fastkpc_full_cuda_phase3_exact_json_numbers(value[[index]])
+    })
+    return(result)
+  }
+  if (is.list(value) && !is.data.frame(value) && !is.object(value)) {
+    return(lapply(
+      value, .fastkpc_full_cuda_phase3_exact_json_numbers
+    ))
+  }
+  value
+}
+
+.fastkpc_full_cuda_phase3_write_json_exact <- function(value, path) {
+  fastkpc_full_cuda_require_namespace("jsonlite")
+  jsonlite::write_json(
+    .fastkpc_full_cuda_phase3_exact_json_numbers(value),
+    path, auto_unbox = TRUE, pretty = TRUE, null = "null",
+    na = "null", digits = NA, json_verbatim = TRUE
   )
   invisible(path)
 }
@@ -6323,16 +6419,9 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
   }
   rownames(result) <- NULL
   mismatched <- names(expected_csv)[!vapply(
-    names(expected_csv), function(field) {
-      if (typeof(expected_csv[[field]]) == "double") {
-        isTRUE(all.equal(
-          result[[field]], expected_csv[[field]],
-          tolerance = 1e-15, check.attributes = FALSE
-        ))
-      } else {
-        identical(result[[field]], expected_csv[[field]])
-      }
-    }, logical(1L)
+    names(expected_csv),
+    function(field) identical(result[[field]], expected_csv[[field]]),
+    logical(1L)
   )]
   if (length(mismatched) > 0L) {
     stop(label, " CSV values do not match RDS: ", mismatched[[1L]],
@@ -6465,18 +6554,9 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     return(FALSE)
   }
   all(vapply(required, function(field) {
-    expected_value <- expected[[field]]
-    if (typeof(expected_value) == "double" && length(expected_value) == 1L &&
-        is.finite(expected_value)) {
-      isTRUE(all.equal(
-        as.double(actual[[field]]), expected_value,
-        tolerance = 1e-15, check.attributes = FALSE
-      ))
-    } else {
-      .fastkpc_full_cuda_phase3_identity_value_equal(
-        actual[[field]], expected_value
-      )
-    }
+    .fastkpc_full_cuda_phase3_identity_value_equal(
+      actual[[field]], expected[[field]]
+    )
   }, logical(1L)))
 }
 
@@ -6777,7 +6857,9 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     artifact_lock, .boundary = "publication_payloads_published"
   )
   manifest_temporary <- file.path(staging_dir, "manifest.json")
-  fastkpc_full_cuda_write_json(manifest, manifest_temporary)
+  .fastkpc_full_cuda_phase3_write_json_exact(
+    manifest, manifest_temporary
+  )
   if (file.exists(paths$manifest_json)) unlink(paths$manifest_json, force = TRUE)
   if (!file.rename(manifest_temporary, paths$manifest_json)) {
     stop("failed to publish Phase 3 oracle manifest", call. = FALSE)
@@ -6793,7 +6875,7 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     manifest_sha256 = manifest_sha256, pass = TRUE
   )
   summary_temporary <- file.path(staging_dir, "summary.json")
-  fastkpc_full_cuda_write_json(summary, summary_temporary)
+  .fastkpc_full_cuda_phase3_write_json_exact(summary, summary_temporary)
   if (file.exists(paths$summary_json)) unlink(paths$summary_json, force = TRUE)
   if (!file.rename(summary_temporary, paths$summary_json)) {
     stop("failed to publish Phase 3 oracle summary", call. = FALSE)
@@ -6879,7 +6961,7 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
       any(dir.exists(expected_payloads))) {
     stop("Phase 3 oracle immutable file set is incomplete", call. = FALSE)
   }
-  snapshot_once <- function() {
+  scan_surface <- function() {
     entries <- sort(list.files(
       output_dir, all.files = TRUE, no.. = TRUE, recursive = TRUE,
       full.names = TRUE, include.dirs = TRUE
@@ -6899,14 +6981,36 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     if (any(directories == regular_files)) {
       stop("Phase 3 oracle evidence entry type is invalid", call. = FALSE)
     }
-    identities <- rep.int("@directory", length(entries))
-    identities[regular_files] <- vapply(
-      entries[regular_files],
-      fastkpc_full_cuda_census_file_hash,
-      character(1L)
+    byte_size <- rep.int(NA_real_, length(entries))
+    byte_size[regular_files] <- as.numeric(
+      file.info(entries[regular_files])$size
     )
-    names(identities) <- relative_paths
-    identities
+    if (anyNA(byte_size[regular_files]) ||
+        any(byte_size[regular_files] < 0)) {
+      stop("Phase 3 oracle evidence file size is invalid", call. = FALSE)
+    }
+    data.frame(
+      relative_path = relative_paths,
+      entry_type = ifelse(regular_files, "regular_file", "directory"),
+      byte_size = byte_size,
+      stringsAsFactors = FALSE
+    )
+  }
+  snapshot_once <- function() {
+    before <- scan_surface()
+    hashes <- rep.int(NA_character_, nrow(before))
+    regular_files <- before$entry_type == "regular_file"
+    hashes[regular_files] <- vapply(
+      file.path(output_dir, before$relative_path[regular_files]),
+      fastkpc_full_cuda_census_file_hash, character(1L)
+    )
+    after <- scan_surface()
+    if (!identical(before, after)) {
+      stop("Phase 3 oracle evidence changed while snapshotting",
+           call. = FALSE)
+    }
+    before$sha256 <- hashes
+    before
   }
   first <- snapshot_once()
   second <- snapshot_once()
@@ -7109,11 +7213,19 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("Phase 3 oracle manifest payload hash namespace is invalid",
          call. = FALSE)
   }
-  actual_hashes <- immutable_file_hashes[payload_names]
-  sizes <- as.numeric(file.info(
-    unlist(paths[payload_keys], use.names = FALSE)
-  )$size)
-  if (anyNA(sizes) || any(sizes <= 0) ||
+  payload_rows <- match(
+    payload_names, immutable_file_hashes$relative_path
+  )
+  if (anyNA(payload_rows) || any(
+        immutable_file_hashes$entry_type[payload_rows] != "regular_file"
+      )) {
+    stop("Phase 3 oracle payload evidence is incomplete", call. = FALSE)
+  }
+  actual_hashes <- setNames(
+    immutable_file_hashes$sha256[payload_rows], payload_names
+  )
+  sizes <- immutable_file_hashes$byte_size[payload_rows]
+  if (anyNA(sizes) || any(sizes <= 0) || anyNA(actual_hashes) ||
       !identical(actual_hashes, manifest_hashes)) {
     stop("Phase 3 oracle payload byte hash validation failed",
          call. = FALSE)
@@ -7473,18 +7585,9 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
       "field_namespace"
     } else {
       names(expected_summary)[!vapply(names(expected_summary), function(field) {
-        expected_value <- expected_summary[[field]]
-        if (typeof(expected_value) == "double" &&
-            length(expected_value) == 1L && is.finite(expected_value)) {
-          isTRUE(all.equal(
-            as.double(summary[[field]]), expected_value,
-            tolerance = 1e-15, check.attributes = FALSE
-          ))
-        } else {
-          .fastkpc_full_cuda_phase3_identity_value_equal(
-            summary[[field]], expected_value
-          )
-        }
+        .fastkpc_full_cuda_phase3_identity_value_equal(
+          summary[[field]], expected_summary[[field]]
+        )
       }, logical(1L))][[1L]]
     }
     stop("Phase 3 oracle summary claims are not recomputed: ", mismatched,

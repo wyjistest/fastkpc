@@ -26,6 +26,75 @@ assert_error <- function(expression, message) {
   invisible(error)
 }
 
+exact_double_values <- c(
+  simple = 0.2,
+  canonical_integer = 10,
+  canonical_large_scientific = 1e5,
+  canonical_small_scientific = 1e-4,
+  pi = pi,
+  minimum_normal = .Machine$double.xmin,
+  minimum_subnormal = 5e-324,
+  adjacent_to_one = 1 + .Machine$double.eps,
+  tiny = 5e-30,
+  json_parser_boundary = -6720.151716784982,
+  missing = NA_real_,
+  not_a_number = NaN
+)
+exact_csv_frame <- data.frame(
+  label = names(exact_double_values),
+  value = unname(exact_double_values),
+  stringsAsFactors = FALSE
+)
+exact_csv_path <- tempfile("phase3-exact-double-", fileext = ".csv")
+on.exit(unlink(exact_csv_path, force = TRUE), add = TRUE)
+.fastkpc_full_cuda_phase3_write_csv(exact_csv_frame, exact_csv_path)
+exact_csv_roundtrip <- .fastkpc_full_cuda_phase3_read_csv(
+  exact_csv_path, "exact-double.csv"
+)
+.fastkpc_full_cuda_phase3_coerce_csv_like(
+  exact_csv_roundtrip, exact_csv_frame, "exact-double"
+)
+exact_csv_lines <- readLines(exact_csv_path, warn = FALSE)
+assert_true(
+  identical(exact_csv_lines[[2L]], '"simple",0.2') &&
+    identical(exact_csv_lines[[3L]], '"canonical_integer",10') &&
+    identical(
+      exact_csv_lines[[4L]],
+      '"canonical_large_scientific",1e+05'
+    ) && identical(
+      exact_csv_lines[[5L]],
+      '"canonical_small_scientific",1e-04'
+    ) &&
+    identical(
+      tail(exact_csv_lines, 2L),
+      c('"missing",NA', '"not_a_number",NA')
+    ),
+  "exact CSV keeps canonical numeric encoding and the NA/NaN policy"
+)
+
+exact_json_values <- as.list(
+  exact_double_values[seq_len(length(exact_double_values) - 2L)]
+)
+exact_json_path <- tempfile("phase3-exact-double-", fileext = ".json")
+on.exit(unlink(exact_json_path, force = TRUE), add = TRUE)
+.fastkpc_full_cuda_phase3_write_json_exact(
+  exact_json_values, exact_json_path
+)
+exact_json_roundtrip <- jsonlite::read_json(
+  exact_json_path, simplifyVector = FALSE
+)
+assert_true(
+  all(vapply(names(exact_json_values), function(field) {
+    identical(
+      as.double(exact_json_roundtrip[[field]]),
+      exact_json_values[[field]]
+    )
+  }, logical(1L))) && any(grepl(
+    '"simple": 0.2', readLines(exact_json_path, warn = FALSE), fixed = TRUE
+  )),
+  "exact JSON preserves finite doubles without changing canonical spellings"
+)
+
 sha <- function(label) fastkpc_full_cuda_census_hash_utf8(label)
 key_hash <- function(keys) {
   fastkpc_full_cuda_census_key_set_hash(sort(keys, method = "radix"))
@@ -1601,6 +1670,47 @@ assert_true(
   "oracle race tests can intercept immutable evidence snapshots"
 )
 
+recursive_snapshot <- original_recursive_snapshot(
+  paths, .fastkpc_full_cuda_phase3_payload_keys("oracle_sp")
+)
+recursive_entries <- sort(list.files(
+  output_dir, all.files = TRUE, no.. = TRUE, recursive = TRUE,
+  full.names = TRUE, include.dirs = TRUE
+), method = "radix")
+recursive_relative_paths <- substring(
+  recursive_entries, nchar(output_dir) + 2L
+)
+recursive_regular_files <- vapply(
+  recursive_entries, function(path) file_test("-f", path), logical(1L)
+)
+assert_true(
+  is.data.frame(recursive_snapshot) &&
+    identical(
+      names(recursive_snapshot),
+      c("relative_path", "entry_type", "byte_size", "sha256")
+    ) &&
+    identical(recursive_snapshot$relative_path, recursive_relative_paths) &&
+    identical(
+      recursive_snapshot$entry_type,
+      unname(ifelse(
+        recursive_regular_files, "regular_file", "directory"
+      ))
+    ) &&
+    identical(
+      recursive_snapshot$byte_size[recursive_regular_files],
+      as.numeric(file.info(recursive_entries[recursive_regular_files])$size)
+    ) &&
+    all(is.na(recursive_snapshot$byte_size[!recursive_regular_files])) &&
+    identical(
+      recursive_snapshot$sha256[recursive_regular_files],
+      unname(vapply(
+        recursive_entries[recursive_regular_files],
+        fastkpc_full_cuda_census_file_hash, character(1L)
+      ))
+    ) && all(is.na(recursive_snapshot$sha256[!recursive_regular_files])),
+  "oracle snapshot records every recursive path, type, byte size, and hash"
+)
+
 manifest_race_root <- clone_completed_artifact("manifest-snapshot-race")
 on.exit(
   unlink(dirname(manifest_race_root), recursive = TRUE, force = TRUE),
@@ -1612,27 +1722,58 @@ manifest_race_paths <- fastkpc_full_cuda_phase3_artifact_paths(
 replacement_manifest <- jsonlite::read_json(
   manifest_race_paths$manifest_json, simplifyVector = FALSE
 )
-replacement_manifest$oracle_semantics_version <- "hostile-race-semantics"
 replacement_manifest_path <- tempfile(
   "phase3-hostile-manifest-", fileext = ".json"
 )
 on.exit(unlink(replacement_manifest_path, force = TRUE), add = TRUE)
-fastkpc_full_cuda_write_json(
-  replacement_manifest, replacement_manifest_path
+writeLines(
+  c("", readLines(manifest_race_paths$manifest_json, warn = FALSE)),
+  replacement_manifest_path, useBytes = TRUE
+)
+assert_true(
+  identical(
+    jsonlite::read_json(
+      replacement_manifest_path, simplifyVector = FALSE
+    ),
+    replacement_manifest
+  ) && !identical(
+    fastkpc_full_cuda_census_file_hash(replacement_manifest_path),
+    fastkpc_full_cuda_census_file_hash(manifest_race_paths$manifest_json)
+  ),
+  "hostile manifest replacement changes bytes without changing semantics"
 )
 manifest_race_summary <- jsonlite::read_json(
   manifest_race_paths$summary_json, simplifyVector = FALSE
 )
-manifest_race_summary$manifest_sha256 <-
+replacement_manifest_sha256 <-
   fastkpc_full_cuda_census_file_hash(replacement_manifest_path)
-fastkpc_full_cuda_write_json(
-  manifest_race_summary, manifest_race_paths$summary_json
+replacement_summary_path <- tempfile(
+  "phase3-hostile-summary-", fileext = ".json"
+)
+on.exit(unlink(replacement_summary_path, force = TRUE), add = TRUE)
+replacement_summary_lines <- readLines(
+  manifest_race_paths$summary_json, warn = FALSE
+)
+assert_true(
+  sum(grepl(
+    manifest_race_summary$manifest_sha256,
+    replacement_summary_lines, fixed = TRUE
+  )) == 1L,
+  "summary contains one manifest hash token"
+)
+writeLines(
+  sub(
+    manifest_race_summary$manifest_sha256, replacement_manifest_sha256,
+    replacement_summary_lines, fixed = TRUE
+  ),
+  replacement_summary_path, useBytes = TRUE
 )
 manifest_snapshot_calls <- 0L
 assign(
   ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
   function(paths, payload_keys) {
     manifest_snapshot_calls <<- manifest_snapshot_calls + 1L
+    snapshot <- original_recursive_snapshot(paths, payload_keys)
     if (manifest_snapshot_calls == 1L) {
       assert_true(
         file.copy(
@@ -1641,8 +1782,15 @@ assign(
         ),
         "hostile manifest replacement succeeds at the snapshot boundary"
       )
+      assert_true(
+        file.copy(
+          replacement_summary_path, paths$summary_json,
+          overwrite = TRUE
+        ),
+        "hostile summary replacement succeeds at the snapshot boundary"
+      )
     }
-    original_recursive_snapshot(paths, payload_keys)
+    snapshot
   },
   envir = .GlobalEnv
 )
@@ -1702,13 +1850,177 @@ assign(
   ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
   original_recursive_snapshot, envir = .GlobalEnv
 )
+
+snapshot_acquisition_root <- clone_completed_artifact(
+  "snapshot-acquisition-race"
+)
+on.exit(
+  unlink(dirname(snapshot_acquisition_root), recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+snapshot_acquisition_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  snapshot_acquisition_root, "oracle_sp"
+)
+snapshot_acquisition_addition <- file.path(
+  snapshot_acquisition_paths$sessions_dir, "hostile-added-session.json"
+)
+original_file_hash <- fastkpc_full_cuda_census_file_hash
+snapshot_hash_calls <- 0L
+assign(
+  "fastkpc_full_cuda_census_file_hash",
+  function(path) {
+    snapshot_hash_calls <<- snapshot_hash_calls + 1L
+    if (snapshot_hash_calls == 1L) {
+      writeLines("{}", snapshot_acquisition_addition, useBytes = TRUE)
+    }
+    original_file_hash(path)
+  },
+  envir = .GlobalEnv
+)
+snapshot_acquisition_error <- tryCatch(
+  original_recursive_snapshot(
+    snapshot_acquisition_paths,
+    .fastkpc_full_cuda_phase3_payload_keys("oracle_sp")
+  ),
+  error = function(error) error,
+  finally = assign(
+    "fastkpc_full_cuda_census_file_hash", original_file_hash,
+    envir = .GlobalEnv
+  )
+)
 assert_true(
   inherits(manifest_race_error, "error") &&
-    inherits(evidence_race_error, "error"),
+    inherits(evidence_race_error, "error") &&
+    inherits(snapshot_acquisition_error, "error") &&
+    grepl(
+      "immutable files changed during validation",
+      conditionMessage(manifest_race_error), fixed = TRUE
+    ) && grepl(
+      "immutable files changed during validation",
+      conditionMessage(evidence_race_error), fixed = TRUE
+    ) && grepl(
+      "evidence changed while snapshotting",
+      conditionMessage(snapshot_acquisition_error), fixed = TRUE
+    ),
   paste0(
-    "oracle validation rejects manifest parse/snapshot and recursive ",
-    "evidence races; manifest_accepted=", is.null(manifest_race_error),
-    "; recursive_accepted=", is.null(evidence_race_error)
+    "oracle validation rejects manifest parse/snapshot, recursive ",
+    "evidence, and acquisition races; manifest=",
+    if (inherits(manifest_race_error, "error")) {
+      conditionMessage(manifest_race_error)
+    } else "accepted",
+    "; recursive=",
+    if (inherits(evidence_race_error, "error")) {
+      conditionMessage(evidence_race_error)
+    } else "accepted",
+    "; acquisition_accepted=", is.null(snapshot_acquisition_error)
+  )
+)
+
+refresh_oracle_payload_markers <- function(root, payload_path) {
+  paths <- fastkpc_full_cuda_phase3_artifact_paths(root, "oracle_sp")
+  manifest <- jsonlite::read_json(
+    paths$manifest_json, simplifyVector = FALSE
+  )
+  manifest$payload_file_sha256[[basename(payload_path)]] <-
+    fastkpc_full_cuda_census_file_hash(payload_path)
+  .fastkpc_full_cuda_phase3_write_json_exact(
+    manifest, paths$manifest_json
+  )
+  summary <- jsonlite::read_json(
+    paths$summary_json, simplifyVector = FALSE
+  )
+  summary$manifest_sha256 <-
+    fastkpc_full_cuda_census_file_hash(paths$manifest_json)
+  .fastkpc_full_cuda_phase3_write_json_exact(summary, paths$summary_json)
+  invisible(TRUE)
+}
+
+csv_ulp_root <- clone_completed_artifact("csv-ulp-corruption")
+on.exit(
+  unlink(dirname(csv_ulp_root), recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+csv_ulp_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  csv_ulp_root, "oracle_sp"
+)
+csv_ulp_rows <- .fastkpc_full_cuda_phase3_read_csv(
+  csv_ulp_paths$qualification_dcov_csv,
+  "qualification_dcov_parity.csv"
+)
+original_csv_p_value <- csv_ulp_rows$p_value[[1L]]
+csv_ulp_rows$p_value[[1L]] <- original_csv_p_value + 1e-16
+assert_true(
+  is.finite(csv_ulp_rows$p_value[[1L]]) &&
+    !identical(csv_ulp_rows$p_value[[1L]], original_csv_p_value) &&
+    abs(csv_ulp_rows$p_value[[1L]] - original_csv_p_value) < 1e-15,
+  "hostile CSV p-value mutation is finite, nonzero, and below tolerance"
+)
+.fastkpc_full_cuda_phase3_write_csv(
+  csv_ulp_rows, csv_ulp_paths$qualification_dcov_csv
+)
+refresh_oracle_payload_markers(
+  csv_ulp_root, csv_ulp_paths$qualification_dcov_csv
+)
+csv_ulp_error <- tryCatch({
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    csv_ulp_root, expected_identity = identity, require_full = FALSE
+  )
+  NULL
+}, error = function(error) error)
+
+summary_ulp_root <- clone_completed_artifact("summary-ulp-corruption")
+on.exit(
+  unlink(dirname(summary_ulp_root), recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+summary_ulp_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  summary_ulp_root, "oracle_sp"
+)
+summary_ulp <- jsonlite::read_json(
+  summary_ulp_paths$summary_json, simplifyVector = FALSE
+)
+original_summary_max_residual <- as.double(
+  summary_ulp$max_residual_abs_diff
+)
+summary_ulp$max_residual_abs_diff <- original_summary_max_residual + 5e-30
+assert_true(
+  is.finite(summary_ulp$max_residual_abs_diff) &&
+    !identical(
+      summary_ulp$max_residual_abs_diff, original_summary_max_residual
+    ) && abs(
+      summary_ulp$max_residual_abs_diff - original_summary_max_residual
+    ) < 1e-15,
+  "hostile summary mutation is finite, nonzero, and below tolerance"
+)
+.fastkpc_full_cuda_phase3_write_json_exact(
+  summary_ulp, summary_ulp_paths$summary_json
+)
+summary_ulp_error <- tryCatch({
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    summary_ulp_root, expected_identity = identity, require_full = FALSE
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(csv_ulp_error, "error") &&
+    inherits(summary_ulp_error, "error") &&
+    grepl(
+      "CSV values do not match RDS: p_value",
+      conditionMessage(csv_ulp_error), fixed = TRUE
+    ) && grepl(
+      "summary claims are not recomputed: max_residual_abs_diff",
+      conditionMessage(summary_ulp_error), fixed = TRUE
+    ),
+  paste0(
+    "oracle validation rejects refreshed-hash sub-tolerance numeric ",
+    "corruption; csv=",
+    if (inherits(csv_ulp_error, "error")) {
+      conditionMessage(csv_ulp_error)
+    } else "accepted",
+    "; summary=",
+    if (inherits(summary_ulp_error, "error")) {
+      conditionMessage(summary_ulp_error)
+    } else "accepted"
   )
 )
 
