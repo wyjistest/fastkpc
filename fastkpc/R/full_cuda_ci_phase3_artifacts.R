@@ -7883,3 +7883,402 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     qualification_dcov_summary = dcov_summary
   )
 }
+
+fastkpc_full_cuda_phase3_direct_ci_payload_schema_version <- function() {
+  "full-cuda-ci-shadow-direct-ci-payload-v1"
+}
+
+fastkpc_full_cuda_phase3_direct_ci_summary_schema_version <- function() {
+  "full-cuda-ci-shadow-direct-ci-summary-v1"
+}
+
+fastkpc_full_cuda_phase3_direct_ci_row_schema <- function() {
+  c(
+    logical_sequence_id = "integer",
+    source_sequence_id = "integer",
+    source_task_index = "integer",
+    level = "integer",
+    x = "integer",
+    y = "integer",
+    S_key = "character",
+    residual_key_x = "character",
+    residual_key_y = "character",
+    reference_p_value = "double",
+    candidate_p_value = "double",
+    absolute_p_value_difference = "double",
+    alpha = "double",
+    reference_decision = "character",
+    candidate_decision = "character",
+    decision_flip = "logical",
+    backend = "character",
+    low_rank_backend = "character",
+    backend_error = "logical",
+    spectra_fallback = "logical"
+  )
+}
+
+.fastkpc_full_cuda_phase3_validate_direct_ci_rows <- function(rows) {
+  schema <- fastkpc_full_cuda_phase3_direct_ci_row_schema()
+  if (!is.data.frame(rows) ||
+      !identical(names(rows), names(schema)) || nrow(rows) != 2213L) {
+    stop("direct-CI row schema or count mismatch", call. = FALSE)
+  }
+  clean_types <- all(vapply(names(schema), function(field) {
+    column <- rows[[field]]
+    typeof(column) == schema[[field]] && length(column) == nrow(rows) &&
+      !is.object(column) && is.null(attributes(column)) &&
+      if (field %in% c("residual_key_x", "residual_key_y")) {
+        all(is.na(column))
+      } else {
+        !anyNA(column)
+      }
+  }, logical(1L)))
+  if (!isTRUE(clean_types)) {
+    stop("direct-CI row schema or type mismatch", call. = FALSE)
+  }
+  numeric_fields <- c(
+    "reference_p_value", "candidate_p_value",
+    "absolute_p_value_difference", "alpha"
+  )
+  canonical <-
+    identical(rows$logical_sequence_id, seq_len(2213L)) &&
+    !anyDuplicated(rows$source_sequence_id) &&
+    all(rows$source_sequence_id > 0L) &&
+    all(rows$source_task_index > 0L) && all(rows$level == 0L) &&
+    all(rows$x >= 1L & rows$x <= 48L) &&
+    all(rows$y >= 1L & rows$y <= 48L) && all(rows$x != rows$y) &&
+    all(rows$S_key == "") &&
+    all(vapply(rows[numeric_fields], function(column) {
+      all(is.finite(column))
+    }, logical(1L))) &&
+    all(rows$alpha > 0 & rows$alpha < 1) &&
+    identical(
+      rows$absolute_p_value_difference,
+      abs(rows$candidate_p_value - rows$reference_p_value)
+    )
+  if (!isTRUE(canonical)) {
+    stop("direct-CI canonical row values are malformed", call. = FALSE)
+  }
+  reference_decision <- ifelse(
+    rows$reference_p_value > rows$alpha, "independent", "dependent"
+  )
+  candidate_decision <- ifelse(
+    rows$candidate_p_value > rows$alpha, "independent", "dependent"
+  )
+  decision_flip <- candidate_decision != reference_decision
+  if (!identical(rows$reference_decision, reference_decision) ||
+      !identical(rows$candidate_decision, candidate_decision) ||
+      !identical(rows$decision_flip, decision_flip)) {
+    stop("direct-CI strict decision convention mismatch", call. = FALSE)
+  }
+  if (any(rows$backend != "legacy-cpp") ||
+      any(rows$low_rank_backend != "spectra")) {
+    stop("direct-CI backend route mismatch", call. = FALSE)
+  }
+  if (any(rows$backend_error)) {
+    stop("direct-CI backend error is not allowed", call. = FALSE)
+  }
+  if (any(rows$spectra_fallback)) {
+    stop("direct-CI Spectra fallback is not allowed", call. = FALSE)
+  }
+  if (any(rows$decision_flip)) {
+    stop("direct-CI decision flip is not allowed", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_validate_direct_ci_phase1_lineage <- function(
+    rows, catalog) {
+  logical_tests <- catalog$inputs$logical_tests
+  expected_hash <- as.character(
+    catalog$inputs$manifest$canonical_logical_census_hash
+  )
+  logical_clean <- is.data.frame(logical_tests) &&
+    nrow(logical_tests) == 240489L &&
+    identical(
+      as.integer(logical_tests$logical_sequence_id), seq_len(240489L)
+    ) && .fastkpc_full_cuda_phase3_sha256(expected_hash) &&
+    identical(
+      fastkpc_full_cuda_census_logical_hash(logical_tests), expected_hash
+    )
+  if (!isTRUE(logical_clean)) {
+    stop("authenticated Phase 1 logical corpus mismatch", call. = FALSE)
+  }
+  expected <- logical_tests[logical_tests$level == 0L, , drop = FALSE]
+  fields <- c(
+    "logical_sequence_id", "source_sequence_id", "source_task_index",
+    "level", "x", "y", "S_key", "residual_key_x", "residual_key_y",
+    "reference_p_value", "alpha", "reference_decision"
+  )
+  if (nrow(expected) != 2213L ||
+      length(setdiff(fields, names(expected))) > 0L ||
+      !all(vapply(fields, function(field) {
+        identical(rows[[field]], expected[[field]])
+      }, logical(1L)))) {
+    stop("Phase 1 direct row lineage mismatch", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_direct_ci_lineage <- function(catalog) {
+  catalog_lineage <- fastkpc_full_cuda_phase3_discover_catalog_evidence(
+    catalog
+  )
+  catalog_lineage <- .fastkpc_full_cuda_phase3_validate_lineage(
+    catalog_lineage
+  )
+  route <- fastkpc_full_cuda_phase3_route_config()
+  route_hash <- fastkpc_full_cuda_phase3_route_config_hash(route)
+  logical_hash <- as.character(
+    catalog$inputs$manifest$canonical_logical_census_hash
+  )
+  phase0_manifest <- catalog$phase0$manifest
+  if (!.fastkpc_full_cuda_phase3_sha256(logical_hash) ||
+      !identical(route$dcov_backend, "legacy-cpp-spectra") ||
+      !identical(route$cpu_fallback_allowed, FALSE) ||
+      !identical(route$approximate_backend_allowed, FALSE)) {
+    stop("direct-CI authenticated route lineage is malformed",
+         call. = FALSE)
+  }
+  lineage <- list(
+    schema_version = "full-cuda-ci-shadow-direct-ci-lineage-v1",
+    authenticated = TRUE,
+    phase0_manifest_hash = catalog_lineage$phase0_manifest_hash,
+    phase1_manifest_hash = catalog_lineage$phase1_manifest_hash,
+    phase2_manifest_hash = catalog_lineage$phase2_manifest_hash,
+    dataset_file_sha256 = catalog_lineage$dataset_file_sha256,
+    dataset_matrix_sha256 = catalog_lineage$dataset_matrix_sha256,
+    canonical_logical_census_hash = logical_hash,
+    canonical_setup_corpus_hash =
+      catalog_lineage$canonical_setup_corpus_hash,
+    canonical_target_corpus_hash =
+      catalog_lineage$canonical_target_corpus_hash,
+    phase0_source_commit = catalog_lineage$phase0_source_commit,
+    phase1_source_commit = catalog_lineage$phase1_source_commit,
+    phase2_source_commit = catalog_lineage$phase2_source_commit,
+    route_config_hash = route_hash,
+    route_schema_version = route$schema_version,
+    dcov_backend = "legacy-cpp",
+    low_rank_backend = "spectra",
+    index = as.integer(phase0_manifest$index),
+    numCol = as.integer(phase0_manifest$numCol),
+    alpha = as.double(phase0_manifest$alpha),
+    decision_convention = "candidate_p_value>alpha",
+    execution_device = "cpu",
+    residual_backend = "none"
+  )
+  clean <- identical(lineage$index, 1L) &&
+    identical(lineage$numCol, 35L) &&
+    identical(lineage$alpha, 0.1) &&
+    all(vapply(lineage[c(
+      "phase0_manifest_hash", "phase1_manifest_hash",
+      "phase2_manifest_hash", "dataset_file_sha256",
+      "dataset_matrix_sha256", "canonical_logical_census_hash",
+      "canonical_setup_corpus_hash", "canonical_target_corpus_hash",
+      "route_config_hash"
+    )], .fastkpc_full_cuda_phase3_sha256, logical(1L)))
+  if (!isTRUE(clean)) {
+    stop("direct-CI authenticated route lineage is malformed",
+         call. = FALSE)
+  }
+  lineage
+}
+
+.fastkpc_full_cuda_phase3_direct_ci_payload <- function(rows, catalog) {
+  .fastkpc_full_cuda_phase3_validate_direct_ci_rows(rows)
+  .fastkpc_full_cuda_phase3_validate_direct_ci_phase1_lineage(rows, catalog)
+  lineage <- .fastkpc_full_cuda_phase3_direct_ci_lineage(catalog)
+  list(
+    schema_version =
+      fastkpc_full_cuda_phase3_direct_ci_payload_schema_version(),
+    lineage = lineage,
+    lineage_sha256 =
+      fastkpc_full_cuda_census_named_metadata_hash(lineage),
+    row_schema = fastkpc_full_cuda_phase3_direct_ci_row_schema(),
+    rows_sha256 = fastkpc_full_cuda_census_frame_hash(rows),
+    rows = rows
+  )
+}
+
+.fastkpc_full_cuda_phase3_direct_ci_summary <- function(
+    payload, direct_ci_rds_sha256) {
+  rows <- payload$rows
+  list(
+    schema_version =
+      fastkpc_full_cuda_phase3_direct_ci_summary_schema_version(),
+    payload_schema_version = payload$schema_version,
+    authenticated = TRUE,
+    pass = TRUE,
+    row_count = as.integer(nrow(rows)),
+    backend_error_count = as.integer(sum(rows$backend_error)),
+    spectra_fallback_count = as.integer(sum(rows$spectra_fallback)),
+    decision_flip_count = as.integer(sum(rows$decision_flip)),
+    max_absolute_p_value_difference =
+      as.double(max(rows$absolute_p_value_difference)),
+    logical_sequence_id_sha256 =
+      fastkpc_full_cuda_census_metadata_hash(rows$logical_sequence_id),
+    rows_sha256 = payload$rows_sha256,
+    lineage_sha256 = payload$lineage_sha256,
+    direct_ci_rds_sha256 = direct_ci_rds_sha256,
+    lineage = payload$lineage
+  )
+}
+
+.fastkpc_full_cuda_phase3_json_tree_equal <- function(actual, expected) {
+  if (is.list(expected) && !is.data.frame(expected) && !is.object(expected)) {
+    return(
+      is.list(actual) && !is.data.frame(actual) && !is.object(actual) &&
+        identical(names(actual), names(expected)) &&
+        all(vapply(seq_along(expected), function(index) {
+          .fastkpc_full_cuda_phase3_json_tree_equal(
+            actual[[index]], expected[[index]]
+          )
+        }, logical(1L)))
+    )
+  }
+  .fastkpc_full_cuda_phase3_json_value_equal(actual, expected)
+}
+
+.fastkpc_full_cuda_phase3_atomic_write_direct_ci_json <- function(
+    value, output_path) {
+  output_dir <- dirname(output_path)
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  temporary <- tempfile(
+    ".phase3-direct-ci-", tmpdir = output_dir, fileext = ".json.tmp"
+  )
+  on.exit(unlink(temporary, force = TRUE), add = TRUE)
+  .fastkpc_full_cuda_phase3_write_json_exact(value, temporary)
+  disk_value <- .fastkpc_full_cuda_phase3_read_json(
+    temporary, "staged direct_ci.summary.json"
+  )
+  if (!.fastkpc_full_cuda_phase3_json_tree_equal(disk_value, value)) {
+    stop("staged direct_ci.summary.json validation failed", call. = FALSE)
+  }
+  if (!file.rename(temporary, output_path)) {
+    stop("failed to atomically publish direct_ci.summary.json",
+         call. = FALSE)
+  }
+  invisible(output_path)
+}
+
+fastkpc_full_cuda_phase3_publish_direct_ci_payload <- function(
+    rows, catalog, output_dir) {
+  paths <- fastkpc_full_cuda_phase3_artifact_paths(
+    output_dir, kind = "full_shadow"
+  )
+  payload <- .fastkpc_full_cuda_phase3_direct_ci_payload(rows, catalog)
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  if (file.exists(paths$direct_ci_summary_json)) {
+    unlink(paths$direct_ci_summary_json, force = TRUE)
+  }
+  .fastkpc_full_cuda_phase3_atomic_write_merged_rds(
+    payload, paths$direct_ci_rds
+  )
+  payload_sha256 <- fastkpc_full_cuda_census_file_hash(
+    paths$direct_ci_rds
+  )
+  summary <- .fastkpc_full_cuda_phase3_direct_ci_summary(
+    payload, payload_sha256
+  )
+  .fastkpc_full_cuda_phase3_atomic_write_direct_ci_json(
+    summary, paths$direct_ci_summary_json
+  )
+  tryCatch(
+    fastkpc_full_cuda_phase3_validate_direct_ci_payload(
+      output_dir = output_dir, catalog = catalog
+    ),
+    error = function(error) {
+      unlink(
+        c(paths$direct_ci_summary_json, paths$direct_ci_rds),
+        force = TRUE
+      )
+      stop("direct-CI publication validation failed: ",
+           conditionMessage(error), call. = FALSE)
+    }
+  )
+}
+
+fastkpc_full_cuda_phase3_validate_direct_ci_payload <- function(
+    output_dir, catalog) {
+  paths <- fastkpc_full_cuda_phase3_artifact_paths(
+    output_dir, kind = "full_shadow"
+  )
+  required_paths <- c(paths$direct_ci_rds, paths$direct_ci_summary_json)
+  if (any(!file.exists(required_paths)) || any(dir.exists(required_paths)) ||
+      any(nzchar(Sys.readlink(required_paths)))) {
+    stop("direct-CI artifact pair is missing or unsafe", call. = FALSE)
+  }
+  payload_sha256 <- fastkpc_full_cuda_census_file_hash(
+    paths$direct_ci_rds
+  )
+  summary <- .fastkpc_full_cuda_phase3_read_json(
+    paths$direct_ci_summary_json, "direct_ci.summary.json"
+  )
+  if (!.fastkpc_full_cuda_phase3_sha256(
+        summary$direct_ci_rds_sha256
+      ) || !identical(summary$direct_ci_rds_sha256, payload_sha256)) {
+    stop("direct_ci.rds SHA-256 mismatch", call. = FALSE)
+  }
+  payload <- .fastkpc_full_cuda_phase3_read_rds(
+    paths$direct_ci_rds, "direct_ci.rds"
+  )
+  payload_fields <- c(
+    "schema_version", "lineage", "lineage_sha256", "row_schema",
+    "rows_sha256", "rows"
+  )
+  if (!is.list(payload) || is.object(payload) ||
+      !identical(names(payload), payload_fields) ||
+      !identical(
+        payload$schema_version,
+        fastkpc_full_cuda_phase3_direct_ci_payload_schema_version()
+      ) || !identical(
+        payload$row_schema,
+        fastkpc_full_cuda_phase3_direct_ci_row_schema()
+      )) {
+    stop("direct_ci.rds payload schema mismatch", call. = FALSE)
+  }
+  expected_lineage <- .fastkpc_full_cuda_phase3_direct_ci_lineage(catalog)
+  if (is.list(payload$lineage) && identical(
+        names(payload$lineage), names(expected_lineage)
+      ) && !identical(
+        payload$lineage$dataset_matrix_sha256,
+        expected_lineage$dataset_matrix_sha256
+      )) {
+    stop("direct-CI dataset matrix hash mismatch", call. = FALSE)
+  }
+  if (!identical(payload$lineage, expected_lineage)) {
+    stop("direct-CI authenticated lineage mismatch", call. = FALSE)
+  }
+  if (!identical(
+        payload$lineage_sha256,
+        fastkpc_full_cuda_census_named_metadata_hash(payload$lineage)
+      )) {
+    stop("direct-CI lineage semantic hash mismatch", call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_validate_direct_ci_rows(payload$rows)
+  .fastkpc_full_cuda_phase3_validate_direct_ci_phase1_lineage(
+    payload$rows, catalog
+  )
+  if (!identical(
+        payload$rows_sha256,
+        fastkpc_full_cuda_census_frame_hash(payload$rows)
+      )) {
+    stop("direct-CI row semantic hash mismatch", call. = FALSE)
+  }
+  expected_summary <- .fastkpc_full_cuda_phase3_direct_ci_summary(
+    payload, payload_sha256
+  )
+  if (!.fastkpc_full_cuda_phase3_json_tree_equal(
+        summary, expected_summary
+      )) {
+    stop("direct-CI summary claims or payload hash mismatch",
+         call. = FALSE)
+  }
+  list(
+    authenticated = TRUE,
+    pass = TRUE,
+    payload = payload,
+    summary = summary,
+    payload_file_sha256 = payload_sha256
+  )
+}
