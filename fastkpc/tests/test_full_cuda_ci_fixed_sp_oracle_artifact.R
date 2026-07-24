@@ -293,6 +293,78 @@ lock_cases <- list(
     release = .fastkpc_full_cuda_phase3_release_shard_runner_lock
   )
 )
+registry_option_name <- "fastkpc.phase3.lock_registry.v1"
+registry_schema_version <- "full-cuda-ci-phase3-lock-registry-v1"
+resource_output <- tempfile("phase3-runner-registry-resource-")
+resource_lock <-
+  .fastkpc_full_cuda_phase3_acquire_shard_runner_lock(resource_output)
+on.exit(
+  try(
+    .fastkpc_full_cuda_phase3_release_shard_runner_lock(resource_lock),
+    silent = TRUE
+  ),
+  add = TRUE
+)
+registry_before_resource <- .fastkpc_full_cuda_phase3_lock_registry()
+source("fastkpc/R/full_cuda_ci_phase3_artifacts.R", local = .GlobalEnv)
+registry_after_resource <- .fastkpc_full_cuda_phase3_lock_registry()
+resource_lock_function_calls <- 0L
+resource_duplicate_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_acquire_lock(
+    lock_path = resource_lock$lock_path, purpose = "shard_runner",
+    .lock_function = function(path, exclusive, timeout) {
+      resource_lock_function_calls <<- resource_lock_function_calls + 1L
+      filelock::lock(path, exclusive = exclusive, timeout = timeout)
+    }
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  identical(registry_after_resource, registry_before_resource) &&
+    identical(getOption(registry_option_name), registry_before_resource) &&
+    identical(
+      attr(registry_before_resource, "schema_version", exact = TRUE),
+      registry_schema_version
+    ) && .fastkpc_full_cuda_phase3_owns_lock(
+      resource_lock, "shard_runner"
+    ) && inherits(resource_duplicate_error, "error") && grepl(
+      "already held by this process",
+      conditionMessage(resource_duplicate_error), fixed = TRUE
+    ) && resource_lock_function_calls == 0L &&
+    identical(
+      attempt_os_lock_in_rscript(resource_lock$lock_path), "blocked"
+    ),
+  "runner lock registry survives module re-source"
+)
+.fastkpc_full_cuda_phase3_release_shard_runner_lock(resource_lock)
+resource_reacquired <-
+  .fastkpc_full_cuda_phase3_acquire_shard_runner_lock(resource_output)
+.fastkpc_full_cuda_phase3_release_shard_runner_lock(resource_reacquired)
+
+corruption_lock <-
+  .fastkpc_full_cuda_phase3_acquire_shard_runner_lock(resource_output)
+saved_registry_option <- getOption(registry_option_name)
+impostor_registry <- new.env(hash = TRUE, parent = emptyenv())
+attr(impostor_registry, "schema_version") <- registry_schema_version
+options(structure(list(impostor_registry), names = registry_option_name))
+corruption_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_lock_registry()
+  NULL
+}, error = function(error) error)
+options(structure(list(saved_registry_option), names = registry_option_name))
+assert_true(
+  inherits(corruption_error, "error") &&
+    grepl("registry singleton", conditionMessage(corruption_error),
+          fixed = TRUE) &&
+    identical(
+      .fastkpc_full_cuda_phase3_lock_registry(), saved_registry_option
+    ) && .fastkpc_full_cuda_phase3_owns_lock(
+      corruption_lock, "shard_runner"
+    ),
+  "registry option replacement fails closed without losing held state"
+)
+.fastkpc_full_cuda_phase3_release_shard_runner_lock(corruption_lock)
+
 synthetic_lock_interrupt <- structure(
   list(message = "synthetic Phase 3 lock transition interrupt", call = NULL),
   class = c("interrupt", "condition")

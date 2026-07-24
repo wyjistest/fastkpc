@@ -2076,10 +2076,83 @@ fastkpc_validate_full_cuda_phase3_artifact <-
     !is.na(value) && nzchar(value) && !grepl("[\r\n]", value)
 }
 
-.fastkpc_full_cuda_phase3_lock_registry <- local({
-  registry <- new.env(hash = TRUE, parent = emptyenv())
-  function() registry
-})
+.fastkpc_full_cuda_phase3_lock_registry_option_name <- function() {
+  "fastkpc.phase3.lock_registry.v1"
+}
+
+.fastkpc_full_cuda_phase3_lock_registry_marker_option_name <- function() {
+  "fastkpc.phase3.lock_registry.initialized.v1"
+}
+
+.fastkpc_full_cuda_phase3_lock_registry_schema_version <- function() {
+  "full-cuda-ci-phase3-lock-registry-v1"
+}
+
+.fastkpc_full_cuda_phase3_valid_lock_registry <- function(registry) {
+  is.environment(registry) && identical(
+    attributes(registry),
+    list(
+      schema_version =
+        .fastkpc_full_cuda_phase3_lock_registry_schema_version()
+    )
+  )
+}
+
+.fastkpc_full_cuda_phase3_initialize_lock_registry <- function() {
+  option_name <- .fastkpc_full_cuda_phase3_lock_registry_option_name()
+  marker_name <-
+    .fastkpc_full_cuda_phase3_lock_registry_marker_option_name()
+  schema_version <-
+    .fastkpc_full_cuda_phase3_lock_registry_schema_version()
+  registry <- getOption(option_name, NULL)
+  marker <- getOption(marker_name, NULL)
+  definition_environment <- environment(
+    .fastkpc_full_cuda_phase3_initialize_lock_registry
+  )
+  previous <- get0(
+    ".fastkpc_full_cuda_phase3_lock_registry_singleton",
+    envir = definition_environment, inherits = FALSE, ifnotfound = NULL
+  )
+
+  if (is.null(marker)) {
+    if (!is.null(registry) || !is.null(previous)) {
+      stop("Phase 3 lock registry singleton initialization is corrupt",
+           call. = FALSE)
+    }
+    registry <- new.env(hash = TRUE, parent = emptyenv())
+    attr(registry, "schema_version") <- schema_version
+    options(structure(
+      list(registry, schema_version), names = c(option_name, marker_name)
+    ))
+    return(registry)
+  }
+  if (!identical(marker, schema_version) ||
+      !.fastkpc_full_cuda_phase3_valid_lock_registry(registry) ||
+      (!is.null(previous) && !identical(previous, registry))) {
+    stop("Phase 3 lock registry singleton is corrupt", call. = FALSE)
+  }
+  registry
+}
+
+.fastkpc_full_cuda_phase3_lock_registry_singleton <-
+  .fastkpc_full_cuda_phase3_initialize_lock_registry()
+
+.fastkpc_full_cuda_phase3_lock_registry <- function() {
+  option_name <- .fastkpc_full_cuda_phase3_lock_registry_option_name()
+  marker_name <-
+    .fastkpc_full_cuda_phase3_lock_registry_marker_option_name()
+  registry <- getOption(option_name, NULL)
+  if (!identical(
+        getOption(marker_name, NULL),
+        .fastkpc_full_cuda_phase3_lock_registry_schema_version()
+      ) || !.fastkpc_full_cuda_phase3_valid_lock_registry(registry) ||
+      !identical(
+        registry, .fastkpc_full_cuda_phase3_lock_registry_singleton
+      )) {
+    stop("Phase 3 lock registry singleton is corrupt", call. = FALSE)
+  }
+  registry
+}
 
 .fastkpc_full_cuda_phase3_normalize_lock_path <- function(lock_path) {
   if (!.fastkpc_full_cuda_phase3_scalar_lock_text(lock_path)) {
