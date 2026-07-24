@@ -1756,6 +1756,33 @@ fastkpc_full_cuda_phase3_input_identity <- function(catalog, device_id) {
   invisible(TRUE)
 }
 
+.fastkpc_full_cuda_phase3_double_ieee_equal <- function(actual, expected) {
+  typeof(actual) == "double" && typeof(expected) == "double" &&
+    length(actual) == length(expected) && identical(
+      writeBin(actual, raw(), size = 8L, endian = "little"),
+      writeBin(expected, raw(), size = 8L, endian = "little")
+    )
+}
+
+.fastkpc_full_cuda_phase3_double_ieee_equal_each <- function(
+    actual, expected) {
+  if (typeof(actual) != "double" || typeof(expected) != "double" ||
+      length(actual) != length(expected)) {
+    stop("Phase 3 IEEE comparison requires equal-length doubles",
+         call. = FALSE)
+  }
+  if (length(actual) == 0L) return(logical())
+  actual_bytes <- matrix(
+    as.integer(writeBin(actual, raw(), size = 8L, endian = "little")),
+    nrow = 8L
+  )
+  expected_bytes <- matrix(
+    as.integer(writeBin(expected, raw(), size = 8L, endian = "little")),
+    nrow = 8L
+  )
+  colSums(actual_bytes != expected_bytes) == 0L
+}
+
 .fastkpc_full_cuda_phase3_identity_value_equal <- function(actual, expected) {
   if (.fastkpc_full_cuda_phase3_bare_scalar(expected, "character")) {
     return(.fastkpc_full_cuda_phase3_bare_scalar(actual, "character") &&
@@ -1771,7 +1798,9 @@ fastkpc_full_cuda_phase3_input_identity <- function(catalog, device_id) {
   }
   if (.fastkpc_full_cuda_phase3_bare_number(expected)) {
     return(.fastkpc_full_cuda_phase3_bare_number(actual) &&
-             identical(as.numeric(actual), as.numeric(expected)))
+             .fastkpc_full_cuda_phase3_double_ieee_equal(
+               as.double(actual), as.double(expected)
+             ))
   }
   identical(actual, expected)
 }
@@ -6248,18 +6277,31 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
   }
   result <- rep.int(NA_character_, length(value))
   present <- which(!is.na(value))
-  candidates <- as.character(value[present])
+  negative_zero <- .fastkpc_full_cuda_phase3_double_ieee_equal_each(
+    value[present], rep.int(-0.0, length(present))
+  )
+  if (any(negative_zero)) {
+    result[present[negative_zero]] <- "-0.0"
+  }
+  unresolved <- which(!negative_zero)
+  candidates <- as.character(value[present[unresolved]])
   parsed <- suppressWarnings(as.double(candidates))
-  exact <- !is.na(parsed) & parsed == value[present]
-  result[present[exact]] <- candidates[exact]
-  unresolved <- which(!exact)
+  exact <- !is.na(parsed) &
+    .fastkpc_full_cuda_phase3_double_ieee_equal_each(
+      parsed, value[present[unresolved]]
+    )
+  result[present[unresolved[exact]]] <- candidates[exact]
+  unresolved <- unresolved[!exact]
   for (digits in 16:17) {
     if (length(unresolved) == 0L) break
     candidates <- sprintf(
       paste0("%.", digits, "g"), value[present[unresolved]]
     )
     parsed <- suppressWarnings(as.double(candidates))
-    exact <- !is.na(parsed) & parsed == value[present[unresolved]]
+    exact <- !is.na(parsed) &
+      .fastkpc_full_cuda_phase3_double_ieee_equal_each(
+        parsed, value[present[unresolved]]
+      )
     if (any(exact)) {
       result[present[unresolved[exact]]] <- candidates[exact]
       unresolved <- unresolved[!exact]
@@ -6310,7 +6352,9 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
         error = function(error) NULL
       )
       if (is.null(parsed) || length(parsed) != 1L ||
-          !identical(as.double(parsed), value)) {
+          !.fastkpc_full_cuda_phase3_double_ieee_equal(
+            as.double(parsed), value
+          )) {
         token <- format(value, digits = 17L, trim = TRUE)
         parsed <- tryCatch(
           jsonlite::fromJSON(token, simplifyVector = TRUE),
@@ -6321,7 +6365,9 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
             "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?$",
             token
           ) || is.null(parsed) || length(parsed) != 1L ||
-          !identical(as.double(parsed), value)) {
+          !.fastkpc_full_cuda_phase3_double_ieee_equal(
+            as.double(parsed), value
+          )) {
         stop("Phase 3 exact JSON number does not round-trip",
              call. = FALSE)
       }
@@ -6420,7 +6466,15 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
   rownames(result) <- NULL
   mismatched <- names(expected_csv)[!vapply(
     names(expected_csv),
-    function(field) identical(result[[field]], expected_csv[[field]]),
+    function(field) {
+      if (typeof(expected_csv[[field]]) == "double") {
+        .fastkpc_full_cuda_phase3_double_ieee_equal(
+          result[[field]], expected_csv[[field]]
+        )
+      } else {
+        identical(result[[field]], expected_csv[[field]])
+      }
+    },
     logical(1L)
   )]
   if (length(mismatched) > 0L) {
@@ -6957,41 +7011,88 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     paths, payload_keys) {
   output_dir <- dirname(paths$manifest_json)
   expected_payloads <- unlist(paths[payload_keys], use.names = FALSE)
+  if (nzchar(Sys.readlink(output_dir))) {
+    stop("Phase 3 oracle evidence path surface is invalid", call. = FALSE)
+  }
   if (!dir.exists(output_dir) || any(!file.exists(expected_payloads)) ||
       any(dir.exists(expected_payloads))) {
     stop("Phase 3 oracle immutable file set is incomplete", call. = FALSE)
   }
   scan_surface <- function() {
-    entries <- sort(list.files(
-      output_dir, all.files = TRUE, no.. = TRUE, recursive = TRUE,
-      full.names = TRUE, include.dirs = TRUE
-    ), method = "radix")
-    if (length(entries) == 0L) {
+    queued_directories <- ""
+    relative_paths <- character()
+    entry_types <- character()
+    byte_size <- numeric()
+    while (length(queued_directories) > 0L) {
+      relative_directory <- queued_directories[[1L]]
+      queued_directories <- queued_directories[-1L]
+      directory <- if (nzchar(relative_directory)) {
+        file.path(output_dir, relative_directory)
+      } else {
+        output_dir
+      }
+      if (nzchar(Sys.readlink(directory)) || !dir.exists(directory) ||
+          file_test("-f", directory)) {
+        stop("Phase 3 oracle evidence path surface is invalid",
+             call. = FALSE)
+      }
+      children <- sort(list.files(
+        directory, all.files = TRUE, no.. = TRUE, recursive = FALSE,
+        full.names = FALSE, include.dirs = TRUE
+      ), method = "radix")
+      for (child in children) {
+        child_path <- file.path(directory, child)
+        child_relative_path <- if (nzchar(relative_directory)) {
+          file.path(relative_directory, child)
+        } else {
+          child
+        }
+        if (!nzchar(child_relative_path) ||
+            nzchar(Sys.readlink(child_path))) {
+          stop("Phase 3 oracle evidence path surface is invalid",
+               call. = FALSE)
+        }
+        is_directory <- dir.exists(child_path)
+        is_regular_file <- file_test("-f", child_path)
+        if (is_directory == is_regular_file) {
+          stop("Phase 3 oracle evidence entry type is invalid",
+               call. = FALSE)
+        }
+        relative_paths <- c(relative_paths, child_relative_path)
+        entry_types <- c(
+          entry_types,
+          if (is_regular_file) "regular_file" else "directory"
+        )
+        size <- if (is_regular_file) {
+          as.numeric(file.info(child_path)$size)
+        } else {
+          NA_real_
+        }
+        if (is_regular_file && (is.na(size) || size < 0)) {
+          stop("Phase 3 oracle evidence file size is invalid",
+               call. = FALSE)
+        }
+        byte_size <- c(byte_size, size)
+        if (is_directory) {
+          queued_directories <- c(
+            queued_directories, child_relative_path
+          )
+        }
+      }
+    }
+    if (length(relative_paths) == 0L) {
       stop("Phase 3 oracle evidence surface is empty", call. = FALSE)
     }
-    relative_paths <- substring(entries, nchar(output_dir) + 2L)
-    if (any(!nzchar(relative_paths)) || anyDuplicated(relative_paths) ||
-        any(nzchar(Sys.readlink(entries)))) {
+    order <- order(relative_paths, method = "radix")
+    relative_paths <- relative_paths[order]
+    entry_types <- entry_types[order]
+    byte_size <- byte_size[order]
+    if (anyDuplicated(relative_paths)) {
       stop("Phase 3 oracle evidence path surface is invalid", call. = FALSE)
-    }
-    directories <- dir.exists(entries)
-    regular_files <- vapply(
-      entries, function(path) file_test("-f", path), logical(1L)
-    )
-    if (any(directories == regular_files)) {
-      stop("Phase 3 oracle evidence entry type is invalid", call. = FALSE)
-    }
-    byte_size <- rep.int(NA_real_, length(entries))
-    byte_size[regular_files] <- as.numeric(
-      file.info(entries[regular_files])$size
-    )
-    if (anyNA(byte_size[regular_files]) ||
-        any(byte_size[regular_files] < 0)) {
-      stop("Phase 3 oracle evidence file size is invalid", call. = FALSE)
     }
     data.frame(
       relative_path = relative_paths,
-      entry_type = ifelse(regular_files, "regular_file", "directory"),
+      entry_type = entry_types,
       byte_size = byte_size,
       stringsAsFactors = FALSE
     )
@@ -7000,8 +7101,14 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     before <- scan_surface()
     hashes <- rep.int(NA_character_, nrow(before))
     regular_files <- before$entry_type == "regular_file"
+    regular_paths <- file.path(
+      output_dir, before$relative_path[regular_files]
+    )
+    if (any(nzchar(Sys.readlink(regular_paths)))) {
+      stop("Phase 3 oracle evidence path surface is invalid", call. = FALSE)
+    }
     hashes[regular_files] <- vapply(
-      file.path(output_dir, before$relative_path[regular_files]),
+      regular_paths,
       fastkpc_full_cuda_census_file_hash, character(1L)
     )
     after <- scan_surface()

@@ -26,6 +26,15 @@ assert_error <- function(expression, message) {
   invisible(error)
 }
 
+ieee_double_bytes <- function(value) {
+  writeBin(as.double(value), raw(), size = 8L, endian = "little")
+}
+ieee_double_equal <- function(actual, expected) {
+  length(actual) == length(expected) && identical(
+    ieee_double_bytes(actual), ieee_double_bytes(expected)
+  )
+}
+
 exact_double_values <- c(
   simple = 0.2,
   canonical_integer = 10,
@@ -37,6 +46,8 @@ exact_double_values <- c(
   adjacent_to_one = 1 + .Machine$double.eps,
   tiny = 5e-30,
   json_parser_boundary = -6720.151716784982,
+  positive_zero = 0.0,
+  negative_zero = -0.0,
   missing = NA_real_,
   not_a_number = NaN
 )
@@ -55,6 +66,12 @@ exact_csv_roundtrip <- .fastkpc_full_cuda_phase3_read_csv(
   exact_csv_roundtrip, exact_csv_frame, "exact-double"
 )
 exact_csv_lines <- readLines(exact_csv_path, warn = FALSE)
+positive_zero_csv_line <- match(
+  "positive_zero", names(exact_double_values)
+) + 1L
+negative_zero_csv_line <- match(
+  "negative_zero", names(exact_double_values)
+) + 1L
 assert_true(
   identical(exact_csv_lines[[2L]], '"simple",0.2') &&
     identical(exact_csv_lines[[3L]], '"canonical_integer",10') &&
@@ -68,6 +85,19 @@ assert_true(
     identical(
       tail(exact_csv_lines, 2L),
       c('"missing",NA', '"not_a_number",NA')
+    ) && identical(
+      exact_csv_lines[[positive_zero_csv_line]],
+      '"positive_zero",0'
+    ) && identical(
+      exact_csv_lines[[negative_zero_csv_line]],
+      '"negative_zero",-0.0'
+    ) && !identical(
+      ieee_double_bytes(0.0), ieee_double_bytes(-0.0)
+    ) && ieee_double_equal(
+      exact_csv_roundtrip$value[c(
+        positive_zero_csv_line, negative_zero_csv_line
+      ) - 1L],
+      c(0.0, -0.0)
     ),
   "exact CSV keeps canonical numeric encoding and the NA/NaN policy"
 )
@@ -85,12 +115,17 @@ exact_json_roundtrip <- jsonlite::read_json(
 )
 assert_true(
   all(vapply(names(exact_json_values), function(field) {
-    identical(
+    ieee_double_equal(
       as.double(exact_json_roundtrip[[field]]),
       exact_json_values[[field]]
     )
-  }, logical(1L))) && any(grepl(
+  }, logical(1L))) && ieee_double_equal(
+    jsonlite::fromJSON("-0.0"), -0.0
+  ) && any(grepl(
     '"simple": 0.2', readLines(exact_json_path, warn = FALSE), fixed = TRUE
+  )) && any(grepl(
+    '"negative_zero": -0.0',
+    readLines(exact_json_path, warn = FALSE), fixed = TRUE
   )),
   "exact JSON preserves finite doubles without changing canonical spellings"
 )
@@ -921,6 +956,7 @@ make_oracle_payload <- function(shard_id, shard_setup_keys, shard_targets) {
   for (field in grep(
     "_(max_abs_diff|relative_l2)$", names(target_parity), value = TRUE
   )) target_parity[[field]] <- rep(1e-14, target_count)
+  target_parity$rhs_relative_l2 <- rep(0.0, target_count)
   for (field in grep(
     "(sha256|fingerprint)$", names(target_parity), value = TRUE
   )) {
@@ -1711,6 +1747,106 @@ assert_true(
   "oracle snapshot records every recursive path, type, byte size, and hash"
 )
 
+symlink_evidence_root <- clone_completed_artifact(
+  "directory-symlink-evidence"
+)
+on.exit(
+  unlink(dirname(symlink_evidence_root), recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+symlink_evidence_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  symlink_evidence_root, "oracle_sp"
+)
+external_evidence_root <- tempfile("phase3-external-evidence-")
+dir.create(
+  file.path(external_evidence_root, "nested"),
+  recursive = TRUE, showWarnings = FALSE
+)
+on.exit(
+  unlink(external_evidence_root, recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+external_sentinel_name <- "must-not-be-traversed.txt"
+writeLines(
+  "external evidence sentinel",
+  file.path(external_evidence_root, "nested", external_sentinel_name),
+  useBytes = TRUE
+)
+directory_symlink_path <- file.path(
+  symlink_evidence_paths$sessions_dir, "external-session-tree"
+)
+directory_symlink_created <- isTRUE(suppressWarnings(file.symlink(
+  external_evidence_root, directory_symlink_path
+)))
+if (!directory_symlink_created) {
+  assert_true(
+    !file.exists(directory_symlink_path) &&
+      !nzchar(Sys.readlink(directory_symlink_path)),
+    "directory-symlink regression skips only when link creation is unsupported"
+  )
+} else {
+  evidence_list_calls <- list()
+  external_sentinel_observed <- FALSE
+  assign(
+    "list.files",
+    function(path = ".", pattern = NULL, all.files = FALSE,
+             full.names = FALSE, recursive = FALSE,
+             ignore.case = FALSE, include.dirs = FALSE, no.. = FALSE) {
+      result <- base::list.files(
+        path = path, pattern = pattern, all.files = all.files,
+        full.names = full.names, recursive = recursive,
+        ignore.case = ignore.case, include.dirs = include.dirs,
+        no.. = no..
+      )
+      evidence_list_calls[[length(evidence_list_calls) + 1L]] <<- list(
+        path = normalizePath(path, mustWork = FALSE),
+        recursive = recursive
+      )
+      if (any(grepl(external_sentinel_name, result, fixed = TRUE))) {
+        external_sentinel_observed <<- TRUE
+      }
+      result
+    },
+    envir = .GlobalEnv
+  )
+  directory_symlink_error <- tryCatch(
+    original_recursive_snapshot(
+      symlink_evidence_paths,
+      .fastkpc_full_cuda_phase3_payload_keys("oracle_sp")
+    ),
+    error = function(error) error,
+    finally = rm("list.files", envir = .GlobalEnv)
+  )
+  external_evidence_path <- normalizePath(
+    external_evidence_root, mustWork = TRUE
+  )
+  assert_true(
+    inherits(directory_symlink_error, "error") &&
+      grepl(
+        "evidence path surface is invalid",
+        conditionMessage(directory_symlink_error), fixed = TRUE
+      ) && length(evidence_list_calls) > 0L &&
+      all(!vapply(
+        evidence_list_calls, function(call) call$recursive, logical(1L)
+      )) && !external_sentinel_observed &&
+      !external_evidence_path %in% vapply(
+        evidence_list_calls, function(call) call$path, character(1L)
+      ),
+    paste0(
+      "oracle evidence walk rejects directory links without following ",
+      "their external contents; error=",
+      if (inherits(directory_symlink_error, "error")) {
+        conditionMessage(directory_symlink_error)
+      } else "accepted",
+      "; recursive_calls=",
+      sum(vapply(
+        evidence_list_calls, function(call) call$recursive, logical(1L)
+      )),
+      "; external_sentinel_observed=", external_sentinel_observed
+    )
+  )
+}
+
 manifest_race_root <- clone_completed_artifact("manifest-snapshot-race")
 on.exit(
   unlink(dirname(manifest_race_root), recursive = TRUE, force = TRUE),
@@ -2020,6 +2156,115 @@ assert_true(
     "; summary=",
     if (inherits(summary_ulp_error, "error")) {
       conditionMessage(summary_ulp_error)
+    } else "accepted"
+  )
+)
+
+csv_signed_zero_root <- clone_completed_artifact(
+  "csv-signed-zero-corruption"
+)
+on.exit(
+  unlink(dirname(csv_signed_zero_root), recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+csv_signed_zero_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  csv_signed_zero_root, "oracle_sp"
+)
+csv_signed_zero_rows <- .fastkpc_full_cuda_phase3_read_csv(
+  csv_signed_zero_paths$qualification_dcov_csv,
+  "qualification_dcov_parity.csv"
+)
+positive_zero_rows <- which(vapply(
+  csv_signed_zero_rows$p_value_difference,
+  function(value) ieee_double_equal(value, 0.0), logical(1L)
+))
+assert_true(
+  length(positive_zero_rows) > 0L,
+  "qualification dCov fixture contains a positive-zero p-value difference"
+)
+csv_signed_zero_row <- positive_zero_rows[[1L]]
+csv_signed_zero_rows$p_value_difference[[csv_signed_zero_row]] <- -0.0
+.fastkpc_full_cuda_phase3_write_csv(
+  csv_signed_zero_rows, csv_signed_zero_paths$qualification_dcov_csv
+)
+csv_signed_zero_roundtrip <- .fastkpc_full_cuda_phase3_read_csv(
+  csv_signed_zero_paths$qualification_dcov_csv,
+  "qualification_dcov_parity.csv"
+)
+assert_true(
+  ieee_double_equal(
+    csv_signed_zero_roundtrip$p_value_difference[[csv_signed_zero_row]],
+    -0.0
+  ),
+  "hostile CSV p-value difference retains negative zero"
+)
+refresh_oracle_payload_markers(
+  csv_signed_zero_root, csv_signed_zero_paths$qualification_dcov_csv
+)
+csv_signed_zero_error <- tryCatch({
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    csv_signed_zero_root, expected_identity = identity, require_full = FALSE
+  )
+  NULL
+}, error = function(error) error)
+
+summary_signed_zero_root <- clone_completed_artifact(
+  "summary-signed-zero-corruption"
+)
+on.exit(
+  unlink(dirname(summary_signed_zero_root), recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+summary_signed_zero_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  summary_signed_zero_root, "oracle_sp"
+)
+summary_signed_zero <- jsonlite::read_json(
+  summary_signed_zero_paths$summary_json, simplifyVector = FALSE
+)
+assert_true(
+  ieee_double_equal(summary_signed_zero$max_rhs_relative_l2, 0.0),
+  "oracle summary fixture contains a positive-zero RHS claim"
+)
+summary_signed_zero$max_rhs_relative_l2 <- -0.0
+.fastkpc_full_cuda_phase3_write_json_exact(
+  summary_signed_zero, summary_signed_zero_paths$summary_json
+)
+summary_signed_zero_roundtrip <- jsonlite::read_json(
+  summary_signed_zero_paths$summary_json, simplifyVector = FALSE
+)
+assert_true(
+  ieee_double_equal(
+    summary_signed_zero_roundtrip$max_rhs_relative_l2, -0.0
+  ),
+  "hostile summary RHS claim retains negative zero"
+)
+summary_signed_zero_error <- tryCatch({
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    summary_signed_zero_root,
+    expected_identity = identity, require_full = FALSE
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(csv_signed_zero_error, "error") &&
+    inherits(summary_signed_zero_error, "error") &&
+    grepl(
+      "CSV values do not match RDS: p_value_difference",
+      conditionMessage(csv_signed_zero_error), fixed = TRUE
+    ) && grepl(
+      "summary claims are not recomputed: max_rhs_relative_l2",
+      conditionMessage(summary_signed_zero_error), fixed = TRUE
+    ) && .fastkpc_full_cuda_phase3_identity_value_equal(0L, 0.0) &&
+    .fastkpc_full_cuda_phase3_identity_value_equal(10L, 10.0),
+  paste0(
+    "oracle validation rejects signed-zero corruption while retaining ",
+    "integer JSON compatibility; csv=",
+    if (inherits(csv_signed_zero_error, "error")) {
+      conditionMessage(csv_signed_zero_error)
+    } else "accepted",
+    "; summary=",
+    if (inherits(summary_signed_zero_error, "error")) {
+      conditionMessage(summary_signed_zero_error)
     } else "accepted"
   )
 )
