@@ -87,7 +87,7 @@ assert_true(
       c('"missing",NA', '"not_a_number",NA')
     ) && identical(
       exact_csv_lines[[positive_zero_csv_line]],
-      '"positive_zero",0'
+      '"positive_zero",0.0'
     ) && identical(
       exact_csv_lines[[negative_zero_csv_line]],
       '"negative_zero",-0.0'
@@ -113,21 +113,84 @@ on.exit(unlink(exact_json_path, force = TRUE), add = TRUE)
 exact_json_roundtrip <- jsonlite::read_json(
   exact_json_path, simplifyVector = FALSE
 )
+json_positive_zero <- jsonlite::fromJSON("0.0")
+json_negative_zero <- jsonlite::fromJSON("-0.0")
+json_integer_positive_zero <- jsonlite::fromJSON("0")
+json_integer_negative_zero <- jsonlite::fromJSON("-0")
 assert_true(
   all(vapply(names(exact_json_values), function(field) {
     ieee_double_equal(
       as.double(exact_json_roundtrip[[field]]),
       exact_json_values[[field]]
     )
-  }, logical(1L))) && ieee_double_equal(
-    jsonlite::fromJSON("-0.0"), -0.0
-  ) && any(grepl(
+  }, logical(1L))) && typeof(json_positive_zero) == "double" &&
+    typeof(json_negative_zero) == "double" &&
+    typeof(json_integer_positive_zero) == "integer" &&
+    typeof(json_integer_negative_zero) == "integer" &&
+    ieee_double_equal(json_positive_zero, 0.0) &&
+    ieee_double_equal(json_negative_zero, -0.0) &&
+    !identical(
+      ieee_double_bytes(json_positive_zero),
+      ieee_double_bytes(json_negative_zero)
+    ) && any(grepl(
+    '"positive_zero": 0.0',
+    readLines(exact_json_path, warn = FALSE), fixed = TRUE
+  )) && any(grepl(
     '"simple": 0.2', readLines(exact_json_path, warn = FALSE), fixed = TRUE
   )) && any(grepl(
     '"negative_zero": -0.0',
     readLines(exact_json_path, warn = FALSE), fixed = TRUE
   )),
   "exact JSON preserves finite doubles without changing canonical spellings"
+)
+assert_true(
+  !.fastkpc_full_cuda_phase3_summary_claims_exact(
+    list(value = json_integer_positive_zero), list(value = 0.0)
+  ) && !.fastkpc_full_cuda_phase3_summary_claims_exact(
+    list(value = json_integer_negative_zero), list(value = -0.0)
+  ) && .fastkpc_full_cuda_phase3_summary_claims_exact(
+    list(value = 10L), list(value = 10.0)
+  ) && .fastkpc_full_cuda_phase3_identity_value_equal(0L, 0.0),
+  paste0(
+    "JSON summary zero requires a signed double token while nonzero ",
+    "integer compatibility and general identity comparison remain stable"
+  )
+)
+
+read_file_bytes <- function(path) {
+  readBin(path, raw(), n = file.info(path)$size)
+}
+default_exact_serialization <- list(
+  tokens = .fastkpc_full_cuda_phase3_format_double_exact(
+    unname(exact_double_values)
+  ),
+  csv = read_file_bytes(exact_csv_path),
+  json = read_file_bytes(exact_json_path)
+)
+serialize_exact_with_options <- function(scipen) {
+  old_options <- options(OutDec = ",", scipen = scipen, digits = 3L)
+  on.exit(options(old_options), add = TRUE)
+  csv_path <- tempfile("phase3-option-exact-", fileext = ".csv")
+  json_path <- tempfile("phase3-option-exact-", fileext = ".json")
+  on.exit(unlink(c(csv_path, json_path), force = TRUE), add = TRUE)
+  .fastkpc_full_cuda_phase3_write_csv(exact_csv_frame, csv_path)
+  .fastkpc_full_cuda_phase3_write_json_exact(
+    exact_json_values, json_path
+  )
+  list(
+    tokens = .fastkpc_full_cuda_phase3_format_double_exact(
+      unname(exact_double_values)
+    ),
+    csv = read_file_bytes(csv_path),
+    json = read_file_bytes(json_path)
+  )
+}
+high_scipen_serialization <- serialize_exact_with_options(999L)
+low_scipen_serialization <- serialize_exact_with_options(-999L)
+assert_true(
+  identical(high_scipen_serialization, default_exact_serialization) &&
+    identical(low_scipen_serialization, default_exact_serialization),
+  "exact double CSV/JSON bytes ignore OutDec, digits, and extreme scipen"
 )
 
 sha <- function(label) fastkpc_full_cuda_census_hash_utf8(label)
@@ -2024,10 +2087,62 @@ snapshot_acquisition_error <- tryCatch(
     envir = .GlobalEnv
   )
 )
+
+same_size_snapshot_root <- clone_completed_artifact(
+  "snapshot-same-size-rewrite"
+)
+on.exit(
+  unlink(dirname(same_size_snapshot_root), recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+same_size_snapshot_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  same_size_snapshot_root, "oracle_sp"
+)
+same_size_snapshot_target <- same_size_snapshot_paths$commands_txt
+same_size_snapshot_size <- file.info(same_size_snapshot_target)$size
+same_size_snapshot_bytes <- readBin(
+  same_size_snapshot_target, raw(), n = same_size_snapshot_size
+)
+same_size_snapshot_replacement <- same_size_snapshot_bytes
+same_size_snapshot_replacement[[1L]] <- as.raw(bitwXor(
+  as.integer(same_size_snapshot_replacement[[1L]]), 1L
+))
+same_size_target_hash_calls <- 0L
+assign(
+  "fastkpc_full_cuda_census_file_hash",
+  function(path) {
+    hash <- original_file_hash(path)
+    if (identical(
+          normalizePath(path, mustWork = TRUE),
+          normalizePath(same_size_snapshot_target, mustWork = TRUE)
+        )) {
+      same_size_target_hash_calls <<- same_size_target_hash_calls + 1L
+      if (same_size_target_hash_calls == 2L) {
+        connection <- file(same_size_snapshot_target, open = "wb")
+        writeBin(same_size_snapshot_replacement, connection)
+        close(connection)
+      }
+    }
+    hash
+  },
+  envir = .GlobalEnv
+)
+same_size_snapshot_error <- tryCatch(
+  original_recursive_snapshot(
+    same_size_snapshot_paths,
+    .fastkpc_full_cuda_phase3_payload_keys("oracle_sp")
+  ),
+  error = function(error) error,
+  finally = assign(
+    "fastkpc_full_cuda_census_file_hash", original_file_hash,
+    envir = .GlobalEnv
+  )
+)
 assert_true(
   inherits(manifest_race_error, "error") &&
     inherits(evidence_race_error, "error") &&
     inherits(snapshot_acquisition_error, "error") &&
+    inherits(same_size_snapshot_error, "error") &&
     grepl(
       "immutable files changed during validation",
       conditionMessage(manifest_race_error), fixed = TRUE
@@ -2037,10 +2152,13 @@ assert_true(
     ) && grepl(
       "evidence changed while snapshotting",
       conditionMessage(snapshot_acquisition_error), fixed = TRUE
+    ) && grepl(
+      "evidence changed while snapshotting",
+      conditionMessage(same_size_snapshot_error), fixed = TRUE
     ),
   paste0(
     "oracle validation rejects manifest parse/snapshot, recursive ",
-    "evidence, and acquisition races; manifest=",
+    "evidence, acquisition, and same-size rewrite races; manifest=",
     if (inherits(manifest_race_error, "error")) {
       conditionMessage(manifest_race_error)
     } else "accepted",
@@ -2048,7 +2166,9 @@ assert_true(
     if (inherits(evidence_race_error, "error")) {
       conditionMessage(evidence_race_error)
     } else "accepted",
-    "; acquisition_accepted=", is.null(snapshot_acquisition_error)
+    "; acquisition_accepted=", is.null(snapshot_acquisition_error),
+    "; same_size_accepted=", is.null(same_size_snapshot_error),
+    "; same_size_hash_calls=", same_size_target_hash_calls
   )
 )
 
@@ -2071,6 +2191,137 @@ refresh_oracle_payload_markers <- function(root, payload_path) {
   invisible(TRUE)
 }
 
+read_raw_csv_tokens <- function(path) {
+  utils::read.csv(
+    path, stringsAsFactors = FALSE, check.names = FALSE,
+    colClasses = "character", na.strings = NULL,
+    blank.lines.skip = FALSE
+  )
+}
+write_raw_csv_tokens <- function(value, path) {
+  utils::write.table(
+    value, path, sep = ",", row.names = FALSE, col.names = TRUE,
+    quote = TRUE, qmethod = "double", na = "NA", fileEncoding = "UTF-8"
+  )
+}
+
+quoted_na_path <- tempfile("phase3-quoted-character-na-", fileext = ".csv")
+on.exit(unlink(quoted_na_path, force = TRUE), add = TRUE)
+writeLines(
+  c(
+    '"character_value","missing_double","missing_integer"',
+    '"NA",NA,NA'
+  ),
+  quoted_na_path, useBytes = TRUE
+)
+quoted_na_expected <- data.frame(
+  character_value = "NA", missing_double = NA_real_,
+  missing_integer = NA_integer_, stringsAsFactors = FALSE
+)
+quoted_na_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_coerce_csv_like(
+    .fastkpc_full_cuda_phase3_read_csv(quoted_na_path, "quoted-na.csv"),
+    quoted_na_expected, "quoted-na"
+  )
+  NULL
+}, error = function(error) error)
+
+bogus_double_root <- clone_completed_artifact(
+  "bogus-missing-double-token"
+)
+on.exit(
+  unlink(dirname(bogus_double_root), recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+bogus_double_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  bogus_double_root, "oracle_sp"
+)
+bogus_double_template <- readRDS(bogus_double_paths$target_parity_rds)
+bogus_double_row <- which(is.na(bogus_double_template$sigma_max))[[1L]]
+bogus_double_rows <- read_raw_csv_tokens(
+  bogus_double_paths$target_parity_csv
+)
+assert_identical(
+  bogus_double_rows$sigma_max[[bogus_double_row]], "NA",
+  "bogus-double fixture starts from a canonical missing token"
+)
+bogus_double_rows$sigma_max[[bogus_double_row]] <- "not-a-double"
+write_raw_csv_tokens(
+  bogus_double_rows, bogus_double_paths$target_parity_csv
+)
+refresh_oracle_payload_markers(
+  bogus_double_root, bogus_double_paths$target_parity_csv
+)
+bogus_double_error <- tryCatch({
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    bogus_double_root, expected_identity = identity, require_full = FALSE
+  )
+  NULL
+}, error = function(error) error)
+
+bogus_integer_root <- clone_completed_artifact(
+  "bogus-missing-integer-token"
+)
+on.exit(
+  unlink(dirname(bogus_integer_root), recursive = TRUE, force = TRUE),
+  add = TRUE
+)
+bogus_integer_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  bogus_integer_root, "oracle_sp"
+)
+bogus_integer_template <- readRDS(bogus_integer_paths$target_parity_rds)
+bogus_integer_row <- which(is.na(
+  bogus_integer_template$aggregate_penalty_root_rank
+))[[1L]]
+bogus_integer_rows <- read_raw_csv_tokens(
+  bogus_integer_paths$target_parity_csv
+)
+assert_identical(
+  bogus_integer_rows$aggregate_penalty_root_rank[[bogus_integer_row]], "NA",
+  "bogus-integer fixture starts from a canonical missing token"
+)
+bogus_integer_rows$aggregate_penalty_root_rank[[bogus_integer_row]] <-
+  "not-an-integer"
+write_raw_csv_tokens(
+  bogus_integer_rows, bogus_integer_paths$target_parity_csv
+)
+refresh_oracle_payload_markers(
+  bogus_integer_root, bogus_integer_paths$target_parity_csv
+)
+bogus_integer_error <- tryCatch({
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    bogus_integer_root, expected_identity = identity, require_full = FALSE
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  is.null(quoted_na_error) &&
+    inherits(bogus_double_error, "error") &&
+    inherits(bogus_integer_error, "error") &&
+    grepl(
+      "double CSV column is malformed: sigma_max",
+      conditionMessage(bogus_double_error), fixed = TRUE
+    ) && grepl(
+      "integer CSV column is malformed: aggregate_penalty_root_rank",
+      conditionMessage(bogus_integer_error), fixed = TRUE
+    ),
+  paste0(
+    "CSV validation preserves quoted character NA and rejects text in ",
+    "permitted-missing numeric cells; quoted_na=",
+    if (inherits(quoted_na_error, "error")) {
+      conditionMessage(quoted_na_error)
+    } else "accepted",
+    "; double=",
+    if (inherits(bogus_double_error, "error")) {
+      conditionMessage(bogus_double_error)
+    } else "accepted",
+    "; integer=",
+    if (inherits(bogus_integer_error, "error")) {
+      conditionMessage(bogus_integer_error)
+    } else "accepted"
+  )
+)
+
 csv_ulp_root <- clone_completed_artifact("csv-ulp-corruption")
 on.exit(
   unlink(dirname(csv_ulp_root), recursive = TRUE, force = TRUE),
@@ -2083,15 +2334,17 @@ csv_ulp_rows <- .fastkpc_full_cuda_phase3_read_csv(
   csv_ulp_paths$qualification_dcov_csv,
   "qualification_dcov_parity.csv"
 )
-original_csv_p_value <- csv_ulp_rows$p_value[[1L]]
-csv_ulp_rows$p_value[[1L]] <- original_csv_p_value + 1e-16
+original_csv_p_value <- as.double(csv_ulp_rows$p_value[[1L]])
+mutated_csv_p_value <- original_csv_p_value + 1e-16
+csv_ulp_rows$p_value[[1L]] <-
+  .fastkpc_full_cuda_phase3_format_double_exact(mutated_csv_p_value)
 assert_true(
-  is.finite(csv_ulp_rows$p_value[[1L]]) &&
-    !identical(csv_ulp_rows$p_value[[1L]], original_csv_p_value) &&
-    abs(csv_ulp_rows$p_value[[1L]] - original_csv_p_value) < 1e-15,
+  is.finite(mutated_csv_p_value) &&
+    !identical(mutated_csv_p_value, original_csv_p_value) &&
+    abs(mutated_csv_p_value - original_csv_p_value) < 1e-15,
   "hostile CSV p-value mutation is finite, nonzero, and below tolerance"
 )
-.fastkpc_full_cuda_phase3_write_csv(
+write_raw_csv_tokens(
   csv_ulp_rows, csv_ulp_paths$qualification_dcov_csv
 )
 refresh_oracle_payload_markers(
@@ -2183,8 +2436,8 @@ assert_true(
   "qualification dCov fixture contains a positive-zero p-value difference"
 )
 csv_signed_zero_row <- positive_zero_rows[[1L]]
-csv_signed_zero_rows$p_value_difference[[csv_signed_zero_row]] <- -0.0
-.fastkpc_full_cuda_phase3_write_csv(
+csv_signed_zero_rows$p_value_difference[[csv_signed_zero_row]] <- "-0.0"
+write_raw_csv_tokens(
   csv_signed_zero_rows, csv_signed_zero_paths$qualification_dcov_csv
 )
 csv_signed_zero_roundtrip <- .fastkpc_full_cuda_phase3_read_csv(

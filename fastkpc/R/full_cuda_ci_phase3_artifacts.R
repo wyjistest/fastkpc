@@ -1805,6 +1805,18 @@ fastkpc_full_cuda_phase3_input_identity <- function(catalog, device_id) {
   identical(actual, expected)
 }
 
+.fastkpc_full_cuda_phase3_json_value_equal <- function(actual, expected) {
+  expected_zero <- typeof(expected) == "double" &&
+    .fastkpc_full_cuda_phase3_bare_number(expected) && expected == 0
+  if (isTRUE(expected_zero)) {
+    return(typeof(actual) == "double" &&
+             .fastkpc_full_cuda_phase3_identity_value_equal(
+               actual, expected
+             ))
+  }
+  .fastkpc_full_cuda_phase3_identity_value_equal(actual, expected)
+}
+
 .fastkpc_full_cuda_phase3_validate_manifest_identity <- function(
     manifest, identity) {
   fields <- .fastkpc_full_cuda_phase3_identity_fields()
@@ -1842,7 +1854,7 @@ fastkpc_full_cuda_phase3_input_identity <- function(catalog, device_id) {
   expected <- fastkpc_full_cuda_phase3_route_config()
   if (!identical(names(route), names(expected)) ||
       any(!vapply(names(expected), function(field) {
-        .fastkpc_full_cuda_phase3_identity_value_equal(
+        .fastkpc_full_cuda_phase3_json_value_equal(
           route[[field]], expected[[field]]
         )
       }, logical(1L)))) {
@@ -5847,7 +5859,7 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     typeof(fields) == "character" && !anyNA(fields) &&
     !anyDuplicated(fields) && all(fields %in% names(expected)) &&
     all(vapply(fields, function(field) {
-      .fastkpc_full_cuda_phase3_identity_value_equal(
+      .fastkpc_full_cuda_phase3_json_value_equal(
         actual[[field]], expected[[field]]
       )
     }, logical(1L)))
@@ -6275,15 +6287,23 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
   if (typeof(value) != "double" || is.object(value)) {
     stop("Phase 3 exact formatter requires bare doubles", call. = FALSE)
   }
+  old_options <- options(OutDec = ".", scipen = 0L, digits = 15L)
+  on.exit(options(old_options), add = TRUE)
   result <- rep.int(NA_character_, length(value))
   present <- which(!is.na(value))
   negative_zero <- .fastkpc_full_cuda_phase3_double_ieee_equal_each(
     value[present], rep.int(-0.0, length(present))
   )
+  positive_zero <- .fastkpc_full_cuda_phase3_double_ieee_equal_each(
+    value[present], rep.int(0.0, length(present))
+  )
   if (any(negative_zero)) {
     result[present[negative_zero]] <- "-0.0"
   }
-  unresolved <- which(!negative_zero)
+  if (any(positive_zero)) {
+    result[present[positive_zero]] <- "0.0"
+  }
+  unresolved <- which(!negative_zero & !positive_zero)
   candidates <- as.character(value[present[unresolved]])
   parsed <- suppressWarnings(as.double(candidates))
   exact <- !is.na(parsed) &
@@ -6292,7 +6312,7 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     )
   result[present[unresolved[exact]]] <- candidates[exact]
   unresolved <- unresolved[!exact]
-  for (digits in 16:17) {
+  for (digits in 1:17) {
     if (length(unresolved) == 0L) break
     candidates <- sprintf(
       paste0("%.", digits, "g"), value[present[unresolved]]
@@ -6355,11 +6375,26 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
           !.fastkpc_full_cuda_phase3_double_ieee_equal(
             as.double(parsed), value
           )) {
-        token <- format(value, digits = 17L, trim = TRUE)
-        parsed <- tryCatch(
-          jsonlite::fromJSON(token, simplifyVector = TRUE),
-          error = function(error) NULL
+        old_options <- options(
+          OutDec = ".", scipen = 0L, digits = 15L
         )
+        on.exit(options(old_options), add = TRUE)
+        for (digits in 1:17) {
+          candidate <- sprintf(paste0("%.", digits, "g"), value)
+          candidate_parsed <- tryCatch(
+            jsonlite::fromJSON(candidate, simplifyVector = TRUE),
+            error = function(error) NULL
+          )
+          if (!is.null(candidate_parsed) &&
+              length(candidate_parsed) == 1L &&
+              .fastkpc_full_cuda_phase3_double_ieee_equal(
+                as.double(candidate_parsed), value
+              )) {
+            token <- candidate
+            parsed <- candidate_parsed
+            break
+          }
+        }
       }
       if (!grepl(
             "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?$",
@@ -6400,7 +6435,8 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
   value <- tryCatch(
     utils::read.csv(
       path, stringsAsFactors = FALSE, check.names = FALSE,
-      na.strings = "NA", blank.lines.skip = FALSE
+      colClasses = "character", na.strings = NULL,
+      blank.lines.skip = FALSE
     ),
     error = function(error) {
       stop(label, " is not valid CSV: ", conditionMessage(error),
@@ -6411,6 +6447,64 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     stop(label, " CSV frame is malformed", call. = FALSE)
   }
   value
+}
+
+.fastkpc_full_cuda_phase3_parse_csv_column <- function(
+    value, type, label, field) {
+  malformed <- function() {
+    stop(label, " ", type, " CSV column is malformed: ", field,
+         call. = FALSE)
+  }
+  if (typeof(value) != "character" || is.object(value) || anyNA(value)) {
+    malformed()
+  }
+  switch(
+    type,
+    character = value,
+    logical = {
+      if (any(!value %in% c("TRUE", "FALSE"))) malformed()
+      value == "TRUE"
+    },
+    integer = {
+      missing <- value == "NA"
+      numeric_token <- grepl("^(0|-?[1-9][0-9]*)$", value)
+      if (any(!missing & !numeric_token)) malformed()
+      result <- rep.int(NA_integer_, length(value))
+      present <- which(!missing)
+      if (length(present) > 0L) {
+        parsed <- suppressWarnings(as.double(value[present]))
+        if (anyNA(parsed) || any(!is.finite(parsed)) ||
+            any(parsed != floor(parsed)) ||
+            any(abs(parsed) > .Machine$integer.max)) {
+          malformed()
+        }
+        result[present] <- as.integer(parsed)
+      }
+      result
+    },
+    double = {
+      missing <- value == "NA"
+      positive_infinity <- value == "Inf"
+      negative_infinity <- value == "-Inf"
+      numeric_token <- grepl(
+        "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?$",
+        value
+      )
+      special <- missing | positive_infinity | negative_infinity
+      if (any(!special & !numeric_token)) malformed()
+      result <- rep.int(NA_real_, length(value))
+      present <- which(!special)
+      if (length(present) > 0L) {
+        parsed <- suppressWarnings(as.double(value[present]))
+        if (anyNA(parsed) || any(!is.finite(parsed))) malformed()
+        result[present] <- parsed
+      }
+      result[positive_infinity] <- Inf
+      result[negative_infinity] <- -Inf
+      result
+    },
+    stop(label, " has an unsupported CSV type: ", field, call. = FALSE)
+  )
 }
 
 .fastkpc_full_cuda_phase3_coerce_csv_like <- function(
@@ -6424,34 +6518,13 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
   for (field in names(expected)) {
     template <- expected[[field]]
     if (is.list(template)) {
+      result[[field]] <- .fastkpc_full_cuda_phase3_parse_csv_column(
+        result[[field]], "character", label, field
+      )
       next
     }
-    result[[field]] <- switch(
-      typeof(template),
-      character = {
-        converted <- as.character(result[[field]])
-        converted[is.na(converted) & template == ""] <- ""
-        converted
-      },
-      logical = {
-        if (typeof(result[[field]]) != "logical" || anyNA(result[[field]])) {
-          stop(label, " logical CSV column is malformed: ", field,
-               call. = FALSE)
-        }
-        as.logical(result[[field]])
-      },
-      integer = {
-        numeric <- suppressWarnings(as.double(result[[field]]))
-        if (anyNA(numeric) != anyNA(template) ||
-            any(is.finite(numeric) & numeric != floor(numeric)) ||
-            any(abs(numeric[is.finite(numeric)]) > .Machine$integer.max)) {
-          stop(label, " integer CSV column is malformed: ", field,
-               call. = FALSE)
-        }
-        as.integer(numeric)
-      },
-      double = as.double(result[[field]]),
-      stop(label, " has an unsupported CSV type: ", field, call. = FALSE)
+    result[[field]] <- .fastkpc_full_cuda_phase3_parse_csv_column(
+      result[[field]], typeof(template), label, field
     )
   }
   expected_csv <- .fastkpc_full_cuda_phase3_csv_frame(expected)
@@ -6608,7 +6681,7 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     return(FALSE)
   }
   all(vapply(required, function(field) {
-    .fastkpc_full_cuda_phase3_identity_value_equal(
+    .fastkpc_full_cuda_phase3_json_value_equal(
       actual[[field]], expected[[field]]
     )
   }, logical(1L)))
@@ -6962,32 +7035,8 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
   result <- value
   for (field in names(schema)) {
     type <- unname(schema[[field]])
-    result[[field]] <- switch(
-      type,
-      character = {
-        converted <- as.character(result[[field]])
-        converted[is.na(converted)] <- ""
-        converted
-      },
-      logical = {
-        if (typeof(result[[field]]) != "logical" || anyNA(result[[field]])) {
-          stop("Phase 3 oracle logical CSV field is malformed: ", field,
-               call. = FALSE)
-        }
-        as.logical(result[[field]])
-      },
-      integer = {
-        numeric <- suppressWarnings(as.double(result[[field]]))
-        finite <- is.finite(numeric)
-        if (any(finite & numeric != floor(numeric)) ||
-            any(abs(numeric[finite]) > .Machine$integer.max)) {
-          stop("Phase 3 oracle integer CSV field is malformed: ", field,
-               call. = FALSE)
-        }
-        as.integer(numeric)
-      },
-      double = as.double(result[[field]]),
-      stop("unsupported Phase 3 oracle CSV field type", call. = FALSE)
+    result[[field]] <- .fastkpc_full_cuda_phase3_parse_csv_column(
+      result[[field]], type, paste("Phase 3 oracle", name), field
     )
   }
   rownames(result) <- NULL
@@ -7018,11 +7067,27 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
       any(dir.exists(expected_payloads))) {
     stop("Phase 3 oracle immutable file set is incomplete", call. = FALSE)
   }
+  stable_metadata <- function(path) {
+    info <- file.info(path)
+    if (nrow(info) != 1L || anyNA(info[c("mode", "mtime", "ctime")])) {
+      stop("Phase 3 oracle evidence metadata is invalid", call. = FALSE)
+    }
+    data.frame(
+      mode = as.integer(info$mode),
+      modification_time = as.numeric(info$mtime),
+      change_time = as.numeric(info$ctime),
+      stringsAsFactors = FALSE
+    )
+  }
   scan_surface <- function() {
+    root_metadata <- stable_metadata(output_dir)
     queued_directories <- ""
     relative_paths <- character()
     entry_types <- character()
     byte_size <- numeric()
+    modes <- integer()
+    modification_times <- numeric()
+    change_times <- numeric()
     while (length(queued_directories) > 0L) {
       relative_directory <- queued_directories[[1L]]
       queued_directories <- queued_directories[-1L]
@@ -7058,6 +7123,7 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
           stop("Phase 3 oracle evidence entry type is invalid",
                call. = FALSE)
         }
+        metadata <- stable_metadata(child_path)
         relative_paths <- c(relative_paths, child_relative_path)
         entry_types <- c(
           entry_types,
@@ -7073,6 +7139,11 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
                call. = FALSE)
         }
         byte_size <- c(byte_size, size)
+        modes <- c(modes, metadata$mode)
+        modification_times <- c(
+          modification_times, metadata$modification_time
+        )
+        change_times <- c(change_times, metadata$change_time)
         if (is_directory) {
           queued_directories <- c(
             queued_directories, child_relative_path
@@ -7087,22 +7158,32 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     relative_paths <- relative_paths[order]
     entry_types <- entry_types[order]
     byte_size <- byte_size[order]
+    modes <- modes[order]
+    modification_times <- modification_times[order]
+    change_times <- change_times[order]
     if (anyDuplicated(relative_paths)) {
       stop("Phase 3 oracle evidence path surface is invalid", call. = FALSE)
     }
-    data.frame(
-      relative_path = relative_paths,
-      entry_type = entry_types,
-      byte_size = byte_size,
-      stringsAsFactors = FALSE
+    list(
+      root_metadata = root_metadata,
+      entries = data.frame(
+        relative_path = relative_paths,
+        entry_type = entry_types,
+        byte_size = byte_size,
+        mode = modes,
+        modification_time = modification_times,
+        change_time = change_times,
+        stringsAsFactors = FALSE
+      )
     )
   }
   snapshot_once <- function() {
     before <- scan_surface()
-    hashes <- rep.int(NA_character_, nrow(before))
-    regular_files <- before$entry_type == "regular_file"
+    entries <- before$entries
+    hashes <- rep.int(NA_character_, nrow(entries))
+    regular_files <- entries$entry_type == "regular_file"
     regular_paths <- file.path(
-      output_dir, before$relative_path[regular_files]
+      output_dir, entries$relative_path[regular_files]
     )
     if (any(nzchar(Sys.readlink(regular_paths)))) {
       stop("Phase 3 oracle evidence path surface is invalid", call. = FALSE)
@@ -7116,8 +7197,9 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
       stop("Phase 3 oracle evidence changed while snapshotting",
            call. = FALSE)
     }
-    before$sha256 <- hashes
-    before
+    result <- entries[c("relative_path", "entry_type", "byte_size")]
+    result$sha256 <- hashes
+    list(evidence = result, stable_metadata = before)
   }
   first <- snapshot_once()
   second <- snapshot_once()
@@ -7125,7 +7207,7 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("Phase 3 oracle evidence changed while snapshotting",
          call. = FALSE)
   }
-  second
+  second$evidence
 }
 
 .fastkpc_full_cuda_phase3_validate_completed_oracle_artifact <- function(
@@ -7410,13 +7492,19 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
   failures <- .fastkpc_full_cuda_phase3_read_csv(
     paths$failures_csv, "failures.csv"
   )
-  if (!identical(names(fallbacks), c("fallback_type", "count")) ||
-      any(!is.finite(fallbacks$count)) ||
-      any(fallbacks$count != floor(fallbacks$count))) {
+  if (!identical(names(fallbacks), c("fallback_type", "count"))) {
     stop("Phase 3 oracle fallback CSV is malformed", call. = FALSE)
   }
-  fallbacks$fallback_type <- as.character(fallbacks$fallback_type)
-  fallbacks$count <- as.integer(fallbacks$count)
+  fallbacks$fallback_type <- .fastkpc_full_cuda_phase3_parse_csv_column(
+    fallbacks$fallback_type, "character", "Phase 3 oracle fallback",
+    "fallback_type"
+  )
+  fallbacks$count <- .fastkpc_full_cuda_phase3_parse_csv_column(
+    fallbacks$count, "integer", "Phase 3 oracle fallback", "count"
+  )
+  if (anyNA(fallbacks$count)) {
+    stop("Phase 3 oracle fallback CSV is malformed", call. = FALSE)
+  }
   failure_fields <- c(
     "prepared_s_key_sha256", "residual_key_sha256", "solver_status",
     "error_code", "error_message_sha256"
@@ -7424,9 +7512,11 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
   if (!identical(names(failures), failure_fields)) {
     stop("Phase 3 oracle failure CSV is malformed", call. = FALSE)
   }
-  for (field in failure_fields) failures[[field]] <- as.character(
-    failures[[field]]
-  )
+  for (field in failure_fields) {
+    failures[[field]] <- .fastkpc_full_cuda_phase3_parse_csv_column(
+      failures[[field]], "character", "Phase 3 oracle failure", field
+    )
+  }
   rownames(fallbacks) <- rownames(failures) <- NULL
 
   setup_rank <- match(
@@ -7692,7 +7782,7 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
       "field_namespace"
     } else {
       names(expected_summary)[!vapply(names(expected_summary), function(field) {
-        .fastkpc_full_cuda_phase3_identity_value_equal(
+        .fastkpc_full_cuda_phase3_json_value_equal(
           summary[[field]], expected_summary[[field]]
         )
       }, logical(1L))][[1L]]
