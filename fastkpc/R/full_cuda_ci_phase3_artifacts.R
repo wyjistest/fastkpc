@@ -2477,6 +2477,47 @@ fastkpc_validate_full_cuda_phase3_artifact <-
   .fastkpc_full_cuda_phase3_release_lock(lock, "oracle_artifact")
 }
 
+.fastkpc_full_cuda_phase3_direct_artifact_lock_path <- function(output_dir) {
+  clean <- typeof(output_dir) == "character" && length(output_dir) == 1L &&
+    !is.object(output_dir) && is.null(attributes(output_dir)) &&
+    !is.na(output_dir) && nzchar(output_dir) && !grepl("[\r\n]", output_dir)
+  if (!isTRUE(clean)) {
+    stop("Phase 3 direct artifact output path is malformed", call. = FALSE)
+  }
+  paste0(
+    normalizePath(output_dir, mustWork = FALSE),
+    ".phase3-direct-artifact.lock"
+  )
+}
+
+.fastkpc_full_cuda_phase3_acquire_direct_artifact_lock <- function(
+    output_dir, .namespace_checker = requireNamespace) {
+  .fastkpc_full_cuda_phase3_acquire_lock(
+    lock_path =
+      .fastkpc_full_cuda_phase3_direct_artifact_lock_path(output_dir),
+    purpose = "direct_artifact", .namespace_checker = .namespace_checker
+  )
+}
+
+.fastkpc_full_cuda_phase3_owns_direct_artifact_lock <- function(lock) {
+  .fastkpc_full_cuda_phase3_owns_lock(lock, "direct_artifact")
+}
+
+.fastkpc_full_cuda_phase3_require_direct_artifact_lock <- function(
+    lock, output_dir) {
+  expected_path <-
+    .fastkpc_full_cuda_phase3_direct_artifact_lock_path(output_dir)
+  if (!.fastkpc_full_cuda_phase3_owns_direct_artifact_lock(lock) ||
+      !identical(lock$lock_path, expected_path)) {
+    stop("Phase 3 direct artifact lock ownership is invalid", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_release_direct_artifact_lock <- function(lock) {
+  .fastkpc_full_cuda_phase3_release_lock(lock, "direct_artifact")
+}
+
 .fastkpc_full_cuda_phase3_shard_runner_lock_path <- function(output_dir) {
   clean <- typeof(output_dir) == "character" && length(output_dir) == 1L &&
     !is.object(output_dir) && is.null(attributes(output_dir)) &&
@@ -7936,6 +7977,13 @@ fastkpc_full_cuda_phase3_direct_ci_row_schema <- function() {
   if (!isTRUE(clean_types)) {
     stop("direct-CI row schema or type mismatch", call. = FALSE)
   }
+  p_value_fields <- c("reference_p_value", "candidate_p_value")
+  clean_p_values <- all(vapply(rows[p_value_fields], function(column) {
+    all(is.finite(column) & column >= 0 & column <= 1)
+  }, logical(1L)))
+  if (!isTRUE(clean_p_values)) {
+    stop("direct-CI p-values must be finite and in [0,1]", call. = FALSE)
+  }
   numeric_fields <- c(
     "reference_p_value", "candidate_p_value",
     "absolute_p_value_difference", "alpha"
@@ -8150,6 +8198,119 @@ fastkpc_full_cuda_phase3_direct_ci_row_schema <- function() {
   .fastkpc_full_cuda_phase3_json_value_equal(actual, expected)
 }
 
+.fastkpc_full_cuda_phase3_direct_ci_pair_paths <- function(paths) {
+  keys <- c("direct_ci_rds", "direct_ci_summary_json")
+  clean <- is.list(paths) && !is.object(paths) &&
+    length(setdiff(keys, names(paths))) == 0L &&
+    all(vapply(keys, function(key) {
+      .fastkpc_full_cuda_phase3_scalar_lock_text(paths[[key]])
+    }, logical(1L)))
+  if (!isTRUE(clean)) {
+    stop("direct-CI artifact paths are malformed", call. = FALSE)
+  }
+  setNames(vapply(keys, function(key) paths[[key]], character(1L)), keys)
+}
+
+.fastkpc_full_cuda_phase3_require_safe_direct_ci_pair <- function(paths) {
+  pair <- .fastkpc_full_cuda_phase3_direct_ci_pair_paths(paths)
+  links <- Sys.readlink(pair)
+  regular <- file_test("-f", pair)
+  safe <- all(file.exists(pair)) && !any(dir.exists(pair)) &&
+    !anyNA(links) && !any(nzchar(links)) &&
+    identical(unname(regular), rep(TRUE, length(pair)))
+  if (!isTRUE(safe)) {
+    stop("direct-CI artifact pair is missing or unsafe", call. = FALSE)
+  }
+  pair
+}
+
+.fastkpc_full_cuda_phase3_read_raw_file <- function(path, label) {
+  connection <- tryCatch(
+    file(path, open = "rb"),
+    error = function(error) {
+      stop(label, " is not readable: ", conditionMessage(error),
+           call. = FALSE)
+    }
+  )
+  on.exit(close(connection), add = TRUE)
+  tryCatch({
+    chunks <- list()
+    repeat {
+      chunk <- readBin(connection, what = "raw", n = 1024L * 1024L)
+      if (!length(chunk)) break
+      chunks[[length(chunks) + 1L]] <- chunk
+    }
+    if (length(chunks)) do.call(c, chunks) else raw()
+  }, error = function(error) {
+    stop(label, " is not readable: ", conditionMessage(error),
+         call. = FALSE)
+  })
+}
+
+.fastkpc_full_cuda_phase3_capture_direct_ci_pair <- function(paths) {
+  pair <- .fastkpc_full_cuda_phase3_require_safe_direct_ci_pair(paths)
+  labels <- c(
+    direct_ci_rds = "direct_ci.rds",
+    direct_ci_summary_json = "direct_ci.summary.json"
+  )
+  raw_files <- lapply(names(pair), function(key) {
+    .fastkpc_full_cuda_phase3_read_raw_file(pair[[key]], labels[[key]])
+  })
+  names(raw_files) <- names(pair)
+  hashes <- vapply(
+    raw_files, fastkpc_full_cuda_census_hash_raw, character(1L)
+  )
+  list(raw = raw_files, hashes = hashes)
+}
+
+.fastkpc_full_cuda_phase3_direct_ci_pair_disk_hashes <- function(paths) {
+  pair <- .fastkpc_full_cuda_phase3_require_safe_direct_ci_pair(paths)
+  hashes <- vapply(
+    pair, fastkpc_full_cuda_census_file_hash, character(1L)
+  )
+  .fastkpc_full_cuda_phase3_require_safe_direct_ci_pair(paths)
+  hashes
+}
+
+.fastkpc_full_cuda_phase3_parse_direct_ci_json_raw <- function(value, label) {
+  if (typeof(value) != "raw" || is.object(value) ||
+      !is.null(attributes(value))) {
+    stop(label, " is not valid JSON", call. = FALSE)
+  }
+  if (!requireNamespace("jsonlite", quietly = TRUE)) {
+    stop("jsonlite is required for Phase 3 artifact validation",
+         call. = FALSE)
+  }
+  parsed <- tryCatch(
+    jsonlite::fromJSON(rawToChar(value), simplifyVector = TRUE),
+    error = function(error) {
+      stop(label, " is not valid JSON: ", conditionMessage(error),
+           call. = FALSE)
+    }
+  )
+  if (!is.list(parsed) || is.object(parsed) || is.null(names(parsed)) ||
+      anyDuplicated(names(parsed))) {
+    stop(label, " JSON object is malformed", call. = FALSE)
+  }
+  parsed
+}
+
+.fastkpc_full_cuda_phase3_parse_direct_ci_rds_raw <- function(value, label) {
+  if (typeof(value) != "raw" || is.object(value) ||
+      !is.null(attributes(value))) {
+    stop(label, " is not readable RDS", call. = FALSE)
+  }
+  connection <- rawConnection(value, open = "rb")
+  on.exit(try(close(connection), silent = TRUE), add = TRUE)
+  tryCatch({
+    connection <- gzcon(connection)
+    readRDS(connection)
+  }, error = function(error) {
+    stop(label, " is not readable RDS: ", conditionMessage(error),
+         call. = FALSE)
+  })
+}
+
 .fastkpc_full_cuda_phase3_atomic_write_direct_ci_json <- function(
     value, output_path) {
   output_dir <- dirname(output_path)
@@ -8173,65 +8334,140 @@ fastkpc_full_cuda_phase3_direct_ci_row_schema <- function() {
 }
 
 fastkpc_full_cuda_phase3_publish_direct_ci_payload <- function(
-    rows, catalog, output_dir) {
+    rows, catalog, output_dir, .transition_hook = NULL) {
+  if (!is.null(.transition_hook) && !is.function(.transition_hook)) {
+    stop("direct-CI publication transition hook is malformed",
+         call. = FALSE)
+  }
   paths <- fastkpc_full_cuda_phase3_artifact_paths(
     output_dir, kind = "full_shadow"
   )
   payload <- .fastkpc_full_cuda_phase3_direct_ci_payload(rows, catalog)
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-  if (file.exists(paths$direct_ci_summary_json)) {
-    unlink(paths$direct_ci_summary_json, force = TRUE)
+  if (!dir.exists(output_dir)) {
+    stop("failed to create direct-CI output directory", call. = FALSE)
   }
+  staging_dir <- tempfile(
+    ".phase3-direct-ci-stage-", tmpdir = output_dir
+  )
+  if (!dir.create(staging_dir, showWarnings = FALSE)) {
+    stop("failed to create direct-CI staging directory", call. = FALSE)
+  }
+  staging_lock_path <-
+    .fastkpc_full_cuda_phase3_direct_artifact_lock_path(staging_dir)
+  artifact_lock <- NULL
+  publication_started <- FALSE
+  publication_complete <- FALSE
+  on.exit({
+    if (!is.null(artifact_lock)) {
+      if (isTRUE(publication_started) && !isTRUE(publication_complete)) {
+        unlink(
+          c(paths$direct_ci_summary_json, paths$direct_ci_rds),
+          force = TRUE
+        )
+      }
+      .fastkpc_full_cuda_phase3_release_direct_artifact_lock(artifact_lock)
+    }
+    unlink(staging_dir, recursive = TRUE, force = TRUE)
+    unlink(staging_lock_path, force = TRUE)
+  }, add = TRUE)
+  staged_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+    staging_dir, kind = "full_shadow"
+  )
   .fastkpc_full_cuda_phase3_atomic_write_merged_rds(
-    payload, paths$direct_ci_rds
+    payload, staged_paths$direct_ci_rds
   )
   payload_sha256 <- fastkpc_full_cuda_census_file_hash(
-    paths$direct_ci_rds
+    staged_paths$direct_ci_rds
   )
   summary <- .fastkpc_full_cuda_phase3_direct_ci_summary(
     payload, payload_sha256
   )
   .fastkpc_full_cuda_phase3_atomic_write_direct_ci_json(
-    summary, paths$direct_ci_summary_json
+    summary, staged_paths$direct_ci_summary_json
   )
-  tryCatch(
+  fastkpc_full_cuda_phase3_validate_direct_ci_payload(
+    output_dir = staging_dir, catalog = catalog
+  )
+  artifact_lock <-
+    .fastkpc_full_cuda_phase3_acquire_direct_artifact_lock(output_dir)
+  .fastkpc_full_cuda_phase3_require_direct_artifact_lock(
+    artifact_lock, output_dir
+  )
+  publication_started <- TRUE
+  unlink(paths$direct_ci_summary_json, force = TRUE)
+  unlink(paths$direct_ci_rds, force = TRUE)
+  if (file.exists(paths$direct_ci_summary_json) ||
+      file.exists(paths$direct_ci_rds)) {
+    stop("failed to clear prior direct-CI artifact pair", call. = FALSE)
+  }
+  if (!file.rename(staged_paths$direct_ci_rds, paths$direct_ci_rds)) {
+    stop("failed to publish staged direct_ci.rds", call. = FALSE)
+  }
+  if (!is.null(.transition_hook)) {
+    .transition_hook(
+      "after_final_rds_publication", paths, artifact_lock
+    )
+  }
+  if (!file.rename(
+        staged_paths$direct_ci_summary_json,
+        paths$direct_ci_summary_json
+      )) {
+    stop("failed to publish staged direct_ci.summary.json", call. = FALSE)
+  }
+  validated <- tryCatch(
     fastkpc_full_cuda_phase3_validate_direct_ci_payload(
-      output_dir = output_dir, catalog = catalog
+      output_dir = output_dir, catalog = catalog,
+      .artifact_lock = artifact_lock
     ),
     error = function(error) {
-      unlink(
-        c(paths$direct_ci_summary_json, paths$direct_ci_rds),
-        force = TRUE
-      )
       stop("direct-CI publication validation failed: ",
            conditionMessage(error), call. = FALSE)
     }
   )
+  publication_complete <- TRUE
+  validated
 }
 
 fastkpc_full_cuda_phase3_validate_direct_ci_payload <- function(
-    output_dir, catalog) {
+    output_dir, catalog, .transition_hook = NULL, .artifact_lock = NULL) {
+  if (!is.null(.transition_hook) && !is.function(.transition_hook)) {
+    stop("direct-CI validation transition hook is malformed",
+         call. = FALSE)
+  }
   paths <- fastkpc_full_cuda_phase3_artifact_paths(
     output_dir, kind = "full_shadow"
   )
-  required_paths <- c(paths$direct_ci_rds, paths$direct_ci_summary_json)
-  if (any(!file.exists(required_paths)) || any(dir.exists(required_paths)) ||
-      any(nzchar(Sys.readlink(required_paths)))) {
-    stop("direct-CI artifact pair is missing or unsafe", call. = FALSE)
+  acquired_lock <- is.null(.artifact_lock)
+  artifact_lock <- if (isTRUE(acquired_lock)) {
+    .fastkpc_full_cuda_phase3_acquire_direct_artifact_lock(output_dir)
+  } else {
+    .artifact_lock
   }
-  payload_sha256 <- fastkpc_full_cuda_census_file_hash(
-    paths$direct_ci_rds
+  if (isTRUE(acquired_lock)) {
+    on.exit(
+      .fastkpc_full_cuda_phase3_release_direct_artifact_lock(artifact_lock),
+      add = TRUE
+    )
+  }
+  .fastkpc_full_cuda_phase3_require_direct_artifact_lock(
+    artifact_lock, output_dir
   )
-  summary <- .fastkpc_full_cuda_phase3_read_json(
-    paths$direct_ci_summary_json, "direct_ci.summary.json"
+  captured <- .fastkpc_full_cuda_phase3_capture_direct_ci_pair(paths)
+  if (!is.null(.transition_hook)) {
+    .transition_hook("after_capture", paths, artifact_lock)
+  }
+  payload_sha256 <- captured$hashes[["direct_ci_rds"]]
+  summary <- .fastkpc_full_cuda_phase3_parse_direct_ci_json_raw(
+    captured$raw[["direct_ci_summary_json"]], "direct_ci.summary.json"
   )
   if (!.fastkpc_full_cuda_phase3_sha256(
         summary$direct_ci_rds_sha256
       ) || !identical(summary$direct_ci_rds_sha256, payload_sha256)) {
     stop("direct_ci.rds SHA-256 mismatch", call. = FALSE)
   }
-  payload <- .fastkpc_full_cuda_phase3_read_rds(
-    paths$direct_ci_rds, "direct_ci.rds"
+  payload <- .fastkpc_full_cuda_phase3_parse_direct_ci_rds_raw(
+    captured$raw[["direct_ci_rds"]], "direct_ci.rds"
   )
   payload_fields <- c(
     "schema_version", "lineage", "lineage_sha256", "row_schema",
@@ -8285,6 +8521,19 @@ fastkpc_full_cuda_phase3_validate_direct_ci_payload <- function(
     stop("direct-CI summary claims or payload hash mismatch",
          call. = FALSE)
   }
+  .fastkpc_full_cuda_phase3_require_direct_artifact_lock(
+    artifact_lock, output_dir
+  )
+  if (!identical(
+        .fastkpc_full_cuda_phase3_direct_ci_pair_disk_hashes(paths),
+        captured$hashes
+      )) {
+    stop("direct-CI artifact pair changed during validation",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_require_direct_artifact_lock(
+    artifact_lock, output_dir
+  )
   list(
     authenticated = TRUE,
     pass = TRUE,

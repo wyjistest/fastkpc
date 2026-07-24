@@ -11,6 +11,36 @@ assert_error <- function(expression, pattern, message) {
   )
 }
 
+hardening_failures <- character()
+record_hardening_error <- function(expression, pattern, message) {
+  error <- tryCatch({
+    force(expression)
+    NULL
+  }, error = identity)
+  if (!inherits(error, "error") ||
+      !grepl(pattern, conditionMessage(error))) {
+    actual <- if (inherits(error, "error")) {
+      strsplit(conditionMessage(error), "\n", fixed = TRUE)[[1L]][[1L]]
+    } else {
+      "no error"
+    }
+    if (nchar(actual, type = "chars") > 160L) {
+      actual <- paste0(substr(actual, 1L, 157L), "...")
+    }
+    hardening_failures <<- c(
+      hardening_failures,
+      paste0(message, " (got: ", actual, ")")
+    )
+  }
+  invisible(error)
+}
+record_hardening_true <- function(value, message) {
+  if (!isTRUE(value)) {
+    hardening_failures <<- c(hardening_failures, message)
+  }
+  invisible(value)
+}
+
 source("fastkpc/R/full_cuda_ci_gate.R")
 source("fastkpc/R/full_cuda_ci_workload_census.R")
 source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")
@@ -426,6 +456,45 @@ assert_true(
   "failed direct-CI publication must leave no payload or completion marker"
 )
 
+publication_failure_dir <- tempfile("full-cuda-ci-direct-publish-failure-")
+publication_failure_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  publication_failure_dir, kind = "full_shadow"
+)
+publication_failure_hook_count <- 0L
+record_hardening_error(
+  fastkpc_full_cuda_phase3_publish_direct_ci_payload(
+    direct_artifact$rows, catalog, publication_failure_dir,
+    .transition_hook = function(stage, paths, artifact_lock) {
+      if (identical(stage, "after_final_rds_publication")) {
+        publication_failure_hook_count <<-
+          publication_failure_hook_count + 1L
+        if (!.fastkpc_full_cuda_phase3_owns_lock(
+              artifact_lock, "direct_artifact"
+            )) {
+          stop("direct artifact lock was not held at publication boundary",
+               call. = FALSE)
+        }
+        stop("injected failure after final direct_ci.rds publication",
+             call. = FALSE)
+      }
+    }
+  ),
+  "^injected failure after final direct_ci.rds publication$",
+  "final-RDS publication failure boundary was not reached"
+)
+record_hardening_true(
+  identical(publication_failure_hook_count, 1L),
+  "final-RDS publication hook did not run exactly once"
+)
+record_hardening_true(
+  !file.exists(publication_failure_paths$direct_ci_rds) &&
+    !file.exists(publication_failure_paths$direct_ci_summary_json),
+  paste(
+    "failure immediately after final RDS publication must remove both",
+    "direct-CI final files"
+  )
+)
+
 direct_paths <- fastkpc_full_cuda_phase3_artifact_paths(
   direct_output_dir, kind = "full_shadow"
 )
@@ -464,6 +533,122 @@ assert_true(
   file.copy(direct_paths$direct_ci_rds, payload_backup, overwrite = TRUE),
   "direct-CI payload backup"
 )
+
+hostile_replacement <- tempfile("direct-ci-hostile-replacement-", fileext = ".rds")
+saveRDS(
+  list(hostile_replacement = TRUE), hostile_replacement,
+  version = 2, compress = FALSE
+)
+validation_transition_count <- 0L
+record_hardening_error(
+  fastkpc_full_cuda_phase3_validate_direct_ci_payload(
+    direct_output_dir, catalog,
+    .transition_hook = function(stage, paths, artifact_lock) {
+      if (identical(stage, "after_capture")) {
+        validation_transition_count <<- validation_transition_count + 1L
+        if (!.fastkpc_full_cuda_phase3_owns_lock(
+              artifact_lock, "direct_artifact"
+            )) {
+          stop("direct artifact lock was not held during validation capture",
+               call. = FALSE)
+        }
+        if (!file.copy(
+              hostile_replacement, paths$direct_ci_rds, overwrite = TRUE
+            )) {
+          stop("failed to install hostile direct-CI replacement",
+               call. = FALSE)
+        }
+      }
+    }
+  ),
+  "^direct-CI artifact pair changed during validation$",
+  "post-capture replacement was not rejected"
+)
+record_hardening_true(
+  identical(validation_transition_count, 1L),
+  "post-capture hook did not run exactly once"
+)
+assert_true(
+  file.copy(payload_backup, direct_paths$direct_ci_rds, overwrite = TRUE),
+  "direct-CI payload restore after post-capture replacement"
+)
+unlink(hostile_replacement, force = TRUE)
+
+valid_domain_payload <- readRDS(payload_backup)
+p_value_attacks <- data.frame(
+  field = rep(c("reference_p_value", "candidate_p_value"), each = 2L),
+  value = rep(c(-1, 2), times = 2L),
+  stringsAsFactors = FALSE
+)
+for (attack_index in seq_len(nrow(p_value_attacks))) {
+  attack_field <- p_value_attacks$field[[attack_index]]
+  attack_value <- as.double(p_value_attacks$value[[attack_index]])
+  hostile_payload <- valid_domain_payload
+  rows <- hostile_payload$rows
+  resulting_decision <- ifelse(
+    attack_value > rows$alpha, "independent", "dependent"
+  )
+  other_decision <- if (identical(attack_field, "reference_p_value")) {
+    rows$candidate_decision
+  } else {
+    rows$reference_decision
+  }
+  attack_row <- which(resulting_decision == other_decision)[[1L]]
+  rows[[attack_field]][[attack_row]] <- attack_value
+  rows$absolute_p_value_difference[[attack_row]] <- abs(
+    rows$candidate_p_value[[attack_row]] -
+      rows$reference_p_value[[attack_row]]
+  )
+  rows$reference_decision[[attack_row]] <- if (
+    rows$reference_p_value[[attack_row]] > rows$alpha[[attack_row]]
+  ) "independent" else "dependent"
+  rows$candidate_decision[[attack_row]] <- if (
+    rows$candidate_p_value[[attack_row]] > rows$alpha[[attack_row]]
+  ) "independent" else "dependent"
+  rows$decision_flip[[attack_row]] <-
+    rows$candidate_decision[[attack_row]] !=
+      rows$reference_decision[[attack_row]]
+  assert_true(
+    !rows$decision_flip[[attack_row]] && identical(
+      rows$absolute_p_value_difference[[attack_row]],
+      abs(
+        rows$candidate_p_value[[attack_row]] -
+          rows$reference_p_value[[attack_row]]
+      )
+    ),
+    paste("hostile", attack_field, attack_value, "row must be self-consistent")
+  )
+  hostile_payload$rows <- rows
+  hostile_payload$rows_sha256 <- fastkpc_full_cuda_census_frame_hash(rows)
+  .fastkpc_full_cuda_phase3_atomic_write_merged_rds(
+    hostile_payload, direct_paths$direct_ci_rds
+  )
+  hostile_payload_sha256 <- fastkpc_full_cuda_census_file_hash(
+    direct_paths$direct_ci_rds
+  )
+  hostile_summary <- .fastkpc_full_cuda_phase3_direct_ci_summary(
+    hostile_payload, hostile_payload_sha256
+  )
+  .fastkpc_full_cuda_phase3_write_json_exact(
+    hostile_summary, direct_paths$direct_ci_summary_json
+  )
+  record_hardening_error(
+    fastkpc_full_cuda_phase3_validate_direct_ci_payload(
+      direct_output_dir, catalog
+    ),
+    "^direct-CI p-values must be finite and in \\[0,1\\]$",
+    paste0(attack_field, "=", attack_value, " escaped p-value validation")
+  )
+}
+assert_true(
+  file.copy(payload_backup, direct_paths$direct_ci_rds, overwrite = TRUE) &&
+    file.copy(
+      summary_backup, direct_paths$direct_ci_summary_json,
+      overwrite = TRUE
+    ),
+  "direct-CI artifact restore after p-value domain attacks"
+)
+
 wrong_data_payload <- readRDS(direct_paths$direct_ci_rds)
 wrong_data_payload$lineage$dataset_matrix_sha256 <- strrep("d", 64L)
 wrong_data_payload$lineage_sha256 <-
@@ -572,5 +757,13 @@ assert_true(
 invisible(fastkpc_full_cuda_phase3_validate_direct_ci_payload(
   direct_output_dir, catalog
 ))
+
+assert_true(
+  length(hardening_failures) == 0L,
+  paste(
+    c("direct-CI hardening expectations failed:", hardening_failures),
+    collapse = "\n- "
+  )
+)
 
 cat("full CUDA CI fixed-sp shadow mapping: PASS\n")
