@@ -3164,6 +3164,14 @@ fastkpc_full_cuda_phase3_assign_setup_shards <- function(
     assignments$sorted_rank[setup_index], rows$residual_key_sha256,
     method = "radix"
   )
+  expected_route <- if (nrow(rows) == 0L) character() else {
+    unname(fastkpc_full_cuda_fixed_sp_route(
+      condition = rows$condition,
+      coefficient_rank = rows$coefficient_rank,
+      null_dim = rows$null_dim,
+      authenticated = rep.int(TRUE, nrow(rows))
+    ))
+  }
   semantic <- is.data.frame(assignments) && !anyNA(setup_index) &&
     !anyDuplicated(rows$residual_key_sha256) &&
     !anyDuplicated(rows$canonical_target_rank) &&
@@ -3183,7 +3191,8 @@ fastkpc_full_cuda_phase3_assign_setup_shards <- function(
     all(rows$condition >= 0) &&
     all(rows$planned_route %in% c(
       "CHOLESKY_BATCHED", "AUGMENTED_QR", "AUGMENTED_SVD"
-    )) && identical(expected_order, seq_len(nrow(rows)))
+    )) && identical(rows$planned_route, expected_route) &&
+    identical(expected_order, seq_len(nrow(rows)))
   if (!isTRUE(semantic)) {
     stop("Phase 3 shadow target authority semantics are malformed",
          call. = FALSE)

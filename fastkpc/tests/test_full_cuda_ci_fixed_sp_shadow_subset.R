@@ -594,7 +594,7 @@ authority_target_rows <- data.frame(
   phase2_shard_id = rep.int(0L, 2L),
   target = as.integer(match(target_keys_fixture, c(key_x, key_y))),
   null_dim = rep.int(2L, 2L),
-  condition = rep.int(1, 2L),
+  condition = c(1, 1e8),
   coefficient_rank = rep.int(2L, 2L),
   planned_route = route_fixture$planned_route,
   selected_sp_hash = unname(vapply(
@@ -614,6 +614,67 @@ authority_target_rows <- data.frame(
   )),
   stringsAsFactors = FALSE
 )
+authority_target_assignments <- data.frame(
+  prepared_s_key_sha256 = setup_a,
+  sorted_rank = 1L,
+  shard_id = 0L,
+  stringsAsFactors = FALSE
+)
+authority_target_schema <-
+  .fastkpc_full_cuda_phase3_shadow_target_authority_schema(
+    authority_target_rows
+  )
+validate_target_route <- function(
+    condition, planned_route, coefficient_rank = 2L, null_dim = 2L) {
+  rows <- authority_target_rows
+  rows$condition[[1L]] <- condition
+  rows$coefficient_rank[[1L]] <- coefficient_rank
+  rows$null_dim[[1L]] <- null_dim
+  rows$planned_route[[1L]] <- planned_route
+  .fastkpc_full_cuda_phase3_validate_shadow_target_authority(
+    rows, authority_target_schema, authority_target_assignments, 64L
+  )
+}
+assert_true(
+  isTRUE(validate_target_route(Inf, "AUGMENTED_SVD")),
+  "canonical infinite condition validates only as authenticated SVD"
+)
+assert_error(
+  validate_target_route(Inf, "CHOLESKY_BATCHED"),
+  "infinite condition cannot claim the Cholesky route", "target authority"
+)
+assert_error(
+  validate_target_route(Inf, "AUGMENTED_QR"),
+  "infinite condition cannot claim the QR route", "target authority"
+)
+finite_route_cases <- data.frame(
+  condition = c(1, 1e8, 1e12),
+  planned_route = c(
+    "CHOLESKY_BATCHED", "AUGMENTED_QR", "AUGMENTED_SVD"
+  ),
+  stringsAsFactors = FALSE
+)
+for (index in seq_len(nrow(finite_route_cases))) {
+  assert_true(
+    isTRUE(validate_target_route(
+      finite_route_cases$condition[[index]],
+      finite_route_cases$planned_route[[index]]
+    )),
+    paste("finite target authority accepts recomputed route", index)
+  )
+}
+assert_error(
+  validate_target_route(1, "AUGMENTED_SVD"),
+  "finite condition cannot claim a different allowed route",
+  "target authority"
+)
+for (condition in list(-Inf, NaN, NA_real_)) {
+  assert_error(
+    validate_target_route(condition, "AUGMENTED_SVD"),
+    "target authority rejects negative, NaN, and missing conditions",
+    "target authority"
+  )
+}
 attacker_selected_plan <- fastkpc_full_cuda_phase3_plan_shards(
   setup_keys = setup_a,
   target_rows = authority_target_rows,
