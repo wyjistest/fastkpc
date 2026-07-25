@@ -92,6 +92,84 @@ assert_error(
 )
 unlink(phase2_identity_dir, recursive = TRUE, force = TRUE)
 
+if (!identical(.Platform$OS.type, "unix")) {
+  message("SKIP: Phase 2 non-symlink identity probe is unavailable")
+} else {
+  assert_phase2_symlink_rejected <- function() {
+    symlink_dir <- tempfile("shadow-phase2-symlink-")
+    dir.create(symlink_dir)
+    on.exit(unlink(symlink_dir, recursive = TRUE, force = TRUE), add = TRUE)
+    setup_path <- file.path(symlink_dir, "prepared_s_setup_index.csv")
+    target_backing_path <- file.path(symlink_dir, "target-backing.rds")
+    target_path <- file.path(symlink_dir, "target_state_index.rds")
+    write_fixture_bytes(setup_path, "setup-symlink-probe")
+    write_fixture_bytes(target_backing_path, "target-symlink-probe")
+    linked <- file.symlink(target_backing_path, target_path)
+    if (!isTRUE(linked)) {
+      message("SKIP: Phase 2 non-symlink identity probe is unavailable")
+      return(invisible(FALSE))
+    }
+    expected_hashes <- c(
+      fastkpc_full_cuda_fixed_sp_sha256_file(setup_path),
+      fastkpc_full_cuda_fixed_sp_sha256_file(target_backing_path)
+    )
+    assert_error(
+      .fastkpc_full_cuda_shadow_phase2_file_records(
+        list(phase2_dir = symlink_dir),
+        expected_hashes[[1L]], expected_hashes[[2L]]
+      ),
+      "regular non-symlink",
+      "Phase 2 file records must reject symlinked payload paths"
+    )
+    invisible(TRUE)
+  }
+  assert_phase2_symlink_rejected()
+  rm(assert_phase2_symlink_rejected)
+}
+
+assert_phase2_transition_rejected <- function() {
+  transition_dir <- tempfile("shadow-phase2-transition-")
+  dir.create(transition_dir)
+  on.exit(unlink(transition_dir, recursive = TRUE, force = TRUE), add = TRUE)
+  transition_paths <- file.path(
+    transition_dir,
+    c("prepared_s_setup_index.csv", "target_state_index.rds")
+  )
+  write_fixture_bytes(transition_paths[[1L]], "setup-transition-stable")
+  write_fixture_bytes(transition_paths[[2L]], "target-transition-before")
+  expected_hashes <- unname(vapply(
+    transition_paths,
+    fastkpc_full_cuda_fixed_sp_sha256_file,
+    character(1L)
+  ))
+  transition_calls <- 0L
+  transition_hook <- function(paths, stage) {
+    transition_calls <<- transition_calls + 1L
+    assert_true(
+      identical(stage, "between_hash_passes"),
+      "Phase 2 transition hook must run between hash passes"
+    )
+    write_fixture_bytes(paths[[2L]], "target-transition-after")
+    invisible(NULL)
+  }
+  assert_error(
+    .fastkpc_full_cuda_shadow_phase2_file_records(
+      list(phase2_dir = transition_dir),
+      expected_hashes[[1L]], expected_hashes[[2L]],
+      .transition_hook = transition_hook
+    ),
+    "changed while snapshotting",
+    "Phase 2 file transitions between hash passes must fail closed"
+  )
+  assert_true(
+    identical(transition_calls, 1L),
+    "Phase 2 transition probe must run exactly once"
+  )
+  invisible(TRUE)
+}
+assert_phase2_transition_rejected()
+rm(assert_phase2_transition_rejected)
+
 catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
   phase0_dir = "fastkpc/artifacts/full_cuda_ci/oracle_351x48_v1",
   phase1_dir =
@@ -168,6 +246,160 @@ assert_true(
   ) && grepl("^[0-9a-f]{64}$", plan$target_association_sha256),
   "shadow plan binds authenticated Phase 2 target associations"
 )
+
+fork_available <- identical(.Platform$OS.type, "unix") &&
+  exists("mcparallel", envir = asNamespace("parallel"), inherits = FALSE) &&
+  exists("mccollect", envir = asNamespace("parallel"), inherits = FALSE)
+if (!isTRUE(fork_available)) {
+  message("SKIP: forked shadow-plan token authentication is unavailable")
+} else {
+  validate_in_fork <- function() {
+    child <- parallel::mcparallel({
+      error <- tryCatch(
+        .fastkpc_full_cuda_shadow_validate_supplied_plan(catalog, plan),
+        error = identity
+      )
+      list(
+        rejected = inherits(error, "error"),
+        message = if (inherits(error, "error")) {
+          conditionMessage(error)
+        } else {
+          NA_character_
+        }
+      )
+    }, mc.set.seed = FALSE, silent = TRUE)
+    collected <- FALSE
+    on.exit({
+      if (!isTRUE(collected)) {
+        try(parallel::mckill(child), silent = TRUE)
+        try(parallel::mccollect(child, wait = TRUE), silent = TRUE)
+      }
+    }, add = TRUE)
+    result <- parallel::mccollect(child, wait = TRUE)
+    collected <- TRUE
+    result[[1L]]
+  }
+  fork_result <- validate_in_fork()
+  assert_true(
+    is.list(fork_result) && isTRUE(fork_result$rejected) && identical(
+      fork_result$message,
+      "direct-CI execution plan does not match authenticated catalog"
+    ),
+    "forked child must reject a plan token inherited from its parent"
+  )
+  assert_true(
+    identical(
+      .fastkpc_full_cuda_shadow_validate_supplied_plan(catalog, plan),
+      plan
+    ),
+    "fork rejection must leave the parent plan token valid"
+  )
+  rm(fork_result, validate_in_fork)
+}
+
+shadow_registry_before_resource <- get(
+  ".fastkpc_full_cuda_shadow_plan_registry", envir = .GlobalEnv,
+  inherits = FALSE
+)
+source("fastkpc/R/full_cuda_ci_fixed_sp_shadow.R")
+shadow_registry_after_resource <- get(
+  ".fastkpc_full_cuda_shadow_plan_registry", envir = .GlobalEnv,
+  inherits = FALSE
+)
+assert_true(
+  identical(shadow_registry_after_resource, shadow_registry_before_resource),
+  "re-sourcing shadow planner code must preserve the plan registry singleton"
+)
+assert_true(
+  identical(
+    .fastkpc_full_cuda_shadow_validate_supplied_plan(catalog, plan),
+    plan
+  ),
+  "re-sourcing shadow planner code must preserve held plan tokens"
+)
+rm(shadow_registry_before_resource, shadow_registry_after_resource)
+
+assert_registry_retains_held_plan <- function() {
+  registry <- .fastkpc_full_cuda_shadow_current_plan_registry()
+  original_keys <- ls(registry, all.names = TRUE)
+  original_entries <- mget(
+    original_keys, envir = registry, inherits = FALSE
+  )
+  original_locks <- setNames(vapply(
+    original_keys, bindingIsLocked, logical(1L), env = registry
+  ), original_keys)
+  on.exit({
+    current_keys <- ls(registry, all.names = TRUE)
+    for (key in current_keys) {
+      if (bindingIsLocked(key, registry)) unlockBinding(key, registry)
+    }
+    if (length(current_keys) > 0L) {
+      rm(list = current_keys, envir = registry)
+    }
+    for (key in original_keys) {
+      assign(key, original_entries[[key]], envir = registry)
+      if (isTRUE(original_locks[[key]])) lockBinding(key, registry)
+    }
+  }, add = TRUE)
+
+  held_registry_id <- plan$authentication_token$registry_id
+  held_entry <- get(held_registry_id, envir = registry, inherits = FALSE)
+  metadata <- plan[.fastkpc_full_cuda_shadow_plan_metadata_fields()]
+  extra_tokens <- lapply(seq_len(33L), function(index) {
+    extra_identity <- fastkpc_full_cuda_census_named_metadata_hash(list(
+      schema_version = "full-cuda-ci-shadow-plan-retention-probe-v1",
+      registration_index = as.integer(index),
+      held_plan_identity_sha256 = plan$plan_identity_sha256
+    ))
+    .fastkpc_full_cuda_shadow_register_plan_identity(
+      metadata, extra_identity, held_entry$phase2_file_records
+    )
+  })
+  assert_true(
+    length(extra_tokens) == 33L,
+    "registry retention probe must register more than 32 compact identities"
+  )
+  assert_true(
+    identical(
+      .fastkpc_full_cuda_shadow_validate_supplied_plan(catalog, plan),
+      plan
+    ),
+    "unrelated plan registrations must not invalidate a held plan token"
+  )
+  invisible(TRUE)
+}
+assert_registry_retains_held_plan()
+rm(assert_registry_retains_held_plan)
+
+assert_corrupt_registry_rejected <- function() {
+  option_name <- .fastkpc_full_cuda_shadow_plan_registry_option_name()
+  marker_name <-
+    .fastkpc_full_cuda_shadow_plan_registry_marker_option_name()
+  original_registry <- getOption(option_name, NULL)
+  original_marker <- getOption(marker_name, NULL)
+  on.exit(options(structure(
+    list(original_registry, original_marker),
+    names = c(option_name, marker_name)
+  )), add = TRUE)
+
+  corrupt_registry <- new.env(hash = TRUE, parent = emptyenv())
+  attr(corrupt_registry, "schema_version") <-
+    .fastkpc_full_cuda_shadow_plan_registry_schema_version()
+  options(structure(list(corrupt_registry), names = option_name))
+  assert_error(
+    .fastkpc_full_cuda_shadow_current_plan_registry(),
+    "shadow plan registry singleton is corrupt",
+    "registry accessor must reject a replaced option-held singleton"
+  )
+  assert_error(
+    source("fastkpc/R/full_cuda_ci_fixed_sp_shadow.R"),
+    "shadow plan registry singleton is corrupt",
+    "re-source must reject a replaced option-held registry singleton"
+  )
+  invisible(TRUE)
+}
+assert_corrupt_registry_rejected()
+rm(assert_corrupt_registry_rejected)
 
 association_swap_catalog <- catalog
 association_swap_keys <-
@@ -349,7 +581,7 @@ assert_error(
 )
 
 assert_current_catalog_association_rejected <- function(
-    candidate_catalog, message) {
+    candidate_catalog, message, candidate_plan = plan) {
   instrumented <- c(
     canonical_plan = "fastkpc_full_cuda_shadow_plan",
     authenticated_phase2 =
@@ -395,7 +627,9 @@ assert_current_catalog_association_rejected <- function(
     envir = .GlobalEnv
   )
   error <- tryCatch(
-    .fastkpc_full_cuda_shadow_direct_ci_rows(candidate_catalog, plan),
+    .fastkpc_full_cuda_shadow_direct_ci_rows(
+      candidate_catalog, candidate_plan
+    ),
     error = identity
   )
   assert_true(
@@ -426,6 +660,38 @@ assert_current_catalog_association_rejected(
   target_association_swap_catalog,
   "mutated current target group/fingerprint association"
 )
+
+direct_type_plan <- plan
+direct_type_plan$direct_tests$shard_id <-
+  as.double(direct_type_plan$direct_tests$shard_id)
+assert_true(
+  identical(
+    fastkpc_full_cuda_census_frame_hash(direct_type_plan$direct_tests),
+    plan$direct_tests_sha256
+  ),
+  "direct type-mutation probe must preserve the portable frame hash"
+)
+assert_current_catalog_association_rejected(
+  catalog, "mutated direct frame column type",
+  candidate_plan = direct_type_plan
+)
+rm(direct_type_plan)
+
+conditional_type_plan <- plan
+conditional_type_plan$conditional_tests$shard_id <-
+  as.double(conditional_type_plan$conditional_tests$shard_id)
+assert_true(
+  identical(
+    fastkpc_full_cuda_census_frame_hash(conditional_type_plan$conditional_tests),
+    plan$conditional_tests_sha256
+  ),
+  "conditional type-mutation probe must preserve the portable frame hash"
+)
+assert_current_catalog_association_rejected(
+  catalog, "mutated conditional frame column type",
+  candidate_plan = conditional_type_plan
+)
+rm(conditional_type_plan)
 
 direct_output_dir <- tempfile("full-cuda-ci-direct-")
 supplied_plan_calls <- new.env(parent = emptyenv())
@@ -640,8 +906,9 @@ if (is.environment(plan$authentication_token)) {
     assign(field, plan$authentication_token[[field]], envir = forged_token)
   }
 } else {
-  forged_token$schema_version <- "full-cuda-ci-shadow-plan-token-v1"
+  forged_token$schema_version <- "full-cuda-ci-shadow-plan-token-v2"
   forged_token$registry_id <- strrep("4", 64L)
+  forged_token$creator_pid <- as.integer(Sys.getpid())
   forged_token$catalog_authority_sha256 <- strrep("5", 64L)
 }
 lockEnvironment(forged_token, bindings = TRUE)
@@ -661,62 +928,150 @@ record_hardening_true(
   "authenticated plan must expose a process-local registry token"
 )
 if (isTRUE(shadow_registry_available)) {
-  shadow_registry <- get(
-    ".fastkpc_full_cuda_shadow_plan_registry", envir = .GlobalEnv,
-    inherits = FALSE
-  )
-  stale_registry_id <- plan$authentication_token$registry_id
-  stale_registry_entry <- get(
-    stale_registry_id, envir = shadow_registry, inherits = FALSE
-  )
-  record_hardening_true(
-    !any(c("direct_tests", "conditional_tests", "setup", "target") %in%
-           names(stale_registry_entry)) &&
-      is.data.frame(stale_registry_entry$phase2_file_records) &&
-      nrow(stale_registry_entry$phase2_file_records) == 2L &&
-      as.numeric(object.size(stale_registry_entry)) < 1000000,
-    "shadow plan registry entry must retain only compact authenticated identity"
-  )
-  stale_binding_locked <- bindingIsLocked(stale_registry_id, shadow_registry)
-  if (stale_binding_locked) unlockBinding(stale_registry_id, shadow_registry)
-  rm(list = stale_registry_id, envir = shadow_registry)
-  assert_supplied_plan_rejected(plan, "stale plan token")
-  assign(stale_registry_id, stale_registry_entry, envir = shadow_registry)
-  if (stale_binding_locked) lockBinding(stale_registry_id, shadow_registry)
+  assert_registry_entry_pid_rejected <- function() {
+    shadow_registry <- .fastkpc_full_cuda_shadow_current_plan_registry()
+    registry_id <- plan$authentication_token$registry_id
+    original_entry <- get(
+      registry_id, envir = shadow_registry, inherits = FALSE
+    )
+    original_locked <- bindingIsLocked(registry_id, shadow_registry)
+    on.exit({
+      if (exists(registry_id, envir = shadow_registry, inherits = FALSE)) {
+        if (bindingIsLocked(registry_id, shadow_registry)) {
+          unlockBinding(registry_id, shadow_registry)
+        }
+        rm(list = registry_id, envir = shadow_registry)
+      }
+      assign(registry_id, original_entry, envir = shadow_registry)
+      if (isTRUE(original_locked)) lockBinding(registry_id, shadow_registry)
+    }, add = TRUE)
+
+    hostile_entry <- original_entry
+    hostile_entry$creator_pid <- as.double(hostile_entry$creator_pid)
+    if (isTRUE(original_locked)) unlockBinding(registry_id, shadow_registry)
+    assign(registry_id, hostile_entry, envir = shadow_registry)
+    if (isTRUE(original_locked)) lockBinding(registry_id, shadow_registry)
+    assert_supplied_plan_rejected(
+      plan, "non-integer registry creator PID"
+    )
+    invisible(TRUE)
+  }
+  assert_registry_entry_pid_rejected()
+  rm(assert_registry_entry_pid_rejected)
+
+  assert_stale_plan_token_rejected <- function() {
+    shadow_registry <- .fastkpc_full_cuda_shadow_current_plan_registry()
+    stale_registry_id <- plan$authentication_token$registry_id
+    stale_registry_entry <- get(
+      stale_registry_id, envir = shadow_registry, inherits = FALSE
+    )
+    stale_binding_locked <- bindingIsLocked(
+      stale_registry_id, shadow_registry
+    )
+    removed <- FALSE
+    on.exit({
+      if (isTRUE(removed)) {
+        if (exists(
+              stale_registry_id, envir = shadow_registry, inherits = FALSE
+            )) {
+          if (bindingIsLocked(stale_registry_id, shadow_registry)) {
+            unlockBinding(stale_registry_id, shadow_registry)
+          }
+          rm(list = stale_registry_id, envir = shadow_registry)
+        }
+        assign(
+          stale_registry_id, stale_registry_entry, envir = shadow_registry
+        )
+        if (isTRUE(stale_binding_locked)) {
+          lockBinding(stale_registry_id, shadow_registry)
+        }
+      }
+    }, add = TRUE)
+    record_hardening_true(
+      !any(c("direct_tests", "conditional_tests", "setup", "target") %in%
+             names(stale_registry_entry)) &&
+        identical(
+          plan$authentication_token$creator_pid, as.integer(Sys.getpid())
+        ) && identical(
+          stale_registry_entry$creator_pid, as.integer(Sys.getpid())
+        ) &&
+        is.data.frame(stale_registry_entry$phase2_file_records) &&
+        nrow(stale_registry_entry$phase2_file_records) == 2L &&
+        as.numeric(object.size(stale_registry_entry)) < 1000000,
+      paste(
+        "shadow plan registry entry must retain only compact authenticated",
+        "identity"
+      )
+    )
+    if (isTRUE(stale_binding_locked)) {
+      unlockBinding(stale_registry_id, shadow_registry)
+    }
+    rm(list = stale_registry_id, envir = shadow_registry)
+    removed <- TRUE
+    assert_supplied_plan_rejected(plan, "stale plan token")
+    invisible(TRUE)
+  }
+  assert_stale_plan_token_rejected()
+  rm(assert_stale_plan_token_rejected)
 }
 
-catalog_authority <- fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
-catalog_authority_registry <- get(
-  ".fastkpc_full_cuda_phase3_catalog_authority_registry", envir = .GlobalEnv,
-  inherits = FALSE
-)
-cross_authority <- get(
-  catalog_authority$authority_sha256,
-  envir = catalog_authority_registry,
-  inherits = FALSE
-)
-cross_authority$phase2_source_commit <- strrep("6", 40L)
-cross_authority$sha256 <-
-  .fastkpc_full_cuda_phase3_catalog_authority_hash(cross_authority)
-cross_catalog <- catalog
-cross_catalog$phase2_manifest$source_commit <-
-  cross_authority$phase2_source_commit
-cross_catalog$phase3_catalog_authority_token <-
-  .fastkpc_full_cuda_phase3_register_catalog_authority(cross_authority)
-cross_catalog$phase3_catalog_authority_sha256 <- cross_authority$sha256
-cross_catalog_authority <-
-  fastkpc_full_cuda_phase3_discover_catalog_authority(cross_catalog)
-assert_true(
-  !identical(
-    cross_catalog_authority$authority_sha256,
-    catalog_authority$authority_sha256
-  ),
-  "cross-catalog probe must have a distinct authenticated authority"
-)
-assert_supplied_plan_rejected(
-  plan, "cross-catalog supplied plan", candidate_catalog = cross_catalog
-)
-rm(list = cross_authority$sha256, envir = catalog_authority_registry)
+assert_cross_catalog_plan_rejected <- function() {
+  catalog_authority <-
+    fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
+  registry <- get(
+    ".fastkpc_full_cuda_phase3_catalog_authority_registry",
+    envir = .GlobalEnv, inherits = FALSE
+  )
+  original_keys <- ls(registry, all.names = TRUE)
+  original_entries <- mget(
+    original_keys, envir = registry, inherits = FALSE
+  )
+  original_locks <- setNames(vapply(
+    original_keys, bindingIsLocked, logical(1L), env = registry
+  ), original_keys)
+  on.exit({
+    current_keys <- ls(registry, all.names = TRUE)
+    for (key in current_keys) {
+      if (bindingIsLocked(key, registry)) unlockBinding(key, registry)
+    }
+    if (length(current_keys) > 0L) {
+      rm(list = current_keys, envir = registry)
+    }
+    for (key in original_keys) {
+      assign(key, original_entries[[key]], envir = registry)
+      if (isTRUE(original_locks[[key]])) lockBinding(key, registry)
+    }
+  }, add = TRUE)
+
+  cross_authority <- get(
+    catalog_authority$authority_sha256,
+    envir = registry, inherits = FALSE
+  )
+  cross_authority$phase2_source_commit <- strrep("6", 40L)
+  cross_authority$sha256 <-
+    .fastkpc_full_cuda_phase3_catalog_authority_hash(cross_authority)
+  cross_catalog <- catalog
+  cross_catalog$phase2_manifest$source_commit <-
+    cross_authority$phase2_source_commit
+  cross_catalog$phase3_catalog_authority_token <-
+    .fastkpc_full_cuda_phase3_register_catalog_authority(cross_authority)
+  cross_catalog$phase3_catalog_authority_sha256 <- cross_authority$sha256
+  cross_catalog_authority <-
+    fastkpc_full_cuda_phase3_discover_catalog_authority(cross_catalog)
+  assert_true(
+    !identical(
+      cross_catalog_authority$authority_sha256,
+      catalog_authority$authority_sha256
+    ),
+    "cross-catalog probe must have a distinct authenticated authority"
+  )
+  assert_supplied_plan_rejected(
+    plan, "cross-catalog supplied plan", candidate_catalog = cross_catalog
+  )
+  invisible(TRUE)
+}
+assert_cross_catalog_plan_rejected()
+rm(assert_cross_catalog_plan_rejected)
 
 validated_direct <- fastkpc_full_cuda_phase3_validate_direct_ci_payload(
   output_dir = direct_output_dir,

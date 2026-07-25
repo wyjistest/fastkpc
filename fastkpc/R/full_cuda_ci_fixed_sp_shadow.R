@@ -538,11 +538,92 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
   )
 }
 
-.fastkpc_full_cuda_shadow_plan_registry <-
-  new.env(hash = TRUE, parent = emptyenv())
+.fastkpc_full_cuda_shadow_plan_registry_option_name <- function() {
+  "fastkpc.full_cuda.shadow_plan_registry.v1"
+}
 
-.fastkpc_full_cuda_shadow_plan_registry_max_entries <- function() {
-  32L
+.fastkpc_full_cuda_shadow_plan_registry_marker_option_name <- function() {
+  "fastkpc.full_cuda.shadow_plan_registry.initialized.v1"
+}
+
+.fastkpc_full_cuda_shadow_plan_registry_schema_version <- function() {
+  "full-cuda-ci-shadow-plan-registry-v1"
+}
+
+.fastkpc_full_cuda_shadow_valid_plan_registry <- function(registry) {
+  is.environment(registry) && identical(
+    attributes(registry),
+    list(
+      schema_version =
+        .fastkpc_full_cuda_shadow_plan_registry_schema_version()
+    )
+  )
+}
+
+.fastkpc_full_cuda_shadow_initialize_plan_registry <- function() {
+  option_name <- .fastkpc_full_cuda_shadow_plan_registry_option_name()
+  marker_name <-
+    .fastkpc_full_cuda_shadow_plan_registry_marker_option_name()
+  schema_version <-
+    .fastkpc_full_cuda_shadow_plan_registry_schema_version()
+  registry <- getOption(option_name, NULL)
+  marker <- getOption(marker_name, NULL)
+  definition_environment <- environment(
+    .fastkpc_full_cuda_shadow_initialize_plan_registry
+  )
+  previous <- get0(
+    ".fastkpc_full_cuda_shadow_plan_registry_singleton",
+    envir = definition_environment, inherits = FALSE, ifnotfound = NULL
+  )
+
+  if (is.null(marker)) {
+    if (!is.null(registry) || !is.null(previous)) {
+      stop("shadow plan registry singleton initialization is corrupt",
+           call. = FALSE)
+    }
+    registry <- new.env(hash = TRUE, parent = emptyenv())
+    attr(registry, "schema_version") <- schema_version
+    options(structure(
+      list(registry, schema_version), names = c(option_name, marker_name)
+    ))
+    return(registry)
+  }
+  if (!identical(marker, schema_version) ||
+      !.fastkpc_full_cuda_shadow_valid_plan_registry(registry) ||
+      (!is.null(previous) && !identical(previous, registry))) {
+    stop("shadow plan registry singleton is corrupt", call. = FALSE)
+  }
+  registry
+}
+
+.fastkpc_full_cuda_shadow_plan_registry_singleton <-
+  .fastkpc_full_cuda_shadow_initialize_plan_registry()
+
+.fastkpc_full_cuda_shadow_plan_registry <-
+  .fastkpc_full_cuda_shadow_plan_registry_singleton
+
+.fastkpc_full_cuda_shadow_current_plan_registry <- function() {
+  option_name <- .fastkpc_full_cuda_shadow_plan_registry_option_name()
+  marker_name <-
+    .fastkpc_full_cuda_shadow_plan_registry_marker_option_name()
+  registry <- getOption(option_name, NULL)
+  definition_environment <- environment(
+    .fastkpc_full_cuda_shadow_current_plan_registry
+  )
+  bound_registry <- get0(
+    ".fastkpc_full_cuda_shadow_plan_registry",
+    envir = definition_environment, inherits = FALSE, ifnotfound = NULL
+  )
+  if (!identical(
+        getOption(marker_name, NULL),
+        .fastkpc_full_cuda_shadow_plan_registry_schema_version()
+      ) || !.fastkpc_full_cuda_shadow_valid_plan_registry(registry) ||
+      !identical(
+        registry, .fastkpc_full_cuda_shadow_plan_registry_singleton
+      ) || !identical(registry, bound_registry)) {
+    stop("shadow plan registry singleton is corrupt", call. = FALSE)
+  }
+  registry
 }
 
 .fastkpc_full_cuda_shadow_plan_metadata_fields <- function() {
@@ -551,7 +632,9 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
     "catalog_lineage_sha256", "route_config_sha256",
     "phase2_setup_index_csv_sha256", "setup_association_sha256",
     "phase2_target_state_index_rds_sha256", "target_association_sha256",
-    "shard_count", "direct_tests_sha256", "conditional_tests_sha256"
+    "shard_count", "direct_tests_schema_sha256",
+    "conditional_tests_schema_sha256", "direct_tests_sha256",
+    "conditional_tests_sha256"
   )
 }
 
@@ -574,6 +657,93 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
   typeof(value) == "character" && length(value) == expected_count &&
     !is.object(value) && is.null(attributes(value)) && !anyNA(value) &&
     all(grepl("^[0-9a-f]{64}$", value))
+}
+
+.fastkpc_full_cuda_shadow_bare_pid <- function(value) {
+  typeof(value) == "integer" && length(value) == 1L &&
+    !is.object(value) && is.null(attributes(value)) && !is.na(value) &&
+    value > 0L
+}
+
+.fastkpc_full_cuda_shadow_plan_frame_schema_hashes <- function(
+    catalog, direct_tests, conditional_tests) {
+  logical_tests <- catalog$inputs$logical_tests
+  logical_attributes <- attributes(logical_tests)
+  logical_clean <- is.data.frame(logical_tests) &&
+    identical(class(logical_tests), "data.frame") &&
+    nrow(logical_tests) == 240489L && !anyDuplicated(names(logical_tests)) &&
+    !anyDuplicated(names(logical_attributes)) &&
+    all(vapply(logical_tests, function(column) {
+      !is.object(column) && is.null(attributes(column)) &&
+        length(column) == nrow(logical_tests)
+    }, logical(1L)))
+  if (!isTRUE(logical_clean)) {
+    stop("shadow plan logical frame schema is malformed", call. = FALSE)
+  }
+  fields <- c(
+    names(logical_tests), "prepared_s_key_x", "prepared_s_key_y", "shard_id"
+  )
+  types <- c(
+    unname(vapply(logical_tests, typeof, character(1L))),
+    "character", "character", "integer"
+  )
+  inherited_attribute_names <-
+    sort(setdiff(names(logical_attributes), c("names", "row.names")))
+  inherited_attribute_types <- unname(vapply(
+    inherited_attribute_names,
+    function(name) typeof(logical_attributes[[name]]),
+    character(1L)
+  ))
+  inherited_attribute_objects <- unname(vapply(
+    inherited_attribute_names,
+    function(name) is.object(logical_attributes[[name]]),
+    logical(1L)
+  ))
+  schema_hash <- function(frame, row_count, label) {
+    frame_attributes <- attributes(frame)
+    clean <- is.data.frame(frame) && identical(class(frame), "data.frame") &&
+      nrow(frame) == row_count && identical(names(frame), fields) &&
+      identical(
+        sort(names(frame_attributes)), sort(names(logical_attributes))
+      ) &&
+      !anyDuplicated(names(frame_attributes)) &&
+      identical(.row_names_info(frame, 0L), c(NA_integer_, -row_count)) &&
+      all(vapply(inherited_attribute_names, function(name) {
+        identical(frame_attributes[[name]], logical_attributes[[name]])
+      }, logical(1L))) &&
+      all(vapply(seq_along(fields), function(index) {
+        column <- frame[[index]]
+        identical(typeof(column), types[[index]]) &&
+          length(column) == row_count && !is.object(column) &&
+          is.null(attributes(column))
+      }, logical(1L)))
+    if (!isTRUE(clean)) {
+      stop("shadow plan ", label, " exact frame schema mismatch",
+           call. = FALSE)
+    }
+    fastkpc_full_cuda_census_named_metadata_hash(list(
+      schema_version = "full-cuda-ci-shadow-frame-schema-v1",
+      row_count = as.integer(row_count),
+      field_order = fields,
+      column_typeof = types,
+      column_object_policy = rep.int(FALSE, length(fields)),
+      column_attributes_policy = rep.int("none", length(fields)),
+      frame_class = "data.frame",
+      frame_object_policy = TRUE,
+      frame_attribute_names = sort(names(logical_attributes)),
+      inherited_attribute_names = inherited_attribute_names,
+      inherited_attribute_typeof = inherited_attribute_types,
+      inherited_attribute_object_policy = inherited_attribute_objects,
+      inherited_attribute_value_policy = "identical-to-logical-contract",
+      row_names_policy = "automatic"
+    ))
+  }
+  list(
+    direct_tests_schema_sha256 =
+      schema_hash(direct_tests, 2213L, "direct"),
+    conditional_tests_schema_sha256 =
+      schema_hash(conditional_tests, 238276L, "conditional")
+  )
 }
 
 .fastkpc_full_cuda_shadow_catalog_association_hashes <- function(catalog) {
@@ -713,10 +883,12 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
 }
 
 .fastkpc_full_cuda_shadow_phase2_file_records <- function(
-    catalog, setup_index_sha256, target_state_sha256) {
+    catalog, setup_index_sha256, target_state_sha256,
+    .transition_hook = NULL) {
   if (!.fastkpc_full_cuda_shadow_bare_sha256(setup_index_sha256) ||
       !.fastkpc_full_cuda_shadow_bare_sha256(target_state_sha256) ||
-      !is.list(catalog) || is.null(catalog$phase2_dir)) {
+      !is.list(catalog) || is.null(catalog$phase2_dir) ||
+      (!is.null(.transition_hook) && !is.function(.transition_hook))) {
     stop("shadow plan Phase 2 file identity is malformed", call. = FALSE)
   }
   logical_path <- c(
@@ -726,90 +898,120 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
     catalog$phase2_dir, winslash = "/", mustWork = TRUE
   )
   paths <- file.path(phase2_dir, logical_path)
-  paths <- unname(vapply(
+  require_regular_paths <- function() {
+    links <- Sys.readlink(paths)
+    clean <- length(paths) == length(logical_path) &&
+      length(links) == length(paths) && !anyNA(links) &&
+      !any(nzchar(links)) && all(file.exists(paths)) &&
+      !any(dir.exists(paths)) && all(file_test("-f", paths))
+    if (!isTRUE(clean)) {
+      stop("shadow plan Phase 2 paths must be regular non-symlink files",
+           call. = FALSE)
+    }
+    invisible(TRUE)
+  }
+  require_regular_paths()
+  canonical_paths <- unname(vapply(
     paths, normalizePath, character(1L), winslash = "/", mustWork = TRUE
   ))
-  if (!all(file.exists(paths)) || any(dir.exists(paths))) {
-    stop("shadow plan Phase 2 file identity is unavailable", call. = FALSE)
-  }
   if (!exists("fastkpc_full_cuda_fixed_sp_sha256_file", mode = "function",
               inherits = TRUE)) {
     stop("shadow plan Phase 2 file hash helper is unavailable",
          call. = FALSE)
   }
-  actual_sha256 <- unname(vapply(
-    paths, fastkpc_full_cuda_fixed_sp_sha256_file, character(1L)
-  ))
-  expected_sha256 <- c(setup_index_sha256, target_state_sha256)
-  if (!all(vapply(
-        actual_sha256, .fastkpc_full_cuda_shadow_bare_sha256, logical(1L)
-      )) || !identical(actual_sha256, expected_sha256)) {
-    stop("shadow plan Phase 2 current file hash mismatch", call. = FALSE)
+  snapshot_metadata <- function() {
+    require_regular_paths()
+    info <- file.info(paths, extra_cols = FALSE)
+    current_paths <- unname(vapply(
+      paths, normalizePath, character(1L), winslash = "/",
+      mustWork = TRUE
+    ))
+    require_regular_paths()
+    clean <- is.data.frame(info) && nrow(info) == length(paths) &&
+      !anyNA(info$size) && !anyNA(info$mode) && !anyNA(info$mtime) &&
+      !anyNA(info$ctime) && all(info$size >= 0) &&
+      identical(current_paths, canonical_paths)
+    if (!isTRUE(clean)) {
+      stop("shadow plan Phase 2 file identity is malformed", call. = FALSE)
+    }
+    data.frame(
+      path = current_paths,
+      size = as.numeric(info$size),
+      mode = as.integer(info$mode),
+      mtime = as.numeric(info$mtime),
+      ctime = as.numeric(info$ctime),
+      stringsAsFactors = FALSE
+    )
   }
-  info <- file.info(paths, extra_cols = FALSE)
-  if (!is.data.frame(info) || nrow(info) != length(paths) ||
-      anyNA(info$size) || anyNA(info$mtime) || anyNA(info$ctime)) {
-    stop("shadow plan Phase 2 file identity is malformed", call. = FALSE)
+  hash_files <- function() {
+    require_regular_paths()
+    hashes <- unname(vapply(
+      paths, fastkpc_full_cuda_fixed_sp_sha256_file, character(1L)
+    ))
+    require_regular_paths()
+    if (!all(vapply(
+          hashes, .fastkpc_full_cuda_shadow_bare_sha256, logical(1L)
+        ))) {
+      stop("shadow plan Phase 2 current file hash mismatch", call. = FALSE)
+    }
+    hashes
+  }
+
+  pre_metadata <- snapshot_metadata()
+  first_sha256 <- hash_files()
+  post_metadata <- snapshot_metadata()
+  if (is.function(.transition_hook)) {
+    .transition_hook(paths = paths, stage = "between_hash_passes")
+  }
+  second_sha256 <- hash_files()
+  final_metadata <- snapshot_metadata()
+  if (!identical(pre_metadata, post_metadata) ||
+      !identical(post_metadata, final_metadata) ||
+      !identical(first_sha256, second_sha256)) {
+    stop("shadow plan Phase 2 files changed while snapshotting",
+         call. = FALSE)
+  }
+  expected_sha256 <- c(setup_index_sha256, target_state_sha256)
+  if (!identical(second_sha256, expected_sha256)) {
+    stop("shadow plan Phase 2 current file hash mismatch", call. = FALSE)
   }
   records <- data.frame(
     logical_path = logical_path,
-    path = paths,
-    size = as.character(info$size),
-    mtime = sprintf("%.6f", as.numeric(info$mtime)),
-    ctime = sprintf("%.6f", as.numeric(info$ctime)),
-    sha256 = actual_sha256,
+    path = final_metadata$path,
+    size = as.character(final_metadata$size),
+    mode = as.character(final_metadata$mode),
+    mtime = sprintf("%.6f", final_metadata$mtime),
+    ctime = sprintf("%.6f", final_metadata$ctime),
+    sha256 = second_sha256,
     stringsAsFactors = FALSE
   )
   rownames(records) <- NULL
   records
 }
 
-.fastkpc_full_cuda_shadow_prune_plan_registry <- function(
-    protect = character()) {
-  registry <- .fastkpc_full_cuda_shadow_plan_registry
-  limit <- .fastkpc_full_cuda_shadow_plan_registry_max_entries()
-  keys <- ls(registry, all.names = TRUE)
-  if (length(keys) <= limit) return(invisible(keys))
-  ages <- vapply(keys, function(key) {
-    entry <- get(key, envir = registry, inherits = FALSE)
-    if (is.list(entry) && is.double(entry$registered_at) &&
-        length(entry$registered_at) == 1L &&
-        is.finite(entry$registered_at)) {
-      entry$registered_at
-    } else {
-      -Inf
-    }
-  }, numeric(1L))
-  removable <- keys[order(ages, method = "radix")]
-  removable <- removable[!removable %in% protect]
-  while (length(ls(registry, all.names = TRUE)) > limit &&
-         length(removable) > 0L) {
-    key <- removable[[1L]]
-    if (bindingIsLocked(key, registry)) unlockBinding(key, registry)
-    rm(list = key, envir = registry)
-    removable <- removable[-1L]
-  }
-  invisible(ls(registry, all.names = TRUE))
-}
-
 .fastkpc_full_cuda_shadow_register_plan_identity <- function(
     metadata, plan_identity_sha256, phase2_file_records) {
   token <- new.env(parent = emptyenv())
+  creator_pid <- as.integer(Sys.getpid())
+  if (!.fastkpc_full_cuda_shadow_bare_pid(creator_pid)) {
+    stop("shadow plan creator process identity is malformed", call. = FALSE)
+  }
   registry_id <- fastkpc_full_cuda_census_named_metadata_hash(list(
     schema_version = "full-cuda-ci-shadow-plan-registry-key-v1",
-    process_id = as.integer(Sys.getpid()),
+    process_id = creator_pid,
     token_environment = format(token),
     catalog_authority_sha256 = metadata$catalog_authority_sha256,
     plan_identity_sha256 = plan_identity_sha256
   ))
-  registry <- .fastkpc_full_cuda_shadow_plan_registry
+  registry <- .fastkpc_full_cuda_shadow_current_plan_registry()
   if (exists(registry_id, envir = registry, inherits = FALSE)) {
     stop("shadow plan registry token collision", call. = FALSE)
   }
   assign(
-    "schema_version", "full-cuda-ci-shadow-plan-token-v1", envir = token
+    "schema_version", "full-cuda-ci-shadow-plan-token-v2", envir = token
   )
   assign("registry_id", registry_id, envir = token)
+  assign("creator_pid", creator_pid, envir = token)
   assign(
     "catalog_authority_sha256", metadata$catalog_authority_sha256,
     envir = token
@@ -818,8 +1020,9 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
   lockEnvironment(token, bindings = TRUE)
 
   entry <- list(
-    schema_version = "full-cuda-ci-shadow-plan-registry-entry-v2",
+    schema_version = "full-cuda-ci-shadow-plan-registry-entry-v4",
     registered_at = as.double(Sys.time()),
+    creator_pid = creator_pid,
     token = token,
     catalog_authority_sha256 = metadata$catalog_authority_sha256,
     catalog_lineage_sha256 = metadata$catalog_lineage_sha256,
@@ -827,13 +1030,15 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
     setup_association_sha256 = metadata$setup_association_sha256,
     target_association_sha256 = metadata$target_association_sha256,
     plan_identity_sha256 = plan_identity_sha256,
+    direct_tests_schema_sha256 = metadata$direct_tests_schema_sha256,
+    conditional_tests_schema_sha256 =
+      metadata$conditional_tests_schema_sha256,
     direct_tests_sha256 = metadata$direct_tests_sha256,
     conditional_tests_sha256 = metadata$conditional_tests_sha256,
     phase2_file_records = phase2_file_records
   )
   assign(registry_id, entry, envir = registry)
   lockBinding(registry_id, registry)
-  .fastkpc_full_cuda_shadow_prune_plan_registry(protect = registry_id)
   token
 }
 
@@ -885,8 +1090,11 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
       !identical(route$approximate_backend_allowed, FALSE)) {
     stop("shadow planner route authentication failed", call. = FALSE)
   }
+  frame_schema_hashes <- .fastkpc_full_cuda_shadow_plan_frame_schema_hashes(
+    catalog, mapped_plan$direct_tests, mapped_plan$conditional_tests
+  )
   metadata <- list(
-    schema_version = "full-cuda-ci-shadow-plan-v2",
+    schema_version = "full-cuda-ci-shadow-plan-v3",
     logical_contract = expected_logical_contract,
     catalog_authority_sha256 = authority$authority_sha256,
     catalog_lineage_sha256 =
@@ -899,6 +1107,10 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
       mapped_plan$phase2_target_state_index_rds_sha256,
     target_association_sha256 = mapped_plan$target_association_sha256,
     shard_count = mapped_plan$shard_count,
+    direct_tests_schema_sha256 =
+      frame_schema_hashes$direct_tests_schema_sha256,
+    conditional_tests_schema_sha256 =
+      frame_schema_hashes$conditional_tests_schema_sha256,
     direct_tests_sha256 =
       fastkpc_full_cuda_census_frame_hash(mapped_plan$direct_tests),
     conditional_tests_sha256 =
@@ -933,12 +1145,13 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
     "catalog_authority_sha256", "catalog_lineage_sha256",
     "route_config_sha256", "phase2_setup_index_csv_sha256",
     "setup_association_sha256", "phase2_target_state_index_rds_sha256",
-    "target_association_sha256", "direct_tests_sha256",
+    "target_association_sha256", "direct_tests_schema_sha256",
+    "conditional_tests_schema_sha256", "direct_tests_sha256",
     "conditional_tests_sha256", "plan_identity_sha256"
   )
   clean_plan <- is.list(plan) && !is.object(plan) &&
     identical(names(plan), expected_fields) &&
-    identical(plan$schema_version, "full-cuda-ci-shadow-plan-v2") &&
+    identical(plan$schema_version, "full-cuda-ci-shadow-plan-v3") &&
     all(vapply(
       plan[sha256_fields], .fastkpc_full_cuda_shadow_bare_sha256, logical(1L)
     )) && is.integer(plan$shard_count) && length(plan$shard_count) == 1L &&
@@ -949,30 +1162,35 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
 
   token <- plan$authentication_token
   token_fields <- c(
-    "catalog_authority_sha256", "plan_identity_sha256", "registry_id",
-    "schema_version"
+    "catalog_authority_sha256", "creator_pid", "plan_identity_sha256",
+    "registry_id", "schema_version"
   )
+  current_pid <- as.integer(Sys.getpid())
   clean_token <- is.environment(token) && environmentIsLocked(token) &&
     identical(ls(token, all.names = TRUE), token_fields) &&
     all(vapply(token_fields, bindingIsLocked, logical(1L), env = token)) &&
-    identical(token$schema_version, "full-cuda-ci-shadow-plan-token-v1") &&
+    identical(token$schema_version, "full-cuda-ci-shadow-plan-token-v2") &&
     .fastkpc_full_cuda_shadow_bare_sha256(token$registry_id) &&
+    .fastkpc_full_cuda_shadow_bare_pid(token$creator_pid) &&
+    .fastkpc_full_cuda_shadow_bare_pid(current_pid) &&
+    identical(token$creator_pid, current_pid) &&
     identical(token$catalog_authority_sha256,
               plan$catalog_authority_sha256) &&
     identical(token$plan_identity_sha256, plan$plan_identity_sha256)
   if (!isTRUE(clean_token)) stop("invalid supplied shadow plan token")
 
-  registry <- .fastkpc_full_cuda_shadow_plan_registry
+  registry <- .fastkpc_full_cuda_shadow_current_plan_registry()
   if (!exists(token$registry_id, envir = registry, inherits = FALSE) ||
       !bindingIsLocked(token$registry_id, registry)) {
     stop("missing supplied shadow plan registry entry")
   }
   entry <- get(token$registry_id, envir = registry, inherits = FALSE)
   entry_fields <- c(
-    "schema_version", "registered_at", "token",
+    "schema_version", "registered_at", "creator_pid", "token",
     "catalog_authority_sha256", "catalog_lineage_sha256",
     "route_config_sha256", "setup_association_sha256",
     "target_association_sha256", "plan_identity_sha256",
+    "direct_tests_schema_sha256", "conditional_tests_schema_sha256",
     "direct_tests_sha256", "conditional_tests_sha256",
     "phase2_file_records"
   )
@@ -980,9 +1198,12 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
     identical(names(entry), entry_fields) &&
     identical(
       entry$schema_version,
-      "full-cuda-ci-shadow-plan-registry-entry-v2"
+      "full-cuda-ci-shadow-plan-registry-entry-v4"
     ) && is.double(entry$registered_at) &&
     length(entry$registered_at) == 1L && is.finite(entry$registered_at) &&
+    .fastkpc_full_cuda_shadow_bare_pid(entry$creator_pid) &&
+    identical(entry$creator_pid, current_pid) &&
+    identical(entry$creator_pid, token$creator_pid) &&
     identical(entry$token, token) &&
     identical(entry$catalog_authority_sha256,
               plan$catalog_authority_sha256) &&
@@ -994,6 +1215,10 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
     identical(entry$target_association_sha256,
               plan$target_association_sha256) &&
     identical(entry$plan_identity_sha256, plan$plan_identity_sha256) &&
+    identical(entry$direct_tests_schema_sha256,
+              plan$direct_tests_schema_sha256) &&
+    identical(entry$conditional_tests_schema_sha256,
+              plan$conditional_tests_schema_sha256) &&
     identical(entry$direct_tests_sha256, plan$direct_tests_sha256) &&
     identical(entry$conditional_tests_sha256,
               plan$conditional_tests_sha256)
@@ -1003,6 +1228,27 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
   if (!identical(metadata_hash, plan$plan_identity_sha256) ||
       !identical(metadata_hash, entry$plan_identity_sha256)) {
     stop("supplied shadow plan metadata identity mismatch")
+  }
+
+  current_frame_schemas <-
+    .fastkpc_full_cuda_shadow_plan_frame_schema_hashes(
+      catalog, plan$direct_tests, plan$conditional_tests
+    )
+  schema_binding <- identical(
+    current_frame_schemas$direct_tests_schema_sha256,
+    plan$direct_tests_schema_sha256
+  ) && identical(
+    current_frame_schemas$direct_tests_schema_sha256,
+    entry$direct_tests_schema_sha256
+  ) && identical(
+    current_frame_schemas$conditional_tests_schema_sha256,
+    plan$conditional_tests_schema_sha256
+  ) && identical(
+    current_frame_schemas$conditional_tests_schema_sha256,
+    entry$conditional_tests_schema_sha256
+  )
+  if (!isTRUE(schema_binding)) {
+    stop("supplied shadow plan exact frame schema identity mismatch")
   }
 
   authority <- fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
