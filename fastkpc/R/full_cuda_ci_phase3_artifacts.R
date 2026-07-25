@@ -583,6 +583,8 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
     fixed_sp_runtime = "fastkpc/R/full_cuda_ci_fixed_sp_runtime.R",
     oracle_runner =
       "fastkpc/tools/run_full_cuda_ci_fixed_sp_oracle_sp.R",
+    shadow_runner =
+      "fastkpc/tools/run_full_cuda_ci_fixed_sp_shadow.R",
     cuda_gate = "fastkpc/R/full_cuda_ci_gate.R",
     oracle_contract = "fastkpc/R/full_cuda_ci_oracle_contract.R",
     prepared_s_contract = "fastkpc/R/full_cuda_ci_prepared_s_contract.R",
@@ -2848,11 +2850,21 @@ fastkpc_full_cuda_phase3_assign_setup_shards <- function(
 }
 
 fastkpc_full_cuda_phase3_plan_shards <- function(
-    setup_keys, target_rows, scope, shard_count = NULL) {
+    setup_keys, target_rows, scope, shard_count = NULL,
+    canonical_setup_shards = FALSE) {
   scope <- .fastkpc_full_cuda_phase3_scope(scope)
   shard_count <- fastkpc_full_cuda_phase3_resolve_shard_count(
     scope, shard_count
   )
+  canonical_flag <- typeof(canonical_setup_shards) == "logical" &&
+    length(canonical_setup_shards) == 1L &&
+    !is.object(canonical_setup_shards) &&
+    is.null(attributes(canonical_setup_shards)) &&
+    !is.na(canonical_setup_shards)
+  if (!isTRUE(canonical_flag)) {
+    stop("canonical_setup_shards must be one bare logical scalar",
+         call. = FALSE)
+  }
   assignments <- fastkpc_full_cuda_phase3_assign_setup_shards(
     setup_keys, shard_count
   )
@@ -2877,6 +2889,42 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
     target_rows$residual_key_sha256,
     "target_rows$residual_key_sha256", allow_empty = TRUE
   )
+  if (isTRUE(canonical_setup_shards)) {
+    canonical_fields <- c(
+      "phase2_shard_id", "canonical_setup_rank"
+    )
+    canonical_clean <- shard_count == 64L &&
+      all(canonical_fields %in% names(target_rows)) &&
+      typeof(target_rows$phase2_shard_id) == "integer" &&
+      typeof(target_rows$canonical_setup_rank) == "integer" &&
+      !anyNA(target_rows$phase2_shard_id) &&
+      !anyNA(target_rows$canonical_setup_rank) &&
+      all(target_rows$phase2_shard_id >= 0L &
+            target_rows$phase2_shard_id < shard_count) &&
+      all(target_rows$canonical_setup_rank >= 1L) && identical(
+        target_rows$phase2_shard_id,
+        as.integer((target_rows$canonical_setup_rank - 1L) %% shard_count)
+      )
+    if (!isTRUE(canonical_clean)) {
+      stop("canonical Phase 3 setup shard evidence is malformed",
+           call. = FALSE)
+    }
+    canonical_shard_id <- vapply(
+      assignments$prepared_s_key_sha256,
+      function(setup_key) {
+        values <- unique(target_rows$phase2_shard_id[
+          target_setup_keys == setup_key
+        ])
+        if (length(values) != 1L) {
+          stop("canonical Phase 3 setup shard ownership is incomplete",
+               call. = FALSE)
+        }
+        as.integer(values[[1L]])
+      },
+      integer(1L)
+    )
+    assignments$shard_id <- canonical_shard_id
+  }
   setup_index <- match(
     target_setup_keys, assignments$prepared_s_key_sha256
   )
@@ -3375,6 +3423,7 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
   target_rows <- plan$target_rows[
     plan$target_rows$shard_id == shard_id, , drop = FALSE
   ]
+  rownames(target_rows) <- NULL
   target_keys <- sort(
     as.character(target_rows$residual_key_sha256), method = "radix"
   )
@@ -5246,6 +5295,518 @@ fastkpc_full_cuda_phase3_run_oracle_shard <- function(
   result
 }
 
+.fastkpc_full_cuda_phase3_is_shadow_payload <- function(payload) {
+  is.list(payload) && !is.object(payload) && identical(
+    names(payload),
+    c("logical_ci_parity", "resource_metrics", "stage_timing")
+  )
+}
+
+fastkpc_full_cuda_phase3_validate_shadow_payload <- function(
+    payload, expected_setup_keys, expected_target_rows,
+    expected_shard_id = NULL) {
+  required_helpers <- c(
+    "fastkpc_full_cuda_shadow_validate_conditional_rows",
+    "fastkpc_full_cuda_shadow_empty_conditional_rows",
+    "fastkpc_full_cuda_fixed_sp_validate_oracle_frame"
+  )
+  missing <- required_helpers[!vapply(
+    required_helpers, exists, logical(1L), mode = "function",
+    inherits = TRUE
+  )]
+  if (length(missing) > 0L) {
+    stop("Phase 3 shadow payload helpers are unavailable: ",
+         paste(missing, collapse = ","), call. = FALSE)
+  }
+  if (!.fastkpc_full_cuda_phase3_is_shadow_payload(payload)) {
+    stop("Phase 3 shadow shard payload schema is malformed",
+         call. = FALSE)
+  }
+  expected_setup_keys <- .fastkpc_full_cuda_phase3_key_vector(
+    expected_setup_keys, "shadow payload expected setup keys",
+    allow_empty = TRUE, allow_empty_list = TRUE
+  )
+  if (!identical(
+        expected_setup_keys,
+        sort(expected_setup_keys, method = "radix")
+      )) {
+    stop("Phase 3 shadow expected setup order is not canonical",
+         call. = FALSE)
+  }
+  target_fields <-
+    .fastkpc_full_cuda_phase3_oracle_descriptor_target_fields()
+  target_clean <- is.data.frame(expected_target_rows) &&
+    identical(names(expected_target_rows), target_fields) &&
+    !anyDuplicated(expected_target_rows$residual_key_sha256)
+  if (!isTRUE(target_clean)) {
+    stop("Phase 3 shadow expected target rows are malformed",
+         call. = FALSE)
+  }
+  target_setup_rank <- match(
+    expected_target_rows$prepared_s_key_sha256, expected_setup_keys
+  )
+  target_order <- if (nrow(expected_target_rows) == 0L) integer() else {
+    order(
+      target_setup_rank, expected_target_rows$residual_key_sha256,
+      method = "radix"
+    )
+  }
+  target_exact <- !anyNA(target_setup_rank) && identical(
+    target_order, seq_len(nrow(expected_target_rows))
+  ) && identical(
+    sort(unique(expected_target_rows$prepared_s_key_sha256),
+         method = "radix"),
+    expected_setup_keys
+  )
+  if (length(expected_setup_keys) == 0L) {
+    target_exact <- nrow(expected_target_rows) == 0L
+  }
+  if (!isTRUE(target_exact)) {
+    stop("Phase 3 shadow expected target ownership is malformed",
+         call. = FALSE)
+  }
+  if (!is.null(expected_shard_id)) {
+    expected_shard_id <- .fastkpc_full_cuda_phase3_whole_scalar(
+      expected_shard_id, 0L, "shadow payload expected shard_id"
+    )
+    if (expected_shard_id >= 64L ||
+        any(expected_target_rows$shard_id != expected_shard_id)) {
+      stop("Phase 3 shadow expected target shard mismatch",
+           call. = FALSE)
+    }
+  }
+
+  rows <- payload$logical_ci_parity
+  fastkpc_full_cuda_shadow_validate_conditional_rows(
+    rows,
+    expected_shard_id = expected_shard_id,
+    allow_empty = TRUE
+  )
+  resources <- payload$resource_metrics
+  stage_timing <- payload$stage_timing
+  fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
+    resources, "resource_metrics"
+  )
+  fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
+    stage_timing, "stage_timing"
+  )
+  if (length(expected_setup_keys) == 0L) {
+    empty_exact <- nrow(rows) == 0L && nrow(resources) == 0L &&
+      nrow(stage_timing) == 0L
+    if (!isTRUE(empty_exact)) {
+      stop("empty Phase 3 shadow payload contains execution rows",
+           call. = FALSE)
+    }
+    return(invisible(list(
+      setup_count = 0L, target_count = 0L, logical_test_count = 0L
+    )))
+  }
+
+  resource_setup <- as.character(resources$prepared_s_key_sha256)
+  resource_order <- order(resource_setup, method = "radix")
+  target_count_by_setup <- tabulate(
+    target_setup_rank, nbins = length(expected_setup_keys)
+  )
+  names(target_count_by_setup) <- expected_setup_keys
+  resource_exact <- nrow(resources) == length(expected_setup_keys) &&
+    !anyDuplicated(resource_setup) && identical(
+      resource_order, seq_len(nrow(resources))
+    ) && identical(resource_setup, expected_setup_keys) && identical(
+      as.integer(resources$target_count),
+      as.integer(target_count_by_setup[resource_setup])
+    ) && all(resources$prepared_handle_create_count == 1L) &&
+    all(resources$prepared_handle_destroy_count == 1L) &&
+    all(resources$residual_token_acquire_count == 1L) &&
+    all(resources$residual_token_release_count == 1L) &&
+    all(resources$output_slot_acquire_count == 1L) &&
+    all(resources$output_slot_release_count == 1L) &&
+    all(!resources$output_slot_leased_after_release) &&
+    all(resources$shadow_materialize_call_count == 1L) && identical(
+      as.integer(resources$shadow_materialize_target_count),
+      as.integer(resources$target_count)
+    ) && all(resources$implicit_residual_d2h_count == 0L) &&
+    all(resources$implicit_residual_d2h_bytes == 0) &&
+    all(resources$per_target_allocation_count_after_warmup == 0L) &&
+    all(resources$per_target_handle_create_count == 0L) &&
+    all(resources$workspace_grow_count_after_warmup == 0L) &&
+    all(resources$stable_workspace_grow_count_after_warmup == 0L) &&
+    all(resources$cuda_device_synchronize_count == 0L) &&
+    all(resources$invalid_output_init_count == 1L) &&
+    all(resources$nonfinite_output_count == 0L) &&
+    all(resources$cpu_fallback_count == 0L) &&
+    all(resources$unknown_fallback_count == 0L) &&
+    all(resources$approximate_backend_count == 0L)
+  if (!is.null(expected_shard_id)) {
+    resource_exact <- resource_exact &&
+      all(resources$shard_id == expected_shard_id)
+  }
+  if (!isTRUE(resource_exact)) {
+    stop("Phase 3 shadow payload resource/lease gates failed",
+         call. = FALSE)
+  }
+
+  expected_stages <- c(
+    "phase2_shard_load", "prepared_handle_create", "solve",
+    "shadow_materialize", "cmagic_oracle", "release_and_free"
+  )
+  stage_groups <- split(
+    stage_timing$stage, stage_timing$prepared_s_key_sha256
+  )
+  stage_exact <- nrow(stage_timing) == 6L * length(expected_setup_keys) &&
+    identical(sort(names(stage_groups), method = "radix"),
+              expected_setup_keys) &&
+    all(vapply(stage_groups, identical, logical(1L), expected_stages)) &&
+    all(is.finite(stage_timing$elapsed_ms)) &&
+    all(stage_timing$elapsed_ms >= 0)
+  if (!is.null(expected_shard_id)) {
+    stage_exact <- stage_exact &&
+      all(stage_timing$shard_id == expected_shard_id)
+  }
+  if (!isTRUE(stage_exact)) {
+    stop("Phase 3 shadow payload stage timing is malformed",
+         call. = FALSE)
+  }
+
+  row_setup_keys <- sort(
+    unique(rows$prepared_s_key_sha256), method = "radix"
+  )
+  endpoint_keys <- c(rows$residual_key_x, rows$residual_key_y)
+  endpoint_match <- match(
+    endpoint_keys, expected_target_rows$residual_key_sha256
+  )
+  row_target_setup <- if (anyNA(endpoint_match)) character() else {
+    expected_target_rows$prepared_s_key_sha256[endpoint_match]
+  }
+  expected_row_setup <- rep(
+    rows$prepared_s_key_sha256, times = 2L
+  )
+  planned_x <- match(
+    rows$residual_key_x, expected_target_rows$residual_key_sha256
+  )
+  planned_y <- match(
+    rows$residual_key_y, expected_target_rows$residual_key_sha256
+  )
+  row_exact <- nrow(rows) > 0L &&
+    identical(row_setup_keys, expected_setup_keys) &&
+    !anyNA(endpoint_match) && identical(
+      row_target_setup, expected_row_setup
+    ) && !anyNA(planned_x) && !anyNA(planned_y) && identical(
+      rows$planned_route_x,
+      expected_target_rows$planned_route[planned_x]
+    ) && identical(
+      rows$planned_route_y,
+      expected_target_rows$planned_route[planned_y]
+    ) && max(rows$absolute_p_value_difference) <
+      fastkpc_full_cuda_phase3_route_config()$
+        qualification_dcov_p_tolerance
+  if (!isTRUE(row_exact)) {
+    stop("Phase 3 shadow payload logical/target lineage gate failed",
+         call. = FALSE)
+  }
+  invisible(list(
+    setup_count = as.integer(length(expected_setup_keys)),
+    target_count = as.integer(nrow(expected_target_rows)),
+    logical_test_count = as.integer(nrow(rows)),
+    near_alpha_count = as.integer(sum(rows$near_alpha)),
+    decision_flip_count = as.integer(sum(rows$decision_flip)),
+    backend_error_count = as.integer(sum(rows$backend_error)),
+    spectra_fallback_count = as.integer(sum(rows$spectra_fallback))
+  ))
+}
+
+fastkpc_full_cuda_phase3_run_shadow_shard <- function(
+    context, shard_id, setup_keys, target_rows, catalog, plan,
+    logical_tests) {
+  required_helpers <- c(
+    "fastkpc_full_cuda_fixed_sp_execute_oracle_setup",
+    "fastkpc_full_cuda_fixed_sp_load_oracle_phase2_shards",
+    "fastkpc_full_cuda_fixed_sp_batches_from_loaded",
+    "fastkpc_full_cuda_fixed_sp_oracle_setup_batch",
+    "fastkpc_full_cuda_fixed_sp_oracle_empty_frame",
+    "fastkpc_full_cuda_shadow_compute_setup_rows",
+    "fastkpc_full_cuda_shadow_attach_target_routes",
+    "fastkpc_full_cuda_shadow_validate_conditional_rows",
+    ".fastkpc_full_cuda_shadow_validate_supplied_plan",
+    "fixed_sp_cuda_runtime_info"
+  )
+  missing <- required_helpers[!vapply(
+    required_helpers, exists, logical(1L), mode = "function",
+    inherits = TRUE
+  )]
+  if (length(missing) > 0L) {
+    stop("Phase 3 shadow shard runtime helpers are unavailable: ",
+         paste(missing, collapse = ","), call. = FALSE)
+  }
+  shard_id <- .fastkpc_full_cuda_phase3_whole_scalar(
+    shard_id, 0L, "shadow shard_id"
+  )
+  if (shard_id >= 64L) {
+    stop("shadow shard_id is outside the canonical plan", call. = FALSE)
+  }
+  setup_keys <- .fastkpc_full_cuda_phase3_key_vector(
+    setup_keys, "shadow shard setup_keys",
+    allow_empty = TRUE, allow_empty_list = TRUE
+  )
+  if (!identical(setup_keys, sort(setup_keys, method = "radix"))) {
+    stop("Phase 3 shadow shard setup order is not canonical",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_shadow_validate_supplied_plan(catalog, plan)
+
+  descriptor_fields <-
+    .fastkpc_full_cuda_phase3_oracle_descriptor_target_fields()
+  if (!is.data.frame(target_rows) ||
+      !identical(names(target_rows), descriptor_fields)) {
+    stop("Phase 3 shadow shard target descriptor is malformed",
+         call. = FALSE)
+  }
+  projected_input <- target_rows[
+    , setdiff(descriptor_fields, "shard_id"), drop = FALSE
+  ]
+  projected <- .fastkpc_full_cuda_phase3_oracle_descriptor_target_rows(
+    catalog, projected_input
+  )
+  projected$shard_id <- as.integer(projected$phase2_shard_id)
+  projected <- projected[, descriptor_fields, drop = FALSE]
+  if (!identical(target_rows, projected)) {
+    stop("Phase 3 shadow shard target descriptor is not authoritative",
+         call. = FALSE)
+  }
+  target_setup_rank <- match(
+    target_rows$prepared_s_key_sha256, setup_keys
+  )
+  target_order <- if (nrow(target_rows) == 0L) integer() else order(
+    target_setup_rank, target_rows$residual_key_sha256, method = "radix"
+  )
+  target_clean <- if (length(setup_keys) == 0L) {
+    nrow(target_rows) == 0L
+  } else {
+    nrow(target_rows) > 0L && !anyNA(target_setup_rank) &&
+      identical(target_order, seq_len(nrow(target_rows))) && identical(
+        sort(unique(target_rows$prepared_s_key_sha256), method = "radix"),
+        setup_keys
+      ) && all(target_rows$shard_id == shard_id) &&
+      all(target_rows$phase2_shard_id == shard_id)
+  }
+  if (!isTRUE(target_clean)) {
+    stop("Phase 3 shadow shard target order/ownership is invalid",
+         call. = FALSE)
+  }
+
+  logical_clean <- is.data.frame(logical_tests) &&
+    !anyDuplicated(names(logical_tests)) &&
+    "logical_sequence_id" %in% names(logical_tests)
+  if (!isTRUE(logical_clean)) {
+    stop("Phase 3 shadow shard logical rows are malformed",
+         call. = FALSE)
+  }
+  if (length(setup_keys) == 0L) {
+    if (nrow(logical_tests) != 0L) {
+      stop("empty Phase 3 shadow shard has logical rows", call. = FALSE)
+    }
+  } else {
+    plan_match <- match(
+      logical_tests$logical_sequence_id,
+      plan$conditional_tests$logical_sequence_id
+    )
+    plan_fields <- names(plan$conditional_tests)
+    exact_plan <- nrow(logical_tests) > 0L && !anyNA(plan_match) &&
+      all(plan_fields %in% names(logical_tests)) &&
+      all(vapply(plan_fields, function(field) {
+        identical(
+          logical_tests[[field]],
+          plan$conditional_tests[[field]][plan_match]
+        )
+      }, logical(1L))) &&
+      !anyDuplicated(logical_tests$logical_sequence_id) && identical(
+        order(logical_tests$logical_sequence_id, method = "radix"),
+        seq_len(nrow(logical_tests))
+      ) && all(logical_tests$shard_id == shard_id) && identical(
+        sort(unique(logical_tests$prepared_s_key_x), method = "radix"),
+        setup_keys
+      ) && identical(
+        logical_tests$prepared_s_key_x,
+        logical_tests$prepared_s_key_y
+      )
+    if (!isTRUE(exact_plan)) {
+      stop("Phase 3 shadow shard logical plan lineage is invalid",
+           call. = FALSE)
+    }
+  }
+  fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
+  runtime_info <- fixed_sp_cuda_runtime_info(context)
+  fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
+    runtime_info, paste("Phase 3 shadow shard", shard_id, "runtime")
+  )
+
+  if (length(setup_keys) == 0L) {
+    payload <- list(
+      logical_ci_parity =
+        fastkpc_full_cuda_shadow_empty_conditional_rows(),
+      resource_metrics =
+        fastkpc_full_cuda_fixed_sp_oracle_empty_frame("resource_metrics"),
+      stage_timing =
+        fastkpc_full_cuda_fixed_sp_oracle_empty_frame("stage_timing")
+    )
+    fastkpc_full_cuda_phase3_validate_shadow_payload(
+      payload, setup_keys, target_rows, expected_shard_id = shard_id
+    )
+    return(list(
+      payload = payload,
+      resource_counts = list(
+        prepared_handle_create_count = 0L,
+        prepared_handle_destroy_count = 0L,
+        residual_token_acquire_count = 0L,
+        residual_token_release_count = 0L,
+        output_slot_acquire_count = 0L,
+        output_slot_release_count = 0L
+      )
+    ))
+  }
+
+  preload_started <- proc.time()[["elapsed"]]
+  phase2 <- fastkpc_full_cuda_fixed_sp_load_oracle_phase2_shards(
+    catalog = catalog, setup_keys = setup_keys, target_rows = target_rows
+  )
+  if (!identical(phase2$phase2_shard_ids, shard_id) ||
+      phase2$phase2_shard_load_count != 1L ||
+      phase2$phase2_shard_authentication_count != 1L) {
+    stop("Phase 3 shadow source-shard authentication is not singular",
+         call. = FALSE)
+  }
+  selected_scope <- list(
+    setup_rows = data.frame(
+      prepared_s_key_sha256 = setup_keys, stringsAsFactors = FALSE
+    ),
+    target_rows = target_rows,
+    shard_ids = phase2$phase2_shard_ids
+  )
+  batches <- fastkpc_full_cuda_fixed_sp_batches_from_loaded(
+    catalog, selected_scope, phase2$loaded
+  )
+  selected_setups <- lapply(seq_along(setup_keys), function(index) {
+    setup_key <- setup_keys[[index]]
+    selected_targets <- target_rows[
+      target_rows$prepared_s_key_sha256 == setup_key, , drop = FALSE
+    ]
+    rownames(selected_targets) <- NULL
+    fastkpc_full_cuda_fixed_sp_oracle_setup_batch(
+      catalog = catalog, setup_key = setup_key,
+      target_rows = selected_targets, batch = batches[[setup_key]]
+    )
+  })
+  load_elapsed_ms <- as.double(
+    (proc.time()[["elapsed"]] - preload_started) * 1000
+  )
+
+  setup_outputs <- vector("list", length(setup_keys))
+  logical_outputs <- vector("list", length(setup_keys))
+  for (index in seq_along(setup_keys)) {
+    setup_key <- setup_keys[[index]]
+    selected_targets <- target_rows[
+      target_rows$prepared_s_key_sha256 == setup_key, , drop = FALSE
+    ]
+    owned_logical <- logical_tests[
+      logical_tests$prepared_s_key_x == setup_key, , drop = FALSE
+    ]
+    rownames(selected_targets) <- rownames(owned_logical) <- NULL
+    if (nrow(owned_logical) == 0L) {
+      stop("Phase 3 shadow setup has no assigned logical rows",
+           call. = FALSE)
+    }
+    setup_output <- fastkpc_full_cuda_fixed_sp_execute_oracle_setup(
+      context = context, catalog = catalog, setup_key = setup_key,
+      target_rows = selected_targets, shard_id = shard_id,
+      setup_ordinal = as.integer(index),
+      selected = selected_setups[[index]],
+      phase2_shard_load_count = as.integer(index == 1L),
+      phase2_shard_authentication_count = as.integer(index == 1L),
+      phase2_shard_load_elapsed_ms = if (index == 1L) {
+        load_elapsed_ms
+      } else {
+        0
+      },
+      shadow_callback = function(setup_key, target_keys, residuals) {
+        fastkpc_full_cuda_shadow_compute_setup_rows(
+          logical_tests = owned_logical,
+          setup_key = setup_key,
+          shard_id = shard_id,
+          target_keys = target_keys,
+          residuals = residuals
+        )
+      }
+    )
+    logical_rows <- fastkpc_full_cuda_shadow_attach_target_routes(
+      setup_output$shadow_callback_result,
+      setup_output$target_parity,
+      owned_logical
+    )
+    fastkpc_full_cuda_shadow_validate_conditional_rows(
+      logical_rows,
+      expected_logical_tests = owned_logical,
+      expected_setup_key = setup_key,
+      expected_shard_id = shard_id,
+      expected_target_rows = setup_output$target_parity
+    )
+    logical_outputs[[index]] <- logical_rows
+    setup_outputs[[index]] <- list(
+      resource_metrics = setup_output$resource_metrics,
+      stage_timing = setup_output$stage_timing
+    )
+    rm(setup_output, logical_rows)
+  }
+  rm(batches, phase2, selected_setups)
+
+  logical_rows <- do.call(rbind, logical_outputs)
+  logical_rows <- logical_rows[order(
+    logical_rows$logical_sequence_id, method = "radix"
+  ), , drop = FALSE]
+  rownames(logical_rows) <- NULL
+  expected_logical <- logical_tests[order(
+    logical_tests$logical_sequence_id, method = "radix"
+  ), , drop = FALSE]
+  rownames(expected_logical) <- NULL
+  fastkpc_full_cuda_shadow_validate_conditional_rows(
+    logical_rows,
+    expected_logical_tests = expected_logical,
+    expected_shard_id = shard_id
+  )
+  bind_frame <- function(name) {
+    value <- do.call(rbind, lapply(setup_outputs, `[[`, name))
+    rownames(value) <- NULL
+    fastkpc_full_cuda_fixed_sp_validate_oracle_frame(value, name)
+    value
+  }
+  payload <- list(
+    logical_ci_parity = logical_rows,
+    resource_metrics = bind_frame("resource_metrics"),
+    stage_timing = bind_frame("stage_timing")
+  )
+  fastkpc_full_cuda_phase3_validate_shadow_payload(
+    payload, setup_keys, target_rows, expected_shard_id = shard_id
+  )
+  resource_count <- function(field) {
+    as.integer(sum(payload$resource_metrics[[field]]))
+  }
+  list(
+    payload = payload,
+    resource_counts = list(
+      prepared_handle_create_count =
+        resource_count("prepared_handle_create_count"),
+      prepared_handle_destroy_count =
+        resource_count("prepared_handle_destroy_count"),
+      residual_token_acquire_count =
+        resource_count("residual_token_acquire_count"),
+      residual_token_release_count =
+        resource_count("residual_token_release_count"),
+      output_slot_acquire_count =
+        resource_count("output_slot_acquire_count"),
+      output_slot_release_count =
+        resource_count("output_slot_release_count")
+    )
+  )
+}
+
 .fastkpc_full_cuda_phase3_resource_fields <- function() {
   c(
     "prepared_handle_create_count", "prepared_handle_destroy_count",
@@ -5311,7 +5872,8 @@ fastkpc_full_cuda_phase3_run_shards <- function(
     output_dir, kind, setup_keys, target_rows, identity, route_config,
     executor, runtime_create, runtime_destroy, scope,
     shard_count = NULL, stop_after = NULL, progress_hook = NULL,
-    executed_native_library_sha256 = NULL) {
+    executed_native_library_sha256 = NULL,
+    canonical_setup_shards = FALSE) {
   output_clean <- typeof(output_dir) == "character" &&
     length(output_dir) == 1L && !is.object(output_dir) &&
     is.null(attributes(output_dir)) && !is.na(output_dir) &&
@@ -5340,7 +5902,8 @@ fastkpc_full_cuda_phase3_run_shards <- function(
     setup_keys = setup_keys,
     target_rows = target_rows,
     scope = scope,
-    shard_count = shard_count
+    shard_count = shard_count,
+    canonical_setup_shards = canonical_setup_shards
   )
   .fastkpc_full_cuda_phase3_validate_route_for_shards(
     route_config, scope
@@ -5698,7 +6261,16 @@ fastkpc_full_cuda_phase3_run_shards <- function(
       }
       value <- do.call(rbind, values)
       rownames(value) <- NULL
-      if ("prepared_s_key_sha256" %in% fields) {
+      if ("logical_sequence_id" %in% fields) {
+        if (anyDuplicated(value$logical_sequence_id)) {
+          stop("Phase 3 merged payload has duplicate logical test keys",
+               call. = FALSE)
+        }
+        value <- value[order(
+          value$logical_sequence_id, method = "radix"
+        ), , drop = FALSE]
+        rownames(value) <- NULL
+      } else if ("prepared_s_key_sha256" %in% fields) {
         setup_rank <- match(value$prepared_s_key_sha256, setup_order)
         if (anyNA(setup_rank)) {
           stop("Phase 3 merged payload has an unknown setup key",
@@ -5720,15 +6292,6 @@ fastkpc_full_cuda_phase3_run_shards <- function(
                call. = FALSE)
         }
         value <- value[order(target_rank, method = "radix"), , drop = FALSE]
-        rownames(value) <- NULL
-      } else if ("logical_sequence_id" %in% fields) {
-        if (anyDuplicated(value$logical_sequence_id)) {
-          stop("Phase 3 merged payload has duplicate logical test keys",
-               call. = FALSE)
-        }
-        value <- value[order(
-          value$logical_sequence_id, method = "radix"
-        ), , drop = FALSE]
         rownames(value) <- NULL
       }
       return(value)
@@ -5776,14 +6339,16 @@ fastkpc_full_cuda_phase3_run_shards <- function(
 
 fastkpc_full_cuda_phase3_merge_shards <- function(
     output_dir, kind, setup_keys, target_rows, identity, route_config,
-    scope, shard_count = NULL, output_path = NULL) {
+    scope, shard_count = NULL, output_path = NULL,
+    canonical_setup_shards = FALSE) {
   scope <- .fastkpc_full_cuda_phase3_scope(scope)
   contract <- .fastkpc_full_cuda_phase3_kind_contract(kind)
   plan <- fastkpc_full_cuda_phase3_plan_shards(
     setup_keys = setup_keys,
     target_rows = target_rows,
     scope = scope,
-    shard_count = shard_count
+    shard_count = shard_count,
+    canonical_setup_shards = canonical_setup_shards
   )
   .fastkpc_full_cuda_phase3_validate_route_for_shards(
     route_config, scope
