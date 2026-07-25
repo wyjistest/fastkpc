@@ -84,26 +84,59 @@ assert_true(
   "executable shadow runner enters authenticated source identity"
 )
 
-runner_source <- readLines(shadow_runner_id, warn = FALSE)
-runtime_destroy_start <- grep(
-  "^runtime_destroy <- function\\(runtime\\)", runner_source
-)
-executor_start <- grep("^executor <- function\\(", runner_source)
-runtime_destroy_source <- runner_source[
-  runtime_destroy_start:(executor_start - 1L)
-]
-cleanup_line <- grep(
-  "on.exit.*fixed_sp_cuda_runtime_free\\(runtime\\)",
-  runtime_destroy_source
-)
-runtime_info_line <- grep(
-  "info <- fixed_sp_cuda_runtime_info\\(runtime\\)",
-  runtime_destroy_source
+destroy_events <- character()
+destroy_error <- assert_error(
+  .fastkpc_full_cuda_phase3_destroy_shadow_runtime(
+    runtime = structure(list(), class = "synthetic-runtime"),
+    info_fun = function(runtime) {
+      destroy_events <<- c(destroy_events, "info")
+      list(state = "open")
+    },
+    validate_fun = function(info) {
+      destroy_events <<- c(destroy_events, "validate")
+      stop("injected runtime info validation failure", call. = FALSE)
+    },
+    free_fun = function(runtime) {
+      destroy_events <<- c(destroy_events, "free")
+      stop("injected runtime free failure", call. = FALSE)
+    }
+  ),
+  "runtime teardown preserves validation and free failures",
+  "runtime info validation failure"
 )
 assert_true(
-  length(cleanup_line) == 1L && length(runtime_info_line) == 1L &&
-    cleanup_line < runtime_info_line,
-  "runtime destroy installs unconditional free before validation"
+  identical(destroy_events, c("info", "validate", "free")) &&
+    grepl("runtime free failure", conditionMessage(destroy_error), fixed = TRUE),
+  "runtime teardown always frees and aggregates both failures"
+)
+destroy_events <- character()
+destroy_info <- .fastkpc_full_cuda_phase3_destroy_shadow_runtime(
+  runtime = structure(list(), class = "synthetic-runtime"),
+  info_fun = function(runtime) {
+    destroy_events <<- c(destroy_events, "info")
+    list(state = "open")
+  },
+  validate_fun = function(info) {
+    destroy_events <<- c(destroy_events, "validate")
+    invisible(TRUE)
+  },
+  free_fun = function(runtime) {
+    destroy_events <<- c(destroy_events, "free")
+    invisible(NULL)
+  }
+)
+assert_true(
+  identical(destroy_info, list(state = "open")) &&
+    identical(destroy_events, c("info", "validate", "free")),
+  "runtime teardown reports success only after confirmed free"
+)
+
+assert_true(
+  is.null(getOption("fastkpc.phase3.shadow_snapshot_registry.v1")) &&
+    is.null(getOption(
+      "fastkpc.phase3.shadow_snapshot_registry.initialized.v1"
+    )),
+  "shadow snapshot registry is not exposed through global options"
 )
 
 sha <- function(label) fastkpc_full_cuda_census_hash_utf8(label)
@@ -457,7 +490,7 @@ for (field in c(
 authority_resources$shadow_materialize_target_count <-
   as.integer(length(target_keys_fixture))
 authority_resources$setup_h2d_upload_count <- 1L
-authority_resources$setup_h2d_bytes <- 8
+authority_resources$setup_h2d_bytes <- 5648
 authority_resources$target_batch_h2d_call_count <- 1L
 authority_resources$target_h2d_copy_count <- 2L
 authority_resources$target_h2d_bytes <- 5616
@@ -825,6 +858,99 @@ assert_error(
   "resource"
 )
 
+forged_setup_bytes_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$resource_metrics$setup_h2d_bytes <-
+      payload$resource_metrics$setup_h2d_bytes + 8
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(forged_setup_bytes_pair),
+  "self-consistent rehash cannot forge setup upload bytes",
+  "resource"
+)
+
+negative_counter_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$resource_metrics$resource_allocation_count_before_solve <- -1L
+    payload$resource_metrics$resource_allocation_count_after_solve <- -1L
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(negative_counter_pair),
+  "self-consistent rehash cannot hide balanced negative counters",
+  "resource"
+)
+
+resource_frame_attribute_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    attr(payload$resource_metrics, "hostile") <- TRUE
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(resource_frame_attribute_pair),
+  "resource frame attributes fail the exact frame contract",
+  "resource"
+)
+
+resource_row_names_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    rownames(payload$resource_metrics) <- "hostile"
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(resource_row_names_pair),
+  "resource row names fail the automatic row-name contract",
+  "resource"
+)
+
+resource_column_attribute_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    attr(payload$resource_metrics$target_count, "units") <- "targets"
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(resource_column_attribute_pair),
+  "resource column attributes fail the bare-column contract",
+  "resource"
+)
+
+nonfinite_stage_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$stage_timing$elapsed_ms[[1L]] <- Inf
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(nonfinite_stage_pair),
+  "nonfinite stage timing fails before authority arithmetic",
+  "stage"
+)
+
+na_phase2_auth_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$resource_metrics$phase2_shard_authentication_count <- NA_integer_
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(na_phase2_auth_pair),
+  "missing Phase 2 authentication count fails closed",
+  "resource"
+)
+
 missing_residual_column_pair <- self_consistent_pair(
   authority_envelope,
   function(payload) {
@@ -967,6 +1093,19 @@ assert_true(
   "only conditional logical rows carry the pinned dCov version field"
 )
 
+plan_shards_source <- paste(deparse(
+  body(fastkpc_full_cuda_phase3_plan_shards)
+), collapse = " ")
+snapshot_constructor_source <- paste(deparse(
+  body(.fastkpc_full_cuda_phase3_build_shadow_execution_snapshot_authority)
+), collapse = " ")
+assert_true(
+  !grepl("canonical_shard_id <- vapply", plan_shards_source, fixed = TRUE) &&
+    !grepl("setup_null_dim <- vapply", snapshot_constructor_source,
+           fixed = TRUE),
+  "snapshot construction uses one target-to-setup index, not setup scans"
+)
+
 phase0_dir <- file.path(
   "fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1"
 )
@@ -1040,6 +1179,117 @@ assert_true(
     ) == 64L,
   "execution snapshot performs heavy plan/file validation exactly once"
 )
+catalog_authority <- fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
+snapshot_identity_binding <- c(
+  list(schema_version = "full-cuda-ci-phase3-input-identity-v1"),
+  catalog_authority$lineage[setdiff(
+    names(catalog_authority$lineage), "authenticated"
+  )],
+  list(route_config_hash = plan$route_config_sha256)
+)
+assert_true(
+  identical(
+    .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+      snapshot_probe$snapshot,
+      expected_scope = "qualification",
+      expected_identity = snapshot_identity_binding,
+      expected_setup_keys = qualification$setup_keys,
+      expected_target_rows = qualification$target_rows,
+      expected_plan_identity_sha256 = plan$plan_identity_sha256
+    )$snapshot_identity_sha256,
+    snapshot_probe$authority$snapshot_identity_sha256
+  ),
+  "snapshot resolve independently binds production identity and runner corpus"
+)
+assert_error(
+  .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+    snapshot_probe$snapshot, expected_scope = "iteration"
+  ),
+  "snapshot rejects wrong-scope replay", "scope"
+)
+cross_catalog_identity <- snapshot_identity_binding
+cross_catalog_identity$phase1_manifest_hash <- sha("cross-catalog replay")
+assert_error(
+  .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+    snapshot_probe$snapshot,
+    expected_scope = "qualification",
+    expected_identity = cross_catalog_identity,
+    expected_setup_keys = qualification$setup_keys,
+    expected_target_rows = qualification$target_rows,
+    expected_plan_identity_sha256 = plan$plan_identity_sha256
+  ),
+  "snapshot rejects cross-catalog identity replay", "identity"
+)
+assert_error(
+  .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+    snapshot_probe$snapshot,
+    expected_scope = "qualification",
+    expected_identity = snapshot_identity_binding,
+    expected_setup_keys = qualification$setup_keys,
+    expected_target_rows = qualification$target_rows,
+    expected_plan_identity_sha256 = sha("cross-plan replay")
+  ),
+  "snapshot rejects cross-plan replay", "plan"
+)
+assert_error(
+  .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+    snapshot_probe$snapshot,
+    expected_scope = "qualification",
+    expected_identity = snapshot_identity_binding,
+    expected_setup_keys = rev(qualification$setup_keys),
+    expected_target_rows = qualification$target_rows,
+    expected_plan_identity_sha256 = plan$plan_identity_sha256
+  ),
+  "snapshot rejects caller corpus replay", "corpus"
+)
+local({
+  old <- options()[c(
+    "fastkpc.phase3.shadow_snapshot_registry.v1",
+    "fastkpc.phase3.shadow_snapshot_registry.initialized.v1"
+  )]
+  on.exit(options(old), add = TRUE)
+  options(
+    fastkpc.phase3.shadow_snapshot_registry.v1 =
+      new.env(parent = emptyenv()),
+    fastkpc.phase3.shadow_snapshot_registry.initialized.v1 =
+      "attacker-controlled"
+  )
+  assert_true(
+    identical(
+      .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+        snapshot_probe$snapshot, expected_scope = "qualification"
+      )$snapshot_identity_sha256,
+      snapshot_probe$authority$snapshot_identity_sha256
+    ),
+    "global option injection cannot replace the private snapshot registry"
+  )
+})
+mutated_authority_copy <-
+  .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+    snapshot_probe$snapshot
+  )
+mutated_authority_copy$scope <- "full"
+assert_true(
+  identical(
+    .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+      snapshot_probe$snapshot
+    )$scope,
+    "qualification"
+  ),
+  "mutating a resolved authority copy cannot mutate the private entry"
+)
+wrong_pid_snapshot <- new.env(parent = emptyenv())
+for (field in ls(snapshot_probe$snapshot, all.names = TRUE)) {
+  assign(field, snapshot_probe$snapshot[[field]], envir = wrong_pid_snapshot)
+}
+wrong_pid_snapshot$creator_pid <- as.integer(Sys.getpid() + 1L)
+lockEnvironment(wrong_pid_snapshot, bindings = TRUE)
+assert_error(
+  .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+    wrong_pid_snapshot
+  ),
+  "snapshot rejects a locked wrong-PID token", "token"
+)
 tampered_snapshot_shard <-
   snapshot_probe$authority$shards[[snapshot_probe$populated[[1L]]]]
 tampered_snapshot_shard$logical_rows$source_sequence_id[[1L]] <-
@@ -1052,7 +1302,36 @@ assert_error(
   "snapshot shard"
 )
 fake_snapshot <- new.env(parent = emptyenv())
+fake_snapshot_values <- list(
+  schema_version = "full-cuda-ci-phase3-shadow-snapshot-token-v2",
+  capability_id = sha("attacker capability id"),
+  creator_pid = as.integer(Sys.getpid()),
+  snapshot_identity_sha256 = sha("attacker snapshot identity")
+)
+for (field in names(fake_snapshot_values)) {
+  assign(field, fake_snapshot_values[[field]], envir = fake_snapshot)
+}
 lockEnvironment(fake_snapshot, bindings = TRUE)
+local({
+  fake_registry <- new.env(parent = emptyenv())
+  assign(fake_snapshot$capability_id, list(
+    schema_version =
+      "full-cuda-ci-phase3-shadow-snapshot-private-entry-v1",
+    sequence_id = 1L,
+    token = fake_snapshot,
+    authority = list(
+      snapshot_identity_sha256 = fake_snapshot$snapshot_identity_sha256
+    )
+  ), envir = fake_registry)
+  old <- options()["fastkpc.phase3.shadow_snapshot_registry.v1"]
+  on.exit(options(old), add = TRUE)
+  options(fastkpc.phase3.shadow_snapshot_registry.v1 = fake_registry)
+  assert_error(
+    .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(fake_snapshot),
+    "self-consistent fake option entry cannot mint a snapshot capability",
+    "released"
+  )
+})
 assert_error(
   .fastkpc_full_cuda_phase3_resolve_execution_plan(
     kind = "full_shadow",
@@ -1068,6 +1347,44 @@ assert_error(
   ),
   "production identity rejects attacker-selected logical rows and snapshot",
   "snapshot"
+)
+iteration_snapshot <-
+  fastkpc_full_cuda_phase3_create_shadow_execution_snapshot(
+    catalog, plan, "iteration"
+  )
+iteration_authority <-
+  .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+    iteration_snapshot, expected_scope = "iteration"
+  )
+iteration_empty <- vapply(
+  iteration_authority$shards,
+  function(shard) shard$setup_count == 0L,
+  logical(1L)
+)
+assert_true(
+  length(iteration_authority$shards) == 64L && any(iteration_empty) &&
+    all(vapply(iteration_authority$shards, function(shard) {
+      isTRUE(.fastkpc_full_cuda_phase3_validate_shadow_snapshot_shard(
+        iteration_snapshot, shard
+      ))
+    }, logical(1L))),
+  "iteration snapshot precomputes and authenticates all empty shards"
+)
+fastkpc_full_cuda_phase3_release_shadow_execution_snapshot(iteration_snapshot)
+assert_error(
+  .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+    iteration_snapshot
+  ),
+  "released iteration snapshot fails closed", "released"
+)
+fastkpc_full_cuda_phase3_release_shadow_execution_snapshot(
+  snapshot_probe$snapshot
+)
+assert_error(
+  .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+    snapshot_probe$snapshot
+  ),
+  "released qualification snapshot fails closed", "released"
 )
 qualification_shards <- fastkpc_full_cuda_phase3_plan_shards(
   setup_keys = qualification$setup_keys,
@@ -1164,9 +1481,21 @@ assert_true(
 build_fastkpc_cuda_native(rebuild = FALSE)
 assert_true(fastkpc_cuda_available(), "CUDA must be available")
 
-iteration <- fastkpc_full_cuda_shadow_scope(
-  catalog = catalog, plan = plan, scope = "iteration"
+iteration_snapshot <-
+  fastkpc_full_cuda_phase3_create_shadow_execution_snapshot(
+    catalog = catalog, plan = plan, scope = "iteration"
+  )
+on.exit(
+  fastkpc_full_cuda_phase3_release_shadow_execution_snapshot(
+    iteration_snapshot
+  ),
+  add = TRUE
 )
+iteration <- .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+  iteration_snapshot, expected_scope = "iteration"
+)
+iteration$setup_assignments <- iteration$phase3_plan$assignments
+iteration$logical_tests <- iteration$logical_rows
 assert_true(
   length(iteration$setup_keys) == 44L &&
     nrow(iteration$target_rows) == 270L &&
@@ -1181,6 +1510,19 @@ assert_true(
   length(device_id) == 1L && !is.na(device_id) && device_id >= 0L,
   "test device id"
 )
+iteration_identity <- fastkpc_full_cuda_phase3_input_identity(
+  catalog, device_id
+)
+iteration <- .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+  iteration_snapshot,
+  expected_scope = "iteration",
+  expected_identity = iteration_identity,
+  expected_setup_keys = iteration$setup_keys,
+  expected_target_rows = iteration$target_rows,
+  expected_plan_identity_sha256 = plan$plan_identity_sha256
+)
+iteration$setup_assignments <- iteration$phase3_plan$assignments
+iteration$logical_tests <- iteration$logical_rows
 capacity <- fastkpc_full_cuda_fixed_sp_contract()$canonical_capacities
 create_runtime <- function() {
   runtime <- fixed_sp_cuda_runtime_create(device_id)
@@ -1198,20 +1540,11 @@ create_runtime <- function() {
 
 shard_ids <- sort(unique(iteration$setup_assignments$shard_id))
 run_iteration_shard <- function(runtime, shard_id) {
-  setup_keys <- iteration$setup_assignments$prepared_s_key_sha256[
-    iteration$setup_assignments$shard_id == shard_id
-  ]
-  target_rows <- iteration$target_rows[
-    iteration$target_rows$shard_id == shard_id, , drop = FALSE
-  ]
-  logical_tests <- iteration$logical_tests[
-    iteration$logical_tests$shard_id == shard_id, , drop = FALSE
-  ]
-  rownames(target_rows) <- rownames(logical_tests) <- NULL
+  descriptor <- iteration$shards[[as.character(shard_id)]]
   executor(
     context = runtime, shard_id = as.integer(shard_id),
-    setup_keys = setup_keys, target_rows = target_rows,
-    catalog = catalog, plan = plan, logical_tests = logical_tests
+    setup_keys = descriptor$setup_keys, target_rows = descriptor$target_rows,
+    catalog = catalog, execution_snapshot = iteration_snapshot
   )
 }
 

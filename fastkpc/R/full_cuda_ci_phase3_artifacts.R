@@ -2867,6 +2867,26 @@ fastkpc_full_cuda_phase3_assign_setup_shards <- function(
   )
 }
 
+.fastkpc_full_cuda_phase3_shadow_setup_authority_fields <- function() {
+  c(
+    "prepared_s_key_sha256", "shard_id", "canonical_setup_rank", "n",
+    "coefficient_dim", "null_dim", "penalty_count", "constraint_mode",
+    "has_H"
+  )
+}
+
+.fastkpc_full_cuda_phase3_has_automatic_row_names <- function(value) {
+  if (!is.data.frame(value)) return(FALSE)
+  row_names <- attr(value, "row.names", exact = TRUE)
+  if (nrow(value) == 0L) {
+    identical(row_names, integer())
+  } else {
+    identical(.row_names_info(value, 0L), c(
+      NA_integer_, -as.integer(nrow(value))
+    ))
+  }
+}
+
 .fastkpc_full_cuda_phase3_shadow_logical_authority_schema <- function(rows) {
   frame_attributes <- attributes(rows)
   clean <- is.data.frame(rows) && identical(class(rows), "data.frame") &&
@@ -2875,9 +2895,8 @@ fastkpc_full_cuda_phase3_assign_setup_shards <- function(
       .fastkpc_full_cuda_phase3_shadow_logical_authority_fields()
     ) && identical(
       sort(names(frame_attributes)), c("class", "names", "row.names")
-    ) && identical(.row_names_info(rows, 0L), c(
-      NA_integer_, -as.integer(nrow(rows))
-    )) && all(vapply(rows, function(column) {
+    ) && .fastkpc_full_cuda_phase3_has_automatic_row_names(rows) &&
+    all(vapply(rows, function(column) {
       !is.object(column) && is.null(attributes(column)) &&
         length(column) == nrow(rows)
     }, logical(1L)))
@@ -2960,9 +2979,13 @@ fastkpc_full_cuda_phase3_assign_setup_shards <- function(
     all(rows$reference_p_value >= 0 & rows$reference_p_value <= 1) &&
     all(rows$alpha > 0 & rows$alpha < 1) &&
     all(rows$absolute_log_distance_from_alpha >= 0) &&
-    identical(rows$reference_decision, ifelse(
-      rows$reference_p_value > rows$alpha, "independent", "dependent"
-    )) && all(vapply(c(
+    identical(rows$reference_decision, if (nrow(rows) == 0L) {
+      character()
+    } else {
+      ifelse(
+        rows$reference_p_value > rows$alpha, "independent", "dependent"
+      )
+    }) && all(vapply(c(
       "residual_key_x", "residual_key_y", "prepared_s_key_x",
       "prepared_s_key_y"
     ), function(field) {
@@ -3091,32 +3114,37 @@ fastkpc_full_cuda_phase3_assign_setup_shards <- function(
   plan$conditional_tests <- rows
   plan$logical_schema <- logical_schema
   if (is.null(setup_authority)) {
-    setup_authority <- lapply(
-      plan$assignments$prepared_s_key_sha256, function(setup_key) {
-        targets <- plan$target_rows[
-          plan$target_rows$prepared_s_key_sha256 == setup_key, , drop = FALSE
-        ]
-        data.frame(
-          prepared_s_key_sha256 = setup_key,
-          shard_id = unique(targets$shard_id),
-          canonical_setup_rank = unique(targets$canonical_setup_rank),
-          n = 351L,
-          coefficient_dim = unique(targets$null_dim),
-          null_dim = unique(targets$null_dim),
-          penalty_count = 0L,
-          stringsAsFactors = FALSE
-        )
-      }
+    target_setup <- match(
+      plan$target_rows$prepared_s_key_sha256,
+      plan$assignments$prepared_s_key_sha256
     )
-    setup_authority <- do.call(rbind, setup_authority)
-    rownames(setup_authority) <- NULL
+    first_target <- match(seq_len(nrow(plan$assignments)), target_setup)
+    if (anyNA(target_setup) || anyNA(first_target)) {
+      stop("Phase 3 shadow default setup authority is incomplete",
+           call. = FALSE)
+    }
+    null_dim <- as.integer(plan$target_rows$null_dim[first_target])
+    setup_authority <- data.frame(
+      prepared_s_key_sha256 =
+        plan$assignments$prepared_s_key_sha256,
+      shard_id = plan$assignments$shard_id,
+      canonical_setup_rank = as.integer(
+        plan$target_rows$canonical_setup_rank[first_target]
+      ),
+      n = rep.int(351L, nrow(plan$assignments)),
+      coefficient_dim = null_dim,
+      null_dim = null_dim,
+      penalty_count = rep.int(0L, nrow(plan$assignments)),
+      constraint_mode = rep.int("identity", nrow(plan$assignments)),
+      has_H = rep.int(FALSE, nrow(plan$assignments)),
+      stringsAsFactors = FALSE
+    )
   }
-  setup_fields <- c(
-    "prepared_s_key_sha256", "shard_id", "canonical_setup_rank", "n",
-    "coefficient_dim", "null_dim", "penalty_count"
-  )
+  setup_fields <- .fastkpc_full_cuda_phase3_shadow_setup_authority_fields()
   setup_clean <- is.data.frame(setup_authority) &&
+    identical(class(setup_authority), "data.frame") &&
     identical(names(setup_authority), setup_fields) &&
+    .fastkpc_full_cuda_phase3_has_automatic_row_names(setup_authority) &&
     identical(
       setup_authority$prepared_s_key_sha256,
       plan$assignments$prepared_s_key_sha256
@@ -3127,7 +3155,12 @@ fastkpc_full_cuda_phase3_assign_setup_shards <- function(
     all(vapply(c("n", "coefficient_dim", "null_dim", "penalty_count"),
       function(field) typeof(setup_authority[[field]]) == "integer" &&
         all(setup_authority[[field]] >= 0L), logical(1L)
-    ))
+    )) && typeof(setup_authority$constraint_mode) == "character" &&
+    all(setup_authority$constraint_mode %in% c("identity", "explicit")) &&
+    typeof(setup_authority$has_H) == "logical" &&
+    all(setup_authority$coefficient_dim >= setup_authority$null_dim) &&
+    all(setup_authority$constraint_mode != "identity" |
+          setup_authority$coefficient_dim == setup_authority$null_dim)
   if (!isTRUE(setup_clean)) {
     stop("Phase 3 shadow setup authority is malformed", call. = FALSE)
   }
@@ -3175,6 +3208,13 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
     target_rows$residual_key_sha256,
     "target_rows$residual_key_sha256", allow_empty = TRUE
   )
+  setup_index <- match(
+    target_setup_keys, assignments$prepared_s_key_sha256
+  )
+  if (anyNA(setup_index)) {
+    stop("every Phase 3 target must inherit exactly one setup shard",
+         call. = FALSE)
+  }
   if (isTRUE(canonical_setup_shards)) {
     canonical_fields <- c(
       "phase2_shard_id", "canonical_setup_rank"
@@ -3195,28 +3235,22 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
       stop("canonical Phase 3 setup shard evidence is malformed",
            call. = FALSE)
     }
-    canonical_shard_id <- vapply(
-      assignments$prepared_s_key_sha256,
-      function(setup_key) {
-        values <- unique(target_rows$phase2_shard_id[
-          target_setup_keys == setup_key
-        ])
-        if (length(values) != 1L) {
-          stop("canonical Phase 3 setup shard ownership is incomplete",
-               call. = FALSE)
-        }
-        as.integer(values[[1L]])
-      },
-      integer(1L)
+    first_target <- match(seq_len(nrow(assignments)), setup_index)
+    if (anyNA(first_target)) {
+      stop("canonical Phase 3 setup shard ownership is incomplete",
+           call. = FALSE)
+    }
+    canonical_shard_id <- as.integer(
+      target_rows$phase2_shard_id[first_target]
     )
+    if (!identical(
+          target_rows$phase2_shard_id,
+          canonical_shard_id[setup_index]
+        )) {
+      stop("canonical Phase 3 setup shard ownership is inconsistent",
+           call. = FALSE)
+    }
     assignments$shard_id <- canonical_shard_id
-  }
-  setup_index <- match(
-    target_setup_keys, assignments$prepared_s_key_sha256
-  )
-  if (anyNA(setup_index)) {
-    stop("every Phase 3 target must inherit exactly one setup shard",
-         call. = FALSE)
   }
   target_rows <- target_rows
   target_rows$prepared_s_key_sha256 <- target_setup_keys
@@ -3245,64 +3279,124 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
   )
 }
 
-.fastkpc_full_cuda_phase3_shadow_snapshot_registry_schema <- function() {
-  "full-cuda-ci-phase3-shadow-snapshot-registry-v1"
-}
+.fastkpc_full_cuda_phase3_shadow_snapshot_capability <- local({
+  registry <- new.env(hash = TRUE, parent = emptyenv())
+  sequence_id <- 0L
+  max_entries <- 8L
 
-.fastkpc_full_cuda_phase3_initialize_shadow_snapshot_registry <- function() {
-  option_name <- "fastkpc.phase3.shadow_snapshot_registry.v1"
-  marker_name <- "fastkpc.phase3.shadow_snapshot_registry.initialized.v1"
-  schema <- .fastkpc_full_cuda_phase3_shadow_snapshot_registry_schema()
-  registry <- getOption(option_name, NULL)
-  marker <- getOption(marker_name, NULL)
-  previous <- get0(
-    ".fastkpc_full_cuda_phase3_shadow_snapshot_registry_singleton",
-    envir = environment(
-      .fastkpc_full_cuda_phase3_initialize_shadow_snapshot_registry
-    ), inherits = FALSE, ifnotfound = NULL
-  )
-  if (is.null(marker)) {
-    if (!is.null(registry) || !is.null(previous)) {
-      stop("Phase 3 shadow snapshot registry initialization is corrupt",
+  validate_token <- function(token) {
+    fields <- c(
+      "capability_id", "creator_pid", "schema_version",
+      "snapshot_identity_sha256"
+    )
+    clean <- is.environment(token) && environmentIsLocked(token) &&
+      identical(ls(token, all.names = TRUE), fields) &&
+      all(vapply(fields, bindingIsLocked, logical(1L), env = token)) &&
+      identical(
+        token$schema_version,
+        "full-cuda-ci-phase3-shadow-snapshot-token-v2"
+      ) && identical(token$creator_pid, as.integer(Sys.getpid())) &&
+      .fastkpc_full_cuda_phase3_sha256(token$capability_id) &&
+      .fastkpc_full_cuda_phase3_sha256(token$snapshot_identity_sha256)
+    if (!isTRUE(clean)) {
+      stop("Phase 3 production shadow snapshot token is invalid",
            call. = FALSE)
     }
-    registry <- new.env(hash = TRUE, parent = emptyenv())
-    attr(registry, "schema_version") <- schema
-    options(structure(
-      list(registry, schema), names = c(option_name, marker_name)
-    ))
-    return(registry)
+    invisible(TRUE)
   }
-  clean <- identical(marker, schema) && is.environment(registry) &&
-    identical(attributes(registry), list(schema_version = schema)) &&
-    (is.null(previous) || identical(previous, registry))
-  if (!isTRUE(clean)) {
-    stop("Phase 3 shadow snapshot registry singleton is corrupt",
+
+  lookup <- function(token) {
+    validate_token(token)
+    capability_id <- token$capability_id
+    if (!exists(capability_id, envir = registry, inherits = FALSE)) {
+      stop("Phase 3 production shadow snapshot is released or unknown",
+           call. = FALSE)
+    }
+    entry <- get(capability_id, envir = registry, inherits = FALSE)
+    clean <- is.list(entry) && !is.object(entry) && identical(
+      names(entry), c(
+        "schema_version", "sequence_id", "token", "authority"
+      )
+    ) && identical(
+      entry$schema_version,
+      "full-cuda-ci-phase3-shadow-snapshot-private-entry-v1"
+    ) && identical(entry$token, token) && is.list(entry$authority) &&
+      identical(
+        entry$authority$snapshot_identity_sha256,
+        token$snapshot_identity_sha256
+      )
+    if (!isTRUE(clean)) {
+      stop("Phase 3 production shadow snapshot private entry is malformed",
+           call. = FALSE)
+    }
+    entry
+  }
+
+  function(action, token = NULL, shard_id = NULL, catalog = NULL,
+           plan = NULL, scope = NULL, ...) {
+    if (identical(action, "mint")) {
+      authority <-
+        .fastkpc_full_cuda_phase3_build_shadow_execution_snapshot_authority(
+          catalog, plan, scope
+        )
+      .fastkpc_full_cuda_phase3_reauthenticate_shadow_snapshot(authority)
+      token <- new.env(parent = emptyenv())
+      creator_pid <- as.integer(Sys.getpid())
+      capability_id <- .fastkpc_full_cuda_phase3_named_hash(list(
+        schema_version =
+          "full-cuda-ci-phase3-shadow-snapshot-capability-key-v1",
+        creator_pid = creator_pid,
+        token_environment = format(token),
+        snapshot_identity_sha256 = authority$snapshot_identity_sha256
+      ))
+      values <- list(
+        schema_version = "full-cuda-ci-phase3-shadow-snapshot-token-v2",
+        capability_id = capability_id,
+        creator_pid = creator_pid,
+        snapshot_identity_sha256 = authority$snapshot_identity_sha256
+      )
+      for (field in names(values)) assign(field, values[[field]], envir = token)
+      lockEnvironment(token, bindings = TRUE)
+      sequence_id <<- sequence_id + 1L
+      assign(capability_id, list(
+        schema_version =
+          "full-cuda-ci-phase3-shadow-snapshot-private-entry-v1",
+        sequence_id = sequence_id,
+        token = token,
+        authority = authority
+      ), envir = registry)
+      keys <- ls(registry, all.names = TRUE)
+      if (length(keys) > max_entries) {
+        ages <- vapply(keys, function(key) {
+          get(key, envir = registry, inherits = FALSE)$sequence_id
+        }, integer(1L))
+        remove <- keys[order(ages, method = "radix")][
+          seq_len(length(keys) - max_entries)
+        ]
+        rm(list = remove, envir = registry)
+      }
+      return(token)
+    }
+    entry <- lookup(token)
+    if (identical(action, "resolve")) {
+      .fastkpc_full_cuda_phase3_reauthenticate_shadow_snapshot(
+        entry$authority, ...
+      )
+      return(entry$authority)
+    }
+    if (identical(action, "resolve_shard")) {
+      return(.fastkpc_full_cuda_phase3_reauthenticate_shadow_snapshot_shard(
+        entry$authority, shard_id
+      ))
+    }
+    if (identical(action, "release")) {
+      rm(list = token$capability_id, envir = registry)
+      return(invisible(TRUE))
+    }
+    stop("unknown Phase 3 shadow snapshot capability action",
          call. = FALSE)
   }
-  registry
-}
-
-.fastkpc_full_cuda_phase3_shadow_snapshot_registry_singleton <-
-  .fastkpc_full_cuda_phase3_initialize_shadow_snapshot_registry()
-
-.fastkpc_full_cuda_phase3_shadow_snapshot_registry <- function() {
-  registry <- getOption("fastkpc.phase3.shadow_snapshot_registry.v1", NULL)
-  clean <- identical(
-    getOption(
-      "fastkpc.phase3.shadow_snapshot_registry.initialized.v1", NULL
-    ),
-    .fastkpc_full_cuda_phase3_shadow_snapshot_registry_schema()
-  ) && identical(
-    registry,
-    .fastkpc_full_cuda_phase3_shadow_snapshot_registry_singleton
-  ) && is.environment(registry)
-  if (!isTRUE(clean)) {
-    stop("Phase 3 shadow snapshot registry singleton is corrupt",
-         call. = FALSE)
-  }
-  registry
-}
+})
 
 .fastkpc_full_cuda_phase3_shadow_snapshot_shard_hash <- function(shard) {
   required <- c(
@@ -3314,6 +3408,30 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
   if (!is.list(shard) || is.object(shard) ||
       !identical(names(shard), required)) {
     stop("Phase 3 shadow snapshot shard schema is malformed", call. = FALSE)
+  }
+  logical_hash <-
+    .fastkpc_full_cuda_phase3_shadow_logical_authority_hash(
+      shard$logical_rows
+    )
+  exact <- typeof(shard$shard_id) == "integer" &&
+    length(shard$shard_id) == 1L && !is.na(shard$shard_id) &&
+    identical(shard$setup_count, as.integer(length(shard$setup_keys))) &&
+    identical(
+      shard$setup_hash,
+      fastkpc_full_cuda_census_key_set_hash(shard$setup_keys)
+    ) && identical(shard$target_count, as.integer(nrow(shard$target_rows))) &&
+    identical(shard$target_keys, sort(
+      shard$target_rows$residual_key_sha256, method = "radix"
+    )) && identical(
+      shard$target_hash,
+      fastkpc_full_cuda_census_key_set_hash(shard$target_keys)
+    ) && identical(shard$logical_count, as.integer(nrow(shard$logical_rows))) &&
+    identical(shard$logical_ids, shard$logical_rows$logical_sequence_id) &&
+    identical(shard$logical_hash, logical_hash) &&
+    .fastkpc_full_cuda_phase3_sha256(shard$logical_schema_sha256)
+  if (!isTRUE(exact)) {
+    stop("Phase 3 shadow snapshot shard authority is inexact",
+         call. = FALSE)
   }
   .fastkpc_full_cuda_phase3_named_hash(list(
     schema_version = "full-cuda-ci-phase3-shadow-snapshot-shard-v1",
@@ -3328,9 +3446,7 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
     logical_schema_sha256 = shard$logical_schema_sha256,
     logical_count = shard$logical_count,
     logical_ids = shard$logical_ids,
-    logical_hash = .fastkpc_full_cuda_phase3_shadow_logical_authority_hash(
-      shard$logical_rows
-    )
+    logical_hash = logical_hash
   ))
 }
 
@@ -3391,7 +3507,217 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
   descriptors
 }
 
-fastkpc_full_cuda_phase3_create_shadow_execution_snapshot <- function(
+.fastkpc_full_cuda_phase3_shadow_snapshot_shards <- function(
+    plan, logical_schema) {
+  lapply(plan$precomputed_descriptors, function(descriptor) {
+    shard <- descriptor[c(
+      "shard_id", "setup_keys", "setup_count", "setup_hash",
+      "setup_rows", "target_rows", "target_keys", "target_count",
+      "target_hash", "logical_rows", "logical_ids", "logical_count",
+      "logical_hash"
+    )]
+    shard$logical_schema_sha256 <- logical_schema$sha256
+    shard$identity_sha256 <-
+      .fastkpc_full_cuda_phase3_shadow_snapshot_shard_hash(shard)
+    shard
+  })
+}
+
+.fastkpc_full_cuda_phase3_shadow_snapshot_identity <- function(authority) {
+  list(
+    schema_version = "full-cuda-ci-phase3-shadow-execution-snapshot-v2",
+    creator_pid = authority$creator_pid,
+    scope = authority$scope,
+    catalog_authority_sha256 = authority$catalog_authority_sha256,
+    catalog_lineage_sha256 = authority$catalog_lineage_sha256,
+    plan_identity_sha256 = authority$plan_identity_sha256,
+    setup_count = as.integer(length(authority$setup_keys)),
+    setup_hash = fastkpc_full_cuda_census_key_set_hash(authority$setup_keys),
+    setup_authority_hash = fastkpc_full_cuda_census_frame_hash(
+      authority$setup_authority
+    ),
+    target_count = as.integer(nrow(authority$target_rows)),
+    target_hash = fastkpc_full_cuda_census_frame_hash(authority$target_rows),
+    logical_schema_sha256 = authority$logical_schema$sha256,
+    logical_count = as.integer(nrow(authority$logical_rows)),
+    logical_ids = unname(authority$logical_rows$logical_sequence_id),
+    logical_hash = .fastkpc_full_cuda_phase3_shadow_logical_authority_hash(
+      authority$logical_rows, authority$logical_schema
+    ),
+    shard_hashes = unname(vapply(
+      authority$shards, `[[`, character(1L), "identity_sha256"
+    ))
+  )
+}
+
+.fastkpc_full_cuda_phase3_reauthenticate_shadow_snapshot <- function(
+    authority, expected_scope = NULL, expected_identity = NULL,
+    expected_setup_keys = NULL, expected_target_rows = NULL,
+    expected_plan_identity_sha256 = NULL) {
+  identity_fields <- names(.fastkpc_full_cuda_phase3_shadow_snapshot_identity(
+    authority
+  ))
+  data_fields <- c(
+    "snapshot_identity_sha256", "catalog_lineage", "plan_binding",
+    "setup_keys", "target_rows", "logical_schema", "logical_rows",
+    "setup_authority", "phase3_plan", "shards"
+  )
+  if (!is.list(authority) || is.object(authority) ||
+      !identical(names(authority), c(identity_fields, data_fields)) ||
+      !identical(authority$creator_pid, as.integer(Sys.getpid())) ||
+      !authority$scope %in% c("iteration", "qualification", "full")) {
+    stop("Phase 3 shadow snapshot authority schema is malformed",
+         call. = FALSE)
+  }
+  plan_fields <- .fastkpc_full_cuda_shadow_plan_metadata_fields()
+  lineage_clean <- is.list(authority$catalog_lineage) &&
+    !is.object(authority$catalog_lineage) &&
+    isTRUE(authority$catalog_lineage$authenticated) && identical(
+      fastkpc_full_cuda_census_named_metadata_hash(
+        authority$catalog_lineage
+      ),
+      authority$catalog_lineage_sha256
+    )
+  plan_clean <- is.list(authority$plan_binding) &&
+    !is.object(authority$plan_binding) &&
+    identical(names(authority$plan_binding), plan_fields) && identical(
+      fastkpc_full_cuda_census_named_metadata_hash(authority$plan_binding),
+      authority$plan_identity_sha256
+    ) && identical(
+      authority$plan_binding$catalog_authority_sha256,
+      authority$catalog_authority_sha256
+    ) && identical(
+      authority$plan_binding$catalog_lineage_sha256,
+      authority$catalog_lineage_sha256
+    )
+  if (!isTRUE(lineage_clean) || !isTRUE(plan_clean)) {
+    stop("Phase 3 shadow snapshot catalog/plan identity is malformed",
+         call. = FALSE)
+  }
+  phase3_fields <- c(
+    "assignments", "target_rows", "shard_count", "shadow_payload_semantics",
+    "conditional_tests", "logical_schema", "setup_authority",
+    "precomputed_descriptors"
+  )
+  phase3_plan <- authority$phase3_plan
+  setup_fields <- .fastkpc_full_cuda_phase3_shadow_setup_authority_fields()
+  setup_authority <- authority$setup_authority
+  setup_clean <- is.data.frame(setup_authority) &&
+    identical(class(setup_authority), "data.frame") &&
+    identical(names(setup_authority), setup_fields) &&
+    identical(
+      sort(names(attributes(setup_authority))),
+      c("class", "names", "row.names")
+    ) && .fastkpc_full_cuda_phase3_has_automatic_row_names(setup_authority) &&
+    all(vapply(setup_authority, function(column) {
+      !is.object(column) && is.null(attributes(column)) && !anyNA(column) &&
+        (!is.numeric(column) || all(is.finite(column)))
+    }, logical(1L)))
+  plan_exact <- is.list(phase3_plan) && !is.object(phase3_plan) &&
+    identical(names(phase3_plan), phase3_fields) &&
+    identical(phase3_plan$shadow_payload_semantics,
+              .fastkpc_full_cuda_phase3_shadow_authoritative_semantics()) &&
+    identical(phase3_plan$shard_count, 64L) &&
+    identical(phase3_plan$target_rows, authority$target_rows) &&
+    identical(phase3_plan$conditional_tests, authority$logical_rows) &&
+    identical(phase3_plan$logical_schema, authority$logical_schema) &&
+    identical(phase3_plan$setup_authority, setup_authority) &&
+    identical(
+      phase3_plan$assignments$prepared_s_key_sha256,
+      authority$setup_keys
+    ) && isTRUE(setup_clean)
+  if (!isTRUE(plan_exact)) {
+    stop("Phase 3 shadow snapshot execution plan is malformed",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_validate_shadow_logical_authority(
+    authority$logical_rows, authority$logical_schema,
+    phase3_plan$assignments, authority$target_rows, phase3_plan$shard_count
+  )
+  rebuilt_descriptors <-
+    .fastkpc_full_cuda_phase3_precompute_shadow_descriptors(phase3_plan)
+  if (!identical(
+        phase3_plan$precomputed_descriptors, rebuilt_descriptors
+      )) {
+    stop("Phase 3 shadow snapshot descriptor corpus is malformed",
+         call. = FALSE)
+  }
+  rebuilt_plan <- phase3_plan
+  rebuilt_plan$precomputed_descriptors <- rebuilt_descriptors
+  rebuilt_shards <- .fastkpc_full_cuda_phase3_shadow_snapshot_shards(
+    rebuilt_plan, authority$logical_schema
+  )
+  if (!identical(authority$shards, rebuilt_shards)) {
+    stop("Phase 3 shadow snapshot shard corpus is malformed",
+         call. = FALSE)
+  }
+  recomputed_identity <-
+    .fastkpc_full_cuda_phase3_shadow_snapshot_identity(authority)
+  recomputed_sha256 <-
+    .fastkpc_full_cuda_phase3_named_hash(recomputed_identity)
+  if (!identical(authority[identity_fields], recomputed_identity) ||
+      !identical(authority$snapshot_identity_sha256, recomputed_sha256)) {
+    stop("Phase 3 shadow snapshot authority identity mismatch",
+         call. = FALSE)
+  }
+  if (!is.null(expected_scope) && !identical(authority$scope, expected_scope)) {
+    stop("Phase 3 production shadow snapshot scope mismatch", call. = FALSE)
+  }
+  if (!is.null(expected_identity)) {
+    lineage_fields <- setdiff(names(authority$catalog_lineage), "authenticated")
+    identity_clean <- is.list(expected_identity) && identical(
+      expected_identity$schema_version,
+      "full-cuda-ci-phase3-input-identity-v1"
+    ) && all(lineage_fields %in% names(expected_identity)) && identical(
+      expected_identity[lineage_fields],
+      authority$catalog_lineage[lineage_fields]
+    ) && identical(
+      expected_identity$route_config_hash,
+      authority$plan_binding$route_config_sha256
+    )
+    if (!isTRUE(identity_clean)) {
+      stop("Phase 3 production shadow snapshot identity mismatch",
+           call. = FALSE)
+    }
+  }
+  if (!is.null(expected_setup_keys) || !is.null(expected_target_rows)) {
+    if (!identical(expected_setup_keys, authority$setup_keys) ||
+        !identical(expected_target_rows, authority$target_rows)) {
+      stop("Phase 3 production shadow snapshot corpus mismatch",
+           call. = FALSE)
+    }
+  }
+  if (!is.null(expected_plan_identity_sha256) && !identical(
+        expected_plan_identity_sha256, authority$plan_identity_sha256
+      )) {
+    stop("Phase 3 production shadow snapshot plan identity mismatch",
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+.fastkpc_full_cuda_phase3_reauthenticate_shadow_snapshot_shard <- function(
+    authority, shard_id) {
+  shard_id <- .fastkpc_full_cuda_phase3_whole_scalar(
+    shard_id, 0L, "shadow snapshot shard_id"
+  )
+  key <- as.character(shard_id)
+  if (!key %in% names(authority$shards)) {
+    stop("Phase 3 shadow snapshot shard is missing", call. = FALSE)
+  }
+  shard <- authority$shards[[key]]
+  candidate <- shard[setdiff(names(shard), "identity_sha256")]
+  if (!identical(
+        .fastkpc_full_cuda_phase3_shadow_snapshot_shard_hash(candidate),
+        shard$identity_sha256
+      )) {
+    stop("Phase 3 shadow snapshot shard authentication failed",
+         call. = FALSE)
+  }
+  shard
+}
+
+.fastkpc_full_cuda_phase3_build_shadow_execution_snapshot_authority <- function(
     catalog, plan, scope) {
   .fastkpc_full_cuda_shadow_validate_supplied_plan(catalog, plan)
   selected <- .fastkpc_full_cuda_shadow_scope_from_validated_plan(
@@ -3413,14 +3739,38 @@ fastkpc_full_cuda_phase3_create_shadow_execution_snapshot <- function(
   setup_index <- match(
     selected$setup_keys, catalog$setup_index$prepared_s_key_sha256
   )
-  setup_null_dim <- vapply(selected$setup_keys, function(setup_key) {
-    values <- unique(selected$target_rows$null_dim[
-      selected$target_rows$prepared_s_key_sha256 == setup_key
-    ])
-    if (length(values) != 1L || is.na(values)) NA_integer_ else {
-      as.integer(values)
-    }
-  }, integer(1L))
+  target_setup <- match(
+    selected$target_rows$prepared_s_key_sha256, selected$setup_keys
+  )
+  first_target <- match(seq_along(selected$setup_keys), target_setup)
+  if (anyNA(setup_index) || anyNA(target_setup) || anyNA(first_target)) {
+    stop("Phase 3 shadow snapshot setup authority is incomplete",
+         call. = FALSE)
+  }
+  setup_null_dim <- as.integer(selected$target_rows$null_dim[first_target])
+  if (!identical(
+        selected$target_rows$null_dim, setup_null_dim[target_setup]
+      )) {
+    stop("Phase 3 shadow snapshot setup null dimension is inconsistent",
+         call. = FALSE)
+  }
+  phase1_setup_index <- match(
+    catalog$setup_index$same_S_group_id[setup_index],
+    catalog$inputs$same_s_setup_metadata$same_S_group_id
+  )
+  if (anyNA(phase1_setup_index)) {
+    stop("Phase 3 shadow snapshot setup metadata is incomplete",
+         call. = FALSE)
+  }
+  phase1_null_dim <- as.integer(
+    catalog$inputs$same_s_setup_metadata$constraint_nullspace_dimension[
+      phase1_setup_index
+    ]
+  )
+  if (!identical(setup_null_dim, phase1_null_dim)) {
+    stop("Phase 3 shadow snapshot setup null dimension authority mismatch",
+         call. = FALSE)
+  }
   setup_authority <- data.frame(
     prepared_s_key_sha256 = selected$setup_keys,
     shard_id = base_plan$assignments$shard_id,
@@ -3433,33 +3783,27 @@ fastkpc_full_cuda_phase3_create_shadow_execution_snapshot <- function(
     penalty_count = as.integer(
       catalog$setup_index$penalty_count[setup_index]
     ),
+    constraint_mode = as.character(
+      catalog$setup_index$constraint_mode[setup_index]
+    ),
+    has_H = as.logical(
+      catalog$inputs$same_s_setup_metadata$H_hash[phase1_setup_index] != "NONE"
+    ),
     stringsAsFactors = FALSE
   )
   phase3_plan <- .fastkpc_full_cuda_phase3_bind_shadow_authority(
     base_plan, logical_rows, logical_schema, setup_authority
   )
-  base_descriptors <-
+  phase3_plan$precomputed_descriptors <-
     .fastkpc_full_cuda_phase3_precompute_shadow_descriptors(phase3_plan)
-  phase3_plan$precomputed_descriptors <- base_descriptors
-  descriptors <- lapply(base_descriptors, function(descriptor) {
-      shard <- descriptor[c(
-        "shard_id", "setup_keys", "setup_count", "setup_hash",
-        "setup_rows", "target_rows", "target_keys", "target_count", "target_hash",
-        "logical_rows", "logical_ids", "logical_count", "logical_hash"
-      )]
-      shard$logical_schema_sha256 <- logical_schema$sha256
-      shard$identity_sha256 <-
-        .fastkpc_full_cuda_phase3_shadow_snapshot_shard_hash(shard)
-      shard
-    })
+  descriptors <- .fastkpc_full_cuda_phase3_shadow_snapshot_shards(
+    phase3_plan, logical_schema
+  )
   catalog_authority <- fastkpc_full_cuda_phase3_discover_catalog_authority(
     catalog
   )
-  shard_hashes <- unname(vapply(
-    descriptors, `[[`, character(1L), "identity_sha256"
-  ))
-  authority_identity <- list(
-    schema_version = "full-cuda-ci-phase3-shadow-execution-snapshot-v1",
+  authority <- list(
+    schema_version = "full-cuda-ci-phase3-shadow-execution-snapshot-v2",
     creator_pid = as.integer(Sys.getpid()),
     scope = selected$scope,
     catalog_authority_sha256 = catalog_authority$authority_sha256,
@@ -3467,131 +3811,72 @@ fastkpc_full_cuda_phase3_create_shadow_execution_snapshot <- function(
     plan_identity_sha256 = plan$plan_identity_sha256,
     setup_count = as.integer(length(selected$setup_keys)),
     setup_hash = fastkpc_full_cuda_census_key_set_hash(selected$setup_keys),
+    setup_authority_hash = fastkpc_full_cuda_census_frame_hash(setup_authority),
     target_count = as.integer(nrow(selected$target_rows)),
     target_hash = fastkpc_full_cuda_census_frame_hash(selected$target_rows),
     logical_schema_sha256 = logical_schema$sha256,
     logical_count = as.integer(nrow(logical_rows)),
-    logical_ids = logical_rows$logical_sequence_id,
+    logical_ids = unname(logical_rows$logical_sequence_id),
     logical_hash = .fastkpc_full_cuda_phase3_shadow_logical_authority_hash(
       logical_rows, logical_schema
     ),
-    shard_hashes = shard_hashes
+    shard_hashes = unname(vapply(
+      descriptors, `[[`, character(1L), "identity_sha256"
+    )),
+    snapshot_identity_sha256 = strrep("0", 64L),
+    catalog_lineage = catalog_authority$lineage,
+    plan_binding = plan[.fastkpc_full_cuda_shadow_plan_metadata_fields()],
+    setup_keys = selected$setup_keys,
+    target_rows = selected$target_rows,
+    logical_schema = logical_schema,
+    logical_rows = logical_rows,
+    setup_authority = setup_authority,
+    phase3_plan = phase3_plan,
+    shards = descriptors
   )
-  snapshot_identity_sha256 <-
-    .fastkpc_full_cuda_phase3_named_hash(authority_identity)
-  token <- new.env(parent = emptyenv())
-  registry_id <- .fastkpc_full_cuda_phase3_named_hash(list(
-    schema_version = "full-cuda-ci-phase3-shadow-snapshot-registry-key-v1",
-    creator_pid = authority_identity$creator_pid,
-    token_environment = format(token),
-    snapshot_identity_sha256 = snapshot_identity_sha256
-  ))
-  for (field in names(list(
-    schema_version = "full-cuda-ci-phase3-shadow-snapshot-token-v1",
-    registry_id = registry_id,
-    creator_pid = authority_identity$creator_pid,
-    snapshot_identity_sha256 = snapshot_identity_sha256
-  ))) {
-    value <- switch(
-      field,
-      schema_version = "full-cuda-ci-phase3-shadow-snapshot-token-v1",
-      registry_id = registry_id,
-      creator_pid = authority_identity$creator_pid,
-      snapshot_identity_sha256 = snapshot_identity_sha256
+  authority$snapshot_identity_sha256 <-
+    .fastkpc_full_cuda_phase3_named_hash(
+      .fastkpc_full_cuda_phase3_shadow_snapshot_identity(authority)
     )
-    assign(field, value, envir = token)
-  }
-  lockEnvironment(token, bindings = TRUE)
-  authority <- c(
-    authority_identity,
-    list(
-      snapshot_identity_sha256 = snapshot_identity_sha256,
-      setup_keys = selected$setup_keys,
-      target_rows = selected$target_rows,
-      logical_schema = logical_schema,
-      logical_rows = logical_rows,
-      setup_authority = setup_authority,
-      phase3_plan = phase3_plan,
-      shards = descriptors
-    )
+  authority
+}
+
+fastkpc_full_cuda_phase3_create_shadow_execution_snapshot <- function(
+    catalog, plan, scope) {
+  .fastkpc_full_cuda_phase3_shadow_snapshot_capability(
+    "mint", catalog = catalog, plan = plan, scope = scope
   )
-  entry <- list(
-    schema_version = "full-cuda-ci-phase3-shadow-snapshot-entry-v1",
-    token = token,
-    creator_pid = authority_identity$creator_pid,
-    snapshot_identity_sha256 = snapshot_identity_sha256,
-    authority = authority
-  )
-  registry <- .fastkpc_full_cuda_phase3_shadow_snapshot_registry()
-  if (exists(registry_id, envir = registry, inherits = FALSE)) {
-    stop("Phase 3 shadow snapshot registry collision", call. = FALSE)
-  }
-  assign(registry_id, entry, envir = registry)
-  lockBinding(registry_id, registry)
-  token
 }
 
 .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot <- function(
-    token, expected_scope = NULL) {
-  fields <- c(
-    "creator_pid", "registry_id", "schema_version",
-    "snapshot_identity_sha256"
+    token, expected_scope = NULL, expected_identity = NULL,
+    expected_setup_keys = NULL, expected_target_rows = NULL,
+    expected_plan_identity_sha256 = NULL) {
+  .fastkpc_full_cuda_phase3_shadow_snapshot_capability(
+    "resolve", token = token, expected_scope = expected_scope,
+    expected_identity = expected_identity,
+    expected_setup_keys = expected_setup_keys,
+    expected_target_rows = expected_target_rows,
+    expected_plan_identity_sha256 = expected_plan_identity_sha256
   )
-  clean <- is.environment(token) && environmentIsLocked(token) &&
-    identical(ls(token, all.names = TRUE), fields) &&
-    all(vapply(fields, bindingIsLocked, logical(1L), env = token)) &&
-    identical(
-      token$schema_version,
-      "full-cuda-ci-phase3-shadow-snapshot-token-v1"
-    ) && identical(token$creator_pid, as.integer(Sys.getpid())) &&
-    .fastkpc_full_cuda_phase3_sha256(token$registry_id) &&
-    .fastkpc_full_cuda_phase3_sha256(token$snapshot_identity_sha256)
-  if (!isTRUE(clean)) {
-    stop("Phase 3 production shadow snapshot token is invalid", call. = FALSE)
-  }
-  registry <- .fastkpc_full_cuda_phase3_shadow_snapshot_registry()
-  if (!exists(token$registry_id, envir = registry, inherits = FALSE) ||
-      !bindingIsLocked(token$registry_id, registry)) {
-    stop("Phase 3 production shadow snapshot registry entry is missing",
-         call. = FALSE)
-  }
-  entry <- get(token$registry_id, envir = registry, inherits = FALSE)
-  entry_clean <- is.list(entry) && !is.object(entry) && identical(
-    names(entry), c(
-      "schema_version", "token", "creator_pid",
-      "snapshot_identity_sha256", "authority"
-    )
-  ) && identical(
-    entry$schema_version, "full-cuda-ci-phase3-shadow-snapshot-entry-v1"
-  ) && identical(entry$token, token) &&
-    identical(entry$creator_pid, token$creator_pid) && identical(
-      entry$snapshot_identity_sha256, token$snapshot_identity_sha256
-    ) && is.list(entry$authority) && identical(
-      entry$authority$snapshot_identity_sha256,
-      token$snapshot_identity_sha256
-    )
-  if (!isTRUE(entry_clean)) {
-    stop("Phase 3 production shadow snapshot entry is malformed",
-         call. = FALSE)
-  }
-  if (!is.null(expected_scope) &&
-      !identical(entry$authority$scope, expected_scope)) {
-    stop("Phase 3 production shadow snapshot scope mismatch", call. = FALSE)
-  }
-  entry$authority
+}
+
+fastkpc_full_cuda_phase3_release_shadow_execution_snapshot <- function(token) {
+  .fastkpc_full_cuda_phase3_shadow_snapshot_capability(
+    "release", token = token
+  )
 }
 
 .fastkpc_full_cuda_phase3_validate_shadow_snapshot_shard <- function(
     token, shard) {
-  authority <-
-    .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(token)
   if (!is.list(shard) || !is.integer(shard$shard_id) ||
-      length(shard$shard_id) != 1L || is.na(shard$shard_id) ||
-      !as.character(shard$shard_id) %in% names(authority$shards)) {
+      length(shard$shard_id) != 1L || is.na(shard$shard_id)) {
     stop("Phase 3 shadow snapshot shard identity is malformed",
          call. = FALSE)
   }
-  expected <- authority$shards[[as.character(shard$shard_id)]]
+  expected <- .fastkpc_full_cuda_phase3_shadow_snapshot_capability(
+    "resolve_shard", token = token, shard_id = shard$shard_id
+  )
   candidate <- shard[setdiff(names(shard), "identity_sha256")]
   candidate_hash <- tryCatch(
     .fastkpc_full_cuda_phase3_shadow_snapshot_shard_hash(candidate),
@@ -3609,7 +3894,8 @@ fastkpc_full_cuda_phase3_create_shadow_execution_snapshot <- function(
 .fastkpc_full_cuda_phase3_resolve_execution_plan <- function(
     kind, identity, setup_keys, target_rows, scope,
     canonical_setup_shards = FALSE, conditional_tests = NULL,
-    execution_snapshot = NULL, shard_count = NULL) {
+    execution_snapshot = NULL, shard_count = NULL,
+    shadow_plan_identity_sha256 = NULL) {
   setup_keys <- setup_keys
   target_rows <- target_rows
   production_shadow <- identical(kind, "full_shadow") &&
@@ -3621,15 +3907,18 @@ fastkpc_full_cuda_phase3_create_shadow_execution_snapshot <- function(
       stop("Phase 3 production shadow snapshot forbids caller logical rows",
            call. = FALSE)
     }
-    authority <-
-      .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
-        execution_snapshot, expected_scope = scope
-      )
-    if (!identical(setup_keys, authority$setup_keys) ||
-        !identical(target_rows, authority$target_rows)) {
-      stop("Phase 3 production shadow snapshot descriptor mismatch",
+    if (!.fastkpc_full_cuda_phase3_sha256(shadow_plan_identity_sha256)) {
+      stop("Phase 3 production shadow plan identity is unavailable",
            call. = FALSE)
     }
+    authority <-
+      .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+        execution_snapshot, expected_scope = scope,
+        expected_identity = identity,
+        expected_setup_keys = setup_keys,
+        expected_target_rows = target_rows,
+        expected_plan_identity_sha256 = shadow_plan_identity_sha256
+      )
     return(list(plan = authority$phase3_plan, authority = authority))
   }
   if (!is.null(execution_snapshot)) {
@@ -6215,12 +6504,16 @@ fastkpc_full_cuda_phase3_run_oracle_shard <- function(
     expected_shard_id = NULL, expected_setup_rows = NULL) {
   exact_atomic_frame <- function(value, schema, label) {
     clean <- is.data.frame(value) && identical(class(value), "data.frame") &&
-      identical(names(value), names(schema)) && all(vapply(
+      identical(names(value), names(schema)) && identical(
+        sort(names(attributes(value))), c("class", "names", "row.names")
+      ) && .fastkpc_full_cuda_phase3_has_automatic_row_names(value) &&
+      all(vapply(
         names(schema), function(field) {
           column <- value[[field]]
           typeof(column) == schema[[field]] && !is.object(column) &&
             is.null(attributes(column)) && length(column) == nrow(value) &&
-            !anyNA(column) && (!is.numeric(column) || all(is.finite(column)))
+            !anyNA(column) && (!is.numeric(column) ||
+              all(is.finite(column) & column >= 0))
         }, logical(1L)
       ))
     if (!isTRUE(clean)) {
@@ -6254,12 +6547,16 @@ fastkpc_full_cuda_phase3_run_oracle_shard <- function(
   target_count <- as.integer(tabulate(
     target_setup, nbins = length(expected_setup_keys)
   ))
-  setup_fields <- c(
-    "prepared_s_key_sha256", "shard_id", "canonical_setup_rank", "n",
-    "coefficient_dim", "null_dim", "penalty_count"
-  )
+  setup_fields <- .fastkpc_full_cuda_phase3_shadow_setup_authority_fields()
   setup_rows_clean <- is.data.frame(expected_setup_rows) &&
+    identical(class(expected_setup_rows), "data.frame") &&
     identical(names(expected_setup_rows), setup_fields) &&
+    identical(
+      sort(names(attributes(expected_setup_rows))),
+      c("class", "names", "row.names")
+    ) && .fastkpc_full_cuda_phase3_has_automatic_row_names(
+      expected_setup_rows
+    ) &&
     identical(
       expected_setup_rows$prepared_s_key_sha256, expected_setup_keys
     ) && identical(expected_setup_rows$shard_id, as.integer(setup_shard)) &&
@@ -6271,7 +6568,13 @@ fastkpc_full_cuda_phase3_run_oracle_shard <- function(
     }, logical(1L))) && all(expected_setup_rows$n > 0L) &&
     all(expected_setup_rows$coefficient_dim > 0L) &&
     all(expected_setup_rows$null_dim > 0L) &&
-    all(expected_setup_rows$penalty_count >= 0L)
+    all(expected_setup_rows$penalty_count >= 0L) &&
+    typeof(expected_setup_rows$constraint_mode) == "character" &&
+    all(expected_setup_rows$constraint_mode %in% c("identity", "explicit")) &&
+    typeof(expected_setup_rows$has_H) == "logical" &&
+    all(expected_setup_rows$coefficient_dim >= expected_setup_rows$null_dim) &&
+    all(expected_setup_rows$constraint_mode != "identity" |
+          expected_setup_rows$coefficient_dim == expected_setup_rows$null_dim)
   setup_exact <- !anyNA(setup_target_index) && !anyNA(setup_shard) &&
     !anyNA(setup_rank) && !anyNA(target_setup) && all(setup_rank >= 1L) &&
     identical(resources$prepared_s_key_sha256, expected_setup_keys) &&
@@ -6396,6 +6699,22 @@ fastkpc_full_cuda_phase3_run_oracle_shard <- function(
     "cpu_fallback_count", "unknown_fallback_count",
     "approximate_backend_count"
   )
+  explicit_constraint <- expected_setup_rows$constraint_mode == "explicit"
+  expected_setup_h2d_bytes <- 8 * (
+    as.double(expected_setup_rows$n) *
+      as.double(expected_setup_rows$coefficient_dim) +
+    as.double(explicit_constraint) * (
+      as.double(expected_setup_rows$coefficient_dim) *
+        as.double(expected_setup_rows$null_dim) +
+      as.double(expected_setup_rows$n) *
+        as.double(expected_setup_rows$null_dim)
+    ) +
+    as.double(expected_setup_rows$null_dim)^2 +
+    as.double(expected_setup_rows$penalty_count) *
+      as.double(expected_setup_rows$null_dim)^2 +
+    as.double(expected_setup_rows$has_H) *
+      as.double(expected_setup_rows$null_dim)^2
+  )
   lifecycle_exact <- all(vapply(forbidden_zero, function(field) {
     all(resources[[field]] == 0)
   }, logical(1L))) && all(vapply(c(
@@ -6406,8 +6725,9 @@ fastkpc_full_cuda_phase3_run_oracle_shard <- function(
     "rhs_device_build_count", "shadow_materialize_call_count",
     "invalid_output_init_count"
   ), function(field) all(resources[[field]] == 1L), logical(1L))) &&
-    all(!resources$output_slot_leased_after_release) &&
-    all(resources$setup_h2d_bytes > 0 & resources$setup_h2d_bytes %% 8 == 0) &&
+    all(!resources$output_slot_leased_after_release) && identical(
+      resources$setup_h2d_bytes, expected_setup_h2d_bytes
+    ) &&
     all(resources$target_h2d_copy_count == 2L) && identical(
       resources$target_h2d_bytes,
       8 * as.double(target_count) * as.double(
@@ -6774,14 +7094,19 @@ fastkpc_full_cuda_phase3_run_shadow_shard <- function(
     stop("Phase 3 shadow shard setup order is not canonical",
          call. = FALSE)
   }
-  snapshot_authority <-
-    .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
-      execution_snapshot
+  shard_authority <-
+    .fastkpc_full_cuda_phase3_shadow_snapshot_capability(
+      "resolve_shard", token = execution_snapshot, shard_id = shard_id
     )
-  if (!as.character(shard_id) %in% names(snapshot_authority$shards)) {
-    stop("Phase 3 shadow snapshot shard is missing", call. = FALSE)
+  if (!identical(
+        shard_authority$logical_schema_sha256,
+        .fastkpc_full_cuda_phase3_shadow_logical_authority_schema(
+          shard_authority$logical_rows
+        )$sha256
+      )) {
+    stop("Phase 3 shadow snapshot shard logical schema mismatch",
+         call. = FALSE)
   }
-  shard_authority <- snapshot_authority$shards[[as.character(shard_id)]]
   .fastkpc_full_cuda_phase3_validate_shadow_snapshot_shard(
     execution_snapshot, shard_authority
   )
@@ -6820,7 +7145,8 @@ fastkpc_full_cuda_phase3_run_shadow_shard <- function(
   }
 
   .fastkpc_full_cuda_phase3_validate_shadow_logical_authority(
-    logical_tests, snapshot_authority$logical_schema
+    logical_tests,
+    .fastkpc_full_cuda_phase3_shadow_logical_authority_schema(logical_tests)
   )
   if (length(setup_keys) == 0L) {
     if (nrow(logical_tests) != 0L) {
@@ -6839,14 +7165,6 @@ fastkpc_full_cuda_phase3_run_shadow_shard <- function(
       stop("Phase 3 shadow shard logical plan lineage is invalid",
            call. = FALSE)
     }
-  }
-  catalog_authority <-
-    fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
-  if (!identical(
-        catalog_authority$authority_sha256,
-        snapshot_authority$catalog_authority_sha256
-      )) {
-    stop("Phase 3 shadow snapshot catalog authority mismatch", call. = FALSE)
   }
   runtime_info <- fixed_sp_cuda_runtime_info(context)
   fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
@@ -7109,13 +7427,56 @@ fastkpc_full_cuda_phase3_run_shadow_shard <- function(
   invisible(production_shadow)
 }
 
+.fastkpc_full_cuda_phase3_destroy_shadow_runtime <- function(
+    runtime, info_fun = fixed_sp_cuda_runtime_info,
+    validate_fun = function(info) {
+      fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
+        info, "Phase 3 shadow final runtime"
+      )
+    }, free_fun = fixed_sp_cuda_runtime_free) {
+  if (!is.function(info_fun) || !is.function(validate_fun) ||
+      !is.function(free_fun)) {
+    stop("Phase 3 shadow runtime destroy callbacks are malformed",
+         call. = FALSE)
+  }
+  info <- NULL
+  validation_error <- tryCatch({
+    info <- info_fun(runtime)
+    validate_fun(info)
+    NULL
+  }, error = function(error) error)
+  free_error <- tryCatch({
+    free_fun(runtime)
+    NULL
+  }, error = function(error) error)
+  if (!is.null(validation_error) && !is.null(free_error)) {
+    condition <- structure(
+      list(
+        message = paste0(
+          "Phase 3 shadow runtime info validation failure: ",
+          conditionMessage(validation_error),
+          "; runtime free failure: ", conditionMessage(free_error)
+        ),
+        call = NULL,
+        validation_error = validation_error,
+        free_error = free_error
+      ),
+      class = c("fastkpc_shadow_runtime_destroy_error", "error", "condition")
+    )
+    stop(condition)
+  }
+  if (!is.null(validation_error)) stop(validation_error)
+  if (!is.null(free_error)) stop(free_error)
+  info
+}
+
 fastkpc_full_cuda_phase3_run_shards <- function(
     output_dir, kind, setup_keys, target_rows, identity, route_config,
     executor, runtime_create, runtime_destroy, scope,
     shard_count = NULL, stop_after = NULL, progress_hook = NULL,
     executed_native_library_sha256 = NULL,
     canonical_setup_shards = FALSE, conditional_tests = NULL,
-    execution_snapshot = NULL) {
+    execution_snapshot = NULL, shadow_plan_identity_sha256 = NULL) {
   output_clean <- typeof(output_dir) == "character" &&
     length(output_dir) == 1L && !is.object(output_dir) &&
     is.null(attributes(output_dir)) && !is.na(output_dir) &&
@@ -7145,7 +7506,8 @@ fastkpc_full_cuda_phase3_run_shards <- function(
     target_rows = target_rows, scope = scope,
     canonical_setup_shards = canonical_setup_shards,
     conditional_tests = conditional_tests,
-    execution_snapshot = execution_snapshot, shard_count = shard_count
+    execution_snapshot = execution_snapshot, shard_count = shard_count,
+    shadow_plan_identity_sha256 = shadow_plan_identity_sha256
   )
   plan <- execution_plan$plan
   .fastkpc_full_cuda_phase3_validate_route_for_shards(
@@ -7603,7 +7965,7 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     output_dir, kind, setup_keys, target_rows, identity, route_config,
     scope, shard_count = NULL, output_path = NULL,
     canonical_setup_shards = FALSE, conditional_tests = NULL,
-    execution_snapshot = NULL) {
+    execution_snapshot = NULL, shadow_plan_identity_sha256 = NULL) {
   scope <- .fastkpc_full_cuda_phase3_scope(scope)
   contract <- .fastkpc_full_cuda_phase3_kind_contract(kind)
   execution_plan <- .fastkpc_full_cuda_phase3_resolve_execution_plan(
@@ -7611,7 +7973,8 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     target_rows = target_rows, scope = scope,
     canonical_setup_shards = canonical_setup_shards,
     conditional_tests = conditional_tests,
-    execution_snapshot = execution_snapshot, shard_count = shard_count
+    execution_snapshot = execution_snapshot, shard_count = shard_count,
+    shadow_plan_identity_sha256 = shadow_plan_identity_sha256
   )
   plan <- execution_plan$plan
   .fastkpc_full_cuda_phase3_validate_route_for_shards(

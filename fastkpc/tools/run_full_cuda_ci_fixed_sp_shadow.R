@@ -65,6 +65,7 @@ output_dir <- scalar_environment(
   )
 )
 
+local({
 started <- proc.time()[["elapsed"]]
 catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
   phase0_dir, phase1_dir, phase2_dir, data_path
@@ -74,6 +75,12 @@ execution_snapshot <-
   fastkpc_full_cuda_phase3_create_shadow_execution_snapshot(
     catalog = catalog, plan = plan, scope = scope
   )
+on.exit(
+  fastkpc_full_cuda_phase3_release_shadow_execution_snapshot(
+    execution_snapshot
+  ),
+  add = TRUE
+)
 selected <- .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
   execution_snapshot, expected_scope = scope
 )
@@ -114,7 +121,7 @@ runtime_create <- function() {
   runtime <- fixed_sp_cuda_runtime_create(device_id)
   keep <- FALSE
   on.exit({
-    if (!keep) try(fixed_sp_cuda_runtime_free(runtime), silent = TRUE)
+    if (!keep) fixed_sp_cuda_runtime_free(runtime)
   }, add = TRUE)
   fixed_sp_cuda_runtime_reserve(
     runtime, capacity$n, capacity$null_dim, capacity$target_count,
@@ -137,10 +144,13 @@ runtime_create <- function() {
 }
 
 runtime_destroy <- function(runtime) {
-  on.exit(try(fixed_sp_cuda_runtime_free(runtime), silent = TRUE), add = TRUE)
-  info <- fixed_sp_cuda_runtime_info(runtime)
-  fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
-    info, "Phase 3 shadow final runtime"
+  info <- .fastkpc_full_cuda_phase3_destroy_shadow_runtime(
+    runtime = runtime,
+    validate_fun = function(info) {
+      fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
+        info, "Phase 3 shadow final runtime"
+      )
+    }
   )
   lifecycle$runtime_after <- info
   invisible(NULL)
@@ -169,7 +179,8 @@ run <- fastkpc_full_cuda_phase3_run_shards(
   runtime_destroy = runtime_destroy,
   scope = scope,
   canonical_setup_shards = TRUE,
-  execution_snapshot = execution_snapshot
+  execution_snapshot = execution_snapshot,
+  shadow_plan_identity_sha256 = plan$plan_identity_sha256
 )
 if (!identical(run$status, "complete")) {
   stop("Phase 3 shadow shard execution stopped before completion",
@@ -185,7 +196,8 @@ merged <- fastkpc_full_cuda_phase3_merge_shards(
   route_config = route_config,
   scope = scope,
   canonical_setup_shards = TRUE,
-  execution_snapshot = execution_snapshot
+  execution_snapshot = execution_snapshot,
+  shadow_plan_identity_sha256 = plan$plan_identity_sha256
 )
 payload <- merged$payload
 summary <- fastkpc_full_cuda_phase3_validate_shadow_payload(
@@ -277,3 +289,4 @@ cat(
   length(run$reused_shard_ids), "\n"
 )
 cat("elapsed seconds:", format(elapsed_seconds, digits = 8L), "\n")
+})
