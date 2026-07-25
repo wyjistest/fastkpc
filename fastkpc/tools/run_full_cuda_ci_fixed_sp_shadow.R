@@ -71,16 +71,14 @@ catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
   phase0_dir, phase1_dir, phase2_dir, data_path
 )
 plan <- fastkpc_full_cuda_shadow_plan(catalog)
-execution_snapshot <-
-  fastkpc_full_cuda_phase3_create_shadow_execution_snapshot(
-    catalog = catalog, plan = plan, scope = scope
-  )
-on.exit(
-  fastkpc_full_cuda_phase3_release_shadow_execution_snapshot(
-    execution_snapshot
-  ),
-  add = TRUE
-)
+.fastkpc_full_cuda_phase3_with_shadow_execution_snapshot(
+  mint_fun = function() {
+    fastkpc_full_cuda_phase3_create_shadow_execution_snapshot(
+      catalog = catalog, plan = plan, scope = scope
+    )
+  },
+  release_fun = fastkpc_full_cuda_phase3_release_shadow_execution_snapshot,
+  body_fun = function(execution_snapshot) {
 selected <- .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
   execution_snapshot, expected_scope = scope
 )
@@ -289,4 +287,5 @@ cat(
   length(run$reused_shard_ids), "\n"
 )
 cat("elapsed seconds:", format(elapsed_seconds, digits = 8L), "\n")
+})
 })

@@ -131,6 +131,52 @@ assert_true(
   "runtime teardown reports success only after confirmed free"
 )
 
+lifecycle_probe <- function(label, body_error = FALSE) {
+  mint_count <- 0L
+  release_count <- 0L
+  body_count <- 0L
+  expression <- function() {
+    .fastkpc_full_cuda_phase3_with_shadow_execution_snapshot(
+      mint_fun = function() {
+        mint_count <<- mint_count + 1L
+        structure(list(label = label), class = "snapshot-token")
+      },
+      release_fun = function(token) {
+        release_count <<- release_count + 1L
+        invisible(TRUE)
+      },
+      body_fun = function(token) {
+        body_count <<- body_count + 1L
+        if (isTRUE(body_error)) stop(label, call. = FALSE)
+        label
+      }
+    )
+  }
+  if (isTRUE(body_error)) {
+    assert_error(expression(), paste(label, "propagates"), label)
+    result <- NULL
+  } else {
+    result <- expression()
+  }
+  list(
+    result = result, mint_count = mint_count,
+    release_count = release_count, body_count = body_count
+  )
+}
+for (scenario in list(
+  list(label = "success", body_error = FALSE),
+  list(label = "pure-resume", body_error = FALSE),
+  list(label = "executor-error", body_error = TRUE),
+  list(label = "destroy-error", body_error = TRUE)
+)) {
+  probe <- lifecycle_probe(scenario$label, scenario$body_error)
+  assert_true(
+    probe$mint_count == 1L && probe$body_count == 1L &&
+      probe$release_count == 1L,
+    paste("snapshot release is singular for", scenario$label)
+  )
+}
+
 assert_true(
   is.null(getOption("fastkpc.phase3.shadow_snapshot_registry.v1")) &&
     is.null(getOption(
@@ -664,6 +710,84 @@ authority_identity_info <- list(
     .fastkpc_full_cuda_phase3_named_hash(authority_gpu),
   production_identity = TRUE
 )
+aggregate_identity <- c(
+  list(
+    schema_version = "full-cuda-ci-phase3-test-input-identity-v1",
+    canonical_setup_corpus_hash =
+      fastkpc_full_cuda_census_key_set_hash(setup_a),
+    canonical_target_corpus_hash =
+      fastkpc_full_cuda_census_key_set_hash(sort(
+        authority_target_rows$residual_key_sha256, method = "radix"
+      )),
+    route_config_hash = authority_route$sha256,
+    source_commit = strrep("1", 40L)
+  ),
+  authority_gpu
+)
+aggregate_identity$sha256 <- .fastkpc_full_cuda_phase3_named_hash(
+  aggregate_identity
+)
+aggregate_dir <- tempfile("phase3-run-destroy-aggregate-")
+on.exit(unlink(aggregate_dir, recursive = TRUE, force = TRUE), add = TRUE)
+aggregate_destroy_count <- 0L
+aggregate_error <- tryCatch({
+  fastkpc_full_cuda_phase3_run_shards(
+    output_dir = aggregate_dir,
+    kind = "full_shadow",
+    setup_keys = setup_a,
+    target_rows = authority_target_rows,
+    identity = aggregate_identity,
+    route_config = authority_route,
+    executor = function(...) {
+      stop("injected executor failure", call. = FALSE)
+    },
+    runtime_create = function() new.env(parent = emptyenv()),
+    runtime_destroy = function(runtime) {
+      aggregate_destroy_count <<- aggregate_destroy_count + 1L
+      .fastkpc_full_cuda_phase3_destroy_shadow_runtime(
+        runtime,
+        info_fun = function(runtime) list(state = "open"),
+        validate_fun = function(info) {
+          stop("injected nested validation failure", call. = FALSE)
+        },
+        free_fun = function(runtime) {
+          stop("injected nested free failure", call. = FALSE)
+        }
+      )
+    },
+    scope = "iteration",
+    shard_count = 1L
+  )
+  NULL
+}, error = function(error) error)
+aggregate_sessions <- list.files(
+  file.path(aggregate_dir, "sessions"), full.names = TRUE
+)
+aggregate_session <- .fastkpc_full_cuda_phase3_read_json(
+  aggregate_sessions[[1L]], "aggregate failure session"
+)
+assert_true(
+  inherits(aggregate_error, "fastkpc_phase3_run_destroy_error") &&
+    identical(names(aggregate_error), c(
+      "message", "call", "run_error", "destroy_error"
+    )) && inherits(aggregate_error$run_error, "error") &&
+    inherits(
+      aggregate_error$destroy_error,
+      "fastkpc_shadow_runtime_destroy_error"
+    ) && grepl(
+      "injected executor failure",
+      conditionMessage(aggregate_error$run_error), fixed = TRUE
+    ) && grepl(
+      "injected nested validation failure",
+      conditionMessage(aggregate_error$destroy_error), fixed = TRUE
+    ) && grepl(
+      "injected nested free failure",
+      conditionMessage(aggregate_error$destroy_error), fixed = TRUE
+    ) && aggregate_destroy_count == 1L &&
+    !identical(aggregate_session$status, "complete") &&
+    as.integer(aggregate_session$runtime_context_destroy_count) == 0L,
+  "runner aggregates executor and nested destroy failures without completion"
+)
 authority_session <- list(
   schema_version = "full-cuda-ci-phase3-session-v1",
   session_id = "authoritative_shadow_fixture",
@@ -869,6 +993,19 @@ forged_setup_bytes_pair <- self_consistent_pair(
 assert_error(
   validate_authority_pair(forged_setup_bytes_pair),
   "self-consistent rehash cannot forge setup upload bytes",
+  "resource"
+)
+
+overflow_bytes_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$resource_metrics$setup_h2d_bytes <- .Machine$double.xmax
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(overflow_bytes_pair),
+  "self-consistent rehash cannot hide transfer byte overflow",
   "resource"
 )
 
@@ -1093,17 +1230,20 @@ assert_true(
   "only conditional logical rows carry the pinned dCov version field"
 )
 
-plan_shards_source <- paste(deparse(
-  body(fastkpc_full_cuda_phase3_plan_shards)
-), collapse = " ")
-snapshot_constructor_source <- paste(deparse(
-  body(.fastkpc_full_cuda_phase3_build_shadow_execution_snapshot_authority)
-), collapse = " ")
+scaled_setup_keys <- vapply(
+  paste("scaled setup", seq_len(256L)), sha, character(1L)
+)
+scaled_target_setup_keys <- rep(scaled_setup_keys, each = 16L)
+scaled_grouping <- .fastkpc_full_cuda_phase3_index_setup_targets(
+  scaled_setup_keys, scaled_target_setup_keys,
+  "scaled shadow grouping probe"
+)
 assert_true(
-  !grepl("canonical_shard_id <- vapply", plan_shards_source, fixed = TRUE) &&
-    !grepl("setup_null_dim <- vapply", snapshot_constructor_source,
-           fixed = TRUE),
-  "snapshot construction uses one target-to-setup index, not setup scans"
+  identical(scaled_grouping$index, rep(seq_len(256L), each = 16L)) &&
+    identical(scaled_grouping$first, as.integer(seq(1L, 4096L, by = 16L))) &&
+    identical(scaled_grouping$count, rep.int(16L, 256L)) &&
+    identical(scaled_grouping$work_count, 4352L),
+  "snapshot grouping work scales with targets plus setups"
 )
 
 phase0_dir <- file.path(
@@ -1178,6 +1318,94 @@ assert_true(
       snapshot_probe$authority$phase3_plan$precomputed_descriptors
     ) == 64L,
   "execution snapshot performs heavy plan/file validation exactly once"
+)
+setup_type_drift <- snapshot_probe$authority$setup_authority
+setup_type_drift$n <- as.double(setup_type_drift$n)
+assert_error(
+  .fastkpc_full_cuda_phase3_validate_shadow_setup_authority(
+    setup_type_drift,
+    snapshot_probe$authority$setup_authority_schema,
+    snapshot_probe$authority$phase3_plan$assignments
+  ),
+  "snapshot setup authority rejects integer-to-double dimensions",
+  "setup authority"
+)
+assignment_mutation <- snapshot_probe$authority$phase3_plan$assignments
+assignment_mutation$sorted_rank[[1L]] <-
+  assignment_mutation$sorted_rank[[1L]] + 1L
+assert_error(
+  .fastkpc_full_cuda_phase3_validate_shadow_assignments(
+    assignment_mutation,
+    snapshot_probe$authority$assignments_schema,
+    snapshot_probe$authority$target_rows,
+    64L
+  ),
+  "snapshot assignment authority rejects sorted-rank mutation",
+  "assignment authority"
+)
+target_type_drift <- snapshot_probe$authority$target_rows
+target_type_drift$canonical_target_rank <-
+  as.double(target_type_drift$canonical_target_rank)
+assert_error(
+  .fastkpc_full_cuda_phase3_validate_shadow_target_authority(
+    target_type_drift,
+    snapshot_probe$authority$target_schema,
+    snapshot_probe$authority$phase3_plan$assignments,
+    64L
+  ),
+  "snapshot target authority rejects equal-value integer-to-double drift",
+  "target authority"
+)
+attributed_target <- snapshot_probe$authority$target_rows
+attr(attributed_target, "hostile") <- TRUE
+assert_error(
+  .fastkpc_full_cuda_phase3_validate_shadow_target_authority(
+    attributed_target,
+    snapshot_probe$authority$target_schema,
+    snapshot_probe$authority$phase3_plan$assignments,
+    64L
+  ),
+  "snapshot target authority rejects frame attributes",
+  "target authority"
+)
+renamed_assignments <- snapshot_probe$authority$phase3_plan$assignments
+rownames(renamed_assignments) <- paste0("hostile-", seq_len(
+  nrow(renamed_assignments)
+))
+assert_error(
+  .fastkpc_full_cuda_phase3_validate_shadow_assignments(
+    renamed_assignments,
+    snapshot_probe$authority$assignments_schema,
+    snapshot_probe$authority$target_rows,
+    64L
+  ),
+  "snapshot assignment authority rejects hostile row names",
+  "assignment authority"
+)
+overflow_setup <- snapshot_probe$authority$setup_authority
+overflow_setup$n[[1L]] <- .Machine$integer.max
+assert_error(
+  .fastkpc_full_cuda_phase3_validate_shadow_setup_authority(
+    overflow_setup,
+    snapshot_probe$authority$setup_authority_schema,
+    snapshot_probe$authority$phase3_plan$assignments
+  ),
+  "snapshot setup authority rejects count/byte overflow dimensions",
+  "setup authority"
+)
+assert_true(
+  !identical(
+    .fastkpc_full_cuda_phase3_shadow_setup_authority_schema(
+      setup_type_drift
+    )$sha256,
+    snapshot_probe$authority$setup_authority_schema$sha256
+  ) && !identical(
+    .fastkpc_full_cuda_phase3_shadow_target_authority_schema(
+      target_type_drift
+    )$sha256,
+    snapshot_probe$authority$target_schema$sha256
+  ),
+  "snapshot exact frame identities bind column typeof independently"
 )
 catalog_authority <- fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
 snapshot_identity_binding <- c(
