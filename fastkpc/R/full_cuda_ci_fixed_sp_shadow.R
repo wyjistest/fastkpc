@@ -569,6 +569,141 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
     grepl("^[0-9a-f]{64}$", value)
 }
 
+.fastkpc_full_cuda_shadow_bare_sha256_vector <- function(
+    value, expected_count) {
+  typeof(value) == "character" && length(value) == expected_count &&
+    !is.object(value) && is.null(attributes(value)) && !anyNA(value) &&
+    all(grepl("^[0-9a-f]{64}$", value))
+}
+
+.fastkpc_full_cuda_shadow_catalog_association_hashes <- function(catalog) {
+  if (!is.list(catalog) || !is.list(catalog$inputs)) {
+    stop("shadow plan catalog association inputs are malformed",
+         call. = FALSE)
+  }
+  setup_index <- catalog$setup_index
+  setup_metadata <- catalog$inputs$same_s_setup_metadata
+  target_metadata <- catalog$inputs$target_fit_metadata
+  setup_fields <- c(
+    "same_S_group_id", "prepared_s_key_sha256",
+    "phase1_setup_fingerprint"
+  )
+  setup_metadata_fields <- c("same_S_group_id", "setup_fingerprint")
+  target_metadata_fields <- c(
+    "residual_key_sha256", "target", "same_S_group_id",
+    "setup_fingerprint"
+  )
+  contract <- fastkpc_full_cuda_fixed_sp_catalog_contract()
+  setup_count <- as.integer(contract$selected_group_count)
+  target_count <- as.integer(contract$target_state_count)
+  schema_clean <- is.data.frame(setup_index) &&
+    is.data.frame(setup_metadata) && is.data.frame(target_metadata) &&
+    nrow(setup_index) == setup_count &&
+    nrow(setup_metadata) == setup_count &&
+    nrow(target_metadata) == target_count &&
+    length(setdiff(c("schema_version", setup_fields),
+                   names(setup_index))) == 0L &&
+    length(setdiff(setup_metadata_fields, names(setup_metadata))) == 0L &&
+    length(setdiff(target_metadata_fields, names(target_metadata))) == 0L &&
+    all(setup_index$schema_version ==
+          "full-cuda-ci-prepared-s-setup-v1")
+  if (!isTRUE(schema_clean)) {
+    stop("shadow plan catalog association schemas are malformed",
+         call. = FALSE)
+  }
+
+  setup_records <- setup_index[, setup_fields, drop = FALSE]
+  setup_sha256_clean <- all(vapply(setup_records, function(value) {
+    .fastkpc_full_cuda_shadow_bare_sha256_vector(value, setup_count)
+  }, logical(1L))) &&
+    .fastkpc_full_cuda_shadow_bare_sha256_vector(
+      setup_metadata$same_S_group_id, setup_count
+    ) && .fastkpc_full_cuda_shadow_bare_sha256_vector(
+      setup_metadata$setup_fingerprint, setup_count
+    )
+  target_sha256_clean <- all(vapply(
+    target_metadata[c(
+      "residual_key_sha256", "same_S_group_id", "setup_fingerprint"
+    )],
+    function(value) {
+      .fastkpc_full_cuda_shadow_bare_sha256_vector(value, target_count)
+    },
+    logical(1L)
+  ))
+  target_value_clean <- typeof(target_metadata$target) == "integer" &&
+    length(target_metadata$target) == target_count &&
+    !is.object(target_metadata$target) &&
+    is.null(attributes(target_metadata$target)) &&
+    !anyNA(target_metadata$target) &&
+    all(target_metadata$target >= 1L & target_metadata$target <= 48L)
+  unique_clean <- !anyDuplicated(setup_records$same_S_group_id) &&
+    !anyDuplicated(setup_records$prepared_s_key_sha256) &&
+    !anyDuplicated(setup_metadata$same_S_group_id) &&
+    !anyDuplicated(target_metadata$residual_key_sha256)
+  if (!isTRUE(setup_sha256_clean) || !isTRUE(target_sha256_clean) ||
+      !isTRUE(target_value_clean) || !isTRUE(unique_clean)) {
+    stop("shadow plan catalog association values are malformed",
+         call. = FALSE)
+  }
+
+  setup_metadata_match <- match(
+    setup_records$same_S_group_id, setup_metadata$same_S_group_id
+  )
+  target_setup_match <- match(
+    target_metadata$same_S_group_id, setup_records$same_S_group_id
+  )
+  association_clean <- !anyNA(setup_metadata_match) &&
+    !anyNA(target_setup_match) &&
+    setequal(
+      setup_records$same_S_group_id, setup_metadata$same_S_group_id
+    ) && setequal(
+      setup_records$same_S_group_id,
+      unique(target_metadata$same_S_group_id)
+    ) && identical(
+      setup_records$phase1_setup_fingerprint,
+      setup_metadata$setup_fingerprint[setup_metadata_match]
+    ) && identical(
+      target_metadata$setup_fingerprint,
+      setup_records$phase1_setup_fingerprint[target_setup_match]
+    )
+  if (!isTRUE(association_clean)) {
+    stop("shadow plan catalog setup/target associations are inconsistent",
+         call. = FALSE)
+  }
+
+  target_records <- data.frame(
+    residual_key_sha256 = target_metadata$residual_key_sha256,
+    target = target_metadata$target,
+    same_S_group_id = target_metadata$same_S_group_id,
+    prepared_s_key_sha256 =
+      setup_records$prepared_s_key_sha256[target_setup_match],
+    phase1_setup_fingerprint = target_metadata$setup_fingerprint,
+    stringsAsFactors = FALSE
+  )
+  setup_records <- setup_records[order(
+    setup_records$prepared_s_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  target_records <- target_records[order(
+    target_records$residual_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  rownames(setup_records) <- rownames(target_records) <- NULL
+  if (!identical(names(setup_records), setup_fields) ||
+      !identical(names(target_records), c(
+        "residual_key_sha256", "target", "same_S_group_id",
+        "prepared_s_key_sha256", "phase1_setup_fingerprint"
+      )) || anyDuplicated(setup_records$prepared_s_key_sha256) ||
+      anyDuplicated(target_records$residual_key_sha256)) {
+    stop("shadow plan canonical association projections are malformed",
+         call. = FALSE)
+  }
+  list(
+    setup_association_sha256 =
+      fastkpc_full_cuda_census_frame_hash(setup_records),
+    target_association_sha256 =
+      fastkpc_full_cuda_census_frame_hash(target_records)
+  )
+}
+
 .fastkpc_full_cuda_shadow_plan_metadata_hash <- function(plan) {
   fields <- .fastkpc_full_cuda_shadow_plan_metadata_fields()
   if (!is.list(plan) || length(setdiff(fields, names(plan))) > 0L) {
@@ -597,6 +732,20 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
   if (!all(file.exists(paths)) || any(dir.exists(paths))) {
     stop("shadow plan Phase 2 file identity is unavailable", call. = FALSE)
   }
+  if (!exists("fastkpc_full_cuda_fixed_sp_sha256_file", mode = "function",
+              inherits = TRUE)) {
+    stop("shadow plan Phase 2 file hash helper is unavailable",
+         call. = FALSE)
+  }
+  actual_sha256 <- unname(vapply(
+    paths, fastkpc_full_cuda_fixed_sp_sha256_file, character(1L)
+  ))
+  expected_sha256 <- c(setup_index_sha256, target_state_sha256)
+  if (!all(vapply(
+        actual_sha256, .fastkpc_full_cuda_shadow_bare_sha256, logical(1L)
+      )) || !identical(actual_sha256, expected_sha256)) {
+    stop("shadow plan Phase 2 current file hash mismatch", call. = FALSE)
+  }
   info <- file.info(paths, extra_cols = FALSE)
   if (!is.data.frame(info) || nrow(info) != length(paths) ||
       anyNA(info$size) || anyNA(info$mtime) || anyNA(info$ctime)) {
@@ -608,7 +757,7 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
     size = as.character(info$size),
     mtime = sprintf("%.6f", as.numeric(info$mtime)),
     ctime = sprintf("%.6f", as.numeric(info$ctime)),
-    sha256 = c(setup_index_sha256, target_state_sha256),
+    sha256 = actual_sha256,
     stringsAsFactors = FALSE
   )
   rownames(records) <- NULL
@@ -669,12 +818,14 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
   lockEnvironment(token, bindings = TRUE)
 
   entry <- list(
-    schema_version = "full-cuda-ci-shadow-plan-registry-entry-v1",
+    schema_version = "full-cuda-ci-shadow-plan-registry-entry-v2",
     registered_at = as.double(Sys.time()),
     token = token,
     catalog_authority_sha256 = metadata$catalog_authority_sha256,
     catalog_lineage_sha256 = metadata$catalog_lineage_sha256,
     route_config_sha256 = metadata$route_config_sha256,
+    setup_association_sha256 = metadata$setup_association_sha256,
+    target_association_sha256 = metadata$target_association_sha256,
     plan_identity_sha256 = plan_identity_sha256,
     direct_tests_sha256 = metadata$direct_tests_sha256,
     conditional_tests_sha256 = metadata$conditional_tests_sha256,
@@ -820,7 +971,8 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
   entry_fields <- c(
     "schema_version", "registered_at", "token",
     "catalog_authority_sha256", "catalog_lineage_sha256",
-    "route_config_sha256", "plan_identity_sha256",
+    "route_config_sha256", "setup_association_sha256",
+    "target_association_sha256", "plan_identity_sha256",
     "direct_tests_sha256", "conditional_tests_sha256",
     "phase2_file_records"
   )
@@ -828,7 +980,7 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
     identical(names(entry), entry_fields) &&
     identical(
       entry$schema_version,
-      "full-cuda-ci-shadow-plan-registry-entry-v1"
+      "full-cuda-ci-shadow-plan-registry-entry-v2"
     ) && is.double(entry$registered_at) &&
     length(entry$registered_at) == 1L && is.finite(entry$registered_at) &&
     identical(entry$token, token) &&
@@ -837,6 +989,10 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
     identical(entry$catalog_lineage_sha256,
               plan$catalog_lineage_sha256) &&
     identical(entry$route_config_sha256, plan$route_config_sha256) &&
+    identical(entry$setup_association_sha256,
+              plan$setup_association_sha256) &&
+    identical(entry$target_association_sha256,
+              plan$target_association_sha256) &&
     identical(entry$plan_identity_sha256, plan$plan_identity_sha256) &&
     identical(entry$direct_tests_sha256, plan$direct_tests_sha256) &&
     identical(entry$conditional_tests_sha256,
@@ -868,6 +1024,25 @@ fastkpc_full_cuda_shadow_map_execution_units <- function(
     identical(route$approximate_backend_allowed, FALSE)
   if (!isTRUE(current_binding)) {
     stop("supplied shadow plan catalog or route binding mismatch")
+  }
+
+  current_associations <-
+    .fastkpc_full_cuda_shadow_catalog_association_hashes(catalog)
+  association_binding <- identical(
+    current_associations$setup_association_sha256,
+    plan$setup_association_sha256
+  ) && identical(
+    current_associations$setup_association_sha256,
+    entry$setup_association_sha256
+  ) && identical(
+    current_associations$target_association_sha256,
+    plan$target_association_sha256
+  ) && identical(
+    current_associations$target_association_sha256,
+    entry$target_association_sha256
+  )
+  if (!isTRUE(association_binding)) {
+    stop("supplied shadow plan catalog association identity mismatch")
   }
 
   contract <- fastkpc_full_cuda_fixed_sp_catalog_contract()

@@ -48,6 +48,50 @@ source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R")
 source("fastkpc/R/full_cuda_ci_phase3_artifacts.R")
 source("fastkpc/R/full_cuda_ci_fixed_sp_shadow.R")
 
+phase2_identity_dir <- tempfile("shadow-phase2-file-identity-")
+dir.create(phase2_identity_dir)
+phase2_identity_paths <- file.path(
+  phase2_identity_dir,
+  c("prepared_s_setup_index.csv", "target_state_index.rds")
+)
+write_fixture_bytes <- function(path, value) {
+  connection <- file(path, open = "wb")
+  on.exit(close(connection), add = TRUE)
+  writeBin(charToRaw(value), connection)
+}
+write_fixture_bytes(phase2_identity_paths[[1L]], "setup-a")
+write_fixture_bytes(phase2_identity_paths[[2L]], "target-a")
+phase2_identity_hashes <- unname(vapply(
+  phase2_identity_paths,
+  fastkpc_full_cuda_fixed_sp_sha256_file,
+  character(1L)
+))
+phase2_identity_records <- .fastkpc_full_cuda_shadow_phase2_file_records(
+  list(phase2_dir = phase2_identity_dir),
+  phase2_identity_hashes[[1L]],
+  phase2_identity_hashes[[2L]]
+)
+assert_true(
+  identical(phase2_identity_records$sha256, phase2_identity_hashes),
+  "Phase 2 file records must store hashes computed from current bytes"
+)
+target_identity_mtime <- file.info(phase2_identity_paths[[2L]])$mtime
+write_fixture_bytes(phase2_identity_paths[[2L]], "target-b")
+Sys.setFileTime(phase2_identity_paths[[2L]], target_identity_mtime)
+assert_error(
+  .fastkpc_full_cuda_shadow_phase2_file_records(
+    list(phase2_dir = phase2_identity_dir),
+    phase2_identity_hashes[[1L]],
+    phase2_identity_hashes[[2L]]
+  ),
+  "Phase 2 current file hash mismatch",
+  paste(
+    "changed Phase 2 bytes must be rejected even when expected hashes and",
+    "stable file metadata claims are reused"
+  )
+)
+unlink(phase2_identity_dir, recursive = TRUE, force = TRUE)
+
 catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
   phase0_dir = "fastkpc/artifacts/full_cuda_ci/oracle_351x48_v1",
   phase1_dir =
@@ -302,6 +346,85 @@ assert_error(
   ),
   "duplicate logical_sequence_id",
   "duplicate logical sequence IDs must fail closed"
+)
+
+assert_current_catalog_association_rejected <- function(
+    candidate_catalog, message) {
+  instrumented <- c(
+    canonical_plan = "fastkpc_full_cuda_shadow_plan",
+    authenticated_phase2 =
+      "fastkpc_full_cuda_shadow_authenticated_phase2_records",
+    phase2_capture = "fastkpc_full_cuda_fixed_sp_capture_phase2_files"
+  )
+  originals <- mget(instrumented, envir = .GlobalEnv, inherits = FALSE)
+  original_backend <- fastkpc_legacy_dcov_gamma_cpp_oracle_batch
+  forbidden_calls <- setNames(integer(length(instrumented)), names(instrumented))
+  backend_calls <- 0L
+  on.exit({
+    for (index in seq_along(instrumented)) {
+      assign(
+        instrumented[[index]], originals[[index]], envir = .GlobalEnv
+      )
+    }
+    assign(
+      "fastkpc_legacy_dcov_gamma_cpp_oracle_batch", original_backend,
+      envir = .GlobalEnv
+    )
+  }, add = TRUE)
+  for (field in names(instrumented)) {
+    local({
+      call_field <- field
+      call_name <- instrumented[[field]]
+      assign(call_name, function(...) {
+        forbidden_calls[[call_field]] <<-
+          forbidden_calls[[call_field]] + 1L
+        stop(
+          "hostile catalog validation called forbidden ", call_field,
+          call. = FALSE
+        )
+      }, envir = .GlobalEnv)
+    })
+  }
+  assign(
+    "fastkpc_legacy_dcov_gamma_cpp_oracle_batch",
+    function(...) {
+      backend_calls <<- backend_calls + 1L
+      stop("hostile catalog association reached direct-CI backend",
+           call. = FALSE)
+    },
+    envir = .GlobalEnv
+  )
+  error <- tryCatch(
+    .fastkpc_full_cuda_shadow_direct_ci_rows(candidate_catalog, plan),
+    error = identity
+  )
+  assert_true(
+    inherits(error, "error") && identical(
+      conditionMessage(error),
+      "direct-CI execution plan does not match authenticated catalog"
+    ),
+    paste0(message, " must fail at supplied-plan authentication")
+  )
+  assert_true(
+    identical(backend_calls, 0L),
+    paste0(message, " must fail before the direct-CI backend")
+  )
+  assert_true(
+    identical(forbidden_calls, setNames(
+      integer(length(instrumented)), names(instrumented)
+    )),
+    paste0(message, " must not rebuild or capture Phase 2 evidence")
+  )
+  invisible(error)
+}
+
+assert_current_catalog_association_rejected(
+  association_swap_catalog,
+  "mutated current setup-group association"
+)
+assert_current_catalog_association_rejected(
+  target_association_swap_catalog,
+  "mutated current target group/fingerprint association"
 )
 
 direct_output_dir <- tempfile("full-cuda-ci-direct-")
