@@ -2617,3 +2617,384 @@ fastkpc_full_cuda_shadow_scope <- function(catalog, plan, scope) {
     logical_tests = logical_tests
   )
 }
+
+fastkpc_full_cuda_shadow_merged_row_schema_version <- function() {
+  "full-cuda-ci-fixed-sp-shadow-merged-logical-row-v1"
+}
+
+fastkpc_full_cuda_shadow_merged_row_schema <- function() {
+  c(
+    merged_schema_version = "character", source_type = "character",
+    logical_sequence_id = "integer", source_sequence_id = "integer",
+    source_task_index = "integer", level = "integer", x = "integer",
+    y = "integer", S_key = "character", residual_key_x = "character",
+    residual_key_y = "character", prepared_s_key_sha256 = "character",
+    shard_id = "integer", reference_p_value = "double",
+    candidate_p_value = "double", absolute_p_value_difference = "double",
+    alpha = "double", reference_decision = "character",
+    candidate_decision = "character", decision_flip = "logical",
+    near_alpha = "logical", near_alpha_bucket = "character",
+    backend = "character", backend_version = "character",
+    low_rank_backend = "character", backend_error = "logical",
+    spectra_fallback = "logical", planned_route_x = "character",
+    executed_route_x = "character", reroute_reason_x = "character",
+    solver_status_x = "character", planned_route_y = "character",
+    executed_route_y = "character", reroute_reason_y = "character",
+    solver_status_y = "character"
+  )
+}
+
+.fastkpc_full_cuda_shadow_validate_direct_subset_rows <- function(rows) {
+  schema <- if (exists("fastkpc_full_cuda_phase3_direct_ci_row_schema",
+                       mode = "function", inherits = TRUE)) {
+    fastkpc_full_cuda_phase3_direct_ci_row_schema()
+  } else {
+    c(
+      logical_sequence_id = "integer", source_sequence_id = "integer",
+      source_task_index = "integer", level = "integer", x = "integer",
+      y = "integer", S_key = "character", residual_key_x = "character",
+      residual_key_y = "character", reference_p_value = "double",
+      candidate_p_value = "double", absolute_p_value_difference = "double",
+      alpha = "double", reference_decision = "character",
+      candidate_decision = "character", decision_flip = "logical",
+      backend = "character", low_rank_backend = "character",
+      backend_error = "logical", spectra_fallback = "logical"
+    )
+  }
+  schema_clean <- is.data.frame(rows) && nrow(rows) > 0L &&
+    identical(names(rows), names(schema)) && all(vapply(
+      names(schema), function(field) {
+        column <- rows[[field]]
+        typeof(column) == schema[[field]] && !is.object(column) &&
+          is.null(attributes(column)) && length(column) == nrow(rows) &&
+          if (field %in% c("residual_key_x", "residual_key_y")) {
+            all(is.na(column))
+          } else {
+            !anyNA(column)
+          }
+      }, logical(1L)
+    ))
+  if (!isTRUE(schema_clean)) {
+    stop("selected direct-CI rows schema or types are malformed",
+         call. = FALSE)
+  }
+  reference_decision <- ifelse(
+    rows$reference_p_value > rows$alpha, "independent", "dependent"
+  )
+  candidate_decision <- ifelse(
+    rows$candidate_p_value > rows$alpha, "independent", "dependent"
+  )
+  clean <- all(rows$level == 0L) && all(rows$S_key == "") &&
+    all(is.na(rows$residual_key_x)) && all(is.na(rows$residual_key_y)) &&
+    all(is.finite(rows$reference_p_value)) &&
+    all(is.finite(rows$candidate_p_value)) &&
+    all(rows$reference_p_value >= 0 & rows$reference_p_value <= 1) &&
+    all(rows$candidate_p_value >= 0 & rows$candidate_p_value <= 1) &&
+    identical(rows$absolute_p_value_difference,
+              abs(rows$candidate_p_value - rows$reference_p_value)) &&
+    identical(rows$reference_decision, reference_decision) &&
+    identical(rows$candidate_decision, candidate_decision) &&
+    identical(rows$decision_flip,
+              candidate_decision != reference_decision) &&
+    all(rows$backend == "legacy-cpp") &&
+    all(rows$low_rank_backend == "spectra") &&
+    !any(rows$backend_error) && !any(rows$spectra_fallback)
+  if (!isTRUE(clean)) {
+    stop("selected direct-CI canonical row contract failed", call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_shadow_merge_logical_rows <- function(
+    direct_rows, conditional_rows, expected_logical_sequence_id) {
+  .fastkpc_full_cuda_shadow_validate_direct_subset_rows(direct_rows)
+  fastkpc_full_cuda_shadow_validate_conditional_rows(
+    conditional_rows, allow_empty = TRUE
+  )
+  expected <- expected_logical_sequence_id
+  expected_clean <- typeof(expected) == "integer" && !is.object(expected) &&
+    is.null(attributes(expected)) && length(expected) > 0L &&
+    !anyNA(expected) && all(expected >= 1L) && !anyDuplicated(expected) &&
+    identical(order(expected, method = "radix"), seq_along(expected))
+  source_ids <- c(
+    direct_rows$logical_sequence_id, conditional_rows$logical_sequence_id
+  )
+  source_clean <- !anyDuplicated(source_ids) && identical(
+    sort(source_ids, method = "radix"), expected
+  )
+  if (!isTRUE(expected_clean) || !isTRUE(source_clean)) {
+    stop("merged shadow logical_sequence_id coverage is not canonical",
+         call. = FALSE)
+  }
+
+  normalize <- function(rows, source_type) {
+    count <- nrow(rows)
+    direct <- identical(source_type, "direct")
+    log_distance <- abs(log(
+      pmax(rows$reference_p_value, .Machine$double.xmin) / rows$alpha
+    ))
+    data.frame(
+      merged_schema_version = rep.int(
+        fastkpc_full_cuda_shadow_merged_row_schema_version(), count
+      ),
+      source_type = rep.int(source_type, count),
+      logical_sequence_id = as.integer(rows$logical_sequence_id),
+      source_sequence_id = as.integer(rows$source_sequence_id),
+      source_task_index = as.integer(rows$source_task_index),
+      level = as.integer(rows$level), x = as.integer(rows$x),
+      y = as.integer(rows$y), S_key = as.character(rows$S_key),
+      residual_key_x = as.character(rows$residual_key_x),
+      residual_key_y = as.character(rows$residual_key_y),
+      prepared_s_key_sha256 = if (direct) rep.int(NA_character_, count) else
+        as.character(rows$prepared_s_key_sha256),
+      shard_id = if (direct) rep.int(NA_integer_, count) else
+        as.integer(rows$shard_id),
+      reference_p_value = as.double(rows$reference_p_value),
+      candidate_p_value = as.double(rows$candidate_p_value),
+      absolute_p_value_difference =
+        as.double(abs(rows$candidate_p_value - rows$reference_p_value)),
+      alpha = as.double(rows$alpha),
+      reference_decision = ifelse(
+        rows$reference_p_value > rows$alpha, "independent", "dependent"
+      ),
+      candidate_decision = ifelse(
+        rows$candidate_p_value > rows$alpha, "independent", "dependent"
+      ),
+      decision_flip = as.logical(
+        (rows$candidate_p_value > rows$alpha) !=
+          (rows$reference_p_value > rows$alpha)
+      ),
+      near_alpha = as.logical(is.finite(log_distance) &
+                                log_distance <= log(2)),
+      near_alpha_bucket = vapply(
+        log_distance, fastkpc_full_cuda_census_near_alpha_bucket,
+        character(1L)
+      ),
+      backend = as.character(rows$backend),
+      backend_version = if (direct) rep.int(NA_character_, count) else
+        as.character(rows$backend_version),
+      low_rank_backend = as.character(rows$low_rank_backend),
+      backend_error = as.logical(rows$backend_error),
+      spectra_fallback = as.logical(rows$spectra_fallback),
+      planned_route_x = if (direct) rep.int(NA_character_, count) else
+        as.character(rows$planned_route_x),
+      executed_route_x = if (direct) rep.int(NA_character_, count) else
+        as.character(rows$executed_route_x),
+      reroute_reason_x = if (direct) rep.int(NA_character_, count) else
+        as.character(rows$reroute_reason_x),
+      solver_status_x = if (direct) rep.int(NA_character_, count) else
+        as.character(rows$solver_status_x),
+      planned_route_y = if (direct) rep.int(NA_character_, count) else
+        as.character(rows$planned_route_y),
+      executed_route_y = if (direct) rep.int(NA_character_, count) else
+        as.character(rows$executed_route_y),
+      reroute_reason_y = if (direct) rep.int(NA_character_, count) else
+        as.character(rows$reroute_reason_y),
+      solver_status_y = if (direct) rep.int(NA_character_, count) else
+        as.character(rows$solver_status_y),
+      stringsAsFactors = FALSE
+    )
+  }
+  merged <- rbind(
+    normalize(direct_rows, "direct"),
+    normalize(conditional_rows, "conditional")
+  )
+  merged <- merged[order(
+    merged$logical_sequence_id, method = "radix"
+  ), , drop = FALSE]
+  rownames(merged) <- NULL
+  schema <- fastkpc_full_cuda_shadow_merged_row_schema()
+  names_exact <- identical(names(merged), names(schema))
+  type_exact <- if (names_exact) vapply(
+    names(schema), function(field) typeof(merged[[field]]) == schema[[field]],
+    logical(1L)
+  ) else setNames(logical(), character())
+  if (!isTRUE(names_exact) || !all(type_exact) ||
+      !identical(merged$logical_sequence_id, expected)) {
+    detail <- if (!isTRUE(names_exact)) {
+      paste0(
+        "column names actual=", paste(names(merged), collapse = ","),
+        " expected=", paste(names(schema), collapse = ",")
+      )
+    } else if (!all(type_exact)) {
+      paste0("column type ", names(type_exact)[which(!type_exact)[[1L]]])
+    } else {
+      "logical_sequence_id"
+    }
+    stop("merged shadow logical row schema failed: ", detail,
+         call. = FALSE)
+  }
+  merged
+}
+
+fastkpc_full_cuda_shadow_reconstruct_target_routes <- function(
+    merged_rows, expected_target_keys = NULL,
+    expected_target_corpus_hash = NULL, require_full = FALSE) {
+  schema <- fastkpc_full_cuda_shadow_merged_row_schema()
+  frame_clean <- is.data.frame(merged_rows) && nrow(merged_rows) > 0L &&
+    identical(names(merged_rows), names(schema)) &&
+    !anyDuplicated(merged_rows$logical_sequence_id) && identical(
+      order(merged_rows$logical_sequence_id, method = "radix"),
+      seq_len(nrow(merged_rows))
+    )
+  if (!isTRUE(frame_clean)) {
+    stop("merged shadow rows are malformed for target reconstruction",
+         call. = FALSE)
+  }
+  conditional <- merged_rows$source_type == "conditional"
+  if (!any(conditional)) {
+    stop("merged shadow rows contain no conditional target evidence",
+         call. = FALSE)
+  }
+  endpoint_frame <- function(endpoint) {
+    suffix <- paste0("_", endpoint)
+    data.frame(
+      residual_key_sha256 = merged_rows[[
+        paste0("residual_key_", endpoint)
+      ]][conditional],
+      prepared_s_key_sha256 =
+        merged_rows$prepared_s_key_sha256[conditional],
+      planned_route = merged_rows[[paste0("planned_route", suffix)]][
+        conditional
+      ],
+      executed_route = merged_rows[[paste0("executed_route", suffix)]][
+        conditional
+      ],
+      reroute_reason = merged_rows[[paste0("reroute_reason", suffix)]][
+        conditional
+      ],
+      solver_status = merged_rows[[paste0("solver_status", suffix)]][
+        conditional
+      ],
+      stringsAsFactors = FALSE
+    )
+  }
+  observed <- rbind(endpoint_frame("x"), endpoint_frame("y"))
+  observed <- observed[order(
+    observed$residual_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  rownames(observed) <- NULL
+  route_fields <- setdiff(names(observed), "residual_key_sha256")
+  grouped <- split(
+    seq_len(nrow(observed)), observed$residual_key_sha256, drop = TRUE
+  )
+  conflict <- vapply(grouped, function(index) {
+    any(vapply(route_fields, function(field) {
+      length(unique(observed[[field]][index])) != 1L
+    }, logical(1L)))
+  }, logical(1L))
+  if (any(conflict)) {
+    stop("conflicting repeated target route evidence: ",
+         names(conflict)[which(conflict)[[1L]]], call. = FALSE)
+  }
+  target_routes <- observed[vapply(grouped, `[[`, integer(1L), 1L),
+                            , drop = FALSE]
+  target_routes <- target_routes[order(
+    target_routes$residual_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  rownames(target_routes) <- NULL
+  keys <- target_routes$residual_key_sha256
+  key_clean <- length(keys) > 0L && !anyNA(keys) &&
+    !anyDuplicated(keys) &&
+    all(grepl("^[0-9a-f]{64}$", keys)) && identical(
+      keys, sort(keys, method = "radix")
+    )
+  if (!isTRUE(key_clean)) {
+    stop("reconstructed target key corpus is malformed", call. = FALSE)
+  }
+  if (!is.null(expected_target_keys)) {
+    expected_clean <- typeof(expected_target_keys) == "character" &&
+      !is.object(expected_target_keys) &&
+      is.null(attributes(expected_target_keys)) &&
+      !anyNA(expected_target_keys) && !anyDuplicated(expected_target_keys) &&
+      identical(expected_target_keys,
+                sort(expected_target_keys, method = "radix"))
+    if (!isTRUE(expected_clean) || !identical(keys, expected_target_keys)) {
+      stop("reconstructed target key coverage mismatch", call. = FALSE)
+    }
+  }
+  corpus_hash <- fastkpc_full_cuda_census_key_set_hash(keys)
+  if (!is.null(expected_target_corpus_hash) &&
+      (!.fastkpc_full_cuda_shadow_bare_sha256(
+        expected_target_corpus_hash
+      ) || !identical(corpus_hash, expected_target_corpus_hash))) {
+    stop("reconstructed target corpus hash mismatch", call. = FALSE)
+  }
+  route_levels <- fastkpc_full_cuda_fixed_sp_contract()$route_levels
+  status_levels <- fastkpc_full_cuda_fixed_sp_contract()$target_status_levels
+  route_clean <- all(target_routes$planned_route %in% route_levels) &&
+    all(target_routes$executed_route %in% route_levels) &&
+    all(target_routes$solver_status %in% status_levels) &&
+    .fastkpc_full_cuda_shadow_route_reason_exact(
+      target_routes$planned_route, target_routes$executed_route,
+      target_routes$reroute_reason
+    ) && .fastkpc_full_cuda_shadow_route_status_exact(
+      target_routes$executed_route, target_routes$solver_status
+    )
+  if (!isTRUE(route_clean)) {
+    stop("reconstructed target route/status evidence is invalid",
+         call. = FALSE)
+  }
+  count_route <- function(field, route) {
+    as.integer(sum(target_routes[[field]] == route))
+  }
+  cholesky_to_svd <- as.integer(sum(
+    target_routes$planned_route == "CHOLESKY_BATCHED" &
+      target_routes$executed_route == "AUGMENTED_SVD"
+  ))
+  qr_to_svd <- as.integer(sum(
+    target_routes$planned_route == "AUGMENTED_QR" &
+      target_routes$executed_route == "AUGMENTED_SVD"
+  ))
+  stable_reroute <- as.integer(sum(
+    target_routes$planned_route != target_routes$executed_route
+  ))
+  summary <- list(
+    target_count = as.integer(nrow(target_routes)),
+    target_corpus_hash = corpus_hash,
+    planned_cholesky_target_count =
+      count_route("planned_route", "CHOLESKY_BATCHED"),
+    planned_qr_target_count = count_route("planned_route", "AUGMENTED_QR"),
+    planned_svd_target_count = count_route("planned_route", "AUGMENTED_SVD"),
+    executed_cholesky_target_count =
+      count_route("executed_route", "CHOLESKY_BATCHED"),
+    executed_qr_target_count = count_route("executed_route", "AUGMENTED_QR"),
+    executed_svd_target_count = count_route("executed_route", "AUGMENTED_SVD"),
+    cholesky_to_svd_count = cholesky_to_svd,
+    qr_to_svd_count = qr_to_svd,
+    stable_reroute_count = stable_reroute,
+    route_conservation_pass = identical(
+      stable_reroute, cholesky_to_svd + qr_to_svd
+    )
+  )
+  summary$route_conservation_pass <- isTRUE(
+    summary$route_conservation_pass &&
+      summary$executed_cholesky_target_count ==
+        summary$planned_cholesky_target_count - cholesky_to_svd &&
+      summary$executed_qr_target_count ==
+        summary$planned_qr_target_count - qr_to_svd &&
+      summary$executed_svd_target_count ==
+        summary$planned_svd_target_count + cholesky_to_svd + qr_to_svd &&
+      sum(unlist(summary[c(
+        "executed_cholesky_target_count", "executed_qr_target_count",
+        "executed_svd_target_count"
+      )], use.names = FALSE)) == summary$target_count
+  )
+  if (!isTRUE(summary$route_conservation_pass)) {
+    stop("reconstructed target route conservation failed", call. = FALSE)
+  }
+  full_clean <- typeof(require_full) == "logical" &&
+    length(require_full) == 1L && !is.object(require_full) &&
+    is.null(attributes(require_full)) && !is.na(require_full)
+  if (!isTRUE(full_clean)) {
+    stop("require_full must be one bare logical scalar", call. = FALSE)
+  }
+  if (isTRUE(require_full) && !(
+      summary$target_count == 110617L &&
+      summary$planned_cholesky_target_count == 73158L &&
+      summary$planned_qr_target_count == 4210L &&
+      summary$planned_svd_target_count == 33249L)) {
+    stop("full shadow target route corpus gates failed", call. = FALSE)
+  }
+  list(target_routes = target_routes, summary = summary)
+}

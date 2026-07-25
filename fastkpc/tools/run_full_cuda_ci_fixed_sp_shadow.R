@@ -50,6 +50,12 @@ phase2_dir <- scalar_environment(
     "fastkpc", "artifacts", "full_cuda_ci", "prepared_s_contract_v1"
   )
 )
+oracle_sp_dir <- scalar_environment(
+  "FASTKPC_FULL_CUDA_PHASE3_ORACLE_SP_DIR",
+  file.path(
+    "fastkpc", "artifacts", "full_cuda_ci", "fixed_sp_cuda_oracle_sp_v1"
+  )
+)
 data_path <- scalar_environment(
   "FASTKPC_FULL_CUDA_PHASE3_DATA",
   file.path(
@@ -264,8 +270,31 @@ if (!isTRUE(scope_gate) || !isTRUE(decision_gate)) {
   stop("Phase 3 shadow logical subset gate failed", call. = FALSE)
 }
 
+publication <- fastkpc_full_cuda_phase3_publish_shadow_artifact(
+  output_dir = output_dir,
+  catalog = catalog,
+  setup_keys = setup_keys,
+  target_rows = target_rows,
+  identity = identity,
+  route_config = route_config,
+  scope = scope,
+  phase0_dir = phase0_dir,
+  oracle_sp_dir = oracle_sp_dir,
+  canonical_setup_shards = TRUE,
+  execution_snapshot = execution_snapshot,
+  shadow_plan_identity_sha256 = plan$plan_identity_sha256,
+  command_lines = "Rscript fastkpc/tools/run_full_cuda_ci_fixed_sp_shadow.R"
+)
+if (!publication$status %in% c("published", "reused") ||
+    !isTRUE(publication$validation$authenticated) ||
+    !isTRUE(publication$validation$pass)) {
+  stop("Phase 3 shadow artifact publication/validation failed",
+       call. = FALSE)
+}
+
 elapsed_seconds <- as.double(proc.time()[["elapsed"]] - started)
 cat("Phase 3 conditional shadow shard run:", run$status, "\n")
+cat("shadow artifact:", publication$status, "\n")
 cat("scope:", scope, "\n")
 cat("setups/targets:", summary$setup_count, "/", summary$target_count, "\n")
 cat(

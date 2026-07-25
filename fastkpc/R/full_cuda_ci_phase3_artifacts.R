@@ -2583,7 +2583,7 @@ fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact <- function(
   )
 }
 
-fastkpc_validate_full_cuda_fixed_sp_shadow_artifact <- function(
+.fastkpc_full_cuda_phase3_validate_legacy_shadow_artifact <- function(
     output_dir, expected_identity = NULL, require_full = FALSE,
     catalog = NULL, device_id = NULL) {
   fastkpc_full_cuda_phase3_validate_artifact(
@@ -11524,5 +11524,853 @@ fastkpc_full_cuda_phase3_validate_direct_ci_payload <- function(
     payload = payload,
     summary = summary,
     payload_file_sha256 = payload_sha256
+  )
+}
+
+.fastkpc_full_cuda_phase3_shadow_publication_keys <- function() {
+  c(
+    "logical_ci_parity_csv", "logical_ci_parity_rds",
+    "deletion_trace_csv", "sepset_agreement_csv", "n_edgetests_csv",
+    "adjacency_rds", "first_divergence_json", "runtime_lifecycle_csv",
+    "resource_metrics_csv", "stage_timing_csv", "fallbacks_csv",
+    "failures_csv", "commands_txt", "environment_txt",
+    "input_hashes_csv", "route_config_json", "manifest_json",
+    "summary_json"
+  )
+}
+
+.fastkpc_full_cuda_phase3_shadow_oracle_sp_evidence <- function(
+    oracle_sp_dir, require_full) {
+  paths <- fastkpc_full_cuda_phase3_artifact_paths(
+    oracle_sp_dir, "oracle_sp"
+  )
+  required <- c("manifest_json", "summary_json", "target_parity_rds")
+  missing <- required[!vapply(paths[required], function(path) {
+    file.exists(path) && !dir.exists(path)
+  }, logical(1L))]
+  if (length(missing) > 0L) {
+    stop("completed oracle-sp artifact is incomplete: ",
+         paste(missing, collapse = ","), call. = FALSE)
+  }
+  manifest <- .fastkpc_full_cuda_phase3_read_json(
+    paths$manifest_json, "oracle-sp manifest.json"
+  )
+  summary <- .fastkpc_full_cuda_phase3_read_json(
+    paths$summary_json, "oracle-sp summary.json"
+  )
+  manifest_hash <- fastkpc_full_cuda_census_file_hash(paths$manifest_json)
+  clean <- is.list(manifest) && is.list(summary) &&
+    identical(manifest$artifact_kind, "oracle_sp") &&
+    identical(
+      manifest$artifact_schema_version,
+      fastkpc_full_cuda_phase3_oracle_schema_version()
+    ) && identical(summary$artifact_kind, "oracle_sp") &&
+    identical(summary$artifact_schema_version,
+              fastkpc_full_cuda_phase3_oracle_schema_version()) &&
+    isTRUE(summary$pass) &&
+    identical(summary$manifest_sha256, manifest_hash)
+  if (!isTRUE(clean)) {
+    stop("completed oracle-sp manifest/summary contract failed",
+         call. = FALSE)
+  }
+  if (isTRUE(require_full)) {
+    fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+      oracle_sp_dir, require_full = TRUE
+    )
+  }
+  target_parity <- .fastkpc_full_cuda_phase3_read_rds(
+    paths$target_parity_rds, "oracle-sp target_parity.rds"
+  )
+  fields <- c(
+    "residual_key_sha256", "planned_route", "executed_route",
+    "reroute_reason", "solver_status"
+  )
+  if (!is.data.frame(target_parity) ||
+      length(setdiff(fields, names(target_parity))) > 0L ||
+      anyDuplicated(target_parity$residual_key_sha256)) {
+    stop("completed oracle-sp target route evidence is malformed",
+         call. = FALSE)
+  }
+  target_routes <- target_parity[, fields, drop = FALSE]
+  target_routes <- target_routes[order(
+    target_routes$residual_key_sha256, method = "radix"
+  ), , drop = FALSE]
+  rownames(target_routes) <- NULL
+  list(
+    manifest = manifest, summary = summary,
+    manifest_sha256 = manifest_hash,
+    target_parity_rds_sha256 =
+      fastkpc_full_cuda_census_file_hash(paths$target_parity_rds),
+    target_routes = target_routes,
+    target_corpus_hash = fastkpc_full_cuda_census_key_set_hash(
+      target_routes$residual_key_sha256
+    )
+  )
+}
+
+.fastkpc_full_cuda_phase3_shadow_selected_direct_ids <- function(
+    direct_rows, direct_logical_sequence_id) {
+  if (is.null(direct_logical_sequence_id)) {
+    return(direct_rows$logical_sequence_id)
+  }
+  ids <- direct_logical_sequence_id
+  clean <- typeof(ids) == "integer" && !is.object(ids) &&
+    is.null(attributes(ids)) && length(ids) > 0L && !anyNA(ids) &&
+    !anyDuplicated(ids) && identical(
+      order(ids, method = "radix"), seq_along(ids)
+    )
+  if (!isTRUE(clean) || anyNA(match(ids, direct_rows$logical_sequence_id))) {
+    stop("selected direct logical_sequence_id coverage is invalid",
+         call. = FALSE)
+  }
+  ids
+}
+
+.fastkpc_full_cuda_phase3_shadow_source_hash <- function(output_dir) {
+  paths <- fastkpc_full_cuda_phase3_artifact_paths(output_dir, "full_shadow")
+  shard_files <- sort(list.files(
+    paths$shards_dir, pattern = "^shard_[0-9]+\\.(rds|summary\\.json)$",
+    full.names = TRUE
+  ), method = "radix")
+  source_files <- c(
+    paths$direct_ci_rds, paths$direct_ci_summary_json, shard_files
+  )
+  if (length(source_files) < 3L || any(!file.exists(source_files)) ||
+      any(dir.exists(source_files))) {
+    stop("shadow source artifact set is incomplete", call. = FALSE)
+  }
+  hashes <- vapply(
+    source_files, fastkpc_full_cuda_census_file_hash, character(1L)
+  )
+  names(hashes) <- c(
+    "direct_ci.rds", "direct_ci.summary.json",
+    file.path("shards", basename(shard_files))
+  )
+  .fastkpc_full_cuda_phase3_named_hash(as.list(hashes))
+}
+
+.fastkpc_full_cuda_phase3_shadow_runtime_gate <- function(
+    resources, stage_timing) {
+  if (!is.data.frame(resources) || !is.data.frame(stage_timing)) {
+    stop("shadow route/resource source evidence is malformed",
+         call. = FALSE)
+  }
+  zero_fields <- intersect(c(
+    "cpu_fallback_count", "unknown_fallback_count",
+    "approximate_backend_count", "implicit_residual_d2h_count",
+    "cuda_device_synchronize_count", "nonfinite_output_count"
+  ), names(resources))
+  if (length(zero_fields) == 0L || any(vapply(
+        zero_fields, function(field) {
+          anyNA(resources[[field]]) || any(resources[[field]] != 0)
+        }, logical(1L)
+      ))) {
+    stop("shadow runtime fallback/resource gate failed", call. = FALSE)
+  }
+  route_fields <- c(
+    "planned_cholesky_target_count", "planned_qr_target_count",
+    "planned_svd_target_count", "executed_cholesky_target_count",
+    "executed_qr_target_count", "executed_svd_target_count",
+    "cholesky_to_svd_count", "qr_to_svd_count", "stable_reroute_count"
+  )
+  if (length(setdiff(route_fields, names(resources))) > 0L) {
+    stop("shadow runtime route counters are incomplete", call. = FALSE)
+  }
+  totals <- setNames(vapply(route_fields, function(field) {
+    values <- resources[[field]]
+    if (!is.numeric(values) || anyNA(values) ||
+        any(!is.finite(values) | values < 0)) {
+      stop("shadow runtime route counter is malformed: ", field,
+           call. = FALSE)
+    }
+    as.integer(sum(values))
+  }, integer(1L)), route_fields)
+  conserved <- totals[["stable_reroute_count"]] ==
+    totals[["cholesky_to_svd_count"]] + totals[["qr_to_svd_count"]] &&
+    totals[["executed_cholesky_target_count"]] ==
+      totals[["planned_cholesky_target_count"]] -
+        totals[["cholesky_to_svd_count"]] &&
+    totals[["executed_qr_target_count"]] ==
+      totals[["planned_qr_target_count"]] - totals[["qr_to_svd_count"]] &&
+    totals[["executed_svd_target_count"]] ==
+      totals[["planned_svd_target_count"]] +
+        totals[["cholesky_to_svd_count"]] + totals[["qr_to_svd_count"]]
+  if (!isTRUE(conserved)) {
+    stop("shadow runtime route conservation failed", call. = FALSE)
+  }
+  as.list(totals)
+}
+
+.fastkpc_full_cuda_phase3_shadow_not_applicable_divergence <- function() {
+  value <- fastkpc_full_cuda_empty_first_divergence()
+  value$type <- "NOT_APPLICABLE"
+  value$message <- "NOT_APPLICABLE"
+  value
+}
+
+.fastkpc_full_cuda_phase3_recompute_shadow_artifact <- function(
+    output_dir, catalog, setup_keys, target_rows, identity, route_config,
+    scope, phase0_dir, oracle_sp_dir, shard_count,
+    canonical_setup_shards, conditional_tests, execution_snapshot,
+    shadow_plan_identity_sha256, direct_logical_sequence_id) {
+  require_full <- identical(scope, "full")
+  source_hash_before <- .fastkpc_full_cuda_phase3_shadow_source_hash(
+    output_dir
+  )
+  direct_validation <- fastkpc_full_cuda_phase3_validate_direct_ci_payload(
+    output_dir, catalog
+  )
+  direct_rows <- direct_validation$payload$rows
+  direct_ids <- .fastkpc_full_cuda_phase3_shadow_selected_direct_ids(
+    direct_rows, direct_logical_sequence_id
+  )
+  direct_rows <- direct_rows[match(
+    direct_ids, direct_rows$logical_sequence_id
+  ), , drop = FALSE]
+  rownames(direct_rows) <- NULL
+  merged_source <- fastkpc_full_cuda_phase3_merge_shards(
+    output_dir = output_dir, kind = "full_shadow",
+    setup_keys = setup_keys, target_rows = target_rows,
+    identity = identity, route_config = route_config, scope = scope,
+    shard_count = shard_count,
+    canonical_setup_shards = canonical_setup_shards,
+    conditional_tests = conditional_tests,
+    execution_snapshot = execution_snapshot,
+    shadow_plan_identity_sha256 = shadow_plan_identity_sha256
+  )
+  conditional_rows <- merged_source$payload$logical_ci_parity
+  fastkpc_full_cuda_shadow_validate_conditional_rows(
+    conditional_rows, allow_empty = TRUE
+  )
+  expected_ids <- sort(c(
+    direct_ids, conditional_rows$logical_sequence_id
+  ), method = "radix")
+  merged_rows <- fastkpc_full_cuda_shadow_merge_logical_rows(
+    direct_rows, conditional_rows, expected_ids
+  )
+  if (any(merged_rows$backend_error) ||
+      any(merged_rows$spectra_fallback) ||
+      any(merged_rows$decision_flip)) {
+    stop("shadow decision/backend/fallback gates failed", call. = FALSE)
+  }
+  oracle_sp <- .fastkpc_full_cuda_phase3_shadow_oracle_sp_evidence(
+    oracle_sp_dir, require_full
+  )
+  if (require_full) {
+    oracle_identity <- oracle_sp$manifest$input_identity
+    oracle_linkage <- is.list(oracle_identity) &&
+      identical(oracle_sp$manifest$input_identity_sha256, identity$sha256) &&
+      identical(oracle_identity$sha256, identity$sha256) &&
+      identical(oracle_identity$route_config_hash, route_config$sha256) &&
+      identical(
+        oracle_sp$manifest$executed_native_library_sha256,
+        merged_source$executed_native_library_sha256
+      ) && identical(
+        oracle_sp$manifest$expected_target_hash,
+        oracle_sp$target_corpus_hash
+      )
+    if (!isTRUE(oracle_linkage)) {
+      stop("full shadow oracle-sp source/native/route linkage failed",
+           call. = FALSE)
+    }
+  }
+  observed_keys <- sort(unique(c(
+    conditional_rows$residual_key_x, conditional_rows$residual_key_y
+  )), method = "radix")
+  expected_target_keys <- if (require_full) {
+    oracle_sp$target_routes$residual_key_sha256
+  } else {
+    observed_keys
+  }
+  route_evidence <- fastkpc_full_cuda_shadow_reconstruct_target_routes(
+    merged_rows, expected_target_keys,
+    fastkpc_full_cuda_census_key_set_hash(expected_target_keys),
+    require_full = require_full
+  )
+  oracle_match <- match(
+    route_evidence$target_routes$residual_key_sha256,
+    oracle_sp$target_routes$residual_key_sha256
+  )
+  route_fields <- c(
+    "planned_route", "executed_route", "reroute_reason", "solver_status"
+  )
+  route_exact <- !anyNA(oracle_match) && all(vapply(
+    route_fields, function(field) identical(
+      route_evidence$target_routes[[field]],
+      oracle_sp$target_routes[[field]][oracle_match]
+    ), logical(1L)
+  ))
+  if (!isTRUE(route_exact)) {
+    stop("shadow endpoint routes disagree with completed oracle-sp evidence",
+         call. = FALSE)
+  }
+  runtime_routes <- .fastkpc_full_cuda_phase3_shadow_runtime_gate(
+    merged_source$payload$resource_metrics,
+    merged_source$payload$stage_timing
+  )
+  if (require_full && !identical(
+        runtime_routes,
+        route_evidence$summary[names(runtime_routes)]
+      )) {
+    stop("full shadow runtime and endpoint route summaries disagree",
+         call. = FALSE)
+  }
+
+  logical_authority <- catalog$inputs$logical_tests
+  authority_match <- match(expected_ids, logical_authority$logical_sequence_id)
+  if (anyNA(authority_match)) {
+    stop("merged shadow logical rows are outside Phase 1 authority",
+         call. = FALSE)
+  }
+  replay_tests <- logical_authority[authority_match, , drop = FALSE]
+  lineage_fields <- c(
+    "source_sequence_id", "source_task_index", "level", "x", "y",
+    "S_key", "reference_p_value", "alpha", "reference_decision"
+  )
+  if (!all(vapply(lineage_fields, function(field) identical(
+        merged_rows[[field]], replay_tests[[field]]
+      ), logical(1L)))) {
+    stop("merged shadow logical rows disagree with Phase 1 authority",
+         call. = FALSE)
+  }
+  replay_tests$logical_sequence_id <- seq_len(nrow(replay_tests))
+  replay <- fastkpc_full_cuda_replay_logical_ci(
+    logical_tests = replay_tests,
+    candidate_p_value = merged_rows$candidate_p_value,
+    labels = colnames(catalog$inputs$data),
+    expected_logical_contract =
+      fastkpc_full_cuda_shadow_logical_contract(replay_tests)
+  )
+  phase0 <- fastkpc_load_full_cuda_ci_oracle(phase0_dir)
+  comparison <- fastkpc_full_cuda_compare_candidate_skeleton(
+    phase0, replay$skeleton
+  )
+  candidate_graph_gate <- isTRUE(comparison$summary$pass)
+  first_divergence <- if (candidate_graph_gate || !require_full) {
+    .fastkpc_full_cuda_phase3_shadow_not_applicable_divergence()
+  } else {
+    comparison$first_divergence
+  }
+  full_gate <- !require_full || (
+    nrow(direct_rows) == 2213L && nrow(conditional_rows) == 238276L &&
+      nrow(merged_rows) == 240489L && sum(merged_rows$near_alpha) == 1529L &&
+      sum(conditional_rows$near_alpha) == 1478L &&
+      candidate_graph_gate &&
+      comparison$summary$edge_count_candidate == 110L &&
+      comparison$summary$edge_count_reference == 110L &&
+      comparison$summary$SHD == 0L &&
+      isTRUE(comparison$summary$sepsets_identical) &&
+      isTRUE(comparison$summary$n_edgetests_identical) &&
+      isTRUE(comparison$summary$deletions_identical)
+  )
+  if (!isTRUE(full_gate)) {
+    stop("full shadow artifact gates failed", call. = FALSE)
+  }
+  source_hash_after <- .fastkpc_full_cuda_phase3_shadow_source_hash(
+    output_dir
+  )
+  if (!identical(source_hash_before, source_hash_after)) {
+    stop("shadow source artifacts changed during recomputation",
+         call. = FALSE)
+  }
+  list(
+    source_output_dir = output_dir,
+    merged_rows = merged_rows, merged_source = merged_source,
+    route_evidence = route_evidence, runtime_routes = runtime_routes,
+    oracle_sp = oracle_sp, replay = replay, comparison = comparison,
+    first_divergence = first_divergence,
+    candidate_graph_gate = candidate_graph_gate,
+    source_artifact_sha256 = source_hash_after,
+    direct_payload_sha256 = direct_validation$payload_file_sha256,
+    expected_logical_ids = expected_ids,
+    full_scope = require_full
+  )
+}
+
+.fastkpc_full_cuda_phase3_shadow_summary <- function(value, scope) {
+  graph <- value$comparison$summary
+  rows <- value$merged_rows
+  list(
+    summary_schema_version =
+      "full-cuda-ci-fixed-sp-shadow-summary-v1",
+    artifact_schema_version =
+      fastkpc_full_cuda_phase3_shadow_schema_version(),
+    artifact_kind = "full_shadow", scope = scope,
+    full_scope = value$full_scope,
+    pass = TRUE, source_artifact_sha256 = value$source_artifact_sha256,
+    direct_payload_sha256 = value$direct_payload_sha256,
+    oracle_sp_manifest_sha256 = value$oracle_sp$manifest_sha256,
+    oracle_sp_target_parity_rds_sha256 =
+      value$oracle_sp$target_parity_rds_sha256,
+    merged_schema_version =
+      fastkpc_full_cuda_shadow_merged_row_schema_version(),
+    logical_test_count = as.integer(nrow(rows)),
+    direct_logical_test_count = as.integer(sum(rows$source_type == "direct")),
+    conditional_logical_test_count =
+      as.integer(sum(rows$source_type == "conditional")),
+    near_alpha_count = as.integer(sum(rows$near_alpha)),
+    conditional_near_alpha_count = as.integer(sum(
+      rows$near_alpha & rows$source_type == "conditional"
+    )),
+    decision_flip_count = as.integer(sum(rows$decision_flip)),
+    backend_error_count = as.integer(sum(rows$backend_error)),
+    spectra_fallback_count = as.integer(sum(rows$spectra_fallback)),
+    target_count = value$route_evidence$summary$target_count,
+    target_corpus_hash = value$route_evidence$summary$target_corpus_hash,
+    cholesky_to_svd_count =
+      value$route_evidence$summary$cholesky_to_svd_count,
+    qr_to_svd_count = value$route_evidence$summary$qr_to_svd_count,
+    stable_reroute_count =
+      value$route_evidence$summary$stable_reroute_count,
+    candidate_graph_gate = value$candidate_graph_gate,
+    edge_count = as.integer(graph$edge_count_candidate),
+    oracle_edge_count = as.integer(graph$edge_count_reference),
+    SHD = as.integer(graph$SHD),
+    normalized_sepsets_identical = isTRUE(graph$sepsets_identical),
+    n_edgetests_exact = isTRUE(graph$n_edgetests_identical),
+    deletion_trace_exact = isTRUE(graph$deletions_identical),
+    first_divergence = value$first_divergence$type
+  )
+}
+
+.fastkpc_full_cuda_phase3_shadow_empty_failures <- function() {
+  data.frame(
+    type = character(), key = character(), reason = character(),
+    stringsAsFactors = FALSE
+  )
+}
+
+.fastkpc_full_cuda_phase3_shadow_fallbacks <- function(value) {
+  fallbacks <- value$comparison$fallbacks
+  if (!is.data.frame(fallbacks)) {
+    fallbacks <- data.frame(
+      type = character(), key = character(), reason = character(),
+      count = numeric(), stringsAsFactors = FALSE
+    )
+  }
+  fallbacks
+}
+
+.fastkpc_full_cuda_phase3_write_shadow_payload <- function(
+    value, staging_dir, scope, identity, route_config, command_lines) {
+  paths <- fastkpc_full_cuda_phase3_artifact_paths(
+    staging_dir, "full_shadow"
+  )
+  dir.create(staging_dir, recursive = TRUE, showWarnings = FALSE)
+  saveRDS(value$merged_rows, paths$logical_ci_parity_rds,
+          version = 2, compress = FALSE)
+  .fastkpc_full_cuda_phase3_write_csv(
+    value$merged_rows, paths$logical_ci_parity_csv
+  )
+  .fastkpc_full_cuda_phase3_write_csv(
+    value$comparison$candidate_deletions, paths$deletion_trace_csv
+  )
+  .fastkpc_full_cuda_phase3_write_csv(
+    value$comparison$sepset_agreement, paths$sepset_agreement_csv
+  )
+  .fastkpc_full_cuda_phase3_write_csv(
+    value$comparison$n_edgetests, paths$n_edgetests_csv
+  )
+  saveRDS(value$replay$skeleton$adjacency, paths$adjacency_rds,
+          version = 2, compress = FALSE)
+  .fastkpc_full_cuda_phase3_write_json_exact(
+    value$first_divergence, paths$first_divergence_json
+  )
+  lifecycle <- .fastkpc_full_cuda_phase3_oracle_runtime_lifecycle(
+    value$source_output_dir,
+    value$merged_source$shard_count
+  )
+  .fastkpc_full_cuda_phase3_write_csv(
+    lifecycle, paths$runtime_lifecycle_csv
+  )
+  .fastkpc_full_cuda_phase3_write_csv(
+    value$merged_source$payload$resource_metrics,
+    paths$resource_metrics_csv
+  )
+  .fastkpc_full_cuda_phase3_write_csv(
+    value$merged_source$payload$stage_timing, paths$stage_timing_csv
+  )
+  fallbacks <- .fastkpc_full_cuda_phase3_shadow_fallbacks(value)
+  .fastkpc_full_cuda_phase3_write_csv(fallbacks, paths$fallbacks_csv)
+  .fastkpc_full_cuda_phase3_write_csv(
+    .fastkpc_full_cuda_phase3_shadow_empty_failures(), paths$failures_csv
+  )
+  writeLines(as.character(command_lines), paths$commands_txt, useBytes = TRUE)
+  writeLines(
+    .fastkpc_full_cuda_phase3_oracle_environment_lines(identity),
+    paths$environment_txt, useBytes = TRUE
+  )
+  .fastkpc_full_cuda_phase3_write_csv(
+    .fastkpc_full_cuda_phase3_oracle_input_hashes(identity),
+    paths$input_hashes_csv
+  )
+  .fastkpc_full_cuda_phase3_write_json_exact(
+    route_config, paths$route_config_json
+  )
+  summary <- .fastkpc_full_cuda_phase3_shadow_summary(value, scope)
+  payload_keys <- setdiff(
+    .fastkpc_full_cuda_phase3_shadow_publication_keys(),
+    c("manifest_json", "summary_json")
+  )
+  file_hashes <- as.list(vapply(
+    paths[payload_keys], fastkpc_full_cuda_census_file_hash, character(1L)
+  ))
+  manifest <- list(
+    manifest_schema_version =
+      "full-cuda-ci-fixed-sp-shadow-manifest-v1",
+    artifact_schema_version =
+      fastkpc_full_cuda_phase3_shadow_schema_version(),
+    artifact_kind = "full_shadow", status = "complete", scope = scope,
+    full_scope = value$full_scope,
+    input_identity_hash = if (identical(
+      identity$schema_version,
+      "full-cuda-ci-phase3-test-input-identity-v1"
+    )) identity$sha256 else .fastkpc_full_cuda_phase3_identity_hash(identity),
+    source_commit = identity$source_commit,
+    canonical_setup_corpus_hash = identity$canonical_setup_corpus_hash,
+    canonical_target_corpus_hash = identity$canonical_target_corpus_hash,
+    route_config_hash = route_config$sha256,
+    executed_native_library_sha256 =
+      value$merged_source$executed_native_library_sha256,
+    source_artifact_sha256 = value$source_artifact_sha256,
+    oracle_sp_manifest_sha256 = value$oracle_sp$manifest_sha256,
+    oracle_sp_target_corpus_hash = value$oracle_sp$target_corpus_hash,
+    merged_logical_rows_sha256 =
+      fastkpc_full_cuda_census_frame_hash(value$merged_rows),
+    file_sha256 = file_hashes
+  )
+  .fastkpc_full_cuda_phase3_write_json_exact(manifest, paths$manifest_json)
+  summary$manifest_sha256 <-
+    fastkpc_full_cuda_census_file_hash(paths$manifest_json)
+  .fastkpc_full_cuda_phase3_write_json_exact(summary, paths$summary_json)
+  list(paths = paths, manifest = manifest, summary = summary)
+}
+
+fastkpc_full_cuda_phase3_publish_shadow_artifact <- function(
+    output_dir, catalog, setup_keys, target_rows, identity, route_config,
+    scope, phase0_dir, oracle_sp_dir, shard_count = NULL,
+    canonical_setup_shards = FALSE, conditional_tests = NULL,
+    execution_snapshot = NULL, shadow_plan_identity_sha256 = NULL,
+    direct_logical_sequence_id = NULL, command_lines = character()) {
+  scope <- .fastkpc_full_cuda_phase3_scope(scope)
+  final_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+    output_dir, "full_shadow"
+  )
+  if (file.exists(final_paths$manifest_json) &&
+      file.exists(final_paths$summary_json)) {
+    validation <- .fastkpc_full_cuda_phase3_validate_shadow_artifact_sources(
+      output_dir = output_dir, catalog = catalog,
+      setup_keys = setup_keys, target_rows = target_rows,
+      identity = identity, route_config = route_config, scope = scope,
+      phase0_dir = phase0_dir, oracle_sp_dir = oracle_sp_dir,
+      shard_count = shard_count,
+      canonical_setup_shards = canonical_setup_shards,
+      conditional_tests = conditional_tests,
+      execution_snapshot = execution_snapshot,
+      shadow_plan_identity_sha256 = shadow_plan_identity_sha256,
+      direct_logical_sequence_id = direct_logical_sequence_id,
+      require_full = identical(scope, "full")
+    )
+    return(list(status = "reused", validation = validation,
+                summary = validation$summary))
+  }
+  value <- .fastkpc_full_cuda_phase3_recompute_shadow_artifact(
+    output_dir, catalog, setup_keys, target_rows, identity, route_config,
+    scope, phase0_dir, oracle_sp_dir, shard_count,
+    canonical_setup_shards, conditional_tests, execution_snapshot,
+    shadow_plan_identity_sha256, direct_logical_sequence_id
+  )
+  staging_dir <- tempfile(
+    paste0(".", basename(output_dir), "-publish-"),
+    tmpdir = dirname(output_dir)
+  )
+  on.exit(unlink(staging_dir, recursive = TRUE, force = TRUE), add = TRUE)
+  written <- .fastkpc_full_cuda_phase3_write_shadow_payload(
+    value, staging_dir, scope, identity, route_config, command_lines
+  )
+  keys <- .fastkpc_full_cuda_phase3_shadow_publication_keys()
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  for (key in keys) {
+    if (file.exists(final_paths[[key]])) unlink(final_paths[[key]], force = TRUE)
+    if (!file.rename(written$paths[[key]], final_paths[[key]])) {
+      stop("failed to atomically publish shadow artifact file: ", key,
+           call. = FALSE)
+    }
+  }
+  validation <- .fastkpc_full_cuda_phase3_validate_shadow_artifact_sources(
+    output_dir = output_dir, catalog = catalog,
+    setup_keys = setup_keys, target_rows = target_rows,
+    identity = identity, route_config = route_config, scope = scope,
+    phase0_dir = phase0_dir, oracle_sp_dir = oracle_sp_dir,
+    shard_count = shard_count,
+    canonical_setup_shards = canonical_setup_shards,
+    conditional_tests = conditional_tests,
+    execution_snapshot = execution_snapshot,
+    shadow_plan_identity_sha256 = shadow_plan_identity_sha256,
+    direct_logical_sequence_id = direct_logical_sequence_id,
+    require_full = identical(scope, "full")
+  )
+  list(status = "published", validation = validation,
+       summary = validation$summary)
+}
+
+.fastkpc_full_cuda_phase3_validate_shadow_artifact_sources <- function(
+    output_dir, catalog, setup_keys, target_rows, identity, route_config,
+    scope, phase0_dir, oracle_sp_dir, shard_count = NULL,
+    canonical_setup_shards = FALSE, conditional_tests = NULL,
+    execution_snapshot = NULL, shadow_plan_identity_sha256 = NULL,
+    direct_logical_sequence_id = NULL, require_full = FALSE) {
+  if (typeof(require_full) != "logical" || length(require_full) != 1L ||
+      is.object(require_full) || !is.null(attributes(require_full)) ||
+      is.na(require_full)) {
+    stop("require_full must be one bare logical scalar", call. = FALSE)
+  }
+  scope <- .fastkpc_full_cuda_phase3_scope(scope)
+  if (isTRUE(require_full) && !identical(scope, "full")) {
+    stop("non-full shadow artifact cannot satisfy require_full=TRUE",
+         call. = FALSE)
+  }
+  paths <- fastkpc_full_cuda_phase3_artifact_paths(
+    output_dir, "full_shadow"
+  )
+  keys <- .fastkpc_full_cuda_phase3_shadow_publication_keys()
+  missing <- keys[!vapply(paths[keys], function(path) {
+    file.exists(path) && !dir.exists(path)
+  }, logical(1L))]
+  if (length(missing) > 0L) {
+    stop("published shadow artifact is incomplete: ",
+         paste(missing, collapse = ","), call. = FALSE)
+  }
+  manifest <- .fastkpc_full_cuda_phase3_read_json(
+    paths$manifest_json, "shadow manifest.json"
+  )
+  summary <- .fastkpc_full_cuda_phase3_read_json(
+    paths$summary_json, "shadow summary.json"
+  )
+  payload_keys <- setdiff(keys, c("manifest_json", "summary_json"))
+  preflight_hashes <- as.list(vapply(
+    paths[payload_keys], fastkpc_full_cuda_census_file_hash, character(1L)
+  ))
+  oracle_manifest_path <- fastkpc_full_cuda_phase3_artifact_paths(
+    oracle_sp_dir, "oracle_sp"
+  )$manifest_json
+  preflight_clean <- .fastkpc_full_cuda_phase3_json_tree_equal(
+    manifest$file_sha256, preflight_hashes
+  ) && identical(
+    summary$manifest_sha256,
+    fastkpc_full_cuda_census_file_hash(paths$manifest_json)
+  ) && file.exists(oracle_manifest_path) && !dir.exists(oracle_manifest_path) &&
+    identical(
+      manifest$oracle_sp_manifest_sha256,
+      fastkpc_full_cuda_census_file_hash(oracle_manifest_path)
+    )
+  if (!isTRUE(preflight_clean)) {
+    stop("published shadow completion hash preflight failed",
+         call. = FALSE)
+  }
+  expected <- .fastkpc_full_cuda_phase3_recompute_shadow_artifact(
+    output_dir, catalog, setup_keys, target_rows, identity, route_config,
+    scope, phase0_dir, oracle_sp_dir, shard_count,
+    canonical_setup_shards, conditional_tests, execution_snapshot,
+    shadow_plan_identity_sha256, direct_logical_sequence_id
+  )
+  actual_rows <- .fastkpc_full_cuda_phase3_read_rds(
+    paths$logical_ci_parity_rds, "shadow logical_ci_parity.rds"
+  )
+  if (!identical(actual_rows, expected$merged_rows)) {
+    stop("published shadow logical rows disagree with source artifacts",
+         call. = FALSE)
+  }
+  logical_csv <- .fastkpc_full_cuda_phase3_read_csv(
+    paths$logical_ci_parity_csv, "shadow logical_ci_parity.csv"
+  )
+  logical_csv_expected <- expected$merged_rows
+  for (field in names(logical_csv_expected)[vapply(
+      logical_csv_expected, typeof, character(1L)
+    ) == "character"]) {
+    logical_csv_expected[[field]][is.na(logical_csv_expected[[field]])] <-
+      "NA"
+  }
+  .fastkpc_full_cuda_phase3_coerce_csv_like(
+    logical_csv, logical_csv_expected, "shadow logical_ci_parity"
+  )
+  expected_frames <- list(
+    deletion_trace_csv = expected$comparison$candidate_deletions,
+    sepset_agreement_csv = expected$comparison$sepset_agreement,
+    n_edgetests_csv = expected$comparison$n_edgetests,
+    runtime_lifecycle_csv =
+      .fastkpc_full_cuda_phase3_oracle_runtime_lifecycle(
+        output_dir, expected$merged_source$shard_count
+      ),
+    resource_metrics_csv = expected$merged_source$payload$resource_metrics,
+    stage_timing_csv = expected$merged_source$payload$stage_timing,
+    fallbacks_csv = .fastkpc_full_cuda_phase3_shadow_fallbacks(expected),
+    failures_csv = .fastkpc_full_cuda_phase3_shadow_empty_failures(),
+    input_hashes_csv =
+      .fastkpc_full_cuda_phase3_oracle_input_hashes(identity)
+  )
+  for (key in names(expected_frames)) {
+    actual <- .fastkpc_full_cuda_phase3_read_csv(
+      paths[[key]], paste("shadow", basename(paths[[key]]))
+    )
+    .fastkpc_full_cuda_phase3_coerce_csv_like(
+      actual, expected_frames[[key]], paste("shadow", key)
+    )
+  }
+  adjacency <- .fastkpc_full_cuda_phase3_read_rds(
+    paths$adjacency_rds, "shadow adjacency.rds"
+  )
+  if (!identical(adjacency, expected$replay$skeleton$adjacency)) {
+    stop("published shadow adjacency disagrees with graph replay",
+         call. = FALSE)
+  }
+  first <- .fastkpc_full_cuda_phase3_read_json(
+    paths$first_divergence_json, "shadow first_divergence.json"
+  )
+  expected_first_path <- tempfile("shadow-first-divergence-", fileext = ".json")
+  on.exit(unlink(expected_first_path, force = TRUE), add = TRUE)
+  .fastkpc_full_cuda_phase3_write_json_exact(
+    expected$first_divergence, expected_first_path
+  )
+  expected_first <- .fastkpc_full_cuda_phase3_read_json(
+    expected_first_path, "recomputed shadow first divergence"
+  )
+  if (!.fastkpc_full_cuda_phase3_json_tree_equal(
+        first, expected_first
+      )) {
+    stop("published shadow first divergence disagrees with graph replay",
+         call. = FALSE)
+  }
+  route_file <- .fastkpc_full_cuda_phase3_read_json(
+    paths$route_config_json, "shadow route_config.json"
+  )
+  if (!.fastkpc_full_cuda_phase3_json_tree_equal(
+        route_file, route_config
+      )) {
+    stop("published shadow route configuration disagrees with invocation",
+         call. = FALSE)
+  }
+  environment_lines <- readLines(
+    paths$environment_txt, warn = FALSE, encoding = "UTF-8"
+  )
+  if (!identical(
+        environment_lines,
+        .fastkpc_full_cuda_phase3_oracle_environment_lines(identity)
+      )) {
+    stop("published shadow environment identity mismatch", call. = FALSE)
+  }
+  command_lines <- readLines(
+    paths$commands_txt, warn = FALSE, encoding = "UTF-8"
+  )
+  if (length(command_lines) == 0L || any(!nzchar(command_lines))) {
+    stop("published shadow command evidence is empty", call. = FALSE)
+  }
+  expected_summary <- .fastkpc_full_cuda_phase3_shadow_summary(
+    expected, scope
+  )
+  expected_summary$manifest_sha256 <-
+    fastkpc_full_cuda_census_file_hash(paths$manifest_json)
+  if (!.fastkpc_full_cuda_phase3_json_tree_equal(
+        summary, expected_summary
+      )) {
+    stop("published shadow summary claims disagree with recomputation",
+         call. = FALSE)
+  }
+  actual_hashes <- as.list(vapply(
+    paths[payload_keys], fastkpc_full_cuda_census_file_hash, character(1L)
+  ))
+  expected_identity_hash <- if (identical(
+    identity$schema_version,
+    "full-cuda-ci-phase3-test-input-identity-v1"
+  )) identity$sha256 else .fastkpc_full_cuda_phase3_identity_hash(identity)
+  manifest_clean <- identical(
+    manifest$manifest_schema_version,
+    "full-cuda-ci-fixed-sp-shadow-manifest-v1"
+  ) && identical(
+    manifest$artifact_schema_version,
+    fastkpc_full_cuda_phase3_shadow_schema_version()
+  ) && identical(manifest$artifact_kind, "full_shadow") &&
+    identical(manifest$status, "complete") &&
+    identical(manifest$scope, scope) &&
+    identical(manifest$full_scope, identical(scope, "full")) &&
+    identical(manifest$input_identity_hash, expected_identity_hash) &&
+    identical(manifest$source_commit, identity$source_commit) &&
+    identical(manifest$canonical_setup_corpus_hash,
+              identity$canonical_setup_corpus_hash) &&
+    identical(manifest$canonical_target_corpus_hash,
+              identity$canonical_target_corpus_hash) &&
+    identical(manifest$route_config_hash, route_config$sha256) &&
+    identical(
+      manifest$executed_native_library_sha256,
+      expected$merged_source$executed_native_library_sha256
+    ) &&
+    identical(manifest$source_artifact_sha256,
+              expected$source_artifact_sha256) &&
+    identical(manifest$oracle_sp_manifest_sha256,
+              expected$oracle_sp$manifest_sha256) &&
+    identical(manifest$oracle_sp_target_corpus_hash,
+              expected$oracle_sp$target_corpus_hash) &&
+    identical(manifest$merged_logical_rows_sha256,
+              fastkpc_full_cuda_census_frame_hash(expected$merged_rows)) &&
+    .fastkpc_full_cuda_phase3_json_tree_equal(
+      manifest$file_sha256, actual_hashes
+    )
+  if (!isTRUE(manifest_clean)) {
+    stop("published shadow manifest claims disagree with recomputation",
+         call. = FALSE)
+  }
+  list(
+    authenticated = TRUE, complete = TRUE, pass = TRUE,
+    manifest = manifest, summary = summary,
+    recomputed_graph = expected$comparison,
+    recomputed_target_routes = expected$route_evidence$target_routes
+  )
+}
+
+fastkpc_validate_full_cuda_fixed_sp_shadow_artifact <- function(
+    output_dir, expected_identity = NULL, require_full = FALSE,
+    catalog = NULL, device_id = NULL, setup_keys = NULL,
+    target_rows = NULL, identity = NULL, route_config = NULL,
+    scope = NULL, phase0_dir = NULL, oracle_sp_dir = NULL,
+    shard_count = NULL, canonical_setup_shards = FALSE,
+    conditional_tests = NULL, execution_snapshot = NULL,
+    shadow_plan_identity_sha256 = NULL,
+    direct_logical_sequence_id = NULL) {
+  task9_requested <- !is.null(setup_keys) || !is.null(target_rows) ||
+    !is.null(identity) || !is.null(route_config) || !is.null(scope) ||
+    !is.null(phase0_dir) || !is.null(oracle_sp_dir) ||
+    !is.null(execution_snapshot) ||
+    !is.null(shadow_plan_identity_sha256) ||
+    !is.null(direct_logical_sequence_id)
+  if (!isTRUE(task9_requested)) {
+    return(.fastkpc_full_cuda_phase3_validate_legacy_shadow_artifact(
+      output_dir = output_dir,
+      expected_identity = expected_identity, require_full = require_full,
+      catalog = catalog, device_id = device_id
+    ))
+  }
+  required <- list(
+    catalog = catalog, setup_keys = setup_keys, target_rows = target_rows,
+    identity = identity, route_config = route_config, scope = scope,
+    phase0_dir = phase0_dir, oracle_sp_dir = oracle_sp_dir
+  )
+  missing <- names(required)[vapply(required, is.null, logical(1L))]
+  if (length(missing) > 0L || !is.null(expected_identity) ||
+      !is.null(device_id)) {
+    stop("Task 9 shadow validator source arguments are incomplete",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_validate_shadow_artifact_sources(
+    output_dir = output_dir, catalog = catalog,
+    setup_keys = setup_keys, target_rows = target_rows,
+    identity = identity, route_config = route_config, scope = scope,
+    phase0_dir = phase0_dir, oracle_sp_dir = oracle_sp_dir,
+    shard_count = shard_count,
+    canonical_setup_shards = canonical_setup_shards,
+    conditional_tests = conditional_tests,
+    execution_snapshot = execution_snapshot,
+    shadow_plan_identity_sha256 = shadow_plan_identity_sha256,
+    direct_logical_sequence_id = direct_logical_sequence_id,
+    require_full = require_full
   )
 }
