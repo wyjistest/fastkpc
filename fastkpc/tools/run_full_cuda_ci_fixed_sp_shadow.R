@@ -70,12 +70,16 @@ catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
   phase0_dir, phase1_dir, phase2_dir, data_path
 )
 plan <- fastkpc_full_cuda_shadow_plan(catalog)
-selected <- fastkpc_full_cuda_shadow_scope(
-  catalog = catalog, plan = plan, scope = scope
+execution_snapshot <-
+  fastkpc_full_cuda_phase3_create_shadow_execution_snapshot(
+    catalog = catalog, plan = plan, scope = scope
+  )
+selected <- .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
+  execution_snapshot, expected_scope = scope
 )
 setup_keys <- selected$setup_keys
 target_rows <- selected$target_rows
-logical_tests <- selected$logical_tests
+logical_tests <- selected$logical_rows
 route_config <- fastkpc_full_cuda_phase3_route_config()
 identity <- fastkpc_full_cuda_phase3_input_identity(catalog, device_id)
 capacity <- fastkpc_full_cuda_fixed_sp_contract()$canonical_capacities
@@ -133,28 +137,23 @@ runtime_create <- function() {
 }
 
 runtime_destroy <- function(runtime) {
+  on.exit(try(fixed_sp_cuda_runtime_free(runtime), silent = TRUE), add = TRUE)
   info <- fixed_sp_cuda_runtime_info(runtime)
   fastkpc_full_cuda_fixed_sp_phase3c_validate_runtime_info(
     info, "Phase 3 shadow final runtime"
   )
   lifecycle$runtime_after <- info
-  fixed_sp_cuda_runtime_free(runtime)
   invisible(NULL)
 }
 
 executor <- function(context, shard_id, setup_keys, target_rows) {
-  shard_logical <- logical_tests[
-    logical_tests$shard_id == shard_id, , drop = FALSE
-  ]
-  rownames(shard_logical) <- NULL
   fastkpc_full_cuda_phase3_run_shadow_shard(
     context = context,
     shard_id = shard_id,
     setup_keys = setup_keys,
     target_rows = target_rows,
     catalog = catalog,
-    plan = plan,
-    logical_tests = shard_logical
+    execution_snapshot = execution_snapshot
   )
 }
 
@@ -170,7 +169,7 @@ run <- fastkpc_full_cuda_phase3_run_shards(
   runtime_destroy = runtime_destroy,
   scope = scope,
   canonical_setup_shards = TRUE,
-  conditional_tests = logical_tests
+  execution_snapshot = execution_snapshot
 )
 if (!identical(run$status, "complete")) {
   stop("Phase 3 shadow shard execution stopped before completion",
@@ -186,7 +185,7 @@ merged <- fastkpc_full_cuda_phase3_merge_shards(
   route_config = route_config,
   scope = scope,
   canonical_setup_shards = TRUE,
-  conditional_tests = logical_tests
+  execution_snapshot = execution_snapshot
 )
 payload <- merged$payload
 summary <- fastkpc_full_cuda_phase3_validate_shadow_payload(
@@ -194,7 +193,8 @@ summary <- fastkpc_full_cuda_phase3_validate_shadow_payload(
   expected_setup_keys = setup_keys,
   expected_target_rows = target_rows,
   expected_logical_tests = logical_tests,
-  require_logical_authority = TRUE
+  require_logical_authority = TRUE,
+  expected_setup_rows = selected$setup_authority
 )
 rows <- payload$logical_ci_parity
 rows <- rows[order(rows$logical_sequence_id, method = "radix"), , drop = FALSE]

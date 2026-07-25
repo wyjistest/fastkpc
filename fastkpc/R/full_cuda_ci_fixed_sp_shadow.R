@@ -2445,6 +2445,12 @@ fastkpc_full_cuda_shadow_validate_conditional_rows <- function(
 }
 
 fastkpc_full_cuda_shadow_scope <- function(catalog, plan, scope) {
+  .fastkpc_full_cuda_shadow_validate_supplied_plan(catalog, plan)
+  .fastkpc_full_cuda_shadow_scope_from_validated_plan(catalog, plan, scope)
+}
+
+.fastkpc_full_cuda_shadow_scope_from_validated_plan <- function(
+    catalog, plan, scope) {
   required_helpers <- c(
     "fastkpc_full_cuda_fixed_sp_scope",
     ".fastkpc_full_cuda_phase3_oracle_descriptor_target_rows",
@@ -2458,7 +2464,6 @@ fastkpc_full_cuda_shadow_scope <- function(catalog, plan, scope) {
     stop("conditional shadow scope helpers are unavailable: ",
          paste(missing, collapse = ","), call. = FALSE)
   }
-  .fastkpc_full_cuda_shadow_validate_supplied_plan(catalog, plan)
   if (typeof(scope) != "character" || length(scope) != 1L ||
       is.object(scope) || !is.null(attributes(scope)) || is.na(scope) ||
       !scope %in% c("iteration", "qualification", "full")) {

@@ -84,6 +84,28 @@ assert_true(
   "executable shadow runner enters authenticated source identity"
 )
 
+runner_source <- readLines(shadow_runner_id, warn = FALSE)
+runtime_destroy_start <- grep(
+  "^runtime_destroy <- function\\(runtime\\)", runner_source
+)
+executor_start <- grep("^executor <- function\\(", runner_source)
+runtime_destroy_source <- runner_source[
+  runtime_destroy_start:(executor_start - 1L)
+]
+cleanup_line <- grep(
+  "on.exit.*fixed_sp_cuda_runtime_free\\(runtime\\)",
+  runtime_destroy_source
+)
+runtime_info_line <- grep(
+  "info <- fixed_sp_cuda_runtime_info\\(runtime\\)",
+  runtime_destroy_source
+)
+assert_true(
+  length(cleanup_line) == 1L && length(runtime_info_line) == 1L &&
+    cleanup_line < runtime_info_line,
+  "runtime destroy installs unconditional free before validation"
+)
+
 sha <- function(label) fastkpc_full_cuda_census_hash_utf8(label)
 setup_a <- sha("shadow setup a")
 setup_b <- sha("shadow setup b")
@@ -420,7 +442,10 @@ authority_resources <- oracle_frame_fixture("resource_metrics")
 authority_resources$prepared_s_key_sha256 <- setup_a
 authority_resources$shard_id <- 0L
 authority_resources$setup_ordinal <- 1L
+authority_resources$canonical_setup_rank <- 1L
 authority_resources$target_count <- as.integer(length(target_keys_fixture))
+authority_resources$phase2_shard_load_count <- 1L
+authority_resources$phase2_shard_authentication_count <- 1L
 for (field in c(
   "prepared_handle_create_count", "prepared_handle_destroy_count",
   "residual_token_acquire_count", "residual_token_release_count",
@@ -431,6 +456,39 @@ for (field in c(
 }
 authority_resources$shadow_materialize_target_count <-
   as.integer(length(target_keys_fixture))
+authority_resources$setup_h2d_upload_count <- 1L
+authority_resources$setup_h2d_bytes <- 8
+authority_resources$target_batch_h2d_call_count <- 1L
+authority_resources$target_h2d_copy_count <- 2L
+authority_resources$target_h2d_bytes <- 5616
+authority_resources$rhs_device_build_count <- 1L
+authority_resources$rhs_authority <- "cuda-x0-transpose-y"
+authority_resources$full_cuda_data_plane <- TRUE
+authority_resources$coefficient_batch_finalize_call_count <- 1L
+authority_resources$fitted_batch_finalize_call_count <- 1L
+authority_resources$residual_rss_batch_finalize_call_count <- 1L
+authority_resources$per_target_output_finalize_call_count <- 1L
+authority_resources$batch_output_finalized_target_count <- 2L
+authority_resources$planned_cholesky_target_count <- 1L
+authority_resources$planned_qr_target_count <- 1L
+authority_resources$executed_cholesky_target_count <- 1L
+authority_resources$executed_qr_target_count <- 1L
+for (field in c(
+  "cholesky_factor_checkpoint_record_count",
+  "cholesky_factor_checkpoint_wait_count",
+  "cholesky_solve_checkpoint_record_count",
+  "cholesky_solve_checkpoint_wait_count",
+  "qr_checkpoint_record_count", "qr_checkpoint_wait_count"
+)) {
+  authority_resources[[field]] <- 1L
+}
+authority_resources$shadow_d2h_bytes <- 11312
+authority_resources$cusolver_deterministic_mode <- "enabled"
+authority_resources$cublas_math_mode <- "pedantic"
+authority_resources$cublas_atomics_mode <- "not_allowed"
+authority_resources$cublas_user_workspace_installed <- TRUE
+authority_resources$cublas_workspace_bytes <- 16777216
+authority_resources$cublas_workspace_alignment <- 256
 authority_stage_timing <- data.frame(
   prepared_s_key_sha256 = rep.int(setup_a, 6L),
   shard_id = rep.int(0L, 6L),
@@ -477,25 +535,74 @@ authority_target_rows <- data.frame(
   )),
   stringsAsFactors = FALSE
 )
-authority_plan <- fastkpc_full_cuda_phase3_plan_shards(
+attacker_selected_plan <- fastkpc_full_cuda_phase3_plan_shards(
   setup_keys = setup_a,
   target_rows = authority_target_rows,
   scope = "iteration",
   shard_count = 1L,
   conditional_tests = authority_logical[2:1, , drop = FALSE]
 )
+attacker_selected_descriptor <- .fastkpc_full_cuda_phase3_shard_descriptor(
+  attacker_selected_plan, 0L
+)
+assert_true(
+  identical(
+    attacker_selected_descriptor$shadow_payload_semantics,
+    "nonproduction-generic-payload-v1"
+  ) && is.null(attacker_selected_descriptor$logical_rows) &&
+    identical(attacker_selected_descriptor$logical_ids, integer()),
+  "caller conditional rows cannot promote a shard plan to production authority"
+)
+authority_schema <-
+  .fastkpc_full_cuda_phase3_shadow_logical_authority_schema(
+    authority_logical[
+      .fastkpc_full_cuda_phase3_shadow_logical_authority_fields()
+    ]
+  )
+authority_plan <- .fastkpc_full_cuda_phase3_bind_shadow_authority(
+  attacker_selected_plan, authority_logical, authority_schema
+)
 authority_descriptor <- .fastkpc_full_cuda_phase3_shard_descriptor(
   authority_plan, 0L
 )
 assert_true(
-  identical(authority_descriptor$logical_rows, authority_logical) &&
+  identical(
+    authority_descriptor$logical_rows,
+    authority_logical[
+      .fastkpc_full_cuda_phase3_shadow_logical_authority_fields()
+    ]
+  ) &&
     identical(
       authority_descriptor$logical_hash,
       .fastkpc_full_cuda_phase3_shadow_logical_authority_hash(
-        authority_logical
+        authority_logical[
+          .fastkpc_full_cuda_phase3_shadow_logical_authority_fields()
+        ]
       )
     ),
   "shadow descriptor canonicalizes and version-hashes plan conditional rows"
+)
+type_drift_logical <- authority_logical
+type_drift_logical$source_sequence_id <-
+  as.double(type_drift_logical$source_sequence_id)
+type_drift_logical <- type_drift_logical[
+  .fastkpc_full_cuda_phase3_shadow_logical_authority_fields()
+]
+assert_error(
+  .fastkpc_full_cuda_phase3_validate_shadow_logical_authority(
+    type_drift_logical, authority_schema
+  ),
+  "logical authority rejects integer-to-double type drift",
+  "schema"
+)
+assert_true(
+  !identical(
+    authority_schema$sha256,
+    .fastkpc_full_cuda_phase3_shadow_logical_authority_schema(
+      type_drift_logical
+    )$sha256
+  ),
+  "logical authority hash binds exact column types"
 )
 
 authority_route <- fastkpc_full_cuda_phase3_route_config()
@@ -666,6 +773,58 @@ assert_error(
   "stage"
 )
 
+na_setup_rank_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$resource_metrics$canonical_setup_rank <- NA_integer_
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(na_setup_rank_pair),
+  "self-consistent rehash cannot hide a missing canonical setup rank",
+  "resource"
+)
+
+forged_phase2_auth_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$resource_metrics$phase2_shard_authentication_count <- 999L
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(forged_phase2_auth_pair),
+  "self-consistent rehash cannot forge Phase 2 authentication counters",
+  "resource"
+)
+
+forged_mode_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$resource_metrics$cublas_math_mode <- "fast"
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(forged_mode_pair),
+  "self-consistent rehash cannot forge deterministic data-plane modes",
+  "resource"
+)
+
+forged_shadow_bytes_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$resource_metrics$shadow_d2h_bytes <- 11320
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(forged_shadow_bytes_pair),
+  "self-consistent rehash cannot forge shadow transfer bytes",
+  "resource"
+)
+
 missing_residual_column_pair <- self_consistent_pair(
   authority_envelope,
   function(payload) {
@@ -834,12 +993,97 @@ assert_true(
     nrow(qualification$logical_tests) == 3808L,
   "authenticated qualification shadow scope"
 )
+snapshot_probe <- local({
+  original_validate <- .fastkpc_full_cuda_shadow_validate_supplied_plan
+  validation_count <- 0L
+  assign(
+    ".fastkpc_full_cuda_shadow_validate_supplied_plan",
+    function(catalog, plan) {
+      validation_count <<- validation_count + 1L
+      original_validate(catalog, plan)
+    },
+    envir = .GlobalEnv
+  )
+  on.exit(assign(
+    ".fastkpc_full_cuda_shadow_validate_supplied_plan",
+    original_validate, envir = .GlobalEnv
+  ), add = TRUE)
+  snapshot <- fastkpc_full_cuda_phase3_create_shadow_execution_snapshot(
+    catalog, plan, "qualification"
+  )
+  authority <-
+    .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(snapshot)
+  populated <- which(vapply(
+    authority$shards, function(shard) shard$setup_count > 0L, logical(1L)
+  ))
+  for (index in head(populated, 2L)) {
+    .fastkpc_full_cuda_phase3_validate_shadow_snapshot_shard(
+      snapshot, authority$shards[[index]]
+    )
+  }
+  list(
+    snapshot = snapshot,
+    authority = authority,
+    validation_count = validation_count,
+    populated = populated
+  )
+})
+assert_true(
+  snapshot_probe$validation_count == 1L &&
+    identical(snapshot_probe$authority$scope, "qualification") &&
+    identical(
+      snapshot_probe$authority$setup_keys, qualification$setup_keys
+    ) && identical(
+      snapshot_probe$authority$target_rows, qualification$target_rows
+    ) && length(
+      snapshot_probe$authority$phase3_plan$precomputed_descriptors
+    ) == 64L,
+  "execution snapshot performs heavy plan/file validation exactly once"
+)
+tampered_snapshot_shard <-
+  snapshot_probe$authority$shards[[snapshot_probe$populated[[1L]]]]
+tampered_snapshot_shard$logical_rows$source_sequence_id[[1L]] <-
+  tampered_snapshot_shard$logical_rows$source_sequence_id[[1L]] + 1L
+assert_error(
+  .fastkpc_full_cuda_phase3_validate_shadow_snapshot_shard(
+    snapshot_probe$snapshot, tampered_snapshot_shard
+  ),
+  "tampered execution snapshot shard authority fails closed",
+  "snapshot shard"
+)
+fake_snapshot <- new.env(parent = emptyenv())
+lockEnvironment(fake_snapshot, bindings = TRUE)
+assert_error(
+  .fastkpc_full_cuda_phase3_resolve_execution_plan(
+    kind = "full_shadow",
+    identity = list(
+      schema_version = "full-cuda-ci-phase3-input-identity-v1"
+    ),
+    setup_keys = setup_a,
+    target_rows = authority_target_rows,
+    scope = "iteration",
+    canonical_setup_shards = FALSE,
+    conditional_tests = authority_logical[1:2, , drop = FALSE],
+    execution_snapshot = fake_snapshot
+  ),
+  "production identity rejects attacker-selected logical rows and snapshot",
+  "snapshot"
+)
 qualification_shards <- fastkpc_full_cuda_phase3_plan_shards(
   setup_keys = qualification$setup_keys,
   target_rows = qualification$target_rows,
   scope = "qualification",
   conditional_tests = qualification$logical_tests,
   canonical_setup_shards = TRUE
+)
+qualification_schema <-
+  .fastkpc_full_cuda_phase3_shadow_logical_authority_schema(
+    qualification$logical_tests[
+      .fastkpc_full_cuda_phase3_shadow_logical_authority_fields()
+    ]
+  )
+qualification_shards <- .fastkpc_full_cuda_phase3_bind_shadow_authority(
+  qualification_shards, qualification$logical_tests, qualification_schema
 )
 qualification_descriptor <- .fastkpc_full_cuda_phase3_shard_descriptor(
   qualification_shards, 0L
@@ -879,7 +1123,7 @@ assert_true(
 )
 qualification_expected_logical <- qualification$logical_tests[
   qualification$logical_tests$shard_id == qualification_descriptor$shard_id,
-  , drop = FALSE
+  .fastkpc_full_cuda_phase3_shadow_logical_authority_fields(), drop = FALSE
 ]
 rownames(qualification_expected_logical) <- NULL
 assert_true(
