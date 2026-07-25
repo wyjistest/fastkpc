@@ -384,6 +384,430 @@ assert_error(
   "executor resource leaks fail closed", "leaked"
 )
 
+authority_logical <- rbind(logical_fixture, logical_fixture)
+authority_logical$logical_sequence_id <- c(10L, 11L)
+authority_logical$source_sequence_id <- c(20L, 21L)
+authority_logical$source_task_index <- c(1L, 2L)
+authority_logical$shard_id <- rep.int(0L, 2L)
+rownames(authority_logical) <- NULL
+authority_base <- fastkpc_full_cuda_shadow_compute_setup_rows(
+  logical_tests = authority_logical,
+  setup_key = setup_a,
+  shard_id = 0L,
+  target_keys = target_keys_fixture,
+  residuals = residuals_fixture,
+  .dcov_batch_fun = function(...) dcov_result(pair_count = 2L),
+  .backend_scope = identity_backend_scope
+)
+authority_rows <- fastkpc_full_cuda_shadow_attach_target_routes(
+  authority_base, route_fixture, authority_logical
+)
+
+oracle_frame_fixture <- function(name, row_count = 1L) {
+  schema <- fastkpc_full_cuda_fixed_sp_oracle_row_schemas()[[name]]
+  columns <- lapply(unname(schema), function(type) switch(
+    type,
+    character = rep.int("", row_count),
+    integer = rep.int(0L, row_count),
+    double = rep.int(0, row_count),
+    logical = rep.int(FALSE, row_count),
+    fail(paste("unsupported oracle fixture type", type))
+  ))
+  names(columns) <- names(schema)
+  as.data.frame(columns, stringsAsFactors = FALSE, optional = TRUE)
+}
+authority_resources <- oracle_frame_fixture("resource_metrics")
+authority_resources$prepared_s_key_sha256 <- setup_a
+authority_resources$shard_id <- 0L
+authority_resources$setup_ordinal <- 1L
+authority_resources$target_count <- as.integer(length(target_keys_fixture))
+for (field in c(
+  "prepared_handle_create_count", "prepared_handle_destroy_count",
+  "residual_token_acquire_count", "residual_token_release_count",
+  "output_slot_acquire_count", "output_slot_release_count",
+  "shadow_materialize_call_count", "invalid_output_init_count"
+)) {
+  authority_resources[[field]] <- 1L
+}
+authority_resources$shadow_materialize_target_count <-
+  as.integer(length(target_keys_fixture))
+authority_stage_timing <- data.frame(
+  prepared_s_key_sha256 = rep.int(setup_a, 6L),
+  shard_id = rep.int(0L, 6L),
+  setup_ordinal = rep.int(1L, 6L),
+  stage = c(
+    "phase2_shard_load", "prepared_handle_create", "solve",
+    "shadow_materialize", "cmagic_oracle", "release_and_free"
+  ),
+  elapsed_ms = rep.int(0, 6L),
+  stringsAsFactors = FALSE
+)
+authority_payload <- list(
+  logical_ci_parity = authority_rows,
+  resource_metrics = authority_resources,
+  stage_timing = authority_stage_timing
+)
+
+authority_target_rows <- data.frame(
+  prepared_s_key_sha256 = rep.int(setup_a, 2L),
+  residual_key_sha256 = target_keys_fixture,
+  shard_id = rep.int(0L, 2L),
+  canonical_setup_rank = rep.int(1L, 2L),
+  canonical_target_rank = seq_len(2L),
+  phase2_shard_id = rep.int(0L, 2L),
+  target = as.integer(match(target_keys_fixture, c(key_x, key_y))),
+  null_dim = rep.int(2L, 2L),
+  condition = rep.int(1, 2L),
+  coefficient_rank = rep.int(2L, 2L),
+  planned_route = route_fixture$planned_route,
+  selected_sp_hash = unname(vapply(
+    paste("authority selected sp", seq_len(2L)), sha, character(1L)
+  )),
+  coefficient_hash = unname(vapply(
+    paste("authority coefficient", seq_len(2L)), sha, character(1L)
+  )),
+  fitted_hash = unname(vapply(
+    paste("authority fitted", seq_len(2L)), sha, character(1L)
+  )),
+  residual_hash = unname(vapply(
+    paste("authority residual", seq_len(2L)), sha, character(1L)
+  )),
+  target_fit_fingerprint = unname(vapply(
+    paste("authority target fit", seq_len(2L)), sha, character(1L)
+  )),
+  stringsAsFactors = FALSE
+)
+authority_plan <- fastkpc_full_cuda_phase3_plan_shards(
+  setup_keys = setup_a,
+  target_rows = authority_target_rows,
+  scope = "iteration",
+  shard_count = 1L,
+  conditional_tests = authority_logical[2:1, , drop = FALSE]
+)
+authority_descriptor <- .fastkpc_full_cuda_phase3_shard_descriptor(
+  authority_plan, 0L
+)
+assert_true(
+  identical(authority_descriptor$logical_rows, authority_logical) &&
+    identical(
+      authority_descriptor$logical_hash,
+      .fastkpc_full_cuda_phase3_shadow_logical_authority_hash(
+        authority_logical
+      )
+    ),
+  "shadow descriptor canonicalizes and version-hashes plan conditional rows"
+)
+
+authority_route <- fastkpc_full_cuda_phase3_route_config()
+authority_gpu <- list(
+  cuda_toolkit_version = 12040L,
+  cuda_driver_version = 55054L,
+  gpu_name = "Synthetic GPU",
+  gpu_uuid = paste0("GPU-", strrep("a", 32L)),
+  compute_capability_major = 8L,
+  compute_capability_minor = 0L,
+  compute_capability = "8.0",
+  sm_count = 108L,
+  device_id = 0L,
+  cusolver_deterministic_mode_required = "enabled",
+  cublas_math_mode_required = "pedantic",
+  cublas_atomics_mode_required = "not_allowed",
+  cublas_user_workspace_required = TRUE,
+  cublas_workspace_bytes_required = 16777216,
+  cublas_workspace_min_alignment_required = 256
+)
+authority_identity_info <- list(
+  input_identity_hash = sha("authority input identity"),
+  source_commit = strrep("1", 40L),
+  gpu_environment = authority_gpu,
+  gpu_environment_hash =
+    .fastkpc_full_cuda_phase3_named_hash(authority_gpu),
+  production_identity = TRUE
+)
+authority_session <- list(
+  schema_version = "full-cuda-ci-phase3-session-v1",
+  session_id = "authoritative_shadow_fixture",
+  input_identity_hash = authority_identity_info$input_identity_hash,
+  route_config_hash = authority_route$sha256,
+  executed_native_library_sha256 = sha("authority native library"),
+  requested_shard_ids = 0L,
+  completed_shard_ids = integer(),
+  runtime_context_create_count = 1L,
+  runtime_context_destroy_count = 0L,
+  prepared_handle_create_count = 0L,
+  prepared_handle_destroy_count = 0L,
+  residual_token_acquire_count = 0L,
+  residual_token_release_count = 0L,
+  output_slot_acquire_count = 0L,
+  output_slot_release_count = 0L,
+  target_level_stable_sync_count = 0L,
+  status = "running"
+)
+authority_contract <- .fastkpc_full_cuda_phase3_kind_contract("full_shadow")
+authority_envelope <- .fastkpc_full_cuda_phase3_build_shard_envelope(
+  contract = authority_contract,
+  descriptor = authority_descriptor,
+  session = authority_session,
+  identity_info = authority_identity_info,
+  route_config = authority_route,
+  payload = authority_payload
+)
+unauthenticated_descriptor <- authority_descriptor
+unauthenticated_descriptor$shadow_payload_semantics <-
+  "nonproduction-generic-payload-v1"
+unauthenticated_descriptor$logical_rows <- NULL
+unauthenticated_descriptor$logical_ids <- integer()
+unauthenticated_descriptor$logical_count <- 0L
+unauthenticated_descriptor$logical_hash <-
+  .fastkpc_full_cuda_phase3_shadow_generic_logical_hash()
+assert_error(
+  .fastkpc_full_cuda_phase3_build_shard_envelope(
+    contract = authority_contract,
+    descriptor = unauthenticated_descriptor,
+    session = authority_session,
+    identity_info = authority_identity_info,
+    route_config = authority_route,
+    payload = authority_payload
+  ),
+  "production full-shadow descriptors require logical authority",
+  "authority is unavailable"
+)
+
+self_consistent_pair <- function(envelope, mutate_payload) {
+  forged <- envelope
+  forged$payload <- mutate_payload(forged$payload)
+  hashes <- .fastkpc_full_cuda_phase3_payload_semantic_hashes(
+    forged$payload
+  )
+  forged$payload_semantic_hashes <- as.list(hashes)
+  forged$payload_semantic_hash <-
+    .fastkpc_full_cuda_phase3_payload_semantic_hash(hashes)
+  list(
+    envelope = forged,
+    summary = .fastkpc_full_cuda_phase3_build_shard_summary(
+      forged, sha("self-consistent hostile RDS bytes")
+    )
+  )
+}
+validate_authority_pair <- function(pair) {
+  .fastkpc_full_cuda_phase3_validate_shard_pair(
+    envelope = pair$envelope,
+    summary = pair$summary,
+    contract = authority_contract,
+    descriptor = authority_descriptor,
+    identity_info = authority_identity_info,
+    route_config = authority_route
+  )
+}
+baseline_pair <- list(
+  envelope = authority_envelope,
+  summary = .fastkpc_full_cuda_phase3_build_shard_summary(
+    authority_envelope, sha("baseline authoritative RDS bytes")
+  )
+)
+assert_true(
+  isTRUE(validate_authority_pair(baseline_pair)),
+  "authoritative full-shadow pair fixture validates before hostile mutation"
+)
+
+dropped_pair <- self_consistent_pair(authority_envelope, function(payload) {
+  payload$logical_ci_parity <-
+    payload$logical_ci_parity[-1L, , drop = FALSE]
+  rownames(payload$logical_ci_parity) <- NULL
+  payload
+})
+assert_error(
+  validate_authority_pair(dropped_pair),
+  "self-consistent rehash cannot authenticate a dropped logical row",
+  "logical"
+)
+
+balanced_resource_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    fields <- c(
+      "prepared_handle_create_count", "prepared_handle_destroy_count",
+      "residual_token_acquire_count", "residual_token_release_count",
+      "output_slot_acquire_count", "output_slot_release_count"
+    )
+    for (field in fields) payload$resource_metrics[[field]] <- 2L
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(balanced_resource_pair),
+  "self-consistent rehash cannot authenticate balanced forged resources",
+  "resource"
+)
+
+forged_resource_ordinal_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$resource_metrics$setup_ordinal <- 2L
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(forged_resource_ordinal_pair),
+  "self-consistent rehash cannot forge resource setup authority",
+  "resource"
+)
+
+forged_stage_ordinal_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$stage_timing$setup_ordinal <- rep.int(2L, 6L)
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(forged_stage_ordinal_pair),
+  "self-consistent rehash cannot forge stage setup authority",
+  "stage"
+)
+
+missing_residual_column_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$logical_ci_parity$residual_key_y <- NULL
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(missing_residual_column_pair),
+  "self-consistent rehash cannot hide a missing residual column",
+  "schema"
+)
+
+missing_residual_key_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    payload$logical_ci_parity$residual_key_y[[1L]] <-
+      sha("missing authoritative residual key")
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(missing_residual_key_pair),
+  "self-consistent rehash cannot hide a missing residual key",
+  "logical"
+)
+
+mislabelled_residual_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    rows <- payload$logical_ci_parity
+    for (field in c(
+      "residual_key", "planned_route", "executed_route", "reroute_reason",
+      "solver_status"
+    )) {
+      x_field <- paste0(field, "_x")
+      y_field <- paste0(field, "_y")
+      temporary <- rows[[x_field]]
+      rows[[x_field]] <- rows[[y_field]]
+      rows[[y_field]] <- temporary
+    }
+    temporary <- rows$x
+    rows$x <- rows$y
+    rows$y <- temporary
+    payload$logical_ci_parity <- rows
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(mislabelled_residual_pair),
+  "self-consistent rehash cannot relabel residual endpoint columns",
+  "lineage"
+)
+
+relabelled_order_pair <- self_consistent_pair(
+  authority_envelope,
+  function(payload) {
+    rows <- payload$logical_ci_parity[2:1, , drop = FALSE]
+    rows$logical_sequence_id <- authority_descriptor$logical_ids
+    rownames(rows) <- NULL
+    payload$logical_ci_parity <- rows
+    payload
+  }
+)
+assert_error(
+  validate_authority_pair(relabelled_order_pair),
+  "self-consistent rehash cannot reorder and relabel logical rows",
+  "lineage"
+)
+
+unlabelled_backend_called <- FALSE
+unlabelled_residuals <- residuals_fixture
+dimnames(unlabelled_residuals) <- NULL
+assert_error(
+  fastkpc_full_cuda_shadow_compute_setup_rows(
+    logical_fixture, setup_a, 7L, target_keys_fixture,
+    unlabelled_residuals,
+    .dcov_batch_fun = function(...) {
+      unlabelled_backend_called <<- TRUE
+      dcov_result()
+    },
+    .backend_scope = identity_backend_scope
+  ),
+  "missing residual column keys fail closed", "residual matrix/columns"
+)
+assert_true(
+  !unlabelled_backend_called,
+  "missing residual column keys fail before dCov"
+)
+mislabelled_residuals <- residuals_fixture
+colnames(mislabelled_residuals) <- rev(target_keys_fixture)
+assert_error(
+  fastkpc_full_cuda_shadow_compute_setup_rows(
+    logical_fixture, setup_a, 7L, target_keys_fixture,
+    mislabelled_residuals,
+    .dcov_batch_fun = function(...) dcov_result(),
+    .backend_scope = identity_backend_scope
+  ),
+  "reordered or mislabelled residual columns fail closed",
+  "residual matrix/columns"
+)
+
+expected_dcov_backend_version <- "legacy-dcov-gamma-cpp-v1"
+assert_true(
+  identical(
+    fastkpc_full_cuda_shadow_dcov_backend_version(),
+    expected_dcov_backend_version
+  ) && all(c("backend", "backend_version", "low_rank_backend") %in%
+            names(equal_boundary_rows)) &&
+    identical(equal_boundary_rows$backend, "cpp") &&
+    identical(
+      equal_boundary_rows$backend_version, expected_dcov_backend_version
+    ) && identical(equal_boundary_rows$low_rank_backend, "spectra"),
+  "conditional rows freeze one pinned C++ Spectra dCov backend identity"
+)
+wrong_backend_version <- equal_boundary_rows
+wrong_backend_version$backend_version <- "legacy-dcov-gamma-cpp-v0"
+assert_error(
+  fastkpc_full_cuda_shadow_validate_conditional_rows(
+    wrong_backend_version,
+    expected_logical_tests = logical_fixture,
+    expected_setup_key = setup_a,
+    expected_shard_id = 7L,
+    expected_target_rows = route_fixture
+  ),
+  "conditional validator rejects an unpinned dCov backend version",
+  "canonical row contract"
+)
+direct_backend_fields <- names(
+  fastkpc_full_cuda_phase3_direct_ci_row_schema()
+)
+conditional_backend_fields <- names(
+  fastkpc_full_cuda_shadow_conditional_row_schema()
+)
+assert_true(
+  all(c("backend", "backend_version", "low_rank_backend") %in%
+        direct_backend_fields) &&
+    all(c("backend", "backend_version", "low_rank_backend") %in%
+          conditional_backend_fields),
+  "direct and conditional logical rows share the pinned dCov version field"
+)
+
 phase0_dir <- file.path(
   "fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1"
 )
@@ -414,6 +838,7 @@ qualification_shards <- fastkpc_full_cuda_phase3_plan_shards(
   setup_keys = qualification$setup_keys,
   target_rows = qualification$target_rows,
   scope = "qualification",
+  conditional_tests = qualification$logical_tests,
   canonical_setup_shards = TRUE
 )
 qualification_descriptor <- .fastkpc_full_cuda_phase3_shard_descriptor(
@@ -451,6 +876,31 @@ assert_identical(
 assert_true(
   identical(qualification_descriptor$target_rows, qualification_projected),
   "qualification shadow descriptor frame matches catalog authority"
+)
+qualification_expected_logical <- qualification$logical_tests[
+  qualification$logical_tests$shard_id == qualification_descriptor$shard_id,
+  , drop = FALSE
+]
+rownames(qualification_expected_logical) <- NULL
+assert_true(
+  identical(
+    qualification_descriptor$shadow_payload_semantics,
+    "authoritative-logical-corpus-v1"
+  ) && identical(
+    qualification_descriptor$logical_rows, qualification_expected_logical
+  ) && identical(
+    qualification_descriptor$logical_ids,
+    qualification_expected_logical$logical_sequence_id
+  ) && identical(
+    qualification_descriptor$logical_count,
+    as.integer(nrow(qualification_expected_logical))
+  ) && identical(
+    qualification_descriptor$logical_hash,
+    .fastkpc_full_cuda_phase3_shadow_logical_authority_hash(
+      qualification_expected_logical
+    )
+  ),
+  "qualification shadow descriptor freezes exact per-shard logical authority"
 )
 
 if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS"), "1")) {
@@ -635,10 +1085,11 @@ assert_true(
   "iteration persistent runtime and no-fallback gates"
 )
 assert_true(
-  identical(rows$logical_sequence_id,
+    identical(rows$logical_sequence_id,
             iteration$logical_tests$logical_sequence_id) &&
     all(rows$prepared_s_key_sha256 %in% iteration$setup_keys) &&
-    all(rows$backend == "legacy-cpp") &&
+    all(rows$backend == "cpp") &&
+    all(rows$backend_version == expected_dcov_backend_version) &&
     all(rows$low_rank_backend == "spectra") &&
     max(rows$absolute_p_value_difference) <
       fastkpc_full_cuda_phase3_route_config()$

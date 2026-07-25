@@ -2849,9 +2849,124 @@ fastkpc_full_cuda_phase3_assign_setup_shards <- function(
   projected
 }
 
+.fastkpc_full_cuda_phase3_shadow_authoritative_semantics <- function() {
+  "authoritative-logical-corpus-v1"
+}
+
+.fastkpc_full_cuda_phase3_shadow_nonproduction_semantics <- function() {
+  "nonproduction-generic-payload-v1"
+}
+
+.fastkpc_full_cuda_phase3_shadow_logical_authority_hash <- function(rows) {
+  if (!is.data.frame(rows) ||
+      !"logical_sequence_id" %in% names(rows) ||
+      typeof(rows$logical_sequence_id) != "integer" ||
+      anyNA(rows$logical_sequence_id) ||
+      anyDuplicated(rows$logical_sequence_id) ||
+      !identical(
+        order(rows$logical_sequence_id, method = "radix"),
+        seq_len(nrow(rows))
+      )) {
+    stop("Phase 3 shadow logical authority is not canonical",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_named_hash(list(
+    schema_version =
+      "full-cuda-ci-phase3-shadow-logical-authority-hash-v1",
+    semantics = .fastkpc_full_cuda_phase3_shadow_authoritative_semantics(),
+    logical_count = as.integer(nrow(rows)),
+    logical_ids = unname(rows$logical_sequence_id),
+    canonical_rows_hash = fastkpc_full_cuda_census_frame_hash(rows)
+  ))
+}
+
+.fastkpc_full_cuda_phase3_shadow_generic_logical_hash <- function() {
+  .fastkpc_full_cuda_phase3_named_hash(list(
+    schema_version =
+      "full-cuda-ci-phase3-shadow-logical-authority-hash-v1",
+    semantics = .fastkpc_full_cuda_phase3_shadow_nonproduction_semantics(),
+    logical_count = 0L,
+    logical_ids = integer()
+  ))
+}
+
+.fastkpc_full_cuda_phase3_normalize_shadow_logical_tests <- function(
+    value, assignments, target_rows, shard_count) {
+  if (is.null(value)) return(NULL)
+  required <- c(
+    "logical_sequence_id", "source_sequence_id", "source_task_index",
+    "level", "x", "y", "S_key", "residual_key_x", "residual_key_y",
+    "prepared_s_key_x", "prepared_s_key_y", "shard_id",
+    "reference_p_value", "alpha", "reference_decision",
+    "absolute_log_distance_from_alpha"
+  )
+  clean <- is.data.frame(value) && !anyDuplicated(names(value)) &&
+    all(required %in% names(value)) &&
+    typeof(value$logical_sequence_id) == "integer" &&
+    typeof(value$shard_id) == "integer" &&
+    typeof(value$prepared_s_key_x) == "character" &&
+    typeof(value$prepared_s_key_y) == "character" &&
+    typeof(value$residual_key_x) == "character" &&
+    typeof(value$residual_key_y) == "character" &&
+    !anyNA(value[c(
+      "logical_sequence_id", "shard_id", "prepared_s_key_x",
+      "prepared_s_key_y", "residual_key_x", "residual_key_y"
+    )]) && !anyDuplicated(value$logical_sequence_id) &&
+    all(value$shard_id >= 0L & value$shard_id < shard_count) &&
+    all(grepl("^[0-9a-f]{64}$", value$prepared_s_key_x)) &&
+    all(grepl("^[0-9a-f]{64}$", value$prepared_s_key_y)) &&
+    all(grepl("^[0-9a-f]{64}$", value$residual_key_x)) &&
+    all(grepl("^[0-9a-f]{64}$", value$residual_key_y))
+  if (!isTRUE(clean)) {
+    stop("Phase 3 shadow logical authority is malformed", call. = FALSE)
+  }
+  value <- value[order(value$logical_sequence_id, method = "radix"),
+                 , drop = FALSE]
+  rownames(value) <- NULL
+
+  endpoint_x <- match(
+    value$residual_key_x, target_rows$residual_key_sha256
+  )
+  endpoint_y <- match(
+    value$residual_key_y, target_rows$residual_key_sha256
+  )
+  setup_keys <- assignments$prepared_s_key_sha256
+  expected_setup_keys <- sort(
+    unique(c(value$prepared_s_key_x, value$prepared_s_key_y)),
+    method = "radix"
+  )
+  lineage_exact <- !anyNA(endpoint_x) && !anyNA(endpoint_y) &&
+    identical(
+      value$prepared_s_key_x,
+      target_rows$prepared_s_key_sha256[endpoint_x]
+    ) && identical(
+      value$prepared_s_key_y,
+      target_rows$prepared_s_key_sha256[endpoint_y]
+    ) && identical(
+      value$prepared_s_key_x, value$prepared_s_key_y
+    ) && identical(
+      value$shard_id, target_rows$shard_id[endpoint_x]
+    ) && identical(
+      value$shard_id, target_rows$shard_id[endpoint_y]
+    ) && identical(expected_setup_keys, setup_keys)
+  if ("target" %in% names(target_rows)) {
+    lineage_exact <- lineage_exact && identical(
+      as.integer(value$x), as.integer(target_rows$target[endpoint_x])
+    ) && identical(
+      as.integer(value$y), as.integer(target_rows$target[endpoint_y])
+    )
+  }
+  if (!isTRUE(lineage_exact)) {
+    stop("Phase 3 shadow logical authority target mapping is inexact",
+         call. = FALSE)
+  }
+  rownames(value) <- NULL
+  value
+}
+
 fastkpc_full_cuda_phase3_plan_shards <- function(
     setup_keys, target_rows, scope, shard_count = NULL,
-    canonical_setup_shards = FALSE) {
+    canonical_setup_shards = FALSE, conditional_tests = NULL) {
   scope <- .fastkpc_full_cuda_phase3_scope(scope)
   shard_count <- fastkpc_full_cuda_phase3_resolve_shard_count(
     scope, shard_count
@@ -2944,10 +3059,20 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
   )
   target_rows <- target_rows[order_id, , drop = FALSE]
   rownames(target_rows) <- NULL
+  conditional_tests <-
+    .fastkpc_full_cuda_phase3_normalize_shadow_logical_tests(
+      conditional_tests, assignments, target_rows, shard_count
+    )
   list(
     assignments = assignments,
     target_rows = target_rows,
-    shard_count = shard_count
+    shard_count = shard_count,
+    shadow_payload_semantics = if (is.null(conditional_tests)) {
+      .fastkpc_full_cuda_phase3_shadow_nonproduction_semantics()
+    } else {
+      .fastkpc_full_cuda_phase3_shadow_authoritative_semantics()
+    },
+    conditional_tests = conditional_tests
   )
 }
 
@@ -3119,7 +3244,8 @@ fastkpc_full_cuda_phase3_plan_shards <- function(
     gpu_environment = gpu_environment,
     gpu_environment_hash = .fastkpc_full_cuda_phase3_named_hash(
       gpu_environment
-    )
+    ),
+    production_identity = canonical
   )
 }
 
@@ -3353,7 +3479,9 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
     "input_identity_hash", "route_config_hash",
     "executed_native_library_sha256", "expected_setup_keys",
     "expected_setup_count", "expected_setup_hash", "expected_target_keys",
-    "expected_target_count", "expected_target_hash", "source_commit",
+    "expected_target_count", "expected_target_hash",
+    "shadow_payload_semantics", "expected_logical_ids",
+    "expected_logical_count", "expected_logical_hash", "source_commit",
     "gpu_environment", "gpu_environment_hash", "payload",
     "payload_semantic_hashes", "payload_semantic_hash"
   )
@@ -3367,7 +3495,9 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
     "executed_native_library_sha256",
     "expected_setup_keys", "expected_setup_count", "expected_setup_hash",
     "expected_target_keys", "expected_target_count", "expected_target_hash",
-    "source_commit", "gpu_environment", "gpu_environment_hash",
+    "shadow_payload_semantics", "expected_logical_ids",
+    "expected_logical_count", "expected_logical_hash", "source_commit",
+    "gpu_environment", "gpu_environment_hash",
     "payload_semantic_hashes", "payload_semantic_hash", "rds_file_sha256"
   )
 }
@@ -3410,6 +3540,69 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
   ))
 }
 
+.fastkpc_full_cuda_phase3_validate_shadow_descriptor_authority <- function(
+    descriptor, require_authoritative = FALSE) {
+  semantics <- descriptor$shadow_payload_semantics
+  authoritative <- identical(
+    semantics, .fastkpc_full_cuda_phase3_shadow_authoritative_semantics()
+  )
+  generic <- identical(
+    semantics, .fastkpc_full_cuda_phase3_shadow_nonproduction_semantics()
+  )
+  required_clean <- typeof(require_authoritative) == "logical" &&
+    length(require_authoritative) == 1L && !is.object(require_authoritative) &&
+    is.null(attributes(require_authoritative)) && !is.na(require_authoritative)
+  common_clean <- isTRUE(required_clean) && (authoritative || generic) &&
+    typeof(descriptor$logical_ids) == "integer" &&
+    !is.object(descriptor$logical_ids) &&
+    is.null(attributes(descriptor$logical_ids)) &&
+    !anyNA(descriptor$logical_ids) &&
+    typeof(descriptor$logical_count) == "integer" &&
+    length(descriptor$logical_count) == 1L &&
+    !is.object(descriptor$logical_count) &&
+    is.null(attributes(descriptor$logical_count)) &&
+    !is.na(descriptor$logical_count) && descriptor$logical_count >= 0L &&
+    .fastkpc_full_cuda_phase3_sha256(descriptor$logical_hash)
+  if (!isTRUE(common_clean) || (isTRUE(require_authoritative) && !authoritative)) {
+    stop("Phase 3 production shadow logical authority is unavailable",
+         call. = FALSE)
+  }
+  if (generic) {
+    clean <- is.null(descriptor$logical_rows) &&
+      identical(descriptor$logical_ids, integer()) &&
+      identical(descriptor$logical_count, 0L) && identical(
+        descriptor$logical_hash,
+        .fastkpc_full_cuda_phase3_shadow_generic_logical_hash()
+      )
+    if (!isTRUE(clean)) {
+      stop("Phase 3 non-production shadow descriptor is malformed",
+           call. = FALSE)
+    }
+    return(invisible(FALSE))
+  }
+
+  rows <- descriptor$logical_rows
+  clean <- is.data.frame(rows) &&
+    "logical_sequence_id" %in% names(rows) &&
+    "shard_id" %in% names(rows) &&
+    typeof(rows$logical_sequence_id) == "integer" &&
+    typeof(rows$shard_id) == "integer" && !anyNA(rows$logical_sequence_id) &&
+    !anyNA(rows$shard_id) && !anyDuplicated(rows$logical_sequence_id) &&
+    identical(
+      order(rows$logical_sequence_id, method = "radix"), seq_len(nrow(rows))
+    ) && identical(rows$logical_sequence_id, descriptor$logical_ids) &&
+    identical(as.integer(nrow(rows)), descriptor$logical_count) &&
+    identical(
+      .fastkpc_full_cuda_phase3_shadow_logical_authority_hash(rows),
+      descriptor$logical_hash
+    ) && all(rows$shard_id == descriptor$shard_id)
+  if (!isTRUE(clean)) {
+    stop("Phase 3 authoritative shadow descriptor is malformed",
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
 .fastkpc_full_cuda_phase3_shard_descriptor <- function(plan, shard_id) {
   shard_id <- .fastkpc_full_cuda_phase3_whole_scalar(
     shard_id, 0L, "shard_id"
@@ -3427,7 +3620,32 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
   target_keys <- sort(
     as.character(target_rows$residual_key_sha256), method = "radix"
   )
-  list(
+  semantics <- plan$shadow_payload_semantics
+  if (is.null(semantics)) {
+    semantics <- .fastkpc_full_cuda_phase3_shadow_nonproduction_semantics()
+  }
+  authoritative <- identical(
+    semantics, .fastkpc_full_cuda_phase3_shadow_authoritative_semantics()
+  )
+  logical_rows <- if (authoritative) {
+    if (!is.data.frame(plan$conditional_tests)) {
+      stop("Phase 3 shadow plan logical authority is unavailable",
+           call. = FALSE)
+    }
+    value <- plan$conditional_tests[
+      plan$conditional_tests$shard_id == shard_id, , drop = FALSE
+    ]
+    rownames(value) <- NULL
+    value
+  } else {
+    NULL
+  }
+  logical_ids <- if (authoritative) {
+    unname(as.integer(logical_rows$logical_sequence_id))
+  } else {
+    integer()
+  }
+  descriptor <- list(
     shard_id = shard_id,
     setup_keys = unname(setup_keys),
     setup_count = as.integer(length(setup_keys)),
@@ -3435,8 +3653,19 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
     target_rows = target_rows,
     target_keys = unname(target_keys),
     target_count = as.integer(length(target_keys)),
-    target_hash = fastkpc_full_cuda_census_key_set_hash(target_keys)
+    target_hash = fastkpc_full_cuda_census_key_set_hash(target_keys),
+    shadow_payload_semantics = semantics,
+    logical_rows = logical_rows,
+    logical_ids = logical_ids,
+    logical_count = as.integer(length(logical_ids)),
+    logical_hash = if (authoritative) {
+      .fastkpc_full_cuda_phase3_shadow_logical_authority_hash(logical_rows)
+    } else {
+      .fastkpc_full_cuda_phase3_shadow_generic_logical_hash()
+    }
   )
+  .fastkpc_full_cuda_phase3_validate_shadow_descriptor_authority(descriptor)
+  descriptor
 }
 
 .fastkpc_full_cuda_phase3_shard_paths <- function(shards_dir, shard_id) {
@@ -3453,6 +3682,23 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
 
 .fastkpc_full_cuda_phase3_build_shard_envelope <- function(
     contract, descriptor, session, identity_info, route_config, payload) {
+  authoritative <- isTRUE(
+    .fastkpc_full_cuda_phase3_validate_shadow_descriptor_authority(
+      descriptor,
+      require_authoritative = identical(contract$kind, "full_shadow") &&
+        isTRUE(identity_info$production_identity)
+    )
+  )
+  if (identical(contract$kind, "full_shadow") && authoritative) {
+    fastkpc_full_cuda_phase3_validate_shadow_payload(
+      payload = payload,
+      expected_setup_keys = descriptor$setup_keys,
+      expected_target_rows = descriptor$target_rows,
+      expected_shard_id = descriptor$shard_id,
+      expected_logical_tests = descriptor$logical_rows,
+      require_logical_authority = TRUE
+    )
+  }
   semantic_hashes <- .fastkpc_full_cuda_phase3_payload_semantic_hashes(
     payload
   )
@@ -3474,6 +3720,10 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
     expected_target_keys = descriptor$target_keys,
     expected_target_count = descriptor$target_count,
     expected_target_hash = descriptor$target_hash,
+    shadow_payload_semantics = descriptor$shadow_payload_semantics,
+    expected_logical_ids = descriptor$logical_ids,
+    expected_logical_count = descriptor$logical_count,
+    expected_logical_hash = descriptor$logical_hash,
     source_commit = identity_info$source_commit,
     gpu_environment = identity_info$gpu_environment,
     gpu_environment_hash = identity_info$gpu_environment_hash,
@@ -3504,6 +3754,10 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
     expected_target_keys = envelope$expected_target_keys,
     expected_target_count = envelope$expected_target_count,
     expected_target_hash = envelope$expected_target_hash,
+    shadow_payload_semantics = envelope$shadow_payload_semantics,
+    expected_logical_ids = envelope$expected_logical_ids,
+    expected_logical_count = envelope$expected_logical_count,
+    expected_logical_hash = envelope$expected_logical_hash,
     source_commit = envelope$source_commit,
     gpu_environment = envelope$gpu_environment,
     gpu_environment_hash = envelope$gpu_environment_hash,
@@ -3528,6 +3782,13 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
 .fastkpc_full_cuda_phase3_validate_shard_pair <- function(
     envelope, summary, contract, descriptor, identity_info, route_config,
     rds_path = NULL) {
+  authoritative_shadow <- isTRUE(
+    .fastkpc_full_cuda_phase3_validate_shadow_descriptor_authority(
+      descriptor,
+      require_authoritative = identical(contract$kind, "full_shadow") &&
+        isTRUE(identity_info$production_identity)
+    )
+  )
   if (!.fastkpc_full_cuda_phase3_exact_named_list(
         envelope, .fastkpc_full_cuda_phase3_shard_payload_fields()
       ) || !.fastkpc_full_cuda_phase3_exact_named_list(
@@ -3548,6 +3809,9 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
     expected_setup_hash = descriptor$setup_hash,
     expected_target_count = descriptor$target_count,
     expected_target_hash = descriptor$target_hash,
+    shadow_payload_semantics = descriptor$shadow_payload_semantics,
+    expected_logical_count = descriptor$logical_count,
+    expected_logical_hash = descriptor$logical_hash,
     source_commit = identity_info$source_commit,
     gpu_environment_hash = identity_info$gpu_environment_hash
   )
@@ -3596,6 +3860,25 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
                    scalar_expected$expected_target_hash) &&
     identical(summary$expected_target_hash,
               scalar_expected$expected_target_hash) &&
+    identical(
+      envelope$shadow_payload_semantics,
+      scalar_expected$shadow_payload_semantics
+    ) && identical(
+      summary$shadow_payload_semantics,
+      scalar_expected$shadow_payload_semantics
+    ) && .fastkpc_full_cuda_phase3_identity_value_equal(
+      envelope$expected_logical_count,
+      scalar_expected$expected_logical_count
+    ) && .fastkpc_full_cuda_phase3_identity_value_equal(
+      summary$expected_logical_count,
+      scalar_expected$expected_logical_count
+    ) && identical(
+      envelope$expected_logical_hash,
+      scalar_expected$expected_logical_hash
+    ) && identical(
+      summary$expected_logical_hash,
+      scalar_expected$expected_logical_hash
+    ) &&
     identical(envelope$source_commit, scalar_expected$source_commit) &&
     identical(summary$source_commit, scalar_expected$source_commit) &&
     identical(envelope$gpu_environment_hash,
@@ -3621,10 +3904,20 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
     summary$expected_target_keys, "summary expected target keys",
     allow_empty = TRUE, allow_empty_list = TRUE
   )
+  logical_ids <- .fastkpc_full_cuda_phase3_integer_vector(
+    envelope$expected_logical_ids, "shard expected logical ids",
+    allow_empty = TRUE
+  )
+  summary_logical_ids <- .fastkpc_full_cuda_phase3_integer_vector(
+    summary$expected_logical_ids, "summary expected logical ids",
+    allow_empty = TRUE
+  )
   if (!identical(setup_keys, descriptor$setup_keys) ||
       !identical(summary_setup_keys, descriptor$setup_keys) ||
       !identical(target_keys, descriptor$target_keys) ||
-      !identical(summary_target_keys, descriptor$target_keys)) {
+      !identical(summary_target_keys, descriptor$target_keys) ||
+      !identical(logical_ids, descriptor$logical_ids) ||
+      !identical(summary_logical_ids, descriptor$logical_ids)) {
     stop("Phase 3 shard expected key set mismatch", call. = FALSE)
   }
   session_fields <- c(
@@ -3675,6 +3968,16 @@ fastkpc_full_cuda_phase3_session_identity_hash <- function(session) {
       envelope$payload,
       expected_setup_keys = descriptor$setup_keys,
       expected_target_rows = descriptor$target_rows
+    )
+  } else if (identical(contract$kind, "full_shadow") &&
+             authoritative_shadow) {
+    fastkpc_full_cuda_phase3_validate_shadow_payload(
+      payload = envelope$payload,
+      expected_setup_keys = descriptor$setup_keys,
+      expected_target_rows = descriptor$target_rows,
+      expected_shard_id = descriptor$shard_id,
+      expected_logical_tests = descriptor$logical_rows,
+      require_logical_authority = TRUE
     )
   }
   if (!.fastkpc_full_cuda_phase3_sha256(summary$rds_file_sha256)) {
@@ -5304,7 +5607,8 @@ fastkpc_full_cuda_phase3_run_oracle_shard <- function(
 
 fastkpc_full_cuda_phase3_validate_shadow_payload <- function(
     payload, expected_setup_keys, expected_target_rows,
-    expected_shard_id = NULL) {
+    expected_shard_id = NULL, expected_logical_tests = NULL,
+    require_logical_authority = FALSE) {
   required_helpers <- c(
     "fastkpc_full_cuda_shadow_validate_conditional_rows",
     "fastkpc_full_cuda_shadow_empty_conditional_rows",
@@ -5320,6 +5624,19 @@ fastkpc_full_cuda_phase3_validate_shadow_payload <- function(
   }
   if (!.fastkpc_full_cuda_phase3_is_shadow_payload(payload)) {
     stop("Phase 3 shadow shard payload schema is malformed",
+         call. = FALSE)
+  }
+  authority_required <- typeof(require_logical_authority) == "logical" &&
+    length(require_logical_authority) == 1L &&
+    !is.object(require_logical_authority) &&
+    is.null(attributes(require_logical_authority)) &&
+    !is.na(require_logical_authority)
+  if (!isTRUE(authority_required)) {
+    stop("require_logical_authority must be one bare logical scalar",
+         call. = FALSE)
+  }
+  if (isTRUE(require_logical_authority) && is.null(expected_logical_tests)) {
+    stop("Phase 3 production shadow logical authority is unavailable",
          call. = FALSE)
   }
   expected_setup_keys <- .fastkpc_full_cuda_phase3_key_vector(
@@ -5376,12 +5693,41 @@ fastkpc_full_cuda_phase3_validate_shadow_payload <- function(
     }
   }
 
+  if (!is.null(expected_logical_tests)) {
+    required_logical <- c(
+      "logical_sequence_id", "prepared_s_key_x", "prepared_s_key_y",
+      "shard_id", "residual_key_x", "residual_key_y"
+    )
+    logical_clean <- is.data.frame(expected_logical_tests) &&
+      all(required_logical %in% names(expected_logical_tests)) &&
+      !anyDuplicated(names(expected_logical_tests)) &&
+      typeof(expected_logical_tests$logical_sequence_id) == "integer" &&
+      !anyNA(expected_logical_tests$logical_sequence_id) &&
+      !anyDuplicated(expected_logical_tests$logical_sequence_id) &&
+      identical(
+        order(expected_logical_tests$logical_sequence_id, method = "radix"),
+        seq_len(nrow(expected_logical_tests))
+      )
+    if (!isTRUE(logical_clean)) {
+      stop("Phase 3 shadow expected logical authority is malformed",
+           call. = FALSE)
+    }
+  }
+
   rows <- payload$logical_ci_parity
   fastkpc_full_cuda_shadow_validate_conditional_rows(
     rows,
+    expected_logical_tests = expected_logical_tests,
     expected_shard_id = expected_shard_id,
     allow_empty = TRUE
   )
+  if (!is.null(expected_logical_tests) && !identical(
+        rows$logical_sequence_id,
+        expected_logical_tests$logical_sequence_id
+      )) {
+    stop("Phase 3 shadow payload logical authority mismatch",
+         call. = FALSE)
+  }
   resources <- payload$resource_metrics
   stage_timing <- payload$stage_timing
   fastkpc_full_cuda_fixed_sp_validate_oracle_frame(
@@ -5404,6 +5750,15 @@ fastkpc_full_cuda_phase3_validate_shadow_payload <- function(
 
   resource_setup <- as.character(resources$prepared_s_key_sha256)
   resource_order <- order(resource_setup, method = "radix")
+  setup_target_index <- match(
+    expected_setup_keys, expected_target_rows$prepared_s_key_sha256
+  )
+  setup_shard_id <- expected_target_rows$shard_id[setup_target_index]
+  expected_setup_ordinal <- ave(
+    seq_along(expected_setup_keys), setup_shard_id,
+    FUN = function(index) seq_along(index)
+  )
+  expected_setup_ordinal <- as.integer(expected_setup_ordinal)
   target_count_by_setup <- tabulate(
     target_setup_rank, nbins = length(expected_setup_keys)
   )
@@ -5412,6 +5767,8 @@ fastkpc_full_cuda_phase3_validate_shadow_payload <- function(
     !anyDuplicated(resource_setup) && identical(
       resource_order, seq_len(nrow(resources))
     ) && identical(resource_setup, expected_setup_keys) && identical(
+      as.integer(resources$setup_ordinal), expected_setup_ordinal
+    ) && identical(
       as.integer(resources$target_count),
       as.integer(target_count_by_setup[resource_setup])
     ) && all(resources$prepared_handle_create_count == 1L) &&
@@ -5449,13 +5806,15 @@ fastkpc_full_cuda_phase3_validate_shadow_payload <- function(
     "phase2_shard_load", "prepared_handle_create", "solve",
     "shadow_materialize", "cmagic_oracle", "release_and_free"
   )
-  stage_groups <- split(
-    stage_timing$stage, stage_timing$prepared_s_key_sha256
-  )
+  expected_stage_setup <- rep(expected_setup_keys, each = 6L)
+  expected_stage_ordinal <- rep(expected_setup_ordinal, each = 6L)
+  expected_stage_sequence <- rep(expected_stages, length(expected_setup_keys))
   stage_exact <- nrow(stage_timing) == 6L * length(expected_setup_keys) &&
-    identical(sort(names(stage_groups), method = "radix"),
-              expected_setup_keys) &&
-    all(vapply(stage_groups, identical, logical(1L), expected_stages)) &&
+    identical(
+      as.character(stage_timing$prepared_s_key_sha256), expected_stage_setup
+    ) && identical(
+      as.integer(stage_timing$setup_ordinal), expected_stage_ordinal
+    ) && identical(as.character(stage_timing$stage), expected_stage_sequence) &&
     all(is.finite(stage_timing$elapsed_ms)) &&
     all(stage_timing$elapsed_ms >= 0)
   if (!is.null(expected_shard_id)) {
@@ -5649,7 +6008,9 @@ fastkpc_full_cuda_phase3_run_shadow_shard <- function(
         fastkpc_full_cuda_fixed_sp_oracle_empty_frame("stage_timing")
     )
     fastkpc_full_cuda_phase3_validate_shadow_payload(
-      payload, setup_keys, target_rows, expected_shard_id = shard_id
+      payload, setup_keys, target_rows, expected_shard_id = shard_id,
+      expected_logical_tests = logical_tests,
+      require_logical_authority = TRUE
     )
     return(list(
       payload = payload,
@@ -5727,6 +6088,13 @@ fastkpc_full_cuda_phase3_run_shadow_shard <- function(
         0
       },
       shadow_callback = function(setup_key, target_keys, residuals) {
+        residual_names <- if (is.matrix(residuals)) colnames(residuals) else NULL
+        if (!is.null(residual_names) &&
+            !identical(residual_names, target_keys)) {
+          stop("Phase 3 shadow native residual column mapping mismatch",
+               call. = FALSE)
+        }
+        colnames(residuals) <- target_keys
         fastkpc_full_cuda_shadow_compute_setup_rows(
           logical_tests = owned_logical,
           setup_key = setup_key,
@@ -5783,7 +6151,9 @@ fastkpc_full_cuda_phase3_run_shadow_shard <- function(
     stage_timing = bind_frame("stage_timing")
   )
   fastkpc_full_cuda_phase3_validate_shadow_payload(
-    payload, setup_keys, target_rows, expected_shard_id = shard_id
+    payload, setup_keys, target_rows, expected_shard_id = shard_id,
+    expected_logical_tests = expected_logical,
+    require_logical_authority = TRUE
   )
   resource_count <- function(field) {
     as.integer(sum(payload$resource_metrics[[field]]))
@@ -5868,12 +6238,26 @@ fastkpc_full_cuda_phase3_run_shadow_shard <- function(
   list(payload = value$payload, resource_counts = counts)
 }
 
+.fastkpc_full_cuda_phase3_require_shadow_plan_authority <- function(
+    contract, identity_info, plan) {
+  production_shadow <- identical(contract$kind, "full_shadow") &&
+    isTRUE(identity_info$production_identity)
+  if (production_shadow && (!identical(
+        plan$shadow_payload_semantics,
+        .fastkpc_full_cuda_phase3_shadow_authoritative_semantics()
+      ) || !is.data.frame(plan$conditional_tests))) {
+    stop("Phase 3 production full_shadow plan lacks logical authority",
+         call. = FALSE)
+  }
+  invisible(production_shadow)
+}
+
 fastkpc_full_cuda_phase3_run_shards <- function(
     output_dir, kind, setup_keys, target_rows, identity, route_config,
     executor, runtime_create, runtime_destroy, scope,
     shard_count = NULL, stop_after = NULL, progress_hook = NULL,
     executed_native_library_sha256 = NULL,
-    canonical_setup_shards = FALSE) {
+    canonical_setup_shards = FALSE, conditional_tests = NULL) {
   output_clean <- typeof(output_dir) == "character" &&
     length(output_dir) == 1L && !is.object(output_dir) &&
     is.null(attributes(output_dir)) && !is.na(output_dir) &&
@@ -5903,7 +6287,8 @@ fastkpc_full_cuda_phase3_run_shards <- function(
     target_rows = target_rows,
     scope = scope,
     shard_count = shard_count,
-    canonical_setup_shards = canonical_setup_shards
+    canonical_setup_shards = canonical_setup_shards,
+    conditional_tests = conditional_tests
   )
   .fastkpc_full_cuda_phase3_validate_route_for_shards(
     route_config, scope
@@ -5913,6 +6298,9 @@ fastkpc_full_cuda_phase3_run_shards <- function(
     route_config = route_config,
     scope = scope,
     plan = plan
+  )
+  .fastkpc_full_cuda_phase3_require_shadow_plan_authority(
+    contract, identity_info, plan
   )
   executed_native_library_sha256 <-
     .fastkpc_full_cuda_phase3_executed_native_library_sha256(
@@ -6113,6 +6501,21 @@ fastkpc_full_cuda_phase3_run_shards <- function(
           target_rows = descriptor$target_rows
         )
       )
+      authoritative_shadow <- identical(contract$kind, "full_shadow") &&
+        isTRUE(.fastkpc_full_cuda_phase3_validate_shadow_descriptor_authority(
+          descriptor,
+          require_authoritative = isTRUE(identity_info$production_identity)
+        ))
+      if (authoritative_shadow) {
+        fastkpc_full_cuda_phase3_validate_shadow_payload(
+          payload = result$payload,
+          expected_setup_keys = descriptor$setup_keys,
+          expected_target_rows = descriptor$target_rows,
+          expected_shard_id = descriptor$shard_id,
+          expected_logical_tests = descriptor$logical_rows,
+          require_logical_authority = TRUE
+        )
+      }
       oracle_accounting <- if (identical(contract$kind, "oracle_sp")) {
         if (!.fastkpc_full_cuda_phase3_is_oracle_payload(result$payload)) {
           stop("Phase 3 oracle shard executor returned a non-oracle payload",
@@ -6340,7 +6743,7 @@ fastkpc_full_cuda_phase3_run_shards <- function(
 fastkpc_full_cuda_phase3_merge_shards <- function(
     output_dir, kind, setup_keys, target_rows, identity, route_config,
     scope, shard_count = NULL, output_path = NULL,
-    canonical_setup_shards = FALSE) {
+    canonical_setup_shards = FALSE, conditional_tests = NULL) {
   scope <- .fastkpc_full_cuda_phase3_scope(scope)
   contract <- .fastkpc_full_cuda_phase3_kind_contract(kind)
   plan <- fastkpc_full_cuda_phase3_plan_shards(
@@ -6348,7 +6751,8 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     target_rows = target_rows,
     scope = scope,
     shard_count = shard_count,
-    canonical_setup_shards = canonical_setup_shards
+    canonical_setup_shards = canonical_setup_shards,
+    conditional_tests = conditional_tests
   )
   .fastkpc_full_cuda_phase3_validate_route_for_shards(
     route_config, scope
@@ -6358,6 +6762,9 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     route_config = route_config,
     scope = scope,
     plan = plan
+  )
+  .fastkpc_full_cuda_phase3_require_shadow_plan_authority(
+    contract, identity_info, plan
   )
   shards_dir <- file.path(output_dir, "shards")
   sessions_dir <- file.path(output_dir, "sessions")
@@ -6393,6 +6800,20 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
   payload <- .fastkpc_full_cuda_phase3_merge_payloads(
     lapply(loaded, function(value) value$envelope$payload), plan
   )
+  authoritative_shadow <- identical(contract$kind, "full_shadow") &&
+    identical(
+      plan$shadow_payload_semantics,
+      .fastkpc_full_cuda_phase3_shadow_authoritative_semantics()
+    )
+  if (authoritative_shadow) {
+    fastkpc_full_cuda_phase3_validate_shadow_payload(
+      payload = payload,
+      expected_setup_keys = plan$assignments$prepared_s_key_sha256,
+      expected_target_rows = plan$target_rows,
+      expected_logical_tests = plan$conditional_tests,
+      require_logical_authority = TRUE
+    )
+  }
   semantic_hashes <- .fastkpc_full_cuda_phase3_payload_semantic_hashes(
     payload
   )
@@ -6416,6 +6837,24 @@ fastkpc_full_cuda_phase3_merge_shards <- function(
     expected_target_count = as.integer(length(target_keys)),
     expected_target_hash =
       fastkpc_full_cuda_census_key_set_hash(target_keys),
+    shadow_payload_semantics = plan$shadow_payload_semantics,
+    expected_logical_ids = if (authoritative_shadow) {
+      plan$conditional_tests$logical_sequence_id
+    } else {
+      integer()
+    },
+    expected_logical_count = if (authoritative_shadow) {
+      as.integer(nrow(plan$conditional_tests))
+    } else {
+      0L
+    },
+    expected_logical_hash = if (authoritative_shadow) {
+      .fastkpc_full_cuda_phase3_shadow_logical_authority_hash(
+        plan$conditional_tests
+      )
+    } else {
+      .fastkpc_full_cuda_phase3_shadow_generic_logical_hash()
+    },
     payload = payload,
     payload_semantic_hashes = as.list(semantic_hashes),
     payload_semantic_hash =
@@ -8539,6 +8978,7 @@ fastkpc_full_cuda_phase3_direct_ci_row_schema <- function() {
     candidate_decision = "character",
     decision_flip = "logical",
     backend = "character",
+    backend_version = "character",
     low_rank_backend = "character",
     backend_error = "logical",
     spectra_fallback = "logical"
@@ -8606,7 +9046,9 @@ fastkpc_full_cuda_phase3_direct_ci_row_schema <- function() {
       !identical(rows$decision_flip, decision_flip)) {
     stop("direct-CI strict decision convention mismatch", call. = FALSE)
   }
-  if (any(rows$backend != "legacy-cpp") ||
+  if (any(rows$backend != "cpp") ||
+      any(rows$backend_version !=
+            fastkpc_full_cuda_shadow_dcov_backend_version()) ||
       any(rows$low_rank_backend != "spectra")) {
     stop("direct-CI backend route mismatch", call. = FALSE)
   }

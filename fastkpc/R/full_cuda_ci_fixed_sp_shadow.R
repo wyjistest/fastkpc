@@ -1705,7 +1705,10 @@ fastkpc_full_cuda_replay_logical_ci <- function(
     candidate_decision = candidate_decision,
     decision_flip = candidate_decision !=
       as.character(direct$reference_decision),
-    backend = rep.int("legacy-cpp", nrow(direct)),
+    backend = rep.int("cpp", nrow(direct)),
+    backend_version = rep.int(
+      fastkpc_full_cuda_shadow_dcov_backend_version(), nrow(direct)
+    ),
     low_rank_backend = rep.int("spectra", nrow(direct)),
     backend_error = rep.int(FALSE, nrow(direct)),
     spectra_fallback = rep.int(FALSE, nrow(direct)),
@@ -1723,6 +1726,10 @@ fastkpc_full_cuda_shadow_write_direct_ci <- function(
     rows = rows, catalog = catalog, output_dir = output_dir
   )
   validated$payload
+}
+
+fastkpc_full_cuda_shadow_dcov_backend_version <- function() {
+  "legacy-dcov-gamma-cpp-v1"
 }
 
 fastkpc_full_cuda_shadow_conditional_row_schema <- function() {
@@ -1748,6 +1755,7 @@ fastkpc_full_cuda_shadow_conditional_row_schema <- function() {
     near_alpha = "logical",
     near_alpha_bucket = "character",
     backend = "character",
+    backend_version = "character",
     low_rank_backend = "character",
     backend_error = "logical",
     spectra_fallback = "logical",
@@ -2008,9 +2016,9 @@ fastkpc_full_cuda_shadow_compute_setup_rows <- function(
     !is.object(residuals) && nrow(residuals) >= 2L &&
     ncol(residuals) == length(target_keys) && all(is.finite(residuals))
   residual_colnames <- if (is.matrix(residuals)) colnames(residuals) else NULL
-  names_clean <- is.null(residual_colnames) ||
-    (identical(residual_colnames, target_keys) &&
-       !anyDuplicated(residual_colnames))
+  names_clean <- !is.null(residual_colnames) &&
+    identical(residual_colnames, target_keys) &&
+    !anyDuplicated(residual_colnames)
   if (!isTRUE(matrix_clean) || !isTRUE(names_clean)) {
     stop("conditional shadow residual matrix/columns are malformed",
          call. = FALSE)
@@ -2103,7 +2111,10 @@ fastkpc_full_cuda_shadow_compute_setup_rows <- function(
       logical_info$log_distance,
       fastkpc_full_cuda_census_near_alpha_bucket, character(1L)
     ),
-    backend = rep.int("legacy-cpp", pair_count),
+    backend = rep.int("cpp", pair_count),
+    backend_version = rep.int(
+      fastkpc_full_cuda_shadow_dcov_backend_version(), pair_count
+    ),
     low_rank_backend = rep.int("spectra", pair_count),
     backend_error = rep.int(FALSE, pair_count),
     spectra_fallback = rep.int(FALSE, pair_count),
@@ -2316,7 +2327,9 @@ fastkpc_full_cuda_shadow_validate_conditional_rows <- function(
     all(rows$shard_id >= 0L & rows$shard_id < 64L) &&
     identical(rows$near_alpha, near_alpha) &&
     identical(rows$near_alpha_bucket, near_bucket)
-  backend_clean <- all(rows$backend == "legacy-cpp") &&
+  backend_clean <- all(rows$backend == "cpp") &&
+    all(rows$backend_version ==
+          fastkpc_full_cuda_shadow_dcov_backend_version()) &&
     all(rows$low_rank_backend == "spectra") &&
     !any(rows$backend_error) && !any(rows$spectra_fallback) &&
     !any(rows$decision_flip)
