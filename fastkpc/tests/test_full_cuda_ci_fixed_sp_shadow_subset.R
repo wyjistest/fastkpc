@@ -801,11 +801,11 @@ conditional_backend_fields <- names(
   fastkpc_full_cuda_shadow_conditional_row_schema()
 )
 assert_true(
-  all(c("backend", "backend_version", "low_rank_backend") %in%
-        direct_backend_fields) &&
+  all(c("backend", "low_rank_backend") %in% direct_backend_fields) &&
+    !"backend_version" %in% direct_backend_fields &&
     all(c("backend", "backend_version", "low_rank_backend") %in%
           conditional_backend_fields),
-  "direct and conditional logical rows share the pinned dCov version field"
+  "only conditional logical rows carry the pinned dCov version field"
 )
 
 phase0_dir <- file.path(

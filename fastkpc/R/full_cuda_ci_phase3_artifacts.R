@@ -8978,7 +8978,6 @@ fastkpc_full_cuda_phase3_direct_ci_row_schema <- function() {
     candidate_decision = "character",
     decision_flip = "logical",
     backend = "character",
-    backend_version = "character",
     low_rank_backend = "character",
     backend_error = "logical",
     spectra_fallback = "logical"
@@ -9046,9 +9045,7 @@ fastkpc_full_cuda_phase3_direct_ci_row_schema <- function() {
       !identical(rows$decision_flip, decision_flip)) {
     stop("direct-CI strict decision convention mismatch", call. = FALSE)
   }
-  if (any(rows$backend != "cpp") ||
-      any(rows$backend_version !=
-            fastkpc_full_cuda_shadow_dcov_backend_version()) ||
+  if (any(rows$backend != "legacy-cpp") ||
       any(rows$low_rank_backend != "spectra")) {
     stop("direct-CI backend route mismatch", call. = FALSE)
   }

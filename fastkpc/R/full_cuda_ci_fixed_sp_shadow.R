@@ -1705,10 +1705,7 @@ fastkpc_full_cuda_replay_logical_ci <- function(
     candidate_decision = candidate_decision,
     decision_flip = candidate_decision !=
       as.character(direct$reference_decision),
-    backend = rep.int("cpp", nrow(direct)),
-    backend_version = rep.int(
-      fastkpc_full_cuda_shadow_dcov_backend_version(), nrow(direct)
-    ),
+    backend = rep.int("legacy-cpp", nrow(direct)),
     low_rank_backend = rep.int("spectra", nrow(direct)),
     backend_error = rep.int(FALSE, nrow(direct)),
     spectra_fallback = rep.int(FALSE, nrow(direct)),
