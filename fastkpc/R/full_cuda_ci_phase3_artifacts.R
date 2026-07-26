@@ -2910,6 +2910,387 @@ fastkpc_validate_full_cuda_phase3_artifact <-
   reserved_path
 }
 
+.fastkpc_full_cuda_phase3_shadow_rollback_state_path <- function(path) {
+  file.path(path, ".fastkpc-shadow-rollback-state.json")
+}
+
+.fastkpc_full_cuda_phase3_shadow_rollback_state_fields <- function() {
+  c(
+    "schema_version", "state", "output_dir", "rollback_generation",
+    "owner_pid", "state_writer_pid", "expected_keys",
+    "expected_file_names", "expected_file_sha256", "prior_complete",
+    "manifest_key", "summary_key", "failed_restore_key",
+    "failed_restore_ordinal", "failed_restore_error_sha256"
+  )
+}
+
+.fastkpc_full_cuda_phase3_validate_shadow_rollback_state <- function(
+    value, backup_dir, output_dir, info) {
+  fields <- .fastkpc_full_cuda_phase3_shadow_rollback_state_fields()
+  canonical_output <- normalizePath(
+    output_dir, winslash = "/", mustWork = TRUE
+  )
+  clean <- is.list(value) && !is.object(value) &&
+    identical(names(value), fields) &&
+    identical(attributes(value), list(names = fields)) &&
+    identical(
+      value$schema_version, "full-cuda-ci-shadow-rollback-state-v1"
+    ) && value$state %in% c("backup_ready", "recovery_required") &&
+    identical(value$output_dir, canonical_output) &&
+    identical(value$rollback_generation, info$generation) &&
+    identical(value$owner_pid, info$creator_pid) &&
+    .fastkpc_full_cuda_phase3_bare_integer(value$state_writer_pid, 1L) &&
+    typeof(value$expected_keys) == "character" &&
+    length(value$expected_keys) > 0L && !anyNA(value$expected_keys) &&
+    !anyDuplicated(value$expected_keys) && all(nzchar(value$expected_keys)) &&
+    typeof(value$expected_file_names) == "character" &&
+    identical(length(value$expected_file_names), length(value$expected_keys)) &&
+    !anyNA(value$expected_file_names) &&
+    !anyDuplicated(value$expected_file_names) &&
+    all(nzchar(value$expected_file_names)) && all(
+      basename(value$expected_file_names) == value$expected_file_names
+    ) && .fastkpc_full_cuda_phase3_bare_scalar(
+      value$prior_complete, "logical"
+    ) && .fastkpc_full_cuda_phase3_bare_scalar(
+      value$manifest_key, "character"
+    ) && .fastkpc_full_cuda_phase3_bare_scalar(
+      value$summary_key, "character"
+    ) && (
+      if (isTRUE(value$prior_complete)) {
+        value$manifest_key %in% value$expected_keys &&
+          value$summary_key %in% value$expected_keys
+      } else {
+        !value$manifest_key %in% value$expected_keys &&
+          !value$summary_key %in% value$expected_keys
+      }
+    ) &&
+    .fastkpc_full_cuda_phase3_bare_scalar(
+      value$failed_restore_key, "character"
+    ) && .fastkpc_full_cuda_phase3_bare_integer(
+      value$failed_restore_ordinal, 0L
+    ) && .fastkpc_full_cuda_phase3_sha256(
+      value$failed_restore_error_sha256
+    )
+  hashes <- if (isTRUE(clean)) tryCatch(
+    .fastkpc_full_cuda_phase3_named_sha256(
+      value$expected_file_sha256,
+      "shadow rollback expected file hashes"
+    ),
+    error = function(error) NULL
+  ) else NULL
+  clean <- isTRUE(clean) && !is.null(hashes) &&
+    identical(names(hashes), value$expected_keys)
+  if (isTRUE(clean) && identical(value$state, "backup_ready")) {
+    clean <- identical(value$failed_restore_key, "") &&
+      identical(value$failed_restore_ordinal, 0L) && identical(
+        value$failed_restore_error_sha256, strrep("0", 64L)
+      )
+  }
+  if (isTRUE(clean) && identical(value$state, "recovery_required")) {
+    clean <- nzchar(value$failed_restore_key) &&
+      value$failed_restore_ordinal >= 1L &&
+      value$failed_restore_ordinal <= length(value$expected_keys) + 1L
+  }
+  expected_surface <- c(
+    basename(.fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(
+      backup_dir
+    )),
+    basename(.fastkpc_full_cuda_phase3_shadow_rollback_state_path(
+      backup_dir
+    )),
+    value$expected_file_names
+  )
+  actual_surface <- if (dir.exists(backup_dir)) list.files(
+    backup_dir, all.files = TRUE, no.. = TRUE, full.names = FALSE
+  ) else character()
+  backup_paths <- file.path(backup_dir, value$expected_file_names)
+  clean <- isTRUE(clean) && !nzchar(Sys.readlink(backup_dir)) &&
+    identical(
+      sort(actual_surface, method = "radix"),
+      sort(expected_surface, method = "radix")
+    ) && all(file.exists(backup_paths)) && !any(dir.exists(backup_paths)) &&
+    !any(nzchar(Sys.readlink(backup_paths))) && identical(
+      unname(vapply(
+        backup_paths, fastkpc_full_cuda_census_file_hash, character(1L)
+      )), unname(hashes)
+    )
+  if (!isTRUE(clean)) {
+    stop("shadow rollback recovery state or backup is malformed",
+         call. = FALSE)
+  }
+  attr(value, "expected_hashes") <- hashes
+  value
+}
+
+.fastkpc_full_cuda_phase3_write_shadow_rollback_state <- function(
+    backup_dir, output_dir, info, state, expected_keys,
+    expected_file_names, expected_file_sha256, prior_complete,
+    manifest_key, summary_key, failed_restore_key = "",
+    failed_restore_ordinal = 0L,
+    failed_restore_error_sha256 = strrep("0", 64L),
+    .publication_hook = NULL) {
+  if (!is.null(.publication_hook) && !is.function(.publication_hook)) {
+    stop("shadow rollback state hook is malformed", call. = FALSE)
+  }
+  canonical_output <- normalizePath(
+    output_dir, winslash = "/", mustWork = TRUE
+  )
+  marker <- list(
+    schema_version = "full-cuda-ci-shadow-rollback-state-v1",
+    state = state, output_dir = canonical_output,
+    rollback_generation = info$generation,
+    owner_pid = info$creator_pid,
+    state_writer_pid = as.integer(Sys.getpid()),
+    expected_keys = unname(expected_keys),
+    expected_file_names = unname(expected_file_names),
+    expected_file_sha256 = as.list(setNames(
+      unname(expected_file_sha256), expected_keys
+    )),
+    prior_complete = prior_complete,
+    manifest_key = manifest_key, summary_key = summary_key,
+    failed_restore_key = failed_restore_key,
+    failed_restore_ordinal = as.integer(failed_restore_ordinal),
+    failed_restore_error_sha256 = failed_restore_error_sha256
+  )
+  marker_path <-
+    .fastkpc_full_cuda_phase3_shadow_rollback_state_path(backup_dir)
+  marker_temp <- file.path(
+    backup_dir,
+    paste0(".fastkpc-shadow-rollback-state.tmp-", Sys.getpid(), "-",
+           info$nonce)
+  )
+  on.exit(unlink(marker_temp, force = TRUE), add = TRUE)
+  if (file.exists(marker_temp) || dir.exists(marker_temp)) {
+    stop("shadow rollback state temporary path already exists",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_write_json_exact(marker, marker_temp)
+  if (identical(state, "recovery_required") &&
+      !is.null(.publication_hook)) {
+    .publication_hook("before_recovery_marker_commit")
+  }
+  if (!file.rename(marker_temp, marker_path)) {
+    stop("failed to atomically publish shadow rollback recovery state",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_validate_shadow_rollback_state(
+    marker, backup_dir, canonical_output, info
+  )
+}
+
+.fastkpc_full_cuda_phase3_shadow_restore_from_backup <- function(
+    backup_dir, state, final_paths, .rename_function = file.rename) {
+  expected_keys <- state$expected_keys
+  hashes <- attr(state, "expected_hashes", exact = TRUE)
+  backup_paths <- setNames(
+    file.path(backup_dir, state$expected_file_names), expected_keys
+  )
+  restore_paths <- setNames(file.path(
+    dirname(final_paths[[1L]]), paste0(
+      ".fastkpc-shadow-restore-", state$rollback_generation, "-",
+      sprintf("%03d", seq_along(expected_keys)), "-",
+      state$expected_file_names
+    )
+  ), expected_keys)
+  on.exit(unlink(restore_paths, force = TRUE), add = TRUE)
+  if (any(file.exists(restore_paths)) || any(dir.exists(restore_paths))) {
+    return(list(
+      success = FALSE, key = expected_keys[[1L]], ordinal = 1L,
+      message = "shadow restore temporary path is not clean"
+    ))
+  }
+  copied <- file.copy(
+    backup_paths, restore_paths, overwrite = FALSE,
+    copy.mode = TRUE, copy.date = TRUE
+  )
+  if (length(copied) != length(expected_keys) || !all(copied) ||
+      !identical(
+        unname(vapply(
+          restore_paths, fastkpc_full_cuda_census_file_hash, character(1L)
+        )), unname(hashes)
+      )) {
+    return(list(
+      success = FALSE, key = expected_keys[[1L]], ordinal = 1L,
+      message = "failed to prepare verified shadow restore files"
+    ))
+  }
+  unlink(final_paths[file.exists(final_paths)], force = TRUE)
+  for (ordinal in seq_along(expected_keys)) {
+    key <- expected_keys[[ordinal]]
+    if (!.rename_function(restore_paths[[key]], final_paths[[key]])) {
+      return(list(
+        success = FALSE, key = key, ordinal = as.integer(ordinal),
+        message = paste("failed to restore prior shadow generation", key)
+      ))
+    }
+  }
+  unexpected <- setdiff(names(final_paths), expected_keys)
+  clean <- all(file.exists(final_paths[expected_keys])) &&
+    !any(dir.exists(final_paths[expected_keys])) && identical(
+      unname(vapply(
+        final_paths[expected_keys], fastkpc_full_cuda_census_file_hash,
+        character(1L)
+      )), unname(hashes)
+    ) && (length(unexpected) == 0L ||
+          !any(file.exists(final_paths[unexpected])))
+  if (!isTRUE(clean)) {
+    return(list(
+      success = FALSE, key = "post_restore_validation",
+      ordinal = as.integer(length(expected_keys) + 1L),
+      message = "restored shadow generation failed exact hash validation"
+    ))
+  }
+  list(success = TRUE, key = "", ordinal = 0L, message = "")
+}
+
+.fastkpc_full_cuda_phase3_recover_shadow_rollback <- function(
+    output_dir, final_paths, artifact_lock, validate_function = NULL,
+    .rename_function = file.rename, .publication_hook = NULL) {
+  .fastkpc_full_cuda_phase3_require_shadow_artifact_lock(
+    artifact_lock, output_dir
+  )
+  clean <- typeof(final_paths) == "character" &&
+    !is.null(names(final_paths)) && !anyDuplicated(names(final_paths)) &&
+    length(final_paths) > 0L && is.function(.rename_function) &&
+    (is.null(validate_function) || is.function(validate_function)) &&
+    (is.null(.publication_hook) || is.function(.publication_hook))
+  if (!isTRUE(clean)) {
+    stop("shadow rollback recovery arguments are malformed", call. = FALSE)
+  }
+  canonical_output <- normalizePath(
+    output_dir, winslash = "/", mustWork = TRUE
+  )
+  entries <- list.files(
+    dirname(canonical_output), full.names = TRUE,
+    all.files = TRUE, no.. = TRUE
+  )
+  prefix <- .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
+    canonical_output, "rollback"
+  )
+  candidates <- entries[startsWith(basename(entries), prefix)]
+  recoverable <- list()
+  for (candidate in candidates) {
+    if (nzchar(Sys.readlink(candidate)) || !dir.exists(candidate) ||
+        file_test("-f", candidate)) {
+      stop("shadow rollback recovery encountered a non-owned entry",
+           call. = FALSE)
+    }
+    info <- .fastkpc_full_cuda_phase3_shadow_work_name_info(
+      candidate, canonical_output, "rollback", bootstrap = FALSE
+    )
+    .fastkpc_full_cuda_phase3_validate_shadow_work_dir_marker(
+      candidate, canonical_output, "rollback", info
+    )
+    state_path <-
+      .fastkpc_full_cuda_phase3_shadow_rollback_state_path(candidate)
+    if (!file.exists(state_path)) {
+      surface <- setdiff(
+        list.files(candidate, all.files = TRUE, no.. = TRUE),
+        basename(.fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(
+          candidate
+        ))
+      )
+      if (length(surface) > 0L) {
+        stop("shadow rollback backup lacks authenticated recovery state",
+             call. = FALSE)
+      }
+      next
+    }
+    if (nzchar(Sys.readlink(state_path)) || dir.exists(state_path)) {
+      stop("shadow rollback recovery marker is malformed", call. = FALSE)
+    }
+    state <- .fastkpc_full_cuda_phase3_validate_shadow_rollback_state(
+      .fastkpc_full_cuda_phase3_read_json(
+        state_path, "shadow rollback recovery state"
+      ), candidate, canonical_output, info
+    )
+    recoverable[[length(recoverable) + 1L]] <- list(
+      path = candidate, info = info, state = state
+    )
+  }
+  if (length(recoverable) == 0L) {
+    return(list(recovered = FALSE, prior_complete = FALSE,
+                validation = NULL))
+  }
+  if (length(recoverable) != 1L) {
+    stop("multiple shadow rollback generations require recovery",
+         call. = FALSE)
+  }
+  recovery <- recoverable[[1L]]
+  restored <- .fastkpc_full_cuda_phase3_shadow_restore_from_backup(
+    recovery$path, recovery$state, final_paths,
+    .rename_function = .rename_function
+  )
+  mark_failure <- function(result) {
+    .fastkpc_full_cuda_phase3_write_shadow_rollback_state(
+      recovery$path, canonical_output, recovery$info,
+      state = "recovery_required",
+      expected_keys = recovery$state$expected_keys,
+      expected_file_names = recovery$state$expected_file_names,
+      expected_file_sha256 = attr(
+        recovery$state, "expected_hashes", exact = TRUE
+      ),
+      prior_complete = recovery$state$prior_complete,
+      manifest_key = recovery$state$manifest_key,
+      summary_key = recovery$state$summary_key,
+      failed_restore_key = result$key,
+      failed_restore_ordinal = result$ordinal,
+      failed_restore_error_sha256 =
+        fastkpc_full_cuda_census_hash_utf8(result$message),
+      .publication_hook = .publication_hook
+    )
+  }
+  if (!isTRUE(restored$success)) {
+    marker_error <- tryCatch({
+      mark_failure(restored)
+      NULL
+    }, error = function(error) error)
+    stop(
+      restored$message,
+      if (inherits(marker_error, "error")) paste0(
+        "; recovery marker update failed: ", conditionMessage(marker_error)
+      ) else "",
+      call. = FALSE
+    )
+  }
+  validation <- NULL
+  if (isTRUE(recovery$state$prior_complete) &&
+      !is.null(validate_function)) {
+    validation_error <- tryCatch({
+      validation <- validate_function()
+      NULL
+    }, error = function(error) error)
+    if (inherits(validation_error, "error")) {
+      result <- list(
+        key = "post_restore_validation",
+        ordinal = as.integer(length(recovery$state$expected_keys) + 1L),
+        message = conditionMessage(validation_error)
+      )
+      marker_error <- tryCatch({
+        mark_failure(result)
+        NULL
+      }, error = function(error) error)
+      stop(
+        "restored shadow generation validation failed: ", result$message,
+        if (inherits(marker_error, "error")) paste0(
+          "; recovery marker update failed: ", conditionMessage(marker_error)
+        ) else "",
+        call. = FALSE
+      )
+    }
+  }
+  unlink(recovery$path, recursive = TRUE, force = TRUE)
+  if (file.exists(recovery$path) || dir.exists(recovery$path)) {
+    stop("failed to clean authenticated shadow rollback after recovery",
+         call. = FALSE)
+  }
+  list(
+    recovered = TRUE,
+    prior_complete = recovery$state$prior_complete,
+    validation = validation
+  )
+}
+
 .fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs <- function(
     output_dir, purposes, artifact_lock) {
   .fastkpc_full_cuda_phase3_require_shadow_artifact_lock(
@@ -2989,6 +3370,20 @@ fastkpc_validate_full_cuda_phase3_artifact <-
       .fastkpc_full_cuda_phase3_validate_shadow_work_dir_marker(
         candidate, canonical_output, purpose, info
       )
+      if (identical(purpose, "rollback")) {
+        protected <- setdiff(
+          list.files(candidate, all.files = TRUE, no.. = TRUE),
+          basename(.fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(
+            candidate
+          ))
+        )
+        if (length(protected) > 0L) {
+          stop(
+            "shadow rollback evidence requires authenticated recovery",
+            call. = FALSE
+          )
+        }
+      }
       unlink(candidate, recursive = TRUE, force = TRUE)
       if (file.exists(candidate) || dir.exists(candidate)) {
         stop("failed to remove stale owned shadow work directory",
@@ -3021,50 +3416,98 @@ fastkpc_validate_full_cuda_phase3_artifact <-
     if (!is.null(.publication_hook)) .publication_hook(event)
     invisible(NULL)
   }
+  recovered_prior <- .fastkpc_full_cuda_phase3_recover_shadow_rollback(
+    output_dir, final_paths, artifact_lock
+  )
+  if (isTRUE(recovered_prior$recovered)) {
+    hook("after_rollback_recovery")
+  }
   .fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs(
     output_dir, "rollback", artifact_lock
   )
   backup_dir <- NULL
+  remove_backup <- TRUE
   suspendInterrupts({
     backup_dir <- .fastkpc_full_cuda_phase3_acquire_shadow_work_dir(
       output_dir, "rollback", artifact_lock,
       .publication_hook = .publication_hook
     )
-    on.exit(
-      unlink(backup_dir, recursive = TRUE, force = TRUE), add = TRUE
-    )
+    on.exit(suspendInterrupts({
+      if (isTRUE(remove_backup)) {
+        unlink(backup_dir, recursive = TRUE, force = TRUE)
+      }
+    }), add = TRUE)
   })
   prior_present <- vapply(final_paths, function(path) {
     file.exists(path) && !dir.exists(path)
   }, logical(1L))
   prior_complete <- isTRUE(prior_present[[manifest_key]]) &&
     isTRUE(prior_present[[summary_key]])
+  restore_keys <- keys[prior_present]
+  if (!prior_complete) {
+    restore_keys <- setdiff(restore_keys, c(manifest_key, summary_key))
+  }
   backup_paths <- setNames(
-    file.path(backup_dir, basename(final_paths)), keys
+    file.path(backup_dir, basename(final_paths[restore_keys])), restore_keys
   )
+  backup_info <- .fastkpc_full_cuda_phase3_shadow_work_name_info(
+    backup_dir, output_dir, "rollback", bootstrap = FALSE
+  )
+  rollback_state <- NULL
   committed <- FALSE
   transaction_started <- FALSE
   rollback <- function() {
     if (!transaction_started || committed) return(invisible(NULL))
-    unlink(final_paths[file.exists(final_paths)], force = TRUE)
-    restore_keys <- keys[prior_present]
-    if (!prior_complete) {
-      restore_keys <- setdiff(restore_keys, c(manifest_key, summary_key))
+    if (length(restore_keys) == 0L) {
+      unlink(final_paths[file.exists(final_paths)], force = TRUE)
+      transaction_started <<- FALSE
+      remove_backup <<- TRUE
+      return(invisible(NULL))
     }
-    for (key in restore_keys) {
-      if (!file.exists(backup_paths[[key]]) || !.rename_function(
-            backup_paths[[key]], final_paths[[key]]
-          )) {
-        stop("failed to restore prior shadow generation: ", key,
-             call. = FALSE)
-      }
+    restored <- .fastkpc_full_cuda_phase3_shadow_restore_from_backup(
+      backup_dir, rollback_state, final_paths,
+      .rename_function = .rename_function
+    )
+    if (!isTRUE(restored$success)) {
+      remove_backup <<- FALSE
+      marker_error <- tryCatch({
+        rollback_state <<-
+          .fastkpc_full_cuda_phase3_write_shadow_rollback_state(
+            backup_dir, output_dir, backup_info,
+            state = "recovery_required",
+            expected_keys = rollback_state$expected_keys,
+            expected_file_names = rollback_state$expected_file_names,
+            expected_file_sha256 = attr(
+              rollback_state, "expected_hashes", exact = TRUE
+            ),
+            prior_complete = rollback_state$prior_complete,
+            manifest_key = rollback_state$manifest_key,
+            summary_key = rollback_state$summary_key,
+            failed_restore_key = restored$key,
+            failed_restore_ordinal = restored$ordinal,
+            failed_restore_error_sha256 =
+              fastkpc_full_cuda_census_hash_utf8(restored$message),
+            .publication_hook = .publication_hook
+          )
+        NULL
+      }, error = function(error) error)
+      stop(
+        restored$message,
+        if (inherits(marker_error, "error")) paste0(
+          "; recovery marker update failed: ",
+          conditionMessage(marker_error)
+        ) else "",
+        call. = FALSE
+      )
     }
+    transaction_started <<- FALSE
+    remove_backup <<- TRUE
     invisible(NULL)
   }
   on.exit(
     suspendInterrupts(rollback()), add = TRUE, after = FALSE
   )
-  for (key in keys[prior_present]) {
+  for (key in restore_keys) {
     copied <- file.copy(
       final_paths[[key]], backup_paths[[key]],
       overwrite = FALSE, copy.mode = TRUE, copy.date = TRUE
@@ -3077,7 +3520,22 @@ fastkpc_validate_full_cuda_phase3_artifact <-
            call. = FALSE)
     }
   }
+  if (length(restore_keys) > 0L) {
+    prior_hashes <- setNames(vapply(
+      backup_paths, fastkpc_full_cuda_census_file_hash, character(1L)
+    ), restore_keys)
+    rollback_state <-
+      .fastkpc_full_cuda_phase3_write_shadow_rollback_state(
+        backup_dir, output_dir, backup_info, state = "backup_ready",
+        expected_keys = restore_keys,
+        expected_file_names = basename(backup_paths),
+        expected_file_sha256 = prior_hashes,
+        prior_complete = prior_complete,
+        manifest_key = manifest_key, summary_key = summary_key
+      )
+  }
   transaction_started <- TRUE
+  remove_backup <- length(restore_keys) == 0L
   unlink(final_paths[c(manifest_key, summary_key)], force = TRUE)
   hook("before_payload_commit")
   for (key in payload_keys) {
@@ -3103,6 +3561,7 @@ fastkpc_validate_full_cuda_phase3_artifact <-
   validate_function()
   hook("after_post_commit_validation")
   committed <- TRUE
+  remove_backup <- TRUE
   unlink(backup_dir, recursive = TRUE, force = TRUE)
   invisible(TRUE)
 }
@@ -13356,15 +13815,8 @@ fastkpc_full_cuda_phase3_publish_shadow_artifact <- function(
       add = TRUE
     )
   })
-  .fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs(
-    output_dir, c("staging", "rollback"), artifact_lock
-  )
-  completion <- c(
-    manifest = file.exists(final_paths$manifest_json),
-    summary = file.exists(final_paths$summary_json)
-  )
-  if (all(completion)) {
-    validation <- .fastkpc_full_cuda_phase3_validate_shadow_artifact_sources(
+  validate_existing <- function() {
+    .fastkpc_full_cuda_phase3_validate_shadow_artifact_sources(
       output_dir = output_dir, catalog = catalog,
       setup_keys = setup_keys, target_rows = target_rows,
       identity = identity, route_config = route_config, scope = scope,
@@ -13378,6 +13830,29 @@ fastkpc_full_cuda_phase3_publish_shadow_artifact <- function(
       require_full = identical(scope, "full"),
       authenticated_plan = authenticated_shadow_plan
     )
+  }
+  startup_keys <- .fastkpc_full_cuda_phase3_shadow_publication_keys()
+  startup_recovery <- .fastkpc_full_cuda_phase3_recover_shadow_rollback(
+    output_dir = output_dir,
+    final_paths = unlist(final_paths[startup_keys], use.names = TRUE),
+    artifact_lock = artifact_lock,
+    validate_function = validate_existing
+  )
+  .fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs(
+    output_dir, c("staging", "rollback"), artifact_lock
+  )
+  if (isTRUE(startup_recovery$recovered) &&
+      isTRUE(startup_recovery$prior_complete)) {
+    validation <- startup_recovery$validation
+    return(list(status = "reused", validation = validation,
+                summary = validation$summary))
+  }
+  completion <- c(
+    manifest = file.exists(final_paths$manifest_json),
+    summary = file.exists(final_paths$summary_json)
+  )
+  if (all(completion)) {
+    validation <- validate_existing()
     return(list(status = "reused", validation = validation,
                 summary = validation$summary))
   }

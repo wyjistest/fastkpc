@@ -662,6 +662,17 @@ assert_true(
          mode = "function"),
   "shadow publication exposes an atomic rollback generation commit"
 )
+assert_true(
+  all(vapply(c(
+    ".fastkpc_full_cuda_phase3_shadow_rollback_state_path",
+    ".fastkpc_full_cuda_phase3_write_shadow_rollback_state",
+    ".fastkpc_full_cuda_phase3_recover_shadow_rollback"
+  ), exists, logical(1L), mode = "function")),
+  paste(
+    "shadow rollback exposes authenticated recovery state and startup",
+    "recovery before stale cleanup"
+  )
+)
 focused_generation_dir <- tempfile("phase3-shadow-focused-generation-")
 dir.create(focused_generation_dir, recursive = TRUE, showWarnings = FALSE)
 on.exit(unlink(focused_generation_dir, recursive = TRUE, force = TRUE),
@@ -754,13 +765,337 @@ for (failure_event in c(
     NULL
   }, error = function(error) error)
   assert_true(
-    inherits(transaction_error, "error") && identical(
+    inherits(transaction_error, "error") && all(file.exists(focused_final)) &&
+      identical(
       vapply(focused_final, fastkpc_full_cuda_census_file_hash,
              character(1L)), focused_old_hashes
     ),
-    paste("shadow generation rollback preserves prior bytes at", failure_event)
+    paste(
+      "shadow generation rollback preserves prior bytes at", failure_event,
+      "observed:", if (inherits(transaction_error, "error")) {
+        conditionMessage(transaction_error)
+      } else {
+        "no error"
+      }, "present=", paste(file.exists(focused_final), collapse = ",")
+    )
   )
   unlink(stage, recursive = TRUE, force = TRUE)
+}
+focused_rollback_siblings <- function() {
+  entries <- list.files(
+    dirname(focused_generation_dir), full.names = TRUE,
+    all.files = TRUE, no.. = TRUE
+  )
+  prefix <- .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
+    focused_generation_dir, "rollback"
+  )
+  entries[startsWith(basename(entries), prefix)]
+}
+make_focused_stage <- function(label) {
+  stage <- tempfile(paste0("shadow-restore-", label, "-stage-"))
+  dir.create(stage, recursive = TRUE, showWarnings = FALSE)
+  paths <- setNames(
+    file.path(stage, basename(focused_final)), names(focused_final)
+  )
+  for (key in names(paths)) {
+    writeLines(paste0(label, "-", key), paths[[key]], useBytes = TRUE)
+  }
+  list(dir = stage, paths = paths)
+}
+for (failed_restore_ordinal in seq_along(focused_final)) {
+  stage <- make_focused_stage(
+    paste0("restore-failure-", failed_restore_ordinal)
+  )
+  restore_ordinal <- 0L
+  restore_error <- tryCatch({
+    .fastkpc_full_cuda_phase3_commit_shadow_generation(
+      staged_paths = stage$paths, final_paths = focused_final,
+      payload_keys = "payload", manifest_key = "manifest",
+      summary_key = "summary", output_dir = focused_generation_dir,
+      artifact_lock = focused_transaction_lock,
+      validate_function = function() stop(
+        "injected validation failure before focused restore", call. = FALSE
+      ),
+      .rename_function = function(from, to) {
+        if (startsWith(
+              basename(from), ".fastkpc-shadow-restore-"
+            )) {
+          restore_ordinal <<- restore_ordinal + 1L
+          if (restore_ordinal == failed_restore_ordinal) return(FALSE)
+        }
+        file.rename(from, to)
+      }
+    )
+    NULL
+  }, error = function(error) error)
+  rollback <- focused_rollback_siblings()
+  assert_true(
+    inherits(restore_error, "error") && length(rollback) == 1L,
+    paste(
+      "failed restore rename preserves one rollback generation at ordinal",
+      failed_restore_ordinal
+    )
+  )
+  rollback_state <- .fastkpc_full_cuda_phase3_read_json(
+    .fastkpc_full_cuda_phase3_shadow_rollback_state_path(rollback[[1L]]),
+    "focused rollback recovery state"
+  )
+  backup_paths <- file.path(rollback[[1L]], basename(focused_final))
+  assert_true(
+    identical(
+      rollback_state$schema_version,
+      "full-cuda-ci-shadow-rollback-state-v1"
+    ) && identical(rollback_state$state, "recovery_required") &&
+      identical(
+        rollback_state$output_dir,
+        normalizePath(focused_generation_dir, mustWork = TRUE)
+      ) && .fastkpc_full_cuda_phase3_bare_integer(
+        rollback_state$owner_pid, 1L
+      ) && .fastkpc_full_cuda_phase3_sha256(
+        rollback_state$failed_restore_error_sha256
+      ) &&
+      identical(
+        as.integer(rollback_state$failed_restore_ordinal),
+        as.integer(failed_restore_ordinal)
+      ) &&
+      file.exists(.fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(
+        rollback[[1L]]
+      )) && all(file.exists(backup_paths)) && identical(
+        unname(vapply(
+          backup_paths, fastkpc_full_cuda_census_file_hash, character(1L)
+        )),
+        unname(focused_old_hashes)
+      ),
+    paste(
+      "recovery_required marker and exact prior backup hashes survive restore",
+      "failure at ordinal", failed_restore_ordinal
+    )
+  )
+  recovered <- tryCatch(
+    .fastkpc_full_cuda_phase3_recover_shadow_rollback(
+      focused_generation_dir, focused_final, focused_transaction_lock,
+      validate_function = function() {
+        assert_true(
+          all(file.exists(focused_final)) && identical(
+            vapply(
+              focused_final, fastkpc_full_cuda_census_file_hash,
+              character(1L)
+            ), focused_old_hashes
+          ),
+          paste(
+            "startup rollback validation observes exact restored prior bytes;",
+            "present=", paste(file.exists(focused_final), collapse = ",")
+          )
+        )
+        invisible(TRUE)
+      }
+    ),
+    error = function(error) error
+  )
+  assert_true(
+    !inherits(recovered, "error") && isTRUE(recovered$recovered) &&
+      length(focused_rollback_siblings()) == 0L &&
+      all(file.exists(focused_final)) && identical(
+        vapply(
+          focused_final, fastkpc_full_cuda_census_file_hash, character(1L)
+        ), focused_old_hashes
+      ),
+    paste(
+      "next locked startup restores and cleans failed rollback ordinal",
+      failed_restore_ordinal, "observed:",
+      if (inherits(recovered, "error")) conditionMessage(recovered) else "ok",
+      "present=", paste(file.exists(focused_final), collapse = ",")
+    )
+  )
+  unlink(stage$dir, recursive = TRUE, force = TRUE)
+}
+
+marker_failure_stage <- make_focused_stage("marker-update-failure")
+marker_restore_ordinal <- 0L
+marker_update_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_commit_shadow_generation(
+    staged_paths = marker_failure_stage$paths, final_paths = focused_final,
+    payload_keys = "payload", manifest_key = "manifest",
+    summary_key = "summary", output_dir = focused_generation_dir,
+    artifact_lock = focused_transaction_lock,
+    validate_function = function() stop(
+      "injected validation failure before marker update", call. = FALSE
+    ),
+    .publication_hook = function(event) {
+      if (identical(event, "before_recovery_marker_commit")) {
+        stop("injected recovery marker update failure", call. = FALSE)
+      }
+    },
+    .rename_function = function(from, to) {
+      if (startsWith(basename(from), ".fastkpc-shadow-restore-")) {
+        marker_restore_ordinal <<- marker_restore_ordinal + 1L
+        if (marker_restore_ordinal == 1L) return(FALSE)
+      }
+      file.rename(from, to)
+    }
+  )
+  NULL
+}, error = function(error) error)
+marker_rollback <- focused_rollback_siblings()
+marker_state <- .fastkpc_full_cuda_phase3_read_json(
+  .fastkpc_full_cuda_phase3_shadow_rollback_state_path(
+    marker_rollback[[1L]]
+  ),
+  "focused rollback ready state"
+)
+marker_backup_paths <- file.path(
+  marker_rollback[[1L]], basename(focused_final)
+)
+assert_true(
+  inherits(marker_update_error, "error") &&
+    length(marker_rollback) == 1L &&
+    identical(marker_state$state, "backup_ready") &&
+    all(file.exists(marker_backup_paths)) && identical(
+      unname(vapply(
+        marker_backup_paths, fastkpc_full_cuda_census_file_hash, character(1L)
+      )),
+      unname(focused_old_hashes)
+    ),
+  paste(
+    "failed recovery marker update preserves authenticated backup_ready state",
+    "and every prior byte hash"
+  )
+)
+unlink(marker_failure_stage$dir, recursive = TRUE, force = TRUE)
+next_stage <- make_focused_stage("next-publication")
+next_hashes <- vapply(
+  next_stage$paths, fastkpc_full_cuda_census_file_hash, character(1L)
+)
+prior_restored_before_new_commit <- FALSE
+.fastkpc_full_cuda_phase3_commit_shadow_generation(
+  staged_paths = next_stage$paths, final_paths = focused_final,
+  payload_keys = "payload", manifest_key = "manifest",
+  summary_key = "summary", output_dir = focused_generation_dir,
+  artifact_lock = focused_transaction_lock,
+  validate_function = function() invisible(TRUE),
+  .publication_hook = function(event) {
+    if (identical(event, "after_rollback_recovery")) {
+      prior_restored_before_new_commit <<- identical(
+        vapply(
+          focused_final, fastkpc_full_cuda_census_file_hash, character(1L)
+        ), focused_old_hashes
+      )
+    }
+  }
+)
+assert_true(
+  isTRUE(prior_restored_before_new_commit) &&
+    length(focused_rollback_siblings()) == 0L && identical(
+      vapply(
+        focused_final, fastkpc_full_cuda_census_file_hash, character(1L)
+      ), next_hashes
+    ),
+  paste(
+    "next publication restores prior generation before replacement, commits",
+    "the new generation, and leaves no rollback sibling"
+  )
+)
+unlink(next_stage$dir, recursive = TRUE, force = TRUE)
+writeLines("old-payload", focused_final[["payload"]], useBytes = TRUE)
+writeLines("old-manifest", focused_final[["manifest"]], useBytes = TRUE)
+writeLines("old-summary", focused_final[["summary"]], useBytes = TRUE)
+
+create_focused_recovery_backup <- function(label) {
+  stage <- make_focused_stage(label)
+  restore_ordinal <- 0L
+  error <- tryCatch({
+    .fastkpc_full_cuda_phase3_commit_shadow_generation(
+      staged_paths = stage$paths, final_paths = focused_final,
+      payload_keys = "payload", manifest_key = "manifest",
+      summary_key = "summary", output_dir = focused_generation_dir,
+      artifact_lock = focused_transaction_lock,
+      validate_function = function() stop(
+        "injected validation failure for backup mutation", call. = FALSE
+      ),
+      .rename_function = function(from, to) {
+        if (startsWith(basename(from), ".fastkpc-shadow-restore-")) {
+          restore_ordinal <<- restore_ordinal + 1L
+          if (restore_ordinal == 1L) return(FALSE)
+        }
+        file.rename(from, to)
+      }
+    )
+    NULL
+  }, error = function(error) error)
+  unlink(stage$dir, recursive = TRUE, force = TRUE)
+  rollback <- focused_rollback_siblings()
+  assert_true(
+    inherits(error, "error") && length(rollback) == 1L,
+    paste("focused backup mutation fixture is recoverable:", label)
+  )
+  rollback[[1L]]
+}
+for (backup_mutation in c("missing", "mismatched", "symlinked")) {
+  rollback <- create_focused_recovery_backup(
+    paste0("backup-", backup_mutation)
+  )
+  backup_payload <- file.path(rollback, basename(focused_final[["payload"]]))
+  backup_bytes <- readBin(
+    backup_payload, "raw", n = file.info(backup_payload)$size
+  )
+  symlink_target <- NULL
+  if (identical(backup_mutation, "missing")) {
+    unlink(backup_payload, force = TRUE)
+  } else if (identical(backup_mutation, "mismatched")) {
+    writeLines("forged rollback backup", backup_payload, useBytes = TRUE)
+  } else {
+    symlink_target <- tempfile("shadow-rollback-symlink-target-")
+    writeLines("symlink target", symlink_target, useBytes = TRUE)
+    unlink(backup_payload, force = TRUE)
+    assert_true(
+      file.symlink(symlink_target, backup_payload),
+      "focused rollback backup symlink fixture is created"
+    )
+  }
+  recovery_error <- tryCatch({
+    .fastkpc_full_cuda_phase3_recover_shadow_rollback(
+      focused_generation_dir, focused_final, focused_transaction_lock
+    )
+    NULL
+  }, error = function(error) error)
+  assert_true(
+    inherits(recovery_error, "error") && dir.exists(rollback) &&
+      file.exists(.fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(
+        rollback
+      )) && file.exists(
+        .fastkpc_full_cuda_phase3_shadow_rollback_state_path(rollback)
+      ) && switch(
+        backup_mutation,
+        missing = !file.exists(backup_payload),
+        mismatched = !identical(
+          fastkpc_full_cuda_census_file_hash(backup_payload),
+          focused_old_hashes[["payload"]]
+        ),
+        symlinked = nzchar(Sys.readlink(backup_payload))
+      ),
+    paste(
+      backup_mutation,
+      "rollback backup fails closed and preserves ownership evidence"
+    )
+  )
+  unlink(backup_payload, force = TRUE)
+  backup_connection <- file(backup_payload, open = "wb")
+  writeBin(backup_bytes, backup_connection)
+  close(backup_connection)
+  if (!is.null(symlink_target)) unlink(symlink_target, force = TRUE)
+  repaired <- .fastkpc_full_cuda_phase3_recover_shadow_rollback(
+    focused_generation_dir, focused_final, focused_transaction_lock
+  )
+  assert_true(
+    isTRUE(repaired$recovered) &&
+      length(focused_rollback_siblings()) == 0L &&
+      all(file.exists(focused_final)) && identical(
+        vapply(
+          focused_final, fastkpc_full_cuda_census_file_hash, character(1L)
+        ), focused_old_hashes
+      ),
+    paste("repaired", backup_mutation, "backup recovers exact prior bytes")
+  )
 }
 unlink(focused_final[["summary"]], force = TRUE)
 partial_stage <- tempfile("shadow-generation-partial-stage-")
@@ -2399,8 +2734,6 @@ stale_rollback <- .fastkpc_full_cuda_phase3_acquire_shadow_work_dir(
   output_dir, "rollback", stale_rollback_lock
 )
 .fastkpc_full_cuda_phase3_release_shadow_artifact_lock(stale_rollback_lock)
-writeLines("stale rollback payload", file.path(stale_rollback, "payload.rds"),
-           useBytes = TRUE)
 published <- do.call(
   fastkpc_full_cuda_phase3_publish_shadow_artifact, publish_args
 )
