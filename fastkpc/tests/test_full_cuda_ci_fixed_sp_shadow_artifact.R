@@ -25,6 +25,356 @@ assert_true(
   "fixed-sp shadow direct/conditional normalizer should exist"
 )
 
+focused_only <- identical(
+  Sys.getenv("FASTKPC_TASK9_FOCUSED_ONLY", unset = "0"), "1"
+)
+publication_only <- identical(
+  Sys.getenv("FASTKPC_TASK9_PUBLICATION_ONLY", unset = "0"), "1"
+)
+assert_true(
+  exists(".fastkpc_full_cuda_phase3_expected_native_sha256",
+         mode = "function"),
+  "Phase 3 execution identity exposes explicit expected native SHA semantics"
+)
+production_native <- strrep("1", 64L)
+test_native <- strrep("2", 64L)
+assert_true(
+  identical(
+    .fastkpc_full_cuda_phase3_expected_native_sha256(
+      list(
+        schema_version = "full-cuda-ci-phase3-input-identity-v1",
+        native_library_sha256 = production_native
+      )
+    ), production_native
+  ) && identical(
+    .fastkpc_full_cuda_phase3_expected_native_sha256(
+      list(schema_version =
+             "full-cuda-ci-phase3-test-input-identity-v1"),
+      claimed_sha256 = test_native
+    ), test_native
+  ),
+  "production native SHA comes from identity while tests use explicit claims"
+)
+assert_true(
+  exists(".fastkpc_full_cuda_phase3_shadow_manifest_dispatch",
+         mode = "function"),
+  "shadow manifest dispatch distinguishes absent, null, and versioned schema"
+)
+legacy_dispatch <- list(
+  artifact_schema_version = fastkpc_full_cuda_phase3_shadow_schema_version(),
+  artifact_kind = "full_shadow"
+)
+v2_dispatch <- list(
+  manifest_schema_version = "full-cuda-ci-fixed-sp-shadow-manifest-v2"
+)
+assert_true(
+  identical(
+    .fastkpc_full_cuda_phase3_shadow_manifest_dispatch(legacy_dispatch),
+    "legacy"
+  ) && identical(
+    .fastkpc_full_cuda_phase3_shadow_manifest_dispatch(v2_dispatch),
+    "task9_v2"
+  ),
+  "only absent historical schema and exact v2 schema dispatch"
+)
+for (bad_manifest in list(
+  list(manifest_schema_version = NULL),
+  list(manifest_schema_version = "unknown-shadow-version"),
+  list(
+    manifest_schema_version = NULL,
+    artifact_schema_version = fastkpc_full_cuda_phase3_shadow_schema_version(),
+    artifact_kind = "full_shadow"
+  )
+)) {
+  dispatch_error <- tryCatch({
+    .fastkpc_full_cuda_phase3_shadow_manifest_dispatch(bad_manifest)
+    NULL
+  }, error = function(error) error)
+  assert_true(
+    inherits(dispatch_error, "error"),
+    "null, unknown, and hybrid shadow schema claims fail closed"
+  )
+}
+assert_true(
+  exists(".fastkpc_full_cuda_phase3_exact_json_namespace",
+         mode = "function"),
+  "Task 9 metadata validation exposes exact ordered namespace checking"
+)
+namespace_value <- list(schema_version = "v1", pass = TRUE)
+invisible(.fastkpc_full_cuda_phase3_exact_json_namespace(
+  namespace_value, c("schema_version", "pass"), "focused metadata"
+))
+for (bad_namespace in list(
+  c(namespace_value, list(extra = 1L)),
+  namespace_value["schema_version"],
+  structure(
+    list("v1", TRUE),
+    names = c("schema_version", "schema_version")
+  )
+)) {
+  namespace_error <- tryCatch({
+    .fastkpc_full_cuda_phase3_exact_json_namespace(
+      bad_namespace, c("schema_version", "pass"), "focused metadata"
+    )
+    NULL
+  }, error = function(error) error)
+  assert_true(
+    inherits(namespace_error, "error"),
+    "extra, missing, and duplicate metadata fields fail closed"
+  )
+}
+assert_true(
+  exists(".fastkpc_full_cuda_phase3_validate_native_claim",
+         mode = "function"),
+  "loaded Phase 3 evidence validates native SHA against identity authority"
+)
+production_identity_info <- list(
+  identity_info_schema_version =
+    "full-cuda-ci-phase3-validated-execution-identity-v2",
+  production_identity = TRUE,
+  expected_native_library_sha256 = production_native
+)
+test_identity_info <- list(
+  production_identity = FALSE,
+  expected_native_library_sha256 = NULL
+)
+invisible(.fastkpc_full_cuda_phase3_validate_native_claim(
+  production_native, production_identity_info, "focused production claim"
+))
+invisible(.fastkpc_full_cuda_phase3_validate_native_claim(
+  test_native, test_identity_info, "focused test claim"
+))
+native_rehash_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_validate_native_claim(
+    test_native, production_identity_info, "coherent wrong production claim"
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(native_rehash_error, "error"),
+  "coherently rehashed production native claims fail identity authority"
+)
+coherent_wrong_native_claims <- c(
+  oracle_manifest = test_native, shadow_manifest = test_native,
+  oracle_shard = test_native, shadow_shard = test_native
+)
+coherent_native_errors <- vapply(
+  names(coherent_wrong_native_claims), function(label) {
+    inherits(tryCatch({
+      .fastkpc_full_cuda_phase3_validate_native_claim(
+        coherent_wrong_native_claims[[label]], production_identity_info,
+        paste("coherent", label)
+      )
+      NULL
+    }, error = function(error) error), "error")
+  }, logical(1L)
+)
+assert_true(
+  all(coherent_native_errors),
+  "coherently rehashed oracle/shadow shard and manifest claims all fail"
+)
+assert_true(
+  all(vapply(c(
+    ".fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock",
+    ".fastkpc_full_cuda_phase3_release_shadow_artifact_lock"
+  ), exists, logical(1L), mode = "function")),
+  "shadow publication exposes a dedicated artifact lock"
+)
+focused_lock_dir <- tempfile("phase3-shadow-focused-lock-")
+dir.create(focused_lock_dir, recursive = TRUE, showWarnings = FALSE)
+on.exit(unlink(focused_lock_dir, recursive = TRUE, force = TRUE), add = TRUE)
+focused_lock <-
+  .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(focused_lock_dir)
+lock_contention_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(focused_lock_dir)
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(lock_contention_error, "error"),
+  "concurrent shadow publication lock acquisition fails closed"
+)
+.fastkpc_full_cuda_phase3_release_shadow_artifact_lock(focused_lock)
+focused_lock <-
+  .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(focused_lock_dir)
+.fastkpc_full_cuda_phase3_release_shadow_artifact_lock(focused_lock)
+assert_true(
+  exists(".fastkpc_full_cuda_phase3_commit_shadow_generation",
+         mode = "function"),
+  "shadow publication exposes an atomic rollback generation commit"
+)
+focused_generation_dir <- tempfile("phase3-shadow-focused-generation-")
+dir.create(focused_generation_dir, recursive = TRUE, showWarnings = FALSE)
+on.exit(unlink(focused_generation_dir, recursive = TRUE, force = TRUE),
+        add = TRUE)
+focused_final <- setNames(
+  file.path(focused_generation_dir, c(
+    "payload.dat", "manifest.json", "summary.json"
+  )), c("payload", "manifest", "summary")
+)
+writeLines("old-payload", focused_final[["payload"]], useBytes = TRUE)
+writeLines("old-manifest", focused_final[["manifest"]], useBytes = TRUE)
+writeLines("old-summary", focused_final[["summary"]], useBytes = TRUE)
+focused_old_hashes <- vapply(
+  focused_final, fastkpc_full_cuda_census_file_hash, character(1L)
+)
+focused_transaction_lock <-
+  .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(
+    focused_generation_dir
+  )
+on.exit(.fastkpc_full_cuda_phase3_release_shadow_artifact_lock(
+  focused_transaction_lock
+), add = TRUE)
+for (failure_event in c(
+  "payload_write", "before_manifest_commit",
+  "after_manifest_commit", "validation_failure"
+)) {
+  stage <- tempfile("shadow-generation-stage-")
+  dir.create(stage, recursive = TRUE, showWarnings = FALSE)
+  staged <- setNames(file.path(stage, basename(focused_final)),
+                     names(focused_final))
+  writeLines("new-payload", staged[["payload"]], useBytes = TRUE)
+  writeLines("new-manifest", staged[["manifest"]], useBytes = TRUE)
+  writeLines("new-summary", staged[["summary"]], useBytes = TRUE)
+  transaction_error <- tryCatch({
+    .fastkpc_full_cuda_phase3_commit_shadow_generation(
+      staged_paths = staged, final_paths = focused_final,
+      payload_keys = "payload", manifest_key = "manifest",
+      summary_key = "summary", output_dir = focused_generation_dir,
+      artifact_lock = focused_transaction_lock,
+      validate_function = function() {
+        if (identical(failure_event, "validation_failure")) {
+          stop("injected focused validation failure", call. = FALSE)
+        }
+        invisible(TRUE)
+      },
+      .publication_hook = function(event) {
+        if (failure_event %in% c(
+              "before_manifest_commit", "after_manifest_commit"
+            ) && identical(event, failure_event)) {
+          stop("injected focused publication failure", call. = FALSE)
+        }
+      },
+      .rename_function = function(from, to) {
+        if (identical(failure_event, "payload_write") &&
+            identical(from, staged[["payload"]])) return(FALSE)
+        file.rename(from, to)
+      }
+    )
+    NULL
+  }, error = function(error) error)
+  assert_true(
+    inherits(transaction_error, "error") && identical(
+      vapply(focused_final, fastkpc_full_cuda_census_file_hash,
+             character(1L)), focused_old_hashes
+    ),
+    paste("shadow generation rollback preserves prior bytes at", failure_event)
+  )
+  unlink(stage, recursive = TRUE, force = TRUE)
+}
+unlink(focused_final[["summary"]], force = TRUE)
+partial_stage <- tempfile("shadow-generation-partial-stage-")
+dir.create(partial_stage, recursive = TRUE, showWarnings = FALSE)
+partial_staged <- setNames(
+  file.path(partial_stage, basename(focused_final)), names(focused_final)
+)
+writeLines("new-payload", partial_staged[["payload"]], useBytes = TRUE)
+writeLines("new-manifest", partial_staged[["manifest"]], useBytes = TRUE)
+writeLines("new-summary", partial_staged[["summary"]], useBytes = TRUE)
+partial_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_commit_shadow_generation(
+    staged_paths = partial_staged, final_paths = focused_final,
+    payload_keys = "payload", manifest_key = "manifest",
+    summary_key = "summary", output_dir = focused_generation_dir,
+    artifact_lock = focused_transaction_lock,
+    validate_function = function() stop(
+      "injected partial-generation validation failure", call. = FALSE
+    )
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(partial_error, "error") &&
+    !file.exists(focused_final[["manifest"]]) &&
+    !file.exists(focused_final[["summary"]]) && identical(
+      fastkpc_full_cuda_census_file_hash(focused_final[["payload"]]),
+      focused_old_hashes[["payload"]]
+    ),
+  "failed replacement of a partial generation removes both completion markers"
+)
+unlink(partial_stage, recursive = TRUE, force = TRUE)
+.fastkpc_full_cuda_phase3_release_shadow_artifact_lock(
+  focused_transaction_lock
+)
+focused_transaction_lock <- NULL
+assert_true(
+  exists(".fastkpc_full_cuda_phase3_shadow_command_lines",
+         mode = "function"),
+  "shadow publication validates command evidence before mutation"
+)
+assert_true(
+  identical(
+    .fastkpc_full_cuda_phase3_shadow_command_lines("Rscript focused.R"),
+    "Rscript focused.R"
+  ),
+  "nonempty exact command evidence is preserved"
+)
+for (bad_commands in list(
+  character(), "", NA_character_, c("ok", "bad\ncommand"), factor("bad")
+)) {
+  command_error <- tryCatch({
+    .fastkpc_full_cuda_phase3_shadow_command_lines(bad_commands)
+    NULL
+  }, error = function(error) error)
+  assert_true(
+    inherits(command_error, "error"),
+    "empty, malformed, attributed, or multiline commands fail closed"
+  )
+}
+assert_true(
+  exists(".fastkpc_full_cuda_phase3_validate_shadow_constraints",
+         mode = "function"),
+  "v2 public validator exposes exact caller-constraint matching"
+)
+focused_expected_constraints <- list(
+  identity = list(schema_version = "test", sha256 = strrep("3", 64L)),
+  catalog_authority_sha256 = strrep("4", 64L), device_id = 0L,
+  scope = "iteration", phase0_dir = "/phase0", oracle_sp_dir = "/oracle",
+  shard_count = 64L, canonical_setup_shards = FALSE,
+  shadow_plan_identity_sha256 = strrep("5", 64L),
+  direct_logical_sequence_id = 1L
+)
+focused_matching_constraints <- focused_expected_constraints
+invisible(.fastkpc_full_cuda_phase3_validate_shadow_constraints(
+  focused_matching_constraints, focused_expected_constraints
+))
+for (field in names(focused_matching_constraints)) {
+  mismatched <- focused_matching_constraints
+  mismatched[[field]] <- switch(
+    field,
+    identity = list(schema_version = "wrong", sha256 = strrep("6", 64L)),
+    catalog_authority_sha256 = strrep("6", 64L),
+    device_id = 1L, scope = "qualification", phase0_dir = "/wrong",
+    oracle_sp_dir = "/wrong", shard_count = 63L,
+    canonical_setup_shards = TRUE,
+    shadow_plan_identity_sha256 = strrep("6", 64L),
+    direct_logical_sequence_id = 2L
+  )
+  constraint_error <- tryCatch({
+    .fastkpc_full_cuda_phase3_validate_shadow_constraints(
+      mismatched, focused_expected_constraints
+    )
+    NULL
+  }, error = function(error) error)
+  assert_true(
+    inherits(constraint_error, "error"),
+    paste("mismatched public constraint fails closed:", field)
+  )
+}
+if (focused_only) {
+  cat("full CUDA CI fixed-sp shadow artifact focused probes: PASS\n")
+  quit(save = "no", status = 0L)
+}
+
 phase1_rows <- readRDS(file.path(
   "fastkpc", "artifacts", "full_cuda_ci",
   "workload_census_351x48_v1", "logical_ci_tests.rds"
@@ -939,6 +1289,56 @@ publish_args <- list(
   command_lines =
     "Rscript fastkpc/tests/test_full_cuda_ci_fixed_sp_shadow_artifact.R"
 )
+.task9_heavy_probe <- new.env(parent = emptyenv())
+.task9_heavy_probe$merge <- 0L
+.task9_heavy_probe$route <- 0L
+.task9_heavy_probe$replay <- 0L
+.task9_heavy_probe$snapshot_create <- 0L
+.task9_heavy_probe$snapshot_release <- 0L
+invisible(trace(
+  "fastkpc_full_cuda_phase3_merge_shards",
+  tracer = quote(if (identical(kind, "full_shadow")) {
+    .task9_heavy_probe$merge <- .task9_heavy_probe$merge + 1L
+  }), print = FALSE, where = globalenv()
+))
+invisible(trace(
+  "fastkpc_full_cuda_shadow_reconstruct_target_routes",
+  tracer = quote({
+    .task9_heavy_probe$route <- .task9_heavy_probe$route + 1L
+  }), print = FALSE, where = globalenv()
+))
+invisible(trace(
+  "fastkpc_full_cuda_replay_logical_ci",
+  tracer = quote({
+    .task9_heavy_probe$replay <- .task9_heavy_probe$replay + 1L
+  }), print = FALSE, where = globalenv()
+))
+invisible(trace(
+  "fastkpc_full_cuda_phase3_create_shadow_execution_snapshot",
+  tracer = quote({
+    .task9_heavy_probe$snapshot_create <-
+      .task9_heavy_probe$snapshot_create + 1L
+  }), print = FALSE, where = globalenv()
+))
+invisible(trace(
+  "fastkpc_full_cuda_phase3_release_shadow_execution_snapshot",
+  tracer = quote({
+    .task9_heavy_probe$snapshot_release <-
+      .task9_heavy_probe$snapshot_release + 1L
+  }), print = FALSE, where = globalenv()
+))
+on.exit({
+  if (exists(".task9_heavy_probe", envir = globalenv(), inherits = FALSE)) {
+    for (name in c(
+      "fastkpc_full_cuda_phase3_merge_shards",
+      "fastkpc_full_cuda_shadow_reconstruct_target_routes",
+      "fastkpc_full_cuda_replay_logical_ci",
+      "fastkpc_full_cuda_phase3_create_shadow_execution_snapshot",
+      "fastkpc_full_cuda_phase3_release_shadow_execution_snapshot"
+    )) untrace(name, where = globalenv())
+    rm(.task9_heavy_probe, envir = globalenv())
+  }
+}, add = TRUE)
 published <- do.call(
   fastkpc_full_cuda_phase3_publish_shadow_artifact, publish_args
 )
@@ -949,6 +1349,67 @@ assert_true(
     identical(published$summary$first_divergence, "NOT_APPLICABLE"),
   "authenticated selected-scope shadow artifact publishes and validates"
 )
+matching_public_validation <-
+  fastkpc_validate_full_cuda_fixed_sp_shadow_artifact(
+    output_dir, expected_identity = identity, catalog = catalog,
+    device_id = identity$device_id, setup_keys = setup_keys,
+    target_rows = target_rows, route_config = route_config,
+    scope = "iteration", phase0_dir = phase0_dir,
+    oracle_sp_dir = oracle_sp_dir, shard_count = 64L,
+    canonical_setup_shards = FALSE,
+    shadow_plan_identity_sha256 = plan$plan_identity_sha256,
+    direct_logical_sequence_id = 1L, require_full = FALSE
+  )
+assert_true(
+  isTRUE(matching_public_validation$authenticated) &&
+    identical(
+      c(
+        merge = .task9_heavy_probe$merge,
+        route = .task9_heavy_probe$route,
+        replay = .task9_heavy_probe$replay
+      ),
+      c(merge = 2L, route = 2L, replay = 2L)
+    ) && .task9_heavy_probe$snapshot_create == 2L &&
+    .task9_heavy_probe$snapshot_release == 2L,
+  paste(
+    "fresh publication plus standalone validation performs exactly two",
+    "merge/route/replay passes and releases both authority snapshots"
+  )
+)
+if (publication_only) {
+  cat("full CUDA CI fixed-sp shadow artifact publication probes: PASS\n")
+  quit(save = "no", status = 0L)
+}
+wrong_identity_constraint <- identity
+wrong_identity_constraint$source_commit <- strrep("9", 40L)
+for (constraint_case in list(
+  list(
+    label = "mismatched expected identity",
+    args = list(expected_identity = wrong_identity_constraint)
+  ),
+  list(label = "malformed supplied catalog", args = list(catalog = list())),
+  list(
+    label = "mismatched source path",
+    args = list(phase0_dir = dirname(phase0_dir))
+  ),
+  list(
+    label = "unsupported caller snapshot",
+    args = list(execution_snapshot = list(forged = TRUE))
+  )
+)) {
+  constraint_error <- tryCatch({
+    do.call(
+      fastkpc_validate_full_cuda_fixed_sp_shadow_artifact,
+      c(list(output_dir = output_dir, require_full = FALSE),
+        constraint_case$args)
+    )
+    NULL
+  }, error = function(error) error)
+  assert_true(
+    inherits(constraint_error, "error"),
+    paste(constraint_case$label, "fails v2 public validation")
+  )
+}
 subprocess_sources <- c(
   "fastkpc/R/full_cuda_ci_gate.R",
   "fastkpc/R/full_cuda_ci_oracle_contract.R",
@@ -1012,6 +1473,9 @@ resume_byte_paths <- c(
 resume_byte_hashes <- vapply(
   resume_byte_paths, fastkpc_full_cuda_census_file_hash, character(1L)
 )
+resume_metadata <- file.info(resume_byte_paths)[
+  , c("size", "mode", "mtime"), drop = FALSE
+]
 semantic_snapshot <- function() {
   shard_rds <- shadow_shard_paths[grepl("\\.rds$", shadow_shard_paths)]
   list(
@@ -1083,6 +1547,11 @@ pure_resume <- fastkpc_full_cuda_phase3_run_shards(
   },
   scope = "iteration", shard_count = 64L
 )
+heavy_before_reuse <- c(
+  merge = .task9_heavy_probe$merge,
+  route = .task9_heavy_probe$route,
+  replay = .task9_heavy_probe$replay
+)
 reused_publication <- do.call(
   fastkpc_full_cuda_phase3_publish_shadow_artifact, publish_args
 )
@@ -1096,10 +1565,25 @@ assert_true(
     identical(reused_publication$status, "reused") && identical(
       vapply(resume_byte_paths, fastkpc_full_cuda_census_file_hash,
              character(1L)), resume_byte_hashes
-    ) && identical(semantic_snapshot(), resume_semantic_hashes),
+    ) && identical(semantic_snapshot(), resume_semantic_hashes) &&
+    identical(
+      file.info(resume_byte_paths)[
+        , c("size", "mode", "mtime"), drop = FALSE
+      ], resume_metadata
+    ) && identical(
+      c(
+        merge = .task9_heavy_probe$merge,
+        route = .task9_heavy_probe$route,
+        replay = .task9_heavy_probe$replay
+      ) - heavy_before_reuse,
+      c(merge = 1L, route = 1L, replay = 1L)
+    ),
   paste(
     "pure resume reuses direct, all 64 shards, sessions, and publication",
-    "with zero CUDA contexts/writes and identical byte/semantic hashes"
+    paste(
+      "with zero CUDA contexts/writes/churn, identical byte/semantic",
+      "hashes/metadata, and exactly one reuse validation pass"
+    )
   )
 )
 
@@ -1226,6 +1710,74 @@ expect_rejected <- function(paths, mutate, label) {
   restore_bytes(snapshot)
   on.exit(NULL, add = FALSE)
   invisible(error)
+}
+
+refresh_shadow_summary_manifest_hash <- function() {
+  summary <- jsonlite::read_json(
+    artifact_paths$summary_json, simplifyVector = FALSE
+  )
+  summary$manifest_sha256 <- fastkpc_full_cuda_census_file_hash(
+    artifact_paths$manifest_json
+  )
+  .fastkpc_full_cuda_phase3_write_json_exact(
+    summary, artifact_paths$summary_json
+  )
+}
+
+manifest_schema_mutations <- list(
+  null_schema = function(manifest) {
+    manifest["manifest_schema_version"] <- list(NULL)
+    manifest
+  },
+  unknown_schema = function(manifest) {
+    manifest$manifest_schema_version <- "unknown-shadow-version"
+    manifest
+  },
+  extra_manifest_field = function(manifest) {
+    manifest$extra_claim <- TRUE
+    manifest
+  },
+  missing_manifest_field = function(manifest) {
+    manifest$source_commit <- NULL
+    manifest
+  },
+  hybrid_null_legacy_claim = function(manifest) {
+    manifest["manifest_schema_version"] <- list(NULL)
+    manifest$artifact_kind <- "full_shadow"
+    manifest$artifact_schema_version <-
+      fastkpc_full_cuda_phase3_shadow_schema_version()
+    manifest
+  }
+)
+for (case_name in names(manifest_schema_mutations)) {
+  mutate_manifest <- manifest_schema_mutations[[case_name]]
+  expect_rejected(
+    c(artifact_paths$manifest_json, artifact_paths$summary_json),
+    function() {
+      manifest <- jsonlite::read_json(
+        artifact_paths$manifest_json, simplifyVector = FALSE
+      )
+      .fastkpc_full_cuda_phase3_write_json_exact(
+        mutate_manifest(manifest), artifact_paths$manifest_json
+      )
+      refresh_shadow_summary_manifest_hash()
+    }, case_name
+  )
+}
+for (case_name in c("extra_summary_field", "missing_summary_field")) {
+  expect_rejected(artifact_paths$summary_json, function() {
+    summary <- jsonlite::read_json(
+      artifact_paths$summary_json, simplifyVector = FALSE
+    )
+    if (identical(case_name, "extra_summary_field")) {
+      summary$extra_claim <- TRUE
+    } else {
+      summary$source_artifact_sha256 <- NULL
+    }
+    .fastkpc_full_cuda_phase3_write_json_exact(
+      summary, artifact_paths$summary_json
+    )
+  }, case_name)
 }
 
 expect_rejected(
@@ -1445,7 +1997,53 @@ expect_rejected(
   }, "reordered published resource evidence"
 )
 
-expect_rejected(artifact_paths$adjacency_rds, function() {
+expect_graph_derivative_rejected <- function(key, path, mutate, label) {
+  snapshot <- snapshot_bytes(c(
+    path, artifact_paths$manifest_json, artifact_paths$summary_json
+  ))
+  on.exit(restore_bytes(snapshot), add = TRUE)
+  mutate()
+  manifest <- jsonlite::read_json(
+    artifact_paths$manifest_json, simplifyVector = FALSE
+  )
+  manifest$file_sha256[[key]] <- fastkpc_full_cuda_census_file_hash(path)
+  .fastkpc_full_cuda_phase3_write_json_exact(
+    manifest, artifact_paths$manifest_json
+  )
+  refresh_shadow_summary_manifest_hash()
+  forged_manifest <- jsonlite::read_json(
+    artifact_paths$manifest_json, simplifyVector = TRUE
+  )
+  forged_summary <- jsonlite::read_json(
+    artifact_paths$summary_json, simplifyVector = TRUE
+  )
+  assert_true(
+    identical(
+      unname(forged_manifest$file_sha256[[key]]),
+      fastkpc_full_cuda_census_file_hash(path)
+    ) && identical(
+      forged_summary$manifest_sha256,
+      fastkpc_full_cuda_census_file_hash(artifact_paths$manifest_json)
+    ),
+    paste(label, "refreshes payload, manifest, and summary hash linkage")
+  )
+  error <- tryCatch({
+    .fastkpc_full_cuda_phase3_validate_shadow_graph_derivatives(
+      artifact_paths, matching_public_validation$recomputed_graph,
+      matching_public_validation$recomputed_first_divergence
+    )
+    NULL
+  }, error = function(error) error)
+  assert_true(
+    inherits(error, "error"),
+    paste(label, "must fail independent graph semantic validation")
+  )
+  restore_bytes(snapshot)
+  on.exit(NULL, add = FALSE)
+}
+
+expect_graph_derivative_rejected(
+  "adjacency_rds", artifact_paths$adjacency_rds, function() {
   adjacency <- readRDS(artifact_paths$adjacency_rds)
   adjacency[1L, 2L] <- !adjacency[1L, 2L]
   adjacency[2L, 1L] <- adjacency[1L, 2L]
@@ -1454,18 +2052,20 @@ expect_rejected(artifact_paths$adjacency_rds, function() {
 }, "forged adjacency")
 
 for (case in list(
-  list(path = artifact_paths$deletion_trace_csv, label = "forged deletion trace"),
-  list(path = artifact_paths$sepset_agreement_csv,
+  list(key = "deletion_trace_csv", path = artifact_paths$deletion_trace_csv,
+       label = "forged deletion trace"),
+  list(key = "sepset_agreement_csv", path = artifact_paths$sepset_agreement_csv,
        label = "forged sepset agreement"),
-  list(path = artifact_paths$n_edgetests_csv,
+  list(key = "n_edgetests_csv", path = artifact_paths$n_edgetests_csv,
        label = "forged n.edgetests")
 )) {
-  expect_rejected(case$path, function() {
+  expect_graph_derivative_rejected(case$key, case$path, function() {
     writeLines("forged", case$path, useBytes = TRUE)
   }, case$label)
 }
 
-expect_rejected(artifact_paths$first_divergence_json, function() {
+expect_graph_derivative_rejected(
+  "first_divergence_json", artifact_paths$first_divergence_json, function() {
   first <- jsonlite::read_json(
     artifact_paths$first_divergence_json, simplifyVector = FALSE
   )
@@ -1630,5 +2230,22 @@ expect_rejected(
 expect_rejected(artifact_paths$failures_csv, function() {
   unlink(artifact_paths$failures_csv, force = TRUE)
 }, "missing required output file")
+
+assert_true(
+  .task9_heavy_probe$snapshot_create ==
+    .task9_heavy_probe$snapshot_release,
+  paste(
+    "standalone validation releases every minted execution snapshot across",
+    "success, restart, and mutation paths"
+  )
+)
+for (name in c(
+  "fastkpc_full_cuda_phase3_merge_shards",
+  "fastkpc_full_cuda_shadow_reconstruct_target_routes",
+  "fastkpc_full_cuda_replay_logical_ci",
+  "fastkpc_full_cuda_phase3_create_shadow_execution_snapshot",
+  "fastkpc_full_cuda_phase3_release_shadow_execution_snapshot"
+)) untrace(name, where = globalenv())
+rm(.task9_heavy_probe, envir = globalenv())
 
 cat("full CUDA CI fixed-sp shadow artifact: PASS\n")

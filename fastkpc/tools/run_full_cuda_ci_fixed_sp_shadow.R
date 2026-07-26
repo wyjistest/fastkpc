@@ -291,10 +291,13 @@ if (!publication$status %in% c("published", "reused") ||
   stop("Phase 3 shadow artifact publication/validation failed",
        call. = FALSE)
 }
-independent_validation <-
+independent_validation <- if (identical(publication$status, "published")) {
   fastkpc_validate_full_cuda_fixed_sp_shadow_artifact(
     output_dir, require_full = identical(scope, "full")
   )
+} else {
+  publication$validation
+}
 if (!isTRUE(independent_validation$authenticated) ||
     !isTRUE(independent_validation$pass) ||
     is.null(independent_validation$recomputed_graph)) {
