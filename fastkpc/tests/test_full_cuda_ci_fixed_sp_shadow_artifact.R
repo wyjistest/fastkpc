@@ -60,22 +60,77 @@ assert_true(
          mode = "function"),
   "shadow manifest dispatch distinguishes absent, null, and versioned schema"
 )
-legacy_dispatch <- list(
-  artifact_schema_version = fastkpc_full_cuda_phase3_shadow_schema_version(),
-  artifact_kind = "full_shadow"
+focused_json_value <- function(type) switch(
+  type, character = "fixture", logical = TRUE, integer = 1L,
+  object = list(fixture = "value")
 )
-v2_dispatch <- list(
-  manifest_schema_version = "full-cuda-ci-fixed-sp-shadow-manifest-v2"
+v2_dispatch <- lapply(
+  .fastkpc_full_cuda_phase3_shadow_manifest_types(), focused_json_value
+)
+v2_dispatch$manifest_schema_version <-
+  "full-cuda-ci-fixed-sp-shadow-manifest-v2"
+v2_summary <- lapply(
+  .fastkpc_full_cuda_phase3_shadow_summary_types(), focused_json_value
+)
+v2_summary$summary_schema_version <-
+  "full-cuda-ci-fixed-sp-shadow-summary-v1"
+focused_legacy_identity_fields <- setdiff(
+  .fastkpc_full_cuda_phase3_identity_fields(), "schema_version"
+)
+focused_legacy_integer_fields <- c(
+  "source_closure_count", "native_build_dependency_count",
+  "native_build_exclusion_count", "cuda_toolkit_version",
+  "cuda_driver_version", "compute_capability_major",
+  "compute_capability_minor", "sm_count", "device_id", "shard_count"
+)
+focused_legacy_logical_fields <- c(
+  "relevant_sources_dirty_or_untracked",
+  "execution_sources_unchanged_after_run",
+  "cublas_user_workspace_required", "authenticated"
+)
+focused_legacy_numeric_fields <- c(
+  "cublas_workspace_bytes_required",
+  "cublas_workspace_min_alignment_required"
+)
+focused_legacy_identity <- setNames(lapply(
+  focused_legacy_identity_fields, function(field) {
+    if (field %in% focused_legacy_integer_fields) return(1L)
+    if (field %in% focused_legacy_logical_fields) return(TRUE)
+    if (field %in% focused_legacy_numeric_fields) return(1)
+    "fixture"
+  }
+), focused_legacy_identity_fields)
+legacy_dispatch <- c(list(
+  artifact_schema_version = fastkpc_full_cuda_phase3_shadow_schema_version(),
+  artifact_kind = "full_shadow",
+  input_identity_schema_version = "full-cuda-ci-phase3-input-identity-v1",
+  input_identity_sha256 = strrep("a", 64L),
+  payload_names = "logical_ci_parity.rds",
+  publication_order = c(
+    "logical_ci_parity.rds", "manifest.json", "summary.json"
+  ),
+  payload_file_sha256 = list(
+    "logical_ci_parity.rds" = strrep("b", 64L)
+  )
+), focused_legacy_identity)
+legacy_summary <- list(
+  artifact_schema_version = fastkpc_full_cuda_phase3_shadow_schema_version(),
+  artifact_kind = "full_shadow", manifest_sha256 = strrep("c", 64L),
+  shard_count = 1L, payload_count = 1L, pass = TRUE
 )
 assert_true(
   identical(
-    .fastkpc_full_cuda_phase3_shadow_manifest_dispatch(legacy_dispatch),
+    .fastkpc_full_cuda_phase3_shadow_manifest_dispatch(
+      legacy_dispatch, legacy_summary
+    ),
     "legacy"
   ) && identical(
-    .fastkpc_full_cuda_phase3_shadow_manifest_dispatch(v2_dispatch),
+    .fastkpc_full_cuda_phase3_shadow_manifest_dispatch(
+      v2_dispatch, v2_summary
+    ),
     "task9_v2"
   ),
-  "only absent historical schema and exact v2 schema dispatch"
+  "only exact historical and exact v2 namespaces dispatch"
 )
 for (bad_manifest in list(
   list(manifest_schema_version = NULL),
@@ -87,7 +142,9 @@ for (bad_manifest in list(
   )
 )) {
   dispatch_error <- tryCatch({
-    .fastkpc_full_cuda_phase3_shadow_manifest_dispatch(bad_manifest)
+    .fastkpc_full_cuda_phase3_shadow_manifest_dispatch(
+      bad_manifest, legacy_summary
+    )
     NULL
   }, error = function(error) error)
   assert_true(
@@ -95,6 +152,40 @@ for (bad_manifest in list(
     "null, unknown, and hybrid shadow schema claims fail closed"
   )
 }
+for (hybrid in list(
+  c(legacy_dispatch, list(source_inputs = list())),
+  c(v2_dispatch, list(legacy_discriminator = "full_shadow"))
+)) {
+  hybrid_error <- tryCatch({
+    .fastkpc_full_cuda_phase3_shadow_manifest_dispatch(
+      hybrid, legacy_summary
+    )
+    NULL
+  }, error = function(error) error)
+  assert_true(
+    inherits(hybrid_error, "error"),
+    "legacy/v2 extra-field and hybrid schema claims fail closed"
+  )
+}
+missing_v2_summary_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_shadow_manifest_dispatch(v2_dispatch, NULL)
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(missing_v2_summary_error, "error"),
+  "v2 dispatch requires its exact summary namespace"
+)
+legacy_summary_extra <- c(legacy_summary, list(v2_pass = TRUE))
+legacy_summary_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_shadow_manifest_dispatch(
+    legacy_dispatch, legacy_summary_extra
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(legacy_summary_error, "error"),
+  "legacy dispatch requires the exact historical summary namespace"
+)
 assert_true(
   exists(".fastkpc_full_cuda_phase3_exact_json_namespace",
          mode = "function"),
@@ -174,6 +265,49 @@ assert_true(
   "coherently rehashed oracle/shadow shard and manifest claims all fail"
 )
 assert_true(
+  exists(".fastkpc_full_cuda_phase3_validate_shadow_native_linkage",
+         mode = "function"),
+  "shadow validation exposes explicit three-way native identity linkage"
+)
+focused_native_path <- tempfile("phase3-shadow-native-")
+writeLines("authenticated native fixture", focused_native_path,
+           useBytes = TRUE)
+on.exit(unlink(focused_native_path, force = TRUE), add = TRUE)
+focused_native_sha <- fastkpc_full_cuda_census_file_hash(focused_native_path)
+focused_native_identity <- list(
+  schema_version = "full-cuda-ci-phase3-input-identity-v1",
+  native_library_path = normalizePath(focused_native_path, mustWork = TRUE),
+  native_library_sha256 = focused_native_sha
+)
+invisible(.fastkpc_full_cuda_phase3_validate_shadow_native_linkage(
+  focused_native_identity, focused_native_identity, focused_native_sha,
+  "focused native linkage"
+))
+focused_embedded_wrong <- focused_native_identity
+focused_embedded_wrong$native_library_sha256 <- strrep("d", 64L)
+embedded_native_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_validate_shadow_native_linkage(
+    focused_native_identity, focused_embedded_wrong, focused_native_sha,
+    "focused embedded native mutation"
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(embedded_native_error, "error"),
+  "refreshed embedded production native mutation fails three-way linkage"
+)
+focused_top_level_wrong <- tryCatch({
+  .fastkpc_full_cuda_phase3_validate_shadow_native_linkage(
+    focused_native_identity, focused_native_identity, strrep("e", 64L),
+    "focused top-level native mutation"
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(focused_top_level_wrong, "error"),
+  "top-level production native mutation fails three-way linkage"
+)
+assert_true(
   all(vapply(c(
     ".fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock",
     ".fastkpc_full_cuda_phase3_release_shadow_artifact_lock"
@@ -197,6 +331,36 @@ assert_true(
 focused_lock <-
   .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(focused_lock_dir)
 .fastkpc_full_cuda_phase3_release_shadow_artifact_lock(focused_lock)
+cross_process_lock_script <- tempfile(
+  "phase3-shadow-lock-child-", fileext = ".R"
+)
+writeLines(c(
+  'source("fastkpc/R/full_cuda_ci_gate.R")',
+  'source("fastkpc/R/full_cuda_ci_oracle_contract.R")',
+  'source("fastkpc/R/full_cuda_ci_workload_census.R")',
+  'source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")',
+  'source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R")',
+  'source("fastkpc/R/full_cuda_ci_fixed_sp_shadow.R")',
+  'source("fastkpc/R/full_cuda_ci_phase3_artifacts.R")',
+  sprintf(
+    '.fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(%s)',
+    encodeString(focused_lock_dir, quote = '"')
+  )
+), cross_process_lock_script, useBytes = TRUE)
+on.exit(unlink(cross_process_lock_script, force = TRUE), add = TRUE)
+focused_lock <-
+  .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(focused_lock_dir)
+cross_process_lock_output <- suppressWarnings(system2(
+  file.path(R.home("bin"), "Rscript"), cross_process_lock_script,
+  stdout = TRUE, stderr = TRUE
+))
+assert_true(
+  !is.null(attr(cross_process_lock_output, "status")) &&
+    attr(cross_process_lock_output, "status") != 0L,
+  "cross-process OS shadow artifact lock contention fails closed"
+)
+.fastkpc_full_cuda_phase3_release_shadow_artifact_lock(focused_lock)
+focused_lock <- NULL
 assert_true(
   exists(".fastkpc_full_cuda_phase3_commit_shadow_generation",
          mode = "function"),
@@ -224,6 +388,37 @@ focused_transaction_lock <-
 on.exit(.fastkpc_full_cuda_phase3_release_shadow_artifact_lock(
   focused_transaction_lock
 ), add = TRUE)
+marker_stage <- tempfile("shadow-generation-marker-stage-")
+dir.create(marker_stage, recursive = TRUE, showWarnings = FALSE)
+marker_staged <- setNames(
+  file.path(marker_stage, basename(focused_final)), names(focused_final)
+)
+writeLines("new-payload", marker_staged[["payload"]], useBytes = TRUE)
+writeLines("new-manifest", marker_staged[["manifest"]], useBytes = TRUE)
+writeLines("new-summary", marker_staged[["summary"]], useBytes = TRUE)
+markers_hidden_before_payload <- FALSE
+.fastkpc_full_cuda_phase3_commit_shadow_generation(
+  staged_paths = marker_staged, final_paths = focused_final,
+  payload_keys = "payload", manifest_key = "manifest",
+  summary_key = "summary", output_dir = focused_generation_dir,
+  artifact_lock = focused_transaction_lock,
+  validate_function = function() invisible(TRUE),
+  .publication_hook = function(event) {
+    if (identical(event, "before_payload_commit")) {
+      markers_hidden_before_payload <<-
+        !file.exists(focused_final[["manifest"]]) &&
+        !file.exists(focused_final[["summary"]])
+    }
+  }
+)
+assert_true(
+  isTRUE(markers_hidden_before_payload),
+  "both completion markers are unpublished before the first payload rename"
+)
+writeLines("old-payload", focused_final[["payload"]], useBytes = TRUE)
+writeLines("old-manifest", focused_final[["manifest"]], useBytes = TRUE)
+writeLines("old-summary", focused_final[["summary"]], useBytes = TRUE)
+unlink(marker_stage, recursive = TRUE, force = TRUE)
 for (failure_event in c(
   "payload_write", "before_manifest_commit",
   "after_manifest_commit", "validation_failure"
@@ -306,6 +501,96 @@ unlink(partial_stage, recursive = TRUE, force = TRUE)
   focused_transaction_lock
 )
 focused_transaction_lock <- NULL
+
+crash_stage <- tempfile("shadow-generation-crash-stage-")
+dir.create(crash_stage, recursive = TRUE, showWarnings = FALSE)
+crash_staged <- setNames(
+  file.path(crash_stage, basename(focused_final)), names(focused_final)
+)
+writeLines("crash-payload", crash_staged[["payload"]], useBytes = TRUE)
+writeLines("crash-manifest", crash_staged[["manifest"]], useBytes = TRUE)
+writeLines("crash-summary", crash_staged[["summary"]], useBytes = TRUE)
+writeLines("old-payload", focused_final[["payload"]], useBytes = TRUE)
+writeLines("old-manifest", focused_final[["manifest"]], useBytes = TRUE)
+writeLines("old-summary", focused_final[["summary"]], useBytes = TRUE)
+crash_script <- tempfile("phase3-shadow-crash-child-", fileext = ".R")
+writeLines(c(
+  'source("fastkpc/R/full_cuda_ci_gate.R")',
+  'source("fastkpc/R/full_cuda_ci_oracle_contract.R")',
+  'source("fastkpc/R/full_cuda_ci_workload_census.R")',
+  'source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")',
+  'source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R")',
+  'source("fastkpc/R/full_cuda_ci_fixed_sp_shadow.R")',
+  'source("fastkpc/R/full_cuda_ci_phase3_artifacts.R")',
+  sprintf(
+    'lock <- .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(%s)',
+    encodeString(focused_generation_dir, quote = '"')
+  ),
+  sprintf(paste0(
+    '.fastkpc_full_cuda_phase3_commit_shadow_generation(',
+    'staged_paths=setNames(c(%s,%s,%s),c("payload","manifest","summary")),',
+    'final_paths=setNames(c(%s,%s,%s),c("payload","manifest","summary")),',
+    'payload_keys="payload",manifest_key="manifest",summary_key="summary",',
+    'output_dir=%s,artifact_lock=lock,validate_function=function() TRUE,',
+    '.publication_hook=function(event) { if (identical(event, ',
+    '"after_payload_commit")) tools::pskill(Sys.getpid(), 9L) })'
+  ),
+  encodeString(crash_staged[["payload"]], quote = '"'),
+  encodeString(crash_staged[["manifest"]], quote = '"'),
+  encodeString(crash_staged[["summary"]], quote = '"'),
+  encodeString(focused_final[["payload"]], quote = '"'),
+  encodeString(focused_final[["manifest"]], quote = '"'),
+  encodeString(focused_final[["summary"]], quote = '"'),
+  encodeString(focused_generation_dir, quote = '"'))
+), crash_script, useBytes = TRUE)
+on.exit(unlink(c(crash_stage, crash_script), recursive = TRUE, force = TRUE),
+        add = TRUE)
+crash_output <- suppressWarnings(system2(
+  file.path(R.home("bin"), "Rscript"), crash_script,
+  stdout = TRUE, stderr = TRUE
+))
+assert_true(
+  !is.null(attr(crash_output, "status")) &&
+    attr(crash_output, "status") != 0L &&
+    !file.exists(focused_final[["manifest"]]) &&
+    !file.exists(focused_final[["summary"]]),
+  "hard exit after first payload replacement leaves no completion markers"
+)
+recovery_stage <- tempfile("shadow-generation-recovery-stage-")
+dir.create(recovery_stage, recursive = TRUE, showWarnings = FALSE)
+recovery_staged <- setNames(
+  file.path(recovery_stage, basename(focused_final)), names(focused_final)
+)
+writeLines("recovered-payload", recovery_staged[["payload"]], useBytes = TRUE)
+writeLines("recovered-manifest", recovery_staged[["manifest"]], useBytes = TRUE)
+writeLines("recovered-summary", recovery_staged[["summary"]], useBytes = TRUE)
+recovery_lock <-
+  .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(
+    focused_generation_dir
+  )
+.fastkpc_full_cuda_phase3_commit_shadow_generation(
+  staged_paths = recovery_staged, final_paths = focused_final,
+  payload_keys = "payload", manifest_key = "manifest",
+  summary_key = "summary", output_dir = focused_generation_dir,
+  artifact_lock = recovery_lock,
+  validate_function = function() invisible(TRUE)
+)
+.fastkpc_full_cuda_phase3_release_shadow_artifact_lock(recovery_lock)
+assert_true(
+  identical(readLines(focused_final[["payload"]]), "recovered-payload") &&
+    identical(readLines(focused_final[["manifest"]]), "recovered-manifest") &&
+    identical(readLines(focused_final[["summary"]]), "recovered-summary") &&
+    !any(startsWith(
+      list.files(
+        dirname(focused_generation_dir), all.files = TRUE,
+        no.. = TRUE, full.names = FALSE
+      ),
+      paste0(".", basename(focused_generation_dir),
+             "-phase3-shadow-rollback-")
+    )),
+  "publication after a hard exit recomputes and completes a clean generation"
+)
+unlink(recovery_stage, recursive = TRUE, force = TRUE)
 assert_true(
   exists(".fastkpc_full_cuda_phase3_shadow_command_lines",
          mode = "function"),
@@ -480,9 +765,22 @@ assert_true(
   "conflicting repeated target route observations fail closed"
 )
 
-phase0_dir <- file.path(
+phase0_source_dir <- file.path(
   "fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1"
 )
+phase0_dir <- tempfile("phase3-shadow-phase0-authority-")
+dir.create(phase0_dir, recursive = TRUE, showWarnings = FALSE)
+phase0_source_files <- list.files(
+  phase0_source_dir, full.names = TRUE, all.files = TRUE, no.. = TRUE
+)
+assert_true(
+  all(file.copy(
+    phase0_source_files, phase0_dir, recursive = TRUE,
+    copy.mode = TRUE, copy.date = TRUE
+  )),
+  "fixture copies Phase 0 authority without mutating repository artifacts"
+)
+on.exit(unlink(phase0_dir, recursive = TRUE, force = TRUE), add = TRUE)
 phase1_dir <- file.path(
   "fastkpc", "artifacts", "full_cuda_ci", "workload_census_351x48_v1"
 )
@@ -1293,6 +1591,8 @@ publish_args <- list(
 .task9_heavy_probe$merge <- 0L
 .task9_heavy_probe$route <- 0L
 .task9_heavy_probe$replay <- 0L
+.task9_heavy_probe$plan <- 0L
+.task9_heavy_probe$scope_authority <- 0L
 .task9_heavy_probe$snapshot_create <- 0L
 .task9_heavy_probe$snapshot_release <- 0L
 invisible(trace(
@@ -1311,6 +1611,19 @@ invisible(trace(
   "fastkpc_full_cuda_replay_logical_ci",
   tracer = quote({
     .task9_heavy_probe$replay <- .task9_heavy_probe$replay + 1L
+  }), print = FALSE, where = globalenv()
+))
+invisible(trace(
+  "fastkpc_full_cuda_shadow_plan",
+  tracer = quote({
+    .task9_heavy_probe$plan <- .task9_heavy_probe$plan + 1L
+  }), print = FALSE, where = globalenv()
+))
+invisible(trace(
+  ".fastkpc_full_cuda_phase3_shadow_scope_authority",
+  tracer = quote({
+    .task9_heavy_probe$scope_authority <-
+      .task9_heavy_probe$scope_authority + 1L
   }), print = FALSE, where = globalenv()
 ))
 invisible(trace(
@@ -1333,6 +1646,8 @@ on.exit({
       "fastkpc_full_cuda_phase3_merge_shards",
       "fastkpc_full_cuda_shadow_reconstruct_target_routes",
       "fastkpc_full_cuda_replay_logical_ci",
+      "fastkpc_full_cuda_shadow_plan",
+      ".fastkpc_full_cuda_phase3_shadow_scope_authority",
       "fastkpc_full_cuda_phase3_create_shadow_execution_snapshot",
       "fastkpc_full_cuda_phase3_release_shadow_execution_snapshot"
     )) untrace(name, where = globalenv())
@@ -1341,6 +1656,19 @@ on.exit({
 }, add = TRUE)
 published <- do.call(
   fastkpc_full_cuda_phase3_publish_shadow_artifact, publish_args
+)
+publisher_heavy_counts <- c(
+  plan = .task9_heavy_probe$plan,
+  scope = .task9_heavy_probe$scope_authority,
+  snapshot = .task9_heavy_probe$snapshot_create
+)
+assert_true(
+  identical(publisher_heavy_counts, c(plan = 1L, scope = 1L, snapshot = 1L)),
+  paste(
+    "publisher constructs and selects authenticated scope exactly once:",
+    paste(names(publisher_heavy_counts), publisher_heavy_counts,
+          sep = "=", collapse = ",")
+  )
 )
 assert_true(
   identical(published$status, "published") &&
@@ -1370,10 +1698,17 @@ assert_true(
       ),
       c(merge = 2L, route = 2L, replay = 2L)
     ) && .task9_heavy_probe$snapshot_create == 2L &&
-    .task9_heavy_probe$snapshot_release == 2L,
+    .task9_heavy_probe$snapshot_release == 2L && identical(
+      c(
+        plan = .task9_heavy_probe$plan,
+        scope = .task9_heavy_probe$scope_authority,
+        snapshot = .task9_heavy_probe$snapshot_create
+      ) - publisher_heavy_counts,
+      c(plan = 1L, scope = 1L, snapshot = 1L)
+    ),
   paste(
     "fresh publication plus standalone validation performs exactly two",
-    "merge/route/replay passes and releases both authority snapshots"
+    "heavy passes with one plan/scope/snapshot build per pass"
   )
 )
 if (publication_only) {
@@ -1382,6 +1717,23 @@ if (publication_only) {
 }
 wrong_identity_constraint <- identity
 wrong_identity_constraint$source_commit <- strrep("9", 40L)
+wrong_phase0_dir <- tempfile("phase3-shadow-wrong-phase0-")
+dir.create(wrong_phase0_dir, recursive = TRUE, showWarnings = FALSE)
+assert_true(
+  all(file.copy(
+    phase0_source_files, wrong_phase0_dir, recursive = TRUE,
+    copy.mode = TRUE, copy.date = TRUE
+  )),
+  "fixture creates a separate valid-looking Phase 0 directory"
+)
+wrong_phase0_link <- tempfile("phase3-shadow-wrong-phase0-link-")
+assert_true(
+  file.symlink(wrong_phase0_dir, wrong_phase0_link),
+  "fixture creates a Phase 0 symlink alias"
+)
+on.exit(unlink(
+  c(wrong_phase0_dir, wrong_phase0_link), recursive = TRUE, force = TRUE
+), add = TRUE)
 for (constraint_case in list(
   list(
     label = "mismatched expected identity",
@@ -1391,6 +1743,14 @@ for (constraint_case in list(
   list(
     label = "mismatched source path",
     args = list(phase0_dir = dirname(phase0_dir))
+  ),
+  list(
+    label = "different valid-looking Phase 0 authority",
+    args = list(phase0_dir = wrong_phase0_dir)
+  ),
+  list(
+    label = "symlink alias to different Phase 0 authority",
+    args = list(phase0_dir = wrong_phase0_link)
   ),
   list(
     label = "unsupported caller snapshot",
@@ -2173,7 +2533,7 @@ expect_oracle_rejected(
   }, "forged oracle target route payload with refreshed hashes"
 )
 
-for (linkage_case in c("native", "route")) {
+for (linkage_case in c("native", "embedded_native", "route")) {
   force(linkage_case)
   expect_oracle_rejected(
     c(
@@ -2185,6 +2545,8 @@ for (linkage_case in c("native", "route")) {
       )
       if (identical(linkage_case, "native")) {
         manifest$executed_native_library_sha256 <- strrep("0", 64L)
+      } else if (identical(linkage_case, "embedded_native")) {
+        manifest$input_identity$native_library_sha256 <- strrep("0", 64L)
       } else {
         manifest$input_identity$route_config_hash <- strrep("0", 64L)
       }
@@ -2203,6 +2565,21 @@ for (linkage_case in c("native", "route")) {
     }, paste("forged oracle", linkage_case, "linkage")
   )
 }
+
+expect_rejected(
+  c(artifact_paths$manifest_json, artifact_paths$summary_json),
+  function() {
+    manifest <- jsonlite::read_json(
+      artifact_paths$manifest_json, simplifyVector = FALSE
+    )
+    manifest$source_inputs$input_identity$native_library_sha256 <-
+      strrep("0", 64L)
+    .fastkpc_full_cuda_phase3_write_json_exact(
+      manifest, artifact_paths$manifest_json
+    )
+    refresh_shadow_summary_manifest_hash()
+  }, "refreshed embedded shadow native identity"
+)
 
 expect_rejected(
   c(artifact_paths$manifest_json, artifact_paths$summary_json),
@@ -2231,6 +2608,37 @@ expect_rejected(artifact_paths$failures_csv, function() {
   unlink(artifact_paths$failures_csv, force = TRUE)
 }, "missing required output file")
 
+.task9_phase0_replace_path <- file.path(phase0_dir, "manifest.json")
+.task9_phase0_replace_once <- TRUE
+invisible(trace(
+  "fastkpc_full_cuda_compare_candidate_skeleton",
+  tracer = quote({
+    if (isTRUE(.task9_phase0_replace_once)) {
+      .task9_phase0_replace_once <- FALSE
+      writeLines(
+        c(readLines(.task9_phase0_replace_path, warn = FALSE), " "),
+        .task9_phase0_replace_path, useBytes = TRUE
+      )
+    }
+  }), print = FALSE, where = globalenv()
+))
+phase0_replacement_error <- tryCatch({
+  fastkpc_validate_full_cuda_fixed_sp_shadow_artifact(
+    output_dir, require_full = FALSE
+  )
+  NULL
+}, error = function(error) error)
+untrace("fastkpc_full_cuda_compare_candidate_skeleton", where = globalenv())
+rm(.task9_phase0_replace_path, .task9_phase0_replace_once,
+   envir = globalenv())
+assert_true(
+  inherits(phase0_replacement_error, "error") && grepl(
+    "authority", conditionMessage(phase0_replacement_error),
+    ignore.case = TRUE
+  ),
+  "Phase 0 replacement during graph replay fails post-use authority recheck"
+)
+
 assert_true(
   .task9_heavy_probe$snapshot_create ==
     .task9_heavy_probe$snapshot_release,
@@ -2243,6 +2651,8 @@ for (name in c(
   "fastkpc_full_cuda_phase3_merge_shards",
   "fastkpc_full_cuda_shadow_reconstruct_target_routes",
   "fastkpc_full_cuda_replay_logical_ci",
+  "fastkpc_full_cuda_shadow_plan",
+  ".fastkpc_full_cuda_phase3_shadow_scope_authority",
   "fastkpc_full_cuda_phase3_create_shadow_execution_snapshot",
   "fastkpc_full_cuda_phase3_release_shadow_execution_snapshot"
 )) untrace(name, where = globalenv())
