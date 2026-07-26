@@ -2602,6 +2602,122 @@ fastkpc_validate_full_cuda_phase3_artifact <-
   .fastkpc_full_cuda_phase3_release_lock(lock, "shadow_artifact")
 }
 
+.fastkpc_full_cuda_phase3_shadow_work_dir_prefix <- function(
+    output_dir, purpose) {
+  clean_purpose <- .fastkpc_full_cuda_phase3_bare_scalar(
+    purpose, "character"
+  ) && purpose %in% c("staging", "rollback")
+  if (!isTRUE(clean_purpose)) {
+    stop("shadow work directory purpose is malformed", call. = FALSE)
+  }
+  canonical_output <- normalizePath(
+    output_dir, winslash = "/", mustWork = TRUE
+  )
+  paste0(
+    ".", basename(canonical_output), "-phase3-shadow-", purpose, "-"
+  )
+}
+
+.fastkpc_full_cuda_phase3_shadow_work_dir_marker_path <- function(path) {
+  file.path(path, ".fastkpc-shadow-work-owner.json")
+}
+
+.fastkpc_full_cuda_phase3_write_shadow_work_dir_marker <- function(
+    path, output_dir, purpose) {
+  canonical_output <- normalizePath(
+    output_dir, winslash = "/", mustWork = TRUE
+  )
+  canonical_path <- normalizePath(path, winslash = "/", mustWork = TRUE)
+  prefix <- .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
+    canonical_output, purpose
+  )
+  clean <- !nzchar(Sys.readlink(path)) && dir.exists(canonical_path) &&
+    !file_test("-f", canonical_path) &&
+    identical(dirname(canonical_path), dirname(canonical_output)) &&
+    startsWith(basename(canonical_path), prefix)
+  if (!isTRUE(clean)) {
+    stop("shadow work directory ownership path is malformed", call. = FALSE)
+  }
+  marker <- list(
+    schema_version = "full-cuda-ci-shadow-work-owner-v1",
+    output_dir = canonical_output, purpose = purpose,
+    creator_pid = as.integer(Sys.getpid()),
+    generation = basename(canonical_path)
+  )
+  .fastkpc_full_cuda_phase3_write_json_exact(
+    marker, .fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(
+      canonical_path
+    )
+  )
+  invisible(marker)
+}
+
+.fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs <- function(
+    output_dir, purposes, artifact_lock) {
+  .fastkpc_full_cuda_phase3_require_shadow_artifact_lock(
+    artifact_lock, output_dir
+  )
+  clean_purposes <- typeof(purposes) == "character" &&
+    !is.object(purposes) && is.null(attributes(purposes)) &&
+    length(purposes) > 0L && !anyNA(purposes) && !anyDuplicated(purposes) &&
+    all(purposes %in% c("staging", "rollback"))
+  if (!isTRUE(clean_purposes)) {
+    stop("shadow work cleanup purposes are malformed", call. = FALSE)
+  }
+  canonical_output <- normalizePath(
+    output_dir, winslash = "/", mustWork = TRUE
+  )
+  parent <- dirname(canonical_output)
+  entries <- list.files(
+    parent, full.names = TRUE, all.files = TRUE, no.. = TRUE
+  )
+  for (purpose in purposes) {
+    prefix <- .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
+      canonical_output, purpose
+    )
+    candidates <- entries[startsWith(basename(entries), prefix)]
+    for (candidate in candidates) {
+      if (nzchar(Sys.readlink(candidate)) || !dir.exists(candidate) ||
+          file_test("-f", candidate)) {
+        stop("shadow work cleanup encountered a non-owned entry",
+             call. = FALSE)
+      }
+      marker_path <-
+        .fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(candidate)
+      if (nzchar(Sys.readlink(marker_path)) || !file.exists(marker_path) ||
+          dir.exists(marker_path)) {
+        stop("shadow work cleanup ownership marker is missing",
+             call. = FALSE)
+      }
+      marker <- .fastkpc_full_cuda_phase3_read_json(
+        marker_path, "shadow work ownership marker"
+      )
+      fields <- c(
+        "schema_version", "output_dir", "purpose", "creator_pid",
+        "generation"
+      )
+      clean_marker <- identical(names(marker), fields) &&
+        identical(attributes(marker), list(names = fields)) &&
+        identical(
+          marker$schema_version, "full-cuda-ci-shadow-work-owner-v1"
+        ) && identical(marker$output_dir, canonical_output) &&
+        identical(marker$purpose, purpose) &&
+        .fastkpc_full_cuda_phase3_bare_integer(marker$creator_pid, 1L) &&
+        identical(marker$generation, basename(candidate))
+      if (!isTRUE(clean_marker)) {
+        stop("shadow work cleanup ownership marker is malformed",
+             call. = FALSE)
+      }
+      unlink(candidate, recursive = TRUE, force = TRUE)
+      if (file.exists(candidate) || dir.exists(candidate)) {
+        stop("failed to remove stale owned shadow work directory",
+             call. = FALSE)
+      }
+    }
+  }
+  invisible(TRUE)
+}
+
 .fastkpc_full_cuda_phase3_commit_shadow_generation <- function(
     staged_paths, final_paths, payload_keys, manifest_key, summary_key,
     output_dir, artifact_lock, validate_function,
@@ -2624,25 +2740,21 @@ fastkpc_validate_full_cuda_phase3_artifact <-
     if (!is.null(.publication_hook)) .publication_hook(event)
     invisible(NULL)
   }
-  output_parent <- dirname(normalizePath(output_dir, mustWork = FALSE))
-  rollback_prefix <- paste0(
-    ".", basename(normalizePath(output_dir, mustWork = FALSE)),
-    "-phase3-shadow-rollback-"
+  output_parent <- dirname(normalizePath(output_dir, mustWork = TRUE))
+  rollback_prefix <- .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
+    output_dir, "rollback"
   )
-  rollback_entries <- list.files(
-    output_parent, full.names = TRUE, all.files = TRUE, no.. = TRUE
+  .fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs(
+    output_dir, "rollback", artifact_lock
   )
-  stale_rollbacks <- rollback_entries[startsWith(
-    basename(rollback_entries), rollback_prefix
-  )]
-  if (length(stale_rollbacks) > 0L) {
-    unlink(stale_rollbacks, recursive = TRUE, force = TRUE)
-  }
   backup_dir <- tempfile(rollback_prefix, tmpdir = output_parent)
   if (!dir.create(backup_dir, recursive = FALSE, showWarnings = FALSE)) {
     stop("failed to create shadow generation rollback directory",
          call. = FALSE)
   }
+  .fastkpc_full_cuda_phase3_write_shadow_work_dir_marker(
+    backup_dir, output_dir, "rollback"
+  )
   prior_present <- vapply(final_paths, function(path) {
     file.exists(path) && !dir.exists(path)
   }, logical(1L))
@@ -10426,6 +10538,11 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("completed Phase 3 oracle validation requires expected identity",
          call. = FALSE)
   }
+  .fastkpc_full_cuda_phase3_validate_shadow_native_linkage(
+    expected_identity, manifest$input_identity,
+    manifest$executed_native_library_sha256,
+    "completed Phase 3 oracle artifact"
+  )
   .fastkpc_full_cuda_phase3_validate_artifact_identity(
     expected_identity, require_full = semantic_full
   )
@@ -10836,9 +10953,13 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     catalog_setup_keys <- sort(as.character(
       selected_scope$setup_rows$prepared_s_key_sha256
     ), method = "radix")
+    catalog_descriptor_fields <- names(catalog_descriptor)
     if (!identical(
           catalog_setup_keys, setup_results$prepared_s_key_sha256
-        ) || !identical(catalog_descriptor, descriptor)) {
+        ) || !identical(
+          catalog_descriptor,
+          descriptor[, catalog_descriptor_fields, drop = FALSE]
+        )) {
       stop("Phase 3 oracle rows do not match reopened catalog lineage",
            call. = FALSE)
     }
@@ -12113,6 +12234,8 @@ fastkpc_full_cuda_phase3_validate_direct_ci_payload <- function(
     catalog, phase0_dir = NULL) {
   fastkpc_full_cuda_phase3_discover_catalog_authority(catalog)
   authority <- .fastkpc_full_cuda_phase3_catalog_authority_snapshot(catalog)
+  input_contract <- fastkpc_full_cuda_census_input_contract()
+  semantic_contract <- fastkpc_full_cuda_canonical_contract()
   canonical_dir <- authority$phase0_dir
   if (!is.null(phase0_dir)) {
     clean <- .fastkpc_full_cuda_phase3_bare_scalar(
@@ -12132,31 +12255,88 @@ fastkpc_full_cuda_phase3_validate_direct_ci_payload <- function(
     fastkpc_full_cuda_census_file_hash(manifest_path),
     error = function(error) NA_character_
   )
+  expected_manifest_hash <- unname(input_contract$file_hashes[[
+    "oracle/manifest.json"
+  ]])
   if (!identical(manifest_hash, authority$phase0_manifest_hash) ||
-      !is.list(catalog$phase0)) {
-    stop("shadow Phase 0 manifest/oracle authority mismatch", call. = FALSE)
+      !identical(manifest_hash, expected_manifest_hash) ||
+      !identical(
+        authority$dataset_file_sha256,
+        unname(input_contract$file_hashes[[
+          "dataset/cancer_RD-causalDiscoveryInput.rds"
+        ]])
+      ) || !identical(
+        authority$dataset_matrix_sha256,
+        input_contract$dataset_matrix_sha256
+      )) {
+    stop("shadow Phase 0 manifest/file authority mismatch", call. = FALSE)
   }
   list(
-    authority = authority, manifest_path = manifest_path,
-    manifest_sha256 = manifest_hash, oracle = catalog$phase0
+    authority = authority, input_contract = input_contract,
+    semantic_contract = semantic_contract,
+    manifest_path = manifest_path, manifest_sha256 = manifest_hash
   )
+}
+
+.fastkpc_full_cuda_phase3_load_shadow_phase0_oracle <- function(
+    catalog, captured) {
+  .fastkpc_full_cuda_phase3_revalidate_shadow_phase0_authority(
+    catalog, captured
+  )
+  loaded <- fastkpc_full_cuda_census_load_inputs(
+    captured$authority$phase0_dir, captured$authority$data_path,
+    contract = captured$input_contract
+  )
+  hashes <- loaded$oracle_input_hashes
+  expected_hashes <- captured$input_contract$file_hashes[
+    hashes$logical_path
+  ]
+  clean <- is.list(loaded$oracle) && is.data.frame(hashes) &&
+    identical(
+      as.character(hashes$actual_sha256), unname(expected_hashes)
+    ) && identical(
+      loaded$oracle_input_bundle_sha256,
+      captured$input_contract$oracle_input_bundle_sha256
+    ) && identical(
+      fastkpc_full_cuda_census_file_hash(captured$manifest_path),
+      captured$manifest_sha256
+    )
+  if (!isTRUE(clean)) {
+    stop("fresh shadow Phase 0 oracle linkage failed", call. = FALSE)
+  }
+  loaded$oracle
 }
 
 .fastkpc_full_cuda_phase3_revalidate_shadow_phase0_authority <- function(
     catalog, captured) {
   if (!is.list(captured) || is.object(captured) || !identical(
         names(captured),
-        c("authority", "manifest_path", "manifest_sha256", "oracle")
+        c(
+          "authority", "input_contract", "semantic_contract",
+          "manifest_path", "manifest_sha256"
+        )
       )) {
     stop("captured shadow Phase 0 authority is malformed", call. = FALSE)
   }
   current <- .fastkpc_full_cuda_phase3_shadow_phase0_authority(
     catalog, captured$authority$phase0_dir
   )
+  hashes <- fastkpc_full_cuda_census_validate_input_hashes(
+    captured$authority$phase0_dir, captured$authority$data_path,
+    contract = captured$input_contract
+  )
   clean <- identical(current$authority, captured$authority) &&
+    identical(current$input_contract, captured$input_contract) &&
+    identical(current$semantic_contract, captured$semantic_contract) &&
     identical(current$manifest_path, captured$manifest_path) &&
     identical(current$manifest_sha256, captured$manifest_sha256) &&
-    identical(current$oracle, captured$oracle)
+    identical(
+      as.character(hashes$actual_sha256),
+      unname(captured$input_contract$file_hashes[hashes$logical_path])
+    ) && identical(
+      attr(hashes, "oracle_input_bundle_sha256", exact = TRUE),
+      captured$input_contract$oracle_input_bundle_sha256
+    )
   if (!isTRUE(clean)) {
     stop("shadow Phase 0 authority changed during graph replay",
          call. = FALSE)
@@ -12376,8 +12556,11 @@ fastkpc_full_cuda_phase3_validate_direct_ci_payload <- function(
   phase0_authority <- .fastkpc_full_cuda_phase3_shadow_phase0_authority(
     catalog, phase0_dir
   )
+  phase0 <- .fastkpc_full_cuda_phase3_load_shadow_phase0_oracle(
+    catalog, phase0_authority
+  )
   comparison <- fastkpc_full_cuda_compare_candidate_skeleton(
-    phase0_authority$oracle, replay$skeleton
+    phase0, replay$skeleton
   )
   .fastkpc_full_cuda_phase3_revalidate_shadow_phase0_authority(
     catalog, phase0_authority
@@ -12580,6 +12763,7 @@ fastkpc_full_cuda_phase3_validate_direct_ci_payload <- function(
   hook("before_payload_write")
   saveRDS(value$merged_rows, paths$logical_ci_parity_rds,
           version = 2, compress = FALSE)
+  hook("after_staged_payload_write")
   .fastkpc_full_cuda_phase3_write_csv(
     value$merged_rows, paths$logical_ci_parity_csv
   )
@@ -12861,6 +13045,9 @@ fastkpc_full_cuda_phase3_publish_shadow_artifact <- function(
       add = TRUE
     )
   })
+  .fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs(
+    output_dir, c("staging", "rollback"), artifact_lock
+  )
   completion <- c(
     manifest = file.exists(final_paths$manifest_json),
     summary = file.exists(final_paths$summary_json)
@@ -12891,8 +13078,17 @@ fastkpc_full_cuda_phase3_publish_shadow_artifact <- function(
     authenticated_plan = authenticated_shadow_plan
   )
   staging_dir <- tempfile(
-    paste0(".", basename(output_dir), "-publish-"),
-    tmpdir = dirname(output_dir)
+    .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
+      output_dir, "staging"
+    ),
+    tmpdir = dirname(normalizePath(output_dir, mustWork = TRUE))
+  )
+  if (!dir.create(staging_dir, recursive = FALSE, showWarnings = FALSE)) {
+    stop("failed to create shadow artifact staging directory",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_write_shadow_work_dir_marker(
+    staging_dir, output_dir, "staging"
   )
   on.exit(unlink(staging_dir, recursive = TRUE, force = TRUE), add = TRUE)
   written <- .fastkpc_full_cuda_phase3_write_shadow_payload(
@@ -13306,13 +13502,16 @@ fastkpc_full_cuda_phase3_publish_shadow_artifact <- function(
   if (!identical(route_config$sha256, identity$route_config_hash)) {
     stop("Task 9 shadow route/input identity mismatch", call. = FALSE)
   }
-  token <- fastkpc_full_cuda_phase3_create_shadow_execution_snapshot(
-    catalog, plan, scope
-  )
-  on.exit(
-    fastkpc_full_cuda_phase3_release_shadow_execution_snapshot(token),
-    add = TRUE
-  )
+  token <- NULL
+  suspendInterrupts({
+    token <- fastkpc_full_cuda_phase3_create_shadow_execution_snapshot(
+      catalog, plan, scope
+    )
+    on.exit(
+      fastkpc_full_cuda_phase3_release_shadow_execution_snapshot(token),
+      add = TRUE
+    )
+  })
   selected <- .fastkpc_full_cuda_phase3_shadow_scope_authority(
     catalog, scope, shard_count, source$canonical_setup_shards,
     token, source$shadow_plan_identity_sha256, plan

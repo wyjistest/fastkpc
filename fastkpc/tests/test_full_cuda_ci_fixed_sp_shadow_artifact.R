@@ -25,9 +25,103 @@ assert_true(
   "fixed-sp shadow direct/conditional normalizer should exist"
 )
 
+assert_true(
+  all(vapply(c(
+    ".fastkpc_full_cuda_phase3_shadow_phase0_authority",
+    ".fastkpc_full_cuda_phase3_load_shadow_phase0_oracle",
+    ".fastkpc_full_cuda_phase3_revalidate_shadow_phase0_authority"
+  ), exists, logical(1L), mode = "function")),
+  "shadow replay exposes fresh canonical Phase 0 loader authority"
+)
+assert_true(
+  all(vapply(c(
+    ".fastkpc_full_cuda_phase3_shadow_work_dir_prefix",
+    ".fastkpc_full_cuda_phase3_write_shadow_work_dir_marker",
+    ".fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs"
+  ), exists, logical(1L), mode = "function")),
+  "shadow publication exposes exact owned staging/rollback cleanup"
+)
+
 focused_only <- identical(
   Sys.getenv("FASTKPC_TASK9_FOCUSED_ONLY", unset = "0"), "1"
 )
+
+focused_work_output <- tempfile("phase3-shadow-work-output-")
+dir.create(focused_work_output, recursive = TRUE, showWarnings = FALSE)
+on.exit(unlink(focused_work_output, recursive = TRUE, force = TRUE),
+        add = TRUE)
+focused_work_lock <-
+  .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(
+    focused_work_output
+  )
+focused_staging <- tempfile(
+  .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
+    focused_work_output, "staging"
+  ),
+  tmpdir = dirname(focused_work_output)
+)
+dir.create(focused_staging, showWarnings = FALSE)
+.fastkpc_full_cuda_phase3_write_shadow_work_dir_marker(
+  focused_staging, focused_work_output, "staging"
+)
+writeLines("partial payload", file.path(focused_staging, "payload.rds"),
+           useBytes = TRUE)
+.fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs(
+  focused_work_output, c("staging", "rollback"), focused_work_lock
+)
+assert_true(
+  !file.exists(focused_staging),
+  "owned stale shadow staging is removed under the publication OS lock"
+)
+focused_malformed_staging <- tempfile(
+  .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
+    focused_work_output, "staging"
+  ),
+  tmpdir = dirname(focused_work_output)
+)
+dir.create(focused_malformed_staging, showWarnings = FALSE)
+writeLines("not an ownership marker", file.path(
+  focused_malformed_staging, ".fastkpc-shadow-work-owner.json"
+), useBytes = TRUE)
+malformed_staging_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs(
+    focused_work_output, "staging", focused_work_lock
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(malformed_staging_error, "error") &&
+    dir.exists(focused_malformed_staging),
+  "malformed shadow staging ownership fails closed without deletion"
+)
+unlink(focused_malformed_staging, recursive = TRUE, force = TRUE)
+focused_symlink_target <- tempfile("phase3-shadow-work-target-")
+dir.create(focused_symlink_target, showWarnings = FALSE)
+focused_symlink_staging <- tempfile(
+  .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
+    focused_work_output, "staging"
+  ),
+  tmpdir = dirname(focused_work_output)
+)
+assert_true(
+  file.symlink(focused_symlink_target, focused_symlink_staging),
+  "focused staging fixture creates a sibling symlink"
+)
+symlink_staging_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs(
+    focused_work_output, "staging", focused_work_lock
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(symlink_staging_error, "error") &&
+    dir.exists(focused_symlink_target),
+  "symlink shadow staging fails closed without deleting its target"
+)
+unlink(focused_symlink_staging, force = TRUE)
+unlink(focused_symlink_target, recursive = TRUE, force = TRUE)
+.fastkpc_full_cuda_phase3_release_shadow_artifact_lock(focused_work_lock)
+focused_work_lock <- NULL
 publication_only <- identical(
   Sys.getenv("FASTKPC_TASK9_PUBLICATION_ONLY", unset = "0"), "1"
 )
@@ -807,6 +901,49 @@ on.exit(
 selected <- .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
   execution_snapshot, expected_scope = "iteration"
 )
+phase0_capture <- .fastkpc_full_cuda_phase3_shadow_phase0_authority(
+  catalog, phase0_dir
+)
+phase0_expected <- .fastkpc_full_cuda_phase3_load_shadow_phase0_oracle(
+  catalog, phase0_capture
+)
+mutated_phase0_catalog <- catalog
+mutated_phase0_catalog$phase0$reference$adjacency[1L, 2L] <-
+  !mutated_phase0_catalog$phase0$reference$adjacency[1L, 2L]
+mutated_phase0_catalog$phase0$logical_trace$p_value[[1L]] <-
+  mutated_phase0_catalog$phase0$logical_trace$p_value[[1L]] + 0.25
+mutated_phase0_catalog$phase0$deletion_trace$p_value[[1L]] <-
+  mutated_phase0_catalog$phase0$deletion_trace$p_value[[1L]] + 0.25
+mutated_phase0_catalog$phase0$reference$sepsets <- list(forged = TRUE)
+mutated_phase0_catalog$phase0$reference$n.edgetests[[1L]] <-
+  mutated_phase0_catalog$phase0$reference$n.edgetests[[1L]] + 1L
+phase0_reloaded <- .fastkpc_full_cuda_phase3_load_shadow_phase0_oracle(
+  mutated_phase0_catalog,
+  .fastkpc_full_cuda_phase3_shadow_phase0_authority(
+    mutated_phase0_catalog, phase0_dir
+  )
+)
+assert_true(
+  identical(
+    phase0_reloaded$reference$adjacency,
+    phase0_expected$reference$adjacency
+  ) && identical(
+    phase0_reloaded$logical_trace, phase0_expected$logical_trace
+  ) && identical(
+    phase0_reloaded$deletion_trace, phase0_expected$deletion_trace
+  ) && identical(
+    phase0_reloaded$reference$sepsets,
+    phase0_expected$reference$sepsets
+  ) && identical(
+    phase0_reloaded$reference$n.edgetests,
+    phase0_expected$reference$n.edgetests
+  ),
+  paste(
+    "fresh canonical Phase 0 reload ignores caller catalog adjacency,",
+    "logical, deletion, sepset, and n.edgetests mutations"
+  )
+)
+rm(mutated_phase0_catalog, phase0_reloaded, phase0_expected)
 logical_rows <- selected$logical_rows
 target_rows <- selected$target_rows
 setup_keys <- selected$setup_keys
@@ -1090,6 +1227,113 @@ identity <- list(
   cublas_workspace_min_alignment_required = 256
 )
 identity$sha256 <- .fastkpc_full_cuda_phase3_named_hash(identity)
+
+production_native_path <- tempfile(
+  "phase3-shadow-production-native-", fileext = .Platform$dynlib.ext
+)
+writeBin(charToRaw("Task 9 production native identity fixture"),
+         production_native_path)
+on.exit(unlink(production_native_path, force = TRUE), add = TRUE)
+production_native_file <- list(
+  path = normalizePath(production_native_path, mustWork = TRUE),
+  device_major_hex = "1", device_minor_hex = "1", inode = "1"
+)
+production_native_sha256 <- fastkpc_full_cuda_census_file_hash(
+  production_native_path
+)
+production_catalog_authority <-
+  .fastkpc_full_cuda_phase3_catalog_authority_snapshot(catalog)
+production_policy <- .fastkpc_full_cuda_phase3_policy_contract()
+production_abi <- fastkpc_full_cuda_fixed_sp_runtime_abi()
+production_route <- fastkpc_full_cuda_phase3_route_config()
+production_source_commit <- strrep("7", 40L)
+production_identity <- list(
+  schema_version = "full-cuda-ci-phase3-input-identity-v1",
+  phase0_manifest_hash = production_catalog_authority$phase0_manifest_hash,
+  phase1_manifest_hash = production_catalog_authority$phase1_manifest_hash,
+  phase2_manifest_hash = production_catalog_authority$phase2_manifest_hash,
+  dataset_file_sha256 = production_catalog_authority$dataset_file_sha256,
+  dataset_matrix_sha256 = production_catalog_authority$dataset_matrix_sha256,
+  canonical_setup_corpus_hash =
+    production_catalog_authority$canonical_setup_corpus_hash,
+  canonical_target_corpus_hash =
+    production_catalog_authority$canonical_target_corpus_hash,
+  phase0_source_commit = production_catalog_authority$phase0_source_commit,
+  phase1_source_commit = production_catalog_authority$phase1_source_commit,
+  phase2_source_commit = production_catalog_authority$phase2_source_commit,
+  phase2_R_version = production_catalog_authority$phase2_R_version,
+  phase2_mgcv_version = production_catalog_authority$phase2_mgcv_version,
+  runtime_abi = production_abi$schema_version,
+  runtime_abi_hash = production_abi$sha256,
+  runtime_policy_schema_version =
+    production_policy$configuration_schema_version,
+  route_config_hash = production_route$sha256,
+  source_commit = production_source_commit,
+  phase3_source_commit = production_source_commit,
+  R_version = R.version.string,
+  phase3_R_version = R.version.string,
+  mgcv_version = as.character(utils::packageVersion("mgcv")),
+  phase3_mgcv_version = as.character(utils::packageVersion("mgcv")),
+  provenance_schema_version =
+    "full-cuda-ci-execution-source-snapshot-v6",
+  provenance_mode = "working-tree-execution-snapshot-v1",
+  source_closure_schema_version =
+    "full-cuda-ci-execution-source-closure-v1",
+  source_discovery_semantics =
+    "parsed-r-ast-load-time-literal-source-v1",
+  source_closure_count = 1L,
+  source_closure_sha256 = sha("production-source-closure"),
+  execution_snapshot_sha256 = sha("production-execution-snapshot"),
+  relevant_sources_dirty_or_untracked = FALSE,
+  execution_sources_unchanged_after_run = TRUE,
+  execution_provenance_state = "post-run-verified",
+  native_library_identity =
+    "qualified-pinned-inode-sha-exact-registered-mapped-path-v3",
+  native_library_path = production_native_file$path,
+  native_library_device_major_hex = production_native_file$device_major_hex,
+  native_library_device_minor_hex = production_native_file$device_minor_hex,
+  native_library_inode = production_native_file$inode,
+  native_library_sha256 = production_native_sha256,
+  native_build_inputs_sha256 = sha("production-native-build-inputs"),
+  native_build_dependencies_schema_version =
+    "full-cuda-ci-native-build-dependencies-v3",
+  native_build_attestation_schema_version =
+    "full-cuda-ci-native-build-trace-attestation-v2",
+  native_build_attestation_sha256 =
+    sha("production-native-build-attestation"),
+  native_build_trace_semantics =
+    "linux-strace-successful-read-exec-evidence-v3",
+  native_build_trace_invocation = "Task 9 fixture native trace",
+  native_build_tracer_path = "/usr/bin/strace",
+  native_build_dependency_count = 1L,
+  native_build_exclusion_count = 0L,
+  native_build_dependencies_sha256 =
+    sha("production-native-build-dependencies"),
+  native_build_trace_sha256 = sha("production-native-build-trace"),
+  native_build_tracer_sha256 = sha("production-native-build-tracer"),
+  cuda_toolkit_version = 12040L, cuda_driver_version = 55054L,
+  gpu_name = "Task 9 Production Fixture GPU",
+  gpu_uuid = paste0("GPU-", strrep("b", 32L)),
+  compute_capability_major = 8L, compute_capability_minor = 0L,
+  compute_capability = "8.0", sm_count = 108L, device_id = 0L,
+  cusolver_deterministic_mode_required =
+    production_policy$cusolver_deterministic_mode_required,
+  cublas_math_mode_required = production_policy$cublas_math_mode_required,
+  cublas_atomics_mode_required =
+    production_policy$cublas_atomics_mode_required,
+  cublas_user_workspace_required =
+    production_policy$cublas_user_workspace_required,
+  cublas_workspace_bytes_required =
+    production_policy$cublas_workspace_bytes_required,
+  cublas_workspace_min_alignment_required =
+    production_policy$cublas_workspace_min_alignment_required,
+  shard_count = production_route$shard_count, authenticated = TRUE
+)
+production_identity$sha256 <-
+  .fastkpc_full_cuda_phase3_identity_hash(production_identity)
+invisible(fastkpc_full_cuda_phase3_validate_input_identity(
+  production_identity
+))
 
 output_dir <- tempfile("phase3-shadow-artifact-")
 oracle_sp_dir <- tempfile("phase3-shadow-oracle-sp-")
@@ -1578,6 +1822,150 @@ oracle_paths <- fastkpc_full_cuda_phase3_artifact_paths(
   oracle_sp_dir, "oracle_sp"
 )
 
+production_oracle_dir <- tempfile("phase3-shadow-production-oracle-")
+on.exit(unlink(production_oracle_dir, recursive = TRUE, force = TRUE),
+        add = TRUE)
+production_oracle_context_count <- 0L
+production_oracle_run <- fastkpc_full_cuda_phase3_run_shards(
+  output_dir = production_oracle_dir, kind = "oracle_sp",
+  setup_keys = setup_keys, target_rows = oracle_target_rows,
+  identity = production_identity, route_config = production_route,
+  executor = function(context, shard_id, setup_keys, target_rows) {
+    payload <- make_oracle_payload(shard_id, setup_keys, target_rows)
+    count <- as.integer(length(setup_keys))
+    list(
+      payload = payload,
+      resource_counts = list(
+        prepared_handle_create_count = count,
+        prepared_handle_destroy_count = count,
+        residual_token_acquire_count = count,
+        residual_token_release_count = count,
+        output_slot_acquire_count = count,
+        output_slot_release_count = count
+      )
+    )
+  },
+  runtime_create = function() {
+    production_oracle_context_count <<-
+      production_oracle_context_count + 1L
+    new.env(parent = emptyenv())
+  },
+  runtime_destroy = function(context) invisible(NULL),
+  scope = "iteration", shard_count = 1L,
+  executed_native_library_sha256 = production_native_sha256
+)
+assert_true(
+  identical(production_oracle_run$status, "complete") &&
+    production_oracle_context_count == 1L,
+  "production-shaped oracle fixture writes authenticated shard evidence"
+)
+original_open_canonical_oracle_catalog <- get(
+  ".fastkpc_full_cuda_phase3_open_canonical_oracle_catalog",
+  envir = globalenv()
+)
+original_phase3_input_identity <- get(
+  "fastkpc_full_cuda_phase3_input_identity", envir = globalenv()
+)
+assign(
+  ".fastkpc_full_cuda_phase3_open_canonical_oracle_catalog",
+  function() catalog, envir = globalenv()
+)
+assign(
+  "fastkpc_full_cuda_phase3_input_identity",
+  function(catalog, device_id) production_identity,
+  envir = globalenv()
+)
+on.exit({
+  assign(
+    ".fastkpc_full_cuda_phase3_open_canonical_oracle_catalog",
+    original_open_canonical_oracle_catalog, envir = globalenv()
+  )
+  assign(
+    "fastkpc_full_cuda_phase3_input_identity",
+    original_phase3_input_identity, envir = globalenv()
+  )
+}, add = TRUE)
+production_oracle_publication <-
+  fastkpc_full_cuda_phase3_publish_oracle_artifact(
+    output_dir = production_oracle_dir, setup_keys = setup_keys,
+    target_rows = oracle_target_rows, identity = production_identity,
+    route_config = production_route, scope = "iteration", shard_count = 1L,
+    risk_rows = NULL, catalog = catalog, device_id = 0L,
+    command_lines =
+      "Rscript fastkpc/tests/test_full_cuda_ci_fixed_sp_shadow_artifact.R"
+  )
+assert_true(
+  identical(production_oracle_publication$status, "published") &&
+    isTRUE(fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+      production_oracle_dir, expected_identity = production_identity,
+      require_full = FALSE
+    )$authenticated),
+  "production-shaped completed oracle fixture passes public validation"
+)
+production_oracle_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+  production_oracle_dir, "oracle_sp"
+)
+production_manifest_before <- readBin(
+  production_oracle_paths$manifest_json, "raw",
+  n = file.info(production_oracle_paths$manifest_json)$size
+)
+production_summary_before <- readBin(
+  production_oracle_paths$summary_json, "raw",
+  n = file.info(production_oracle_paths$summary_json)$size
+)
+production_manifest <- jsonlite::read_json(
+  production_oracle_paths$manifest_json, simplifyVector = FALSE
+)
+production_manifest$input_identity$native_library_sha256 <- strrep("0", 64L)
+.fastkpc_full_cuda_phase3_write_json_exact(
+  production_manifest, production_oracle_paths$manifest_json
+)
+production_summary <- jsonlite::read_json(
+  production_oracle_paths$summary_json, simplifyVector = FALSE
+)
+production_summary$manifest_sha256 <- fastkpc_full_cuda_census_file_hash(
+  production_oracle_paths$manifest_json
+)
+.fastkpc_full_cuda_phase3_write_json_exact(
+  production_summary, production_oracle_paths$summary_json
+)
+production_native_error <- tryCatch({
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    production_oracle_dir, expected_identity = production_identity,
+    require_full = FALSE
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(production_native_error, "error") && grepl(
+    "native", conditionMessage(production_native_error), ignore.case = TRUE
+  ) && grepl(
+    "mismatch", conditionMessage(production_native_error), ignore.case = TRUE
+  ),
+  paste(
+    "public completed-oracle validator rejects an embedded-only native SHA",
+    "mutation through the production four-way gate"
+  )
+)
+manifest_connection <- file(
+  production_oracle_paths$manifest_json, open = "wb"
+)
+writeBin(production_manifest_before, manifest_connection)
+close(manifest_connection)
+summary_connection <- file(
+  production_oracle_paths$summary_json, open = "wb"
+)
+writeBin(production_summary_before, summary_connection)
+close(summary_connection)
+assign(
+  ".fastkpc_full_cuda_phase3_open_canonical_oracle_catalog",
+  original_open_canonical_oracle_catalog, envir = globalenv()
+)
+assign(
+  "fastkpc_full_cuda_phase3_input_identity",
+  original_phase3_input_identity, envir = globalenv()
+)
+
 publish_args <- list(
   output_dir = output_dir, catalog = catalog, setup_keys = setup_keys,
   target_rows = target_rows, identity = identity,
@@ -1654,6 +2042,101 @@ on.exit({
     rm(.task9_heavy_probe, envir = globalenv())
   }
 }, add = TRUE)
+publisher_child_identity <- tempfile(
+  "phase3-shadow-publisher-child-identity-", fileext = ".rds"
+)
+publisher_child_setup <- tempfile(
+  "phase3-shadow-publisher-child-setup-", fileext = ".rds"
+)
+publisher_child_targets <- tempfile(
+  "phase3-shadow-publisher-child-targets-", fileext = ".rds"
+)
+saveRDS(identity, publisher_child_identity, version = 2)
+saveRDS(setup_keys, publisher_child_setup, version = 2)
+saveRDS(target_rows, publisher_child_targets, version = 2)
+publisher_crash_script <- tempfile(
+  "phase3-shadow-real-publisher-crash-", fileext = ".R"
+)
+writeLines(c(
+  'source("fastkpc/R/full_cuda_ci_gate.R")',
+  'source("fastkpc/R/full_cuda_ci_oracle_contract.R")',
+  'source("fastkpc/R/full_cuda_ci_workload_census.R")',
+  'source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")',
+  'source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R")',
+  'source("fastkpc/R/full_cuda_ci_fixed_sp_shadow.R")',
+  'source("fastkpc/R/full_cuda_ci_phase3_artifacts.R")',
+  sprintf(
+    'catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(%s,%s,%s,%s)',
+    encodeString(phase0_dir, quote = '"'),
+    encodeString(phase1_dir, quote = '"'),
+    encodeString(phase2_dir, quote = '"'),
+    encodeString(data_path, quote = '"')
+  ),
+  sprintf('identity <- readRDS(%s)',
+          encodeString(publisher_child_identity, quote = '"')),
+  sprintf('setup_keys <- readRDS(%s)',
+          encodeString(publisher_child_setup, quote = '"')),
+  sprintf('target_rows <- readRDS(%s)',
+          encodeString(publisher_child_targets, quote = '"')),
+  sprintf(paste0(
+    'fastkpc_full_cuda_phase3_publish_shadow_artifact(',
+    'output_dir=%s,catalog=catalog,setup_keys=setup_keys,',
+    'target_rows=target_rows,identity=identity,',
+    'route_config=fastkpc_full_cuda_phase3_route_config(),',
+    'scope="iteration",phase0_dir=%s,oracle_sp_dir=%s,',
+    'shard_count=64L,direct_logical_sequence_id=1L,',
+    'command_lines="Task 9 real publisher crash fixture",',
+    '.publication_hook=function(event) { if (identical(event,',
+    '"after_staged_payload_write")) tools::pskill(Sys.getpid(),9L) })'
+  ),
+  encodeString(output_dir, quote = '"'),
+  encodeString(phase0_dir, quote = '"'),
+  encodeString(oracle_sp_dir, quote = '"'))
+), publisher_crash_script, useBytes = TRUE)
+on.exit(unlink(c(
+  publisher_child_identity, publisher_child_setup,
+  publisher_child_targets, publisher_crash_script
+), force = TRUE), add = TRUE)
+publisher_crash_output <- suppressWarnings(system2(
+  file.path(R.home("bin"), "Rscript"), publisher_crash_script,
+  stdout = TRUE, stderr = TRUE
+))
+shadow_work_siblings <- function(purpose) {
+  entries <- list.files(
+    dirname(output_dir), full.names = TRUE, all.files = TRUE, no.. = TRUE
+  )
+  prefix <- .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
+    output_dir, purpose
+  )
+  entries[startsWith(basename(entries), prefix)]
+}
+crashed_staging <- shadow_work_siblings("staging")
+assert_true(
+  !is.null(attr(publisher_crash_output, "status")) &&
+    attr(publisher_crash_output, "status") != 0L &&
+    !file.exists(artifact_paths$manifest_json) &&
+    !file.exists(artifact_paths$summary_json) &&
+    length(crashed_staging) == 1L &&
+    file.exists(.fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(
+      crashed_staging[[1L]]
+    )) && file.exists(file.path(
+      crashed_staging[[1L]], "logical_ci_parity.rds"
+    )),
+  paste(
+    "real publisher hard kill after its first staged payload leaves no",
+    "completion markers and one authenticated stale staging directory"
+  )
+)
+stale_rollback <- tempfile(
+  .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(output_dir, "rollback"),
+  tmpdir = dirname(output_dir)
+)
+dir.create(stale_rollback, showWarnings = FALSE)
+.fastkpc_full_cuda_phase3_write_shadow_work_dir_marker(
+  stale_rollback, output_dir, "rollback"
+)
+writeLines("stale rollback payload", file.path(stale_rollback, "payload.rds"),
+           useBytes = TRUE)
 published <- do.call(
   fastkpc_full_cuda_phase3_publish_shadow_artifact, publish_args
 )
@@ -1676,6 +2159,11 @@ assert_true(
     !isTRUE(published$summary$full_scope) &&
     identical(published$summary$first_divergence, "NOT_APPLICABLE"),
   "authenticated selected-scope shadow artifact publishes and validates"
+)
+assert_true(
+  length(shadow_work_siblings("staging")) == 0L &&
+    length(shadow_work_siblings("rollback")) == 0L,
+  "next real publication removes all owned stale staging and rollback siblings"
 )
 matching_public_validation <-
   fastkpc_validate_full_cuda_fixed_sp_shadow_artifact(
@@ -1711,6 +2199,56 @@ assert_true(
     "heavy passes with one plan/scope/snapshot build per pass"
   )
 )
+expect_standalone_snapshot_release <- function(
+    function_name, tracer, label) {
+  before <- c(
+    create = .task9_heavy_probe$snapshot_create,
+    release = .task9_heavy_probe$snapshot_release
+  )
+  invisible(trace(
+    function_name, tracer = tracer, print = FALSE, where = globalenv()
+  ))
+  error <- tryCatch({
+    fastkpc_validate_full_cuda_fixed_sp_shadow_artifact(
+      output_dir, require_full = FALSE
+    )
+    NULL
+  }, error = function(error) error)
+  untrace(function_name, where = globalenv())
+  after <- c(
+    create = .task9_heavy_probe$snapshot_create,
+    release = .task9_heavy_probe$snapshot_release
+  )
+  assert_true(
+    inherits(error, "error") && identical(
+      after - before, c(create = 1L, release = 1L)
+    ),
+    paste(label, "releases exactly one standalone execution snapshot")
+  )
+  invisible(error)
+}
+expect_standalone_snapshot_release(
+  ".fastkpc_full_cuda_phase3_shadow_oracle_sp_evidence",
+  quote(stop("injected completed-oracle native mismatch", call. = FALSE)),
+  "completed-oracle native mismatch"
+)
+expect_standalone_snapshot_release(
+  "fastkpc_full_cuda_compare_candidate_skeleton",
+  quote(stop("injected graph replay comparison failure", call. = FALSE)),
+  "graph replay comparison failure"
+)
+.task9_phase0_reload_calls <- 0L
+expect_standalone_snapshot_release(
+  "fastkpc_full_cuda_census_load_inputs",
+  quote({
+    .task9_phase0_reload_calls <<- .task9_phase0_reload_calls + 1L
+    if (.task9_phase0_reload_calls == 2L) {
+      stop("injected fresh Phase 0 reload failure", call. = FALSE)
+    }
+  }),
+  "fresh Phase 0 reload failure"
+)
+rm(.task9_phase0_reload_calls, envir = globalenv())
 if (publication_only) {
   cat("full CUDA CI fixed-sp shadow artifact publication probes: PASS\n")
   quit(save = "no", status = 0L)
@@ -2610,6 +3148,14 @@ expect_rejected(artifact_paths$failures_csv, function() {
 
 .task9_phase0_replace_path <- file.path(phase0_dir, "manifest.json")
 .task9_phase0_replace_once <- TRUE
+phase0_manifest_before <- readBin(
+  .task9_phase0_replace_path, "raw",
+  n = file.info(.task9_phase0_replace_path)$size
+)
+phase0_replacement_snapshot_before <- c(
+  create = .task9_heavy_probe$snapshot_create,
+  release = .task9_heavy_probe$snapshot_release
+)
 invisible(trace(
   "fastkpc_full_cuda_compare_candidate_skeleton",
   tracer = quote({
@@ -2628,13 +3174,23 @@ phase0_replacement_error <- tryCatch({
   )
   NULL
 }, error = function(error) error)
+phase0_replacement_snapshot_after <- c(
+  create = .task9_heavy_probe$snapshot_create,
+  release = .task9_heavy_probe$snapshot_release
+)
 untrace("fastkpc_full_cuda_compare_candidate_skeleton", where = globalenv())
+phase0_manifest_connection <- file(.task9_phase0_replace_path, open = "wb")
+writeBin(phase0_manifest_before, phase0_manifest_connection)
+close(phase0_manifest_connection)
 rm(.task9_phase0_replace_path, .task9_phase0_replace_once,
    envir = globalenv())
 assert_true(
   inherits(phase0_replacement_error, "error") && grepl(
     "authority", conditionMessage(phase0_replacement_error),
     ignore.case = TRUE
+  ) && identical(
+    phase0_replacement_snapshot_after - phase0_replacement_snapshot_before,
+    c(create = 1L, release = 1L)
   ),
   "Phase 0 replacement during graph replay fails post-use authority recheck"
 )
