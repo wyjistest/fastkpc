@@ -1830,6 +1830,19 @@ fastkpc_full_cuda_shadow_runtime_counters <- function(resource_metrics) {
     "shadow_materialize_call_count",
     "shadow_materialize_target_count"
   )
+  route_fields <- c(
+    "planned_cholesky_target_count", "planned_qr_target_count",
+    "planned_svd_target_count", "executed_cholesky_target_count",
+    "executed_qr_target_count", "executed_svd_target_count",
+    "cholesky_to_svd_count", "qr_to_svd_count",
+    "stable_reroute_count"
+  )
+  route_present <- route_fields %in% names(resource_metrics)
+  if (any(route_present) && !all(route_present)) {
+    stop("conditional shadow runtime route counters are incomplete",
+         call. = FALSE)
+  }
+  if (all(route_present)) fields <- c(fields, route_fields)
   clean <- is.data.frame(resource_metrics) &&
     all(fields %in% names(resource_metrics)) &&
     all(vapply(fields, function(field) {
@@ -2619,13 +2632,14 @@ fastkpc_full_cuda_shadow_scope <- function(catalog, plan, scope) {
 }
 
 fastkpc_full_cuda_shadow_merged_row_schema_version <- function() {
-  "full-cuda-ci-fixed-sp-shadow-merged-logical-row-v1"
+  "full-cuda-ci-fixed-sp-shadow-merged-logical-row-v2"
 }
 
 fastkpc_full_cuda_shadow_merged_row_schema <- function() {
   c(
     merged_schema_version = "character", source_type = "character",
-    logical_sequence_id = "integer", source_sequence_id = "integer",
+    logical_sequence_id = "integer", scope_sequence_ordinal = "integer",
+    source_sequence_id = "integer",
     source_task_index = "integer", level = "integer", x = "integer",
     y = "integer", S_key = "character", residual_key_x = "character",
     residual_key_y = "character", prepared_s_key_sha256 = "character",
@@ -2739,6 +2753,7 @@ fastkpc_full_cuda_shadow_merge_logical_rows <- function(
       ),
       source_type = rep.int(source_type, count),
       logical_sequence_id = as.integer(rows$logical_sequence_id),
+      scope_sequence_ordinal = rep.int(0L, count),
       source_sequence_id = as.integer(rows$source_sequence_id),
       source_task_index = as.integer(rows$source_task_index),
       level = as.integer(rows$level), x = as.integer(rows$x),
@@ -2803,6 +2818,7 @@ fastkpc_full_cuda_shadow_merge_logical_rows <- function(
     merged$logical_sequence_id, method = "radix"
   ), , drop = FALSE]
   rownames(merged) <- NULL
+  merged$scope_sequence_ordinal <- seq_len(nrow(merged))
   schema <- fastkpc_full_cuda_shadow_merged_row_schema()
   names_exact <- identical(names(merged), names(schema))
   type_exact <- if (names_exact) vapply(
@@ -2810,7 +2826,9 @@ fastkpc_full_cuda_shadow_merge_logical_rows <- function(
     logical(1L)
   ) else setNames(logical(), character())
   if (!isTRUE(names_exact) || !all(type_exact) ||
-      !identical(merged$logical_sequence_id, expected)) {
+      !identical(merged$logical_sequence_id, expected) || !identical(
+        merged$scope_sequence_ordinal, seq_len(nrow(merged))
+      )) {
     detail <- if (!isTRUE(names_exact)) {
       paste0(
         "column names actual=", paste(names(merged), collapse = ","),

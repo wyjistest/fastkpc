@@ -291,6 +291,16 @@ if (!publication$status %in% c("published", "reused") ||
   stop("Phase 3 shadow artifact publication/validation failed",
        call. = FALSE)
 }
+independent_validation <-
+  fastkpc_validate_full_cuda_fixed_sp_shadow_artifact(
+    output_dir, require_full = identical(scope, "full")
+  )
+if (!isTRUE(independent_validation$authenticated) ||
+    !isTRUE(independent_validation$pass) ||
+    is.null(independent_validation$recomputed_graph)) {
+  stop("Phase 3 public shadow artifact validation failed",
+       call. = FALSE)
+}
 
 elapsed_seconds <- as.double(proc.time()[["elapsed"]] - started)
 cat("Phase 3 conditional shadow shard run:", run$status, "\n")
