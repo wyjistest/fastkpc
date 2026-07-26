@@ -643,12 +643,15 @@ git commit -m "feat: publish authenticated fixed-sp CUDA oracle artifacts"
 rm -f fastkpc/build/*.o fastkpc/build/fastkpc_cuda.so
 bash fastkpc/tools/build_cuda_native.sh
 FASTKPC_RUN_CUDA_TESTS=1 \
+  Rscript fastkpc/tests/test_cuda_native_reproducible_build.R
+FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_phase3c_iteration.R
 FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_phase3c_qualification.R
 ```
 
-Expected: clean build and both gates PASS. Stop here on any failure.
+Expected: clean build, reproducible-build gate, and both numeric gates PASS.
+Stop here on any failure.
 
 - [ ] **Step 2: Run the full oracle-sp artifact**
 
@@ -670,7 +673,7 @@ override. The runner owns the frozen route config.
 - [ ] **Step 3: Run the independent full validator**
 
 ```bash
-Rscript -e 'source("fastkpc/R/full_cuda_ci_gate.R"); source("fastkpc/R/full_cuda_ci_workload_census.R"); source("fastkpc/R/full_cuda_ci_prepared_s_contract.R"); source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R"); source("fastkpc/R/full_cuda_ci_phase3_artifacts.R"); fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact("fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_oracle_sp_v1", require_full = TRUE)'
+Rscript -e 'source("fastkpc/R/full_cuda_ci_gate.R"); source("fastkpc/R/full_cuda_ci_oracle_contract.R"); source("fastkpc/R/full_cuda_ci_workload_census.R"); source("fastkpc/R/full_cuda_ci_prepared_s_contract.R"); source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R"); source("fastkpc/R/cuda_native.R"); source("fastkpc/R/full_cuda_ci_phase3_artifacts.R"); fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact("fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_oracle_sp_v1", require_full = TRUE)'
 ```
 
 Expected hard gates:
@@ -1157,8 +1160,25 @@ After Task 9 is committed and both reviews pass, run Task 5 Steps 2-5 under
 that exact source identity. Do not make another source commit between the
 oracle run, its pure-resume validation, and the full shadow run below.
 
+If `fixed_sp_cuda_oracle_sp_v1` contains a completed artifact from an older
+execution-source or native-build identity, preserve it under a uniquely named
+historical directory before rerunning Task 5 Step 2. Do not ask resume to
+adopt stale shards under the new identity. For the reproducible-native-build
+repair discovered after the `ef2a116` run, use:
+
 ```bash
-Rscript -e 'source("fastkpc/R/full_cuda_ci_gate.R"); source("fastkpc/R/full_cuda_ci_workload_census.R"); source("fastkpc/R/full_cuda_ci_prepared_s_contract.R"); source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R"); source("fastkpc/R/full_cuda_ci_phase3_artifacts.R"); fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact("fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_oracle_sp_v1", require_full = TRUE)'
+mv fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_oracle_sp_v1 \
+  fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_oracle_sp_v1.pre_reproducible_native_ef2a116_20260727
+mkdir -p fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_oracle_sp_v1
+```
+
+Commit the native-build repair before generating the replacement oracle.
+After that commit, make no source change through oracle generation, oracle
+validation and pure resume, full shadow generation, shadow validation, and
+shadow pure resume.
+
+```bash
+Rscript -e 'source("fastkpc/R/full_cuda_ci_gate.R"); source("fastkpc/R/full_cuda_ci_oracle_contract.R"); source("fastkpc/R/full_cuda_ci_workload_census.R"); source("fastkpc/R/full_cuda_ci_prepared_s_contract.R"); source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R"); source("fastkpc/R/cuda_native.R"); source("fastkpc/R/full_cuda_ci_phase3_artifacts.R"); fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact("fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_oracle_sp_v1", require_full = TRUE)'
 ```
 
 Expected: PASS. The shadow runner refuses an incomplete or mismatched oracle-sp
@@ -1185,7 +1205,7 @@ decision, route, or fallback overrides.
 - [ ] **Step 3: Run the independent full shadow validator**
 
 ```bash
-Rscript -e 'source("fastkpc/R/full_cuda_ci_gate.R"); source("fastkpc/R/full_cuda_ci_workload_census.R"); source("fastkpc/R/full_cuda_ci_prepared_s_contract.R"); source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R"); source("fastkpc/R/full_cuda_ci_phase3_artifacts.R"); source("fastkpc/R/full_cuda_ci_fixed_sp_shadow.R"); fastkpc_validate_full_cuda_fixed_sp_shadow_artifact("fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_full_shadow_v1", require_full = TRUE)'
+Rscript -e 'source("fastkpc/R/full_cuda_ci_gate.R"); source("fastkpc/R/full_cuda_ci_oracle_contract.R"); source("fastkpc/R/full_cuda_ci_workload_census.R"); source("fastkpc/R/full_cuda_ci_prepared_s_contract.R"); source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R"); source("fastkpc/R/full_cuda_ci_fixed_sp_shadow.R"); source("fastkpc/R/cuda_native.R"); source("fastkpc/R/full_cuda_ci_phase3_artifacts.R"); fastkpc_validate_full_cuda_fixed_sp_shadow_artifact("fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_full_shadow_v1", require_full = TRUE)'
 ```
 
 Expected: all Task 9 graph gates, exact route/resource gates, `64/64`
@@ -1210,6 +1230,7 @@ changing the existing Phase 0 comparator's generic NA-valued empty helper.
 
 **Files:**
 - Modify: `goal-5.6.md`
+- Verify: `fastkpc/tests/test_cuda_native_reproducible_build.R`
 
 - [ ] **Step 1: Clean-build CUDA**
 
@@ -1241,6 +1262,8 @@ FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_runtime_lifecycle.R
 FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_runtime_misuse.R
+FASTKPC_RUN_CUDA_TESTS=1 \
+  Rscript fastkpc/tests/test_cuda_native_reproducible_build.R
 FASTKPC_RUN_CUDA_TESTS=1 \
   Rscript fastkpc/tests/test_mgcv_fixed_sp_cuda_phase3c_iteration.R
 FASTKPC_RUN_CUDA_TESTS=1 \

@@ -80,7 +80,7 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   $COMMON_INC -c "$ROOT/src/cuda/mgcv_extract_fixed_sp_cuda.cu" \
   -o "$BUILD/mgcv_extract_fixed_sp_cuda.o"
 
-"$CXX" -shared -o "$TMP_SO" \
+"$CXX" -shared -Wl,-x -o "$TMP_SO" \
   "$BUILD/dcov_exact_cpu.o" \
   "$BUILD/hsic_cpu.o" \
   "$BUILD/legacy_dcov_gamma_cpp.o" \
