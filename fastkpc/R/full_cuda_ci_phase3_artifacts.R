@@ -318,6 +318,15 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
   invisible(expected)
 }
 
+.fastkpc_full_cuda_phase3_revalidate_completed_oracle_native <- function(
+    discovered_identity, embedded_identity,
+    executed_native_library_sha256, label) {
+  .fastkpc_full_cuda_phase3_validate_shadow_native_linkage(
+    discovered_identity, embedded_identity,
+    executed_native_library_sha256, label
+  )
+}
+
 .fastkpc_full_cuda_phase3_scalar_text <- function(value, name) {
   if (!.fastkpc_full_cuda_phase3_bare_scalar(value, "character") ||
       !nzchar(value) || grepl("[[:cntrl:]]", value, perl = TRUE)) {
@@ -2618,38 +2627,287 @@ fastkpc_validate_full_cuda_phase3_artifact <-
   )
 }
 
+.fastkpc_full_cuda_phase3_shadow_work_bootstrap_prefix <- function(output_dir) {
+  canonical_output <- normalizePath(
+    output_dir, winslash = "/", mustWork = TRUE
+  )
+  paste0(
+    ".", basename(canonical_output), "-phase3-shadow-bootstrap-"
+  )
+}
+
 .fastkpc_full_cuda_phase3_shadow_work_dir_marker_path <- function(path) {
   file.path(path, ".fastkpc-shadow-work-owner.json")
 }
 
+.fastkpc_full_cuda_phase3_shadow_work_name <- function(
+    output_dir, purpose, creator_pid, generation, nonce,
+    bootstrap = FALSE) {
+  clean <- .fastkpc_full_cuda_phase3_bare_scalar(purpose, "character") &&
+    purpose %in% c("staging", "rollback") &&
+    .fastkpc_full_cuda_phase3_bare_integer(creator_pid, 1L) &&
+    .fastkpc_full_cuda_phase3_bare_scalar(generation, "character") &&
+    grepl("^[0-9a-f]{16}$", generation) &&
+    .fastkpc_full_cuda_phase3_bare_scalar(nonce, "character") &&
+    grepl("^[0-9a-f]{32}$", nonce) &&
+    .fastkpc_full_cuda_phase3_bare_scalar(bootstrap, "logical")
+  if (!isTRUE(clean)) {
+    stop("shadow work directory ownership name is malformed", call. = FALSE)
+  }
+  prefix <- if (isTRUE(bootstrap)) {
+    paste0(
+      .fastkpc_full_cuda_phase3_shadow_work_bootstrap_prefix(output_dir),
+      purpose, "-"
+    )
+  } else {
+    .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(output_dir, purpose)
+  }
+  paste0(
+    prefix, "pid", creator_pid, "-generation-", generation,
+    "-nonce-", nonce
+  )
+}
+
+.fastkpc_full_cuda_phase3_shadow_work_name_info <- function(
+    path, output_dir, purpose = NULL, bootstrap = FALSE) {
+  canonical_output <- normalizePath(
+    output_dir, winslash = "/", mustWork = TRUE
+  )
+  clean_purpose <- is.null(purpose) || (
+    .fastkpc_full_cuda_phase3_bare_scalar(purpose, "character") &&
+      purpose %in% c("staging", "rollback")
+  )
+  if (!isTRUE(clean_purpose) ||
+      !.fastkpc_full_cuda_phase3_bare_scalar(bootstrap, "logical")) {
+    stop("shadow work directory ownership name is malformed", call. = FALSE)
+  }
+  name <- basename(path)
+  if (isTRUE(bootstrap)) {
+    prefix <- .fastkpc_full_cuda_phase3_shadow_work_bootstrap_prefix(
+      canonical_output
+    )
+    if (!startsWith(name, prefix)) {
+      stop("shadow work bootstrap name is malformed", call. = FALSE)
+    }
+    suffix <- substring(name, nchar(prefix) + 1L)
+    matched <- regexec(
+      "^(staging|rollback)-pid([1-9][0-9]*)-generation-([0-9a-f]{16})-nonce-([0-9a-f]{32})$",
+      suffix, perl = TRUE
+    )
+    parts <- regmatches(suffix, matched)[[1L]]
+    if (length(parts) != 5L) {
+      stop("shadow work bootstrap name is malformed", call. = FALSE)
+    }
+    parsed_purpose <- parts[[2L]]
+    parsed_pid <- suppressWarnings(as.integer(parts[[3L]]))
+    generation <- parts[[4L]]
+    nonce <- parts[[5L]]
+  } else {
+    if (is.null(purpose)) {
+      stop("reserved shadow work purpose is missing", call. = FALSE)
+    }
+    prefix <- .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
+      canonical_output, purpose
+    )
+    if (!startsWith(name, prefix)) {
+      stop("reserved shadow work name is malformed", call. = FALSE)
+    }
+    suffix <- substring(name, nchar(prefix) + 1L)
+    matched <- regexec(
+      "^pid([1-9][0-9]*)-generation-([0-9a-f]{16})-nonce-([0-9a-f]{32})$",
+      suffix, perl = TRUE
+    )
+    parts <- regmatches(suffix, matched)[[1L]]
+    if (length(parts) != 4L) {
+      stop("reserved shadow work name is malformed", call. = FALSE)
+    }
+    parsed_purpose <- purpose
+    parsed_pid <- suppressWarnings(as.integer(parts[[2L]]))
+    generation <- parts[[3L]]
+    nonce <- parts[[4L]]
+  }
+  if (is.na(parsed_pid) || parsed_pid < 1L ||
+      (!is.null(purpose) && !identical(parsed_purpose, purpose))) {
+    stop("shadow work directory ownership name is malformed", call. = FALSE)
+  }
+  list(
+    purpose = parsed_purpose, creator_pid = parsed_pid,
+    generation = generation, nonce = nonce
+  )
+}
+
+.fastkpc_full_cuda_phase3_shadow_work_pid_active <- function(pid) {
+  if (!.fastkpc_full_cuda_phase3_bare_integer(pid, 1L)) {
+    stop("shadow work owner PID is malformed", call. = FALSE)
+  }
+  if (.Platform$OS.type == "unix" && dir.exists("/proc")) {
+    return(dir.exists(file.path("/proc", as.character(pid))))
+  }
+  isTRUE(tryCatch({
+    tools::pskill(pid, signal = 0L)
+    TRUE
+  }, error = function(error) FALSE, warning = function(warning) FALSE))
+}
+
+.fastkpc_full_cuda_phase3_validate_shadow_work_dir_marker <- function(
+    path, output_dir, purpose, info) {
+  canonical_output <- normalizePath(
+    output_dir, winslash = "/", mustWork = TRUE
+  )
+  marker_path <- .fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(path)
+  if (nzchar(Sys.readlink(marker_path)) || !file.exists(marker_path) ||
+      dir.exists(marker_path)) {
+    stop("shadow work cleanup ownership marker is missing", call. = FALSE)
+  }
+  marker <- .fastkpc_full_cuda_phase3_read_json(
+    marker_path, "shadow work ownership marker"
+  )
+  fields <- c(
+    "schema_version", "output_dir", "purpose", "creator_pid",
+    "generation", "nonce"
+  )
+  clean <- identical(names(marker), fields) &&
+    identical(attributes(marker), list(names = fields)) &&
+    identical(
+      marker$schema_version, "full-cuda-ci-shadow-work-owner-v2"
+    ) && identical(marker$output_dir, canonical_output) &&
+    identical(marker$purpose, purpose) &&
+    identical(marker$creator_pid, info$creator_pid) &&
+    identical(marker$generation, info$generation) &&
+    identical(marker$nonce, info$nonce)
+  if (!isTRUE(clean)) {
+    stop("shadow work cleanup ownership marker is malformed", call. = FALSE)
+  }
+  invisible(marker)
+}
+
 .fastkpc_full_cuda_phase3_write_shadow_work_dir_marker <- function(
-    path, output_dir, purpose) {
+    path, output_dir, purpose, .publication_hook = NULL) {
+  if (!is.null(.publication_hook) && !is.function(.publication_hook)) {
+    stop("shadow work marker hook is malformed", call. = FALSE)
+  }
   canonical_output <- normalizePath(
     output_dir, winslash = "/", mustWork = TRUE
   )
   canonical_path <- normalizePath(path, winslash = "/", mustWork = TRUE)
-  prefix <- .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
-    canonical_output, purpose
+  info <- .fastkpc_full_cuda_phase3_shadow_work_name_info(
+    canonical_path, canonical_output, purpose, bootstrap = TRUE
   )
   clean <- !nzchar(Sys.readlink(path)) && dir.exists(canonical_path) &&
     !file_test("-f", canonical_path) &&
-    identical(dirname(canonical_path), dirname(canonical_output)) &&
-    startsWith(basename(canonical_path), prefix)
+    identical(dirname(canonical_path), dirname(canonical_output))
   if (!isTRUE(clean)) {
     stop("shadow work directory ownership path is malformed", call. = FALSE)
   }
   marker <- list(
-    schema_version = "full-cuda-ci-shadow-work-owner-v1",
+    schema_version = "full-cuda-ci-shadow-work-owner-v2",
     output_dir = canonical_output, purpose = purpose,
-    creator_pid = as.integer(Sys.getpid()),
-    generation = basename(canonical_path)
+    creator_pid = info$creator_pid, generation = info$generation,
+    nonce = info$nonce
   )
+  marker_path <- .fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(
+    canonical_path
+  )
+  marker_temp <- file.path(
+    canonical_path,
+    paste0(".fastkpc-shadow-work-owner.tmp-", info$creator_pid, "-",
+           info$nonce)
+  )
+  on.exit(unlink(marker_temp, force = TRUE), add = TRUE)
+  if (file.exists(marker_path) || file.exists(marker_temp)) {
+    stop("shadow work ownership marker already exists", call. = FALSE)
+  }
   .fastkpc_full_cuda_phase3_write_json_exact(
-    marker, .fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(
-      canonical_path
-    )
+    marker, marker_temp
+  )
+  if (!is.null(.publication_hook)) {
+    .publication_hook(paste0("during_", purpose, "_marker_write"))
+  }
+  if (!file.rename(marker_temp, marker_path)) {
+    stop("failed to atomically publish shadow work ownership marker",
+         call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_validate_shadow_work_dir_marker(
+    canonical_path, canonical_output, purpose, info
   )
   invisible(marker)
+}
+
+.fastkpc_full_cuda_phase3_acquire_shadow_work_dir <- function(
+    output_dir, purpose, artifact_lock, .publication_hook = NULL) {
+  .fastkpc_full_cuda_phase3_require_shadow_artifact_lock(
+    artifact_lock, output_dir
+  )
+  if (!is.null(.publication_hook) && !is.function(.publication_hook)) {
+    stop("shadow work acquisition hook is malformed", call. = FALSE)
+  }
+  canonical_output <- normalizePath(
+    output_dir, winslash = "/", mustWork = TRUE
+  )
+  parent <- dirname(canonical_output)
+  creator_pid <- as.integer(Sys.getpid())
+  seed <- paste(
+    creator_pid, purpose, format(Sys.time(), "%Y%m%d%H%M%OS9"),
+    tempfile("shadow-work-seed-"), sep = ":"
+  )
+  generation <- substr(
+    fastkpc_full_cuda_census_hash_utf8(seed), 1L, 16L
+  )
+  nonce <- substr(
+    fastkpc_full_cuda_census_hash_utf8(paste0(seed, ":nonce")), 1L, 32L
+  )
+  bootstrap_name <- .fastkpc_full_cuda_phase3_shadow_work_name(
+    canonical_output, purpose, creator_pid, generation, nonce,
+    bootstrap = TRUE
+  )
+  reserved_name <- .fastkpc_full_cuda_phase3_shadow_work_name(
+    canonical_output, purpose, creator_pid, generation, nonce,
+    bootstrap = FALSE
+  )
+  bootstrap_path <- file.path(parent, bootstrap_name)
+  reserved_path <- file.path(parent, reserved_name)
+  acquired <- FALSE
+  promoted <- FALSE
+  on.exit(suspendInterrupts({
+    if (!isTRUE(promoted)) {
+      if (isTRUE(acquired)) {
+        unlink(bootstrap_path, recursive = TRUE, force = TRUE)
+      }
+      unlink(reserved_path, recursive = TRUE, force = TRUE)
+    }
+  }), add = TRUE)
+  suspendInterrupts({
+    if (!dir.create(
+          bootstrap_path, recursive = FALSE, showWarnings = FALSE
+        )) {
+      stop("failed to create shadow work bootstrap directory",
+           call. = FALSE)
+    }
+    acquired <- TRUE
+  })
+  if (!is.null(.publication_hook)) {
+    .publication_hook(paste0("after_", purpose, "_bootstrap_create"))
+  }
+  .fastkpc_full_cuda_phase3_write_shadow_work_dir_marker(
+    bootstrap_path, canonical_output, purpose,
+    .publication_hook = .publication_hook
+  )
+  if (!is.null(.publication_hook)) {
+    .publication_hook(paste0("after_", purpose, "_marker_validation"))
+  }
+  if (!file.rename(bootstrap_path, reserved_path)) {
+    stop("failed to promote authenticated shadow work directory",
+         call. = FALSE)
+  }
+  acquired <- FALSE
+  info <- .fastkpc_full_cuda_phase3_shadow_work_name_info(
+    reserved_path, canonical_output, purpose, bootstrap = FALSE
+  )
+  .fastkpc_full_cuda_phase3_validate_shadow_work_dir_marker(
+    reserved_path, canonical_output, purpose, info
+  )
+  promoted <- TRUE
+  reserved_path
 }
 
 .fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs <- function(
@@ -2671,6 +2929,43 @@ fastkpc_validate_full_cuda_phase3_artifact <-
   entries <- list.files(
     parent, full.names = TRUE, all.files = TRUE, no.. = TRUE
   )
+  bootstrap_prefix <-
+    .fastkpc_full_cuda_phase3_shadow_work_bootstrap_prefix(canonical_output)
+  bootstrap_candidates <- entries[
+    startsWith(basename(entries), bootstrap_prefix)
+  ]
+  for (candidate in bootstrap_candidates) {
+    if (nzchar(Sys.readlink(candidate)) || !dir.exists(candidate) ||
+        file_test("-f", candidate)) {
+      stop("shadow work cleanup encountered a non-owned bootstrap entry",
+           call. = FALSE)
+    }
+    info <- .fastkpc_full_cuda_phase3_shadow_work_name_info(
+      candidate, canonical_output, bootstrap = TRUE
+    )
+    if (!info$purpose %in% purposes) next
+    owner_active <-
+      .fastkpc_full_cuda_phase3_shadow_work_pid_active(info$creator_pid)
+    if (isTRUE(owner_active) && info$creator_pid != as.integer(Sys.getpid())) {
+      stop("shadow work cleanup encountered a live bootstrap owner",
+           call. = FALSE)
+    }
+    marker_path <-
+      .fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(candidate)
+    if (file.exists(marker_path)) {
+      .fastkpc_full_cuda_phase3_validate_shadow_work_dir_marker(
+        candidate, canonical_output, info$purpose, info
+      )
+    } else if (isTRUE(owner_active)) {
+      stop("live shadow work bootstrap is missing its ownership marker",
+           call. = FALSE)
+    }
+    unlink(candidate, recursive = TRUE, force = TRUE)
+    if (file.exists(candidate) || dir.exists(candidate)) {
+      stop("failed to remove stale owned shadow work bootstrap",
+           call. = FALSE)
+    }
+  }
   for (purpose in purposes) {
     prefix <- .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
       canonical_output, purpose
@@ -2682,32 +2977,18 @@ fastkpc_validate_full_cuda_phase3_artifact <-
         stop("shadow work cleanup encountered a non-owned entry",
              call. = FALSE)
       }
-      marker_path <-
-        .fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(candidate)
-      if (nzchar(Sys.readlink(marker_path)) || !file.exists(marker_path) ||
-          dir.exists(marker_path)) {
-        stop("shadow work cleanup ownership marker is missing",
+      info <- .fastkpc_full_cuda_phase3_shadow_work_name_info(
+        candidate, canonical_output, purpose, bootstrap = FALSE
+      )
+      if (.fastkpc_full_cuda_phase3_shadow_work_pid_active(
+            info$creator_pid
+          ) && info$creator_pid != as.integer(Sys.getpid())) {
+        stop("shadow work cleanup encountered a live reserved owner",
              call. = FALSE)
       }
-      marker <- .fastkpc_full_cuda_phase3_read_json(
-        marker_path, "shadow work ownership marker"
+      .fastkpc_full_cuda_phase3_validate_shadow_work_dir_marker(
+        candidate, canonical_output, purpose, info
       )
-      fields <- c(
-        "schema_version", "output_dir", "purpose", "creator_pid",
-        "generation"
-      )
-      clean_marker <- identical(names(marker), fields) &&
-        identical(attributes(marker), list(names = fields)) &&
-        identical(
-          marker$schema_version, "full-cuda-ci-shadow-work-owner-v1"
-        ) && identical(marker$output_dir, canonical_output) &&
-        identical(marker$purpose, purpose) &&
-        .fastkpc_full_cuda_phase3_bare_integer(marker$creator_pid, 1L) &&
-        identical(marker$generation, basename(candidate))
-      if (!isTRUE(clean_marker)) {
-        stop("shadow work cleanup ownership marker is malformed",
-             call. = FALSE)
-      }
       unlink(candidate, recursive = TRUE, force = TRUE)
       if (file.exists(candidate) || dir.exists(candidate)) {
         stop("failed to remove stale owned shadow work directory",
@@ -2740,21 +3021,19 @@ fastkpc_validate_full_cuda_phase3_artifact <-
     if (!is.null(.publication_hook)) .publication_hook(event)
     invisible(NULL)
   }
-  output_parent <- dirname(normalizePath(output_dir, mustWork = TRUE))
-  rollback_prefix <- .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
-    output_dir, "rollback"
-  )
   .fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs(
     output_dir, "rollback", artifact_lock
   )
-  backup_dir <- tempfile(rollback_prefix, tmpdir = output_parent)
-  if (!dir.create(backup_dir, recursive = FALSE, showWarnings = FALSE)) {
-    stop("failed to create shadow generation rollback directory",
-         call. = FALSE)
-  }
-  .fastkpc_full_cuda_phase3_write_shadow_work_dir_marker(
-    backup_dir, output_dir, "rollback"
-  )
+  backup_dir <- NULL
+  suspendInterrupts({
+    backup_dir <- .fastkpc_full_cuda_phase3_acquire_shadow_work_dir(
+      output_dir, "rollback", artifact_lock,
+      .publication_hook = .publication_hook
+    )
+    on.exit(
+      unlink(backup_dir, recursive = TRUE, force = TRUE), add = TRUE
+    )
+  })
   prior_present <- vapply(final_paths, function(path) {
     file.exists(path) && !dir.exists(path)
   }, logical(1L))
@@ -2782,10 +3061,9 @@ fastkpc_validate_full_cuda_phase3_artifact <-
     }
     invisible(NULL)
   }
-  on.exit(suspendInterrupts({
-    rollback()
-    unlink(backup_dir, recursive = TRUE, force = TRUE)
-  }), add = TRUE)
+  on.exit(
+    suspendInterrupts(rollback()), add = TRUE, after = FALSE
+  )
   for (key in keys[prior_present]) {
     copied <- file.copy(
       final_paths[[key]], backup_paths[[key]],
@@ -11051,6 +11329,11 @@ fastkpc_full_cuda_phase3_publish_oracle_artifact <- function(
     stop("Phase 3 oracle immutable files changed during validation",
          call. = FALSE)
   }
+  .fastkpc_full_cuda_phase3_revalidate_completed_oracle_native(
+    expected_identity, manifest$input_identity,
+    manifest$executed_native_library_sha256,
+    "completed Phase 3 oracle artifact final native recheck"
+  )
   list(
     authenticated = TRUE, complete = TRUE, pass = TRUE,
     computed_contract_pass = TRUE, artifact_kind = "oracle_sp",
@@ -12344,23 +12627,27 @@ fastkpc_full_cuda_phase3_validate_direct_ci_payload <- function(
   invisible(TRUE)
 }
 
-.fastkpc_full_cuda_phase3_shadow_scope_authority <- function(
-    catalog, scope, shard_count, canonical_setup_shards,
-    execution_snapshot = NULL, shadow_plan_identity_sha256 = NULL,
-    authenticated_plan = NULL) {
-  plan <- authenticated_plan
-  own_snapshot <- is.null(execution_snapshot)
-  token <- execution_snapshot
-  if (own_snapshot) {
-    if (is.null(plan)) plan <- fastkpc_full_cuda_shadow_plan(catalog)
+.fastkpc_full_cuda_phase3_with_owned_shadow_execution_snapshot <- function(
+    catalog, shadow_plan, scope, callback) {
+  if (!is.function(callback)) {
+    stop("shadow snapshot lifecycle callback is malformed", call. = FALSE)
+  }
+  token <- NULL
+  suspendInterrupts({
     token <- fastkpc_full_cuda_phase3_create_shadow_execution_snapshot(
-      catalog, plan, scope
+      catalog, shadow_plan, scope
     )
     on.exit(
       fastkpc_full_cuda_phase3_release_shadow_execution_snapshot(token),
       add = TRUE
     )
-  }
+  })
+  callback(token)
+}
+
+.fastkpc_full_cuda_phase3_shadow_scope_from_snapshot <- function(
+    token, scope, shard_count, canonical_setup_shards,
+    shadow_plan_identity_sha256, plan) {
   authority <- .fastkpc_full_cuda_phase3_resolve_shadow_execution_snapshot(
     token, expected_scope = scope,
     expected_plan_identity_sha256 = if (
@@ -12390,6 +12677,30 @@ fastkpc_full_cuda_phase3_validate_direct_ci_payload <- function(
     authority$logical_rows$shard_id <- assignments$shard_id[logical_match]
   }
   authority
+}
+
+.fastkpc_full_cuda_phase3_shadow_scope_authority <- function(
+    catalog, scope, shard_count, canonical_setup_shards,
+    execution_snapshot = NULL, shadow_plan_identity_sha256 = NULL,
+    authenticated_plan = NULL) {
+  plan <- authenticated_plan
+  own_snapshot <- is.null(execution_snapshot)
+  token <- execution_snapshot
+  if (own_snapshot) {
+    if (is.null(plan)) plan <- fastkpc_full_cuda_shadow_plan(catalog)
+    return(.fastkpc_full_cuda_phase3_with_owned_shadow_execution_snapshot(
+      catalog, plan, scope, function(owned_token) {
+        .fastkpc_full_cuda_phase3_shadow_scope_from_snapshot(
+          owned_token, scope, shard_count, canonical_setup_shards,
+          shadow_plan_identity_sha256, plan
+        )
+      }
+    ))
+  }
+  .fastkpc_full_cuda_phase3_shadow_scope_from_snapshot(
+    token, scope, shard_count, canonical_setup_shards,
+    shadow_plan_identity_sha256, plan
+  )
 }
 
 .fastkpc_full_cuda_phase3_recompute_shadow_artifact <- function(
@@ -13077,20 +13388,16 @@ fastkpc_full_cuda_phase3_publish_shadow_artifact <- function(
     shadow_plan_identity_sha256, direct_logical_sequence_id,
     authenticated_plan = authenticated_shadow_plan
   )
-  staging_dir <- tempfile(
-    .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
-      output_dir, "staging"
-    ),
-    tmpdir = dirname(normalizePath(output_dir, mustWork = TRUE))
-  )
-  if (!dir.create(staging_dir, recursive = FALSE, showWarnings = FALSE)) {
-    stop("failed to create shadow artifact staging directory",
-         call. = FALSE)
-  }
-  .fastkpc_full_cuda_phase3_write_shadow_work_dir_marker(
-    staging_dir, output_dir, "staging"
-  )
-  on.exit(unlink(staging_dir, recursive = TRUE, force = TRUE), add = TRUE)
+  staging_dir <- NULL
+  suspendInterrupts({
+    staging_dir <- .fastkpc_full_cuda_phase3_acquire_shadow_work_dir(
+      output_dir, "staging", artifact_lock,
+      .publication_hook = .publication_hook
+    )
+    on.exit(
+      unlink(staging_dir, recursive = TRUE, force = TRUE), add = TRUE
+    )
+  })
   written <- .fastkpc_full_cuda_phase3_write_shadow_payload(
     value, staging_dir, scope, identity, route_config, command_lines,
     catalog, oracle_sp_dir, canonical_setup_shards,

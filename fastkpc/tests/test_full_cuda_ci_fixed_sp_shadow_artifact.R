@@ -36,10 +36,15 @@ assert_true(
 assert_true(
   all(vapply(c(
     ".fastkpc_full_cuda_phase3_shadow_work_dir_prefix",
+    ".fastkpc_full_cuda_phase3_shadow_work_bootstrap_prefix",
+    ".fastkpc_full_cuda_phase3_acquire_shadow_work_dir",
     ".fastkpc_full_cuda_phase3_write_shadow_work_dir_marker",
     ".fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs"
   ), exists, logical(1L), mode = "function")),
-  "shadow publication exposes exact owned staging/rollback cleanup"
+  paste(
+    "shadow publication exposes atomic marked bootstrap acquisition and exact",
+    "owned staging/rollback cleanup"
+  )
 )
 
 focused_only <- identical(
@@ -54,15 +59,8 @@ focused_work_lock <-
   .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(
     focused_work_output
   )
-focused_staging <- tempfile(
-  .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(
-    focused_work_output, "staging"
-  ),
-  tmpdir = dirname(focused_work_output)
-)
-dir.create(focused_staging, showWarnings = FALSE)
-.fastkpc_full_cuda_phase3_write_shadow_work_dir_marker(
-  focused_staging, focused_work_output, "staging"
+focused_staging <- .fastkpc_full_cuda_phase3_acquire_shadow_work_dir(
+  focused_work_output, "staging", focused_work_lock
 )
 writeLines("partial payload", file.path(focused_staging, "payload.rds"),
            useBytes = TRUE)
@@ -122,6 +120,107 @@ unlink(focused_symlink_staging, force = TRUE)
 unlink(focused_symlink_target, recursive = TRUE, force = TRUE)
 .fastkpc_full_cuda_phase3_release_shadow_artifact_lock(focused_work_lock)
 focused_work_lock <- NULL
+
+focused_prior_paths <- file.path(
+  focused_work_output, c("payload.rds", "manifest.json", "summary.json")
+)
+writeLines("prior payload", focused_prior_paths[[1L]], useBytes = TRUE)
+writeLines("prior manifest", focused_prior_paths[[2L]], useBytes = TRUE)
+writeLines("prior summary", focused_prior_paths[[3L]], useBytes = TRUE)
+focused_prior_hashes <- vapply(
+  focused_prior_paths, fastkpc_full_cuda_census_file_hash, character(1L)
+)
+bootstrap_crash_script <- tempfile(
+  "phase3-shadow-bootstrap-crash-", fileext = ".R"
+)
+writeLines(c(
+  'source("fastkpc/R/full_cuda_ci_gate.R")',
+  'source("fastkpc/R/full_cuda_ci_oracle_contract.R")',
+  'source("fastkpc/R/full_cuda_ci_workload_census.R")',
+  'source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")',
+  'source("fastkpc/R/full_cuda_ci_fixed_sp_runtime.R")',
+  'source("fastkpc/R/full_cuda_ci_fixed_sp_shadow.R")',
+  'source("fastkpc/R/full_cuda_ci_phase3_artifacts.R")',
+  'args <- commandArgs(trailingOnly = TRUE)',
+  'output_dir <- args[[1L]]',
+  'purpose <- args[[2L]]',
+  'event <- args[[3L]]',
+  'lock <- .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(output_dir)',
+  paste0(
+    '.fastkpc_full_cuda_phase3_acquire_shadow_work_dir(',
+    'output_dir,purpose,lock,.publication_hook=function(observed) {',
+    'if (identical(observed,event)) tools::pskill(Sys.getpid(),9L)})'
+  )
+), bootstrap_crash_script, useBytes = TRUE)
+on.exit(unlink(bootstrap_crash_script, force = TRUE), add = TRUE)
+focused_work_siblings <- function(output_dir) {
+  entries <- list.files(
+    dirname(output_dir), full.names = TRUE, all.files = TRUE, no.. = TRUE
+  )
+  names <- basename(entries)
+  reserved <- vapply(c("staging", "rollback"), function(purpose) {
+    startsWith(
+      names,
+      .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(output_dir, purpose)
+    )
+  }, logical(length(entries)))
+  bootstrap <- startsWith(
+    names,
+    .fastkpc_full_cuda_phase3_shadow_work_bootstrap_prefix(output_dir)
+  )
+  entries[bootstrap | rowSums(reserved) > 0L]
+}
+for (purpose in c("staging", "rollback")) {
+  for (event in c(
+    paste0("after_", purpose, "_bootstrap_create"),
+    paste0("during_", purpose, "_marker_write"),
+    paste0("after_", purpose, "_marker_validation")
+  )) {
+    crash_output <- suppressWarnings(system2(
+      file.path(R.home("bin"), "Rscript"),
+      args = c(
+        bootstrap_crash_script, focused_work_output, purpose, event
+      ),
+      stdout = TRUE, stderr = TRUE
+    ))
+    assert_true(
+      !is.null(attr(crash_output, "status")) &&
+        attr(crash_output, "status") != 0L &&
+        length(focused_work_siblings(focused_work_output)) == 1L,
+      paste(
+        "hard exit leaves one exact dead-owner work resource at", event,
+        "status=", attr(crash_output, "status"),
+        "output=", paste(crash_output, collapse = " | "),
+        "siblings=", paste(
+          basename(focused_work_siblings(focused_work_output)),
+          collapse = ","
+        )
+      )
+    )
+    recovery_lock <-
+      .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(
+        focused_work_output
+      )
+    .fastkpc_full_cuda_phase3_cleanup_shadow_work_dirs(
+      focused_work_output, c("staging", "rollback"), recovery_lock
+    )
+    .fastkpc_full_cuda_phase3_release_shadow_artifact_lock(recovery_lock)
+    assert_true(
+      length(focused_work_siblings(focused_work_output)) == 0L &&
+        identical(
+          vapply(
+            focused_prior_paths, fastkpc_full_cuda_census_file_hash,
+            character(1L)
+          ),
+          focused_prior_hashes
+        ),
+      paste(
+        "next locked publication cleanup removes dead-owner bootstrap state",
+        "without poisoning the prior generation at", event
+      )
+    )
+  }
+}
 publication_only <- identical(
   Sys.getenv("FASTKPC_TASK9_PUBLICATION_ONLY", unset = "0"), "1"
 )
@@ -363,6 +462,13 @@ assert_true(
          mode = "function"),
   "shadow validation exposes explicit three-way native identity linkage"
 )
+assert_true(
+  exists(
+    ".fastkpc_full_cuda_phase3_revalidate_completed_oracle_native",
+    mode = "function"
+  ),
+  "completed oracle validation exposes a fresh end-of-use native gate"
+)
 focused_native_path <- tempfile("phase3-shadow-native-")
 writeLines("authenticated native fixture", focused_native_path,
            useBytes = TRUE)
@@ -400,6 +506,102 @@ focused_top_level_wrong <- tryCatch({
 assert_true(
   inherits(focused_top_level_wrong, "error"),
   "top-level production native mutation fails three-way linkage"
+)
+focused_native_before <- readBin(
+  focused_native_path, "raw", n = file.info(focused_native_path)$size
+)
+focused_native_replacement <- tempfile(
+  "phase3-shadow-native-replacement-", tmpdir = dirname(focused_native_path)
+)
+writeLines("replacement native fixture", focused_native_replacement,
+           useBytes = TRUE)
+assert_true(
+  file.rename(focused_native_replacement, focused_native_path),
+  "focused native fixture is atomically replaced after its initial gate"
+)
+focused_final_native_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_revalidate_completed_oracle_native(
+    focused_native_identity, focused_native_identity, focused_native_sha,
+    "focused completed oracle final native gate"
+  )
+  NULL
+}, error = function(error) error)
+focused_native_connection <- file(focused_native_path, open = "wb")
+writeBin(focused_native_before, focused_native_connection)
+close(focused_native_connection)
+assert_true(
+  inherits(focused_final_native_error, "error") && grepl(
+    "native", conditionMessage(focused_final_native_error),
+    ignore.case = TRUE
+  ) && grepl(
+    "mismatch", conditionMessage(focused_final_native_error),
+    ignore.case = TRUE
+  ),
+  "end-of-use native gate freshly hashes and rejects a replaced library"
+)
+assert_true(
+  exists(
+    ".fastkpc_full_cuda_phase3_with_owned_shadow_execution_snapshot",
+    mode = "function"
+  ),
+  "helper-owned snapshot mint and release share one lifecycle boundary"
+)
+focused_snapshot_create <- 0L
+focused_snapshot_release <- 0L
+original_snapshot_create <- get(
+  "fastkpc_full_cuda_phase3_create_shadow_execution_snapshot",
+  envir = globalenv()
+)
+original_snapshot_release <- get(
+  "fastkpc_full_cuda_phase3_release_shadow_execution_snapshot",
+  envir = globalenv()
+)
+assign(
+  "fastkpc_full_cuda_phase3_create_shadow_execution_snapshot",
+  function(catalog, shadow_plan, scope) {
+    focused_snapshot_create <<- focused_snapshot_create + 1L
+    structure(list(id = focused_snapshot_create), class = "focused_snapshot")
+  },
+  envir = globalenv()
+)
+assign(
+  "fastkpc_full_cuda_phase3_release_shadow_execution_snapshot",
+  function(token) {
+    focused_snapshot_release <<- focused_snapshot_release + 1L
+    invisible(TRUE)
+  },
+  envir = globalenv()
+)
+focused_snapshot_value <-
+  .fastkpc_full_cuda_phase3_with_owned_shadow_execution_snapshot(
+    catalog = list(), shadow_plan = list(), scope = "iteration",
+    callback = function(token) token$id
+  )
+focused_snapshot_failure <- tryCatch({
+  .fastkpc_full_cuda_phase3_with_owned_shadow_execution_snapshot(
+    catalog = list(), shadow_plan = list(), scope = "iteration",
+    callback = function(token) stop(
+      "focused helper failure after mint", call. = FALSE
+    )
+  )
+  NULL
+}, error = function(error) error)
+assign(
+  "fastkpc_full_cuda_phase3_create_shadow_execution_snapshot",
+  original_snapshot_create, envir = globalenv()
+)
+assign(
+  "fastkpc_full_cuda_phase3_release_shadow_execution_snapshot",
+  original_snapshot_release, envir = globalenv()
+)
+assert_true(
+  identical(focused_snapshot_value, 1L) &&
+    inherits(focused_snapshot_failure, "error") &&
+    identical(
+      c(create = focused_snapshot_create, release = focused_snapshot_release),
+      c(create = 2L, release = 2L)
+    ),
+  "helper-owned snapshots release exactly once on success and failure"
 )
 assert_true(
   all(vapply(c(
@@ -1902,6 +2104,70 @@ assert_true(
     )$authenticated),
   "production-shaped completed oracle fixture passes public validation"
 )
+.task9_final_native_recheck_count <- 0L
+.task9_final_native_replacement_path <- production_native_path
+.task9_final_native_replacement_bytes <- readBin(
+  production_native_path, "raw", n = file.info(production_native_path)$size
+)
+invisible(trace(
+  ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
+  exit = quote({
+    .task9_final_native_recheck_count <<-
+      .task9_final_native_recheck_count + 1L
+    if (.task9_final_native_recheck_count == 2L) {
+      replacement <- tempfile(
+        "phase3-oracle-native-late-replacement-",
+        tmpdir = dirname(.task9_final_native_replacement_path)
+      )
+      writeBin(charToRaw("late replacement native"), replacement)
+      if (!file.rename(
+            replacement, .task9_final_native_replacement_path
+          )) {
+        stop("failed to atomically replace late native fixture",
+             call. = FALSE)
+      }
+    }
+  }), print = FALSE, where = globalenv()
+))
+late_native_error <- tryCatch({
+  fastkpc_validate_full_cuda_fixed_sp_oracle_sp_artifact(
+    production_oracle_dir, expected_identity = production_identity,
+    require_full = FALSE
+  )
+  NULL
+}, error = function(error) error)
+untrace(
+  ".fastkpc_full_cuda_phase3_oracle_immutable_file_hashes",
+  where = globalenv()
+)
+production_native_connection <- file(production_native_path, open = "wb")
+writeBin(
+  .task9_final_native_replacement_bytes, production_native_connection
+)
+close(production_native_connection)
+rm(
+  .task9_final_native_recheck_count,
+  .task9_final_native_replacement_path,
+  .task9_final_native_replacement_bytes,
+  envir = globalenv()
+)
+assert_true(
+  inherits(late_native_error, "error") && grepl(
+    "final native recheck", conditionMessage(late_native_error),
+    fixed = TRUE
+  ) && grepl(
+    "mismatch", conditionMessage(late_native_error), ignore.case = TRUE
+  ),
+  paste(
+    "public completed-oracle validation rejects a native file atomically",
+    "replaced after initial validation and immutable artifact rechecks;",
+    "observed:", if (inherits(late_native_error, "error")) {
+      conditionMessage(late_native_error)
+    } else {
+      "no error"
+    }
+  )
+)
 production_oracle_paths <- fastkpc_full_cuda_phase3_artifact_paths(
   production_oracle_dir, "oracle_sp"
 )
@@ -2127,14 +2393,12 @@ assert_true(
     "completion markers and one authenticated stale staging directory"
   )
 )
-stale_rollback <- tempfile(
-  .fastkpc_full_cuda_phase3_shadow_work_dir_prefix(output_dir, "rollback"),
-  tmpdir = dirname(output_dir)
+stale_rollback_lock <-
+  .fastkpc_full_cuda_phase3_acquire_shadow_artifact_lock(output_dir)
+stale_rollback <- .fastkpc_full_cuda_phase3_acquire_shadow_work_dir(
+  output_dir, "rollback", stale_rollback_lock
 )
-dir.create(stale_rollback, showWarnings = FALSE)
-.fastkpc_full_cuda_phase3_write_shadow_work_dir_marker(
-  stale_rollback, output_dir, "rollback"
-)
+.fastkpc_full_cuda_phase3_release_shadow_artifact_lock(stale_rollback_lock)
 writeLines("stale rollback payload", file.path(stale_rollback, "payload.rds"),
            useBytes = TRUE)
 published <- do.call(
