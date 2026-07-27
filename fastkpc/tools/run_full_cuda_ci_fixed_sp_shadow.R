@@ -95,12 +95,48 @@ route_config <- fastkpc_full_cuda_phase3_route_config()
 identity <- fastkpc_full_cuda_phase3_input_identity(catalog, device_id)
 capacity <- fastkpc_full_cuda_fixed_sp_contract()$canonical_capacities
 
-direct_paths <- fastkpc_full_cuda_phase3_artifact_paths(
+artifact_paths <- fastkpc_full_cuda_phase3_artifact_paths(
   output_dir, kind = "full_shadow"
 )
+completion_markers <- c(
+  manifest = file.exists(artifact_paths$manifest_json),
+  summary = file.exists(artifact_paths$summary_json)
+)
+if (any(completion_markers)) {
+  completed <- tryCatch(
+    fastkpc_full_cuda_phase3_publish_shadow_artifact(
+      output_dir = output_dir,
+      catalog = catalog,
+      setup_keys = setup_keys,
+      target_rows = target_rows,
+      identity = identity,
+      route_config = route_config,
+      scope = scope,
+      phase0_dir = phase0_dir,
+      oracle_sp_dir = oracle_sp_dir,
+      canonical_setup_shards = TRUE,
+      execution_snapshot = execution_snapshot,
+      shadow_plan_identity_sha256 = plan$plan_identity_sha256,
+      command_lines =
+        "Rscript fastkpc/tools/run_full_cuda_ci_fixed_sp_shadow.R"
+    ),
+    error = function(error) error
+  )
+  if (!inherits(completed, "error")) {
+    cat("Phase 3 shadow artifact:", completed$status, "\n")
+    cat("scope:", scope, "\n")
+    return(invisible(completed))
+  }
+  remaining_markers <- c(
+    manifest = file.exists(artifact_paths$manifest_json),
+    summary = file.exists(artifact_paths$summary_json)
+  )
+  if (any(remaining_markers)) stop(completed)
+}
+
 direct_present <- c(
-  rds = file.exists(direct_paths$direct_ci_rds),
-  summary = file.exists(direct_paths$direct_ci_summary_json)
+  rds = file.exists(artifact_paths$direct_ci_rds),
+  summary = file.exists(artifact_paths$direct_ci_summary_json)
 )
 if (xor(direct_present[["rds"]], direct_present[["summary"]])) {
   stop("existing direct-CI artifact pair is incomplete", call. = FALSE)

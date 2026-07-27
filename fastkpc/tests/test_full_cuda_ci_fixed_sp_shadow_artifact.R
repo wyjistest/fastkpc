@@ -20,6 +20,35 @@ assert_true(
   "independent fixed-sp shadow artifact validator should exist"
 )
 
+shadow_runner_lines <- readLines(
+  "fastkpc/tools/run_full_cuda_ci_fixed_sp_shadow.R", warn = FALSE
+)
+shadow_completion_index <- grep(
+  "^completion_markers <- c\\($", shadow_runner_lines
+)
+shadow_run_index <- grep(
+  "^run <- fastkpc_full_cuda_phase3_run_shards\\($", shadow_runner_lines
+)
+shadow_completion_block <- if (
+    length(shadow_completion_index) == 1L && length(shadow_run_index) == 1L &&
+    shadow_completion_index < shadow_run_index) {
+  shadow_runner_lines[seq.int(shadow_completion_index, shadow_run_index - 1L)]
+} else {
+  character()
+}
+assert_true(
+  length(shadow_completion_block) > 0L && any(grepl(
+    "fastkpc_full_cuda_phase3_publish_shadow_artifact\\(",
+    shadow_completion_block
+  )) && any(grepl(
+    "return\\(invisible\\(completed\\)\\)", shadow_completion_block
+  )),
+  paste(
+    "shadow runner validates and returns a completed publication before",
+    "entering shard execution"
+  )
+)
+
 assert_true(
   exists("fastkpc_full_cuda_shadow_merge_logical_rows", mode = "function"),
   "fixed-sp shadow direct/conditional normalizer should exist"
@@ -1871,6 +1900,31 @@ production_identity$sha256 <-
 invisible(fastkpc_full_cuda_phase3_validate_input_identity(
   production_identity
 ))
+production_identity_json <- tempfile(
+  "phase3-shadow-production-identity-", fileext = ".json"
+)
+on.exit(unlink(production_identity_json, force = TRUE), add = TRUE)
+.fastkpc_full_cuda_phase3_write_json_exact(
+  list(input_identity = production_identity), production_identity_json
+)
+roundtrip_production_identity <- jsonlite::read_json(
+  production_identity_json, simplifyVector = FALSE
+)$input_identity
+invisible(fastkpc_full_cuda_phase3_validate_input_identity(
+  roundtrip_production_identity
+))
+assert_true(
+  identical(
+    roundtrip_production_identity$cublas_workspace_bytes_required,
+    as.integer(production_identity$cublas_workspace_bytes_required)
+  ) && identical(
+    roundtrip_production_identity$cublas_workspace_min_alignment_required,
+    as.integer(
+      production_identity$cublas_workspace_min_alignment_required
+    )
+  ),
+  "production identity survives exact JSON integer-valued numeric round-trip"
+)
 
 output_dir <- tempfile("phase3-shadow-artifact-")
 oracle_sp_dir <- tempfile("phase3-shadow-oracle-sp-")
@@ -2463,6 +2517,45 @@ assert_true(
   identical(volatile_production_identity$sha256,
             production_identity$sha256),
   "volatile-session fixture preserves the stable production identity hash"
+)
+reused_production_identity <-
+  .fastkpc_full_cuda_phase3_shadow_reuse_identity(
+    volatile_production_identity, roundtrip_production_identity,
+    production_native_sha256
+  )
+assert_true(
+  identical(reused_production_identity, roundtrip_production_identity),
+  paste(
+    "completed shadow reuse retains the recorded identity after stable",
+    "cross-session and native-SHA validation"
+  )
+)
+wrong_reuse_identity <- roundtrip_production_identity
+wrong_reuse_identity$source_commit <- strrep("8", 40L)
+wrong_reuse_identity$phase3_source_commit <- wrong_reuse_identity$source_commit
+wrong_reuse_identity$sha256 <-
+  .fastkpc_full_cuda_phase3_identity_hash(wrong_reuse_identity)
+wrong_reuse_identity_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_shadow_reuse_identity(
+    volatile_production_identity, wrong_reuse_identity,
+    production_native_sha256
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(wrong_reuse_identity_error, "error"),
+  "completed shadow reuse rejects a different stable source identity"
+)
+wrong_reuse_native_error <- tryCatch({
+  .fastkpc_full_cuda_phase3_shadow_reuse_identity(
+    volatile_production_identity, roundtrip_production_identity,
+    strrep("0", 64L)
+  )
+  NULL
+}, error = function(error) error)
+assert_true(
+  inherits(wrong_reuse_native_error, "error"),
+  "completed shadow reuse rejects a different executed native SHA"
 )
 volatile_oracle_linkage <- tryCatch(
   .fastkpc_full_cuda_phase3_shadow_oracle_sp_evidence(

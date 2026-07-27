@@ -327,6 +327,40 @@ fastkpc_full_cuda_phase3_route_config_hash <- function(
   )
 }
 
+.fastkpc_full_cuda_phase3_shadow_reuse_identity <- function(
+    current_identity, recorded_identity, executed_native_library_sha256) {
+  .fastkpc_full_cuda_phase3_validate_artifact_identity(current_identity)
+  .fastkpc_full_cuda_phase3_validate_artifact_identity(recorded_identity)
+  production <- identical(
+    current_identity$schema_version,
+    "full-cuda-ci-phase3-input-identity-v1"
+  )
+  if (!identical(
+        production,
+        identical(
+          recorded_identity$schema_version,
+          "full-cuda-ci-phase3-input-identity-v1"
+        )
+      )) {
+    stop("completed shadow artifact identity schema mismatch", call. = FALSE)
+  }
+  stable_fields <- if (production) {
+    c(.fastkpc_full_cuda_phase3_stable_identity_fields(), "sha256")
+  } else {
+    names(current_identity)
+  }
+  if (!.fastkpc_full_cuda_phase3_identity_json_exact(
+        recorded_identity, current_identity, fields = stable_fields
+      )) {
+    stop("completed shadow artifact stable identity mismatch", call. = FALSE)
+  }
+  .fastkpc_full_cuda_phase3_validate_shadow_native_linkage(
+    current_identity, recorded_identity, executed_native_library_sha256,
+    "completed shadow artifact reuse"
+  )
+  recorded_identity
+}
+
 .fastkpc_full_cuda_phase3_scalar_text <- function(value, name) {
   if (!.fastkpc_full_cuda_phase3_bare_scalar(value, "character") ||
       !nzchar(value) || grepl("[[:cntrl:]]", value, perl = TRUE)) {
@@ -1588,10 +1622,13 @@ fastkpc_full_cuda_phase3_validate_input_identity <- function(
                  policy$cublas_atomics_mode_required) ||
       !identical(identity$cublas_user_workspace_required,
                  policy$cublas_user_workspace_required) ||
-      !identical(identity$cublas_workspace_bytes_required,
-                 policy$cublas_workspace_bytes_required) ||
-      !identical(identity$cublas_workspace_min_alignment_required,
-                 policy$cublas_workspace_min_alignment_required) ||
+      !.fastkpc_full_cuda_phase3_identity_value_equal(
+        identity$cublas_workspace_bytes_required,
+        policy$cublas_workspace_bytes_required
+      ) || !.fastkpc_full_cuda_phase3_identity_value_equal(
+        identity$cublas_workspace_min_alignment_required,
+        policy$cublas_workspace_min_alignment_required
+      ) ||
       !identical(identity$compute_capability,
                  paste0(identity$compute_capability_major, ".",
                         identity$compute_capability_minor)) ||
@@ -13821,10 +13858,19 @@ fastkpc_full_cuda_phase3_publish_shadow_artifact <- function(
     )
   })
   validate_existing <- function() {
+    manifest <- .fastkpc_full_cuda_phase3_read_json(
+      final_paths$manifest_json, "existing shadow manifest.json"
+    )
+    recorded_identity <- manifest$source_inputs$input_identity
+    validation_identity <-
+      .fastkpc_full_cuda_phase3_shadow_reuse_identity(
+        identity, recorded_identity,
+        manifest$executed_native_library_sha256
+      )
     .fastkpc_full_cuda_phase3_validate_shadow_artifact_sources(
       output_dir = output_dir, catalog = catalog,
       setup_keys = setup_keys, target_rows = target_rows,
-      identity = identity, route_config = route_config, scope = scope,
+      identity = validation_identity, route_config = route_config, scope = scope,
       phase0_dir = phase0_dir, oracle_sp_dir = oracle_sp_dir,
       shard_count = shard_count,
       canonical_setup_shards = canonical_setup_shards,
