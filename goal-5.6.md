@@ -604,7 +604,7 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 0 | Freeze oracle and zero-SHD comparator | COMPLETE — standardized oracle and first-divergence gate pass |
 | 1 | Full workload and risk census | COMPLETE - full 110,617-key metadata artifact passes all gates |
 | 2 | Response-independent GAM setup contract | COMPLETE - full structural artifact and qualification exact-parity/restart gates pass |
-| 3 | Persistent stable fixed-sp CUDA residual runtime | PARTIAL - Phase 3A/3B/3C qualification milestones verified; full fixed-sp artifacts and graph closure are next |
+| 3 | Persistent stable fixed-sp CUDA residual runtime | COMPLETE - full 110,617-target oracle and 240,489-test shadow artifacts independently validate with 0 flips and SHD 0 |
 | 4 | Full-CUDA single-penalty GCV for `|S|<=2` | PARTIAL — CPU spectral selection exists |
 | 5 | C++ multi-penalty GAM semantic replica | NOT COMPLETE |
 | 6 | CUDA multi-penalty same-S target batches | NOT STARTED |
@@ -1197,8 +1197,8 @@ High-condition cases must not silently return a normal-equation answer that diff
 
 #### Verified Phase 3C milestone (2026-07-20)
 
-Phase 3C qualification is complete. This does not complete Phase 3; the full
-110,617-target fixed-sp artifacts and canonical graph closure remain open.
+Phase 3C qualification is complete. The full Phase 3 artifact and graph
+closure is recorded below.
 
 ```text
 one-time individual QR roots, qualification matrices/rows 6,272 / 63,552
@@ -1215,8 +1215,7 @@ dCov 3,808 pairs, near-alpha 1,478, decision flips 0
 unknown/CPU/approximate fallback 0
 ```
 
-Active next task: generate `fixed_sp_cuda_oracle_sp_v1` and
-`fixed_sp_cuda_full_shadow_v1`.
+Active next task: Phase 4 CUDA smoothing-parameter selection.
 
 ### Required API shape
 
@@ -1273,6 +1272,69 @@ unknown fallback count = 0
 ### Exit condition
 
 Fixed-sp fitting is a correct, stable, persistent CUDA service. Smoothing-parameter selection remains oracle-supplied until Phase 4/6.
+
+### Completion evidence (2026-07-27)
+
+Phase 3 is complete for the oracle-selected fixed-sp scope. Both production
+artifacts were generated from source commit
+`2b61721b63616f5100084ccafdd243a8c3647b82` and independently validated from
+disk. Commit `558043f4908f0b0ed66b5d9bed6ff1bdb2e270a8` is a post-artifact
+publication/reuse fix; it does not change the CUDA runtime or native binary,
+and it does not relabel or rewrite the frozen artifact identities.
+
+```text
+oracle artifact                       =
+  fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_oracle_sp_v1/
+oracle manifest SHA-256               =
+  7ba91e115243e4b4551b0d80c234ba18b3bc85c60e6dc583753df742bb94bab6
+oracle summary SHA-256                =
+  38ada38620ba45cfd70ed55e37b6b1b84f043f74c78f82eb036ac3276879fa82
+
+shadow artifact                       =
+  fastkpc/artifacts/full_cuda_ci/fixed_sp_cuda_full_shadow_v1/
+shadow manifest SHA-256               =
+  0efbbdd2dba998da792fd80f035bd703c87ca888f226a3cab2a501782f464c35
+shadow summary SHA-256                =
+  8df1ff4b0e7a800e5ecdd897256759bd1be7b743ed94080a5c4b4c66f991af57
+executed native library SHA-256       =
+  29a303e7d22bfd6b7de45a4456b239c93dc1d62c274f5a1114f5c98217151ab3
+
+shards / PreparedSSetup / TargetState = 64 / 8,634 / 110,617
+planned Cholesky / QR / SVD            = 73,158 / 4,210 / 33,249
+executed Cholesky / QR / SVD           = 73,158 / 4,210 / 33,249
+Cholesky->SVD / QR->SVD reroutes       = 0 / 0
+non-OK / nonfinite / numeric failures  = 0 / 0 / 0
+unknown / CPU / approximate fallback   = 0 / 0 / 0
+per-target allocations/handles         = 0 / 0 after warm-up
+implicit residual D2H / device sync     = 0 / 0
+
+max fitted abs / relative-L2 diff       = 1.1930435e-08 / 8.5685251e-10
+max residual abs / relative-L2 diff     = 1.1930435e-08 / 2.6844550e-09
+qualification dCov rows                 = 3,808
+qualification max p-value abs diff      = 6.9555695e-11
+qualification decision flips/errors     = 0 / 0
+
+logical CI rows                         = 240,489
+direct / conditional rows               = 2,213 / 238,276
+near-alpha all / conditional             = 1,529 / 1,478
+decision flips / backend errors          = 0 / 0
+Spectra fallbacks                        = 0
+edge_count                               = 110 / 110
+SHD                                      = 0
+normalized sepsets identical             = TRUE
+n.edgetests exact                        = TRUE
+deletion trace exact                     = TRUE
+first divergence                         = NOT_APPLICABLE
+```
+
+The oracle pure resume reused the completed artifact without creating a new
+session or CUDA context. The shadow resume probe likewise created no new
+session or context and left all 64 shard pairs unchanged, but the old
+publisher then rejected volatile cross-session `input_hashes.csv` evidence.
+`558043f` fixes completed-publication reuse, exact-JSON numeric round trips,
+and the runner's completion fast path; focused, publication, artifact-contract,
+and hostile stable-source/native-SHA tests pass. No full workload was rerun for
+that post-artifact tooling fix.
 
 ---
 
@@ -2361,7 +2423,7 @@ The exact script names may be adjusted to repository conventions, but one standa
 ## 12. Immediate next actions
 
 Codex should begin with the earliest phase whose exit gate is incomplete. Phase
-0 through Phase 2 are complete, so the current starting point is Phase 3.
+0 through Phase 3 are complete, so the current starting point is Phase 4.
 
 ### Task 1
 
@@ -2391,28 +2453,34 @@ restart closure, and inherited Phase 0 graph evidence.
 ### Task 5
 
 Complete: Phase 3A established the verified persistent fixed-sp CUDA resource
-and safe single-target Cholesky milestone recorded above. This is a Phase 3A
-milestone only and does not complete Phase 3.
+and safe single-target Cholesky milestone recorded above. It is incorporated
+into the completed Phase 3 runtime.
 
 ### Task 6
 
 Complete: Phase 3B established the verified true same-S multi-target Cholesky
-milestone recorded above. This is a Phase 3B milestone only and does not
-complete Phase 3.
+milestone recorded above. It is incorporated into the completed Phase 3
+runtime.
 
 ### Task 7
 
 Complete: Phase 3C established the verified augmented QR/SVD stable routes and
 the 6,143-target qualification milestone recorded above, with zero declared
-reroutes and zero dCov decision flips. This is a Phase 3C milestone only and
-does not complete Phase 3.
+reroutes and zero dCov decision flips.
 
-Active next task: generate `fixed_sp_cuda_oracle_sp_v1` and
-`fixed_sp_cuda_full_shadow_v1`.
+### Task 8
+
+Complete: the full Phase 3 closure produced and independently validated all
+64 shards, 8,634 setups, 110,617 target solves, and 240,489 logical CI rows.
+It reproduced 110 edges with zero decision flips, exact sepsets and
+`n.edgetests`, and SHD 0.
+
+Active next task: Phase 4 CUDA smoothing-parameter selection using the
+accepted persistent fixed-sp residual runtime.
 
 The current CUDA Spectra projection primitive remains useful substrate for
-Phase 8, but the immediate critical path is now full fixed-sp artifact and
-canonical graph closure.
+Phase 8, but the immediate critical path is now single-penalty CUDA GCV
+objective and selected-`sp` parity.
 
 ---
 
