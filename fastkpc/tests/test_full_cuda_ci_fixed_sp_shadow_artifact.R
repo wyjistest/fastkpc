@@ -2439,6 +2439,59 @@ assert_true(
     )$authenticated),
   "production-shaped completed oracle fixture passes public validation"
 )
+volatile_native_path <- tempfile(
+  "phase3-shadow-volatile-native-", fileext = .Platform$dynlib.ext
+)
+assert_true(
+  file.copy(production_native_path, volatile_native_path),
+  "volatile-session fixture copies the identical native image"
+)
+on.exit(unlink(volatile_native_path, force = TRUE), add = TRUE)
+volatile_production_identity <- production_identity
+volatile_production_identity$execution_snapshot_sha256 <-
+  sha("different-production-execution-snapshot")
+volatile_production_identity$native_library_path <-
+  normalizePath(volatile_native_path, mustWork = TRUE)
+volatile_production_identity$native_library_inode <- "2"
+volatile_production_identity$native_build_dependencies_sha256 <-
+  sha("different-production-native-build-dependencies")
+volatile_production_identity$native_build_trace_sha256 <-
+  sha("different-production-native-build-trace")
+volatile_production_identity$sha256 <-
+  .fastkpc_full_cuda_phase3_identity_hash(volatile_production_identity)
+assert_true(
+  identical(volatile_production_identity$sha256,
+            production_identity$sha256),
+  "volatile-session fixture preserves the stable production identity hash"
+)
+volatile_oracle_linkage <- tryCatch(
+  .fastkpc_full_cuda_phase3_shadow_oracle_sp_evidence(
+    production_oracle_dir,
+    identity = volatile_production_identity,
+    catalog = catalog,
+    scope = "iteration",
+    executed_native_library_sha256 = production_native_sha256
+  ),
+  error = function(error) error
+)
+assert_true(
+  !inherits(volatile_oracle_linkage, "error") &&
+    identical(
+      volatile_oracle_linkage$manifest_sha256,
+      fastkpc_full_cuda_census_file_hash(
+        file.path(production_oracle_dir, "manifest.json")
+      )
+    ),
+  paste(
+    "completed-oracle linkage permits volatile native-session and trace",
+    "identity fields while retaining stable/native gates:",
+    if (inherits(volatile_oracle_linkage, "error")) {
+      conditionMessage(volatile_oracle_linkage)
+    } else {
+      "accepted"
+    }
+  )
+)
 .task9_final_native_recheck_count <- 0L
 .task9_final_native_replacement_path <- production_native_path
 .task9_final_native_replacement_bytes <- readBin(
@@ -2725,7 +2778,20 @@ assert_true(
     )),
   paste(
     "real publisher hard kill after its first staged payload leaves no",
-    "completion markers and one authenticated stale staging directory"
+    "completion markers and one authenticated stale staging directory;",
+    "status=", attr(publisher_crash_output, "status"),
+    "manifest=", file.exists(artifact_paths$manifest_json),
+    "summary=", file.exists(artifact_paths$summary_json),
+    "staging_count=", length(crashed_staging),
+    "marker=", length(crashed_staging) == 1L && file.exists(
+      .fastkpc_full_cuda_phase3_shadow_work_dir_marker_path(
+        crashed_staging[[1L]]
+      )
+    ),
+    "payload=", length(crashed_staging) == 1L && file.exists(file.path(
+      crashed_staging[[1L]], "logical_ci_parity.rds"
+    )),
+    "output=", paste(publisher_crash_output, collapse = " | ")
   )
 )
 stale_rollback_lock <-

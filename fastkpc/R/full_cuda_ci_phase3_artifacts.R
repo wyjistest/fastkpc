@@ -12799,6 +12799,11 @@ fastkpc_full_cuda_phase3_validate_direct_ci_payload <- function(
   target_file_hash <- fastkpc_full_cuda_census_file_hash(
     paths$target_parity_rds
   )
+  identity_comparison_fields <- if (production_identity) {
+    c(.fastkpc_full_cuda_phase3_stable_identity_fields(), "sha256")
+  } else {
+    names(identity)
+  }
   clean <- isTRUE(validated$authenticated) && isTRUE(validated$complete) &&
     isTRUE(validated$pass) && identical(manifest$scope, scope) &&
     identical(manifest_hash, summary$manifest_sha256) &&
@@ -12811,7 +12816,7 @@ fastkpc_full_cuda_phase3_validate_direct_ci_payload <- function(
     ) && identical(manifest$input_identity_sha256, identity$sha256) &&
     .fastkpc_full_cuda_phase3_identity_json_exact(
       manifest$input_identity, identity,
-      fields = names(identity)
+      fields = identity_comparison_fields
     ) && identical(identity$route_config_hash,
                     manifest$input_identity$route_config_hash)
   native_clean <- tryCatch({
