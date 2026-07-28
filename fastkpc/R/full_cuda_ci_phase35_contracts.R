@@ -327,6 +327,10 @@ fastkpc_full_cuda_phase35_sha256_utf8 <- function(value) {
       !identical(payload$decision_semantics$independent_when,
                  "p_value >= alpha") ||
       !identical(payload$decision_semantics$allowed_flip_count, 0L) ||
+      !identical(payload$dcov_formulas$variance,
+                 "variance_factor*x_self_moment*y_self_moment/n^2") ||
+      !identical(payload$dcov_formulas$legacy_variance_operator_order,
+                 "((variance_factor*x_self_moment*y_self_moment)/n^4)*n^2") ||
       !identical(payload$nonfinite_policy, "fail-closed-before-replay")) {
     stop("numerical contract decision or solver policy is invalid",
          call. = FALSE)
@@ -426,6 +430,7 @@ fastkpc_full_cuda_phase35_sha256_utf8 <- function(value) {
         payload$source_identities,
         .fastkpc_full_cuda_phase35_sha256, logical(1L)
       )) ||
+      !identical(payload$canonical_counts$qualification_setup_count, 2061L) ||
       !identical(payload$canonical_counts$target_count, 6143L) ||
       !identical(payload$canonical_counts$dcov_pair_count, 3808L) ||
       !identical(payload$canonical_counts$near_alpha_pair_count, 1478L) ||

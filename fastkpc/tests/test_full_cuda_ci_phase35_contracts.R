@@ -122,6 +122,10 @@ assert_true(
   identical(numerical$decision_semantics$independent_when, "p_value >= alpha") &&
     identical(numerical$decision_semantics$allowed_flip_count, 0L) &&
     identical(numerical$precision$storage, "IEEE-754-binary64") &&
+    identical(numerical$dcov_formulas$variance,
+              "variance_factor*x_self_moment*y_self_moment/n^2") &&
+    identical(numerical$dcov_formulas$legacy_variance_operator_order,
+              "((variance_factor*x_self_moment*y_self_moment)/n^4)*n^2") &&
     identical(numerical$tolerances$residual$max_absolute, "1e-7") &&
     identical(numerical$tolerances$residual$relative_l2, "1e-8") &&
     identical(numerical$tolerances$p_value$absolute, "1e-10") &&
@@ -135,6 +139,15 @@ assert_true(
       "AUGMENTED_SVD")
   ),
   "condition buckets must retain the qualified Phase 3 route policy"
+)
+
+development <- contracts$development_qualification_corpus_v1$payload
+assert_true(
+  identical(development$canonical_counts$qualification_setup_count, 2061L) &&
+    identical(development$canonical_counts$target_count, 6143L) &&
+    identical(development$canonical_counts$dcov_pair_count, 3808L) &&
+    identical(development$canonical_counts$near_alpha_pair_count, 1478L),
+  "development qualification corpus counts must match authenticated inputs"
 )
 
 machine <- contracts$reference_machine_v1$payload

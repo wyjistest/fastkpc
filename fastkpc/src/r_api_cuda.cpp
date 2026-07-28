@@ -596,6 +596,190 @@ fastkpc::FullCudaCiVerticalRequest parse_full_cuda_ci_vertical_request(
   return result;
 }
 
+void require_full_cuda_ci_exact_batch_request_fields(SEXP request_s) {
+  static const char* expected[] = {
+    "schema_version", "expected_prepared_s_key_sha256",
+    "request_identity_sha256", "logical_sequence_ids",
+    "left_target_ordinals", "right_target_ordinals", "alpha",
+    "component_capacity"
+  };
+  constexpr int expected_count =
+    static_cast<int>(sizeof(expected) / sizeof(expected[0]));
+  if (TYPEOF(request_s) != VECSXP || XLENGTH(request_s) != expected_count ||
+      Rf_isObject(request_s) ||
+      !has_only_attributes(request_s, {R_NamesSymbol})) {
+    Rcpp::stop("exact batch request must have exact fields");
+  }
+  SEXP names = Rf_getAttrib(request_s, R_NamesSymbol);
+  if (TYPEOF(names) != STRSXP || XLENGTH(names) != expected_count ||
+      Rf_isObject(names) || ATTRIB(names) != R_NilValue) {
+    Rcpp::stop("exact batch request must have exact fields");
+  }
+  for (int index = 0; index < expected_count; ++index) {
+    if (STRING_ELT(names, index) == NA_STRING ||
+        std::string(CHAR(STRING_ELT(names, index))) != expected[index]) {
+      Rcpp::stop("exact batch request must have exact fields");
+    }
+  }
+}
+
+fastkpc::FullCudaCiExactBatchRequest
+parse_full_cuda_ci_exact_batch_request(SEXP request_s) {
+  require_full_cuda_ci_exact_batch_request_fields(request_s);
+  Rcpp::List request(request_s);
+  const std::string schema = bare_scalar_string(
+    request[0], "exact batch request schema_version");
+  if (schema != fastkpc::kFullCudaCiExactBatchRequestSchemaVersion) {
+    Rcpp::stop("exact batch request schema_version mismatch");
+  }
+  require_sha256_string(
+    request[1], "exact batch expected_prepared_s_key_sha256");
+  require_sha256_string(request[2], "exact batch request_identity_sha256");
+
+  SEXP logical_s = request[3];
+  SEXP left_s = request[4];
+  SEXP right_s = request[5];
+  if (TYPEOF(logical_s) != REALSXP || XLENGTH(logical_s) < 1 ||
+      XLENGTH(logical_s) > std::numeric_limits<int>::max() ||
+      Rf_isObject(logical_s) || ATTRIB(logical_s) != R_NilValue ||
+      TYPEOF(left_s) != INTSXP || XLENGTH(left_s) != XLENGTH(logical_s) ||
+      Rf_isObject(left_s) || ATTRIB(left_s) != R_NilValue ||
+      TYPEOF(right_s) != INTSXP ||
+      XLENGTH(right_s) != XLENGTH(logical_s) || Rf_isObject(right_s) ||
+      ATTRIB(right_s) != R_NilValue) {
+    Rcpp::stop("exact batch pair vectors are malformed");
+  }
+
+  SEXP alpha_s = request[6];
+  if (TYPEOF(alpha_s) != REALSXP || XLENGTH(alpha_s) != 1 ||
+      Rf_isObject(alpha_s) || ATTRIB(alpha_s) != R_NilValue ||
+      !std::isfinite(REAL(alpha_s)[0])) {
+    Rcpp::stop("exact batch alpha must be a bare finite double scalar");
+  }
+  const int component_capacity = positive_scalar_integer(
+    request[7], "exact batch component_capacity");
+
+  fastkpc::FullCudaCiExactBatchRequest result;
+  result.expected_prepared_s_key_sha256 =
+    Rcpp::as<std::string>(request[1]);
+  result.request_identity_sha256 = Rcpp::as<std::string>(request[2]);
+  result.component_capacity = component_capacity;
+  const int pair_count = static_cast<int>(XLENGTH(logical_s));
+  result.pairs.reserve(static_cast<std::size_t>(pair_count));
+  for (int index = 0; index < pair_count; ++index) {
+    const double logical_id = REAL(logical_s)[index];
+    const int left_ordinal = INTEGER(left_s)[index];
+    const int right_ordinal = INTEGER(right_s)[index];
+    if (!std::isfinite(logical_id) || logical_id < 1.0 ||
+        logical_id > 9007199254740991.0 ||
+        std::floor(logical_id) != logical_id ||
+        left_ordinal == NA_INTEGER || right_ordinal == NA_INTEGER ||
+        left_ordinal < 1 || right_ordinal < 1) {
+      Rcpp::stop("exact batch pair vectors are malformed");
+    }
+    fastkpc::FullCudaCiExactBatchPairRequest pair;
+    pair.logical_sequence_id = static_cast<std::uint64_t>(logical_id);
+    pair.left_target_index = left_ordinal - 1;
+    pair.right_target_index = right_ordinal - 1;
+    pair.alpha = REAL(alpha_s)[0];
+    result.pairs.push_back(pair);
+  }
+  return result;
+}
+
+void require_full_cuda_ci_legacy_eig_batch_request_fields(SEXP request_s) {
+  static const char* expected[] = {
+    "schema_version", "expected_prepared_s_key_sha256",
+    "request_identity_sha256", "logical_sequence_ids",
+    "left_target_ordinals", "right_target_ordinals", "alpha",
+    "component_capacity", "num_col"
+  };
+  constexpr int expected_count =
+    static_cast<int>(sizeof(expected) / sizeof(expected[0]));
+  if (TYPEOF(request_s) != VECSXP || XLENGTH(request_s) != expected_count ||
+      Rf_isObject(request_s) ||
+      !has_only_attributes(request_s, {R_NamesSymbol})) {
+    Rcpp::stop("legacy eig batch request must have exact fields");
+  }
+  SEXP names = Rf_getAttrib(request_s, R_NamesSymbol);
+  if (TYPEOF(names) != STRSXP || XLENGTH(names) != expected_count ||
+      Rf_isObject(names) || ATTRIB(names) != R_NilValue) {
+    Rcpp::stop("legacy eig batch request must have exact fields");
+  }
+  for (int index = 0; index < expected_count; ++index) {
+    if (STRING_ELT(names, index) == NA_STRING ||
+        std::string(CHAR(STRING_ELT(names, index))) != expected[index]) {
+      Rcpp::stop("legacy eig batch request must have exact fields");
+    }
+  }
+}
+
+fastkpc::FullCudaCiLegacyEigBatchRequest
+parse_full_cuda_ci_legacy_eig_batch_request(SEXP request_s) {
+  require_full_cuda_ci_legacy_eig_batch_request_fields(request_s);
+  Rcpp::List request(request_s);
+  const std::string schema = bare_scalar_string(
+    request[0], "legacy eig batch request schema_version");
+  if (schema != fastkpc::kFullCudaCiLegacyEigBatchRequestSchemaVersion) {
+    Rcpp::stop("legacy eig batch request schema_version mismatch");
+  }
+  require_sha256_string(
+    request[1], "legacy eig expected_prepared_s_key_sha256");
+  require_sha256_string(
+    request[2], "legacy eig request_identity_sha256");
+  SEXP logical_s = request[3];
+  SEXP left_s = request[4];
+  SEXP right_s = request[5];
+  if (TYPEOF(logical_s) != REALSXP || XLENGTH(logical_s) < 1 ||
+      XLENGTH(logical_s) > std::numeric_limits<int>::max() ||
+      Rf_isObject(logical_s) || ATTRIB(logical_s) != R_NilValue ||
+      TYPEOF(left_s) != INTSXP || XLENGTH(left_s) != XLENGTH(logical_s) ||
+      Rf_isObject(left_s) || ATTRIB(left_s) != R_NilValue ||
+      TYPEOF(right_s) != INTSXP ||
+      XLENGTH(right_s) != XLENGTH(logical_s) || Rf_isObject(right_s) ||
+      ATTRIB(right_s) != R_NilValue) {
+    Rcpp::stop("legacy eig batch pair vectors are malformed");
+  }
+  SEXP alpha_s = request[6];
+  if (TYPEOF(alpha_s) != REALSXP || XLENGTH(alpha_s) != 1 ||
+      Rf_isObject(alpha_s) || ATTRIB(alpha_s) != R_NilValue ||
+      !std::isfinite(REAL(alpha_s)[0])) {
+    Rcpp::stop("legacy eig alpha must be a bare finite double scalar");
+  }
+  const int component_capacity = positive_scalar_integer(
+    request[7], "legacy eig component_capacity");
+  const int num_col = positive_scalar_integer(
+    request[8], "legacy eig num_col");
+
+  fastkpc::FullCudaCiLegacyEigBatchRequest result;
+  result.expected_prepared_s_key_sha256 =
+    Rcpp::as<std::string>(request[1]);
+  result.request_identity_sha256 = Rcpp::as<std::string>(request[2]);
+  result.component_capacity = component_capacity;
+  result.num_col = num_col;
+  const int pair_count = static_cast<int>(XLENGTH(logical_s));
+  result.pairs.reserve(static_cast<std::size_t>(pair_count));
+  for (int index = 0; index < pair_count; ++index) {
+    const double logical_id = REAL(logical_s)[index];
+    const int left_ordinal = INTEGER(left_s)[index];
+    const int right_ordinal = INTEGER(right_s)[index];
+    if (!std::isfinite(logical_id) || logical_id < 1.0 ||
+        logical_id > 9007199254740991.0 ||
+        std::floor(logical_id) != logical_id ||
+        left_ordinal == NA_INTEGER || right_ordinal == NA_INTEGER ||
+        left_ordinal < 1 || right_ordinal < 1) {
+      Rcpp::stop("legacy eig batch pair vectors are malformed");
+    }
+    fastkpc::FullCudaCiExactBatchPairRequest pair;
+    pair.logical_sequence_id = static_cast<std::uint64_t>(logical_id);
+    pair.left_target_index = left_ordinal - 1;
+    pair.right_target_index = right_ordinal - 1;
+    pair.alpha = REAL(alpha_s)[0];
+    result.pairs.push_back(pair);
+  }
+  return result;
+}
+
 void legacy_dcov_spectra_matvec_handle_finalizer(SEXP ext) {
   auto* handle =
     static_cast<fastkpc::LegacyDcovSpectraMatvecCudaHandle*>(
@@ -3666,6 +3850,266 @@ Rcpp::List full_cuda_ci_vertical_diagnostics_to_list(
   return result;
 }
 
+Rcpp::DataFrame full_cuda_ci_exact_batch_records_to_frame(
+    const std::vector<fastkpc::FullCudaCiCompactHostRecord>& records) {
+  const int count = static_cast<int>(records.size());
+  Rcpp::NumericVector logical_sequence_id(count);
+  Rcpp::NumericVector p_value(count);
+  Rcpp::CharacterVector status(count);
+  Rcpp::CharacterVector solver_route(count);
+  Rcpp::CharacterVector optimizer_status(count);
+  Rcpp::CharacterVector dcov_status(count);
+  Rcpp::IntegerVector diagnostic_flags(count);
+  for (int index = 0; index < count; ++index) {
+    const fastkpc::FullCudaCiCompactHostRecord& record =
+      records[static_cast<std::size_t>(index)];
+    logical_sequence_id[index] =
+      static_cast<double>(record.logical_sequence_id);
+    p_value[index] = record.p_value;
+    status[index] = record.status;
+    solver_route[index] = record.solver_route;
+    optimizer_status[index] = record.optimizer_status;
+    dcov_status[index] = record.dcov_status;
+    diagnostic_flags[index] = record.diagnostic_flags;
+  }
+  return Rcpp::DataFrame::create(
+    Rcpp::Named("logical_sequence_id") = logical_sequence_id,
+    Rcpp::Named("p_value") = p_value,
+    Rcpp::Named("status") = status,
+    Rcpp::Named("solver_route") = solver_route,
+    Rcpp::Named("optimizer_status") = optimizer_status,
+    Rcpp::Named("dcov_status") = dcov_status,
+    Rcpp::Named("diagnostic_flags") = diagnostic_flags,
+    Rcpp::Named("stringsAsFactors") = false
+  );
+}
+
+Rcpp::DataFrame full_cuda_ci_exact_batch_numerical_to_frame(
+    const std::vector<fastkpc::FullCudaCiNumericalDiagnostics>& values) {
+  const int count = static_cast<int>(values.size());
+  Rcpp::NumericVector statistic(count);
+  Rcpp::NumericVector mean(count);
+  Rcpp::NumericVector variance(count);
+  Rcpp::NumericVector gamma_shape(count);
+  Rcpp::NumericVector gamma_scale(count);
+  Rcpp::IntegerVector gamma_iterations(count);
+  for (int index = 0; index < count; ++index) {
+    const fastkpc::FullCudaCiNumericalDiagnostics& value =
+      values[static_cast<std::size_t>(index)];
+    statistic[index] = value.statistic;
+    mean[index] = value.mean;
+    variance[index] = value.variance;
+    gamma_shape[index] = value.gamma_shape;
+    gamma_scale[index] = value.gamma_scale;
+    gamma_iterations[index] = value.gamma_iterations;
+  }
+  return Rcpp::DataFrame::create(
+    Rcpp::Named("statistic") = statistic,
+    Rcpp::Named("mean") = mean,
+    Rcpp::Named("variance") = variance,
+    Rcpp::Named("gamma_shape") = gamma_shape,
+    Rcpp::Named("gamma_scale") = gamma_scale,
+    Rcpp::Named("gamma_iterations") = gamma_iterations,
+    Rcpp::Named("stringsAsFactors") = false
+  );
+}
+
+Rcpp::List full_cuda_ci_exact_batch_diagnostics_to_list(
+    const fastkpc::FullCudaCiExactBatchDiagnostics& value) {
+  Rcpp::List result;
+  result.push_back(value.component_semantic_version,
+                   "component_semantic_version");
+  result.push_back(value.n, "n");
+  result.push_back(value.target_count, "target_count");
+  result.push_back(value.pair_count, "pair_count");
+  result.push_back(value.referenced_component_count,
+                   "referenced_component_count");
+  result.push_back(value.component_capacity, "component_capacity");
+  result.push_back(value.component_cache_lookup_count,
+                   "component_cache_lookup_count");
+  result.push_back(value.component_cache_hit_count,
+                   "component_cache_hit_count");
+  result.push_back(value.component_cache_miss_count,
+                   "component_cache_miss_count");
+  result.push_back(value.component_build_count, "component_build_count");
+  result.push_back(value.component_cache_eviction_count,
+                   "component_cache_eviction_count");
+  result.push_back(value.pair_evaluation_count, "pair_evaluation_count");
+  result.push_back(value.residual_d2h_count, "residual_d2h_count");
+  result.push_back(static_cast<double>(value.residual_d2h_bytes),
+                   "residual_d2h_bytes");
+  result.push_back(value.component_d2h_count, "component_d2h_count");
+  result.push_back(static_cast<double>(value.component_d2h_bytes),
+                   "component_d2h_bytes");
+  result.push_back(value.compact_result_d2h_count,
+                   "compact_result_d2h_count");
+  result.push_back(static_cast<double>(value.compact_result_d2h_bytes),
+                   "compact_result_d2h_bytes");
+  result.push_back(value.metadata_h2d_count, "metadata_h2d_count");
+  result.push_back(static_cast<double>(value.metadata_h2d_bytes),
+                   "metadata_h2d_bytes");
+  result.push_back(value.cpu_dcov_component_count,
+                   "cpu_dcov_component_count");
+  result.push_back(value.cpu_dcov_pair_statistic_count,
+                   "cpu_dcov_pair_statistic_count");
+  result.push_back(value.cpu_gamma_p_value_count,
+                   "cpu_gamma_p_value_count");
+  result.push_back(value.consumer_event_registration_count,
+                   "consumer_event_registration_count");
+  result.push_back(value.explicit_host_wait_count,
+                   "explicit_host_wait_count");
+  result.push_back(value.device_allocation_count,
+                   "device_allocation_count");
+  result.push_back(value.device_free_count, "device_free_count");
+  result.push_back(static_cast<double>(value.device_allocation_bytes),
+                   "device_allocation_bytes");
+  result.push_back(static_cast<double>(value.peak_live_device_bytes),
+                   "peak_live_device_bytes");
+  result.push_back(static_cast<double>(value.component_bytes_per_target),
+                   "component_bytes_per_target");
+  result.push_back(static_cast<double>(value.peak_component_bytes),
+                   "peak_component_bytes");
+  result.push_back(static_cast<double>(value.live_device_allocations_before),
+                   "live_device_allocations_before");
+  result.push_back(static_cast<double>(value.live_device_allocations_after),
+                   "live_device_allocations_after");
+  result.push_back(static_cast<double>(value.live_device_bytes_before),
+                   "live_device_bytes_before");
+  result.push_back(static_cast<double>(value.live_device_bytes_after),
+                   "live_device_bytes_after");
+  result.push_back(value.residual_solve_host_ms,
+                   "residual_solve_host_ms");
+  result.push_back(value.metadata_h2d_cuda_ms,
+                   "metadata_h2d_cuda_ms");
+  result.push_back(value.component_build_cuda_ms,
+                   "component_build_cuda_ms");
+  result.push_back(value.pair_evaluation_cuda_ms,
+                   "pair_evaluation_cuda_ms");
+  result.push_back(value.compact_d2h_cuda_ms,
+                   "compact_d2h_cuda_ms");
+  result.push_back(value.dcov_host_boundary_ms,
+                   "dcov_host_boundary_ms");
+  result.push_back(value.teardown_host_ms, "teardown_host_ms");
+  result.push_back(value.total_host_ms, "total_host_ms");
+  result.push_back(value.request_identity_authenticated,
+                   "request_identity_authenticated");
+  result.push_back(value.prepared_identity_authenticated,
+                   "prepared_identity_authenticated");
+  result.push_back(value.target_identity_authenticated,
+                   "target_identity_authenticated");
+  result.push_back(value.residuals_device_resident,
+                   "residuals_device_resident");
+  result.push_back(value.components_device_resident,
+                   "components_device_resident");
+  result.push_back(value.compact_result_only_d2h,
+                   "compact_result_only_d2h");
+  result.push_back(value.deterministic_logical_order,
+                   "deterministic_logical_order");
+  result.push_back(value.component_capacity_respected,
+                   "component_capacity_respected");
+  result.push_back(value.bounded_allocation, "bounded_allocation");
+  result.push_back(value.leak_free_teardown, "leak_free_teardown");
+  result.push_back(value.caller_device_restored,
+                   "caller_device_restored");
+  return result;
+}
+
+Rcpp::List full_cuda_ci_legacy_eig_batch_diagnostics_to_list(
+    const fastkpc::FullCudaCiLegacyEigBatchDiagnostics& value) {
+  Rcpp::List result;
+  result.push_back(value.component_semantic_version,
+                   "component_semantic_version");
+  result.push_back(value.n, "n");
+  result.push_back(value.target_count, "target_count");
+  result.push_back(value.pair_count, "pair_count");
+  result.push_back(value.referenced_component_count,
+                   "referenced_component_count");
+  result.push_back(value.component_capacity, "component_capacity");
+  result.push_back(value.num_col, "num_col");
+  result.push_back(value.component_build_count, "component_build_count");
+  result.push_back(value.pair_evaluation_count, "pair_evaluation_count");
+  result.push_back(value.solver_failure_count, "solver_failure_count");
+  result.push_back(value.residual_d2h_count, "residual_d2h_count");
+  result.push_back(static_cast<double>(value.residual_d2h_bytes),
+                   "residual_d2h_bytes");
+  result.push_back(value.component_d2h_count, "component_d2h_count");
+  result.push_back(static_cast<double>(value.component_d2h_bytes),
+                   "component_d2h_bytes");
+  result.push_back(value.compact_result_d2h_count,
+                   "compact_result_d2h_count");
+  result.push_back(static_cast<double>(value.compact_result_d2h_bytes),
+                   "compact_result_d2h_bytes");
+  result.push_back(value.compact_status_d2h_count,
+                   "compact_status_d2h_count");
+  result.push_back(static_cast<double>(value.compact_status_d2h_bytes),
+                   "compact_status_d2h_bytes");
+  result.push_back(value.metadata_h2d_count, "metadata_h2d_count");
+  result.push_back(static_cast<double>(value.metadata_h2d_bytes),
+                   "metadata_h2d_bytes");
+  result.push_back(value.cpu_dcov_component_count,
+                   "cpu_dcov_component_count");
+  result.push_back(value.cpu_dcov_eigen_count, "cpu_dcov_eigen_count");
+  result.push_back(value.cpu_dcov_pair_statistic_count,
+                   "cpu_dcov_pair_statistic_count");
+  result.push_back(value.cpu_gamma_p_value_count,
+                   "cpu_gamma_p_value_count");
+  result.push_back(value.cuda_full_eig_count, "cuda_full_eig_count");
+  result.push_back(value.cuda_pair_count, "cuda_pair_count");
+  result.push_back(value.cuda_gamma_count, "cuda_gamma_count");
+  result.push_back(value.consumer_event_registration_count,
+                   "consumer_event_registration_count");
+  result.push_back(value.explicit_host_wait_count,
+                   "explicit_host_wait_count");
+  result.push_back(value.device_allocation_count,
+                   "device_allocation_count");
+  result.push_back(value.device_free_count, "device_free_count");
+  result.push_back(static_cast<double>(value.device_allocation_bytes),
+                   "device_allocation_bytes");
+  result.push_back(static_cast<double>(value.peak_live_device_bytes),
+                   "peak_live_device_bytes");
+  result.push_back(static_cast<double>(value.persistent_component_bytes),
+                   "persistent_component_bytes");
+  result.push_back(static_cast<double>(value.eig_workspace_bytes),
+                   "eig_workspace_bytes");
+  result.push_back(static_cast<double>(value.pair_workspace_bytes),
+                   "pair_workspace_bytes");
+  result.push_back(value.residual_solve_host_ms, "residual_solve_host_ms");
+  result.push_back(value.metadata_h2d_cuda_ms, "metadata_h2d_cuda_ms");
+  result.push_back(value.distance_build_cuda_ms, "distance_build_cuda_ms");
+  result.push_back(value.full_eig_cuda_ms, "full_eig_cuda_ms");
+  result.push_back(value.component_finalize_cuda_ms,
+                   "component_finalize_cuda_ms");
+  result.push_back(value.component_build_cuda_ms,
+                   "component_build_cuda_ms");
+  result.push_back(value.pair_evaluation_cuda_ms,
+                   "pair_evaluation_cuda_ms");
+  result.push_back(value.compact_d2h_cuda_ms, "compact_d2h_cuda_ms");
+  result.push_back(value.dcov_host_boundary_ms, "dcov_host_boundary_ms");
+  result.push_back(value.teardown_host_ms, "teardown_host_ms");
+  result.push_back(value.total_host_ms, "total_host_ms");
+  result.push_back(value.request_identity_authenticated,
+                   "request_identity_authenticated");
+  result.push_back(value.prepared_identity_authenticated,
+                   "prepared_identity_authenticated");
+  result.push_back(value.target_identity_authenticated,
+                   "target_identity_authenticated");
+  result.push_back(value.residuals_device_resident,
+                   "residuals_device_resident");
+  result.push_back(value.components_device_resident,
+                   "components_device_resident");
+  result.push_back(value.compact_result_only_d2h,
+                   "compact_result_only_d2h");
+  result.push_back(value.deterministic_logical_order,
+                   "deterministic_logical_order");
+  result.push_back(value.component_capacity_respected,
+                   "component_capacity_respected");
+  result.push_back(value.bounded_allocation, "bounded_allocation");
+  result.push_back(value.leak_free_teardown, "leak_free_teardown");
+  result.push_back(value.caller_device_restored,
+                   "caller_device_restored");
+  return result;
+}
+
 Rcpp::List full_cuda_ci_vertical_resource_snapshot_to_list(
     const fastkpc::FullCudaCiVerticalResourceSnapshot& value) {
   return Rcpp::List::create(
@@ -3787,6 +4231,182 @@ extern "C" SEXP C_full_cuda_ci_phase35_vertical(
       full_cuda_ci_numerical_diagnostics_to_list(result.replay_numerical),
     Rcpp::Named("diagnostics") =
       full_cuda_ci_vertical_diagnostics_to_list(result.diagnostics)
+  );
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_phase35_exact_batch(
+    SEXP prepared_s,
+    SEXP Y_s,
+    SEXP SP_s,
+    SEXP planned_route_s,
+    SEXP target_keys_s,
+    SEXP request_s) {
+  BEGIN_RCPP
+  FixedSpPreparedHolder* prepared_holder =
+    fixed_sp_cuda_prepared_holder(prepared_s, true);
+  const fastkpc::PreparedSInfo prepared_info =
+    fastkpc::prepared_s_gpu_info(prepared_holder->value);
+
+  if (TYPEOF(Y_s) != REALSXP || !Rf_isMatrix(Y_s) || Rf_isObject(Y_s) ||
+      !has_only_attributes(Y_s, {R_DimSymbol, R_DimNamesSymbol})) {
+    Rcpp::stop("exact batch Y must be a finite double matrix");
+  }
+  SEXP Y_dimensions = Rf_getAttrib(Y_s, R_DimSymbol);
+  if (TYPEOF(Y_dimensions) != INTSXP || XLENGTH(Y_dimensions) != 2 ||
+      INTEGER(Y_dimensions)[0] != prepared_info.n ||
+      INTEGER(Y_dimensions)[1] < 2) {
+    Rcpp::stop("exact batch Y shape mismatch");
+  }
+  const int target_count = INTEGER(Y_dimensions)[1];
+  require_bare_double_matrix(Y_s, prepared_info.n, target_count,
+                             "exact batch Y");
+  require_bare_double_matrix(SP_s, prepared_info.penalty_count,
+                             target_count, "exact batch SP");
+
+  const std::vector<std::string> route_names = bare_character_vector(
+    planned_route_s, target_count, "exact batch planned_route");
+  std::vector<fastkpc::FixedSpRoute> planned_routes;
+  planned_routes.reserve(static_cast<std::size_t>(target_count));
+  for (const std::string& route : route_names) {
+    planned_routes.push_back(fixed_sp_route_from_string(route));
+  }
+  const std::vector<std::string> target_keys = bare_character_vector(
+    target_keys_s, target_count, "exact batch target_keys");
+  for (int index = 0; index < target_count; ++index) {
+    const std::string& key = target_keys[static_cast<std::size_t>(index)];
+    const bool valid_sha = key.size() == 64U &&
+      std::all_of(key.begin(), key.end(), [](unsigned char character) {
+        return (character >= '0' && character <= '9') ||
+          (character >= 'a' && character <= 'f');
+      });
+    if (!valid_sha) {
+      Rcpp::stop(
+        "exact batch target_keys must contain lowercase SHA-256 strings");
+    }
+    if (std::find(target_keys.begin(), target_keys.begin() + index, key) !=
+        target_keys.begin() + index) {
+      Rcpp::stop("exact batch target_keys must not contain duplicates");
+    }
+  }
+
+  const fastkpc::FullCudaCiExactBatchRequest request =
+    parse_full_cuda_ci_exact_batch_request(request_s);
+  fastkpc::FixedSpBatchHostView batch;
+  batch.Y = REAL(Y_s);
+  batch.SP = REAL(SP_s);
+  batch.n = prepared_info.n;
+  batch.null_dim = prepared_info.null_dim;
+  batch.penalty_count = prepared_info.penalty_count;
+  batch.target_count = target_count;
+  batch.output_mask = fastkpc::FixedSpOutputResiduals;
+  batch.planned_routes = std::move(planned_routes);
+  batch.target_keys = target_keys;
+
+  const fastkpc::FullCudaCiExactBatchResult result =
+    fastkpc::run_full_cuda_ci_phase35_exact_batch(
+      prepared_holder->value, batch, request);
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") = result.schema_version,
+    Rcpp::Named("request_identity_sha256") =
+      result.request_identity_sha256,
+    Rcpp::Named("prepared_s_key_sha256") =
+      result.prepared_s_key_sha256,
+    Rcpp::Named("target_keys") = Rcpp::wrap(result.target_keys),
+    Rcpp::Named("records") =
+      full_cuda_ci_exact_batch_records_to_frame(result.records),
+    Rcpp::Named("numerical") =
+      full_cuda_ci_exact_batch_numerical_to_frame(result.numerical),
+    Rcpp::Named("diagnostics") =
+      full_cuda_ci_exact_batch_diagnostics_to_list(result.diagnostics)
+  );
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_phase35_legacy_eig_batch(
+    SEXP prepared_s,
+    SEXP Y_s,
+    SEXP SP_s,
+    SEXP planned_route_s,
+    SEXP target_keys_s,
+    SEXP request_s) {
+  BEGIN_RCPP
+  FixedSpPreparedHolder* prepared_holder =
+    fixed_sp_cuda_prepared_holder(prepared_s, true);
+  const fastkpc::PreparedSInfo prepared_info =
+    fastkpc::prepared_s_gpu_info(prepared_holder->value);
+
+  if (TYPEOF(Y_s) != REALSXP || !Rf_isMatrix(Y_s) || Rf_isObject(Y_s) ||
+      !has_only_attributes(Y_s, {R_DimSymbol, R_DimNamesSymbol})) {
+    Rcpp::stop("legacy eig batch Y must be a finite double matrix");
+  }
+  SEXP Y_dimensions = Rf_getAttrib(Y_s, R_DimSymbol);
+  if (TYPEOF(Y_dimensions) != INTSXP || XLENGTH(Y_dimensions) != 2 ||
+      INTEGER(Y_dimensions)[0] != prepared_info.n ||
+      INTEGER(Y_dimensions)[1] < 2) {
+    Rcpp::stop("legacy eig batch Y shape mismatch");
+  }
+  const int target_count = INTEGER(Y_dimensions)[1];
+  require_bare_double_matrix(Y_s, prepared_info.n, target_count,
+                             "legacy eig batch Y");
+  require_bare_double_matrix(SP_s, prepared_info.penalty_count,
+                             target_count, "legacy eig batch SP");
+
+  const std::vector<std::string> route_names = bare_character_vector(
+    planned_route_s, target_count, "legacy eig batch planned_route");
+  std::vector<fastkpc::FixedSpRoute> planned_routes;
+  planned_routes.reserve(static_cast<std::size_t>(target_count));
+  for (const std::string& route : route_names) {
+    planned_routes.push_back(fixed_sp_route_from_string(route));
+  }
+  const std::vector<std::string> target_keys = bare_character_vector(
+    target_keys_s, target_count, "legacy eig batch target_keys");
+  for (int index = 0; index < target_count; ++index) {
+    const std::string& key = target_keys[static_cast<std::size_t>(index)];
+    const bool valid_sha = key.size() == 64U &&
+      std::all_of(key.begin(), key.end(), [](unsigned char character) {
+        return (character >= '0' && character <= '9') ||
+          (character >= 'a' && character <= 'f');
+      });
+    if (!valid_sha) {
+      Rcpp::stop(
+        "legacy eig batch target_keys must contain lowercase SHA-256 strings");
+    }
+    if (std::find(target_keys.begin(), target_keys.begin() + index, key) !=
+        target_keys.begin() + index) {
+      Rcpp::stop("legacy eig batch target_keys must not contain duplicates");
+    }
+  }
+
+  const fastkpc::FullCudaCiLegacyEigBatchRequest request =
+    parse_full_cuda_ci_legacy_eig_batch_request(request_s);
+  fastkpc::FixedSpBatchHostView batch;
+  batch.Y = REAL(Y_s);
+  batch.SP = REAL(SP_s);
+  batch.n = prepared_info.n;
+  batch.null_dim = prepared_info.null_dim;
+  batch.penalty_count = prepared_info.penalty_count;
+  batch.target_count = target_count;
+  batch.output_mask = fastkpc::FixedSpOutputResiduals;
+  batch.planned_routes = std::move(planned_routes);
+  batch.target_keys = target_keys;
+
+  const fastkpc::FullCudaCiLegacyEigBatchResult result =
+    fastkpc::run_full_cuda_ci_phase35_legacy_eig_batch(
+      prepared_holder->value, batch, request);
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") = result.schema_version,
+    Rcpp::Named("request_identity_sha256") =
+      result.request_identity_sha256,
+    Rcpp::Named("prepared_s_key_sha256") =
+      result.prepared_s_key_sha256,
+    Rcpp::Named("target_keys") = Rcpp::wrap(result.target_keys),
+    Rcpp::Named("records") =
+      full_cuda_ci_exact_batch_records_to_frame(result.records),
+    Rcpp::Named("numerical") =
+      full_cuda_ci_exact_batch_numerical_to_frame(result.numerical),
+    Rcpp::Named("diagnostics") =
+      full_cuda_ci_legacy_eig_batch_diagnostics_to_list(result.diagnostics)
   );
   END_RCPP
 }
@@ -9255,6 +9875,8 @@ static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_semantic_abi_info", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_semantic_abi_info), 0},
   {"C_full_cuda_ci_phase35_vertical_resource_snapshot", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical_resource_snapshot), 0},
   {"C_full_cuda_ci_phase35_vertical", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical), 6},
+  {"C_full_cuda_ci_phase35_exact_batch", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_exact_batch), 6},
+  {"C_full_cuda_ci_phase35_legacy_eig_batch", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_legacy_eig_batch), 6},
   {"C_fastkpc_cuda_available", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_available), 0},
   {"C_fastkpc_cuda_device_info", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_device_info), 0},
   {"C_fastkpc_cuda_phase3_environment_identity", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_phase3_environment_identity), 1},

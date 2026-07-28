@@ -4,9 +4,9 @@
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
-> **Current accepted implementation/evidence snapshot:** `main` at `320f019` (`docs: record full CUDA CI Phase 3 closure`); Phase 3 is COMPLETE.
+> **Current accepted implementation/evidence snapshot:** Phase 3.5 is COMPLETE. Its accepted feasibility manifest is `5618db7966d0be4c3762a17a937a370842f61ba76294986ead967fed1c98be9f`, built on the Phase 3.5D native baseline at `ded3333`.
 >
-> **Active roadmap phase:** Phase 3.5, whose blocking specification was introduced at `114ec95`.
+> **Active roadmap phase:** Phase 4, full-CUDA single-penalty GCV for `|S| <= 2`.
 >
 > **Hard rule:** **0 SHD is mandatory.** A faster result with a different skeleton is a failed result.
 
@@ -629,8 +629,8 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 1 | Full workload and risk census | COMPLETE - full 110,617-key metadata artifact passes all gates |
 | 2 | Response-independent GAM setup contract | COMPLETE - full structural artifact and qualification exact-parity/restart gates pass |
 | 3 | Persistent stable fixed-sp CUDA residual runtime | COMPLETE - full 110,617-target oracle and 240,489-test shadow artifacts independently validate with 0 flips and SHD 0 |
-| 3.5 | Full-CUDA architecture feasibility and performance-budget gate | ACTIVE - blocking contracts, dCov bake-off, and cache/budget artifacts are required before Phase 4 authority |
-| 4 | Full-CUDA single-penalty GCV for `|S|<=2` | PARTIAL — CPU spectral selection exists |
+| 3.5 | Full-CUDA architecture feasibility and performance-budget gate | COMPLETE - guarded exact-screen/full-eig CUDA architecture is GO for Phase 8 qualification; measured cache/memory and conservative 98.529-second campaign feasibility gates pass |
+| 4 | Full-CUDA single-penalty GCV for `|S|<=2` | ACTIVE - CPU spectral selection remains to be removed |
 | 5 | C++ multi-penalty GAM semantic replica | NOT COMPLETE |
 | 6 | CUDA multi-penalty same-S target batches | NOT STARTED |
 | 7 | Native setup builder; remove R/mgcv from CI loop | NOT STARTED |
@@ -1240,8 +1240,9 @@ dCov 3,808 pairs, near-alpha 1,478, decision flips 0
 unknown/CPU/approximate fallback 0
 ```
 
-Active next task: Phase 3.5 tracked contracts, dCov architecture bake-off,
-cache/memory model, and conservative performance budget.
+Active next task: Phase 4 full-CUDA single-penalty GCV objective and optimizer
+parity for `|S| <= 2`, consuming the accepted Phase 3.5 contracts and guarded
+dCov architecture decision.
 
 ### Required API shape
 
@@ -1368,10 +1369,114 @@ that post-artifact tooling fix.
 
 ### Status and blocking rule
 
-Phase 3 remains complete. Phase 3.5 is a blocking gate for Phase 4. Independent
-experiments may continue, but no Phase 4 implementation may become accepted
-campaign authority, and no interface that constrains later dCov, cache, or
-device-residency work may be frozen, until the Phase 3.5 exit gate passes.
+Phase 3 remains complete. Phase 3.5 passed its blocking gate on 2026-07-28.
+Phase 4 may now become accepted campaign authority when its own exit gates
+pass, using compatible versions of the frozen Phase 3.5 contracts.
+
+#### Accepted Phase 3.5 closure (2026-07-28)
+
+The selected architecture is:
+
+```text
+exact CUDA decision screen for every conditional pair
+  -> screen p in closed interval [0.05, 0.15]
+     -> deterministic CUDA legacy full-eig refinement
+  -> final canonical-order decision replay
+```
+
+This architecture is `GO for Phase 8 implementation and full qualification`.
+That GO is an architecture-feasibility decision, not a production-backend or
+Phase 10 promotion. Exact CUDA values outside the guard are internal decision
+screens; they are not claimed to be universal legacy p-values.
+
+Candidate decisions:
+
+```text
+Candidate A full eig globally       REJECT; 832,508.19 ms diagnostic bound
+Candidate A two-sided partial eig   REJECT; 1,633,730.54 ms diagnostic bound
+Candidate B block Krylov core       REJECT/NOT-GO; 34,439.81 ms core-only bound
+Candidate C exact CUDA authority    REJECT; 92 complete-conditional flips
+guarded C-screen/A-refinement       GO; zero final flips and 25,527.978 ms dCov bound
+```
+
+Candidate B's bound excludes convergence, finalization, pair work, and parity;
+it is rejection evidence and is not used as the feasibility bound. No best or
+average microbenchmark is multiplied by the global workload in the accepted
+performance model.
+
+Measured numerical and scale evidence:
+
+```text
+Scale A qualification       3,808 pairs / 2,061 groups / 6,143 components
+  screen flips 92; guarded pairs 1,142; final flips 0
+  refined components/groups 1,532 / 385
+  maximum refined p-value error 6.955136e-11
+  dCov host boundary 12,845.19 ms
+
+Scale B campaign slice      21,380 pairs / 192 groups / 7,236 components
+  48 groups in each reuse quartile
+  screen flips 9; guarded pairs 78; final flips 0
+  refined components/groups 124 / 29
+  maximum refined p-value error 1.826568e-11
+  dCov host boundary 1,136.45 ms
+
+complete conditional trace 238,276 pairs / 8,634 groups / 110,617 components
+  levels 1 through 7 complete
+  all 92 exact-screen flips inside the guard
+  guarded pairs 1,142; final flips 0
+  maximum refined p-value error 6.955136e-11
+  component CUDA 13,042.082 ms
+  pair/gamma CUDA 721.365 ms
+  dCov host boundary 16,766.36 ms
+```
+
+All measured routes report zero residual/component D2H and zero CPU numerical
+dCov/gamma authority. The deleting fixture at logical id 239277 restores the
+legacy independent decision with p-value error `8.2768e-12` and statistic
+error `2.68519e-11`.
+
+Accepted cache, memory, and conservative performance evidence:
+
+```text
+LRU capacities               2 / 8 / 16 / 47 components
+misses                  224,619 / 201,455 / 166,794 / 110,617
+evictions               207,351 / 141,879 / 83,736 / 0
+declared peak device bytes   632,071,874
+declared RTX 4090 headroom   25,125,148,990 bytes
+
+component p95 bound          18,337.636 ms <= 35,000 ms
+pair/gamma p95 bound          7,190.342 ms <= 12,000 ms
+dCov total bound             25,527.978 ms <= 47,000 ms
+full campaign used/reserved  98,529 ms <= 120,000 ms
+```
+
+The full campaign bound retains the entire allocation for every unimplemented
+Phase 4/7/9/10 owner. The reusable development corpus is measured, the
+metamorphic protocol is frozen without claiming complete Phase 3.5 execution
+of every future transformation, and promotion holdout v1 remains
+`SEALED_NOT_RELEASED` with no repository payload.
+
+Accepted identities:
+
+```text
+native binary SHA-256
+  9b28d0045eedf013955c673f68e1a5b138b4063d901920bb720cb85a30f688e5
+prepublication evidence manifest SHA-256
+  102768a44b09e6afe43d8eca50bb3d96fd81d63e1249bffd99c819c5d0d19de2
+Phase 3.5D vertical artifact manifest SHA-256
+  bca5ca4efde7f5377b2da764e24a74d0611cf4c106ccc1555d6a616a46bd42e5
+Phase 3.5 feasibility artifact manifest SHA-256
+  5618db7966d0be4c3762a17a937a370842f61ba76294986ead967fed1c98be9f
+feasibility producer semantic identity
+  e056099c6fb456349f787a0025891fc86fd0eed6db7962b24e13e8d2407f82e3
+```
+
+The accepted on-disk artifact is
+`fastkpc/artifacts/full_cuda_ci/phase35_feasibility_v1/`. Its validator binds
+the tracked contract snapshots, producer/attestation/receipt namespaces,
+source closure, native and benchmark binaries, evidence hashes, complete pair
+decisions, cache/memory tables, corpus policy, and conservative performance
+classes. Payload and manifest tamper tests fail closed.
 
 ### Goal
 
@@ -1775,10 +1880,9 @@ completion of Phase 4, Phase 7, Phase 8, Phase 9, or the actual Phase 10
 
 Remove `r-cpu-spectral` smoothing scoring and selection from the single-penalty compatible path.
 
-Phase 4 may run exploratory branches before Phase 3.5 completes, but it cannot
-become accepted campaign authority until every Phase 3.5 exit gate passes. It
-must consume compatible versions of the tracked architecture, numerical,
-identity, machine, budget, and corpus contracts.
+Phase 3.5 now permits Phase 4 to become accepted campaign authority when the
+Phase 4 gates pass. Phase 4 must consume compatible versions of the tracked
+architecture, numerical, identity, machine, budget, and corpus contracts.
 
 ### Current starting point
 
@@ -2950,8 +3054,8 @@ The exact script names may be adjusted to repository conventions, but one standa
 ## 12. Immediate next actions
 
 Codex should begin with the earliest phase whose exit gate is incomplete. Phase
-0 through Phase 3 are complete, so the current starting point is the blocking
-Phase 3.5 architecture feasibility gate.
+0 through Phase 3.5 are complete, so the current starting point is Phase 4
+single-penalty GCV.
 
 ### Task 1
 
@@ -3005,14 +3109,22 @@ It reproduced 110 edges with zero decision flips, exact sepsets and
 
 ### Task 9
 
-Active: complete Phase 3.5 by implementing the tracked campaign contracts,
-freezing the opaque semantic ABI and three-layer identity model, running the
-two-scale dCov bake-off, and accepting the cache/memory and conservative
-120-second feasibility budgets.
+Complete: Phase 3.5 froze the tracked campaign contracts, opaque semantic ABI,
+and three-layer identity model; selected the guarded exact-screen/full-eig CUDA
+architecture as GO for Phase 8 qualification under two real measured scales;
+and accepted the cache/memory and conservative 98.529-second full-campaign
+feasibility model with zero final decision drift.
+
+### Task 10
+
+Active: implement Phase 4 full-CUDA single-penalty GCV for `|S| <= 2`, starting
+with objective parity and deterministic optimizer semantics. Retire
+`r-cpu-spectral` selection from the accepted route while preserving the Phase
+3.5 numerical, identity, machine, budget, and corpus contracts.
 
 The current CUDA Spectra projection primitive remains useful substrate for
-the bake-off, but the immediate critical path is architecture feasibility and
-dCov/cache/performance risk retirement, not accepted Phase 4 GCV authority.
+diagnostics, but the immediate critical path is accepted Phase 4 GCV objective
+and optimizer parity, not another Phase 3.5 dCov architecture bake-off.
 
 ---
 
