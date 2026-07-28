@@ -4,7 +4,7 @@
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
-> **Current accepted implementation/evidence snapshot:** Phase 3.5 is COMPLETE. Its accepted feasibility manifest is `5618db7966d0be4c3762a17a937a370842f61ba76294986ead967fed1c98be9f`, built on the Phase 3.5D native baseline at `ded3333`.
+> **Current accepted implementation/evidence snapshot:** Phase 3.5 is COMPLETE. Its producer source commit is `337e754`, and its accepted feasibility manifest is `87c66555edb0912d5d50e80eb9d7601e4da9800c61b7de0f9691d76d8c332185`.
 >
 > **Active roadmap phase:** Phase 4, full-CUDA single-penalty GCV for `|S| <= 2`.
 >
@@ -1392,9 +1392,9 @@ screens; they are not claimed to be universal legacy p-values.
 Candidate decisions:
 
 ```text
-Candidate A full eig globally       REJECT; 832,508.19 ms diagnostic bound
-Candidate A two-sided partial eig   REJECT; 1,633,730.54 ms diagnostic bound
-Candidate B block Krylov core       REJECT/NOT-GO; 34,439.81 ms core-only bound
+Candidate A full eig globally       REJECT; 827,349.8 ms diagnostic bound
+Candidate A two-sided partial eig   REJECT; 1,634,351.4 ms diagnostic bound
+Candidate B block Krylov core       REJECT/NOT-GO; 34,647.2 ms core-only bound
 Candidate C exact CUDA authority    REJECT; 92 complete-conditional flips
 guarded C-screen/A-refinement       GO; zero final flips and 25,527.978 ms dCov bound
 ```
@@ -1464,11 +1464,11 @@ native binary SHA-256
 prepublication evidence manifest SHA-256
   102768a44b09e6afe43d8eca50bb3d96fd81d63e1249bffd99c819c5d0d19de2
 Phase 3.5D vertical artifact manifest SHA-256
-  bca5ca4efde7f5377b2da764e24a74d0611cf4c106ccc1555d6a616a46bd42e5
+  ae36e739d9674ad3c20123d90f25a2573def925ca7f0edbeda58ef466fc631f3
 Phase 3.5 feasibility artifact manifest SHA-256
-  5618db7966d0be4c3762a17a937a370842f61ba76294986ead967fed1c98be9f
+  87c66555edb0912d5d50e80eb9d7601e4da9800c61b7de0f9691d76d8c332185
 feasibility producer semantic identity
-  e056099c6fb456349f787a0025891fc86fd0eed6db7962b24e13e8d2407f82e3
+  66a03682777339be730068be1f471ed7b2839cef5290e7542900ebea5e8a82a8
 ```
 
 The accepted on-disk artifact is
