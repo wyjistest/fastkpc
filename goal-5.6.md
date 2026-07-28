@@ -2,7 +2,11 @@
 
 > **Campaign:** replace the complete numerical conditional-independence data plane used by the KPC skeleton with a legacy-compatible CUDA implementation.
 >
-> **Active baseline inspected:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
+> **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
+>
+> **Current accepted implementation/evidence snapshot:** `main` at `320f019` (`docs: record full CUDA CI Phase 3 closure`); Phase 3 is COMPLETE.
+>
+> **Active roadmap phase:** Phase 3.5, whose blocking specification was introduced at `114ec95`.
 >
 > **Hard rule:** **0 SHD is mandatory.** A faster result with a different skeleton is a failed result.
 
@@ -311,17 +315,29 @@ same-setup x/y and target-list APIs
 oracle trace and replay artifacts
 ```
 
-Current limitations include:
+Historical limitations of the pre-Phase 3 precision prototype included:
 
 ```text
-current precision CUDA scope is mainly |S| <= 2
-multi-penalty GPU GCV is not implemented
-smoothing scoring/selection is still reported as r-cpu-spectral in the main path
-current same-setup CUDA solve is repeated work, not a true fused batch kernel
-true_batched_kernel must remain FALSE for that path
-fixed-sp CUDA code allocates/copies/creates solver resources too often
-residuals are materialized back on the host
-R/mgcv still supplies setup semantics
+precision CUDA scope was mainly |S| <= 2
+multi-penalty GPU GCV was not implemented
+smoothing scoring/selection used r-cpu-spectral in the main path
+same-setup CUDA solve repeated work instead of using a true fused batch kernel
+true_batched_kernel remained FALSE for that path
+fixed-sp CUDA code allocated/copied/created solver resources too often
+residuals were materialized back on the host
+R/mgcv supplied setup semantics
+```
+
+Phase 3 removed the repeated-resource and false-batch limitations for the
+accepted oracle-selected fixed-sp runtime. The current campaign gaps are:
+
+```text
+autonomous single-penalty and multi-penalty CUDA GCV are not implemented
+R/mgcv still supplies response-independent setup semantics
+the promotable device-resident dCov architecture is not yet selected
+the capacity-bounded final cache split has not been accepted
+the final one-call compatible.cuda service is not integrated
+the conservative 120-second feasibility budget has not passed
 ```
 
 ### 3.4 Residual workload evidence
@@ -613,7 +629,7 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 1 | Full workload and risk census | COMPLETE - full 110,617-key metadata artifact passes all gates |
 | 2 | Response-independent GAM setup contract | COMPLETE - full structural artifact and qualification exact-parity/restart gates pass |
 | 3 | Persistent stable fixed-sp CUDA residual runtime | COMPLETE - full 110,617-target oracle and 240,489-test shadow artifacts independently validate with 0 flips and SHD 0 |
-| 3.5 | Full-CUDA architecture feasibility and performance-budget gate | NOT COMPLETE - blocking contracts, dCov bake-off, and cache/budget artifacts are required before Phase 4 authority |
+| 3.5 | Full-CUDA architecture feasibility and performance-budget gate | ACTIVE - blocking contracts, dCov bake-off, and cache/budget artifacts are required before Phase 4 authority |
 | 4 | Full-CUDA single-penalty GCV for `|S|<=2` | PARTIAL — CPU spectral selection exists |
 | 5 | C++ multi-penalty GAM semantic replica | NOT COMPLETE |
 | 6 | CUDA multi-penalty same-S target batches | NOT STARTED |
@@ -1224,7 +1240,8 @@ dCov 3,808 pairs, near-alpha 1,478, decision flips 0
 unknown/CPU/approximate fallback 0
 ```
 
-Active next task: Phase 4 CUDA smoothing-parameter selection.
+Active next task: Phase 3.5 tracked contracts, dCov architecture bake-off,
+cache/memory model, and conservative performance budget.
 
 ### Required API shape
 
@@ -2933,7 +2950,8 @@ The exact script names may be adjusted to repository conventions, but one standa
 ## 12. Immediate next actions
 
 Codex should begin with the earliest phase whose exit gate is incomplete. Phase
-0 through Phase 3 are complete, so the current starting point is Phase 4.
+0 through Phase 3 are complete, so the current starting point is the blocking
+Phase 3.5 architecture feasibility gate.
 
 ### Task 1
 
@@ -2985,12 +3003,16 @@ Complete: the full Phase 3 closure produced and independently validated all
 It reproduced 110 edges with zero decision flips, exact sepsets and
 `n.edgetests`, and SHD 0.
 
-Active next task: Phase 4 CUDA smoothing-parameter selection using the
-accepted persistent fixed-sp residual runtime.
+### Task 9
+
+Active: complete Phase 3.5 by implementing the tracked campaign contracts,
+freezing the opaque semantic ABI and three-layer identity model, running the
+two-scale dCov bake-off, and accepting the cache/memory and conservative
+120-second feasibility budgets.
 
 The current CUDA Spectra projection primitive remains useful substrate for
-Phase 8, but the immediate critical path is now single-penalty CUDA GCV
-objective and selected-`sp` parity.
+the bake-off, but the immediate critical path is architecture feasibility and
+dCov/cache/performance risk retirement, not accepted Phase 4 GCV authority.
 
 ---
 
