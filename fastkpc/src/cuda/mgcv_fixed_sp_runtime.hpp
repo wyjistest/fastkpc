@@ -6,6 +6,8 @@
 #include <cuda_runtime_api.h>
 
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace fastkpc {
 
@@ -19,6 +21,21 @@ struct TransientFixedSpCompatibilityHostView {
   const double* X_null = nullptr;
   const double* gram = nullptr;
   const double* projected_penalty = nullptr;
+};
+
+// Internal CUDA consumers use this ephemeral view while retaining the token.
+// It is deliberately absent from the public semantic ABI and is never
+// serialized or returned to R.
+struct DeviceResidualConsumerView {
+  const double* residuals = nullptr;
+  int n = 0;
+  int target_count = 0;
+  int device_id = -1;
+  cudaStream_t producer_stream = nullptr;
+  cudaEvent_t producer_completion_event = nullptr;
+  std::vector<std::string> target_keys;
+  std::vector<FixedSpRoute> executed_routes;
+  std::vector<FixedSpStatus> solver_statuses;
 };
 
 std::shared_ptr<CudaRuntimeContext> create_fixed_sp_runtime(int device_id);
@@ -53,6 +70,8 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
   const std::shared_ptr<PreparedSGpuHandle>& handle,
   const FixedSpBatchHostView& batch);
 DeviceResidualInfo device_residual_info(
+  const std::shared_ptr<DeviceResidualBatch>& token);
+DeviceResidualConsumerView acquire_device_residual_consumer_view(
   const std::shared_ptr<DeviceResidualBatch>& token);
 FixedSpShadowResult materialize_fixed_sp_shadow(
   const std::shared_ptr<DeviceResidualBatch>& token,

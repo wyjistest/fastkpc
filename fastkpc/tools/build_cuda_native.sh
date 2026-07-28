@@ -55,6 +55,10 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   -o "$BUILD/dcov_batch_cuda.o"
 
 "$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
+  $COMMON_INC -c "$ROOT/src/cuda/full_cuda_ci_vertical.cu" \
+  -o "$BUILD/full_cuda_ci_vertical.o"
+
+"$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
   $COMMON_INC -c "$ROOT/src/cuda/legacy_dcov_spectra_matvec_cuda.cu" \
   -o "$BUILD/legacy_dcov_spectra_matvec_cuda.o"
 
@@ -105,6 +109,7 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   "$BUILD/cuda_status.o" \
   "$BUILD/r_api_cuda.o" \
   "$BUILD/dcov_batch_cuda.o" \
+  "$BUILD/full_cuda_ci_vertical.o" \
   "$BUILD/legacy_dcov_spectra_matvec_cuda.o" \
   "$BUILD/hsic_batch_cuda.o" \
   "$BUILD/fastspline_batched_solver.o" \

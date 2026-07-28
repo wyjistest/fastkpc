@@ -5192,6 +5192,63 @@ DeviceResidualInfo device_residual_info(
   return token->diagnostics;
 }
 
+DeviceResidualConsumerView acquire_device_residual_consumer_view(
+    const std::shared_ptr<DeviceResidualBatch>& token) {
+  const std::shared_ptr<CudaRuntimeContext> context =
+    require_residual_host_identity(token, true);
+  std::lock_guard<std::mutex> lock(context->mutex);
+  require_residual_host_identity(token, true);
+  if (token->slot->state == TransientResidualSlotState::Poisoned) {
+    throw_output_slot_poisoned(*token->slot);
+  }
+  if (token->slot->state ==
+        TransientResidualSlotState::ConsumerRegistrationPending ||
+      token->slot->consumer_event_registered) {
+    token->diagnostics.output_slot_busy_count += 1;
+    throw std::runtime_error("ERR_OUTPUT_SLOT_BUSY");
+  }
+  context->require_usable();
+  if ((token->output_mask & FixedSpOutputResiduals) == 0U) {
+    throw std::runtime_error(
+      "device residual consumer requires residual output");
+  }
+  resolve_fixed_sp_output_status_locked(token.get(), context.get());
+  if (token->slot->residuals == nullptr ||
+      token->slot->solve_completion_event == nullptr ||
+      token->target_count <= 0 ||
+      token->target_count > token->slot->target_capacity) {
+    throw std::runtime_error(
+      "device residual consumer storage is unavailable");
+  }
+  if (token->solver_statuses.size() !=
+        static_cast<std::size_t>(token->target_count) ||
+      token->executed_routes.size() !=
+        static_cast<std::size_t>(token->target_count) ||
+      token->target_keys.size() !=
+        static_cast<std::size_t>(token->target_count)) {
+    throw std::runtime_error(
+      "device residual consumer metadata size mismatch");
+  }
+  if (!std::all_of(
+        token->solver_statuses.begin(), token->solver_statuses.end(),
+        fixed_sp_status_is_successful)) {
+    throw std::runtime_error(
+      "device residual consumer rejects unsuccessful solver output");
+  }
+
+  DeviceResidualConsumerView view;
+  view.residuals = token->slot->residuals;
+  view.n = token->n;
+  view.target_count = token->target_count;
+  view.device_id = token->device_id;
+  view.producer_stream = context->stream;
+  view.producer_completion_event = token->slot->solve_completion_event;
+  view.target_keys = token->target_keys;
+  view.executed_routes = token->executed_routes;
+  view.solver_statuses = token->solver_statuses;
+  return view;
+}
+
 FixedSpShadowResult materialize_fixed_sp_shadow(
     const std::shared_ptr<DeviceResidualBatch>& token,
     std::uint32_t output_mask) {
