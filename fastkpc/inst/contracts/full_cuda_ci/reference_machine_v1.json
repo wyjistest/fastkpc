@@ -1,0 +1,74 @@
+{
+  "campaign": "full-cuda-legacy-compatible-ci",
+  "contract_name": "reference_machine_v1",
+  "contract_schema_version": "full-cuda-ci-tracked-contract-v1",
+  "phase_introduced": "3.5",
+  "semantic_version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "payload": {
+    "host": {
+      "hostname": "amax",
+      "architecture": "x86_64",
+      "operating_system": "Linux",
+      "kernel_release": "5.15.0-46-generic",
+      "physical_memory_bytes": 134745059328,
+      "numa_nodes": 1
+    },
+    "cpu": {
+      "model": "Intel(R) Core(TM) i9-10900X CPU @ 3.70GHz",
+      "logical_cpu_count": 20,
+      "physical_core_count": 10,
+      "benchmark_affinity": "0-19",
+      "governor_policy": "record-current-and-reject-unrecorded-change",
+      "blas_threads": 1,
+      "lapack_threads": 1,
+      "openmp_threads": 1,
+      "control_plane_threads": 1
+    },
+    "gpu": {
+      "device_id": 0,
+      "model": "NVIDIA GeForce RTX 4090",
+      "uuid": "GPU-d1f5be95b8a33c18f91990913038a1a3",
+      "pci_bus_id": "00000000:67:00.0",
+      "compute_capability": "8.9",
+      "sm_count": 128,
+      "total_memory_bytes": 25757220864,
+      "driver_version": "555.42.06",
+      "cuda_toolkit_version": "12.5.82",
+      "power_limit_watts": "450",
+      "persistence_mode": "disabled",
+      "application_clock_policy": "unset-default-dynamic",
+      "exclusive_process_mode_required": false,
+      "concurrent_campaign_gpu_use": "forbidden"
+    },
+    "software": {
+      "R_version": "4.4.1",
+      "mgcv_version": "1.9.1",
+      "compiler": "R-CXX17-g++",
+      "cuda_architecture_flag": "sm_89",
+      "cublas_math_mode": "pedantic",
+      "cublas_atomics_mode": "not_allowed",
+      "cusolver_deterministic_results": "enabled"
+    },
+    "timing": {
+      "clock": "steady-monotonic-wall-clock",
+      "build_included": false,
+      "input_validation_included": true,
+      "input_h2d_included": true,
+      "native_setup_included": true,
+      "cache_construction_included": true,
+      "orientation_included": false,
+      "result_packaging_included": true,
+      "cold_definition": "new-process-new-cuda-context-empty-semantic-caches-after-native-build",
+      "warm_definition": "same-binary-new-measured-call-after-one-unmeasured-complete-warmup-with-capacity-bounded-caches-reset-to-declared-warm-start-state",
+      "cold_and_warm_reported_separately": true,
+      "measured_warm_repetitions": 5,
+      "baseline_interleaving": "candidate-and-correct-baseline-alternated-by-repetition",
+      "gpu_idle_precondition": "no-other-compute-process-and-temperature-power-state-recorded",
+      "environment_drift_policy": "fail-closed"
+    }
+  }
+}

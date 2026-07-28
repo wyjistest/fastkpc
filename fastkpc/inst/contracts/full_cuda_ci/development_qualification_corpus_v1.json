@@ -1,0 +1,65 @@
+{
+  "campaign": "full-cuda-legacy-compatible-ci",
+  "contract_name": "development_qualification_corpus_v1",
+  "contract_schema_version": "full-cuda-ci-tracked-contract-v1",
+  "phase_introduced": "3.5",
+  "semantic_version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "payload": {
+    "purpose": "reusable-development-correctness-and-risk-qualification",
+    "source_identities": {
+      "phase0_manifest_sha256": "f907559586c4b766f483bdc01b4074d93ce2c8b80972c3199c4493848b2b8750",
+      "phase1_manifest_sha256": "b0990cfc932a5fcabc09ad25e352e7babb67fc8a127f11c7d2b88887c4940574",
+      "phase2_manifest_sha256": "755a07e2386279a3de4b72a663a30fced69f91eef7c2ca1f1c05c88288d74c84",
+      "phase3_oracle_manifest_sha256": "7ba91e115243e4b4551b0d80c234ba18b3bc85c60e6dc583753df742bb94bab6",
+      "phase3_shadow_manifest_sha256": "0efbbdd2dba998da792fd80f035bd703c87ca888f226a3cab2a501782f464c35",
+      "dataset_file_sha256": "e03cbfafed3336f3da7725878e92af24556b5ebdc6227b94ea84469e62e94036",
+      "dataset_matrix_sha256": "971f1e0784817c6febfc84154f19540be02a92f6e4acad784dc7f92b979f1df7",
+      "canonical_setup_corpus_sha256": "acf6d8a93884467ca35da3f9a24966151a041ac84efd76edffde83a348a2cd79",
+      "canonical_target_corpus_sha256": "b843630969f116da63f7fad095c54de2ff471540159ff97ca56c3871d6b2e1fa",
+      "canonical_logical_census_sha256": "c9b48074dd59a439fceb9d5e64806adda5620cc4abe32095371abc447ef98634",
+      "oracle_logical_trace_file_sha256": "b777c5dc1b9acad08c133ccd668eae5e9444a89d481c7f8adf9b2c2a0dd6cda5"
+    },
+    "canonical_counts": {
+      "full_setup_count": 8634,
+      "full_target_count": 110617,
+      "logical_ci_count": 240489,
+      "qualification_setup_count": 251,
+      "target_count": 6143,
+      "dcov_pair_count": 3808,
+      "near_alpha_pair_count": 1478
+    },
+    "required_risk_classes": [
+      "rank-deficient",
+      "finite-condition-lt-1e4",
+      "finite-condition-1e4-to-lt-1e8",
+      "finite-condition-1e8-to-lt-1e12",
+      "finite-condition-ge-1e12",
+      "near-constant-target",
+      "extreme-low-sp",
+      "extreme-high-sp",
+      "single-penalty",
+      "multi-penalty",
+      "near-alpha",
+      "deleting-test",
+      "non-deleting-test"
+    ],
+    "selection": {
+      "policy": "authenticated-phase3-qualification-corpus-v1",
+      "stable_order": "residual-key-and-logical-sequence-id-radix-order",
+      "replacement": "forbidden-without-contract-version-change",
+      "missing_class": "fail-closed",
+      "oracle_recomputation": "version-pinned-legacy-authority"
+    },
+    "allowed_use": [
+      "implementation-development",
+      "regression-testing",
+      "architecture-bakeoff",
+      "performance-class-calibration"
+    ],
+    "promotion_holdout_claim": false
+  }
+}

@@ -1,0 +1,164 @@
+{
+  "campaign": "full-cuda-legacy-compatible-ci",
+  "contract_name": "architecture_contract_v1",
+  "contract_schema_version": "full-cuda-ci-tracked-contract-v1",
+  "phase_introduced": "3.5",
+  "semantic_version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "payload": {
+    "abi": {
+      "major": 1,
+      "minor": 0,
+      "backend_semantic_version": "full-cuda-ci-semantic-abi-v1",
+      "capability_discovery_required": true,
+      "major_mismatch_policy": "fail-closed",
+      "minor_compatibility": "consumer-required-minor-less-than-or-equal-to-provider-minor",
+      "unknown_required_capability_policy": "fail-closed",
+      "unknown_optional_capability_policy": "ignore-and-record"
+    },
+    "required_capability_query_fields": [
+      "abi_major",
+      "abi_minor",
+      "capabilities",
+      "backend_semantic_version",
+      "producer_contract_hash",
+      "device_residency_flags"
+    ],
+    "capabilities": [
+      "prepared-s-device-resident-v1",
+      "target-optimizer-opaque-v1",
+      "fixed-sp-stable-batch-v1",
+      "device-residual-consumer-event-v1",
+      "dcov-component-opaque-v1",
+      "logical-ci-batch-v1",
+      "compact-ci-result-v1",
+      "deterministic-eviction-reconstruction-v1"
+    ],
+    "ownership": {
+      "backend_owns_storage": true,
+      "client_owns_opaque_lease": true,
+      "parent_lifetime_extended_by_child_lease": true,
+      "destruction_waits_for_registered_consumer_events": true,
+      "double_destroy_policy": "idempotent-for-released-lease",
+      "stale_generation_policy": "fail-closed",
+      "cross_device_use_policy": "fail-closed",
+      "cross_process_use_policy": "fail-closed",
+      "raw_pointer_serialization": "forbidden"
+    },
+    "asynchrony": {
+      "submission": "stream-ordered",
+      "completion": "backend-event-or-explicit-host-wait",
+      "implicit_device_synchronize": "forbidden",
+      "consumer_event_registration": "required-before-producer-lease-release",
+      "compact_result_visibility": "after-batch-completion-event"
+    },
+    "error_model": {
+      "status_is_per_target_or_per_pair": true,
+      "first_error_is_structured": true,
+      "unknown_status_policy": "fail-closed",
+      "nonfinite_status_policy": "fail-closed-before-canonical-replay",
+      "oom_policy": "abort-level-and-publish-no-partial-graph",
+      "approximate_fallback": "forbidden",
+      "silent_cpu_fallback": "forbidden"
+    },
+    "selected_sp_semantics": {
+      "coordinate": "natural-log-of-positive-smoothing-parameter",
+      "penalty_order": "PreparedSSetup-penalty-sp-index-order",
+      "penalty_scaling": "version-pinned-mgcv-PreparedSSetup-scaling",
+      "target_specific": true,
+      "shared_across_same_s_targets": false,
+      "rank_and_null_space": "PreparedSSetup-authenticated-rank-and-constraint-nullspace"
+    },
+    "large_payload_policy": {
+      "residual_d2h": "forbidden",
+      "component_d2h": "forbidden",
+      "dense_distance_d2h": "forbidden",
+      "eigenvector_d2h": "forbidden",
+      "sampled_shadow_transfer": "explicit-development-only-and-counted",
+      "host_visible_production_payload": "CompactCiResult-only"
+    },
+    "compact_result_fields": [
+      "logical_sequence_id",
+      "p_value",
+      "status",
+      "solver_route",
+      "optimizer_status",
+      "dcov_status",
+      "diagnostic_flags"
+    ],
+    "semantic_objects": [
+      {
+        "name": "PreparedSGpuHandle",
+        "kind": "opaque-handle",
+        "created_from": "authenticated-PreparedSSetup",
+        "cache_identity": "PreparedSKey-plus-semantic-and-contract-hashes",
+        "device_resident": true,
+        "reconstructible": true,
+        "eviction": "allowed-when-no-child-lease-or-consumer-event",
+        "host_visible": "identity-capability-rank-shape-and-accounting-only"
+      },
+      {
+        "name": "TargetOptimizerStateHandle",
+        "kind": "opaque-handle",
+        "created_from": "PreparedSGpuHandle-plus-TargetKey",
+        "cache_identity": "TargetKey-plus-optimizer-semantic-version",
+        "device_resident": true,
+        "reconstructible": true,
+        "eviction": "allowed-after-completion-and-without-dependent-residual",
+        "host_visible": "selected-sp-score-edf-convergence-and-status-only"
+      },
+      {
+        "name": "DeviceResidualHandle",
+        "kind": "opaque-handle",
+        "created_from": "PreparedSGpuHandle-plus-TargetOptimizerStateHandle",
+        "cache_identity": "ResidualKey-plus-solver-semantic-version",
+        "device_resident": true,
+        "reconstructible": true,
+        "eviction": "allowed-after-registered-consumers-complete",
+        "host_visible": "identity-shape-route-status-and-accounting-only"
+      },
+      {
+        "name": "DcovComponentHandle",
+        "kind": "opaque-handle",
+        "created_from": "DeviceResidualHandle-plus-dcov-semantic-configuration",
+        "cache_identity": "DcovComponentKey",
+        "device_resident": true,
+        "reconstructible": true,
+        "eviction": "allowed-after-pair-consumers-complete",
+        "host_visible": "identity-status-and-accounting-only",
+        "representation_promise": "none-beyond-compatible-pair-consumability"
+      },
+      {
+        "name": "LogicalCiBatchHandle",
+        "kind": "opaque-handle",
+        "created_from": "ordered-LogicalCiKey-list-plus-component-leases",
+        "cache_identity": "not-cacheable",
+        "device_resident": true,
+        "reconstructible": false,
+        "eviction": "not-applicable",
+        "host_visible": "batch-identity-status-and-completion-only"
+      },
+      {
+        "name": "CompactCiResult",
+        "kind": "immutable-value",
+        "created_from": "completed-LogicalCiBatchHandle",
+        "cache_identity": "LogicalCiKey-plus-backend-semantic-version",
+        "device_resident": false,
+        "reconstructible": true,
+        "eviction": "host-control-plane-policy",
+        "host_visible": "complete-compact-schema"
+      }
+    ],
+    "not_frozen": [
+      "struct-layout",
+      "buffer-layout",
+      "matrix-leading-dimension",
+      "workspace-layout",
+      "eigensolver-representation",
+      "kernel-launch-topology"
+    ]
+  }
+}

@@ -1,6 +1,7 @@
 #include "dcov_batch_types.hpp"
 #include "dcov_exact_cpu.hpp"
 #include "fastspline_basis.hpp"
+#include "full_cuda_ci_contract.hpp"
 #include "hsic_cpu.hpp"
 #include "legacy_dcov_gamma_cpp.hpp"
 #include "orientation_types.hpp"
@@ -3390,6 +3391,44 @@ OrientationOptions make_orientation_options(double alpha,
 }
 
 }  // namespace
+
+extern "C" SEXP C_full_cuda_ci_sha256_utf8(SEXP value_s) {
+  BEGIN_RCPP
+  Rcpp::CharacterVector value(value_s);
+  if (value.size() != 1 || value[0] == NA_STRING) {
+    Rcpp::stop("SHA-256 input must be one non-missing string");
+  }
+  return Rcpp::wrap(fastkpc::full_cuda_ci_sha256_utf8(
+    Rcpp::as<std::string>(value)));
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_contract_identity(
+    SEXP json_s,
+    SEXP expected_name_s) {
+  BEGIN_RCPP
+  Rcpp::CharacterVector json(json_s);
+  Rcpp::CharacterVector expected_name(expected_name_s);
+  if (json.size() != 1 || json[0] == NA_STRING ||
+      expected_name.size() != 1 || expected_name[0] == NA_STRING) {
+    Rcpp::stop("contract JSON and expected name must be non-missing strings");
+  }
+  const fastkpc::FullCudaCiContractIdentity identity =
+    fastkpc::full_cuda_ci_contract_identity(
+      Rcpp::as<std::string>(json),
+      Rcpp::as<std::string>(expected_name));
+  return Rcpp::List::create(
+    Rcpp::Named("contract_name") = identity.contract_name,
+    Rcpp::Named("contract_schema_version") =
+      identity.contract_schema_version,
+    Rcpp::Named("semantic_major") = identity.semantic_major,
+    Rcpp::Named("semantic_minor") = identity.semantic_minor,
+    Rcpp::Named("semantic_patch") = identity.semantic_patch,
+    Rcpp::Named("canonical_json") = identity.canonical_json,
+    Rcpp::Named("sha256") = identity.sha256
+  );
+  END_RCPP
+}
 
 extern "C" SEXP C_fastkpc_cuda_available() {
   BEGIN_RCPP
@@ -8850,6 +8889,8 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
 }
 
 static const R_CallMethodDef call_methods[] = {
+  {"C_full_cuda_ci_sha256_utf8", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_sha256_utf8), 1},
+  {"C_full_cuda_ci_contract_identity", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_contract_identity), 2},
   {"C_fastkpc_cuda_available", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_available), 0},
   {"C_fastkpc_cuda_device_info", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_device_info), 0},
   {"C_fastkpc_cuda_phase3_environment_identity", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_phase3_environment_identity), 1},

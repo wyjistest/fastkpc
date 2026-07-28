@@ -1,0 +1,161 @@
+{
+  "campaign": "full-cuda-legacy-compatible-ci",
+  "contract_name": "numerical_contract_v1",
+  "contract_schema_version": "full-cuda-ci-tracked-contract-v1",
+  "phase_introduced": "3.5",
+  "semantic_version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "payload": {
+    "decimal_encoding": "finite-decimals-are-canonical-lowercase-scientific-strings",
+    "precision": {
+      "storage": "IEEE-754-binary64",
+      "accumulation": "IEEE-754-binary64",
+      "tf32": "forbidden",
+      "float32": "forbidden",
+      "fast_math": "forbidden",
+      "cublas_math_mode": "pedantic",
+      "cublas_atomics_mode": "not_allowed",
+      "cusolver_deterministic_results": "required"
+    },
+    "comparison_metrics": {
+      "scalar_absolute": "abs(candidate-reference)",
+      "scalar_relative": "abs(candidate-reference)/max(abs(reference),scalar-denominator-floor)",
+      "vector_max_absolute": "max_i(abs(candidate_i-reference_i))",
+      "vector_relative_l2": "l2(candidate-reference)/max(l2(reference),vector-denominator-floor)",
+      "absolute_and_relative_rule": "both-declared-bounds-must-pass",
+      "signed_zero": "equivalent",
+      "nan_equality": "never"
+    },
+    "denominator_floors": {
+      "scalar": "1e-300",
+      "vector_l2": "1e-300",
+      "gcv_effective_residual_df": "1e-8",
+      "dcov_positive_moment": "0"
+    },
+    "gam_formulas": {
+      "rss": "sum_i((y_i-fitted_i)^2)",
+      "edf": "trace(X*inverse(X_transpose_X+sum_j(sp_j*S_j))*X_transpose)",
+      "gcv_unknown_scale": "n*rss/(n-gamma*edf)^2",
+      "cp_known_scale": "rss/n+2*gamma*edf/n-scale",
+      "canonical_family": "gaussian",
+      "canonical_link": "identity",
+      "canonical_method": "GCV.Cp",
+      "canonical_gamma": "1",
+      "canonical_scale_mode": "unknown-estimated-by-gcv",
+      "invalid_gcv_denominator": "positive-infinity-and-not-selectable"
+    },
+    "smoothing_parameter": {
+      "optimizer_coordinate": "log(sp)",
+      "log_base": "natural",
+      "sp_mapping": "sp=exp(log_sp)",
+      "penalty_order": "PreparedSSetup-penalty-sp-index-order",
+      "finite_positive_sp_required": true,
+      "target_specific": true,
+      "boundary_points": "included",
+      "equal_score_tie_break": "lowest-canonical-evaluation-sequence-id",
+      "oracle_boundary_source": "version-pinned-mgcv-optimizer-state",
+      "selected_log_sp_bit_identity_required": false
+    },
+    "condition_buckets": [
+      {
+        "name": "finite-full-rank-lt-1e8",
+        "predicate": "full_rank_and_finite_condition_and_condition<1e8",
+        "solver": "CHOLESKY_BATCHED"
+      },
+      {
+        "name": "finite-full-rank-1e8-to-lt-1e12",
+        "predicate": "full_rank_and_finite_condition_and_1e8<=condition<1e12",
+        "solver": "AUGMENTED_QR"
+      },
+      {
+        "name": "finite-full-rank-ge-1e12",
+        "predicate": "full_rank_and_finite_condition_and_condition>=1e12",
+        "solver": "AUGMENTED_SVD"
+      },
+      {
+        "name": "rank-deficient-or-unauthenticated-condition",
+        "predicate": "rank_deficient_or_condition_metadata_unauthenticated",
+        "solver": "AUGMENTED_SVD"
+      }
+    ],
+    "rank_policy": {
+      "stable_svd_rank_tolerance": "sigma_max*sqrt(IEEE-754-binary64-epsilon)",
+      "phase1_census_rank_tolerance": "max(dim(A))*sigma_max*IEEE-754-binary64-epsilon",
+      "aggregate_penalty_semantics": "single-deterministic-aggregate-root",
+      "rank_zero_policy": "fail-closed"
+    },
+    "dcov_formulas": {
+      "input_index_policy": "if-index-outside-closed-interval-0-to-2-report-1",
+      "legacy_distance_semantics": "abs(value_i-value_j)-without-index-exponent",
+      "component_eigen_selection": "largest-absolute-eigenvalue-stable-order-with-higher-original-index-tie-break",
+      "component_vector_centering": "subtract-column-mean-after-eigen-selection",
+      "nV2": "weighted_cross_sum(component_x,component_y)/n",
+      "mean": "sum(distance_x)/n^2*sum(distance_y)/n^2",
+      "variance_factor": "2*(n-4)*(n-5)/(n*(n-1)*(n-2)*(n-3))",
+      "variance": "variance_factor*x_self_moment*y_self_moment/n^6",
+      "gamma_alpha": "mean^2/variance",
+      "gamma_beta": "variance/mean",
+      "p_value": "upper_regularized_gamma_tail(nV2,alpha,scale=beta)",
+      "num_col": "positive-and-less-than-n",
+      "minimum_n": 6
+    },
+    "tolerances": {
+      "rss": {
+        "absolute": "1e-8",
+        "relative": "1e-8"
+      },
+      "gcv_cp_score": {
+        "absolute": "1e-8",
+        "relative": "1e-8"
+      },
+      "edf": {
+        "absolute": "1e-8"
+      },
+      "selected_log_sp": {
+        "absolute_diagnostic": "1e-6",
+        "decision_authority": "residual-and-ci-gates"
+      },
+      "fitted": {
+        "max_absolute": "1e-7",
+        "relative_l2": "1e-8"
+      },
+      "residual": {
+        "max_absolute": "1e-7",
+        "relative_l2": "1e-8"
+      },
+      "dcov_statistic": {
+        "absolute": "1e-9",
+        "relative": "1e-8"
+      },
+      "dcov_moment": {
+        "absolute": "1e-10",
+        "relative": "1e-8"
+      },
+      "p_value": {
+        "absolute": "1e-10",
+        "near_alpha_absolute": "1e-10",
+        "near_alpha_decision_flip_count": 0
+      }
+    },
+    "decision_semantics": {
+      "independent_when": "p_value >= alpha",
+      "dependent_when": "p_value < alpha",
+      "allowed_flip_count": 0,
+      "graph_shd_required": 0,
+      "sepsets_exact": true,
+      "logical_n_edgetests_exact": true,
+      "deletion_trace_exact": true
+    },
+    "nonfinite_policy": "fail-closed-before-replay",
+    "boundary_policy": {
+      "p_equal_alpha": "independent",
+      "gcv_equal_score": "canonical-evaluation-order",
+      "condition_equal_1e8": "AUGMENTED_QR",
+      "condition_equal_1e12": "AUGMENTED_SVD"
+    },
+    "tolerance_change_policy": "semantic-version-change-and-renewed-affected-qualification-required"
+  }
+}

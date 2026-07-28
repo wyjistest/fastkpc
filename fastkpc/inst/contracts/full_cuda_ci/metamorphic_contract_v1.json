@@ -1,0 +1,79 @@
+{
+  "campaign": "full-cuda-legacy-compatible-ci",
+  "contract_name": "metamorphic_contract_v1",
+  "contract_schema_version": "full-cuda-ci-tracked-contract-v1",
+  "phase_introduced": "3.5",
+  "semantic_version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "payload": {
+    "purpose": "reusable-representation-scheduling-and-cache-invariance",
+    "base_corpus": "development_qualification_corpus_v1",
+    "global_invariants": [
+      "all-status-ok",
+      "all-output-finite",
+      "zero-decision-flips",
+      "exact-logical-result-order",
+      "exact-graph-semantics-when-replayed",
+      "zero-unknown-fallback",
+      "zero-approximate-backend"
+    ],
+    "transformations": [
+      {
+        "name": "conditioning-column-permutation",
+        "applies_to": "PreparedSSetup",
+        "required_invariant": "same-function-space-selected-fit-residual-and-ci-decision",
+        "identity_change": "PreparedSKey-records-canonical-sorted-S-not-storage-order"
+      },
+      {
+        "name": "basis-sign-flip",
+        "applies_to": "PreparedSSetup-basis-columns-and-matched-penalties",
+        "required_invariant": "same-fitted-residual-score-edf-and-ci-decision",
+        "identity_change": "representation-fingerprint-may-change-semantic-fingerprint-must-not"
+      },
+      {
+        "name": "equivalent-orthogonal-rotation",
+        "applies_to": "constraint-nullspace-basis-and-matched-penalties",
+        "required_invariant": "same-column-space-penalty-action-fit-residual-and-ci-decision",
+        "identity_change": "representation-fingerprint-may-change-semantic-fingerprint-must-not"
+      },
+      {
+        "name": "batch-split-merge",
+        "applies_to": "same-S-target-and-ci-pair-batches",
+        "required_invariant": "canonical-per-target-and-per-pair-results-identical",
+        "identity_change": "none"
+      },
+      {
+        "name": "stream-count-variation",
+        "applies_to": "legal-stream-counts-1-2-4",
+        "required_invariant": "canonical-results-and-status-identical",
+        "identity_change": "backend-configuration-recorded-not-semantic-output"
+      },
+      {
+        "name": "cache-capacity-variation",
+        "applies_to": "declared-minimum-through-reference-capacity",
+        "required_invariant": "results-identical-despite-reconstruction",
+        "identity_change": "cache-events-change-semantic-output-does-not"
+      },
+      {
+        "name": "standalone-versus-batched",
+        "applies_to": "every-declared-risk-class",
+        "required_invariant": "same-result-under-numerical-contract-and-zero-decision-flips",
+        "identity_change": "none"
+      }
+    ],
+    "minimum_coverage": {
+      "case_per_risk_class_per_applicable_transformation": 1,
+      "near_alpha_cases": "complete-development-near-alpha-corpus",
+      "cache_capacity_points": 4,
+      "stream_counts": [
+        1,
+        2,
+        4
+      ]
+    },
+    "failure_policy": "persist-minimal-reproducer-and-stop-promotion"
+  }
+}

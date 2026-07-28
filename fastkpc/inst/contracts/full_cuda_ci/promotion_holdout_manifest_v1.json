@@ -1,0 +1,54 @@
+{
+  "campaign": "full-cuda-legacy-compatible-ci",
+  "contract_name": "promotion_holdout_manifest_v1",
+  "contract_schema_version": "full-cuda-ci-tracked-contract-v1",
+  "phase_introduced": "3.5",
+  "semantic_version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "payload": {
+    "holdout_id": "full-cuda-ci-promotion-holdout-v1",
+    "state": "SEALED_NOT_RELEASED",
+    "ordinary_development_access": "forbidden",
+    "payload_present_in_repository": false,
+    "custody": {
+      "authority": "external-release-envelope",
+      "release_phase": "10",
+      "release_requires": [
+        "candidate-source-frozen",
+        "native-binary-sha256-frozen",
+        "backend-configuration-frozen",
+        "all-contract-hashes-frozen",
+        "phase3.5-through-phase9-gates-pass"
+      ],
+      "release_token_environment_variable": "FASTKPC_PROMOTION_HOLDOUT_RELEASE_TOKEN",
+      "release_event_must_be_persisted": true,
+      "repeat_open_without-record": "forbidden"
+    },
+    "commitment": {
+      "identity_formula": "sha256(canonical(custody_authority,holdout_id,payload_present_in_repository,release_phase,state))",
+      "manifest_identity_sha256": "c8822b50fba0fc19e0c5cba979ac8e5215d591d2c6ed3238a813d2ff988e7cfd",
+      "payload_sha256_visibility": "withheld-until-authorized-release",
+      "released_payload_hash_must_match_custodian_attestation": true,
+      "dataset_and_case_count_visibility": "withheld-until-authorized-release",
+      "no-development-code-path-may-resolve-payload": true
+    },
+    "release_protocol": [
+      "verify-frozen-producer-and-contract-identities",
+      "record-open-event-before-payload-read",
+      "obtain-custodian-payload-and-sha256-attestation",
+      "verify-payload-sha256-before-deserialization",
+      "run-once-under-frozen-candidate",
+      "publish-results-and-open-event-together"
+    ],
+    "implementation_change_after_open_policy": "retire-version-and-reseal-new-version",
+    "result_policy": {
+      "any-decision-flip": "promotion-fail",
+      "any-graph-drift": "promotion-fail",
+      "any-unknown-fallback": "promotion-fail",
+      "any-nonfinite": "promotion-fail"
+    }
+  }
+}

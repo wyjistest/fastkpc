@@ -1,0 +1,109 @@
+{
+  "campaign": "full-cuda-legacy-compatible-ci",
+  "contract_name": "artifact_identity_contract_v1",
+  "contract_schema_version": "full-cuda-ci-tracked-contract-v1",
+  "phase_introduced": "3.5",
+  "semantic_version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "payload": {
+    "canonicalization": {
+      "schema": "full-cuda-ci-canonical-json-v1",
+      "object_keys": "utf8-byte-lexicographic",
+      "array_order": "preserved",
+      "duplicate_object_keys": "forbidden",
+      "json_numbers": "signed-safe-53-bit-integers-only",
+      "finite_decimals": "canonical-lowercase-scientific-strings",
+      "string_encoding": "utf8",
+      "hash": "sha256-of-canonical-json-utf8-without-terminal-newline"
+    },
+    "contract_snapshot": {
+      "required_fields": [
+        "contract_name",
+        "semantic_version",
+        "sha256",
+        "snapshot"
+      ],
+      "tracked_contract_hash_must_match": true,
+      "exact_snapshot_must_match": true,
+      "artifact_cannot_be_contract_authority": true
+    },
+    "producer_semantic_identity": {
+      "schema": "full-cuda-ci-producer-semantic-identity-v1",
+      "immutable_after_publication": true,
+      "required_fields": [
+        "producer_source_closure_sha256",
+        "native_binary_sha256",
+        "route_semantic_version",
+        "contract_snapshots",
+        "dataset_or_corpus_sha256",
+        "oracle_sha256",
+        "backend_configuration_sha256",
+        "build_recipe_sha256"
+      ],
+      "forbidden_fields": [
+        "pid",
+        "session_id",
+        "cuda_context_id",
+        "filesystem_path",
+        "inode",
+        "timestamp",
+        "staging_path"
+      ],
+      "identity_hash": "sha256-of-canonical-required-fields"
+    },
+    "validator_attestation_identity": {
+      "schema": "full-cuda-ci-validator-attestation-v1",
+      "append_only": true,
+      "required_fields": [
+        "attested_producer_sha256",
+        "validator_source_closure_sha256",
+        "validator_semantic_version",
+        "validator_contract_snapshots",
+        "validation_timestamp_utc",
+        "environment_sha256",
+        "validation_result"
+      ],
+      "may_validate_older_producer": true,
+      "may_rewrite_producer": false,
+      "identity_hash": "sha256-of-canonical-attestation-fields"
+    },
+    "volatile_execution_receipt": {
+      "schema": "full-cuda-ci-execution-receipt-v1",
+      "audit_only": true,
+      "append_only": true,
+      "required_fields": [
+        "producer_sha256",
+        "pid",
+        "session_id",
+        "cuda_context_id",
+        "artifact_path",
+        "artifact_inode",
+        "staging_path",
+        "recorded_at_utc"
+      ],
+      "defines_semantic_equality": false,
+      "may_block_cross_session_linkage": false,
+      "identity_hash": "sha256-of-canonical-receipt-fields"
+    },
+    "artifact_semantic_identity": {
+      "schema": "full-cuda-ci-artifact-semantic-envelope-v1",
+      "formula": "sha256(canonical(producer-identity-sha256,payload-manifest-sha256))",
+      "excludes_attestations": true,
+      "excludes_execution_receipts": true,
+      "attestation_order": "append-order",
+      "receipt_order": "append-order"
+    },
+    "publication": {
+      "producer_manifest_first_mutability": "staging-only",
+      "published_producer_manifest": "immutable",
+      "attestation_storage": "append-only-separate-namespace",
+      "receipt_storage": "append-only-separate-namespace",
+      "symlink_inputs": "forbidden",
+      "non_regular_payloads": "forbidden",
+      "partial_publication": "invalid"
+    }
+  }
+}

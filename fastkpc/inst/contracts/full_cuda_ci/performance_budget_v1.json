@@ -1,0 +1,76 @@
+{
+  "campaign": "full-cuda-legacy-compatible-ci",
+  "contract_name": "performance_budget_v1",
+  "contract_schema_version": "full-cuda-ci-tracked-contract-v1",
+  "phase_introduced": "3.5",
+  "semantic_version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "payload": {
+    "reference_machine_contract": "reference_machine_v1",
+    "component_budgets": {
+      "input_and_h2d": {
+        "owner_phase": "9",
+        "warm_upper_bound_ms": 1000
+      },
+      "native_setup": {
+        "owner_phase": "7",
+        "warm_upper_bound_ms": 12000
+      },
+      "gcv_selection": {
+        "owner_phase": "4-and-6",
+        "warm_upper_bound_ms": 25000
+      },
+      "fixed_sp_solve_and_residual": {
+        "owner_phase": "3-and-6",
+        "warm_upper_bound_ms": 18000
+      },
+      "dcov_component": {
+        "owner_phase": "8",
+        "warm_upper_bound_ms": 35000
+      },
+      "dcov_pair_and_gamma": {
+        "owner_phase": "8",
+        "warm_upper_bound_ms": 12000
+      },
+      "control_replay_and_packaging": {
+        "owner_phase": "9",
+        "warm_upper_bound_ms": 5000
+      },
+      "contingency": {
+        "owner_phase": "10",
+        "warm_upper_bound_ms": 12000
+      }
+    },
+    "feasibility": {
+      "total_upper_bound_ms": 120000,
+      "dcov_total_upper_bound_ms": 47000,
+      "bound_method": "fixed-overhead-plus-class-stratified-component-and-pair-costs-plus-observed-cache-misses-plus-workspace-sync-overhead-plus-throughput-lower-bound-plus-contingency",
+      "best_microbenchmark_global_extrapolation": "forbidden",
+      "qualification_scale_measured": true,
+      "campaign_slice_scale_measured": true,
+      "simulated_backend_timing": "forbidden",
+      "unimplemented_work_must_retain_budget": true
+    },
+    "promotion": {
+      "warm_repetitions": 5,
+      "warm_median_upper_bound_ms": 120000,
+      "correct_baseline_ratio_max": "0.80",
+      "stretch_warm_median_ms": 60000,
+      "every_run_graph_gate_required": true,
+      "every_run_authority_gate_required": true,
+      "cold_metric_reported_without_promotion_threshold": true
+    },
+    "measurement": {
+      "timing_boundaries_from": "reference_machine_v1",
+      "per_stage_cuda_events": true,
+      "host_wall_time": true,
+      "synchronization_counted": true,
+      "allocation_and_cache_events_counted": true,
+      "failed_or_timeout_run_included_as_failure": true,
+      "route_or_contract_change_invalidates_prior_timing": true
+    }
+  }
+}
