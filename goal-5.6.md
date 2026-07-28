@@ -175,7 +175,11 @@ For the canonical 351x48 final gate:
 legacy mgcv fit count in CI loop = 0
 R callback count in native skeleton loop = 0
 CPU residual solve count = 0
-CPU Spectra/full-eigen dCov count = 0
+CPU dCov component count = 0
+CPU dCov eigen/low-rank count = 0
+CPU dCov pair-statistic count = 0
+CPU gamma p-value count = 0
+CPU Spectra count = 0
 unknown fallback count = 0
 ```
 
@@ -591,6 +595,10 @@ stable rank handling
 recorded tolerances and convergence status
 ```
 
+After Phase 3.5, all numerical thresholds, denominator rules, condition
+buckets, boundary semantics, and non-finite policies come from the tracked
+`numerical_contract_v1`; phase-local prose cannot silently override it.
+
 Do not rely only on normal equations for difficult cases. A Cholesky path may be used when the measured condition and parity gates support it. Ill-conditioned cases require a stable QR/SVD or equivalent augmented-system path on C++/CUDA.
 
 ---
@@ -605,6 +613,7 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 1 | Full workload and risk census | COMPLETE - full 110,617-key metadata artifact passes all gates |
 | 2 | Response-independent GAM setup contract | COMPLETE - full structural artifact and qualification exact-parity/restart gates pass |
 | 3 | Persistent stable fixed-sp CUDA residual runtime | COMPLETE - full 110,617-target oracle and 240,489-test shadow artifacts independently validate with 0 flips and SHD 0 |
+| 3.5 | Full-CUDA architecture feasibility and performance-budget gate | NOT COMPLETE - blocking contracts, dCov bake-off, and cache/budget artifacts are required before Phase 4 authority |
 | 4 | Full-CUDA single-penalty GCV for `|S|<=2` | PARTIAL — CPU spectral selection exists |
 | 5 | C++ multi-penalty GAM semantic replica | NOT COMPLETE |
 | 6 | CUDA multi-penalty same-S target batches | NOT STARTED |
@@ -1338,11 +1347,421 @@ that post-artifact tooling fix.
 
 ---
 
+## Phase 3.5 — Full-CUDA architecture feasibility and performance-budget gate
+
+### Status and blocking rule
+
+Phase 3 remains complete. Phase 3.5 is a blocking gate for Phase 4. Independent
+experiments may continue, but no Phase 4 implementation may become accepted
+campaign authority, and no interface that constrains later dCov, cache, or
+device-residency work may be frozen, until the Phase 3.5 exit gate passes.
+
+### Goal
+
+Before implementing full GCV and multi-penalty support, prove that the eventual
+one-call, device-resident architecture has:
+
+```text
+a stable but evolvable semantic interface
+an auditable producer/validator/receipt identity model
+at least one viable CUDA dCov architecture
+a capacity-bounded memory and cache design
+a conservative path to the 120-second campaign target
+```
+
+### Explicit non-goals
+
+Phase 3.5 does not:
+
+```text
+implement complete single-penalty or multi-penalty GCV
+implement the native setup builder
+implement or promote the final production dCov backend
+replace Phase 8 full dCov qualification
+replace Phase 10 complete campaign benchmarking
+reopen or repeat Phase 3 fixed-sp correctness closure
+```
+
+Phase 3.5 ends when one architecture is demonstrably feasible. It does not
+require optimizing every candidate or completing every production integration
+detail.
+
+### 3.5A — Version-controlled semantic contracts
+
+Contracts are tracked source, not untracked artifact authority. The intended
+layout is:
+
+```text
+fastkpc/inst/contracts/full_cuda_ci/
+  architecture_contract_v1.json
+  numerical_contract_v1.json
+  artifact_identity_contract_v1.json
+  reference_machine_v1.json
+  performance_budget_v1.json
+  development_qualification_corpus_v1.json
+  metamorphic_contract_v1.json
+  promotion_holdout_manifest_v1.json
+```
+
+Tracked R/C++ code must parse, canonically serialize, hash, and validate these
+contracts. Every artifact records:
+
+```text
+contract name and semantic version
+canonical contract SHA-256
+exact contract snapshot
+producer source commit
+```
+
+The validator recomputes every snapshot hash and checks it against the tracked
+contract. Artifact contents cannot become the sole contract authority.
+
+Contract versions use:
+
+```text
+major: breaking semantic or API change
+minor: backward-compatible capability addition
+patch/attestation revision: validator or explanatory change that does not
+  change producer semantics
+```
+
+Accepted phases consume a compatible ABI version. An incompatible ABI change
+requires a major-version increment, an explicit migration or adapter decision,
+renewed qualification for affected phases, and no reinterpretation of old
+artifacts.
+
+The numerical contract must define explicit formulas and policies for:
+
+| Numerical layer | Required gate |
+|---|---|
+| RSS and GCV/Cp score | absolute plus relative error |
+| EDF | absolute error |
+| selected log-sp | diagnostic compatibility; bit identity only if required by semantics |
+| fitted and residual vectors | max-absolute plus relative-L2 error |
+| dCov statistics and moments | absolute plus relative error |
+| p-value | absolute error with a separate near-alpha rule |
+| decision and graph semantics | zero flips and exact graph-semantic equality |
+
+It also freezes denominator floors, condition buckets, boundary handling,
+NaN/Inf policy, and the rule for changing a tolerance. Any semantic tolerance
+change requires a new contract version and renewed affected qualification.
+Observed Phase 3 maxima are evidence inputs, not automatic future thresholds.
+
+### 3.5B — Opaque semantic ABI
+
+Define these logical objects:
+
+```text
+PreparedSGpuHandle
+TargetOptimizerStateHandle
+DeviceResidualHandle
+DcovComponentHandle
+LogicalCiBatchHandle
+CompactCiResult
+```
+
+Handles are opaque, versioned, capability-queryable, lifetime-controlled,
+backend-owned objects. Raw pointer values and internal layouts are not artifact
+formats. The ABI freezes:
+
+```text
+creation, destruction, ownership, and lease semantics
+stream/event dependency and asynchronous completion semantics
+cache identity and semantic fingerprints
+error/status propagation
+allowed compact host-visible diagnostics
+large-payload host-transfer prohibition
+capability discovery and version negotiation
+eviction and reconstruction semantics
+selected-sp coordinates, penalty scaling, rank, and null-space semantics
+```
+
+It does not freeze:
+
+```text
+struct or buffer layout
+matrix leading dimensions
+workspace layout
+eigensolver representation
+kernel launch topology
+```
+
+At minimum, capability queries expose:
+
+```text
+abi_major / abi_minor
+capabilities
+backend_semantic_version
+producer_contract_hash
+device_residency_flags
+```
+
+`TargetOptimizerStateHandle` remains opaque until Phase 4 establishes optimizer
+semantics. `DcovComponentHandle` promises only a device-side semantic object
+consumable by the compatible pair evaluator; it does not promise full
+eigenvectors, partial eigenpairs, low-rank factors, block-Krylov state, or a
+dense centered matrix.
+
+### 3.5C — Three-layer artifact identity
+
+Every later campaign artifact uses three separate identities.
+
+Producer semantic identity describes the implementation that produced the
+payload:
+
+```text
+producer source closure hash
+native binary SHA-256
+route semantic version
+ABI and numerical contract hashes
+dataset/corpus and oracle identities
+backend configuration
+compiler/build recipe identity where required
+```
+
+It is immutable after publication.
+
+Validator/attestation identity describes a validation act:
+
+```text
+validator source closure hash and semantic version
+validator contract hashes
+validation timestamp and environment summary
+validation result
+attested producer identity
+```
+
+One producer artifact may have multiple append-only attestations. A new
+validator may validate an old producer artifact, but it must not replace the
+producer identity or rewrite the producer manifest.
+
+Volatile execution receipts are audit evidence only:
+
+```text
+PID and session ID
+CUDA context/session identifiers
+filesystem path and inode
+temporary/staging directories
+timestamps and host-process details
+```
+
+They must not define semantic equality, impersonate producer identity, or
+prevent valid cross-session linkage.
+
+### 3.5D — Minimal vertical structural prototype
+
+Build the minimum final-shape slice:
+
+```text
+one native control-plane call
+  -> authenticated canonical request slice
+  -> Phase 3 device residual handles
+  -> candidate dCov component handles
+  -> CUDA pair evaluation
+  -> compact host results
+  -> deterministic replay
+```
+
+This slice may use oracle-selected sp and Phase 2 prepared setups. It must
+demonstrate:
+
+```text
+residuals remain device-resident
+production-sized residual/component D2H is zero
+CPU numerical dCov authority is zero
+only compact p-value/status diagnostics return to the host
+handle lifetimes are bounded and leak-free
+cache eviction does not alter results
+```
+
+The prototype validates object boundaries, ownership, residency, and timing
+instrumentation. It does not repeat the Phase 3 full-graph correctness claim.
+
+### 3.5E — dCov architecture bake-off
+
+Evaluate the Phase 8 candidates before committing to a production
+implementation. Each candidate records:
+
+```text
+component representation and construction parity
+pair statistic parity
+gamma moment and p-value parity
+near-alpha and declared risk-corpus decisions
+component-build and pair-evaluation time
+H2D/D2H bytes and host synchronization count
+workspace, persistent, and cacheable bytes
+failure and convergence behavior
+```
+
+Two real measured scales are mandatory:
+
+```text
+Scale A — qualification scale
+  covers every declared semantic and risk class
+
+Scale B — campaign-slice scale
+  materially larger canonical trace slice
+  representative reuse distribution and dense skeleton level
+  realistic batching, cache pressure, and scheduling
+```
+
+Also cover component-build-dominated and pair/reuse-dominated workloads, the
+complete near-alpha corpus, and the complete declared risk corpus. Neither
+scale may use simulated backend timing.
+
+The conservative full-workload upper bound includes measured fixed overhead,
+class-stratified component and pair costs, observed reuse/cache behavior,
+allocator/workspace and synchronization overhead, a conservative throughput
+bound, and declared contingency. It must not multiply one best or average
+microbenchmark time by a global count.
+
+A candidate is `GO for Phase 8 implementation and full qualification` only
+when:
+
+```text
+representative component, pair, moment, and p-value parity pass
+complete near-alpha decision flips = 0
+complete declared risk-corpus decision flips = 0
+both measured scales fit the allocated dCov budget
+the conservative full-workload upper bound fits that budget
+CPU numerical dCov authority = 0
+production large-payload residual/component D2H = 0
+unsupported and numerical failure behavior is fail-closed
+```
+
+This GO decision selects an architecture for Phase 8. It does not promote a
+final backend.
+
+### 3.5F — Cache and memory model
+
+Use measured allocation data, not raw matrix dimensions alone. Account for:
+
+```text
+allocator metadata, alignment, pitch, and fragmentation
+cuBLAS/cuSOLVER workspaces
+stream and event state
+prepared setup and optimizer state
+residual and dCov component persistent bytes
+temporary pair-batch workspace
+peak concurrent batch state
+```
+
+Use the canonical trace and intended legal schedules to compute:
+
+```text
+reuse-distance and future-use distributions
+peak live set and dense-level pressure
+cache miss curves by capacity
+eviction/rebuild cost
+residual/component memory split
+```
+
+The accepted policy is capacity-bounded, memory-accounted, deterministic in
+semantics, result-invariant under eviction, and independent of allocator luck.
+It declares reference-GPU headroom, fails closed on OOM, and never publishes a
+partial graph after OOM.
+
+### 3.5G — Corpus policy
+
+Keep three distinct corpora.
+
+The reusable development qualification corpus covers rank deficiency,
+condition buckets, extreme sp, near constants, representative penalty counts,
+and declared numerical risks.
+
+The reusable metamorphic corpus covers:
+
+```text
+conditioning-column permutation
+basis sign flip and equivalent orthogonal rotation
+batch split/merge
+stream-count and cache-capacity variation
+standalone versus batched execution
+```
+
+The sealed promotion holdout is opened only in Phase 10 after candidate source,
+configuration, and contracts are frozen. Its tracked manifest records identity,
+hash, and release protocol; ordinary development cannot access the payload.
+Opening is recorded. If results cause an implementation change, that corpus
+becomes regression evidence and a new sealed version is required for another
+unbiased promotion claim.
+
+### 3.5H — Performance budget
+
+`performance_budget_v1` separates feasibility from final measurement:
+
+```text
+Phase 3.5 feasibility gate:
+  measured component budgets
+  + conservative full-workload bounds
+  + declared contingency
+  <= 120 seconds
+
+Phase 10 actual campaign gate:
+  five-run real complete warm campaign median <= 120 seconds
+```
+
+The tracked reference-machine contract freezes timing boundaries, input-copy
+and native-setup inclusion, cache construction, build exclusion, cold/warm
+definitions, GPU power/clock policy, CPU affinity, and thread policy. Cold and
+warm metrics are reported independently.
+
+Final promotion must simultaneously satisfy:
+
+```text
+warm median <= 120 seconds on reference_machine_v1
+warm median <= 0.80 * same-run correct baseline median
+every measured run passes every graph-semantic and authority gate
+```
+
+The stretch target is a warm median of at most 60 seconds. Phase budgets must
+leave explicit contingency and a credible allocation for not-yet-implemented
+GCV and native setup work.
+
+### Phase 3.5 exit gate
+
+Phase 3.5 passes only when all of the following versioned contracts and
+artifacts are accepted:
+
+```text
+architecture_contract_v1
+  opaque semantic ABI and compatibility rules accepted
+
+numerical_contract_v1
+  tracked tolerances, decision rules, snapshots, and hashes accepted
+
+artifact_identity_contract_v1
+  producer, validator/attestation, and volatile receipt identities separated
+
+dcov_architecture_bakeoff_v1
+  at least one candidate is GO for Phase 8 under two-scale measured evidence
+
+cache_memory_model_v1
+  measured memory, declared headroom, deterministic eviction, and OOM gates pass
+
+performance_budget_v1
+  cold/warm boundaries frozen and measured budgets plus contingency <= 120 sec
+
+corpus_policy_v1
+  development, metamorphic, and sealed promotion protocols frozen
+```
+
+Passing Phase 3.5 proves architectural feasibility. It does not claim
+completion of Phase 4, Phase 7, Phase 8, Phase 9, or the actual Phase 10
+120-second campaign gate.
+
+---
+
 ## Phase 4 — Implement full-CUDA single-penalty GCV for `|S| <= 2`
 
 ### Goal
 
 Remove `r-cpu-spectral` smoothing scoring and selection from the single-penalty compatible path.
+
+Phase 4 may run exploratory branches before Phase 3.5 completes, but it cannot
+become accepted campaign authority until every Phase 3.5 exit gate passes. It
+must consume compatible versions of the tracked architecture, numerical,
+identity, machine, budget, and corpus contracts.
 
 ### Current starting point
 
@@ -1359,7 +1778,9 @@ GCV/Cp score(sp)
 validity and rank status
 ```
 
-Validate the full score curve against the version-pinned oracle over a dense log-sp grid, including extreme and near-optimal regions.
+Validate the full score curve against the version-pinned oracle and
+`numerical_contract_v1` over a dense log-sp grid, including extreme and
+near-optimal regions.
 
 ### Phase 4B — Target-batched scoring
 
@@ -1388,6 +1809,23 @@ boundary status
 ```
 
 Record selected `sp`, score, EDF, iteration count, and convergence reason for every target.
+
+For the development risk corpus, near-alpha cases, boundary cases, and every
+oracle non-fully-converged case, also preserve an optimizer transcript:
+
+```text
+iteration and current log-sp
+objective, gradient, and Hessian or approximation
+proposed and accepted steps
+step-halving count
+boundary and rank-path flags
+termination reason
+```
+
+The CUDA optimizer need not reproduce every internal mgcv step. It must explain
+exceptional states and preserve compatible final objective, fit, residual,
+decision, and accepted boundary/convergence semantics. Reporting every case as
+converged is not an acceptable substitute.
 
 ### Phase 4D — Integrate with the persistent fixed-sp solver
 
@@ -1430,7 +1868,7 @@ fastkpc/artifacts/full_cuda_ci/single_penalty_cuda_gcv_backend_v1/
 For the entire `|S|<=2` census envelope:
 
 ```text
-objective curves agree within declared tolerance
+objective curves agree under numerical_contract_v1
 selected-sp diagnostics are explained
 residual decision flips = 0
 downstream legacy dCov decision flips = 0
@@ -1753,6 +2191,12 @@ Replace the CPU Spectra legacy dCov authority with a device-resident CUDA implem
 
 ### Important policy
 
+Phase 8 implements and fully qualifies the architecture selected as GO by the
+Phase 3.5 bake-off. It is not the first architecture-selection point. The
+candidate descriptions below define the Phase 3.5 comparison set and retained
+research alternatives; a different architecture requires a new accepted
+bake-off artifact.
+
 Do not assume the current host-driven `cuda_spectra` design must be the final solution. Benchmark architectures by full-route wall time and zero-drift correctness.
 
 ### Required component-level architecture
@@ -1840,7 +2284,14 @@ gamma pvalue_ms
 matrix H2D bytes
 residual D2H bytes
 host synchronization count
+CPU dCov component count
+CPU dCov eigen/low-rank count
+CPU dCov pair-statistic count
+CPU gamma p-value count
 CPU Spectra count
+CUDA dCov component count
+CUDA dCov pair count
+CUDA gamma p-value count
 CUDA eig convergence/failure count
 ```
 
@@ -1864,17 +2315,26 @@ SHD = 0
 sepsets identical = TRUE
 n.edgetests exact = TRUE
 canonical deletion trace identical = TRUE
-CPU Spectra/full-eigen dCov count = 0
+CPU dCov component count = 0
+CPU dCov eigen/low-rank count = 0
+CPU dCov pair-statistic count = 0
+CPU gamma p-value count = 0
+CPU Spectra count = 0
+residual/component large-payload D2H = 0
 unknown fallback count = 0
 ```
 
 ### Performance gate
 
-The CUDA dCov route must complete the full run and beat the C++ Spectra dCov portion on the same machine. A faster microbenchmark that still causes a full-run timeout is a failed route.
+The CUDA dCov route must complete the full run, beat the C++ Spectra dCov
+portion on the same machine, and satisfy the dCov allocation in the accepted
+`performance_budget_v1`. A faster microbenchmark that violates the Phase 3.5
+full-workload bound or still causes a full-run timeout is a failed route.
 
 ### Exit condition
 
-The entire numerical dCov authority is device-resident, complete on 351x48, and graph-identical.
+The Phase 3.5-selected numerical dCov architecture is fully implemented,
+device-resident, complete on 351x48, and graph-identical.
 
 ---
 
@@ -1883,6 +2343,11 @@ The entire numerical dCov authority is device-resident, complete on 351x48, and 
 ### Goal
 
 Replace the hidden R residual provider and CPU dCov authority in the existing native one-call facade with the accepted CUDA CI service.
+
+The integration must consume compatible Phase 3.5 semantic handles and the
+accepted identity, numerical, cache, corpus, and performance contracts. Phase 9
+is not the first validation of ownership, device residency, dCov architecture,
+or memory feasibility.
 
 ### C++ control-plane responsibilities
 
@@ -1926,6 +2391,10 @@ Historical level-prefetch and eager-prefill experiments reduced theoretical fit 
 
 ### Cache policy
 
+Start from the accepted `cache_memory_model_v1` capacity split, accounting,
+headroom, and deterministic eviction policy. Phase 9 may tune that policy only
+through a versioned replacement model and renewed affected gates.
+
 Caches must be:
 
 ```text
@@ -1946,13 +2415,17 @@ r_callback_count
 legacy_mgcv_fit_count
 legacy_mgcv_setup_count
 cpu_residual_solve_count
-cpu_dcov_count
+cpu_dcov_component_count
+cpu_dcov_eigen_or_lowrank_count
+cpu_dcov_pair_stat_count
+cpu_gamma_pvalue_count
 cpu_spectra_count
 cuda_single_penalty_target_count
 cuda_multi_penalty_target_count
 cuda_residual_batch_count
 cuda_dcov_component_count
 cuda_dcov_pair_count
+cuda_gamma_pvalue_count
 logical_tests_consumed
 physical_tests_evaluated
 speculative_tests_ignored
@@ -1968,7 +2441,14 @@ r_callback_count = 0
 legacy_mgcv_fit_count = 0
 legacy_mgcv_setup_count = 0
 cpu_residual_solve_count = 0
+cpu_dcov_component_count = 0
+cpu_dcov_eigen_or_lowrank_count = 0
+cpu_dcov_pair_stat_count = 0
+cpu_gamma_pvalue_count = 0
 cpu_spectra_count = 0
+cuda_dcov_component_count > 0 and is fully cache-accounted
+cuda_dcov_pair_count = physical_tests_evaluated
+cuda_gamma_pvalue_count = physical_tests_evaluated
 residual_d2h_bytes = 0 in the production path
 unknown_fallback_count = 0
 logical n.edgetests exact = TRUE
@@ -2020,43 +2500,44 @@ Prove that the correct full-CUDA route is repeatable, faster, fail-closed, and s
 
 ### Benchmark protocol
 
+Use the accepted `reference_machine_v1` and `performance_budget_v1`. Measure
+cold and warm product boundaries independently. The contracts define whether
+input copies, native setup, and cache construction are included, exclude build
+time, and freeze GPU power/clock policy, CPU affinity, thread counts, and cache
+state.
+
 On the same machine and software environment:
 
 ```text
-one warm-up per route
-five measured repetitions
-fresh process for each measured repetition when practical
+five measured cold repetitions from the declared cold state
+one prescribed warm-up before each warm measurement
+five measured warm repetitions
+fresh process for each repetition with the declared in-process warm-up
 same data and config
 same CPU/GPU affinity policy
 same thread counts
 same cache policy
 record raw per-run timings
-report median, min, max, and MAD/IQR
+report cold and warm median, min, max, and MAD/IQR separately
 ```
 
 Always run a fresh correct baseline in the same campaign. Do not compare only with an old artifact from another environment.
 
 ### Mandatory performance gate
 
-```text
-candidate median elapsed < current correct baseline median elapsed
-no correctness failure in any repetition
-```
-
-Promotion target:
+Final promotion must satisfy all of these conditions simultaneously:
 
 ```text
-at least 20% median wall-time improvement versus the same-run 592-second-class baseline
+warm candidate median <= 120 seconds on reference_machine_v1
+warm candidate median <= 0.80 * same-run correct baseline median
+every cold and warm measured run passes all correctness and authority gates
 ```
 
-Engineering targets:
-
-```text
-main target:    <= 120 seconds on the reference machine
-stretch target: <= 60 seconds on the reference machine
-```
-
-The 120/60-second targets do not weaken correctness. A 30-second run with SHD > 0 is a failure.
+The warm stretch target is at most 60 seconds. The relative gate remains
+mandatory even when the absolute gate is stricter, so a hardware or baseline
+change cannot hide relative regression. The Phase 3.5 feasibility bound is not
+the Phase 10 actual campaign measurement. None of these targets weakens
+correctness: a 30-second run with SHD > 0 is a failure.
 
 ### Required hardening
 
@@ -2075,9 +2556,15 @@ repeated-run leak checks
 version mismatch receipts
 ```
 
+Capacity sweeps validate the accepted Phase 3.5 memory model under the complete
+route; they are not the first memory-feasibility analysis.
+
 ### Held-out validation
 
-Add held-out workloads covering:
+Use `corpus_policy_v1`. Reusable development qualification and metamorphic
+corpora must already have run throughout the affected phases. After source,
+configuration, and contracts are frozen, open the sealed promotion holdout
+under its recorded release protocol. It covers:
 
 ```text
 different n and p
@@ -2088,7 +2575,10 @@ multiple penalty counts
 near-alpha decisions
 ```
 
-The canonical 351x48 gate remains mandatory. Held-out success cannot replace it.
+The canonical 351x48 gate remains mandatory. Holdout success cannot replace it.
+If holdout results cause an implementation change, the opened corpus becomes
+regression evidence and a new sealed holdout version is required for another
+unbiased promotion claim.
 
 ### Promotion ladder
 
@@ -2103,7 +2593,7 @@ shadow
 
 ```text
 fastkpc/artifacts/full_cuda_ci/promotion_351x48_v1/
-fastkpc/artifacts/full_cuda_ci/heldout_validation_v1/
+fastkpc/artifacts/full_cuda_ci/sealed_promotion_holdout_v1/
 fastkpc/artifacts/full_cuda_ci/failure_injection_v1/
 ```
 
@@ -2149,6 +2639,21 @@ stage_timing.csv
 raw_runs.csv
 ```
 
+Every artifact after Phase 3.5 must consume
+`artifact_identity_contract_v1` and keep these namespaces separate:
+
+```text
+producer semantic manifest        # immutable producer authority
+validator attestations            # append-only validation acts
+volatile execution receipts       # audit-only session/process evidence
+```
+
+The producer manifest records every applicable tracked contract name, semantic
+version, canonical SHA-256, and exact snapshot. Validators recompute contract
+and payload hashes from disk. A validator upgrade may add a new attestation but
+must not rewrite the producer manifest. Volatile path, inode, PID, session,
+context, staging, and timestamp values never define semantic equality.
+
 Phase-specific numerical artifacts should additionally include:
 
 ```text
@@ -2175,6 +2680,11 @@ n_edgetests_identical
 deletions_identical
 unknown_fallback_count
 approximate_backend_count
+architecture_contract_sha256
+numerical_contract_sha256
+artifact_identity_contract_sha256
+reference_machine_contract_sha256
+performance_budget_contract_sha256
 elapsed_sec
 pass
 ```
@@ -2497,6 +3007,16 @@ CUDA owns the repeated numerical CI data plane.
 R receives skeleton and sepsets and continues orientation.
 ```
 
+### Contract authority
+
+```text
+compatible architecture and ABI contract accepted
+numerical contract accepted and all artifact snapshots authenticated
+producer/validator/receipt identity contract enforced
+reference machine and performance budget contracts accepted
+development, metamorphic, and sealed holdout corpus policy enforced
+```
+
 ### Canonical correctness
 
 ```text
@@ -2517,7 +3037,11 @@ legacy mgcv target fits in CI loop = 0
 legacy mgcv setup calls in CI loop = 0
 R callbacks in native skeleton loop = 0
 CPU residual numerical solves = 0
-CPU Spectra/full-eigen dCov calls = 0
+CPU dCov component builds = 0
+CPU dCov eigen/low-rank calls = 0
+CPU dCov pair-statistic calls = 0
+CPU gamma p-value calls = 0
+CPU Spectra calls = 0
 approximate residual backend calls = 0
 unknown fallback count = 0
 residual D2H materialization in production path = 0
@@ -2537,10 +3061,11 @@ no intermittent fallback or non-finite result
 ### Performance
 
 ```text
-median wall time is lower than the same-run correct CPU/C++ baseline
-promotion target is at least 20% faster
-main engineering target is <= 120 seconds on the reference machine
-stretch target is <= 60 seconds on the reference machine
+warm median <= 120 seconds on reference_machine_v1
+warm median <= 0.80 * same-run correct baseline median
+every cold and warm measured run passes all correctness/authority gates
+warm stretch target <= 60 seconds
+cold and warm boundaries and raw timings are independently reported
 ```
 
 ### Failure behavior
