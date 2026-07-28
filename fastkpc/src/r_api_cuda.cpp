@@ -2,6 +2,7 @@
 #include "dcov_exact_cpu.hpp"
 #include "fastspline_basis.hpp"
 #include "full_cuda_ci_contract.hpp"
+#include "full_cuda_ci_semantic_abi.hpp"
 #include "hsic_cpu.hpp"
 #include "legacy_dcov_gamma_cpp.hpp"
 #include "orientation_types.hpp"
@@ -3426,6 +3427,41 @@ extern "C" SEXP C_full_cuda_ci_contract_identity(
     Rcpp::Named("semantic_patch") = identity.semantic_patch,
     Rcpp::Named("canonical_json") = identity.canonical_json,
     Rcpp::Named("sha256") = identity.sha256
+  );
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_semantic_abi_info() {
+  BEGIN_RCPP
+  const fastkpc::FullCudaCiSemanticAbiInfo info =
+    fastkpc::full_cuda_ci_semantic_abi_info();
+  Rcpp::CharacterVector capability_status(info.capability_status.size());
+  Rcpp::CharacterVector capability_status_names(info.capability_status.size());
+  for (std::size_t index = 0; index < info.capability_status.size(); ++index) {
+    capability_status[index] = info.capability_status[index].second;
+    capability_status_names[index] = info.capability_status[index].first;
+  }
+  capability_status.attr("names") = capability_status_names;
+  Rcpp::LogicalVector residency(info.device_residency_flags.size());
+  Rcpp::CharacterVector residency_names(info.device_residency_flags.size());
+  for (std::size_t index = 0; index < info.device_residency_flags.size();
+       ++index) {
+    residency[index] = info.device_residency_flags[index].second;
+    residency_names[index] = info.device_residency_flags[index].first;
+  }
+  residency.attr("names") = residency_names;
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") = info.schema_version,
+    Rcpp::Named("abi_major") = info.abi_major,
+    Rcpp::Named("abi_minor") = info.abi_minor,
+    Rcpp::Named("capabilities") = info.capabilities,
+    Rcpp::Named("capability_status") = capability_status,
+    Rcpp::Named("backend_semantic_version") =
+      info.backend_semantic_version,
+    Rcpp::Named("producer_contract_hash") = info.producer_contract_hash,
+    Rcpp::Named("device_residency_flags") = residency,
+    Rcpp::Named("semantic_objects") = info.semantic_objects,
+    Rcpp::Named("compact_result_fields") = info.compact_result_fields
   );
   END_RCPP
 }
@@ -8891,6 +8927,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
 static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_sha256_utf8", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_sha256_utf8), 1},
   {"C_full_cuda_ci_contract_identity", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_contract_identity), 2},
+  {"C_full_cuda_ci_semantic_abi_info", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_semantic_abi_info), 0},
   {"C_fastkpc_cuda_available", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_available), 0},
   {"C_fastkpc_cuda_device_info", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_device_info), 0},
   {"C_fastkpc_cuda_phase3_environment_identity", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_phase3_environment_identity), 1},

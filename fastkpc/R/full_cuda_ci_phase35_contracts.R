@@ -1070,3 +1070,135 @@ fastkpc_full_cuda_phase35_native_sha256_utf8 <- function(value) {
   }
   .Call("C_full_cuda_ci_sha256_utf8", value, PACKAGE = "fastkpc_cuda")
 }
+
+.fastkpc_full_cuda_phase35_validate_semantic_abi_info <- function(
+    info, contracts) {
+  required <- c(
+    "schema_version", "abi_major", "abi_minor", "capabilities",
+    "capability_status", "backend_semantic_version",
+    "producer_contract_hash", "device_residency_flags", "semantic_objects",
+    "compact_result_fields"
+  )
+  architecture <- contracts$architecture_contract_v1
+  vocabulary <- unlist(
+    architecture$payload$capabilities, use.names = FALSE
+  )
+  object_names <- vapply(
+    architecture$payload$semantic_objects, `[[`, character(1L), "name"
+  )
+  compact_fields <- unlist(
+    architecture$payload$compact_result_fields, use.names = FALSE
+  )
+  expected_residency <- c(
+    "prepared_s_device_resident", "target_optimizer_device_resident",
+    "residual_device_resident", "dcov_component_device_resident",
+    "logical_ci_batch_device_resident", "compact_result_host_visible",
+    "production_residual_d2h_forbidden",
+    "production_component_d2h_forbidden"
+  )
+  clean_status <- is.character(info$capability_status) &&
+    !anyNA(info$capability_status) &&
+    identical(names(info$capability_status), vocabulary) &&
+    all(info$capability_status %in%
+        c("available", "interface_only", "unavailable"))
+  clean_capabilities <- is.character(info$capabilities) &&
+    !anyNA(info$capabilities) && !anyDuplicated(info$capabilities) &&
+    identical(
+      info$capabilities,
+      vocabulary[info$capability_status == "available"]
+    )
+  clean_residency <- is.logical(info$device_residency_flags) &&
+    !anyNA(info$device_residency_flags) &&
+    identical(names(info$device_residency_flags), expected_residency)
+  if (!is.list(info) || !identical(names(info), required) ||
+      !identical(info$schema_version,
+                 "full-cuda-ci-semantic-abi-info-v1") ||
+      !.fastkpc_full_cuda_phase35_scalar_integer(info$abi_major, 1L) ||
+      !.fastkpc_full_cuda_phase35_scalar_integer(info$abi_minor, 0L) ||
+      !isTRUE(clean_status) || !isTRUE(clean_capabilities) ||
+      !identical(info$backend_semantic_version,
+                 architecture$payload$abi$backend_semantic_version) ||
+      !identical(info$producer_contract_hash, architecture$sha256) ||
+      !isTRUE(clean_residency) ||
+      !identical(info$semantic_objects, object_names) ||
+      !identical(info$compact_result_fields, compact_fields)) {
+    stop("native semantic ABI information is malformed or unauthenticated",
+         call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+fastkpc_full_cuda_phase35_semantic_abi_info <- function(
+    contracts = fastkpc_full_cuda_phase35_load_contract_set()) {
+  info <- .Call(
+    "C_full_cuda_ci_semantic_abi_info", PACKAGE = "fastkpc_cuda"
+  )
+  .fastkpc_full_cuda_phase35_validate_semantic_abi_info(info, contracts)
+  info
+}
+
+.fastkpc_full_cuda_phase35_capability_vector <- function(value, label) {
+  if (is.null(value)) return(character())
+  if (typeof(value) != "character" || is.object(value) || anyNA(value) ||
+      any(!nzchar(value)) || anyDuplicated(value)) {
+    stop(label, " must be unique non-missing capability strings",
+         call. = FALSE)
+  }
+  unname(value)
+}
+
+fastkpc_full_cuda_phase35_negotiate_semantic_abi <- function(
+    info,
+    required_major = 1L,
+    required_minor = 0L,
+    required_capabilities = character(),
+    optional_capabilities = character(),
+    contracts = fastkpc_full_cuda_phase35_load_contract_set()) {
+  .fastkpc_full_cuda_phase35_validate_semantic_abi_info(info, contracts)
+  if (!.fastkpc_full_cuda_phase35_scalar_integer(required_major, 0L) ||
+      !.fastkpc_full_cuda_phase35_scalar_integer(required_minor, 0L)) {
+    stop("required semantic ABI version is malformed", call. = FALSE)
+  }
+  required_capabilities <- .fastkpc_full_cuda_phase35_capability_vector(
+    required_capabilities, "required capabilities"
+  )
+  optional_capabilities <- .fastkpc_full_cuda_phase35_capability_vector(
+    optional_capabilities, "optional capabilities"
+  )
+  if (length(intersect(required_capabilities, optional_capabilities)) > 0L) {
+    stop("required and optional capabilities must be disjoint",
+         call. = FALSE)
+  }
+  if (!identical(info$abi_major, required_major)) {
+    stop("semantic ABI major mismatch", call. = FALSE)
+  }
+  if (info$abi_minor < required_minor) {
+    stop("semantic ABI minor capability mismatch", call. = FALSE)
+  }
+  vocabulary <- names(info$capability_status)
+  unknown_required <- setdiff(required_capabilities, vocabulary)
+  if (length(unknown_required) > 0L) {
+    stop("required semantic capability is unknown: ", unknown_required[[1L]],
+         call. = FALSE)
+  }
+  unavailable_required <- required_capabilities[
+    info$capability_status[required_capabilities] != "available"
+  ]
+  if (length(unavailable_required) > 0L) {
+    stop(
+      "required semantic capability is unavailable: ",
+      unavailable_required[[1L]], call. = FALSE
+    )
+  }
+  unavailable_optional <- optional_capabilities[
+    !optional_capabilities %in% info$capabilities
+  ]
+  list(
+    compatible = TRUE,
+    provider_abi_major = info$abi_major,
+    provider_abi_minor = info$abi_minor,
+    available_required_capabilities = required_capabilities,
+    unavailable_optional_capabilities = unavailable_optional,
+    producer_contract_hash = info$producer_contract_hash
+  )
+}
