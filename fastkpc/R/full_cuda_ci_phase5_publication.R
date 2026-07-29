@@ -521,7 +521,7 @@ fastkpc_full_cuda_phase5_validate_artifact <- function(
     "Phase 5 payload manifest hash mismatch"
   )
   envelope <- manifest$producer_semantic_envelope
-  .fastkpc_full_cuda_phase35_validate_identity_envelope(envelope)
+  fastkpc_full_cuda_phase35_validate_identity_envelope(envelope)
   fastkpc_full_cuda_phase5_publication_require(
     identical(envelope$payload_manifest_sha256,
               payload_manifest_sha256),
