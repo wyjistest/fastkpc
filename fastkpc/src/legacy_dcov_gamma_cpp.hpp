@@ -83,6 +83,13 @@ Rcpp::List legacy_dcov_gamma_cpp_compute_batch_ptrs(
     int numCol,
     double index = 1.0);
 
+Rcpp::List legacy_dcov_gamma_cpp_compute_component_cache_batch(
+    Rcpp::NumericMatrix residuals,
+    Rcpp::IntegerVector left_columns,
+    Rcpp::IntegerVector right_columns,
+    int numCol,
+    double index = 1.0);
+
 Rcpp::List legacy_dcov_gamma_cpp_result_to_list(
     const LegacyDcovGammaCppResult& result);
 

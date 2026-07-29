@@ -5,6 +5,7 @@
 #include "full_cuda_ci_semantic_abi.hpp"
 #include "hsic_cpu.hpp"
 #include "legacy_dcov_gamma_cpp.hpp"
+#include "mgcv_multi_penalty_cpp.hpp"
 #include "orientation_types.hpp"
 #include "regrvonps_device.hpp"
 #include "residual_backend_registry.hpp"
@@ -6414,6 +6415,25 @@ extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch(
   END_RCPP
 }
 
+extern "C" SEXP C_legacy_dcov_gamma_cpp_component_cache_batch(
+    SEXP residuals_s,
+    SEXP left_columns_s,
+    SEXP right_columns_s,
+    SEXP num_col_s,
+    SEXP index_s) {
+  BEGIN_RCPP
+  if (!Rf_isReal(residuals_s) || !Rf_isMatrix(residuals_s) ||
+      !Rf_isInteger(left_columns_s) || !Rf_isInteger(right_columns_s)) {
+    Rcpp::stop("legacy dCov component-cache inputs are malformed");
+  }
+  return fastkpc::legacy_dcov_gamma_cpp_compute_component_cache_batch(
+    Rcpp::NumericMatrix(residuals_s),
+    Rcpp::IntegerVector(left_columns_s),
+    Rcpp::IntegerVector(right_columns_s),
+    Rcpp::as<int>(num_col_s), Rcpp::as<double>(index_s));
+  END_RCPP
+}
+
 extern "C" SEXP C_legacy_dcov_spectra_matvec_cuda_handle_free(
     SEXP handles) {
   BEGIN_RCPP
@@ -6728,6 +6748,312 @@ extern "C" SEXP C_mgcv_extract_gpu_test_checked_augmented_rows(
   BEGIN_RCPP
   return Rcpp::wrap(mgcv_extract_fixed_sp_checked_augmented_rows(
     Rcpp::as<int>(ns), Rcpp::as<int>(null_dims)));
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_evaluate_cpp(
+    SEXP Xs,
+    SEXP ys,
+    SEXP penalty_blocks_s,
+    SEXP penalty_offsets_s,
+    SEXP penalty_ranks_s,
+    SEXP log_sp_s,
+    SEXP Hs,
+    SEXP constraint_s,
+    SEXP rank_tolerance_s) {
+  BEGIN_RCPP
+  if (!Rf_isReal(Xs) || !Rf_isMatrix(Xs) || !Rf_isReal(ys) ||
+      !Rf_isNewList(penalty_blocks_s) ||
+      !Rf_isInteger(penalty_offsets_s) ||
+      !Rf_isInteger(penalty_ranks_s) || !Rf_isReal(log_sp_s)) {
+    Rcpp::stop("multi-penalty C++ inputs have invalid storage types");
+  }
+  Rcpp::NumericMatrix X(Xs);
+  Rcpp::NumericVector y(ys);
+  Rcpp::List penalty_blocks(penalty_blocks_s);
+  Rcpp::IntegerVector penalty_offsets(penalty_offsets_s);
+  Rcpp::IntegerVector penalty_ranks(penalty_ranks_s);
+  Rcpp::NumericVector log_sp(log_sp_s);
+  const int n = X.nrow();
+  const int p = X.ncol();
+  const int penalty_count = penalty_blocks.size();
+  if (y.size() != n || penalty_count <= 1 ||
+      penalty_offsets.size() != penalty_count ||
+      penalty_ranks.size() != penalty_count ||
+      log_sp.size() != penalty_count) {
+    Rcpp::stop("multi-penalty C++ input dimensions are inconsistent");
+  }
+  std::vector<std::vector<double>> blocks;
+  std::vector<int> dimensions;
+  std::vector<int> offsets;
+  std::vector<int> ranks;
+  blocks.reserve(penalty_count);
+  dimensions.reserve(penalty_count);
+  offsets.reserve(penalty_count);
+  ranks.reserve(penalty_count);
+  for (int index = 0; index < penalty_count; ++index) {
+    SEXP block_s = penalty_blocks[index];
+    if (!Rf_isReal(block_s) || !Rf_isMatrix(block_s)) {
+      Rcpp::stop("each multi-penalty block must be a numeric matrix");
+    }
+    Rcpp::NumericMatrix block(block_s);
+    if (block.nrow() <= 0 || block.nrow() != block.ncol()) {
+      Rcpp::stop("each multi-penalty block must be nonempty and square");
+    }
+    blocks.emplace_back(REAL(block_s), REAL(block_s) + XLENGTH(block_s));
+    dimensions.push_back(block.nrow());
+    offsets.push_back(penalty_offsets[index] - 1);
+    ranks.push_back(penalty_ranks[index]);
+  }
+  const double* H = nullptr;
+  bool has_H = false;
+  if (!Rf_isNull(Hs)) {
+    if (!Rf_isReal(Hs) || !Rf_isMatrix(Hs)) {
+      Rcpp::stop("fixed penalty H must be NULL or a numeric matrix");
+    }
+    Rcpp::NumericMatrix H_matrix(Hs);
+    if (H_matrix.nrow() != p || H_matrix.ncol() != p) {
+      Rcpp::stop("fixed penalty H must have dimension p x p");
+    }
+    H = REAL(Hs);
+    has_H = true;
+  }
+  const double* constraint = nullptr;
+  int constraint_rows = 0;
+  if (!Rf_isNull(constraint_s)) {
+    if (!Rf_isReal(constraint_s) || !Rf_isMatrix(constraint_s)) {
+      Rcpp::stop("constraint must be NULL or a numeric matrix");
+    }
+    Rcpp::NumericMatrix constraint_matrix(constraint_s);
+    if (constraint_matrix.ncol() != p) {
+      Rcpp::stop("constraint must have ncol equal to p");
+    }
+    constraint_rows = constraint_matrix.nrow();
+    if (constraint_rows > 0) constraint = REAL(constraint_s);
+  }
+  const std::vector<double> log_sp_values(log_sp.begin(), log_sp.end());
+  const fastkpc::MultiPenaltyGcvEvaluation result =
+    fastkpc::multi_penalty_gcv_evaluate_cpp(
+      REAL(Xs), REAL(ys), n, p, blocks, dimensions, offsets, ranks,
+      log_sp_values, H, has_H, constraint, constraint_rows,
+      Rcpp::as<double>(rank_tolerance_s));
+  Rcpp::NumericMatrix hessian(result.penalty_count, result.penalty_count);
+  std::copy(result.hessian.begin(), result.hessian.end(), hessian.begin());
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") =
+      "full-cuda-ci-multi-penalty-cpp-evaluation-v1",
+    Rcpp::Named("rank_path") = "augmented-jacobi-svd",
+    Rcpp::Named("constraint_aware") = true,
+    Rcpp::Named("normal_equations_used") = false,
+    Rcpp::Named("n") = result.n,
+    Rcpp::Named("coefficient_dim") = result.coefficient_dim,
+    Rcpp::Named("free_dim") = result.free_dim,
+    Rcpp::Named("penalty_count") = result.penalty_count,
+    Rcpp::Named("constraint_rank") = result.constraint_rank,
+    Rcpp::Named("augmented_penalty_rank") =
+      result.augmented_penalty_rank,
+    Rcpp::Named("numerical_rank") = result.numerical_rank,
+    Rcpp::Named("condition") = result.condition,
+    Rcpp::Named("condition_bucket") = result.condition_bucket,
+    Rcpp::Named("log_sp") = Rcpp::wrap(result.log_sp),
+    Rcpp::Named("rss") = result.rss,
+    Rcpp::Named("edf") = result.edf,
+    Rcpp::Named("score") = result.score,
+    Rcpp::Named("gradient") = Rcpp::wrap(result.gradient),
+    Rcpp::Named("hessian") = hessian,
+    Rcpp::Named("coefficients") = Rcpp::wrap(result.coefficients),
+    Rcpp::Named("fitted") = Rcpp::wrap(result.fitted),
+    Rcpp::Named("residuals") = Rcpp::wrap(result.residuals));
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cpp(
+    SEXP Xs,
+    SEXP ys,
+    SEXP penalty_blocks_s,
+    SEXP penalty_offsets_s,
+    SEXP penalty_ranks_s,
+    SEXP Hs,
+    SEXP constraint_s,
+    SEXP control_s) {
+  BEGIN_RCPP
+  if (!Rf_isReal(Xs) || !Rf_isMatrix(Xs) || !Rf_isReal(ys) ||
+      !Rf_isNewList(penalty_blocks_s) ||
+      !Rf_isInteger(penalty_offsets_s) ||
+      !Rf_isInteger(penalty_ranks_s) || !Rf_isNewList(control_s)) {
+    Rcpp::stop("multi-penalty optimizer inputs have invalid storage types");
+  }
+  Rcpp::NumericMatrix X(Xs);
+  Rcpp::NumericVector y(ys);
+  Rcpp::List penalty_blocks(penalty_blocks_s);
+  Rcpp::IntegerVector penalty_offsets(penalty_offsets_s);
+  Rcpp::IntegerVector penalty_ranks(penalty_ranks_s);
+  Rcpp::List control_values(control_s);
+  const int n = X.nrow();
+  const int p = X.ncol();
+  const int penalty_count = penalty_blocks.size();
+  if (y.size() != n || penalty_count <= 1 ||
+      penalty_offsets.size() != penalty_count ||
+      penalty_ranks.size() != penalty_count) {
+    Rcpp::stop("multi-penalty optimizer input dimensions are inconsistent");
+  }
+  std::vector<std::vector<double>> blocks;
+  std::vector<int> dimensions;
+  std::vector<int> offsets;
+  std::vector<int> ranks;
+  blocks.reserve(penalty_count);
+  dimensions.reserve(penalty_count);
+  offsets.reserve(penalty_count);
+  ranks.reserve(penalty_count);
+  for (int index = 0; index < penalty_count; ++index) {
+    SEXP block_s = penalty_blocks[index];
+    if (!Rf_isReal(block_s) || !Rf_isMatrix(block_s)) {
+      Rcpp::stop("each multi-penalty block must be a numeric matrix");
+    }
+    Rcpp::NumericMatrix block(block_s);
+    if (block.nrow() <= 0 || block.nrow() != block.ncol()) {
+      Rcpp::stop("each multi-penalty block must be nonempty and square");
+    }
+    blocks.emplace_back(REAL(block_s), REAL(block_s) + XLENGTH(block_s));
+    dimensions.push_back(block.nrow());
+    offsets.push_back(penalty_offsets[index] - 1);
+    ranks.push_back(penalty_ranks[index]);
+  }
+  const double* H = nullptr;
+  bool has_H = false;
+  if (!Rf_isNull(Hs)) {
+    if (!Rf_isReal(Hs) || !Rf_isMatrix(Hs)) {
+      Rcpp::stop("fixed penalty H must be NULL or a numeric matrix");
+    }
+    Rcpp::NumericMatrix H_matrix(Hs);
+    if (H_matrix.nrow() != p || H_matrix.ncol() != p) {
+      Rcpp::stop("fixed penalty H must have dimension p x p");
+    }
+    H = REAL(Hs);
+    has_H = true;
+  }
+  const double* constraint = nullptr;
+  int constraint_rows = 0;
+  if (!Rf_isNull(constraint_s)) {
+    if (!Rf_isReal(constraint_s) || !Rf_isMatrix(constraint_s)) {
+      Rcpp::stop("constraint must be NULL or a numeric matrix");
+    }
+    Rcpp::NumericMatrix constraint_matrix(constraint_s);
+    if (constraint_matrix.ncol() != p) {
+      Rcpp::stop("constraint must have ncol equal to p");
+    }
+    constraint_rows = constraint_matrix.nrow();
+    if (constraint_rows > 0) constraint = REAL(constraint_s);
+  }
+  auto numeric_control = [&](const char* name, double fallback) {
+    return control_values.containsElementNamed(name) ?
+      Rcpp::as<double>(control_values[name]) : fallback;
+  };
+  auto integer_control = [&](const char* name, int fallback) {
+    return control_values.containsElementNamed(name) ?
+      Rcpp::as<int>(control_values[name]) : fallback;
+  };
+  fastkpc::MultiPenaltyOptimizerControl control;
+  control.convergence_tolerance = numeric_control(
+    "convergence_tolerance", control.convergence_tolerance);
+  control.max_step_halving = integer_control(
+    "max_step_halving", control.max_step_halving);
+  control.max_iterations = integer_control(
+    "max_iterations", control.max_iterations);
+  control.max_newton_step = numeric_control(
+    "max_newton_step", control.max_newton_step);
+  control.boundary_probe_step = numeric_control(
+    "boundary_probe_step", control.boundary_probe_step);
+  control.max_boundary_probes = integer_control(
+    "max_boundary_probes", control.max_boundary_probes);
+  control.rank_tolerance = numeric_control(
+    "rank_tolerance", control.rank_tolerance);
+  control.keep_transcript =
+    control_values.containsElementNamed("keep_transcript") &&
+    Rcpp::as<bool>(control_values["keep_transcript"]);
+
+  const fastkpc::MultiPenaltyGcvOptimization result =
+    fastkpc::multi_penalty_gcv_optimize_cpp(
+      REAL(Xs), REAL(ys), n, p, blocks, dimensions, offsets, ranks,
+      H, has_H, constraint, constraint_rows, control);
+  const fastkpc::MultiPenaltyGcvEvaluation& selected = result.selected;
+  Rcpp::NumericMatrix hessian(selected.penalty_count,
+                              selected.penalty_count);
+  std::copy(selected.hessian.begin(), selected.hessian.end(),
+            hessian.begin());
+  Rcpp::List transcript(result.transcript.size());
+  for (std::size_t index = 0; index < result.transcript.size(); ++index) {
+    const fastkpc::MultiPenaltyOptimizerTranscriptEntry& entry =
+      result.transcript[index];
+    Rcpp::NumericMatrix entry_hessian(selected.penalty_count,
+                                      selected.penalty_count);
+    std::copy(entry.hessian.begin(), entry.hessian.end(),
+              entry_hessian.begin());
+    transcript[index] = Rcpp::List::create(
+      Rcpp::Named("stage") = entry.stage,
+      Rcpp::Named("iteration") = entry.iteration,
+      Rcpp::Named("evaluation") = entry.evaluation,
+      Rcpp::Named("coordinate") = entry.coordinate < 0 ?
+        NA_INTEGER : entry.coordinate + 1,
+      Rcpp::Named("current_log_sp") = Rcpp::wrap(entry.current_log_sp),
+      Rcpp::Named("proposed_step") = Rcpp::wrap(entry.proposed_step),
+      Rcpp::Named("trial_log_sp") = Rcpp::wrap(entry.trial_log_sp),
+      Rcpp::Named("objective") = entry.score,
+      Rcpp::Named("gradient") = Rcpp::wrap(entry.gradient),
+      Rcpp::Named("hessian") = entry_hessian,
+      Rcpp::Named("hessian_eigenvalues") =
+        Rcpp::wrap(entry.hessian_eigenvalues),
+      Rcpp::Named("accepted") = entry.accepted,
+      Rcpp::Named("step_source") = entry.step_source,
+      Rcpp::Named("numerical_rank") = entry.numerical_rank,
+      Rcpp::Named("condition") = entry.condition);
+  }
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") =
+      "full-cuda-ci-multi-penalty-cpp-optimization-v1",
+    Rcpp::Named("rank_path") = "augmented-jacobi-svd",
+    Rcpp::Named("constraint_aware") = true,
+    Rcpp::Named("normal_equations_used") = false,
+    Rcpp::Named("response_independent_initialization") = true,
+    Rcpp::Named("fallback_reason") = "NONE",
+    Rcpp::Named("n") = selected.n,
+    Rcpp::Named("coefficient_dim") = selected.coefficient_dim,
+    Rcpp::Named("free_dim") = selected.free_dim,
+    Rcpp::Named("penalty_count") = selected.penalty_count,
+    Rcpp::Named("constraint_rank") = selected.constraint_rank,
+    Rcpp::Named("augmented_penalty_rank") =
+      selected.augmented_penalty_rank,
+    Rcpp::Named("numerical_rank") = selected.numerical_rank,
+    Rcpp::Named("condition") = selected.condition,
+    Rcpp::Named("condition_bucket") = selected.condition_bucket,
+    Rcpp::Named("initial_log_sp") = Rcpp::wrap(result.initial_log_sp),
+    Rcpp::Named("selected_log_sp") = Rcpp::wrap(selected.log_sp),
+    Rcpp::Named("rss") = selected.rss,
+    Rcpp::Named("edf") = selected.edf,
+    Rcpp::Named("score") = selected.score,
+    Rcpp::Named("gradient") = Rcpp::wrap(selected.gradient),
+    Rcpp::Named("hessian") = hessian,
+    Rcpp::Named("coefficients") = Rcpp::wrap(selected.coefficients),
+    Rcpp::Named("fitted") = Rcpp::wrap(selected.fitted),
+    Rcpp::Named("residuals") = Rcpp::wrap(selected.residuals),
+    Rcpp::Named("optimizer_iterations") = result.optimizer_iterations,
+    Rcpp::Named("score_calls") = result.score_calls,
+    Rcpp::Named("objective_calls") = result.objective_calls,
+    Rcpp::Named("step_halving_count") = result.step_halving_count,
+    Rcpp::Named("newton_trial_count") = result.newton_trial_count,
+    Rcpp::Named("steepest_descent_trial_count") =
+      result.steepest_descent_trial_count,
+    Rcpp::Named("boundary_probe_count") = result.boundary_probe_count,
+    Rcpp::Named("boundary_accepted_count") =
+      result.boundary_accepted_count,
+    Rcpp::Named("boundary_status") = Rcpp::wrap(result.boundary_status),
+    Rcpp::Named("fully_converged") = result.fully_converged,
+    Rcpp::Named("hessian_positive_definite") =
+      result.hessian_positive_definite,
+    Rcpp::Named("step_failed") = result.step_failed,
+    Rcpp::Named("rms_gradient") = result.rms_gradient,
+    Rcpp::Named("convergence_code") = result.convergence_code,
+    Rcpp::Named("transcript") = transcript);
   END_RCPP
 }
 
@@ -11166,6 +11492,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_shadow), 6},
   {"C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma), 7},
   {"C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch), 7},
+  {"C_legacy_dcov_gamma_cpp_component_cache_batch", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_gamma_cpp_component_cache_batch), 5},
   {"C_legacy_dcov_spectra_matvec_cuda_handle_free", reinterpret_cast<DL_FUNC>(&C_legacy_dcov_spectra_matvec_cuda_handle_free), 1},
   {"C_fixed_sp_cuda_runtime_create", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_runtime_create), 1},
   {"C_fixed_sp_cuda_live_owner_snapshot", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_live_owner_snapshot), 0},
@@ -11206,6 +11533,8 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fastspline_residual_cuda", reinterpret_cast<DL_FUNC>(&C_fastspline_residual_cuda), 4},
   {"C_fastspline_residual_batch_cuda", reinterpret_cast<DL_FUNC>(&C_fastspline_residual_batch_cuda), 5},
   {"C_mgcv_extract_gpu_test_checked_augmented_rows", reinterpret_cast<DL_FUNC>(&C_mgcv_extract_gpu_test_checked_augmented_rows), 2},
+  {"C_full_cuda_ci_multi_penalty_gcv_evaluate_cpp", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_evaluate_cpp), 9},
+  {"C_full_cuda_ci_multi_penalty_gcv_optimize_cpp", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_optimize_cpp), 8},
   {"C_full_cuda_ci_single_penalty_mroot_cuda", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_single_penalty_mroot_cuda), 3},
   {"C_full_cuda_ci_single_penalty_gcv_cuda", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_single_penalty_gcv_cuda), 15},
   {"C_full_cuda_ci_single_penalty_gcv_multi_cuda", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_single_penalty_gcv_multi_cuda), 2},

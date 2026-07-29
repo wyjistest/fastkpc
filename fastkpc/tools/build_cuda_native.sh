@@ -33,6 +33,7 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
 "$CXX" $COMMON_CXX -c "$ROOT/src/full_cuda_ci_semantic_abi.cpp" -o "$BUILD/full_cuda_ci_semantic_abi.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/hsic_cpu.cpp" -o "$BUILD/hsic_cpu.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/legacy_dcov_gamma_cpp.cpp" -o "$BUILD/legacy_dcov_gamma_cpp.o"
+"$CXX" $COMMON_CXX -c "$ROOT/src/mgcv_multi_penalty_cpp.cpp" -o "$BUILD/mgcv_multi_penalty_cpp.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/ci_method.cpp" -o "$BUILD/ci_method.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/fastspline_basis.cpp" -o "$BUILD/fastspline_basis.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/fastspline_solver.cpp" -o "$BUILD/fastspline_solver.o"
@@ -97,6 +98,7 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   "$BUILD/full_cuda_ci_semantic_abi.o" \
   "$BUILD/hsic_cpu.o" \
   "$BUILD/legacy_dcov_gamma_cpp.o" \
+  "$BUILD/mgcv_multi_penalty_cpp.o" \
   "$BUILD/ci_method.o" \
   "$BUILD/fastspline_basis.o" \
   "$BUILD/fastspline_solver.o" \

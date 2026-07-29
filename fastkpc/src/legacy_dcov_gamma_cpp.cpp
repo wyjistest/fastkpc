@@ -544,6 +544,183 @@ Rcpp::List legacy_dcov_gamma_cpp_result_to_list(
   );
 }
 
+Rcpp::List legacy_dcov_gamma_cpp_compute_component_cache_batch(
+    Rcpp::NumericMatrix residuals,
+    Rcpp::IntegerVector left_columns,
+    Rcpp::IntegerVector right_columns,
+    int numCol,
+    double index) {
+  const auto total_start = std::chrono::steady_clock::now();
+  const int n = residuals.nrow();
+  const int component_capacity = residuals.ncol();
+  const int pair_count = left_columns.size();
+  if (n <= 5 || component_capacity <= 0 || pair_count <= 0 ||
+      right_columns.size() != pair_count) {
+    Rcpp::stop("legacy dCov component-cache dimensions are invalid");
+  }
+  if (numCol <= 0 || numCol >= n) {
+    Rcpp::stop("numCol must be positive and less than sample size");
+  }
+  if (index < 0.0 || index > 2.0) index = 1.0;
+  std::vector<int> left(static_cast<std::size_t>(pair_count));
+  std::vector<int> right(static_cast<std::size_t>(pair_count));
+  std::vector<unsigned char> used(
+    static_cast<std::size_t>(component_capacity), 0);
+  for (int pair = 0; pair < pair_count; ++pair) {
+    left[static_cast<std::size_t>(pair)] = left_columns[pair] - 1;
+    right[static_cast<std::size_t>(pair)] = right_columns[pair] - 1;
+    if (left[static_cast<std::size_t>(pair)] < 0 ||
+        left[static_cast<std::size_t>(pair)] >= component_capacity ||
+        right[static_cast<std::size_t>(pair)] < 0 ||
+        right[static_cast<std::size_t>(pair)] >= component_capacity) {
+      Rcpp::stop("legacy dCov component-cache column index is invalid");
+    }
+    used[static_cast<std::size_t>(left[static_cast<std::size_t>(pair)])] = 1;
+    used[static_cast<std::size_t>(right[static_cast<std::size_t>(pair)])] = 1;
+  }
+  int component_count = 0;
+  for (unsigned char value : used) component_count += value != 0 ? 1 : 0;
+
+  std::vector<LegacyDcovLowrank> components(
+    static_cast<std::size_t>(component_capacity));
+  std::vector<double> distance_mean(
+    static_cast<std::size_t>(component_capacity), 0.0);
+  std::vector<double> self_moment(
+    static_cast<std::size_t>(component_capacity), 0.0);
+  LegacyDcovLowrankEigWorkspace eig_workspace;
+  LegacyDcovLowrankTimings lowrank_timings;
+  const LegacyDcovLowrankMode lowrank_mode =
+    legacy_dcov_lowrank_mode_from_env();
+  arma::mat distance;
+  arma::mat cross_workspace;
+  double distance_ms = 0.0;
+  double lowrank_ms = 0.0;
+  double component_moment_ms = 0.0;
+  for (int component = 0; component < component_capacity; ++component) {
+    if (used[static_cast<std::size_t>(component)] == 0) continue;
+    const double* values = REAL(residuals) +
+      static_cast<std::size_t>(component) * n;
+    for (int row = 0; row < n; ++row) {
+      if (!std::isfinite(values[row])) {
+        Rcpp::stop("Data contains missing or infinite values");
+      }
+    }
+    const auto distance_start = std::chrono::steady_clock::now();
+    legacy_dcov_fill_distance_matrix(values, n, distance);
+    distance_mean[static_cast<std::size_t>(component)] =
+      arma::accu(distance) /
+      (static_cast<double>(n) * static_cast<double>(n));
+    distance_ms += legacy_dcov_elapsed_ms_since(distance_start);
+
+    const auto lowrank_start = std::chrono::steady_clock::now();
+    legacy_dcov_lowrank(
+      distance, numCol, lowrank_mode,
+      components[static_cast<std::size_t>(component)], &eig_workspace,
+      &lowrank_timings);
+    lowrank_ms += legacy_dcov_elapsed_ms_since(lowrank_start);
+
+    const auto moment_start = std::chrono::steady_clock::now();
+    const LegacyDcovLowrank& value =
+      components[static_cast<std::size_t>(component)];
+    self_moment[static_cast<std::size_t>(component)] =
+      legacy_dcov_weighted_cross_sum(
+        value.centered_vectors, value.values,
+        value.centered_vectors, value.values, &cross_workspace);
+    component_moment_ms += legacy_dcov_elapsed_ms_since(moment_start);
+  }
+
+  Rcpp::NumericVector p_value(pair_count);
+  Rcpp::NumericVector nV2(pair_count);
+  Rcpp::NumericVector mean(pair_count);
+  Rcpp::NumericVector variance(pair_count);
+  Rcpp::NumericVector alpha(pair_count);
+  Rcpp::NumericVector beta(pair_count);
+  double pair_statistic_ms = 0.0;
+  double pair_moment_ms = 0.0;
+  double pgamma_ms = 0.0;
+  const double n_double = static_cast<double>(n);
+  const double variance_factor =
+    2.0 * (n_double - 4.0) * (n_double - 5.0) /
+    n_double / (n_double - 1.0) / (n_double - 2.0) /
+    (n_double - 3.0);
+  for (int pair = 0; pair < pair_count; ++pair) {
+    const int left_index = left[static_cast<std::size_t>(pair)];
+    const int right_index = right[static_cast<std::size_t>(pair)];
+    const LegacyDcovLowrank& left_component =
+      components[static_cast<std::size_t>(left_index)];
+    const LegacyDcovLowrank& right_component =
+      components[static_cast<std::size_t>(right_index)];
+    const auto statistic_start = std::chrono::steady_clock::now();
+    nV2[pair] = legacy_dcov_weighted_cross_sum(
+      left_component.centered_vectors, left_component.values,
+      right_component.centered_vectors, right_component.values,
+      &cross_workspace) / n_double;
+    pair_statistic_ms += legacy_dcov_elapsed_ms_since(statistic_start);
+
+    const auto moment_start = std::chrono::steady_clock::now();
+    mean[pair] = distance_mean[static_cast<std::size_t>(left_index)] *
+      distance_mean[static_cast<std::size_t>(right_index)];
+    variance[pair] = variance_factor *
+      self_moment[static_cast<std::size_t>(left_index)] *
+      self_moment[static_cast<std::size_t>(right_index)] /
+      std::pow(n_double, 4.0) * std::pow(n_double, 2.0);
+    alpha[pair] = mean[pair] * mean[pair] / variance[pair];
+    beta[pair] = variance[pair] / mean[pair];
+    pair_moment_ms += legacy_dcov_elapsed_ms_since(moment_start);
+
+    const auto pgamma_start = std::chrono::steady_clock::now();
+    p_value[pair] = 1.0 - R::pgamma(
+      nV2[pair], alpha[pair], beta[pair], true, false);
+    pgamma_ms += legacy_dcov_elapsed_ms_since(pgamma_start);
+    if (!std::isfinite(p_value[pair]) || p_value[pair] < 0.0 ||
+        p_value[pair] > 1.0) {
+      Rcpp::stop("legacy dCov component-cache p-value is invalid");
+    }
+  }
+  const double total_ms = legacy_dcov_elapsed_ms_since(total_start);
+  return Rcpp::List::create(
+    Rcpp::Named("p.value") = p_value,
+    Rcpp::Named("nV2") = nV2,
+    Rcpp::Named("mean") = mean,
+    Rcpp::Named("variance") = variance,
+    Rcpp::Named("alpha") = alpha,
+    Rcpp::Named("beta") = beta,
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("n") = n,
+      Rcpp::Named("component_capacity") = component_capacity,
+      Rcpp::Named("component_count") = component_count,
+      Rcpp::Named("component_request_count") = 2 * pair_count,
+      Rcpp::Named("component_cache_hit_count") =
+        2 * pair_count - component_count,
+      Rcpp::Named("component_cache_miss_count") = component_count,
+      Rcpp::Named("pair_count") = pair_count,
+      Rcpp::Named("numCol") = numCol,
+      Rcpp::Named("index") = index,
+      Rcpp::Named("lowrank_mode") =
+        std::string(legacy_dcov_lowrank_mode_name(lowrank_mode)),
+      Rcpp::Named("lowrank_full_eig_count") =
+        lowrank_timings.full_eig_count,
+      Rcpp::Named("lowrank_spectra_count") =
+        lowrank_timings.spectra_count,
+      Rcpp::Named("lowrank_spectra_converged_count") =
+        lowrank_timings.spectra_converged_count,
+      Rcpp::Named("lowrank_spectra_failed_count") =
+        lowrank_timings.spectra_failed_count,
+      Rcpp::Named("lowrank_spectra_fallback_full_eig_count") =
+        lowrank_timings.spectra_fallback_full_eig_count,
+      Rcpp::Named("component_distance_ms") = distance_ms,
+      Rcpp::Named("component_lowrank_ms") = lowrank_ms,
+      Rcpp::Named("component_moment_ms") = component_moment_ms,
+      Rcpp::Named("pair_statistic_ms") = pair_statistic_ms,
+      Rcpp::Named("pair_moment_ms") = pair_moment_ms,
+      Rcpp::Named("pgamma_ms") = pgamma_ms,
+      Rcpp::Named("total_ms") = total_ms,
+      Rcpp::Named("eig_workspace_reuse_count") =
+        eig_workspace.reuse_count
+    )
+  );
+}
+
 Rcpp::List legacy_dcov_gamma_cpp_compute_batch_ptrs(
     const std::vector<const double*>& x_columns,
     const std::vector<const double*>& y_columns,

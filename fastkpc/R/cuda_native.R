@@ -1389,6 +1389,18 @@ legacy_dcov_spectra_matvec_cuda_lowrank_gamma_batch <- function(x, y, numCol,
         PACKAGE = "fastkpc_cuda")
 }
 
+legacy_dcov_gamma_cpp_component_cache_batch_native <- function(
+    residuals, left_columns, right_columns, numCol = 35L, index = 1) {
+  load_fastkpc_cuda_native()
+  residuals <- as.matrix(residuals)
+  storage.mode(residuals) <- "double"
+  .Call(
+    "C_legacy_dcov_gamma_cpp_component_cache_batch",
+    residuals, as.integer(left_columns), as.integer(right_columns),
+    as.integer(numCol), as.numeric(index), PACKAGE = "fastkpc_cuda"
+  )
+}
+
 legacy_dcov_spectra_matvec_cuda_lowrank_shadow_grid <- function(cases,
                                                                 case_indices =
                                                                   NULL,
@@ -1583,6 +1595,63 @@ full_cuda_ci_single_penalty_mroot_cuda <- function(
   .Call(
     "C_full_cuda_ci_single_penalty_mroot_cuda",
     penalty_matrix, as.integer(penalty_rank), as.double(log_sp),
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_evaluate_cpp_native <- function(
+    X, y, penalty_blocks, penalty_offsets, penalty_ranks, log_sp,
+    H = NULL, constraint = NULL,
+    rank_tolerance = sqrt(.Machine$double.eps)) {
+  load_fastkpc_cuda_native()
+  X <- as.matrix(X)
+  y <- as.numeric(y)
+  penalty_blocks <- lapply(penalty_blocks, function(value) {
+    value <- as.matrix(value)
+    storage.mode(value) <- "double"
+    value
+  })
+  if (!is.null(H)) {
+    H <- as.matrix(H)
+    storage.mode(H) <- "double"
+  }
+  if (!is.null(constraint)) {
+    constraint <- as.matrix(constraint)
+    storage.mode(constraint) <- "double"
+  }
+  storage.mode(X) <- "double"
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_evaluate_cpp",
+    X, y, penalty_blocks, as.integer(penalty_offsets),
+    as.integer(penalty_ranks), as.double(log_sp), H, constraint,
+    as.double(rank_tolerance), PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_optimize_cpp_native <- function(
+    X, y, penalty_blocks, penalty_offsets, penalty_ranks,
+    H = NULL, constraint = NULL, control = list()) {
+  load_fastkpc_cuda_native()
+  X <- as.matrix(X)
+  y <- as.numeric(y)
+  penalty_blocks <- lapply(penalty_blocks, function(value) {
+    value <- as.matrix(value)
+    storage.mode(value) <- "double"
+    value
+  })
+  if (!is.null(H)) {
+    H <- as.matrix(H)
+    storage.mode(H) <- "double"
+  }
+  if (!is.null(constraint)) {
+    constraint <- as.matrix(constraint)
+    storage.mode(constraint) <- "double"
+  }
+  storage.mode(X) <- "double"
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_optimize_cpp",
+    X, y, penalty_blocks, as.integer(penalty_offsets),
+    as.integer(penalty_ranks), H, constraint, control,
     PACKAGE = "fastkpc_cuda"
   )
 }
