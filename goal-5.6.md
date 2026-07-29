@@ -4,9 +4,9 @@
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
-> **Current accepted implementation/evidence snapshot:** Phase 4 is COMPLETE. Its producer source commit is `54c2267`, and its accepted oracle/full-shadow/backend manifest SHA-256 values are `1fb6dbbcb7ebfa9f7a3104785f2b45ccad4d979227a3b662e038e1c43f71bcfc`, `6f703f68c986ecccbe263d6558d178e646812d381ee8e683524ed9bbd66ad401`, and `246c59253e71e8cd13b9a9453d965fb7534623d92cb082589591548e7be7e797`.
+> **Current accepted implementation/evidence snapshot:** Phase 5 is COMPLETE. Its producer source commit is `cc336a9a27ed213376c1cc38d91677edf701eb84`, and its accepted oracle/full-shadow/backend manifest SHA-256 values are `579e2d18c6c170f889fe848db17984f455752c6ab48fb200c64a90922c1cf79e`, `3d39ee3773d362d3ff6a0dcb2b426550f992f3a8e69b28b2fd3ac43b7cdef806`, and `877e681f6188adff1255141209fd711eadfa236c6a1418bf111d4e5382153778`.
 >
-> **Active roadmap phase:** Phase 5, C++ multi-penalty GAM semantic replica for `|S| > 2`.
+> **Active roadmap phase:** Phase 6, CUDA multi-penalty same-S target batches.
 >
 > **Hard rule:** **0 SHD is mandatory.** A faster result with a different skeleton is a failed result.
 
@@ -631,8 +631,8 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 3 | Persistent stable fixed-sp CUDA residual runtime | COMPLETE - full 110,617-target oracle and 240,489-test shadow artifacts independently validate with 0 flips and SHD 0 |
 | 3.5 | Full-CUDA architecture feasibility and performance-budget gate | COMPLETE - guarded exact-screen/full-eig CUDA architecture is GO for Phase 8 qualification; measured cache/memory and conservative 98.529-second campaign feasibility gates pass |
 | 4 | Full-CUDA single-penalty GCV for `|S|<=2` | COMPLETE - all 44,941 targets use CUDA scoring/selection and fitting; full-shadow graph semantics and the five-run backend gate pass |
-| 5 | C++ multi-penalty GAM semantic replica | ACTIVE - reproduce the additive multi-penalty mgcv oracle in C++ shadow mode |
-| 6 | CUDA multi-penalty same-S target batches | NOT STARTED |
+| 5 | C++ multi-penalty GAM semantic replica | COMPLETE - all 7,460 setups, 65,676 targets, and 60,324 logical rows pass with zero optimizer drift, decision flips, or fallback; mixed replay has SHD 0 |
+| 6 | CUDA multi-penalty same-S target batches | ACTIVE - port the accepted C++ semantic replica without weakening its full-corpus gates |
 | 7 | Native setup builder; remove R/mgcv from CI loop | NOT STARTED |
 | 8 | Legacy-compatible device-resident CUDA dCov | PARTIAL — primitives/smoke gates exist |
 | 9 | Fused one-call compatible CUDA skeleton | PARTIAL — facade exists, CI service does not |
@@ -2223,6 +2223,20 @@ Correctness is the goal. A slower C++ semantic replica is acceptable as a shadow
 
 The complete regrXonS semantic subset has a non-R, stable, zero-drift numerical specification.
 
+### Accepted closure evidence
+
+Accepted on 2026-07-29 from producer `cc336a9`: all 16 authenticated-shard
+partitions exactly cover 7,460 setups, 65,676 targets, and 60,324 logical CI
+rows. The C++ optimizer has zero iteration, score-call, convergence, Hessian,
+and rank mismatches; zero fallback; zero downstream or near-alpha decision
+flips; and no unconditional normal-equation path. Mixed replay with the
+accepted Phase 4 route returns 110 / 110 edges, SHD 0, and identical adjacency,
+sepsets, `n.edgetests`, and deletion trace. The three required artifacts above
+independently validate and reject payload, manifest, attestation, and receipt
+tampering. The canonical Phase 5 corpus has identity constraints and `H=NULL`
+for every setup, as authenticated by the Phase 1 metadata. Phase 5 is COMPLETE;
+Phase 6 may use this immutable C++ result as its numerical oracle.
+
 ---
 
 ## Phase 6 — Port multi-penalty same-S target batches to CUDA
@@ -3130,8 +3144,8 @@ The exact script names may be adjusted to repository conventions, but one standa
 ## 12. Immediate next actions
 
 Codex should begin with the earliest phase whose exit gate is incomplete. Phase
-0 through Phase 3.5 are complete, so the current starting point is Phase 4
-single-penalty GCV.
+0 through Phase 5 are complete, so the current starting point is Phase 6 CUDA
+multi-penalty same-S target batching.
 
 ### Task 1
 
@@ -3201,10 +3215,18 @@ graph semantics, SHD 0, and a `0.5650` same-corpus performance ratio.
 
 ### Task 11
 
-Active: implement the Phase 5 C++ multi-penalty GAM semantic replica for the
-actual `|S| > 2` additive-smooth formula route. Begin with focused oracle
-cases and target/setup diagnostics, keep the implementation shadow-only, and
-do not begin CUDA acceleration until the complete C++ semantic gates pass.
+Complete: Phase 5 reproduced the `|S| > 2` additive multi-penalty mgcv
+objective, optimizer trajectory, selected smoothing parameters, and residuals
+for the full canonical corpus. All 16 partitions and three authenticated
+artifacts pass with zero fallback, zero decision flips, exact mixed graph
+semantics, and SHD 0.
+
+### Task 12
+
+Active: implement Phase 6 persistent CUDA multi-penalty same-S target batches
+against the accepted Phase 5 C++ oracle. Preserve one smoothing-parameter
+state per target, stable QR/SVD semantics for difficult cases, exact canonical
+replay, and zero fallback before Phase 6 completion.
 
 ---
 
