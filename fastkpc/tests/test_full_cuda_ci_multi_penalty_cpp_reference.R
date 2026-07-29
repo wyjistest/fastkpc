@@ -51,7 +51,10 @@ candidate <- evaluate(log_sp)
 assert_true(
   identical(candidate$schema_version,
             "full-cuda-ci-multi-penalty-cpp-evaluation-v1") &&
-    identical(candidate$rank_path, "augmented-jacobi-svd") &&
+    identical(
+      candidate$rank_path,
+      "pivoted-qr-augmented-lapack-dgesdd-svd"
+    ) &&
     isTRUE(candidate$constraint_aware) &&
     !isTRUE(candidate$normal_equations_used) &&
     candidate$penalty_count == 3L,

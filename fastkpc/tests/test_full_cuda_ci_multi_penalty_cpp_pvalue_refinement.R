@@ -48,7 +48,7 @@ for (index in seq_along(residual_keys)) {
   assert_true(
     identical(
       candidate$selected_fit_refinement_path,
-      "augmented-lapack-dgesdd-svd"
+      "pivoted-qr-augmented-lapack-dgesdd-svd"
     ),
     "Phase 5 selected fit must declare LAPACK SVD refinement"
   )

@@ -3,6 +3,7 @@
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 #include <Eigen/SVD>
+#include <R_ext/BLAS.h>
 #include <R_ext/Lapack.h>
 
 #include <algorithm>
@@ -94,7 +95,11 @@ void validate_penalty_rank(const Matrix& penalty, int expected_rank) {
           "authenticated penalty rank exceeds the stable penalty rank");
 }
 
-Matrix pivoted_cholesky_root(const Matrix& penalty, int* root_rank) {
+Matrix pivoted_cholesky_root(
+    const Matrix& penalty,
+    int* root_rank,
+    int requested_rank = 0,
+    double tolerance = -1.0) {
   require(root_rank != nullptr, "penalty root rank pointer is missing");
   Matrix factor = penalty;
   const La_INT dimension = static_cast<La_INT>(penalty.rows());
@@ -103,13 +108,16 @@ Matrix pivoted_cholesky_root(const Matrix& penalty, int* root_rank) {
   std::vector<double> work(static_cast<std::size_t>(2 * dimension));
   La_INT rank = 0;
   La_INT info = 0;
-  double tolerance = -1.0;
   const char uplo = 'U';
   F77_CALL(dpstrf)(
     &uplo, &dimension, factor.data(), &leading_dimension, pivot.data(),
     &rank, &tolerance, work.data(), &info FCONE);
   require(info >= 0 && rank > 0 && rank <= dimension,
           "aggregate penalty pivoted Cholesky failed");
+  require(requested_rank >= 0 &&
+            (requested_rank == 0 || requested_rank <= rank),
+          "requested penalty root rank is unavailable");
+  if (requested_rank > 0) rank = static_cast<La_INT>(requested_rank);
   Matrix root = Matrix::Zero(rank, dimension);
   for (La_INT column = 0; column < dimension; ++column) {
     const La_INT original_column = pivot[static_cast<std::size_t>(column)] - 1;
@@ -125,8 +133,101 @@ Matrix pivoted_cholesky_root(const Matrix& penalty, int* root_rank) {
   return root;
 }
 
+Matrix blas_multiply(
+    const Matrix& left,
+    bool transpose_left,
+    const Matrix& right,
+    bool transpose_right) {
+  const La_INT rows = static_cast<La_INT>(
+    transpose_left ? left.cols() : left.rows());
+  const La_INT common_left = static_cast<La_INT>(
+    transpose_left ? left.rows() : left.cols());
+  const La_INT common_right = static_cast<La_INT>(
+    transpose_right ? right.cols() : right.rows());
+  const La_INT columns = static_cast<La_INT>(
+    transpose_right ? right.rows() : right.cols());
+  require(rows > 0 && columns > 0 && common_left > 0 &&
+            common_left == common_right,
+          "BLAS matrix product dimensions are invalid");
+  const char left_operation = transpose_left ? 'T' : 'N';
+  const char right_operation = transpose_right ? 'T' : 'N';
+  const La_INT leading_left = static_cast<La_INT>(left.rows());
+  const La_INT leading_right = static_cast<La_INT>(right.rows());
+  const La_INT leading_result = rows;
+  const double alpha = 1.0;
+  const double beta = 0.0;
+  Matrix result(rows, columns);
+  F77_CALL(dgemm)(
+    &left_operation, &right_operation, &rows, &columns, &common_left,
+    &alpha, left.data(), &leading_left, right.data(), &leading_right,
+    &beta, result.data(), &leading_result FCONE FCONE);
+  require(result.allFinite(), "BLAS matrix product is non-finite");
+  return result;
+}
+
+Matrix blas_symmetric_xxt(const Matrix& input) {
+  require(input.rows() > 0 && input.cols() > 0,
+          "BLAS XXt input dimensions are invalid");
+  const La_INT dimension = static_cast<La_INT>(input.rows());
+  const La_INT common = static_cast<La_INT>(input.cols());
+  const La_INT leading_input = dimension;
+  const La_INT leading_result = dimension;
+  const char uplo = 'L';
+  const char transpose = 'N';
+  const double alpha = 1.0;
+  const double beta = 0.0;
+  Matrix result = Matrix::Zero(dimension, dimension);
+  F77_CALL(dsyrk)(
+    &uplo, &transpose, &dimension, &common, &alpha, input.data(),
+    &leading_input, &beta, result.data(), &leading_result FCONE FCONE);
+  for (La_INT column = 0; column < dimension; ++column) {
+    for (La_INT row = 0; row < column; ++row) {
+      result(row, column) = result(column, row);
+    }
+  }
+  require(result.allFinite(), "BLAS XXt product is non-finite");
+  return result;
+}
+
+Matrix blas_symmetric_xtx(const Matrix& input) {
+  require(input.rows() > 0 && input.cols() > 0,
+          "BLAS XtX input dimensions are invalid");
+  const La_INT dimension = static_cast<La_INT>(input.cols());
+  const La_INT common = static_cast<La_INT>(input.rows());
+  const La_INT leading_input = common;
+  const La_INT leading_result = dimension;
+  const char uplo = 'L';
+  const char transpose = 'T';
+  const double alpha = 1.0;
+  const double beta = 0.0;
+  Matrix result = Matrix::Zero(dimension, dimension);
+  F77_CALL(dsyrk)(
+    &uplo, &transpose, &dimension, &common, &alpha, input.data(),
+    &leading_input, &beta, result.data(), &leading_result FCONE FCONE);
+  for (La_INT column = 0; column < dimension; ++column) {
+    for (La_INT row = 0; row < column; ++row) {
+      result(row, column) = result(column, row);
+    }
+  }
+  require(result.allFinite(), "BLAS XtX product is non-finite");
+  return result;
+}
+
 std::vector<double> copy_vector(const Vector& value) {
   return std::vector<double>(value.data(), value.data() + value.size());
+}
+
+double r_corrected_mean(const std::vector<double>& values) {
+  require(!values.empty(), "mean input is empty");
+  long double mean = 0.0L;
+  for (double value : values) mean += value;
+  mean /= static_cast<long double>(values.size());
+  long double correction = 0.0L;
+  for (double value : values) {
+    correction += static_cast<long double>(value) - mean;
+  }
+  mean += correction / static_cast<long double>(values.size());
+  return static_cast<double>(mean);
 }
 
 Vector initial_log_sp(
@@ -138,7 +239,14 @@ Vector initial_log_sp(
     const std::vector<int>& penalty_offsets) {
   const std::size_t penalty_count = penalty_blocks.size();
   Eigen::Map<const Matrix> X(X_data, n, coefficient_dim);
-  Vector design_diagonal = X.colwise().squaredNorm().transpose();
+  Vector design_diagonal(coefficient_dim);
+  for (int column = 0; column < coefficient_dim; ++column) {
+    long double value = 0.0L;
+    for (int row = 0; row < n; ++row) {
+      value += X(row, column) * X(row, column);
+    }
+    design_diagonal[column] = static_cast<double>(value);
+  }
   Vector scaled_penalty_diagonal = Vector::Zero(coefficient_dim);
   std::vector<unsigned char> penalized(
     static_cast<std::size_t>(coefficient_dim), 0);
@@ -152,8 +260,10 @@ Vector initial_log_sp(
       penalty_blocks[index].data(), dimension, dimension);
     const Matrix absolute = block.cwiseAbs();
     const double threshold = threshold_scale * absolute.maxCoeff();
-    double design_sum = 0.0;
-    double penalty_sum = 0.0;
+    std::vector<double> selected_design;
+    std::vector<double> selected_penalty;
+    selected_design.reserve(static_cast<std::size_t>(dimension));
+    selected_penalty.reserve(static_cast<std::size_t>(dimension));
     int selected = 0;
     for (int row = 0; row < dimension; ++row) {
       const double row_mean = absolute.row(row).mean();
@@ -161,34 +271,40 @@ Vector initial_log_sp(
       const double diagonal = absolute(row, row);
       if (row_mean > threshold && column_mean > threshold &&
           diagonal > threshold) {
-        design_sum += design_diagonal[offset + row];
-        penalty_sum += block(row, row);
+        selected_design.push_back(design_diagonal[offset + row]);
+        selected_penalty.push_back(block(row, row));
         penalized[static_cast<std::size_t>(offset + row)] = 1;
         ++selected;
       }
     }
-    require(selected > 0 && penalty_sum > 0.0,
+    require(selected > 0,
             "multi-penalty initial smoothing scale is invalid");
-    initial[static_cast<Eigen::Index>(index)] = design_sum / penalty_sum;
+    const double design_mean = r_corrected_mean(selected_design);
+    const double penalty_mean = r_corrected_mean(selected_penalty);
+    require(penalty_mean > 0.0,
+            "multi-penalty initial smoothing scale is invalid");
+    initial[static_cast<Eigen::Index>(index)] =
+      design_mean / penalty_mean;
     for (int row = 0; row < dimension; ++row) {
       scaled_penalty_diagonal[offset + row] +=
         initial[static_cast<Eigen::Index>(index)] * block(row, row);
     }
   }
   auto mean_influence = [&]() {
-    double total = 0.0;
-    int count = 0;
+    std::vector<double> influence;
+    influence.reserve(static_cast<std::size_t>(coefficient_dim));
     for (int column = 0; column < coefficient_dim; ++column) {
       if (penalized[static_cast<std::size_t>(column)] != 0 &&
           design_diagonal[column] > 0.0 &&
           scaled_penalty_diagonal[column] > 0.0) {
-        total += design_diagonal[column] /
-          (design_diagonal[column] + scaled_penalty_diagonal[column]);
-        ++count;
+        influence.push_back(
+          design_diagonal[column] /
+            (design_diagonal[column] + scaled_penalty_diagonal[column]));
       }
     }
-    require(count > 0, "multi-penalty initial smoothing support is empty");
-    return total / static_cast<double>(count);
+    require(!influence.empty(),
+            "multi-penalty initial smoothing support is empty");
+    return r_corrected_mean(influence);
   };
   int scaling_iterations = 0;
   while (mean_influence() > 0.4) {
@@ -205,7 +321,11 @@ Vector initial_log_sp(
   }
   require(initial.allFinite() && (initial.array() > 0.0).all(),
           "multi-penalty initial smoothing vector is invalid");
-  return initial.array().log().matrix();
+  Vector log_initial(initial.size());
+  for (Eigen::Index index = 0; index < initial.size(); ++index) {
+    log_initial[index] = std::log(initial[index]);
+  }
+  return log_initial;
 }
 
 struct PreparedMultiPenaltyProblem {
@@ -216,8 +336,12 @@ struct PreparedMultiPenaltyProblem {
   int constraint_rank = 0;
   double rank_tolerance = 0.0;
   Matrix X;
-  Matrix Z;
-  Matrix X_free;
+  Matrix Z_pivoted;
+  Matrix qr_packed;
+  Vector qr_tau;
+  Matrix design_r;
+  std::vector<int> qr_pivot;
+  std::vector<Matrix> penalty_roots;
   std::vector<Matrix> penalties;
   Matrix fixed_penalty;
   bool has_fixed_penalty = false;
@@ -226,6 +350,7 @@ struct PreparedMultiPenaltyProblem {
 
 struct PreparedMultiPenaltyResponse {
   Vector y;
+  Vector y0;
   double squared_norm = 0.0;
 };
 
@@ -249,6 +374,171 @@ struct ThinLapackSvd {
   Vector singular;
 };
 
+struct SymmetricLapackEigen {
+  Matrix vectors;
+  Vector values;
+};
+
+La_INT lapack_workspace_size(double query, const char* message) {
+  require(std::isfinite(query) && query >= 1.0, message);
+  double rounded = std::floor(query);
+  if (query - rounded > 0.5) rounded += 1.0;
+  require(rounded <= static_cast<double>(std::numeric_limits<La_INT>::max()),
+          message);
+  return static_cast<La_INT>(rounded);
+}
+
+SymmetricLapackEigen symmetric_lapack_eigen(const Matrix& input) {
+  require(input.rows() == input.cols() && input.rows() > 0 &&
+            input.allFinite(),
+          "symmetric LAPACK eigen input is invalid");
+  const La_INT dimension = static_cast<La_INT>(input.rows());
+  const La_INT leading_dimension = dimension;
+  const char job = 'V';
+  const char range = 'A';
+  const char uplo = 'L';
+  const double lower_value = 0.0;
+  const double upper_value = 0.0;
+  const La_INT lower_index = 0;
+  const La_INT upper_index = 0;
+  const double absolute_tolerance = 0.0;
+  La_INT eigenvalue_count = 0;
+  Vector values(dimension);
+  Matrix vectors(dimension, dimension);
+  std::vector<La_INT> support(static_cast<std::size_t>(2 * dimension));
+  double workspace_query = 0.0;
+  La_INT integer_workspace_query = 0;
+  La_INT workspace_size = -1;
+  La_INT integer_workspace_size = -1;
+  La_INT info = 0;
+  Matrix factor = input;
+  F77_CALL(dsyevr)(
+    &job, &range, &uplo, &dimension, factor.data(), &leading_dimension,
+    &lower_value, &upper_value, &lower_index, &upper_index,
+    &absolute_tolerance, &eigenvalue_count, values.data(), vectors.data(),
+    &leading_dimension, support.data(), &workspace_query, &workspace_size,
+    &integer_workspace_query, &integer_workspace_size, &info
+    FCONE FCONE FCONE);
+  require(info == 0 && integer_workspace_query > 0,
+          "symmetric LAPACK eigen workspace query failed");
+  workspace_size = lapack_workspace_size(
+    workspace_query, "symmetric LAPACK eigen workspace query failed");
+  integer_workspace_size = integer_workspace_query;
+  std::vector<double> workspace(
+    static_cast<std::size_t>(workspace_size));
+  std::vector<La_INT> integer_workspace(
+    static_cast<std::size_t>(integer_workspace_size));
+  factor = input;
+  F77_CALL(dsyevr)(
+    &job, &range, &uplo, &dimension, factor.data(), &leading_dimension,
+    &lower_value, &upper_value, &lower_index, &upper_index,
+    &absolute_tolerance, &eigenvalue_count, values.data(), vectors.data(),
+    &leading_dimension, support.data(), workspace.data(), &workspace_size,
+    integer_workspace.data(), &integer_workspace_size, &info
+    FCONE FCONE FCONE);
+  require(info == 0 && eigenvalue_count == dimension &&
+            values.allFinite() && vectors.allFinite(),
+          "symmetric LAPACK eigen decomposition failed");
+  SymmetricLapackEigen result;
+  result.vectors = std::move(vectors);
+  result.values = std::move(values);
+  return result;
+}
+
+struct PivotedLapackQr {
+  Matrix packed;
+  Vector tau;
+  Matrix R;
+  std::vector<int> pivot;
+};
+
+PivotedLapackQr pivoted_lapack_qr(const Matrix& input) {
+  require(input.rows() >= input.cols() && input.cols() > 0,
+          "pivoted LAPACK QR input dimensions are invalid");
+  const La_INT rows = static_cast<La_INT>(input.rows());
+  const La_INT columns = static_cast<La_INT>(input.cols());
+  Matrix packed = input;
+  Vector tau(columns);
+  std::vector<La_INT> pivot(static_cast<std::size_t>(columns), 0);
+  double workspace_query = 0.0;
+  La_INT workspace_size = -1;
+  La_INT info = 0;
+  F77_CALL(dgeqp3)(
+    &rows, &columns, packed.data(), &rows, pivot.data(), tau.data(),
+    &workspace_query, &workspace_size, &info);
+  require(info == 0, "pivoted LAPACK QR workspace query failed");
+  workspace_size = lapack_workspace_size(
+    workspace_query, "pivoted LAPACK QR workspace query failed");
+  std::vector<double> workspace(
+    static_cast<std::size_t>(workspace_size));
+  packed = input;
+  std::fill(pivot.begin(), pivot.end(), 0);
+  F77_CALL(dgeqp3)(
+    &rows, &columns, packed.data(), &rows, pivot.data(), tau.data(),
+    workspace.data(), &workspace_size, &info);
+  require(info == 0 && packed.allFinite() && tau.allFinite(),
+          "pivoted LAPACK QR failed");
+
+  PivotedLapackQr result;
+  result.packed = std::move(packed);
+  result.tau = std::move(tau);
+  result.R = Matrix::Zero(columns, columns);
+  result.pivot.resize(static_cast<std::size_t>(columns));
+  std::vector<unsigned char> seen(static_cast<std::size_t>(columns), 0);
+  for (La_INT column = 0; column < columns; ++column) {
+    const La_INT original = pivot[static_cast<std::size_t>(column)] - 1;
+    require(original >= 0 && original < columns &&
+              seen[static_cast<std::size_t>(original)] == 0,
+            "pivoted LAPACK QR returned an invalid permutation");
+    seen[static_cast<std::size_t>(original)] = 1;
+    result.pivot[static_cast<std::size_t>(column)] =
+      static_cast<int>(original);
+    for (La_INT row = 0; row <= column; ++row) {
+      result.R(row, column) = result.packed(row, column);
+    }
+  }
+  return result;
+}
+
+Vector apply_q_transpose(
+    const Matrix& qr_packed,
+    const Vector& qr_tau,
+    const Vector& value) {
+  require(qr_packed.rows() == value.size() &&
+            qr_packed.cols() == qr_tau.size(),
+          "pivoted LAPACK QR response dimensions are invalid");
+  const La_INT rows = static_cast<La_INT>(qr_packed.rows());
+  const La_INT columns = 1;
+  const La_INT reflectors = static_cast<La_INT>(qr_packed.cols());
+  const La_INT leading_qr = rows;
+  const La_INT leading_value = rows;
+  const char side = 'L';
+  const char transpose = 'T';
+  Vector transformed = value;
+  double workspace_query = 0.0;
+  La_INT workspace_size = -1;
+  La_INT info = 0;
+  F77_CALL(dormqr)(
+    &side, &transpose, &rows, &columns, &reflectors,
+    const_cast<double*>(qr_packed.data()), &leading_qr,
+    const_cast<double*>(qr_tau.data()), transformed.data(), &leading_value,
+    &workspace_query, &workspace_size, &info FCONE FCONE);
+  require(info == 0, "pivoted LAPACK QR response workspace query failed");
+  workspace_size = lapack_workspace_size(
+    workspace_query, "pivoted LAPACK QR response workspace query failed");
+  std::vector<double> workspace(
+    static_cast<std::size_t>(workspace_size));
+  transformed = value;
+  F77_CALL(dormqr)(
+    &side, &transpose, &rows, &columns, &reflectors,
+    const_cast<double*>(qr_packed.data()), &leading_qr,
+    const_cast<double*>(qr_tau.data()), transformed.data(), &leading_value,
+    workspace.data(), &workspace_size, &info FCONE FCONE);
+  require(info == 0 && transformed.allFinite(),
+          "pivoted LAPACK QR response transform failed");
+  return transformed.head(reflectors);
+}
+
 ThinLapackSvd thin_lapack_svd(const Matrix& input) {
   require(input.rows() >= input.cols() && input.cols() > 0,
           "thin LAPACK SVD input dimensions are invalid");
@@ -258,7 +548,6 @@ ThinLapackSvd thin_lapack_svd(const Matrix& input) {
   const La_INT leading_u = rows;
   const La_INT leading_vt = columns;
   Matrix factor = input;
-  Matrix U(rows, columns);
   Matrix Vt(columns, columns);
   Vector singular(columns);
   std::vector<La_INT> integer_work(
@@ -266,27 +555,27 @@ ThinLapackSvd thin_lapack_svd(const Matrix& input) {
   double workspace_query = 0.0;
   La_INT workspace_size = -1;
   La_INT info = 0;
-  const char job = 'S';
+  double unused_u = 0.0;
+  const char job = 'O';
   F77_CALL(dgesdd)(
     &job, &rows, &columns, factor.data(), &leading_input,
-    singular.data(), U.data(), &leading_u, Vt.data(), &leading_vt,
+    singular.data(), &unused_u, &leading_u, Vt.data(), &leading_vt,
     &workspace_query, &workspace_size, integer_work.data(), &info FCONE);
-  require(info == 0 && std::isfinite(workspace_query) &&
-            workspace_query >= 1.0,
-          "thin LAPACK SVD workspace query failed");
-  workspace_size = static_cast<La_INT>(std::ceil(workspace_query));
+  require(info == 0, "thin LAPACK SVD workspace query failed");
+  workspace_size = lapack_workspace_size(
+    workspace_query, "thin LAPACK SVD workspace query failed");
   std::vector<double> workspace(
     static_cast<std::size_t>(workspace_size));
   factor = input;
   F77_CALL(dgesdd)(
     &job, &rows, &columns, factor.data(), &leading_input,
-    singular.data(), U.data(), &leading_u, Vt.data(), &leading_vt,
+    singular.data(), &unused_u, &leading_u, Vt.data(), &leading_vt,
     workspace.data(), &workspace_size, integer_work.data(), &info FCONE);
-  require(info == 0 && singular.allFinite() && U.allFinite() &&
+  require(info == 0 && singular.allFinite() && factor.allFinite() &&
             Vt.allFinite(),
           "thin LAPACK SVD failed");
   ThinLapackSvd result;
-  result.U = std::move(U);
+  result.U = std::move(factor);
   result.V = Vt.transpose();
   result.singular = std::move(singular);
   return result;
@@ -331,11 +620,23 @@ PreparedMultiPenaltyProblem prepare_multi_penalty_problem(
   problem.penalty_count = static_cast<int>(penalty_count);
   problem.rank_tolerance = rank_tolerance;
   problem.X = X;
-  problem.Z = constraint_null_space(
+  const Matrix Z = constraint_null_space(
     constraint, constraint_rows, coefficient_dim, rank_tolerance,
     &problem.constraint_rank);
-  problem.free_dim = static_cast<int>(problem.Z.cols());
-  problem.X_free = problem.X * problem.Z;
+  problem.free_dim = static_cast<int>(Z.cols());
+  const Matrix X_free = problem.constraint_rank == 0 ?
+    problem.X : blas_multiply(problem.X, false, Z, false);
+  const PivotedLapackQr qr = pivoted_lapack_qr(X_free);
+  problem.qr_packed = qr.packed;
+  problem.qr_tau = qr.tau;
+  problem.design_r = qr.R;
+  problem.qr_pivot = qr.pivot;
+  problem.Z_pivoted.resize(coefficient_dim, problem.free_dim);
+  for (int index = 0; index < problem.free_dim; ++index) {
+    problem.Z_pivoted.col(index) =
+      Z.col(problem.qr_pivot[static_cast<std::size_t>(index)]);
+  }
+  problem.penalty_roots.reserve(penalty_count);
   problem.penalties.reserve(penalty_count);
   for (std::size_t index = 0; index < penalty_count; ++index) {
     const int dimension = penalty_dimensions[index];
@@ -349,22 +650,49 @@ PreparedMultiPenaltyProblem prepare_multi_penalty_problem(
             "penalty block metadata is invalid");
     Eigen::Map<const Matrix> block(
       penalty_blocks[index].data(), dimension, dimension);
+    const Matrix raw_block = block;
     Matrix full = Matrix::Zero(coefficient_dim, coefficient_dim);
     full.block(offset, offset, dimension, dimension) =
       symmetric_matrix(block, "penalty block");
-    Matrix free_penalty = symmetric_matrix(
-      problem.Z.transpose() * full * problem.Z, "projected penalty");
+    const Matrix free_penalty = symmetric_matrix(
+      Z.transpose() * full * Z, "projected penalty");
     validate_penalty_rank(
       free_penalty, std::min(expected_rank, problem.free_dim));
-    problem.penalties.push_back(std::move(free_penalty));
+    int root_rank = 0;
+    const Matrix block_root = pivoted_cholesky_root(
+      raw_block, &root_rank, expected_rank, 0.0);
+    require(root_rank == expected_rank,
+            "penalty root rank differs from authenticated rank");
+    Matrix full_root = Matrix::Zero(coefficient_dim, root_rank);
+    full_root.block(offset, 0, dimension, root_rank) =
+      block_root.transpose();
+    const Matrix free_root = problem.constraint_rank == 0 ?
+      full_root : blas_multiply(Z, true, full_root, false);
+    Matrix pivoted_root(problem.free_dim, root_rank);
+    for (int row = 0; row < problem.free_dim; ++row) {
+      pivoted_root.row(row) = free_root.row(
+        problem.qr_pivot[static_cast<std::size_t>(row)]);
+    }
+    problem.penalties.push_back(blas_symmetric_xxt(pivoted_root));
+    problem.penalty_roots.push_back(std::move(pivoted_root));
   }
   if (has_H) {
     require(H_data != nullptr, "fixed penalty pointer is missing");
     Eigen::Map<const Matrix> H(H_data, coefficient_dim, coefficient_dim);
-    problem.fixed_penalty = symmetric_matrix(
-      problem.Z.transpose() * symmetric_matrix(H, "fixed penalty") *
-        problem.Z,
+    const Matrix free_fixed_penalty = symmetric_matrix(
+      Z.transpose() * symmetric_matrix(H, "fixed penalty") * Z,
       "projected fixed penalty");
+    problem.fixed_penalty.resize(problem.free_dim, problem.free_dim);
+    for (int column = 0; column < problem.free_dim; ++column) {
+      const int original_column =
+        problem.qr_pivot[static_cast<std::size_t>(column)];
+      for (int row = 0; row < problem.free_dim; ++row) {
+        const int original_row =
+          problem.qr_pivot[static_cast<std::size_t>(row)];
+        problem.fixed_penalty(row, column) =
+          free_fixed_penalty(original_row, original_column);
+      }
+    }
     problem.has_fixed_penalty = true;
   }
   problem.initial_log_sp = initial_log_sp(
@@ -374,6 +702,7 @@ PreparedMultiPenaltyProblem prepare_multi_penalty_problem(
 }
 
 PreparedMultiPenaltyResponse prepare_multi_penalty_response(
+    const PreparedMultiPenaltyProblem& problem,
     const double* y_data,
     int n) {
   require(y_data != nullptr, "response must be present");
@@ -381,7 +710,12 @@ PreparedMultiPenaltyResponse prepare_multi_penalty_response(
   require(y.allFinite(), "response must be finite");
   PreparedMultiPenaltyResponse response;
   response.y = y;
-  response.squared_norm = response.y.squaredNorm();
+  response.y0 = apply_q_transpose(
+    problem.qr_packed, problem.qr_tau, response.y);
+  response.squared_norm = 0.0;
+  for (int index = 0; index < n; ++index) {
+    response.squared_norm += response.y[index] * response.y[index];
+  }
   return response;
 }
 
@@ -399,19 +733,28 @@ Matrix multi_penalty_augmented_system(
     const double multiplier = std::exp(log_sp[index]);
     require(std::isfinite(multiplier) && multiplier > 0.0,
             "smoothing parameter must be positive and finite");
-    aggregate_penalty +=
-      multiplier * problem.penalties[static_cast<std::size_t>(index)];
+    const Matrix& penalty =
+      problem.penalties[static_cast<std::size_t>(index)];
+    for (Eigen::Index element = 0;
+         element < aggregate_penalty.size(); ++element) {
+      aggregate_penalty.data()[element] +=
+        penalty.data()[element] * multiplier;
+    }
   }
   if (problem.has_fixed_penalty) {
-    aggregate_penalty += problem.fixed_penalty;
+    for (Eigen::Index element = 0;
+         element < aggregate_penalty.size(); ++element) {
+      aggregate_penalty.data()[element] +=
+        problem.fixed_penalty.data()[element];
+    }
   }
-  aggregate_penalty = symmetric_matrix(
-    aggregate_penalty, "aggregate penalty");
+  require(aggregate_penalty.allFinite(),
+          "aggregate penalty is non-finite");
   const Matrix aggregate_root = pivoted_cholesky_root(
     aggregate_penalty, augmented_penalty_rank);
   Matrix augmented(
-    problem.n + *augmented_penalty_rank, problem.free_dim);
-  augmented.topRows(problem.n) = problem.X_free;
+    problem.free_dim + *augmented_penalty_rank, problem.free_dim);
+  augmented.topRows(problem.free_dim) = problem.design_r;
   augmented.bottomRows(*augmented_penalty_rank) = aggregate_root;
   require(augmented.allFinite(),
           "augmented multi-penalty system is malformed");
@@ -425,11 +768,8 @@ MultiPenaltyCoreEvaluation evaluate_multi_penalty_core(
   int augmented_penalty_rank = 0;
   const Matrix augmented = multi_penalty_augmented_system(
     problem, log_sp, &augmented_penalty_rank);
-  Eigen::JacobiSVD<Matrix> decomposition(
-    augmented, Eigen::ComputeThinU | Eigen::ComputeThinV);
-  require(decomposition.info() == Eigen::Success,
-          "augmented multi-penalty SVD failed");
-  const Vector singular = decomposition.singularValues();
+  const ThinLapackSvd decomposition = thin_lapack_svd(augmented);
+  const Vector& singular = decomposition.singular;
   require(singular.size() == problem.free_dim && singular[0] > 0.0,
           "augmented multi-penalty singular values are invalid");
   const double singular_threshold = singular[0] * problem.rank_tolerance;
@@ -444,20 +784,34 @@ MultiPenaltyCoreEvaluation evaluate_multi_penalty_core(
   core.log_sp = log_sp;
   core.augmented_penalty_rank = augmented_penalty_rank;
   core.numerical_rank = numerical_rank;
-  core.U1 = decomposition.matrixU().topRows(problem.n).leftCols(
+  core.U1 = decomposition.U.topRows(problem.free_dim).leftCols(
     numerical_rank);
-  core.V = decomposition.matrixV().leftCols(numerical_rank);
+  core.V = decomposition.V.leftCols(numerical_rank);
   core.d = singular.head(numerical_rank);
-  core.y1 = core.U1.transpose() * response.y;
-  const Vector Ay = core.U1 * core.y1;
-  core.rss = response.squared_norm - 2.0 * core.y1.squaredNorm() +
-    Ay.squaredNorm();
-  if (core.rss < 0.0 && core.rss >= -64.0 *
-      std::numeric_limits<double>::epsilon() *
-      std::max(1.0, response.squared_norm)) {
-    core.rss = 0.0;
+  core.y1.resize(numerical_rank);
+  double yAy = 0.0;
+  for (int column = 0; column < numerical_rank; ++column) {
+    double value = 0.0;
+    for (int row = 0; row < problem.free_dim; ++row) {
+      value += core.U1(row, column) * response.y0[row];
+    }
+    core.y1[column] = value;
+    yAy += value * value;
   }
-  core.edf = core.U1.squaredNorm();
+  double yAAy = 0.0;
+  for (int row = 0; row < problem.free_dim; ++row) {
+    double value = 0.0;
+    for (int column = 0; column < numerical_rank; ++column) {
+      value += core.U1(row, column) * core.y1[column];
+    }
+    yAAy += value * value;
+  }
+  core.rss = response.squared_norm - 2.0 * yAy + yAAy;
+  if (core.rss < 0.0) core.rss = 0.0;
+  core.edf = 0.0;
+  for (Eigen::Index index = 0; index < core.U1.size(); ++index) {
+    core.edf += core.U1.data()[index] * core.U1.data()[index];
+  }
   const double delta = static_cast<double>(problem.n) - core.edf;
   require(std::isfinite(core.rss) && core.rss >= 0.0 &&
             std::isfinite(core.edf) && delta > 1e-8,
@@ -492,14 +846,21 @@ MultiPenaltyGcvEvaluation materialize_multi_penalty_evaluation(
   result.log_sp = copy_vector(core.log_sp);
   if (!include_derivatives_and_fit) return result;
 
-  const Vector theta = core.V *
+  const Vector scaled_response =
     (core.y1.array() / core.d.array()).matrix();
-  const Vector coefficients = problem.Z * theta;
+  Vector theta(problem.free_dim);
+  for (int row = 0; row < problem.free_dim; ++row) {
+    double value = 0.0;
+    for (int column = 0; column < core.numerical_rank; ++column) {
+      value += core.V(row, column) * scaled_response[column];
+    }
+    theta[row] = value;
+  }
+  const Vector coefficients = problem.Z_pivoted * theta;
   const Vector fitted = problem.X * coefficients;
   const Vector residuals = response.y - fitted;
 
-  const Matrix U1U1 = core.U1.transpose() * core.U1;
-  const Matrix inverse_d = core.d.cwiseInverse().asDiagonal();
+  const Matrix U1U1 = blas_symmetric_xtx(core.U1);
   std::vector<Matrix> M;
   std::vector<Matrix> K;
   std::vector<Vector> My;
@@ -510,15 +871,41 @@ MultiPenaltyGcvEvaluation materialize_multi_penalty_evaluation(
   My.reserve(static_cast<std::size_t>(problem.penalty_count));
   Ky.reserve(static_cast<std::size_t>(problem.penalty_count));
   yK.reserve(static_cast<std::size_t>(problem.penalty_count));
-  for (const Matrix& penalty : problem.penalties) {
-    Matrix metric = inverse_d * core.V.transpose() * penalty * core.V *
-      inverse_d;
-    Matrix influence = metric * U1U1;
-    M.push_back(std::move(metric));
-    K.push_back(std::move(influence));
-    My.push_back(M.back() * core.y1);
-    Ky.push_back(K.back() * core.y1);
-    yK.push_back(K.back().transpose() * core.y1);
+  for (const Matrix& root : problem.penalty_roots) {
+    Matrix transformed = blas_multiply(core.V, true, root, false);
+    for (Eigen::Index column = 0; column < transformed.cols(); ++column) {
+      for (int row = 0; row < core.numerical_rank; ++row) {
+        transformed(row, column) /= core.d[row];
+      }
+    }
+    const Matrix intermediate = blas_multiply(
+      transformed, true, U1U1, false);
+    K.push_back(blas_multiply(
+      transformed, false, intermediate, false));
+    M.push_back(blas_symmetric_xxt(transformed));
+
+    Vector metric_y(core.numerical_rank);
+    Vector influence_y(core.numerical_rank);
+    Vector y_influence(core.numerical_rank);
+    for (int output = 0; output < core.numerical_rank; ++output) {
+      double metric_value = 0.0;
+      double y_influence_value = 0.0;
+      double influence_value = 0.0;
+      for (int component = 0;
+           component < core.numerical_rank; ++component) {
+        metric_value += core.y1[component] * M.back()(component, output);
+        y_influence_value +=
+          core.y1[component] * K.back()(component, output);
+        influence_value +=
+          core.y1[component] * K.back()(output, component);
+      }
+      metric_y[output] = metric_value;
+      y_influence[output] = y_influence_value;
+      influence_y[output] = influence_value;
+    }
+    My.push_back(std::move(metric_y));
+    Ky.push_back(std::move(influence_y));
+    yK.push_back(std::move(y_influence));
   }
   Vector dnorm(problem.penalty_count);
   Vector ddelta(problem.penalty_count);
@@ -528,17 +915,35 @@ MultiPenaltyGcvEvaluation materialize_multi_penalty_evaluation(
     problem.penalty_count, problem.penalty_count);
   for (int i = 0; i < problem.penalty_count; ++i) {
     const double lambda_i = std::exp(core.log_sp[i]);
-    ddelta[i] = lambda_i * K[static_cast<std::size_t>(i)].trace();
-    dnorm[i] = 2.0 * lambda_i * core.y1.dot(
-      My[static_cast<std::size_t>(i)] - Ky[static_cast<std::size_t>(i)]);
+    double trace = 0.0;
+    for (int component = 0;
+         component < core.numerical_rank; ++component) {
+      trace += K[static_cast<std::size_t>(i)](component, component);
+    }
+    ddelta[i] = lambda_i * trace;
     for (int j = 0; j <= i; ++j) {
-      const double lambda_j = std::exp(core.log_sp[j]);
-      double delta_value = -2.0 * lambda_i * lambda_j *
-        (M[static_cast<std::size_t>(j)].array() *
-         K[static_cast<std::size_t>(i)].array()).sum();
-      if (i == j) delta_value += ddelta[i];
+      double product_sum = 0.0;
+      const Matrix& metric_j = M[static_cast<std::size_t>(j)];
+      const Matrix& influence_i = K[static_cast<std::size_t>(i)];
+      for (Eigen::Index element = 0; element < metric_j.size(); ++element) {
+        product_sum += metric_j.data()[element] * influence_i.data()[element];
+      }
+      const double delta_value = -2.0 *
+        std::exp(core.log_sp[i] + core.log_sp[j]) * product_sum;
       d2delta(i, j) = delta_value;
       d2delta(j, i) = delta_value;
+    }
+    d2delta(i, i) += ddelta[i];
+
+    double norm_derivative = 0.0;
+    for (int component = 0;
+         component < core.numerical_rank; ++component) {
+      norm_derivative += core.y1[component] *
+        (My[static_cast<std::size_t>(i)][component] -
+         Ky[static_cast<std::size_t>(i)][component]);
+    }
+    dnorm[i] = 2.0 * lambda_i * norm_derivative;
+    for (int j = 0; j <= i; ++j) {
       double norm_value = 0.0;
       for (int component = 0; component < core.numerical_rank; ++component) {
         norm_value +=
@@ -551,11 +956,11 @@ MultiPenaltyGcvEvaluation materialize_multi_penalty_evaluation(
           yK[static_cast<std::size_t>(i)][component] *
             My[static_cast<std::size_t>(j)][component];
       }
-      norm_value *= 2.0 * lambda_i * lambda_j;
-      if (i == j) norm_value += dnorm[i];
+      norm_value *= 2.0 * std::exp(core.log_sp[i] + core.log_sp[j]);
       d2norm(i, j) = norm_value;
       d2norm(j, i) = norm_value;
     }
+    d2norm(i, i) += dnorm[i];
   }
   const double delta = static_cast<double>(problem.n) - core.edf;
   const double score_scale = static_cast<double>(problem.n) /
@@ -566,12 +971,14 @@ MultiPenaltyGcvEvaluation materialize_multi_penalty_evaluation(
   const Vector gradient = score_scale * dnorm - delta_scale * ddelta;
   Matrix hessian(problem.penalty_count, problem.penalty_count);
   for (int i = 0; i < problem.penalty_count; ++i) {
-    for (int j = 0; j < problem.penalty_count; ++j) {
-      hessian(i, j) =
+    for (int j = 0; j <= i; ++j) {
+      const double value =
         cross_scale * (ddelta[j] * dnorm[i] + ddelta[i] * dnorm[j]) +
         score_scale * d2norm(i, j) +
         curvature_scale * ddelta[i] * ddelta[j] -
         delta_scale * d2delta(i, j);
+      hessian(i, j) = value;
+      hessian(j, i) = value;
     }
   }
   require(gradient.allFinite() && hessian.allFinite() &&
@@ -610,13 +1017,27 @@ void refine_multi_penalty_selected_fit(
             numerical_rank == evaluation->numerical_rank &&
             numerical_rank > 0,
           "selected fit refinement rank drifted");
-  const Matrix U1 = decomposition.U.topRows(problem.n).leftCols(
+  const Matrix U1 = decomposition.U.topRows(problem.free_dim).leftCols(
     numerical_rank);
   const Vector d = decomposition.singular.head(numerical_rank);
-  const Vector y1 = U1.transpose() * response.y;
-  const Vector theta = decomposition.V.leftCols(numerical_rank) *
-    (y1.array() / d.array()).matrix();
-  const Vector coefficients = problem.Z * theta;
+  Vector y1(numerical_rank);
+  for (int column = 0; column < numerical_rank; ++column) {
+    double value = 0.0;
+    for (int row = 0; row < problem.free_dim; ++row) {
+      value += U1(row, column) * response.y0[row];
+    }
+    y1[column] = value;
+  }
+  const Vector scaled_response = (y1.array() / d.array()).matrix();
+  Vector theta(problem.free_dim);
+  for (int row = 0; row < problem.free_dim; ++row) {
+    double value = 0.0;
+    for (int column = 0; column < numerical_rank; ++column) {
+      value += decomposition.V(row, column) * scaled_response[column];
+    }
+    theta[row] = value;
+  }
+  const Vector coefficients = problem.Z_pivoted * theta;
   const Vector fitted = problem.X * coefficients;
   const Vector residuals = response.y - fitted;
   require(coefficients.allFinite() && fitted.allFinite() &&
@@ -678,221 +1099,20 @@ MultiPenaltyGcvEvaluation multi_penalty_gcv_evaluate_cpp(
     const double* constraint,
     int constraint_rows,
     double rank_tolerance) {
-  require(X_data != nullptr && y_data != nullptr,
-          "model matrix and response must be present");
-  require(n > coefficient_dim && coefficient_dim > 0,
-          "multi-penalty evaluation requires n > p > 0");
-  require(std::isfinite(rank_tolerance) && rank_tolerance > 0.0 &&
-            rank_tolerance < 1.0,
-          "rank tolerance must be finite and in (0, 1)");
-  const std::size_t penalty_count = penalty_blocks.size();
-  require(penalty_count > 1,
-          "multi-penalty evaluation requires at least two penalties");
-  require(penalty_dimensions.size() == penalty_count &&
-            penalty_offsets.size() == penalty_count &&
-            penalty_ranks.size() == penalty_count &&
-            log_sp.size() == penalty_count,
-          "multi-penalty metadata lengths must match");
-  Eigen::Map<const Matrix> X(X_data, n, coefficient_dim);
-  Eigen::Map<const Vector> y(y_data, n);
-  require(X.allFinite() && y.allFinite(),
-          "model matrix and response must be finite");
-
-  int constraint_rank = 0;
-  const Matrix Z = constraint_null_space(
-    constraint, constraint_rows, coefficient_dim, rank_tolerance,
-    &constraint_rank);
-  const int free_dim = static_cast<int>(Z.cols());
-  const Matrix X_free = X * Z;
-  std::vector<Matrix> penalties;
-  penalties.reserve(penalty_count);
-  Matrix aggregate_penalty = Matrix::Zero(free_dim, free_dim);
-  for (std::size_t index = 0; index < penalty_count; ++index) {
-    const int dimension = penalty_dimensions[index];
-    const int offset = penalty_offsets[index];
-    const int expected_rank = penalty_ranks[index];
-    require(dimension > 0 && offset >= 0 &&
-              offset + dimension <= coefficient_dim &&
-              expected_rank > 0 && expected_rank <= dimension &&
-              penalty_blocks[index].size() ==
-                static_cast<std::size_t>(dimension) * dimension &&
-              std::isfinite(log_sp[index]),
-            "penalty block metadata is invalid");
-    Eigen::Map<const Matrix> block(
-      penalty_blocks[index].data(), dimension, dimension);
-    Matrix full = Matrix::Zero(coefficient_dim, coefficient_dim);
-    full.block(offset, offset, dimension, dimension) =
-      symmetric_matrix(block, "penalty block");
-    Matrix free_penalty = symmetric_matrix(
-      Z.transpose() * full * Z, "projected penalty");
-    validate_penalty_rank(
-      free_penalty, std::min(expected_rank, free_dim));
-    penalties.push_back(free_penalty);
-    const double multiplier = std::exp(log_sp[index]);
-    require(std::isfinite(multiplier) && multiplier > 0.0,
-            "smoothing parameter must be positive and finite");
-    aggregate_penalty += multiplier * free_penalty;
-  }
-  if (has_H) {
-    require(H_data != nullptr, "fixed penalty pointer is missing");
-    Eigen::Map<const Matrix> H(H_data, coefficient_dim, coefficient_dim);
-    aggregate_penalty += symmetric_matrix(
-      Z.transpose() * symmetric_matrix(H, "fixed penalty") * Z,
-      "projected fixed penalty");
-  }
-  aggregate_penalty = symmetric_matrix(
-    aggregate_penalty, "aggregate penalty");
-  int augmented_penalty_rank = 0;
-  const Matrix aggregate_root = pivoted_cholesky_root(
-    aggregate_penalty, &augmented_penalty_rank);
-
-  Matrix augmented(n + augmented_penalty_rank, free_dim);
-  augmented.topRows(n) = X_free;
-  augmented.bottomRows(augmented_penalty_rank) = aggregate_root;
-  require(augmented.allFinite(),
-          "augmented multi-penalty system is malformed");
-  Eigen::JacobiSVD<Matrix> decomposition(
-    augmented, Eigen::ComputeThinU | Eigen::ComputeThinV);
-  require(decomposition.info() == Eigen::Success,
-          "augmented multi-penalty SVD failed");
-  const Vector singular = decomposition.singularValues();
-  require(singular.size() == free_dim && singular[0] > 0.0,
-          "augmented multi-penalty singular values are invalid");
-  const double singular_threshold = singular[0] * rank_tolerance;
-  int numerical_rank = 0;
-  for (Eigen::Index index = 0; index < singular.size(); ++index) {
-    if (singular[index] >= singular_threshold) ++numerical_rank;
-  }
-  require(numerical_rank > 0,
-          "augmented multi-penalty numerical rank is zero");
-  const Matrix U1 = decomposition.matrixU().topRows(n).leftCols(numerical_rank);
-  const Matrix V = decomposition.matrixV().leftCols(numerical_rank);
-  const Vector d = singular.head(numerical_rank);
-  const Vector y1 = U1.transpose() * y;
-  const Vector Ay = U1 * y1;
-  double rss = y.squaredNorm() - 2.0 * y1.squaredNorm() + Ay.squaredNorm();
-  if (rss < 0.0 && rss >= -64.0 * std::numeric_limits<double>::epsilon() *
-      std::max(1.0, y.squaredNorm())) {
-    rss = 0.0;
-  }
-  const double edf = U1.squaredNorm();
-  const double delta = static_cast<double>(n) - edf;
-  require(std::isfinite(rss) && rss >= 0.0 && std::isfinite(edf) &&
-            delta > 1e-8,
-          "multi-penalty GCV objective is invalid");
-  const double score = static_cast<double>(n) * rss / (delta * delta);
-  const Vector theta = V * (y1.array() / d.array()).matrix();
-  const Vector coefficients = Z * theta;
-  const Vector fitted = X * coefficients;
-  const Vector residuals = y - fitted;
-
-  const Matrix U1U1 = U1.transpose() * U1;
-  const Matrix inverse_d = d.cwiseInverse().asDiagonal();
-  std::vector<Matrix> M;
-  std::vector<Matrix> K;
-  std::vector<Vector> My;
-  std::vector<Vector> Ky;
-  std::vector<Vector> yK;
-  M.reserve(penalty_count);
-  K.reserve(penalty_count);
-  My.reserve(penalty_count);
-  Ky.reserve(penalty_count);
-  yK.reserve(penalty_count);
-  for (const Matrix& penalty : penalties) {
-    Matrix metric = inverse_d * V.transpose() * penalty * V * inverse_d;
-    Matrix influence = metric * U1U1;
-    M.push_back(std::move(metric));
-    K.push_back(std::move(influence));
-    My.push_back(M.back() * y1);
-    Ky.push_back(K.back() * y1);
-    yK.push_back(K.back().transpose() * y1);
-  }
-  Vector dnorm(penalty_count);
-  Vector ddelta(penalty_count);
-  Matrix d2norm = Matrix::Zero(penalty_count, penalty_count);
-  Matrix d2delta = Matrix::Zero(penalty_count, penalty_count);
-  for (std::size_t i = 0; i < penalty_count; ++i) {
-    const double lambda_i = std::exp(log_sp[i]);
-    ddelta[static_cast<Eigen::Index>(i)] =
-      lambda_i * K[i].trace();
-    dnorm[static_cast<Eigen::Index>(i)] =
-      2.0 * lambda_i * y1.dot(My[i] - Ky[i]);
-    for (std::size_t j = 0; j <= i; ++j) {
-      const double lambda_j = std::exp(log_sp[j]);
-      double delta_value = -2.0 * lambda_i * lambda_j *
-        (M[j].array() * K[i].array()).sum();
-      if (i == j) delta_value += ddelta[static_cast<Eigen::Index>(i)];
-      d2delta(static_cast<Eigen::Index>(i),
-              static_cast<Eigen::Index>(j)) = delta_value;
-      d2delta(static_cast<Eigen::Index>(j),
-              static_cast<Eigen::Index>(i)) = delta_value;
-      double norm_value = 0.0;
-      for (int component = 0; component < numerical_rank; ++component) {
-        norm_value +=
-          My[i][component] * Ky[j][component] +
-          My[j][component] * Ky[i][component] -
-          2.0 * My[i][component] * My[j][component] +
-          yK[i][component] * My[j][component];
-      }
-      norm_value *= 2.0 * lambda_i * lambda_j;
-      if (i == j) norm_value += dnorm[static_cast<Eigen::Index>(i)];
-      d2norm(static_cast<Eigen::Index>(i),
-             static_cast<Eigen::Index>(j)) = norm_value;
-      d2norm(static_cast<Eigen::Index>(j),
-             static_cast<Eigen::Index>(i)) = norm_value;
-    }
-  }
-  const double score_scale = static_cast<double>(n) / (delta * delta);
-  const double delta_scale = 2.0 * score_scale * rss / delta;
-  const double cross_scale = -2.0 * score_scale / delta;
-  const double curvature_scale = 3.0 * delta_scale / delta;
-  const Vector gradient = score_scale * dnorm - delta_scale * ddelta;
-  Matrix hessian(penalty_count, penalty_count);
-  for (std::size_t i = 0; i < penalty_count; ++i) {
-    for (std::size_t j = 0; j < penalty_count; ++j) {
-      hessian(static_cast<Eigen::Index>(i),
-              static_cast<Eigen::Index>(j)) =
-        cross_scale *
-          (ddelta[static_cast<Eigen::Index>(j)] *
-             dnorm[static_cast<Eigen::Index>(i)] +
-           ddelta[static_cast<Eigen::Index>(i)] *
-             dnorm[static_cast<Eigen::Index>(j)]) +
-        score_scale * d2norm(static_cast<Eigen::Index>(i),
-                             static_cast<Eigen::Index>(j)) +
-        curvature_scale *
-          ddelta[static_cast<Eigen::Index>(i)] *
-          ddelta[static_cast<Eigen::Index>(j)] -
-        delta_scale * d2delta(static_cast<Eigen::Index>(i),
-                              static_cast<Eigen::Index>(j));
-    }
-  }
-  require(std::isfinite(score) && gradient.allFinite() &&
-            hessian.allFinite() && coefficients.allFinite() &&
-            residuals.allFinite(),
-          "multi-penalty evaluation produced non-finite output");
-
-  MultiPenaltyGcvEvaluation result;
-  result.n = n;
-  result.coefficient_dim = coefficient_dim;
-  result.free_dim = free_dim;
-  result.penalty_count = static_cast<int>(penalty_count);
-  result.constraint_rank = constraint_rank;
-  result.augmented_penalty_rank = augmented_penalty_rank;
-  result.numerical_rank = numerical_rank;
-  result.rss = rss;
-  result.edf = edf;
-  result.score = score;
-  result.condition = d[0] / d[numerical_rank - 1];
-  result.condition_bucket = condition_bucket(
-    numerical_rank, free_dim, result.condition);
-  result.log_sp = log_sp;
-  result.gradient = copy_vector(gradient);
-  result.hessian.assign(
-    hessian.data(), hessian.data() + hessian.size());
-  result.coefficients = copy_vector(coefficients);
-  result.fitted = copy_vector(fitted);
-  result.residuals = copy_vector(residuals);
-  return result;
+  require(log_sp.size() == penalty_blocks.size(),
+          "multi-penalty smoothing parameter length is invalid");
+  const PreparedMultiPenaltyProblem problem = prepare_multi_penalty_problem(
+    X_data, n, coefficient_dim, penalty_blocks, penalty_dimensions,
+    penalty_offsets, penalty_ranks, H_data, has_H, constraint,
+    constraint_rows, rank_tolerance);
+  const PreparedMultiPenaltyResponse response =
+    prepare_multi_penalty_response(problem, y_data, n);
+  const Eigen::Map<const Vector> log_sp_vector(
+    log_sp.data(), static_cast<Eigen::Index>(log_sp.size()));
+  const MultiPenaltyCoreEvaluation core = evaluate_multi_penalty_core(
+    problem, response, log_sp_vector);
+  return materialize_multi_penalty_evaluation(
+    problem, response, core, true);
 }
 
 MultiPenaltyGcvOptimization multi_penalty_gcv_optimize_cpp(
@@ -926,7 +1146,7 @@ MultiPenaltyGcvOptimization multi_penalty_gcv_optimize_cpp(
     penalty_offsets, penalty_ranks, H, has_H, constraint, constraint_rows,
     control.rank_tolerance);
   const PreparedMultiPenaltyResponse response =
-    prepare_multi_penalty_response(y, n);
+    prepare_multi_penalty_response(problem, y, n);
   const int penalty_count = problem.penalty_count;
   Vector log_sp = problem.initial_log_sp;
   auto evaluate_core = [&](const Vector& value) {
@@ -1003,7 +1223,11 @@ MultiPenaltyGcvOptimization multi_penalty_gcv_optimize_cpp(
     }
 
     if (iteration > 3) {
-      const double gradient_norm = gradient.norm();
+      double squared_gradient_norm = 0.0;
+      for (int index = 0; index < penalty_count; ++index) {
+        squared_gradient_norm += gradient[index] * gradient[index];
+      }
+      const double gradient_norm = std::sqrt(squared_gradient_norm);
       converged =
         score_reduction <= control.convergence_tolerance *
           (1.0 + minimum_score) &&
@@ -1023,29 +1247,40 @@ MultiPenaltyGcvOptimization multi_penalty_gcv_optimize_cpp(
       current.gradient.data(), penalty_count);
     Eigen::Map<const Matrix> current_hessian(
       current.hessian.data(), penalty_count, penalty_count);
-    Eigen::SelfAdjointEigenSolver<Matrix> decomposition(
-      0.5 * (current_hessian + current_hessian.transpose()));
-    require(decomposition.info() == Eigen::Success &&
-              decomposition.eigenvalues().allFinite() &&
-              decomposition.eigenvectors().allFinite(),
-            "multi-penalty optimizer Hessian eigendecomposition failed");
-    eigenvalues = decomposition.eigenvalues();
+    const SymmetricLapackEigen decomposition =
+      symmetric_lapack_eigen(current_hessian);
+    eigenvalues = decomposition.values;
     use_steepest_descent = (eigenvalues.array() < 0.0).any();
     if (!use_steepest_descent) {
-      const Vector projected = decomposition.eigenvectors().transpose() *
-        gradient;
-      if ((eigenvalues.array() == 0.0).any()) {
-        use_steepest_descent = true;
-      } else {
-        newton_step = -decomposition.eigenvectors() *
-          (projected.array() / eigenvalues.array()).matrix();
-        const double maximum_component = newton_step.cwiseAbs().maxCoeff();
-        if (maximum_component > control.max_newton_step) {
-          newton_step *= control.max_newton_step / maximum_component;
+      Vector projected(penalty_count);
+      for (int column = 0; column < penalty_count; ++column) {
+        double value = 0.0;
+        for (int row = 0; row < penalty_count; ++row) {
+          value += decomposition.vectors(row, column) * gradient[row];
         }
+        projected[column] = value / eigenvalues[column];
+      }
+      for (int row = 0; row < penalty_count; ++row) {
+        double value = 0.0;
+        for (int column = 0; column < penalty_count; ++column) {
+          value += decomposition.vectors(row, column) * projected[column];
+        }
+        newton_step[row] = -value;
+      }
+      double maximum_component = std::abs(newton_step[0]);
+      for (int index = 1; index < penalty_count; ++index) {
+        maximum_component = std::max(
+          maximum_component, std::abs(newton_step[index]));
+      }
+      if (maximum_component > control.max_newton_step) {
+        newton_step *= control.max_newton_step / maximum_component;
       }
     }
-    const double maximum_gradient = gradient.cwiseAbs().maxCoeff();
+    double maximum_gradient = std::abs(gradient[0]);
+    for (int index = 1; index < penalty_count; ++index) {
+      maximum_gradient = std::max(
+        maximum_gradient, std::abs(gradient[index]));
+    }
     if (maximum_gradient == 0.0) {
       steepest_step.setZero();
     } else {

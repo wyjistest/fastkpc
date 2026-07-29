@@ -73,7 +73,8 @@ fastkpc_full_cuda_phase5_backend_configuration <- function(kind) {
     link = "identity",
     sp_selection_backend = "cpp-magic-multi-penalty",
     gcv_score_backend = "cpp-analytic-magic-gH",
-    residual_backend = "cpp-augmented-jacobi-svd",
+    residual_backend =
+      "cpp-pivoted-qr-augmented-lapack-dgesdd-svd",
     penalty_root_backend = "lapack-dpstrf-aggregate-penalty",
     rank_tolerance = "sqrt(.Machine$double.eps)",
     convergence_tolerance = "1e-7",
@@ -188,7 +189,8 @@ fastkpc_full_cuda_phase5_validate_merged_evidence <- function(
     !any(evidence$logical_rows$backend_error) &&
     !any(evidence$logical_rows$spectra_fallback) &&
     all(evidence$targets$fallback_reason == "NONE") &&
-    all(evidence$targets$rank_path == "augmented-jacobi-svd") &&
+    all(evidence$targets$rank_path ==
+          "pivoted-qr-augmented-lapack-dgesdd-svd") &&
     !any(evidence$targets$normal_equations_used) &&
     all(evidence$targets$all_finite)
   fastkpc_full_cuda_phase5_publication_require(
@@ -234,8 +236,10 @@ fastkpc_full_cuda_phase5_common_summary <- function(
       "fastkpc/artifacts/full_cuda_ci/",
       "single_penalty_cuda_gcv_full_shadow_v1"
     ),
-    candidate_route =
-      "cpp-magic-multi-penalty+cpp-augmented-jacobi-svd",
+    candidate_route = paste0(
+      "cpp-magic-multi-penalty+",
+      "cpp-pivoted-qr-augmented-lapack-dgesdd-svd"
+    ),
     edge_count_reference = as.integer(graph$edge_count_reference),
     edge_count_candidate = as.integer(graph$edge_count_candidate),
     SHD = as.integer(graph$SHD),
@@ -676,7 +680,8 @@ fastkpc_full_cuda_phase5_validate_artifact <- function(
   )
   payload_gate <- nrow(cases) == 65676L &&
     all(cases$fallback_reason == "NONE") &&
-    all(cases$rank_path == "augmented-jacobi-svd") &&
+    all(cases$rank_path ==
+          "pivoted-qr-augmented-lapack-dgesdd-svd") &&
     !any(cases$normal_equations_used) && all(cases$all_finite) &&
     nrow(graph) == 1L && graph$SHD[[1L]] == 0L &&
     isTRUE(graph$adjacency_identical[[1L]]) && identical(

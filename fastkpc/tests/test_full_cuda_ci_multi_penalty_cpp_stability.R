@@ -72,7 +72,10 @@ results <- lapply(seq_len(nrow(cases)), function(index) {
   ))
   assert_true(
     candidate$penalty_count == case$expected_penalty_count &&
-      identical(candidate$rank_path, "augmented-jacobi-svd") &&
+      identical(
+        candidate$rank_path,
+        "pivoted-qr-augmented-lapack-dgesdd-svd"
+      ) &&
       !isTRUE(candidate$normal_equations_used) &&
       is.finite(candidate$condition),
     paste0("Phase 5 stable route mismatch: ", case$label)

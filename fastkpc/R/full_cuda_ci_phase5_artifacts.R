@@ -542,9 +542,11 @@ fastkpc_full_cuda_phase5_shadow_summary <- function(
     dcov_spectra_decomposition_count =
       sum(timings$dcov_spectra_decomposition_count),
     elapsed_seconds = as.numeric(elapsed_seconds),
-    stable_rank_path_gate = all(targets$rank_path == "augmented-jacobi-svd") &&
+    stable_rank_path_gate = all(
+      targets$rank_path == "pivoted-qr-augmented-lapack-dgesdd-svd"
+    ) &&
       all(targets$selected_fit_refinement_path ==
-            "augmented-lapack-dgesdd-svd") &&
+            "pivoted-qr-augmented-lapack-dgesdd-svd") &&
       !any(targets$normal_equations_used),
     numerical_gate = numerical_gate,
     optimizer_gate = optimizer_gate,
@@ -552,14 +554,15 @@ fastkpc_full_cuda_phase5_shadow_summary <- function(
     backend_gate = optimizer_gate &&
       all(targets$optimizer_backend_executed == "cpp-magic-multi-penalty") &&
       all(targets$residual_backend_executed ==
-            "cpp-augmented-jacobi-svd") &&
+            "cpp-pivoted-qr-augmented-lapack-dgesdd-svd") &&
       all(targets$selected_fit_refinement_path ==
-            "augmented-lapack-dgesdd-svd") &&
+            "pivoted-qr-augmented-lapack-dgesdd-svd") &&
       all(targets$fallback_reason == "NONE"),
     pass = numerical_gate && optimizer_gate && downstream_gate &&
-      all(targets$rank_path == "augmented-jacobi-svd") &&
+      all(targets$rank_path ==
+            "pivoted-qr-augmented-lapack-dgesdd-svd") &&
       all(targets$selected_fit_refinement_path ==
-            "augmented-lapack-dgesdd-svd") &&
+            "pivoted-qr-augmented-lapack-dgesdd-svd") &&
       !any(targets$normal_equations_used),
     numerical_contract_sha256 = numerical$sha256
   )
@@ -785,7 +788,8 @@ fastkpc_full_cuda_phase5_scan_partition <- function(
             convergence_code = candidate$convergence_code,
             fallback_reason = candidate$fallback_reason,
             optimizer_backend_executed = "cpp-magic-multi-penalty",
-            residual_backend_executed = "cpp-augmented-jacobi-svd",
+            residual_backend_executed =
+              "cpp-pivoted-qr-augmented-lapack-dgesdd-svd",
             transcript_preserved = !is.null(transcripts[[key]]),
             stringsAsFactors = FALSE
           )
