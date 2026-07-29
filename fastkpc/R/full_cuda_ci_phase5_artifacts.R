@@ -543,6 +543,8 @@ fastkpc_full_cuda_phase5_shadow_summary <- function(
       sum(timings$dcov_spectra_decomposition_count),
     elapsed_seconds = as.numeric(elapsed_seconds),
     stable_rank_path_gate = all(targets$rank_path == "augmented-jacobi-svd") &&
+      all(targets$selected_fit_refinement_path ==
+            "augmented-lapack-dgesdd-svd") &&
       !any(targets$normal_equations_used),
     numerical_gate = numerical_gate,
     optimizer_gate = optimizer_gate,
@@ -551,9 +553,13 @@ fastkpc_full_cuda_phase5_shadow_summary <- function(
       all(targets$optimizer_backend_executed == "cpp-magic-multi-penalty") &&
       all(targets$residual_backend_executed ==
             "cpp-augmented-jacobi-svd") &&
+      all(targets$selected_fit_refinement_path ==
+            "augmented-lapack-dgesdd-svd") &&
       all(targets$fallback_reason == "NONE"),
     pass = numerical_gate && optimizer_gate && downstream_gate &&
       all(targets$rank_path == "augmented-jacobi-svd") &&
+      all(targets$selected_fit_refinement_path ==
+            "augmented-lapack-dgesdd-svd") &&
       !any(targets$normal_equations_used),
     numerical_contract_sha256 = numerical$sha256
   )
@@ -763,6 +769,8 @@ fastkpc_full_cuda_phase5_scan_partition <- function(
             rank_mismatch = candidate$numerical_rank != convergence$rank ||
               candidate$free_dim != convergence$full_rank,
             rank_path = candidate$rank_path,
+            selected_fit_refinement_path =
+              candidate$selected_fit_refinement_path,
             condition = candidate$condition,
             condition_bucket = candidate$condition_bucket,
             normal_equations_used = candidate$normal_equations_used,

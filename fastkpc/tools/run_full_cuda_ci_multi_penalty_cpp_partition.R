@@ -56,6 +56,7 @@ evidence <- fastkpc_full_cuda_phase5_scan_partition(
   progress = TRUE
 )
 if (!isTRUE(evidence$summary$pass)) {
+  print(evidence$summary)
   stop("Phase 5 partition gate failed", call. = FALSE)
 }
 dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)

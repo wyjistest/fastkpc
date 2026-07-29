@@ -243,6 +243,55 @@ struct MultiPenaltyCoreEvaluation {
   Vector y1;
 };
 
+struct ThinLapackSvd {
+  Matrix U;
+  Matrix V;
+  Vector singular;
+};
+
+ThinLapackSvd thin_lapack_svd(const Matrix& input) {
+  require(input.rows() >= input.cols() && input.cols() > 0,
+          "thin LAPACK SVD input dimensions are invalid");
+  const La_INT rows = static_cast<La_INT>(input.rows());
+  const La_INT columns = static_cast<La_INT>(input.cols());
+  const La_INT leading_input = rows;
+  const La_INT leading_u = rows;
+  const La_INT leading_vt = columns;
+  Matrix factor = input;
+  Matrix U(rows, columns);
+  Matrix Vt(columns, columns);
+  Vector singular(columns);
+  std::vector<La_INT> integer_work(
+    static_cast<std::size_t>(8 * columns));
+  double workspace_query = 0.0;
+  La_INT workspace_size = -1;
+  La_INT info = 0;
+  const char job = 'S';
+  F77_CALL(dgesdd)(
+    &job, &rows, &columns, factor.data(), &leading_input,
+    singular.data(), U.data(), &leading_u, Vt.data(), &leading_vt,
+    &workspace_query, &workspace_size, integer_work.data(), &info FCONE);
+  require(info == 0 && std::isfinite(workspace_query) &&
+            workspace_query >= 1.0,
+          "thin LAPACK SVD workspace query failed");
+  workspace_size = static_cast<La_INT>(std::ceil(workspace_query));
+  std::vector<double> workspace(
+    static_cast<std::size_t>(workspace_size));
+  factor = input;
+  F77_CALL(dgesdd)(
+    &job, &rows, &columns, factor.data(), &leading_input,
+    singular.data(), U.data(), &leading_u, Vt.data(), &leading_vt,
+    workspace.data(), &workspace_size, integer_work.data(), &info FCONE);
+  require(info == 0 && singular.allFinite() && U.allFinite() &&
+            Vt.allFinite(),
+          "thin LAPACK SVD failed");
+  ThinLapackSvd result;
+  result.U = std::move(U);
+  result.V = Vt.transpose();
+  result.singular = std::move(singular);
+  return result;
+}
+
 PreparedMultiPenaltyProblem prepare_multi_penalty_problem(
     const double* X_data,
     int n,
@@ -336,10 +385,12 @@ PreparedMultiPenaltyResponse prepare_multi_penalty_response(
   return response;
 }
 
-MultiPenaltyCoreEvaluation evaluate_multi_penalty_core(
+Matrix multi_penalty_augmented_system(
     const PreparedMultiPenaltyProblem& problem,
-    const PreparedMultiPenaltyResponse& response,
-    const Vector& log_sp) {
+    const Vector& log_sp,
+    int* augmented_penalty_rank) {
+  require(augmented_penalty_rank != nullptr,
+          "augmented penalty rank pointer is missing");
   require(log_sp.size() == problem.penalty_count && log_sp.allFinite(),
           "smoothing parameter vector is invalid");
   Matrix aggregate_penalty = Matrix::Zero(
@@ -356,15 +407,24 @@ MultiPenaltyCoreEvaluation evaluate_multi_penalty_core(
   }
   aggregate_penalty = symmetric_matrix(
     aggregate_penalty, "aggregate penalty");
-  int augmented_penalty_rank = 0;
   const Matrix aggregate_root = pivoted_cholesky_root(
-    aggregate_penalty, &augmented_penalty_rank);
-
-  Matrix augmented(problem.n + augmented_penalty_rank, problem.free_dim);
+    aggregate_penalty, augmented_penalty_rank);
+  Matrix augmented(
+    problem.n + *augmented_penalty_rank, problem.free_dim);
   augmented.topRows(problem.n) = problem.X_free;
-  augmented.bottomRows(augmented_penalty_rank) = aggregate_root;
+  augmented.bottomRows(*augmented_penalty_rank) = aggregate_root;
   require(augmented.allFinite(),
           "augmented multi-penalty system is malformed");
+  return augmented;
+}
+
+MultiPenaltyCoreEvaluation evaluate_multi_penalty_core(
+    const PreparedMultiPenaltyProblem& problem,
+    const PreparedMultiPenaltyResponse& response,
+    const Vector& log_sp) {
+  int augmented_penalty_rank = 0;
+  const Matrix augmented = multi_penalty_augmented_system(
+    problem, log_sp, &augmented_penalty_rank);
   Eigen::JacobiSVD<Matrix> decomposition(
     augmented, Eigen::ComputeThinU | Eigen::ComputeThinV);
   require(decomposition.info() == Eigen::Success,
@@ -523,6 +583,48 @@ MultiPenaltyGcvEvaluation materialize_multi_penalty_evaluation(
   result.fitted = copy_vector(fitted);
   result.residuals = copy_vector(residuals);
   return result;
+}
+
+void refine_multi_penalty_selected_fit(
+    const PreparedMultiPenaltyProblem& problem,
+    const PreparedMultiPenaltyResponse& response,
+    const Vector& log_sp,
+    MultiPenaltyGcvEvaluation* evaluation) {
+  require(evaluation != nullptr,
+          "selected fit refinement output is missing");
+  int augmented_penalty_rank = 0;
+  const Matrix augmented = multi_penalty_augmented_system(
+    problem, log_sp, &augmented_penalty_rank);
+  const ThinLapackSvd decomposition = thin_lapack_svd(augmented);
+  require(decomposition.singular.size() == problem.free_dim &&
+            decomposition.singular[0] > 0.0,
+          "selected fit refinement singular values are invalid");
+  const double threshold = decomposition.singular[0] *
+    problem.rank_tolerance;
+  int numerical_rank = 0;
+  for (Eigen::Index index = 0;
+       index < decomposition.singular.size(); ++index) {
+    if (decomposition.singular[index] >= threshold) ++numerical_rank;
+  }
+  require(augmented_penalty_rank == evaluation->augmented_penalty_rank &&
+            numerical_rank == evaluation->numerical_rank &&
+            numerical_rank > 0,
+          "selected fit refinement rank drifted");
+  const Matrix U1 = decomposition.U.topRows(problem.n).leftCols(
+    numerical_rank);
+  const Vector d = decomposition.singular.head(numerical_rank);
+  const Vector y1 = U1.transpose() * response.y;
+  const Vector theta = decomposition.V.leftCols(numerical_rank) *
+    (y1.array() / d.array()).matrix();
+  const Vector coefficients = problem.Z * theta;
+  const Vector fitted = problem.X * coefficients;
+  const Vector residuals = response.y - fitted;
+  require(coefficients.allFinite() && fitted.allFinite() &&
+            residuals.allFinite(),
+          "selected fit refinement produced non-finite output");
+  evaluation->coefficients = copy_vector(coefficients);
+  evaluation->fitted = copy_vector(fitted);
+  evaluation->residuals = copy_vector(residuals);
 }
 
 void append_transcript(
@@ -1001,6 +1103,8 @@ MultiPenaltyGcvOptimization multi_penalty_gcv_optimize_cpp(
       result.boundary_status.push_back("finite-after-boundary-probe");
     }
   }
+  refine_multi_penalty_selected_fit(
+    problem, response, log_sp, &current);
   result.selected = std::move(current);
   ++result.objective_calls;
   return result;

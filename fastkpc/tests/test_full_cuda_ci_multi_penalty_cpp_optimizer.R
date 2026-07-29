@@ -78,6 +78,10 @@ results <- lapply(seq_len(nrow(cases)), function(index) {
       "full-cuda-ci-multi-penalty-cpp-optimization-v1"
     ) &&
       identical(candidate$rank_path, "augmented-jacobi-svd") &&
+      identical(
+        candidate$selected_fit_refinement_path,
+        "augmented-lapack-dgesdd-svd"
+      ) &&
       isTRUE(candidate$response_independent_initialization) &&
       !isTRUE(candidate$normal_equations_used) &&
       identical(candidate$fallback_reason, "NONE"),

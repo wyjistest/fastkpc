@@ -7012,6 +7012,8 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cpp(
     Rcpp::Named("schema_version") =
       "full-cuda-ci-multi-penalty-cpp-optimization-v1",
     Rcpp::Named("rank_path") = "augmented-jacobi-svd",
+    Rcpp::Named("selected_fit_refinement_path") =
+      "augmented-lapack-dgesdd-svd",
     Rcpp::Named("constraint_aware") = true,
     Rcpp::Named("normal_equations_used") = false,
     Rcpp::Named("response_independent_initialization") = true,
