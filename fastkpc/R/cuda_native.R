@@ -1575,6 +1575,88 @@ mgcv_extract_gpu_solve_handle_fixed_sp_cuda <- function(handle) {
         PACKAGE = "fastkpc_cuda")
 }
 
+full_cuda_ci_single_penalty_mroot_cuda <- function(
+    penalty_matrix, penalty_rank, log_sp) {
+  load_fastkpc_cuda_native()
+  penalty_matrix <- as.matrix(penalty_matrix)
+  storage.mode(penalty_matrix) <- "double"
+  .Call(
+    "C_full_cuda_ci_single_penalty_mroot_cuda",
+    penalty_matrix, as.integer(penalty_rank), as.double(log_sp),
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_single_penalty_gcv_cuda <- function(
+    X, Y, rhs_transform, eigenvalues, magic_qr_packed, magic_tau, magic_r,
+    magic_penalty_root, magic_penalty_matrix, target_ids, penalty_rank, initial_sp,
+    sp_grid = numeric(), materialize_grid = length(sp_grid) > 0L,
+    keep_transcript = FALSE) {
+  load_fastkpc_cuda_native()
+  X <- as.matrix(X)
+  Y <- as.matrix(Y)
+  rhs_transform <- as.matrix(rhs_transform)
+  eigenvalues <- as.numeric(eigenvalues)
+  magic_qr_packed <- as.matrix(magic_qr_packed)
+  magic_tau <- as.numeric(magic_tau)
+  magic_r <- as.matrix(magic_r)
+  magic_penalty_root <- as.matrix(magic_penalty_root)
+  magic_penalty_matrix <- as.matrix(magic_penalty_matrix)
+  sp_grid <- as.numeric(sp_grid)
+  storage.mode(X) <- "double"
+  storage.mode(Y) <- "double"
+  storage.mode(rhs_transform) <- "double"
+  storage.mode(magic_qr_packed) <- "double"
+  storage.mode(magic_r) <- "double"
+  storage.mode(magic_penalty_root) <- "double"
+  storage.mode(magic_penalty_matrix) <- "double"
+  .Call(
+    "C_full_cuda_ci_single_penalty_gcv_cuda",
+    X, Y, rhs_transform, eigenvalues, magic_qr_packed, magic_tau, magic_r,
+    magic_penalty_root, magic_penalty_matrix, as.integer(target_ids),
+    as.integer(penalty_rank),
+    as.numeric(initial_sp), sp_grid, isTRUE(materialize_grid),
+    isTRUE(keep_transcript),
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_single_penalty_gcv_multi_cuda <- function(
+    setups, concurrency = 1L) {
+  load_fastkpc_cuda_native()
+  if (!is.list(setups) || length(setups) == 0L) {
+    stop("setups must be a non-empty list", call. = FALSE)
+  }
+  concurrency <- as.integer(concurrency)
+  if (length(concurrency) != 1L || is.na(concurrency) ||
+      concurrency < 1L || concurrency > 16L) {
+    stop("concurrency must be one integer in [1, 16]", call. = FALSE)
+  }
+  .Call(
+    "C_full_cuda_ci_single_penalty_gcv_multi_cuda",
+    setups, concurrency,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_single_penalty_gcv_fixed_sp_cuda <- function(
+    handle, X, Y, rhs_transform, eigenvalues, magic_qr_packed, magic_tau,
+    magic_r, magic_penalty_root, magic_penalty_matrix, target_ids, penalty_rank,
+    initial_sp, planned_route,
+    target_keys, outputs = c("residuals")) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_full_cuda_ci_single_penalty_gcv_fixed_sp_cuda",
+    handle, X, Y, rhs_transform, as.double(eigenvalues), magic_qr_packed,
+    as.double(magic_tau), magic_r,
+    magic_penalty_root, magic_penalty_matrix, as.integer(target_ids),
+    as.integer(penalty_rank),
+    as.double(initial_sp), as.character(planned_route),
+    as.character(target_keys),
+    as.character(outputs), PACKAGE = "fastkpc_cuda"
+  )
+}
+
 mgcv_extract_gpu_solve_same_setup_batch_fixed_sp_cuda <- function(handles) {
   load_fastkpc_cuda_native()
   if (!is.list(handles) || length(handles) == 0L) {

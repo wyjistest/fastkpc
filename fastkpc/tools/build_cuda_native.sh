@@ -82,6 +82,11 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   $COMMON_INC -c "$ROOT/src/cuda/mgcv_fixed_sp_runtime.cu" \
   -o "$BUILD/mgcv_fixed_sp_runtime.o"
 
+"$NVCC" -O3 -arch=sm_89 --fmad=false -diag-suppress 2464 \
+  -Xcompiler -fPIC -std=c++17 \
+  $COMMON_INC -c "$ROOT/src/cuda/mgcv_single_penalty_gcv.cu" \
+  -o "$BUILD/mgcv_single_penalty_gcv.o"
+
 "$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
   $COMMON_INC -c "$ROOT/src/cuda/mgcv_extract_fixed_sp_cuda.cu" \
   -o "$BUILD/mgcv_extract_fixed_sp_cuda.o"
@@ -116,6 +121,7 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   "$BUILD/fastspline_residual_cuda.o" \
   "$BUILD/mgcv_fixed_sp_stable.o" \
   "$BUILD/mgcv_fixed_sp_runtime.o" \
+  "$BUILD/mgcv_single_penalty_gcv.o" \
   "$BUILD/mgcv_extract_fixed_sp_cuda.o" \
   $LAPACK_LIBS $BLAS_LIBS $FLIBS \
   -L/usr/local/cuda/lib64 -lcudart -lcublas -lcusolver \
