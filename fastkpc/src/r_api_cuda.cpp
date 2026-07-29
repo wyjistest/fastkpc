@@ -20,6 +20,7 @@
 #include "cuda/legacy_dcov_spectra_matvec_cuda.hpp"
 #include "cuda/mgcv_extract_fixed_sp_cuda.hpp"
 #include "cuda/mgcv_fixed_sp_runtime.hpp"
+#include "cuda/mgcv_multi_penalty_gcv.hpp"
 #include "cuda/mgcv_single_penalty_gcv.hpp"
 
 #include <Rcpp.h>
@@ -281,6 +282,76 @@ void fixed_sp_cuda_residual_finalizer(SEXP ptr) {
     }
   }
   fixed_sp_owner_release(holder, FixedSpOwnerKind::Residual);
+  delete holder;
+  R_ClearExternalPtr(ptr);
+}
+
+SEXP multi_penalty_cuda_prepared_tag() {
+  static SEXP tag = Rf_install("fastkpc_multi_penalty_cuda_prepared");
+  return tag;
+}
+
+using MultiPenaltyCudaPreparedHolder =
+  FixedSpExternalHolder<fastkpc::MultiPenaltyGcvCudaPrepared>;
+
+MultiPenaltyCudaPreparedHolder* multi_penalty_cuda_prepared_holder(
+    SEXP ptr, bool require_live) {
+  if (TYPEOF(ptr) != EXTPTRSXP ||
+      R_ExternalPtrTag(ptr) != multi_penalty_cuda_prepared_tag()) {
+    Rcpp::stop(
+      "multi-penalty CUDA prepared handle has the wrong external pointer tag");
+  }
+  auto* holder = static_cast<MultiPenaltyCudaPreparedHolder*>(
+    R_ExternalPtrAddr(ptr));
+  if (holder == nullptr || (require_live && !holder->value)) {
+    Rcpp::stop("multi-penalty CUDA prepared handle has been freed");
+  }
+  return holder;
+}
+
+void multi_penalty_cuda_prepared_finalizer(SEXP ptr) {
+  auto* holder = static_cast<MultiPenaltyCudaPreparedHolder*>(
+    R_ExternalPtrAddr(ptr));
+  if (holder == nullptr) return;
+  if (holder->creator_pid == fixed_sp_current_pid()) holder->value.reset();
+  delete holder;
+  R_ClearExternalPtr(ptr);
+}
+
+SEXP multi_penalty_cuda_residual_tag() {
+  static SEXP tag = Rf_install("fastkpc_multi_penalty_cuda_residual");
+  return tag;
+}
+
+using MultiPenaltyCudaResidualHolder =
+  FixedSpExternalHolder<fastkpc::MultiPenaltyGcvCudaResidualBatch>;
+
+MultiPenaltyCudaResidualHolder* multi_penalty_cuda_residual_holder(
+    SEXP ptr, bool require_live) {
+  if (TYPEOF(ptr) != EXTPTRSXP ||
+      R_ExternalPtrTag(ptr) != multi_penalty_cuda_residual_tag()) {
+    Rcpp::stop(
+      "multi-penalty CUDA residual has the wrong external pointer tag");
+  }
+  auto* holder = static_cast<MultiPenaltyCudaResidualHolder*>(
+    R_ExternalPtrAddr(ptr));
+  if (holder == nullptr || (require_live && !holder->value)) {
+    Rcpp::stop("multi-penalty CUDA residual token has been freed");
+  }
+  return holder;
+}
+
+void multi_penalty_cuda_residual_finalizer(SEXP ptr) {
+  auto* holder = static_cast<MultiPenaltyCudaResidualHolder*>(
+    R_ExternalPtrAddr(ptr));
+  if (holder == nullptr) return;
+  if (holder->creator_pid == fixed_sp_current_pid() && holder->value) {
+    try {
+      fastkpc::release_multi_penalty_gcv_cuda_residual(holder->value);
+    } catch (...) {
+    }
+    holder->value.reset();
+  }
   delete holder;
   R_ClearExternalPtr(ptr);
 }
@@ -7061,6 +7132,1046 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cpp(
   END_RCPP
 }
 
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_evaluate_cuda(
+    SEXP Xs,
+    SEXP Ys,
+    SEXP magic_qr_packed_s,
+    SEXP magic_tau_s,
+    SEXP magic_r_s,
+    SEXP magic_pivot_s,
+    SEXP penalty_roots_s,
+    SEXP penalty_matrices_s,
+    SEXP penalty_ranks_s,
+    SEXP log_sp_s,
+    SEXP rank_tolerance_s) {
+  BEGIN_RCPP
+  if (!Rf_isReal(Xs) || !Rf_isMatrix(Xs) ||
+      !Rf_isReal(Ys) || !Rf_isMatrix(Ys) ||
+      !Rf_isReal(magic_qr_packed_s) || !Rf_isMatrix(magic_qr_packed_s) ||
+      !Rf_isReal(magic_tau_s) ||
+      !Rf_isReal(magic_r_s) || !Rf_isMatrix(magic_r_s) ||
+      !Rf_isInteger(magic_pivot_s) ||
+      !Rf_isNewList(penalty_roots_s) ||
+      !Rf_isNewList(penalty_matrices_s) ||
+      !Rf_isInteger(penalty_ranks_s) ||
+      !Rf_isReal(log_sp_s) || !Rf_isMatrix(log_sp_s)) {
+    Rcpp::stop("multi-penalty CUDA inputs have invalid storage types");
+  }
+  Rcpp::NumericMatrix X(Xs);
+  Rcpp::NumericMatrix Y(Ys);
+  Rcpp::NumericMatrix qr_packed(magic_qr_packed_s);
+  Rcpp::NumericVector tau(magic_tau_s);
+  Rcpp::NumericMatrix magic_r(magic_r_s);
+  Rcpp::IntegerVector pivot(magic_pivot_s);
+  Rcpp::List penalty_roots(penalty_roots_s);
+  Rcpp::List penalty_matrices(penalty_matrices_s);
+  Rcpp::IntegerVector penalty_ranks(penalty_ranks_s);
+  Rcpp::NumericMatrix log_sp(log_sp_s);
+  const int n = X.nrow();
+  const int q = X.ncol();
+  const int target_count = Y.ncol();
+  const int penalty_count = penalty_roots.size();
+  if (Y.nrow() != n || target_count <= 1 ||
+      qr_packed.nrow() != n || qr_packed.ncol() != q ||
+      tau.size() != q || magic_r.nrow() != q || magic_r.ncol() != q ||
+      pivot.size() != q || penalty_count <= 1 ||
+      penalty_matrices.size() != penalty_count ||
+      penalty_ranks.size() != penalty_count ||
+      log_sp.nrow() != penalty_count || log_sp.ncol() != target_count) {
+    Rcpp::stop("multi-penalty CUDA input dimensions are inconsistent");
+  }
+  std::vector<int> pivot_zero_based(static_cast<std::size_t>(q));
+  std::vector<unsigned char> pivot_seen(static_cast<std::size_t>(q), 0);
+  for (int index = 0; index < q; ++index) {
+    const int value = pivot[index] - 1;
+    if (value < 0 || value >= q ||
+        pivot_seen[static_cast<std::size_t>(value)] != 0) {
+      Rcpp::stop("multi-penalty CUDA QR pivot is invalid");
+    }
+    pivot_seen[static_cast<std::size_t>(value)] = 1;
+    pivot_zero_based[static_cast<std::size_t>(index)] = value;
+  }
+  std::vector<std::vector<double>> roots;
+  std::vector<std::vector<double>> matrices;
+  std::vector<int> ranks;
+  roots.reserve(static_cast<std::size_t>(penalty_count));
+  matrices.reserve(static_cast<std::size_t>(penalty_count));
+  ranks.reserve(static_cast<std::size_t>(penalty_count));
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    SEXP root_s = penalty_roots[penalty];
+    SEXP matrix_s = penalty_matrices[penalty];
+    if (!Rf_isReal(root_s) || !Rf_isMatrix(root_s) ||
+        !Rf_isReal(matrix_s) || !Rf_isMatrix(matrix_s)) {
+      Rcpp::stop("multi-penalty CUDA penalty inputs must be matrices");
+    }
+    Rcpp::NumericMatrix root(root_s);
+    Rcpp::NumericMatrix matrix(matrix_s);
+    const int rank = penalty_ranks[penalty];
+    if (root.nrow() != q || root.ncol() != rank || rank <= 0 ||
+        matrix.nrow() != q || matrix.ncol() != q) {
+      Rcpp::stop("multi-penalty CUDA penalty dimensions are invalid");
+    }
+    roots.emplace_back(REAL(root_s), REAL(root_s) + XLENGTH(root_s));
+    matrices.emplace_back(
+      REAL(matrix_s), REAL(matrix_s) + XLENGTH(matrix_s));
+    ranks.push_back(rank);
+  }
+  const fastkpc::MultiPenaltyGcvCudaEvaluation result =
+    fastkpc::multi_penalty_gcv_evaluate_cuda(
+      REAL(Xs), REAL(Ys), REAL(magic_qr_packed_s), REAL(magic_tau_s),
+      REAL(magic_r_s), pivot_zero_based.data(), roots, matrices, ranks,
+      REAL(log_sp_s), n, q, penalty_count, target_count,
+      Rcpp::as<double>(rank_tolerance_s));
+  Rcpp::NumericMatrix gradient(result.penalty_count, result.target_count);
+  std::copy(result.gradient.begin(), result.gradient.end(), gradient.begin());
+  Rcpp::NumericVector hessian(result.hessian.begin(), result.hessian.end());
+  hessian.attr("dim") = Rcpp::IntegerVector::create(
+    result.penalty_count, result.penalty_count, result.target_count);
+  Rcpp::NumericMatrix coefficients(
+    result.coefficient_dim, result.target_count);
+  std::copy(
+    result.coefficients.begin(), result.coefficients.end(),
+    coefficients.begin());
+  const fastkpc::MultiPenaltyGcvCudaDiagnostics& diagnostics =
+    result.diagnostics;
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") = result.schema_version,
+    Rcpp::Named("rank_path") = result.rank_path,
+    Rcpp::Named("n") = result.n,
+    Rcpp::Named("coefficient_dim") = result.coefficient_dim,
+    Rcpp::Named("penalty_count") = result.penalty_count,
+    Rcpp::Named("target_count") = result.target_count,
+    Rcpp::Named("rss") = Rcpp::wrap(result.rss),
+    Rcpp::Named("edf") = Rcpp::wrap(result.edf),
+    Rcpp::Named("score") = Rcpp::wrap(result.score),
+    Rcpp::Named("condition") = Rcpp::wrap(result.condition),
+    Rcpp::Named("aggregate_penalty_rank") =
+      Rcpp::wrap(result.aggregate_penalty_rank),
+    Rcpp::Named("numerical_rank") = Rcpp::wrap(result.numerical_rank),
+    Rcpp::Named("solver_info") = Rcpp::wrap(result.solver_info),
+    Rcpp::Named("gradient") = gradient,
+    Rcpp::Named("hessian") = hessian,
+    Rcpp::Named("coefficients") = coefficients,
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("schema_version") = diagnostics.schema_version,
+      Rcpp::Named("execution_strategy") = diagnostics.execution_strategy,
+      Rcpp::Named("device_id") = diagnostics.device_id,
+      Rcpp::Named("gpu_name") = diagnostics.gpu_name,
+      Rcpp::Named("prepared_setup_upload_count") =
+        diagnostics.prepared_setup_upload_count,
+      Rcpp::Named("target_batch_upload_count") =
+        diagnostics.target_batch_upload_count,
+      Rcpp::Named("cuda_qt_y_kernel_launch_count") =
+        diagnostics.cuda_qt_y_kernel_launch_count,
+      Rcpp::Named("cuda_objective_kernel_launch_count") =
+        diagnostics.cuda_objective_kernel_launch_count,
+      Rcpp::Named("cuda_objective_target_count") =
+        diagnostics.cuda_objective_target_count,
+      Rcpp::Named("cuda_guarded_qr_evaluation_count") =
+        diagnostics.cuda_guarded_qr_evaluation_count,
+      Rcpp::Named("cuda_stable_svd_evaluation_count") =
+        diagnostics.cuda_stable_svd_evaluation_count,
+      Rcpp::Named("cpu_objective_count") = diagnostics.cpu_objective_count,
+      Rcpp::Named("cpu_multi_penalty_solve_count") =
+        diagnostics.cpu_multi_penalty_solve_count,
+      Rcpp::Named("fallback_count") = diagnostics.fallback_count,
+      Rcpp::Named("cuda_error_count") = diagnostics.cuda_error_count,
+      Rcpp::Named("svd_nonconverged_count") =
+        diagnostics.svd_nonconverged_count,
+      Rcpp::Named("aggregate_rank_failure_count") =
+        diagnostics.aggregate_rank_failure_count,
+      Rcpp::Named("device_allocation_count") =
+        diagnostics.device_allocation_count,
+      Rcpp::Named("h2d_copy_count") = diagnostics.h2d_copy_count,
+      Rcpp::Named("d2h_copy_count") = diagnostics.d2h_copy_count,
+      Rcpp::Named("target_specific_log_sp") =
+        diagnostics.target_specific_log_sp,
+      Rcpp::Named("true_batched_kernel") = diagnostics.true_batched_kernel,
+      Rcpp::Named("normal_equations_used") =
+        diagnostics.normal_equations_used,
+      Rcpp::Named("double_precision") = diagnostics.double_precision,
+      Rcpp::Named("total_host_ms") = diagnostics.total_host_ms));
+  END_RCPP
+}
+
+namespace {
+
+Rcpp::List multi_penalty_cuda_optimization_to_list(
+    const fastkpc::MultiPenaltyGcvCudaOptimization& result) {
+  Rcpp::NumericMatrix selected_log_sp(
+    result.penalty_count, result.target_count);
+  std::copy(result.selected_log_sp.begin(), result.selected_log_sp.end(),
+            selected_log_sp.begin());
+  Rcpp::NumericMatrix gradient(result.penalty_count, result.target_count);
+  std::copy(result.gradient.begin(), result.gradient.end(), gradient.begin());
+  Rcpp::NumericVector hessian(result.hessian.begin(), result.hessian.end());
+  hessian.attr("dim") = Rcpp::IntegerVector::create(
+    result.penalty_count, result.penalty_count, result.target_count);
+  Rcpp::NumericMatrix coefficients(
+    result.coefficient_dim, result.target_count);
+  std::copy(result.coefficients.begin(), result.coefficients.end(),
+            coefficients.begin());
+  Rcpp::NumericMatrix hessian_eigenvalues(
+    result.penalty_count, result.target_count);
+  std::copy(result.hessian_eigenvalues.begin(),
+            result.hessian_eigenvalues.end(),
+            hessian_eigenvalues.begin());
+  Rcpp::CharacterMatrix boundary_status(
+    result.penalty_count, result.target_count);
+  Rcpp::LogicalVector fully_converged(result.target_count);
+  Rcpp::LogicalVector hessian_positive_definite(result.target_count);
+  Rcpp::LogicalVector step_failed(result.target_count);
+  Rcpp::CharacterVector convergence_code(result.target_count);
+  for (int target = 0; target < result.target_count; ++target) {
+    fully_converged[target] = result.fully_converged[target] != 0;
+    hessian_positive_definite[target] =
+      result.hessian_positive_definite[target] != 0;
+    step_failed[target] = result.step_failed[target] != 0;
+    convergence_code[target] = result.optimizer_status[target] != 0 ?
+      "cuda_optimizer_error" :
+      (result.step_failed[target] != 0 ?
+        "step_halving_exhausted" : "fully_converged");
+    for (int penalty = 0; penalty < result.penalty_count; ++penalty) {
+      const int value = result.boundary_status[
+        penalty + result.penalty_count * target];
+      boundary_status(penalty, target) = value == 0 ? "finite-interior" :
+        (value == 1 ? "positive-boundary" :
+          (value == 2 ? "negative-boundary" :
+            (value == 3 ? "finite-after-boundary-probe" : "unresolved")));
+    }
+  }
+  const fastkpc::MultiPenaltyGcvCudaDiagnostics& diagnostics =
+    result.diagnostics;
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") = result.schema_version,
+    Rcpp::Named("rank_path") = result.rank_path,
+    Rcpp::Named("optimizer_path") = result.optimizer_path,
+    Rcpp::Named("n") = result.n,
+    Rcpp::Named("coefficient_dim") = result.coefficient_dim,
+    Rcpp::Named("penalty_count") = result.penalty_count,
+    Rcpp::Named("target_count") = result.target_count,
+    Rcpp::Named("initial_log_sp") = Rcpp::wrap(result.initial_log_sp),
+    Rcpp::Named("selected_log_sp") = selected_log_sp,
+    Rcpp::Named("rss") = Rcpp::wrap(result.rss),
+    Rcpp::Named("edf") = Rcpp::wrap(result.edf),
+    Rcpp::Named("score") = Rcpp::wrap(result.score),
+    Rcpp::Named("condition") = Rcpp::wrap(result.condition),
+    Rcpp::Named("gradient") = gradient,
+    Rcpp::Named("hessian") = hessian,
+    Rcpp::Named("coefficients") = coefficients,
+    Rcpp::Named("rms_gradient") = Rcpp::wrap(result.rms_gradient),
+    Rcpp::Named("hessian_eigenvalues") = hessian_eigenvalues,
+    Rcpp::Named("aggregate_penalty_rank") =
+      Rcpp::wrap(result.aggregate_penalty_rank),
+    Rcpp::Named("numerical_rank") = Rcpp::wrap(result.numerical_rank),
+    Rcpp::Named("solver_info") = Rcpp::wrap(result.solver_info),
+    Rcpp::Named("optimizer_iterations") =
+      Rcpp::wrap(result.optimizer_iterations),
+    Rcpp::Named("score_calls") = Rcpp::wrap(result.score_calls),
+    Rcpp::Named("objective_calls") = Rcpp::wrap(result.objective_calls),
+    Rcpp::Named("step_halving_count") =
+      Rcpp::wrap(result.step_halving_count),
+    Rcpp::Named("newton_trial_count") =
+      Rcpp::wrap(result.newton_trial_count),
+    Rcpp::Named("steepest_descent_trial_count") =
+      Rcpp::wrap(result.steepest_descent_trial_count),
+    Rcpp::Named("boundary_probe_count") =
+      Rcpp::wrap(result.boundary_probe_count),
+    Rcpp::Named("boundary_accepted_count") =
+      Rcpp::wrap(result.boundary_accepted_count),
+    Rcpp::Named("boundary_status") = boundary_status,
+    Rcpp::Named("fully_converged") = fully_converged,
+    Rcpp::Named("hessian_positive_definite") =
+      hessian_positive_definite,
+    Rcpp::Named("step_failed") = step_failed,
+    Rcpp::Named("convergence_code") = convergence_code,
+    Rcpp::Named("optimizer_status") = Rcpp::wrap(result.optimizer_status),
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("schema_version") = diagnostics.schema_version,
+      Rcpp::Named("execution_strategy") = diagnostics.execution_strategy,
+      Rcpp::Named("device_id") = diagnostics.device_id,
+      Rcpp::Named("gpu_name") = diagnostics.gpu_name,
+      Rcpp::Named("prepared_setup_upload_count") =
+        diagnostics.prepared_setup_upload_count,
+      Rcpp::Named("target_batch_upload_count") =
+        diagnostics.target_batch_upload_count,
+      Rcpp::Named("cuda_qt_y_kernel_launch_count") =
+        diagnostics.cuda_qt_y_kernel_launch_count,
+      Rcpp::Named("cuda_optimizer_kernel_launch_count") =
+        diagnostics.cuda_optimizer_kernel_launch_count,
+      Rcpp::Named("cuda_optimizer_target_count") =
+        diagnostics.cuda_optimizer_target_count,
+      Rcpp::Named("cuda_optimizer_objective_count") =
+        diagnostics.cuda_optimizer_objective_count,
+      Rcpp::Named("cuda_penalty_factor_augmentation_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_penalty_factor_augmentation_cycles),
+      Rcpp::Named("cuda_qr_svd_cycles") =
+        static_cast<double>(diagnostics.cuda_qr_svd_cycles),
+      Rcpp::Named("cuda_qr_bidiagonal_reduction_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_qr_bidiagonal_reduction_cycles),
+      Rcpp::Named("cuda_bidiagonal_svd_cycles") =
+        static_cast<double>(diagnostics.cuda_bidiagonal_svd_cycles),
+      Rcpp::Named("cuda_svd_vector_postback_cycles") =
+        static_cast<double>(diagnostics.cuda_svd_vector_postback_cycles),
+      Rcpp::Named("cuda_left_vector_product_cycles") =
+        static_cast<double>(diagnostics.cuda_left_vector_product_cycles),
+      Rcpp::Named("cuda_score_construction_cycles") =
+        static_cast<double>(diagnostics.cuda_score_construction_cycles),
+      Rcpp::Named("cuda_derivative_hessian_cycles") =
+        static_cast<double>(diagnostics.cuda_derivative_hessian_cycles),
+      Rcpp::Named("cuda_complete_evaluation_count") =
+        diagnostics.cuda_complete_evaluation_count,
+      Rcpp::Named("cuda_score_only_evaluation_count") =
+        diagnostics.cuda_score_only_evaluation_count,
+      Rcpp::Named("cuda_guarded_qr_evaluation_count") =
+        diagnostics.cuda_guarded_qr_evaluation_count,
+      Rcpp::Named("cuda_stable_svd_evaluation_count") =
+        diagnostics.cuda_stable_svd_evaluation_count,
+      Rcpp::Named("cuda_selected_evaluation_reuse_count") =
+        diagnostics.cuda_selected_evaluation_reuse_count,
+      Rcpp::Named("cuda_hessian_eigensolver_count") =
+        diagnostics.cuda_hessian_eigensolver_count,
+      Rcpp::Named("cuda_selected_fit_count") =
+        diagnostics.cuda_selected_fit_count,
+      Rcpp::Named("cuda_objective_target_count") =
+        diagnostics.cuda_objective_target_count,
+      Rcpp::Named("cpu_objective_count") = diagnostics.cpu_objective_count,
+      Rcpp::Named("cpu_optimizer_count") = diagnostics.cpu_optimizer_count,
+      Rcpp::Named("cpu_multi_penalty_solve_count") =
+        diagnostics.cpu_multi_penalty_solve_count,
+      Rcpp::Named("fallback_count") = diagnostics.fallback_count,
+      Rcpp::Named("cuda_error_count") = diagnostics.cuda_error_count,
+      Rcpp::Named("svd_nonconverged_count") =
+        diagnostics.svd_nonconverged_count,
+      Rcpp::Named("aggregate_rank_failure_count") =
+        diagnostics.aggregate_rank_failure_count,
+      Rcpp::Named("device_allocation_count") =
+        diagnostics.device_allocation_count,
+      Rcpp::Named("h2d_copy_count") = diagnostics.h2d_copy_count,
+      Rcpp::Named("d2h_copy_count") = diagnostics.d2h_copy_count,
+      Rcpp::Named("target_specific_log_sp") =
+        diagnostics.target_specific_log_sp,
+      Rcpp::Named("true_batched_kernel") = diagnostics.true_batched_kernel,
+      Rcpp::Named("independent_target_states") =
+        diagnostics.independent_target_states,
+      Rcpp::Named("normal_equations_used") =
+        diagnostics.normal_equations_used,
+      Rcpp::Named("double_precision") = diagnostics.double_precision,
+      Rcpp::Named("total_host_ms") = diagnostics.total_host_ms));
+}
+
+fastkpc::MultiPenaltyGcvCudaOptimizerControl
+multi_penalty_cuda_optimizer_control(Rcpp::List values) {
+  auto numeric = [&](const char* name, double fallback) {
+    return values.containsElementNamed(name) ?
+      Rcpp::as<double>(values[name]) : fallback;
+  };
+  auto integer = [&](const char* name, int fallback) {
+    return values.containsElementNamed(name) ?
+      Rcpp::as<int>(values[name]) : fallback;
+  };
+  fastkpc::MultiPenaltyGcvCudaOptimizerControl control;
+  control.convergence_tolerance = numeric(
+    "convergence_tolerance", control.convergence_tolerance);
+  control.max_step_halving = integer(
+    "max_step_halving", control.max_step_halving);
+  control.max_iterations = integer("max_iterations", control.max_iterations);
+  control.max_newton_step = numeric(
+    "max_newton_step", control.max_newton_step);
+  control.boundary_probe_step = numeric(
+    "boundary_probe_step", control.boundary_probe_step);
+  control.max_boundary_probes = integer(
+    "max_boundary_probes", control.max_boundary_probes);
+  control.rank_tolerance = numeric("rank_tolerance", control.rank_tolerance);
+  return control;
+}
+
+Rcpp::List multi_penalty_cuda_batch_result_to_list(
+    fastkpc::MultiPenaltyGcvCudaBatchResult result) {
+  auto* residual_holder = new MultiPenaltyCudaResidualHolder{
+    std::move(result.residual), fixed_sp_current_pid()
+  };
+  SEXP residual_ext = PROTECT(R_MakeExternalPtr(
+    residual_holder, multi_penalty_cuda_residual_tag(), R_NilValue));
+  R_RegisterCFinalizerEx(
+    residual_ext, multi_penalty_cuda_residual_finalizer, TRUE);
+  Rcpp::List output = Rcpp::List::create(
+    Rcpp::Named("optimization") =
+      multi_penalty_cuda_optimization_to_list(result.optimization),
+    Rcpp::Named("residual") = residual_ext);
+  UNPROTECT(1);
+  return output;
+}
+
+}  // namespace
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cuda(
+    SEXP Xs,
+    SEXP Ys,
+    SEXP magic_qr_packed_s,
+    SEXP magic_tau_s,
+    SEXP magic_r_s,
+    SEXP magic_pivot_s,
+    SEXP penalty_roots_s,
+    SEXP penalty_matrices_s,
+    SEXP penalty_ranks_s,
+    SEXP initial_log_sp_s,
+    SEXP control_s) {
+  BEGIN_RCPP
+  if (!Rf_isReal(Xs) || !Rf_isMatrix(Xs) ||
+      !Rf_isReal(Ys) || !Rf_isMatrix(Ys) ||
+      !Rf_isReal(magic_qr_packed_s) || !Rf_isMatrix(magic_qr_packed_s) ||
+      !Rf_isReal(magic_tau_s) ||
+      !Rf_isReal(magic_r_s) || !Rf_isMatrix(magic_r_s) ||
+      !Rf_isInteger(magic_pivot_s) ||
+      !Rf_isNewList(penalty_roots_s) ||
+      !Rf_isNewList(penalty_matrices_s) ||
+      !Rf_isInteger(penalty_ranks_s) ||
+      !Rf_isReal(initial_log_sp_s) || !Rf_isNewList(control_s)) {
+    Rcpp::stop(
+      "multi-penalty CUDA optimizer inputs have invalid storage types");
+  }
+  Rcpp::NumericMatrix X(Xs);
+  Rcpp::NumericMatrix Y(Ys);
+  Rcpp::NumericMatrix qr_packed(magic_qr_packed_s);
+  Rcpp::NumericVector tau(magic_tau_s);
+  Rcpp::NumericMatrix magic_r(magic_r_s);
+  Rcpp::IntegerVector pivot(magic_pivot_s);
+  Rcpp::List penalty_roots(penalty_roots_s);
+  Rcpp::List penalty_matrices(penalty_matrices_s);
+  Rcpp::IntegerVector penalty_ranks(penalty_ranks_s);
+  Rcpp::NumericVector initial_log_sp(initial_log_sp_s);
+  Rcpp::List control_values(control_s);
+  const int n = X.nrow();
+  const int q = X.ncol();
+  const int target_count = Y.ncol();
+  const int penalty_count = penalty_roots.size();
+  if (Y.nrow() != n || target_count <= 1 ||
+      qr_packed.nrow() != n || qr_packed.ncol() != q ||
+      tau.size() != q || magic_r.nrow() != q || magic_r.ncol() != q ||
+      pivot.size() != q || penalty_count <= 1 ||
+      penalty_matrices.size() != penalty_count ||
+      penalty_ranks.size() != penalty_count ||
+      initial_log_sp.size() != penalty_count) {
+    Rcpp::stop(
+      "multi-penalty CUDA optimizer input dimensions are inconsistent");
+  }
+  std::vector<int> pivot_zero_based(static_cast<std::size_t>(q));
+  std::vector<unsigned char> pivot_seen(static_cast<std::size_t>(q), 0);
+  for (int index = 0; index < q; ++index) {
+    const int value = pivot[index] - 1;
+    if (value < 0 || value >= q ||
+        pivot_seen[static_cast<std::size_t>(value)] != 0) {
+      Rcpp::stop("multi-penalty CUDA optimizer QR pivot is invalid");
+    }
+    pivot_seen[static_cast<std::size_t>(value)] = 1;
+    pivot_zero_based[static_cast<std::size_t>(index)] = value;
+  }
+  std::vector<std::vector<double>> roots;
+  std::vector<std::vector<double>> matrices;
+  std::vector<int> ranks;
+  roots.reserve(static_cast<std::size_t>(penalty_count));
+  matrices.reserve(static_cast<std::size_t>(penalty_count));
+  ranks.reserve(static_cast<std::size_t>(penalty_count));
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    SEXP root_s = penalty_roots[penalty];
+    SEXP matrix_s = penalty_matrices[penalty];
+    if (!Rf_isReal(root_s) || !Rf_isMatrix(root_s) ||
+        !Rf_isReal(matrix_s) || !Rf_isMatrix(matrix_s)) {
+      Rcpp::stop(
+        "multi-penalty CUDA optimizer penalties must be matrices");
+    }
+    Rcpp::NumericMatrix root(root_s);
+    Rcpp::NumericMatrix matrix(matrix_s);
+    const int rank = penalty_ranks[penalty];
+    if (root.nrow() != q || root.ncol() != rank || rank <= 0 ||
+        matrix.nrow() != q || matrix.ncol() != q) {
+      Rcpp::stop(
+        "multi-penalty CUDA optimizer penalty dimensions are invalid");
+    }
+    roots.emplace_back(REAL(root_s), REAL(root_s) + XLENGTH(root_s));
+    matrices.emplace_back(
+      REAL(matrix_s), REAL(matrix_s) + XLENGTH(matrix_s));
+    ranks.push_back(rank);
+  }
+  auto numeric_control = [&](const char* name, double fallback) {
+    return control_values.containsElementNamed(name) ?
+      Rcpp::as<double>(control_values[name]) : fallback;
+  };
+  auto integer_control = [&](const char* name, int fallback) {
+    return control_values.containsElementNamed(name) ?
+      Rcpp::as<int>(control_values[name]) : fallback;
+  };
+  fastkpc::MultiPenaltyGcvCudaOptimizerControl control;
+  control.convergence_tolerance = numeric_control(
+    "convergence_tolerance", control.convergence_tolerance);
+  control.max_step_halving = integer_control(
+    "max_step_halving", control.max_step_halving);
+  control.max_iterations = integer_control(
+    "max_iterations", control.max_iterations);
+  control.max_newton_step = numeric_control(
+    "max_newton_step", control.max_newton_step);
+  control.boundary_probe_step = numeric_control(
+    "boundary_probe_step", control.boundary_probe_step);
+  control.max_boundary_probes = integer_control(
+    "max_boundary_probes", control.max_boundary_probes);
+  control.rank_tolerance = numeric_control(
+    "rank_tolerance", control.rank_tolerance);
+
+  const fastkpc::MultiPenaltyGcvCudaOptimization result =
+    fastkpc::multi_penalty_gcv_optimize_cuda(
+      REAL(Xs), REAL(Ys), REAL(magic_qr_packed_s), REAL(magic_tau_s),
+      REAL(magic_r_s), pivot_zero_based.data(), roots, matrices, ranks,
+      REAL(initial_log_sp_s), n, q, penalty_count, target_count, control);
+  Rcpp::NumericMatrix selected_log_sp(
+    result.penalty_count, result.target_count);
+  std::copy(result.selected_log_sp.begin(), result.selected_log_sp.end(),
+            selected_log_sp.begin());
+  Rcpp::NumericMatrix gradient(result.penalty_count, result.target_count);
+  std::copy(result.gradient.begin(), result.gradient.end(), gradient.begin());
+  Rcpp::NumericVector hessian(result.hessian.begin(), result.hessian.end());
+  hessian.attr("dim") = Rcpp::IntegerVector::create(
+    result.penalty_count, result.penalty_count, result.target_count);
+  Rcpp::NumericMatrix coefficients(
+    result.coefficient_dim, result.target_count);
+  std::copy(result.coefficients.begin(), result.coefficients.end(),
+            coefficients.begin());
+  Rcpp::NumericMatrix hessian_eigenvalues(
+    result.penalty_count, result.target_count);
+  std::copy(result.hessian_eigenvalues.begin(),
+            result.hessian_eigenvalues.end(),
+            hessian_eigenvalues.begin());
+  Rcpp::CharacterMatrix boundary_status(
+    result.penalty_count, result.target_count);
+  Rcpp::LogicalVector fully_converged(result.target_count);
+  Rcpp::LogicalVector hessian_positive_definite(result.target_count);
+  Rcpp::LogicalVector step_failed(result.target_count);
+  Rcpp::CharacterVector convergence_code(result.target_count);
+  for (int target = 0; target < result.target_count; ++target) {
+    fully_converged[target] = result.fully_converged[target] != 0;
+    hessian_positive_definite[target] =
+      result.hessian_positive_definite[target] != 0;
+    step_failed[target] = result.step_failed[target] != 0;
+    convergence_code[target] = result.optimizer_status[target] != 0 ?
+      "cuda_optimizer_error" :
+      (result.step_failed[target] != 0 ?
+        "step_halving_exhausted" : "fully_converged");
+    for (int penalty = 0; penalty < result.penalty_count; ++penalty) {
+      const int value = result.boundary_status[
+        penalty + result.penalty_count * target];
+      boundary_status(penalty, target) = value == 0 ? "finite-interior" :
+        (value == 1 ? "positive-boundary" :
+          (value == 2 ? "negative-boundary" :
+            (value == 3 ? "finite-after-boundary-probe" : "unresolved")));
+    }
+  }
+  const fastkpc::MultiPenaltyGcvCudaDiagnostics& diagnostics =
+    result.diagnostics;
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") = result.schema_version,
+    Rcpp::Named("rank_path") = result.rank_path,
+    Rcpp::Named("optimizer_path") = result.optimizer_path,
+    Rcpp::Named("n") = result.n,
+    Rcpp::Named("coefficient_dim") = result.coefficient_dim,
+    Rcpp::Named("penalty_count") = result.penalty_count,
+    Rcpp::Named("target_count") = result.target_count,
+    Rcpp::Named("initial_log_sp") = Rcpp::wrap(result.initial_log_sp),
+    Rcpp::Named("selected_log_sp") = selected_log_sp,
+    Rcpp::Named("rss") = Rcpp::wrap(result.rss),
+    Rcpp::Named("edf") = Rcpp::wrap(result.edf),
+    Rcpp::Named("score") = Rcpp::wrap(result.score),
+    Rcpp::Named("condition") = Rcpp::wrap(result.condition),
+    Rcpp::Named("gradient") = gradient,
+    Rcpp::Named("hessian") = hessian,
+    Rcpp::Named("coefficients") = coefficients,
+    Rcpp::Named("rms_gradient") = Rcpp::wrap(result.rms_gradient),
+    Rcpp::Named("hessian_eigenvalues") = hessian_eigenvalues,
+    Rcpp::Named("aggregate_penalty_rank") =
+      Rcpp::wrap(result.aggregate_penalty_rank),
+    Rcpp::Named("numerical_rank") = Rcpp::wrap(result.numerical_rank),
+    Rcpp::Named("solver_info") = Rcpp::wrap(result.solver_info),
+    Rcpp::Named("optimizer_iterations") =
+      Rcpp::wrap(result.optimizer_iterations),
+    Rcpp::Named("score_calls") = Rcpp::wrap(result.score_calls),
+    Rcpp::Named("objective_calls") = Rcpp::wrap(result.objective_calls),
+    Rcpp::Named("step_halving_count") =
+      Rcpp::wrap(result.step_halving_count),
+    Rcpp::Named("newton_trial_count") =
+      Rcpp::wrap(result.newton_trial_count),
+    Rcpp::Named("steepest_descent_trial_count") =
+      Rcpp::wrap(result.steepest_descent_trial_count),
+    Rcpp::Named("boundary_probe_count") =
+      Rcpp::wrap(result.boundary_probe_count),
+    Rcpp::Named("boundary_accepted_count") =
+      Rcpp::wrap(result.boundary_accepted_count),
+    Rcpp::Named("boundary_status") = boundary_status,
+    Rcpp::Named("fully_converged") = fully_converged,
+    Rcpp::Named("hessian_positive_definite") =
+      hessian_positive_definite,
+    Rcpp::Named("step_failed") = step_failed,
+    Rcpp::Named("convergence_code") = convergence_code,
+    Rcpp::Named("optimizer_status") = Rcpp::wrap(result.optimizer_status),
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("schema_version") = diagnostics.schema_version,
+      Rcpp::Named("execution_strategy") = diagnostics.execution_strategy,
+      Rcpp::Named("device_id") = diagnostics.device_id,
+      Rcpp::Named("gpu_name") = diagnostics.gpu_name,
+      Rcpp::Named("prepared_setup_upload_count") =
+        diagnostics.prepared_setup_upload_count,
+      Rcpp::Named("target_batch_upload_count") =
+        diagnostics.target_batch_upload_count,
+      Rcpp::Named("cuda_qt_y_kernel_launch_count") =
+        diagnostics.cuda_qt_y_kernel_launch_count,
+      Rcpp::Named("cuda_optimizer_kernel_launch_count") =
+        diagnostics.cuda_optimizer_kernel_launch_count,
+      Rcpp::Named("cuda_optimizer_target_count") =
+        diagnostics.cuda_optimizer_target_count,
+      Rcpp::Named("cuda_optimizer_objective_count") =
+        diagnostics.cuda_optimizer_objective_count,
+      Rcpp::Named("cuda_penalty_factor_augmentation_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_penalty_factor_augmentation_cycles),
+      Rcpp::Named("cuda_qr_svd_cycles") =
+        static_cast<double>(diagnostics.cuda_qr_svd_cycles),
+      Rcpp::Named("cuda_qr_bidiagonal_reduction_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_qr_bidiagonal_reduction_cycles),
+      Rcpp::Named("cuda_bidiagonal_svd_cycles") =
+        static_cast<double>(diagnostics.cuda_bidiagonal_svd_cycles),
+      Rcpp::Named("cuda_svd_vector_postback_cycles") =
+        static_cast<double>(diagnostics.cuda_svd_vector_postback_cycles),
+      Rcpp::Named("cuda_left_vector_product_cycles") =
+        static_cast<double>(diagnostics.cuda_left_vector_product_cycles),
+      Rcpp::Named("cuda_score_construction_cycles") =
+        static_cast<double>(diagnostics.cuda_score_construction_cycles),
+      Rcpp::Named("cuda_derivative_hessian_cycles") =
+        static_cast<double>(diagnostics.cuda_derivative_hessian_cycles),
+      Rcpp::Named("cuda_complete_evaluation_count") =
+        diagnostics.cuda_complete_evaluation_count,
+      Rcpp::Named("cuda_score_only_evaluation_count") =
+        diagnostics.cuda_score_only_evaluation_count,
+      Rcpp::Named("cuda_guarded_qr_evaluation_count") =
+        diagnostics.cuda_guarded_qr_evaluation_count,
+      Rcpp::Named("cuda_stable_svd_evaluation_count") =
+        diagnostics.cuda_stable_svd_evaluation_count,
+      Rcpp::Named("cuda_selected_evaluation_reuse_count") =
+        diagnostics.cuda_selected_evaluation_reuse_count,
+      Rcpp::Named("cuda_hessian_eigensolver_count") =
+        diagnostics.cuda_hessian_eigensolver_count,
+      Rcpp::Named("cuda_selected_fit_count") =
+        diagnostics.cuda_selected_fit_count,
+      Rcpp::Named("cuda_objective_target_count") =
+        diagnostics.cuda_objective_target_count,
+      Rcpp::Named("cpu_objective_count") = diagnostics.cpu_objective_count,
+      Rcpp::Named("cpu_optimizer_count") = diagnostics.cpu_optimizer_count,
+      Rcpp::Named("cpu_multi_penalty_solve_count") =
+        diagnostics.cpu_multi_penalty_solve_count,
+      Rcpp::Named("fallback_count") = diagnostics.fallback_count,
+      Rcpp::Named("cuda_error_count") = diagnostics.cuda_error_count,
+      Rcpp::Named("svd_nonconverged_count") =
+        diagnostics.svd_nonconverged_count,
+      Rcpp::Named("aggregate_rank_failure_count") =
+        diagnostics.aggregate_rank_failure_count,
+      Rcpp::Named("device_allocation_count") =
+        diagnostics.device_allocation_count,
+      Rcpp::Named("h2d_copy_count") = diagnostics.h2d_copy_count,
+      Rcpp::Named("d2h_copy_count") = diagnostics.d2h_copy_count,
+      Rcpp::Named("target_specific_log_sp") =
+        diagnostics.target_specific_log_sp,
+      Rcpp::Named("true_batched_kernel") = diagnostics.true_batched_kernel,
+      Rcpp::Named("independent_target_states") =
+        diagnostics.independent_target_states,
+      Rcpp::Named("normal_equations_used") =
+        diagnostics.normal_equations_used,
+      Rcpp::Named("double_precision") = diagnostics.double_precision,
+      Rcpp::Named("total_host_ms") = diagnostics.total_host_ms));
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_prepared_create(
+    SEXP Xs,
+    SEXP magic_qr_packed_s,
+    SEXP magic_tau_s,
+    SEXP magic_r_s,
+    SEXP magic_pivot_s,
+    SEXP penalty_roots_s,
+    SEXP penalty_matrices_s,
+    SEXP penalty_ranks_s,
+    SEXP initial_log_sp_s,
+    SEXP target_capacity_s,
+    SEXP device_id_s) {
+  BEGIN_RCPP
+  if (!Rf_isReal(Xs) || !Rf_isMatrix(Xs) ||
+      !Rf_isReal(magic_qr_packed_s) || !Rf_isMatrix(magic_qr_packed_s) ||
+      !Rf_isReal(magic_tau_s) ||
+      !Rf_isReal(magic_r_s) || !Rf_isMatrix(magic_r_s) ||
+      !Rf_isInteger(magic_pivot_s) ||
+      !Rf_isNewList(penalty_roots_s) ||
+      !Rf_isNewList(penalty_matrices_s) ||
+      !Rf_isInteger(penalty_ranks_s) || !Rf_isReal(initial_log_sp_s)) {
+    Rcpp::stop(
+      "persistent multi-penalty CUDA setup has invalid storage types");
+  }
+  Rcpp::NumericMatrix X(Xs);
+  Rcpp::NumericMatrix qr_packed(magic_qr_packed_s);
+  Rcpp::NumericVector tau(magic_tau_s);
+  Rcpp::NumericMatrix magic_r(magic_r_s);
+  Rcpp::IntegerVector pivot(magic_pivot_s);
+  Rcpp::List penalty_roots(penalty_roots_s);
+  Rcpp::List penalty_matrices(penalty_matrices_s);
+  Rcpp::IntegerVector penalty_ranks(penalty_ranks_s);
+  Rcpp::NumericVector initial_log_sp(initial_log_sp_s);
+  const int n = X.nrow();
+  const int q = X.ncol();
+  const int penalty_count = penalty_roots.size();
+  const int target_capacity = Rcpp::as<int>(target_capacity_s);
+  const int device_id = Rcpp::as<int>(device_id_s);
+  if (n <= q || q <= 0 || qr_packed.nrow() != n ||
+      qr_packed.ncol() != q || tau.size() != q ||
+      magic_r.nrow() != q || magic_r.ncol() != q || pivot.size() != q ||
+      penalty_count <= 1 || penalty_matrices.size() != penalty_count ||
+      penalty_ranks.size() != penalty_count ||
+      initial_log_sp.size() != penalty_count || target_capacity <= 1 ||
+      !all_finite(X) || !all_finite(qr_packed) ||
+      !all_finite(magic_r) || !all_finite_vector(tau) ||
+      !all_finite_vector(initial_log_sp)) {
+    Rcpp::stop(
+      "persistent multi-penalty CUDA setup dimensions are inconsistent");
+  }
+  std::vector<int> pivot_zero_based(static_cast<std::size_t>(q));
+  std::vector<unsigned char> pivot_seen(static_cast<std::size_t>(q), 0);
+  for (int index = 0; index < q; ++index) {
+    const int value = pivot[index] - 1;
+    if (value < 0 || value >= q ||
+        pivot_seen[static_cast<std::size_t>(value)] != 0) {
+      Rcpp::stop("persistent multi-penalty CUDA QR pivot is invalid");
+    }
+    pivot_seen[static_cast<std::size_t>(value)] = 1;
+    pivot_zero_based[static_cast<std::size_t>(index)] = value;
+  }
+  std::vector<std::vector<double>> roots;
+  std::vector<std::vector<double>> matrices;
+  std::vector<int> ranks;
+  roots.reserve(static_cast<std::size_t>(penalty_count));
+  matrices.reserve(static_cast<std::size_t>(penalty_count));
+  ranks.reserve(static_cast<std::size_t>(penalty_count));
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    SEXP root_s = penalty_roots[penalty];
+    SEXP matrix_s = penalty_matrices[penalty];
+    if (!Rf_isReal(root_s) || !Rf_isMatrix(root_s) ||
+        !Rf_isReal(matrix_s) || !Rf_isMatrix(matrix_s)) {
+      Rcpp::stop(
+        "persistent multi-penalty CUDA penalties must be matrices");
+    }
+    Rcpp::NumericMatrix root(root_s);
+    Rcpp::NumericMatrix matrix(matrix_s);
+    const int rank = penalty_ranks[penalty];
+    if (root.nrow() != q || root.ncol() != rank || rank <= 0 ||
+        matrix.nrow() != q || matrix.ncol() != q ||
+        !all_finite(root) || !all_finite(matrix)) {
+      Rcpp::stop(
+        "persistent multi-penalty CUDA penalty geometry is invalid");
+    }
+    roots.emplace_back(REAL(root_s), REAL(root_s) + XLENGTH(root_s));
+    matrices.emplace_back(
+      REAL(matrix_s), REAL(matrix_s) + XLENGTH(matrix_s));
+    ranks.push_back(rank);
+  }
+  auto* holder = new MultiPenaltyCudaPreparedHolder{
+    std::shared_ptr<fastkpc::MultiPenaltyGcvCudaPrepared>(),
+    fixed_sp_current_pid()
+  };
+  SEXP ext = PROTECT(R_MakeExternalPtr(
+    holder, multi_penalty_cuda_prepared_tag(), R_NilValue));
+  R_RegisterCFinalizerEx(
+    ext, multi_penalty_cuda_prepared_finalizer, TRUE);
+  try {
+    holder->value = fastkpc::create_multi_penalty_gcv_cuda_prepared(
+      REAL(Xs), REAL(magic_qr_packed_s), REAL(magic_tau_s),
+      REAL(magic_r_s), pivot_zero_based.data(), roots, matrices, ranks,
+      REAL(initial_log_sp_s), n, q, penalty_count, target_capacity,
+      device_id);
+  } catch (...) {
+    delete holder;
+    R_ClearExternalPtr(ext);
+    UNPROTECT(1);
+    throw;
+  }
+  UNPROTECT(1);
+  return ext;
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_prepared_info(
+    SEXP prepared_s) {
+  BEGIN_RCPP
+  MultiPenaltyCudaPreparedHolder* holder =
+    multi_penalty_cuda_prepared_holder(prepared_s, true);
+  const fastkpc::MultiPenaltyGcvCudaPreparedInfo info =
+    fastkpc::multi_penalty_gcv_cuda_prepared_info(holder->value);
+  return Rcpp::List::create(
+    Rcpp::Named("device_id") = info.device_id,
+    Rcpp::Named("gpu_name") = info.gpu_name,
+    Rcpp::Named("n") = info.n,
+    Rcpp::Named("coefficient_dim") = info.coefficient_dim,
+    Rcpp::Named("penalty_count") = info.penalty_count,
+    Rcpp::Named("target_capacity") = info.target_capacity,
+    Rcpp::Named("setup_upload_count") = info.setup_upload_count,
+    Rcpp::Named("setup_h2d_bytes") =
+      static_cast<double>(info.setup_h2d_bytes),
+    Rcpp::Named("device_allocation_count") = info.device_allocation_count,
+    Rcpp::Named("workspace_grow_count") = info.workspace_grow_count,
+    Rcpp::Named("solve_count") = info.solve_count,
+    Rcpp::Named("cublas_gemm_count") = info.cublas_gemm_count,
+    Rcpp::Named("residual_kernel_count") = info.residual_kernel_count,
+    Rcpp::Named("residual_shadow_d2h_count") =
+      info.residual_shadow_d2h_count,
+    Rcpp::Named("residual_shadow_d2h_bytes") =
+      static_cast<double>(info.residual_shadow_d2h_bytes),
+    Rcpp::Named("residual_slot_leased") = info.residual_slot_leased,
+    Rcpp::Named("generation") = static_cast<double>(info.generation));
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_prepared_free(
+    SEXP prepared_s) {
+  BEGIN_RCPP
+  MultiPenaltyCudaPreparedHolder* holder =
+    multi_penalty_cuda_prepared_holder(prepared_s, false);
+  holder->value.reset();
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_batch(
+    SEXP prepared_s,
+    SEXP Ys,
+    SEXP target_keys_s,
+    SEXP control_s) {
+  BEGIN_RCPP
+  MultiPenaltyCudaPreparedHolder* prepared_holder =
+    multi_penalty_cuda_prepared_holder(prepared_s, true);
+  if (!Rf_isReal(Ys) || !Rf_isMatrix(Ys) ||
+      !Rf_isString(target_keys_s) || !Rf_isNewList(control_s)) {
+    Rcpp::stop(
+      "persistent multi-penalty CUDA batch has invalid storage types");
+  }
+  Rcpp::NumericMatrix Y(Ys);
+  Rcpp::CharacterVector target_keys_r(target_keys_s);
+  const fastkpc::MultiPenaltyGcvCudaPreparedInfo prepared_info =
+    fastkpc::multi_penalty_gcv_cuda_prepared_info(prepared_holder->value);
+  const int target_count = Y.ncol();
+  if (Y.nrow() != prepared_info.n || target_count <= 1 ||
+      target_keys_r.size() != target_count || !all_finite(Y)) {
+    Rcpp::stop(
+      "persistent multi-penalty CUDA batch dimensions are inconsistent");
+  }
+  std::vector<std::string> target_keys;
+  target_keys.reserve(static_cast<std::size_t>(target_count));
+  for (int target = 0; target < target_count; ++target) {
+    if (target_keys_r[target] == NA_STRING) {
+      Rcpp::stop("persistent multi-penalty target keys must not be missing");
+    }
+    const std::string key = Rcpp::as<std::string>(target_keys_r[target]);
+    if (key.empty()) {
+      Rcpp::stop("persistent multi-penalty target keys must be nonempty");
+    }
+    target_keys.push_back(key);
+  }
+  const fastkpc::MultiPenaltyGcvCudaOptimizerControl control =
+    multi_penalty_cuda_optimizer_control(Rcpp::List(control_s));
+  fastkpc::MultiPenaltyGcvCudaBatchResult result =
+    fastkpc::multi_penalty_gcv_cuda_optimize_batch(
+      prepared_holder->value, REAL(Ys), Y.nrow(), target_count,
+      target_keys, control);
+  return multi_penalty_cuda_batch_result_to_list(std::move(result));
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_multi(
+    SEXP requests_s,
+    SEXP concurrency_s,
+    SEXP control_s) {
+  BEGIN_RCPP
+  if (!Rf_isNewList(requests_s) || !Rf_isNewList(control_s)) {
+    Rcpp::stop(
+      "multi-setup multi-penalty CUDA inputs have invalid storage types");
+  }
+  Rcpp::List request_values(requests_s);
+  const int concurrency = Rcpp::as<int>(concurrency_s);
+  if (request_values.size() <= 0 || concurrency <= 0 ||
+      concurrency > fastkpc::kMultiPenaltyGcvMaximumConcurrentSetups) {
+    Rcpp::stop(
+      "multi-setup multi-penalty CUDA concurrency must be in [1, 32]");
+  }
+  const fastkpc::MultiPenaltyGcvCudaOptimizerControl control =
+    multi_penalty_cuda_optimizer_control(Rcpp::List(control_s));
+  std::vector<fastkpc::MultiPenaltyGcvCudaMultiRequest> requests;
+  requests.reserve(static_cast<std::size_t>(request_values.size()));
+  std::vector<MultiPenaltyCudaPreparedHolder*> observed_holders;
+  observed_holders.reserve(static_cast<std::size_t>(request_values.size()));
+  for (R_xlen_t index = 0; index < request_values.size(); ++index) {
+    SEXP request_s = request_values[index];
+    if (!Rf_isNewList(request_s)) {
+      Rcpp::stop("each multi-setup multi-penalty request must be a list");
+    }
+    Rcpp::List request(request_s);
+    if (!request.containsElementNamed("handle") ||
+        !request.containsElementNamed("Y") ||
+        !request.containsElementNamed("target_keys")) {
+      Rcpp::stop("multi-setup multi-penalty request fields are incomplete");
+    }
+    SEXP prepared_s = request["handle"];
+    SEXP Ys = request["Y"];
+    SEXP target_keys_s = request["target_keys"];
+    MultiPenaltyCudaPreparedHolder* prepared_holder =
+      multi_penalty_cuda_prepared_holder(prepared_s, true);
+    if (std::find(
+          observed_holders.begin(), observed_holders.end(),
+          prepared_holder) != observed_holders.end()) {
+      Rcpp::stop(
+        "multi-setup multi-penalty requests must use distinct handles");
+    }
+    observed_holders.push_back(prepared_holder);
+    if (!Rf_isReal(Ys) || !Rf_isMatrix(Ys) ||
+        !Rf_isString(target_keys_s)) {
+      Rcpp::stop(
+        "multi-setup multi-penalty request payload types are invalid");
+    }
+    Rcpp::NumericMatrix Y(Ys);
+    Rcpp::CharacterVector target_keys_r(target_keys_s);
+    const fastkpc::MultiPenaltyGcvCudaPreparedInfo prepared_info =
+      fastkpc::multi_penalty_gcv_cuda_prepared_info(prepared_holder->value);
+    const int target_count = Y.ncol();
+    if (prepared_info.residual_slot_leased || Y.nrow() != prepared_info.n ||
+        target_count <= 1 || target_count > prepared_info.target_capacity ||
+        target_keys_r.size() != target_count || !all_finite(Y)) {
+      Rcpp::stop(
+        "multi-setup multi-penalty request dimensions are inconsistent");
+    }
+    fastkpc::MultiPenaltyGcvCudaMultiRequest value;
+    value.prepared = prepared_holder->value;
+    value.Y.assign(REAL(Ys), REAL(Ys) + XLENGTH(Ys));
+    value.n = Y.nrow();
+    value.target_count = target_count;
+    value.target_keys.reserve(static_cast<std::size_t>(target_count));
+    for (int target = 0; target < target_count; ++target) {
+      if (target_keys_r[target] == NA_STRING) {
+        Rcpp::stop("multi-setup multi-penalty target keys must not be missing");
+      }
+      const std::string key = Rcpp::as<std::string>(target_keys_r[target]);
+      if (key.empty()) {
+        Rcpp::stop("multi-setup multi-penalty target keys must be nonempty");
+      }
+      value.target_keys.push_back(key);
+    }
+    value.control = control;
+    requests.push_back(std::move(value));
+  }
+
+  fastkpc::MultiPenaltyGcvCudaMultiResult result =
+    fastkpc::multi_penalty_gcv_cuda_optimize_multi(
+      std::move(requests), concurrency);
+  Rcpp::List setups(result.setups.size());
+  for (std::size_t index = 0; index < result.setups.size(); ++index) {
+    setups[index] = multi_penalty_cuda_batch_result_to_list(
+      std::move(result.setups[index]));
+  }
+  const fastkpc::MultiPenaltyGcvCudaMultiDiagnostics& diagnostics =
+    result.diagnostics;
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") = result.schema_version,
+    Rcpp::Named("setups") = setups,
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("schema_version") = diagnostics.schema_version,
+      Rcpp::Named("execution_strategy") = diagnostics.execution_strategy,
+      Rcpp::Named("setup_count") = diagnostics.setup_count,
+      Rcpp::Named("target_count") = diagnostics.target_count,
+      Rcpp::Named("requested_concurrency") =
+        diagnostics.requested_concurrency,
+      Rcpp::Named("worker_count") = diagnostics.worker_count,
+      Rcpp::Named("max_host_calls_in_flight") =
+        diagnostics.max_host_calls_in_flight,
+      Rcpp::Named("setup_stream_count") = diagnostics.setup_stream_count,
+      Rcpp::Named("summed_setup_host_ms") =
+        diagnostics.summed_setup_host_ms,
+      Rcpp::Named("wall_host_ms") = diagnostics.wall_host_ms,
+      Rcpp::Named("host_overlap_factor") = diagnostics.host_overlap_factor));
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_residual_info(
+    SEXP residual_s) {
+  BEGIN_RCPP
+  MultiPenaltyCudaResidualHolder* holder =
+    multi_penalty_cuda_residual_holder(residual_s, true);
+  const fastkpc::MultiPenaltyGcvCudaResidualInfo info =
+    fastkpc::multi_penalty_gcv_cuda_residual_info(holder->value);
+  return Rcpp::List::create(
+    Rcpp::Named("n") = info.n,
+    Rcpp::Named("coefficient_dim") = info.coefficient_dim,
+    Rcpp::Named("target_count") = info.target_count,
+    Rcpp::Named("device_id") = info.device_id,
+    Rcpp::Named("target_keys") = Rcpp::wrap(info.target_keys),
+    Rcpp::Named("optimizer_status") = Rcpp::wrap(info.optimizer_status),
+    Rcpp::Named("device_resident") = info.device_resident,
+    Rcpp::Named("released") = info.released,
+    Rcpp::Named("generation") = static_cast<double>(info.generation));
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_residual_shadow(
+    SEXP residual_s) {
+  BEGIN_RCPP
+  MultiPenaltyCudaResidualHolder* holder =
+    multi_penalty_cuda_residual_holder(residual_s, true);
+  const fastkpc::MultiPenaltyGcvCudaResidualShadow shadow =
+    fastkpc::materialize_multi_penalty_gcv_cuda_residual_shadow(
+      holder->value);
+  Rcpp::NumericMatrix coefficients(
+    shadow.coefficient_dim, shadow.target_count);
+  Rcpp::NumericMatrix fitted(shadow.n, shadow.target_count);
+  Rcpp::NumericMatrix residuals(shadow.n, shadow.target_count);
+  std::copy(shadow.coefficients.begin(), shadow.coefficients.end(),
+            coefficients.begin());
+  std::copy(shadow.fitted.begin(), shadow.fitted.end(), fitted.begin());
+  std::copy(shadow.residuals.begin(), shadow.residuals.end(),
+            residuals.begin());
+  return Rcpp::List::create(
+    Rcpp::Named("coefficients") = coefficients,
+    Rcpp::Named("fitted") = fitted,
+    Rcpp::Named("residuals") = residuals);
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_residual_release(
+    SEXP residual_s) {
+  BEGIN_RCPP
+  MultiPenaltyCudaResidualHolder* holder =
+    multi_penalty_cuda_residual_holder(residual_s, true);
+  fastkpc::release_multi_penalty_gcv_cuda_residual(holder->value);
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_residual_free(
+    SEXP residual_s) {
+  BEGIN_RCPP
+  MultiPenaltyCudaResidualHolder* holder =
+    multi_penalty_cuda_residual_holder(residual_s, false);
+  if (holder == nullptr) return R_NilValue;
+  if (holder->value) {
+    fastkpc::release_multi_penalty_gcv_cuda_residual(holder->value);
+    holder->value.reset();
+  }
+  delete holder;
+  R_ClearExternalPtr(residual_s);
+  return R_NilValue;
+  END_RCPP
+}
+
 extern "C" SEXP C_full_cuda_ci_single_penalty_mroot_cuda(
     SEXP penalty_matrix_s,
     SEXP penalty_rank_s,
@@ -11539,6 +12650,17 @@ static const R_CallMethodDef call_methods[] = {
   {"C_mgcv_extract_gpu_test_checked_augmented_rows", reinterpret_cast<DL_FUNC>(&C_mgcv_extract_gpu_test_checked_augmented_rows), 2},
   {"C_full_cuda_ci_multi_penalty_gcv_evaluate_cpp", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_evaluate_cpp), 9},
   {"C_full_cuda_ci_multi_penalty_gcv_optimize_cpp", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_optimize_cpp), 8},
+  {"C_full_cuda_ci_multi_penalty_gcv_evaluate_cuda", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_evaluate_cuda), 11},
+  {"C_full_cuda_ci_multi_penalty_gcv_optimize_cuda", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_optimize_cuda), 11},
+  {"C_full_cuda_ci_multi_penalty_gcv_prepared_create", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_prepared_create), 11},
+  {"C_full_cuda_ci_multi_penalty_gcv_prepared_info", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_prepared_info), 1},
+  {"C_full_cuda_ci_multi_penalty_gcv_prepared_free", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_prepared_free), 1},
+  {"C_full_cuda_ci_multi_penalty_gcv_optimize_batch", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_optimize_batch), 4},
+  {"C_full_cuda_ci_multi_penalty_gcv_optimize_multi", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_optimize_multi), 3},
+  {"C_full_cuda_ci_multi_penalty_gcv_residual_info", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_residual_info), 1},
+  {"C_full_cuda_ci_multi_penalty_gcv_residual_shadow", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_residual_shadow), 1},
+  {"C_full_cuda_ci_multi_penalty_gcv_residual_release", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_residual_release), 1},
+  {"C_full_cuda_ci_multi_penalty_gcv_residual_free", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_residual_free), 1},
   {"C_full_cuda_ci_single_penalty_mroot_cuda", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_single_penalty_mroot_cuda), 3},
   {"C_full_cuda_ci_single_penalty_gcv_cuda", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_single_penalty_gcv_cuda), 15},
   {"C_full_cuda_ci_single_penalty_gcv_multi_cuda", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_single_penalty_gcv_multi_cuda), 2},

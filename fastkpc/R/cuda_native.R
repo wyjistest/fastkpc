@@ -1656,6 +1656,156 @@ full_cuda_ci_multi_penalty_gcv_optimize_cpp_native <- function(
   )
 }
 
+full_cuda_ci_multi_penalty_gcv_evaluate_cuda_native <- function(
+    X, Y, magic_qr_packed, magic_tau, magic_r, magic_pivot,
+    penalty_roots, penalty_matrices, penalty_ranks, log_sp,
+    rank_tolerance = sqrt(.Machine$double.eps)) {
+  load_fastkpc_cuda_native()
+  X <- as.matrix(X)
+  Y <- as.matrix(Y)
+  magic_qr_packed <- as.matrix(magic_qr_packed)
+  magic_r <- as.matrix(magic_r)
+  log_sp <- as.matrix(log_sp)
+  penalty_roots <- lapply(penalty_roots, function(value) {
+    value <- as.matrix(value)
+    storage.mode(value) <- "double"
+    value
+  })
+  penalty_matrices <- lapply(penalty_matrices, function(value) {
+    value <- as.matrix(value)
+    storage.mode(value) <- "double"
+    value
+  })
+  storage.mode(X) <- "double"
+  storage.mode(Y) <- "double"
+  storage.mode(magic_qr_packed) <- "double"
+  storage.mode(magic_r) <- "double"
+  storage.mode(log_sp) <- "double"
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_evaluate_cuda",
+    X, Y, magic_qr_packed, as.double(magic_tau), magic_r,
+    as.integer(magic_pivot), penalty_roots, penalty_matrices,
+    as.integer(penalty_ranks), log_sp, as.double(rank_tolerance),
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_optimize_cuda_native <- function(
+    X, Y, magic_qr_packed, magic_tau, magic_r, magic_pivot,
+    penalty_roots, penalty_matrices, penalty_ranks, initial_log_sp,
+    control = list()) {
+  load_fastkpc_cuda_native()
+  X <- as.matrix(X)
+  Y <- as.matrix(Y)
+  magic_qr_packed <- as.matrix(magic_qr_packed)
+  magic_r <- as.matrix(magic_r)
+  penalty_roots <- lapply(penalty_roots, function(value) {
+    value <- as.matrix(value)
+    storage.mode(value) <- "double"
+    value
+  })
+  penalty_matrices <- lapply(penalty_matrices, function(value) {
+    value <- as.matrix(value)
+    storage.mode(value) <- "double"
+    value
+  })
+  storage.mode(X) <- "double"
+  storage.mode(Y) <- "double"
+  storage.mode(magic_qr_packed) <- "double"
+  storage.mode(magic_r) <- "double"
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_optimize_cuda",
+    X, Y, magic_qr_packed, as.double(magic_tau), magic_r,
+    as.integer(magic_pivot), penalty_roots, penalty_matrices,
+    as.integer(penalty_ranks), as.double(initial_log_sp), control,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_prepared_create_native <- function(
+    prepared, target_capacity, device_id = 0L) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_prepared_create",
+    prepared$X, prepared$magic_qr_packed, as.double(prepared$magic_tau),
+    prepared$magic_r, as.integer(prepared$magic_pivot),
+    prepared$penalty_roots, prepared$penalty_matrices,
+    as.integer(prepared$penalty_ranks),
+    as.double(prepared$initial_log_sp), as.integer(target_capacity),
+    as.integer(device_id), PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_prepared_info_native <- function(handle) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_prepared_info", handle,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_prepared_free_native <- function(handle) {
+  load_fastkpc_cuda_native()
+  invisible(.Call(
+    "C_full_cuda_ci_multi_penalty_gcv_prepared_free", handle,
+    PACKAGE = "fastkpc_cuda"
+  ))
+}
+
+full_cuda_ci_multi_penalty_gcv_optimize_batch_native <- function(
+    handle, Y, target_keys, control = list()) {
+  load_fastkpc_cuda_native()
+  Y <- as.matrix(Y)
+  storage.mode(Y) <- "double"
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_optimize_batch",
+    handle, Y, as.character(target_keys), control,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_optimize_multi_native <- function(
+    requests, concurrency, control = list()) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_optimize_multi",
+    requests, as.integer(concurrency), control,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_residual_info_native <- function(token) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_residual_info", token,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_residual_shadow_native <- function(token) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_residual_shadow", token,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_residual_release_native <- function(token) {
+  load_fastkpc_cuda_native()
+  invisible(.Call(
+    "C_full_cuda_ci_multi_penalty_gcv_residual_release", token,
+    PACKAGE = "fastkpc_cuda"
+  ))
+}
+
+full_cuda_ci_multi_penalty_gcv_residual_free_native <- function(token) {
+  load_fastkpc_cuda_native()
+  invisible(.Call(
+    "C_full_cuda_ci_multi_penalty_gcv_residual_free", token,
+    PACKAGE = "fastkpc_cuda"
+  ))
+}
+
 full_cuda_ci_single_penalty_gcv_cuda <- function(
     X, Y, rhs_transform, eigenvalues, magic_qr_packed, magic_tau, magic_r,
     magic_penalty_root, magic_penalty_matrix, target_ids, penalty_rank, initial_sp,

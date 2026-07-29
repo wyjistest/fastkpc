@@ -1,0 +1,2848 @@
+#include "mgcv_multi_penalty_gcv.hpp"
+
+#define FASTKPC_LAPACK_SMALL_MAX_COLUMNS 64
+#define FASTKPC_LAPACK_SMALL_NAMESPACE lapack312_multi
+#include "lapack_312_small_dgesdd.cuh"
+#undef FASTKPC_LAPACK_SMALL_NAMESPACE
+#include "third_party/glibc_2_35_exp_fma.cuh"
+
+#include <cublas_v2.h>
+#include <cuda_runtime.h>
+#include <math_constants.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <exception>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace fastkpc {
+namespace {
+
+constexpr int kBlockSize = 64;
+constexpr int kMaximumRows = 128;
+constexpr double kLapackEpsilon =
+  1.1102230246251565404236316680908203125e-16;
+constexpr double kDenominatorFloor = 1e-8;
+
+void check_cuda(cudaError_t status, const char* stage) {
+  if (status != cudaSuccess) {
+    throw std::runtime_error(
+      std::string(stage) + ": " + cudaGetErrorString(status));
+  }
+}
+
+void check_cublas(cublasStatus_t status, const char* stage) {
+  if (status != CUBLAS_STATUS_SUCCESS) {
+    throw std::runtime_error(
+      std::string(stage) + ": cuBLAS status " +
+      std::to_string(static_cast<int>(status)));
+  }
+}
+
+template <typename T>
+class DeviceBuffer {
+ public:
+  DeviceBuffer() = default;
+  DeviceBuffer(const DeviceBuffer&) = delete;
+  DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+  ~DeviceBuffer() {
+    if (owns_data_ && data_ != nullptr) cudaFree(data_);
+  }
+
+  void allocate(std::size_t count,
+                MultiPenaltyGcvCudaDiagnostics* diagnostics) {
+    if (count == 0) return;
+    check_cuda(cudaMalloc(
+      reinterpret_cast<void**>(&data_), count * sizeof(T)),
+      "allocate multi-penalty GCV buffer");
+    count_ = count;
+    owns_data_ = true;
+    diagnostics->device_allocation_count += 1;
+  }
+
+  std::size_t bind_from_arena(
+      unsigned char* arena,
+      std::size_t offset,
+      std::size_t count) {
+    if (arena == nullptr || data_ != nullptr || count == 0) {
+      throw std::runtime_error("multi-penalty CUDA arena binding is invalid");
+    }
+    constexpr std::size_t alignment = alignof(T);
+    const std::size_t aligned =
+      (offset + alignment - 1) & ~(alignment - 1);
+    data_ = reinterpret_cast<T*>(arena + aligned);
+    count_ = count;
+    owns_data_ = false;
+    return aligned + count * sizeof(T);
+  }
+
+  T* get() { return data_; }
+  const T* get() const { return data_; }
+  std::size_t count() const { return count_; }
+
+ private:
+  T* data_ = nullptr;
+  std::size_t count_ = 0;
+  bool owns_data_ = false;
+};
+
+template <typename T>
+std::size_t arena_advance(std::size_t offset, std::size_t count) {
+  constexpr std::size_t alignment = alignof(T);
+  const std::size_t aligned =
+    (offset + alignment - 1) & ~(alignment - 1);
+  return aligned + count * sizeof(T);
+}
+
+class Stream {
+ public:
+  Stream() {
+    check_cuda(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking),
+               "create multi-penalty GCV stream");
+  }
+  Stream(const Stream&) = delete;
+  Stream& operator=(const Stream&) = delete;
+  ~Stream() {
+    if (stream_ != nullptr) cudaStreamDestroy(stream_);
+  }
+  cudaStream_t get() const { return stream_; }
+
+ private:
+  cudaStream_t stream_ = nullptr;
+};
+
+class Event {
+ public:
+  Event() {
+    check_cuda(cudaEventCreateWithFlags(
+      &event_, cudaEventDisableTiming),
+      "create multi-penalty GCV completion event");
+  }
+  Event(const Event&) = delete;
+  Event& operator=(const Event&) = delete;
+  ~Event() {
+    if (event_ != nullptr) cudaEventDestroy(event_);
+  }
+  cudaEvent_t get() const { return event_; }
+
+ private:
+  cudaEvent_t event_ = nullptr;
+};
+
+class CublasHandle {
+ public:
+  explicit CublasHandle(cudaStream_t stream) {
+    check_cublas(cublasCreate(&handle_),
+                 "create multi-penalty GCV cuBLAS handle");
+    check_cublas(cublasSetStream(handle_, stream),
+                 "bind multi-penalty GCV cuBLAS stream");
+  }
+  CublasHandle(const CublasHandle&) = delete;
+  CublasHandle& operator=(const CublasHandle&) = delete;
+  ~CublasHandle() {
+    if (handle_ != nullptr) cublasDestroy(handle_);
+  }
+  cublasHandle_t get() const { return handle_; }
+
+ private:
+  cublasHandle_t handle_ = nullptr;
+};
+
+template <typename T>
+void upload_async(DeviceBuffer<T>* destination,
+                  const T* source,
+                  std::size_t count,
+                  cudaStream_t stream,
+                  MultiPenaltyGcvCudaDiagnostics* diagnostics) {
+  if (count == 0) return;
+  check_cuda(cudaMemcpyAsync(
+    destination->get(), source, count * sizeof(T),
+    cudaMemcpyHostToDevice, stream),
+    "upload multi-penalty GCV input");
+  diagnostics->h2d_copy_count += 1;
+}
+
+__device__ double rounded_multiply_add(double accumulator,
+                                       double left,
+                                       double right) {
+  return __dadd_rn(accumulator, __dmul_rn(left, right));
+}
+
+__global__ void target_squared_norm_kernel(
+    const double* Y, double* squared_norm, int n, int target_count) {
+  const int target = blockIdx.x * blockDim.x + threadIdx.x;
+  if (target >= target_count) return;
+  double value = 0.0;
+  const double* y = Y + static_cast<std::size_t>(n) * target;
+  for (int row = 0; row < n; ++row) {
+    value = rounded_multiply_add(value, y[row], y[row]);
+  }
+  squared_norm[target] = value;
+}
+
+__global__ void magic_qt_y_kernel(
+    const double* qr_packed,
+    const double* tau,
+    const double* Y,
+    double* work,
+    double* y0,
+    int n,
+    int q,
+    int target_count) {
+  const int target = blockIdx.x * blockDim.x + threadIdx.x;
+  if (target >= target_count) return;
+  double* target_work = work + static_cast<std::size_t>(n) * target;
+  const double* target_y = Y + static_cast<std::size_t>(n) * target;
+  for (int row = 0; row < n; ++row) target_work[row] = target_y[row];
+  for (int reflector = 0; reflector < q; ++reflector) {
+    double dot = target_work[reflector];
+    const double* vector =
+      qr_packed + static_cast<std::size_t>(n) * reflector;
+    for (int row = reflector + 1; row < n; ++row) {
+      dot = rounded_multiply_add(dot, vector[row], target_work[row]);
+    }
+    const double scale = __dmul_rn(-tau[reflector], dot);
+    target_work[reflector] = __dadd_rn(target_work[reflector], scale);
+    for (int row = reflector + 1; row < n; ++row) {
+      target_work[row] = rounded_multiply_add(
+        target_work[row], vector[row], scale);
+    }
+  }
+  for (int row = 0; row < q; ++row) {
+    y0[row + q * target] = target_work[row];
+  }
+}
+
+__device__ void swap_double(double* left, double* right) {
+  const double saved = *left;
+  *left = *right;
+  *right = saved;
+}
+
+__device__ int dpstf2_upper_block(
+    double* matrix, int* pivot, double* work, int q) {
+  for (int index = threadIdx.x; index < q; index += blockDim.x) {
+    pivot[index] = index + 1;
+    work[index] = 0.0;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    int pivot_index = 0;
+    double diagonal = matrix[0];
+    for (int index = 1; index < q; ++index) {
+      const double candidate = matrix[index + q * index];
+      if (candidate > diagonal) {
+        pivot_index = index;
+        diagonal = candidate;
+      }
+    }
+    pivot[q] = diagonal <= 0.0 || isnan(diagonal) ? 0 : -1;
+    pivot[q + 1] = pivot_index;
+    work[2 * q] = __dmul_rn(
+      __dmul_rn(static_cast<double>(q), kLapackEpsilon), diagonal);
+    work[2 * q + 1] = diagonal;
+  }
+  __syncthreads();
+  if (pivot[q] == 0) return 0;
+  for (int column = 0; column < q; ++column) {
+    for (int index = column + threadIdx.x; index < q;
+         index += blockDim.x) {
+      if (column > 0) {
+        const double previous = matrix[(column - 1) + q * index];
+        work[index] = rounded_multiply_add(
+          work[index], previous, previous);
+      }
+      work[q + index] = __dadd_rn(
+        matrix[index + q * index], -work[index]);
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      int pivot_index = pivot[q + 1];
+      double diagonal = work[2 * q + 1];
+      if (column > 0) {
+        pivot_index = column;
+        diagonal = work[q + column];
+        for (int index = column + 1; index < q; ++index) {
+          const double candidate = work[q + index];
+          if (candidate > diagonal) {
+            pivot_index = index;
+            diagonal = candidate;
+          }
+        }
+        if (diagonal <= work[2 * q] || isnan(diagonal)) {
+          matrix[column + q * column] = diagonal;
+          pivot[q] = column;
+        }
+      }
+      if (pivot[q] < 0) {
+        if (column != pivot_index) {
+          matrix[pivot_index + q * pivot_index] =
+            matrix[column + q * column];
+          for (int row = 0; row < column; ++row) {
+            swap_double(matrix + row + q * column,
+                        matrix + row + q * pivot_index);
+          }
+          for (int trailing = pivot_index + 1; trailing < q; ++trailing) {
+            swap_double(matrix + column + q * trailing,
+                        matrix + pivot_index + q * trailing);
+          }
+          for (int index = column + 1; index < pivot_index; ++index) {
+            swap_double(matrix + column + q * index,
+                        matrix + index + q * pivot_index);
+          }
+          swap_double(work + column, work + pivot_index);
+          const int saved_pivot = pivot[pivot_index];
+          pivot[pivot_index] = pivot[column];
+          pivot[column] = saved_pivot;
+        }
+        diagonal = sqrt(diagonal);
+        matrix[column + q * column] = diagonal;
+        work[2 * q + 1] = diagonal;
+        pivot[q + 1] = pivot_index;
+      }
+    }
+    __syncthreads();
+    if (pivot[q] >= 0) return pivot[q];
+    const double diagonal = work[2 * q + 1];
+    if (column + 1 < q) {
+      for (int trailing = column + 1 + threadIdx.x; trailing < q;
+           trailing += blockDim.x) {
+        double dot = 0.0;
+        for (int row = 0; row < column; ++row) {
+          dot = rounded_multiply_add(
+            dot, matrix[row + q * trailing],
+            matrix[row + q * column]);
+        }
+        matrix[column + q * trailing] = __ddiv_rn(
+          __dadd_rn(matrix[column + q * trailing], -dot), diagonal);
+      }
+    }
+    __syncthreads();
+  }
+  return q;
+}
+
+struct DeviceTargetEvaluation {
+  double rss;
+  double edf;
+  double score;
+  double condition;
+  double gradient[kMultiPenaltyGcvMaximumPenaltyCount];
+  double hessian[
+    kMultiPenaltyGcvMaximumPenaltyCount *
+    kMultiPenaltyGcvMaximumPenaltyCount];
+  double coefficients[kMultiPenaltyGcvMaximumCoefficientDim];
+  int aggregate_penalty_rank;
+  int numerical_rank;
+  int solver_info;
+  int decomposition_route;
+};
+
+enum DeviceDecompositionRoute : int {
+  kDecompositionUnknown = 0,
+  kDecompositionGuardedQr = 1,
+  kDecompositionStableSvd = 2
+};
+
+struct DeviceEvaluationWorkspace {
+  lapack312_multi::Workspace decomposition;
+  double metric[
+    kMultiPenaltyGcvMaximumPenaltyCount *
+    kMultiPenaltyGcvMaximumCoefficientDim *
+    kMultiPenaltyGcvMaximumCoefficientDim];
+  double influence[
+    kMultiPenaltyGcvMaximumPenaltyCount *
+    kMultiPenaltyGcvMaximumCoefficientDim *
+    kMultiPenaltyGcvMaximumCoefficientDim];
+  double metric_y[
+    kMultiPenaltyGcvMaximumPenaltyCount *
+    kMultiPenaltyGcvMaximumCoefficientDim];
+  double influence_y[
+    kMultiPenaltyGcvMaximumPenaltyCount *
+    kMultiPenaltyGcvMaximumCoefficientDim];
+  double y_influence[
+    kMultiPenaltyGcvMaximumPenaltyCount *
+    kMultiPenaltyGcvMaximumCoefficientDim];
+  double derivative_norm[kMultiPenaltyGcvMaximumPenaltyCount];
+  double derivative_delta[kMultiPenaltyGcvMaximumPenaltyCount];
+  double second_derivative_norm[
+    kMultiPenaltyGcvMaximumPenaltyCount *
+    kMultiPenaltyGcvMaximumPenaltyCount];
+  double second_derivative_delta[
+    kMultiPenaltyGcvMaximumPenaltyCount *
+    kMultiPenaltyGcvMaximumPenaltyCount];
+};
+
+enum DeviceBoundaryStatus : int {
+  kBoundaryFiniteInterior = 0,
+  kBoundaryPositive = 1,
+  kBoundaryNegative = 2,
+  kBoundaryFiniteAfterProbe = 3
+};
+
+struct DevicePhaseTiming {
+  unsigned long long penalty_factor_augmentation_cycles;
+  unsigned long long qr_svd_cycles;
+  unsigned long long score_construction_cycles;
+  unsigned long long derivative_hessian_cycles;
+  unsigned long long decomposition_stage_cycles[4];
+  int complete_evaluation_count;
+  int score_only_evaluation_count;
+  int guarded_qr_evaluation_count;
+  int stable_svd_evaluation_count;
+};
+
+struct DeviceOptimizerState {
+  DeviceTargetEvaluation current;
+  DeviceTargetEvaluation trial;
+  double log_sp[kMultiPenaltyGcvMaximumPenaltyCount];
+  double trial_log_sp[kMultiPenaltyGcvMaximumPenaltyCount];
+  double gradient[kMultiPenaltyGcvMaximumPenaltyCount];
+  double newton_step[kMultiPenaltyGcvMaximumPenaltyCount];
+  double steepest_step[kMultiPenaltyGcvMaximumPenaltyCount];
+  double working_step[kMultiPenaltyGcvMaximumPenaltyCount];
+  double hessian_eigenvalues[kMultiPenaltyGcvMaximumPenaltyCount];
+  double hessian_eigenvectors[
+    kMultiPenaltyGcvMaximumPenaltyCount *
+    kMultiPenaltyGcvMaximumPenaltyCount];
+  double hessian_work[
+    kMultiPenaltyGcvMaximumPenaltyCount *
+    kMultiPenaltyGcvMaximumPenaltyCount];
+  double minimum_score;
+  double score_reduction;
+  double rms_gradient;
+  int optimizer_iterations;
+  int score_calls;
+  int objective_calls;
+  int step_halving_count;
+  int newton_trial_count;
+  int steepest_descent_trial_count;
+  int boundary_probe_count;
+  int boundary_accepted_count;
+  int boundary_status[kMultiPenaltyGcvMaximumPenaltyCount];
+  int fully_converged;
+  int hessian_positive_definite;
+  int step_failed;
+  int optimizer_status;
+  int use_steepest_descent;
+  int converged;
+  int trying;
+  int tries;
+  int selected_evaluation_reuse_count;
+  DevicePhaseTiming phase_timing;
+};
+
+__device__ bool symmetric_jacobi_eigen(
+    const double* input,
+    int dimension,
+    double* matrix,
+    double* values,
+    double* vectors) {
+  const int square = dimension * dimension;
+  for (int index = 0; index < square; ++index) {
+    matrix[index] = input[index];
+    vectors[index] = 0.0;
+  }
+  for (int index = 0; index < dimension; ++index) {
+    vectors[index + dimension * index] = 1.0;
+  }
+
+  bool converged = false;
+  for (int sweep = 0; sweep < 128; ++sweep) {
+    double maximum_off_diagonal = 0.0;
+    double maximum_diagonal = 0.0;
+    for (int column = 0; column < dimension; ++column) {
+      maximum_diagonal = fmax(
+        maximum_diagonal, fabs(matrix[column + dimension * column]));
+      for (int row = 0; row < column; ++row) {
+        maximum_off_diagonal = fmax(
+          maximum_off_diagonal,
+          fabs(matrix[row + dimension * column]));
+      }
+    }
+    if (maximum_off_diagonal <= __dmul_rn(
+          8.0 * kLapackEpsilon, fmax(1.0, maximum_diagonal))) {
+      converged = true;
+      break;
+    }
+
+    for (int p = 0; p < dimension - 1; ++p) {
+      for (int q = p + 1; q < dimension; ++q) {
+        const double apq = matrix[p + dimension * q];
+        if (apq == 0.0) continue;
+        const double app = matrix[p + dimension * p];
+        const double aqq = matrix[q + dimension * q];
+        const double tau = __ddiv_rn(
+          __dadd_rn(aqq, -app), __dmul_rn(2.0, apq));
+        const double root = hypot(1.0, tau);
+        const double t = copysign(
+          __ddiv_rn(1.0, __dadd_rn(fabs(tau), root)), tau);
+        const double cosine = __ddiv_rn(1.0, sqrt(
+          __dadd_rn(1.0, __dmul_rn(t, t))));
+        const double sine = __dmul_rn(t, cosine);
+
+        for (int index = 0; index < dimension; ++index) {
+          if (index == p || index == q) continue;
+          const double aip = matrix[index + dimension * p];
+          const double aiq = matrix[index + dimension * q];
+          const double new_aip = __dadd_rn(
+            __dmul_rn(cosine, aip), -__dmul_rn(sine, aiq));
+          const double new_aiq = __dadd_rn(
+            __dmul_rn(sine, aip), __dmul_rn(cosine, aiq));
+          matrix[index + dimension * p] = new_aip;
+          matrix[p + dimension * index] = new_aip;
+          matrix[index + dimension * q] = new_aiq;
+          matrix[q + dimension * index] = new_aiq;
+        }
+        matrix[p + dimension * p] =
+          __dadd_rn(app, -__dmul_rn(t, apq));
+        matrix[q + dimension * q] =
+          __dadd_rn(aqq, __dmul_rn(t, apq));
+        matrix[p + dimension * q] = 0.0;
+        matrix[q + dimension * p] = 0.0;
+        for (int row = 0; row < dimension; ++row) {
+          const double vip = vectors[row + dimension * p];
+          const double viq = vectors[row + dimension * q];
+          vectors[row + dimension * p] = __dadd_rn(
+            __dmul_rn(cosine, vip), -__dmul_rn(sine, viq));
+          vectors[row + dimension * q] = __dadd_rn(
+            __dmul_rn(sine, vip), __dmul_rn(cosine, viq));
+        }
+      }
+    }
+  }
+  for (int index = 0; index < dimension; ++index) {
+    values[index] = matrix[index + dimension * index];
+    if (!isfinite(values[index])) return false;
+  }
+  for (int left = 0; left < dimension - 1; ++left) {
+    int selected = left;
+    for (int right = left + 1; right < dimension; ++right) {
+      if (values[right] < values[selected]) selected = right;
+    }
+    if (selected == left) continue;
+    swap_double(values + left, values + selected);
+    for (int row = 0; row < dimension; ++row) {
+      swap_double(vectors + row + dimension * left,
+                  vectors + row + dimension * selected);
+    }
+  }
+  return converged;
+}
+
+__device__ void evaluate_multi_penalty_target_device(
+    const double* magic_r,
+    const int* magic_pivot,
+    const double* penalty_roots,
+    const int* root_offsets,
+    const int* penalty_ranks,
+    const double* penalty_matrices,
+    const double* target_y0,
+    double target_squared_norm,
+    const double* target_log_sp,
+    DeviceEvaluationWorkspace* workspace,
+    DeviceTargetEvaluation* result,
+    int n,
+    int q,
+    int penalty_count,
+    bool complete_evaluation,
+    DevicePhaseTiming* phase_timing,
+    double rank_tolerance) {
+  lapack312_multi::Workspace* decomposition = &workspace->decomposition;
+  const int square = q * q;
+  double* aggregate = decomposition->bidiagonal_vt;
+  int* pivot = decomposition->iwork;
+  double* factor_work = decomposition->work;
+  unsigned long long phase_started = 0;
+  if (threadIdx.x == 0 && phase_timing != nullptr) {
+    phase_started = clock64();
+  }
+  if (threadIdx.x == 0) {
+    result->rss = CUDART_NAN;
+    result->edf = CUDART_NAN;
+    result->score = CUDART_INF;
+    result->condition = CUDART_NAN;
+    result->aggregate_penalty_rank = 0;
+    result->numerical_rank = 0;
+    result->solver_info = 0;
+    result->decomposition_route = kDecompositionUnknown;
+    for (int index = 0;
+         index < kMultiPenaltyGcvMaximumPenaltyCount; ++index) {
+      result->gradient[index] = CUDART_NAN;
+    }
+    for (int index = 0;
+         index < kMultiPenaltyGcvMaximumPenaltyCount *
+           kMultiPenaltyGcvMaximumPenaltyCount; ++index) {
+      result->hessian[index] = CUDART_NAN;
+    }
+    for (int index = 0;
+         index < kMultiPenaltyGcvMaximumCoefficientDim; ++index) {
+      result->coefficients[index] = CUDART_NAN;
+    }
+  }
+  for (int element = threadIdx.x; element < square;
+       element += blockDim.x) {
+    double value = 0.0;
+    for (int penalty = 0; penalty < penalty_count; ++penalty) {
+      const double multiplier = glibc235::exp_fma_rn(
+        target_log_sp[penalty]);
+      value = __dadd_rn(
+        value,
+        __dmul_rn(multiplier,
+          penalty_matrices[element + square * penalty]));
+    }
+    aggregate[element] = value;
+  }
+  __syncthreads();
+  const int factor_rank = dpstf2_upper_block(
+    aggregate, pivot, factor_work, q);
+  if (threadIdx.x == 0) {
+    result->aggregate_penalty_rank = factor_rank;
+    decomposition->iwork[2 * q] = factor_rank;
+  }
+  __syncthreads();
+  const int root_rank = decomposition->iwork[2 * q];
+  if (root_rank <= 0 || root_rank + q > kMaximumRows) {
+    if (threadIdx.x == 0) result->solver_info = -1;
+    return;
+  }
+  const int rows = q + root_rank;
+  for (int output = threadIdx.x; output < rows * q;
+       output += blockDim.x) {
+    const int row = output % rows;
+    const int column = output / rows;
+    double value = 0.0;
+    if (row < q) {
+      value = magic_r[row + q * column];
+    } else {
+      const int root_row = row - q;
+      int factor_column = 0;
+      while (factor_column < q && pivot[factor_column] != column + 1) {
+        ++factor_column;
+      }
+      if (factor_column < q && root_row <= factor_column) {
+        value = aggregate[root_row + q * factor_column];
+      }
+    }
+    decomposition->a[output] = value;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0 && phase_timing != nullptr) {
+    phase_timing->penalty_factor_augmentation_cycles +=
+      clock64() - phase_started;
+    phase_started = clock64();
+  }
+  const int solver_info =
+    lapack312_multi::small_dgesdd_left(
+      rows, q, decomposition, complete_evaluation,
+      phase_timing == nullptr ? nullptr :
+        phase_timing->decomposition_stage_cycles,
+      true);
+  if (threadIdx.x == 0) {
+    result->solver_info = solver_info;
+    result->decomposition_route = decomposition->qr_basis_used != 0 ?
+      kDecompositionGuardedQr : kDecompositionStableSvd;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0 && phase_timing != nullptr) {
+    phase_timing->qr_svd_cycles += clock64() - phase_started;
+  }
+  if (solver_info != 0) return;
+
+  if (threadIdx.x == 0 && phase_timing != nullptr) {
+    phase_started = clock64();
+  }
+  if (threadIdx.x == 0) {
+    int rank = q;
+    const double threshold =
+      __dmul_rn(decomposition->bidiagonal[0], rank_tolerance);
+    while (rank > 0 && decomposition->bidiagonal[rank - 1] < threshold) {
+      --rank;
+    }
+    result->numerical_rank = rank;
+    decomposition->iwork[2 * q + 1] = rank;
+  }
+  __syncthreads();
+  const int rank = decomposition->iwork[2 * q + 1];
+  if (rank <= 0) {
+    if (threadIdx.x == 0) result->solver_info = -2;
+    return;
+  }
+  double* projected = decomposition->qr_tau;
+  for (int component = threadIdx.x; component < rank;
+       component += blockDim.x) {
+    double value = 0.0;
+    for (int row = 0; row < q; ++row) {
+      value = rounded_multiply_add(
+        value, decomposition->left_u[row + rows * component],
+        target_y0[row]);
+    }
+    projected[component] = value;
+  }
+  __syncthreads();
+  double* fitted_coordinates = decomposition->tau_q;
+  for (int row = threadIdx.x; row < q; row += blockDim.x) {
+    double value = 0.0;
+    for (int component = 0; component < rank; ++component) {
+      value = rounded_multiply_add(
+        value, decomposition->left_u[row + rows * component],
+        projected[component]);
+    }
+    fitted_coordinates[row] = value;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    double y_ay = 0.0;
+    for (int component = 0; component < rank; ++component) {
+      y_ay = rounded_multiply_add(
+        y_ay, projected[component], projected[component]);
+    }
+    double y_aay = 0.0;
+    for (int row = 0; row < q; ++row) {
+      y_aay = rounded_multiply_add(
+        y_aay, fitted_coordinates[row], fitted_coordinates[row]);
+    }
+    double edf = 0.0;
+    for (int column = 0; column < rank; ++column) {
+      for (int row = 0; row < q; ++row) {
+        const double value = decomposition->left_u[row + rows * column];
+        edf = rounded_multiply_add(edf, value, value);
+      }
+    }
+    double rss = __dadd_rn(
+      __dadd_rn(target_squared_norm, __dmul_rn(-2.0, y_ay)), y_aay);
+    if (rss < 0.0 && isfinite(rss)) rss = 0.0;
+    const double delta = static_cast<double>(n) - edf;
+    if (!isfinite(rss) || !isfinite(edf) || delta <= kDenominatorFloor) {
+      result->solver_info = -3;
+    } else {
+      const double score = __ddiv_rn(
+        __dmul_rn(static_cast<double>(n), rss), __dmul_rn(delta, delta));
+      result->rss = rss;
+      result->edf = edf;
+      result->score = score;
+      result->condition = decomposition->qr_basis_used != 0 ?
+        decomposition->qr_condition_estimate :
+        __ddiv_rn(
+          decomposition->bidiagonal[0],
+          decomposition->bidiagonal[rank - 1]);
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0 && phase_timing != nullptr) {
+    phase_timing->score_construction_cycles += clock64() - phase_started;
+    if (complete_evaluation) {
+      ++phase_timing->complete_evaluation_count;
+    } else {
+      ++phase_timing->score_only_evaluation_count;
+    }
+    if (result->decomposition_route == kDecompositionGuardedQr) {
+      ++phase_timing->guarded_qr_evaluation_count;
+    } else {
+      ++phase_timing->stable_svd_evaluation_count;
+    }
+  }
+  if (result->solver_info != 0 || !complete_evaluation) return;
+  if (threadIdx.x == 0 && phase_timing != nullptr) {
+    phase_started = clock64();
+  }
+  const double rss = result->rss;
+  const double delta = static_cast<double>(n) - result->edf;
+
+  double* u1_u1 = decomposition->a;
+  for (int element = threadIdx.x; element < rank * rank;
+       element += blockDim.x) {
+    const int row = element % rank;
+    const int column = element / rank;
+    if (row >= column) {
+      double value = 0.0;
+      for (int coordinate = 0; coordinate < q; ++coordinate) {
+        value = rounded_multiply_add(
+          value,
+          decomposition->left_u[coordinate + rows * row],
+          decomposition->left_u[coordinate + rows * column]);
+      }
+      u1_u1[row + rank * column] = value;
+      u1_u1[column + rank * row] = value;
+    }
+  }
+  __syncthreads();
+  double* transformed = decomposition->r;
+  double* intermediate = decomposition->bidiagonal_u;
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const int penalty_rank = penalty_ranks[penalty];
+    const int root_offset = root_offsets[penalty];
+    for (int output = threadIdx.x; output < rank * penalty_rank;
+         output += blockDim.x) {
+      const int component = output % rank;
+      const int root_column = output / rank;
+      double value = 0.0;
+      for (int coordinate = 0; coordinate < q; ++coordinate) {
+        value = rounded_multiply_add(
+          value,
+          decomposition->bidiagonal_vt[component + q * coordinate],
+          penalty_roots[
+            coordinate + q * (root_offset + root_column)]);
+      }
+      transformed[component + rank * root_column] = __ddiv_rn(
+        value, decomposition->bidiagonal[component]);
+    }
+    __syncthreads();
+    for (int output = threadIdx.x; output < penalty_rank * rank;
+         output += blockDim.x) {
+      const int root_column = output % penalty_rank;
+      const int column = output / penalty_rank;
+      double value = 0.0;
+      for (int component = 0; component < rank; ++component) {
+        value = rounded_multiply_add(
+          value,
+          transformed[component + rank * root_column],
+          u1_u1[component + rank * column]);
+      }
+      intermediate[root_column + penalty_rank * column] = value;
+    }
+    __syncthreads();
+    double* metric = workspace->metric +
+      static_cast<std::size_t>(penalty) * square;
+    double* influence = workspace->influence +
+      static_cast<std::size_t>(penalty) * square;
+    for (int element = threadIdx.x; element < rank * rank;
+         element += blockDim.x) {
+      const int row = element % rank;
+      const int column = element / rank;
+      if (row >= column) {
+        double value = 0.0;
+        for (int root_column = 0; root_column < penalty_rank; ++root_column) {
+          value = rounded_multiply_add(
+            value,
+            transformed[row + rank * root_column],
+            transformed[column + rank * root_column]);
+        }
+        metric[row + rank * column] = value;
+        metric[column + rank * row] = value;
+      }
+    }
+    __syncthreads();
+    for (int element = threadIdx.x; element < rank * rank;
+         element += blockDim.x) {
+      const int row = element % rank;
+      const int column = element / rank;
+      double value = 0.0;
+      for (int root_column = 0; root_column < penalty_rank; ++root_column) {
+        value = rounded_multiply_add(
+          value,
+          transformed[row + rank * root_column],
+          intermediate[root_column + penalty_rank * column]);
+      }
+      influence[row + rank * column] = value;
+    }
+    __syncthreads();
+    for (int output = threadIdx.x; output < rank;
+         output += blockDim.x) {
+      double metric_value = 0.0;
+      double influence_value = 0.0;
+      double y_influence_value = 0.0;
+      for (int component = 0; component < rank; ++component) {
+        metric_value = rounded_multiply_add(
+          metric_value, projected[component],
+          metric[component + rank * output]);
+        y_influence_value = rounded_multiply_add(
+          y_influence_value, projected[component],
+          influence[component + rank * output]);
+        influence_value = rounded_multiply_add(
+          influence_value, projected[component],
+          influence[output + rank * component]);
+      }
+      workspace->metric_y[penalty * q + output] = metric_value;
+      workspace->influence_y[penalty * q + output] = influence_value;
+      workspace->y_influence[penalty * q + output] = y_influence_value;
+    }
+    __syncthreads();
+  }
+
+  double* dnorm = workspace->derivative_norm;
+  double* ddelta = workspace->derivative_delta;
+  double* d2norm = workspace->second_derivative_norm;
+  double* d2delta = workspace->second_derivative_delta;
+  for (int i = threadIdx.x; i < penalty_count; i += blockDim.x) {
+    const double lambda_i = glibc235::exp_fma_rn(
+      target_log_sp[i]);
+    const double* influence_i = workspace->influence +
+      static_cast<std::size_t>(i) * square;
+    double trace = 0.0;
+    for (int component = 0; component < rank; ++component) {
+      trace = __dadd_rn(trace, influence_i[component + rank * component]);
+    }
+    ddelta[i] = __dmul_rn(lambda_i, trace);
+    double norm_derivative = 0.0;
+    for (int component = 0; component < rank; ++component) {
+      norm_derivative = rounded_multiply_add(
+        norm_derivative, projected[component],
+        __dadd_rn(
+          workspace->metric_y[i * q + component],
+          -workspace->influence_y[i * q + component]));
+    }
+    dnorm[i] = __dmul_rn(
+      __dmul_rn(2.0, lambda_i), norm_derivative);
+  }
+  __syncthreads();
+  for (int pair = threadIdx.x; pair < penalty_count * penalty_count;
+       pair += blockDim.x) {
+    const int i = pair % penalty_count;
+    const int j = pair / penalty_count;
+    if (i >= j) {
+      const double* influence_i = workspace->influence +
+        static_cast<std::size_t>(i) * square;
+      const double* metric_j = workspace->metric +
+        static_cast<std::size_t>(j) * square;
+      double product_sum = 0.0;
+      for (int element = 0; element < rank * rank; ++element) {
+        product_sum = rounded_multiply_add(
+          product_sum, metric_j[element], influence_i[element]);
+      }
+      double value = __dmul_rn(
+        -2.0,
+        glibc235::exp_fma_rn(__dadd_rn(
+          target_log_sp[i], target_log_sp[j])));
+      value = __dmul_rn(value, product_sum);
+      if (i == j) value = __dadd_rn(value, ddelta[i]);
+      d2delta[i + penalty_count * j] = value;
+      d2delta[j + penalty_count * i] = value;
+      double norm_value = 0.0;
+      for (int component = 0; component < rank; ++component) {
+        const double my_i = workspace->metric_y[i * q + component];
+        const double my_j = workspace->metric_y[j * q + component];
+        const double ky_i = workspace->influence_y[i * q + component];
+        const double ky_j = workspace->influence_y[j * q + component];
+        double term = __dadd_rn(
+          __dmul_rn(my_i, ky_j), __dmul_rn(my_j, ky_i));
+        term = __dadd_rn(term, -__dmul_rn(__dmul_rn(2.0, my_i), my_j));
+        term = __dadd_rn(
+          term,
+          __dmul_rn(workspace->y_influence[i * q + component], my_j));
+        norm_value = __dadd_rn(norm_value, term);
+      }
+      double norm_second_value = __dmul_rn(
+        2.0,
+        glibc235::exp_fma_rn(__dadd_rn(
+          target_log_sp[i], target_log_sp[j])));
+      norm_second_value = __dmul_rn(norm_second_value, norm_value);
+      if (i == j) {
+        norm_second_value = __dadd_rn(norm_second_value, dnorm[i]);
+      }
+      d2norm[i + penalty_count * j] = norm_second_value;
+      d2norm[j + penalty_count * i] = norm_second_value;
+    }
+  }
+  __syncthreads();
+  const double score_scale = __ddiv_rn(
+    static_cast<double>(n), __dmul_rn(delta, delta));
+  const double delta_scale = __ddiv_rn(
+    __dmul_rn(__dmul_rn(2.0, score_scale), rss), delta);
+  const double cross_scale = __ddiv_rn(
+    __dmul_rn(-2.0, score_scale), delta);
+  const double curvature_scale = __ddiv_rn(
+    __dmul_rn(3.0, delta_scale), delta);
+  for (int i = threadIdx.x; i < penalty_count; i += blockDim.x) {
+    result->gradient[i] = __dadd_rn(
+      __dmul_rn(score_scale, dnorm[i]),
+      -__dmul_rn(delta_scale, ddelta[i]));
+  }
+  for (int pair = threadIdx.x; pair < penalty_count * penalty_count;
+       pair += blockDim.x) {
+    const int i = pair % penalty_count;
+    const int j = pair / penalty_count;
+    if (i >= j) {
+      double value = __dmul_rn(
+        cross_scale,
+        __dadd_rn(__dmul_rn(ddelta[j], dnorm[i]),
+                  __dmul_rn(ddelta[i], dnorm[j])));
+      value = __dadd_rn(
+        value,
+        __dmul_rn(score_scale, d2norm[i + penalty_count * j]));
+      value = __dadd_rn(
+        value,
+        __dmul_rn(curvature_scale,
+                  __dmul_rn(ddelta[i], ddelta[j])));
+      value = __dadd_rn(
+        value,
+        -__dmul_rn(delta_scale, d2delta[i + penalty_count * j]));
+      result->hessian[i + penalty_count * j] = value;
+      result->hessian[j + penalty_count * i] = value;
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0 && phase_timing != nullptr) {
+    phase_timing->derivative_hessian_cycles += clock64() - phase_started;
+  }
+
+  for (int component = threadIdx.x; component < rank;
+       component += blockDim.x) {
+    fitted_coordinates[component] = __ddiv_rn(
+      projected[component], decomposition->bidiagonal[component]);
+  }
+  __syncthreads();
+  for (int row = threadIdx.x; row < q; row += blockDim.x) {
+    double value = 0.0;
+    for (int component = 0; component < rank; ++component) {
+      value = rounded_multiply_add(
+        value,
+        decomposition->bidiagonal_vt[component + q * row],
+        fitted_coordinates[component]);
+    }
+    result->coefficients[magic_pivot[row]] = value;
+  }
+}
+
+__global__ void evaluate_multi_penalty_targets_kernel(
+    const double* magic_r,
+    const int* magic_pivot,
+    const double* penalty_roots,
+    const int* root_offsets,
+    const int* penalty_ranks,
+    const double* penalty_matrices,
+    const double* y0,
+    const double* squared_norm,
+    const double* log_sp,
+    DeviceEvaluationWorkspace* workspaces,
+    DeviceTargetEvaluation* results,
+    int n,
+    int q,
+    int penalty_count,
+    int target_count,
+    double rank_tolerance) {
+  const int target = blockIdx.x;
+  if (target >= target_count) return;
+  evaluate_multi_penalty_target_device(
+    magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
+    penalty_matrices,
+    y0 + static_cast<std::size_t>(q) * target,
+    squared_norm[target],
+    log_sp + static_cast<std::size_t>(penalty_count) * target,
+    workspaces + target, results + target, n, q, penalty_count, true,
+    nullptr, rank_tolerance);
+}
+
+__global__ void optimize_multi_penalty_targets_kernel(
+    const double* magic_r,
+    const int* magic_pivot,
+    const double* penalty_roots,
+    const int* root_offsets,
+    const int* penalty_ranks,
+    const double* penalty_matrices,
+    const double* y0,
+    const double* squared_norm,
+    const double* initial_log_sp,
+    DeviceEvaluationWorkspace* workspaces,
+    DeviceOptimizerState* states,
+    int n,
+    int q,
+    int penalty_count,
+    int target_count,
+    double convergence_tolerance,
+    double gradient_tolerance_factor,
+    int max_step_halving,
+    int max_iterations,
+    double max_newton_step,
+    double boundary_probe_step,
+    int max_boundary_probes,
+    double rank_tolerance) {
+  const int target = blockIdx.x;
+  if (target >= target_count) return;
+  DeviceEvaluationWorkspace* workspace = workspaces + target;
+  DeviceOptimizerState* state = states + target;
+  const double* target_y0 = y0 + static_cast<std::size_t>(q) * target;
+  const double target_squared_norm = squared_norm[target];
+
+  if (threadIdx.x == 0) {
+    state->minimum_score = CUDART_INF;
+    state->score_reduction = 1e10;
+    state->rms_gradient = 0.0;
+    state->optimizer_iterations = 0;
+    state->score_calls = 0;
+    state->objective_calls = 0;
+    state->step_halving_count = 0;
+    state->newton_trial_count = 0;
+    state->steepest_descent_trial_count = 0;
+    state->boundary_probe_count = 0;
+    state->boundary_accepted_count = 0;
+    state->fully_converged = 0;
+    state->hessian_positive_definite = 0;
+    state->step_failed = 0;
+    state->optimizer_status = 0;
+    state->use_steepest_descent = 0;
+    state->converged = 0;
+    state->trying = 0;
+    state->tries = 0;
+    state->selected_evaluation_reuse_count = 0;
+    state->phase_timing.penalty_factor_augmentation_cycles = 0;
+    state->phase_timing.qr_svd_cycles = 0;
+    state->phase_timing.score_construction_cycles = 0;
+    state->phase_timing.derivative_hessian_cycles = 0;
+    for (int stage = 0; stage < 4; ++stage) {
+      state->phase_timing.decomposition_stage_cycles[stage] = 0;
+    }
+    state->phase_timing.complete_evaluation_count = 0;
+    state->phase_timing.score_only_evaluation_count = 0;
+    state->phase_timing.guarded_qr_evaluation_count = 0;
+    state->phase_timing.stable_svd_evaluation_count = 0;
+    for (int penalty = 0; penalty < penalty_count; ++penalty) {
+      state->log_sp[penalty] = initial_log_sp[penalty];
+      state->trial_log_sp[penalty] = initial_log_sp[penalty];
+      state->gradient[penalty] = 0.0;
+      state->newton_step[penalty] = 0.0;
+      state->steepest_step[penalty] = 0.0;
+      state->working_step[penalty] = 0.0;
+      state->hessian_eigenvalues[penalty] = 0.0;
+      state->boundary_status[penalty] = -1;
+    }
+  }
+  __syncthreads();
+  evaluate_multi_penalty_target_device(
+    magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
+    penalty_matrices, target_y0, target_squared_norm, state->log_sp,
+    workspace, &state->current, n, q, penalty_count, true,
+    &state->phase_timing, rank_tolerance);
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    state->score_calls = 1;
+    state->objective_calls = 1;
+    if (state->current.solver_info != 0 ||
+        !isfinite(state->current.score)) {
+      state->optimizer_status = 1;
+    } else {
+      state->minimum_score = state->current.score;
+    }
+  }
+  __syncthreads();
+  if (state->optimizer_status != 0) return;
+
+  for (int iteration = 1; iteration <= max_iterations; ++iteration) {
+    if (threadIdx.x == 0) {
+      state->optimizer_iterations = iteration;
+      state->tries = 0;
+      state->trying = iteration > 1 ? 1 : 0;
+      if (iteration > 1) {
+        const double* source = state->use_steepest_descent != 0 ?
+          state->steepest_step : state->newton_step;
+        for (int penalty = 0; penalty < penalty_count; ++penalty) {
+          state->working_step[penalty] = source[penalty];
+        }
+      }
+    }
+    __syncthreads();
+
+    if (iteration > 1) {
+      for (int trial_index = 1; trial_index <= max_step_halving;
+           ++trial_index) {
+        if (threadIdx.x == 0 && state->trying != 0) {
+          state->tries = trial_index;
+          if (trial_index == 4 && state->use_steepest_descent == 0) {
+            state->use_steepest_descent = 1;
+            for (int penalty = 0; penalty < penalty_count; ++penalty) {
+              state->working_step[penalty] =
+                state->steepest_step[penalty];
+            }
+          }
+          if (state->use_steepest_descent == 0) {
+            ++state->newton_trial_count;
+          } else {
+            ++state->steepest_descent_trial_count;
+          }
+          for (int penalty = 0; penalty < penalty_count; ++penalty) {
+            state->trial_log_sp[penalty] = __dadd_rn(
+              state->log_sp[penalty], state->working_step[penalty]);
+          }
+        }
+        __syncthreads();
+        if (state->trying == 0) break;
+        evaluate_multi_penalty_target_device(
+          magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
+          penalty_matrices, target_y0, target_squared_norm,
+          state->trial_log_sp, workspace, &state->trial, n, q,
+          penalty_count, true, &state->phase_timing, rank_tolerance);
+        __syncthreads();
+        if (threadIdx.x == 0) {
+          ++state->score_calls;
+          ++state->objective_calls;
+          if (state->trial.solver_info != 0 ||
+              !isfinite(state->trial.score)) {
+            state->optimizer_status = 2;
+            state->trying = 0;
+          } else {
+            double directional_derivative = 0.0;
+            double maximum_step = 0.0;
+            double maximum_log_sp = 0.0;
+            for (int penalty = 0; penalty < penalty_count; ++penalty) {
+              directional_derivative = rounded_multiply_add(
+                directional_derivative, state->gradient[penalty],
+                state->working_step[penalty]);
+              maximum_step = fmax(
+                maximum_step, fabs(state->working_step[penalty]));
+              maximum_log_sp = fmax(
+                maximum_log_sp, fabs(state->log_sp[penalty]));
+            }
+            const double score_delta = __dadd_rn(
+              state->trial.score, -state->minimum_score);
+            const double comparison_slack = __dmul_rn(
+              16.0 * kLapackEpsilon,
+              __dadd_rn(1.0, fabs(state->minimum_score)));
+            const double convergence_step = __dmul_rn(
+              convergence_tolerance, __dadd_rn(1.0, maximum_log_sp));
+            // Resolve only near-convergence Newton comparisons whose score
+            // ordering is below the binary64 LAPACK/CUDA arithmetic floor.
+            const bool roundoff_limited_newton_descent =
+              state->use_steepest_descent == 0 &&
+              directional_derivative < 0.0 &&
+              maximum_step <= convergence_step &&
+              score_delta <= comparison_slack;
+            const bool accepted =
+              state->trial.score < state->minimum_score ||
+              roundoff_limited_newton_descent;
+            if (accepted) {
+              state->score_reduction = __dadd_rn(
+                state->minimum_score, -state->trial.score);
+              state->minimum_score = state->trial.score;
+              for (int penalty = 0; penalty < penalty_count; ++penalty) {
+                state->log_sp[penalty] = state->trial_log_sp[penalty];
+              }
+              state->current = state->trial;
+              state->trying = 0;
+            } else {
+              for (int penalty = 0; penalty < penalty_count; ++penalty) {
+                state->working_step[penalty] = __dmul_rn(
+                  0.5, state->working_step[penalty]);
+              }
+              ++state->step_halving_count;
+            }
+          }
+          if (trial_index == max_step_halving - 1 &&
+              state->trying != 0) {
+            for (int penalty = 0; penalty < penalty_count; ++penalty) {
+              state->working_step[penalty] = 0.0;
+            }
+          }
+          if (trial_index == max_step_halving) state->trying = 0;
+        }
+        __syncthreads();
+        if (state->optimizer_status != 0 || state->trying == 0) break;
+      }
+    }
+    __syncthreads();
+    if (state->optimizer_status != 0) break;
+
+    if (threadIdx.x == 0) {
+      if (iteration > 3) {
+        double squared_gradient_norm = 0.0;
+        for (int penalty = 0; penalty < penalty_count; ++penalty) {
+          squared_gradient_norm = rounded_multiply_add(
+            squared_gradient_norm, state->gradient[penalty],
+            state->gradient[penalty]);
+        }
+        const double gradient_norm = sqrt(squared_gradient_norm);
+        state->converged =
+          state->score_reduction <= __dmul_rn(
+            convergence_tolerance,
+            __dadd_rn(1.0, state->minimum_score)) &&
+          gradient_norm <= __dmul_rn(
+            gradient_tolerance_factor,
+            __dadd_rn(1.0, fabs(state->minimum_score)));
+        if (state->tries == max_step_halving) state->converged = 1;
+        if (state->converged != 0) {
+          state->rms_gradient = __ddiv_rn(
+            gradient_norm, sqrt(static_cast<double>(penalty_count)));
+          if (state->tries == max_step_halving) state->step_failed = 1;
+        }
+      }
+
+      for (int penalty = 0; penalty < penalty_count; ++penalty) {
+        state->gradient[penalty] = state->current.gradient[penalty];
+      }
+      const bool eigen_converged = symmetric_jacobi_eigen(
+        state->current.hessian, penalty_count, state->hessian_work,
+        state->hessian_eigenvalues, state->hessian_eigenvectors);
+      if (!eigen_converged) {
+        state->optimizer_status = 3;
+      } else {
+        state->use_steepest_descent = 0;
+        for (int penalty = 0; penalty < penalty_count; ++penalty) {
+          if (state->hessian_eigenvalues[penalty] < 0.0) {
+            state->use_steepest_descent = 1;
+          }
+        }
+        if (state->use_steepest_descent == 0) {
+          double projected[kMultiPenaltyGcvMaximumPenaltyCount];
+          for (int column = 0; column < penalty_count; ++column) {
+            double value = 0.0;
+            for (int row = 0; row < penalty_count; ++row) {
+              value = rounded_multiply_add(
+                value,
+                state->hessian_eigenvectors[row + penalty_count * column],
+                state->gradient[row]);
+            }
+            projected[column] = __ddiv_rn(
+              value, state->hessian_eigenvalues[column]);
+          }
+          for (int row = 0; row < penalty_count; ++row) {
+            double value = 0.0;
+            for (int column = 0; column < penalty_count; ++column) {
+              value = rounded_multiply_add(
+                value,
+                state->hessian_eigenvectors[row + penalty_count * column],
+                projected[column]);
+            }
+            state->newton_step[row] = -value;
+          }
+          double maximum_component = fabs(state->newton_step[0]);
+          for (int penalty = 1; penalty < penalty_count; ++penalty) {
+            maximum_component = fmax(
+              maximum_component, fabs(state->newton_step[penalty]));
+          }
+          if (maximum_component > max_newton_step) {
+            const double scale = __ddiv_rn(
+              max_newton_step, maximum_component);
+            for (int penalty = 0; penalty < penalty_count; ++penalty) {
+              state->newton_step[penalty] = __dmul_rn(
+                state->newton_step[penalty], scale);
+            }
+          }
+        }
+        double maximum_gradient = fabs(state->gradient[0]);
+        for (int penalty = 1; penalty < penalty_count; ++penalty) {
+          maximum_gradient = fmax(
+            maximum_gradient, fabs(state->gradient[penalty]));
+        }
+        for (int penalty = 0; penalty < penalty_count; ++penalty) {
+          state->steepest_step[penalty] = maximum_gradient == 0.0 ? 0.0 :
+            __ddiv_rn(-state->gradient[penalty], maximum_gradient);
+        }
+      }
+    }
+    __syncthreads();
+    if (state->optimizer_status != 0 || state->converged != 0) break;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0 && state->optimizer_status == 0 &&
+      state->converged == 0) {
+    state->optimizer_status = 4;
+  }
+  __syncthreads();
+  if (state->optimizer_status != 0) return;
+
+  if (threadIdx.x == 0) {
+    state->fully_converged = state->step_failed == 0 ? 1 : 0;
+    state->hessian_positive_definite =
+      state->use_steepest_descent == 0 ? 1 : 0;
+  }
+  __syncthreads();
+
+  for (int coordinate = 0; coordinate < penalty_count; ++coordinate) {
+    if (threadIdx.x == 0) {
+      state->tries = 0;
+      state->trying = 1;
+      const double direction = state->gradient[coordinate] < 0.0 ?
+        1.0 : -1.0;
+      for (int penalty = 0; penalty < penalty_count; ++penalty) {
+        state->working_step[penalty] = 0.0;
+      }
+      state->working_step[coordinate] = __dmul_rn(
+        direction, boundary_probe_step);
+    }
+    __syncthreads();
+    for (int probe = 1; probe <= max_boundary_probes; ++probe) {
+      if (threadIdx.x == 0 && state->trying != 0) {
+        for (int penalty = 0; penalty < penalty_count; ++penalty) {
+          state->trial_log_sp[penalty] = __dadd_rn(
+            state->log_sp[penalty], state->working_step[penalty]);
+        }
+      }
+      __syncthreads();
+      if (state->trying == 0) break;
+      evaluate_multi_penalty_target_device(
+        magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
+        penalty_matrices, target_y0, target_squared_norm,
+        state->trial_log_sp, workspace, &state->trial, n, q,
+        penalty_count, false, &state->phase_timing, rank_tolerance);
+      __syncthreads();
+      if (threadIdx.x == 0) {
+        ++state->objective_calls;
+        ++state->boundary_probe_count;
+        if (state->trial.solver_info != 0 ||
+            !isfinite(state->trial.score)) {
+          state->optimizer_status = 5;
+          state->trying = 0;
+        } else {
+          const double boundary_comparison_slack = __dmul_rn(
+            256.0 * kLapackEpsilon,
+            __dadd_rn(1.0, fabs(state->minimum_score)));
+          const bool accepted = state->trial.score < state->minimum_score ||
+            __dadd_rn(state->trial.score, -state->minimum_score) <=
+              boundary_comparison_slack;
+          if (accepted) {
+            for (int penalty = 0; penalty < penalty_count; ++penalty) {
+              state->log_sp[penalty] = state->trial_log_sp[penalty];
+            }
+            state->current = state->trial;
+            state->minimum_score = state->current.score;
+            ++state->tries;
+            ++state->boundary_accepted_count;
+          } else {
+            state->trying = 0;
+          }
+        }
+      }
+      __syncthreads();
+      if (state->optimizer_status != 0 || state->trying == 0) break;
+    }
+    if (threadIdx.x == 0 && state->optimizer_status == 0) {
+      if (state->tries == 0) {
+        state->boundary_status[coordinate] = kBoundaryFiniteInterior;
+      } else if (state->tries == max_boundary_probes) {
+        state->boundary_status[coordinate] =
+          state->working_step[coordinate] > 0.0 ?
+            kBoundaryPositive : kBoundaryNegative;
+      } else {
+        state->boundary_status[coordinate] = kBoundaryFiniteAfterProbe;
+      }
+    }
+    __syncthreads();
+    if (state->optimizer_status != 0) return;
+  }
+
+  if (state->boundary_accepted_count == 0) {
+    if (threadIdx.x == 0) {
+      ++state->objective_calls;
+      state->selected_evaluation_reuse_count = 1;
+    }
+    return;
+  }
+
+  evaluate_multi_penalty_target_device(
+    magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
+    penalty_matrices, target_y0, target_squared_norm, state->log_sp,
+    workspace, &state->trial, n, q, penalty_count, true,
+    &state->phase_timing, rank_tolerance);
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    ++state->objective_calls;
+    if (state->trial.solver_info != 0 || !isfinite(state->trial.score)) {
+      state->optimizer_status = 6;
+    } else {
+      state->current = state->trial;
+    }
+  }
+}
+
+__global__ void gather_multi_penalty_coefficients_kernel(
+    const DeviceOptimizerState* states,
+    double* coefficients,
+    int q,
+    int target_count) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int count = q * target_count;
+  if (index >= count) return;
+  const int target = index / q;
+  const int row = index - target * q;
+  coefficients[index] = states[target].optimizer_status == 0 ?
+    states[target].current.coefficients[row] : CUDART_NAN;
+}
+
+__global__ void form_multi_penalty_residuals_kernel(
+    const double* Y,
+    const double* fitted,
+    double* residuals,
+    int count) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= count) return;
+  residuals[index] = __dadd_rn(Y[index], -fitted[index]);
+}
+
+}  // namespace
+
+class MultiPenaltyGcvCudaPrepared {
+ public:
+  MultiPenaltyGcvCudaPrepared() : cublas(stream.get()) {}
+  ~MultiPenaltyGcvCudaPrepared() {
+    if (device_id >= 0) cudaSetDevice(device_id);
+  }
+
+  int device_id = -1;
+  int n = 0;
+  int q = 0;
+  int penalty_count = 0;
+  int target_capacity = 0;
+  int total_root_rank = 0;
+  std::vector<double> initial_log_sp;
+  Stream stream;
+  CublasHandle cublas;
+  Event completion_event;
+  DeviceBuffer<unsigned char> d_arena;
+  DeviceBuffer<double> d_X;
+  DeviceBuffer<double> d_qr_packed;
+  DeviceBuffer<double> d_tau;
+  DeviceBuffer<double> d_r;
+  DeviceBuffer<int> d_pivot;
+  DeviceBuffer<double> d_roots;
+  DeviceBuffer<int> d_root_offsets;
+  DeviceBuffer<int> d_ranks;
+  DeviceBuffer<double> d_matrices;
+  DeviceBuffer<double> d_initial_log_sp;
+  DeviceBuffer<double> d_Y;
+  DeviceBuffer<double> d_qt_work;
+  DeviceBuffer<double> d_y0;
+  DeviceBuffer<double> d_squared_norm;
+  DeviceBuffer<DeviceEvaluationWorkspace> d_workspaces;
+  DeviceBuffer<DeviceOptimizerState> d_states;
+  DeviceBuffer<double> d_coefficients;
+  DeviceBuffer<double> d_fitted;
+  DeviceBuffer<double> d_residuals;
+  std::vector<DeviceOptimizerState> host_states;
+  MultiPenaltyGcvCudaPreparedInfo info;
+  std::uint64_t generation = 0;
+  bool residual_slot_leased = false;
+  std::mutex mutex;
+};
+
+class MultiPenaltyGcvCudaResidualBatch {
+ public:
+  ~MultiPenaltyGcvCudaResidualBatch() {
+    if (!released && owner) {
+      std::lock_guard<std::mutex> lock(owner->mutex);
+      if (owner->generation == generation) {
+        owner->residual_slot_leased = false;
+      }
+      released = true;
+    }
+  }
+
+  std::shared_ptr<MultiPenaltyGcvCudaPrepared> owner;
+  int n = 0;
+  int q = 0;
+  int target_count = 0;
+  int device_id = -1;
+  std::vector<std::string> target_keys;
+  std::vector<int> optimizer_status;
+  std::uint64_t generation = 0;
+  bool released = false;
+};
+
+namespace {
+
+MultiPenaltyGcvCudaOptimization materialize_optimizer_output(
+    const DeviceOptimizerState* states,
+    int n,
+    int q,
+    int penalty_count,
+    int target_count,
+    const std::vector<double>& initial_log_sp,
+    MultiPenaltyGcvCudaDiagnostics diagnostics) {
+  MultiPenaltyGcvCudaOptimization output;
+  output.schema_version =
+    "full-cuda-ci-multi-penalty-gcv-cuda-optimization-v1";
+  output.rank_path =
+    "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd";
+  output.optimizer_path =
+    "cuda-independent-target-newton-steepest-boundary-v1";
+  output.n = n;
+  output.coefficient_dim = q;
+  output.penalty_count = penalty_count;
+  output.target_count = target_count;
+  output.initial_log_sp = initial_log_sp;
+  const std::size_t targets = static_cast<std::size_t>(target_count);
+  const std::size_t penalty_targets =
+    static_cast<std::size_t>(penalty_count) * targets;
+  output.selected_log_sp.resize(penalty_targets);
+  output.rss.resize(targets);
+  output.edf.resize(targets);
+  output.score.resize(targets);
+  output.condition.resize(targets);
+  output.gradient.resize(penalty_targets);
+  output.hessian.resize(
+    static_cast<std::size_t>(penalty_count) * penalty_count * targets);
+  output.coefficients.resize(static_cast<std::size_t>(q) * targets);
+  output.rms_gradient.resize(targets);
+  output.hessian_eigenvalues.resize(penalty_targets);
+  output.aggregate_penalty_rank.resize(targets);
+  output.numerical_rank.resize(targets);
+  output.solver_info.resize(targets);
+  output.optimizer_iterations.resize(targets);
+  output.score_calls.resize(targets);
+  output.objective_calls.resize(targets);
+  output.step_halving_count.resize(targets);
+  output.newton_trial_count.resize(targets);
+  output.steepest_descent_trial_count.resize(targets);
+  output.boundary_probe_count.resize(targets);
+  output.boundary_accepted_count.resize(targets);
+  output.boundary_status.resize(penalty_targets);
+  output.fully_converged.resize(targets);
+  output.hessian_positive_definite.resize(targets);
+  output.step_failed.resize(targets);
+  output.optimizer_status.resize(targets);
+  for (int target = 0; target < target_count; ++target) {
+    const DeviceOptimizerState& state = states[target];
+    const DeviceTargetEvaluation& value = state.current;
+    output.rss[target] = value.rss;
+    output.edf[target] = value.edf;
+    output.score[target] = value.score;
+    output.condition[target] = value.condition;
+    output.rms_gradient[target] = state.rms_gradient;
+    output.aggregate_penalty_rank[target] = value.aggregate_penalty_rank;
+    output.numerical_rank[target] = value.numerical_rank;
+    output.solver_info[target] = value.solver_info;
+    output.optimizer_iterations[target] = state.optimizer_iterations;
+    output.score_calls[target] = state.score_calls;
+    output.objective_calls[target] = state.objective_calls;
+    output.step_halving_count[target] = state.step_halving_count;
+    output.newton_trial_count[target] = state.newton_trial_count;
+    output.steepest_descent_trial_count[target] =
+      state.steepest_descent_trial_count;
+    output.boundary_probe_count[target] = state.boundary_probe_count;
+    output.boundary_accepted_count[target] = state.boundary_accepted_count;
+    output.fully_converged[target] = state.fully_converged;
+    output.hessian_positive_definite[target] =
+      state.hessian_positive_definite;
+    output.step_failed[target] = state.step_failed;
+    output.optimizer_status[target] = state.optimizer_status;
+    diagnostics.cuda_optimizer_objective_count += state.objective_calls;
+    diagnostics.cuda_penalty_factor_augmentation_cycles +=
+      state.phase_timing.penalty_factor_augmentation_cycles;
+    diagnostics.cuda_qr_svd_cycles += state.phase_timing.qr_svd_cycles;
+    diagnostics.cuda_qr_bidiagonal_reduction_cycles +=
+      state.phase_timing.decomposition_stage_cycles[0];
+    diagnostics.cuda_bidiagonal_svd_cycles +=
+      state.phase_timing.decomposition_stage_cycles[1];
+    diagnostics.cuda_svd_vector_postback_cycles +=
+      state.phase_timing.decomposition_stage_cycles[2];
+    diagnostics.cuda_left_vector_product_cycles +=
+      state.phase_timing.decomposition_stage_cycles[3];
+    diagnostics.cuda_score_construction_cycles +=
+      state.phase_timing.score_construction_cycles;
+    diagnostics.cuda_derivative_hessian_cycles +=
+      state.phase_timing.derivative_hessian_cycles;
+    diagnostics.cuda_complete_evaluation_count +=
+      state.phase_timing.complete_evaluation_count;
+    diagnostics.cuda_score_only_evaluation_count +=
+      state.phase_timing.score_only_evaluation_count;
+    diagnostics.cuda_guarded_qr_evaluation_count +=
+      state.phase_timing.guarded_qr_evaluation_count;
+    diagnostics.cuda_stable_svd_evaluation_count +=
+      state.phase_timing.stable_svd_evaluation_count;
+    diagnostics.cuda_selected_evaluation_reuse_count +=
+      state.selected_evaluation_reuse_count;
+    diagnostics.cuda_hessian_eigensolver_count +=
+      state.optimizer_iterations;
+    if (state.optimizer_status == 0) {
+      diagnostics.cuda_selected_fit_count += 1;
+    } else {
+      diagnostics.cuda_error_count += 1;
+    }
+    if (value.solver_info > 0) diagnostics.svd_nonconverged_count += 1;
+    if (value.solver_info == -1) {
+      diagnostics.aggregate_rank_failure_count += 1;
+    }
+    for (int penalty = 0; penalty < penalty_count; ++penalty) {
+      const std::size_t penalty_target =
+        static_cast<std::size_t>(penalty) +
+        static_cast<std::size_t>(penalty_count) * target;
+      output.selected_log_sp[penalty_target] = state.log_sp[penalty];
+      output.gradient[penalty_target] = value.gradient[penalty];
+      output.hessian_eigenvalues[penalty_target] =
+        state.hessian_eigenvalues[penalty];
+      output.boundary_status[penalty_target] =
+        state.boundary_status[penalty];
+      for (int other = 0; other < penalty_count; ++other) {
+        output.hessian[penalty + penalty_count *
+          (other + penalty_count * target)] =
+            value.hessian[penalty + penalty_count * other];
+      }
+    }
+    for (int row = 0; row < q; ++row) {
+      output.coefficients[row + q * target] = value.coefficients[row];
+    }
+  }
+  diagnostics.cuda_objective_target_count =
+    diagnostics.cuda_optimizer_objective_count;
+  output.diagnostics = std::move(diagnostics);
+  return output;
+}
+
+void require_live_multi_penalty_residual(
+    const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& residual) {
+  if (!residual || !residual->owner || residual->released ||
+      residual->owner->generation != residual->generation ||
+      !residual->owner->residual_slot_leased) {
+    throw std::runtime_error(
+      "multi-penalty CUDA residual token is stale or released");
+  }
+}
+
+}  // namespace
+
+MultiPenaltyGcvCudaEvaluation multi_penalty_gcv_evaluate_cuda(
+    const double* X,
+    const double* Y,
+    const double* magic_qr_packed,
+    const double* magic_tau,
+    const double* magic_r,
+    const int* magic_pivot_zero_based,
+    const std::vector<std::vector<double>>& penalty_roots,
+    const std::vector<std::vector<double>>& penalty_matrices,
+    const std::vector<int>& penalty_ranks,
+    const double* log_sp,
+    int n,
+    int coefficient_dim,
+    int penalty_count,
+    int target_count,
+    double rank_tolerance) {
+  const auto started = std::chrono::steady_clock::now();
+  if (X == nullptr || Y == nullptr || magic_qr_packed == nullptr ||
+      magic_tau == nullptr || magic_r == nullptr ||
+      magic_pivot_zero_based == nullptr || log_sp == nullptr ||
+      n <= coefficient_dim || coefficient_dim <= 0 ||
+      coefficient_dim > kMultiPenaltyGcvMaximumCoefficientDim ||
+      penalty_count <= 1 ||
+      penalty_count > kMultiPenaltyGcvMaximumPenaltyCount ||
+      target_count <= 1 || !std::isfinite(rank_tolerance) ||
+      rank_tolerance <= 0.0 || rank_tolerance >= 1.0 ||
+      static_cast<int>(penalty_roots.size()) != penalty_count ||
+      static_cast<int>(penalty_matrices.size()) != penalty_count ||
+      static_cast<int>(penalty_ranks.size()) != penalty_count) {
+    throw std::runtime_error("multi-penalty CUDA inputs are invalid");
+  }
+  const int q = coefficient_dim;
+  const std::size_t square = static_cast<std::size_t>(q) * q;
+  int total_root_rank = 0;
+  std::vector<int> root_offsets(static_cast<std::size_t>(penalty_count));
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const int rank = penalty_ranks[static_cast<std::size_t>(penalty)];
+    if (rank <= 0 || rank > q ||
+        penalty_roots[static_cast<std::size_t>(penalty)].size() !=
+          static_cast<std::size_t>(q) * rank ||
+        penalty_matrices[static_cast<std::size_t>(penalty)].size() !=
+          square) {
+      throw std::runtime_error(
+        "multi-penalty CUDA penalty geometry is invalid");
+    }
+    root_offsets[static_cast<std::size_t>(penalty)] = total_root_rank;
+    total_root_rank += rank;
+  }
+  if (q + total_root_rank > kMaximumRows) {
+    throw std::runtime_error(
+      "multi-penalty CUDA augmented dimensions exceed the envelope");
+  }
+  std::vector<double> roots(
+    static_cast<std::size_t>(q) * total_root_rank);
+  std::vector<double> matrices(square * penalty_count);
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const std::vector<double>& root =
+      penalty_roots[static_cast<std::size_t>(penalty)];
+    std::copy(root.begin(), root.end(), roots.begin() +
+      static_cast<std::size_t>(q) *
+        root_offsets[static_cast<std::size_t>(penalty)]);
+    const std::vector<double>& matrix =
+      penalty_matrices[static_cast<std::size_t>(penalty)];
+    std::copy(matrix.begin(), matrix.end(),
+              matrices.begin() + square * penalty);
+  }
+
+  MultiPenaltyGcvCudaEvaluation output;
+  output.schema_version =
+    "full-cuda-ci-multi-penalty-gcv-cuda-evaluation-v1";
+  output.rank_path =
+    "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd";
+  output.n = n;
+  output.coefficient_dim = q;
+  output.penalty_count = penalty_count;
+  output.target_count = target_count;
+  MultiPenaltyGcvCudaDiagnostics& diagnostics = output.diagnostics;
+  diagnostics.schema_version =
+    "full-cuda-ci-multi-penalty-gcv-cuda-diagnostics-v1";
+  diagnostics.execution_strategy =
+    "one-setup-one-block-per-target-true-batch";
+  diagnostics.prepared_setup_upload_count = 1;
+  diagnostics.target_batch_upload_count = 1;
+  diagnostics.cuda_qt_y_kernel_launch_count = 1;
+  diagnostics.cuda_objective_kernel_launch_count = 1;
+  diagnostics.cuda_objective_target_count = target_count;
+  diagnostics.target_specific_log_sp = true;
+  diagnostics.true_batched_kernel = target_count > 1;
+  diagnostics.normal_equations_used = false;
+  check_cuda(cudaGetDevice(&diagnostics.device_id),
+             "query multi-penalty GCV device");
+  cudaDeviceProp properties{};
+  check_cuda(cudaGetDeviceProperties(&properties, diagnostics.device_id),
+             "query multi-penalty GCV device properties");
+  diagnostics.gpu_name = properties.name;
+
+  Stream stream;
+  DeviceBuffer<double> d_Y;
+  DeviceBuffer<double> d_qr_packed;
+  DeviceBuffer<double> d_tau;
+  DeviceBuffer<double> d_r;
+  DeviceBuffer<int> d_pivot;
+  DeviceBuffer<double> d_roots;
+  DeviceBuffer<int> d_root_offsets;
+  DeviceBuffer<int> d_ranks;
+  DeviceBuffer<double> d_matrices;
+  DeviceBuffer<double> d_log_sp;
+  DeviceBuffer<double> d_qt_work;
+  DeviceBuffer<double> d_y0;
+  DeviceBuffer<double> d_squared_norm;
+  DeviceBuffer<DeviceEvaluationWorkspace> d_workspaces;
+  DeviceBuffer<DeviceTargetEvaluation> d_results;
+  const std::size_t y_count = static_cast<std::size_t>(n) * target_count;
+  d_Y.allocate(y_count, &diagnostics);
+  d_qr_packed.allocate(static_cast<std::size_t>(n) * q, &diagnostics);
+  d_tau.allocate(q, &diagnostics);
+  d_r.allocate(square, &diagnostics);
+  d_pivot.allocate(q, &diagnostics);
+  d_roots.allocate(roots.size(), &diagnostics);
+  d_root_offsets.allocate(penalty_count, &diagnostics);
+  d_ranks.allocate(penalty_count, &diagnostics);
+  d_matrices.allocate(matrices.size(), &diagnostics);
+  d_log_sp.allocate(
+    static_cast<std::size_t>(penalty_count) * target_count, &diagnostics);
+  d_qt_work.allocate(y_count, &diagnostics);
+  d_y0.allocate(static_cast<std::size_t>(q) * target_count, &diagnostics);
+  d_squared_norm.allocate(target_count, &diagnostics);
+  d_workspaces.allocate(target_count, &diagnostics);
+  d_results.allocate(target_count, &diagnostics);
+  upload_async(&d_Y, Y, y_count, stream.get(), &diagnostics);
+  upload_async(&d_qr_packed, magic_qr_packed,
+               static_cast<std::size_t>(n) * q, stream.get(), &diagnostics);
+  upload_async(&d_tau, magic_tau, q, stream.get(), &diagnostics);
+  upload_async(&d_r, magic_r, square, stream.get(), &diagnostics);
+  upload_async(&d_pivot, magic_pivot_zero_based, q,
+               stream.get(), &diagnostics);
+  upload_async(&d_roots, roots.data(), roots.size(),
+               stream.get(), &diagnostics);
+  upload_async(&d_root_offsets, root_offsets.data(), penalty_count,
+               stream.get(), &diagnostics);
+  upload_async(&d_ranks, penalty_ranks.data(), penalty_count,
+               stream.get(), &diagnostics);
+  upload_async(&d_matrices, matrices.data(), matrices.size(),
+               stream.get(), &diagnostics);
+  upload_async(&d_log_sp, log_sp,
+               static_cast<std::size_t>(penalty_count) * target_count,
+               stream.get(), &diagnostics);
+
+  const int target_blocks = (target_count + kBlockSize - 1) / kBlockSize;
+  target_squared_norm_kernel<<<target_blocks, kBlockSize, 0, stream.get()>>>(
+    d_Y.get(), d_squared_norm.get(), n, target_count);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty target norm kernel");
+  magic_qt_y_kernel<<<target_blocks, kBlockSize, 0, stream.get()>>>(
+    d_qr_packed.get(), d_tau.get(), d_Y.get(), d_qt_work.get(),
+    d_y0.get(), n, q, target_count);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty QR projection kernel");
+  evaluate_multi_penalty_targets_kernel<<<
+    target_count, kBlockSize, 0, stream.get()>>>(
+      d_r.get(), d_pivot.get(), d_roots.get(), d_root_offsets.get(),
+      d_ranks.get(), d_matrices.get(), d_y0.get(), d_squared_norm.get(),
+      d_log_sp.get(), d_workspaces.get(), d_results.get(), n, q,
+      penalty_count, target_count, rank_tolerance);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty objective batch kernel");
+  std::vector<DeviceTargetEvaluation> host_results(
+    static_cast<std::size_t>(target_count));
+  check_cuda(cudaMemcpyAsync(
+    host_results.data(), d_results.get(),
+    host_results.size() * sizeof(DeviceTargetEvaluation),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download multi-penalty objective results");
+  diagnostics.d2h_copy_count = 1;
+  check_cuda(cudaStreamSynchronize(stream.get()),
+             "synchronize multi-penalty objective batch");
+
+  output.rss.resize(target_count);
+  output.edf.resize(target_count);
+  output.score.resize(target_count);
+  output.condition.resize(target_count);
+  output.aggregate_penalty_rank.resize(target_count);
+  output.numerical_rank.resize(target_count);
+  output.solver_info.resize(target_count);
+  output.gradient.resize(
+    static_cast<std::size_t>(penalty_count) * target_count);
+  output.hessian.resize(
+    static_cast<std::size_t>(penalty_count) * penalty_count * target_count);
+  output.coefficients.resize(static_cast<std::size_t>(q) * target_count);
+  for (int target = 0; target < target_count; ++target) {
+    const DeviceTargetEvaluation& value =
+      host_results[static_cast<std::size_t>(target)];
+    output.rss[static_cast<std::size_t>(target)] = value.rss;
+    output.edf[static_cast<std::size_t>(target)] = value.edf;
+    output.score[static_cast<std::size_t>(target)] = value.score;
+    output.condition[static_cast<std::size_t>(target)] = value.condition;
+    output.aggregate_penalty_rank[static_cast<std::size_t>(target)] =
+      value.aggregate_penalty_rank;
+    output.numerical_rank[static_cast<std::size_t>(target)] =
+      value.numerical_rank;
+    output.solver_info[static_cast<std::size_t>(target)] = value.solver_info;
+    if (value.solver_info != 0) diagnostics.cuda_error_count += 1;
+    if (value.solver_info > 0) diagnostics.svd_nonconverged_count += 1;
+    if (value.solver_info == -1) {
+      diagnostics.aggregate_rank_failure_count += 1;
+    }
+    if (value.decomposition_route == kDecompositionGuardedQr) {
+      diagnostics.cuda_guarded_qr_evaluation_count += 1;
+    } else if (value.decomposition_route == kDecompositionStableSvd) {
+      diagnostics.cuda_stable_svd_evaluation_count += 1;
+    }
+    for (int penalty = 0; penalty < penalty_count; ++penalty) {
+      output.gradient[penalty + penalty_count * target] =
+        value.gradient[penalty];
+      for (int other = 0; other < penalty_count; ++other) {
+        output.hessian[penalty + penalty_count *
+          (other + penalty_count * target)] =
+            value.hessian[penalty + penalty_count * other];
+      }
+    }
+    for (int row = 0; row < q; ++row) {
+      output.coefficients[row + q * target] = value.coefficients[row];
+    }
+  }
+  diagnostics.total_host_ms = std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - started).count();
+  return output;
+}
+
+MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
+    const double* X,
+    const double* Y,
+    const double* magic_qr_packed,
+    const double* magic_tau,
+    const double* magic_r,
+    const int* magic_pivot_zero_based,
+    const std::vector<std::vector<double>>& penalty_roots,
+    const std::vector<std::vector<double>>& penalty_matrices,
+    const std::vector<int>& penalty_ranks,
+    const double* initial_log_sp,
+    int n,
+    int coefficient_dim,
+    int penalty_count,
+    int target_count,
+    const MultiPenaltyGcvCudaOptimizerControl& control) {
+  const auto started = std::chrono::steady_clock::now();
+  if (X == nullptr || Y == nullptr || magic_qr_packed == nullptr ||
+      magic_tau == nullptr || magic_r == nullptr ||
+      magic_pivot_zero_based == nullptr || initial_log_sp == nullptr ||
+      n <= coefficient_dim || coefficient_dim <= 0 ||
+      coefficient_dim > kMultiPenaltyGcvMaximumCoefficientDim ||
+      penalty_count <= 1 ||
+      penalty_count > kMultiPenaltyGcvMaximumPenaltyCount ||
+      target_count <= 1 ||
+      static_cast<int>(penalty_roots.size()) != penalty_count ||
+      static_cast<int>(penalty_matrices.size()) != penalty_count ||
+      static_cast<int>(penalty_ranks.size()) != penalty_count ||
+      !std::isfinite(control.convergence_tolerance) ||
+      control.convergence_tolerance <= 0.0 ||
+      control.convergence_tolerance >= 1.0 ||
+      control.max_step_halving < 4 || control.max_iterations <= 3 ||
+      !std::isfinite(control.max_newton_step) ||
+      control.max_newton_step <= 0.0 ||
+      !std::isfinite(control.boundary_probe_step) ||
+      control.boundary_probe_step <= 0.0 ||
+      control.max_boundary_probes <= 0 ||
+      !std::isfinite(control.rank_tolerance) ||
+      control.rank_tolerance <= 0.0 || control.rank_tolerance >= 1.0) {
+    throw std::runtime_error(
+      "multi-penalty CUDA optimizer inputs are invalid");
+  }
+  const int q = coefficient_dim;
+  const std::size_t square = static_cast<std::size_t>(q) * q;
+  int total_root_rank = 0;
+  std::vector<int> root_offsets(static_cast<std::size_t>(penalty_count));
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const int rank = penalty_ranks[static_cast<std::size_t>(penalty)];
+    if (rank <= 0 || rank > q ||
+        penalty_roots[static_cast<std::size_t>(penalty)].size() !=
+          static_cast<std::size_t>(q) * rank ||
+        penalty_matrices[static_cast<std::size_t>(penalty)].size() !=
+          square || !std::isfinite(initial_log_sp[penalty])) {
+      throw std::runtime_error(
+        "multi-penalty CUDA optimizer geometry is invalid");
+    }
+    root_offsets[static_cast<std::size_t>(penalty)] = total_root_rank;
+    total_root_rank += rank;
+  }
+  if (q + total_root_rank > kMaximumRows) {
+    throw std::runtime_error(
+      "multi-penalty CUDA optimizer dimensions exceed the envelope");
+  }
+  std::vector<double> roots(
+    static_cast<std::size_t>(q) * total_root_rank);
+  std::vector<double> matrices(square * penalty_count);
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const std::vector<double>& root =
+      penalty_roots[static_cast<std::size_t>(penalty)];
+    std::copy(root.begin(), root.end(), roots.begin() +
+      static_cast<std::size_t>(q) *
+        root_offsets[static_cast<std::size_t>(penalty)]);
+    const std::vector<double>& matrix =
+      penalty_matrices[static_cast<std::size_t>(penalty)];
+    std::copy(matrix.begin(), matrix.end(),
+              matrices.begin() + square * penalty);
+  }
+
+  MultiPenaltyGcvCudaOptimization output;
+  output.schema_version =
+    "full-cuda-ci-multi-penalty-gcv-cuda-optimization-v1";
+  output.rank_path =
+    "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd";
+  output.optimizer_path =
+    "cuda-independent-target-newton-steepest-boundary-v1";
+  output.n = n;
+  output.coefficient_dim = q;
+  output.penalty_count = penalty_count;
+  output.target_count = target_count;
+  output.initial_log_sp.assign(
+    initial_log_sp, initial_log_sp + penalty_count);
+  MultiPenaltyGcvCudaDiagnostics& diagnostics = output.diagnostics;
+  diagnostics.schema_version =
+    "full-cuda-ci-multi-penalty-gcv-cuda-diagnostics-v1";
+  diagnostics.execution_strategy =
+    "one-setup-one-block-per-target-independent-optimizer";
+  diagnostics.prepared_setup_upload_count = 1;
+  diagnostics.target_batch_upload_count = 1;
+  diagnostics.cuda_qt_y_kernel_launch_count = 1;
+  diagnostics.cuda_optimizer_kernel_launch_count = 1;
+  diagnostics.cuda_optimizer_target_count = target_count;
+  diagnostics.independent_target_states = true;
+  diagnostics.target_specific_log_sp = true;
+  diagnostics.true_batched_kernel = target_count > 1;
+  diagnostics.normal_equations_used = false;
+  check_cuda(cudaGetDevice(&diagnostics.device_id),
+             "query multi-penalty optimizer device");
+  cudaDeviceProp properties{};
+  check_cuda(cudaGetDeviceProperties(&properties, diagnostics.device_id),
+             "query multi-penalty optimizer device properties");
+  diagnostics.gpu_name = properties.name;
+
+  Stream stream;
+  DeviceBuffer<double> d_Y;
+  DeviceBuffer<double> d_qr_packed;
+  DeviceBuffer<double> d_tau;
+  DeviceBuffer<double> d_r;
+  DeviceBuffer<int> d_pivot;
+  DeviceBuffer<double> d_roots;
+  DeviceBuffer<int> d_root_offsets;
+  DeviceBuffer<int> d_ranks;
+  DeviceBuffer<double> d_matrices;
+  DeviceBuffer<double> d_initial_log_sp;
+  DeviceBuffer<double> d_qt_work;
+  DeviceBuffer<double> d_y0;
+  DeviceBuffer<double> d_squared_norm;
+  DeviceBuffer<DeviceEvaluationWorkspace> d_workspaces;
+  DeviceBuffer<DeviceOptimizerState> d_states;
+  const std::size_t y_count = static_cast<std::size_t>(n) * target_count;
+  d_Y.allocate(y_count, &diagnostics);
+  d_qr_packed.allocate(static_cast<std::size_t>(n) * q, &diagnostics);
+  d_tau.allocate(q, &diagnostics);
+  d_r.allocate(square, &diagnostics);
+  d_pivot.allocate(q, &diagnostics);
+  d_roots.allocate(roots.size(), &diagnostics);
+  d_root_offsets.allocate(penalty_count, &diagnostics);
+  d_ranks.allocate(penalty_count, &diagnostics);
+  d_matrices.allocate(matrices.size(), &diagnostics);
+  d_initial_log_sp.allocate(penalty_count, &diagnostics);
+  d_qt_work.allocate(y_count, &diagnostics);
+  d_y0.allocate(static_cast<std::size_t>(q) * target_count, &diagnostics);
+  d_squared_norm.allocate(target_count, &diagnostics);
+  d_workspaces.allocate(target_count, &diagnostics);
+  d_states.allocate(target_count, &diagnostics);
+  upload_async(&d_Y, Y, y_count, stream.get(), &diagnostics);
+  upload_async(&d_qr_packed, magic_qr_packed,
+               static_cast<std::size_t>(n) * q, stream.get(), &diagnostics);
+  upload_async(&d_tau, magic_tau, q, stream.get(), &diagnostics);
+  upload_async(&d_r, magic_r, square, stream.get(), &diagnostics);
+  upload_async(&d_pivot, magic_pivot_zero_based, q,
+               stream.get(), &diagnostics);
+  upload_async(&d_roots, roots.data(), roots.size(),
+               stream.get(), &diagnostics);
+  upload_async(&d_root_offsets, root_offsets.data(), penalty_count,
+               stream.get(), &diagnostics);
+  upload_async(&d_ranks, penalty_ranks.data(), penalty_count,
+               stream.get(), &diagnostics);
+  upload_async(&d_matrices, matrices.data(), matrices.size(),
+               stream.get(), &diagnostics);
+  upload_async(&d_initial_log_sp, initial_log_sp, penalty_count,
+               stream.get(), &diagnostics);
+
+  const int target_blocks = (target_count + kBlockSize - 1) / kBlockSize;
+  target_squared_norm_kernel<<<target_blocks, kBlockSize, 0, stream.get()>>>(
+    d_Y.get(), d_squared_norm.get(), n, target_count);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty optimizer norm kernel");
+  magic_qt_y_kernel<<<target_blocks, kBlockSize, 0, stream.get()>>>(
+    d_qr_packed.get(), d_tau.get(), d_Y.get(), d_qt_work.get(),
+    d_y0.get(), n, q, target_count);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty optimizer QR projection kernel");
+  const double gradient_tolerance_factor = std::pow(
+    control.convergence_tolerance, 1.0 / 3.0);
+  optimize_multi_penalty_targets_kernel<<<
+    target_count, kBlockSize, 0, stream.get()>>>(
+      d_r.get(), d_pivot.get(), d_roots.get(), d_root_offsets.get(),
+      d_ranks.get(), d_matrices.get(), d_y0.get(), d_squared_norm.get(),
+      d_initial_log_sp.get(), d_workspaces.get(), d_states.get(), n, q,
+      penalty_count, target_count, control.convergence_tolerance,
+      gradient_tolerance_factor, control.max_step_halving,
+      control.max_iterations, control.max_newton_step,
+      control.boundary_probe_step, control.max_boundary_probes,
+      control.rank_tolerance);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty optimizer batch kernel");
+  std::vector<DeviceOptimizerState> host_states(
+    static_cast<std::size_t>(target_count));
+  check_cuda(cudaMemcpyAsync(
+    host_states.data(), d_states.get(),
+    host_states.size() * sizeof(DeviceOptimizerState),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download multi-penalty optimizer results");
+  diagnostics.d2h_copy_count = 1;
+  check_cuda(cudaStreamSynchronize(stream.get()),
+             "synchronize multi-penalty optimizer batch");
+
+  const std::size_t target_size = static_cast<std::size_t>(target_count);
+  const std::size_t penalty_target_size =
+    static_cast<std::size_t>(penalty_count) * target_count;
+  output.selected_log_sp.resize(penalty_target_size);
+  output.rss.resize(target_size);
+  output.edf.resize(target_size);
+  output.score.resize(target_size);
+  output.condition.resize(target_size);
+  output.gradient.resize(penalty_target_size);
+  output.hessian.resize(
+    static_cast<std::size_t>(penalty_count) * penalty_count * target_count);
+  output.coefficients.resize(static_cast<std::size_t>(q) * target_count);
+  output.rms_gradient.resize(target_size);
+  output.hessian_eigenvalues.resize(penalty_target_size);
+  output.aggregate_penalty_rank.resize(target_size);
+  output.numerical_rank.resize(target_size);
+  output.solver_info.resize(target_size);
+  output.optimizer_iterations.resize(target_size);
+  output.score_calls.resize(target_size);
+  output.objective_calls.resize(target_size);
+  output.step_halving_count.resize(target_size);
+  output.newton_trial_count.resize(target_size);
+  output.steepest_descent_trial_count.resize(target_size);
+  output.boundary_probe_count.resize(target_size);
+  output.boundary_accepted_count.resize(target_size);
+  output.boundary_status.resize(penalty_target_size);
+  output.fully_converged.resize(target_size);
+  output.hessian_positive_definite.resize(target_size);
+  output.step_failed.resize(target_size);
+  output.optimizer_status.resize(target_size);
+  for (int target = 0; target < target_count; ++target) {
+    const DeviceOptimizerState& state =
+      host_states[static_cast<std::size_t>(target)];
+    const DeviceTargetEvaluation& value = state.current;
+    output.rss[target] = value.rss;
+    output.edf[target] = value.edf;
+    output.score[target] = value.score;
+    output.condition[target] = value.condition;
+    output.rms_gradient[target] = state.rms_gradient;
+    output.aggregate_penalty_rank[target] = value.aggregate_penalty_rank;
+    output.numerical_rank[target] = value.numerical_rank;
+    output.solver_info[target] = value.solver_info;
+    output.optimizer_iterations[target] = state.optimizer_iterations;
+    output.score_calls[target] = state.score_calls;
+    output.objective_calls[target] = state.objective_calls;
+    output.step_halving_count[target] = state.step_halving_count;
+    output.newton_trial_count[target] = state.newton_trial_count;
+    output.steepest_descent_trial_count[target] =
+      state.steepest_descent_trial_count;
+    output.boundary_probe_count[target] = state.boundary_probe_count;
+    output.boundary_accepted_count[target] = state.boundary_accepted_count;
+    output.fully_converged[target] = state.fully_converged;
+    output.hessian_positive_definite[target] =
+      state.hessian_positive_definite;
+    output.step_failed[target] = state.step_failed;
+    output.optimizer_status[target] = state.optimizer_status;
+    diagnostics.cuda_optimizer_objective_count += state.objective_calls;
+    diagnostics.cuda_penalty_factor_augmentation_cycles +=
+      state.phase_timing.penalty_factor_augmentation_cycles;
+    diagnostics.cuda_qr_svd_cycles += state.phase_timing.qr_svd_cycles;
+    diagnostics.cuda_qr_bidiagonal_reduction_cycles +=
+      state.phase_timing.decomposition_stage_cycles[0];
+    diagnostics.cuda_bidiagonal_svd_cycles +=
+      state.phase_timing.decomposition_stage_cycles[1];
+    diagnostics.cuda_svd_vector_postback_cycles +=
+      state.phase_timing.decomposition_stage_cycles[2];
+    diagnostics.cuda_left_vector_product_cycles +=
+      state.phase_timing.decomposition_stage_cycles[3];
+    diagnostics.cuda_score_construction_cycles +=
+      state.phase_timing.score_construction_cycles;
+    diagnostics.cuda_derivative_hessian_cycles +=
+      state.phase_timing.derivative_hessian_cycles;
+    diagnostics.cuda_complete_evaluation_count +=
+      state.phase_timing.complete_evaluation_count;
+    diagnostics.cuda_score_only_evaluation_count +=
+      state.phase_timing.score_only_evaluation_count;
+    diagnostics.cuda_guarded_qr_evaluation_count +=
+      state.phase_timing.guarded_qr_evaluation_count;
+    diagnostics.cuda_stable_svd_evaluation_count +=
+      state.phase_timing.stable_svd_evaluation_count;
+    diagnostics.cuda_selected_evaluation_reuse_count +=
+      state.selected_evaluation_reuse_count;
+    diagnostics.cuda_hessian_eigensolver_count +=
+      state.optimizer_iterations;
+    if (state.optimizer_status == 0) {
+      diagnostics.cuda_selected_fit_count += 1;
+    } else {
+      diagnostics.cuda_error_count += 1;
+    }
+    if (value.solver_info > 0) diagnostics.svd_nonconverged_count += 1;
+    if (value.solver_info == -1) {
+      diagnostics.aggregate_rank_failure_count += 1;
+    }
+    for (int penalty = 0; penalty < penalty_count; ++penalty) {
+      const std::size_t penalty_target =
+        static_cast<std::size_t>(penalty) +
+        static_cast<std::size_t>(penalty_count) * target;
+      output.selected_log_sp[penalty_target] = state.log_sp[penalty];
+      output.gradient[penalty_target] = value.gradient[penalty];
+      output.hessian_eigenvalues[penalty_target] =
+        state.hessian_eigenvalues[penalty];
+      output.boundary_status[penalty_target] =
+        state.boundary_status[penalty];
+      for (int other = 0; other < penalty_count; ++other) {
+        output.hessian[penalty + penalty_count *
+          (other + penalty_count * target)] =
+            value.hessian[penalty + penalty_count * other];
+      }
+    }
+    for (int row = 0; row < q; ++row) {
+      output.coefficients[row + q * target] = value.coefficients[row];
+    }
+  }
+  diagnostics.cuda_objective_target_count =
+    diagnostics.cuda_optimizer_objective_count;
+  diagnostics.total_host_ms = std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - started).count();
+  return output;
+}
+
+std::shared_ptr<MultiPenaltyGcvCudaPrepared>
+create_multi_penalty_gcv_cuda_prepared(
+    const double* X,
+    const double* magic_qr_packed,
+    const double* magic_tau,
+    const double* magic_r,
+    const int* magic_pivot_zero_based,
+    const std::vector<std::vector<double>>& penalty_roots,
+    const std::vector<std::vector<double>>& penalty_matrices,
+    const std::vector<int>& penalty_ranks,
+    const double* initial_log_sp,
+    int n,
+    int coefficient_dim,
+    int penalty_count,
+    int target_capacity,
+    int device_id) {
+  if (X == nullptr || magic_qr_packed == nullptr || magic_tau == nullptr ||
+      magic_r == nullptr || magic_pivot_zero_based == nullptr ||
+      initial_log_sp == nullptr || n <= coefficient_dim ||
+      coefficient_dim <= 0 ||
+      coefficient_dim > kMultiPenaltyGcvMaximumCoefficientDim ||
+      penalty_count <= 1 ||
+      penalty_count > kMultiPenaltyGcvMaximumPenaltyCount ||
+      target_capacity <= 1 || device_id < 0 ||
+      static_cast<int>(penalty_roots.size()) != penalty_count ||
+      static_cast<int>(penalty_matrices.size()) != penalty_count ||
+      static_cast<int>(penalty_ranks.size()) != penalty_count) {
+    throw std::runtime_error(
+      "persistent multi-penalty CUDA setup inputs are invalid");
+  }
+  const int q = coefficient_dim;
+  const std::size_t square = static_cast<std::size_t>(q) * q;
+  int total_root_rank = 0;
+  std::vector<int> root_offsets(static_cast<std::size_t>(penalty_count));
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const int rank = penalty_ranks[static_cast<std::size_t>(penalty)];
+    if (rank <= 0 || rank > q ||
+        penalty_roots[static_cast<std::size_t>(penalty)].size() !=
+          static_cast<std::size_t>(q) * rank ||
+        penalty_matrices[static_cast<std::size_t>(penalty)].size() !=
+          square || !std::isfinite(initial_log_sp[penalty])) {
+      throw std::runtime_error(
+        "persistent multi-penalty CUDA setup geometry is invalid");
+    }
+    root_offsets[static_cast<std::size_t>(penalty)] = total_root_rank;
+    total_root_rank += rank;
+  }
+  if (q + total_root_rank > kMaximumRows) {
+    throw std::runtime_error(
+      "persistent multi-penalty CUDA setup exceeds the envelope");
+  }
+  std::vector<double> roots(
+    static_cast<std::size_t>(q) * total_root_rank);
+  std::vector<double> matrices(square * penalty_count);
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const std::vector<double>& root =
+      penalty_roots[static_cast<std::size_t>(penalty)];
+    std::copy(root.begin(), root.end(), roots.begin() +
+      static_cast<std::size_t>(q) *
+        root_offsets[static_cast<std::size_t>(penalty)]);
+    const std::vector<double>& matrix =
+      penalty_matrices[static_cast<std::size_t>(penalty)];
+    std::copy(matrix.begin(), matrix.end(),
+              matrices.begin() + square * penalty);
+  }
+
+  int previous_device = -1;
+  check_cuda(cudaGetDevice(&previous_device),
+             "query device before persistent multi-penalty setup");
+  check_cuda(cudaSetDevice(device_id),
+             "select device for persistent multi-penalty setup");
+  try {
+    std::shared_ptr<MultiPenaltyGcvCudaPrepared> prepared =
+      std::make_shared<MultiPenaltyGcvCudaPrepared>();
+    prepared->device_id = device_id;
+    prepared->n = n;
+    prepared->q = q;
+    prepared->penalty_count = penalty_count;
+    prepared->target_capacity = target_capacity;
+    prepared->total_root_rank = total_root_rank;
+    prepared->initial_log_sp.assign(
+      initial_log_sp, initial_log_sp + penalty_count);
+    prepared->host_states.resize(static_cast<std::size_t>(target_capacity));
+    MultiPenaltyGcvCudaDiagnostics allocation_diagnostics;
+    const std::size_t y_capacity =
+      static_cast<std::size_t>(n) * target_capacity;
+    const std::size_t q_targets =
+      static_cast<std::size_t>(q) * target_capacity;
+    std::size_t arena_bytes = 0;
+    arena_bytes = arena_advance<double>(arena_bytes,
+      static_cast<std::size_t>(n) * q);
+    arena_bytes = arena_advance<double>(arena_bytes,
+      static_cast<std::size_t>(n) * q);
+    arena_bytes = arena_advance<double>(arena_bytes, q);
+    arena_bytes = arena_advance<double>(arena_bytes, square);
+    arena_bytes = arena_advance<int>(arena_bytes, q);
+    arena_bytes = arena_advance<double>(arena_bytes, roots.size());
+    arena_bytes = arena_advance<int>(arena_bytes, penalty_count);
+    arena_bytes = arena_advance<int>(arena_bytes, penalty_count);
+    arena_bytes = arena_advance<double>(arena_bytes, matrices.size());
+    arena_bytes = arena_advance<double>(arena_bytes, penalty_count);
+    arena_bytes = arena_advance<double>(arena_bytes, y_capacity);
+    arena_bytes = arena_advance<double>(arena_bytes, y_capacity);
+    arena_bytes = arena_advance<double>(arena_bytes, q_targets);
+    arena_bytes = arena_advance<double>(arena_bytes, target_capacity);
+    arena_bytes = arena_advance<DeviceEvaluationWorkspace>(
+      arena_bytes, target_capacity);
+    arena_bytes = arena_advance<DeviceOptimizerState>(
+      arena_bytes, target_capacity);
+    arena_bytes = arena_advance<double>(arena_bytes, q_targets);
+    arena_bytes = arena_advance<double>(arena_bytes, y_capacity);
+    arena_bytes = arena_advance<double>(arena_bytes, y_capacity);
+    prepared->d_arena.allocate(arena_bytes, &allocation_diagnostics);
+    unsigned char* arena = prepared->d_arena.get();
+    std::size_t arena_offset = 0;
+    arena_offset = prepared->d_X.bind_from_arena(
+      arena, arena_offset, static_cast<std::size_t>(n) * q);
+    arena_offset = prepared->d_qr_packed.bind_from_arena(
+      arena, arena_offset, static_cast<std::size_t>(n) * q);
+    arena_offset = prepared->d_tau.bind_from_arena(
+      arena, arena_offset, q);
+    arena_offset = prepared->d_r.bind_from_arena(
+      arena, arena_offset, square);
+    arena_offset = prepared->d_pivot.bind_from_arena(
+      arena, arena_offset, q);
+    arena_offset = prepared->d_roots.bind_from_arena(
+      arena, arena_offset, roots.size());
+    arena_offset = prepared->d_root_offsets.bind_from_arena(
+      arena, arena_offset, penalty_count);
+    arena_offset = prepared->d_ranks.bind_from_arena(
+      arena, arena_offset, penalty_count);
+    arena_offset = prepared->d_matrices.bind_from_arena(
+      arena, arena_offset, matrices.size());
+    arena_offset = prepared->d_initial_log_sp.bind_from_arena(
+      arena, arena_offset, penalty_count);
+    arena_offset = prepared->d_Y.bind_from_arena(
+      arena, arena_offset, y_capacity);
+    arena_offset = prepared->d_qt_work.bind_from_arena(
+      arena, arena_offset, y_capacity);
+    arena_offset = prepared->d_y0.bind_from_arena(
+      arena, arena_offset, q_targets);
+    arena_offset = prepared->d_squared_norm.bind_from_arena(
+      arena, arena_offset, target_capacity);
+    arena_offset = prepared->d_workspaces.bind_from_arena(
+      arena, arena_offset, target_capacity);
+    arena_offset = prepared->d_states.bind_from_arena(
+      arena, arena_offset, target_capacity);
+    arena_offset = prepared->d_coefficients.bind_from_arena(
+      arena, arena_offset, q_targets);
+    arena_offset = prepared->d_fitted.bind_from_arena(
+      arena, arena_offset, y_capacity);
+    arena_offset = prepared->d_residuals.bind_from_arena(
+      arena, arena_offset, y_capacity);
+    if (arena_offset != arena_bytes) {
+      throw std::runtime_error(
+        "persistent multi-penalty CUDA arena layout is inconsistent");
+    }
+    MultiPenaltyGcvCudaDiagnostics upload_diagnostics;
+    upload_async(&prepared->d_X, X, static_cast<std::size_t>(n) * q,
+                 prepared->stream.get(), &upload_diagnostics);
+    upload_async(&prepared->d_qr_packed, magic_qr_packed,
+                 static_cast<std::size_t>(n) * q,
+                 prepared->stream.get(), &upload_diagnostics);
+    upload_async(&prepared->d_tau, magic_tau, q,
+                 prepared->stream.get(), &upload_diagnostics);
+    upload_async(&prepared->d_r, magic_r, square,
+                 prepared->stream.get(), &upload_diagnostics);
+    upload_async(&prepared->d_pivot, magic_pivot_zero_based, q,
+                 prepared->stream.get(), &upload_diagnostics);
+    upload_async(&prepared->d_roots, roots.data(), roots.size(),
+                 prepared->stream.get(), &upload_diagnostics);
+    upload_async(&prepared->d_root_offsets, root_offsets.data(),
+                 penalty_count, prepared->stream.get(),
+                 &upload_diagnostics);
+    upload_async(&prepared->d_ranks, penalty_ranks.data(), penalty_count,
+                 prepared->stream.get(), &upload_diagnostics);
+    upload_async(&prepared->d_matrices, matrices.data(), matrices.size(),
+                 prepared->stream.get(), &upload_diagnostics);
+    upload_async(&prepared->d_initial_log_sp, initial_log_sp,
+                 penalty_count, prepared->stream.get(),
+                 &upload_diagnostics);
+    check_cuda(cudaStreamSynchronize(prepared->stream.get()),
+               "synchronize persistent multi-penalty setup");
+    cudaDeviceProp properties{};
+    check_cuda(cudaGetDeviceProperties(&properties, device_id),
+               "query persistent multi-penalty device properties");
+    prepared->info.device_id = device_id;
+    prepared->info.gpu_name = properties.name;
+    prepared->info.n = n;
+    prepared->info.coefficient_dim = q;
+    prepared->info.penalty_count = penalty_count;
+    prepared->info.target_capacity = target_capacity;
+    prepared->info.setup_upload_count = 1;
+    prepared->info.device_allocation_count =
+      allocation_diagnostics.device_allocation_count;
+    prepared->info.setup_h2d_bytes =
+      (static_cast<std::size_t>(2) * n * q + square + roots.size() +
+       matrices.size() + static_cast<std::size_t>(2) * penalty_count + q) *
+        sizeof(double) +
+      (static_cast<std::size_t>(q) +
+       static_cast<std::size_t>(2) * penalty_count) * sizeof(int);
+    check_cuda(cudaSetDevice(previous_device),
+               "restore device after persistent multi-penalty setup");
+    return prepared;
+  } catch (...) {
+    cudaSetDevice(previous_device);
+    throw;
+  }
+}
+
+MultiPenaltyGcvCudaPreparedInfo multi_penalty_gcv_cuda_prepared_info(
+    const std::shared_ptr<MultiPenaltyGcvCudaPrepared>& prepared) {
+  if (!prepared) {
+    throw std::runtime_error(
+      "persistent multi-penalty CUDA setup has been freed");
+  }
+  std::lock_guard<std::mutex> lock(prepared->mutex);
+  MultiPenaltyGcvCudaPreparedInfo info = prepared->info;
+  info.residual_slot_leased = prepared->residual_slot_leased;
+  info.generation = prepared->generation;
+  return info;
+}
+
+MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
+    const std::shared_ptr<MultiPenaltyGcvCudaPrepared>& prepared,
+    const double* Y,
+    int n,
+    int target_count,
+    const std::vector<std::string>& target_keys,
+    const MultiPenaltyGcvCudaOptimizerControl& control) {
+  const auto started = std::chrono::steady_clock::now();
+  if (!prepared || Y == nullptr) {
+    throw std::runtime_error(
+      "persistent multi-penalty CUDA batch inputs are invalid");
+  }
+  std::lock_guard<std::mutex> lock(prepared->mutex);
+  if (prepared->residual_slot_leased) {
+    throw std::runtime_error("ERR_MULTI_PENALTY_OUTPUT_SLOT_BUSY");
+  }
+  if (n != prepared->n || target_count <= 1 ||
+      target_count > prepared->target_capacity ||
+      target_keys.size() != static_cast<std::size_t>(target_count) ||
+      !std::isfinite(control.convergence_tolerance) ||
+      control.convergence_tolerance <= 0.0 ||
+      control.convergence_tolerance >= 1.0 ||
+      control.max_step_halving < 4 || control.max_iterations <= 3 ||
+      !std::isfinite(control.max_newton_step) ||
+      control.max_newton_step <= 0.0 ||
+      !std::isfinite(control.boundary_probe_step) ||
+      control.boundary_probe_step <= 0.0 ||
+      control.max_boundary_probes <= 0 ||
+      !std::isfinite(control.rank_tolerance) ||
+      control.rank_tolerance <= 0.0 || control.rank_tolerance >= 1.0) {
+    throw std::runtime_error(
+      "persistent multi-penalty CUDA batch dimensions are invalid");
+  }
+  int previous_device = -1;
+  check_cuda(cudaGetDevice(&previous_device),
+             "query device before persistent multi-penalty batch");
+  check_cuda(cudaSetDevice(prepared->device_id),
+             "select device for persistent multi-penalty batch");
+  try {
+    const int q = prepared->q;
+    const int penalty_count = prepared->penalty_count;
+    const std::size_t y_count =
+      static_cast<std::size_t>(n) * target_count;
+    MultiPenaltyGcvCudaDiagnostics diagnostics;
+    diagnostics.schema_version =
+      "full-cuda-ci-multi-penalty-gcv-cuda-diagnostics-v1";
+    diagnostics.execution_strategy =
+      "persistent-one-setup-one-block-per-target-independent-optimizer";
+    diagnostics.device_id = prepared->device_id;
+    diagnostics.gpu_name = prepared->info.gpu_name;
+    diagnostics.prepared_setup_upload_count =
+      prepared->info.setup_upload_count;
+    diagnostics.target_batch_upload_count = 1;
+    diagnostics.cuda_qt_y_kernel_launch_count = 1;
+    diagnostics.cuda_optimizer_kernel_launch_count = 1;
+    diagnostics.cuda_optimizer_target_count = target_count;
+    diagnostics.independent_target_states = true;
+    diagnostics.target_specific_log_sp = true;
+    diagnostics.true_batched_kernel = true;
+    diagnostics.normal_equations_used = false;
+    check_cuda(cudaMemcpyAsync(
+      prepared->d_Y.get(), Y, y_count * sizeof(double),
+      cudaMemcpyHostToDevice, prepared->stream.get()),
+      "upload persistent multi-penalty target batch");
+    diagnostics.h2d_copy_count = 1;
+    const int target_blocks =
+      (target_count + kBlockSize - 1) / kBlockSize;
+    target_squared_norm_kernel<<<
+      target_blocks, kBlockSize, 0, prepared->stream.get()>>>(
+        prepared->d_Y.get(), prepared->d_squared_norm.get(),
+        n, target_count);
+    check_cuda(cudaGetLastError(),
+               "launch persistent multi-penalty norm kernel");
+    magic_qt_y_kernel<<<
+      target_blocks, kBlockSize, 0, prepared->stream.get()>>>(
+        prepared->d_qr_packed.get(), prepared->d_tau.get(),
+        prepared->d_Y.get(), prepared->d_qt_work.get(),
+        prepared->d_y0.get(), n, q, target_count);
+    check_cuda(cudaGetLastError(),
+               "launch persistent multi-penalty QR projection kernel");
+    const double gradient_tolerance_factor = std::pow(
+      control.convergence_tolerance, 1.0 / 3.0);
+    optimize_multi_penalty_targets_kernel<<<
+      target_count, kBlockSize, 0, prepared->stream.get()>>>(
+        prepared->d_r.get(), prepared->d_pivot.get(),
+        prepared->d_roots.get(), prepared->d_root_offsets.get(),
+        prepared->d_ranks.get(), prepared->d_matrices.get(),
+        prepared->d_y0.get(), prepared->d_squared_norm.get(),
+        prepared->d_initial_log_sp.get(), prepared->d_workspaces.get(),
+        prepared->d_states.get(), n, q, penalty_count, target_count,
+        control.convergence_tolerance, gradient_tolerance_factor,
+        control.max_step_halving, control.max_iterations,
+        control.max_newton_step, control.boundary_probe_step,
+        control.max_boundary_probes, control.rank_tolerance);
+    check_cuda(cudaGetLastError(),
+               "launch persistent multi-penalty optimizer kernel");
+    const int coefficient_count = q * target_count;
+    const int coefficient_blocks =
+      (coefficient_count + 255) / 256;
+    gather_multi_penalty_coefficients_kernel<<<
+      coefficient_blocks, 256, 0, prepared->stream.get()>>>(
+        prepared->d_states.get(), prepared->d_coefficients.get(),
+        q, target_count);
+    check_cuda(cudaGetLastError(),
+               "launch persistent multi-penalty coefficient gather");
+    const double alpha = 1.0;
+    const double beta = 0.0;
+    check_cublas(cublasDgemm(
+      prepared->cublas.get(), CUBLAS_OP_N, CUBLAS_OP_N,
+      n, target_count, q, &alpha, prepared->d_X.get(), n,
+      prepared->d_coefficients.get(), q, &beta,
+      prepared->d_fitted.get(), n),
+      "form persistent multi-penalty selected fits");
+    const int residual_blocks =
+      (static_cast<int>(y_count) + 255) / 256;
+    form_multi_penalty_residuals_kernel<<<
+      residual_blocks, 256, 0, prepared->stream.get()>>>(
+        prepared->d_Y.get(), prepared->d_fitted.get(),
+        prepared->d_residuals.get(), static_cast<int>(y_count));
+    check_cuda(cudaGetLastError(),
+               "launch persistent multi-penalty residual kernel");
+    check_cuda(cudaEventRecord(
+      prepared->completion_event.get(), prepared->stream.get()),
+      "record persistent multi-penalty residual completion");
+    check_cuda(cudaMemcpyAsync(
+      prepared->host_states.data(), prepared->d_states.get(),
+      static_cast<std::size_t>(target_count) *
+        sizeof(DeviceOptimizerState),
+      cudaMemcpyDeviceToHost, prepared->stream.get()),
+      "download persistent multi-penalty optimizer status");
+    diagnostics.d2h_copy_count = 1;
+    check_cuda(cudaStreamSynchronize(prepared->stream.get()),
+               "synchronize persistent multi-penalty batch");
+    MultiPenaltyGcvCudaBatchResult result;
+    result.optimization = materialize_optimizer_output(
+      prepared->host_states.data(), n, q, penalty_count, target_count,
+      prepared->initial_log_sp, std::move(diagnostics));
+    result.optimization.diagnostics.total_host_ms =
+      std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    prepared->generation += 1;
+    prepared->residual_slot_leased = true;
+    prepared->info.solve_count += 1;
+    prepared->info.cublas_gemm_count += 1;
+    prepared->info.residual_kernel_count += 1;
+    prepared->info.generation = prepared->generation;
+    prepared->info.residual_slot_leased = true;
+    result.residual =
+      std::make_shared<MultiPenaltyGcvCudaResidualBatch>();
+    result.residual->owner = prepared;
+    result.residual->n = n;
+    result.residual->q = q;
+    result.residual->target_count = target_count;
+    result.residual->device_id = prepared->device_id;
+    result.residual->target_keys = target_keys;
+    result.residual->optimizer_status =
+      result.optimization.optimizer_status;
+    result.residual->generation = prepared->generation;
+    check_cuda(cudaSetDevice(previous_device),
+               "restore device after persistent multi-penalty batch");
+    return result;
+  } catch (...) {
+    cudaSetDevice(previous_device);
+    throw;
+  }
+}
+
+MultiPenaltyGcvCudaMultiResult multi_penalty_gcv_cuda_optimize_multi(
+    std::vector<MultiPenaltyGcvCudaMultiRequest> requests,
+    int requested_concurrency) {
+  const auto started = std::chrono::steady_clock::now();
+  if (requests.empty() || requested_concurrency <= 0 ||
+      requested_concurrency > kMultiPenaltyGcvMaximumConcurrentSetups) {
+    throw std::runtime_error(
+      "multi-setup multi-penalty CUDA concurrency is invalid");
+  }
+  int target_count = 0;
+  for (const MultiPenaltyGcvCudaMultiRequest& request : requests) {
+    if (!request.prepared || request.n <= 0 || request.target_count <= 1 ||
+        request.Y.size() != static_cast<std::size_t>(request.n) *
+          request.target_count ||
+        request.target_keys.size() !=
+          static_cast<std::size_t>(request.target_count)) {
+      throw std::runtime_error(
+        "multi-setup multi-penalty CUDA request is malformed");
+    }
+    target_count += request.target_count;
+  }
+
+  MultiPenaltyGcvCudaMultiResult output;
+  output.schema_version =
+    "full-cuda-ci-multi-penalty-gcv-cuda-multi-setup-v1";
+  output.setups.resize(requests.size());
+  MultiPenaltyGcvCudaMultiDiagnostics& diagnostics = output.diagnostics;
+  diagnostics.schema_version =
+    "full-cuda-ci-multi-penalty-gcv-cuda-multi-diagnostics-v1";
+  diagnostics.execution_strategy =
+    "bounded-independent-prepared-streams-v1";
+  diagnostics.setup_count = static_cast<int>(requests.size());
+  diagnostics.target_count = target_count;
+  diagnostics.requested_concurrency = requested_concurrency;
+  diagnostics.worker_count = std::min(
+    requested_concurrency, static_cast<int>(requests.size()));
+  diagnostics.setup_stream_count = static_cast<int>(requests.size());
+
+  std::atomic<std::size_t> next{0};
+  std::atomic<int> ready{0};
+  std::atomic<int> active{0};
+  std::atomic<int> maximum_active{0};
+  std::atomic<bool> start{false};
+  std::atomic<bool> cancelled{false};
+  std::mutex error_mutex;
+  std::exception_ptr first_error;
+  auto worker = [&]() {
+    ready.fetch_add(1, std::memory_order_release);
+    while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+    while (!cancelled.load(std::memory_order_acquire)) {
+      const std::size_t index = next.fetch_add(1, std::memory_order_relaxed);
+      if (index >= requests.size()) break;
+      const int in_flight = active.fetch_add(1, std::memory_order_acq_rel) + 1;
+      int observed = maximum_active.load(std::memory_order_relaxed);
+      while (in_flight > observed && !maximum_active.compare_exchange_weak(
+               observed, in_flight, std::memory_order_release,
+               std::memory_order_relaxed)) {
+      }
+      try {
+        MultiPenaltyGcvCudaMultiRequest& request = requests[index];
+        output.setups[index] = multi_penalty_gcv_cuda_optimize_batch(
+          request.prepared, request.Y.data(), request.n,
+          request.target_count, request.target_keys, request.control);
+      } catch (...) {
+        {
+          std::lock_guard<std::mutex> lock(error_mutex);
+          if (!first_error) first_error = std::current_exception();
+        }
+        cancelled.store(true, std::memory_order_release);
+      }
+      active.fetch_sub(1, std::memory_order_acq_rel);
+    }
+  };
+
+  std::vector<std::thread> workers;
+  workers.reserve(static_cast<std::size_t>(diagnostics.worker_count));
+  try {
+    for (int index = 0; index < diagnostics.worker_count; ++index) {
+      workers.emplace_back(worker);
+    }
+  } catch (...) {
+    cancelled.store(true, std::memory_order_release);
+    start.store(true, std::memory_order_release);
+    for (std::thread& thread : workers) {
+      if (thread.joinable()) thread.join();
+    }
+    throw;
+  }
+  while (ready.load(std::memory_order_acquire) < diagnostics.worker_count) {
+    std::this_thread::yield();
+  }
+  start.store(true, std::memory_order_release);
+  for (std::thread& thread : workers) thread.join();
+  if (first_error) std::rethrow_exception(first_error);
+
+  diagnostics.max_host_calls_in_flight =
+    maximum_active.load(std::memory_order_acquire);
+  for (const MultiPenaltyGcvCudaBatchResult& setup : output.setups) {
+    diagnostics.summed_setup_host_ms +=
+      setup.optimization.diagnostics.total_host_ms;
+  }
+  diagnostics.wall_host_ms = std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - started).count();
+  diagnostics.host_overlap_factor = diagnostics.wall_host_ms > 0.0 ?
+    diagnostics.summed_setup_host_ms / diagnostics.wall_host_ms : 0.0;
+  return output;
+}
+
+MultiPenaltyGcvCudaResidualInfo multi_penalty_gcv_cuda_residual_info(
+    const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& residual) {
+  if (!residual || !residual->owner) {
+    throw std::runtime_error(
+      "multi-penalty CUDA residual token has been freed");
+  }
+  std::lock_guard<std::mutex> lock(residual->owner->mutex);
+  MultiPenaltyGcvCudaResidualInfo info;
+  info.n = residual->n;
+  info.coefficient_dim = residual->q;
+  info.target_count = residual->target_count;
+  info.device_id = residual->device_id;
+  info.target_keys = residual->target_keys;
+  info.optimizer_status = residual->optimizer_status;
+  info.released = residual->released;
+  info.generation = residual->generation;
+  info.device_resident = !residual->released &&
+    residual->owner->generation == residual->generation &&
+    residual->owner->residual_slot_leased;
+  return info;
+}
+
+MultiPenaltyGcvCudaResidualConsumerView
+acquire_multi_penalty_gcv_cuda_residual_consumer_view(
+    const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& residual) {
+  if (!residual || !residual->owner) {
+    throw std::runtime_error(
+      "multi-penalty CUDA residual token has been freed");
+  }
+  std::lock_guard<std::mutex> lock(residual->owner->mutex);
+  require_live_multi_penalty_residual(residual);
+  if (!std::all_of(
+        residual->optimizer_status.begin(), residual->optimizer_status.end(),
+        [](int value) { return value == 0; })) {
+    throw std::runtime_error(
+      "multi-penalty CUDA residual consumer rejects optimizer failure");
+  }
+  MultiPenaltyGcvCudaResidualConsumerView view;
+  view.residuals = residual->owner->d_residuals.get();
+  view.n = residual->n;
+  view.target_count = residual->target_count;
+  view.device_id = residual->device_id;
+  view.producer_stream = residual->owner->stream.get();
+  view.producer_completion_event =
+    residual->owner->completion_event.get();
+  view.target_keys = residual->target_keys;
+  return view;
+}
+
+MultiPenaltyGcvCudaResidualShadow
+materialize_multi_penalty_gcv_cuda_residual_shadow(
+    const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& residual) {
+  if (!residual || !residual->owner) {
+    throw std::runtime_error(
+      "multi-penalty CUDA residual token has been freed");
+  }
+  std::lock_guard<std::mutex> lock(residual->owner->mutex);
+  require_live_multi_penalty_residual(residual);
+  int previous_device = -1;
+  check_cuda(cudaGetDevice(&previous_device),
+             "query device before multi-penalty residual shadow");
+  check_cuda(cudaSetDevice(residual->device_id),
+             "select device for multi-penalty residual shadow");
+  try {
+    check_cuda(cudaEventSynchronize(
+      residual->owner->completion_event.get()),
+      "wait for multi-penalty residual shadow");
+    MultiPenaltyGcvCudaResidualShadow shadow;
+    shadow.n = residual->n;
+    shadow.coefficient_dim = residual->q;
+    shadow.target_count = residual->target_count;
+    const std::size_t coefficient_count =
+      static_cast<std::size_t>(residual->q) * residual->target_count;
+    const std::size_t observation_count =
+      static_cast<std::size_t>(residual->n) * residual->target_count;
+    shadow.coefficients.resize(coefficient_count);
+    shadow.fitted.resize(observation_count);
+    shadow.residuals.resize(observation_count);
+    check_cuda(cudaMemcpy(
+      shadow.coefficients.data(), residual->owner->d_coefficients.get(),
+      coefficient_count * sizeof(double), cudaMemcpyDeviceToHost),
+      "download multi-penalty coefficient shadow");
+    check_cuda(cudaMemcpy(
+      shadow.fitted.data(), residual->owner->d_fitted.get(),
+      observation_count * sizeof(double), cudaMemcpyDeviceToHost),
+      "download multi-penalty fitted shadow");
+    check_cuda(cudaMemcpy(
+      shadow.residuals.data(), residual->owner->d_residuals.get(),
+      observation_count * sizeof(double), cudaMemcpyDeviceToHost),
+      "download multi-penalty residual shadow");
+    residual->owner->info.residual_shadow_d2h_count += 3;
+    residual->owner->info.residual_shadow_d2h_bytes +=
+      (coefficient_count + 2 * observation_count) * sizeof(double);
+    check_cuda(cudaSetDevice(previous_device),
+               "restore device after multi-penalty residual shadow");
+    return shadow;
+  } catch (...) {
+    cudaSetDevice(previous_device);
+    throw;
+  }
+}
+
+void release_multi_penalty_gcv_cuda_residual(
+    const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& residual) {
+  if (!residual || !residual->owner) return;
+  std::lock_guard<std::mutex> lock(residual->owner->mutex);
+  if (residual->released) return;
+  if (residual->owner->generation == residual->generation) {
+    residual->owner->residual_slot_leased = false;
+    residual->owner->info.residual_slot_leased = false;
+  }
+  residual->released = true;
+}
+
+}  // namespace fastkpc

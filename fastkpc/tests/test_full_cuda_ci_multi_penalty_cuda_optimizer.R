@@ -1,0 +1,253 @@
+source("fastkpc/R/full_cuda_ci_gate.R")
+source("fastkpc/R/full_cuda_ci_oracle_contract.R")
+source("fastkpc/R/full_cuda_ci_workload_census.R")
+source("fastkpc/R/full_cuda_ci_prepared_s_contract.R")
+source("fastkpc/R/cuda_native.R")
+source("fastkpc/R/full_cuda_ci_multi_penalty_cpp.R")
+source("fastkpc/R/full_cuda_ci_multi_penalty_cuda.R")
+
+fail <- function(message) stop(message, call. = FALSE)
+assert_true <- function(value, message) if (!isTRUE(value)) fail(message)
+
+if (!identical(Sys.getenv("FASTKPC_RUN_CUDA_TESTS", unset = "0"), "1")) {
+  cat("SKIP Phase 6 CUDA optimizer: FASTKPC_RUN_CUDA_TESTS != 1\n")
+  quit(save = "no", status = 0)
+}
+if (!isTRUE(tryCatch(fastkpc_cuda_available(), error = function(error) FALSE))) {
+  cat("SKIP Phase 6 CUDA optimizer: CUDA unavailable\n")
+  quit(save = "no", status = 0)
+}
+
+data <- readRDS(file.path(
+  "fastkpc", "artifacts", "kpc_tprs_real_zhu",
+  "cancer_RD-causalDiscoveryInput.rds"
+))
+cases <- data.frame(
+  label = c(
+    "reference", "five-penalty-stability", "indefinite-hessian",
+    "rank-deficient", "maximum-iterations", "maximum-score-calls",
+    "near-flat-boundary", "near-convergence-score-rounding"
+  ),
+  shard_id = c(1L, 56L, 0L, 37L, 10L, 59L, 10L, 48L),
+  prepared_s_key_sha256 = c(
+    "001245052f571033286b2dc7526c24dbe5ec5c221660c094a8b9f052376b91da",
+    "e24dde52f78eab81021dc092fb072111f0d27733d6056b5490162039f8e87094",
+    "334c0e1a40c98ae302ced2a9573755e48fe19be1d9e7753862a00b620ea71746",
+    "2959705cc686141ff4e758d64525e70a211bc845a21ee3085c97d0b5d8abedab",
+    "31ff054083fb4a0cdfb0be76305e057a6ab086c134f68a0ba7fbae8661ab2e14",
+    "7844c90be2027d3b78f4750e99ca43cb6ee8621e0aca651d2422e3884eb81168",
+    "0088c39e91afee87a1a347802db2fb51395e025689e3f13da5a0fe71b71c6bdf",
+    "43470d9bf1e9680097ac2b5bf142836e76e88de2660f680c64f4b62bd8bcd3cd"
+  ),
+  residual_key_sha256 = c(
+    NA_character_,
+    "00354ddff81cd49307434189f6bba0fc009f59b6eba9e118bd34b468583cea69",
+    "7795b8ddd608d04621c3474df34751044f21077eab6089130662ec93a338fdff",
+    "1db147c7e70b187f54304a14982184b7bc5b221d71051abfbfc21c3312399432",
+    "8e56ba8371592d8daed48dfa00cac511893d66746ca43f2941954dfa1cf8e81e",
+    "d5333f96a4468977ddc61a6526d5a7f255885a9f514f4e990188770e474088d3",
+    "8b770202d16c751864c6fa19b51355ace98a070645b916949d825ffcf1327ced",
+    "473654d1eb6bc2d4f707c970109139d5417cefa303941838a959663719b29888"
+  ),
+  stringsAsFactors = FALSE
+)
+
+rows <- lapply(seq_len(nrow(cases)), function(case_index) {
+  case <- cases[case_index, , drop = FALSE]
+  shard <- readRDS(file.path(
+    "fastkpc", "artifacts", "full_cuda_ci", "prepared_s_contract_v1",
+    "shards", paste0("shard_", case$shard_id, ".rds")
+  ))
+  setup <- shard$prepared_s_setups[[case$prepared_s_key_sha256]]
+  witness_index <- if (is.na(case$residual_key_sha256)) {
+    which(
+      shard$target_states$prepared_s_key_sha256 ==
+        case$prepared_s_key_sha256
+    )[[1L]]
+  } else {
+    match(
+      case$residual_key_sha256,
+      shard$target_states$residual_key_sha256
+    )
+  }
+  assert_true(
+    !is.null(setup) && !is.na(witness_index),
+    paste0("Phase 6 optimizer witness is missing: ", case$label)
+  )
+  state_indices <- unique(c(
+    witness_index,
+    which(
+      shard$target_states$prepared_s_key_sha256 ==
+        case$prepared_s_key_sha256
+    )
+  ))
+  state_indices <- head(state_indices, 2L)
+  if (length(state_indices) == 1L) state_indices <- rep(state_indices, 2L)
+  contexts <- lapply(state_indices, function(index) {
+    state <- shard$target_states[index, , drop = FALSE]
+    target <- fastkpc_full_cuda_materialize_target_state(
+      state, data, setup$dataset_sha256
+    )
+    fastkpc_full_cuda_validate_materialized_target_for_prepared(setup, target)
+  })
+  Y <- do.call(cbind, lapply(contexts, `[[`, "y"))
+  prepared <- fastkpc_full_cuda_phase6_prepare(setup)
+  candidate <- fastkpc_full_cuda_phase6_optimize_cuda(prepared, Y)
+  reference <- lapply(seq_len(ncol(Y)), function(target) {
+    fastkpc_full_cuda_phase5_optimize_cpp(setup, Y[, target])
+  })
+  reference_log_sp <- do.call(cbind, lapply(
+    reference, `[[`, "selected_log_sp"
+  ))
+  reference_score <- vapply(reference, `[[`, numeric(1L), "score")
+  reference_edf <- vapply(reference, `[[`, numeric(1L), "edf")
+  reference_iterations <- vapply(
+    reference, `[[`, integer(1L), "optimizer_iterations"
+  )
+  reference_score_calls <- vapply(
+    reference, `[[`, integer(1L), "score_calls"
+  )
+  reference_objective_calls <- vapply(
+    reference, `[[`, integer(1L), "objective_calls"
+  )
+  reference_step_halving <- vapply(
+    reference, `[[`, integer(1L), "step_halving_count"
+  )
+  reference_boundary_probes <- vapply(
+    reference, `[[`, integer(1L), "boundary_probe_count"
+  )
+  reference_boundary_accepted <- vapply(
+    reference, `[[`, integer(1L), "boundary_accepted_count"
+  )
+  reference_hessian_positive <- vapply(
+    reference, `[[`, logical(1L), "hessian_positive_definite"
+  )
+  reference_fully_converged <- vapply(
+    reference, `[[`, logical(1L), "fully_converged"
+  )
+  reference_residuals <- do.call(cbind, lapply(reference, `[[`, "residuals"))
+  candidate_residuals <- Y - prepared$X %*% candidate$coefficients
+  diagnostics <- candidate$diagnostics
+  assert_true(
+    identical(
+      candidate$schema_version,
+      "full-cuda-ci-multi-penalty-gcv-cuda-optimization-v1"
+    ) && identical(
+      candidate$rank_path,
+      "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd"
+    ) && all(candidate$optimizer_status == 0L) &&
+      identical(
+        diagnostics$execution_strategy,
+        "one-setup-one-block-per-target-independent-optimizer"
+      ) && diagnostics$cuda_optimizer_kernel_launch_count == 1L &&
+      diagnostics$cuda_optimizer_target_count == ncol(Y) &&
+      diagnostics$cuda_selected_fit_count == ncol(Y) &&
+      diagnostics$cuda_optimizer_objective_count ==
+        sum(candidate$objective_calls) &&
+      diagnostics$cuda_complete_evaluation_count +
+        diagnostics$cuda_score_only_evaluation_count +
+        diagnostics$cuda_selected_evaluation_reuse_count ==
+          diagnostics$cuda_optimizer_objective_count &&
+      diagnostics$cuda_score_only_evaluation_count ==
+        sum(candidate$boundary_probe_count) &&
+      diagnostics$cuda_selected_evaluation_reuse_count ==
+        sum(candidate$boundary_accepted_count == 0L) &&
+      diagnostics$cuda_guarded_qr_evaluation_count +
+        diagnostics$cuda_stable_svd_evaluation_count ==
+          diagnostics$cuda_complete_evaluation_count +
+            diagnostics$cuda_score_only_evaluation_count &&
+      diagnostics$cuda_guarded_qr_evaluation_count > 0L &&
+      diagnostics$cuda_penalty_factor_augmentation_cycles > 0 &&
+      diagnostics$cuda_qr_svd_cycles > 0 &&
+      diagnostics$cuda_qr_bidiagonal_reduction_cycles > 0 &&
+      (diagnostics$cuda_stable_svd_evaluation_count == 0L || (
+        diagnostics$cuda_bidiagonal_svd_cycles > 0 &&
+          diagnostics$cuda_svd_vector_postback_cycles > 0 &&
+          diagnostics$cuda_left_vector_product_cycles > 0
+      )) &&
+      diagnostics$cuda_score_construction_cycles > 0 &&
+      diagnostics$cuda_derivative_hessian_cycles > 0 &&
+      diagnostics$cpu_objective_count == 0L &&
+      diagnostics$cpu_optimizer_count == 0L &&
+      diagnostics$cpu_multi_penalty_solve_count == 0L &&
+      diagnostics$fallback_count == 0L &&
+      diagnostics$cuda_error_count == 0L &&
+      isTRUE(diagnostics$independent_target_states) &&
+      isTRUE(diagnostics$true_batched_kernel) &&
+      !isTRUE(diagnostics$normal_equations_used),
+    paste0("Phase 6 CUDA optimizer failed: ", case$label)
+  )
+  assert_true(
+    identical(candidate$optimizer_iterations, reference_iterations) &&
+      identical(candidate$score_calls, reference_score_calls) &&
+      identical(candidate$objective_calls, reference_objective_calls) &&
+      identical(candidate$step_halving_count, reference_step_halving) &&
+      identical(candidate$boundary_probe_count, reference_boundary_probes) &&
+      identical(
+        candidate$boundary_accepted_count, reference_boundary_accepted
+      ) &&
+      identical(
+        candidate$hessian_positive_definite,
+        reference_hessian_positive
+      ) && identical(
+        candidate$fully_converged, reference_fully_converged
+      ),
+    paste0("Phase 6 CUDA optimizer trajectory drifted: ", case$label)
+  )
+  assert_true(
+    max(abs(candidate$selected_log_sp - reference_log_sp)) <= 1e-6 &&
+      max(abs(candidate$score - reference_score)) <= 1e-8 &&
+      max(abs(candidate$edf - reference_edf)) <= 1e-8 &&
+      max(abs(candidate_residuals - reference_residuals)) <= 1e-7,
+    paste0("Phase 6 CUDA optimizer selected fit drifted: ", case$label)
+  )
+  decomposition_cycles <- sum(c(
+    diagnostics$cuda_qr_bidiagonal_reduction_cycles,
+    diagnostics$cuda_bidiagonal_svd_cycles,
+    diagnostics$cuda_svd_vector_postback_cycles,
+    diagnostics$cuda_left_vector_product_cycles
+  ))
+  data.frame(
+    label = case$label,
+    coefficient_dim = ncol(setup$X),
+    penalty_count = length(setup$penalty_blocks),
+    target_count = ncol(Y),
+    max_log_sp_error = max(abs(
+      candidate$selected_log_sp - reference_log_sp
+    )),
+    max_score_error = max(abs(candidate$score - reference_score)),
+    max_edf_error = max(abs(candidate$edf - reference_edf)),
+    max_iteration_delta = max(abs(
+      candidate$optimizer_iterations - reference_iterations
+    )),
+    max_score_call_delta = max(abs(
+      candidate$score_calls - reference_score_calls
+    )),
+    qr_reduction_share =
+      diagnostics$cuda_qr_bidiagonal_reduction_cycles /
+        decomposition_cycles,
+    bidiagonal_svd_share =
+      diagnostics$cuda_bidiagonal_svd_cycles / decomposition_cycles,
+    vector_postback_share =
+      diagnostics$cuda_svd_vector_postback_cycles / decomposition_cycles,
+    left_product_share =
+      diagnostics$cuda_left_vector_product_cycles / decomposition_cycles,
+    guarded_qr_evaluation_count =
+      diagnostics$cuda_guarded_qr_evaluation_count,
+    stable_svd_evaluation_count =
+      diagnostics$cuda_stable_svd_evaluation_count,
+    max_residual_error = max(abs(
+      candidate_residuals - reference_residuals
+    )),
+    stringsAsFactors = FALSE
+  )
+})
+
+rows <- do.call(rbind, rows)
+assert_true(
+  sum(rows$guarded_qr_evaluation_count) > 0L &&
+    sum(rows$stable_svd_evaluation_count) > 0L,
+  "Phase 6 guarded QR/SVD optimizer route coverage is incomplete"
+)
+print(rows, row.names = FALSE, digits = 17)
+cat("PASS Phase 6 CUDA independent-target optimizer smoke\n")
