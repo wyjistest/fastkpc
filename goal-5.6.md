@@ -4,9 +4,9 @@
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
-> **Current accepted implementation/evidence snapshot:** Phase 3.5 is COMPLETE. Its producer source commit is `337e754`, and its accepted feasibility manifest is `87c66555edb0912d5d50e80eb9d7601e4da9800c61b7de0f9691d76d8c332185`.
+> **Current accepted implementation/evidence snapshot:** Phase 4 is COMPLETE. Its producer source commit is `54c2267`, and its accepted oracle/full-shadow/backend manifest SHA-256 values are `1fb6dbbcb7ebfa9f7a3104785f2b45ccad4d979227a3b662e038e1c43f71bcfc`, `6f703f68c986ecccbe263d6558d178e646812d381ee8e683524ed9bbd66ad401`, and `246c59253e71e8cd13b9a9453d965fb7534623d92cb082589591548e7be7e797`.
 >
-> **Active roadmap phase:** Phase 4, full-CUDA single-penalty GCV for `|S| <= 2`.
+> **Active roadmap phase:** Phase 5, C++ multi-penalty GAM semantic replica for `|S| > 2`.
 >
 > **Hard rule:** **0 SHD is mandatory.** A faster result with a different skeleton is a failed result.
 
@@ -630,8 +630,8 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 2 | Response-independent GAM setup contract | COMPLETE - full structural artifact and qualification exact-parity/restart gates pass |
 | 3 | Persistent stable fixed-sp CUDA residual runtime | COMPLETE - full 110,617-target oracle and 240,489-test shadow artifacts independently validate with 0 flips and SHD 0 |
 | 3.5 | Full-CUDA architecture feasibility and performance-budget gate | COMPLETE - guarded exact-screen/full-eig CUDA architecture is GO for Phase 8 qualification; measured cache/memory and conservative 98.529-second campaign feasibility gates pass |
-| 4 | Full-CUDA single-penalty GCV for `|S|<=2` | ACTIVE - CPU spectral selection remains to be removed |
-| 5 | C++ multi-penalty GAM semantic replica | NOT COMPLETE |
+| 4 | Full-CUDA single-penalty GCV for `|S|<=2` | COMPLETE - all 44,941 targets use CUDA scoring/selection and fitting; full-shadow graph semantics and the five-run backend gate pass |
+| 5 | C++ multi-penalty GAM semantic replica | ACTIVE - reproduce the additive multi-penalty mgcv oracle in C++ shadow mode |
 | 6 | CUDA multi-penalty same-S target batches | NOT STARTED |
 | 7 | Native setup builder; remove R/mgcv from CI loop | NOT STARTED |
 | 8 | Legacy-compatible device-resident CUDA dCov | PARTIAL — primitives/smoke gates exist |
@@ -1876,6 +1876,82 @@ completion of Phase 4, Phase 7, Phase 8, Phase 9, or the actual Phase 10
 
 ## Phase 4 — Implement full-CUDA single-penalty GCV for `|S| <= 2`
 
+### Status
+
+Phase 4 passed its local, full-shadow, identity, and performance gates on
+2026-07-29. Phase 5 is now the earliest incomplete phase. This is a Phase 4
+scope decision, not promotion of the final production backend.
+
+#### Accepted Phase 4 closure (2026-07-29)
+
+The accepted route performs response-independent setup preparation once, then
+uses CUDA for batched target projection, dense objective evaluation,
+continuous `log(sp)` refinement, risk-gated exact replay, and the selected-sp
+residual solve. Refinement uses bounded proposals, rejected-trial bracketing
+with deterministic step halving, explicit convergence/flat-objective states,
+iteration limits, and boundary probes. Exact replay is selected only from
+generic numerical state; no setup key or target ID controls routing.
+
+Full single-penalty oracle evidence:
+
+```text
+setups / targets                    1,174 / 44,941
+dense objective cells               9,020,884
+maximum RSS absolute error          4.001777e-11
+maximum EDF absolute error          9.947598e-14
+maximum GCV score absolute error    1.292300e-13
+maximum selected log-sp error       2.231308e-10
+optimizer iteration mismatches      0
+optimizer Hessian-state mismatches  0
+required/preserved transcripts      5,622 / 5,622
+legacy mgcv target calls            0
+CPU score/optimizer/fallback calls  0 / 0 / 0
+```
+
+The compact full-shadow route covered all `177,952` logical `|S| <= 2` CI
+tests. It used 36,365 spectral-only targets and 8,576 exact CUDA replays,
+including 6,718 generic numerical-risk replays. Maximum residual oracle
+relative-L2 error was `4.174897e-10`, maximum downstream p-value absolute
+error was `4.889811e-11`, and both residual and downstream dCov decision-flip
+counts were zero. It performed no selected-sp R roundtrip and no implicit
+residual D2H materialization.
+
+Mixed-route graph evidence:
+
+```text
+edge count                         110 / 110
+SHD                                0
+adjacency / sepsets identical      TRUE / TRUE
+n.edgetests / deletions identical  TRUE / TRUE
+explicit legacy fallbacks          60,324, all |S| > 2
+unknown / approximate fallbacks    0 / 0
+```
+
+Five measured repetitions on physical GPU 0 had a CUDA median of `7,378 ms`
+versus `13,058 ms` for the same-corpus `r-cpu-spectral` baseline, a ratio of
+`0.5650`. Every candidate result and counter signature was identical, the
+warm median was below the Phase 4 `25,000 ms` ceiling, and both absolute and
+relative backend gates passed.
+
+Accepted identities:
+
+```text
+producer source commit             54c2267a01debde8abfe4477eeb613e13d74ed2c
+producer source closure SHA-256    cdcaf2ef36c2d037e3c25ffec5146bcb1966f7853371eaff7622424c4a97cac8
+native binary SHA-256              2cfbdef063f757b95a0c1a6a0161a5066ccb808e4bdb4f41f2c4e85747cc225f
+oracle producer identity           8ad2d090301e21ddc3f50b1c671f5fa505bf3adb948242b895e54aaa3bdac2d9
+full-shadow producer identity      9a610468edff3219fe8c0b92013e9ffb4d4d3bcb39d55e22403dcc39b9e05464
+backend producer identity          fb8bc399dc9a609cd4fa9f9a4343962f2e0825fc600262716299fbdc0ba865bd
+```
+
+The accepted artifacts are the three directories listed under Required
+artifacts below. Their validators bind the tracked contracts, 91-file source
+closure, native binary, semantic payload hashes, validator attestations, and
+volatile receipts. Payload, manifest, attestation, and receipt tamper tests
+all fail closed. Phase 4 retires `r-cpu-spectral` authority for the canonical
+single-penalty envelope; `|S| > 2` remains an explicit legacy oracle fallback
+until Phases 5 and 6 pass.
+
 ### Goal
 
 Remove `r-cpu-spectral` smoothing scoring and selection from the single-penalty compatible path.
@@ -3117,14 +3193,18 @@ feasibility model with zero final decision drift.
 
 ### Task 10
 
-Active: implement Phase 4 full-CUDA single-penalty GCV for `|S| <= 2`, starting
-with objective parity and deterministic optimizer semantics. Retire
-`r-cpu-spectral` selection from the accepted route while preserving the Phase
-3.5 numerical, identity, machine, budget, and corpus contracts.
+Complete: Phase 4 produced full-corpus CUDA objective/optimizer, full-shadow,
+and five-repetition backend artifacts for all 1,174 single-penalty setups and
+44,941 targets. It retired `r-cpu-spectral` authority with zero CPU target
+scoring/optimization/fallback, zero downstream decision flips, exact mixed
+graph semantics, SHD 0, and a `0.5650` same-corpus performance ratio.
 
-The current CUDA Spectra projection primitive remains useful substrate for
-diagnostics, but the immediate critical path is accepted Phase 4 GCV objective
-and optimizer parity, not another Phase 3.5 dCov architecture bake-off.
+### Task 11
+
+Active: implement the Phase 5 C++ multi-penalty GAM semantic replica for the
+actual `|S| > 2` additive-smooth formula route. Begin with focused oracle
+cases and target/setup diagnostics, keep the implementation shadow-only, and
+do not begin CUDA acceleration until the complete C++ semantic gates pass.
 
 ---
 
