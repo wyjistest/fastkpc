@@ -7431,6 +7431,63 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
         diagnostics.cuda_stable_svd_evaluation_count,
       Rcpp::Named("cuda_selected_evaluation_reuse_count") =
         diagnostics.cuda_selected_evaluation_reuse_count,
+      Rcpp::Named("cuda_stability_replay_kernel_launch_count") =
+        diagnostics.cuda_stability_replay_kernel_launch_count,
+      Rcpp::Named("cuda_stability_merge_kernel_launch_count") =
+        diagnostics.cuda_stability_merge_kernel_launch_count,
+      Rcpp::Named("cuda_stability_replay_target_count") =
+        diagnostics.cuda_stability_replay_target_count,
+      Rcpp::Named("cuda_stability_replay_selected_count") =
+        diagnostics.cuda_stability_replay_selected_count,
+      Rcpp::Named("cuda_stability_replay_error_count") =
+        diagnostics.cuda_stability_replay_error_count,
+      Rcpp::Named(
+        "cuda_stability_replay_discarded_complete_evaluation_count") =
+          diagnostics
+            .cuda_stability_replay_discarded_complete_evaluation_count,
+      Rcpp::Named(
+        "cuda_stability_replay_discarded_score_only_evaluation_count") =
+          diagnostics
+            .cuda_stability_replay_discarded_score_only_evaluation_count,
+      Rcpp::Named(
+        "cuda_stability_replay_discarded_guarded_qr_evaluation_count") =
+          diagnostics
+            .cuda_stability_replay_discarded_guarded_qr_evaluation_count,
+      Rcpp::Named(
+        "cuda_stability_replay_discarded_stable_svd_evaluation_count") =
+          diagnostics
+            .cuda_stability_replay_discarded_stable_svd_evaluation_count,
+      Rcpp::Named("cuda_stability_replay_discarded_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_stability_replay_discarded_cycles),
+      Rcpp::Named("cuda_stability_replay_max_log_sp_spread") =
+        diagnostics.cuda_stability_replay_max_log_sp_spread,
+      Rcpp::Named("cuda_terminal_boundary_confirmation_count") =
+        diagnostics.cuda_terminal_boundary_confirmation_count,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_accepted_count") =
+          diagnostics.cuda_terminal_boundary_confirmation_accepted_count,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_rejected_count") =
+          diagnostics.cuda_terminal_boundary_confirmation_rejected_count,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_complete_evaluation_count") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_complete_evaluation_count,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_stable_svd_evaluation_count") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_stable_svd_evaluation_count,
+      Rcpp::Named("cuda_terminal_boundary_confirmation_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_terminal_boundary_confirmation_cycles),
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_max_identity_disagreement") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_max_identity_disagreement,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_max_identity_ratio") =
+          diagnostics.cuda_terminal_boundary_confirmation_max_identity_ratio,
       Rcpp::Named("cuda_hessian_eigensolver_count") =
         diagnostics.cuda_hessian_eigensolver_count,
       Rcpp::Named("cuda_selected_fit_count") =
@@ -7758,6 +7815,63 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cuda(
         diagnostics.cuda_stable_svd_evaluation_count,
       Rcpp::Named("cuda_selected_evaluation_reuse_count") =
         diagnostics.cuda_selected_evaluation_reuse_count,
+      Rcpp::Named("cuda_stability_replay_kernel_launch_count") =
+        diagnostics.cuda_stability_replay_kernel_launch_count,
+      Rcpp::Named("cuda_stability_merge_kernel_launch_count") =
+        diagnostics.cuda_stability_merge_kernel_launch_count,
+      Rcpp::Named("cuda_stability_replay_target_count") =
+        diagnostics.cuda_stability_replay_target_count,
+      Rcpp::Named("cuda_stability_replay_selected_count") =
+        diagnostics.cuda_stability_replay_selected_count,
+      Rcpp::Named("cuda_stability_replay_error_count") =
+        diagnostics.cuda_stability_replay_error_count,
+      Rcpp::Named(
+        "cuda_stability_replay_discarded_complete_evaluation_count") =
+          diagnostics
+            .cuda_stability_replay_discarded_complete_evaluation_count,
+      Rcpp::Named(
+        "cuda_stability_replay_discarded_score_only_evaluation_count") =
+          diagnostics
+            .cuda_stability_replay_discarded_score_only_evaluation_count,
+      Rcpp::Named(
+        "cuda_stability_replay_discarded_guarded_qr_evaluation_count") =
+          diagnostics
+            .cuda_stability_replay_discarded_guarded_qr_evaluation_count,
+      Rcpp::Named(
+        "cuda_stability_replay_discarded_stable_svd_evaluation_count") =
+          diagnostics
+            .cuda_stability_replay_discarded_stable_svd_evaluation_count,
+      Rcpp::Named("cuda_stability_replay_discarded_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_stability_replay_discarded_cycles),
+      Rcpp::Named("cuda_stability_replay_max_log_sp_spread") =
+        diagnostics.cuda_stability_replay_max_log_sp_spread,
+      Rcpp::Named("cuda_terminal_boundary_confirmation_count") =
+        diagnostics.cuda_terminal_boundary_confirmation_count,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_accepted_count") =
+          diagnostics.cuda_terminal_boundary_confirmation_accepted_count,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_rejected_count") =
+          diagnostics.cuda_terminal_boundary_confirmation_rejected_count,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_complete_evaluation_count") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_complete_evaluation_count,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_stable_svd_evaluation_count") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_stable_svd_evaluation_count,
+      Rcpp::Named("cuda_terminal_boundary_confirmation_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_terminal_boundary_confirmation_cycles),
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_max_identity_disagreement") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_max_identity_disagreement,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_max_identity_ratio") =
+          diagnostics.cuda_terminal_boundary_confirmation_max_identity_ratio,
       Rcpp::Named("cuda_hessian_eigensolver_count") =
         diagnostics.cuda_hessian_eigensolver_count,
       Rcpp::Named("cuda_selected_fit_count") =

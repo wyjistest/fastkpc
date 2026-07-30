@@ -658,7 +658,8 @@ __device__ int small_dgesdd_left(
     integer m, integer n, Workspace* workspace,
     bool compute_right_vectors = true,
     unsigned long long* stage_cycles = nullptr,
-    bool allow_qr_complete = false) {
+    bool allow_qr_complete = false,
+    bool force_stable_svd = false) {
   if (blockDim.x == 64 && n > FASTKPC_LAPACK_SMALL_SMLSIZ) {
     const integer warp = static_cast<integer>(threadIdx.x) >> 5;
     const integer lane = static_cast<integer>(threadIdx.x) & 31;
@@ -695,7 +696,8 @@ __device__ int small_dgesdd_left(
           minimum_diagonal = min(minimum_diagonal, diagonal);
         }
         workspace->qr_guard_accepted =
-          (!compute_right_vectors || allow_qr_complete) &&
+          !force_stable_svd &&
+            (!compute_right_vectors || allow_qr_complete) &&
             isfinite(maximum_diagonal) &&
             isfinite(minimum_diagonal) && maximum_diagonal > 0.0 &&
             minimum_diagonal > maximum_diagonal *

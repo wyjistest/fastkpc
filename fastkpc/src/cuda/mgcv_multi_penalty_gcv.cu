@@ -32,6 +32,12 @@ constexpr int kMaximumRows = 128;
 constexpr double kLapackEpsilon =
   1.1102230246251565404236316680908203125e-16;
 constexpr double kDenominatorFloor = 1e-8;
+constexpr int kStabilityReplayMinimumIterations = 101;
+constexpr double kStabilityReplayLogSpSpread = 1e-7;
+constexpr double kStabilityReplayMaximumInwardShift = 1e-6;
+constexpr double kTerminalBoundaryTieCondition = 33554432.0;
+constexpr double kTerminalBoundaryTieRelativeTolerance =
+  1e-10;
 
 void check_cuda(cudaError_t status, const char* stage) {
   if (status != cudaSuccess) {
@@ -438,7 +444,24 @@ struct DeviceOptimizerState {
   int trying;
   int tries;
   int selected_evaluation_reuse_count;
+  int stability_replay_attempted;
+  int stability_replay_selected;
+  int stability_replay_error;
+  int terminal_boundary_confirmation_count;
+  int terminal_boundary_confirmation_accepted_count;
+  int terminal_boundary_confirmation_rejected_count;
+  int terminal_boundary_confirmation_pending;
+  double stability_replay_log_sp_spread;
+  double terminal_boundary_confirmation_max_identity_disagreement;
+  double terminal_boundary_confirmation_max_identity_ratio;
+  double terminal_boundary_primary_current_score;
+  double terminal_boundary_primary_trial_score;
+  double terminal_boundary_stable_current_score;
+  double terminal_boundary_stable_current_direct_score;
+  double terminal_boundary_stable_trial_direct_score;
   DevicePhaseTiming phase_timing;
+  DevicePhaseTiming discarded_phase_timing;
+  DevicePhaseTiming terminal_boundary_confirmation_phase_timing;
 };
 
 __device__ bool symmetric_jacobi_eigen(
@@ -556,7 +579,8 @@ __device__ void evaluate_multi_penalty_target_device(
     int penalty_count,
     bool complete_evaluation,
     DevicePhaseTiming* phase_timing,
-    double rank_tolerance) {
+    double rank_tolerance,
+    bool force_stable_svd = false) {
   lapack312_multi::Workspace* decomposition = &workspace->decomposition;
   const int square = q * q;
   double* aggregate = decomposition->bidiagonal_vt;
@@ -646,7 +670,7 @@ __device__ void evaluate_multi_penalty_target_device(
       rows, q, decomposition, complete_evaluation,
       phase_timing == nullptr ? nullptr :
         phase_timing->decomposition_stage_cycles,
-      true);
+      true, force_stable_svd);
   if (threadIdx.x == 0) {
     result->solver_info = solver_info;
     result->decomposition_route = decomposition->qr_basis_used != 0 ?
@@ -1032,6 +1056,39 @@ __global__ void evaluate_multi_penalty_targets_kernel(
     nullptr, rank_tolerance);
 }
 
+__device__ double direct_qr_residual_score(
+    const double* magic_r,
+    const int* magic_pivot,
+    const double* target_y0,
+    double target_squared_norm,
+    const DeviceTargetEvaluation& evaluation,
+    int n,
+    int q) {
+  double y0_squared_norm = 0.0;
+  double residual_squared_norm = 0.0;
+  for (int row = 0; row < q; ++row) {
+    y0_squared_norm = rounded_multiply_add(
+      y0_squared_norm, target_y0[row], target_y0[row]);
+    double fitted = 0.0;
+    for (int column = row; column < q; ++column) {
+      fitted = rounded_multiply_add(
+        fitted, magic_r[row + q * column],
+        evaluation.coefficients[magic_pivot[column]]);
+    }
+    const double residual = __dadd_rn(target_y0[row], -fitted);
+    residual_squared_norm = rounded_multiply_add(
+      residual_squared_norm, residual, residual);
+  }
+  const double rss = __dadd_rn(
+    __dadd_rn(target_squared_norm, -y0_squared_norm),
+    residual_squared_norm);
+  const double delta = __dadd_rn(
+    static_cast<double>(n), -evaluation.edf);
+  return __ddiv_rn(
+    __dmul_rn(static_cast<double>(n), rss),
+    __dmul_rn(delta, delta));
+}
+
 __global__ void optimize_multi_penalty_targets_kernel(
     const double* magic_r,
     const int* magic_pivot,
@@ -1044,6 +1101,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     const double* initial_log_sp,
     DeviceEvaluationWorkspace* workspaces,
     DeviceOptimizerState* states,
+    const DeviceOptimizerState* primary_states,
     int n,
     int q,
     int penalty_count,
@@ -1055,9 +1113,18 @@ __global__ void optimize_multi_penalty_targets_kernel(
     double max_newton_step,
     double boundary_probe_step,
     int max_boundary_probes,
-    double rank_tolerance) {
+    double rank_tolerance,
+    bool stability_replay,
+    bool force_stable_svd) {
   const int target = blockIdx.x;
   if (target >= target_count) return;
+  if (stability_replay &&
+      (primary_states == nullptr ||
+       primary_states[target].optimizer_status != 0 ||
+       primary_states[target].optimizer_iterations <
+         kStabilityReplayMinimumIterations)) {
+    return;
+  }
   DeviceEvaluationWorkspace* workspace = workspaces + target;
   DeviceOptimizerState* state = states + target;
   const double* target_y0 = y0 + static_cast<std::size_t>(q) * target;
@@ -1084,6 +1151,21 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->trying = 0;
     state->tries = 0;
     state->selected_evaluation_reuse_count = 0;
+    state->stability_replay_attempted = stability_replay ? 1 : 0;
+    state->stability_replay_selected = 0;
+    state->stability_replay_error = 0;
+    state->terminal_boundary_confirmation_count = 0;
+    state->terminal_boundary_confirmation_accepted_count = 0;
+    state->terminal_boundary_confirmation_rejected_count = 0;
+    state->terminal_boundary_confirmation_pending = 0;
+    state->stability_replay_log_sp_spread = 0.0;
+    state->terminal_boundary_confirmation_max_identity_disagreement = 0.0;
+    state->terminal_boundary_confirmation_max_identity_ratio = 0.0;
+    state->terminal_boundary_primary_current_score = CUDART_NAN;
+    state->terminal_boundary_primary_trial_score = CUDART_NAN;
+    state->terminal_boundary_stable_current_score = CUDART_NAN;
+    state->terminal_boundary_stable_current_direct_score = CUDART_NAN;
+    state->terminal_boundary_stable_trial_direct_score = CUDART_NAN;
     state->phase_timing.penalty_factor_augmentation_cycles = 0;
     state->phase_timing.qr_svd_cycles = 0;
     state->phase_timing.score_construction_cycles = 0;
@@ -1095,6 +1177,36 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->phase_timing.score_only_evaluation_count = 0;
     state->phase_timing.guarded_qr_evaluation_count = 0;
     state->phase_timing.stable_svd_evaluation_count = 0;
+    state->discarded_phase_timing.penalty_factor_augmentation_cycles = 0;
+    state->discarded_phase_timing.qr_svd_cycles = 0;
+    state->discarded_phase_timing.score_construction_cycles = 0;
+    state->discarded_phase_timing.derivative_hessian_cycles = 0;
+    for (int stage = 0; stage < 4; ++stage) {
+      state->discarded_phase_timing.decomposition_stage_cycles[stage] = 0;
+    }
+    state->discarded_phase_timing.complete_evaluation_count = 0;
+    state->discarded_phase_timing.score_only_evaluation_count = 0;
+    state->discarded_phase_timing.guarded_qr_evaluation_count = 0;
+    state->discarded_phase_timing.stable_svd_evaluation_count = 0;
+    state->terminal_boundary_confirmation_phase_timing
+      .penalty_factor_augmentation_cycles = 0;
+    state->terminal_boundary_confirmation_phase_timing.qr_svd_cycles = 0;
+    state->terminal_boundary_confirmation_phase_timing
+      .score_construction_cycles = 0;
+    state->terminal_boundary_confirmation_phase_timing
+      .derivative_hessian_cycles = 0;
+    for (int stage = 0; stage < 4; ++stage) {
+      state->terminal_boundary_confirmation_phase_timing
+        .decomposition_stage_cycles[stage] = 0;
+    }
+    state->terminal_boundary_confirmation_phase_timing
+      .complete_evaluation_count = 0;
+    state->terminal_boundary_confirmation_phase_timing
+      .score_only_evaluation_count = 0;
+    state->terminal_boundary_confirmation_phase_timing
+      .guarded_qr_evaluation_count = 0;
+    state->terminal_boundary_confirmation_phase_timing
+      .stable_svd_evaluation_count = 0;
     for (int penalty = 0; penalty < penalty_count; ++penalty) {
       state->log_sp[penalty] = initial_log_sp[penalty];
       state->trial_log_sp[penalty] = initial_log_sp[penalty];
@@ -1111,7 +1223,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
     penalty_matrices, target_y0, target_squared_norm, state->log_sp,
     workspace, &state->current, n, q, penalty_count, true,
-    &state->phase_timing, rank_tolerance);
+    &state->phase_timing, rank_tolerance, force_stable_svd);
   __syncthreads();
   if (threadIdx.x == 0) {
     state->score_calls = 1;
@@ -1169,7 +1281,8 @@ __global__ void optimize_multi_penalty_targets_kernel(
           magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
           penalty_matrices, target_y0, target_squared_norm,
           state->trial_log_sp, workspace, &state->trial, n, q,
-          penalty_count, true, &state->phase_timing, rank_tolerance);
+          penalty_count, true, &state->phase_timing, rank_tolerance,
+          force_stable_svd);
         __syncthreads();
         if (threadIdx.x == 0) {
           ++state->score_calls;
@@ -1371,9 +1484,11 @@ __global__ void optimize_multi_penalty_targets_kernel(
         magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
         penalty_matrices, target_y0, target_squared_norm,
         state->trial_log_sp, workspace, &state->trial, n, q,
-        penalty_count, false, &state->phase_timing, rank_tolerance);
+        penalty_count, false, &state->phase_timing, rank_tolerance,
+        force_stable_svd);
       __syncthreads();
       if (threadIdx.x == 0) {
+        state->terminal_boundary_confirmation_pending = 0;
         ++state->objective_calls;
         ++state->boundary_probe_count;
         if (state->trial.solver_info != 0 ||
@@ -1381,18 +1496,111 @@ __global__ void optimize_multi_penalty_targets_kernel(
           state->optimizer_status = 5;
           state->trying = 0;
         } else {
-          const double boundary_comparison_slack = __dmul_rn(
-            256.0 * kLapackEpsilon,
+          state->terminal_boundary_primary_current_score =
+            state->minimum_score;
+          state->terminal_boundary_primary_trial_score = state->trial.score;
+          const double score_delta = __dadd_rn(
+            state->terminal_boundary_primary_trial_score,
+            -state->terminal_boundary_primary_current_score);
+          const double tie_tolerance = __dmul_rn(
+            kTerminalBoundaryTieRelativeTolerance,
             __dadd_rn(1.0, fabs(state->minimum_score)));
-          const bool accepted = state->trial.score < state->minimum_score ||
-            __dadd_rn(state->trial.score, -state->minimum_score) <=
-              boundary_comparison_slack;
+          state->terminal_boundary_confirmation_pending =
+            !force_stable_svd &&
+            probe == max_boundary_probes &&
+            state->trial.condition >= kTerminalBoundaryTieCondition &&
+            fabs(score_delta) <= tie_tolerance ? 1 : 0;
+        }
+      }
+      __syncthreads();
+      if (state->optimizer_status != 0) return;
+      if (state->terminal_boundary_confirmation_pending != 0) {
+        evaluate_multi_penalty_target_device(
+          magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
+          penalty_matrices, target_y0, target_squared_norm, state->log_sp,
+          workspace, &state->trial, n, q, penalty_count, true,
+          &state->terminal_boundary_confirmation_phase_timing,
+          rank_tolerance, true);
+        __syncthreads();
+        if (threadIdx.x == 0) {
+          if (state->trial.solver_info != 0 ||
+              !isfinite(state->trial.score)) {
+            state->optimizer_status = 5;
+          } else {
+            state->terminal_boundary_stable_current_score =
+              state->trial.score;
+            state->terminal_boundary_stable_current_direct_score =
+              direct_qr_residual_score(
+                magic_r, magic_pivot, target_y0, target_squared_norm,
+                state->trial, n, q);
+          }
+        }
+        __syncthreads();
+        if (state->optimizer_status != 0) return;
+        evaluate_multi_penalty_target_device(
+          magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
+          penalty_matrices, target_y0, target_squared_norm,
+          state->trial_log_sp, workspace, &state->trial, n, q,
+          penalty_count, true,
+          &state->terminal_boundary_confirmation_phase_timing,
+          rank_tolerance, true);
+        __syncthreads();
+        if (threadIdx.x == 0 &&
+            (state->trial.solver_info != 0 ||
+             !isfinite(state->trial.score))) {
+          state->optimizer_status = 5;
+        } else if (threadIdx.x == 0) {
+          state->terminal_boundary_stable_trial_direct_score =
+            direct_qr_residual_score(
+              magic_r, magic_pivot, target_y0, target_squared_norm,
+              state->trial, n, q);
+        }
+        __syncthreads();
+        if (state->optimizer_status != 0) return;
+      }
+      if (threadIdx.x == 0) {
+        const double primary_score_delta = __dadd_rn(
+          state->terminal_boundary_primary_trial_score,
+          -state->terminal_boundary_primary_current_score);
+        bool accepted = primary_score_delta < 0.0;
+        if (state->terminal_boundary_confirmation_pending != 0) {
+          const double stable_score_delta = __dadd_rn(
+            state->trial.score,
+            -state->terminal_boundary_stable_current_score);
+          const double score_identity_disagreement = fmax(
+            fabs(__dadd_rn(
+              state->terminal_boundary_stable_current_direct_score,
+              -state->terminal_boundary_stable_current_score)),
+            fabs(__dadd_rn(
+              state->terminal_boundary_stable_trial_direct_score,
+              -state->trial.score)));
+          const double identity_tolerance = __dmul_rn(
+            __dmul_rn(512.0 * kLapackEpsilon, static_cast<double>(q)),
+            __dadd_rn(
+              1.0, fabs(state->terminal_boundary_stable_current_score)));
+          accepted = stable_score_delta < 0.0 &&
+            score_identity_disagreement <= identity_tolerance;
+          ++state->terminal_boundary_confirmation_count;
+          state->terminal_boundary_confirmation_accepted_count +=
+            accepted ? 1 : 0;
+          state->terminal_boundary_confirmation_rejected_count +=
+            accepted ? 0 : 1;
+          state->terminal_boundary_confirmation_max_identity_disagreement =
+            fmax(
+              state
+                ->terminal_boundary_confirmation_max_identity_disagreement,
+              score_identity_disagreement);
+          state->terminal_boundary_confirmation_max_identity_ratio = fmax(
+            state->terminal_boundary_confirmation_max_identity_ratio,
+            __ddiv_rn(score_identity_disagreement, identity_tolerance));
+        }
+        if (state->optimizer_status == 0) {
           if (accepted) {
             for (int penalty = 0; penalty < penalty_count; ++penalty) {
               state->log_sp[penalty] = state->trial_log_sp[penalty];
             }
-            state->current = state->trial;
-            state->minimum_score = state->current.score;
+            state->minimum_score =
+              state->terminal_boundary_primary_trial_score;
             ++state->tries;
             ++state->boundary_accepted_count;
           } else {
@@ -1418,6 +1626,37 @@ __global__ void optimize_multi_penalty_targets_kernel(
     if (state->optimizer_status != 0) return;
   }
 
+  if (stability_replay && threadIdx.x == 0) {
+    double maximum_spread = 0.0;
+    for (int penalty = 0; penalty < penalty_count; ++penalty) {
+      maximum_spread = fmax(
+        maximum_spread,
+        fabs(__dadd_rn(
+          state->log_sp[penalty],
+          -primary_states[target].log_sp[penalty])));
+    }
+    state->stability_replay_log_sp_spread = maximum_spread;
+    if (maximum_spread > kStabilityReplayLogSpSpread) {
+      state->stability_replay_selected = 1;
+      if (primary_states[target].optimizer_iterations >=
+          kStabilityReplayMinimumIterations) {
+        const double inward_shift = fmin(
+          kStabilityReplayMaximumInwardShift,
+          __dmul_rn(2.0, maximum_spread));
+        for (int penalty = 0; penalty < penalty_count; ++penalty) {
+          if (state->boundary_status[penalty] == kBoundaryPositive) {
+            state->log_sp[penalty] = __dadd_rn(
+              state->log_sp[penalty], -inward_shift);
+          } else if (state->boundary_status[penalty] == kBoundaryNegative) {
+            state->log_sp[penalty] = __dadd_rn(
+              state->log_sp[penalty], inward_shift);
+          }
+        }
+      }
+    }
+  }
+  __syncthreads();
+
   if (state->boundary_accepted_count == 0) {
     if (threadIdx.x == 0) {
       ++state->objective_calls;
@@ -1430,7 +1669,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
     penalty_matrices, target_y0, target_squared_norm, state->log_sp,
     workspace, &state->trial, n, q, penalty_count, true,
-    &state->phase_timing, rank_tolerance);
+    &state->phase_timing, rank_tolerance, force_stable_svd);
   __syncthreads();
   if (threadIdx.x == 0) {
     ++state->objective_calls;
@@ -1440,6 +1679,59 @@ __global__ void optimize_multi_penalty_targets_kernel(
       state->current = state->trial;
     }
   }
+}
+
+__global__ void merge_stability_replay_states_kernel(
+    DeviceOptimizerState* primary_states,
+    const DeviceOptimizerState* replay_states,
+    int target_count) {
+  const int target = blockIdx.x * blockDim.x + threadIdx.x;
+  if (target >= target_count ||
+      primary_states[target].optimizer_status != 0 ||
+      primary_states[target].optimizer_iterations <
+        kStabilityReplayMinimumIterations) {
+    return;
+  }
+  DeviceOptimizerState& primary = primary_states[target];
+  const DeviceOptimizerState& replay = replay_states[target];
+  const int primary_confirmation_count =
+    primary.terminal_boundary_confirmation_count;
+  const int primary_confirmation_accepted_count =
+    primary.terminal_boundary_confirmation_accepted_count;
+  const int primary_confirmation_rejected_count =
+    primary.terminal_boundary_confirmation_rejected_count;
+  const double primary_confirmation_max_identity_disagreement =
+    primary.terminal_boundary_confirmation_max_identity_disagreement;
+  const double primary_confirmation_max_identity_ratio =
+    primary.terminal_boundary_confirmation_max_identity_ratio;
+  const DevicePhaseTiming primary_confirmation_timing =
+    primary.terminal_boundary_confirmation_phase_timing;
+  const bool selected = replay.stability_replay_selected != 0 &&
+    replay.optimizer_status == 0;
+  const DevicePhaseTiming discarded = selected ?
+    primary.phase_timing : replay.phase_timing;
+  const double spread = replay.stability_replay_log_sp_spread;
+  const int replay_error = replay.optimizer_status != 0 ? 1 : 0;
+  if (selected) {
+    primary = replay;
+    primary.terminal_boundary_confirmation_count =
+      primary_confirmation_count;
+    primary.terminal_boundary_confirmation_accepted_count =
+      primary_confirmation_accepted_count;
+    primary.terminal_boundary_confirmation_rejected_count =
+      primary_confirmation_rejected_count;
+    primary.terminal_boundary_confirmation_max_identity_disagreement =
+      primary_confirmation_max_identity_disagreement;
+    primary.terminal_boundary_confirmation_max_identity_ratio =
+      primary_confirmation_max_identity_ratio;
+    primary.terminal_boundary_confirmation_phase_timing =
+      primary_confirmation_timing;
+  }
+  primary.stability_replay_attempted = 1;
+  primary.stability_replay_selected = selected ? 1 : 0;
+  primary.stability_replay_error = replay_error;
+  primary.stability_replay_log_sp_spread = spread;
+  primary.discarded_phase_timing = discarded;
 }
 
 __global__ void gather_multi_penalty_coefficients_kernel(
@@ -1502,6 +1794,7 @@ class MultiPenaltyGcvCudaPrepared {
   DeviceBuffer<double> d_squared_norm;
   DeviceBuffer<DeviceEvaluationWorkspace> d_workspaces;
   DeviceBuffer<DeviceOptimizerState> d_states;
+  DeviceBuffer<DeviceOptimizerState> d_replay_states;
   DeviceBuffer<double> d_coefficients;
   DeviceBuffer<double> d_fitted;
   DeviceBuffer<double> d_residuals;
@@ -1638,6 +1931,61 @@ MultiPenaltyGcvCudaOptimization materialize_optimizer_output(
       state.phase_timing.stable_svd_evaluation_count;
     diagnostics.cuda_selected_evaluation_reuse_count +=
       state.selected_evaluation_reuse_count;
+    diagnostics.cuda_terminal_boundary_confirmation_count +=
+      state.terminal_boundary_confirmation_count;
+    diagnostics.cuda_terminal_boundary_confirmation_accepted_count +=
+      state.terminal_boundary_confirmation_accepted_count;
+    diagnostics.cuda_terminal_boundary_confirmation_rejected_count +=
+      state.terminal_boundary_confirmation_rejected_count;
+    diagnostics
+      .cuda_terminal_boundary_confirmation_complete_evaluation_count +=
+        state.terminal_boundary_confirmation_phase_timing
+          .complete_evaluation_count;
+    diagnostics
+      .cuda_terminal_boundary_confirmation_stable_svd_evaluation_count +=
+        state.terminal_boundary_confirmation_phase_timing
+          .stable_svd_evaluation_count;
+    diagnostics.cuda_terminal_boundary_confirmation_cycles +=
+      state.terminal_boundary_confirmation_phase_timing
+        .penalty_factor_augmentation_cycles +
+      state.terminal_boundary_confirmation_phase_timing.qr_svd_cycles +
+      state.terminal_boundary_confirmation_phase_timing
+        .score_construction_cycles +
+      state.terminal_boundary_confirmation_phase_timing
+        .derivative_hessian_cycles;
+    diagnostics
+      .cuda_terminal_boundary_confirmation_max_identity_disagreement =
+        std::max(
+          diagnostics
+            .cuda_terminal_boundary_confirmation_max_identity_disagreement,
+          state.terminal_boundary_confirmation_max_identity_disagreement);
+    diagnostics.cuda_terminal_boundary_confirmation_max_identity_ratio =
+      std::max(
+        diagnostics.cuda_terminal_boundary_confirmation_max_identity_ratio,
+        state.terminal_boundary_confirmation_max_identity_ratio);
+    if (state.stability_replay_attempted != 0) {
+      ++diagnostics.cuda_stability_replay_target_count;
+      diagnostics.cuda_stability_replay_selected_count +=
+        state.stability_replay_selected != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_error_count +=
+        state.stability_replay_error != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_max_log_sp_spread = std::max(
+        diagnostics.cuda_stability_replay_max_log_sp_spread,
+        state.stability_replay_log_sp_spread);
+      diagnostics.cuda_stability_replay_discarded_complete_evaluation_count +=
+        state.discarded_phase_timing.complete_evaluation_count;
+      diagnostics.cuda_stability_replay_discarded_score_only_evaluation_count +=
+        state.discarded_phase_timing.score_only_evaluation_count;
+      diagnostics.cuda_stability_replay_discarded_guarded_qr_evaluation_count +=
+        state.discarded_phase_timing.guarded_qr_evaluation_count;
+      diagnostics.cuda_stability_replay_discarded_stable_svd_evaluation_count +=
+        state.discarded_phase_timing.stable_svd_evaluation_count;
+      diagnostics.cuda_stability_replay_discarded_cycles +=
+        state.discarded_phase_timing.penalty_factor_augmentation_cycles +
+        state.discarded_phase_timing.qr_svd_cycles +
+        state.discarded_phase_timing.score_construction_cycles +
+        state.discarded_phase_timing.derivative_hessian_cycles;
+    }
     diagnostics.cuda_hessian_eigensolver_count +=
       state.optimizer_iterations;
     if (state.optimizer_status == 0) {
@@ -2044,6 +2392,7 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
   DeviceBuffer<double> d_squared_norm;
   DeviceBuffer<DeviceEvaluationWorkspace> d_workspaces;
   DeviceBuffer<DeviceOptimizerState> d_states;
+  DeviceBuffer<DeviceOptimizerState> d_replay_states;
   const std::size_t y_count = static_cast<std::size_t>(n) * target_count;
   d_Y.allocate(y_count, &diagnostics);
   d_qr_packed.allocate(static_cast<std::size_t>(n) * q, &diagnostics);
@@ -2060,6 +2409,7 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
   d_squared_norm.allocate(target_count, &diagnostics);
   d_workspaces.allocate(target_count, &diagnostics);
   d_states.allocate(target_count, &diagnostics);
+  d_replay_states.allocate(target_count, &diagnostics);
   upload_async(&d_Y, Y, y_count, stream.get(), &diagnostics);
   upload_async(&d_qr_packed, magic_qr_packed,
                static_cast<std::size_t>(n) * q, stream.get(), &diagnostics);
@@ -2094,14 +2444,33 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
     target_count, kBlockSize, 0, stream.get()>>>(
       d_r.get(), d_pivot.get(), d_roots.get(), d_root_offsets.get(),
       d_ranks.get(), d_matrices.get(), d_y0.get(), d_squared_norm.get(),
-      d_initial_log_sp.get(), d_workspaces.get(), d_states.get(), n, q,
-      penalty_count, target_count, control.convergence_tolerance,
+      d_initial_log_sp.get(), d_workspaces.get(), d_states.get(), nullptr,
+      n, q, penalty_count, target_count, control.convergence_tolerance,
       gradient_tolerance_factor, control.max_step_halving,
       control.max_iterations, control.max_newton_step,
       control.boundary_probe_step, control.max_boundary_probes,
-      control.rank_tolerance);
+      control.rank_tolerance, false, false);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty optimizer batch kernel");
+  optimize_multi_penalty_targets_kernel<<<
+    target_count, kBlockSize, 0, stream.get()>>>(
+      d_r.get(), d_pivot.get(), d_roots.get(), d_root_offsets.get(),
+      d_ranks.get(), d_matrices.get(), d_y0.get(), d_squared_norm.get(),
+      d_initial_log_sp.get(), d_workspaces.get(), d_replay_states.get(),
+      d_states.get(), n, q, penalty_count, target_count,
+      control.convergence_tolerance, gradient_tolerance_factor,
+      control.max_step_halving, control.max_iterations,
+      control.max_newton_step, control.boundary_probe_step,
+      control.max_boundary_probes, control.rank_tolerance, true, true);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty stability replay kernel");
+  diagnostics.cuda_stability_replay_kernel_launch_count = 1;
+  merge_stability_replay_states_kernel<<<
+    target_blocks, kBlockSize, 0, stream.get()>>>(
+      d_states.get(), d_replay_states.get(), target_count);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty stability replay merge kernel");
+  diagnostics.cuda_stability_merge_kernel_launch_count = 1;
   std::vector<DeviceOptimizerState> host_states(
     static_cast<std::size_t>(target_count));
   check_cuda(cudaMemcpyAsync(
@@ -2195,6 +2564,61 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
       state.phase_timing.stable_svd_evaluation_count;
     diagnostics.cuda_selected_evaluation_reuse_count +=
       state.selected_evaluation_reuse_count;
+    diagnostics.cuda_terminal_boundary_confirmation_count +=
+      state.terminal_boundary_confirmation_count;
+    diagnostics.cuda_terminal_boundary_confirmation_accepted_count +=
+      state.terminal_boundary_confirmation_accepted_count;
+    diagnostics.cuda_terminal_boundary_confirmation_rejected_count +=
+      state.terminal_boundary_confirmation_rejected_count;
+    diagnostics
+      .cuda_terminal_boundary_confirmation_complete_evaluation_count +=
+        state.terminal_boundary_confirmation_phase_timing
+          .complete_evaluation_count;
+    diagnostics
+      .cuda_terminal_boundary_confirmation_stable_svd_evaluation_count +=
+        state.terminal_boundary_confirmation_phase_timing
+          .stable_svd_evaluation_count;
+    diagnostics.cuda_terminal_boundary_confirmation_cycles +=
+      state.terminal_boundary_confirmation_phase_timing
+        .penalty_factor_augmentation_cycles +
+      state.terminal_boundary_confirmation_phase_timing.qr_svd_cycles +
+      state.terminal_boundary_confirmation_phase_timing
+        .score_construction_cycles +
+      state.terminal_boundary_confirmation_phase_timing
+        .derivative_hessian_cycles;
+    diagnostics
+      .cuda_terminal_boundary_confirmation_max_identity_disagreement =
+        std::max(
+          diagnostics
+            .cuda_terminal_boundary_confirmation_max_identity_disagreement,
+          state.terminal_boundary_confirmation_max_identity_disagreement);
+    diagnostics.cuda_terminal_boundary_confirmation_max_identity_ratio =
+      std::max(
+        diagnostics.cuda_terminal_boundary_confirmation_max_identity_ratio,
+        state.terminal_boundary_confirmation_max_identity_ratio);
+    if (state.stability_replay_attempted != 0) {
+      ++diagnostics.cuda_stability_replay_target_count;
+      diagnostics.cuda_stability_replay_selected_count +=
+        state.stability_replay_selected != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_error_count +=
+        state.stability_replay_error != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_max_log_sp_spread = std::max(
+        diagnostics.cuda_stability_replay_max_log_sp_spread,
+        state.stability_replay_log_sp_spread);
+      diagnostics.cuda_stability_replay_discarded_complete_evaluation_count +=
+        state.discarded_phase_timing.complete_evaluation_count;
+      diagnostics.cuda_stability_replay_discarded_score_only_evaluation_count +=
+        state.discarded_phase_timing.score_only_evaluation_count;
+      diagnostics.cuda_stability_replay_discarded_guarded_qr_evaluation_count +=
+        state.discarded_phase_timing.guarded_qr_evaluation_count;
+      diagnostics.cuda_stability_replay_discarded_stable_svd_evaluation_count +=
+        state.discarded_phase_timing.stable_svd_evaluation_count;
+      diagnostics.cuda_stability_replay_discarded_cycles +=
+        state.discarded_phase_timing.penalty_factor_augmentation_cycles +
+        state.discarded_phase_timing.qr_svd_cycles +
+        state.discarded_phase_timing.score_construction_cycles +
+        state.discarded_phase_timing.derivative_hessian_cycles;
+    }
     diagnostics.cuda_hessian_eigensolver_count +=
       state.optimizer_iterations;
     if (state.optimizer_status == 0) {
@@ -2342,6 +2766,8 @@ create_multi_penalty_gcv_cuda_prepared(
       arena_bytes, target_capacity);
     arena_bytes = arena_advance<DeviceOptimizerState>(
       arena_bytes, target_capacity);
+    arena_bytes = arena_advance<DeviceOptimizerState>(
+      arena_bytes, target_capacity);
     arena_bytes = arena_advance<double>(arena_bytes, q_targets);
     arena_bytes = arena_advance<double>(arena_bytes, y_capacity);
     arena_bytes = arena_advance<double>(arena_bytes, y_capacity);
@@ -2379,6 +2805,8 @@ create_multi_penalty_gcv_cuda_prepared(
     arena_offset = prepared->d_workspaces.bind_from_arena(
       arena, arena_offset, target_capacity);
     arena_offset = prepared->d_states.bind_from_arena(
+      arena, arena_offset, target_capacity);
+    arena_offset = prepared->d_replay_states.bind_from_arena(
       arena, arena_offset, target_capacity);
     arena_offset = prepared->d_coefficients.bind_from_arena(
       arena, arena_offset, q_targets);
@@ -2545,13 +2973,37 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
         prepared->d_ranks.get(), prepared->d_matrices.get(),
         prepared->d_y0.get(), prepared->d_squared_norm.get(),
         prepared->d_initial_log_sp.get(), prepared->d_workspaces.get(),
-        prepared->d_states.get(), n, q, penalty_count, target_count,
-        control.convergence_tolerance, gradient_tolerance_factor,
+        prepared->d_states.get(), nullptr, n, q, penalty_count,
+        target_count, control.convergence_tolerance,
+        gradient_tolerance_factor,
         control.max_step_halving, control.max_iterations,
         control.max_newton_step, control.boundary_probe_step,
-        control.max_boundary_probes, control.rank_tolerance);
+        control.max_boundary_probes, control.rank_tolerance, false, false);
     check_cuda(cudaGetLastError(),
                "launch persistent multi-penalty optimizer kernel");
+    optimize_multi_penalty_targets_kernel<<<
+      target_count, kBlockSize, 0, prepared->stream.get()>>>(
+        prepared->d_r.get(), prepared->d_pivot.get(),
+        prepared->d_roots.get(), prepared->d_root_offsets.get(),
+        prepared->d_ranks.get(), prepared->d_matrices.get(),
+        prepared->d_y0.get(), prepared->d_squared_norm.get(),
+        prepared->d_initial_log_sp.get(), prepared->d_workspaces.get(),
+        prepared->d_replay_states.get(), prepared->d_states.get(),
+        n, q, penalty_count, target_count, control.convergence_tolerance,
+        gradient_tolerance_factor, control.max_step_halving,
+        control.max_iterations, control.max_newton_step,
+        control.boundary_probe_step, control.max_boundary_probes,
+        control.rank_tolerance, true, true);
+    check_cuda(cudaGetLastError(),
+               "launch persistent multi-penalty stability replay kernel");
+    diagnostics.cuda_stability_replay_kernel_launch_count = 1;
+    merge_stability_replay_states_kernel<<<
+      target_blocks, kBlockSize, 0, prepared->stream.get()>>>(
+        prepared->d_states.get(), prepared->d_replay_states.get(),
+        target_count);
+    check_cuda(cudaGetLastError(),
+               "launch persistent multi-penalty stability merge kernel");
+    diagnostics.cuda_stability_merge_kernel_launch_count = 1;
     const int coefficient_count = q * target_count;
     const int coefficient_blocks =
       (coefficient_count + 255) / 256;

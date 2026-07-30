@@ -102,6 +102,78 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
     sum(targets$rank_mismatch) == 0L &&
     sum(targets$optimizer_status != 0L) == 0L &&
     all(targets$fully_converged) && all(targets$all_finite)
+  replay_discarded_evaluations <-
+    timings$cuda_stability_replay_discarded_complete_evaluation_count +
+      timings$cuda_stability_replay_discarded_score_only_evaluation_count
+  replay_discarded_factorizations <-
+    timings$cuda_stability_replay_discarded_guarded_qr_evaluation_count +
+      timings$cuda_stability_replay_discarded_stable_svd_evaluation_count
+  confirmation_evaluations <-
+    timings$cuda_terminal_boundary_confirmation_complete_evaluation_count
+  confirmation_factorizations <-
+    timings$cuda_terminal_boundary_confirmation_stable_svd_evaluation_count
+  physical_evaluations <-
+    timings$cuda_complete_evaluation_count +
+      timings$cuda_score_only_evaluation_count +
+      replay_discarded_evaluations + confirmation_evaluations
+  physical_factorizations <-
+    timings$cuda_guarded_qr_evaluation_count +
+      timings$cuda_stable_svd_evaluation_count +
+      replay_discarded_factorizations + confirmation_factorizations
+  stability_replay_gate <-
+    all(timings$cuda_stability_replay_kernel_launch_count == 1L) &&
+    all(timings$cuda_stability_merge_kernel_launch_count == 1L) &&
+    all(timings$cuda_stability_replay_target_count >= 0L) &&
+    all(timings$cuda_stability_replay_target_count <=
+          timings$target_count) &&
+    all(timings$cuda_stability_replay_selected_count >= 0L) &&
+    all(timings$cuda_stability_replay_selected_count <=
+          timings$cuda_stability_replay_target_count) &&
+    sum(timings$cuda_stability_replay_error_count) == 0L &&
+    all(replay_discarded_evaluations == replay_discarded_factorizations) &&
+    all(
+      (timings$cuda_stability_replay_target_count == 0L &
+         replay_discarded_evaluations == 0L) |
+        (timings$cuda_stability_replay_target_count > 0L &
+           replay_discarded_evaluations > 0L)
+    ) &&
+    all(is.finite(timings$cuda_stability_replay_max_log_sp_spread)) &&
+    all(timings$cuda_stability_replay_max_log_sp_spread >= 0) &&
+    all(
+      timings$cuda_stability_replay_selected_count == 0L |
+        timings$cuda_stability_replay_max_log_sp_spread > 1e-7
+    )
+  terminal_boundary_confirmation_gate <-
+    all(timings$cuda_terminal_boundary_confirmation_count >= 0L) &&
+    all(timings$cuda_terminal_boundary_confirmation_accepted_count >= 0L) &&
+    all(timings$cuda_terminal_boundary_confirmation_rejected_count >= 0L) &&
+    all(
+      timings$cuda_terminal_boundary_confirmation_accepted_count +
+        timings$cuda_terminal_boundary_confirmation_rejected_count ==
+        timings$cuda_terminal_boundary_confirmation_count
+    ) &&
+    all(confirmation_evaluations ==
+          2L * timings$cuda_terminal_boundary_confirmation_count) &&
+    all(confirmation_factorizations == confirmation_evaluations) &&
+    all(is.finite(timings$cuda_terminal_boundary_confirmation_cycles)) &&
+    all(timings$cuda_terminal_boundary_confirmation_cycles >= 0) &&
+    all(is.finite(
+      timings$cuda_terminal_boundary_confirmation_max_identity_disagreement
+    )) &&
+    all(
+      timings$cuda_terminal_boundary_confirmation_max_identity_disagreement >=
+        0
+    ) &&
+    all(is.finite(
+      timings$cuda_terminal_boundary_confirmation_max_identity_ratio
+    )) &&
+    all(timings$cuda_terminal_boundary_confirmation_max_identity_ratio >= 0) &&
+    all(
+      timings$cuda_terminal_boundary_confirmation_count == 0L |
+        timings$cuda_terminal_boundary_confirmation_cycles > 0
+    )
+  physical_evaluation_accounting_gate <-
+    all(physical_evaluations == physical_factorizations)
   authority_gate <-
     sum(timings$legacy_mgcv_target_calls) == 0L &&
     sum(timings$cpu_multi_penalty_solve_count) == 0L &&
@@ -122,7 +194,9 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
           timings$cuda_complete_evaluation_count +
             timings$cuda_score_only_evaluation_count) &&
     sum(timings$cuda_selected_evaluation_reuse_count) ==
-      sum(targets$boundary_accepted_count == 0L)
+      sum(targets$boundary_accepted_count == 0L) &&
+    stability_replay_gate && terminal_boundary_confirmation_gate &&
+    physical_evaluation_accounting_gate
   windows <- timings[timings$scheduler_window_leader, , drop = FALSE]
   concurrent_windows <- windows$scheduler_window_setup_count > 1L
   concurrency_gate <-
@@ -210,6 +284,53 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
       sum(timings$cuda_guarded_qr_evaluation_count),
     cuda_stable_svd_evaluation_count =
       sum(timings$cuda_stable_svd_evaluation_count),
+    cuda_stability_replay_kernel_launch_count =
+      sum(timings$cuda_stability_replay_kernel_launch_count),
+    cuda_stability_merge_kernel_launch_count =
+      sum(timings$cuda_stability_merge_kernel_launch_count),
+    cuda_stability_replay_target_count =
+      sum(timings$cuda_stability_replay_target_count),
+    cuda_stability_replay_selected_count =
+      sum(timings$cuda_stability_replay_selected_count),
+    cuda_stability_replay_error_count =
+      sum(timings$cuda_stability_replay_error_count),
+    cuda_stability_replay_discarded_complete_evaluation_count = sum(
+      timings$cuda_stability_replay_discarded_complete_evaluation_count
+    ),
+    cuda_stability_replay_discarded_score_only_evaluation_count = sum(
+      timings$cuda_stability_replay_discarded_score_only_evaluation_count
+    ),
+    cuda_stability_replay_discarded_guarded_qr_evaluation_count = sum(
+      timings$cuda_stability_replay_discarded_guarded_qr_evaluation_count
+    ),
+    cuda_stability_replay_discarded_stable_svd_evaluation_count = sum(
+      timings$cuda_stability_replay_discarded_stable_svd_evaluation_count
+    ),
+    cuda_stability_replay_discarded_cycles =
+      sum(timings$cuda_stability_replay_discarded_cycles),
+    cuda_stability_replay_max_log_sp_spread =
+      max(timings$cuda_stability_replay_max_log_sp_spread),
+    cuda_terminal_boundary_confirmation_count =
+      sum(timings$cuda_terminal_boundary_confirmation_count),
+    cuda_terminal_boundary_confirmation_accepted_count =
+      sum(timings$cuda_terminal_boundary_confirmation_accepted_count),
+    cuda_terminal_boundary_confirmation_rejected_count =
+      sum(timings$cuda_terminal_boundary_confirmation_rejected_count),
+    cuda_terminal_boundary_confirmation_complete_evaluation_count = sum(
+      timings$cuda_terminal_boundary_confirmation_complete_evaluation_count
+    ),
+    cuda_terminal_boundary_confirmation_stable_svd_evaluation_count = sum(
+      timings$cuda_terminal_boundary_confirmation_stable_svd_evaluation_count
+    ),
+    cuda_terminal_boundary_confirmation_cycles =
+      sum(timings$cuda_terminal_boundary_confirmation_cycles),
+    cuda_terminal_boundary_confirmation_max_identity_disagreement = max(
+      timings$cuda_terminal_boundary_confirmation_max_identity_disagreement
+    ),
+    cuda_terminal_boundary_confirmation_max_identity_ratio =
+      max(timings$cuda_terminal_boundary_confirmation_max_identity_ratio),
+    cuda_physical_evaluation_count = sum(physical_evaluations),
+    cuda_physical_factorization_count = sum(physical_factorizations),
     legacy_mgcv_target_calls = sum(timings$legacy_mgcv_target_calls),
     cpu_multi_penalty_solve_count =
       sum(timings$cpu_multi_penalty_solve_count),
@@ -267,6 +388,11 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
     elapsed_seconds = as.numeric(elapsed_seconds),
     numerical_gate = numerical_gate,
     optimizer_gate = optimizer_gate,
+    stability_replay_gate = stability_replay_gate,
+    terminal_boundary_confirmation_gate =
+      terminal_boundary_confirmation_gate,
+    physical_evaluation_accounting_gate =
+      physical_evaluation_accounting_gate,
     authority_gate = authority_gate,
     concurrency_gate = concurrency_gate,
     downstream_decision_gate = downstream_gate,
@@ -679,6 +805,65 @@ fastkpc_full_cuda_phase6_scan_partition <- function(
           candidate$diagnostics$cuda_guarded_qr_evaluation_count,
         cuda_stable_svd_evaluation_count =
           candidate$diagnostics$cuda_stable_svd_evaluation_count,
+        cuda_stability_replay_kernel_launch_count =
+          candidate$diagnostics$cuda_stability_replay_kernel_launch_count,
+        cuda_stability_merge_kernel_launch_count =
+          candidate$diagnostics$cuda_stability_merge_kernel_launch_count,
+        cuda_stability_replay_target_count =
+          candidate$diagnostics$cuda_stability_replay_target_count,
+        cuda_stability_replay_selected_count =
+          candidate$diagnostics$cuda_stability_replay_selected_count,
+        cuda_stability_replay_error_count =
+          candidate$diagnostics$cuda_stability_replay_error_count,
+        cuda_stability_replay_discarded_complete_evaluation_count =
+          candidate$diagnostics[[
+            "cuda_stability_replay_discarded_complete_evaluation_count"
+          ]],
+        cuda_stability_replay_discarded_score_only_evaluation_count =
+          candidate$diagnostics[[
+            "cuda_stability_replay_discarded_score_only_evaluation_count"
+          ]],
+        cuda_stability_replay_discarded_guarded_qr_evaluation_count =
+          candidate$diagnostics[[
+            "cuda_stability_replay_discarded_guarded_qr_evaluation_count"
+          ]],
+        cuda_stability_replay_discarded_stable_svd_evaluation_count =
+          candidate$diagnostics[[
+            "cuda_stability_replay_discarded_stable_svd_evaluation_count"
+          ]],
+        cuda_stability_replay_discarded_cycles =
+          candidate$diagnostics$cuda_stability_replay_discarded_cycles,
+        cuda_stability_replay_max_log_sp_spread =
+          candidate$diagnostics$cuda_stability_replay_max_log_sp_spread,
+        cuda_terminal_boundary_confirmation_count = candidate$diagnostics[[
+          "cuda_terminal_boundary_confirmation_count"
+        ]],
+        cuda_terminal_boundary_confirmation_accepted_count =
+          candidate$diagnostics[[
+            "cuda_terminal_boundary_confirmation_accepted_count"
+          ]],
+        cuda_terminal_boundary_confirmation_rejected_count =
+          candidate$diagnostics[[
+            "cuda_terminal_boundary_confirmation_rejected_count"
+          ]],
+        cuda_terminal_boundary_confirmation_complete_evaluation_count =
+          candidate$diagnostics[[
+            "cuda_terminal_boundary_confirmation_complete_evaluation_count"
+          ]],
+        cuda_terminal_boundary_confirmation_stable_svd_evaluation_count =
+          candidate$diagnostics[[
+            "cuda_terminal_boundary_confirmation_stable_svd_evaluation_count"
+          ]],
+        cuda_terminal_boundary_confirmation_cycles =
+          candidate$diagnostics$cuda_terminal_boundary_confirmation_cycles,
+        cuda_terminal_boundary_confirmation_max_identity_disagreement =
+          candidate$diagnostics[[
+            "cuda_terminal_boundary_confirmation_max_identity_disagreement"
+          ]],
+        cuda_terminal_boundary_confirmation_max_identity_ratio =
+          candidate$diagnostics[[
+            "cuda_terminal_boundary_confirmation_max_identity_ratio"
+          ]],
         cuda_error_count = candidate$diagnostics$cuda_error_count,
         legacy_mgcv_target_calls = 0L,
         cpu_multi_penalty_solve_count = 0L,

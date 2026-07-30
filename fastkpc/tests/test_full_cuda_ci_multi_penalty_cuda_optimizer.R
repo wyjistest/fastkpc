@@ -26,9 +26,16 @@ cases <- data.frame(
   label = c(
     "reference", "five-penalty-stability", "indefinite-hessian",
     "rank-deficient", "maximum-iterations", "maximum-score-calls",
-    "near-flat-boundary", "near-convergence-score-rounding"
+    "near-flat-boundary", "near-convergence-score-rounding",
+    "formal-partition-log-sp-tolerance",
+    "formal-partition-boundary-trajectory",
+    "formal-partition-legitimate-boundary-a",
+    "formal-partition-legitimate-boundary-b",
+    "formal-partition-legitimate-boundary-c"
   ),
-  shard_id = c(1L, 56L, 0L, 37L, 10L, 59L, 10L, 48L),
+  shard_id = c(
+    1L, 56L, 0L, 37L, 10L, 59L, 10L, 48L, 1L, 33L, 1L, 1L, 17L
+  ),
   prepared_s_key_sha256 = c(
     "001245052f571033286b2dc7526c24dbe5ec5c221660c094a8b9f052376b91da",
     "e24dde52f78eab81021dc092fb072111f0d27733d6056b5490162039f8e87094",
@@ -37,7 +44,12 @@ cases <- data.frame(
     "31ff054083fb4a0cdfb0be76305e057a6ab086c134f68a0ba7fbae8661ab2e14",
     "7844c90be2027d3b78f4750e99ca43cb6ee8621e0aca651d2422e3884eb81168",
     "0088c39e91afee87a1a347802db2fb51395e025689e3f13da5a0fe71b71c6bdf",
-    "43470d9bf1e9680097ac2b5bf142836e76e88de2660f680c64f4b62bd8bcd3cd"
+    "43470d9bf1e9680097ac2b5bf142836e76e88de2660f680c64f4b62bd8bcd3cd",
+    "4b5e8d92c4e86cdddeb003da79188d933cf991b521151134a1f85ab1947d4cb1",
+    "d19398722be813273a4d9d038b0100d6e425487fadc52091802d1990c0b728f5",
+    "2683a26ce86357d2d4706b2ab91e9e6117a4b96cbeff61cc0fab787ed720b088",
+    "922330870499c78da8ff876abf363766c571a53536a85b58ed4c829b74d502e1",
+    "a7b667e962ff5dd521f4573adfca50b04b443054179da19e9e96523c16706766"
   ),
   residual_key_sha256 = c(
     NA_character_,
@@ -47,7 +59,12 @@ cases <- data.frame(
     "8e56ba8371592d8daed48dfa00cac511893d66746ca43f2941954dfa1cf8e81e",
     "d5333f96a4468977ddc61a6526d5a7f255885a9f514f4e990188770e474088d3",
     "8b770202d16c751864c6fa19b51355ace98a070645b916949d825ffcf1327ced",
-    "473654d1eb6bc2d4f707c970109139d5417cefa303941838a959663719b29888"
+    "473654d1eb6bc2d4f707c970109139d5417cefa303941838a959663719b29888",
+    "ad4d0942fca390d0997052899c1f99c4071414d21493dae5c10126348a012e14",
+    "d190d6c386123aa4eb52016bb1d9149027dd1cdd844b3c7219a9c57d163783af",
+    "406ff4c472c7ef03668f8d416362a0c7041415579019fb30d88a7493056f1580",
+    "bec8345d9c183a753ff5be4e81983b2e655c7ba83efa2b2bb1cb236cbc927c57",
+    "b8bfb8f557d7623169f4d76e9a1691541e5a5c017731bef22fe6c3f9f486ee13"
   ),
   stringsAsFactors = FALSE
 )
@@ -119,6 +136,9 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
   reference_boundary_accepted <- vapply(
     reference, `[[`, integer(1L), "boundary_accepted_count"
   )
+  reference_boundary_status <- do.call(cbind, lapply(
+    reference, `[[`, "boundary_status"
+  ))
   reference_hessian_positive <- vapply(
     reference, `[[`, logical(1L), "hessian_positive_definite"
   )
@@ -128,6 +148,26 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
   reference_residuals <- do.call(cbind, lapply(reference, `[[`, "residuals"))
   candidate_residuals <- Y - prepared$X %*% candidate$coefficients
   diagnostics <- candidate$diagnostics
+  replay_discarded_evaluations <-
+    diagnostics$cuda_stability_replay_discarded_complete_evaluation_count +
+      diagnostics$cuda_stability_replay_discarded_score_only_evaluation_count
+  replay_discarded_factorizations <-
+    diagnostics$cuda_stability_replay_discarded_guarded_qr_evaluation_count +
+      diagnostics$cuda_stability_replay_discarded_stable_svd_evaluation_count
+  confirmation_evaluations <- diagnostics[[
+    "cuda_terminal_boundary_confirmation_complete_evaluation_count"
+  ]]
+  confirmation_factorizations <- diagnostics[[
+    "cuda_terminal_boundary_confirmation_stable_svd_evaluation_count"
+  ]]
+  physical_evaluations <-
+    diagnostics$cuda_complete_evaluation_count +
+      diagnostics$cuda_score_only_evaluation_count +
+      replay_discarded_evaluations + confirmation_evaluations
+  physical_factorizations <-
+    diagnostics$cuda_guarded_qr_evaluation_count +
+      diagnostics$cuda_stable_svd_evaluation_count +
+      replay_discarded_factorizations + confirmation_factorizations
   assert_true(
     identical(
       candidate$schema_version,
@@ -156,6 +196,19 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
         diagnostics$cuda_stable_svd_evaluation_count ==
           diagnostics$cuda_complete_evaluation_count +
             diagnostics$cuda_score_only_evaluation_count &&
+      diagnostics$cuda_stability_replay_kernel_launch_count == 1L &&
+      diagnostics$cuda_stability_merge_kernel_launch_count == 1L &&
+      diagnostics$cuda_stability_replay_target_count >=
+        diagnostics$cuda_stability_replay_selected_count &&
+      diagnostics$cuda_stability_replay_error_count == 0L &&
+      replay_discarded_evaluations == replay_discarded_factorizations &&
+      diagnostics$cuda_terminal_boundary_confirmation_accepted_count +
+        diagnostics$cuda_terminal_boundary_confirmation_rejected_count ==
+          diagnostics$cuda_terminal_boundary_confirmation_count &&
+      confirmation_evaluations ==
+        2L * diagnostics$cuda_terminal_boundary_confirmation_count &&
+      confirmation_factorizations == confirmation_evaluations &&
+      physical_evaluations == physical_factorizations &&
       diagnostics$cuda_guarded_qr_evaluation_count > 0L &&
       diagnostics$cuda_penalty_factor_augmentation_cycles > 0 &&
       diagnostics$cuda_qr_svd_cycles > 0 &&
@@ -185,6 +238,8 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       identical(candidate$boundary_probe_count, reference_boundary_probes) &&
       identical(
         candidate$boundary_accepted_count, reference_boundary_accepted
+      ) && identical(
+        candidate$boundary_status, reference_boundary_status
       ) &&
       identical(
         candidate$hessian_positive_definite,
@@ -236,6 +291,41 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       diagnostics$cuda_guarded_qr_evaluation_count,
     stable_svd_evaluation_count =
       diagnostics$cuda_stable_svd_evaluation_count,
+    stability_replay_target_count =
+      diagnostics$cuda_stability_replay_target_count,
+    stability_replay_selected_count =
+      diagnostics$cuda_stability_replay_selected_count,
+    stability_replay_error_count =
+      diagnostics$cuda_stability_replay_error_count,
+    stability_replay_max_log_sp_spread =
+      diagnostics$cuda_stability_replay_max_log_sp_spread,
+    stability_replay_discarded_evaluation_count =
+      diagnostics$cuda_stability_replay_discarded_complete_evaluation_count +
+        diagnostics[[
+          "cuda_stability_replay_discarded_score_only_evaluation_count"
+        ]],
+    terminal_boundary_confirmation_count =
+      diagnostics$cuda_terminal_boundary_confirmation_count,
+    terminal_boundary_confirmation_accepted_count =
+      diagnostics$cuda_terminal_boundary_confirmation_accepted_count,
+    terminal_boundary_confirmation_rejected_count =
+      diagnostics$cuda_terminal_boundary_confirmation_rejected_count,
+    terminal_boundary_confirmation_complete_evaluation_count =
+      diagnostics[[
+        "cuda_terminal_boundary_confirmation_complete_evaluation_count"
+      ]],
+    terminal_boundary_confirmation_stable_svd_evaluation_count =
+      diagnostics[[
+        "cuda_terminal_boundary_confirmation_stable_svd_evaluation_count"
+      ]],
+    terminal_boundary_confirmation_cycles =
+      diagnostics$cuda_terminal_boundary_confirmation_cycles,
+    terminal_boundary_confirmation_max_identity_disagreement =
+      diagnostics[[
+        "cuda_terminal_boundary_confirmation_max_identity_disagreement"
+      ]],
+    terminal_boundary_confirmation_max_identity_ratio =
+      diagnostics$cuda_terminal_boundary_confirmation_max_identity_ratio,
     max_residual_error = max(abs(
       candidate_residuals - reference_residuals
     )),
@@ -248,6 +338,74 @@ assert_true(
   sum(rows$guarded_qr_evaluation_count) > 0L &&
     sum(rows$stable_svd_evaluation_count) > 0L,
   "Phase 6 guarded QR/SVD optimizer route coverage is incomplete"
+)
+stability_row <- rows[
+  rows$label == "formal-partition-log-sp-tolerance", , drop = FALSE
+]
+boundary_row <- rows[
+  rows$label == "formal-partition-boundary-trajectory", , drop = FALSE
+]
+legitimate_boundary_rows <- rows[
+  startsWith(rows$label, "formal-partition-legitimate-boundary-"),
+  , drop = FALSE
+]
+assert_true(
+  nrow(stability_row) == 1L &&
+    stability_row$stability_replay_target_count >= 1L &&
+    stability_row$stability_replay_selected_count >= 1L &&
+    stability_row$stability_replay_error_count == 0L &&
+    stability_row$stability_replay_max_log_sp_spread > 1e-7 &&
+    stability_row$stability_replay_discarded_evaluation_count > 0L,
+  "Phase 6 long-trajectory stability replay coverage is incomplete"
+)
+assert_true(
+  nrow(boundary_row) == 1L &&
+    boundary_row$terminal_boundary_confirmation_count >= 1L &&
+    boundary_row$terminal_boundary_confirmation_rejected_count >= 1L &&
+    boundary_row$terminal_boundary_confirmation_complete_evaluation_count ==
+      2L * boundary_row$terminal_boundary_confirmation_count &&
+    boundary_row$terminal_boundary_confirmation_stable_svd_evaluation_count ==
+      boundary_row$terminal_boundary_confirmation_complete_evaluation_count &&
+    boundary_row$terminal_boundary_confirmation_cycles > 0 &&
+    boundary_row$terminal_boundary_confirmation_max_identity_disagreement > 0 &&
+    boundary_row$terminal_boundary_confirmation_max_identity_ratio > 1,
+  "Phase 6 rejected terminal boundary confirmation coverage is incomplete"
+)
+assert_true(
+  nrow(legitimate_boundary_rows) == 3L &&
+    all(legitimate_boundary_rows$terminal_boundary_confirmation_count >= 1L) &&
+    all(
+      legitimate_boundary_rows$terminal_boundary_confirmation_accepted_count >=
+        1L
+    ) &&
+    all(
+      legitimate_boundary_rows$terminal_boundary_confirmation_rejected_count ==
+        0L
+    ) &&
+    all(
+      legitimate_boundary_rows[[
+        "terminal_boundary_confirmation_complete_evaluation_count"
+      ]] == 2L * legitimate_boundary_rows$terminal_boundary_confirmation_count
+    ) &&
+    all(
+      legitimate_boundary_rows[[
+        "terminal_boundary_confirmation_stable_svd_evaluation_count"
+      ]] == legitimate_boundary_rows[[
+        "terminal_boundary_confirmation_complete_evaluation_count"
+      ]]
+    ) &&
+    all(legitimate_boundary_rows$terminal_boundary_confirmation_cycles > 0) &&
+    all(
+      legitimate_boundary_rows[[
+        "terminal_boundary_confirmation_max_identity_disagreement"
+      ]] > 0
+    ) &&
+    all(
+      legitimate_boundary_rows$terminal_boundary_confirmation_max_identity_ratio <=
+        1
+    ) &&
+    all(legitimate_boundary_rows$stability_replay_error_count == 0L),
+  "Phase 6 accepted terminal boundary confirmation coverage is incomplete"
 )
 print(rows, row.names = FALSE, digits = 17)
 cat("PASS Phase 6 CUDA independent-target optimizer smoke\n")
