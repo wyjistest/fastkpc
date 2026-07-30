@@ -29,6 +29,7 @@ cases <- data.frame(
     "near-flat-boundary", "near-convergence-score-rounding",
     "formal-partition-log-sp-tolerance",
     "formal-partition-edf-tolerance",
+    "formal-partition-high-condition-log-sp-tolerance",
     "formal-partition-boundary-trajectory",
     "formal-partition-legitimate-boundary-a",
     "formal-partition-legitimate-boundary-b",
@@ -36,8 +37,8 @@ cases <- data.frame(
     "formal-partition-legitimate-boundary-d"
   ),
   shard_id = c(
-    1L, 56L, 0L, 37L, 10L, 59L, 10L, 48L, 1L, 36L, 33L, 1L, 1L,
-    17L, 37L
+    1L, 56L, 0L, 37L, 10L, 59L, 10L, 48L, 1L, 36L, 7L, 33L, 1L,
+    1L, 17L, 37L
   ),
   prepared_s_key_sha256 = c(
     "001245052f571033286b2dc7526c24dbe5ec5c221660c094a8b9f052376b91da",
@@ -50,6 +51,7 @@ cases <- data.frame(
     "43470d9bf1e9680097ac2b5bf142836e76e88de2660f680c64f4b62bd8bcd3cd",
     "4b5e8d92c4e86cdddeb003da79188d933cf991b521151134a1f85ab1947d4cb1",
     "18b367b21d9ab1f391df7f790af330b1e0770e0db7a83c032cfbeb73645b5b9a",
+    "1d5a8de575fae279f3fb99e27ba6d9154537d9d20f42fa42f2543a6489b493c7",
     "d19398722be813273a4d9d038b0100d6e425487fadc52091802d1990c0b728f5",
     "2683a26ce86357d2d4706b2ab91e9e6117a4b96cbeff61cc0fab787ed720b088",
     "922330870499c78da8ff876abf363766c571a53536a85b58ed4c829b74d502e1",
@@ -67,6 +69,7 @@ cases <- data.frame(
     "473654d1eb6bc2d4f707c970109139d5417cefa303941838a959663719b29888",
     "ad4d0942fca390d0997052899c1f99c4071414d21493dae5c10126348a012e14",
     "4e8c62a69abbd86d18f2131e33603c5251b3ae5517b41dd4f8208b0c55267523",
+    "abcb9d71b53933c115666f031c1a20fdacfe48940fa3d4237849bdfbd5e52cc0",
     "d190d6c386123aa4eb52016bb1d9149027dd1cdd844b3c7219a9c57d163783af",
     "406ff4c472c7ef03668f8d416362a0c7041415579019fb30d88a7493056f1580",
     "bec8345d9c183a753ff5be4e81983b2e655c7ba83efa2b2bb1cb236cbc927c57",
@@ -208,6 +211,12 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       diagnostics$cuda_stability_replay_target_count >=
         diagnostics$cuda_stability_replay_selected_count &&
       diagnostics$cuda_stability_replay_error_count == 0L &&
+      diagnostics$cuda_stability_replay_extrapolation_target_count >= 0L &&
+      diagnostics$cuda_stability_replay_extrapolation_target_count <=
+        diagnostics$cuda_stability_replay_selected_count &&
+      is.finite(diagnostics$cuda_stability_replay_max_extrapolation) &&
+      diagnostics$cuda_stability_replay_max_extrapolation >= 0 &&
+      diagnostics$cuda_stability_replay_max_extrapolation <= 4e-6 &&
       replay_discarded_evaluations == replay_discarded_factorizations &&
       diagnostics$cuda_terminal_boundary_confirmation_accepted_count +
         diagnostics$cuda_terminal_boundary_confirmation_rejected_count ==
@@ -319,8 +328,12 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       diagnostics$cuda_stability_replay_selected_count,
     stability_replay_error_count =
       diagnostics$cuda_stability_replay_error_count,
+    stability_replay_extrapolation_target_count =
+      diagnostics$cuda_stability_replay_extrapolation_target_count,
     stability_replay_max_log_sp_spread =
       diagnostics$cuda_stability_replay_max_log_sp_spread,
+    stability_replay_max_extrapolation =
+      diagnostics$cuda_stability_replay_max_extrapolation,
     stability_replay_discarded_evaluation_count =
       diagnostics$cuda_stability_replay_discarded_complete_evaluation_count +
         diagnostics[[
@@ -381,6 +394,10 @@ stability_row <- rows[
 edf_stability_row <- rows[
   rows$label == "formal-partition-edf-tolerance", , drop = FALSE
 ]
+high_condition_stability_row <- rows[
+  rows$label == "formal-partition-high-condition-log-sp-tolerance",
+  , drop = FALSE
+]
 boundary_row <- rows[
   rows$label == "formal-partition-boundary-trajectory", , drop = FALSE
 ]
@@ -411,6 +428,19 @@ assert_true(
     edf_stability_row$stability_replay_max_log_sp_spread > 5e-8 &&
     edf_stability_row$max_edf_error <= 1e-8,
   "Phase 6 boundary-risk stability replay coverage is incomplete"
+)
+assert_true(
+  nrow(high_condition_stability_row) == 1L &&
+    high_condition_stability_row$stability_replay_target_count >= 1L &&
+    high_condition_stability_row$stability_replay_selected_count >= 1L &&
+    high_condition_stability_row$stability_replay_error_count == 0L &&
+    high_condition_stability_row$stability_replay_extrapolation_target_count >=
+      1L &&
+    high_condition_stability_row$stability_replay_max_extrapolation > 0 &&
+    high_condition_stability_row$stability_replay_max_extrapolation <= 4e-6 &&
+    high_condition_stability_row$stability_replay_max_log_sp_spread > 5e-8 &&
+    high_condition_stability_row$max_log_sp_error <= 1e-6,
+  "Phase 6 high-condition boundary replay coverage is incomplete"
 )
 assert_true(
   nrow(boundary_row) == 1L &&

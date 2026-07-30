@@ -49,12 +49,14 @@ struct MultiPenaltyGcvCudaDiagnostics {
   int cuda_stability_replay_target_count = 0;
   int cuda_stability_replay_selected_count = 0;
   int cuda_stability_replay_error_count = 0;
+  int cuda_stability_replay_extrapolation_target_count = 0;
   int cuda_stability_replay_discarded_complete_evaluation_count = 0;
   int cuda_stability_replay_discarded_score_only_evaluation_count = 0;
   int cuda_stability_replay_discarded_guarded_qr_evaluation_count = 0;
   int cuda_stability_replay_discarded_stable_svd_evaluation_count = 0;
   std::uint64_t cuda_stability_replay_discarded_cycles = 0;
   double cuda_stability_replay_max_log_sp_spread = 0.0;
+  double cuda_stability_replay_max_extrapolation = 0.0;
   int cuda_terminal_boundary_confirmation_count = 0;
   int cuda_terminal_boundary_confirmation_accepted_count = 0;
   int cuda_terminal_boundary_confirmation_rejected_count = 0;

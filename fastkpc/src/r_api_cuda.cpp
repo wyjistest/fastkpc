@@ -7441,6 +7441,8 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
         diagnostics.cuda_stability_replay_selected_count,
       Rcpp::Named("cuda_stability_replay_error_count") =
         diagnostics.cuda_stability_replay_error_count,
+      Rcpp::Named("cuda_stability_replay_extrapolation_target_count") =
+        diagnostics.cuda_stability_replay_extrapolation_target_count,
       Rcpp::Named(
         "cuda_stability_replay_discarded_complete_evaluation_count") =
           diagnostics
@@ -7462,6 +7464,8 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
           diagnostics.cuda_stability_replay_discarded_cycles),
       Rcpp::Named("cuda_stability_replay_max_log_sp_spread") =
         diagnostics.cuda_stability_replay_max_log_sp_spread,
+      Rcpp::Named("cuda_stability_replay_max_extrapolation") =
+        diagnostics.cuda_stability_replay_max_extrapolation,
       Rcpp::Named("cuda_terminal_boundary_confirmation_count") =
         diagnostics.cuda_terminal_boundary_confirmation_count,
       Rcpp::Named(
@@ -7840,6 +7844,8 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cuda(
         diagnostics.cuda_stability_replay_selected_count,
       Rcpp::Named("cuda_stability_replay_error_count") =
         diagnostics.cuda_stability_replay_error_count,
+      Rcpp::Named("cuda_stability_replay_extrapolation_target_count") =
+        diagnostics.cuda_stability_replay_extrapolation_target_count,
       Rcpp::Named(
         "cuda_stability_replay_discarded_complete_evaluation_count") =
           diagnostics
@@ -7861,6 +7867,8 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cuda(
           diagnostics.cuda_stability_replay_discarded_cycles),
       Rcpp::Named("cuda_stability_replay_max_log_sp_spread") =
         diagnostics.cuda_stability_replay_max_log_sp_spread,
+      Rcpp::Named("cuda_stability_replay_max_extrapolation") =
+        diagnostics.cuda_stability_replay_max_extrapolation,
       Rcpp::Named("cuda_terminal_boundary_confirmation_count") =
         diagnostics.cuda_terminal_boundary_confirmation_count,
       Rcpp::Named(

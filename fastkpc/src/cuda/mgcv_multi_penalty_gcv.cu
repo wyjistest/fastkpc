@@ -36,8 +36,14 @@ constexpr int kStabilityReplayLongTrajectoryMinimumIterations = 101;
 constexpr int kStabilityReplayBoundaryMinimumIterations = 25;
 constexpr int kStabilityReplayBoundaryStepHalvingNumerator = 9;
 constexpr int kStabilityReplayBoundaryStepHalvingDenominator = 4;
+constexpr int kStabilityReplayHighConditionMinimumIterations = 16;
+constexpr int kStabilityReplayHighConditionStepHalvingNumerator = 3;
+constexpr int kStabilityReplayHighConditionStepHalvingDenominator = 4;
+constexpr double kStabilityReplayHighConditionThreshold = 16777216.0;
 constexpr double kStabilityReplayLogSpSpread = 5e-8;
 constexpr double kStabilityReplayMaximumInwardShift = 1e-6;
+constexpr double kStabilityReplayExtrapolationFraction = 0.25;
+constexpr double kStabilityReplayMaximumExtrapolation = 4e-6;
 constexpr double kTerminalBoundaryTieCondition = 33554432.0;
 constexpr double kTerminalBoundaryTieRelativeTolerance =
   1e-10;
@@ -450,6 +456,7 @@ struct DeviceOptimizerState {
   int stability_replay_attempted;
   int stability_replay_selected;
   int stability_replay_error;
+  int stability_replay_extrapolation_applied;
   int terminal_boundary_confirmation_count;
   int terminal_boundary_confirmation_accepted_count;
   int terminal_boundary_confirmation_rejected_count;
@@ -457,6 +464,7 @@ struct DeviceOptimizerState {
   int terminal_boundary_confirmation_identity_tie_accepted_count;
   int terminal_boundary_confirmation_pending;
   double stability_replay_log_sp_spread;
+  double stability_replay_max_extrapolation;
   double terminal_boundary_confirmation_max_identity_disagreement;
   double terminal_boundary_confirmation_max_identity_ratio;
   double terminal_boundary_confirmation_max_delta_disagreement;
@@ -471,18 +479,36 @@ struct DeviceOptimizerState {
   DevicePhaseTiming terminal_boundary_confirmation_phase_timing;
 };
 
+__device__ bool requires_high_condition_stability_replay(
+    const DeviceOptimizerState& state) {
+  return state.optimizer_status == 0 &&
+    state.boundary_accepted_count > 0 &&
+    state.optimizer_iterations >=
+      kStabilityReplayHighConditionMinimumIterations &&
+    state.current.condition >= kStabilityReplayHighConditionThreshold &&
+    state.step_halving_count *
+      kStabilityReplayHighConditionStepHalvingDenominator >=
+        state.optimizer_iterations *
+          kStabilityReplayHighConditionStepHalvingNumerator;
+}
+
 __device__ bool requires_stability_replay(
     const DeviceOptimizerState& state) {
-  return state.optimizer_status == 0 && (
+  if (state.optimizer_status != 0) return false;
+  if (state.optimizer_iterations >=
+      kStabilityReplayLongTrajectoryMinimumIterations) {
+    return true;
+  }
+  if (state.boundary_accepted_count == 0) return false;
+  const bool dense_boundary_halving =
     state.optimizer_iterations >=
-      kStabilityReplayLongTrajectoryMinimumIterations ||
-    (state.optimizer_iterations >=
-       kStabilityReplayBoundaryMinimumIterations &&
-     state.boundary_accepted_count > 0 &&
-     state.step_halving_count *
-       kStabilityReplayBoundaryStepHalvingDenominator >=
-         state.optimizer_iterations *
-           kStabilityReplayBoundaryStepHalvingNumerator));
+      kStabilityReplayBoundaryMinimumIterations &&
+    state.step_halving_count *
+      kStabilityReplayBoundaryStepHalvingDenominator >=
+        state.optimizer_iterations *
+          kStabilityReplayBoundaryStepHalvingNumerator;
+  return dense_boundary_halving ||
+    requires_high_condition_stability_replay(state);
 }
 
 __device__ bool symmetric_jacobi_eigen(
@@ -1173,6 +1199,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->stability_replay_attempted = stability_replay ? 1 : 0;
     state->stability_replay_selected = 0;
     state->stability_replay_error = 0;
+    state->stability_replay_extrapolation_applied = 0;
     state->terminal_boundary_confirmation_count = 0;
     state->terminal_boundary_confirmation_accepted_count = 0;
     state->terminal_boundary_confirmation_rejected_count = 0;
@@ -1180,6 +1207,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->terminal_boundary_confirmation_identity_tie_accepted_count = 0;
     state->terminal_boundary_confirmation_pending = 0;
     state->stability_replay_log_sp_spread = 0.0;
+    state->stability_replay_max_extrapolation = 0.0;
     state->terminal_boundary_confirmation_max_identity_disagreement = 0.0;
     state->terminal_boundary_confirmation_max_identity_ratio = 0.0;
     state->terminal_boundary_confirmation_max_delta_disagreement = 0.0;
@@ -1686,6 +1714,26 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->stability_replay_log_sp_spread = maximum_spread;
     if (maximum_spread > kStabilityReplayLogSpSpread) {
       state->stability_replay_selected = 1;
+      if (requires_high_condition_stability_replay(
+            primary_states[target])) {
+        for (int penalty = 0; penalty < penalty_count; ++penalty) {
+          const double path_delta = __dadd_rn(
+            state->log_sp[penalty],
+            -primary_states[target].log_sp[penalty]);
+          const double extrapolation = copysign(
+            fmin(
+              kStabilityReplayMaximumExtrapolation,
+              fabs(__dmul_rn(
+                kStabilityReplayExtrapolationFraction, path_delta))),
+            path_delta);
+          state->log_sp[penalty] = __dadd_rn(
+            state->log_sp[penalty], extrapolation);
+          state->stability_replay_max_extrapolation = fmax(
+            state->stability_replay_max_extrapolation,
+            fabs(extrapolation));
+        }
+        state->stability_replay_extrapolation_applied = 1;
+      }
       if (primary_states[target].optimizer_iterations >=
           kStabilityReplayLongTrajectoryMinimumIterations) {
         const double inward_shift = fmin(
@@ -2047,9 +2095,14 @@ MultiPenaltyGcvCudaOptimization materialize_optimizer_output(
         state.stability_replay_selected != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_error_count +=
         state.stability_replay_error != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_extrapolation_target_count +=
+        state.stability_replay_extrapolation_applied != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_max_log_sp_spread = std::max(
         diagnostics.cuda_stability_replay_max_log_sp_spread,
         state.stability_replay_log_sp_spread);
+      diagnostics.cuda_stability_replay_max_extrapolation = std::max(
+        diagnostics.cuda_stability_replay_max_extrapolation,
+        state.stability_replay_max_extrapolation);
       diagnostics.cuda_stability_replay_discarded_complete_evaluation_count +=
         state.discarded_phase_timing.complete_evaluation_count;
       diagnostics.cuda_stability_replay_discarded_score_only_evaluation_count +=
@@ -2696,9 +2749,14 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
         state.stability_replay_selected != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_error_count +=
         state.stability_replay_error != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_extrapolation_target_count +=
+        state.stability_replay_extrapolation_applied != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_max_log_sp_spread = std::max(
         diagnostics.cuda_stability_replay_max_log_sp_spread,
         state.stability_replay_log_sp_spread);
+      diagnostics.cuda_stability_replay_max_extrapolation = std::max(
+        diagnostics.cuda_stability_replay_max_extrapolation,
+        state.stability_replay_max_extrapolation);
       diagnostics.cuda_stability_replay_discarded_complete_evaluation_count +=
         state.discarded_phase_timing.complete_evaluation_count;
       diagnostics.cuda_stability_replay_discarded_score_only_evaluation_count +=

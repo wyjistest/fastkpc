@@ -130,6 +130,11 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
     all(timings$cuda_stability_replay_selected_count <=
           timings$cuda_stability_replay_target_count) &&
     sum(timings$cuda_stability_replay_error_count) == 0L &&
+    all(
+      timings$cuda_stability_replay_extrapolation_target_count >= 0L &
+        timings$cuda_stability_replay_extrapolation_target_count <=
+          timings$cuda_stability_replay_selected_count
+    ) &&
     all(replay_discarded_evaluations == replay_discarded_factorizations) &&
     all(
       (timings$cuda_stability_replay_target_count == 0L &
@@ -142,6 +147,14 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
     all(
       timings$cuda_stability_replay_selected_count == 0L |
         timings$cuda_stability_replay_max_log_sp_spread > 5e-8
+    ) &&
+    all(is.finite(timings$cuda_stability_replay_max_extrapolation)) &&
+    all(
+      (timings$cuda_stability_replay_extrapolation_target_count == 0L &
+        timings$cuda_stability_replay_max_extrapolation == 0) |
+        (timings$cuda_stability_replay_extrapolation_target_count > 0L &
+          timings$cuda_stability_replay_max_extrapolation > 0 &
+          timings$cuda_stability_replay_max_extrapolation <= 4e-6)
     )
   terminal_boundary_confirmation_gate <-
     all(timings$cuda_terminal_boundary_confirmation_count >= 0L) &&
@@ -321,6 +334,8 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
       sum(timings$cuda_stability_replay_selected_count),
     cuda_stability_replay_error_count =
       sum(timings$cuda_stability_replay_error_count),
+    cuda_stability_replay_extrapolation_target_count =
+      sum(timings$cuda_stability_replay_extrapolation_target_count),
     cuda_stability_replay_discarded_complete_evaluation_count = sum(
       timings$cuda_stability_replay_discarded_complete_evaluation_count
     ),
@@ -337,6 +352,8 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
       sum(timings$cuda_stability_replay_discarded_cycles),
     cuda_stability_replay_max_log_sp_spread =
       max(timings$cuda_stability_replay_max_log_sp_spread),
+    cuda_stability_replay_max_extrapolation =
+      max(timings$cuda_stability_replay_max_extrapolation),
     cuda_terminal_boundary_confirmation_count =
       sum(timings$cuda_terminal_boundary_confirmation_count),
     cuda_terminal_boundary_confirmation_accepted_count =
@@ -857,6 +874,10 @@ fastkpc_full_cuda_phase6_scan_partition <- function(
           candidate$diagnostics$cuda_stability_replay_selected_count,
         cuda_stability_replay_error_count =
           candidate$diagnostics$cuda_stability_replay_error_count,
+        cuda_stability_replay_extrapolation_target_count =
+          candidate$diagnostics[[
+            "cuda_stability_replay_extrapolation_target_count"
+          ]],
         cuda_stability_replay_discarded_complete_evaluation_count =
           candidate$diagnostics[[
             "cuda_stability_replay_discarded_complete_evaluation_count"
@@ -877,6 +898,8 @@ fastkpc_full_cuda_phase6_scan_partition <- function(
           candidate$diagnostics$cuda_stability_replay_discarded_cycles,
         cuda_stability_replay_max_log_sp_spread =
           candidate$diagnostics$cuda_stability_replay_max_log_sp_spread,
+        cuda_stability_replay_max_extrapolation =
+          candidate$diagnostics$cuda_stability_replay_max_extrapolation,
         cuda_terminal_boundary_confirmation_count = candidate$diagnostics[[
           "cuda_terminal_boundary_confirmation_count"
         ]],
