@@ -113,8 +113,13 @@ fastkpc_full_cuda_phase6_backend_configuration <- function(kind) {
     stability_replay_backend = "device-all-svd-full-trajectory",
     stability_replay_long_trajectory_minimum_iterations = 101L,
     stability_replay_boundary_minimum_iterations = 25L,
+    stability_replay_boundary_maximum_iterations = 100L,
     stability_replay_boundary_requires_accepted_probe = TRUE,
+    stability_replay_dense_boundary_minimum_accepted_probes = 2L,
     stability_replay_boundary_minimum_step_halving_per_iteration = "2.25",
+    stability_replay_dense_boundary_maximum_selection_spread = "5e-8",
+    stability_replay_dense_boundary_extrapolation_fraction = "8",
+    stability_replay_dense_boundary_maximum_extrapolation = "4e-6",
     stability_replay_high_condition_minimum_iterations = 16L,
     stability_replay_high_condition_threshold = "16777216",
     stability_replay_high_condition_requires_accepted_probe = TRUE,
@@ -122,7 +127,7 @@ fastkpc_full_cuda_phase6_backend_configuration <- function(kind) {
       "0.75",
     stability_replay_high_condition_extrapolation_fraction = "0.25",
     stability_replay_high_condition_maximum_extrapolation = "4e-6",
-    stability_replay_selection_log_sp_spread = "5e-8",
+    stability_replay_selection_log_sp_spread = "3e-8",
     stability_replay_maximum_inward_shift = "1e-6",
     stability_replay_inward_shift_scope = "long-trajectory-only",
     terminal_boundary_confirmation_backend =
@@ -1017,7 +1022,7 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
       ) &&
       all(
         stage_timing$cuda_stability_replay_selected_count == 0L |
-          stage_timing$cuda_stability_replay_max_log_sp_spread > 5e-8
+          stage_timing$cuda_stability_replay_max_log_sp_spread > 3e-8
       ) &&
       all(
         (stage_timing$cuda_stability_replay_extrapolation_target_count == 0L &

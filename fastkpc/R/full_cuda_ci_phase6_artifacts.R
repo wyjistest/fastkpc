@@ -146,7 +146,7 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
     all(timings$cuda_stability_replay_max_log_sp_spread >= 0) &&
     all(
       timings$cuda_stability_replay_selected_count == 0L |
-        timings$cuda_stability_replay_max_log_sp_spread > 5e-8
+        timings$cuda_stability_replay_max_log_sp_spread > 3e-8
     ) &&
     all(is.finite(timings$cuda_stability_replay_max_extrapolation)) &&
     all(

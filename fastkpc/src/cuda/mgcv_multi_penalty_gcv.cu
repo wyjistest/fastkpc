@@ -34,15 +34,19 @@ constexpr double kLapackEpsilon =
 constexpr double kDenominatorFloor = 1e-8;
 constexpr int kStabilityReplayLongTrajectoryMinimumIterations = 101;
 constexpr int kStabilityReplayBoundaryMinimumIterations = 25;
+constexpr int kStabilityReplayBoundaryMaximumIterations = 100;
+constexpr int kStabilityReplayBoundaryMinimumAcceptedProbes = 2;
 constexpr int kStabilityReplayBoundaryStepHalvingNumerator = 9;
 constexpr int kStabilityReplayBoundaryStepHalvingDenominator = 4;
 constexpr int kStabilityReplayHighConditionMinimumIterations = 16;
 constexpr int kStabilityReplayHighConditionStepHalvingNumerator = 3;
 constexpr int kStabilityReplayHighConditionStepHalvingDenominator = 4;
 constexpr double kStabilityReplayHighConditionThreshold = 16777216.0;
-constexpr double kStabilityReplayLogSpSpread = 5e-8;
+constexpr double kStabilityReplayLogSpSpread = 3e-8;
+constexpr double kStabilityReplayDenseBoundaryMaximumSpread = 5e-8;
 constexpr double kStabilityReplayMaximumInwardShift = 1e-6;
 constexpr double kStabilityReplayExtrapolationFraction = 0.25;
+constexpr double kStabilityReplayDenseBoundaryExtrapolationFraction = 8.0;
 constexpr double kStabilityReplayMaximumExtrapolation = 4e-6;
 constexpr double kTerminalBoundaryTieCondition = 33554432.0;
 constexpr double kTerminalBoundaryTieRelativeTolerance =
@@ -492,6 +496,19 @@ __device__ bool requires_high_condition_stability_replay(
           kStabilityReplayHighConditionStepHalvingNumerator;
 }
 
+__device__ bool requires_dense_boundary_stability_replay(
+    const DeviceOptimizerState& state) {
+  return state.optimizer_status == 0 &&
+    state.optimizer_iterations >= kStabilityReplayBoundaryMinimumIterations &&
+    state.optimizer_iterations <= kStabilityReplayBoundaryMaximumIterations &&
+    state.boundary_accepted_count >=
+      kStabilityReplayBoundaryMinimumAcceptedProbes &&
+    state.step_halving_count *
+      kStabilityReplayBoundaryStepHalvingDenominator >=
+        state.optimizer_iterations *
+          kStabilityReplayBoundaryStepHalvingNumerator;
+}
+
 __device__ bool requires_stability_replay(
     const DeviceOptimizerState& state) {
   if (state.optimizer_status != 0) return false;
@@ -499,15 +516,7 @@ __device__ bool requires_stability_replay(
       kStabilityReplayLongTrajectoryMinimumIterations) {
     return true;
   }
-  if (state.boundary_accepted_count == 0) return false;
-  const bool dense_boundary_halving =
-    state.optimizer_iterations >=
-      kStabilityReplayBoundaryMinimumIterations &&
-    state.step_halving_count *
-      kStabilityReplayBoundaryStepHalvingDenominator >=
-        state.optimizer_iterations *
-          kStabilityReplayBoundaryStepHalvingNumerator;
-  return dense_boundary_halving ||
+  return requires_dense_boundary_stability_replay(state) ||
     requires_high_condition_stability_replay(state);
 }
 
@@ -1714,8 +1723,16 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->stability_replay_log_sp_spread = maximum_spread;
     if (maximum_spread > kStabilityReplayLogSpSpread) {
       state->stability_replay_selected = 1;
-      if (requires_high_condition_stability_replay(
-            primary_states[target])) {
+      double extrapolation_fraction = 0.0;
+      if (requires_high_condition_stability_replay(primary_states[target])) {
+        extrapolation_fraction = kStabilityReplayExtrapolationFraction;
+      } else if (
+          requires_dense_boundary_stability_replay(primary_states[target]) &&
+          maximum_spread <= kStabilityReplayDenseBoundaryMaximumSpread) {
+        extrapolation_fraction =
+          kStabilityReplayDenseBoundaryExtrapolationFraction;
+      }
+      if (extrapolation_fraction > 0.0) {
         for (int penalty = 0; penalty < penalty_count; ++penalty) {
           const double path_delta = __dadd_rn(
             state->log_sp[penalty],
@@ -1724,7 +1741,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
             fmin(
               kStabilityReplayMaximumExtrapolation,
               fabs(__dmul_rn(
-                kStabilityReplayExtrapolationFraction, path_delta))),
+                extrapolation_fraction, path_delta))),
             path_delta);
           state->log_sp[penalty] = __dadd_rn(
             state->log_sp[penalty], extrapolation);
