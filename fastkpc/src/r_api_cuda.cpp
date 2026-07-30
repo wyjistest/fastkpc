@@ -7437,10 +7437,28 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
         diagnostics.cuda_stability_merge_kernel_launch_count,
       Rcpp::Named("cuda_stability_replay_target_count") =
         diagnostics.cuda_stability_replay_target_count,
+      Rcpp::Named("cuda_stability_replay_screened_count") =
+        diagnostics.cuda_stability_replay_screened_count,
       Rcpp::Named("cuda_stability_replay_selected_count") =
         diagnostics.cuda_stability_replay_selected_count,
       Rcpp::Named("cuda_stability_replay_error_count") =
         diagnostics.cuda_stability_replay_error_count,
+      Rcpp::Named("cuda_stability_replay_long_trajectory_reason_count") =
+        diagnostics.cuda_stability_replay_long_trajectory_reason_count,
+      Rcpp::Named("cuda_stability_replay_dense_boundary_reason_count") =
+        diagnostics.cuda_stability_replay_dense_boundary_reason_count,
+      Rcpp::Named("cuda_stability_replay_high_condition_reason_count") =
+        diagnostics.cuda_stability_replay_high_condition_reason_count,
+      Rcpp::Named("cuda_stability_replay_ambiguous_step_reason_count") =
+        diagnostics.cuda_stability_replay_ambiguous_step_reason_count,
+      Rcpp::Named("cuda_stability_replay_rejected_boundary_reason_count") =
+        diagnostics.cuda_stability_replay_rejected_boundary_reason_count,
+      Rcpp::Named("cuda_stability_replay_direct_newton_reason_count") =
+        diagnostics.cuda_stability_replay_direct_newton_reason_count,
+      Rcpp::Named(
+        "cuda_stability_replay_dense_score_guard_rejected_count") =
+          diagnostics
+            .cuda_stability_replay_dense_score_guard_rejected_count,
       Rcpp::Named("cuda_stability_replay_extrapolation_target_count") =
         diagnostics.cuda_stability_replay_extrapolation_target_count,
       Rcpp::Named(
@@ -7482,6 +7500,10 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
         "cuda_terminal_boundary_confirmation_identity_tie_accepted_count") =
           diagnostics
             .cuda_terminal_boundary_confirmation_identity_tie_accepted_count,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_delta_identity_accepted_count") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_delta_identity_accepted_count,
       Rcpp::Named(
         "cuda_terminal_boundary_confirmation_complete_evaluation_count") =
           diagnostics
@@ -7840,10 +7862,28 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cuda(
         diagnostics.cuda_stability_merge_kernel_launch_count,
       Rcpp::Named("cuda_stability_replay_target_count") =
         diagnostics.cuda_stability_replay_target_count,
+      Rcpp::Named("cuda_stability_replay_screened_count") =
+        diagnostics.cuda_stability_replay_screened_count,
       Rcpp::Named("cuda_stability_replay_selected_count") =
         diagnostics.cuda_stability_replay_selected_count,
       Rcpp::Named("cuda_stability_replay_error_count") =
         diagnostics.cuda_stability_replay_error_count,
+      Rcpp::Named("cuda_stability_replay_long_trajectory_reason_count") =
+        diagnostics.cuda_stability_replay_long_trajectory_reason_count,
+      Rcpp::Named("cuda_stability_replay_dense_boundary_reason_count") =
+        diagnostics.cuda_stability_replay_dense_boundary_reason_count,
+      Rcpp::Named("cuda_stability_replay_high_condition_reason_count") =
+        diagnostics.cuda_stability_replay_high_condition_reason_count,
+      Rcpp::Named("cuda_stability_replay_ambiguous_step_reason_count") =
+        diagnostics.cuda_stability_replay_ambiguous_step_reason_count,
+      Rcpp::Named("cuda_stability_replay_rejected_boundary_reason_count") =
+        diagnostics.cuda_stability_replay_rejected_boundary_reason_count,
+      Rcpp::Named("cuda_stability_replay_direct_newton_reason_count") =
+        diagnostics.cuda_stability_replay_direct_newton_reason_count,
+      Rcpp::Named(
+        "cuda_stability_replay_dense_score_guard_rejected_count") =
+          diagnostics
+            .cuda_stability_replay_dense_score_guard_rejected_count,
       Rcpp::Named("cuda_stability_replay_extrapolation_target_count") =
         diagnostics.cuda_stability_replay_extrapolation_target_count,
       Rcpp::Named(
@@ -7885,6 +7925,10 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cuda(
         "cuda_terminal_boundary_confirmation_identity_tie_accepted_count") =
           diagnostics
             .cuda_terminal_boundary_confirmation_identity_tie_accepted_count,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_delta_identity_accepted_count") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_delta_identity_accepted_count,
       Rcpp::Named(
         "cuda_terminal_boundary_confirmation_complete_evaluation_count") =
           diagnostics
@@ -8156,7 +8200,7 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_multi(
   if (request_values.size() <= 0 || concurrency <= 0 ||
       concurrency > fastkpc::kMultiPenaltyGcvMaximumConcurrentSetups) {
     Rcpp::stop(
-      "multi-setup multi-penalty CUDA concurrency must be in [1, 32]");
+      "multi-setup multi-penalty CUDA concurrency must be in [1, 64]");
   }
   const fastkpc::MultiPenaltyGcvCudaOptimizerControl control =
     multi_penalty_cuda_optimizer_control(Rcpp::List(control_s));

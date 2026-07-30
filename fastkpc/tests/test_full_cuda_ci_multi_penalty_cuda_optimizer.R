@@ -36,11 +36,22 @@ cases <- data.frame(
     "formal-partition-legitimate-boundary-a",
     "formal-partition-legitimate-boundary-b",
     "formal-partition-legitimate-boundary-c",
-    "formal-partition-legitimate-boundary-d"
+    "formal-partition-legitimate-boundary-d",
+    "formal-p8-direct-newton-flat-boundary",
+    "formal-p11-ambiguous-tie-replay",
+    "formal-p12-ambiguous-descent-halving",
+    "formal-p13-delta-identity-boundary",
+    "formal-p13-direct-newton-halving",
+    "formal-p14-replay-score-guard",
+    "formal-p15-rejected-boundary-replay",
+    "formal-p15-low-condition-delta-identity",
+    "formal-p15-identity-consistent-descent",
+    "formal-p7-moderate-condition-descent"
   ),
   shard_id = c(
     1L, 56L, 0L, 37L, 10L, 59L, 10L, 48L, 1L, 36L, 55L, 23L, 7L,
-    33L, 1L, 1L, 17L, 37L
+    33L, 1L, 1L, 17L, 37L, 24L, 43L, 28L, 45L, 45L, 46L, 31L,
+    47L, 31L, 55L
   ),
   prepared_s_key_sha256 = c(
     "001245052f571033286b2dc7526c24dbe5ec5c221660c094a8b9f052376b91da",
@@ -60,7 +71,17 @@ cases <- data.frame(
     "2683a26ce86357d2d4706b2ab91e9e6117a4b96cbeff61cc0fab787ed720b088",
     "922330870499c78da8ff876abf363766c571a53536a85b58ed4c829b74d502e1",
     "a7b667e962ff5dd521f4573adfca50b04b443054179da19e9e96523c16706766",
-    "ef263c8336fa2dde2c90e8db0a4f5ba9e3086c710e43a3c1536af28e24571eca"
+    "ef263c8336fa2dde2c90e8db0a4f5ba9e3086c710e43a3c1536af28e24571eca",
+    "01079f3f0d837959a7136b15b32e8b3421f8bffab53e3b7700eacee8700795a9",
+    "8f5031d0f6d46d95da3270c798549c4e466469b5da74f312449e1eca7df6e96c",
+    "c8522edfd10de23093ae68eed6e2196fffec6daa944ec04c687c3c8e2ba7840e",
+    "8757315071ef93776d72fa2cde8a9bc8d514ec18ddf31ec0d091d4f48c6f451a",
+    "c8c47b11af8006e5c845c00af69822d72f56e0c718effe23b5b28c33ef5417df",
+    "bdcff60a7bb7db1555116105d64fa491f476abcb2fc68b148036e48d87297a00",
+    "e931fdb62d19fe6739f096548cf013ddacd60a2d4f4d5d582ba609102625a605",
+    "a68f011613627f330caeb8756780b2a8b340375ccea2f03b6fd328b79d4399c5",
+    "5f58ebdfee2aed7b65bf9b4e722ef3dcfa097ae9d5d6b44c554d680cd2c711fd",
+    "1ece0b46e42a51ecb6b2158e7bd284860bf1b061707239e842426910f59644c5"
   ),
   residual_key_sha256 = c(
     NA_character_,
@@ -80,7 +101,17 @@ cases <- data.frame(
     "406ff4c472c7ef03668f8d416362a0c7041415579019fb30d88a7493056f1580",
     "bec8345d9c183a753ff5be4e81983b2e655c7ba83efa2b2bb1cb236cbc927c57",
     "b8bfb8f557d7623169f4d76e9a1691541e5a5c017731bef22fe6c3f9f486ee13",
-    "51f6eee9ba1ead5075b60d20cab243c4fe2d8e6cebbed977c8ebe61f2d9717e4"
+    "51f6eee9ba1ead5075b60d20cab243c4fe2d8e6cebbed977c8ebe61f2d9717e4",
+    "442c69affc453227bc3d15e30f75241378c63498fa8f833475b3ea29391ac10b",
+    "81d53d84fd0fa13d854d8e1873759af0ccd7770a7ad7478a26b3193f78fc8239",
+    "4ad8305edcf7995e18b75e5a1c7c39ba86aa6f597f11128e1cec5810475bfd55",
+    "69f3518997be4b03172893055a7031956391439dd8c7e24564e4e86cd53fb2d0",
+    "8d4a2fb574d88f3bc0784d3ae393d9572c388a4cf1685479c1886d7237a1f84b",
+    "00cbbe34a514a98b974718870623778bad887df96737164e8e275d88b954e52c",
+    "3fc46c612c28ff37e64d4adc7433c473510749e0d09812d88e501b2bf032d568",
+    "baf88fb40a265e123d3c7007ba00f58df88f06b1d90b871567ad99be0eca1564",
+    "e88a3fac1b8da94d36f574fe8d33e45e7bce765dd909861a09b711de7edb349d",
+    "3bd59a45c4138f0e5d404628bfb39629af66917a5dcfb01e205d6cdf44ec2f41"
   ),
   stringsAsFactors = FALSE
 )
@@ -184,6 +215,14 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
     diagnostics$cuda_guarded_qr_evaluation_count +
       diagnostics$cuda_stable_svd_evaluation_count +
       replay_discarded_factorizations + confirmation_factorizations
+  replay_reason_counts <- c(
+    diagnostics$cuda_stability_replay_long_trajectory_reason_count,
+    diagnostics$cuda_stability_replay_dense_boundary_reason_count,
+    diagnostics$cuda_stability_replay_high_condition_reason_count,
+    diagnostics$cuda_stability_replay_ambiguous_step_reason_count,
+    diagnostics$cuda_stability_replay_rejected_boundary_reason_count,
+    diagnostics$cuda_stability_replay_direct_newton_reason_count
+  )
   assert_true(
     identical(
       candidate$schema_version,
@@ -216,13 +255,28 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       diagnostics$cuda_stability_merge_kernel_launch_count == 1L &&
       diagnostics$cuda_stability_replay_target_count >=
         diagnostics$cuda_stability_replay_selected_count &&
+      diagnostics$cuda_stability_replay_screened_count >= 0L &&
+      diagnostics$cuda_stability_replay_screened_count <=
+        diagnostics$cuda_stability_replay_target_count &&
+      diagnostics$cuda_stability_replay_screened_count +
+        diagnostics$cuda_stability_replay_selected_count <=
+          diagnostics$cuda_stability_replay_target_count &&
       diagnostics$cuda_stability_replay_error_count == 0L &&
+      all(replay_reason_counts >= 0L) &&
+      all(replay_reason_counts <=
+            diagnostics$cuda_stability_replay_target_count) &&
+      sum(replay_reason_counts) >=
+        diagnostics$cuda_stability_replay_target_count &&
+      diagnostics$cuda_stability_replay_dense_score_guard_rejected_count >=
+        0L &&
+      diagnostics$cuda_stability_replay_dense_score_guard_rejected_count <=
+        diagnostics$cuda_stability_replay_dense_boundary_reason_count &&
       diagnostics$cuda_stability_replay_extrapolation_target_count >= 0L &&
       diagnostics$cuda_stability_replay_extrapolation_target_count <=
         diagnostics$cuda_stability_replay_selected_count &&
       is.finite(diagnostics$cuda_stability_replay_max_extrapolation) &&
       diagnostics$cuda_stability_replay_max_extrapolation >= 0 &&
-      diagnostics$cuda_stability_replay_max_extrapolation <= 4e-6 &&
+      diagnostics$cuda_stability_replay_max_extrapolation <= 2e-5 &&
       replay_discarded_evaluations == replay_discarded_factorizations &&
       diagnostics$cuda_terminal_boundary_confirmation_accepted_count +
         diagnostics$cuda_terminal_boundary_confirmation_rejected_count ==
@@ -231,6 +285,8 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
         "cuda_terminal_boundary_confirmation_strong_delta_accepted_count"
       ]] + diagnostics[[
         "cuda_terminal_boundary_confirmation_identity_tie_accepted_count"
+      ]] + diagnostics[[
+        "cuda_terminal_boundary_confirmation_delta_identity_accepted_count"
       ]] == diagnostics$cuda_terminal_boundary_confirmation_accepted_count &&
       confirmation_evaluations ==
         2L * diagnostics$cuda_terminal_boundary_confirmation_count &&
@@ -334,10 +390,26 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       diagnostics$cuda_stable_svd_evaluation_count,
     stability_replay_target_count =
       diagnostics$cuda_stability_replay_target_count,
+    stability_replay_screened_count =
+      diagnostics$cuda_stability_replay_screened_count,
     stability_replay_selected_count =
       diagnostics$cuda_stability_replay_selected_count,
     stability_replay_error_count =
       diagnostics$cuda_stability_replay_error_count,
+    stability_replay_long_trajectory_reason_count =
+      diagnostics$cuda_stability_replay_long_trajectory_reason_count,
+    stability_replay_dense_boundary_reason_count =
+      diagnostics$cuda_stability_replay_dense_boundary_reason_count,
+    stability_replay_high_condition_reason_count =
+      diagnostics$cuda_stability_replay_high_condition_reason_count,
+    stability_replay_ambiguous_step_reason_count =
+      diagnostics$cuda_stability_replay_ambiguous_step_reason_count,
+    stability_replay_rejected_boundary_reason_count =
+      diagnostics$cuda_stability_replay_rejected_boundary_reason_count,
+    stability_replay_direct_newton_reason_count =
+      diagnostics$cuda_stability_replay_direct_newton_reason_count,
+    stability_replay_dense_score_guard_rejected_count =
+      diagnostics$cuda_stability_replay_dense_score_guard_rejected_count,
     stability_replay_extrapolation_target_count =
       diagnostics$cuda_stability_replay_extrapolation_target_count,
     stability_replay_max_log_sp_spread =
@@ -362,6 +434,10 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
     terminal_boundary_confirmation_identity_tie_accepted_count =
       diagnostics[[
         "cuda_terminal_boundary_confirmation_identity_tie_accepted_count"
+      ]],
+    terminal_boundary_confirmation_delta_identity_accepted_count =
+      diagnostics[[
+        "cuda_terminal_boundary_confirmation_delta_identity_accepted_count"
       ]],
     terminal_boundary_confirmation_complete_evaluation_count =
       diagnostics[[
@@ -429,10 +505,41 @@ identity_tie_boundary_row <- rows[
 strong_delta_boundary_row <- rows[
   rows$label == "formal-partition-legitimate-boundary-d", , drop = FALSE
 ]
+direct_flat_boundary_row <- rows[
+  rows$label == "formal-p8-direct-newton-flat-boundary", , drop = FALSE
+]
+ambiguous_tie_row <- rows[
+  rows$label == "formal-p11-ambiguous-tie-replay", , drop = FALSE
+]
+ambiguous_descent_row <- rows[
+  rows$label == "formal-p12-ambiguous-descent-halving", , drop = FALSE
+]
+delta_identity_boundary_row <- rows[
+  rows$label == "formal-p13-delta-identity-boundary", , drop = FALSE
+]
+direct_halving_row <- rows[
+  rows$label == "formal-p13-direct-newton-halving", , drop = FALSE
+]
+replay_score_guard_row <- rows[
+  rows$label == "formal-p14-replay-score-guard", , drop = FALSE
+]
+rejected_boundary_replay_row <- rows[
+  rows$label == "formal-p15-rejected-boundary-replay", , drop = FALSE
+]
+low_condition_delta_identity_row <- rows[
+  rows$label == "formal-p15-low-condition-delta-identity", , drop = FALSE
+]
+identity_consistent_descent_row <- rows[
+  rows$label == "formal-p15-identity-consistent-descent", , drop = FALSE
+]
+moderate_condition_descent_row <- rows[
+  rows$label == "formal-p7-moderate-condition-descent", , drop = FALSE
+]
 assert_true(
   nrow(stability_row) == 1L &&
     stability_row$stability_replay_target_count >= 1L &&
     stability_row$stability_replay_selected_count >= 1L &&
+    stability_row$stability_replay_long_trajectory_reason_count >= 1L &&
     stability_row$stability_replay_error_count == 0L &&
     stability_row$stability_replay_max_log_sp_spread > 1e-7 &&
     stability_row$stability_replay_discarded_evaluation_count > 0L,
@@ -451,6 +558,7 @@ assert_true(
   nrow(dense_boundary_edf_row) == 1L &&
     dense_boundary_edf_row$stability_replay_target_count >= 1L &&
     dense_boundary_edf_row$stability_replay_selected_count >= 1L &&
+    dense_boundary_edf_row$stability_replay_dense_boundary_reason_count >= 1L &&
     dense_boundary_edf_row$stability_replay_error_count == 0L &&
     dense_boundary_edf_row$stability_replay_extrapolation_target_count >= 1L &&
     dense_boundary_edf_row$stability_replay_max_extrapolation > 0 &&
@@ -482,6 +590,9 @@ assert_true(
   nrow(high_condition_stability_row) == 1L &&
     high_condition_stability_row$stability_replay_target_count >= 1L &&
     high_condition_stability_row$stability_replay_selected_count >= 1L &&
+    high_condition_stability_row[[
+      "stability_replay_high_condition_reason_count"
+    ]] >= 1L &&
     high_condition_stability_row$stability_replay_error_count == 0L &&
     high_condition_stability_row$stability_replay_extrapolation_target_count >=
       1L &&
@@ -528,6 +639,8 @@ assert_true(
         "terminal_boundary_confirmation_strong_delta_accepted_count"
       ]] + legitimate_boundary_rows[[
         "terminal_boundary_confirmation_identity_tie_accepted_count"
+      ]] + legitimate_boundary_rows[[
+        "terminal_boundary_confirmation_delta_identity_accepted_count"
       ]] == legitimate_boundary_rows[[
         "terminal_boundary_confirmation_accepted_count"
       ]]
@@ -571,6 +684,109 @@ assert_true(
       1 &&
     all(legitimate_boundary_rows$stability_replay_error_count == 0L),
   "Phase 6 accepted terminal boundary confirmation coverage is incomplete"
+)
+assert_true(
+  nrow(direct_flat_boundary_row) == 1L &&
+    direct_flat_boundary_row$stability_replay_target_count >= 1L &&
+    direct_flat_boundary_row$stability_replay_selected_count >= 1L &&
+    direct_flat_boundary_row$stability_replay_direct_newton_reason_count >= 1L &&
+    direct_flat_boundary_row$stability_replay_extrapolation_target_count ==
+      0L &&
+    direct_flat_boundary_row$stability_replay_max_log_sp_spread > 1e-5 &&
+    direct_flat_boundary_row$max_log_sp_error <= 1e-6 &&
+    direct_flat_boundary_row$max_edf_error <= 1e-8,
+  "Phase 6 direct-Newton flat-boundary replay coverage is incomplete"
+)
+assert_true(
+  nrow(ambiguous_tie_row) == 1L &&
+    ambiguous_tie_row$stability_replay_target_count >= 1L &&
+    ambiguous_tie_row$stability_replay_selected_count >= 1L &&
+    ambiguous_tie_row$stability_replay_ambiguous_step_reason_count >= 1L &&
+    ambiguous_tie_row$max_log_sp_error <= 1e-6 &&
+    nrow(ambiguous_descent_row) == 1L &&
+    ambiguous_descent_row$stability_replay_target_count >= 1L &&
+    ambiguous_descent_row$stability_replay_selected_count >= 1L &&
+    ambiguous_descent_row$stability_replay_ambiguous_step_reason_count >= 1L &&
+    ambiguous_descent_row$max_log_sp_error <= 1e-6,
+  "Phase 6 ambiguous first-step replay coverage is incomplete"
+)
+assert_true(
+  nrow(delta_identity_boundary_row) == 1L &&
+    delta_identity_boundary_row$terminal_boundary_confirmation_count >= 1L &&
+    delta_identity_boundary_row[[
+      "terminal_boundary_confirmation_accepted_count"
+    ]] >= 1L &&
+    delta_identity_boundary_row[[
+      "terminal_boundary_confirmation_rejected_count"
+    ]] == 0L &&
+    delta_identity_boundary_row[[
+      "terminal_boundary_confirmation_delta_identity_accepted_count"
+    ]] >= 1L &&
+    delta_identity_boundary_row$max_log_sp_error <= 1e-6 &&
+    nrow(low_condition_delta_identity_row) == 1L &&
+    low_condition_delta_identity_row[[
+      "terminal_boundary_confirmation_accepted_count"
+    ]] >= 1L &&
+    low_condition_delta_identity_row[[
+      "terminal_boundary_confirmation_delta_identity_accepted_count"
+    ]] >= 1L &&
+    low_condition_delta_identity_row$max_log_sp_error <= 1e-6,
+  "Phase 6 delta-identity terminal confirmation coverage is incomplete"
+)
+assert_true(
+  nrow(direct_halving_row) == 1L &&
+    direct_halving_row$stability_replay_target_count >= 1L &&
+    direct_halving_row$stability_replay_selected_count >= 1L &&
+    direct_halving_row$stability_replay_direct_newton_reason_count >= 1L &&
+    direct_halving_row$stability_replay_extrapolation_target_count >= 1L &&
+    direct_halving_row$stability_replay_max_extrapolation > 4e-6 &&
+    direct_halving_row$stability_replay_max_extrapolation <= 2e-5 &&
+    direct_halving_row$max_log_sp_error <= 1e-6 &&
+    direct_halving_row$max_edf_error <= 1e-8,
+  "Phase 6 direct-Newton halving refinement coverage is incomplete"
+)
+assert_true(
+  nrow(replay_score_guard_row) == 1L &&
+    replay_score_guard_row$stability_replay_target_count >= 1L &&
+    replay_score_guard_row$stability_replay_screened_count >= 1L &&
+    replay_score_guard_row$stability_replay_selected_count == 0L &&
+    replay_score_guard_row$stability_replay_dense_boundary_reason_count >= 1L &&
+    replay_score_guard_row[[
+      "stability_replay_dense_score_guard_rejected_count"
+    ]] == 0L &&
+    replay_score_guard_row$stability_replay_extrapolation_target_count == 0L &&
+    replay_score_guard_row$max_log_sp_error <= 1e-6 &&
+    replay_score_guard_row$max_edf_error <= 1e-8,
+  "Phase 6 replay risk-screen coverage is incomplete"
+)
+assert_true(
+  nrow(rejected_boundary_replay_row) == 1L &&
+    rejected_boundary_replay_row[[
+      "terminal_boundary_confirmation_rejected_count"
+    ]] >= 1L &&
+    rejected_boundary_replay_row$stability_replay_target_count >= 1L &&
+    rejected_boundary_replay_row[[
+      "stability_replay_rejected_boundary_reason_count"
+    ]] >= 1L &&
+    rejected_boundary_replay_row$stability_replay_selected_count >= 1L &&
+    rejected_boundary_replay_row$max_log_sp_error <= 1e-6,
+  "Phase 6 rejected-boundary stability replay coverage is incomplete"
+)
+assert_true(
+  nrow(identity_consistent_descent_row) == 1L &&
+    identity_consistent_descent_row$stability_replay_target_count == 0L &&
+    identity_consistent_descent_row$stability_replay_selected_count == 0L &&
+    identity_consistent_descent_row$max_log_sp_error <= 1e-6 &&
+    identity_consistent_descent_row$max_edf_error <= 1e-8,
+  "Phase 6 identity-consistent ambiguous descent coverage is incomplete"
+)
+assert_true(
+  nrow(moderate_condition_descent_row) == 1L &&
+    moderate_condition_descent_row$stability_replay_target_count == 0L &&
+    moderate_condition_descent_row$stability_replay_selected_count == 0L &&
+    moderate_condition_descent_row$max_log_sp_error <= 1e-6 &&
+    moderate_condition_descent_row$max_edf_error <= 1e-8,
+  "Phase 6 moderate-condition ambiguous descent coverage is incomplete"
 )
 print(rows, row.names = FALSE, digits = 17)
 cat("PASS Phase 6 CUDA independent-target optimizer smoke\n")

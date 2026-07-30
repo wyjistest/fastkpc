@@ -31,7 +31,7 @@ repetition_count <- read_integer(
 )
 output_path <- Sys.getenv("FASTKPC_PHASE6_WINDOW_OUTPUT", unset = "")
 require_true(
-  concurrency <= setup_count && concurrency <= 32L,
+  concurrency <= setup_count && concurrency <= 64L,
   "Phase 6 mixed-window concurrency is outside the supported envelope"
 )
 

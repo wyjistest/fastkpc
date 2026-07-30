@@ -100,7 +100,7 @@ fastkpc_full_cuda_phase6_backend_configuration <- function(kind) {
     stable_solver_backend =
       "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd",
     execution_strategy = "bounded-independent-prepared-streams-v1",
-    maximum_concurrent_setups = 32L,
+    maximum_concurrent_setups = 64L,
     target_optimizer_state = "independent-per-target",
     residual_placement = "device-resident-token",
     rank_tolerance = "sqrt(.Machine$double.eps)",
@@ -110,7 +110,20 @@ fastkpc_full_cuda_phase6_backend_configuration <- function(kind) {
     max_newton_component = "5",
     boundary_probe_step = "2",
     max_boundary_probes = 5L,
-    stability_replay_backend = "device-all-svd-full-trajectory",
+    stability_replay_backend = paste(
+      "device-risk-screened-stable-svd-or-direct-newton",
+      "full-trajectory"
+    ),
+    stability_replay_reason_telemetry = c(
+      "long-trajectory", "dense-boundary", "high-condition",
+      "ambiguous-step", "rejected-boundary", "direct-newton"
+    ),
+    stability_replay_risk_screen =
+      "trajectory-halving-density-or-condition-v1",
+    stability_replay_long_risk_minimum_step_halving_per_iteration = "4",
+    stability_replay_dense_risk_maximum_step_halving_per_iteration = "2.45",
+    stability_replay_dense_risk_condition_override = "8388608",
+    stability_replay_dense_score_guard_telemetry = TRUE,
     stability_replay_long_trajectory_minimum_iterations = 101L,
     stability_replay_boundary_minimum_iterations = 25L,
     stability_replay_boundary_maximum_iterations = 100L,
@@ -127,17 +140,33 @@ fastkpc_full_cuda_phase6_backend_configuration <- function(kind) {
       "0.75",
     stability_replay_high_condition_extrapolation_fraction = "0.25",
     stability_replay_high_condition_maximum_extrapolation = "4e-6",
+    stability_replay_direct_newton_maximum_iterations = 20L,
+    stability_replay_direct_newton_minimum_accepted_probes = 1L,
+    stability_replay_direct_newton_maximum_smallest_hessian_eigenvalue =
+      "1e-12",
+    stability_replay_direct_newton_minimum_hessian_condition = "1e9",
+    stability_replay_direct_newton_defers_to_high_condition_replay = TRUE,
+    stability_replay_direct_newton_halving_extrapolation_fraction = "0.75",
+    stability_replay_direct_newton_maximum_extrapolation = "2e-5",
+    stability_replay_ambiguous_first_step_relative_tolerance =
+      "128*lapack_epsilon*(1+abs(current_score))",
+    stability_replay_ambiguous_descent_minimum_hessian_condition = "5",
+    stability_replay_ambiguous_descent_direct_delta_disagreement =
+      "0.25*ambiguous_first_step_tolerance",
+    stability_replay_rejected_boundary_minimum_delta_ratio = "2",
     stability_replay_selection_log_sp_spread = "3e-8",
     stability_replay_maximum_inward_shift = "1e-6",
     stability_replay_inward_shift_scope = "long-trajectory-only",
     terminal_boundary_confirmation_backend =
       "device-stable-svd-plus-direct-qr-residual-delta-identity",
-    terminal_boundary_confirmation_condition_threshold = "33554432",
+    terminal_boundary_confirmation_condition_threshold = "8388608",
     terminal_boundary_confirmation_score_tie_relative_tolerance = "1e-10",
     terminal_boundary_confirmation_delta_identity_tolerance =
       "512*lapack_epsilon*q*(1+abs(current_score))",
-    terminal_boundary_confirmation_acceptance_modes =
-      "reinforced-strong-delta-or-endpoint-identity-verified-tie",
+    terminal_boundary_confirmation_acceptance_modes = paste(
+      "reinforced-strong-delta, endpoint-identity-verified-tie,",
+      "or delta-identity-verified-direct-descent"
+    ),
     downstream_validation_backend =
       "legacy-dcov-gamma-cpp-spectra-component-cache",
     precision = "float64",
@@ -219,10 +248,8 @@ fastkpc_full_cuda_phase6_validate_merged_evidence <- function(
   clean <- is.list(evidence) && identical(
     evidence$schema_version,
     "full-cuda-ci-multi-penalty-cuda-full-shadow-merged-v1"
-  ) && is.list(summary) && is.list(recomputed_summary) && identical(
-    fastkpc_full_cuda_phase35_canonical_json(summary),
-    fastkpc_full_cuda_phase35_canonical_json(recomputed_summary)
-  ) && isTRUE(summary$pass) &&
+  ) && is.list(summary) && is.list(recomputed_summary) &&
+    identical(summary, recomputed_summary) && isTRUE(summary$pass) &&
     summary$setup_count == 7460L && summary$target_count == 65676L &&
     summary$logical_test_count == 60324L &&
     summary$penalty_count_min == 3L && summary$penalty_count_max == 7L &&
@@ -256,10 +283,29 @@ fastkpc_full_cuda_phase6_validate_merged_evidence <- function(
     summary$cuda_stability_replay_kernel_launch_count == 7460L &&
     summary$cuda_stability_merge_kernel_launch_count == 7460L &&
     summary$cuda_stability_replay_target_count > 0L &&
+    summary$cuda_stability_replay_screened_count > 0L &&
+    summary$cuda_stability_replay_screened_count <
+      summary$cuda_stability_replay_target_count &&
     summary$cuda_stability_replay_selected_count > 0L &&
     summary$cuda_stability_replay_selected_count <=
       summary$cuda_stability_replay_target_count &&
     summary$cuda_stability_replay_error_count == 0L &&
+    summary$cuda_stability_replay_long_trajectory_reason_count > 0L &&
+    summary$cuda_stability_replay_dense_boundary_reason_count > 0L &&
+    summary$cuda_stability_replay_high_condition_reason_count > 0L &&
+    summary$cuda_stability_replay_ambiguous_step_reason_count > 0L &&
+    summary$cuda_stability_replay_rejected_boundary_reason_count > 0L &&
+    summary$cuda_stability_replay_direct_newton_reason_count > 0L &&
+    summary$cuda_stability_replay_long_trajectory_reason_count +
+      summary$cuda_stability_replay_dense_boundary_reason_count +
+      summary$cuda_stability_replay_high_condition_reason_count +
+      summary$cuda_stability_replay_ambiguous_step_reason_count +
+      summary$cuda_stability_replay_rejected_boundary_reason_count +
+      summary$cuda_stability_replay_direct_newton_reason_count >=
+        summary$cuda_stability_replay_target_count &&
+    summary$cuda_stability_replay_dense_score_guard_rejected_count > 0L &&
+    summary$cuda_stability_replay_dense_score_guard_rejected_count <=
+      summary$cuda_stability_replay_dense_boundary_reason_count &&
     summary$cuda_stability_replay_extrapolation_target_count > 0L &&
     summary$cuda_stability_replay_extrapolation_target_count <=
       summary$cuda_stability_replay_selected_count &&
@@ -269,7 +315,7 @@ fastkpc_full_cuda_phase6_validate_merged_evidence <- function(
           summary$cuda_stability_replay_discarded_stable_svd_evaluation_count &&
     summary$cuda_stability_replay_max_log_sp_spread > 5e-8 &&
     summary$cuda_stability_replay_max_extrapolation > 0 &&
-    summary$cuda_stability_replay_max_extrapolation <= 4e-6 &&
+    summary$cuda_stability_replay_max_extrapolation <= 2e-5 &&
     summary$cuda_terminal_boundary_confirmation_count > 0L &&
     summary$cuda_terminal_boundary_confirmation_accepted_count > 0L &&
     summary$cuda_terminal_boundary_confirmation_rejected_count > 0L &&
@@ -279,6 +325,9 @@ fastkpc_full_cuda_phase6_validate_merged_evidence <- function(
     summary[[
       "cuda_terminal_boundary_confirmation_identity_tie_accepted_count"
     ]] > 0L &&
+    summary[[
+      "cuda_terminal_boundary_confirmation_delta_identity_accepted_count"
+    ]] > 0L &&
     summary$cuda_terminal_boundary_confirmation_accepted_count +
       summary$cuda_terminal_boundary_confirmation_rejected_count ==
         summary$cuda_terminal_boundary_confirmation_count &&
@@ -286,6 +335,8 @@ fastkpc_full_cuda_phase6_validate_merged_evidence <- function(
       "cuda_terminal_boundary_confirmation_strong_delta_accepted_count"
     ]] + summary[[
       "cuda_terminal_boundary_confirmation_identity_tie_accepted_count"
+    ]] + summary[[
+      "cuda_terminal_boundary_confirmation_delta_identity_accepted_count"
     ]] == summary$cuda_terminal_boundary_confirmation_accepted_count &&
     summary$cuda_terminal_boundary_confirmation_complete_evaluation_count ==
       2L * summary$cuda_terminal_boundary_confirmation_count &&
@@ -297,7 +348,7 @@ fastkpc_full_cuda_phase6_validate_merged_evidence <- function(
     summary$cuda_guarded_qr_evaluation_count > 0L &&
     summary$cuda_stable_svd_evaluation_count > 0L &&
     summary$configured_concurrency >= 1L &&
-    summary$configured_concurrency <= 32L &&
+    summary$configured_concurrency <= 64L &&
     summary$maximum_host_calls_in_flight > 1L &&
     summary$maximum_setup_stream_count > 1L &&
     isTRUE(summary$observed_concurrent_execution) &&
@@ -478,10 +529,33 @@ fastkpc_full_cuda_phase6_common_summary <- function(
       as.integer(source$cuda_stability_merge_kernel_launch_count),
     cuda_stability_replay_target_count =
       as.integer(source$cuda_stability_replay_target_count),
+    cuda_stability_replay_screened_count =
+      as.integer(source$cuda_stability_replay_screened_count),
     cuda_stability_replay_selected_count =
       as.integer(source$cuda_stability_replay_selected_count),
     cuda_stability_replay_error_count =
       as.integer(source$cuda_stability_replay_error_count),
+    cuda_stability_replay_long_trajectory_reason_count = as.integer(
+      source$cuda_stability_replay_long_trajectory_reason_count
+    ),
+    cuda_stability_replay_dense_boundary_reason_count = as.integer(
+      source$cuda_stability_replay_dense_boundary_reason_count
+    ),
+    cuda_stability_replay_high_condition_reason_count = as.integer(
+      source$cuda_stability_replay_high_condition_reason_count
+    ),
+    cuda_stability_replay_ambiguous_step_reason_count = as.integer(
+      source$cuda_stability_replay_ambiguous_step_reason_count
+    ),
+    cuda_stability_replay_rejected_boundary_reason_count = as.integer(
+      source$cuda_stability_replay_rejected_boundary_reason_count
+    ),
+    cuda_stability_replay_direct_newton_reason_count = as.integer(
+      source$cuda_stability_replay_direct_newton_reason_count
+    ),
+    cuda_stability_replay_dense_score_guard_rejected_count = as.integer(
+      source$cuda_stability_replay_dense_score_guard_rejected_count
+    ),
     cuda_stability_replay_extrapolation_target_count = as.integer(
       source$cuda_stability_replay_extrapolation_target_count
     ),
@@ -518,6 +592,10 @@ fastkpc_full_cuda_phase6_common_summary <- function(
     cuda_terminal_boundary_confirmation_identity_tie_accepted_count =
       as.integer(source[[
         "cuda_terminal_boundary_confirmation_identity_tie_accepted_count"
+      ]]),
+    cuda_terminal_boundary_confirmation_delta_identity_accepted_count =
+      as.integer(source[[
+        "cuda_terminal_boundary_confirmation_delta_identity_accepted_count"
       ]]),
     cuda_terminal_boundary_confirmation_complete_evaluation_count = as.integer(
       source$cuda_terminal_boundary_confirmation_complete_evaluation_count
@@ -939,8 +1017,16 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
     "cuda_stability_replay_kernel_launch_count",
     "cuda_stability_merge_kernel_launch_count",
     "cuda_stability_replay_target_count",
+    "cuda_stability_replay_screened_count",
     "cuda_stability_replay_selected_count",
     "cuda_stability_replay_error_count",
+    "cuda_stability_replay_long_trajectory_reason_count",
+    "cuda_stability_replay_dense_boundary_reason_count",
+    "cuda_stability_replay_high_condition_reason_count",
+    "cuda_stability_replay_ambiguous_step_reason_count",
+    "cuda_stability_replay_rejected_boundary_reason_count",
+    "cuda_stability_replay_direct_newton_reason_count",
+    "cuda_stability_replay_dense_score_guard_rejected_count",
     "cuda_stability_replay_extrapolation_target_count",
     "cuda_stability_replay_discarded_complete_evaluation_count",
     "cuda_stability_replay_discarded_score_only_evaluation_count",
@@ -952,6 +1038,7 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
     "cuda_terminal_boundary_confirmation_rejected_count",
     "cuda_terminal_boundary_confirmation_strong_delta_accepted_count",
     "cuda_terminal_boundary_confirmation_identity_tie_accepted_count",
+    "cuda_terminal_boundary_confirmation_delta_identity_accepted_count",
     "cuda_terminal_boundary_confirmation_complete_evaluation_count",
     "cuda_terminal_boundary_confirmation_stable_svd_evaluation_count",
     "cuda_terminal_boundary_confirmation_cycles"
@@ -964,6 +1051,14 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
     "cuda_terminal_boundary_confirmation_max_delta_disagreement",
     "cuda_terminal_boundary_confirmation_max_delta_ratio"
   )
+  replay_reason_fields <- c(
+    "cuda_stability_replay_long_trajectory_reason_count",
+    "cuda_stability_replay_dense_boundary_reason_count",
+    "cuda_stability_replay_high_condition_reason_count",
+    "cuda_stability_replay_ambiguous_step_reason_count",
+    "cuda_stability_replay_rejected_boundary_reason_count",
+    "cuda_stability_replay_direct_newton_reason_count"
+  )
   telemetry_required_fields <- c(
     "target_count", "cuda_complete_evaluation_count",
     "cuda_score_only_evaluation_count", "cuda_guarded_qr_evaluation_count",
@@ -973,6 +1068,10 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
   telemetry_gate <- nrow(stage_timing) == 7460L &&
     all(telemetry_required_fields %in% names(stage_timing))
   if (isTRUE(telemetry_gate)) {
+    replay_reason_count <- rowSums(stage_timing[replay_reason_fields])
+    replay_executed_count <-
+      stage_timing$cuda_stability_replay_target_count -
+        stage_timing$cuda_stability_replay_screened_count
     replay_evaluations <-
       stage_timing$cuda_stability_replay_discarded_complete_evaluation_count +
         stage_timing[[
@@ -1004,10 +1103,30 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
       all(stage_timing$cuda_stability_replay_target_count >= 0L) &&
       all(stage_timing$cuda_stability_replay_target_count <=
             stage_timing$target_count) &&
+      all(stage_timing$cuda_stability_replay_screened_count >= 0L) &&
+      all(stage_timing$cuda_stability_replay_screened_count <=
+            stage_timing$cuda_stability_replay_target_count) &&
       all(stage_timing$cuda_stability_replay_selected_count >= 0L) &&
       all(stage_timing$cuda_stability_replay_selected_count <=
             stage_timing$cuda_stability_replay_target_count) &&
+      all(stage_timing$cuda_stability_replay_screened_count +
+            stage_timing$cuda_stability_replay_selected_count <=
+            stage_timing$cuda_stability_replay_target_count) &&
       sum(stage_timing$cuda_stability_replay_error_count) == 0L &&
+      all(vapply(replay_reason_fields, function(field) {
+        all(stage_timing[[field]] >= 0L) &&
+          all(stage_timing[[field]] <=
+                stage_timing$cuda_stability_replay_target_count)
+      }, logical(1L))) &&
+      all(replay_reason_count >=
+            stage_timing$cuda_stability_replay_target_count) &&
+      all(
+        stage_timing$cuda_stability_replay_dense_score_guard_rejected_count >=
+          0L &
+          stage_timing[[
+            "cuda_stability_replay_dense_score_guard_rejected_count"
+          ]] <= stage_timing$cuda_stability_replay_dense_boundary_reason_count
+      ) &&
       all(
         stage_timing$cuda_stability_replay_extrapolation_target_count >= 0L &
           stage_timing$cuda_stability_replay_extrapolation_target_count <=
@@ -1015,9 +1134,9 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
       ) &&
       all(replay_evaluations == replay_factorizations) &&
       all(
-        (stage_timing$cuda_stability_replay_target_count == 0L &
+        (replay_executed_count == 0L &
            replay_evaluations == 0L) |
-          (stage_timing$cuda_stability_replay_target_count > 0L &
+          (replay_executed_count > 0L &
              replay_evaluations > 0L)
       ) &&
       all(
@@ -1029,7 +1148,7 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
           stage_timing$cuda_stability_replay_max_extrapolation == 0) |
           (stage_timing$cuda_stability_replay_extrapolation_target_count > 0L &
             stage_timing$cuda_stability_replay_max_extrapolation > 0 &
-            stage_timing$cuda_stability_replay_max_extrapolation <= 4e-6)
+            stage_timing$cuda_stability_replay_max_extrapolation <= 2e-5)
       ) &&
       all(
         stage_timing$cuda_terminal_boundary_confirmation_accepted_count +
@@ -1041,6 +1160,8 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
           "cuda_terminal_boundary_confirmation_strong_delta_accepted_count"
         ]] + stage_timing[[
           "cuda_terminal_boundary_confirmation_identity_tie_accepted_count"
+        ]] + stage_timing[[
+          "cuda_terminal_boundary_confirmation_delta_identity_accepted_count"
         ]] ==
           stage_timing$cuda_terminal_boundary_confirmation_accepted_count
       ) &&
@@ -1114,6 +1235,9 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
     summary$cuda_stability_replay_kernel_launch_count == 7460L &&
     summary$cuda_stability_merge_kernel_launch_count == 7460L &&
     summary$cuda_stability_replay_target_count > 0L &&
+    summary$cuda_stability_replay_screened_count > 0L &&
+    summary$cuda_stability_replay_screened_count <
+      summary$cuda_stability_replay_target_count &&
     summary$cuda_stability_replay_selected_count > 0L &&
     summary$cuda_stability_replay_selected_count <=
       summary$cuda_stability_replay_target_count &&
@@ -1127,7 +1251,7 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
           summary$cuda_stability_replay_discarded_stable_svd_evaluation_count &&
     summary$cuda_stability_replay_max_log_sp_spread > 5e-8 &&
     summary$cuda_stability_replay_max_extrapolation > 0 &&
-    summary$cuda_stability_replay_max_extrapolation <= 4e-6 &&
+    summary$cuda_stability_replay_max_extrapolation <= 2e-5 &&
     summary$cuda_terminal_boundary_confirmation_count > 0L &&
     summary$cuda_terminal_boundary_confirmation_accepted_count > 0L &&
     summary$cuda_terminal_boundary_confirmation_rejected_count > 0L &&
@@ -1144,6 +1268,8 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
       "cuda_terminal_boundary_confirmation_strong_delta_accepted_count"
     ]] + summary[[
       "cuda_terminal_boundary_confirmation_identity_tie_accepted_count"
+    ]] + summary[[
+      "cuda_terminal_boundary_confirmation_delta_identity_accepted_count"
     ]] == summary$cuda_terminal_boundary_confirmation_accepted_count &&
     summary$cuda_terminal_boundary_confirmation_complete_evaluation_count ==
       2L * summary$cuda_terminal_boundary_confirmation_count &&
@@ -1162,7 +1288,7 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
     summary$max_residual_identity_absolute_error <= 1e-12 &&
     summary$max_absolute_p_value_difference <= 1e-10 &&
     summary$configured_concurrency >= 1L &&
-    summary$configured_concurrency <= 32L &&
+    summary$configured_concurrency <= 64L &&
     summary$maximum_host_calls_in_flight > 1L &&
     summary$maximum_setup_stream_count > 1L &&
     isTRUE(summary$observed_concurrent_execution) &&

@@ -55,7 +55,7 @@ contexts <- lapply(seq_len(nrow(states)), function(index) {
 Y <- do.call(cbind, lapply(contexts, `[[`, "y"))
 target_keys <- as.character(states$residual_key_sha256)
 prepared <- fastkpc_full_cuda_phase6_prepare(setup)
-setup_count <- 32L
+setup_count <- 64L
 handles <- lapply(seq_len(setup_count), function(index) {
   fastkpc_full_cuda_phase6_prepared_create(
     prepared, target_capacity = ncol(Y)
@@ -122,7 +122,7 @@ execute <- function(concurrency) {
 }
 
 warm <- execute(1L)
-concurrency_values <- c(1L, 2L, 4L, 8L, 16L, 32L)
+concurrency_values <- c(1L, 2L, 4L, 8L, 16L, 32L, 64L)
 runs <- vector("list", length(concurrency_values) * repetitions)
 ordinal <- 0L
 for (repetition in seq_len(repetitions)) {

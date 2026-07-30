@@ -215,7 +215,7 @@ fastkpc_full_cuda_phase6_optimize_prepared <- function(
 }
 
 fastkpc_full_cuda_phase6_optimize_prepared_multi <- function(
-    handles, target_batches, target_keys, concurrency = 32L,
+    handles, target_batches, target_keys, concurrency = 64L,
     convergence_tolerance = 1e-7, max_step_halving = 25L,
     max_iterations = 400L, max_newton_step = 5,
     boundary_probe_step = 2, max_boundary_probes = 5L,
@@ -227,7 +227,7 @@ fastkpc_full_cuda_phase6_optimize_prepared_multi <- function(
       length(target_batches) == length(handles) &&
       length(target_keys) == length(handles) &&
       length(concurrency) == 1L && !is.na(concurrency) &&
-      concurrency >= 1L && concurrency <= 32L,
+      concurrency >= 1L && concurrency <= 64L,
     "Phase 6 bounded multi-setup CUDA request is malformed"
   )
   requests <- lapply(seq_along(handles), function(index) {

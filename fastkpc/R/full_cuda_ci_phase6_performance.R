@@ -2,6 +2,10 @@ fastkpc_full_cuda_phase6_performance_require <- function(condition, message) {
   if (!isTRUE(condition)) stop(message, call. = FALSE)
 }
 
+fastkpc_full_cuda_phase6_performance_object_hash <- function(value) {
+  fastkpc_full_cuda_census_hash_raw(serialize(value, NULL, version = 2L))
+}
+
 fastkpc_full_cuda_phase6_performance_paths <- function() {
   c(
     phase4_backend_summary = file.path(
@@ -22,7 +26,7 @@ fastkpc_full_cuda_phase6_performance_paths <- function() {
 fastkpc_full_cuda_phase6_build_performance_evidence <- function(
     merged_evidence, merged_evidence_path = NULL,
     paths = fastkpc_full_cuda_phase6_performance_paths()) {
-  paths <- as.character(paths)
+  paths <- stats::setNames(as.character(paths), names(paths))
   fastkpc_full_cuda_phase6_performance_require(
     identical(names(paths), names(fastkpc_full_cuda_phase6_performance_paths())) &&
       all(file.exists(paths) & !dir.exists(paths)),
@@ -227,8 +231,8 @@ fastkpc_full_cuda_phase6_validate_performance_evidence <- function(
     )
     fastkpc_full_cuda_phase6_performance_require(
       identical(
-        fastkpc_full_cuda_phase35_canonical_json(value),
-        fastkpc_full_cuda_phase35_canonical_json(recomputed)
+        fastkpc_full_cuda_phase6_performance_object_hash(value),
+        fastkpc_full_cuda_phase6_performance_object_hash(recomputed)
       ),
       "Phase 6 performance evidence does not match current inputs"
     )

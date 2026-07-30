@@ -29,7 +29,7 @@ partition_id <- read_integer("FASTKPC_PHASE6_PARTITION_ID")
 partition_count <- read_integer("FASTKPC_PHASE6_PARTITION_COUNT")
 max_setups <- read_integer("FASTKPC_PHASE6_MAX_SETUPS")
 run_dcov <- read_integer("FASTKPC_PHASE6_RUN_DCOV", 1L) == 1L
-concurrency <- read_integer("FASTKPC_PHASE6_CONCURRENCY", 32L)
+concurrency <- read_integer("FASTKPC_PHASE6_CONCURRENCY", 64L)
 output_path <- Sys.getenv("FASTKPC_PHASE6_PARTITION_OUTPUT", unset = "")
 if (!nzchar(output_path)) {
   stop("FASTKPC_PHASE6_PARTITION_OUTPUT is required", call. = FALSE)

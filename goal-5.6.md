@@ -632,8 +632,8 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 3.5 | Full-CUDA architecture feasibility and performance-budget gate | COMPLETE - guarded exact-screen/full-eig CUDA architecture is GO for Phase 8 qualification; measured cache/memory and conservative 98.529-second campaign feasibility gates pass |
 | 4 | Full-CUDA single-penalty GCV for `|S|<=2` | COMPLETE - all 44,941 targets use CUDA scoring/selection and fitting; full-shadow graph semantics and the five-run backend gate pass |
 | 5 | C++ multi-penalty GAM semantic replica | COMPLETE - all 7,460 setups, 65,676 targets, and 60,324 logical rows pass with zero optimizer drift, decision flips, or fallback; mixed replay has SHD 0 |
-| 6 | CUDA multi-penalty same-S target batches | ACTIVE - port the accepted C++ semantic replica without weakening its full-corpus gates |
-| 7 | Native setup builder; remove R/mgcv from CI loop | NOT STARTED |
+| 6 | CUDA multi-penalty same-S target batches | COMPLETE - all 65,676 multi-penalty targets use persistent CUDA optimization and residual solves; the full residual route has SHD 0 and a 0.7693 same-trace performance ratio |
+| 7 | Native setup builder; remove R/mgcv from CI loop | ACTIVE - replace the version-pinned Phase 2 setup provider without weakening the accepted residual route |
 | 8 | Legacy-compatible device-resident CUDA dCov | PARTIAL — primitives/smoke gates exist |
 | 9 | Fused one-call compatible CUDA skeleton | PARTIAL — facade exists, CI service does not |
 | 10 | Full gate, hardening, and promotion | NOT STARTED |
@@ -2241,6 +2241,89 @@ Phase 6 may use this immutable C++ result as its numerical oracle.
 
 ## Phase 6 — Port multi-penalty same-S target batches to CUDA
 
+### Status
+
+Phase 6 passed its local, full-corpus residual, graph, identity, and performance
+gates on 2026-07-30. Phase 7 is now the earliest incomplete phase. This closes
+target-dependent GAM numerical work; it does not yet remove the Phase 2
+R/mgcv setup provider or promote the final Phase 10 route.
+
+#### Accepted Phase 6 closure (2026-07-30)
+
+The accepted runtime uploads each `PreparedSSetup` once, gives every target an
+independent optimizer state, executes same-S target batches on CUDA, and uses
+bounded independent prepared streams across setups. Objective, gradient,
+Hessian, step acceptance, boundary probes, guarded QR/SVD solves, GEMM fitted
+values, and residual formation are CUDA authoritative. The reference machine
+run used physical GPU 0 with 64 concurrent setup streams.
+
+All 16 authenticated partitions merged with exact coverage:
+
+```text
+setups / targets / logical rows       7,460 / 65,676 / 60,324
+penalty-count range                   3 through 7
+maximum coefficient dimension        64
+maximum selected log-sp error         9.827357e-07
+maximum score absolute error          2.481615e-11
+maximum EDF absolute error            9.985751e-09
+maximum downstream p-value error      9.055423e-11
+iteration / score-call mismatches     0 / 0
+objective / step-halving mismatches   0 / 0
+boundary / convergence mismatches     0 / 0
+Hessian-state / rank mismatches       0 / 0
+legacy mgcv target calls              0
+CPU multi-penalty solves / fallback   0 / 0
+CUDA optimizer errors                 0
+```
+
+Generic stability telemetry identified 182 replay candidates across all six
+risk reasons. It screened 119 low-risk candidates before replay, executed 63,
+selected 10 numerically material corrections, and recorded zero replay
+errors. All 10 corrections retained by the unscreened qualification corpus
+remain selected. Thirty-three terminal boundary confirmations produced 31
+accepted and two rejected probes through the strong-delta, identity-tie, and
+delta-identity modes. Physical evaluation and factorization counts both equal
+`1,394,102`; no hidden evaluation or fallback is present.
+
+Full residual graph evidence:
+
+```text
+edge count                         110 / 110
+SHD                                0
+adjacency / sepsets identical      TRUE / TRUE
+n.edgetests / deletions identical  TRUE / TRUE
+residual numerical fallbacks       0
+downstream / near-alpha flips      0 / 0
+```
+
+The authenticated same-trace residual performance evidence includes the
+accepted Phase 4 optimizer and selected fit plus Phase 6 setup upload,
+optimization, GEMM, and residual work:
+
+```text
+candidate residual wall time       252,393.596 ms
+legacy-mgcv 20-core baseline       328,075.687 ms
+candidate / baseline ratio         0.769315
+relative performance gate          PASS
+```
+
+Accepted identities:
+
+```text
+producer source commit             1ff656a7de649d0ea762fc0d8679e586aaeaef39
+producer source closure SHA-256    c8730a438617eeffdf983d678a33292ec6edd9c44b55880d05d9f98f45cff686
+native binary SHA-256              e29b997c9e92da92c92482e9e456d7eec1a814c945292d055ccfd7d651d0f285
+oracle producer identity           08399f638dd994903d3761e8e386334ab3813ab806e0fa59a41623904280a7d1
+full-shadow producer identity      b600fe36e4d198313b4bcfc2bf3946bf1b528ac428b66bd3b53d9f42257f3f51
+backend producer identity          4c591e33f344bc89e36d1ea06b941ac2ebf7fa35c2a5009ef6bca0b5f209631e
+```
+
+The three required artifact directories below independently validate their
+payload manifests, producer envelopes, source/native identities, validator
+attestations, and execution receipts. Payload, manifest, attestation, and
+receipt tampering all fail closed. Phase 6 is COMPLETE; Phase 7 may replace
+setup construction while treating this residual route as immutable authority.
+
 ### Goal
 
 Move Phase 5 smoothing optimization and residual solves to a persistent CUDA runtime.
@@ -3144,8 +3227,8 @@ The exact script names may be adjusted to repository conventions, but one standa
 ## 12. Immediate next actions
 
 Codex should begin with the earliest phase whose exit gate is incomplete. Phase
-0 through Phase 5 are complete, so the current starting point is Phase 6 CUDA
-multi-penalty same-S target batching.
+0 through Phase 6 are complete, so the current starting point is Phase 7 native
+setup construction.
 
 ### Task 1
 
@@ -3223,10 +3306,18 @@ semantics, and SHD 0.
 
 ### Task 12
 
-Active: implement Phase 6 persistent CUDA multi-penalty same-S target batches
-against the accepted Phase 5 C++ oracle. Preserve one smoothing-parameter
-state per target, stable QR/SVD semantics for difficult cases, exact canonical
-replay, and zero fallback before Phase 6 completion.
+Complete: Phase 6 produced all 16 authenticated partitions and three required
+artifacts for 7,460 setups, 65,676 targets, and 60,324 logical rows. Persistent
+CUDA optimization and residual solves have zero trajectory mismatches, zero
+fallback, exact graph semantics, SHD 0, and a `0.769315` same-trace residual
+performance ratio against the correct 20-core legacy-mgcv provider.
+
+### Task 13
+
+Active: implement the Phase 7 native setup generator in shadow mode against
+the version-pinned Phase 2 provider. Prove model-space, constraint, penalty,
+rank, selected-fit, residual, and downstream decision parity before making the
+native setup authoritative or removing any oracle path.
 
 ---
 

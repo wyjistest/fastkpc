@@ -13,7 +13,7 @@ namespace fastkpc {
 
 constexpr int kMultiPenaltyGcvMaximumCoefficientDim = 64;
 constexpr int kMultiPenaltyGcvMaximumPenaltyCount = 7;
-constexpr int kMultiPenaltyGcvMaximumConcurrentSetups = 32;
+constexpr int kMultiPenaltyGcvMaximumConcurrentSetups = 64;
 
 class MultiPenaltyGcvCudaPrepared;
 class MultiPenaltyGcvCudaResidualBatch;
@@ -47,8 +47,16 @@ struct MultiPenaltyGcvCudaDiagnostics {
   int cuda_stability_replay_kernel_launch_count = 0;
   int cuda_stability_merge_kernel_launch_count = 0;
   int cuda_stability_replay_target_count = 0;
+  int cuda_stability_replay_screened_count = 0;
   int cuda_stability_replay_selected_count = 0;
   int cuda_stability_replay_error_count = 0;
+  int cuda_stability_replay_long_trajectory_reason_count = 0;
+  int cuda_stability_replay_dense_boundary_reason_count = 0;
+  int cuda_stability_replay_high_condition_reason_count = 0;
+  int cuda_stability_replay_ambiguous_step_reason_count = 0;
+  int cuda_stability_replay_rejected_boundary_reason_count = 0;
+  int cuda_stability_replay_direct_newton_reason_count = 0;
+  int cuda_stability_replay_dense_score_guard_rejected_count = 0;
   int cuda_stability_replay_extrapolation_target_count = 0;
   int cuda_stability_replay_discarded_complete_evaluation_count = 0;
   int cuda_stability_replay_discarded_score_only_evaluation_count = 0;
@@ -62,6 +70,7 @@ struct MultiPenaltyGcvCudaDiagnostics {
   int cuda_terminal_boundary_confirmation_rejected_count = 0;
   int cuda_terminal_boundary_confirmation_strong_delta_accepted_count = 0;
   int cuda_terminal_boundary_confirmation_identity_tie_accepted_count = 0;
+  int cuda_terminal_boundary_confirmation_delta_identity_accepted_count = 0;
   int cuda_terminal_boundary_confirmation_complete_evaluation_count = 0;
   int cuda_terminal_boundary_confirmation_stable_svd_evaluation_count = 0;
   std::uint64_t cuda_terminal_boundary_confirmation_cycles = 0;

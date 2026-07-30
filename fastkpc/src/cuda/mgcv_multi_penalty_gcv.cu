@@ -38,17 +38,34 @@ constexpr int kStabilityReplayBoundaryMaximumIterations = 100;
 constexpr int kStabilityReplayBoundaryMinimumAcceptedProbes = 2;
 constexpr int kStabilityReplayBoundaryStepHalvingNumerator = 9;
 constexpr int kStabilityReplayBoundaryStepHalvingDenominator = 4;
+constexpr int kStabilityReplayDenseRiskMaximumStepHalvingNumerator = 49;
+constexpr int kStabilityReplayDenseRiskMaximumStepHalvingDenominator = 20;
+constexpr double kStabilityReplayDenseRiskConditionOverride = 8388608.0;
+constexpr int kStabilityReplayLongRiskStepHalvingMultiplier = 4;
 constexpr int kStabilityReplayHighConditionMinimumIterations = 16;
 constexpr int kStabilityReplayHighConditionStepHalvingNumerator = 3;
 constexpr int kStabilityReplayHighConditionStepHalvingDenominator = 4;
 constexpr double kStabilityReplayHighConditionThreshold = 16777216.0;
+constexpr int kDirectNewtonReplayMaximumIterations = 20;
+constexpr int kDirectNewtonReplayMinimumAcceptedProbes = 1;
+constexpr double kDirectNewtonReplayMaximumSmallestEigenvalue = 1e-12;
+constexpr double kDirectNewtonReplayMinimumHessianCondition = 1e9;
+constexpr double kDirectNewtonHalvingExtrapolationFraction = 0.75;
+constexpr double kDirectNewtonMaximumExtrapolation = 2e-5;
 constexpr double kStabilityReplayLogSpSpread = 3e-8;
 constexpr double kStabilityReplayDenseBoundaryMaximumSpread = 5e-8;
 constexpr double kStabilityReplayMaximumInwardShift = 1e-6;
 constexpr double kStabilityReplayExtrapolationFraction = 0.25;
 constexpr double kStabilityReplayDenseBoundaryExtrapolationFraction = 8.0;
 constexpr double kStabilityReplayMaximumExtrapolation = 4e-6;
-constexpr double kTerminalBoundaryTieCondition = 33554432.0;
+constexpr double kAmbiguousStepRelativeTolerance =
+  128.0 * kLapackEpsilon;
+constexpr double kAmbiguousStepConservativeDescentFraction = 0.5;
+constexpr double kAmbiguousStepConservativeMinimumHessianCondition = 5.0;
+constexpr double kAmbiguousStepDirectDeltaDisagreementFraction = 0.25;
+constexpr double kRejectedBoundaryReplayDeltaRatio = 2.0;
+constexpr double kTerminalBoundaryTieCondition = 8388608.0;
+constexpr double kTerminalBoundaryOverrideCondition = 33554432.0;
 constexpr double kTerminalBoundaryTieRelativeTolerance =
   1e-10;
 
@@ -452,20 +469,32 @@ struct DeviceOptimizerState {
   int hessian_positive_definite;
   int step_failed;
   int optimizer_status;
+  int penalty_count;
   int use_steepest_descent;
   int converged;
   int trying;
   int tries;
   int selected_evaluation_reuse_count;
+  int ambiguous_step_descent_count;
+  int ambiguous_step_non_descent_count;
   int stability_replay_attempted;
+  int stability_replay_screened;
   int stability_replay_selected;
   int stability_replay_error;
+  int stability_replay_long_trajectory_reason;
+  int stability_replay_dense_boundary_reason;
+  int stability_replay_high_condition_reason;
+  int stability_replay_ambiguous_step_reason;
+  int stability_replay_rejected_boundary_reason;
+  int stability_replay_direct_newton_reason;
+  int stability_replay_dense_score_guard_rejected;
   int stability_replay_extrapolation_applied;
   int terminal_boundary_confirmation_count;
   int terminal_boundary_confirmation_accepted_count;
   int terminal_boundary_confirmation_rejected_count;
   int terminal_boundary_confirmation_strong_delta_accepted_count;
   int terminal_boundary_confirmation_identity_tie_accepted_count;
+  int terminal_boundary_confirmation_delta_identity_accepted_count;
   int terminal_boundary_confirmation_pending;
   double stability_replay_log_sp_spread;
   double stability_replay_max_extrapolation;
@@ -496,6 +525,13 @@ __device__ bool requires_high_condition_stability_replay(
           kStabilityReplayHighConditionStepHalvingNumerator;
 }
 
+__device__ bool requires_long_trajectory_stability_replay(
+    const DeviceOptimizerState& state) {
+  return state.optimizer_status == 0 &&
+    state.optimizer_iterations >=
+      kStabilityReplayLongTrajectoryMinimumIterations;
+}
+
 __device__ bool requires_dense_boundary_stability_replay(
     const DeviceOptimizerState& state) {
   return state.optimizer_status == 0 &&
@@ -509,15 +545,75 @@ __device__ bool requires_dense_boundary_stability_replay(
           kStabilityReplayBoundaryStepHalvingNumerator;
 }
 
-__device__ bool requires_stability_replay(
+__device__ bool requires_ambiguous_step_stability_replay(
+    const DeviceOptimizerState& state) {
+  return state.optimizer_status == 0 &&
+    (state.ambiguous_step_descent_count > 0 ||
+     state.ambiguous_step_non_descent_count > 0);
+}
+
+__device__ bool requires_rejected_boundary_stability_replay(
+    const DeviceOptimizerState& state) {
+  return state.optimizer_status == 0 &&
+    state.terminal_boundary_confirmation_rejected_count > 0 &&
+    state.terminal_boundary_confirmation_max_delta_ratio >
+      kRejectedBoundaryReplayDeltaRatio;
+}
+
+__device__ bool requires_direct_newton_stability_replay(
+    const DeviceOptimizerState& state) {
+  const double smallest = fabs(state.hessian_eigenvalues[0]);
+  double largest = smallest;
+  for (int penalty = 1;
+       penalty < state.penalty_count; ++penalty) {
+    largest = fmax(largest, fabs(state.hessian_eigenvalues[penalty]));
+  }
+  return state.optimizer_status == 0 &&
+    !requires_high_condition_stability_replay(state) &&
+    state.optimizer_iterations <= kDirectNewtonReplayMaximumIterations &&
+    state.step_halving_count <= state.optimizer_iterations &&
+    state.boundary_accepted_count >=
+      kDirectNewtonReplayMinimumAcceptedProbes &&
+    state.hessian_positive_definite != 0 && smallest > 0.0 &&
+    smallest <= kDirectNewtonReplayMaximumSmallestEigenvalue &&
+    largest >= __dmul_rn(
+      kDirectNewtonReplayMinimumHessianCondition, smallest);
+}
+
+__device__ bool is_stability_replay_candidate(
     const DeviceOptimizerState& state) {
   if (state.optimizer_status != 0) return false;
-  if (state.optimizer_iterations >=
-      kStabilityReplayLongTrajectoryMinimumIterations) {
+  if (requires_long_trajectory_stability_replay(state)) {
     return true;
   }
   return requires_dense_boundary_stability_replay(state) ||
-    requires_high_condition_stability_replay(state);
+    requires_high_condition_stability_replay(state) ||
+    requires_ambiguous_step_stability_replay(state) ||
+    requires_rejected_boundary_stability_replay(state) ||
+    requires_direct_newton_stability_replay(state);
+}
+
+__device__ bool requires_full_stability_replay(
+    const DeviceOptimizerState& state) {
+  if (state.optimizer_status != 0) return false;
+  if (requires_ambiguous_step_stability_replay(state) ||
+      requires_rejected_boundary_stability_replay(state) ||
+      requires_direct_newton_stability_replay(state) ||
+      requires_high_condition_stability_replay(state)) {
+    return true;
+  }
+  if (requires_long_trajectory_stability_replay(state)) {
+    return state.step_halving_count >=
+      kStabilityReplayLongRiskStepHalvingMultiplier *
+        state.optimizer_iterations;
+  }
+  return requires_dense_boundary_stability_replay(state) &&
+    (state.step_halving_count *
+         kStabilityReplayDenseRiskMaximumStepHalvingDenominator <=
+       state.optimizer_iterations *
+         kStabilityReplayDenseRiskMaximumStepHalvingNumerator ||
+     state.current.condition >=
+       kStabilityReplayDenseRiskConditionOverride);
 }
 
 __device__ bool symmetric_jacobi_eigen(
@@ -616,6 +712,68 @@ __device__ bool symmetric_jacobi_eigen(
     }
   }
   return converged;
+}
+
+__device__ bool solve_newton_system_direct(
+    const double* hessian,
+    const double* gradient,
+    int dimension,
+    double* matrix,
+    double* solution) {
+  for (int column = 0; column < dimension; ++column) {
+    for (int row = 0; row < dimension; ++row) {
+      matrix[row + dimension * column] =
+        hessian[row + dimension * column];
+    }
+    solution[column] = -gradient[column];
+  }
+  for (int column = 0; column < dimension; ++column) {
+    int pivot = column;
+    double maximum = fabs(matrix[column + dimension * column]);
+    for (int row = column + 1; row < dimension; ++row) {
+      const double candidate = fabs(matrix[row + dimension * column]);
+      if (candidate > maximum) {
+        pivot = row;
+        maximum = candidate;
+      }
+    }
+    if (!(maximum > 0.0) || !isfinite(maximum)) return false;
+    if (pivot != column) {
+      for (int trailing = 0; trailing < dimension; ++trailing) {
+        swap_double(
+          matrix + column + dimension * trailing,
+          matrix + pivot + dimension * trailing);
+      }
+      swap_double(solution + column, solution + pivot);
+    }
+    const double diagonal = matrix[column + dimension * column];
+    for (int row = column + 1; row < dimension; ++row) {
+      const double factor = __ddiv_rn(
+        matrix[row + dimension * column], diagonal);
+      matrix[row + dimension * column] = 0.0;
+      for (int trailing = column + 1; trailing < dimension; ++trailing) {
+        matrix[row + dimension * trailing] = __dadd_rn(
+          matrix[row + dimension * trailing],
+          -__dmul_rn(
+            factor, matrix[column + dimension * trailing]));
+      }
+      solution[row] = __dadd_rn(
+        solution[row], -__dmul_rn(factor, solution[column]));
+    }
+  }
+  for (int row = dimension - 1; row >= 0; --row) {
+    double value = solution[row];
+    for (int column = row + 1; column < dimension; ++column) {
+      value = __dadd_rn(
+        value,
+        -__dmul_rn(matrix[row + dimension * column], solution[column]));
+    }
+    const double diagonal = matrix[row + dimension * row];
+    if (diagonal == 0.0 || !isfinite(diagonal)) return false;
+    solution[row] = __ddiv_rn(value, diagonal);
+    if (!isfinite(solution[row])) return false;
+  }
+  return true;
 }
 
 __device__ void evaluate_multi_penalty_target_device(
@@ -1176,11 +1334,34 @@ __global__ void optimize_multi_penalty_targets_kernel(
   if (target >= target_count) return;
   if (stability_replay &&
       (primary_states == nullptr ||
-       !requires_stability_replay(primary_states[target]))) {
+       !is_stability_replay_candidate(primary_states[target]))) {
     return;
   }
   DeviceEvaluationWorkspace* workspace = workspaces + target;
   DeviceOptimizerState* state = states + target;
+  const bool long_trajectory_replay = stability_replay &&
+    primary_states != nullptr &&
+    requires_long_trajectory_stability_replay(primary_states[target]);
+  const bool dense_boundary_replay = stability_replay &&
+    primary_states != nullptr &&
+    requires_dense_boundary_stability_replay(primary_states[target]);
+  const bool high_condition_replay = stability_replay &&
+    primary_states != nullptr &&
+    requires_high_condition_stability_replay(primary_states[target]);
+  const bool ambiguous_step_replay = stability_replay &&
+    primary_states != nullptr &&
+    requires_ambiguous_step_stability_replay(primary_states[target]);
+  const bool rejected_boundary_replay = stability_replay &&
+    primary_states != nullptr &&
+    requires_rejected_boundary_stability_replay(primary_states[target]);
+  const bool direct_newton_replay = stability_replay &&
+    primary_states != nullptr &&
+    requires_direct_newton_stability_replay(primary_states[target]);
+  const bool full_stability_replay = stability_replay &&
+    primary_states != nullptr &&
+    requires_full_stability_replay(primary_states[target]);
+  const bool target_force_stable_svd =
+    force_stable_svd && !direct_newton_replay;
   const double* target_y0 = y0 + static_cast<std::size_t>(q) * target;
   const double target_squared_norm = squared_norm[target];
 
@@ -1200,20 +1381,39 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->hessian_positive_definite = 0;
     state->step_failed = 0;
     state->optimizer_status = 0;
+    state->penalty_count = penalty_count;
     state->use_steepest_descent = 0;
     state->converged = 0;
     state->trying = 0;
     state->tries = 0;
     state->selected_evaluation_reuse_count = 0;
+    state->ambiguous_step_descent_count = 0;
+    state->ambiguous_step_non_descent_count = 0;
     state->stability_replay_attempted = stability_replay ? 1 : 0;
+    state->stability_replay_screened =
+      stability_replay && !full_stability_replay ? 1 : 0;
     state->stability_replay_selected = 0;
     state->stability_replay_error = 0;
+    state->stability_replay_long_trajectory_reason =
+      long_trajectory_replay ? 1 : 0;
+    state->stability_replay_dense_boundary_reason =
+      dense_boundary_replay ? 1 : 0;
+    state->stability_replay_high_condition_reason =
+      high_condition_replay ? 1 : 0;
+    state->stability_replay_ambiguous_step_reason =
+      ambiguous_step_replay ? 1 : 0;
+    state->stability_replay_rejected_boundary_reason =
+      rejected_boundary_replay ? 1 : 0;
+    state->stability_replay_direct_newton_reason =
+      direct_newton_replay ? 1 : 0;
+    state->stability_replay_dense_score_guard_rejected = 0;
     state->stability_replay_extrapolation_applied = 0;
     state->terminal_boundary_confirmation_count = 0;
     state->terminal_boundary_confirmation_accepted_count = 0;
     state->terminal_boundary_confirmation_rejected_count = 0;
     state->terminal_boundary_confirmation_strong_delta_accepted_count = 0;
     state->terminal_boundary_confirmation_identity_tie_accepted_count = 0;
+    state->terminal_boundary_confirmation_delta_identity_accepted_count = 0;
     state->terminal_boundary_confirmation_pending = 0;
     state->stability_replay_log_sp_spread = 0.0;
     state->stability_replay_max_extrapolation = 0.0;
@@ -1279,11 +1479,12 @@ __global__ void optimize_multi_penalty_targets_kernel(
     }
   }
   __syncthreads();
+  if (stability_replay && !full_stability_replay) return;
   evaluate_multi_penalty_target_device(
     magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
     penalty_matrices, target_y0, target_squared_norm, state->log_sp,
     workspace, &state->current, n, q, penalty_count, true,
-    &state->phase_timing, rank_tolerance, force_stable_svd);
+    &state->phase_timing, rank_tolerance, target_force_stable_svd);
   __syncthreads();
   if (threadIdx.x == 0) {
     state->score_calls = 1;
@@ -1342,7 +1543,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
           penalty_matrices, target_y0, target_squared_norm,
           state->trial_log_sp, workspace, &state->trial, n, q,
           penalty_count, true, &state->phase_timing, rank_tolerance,
-          force_stable_svd);
+          target_force_stable_svd);
         __syncthreads();
         if (threadIdx.x == 0) {
           ++state->score_calls;
@@ -1371,6 +1572,62 @@ __global__ void optimize_multi_penalty_targets_kernel(
               __dadd_rn(1.0, fabs(state->minimum_score)));
             const double convergence_step = __dmul_rn(
               convergence_tolerance, __dadd_rn(1.0, maximum_log_sp));
+            const double ambiguity_tolerance = __dmul_rn(
+              kAmbiguousStepRelativeTolerance,
+              __dadd_rn(1.0, fabs(state->minimum_score)));
+            const bool ambiguous_first_newton_step =
+              state->use_steepest_descent == 0 &&
+              trial_index == 1 && directional_derivative < 0.0 &&
+              maximum_step > convergence_step &&
+              fabs(score_delta) <= ambiguity_tolerance;
+            double smallest_hessian_eigenvalue = fabs(
+              state->hessian_eigenvalues[0]);
+            double largest_hessian_eigenvalue =
+              smallest_hessian_eigenvalue;
+            for (int penalty = 1; penalty < penalty_count; ++penalty) {
+              const double value = fabs(
+                state->hessian_eigenvalues[penalty]);
+              smallest_hessian_eigenvalue = fmin(
+                smallest_hessian_eigenvalue, value);
+              largest_hessian_eigenvalue = fmax(
+                largest_hessian_eigenvalue, value);
+            }
+            const bool conservative_hessian_condition =
+              smallest_hessian_eigenvalue > 0.0 &&
+              largest_hessian_eigenvalue >= __dmul_rn(
+                kAmbiguousStepConservativeMinimumHessianCondition,
+                smallest_hessian_eigenvalue);
+            bool material_direct_delta_disagreement = false;
+            if (!stability_replay && ambiguous_first_newton_step &&
+                score_delta < 0.0 && conservative_hessian_condition) {
+              const double current_direct_score = direct_qr_residual_score(
+                magic_r, magic_pivot, target_y0, target_squared_norm,
+                state->current, n, q);
+              const double trial_direct_score = direct_qr_residual_score(
+                magic_r, magic_pivot, target_y0, target_squared_norm,
+                state->trial, n, q);
+              const double direct_score_delta = __dadd_rn(
+                trial_direct_score, -current_direct_score);
+              material_direct_delta_disagreement =
+                fabs(__dadd_rn(score_delta, -direct_score_delta)) >=
+                  __dmul_rn(
+                    kAmbiguousStepDirectDeltaDisagreementFraction,
+                    ambiguity_tolerance);
+            }
+            if (!stability_replay && ambiguous_first_newton_step) {
+              if (score_delta < -__dmul_rn(
+                    kAmbiguousStepConservativeDescentFraction,
+                    ambiguity_tolerance) &&
+                  conservative_hessian_condition &&
+                  material_direct_delta_disagreement) {
+                ++state->ambiguous_step_descent_count;
+              } else if (score_delta >= 0.0) {
+                ++state->ambiguous_step_non_descent_count;
+              }
+            }
+            const bool conservative_replay_halving =
+              stability_replay && ambiguous_first_newton_step &&
+              primary_states[target].ambiguous_step_descent_count > 0;
             // Resolve only near-convergence Newton comparisons whose score
             // ordering is below the binary64 LAPACK/CUDA arithmetic floor.
             const bool roundoff_limited_newton_descent =
@@ -1379,8 +1636,9 @@ __global__ void optimize_multi_penalty_targets_kernel(
               maximum_step <= convergence_step &&
               score_delta <= comparison_slack;
             const bool accepted =
-              state->trial.score < state->minimum_score ||
-              roundoff_limited_newton_descent;
+              !conservative_replay_halving &&
+              (state->trial.score < state->minimum_score ||
+               roundoff_limited_newton_descent);
             if (accepted) {
               state->score_reduction = __dadd_rn(
                 state->minimum_score, -state->trial.score);
@@ -1453,6 +1711,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
           }
         }
         if (state->use_steepest_descent == 0) {
+          double spectral_step[kMultiPenaltyGcvMaximumPenaltyCount];
           double projected[kMultiPenaltyGcvMaximumPenaltyCount];
           for (int column = 0; column < penalty_count; ++column) {
             double value = 0.0;
@@ -1473,7 +1732,18 @@ __global__ void optimize_multi_penalty_targets_kernel(
                 state->hessian_eigenvectors[row + penalty_count * column],
                 projected[column]);
             }
-            state->newton_step[row] = -value;
+            spectral_step[row] = -value;
+          }
+          bool direct_solved = false;
+          if (direct_newton_replay) {
+            direct_solved = solve_newton_system_direct(
+              state->current.hessian, state->gradient, penalty_count,
+              state->hessian_work, state->newton_step);
+          }
+          if (!direct_newton_replay || !direct_solved) {
+            for (int row = 0; row < penalty_count; ++row) {
+              state->newton_step[row] = spectral_step[row];
+            }
           }
           double maximum_component = fabs(state->newton_step[0]);
           for (int penalty = 1; penalty < penalty_count; ++penalty) {
@@ -1545,7 +1815,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
         penalty_matrices, target_y0, target_squared_norm,
         state->trial_log_sp, workspace, &state->trial, n, q,
         penalty_count, false, &state->phase_timing, rank_tolerance,
-        force_stable_svd);
+        target_force_stable_svd);
       __syncthreads();
       if (threadIdx.x == 0) {
         state->terminal_boundary_confirmation_pending = 0;
@@ -1566,9 +1836,11 @@ __global__ void optimize_multi_penalty_targets_kernel(
             kTerminalBoundaryTieRelativeTolerance,
             __dadd_rn(1.0, fabs(state->minimum_score)));
           state->terminal_boundary_confirmation_pending =
-            !force_stable_svd &&
+            !target_force_stable_svd &&
             probe == max_boundary_probes &&
             state->trial.condition >= kTerminalBoundaryTieCondition &&
+            (state->trial.condition >= kTerminalBoundaryOverrideCondition ||
+             score_delta >= 0.0) &&
             fabs(score_delta) <= tie_tolerance ? 1 : 0;
         }
       }
@@ -1650,7 +1922,13 @@ __global__ void optimize_multi_penalty_targets_kernel(
             !identity_verified_tie_descent &&
             stable_score_delta < -identity_tolerance &&
             stable_direct_score_delta < stable_score_delta;
-          accepted = strong_delta_descent || identity_verified_tie_descent;
+          const bool delta_identity_verified_descent =
+            !identity_verified_tie_descent && !strong_delta_descent &&
+            stable_direct_score_delta < 0.0 &&
+            delta_identity_disagreement <= identity_tolerance;
+          accepted = strong_delta_descent ||
+            identity_verified_tie_descent ||
+            delta_identity_verified_descent;
           ++state->terminal_boundary_confirmation_count;
           state->terminal_boundary_confirmation_accepted_count +=
             accepted ? 1 : 0;
@@ -1662,6 +1940,9 @@ __global__ void optimize_multi_penalty_targets_kernel(
           state
             ->terminal_boundary_confirmation_identity_tie_accepted_count +=
               identity_verified_tie_descent ? 1 : 0;
+          state
+            ->terminal_boundary_confirmation_delta_identity_accepted_count +=
+              delta_identity_verified_descent ? 1 : 0;
           state->terminal_boundary_confirmation_max_identity_disagreement =
             fmax(
               state
@@ -1724,7 +2005,15 @@ __global__ void optimize_multi_penalty_targets_kernel(
     if (maximum_spread > kStabilityReplayLogSpSpread) {
       state->stability_replay_selected = 1;
       double extrapolation_fraction = 0.0;
-      if (requires_high_condition_stability_replay(primary_states[target])) {
+      double maximum_extrapolation =
+        kStabilityReplayMaximumExtrapolation;
+      if (direct_newton_replay &&
+          primary_states[target].step_halving_count > 0) {
+        extrapolation_fraction =
+          kDirectNewtonHalvingExtrapolationFraction;
+        maximum_extrapolation = kDirectNewtonMaximumExtrapolation;
+      } else if (
+          requires_high_condition_stability_replay(primary_states[target])) {
         extrapolation_fraction = kStabilityReplayExtrapolationFraction;
       } else if (
           requires_dense_boundary_stability_replay(primary_states[target]) &&
@@ -1739,7 +2028,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
             -primary_states[target].log_sp[penalty]);
           const double extrapolation = copysign(
             fmin(
-              kStabilityReplayMaximumExtrapolation,
+              maximum_extrapolation,
               fabs(__dmul_rn(
                 extrapolation_fraction, path_delta))),
             path_delta);
@@ -1782,7 +2071,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
     penalty_matrices, target_y0, target_squared_norm, state->log_sp,
     workspace, &state->trial, n, q, penalty_count, true,
-    &state->phase_timing, rank_tolerance, force_stable_svd);
+    &state->phase_timing, rank_tolerance, target_force_stable_svd);
   __syncthreads();
   if (threadIdx.x == 0) {
     ++state->objective_calls;
@@ -1790,6 +2079,13 @@ __global__ void optimize_multi_penalty_targets_kernel(
       state->optimizer_status = 6;
     } else {
       state->current = state->trial;
+      if (stability_replay && state->stability_replay_selected != 0 &&
+          requires_dense_boundary_stability_replay(
+            primary_states[target]) &&
+          state->current.score >= primary_states[target].current.score) {
+        state->stability_replay_selected = 0;
+        state->stability_replay_dense_score_guard_rejected = 1;
+      }
     }
   }
 }
@@ -1800,7 +2096,7 @@ __global__ void merge_stability_replay_states_kernel(
     int target_count) {
   const int target = blockIdx.x * blockDim.x + threadIdx.x;
   if (target >= target_count ||
-      !requires_stability_replay(primary_states[target])) {
+      !is_stability_replay_candidate(primary_states[target])) {
     return;
   }
   DeviceOptimizerState& primary = primary_states[target];
@@ -1815,6 +2111,8 @@ __global__ void merge_stability_replay_states_kernel(
     primary.terminal_boundary_confirmation_strong_delta_accepted_count;
   const int primary_confirmation_identity_tie_accepted_count =
     primary.terminal_boundary_confirmation_identity_tie_accepted_count;
+  const int primary_confirmation_delta_identity_accepted_count =
+    primary.terminal_boundary_confirmation_delta_identity_accepted_count;
   const double primary_confirmation_max_identity_disagreement =
     primary.terminal_boundary_confirmation_max_identity_disagreement;
   const double primary_confirmation_max_identity_ratio =
@@ -1825,6 +2123,8 @@ __global__ void merge_stability_replay_states_kernel(
     primary.terminal_boundary_confirmation_max_delta_ratio;
   const DevicePhaseTiming primary_confirmation_timing =
     primary.terminal_boundary_confirmation_phase_timing;
+  const int replay_screened =
+    requires_full_stability_replay(primary) ? 0 : 1;
   const bool selected = replay.stability_replay_selected != 0 &&
     replay.optimizer_status == 0;
   const DevicePhaseTiming discarded = selected ?
@@ -1843,6 +2143,8 @@ __global__ void merge_stability_replay_states_kernel(
       primary_confirmation_strong_delta_accepted_count;
     primary.terminal_boundary_confirmation_identity_tie_accepted_count =
       primary_confirmation_identity_tie_accepted_count;
+    primary.terminal_boundary_confirmation_delta_identity_accepted_count =
+      primary_confirmation_delta_identity_accepted_count;
     primary.terminal_boundary_confirmation_max_identity_disagreement =
       primary_confirmation_max_identity_disagreement;
     primary.terminal_boundary_confirmation_max_identity_ratio =
@@ -1855,8 +2157,23 @@ __global__ void merge_stability_replay_states_kernel(
       primary_confirmation_timing;
   }
   primary.stability_replay_attempted = 1;
+  primary.stability_replay_screened = replay_screened;
   primary.stability_replay_selected = selected ? 1 : 0;
   primary.stability_replay_error = replay_error;
+  primary.stability_replay_long_trajectory_reason =
+    replay.stability_replay_long_trajectory_reason;
+  primary.stability_replay_dense_boundary_reason =
+    replay.stability_replay_dense_boundary_reason;
+  primary.stability_replay_high_condition_reason =
+    replay.stability_replay_high_condition_reason;
+  primary.stability_replay_ambiguous_step_reason =
+    replay.stability_replay_ambiguous_step_reason;
+  primary.stability_replay_rejected_boundary_reason =
+    replay.stability_replay_rejected_boundary_reason;
+  primary.stability_replay_direct_newton_reason =
+    replay.stability_replay_direct_newton_reason;
+  primary.stability_replay_dense_score_guard_rejected =
+    replay.stability_replay_dense_score_guard_rejected;
   primary.stability_replay_log_sp_spread = spread;
   primary.discarded_phase_timing = discarded;
 }
@@ -2071,6 +2388,9 @@ MultiPenaltyGcvCudaOptimization materialize_optimizer_output(
       .cuda_terminal_boundary_confirmation_identity_tie_accepted_count +=
         state.terminal_boundary_confirmation_identity_tie_accepted_count;
     diagnostics
+      .cuda_terminal_boundary_confirmation_delta_identity_accepted_count +=
+        state.terminal_boundary_confirmation_delta_identity_accepted_count;
+    diagnostics
       .cuda_terminal_boundary_confirmation_complete_evaluation_count +=
         state.terminal_boundary_confirmation_phase_timing
           .complete_evaluation_count;
@@ -2108,10 +2428,31 @@ MultiPenaltyGcvCudaOptimization materialize_optimizer_output(
         state.terminal_boundary_confirmation_max_delta_ratio);
     if (state.stability_replay_attempted != 0) {
       ++diagnostics.cuda_stability_replay_target_count;
+      const int discarded_replay_evaluations =
+        state.discarded_phase_timing.complete_evaluation_count +
+          state.discarded_phase_timing.score_only_evaluation_count;
+      diagnostics.cuda_stability_replay_screened_count +=
+        state.stability_replay_selected == 0 &&
+          state.stability_replay_error == 0 &&
+          discarded_replay_evaluations == 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_selected_count +=
         state.stability_replay_selected != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_error_count +=
         state.stability_replay_error != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_long_trajectory_reason_count +=
+        state.stability_replay_long_trajectory_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_dense_boundary_reason_count +=
+        state.stability_replay_dense_boundary_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_high_condition_reason_count +=
+        state.stability_replay_high_condition_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_ambiguous_step_reason_count +=
+        state.stability_replay_ambiguous_step_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_rejected_boundary_reason_count +=
+        state.stability_replay_rejected_boundary_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_direct_newton_reason_count +=
+        state.stability_replay_direct_newton_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_dense_score_guard_rejected_count +=
+        state.stability_replay_dense_score_guard_rejected != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_extrapolation_target_count +=
         state.stability_replay_extrapolation_applied != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_max_log_sp_spread = std::max(
@@ -2725,6 +3066,9 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
       .cuda_terminal_boundary_confirmation_identity_tie_accepted_count +=
         state.terminal_boundary_confirmation_identity_tie_accepted_count;
     diagnostics
+      .cuda_terminal_boundary_confirmation_delta_identity_accepted_count +=
+        state.terminal_boundary_confirmation_delta_identity_accepted_count;
+    diagnostics
       .cuda_terminal_boundary_confirmation_complete_evaluation_count +=
         state.terminal_boundary_confirmation_phase_timing
           .complete_evaluation_count;
@@ -2762,10 +3106,31 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
         state.terminal_boundary_confirmation_max_delta_ratio);
     if (state.stability_replay_attempted != 0) {
       ++diagnostics.cuda_stability_replay_target_count;
+      const int discarded_replay_evaluations =
+        state.discarded_phase_timing.complete_evaluation_count +
+          state.discarded_phase_timing.score_only_evaluation_count;
+      diagnostics.cuda_stability_replay_screened_count +=
+        state.stability_replay_selected == 0 &&
+          state.stability_replay_error == 0 &&
+          discarded_replay_evaluations == 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_selected_count +=
         state.stability_replay_selected != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_error_count +=
         state.stability_replay_error != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_long_trajectory_reason_count +=
+        state.stability_replay_long_trajectory_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_dense_boundary_reason_count +=
+        state.stability_replay_dense_boundary_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_high_condition_reason_count +=
+        state.stability_replay_high_condition_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_ambiguous_step_reason_count +=
+        state.stability_replay_ambiguous_step_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_rejected_boundary_reason_count +=
+        state.stability_replay_rejected_boundary_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_direct_newton_reason_count +=
+        state.stability_replay_direct_newton_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_dense_score_guard_rejected_count +=
+        state.stability_replay_dense_score_guard_rejected != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_extrapolation_target_count +=
         state.stability_replay_extrapolation_applied != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_max_log_sp_spread = std::max(
