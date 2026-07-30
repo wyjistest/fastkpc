@@ -7471,6 +7471,14 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
         "cuda_terminal_boundary_confirmation_rejected_count") =
           diagnostics.cuda_terminal_boundary_confirmation_rejected_count,
       Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_strong_delta_accepted_count") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_strong_delta_accepted_count,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_identity_tie_accepted_count") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_identity_tie_accepted_count,
+      Rcpp::Named(
         "cuda_terminal_boundary_confirmation_complete_evaluation_count") =
           diagnostics
             .cuda_terminal_boundary_confirmation_complete_evaluation_count,
@@ -7488,6 +7496,13 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
       Rcpp::Named(
         "cuda_terminal_boundary_confirmation_max_identity_ratio") =
           diagnostics.cuda_terminal_boundary_confirmation_max_identity_ratio,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_max_delta_disagreement") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_max_delta_disagreement,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_max_delta_ratio") =
+          diagnostics.cuda_terminal_boundary_confirmation_max_delta_ratio,
       Rcpp::Named("cuda_hessian_eigensolver_count") =
         diagnostics.cuda_hessian_eigensolver_count,
       Rcpp::Named("cuda_selected_fit_count") =
@@ -7855,6 +7870,14 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cuda(
         "cuda_terminal_boundary_confirmation_rejected_count") =
           diagnostics.cuda_terminal_boundary_confirmation_rejected_count,
       Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_strong_delta_accepted_count") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_strong_delta_accepted_count,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_identity_tie_accepted_count") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_identity_tie_accepted_count,
+      Rcpp::Named(
         "cuda_terminal_boundary_confirmation_complete_evaluation_count") =
           diagnostics
             .cuda_terminal_boundary_confirmation_complete_evaluation_count,
@@ -7872,6 +7895,13 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cuda(
       Rcpp::Named(
         "cuda_terminal_boundary_confirmation_max_identity_ratio") =
           diagnostics.cuda_terminal_boundary_confirmation_max_identity_ratio,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_max_delta_disagreement") =
+          diagnostics
+            .cuda_terminal_boundary_confirmation_max_delta_disagreement,
+      Rcpp::Named(
+        "cuda_terminal_boundary_confirmation_max_delta_ratio") =
+          diagnostics.cuda_terminal_boundary_confirmation_max_delta_ratio,
       Rcpp::Named("cuda_hessian_eigensolver_count") =
         diagnostics.cuda_hessian_eigensolver_count,
       Rcpp::Named("cuda_selected_fit_count") =

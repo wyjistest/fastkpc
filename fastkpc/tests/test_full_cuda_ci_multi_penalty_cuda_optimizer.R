@@ -28,13 +28,16 @@ cases <- data.frame(
     "rank-deficient", "maximum-iterations", "maximum-score-calls",
     "near-flat-boundary", "near-convergence-score-rounding",
     "formal-partition-log-sp-tolerance",
+    "formal-partition-edf-tolerance",
     "formal-partition-boundary-trajectory",
     "formal-partition-legitimate-boundary-a",
     "formal-partition-legitimate-boundary-b",
-    "formal-partition-legitimate-boundary-c"
+    "formal-partition-legitimate-boundary-c",
+    "formal-partition-legitimate-boundary-d"
   ),
   shard_id = c(
-    1L, 56L, 0L, 37L, 10L, 59L, 10L, 48L, 1L, 33L, 1L, 1L, 17L
+    1L, 56L, 0L, 37L, 10L, 59L, 10L, 48L, 1L, 36L, 33L, 1L, 1L,
+    17L, 37L
   ),
   prepared_s_key_sha256 = c(
     "001245052f571033286b2dc7526c24dbe5ec5c221660c094a8b9f052376b91da",
@@ -46,10 +49,12 @@ cases <- data.frame(
     "0088c39e91afee87a1a347802db2fb51395e025689e3f13da5a0fe71b71c6bdf",
     "43470d9bf1e9680097ac2b5bf142836e76e88de2660f680c64f4b62bd8bcd3cd",
     "4b5e8d92c4e86cdddeb003da79188d933cf991b521151134a1f85ab1947d4cb1",
+    "18b367b21d9ab1f391df7f790af330b1e0770e0db7a83c032cfbeb73645b5b9a",
     "d19398722be813273a4d9d038b0100d6e425487fadc52091802d1990c0b728f5",
     "2683a26ce86357d2d4706b2ab91e9e6117a4b96cbeff61cc0fab787ed720b088",
     "922330870499c78da8ff876abf363766c571a53536a85b58ed4c829b74d502e1",
-    "a7b667e962ff5dd521f4573adfca50b04b443054179da19e9e96523c16706766"
+    "a7b667e962ff5dd521f4573adfca50b04b443054179da19e9e96523c16706766",
+    "ef263c8336fa2dde2c90e8db0a4f5ba9e3086c710e43a3c1536af28e24571eca"
   ),
   residual_key_sha256 = c(
     NA_character_,
@@ -61,10 +66,12 @@ cases <- data.frame(
     "8b770202d16c751864c6fa19b51355ace98a070645b916949d825ffcf1327ced",
     "473654d1eb6bc2d4f707c970109139d5417cefa303941838a959663719b29888",
     "ad4d0942fca390d0997052899c1f99c4071414d21493dae5c10126348a012e14",
+    "4e8c62a69abbd86d18f2131e33603c5251b3ae5517b41dd4f8208b0c55267523",
     "d190d6c386123aa4eb52016bb1d9149027dd1cdd844b3c7219a9c57d163783af",
     "406ff4c472c7ef03668f8d416362a0c7041415579019fb30d88a7493056f1580",
     "bec8345d9c183a753ff5be4e81983b2e655c7ba83efa2b2bb1cb236cbc927c57",
-    "b8bfb8f557d7623169f4d76e9a1691541e5a5c017731bef22fe6c3f9f486ee13"
+    "b8bfb8f557d7623169f4d76e9a1691541e5a5c017731bef22fe6c3f9f486ee13",
+    "51f6eee9ba1ead5075b60d20cab243c4fe2d8e6cebbed977c8ebe61f2d9717e4"
   ),
   stringsAsFactors = FALSE
 )
@@ -205,9 +212,24 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       diagnostics$cuda_terminal_boundary_confirmation_accepted_count +
         diagnostics$cuda_terminal_boundary_confirmation_rejected_count ==
           diagnostics$cuda_terminal_boundary_confirmation_count &&
+      diagnostics[[
+        "cuda_terminal_boundary_confirmation_strong_delta_accepted_count"
+      ]] + diagnostics[[
+        "cuda_terminal_boundary_confirmation_identity_tie_accepted_count"
+      ]] == diagnostics$cuda_terminal_boundary_confirmation_accepted_count &&
       confirmation_evaluations ==
         2L * diagnostics$cuda_terminal_boundary_confirmation_count &&
       confirmation_factorizations == confirmation_evaluations &&
+      is.finite(diagnostics[[
+        "cuda_terminal_boundary_confirmation_max_delta_disagreement"
+      ]]) && diagnostics[[
+        "cuda_terminal_boundary_confirmation_max_delta_disagreement"
+      ]] >= 0 &&
+      is.finite(diagnostics[[
+        "cuda_terminal_boundary_confirmation_max_delta_ratio"
+      ]]) && diagnostics[[
+        "cuda_terminal_boundary_confirmation_max_delta_ratio"
+      ]] >= 0 &&
       physical_evaluations == physical_factorizations &&
       diagnostics$cuda_guarded_qr_evaluation_count > 0L &&
       diagnostics$cuda_penalty_factor_augmentation_cycles > 0 &&
@@ -310,6 +332,14 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       diagnostics$cuda_terminal_boundary_confirmation_accepted_count,
     terminal_boundary_confirmation_rejected_count =
       diagnostics$cuda_terminal_boundary_confirmation_rejected_count,
+    terminal_boundary_confirmation_strong_delta_accepted_count =
+      diagnostics[[
+        "cuda_terminal_boundary_confirmation_strong_delta_accepted_count"
+      ]],
+    terminal_boundary_confirmation_identity_tie_accepted_count =
+      diagnostics[[
+        "cuda_terminal_boundary_confirmation_identity_tie_accepted_count"
+      ]],
     terminal_boundary_confirmation_complete_evaluation_count =
       diagnostics[[
         "cuda_terminal_boundary_confirmation_complete_evaluation_count"
@@ -326,6 +356,12 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       ]],
     terminal_boundary_confirmation_max_identity_ratio =
       diagnostics$cuda_terminal_boundary_confirmation_max_identity_ratio,
+    terminal_boundary_confirmation_max_delta_disagreement =
+      diagnostics[[
+        "cuda_terminal_boundary_confirmation_max_delta_disagreement"
+      ]],
+    terminal_boundary_confirmation_max_delta_ratio =
+      diagnostics$cuda_terminal_boundary_confirmation_max_delta_ratio,
     max_residual_error = max(abs(
       candidate_residuals - reference_residuals
     )),
@@ -342,12 +378,21 @@ assert_true(
 stability_row <- rows[
   rows$label == "formal-partition-log-sp-tolerance", , drop = FALSE
 ]
+edf_stability_row <- rows[
+  rows$label == "formal-partition-edf-tolerance", , drop = FALSE
+]
 boundary_row <- rows[
   rows$label == "formal-partition-boundary-trajectory", , drop = FALSE
 ]
 legitimate_boundary_rows <- rows[
   startsWith(rows$label, "formal-partition-legitimate-boundary-"),
   , drop = FALSE
+]
+identity_tie_boundary_row <- rows[
+  rows$label == "formal-partition-legitimate-boundary-a", , drop = FALSE
+]
+strong_delta_boundary_row <- rows[
+  rows$label == "formal-partition-legitimate-boundary-d", , drop = FALSE
 ]
 assert_true(
   nrow(stability_row) == 1L &&
@@ -359,20 +404,37 @@ assert_true(
   "Phase 6 long-trajectory stability replay coverage is incomplete"
 )
 assert_true(
+  nrow(edf_stability_row) == 1L &&
+    edf_stability_row$stability_replay_target_count >= 1L &&
+    edf_stability_row$stability_replay_selected_count >= 1L &&
+    edf_stability_row$stability_replay_error_count == 0L &&
+    edf_stability_row$stability_replay_max_log_sp_spread > 5e-8 &&
+    edf_stability_row$max_edf_error <= 1e-8,
+  "Phase 6 boundary-risk stability replay coverage is incomplete"
+)
+assert_true(
   nrow(boundary_row) == 1L &&
     boundary_row$terminal_boundary_confirmation_count >= 1L &&
     boundary_row$terminal_boundary_confirmation_rejected_count >= 1L &&
+    boundary_row[[
+      "terminal_boundary_confirmation_strong_delta_accepted_count"
+    ]] == 0L &&
+    boundary_row[[
+      "terminal_boundary_confirmation_identity_tie_accepted_count"
+    ]] == 0L &&
     boundary_row$terminal_boundary_confirmation_complete_evaluation_count ==
       2L * boundary_row$terminal_boundary_confirmation_count &&
     boundary_row$terminal_boundary_confirmation_stable_svd_evaluation_count ==
       boundary_row$terminal_boundary_confirmation_complete_evaluation_count &&
     boundary_row$terminal_boundary_confirmation_cycles > 0 &&
     boundary_row$terminal_boundary_confirmation_max_identity_disagreement > 0 &&
-    boundary_row$terminal_boundary_confirmation_max_identity_ratio > 1,
+    boundary_row$terminal_boundary_confirmation_max_identity_ratio > 1 &&
+    boundary_row$terminal_boundary_confirmation_max_delta_disagreement > 0 &&
+    boundary_row$terminal_boundary_confirmation_max_delta_ratio > 1,
   "Phase 6 rejected terminal boundary confirmation coverage is incomplete"
 )
 assert_true(
-  nrow(legitimate_boundary_rows) == 3L &&
+  nrow(legitimate_boundary_rows) == 4L &&
     all(legitimate_boundary_rows$terminal_boundary_confirmation_count >= 1L) &&
     all(
       legitimate_boundary_rows$terminal_boundary_confirmation_accepted_count >=
@@ -381,6 +443,15 @@ assert_true(
     all(
       legitimate_boundary_rows$terminal_boundary_confirmation_rejected_count ==
         0L
+    ) &&
+    all(
+      legitimate_boundary_rows[[
+        "terminal_boundary_confirmation_strong_delta_accepted_count"
+      ]] + legitimate_boundary_rows[[
+        "terminal_boundary_confirmation_identity_tie_accepted_count"
+      ]] == legitimate_boundary_rows[[
+        "terminal_boundary_confirmation_accepted_count"
+      ]]
     ) &&
     all(
       legitimate_boundary_rows[[
@@ -401,9 +472,24 @@ assert_true(
       ]] > 0
     ) &&
     all(
-      legitimate_boundary_rows$terminal_boundary_confirmation_max_identity_ratio <=
-        1
+      legitimate_boundary_rows[[
+        "terminal_boundary_confirmation_max_delta_disagreement"
+      ]] > 0
     ) &&
+    nrow(identity_tie_boundary_row) == 1L &&
+    identity_tie_boundary_row[[
+      "terminal_boundary_confirmation_identity_tie_accepted_count"
+    ]] >= 1L &&
+    identity_tie_boundary_row$terminal_boundary_confirmation_max_identity_ratio <=
+      1 &&
+    nrow(strong_delta_boundary_row) == 1L &&
+    strong_delta_boundary_row[[
+      "terminal_boundary_confirmation_strong_delta_accepted_count"
+    ]] >= 1L &&
+    strong_delta_boundary_row$terminal_boundary_confirmation_max_identity_ratio >
+      1 &&
+    strong_delta_boundary_row$terminal_boundary_confirmation_max_delta_ratio >
+      1 &&
     all(legitimate_boundary_rows$stability_replay_error_count == 0L),
   "Phase 6 accepted terminal boundary confirmation coverage is incomplete"
 )

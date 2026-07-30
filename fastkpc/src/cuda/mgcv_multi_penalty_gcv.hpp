@@ -58,11 +58,15 @@ struct MultiPenaltyGcvCudaDiagnostics {
   int cuda_terminal_boundary_confirmation_count = 0;
   int cuda_terminal_boundary_confirmation_accepted_count = 0;
   int cuda_terminal_boundary_confirmation_rejected_count = 0;
+  int cuda_terminal_boundary_confirmation_strong_delta_accepted_count = 0;
+  int cuda_terminal_boundary_confirmation_identity_tie_accepted_count = 0;
   int cuda_terminal_boundary_confirmation_complete_evaluation_count = 0;
   int cuda_terminal_boundary_confirmation_stable_svd_evaluation_count = 0;
   std::uint64_t cuda_terminal_boundary_confirmation_cycles = 0;
   double cuda_terminal_boundary_confirmation_max_identity_disagreement = 0.0;
   double cuda_terminal_boundary_confirmation_max_identity_ratio = 0.0;
+  double cuda_terminal_boundary_confirmation_max_delta_disagreement = 0.0;
+  double cuda_terminal_boundary_confirmation_max_delta_ratio = 0.0;
   int cuda_hessian_eigensolver_count = 0;
   int cuda_selected_fit_count = 0;
   int cpu_objective_count = 0;

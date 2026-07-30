@@ -141,16 +141,33 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
     all(timings$cuda_stability_replay_max_log_sp_spread >= 0) &&
     all(
       timings$cuda_stability_replay_selected_count == 0L |
-        timings$cuda_stability_replay_max_log_sp_spread > 1e-7
+        timings$cuda_stability_replay_max_log_sp_spread > 5e-8
     )
   terminal_boundary_confirmation_gate <-
     all(timings$cuda_terminal_boundary_confirmation_count >= 0L) &&
     all(timings$cuda_terminal_boundary_confirmation_accepted_count >= 0L) &&
     all(timings$cuda_terminal_boundary_confirmation_rejected_count >= 0L) &&
     all(
+      timings[[
+        "cuda_terminal_boundary_confirmation_strong_delta_accepted_count"
+      ]] >= 0L
+    ) &&
+    all(
+      timings[[
+        "cuda_terminal_boundary_confirmation_identity_tie_accepted_count"
+      ]] >= 0L
+    ) &&
+    all(
       timings$cuda_terminal_boundary_confirmation_accepted_count +
         timings$cuda_terminal_boundary_confirmation_rejected_count ==
         timings$cuda_terminal_boundary_confirmation_count
+    ) &&
+    all(
+      timings[[
+        "cuda_terminal_boundary_confirmation_strong_delta_accepted_count"
+      ]] + timings[[
+        "cuda_terminal_boundary_confirmation_identity_tie_accepted_count"
+      ]] == timings$cuda_terminal_boundary_confirmation_accepted_count
     ) &&
     all(confirmation_evaluations ==
           2L * timings$cuda_terminal_boundary_confirmation_count) &&
@@ -168,6 +185,16 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
       timings$cuda_terminal_boundary_confirmation_max_identity_ratio
     )) &&
     all(timings$cuda_terminal_boundary_confirmation_max_identity_ratio >= 0) &&
+    all(is.finite(
+      timings$cuda_terminal_boundary_confirmation_max_delta_disagreement
+    )) &&
+    all(
+      timings$cuda_terminal_boundary_confirmation_max_delta_disagreement >= 0
+    ) &&
+    all(is.finite(
+      timings$cuda_terminal_boundary_confirmation_max_delta_ratio
+    )) &&
+    all(timings$cuda_terminal_boundary_confirmation_max_delta_ratio >= 0) &&
     all(
       timings$cuda_terminal_boundary_confirmation_count == 0L |
         timings$cuda_terminal_boundary_confirmation_cycles > 0
@@ -316,6 +343,16 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
       sum(timings$cuda_terminal_boundary_confirmation_accepted_count),
     cuda_terminal_boundary_confirmation_rejected_count =
       sum(timings$cuda_terminal_boundary_confirmation_rejected_count),
+    cuda_terminal_boundary_confirmation_strong_delta_accepted_count = sum(
+      timings[[
+        "cuda_terminal_boundary_confirmation_strong_delta_accepted_count"
+      ]]
+    ),
+    cuda_terminal_boundary_confirmation_identity_tie_accepted_count = sum(
+      timings[[
+        "cuda_terminal_boundary_confirmation_identity_tie_accepted_count"
+      ]]
+    ),
     cuda_terminal_boundary_confirmation_complete_evaluation_count = sum(
       timings$cuda_terminal_boundary_confirmation_complete_evaluation_count
     ),
@@ -329,6 +366,11 @@ fastkpc_full_cuda_phase6_shadow_summary <- function(
     ),
     cuda_terminal_boundary_confirmation_max_identity_ratio =
       max(timings$cuda_terminal_boundary_confirmation_max_identity_ratio),
+    cuda_terminal_boundary_confirmation_max_delta_disagreement = max(
+      timings$cuda_terminal_boundary_confirmation_max_delta_disagreement
+    ),
+    cuda_terminal_boundary_confirmation_max_delta_ratio =
+      max(timings$cuda_terminal_boundary_confirmation_max_delta_ratio),
     cuda_physical_evaluation_count = sum(physical_evaluations),
     cuda_physical_factorization_count = sum(physical_factorizations),
     legacy_mgcv_target_calls = sum(timings$legacy_mgcv_target_calls),
@@ -846,6 +888,20 @@ fastkpc_full_cuda_phase6_scan_partition <- function(
           candidate$diagnostics[[
             "cuda_terminal_boundary_confirmation_rejected_count"
           ]],
+        cuda_terminal_boundary_confirmation_strong_delta_accepted_count =
+          candidate$diagnostics[[
+            paste0(
+              "cuda_terminal_boundary_confirmation_",
+              "strong_delta_accepted_count"
+            )
+          ]],
+        cuda_terminal_boundary_confirmation_identity_tie_accepted_count =
+          candidate$diagnostics[[
+            paste0(
+              "cuda_terminal_boundary_confirmation_",
+              "identity_tie_accepted_count"
+            )
+          ]],
         cuda_terminal_boundary_confirmation_complete_evaluation_count =
           candidate$diagnostics[[
             "cuda_terminal_boundary_confirmation_complete_evaluation_count"
@@ -863,6 +919,14 @@ fastkpc_full_cuda_phase6_scan_partition <- function(
         cuda_terminal_boundary_confirmation_max_identity_ratio =
           candidate$diagnostics[[
             "cuda_terminal_boundary_confirmation_max_identity_ratio"
+          ]],
+        cuda_terminal_boundary_confirmation_max_delta_disagreement =
+          candidate$diagnostics[[
+            "cuda_terminal_boundary_confirmation_max_delta_disagreement"
+          ]],
+        cuda_terminal_boundary_confirmation_max_delta_ratio =
+          candidate$diagnostics[[
+            "cuda_terminal_boundary_confirmation_max_delta_ratio"
           ]],
         cuda_error_count = candidate$diagnostics$cuda_error_count,
         legacy_mgcv_target_calls = 0L,

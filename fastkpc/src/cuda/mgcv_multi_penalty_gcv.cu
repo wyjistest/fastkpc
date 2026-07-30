@@ -32,8 +32,11 @@ constexpr int kMaximumRows = 128;
 constexpr double kLapackEpsilon =
   1.1102230246251565404236316680908203125e-16;
 constexpr double kDenominatorFloor = 1e-8;
-constexpr int kStabilityReplayMinimumIterations = 101;
-constexpr double kStabilityReplayLogSpSpread = 1e-7;
+constexpr int kStabilityReplayLongTrajectoryMinimumIterations = 101;
+constexpr int kStabilityReplayBoundaryMinimumIterations = 25;
+constexpr int kStabilityReplayBoundaryStepHalvingNumerator = 9;
+constexpr int kStabilityReplayBoundaryStepHalvingDenominator = 4;
+constexpr double kStabilityReplayLogSpSpread = 5e-8;
 constexpr double kStabilityReplayMaximumInwardShift = 1e-6;
 constexpr double kTerminalBoundaryTieCondition = 33554432.0;
 constexpr double kTerminalBoundaryTieRelativeTolerance =
@@ -450,10 +453,14 @@ struct DeviceOptimizerState {
   int terminal_boundary_confirmation_count;
   int terminal_boundary_confirmation_accepted_count;
   int terminal_boundary_confirmation_rejected_count;
+  int terminal_boundary_confirmation_strong_delta_accepted_count;
+  int terminal_boundary_confirmation_identity_tie_accepted_count;
   int terminal_boundary_confirmation_pending;
   double stability_replay_log_sp_spread;
   double terminal_boundary_confirmation_max_identity_disagreement;
   double terminal_boundary_confirmation_max_identity_ratio;
+  double terminal_boundary_confirmation_max_delta_disagreement;
+  double terminal_boundary_confirmation_max_delta_ratio;
   double terminal_boundary_primary_current_score;
   double terminal_boundary_primary_trial_score;
   double terminal_boundary_stable_current_score;
@@ -463,6 +470,20 @@ struct DeviceOptimizerState {
   DevicePhaseTiming discarded_phase_timing;
   DevicePhaseTiming terminal_boundary_confirmation_phase_timing;
 };
+
+__device__ bool requires_stability_replay(
+    const DeviceOptimizerState& state) {
+  return state.optimizer_status == 0 && (
+    state.optimizer_iterations >=
+      kStabilityReplayLongTrajectoryMinimumIterations ||
+    (state.optimizer_iterations >=
+       kStabilityReplayBoundaryMinimumIterations &&
+     state.boundary_accepted_count > 0 &&
+     state.step_halving_count *
+       kStabilityReplayBoundaryStepHalvingDenominator >=
+         state.optimizer_iterations *
+           kStabilityReplayBoundaryStepHalvingNumerator));
+}
 
 __device__ bool symmetric_jacobi_eigen(
     const double* input,
@@ -1120,9 +1141,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
   if (target >= target_count) return;
   if (stability_replay &&
       (primary_states == nullptr ||
-       primary_states[target].optimizer_status != 0 ||
-       primary_states[target].optimizer_iterations <
-         kStabilityReplayMinimumIterations)) {
+       !requires_stability_replay(primary_states[target]))) {
     return;
   }
   DeviceEvaluationWorkspace* workspace = workspaces + target;
@@ -1157,10 +1176,14 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->terminal_boundary_confirmation_count = 0;
     state->terminal_boundary_confirmation_accepted_count = 0;
     state->terminal_boundary_confirmation_rejected_count = 0;
+    state->terminal_boundary_confirmation_strong_delta_accepted_count = 0;
+    state->terminal_boundary_confirmation_identity_tie_accepted_count = 0;
     state->terminal_boundary_confirmation_pending = 0;
     state->stability_replay_log_sp_spread = 0.0;
     state->terminal_boundary_confirmation_max_identity_disagreement = 0.0;
     state->terminal_boundary_confirmation_max_identity_ratio = 0.0;
+    state->terminal_boundary_confirmation_max_delta_disagreement = 0.0;
+    state->terminal_boundary_confirmation_max_delta_ratio = 0.0;
     state->terminal_boundary_primary_current_score = CUDART_NAN;
     state->terminal_boundary_primary_trial_score = CUDART_NAN;
     state->terminal_boundary_stable_current_score = CUDART_NAN;
@@ -1578,13 +1601,30 @@ __global__ void optimize_multi_penalty_targets_kernel(
             __dmul_rn(512.0 * kLapackEpsilon, static_cast<double>(q)),
             __dadd_rn(
               1.0, fabs(state->terminal_boundary_stable_current_score)));
-          accepted = stable_score_delta < 0.0 &&
+          const double stable_direct_score_delta = __dadd_rn(
+            state->terminal_boundary_stable_trial_direct_score,
+            -state->terminal_boundary_stable_current_direct_score);
+          const double delta_identity_disagreement = fabs(__dadd_rn(
+            stable_score_delta, -stable_direct_score_delta));
+          const bool identity_verified_tie_descent =
+            stable_score_delta < 0.0 &&
             score_identity_disagreement <= identity_tolerance;
+          const bool strong_delta_descent =
+            !identity_verified_tie_descent &&
+            stable_score_delta < -identity_tolerance &&
+            stable_direct_score_delta < stable_score_delta;
+          accepted = strong_delta_descent || identity_verified_tie_descent;
           ++state->terminal_boundary_confirmation_count;
           state->terminal_boundary_confirmation_accepted_count +=
             accepted ? 1 : 0;
           state->terminal_boundary_confirmation_rejected_count +=
             accepted ? 0 : 1;
+          state
+            ->terminal_boundary_confirmation_strong_delta_accepted_count +=
+              strong_delta_descent ? 1 : 0;
+          state
+            ->terminal_boundary_confirmation_identity_tie_accepted_count +=
+              identity_verified_tie_descent ? 1 : 0;
           state->terminal_boundary_confirmation_max_identity_disagreement =
             fmax(
               state
@@ -1593,6 +1633,14 @@ __global__ void optimize_multi_penalty_targets_kernel(
           state->terminal_boundary_confirmation_max_identity_ratio = fmax(
             state->terminal_boundary_confirmation_max_identity_ratio,
             __ddiv_rn(score_identity_disagreement, identity_tolerance));
+          state->terminal_boundary_confirmation_max_delta_disagreement =
+            fmax(
+              state
+                ->terminal_boundary_confirmation_max_delta_disagreement,
+              delta_identity_disagreement);
+          state->terminal_boundary_confirmation_max_delta_ratio = fmax(
+            state->terminal_boundary_confirmation_max_delta_ratio,
+            __ddiv_rn(delta_identity_disagreement, identity_tolerance));
         }
         if (state->optimizer_status == 0) {
           if (accepted) {
@@ -1639,7 +1687,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     if (maximum_spread > kStabilityReplayLogSpSpread) {
       state->stability_replay_selected = 1;
       if (primary_states[target].optimizer_iterations >=
-          kStabilityReplayMinimumIterations) {
+          kStabilityReplayLongTrajectoryMinimumIterations) {
         const double inward_shift = fmin(
           kStabilityReplayMaximumInwardShift,
           __dmul_rn(2.0, maximum_spread));
@@ -1687,9 +1735,7 @@ __global__ void merge_stability_replay_states_kernel(
     int target_count) {
   const int target = blockIdx.x * blockDim.x + threadIdx.x;
   if (target >= target_count ||
-      primary_states[target].optimizer_status != 0 ||
-      primary_states[target].optimizer_iterations <
-        kStabilityReplayMinimumIterations) {
+      !requires_stability_replay(primary_states[target])) {
     return;
   }
   DeviceOptimizerState& primary = primary_states[target];
@@ -1700,10 +1746,18 @@ __global__ void merge_stability_replay_states_kernel(
     primary.terminal_boundary_confirmation_accepted_count;
   const int primary_confirmation_rejected_count =
     primary.terminal_boundary_confirmation_rejected_count;
+  const int primary_confirmation_strong_delta_accepted_count =
+    primary.terminal_boundary_confirmation_strong_delta_accepted_count;
+  const int primary_confirmation_identity_tie_accepted_count =
+    primary.terminal_boundary_confirmation_identity_tie_accepted_count;
   const double primary_confirmation_max_identity_disagreement =
     primary.terminal_boundary_confirmation_max_identity_disagreement;
   const double primary_confirmation_max_identity_ratio =
     primary.terminal_boundary_confirmation_max_identity_ratio;
+  const double primary_confirmation_max_delta_disagreement =
+    primary.terminal_boundary_confirmation_max_delta_disagreement;
+  const double primary_confirmation_max_delta_ratio =
+    primary.terminal_boundary_confirmation_max_delta_ratio;
   const DevicePhaseTiming primary_confirmation_timing =
     primary.terminal_boundary_confirmation_phase_timing;
   const bool selected = replay.stability_replay_selected != 0 &&
@@ -1720,10 +1774,18 @@ __global__ void merge_stability_replay_states_kernel(
       primary_confirmation_accepted_count;
     primary.terminal_boundary_confirmation_rejected_count =
       primary_confirmation_rejected_count;
+    primary.terminal_boundary_confirmation_strong_delta_accepted_count =
+      primary_confirmation_strong_delta_accepted_count;
+    primary.terminal_boundary_confirmation_identity_tie_accepted_count =
+      primary_confirmation_identity_tie_accepted_count;
     primary.terminal_boundary_confirmation_max_identity_disagreement =
       primary_confirmation_max_identity_disagreement;
     primary.terminal_boundary_confirmation_max_identity_ratio =
       primary_confirmation_max_identity_ratio;
+    primary.terminal_boundary_confirmation_max_delta_disagreement =
+      primary_confirmation_max_delta_disagreement;
+    primary.terminal_boundary_confirmation_max_delta_ratio =
+      primary_confirmation_max_delta_ratio;
     primary.terminal_boundary_confirmation_phase_timing =
       primary_confirmation_timing;
   }
@@ -1938,6 +2000,12 @@ MultiPenaltyGcvCudaOptimization materialize_optimizer_output(
     diagnostics.cuda_terminal_boundary_confirmation_rejected_count +=
       state.terminal_boundary_confirmation_rejected_count;
     diagnostics
+      .cuda_terminal_boundary_confirmation_strong_delta_accepted_count +=
+        state.terminal_boundary_confirmation_strong_delta_accepted_count;
+    diagnostics
+      .cuda_terminal_boundary_confirmation_identity_tie_accepted_count +=
+        state.terminal_boundary_confirmation_identity_tie_accepted_count;
+    diagnostics
       .cuda_terminal_boundary_confirmation_complete_evaluation_count +=
         state.terminal_boundary_confirmation_phase_timing
           .complete_evaluation_count;
@@ -1963,6 +2031,16 @@ MultiPenaltyGcvCudaOptimization materialize_optimizer_output(
       std::max(
         diagnostics.cuda_terminal_boundary_confirmation_max_identity_ratio,
         state.terminal_boundary_confirmation_max_identity_ratio);
+    diagnostics
+      .cuda_terminal_boundary_confirmation_max_delta_disagreement =
+        std::max(
+          diagnostics
+            .cuda_terminal_boundary_confirmation_max_delta_disagreement,
+          state.terminal_boundary_confirmation_max_delta_disagreement);
+    diagnostics.cuda_terminal_boundary_confirmation_max_delta_ratio =
+      std::max(
+        diagnostics.cuda_terminal_boundary_confirmation_max_delta_ratio,
+        state.terminal_boundary_confirmation_max_delta_ratio);
     if (state.stability_replay_attempted != 0) {
       ++diagnostics.cuda_stability_replay_target_count;
       diagnostics.cuda_stability_replay_selected_count +=
@@ -2571,6 +2649,12 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
     diagnostics.cuda_terminal_boundary_confirmation_rejected_count +=
       state.terminal_boundary_confirmation_rejected_count;
     diagnostics
+      .cuda_terminal_boundary_confirmation_strong_delta_accepted_count +=
+        state.terminal_boundary_confirmation_strong_delta_accepted_count;
+    diagnostics
+      .cuda_terminal_boundary_confirmation_identity_tie_accepted_count +=
+        state.terminal_boundary_confirmation_identity_tie_accepted_count;
+    diagnostics
       .cuda_terminal_boundary_confirmation_complete_evaluation_count +=
         state.terminal_boundary_confirmation_phase_timing
           .complete_evaluation_count;
@@ -2596,6 +2680,16 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
       std::max(
         diagnostics.cuda_terminal_boundary_confirmation_max_identity_ratio,
         state.terminal_boundary_confirmation_max_identity_ratio);
+    diagnostics
+      .cuda_terminal_boundary_confirmation_max_delta_disagreement =
+        std::max(
+          diagnostics
+            .cuda_terminal_boundary_confirmation_max_delta_disagreement,
+          state.terminal_boundary_confirmation_max_delta_disagreement);
+    diagnostics.cuda_terminal_boundary_confirmation_max_delta_ratio =
+      std::max(
+        diagnostics.cuda_terminal_boundary_confirmation_max_delta_ratio,
+        state.terminal_boundary_confirmation_max_delta_ratio);
     if (state.stability_replay_attempted != 0) {
       ++diagnostics.cuda_stability_replay_target_count;
       diagnostics.cuda_stability_replay_selected_count +=
