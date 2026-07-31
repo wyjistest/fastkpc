@@ -60,6 +60,17 @@ evidence <- fastkpc_full_cuda_phase10_capture_compute_warm(
   formal_canonical = FALSE, capture_machine = FALSE
 )
 fastkpc_full_cuda_phase10_validate_compute_warm_evidence(evidence)
+profile <- fastkpc_full_cuda_phase10_compute_profile(evidence$result$summary)
+assert_true(
+  identical(profile$schema_version, "full-cuda-ci-compute-profile-v2") &&
+    is.data.frame(profile$stage_timing) &&
+    nrow(profile$stage_timing) == 14L &&
+    is.data.frame(profile$physical_work) &&
+    nrow(profile$physical_work) == 49L &&
+    all(is.finite(profile$stage_timing$elapsed_ms)) &&
+    all(is.finite(profile$physical_work$value)),
+  "compute-warm profile must expose complete finite stage/work counters"
+)
 
 tampered <- evidence
 tampered$cache_precondition$cache_epoch_after_reset <-

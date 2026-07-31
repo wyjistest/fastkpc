@@ -90,6 +90,13 @@ for promotion until the v2 campaign and public 500x50 development fixture pass:
 FASTKPC_RUN_CUDA_TESTS=1 bash fastkpc/tools/run_full_cuda_ci_gate.sh
 ```
 
+The current development producer has reduced one canonical fresh-data
+compute-warm run from `1300.19` to `376.461` seconds while preserving exact
+graph/sepset/test-count/deletion decisions and zero CPU numerical authority.
+This passes the `< 600`-second development Checkpoint A only. It does not pass
+the `< 180` Checkpoint B or the final five-run 120-second promotion gate, so no
+candidate has been frozen and the sealed holdout remains unopened.
+
 Only after those prerequisites and a new source/native/contract freeze may an
 external custodian release be supplied. No holdout release input should be
 provided for commit `25db2a6`.

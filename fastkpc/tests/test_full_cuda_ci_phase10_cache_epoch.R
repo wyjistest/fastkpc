@@ -70,6 +70,45 @@ assert_true(
     summary$native_setup_cache_warm_start_entries == 0L &&
     summary$residual_cache_warm_start_entries == 0L &&
     summary$component_cache_warm_start_entries == 0L &&
+    summary$unique_prepared_s_key_count > 0L &&
+    summary$physical_prepared_s_key_count >=
+      summary$unique_prepared_s_key_count &&
+    summary$speculative_prepared_s_build_count ==
+      summary$physical_prepared_s_key_count -
+        summary$unique_prepared_s_key_count &&
+    summary$unique_target_key_count > 0L &&
+    summary$unique_residual_key_count > 0L &&
+    summary$unique_target_key_count == summary$target_cache_miss_count &&
+    summary$native_setup_cache_hit_count ==
+      summary$native_setup_device_cache_hit_count +
+        summary$native_setup_host_cache_hit_count &&
+    summary$native_setup_device_rehydrate_count ==
+      summary$native_setup_host_cache_hit_count &&
+    summary$native_setup_host_cache_peak_entries <=
+      summary$native_setup_host_cache_capacity &&
+    summary$physical_target_optimization_count ==
+      summary$cuda_single_penalty_target_count +
+        summary$cuda_multi_penalty_target_count &&
+    summary$excess_target_optimization_count ==
+      summary$physical_target_optimization_count -
+        summary$unique_target_key_count &&
+    summary$reused_target_state_count == 0L &&
+    summary$unique_residual_key_count <= summary$physical_residual_fits &&
+    summary$excess_residual_fit_count ==
+      summary$physical_residual_fits - summary$unique_residual_key_count &&
+    summary$excess_native_setup_build_count ==
+      summary$native_setup_count - summary$physical_prepared_s_key_count &&
+    summary$cuda_single_penalty_optimizer_call_count > 0L &&
+    summary$cuda_multi_penalty_optimizer_call_count == 0L &&
+    summary$cuda_optimizer_host_boundary_count ==
+      summary$cuda_single_penalty_optimizer_call_count +
+        summary$cuda_multi_penalty_optimizer_call_count &&
+    summary$cuda_optimizer_kernel_launch_count > 0L &&
+    summary$cuda_single_penalty_optimizer_host_ms > 0 &&
+    summary$cuda_multi_penalty_optimizer_host_ms == 0 &&
+    summary$cuda_residual_solve_host_ms > 0 &&
+    summary$cuda_dcov_component_build_ms > 0 &&
+    summary$cuda_dcov_pair_gamma_ms > 0 &&
     summary$physical_tests_evaluated > 0L &&
     summary$physical_residual_fits > 0L,
   "Phase 10 cold call did not prove an empty DatasetKey cache state"

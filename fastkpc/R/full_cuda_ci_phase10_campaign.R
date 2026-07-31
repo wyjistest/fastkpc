@@ -669,7 +669,9 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
     as.integer(summary$native_call_count) == 1L &&
     as.integer(summary$logical_tests_consumed) == 240489L &&
     as.integer(summary$speculative_tests_ignored) == 0L &&
-    identical(summary$scheduler, "cache-aware-frontier-4x-v1") &&
+    summary$scheduler %in% c(
+      "cache-aware-frontier-4x-v1", "cuda-level-target-prefill-host-v5"
+    ) &&
     as.integer(summary$frontier_batch_count) == sum(result$levels$rounds) &&
     as.integer(summary$result_cache_capacity) == 262144L &&
     as.integer(summary$target_cache_capacity) == 131072L &&

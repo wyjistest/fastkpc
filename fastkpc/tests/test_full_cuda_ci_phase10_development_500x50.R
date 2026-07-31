@@ -113,5 +113,13 @@ invisible(full_cuda_ci_one_call_cache_control_native("reset"))
 cat(
   "PASS Phase 10 public 500x50 production-shape fixture; tests=",
   summary$logical_tests_consumed, " edges=",
-  sum(result$adjacency[upper.tri(result$adjacency)]), "\n", sep = ""
+  sum(result$adjacency[upper.tri(result$adjacency)]),
+  " unique_S=", summary$unique_prepared_s_key_count,
+  " unique_targets=", summary$unique_target_key_count,
+  " setup_builds=", summary$native_setup_count,
+  " optimizer_calls=",
+  summary$cuda_single_penalty_optimizer_call_count +
+    summary$cuda_multi_penalty_optimizer_call_count,
+  " residual_fits=", summary$physical_residual_fits,
+  "\n", sep = ""
 )

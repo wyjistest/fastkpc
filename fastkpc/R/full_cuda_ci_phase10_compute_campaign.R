@@ -422,6 +422,150 @@ fastkpc_full_cuda_phase10_validate_compute_warm_evidence <- function(evidence) {
   invisible(evidence)
 }
 
+fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
+  timing_fields <- c(
+    "native_setup_ms", "native_setup_device_rehydrate_ms",
+    "cuda_optimizer_host_ms",
+    "cuda_single_penalty_optimizer_host_ms",
+    "cuda_multi_penalty_optimizer_host_ms",
+    "cuda_single_penalty_optimizer_cuda_ms",
+    "cuda_residual_solve_host_ms", "cuda_dcov_host_ms",
+    "cuda_dcov_metadata_h2d_ms", "cuda_dcov_component_build_ms",
+    "cuda_dcov_pair_gamma_ms", "cuda_dcov_compact_d2h_ms",
+    "cuda_dcov_teardown_host_ms"
+  )
+  counter_fields <- c(
+    "unique_prepared_s_key_count", "physical_prepared_s_key_count",
+    "speculative_prepared_s_build_count", "native_setup_count",
+    "native_setup_cache_request_count", "native_setup_cache_hit_count",
+    "native_setup_device_cache_hit_count",
+    "native_setup_host_cache_hit_count", "native_setup_cache_miss_count",
+    "native_setup_cache_eviction_count",
+    "native_setup_host_cache_capacity",
+    "native_setup_host_cache_eviction_count",
+    "native_setup_host_cache_peak_entries",
+    "native_setup_device_rehydrate_count", "unique_target_key_count",
+    "result_cache_request_count", "result_cache_hit_count",
+    "result_cache_miss_count", "result_cache_insert_count",
+    "result_cache_eviction_count",
+    "target_cache_request_count", "target_cache_hit_count",
+    "target_cache_miss_count", "target_cache_insert_count",
+    "target_cache_eviction_count",
+    "component_cache_request_count", "component_cache_hit_count",
+    "component_cache_miss_count", "component_cache_eviction_count",
+    "cuda_single_penalty_target_count",
+    "cuda_multi_penalty_target_count",
+    "physical_target_optimization_count",
+    "excess_target_optimization_count", "reused_target_state_count",
+    "cuda_single_penalty_optimizer_setup_count",
+    "cuda_single_penalty_optimizer_call_count",
+    "cuda_multi_penalty_optimizer_setup_count",
+    "cuda_multi_penalty_optimizer_call_count",
+    "cuda_optimizer_kernel_launch_count",
+    "cuda_optimizer_host_boundary_count", "unique_residual_key_count",
+    "logical_residual_requests", "physical_residual_fits",
+    "excess_residual_fit_count", "excess_native_setup_build_count",
+    "cuda_dcov_component_count", "cuda_dcov_pair_count",
+    "cuda_gamma_pvalue_count", "host_synchronization_count"
+  )
+  timings <- vapply(timing_fields, function(field) {
+    value <- summary[[field]]
+    if (is.null(value)) NA_real_ else as.numeric(value)
+  }, numeric(1L))
+  counters <- vapply(counter_fields, function(field) {
+    value <- summary[[field]]
+    if (is.null(value)) NA_real_ else as.numeric(value)
+  }, numeric(1L))
+  total_ms <- as.numeric(summary$elapsed_sec) * 1000
+  known_top_level_ms <- sum(timings[c(
+    "native_setup_ms", "native_setup_device_rehydrate_ms",
+    "cuda_optimizer_host_ms",
+    "cuda_residual_solve_host_ms", "cuda_dcov_host_ms",
+    "cuda_dcov_teardown_host_ms"
+  )])
+  fastkpc_full_cuda_phase10_compute_require(
+    length(total_ms) == 1L && is.finite(total_ms) && total_ms > 0 &&
+      all(is.finite(timings) & timings >= 0) &&
+      all(is.finite(counters) & counters >= 0) &&
+      counters[["unique_prepared_s_key_count"]] <=
+        counters[["physical_prepared_s_key_count"]] &&
+      counters[["physical_prepared_s_key_count"]] <=
+        counters[["native_setup_count"]] &&
+      counters[["speculative_prepared_s_build_count"]] ==
+        counters[["physical_prepared_s_key_count"]] -
+          counters[["unique_prepared_s_key_count"]] &&
+      counters[["native_setup_cache_hit_count"]] ==
+        counters[["native_setup_device_cache_hit_count"]] +
+          counters[["native_setup_host_cache_hit_count"]] &&
+      counters[["native_setup_device_rehydrate_count"]] ==
+        counters[["native_setup_host_cache_hit_count"]] &&
+      counters[["native_setup_host_cache_peak_entries"]] <=
+        counters[["native_setup_host_cache_capacity"]] &&
+      counters[["unique_target_key_count"]] <=
+        counters[["target_cache_miss_count"]] &&
+      counters[["target_cache_miss_count"]] <=
+        counters[["physical_target_optimization_count"]] &&
+      counters[["physical_target_optimization_count"]] ==
+        counters[["cuda_single_penalty_target_count"]] +
+          counters[["cuda_multi_penalty_target_count"]] &&
+      counters[["excess_target_optimization_count"]] ==
+        counters[["physical_target_optimization_count"]] -
+          counters[["unique_target_key_count"]] &&
+      counters[["reused_target_state_count"]] == 0 &&
+      counters[["unique_residual_key_count"]] <=
+        counters[["physical_residual_fits"]] &&
+      counters[["excess_residual_fit_count"]] ==
+        counters[["physical_residual_fits"]] -
+          counters[["unique_residual_key_count"]] &&
+      counters[["excess_native_setup_build_count"]] ==
+        counters[["native_setup_count"]] -
+          counters[["physical_prepared_s_key_count"]] &&
+      counters[["cuda_optimizer_host_boundary_count"]] ==
+        counters[["cuda_single_penalty_optimizer_call_count"]] +
+          counters[["cuda_multi_penalty_optimizer_call_count"]],
+    "Phase 10 fresh-data compute profile is malformed"
+  )
+  list(
+    schema_version = "full-cuda-ci-compute-profile-v2",
+    stage_timing = data.frame(
+      stage = c(
+        "native_setup", "native_setup_device_rehydrate",
+        "optimizer_total_host_boundary",
+        "optimizer_single_host", "optimizer_single_cuda_nested",
+        "optimizer_multi_host", "residual_solve_host",
+        "dcov_host_boundary", "dcov_metadata_h2d_nested",
+        "dcov_component_build_nested", "dcov_pair_gamma_nested",
+        "dcov_compact_d2h_nested", "dcov_teardown_host",
+        "control_enumeration_packaging_unattributed"
+      ),
+      elapsed_ms = c(
+        timings[["native_setup_ms"]],
+        timings[["native_setup_device_rehydrate_ms"]],
+        timings[["cuda_optimizer_host_ms"]],
+        timings[["cuda_single_penalty_optimizer_host_ms"]],
+        timings[["cuda_single_penalty_optimizer_cuda_ms"]],
+        timings[["cuda_multi_penalty_optimizer_host_ms"]],
+        timings[["cuda_residual_solve_host_ms"]],
+        timings[["cuda_dcov_host_ms"]],
+        timings[["cuda_dcov_metadata_h2d_ms"]],
+        timings[["cuda_dcov_component_build_ms"]],
+        timings[["cuda_dcov_pair_gamma_ms"]],
+        timings[["cuda_dcov_compact_d2h_ms"]],
+        timings[["cuda_dcov_teardown_host_ms"]],
+        max(0, total_ms - known_top_level_ms)
+      ),
+      stringsAsFactors = FALSE
+    ),
+    physical_work = data.frame(
+      metric = names(counters),
+      value = unname(counters),
+      stringsAsFactors = FALSE
+    ),
+    total_elapsed_ms = total_ms,
+    known_top_level_ms = known_top_level_ms
+  )
+}
+
 fastkpc_full_cuda_phase10_write_compute_warm_evidence <- function(
     evidence, path) {
   fastkpc_full_cuda_phase10_validate_compute_warm_evidence(evidence)

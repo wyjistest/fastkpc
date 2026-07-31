@@ -82,12 +82,16 @@ assert_true(
   "Phase 10 cold compact-result cache accounting is invalid"
 )
 assert_true(
-  identical(cold$summary$scheduler, "cache-aware-frontier-4x-v1") &&
+  identical(cold$summary$scheduler, "cuda-level-target-prefill-host-v5") &&
     cold$summary$frontier_batch_count == sum(cold$levels$rounds) &&
     cold$summary$native_setup_cache_miss_count ==
       length(unique(conditional_tasks$S_key)) &&
-    cold$summary$native_setup_cache_request_count <=
-      2L * length(unique(conditional_tasks$S_key)),
+    cold$summary$native_setup_count ==
+      length(unique(conditional_tasks$S_key)) &&
+    cold$summary$native_setup_cache_eviction_count == 0L &&
+    cold$summary$native_setup_cache_request_count ==
+      cold$summary$native_setup_cache_hit_count +
+        cold$summary$native_setup_cache_miss_count,
   "Phase 10 cache-aware frontier scheduler is not active or bounded"
 )
 assert_true(

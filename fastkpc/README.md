@@ -61,7 +61,8 @@ The candidate uses these bounded caches:
 ```text
 compact CI result cache: 262144 entries
 target optimizer state cache: 131072 entries
-native Prepared-S cache: 64 entries
+native Prepared-S active device cache: 2048 single-penalty + 64 multi-penalty
+per-call native Prepared-S host cache: 16384 entries
 device dCov component capacity: 47 entries
 ```
 
@@ -93,6 +94,29 @@ fresh-data compute-warm median <= 120 seconds
 fresh-data compute-warm median <= 0.80 * same-run correct baseline median
 fresh-process cold median <= same-run correct baseline median
 replay-warm: report only
+```
+
+The current development producer has passed the first optimization checkpoint,
+but it is not a frozen candidate. One fresh-data compute-warm development run
+on the canonical 351x48 input completed in `376.461` seconds, down from the
+initial `1300.19`-second measurement. It consumed 8,634 unique PreparedS keys
+and physically built 8,637 setups (three bounded speculative builds), used 137
+optimizer host boundaries, and recorded 22,291 bounded excess target
+optimizations. Adjacency, normalized sepsets, `n.edgetests`, task order, and
+deletion decisions matched the prior canonical result; the maximum p-value
+difference was `2.89e-14`, and every CPU numerical authority/fallback counter
+was zero.
+
+This is single-run development evidence: Checkpoint A (`< 600` seconds) passes,
+while Checkpoint B (`< 180` seconds) and the final five-run 120-second gate do
+not. Reproduce the development profile without creating formal evidence with:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
+Rscript fastkpc/tools/profile_full_cuda_ci_phase10_fresh_data.R \
+  7 fastkpc/artifacts/full_cuda_ci/phase10_profile_v2/development.rds \
+  development
 ```
 
 Build and focused validation:
