@@ -17,6 +17,7 @@ fastkpc/artifacts/
 *.html
 *.rds
 !fastkpc/tests/fixtures/legacy_dcov_gamma_oracle_v1.rds
+!fastkpc/tests/fixtures/full_cuda_ci_development_500x50_v1.rds
 *.RData
 
 # R session/editor files
