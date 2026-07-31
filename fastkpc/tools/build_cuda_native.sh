@@ -32,6 +32,7 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
 "$CXX" $COMMON_CXX -c "$ROOT/src/full_cuda_ci_contract.cpp" -o "$BUILD/full_cuda_ci_contract.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/full_cuda_ci_semantic_abi.cpp" -o "$BUILD/full_cuda_ci_semantic_abi.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/full_cuda_ci_native_setup.cpp" -o "$BUILD/full_cuda_ci_native_setup.o"
+"$CXX" $COMMON_CXX -c "$ROOT/src/full_cuda_ci_one_call.cpp" -o "$BUILD/full_cuda_ci_one_call.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/hsic_cpu.cpp" -o "$BUILD/hsic_cpu.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/legacy_dcov_gamma_cpp.cpp" -o "$BUILD/legacy_dcov_gamma_cpp.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/mgcv_multi_penalty_cpp.cpp" -o "$BUILD/mgcv_multi_penalty_cpp.o"
@@ -103,6 +104,7 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   "$BUILD/full_cuda_ci_contract.o" \
   "$BUILD/full_cuda_ci_semantic_abi.o" \
   "$BUILD/full_cuda_ci_native_setup.o" \
+  "$BUILD/full_cuda_ci_one_call.o" \
   "$BUILD/hsic_cpu.o" \
   "$BUILD/legacy_dcov_gamma_cpp.o" \
   "$BUILD/mgcv_multi_penalty_cpp.o" \

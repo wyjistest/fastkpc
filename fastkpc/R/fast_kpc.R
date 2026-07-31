@@ -62,7 +62,8 @@ fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
                        "trace_level", "dcov_batch",
                        "mgcv_residual_backend",
                        "mgcv_residual_backend_native_s_size_limit",
-                       "mgcv_residual_backend_condition_threshold")
+                       "mgcv_residual_backend_condition_threshold",
+                       "route", "compatible_cuda_strict")
   unknown_options <- setdiff(names(options), allowed_options)
   if (length(unknown_options) > 0L) {
     stop("unknown compatible CUDA option(s): ",
@@ -78,6 +79,36 @@ fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
   index <- options$index %||% 1
   numCol <- options$numCol %||% floor(nrow(data) / 10)
   trace_level <- options$trace_level %||% "summary"
+  route <- match.arg(options$route %||% "legacy", c("legacy", "full_cuda"))
+  compatible_cuda_strict <- options$compatible_cuda_strict %||% TRUE
+  if (identical(route, "full_cuda")) {
+    result <- precision_run_skeleton_full_cuda_native(
+      data = data,
+      alpha = alpha,
+      max_conditioning_size = as.integer(options$max_conditioning_size),
+      index = index,
+      numCol = numCol,
+      trace_level = trace_level,
+      compatible_cuda_strict = compatible_cuda_strict
+    )
+    dimnames(result$adjacency) <- list(labels, labels)
+    dimnames(result$pMax) <- list(labels, labels)
+    names(result$sepsets) <- labels
+    result$sepsets <- lapply(result$sepsets, function(row) {
+      names(row) <- labels
+      row
+    })
+    result$summary$native_entrypoint <- result$summary$entrypoint
+    result$summary$compatible_cuda_facade <- TRUE
+    result$summary$compatible_cuda_entrypoint <-
+      "fastkpc-compatible-cuda-skeleton"
+    result$summary$compatible_cuda_residual_authority <-
+      "native-setup-live-cuda-gcv-device-residual"
+    result$summary$compatible_cuda_ci_authority <-
+      "guarded-exact-screen-legacy-full-eig-cuda"
+    result$summary$labels <- labels
+    return(result)
+  }
   dcov_batch <- options$dcov_batch %||% "env"
   mgcv_residual_backend <- options$mgcv_residual_backend %||% "env"
   mgcv_residual_backend <- match.arg(

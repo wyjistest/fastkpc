@@ -3,6 +3,7 @@
 #include "fastspline_basis.hpp"
 #include "full_cuda_ci_contract.hpp"
 #include "full_cuda_ci_native_setup.hpp"
+#include "full_cuda_ci_one_call.hpp"
 #include "full_cuda_ci_semantic_abi.hpp"
 #include "hsic_cpu.hpp"
 #include "legacy_dcov_gamma_cpp.hpp"
@@ -8379,6 +8380,29 @@ extern "C" SEXP C_full_cuda_ci_native_setup(SEXP conditioning_s) {
   END_RCPP
 }
 
+extern "C" SEXP C_full_cuda_ci_one_call_skeleton(
+    SEXP data_s,
+    SEXP alpha_s,
+    SEXP max_conditioning_size_s,
+    SEXP index_s,
+    SEXP num_col_s,
+    SEXP trace_level_s,
+    SEXP compatible_cuda_strict_s) {
+  BEGIN_RCPP
+  if (!Rf_isReal(data_s) || !Rf_isMatrix(data_s)) {
+    Rcpp::stop("compatible.cuda one-call data must be a numeric matrix");
+  }
+  return fastkpc::full_cuda_ci_one_call_skeleton(
+    Rcpp::NumericMatrix(data_s),
+    Rcpp::as<double>(alpha_s),
+    Rcpp::as<int>(max_conditioning_size_s),
+    Rcpp::as<double>(index_s),
+    Rcpp::as<int>(num_col_s),
+    Rcpp::as<std::string>(trace_level_s),
+    Rcpp::as<bool>(compatible_cuda_strict_s));
+  END_RCPP
+}
+
 extern "C" SEXP C_full_cuda_ci_native_geometry_prepare(
     SEXP X_s,
     SEXP penalty_blocks_s,
@@ -12815,6 +12839,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_contract_identity", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_contract_identity), 2},
   {"C_full_cuda_ci_semantic_abi_info", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_semantic_abi_info), 0},
   {"C_full_cuda_ci_native_setup", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_setup), 1},
+  {"C_full_cuda_ci_one_call_skeleton", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_skeleton), 7},
   {"C_full_cuda_ci_native_geometry_prepare", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_geometry_prepare), 4},
   {"C_full_cuda_ci_phase35_vertical_resource_snapshot", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical_resource_snapshot), 0},
   {"C_full_cuda_ci_phase35_vertical", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical), 6},

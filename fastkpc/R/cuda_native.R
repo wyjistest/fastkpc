@@ -2132,6 +2132,28 @@ precision_run_skeleton_residual_provider_legacy_dcov_native <- function(
         PACKAGE = "fastkpc_cuda")
 }
 
+precision_run_skeleton_full_cuda_native <- function(
+    data, alpha, max_conditioning_size,
+    index = 1, numCol = floor(nrow(as.matrix(data)) / 10),
+    trace_level = c("summary", "logical", "full", "none"),
+    compatible_cuda_strict = TRUE) {
+  load_fastkpc_cuda_native()
+  trace_level <- match.arg(trace_level)
+  data <- as.matrix(data)
+  storage.mode(data) <- "double"
+  .Call(
+    "C_full_cuda_ci_one_call_skeleton",
+    data,
+    as.numeric(alpha),
+    as.integer(max_conditioning_size),
+    as.numeric(index),
+    as.integer(numCol),
+    as.character(trace_level),
+    as.logical(compatible_cuda_strict),
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
 fastkpc_native_legacy_mgcv_residual_backend <- function() {
   raw <- tolower(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
                             unset = "r"))

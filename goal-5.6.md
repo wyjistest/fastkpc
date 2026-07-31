@@ -4,9 +4,9 @@
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
-> **Current accepted implementation/evidence snapshot:** Phase 8 is COMPLETE. Its producer source commit is `e3a996ce28af0aae5cc4525c371faf6f2f8efc7f`, source closure is `35c841b1bcbeda7fd04ffe9e80178ec202ad75dc7d4249320669c781f8f0f9be`, native binary SHA-256 is `5f5f2a69e1155aaf60e5d058143708ca3b51766e85a07c904eb894ea7b798c32`, and its accepted component-oracle/full-shadow/backend manifest SHA-256 values are `0608a6710bf2cd0bfa1f238093783242c172e6f12ee62356678276c13102de8d`, `dc620c6025bc03107744e362ead3d4bbaea274e155797e5cc7320f252585d3b2`, and `9df0a8c0829f831ccb983f9ce95cd479bc9c55e80aaeea1d8875c5e6d7699d4d`.
+> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. Its producer source commit is `37da2b3d5973c7a878e657f9f2a3a2698fea7fd4`, source closure is `4baa27f921bf16ef151f0a028caa0a71f4297fd0830b274f3968aad36b4a52b1`, native binary SHA-256 is `c3744bf41d77190ce5b3283df6aceae5fe472d67d5b034aaa56fd585ac8c7e0b`, and the accepted one-call artifact manifest SHA-256 is `f32a4ae5275da20912e709d766ad4e12a887446c34ccaf89f9d2358383159831`.
 >
-> **Active roadmap phase:** Phase 9, fused one-call compatible CUDA skeleton.
+> **Active roadmap phase:** Phase 10, full performance gate, hardening, and promotion.
 >
 > **Hard rule:** **0 SHD is mandatory.** A faster result with a different skeleton is a failed result.
 
@@ -635,8 +635,8 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 6 | CUDA multi-penalty same-S target batches | COMPLETE - all 65,676 multi-penalty targets use persistent CUDA optimization and residual solves; the full residual route has SHD 0 and a 0.7693 same-trace performance ratio |
 | 7 | Native setup builder; remove R/mgcv from CI loop | COMPLETE - all 8,634 native setups and the complete residual/graph route pass with zero R/mgcv setup authority or fallback |
 | 8 | Legacy-compatible device-resident CUDA dCov | COMPLETE - all 240,489 logical tests use guarded device-resident CUDA dCov with zero final flips, zero CPU numerical authority, SHD 0, and a 17.499-second dCov boundary |
-| 9 | Fused one-call compatible CUDA skeleton | ACTIVE - integrate the accepted Phase 7 residual and Phase 8 dCov services into the native canonical control plane |
-| 10 | Full gate, hardening, and promotion | NOT STARTED |
+| 9 | Fused one-call compatible CUDA skeleton | COMPLETE - one native call reproduces all 240,489 canonical tests, exact graph semantics, and zero R/CPU numerical authority |
+| 10 | Full gate, hardening, and promotion | ACTIVE - eliminate Phase 9 setup/residual recomputation, pass repeatability and hardening, then meet both performance gates |
 
 **Codex starts at the earliest phase whose exit gate is not complete.** Do not skip Phase 0 because later code already exists.
 
@@ -2891,6 +2891,47 @@ approximate backend count = 0
 
 One native call runs the complete compatible skeleton with a CUDA numerical CI data plane and no hidden R/CPU numerical authority.
 
+### Accepted Phase 9 closure (2026-07-31)
+
+The explicit `compatible.cuda` / `route="full_cuda"` facade now makes one
+native call. C++ owns the complete stable skeleton state machine and canonical
+replay; the accepted Phase 7 residual and Phase 8 dCov services remain the only
+numerical authorities. Physical CUDA rounds are recorded by task slot and then
+replayed in exact canonical layer-plan order.
+
+```text
+native calls                            = 1
+logical tests                           = 240,489
+logical n.edgetests                     = 2213,52659,125293,40694,13293,5422,835,80
+physical dCov/gamma evaluations         = 241,677
+guarded full-eig refinements            = 1,188
+logical trace / deletion trace          = exact / exact
+edge count                              = 110 / 110
+SHD                                     = 0
+adjacency / sepsets / n.edgetests       = exact / exact / exact
+final decision flips                    = 0
+R callbacks / legacy mgcv fits/setups   = 0 / 0 / 0
+CPU residual / dCov / gamma / Spectra   = 0 / 0 / 0 / 0
+residual / component large-payload D2H  = 0 / 0 bytes
+unknown / approximate fallback count    = 0 / 0
+```
+
+Accepted artifact:
+
+```text
+fastkpc/artifacts/full_cuda_ci/one_call_full_cuda_351x48_v1/
+  manifest SHA-256 = f32a4ae5275da20912e709d766ad4e12a887446c34ccaf89f9d2358383159831
+  source evidence SHA-256 = bb8d0e401dfa2ef59bbc4f73c656aa1201b5e7ad8ecb0d805d5cdd2b16becb47
+  producer identity = d248433eeba4aa66bf18d709f5231b6638e9dfd1dcf91477f6dbed682206bbc3
+```
+
+The first complete measured call took `3,074.062` seconds, so it explicitly
+fails the Phase 10 performance gate. Diagnostics identify `80,175` native setup
+misses/rebuilds, `294,877` physical residual fits, `699.592` seconds of setup
+time, and `2,257.702` seconds at the CUDA optimizer host boundary. Phase 9
+accepts correctness and authority only; Phase 10 must remove this repeated work
+and cannot promote the route at the recorded timing.
+
 ---
 
 ## Phase 10 — Full performance gate, hardening, and promotion
@@ -3334,8 +3375,8 @@ The exact script names may be adjusted to repository conventions, but one standa
 ## 12. Immediate next actions
 
 Codex should begin with the earliest phase whose exit gate is incomplete. Phase
-0 through Phase 6 are complete, so the current starting point is Phase 7 native
-setup construction.
+0 through Phase 9 are complete, so the current starting point is Phase 10
+performance, hardening, repeatability, and promotion.
 
 ### Task 1
 
@@ -3439,12 +3480,20 @@ passes the accepted 47-second allocation.
 
 ### Task 15
 
-Active: fuse Phase 7 native setup, CUDA target optimization/residual handles,
-and the Phase 8 guarded CUDA dCov service into the existing native canonical
-skeleton control plane. Remove the 8,634-call R orchestration used only for
-Phase 8 qualification, preserve bounded cache and canonical replay semantics,
-return only compact results, and publish `one_call_full_cuda_351x48_v1/` after
-all authority and graph gates pass.
+Complete: Phase 9 fused Phase 7 native setup, live CUDA target optimization and
+device residual handles, and Phase 8 guarded CUDA dCov into one native skeleton
+call. The authenticated canonical artifact has exact logical order, graph,
+sepsets, counts, and deletion trace, zero final decision flips, and zero hidden
+R/CPU numerical authority. Its `3,074.062`-second timing is retained as a failed
+Phase 10 performance baseline, not as a promotion claim.
+
+### Task 16
+
+Active: remove the Phase 9 setup and residual recomputation exposed by the full
+artifact, implement the required bounded cache/concurrency behavior, and rerun
+the full cold/warm, repeatability, hardening, held-out, and same-run baseline
+campaign. Promotion remains forbidden until every Phase 10 correctness,
+authority, absolute-time, and relative-time gate passes.
 
 ---
 
