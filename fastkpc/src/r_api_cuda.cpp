@@ -8403,6 +8403,16 @@ extern "C" SEXP C_full_cuda_ci_one_call_skeleton(
   END_RCPP
 }
 
+extern "C" SEXP C_full_cuda_ci_one_call_cache_control(
+    SEXP action_s,
+    SEXP capacity_s) {
+  BEGIN_RCPP
+  return fastkpc::full_cuda_ci_one_call_cache_control(
+    Rcpp::as<std::string>(action_s),
+    Rcpp::as<int>(capacity_s));
+  END_RCPP
+}
+
 extern "C" SEXP C_full_cuda_ci_native_geometry_prepare(
     SEXP X_s,
     SEXP penalty_blocks_s,
@@ -12840,6 +12850,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_semantic_abi_info", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_semantic_abi_info), 0},
   {"C_full_cuda_ci_native_setup", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_setup), 1},
   {"C_full_cuda_ci_one_call_skeleton", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_skeleton), 7},
+  {"C_full_cuda_ci_one_call_cache_control", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_cache_control), 2},
   {"C_full_cuda_ci_native_geometry_prepare", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_geometry_prepare), 4},
   {"C_full_cuda_ci_phase35_vertical_resource_snapshot", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical_resource_snapshot), 0},
   {"C_full_cuda_ci_phase35_vertical", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical), 6},

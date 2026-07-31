@@ -5,6 +5,116 @@ Staged fast kPC backend for this workspace.
 This directory is intentionally separate from `kpcalg/R`. The legacy package
 files stay unchanged while the fast backend is developed and validated.
 
+## Full-CUDA legacy-compatible skeleton candidate
+
+An explicit one-call full-CUDA route now implements the numerical CI data plane
+for the exact `regrXonS`/KPC subset. The frozen Phase 10 canonical campaign has
+passed, but promotion remains pending because the externally held sealed
+holdout is still `SEALED_NOT_RELEASED`. The route is therefore an explicit
+candidate, not the default and not yet the recommended route.
+
+```r
+source("fastkpc/R/fast_kpc.R")
+
+skeleton <- fastkpc_compatible_cuda_skeleton(
+  data,
+  alpha = 0.1,
+  options = list(
+    route = "full_cuda",
+    compatible_cuda_strict = TRUE,
+    max_conditioning_size = 7L,
+    index = 1,
+    numCol = 35L,
+    trace_level = "logical"
+  )
+)
+```
+
+This API is separate from `fast_kpc(precision = "compatible")`, which remains
+the older mgcvExtractGPU compatibility bridge documented below. The full-CUDA
+candidate uses one native skeleton call, a C++ canonical control plane, native
+response-independent setup construction, CUDA target-specific GCV and stable
+residual solves, device-resident CUDA dCov components, CUDA gamma p-values,
+and canonical compact-result replay.
+
+Qualified semantic envelope:
+
+```text
+input: finite binary64 matrix; n > 35; 2 <= p <= 64
+alpha: exactly 0.1
+index / numCol: 1 / 35
+maximum conditioning size: 0 through 7
+model: Gaussian, identity, unweighted, zero offset
+smooth route: joint thin-plate smooth for |S| <= 2
+              additive thin-plate smooths for |S| > 2
+graph stage: skeleton
+```
+
+This is a compatible implementation of that exact subset, not a full mgcv
+clone. Unsupported values fail before canonical replay. Strict execution has
+no legacy-mgcv target fit or setup call in the CI loop, no R callback, no CPU
+residual/dCov/gamma numerical fallback, and no approximate fallback.
+
+The candidate uses these bounded caches:
+
+```text
+compact CI result cache: 262144 entries
+target optimizer state cache: 131072 entries
+native Prepared-S cache: 64 entries
+device dCov component capacity: 47 entries
+```
+
+The canonical artifact is
+`artifacts/full_cuda_ci/promotion_351x48_v1/`. Across five cold runs, five
+complete-warmup plus measured-warm runs, and five fresh correct baselines, every
+run had 110 edges, SHD 0, exact adjacency, exact normalized sepsets, exact
+`n.edgetests`, and an exact deletion/logical trace. Timings on
+`reference_machine_v1` were:
+
+```text
+cold median       1290.664 seconds
+warm median          0.699 seconds
+baseline median    601.431 seconds
+warm/baseline ratio  0.001162228
+```
+
+The cold boundary includes setup and cache construction and has no promotion
+threshold in `performance_budget_v1`; it is reported separately. Warm timing
+is a second complete call after one unmeasured complete warm-up in a fresh
+process. It replays authenticated, capacity-bounded compact results and performs
+zero physical CI tests or residual fits.
+
+Build and focused validation:
+
+```bash
+bash fastkpc/tools/clean_cuda_native.sh
+bash fastkpc/tools/build_cuda_native.sh
+Rscript fastkpc/tests/test_full_cuda_ci_one_call.R
+Rscript fastkpc/tests/test_full_cuda_ci_one_call_cache.R
+Rscript fastkpc/tests/test_full_cuda_ci_phase10_hardening_artifact.R
+Rscript fastkpc/tests/test_full_cuda_ci_phase10_campaign_artifact.R
+Rscript fastkpc/tests/test_full_cuda_ci_phase10_completion_audit.R
+```
+
+The completion audit intentionally fails until the sealed holdout artifact and
+final `COMPLETE` roadmap state exist.
+
+The final gate also requires an unused external custody envelope and its secret
+release token:
+
+```bash
+export FASTKPC_PROMOTION_HOLDOUT_RELEASE_DIR=/path/from/custodian
+export FASTKPC_PROMOTION_HOLDOUT_RELEASE_TOKEN='custodian-secret'
+FASTKPC_RUN_CUDA_TESTS=1 bash fastkpc/tools/run_full_cuda_ci_gate.sh
+```
+
+The gate refuses to continue without `custodian_attestation.json`, its declared
+payload, a matching token hash, and a canonical campaign identity. It records
+the open event before reading the payload, runs the payload once, and rejects
+any decision flip, graph drift, non-finite result, or fallback. A successful
+holdout may recommend this explicit route; making it the default still requires
+separate explicit approval.
+
 ## Current Scope
 
 Implemented:
@@ -41,7 +151,7 @@ Implemented:
 
 Not implemented:
 
-- Full CUDA GAM replacement for mgcv
+- A general-purpose CUDA clone of all mgcv families and formula semantics
 - Multi-GPU scheduling
 - Replacement of exported `kpcalg::kpc()`
 - `tprsApproxCUDA`, unless future attribution evidence reverses the current
@@ -67,9 +177,11 @@ precision = "hybrid":
     canonical replay preserved
 ```
 
-`mgcvExtractGPU` is a version-pinned compatibility bridge: mgcv constructs the
-restricted setup and fastkpc uses GPU numerical paths where supported. It is not
-a full mgcv clone and it is not a pure GPU approximation backend.
+This section describes the older public precision ladder, not the explicit
+full-CUDA candidate above. `mgcvExtractGPU` is a version-pinned compatibility
+bridge: mgcv constructs the restricted setup and fastkpc uses GPU numerical
+paths where supported. It is not a full mgcv clone and it is not a pure GPU
+approximation backend.
 
 The precision `mgcvExtractGPU` executor now uses same-setup x/y pair batching
 for selected fixed-sp CUDA solves after per-target spectral GCV selection.
@@ -134,6 +246,9 @@ precision = "hybrid":
 ```
 
 The default remains the existing behavior until held-out validation is accepted.
+The full-CUDA candidate is selected only through its explicit facade and does
+not alter these `fast_kpc()` precision routes.
+
 Diagnostics distinguish `backend_planned` from `backend_executed`;
 `backend_used` refers to the actual executor. Current precision data-plane scope
 is skeleton only, CPU/CUDA, and single-penalty `|S| <= 2`. On-demand same-S

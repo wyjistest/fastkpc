@@ -20,11 +20,13 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -39,6 +41,10 @@ constexpr double kGuardLower = 0.05;
 constexpr double kGuardUpper = 0.15;
 constexpr int kPreparedCacheCapacity = 64;
 constexpr int kReferenceComponentCapacity = 47;
+constexpr int kDefaultCompactResultCacheCapacity = 262144;
+constexpr int kMaximumCompactResultCacheCapacity = 1048576;
+constexpr int kDefaultTargetStateCacheCapacity = 131072;
+constexpr int kMaximumTargetStateCacheCapacity = 524288;
 constexpr double kCholeskyConditionMax = 1e8;
 constexpr double kSvdConditionMin = 1e12;
 
@@ -72,6 +78,26 @@ std::string conditioning_key(const std::vector<int>& conditioning_set) {
     if (index != 0U) output << "|";
     output << conditioning_set[index] + 1;
   }
+  return output.str();
+}
+
+std::string compact_result_key(const std::string& dataset,
+                               int num_col,
+                               int level,
+                               int task_index,
+                               const LayerCiTask& task) {
+  std::ostringstream output;
+  output << "schema=full-cuda-ci-compact-result-key-v1\n"
+         << "backend=compatible-cuda-full-skeleton-native-v1\n"
+         << "dataset=" << dataset << "\n"
+         << "alpha=0.1\nindex=1\n"
+         << "numCol=" << num_col << "\n"
+         << "level=" << level << "\n"
+         << "task_index=" << task_index + 1 << "\n"
+         << "edge=" << task.edge_x + 1 << "|" << task.edge_y + 1 << "\n"
+         << "orientation=" << task.orientation_x + 1 << "|"
+         << task.orientation_y + 1 << "\n"
+         << "S=" << conditioning_key(task.conditioning_set) << "\n";
   return output.str();
 }
 
@@ -241,6 +267,20 @@ struct OneCallDiagnostics {
   int component_cache_miss_count = 0;
   int component_cache_eviction_count = 0;
   int host_synchronization_count = 0;
+  int result_cache_capacity = 0;
+  int result_cache_warm_start_entries = 0;
+  int result_cache_request_count = 0;
+  int result_cache_hit_count = 0;
+  int result_cache_miss_count = 0;
+  int result_cache_insert_count = 0;
+  int result_cache_eviction_count = 0;
+  int target_cache_capacity = 0;
+  int target_cache_warm_start_entries = 0;
+  int target_cache_request_count = 0;
+  int target_cache_hit_count = 0;
+  int target_cache_miss_count = 0;
+  int target_cache_insert_count = 0;
+  int target_cache_eviction_count = 0;
   int cpu_dcov_component_count = 0;
   int cpu_dcov_eigen_or_lowrank_count = 0;
   int cpu_dcov_pair_stat_count = 0;
@@ -254,6 +294,279 @@ struct OneCallDiagnostics {
   double cuda_optimizer_host_ms = 0.0;
   double cuda_dcov_host_ms = 0.0;
 };
+
+class CompactResultCache {
+ public:
+  struct Snapshot {
+    int capacity = 0;
+    int entries = 0;
+    std::uint64_t total_requests = 0;
+    std::uint64_t total_hits = 0;
+    std::uint64_t total_misses = 0;
+    std::uint64_t total_inserts = 0;
+    std::uint64_t total_evictions = 0;
+    std::uint64_t generation = 0;
+  };
+
+  bool lookup(const std::string& key,
+              double* p_value,
+              OneCallDiagnostics* diagnostics) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++total_requests_;
+    ++diagnostics->result_cache_request_count;
+    auto found = entries_.find(key);
+    if (found == entries_.end()) {
+      ++total_misses_;
+      ++diagnostics->result_cache_miss_count;
+      return false;
+    }
+    ++total_hits_;
+    ++diagnostics->result_cache_hit_count;
+    order_.erase(found->second.order);
+    order_.push_front(key);
+    found->second.order = order_.begin();
+    *p_value = found->second.p_value;
+    return true;
+  }
+
+  void insert(const std::string& key,
+              double p_value,
+              OneCallDiagnostics* diagnostics) {
+    require(std::isfinite(p_value) && p_value >= 0.0 && p_value <= 1.0,
+            "compact result cache refuses a non-finite p-value");
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto found = entries_.find(key);
+    if (found != entries_.end()) {
+      found->second.p_value = p_value;
+      order_.erase(found->second.order);
+      order_.push_front(key);
+      found->second.order = order_.begin();
+      return;
+    }
+    while (entries_.size() >= static_cast<std::size_t>(capacity_)) {
+      const std::string victim_key = order_.back();
+      order_.pop_back();
+      entries_.erase(victim_key);
+      ++total_evictions_;
+      ++diagnostics->result_cache_eviction_count;
+    }
+    order_.push_front(key);
+    entries_.emplace(key, Entry{p_value, order_.begin()});
+    ++total_inserts_;
+    ++diagnostics->result_cache_insert_count;
+  }
+
+  Snapshot snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return snapshot_locked();
+  }
+
+  Snapshot configure(int capacity) {
+    require(capacity >= 1 && capacity <= kMaximumCompactResultCacheCapacity,
+            "compact result cache capacity is outside [1, 1048576]");
+    std::lock_guard<std::mutex> lock(mutex_);
+    capacity_ = capacity;
+    while (entries_.size() > static_cast<std::size_t>(capacity_)) {
+      const std::string victim_key = order_.back();
+      order_.pop_back();
+      entries_.erase(victim_key);
+      ++total_evictions_;
+    }
+    ++generation_;
+    return snapshot_locked();
+  }
+
+  Snapshot reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    entries_.clear();
+    order_.clear();
+    total_requests_ = 0;
+    total_hits_ = 0;
+    total_misses_ = 0;
+    total_inserts_ = 0;
+    total_evictions_ = 0;
+    ++generation_;
+    return snapshot_locked();
+  }
+
+ private:
+  struct Entry {
+    double p_value = 0.0;
+    std::list<std::string>::iterator order;
+  };
+
+  Snapshot snapshot_locked() const {
+    Snapshot value;
+    value.capacity = capacity_;
+    value.entries = static_cast<int>(entries_.size());
+    value.total_requests = total_requests_;
+    value.total_hits = total_hits_;
+    value.total_misses = total_misses_;
+    value.total_inserts = total_inserts_;
+    value.total_evictions = total_evictions_;
+    value.generation = generation_;
+    return value;
+  }
+
+  mutable std::mutex mutex_;
+  int capacity_ = kDefaultCompactResultCacheCapacity;
+  std::list<std::string> order_;
+  std::unordered_map<std::string, Entry> entries_;
+  std::uint64_t total_requests_ = 0;
+  std::uint64_t total_hits_ = 0;
+  std::uint64_t total_misses_ = 0;
+  std::uint64_t total_inserts_ = 0;
+  std::uint64_t total_evictions_ = 0;
+  std::uint64_t generation_ = 1;
+};
+
+CompactResultCache& compact_result_cache() {
+  static CompactResultCache cache;
+  return cache;
+}
+
+struct CachedTargetState {
+  std::vector<double> selected_sp;
+  FixedSpRoute planned_route = FixedSpRoute::CholeskyBatched;
+};
+
+class TargetStateCache {
+ public:
+  struct Snapshot {
+    int capacity = 0;
+    int entries = 0;
+    std::uint64_t total_requests = 0;
+    std::uint64_t total_hits = 0;
+    std::uint64_t total_misses = 0;
+    std::uint64_t total_inserts = 0;
+    std::uint64_t total_evictions = 0;
+    std::uint64_t generation = 0;
+  };
+
+  bool lookup(const std::string& key,
+              int penalty_count,
+              CachedTargetState* state,
+              OneCallDiagnostics* diagnostics) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++total_requests_;
+    ++diagnostics->target_cache_request_count;
+    auto found = entries_.find(key);
+    if (found == entries_.end()) {
+      ++total_misses_;
+      ++diagnostics->target_cache_miss_count;
+      return false;
+    }
+    require(static_cast<int>(found->second.state.selected_sp.size()) ==
+              penalty_count,
+            "target optimizer cache penalty shape changed");
+    ++total_hits_;
+    ++diagnostics->target_cache_hit_count;
+    order_.erase(found->second.order);
+    order_.push_front(key);
+    found->second.order = order_.begin();
+    *state = found->second.state;
+    return true;
+  }
+
+  void insert(const std::string& key,
+              const CachedTargetState& state,
+              OneCallDiagnostics* diagnostics) {
+    require(!state.selected_sp.empty() &&
+              std::all_of(state.selected_sp.begin(), state.selected_sp.end(),
+                          [](double value) {
+                            return std::isfinite(value) && value > 0.0;
+                          }),
+            "target optimizer cache refuses invalid smoothing parameters");
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto found = entries_.find(key);
+    if (found != entries_.end()) {
+      found->second.state = state;
+      order_.erase(found->second.order);
+      order_.push_front(key);
+      found->second.order = order_.begin();
+      return;
+    }
+    while (entries_.size() >= static_cast<std::size_t>(capacity_)) {
+      const std::string victim_key = order_.back();
+      order_.pop_back();
+      entries_.erase(victim_key);
+      ++total_evictions_;
+      ++diagnostics->target_cache_eviction_count;
+    }
+    order_.push_front(key);
+    entries_.emplace(key, Entry{state, order_.begin()});
+    ++total_inserts_;
+    ++diagnostics->target_cache_insert_count;
+  }
+
+  Snapshot snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return snapshot_locked();
+  }
+
+  Snapshot configure(int capacity) {
+    require(capacity >= 1 && capacity <= kMaximumTargetStateCacheCapacity,
+            "target optimizer cache capacity is outside [1, 524288]");
+    std::lock_guard<std::mutex> lock(mutex_);
+    capacity_ = capacity;
+    while (entries_.size() > static_cast<std::size_t>(capacity_)) {
+      const std::string victim_key = order_.back();
+      order_.pop_back();
+      entries_.erase(victim_key);
+      ++total_evictions_;
+    }
+    ++generation_;
+    return snapshot_locked();
+  }
+
+  Snapshot reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    entries_.clear();
+    order_.clear();
+    total_requests_ = 0;
+    total_hits_ = 0;
+    total_misses_ = 0;
+    total_inserts_ = 0;
+    total_evictions_ = 0;
+    ++generation_;
+    return snapshot_locked();
+  }
+
+ private:
+  struct Entry {
+    CachedTargetState state;
+    std::list<std::string>::iterator order;
+  };
+
+  Snapshot snapshot_locked() const {
+    Snapshot value;
+    value.capacity = capacity_;
+    value.entries = static_cast<int>(entries_.size());
+    value.total_requests = total_requests_;
+    value.total_hits = total_hits_;
+    value.total_misses = total_misses_;
+    value.total_inserts = total_inserts_;
+    value.total_evictions = total_evictions_;
+    value.generation = generation_;
+    return value;
+  }
+
+  mutable std::mutex mutex_;
+  int capacity_ = kDefaultTargetStateCacheCapacity;
+  std::list<std::string> order_;
+  std::unordered_map<std::string, Entry> entries_;
+  std::uint64_t total_requests_ = 0;
+  std::uint64_t total_hits_ = 0;
+  std::uint64_t total_misses_ = 0;
+  std::uint64_t total_inserts_ = 0;
+  std::uint64_t total_evictions_ = 0;
+  std::uint64_t generation_ = 1;
+};
+
+TargetStateCache& target_state_cache() {
+  static TargetStateCache cache;
+  return cache;
+}
 
 std::vector<const double*> penalty_block_pointers(
     const Rcpp::List& penalty_blocks) {
@@ -570,6 +883,8 @@ class NativeSetupCache {
       const std::string evicted = order_.back();
       order_.pop_back();
       auto victim = entries_.find(evicted);
+      live_conditioning_keys_.erase(
+        conditioning_key(victim->second.context->conditioning_set));
       close_context(victim->second.context);
       entries_.erase(victim);
       diagnostics_->native_setup_cache_eviction_count += 1;
@@ -578,13 +893,20 @@ class NativeSetupCache {
       data_, dataset_, conditioning_set, runtime_, diagnostics_);
     order_.push_front(key);
     entries_.emplace(key, Entry{context, order_.begin()});
+    live_conditioning_keys_.insert(conditioning_key(conditioning_set));
     return context;
+  }
+
+  bool contains_conditioning_key(const std::string& key) const {
+    return live_conditioning_keys_.find(key) !=
+      live_conditioning_keys_.end();
   }
 
   void clear() {
     for (auto& entry : entries_) close_context(entry.second.context);
     entries_.clear();
     order_.clear();
+    live_conditioning_keys_.clear();
   }
 
   ~NativeSetupCache() {
@@ -603,6 +925,7 @@ class NativeSetupCache {
   OneCallDiagnostics* diagnostics_;
   std::list<std::string> order_;
   std::unordered_map<std::string, Entry> entries_;
+  std::unordered_set<std::string> live_conditioning_keys_;
 };
 
 FixedSpRoute route_from_condition(double condition, bool full_rank) {
@@ -745,36 +1068,92 @@ GroupResult execute_group(
   }
 
   if (!direct) {
-    const auto optimize_start = std::chrono::steady_clock::now();
+    std::vector<std::string> optimizer_state_keys(target_count);
+    std::vector<int> missing_positions;
+    for (int position = 0; position < target_count; ++position) {
+      optimizer_state_keys[static_cast<std::size_t>(position)] =
+        "schema=full-cuda-ci-target-optimizer-state-v1\ntarget=" +
+        base_target_keys[static_cast<std::size_t>(position)] + "\n";
+      CachedTargetState cached;
+      if (target_state_cache().lookup(
+            optimizer_state_keys[static_cast<std::size_t>(position)],
+            context->penalty_count, &cached, diagnostics)) {
+        for (int penalty = 0; penalty < context->penalty_count; ++penalty) {
+          selected_sp[
+            static_cast<std::size_t>(context->penalty_count) * position +
+            penalty] = cached.selected_sp[static_cast<std::size_t>(penalty)];
+        }
+        planned_routes[static_cast<std::size_t>(position)] =
+          cached.planned_route;
+      } else {
+        missing_positions.push_back(position);
+      }
+    }
+
+    if (!missing_positions.empty()) {
+      const auto optimize_start = std::chrono::steady_clock::now();
+      std::vector<int> optimization_positions = missing_positions;
+      if (context->penalty_count > 1 &&
+          optimization_positions.size() == 1U) {
+        for (int position = 0; position < target_count; ++position) {
+          if (position != optimization_positions.front()) {
+            optimization_positions.push_back(position);
+            break;
+          }
+        }
+      }
+      const int optimization_count =
+        static_cast<int>(optimization_positions.size());
+      std::vector<double> optimization_Y(
+        static_cast<std::size_t>(context->n) * optimization_count);
+      std::vector<std::string> optimization_base_keys;
+      optimization_base_keys.reserve(
+        static_cast<std::size_t>(optimization_count));
+      for (int local = 0; local < optimization_count; ++local) {
+        const int position =
+          optimization_positions[static_cast<std::size_t>(local)];
+        std::copy(
+          Y.begin() + static_cast<std::ptrdiff_t>(position) * context->n,
+          Y.begin() + static_cast<std::ptrdiff_t>(position + 1) * context->n,
+          optimization_Y.begin() +
+            static_cast<std::ptrdiff_t>(local) * context->n);
+        optimization_base_keys.push_back(
+          base_target_keys[static_cast<std::size_t>(position)]);
+      }
+
     if (context->penalty_count == 1) {
       require(context->single_penalty != nullptr,
               "single-penalty CUDA geometry is missing");
       const SinglePenaltyGeometry& geometry = *context->single_penalty;
       Rcpp::NumericMatrix X = context->setup["X"];
-      std::vector<int> target_ids(target_count);
-      for (int index = 0; index < target_count; ++index) {
+      std::vector<int> target_ids(optimization_count);
+      for (int index = 0; index < optimization_count; ++index) {
+        const int position =
+          optimization_positions[static_cast<std::size_t>(index)];
         target_ids[static_cast<std::size_t>(index)] =
-          targets[static_cast<std::size_t>(index)] + 1;
+          targets[static_cast<std::size_t>(position)] + 1;
       }
       const SinglePenaltyGcvCudaResult optimization =
         single_penalty_gcv_cuda(
-          X.begin(), Y.data(), geometry.rhs_transform.data(),
+          X.begin(), optimization_Y.data(), geometry.rhs_transform.data(),
           geometry.eigenvalues.data(), geometry.magic_qr_packed.data(),
           geometry.magic_tau.data(), geometry.magic_r.data(),
           geometry.magic_penalty_root.data(),
           geometry.magic_penalty_matrix.data(), target_ids.data(),
-          context->n, context->coefficient_dim, target_count,
+          context->n, context->coefficient_dim, optimization_count,
           geometry.penalty_rank, geometry.initial_sp, {}, false, false);
-      require(optimization.target_count == target_count &&
+      require(optimization.target_count == optimization_count &&
                 optimization.diagnostics.legacy_mgcv_target_calls == 0 &&
                 optimization.diagnostics.cpu_score_count == 0 &&
                 optimization.diagnostics.cpu_optimizer_count == 0 &&
                 optimization.diagnostics.fallback_count == 0 &&
                 optimization.diagnostics.optimizer_target_coverage_complete,
               "single-penalty live CUDA optimizer authority gate failed");
-      for (int target = 0; target < target_count; ++target) {
+      for (int local = 0; local < optimization_count; ++local) {
+        const int position =
+          optimization_positions[static_cast<std::size_t>(local)];
         const SinglePenaltyGcvOptimizerResult& result =
-          optimization.targets[static_cast<std::size_t>(target)];
+          optimization.targets[static_cast<std::size_t>(local)];
         const bool accepted =
           result.termination == static_cast<int>(
             SinglePenaltyGcvTermination::ScoreAndGradient) ||
@@ -784,26 +1163,28 @@ GroupResult execute_group(
             SinglePenaltyGcvTermination::FlatObjective);
         require(accepted && std::isfinite(result.sp) && result.sp > 0.0,
                 "single-penalty live CUDA optimizer failed closed");
-        selected_sp[static_cast<std::size_t>(target)] = result.sp;
-        planned_routes[static_cast<std::size_t>(target)] =
+        selected_sp[static_cast<std::size_t>(position)] = result.sp;
+        planned_routes[static_cast<std::size_t>(position)] =
           route_from_condition(
             single_penalty_condition(geometry, result.sp), true);
       }
-      diagnostics->cuda_single_penalty_target_count += target_count;
+      diagnostics->cuda_single_penalty_target_count += optimization_count;
     } else {
       require(context->multi_penalty != nullptr,
               "multi-penalty CUDA prepared handle is missing");
       MultiPenaltyGcvCudaOptimizerControl control;
       MultiPenaltyGcvCudaBatchResult optimization =
         multi_penalty_gcv_cuda_optimize_batch(
-          context->multi_penalty, Y.data(), context->n, target_count,
-          base_target_keys, control);
+          context->multi_penalty, optimization_Y.data(), context->n,
+          optimization_count, optimization_base_keys, control);
       try {
         const MultiPenaltyGcvCudaOptimization& result =
           optimization.optimization;
-        require(result.target_count == target_count &&
+        require(result.target_count == optimization_count &&
                   result.penalty_count == context->penalty_count &&
-                  result.selected_log_sp.size() == selected_sp.size() &&
+                  result.selected_log_sp.size() ==
+                    static_cast<std::size_t>(context->penalty_count) *
+                      optimization_count &&
                   result.diagnostics.cpu_objective_count == 0 &&
                   result.diagnostics.cpu_optimizer_count == 0 &&
                   result.diagnostics.cpu_multi_penalty_solve_count == 0 &&
@@ -812,18 +1193,25 @@ GroupResult execute_group(
                   result.diagnostics.true_batched_kernel &&
                   result.diagnostics.independent_target_states,
                 "multi-penalty live CUDA optimizer authority gate failed");
-        for (std::size_t index = 0; index < selected_sp.size(); ++index) {
-          selected_sp[index] = std::exp(result.selected_log_sp[index]);
-          require(std::isfinite(selected_sp[index]) && selected_sp[index] > 0,
-                  "multi-penalty selected sp is non-finite");
-        }
-        for (int target = 0; target < target_count; ++target) {
-          require(result.optimizer_status[static_cast<std::size_t>(target)] == 0,
+        for (int local = 0; local < optimization_count; ++local) {
+          const int position =
+            optimization_positions[static_cast<std::size_t>(local)];
+          for (int penalty = 0; penalty < context->penalty_count; ++penalty) {
+            const double sp = std::exp(result.selected_log_sp[
+              static_cast<std::size_t>(context->penalty_count) * local +
+              penalty]);
+            require(std::isfinite(sp) && sp > 0,
+                    "multi-penalty selected sp is non-finite");
+            selected_sp[
+              static_cast<std::size_t>(context->penalty_count) * position +
+              penalty] = sp;
+          }
+          require(result.optimizer_status[static_cast<std::size_t>(local)] == 0,
                   "multi-penalty CUDA optimizer returned an error status");
-          planned_routes[static_cast<std::size_t>(target)] =
+          planned_routes[static_cast<std::size_t>(position)] =
             route_from_condition(
-              result.condition[static_cast<std::size_t>(target)],
-              result.numerical_rank[static_cast<std::size_t>(target)] ==
+              result.condition[static_cast<std::size_t>(local)],
+              result.numerical_rank[static_cast<std::size_t>(local)] ==
                 context->coefficient_dim);
         }
         release_multi_penalty_gcv_cuda_residual(optimization.residual);
@@ -837,9 +1225,26 @@ GroupResult execute_group(
         }
         throw;
       }
-      diagnostics->cuda_multi_penalty_target_count += target_count;
+      diagnostics->cuda_multi_penalty_target_count += optimization_count;
     }
-    diagnostics->cuda_optimizer_host_ms += elapsed_ms(optimize_start);
+
+      for (int position : optimization_positions) {
+        CachedTargetState state;
+        state.selected_sp.resize(
+          static_cast<std::size_t>(context->penalty_count));
+        for (int penalty = 0; penalty < context->penalty_count; ++penalty) {
+          state.selected_sp[static_cast<std::size_t>(penalty)] = selected_sp[
+            static_cast<std::size_t>(context->penalty_count) * position +
+            penalty];
+        }
+        state.planned_route =
+          planned_routes[static_cast<std::size_t>(position)];
+        target_state_cache().insert(
+          optimizer_state_keys[static_cast<std::size_t>(position)],
+          state, diagnostics);
+      }
+      diagnostics->cuda_optimizer_host_ms += elapsed_ms(optimize_start);
+    }
   }
 
   std::vector<std::string> residual_keys;
@@ -980,6 +1385,14 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
   reserve_fixed_sp_runtime(runtime, capacities);
 
   OneCallDiagnostics diagnostics;
+  const CompactResultCache::Snapshot result_cache_start =
+    compact_result_cache().snapshot();
+  diagnostics.result_cache_capacity = result_cache_start.capacity;
+  diagnostics.result_cache_warm_start_entries = result_cache_start.entries;
+  const TargetStateCache::Snapshot target_cache_start =
+    target_state_cache().snapshot();
+  diagnostics.target_cache_capacity = target_cache_start.capacity;
+  diagnostics.target_cache_warm_start_entries = target_cache_start.entries;
   NativeSetupCache setup_cache(data, dataset, runtime, &diagnostics);
   std::shared_ptr<NativeSetupContext> direct = build_direct_context(
     data, dataset, runtime);
@@ -1017,16 +1430,13 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
   int total_tests_replayed = 0;
   int total_ignored = 0;
   int total_deletions = 0;
+  int total_frontier_batches = 0;
 
   try {
     for (int level = 0; level <= max_conditioning_size; ++level) {
       const auto level_started = std::chrono::steady_clock::now();
       const LayerPlan plan = make_layer_plan(adjacency, p, level);
       const int task_count = static_cast<int>(plan.tasks.size());
-      std::vector<unsigned char> replayed(
-        static_cast<std::size_t>(task_count), 0U);
-      std::vector<unsigned char> edge_done(
-        static_cast<std::size_t>(p) * p, 0U);
       std::vector<unsigned char> delete_edges(
         static_cast<std::size_t>(p) * p, 0U);
       std::vector<unsigned char> consumed(
@@ -1039,46 +1449,102 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
       int deletions = 0;
       int rounds = 0;
 
-      while (remaining > 0) {
-        std::vector<int> selected;
-        std::vector<unsigned char> pending_edges(
-          static_cast<std::size_t>(p) * p, 0U);
-        for (int task_index = 0; task_index < task_count; ++task_index) {
-          if (replayed[static_cast<std::size_t>(task_index)] != 0U) continue;
-          const LayerCiTask& task =
-            plan.tasks[static_cast<std::size_t>(task_index)];
-          const std::size_t edge = static_cast<std::size_t>(task.edge_key);
-          const bool no_longer_reachable = edge_done[edge] != 0U ||
-            adjacency[static_cast<std::size_t>(task.edge_x) * p +
-                      task.edge_y] == 0;
-          if (no_longer_reachable) {
-            replayed[static_cast<std::size_t>(task_index)] = 1U;
-            --remaining;
-            ++ignored;
-            continue;
+      std::vector<std::vector<int>> edge_tasks(
+        static_cast<std::size_t>(p) * p);
+      for (int task_index = 0; task_index < task_count; ++task_index) {
+        const LayerCiTask& task =
+          plan.tasks[static_cast<std::size_t>(task_index)];
+        edge_tasks[static_cast<std::size_t>(task.edge_key)].push_back(
+          task_index);
+      }
+      std::vector<std::size_t> edge_positions(
+        static_cast<std::size_t>(p) * p, 0U);
+      std::map<std::string, std::vector<int>> ready_by_conditioning;
+      int active_edges = 0;
+      for (std::size_t edge = 0; edge < edge_tasks.size(); ++edge) {
+        if (edge_tasks[edge].empty()) continue;
+        const int task_index = edge_tasks[edge].front();
+        const LayerCiTask& task =
+          plan.tasks[static_cast<std::size_t>(task_index)];
+        ready_by_conditioning[conditioning_key(task.conditioning_set)]
+          .push_back(static_cast<int>(edge));
+        ++active_edges;
+      }
+
+      while (active_edges > 0) {
+        require(!ready_by_conditioning.empty(),
+                "compatible.cuda frontier scheduler made no progress");
+        auto global_largest = ready_by_conditioning.begin();
+        auto cached_largest = ready_by_conditioning.end();
+        for (auto candidate = ready_by_conditioning.begin();
+             candidate != ready_by_conditioning.end(); ++candidate) {
+          if (candidate->second.size() > global_largest->second.size()) {
+            global_largest = candidate;
           }
-          if (pending_edges[edge] != 0U) continue;
-          pending_edges[edge] = 1U;
-          selected.push_back(task_index);
+          if (!candidate->first.empty() &&
+              setup_cache.contains_conditioning_key(candidate->first) &&
+              (cached_largest == ready_by_conditioning.end() ||
+               candidate->second.size() > cached_largest->second.size())) {
+            cached_largest = candidate;
+          }
         }
-        require(!selected.empty() || remaining == 0,
-                "compatible.cuda round scheduler made no progress");
-        if (selected.empty()) break;
+        auto selected_bucket = global_largest;
+        if (cached_largest != ready_by_conditioning.end() &&
+            cached_largest->second.size() * 4U >=
+              global_largest->second.size()) {
+          selected_bucket = cached_largest;
+        }
+        std::vector<int> selected_edges = std::move(selected_bucket->second);
+        ready_by_conditioning.erase(selected_bucket);
+
+        std::vector<int> selected;
+        selected.reserve(selected_edges.size());
+        for (int edge_value : selected_edges) {
+          const std::size_t edge = static_cast<std::size_t>(edge_value);
+          require(edge < edge_tasks.size() &&
+                    edge_positions[edge] < edge_tasks[edge].size(),
+                  "compatible.cuda frontier edge position is invalid");
+          selected.push_back(
+            edge_tasks[edge][edge_positions[edge]]);
+        }
+        require(!selected.empty(),
+                "compatible.cuda frontier scheduler selected an empty batch");
         ++rounds;
 
+        const std::string selected_conditioning_key =
+          conditioning_key(plan.tasks[
+            static_cast<std::size_t>(selected.front())].conditioning_set);
+        for (int task_index : selected) {
+          require(conditioning_key(plan.tasks[
+                    static_cast<std::size_t>(task_index)].conditioning_set) ==
+                    selected_conditioning_key,
+                  "compatible.cuda frontier batch mixed conditioning sets");
+        }
+
         std::vector<std::uint64_t> selected_ids(selected.size());
+        std::vector<std::string> selected_cache_keys(selected.size());
+        std::vector<double> selected_pvalues(selected.size(), NA_REAL);
+        std::map<std::string, std::vector<std::size_t>> grouped_positions;
         for (std::size_t index_value = 0;
              index_value < selected.size(); ++index_value) {
           selected_ids[index_value] = next_request_sequence_id++;
-        }
-        std::map<std::string, std::vector<std::size_t>> grouped_positions;
-        for (std::size_t position = 0; position < selected.size(); ++position) {
           const LayerCiTask& task =
-            plan.tasks[static_cast<std::size_t>(selected[position])];
-          grouped_positions[conditioning_key(task.conditioning_set)]
-            .push_back(position);
+            plan.tasks[static_cast<std::size_t>(selected[index_value])];
+          selected_cache_keys[index_value] = compact_result_key(
+            dataset, num_col, level, selected[index_value], task);
+          double cached_p_value = NA_REAL;
+          if (compact_result_cache().lookup(
+                selected_cache_keys[index_value], &cached_p_value,
+                &diagnostics)) {
+            require(std::isfinite(cached_p_value) &&
+                      cached_p_value >= 0.0 && cached_p_value <= 1.0,
+                    "compact result cache returned an invalid p-value");
+            selected_pvalues[index_value] = cached_p_value;
+          } else {
+            grouped_positions[conditioning_key(task.conditioning_set)]
+              .push_back(index_value);
+          }
         }
-        std::vector<double> selected_pvalues(selected.size(), NA_REAL);
         for (const auto& group : grouped_positions) {
           std::vector<int> group_tasks;
           std::vector<std::uint64_t> group_ids;
@@ -1100,8 +1566,11 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
                   "compatible.cuda group result alignment changed");
           for (std::size_t index_value = 0;
                index_value < group.second.size(); ++index_value) {
-            selected_pvalues[group.second[index_value]] =
-              result.p_values[index_value];
+            const std::size_t selected_position = group.second[index_value];
+            selected_pvalues[selected_position] = result.p_values[index_value];
+            compact_result_cache().insert(
+              selected_cache_keys[selected_position],
+              result.p_values[index_value], &diagnostics);
           }
         }
 
@@ -1112,7 +1581,6 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
           const double p_value = selected_pvalues[position];
           require(std::isfinite(p_value),
                   "compatible.cuda replay received a non-finite p-value");
-          replayed[static_cast<std::size_t>(task_index)] = 1U;
           consumed[static_cast<std::size_t>(task_index)] = 1U;
           task_p_values[static_cast<std::size_t>(task_index)] = p_value;
           --remaining;
@@ -1124,10 +1592,35 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
           if (deleted) {
             delete_edges[forward] = 1U;
             delete_edges[reverse] = 1U;
-            edge_done[static_cast<std::size_t>(task.edge_key)] = 1U;
+          }
+
+          const std::size_t edge = static_cast<std::size_t>(task.edge_key);
+          require(edge < edge_tasks.size() &&
+                    edge_positions[edge] < edge_tasks[edge].size() &&
+                    edge_tasks[edge][edge_positions[edge]] == task_index,
+                  "compatible.cuda frontier advancement changed task order");
+          ++edge_positions[edge];
+          if (deleted) {
+            const int trailing = static_cast<int>(
+              edge_tasks[edge].size() - edge_positions[edge]);
+            ignored += trailing;
+            remaining -= trailing;
+            edge_positions[edge] = edge_tasks[edge].size();
+            --active_edges;
+          } else if (edge_positions[edge] == edge_tasks[edge].size()) {
+            --active_edges;
+          } else {
+            const int next_task_index = edge_tasks[edge][edge_positions[edge]];
+            const LayerCiTask& next_task =
+              plan.tasks[static_cast<std::size_t>(next_task_index)];
+            ready_by_conditioning[
+              conditioning_key(next_task.conditioning_set)]
+                .push_back(static_cast<int>(edge));
           }
         }
       }
+      require(remaining == 0 && ready_by_conditioning.empty(),
+              "compatible.cuda frontier scheduler left reachable tasks");
 
       // Physical CUDA rounds preserve per-edge reachability. Replay their
       // compact results in the canonical layer-plan order used by the oracle.
@@ -1178,6 +1671,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
       total_tests_replayed += tests_replayed;
       total_ignored += ignored;
       total_deletions += deletions;
+      total_frontier_batches += rounds;
       n_edgetests.push_back(tests_replayed);
       level_values.push_back(level);
       level_tasks_planned.push_back(task_count);
@@ -1263,6 +1757,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
       Rcpp::Named("alpha") = alpha,
       Rcpp::Named("index") = index,
       Rcpp::Named("numCol") = num_col,
+      Rcpp::Named("scheduler") = "cache-aware-frontier-4x-v1",
+      Rcpp::Named("frontier_batch_count") = total_frontier_batches,
       Rcpp::Named("levels") = static_cast<int>(level_values.size()),
       Rcpp::Named("tasks_planned") = total_tasks_planned,
       Rcpp::Named("logical_tests_consumed") = total_tests_replayed,
@@ -1319,6 +1815,34 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.component_cache_miss_count,
       Rcpp::Named("component_cache_eviction_count") =
         diagnostics.component_cache_eviction_count,
+      Rcpp::Named("result_cache_capacity") =
+        diagnostics.result_cache_capacity,
+      Rcpp::Named("result_cache_warm_start_entries") =
+        diagnostics.result_cache_warm_start_entries,
+      Rcpp::Named("result_cache_request_count") =
+        diagnostics.result_cache_request_count,
+      Rcpp::Named("result_cache_hit_count") =
+        diagnostics.result_cache_hit_count,
+      Rcpp::Named("result_cache_miss_count") =
+        diagnostics.result_cache_miss_count,
+      Rcpp::Named("result_cache_insert_count") =
+        diagnostics.result_cache_insert_count,
+      Rcpp::Named("result_cache_eviction_count") =
+        diagnostics.result_cache_eviction_count,
+      Rcpp::Named("target_cache_capacity") =
+        diagnostics.target_cache_capacity,
+      Rcpp::Named("target_cache_warm_start_entries") =
+        diagnostics.target_cache_warm_start_entries,
+      Rcpp::Named("target_cache_request_count") =
+        diagnostics.target_cache_request_count,
+      Rcpp::Named("target_cache_hit_count") =
+        diagnostics.target_cache_hit_count,
+      Rcpp::Named("target_cache_miss_count") =
+        diagnostics.target_cache_miss_count,
+      Rcpp::Named("target_cache_insert_count") =
+        diagnostics.target_cache_insert_count,
+      Rcpp::Named("target_cache_eviction_count") =
+        diagnostics.target_cache_eviction_count,
       Rcpp::Named("host_synchronization_count") =
         diagnostics.host_synchronization_count,
       Rcpp::Named("matrix_h2d_bytes") =
@@ -1340,6 +1864,60 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         static_cast<double>(runtime_info.workspace_bytes),
       Rcpp::Named("elapsed_sec") = elapsed_ms(run_started) / 1000.0,
       Rcpp::Named("authority_gate_pass") = authority_clean));
+}
+
+Rcpp::List full_cuda_ci_one_call_cache_control(
+    const std::string& action,
+    int capacity) {
+  CompactResultCache::Snapshot value;
+  TargetStateCache::Snapshot target_value;
+  if (action == "info") {
+    require(capacity == -1,
+            "compact result cache info does not accept a capacity");
+    value = compact_result_cache().snapshot();
+    target_value = target_state_cache().snapshot();
+  } else if (action == "reset") {
+    require(capacity == -1,
+            "compact result cache reset does not accept a capacity");
+    value = compact_result_cache().reset();
+    target_value = target_state_cache().reset();
+  } else if (action == "configure") {
+    value = compact_result_cache().configure(capacity);
+    target_value = target_state_cache().snapshot();
+  } else if (action == "configure_target") {
+    target_value = target_state_cache().configure(capacity);
+    value = compact_result_cache().snapshot();
+  } else {
+    throw std::runtime_error("unknown compact result cache control action");
+  }
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") =
+      "full-cuda-ci-compact-result-cache-control-v1",
+    Rcpp::Named("action") = action,
+    Rcpp::Named("capacity") = value.capacity,
+    Rcpp::Named("entries") = value.entries,
+    Rcpp::Named("total_requests") =
+      static_cast<double>(value.total_requests),
+    Rcpp::Named("total_hits") = static_cast<double>(value.total_hits),
+    Rcpp::Named("total_misses") = static_cast<double>(value.total_misses),
+    Rcpp::Named("total_inserts") = static_cast<double>(value.total_inserts),
+    Rcpp::Named("total_evictions") =
+      static_cast<double>(value.total_evictions),
+    Rcpp::Named("generation") = static_cast<double>(value.generation),
+    Rcpp::Named("target_capacity") = target_value.capacity,
+    Rcpp::Named("target_entries") = target_value.entries,
+    Rcpp::Named("target_total_requests") =
+      static_cast<double>(target_value.total_requests),
+    Rcpp::Named("target_total_hits") =
+      static_cast<double>(target_value.total_hits),
+    Rcpp::Named("target_total_misses") =
+      static_cast<double>(target_value.total_misses),
+    Rcpp::Named("target_total_inserts") =
+      static_cast<double>(target_value.total_inserts),
+    Rcpp::Named("target_total_evictions") =
+      static_cast<double>(target_value.total_evictions),
+    Rcpp::Named("target_generation") =
+      static_cast<double>(target_value.generation));
 }
 
 }  // namespace fastkpc

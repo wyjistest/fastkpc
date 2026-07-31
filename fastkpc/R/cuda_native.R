@@ -2154,6 +2154,19 @@ precision_run_skeleton_full_cuda_native <- function(
   )
 }
 
+full_cuda_ci_one_call_cache_control_native <- function(
+    action = c("info", "reset", "configure", "configure_target"),
+    capacity = NULL) {
+  load_fastkpc_cuda_native()
+  action <- match.arg(action)
+  capacity_value <- if (is.null(capacity)) -1L else as.integer(capacity)
+  .Call(
+    "C_full_cuda_ci_one_call_cache_control",
+    as.character(action), capacity_value,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
 fastkpc_native_legacy_mgcv_residual_backend <- function() {
   raw <- tolower(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
                             unset = "r"))

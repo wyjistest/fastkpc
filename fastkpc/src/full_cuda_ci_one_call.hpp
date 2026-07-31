@@ -16,6 +16,10 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
     const std::string& trace_level,
     bool compatible_cuda_strict);
 
+Rcpp::List full_cuda_ci_one_call_cache_control(
+    const std::string& action,
+    int capacity);
+
 }  // namespace fastkpc
 
 #endif

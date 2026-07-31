@@ -750,7 +750,7 @@ fastkpc_full_cuda_phase8_validate_artifact <- function(
   )
   evidence <- readRDS(file.path(artifact_dir, "source_evidence.rds"))
   fastkpc_full_cuda_phase8_validate_full(
-    evidence, verify_current_identity = TRUE
+    evidence, verify_current_identity = isTRUE(verify_current_sources)
   )
   fastkpc_full_cuda_phase8_publication_require(
     identical(summary$execution_identity_sha256,

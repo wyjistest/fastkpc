@@ -4,7 +4,7 @@
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
-> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. Its producer source commit is `37da2b3d5973c7a878e657f9f2a3a2698fea7fd4`, source closure is `4baa27f921bf16ef151f0a028caa0a71f4297fd0830b274f3968aad36b4a52b1`, native binary SHA-256 is `c3744bf41d77190ce5b3283df6aceae5fe472d67d5b034aaa56fd585ac8c7e0b`, and the accepted one-call artifact manifest SHA-256 is `f32a4ae5275da20912e709d766ad4e12a887446c34ccaf89f9d2358383159831`.
+> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE and the Phase 10 canonical campaign is accepted. The campaign producer is `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556`, freeze identity is `1b1f19333ab2df038d6177bbbb40f9213afe8ed94bd0411fcc088638ec232a75`, source closure is `9f5a85968bbb61390288a62775c3b0ea930cb8c679b36dda86f3661abc5c1e36`, and native binary SHA-256 is `c24881ffd1acedd095b83c54271bcc9c11c0f7bc0843e7f9900cb38f6c32623d`. Phase 10 is not complete because the external promotion holdout remains `SEALED_NOT_RELEASED`.
 >
 > **Active roadmap phase:** Phase 10, full performance gate, hardening, and promotion.
 >
@@ -636,7 +636,7 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 7 | Native setup builder; remove R/mgcv from CI loop | COMPLETE - all 8,634 native setups and the complete residual/graph route pass with zero R/mgcv setup authority or fallback |
 | 8 | Legacy-compatible device-resident CUDA dCov | COMPLETE - all 240,489 logical tests use guarded device-resident CUDA dCov with zero final flips, zero CPU numerical authority, SHD 0, and a 17.499-second dCov boundary |
 | 9 | Fused one-call compatible CUDA skeleton | COMPLETE - one native call reproduces all 240,489 canonical tests, exact graph semantics, and zero R/CPU numerical authority |
-| 10 | Full gate, hardening, and promotion | ACTIVE - eliminate Phase 9 setup/residual recomputation, pass repeatability and hardening, then meet both performance gates |
+| 10 | Full gate, hardening, and promotion | ACTIVE - bounded caches, hardening, 15-run canonical repeatability, and both performance gates pass; external sealed holdout, final docs, and completion audit remain |
 
 **Codex starts at the earliest phase whose exit gate is not complete.** Do not skip Phase 0 because later code already exists.
 
@@ -3056,6 +3056,62 @@ known supported semantic envelope
 
 Do not describe `compatible.cuda` as a full mgcv clone. It is a compatible implementation of the exact regrXonS/KPC subset.
 
+### Accepted canonical campaign evidence (2026-07-31)
+
+The canonical performance/repeatability claim is accepted independently of
+the still-sealed promotion holdout:
+
+```text
+artifact = fastkpc/artifacts/full_cuda_ci/promotion_351x48_v1/
+producer identity SHA-256 =
+  592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556
+freeze identity SHA-256 =
+  1b1f19333ab2df038d6177bbbb40f9213afe8ed94bd0411fcc088638ec232a75
+source closure SHA-256 =
+  9f5a85968bbb61390288a62775c3b0ea930cb8c679b36dda86f3661abc5c1e36
+native binary SHA-256 =
+  c24881ffd1acedd095b83c54271bcc9c11c0f7bc0843e7f9900cb38f6c32623d
+manifest SHA-256 =
+  4ec1858dee56bdfc8af6073548adf86a08dfd7c2b479ac4d5db51fcad711b6b4
+summary SHA-256 =
+  313bfbd27d3dd48beb3be700c65d490feae50adfc52ab6a8d59c97452337045c
+
+cold repetitions / median = 5 / 1290.664 sec
+warm repetitions / median = 5 / 0.699 sec
+fresh correct baselines / median = 5 / 601.431 sec
+warm / correct-baseline median ratio = 0.001162228
+warm absolute / relative / stretch gates = TRUE / TRUE / TRUE
+
+edge count = 110 / 110
+SHD = 0 in all 15 measured runs
+adjacency / sepsets / n.edgetests exact = TRUE / TRUE / TRUE
+deletion / logical trace exact = TRUE / TRUE
+repeatability gate = TRUE
+every-run correctness gate = TRUE
+every-candidate authority gate = TRUE
+
+legacy mgcv target fits / setup calls in CI loop = 0 / 0
+R callbacks / CPU residual solves = 0 / 0
+CPU dCov component / eig / pair / gamma / Spectra calls = 0 / 0 / 0 / 0 / 0
+residual / component D2H bytes = 0 / 0
+unknown / approximate fallback count = 0 / 0
+
+hardening artifact = fastkpc/artifacts/full_cuda_ci/failure_injection_v1/
+hardening gate = TRUE
+campaign artifact identity and tamper gate = TRUE
+holdout state / gate = SEALED_NOT_RELEASED / FALSE
+phase10 canonical campaign claim = TRUE
+phase10 promotion claim = FALSE
+recommended route = FALSE
+```
+
+The five warm measurements each follow one unmeasured complete cold warm-up in
+a fresh process. The measured warm call reuses authenticated,
+capacity-bounded compact-result and target-state caches. Cold timing includes
+input validation, native setup, CUDA work, cache construction, and packaging;
+the frozen budget requires it to be reported but assigns no cold promotion
+threshold.
+
 ### Final exit condition
 
 The final success definition in Section 13 is satisfied.
@@ -3489,11 +3545,13 @@ Phase 10 performance baseline, not as a promotion claim.
 
 ### Task 16
 
-Active: remove the Phase 9 setup and residual recomputation exposed by the full
-artifact, implement the required bounded cache/concurrency behavior, and rerun
-the full cold/warm, repeatability, hardening, held-out, and same-run baseline
-campaign. Promotion remains forbidden until every Phase 10 correctness,
-authority, absolute-time, and relative-time gate passes.
+Active: bounded compact-result/target-state caching and the cache-aware frontier
+scheduler removed the repeated warm-path work. The hardening artifact and the
+formal five-cold/five-warm/five-baseline canonical campaign pass with SHD 0,
+exact graph semantics, zero CPU numerical authority, a `0.699`-second warm
+median, and a `0.001162228` same-campaign baseline ratio. The external sealed
+holdout, final promoted documentation, and Section 13 completion audit remain.
+Promotion remains forbidden while the holdout is `SEALED_NOT_RELEASED`.
 
 ---
 

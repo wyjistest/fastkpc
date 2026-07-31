@@ -4,6 +4,86 @@ This repository keeps the legacy `kpcalg` sources and the staged `fastkpc`
 backend work in one workspace. The active fast backend code is under
 `fastkpc/`.
 
+## Full-CUDA compatible skeleton candidate
+
+The explicit full-CUDA skeleton route has passed the frozen Phase 10 canonical
+351x48 campaign. It is not promoted or recommended yet: the externally held
+sealed promotion corpus remains `SEALED_NOT_RELEASED`.
+
+The route is separate from the older `fast_kpc(precision = "compatible")`
+bridge described below. Invoke it explicitly:
+
+```r
+source("fastkpc/R/fast_kpc.R")
+
+skeleton <- fastkpc_compatible_cuda_skeleton(
+  data,
+  alpha = 0.1,
+  options = list(
+    route = "full_cuda",
+    compatible_cuda_strict = TRUE,
+    max_conditioning_size = 7L,
+    index = 1,
+    numCol = 35L,
+    trace_level = "logical"
+  )
+)
+```
+
+This route implements the exact Gaussian/identity `regrXonS` subset used by
+the KPC skeleton: a joint thin-plate smooth for `|S| <= 2`, additive smooths
+for `|S| > 2`, target-specific GCV selection, CUDA residual formation, and
+legacy-compatible CUDA `dcov.gamma`. It is not a general mgcv clone.
+
+The currently qualified public envelope is deliberately narrow:
+
+```text
+finite binary64 matrix; n > 35; 2 <= p <= 64
+alpha = 0.1; index = 1; numCol = 35
+0 <= max_conditioning_size <= 7
+Gaussian family; identity link; unweighted; zero offset
+skeleton stage only
+```
+
+Strict mode fails closed outside that envelope. It does not silently call
+legacy mgcv, a CPU numerical CI path, `fastSplineCUDA`, or another approximate
+backend. C++ owns canonical skeleton replay; CUDA owns repeated numerical CI
+work. The result and target-state caches are capacity-bounded and keyed by
+semantic dataset/test identities.
+
+Build and validate the frozen candidate with:
+
+```bash
+bash fastkpc/tools/clean_cuda_native.sh
+bash fastkpc/tools/build_cuda_native.sh
+Rscript fastkpc/tests/test_full_cuda_ci_one_call.R
+Rscript fastkpc/tests/test_full_cuda_ci_one_call_cache.R
+Rscript fastkpc/tests/test_full_cuda_ci_phase10_hardening_artifact.R
+Rscript fastkpc/tests/test_full_cuda_ci_phase10_campaign_artifact.R
+Rscript fastkpc/tests/test_full_cuda_ci_phase10_completion_audit.R
+```
+
+The completion audit intentionally fails until the sealed holdout artifact and
+final `COMPLETE` roadmap state exist.
+
+Canonical campaign evidence is under
+`fastkpc/artifacts/full_cuda_ci/promotion_351x48_v1/`. Five cold, five warm,
+and five same-campaign correct-baseline runs all reproduced 110 edges,
+SHD 0, exact sepsets, exact logical test counts, and the exact deletion trace.
+The measured warm median was 0.699 seconds versus a 601.431-second baseline
+median; the cold median was 1290.664 seconds and is reported separately without
+a promotion threshold. All CPU numerical authority, approximate-backend, and
+unknown-fallback counters were zero.
+
+Final promotion additionally requires an external custodian release directory
+and token through `FASTKPC_PROMOTION_HOLDOUT_RELEASE_DIR` and
+`FASTKPC_PROMOTION_HOLDOUT_RELEASE_TOKEN`. The standard gate fails when those
+inputs or the resulting sealed-holdout artifact are absent:
+
+```bash
+FASTKPC_RUN_CUDA_TESTS=1 bash fastkpc/tools/run_full_cuda_ci_gate.sh
+```
+
 ## Operational backend positioning
 
 ```text
@@ -59,7 +139,8 @@ precision = "hybrid":
 ```
 
 The default remains the existing legacy-compatible fastkpc behavior unless
-`precision` is explicitly requested. Diagnostics distinguish
+`precision` is explicitly requested. This precision ladder is distinct from
+the explicit full-CUDA candidate above. Diagnostics distinguish
 `backend_planned` from `backend_executed`; `backend_used` refers to the actual
 executor. Current precision data-plane scope is skeleton only, CPU/CUDA, and
 single-penalty `|S| <= 2`. CUDA precision tests include an opt-in native E2E
