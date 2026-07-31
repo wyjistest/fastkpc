@@ -11,6 +11,7 @@ source("fastkpc/R/full_cuda_ci_multi_penalty_cpp.R")
 source("fastkpc/R/full_cuda_ci_phase5_artifacts.R")
 source("fastkpc/R/full_cuda_ci_multi_penalty_cuda.R")
 source("fastkpc/R/full_cuda_ci_phase6_artifacts.R")
+source("fastkpc/R/full_cuda_ci_native_setup.R")
 
 read_integer <- function(name, default = NULL) {
   raw <- Sys.getenv(name, unset = "")
@@ -30,6 +31,7 @@ partition_count <- read_integer("FASTKPC_PHASE6_PARTITION_COUNT")
 max_setups <- read_integer("FASTKPC_PHASE6_MAX_SETUPS")
 run_dcov <- read_integer("FASTKPC_PHASE6_RUN_DCOV", 1L) == 1L
 concurrency <- read_integer("FASTKPC_PHASE6_CONCURRENCY", 64L)
+native_setup <- read_integer("FASTKPC_PHASE7_NATIVE_SETUP", 0L) == 1L
 output_path <- Sys.getenv("FASTKPC_PHASE6_PARTITION_OUTPUT", unset = "")
 if (!nzchar(output_path)) {
   stop("FASTKPC_PHASE6_PARTITION_OUTPUT is required", call. = FALSE)
@@ -69,8 +71,19 @@ evidence <- fastkpc_full_cuda_phase6_scan_partition(
   partition_id = partition_id,
   partition_count = partition_count,
   concurrency = concurrency,
-  progress = TRUE
+  progress = TRUE,
+  setup_builder = if (native_setup) {
+    fastkpc_full_cuda_phase7_setup_builder
+  } else {
+    NULL
+  }
 )
+if (native_setup) {
+  evidence$phase7_execution_identity <-
+    fastkpc_full_cuda_phase7_execution_identity(
+      catalog, "native-setup-backend"
+    )
+}
 if (!isTRUE(evidence$summary$pass)) {
   print(evidence$summary)
   mismatched <- evidence$targets[

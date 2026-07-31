@@ -1,4 +1,5 @@
 source("fastkpc/R/mgcv_extract_oracle.R")
+source("fastkpc/R/cuda_native.R")
 source("fastkpc/R/full_cuda_ci_single_penalty_gcv.R")
 
 fail <- function(message) stop(message, call. = FALSE)

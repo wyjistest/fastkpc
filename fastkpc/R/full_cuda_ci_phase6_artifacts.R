@@ -529,7 +529,11 @@ fastkpc_full_cuda_phase6_scan_partition <- function(
     catalog, phase5_evidence, phase5_evidence_path,
     max_setups = NULL, run_dcov = TRUE,
     partition_id = NULL, partition_count = NULL,
-    concurrency = 64L, progress = interactive()) {
+    concurrency = 64L, progress = interactive(), setup_builder = NULL) {
+  fastkpc_full_cuda_phase6_artifact_require(
+    is.null(setup_builder) || is.function(setup_builder),
+    "Phase 6 setup builder must be NULL or a function"
+  )
   concurrency <- as.integer(concurrency)
   fastkpc_full_cuda_phase6_artifact_require(
     length(concurrency) == 1L && !is.na(concurrency) &&
@@ -605,9 +609,10 @@ fastkpc_full_cuda_phase6_scan_partition <- function(
   scheduler_window_id <- 0L
   for (shard_id in scope$shard_ids) {
     shard <- fastkpc_full_cuda_phase5_read_shard(
-      catalog, scope, shard_id, preparation = preparation
+      catalog, scope, shard_id, preparation = preparation,
+      include_oracle_setups = is.null(setup_builder)
     )
-    shard_setup_keys <- names(shard$setups)
+    shard_setup_keys <- shard$setup_keys
     window_starts <- seq.int(1L, length(shard_setup_keys), by = concurrency)
     for (window_start in window_starts) {
       scheduler_window_id <- scheduler_window_id + 1L
@@ -621,8 +626,29 @@ fastkpc_full_cuda_phase6_scan_partition <- function(
       tryCatch({
         for (window_index in seq_along(window_keys)) {
           setup_key <- window_keys[[window_index]]
+          setup_started <- proc.time()[["elapsed"]]
+          setup_override <- NULL
+          if (is.function(setup_builder)) {
+            setup_index <- match(
+              setup_key, shard$setup_rows$prepared_s_key_sha256
+            )
+            state_index <- which(
+              shard$target_states$prepared_s_key_sha256 == setup_key
+            )
+            fastkpc_full_cuda_phase6_artifact_require(
+              !is.na(setup_index) && length(state_index) > 0L,
+              "Phase 6 native setup lineage is incomplete"
+            )
+            setup_override <- setup_builder(
+              catalog = catalog,
+              setup_row = shard$setup_rows[setup_index, , drop = FALSE],
+              target_states =
+                shard$target_states[state_index, , drop = FALSE],
+              setup_key = setup_key
+            )
+          }
           batch <- fastkpc_full_cuda_phase5_batch_from_shard(
-            catalog, shard, setup_key
+            catalog, shard, setup_key, setup_override = setup_override
           )
           target_count <- length(batch$target_keys)
           expected_index <- match(
@@ -632,7 +658,6 @@ fastkpc_full_cuda_phase6_scan_partition <- function(
             !anyNA(expected_index),
             "Phase 6 target is missing from the immutable Phase 5 oracle"
           )
-          setup_started <- proc.time()[["elapsed"]]
           cuda_setup <- fastkpc_full_cuda_phase6_prepare(batch$setup)
           handles[[window_index]] <-
             fastkpc_full_cuda_phase6_prepared_create(
@@ -644,6 +669,8 @@ fastkpc_full_cuda_phase6_scan_partition <- function(
             target_count = target_count,
             expected = phase5_targets[expected_index, , drop = FALSE],
             cuda_setup = cuda_setup,
+            native_setup_diagnostics =
+              batch$setup$native_setup_diagnostics,
             setup_ms = 1000 *
               (proc.time()[["elapsed"]] - setup_started),
             before = full_cuda_ci_multi_penalty_gcv_prepared_info_native(
@@ -858,6 +885,26 @@ fastkpc_full_cuda_phase6_scan_partition <- function(
         target_count = target_count,
         logical_test_count = nrow(setup_logical),
         setup_ms = setup_ms,
+        native_setup_count = if (is.null(
+          context$native_setup_diagnostics
+        )) 0L else as.integer(
+          context$native_setup_diagnostics$native_setup_count
+        ),
+        native_setup_unsupported_count = if (is.null(
+          context$native_setup_diagnostics
+        )) 0L else as.integer(
+          context$native_setup_diagnostics$unsupported_count
+        ),
+        legacy_mgcv_setup_count = if (is.null(
+          context$native_setup_diagnostics
+        )) 0L else as.integer(
+          context$native_setup_diagnostics$legacy_mgcv_setup_count
+        ),
+        r_callback_count = if (is.null(
+          context$native_setup_diagnostics
+        )) 0L else as.integer(
+          context$native_setup_diagnostics$r_callback_count
+        ),
         optimizer_ms = optimizer_ms,
         validation_ms = validation_ms,
         dcov_ms = dcov_ms,
@@ -1133,11 +1180,12 @@ fastkpc_full_cuda_phase6_mixed_graph_replay <- function(
     phase4_artifact_dir = file.path(
       "fastkpc", "artifacts", "full_cuda_ci",
       "single_penalty_cuda_gcv_full_shadow_v1"
-    )) {
+    ), phase4_logical_rows = NULL) {
   inherited <- fastkpc_full_cuda_phase5_mixed_graph_replay(
     catalog = catalog,
     phase5_logical_rows = phase6_logical_rows,
-    phase4_artifact_dir = phase4_artifact_dir
+    phase4_artifact_dir = phase4_artifact_dir,
+    phase4_logical_rows = phase4_logical_rows
   )
   graph <- inherited$summary
   summary <- list(
@@ -1189,7 +1237,7 @@ fastkpc_full_cuda_phase6_merge_partitions <- function(
     phase4_artifact_dir = file.path(
       "fastkpc", "artifacts", "full_cuda_ci",
       "single_penalty_cuda_gcv_full_shadow_v1"
-    )) {
+    ), phase4_logical_rows = NULL) {
   evidence_paths <- as.character(evidence_paths)
   phase5_evidence_path <- normalizePath(
     phase5_evidence_path, winslash = "/", mustWork = TRUE
@@ -1365,7 +1413,8 @@ fastkpc_full_cuda_phase6_merge_partitions <- function(
     "Phase 6 merged numerical/concurrency gate failed"
   )
   mixed_graph <- fastkpc_full_cuda_phase6_mixed_graph_replay(
-    catalog, logical_rows, phase4_artifact_dir = phase4_artifact_dir
+    catalog, logical_rows, phase4_artifact_dir = phase4_artifact_dir,
+    phase4_logical_rows = phase4_logical_rows
   )
   list(
     schema_version =

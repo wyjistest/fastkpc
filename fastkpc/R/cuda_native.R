@@ -1599,6 +1599,33 @@ full_cuda_ci_single_penalty_mroot_cuda <- function(
   )
 }
 
+full_cuda_ci_native_setup_native <- function(conditioning) {
+  load_fastkpc_cuda_native()
+  conditioning <- as.matrix(conditioning)
+  storage.mode(conditioning) <- "double"
+  .Call(
+    "C_full_cuda_ci_native_setup", conditioning,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_native_geometry_prepare_native <- function(
+    X, penalty_blocks, penalty_offsets, penalty_ranks) {
+  load_fastkpc_cuda_native()
+  X <- as.matrix(X)
+  storage.mode(X) <- "double"
+  penalty_blocks <- lapply(penalty_blocks, function(block) {
+    block <- as.matrix(block)
+    storage.mode(block) <- "double"
+    block
+  })
+  .Call(
+    "C_full_cuda_ci_native_geometry_prepare",
+    X, penalty_blocks, as.integer(penalty_offsets),
+    as.integer(penalty_ranks), PACKAGE = "fastkpc_cuda"
+  )
+}
+
 full_cuda_ci_multi_penalty_gcv_evaluate_cpp_native <- function(
     X, y, penalty_blocks, penalty_offsets, penalty_ranks, log_sp,
     H = NULL, constraint = NULL,

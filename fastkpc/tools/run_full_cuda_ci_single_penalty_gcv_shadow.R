@@ -9,6 +9,7 @@ source("fastkpc/R/full_cuda_ci_phase35_contracts.R")
 source("fastkpc/R/cuda_native.R")
 source("fastkpc/R/full_cuda_ci_single_penalty_gcv.R")
 source("fastkpc/R/full_cuda_ci_phase4_artifacts.R")
+source("fastkpc/R/full_cuda_ci_native_setup.R")
 
 if (!isTRUE(fastkpc_cuda_available())) {
   stop("Phase 4 full shadow requires CUDA", call. = FALSE)
@@ -44,6 +45,9 @@ partition_id <- if (nzchar(partition_id_text)) {
 } else {
   NULL
 }
+native_setup <- identical(
+  Sys.getenv("FASTKPC_PHASE7_NATIVE_SETUP", unset = "0"), "1"
+)
 catalog <- fastkpc_full_cuda_open_fixed_sp_catalog(
   file.path("fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1"),
   file.path(
@@ -64,8 +68,19 @@ evidence <- fastkpc_full_cuda_phase4_scan_full_shadow(
   run_dcov = run_dcov,
   partition_id = partition_id,
   partition_count = partition_count,
-  progress = TRUE
+  progress = TRUE,
+  setup_builder = if (native_setup) {
+    fastkpc_full_cuda_phase7_setup_builder
+  } else {
+    NULL
+  }
 )
+if (native_setup) {
+  evidence$phase7_execution_identity <-
+    fastkpc_full_cuda_phase7_execution_identity(
+      catalog, "native-setup-backend"
+    )
+}
 saveRDS(evidence, output, version = 3L)
 print(evidence$summary)
 if (!isTRUE(evidence$summary$same_sp_fixed_solver_gate) ||

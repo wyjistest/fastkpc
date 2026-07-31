@@ -111,24 +111,17 @@ fastkpc_full_cuda_phase4_spectral_prepare <- function(prepared_setup) {
     sum(eigenvalues > 0) == penalty_rank,
     "Phase 4 rank-aware spectral decomposition disagrees with penalty rank"
   )
-  magic_qr <- qr(X, LAPACK = TRUE)
-  magic_q <- qr.Q(magic_qr, complete = FALSE)
-  magic_r <- qr.R(magic_qr, complete = FALSE)
-  magic_qr_packed <- as.matrix(magic_qr$qr)
-  magic_tau <- as.numeric(magic_qr$qraux)
-  magic_pivot <- as.integer(magic_qr$pivot)
-  mroot <- get("mroot", envir = asNamespace("mgcv"))
-  block_root <- mroot(
-    as.matrix(prepared_setup$penalty_blocks[[1L]]),
-    rank = penalty_rank,
-    method = "chol"
+  geometry <- full_cuda_ci_native_geometry_prepare_native(
+    X, prepared_setup$penalty_blocks, prepared_setup$penalty_offsets,
+    penalty_rank
   )
-  full_root <- matrix(0, p, penalty_rank)
-  root_indices <- prepared_setup$penalty_offsets[[1L]] +
-    seq_len(nrow(block_root)) - 1L
-  full_root[root_indices, ] <- block_root
-  magic_penalty_root <- full_root[magic_pivot, , drop = FALSE]
-  magic_penalty_matrix <- tcrossprod(magic_penalty_root)
+  magic_q <- geometry$magic_q
+  magic_r <- geometry$magic_r
+  magic_qr_packed <- geometry$magic_qr_packed
+  magic_tau <- geometry$magic_tau
+  magic_pivot <- geometry$magic_pivot
+  magic_penalty_root <- geometry$penalty_roots[[1L]]
+  magic_penalty_matrix <- geometry$penalty_matrices[[1L]]
   storage.mode(magic_q) <- "double"
   storage.mode(magic_r) <- "double"
   storage.mode(magic_qr_packed) <- "double"
@@ -164,7 +157,8 @@ fastkpc_full_cuda_phase4_spectral_prepare <- function(prepared_setup) {
     magic_penalty_root = magic_penalty_root,
     magic_penalty_matrix = magic_penalty_matrix,
     magic_pivot = magic_pivot,
-    initial_sp = fastkpc_full_cuda_phase4_initial_sp(prepared_setup)
+    initial_sp = geometry$initial_sp[[1L]],
+    native_geometry_diagnostics = geometry$diagnostics
   )
 }
 

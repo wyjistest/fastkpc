@@ -4,9 +4,9 @@
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
-> **Current accepted implementation/evidence snapshot:** Phase 5 is COMPLETE. Its producer source commit is `cc336a9a27ed213376c1cc38d91677edf701eb84`, and its accepted oracle/full-shadow/backend manifest SHA-256 values are `579e2d18c6c170f889fe848db17984f455752c6ab48fb200c64a90922c1cf79e`, `3d39ee3773d362d3ff6a0dcb2b426550f992f3a8e69b28b2fd3ac43b7cdef806`, and `877e681f6188adff1255141209fd711eadfa236c6a1418bf111d4e5382153778`.
+> **Current accepted implementation/evidence snapshot:** Phase 7 is COMPLETE. Its producer source commit is `63fee4f771f2443b60b74f1634bf124bf093fa0b`, source closure is `3827f34f01b4af3f000d6bd4c2d8530f69d2e2d0b7c09d3990dba275e3da6fa1`, native binary SHA-256 is `5f5f2a69e1155aaf60e5d058143708ca3b51766e85a07c904eb894ea7b798c32`, and its accepted oracle/full-shadow/backend manifest SHA-256 values are `a01230a39177e995c2c7290c587706f5478c2a7905ddcba60a012a7299925389`, `6342295fd09081c2515c6380c6deae9d3d5b5195c1644d44d9e3f8c7d848bc7e`, and `e84e8597f8876c78b63050932190600267fd858c260d6918b8740ad89ea760dc`.
 >
-> **Active roadmap phase:** Phase 6, CUDA multi-penalty same-S target batches.
+> **Active roadmap phase:** Phase 8, legacy-compatible device-resident CUDA dCov.
 >
 > **Hard rule:** **0 SHD is mandatory.** A faster result with a different skeleton is a failed result.
 
@@ -633,8 +633,8 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 4 | Full-CUDA single-penalty GCV for `|S|<=2` | COMPLETE - all 44,941 targets use CUDA scoring/selection and fitting; full-shadow graph semantics and the five-run backend gate pass |
 | 5 | C++ multi-penalty GAM semantic replica | COMPLETE - all 7,460 setups, 65,676 targets, and 60,324 logical rows pass with zero optimizer drift, decision flips, or fallback; mixed replay has SHD 0 |
 | 6 | CUDA multi-penalty same-S target batches | COMPLETE - all 65,676 multi-penalty targets use persistent CUDA optimization and residual solves; the full residual route has SHD 0 and a 0.7693 same-trace performance ratio |
-| 7 | Native setup builder; remove R/mgcv from CI loop | ACTIVE - replace the version-pinned Phase 2 setup provider without weakening the accepted residual route |
-| 8 | Legacy-compatible device-resident CUDA dCov | PARTIAL — primitives/smoke gates exist |
+| 7 | Native setup builder; remove R/mgcv from CI loop | COMPLETE - all 8,634 native setups and the complete residual/graph route pass with zero R/mgcv setup authority or fallback |
+| 8 | Legacy-compatible device-resident CUDA dCov | ACTIVE - qualify the Phase 3.5 guarded exact-screen/full-eig architecture on the accepted Phase 7 residual service |
 | 9 | Fused one-call compatible CUDA skeleton | PARTIAL — facade exists, CI service does not |
 | 10 | Full gate, hardening, and promotion | NOT STARTED |
 
@@ -2475,6 +2475,57 @@ n.edgetests exact = TRUE
 
 The compatible GAM residual service is self-contained in C++/CUDA for the complete canonical semantic envelope.
 
+### Accepted Phase 7 closure (2026-07-31)
+
+The native C++ setup builder now covers every canonical `|S|=1..7` setup:
+
+```text
+setups                                  = 8,634
+single- / multi-penalty setups          = 1,174 / 7,460
+targets                                 = 110,617
+logical tests                           = 240,489
+native setup unsupported count          = 0
+legacy mgcv setup / fit count           = 0 / 0
+R callback count                        = 0
+CPU residual numerical solve count      = 0
+unknown / approximate fallback count    = 0 / 0
+edge count                              = 110 / 110
+SHD                                     = 0
+adjacency / sepsets / n.edgetests       = exact / exact / exact
+canonical deletion trace                = exact
+```
+
+All 8,634 oracle-shadow setup comparisons have exact model matrices,
+projectors, constraints, penalty operators, rank/null-space metadata, QR,
+penalty roots, and initial smoothing parameters. The authoritative native
+setup route then passes the complete Phase 4 and Phase 6 selected-fit and
+downstream decision gates. Maximum selected log-sp error is
+`2.231309e-10` for single-penalty targets and `9.827357e-07` for
+multi-penalty targets; maximum single-penalty fitted/residual error is
+`6.223058e-10`, and maximum multi-penalty fitted GEMM error is
+`1.110223e-14` with exact residual identity.
+
+Accepted artifacts:
+
+```text
+fastkpc/artifacts/full_cuda_ci/native_setup_oracle_v1/
+  manifest SHA-256 = a01230a39177e995c2c7290c587706f5478c2a7905ddcba60a012a7299925389
+
+fastkpc/artifacts/full_cuda_ci/native_setup_full_shadow_v1/
+  manifest SHA-256 = 6342295fd09081c2515c6380c6deae9d3d5b5195c1644d44d9e3f8c7d848bc7e
+
+fastkpc/artifacts/full_cuda_ci/native_setup_backend_v1/
+  manifest SHA-256 = e84e8597f8876c78b63050932190600267fd858c260d6918b8740ad89ea760dc
+```
+
+Each artifact contains all 26 standard and phase-specific files and validates
+its 110,617 case rows, 8,634 rank/condition rows, 1,478 near-alpha rows, 96
+authenticated raw runs, graph payloads, producer identity, source closure,
+binary identity, tracked contract snapshots, and content hashes. The accepted
+source evidence SHA-256 is
+`65ee9f8cd579b090bd27656a62cc642ef229705a723dc4c89566740bad4d91c3`.
+Phase 7 is complete; Phase 8 is next.
+
 ---
 
 ## Phase 8 — Build a promotable legacy-compatible CUDA dCov backend
@@ -3314,10 +3365,20 @@ performance ratio against the correct 20-core legacy-mgcv provider.
 
 ### Task 13
 
-Active: implement the Phase 7 native setup generator in shadow mode against
-the version-pinned Phase 2 provider. Prove model-space, constraint, penalty,
-rank, selected-fit, residual, and downstream decision parity before making the
-native setup authoritative or removing any oracle path.
+Complete: Phase 7 produced all 64 setup shards, 16 Phase 4 partitions, 16
+Phase 6 partitions, and three schema-complete authenticated artifacts. The
+native C++ setup builder covers all 8,634 setups and 110,617 targets with exact
+setup geometry, zero unsupported cases, zero runtime R/mgcv setup or fit
+authority, exact graph semantics, and SHD 0.
+
+### Task 14
+
+Active: qualify the Phase 3.5-selected guarded exact-CUDA decision screen plus
+CUDA legacy full-eig refinement against the accepted Phase 7 native setup and
+CUDA residual service. Cover level-zero and all 238,276 conditional logical
+tests, preserve every canonical decision, keep residual/component large-payload
+D2H and all CPU numerical dCov/gamma counters at zero, and publish the three
+required Phase 8 artifacts before integrating the backend into Phase 9.
 
 ---
 

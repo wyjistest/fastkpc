@@ -132,8 +132,14 @@ fastkpc_full_cuda_phase5_multi_penalty_scope <- function(catalog) {
 }
 
 fastkpc_full_cuda_phase5_read_shard <- function(
-    catalog, scope, shard_id, preparation = NULL) {
+    catalog, scope, shard_id, preparation = NULL,
+    include_oracle_setups = TRUE) {
   shard_id <- as.integer(shard_id)
+  fastkpc_full_cuda_phase5_artifact_require(
+    is.logical(include_oracle_setups) &&
+      length(include_oracle_setups) == 1L && !is.na(include_oracle_setups),
+    "Phase 5 oracle-setup inclusion flag is malformed"
+  )
   selected <- scope$shard_id == shard_id
   setup_keys <- as.character(
     scope$setup_rows$prepared_s_key_sha256[selected]
@@ -156,8 +162,13 @@ fastkpc_full_cuda_phase5_read_shard <- function(
   fastkpc_full_cuda_phase5_artifact_require(
     !anyNA(setup_match), "Phase 5 shard is missing a selected setup"
   )
-  setups <- payload$prepared_s_setups[setup_match]
-  names(setups) <- setup_keys
+  setups <- if (isTRUE(include_oracle_setups)) {
+    value <- payload$prepared_s_setups[setup_match]
+    names(value) <- setup_keys
+    value
+  } else {
+    NULL
+  }
   target_rows <- scope$target_rows[
     scope$target_rows$prepared_s_key_sha256 %in% setup_keys,
     , drop = FALSE
@@ -182,6 +193,8 @@ fastkpc_full_cuda_phase5_read_shard <- function(
   )
   list(
     shard_id = shard_id,
+    setup_keys = setup_keys,
+    setup_rows = scope$setup_rows[selected, , drop = FALSE],
     setups = setups,
     target_states = states,
     target_rows = target_rows
@@ -189,8 +202,12 @@ fastkpc_full_cuda_phase5_read_shard <- function(
 }
 
 fastkpc_full_cuda_phase5_batch_from_shard <- function(
-    catalog, shard, setup_key) {
-  setup <- shard$setups[[setup_key]]
+    catalog, shard, setup_key, setup_override = NULL) {
+  setup <- if (is.null(setup_override)) {
+    shard$setups[[setup_key]]
+  } else {
+    setup_override
+  }
   indices <- which(
     shard$target_states$prepared_s_key_sha256 == setup_key
   )
@@ -906,7 +923,7 @@ fastkpc_full_cuda_phase5_mixed_graph_replay <- function(
     phase4_artifact_dir = file.path(
       "fastkpc", "artifacts", "full_cuda_ci",
       "single_penalty_cuda_gcv_full_shadow_v1"
-    )) {
+    ), phase4_logical_rows = NULL) {
   required <- c(
     "fastkpc_full_cuda_replay_logical_ci",
     "fastkpc_full_cuda_compare_candidate_skeleton",
@@ -918,7 +935,7 @@ fastkpc_full_cuda_phase5_mixed_graph_replay <- function(
                inherits = TRUE)),
     "Phase 5 mixed graph replay dependencies are unavailable"
   )
-  if (exists(
+  if (is.null(phase4_logical_rows) && exists(
         "fastkpc_full_cuda_phase4_validate_artifact", mode = "function",
         inherits = TRUE
       )) {
@@ -931,11 +948,21 @@ fastkpc_full_cuda_phase5_mixed_graph_replay <- function(
     )
   }
   phase4_path <- file.path(phase4_artifact_dir, "logical_ci_results.rds")
-  fastkpc_full_cuda_phase5_artifact_require(
-    file.exists(phase4_path),
-    "Phase 5 inherited Phase 4 logical results are missing"
-  )
-  phase4_rows <- readRDS(phase4_path)
+  if (is.null(phase4_logical_rows)) {
+    fastkpc_full_cuda_phase5_artifact_require(
+      file.exists(phase4_path),
+      "Phase 5 inherited Phase 4 logical results are missing"
+    )
+    phase4_rows <- readRDS(phase4_path)
+    phase4_identity <- fastkpc_full_cuda_census_file_hash(phase4_path)
+  } else {
+    fastkpc_full_cuda_phase5_artifact_require(
+      is.data.frame(phase4_logical_rows),
+      "Phase 5 supplied Phase 4 logical results are malformed"
+    )
+    phase4_rows <- phase4_logical_rows
+    phase4_identity <- fastkpc_full_cuda_census_frame_hash(phase4_rows)
+  }
   phase4_rows <- phase4_rows[order(
     phase4_rows$logical_sequence_id, method = "radix"
   ), , drop = FALSE]
@@ -1043,7 +1070,7 @@ fastkpc_full_cuda_phase5_mixed_graph_replay <- function(
       pass = pass
     ),
     inherited_phase4_logical_results_sha256 =
-      fastkpc_full_cuda_census_file_hash(phase4_path),
+      phase4_identity,
     replay = replay,
     comparison = comparison
   )

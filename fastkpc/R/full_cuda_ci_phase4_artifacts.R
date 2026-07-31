@@ -35,8 +35,14 @@ fastkpc_full_cuda_phase4_single_penalty_scope <- function(catalog) {
 }
 
 fastkpc_full_cuda_phase4_read_shard <- function(
-    catalog, scope, shard_id, preparation = NULL) {
+    catalog, scope, shard_id, preparation = NULL,
+    include_oracle_setups = TRUE) {
   shard_id <- as.integer(shard_id)
+  fastkpc_full_cuda_phase4_artifact_require(
+    is.logical(include_oracle_setups) &&
+      length(include_oracle_setups) == 1L && !is.na(include_oracle_setups),
+    "Phase 4 oracle-setup inclusion flag is malformed"
+  )
   selected <- scope$shard_id == shard_id
   setup_keys <- as.character(
     scope$setup_rows$prepared_s_key_sha256[selected]
@@ -59,8 +65,13 @@ fastkpc_full_cuda_phase4_read_shard <- function(
   fastkpc_full_cuda_phase4_artifact_require(
     !anyNA(setup_match), "Phase 4 shard is missing a selected setup"
   )
-  setups <- payload$prepared_s_setups[setup_match]
-  names(setups) <- setup_keys
+  setups <- if (isTRUE(include_oracle_setups)) {
+    value <- payload$prepared_s_setups[setup_match]
+    names(value) <- setup_keys
+    value
+  } else {
+    NULL
+  }
   target_rows <- scope$target_rows[
     scope$target_rows$prepared_s_key_sha256 %in% setup_keys,
     , drop = FALSE
@@ -85,6 +96,8 @@ fastkpc_full_cuda_phase4_read_shard <- function(
   )
   list(
     shard_id = shard_id,
+    setup_keys = setup_keys,
+    setup_rows = scope$setup_rows[selected, , drop = FALSE],
     setups = setups,
     target_states = states,
     target_rows = target_rows
@@ -92,8 +105,12 @@ fastkpc_full_cuda_phase4_read_shard <- function(
 }
 
 fastkpc_full_cuda_phase4_batch_from_shard <- function(
-    catalog, shard, setup_key) {
-  setup <- shard$setups[[setup_key]]
+    catalog, shard, setup_key, setup_override = NULL) {
+  setup <- if (is.null(setup_override)) {
+    shard$setups[[setup_key]]
+  } else {
+    setup_override
+  }
   indices <- which(
     shard$target_states$prepared_s_key_sha256 == setup_key
   )
@@ -591,7 +608,13 @@ fastkpc_full_cuda_phase4_column_errors <- function(candidate, reference) {
 
 fastkpc_full_cuda_phase4_execute_integrated_setup <- function(
     runtime, batch) {
-  dto <- fastkpc_full_cuda_fixed_sp_native_dto(batch$setup)
+  dto <- if (identical(
+    batch$setup$schema_version, "full-cuda-ci-native-runtime-setup-v1"
+  )) {
+    fastkpc_full_cuda_phase7_fixed_sp_dto(batch$setup)
+  } else {
+    fastkpc_full_cuda_fixed_sp_native_dto(batch$setup)
+  }
   native <- list(
     Y = batch$Y,
     planned_route = batch$planned_route,
@@ -818,7 +841,11 @@ fastkpc_full_cuda_phase4_shadow_summary <- function(
 fastkpc_full_cuda_phase4_scan_full_shadow <- function(
     catalog, max_setups = NULL, run_dcov = TRUE,
     partition_id = NULL, partition_count = NULL,
-    progress = interactive()) {
+    progress = interactive(), setup_builder = NULL) {
+  fastkpc_full_cuda_phase4_artifact_require(
+    is.null(setup_builder) || is.function(setup_builder),
+    "Phase 4 setup builder must be NULL or a function"
+  )
   scope <- fastkpc_full_cuda_phase4_single_penalty_scope(catalog)
   all_setup_keys <- as.character(
     scope$setup_rows$prepared_s_key_sha256
@@ -882,12 +909,35 @@ fastkpc_full_cuda_phase4_scan_full_shadow <- function(
   started <- proc.time()[["elapsed"]]
   for (shard_id in scope$shard_ids) {
     shard <- fastkpc_full_cuda_phase4_read_shard(
-      catalog, scope, shard_id, preparation = preparation
+      catalog, scope, shard_id, preparation = preparation,
+      include_oracle_setups = is.null(setup_builder)
     )
-    for (setup_key in names(shard$setups)) {
+    for (setup_key in shard$setup_keys) {
       setup_ordinal <- setup_ordinal + 1L
+      setup_started <- proc.time()[["elapsed"]]
+      setup_override <- NULL
+      if (is.function(setup_builder)) {
+        setup_index <- match(
+          setup_key, shard$setup_rows$prepared_s_key_sha256
+        )
+        state_index <- which(
+          shard$target_states$prepared_s_key_sha256 == setup_key
+        )
+        fastkpc_full_cuda_phase4_artifact_require(
+          !is.na(setup_index) && length(state_index) > 0L,
+          "Phase 4 native setup lineage is incomplete"
+        )
+        setup_override <- setup_builder(
+          catalog = catalog,
+          setup_row = shard$setup_rows[setup_index, , drop = FALSE],
+          target_states = shard$target_states[state_index, , drop = FALSE],
+          setup_key = setup_key
+        )
+      }
+      native_setup_ms <-
+        1000 * (proc.time()[["elapsed"]] - setup_started)
       batch <- fastkpc_full_cuda_phase4_batch_from_shard(
-        catalog, shard, setup_key
+        catalog, shard, setup_key, setup_override = setup_override
       )
       executed <- fastkpc_full_cuda_phase4_execute_integrated_setup(
         runtime, batch
@@ -976,10 +1026,24 @@ fastkpc_full_cuda_phase4_scan_full_shadow <- function(
         dcov_ms <- 1000 * (proc.time()[["elapsed"]] - dcov_started)
       }
       diagnostics <- executed$diagnostics
+      native_diagnostics <- batch$setup$native_setup_diagnostics
+      native_count <- if (is.null(native_diagnostics)) 0L else
+        as.integer(native_diagnostics$native_setup_count)
+      native_unsupported <- if (is.null(native_diagnostics)) 0L else
+        as.integer(native_diagnostics$unsupported_count)
+      legacy_setup_count <- if (is.null(native_diagnostics)) 0L else
+        as.integer(native_diagnostics$legacy_mgcv_setup_count)
+      r_callback_count <- if (is.null(native_diagnostics)) 0L else
+        as.integer(native_diagnostics$r_callback_count)
       timing_parts[[setup_ordinal]] <- data.frame(
         prepared_s_key_sha256 = setup_key,
         target_count = target_count,
         logical_test_count = nrow(setup_logical),
+        native_setup_ms = native_setup_ms,
+        native_setup_count = native_count,
+        native_setup_unsupported_count = native_unsupported,
+        legacy_mgcv_setup_count = legacy_setup_count,
+        r_callback_count = r_callback_count,
         integrated_host_ms = executed$integrated_host_ms,
         cuda_gcv_score_ms = diagnostics$cuda_gcv_score_ms,
         cuda_selected_sp_solve_ms =

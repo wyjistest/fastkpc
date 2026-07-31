@@ -2,6 +2,7 @@
 #include "dcov_exact_cpu.hpp"
 #include "fastspline_basis.hpp"
 #include "full_cuda_ci_contract.hpp"
+#include "full_cuda_ci_native_setup.hpp"
 #include "full_cuda_ci_semantic_abi.hpp"
 #include "hsic_cpu.hpp"
 #include "legacy_dcov_gamma_cpp.hpp"
@@ -8368,6 +8369,33 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_residual_free(
   END_RCPP
 }
 
+extern "C" SEXP C_full_cuda_ci_native_setup(SEXP conditioning_s) {
+  BEGIN_RCPP
+  if (!Rf_isReal(conditioning_s) || !Rf_isMatrix(conditioning_s)) {
+    Rcpp::stop("conditioning must be a numeric matrix");
+  }
+  return fastkpc::full_cuda_ci_native_setup(
+    Rcpp::NumericMatrix(conditioning_s));
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_native_geometry_prepare(
+    SEXP X_s,
+    SEXP penalty_blocks_s,
+    SEXP penalty_offsets_s,
+    SEXP penalty_ranks_s) {
+  BEGIN_RCPP
+  if (!Rf_isReal(X_s) || !Rf_isMatrix(X_s) ||
+      !Rf_isNewList(penalty_blocks_s)) {
+    Rcpp::stop("native geometry inputs are malformed");
+  }
+  return fastkpc::full_cuda_ci_native_geometry_prepare(
+    Rcpp::NumericMatrix(X_s), Rcpp::List(penalty_blocks_s),
+    Rcpp::as<Rcpp::IntegerVector>(penalty_offsets_s),
+    Rcpp::as<Rcpp::IntegerVector>(penalty_ranks_s));
+  END_RCPP
+}
+
 extern "C" SEXP C_full_cuda_ci_single_penalty_mroot_cuda(
     SEXP penalty_matrix_s,
     SEXP penalty_rank_s,
@@ -12786,6 +12814,8 @@ static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_sha256_utf8", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_sha256_utf8), 1},
   {"C_full_cuda_ci_contract_identity", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_contract_identity), 2},
   {"C_full_cuda_ci_semantic_abi_info", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_semantic_abi_info), 0},
+  {"C_full_cuda_ci_native_setup", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_setup), 1},
+  {"C_full_cuda_ci_native_geometry_prepare", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_geometry_prepare), 4},
   {"C_full_cuda_ci_phase35_vertical_resource_snapshot", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical_resource_snapshot), 0},
   {"C_full_cuda_ci_phase35_vertical", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical), 6},
   {"C_full_cuda_ci_phase35_exact_batch", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_exact_batch), 6},

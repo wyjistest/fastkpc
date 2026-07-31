@@ -34,32 +34,16 @@ fastkpc_full_cuda_phase6_prepare <- function(prepared_setup) {
     )
   }
 
-  magic_qr <- qr(X, LAPACK = TRUE)
-  magic_r <- qr.R(magic_qr, complete = FALSE)
-  magic_qr_packed <- as.matrix(magic_qr$qr)
-  magic_tau <- as.numeric(magic_qr$qraux)
-  magic_pivot <- as.integer(magic_qr$pivot)
-  mroot <- get("mroot", envir = asNamespace("mgcv"))
-  penalty_roots <- lapply(seq_len(penalty_count), function(index) {
-    block <- as.matrix(prepared_setup$penalty_blocks[[index]])
-    storage.mode(block) <- "double"
-    root <- mroot(block, rank = ranks[[index]], method = "chol")
-    full_root <- matrix(0, p, ranks[[index]])
-    rows <- offsets[[index]] + seq_len(nrow(root)) - 1L
-    full_root[rows, ] <- root
-    result <- full_root[magic_pivot, , drop = FALSE]
-    storage.mode(result) <- "double"
-    result
-  })
-  penalty_matrices <- lapply(penalty_roots, function(root) {
-    result <- tcrossprod(root)
-    storage.mode(result) <- "double"
-    result
-  })
-  initial_sp <- get("initial.sp", envir = asNamespace("mgcv"))(
-    X, prepared_setup$penalty_blocks, offsets
+  geometry <- full_cuda_ci_native_geometry_prepare_native(
+    X, prepared_setup$penalty_blocks, offsets, ranks
   )
-  initial_log_sp <- log(as.numeric(initial_sp))
+  magic_r <- geometry$magic_r
+  magic_qr_packed <- geometry$magic_qr_packed
+  magic_tau <- geometry$magic_tau
+  magic_pivot <- geometry$magic_pivot
+  penalty_roots <- geometry$penalty_roots
+  penalty_matrices <- geometry$penalty_matrices
+  initial_log_sp <- geometry$initial_log_sp
   storage.mode(magic_r) <- "double"
   storage.mode(magic_qr_packed) <- "double"
   fastkpc_full_cuda_phase6_require(
@@ -88,7 +72,8 @@ fastkpc_full_cuda_phase6_prepare <- function(prepared_setup) {
     penalty_roots = penalty_roots,
     penalty_matrices = penalty_matrices,
     penalty_ranks = ranks,
-    initial_log_sp = initial_log_sp
+    initial_log_sp = initial_log_sp,
+    native_geometry_diagnostics = geometry$diagnostics
   )
 }
 
