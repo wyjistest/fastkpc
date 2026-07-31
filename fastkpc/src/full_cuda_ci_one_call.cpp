@@ -11,6 +11,7 @@
 #include <RcppEigen.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -235,6 +236,7 @@ struct SinglePenaltyGeometry {
 };
 
 struct NativeSetupContext {
+  std::string dataset_key;
   std::string prepared_key;
   std::vector<int> conditioning_set;
   Rcpp::List setup;
@@ -269,18 +271,25 @@ struct OneCallDiagnostics {
   int host_synchronization_count = 0;
   int result_cache_capacity = 0;
   int result_cache_warm_start_entries = 0;
+  int result_cache_dataset_warm_start_entries = 0;
+  std::uint64_t result_cache_warm_start_insert_count = 0;
   int result_cache_request_count = 0;
   int result_cache_hit_count = 0;
+  int result_cache_preexisting_hit_count = 0;
   int result_cache_miss_count = 0;
   int result_cache_insert_count = 0;
   int result_cache_eviction_count = 0;
   int target_cache_capacity = 0;
   int target_cache_warm_start_entries = 0;
+  int target_cache_dataset_warm_start_entries = 0;
+  std::uint64_t target_cache_warm_start_insert_count = 0;
   int target_cache_request_count = 0;
   int target_cache_hit_count = 0;
+  int target_cache_preexisting_hit_count = 0;
   int target_cache_miss_count = 0;
   int target_cache_insert_count = 0;
   int target_cache_eviction_count = 0;
+  std::uint64_t dataset_cache_epoch_at_start = 0;
   int cpu_dcov_component_count = 0;
   int cpu_dcov_eigen_or_lowrank_count = 0;
   int cpu_dcov_pair_stat_count = 0;
@@ -300,6 +309,7 @@ class CompactResultCache {
   struct Snapshot {
     int capacity = 0;
     int entries = 0;
+    int dataset_entries = 0;
     std::uint64_t total_requests = 0;
     std::uint64_t total_hits = 0;
     std::uint64_t total_misses = 0;
@@ -309,6 +319,7 @@ class CompactResultCache {
   };
 
   bool lookup(const std::string& key,
+              const std::string& dataset,
               double* p_value,
               OneCallDiagnostics* diagnostics) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -320,8 +331,14 @@ class CompactResultCache {
       ++diagnostics->result_cache_miss_count;
       return false;
     }
+    require(found->second.dataset == dataset,
+            "compact result cache DatasetKey identity changed");
     ++total_hits_;
     ++diagnostics->result_cache_hit_count;
+    if (found->second.insertion_ordinal <=
+        diagnostics->result_cache_warm_start_insert_count) {
+      ++diagnostics->result_cache_preexisting_hit_count;
+    }
     order_.erase(found->second.order);
     order_.push_front(key);
     found->second.order = order_.begin();
@@ -330,6 +347,7 @@ class CompactResultCache {
   }
 
   void insert(const std::string& key,
+              const std::string& dataset,
               double p_value,
               OneCallDiagnostics* diagnostics) {
     require(std::isfinite(p_value) && p_value >= 0.0 && p_value <= 1.0,
@@ -337,6 +355,8 @@ class CompactResultCache {
     std::lock_guard<std::mutex> lock(mutex_);
     auto found = entries_.find(key);
     if (found != entries_.end()) {
+      require(found->second.dataset == dataset,
+              "compact result cache DatasetKey identity changed");
       found->second.p_value = p_value;
       order_.erase(found->second.order);
       order_.push_front(key);
@@ -351,14 +371,15 @@ class CompactResultCache {
       ++diagnostics->result_cache_eviction_count;
     }
     order_.push_front(key);
-    entries_.emplace(key, Entry{p_value, order_.begin()});
     ++total_inserts_;
+    entries_.emplace(
+      key, Entry{dataset, p_value, total_inserts_, order_.begin()});
     ++diagnostics->result_cache_insert_count;
   }
 
-  Snapshot snapshot() const {
+  Snapshot snapshot(const std::string& dataset = std::string()) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return snapshot_locked();
+    return snapshot_locked(dataset);
   }
 
   Snapshot configure(int capacity) {
@@ -373,7 +394,7 @@ class CompactResultCache {
       ++total_evictions_;
     }
     ++generation_;
-    return snapshot_locked();
+    return snapshot_locked(std::string());
   }
 
   Snapshot reset() {
@@ -386,19 +407,27 @@ class CompactResultCache {
     total_inserts_ = 0;
     total_evictions_ = 0;
     ++generation_;
-    return snapshot_locked();
+    return snapshot_locked(std::string());
   }
 
  private:
   struct Entry {
+    std::string dataset;
     double p_value = 0.0;
+    std::uint64_t insertion_ordinal = 0;
     std::list<std::string>::iterator order;
   };
 
-  Snapshot snapshot_locked() const {
+  Snapshot snapshot_locked(const std::string& dataset) const {
     Snapshot value;
     value.capacity = capacity_;
     value.entries = static_cast<int>(entries_.size());
+    if (!dataset.empty()) {
+      value.dataset_entries = static_cast<int>(std::count_if(
+        entries_.begin(), entries_.end(), [&dataset](const auto& entry) {
+          return entry.second.dataset == dataset;
+        }));
+    }
     value.total_requests = total_requests_;
     value.total_hits = total_hits_;
     value.total_misses = total_misses_;
@@ -435,6 +464,7 @@ class TargetStateCache {
   struct Snapshot {
     int capacity = 0;
     int entries = 0;
+    int dataset_entries = 0;
     std::uint64_t total_requests = 0;
     std::uint64_t total_hits = 0;
     std::uint64_t total_misses = 0;
@@ -444,6 +474,7 @@ class TargetStateCache {
   };
 
   bool lookup(const std::string& key,
+              const std::string& dataset,
               int penalty_count,
               CachedTargetState* state,
               OneCallDiagnostics* diagnostics) {
@@ -456,11 +487,17 @@ class TargetStateCache {
       ++diagnostics->target_cache_miss_count;
       return false;
     }
+    require(found->second.dataset == dataset,
+            "target optimizer cache DatasetKey identity changed");
     require(static_cast<int>(found->second.state.selected_sp.size()) ==
               penalty_count,
             "target optimizer cache penalty shape changed");
     ++total_hits_;
     ++diagnostics->target_cache_hit_count;
+    if (found->second.insertion_ordinal <=
+        diagnostics->target_cache_warm_start_insert_count) {
+      ++diagnostics->target_cache_preexisting_hit_count;
+    }
     order_.erase(found->second.order);
     order_.push_front(key);
     found->second.order = order_.begin();
@@ -469,6 +506,7 @@ class TargetStateCache {
   }
 
   void insert(const std::string& key,
+              const std::string& dataset,
               const CachedTargetState& state,
               OneCallDiagnostics* diagnostics) {
     require(!state.selected_sp.empty() &&
@@ -480,6 +518,8 @@ class TargetStateCache {
     std::lock_guard<std::mutex> lock(mutex_);
     auto found = entries_.find(key);
     if (found != entries_.end()) {
+      require(found->second.dataset == dataset,
+              "target optimizer cache DatasetKey identity changed");
       found->second.state = state;
       order_.erase(found->second.order);
       order_.push_front(key);
@@ -494,14 +534,15 @@ class TargetStateCache {
       ++diagnostics->target_cache_eviction_count;
     }
     order_.push_front(key);
-    entries_.emplace(key, Entry{state, order_.begin()});
     ++total_inserts_;
+    entries_.emplace(
+      key, Entry{dataset, state, total_inserts_, order_.begin()});
     ++diagnostics->target_cache_insert_count;
   }
 
-  Snapshot snapshot() const {
+  Snapshot snapshot(const std::string& dataset = std::string()) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return snapshot_locked();
+    return snapshot_locked(dataset);
   }
 
   Snapshot configure(int capacity) {
@@ -516,7 +557,7 @@ class TargetStateCache {
       ++total_evictions_;
     }
     ++generation_;
-    return snapshot_locked();
+    return snapshot_locked(std::string());
   }
 
   Snapshot reset() {
@@ -529,19 +570,27 @@ class TargetStateCache {
     total_inserts_ = 0;
     total_evictions_ = 0;
     ++generation_;
-    return snapshot_locked();
+    return snapshot_locked(std::string());
   }
 
  private:
   struct Entry {
+    std::string dataset;
     CachedTargetState state;
+    std::uint64_t insertion_ordinal = 0;
     std::list<std::string>::iterator order;
   };
 
-  Snapshot snapshot_locked() const {
+  Snapshot snapshot_locked(const std::string& dataset) const {
     Snapshot value;
     value.capacity = capacity_;
     value.entries = static_cast<int>(entries_.size());
+    if (!dataset.empty()) {
+      value.dataset_entries = static_cast<int>(std::count_if(
+        entries_.begin(), entries_.end(), [&dataset](const auto& entry) {
+          return entry.second.dataset == dataset;
+        }));
+    }
     value.total_requests = total_requests_;
     value.total_hits = total_hits_;
     value.total_misses = total_misses_;
@@ -566,6 +615,11 @@ class TargetStateCache {
 TargetStateCache& target_state_cache() {
   static TargetStateCache cache;
   return cache;
+}
+
+std::atomic<std::uint64_t>& dataset_cache_epoch() {
+  static std::atomic<std::uint64_t> epoch{1U};
+  return epoch;
 }
 
 std::vector<const double*> penalty_block_pointers(
@@ -789,6 +843,7 @@ std::shared_ptr<NativeSetupContext> build_native_context(
                 static_cast<std::ptrdiff_t>(column) * data.nrow());
   }
   auto context = std::make_shared<NativeSetupContext>();
+  context->dataset_key = dataset;
   context->prepared_key = prepared_key(dataset, conditioning_set);
   context->conditioning_set = conditioning_set;
   context->setup = full_cuda_ci_native_setup(conditioning);
@@ -818,6 +873,7 @@ std::shared_ptr<NativeSetupContext> build_direct_context(
     const std::string& dataset,
     const std::shared_ptr<CudaRuntimeContext>& runtime) {
   auto context = std::make_shared<NativeSetupContext>();
+  context->dataset_key = dataset;
   context->prepared_key = full_cuda_ci_sha256_utf8(
     "schema=full-cuda-ci-direct-prepared-key-v1\ndataset=" + dataset +
     "\n");
@@ -1077,7 +1133,8 @@ GroupResult execute_group(
       CachedTargetState cached;
       if (target_state_cache().lookup(
             optimizer_state_keys[static_cast<std::size_t>(position)],
-            context->penalty_count, &cached, diagnostics)) {
+            context->dataset_key, context->penalty_count, &cached,
+            diagnostics)) {
         for (int penalty = 0; penalty < context->penalty_count; ++penalty) {
           selected_sp[
             static_cast<std::size_t>(context->penalty_count) * position +
@@ -1241,7 +1298,7 @@ GroupResult execute_group(
           planned_routes[static_cast<std::size_t>(position)];
         target_state_cache().insert(
           optimizer_state_keys[static_cast<std::size_t>(position)],
-          state, diagnostics);
+          context->dataset_key, state, diagnostics);
       }
       diagnostics->cuda_optimizer_host_ms += elapsed_ms(optimize_start);
     }
@@ -1386,13 +1443,23 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
 
   OneCallDiagnostics diagnostics;
   const CompactResultCache::Snapshot result_cache_start =
-    compact_result_cache().snapshot();
+    compact_result_cache().snapshot(dataset);
   diagnostics.result_cache_capacity = result_cache_start.capacity;
   diagnostics.result_cache_warm_start_entries = result_cache_start.entries;
+  diagnostics.result_cache_dataset_warm_start_entries =
+    result_cache_start.dataset_entries;
+  diagnostics.result_cache_warm_start_insert_count =
+    result_cache_start.total_inserts;
   const TargetStateCache::Snapshot target_cache_start =
-    target_state_cache().snapshot();
+    target_state_cache().snapshot(dataset);
   diagnostics.target_cache_capacity = target_cache_start.capacity;
   diagnostics.target_cache_warm_start_entries = target_cache_start.entries;
+  diagnostics.target_cache_dataset_warm_start_entries =
+    target_cache_start.dataset_entries;
+  diagnostics.target_cache_warm_start_insert_count =
+    target_cache_start.total_inserts;
+  diagnostics.dataset_cache_epoch_at_start =
+    dataset_cache_epoch().load(std::memory_order_acquire);
   NativeSetupCache setup_cache(data, dataset, runtime, &diagnostics);
   std::shared_ptr<NativeSetupContext> direct = build_direct_context(
     data, dataset, runtime);
@@ -1534,7 +1601,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
             dataset, num_col, level, selected[index_value], task);
           double cached_p_value = NA_REAL;
           if (compact_result_cache().lookup(
-                selected_cache_keys[index_value], &cached_p_value,
+                selected_cache_keys[index_value], dataset, &cached_p_value,
                 &diagnostics)) {
             require(std::isfinite(cached_p_value) &&
                       cached_p_value >= 0.0 && cached_p_value <= 1.0,
@@ -1570,7 +1637,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
             selected_pvalues[selected_position] = result.p_values[index_value];
             compact_result_cache().insert(
               selected_cache_keys[selected_position],
-              result.p_values[index_value], &diagnostics);
+              dataset, result.p_values[index_value], &diagnostics);
           }
         }
 
@@ -1797,6 +1864,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
       Rcpp::Named("guarded_pair_count") = diagnostics.guarded_pair_count,
       Rcpp::Named("native_setup_count") = diagnostics.native_setup_count,
       Rcpp::Named("native_setup_cache_capacity") = kPreparedCacheCapacity,
+      Rcpp::Named("native_setup_cache_warm_start_entries") = 0,
       Rcpp::Named("native_setup_cache_request_count") =
         diagnostics.native_setup_cache_request_count,
       Rcpp::Named("native_setup_cache_hit_count") =
@@ -1807,6 +1875,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.native_setup_cache_eviction_count,
       Rcpp::Named("component_cache_capacity") =
         kReferenceComponentCapacity,
+      Rcpp::Named("component_cache_warm_start_entries") = 0,
+      Rcpp::Named("residual_cache_warm_start_entries") = 0,
       Rcpp::Named("component_cache_request_count") =
         diagnostics.component_cache_request_count,
       Rcpp::Named("component_cache_hit_count") =
@@ -1819,10 +1889,14 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.result_cache_capacity,
       Rcpp::Named("result_cache_warm_start_entries") =
         diagnostics.result_cache_warm_start_entries,
+      Rcpp::Named("result_cache_dataset_warm_start_entries") =
+        diagnostics.result_cache_dataset_warm_start_entries,
       Rcpp::Named("result_cache_request_count") =
         diagnostics.result_cache_request_count,
       Rcpp::Named("result_cache_hit_count") =
         diagnostics.result_cache_hit_count,
+      Rcpp::Named("result_cache_preexisting_hit_count") =
+        diagnostics.result_cache_preexisting_hit_count,
       Rcpp::Named("result_cache_miss_count") =
         diagnostics.result_cache_miss_count,
       Rcpp::Named("result_cache_insert_count") =
@@ -1833,16 +1907,22 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.target_cache_capacity,
       Rcpp::Named("target_cache_warm_start_entries") =
         diagnostics.target_cache_warm_start_entries,
+      Rcpp::Named("target_cache_dataset_warm_start_entries") =
+        diagnostics.target_cache_dataset_warm_start_entries,
       Rcpp::Named("target_cache_request_count") =
         diagnostics.target_cache_request_count,
       Rcpp::Named("target_cache_hit_count") =
         diagnostics.target_cache_hit_count,
+      Rcpp::Named("target_cache_preexisting_hit_count") =
+        diagnostics.target_cache_preexisting_hit_count,
       Rcpp::Named("target_cache_miss_count") =
         diagnostics.target_cache_miss_count,
       Rcpp::Named("target_cache_insert_count") =
         diagnostics.target_cache_insert_count,
       Rcpp::Named("target_cache_eviction_count") =
         diagnostics.target_cache_eviction_count,
+      Rcpp::Named("dataset_cache_epoch_at_start") =
+        static_cast<double>(diagnostics.dataset_cache_epoch_at_start),
       Rcpp::Named("host_synchronization_count") =
         diagnostics.host_synchronization_count,
       Rcpp::Named("matrix_h2d_bytes") =
@@ -1881,6 +1961,7 @@ Rcpp::List full_cuda_ci_one_call_cache_control(
             "compact result cache reset does not accept a capacity");
     value = compact_result_cache().reset();
     target_value = target_state_cache().reset();
+    dataset_cache_epoch().fetch_add(1U, std::memory_order_acq_rel);
   } else if (action == "configure") {
     value = compact_result_cache().configure(capacity);
     target_value = target_state_cache().snapshot();
@@ -1917,7 +1998,56 @@ Rcpp::List full_cuda_ci_one_call_cache_control(
     Rcpp::Named("target_total_evictions") =
       static_cast<double>(target_value.total_evictions),
     Rcpp::Named("target_generation") =
-      static_cast<double>(target_value.generation));
+      static_cast<double>(target_value.generation),
+    Rcpp::Named("cache_epoch") = static_cast<double>(
+      dataset_cache_epoch().load(std::memory_order_acquire)));
+}
+
+Rcpp::List full_cuda_ci_one_call_cache_state(
+    const Rcpp::NumericMatrix& data) {
+  require(data.nrow() > 0 && data.ncol() > 0 && finite_matrix(data),
+          "dataset cache state requires a finite non-empty numeric matrix");
+  const std::string dataset = dataset_key(data);
+  const CompactResultCache::Snapshot result =
+    compact_result_cache().snapshot(dataset);
+  const TargetStateCache::Snapshot target =
+    target_state_cache().snapshot(dataset);
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") =
+      "full-cuda-ci-dataset-cache-state-v2",
+    Rcpp::Named("dataset_key") = dataset,
+    Rcpp::Named("cache_epoch") = static_cast<double>(
+      dataset_cache_epoch().load(std::memory_order_acquire)),
+    Rcpp::Named("result_cache_capacity") = result.capacity,
+    Rcpp::Named("result_cache_entries") = result.entries,
+    Rcpp::Named("result_cache_dataset_entries") = result.dataset_entries,
+    Rcpp::Named("result_cache_total_requests") =
+      static_cast<double>(result.total_requests),
+    Rcpp::Named("result_cache_total_hits") =
+      static_cast<double>(result.total_hits),
+    Rcpp::Named("result_cache_total_misses") =
+      static_cast<double>(result.total_misses),
+    Rcpp::Named("result_cache_total_inserts") =
+      static_cast<double>(result.total_inserts),
+    Rcpp::Named("result_cache_total_evictions") =
+      static_cast<double>(result.total_evictions),
+    Rcpp::Named("result_cache_generation") =
+      static_cast<double>(result.generation),
+    Rcpp::Named("target_cache_capacity") = target.capacity,
+    Rcpp::Named("target_cache_entries") = target.entries,
+    Rcpp::Named("target_cache_dataset_entries") = target.dataset_entries,
+    Rcpp::Named("target_cache_total_requests") =
+      static_cast<double>(target.total_requests),
+    Rcpp::Named("target_cache_total_hits") =
+      static_cast<double>(target.total_hits),
+    Rcpp::Named("target_cache_total_misses") =
+      static_cast<double>(target.total_misses),
+    Rcpp::Named("target_cache_total_inserts") =
+      static_cast<double>(target.total_inserts),
+    Rcpp::Named("target_cache_total_evictions") =
+      static_cast<double>(target.total_evictions),
+    Rcpp::Named("target_cache_generation") =
+      static_cast<double>(target.generation));
 }
 
 }  // namespace fastkpc

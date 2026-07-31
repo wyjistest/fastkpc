@@ -2167,6 +2167,16 @@ full_cuda_ci_one_call_cache_control_native <- function(
   )
 }
 
+full_cuda_ci_one_call_cache_state_native <- function(data) {
+  load_fastkpc_cuda_native()
+  data <- as.matrix(data)
+  storage.mode(data) <- "double"
+  .Call(
+    "C_full_cuda_ci_one_call_cache_state", data,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
 fastkpc_native_legacy_mgcv_residual_backend <- function() {
   raw <- tolower(Sys.getenv("FASTKPC_LEGACY_MGCV_RESIDUAL_BACKEND",
                             unset = "r"))

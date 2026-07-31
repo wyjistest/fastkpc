@@ -1052,6 +1052,17 @@ fastkpc_full_cuda_phase10_release_holdout <- function(
       "and unused staging/output paths"
     )
   )
+  revised_campaign_manifest <- file.path(
+    dirname(campaign_dir), "promotion_351x48_v2", "manifest.json"
+  )
+  fastkpc_full_cuda_phase10_holdout_require(
+    file.exists(revised_campaign_manifest) &&
+      !dir.exists(revised_campaign_manifest),
+    paste(
+      "Phase 10 holdout release is disabled until the performance_budget_v2",
+      "fresh-data campaign and public 500x50 fixture are frozen"
+    )
+  )
   campaign <- fastkpc_full_cuda_phase10_validate_campaign_artifact(
     campaign_dir, verify_current_sources = TRUE
   )

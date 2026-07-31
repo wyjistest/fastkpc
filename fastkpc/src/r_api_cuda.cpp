@@ -8413,6 +8413,16 @@ extern "C" SEXP C_full_cuda_ci_one_call_cache_control(
   END_RCPP
 }
 
+extern "C" SEXP C_full_cuda_ci_one_call_cache_state(SEXP data_s) {
+  BEGIN_RCPP
+  if (!Rf_isReal(data_s) || !Rf_isMatrix(data_s)) {
+    Rcpp::stop("dataset cache state requires a numeric matrix");
+  }
+  return fastkpc::full_cuda_ci_one_call_cache_state(
+    Rcpp::NumericMatrix(data_s));
+  END_RCPP
+}
+
 extern "C" SEXP C_full_cuda_ci_native_geometry_prepare(
     SEXP X_s,
     SEXP penalty_blocks_s,
@@ -12851,6 +12861,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_native_setup", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_setup), 1},
   {"C_full_cuda_ci_one_call_skeleton", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_skeleton), 7},
   {"C_full_cuda_ci_one_call_cache_control", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_cache_control), 2},
+  {"C_full_cuda_ci_one_call_cache_state", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_cache_state), 1},
   {"C_full_cuda_ci_native_geometry_prepare", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_geometry_prepare), 4},
   {"C_full_cuda_ci_phase35_vertical_resource_snapshot", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical_resource_snapshot), 0},
   {"C_full_cuda_ci_phase35_vertical", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical), 6},

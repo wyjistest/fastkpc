@@ -20,6 +20,9 @@ Rcpp::List full_cuda_ci_one_call_cache_control(
     const std::string& action,
     int capacity);
 
+Rcpp::List full_cuda_ci_one_call_cache_state(
+    const Rcpp::NumericMatrix& data);
+
 }  // namespace fastkpc
 
 #endif
