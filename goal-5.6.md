@@ -4,7 +4,7 @@
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
-> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE and the Phase 10 canonical campaign is accepted. The campaign producer is `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556`, freeze identity is `1b1f19333ab2df038d6177bbbb40f9213afe8ed94bd0411fcc088638ec232a75`, source closure is `9f5a85968bbb61390288a62775c3b0ea930cb8c679b36dda86f3661abc5c1e36`, and native binary SHA-256 is `c24881ffd1acedd095b83c54271bcc9c11c0f7bc0843e7f9900cb38f6c32623d`. Phase 10 is not complete because the external promotion holdout remains `SEALED_NOT_RELEASED`.
+> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. The historical Phase 10 v1 campaign producer `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556` is accepted for canonical correctness, CUDA authority, hardening, artifact integrity, and replay latency only. Its `0.699`-second measurement is replay-warm after a complete same-data call; fresh-process cold is `1290.664` seconds versus a `601.431`-second correct baseline. `performance_budget_v2` now requires a distinct fresh-data compute-warm gate and a public 500x50 development fixture before a new candidate freeze. Phase 10 is not complete, and the external promotion holdout remains `SEALED_NOT_RELEASED` and must stay unopened.
 >
 > **Active roadmap phase:** Phase 10, full performance gate, hardening, and promotion.
 >
@@ -636,7 +636,7 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 7 | Native setup builder; remove R/mgcv from CI loop | COMPLETE - all 8,634 native setups and the complete residual/graph route pass with zero R/mgcv setup authority or fallback |
 | 8 | Legacy-compatible device-resident CUDA dCov | COMPLETE - all 240,489 logical tests use guarded device-resident CUDA dCov with zero final flips, zero CPU numerical authority, SHD 0, and a 17.499-second dCov boundary |
 | 9 | Fused one-call compatible CUDA skeleton | COMPLETE - one native call reproduces all 240,489 canonical tests, exact graph semantics, and zero R/CPU numerical authority |
-| 10 | Full gate, hardening, and promotion | ACTIVE - bounded caches, hardening, 15-run canonical repeatability, and both performance gates pass; external sealed holdout, final docs, and completion audit remain |
+| 10 | Full gate, hardening, and promotion | ACTIVE - v1 correctness/hardening/replay evidence passes; fresh-data compute is slower than the correct baseline, so v2 compute-warm, public 500x50, optimization, refreeze, sealed holdout, and completion audit remain |
 
 **Codex starts at the earliest phase whose exit gate is not complete.** Do not skip Phase 0 because later code already exists.
 
@@ -2942,19 +2942,25 @@ Prove that the correct full-CUDA route is repeatable, faster, fail-closed, and s
 
 ### Benchmark protocol
 
-Use the accepted `reference_machine_v1` and `performance_budget_v1`. Measure
-cold and warm product boundaries independently. The contracts define whether
-input copies, native setup, and cache construction are included, exclude build
-time, and freeze GPU power/clock policy, CPU affinity, thread counts, and cache
-state.
+Use the accepted `reference_machine_v1` and `performance_budget_v2`. The v1
+budget and `promotion_351x48_v1` remain immutable historical evidence; v1 warm
+is classified as replay-warm and cannot satisfy a fresh-data promotion gate.
+Measure fresh-process cold, fresh-data compute-warm, replay-warm, and the
+correct baseline independently. The contracts define cache preconditions,
+include complete numerical CI and skeleton work in both fresh-data boundaries,
+exclude build time, and freeze GPU power/clock policy, CPU affinity, thread
+counts, and cache state.
 
 On the same machine and software environment:
 
 ```text
-five measured cold repetitions from the declared cold state
-one prescribed warm-up before each warm measurement
-five measured warm repetitions
-fresh process for each repetition with the declared in-process warm-up
+five fresh-process cold repetitions from uninitialized CUDA state
+five fresh-data compute-warm repetitions after noncanonical CUDA prewarm
+five replay-warm repetitions after a complete same-data call
+five fresh correct-baseline repetitions
+fresh process for every measured repetition
+empty dataset-specific caches before each compute-warm measurement
+zero preexisting entries for the measured DatasetKey
 same data and config
 same CPU/GPU affinity policy
 same thread counts
@@ -2970,16 +2976,19 @@ Always run a fresh correct baseline in the same campaign. Do not compare only wi
 Final promotion must satisfy all of these conditions simultaneously:
 
 ```text
-warm candidate median <= 120 seconds on reference_machine_v1
-warm candidate median <= 0.80 * same-run correct baseline median
-every cold and warm measured run passes all correctness and authority gates
+fresh-data compute-warm median <= 120 seconds on reference_machine_v1
+fresh-data compute-warm median <= 0.80 * same-run correct baseline median
+fresh-process cold median <= same-run correct baseline median
+every candidate run passes all correctness and authority gates
+replay-warm is reported but is not a promotion gate
 ```
 
-The warm stretch target is at most 60 seconds. The relative gate remains
-mandatory even when the absolute gate is stricter, so a hardware or baseline
-change cannot hide relative regression. The Phase 3.5 feasibility bound is not
-the Phase 10 actual campaign measurement. None of these targets weakens
-correctness: a 30-second run with SHD > 0 is a failure.
+The fresh-data compute-warm stretch target is at most 60 seconds. The relative
+gate remains mandatory even when the absolute gate is stricter, so a hardware
+or baseline change cannot hide relative regression. Machine counters must prove
+positive physical CI, setup, optimizer, residual, dCov component, pair, and
+gamma work; a result-cache replay cannot pass this boundary. None of these
+targets weakens correctness: a 30-second run with SHD > 0 is a failure.
 
 ### Required hardening
 
@@ -3035,6 +3044,8 @@ shadow
 
 ```text
 fastkpc/artifacts/full_cuda_ci/promotion_351x48_v1/
+fastkpc/artifacts/full_cuda_ci/promotion_351x48_v2/
+fastkpc/artifacts/full_cuda_ci/development_500x50_v1/
 fastkpc/artifacts/full_cuda_ci/sealed_promotion_holdout_v1/
 fastkpc/artifacts/full_cuda_ci/failure_injection_v1/
 ```
@@ -3056,10 +3067,11 @@ known supported semantic envelope
 
 Do not describe `compatible.cuda` as a full mgcv clone. It is a compatible implementation of the exact regrXonS/KPC subset.
 
-### Accepted canonical campaign evidence (2026-07-31)
+### Historical v1 canonical/replay evidence (2026-07-31)
 
-The canonical performance/repeatability claim is accepted independently of
-the still-sealed promotion holdout:
+The v1 correctness, authority, repeatability, hardening, artifact-integrity,
+and replay-latency claims are accepted independently of the still-sealed
+promotion holdout. Its performance claim is not sufficient under v2:
 
 ```text
 artifact = fastkpc/artifacts/full_cuda_ci/promotion_351x48_v1/
@@ -3076,11 +3088,12 @@ manifest SHA-256 =
 summary SHA-256 =
   313bfbd27d3dd48beb3be700c65d490feae50adfc52ab6a8d59c97452337045c
 
-cold repetitions / median = 5 / 1290.664 sec
-warm repetitions / median = 5 / 0.699 sec
+fresh-process cold repetitions / median = 5 / 1290.664 sec
+replay-warm repetitions / median = 5 / 0.699 sec
 fresh correct baselines / median = 5 / 601.431 sec
-warm / correct-baseline median ratio = 0.001162228
-warm absolute / relative / stretch gates = TRUE / TRUE / TRUE
+replay-warm / correct-baseline median ratio = 0.001162228
+v2 fresh-data compute-warm gate = NOT_MEASURED
+v2 fresh-process cold ratio gate = FALSE
 
 edge count = 110 / 110
 SHD = 0 in all 15 measured runs
@@ -3100,17 +3113,19 @@ hardening artifact = fastkpc/artifacts/full_cuda_ci/failure_injection_v1/
 hardening gate = TRUE
 campaign artifact identity and tamper gate = TRUE
 holdout state / gate = SEALED_NOT_RELEASED / FALSE
-phase10 canonical campaign claim = TRUE
+phase10 v1 canonical/replay claim = TRUE
 phase10 promotion claim = FALSE
 recommended route = FALSE
 ```
 
-The five warm measurements each follow one unmeasured complete cold warm-up in
-a fresh process. The measured warm call reuses authenticated,
-capacity-bounded compact-result and target-state caches. Cold timing includes
-input validation, native setup, CUDA work, cache construction, and packaging;
-the frozen budget requires it to be reported but assigns no cold promotion
-threshold.
+The five replay-warm measurements each follow one unmeasured complete same-data
+call in a fresh process. They reuse authenticated, capacity-bounded
+compact-result and target-state caches and perform zero physical CI tests or
+residual fits. Cold timing includes input validation, native setup, CUDA work,
+cache construction, and packaging. Under v2, the old `0.699`-second value is
+report-only and the old `1290.664`-second cold median fails the new ratio gate.
+No sealed holdout release is allowed until the v2 campaign and public 500x50
+fixture pass and a new candidate is frozen.
 
 ### Final exit condition
 
@@ -3546,12 +3561,12 @@ Phase 10 performance baseline, not as a promotion claim.
 ### Task 16
 
 Active: bounded compact-result/target-state caching and the cache-aware frontier
-scheduler removed the repeated warm-path work. The hardening artifact and the
-formal five-cold/five-warm/five-baseline canonical campaign pass with SHD 0,
-exact graph semantics, zero CPU numerical authority, a `0.699`-second warm
-median, and a `0.001162228` same-campaign baseline ratio. The external sealed
-holdout, final promoted documentation, and Section 13 completion audit remain.
-Promotion remains forbidden while the holdout is `SEALED_NOT_RELEASED`.
+scheduler make same-data replay fast, but the historical `0.699`-second value
+is replay-warm rather than fresh-data compute. The v1 cold path takes
+`1290.664` seconds versus a `601.431`-second correct baseline. Implement the v2
+cache-state proof and compute-warm campaign, add the public 500x50 fixture,
+reduce unique setup/target/residual work, pass the v2 checkpoints, and refreeze
+before opening the external sealed holdout. Promotion remains forbidden.
 
 ---
 
@@ -3622,11 +3637,14 @@ no intermittent fallback or non-finite result
 ### Performance
 
 ```text
-warm median <= 120 seconds on reference_machine_v1
-warm median <= 0.80 * same-run correct baseline median
-every cold and warm measured run passes all correctness/authority gates
-warm stretch target <= 60 seconds
-cold and warm boundaries and raw timings are independently reported
+fresh-data compute-warm median <= 120 seconds on reference_machine_v1
+fresh-data compute-warm median <= 0.80 * same-run correct baseline median
+fresh-process cold median <= same-run correct baseline median
+every measured candidate run passes all correctness/authority gates
+fresh-data compute-warm stretch target <= 60 seconds
+fresh-process cold, fresh-data compute-warm, replay-warm, and baseline raw
+timings are independently reported
+replay-warm is report-only and cannot satisfy a promotion performance gate
 ```
 
 ### Failure behavior

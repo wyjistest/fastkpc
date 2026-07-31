@@ -8,10 +8,11 @@ files stay unchanged while the fast backend is developed and validated.
 ## Full-CUDA legacy-compatible skeleton candidate
 
 An explicit one-call full-CUDA route now implements the numerical CI data plane
-for the exact `regrXonS`/KPC subset. The frozen Phase 10 canonical campaign has
-passed, but promotion remains pending because the externally held sealed
-holdout is still `SEALED_NOT_RELEASED`. The route is therefore an explicit
-candidate, not the default and not yet the recommended route.
+for the exact `regrXonS`/KPC subset. The historical Phase 10 v1 campaign passed
+canonical correctness, CUDA authority, hardening, and replay-latency gates, but
+did not measure acceptable fresh-data performance. The sealed holdout remains
+`SEALED_NOT_RELEASED` and must not be opened for this candidate. The route is
+explicit, not the default, and not recommended.
 
 ```r
 source("fastkpc/R/fast_kpc.R")
@@ -64,25 +65,35 @@ native Prepared-S cache: 64 entries
 device dCov component capacity: 47 entries
 ```
 
-The canonical artifact is
-`artifacts/full_cuda_ci/promotion_351x48_v1/`. Across five cold runs, five
-complete-warmup plus measured-warm runs, and five fresh correct baselines, every
+The historical canonical artifact is
+`artifacts/full_cuda_ci/promotion_351x48_v1/`. Across five fresh-process cold
+runs, five same-data replay-warm runs, and five fresh correct baselines, every
 run had 110 edges, SHD 0, exact adjacency, exact normalized sepsets, exact
 `n.edgetests`, and an exact deletion/logical trace. Timings on
 `reference_machine_v1` were:
 
 ```text
-cold median       1290.664 seconds
-warm median          0.699 seconds
-baseline median    601.431 seconds
-warm/baseline ratio  0.001162228
+fresh-process cold median  1290.664 seconds
+replay-warm median             0.699 seconds
+baseline median              601.431 seconds
+replay/baseline ratio          0.001162228
 ```
 
-The cold boundary includes setup and cache construction and has no promotion
-threshold in `performance_budget_v1`; it is reported separately. Warm timing
-is a second complete call after one unmeasured complete warm-up in a fresh
-process. It replays authenticated, capacity-bounded compact results and performs
-zero physical CI tests or residual fits.
+The v1 replay-warm timing is a second call after one complete same-data call in
+a fresh process. It replays authenticated, capacity-bounded compact results and
+performs zero physical CI tests or residual fits. It is not evidence for the
+latency of a previously unseen input matrix. `performance_budget_v2` preserves
+this result as report-only replay latency and requires a separate fresh-data
+compute-warm boundary with empty dataset-specific caches.
+
+The v2 hard gates are:
+
+```text
+fresh-data compute-warm median <= 120 seconds
+fresh-data compute-warm median <= 0.80 * same-run correct baseline median
+fresh-process cold median <= same-run correct baseline median
+replay-warm: report only
+```
 
 Build and focused validation:
 
@@ -96,24 +107,15 @@ Rscript fastkpc/tests/test_full_cuda_ci_phase10_campaign_artifact.R
 Rscript fastkpc/tests/test_full_cuda_ci_phase10_completion_audit.R
 ```
 
-The completion audit intentionally fails until the sealed holdout artifact and
-final `COMPLETE` roadmap state exist.
+The completion audit intentionally fails until the v2 fresh-data campaign, the
+public 500x50 development fixture, the sealed holdout artifact, and the final
+`COMPLETE` roadmap state all exist.
 
-The final gate also requires an unused external custody envelope and its secret
-release token:
-
-```bash
-export FASTKPC_PROMOTION_HOLDOUT_RELEASE_DIR=/path/from/custodian
-export FASTKPC_PROMOTION_HOLDOUT_RELEASE_TOKEN='custodian-secret'
-FASTKPC_RUN_CUDA_TESTS=1 bash fastkpc/tools/run_full_cuda_ci_gate.sh
-```
-
-The gate refuses to continue without `custodian_attestation.json`, its declared
-payload, a matching token hash, and a canonical campaign identity. It records
-the open event before reading the payload, runs the payload once, and rejects
-any decision flip, graph drift, non-finite result, or fallback. A successful
-holdout may recommend this explicit route; making it the default still requires
-separate explicit approval.
+Do not provide a custody envelope or release token for the v1 candidate. The
+holdout may be opened once, and only after the v2 performance contract, public
+500x50 fixture, fresh-data compute campaign, source/native configuration, and
+all contract hashes are frozen. A successful holdout may then recommend this
+explicit route; making it the default still requires separate approval.
 
 ## Current Scope
 

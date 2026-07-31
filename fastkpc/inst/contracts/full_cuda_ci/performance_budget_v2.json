@@ -1,0 +1,152 @@
+{
+  "campaign": "full-cuda-legacy-compatible-ci",
+  "contract_name": "performance_budget_v2",
+  "contract_schema_version": "full-cuda-ci-tracked-contract-v1",
+  "phase_introduced": "3.5",
+  "semantic_version": {
+    "major": 2,
+    "minor": 0,
+    "patch": 0
+  },
+  "payload": {
+    "reference_machine_contract": "reference_machine_v1",
+    "supersedes_performance_claim_from": "performance_budget_v1",
+    "legacy_v1_evidence": {
+      "artifact": "promotion_351x48_v1",
+      "historical_warm_classification": "replay-warm",
+      "accepted_claims": [
+        "canonical-correctness",
+        "cuda-authority",
+        "hardening",
+        "artifact-identity",
+        "replay-latency"
+      ],
+      "forbidden_claims": [
+        "fresh-data-performance",
+        "promotion-performance",
+        "recommended-route"
+      ]
+    },
+    "boundaries": {
+      "fresh_process_cold": {
+        "repetitions": 5,
+        "process_state": "new-R-process",
+        "cuda_context_state": "uninitialized",
+        "dataset_specific_cache_state": "empty",
+        "timed_work": "complete-numerical-ci-and-skeleton",
+        "gate": {
+          "correct_baseline_ratio_max": "1.00"
+        }
+      },
+      "fresh_data_compute_warm": {
+        "repetitions": 5,
+        "process_state": "new-R-process",
+        "allowed_prewarm": [
+          "cuda-library",
+          "cuda-primary-context",
+          "allocator",
+          "generic-workspace"
+        ],
+        "prewarm_dataset_policy": "different-DatasetKey-and-noncanonical",
+        "dataset_specific_cache_reset_required": true,
+        "preexisting_dataset_entry_count_max": 0,
+        "cache_epoch_advance_required": true,
+        "timed_work": "complete-numerical-ci-and-skeleton",
+        "required_positive_counters": [
+          "physical_tests_evaluated",
+          "physical_residual_fits",
+          "native_setup_count",
+          "cuda_single_penalty_target_count",
+          "cuda_multi_penalty_target_count",
+          "cuda_dcov_component_count",
+          "cuda_dcov_pair_count",
+          "cuda_gamma_pvalue_count"
+        ],
+        "gate": {
+          "median_upper_bound_ms": 120000,
+          "correct_baseline_ratio_max": "0.80",
+          "stretch_median_ms": 60000
+        }
+      },
+      "replay_warm": {
+        "repetitions": 5,
+        "process_state": "same-process-after-complete-canonical-call",
+        "dataset_key_state": "same-DatasetKey",
+        "compact_result_state": "fully-populated",
+        "timed_work": "canonical-enumeration-and-result-replay",
+        "promotion_gate": false,
+        "report_only": true
+      },
+      "correct_baseline": {
+        "repetitions": 5,
+        "process_state": "new-R-process",
+        "route": "legacy-mgcv-provider-native-legacy-dcov-20-core",
+        "same_machine_and_campaign_required": true
+      }
+    },
+    "cache_precondition": {
+      "dataset_specific_caches": [
+        "compact-result",
+        "target-state"
+      ],
+      "per_call_caches": [
+        "native-prepared-setup",
+        "device-residual",
+        "dcov-component"
+      ],
+      "required_fields": [
+        "dataset_key",
+        "cache_epoch_before_reset",
+        "cache_epoch_after_reset",
+        "result_cache_entries_before",
+        "result_cache_entries_after_reset",
+        "result_cache_dataset_entries_before",
+        "result_cache_dataset_entries_after_reset",
+        "target_cache_entries_before",
+        "target_cache_entries_after_reset",
+        "target_cache_dataset_entries_before",
+        "target_cache_dataset_entries_after_reset",
+        "preexisting_result_cache_hit_count",
+        "preexisting_target_cache_hit_count"
+      ],
+      "reset_scope": "all-dataset-semantic-caches",
+      "partial_reset": "forbidden",
+      "counter_only-proof": "insufficient"
+    },
+    "promotion": {
+      "primary_performance_boundary": "fresh_data_compute_warm",
+      "fresh_process_cold_gate_required": true,
+      "replay_warm_gate_allowed": false,
+      "every_candidate_run_graph_gate_required": true,
+      "every_candidate_run_authority_gate_required": true,
+      "failed_or_timeout_run_included_as_failure": true
+    },
+    "checkpoints": {
+      "A_fresh_data_compute_upper_bound_ms": 600000,
+      "B_fresh_data_compute_upper_bound_ms": 180000,
+      "final_fresh_data_compute_upper_bound_ms": 120000
+    },
+    "measurement": {
+      "timing_boundaries_from": "reference_machine_v1",
+      "per_stage_cuda_events": true,
+      "host_wall_time": true,
+      "synchronization_counted": true,
+      "allocation_and_cache_events_counted": true,
+      "required_summary_fields": [
+        "fresh_process_cold_median",
+        "fresh_data_compute_warm_median",
+        "replay_warm_median",
+        "baseline_median",
+        "compute_warm_to_baseline_ratio",
+        "cold_to_baseline_ratio"
+      ],
+      "generic_warm_label": "forbidden",
+      "route_or_contract_change_invalidates_prior_timing": true
+    },
+    "freeze": {
+      "public_500x50_development_fixture_required": true,
+      "fresh_data_compute_gate_required_before_holdout_open": true,
+      "source_native_configuration_and_contract_hashes_required": true
+    }
+  }
+}

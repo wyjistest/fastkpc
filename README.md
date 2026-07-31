@@ -6,9 +6,11 @@ backend work in one workspace. The active fast backend code is under
 
 ## Full-CUDA compatible skeleton candidate
 
-The explicit full-CUDA skeleton route has passed the frozen Phase 10 canonical
-351x48 campaign. It is not promoted or recommended yet: the externally held
-sealed promotion corpus remains `SEALED_NOT_RELEASED`.
+The explicit full-CUDA skeleton route has passed the historical Phase 10 v1
+canonical correctness, CUDA-authority, hardening, and replay campaign. It has
+not passed the revised fresh-data performance gate and is not promoted or
+recommended. The externally held sealed promotion corpus remains
+`SEALED_NOT_RELEASED` and must not be opened for this candidate.
 
 The route is separate from the older `fast_kpc(precision = "compatible")`
 bridge described below. Invoke it explicitly:
@@ -63,26 +65,34 @@ Rscript fastkpc/tests/test_full_cuda_ci_phase10_campaign_artifact.R
 Rscript fastkpc/tests/test_full_cuda_ci_phase10_completion_audit.R
 ```
 
-The completion audit intentionally fails until the sealed holdout artifact and
-final `COMPLETE` roadmap state exist.
+The completion audit intentionally fails until the v2 fresh-data campaign, the
+public 500x50 development fixture, the sealed holdout artifact, and the final
+`COMPLETE` roadmap state all exist.
 
-Canonical campaign evidence is under
-`fastkpc/artifacts/full_cuda_ci/promotion_351x48_v1/`. Five cold, five warm,
-and five same-campaign correct-baseline runs all reproduced 110 edges,
-SHD 0, exact sepsets, exact logical test counts, and the exact deletion trace.
-The measured warm median was 0.699 seconds versus a 601.431-second baseline
-median; the cold median was 1290.664 seconds and is reported separately without
-a promotion threshold. All CPU numerical authority, approximate-backend, and
+Historical v1 campaign evidence is under
+`fastkpc/artifacts/full_cuda_ci/promotion_351x48_v1/`. Five fresh-process cold,
+five replay-warm, and five same-campaign correct-baseline runs all reproduced
+110 edges, SHD 0, exact sepsets, exact logical test counts, and the exact
+deletion trace. The `0.699`-second result is replay-warm: it follows a complete
+same-data call and performs zero physical CI tests or residual fits. The
+fresh-process cold median was `1290.664` seconds versus a `601.431`-second CPU
+baseline median. All CPU numerical authority, approximate-backend, and
 unknown-fallback counters were zero.
 
-Final promotion additionally requires an external custodian release directory
-and token through `FASTKPC_PROMOTION_HOLDOUT_RELEASE_DIR` and
-`FASTKPC_PROMOTION_HOLDOUT_RELEASE_TOKEN`. The standard gate fails when those
-inputs or the resulting sealed-holdout artifact are absent:
+`performance_budget_v2` therefore treats v1 as correctness and replay-latency
+evidence only. Promotion now requires five fresh-data compute-warm runs with
+empty dataset-specific caches, a median at most 120 seconds and at most 0.80 of
+the same-campaign correct baseline, plus a cold median no slower than that
+baseline. Replay-warm is report-only. The standard gate remains unavailable
+for promotion until the v2 campaign and public 500x50 development fixture pass:
 
 ```bash
 FASTKPC_RUN_CUDA_TESTS=1 bash fastkpc/tools/run_full_cuda_ci_gate.sh
 ```
+
+Only after those prerequisites and a new source/native/contract freeze may an
+external custodian release be supplied. No holdout release input should be
+provided for commit `25db2a6`.
 
 ## Operational backend positioning
 
