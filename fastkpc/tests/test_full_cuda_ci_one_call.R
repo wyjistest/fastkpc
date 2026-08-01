@@ -191,9 +191,21 @@ multi_candidate <- precision_run_skeleton_full_cuda_native(
   trace_level = "logical",
   compatible_cuda_strict = TRUE
 )
+multi_summary <- multi_candidate$summary
 assert_true(
   length(multi_candidate$n.edgetests) == 4L &&
-    multi_candidate$summary$cuda_multi_penalty_target_count > 0L &&
+    multi_summary$cuda_multi_penalty_target_count > 0L &&
+    multi_summary$native_setup_multi_penalty_cache_capacity == 8192L &&
+    multi_summary$native_setup_device_rehydrate_count == 0L &&
+    multi_summary$native_setup_cache_eviction_count == 0L &&
+    multi_summary$cuda_multi_penalty_prepared_build_count ==
+      multi_summary$cuda_multi_penalty_optimizer_setup_count &&
+    multi_summary$cuda_multi_penalty_prepared_release_count ==
+      multi_summary$cuda_multi_penalty_prepared_build_count &&
+    multi_summary$cuda_multi_penalty_prepared_target_capacity_sum <
+      64L * multi_summary$cuda_multi_penalty_prepared_build_count &&
+    multi_summary$cuda_multi_penalty_prepared_target_capacity_peak <=
+      multi_p &&
     identical(multi_candidate$adjacency, multi_reference$adjacency) &&
     identical(normalize_sepsets(multi_candidate$sepsets),
               normalize_sepsets(multi_reference$sepsets)) &&

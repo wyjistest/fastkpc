@@ -4,7 +4,7 @@
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
-> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. The historical Phase 10 v1 campaign producer `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556` is accepted for canonical correctness, CUDA authority, hardening, artifact integrity, and replay latency only. Its `0.699`-second measurement is replay-warm after a complete same-data call; fresh-process cold is `1290.664` seconds versus a `601.431`-second correct baseline. `performance_budget_v2` now requires a distinct fresh-data compute-warm gate and a public 500x50 development fixture before a new candidate freeze. Phase 10 is not complete, and the external promotion holdout remains `SEALED_NOT_RELEASED` and must stay unopened.
+> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. The historical Phase 10 v1 campaign producer `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556` is accepted for canonical correctness, CUDA authority, hardening, artifact integrity, and replay latency only. Its `0.699`-second measurement is replay-warm after a complete same-data call; fresh-process cold is `1290.664` seconds versus a `601.431`-second correct baseline. Under `performance_budget_v2`, the public 500x50 development fixture passes and a single full fresh-data compute-warm development run now completes in `301.971` seconds with bitwise-identical consumed p-values, exact graph/sepset/count/trace parity, and zero CPU numerical authority or fallback. This passes Checkpoint A but still fails Checkpoint B (`<180` seconds) and the final five-run median gate (`<=120` seconds). No new candidate is frozen; Phase 10 is not complete, and the external promotion holdout remains `SEALED_NOT_RELEASED` and must stay unopened.
 >
 > **Active roadmap phase:** Phase 10, full performance gate, hardening, and promotion.
 >
@@ -636,7 +636,7 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 7 | Native setup builder; remove R/mgcv from CI loop | COMPLETE - all 8,634 native setups and the complete residual/graph route pass with zero R/mgcv setup authority or fallback |
 | 8 | Legacy-compatible device-resident CUDA dCov | COMPLETE - all 240,489 logical tests use guarded device-resident CUDA dCov with zero final flips, zero CPU numerical authority, SHD 0, and a 17.499-second dCov boundary |
 | 9 | Fused one-call compatible CUDA skeleton | COMPLETE - one native call reproduces all 240,489 canonical tests, exact graph semantics, and zero R/CPU numerical authority |
-| 10 | Full gate, hardening, and promotion | ACTIVE - v1 correctness/hardening/replay evidence passes; fresh-data compute is slower than the correct baseline, so v2 compute-warm, public 500x50, optimization, refreeze, sealed holdout, and completion audit remain |
+| 10 | Full gate, hardening, and promotion | ACTIVE - v1 correctness/hardening/replay evidence passes; the public 500x50 fixture and a 301.971-second single-run fresh-data development profile pass, but Checkpoint B, the formal five-run 120-second gate, refreeze, sealed holdout, and completion audit remain |
 
 **Codex starts at the earliest phase whose exit gate is not complete.** Do not skip Phase 0 because later code already exists.
 

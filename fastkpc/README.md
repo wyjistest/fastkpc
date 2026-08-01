@@ -97,15 +97,25 @@ replay-warm: report only
 ```
 
 The current development producer has passed the first optimization checkpoint,
-but it is not a frozen candidate. One fresh-data compute-warm development run
-on the canonical 351x48 input completed in `376.461` seconds, down from the
-initial `1300.19`-second measurement. It consumed 8,634 unique PreparedS keys
-and physically built 8,637 setups (three bounded speculative builds), used 137
-optimizer host boundaries, and recorded 22,291 bounded excess target
-optimizations. Adjacency, normalized sepsets, `n.edgetests`, task order, and
-deletion decisions matched the prior canonical result; the maximum p-value
-difference was `2.89e-14`, and every CPU numerical authority/fallback counter
-was zero.
+but it is not a frozen candidate. A fresh-data compute-warm development run on
+the canonical 351x48 input completed in `301.971` seconds, down from the
+initial `1300.19`-second measurement and the prior `376.461`-second Checkpoint A
+run. Lazy, right-sized multi-penalty optimizer handles eliminated all 52.884
+seconds of device rehydration while preserving the authenticated optimizer
+trajectory. The measured stage totals were 77.650 seconds for native setup,
+173.316 seconds for the optimizer boundary, 15.269 seconds for residual solves,
+and 29.805 seconds for dCov.
+
+The run consumed 8,634 unique PreparedS keys and physically built 8,637 setups
+(three bounded speculative builds). It used 137 optimizer host boundaries,
+built and released 7,463 right-sized multi-penalty handles with a peak target
+capacity of 33, and recorded 22,291 bounded excess target optimizations.
+Adjacency, normalized sepsets, `n.edgetests`, task order, and deletion decisions
+matched the prior canonical result; the maximum p-value difference was
+zero (all consumed p-values were bitwise identical), and every CPU numerical
+authority, fallback, and residual/component D2H counter was zero. The public
+500x50 production-shape fixture also passes with empty dataset-specific caches
+and one native skeleton call.
 
 This is single-run development evidence: Checkpoint A (`< 600` seconds) passes,
 while Checkpoint B (`< 180` seconds) and the final five-run 120-second gate do
@@ -115,7 +125,8 @@ not. Reproduce the development profile without creating formal evidence with:
 CUDA_VISIBLE_DEVICES=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
 MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
 Rscript fastkpc/tools/profile_full_cuda_ci_phase10_fresh_data.R \
-  7 fastkpc/artifacts/full_cuda_ci/phase10_profile_v2/development.rds \
+  7 \
+  fastkpc/artifacts/full_cuda_ci/phase10_profile_v2/fresh-data-level-07-lazy-multi-capacity-development.rds \
   development
 ```
 

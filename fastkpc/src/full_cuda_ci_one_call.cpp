@@ -41,7 +41,7 @@ constexpr double kQualifiedAlpha = 0.1;
 constexpr double kGuardLower = 0.05;
 constexpr double kGuardUpper = 0.15;
 constexpr int kSinglePenaltyPreparedCacheCapacity = 2048;
-constexpr int kMultiPenaltyPreparedCacheCapacity = 64;
+constexpr int kMultiPenaltyPreparedCacheCapacity = 8192;
 constexpr int kPreparedCacheCapacity =
   kSinglePenaltyPreparedCacheCapacity + kMultiPenaltyPreparedCacheCapacity;
 constexpr int kHostPreparedCacheCapacity = 16384;
@@ -249,6 +249,7 @@ struct NativeSetupContext {
   int n = 0;
   int coefficient_dim = 0;
   int penalty_count = 0;
+  int multi_penalty_target_capacity = 0;
   std::shared_ptr<PreparedSGpuHandle> fixed_sp;
   std::shared_ptr<MultiPenaltyGcvCudaPrepared> multi_penalty;
   std::unique_ptr<SinglePenaltyGeometry> single_penalty;
@@ -275,6 +276,10 @@ struct OneCallDiagnostics {
   int cuda_single_penalty_optimizer_call_count = 0;
   int cuda_multi_penalty_optimizer_setup_count = 0;
   int cuda_multi_penalty_optimizer_call_count = 0;
+  int cuda_multi_penalty_prepared_build_count = 0;
+  int cuda_multi_penalty_prepared_release_count = 0;
+  int cuda_multi_penalty_prepared_target_capacity_sum = 0;
+  int cuda_multi_penalty_prepared_target_capacity_peak = 0;
   int cuda_optimizer_kernel_launch_count = 0;
   int cuda_optimizer_host_boundary_count = 0;
   int cuda_residual_batch_count = 0;
@@ -324,6 +329,7 @@ struct OneCallDiagnostics {
   double cuda_optimizer_host_ms = 0.0;
   double cuda_single_penalty_optimizer_host_ms = 0.0;
   double cuda_multi_penalty_optimizer_host_ms = 0.0;
+  double cuda_multi_penalty_prepared_build_ms = 0.0;
   double cuda_single_penalty_optimizer_cuda_ms = 0.0;
   double cuda_residual_solve_host_ms = 0.0;
   double cuda_dcov_metadata_h2d_ms = 0.0;
@@ -857,6 +863,53 @@ std::shared_ptr<MultiPenaltyGcvCudaPrepared> create_multi_penalty_handle(
     context->penalty_count, target_capacity, 0);
 }
 
+void release_multi_penalty_handle(
+    const std::shared_ptr<NativeSetupContext>& context,
+    OneCallDiagnostics* diagnostics) {
+  require(context != nullptr && diagnostics != nullptr,
+          "multi-penalty prepared release state is invalid");
+  if (!context->multi_penalty) {
+    require(context->multi_penalty_target_capacity == 0,
+            "multi-penalty prepared capacity survived release");
+    return;
+  }
+  const MultiPenaltyGcvCudaPreparedInfo info =
+    multi_penalty_gcv_cuda_prepared_info(context->multi_penalty);
+  require(!info.residual_slot_leased,
+          "multi-penalty prepared release observed a live residual");
+  context->multi_penalty.reset();
+  context->multi_penalty_target_capacity = 0;
+  diagnostics->cuda_multi_penalty_prepared_release_count += 1;
+}
+
+void ensure_multi_penalty_handle(
+    const std::shared_ptr<NativeSetupContext>& context,
+    int target_capacity,
+    OneCallDiagnostics* diagnostics) {
+  require(context != nullptr && diagnostics != nullptr &&
+            context->penalty_count > 1 && target_capacity >= 2 &&
+            target_capacity <= 64,
+          "multi-penalty prepared demand is invalid");
+  if (context->multi_penalty &&
+      context->multi_penalty_target_capacity >= target_capacity) {
+    return;
+  }
+  if (context->multi_penalty) {
+    release_multi_penalty_handle(context, diagnostics);
+  }
+  const auto started = std::chrono::steady_clock::now();
+  context->multi_penalty = create_multi_penalty_handle(
+    context, target_capacity);
+  context->multi_penalty_target_capacity = target_capacity;
+  diagnostics->cuda_multi_penalty_prepared_build_count += 1;
+  diagnostics->cuda_multi_penalty_prepared_target_capacity_sum +=
+    target_capacity;
+  diagnostics->cuda_multi_penalty_prepared_target_capacity_peak = std::max(
+    diagnostics->cuda_multi_penalty_prepared_target_capacity_peak,
+    target_capacity);
+  diagnostics->cuda_multi_penalty_prepared_build_ms += elapsed_ms(started);
+}
+
 std::shared_ptr<NativeSetupContext> build_native_context(
     const Rcpp::NumericMatrix& data,
     const std::string& dataset,
@@ -890,8 +943,6 @@ std::shared_ptr<NativeSetupContext> build_native_context(
   if (context->penalty_count == 1) {
     context->single_penalty.reset(
       new SinglePenaltyGeometry(prepare_single_penalty_geometry(context)));
-  } else {
-    context->multi_penalty = create_multi_penalty_handle(context, 64);
   }
   diagnostics->native_setup_count += 1;
   diagnostics->native_setup_ms += elapsed_ms(started);
@@ -932,6 +983,7 @@ std::shared_ptr<NativeSetupContext> build_direct_context(
 void close_context(const std::shared_ptr<NativeSetupContext>& context) {
   if (!context) return;
   context->multi_penalty.reset();
+  context->multi_penalty_target_capacity = 0;
   if (context->fixed_sp) {
     try {
       free_prepared_s_gpu(&context->fixed_sp);
@@ -951,9 +1003,6 @@ void rehydrate_native_context(
   try {
     context->fixed_sp = create_fixed_sp_handle(
       runtime, context->dataset_key, context);
-    if (context->penalty_count > 1) {
-      context->multi_penalty = create_multi_penalty_handle(context, 64);
-    }
   } catch (...) {
     close_context(context);
     throw;
@@ -1451,8 +1500,6 @@ void prefill_multi_penalty_target_states(
         group.task_indices.empty()) {
       continue;
     }
-    require(context->multi_penalty != nullptr,
-            "multi-penalty prefill prepared handle is missing");
     std::set<int> target_set;
     for (int task_index : group.task_indices) {
       const LayerCiTask& task =
@@ -1481,6 +1528,8 @@ void prefill_multi_penalty_target_states(
     }
     if (request.targets.size() < 2U) continue;
 
+    ensure_multi_penalty_handle(
+      context, static_cast<int>(request.targets.size()), diagnostics);
     input.prepared = context->multi_penalty;
     input.n = context->n;
     input.target_count = static_cast<int>(request.targets.size());
@@ -1499,18 +1548,17 @@ void prefill_multi_penalty_target_states(
   }
 
   if (requests.empty()) return;
-  MultiPenaltyGcvCudaMultiResult optimization =
-    multi_penalty_gcv_cuda_optimize_multi(
+  MultiPenaltyGcvCudaMultiResult optimization;
+  try {
+    optimization = multi_penalty_gcv_cuda_optimize_multi(
       std::move(requests), std::min(
         kMultiPenaltyGcvMaximumConcurrentSetups,
         static_cast<int>(metadata.size())));
-  require(optimization.setups.size() == metadata.size() &&
-            optimization.diagnostics.setup_count ==
-              static_cast<int>(metadata.size()) &&
-            optimization.diagnostics.max_host_calls_in_flight > 0,
-          "multi-penalty cross-setup CUDA optimizer coverage changed");
-
-  try {
+    require(optimization.setups.size() == metadata.size() &&
+              optimization.diagnostics.setup_count ==
+                static_cast<int>(metadata.size()) &&
+              optimization.diagnostics.max_host_calls_in_flight > 0,
+            "multi-penalty cross-setup CUDA optimizer coverage changed");
     for (std::size_t setup_index = 0; setup_index < metadata.size();
          ++setup_index) {
       const MultiPenaltyPrefillRequest& request = metadata[setup_index];
@@ -1561,6 +1609,7 @@ void prefill_multi_penalty_target_states(
       diagnostics->cuda_multi_penalty_target_count += target_count;
       release_multi_penalty_gcv_cuda_residual(setup.residual);
       setup.residual.reset();
+      release_multi_penalty_handle(request.context, diagnostics);
     }
   } catch (...) {
     for (MultiPenaltyGcvCudaBatchResult& setup : optimization.setups) {
@@ -1570,6 +1619,14 @@ void prefill_multi_penalty_target_states(
         } catch (...) {
         }
         setup.residual.reset();
+      }
+    }
+    for (const MultiPenaltyPrefillRequest& request : metadata) {
+      if (request.context && request.context->multi_penalty) {
+        try {
+          release_multi_penalty_handle(request.context, diagnostics);
+        } catch (...) {
+        }
       }
     }
     throw;
@@ -1783,14 +1840,14 @@ GroupResult execute_group(
       }
       diagnostics->cuda_single_penalty_target_count += optimization_count;
     } else {
-      require(context->multi_penalty != nullptr,
-              "multi-penalty CUDA prepared handle is missing");
+      ensure_multi_penalty_handle(
+        context, optimization_count, diagnostics);
       MultiPenaltyGcvCudaOptimizerControl control;
-      MultiPenaltyGcvCudaBatchResult optimization =
-        multi_penalty_gcv_cuda_optimize_batch(
+      MultiPenaltyGcvCudaBatchResult optimization;
+      try {
+        optimization = multi_penalty_gcv_cuda_optimize_batch(
           context->multi_penalty, optimization_Y.data(), context->n,
           optimization_count, optimization_base_keys, control);
-      try {
         const MultiPenaltyGcvCudaOptimization& result =
           optimization.optimization;
         diagnostics->cuda_multi_penalty_optimizer_setup_count += 1;
@@ -1839,10 +1896,17 @@ GroupResult execute_group(
         }
         release_multi_penalty_gcv_cuda_residual(optimization.residual);
         optimization.residual.reset();
+        release_multi_penalty_handle(context, diagnostics);
       } catch (...) {
         if (optimization.residual) {
           try {
             release_multi_penalty_gcv_cuda_residual(optimization.residual);
+          } catch (...) {
+          }
+        }
+        if (context->multi_penalty) {
+          try {
+            release_multi_penalty_handle(context, diagnostics);
           } catch (...) {
           }
         }
@@ -2404,7 +2468,11 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
   require(diagnostics.native_setup_count >= physical_prepared_s_key_count &&
             physical_prepared_s_key_count >= unique_prepared_s_key_count &&
             diagnostics.physical_residual_fit_count >=
-              unique_residual_key_count,
+              unique_residual_key_count &&
+            diagnostics.cuda_multi_penalty_prepared_build_count ==
+              diagnostics.cuda_multi_penalty_prepared_release_count &&
+            diagnostics.cuda_multi_penalty_prepared_target_capacity_peak <=
+              64,
           "compatible.cuda one-call physical work accounting changed");
   const bool authority_clean =
     diagnostics.cpu_dcov_component_count == 0 &&
@@ -2477,6 +2545,14 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.cuda_multi_penalty_optimizer_setup_count,
       Rcpp::Named("cuda_multi_penalty_optimizer_call_count") =
         diagnostics.cuda_multi_penalty_optimizer_call_count,
+      Rcpp::Named("cuda_multi_penalty_prepared_build_count") =
+        diagnostics.cuda_multi_penalty_prepared_build_count,
+      Rcpp::Named("cuda_multi_penalty_prepared_release_count") =
+        diagnostics.cuda_multi_penalty_prepared_release_count,
+      Rcpp::Named("cuda_multi_penalty_prepared_target_capacity_sum") =
+        diagnostics.cuda_multi_penalty_prepared_target_capacity_sum,
+      Rcpp::Named("cuda_multi_penalty_prepared_target_capacity_peak") =
+        diagnostics.cuda_multi_penalty_prepared_target_capacity_peak,
       Rcpp::Named("cuda_optimizer_kernel_launch_count") =
         diagnostics.cuda_optimizer_kernel_launch_count,
       Rcpp::Named("cuda_optimizer_host_boundary_count") =
@@ -2604,6 +2680,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.cuda_single_penalty_optimizer_host_ms,
       Rcpp::Named("cuda_multi_penalty_optimizer_host_ms") =
         diagnostics.cuda_multi_penalty_optimizer_host_ms,
+      Rcpp::Named("cuda_multi_penalty_prepared_build_ms") =
+        diagnostics.cuda_multi_penalty_prepared_build_ms,
       Rcpp::Named("cuda_single_penalty_optimizer_cuda_ms") =
         diagnostics.cuda_single_penalty_optimizer_cuda_ms,
       Rcpp::Named("cuda_residual_solve_host_ms") =
