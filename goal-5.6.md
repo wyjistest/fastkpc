@@ -3567,9 +3567,13 @@ is replay-warm rather than fresh-data compute. The v1 cold path takes
 proof and public 500x50 fixture pass. Lazy multi-penalty handles and per-call
 univariate primitive reuse reduce the current single-run fresh-data development
 profile to `263.305` seconds with exact numerical and graph parity, but
-Checkpoint B and the final five-run gate still fail. Continue reducing optimizer
-and setup execution cost, pass the v2 checkpoints, and refreeze before opening
-the external sealed holdout. Promotion remains forbidden.
+Checkpoint B and the final five-run gate still fail. A non-formal
+max-conditioning-size-3 profile attributes 63.6% of optimizer stage-0 cycles to
+QR factorization and 25.7% to explicit Q generation; prepared-handle builds are
+only 5.812 seconds of the 40.330-second multi-penalty boundary. Continue with a
+trajectory-preserving decomposition/execution-shape change, pass the v2
+checkpoints, and refreeze before opening the external sealed holdout. Promotion
+remains forbidden.
 
 ---
 

@@ -665,8 +665,10 @@ __device__ int small_dgesdd_left(
     const integer lane = static_cast<integer>(threadIdx.x) & 31;
     integer info = 0;
     unsigned long long stage_started = 0;
+    unsigned long long detail_started = 0;
     if (threadIdx.x == 0 && stage_cycles != nullptr) {
       stage_started = clock64();
+      detail_started = stage_started;
     }
     if (warp == 0) {
       if (lane == 0) {
@@ -676,6 +678,10 @@ __device__ int small_dgesdd_left(
       cooperative_sync(32);
       dgeqr2_(&m, &n, workspace->a, &m, workspace->qr_tau,
               workspace->work, &info);
+      if (lane == 0 && stage_cycles != nullptr) {
+        stage_cycles[4] += clock64() - detail_started;
+        detail_started = clock64();
+      }
       if (info == 0) {
         for (integer index = lane; index < n * n; index += 32) {
           const integer row = index % n;
@@ -686,6 +692,10 @@ __device__ int small_dgesdd_left(
         cooperative_sync(32);
         dorg2r_(&m, &n, &n, workspace->a, &m, workspace->qr_tau,
                 workspace->work, &info);
+      }
+      if (lane == 0 && stage_cycles != nullptr) {
+        stage_cycles[5] += clock64() - detail_started;
+        detail_started = clock64();
       }
       if (lane == 0) {
         doublereal maximum_diagonal = 0.0;
@@ -745,6 +755,10 @@ __device__ int small_dgesdd_left(
         }
         cooperative_sync(32);
       }
+      if (lane == 0 && stage_cycles != nullptr) {
+        stage_cycles[6] += clock64() - detail_started;
+        detail_started = clock64();
+      }
       if (info == 0 && workspace->qr_guard_accepted != 0) {
         for (integer index = lane; index < m * n; index += 32) {
           workspace->left_u[index] = workspace->a[index];
@@ -757,6 +771,9 @@ __device__ int small_dgesdd_left(
         dgebd2_(&n, &n, workspace->r, &n, workspace->bidiagonal,
                 workspace->bidiagonal_e, workspace->tau_q,
                 workspace->tau_p, workspace->work, &info);
+      }
+      if (lane == 0 && stage_cycles != nullptr) {
+        stage_cycles[7] += clock64() - detail_started;
       }
       if (lane == 0) workspace->iwork[0] = info;
     }
@@ -830,11 +847,17 @@ __device__ int small_dgesdd_left(
   integer info = 0;
   if (threadIdx.x == 0) workspace->qr_basis_used = 0;
   unsigned long long stage_started = 0;
+  unsigned long long detail_started = 0;
   if (threadIdx.x == 0 && stage_cycles != nullptr) {
     stage_started = clock64();
+    detail_started = stage_started;
   }
   dgeqr2_(&m, &n, workspace->a, &m, workspace->qr_tau,
           workspace->work, &info);
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[4] += clock64() - detail_started;
+    detail_started = clock64();
+  }
   if (info != 0) return info;
   const int lane_count = cooperative_lane_count();
   const int lane = cooperative_lane_index(lane_count);
@@ -847,10 +870,17 @@ __device__ int small_dgesdd_left(
   cooperative_sync(lane_count);
   dorg2r_(&m, &n, &n, workspace->a, &m, workspace->qr_tau,
           workspace->work, &info);
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[5] += clock64() - detail_started;
+    detail_started = clock64();
+  }
   if (info != 0) return info;
   dgebd2_(&n, &n, workspace->r, &n, workspace->bidiagonal,
           workspace->bidiagonal_e, workspace->tau_q, workspace->tau_p,
           workspace->work, &info);
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[7] += clock64() - detail_started;
+  }
   if (threadIdx.x == 0 && stage_cycles != nullptr) {
     stage_cycles[0] += clock64() - stage_started;
     stage_started = clock64();

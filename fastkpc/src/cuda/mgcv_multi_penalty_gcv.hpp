@@ -34,6 +34,10 @@ struct MultiPenaltyGcvCudaDiagnostics {
   std::uint64_t cuda_penalty_factor_augmentation_cycles = 0;
   std::uint64_t cuda_qr_svd_cycles = 0;
   std::uint64_t cuda_qr_bidiagonal_reduction_cycles = 0;
+  std::uint64_t cuda_qr_factorization_cycles = 0;
+  std::uint64_t cuda_q_generation_cycles = 0;
+  std::uint64_t cuda_qr_guard_cycles = 0;
+  std::uint64_t cuda_stable_bidiagonal_reduction_cycles = 0;
   std::uint64_t cuda_bidiagonal_svd_cycles = 0;
   std::uint64_t cuda_svd_vector_postback_cycles = 0;
   std::uint64_t cuda_left_vector_product_cycles = 0;

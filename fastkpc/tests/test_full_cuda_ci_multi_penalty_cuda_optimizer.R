@@ -306,7 +306,17 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       diagnostics$cuda_penalty_factor_augmentation_cycles > 0 &&
       diagnostics$cuda_qr_svd_cycles > 0 &&
       diagnostics$cuda_qr_bidiagonal_reduction_cycles > 0 &&
+      diagnostics$cuda_qr_factorization_cycles > 0 &&
+      diagnostics$cuda_q_generation_cycles > 0 &&
+      diagnostics$cuda_qr_guard_cycles >= 0 &&
+      diagnostics$cuda_stable_bidiagonal_reduction_cycles >= 0 &&
+      diagnostics$cuda_qr_factorization_cycles +
+        diagnostics$cuda_q_generation_cycles +
+        diagnostics$cuda_qr_guard_cycles +
+        diagnostics$cuda_stable_bidiagonal_reduction_cycles <=
+          diagnostics$cuda_qr_bidiagonal_reduction_cycles &&
       (diagnostics$cuda_stable_svd_evaluation_count == 0L || (
+        diagnostics$cuda_stable_bidiagonal_reduction_cycles > 0 &&
         diagnostics$cuda_bidiagonal_svd_cycles > 0 &&
           diagnostics$cuda_svd_vector_postback_cycles > 0 &&
           diagnostics$cuda_left_vector_product_cycles > 0

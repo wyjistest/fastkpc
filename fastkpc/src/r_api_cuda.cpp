@@ -7413,6 +7413,15 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
       Rcpp::Named("cuda_qr_bidiagonal_reduction_cycles") =
         static_cast<double>(
           diagnostics.cuda_qr_bidiagonal_reduction_cycles),
+      Rcpp::Named("cuda_qr_factorization_cycles") =
+        static_cast<double>(diagnostics.cuda_qr_factorization_cycles),
+      Rcpp::Named("cuda_q_generation_cycles") =
+        static_cast<double>(diagnostics.cuda_q_generation_cycles),
+      Rcpp::Named("cuda_qr_guard_cycles") =
+        static_cast<double>(diagnostics.cuda_qr_guard_cycles),
+      Rcpp::Named("cuda_stable_bidiagonal_reduction_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_stable_bidiagonal_reduction_cycles),
       Rcpp::Named("cuda_bidiagonal_svd_cycles") =
         static_cast<double>(diagnostics.cuda_bidiagonal_svd_cycles),
       Rcpp::Named("cuda_svd_vector_postback_cycles") =
@@ -7838,6 +7847,15 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cuda(
       Rcpp::Named("cuda_qr_bidiagonal_reduction_cycles") =
         static_cast<double>(
           diagnostics.cuda_qr_bidiagonal_reduction_cycles),
+      Rcpp::Named("cuda_qr_factorization_cycles") =
+        static_cast<double>(diagnostics.cuda_qr_factorization_cycles),
+      Rcpp::Named("cuda_q_generation_cycles") =
+        static_cast<double>(diagnostics.cuda_q_generation_cycles),
+      Rcpp::Named("cuda_qr_guard_cycles") =
+        static_cast<double>(diagnostics.cuda_qr_guard_cycles),
+      Rcpp::Named("cuda_stable_bidiagonal_reduction_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_stable_bidiagonal_reduction_cycles),
       Rcpp::Named("cuda_bidiagonal_svd_cycles") =
         static_cast<double>(diagnostics.cuda_bidiagonal_svd_cycles),
       Rcpp::Named("cuda_svd_vector_postback_cycles") =

@@ -62,11 +62,11 @@ evidence <- fastkpc_full_cuda_phase10_capture_compute_warm(
 fastkpc_full_cuda_phase10_validate_compute_warm_evidence(evidence)
 profile <- fastkpc_full_cuda_phase10_compute_profile(evidence$result$summary)
 assert_true(
-    identical(profile$schema_version, "full-cuda-ci-compute-profile-v3") &&
+    identical(profile$schema_version, "full-cuda-ci-compute-profile-v4") &&
     is.data.frame(profile$stage_timing) &&
-    nrow(profile$stage_timing) == 30L &&
+    nrow(profile$stage_timing) == 32L &&
     is.data.frame(profile$physical_work) &&
-    nrow(profile$physical_work) == 58L &&
+    nrow(profile$physical_work) == 89L &&
     all(is.finite(profile$stage_timing$elapsed_ms)) &&
     all(is.finite(profile$physical_work$value)),
   "compute-warm profile must expose complete finite stage/work counters"

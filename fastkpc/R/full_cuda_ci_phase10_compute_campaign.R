@@ -437,6 +437,8 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "cuda_optimizer_host_ms",
     "cuda_single_penalty_optimizer_host_ms",
     "cuda_multi_penalty_optimizer_host_ms",
+    "cuda_multi_penalty_optimizer_summed_setup_host_ms",
+    "cuda_multi_penalty_optimizer_max_setup_host_ms",
     "cuda_multi_penalty_prepared_build_ms",
     "cuda_single_penalty_optimizer_cuda_ms",
     "cuda_residual_solve_host_ms", "cuda_dcov_host_ms",
@@ -480,6 +482,37 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "cuda_multi_penalty_prepared_release_count",
     "cuda_multi_penalty_prepared_target_capacity_sum",
     "cuda_multi_penalty_prepared_target_capacity_peak",
+    "cuda_multi_penalty_optimizer_iteration_sum",
+    "cuda_multi_penalty_optimizer_iteration_max",
+    "cuda_multi_penalty_score_call_sum",
+    "cuda_multi_penalty_objective_call_sum",
+    "cuda_multi_penalty_step_halving_sum",
+    "cuda_multi_penalty_newton_trial_sum",
+    "cuda_multi_penalty_steepest_descent_trial_sum",
+    "cuda_multi_penalty_boundary_probe_sum",
+    "cuda_multi_penalty_complete_evaluation_count",
+    "cuda_multi_penalty_score_only_evaluation_count",
+    "cuda_multi_penalty_guarded_qr_evaluation_count",
+    "cuda_multi_penalty_stable_svd_evaluation_count",
+    "cuda_multi_penalty_selected_evaluation_reuse_count",
+    "cuda_multi_penalty_stability_replay_target_count",
+    "cuda_multi_penalty_stability_replay_selected_count",
+    "cuda_multi_penalty_terminal_confirmation_count",
+    "cuda_multi_penalty_hessian_eigensolver_count",
+    "cuda_multi_penalty_penalty_factor_cycles",
+    "cuda_multi_penalty_qr_svd_cycles",
+    "cuda_multi_penalty_qr_bidiagonal_reduction_cycles",
+    "cuda_multi_penalty_qr_factorization_cycles",
+    "cuda_multi_penalty_q_generation_cycles",
+    "cuda_multi_penalty_qr_guard_cycles",
+    "cuda_multi_penalty_stable_bidiagonal_reduction_cycles",
+    "cuda_multi_penalty_bidiagonal_svd_cycles",
+    "cuda_multi_penalty_svd_vector_postback_cycles",
+    "cuda_multi_penalty_left_vector_product_cycles",
+    "cuda_multi_penalty_score_construction_cycles",
+    "cuda_multi_penalty_derivative_hessian_cycles",
+    "cuda_multi_penalty_stability_replay_discarded_cycles",
+    "cuda_multi_penalty_terminal_confirmation_cycles",
     "cuda_optimizer_kernel_launch_count",
     "cuda_optimizer_host_boundary_count", "unique_residual_key_count",
     "logical_residual_requests", "physical_residual_fits",
@@ -541,6 +574,26 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
       counters[["cuda_multi_penalty_prepared_target_capacity_sum"]] >=
         2 * counters[["cuda_multi_penalty_prepared_build_count"]] &&
       counters[["cuda_multi_penalty_prepared_target_capacity_peak"]] <= 64 &&
+      (counters[["cuda_multi_penalty_target_count"]] == 0 || (
+        counters[["cuda_multi_penalty_optimizer_iteration_sum"]] > 0 &&
+        counters[["cuda_multi_penalty_optimizer_iteration_max"]] > 0 &&
+        counters[["cuda_multi_penalty_objective_call_sum"]] >=
+          counters[["cuda_multi_penalty_score_call_sum"]] &&
+        counters[["cuda_multi_penalty_complete_evaluation_count"]] > 0 &&
+        counters[["cuda_multi_penalty_qr_svd_cycles"]] > 0 &&
+        counters[["cuda_multi_penalty_qr_factorization_cycles"]] > 0 &&
+        counters[["cuda_multi_penalty_q_generation_cycles"]] > 0 &&
+        (counters[["cuda_multi_penalty_guarded_qr_evaluation_count"]] == 0 ||
+          counters[["cuda_multi_penalty_qr_guard_cycles"]] > 0) &&
+        (counters[["cuda_multi_penalty_stable_svd_evaluation_count"]] == 0 ||
+          counters[[
+            "cuda_multi_penalty_stable_bidiagonal_reduction_cycles"
+          ]] > 0) &&
+        counters[["cuda_multi_penalty_hessian_eigensolver_count"]] ==
+          counters[["cuda_multi_penalty_optimizer_iteration_sum"]] &&
+        counters[["cuda_multi_penalty_stability_replay_selected_count"]] <=
+          counters[["cuda_multi_penalty_stability_replay_target_count"]]
+      )) &&
       counters[["excess_target_optimization_count"]] ==
         counters[["physical_target_optimization_count"]] -
           counters[["unique_target_key_count"]] &&
@@ -559,7 +612,7 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "Phase 10 fresh-data compute profile is malformed"
   )
   list(
-    schema_version = "full-cuda-ci-compute-profile-v3",
+    schema_version = "full-cuda-ci-compute-profile-v4",
     stage_timing = data.frame(
       stage = c(
         "native_setup",
@@ -581,7 +634,10 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
         "native_setup_device_rehydrate",
         "optimizer_total_host_boundary",
         "optimizer_single_host", "optimizer_single_cuda_nested",
-        "optimizer_multi_host", "optimizer_multi_prepared_build_nested",
+        "optimizer_multi_host",
+        "optimizer_multi_summed_setup_host_nested",
+        "optimizer_multi_max_setup_host_nested",
+        "optimizer_multi_prepared_build_nested",
         "residual_solve_host",
         "dcov_host_boundary", "dcov_metadata_h2d_nested",
         "dcov_component_build_nested", "dcov_pair_gamma_nested",
@@ -610,6 +666,8 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
         timings[["cuda_single_penalty_optimizer_host_ms"]],
         timings[["cuda_single_penalty_optimizer_cuda_ms"]],
         timings[["cuda_multi_penalty_optimizer_host_ms"]],
+        timings[["cuda_multi_penalty_optimizer_summed_setup_host_ms"]],
+        timings[["cuda_multi_penalty_optimizer_max_setup_host_ms"]],
         timings[["cuda_multi_penalty_prepared_build_ms"]],
         timings[["cuda_residual_solve_host_ms"]],
         timings[["cuda_dcov_host_ms"]],

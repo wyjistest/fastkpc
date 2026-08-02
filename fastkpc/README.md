@@ -120,6 +120,24 @@ authority, fallback, and residual/component D2H counter was zero. The public
 500x50 production-shape fixture also passes with empty dataset-specific caches
 and one native skeleton call.
 
+A non-formal max-conditioning-size-3 profile now exposes the optimizer work
+instead of treating the CUDA boundary as one opaque stage. It completed in
+`121.848` seconds, including `40.330` seconds in the multi-penalty optimizer.
+Across 54,878 targets it recorded 563,638 optimizer iterations, 700,893 score
+calls, 1,053,964 objective calls, 137,255 step halvings, 941,534 guarded-QR
+evaluations, and 85,596 stable-SVD evaluations. Multi-penalty prepared-handle
+construction accounted for `5.812` seconds, so pooling those handles alone
+cannot close the remaining performance gap.
+
+Within the `1.316e12` stage-0 QR/reduction cycles, the new profile attributes
+`63.6%` to QR factorization, `25.7%` to explicit Q generation, `5.4%` to the
+guard, and `5.3%` to fallback bidiagonal reduction. Two exact-trajectory
+`DGER` lane-remapping experiments, a 32-thread target block, and a five-block
+launch bound were rejected because full level-3 wall time stayed flat or
+regressed. These experiments are not present in the production path. The next
+optimizer change therefore needs decomposition reuse or a larger execution-
+shape change while preserving the authenticated optimizer transcript.
+
 This is single-run development evidence: Checkpoint A (`< 600` seconds) passes,
 while Checkpoint B (`< 180` seconds) and the final five-run 120-second gate do
 not. Reproduce the development profile without creating formal evidence with:

@@ -285,6 +285,37 @@ struct OneCallDiagnostics {
   int cuda_multi_penalty_prepared_release_count = 0;
   int cuda_multi_penalty_prepared_target_capacity_sum = 0;
   int cuda_multi_penalty_prepared_target_capacity_peak = 0;
+  std::uint64_t cuda_multi_penalty_optimizer_iteration_sum = 0;
+  int cuda_multi_penalty_optimizer_iteration_max = 0;
+  std::uint64_t cuda_multi_penalty_score_call_sum = 0;
+  std::uint64_t cuda_multi_penalty_objective_call_sum = 0;
+  std::uint64_t cuda_multi_penalty_step_halving_sum = 0;
+  std::uint64_t cuda_multi_penalty_newton_trial_sum = 0;
+  std::uint64_t cuda_multi_penalty_steepest_descent_trial_sum = 0;
+  std::uint64_t cuda_multi_penalty_boundary_probe_sum = 0;
+  std::uint64_t cuda_multi_penalty_complete_evaluation_count = 0;
+  std::uint64_t cuda_multi_penalty_score_only_evaluation_count = 0;
+  std::uint64_t cuda_multi_penalty_guarded_qr_evaluation_count = 0;
+  std::uint64_t cuda_multi_penalty_stable_svd_evaluation_count = 0;
+  std::uint64_t cuda_multi_penalty_selected_evaluation_reuse_count = 0;
+  std::uint64_t cuda_multi_penalty_stability_replay_target_count = 0;
+  std::uint64_t cuda_multi_penalty_stability_replay_selected_count = 0;
+  std::uint64_t cuda_multi_penalty_terminal_confirmation_count = 0;
+  std::uint64_t cuda_multi_penalty_hessian_eigensolver_count = 0;
+  std::uint64_t cuda_multi_penalty_penalty_factor_cycles = 0;
+  std::uint64_t cuda_multi_penalty_qr_svd_cycles = 0;
+  std::uint64_t cuda_multi_penalty_qr_bidiagonal_reduction_cycles = 0;
+  std::uint64_t cuda_multi_penalty_qr_factorization_cycles = 0;
+  std::uint64_t cuda_multi_penalty_q_generation_cycles = 0;
+  std::uint64_t cuda_multi_penalty_qr_guard_cycles = 0;
+  std::uint64_t cuda_multi_penalty_stable_bidiagonal_reduction_cycles = 0;
+  std::uint64_t cuda_multi_penalty_bidiagonal_svd_cycles = 0;
+  std::uint64_t cuda_multi_penalty_svd_vector_postback_cycles = 0;
+  std::uint64_t cuda_multi_penalty_left_vector_product_cycles = 0;
+  std::uint64_t cuda_multi_penalty_score_construction_cycles = 0;
+  std::uint64_t cuda_multi_penalty_derivative_hessian_cycles = 0;
+  std::uint64_t cuda_multi_penalty_stability_replay_discarded_cycles = 0;
+  std::uint64_t cuda_multi_penalty_terminal_confirmation_cycles = 0;
   int cuda_optimizer_kernel_launch_count = 0;
   int cuda_optimizer_host_boundary_count = 0;
   int cuda_residual_batch_count = 0;
@@ -349,6 +380,8 @@ struct OneCallDiagnostics {
   double cuda_optimizer_host_ms = 0.0;
   double cuda_single_penalty_optimizer_host_ms = 0.0;
   double cuda_multi_penalty_optimizer_host_ms = 0.0;
+  double cuda_multi_penalty_optimizer_summed_setup_host_ms = 0.0;
+  double cuda_multi_penalty_optimizer_max_setup_host_ms = 0.0;
   double cuda_multi_penalty_prepared_build_ms = 0.0;
   double cuda_single_penalty_optimizer_cuda_ms = 0.0;
   double cuda_residual_solve_host_ms = 0.0;
@@ -1388,7 +1421,101 @@ void accumulate_single_penalty_optimizer_diagnostics(
     value.exact_objective_kernel_launch_count +
     value.exact_endpoint_kernel_launch_count +
     value.optimizer_kernel_launch_count +
-    value.augmented_objective_kernel_launch_count;
+      value.augmented_objective_kernel_launch_count;
+}
+
+void accumulate_multi_penalty_optimizer_diagnostics(
+    const MultiPenaltyGcvCudaOptimization& value,
+    OneCallDiagnostics* diagnostics) {
+  require(diagnostics != nullptr && value.target_count > 0,
+          "multi-penalty optimizer diagnostics are malformed");
+  const MultiPenaltyGcvCudaDiagnostics& source = value.diagnostics;
+  diagnostics->cuda_multi_penalty_optimizer_summed_setup_host_ms +=
+    source.total_host_ms;
+  diagnostics->cuda_multi_penalty_optimizer_max_setup_host_ms = std::max(
+    diagnostics->cuda_multi_penalty_optimizer_max_setup_host_ms,
+    source.total_host_ms);
+  diagnostics->cuda_multi_penalty_complete_evaluation_count +=
+    source.cuda_complete_evaluation_count;
+  diagnostics->cuda_multi_penalty_score_only_evaluation_count +=
+    source.cuda_score_only_evaluation_count;
+  diagnostics->cuda_multi_penalty_guarded_qr_evaluation_count +=
+    source.cuda_guarded_qr_evaluation_count;
+  diagnostics->cuda_multi_penalty_stable_svd_evaluation_count +=
+    source.cuda_stable_svd_evaluation_count;
+  diagnostics->cuda_multi_penalty_selected_evaluation_reuse_count +=
+    source.cuda_selected_evaluation_reuse_count;
+  diagnostics->cuda_multi_penalty_stability_replay_target_count +=
+    source.cuda_stability_replay_target_count;
+  diagnostics->cuda_multi_penalty_stability_replay_selected_count +=
+    source.cuda_stability_replay_selected_count;
+  diagnostics->cuda_multi_penalty_terminal_confirmation_count +=
+    source.cuda_terminal_boundary_confirmation_count;
+  diagnostics->cuda_multi_penalty_hessian_eigensolver_count +=
+    source.cuda_hessian_eigensolver_count;
+  diagnostics->cuda_multi_penalty_penalty_factor_cycles +=
+    source.cuda_penalty_factor_augmentation_cycles;
+  diagnostics->cuda_multi_penalty_qr_svd_cycles +=
+    source.cuda_qr_svd_cycles;
+  diagnostics->cuda_multi_penalty_qr_bidiagonal_reduction_cycles +=
+    source.cuda_qr_bidiagonal_reduction_cycles;
+  diagnostics->cuda_multi_penalty_qr_factorization_cycles +=
+    source.cuda_qr_factorization_cycles;
+  diagnostics->cuda_multi_penalty_q_generation_cycles +=
+    source.cuda_q_generation_cycles;
+  diagnostics->cuda_multi_penalty_qr_guard_cycles +=
+    source.cuda_qr_guard_cycles;
+  diagnostics->cuda_multi_penalty_stable_bidiagonal_reduction_cycles +=
+    source.cuda_stable_bidiagonal_reduction_cycles;
+  diagnostics->cuda_multi_penalty_bidiagonal_svd_cycles +=
+    source.cuda_bidiagonal_svd_cycles;
+  diagnostics->cuda_multi_penalty_svd_vector_postback_cycles +=
+    source.cuda_svd_vector_postback_cycles;
+  diagnostics->cuda_multi_penalty_left_vector_product_cycles +=
+    source.cuda_left_vector_product_cycles;
+  diagnostics->cuda_multi_penalty_score_construction_cycles +=
+    source.cuda_score_construction_cycles;
+  diagnostics->cuda_multi_penalty_derivative_hessian_cycles +=
+    source.cuda_derivative_hessian_cycles;
+  diagnostics->cuda_multi_penalty_stability_replay_discarded_cycles +=
+    source.cuda_stability_replay_discarded_cycles;
+  diagnostics->cuda_multi_penalty_terminal_confirmation_cycles +=
+    source.cuda_terminal_boundary_confirmation_cycles;
+
+  require(
+    value.optimizer_iterations.size() ==
+      static_cast<std::size_t>(value.target_count) &&
+    value.score_calls.size() == static_cast<std::size_t>(value.target_count) &&
+    value.objective_calls.size() ==
+      static_cast<std::size_t>(value.target_count) &&
+    value.step_halving_count.size() ==
+      static_cast<std::size_t>(value.target_count) &&
+    value.newton_trial_count.size() ==
+      static_cast<std::size_t>(value.target_count) &&
+    value.steepest_descent_trial_count.size() ==
+      static_cast<std::size_t>(value.target_count) &&
+    value.boundary_probe_count.size() ==
+      static_cast<std::size_t>(value.target_count),
+    "multi-penalty optimizer transcript diagnostics are malformed");
+  for (int target = 0; target < value.target_count; ++target) {
+    const std::size_t index = static_cast<std::size_t>(target);
+    diagnostics->cuda_multi_penalty_optimizer_iteration_sum +=
+      value.optimizer_iterations[index];
+    diagnostics->cuda_multi_penalty_optimizer_iteration_max = std::max(
+      diagnostics->cuda_multi_penalty_optimizer_iteration_max,
+      value.optimizer_iterations[index]);
+    diagnostics->cuda_multi_penalty_score_call_sum += value.score_calls[index];
+    diagnostics->cuda_multi_penalty_objective_call_sum +=
+      value.objective_calls[index];
+    diagnostics->cuda_multi_penalty_step_halving_sum +=
+      value.step_halving_count[index];
+    diagnostics->cuda_multi_penalty_newton_trial_sum +=
+      value.newton_trial_count[index];
+    diagnostics->cuda_multi_penalty_steepest_descent_trial_sum +=
+      value.steepest_descent_trial_count[index];
+    diagnostics->cuda_multi_penalty_boundary_probe_sum +=
+      value.boundary_probe_count[index];
+  }
 }
 
 struct SinglePenaltyPrefillGroup {
@@ -1688,6 +1815,7 @@ void prefill_multi_penalty_target_states(
                 result.diagnostics.true_batched_kernel &&
                 result.diagnostics.independent_target_states,
               "multi-penalty cross-setup CUDA optimizer authority gate failed");
+      accumulate_multi_penalty_optimizer_diagnostics(result, diagnostics);
       for (int target_index = 0; target_index < target_count; ++target_index) {
         require(result.optimizer_status[
                   static_cast<std::size_t>(target_index)] == 0,
@@ -1976,6 +2104,7 @@ GroupResult execute_group(
                   result.diagnostics.true_batched_kernel &&
                   result.diagnostics.independent_target_states,
                 "multi-penalty live CUDA optimizer authority gate failed");
+        accumulate_multi_penalty_optimizer_diagnostics(result, diagnostics);
         for (int local = 0; local < optimization_count; ++local) {
           const int position =
             optimization_positions[static_cast<std::size_t>(local)];
@@ -2663,6 +2792,90 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.cuda_multi_penalty_prepared_target_capacity_sum,
       Rcpp::Named("cuda_multi_penalty_prepared_target_capacity_peak") =
         diagnostics.cuda_multi_penalty_prepared_target_capacity_peak,
+      Rcpp::Named("cuda_multi_penalty_optimizer_iteration_sum") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_optimizer_iteration_sum),
+      Rcpp::Named("cuda_multi_penalty_optimizer_iteration_max") =
+        diagnostics.cuda_multi_penalty_optimizer_iteration_max,
+      Rcpp::Named("cuda_multi_penalty_score_call_sum") =
+        static_cast<double>(diagnostics.cuda_multi_penalty_score_call_sum),
+      Rcpp::Named("cuda_multi_penalty_objective_call_sum") =
+        static_cast<double>(diagnostics.cuda_multi_penalty_objective_call_sum),
+      Rcpp::Named("cuda_multi_penalty_step_halving_sum") =
+        static_cast<double>(diagnostics.cuda_multi_penalty_step_halving_sum),
+      Rcpp::Named("cuda_multi_penalty_newton_trial_sum") =
+        static_cast<double>(diagnostics.cuda_multi_penalty_newton_trial_sum),
+      Rcpp::Named("cuda_multi_penalty_steepest_descent_trial_sum") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_steepest_descent_trial_sum),
+      Rcpp::Named("cuda_multi_penalty_boundary_probe_sum") =
+        static_cast<double>(diagnostics.cuda_multi_penalty_boundary_probe_sum),
+      Rcpp::Named("cuda_multi_penalty_complete_evaluation_count") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_complete_evaluation_count),
+      Rcpp::Named("cuda_multi_penalty_score_only_evaluation_count") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_score_only_evaluation_count),
+      Rcpp::Named("cuda_multi_penalty_guarded_qr_evaluation_count") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_guarded_qr_evaluation_count),
+      Rcpp::Named("cuda_multi_penalty_stable_svd_evaluation_count") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_stable_svd_evaluation_count),
+      Rcpp::Named("cuda_multi_penalty_selected_evaluation_reuse_count") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_selected_evaluation_reuse_count),
+      Rcpp::Named("cuda_multi_penalty_stability_replay_target_count") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_stability_replay_target_count),
+      Rcpp::Named("cuda_multi_penalty_stability_replay_selected_count") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_stability_replay_selected_count),
+      Rcpp::Named("cuda_multi_penalty_terminal_confirmation_count") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_terminal_confirmation_count),
+      Rcpp::Named("cuda_multi_penalty_hessian_eigensolver_count") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_hessian_eigensolver_count),
+      Rcpp::Named("cuda_multi_penalty_penalty_factor_cycles") =
+        static_cast<double>(diagnostics.cuda_multi_penalty_penalty_factor_cycles),
+      Rcpp::Named("cuda_multi_penalty_qr_svd_cycles") =
+        static_cast<double>(diagnostics.cuda_multi_penalty_qr_svd_cycles),
+      Rcpp::Named("cuda_multi_penalty_qr_bidiagonal_reduction_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_qr_bidiagonal_reduction_cycles),
+      Rcpp::Named("cuda_multi_penalty_qr_factorization_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_qr_factorization_cycles),
+      Rcpp::Named("cuda_multi_penalty_q_generation_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_q_generation_cycles),
+      Rcpp::Named("cuda_multi_penalty_qr_guard_cycles") =
+        static_cast<double>(diagnostics.cuda_multi_penalty_qr_guard_cycles),
+      Rcpp::Named("cuda_multi_penalty_stable_bidiagonal_reduction_cycles") =
+        static_cast<double>(
+          diagnostics
+            .cuda_multi_penalty_stable_bidiagonal_reduction_cycles),
+      Rcpp::Named("cuda_multi_penalty_bidiagonal_svd_cycles") =
+        static_cast<double>(diagnostics.cuda_multi_penalty_bidiagonal_svd_cycles),
+      Rcpp::Named("cuda_multi_penalty_svd_vector_postback_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_svd_vector_postback_cycles),
+      Rcpp::Named("cuda_multi_penalty_left_vector_product_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_left_vector_product_cycles),
+      Rcpp::Named("cuda_multi_penalty_score_construction_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_score_construction_cycles),
+      Rcpp::Named("cuda_multi_penalty_derivative_hessian_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_derivative_hessian_cycles),
+      Rcpp::Named("cuda_multi_penalty_stability_replay_discarded_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_stability_replay_discarded_cycles),
+      Rcpp::Named("cuda_multi_penalty_terminal_confirmation_cycles") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_terminal_confirmation_cycles),
       Rcpp::Named("cuda_optimizer_kernel_launch_count") =
         diagnostics.cuda_optimizer_kernel_launch_count,
       Rcpp::Named("cuda_optimizer_host_boundary_count") =
@@ -2829,6 +3042,10 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.cuda_single_penalty_optimizer_host_ms,
       Rcpp::Named("cuda_multi_penalty_optimizer_host_ms") =
         diagnostics.cuda_multi_penalty_optimizer_host_ms,
+      Rcpp::Named("cuda_multi_penalty_optimizer_summed_setup_host_ms") =
+        diagnostics.cuda_multi_penalty_optimizer_summed_setup_host_ms,
+      Rcpp::Named("cuda_multi_penalty_optimizer_max_setup_host_ms") =
+        diagnostics.cuda_multi_penalty_optimizer_max_setup_host_ms,
       Rcpp::Named("cuda_multi_penalty_prepared_build_ms") =
         diagnostics.cuda_multi_penalty_prepared_build_ms,
       Rcpp::Named("cuda_single_penalty_optimizer_cuda_ms") =

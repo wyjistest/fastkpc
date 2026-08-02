@@ -430,7 +430,8 @@ struct DevicePhaseTiming {
   unsigned long long qr_svd_cycles;
   unsigned long long score_construction_cycles;
   unsigned long long derivative_hessian_cycles;
-  unsigned long long decomposition_stage_cycles[4];
+  // Entries 4-7 partition the QR/reduction total in entry 0.
+  unsigned long long decomposition_stage_cycles[8];
   int complete_evaluation_count;
   int score_only_evaluation_count;
   int guarded_qr_evaluation_count;
@@ -1430,7 +1431,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->phase_timing.qr_svd_cycles = 0;
     state->phase_timing.score_construction_cycles = 0;
     state->phase_timing.derivative_hessian_cycles = 0;
-    for (int stage = 0; stage < 4; ++stage) {
+    for (int stage = 0; stage < 8; ++stage) {
       state->phase_timing.decomposition_stage_cycles[stage] = 0;
     }
     state->phase_timing.complete_evaluation_count = 0;
@@ -1441,7 +1442,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->discarded_phase_timing.qr_svd_cycles = 0;
     state->discarded_phase_timing.score_construction_cycles = 0;
     state->discarded_phase_timing.derivative_hessian_cycles = 0;
-    for (int stage = 0; stage < 4; ++stage) {
+    for (int stage = 0; stage < 8; ++stage) {
       state->discarded_phase_timing.decomposition_stage_cycles[stage] = 0;
     }
     state->discarded_phase_timing.complete_evaluation_count = 0;
@@ -1455,7 +1456,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
       .score_construction_cycles = 0;
     state->terminal_boundary_confirmation_phase_timing
       .derivative_hessian_cycles = 0;
-    for (int stage = 0; stage < 4; ++stage) {
+    for (int stage = 0; stage < 8; ++stage) {
       state->terminal_boundary_confirmation_phase_timing
         .decomposition_stage_cycles[stage] = 0;
     }
@@ -2355,6 +2356,14 @@ MultiPenaltyGcvCudaOptimization materialize_optimizer_output(
     diagnostics.cuda_qr_svd_cycles += state.phase_timing.qr_svd_cycles;
     diagnostics.cuda_qr_bidiagonal_reduction_cycles +=
       state.phase_timing.decomposition_stage_cycles[0];
+    diagnostics.cuda_qr_factorization_cycles +=
+      state.phase_timing.decomposition_stage_cycles[4];
+    diagnostics.cuda_q_generation_cycles +=
+      state.phase_timing.decomposition_stage_cycles[5];
+    diagnostics.cuda_qr_guard_cycles +=
+      state.phase_timing.decomposition_stage_cycles[6];
+    diagnostics.cuda_stable_bidiagonal_reduction_cycles +=
+      state.phase_timing.decomposition_stage_cycles[7];
     diagnostics.cuda_bidiagonal_svd_cycles +=
       state.phase_timing.decomposition_stage_cycles[1];
     diagnostics.cuda_svd_vector_postback_cycles +=
@@ -3033,6 +3042,14 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
     diagnostics.cuda_qr_svd_cycles += state.phase_timing.qr_svd_cycles;
     diagnostics.cuda_qr_bidiagonal_reduction_cycles +=
       state.phase_timing.decomposition_stage_cycles[0];
+    diagnostics.cuda_qr_factorization_cycles +=
+      state.phase_timing.decomposition_stage_cycles[4];
+    diagnostics.cuda_q_generation_cycles +=
+      state.phase_timing.decomposition_stage_cycles[5];
+    diagnostics.cuda_qr_guard_cycles +=
+      state.phase_timing.decomposition_stage_cycles[6];
+    diagnostics.cuda_stable_bidiagonal_reduction_cycles +=
+      state.phase_timing.decomposition_stage_cycles[7];
     diagnostics.cuda_bidiagonal_svd_cycles +=
       state.phase_timing.decomposition_stage_cycles[1];
     diagnostics.cuda_svd_vector_postback_cycles +=

@@ -213,6 +213,15 @@ assert_true(
       64L * multi_summary$cuda_multi_penalty_prepared_build_count &&
     multi_summary$cuda_multi_penalty_prepared_target_capacity_peak <=
       multi_p &&
+    multi_summary$cuda_multi_penalty_optimizer_iteration_sum > 0 &&
+    multi_summary$cuda_multi_penalty_optimizer_iteration_max > 0 &&
+    multi_summary$cuda_multi_penalty_qr_svd_cycles > 0 &&
+    multi_summary$cuda_multi_penalty_qr_factorization_cycles > 0 &&
+    multi_summary$cuda_multi_penalty_q_generation_cycles > 0 &&
+    multi_summary$cuda_multi_penalty_qr_guard_cycles > 0 &&
+    multi_summary$cuda_multi_penalty_stable_bidiagonal_reduction_cycles > 0 &&
+    multi_summary$cuda_multi_penalty_hessian_eigensolver_count ==
+      multi_summary$cuda_multi_penalty_optimizer_iteration_sum &&
     identical(multi_candidate$adjacency, multi_reference$adjacency) &&
     identical(normalize_sepsets(multi_candidate$sepsets),
               normalize_sepsets(multi_reference$sepsets)) &&
