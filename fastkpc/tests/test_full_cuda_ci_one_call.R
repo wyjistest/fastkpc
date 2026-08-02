@@ -198,6 +198,13 @@ assert_true(
     multi_summary$native_setup_multi_penalty_cache_capacity == 8192L &&
     multi_summary$native_setup_device_rehydrate_count == 0L &&
     multi_summary$native_setup_cache_eviction_count == 0L &&
+    multi_summary$native_setup_univariate_primitive_request_count ==
+      multi_summary$native_setup_univariate_primitive_hit_count +
+        multi_summary$native_setup_univariate_primitive_build_count &&
+    multi_summary$native_setup_univariate_primitive_build_count ==
+      multi_summary$native_setup_univariate_primitive_cache_peak_entries &&
+    multi_summary$native_setup_univariate_primitive_build_count <= multi_p &&
+    multi_summary$native_setup_univariate_primitive_cache_capacity == multi_p &&
     multi_summary$cuda_multi_penalty_prepared_build_count ==
       multi_summary$cuda_multi_penalty_optimizer_setup_count &&
     multi_summary$cuda_multi_penalty_prepared_release_count ==

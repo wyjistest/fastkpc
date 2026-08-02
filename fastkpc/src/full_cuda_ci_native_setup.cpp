@@ -19,6 +19,7 @@
 #include <R_ext/RS.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -36,6 +37,12 @@ namespace {
 constexpr const char* kSchemaVersion = "full-cuda-ci-native-setup-v1";
 constexpr const char* kSemanticVersion =
   "mgcv-1.9-1-tprs-native-setup-v1";
+
+double profile_elapsed_ms(
+    const std::chrono::steady_clock::time_point& started) {
+  return std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - started).count();
+}
 
 class RowMatrix {
  public:
@@ -1151,7 +1158,18 @@ std::string input_fingerprint_payload(const Rcpp::NumericMatrix& conditioning) {
 
 }  // namespace
 
-Rcpp::List full_cuda_ci_native_setup(
+class NativeUnivariateSmooth {
+ public:
+  NativeUnivariateSmooth(int source_column, SmoothSetup smooth)
+      : source_column(source_column), smooth(std::move(smooth)) {}
+
+  int source_column;
+  SmoothSetup smooth;
+};
+
+namespace {
+
+void validate_native_conditioning(
     const Rcpp::NumericMatrix& conditioning) {
   const int n = conditioning.nrow();
   const int conditioning_size = conditioning.ncol();
@@ -1165,23 +1183,28 @@ Rcpp::List full_cuda_ci_native_setup(
       }
     }
   }
+}
 
-  std::vector<SmoothSetup> smooths;
-  if (conditioning_size <= 2) {
-    std::vector<int> columns(static_cast<std::size_t>(conditioning_size));
-    for (int column = 0; column < conditioning_size; ++column) {
-      columns[static_cast<std::size_t>(column)] = column;
-    }
-    const int basis_dimension = conditioning_size == 1 ? 10 : 30;
-    smooths.push_back(build_smooth(conditioning, columns, basis_dimension));
-  } else {
-    for (int column = 0; column < conditioning_size; ++column) {
-      smooths.push_back(build_smooth(conditioning, {column}, 10));
-    }
+Rcpp::List assemble_native_setup(
+    const Rcpp::NumericMatrix& conditioning,
+    const std::vector<const SmoothSetup*>& smooths,
+    NativeSetupProfile* profile) {
+  const int n = conditioning.nrow();
+  const int conditioning_size = conditioning.ncol();
+  const std::size_t expected_smooth_count = conditioning_size <= 2 ?
+    1U : static_cast<std::size_t>(conditioning_size);
+  if (smooths.size() != expected_smooth_count ||
+      std::any_of(smooths.begin(), smooths.end(), [](const SmoothSetup* value) {
+        return value == nullptr;
+      })) {
+    Rcpp::stop("native setup smooth primitives are malformed");
   }
 
+  auto stage_started = std::chrono::steady_clock::now();
   int coefficient_count = 1;
-  for (const SmoothSetup& smooth : smooths) coefficient_count += smooth.X.cols();
+  for (const SmoothSetup* smooth : smooths) {
+    coefficient_count += smooth->X.cols();
+  }
   Rcpp::NumericMatrix X(n, coefficient_count);
   for (int row = 0; row < n; ++row) X(row, 0) = 1.0;
   Rcpp::List penalty_blocks(smooths.size());
@@ -1197,7 +1220,10 @@ Rcpp::List full_cuda_ci_native_setup(
 
   int destination = 1;
   for (std::size_t index = 0; index < smooths.size(); ++index) {
-    const SmoothSetup& smooth = smooths[index];
+    const SmoothSetup& smooth = *smooths[index];
+    if (smooth.X.rows() != n) {
+      Rcpp::stop("native setup smooth primitive row count changed");
+    }
     for (int column = 0; column < smooth.X.cols(); ++column) {
       for (int row = 0; row < n; ++row) {
         X(row, destination + column) = smooth.X(row, column);
@@ -1219,6 +1245,11 @@ Rcpp::List full_cuda_ci_native_setup(
   penalty_blocks.attr("names") = penalty_names;
   shifts.attr("names") = Rcpp::CharacterVector(
     penalty_names.begin(), penalty_names.end());
+  if (profile != nullptr) {
+    profile->block_assembly_ms += profile_elapsed_ms(stage_started);
+  }
+
+  stage_started = std::chrono::steady_clock::now();
   Rcpp::NumericMatrix gram_matrix(coefficient_count, coefficient_count);
   const char upper = 'U';
   const char transpose = 'T';
@@ -1232,15 +1263,23 @@ Rcpp::List full_cuda_ci_native_setup(
       gram_matrix(row, column) = gram_matrix(column, row);
     }
   }
+  if (profile != nullptr) {
+    profile->gram_ms += profile_elapsed_ms(stage_started);
+  }
 
+  stage_started = std::chrono::steady_clock::now();
   const std::string fingerprint_payload =
     input_fingerprint_payload(conditioning);
   const std::string semantic_fingerprint =
     full_cuda_ci_sha256_utf8(fingerprint_payload);
   const std::string formula_class = conditioning_size <= 2
     ? "full-smooth" : "additive-smooth";
+  if (profile != nullptr) {
+    profile->fingerprint_ms += profile_elapsed_ms(stage_started);
+  }
 
-  return Rcpp::List::create(
+  stage_started = std::chrono::steady_clock::now();
+  Rcpp::List result = Rcpp::List::create(
     Rcpp::Named("schema_version") = kSchemaVersion,
     Rcpp::Named("semantic_version") = kSemanticVersion,
     Rcpp::Named("semantic_fingerprint") = semantic_fingerprint,
@@ -1267,13 +1306,118 @@ Rcpp::List full_cuda_ci_native_setup(
         "mgcv-1.9-1-Rlanczos-QT-LINPACK-constraint-v1"
     )
   );
+  if (profile != nullptr) {
+    profile->setup_packaging_ms += profile_elapsed_ms(stage_started);
+  }
+  return result;
+}
+
+}  // namespace
+
+Rcpp::List full_cuda_ci_native_setup(
+    const Rcpp::NumericMatrix& conditioning,
+    NativeSetupProfile* profile) {
+  auto stage_started = std::chrono::steady_clock::now();
+  const int conditioning_size = conditioning.ncol();
+  validate_native_conditioning(conditioning);
+  if (profile != nullptr) {
+    profile->input_validation_ms += profile_elapsed_ms(stage_started);
+  }
+
+  stage_started = std::chrono::steady_clock::now();
+  std::vector<SmoothSetup> smooths;
+  if (conditioning_size <= 2) {
+    std::vector<int> columns(static_cast<std::size_t>(conditioning_size));
+    for (int column = 0; column < conditioning_size; ++column) {
+      columns[static_cast<std::size_t>(column)] = column;
+    }
+    const int basis_dimension = conditioning_size == 1 ? 10 : 30;
+    smooths.push_back(build_smooth(conditioning, columns, basis_dimension));
+  } else {
+    for (int column = 0; column < conditioning_size; ++column) {
+      smooths.push_back(build_smooth(conditioning, {column}, 10));
+    }
+  }
+  if (profile != nullptr) {
+    profile->smooth_build_ms += profile_elapsed_ms(stage_started);
+  }
+
+  std::vector<const SmoothSetup*> smooth_pointers;
+  smooth_pointers.reserve(smooths.size());
+  for (const SmoothSetup& smooth : smooths) {
+    smooth_pointers.push_back(&smooth);
+  }
+  return assemble_native_setup(conditioning, smooth_pointers, profile);
+}
+
+std::shared_ptr<const NativeUnivariateSmooth>
+full_cuda_ci_native_univariate_smooth(
+    const Rcpp::NumericMatrix& data,
+    int source_column,
+    NativeSetupProfile* profile) {
+  auto stage_started = std::chrono::steady_clock::now();
+  if (data.nrow() <= 0 || source_column < 0 || source_column >= data.ncol()) {
+    Rcpp::stop("native univariate smooth source is invalid");
+  }
+  for (int row = 0; row < data.nrow(); ++row) {
+    if (!std::isfinite(data(row, source_column))) {
+      Rcpp::stop("native univariate smooth data must be finite");
+    }
+  }
+  if (profile != nullptr) {
+    profile->input_validation_ms += profile_elapsed_ms(stage_started);
+  }
+
+  stage_started = std::chrono::steady_clock::now();
+  SmoothSetup smooth = build_smooth(data, {source_column}, 10);
+  if (profile != nullptr) {
+    profile->smooth_build_ms += profile_elapsed_ms(stage_started);
+  }
+  return std::make_shared<const NativeUnivariateSmooth>(
+    source_column, std::move(smooth));
+}
+
+Rcpp::List full_cuda_ci_native_additive_setup(
+    const Rcpp::NumericMatrix& conditioning,
+    const std::vector<int>& source_columns,
+    const std::vector<std::shared_ptr<const NativeUnivariateSmooth>>& smooths,
+    NativeSetupProfile* profile) {
+  auto stage_started = std::chrono::steady_clock::now();
+  validate_native_conditioning(conditioning);
+  const int conditioning_size = conditioning.ncol();
+  if (conditioning_size <= 2 ||
+      source_columns.size() != static_cast<std::size_t>(conditioning_size) ||
+      smooths.size() != static_cast<std::size_t>(conditioning_size)) {
+    Rcpp::stop("native additive smooth primitive set is malformed");
+  }
+  for (int index = 0; index < conditioning_size; ++index) {
+    const std::shared_ptr<const NativeUnivariateSmooth>& smooth =
+      smooths[static_cast<std::size_t>(index)];
+    if (!smooth || smooth->source_column !=
+          source_columns[static_cast<std::size_t>(index)] ||
+        smooth->smooth.X.rows() != conditioning.nrow()) {
+      Rcpp::stop("native additive smooth primitive identity changed");
+    }
+  }
+  if (profile != nullptr) {
+    profile->input_validation_ms += profile_elapsed_ms(stage_started);
+  }
+
+  std::vector<const SmoothSetup*> smooth_pointers;
+  smooth_pointers.reserve(smooths.size());
+  for (const std::shared_ptr<const NativeUnivariateSmooth>& smooth : smooths) {
+    smooth_pointers.push_back(&smooth->smooth);
+  }
+  return assemble_native_setup(conditioning, smooth_pointers, profile);
 }
 
 Rcpp::List full_cuda_ci_native_geometry_prepare(
     const Rcpp::NumericMatrix& X_input,
     const Rcpp::List& penalty_blocks,
     const Rcpp::IntegerVector& penalty_offsets,
-    const Rcpp::IntegerVector& penalty_ranks) {
+    const Rcpp::IntegerVector& penalty_ranks,
+    NativeSetupProfile* profile) {
+  auto stage_started = std::chrono::steady_clock::now();
   const int n = X_input.nrow();
   const int coefficient_count = X_input.ncol();
   const int penalty_count = penalty_blocks.size();
@@ -1325,8 +1469,17 @@ Rcpp::List full_cuda_ci_native_geometry_prepare(
     offsets.push_back(offset);
     ranks.push_back(rank);
   }
+  if (profile != nullptr) {
+    profile->geometry_input_ms += profile_elapsed_ms(stage_started);
+  }
 
+  stage_started = std::chrono::steady_clock::now();
   PivotedQr qr = pivoted_qr(X);
+  if (profile != nullptr) {
+    profile->geometry_qr_ms += profile_elapsed_ms(stage_started);
+  }
+
+  stage_started = std::chrono::steady_clock::now();
   Rcpp::List roots(penalty_count);
   Rcpp::List matrices(penalty_count);
   Rcpp::CharacterVector names(penalty_count);
@@ -1355,6 +1508,11 @@ Rcpp::List full_cuda_ci_native_geometry_prepare(
   }
   roots.attr("names") = names;
   matrices.attr("names") = names;
+  if (profile != nullptr) {
+    profile->geometry_penalty_ms += profile_elapsed_ms(stage_started);
+  }
+
+  stage_started = std::chrono::steady_clock::now();
   const std::vector<double> initial_sp = initial_smoothing_parameters(
     X, penalties, offsets);
   std::vector<double> initial_log_sp(initial_sp.size(), 0.0);
@@ -1362,8 +1520,12 @@ Rcpp::List full_cuda_ci_native_geometry_prepare(
                  initial_log_sp.begin(), [](double value) {
                    return std::log(value);
                  });
+  if (profile != nullptr) {
+    profile->geometry_initial_sp_ms += profile_elapsed_ms(stage_started);
+  }
 
-  return Rcpp::List::create(
+  stage_started = std::chrono::steady_clock::now();
+  Rcpp::List result = Rcpp::List::create(
     Rcpp::Named("schema_version") = "full-cuda-ci-native-geometry-v1",
     Rcpp::Named("magic_q") = to_rcpp(qr.Q),
     Rcpp::Named("magic_qr_packed") = to_rcpp(qr.packed),
@@ -1383,6 +1545,10 @@ Rcpp::List full_cuda_ci_native_geometry_prepare(
       Rcpp::Named("native_initial_sp_count") = 1
     )
   );
+  if (profile != nullptr) {
+    profile->geometry_packaging_ms += profile_elapsed_ms(stage_started);
+  }
+  return result;
 }
 
 }  // namespace fastkpc

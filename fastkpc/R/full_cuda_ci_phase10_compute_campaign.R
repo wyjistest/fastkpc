@@ -424,7 +424,16 @@ fastkpc_full_cuda_phase10_validate_compute_warm_evidence <- function(evidence) {
 
 fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
   timing_fields <- c(
-    "native_setup_ms", "native_setup_device_rehydrate_ms",
+    "native_setup_ms", "native_setup_conditioning_copy_ms",
+    "native_setup_input_validation_ms", "native_setup_smooth_build_ms",
+    "native_setup_block_assembly_ms", "native_setup_gram_ms",
+    "native_setup_fingerprint_ms", "native_setup_result_packaging_ms",
+    "native_setup_geometry_input_ms", "native_setup_geometry_qr_ms",
+    "native_setup_geometry_penalty_ms",
+    "native_setup_geometry_initial_sp_ms",
+    "native_setup_geometry_packaging_ms", "native_setup_fixed_sp_h2d_ms",
+    "native_setup_single_penalty_geometry_ms",
+    "native_setup_context_overhead_ms", "native_setup_device_rehydrate_ms",
     "cuda_optimizer_host_ms",
     "cuda_single_penalty_optimizer_host_ms",
     "cuda_multi_penalty_optimizer_host_ms",
@@ -446,6 +455,11 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "native_setup_host_cache_eviction_count",
     "native_setup_host_cache_peak_entries",
     "native_setup_device_rehydrate_count", "unique_target_key_count",
+    "native_setup_univariate_primitive_request_count",
+    "native_setup_univariate_primitive_hit_count",
+    "native_setup_univariate_primitive_build_count",
+    "native_setup_univariate_primitive_cache_capacity",
+    "native_setup_univariate_primitive_cache_peak_entries",
     "result_cache_request_count", "result_cache_hit_count",
     "result_cache_miss_count", "result_cache_insert_count",
     "result_cache_eviction_count",
@@ -504,6 +518,13 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
           counters[["native_setup_host_cache_hit_count"]] &&
       counters[["native_setup_device_rehydrate_count"]] ==
         counters[["native_setup_host_cache_hit_count"]] &&
+      counters[["native_setup_univariate_primitive_request_count"]] ==
+        counters[["native_setup_univariate_primitive_hit_count"]] +
+          counters[["native_setup_univariate_primitive_build_count"]] &&
+      counters[["native_setup_univariate_primitive_build_count"]] ==
+        counters[["native_setup_univariate_primitive_cache_peak_entries"]] &&
+      counters[["native_setup_univariate_primitive_build_count"]] <=
+        counters[["native_setup_univariate_primitive_cache_capacity"]] &&
       counters[["native_setup_host_cache_peak_entries"]] <=
         counters[["native_setup_host_cache_capacity"]] &&
       counters[["unique_target_key_count"]] <=
@@ -538,10 +559,26 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "Phase 10 fresh-data compute profile is malformed"
   )
   list(
-    schema_version = "full-cuda-ci-compute-profile-v2",
+    schema_version = "full-cuda-ci-compute-profile-v3",
     stage_timing = data.frame(
       stage = c(
-        "native_setup", "native_setup_device_rehydrate",
+        "native_setup",
+        "native_setup_conditioning_copy_nested",
+        "native_setup_input_validation_nested",
+        "native_setup_smooth_build_nested",
+        "native_setup_block_assembly_nested",
+        "native_setup_gram_nested",
+        "native_setup_fingerprint_nested",
+        "native_setup_result_packaging_nested",
+        "native_setup_geometry_input_nested",
+        "native_setup_geometry_qr_nested",
+        "native_setup_geometry_penalty_nested",
+        "native_setup_geometry_initial_sp_nested",
+        "native_setup_geometry_packaging_nested",
+        "native_setup_fixed_sp_h2d_nested",
+        "native_setup_single_penalty_geometry_nested",
+        "native_setup_context_overhead_nested",
+        "native_setup_device_rehydrate",
         "optimizer_total_host_boundary",
         "optimizer_single_host", "optimizer_single_cuda_nested",
         "optimizer_multi_host", "optimizer_multi_prepared_build_nested",
@@ -553,6 +590,21 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
       ),
       elapsed_ms = c(
         timings[["native_setup_ms"]],
+        timings[["native_setup_conditioning_copy_ms"]],
+        timings[["native_setup_input_validation_ms"]],
+        timings[["native_setup_smooth_build_ms"]],
+        timings[["native_setup_block_assembly_ms"]],
+        timings[["native_setup_gram_ms"]],
+        timings[["native_setup_fingerprint_ms"]],
+        timings[["native_setup_result_packaging_ms"]],
+        timings[["native_setup_geometry_input_ms"]],
+        timings[["native_setup_geometry_qr_ms"]],
+        timings[["native_setup_geometry_penalty_ms"]],
+        timings[["native_setup_geometry_initial_sp_ms"]],
+        timings[["native_setup_geometry_packaging_ms"]],
+        timings[["native_setup_fixed_sp_h2d_ms"]],
+        timings[["native_setup_single_penalty_geometry_ms"]],
+        timings[["native_setup_context_overhead_ms"]],
         timings[["native_setup_device_rehydrate_ms"]],
         timings[["cuda_optimizer_host_ms"]],
         timings[["cuda_single_penalty_optimizer_host_ms"]],

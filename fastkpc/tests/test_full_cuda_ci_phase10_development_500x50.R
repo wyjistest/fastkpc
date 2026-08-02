@@ -84,6 +84,13 @@ assert_true(
     summary$target_cache_dataset_warm_start_entries == 0L &&
     summary$result_cache_preexisting_hit_count == 0L &&
     summary$target_cache_preexisting_hit_count == 0L &&
+    summary$native_setup_univariate_primitive_request_count ==
+      summary$native_setup_univariate_primitive_hit_count +
+        summary$native_setup_univariate_primitive_build_count &&
+    summary$native_setup_univariate_primitive_build_count ==
+      summary$native_setup_univariate_primitive_cache_peak_entries &&
+    summary$native_setup_univariate_primitive_build_count <= 50L &&
+    summary$native_setup_univariate_primitive_cache_capacity == 50L &&
     all(vapply(zero_fields, function(field) {
       identical(as.numeric(summary[[field]]), 0)
     }, logical(1L))),

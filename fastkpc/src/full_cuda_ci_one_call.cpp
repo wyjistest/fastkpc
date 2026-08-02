@@ -270,6 +270,11 @@ struct OneCallDiagnostics {
   int native_setup_host_cache_eviction_count = 0;
   int native_setup_host_cache_peak_entries = 0;
   int native_setup_device_rehydrate_count = 0;
+  int native_setup_univariate_primitive_request_count = 0;
+  int native_setup_univariate_primitive_hit_count = 0;
+  int native_setup_univariate_primitive_build_count = 0;
+  int native_setup_univariate_primitive_cache_capacity = 0;
+  int native_setup_univariate_primitive_cache_peak_entries = 0;
   int cuda_single_penalty_target_count = 0;
   int cuda_multi_penalty_target_count = 0;
   int cuda_single_penalty_optimizer_setup_count = 0;
@@ -325,6 +330,21 @@ struct OneCallDiagnostics {
   std::size_t component_d2h_bytes = 0;
   std::size_t compact_result_d2h_bytes = 0;
   double native_setup_ms = 0.0;
+  double native_setup_conditioning_copy_ms = 0.0;
+  double native_setup_input_validation_ms = 0.0;
+  double native_setup_smooth_build_ms = 0.0;
+  double native_setup_block_assembly_ms = 0.0;
+  double native_setup_gram_ms = 0.0;
+  double native_setup_fingerprint_ms = 0.0;
+  double native_setup_result_packaging_ms = 0.0;
+  double native_setup_geometry_input_ms = 0.0;
+  double native_setup_geometry_qr_ms = 0.0;
+  double native_setup_geometry_penalty_ms = 0.0;
+  double native_setup_geometry_initial_sp_ms = 0.0;
+  double native_setup_geometry_packaging_ms = 0.0;
+  double native_setup_fixed_sp_h2d_ms = 0.0;
+  double native_setup_single_penalty_geometry_ms = 0.0;
+  double native_setup_context_overhead_ms = 0.0;
   double native_setup_device_rehydrate_ms = 0.0;
   double cuda_optimizer_host_ms = 0.0;
   double cuda_single_penalty_optimizer_host_ms = 0.0;
@@ -915,21 +935,56 @@ std::shared_ptr<NativeSetupContext> build_native_context(
     const std::string& dataset,
     const std::vector<int>& conditioning_set,
     const std::shared_ptr<CudaRuntimeContext>& runtime,
-    OneCallDiagnostics* diagnostics) {
+    OneCallDiagnostics* diagnostics,
+    std::vector<std::shared_ptr<const NativeUnivariateSmooth>>*
+      univariate_smooths) {
   const auto started = std::chrono::steady_clock::now();
+  require(univariate_smooths != nullptr &&
+            univariate_smooths->size() ==
+              static_cast<std::size_t>(data.ncol()),
+          "native univariate smooth cache is malformed");
+  auto stage_started = std::chrono::steady_clock::now();
   Rcpp::NumericMatrix conditioning(data.nrow(), conditioning_set.size());
   for (int column = 0; column < conditioning.ncol(); ++column) {
     const int source = conditioning_set[static_cast<std::size_t>(column)];
+    require(source >= 0 && source < data.ncol(),
+            "native conditioning source is out of range");
     std::copy(data.begin() + static_cast<std::ptrdiff_t>(source) * data.nrow(),
               data.begin() + static_cast<std::ptrdiff_t>(source + 1) * data.nrow(),
               conditioning.begin() +
                 static_cast<std::ptrdiff_t>(column) * data.nrow());
   }
+  const double conditioning_copy_ms = elapsed_ms(stage_started);
   auto context = std::make_shared<NativeSetupContext>();
   context->dataset_key = dataset;
   context->prepared_key = prepared_key(dataset, conditioning_set);
   context->conditioning_set = conditioning_set;
-  context->setup = full_cuda_ci_native_setup(conditioning);
+  NativeSetupProfile setup_profile;
+  if (conditioning_set.size() > 2U) {
+    std::vector<std::shared_ptr<const NativeUnivariateSmooth>> smooths;
+    smooths.reserve(conditioning_set.size());
+    for (int source : conditioning_set) {
+      diagnostics->native_setup_univariate_primitive_request_count += 1;
+      std::shared_ptr<const NativeUnivariateSmooth>& cached =
+        (*univariate_smooths)[static_cast<std::size_t>(source)];
+      if (cached) {
+        diagnostics->native_setup_univariate_primitive_hit_count += 1;
+      } else {
+        cached = full_cuda_ci_native_univariate_smooth(
+          data, source, &setup_profile);
+        diagnostics->native_setup_univariate_primitive_build_count += 1;
+        diagnostics->native_setup_univariate_primitive_cache_peak_entries =
+          std::max(
+            diagnostics->native_setup_univariate_primitive_cache_peak_entries,
+            diagnostics->native_setup_univariate_primitive_build_count);
+      }
+      smooths.push_back(cached);
+    }
+    context->setup = full_cuda_ci_native_additive_setup(
+      conditioning, conditioning_set, smooths, &setup_profile);
+  } else {
+    context->setup = full_cuda_ci_native_setup(conditioning, &setup_profile);
+  }
   context->n = data.nrow();
   Rcpp::NumericMatrix X = context->setup["X"];
   Rcpp::List blocks = context->setup["penalty_blocks"];
@@ -937,15 +992,53 @@ std::shared_ptr<NativeSetupContext> build_native_context(
   Rcpp::IntegerVector ranks = context->setup["penalty_ranks"];
   context->coefficient_dim = X.ncol();
   context->penalty_count = blocks.size();
+  stage_started = std::chrono::steady_clock::now();
   context->geometry = full_cuda_ci_native_geometry_prepare(
-    X, blocks, offsets, ranks);
+    X, blocks, offsets, ranks, &setup_profile);
+  const double geometry_ms = elapsed_ms(stage_started);
+  stage_started = std::chrono::steady_clock::now();
   context->fixed_sp = create_fixed_sp_handle(runtime, dataset, context);
+  const double fixed_sp_h2d_ms = elapsed_ms(stage_started);
+  double single_penalty_geometry_ms = 0.0;
   if (context->penalty_count == 1) {
+    stage_started = std::chrono::steady_clock::now();
     context->single_penalty.reset(
       new SinglePenaltyGeometry(prepare_single_penalty_geometry(context)));
+    single_penalty_geometry_ms = elapsed_ms(stage_started);
   }
+  const double total_ms = elapsed_ms(started);
+  const double setup_profile_ms =
+    setup_profile.input_validation_ms + setup_profile.smooth_build_ms +
+    setup_profile.block_assembly_ms + setup_profile.gram_ms +
+    setup_profile.fingerprint_ms + setup_profile.setup_packaging_ms;
+  const double accounted_ms = conditioning_copy_ms + setup_profile_ms +
+    geometry_ms + fixed_sp_h2d_ms + single_penalty_geometry_ms;
   diagnostics->native_setup_count += 1;
-  diagnostics->native_setup_ms += elapsed_ms(started);
+  diagnostics->native_setup_ms += total_ms;
+  diagnostics->native_setup_conditioning_copy_ms += conditioning_copy_ms;
+  diagnostics->native_setup_input_validation_ms +=
+    setup_profile.input_validation_ms;
+  diagnostics->native_setup_smooth_build_ms += setup_profile.smooth_build_ms;
+  diagnostics->native_setup_block_assembly_ms +=
+    setup_profile.block_assembly_ms;
+  diagnostics->native_setup_gram_ms += setup_profile.gram_ms;
+  diagnostics->native_setup_fingerprint_ms += setup_profile.fingerprint_ms;
+  diagnostics->native_setup_result_packaging_ms +=
+    setup_profile.setup_packaging_ms;
+  diagnostics->native_setup_geometry_input_ms +=
+    setup_profile.geometry_input_ms;
+  diagnostics->native_setup_geometry_qr_ms += setup_profile.geometry_qr_ms;
+  diagnostics->native_setup_geometry_penalty_ms +=
+    setup_profile.geometry_penalty_ms;
+  diagnostics->native_setup_geometry_initial_sp_ms +=
+    setup_profile.geometry_initial_sp_ms;
+  diagnostics->native_setup_geometry_packaging_ms +=
+    setup_profile.geometry_packaging_ms;
+  diagnostics->native_setup_fixed_sp_h2d_ms += fixed_sp_h2d_ms;
+  diagnostics->native_setup_single_penalty_geometry_ms +=
+    single_penalty_geometry_ms;
+  diagnostics->native_setup_context_overhead_ms +=
+    std::max(0.0, total_ms - accounted_ms);
   return context;
 }
 
@@ -1020,7 +1113,13 @@ class NativeSetupCache {
       : data_(data),
         dataset_(std::move(dataset)),
         runtime_(std::move(runtime)),
-        diagnostics_(diagnostics) {}
+        diagnostics_(diagnostics),
+        univariate_smooths_(static_cast<std::size_t>(data.ncol())) {
+    require(diagnostics_ != nullptr,
+            "native setup diagnostics are missing");
+    diagnostics_->native_setup_univariate_primitive_cache_capacity =
+      data.ncol();
+  }
 
   std::shared_ptr<NativeSetupContext> get(
       const std::vector<int>& conditioning_set) {
@@ -1066,7 +1165,8 @@ class NativeSetupCache {
       evict_host_one();
     }
     std::shared_ptr<NativeSetupContext> context = build_native_context(
-      data_, dataset_, conditioning_set, runtime_, diagnostics_);
+      data_, dataset_, conditioning_set, runtime_, diagnostics_,
+      &univariate_smooths_);
     const bool single_penalty = context->penalty_count == 1;
     std::list<std::string>& order = single_penalty ?
       single_penalty_order_ : multi_penalty_order_;
@@ -1098,6 +1198,7 @@ class NativeSetupCache {
     live_conditioning_keys_.clear();
     host_entries_.clear();
     host_order_.clear();
+    univariate_smooths_.clear();
   }
 
   ~NativeSetupCache() {
@@ -1163,6 +1264,8 @@ class NativeSetupCache {
   std::list<std::string> multi_penalty_order_;
   std::unordered_map<std::string, Entry> entries_;
   std::unordered_set<std::string> live_conditioning_keys_;
+  std::vector<std::shared_ptr<const NativeUnivariateSmooth>>
+    univariate_smooths_;
   std::list<std::string> host_order_;
   std::unordered_map<std::string, HostEntry> host_entries_;
 };
@@ -2469,6 +2572,13 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
             physical_prepared_s_key_count >= unique_prepared_s_key_count &&
             diagnostics.physical_residual_fit_count >=
               unique_residual_key_count &&
+            diagnostics.native_setup_univariate_primitive_request_count ==
+              diagnostics.native_setup_univariate_primitive_hit_count +
+                diagnostics.native_setup_univariate_primitive_build_count &&
+            diagnostics.native_setup_univariate_primitive_build_count ==
+              diagnostics.native_setup_univariate_primitive_cache_peak_entries &&
+            diagnostics.native_setup_univariate_primitive_build_count <=
+              diagnostics.native_setup_univariate_primitive_cache_capacity &&
             diagnostics.cuda_multi_penalty_prepared_build_count ==
               diagnostics.cuda_multi_penalty_prepared_release_count &&
             diagnostics.cuda_multi_penalty_prepared_target_capacity_peak <=
@@ -2608,6 +2718,16 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.native_setup_host_cache_peak_entries,
       Rcpp::Named("native_setup_device_rehydrate_count") =
         diagnostics.native_setup_device_rehydrate_count,
+      Rcpp::Named("native_setup_univariate_primitive_request_count") =
+        diagnostics.native_setup_univariate_primitive_request_count,
+      Rcpp::Named("native_setup_univariate_primitive_hit_count") =
+        diagnostics.native_setup_univariate_primitive_hit_count,
+      Rcpp::Named("native_setup_univariate_primitive_build_count") =
+        diagnostics.native_setup_univariate_primitive_build_count,
+      Rcpp::Named("native_setup_univariate_primitive_cache_capacity") =
+        diagnostics.native_setup_univariate_primitive_cache_capacity,
+      Rcpp::Named("native_setup_univariate_primitive_cache_peak_entries") =
+        diagnostics.native_setup_univariate_primitive_cache_peak_entries,
       Rcpp::Named("component_cache_capacity") =
         kReferenceComponentCapacity,
       Rcpp::Named("component_cache_warm_start_entries") = 0,
@@ -2672,6 +2792,35 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
       Rcpp::Named("unknown_fallback_count") = 0,
       Rcpp::Named("approximate_backend_count") = 0,
       Rcpp::Named("native_setup_ms") = diagnostics.native_setup_ms,
+      Rcpp::Named("native_setup_conditioning_copy_ms") =
+        diagnostics.native_setup_conditioning_copy_ms,
+      Rcpp::Named("native_setup_input_validation_ms") =
+        diagnostics.native_setup_input_validation_ms,
+      Rcpp::Named("native_setup_smooth_build_ms") =
+        diagnostics.native_setup_smooth_build_ms,
+      Rcpp::Named("native_setup_block_assembly_ms") =
+        diagnostics.native_setup_block_assembly_ms,
+      Rcpp::Named("native_setup_gram_ms") = diagnostics.native_setup_gram_ms,
+      Rcpp::Named("native_setup_fingerprint_ms") =
+        diagnostics.native_setup_fingerprint_ms,
+      Rcpp::Named("native_setup_result_packaging_ms") =
+        diagnostics.native_setup_result_packaging_ms,
+      Rcpp::Named("native_setup_geometry_input_ms") =
+        diagnostics.native_setup_geometry_input_ms,
+      Rcpp::Named("native_setup_geometry_qr_ms") =
+        diagnostics.native_setup_geometry_qr_ms,
+      Rcpp::Named("native_setup_geometry_penalty_ms") =
+        diagnostics.native_setup_geometry_penalty_ms,
+      Rcpp::Named("native_setup_geometry_initial_sp_ms") =
+        diagnostics.native_setup_geometry_initial_sp_ms,
+      Rcpp::Named("native_setup_geometry_packaging_ms") =
+        diagnostics.native_setup_geometry_packaging_ms,
+      Rcpp::Named("native_setup_fixed_sp_h2d_ms") =
+        diagnostics.native_setup_fixed_sp_h2d_ms,
+      Rcpp::Named("native_setup_single_penalty_geometry_ms") =
+        diagnostics.native_setup_single_penalty_geometry_ms,
+      Rcpp::Named("native_setup_context_overhead_ms") =
+        diagnostics.native_setup_context_overhead_ms,
       Rcpp::Named("native_setup_device_rehydrate_ms") =
         diagnostics.native_setup_device_rehydrate_ms,
       Rcpp::Named("cuda_optimizer_host_ms") =
