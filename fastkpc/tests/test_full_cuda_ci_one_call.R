@@ -1,4 +1,5 @@
 source("fastkpc/R/fast_kpc.R")
+source("fastkpc/R/full_cuda_ci_phase10_compute_campaign.R")
 
 fail <- function(message) stop(message, call. = FALSE)
 assert_true <- function(value, message) if (!isTRUE(value)) fail(message)
@@ -182,16 +183,27 @@ multi_reference <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
   trace_level = "logical",
   dcov_batch = "round"
 )
-multi_candidate <- precision_run_skeleton_full_cuda_native(
-  data = multi_data,
-  alpha = 0.1,
-  max_conditioning_size = 3L,
-  index = 1,
-  numCol = 35L,
-  trace_level = "logical",
-  compatible_cuda_strict = TRUE
+trace_environment <- "FASTKPC_PHASE10_DECOMPOSITION_TRACE_CAPACITY"
+assert_true(
+  Sys.getenv(trace_environment, unset = "") %in% c("", "0"),
+  "Phase 9 focused trace environment must start disabled"
+)
+Sys.setenv(FASTKPC_PHASE10_DECOMPOSITION_TRACE_CAPACITY = "512")
+multi_candidate <- tryCatch(
+  precision_run_skeleton_full_cuda_native(
+    data = multi_data,
+    alpha = 0.1,
+    max_conditioning_size = 3L,
+    index = 1,
+    numCol = 35L,
+    trace_level = "logical",
+    compatible_cuda_strict = TRUE
+  ),
+  finally = Sys.unsetenv(trace_environment)
 )
 multi_summary <- multi_candidate$summary
+multi_reuse_profile <-
+  fastkpc_full_cuda_phase10_decomposition_reuse_profile(multi_summary)
 assert_true(
   length(multi_candidate$n.edgetests) == 4L &&
     multi_summary$cuda_multi_penalty_target_count > 0L &&
@@ -222,6 +234,22 @@ assert_true(
     multi_summary$cuda_multi_penalty_stable_bidiagonal_reduction_cycles > 0 &&
     multi_summary$cuda_multi_penalty_hessian_eigensolver_count ==
       multi_summary$cuda_multi_penalty_optimizer_iteration_sum &&
+    identical(
+      multi_reuse_profile$schema_version,
+      "full-cuda-ci-decomposition-reuse-profile-v1"
+    ) &&
+    isTRUE(multi_summary[[
+      "cuda_multi_penalty_decomposition_trace_enabled"
+    ]]) &&
+    multi_summary$cuda_multi_penalty_decomposition_request_count ==
+      multi_summary$cuda_multi_penalty_decomposition_stored_count &&
+    multi_summary[[
+      "cuda_multi_penalty_decomposition_trace_overflow_count"
+    ]] == 0L &&
+    multi_summary[[
+      "cuda_multi_penalty_decomposition_route_mismatch_count"
+    ]] == 0L &&
+    multi_summary$cuda_multi_penalty_decomposition_reuse_count > 0L &&
     identical(multi_candidate$adjacency, multi_reference$adjacency) &&
     identical(normalize_sepsets(multi_candidate$sepsets),
               normalize_sepsets(multi_reference$sepsets)) &&

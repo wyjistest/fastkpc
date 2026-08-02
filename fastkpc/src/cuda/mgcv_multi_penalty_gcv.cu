@@ -11,11 +11,15 @@
 #include <math_constants.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <exception>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -68,6 +72,32 @@ constexpr double kTerminalBoundaryTieCondition = 8388608.0;
 constexpr double kTerminalBoundaryOverrideCondition = 33554432.0;
 constexpr double kTerminalBoundaryTieRelativeTolerance =
   1e-10;
+
+enum DeviceDecompositionTraceFlag : unsigned int {
+  kDecompositionTraceInitial = 1U << 0,
+  kDecompositionTraceNewtonTrial = 1U << 1,
+  kDecompositionTraceSteepestTrial = 1U << 2,
+  kDecompositionTraceStepHalving = 1U << 3,
+  kDecompositionTraceBoundaryProbe = 1U << 4,
+  kDecompositionTraceTerminalConfirmation = 1U << 5,
+  kDecompositionTraceStabilityReplay = 1U << 6,
+  kDecompositionTraceSelectedFit = 1U << 7,
+  kDecompositionTraceCompleteCapability = 1U << 8,
+  kDecompositionTraceForceStableSvd = 1U << 9
+};
+
+constexpr std::array<unsigned int,
+                     kMultiPenaltyGcvDecompositionTraceStageCount>
+  kDecompositionTraceStageFlags = {{
+    kDecompositionTraceInitial,
+    kDecompositionTraceNewtonTrial,
+    kDecompositionTraceSteepestTrial,
+    kDecompositionTraceStepHalving,
+    kDecompositionTraceBoundaryProbe,
+    kDecompositionTraceTerminalConfirmation,
+    kDecompositionTraceStabilityReplay,
+    kDecompositionTraceSelectedFit
+  }};
 
 void check_cuda(cudaError_t status, const char* stage) {
   if (status != cudaSuccess) {
@@ -438,6 +468,15 @@ struct DevicePhaseTiming {
   int stable_svd_evaluation_count;
 };
 
+struct DeviceDecompositionTraceRecord {
+  unsigned long long
+    log_sp_bits[kMultiPenaltyGcvMaximumPenaltyCount];
+  int target;
+  int iteration;
+  unsigned int flags;
+  int route;
+};
+
 struct DeviceOptimizerState {
   DeviceTargetEvaluation current;
   DeviceTargetEvaluation trial;
@@ -512,6 +551,172 @@ struct DeviceOptimizerState {
   DevicePhaseTiming discarded_phase_timing;
   DevicePhaseTiming terminal_boundary_confirmation_phase_timing;
 };
+
+struct HostDecompositionTraceKey {
+  std::array<std::uint64_t, kMultiPenaltyGcvMaximumPenaltyCount>
+    log_sp_bits{};
+  unsigned int capability_flags = 0;
+
+  bool operator<(const HostDecompositionTraceKey& other) const {
+    if (log_sp_bits != other.log_sp_bits) {
+      return log_sp_bits < other.log_sp_bits;
+    }
+    return capability_flags < other.capability_flags;
+  }
+};
+
+struct HostDecompositionTraceGroup {
+  std::uint64_t request_count = 0;
+  int route = kDecompositionUnknown;
+};
+
+using HostDecompositionTraceGroups =
+  std::map<HostDecompositionTraceKey, HostDecompositionTraceGroup>;
+
+HostDecompositionTraceKey decomposition_trace_key(
+    const DeviceDecompositionTraceRecord& record) {
+  HostDecompositionTraceKey key;
+  for (int penalty = 0;
+       penalty < kMultiPenaltyGcvMaximumPenaltyCount; ++penalty) {
+    key.log_sp_bits[static_cast<std::size_t>(penalty)] =
+      static_cast<std::uint64_t>(record.log_sp_bits[penalty]);
+  }
+  key.capability_flags = record.flags &
+    (kDecompositionTraceCompleteCapability |
+     kDecompositionTraceForceStableSvd);
+  return key;
+}
+
+void add_decomposition_trace_group(
+    HostDecompositionTraceGroups* groups,
+    const HostDecompositionTraceKey& key,
+    int route,
+    std::uint64_t* route_mismatch_count) {
+  auto inserted = groups->emplace(
+    key, HostDecompositionTraceGroup{1U, route});
+  if (inserted.second) return;
+  HostDecompositionTraceGroup& group = inserted.first->second;
+  group.request_count += 1U;
+  if (group.route != route) {
+    *route_mismatch_count += 1U;
+  }
+}
+
+std::uint64_t decomposition_trace_group_requests(
+    const HostDecompositionTraceGroups& groups) {
+  std::uint64_t count = 0;
+  for (const auto& entry : groups) count += entry.second.request_count;
+  return count;
+}
+
+void materialize_decomposition_trace_diagnostics(
+    const std::vector<DeviceDecompositionTraceRecord>& records,
+    std::uint64_t request_count,
+    std::uint64_t overflow_count,
+    int capacity_per_target,
+    MultiPenaltyGcvCudaDiagnostics* diagnostics) {
+  diagnostics->cuda_decomposition_trace_enabled = true;
+  diagnostics->cuda_decomposition_trace_capacity_per_target =
+    capacity_per_target;
+  diagnostics->cuda_decomposition_request_count = request_count;
+  diagnostics->cuda_decomposition_stored_count = records.size();
+  diagnostics->cuda_decomposition_trace_overflow_count = overflow_count;
+
+  HostDecompositionTraceGroups all_groups;
+  std::array<HostDecompositionTraceGroups,
+             kMultiPenaltyGcvDecompositionTraceStageCount> stage_groups;
+  std::array<HostDecompositionTraceGroups,
+             kMultiPenaltyGcvDecompositionTraceRouteCount> route_groups;
+  using IterationKey = std::pair<bool, int>;
+  std::map<IterationKey, HostDecompositionTraceGroups> iteration_groups;
+  std::uint64_t ignored_route_mismatch_count = 0;
+  for (const DeviceDecompositionTraceRecord& record : records) {
+    const HostDecompositionTraceKey key = decomposition_trace_key(record);
+    add_decomposition_trace_group(
+      &all_groups, key, record.route,
+      &diagnostics->cuda_decomposition_route_mismatch_count);
+    for (int stage = 0;
+         stage < kMultiPenaltyGcvDecompositionTraceStageCount; ++stage) {
+      if ((record.flags & kDecompositionTraceStageFlags[
+            static_cast<std::size_t>(stage)]) != 0U) {
+        add_decomposition_trace_group(
+          &stage_groups[static_cast<std::size_t>(stage)], key,
+          record.route,
+          &ignored_route_mismatch_count);
+      }
+    }
+    const int route = record.route >= kDecompositionUnknown &&
+        record.route <= kDecompositionStableSvd ?
+      record.route : kDecompositionUnknown;
+    add_decomposition_trace_group(
+      &route_groups[static_cast<std::size_t>(route)], key, route,
+      &ignored_route_mismatch_count);
+    if (record.iteration >= 0) {
+      const bool replay =
+        (record.flags & kDecompositionTraceStabilityReplay) != 0U;
+      add_decomposition_trace_group(
+        &iteration_groups[IterationKey{replay, record.iteration}], key,
+        record.route,
+        &ignored_route_mismatch_count);
+    }
+  }
+
+  diagnostics->cuda_decomposition_unique_key_count = all_groups.size();
+  diagnostics->cuda_decomposition_reuse_count =
+    records.size() - all_groups.size();
+  std::size_t maximum_group_size = 0;
+  for (const auto& entry : all_groups) {
+    maximum_group_size = std::max(
+      maximum_group_size,
+      static_cast<std::size_t>(entry.second.request_count));
+  }
+  diagnostics->cuda_decomposition_reuse_group_size_histogram.assign(
+    maximum_group_size + 1U, 0U);
+  for (const auto& entry : all_groups) {
+    diagnostics->cuda_decomposition_reuse_group_size_histogram[
+      static_cast<std::size_t>(entry.second.request_count)] += 1U;
+  }
+  for (int stage = 0;
+       stage < kMultiPenaltyGcvDecompositionTraceStageCount; ++stage) {
+    const HostDecompositionTraceGroups& groups =
+      stage_groups[static_cast<std::size_t>(stage)];
+    const std::uint64_t requests =
+      decomposition_trace_group_requests(groups);
+    diagnostics->cuda_decomposition_stage_request_count[
+      static_cast<std::size_t>(stage)] = requests;
+    diagnostics->cuda_decomposition_stage_unique_key_count[
+      static_cast<std::size_t>(stage)] = groups.size();
+    diagnostics->cuda_decomposition_stage_reuse_count[
+      static_cast<std::size_t>(stage)] = requests - groups.size();
+  }
+  for (int route = 0;
+       route < kMultiPenaltyGcvDecompositionTraceRouteCount; ++route) {
+    const HostDecompositionTraceGroups& groups =
+      route_groups[static_cast<std::size_t>(route)];
+    const std::uint64_t requests =
+      decomposition_trace_group_requests(groups);
+    diagnostics->cuda_decomposition_route_request_count[
+      static_cast<std::size_t>(route)] = requests;
+    diagnostics->cuda_decomposition_route_unique_key_count[
+      static_cast<std::size_t>(route)] = groups.size();
+    diagnostics->cuda_decomposition_route_reuse_count[
+      static_cast<std::size_t>(route)] = requests - groups.size();
+  }
+  diagnostics->cuda_decomposition_iteration_reuse.reserve(
+    iteration_groups.size());
+  for (const auto& entry : iteration_groups) {
+    const std::uint64_t requests =
+      decomposition_trace_group_requests(entry.second);
+    diagnostics->cuda_decomposition_iteration_reuse.push_back(
+      MultiPenaltyGcvCudaDecompositionIterationReuse{
+        entry.first.second,
+        entry.first.first,
+        requests,
+        entry.second.size(),
+        requests - entry.second.size()
+      });
+  }
+}
 
 __device__ bool requires_high_condition_stability_replay(
     const DeviceOptimizerState& state) {
@@ -795,7 +1000,13 @@ __device__ void evaluate_multi_penalty_target_device(
     bool complete_evaluation,
     DevicePhaseTiming* phase_timing,
     double rank_tolerance,
-    bool force_stable_svd = false) {
+    bool force_stable_svd = false,
+    DeviceDecompositionTraceRecord* decomposition_trace = nullptr,
+    unsigned int* decomposition_trace_counters = nullptr,
+    unsigned int decomposition_trace_capacity = 0U,
+    int trace_target = -1,
+    int trace_iteration = -1,
+    unsigned int trace_flags = 0U) {
   lapack312_multi::Workspace* decomposition = &workspace->decomposition;
   const int square = q * q;
   double* aggregate = decomposition->bidiagonal_vt;
@@ -880,6 +1091,34 @@ __device__ void evaluate_multi_penalty_target_device(
       clock64() - phase_started;
     phase_started = clock64();
   }
+  int decomposition_trace_slot = -1;
+  if (threadIdx.x == 0 && decomposition_trace != nullptr &&
+      decomposition_trace_counters != nullptr &&
+      decomposition_trace_capacity > 0U) {
+    const unsigned int slot = atomicAdd(decomposition_trace_counters, 1U);
+    if (slot < decomposition_trace_capacity) {
+      decomposition_trace_slot = static_cast<int>(slot);
+      DeviceDecompositionTraceRecord& record = decomposition_trace[slot];
+      for (int penalty = 0;
+           penalty < kMultiPenaltyGcvMaximumPenaltyCount; ++penalty) {
+        record.log_sp_bits[penalty] = penalty < penalty_count ?
+          static_cast<unsigned long long>(
+            __double_as_longlong(target_log_sp[penalty])) : 0ULL;
+      }
+      record.target = trace_target;
+      record.iteration = trace_iteration;
+      record.flags = trace_flags |
+        (complete_evaluation ?
+          kDecompositionTraceCompleteCapability : 0U) |
+        (force_stable_svd ? kDecompositionTraceForceStableSvd : 0U);
+      record.route = kDecompositionUnknown;
+    } else {
+      atomicAdd(decomposition_trace_counters + 1, 1U);
+    }
+  }
+  if (threadIdx.x == 0 && phase_timing != nullptr) {
+    phase_started = clock64();
+  }
   const int solver_info =
     lapack312_multi::small_dgesdd_left(
       rows, q, decomposition, complete_evaluation,
@@ -890,6 +1129,10 @@ __device__ void evaluate_multi_penalty_target_device(
     result->solver_info = solver_info;
     result->decomposition_route = decomposition->qr_basis_used != 0 ?
       kDecompositionGuardedQr : kDecompositionStableSvd;
+    if (decomposition_trace_slot >= 0) {
+      decomposition_trace[decomposition_trace_slot].route =
+        result->decomposition_route;
+    }
   }
   __syncthreads();
   if (threadIdx.x == 0 && phase_timing != nullptr) {
@@ -1330,7 +1573,10 @@ __global__ void optimize_multi_penalty_targets_kernel(
     int max_boundary_probes,
     double rank_tolerance,
     bool stability_replay,
-    bool force_stable_svd) {
+    bool force_stable_svd,
+    DeviceDecompositionTraceRecord* decomposition_trace,
+    unsigned int* decomposition_trace_counters,
+    unsigned int decomposition_trace_capacity) {
   const int target = blockIdx.x;
   if (target >= target_count) return;
   if (stability_replay &&
@@ -1363,6 +1609,8 @@ __global__ void optimize_multi_penalty_targets_kernel(
     requires_full_stability_replay(primary_states[target]);
   const bool target_force_stable_svd =
     force_stable_svd && !direct_newton_replay;
+  const unsigned int stability_trace_flag = stability_replay ?
+    kDecompositionTraceStabilityReplay : 0U;
   const double* target_y0 = y0 + static_cast<std::size_t>(q) * target;
   const double target_squared_norm = squared_norm[target];
 
@@ -1485,7 +1733,10 @@ __global__ void optimize_multi_penalty_targets_kernel(
     magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
     penalty_matrices, target_y0, target_squared_norm, state->log_sp,
     workspace, &state->current, n, q, penalty_count, true,
-    &state->phase_timing, rank_tolerance, target_force_stable_svd);
+    &state->phase_timing, rank_tolerance, target_force_stable_svd,
+    decomposition_trace, decomposition_trace_counters,
+    decomposition_trace_capacity, target, 0,
+    kDecompositionTraceInitial | stability_trace_flag);
   __syncthreads();
   if (threadIdx.x == 0) {
     state->score_calls = 1;
@@ -1544,7 +1795,14 @@ __global__ void optimize_multi_penalty_targets_kernel(
           penalty_matrices, target_y0, target_squared_norm,
           state->trial_log_sp, workspace, &state->trial, n, q,
           penalty_count, true, &state->phase_timing, rank_tolerance,
-          target_force_stable_svd);
+          target_force_stable_svd, decomposition_trace,
+          decomposition_trace_counters, decomposition_trace_capacity,
+          target, iteration,
+          (state->use_steepest_descent == 0 ?
+            kDecompositionTraceNewtonTrial :
+            kDecompositionTraceSteepestTrial) |
+            (trial_index > 1 ? kDecompositionTraceStepHalving : 0U) |
+            stability_trace_flag);
         __syncthreads();
         if (threadIdx.x == 0) {
           ++state->score_calls;
@@ -1816,7 +2074,10 @@ __global__ void optimize_multi_penalty_targets_kernel(
         penalty_matrices, target_y0, target_squared_norm,
         state->trial_log_sp, workspace, &state->trial, n, q,
         penalty_count, false, &state->phase_timing, rank_tolerance,
-        target_force_stable_svd);
+        target_force_stable_svd, decomposition_trace,
+        decomposition_trace_counters, decomposition_trace_capacity,
+        target, -1,
+        kDecompositionTraceBoundaryProbe | stability_trace_flag);
       __syncthreads();
       if (threadIdx.x == 0) {
         state->terminal_boundary_confirmation_pending = 0;
@@ -1853,7 +2114,11 @@ __global__ void optimize_multi_penalty_targets_kernel(
           penalty_matrices, target_y0, target_squared_norm, state->log_sp,
           workspace, &state->trial, n, q, penalty_count, true,
           &state->terminal_boundary_confirmation_phase_timing,
-          rank_tolerance, true);
+          rank_tolerance, true, decomposition_trace,
+          decomposition_trace_counters, decomposition_trace_capacity,
+          target, -1,
+          kDecompositionTraceTerminalConfirmation |
+            stability_trace_flag);
         __syncthreads();
         if (threadIdx.x == 0) {
           if (state->trial.solver_info != 0 ||
@@ -1876,7 +2141,11 @@ __global__ void optimize_multi_penalty_targets_kernel(
           state->trial_log_sp, workspace, &state->trial, n, q,
           penalty_count, true,
           &state->terminal_boundary_confirmation_phase_timing,
-          rank_tolerance, true);
+          rank_tolerance, true, decomposition_trace,
+          decomposition_trace_counters, decomposition_trace_capacity,
+          target, -1,
+          kDecompositionTraceTerminalConfirmation |
+            stability_trace_flag);
         __syncthreads();
         if (threadIdx.x == 0 &&
             (state->trial.solver_info != 0 ||
@@ -2072,7 +2341,10 @@ __global__ void optimize_multi_penalty_targets_kernel(
     magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
     penalty_matrices, target_y0, target_squared_norm, state->log_sp,
     workspace, &state->trial, n, q, penalty_count, true,
-    &state->phase_timing, rank_tolerance, target_force_stable_svd);
+    &state->phase_timing, rank_tolerance, target_force_stable_svd,
+    decomposition_trace, decomposition_trace_counters,
+    decomposition_trace_capacity, target, -1,
+    kDecompositionTraceSelectedFit | stability_trace_flag);
   __syncthreads();
   if (threadIdx.x == 0) {
     ++state->objective_calls;
@@ -2240,10 +2512,13 @@ class MultiPenaltyGcvCudaPrepared {
   DeviceBuffer<DeviceEvaluationWorkspace> d_workspaces;
   DeviceBuffer<DeviceOptimizerState> d_states;
   DeviceBuffer<DeviceOptimizerState> d_replay_states;
+  DeviceBuffer<DeviceDecompositionTraceRecord> d_decomposition_trace;
+  DeviceBuffer<unsigned int> d_decomposition_trace_counters;
   DeviceBuffer<double> d_coefficients;
   DeviceBuffer<double> d_fitted;
   DeviceBuffer<double> d_residuals;
   std::vector<DeviceOptimizerState> host_states;
+  int decomposition_trace_capacity_per_target = 0;
   MultiPenaltyGcvCudaPreparedInfo info;
   std::uint64_t generation = 0;
   bool residual_slot_leased = false;
@@ -2800,7 +3075,9 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
       control.boundary_probe_step <= 0.0 ||
       control.max_boundary_probes <= 0 ||
       !std::isfinite(control.rank_tolerance) ||
-      control.rank_tolerance <= 0.0 || control.rank_tolerance >= 1.0) {
+      control.rank_tolerance <= 0.0 || control.rank_tolerance >= 1.0 ||
+      control.decomposition_trace_capacity_per_target < 0 ||
+      control.decomposition_trace_capacity_per_target > 4096) {
     throw std::runtime_error(
       "multi-penalty CUDA optimizer inputs are invalid");
   }
@@ -2947,7 +3224,7 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
       gradient_tolerance_factor, control.max_step_halving,
       control.max_iterations, control.max_newton_step,
       control.boundary_probe_step, control.max_boundary_probes,
-      control.rank_tolerance, false, false);
+      control.rank_tolerance, false, false, nullptr, nullptr, 0U);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty optimizer batch kernel");
   optimize_multi_penalty_targets_kernel<<<
@@ -2959,7 +3236,8 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
       control.convergence_tolerance, gradient_tolerance_factor,
       control.max_step_halving, control.max_iterations,
       control.max_newton_step, control.boundary_probe_step,
-      control.max_boundary_probes, control.rank_tolerance, true, true);
+      control.max_boundary_probes, control.rank_tolerance, true, true,
+      nullptr, nullptr, 0U);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty stability replay kernel");
   diagnostics.cuda_stability_replay_kernel_launch_count = 1;
@@ -3495,6 +3773,39 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
     diagnostics.target_specific_log_sp = true;
     diagnostics.true_batched_kernel = true;
     diagnostics.normal_equations_used = false;
+    DeviceDecompositionTraceRecord* decomposition_trace = nullptr;
+    unsigned int* decomposition_trace_counters = nullptr;
+    unsigned int decomposition_trace_capacity = 0U;
+    // Zero capacity preserves the production allocation and synchronization path.
+    if (control.decomposition_trace_capacity_per_target > 0) {
+      const int requested_capacity =
+        control.decomposition_trace_capacity_per_target;
+      if (prepared->d_decomposition_trace.count() == 0U) {
+        prepared->d_decomposition_trace.allocate(
+          static_cast<std::size_t>(prepared->target_capacity) *
+            requested_capacity,
+          &diagnostics);
+        prepared->d_decomposition_trace_counters.allocate(2U, &diagnostics);
+        prepared->decomposition_trace_capacity_per_target =
+          requested_capacity;
+      } else if (prepared->decomposition_trace_capacity_per_target !=
+                   requested_capacity) {
+        throw std::runtime_error(
+          "persistent multi-penalty decomposition trace capacity changed");
+      }
+      decomposition_trace = prepared->d_decomposition_trace.get();
+      decomposition_trace_counters =
+        prepared->d_decomposition_trace_counters.get();
+      decomposition_trace_capacity = static_cast<unsigned int>(
+        static_cast<std::size_t>(target_count) * requested_capacity);
+      check_cuda(cudaMemsetAsync(
+        decomposition_trace_counters, 0, 2U * sizeof(unsigned int),
+        prepared->stream.get()),
+        "reset persistent multi-penalty decomposition trace counters");
+      diagnostics.cuda_decomposition_trace_enabled = true;
+      diagnostics.cuda_decomposition_trace_capacity_per_target =
+        requested_capacity;
+    }
     check_cuda(cudaMemcpyAsync(
       prepared->d_Y.get(), Y, y_count * sizeof(double),
       cudaMemcpyHostToDevice, prepared->stream.get()),
@@ -3529,7 +3840,9 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
         gradient_tolerance_factor,
         control.max_step_halving, control.max_iterations,
         control.max_newton_step, control.boundary_probe_step,
-        control.max_boundary_probes, control.rank_tolerance, false, false);
+        control.max_boundary_probes, control.rank_tolerance, false, false,
+        decomposition_trace, decomposition_trace_counters,
+        decomposition_trace_capacity);
     check_cuda(cudaGetLastError(),
                "launch persistent multi-penalty optimizer kernel");
     optimize_multi_penalty_targets_kernel<<<
@@ -3544,7 +3857,8 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
         gradient_tolerance_factor, control.max_step_halving,
         control.max_iterations, control.max_newton_step,
         control.boundary_probe_step, control.max_boundary_probes,
-        control.rank_tolerance, true, true);
+        control.rank_tolerance, true, true, decomposition_trace,
+        decomposition_trace_counters, decomposition_trace_capacity);
     check_cuda(cudaGetLastError(),
                "launch persistent multi-penalty stability replay kernel");
     diagnostics.cuda_stability_replay_kernel_launch_count = 1;
@@ -3590,8 +3904,42 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
       cudaMemcpyDeviceToHost, prepared->stream.get()),
       "download persistent multi-penalty optimizer status");
     diagnostics.d2h_copy_count = 1;
+    std::array<unsigned int, 2> host_trace_counters{{0U, 0U}};
+    if (decomposition_trace != nullptr) {
+      check_cuda(cudaMemcpyAsync(
+        host_trace_counters.data(), decomposition_trace_counters,
+        2U * sizeof(unsigned int), cudaMemcpyDeviceToHost,
+        prepared->stream.get()),
+        "download persistent multi-penalty decomposition trace counters");
+      diagnostics.d2h_copy_count += 1;
+    }
     check_cuda(cudaStreamSynchronize(prepared->stream.get()),
                "synchronize persistent multi-penalty batch");
+    if (decomposition_trace != nullptr) {
+      const std::uint64_t trace_requests = host_trace_counters[0];
+      const std::uint64_t trace_overflow = host_trace_counters[1];
+      const std::size_t trace_stored = static_cast<std::size_t>(std::min(
+        trace_requests,
+        static_cast<std::uint64_t>(decomposition_trace_capacity)));
+      if (trace_requests != trace_stored + trace_overflow) {
+        throw std::runtime_error(
+          "persistent multi-penalty decomposition trace accounting failed");
+      }
+      std::vector<DeviceDecompositionTraceRecord> host_trace(trace_stored);
+      if (!host_trace.empty()) {
+        check_cuda(cudaMemcpyAsync(
+          host_trace.data(), decomposition_trace,
+          host_trace.size() * sizeof(DeviceDecompositionTraceRecord),
+          cudaMemcpyDeviceToHost, prepared->stream.get()),
+          "download persistent multi-penalty decomposition trace");
+        diagnostics.d2h_copy_count += 1;
+        check_cuda(cudaStreamSynchronize(prepared->stream.get()),
+                   "synchronize persistent decomposition trace download");
+      }
+      materialize_decomposition_trace_diagnostics(
+        host_trace, trace_requests, trace_overflow,
+        control.decomposition_trace_capacity_per_target, &diagnostics);
+    }
     MultiPenaltyGcvCudaBatchResult result;
     result.optimization = materialize_optimizer_output(
       prepared->host_states.data(), n, q, penalty_count, target_count,

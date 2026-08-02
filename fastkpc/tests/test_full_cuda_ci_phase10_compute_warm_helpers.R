@@ -71,6 +71,22 @@ assert_true(
     all(is.finite(profile$physical_work$value)),
   "compute-warm profile must expose complete finite stage/work counters"
 )
+assert_true(
+  !isTRUE(evidence$result$summary[[
+    "cuda_multi_penalty_decomposition_trace_enabled"
+  ]]) &&
+    evidence$result$summary[[
+      "cuda_multi_penalty_decomposition_request_count"
+    ]] == 0L,
+  "formal-compatible compute-warm helpers must leave trace disabled"
+)
+assert_error(
+  fastkpc_full_cuda_phase10_decomposition_reuse_profile(
+    evidence$result$summary
+  ),
+  "Phase 10 exact decomposition reuse profile is malformed",
+  "decomposition reuse profile must reject a trace-free run"
+)
 
 tampered <- evidence
 tampered$cache_precondition$cache_epoch_after_reset <-

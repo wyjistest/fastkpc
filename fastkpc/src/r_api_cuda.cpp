@@ -7344,6 +7344,88 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
   }
   const fastkpc::MultiPenaltyGcvCudaDiagnostics& diagnostics =
     result.diagnostics;
+  const Rcpp::CharacterVector decomposition_stage_names =
+    Rcpp::CharacterVector::create(
+      "initial", "newton_trial", "steepest_descent_trial",
+      "step_halving", "boundary_probe", "terminal_confirmation",
+      "stability_replay", "selected_fit");
+  Rcpp::NumericVector decomposition_stage_requests(
+    fastkpc::kMultiPenaltyGcvDecompositionTraceStageCount);
+  Rcpp::NumericVector decomposition_stage_unique_keys(
+    fastkpc::kMultiPenaltyGcvDecompositionTraceStageCount);
+  Rcpp::NumericVector decomposition_stage_reuse(
+    fastkpc::kMultiPenaltyGcvDecompositionTraceStageCount);
+  for (int stage = 0;
+       stage < fastkpc::kMultiPenaltyGcvDecompositionTraceStageCount;
+       ++stage) {
+    const std::size_t index = static_cast<std::size_t>(stage);
+    decomposition_stage_requests[stage] = static_cast<double>(
+      diagnostics.cuda_decomposition_stage_request_count[index]);
+    decomposition_stage_unique_keys[stage] = static_cast<double>(
+      diagnostics.cuda_decomposition_stage_unique_key_count[index]);
+    decomposition_stage_reuse[stage] = static_cast<double>(
+      diagnostics.cuda_decomposition_stage_reuse_count[index]);
+  }
+  decomposition_stage_requests.attr("names") = decomposition_stage_names;
+  decomposition_stage_unique_keys.attr("names") = decomposition_stage_names;
+  decomposition_stage_reuse.attr("names") = decomposition_stage_names;
+  const Rcpp::CharacterVector decomposition_route_names =
+    Rcpp::CharacterVector::create("unknown", "guarded_qr", "stable_svd");
+  Rcpp::NumericVector decomposition_route_requests(
+    fastkpc::kMultiPenaltyGcvDecompositionTraceRouteCount);
+  Rcpp::NumericVector decomposition_route_unique_keys(
+    fastkpc::kMultiPenaltyGcvDecompositionTraceRouteCount);
+  Rcpp::NumericVector decomposition_route_reuse(
+    fastkpc::kMultiPenaltyGcvDecompositionTraceRouteCount);
+  for (int route = 0;
+       route < fastkpc::kMultiPenaltyGcvDecompositionTraceRouteCount;
+       ++route) {
+    const std::size_t index = static_cast<std::size_t>(route);
+    decomposition_route_requests[route] = static_cast<double>(
+      diagnostics.cuda_decomposition_route_request_count[index]);
+    decomposition_route_unique_keys[route] = static_cast<double>(
+      diagnostics.cuda_decomposition_route_unique_key_count[index]);
+    decomposition_route_reuse[route] = static_cast<double>(
+      diagnostics.cuda_decomposition_route_reuse_count[index]);
+  }
+  decomposition_route_requests.attr("names") = decomposition_route_names;
+  decomposition_route_unique_keys.attr("names") = decomposition_route_names;
+  decomposition_route_reuse.attr("names") = decomposition_route_names;
+  Rcpp::NumericVector decomposition_group_size_histogram(
+    diagnostics.cuda_decomposition_reuse_group_size_histogram.begin(),
+    diagnostics.cuda_decomposition_reuse_group_size_histogram.end());
+  const int decomposition_iteration_count = static_cast<int>(
+    diagnostics.cuda_decomposition_iteration_reuse.size());
+  Rcpp::IntegerVector decomposition_iteration(decomposition_iteration_count);
+  Rcpp::LogicalVector decomposition_iteration_replay(
+    decomposition_iteration_count);
+  Rcpp::NumericVector decomposition_iteration_requests(
+    decomposition_iteration_count);
+  Rcpp::NumericVector decomposition_iteration_unique_keys(
+    decomposition_iteration_count);
+  Rcpp::NumericVector decomposition_iteration_reuse(
+    decomposition_iteration_count);
+  for (int index = 0; index < decomposition_iteration_count; ++index) {
+    const auto& row = diagnostics.cuda_decomposition_iteration_reuse[
+      static_cast<std::size_t>(index)];
+    decomposition_iteration[index] = row.iteration;
+    decomposition_iteration_replay[index] = row.stability_replay;
+    decomposition_iteration_requests[index] =
+      static_cast<double>(row.request_count);
+    decomposition_iteration_unique_keys[index] =
+      static_cast<double>(row.unique_key_count);
+    decomposition_iteration_reuse[index] =
+      static_cast<double>(row.reuse_count);
+  }
+  const Rcpp::DataFrame decomposition_iteration_reuse_frame =
+    Rcpp::DataFrame::create(
+      Rcpp::Named("iteration") = decomposition_iteration,
+      Rcpp::Named("stability_replay") = decomposition_iteration_replay,
+      Rcpp::Named("request_count") = decomposition_iteration_requests,
+      Rcpp::Named("unique_key_count") =
+        decomposition_iteration_unique_keys,
+      Rcpp::Named("reuse_count") = decomposition_iteration_reuse,
+      Rcpp::Named("stringsAsFactors") = false);
   return Rcpp::List::create(
     Rcpp::Named("schema_version") = result.schema_version,
     Rcpp::Named("rank_path") = result.rank_path,
@@ -7544,6 +7626,41 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
         diagnostics.cuda_hessian_eigensolver_count,
       Rcpp::Named("cuda_selected_fit_count") =
         diagnostics.cuda_selected_fit_count,
+      Rcpp::Named("cuda_decomposition_trace_enabled") =
+        diagnostics.cuda_decomposition_trace_enabled,
+      Rcpp::Named("cuda_decomposition_trace_capacity_per_target") =
+        diagnostics.cuda_decomposition_trace_capacity_per_target,
+      Rcpp::Named("cuda_decomposition_request_count") =
+        static_cast<double>(diagnostics.cuda_decomposition_request_count),
+      Rcpp::Named("cuda_decomposition_stored_count") =
+        static_cast<double>(diagnostics.cuda_decomposition_stored_count),
+      Rcpp::Named("cuda_decomposition_trace_overflow_count") =
+        static_cast<double>(
+          diagnostics.cuda_decomposition_trace_overflow_count),
+      Rcpp::Named("cuda_decomposition_unique_key_count") =
+        static_cast<double>(
+          diagnostics.cuda_decomposition_unique_key_count),
+      Rcpp::Named("cuda_decomposition_reuse_count") =
+        static_cast<double>(diagnostics.cuda_decomposition_reuse_count),
+      Rcpp::Named("cuda_decomposition_route_mismatch_count") =
+        static_cast<double>(
+          diagnostics.cuda_decomposition_route_mismatch_count),
+      Rcpp::Named("cuda_decomposition_stage_request_count") =
+        decomposition_stage_requests,
+      Rcpp::Named("cuda_decomposition_stage_unique_key_count") =
+        decomposition_stage_unique_keys,
+      Rcpp::Named("cuda_decomposition_stage_reuse_count") =
+        decomposition_stage_reuse,
+      Rcpp::Named("cuda_decomposition_route_request_count") =
+        decomposition_route_requests,
+      Rcpp::Named("cuda_decomposition_route_unique_key_count") =
+        decomposition_route_unique_keys,
+      Rcpp::Named("cuda_decomposition_route_reuse_count") =
+        decomposition_route_reuse,
+      Rcpp::Named("cuda_decomposition_reuse_group_size_histogram") =
+        decomposition_group_size_histogram,
+      Rcpp::Named("cuda_decomposition_iteration_reuse") =
+        decomposition_iteration_reuse_frame,
       Rcpp::Named("cuda_objective_target_count") =
         diagnostics.cuda_objective_target_count,
       Rcpp::Named("cpu_objective_count") = diagnostics.cpu_objective_count,
@@ -7594,6 +7711,9 @@ multi_penalty_cuda_optimizer_control(Rcpp::List values) {
   control.max_boundary_probes = integer(
     "max_boundary_probes", control.max_boundary_probes);
   control.rank_tolerance = numeric("rank_tolerance", control.rank_tolerance);
+  control.decomposition_trace_capacity_per_target = integer(
+    "decomposition_trace_capacity_per_target",
+    control.decomposition_trace_capacity_per_target);
   return control;
 }
 

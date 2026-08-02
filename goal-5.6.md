@@ -3570,10 +3570,16 @@ profile to `263.305` seconds with exact numerical and graph parity, but
 Checkpoint B and the final five-run gate still fail. A non-formal
 max-conditioning-size-3 profile attributes 63.6% of optimizer stage-0 cycles to
 QR factorization and 25.7% to explicit Q generation; prepared-handle builds are
-only 5.812 seconds of the 40.330-second multi-penalty boundary. Continue with a
-trajectory-preserving decomposition/execution-shape change, pass the v2
-checkpoints, and refreeze before opening the external sealed holdout. Promotion
-remains forbidden.
+only 5.812 seconds of the 40.330-second multi-penalty boundary. An opt-in exact-
+bit full level-7 trace finds only 73,274 reusable requests among 1,691,603
+decompositions (`4.33%`): 73,272 occur during initial evaluation and only two
+occur later. Reuse declines from 4.93% at three penalties to 1.55% at seven,
+with group-size p50/p95 both equal to one. The traced result remains bitwise
+identical and has zero overflow or route mismatch, but its instrumented
+421.065-second wall time is not performance evidence. Treat initial
+decomposition sharing as secondary and continue with a trajectory-preserving
+grouped/persistent QR execution shape. Pass the v2 checkpoints and refreeze
+before opening the external sealed holdout. Promotion remains forbidden.
 
 ---
 

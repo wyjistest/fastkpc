@@ -146,7 +146,10 @@ assert_true(
 )
 full_cuda_ci_multi_penalty_gcv_residual_free_native(token)
 
-second <- fastkpc_full_cuda_phase6_optimize_prepared(handle, Y, target_keys)
+second <- fastkpc_full_cuda_phase6_optimize_prepared(
+  handle, Y, target_keys,
+  decomposition_trace_capacity_per_target = 512L
+)
 second_token <- second$residual
 on.exit(
   try(full_cuda_ci_multi_penalty_gcv_residual_free_native(second_token),
@@ -154,11 +157,33 @@ on.exit(
   add = TRUE
 )
 second_info <- full_cuda_ci_multi_penalty_gcv_prepared_info_native(handle)
+trace <- second$optimization$diagnostics
 assert_true(
   identical(second$optimization$selected_log_sp,
             candidate$selected_log_sp) &&
     identical(second$optimization$optimizer_iterations,
               candidate$optimizer_iterations) &&
+    identical(second$optimization$score_calls, candidate$score_calls) &&
+    identical(second$optimization$objective_calls,
+              candidate$objective_calls) &&
+    isTRUE(trace$cuda_decomposition_trace_enabled) &&
+    trace$cuda_decomposition_trace_capacity_per_target == 512L &&
+    trace$cuda_decomposition_request_count > 0L &&
+    trace$cuda_decomposition_request_count ==
+      trace$cuda_decomposition_stored_count &&
+    trace$cuda_decomposition_trace_overflow_count == 0L &&
+    trace$cuda_decomposition_route_mismatch_count == 0L &&
+    trace$cuda_decomposition_stored_count ==
+      trace$cuda_decomposition_unique_key_count +
+        trace$cuda_decomposition_reuse_count &&
+    trace$cuda_decomposition_reuse_count > 0L &&
+    trace$cuda_decomposition_stage_request_count[["initial"]] >=
+      ncol(Y) &&
+    trace$cuda_decomposition_stage_reuse_count[["initial"]] > 0L &&
+    is.data.frame(trace$cuda_decomposition_iteration_reuse) &&
+    nrow(trace$cuda_decomposition_iteration_reuse) > 0L &&
+    trace$device_allocation_count == 2L &&
+    trace$d2h_copy_count == 3L &&
     second_info$solve_count == 2L && second_info$cublas_gemm_count == 2L &&
     second_info$residual_kernel_count == 2L &&
     second_info$workspace_grow_count == 0L &&

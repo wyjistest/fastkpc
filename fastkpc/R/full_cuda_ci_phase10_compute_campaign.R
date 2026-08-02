@@ -197,9 +197,13 @@ fastkpc_full_cuda_phase10_capture_compute_warm <- function(
     "Phase 10 compute-warm measured data is malformed"
   )
   if (isTRUE(formal_canonical)) {
+    trace_capacity <- Sys.getenv(
+      "FASTKPC_PHASE10_DECOMPOSITION_TRACE_CAPACITY", unset = "0"
+    )
     fastkpc_full_cuda_phase10_compute_require(
       identical(dim(data), c(351L, 48L)) &&
-        as.integer(max_conditioning_size) == 7L,
+        as.integer(max_conditioning_size) == 7L &&
+        trace_capacity %in% c("", "0"),
       "Phase 10 formal compute-warm boundary requires canonical 351x48 data"
     )
   }
@@ -687,6 +691,112 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     ),
     total_elapsed_ms = total_ms,
     known_top_level_ms = known_top_level_ms
+  )
+}
+
+fastkpc_full_cuda_phase10_decomposition_reuse_profile <- function(summary) {
+  scalar_fields <- c(
+    "cuda_multi_penalty_decomposition_trace_capacity_per_target",
+    "cuda_multi_penalty_decomposition_trace_batch_count",
+    "cuda_multi_penalty_decomposition_request_count",
+    "cuda_multi_penalty_decomposition_stored_count",
+    "cuda_multi_penalty_decomposition_trace_overflow_count",
+    "cuda_multi_penalty_decomposition_unique_key_count",
+    "cuda_multi_penalty_decomposition_reuse_count",
+    "cuda_multi_penalty_decomposition_reuse_ratio",
+    "cuda_multi_penalty_decomposition_route_mismatch_count",
+    "cuda_multi_penalty_decomposition_group_size_p50",
+    "cuda_multi_penalty_decomposition_group_size_p95",
+    "cuda_multi_penalty_decomposition_group_size_max"
+  )
+  values <- unlist(summary[scalar_fields], use.names = TRUE)
+  by_stage <- summary$cuda_multi_penalty_decomposition_reuse_by_stage
+  by_route <- summary$cuda_multi_penalty_decomposition_reuse_by_route
+  by_shape <- summary$cuda_multi_penalty_decomposition_reuse_by_shape
+  by_iteration <-
+    summary$cuda_multi_penalty_decomposition_reuse_by_iteration
+  stage_names <- c(
+    "initial", "newton_trial", "steepest_descent_trial",
+    "step_halving", "boundary_probe", "terminal_confirmation",
+    "stability_replay", "selected_fit"
+  )
+  route_names <- c("unknown", "guarded_qr", "stable_svd")
+  count_fields <- c("request_count", "unique_key_count", "reuse_count")
+  valid_count_table <- function(value, expected_names, name_field) {
+    is.data.frame(value) && nrow(value) == length(expected_names) &&
+      identical(expected_names, as.character(value[[name_field]])) &&
+      all(count_fields %in% names(value)) &&
+      all(vapply(value[count_fields], function(column) {
+        is.numeric(column) && all(is.finite(column)) && all(column >= 0) &&
+          all(column == floor(column))
+      }, logical(1L))) &&
+      all(value$request_count ==
+            value$unique_key_count + value$reuse_count)
+  }
+  fastkpc_full_cuda_phase10_compute_require(
+    isTRUE(summary$cuda_multi_penalty_decomposition_trace_enabled) &&
+      identical(names(values), scalar_fields) &&
+      all(is.finite(values)) &&
+      values[[
+        "cuda_multi_penalty_decomposition_trace_capacity_per_target"
+      ]] >= 64 &&
+      values[["cuda_multi_penalty_decomposition_trace_batch_count"]] > 0 &&
+      values[["cuda_multi_penalty_decomposition_request_count"]] > 0 &&
+      values[["cuda_multi_penalty_decomposition_request_count"]] ==
+        values[["cuda_multi_penalty_decomposition_stored_count"]] &&
+      values[[
+        "cuda_multi_penalty_decomposition_trace_overflow_count"
+      ]] == 0 &&
+      values[[
+        "cuda_multi_penalty_decomposition_route_mismatch_count"
+      ]] == 0 &&
+      values[["cuda_multi_penalty_decomposition_stored_count"]] ==
+        values[["cuda_multi_penalty_decomposition_unique_key_count"]] +
+          values[["cuda_multi_penalty_decomposition_reuse_count"]] &&
+      isTRUE(all.equal(
+        unname(values[["cuda_multi_penalty_decomposition_reuse_ratio"]]),
+        unname(values[["cuda_multi_penalty_decomposition_reuse_count"]] /
+          values[["cuda_multi_penalty_decomposition_stored_count"]]),
+        tolerance = 1e-15
+      )) &&
+      valid_count_table(by_stage, stage_names, "stage") &&
+      valid_count_table(by_route, route_names, "route") &&
+      sum(by_route$request_count) ==
+        values[["cuda_multi_penalty_decomposition_request_count"]] &&
+      is.data.frame(by_shape) && nrow(by_shape) > 0L &&
+      all(c("coefficient_dim", "penalty_count", "batch_count",
+            count_fields) %in% names(by_shape)) &&
+      sum(by_shape$request_count) ==
+        values[["cuda_multi_penalty_decomposition_request_count"]] &&
+      sum(by_shape$unique_key_count) ==
+        values[["cuda_multi_penalty_decomposition_unique_key_count"]] &&
+      sum(by_shape$reuse_count) ==
+        values[["cuda_multi_penalty_decomposition_reuse_count"]] &&
+      is.data.frame(by_iteration) && nrow(by_iteration) > 0L &&
+      all(c("prepared_s_key", "coefficient_dim", "penalty_count",
+            "iteration", "stability_replay", count_fields) %in%
+          names(by_iteration)) &&
+      all(nzchar(by_iteration$prepared_s_key)) &&
+      all(by_iteration$request_count ==
+            by_iteration$unique_key_count + by_iteration$reuse_count) &&
+      values[["cuda_multi_penalty_decomposition_group_size_p50"]] >= 1 &&
+      values[["cuda_multi_penalty_decomposition_group_size_p95"]] >=
+        values[["cuda_multi_penalty_decomposition_group_size_p50"]] &&
+      values[["cuda_multi_penalty_decomposition_group_size_max"]] >=
+        values[["cuda_multi_penalty_decomposition_group_size_p95"]],
+    "Phase 10 exact decomposition reuse profile is malformed"
+  )
+  list(
+    schema_version = "full-cuda-ci-decomposition-reuse-profile-v1",
+    summary = data.frame(
+      metric = scalar_fields,
+      value = unname(values),
+      stringsAsFactors = FALSE
+    ),
+    by_stage = by_stage,
+    by_route = by_route,
+    by_shape = by_shape,
+    by_iteration = by_iteration
   )
 }
 

@@ -176,7 +176,8 @@ fastkpc_full_cuda_phase6_optimize_prepared <- function(
     convergence_tolerance = 1e-7, max_step_halving = 25L,
     max_iterations = 400L, max_newton_step = 5,
     boundary_probe_step = 2, max_boundary_probes = 5L,
-    rank_tolerance = sqrt(.Machine$double.eps)) {
+    rank_tolerance = sqrt(.Machine$double.eps),
+    decomposition_trace_capacity_per_target = 0L) {
   Y <- as.matrix(Y)
   storage.mode(Y) <- "double"
   fastkpc_full_cuda_phase6_require(
@@ -192,7 +193,9 @@ fastkpc_full_cuda_phase6_optimize_prepared <- function(
     max_newton_step = as.numeric(max_newton_step),
     boundary_probe_step = as.numeric(boundary_probe_step),
     max_boundary_probes = as.integer(max_boundary_probes),
-    rank_tolerance = as.numeric(rank_tolerance)
+    rank_tolerance = as.numeric(rank_tolerance),
+    decomposition_trace_capacity_per_target =
+      as.integer(decomposition_trace_capacity_per_target)
   )
   full_cuda_ci_multi_penalty_gcv_optimize_batch_native(
     handle, Y, as.character(target_keys), control
@@ -204,7 +207,8 @@ fastkpc_full_cuda_phase6_optimize_prepared_multi <- function(
     convergence_tolerance = 1e-7, max_step_halving = 25L,
     max_iterations = 400L, max_newton_step = 5,
     boundary_probe_step = 2, max_boundary_probes = 5L,
-    rank_tolerance = sqrt(.Machine$double.eps)) {
+    rank_tolerance = sqrt(.Machine$double.eps),
+    decomposition_trace_capacity_per_target = 0L) {
   concurrency <- as.integer(concurrency)
   fastkpc_full_cuda_phase6_require(
     is.list(handles) && length(handles) > 0L &&
@@ -233,7 +237,9 @@ fastkpc_full_cuda_phase6_optimize_prepared_multi <- function(
     max_newton_step = as.numeric(max_newton_step),
     boundary_probe_step = as.numeric(boundary_probe_step),
     max_boundary_probes = as.integer(max_boundary_probes),
-    rank_tolerance = as.numeric(rank_tolerance)
+    rank_tolerance = as.numeric(rank_tolerance),
+    decomposition_trace_capacity_per_target =
+      as.integer(decomposition_trace_capacity_per_target)
   )
   full_cuda_ci_multi_penalty_gcv_optimize_multi_native(
     requests, concurrency = concurrency, control = control

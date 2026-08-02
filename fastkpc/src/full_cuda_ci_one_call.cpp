@@ -11,10 +11,12 @@
 #include <RcppEigen.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <limits>
@@ -26,6 +28,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -62,6 +65,24 @@ double elapsed_ms(
     const std::chrono::steady_clock::time_point& start) {
   return std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - start).count();
+}
+
+int decomposition_trace_capacity_from_environment() {
+  const char* raw = std::getenv(
+    "FASTKPC_PHASE10_DECOMPOSITION_TRACE_CAPACITY");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "0") return 0;
+  std::size_t parsed = 0;
+  int capacity = 0;
+  try {
+    capacity = std::stoi(raw, &parsed);
+  } catch (...) {
+    throw std::runtime_error(
+      "Phase 10 decomposition trace capacity is not an integer");
+  }
+  require(parsed == std::string(raw).size() &&
+            capacity >= 64 && capacity <= 4096,
+          "Phase 10 decomposition trace capacity is outside [64, 4096]");
+  return capacity;
 }
 
 bool finite_matrix(const Rcpp::NumericMatrix& values) {
@@ -255,6 +276,46 @@ struct NativeSetupContext {
   std::unique_ptr<SinglePenaltyGeometry> single_penalty;
 };
 
+struct DecompositionReuseAggregate {
+  std::uint64_t batch_count = 0;
+  std::uint64_t request_count = 0;
+  std::uint64_t stored_count = 0;
+  std::uint64_t overflow_count = 0;
+  std::uint64_t unique_key_count = 0;
+  std::uint64_t reuse_count = 0;
+  std::uint64_t route_mismatch_count = 0;
+  std::array<std::uint64_t,
+             kMultiPenaltyGcvDecompositionTraceStageCount>
+    stage_request_count{};
+  std::array<std::uint64_t,
+             kMultiPenaltyGcvDecompositionTraceStageCount>
+    stage_unique_key_count{};
+  std::array<std::uint64_t,
+             kMultiPenaltyGcvDecompositionTraceStageCount>
+    stage_reuse_count{};
+  std::array<std::uint64_t,
+             kMultiPenaltyGcvDecompositionTraceRouteCount>
+    route_request_count{};
+  std::array<std::uint64_t,
+             kMultiPenaltyGcvDecompositionTraceRouteCount>
+    route_unique_key_count{};
+  std::array<std::uint64_t,
+             kMultiPenaltyGcvDecompositionTraceRouteCount>
+    route_reuse_count{};
+  std::vector<std::uint64_t> group_size_histogram;
+};
+
+struct DecompositionIterationReuseRow {
+  std::string prepared_key;
+  int coefficient_dim = 0;
+  int penalty_count = 0;
+  int iteration = 0;
+  bool stability_replay = false;
+  std::uint64_t request_count = 0;
+  std::uint64_t unique_key_count = 0;
+  std::uint64_t reuse_count = 0;
+};
+
 struct OneCallDiagnostics {
   std::unordered_set<std::string> physical_prepared_keys;
   std::unordered_set<std::string> consumed_prepared_keys;
@@ -285,6 +346,12 @@ struct OneCallDiagnostics {
   int cuda_multi_penalty_prepared_release_count = 0;
   int cuda_multi_penalty_prepared_target_capacity_sum = 0;
   int cuda_multi_penalty_prepared_target_capacity_peak = 0;
+  int cuda_multi_penalty_decomposition_trace_capacity_per_target = 0;
+  DecompositionReuseAggregate cuda_multi_penalty_decomposition_reuse;
+  std::map<std::pair<int, int>, DecompositionReuseAggregate>
+    cuda_multi_penalty_decomposition_reuse_by_shape;
+  std::vector<DecompositionIterationReuseRow>
+    cuda_multi_penalty_decomposition_iteration_reuse;
   std::uint64_t cuda_multi_penalty_optimizer_iteration_sum = 0;
   int cuda_multi_penalty_optimizer_iteration_max = 0;
   std::uint64_t cuda_multi_penalty_score_call_sum = 0;
@@ -1424,12 +1491,112 @@ void accumulate_single_penalty_optimizer_diagnostics(
       value.augmented_objective_kernel_launch_count;
 }
 
+void merge_decomposition_reuse_aggregate(
+    const MultiPenaltyGcvCudaDiagnostics& source,
+    DecompositionReuseAggregate* destination) {
+  destination->batch_count += 1U;
+  destination->request_count += source.cuda_decomposition_request_count;
+  destination->stored_count += source.cuda_decomposition_stored_count;
+  destination->overflow_count +=
+    source.cuda_decomposition_trace_overflow_count;
+  destination->unique_key_count +=
+    source.cuda_decomposition_unique_key_count;
+  destination->reuse_count += source.cuda_decomposition_reuse_count;
+  destination->route_mismatch_count +=
+    source.cuda_decomposition_route_mismatch_count;
+  for (int stage = 0;
+       stage < kMultiPenaltyGcvDecompositionTraceStageCount; ++stage) {
+    const std::size_t index = static_cast<std::size_t>(stage);
+    destination->stage_request_count[index] +=
+      source.cuda_decomposition_stage_request_count[index];
+    destination->stage_unique_key_count[index] +=
+      source.cuda_decomposition_stage_unique_key_count[index];
+    destination->stage_reuse_count[index] +=
+      source.cuda_decomposition_stage_reuse_count[index];
+  }
+  for (int route = 0;
+       route < kMultiPenaltyGcvDecompositionTraceRouteCount; ++route) {
+    const std::size_t index = static_cast<std::size_t>(route);
+    destination->route_request_count[index] +=
+      source.cuda_decomposition_route_request_count[index];
+    destination->route_unique_key_count[index] +=
+      source.cuda_decomposition_route_unique_key_count[index];
+    destination->route_reuse_count[index] +=
+      source.cuda_decomposition_route_reuse_count[index];
+  }
+  if (destination->group_size_histogram.size() <
+      source.cuda_decomposition_reuse_group_size_histogram.size()) {
+    destination->group_size_histogram.resize(
+      source.cuda_decomposition_reuse_group_size_histogram.size(), 0U);
+  }
+  for (std::size_t size = 0;
+       size < source.cuda_decomposition_reuse_group_size_histogram.size();
+       ++size) {
+    destination->group_size_histogram[size] +=
+      source.cuda_decomposition_reuse_group_size_histogram[size];
+  }
+}
+
+void accumulate_decomposition_reuse_diagnostics(
+    const MultiPenaltyGcvCudaOptimization& value,
+    const std::string& prepared_key,
+    OneCallDiagnostics* diagnostics) {
+  const MultiPenaltyGcvCudaDiagnostics& source = value.diagnostics;
+  const bool expected =
+    diagnostics->cuda_multi_penalty_decomposition_trace_capacity_per_target >
+      0;
+  require(source.cuda_decomposition_trace_enabled == expected,
+          "multi-penalty decomposition trace activation drifted");
+  if (!expected) {
+    require(source.cuda_decomposition_request_count == 0U &&
+              source.cuda_decomposition_stored_count == 0U &&
+              source.cuda_decomposition_trace_overflow_count == 0U,
+            "disabled multi-penalty decomposition trace recorded work");
+    return;
+  }
+  require(source.cuda_decomposition_trace_capacity_per_target ==
+            diagnostics
+              ->cuda_multi_penalty_decomposition_trace_capacity_per_target &&
+            source.cuda_decomposition_request_count > 0U &&
+            source.cuda_decomposition_stored_count <=
+              source.cuda_decomposition_request_count &&
+            source.cuda_decomposition_unique_key_count <=
+              source.cuda_decomposition_stored_count &&
+            source.cuda_decomposition_reuse_count ==
+              source.cuda_decomposition_stored_count -
+                source.cuda_decomposition_unique_key_count,
+          "multi-penalty decomposition trace accounting is malformed");
+  merge_decomposition_reuse_aggregate(
+    source, &diagnostics->cuda_multi_penalty_decomposition_reuse);
+  merge_decomposition_reuse_aggregate(
+    source,
+    &diagnostics->cuda_multi_penalty_decomposition_reuse_by_shape[
+      std::make_pair(value.coefficient_dim, value.penalty_count)]);
+  for (const MultiPenaltyGcvCudaDecompositionIterationReuse& row :
+       source.cuda_decomposition_iteration_reuse) {
+    diagnostics->cuda_multi_penalty_decomposition_iteration_reuse.push_back(
+      DecompositionIterationReuseRow{
+        prepared_key,
+        value.coefficient_dim,
+        value.penalty_count,
+        row.iteration,
+        row.stability_replay,
+        row.request_count,
+        row.unique_key_count,
+        row.reuse_count
+      });
+  }
+}
+
 void accumulate_multi_penalty_optimizer_diagnostics(
     const MultiPenaltyGcvCudaOptimization& value,
+    const std::string& prepared_key,
     OneCallDiagnostics* diagnostics) {
   require(diagnostics != nullptr && value.target_count > 0,
           "multi-penalty optimizer diagnostics are malformed");
   const MultiPenaltyGcvCudaDiagnostics& source = value.diagnostics;
+  accumulate_decomposition_reuse_diagnostics(
+    value, prepared_key, diagnostics);
   diagnostics->cuda_multi_penalty_optimizer_summed_setup_host_ms +=
     source.total_host_ms;
   diagnostics->cuda_multi_penalty_optimizer_max_setup_host_ms = std::max(
@@ -1516,6 +1683,174 @@ void accumulate_multi_penalty_optimizer_diagnostics(
     diagnostics->cuda_multi_penalty_boundary_probe_sum +=
       value.boundary_probe_count[index];
   }
+}
+
+const std::array<const char*,
+                 kMultiPenaltyGcvDecompositionTraceStageCount>&
+decomposition_trace_stage_names() {
+  static const std::array<const char*,
+                          kMultiPenaltyGcvDecompositionTraceStageCount>
+    names = {{
+      "initial", "newton_trial", "steepest_descent_trial",
+      "step_halving", "boundary_probe", "terminal_confirmation",
+      "stability_replay", "selected_fit"
+    }};
+  return names;
+}
+
+const std::array<const char*,
+                 kMultiPenaltyGcvDecompositionTraceRouteCount>&
+decomposition_trace_route_names() {
+  static const std::array<const char*,
+                          kMultiPenaltyGcvDecompositionTraceRouteCount>
+    names = {{"unknown", "guarded_qr", "stable_svd"}};
+  return names;
+}
+
+double decomposition_group_size_quantile(
+    const std::vector<std::uint64_t>& histogram,
+    double probability) {
+  std::uint64_t group_count = 0;
+  for (std::uint64_t count : histogram) group_count += count;
+  if (group_count == 0U) return 0.0;
+  const std::uint64_t rank = static_cast<std::uint64_t>(std::ceil(
+    probability * static_cast<double>(group_count)));
+  std::uint64_t cumulative = 0;
+  for (std::size_t size = 0; size < histogram.size(); ++size) {
+    cumulative += histogram[size];
+    if (cumulative >= std::max<std::uint64_t>(1U, rank)) {
+      return static_cast<double>(size);
+    }
+  }
+  return static_cast<double>(histogram.empty() ? 0U : histogram.size() - 1U);
+}
+
+Rcpp::DataFrame decomposition_reuse_stage_frame(
+    const DecompositionReuseAggregate& value) {
+  const auto& names = decomposition_trace_stage_names();
+  Rcpp::CharacterVector stage(names.size());
+  Rcpp::NumericVector requests(names.size());
+  Rcpp::NumericVector unique_keys(names.size());
+  Rcpp::NumericVector reuse(names.size());
+  Rcpp::NumericVector ratio(names.size());
+  for (std::size_t index = 0; index < names.size(); ++index) {
+    stage[index] = names[index];
+    requests[index] = static_cast<double>(value.stage_request_count[index]);
+    unique_keys[index] =
+      static_cast<double>(value.stage_unique_key_count[index]);
+    reuse[index] = static_cast<double>(value.stage_reuse_count[index]);
+    ratio[index] = value.stage_request_count[index] > 0U ?
+      static_cast<double>(value.stage_reuse_count[index]) /
+        static_cast<double>(value.stage_request_count[index]) : 0.0;
+  }
+  return Rcpp::DataFrame::create(
+    Rcpp::Named("stage") = stage,
+    Rcpp::Named("request_count") = requests,
+    Rcpp::Named("unique_key_count") = unique_keys,
+    Rcpp::Named("reuse_count") = reuse,
+    Rcpp::Named("reuse_ratio") = ratio,
+    Rcpp::Named("stringsAsFactors") = false);
+}
+
+Rcpp::DataFrame decomposition_reuse_route_frame(
+    const DecompositionReuseAggregate& value) {
+  const auto& names = decomposition_trace_route_names();
+  Rcpp::CharacterVector route(names.size());
+  Rcpp::NumericVector requests(names.size());
+  Rcpp::NumericVector unique_keys(names.size());
+  Rcpp::NumericVector reuse(names.size());
+  Rcpp::NumericVector ratio(names.size());
+  for (std::size_t index = 0; index < names.size(); ++index) {
+    route[index] = names[index];
+    requests[index] = static_cast<double>(value.route_request_count[index]);
+    unique_keys[index] =
+      static_cast<double>(value.route_unique_key_count[index]);
+    reuse[index] = static_cast<double>(value.route_reuse_count[index]);
+    ratio[index] = value.route_request_count[index] > 0U ?
+      static_cast<double>(value.route_reuse_count[index]) /
+        static_cast<double>(value.route_request_count[index]) : 0.0;
+  }
+  return Rcpp::DataFrame::create(
+    Rcpp::Named("route") = route,
+    Rcpp::Named("request_count") = requests,
+    Rcpp::Named("unique_key_count") = unique_keys,
+    Rcpp::Named("reuse_count") = reuse,
+    Rcpp::Named("reuse_ratio") = ratio,
+    Rcpp::Named("stringsAsFactors") = false);
+}
+
+Rcpp::DataFrame decomposition_reuse_shape_frame(
+    const std::map<std::pair<int, int>, DecompositionReuseAggregate>& values) {
+  const int count = static_cast<int>(values.size());
+  Rcpp::IntegerVector coefficient_dim(count);
+  Rcpp::IntegerVector penalty_count(count);
+  Rcpp::NumericVector batches(count);
+  Rcpp::NumericVector requests(count);
+  Rcpp::NumericVector unique_keys(count);
+  Rcpp::NumericVector reuse(count);
+  Rcpp::NumericVector ratio(count);
+  int index = 0;
+  for (const auto& entry : values) {
+    coefficient_dim[index] = entry.first.first;
+    penalty_count[index] = entry.first.second;
+    batches[index] = static_cast<double>(entry.second.batch_count);
+    requests[index] = static_cast<double>(entry.second.request_count);
+    unique_keys[index] = static_cast<double>(entry.second.unique_key_count);
+    reuse[index] = static_cast<double>(entry.second.reuse_count);
+    ratio[index] = entry.second.request_count > 0U ?
+      static_cast<double>(entry.second.reuse_count) /
+        static_cast<double>(entry.second.request_count) : 0.0;
+    ++index;
+  }
+  return Rcpp::DataFrame::create(
+    Rcpp::Named("coefficient_dim") = coefficient_dim,
+    Rcpp::Named("penalty_count") = penalty_count,
+    Rcpp::Named("batch_count") = batches,
+    Rcpp::Named("request_count") = requests,
+    Rcpp::Named("unique_key_count") = unique_keys,
+    Rcpp::Named("reuse_count") = reuse,
+    Rcpp::Named("reuse_ratio") = ratio,
+    Rcpp::Named("stringsAsFactors") = false);
+}
+
+Rcpp::DataFrame decomposition_iteration_reuse_frame(
+    std::vector<DecompositionIterationReuseRow> values) {
+  std::sort(values.begin(), values.end(), [](const auto& left,
+                                              const auto& right) {
+    return std::tie(left.prepared_key, left.stability_replay, left.iteration) <
+      std::tie(right.prepared_key, right.stability_replay, right.iteration);
+  });
+  const int count = static_cast<int>(values.size());
+  Rcpp::CharacterVector prepared_key(count);
+  Rcpp::IntegerVector coefficient_dim(count);
+  Rcpp::IntegerVector penalty_count(count);
+  Rcpp::IntegerVector iteration(count);
+  Rcpp::LogicalVector stability_replay(count);
+  Rcpp::NumericVector requests(count);
+  Rcpp::NumericVector unique_keys(count);
+  Rcpp::NumericVector reuse(count);
+  for (int index = 0; index < count; ++index) {
+    const DecompositionIterationReuseRow& row =
+      values[static_cast<std::size_t>(index)];
+    prepared_key[index] = row.prepared_key;
+    coefficient_dim[index] = row.coefficient_dim;
+    penalty_count[index] = row.penalty_count;
+    iteration[index] = row.iteration;
+    stability_replay[index] = row.stability_replay;
+    requests[index] = static_cast<double>(row.request_count);
+    unique_keys[index] = static_cast<double>(row.unique_key_count);
+    reuse[index] = static_cast<double>(row.reuse_count);
+  }
+  return Rcpp::DataFrame::create(
+    Rcpp::Named("prepared_s_key") = prepared_key,
+    Rcpp::Named("coefficient_dim") = coefficient_dim,
+    Rcpp::Named("penalty_count") = penalty_count,
+    Rcpp::Named("iteration") = iteration,
+    Rcpp::Named("stability_replay") = stability_replay,
+    Rcpp::Named("request_count") = requests,
+    Rcpp::Named("unique_key_count") = unique_keys,
+    Rcpp::Named("reuse_count") = reuse,
+    Rcpp::Named("stringsAsFactors") = false);
 }
 
 struct SinglePenaltyPrefillGroup {
@@ -1764,6 +2099,9 @@ void prefill_multi_penalty_target_states(
     input.n = context->n;
     input.target_count = static_cast<int>(request.targets.size());
     input.target_keys = std::move(base_target_keys);
+    input.control.decomposition_trace_capacity_per_target =
+      diagnostics
+        ->cuda_multi_penalty_decomposition_trace_capacity_per_target;
     input.Y.resize(
       static_cast<std::size_t>(context->n) * request.targets.size());
     for (std::size_t index = 0; index < request.targets.size(); ++index) {
@@ -1815,7 +2153,8 @@ void prefill_multi_penalty_target_states(
                 result.diagnostics.true_batched_kernel &&
                 result.diagnostics.independent_target_states,
               "multi-penalty cross-setup CUDA optimizer authority gate failed");
-      accumulate_multi_penalty_optimizer_diagnostics(result, diagnostics);
+      accumulate_multi_penalty_optimizer_diagnostics(
+        result, request.context->prepared_key, diagnostics);
       for (int target_index = 0; target_index < target_count; ++target_index) {
         require(result.optimizer_status[
                   static_cast<std::size_t>(target_index)] == 0,
@@ -2074,6 +2413,9 @@ GroupResult execute_group(
       ensure_multi_penalty_handle(
         context, optimization_count, diagnostics);
       MultiPenaltyGcvCudaOptimizerControl control;
+      control.decomposition_trace_capacity_per_target =
+        diagnostics
+          ->cuda_multi_penalty_decomposition_trace_capacity_per_target;
       MultiPenaltyGcvCudaBatchResult optimization;
       try {
         optimization = multi_penalty_gcv_cuda_optimize_batch(
@@ -2104,7 +2446,8 @@ GroupResult execute_group(
                   result.diagnostics.true_batched_kernel &&
                   result.diagnostics.independent_target_states,
                 "multi-penalty live CUDA optimizer authority gate failed");
-        accumulate_multi_penalty_optimizer_diagnostics(result, diagnostics);
+        accumulate_multi_penalty_optimizer_diagnostics(
+          result, context->prepared_key, diagnostics);
         for (int local = 0; local < optimization_count; ++local) {
           const int position =
             optimization_positions[static_cast<std::size_t>(local)];
@@ -2305,6 +2648,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
   reserve_fixed_sp_runtime(runtime, capacities);
 
   OneCallDiagnostics diagnostics;
+  diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target =
+    decomposition_trace_capacity_from_environment();
   const CompactResultCache::Snapshot result_cache_start =
     compact_result_cache().snapshot(dataset);
   diagnostics.result_cache_capacity = result_cache_start.capacity;
@@ -2724,6 +3069,55 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
   require(authority_clean,
           "compatible.cuda one-call authority counters failed closed");
 
+  const DecompositionReuseAggregate& decomposition_reuse =
+    diagnostics.cuda_multi_penalty_decomposition_reuse;
+  const bool decomposition_trace_enabled =
+    diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target >
+      0;
+  require(
+    (!decomposition_trace_enabled && decomposition_reuse.batch_count == 0U &&
+      decomposition_reuse.request_count == 0U &&
+      decomposition_reuse.stored_count == 0U) ||
+    (decomposition_trace_enabled &&
+      ((diagnostics.cuda_multi_penalty_target_count == 0 &&
+        decomposition_reuse.batch_count == 0U &&
+        decomposition_reuse.request_count == 0U) ||
+       (diagnostics.cuda_multi_penalty_target_count > 0 &&
+        decomposition_reuse.batch_count > 0U &&
+        decomposition_reuse.request_count ==
+          decomposition_reuse.stored_count +
+            decomposition_reuse.overflow_count &&
+        decomposition_reuse.unique_key_count <=
+          decomposition_reuse.stored_count &&
+        decomposition_reuse.reuse_count ==
+          decomposition_reuse.stored_count -
+            decomposition_reuse.unique_key_count))),
+    "compatible.cuda decomposition trace summary is malformed");
+  const double decomposition_reuse_ratio =
+    decomposition_reuse.stored_count > 0U ?
+      static_cast<double>(decomposition_reuse.reuse_count) /
+        static_cast<double>(decomposition_reuse.stored_count) : 0.0;
+  const double decomposition_group_size_p50 =
+    decomposition_group_size_quantile(
+      decomposition_reuse.group_size_histogram, 0.50);
+  const double decomposition_group_size_p95 =
+    decomposition_group_size_quantile(
+      decomposition_reuse.group_size_histogram, 0.95);
+  const double decomposition_group_size_max =
+    decomposition_reuse.group_size_histogram.empty() ? 0.0 :
+      static_cast<double>(
+        decomposition_reuse.group_size_histogram.size() - 1U);
+  const Rcpp::DataFrame decomposition_reuse_by_stage =
+    decomposition_reuse_stage_frame(decomposition_reuse);
+  const Rcpp::DataFrame decomposition_reuse_by_route =
+    decomposition_reuse_route_frame(decomposition_reuse);
+  const Rcpp::DataFrame decomposition_reuse_by_shape =
+    decomposition_reuse_shape_frame(
+      diagnostics.cuda_multi_penalty_decomposition_reuse_by_shape);
+  const Rcpp::DataFrame decomposition_reuse_by_iteration =
+    decomposition_iteration_reuse_frame(
+      diagnostics.cuda_multi_penalty_decomposition_iteration_reuse);
+
   return Rcpp::List::create(
     Rcpp::Named("adjacency") = adjacency_matrix(adjacency, p),
     Rcpp::Named("sepsets") = sepset_list(sepsets),
@@ -2792,6 +3186,44 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.cuda_multi_penalty_prepared_target_capacity_sum,
       Rcpp::Named("cuda_multi_penalty_prepared_target_capacity_peak") =
         diagnostics.cuda_multi_penalty_prepared_target_capacity_peak,
+      Rcpp::Named("cuda_multi_penalty_decomposition_trace_enabled") =
+        decomposition_trace_enabled,
+      Rcpp::Named(
+        "cuda_multi_penalty_decomposition_trace_capacity_per_target") =
+          diagnostics
+            .cuda_multi_penalty_decomposition_trace_capacity_per_target,
+      Rcpp::Named("cuda_multi_penalty_decomposition_trace_batch_count") =
+        static_cast<double>(decomposition_reuse.batch_count),
+      Rcpp::Named("cuda_multi_penalty_decomposition_request_count") =
+        static_cast<double>(decomposition_reuse.request_count),
+      Rcpp::Named("cuda_multi_penalty_decomposition_stored_count") =
+        static_cast<double>(decomposition_reuse.stored_count),
+      Rcpp::Named(
+        "cuda_multi_penalty_decomposition_trace_overflow_count") =
+          static_cast<double>(decomposition_reuse.overflow_count),
+      Rcpp::Named("cuda_multi_penalty_decomposition_unique_key_count") =
+        static_cast<double>(decomposition_reuse.unique_key_count),
+      Rcpp::Named("cuda_multi_penalty_decomposition_reuse_count") =
+        static_cast<double>(decomposition_reuse.reuse_count),
+      Rcpp::Named("cuda_multi_penalty_decomposition_reuse_ratio") =
+        decomposition_reuse_ratio,
+      Rcpp::Named(
+        "cuda_multi_penalty_decomposition_route_mismatch_count") =
+          static_cast<double>(decomposition_reuse.route_mismatch_count),
+      Rcpp::Named("cuda_multi_penalty_decomposition_group_size_p50") =
+        decomposition_group_size_p50,
+      Rcpp::Named("cuda_multi_penalty_decomposition_group_size_p95") =
+        decomposition_group_size_p95,
+      Rcpp::Named("cuda_multi_penalty_decomposition_group_size_max") =
+        decomposition_group_size_max,
+      Rcpp::Named("cuda_multi_penalty_decomposition_reuse_by_stage") =
+        decomposition_reuse_by_stage,
+      Rcpp::Named("cuda_multi_penalty_decomposition_reuse_by_route") =
+        decomposition_reuse_by_route,
+      Rcpp::Named("cuda_multi_penalty_decomposition_reuse_by_shape") =
+        decomposition_reuse_by_shape,
+      Rcpp::Named("cuda_multi_penalty_decomposition_reuse_by_iteration") =
+        decomposition_reuse_by_iteration,
       Rcpp::Named("cuda_multi_penalty_optimizer_iteration_sum") =
         static_cast<double>(
           diagnostics.cuda_multi_penalty_optimizer_iteration_sum),

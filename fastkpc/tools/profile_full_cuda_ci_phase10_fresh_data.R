@@ -58,6 +58,18 @@ fastkpc_full_cuda_phase10_compute_require(
   profile_mode != "formal" || max_conditioning_size == 7L,
   "Phase 10 formal profile requires max conditioning size 7"
 )
+trace_capacity_raw <- Sys.getenv(
+  "FASTKPC_PHASE10_DECOMPOSITION_TRACE_CAPACITY", unset = "0"
+)
+trace_enabled <- !(trace_capacity_raw %in% c("", "0"))
+trace_capacity <- suppressWarnings(as.integer(trace_capacity_raw))
+fastkpc_full_cuda_phase10_compute_require(
+  (!trace_enabled || (
+    profile_mode == "development" && !is.na(trace_capacity) &&
+      trace_capacity >= 64L && trace_capacity <= 4096L
+  )),
+  "Phase 10 decomposition trace is restricted to development profiles"
+)
 base_environment <- c(
   CUDA_VISIBLE_DEVICES = "0", OPENBLAS_NUM_THREADS = "1",
   OMP_NUM_THREADS = "1", MKL_NUM_THREADS = "1", BLIS_NUM_THREADS = "1",
@@ -83,7 +95,19 @@ if (file.exists(path)) {
   fastkpc_full_cuda_phase10_write_compute_warm_evidence(evidence, path)
 }
 fastkpc_full_cuda_phase10_compute_require(
-  identical(isTRUE(evidence$formal_canonical), profile_mode == "formal"),
+  identical(isTRUE(evidence$formal_canonical), profile_mode == "formal") &&
+    identical(
+      isTRUE(evidence$result$summary[[
+        "cuda_multi_penalty_decomposition_trace_enabled"
+      ]]),
+      trace_enabled
+    ) &&
+    (!trace_enabled || identical(
+      as.integer(evidence$result$summary[[
+        "cuda_multi_penalty_decomposition_trace_capacity_per_target"
+      ]]),
+      trace_capacity
+    )),
   "Phase 10 profile mode disagrees with the stored evidence"
 )
 profile <- fastkpc_full_cuda_phase10_compute_profile(evidence$result$summary)
@@ -94,3 +118,13 @@ cat(
 )
 print(profile$stage_timing, row.names = FALSE)
 print(profile$physical_work, row.names = FALSE)
+if (trace_enabled) {
+  reuse <- fastkpc_full_cuda_phase10_decomposition_reuse_profile(
+    evidence$result$summary
+  )
+  cat("Exact decomposition reuse:\n")
+  print(reuse$summary, row.names = FALSE)
+  print(reuse$by_stage, row.names = FALSE)
+  print(reuse$by_route, row.names = FALSE)
+  print(reuse$by_shape, row.names = FALSE)
+}

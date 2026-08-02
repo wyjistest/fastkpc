@@ -3,6 +3,7 @@
 
 #include <cuda_runtime_api.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -14,6 +15,16 @@ namespace fastkpc {
 constexpr int kMultiPenaltyGcvMaximumCoefficientDim = 64;
 constexpr int kMultiPenaltyGcvMaximumPenaltyCount = 7;
 constexpr int kMultiPenaltyGcvMaximumConcurrentSetups = 64;
+constexpr int kMultiPenaltyGcvDecompositionTraceStageCount = 8;
+constexpr int kMultiPenaltyGcvDecompositionTraceRouteCount = 3;
+
+struct MultiPenaltyGcvCudaDecompositionIterationReuse {
+  int iteration = 0;
+  bool stability_replay = false;
+  std::uint64_t request_count = 0;
+  std::uint64_t unique_key_count = 0;
+  std::uint64_t reuse_count = 0;
+};
 
 class MultiPenaltyGcvCudaPrepared;
 class MultiPenaltyGcvCudaResidualBatch;
@@ -84,6 +95,36 @@ struct MultiPenaltyGcvCudaDiagnostics {
   double cuda_terminal_boundary_confirmation_max_delta_ratio = 0.0;
   int cuda_hessian_eigensolver_count = 0;
   int cuda_selected_fit_count = 0;
+  bool cuda_decomposition_trace_enabled = false;
+  int cuda_decomposition_trace_capacity_per_target = 0;
+  std::uint64_t cuda_decomposition_request_count = 0;
+  std::uint64_t cuda_decomposition_stored_count = 0;
+  std::uint64_t cuda_decomposition_trace_overflow_count = 0;
+  std::uint64_t cuda_decomposition_unique_key_count = 0;
+  std::uint64_t cuda_decomposition_reuse_count = 0;
+  std::uint64_t cuda_decomposition_route_mismatch_count = 0;
+  std::array<std::uint64_t,
+             kMultiPenaltyGcvDecompositionTraceStageCount>
+    cuda_decomposition_stage_request_count{};
+  std::array<std::uint64_t,
+             kMultiPenaltyGcvDecompositionTraceStageCount>
+    cuda_decomposition_stage_unique_key_count{};
+  std::array<std::uint64_t,
+             kMultiPenaltyGcvDecompositionTraceStageCount>
+    cuda_decomposition_stage_reuse_count{};
+  std::array<std::uint64_t,
+             kMultiPenaltyGcvDecompositionTraceRouteCount>
+    cuda_decomposition_route_request_count{};
+  std::array<std::uint64_t,
+             kMultiPenaltyGcvDecompositionTraceRouteCount>
+    cuda_decomposition_route_unique_key_count{};
+  std::array<std::uint64_t,
+             kMultiPenaltyGcvDecompositionTraceRouteCount>
+    cuda_decomposition_route_reuse_count{};
+  std::vector<std::uint64_t>
+    cuda_decomposition_reuse_group_size_histogram;
+  std::vector<MultiPenaltyGcvCudaDecompositionIterationReuse>
+    cuda_decomposition_iteration_reuse;
   int cpu_objective_count = 0;
   int cpu_optimizer_count = 0;
   int cpu_multi_penalty_solve_count = 0;
@@ -130,6 +171,7 @@ struct MultiPenaltyGcvCudaOptimizerControl {
   double boundary_probe_step = 2.0;
   int max_boundary_probes = 5;
   double rank_tolerance = 1.4901161193847656e-8;
+  int decomposition_trace_capacity_per_target = 0;
 };
 
 struct MultiPenaltyGcvCudaOptimization {

@@ -138,6 +138,43 @@ regressed. These experiments are not present in the production path. The next
 optimizer change therefore needs decomposition reuse or a larger execution-
 shape change while preserving the authenticated optimizer transcript.
 
+An opt-in exact-bit decomposition trace then measured whether response-
+independent decomposition reuse is large enough to justify that first route.
+The full max-conditioning-size-7 development trace recorded 1,691,603 actual
+decomposition requests, 1,618,329 unique setup/capability/log-sp keys, and
+73,274 reusable requests (`4.33%`). Initial evaluations supplied 73,272 of
+those requests; only two later steepest-descent requests matched exactly.
+Newton, step-halving, boundary-probe, terminal-confirmation, stability-replay,
+and selected-fit stages had zero exact reuse. Reuse also declined as penalty
+count increased: `4.93%`, `3.67%`, `3.08%`, `2.34%`, and `1.55%` for three
+through seven penalties. Unique-key group sizes had p50 and p95 equal to one
+and a maximum of 33. Trace overflow and route mismatch counts were zero, and
+the full traced result was bitwise identical to the `263.305`-second result for
+every consumed p-value, graph field, sepset, count, and task.
+
+The full traced call took `421.065` seconds because it downloads and groups
+every diagnostic record; that value is not performance evidence. A level-3
+trace-disabled rerun completed in `121.940` seconds versus the prior `121.848`
+seconds (`+0.08%`), with bitwise-identical tasks and all optimizer work counters
+unchanged, so the dormant trace branch has no observed default-path regression.
+Exact decomposition memoization can remain a secondary initial-evaluation
+optimization, but a maximum observed `4.33%` request reduction cannot close the
+optimizer gap. The primary next route is therefore grouped/persistent QR
+execution across independent matrices with each matrix retaining its
+authenticated internal arithmetic order.
+
+Reproduce the development-only reuse trace with a distinct artifact path:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
+FASTKPC_PHASE10_DECOMPOSITION_TRACE_CAPACITY=4096 \
+Rscript fastkpc/tools/profile_full_cuda_ci_phase10_fresh_data.R \
+  7 \
+  fastkpc/artifacts/full_cuda_ci/phase10_profile_v2/fresh-data-level-07-exact-decomposition-reuse-development.rds \
+  development
+```
+
 This is single-run development evidence: Checkpoint A (`< 600` seconds) passes,
 while Checkpoint B (`< 180` seconds) and the final five-run 120-second gate do
 not. Reproduce the development profile without creating formal evidence with:
