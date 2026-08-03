@@ -228,9 +228,32 @@ none comes from singleton padding or repeated optimization. The per-window
 receipt records level, penalty class, conditioning groups, optimizer setups,
 optimized TargetKeys, eventually consumed/unconsumed TargetKeys, and exact
 batch/optimizer host time. It deliberately does not assign a fabricated
-per-target time to mixed batches. The next low-risk performance experiment is
-therefore a deterministic bounded canonical frontier/look-ahead. A dedicated
-multi-penalty singleton tail is not currently justified by measured work.
+per-target time to mixed batches.
+
+A development-only zero-lookahead frontier implementation was then tested and
+rejected before integration. It optimized only currently ready TargetKeys and
+closed its accounting with zero lookahead, zero on-demand optimization, and
+zero unconsumed frontier keys. On the canonical max-conditioning-size-3
+workload, however, it took `394.993` seconds versus `179.914` seconds for the
+whole-level v5 route. Physical target optimizations fell only from `107,053`
+to `102,110`, because `14,507` singleton padding targets replaced most of the
+removed speculative work. Optimizer boundaries increased from 83 to 1,898 and
+setup submissions from 5,239 to 46,691; optimizer host time increased from
+`50.112` to `287.610` seconds. The structural task trace, graph, sepsets,
+deletion decisions, and `n.edgetests` remained exact, but 120,991 consumed
+p-values differed in low bits (maximum absolute difference `3.33e-14`), so the
+experiment also failed the bitwise numerical gate. The v5 production scheduler
+was restored, and no max-conditioning-size-7 run was attempted.
+
+Do not retry synchronous zero-lookahead or add depth-one/two lookahead directly
+to the production scheduler. Any later frontier design must first show, on the
+level-3 development workload, that setup-aware coalescing keeps optimizer
+boundaries and setup submissions near the v5 shape, does not exchange
+speculative targets for singleton padding, preserves the original canonical
+group execution shape, and restores bitwise-identical consumed p-values. A
+dedicated multi-penalty singleton tail is not justified as a standalone fix;
+even eliminating all 14,507 padding targets would leave the repeated setup and
+boundary costs dominant.
 
 Reproduce the exactness and stop/go campaign with:
 

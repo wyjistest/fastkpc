@@ -4,7 +4,7 @@
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
-> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. The historical Phase 10 v1 campaign producer `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556` is accepted for canonical correctness, CUDA authority, hardening, artifact integrity, and replay latency only. Its `0.699`-second measurement is replay-warm after a complete same-data call; fresh-process cold is `1290.664` seconds versus a `601.431`-second correct baseline. Under `performance_budget_v2`, the public 500x50 development fixture passes and the best full fresh-data compute-warm development run remains `263.305` seconds. Per-call univariate primitive reuse reduced native setup from `77.650` to `38.997` seconds while preserving bitwise-identical consumed p-values, exact graph/sepset/count/trace parity, and zero CPU numerical authority or fallback. A development-only grouped guarded-QR/stable-SVD-queue prototype has exact internal and public-output parity across real q=28/37/46/55/64 shapes, but its best 512-target QR/Q speedup is only `1.032x`, below the `1.3x` stop threshold; it is not integrated into the optimizer. Compute-profile v5 now proves that all `132,908` physical target optimizations occur in whole-level prefill: `110,617` TargetKeys are eventually consumed and `22,291` are never consumed, while frontier live optimization and singleton padding are both zero. Its `269.426`-second diagnostic run is bitwise identical to the `263.305`-second result and is not a new performance claim. The next low-risk change is bounded canonical-frontier prefill. Checkpoint A passes, but Checkpoint B (`<180` seconds) and the final five-run median gate (`<=120` seconds) still fail. No new candidate is frozen; Phase 10 is not complete, and the external promotion holdout remains `SEALED_NOT_RELEASED` and must stay unopened.
+> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. The historical Phase 10 v1 campaign producer `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556` is accepted for canonical correctness, CUDA authority, hardening, artifact integrity, and replay latency only. Its `0.699`-second measurement is replay-warm after a complete same-data call; fresh-process cold is `1290.664` seconds versus a `601.431`-second correct baseline. Under `performance_budget_v2`, the public 500x50 development fixture passes and the best full fresh-data compute-warm development run remains `263.305` seconds. Per-call univariate primitive reuse reduced native setup from `77.650` to `38.997` seconds while preserving bitwise-identical consumed p-values, exact graph/sepset/count/trace parity, and zero CPU numerical authority or fallback. A development-only grouped guarded-QR/stable-SVD-queue prototype has exact internal and public-output parity across real q=28/37/46/55/64 shapes, but its best 512-target QR/Q speedup is only `1.032x`, below the `1.3x` stop threshold; it is not integrated into the optimizer. Compute-profile v5 proves that all `132,908` physical target optimizations occur in whole-level prefill: `110,617` TargetKeys are eventually consumed and `22,291` are never consumed, while frontier live optimization and singleton padding are both zero. Its `269.426`-second diagnostic run is bitwise identical to the `263.305`-second result and is not a new performance claim. A subsequent zero-lookahead canonical-frontier prototype was rejected at max conditioning size 3: it took `394.993` seconds versus `179.914` seconds for v5, increased optimizer boundaries from 83 to 1,898 and setup submissions from 5,239 to 46,691, created 14,507 singleton padding targets, and changed 120,991 consumed p-values in low bits (maximum `3.33e-14`) despite exact structural graph semantics and zero decision flips. The v5 production path is restored. Checkpoint A passes, but Checkpoint B (`<180` seconds) and the final five-run median gate (`<=120` seconds) still fail. No new candidate is frozen; Phase 10 is not complete, and the external promotion holdout remains `SEALED_NOT_RELEASED` and must stay unopened.
 >
 > **Active roadmap phase:** Phase 10, full performance gate, hardening, and promotion.
 >
@@ -3595,10 +3595,20 @@ run takes `269.426` seconds, records `162.321` seconds of prefill optimizer host
 time and `178.574` seconds of end-to-end prefill batch wall time, and remains
 bitwise identical to the `263.305`-second result with zero CPU authority,
 fallback, or large-payload D2H. Do not invent per-target time attribution for
-mixed windows. Replace whole-level prefill with a deterministic bounded
-canonical frontier/look-ahead before spending work on singleton-tail support.
-Pass the v2 checkpoints and refreeze before opening the external sealed
-holdout. Promotion remains forbidden.
+mixed windows. A zero-lookahead canonical-frontier prototype was rejected on
+the level-3 development workload: wall time regressed from `179.914` to
+`394.993` seconds, optimizer boundaries increased from 83 to 1,898, setup
+submissions increased from 5,239 to 46,691, and 14,507 singleton padding
+targets replaced most of the removed speculative work. It also changed 120,991
+consumed p-values in low bits (maximum absolute difference `3.33e-14`) despite
+zero decision flips and exact structural graph semantics. The v5 whole-level
+production scheduler is restored, and the failed prototype was not run through
+level 7. Do not retry synchronous zero-lookahead or direct depth-one/two
+lookahead. First design and measure setup-aware coalescing that preserves the
+v5 canonical group/batch shape, keeps boundaries and setup submissions bounded,
+avoids singleton padding, and restores bitwise parity on level 3. Pass the v2
+checkpoints and refreeze before opening the external sealed holdout. Promotion
+remains forbidden.
 
 ---
 
