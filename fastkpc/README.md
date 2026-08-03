@@ -255,6 +255,51 @@ dedicated multi-penalty singleton tail is not justified as a standalone fix;
 even eliminating all 14,507 padding targets would leave the repeated setup and
 boundary costs dominant.
 
+A subsequent setup-aware opportunity diagnostic rebuilt the original v5 plan
+without executing any new CUDA CI work. It used the exported native layer
+planner plus the stored canonical `p_used` trace, reconstructed all 8,637 setup
+cohorts and 137 original 64-setup windows, and matched every persisted v5
+window count exactly. The result closes the scheduler opportunity:
+
+```text
+v5 windows                                      137
+windows ever demanded                          137
+windows never demanded                           0
+recorded wall time in skippable windows       0 ms
+
+v5 setup cohorts                              8637
+setup cohorts ever demanded                   8634
+setup cohorts never demanded                     3
+targets in never-demanded cohorts                9
+
+unconsumed targets inside demanded cohorts   22282
+total unconsumed targets                     22291
+```
+
+Thus 99.96% of the unconsumed targets are distributed inside setup cohorts
+whose original windows must execute. At max conditioning size 3, lazy original-
+window activation still requires the same 83 optimizer boundaries, 5,239 setup
+submissions, and 107,053 target optimizations as v5, with zero recorded batch
+wall time available to skip. Frontier density also does not justify dynamic
+setup flushing at that checkpoint: newly ready setup cohorts have p95 at most
+two, a maximum of 51 at level 3, and no level-3 epoch exposes a full 64-setup
+inactive window.
+
+The diagnostic decision is `STOP_SCHEDULER_OPPORTUNITY_TOO_SMALL`. Do not
+implement lazy original-window activation or setup-cohort coalescing for this
+contract epoch. Preserving the v5 cohort/window numerical shape removes almost
+all scheduler-side savings; trimming inside demanded cohorts reopens the
+bitwise and batch-amortization failures already observed. The next independent
+routes are optimizer accepted-residual reuse and a pure-C++ owned Prepared-S
+pipeline that overlaps native setup with GPU optimization.
+
+Rebuild the opportunity receipt without CUDA numerical work with:
+
+```bash
+Rscript fastkpc/tools/profile_full_cuda_ci_phase10_coalescing_opportunity.R
+Rscript fastkpc/tests/test_full_cuda_ci_phase10_coalescing_opportunity.R
+```
+
 Reproduce the exactness and stop/go campaign with:
 
 ```bash

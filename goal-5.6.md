@@ -6,6 +6,8 @@
 >
 > **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. The historical Phase 10 v1 campaign producer `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556` is accepted for canonical correctness, CUDA authority, hardening, artifact integrity, and replay latency only. Its `0.699`-second measurement is replay-warm after a complete same-data call; fresh-process cold is `1290.664` seconds versus a `601.431`-second correct baseline. Under `performance_budget_v2`, the public 500x50 development fixture passes and the best full fresh-data compute-warm development run remains `263.305` seconds. Per-call univariate primitive reuse reduced native setup from `77.650` to `38.997` seconds while preserving bitwise-identical consumed p-values, exact graph/sepset/count/trace parity, and zero CPU numerical authority or fallback. A development-only grouped guarded-QR/stable-SVD-queue prototype has exact internal and public-output parity across real q=28/37/46/55/64 shapes, but its best 512-target QR/Q speedup is only `1.032x`, below the `1.3x` stop threshold; it is not integrated into the optimizer. Compute-profile v5 proves that all `132,908` physical target optimizations occur in whole-level prefill: `110,617` TargetKeys are eventually consumed and `22,291` are never consumed, while frontier live optimization and singleton padding are both zero. Its `269.426`-second diagnostic run is bitwise identical to the `263.305`-second result and is not a new performance claim. A subsequent zero-lookahead canonical-frontier prototype was rejected at max conditioning size 3: it took `394.993` seconds versus `179.914` seconds for v5, increased optimizer boundaries from 83 to 1,898 and setup submissions from 5,239 to 46,691, created 14,507 singleton padding targets, and changed 120,991 consumed p-values in low bits (maximum `3.33e-14`) despite exact structural graph semantics and zero decision flips. The v5 production path is restored. Checkpoint A passes, but Checkpoint B (`<180` seconds) and the final five-run median gate (`<=120` seconds) still fail. No new candidate is frozen; Phase 10 is not complete, and the external promotion holdout remains `SEALED_NOT_RELEASED` and must stay unopened.
 >
+> **Latest scheduler opportunity diagnostic:** A no-CUDA-CI native-plan replay reconstructed all 137 original v5 windows, 8,637 setup cohorts, 132,908 target optimizations, and 110,617 consumed TargetKeys exactly. Every v5 window is eventually demanded; only three setup cohorts are never demanded, containing nine targets. Of the 22,291 unconsumed targets, 22,282 are inside demanded cohorts. Lazy original-window activation therefore skips zero recorded windows and zero recorded batch wall time; through level 3 it still requires exactly 83 boundaries, 5,239 setup submissions, and 107,053 target optimizations. The decision is `STOP_SCHEDULER_OPPORTUNITY_TOO_SMALL`: stop scheduler-prefill work for this contract epoch and move to accepted optimizer-residual reuse or pure-C++ setup/optimizer pipelining.
+>
 > **Active roadmap phase:** Phase 10, full performance gate, hardening, and promotion.
 >
 > **Hard rule:** **0 SHD is mandatory.** A faster result with a different skeleton is a failed result.
@@ -3604,11 +3606,17 @@ consumed p-values in low bits (maximum absolute difference `3.33e-14`) despite
 zero decision flips and exact structural graph semantics. The v5 whole-level
 production scheduler is restored, and the failed prototype was not run through
 level 7. Do not retry synchronous zero-lookahead or direct depth-one/two
-lookahead. First design and measure setup-aware coalescing that preserves the
-v5 canonical group/batch shape, keeps boundaries and setup submissions bounded,
-avoids singleton padding, and restores bitwise parity on level 3. Pass the v2
-checkpoints and refreeze before opening the external sealed holdout. Promotion
-remains forbidden.
+lookahead. A subsequent no-CUDA-CI opportunity replay rebuilt all 137 original
+v5 windows and 8,637 setup cohorts exactly. All 137 windows are eventually
+demanded; only three cohorts and nine targets are never demanded. The remaining
+22,282 unconsumed targets are inside demanded cohorts. Lazy original-window
+activation therefore skips zero recorded batch wall time and, through level 3,
+retains exactly the v5 shape of 83 boundaries, 5,239 setup submissions, and
+107,053 target optimizations. The scheduler opportunity decision is
+`STOP_SCHEDULER_OPPORTUNITY_TOO_SMALL`. Stop this optimization family for the
+current contract epoch; continue with accepted optimizer-residual reuse or a
+pure-C++ setup/optimizer pipeline. Pass the v2 checkpoints and refreeze before
+opening the external sealed holdout. Promotion remains forbidden.
 
 ---
 
