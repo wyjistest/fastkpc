@@ -113,6 +113,55 @@ fastkpc_full_cuda_phase6_evaluate_cuda <- function(
   )
 }
 
+fastkpc_full_cuda_phase10_grouped_evaluate_prototype <- function(
+    prepared, Y, log_sp, force_stable_svd = FALSE,
+    rank_tolerance = sqrt(.Machine$double.eps),
+    grouped_warps_per_block = 4L, timing_repetitions = 7L) {
+  fastkpc_full_cuda_phase6_require(
+    is.list(prepared) && identical(
+      prepared$schema_version,
+      "full-cuda-ci-multi-penalty-cuda-setup-v1"
+    ),
+    "Phase 10 grouped prototype prepared setup is invalid"
+  )
+  Y <- as.matrix(Y)
+  log_sp <- as.matrix(log_sp)
+  storage.mode(Y) <- "double"
+  storage.mode(log_sp) <- "double"
+  target_count <- ncol(Y)
+  if (length(force_stable_svd) == 1L) {
+    force_stable_svd <- rep(force_stable_svd, target_count)
+  }
+  fastkpc_full_cuda_phase6_require(
+    ncol(prepared$X) > 25L && ncol(prepared$X) <= 64L &&
+      nrow(Y) == nrow(prepared$X) && target_count > 1L &&
+      target_count <= 512L && all(is.finite(Y)) &&
+      identical(
+        dim(log_sp), c(length(prepared$penalty_roots), target_count)
+      ) && all(is.finite(log_sp)) &&
+      is.logical(force_stable_svd) &&
+      length(force_stable_svd) == target_count &&
+      !anyNA(force_stable_svd) &&
+      length(grouped_warps_per_block) == 1L &&
+      !is.na(grouped_warps_per_block) &&
+      grouped_warps_per_block %in% c(2L, 4L, 8L) &&
+      length(timing_repetitions) == 1L &&
+      is.finite(timing_repetitions) &&
+      timing_repetitions == as.integer(timing_repetitions) &&
+      timing_repetitions >= 1L && timing_repetitions <= 50L,
+    "Phase 10 grouped prototype workload is outside its development envelope"
+  )
+  full_cuda_ci_multi_penalty_gcv_grouped_prototype_native(
+    prepared = prepared,
+    Y = Y,
+    log_sp = log_sp,
+    force_stable_svd = force_stable_svd,
+    rank_tolerance = rank_tolerance,
+    grouped_warps_per_block = grouped_warps_per_block,
+    timing_repetitions = timing_repetitions
+  )
+}
+
 fastkpc_full_cuda_phase6_optimize_cuda <- function(
     prepared, Y, convergence_tolerance = 1e-7,
     max_step_halving = 25L, max_iterations = 400L,

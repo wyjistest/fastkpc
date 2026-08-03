@@ -159,9 +159,53 @@ seconds (`+0.08%`), with bitwise-identical tasks and all optimizer work counters
 unchanged, so the dormant trace branch has no observed default-path regression.
 Exact decomposition memoization can remain a secondary initial-evaluation
 optimization, but a maximum observed `4.33%` request reduction cannot close the
-optimizer gap. The primary next route is therefore grouped/persistent QR
-execution across independent matrices with each matrix retaining its
-authenticated internal arithmetic order.
+optimizer gap.
+
+A development-only staged evaluator then tested the proposed grouped execution
+shape before changing the optimizer state machine. It retains the certified
+per-matrix `dgeqr2`/R-copy/`dorg2r`/guard arithmetic, assigns one independent
+matrix to each warp, compacts guard failures into a device queue, and sends
+those failures through the existing exact 64-thread/two-warp stable-SVD
+continuation. Separate baseline and grouped workspaces are compared before
+post-processing for bitwise-identical R, explicit Q, left basis, singular
+values, right basis, condition diagnostics, route, and status. The completed
+RSS, EDF, score, gradient, Hessian, and coefficients are also compared bitwise
+against both the staged baseline and the existing standalone Phase 6 evaluator.
+
+On `reference_machine_v1` (RTX 4090), a 512-target campaign covered real
+Prepared-S shapes `q=28/37/46/55/64`, three through seven penalties, guarded-QR
+and stable-SVD routes, and 2/4/8 warps per CTA. All 15 configurations had zero
+internal or public-output mismatches. Throughput, however, did not clear the
+prototype gate:
+
+```text
+best QR/Q speedup                  1.032x  (q=37, 4 warps/CTA)
+2/4-warp configurations           0.962x to 1.032x
+8-warp configurations             0.638x to 0.824x
+required to justify integration  >=1.500x
+stop threshold                    <1.300x
+decision                          STOP_BEFORE_OPTIMIZER_INTEGRATION
+```
+
+The result shows that merely packing independent certified QR evaluations into
+larger CTAs does not recover the nominally idle second warp: with enough work,
+CUDA already overlaps the existing 64-thread target CTAs effectively. The
+failure queue adds modest overhead on stable-SVD-heavy shapes, and eight-warp
+CTAs reduce useful occupancy. The prototype therefore remains development-only
+and is not called by `full_cuda_ci_one_call.cpp`; the optimizer state machine,
+candidate identity, and promotion boundary are unchanged. Any next optimizer
+route needs new evidence for a materially different decomposition kernel or
+work organization, not another direct per-warp CTA packing variant.
+
+Reproduce the exactness and stop/go campaign with:
+
+```bash
+FASTKPC_RUN_CUDA_TESTS=1 \
+Rscript fastkpc/tests/test_full_cuda_ci_grouped_qr_prototype.R
+```
+
+Set `FASTKPC_GROUPED_QR_REQUIRE_GO=1` to make the campaign fail unless the best
+measured configuration reaches the `1.5x` integration gate.
 
 Reproduce the development-only reuse trace with a distinct artifact path:
 

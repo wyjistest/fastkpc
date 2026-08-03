@@ -1717,6 +1717,45 @@ full_cuda_ci_multi_penalty_gcv_evaluate_cuda_native <- function(
   )
 }
 
+full_cuda_ci_multi_penalty_gcv_grouped_prototype_native <- function(
+    prepared, Y, log_sp, force_stable_svd, rank_tolerance,
+    grouped_warps_per_block, timing_repetitions) {
+  load_fastkpc_cuda_native()
+  prepared <- as.list(prepared)
+  prepared$X <- as.matrix(prepared$X)
+  prepared$magic_qr_packed <- as.matrix(prepared$magic_qr_packed)
+  prepared$magic_r <- as.matrix(prepared$magic_r)
+  prepared$magic_tau <- as.double(prepared$magic_tau)
+  prepared$magic_pivot <- as.integer(prepared$magic_pivot)
+  prepared$penalty_ranks <- as.integer(prepared$penalty_ranks)
+  prepared$penalty_roots <- lapply(prepared$penalty_roots, function(value) {
+    value <- as.matrix(value)
+    storage.mode(value) <- "double"
+    value
+  })
+  prepared$penalty_matrices <- lapply(
+    prepared$penalty_matrices,
+    function(value) {
+      value <- as.matrix(value)
+      storage.mode(value) <- "double"
+      value
+    }
+  )
+  storage.mode(prepared$X) <- "double"
+  storage.mode(prepared$magic_qr_packed) <- "double"
+  storage.mode(prepared$magic_r) <- "double"
+  Y <- as.matrix(Y)
+  log_sp <- as.matrix(log_sp)
+  storage.mode(Y) <- "double"
+  storage.mode(log_sp) <- "double"
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_grouped_prototype",
+    prepared, Y, log_sp, as.integer(force_stable_svd),
+    as.double(rank_tolerance), as.integer(grouped_warps_per_block),
+    as.integer(timing_repetitions), PACKAGE = "fastkpc_cuda"
+  )
+}
+
 full_cuda_ci_multi_penalty_gcv_optimize_cuda_native <- function(
     X, Y, magic_qr_packed, magic_tau, magic_r, magic_pivot,
     penalty_roots, penalty_matrices, penalty_ranks, initial_log_sp,

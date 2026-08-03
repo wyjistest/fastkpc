@@ -654,6 +654,168 @@ __device__ int small_dbdsdc_upper_i_two_warp(
   return iwork[0];
 }
 
+// Development-only grouped evaluator primitive. Each active warp owns one
+// independent workspace. The arithmetic within a matrix mirrors the guarded
+// QR prefix of small_dgesdd_left() exactly; only inter-matrix scheduling
+// differs. A rejected guard leaves the bidiagonalized R state ready for the
+// two-warp continuation below.
+__device__ int grouped_guarded_qr_warp(
+    integer m, integer n, Workspace* workspace,
+    bool compute_right_vectors = true,
+    bool allow_qr_complete = false,
+    bool force_stable_svd = false) {
+  const integer lane = static_cast<integer>(threadIdx.x) & 31;
+  integer info = 0;
+  if (lane == 0) {
+    workspace->qr_basis_used = 0;
+    workspace->qr_guard_accepted = 0;
+  }
+  cooperative_sync(32);
+  dgeqr2_(&m, &n, workspace->a, &m, workspace->qr_tau,
+          workspace->work, &info);
+  if (info == 0) {
+    for (integer index = lane; index < n * n; index += 32) {
+      const integer row = index % n;
+      const integer column = index / n;
+      workspace->r[index] =
+        row <= column ? workspace->a[row + m * column] : 0.0;
+    }
+    cooperative_sync(32);
+    dorg2r_(&m, &n, &n, workspace->a, &m, workspace->qr_tau,
+            workspace->work, &info);
+  }
+  if (lane == 0) {
+    doublereal maximum_diagonal = 0.0;
+    doublereal minimum_diagonal = DBL_MAX;
+    for (integer index = 0; index < n; ++index) {
+      const doublereal diagonal = abs(workspace->r[index + n * index]);
+      maximum_diagonal = max(maximum_diagonal, diagonal);
+      minimum_diagonal = min(minimum_diagonal, diagonal);
+    }
+    workspace->qr_guard_accepted =
+      !force_stable_svd &&
+        (!compute_right_vectors || allow_qr_complete) &&
+        isfinite(maximum_diagonal) &&
+        isfinite(minimum_diagonal) && maximum_diagonal > 0.0 &&
+        minimum_diagonal > maximum_diagonal *
+          kGuardedQrMinimumDiagonalRatio ? 1 : 0;
+  }
+  cooperative_sync(32);
+  if (info == 0 && workspace->qr_guard_accepted != 0) {
+    for (integer column = lane; column < n; column += 32) {
+      for (integer row = 0; row < column; ++row) {
+        workspace->bidiagonal_vt[row + n * column] = 0.0;
+      }
+      for (integer row = column; row < n; ++row) {
+        doublereal value = row == column ? 1.0 : 0.0;
+        for (integer inner = column; inner < row; ++inner) {
+          value -= workspace->r[inner + n * row] *
+            workspace->bidiagonal_vt[inner + n * column];
+        }
+        workspace->bidiagonal_vt[row + n * column] =
+          value / workspace->r[row + n * row];
+      }
+    }
+    cooperative_sync(32);
+    doublereal r_squared_norm = 0.0;
+    doublereal inverse_squared_norm = 0.0;
+    for (integer index = lane; index < n * n; index += 32) {
+      r_squared_norm += workspace->r[index] * workspace->r[index];
+      inverse_squared_norm += workspace->bidiagonal_vt[index] *
+        workspace->bidiagonal_vt[index];
+    }
+    for (integer offset = 16; offset > 0; offset /= 2) {
+      r_squared_norm += __shfl_down_sync(
+        0xffffffffu, r_squared_norm, offset);
+      inverse_squared_norm += __shfl_down_sync(
+        0xffffffffu, inverse_squared_norm, offset);
+    }
+    if (lane == 0) {
+      const doublereal condition_upper_bound =
+        sqrt(r_squared_norm) * sqrt(inverse_squared_norm);
+      workspace->qr_guard_accepted =
+        isfinite(condition_upper_bound) &&
+          condition_upper_bound < kGuardedQrConditionUpperBound ? 1 : 0;
+      workspace->qr_condition_estimate = condition_upper_bound;
+    }
+    cooperative_sync(32);
+  }
+  if (info == 0 && workspace->qr_guard_accepted != 0) {
+    for (integer index = lane; index < m * n; index += 32) {
+      workspace->left_u[index] = workspace->a[index];
+    }
+    for (integer index = lane; index < n; index += 32) {
+      workspace->bidiagonal[index] = 1.0;
+    }
+    cooperative_sync(32);
+  } else if (info == 0) {
+    dgebd2_(&n, &n, workspace->r, &n, workspace->bidiagonal,
+            workspace->bidiagonal_e, workspace->tau_q,
+            workspace->tau_p, workspace->work, &info);
+  }
+  if (lane == 0) {
+    workspace->iwork[0] = info;
+    workspace->qr_basis_used =
+      info == 0 && workspace->qr_guard_accepted != 0 ? 1 : 0;
+  }
+  cooperative_sync(32);
+  return workspace->iwork[0];
+}
+
+__device__ int grouped_stable_svd_two_warp_continuation(
+    integer m, integer n, Workspace* workspace,
+    bool compute_right_vectors = true) {
+  if (blockDim.x != 64) return -100;
+  const integer warp = static_cast<integer>(threadIdx.x) >> 5;
+  const integer lane = static_cast<integer>(threadIdx.x) & 31;
+  if (workspace->iwork[0] != 0) return workspace->iwork[0];
+  if (threadIdx.x == 0) workspace->qr_basis_used = 0;
+  __syncthreads();
+
+  int info = small_dbdsdc_upper_i_two_warp(n, workspace);
+  if (info != 0) return info;
+
+  if (warp == 0) {
+    char left = 'L';
+    char no_transpose = 'N';
+    dorm2r_(&left, &no_transpose, &n, &n, &n, workspace->r, &n,
+            workspace->tau_q, workspace->bidiagonal_u, &n,
+            workspace->work, &info, 1, 1);
+    if (info == 0 && compute_right_vectors) {
+      char right = 'R';
+      for (integer reflector = n - 2; reflector >= 0; --reflector) {
+        integer reflector_order = n - reflector - 1;
+        doublereal* vector =
+          workspace->r + reflector + n * (reflector + 1);
+        const doublereal saved = *vector;
+        *vector = 1.0;
+        dlarf_(&right, &n, &reflector_order, vector, &n,
+               workspace->tau_p + reflector,
+               workspace->bidiagonal_vt + n * (reflector + 1), &n,
+               workspace->work, 1);
+        *vector = saved;
+      }
+    }
+    if (lane == 0) workspace->iwork[0] = info;
+  }
+  __syncthreads();
+  if (workspace->iwork[0] != 0) return workspace->iwork[0];
+
+  for (integer output = static_cast<integer>(threadIdx.x);
+       output < m * n; output += static_cast<integer>(blockDim.x)) {
+    const integer row = output % m;
+    const integer column = output / m;
+    doublereal value = 0.0;
+    for (integer inner = 0; inner < n; ++inner) {
+      value += workspace->a[row + m * inner] *
+               workspace->bidiagonal_u[inner + n * column];
+    }
+    workspace->left_u[output] = value;
+  }
+  __syncthreads();
+  return 0;
+}
+
 __device__ int small_dgesdd_left(
     integer m, integer n, Workspace* workspace,
     bool compute_right_vectors = true,

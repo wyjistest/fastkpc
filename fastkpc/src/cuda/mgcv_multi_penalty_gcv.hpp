@@ -163,6 +163,51 @@ struct MultiPenaltyGcvCudaEvaluation {
   MultiPenaltyGcvCudaDiagnostics diagnostics;
 };
 
+struct MultiPenaltyGcvCudaGroupedPrototypeDiagnostics {
+  std::string schema_version;
+  std::string execution_strategy;
+  int device_id = -1;
+  std::string gpu_name;
+  int grouped_warps_per_block = 0;
+  int timing_repetitions = 0;
+  int target_count = 0;
+  int baseline_guarded_qr_count = 0;
+  int baseline_stable_svd_count = 0;
+  int grouped_guarded_qr_count = 0;
+  int grouped_stable_svd_count = 0;
+  int grouped_failure_queue_count = 0;
+  std::uint64_t solver_route_mismatch_count = 0;
+  std::uint64_t solver_info_mismatch_count = 0;
+  std::uint64_t aggregate_rank_mismatch_count = 0;
+  std::uint64_t numerical_rank_mismatch_count = 0;
+  std::uint64_t augmented_rows_mismatch_count = 0;
+  std::uint64_t r_bitwise_mismatch_count = 0;
+  std::uint64_t explicit_q_bitwise_mismatch_count = 0;
+  std::uint64_t left_basis_bitwise_mismatch_count = 0;
+  std::uint64_t singular_value_bitwise_mismatch_count = 0;
+  std::uint64_t right_basis_bitwise_mismatch_count = 0;
+  std::uint64_t qr_condition_estimate_bitwise_mismatch_count = 0;
+  std::uint64_t condition_bitwise_mismatch_count = 0;
+  std::uint64_t rss_bitwise_mismatch_count = 0;
+  std::uint64_t edf_bitwise_mismatch_count = 0;
+  std::uint64_t score_bitwise_mismatch_count = 0;
+  std::uint64_t gradient_bitwise_mismatch_count = 0;
+  std::uint64_t hessian_bitwise_mismatch_count = 0;
+  std::uint64_t coefficient_bitwise_mismatch_count = 0;
+  std::uint64_t nonfinite_status_mismatch_count = 0;
+  bool exact_parity = false;
+  std::vector<double> baseline_qr_ms;
+  std::vector<double> grouped_qr_ms;
+  double baseline_qr_median_ms = 0.0;
+  double grouped_qr_median_ms = 0.0;
+  double qr_throughput_speedup = 0.0;
+};
+
+struct MultiPenaltyGcvCudaGroupedPrototypeResult {
+  MultiPenaltyGcvCudaEvaluation evaluation;
+  MultiPenaltyGcvCudaGroupedPrototypeDiagnostics diagnostics;
+};
+
 struct MultiPenaltyGcvCudaOptimizerControl {
   double convergence_tolerance = 1e-7;
   int max_step_halving = 25;
@@ -313,6 +358,27 @@ MultiPenaltyGcvCudaEvaluation multi_penalty_gcv_evaluate_cuda(
     int penalty_count,
     int target_count,
     double rank_tolerance);
+
+MultiPenaltyGcvCudaGroupedPrototypeResult
+multi_penalty_gcv_grouped_evaluate_prototype_cuda(
+    const double* X,
+    const double* Y,
+    const double* magic_qr_packed,
+    const double* magic_tau,
+    const double* magic_r,
+    const int* magic_pivot_zero_based,
+    const std::vector<std::vector<double>>& penalty_roots,
+    const std::vector<std::vector<double>>& penalty_matrices,
+    const std::vector<int>& penalty_ranks,
+    const double* log_sp,
+    const int* force_stable_svd,
+    int n,
+    int coefficient_dim,
+    int penalty_count,
+    int target_count,
+    double rank_tolerance,
+    int grouped_warps_per_block,
+    int timing_repetitions);
 
 MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
     const double* X,

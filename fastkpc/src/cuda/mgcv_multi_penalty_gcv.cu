@@ -204,6 +204,23 @@ class Event {
   cudaEvent_t event_ = nullptr;
 };
 
+class TimingEvent {
+ public:
+  TimingEvent() {
+    check_cuda(cudaEventCreate(&event_),
+               "create multi-penalty GCV timing event");
+  }
+  TimingEvent(const TimingEvent&) = delete;
+  TimingEvent& operator=(const TimingEvent&) = delete;
+  ~TimingEvent() {
+    if (event_ != nullptr) cudaEventDestroy(event_);
+  }
+  cudaEvent_t get() const { return event_; }
+
+ private:
+  cudaEvent_t event_ = nullptr;
+};
+
 class CublasHandle {
  public:
   explicit CublasHandle(cudaStream_t stream) {
@@ -1512,6 +1529,644 @@ __global__ void evaluate_multi_penalty_targets_kernel(
     log_sp + static_cast<std::size_t>(penalty_count) * target,
     workspaces + target, results + target, n, q, penalty_count, true,
     nullptr, rank_tolerance);
+}
+
+struct DeviceGroupedPrototypeParity {
+  unsigned long long solver_route_mismatch_count;
+  unsigned long long solver_info_mismatch_count;
+  unsigned long long aggregate_rank_mismatch_count;
+  unsigned long long augmented_rows_mismatch_count;
+  unsigned long long r_bitwise_mismatch_count;
+  unsigned long long explicit_q_bitwise_mismatch_count;
+  unsigned long long left_basis_bitwise_mismatch_count;
+  unsigned long long singular_value_bitwise_mismatch_count;
+  unsigned long long right_basis_bitwise_mismatch_count;
+  unsigned long long qr_condition_estimate_bitwise_mismatch_count;
+};
+
+__device__ bool grouped_prototype_double_bits_equal(double left,
+                                                     double right) {
+  return __double_as_longlong(left) == __double_as_longlong(right);
+}
+
+__device__ void initialize_grouped_prototype_result(
+    DeviceTargetEvaluation* result) {
+  if (threadIdx.x != 0) return;
+  result->rss = CUDART_NAN;
+  result->edf = CUDART_NAN;
+  result->score = CUDART_INF;
+  result->condition = CUDART_NAN;
+  result->aggregate_penalty_rank = 0;
+  result->numerical_rank = 0;
+  result->solver_info = 0;
+  result->decomposition_route = kDecompositionUnknown;
+  for (int index = 0;
+       index < kMultiPenaltyGcvMaximumPenaltyCount; ++index) {
+    result->gradient[index] = CUDART_NAN;
+  }
+  for (int index = 0;
+       index < kMultiPenaltyGcvMaximumPenaltyCount *
+         kMultiPenaltyGcvMaximumPenaltyCount; ++index) {
+    result->hessian[index] = CUDART_NAN;
+  }
+  for (int index = 0;
+       index < kMultiPenaltyGcvMaximumCoefficientDim; ++index) {
+    result->coefficients[index] = CUDART_NAN;
+  }
+}
+
+__global__ void prepare_grouped_prototype_targets_kernel(
+    const double* magic_r,
+    const double* penalty_matrices,
+    const double* log_sp,
+    DeviceEvaluationWorkspace* workspaces,
+    DeviceTargetEvaluation* results,
+    int* augmented_rows,
+    int q,
+    int penalty_count,
+    int target_count) {
+  const int target = blockIdx.x;
+  if (target >= target_count) return;
+  DeviceEvaluationWorkspace* workspace = workspaces + target;
+  DeviceTargetEvaluation* result = results + target;
+  lapack312_multi::Workspace* decomposition = &workspace->decomposition;
+  const double* target_log_sp =
+    log_sp + static_cast<std::size_t>(penalty_count) * target;
+  const int square = q * q;
+  double* aggregate = decomposition->bidiagonal_vt;
+  int* pivot = decomposition->iwork;
+  double* factor_work = decomposition->work;
+
+  initialize_grouped_prototype_result(result);
+  if (threadIdx.x == 0) augmented_rows[target] = 0;
+  for (int element = threadIdx.x; element < square;
+       element += blockDim.x) {
+    double value = 0.0;
+    for (int penalty = 0; penalty < penalty_count; ++penalty) {
+      const double multiplier = glibc235::exp_fma_rn(
+        target_log_sp[penalty]);
+      value = __dadd_rn(
+        value,
+        __dmul_rn(multiplier,
+          penalty_matrices[element + square * penalty]));
+    }
+    aggregate[element] = value;
+  }
+  __syncthreads();
+  const int factor_rank = dpstf2_upper_block(
+    aggregate, pivot, factor_work, q);
+  if (threadIdx.x == 0) {
+    result->aggregate_penalty_rank = factor_rank;
+    decomposition->iwork[2 * q] = factor_rank;
+  }
+  __syncthreads();
+  const int root_rank = decomposition->iwork[2 * q];
+  if (root_rank <= 0 || root_rank + q > kMaximumRows) {
+    if (threadIdx.x == 0) result->solver_info = -1;
+    return;
+  }
+  const int rows = q + root_rank;
+  if (threadIdx.x == 0) augmented_rows[target] = rows;
+  for (int output = threadIdx.x; output < rows * q;
+       output += blockDim.x) {
+    const int row = output % rows;
+    const int column = output / rows;
+    double value = 0.0;
+    if (row < q) {
+      value = magic_r[row + q * column];
+    } else {
+      const int root_row = row - q;
+      int factor_column = 0;
+      while (factor_column < q && pivot[factor_column] != column + 1) {
+        ++factor_column;
+      }
+      if (factor_column < q && root_row <= factor_column) {
+        value = aggregate[root_row + q * factor_column];
+      }
+    }
+    decomposition->a[output] = value;
+  }
+}
+
+__global__ void baseline_grouped_prototype_decomposition_kernel(
+    DeviceEvaluationWorkspace* workspaces,
+    DeviceTargetEvaluation* results,
+    const int* augmented_rows,
+    const int* force_stable_svd,
+    int q,
+    int target_count) {
+  const int target = blockIdx.x;
+  if (target >= target_count || augmented_rows[target] <= 0) return;
+  lapack312_multi::Workspace* decomposition =
+    &workspaces[target].decomposition;
+  const int solver_info = lapack312_multi::small_dgesdd_left(
+    augmented_rows[target], q, decomposition, true, nullptr, true,
+    force_stable_svd[target] != 0);
+  if (threadIdx.x == 0) {
+    results[target].solver_info = solver_info;
+    results[target].decomposition_route =
+      decomposition->qr_basis_used != 0 ?
+        kDecompositionGuardedQr : kDecompositionStableSvd;
+  }
+}
+
+__global__ void grouped_prototype_guarded_qr_kernel(
+    DeviceEvaluationWorkspace* workspaces,
+    DeviceTargetEvaluation* results,
+    const int* augmented_rows,
+    const int* force_stable_svd,
+    int* failure_targets,
+    unsigned int* failure_count,
+    int q,
+    int target_count) {
+  const int global_thread = blockIdx.x * blockDim.x + threadIdx.x;
+  const int target = global_thread >> 5;
+  const int lane = threadIdx.x & 31;
+  if (target >= target_count || augmented_rows[target] <= 0) return;
+  lapack312_multi::Workspace* decomposition =
+    &workspaces[target].decomposition;
+  const int solver_info = lapack312_multi::grouped_guarded_qr_warp(
+    augmented_rows[target], q, decomposition, true, true,
+    force_stable_svd[target] != 0);
+  if (lane == 0) {
+    results[target].solver_info = solver_info;
+    if (solver_info == 0 && decomposition->qr_basis_used != 0) {
+      results[target].decomposition_route = kDecompositionGuardedQr;
+    } else {
+      results[target].decomposition_route = kDecompositionStableSvd;
+      if (solver_info == 0) {
+        const unsigned int slot = atomicAdd(failure_count, 1U);
+        failure_targets[slot] = target;
+      }
+    }
+  }
+}
+
+__global__ void grouped_prototype_stable_svd_kernel(
+    DeviceEvaluationWorkspace* workspaces,
+    DeviceTargetEvaluation* results,
+    const int* augmented_rows,
+    const int* failure_targets,
+    const unsigned int* failure_count,
+    int q) {
+  const unsigned int queue_index = blockIdx.x;
+  if (queue_index >= *failure_count) return;
+  const int target = failure_targets[queue_index];
+  const int solver_info =
+    lapack312_multi::grouped_stable_svd_two_warp_continuation(
+      augmented_rows[target], q, &workspaces[target].decomposition, true);
+  if (threadIdx.x == 0) {
+    results[target].solver_info = solver_info;
+    results[target].decomposition_route = kDecompositionStableSvd;
+  }
+}
+
+__global__ void compare_grouped_prototype_decompositions_kernel(
+    const DeviceEvaluationWorkspace* baseline_workspaces,
+    const DeviceEvaluationWorkspace* grouped_workspaces,
+    const DeviceTargetEvaluation* baseline_results,
+    const DeviceTargetEvaluation* grouped_results,
+    const int* baseline_rows,
+    const int* grouped_rows,
+    DeviceGroupedPrototypeParity* parity,
+    int q,
+    int target_count) {
+  const int target = blockIdx.x;
+  if (target >= target_count) return;
+  const lapack312_multi::Workspace& baseline =
+    baseline_workspaces[target].decomposition;
+  const lapack312_multi::Workspace& grouped =
+    grouped_workspaces[target].decomposition;
+  if (threadIdx.x == 0) {
+    if (baseline_results[target].decomposition_route !=
+        grouped_results[target].decomposition_route) {
+      atomicAdd(&parity->solver_route_mismatch_count, 1ULL);
+    }
+    if (baseline_results[target].solver_info !=
+        grouped_results[target].solver_info) {
+      atomicAdd(&parity->solver_info_mismatch_count, 1ULL);
+    }
+    if (baseline_results[target].aggregate_penalty_rank !=
+        grouped_results[target].aggregate_penalty_rank) {
+      atomicAdd(&parity->aggregate_rank_mismatch_count, 1ULL);
+    }
+    if (baseline_rows[target] != grouped_rows[target]) {
+      atomicAdd(&parity->augmented_rows_mismatch_count, 1ULL);
+    }
+    if (!grouped_prototype_double_bits_equal(
+          baseline.qr_condition_estimate,
+          grouped.qr_condition_estimate)) {
+      atomicAdd(
+        &parity->qr_condition_estimate_bitwise_mismatch_count, 1ULL);
+    }
+  }
+  const int rows = baseline_rows[target];
+  if (rows <= 0 || rows != grouped_rows[target]) return;
+  for (int element = threadIdx.x; element < q * q;
+       element += blockDim.x) {
+    if (!grouped_prototype_double_bits_equal(
+          baseline.r[element], grouped.r[element])) {
+      atomicAdd(&parity->r_bitwise_mismatch_count, 1ULL);
+    }
+    if (!grouped_prototype_double_bits_equal(
+          baseline.bidiagonal_vt[element],
+          grouped.bidiagonal_vt[element])) {
+      atomicAdd(&parity->right_basis_bitwise_mismatch_count, 1ULL);
+    }
+  }
+  for (int element = threadIdx.x; element < rows * q;
+       element += blockDim.x) {
+    if (!grouped_prototype_double_bits_equal(
+          baseline.a[element], grouped.a[element])) {
+      atomicAdd(&parity->explicit_q_bitwise_mismatch_count, 1ULL);
+    }
+    if (!grouped_prototype_double_bits_equal(
+          baseline.left_u[element], grouped.left_u[element])) {
+      atomicAdd(&parity->left_basis_bitwise_mismatch_count, 1ULL);
+    }
+  }
+  for (int element = threadIdx.x; element < q;
+       element += blockDim.x) {
+    if (!grouped_prototype_double_bits_equal(
+          baseline.bidiagonal[element], grouped.bidiagonal[element])) {
+      atomicAdd(&parity->singular_value_bitwise_mismatch_count, 1ULL);
+    }
+  }
+}
+
+// Mirrors the certified post-decomposition sequence in
+// evaluate_multi_penalty_target_device(). Keeping this prototype helper
+// separate avoids changing the production optimizer's monolithic state
+// machine before the grouped execution shape clears its stop/go gate.
+__device__ void complete_grouped_prototype_target_device(
+    const int* magic_pivot,
+    const double* penalty_roots,
+    const int* root_offsets,
+    const int* penalty_ranks,
+    const double* target_y0,
+    double target_squared_norm,
+    const double* target_log_sp,
+    DeviceEvaluationWorkspace* workspace,
+    DeviceTargetEvaluation* result,
+    int n,
+    int q,
+    int penalty_count,
+    double rank_tolerance) {
+  if (result->solver_info != 0) return;
+  lapack312_multi::Workspace* decomposition = &workspace->decomposition;
+  const int rows = q + result->aggregate_penalty_rank;
+  const int square = q * q;
+  if (threadIdx.x == 0) {
+    int rank = q;
+    const double threshold =
+      __dmul_rn(decomposition->bidiagonal[0], rank_tolerance);
+    while (rank > 0 && decomposition->bidiagonal[rank - 1] < threshold) {
+      --rank;
+    }
+    result->numerical_rank = rank;
+    decomposition->iwork[2 * q + 1] = rank;
+  }
+  __syncthreads();
+  const int rank = decomposition->iwork[2 * q + 1];
+  if (rank <= 0) {
+    if (threadIdx.x == 0) result->solver_info = -2;
+    return;
+  }
+  double* projected = decomposition->qr_tau;
+  for (int component = threadIdx.x; component < rank;
+       component += blockDim.x) {
+    double value = 0.0;
+    for (int row = 0; row < q; ++row) {
+      value = rounded_multiply_add(
+        value, decomposition->left_u[row + rows * component],
+        target_y0[row]);
+    }
+    projected[component] = value;
+  }
+  __syncthreads();
+  double* fitted_coordinates = decomposition->tau_q;
+  for (int row = threadIdx.x; row < q; row += blockDim.x) {
+    double value = 0.0;
+    for (int component = 0; component < rank; ++component) {
+      value = rounded_multiply_add(
+        value, decomposition->left_u[row + rows * component],
+        projected[component]);
+    }
+    fitted_coordinates[row] = value;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    double y_ay = 0.0;
+    for (int component = 0; component < rank; ++component) {
+      y_ay = rounded_multiply_add(
+        y_ay, projected[component], projected[component]);
+    }
+    double y_aay = 0.0;
+    for (int row = 0; row < q; ++row) {
+      y_aay = rounded_multiply_add(
+        y_aay, fitted_coordinates[row], fitted_coordinates[row]);
+    }
+    double edf = 0.0;
+    for (int column = 0; column < rank; ++column) {
+      for (int row = 0; row < q; ++row) {
+        const double value = decomposition->left_u[row + rows * column];
+        edf = rounded_multiply_add(edf, value, value);
+      }
+    }
+    double rss = __dadd_rn(
+      __dadd_rn(target_squared_norm, __dmul_rn(-2.0, y_ay)), y_aay);
+    if (rss < 0.0 && isfinite(rss)) rss = 0.0;
+    const double delta = static_cast<double>(n) - edf;
+    if (!isfinite(rss) || !isfinite(edf) || delta <= kDenominatorFloor) {
+      result->solver_info = -3;
+    } else {
+      const double score = __ddiv_rn(
+        __dmul_rn(static_cast<double>(n), rss),
+        __dmul_rn(delta, delta));
+      result->rss = rss;
+      result->edf = edf;
+      result->score = score;
+      result->condition = decomposition->qr_basis_used != 0 ?
+        decomposition->qr_condition_estimate :
+        __ddiv_rn(
+          decomposition->bidiagonal[0],
+          decomposition->bidiagonal[rank - 1]);
+    }
+  }
+  __syncthreads();
+  if (result->solver_info != 0) return;
+  const double rss = result->rss;
+  const double delta = static_cast<double>(n) - result->edf;
+
+  double* u1_u1 = decomposition->a;
+  for (int element = threadIdx.x; element < rank * rank;
+       element += blockDim.x) {
+    const int row = element % rank;
+    const int column = element / rank;
+    if (row >= column) {
+      double value = 0.0;
+      for (int coordinate = 0; coordinate < q; ++coordinate) {
+        value = rounded_multiply_add(
+          value,
+          decomposition->left_u[coordinate + rows * row],
+          decomposition->left_u[coordinate + rows * column]);
+      }
+      u1_u1[row + rank * column] = value;
+      u1_u1[column + rank * row] = value;
+    }
+  }
+  __syncthreads();
+  double* transformed = decomposition->r;
+  double* intermediate = decomposition->bidiagonal_u;
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const int penalty_rank = penalty_ranks[penalty];
+    const int root_offset = root_offsets[penalty];
+    for (int output = threadIdx.x; output < rank * penalty_rank;
+         output += blockDim.x) {
+      const int component = output % rank;
+      const int root_column = output / rank;
+      double value = 0.0;
+      for (int coordinate = 0; coordinate < q; ++coordinate) {
+        value = rounded_multiply_add(
+          value,
+          decomposition->bidiagonal_vt[component + q * coordinate],
+          penalty_roots[
+            coordinate + q * (root_offset + root_column)]);
+      }
+      transformed[component + rank * root_column] = __ddiv_rn(
+        value, decomposition->bidiagonal[component]);
+    }
+    __syncthreads();
+    for (int output = threadIdx.x; output < penalty_rank * rank;
+         output += blockDim.x) {
+      const int root_column = output % penalty_rank;
+      const int column = output / penalty_rank;
+      double value = 0.0;
+      for (int component = 0; component < rank; ++component) {
+        value = rounded_multiply_add(
+          value,
+          transformed[component + rank * root_column],
+          u1_u1[component + rank * column]);
+      }
+      intermediate[root_column + penalty_rank * column] = value;
+    }
+    __syncthreads();
+    double* metric = workspace->metric +
+      static_cast<std::size_t>(penalty) * square;
+    double* influence = workspace->influence +
+      static_cast<std::size_t>(penalty) * square;
+    for (int element = threadIdx.x; element < rank * rank;
+         element += blockDim.x) {
+      const int row = element % rank;
+      const int column = element / rank;
+      if (row >= column) {
+        double value = 0.0;
+        for (int root_column = 0; root_column < penalty_rank;
+             ++root_column) {
+          value = rounded_multiply_add(
+            value,
+            transformed[row + rank * root_column],
+            transformed[column + rank * root_column]);
+        }
+        metric[row + rank * column] = value;
+        metric[column + rank * row] = value;
+      }
+    }
+    __syncthreads();
+    for (int element = threadIdx.x; element < rank * rank;
+         element += blockDim.x) {
+      const int row = element % rank;
+      const int column = element / rank;
+      double value = 0.0;
+      for (int root_column = 0; root_column < penalty_rank;
+           ++root_column) {
+        value = rounded_multiply_add(
+          value,
+          transformed[row + rank * root_column],
+          intermediate[root_column + penalty_rank * column]);
+      }
+      influence[row + rank * column] = value;
+    }
+    __syncthreads();
+    for (int output = threadIdx.x; output < rank;
+         output += blockDim.x) {
+      double metric_value = 0.0;
+      double influence_value = 0.0;
+      double y_influence_value = 0.0;
+      for (int component = 0; component < rank; ++component) {
+        metric_value = rounded_multiply_add(
+          metric_value, projected[component],
+          metric[component + rank * output]);
+        y_influence_value = rounded_multiply_add(
+          y_influence_value, projected[component],
+          influence[component + rank * output]);
+        influence_value = rounded_multiply_add(
+          influence_value, projected[component],
+          influence[output + rank * component]);
+      }
+      workspace->metric_y[penalty * q + output] = metric_value;
+      workspace->influence_y[penalty * q + output] = influence_value;
+      workspace->y_influence[penalty * q + output] = y_influence_value;
+    }
+    __syncthreads();
+  }
+
+  double* dnorm = workspace->derivative_norm;
+  double* ddelta = workspace->derivative_delta;
+  double* d2norm = workspace->second_derivative_norm;
+  double* d2delta = workspace->second_derivative_delta;
+  for (int i = threadIdx.x; i < penalty_count; i += blockDim.x) {
+    const double lambda_i = glibc235::exp_fma_rn(target_log_sp[i]);
+    const double* influence_i = workspace->influence +
+      static_cast<std::size_t>(i) * square;
+    double trace = 0.0;
+    for (int component = 0; component < rank; ++component) {
+      trace = __dadd_rn(trace, influence_i[component + rank * component]);
+    }
+    ddelta[i] = __dmul_rn(lambda_i, trace);
+    double norm_derivative = 0.0;
+    for (int component = 0; component < rank; ++component) {
+      norm_derivative = rounded_multiply_add(
+        norm_derivative, projected[component],
+        __dadd_rn(
+          workspace->metric_y[i * q + component],
+          -workspace->influence_y[i * q + component]));
+    }
+    dnorm[i] = __dmul_rn(
+      __dmul_rn(2.0, lambda_i), norm_derivative);
+  }
+  __syncthreads();
+  for (int pair = threadIdx.x; pair < penalty_count * penalty_count;
+       pair += blockDim.x) {
+    const int i = pair % penalty_count;
+    const int j = pair / penalty_count;
+    if (i >= j) {
+      const double* influence_i = workspace->influence +
+        static_cast<std::size_t>(i) * square;
+      const double* metric_j = workspace->metric +
+        static_cast<std::size_t>(j) * square;
+      double product_sum = 0.0;
+      for (int element = 0; element < rank * rank; ++element) {
+        product_sum = rounded_multiply_add(
+          product_sum, metric_j[element], influence_i[element]);
+      }
+      double value = __dmul_rn(
+        -2.0,
+        glibc235::exp_fma_rn(__dadd_rn(
+          target_log_sp[i], target_log_sp[j])));
+      value = __dmul_rn(value, product_sum);
+      if (i == j) value = __dadd_rn(value, ddelta[i]);
+      d2delta[i + penalty_count * j] = value;
+      d2delta[j + penalty_count * i] = value;
+      double norm_value = 0.0;
+      for (int component = 0; component < rank; ++component) {
+        const double my_i = workspace->metric_y[i * q + component];
+        const double my_j = workspace->metric_y[j * q + component];
+        const double ky_i = workspace->influence_y[i * q + component];
+        const double ky_j = workspace->influence_y[j * q + component];
+        double term = __dadd_rn(
+          __dmul_rn(my_i, ky_j), __dmul_rn(my_j, ky_i));
+        term = __dadd_rn(
+          term, -__dmul_rn(__dmul_rn(2.0, my_i), my_j));
+        term = __dadd_rn(
+          term,
+          __dmul_rn(
+            workspace->y_influence[i * q + component], my_j));
+        norm_value = __dadd_rn(norm_value, term);
+      }
+      double norm_second_value = __dmul_rn(
+        2.0,
+        glibc235::exp_fma_rn(__dadd_rn(
+          target_log_sp[i], target_log_sp[j])));
+      norm_second_value = __dmul_rn(norm_second_value, norm_value);
+      if (i == j) {
+        norm_second_value = __dadd_rn(norm_second_value, dnorm[i]);
+      }
+      d2norm[i + penalty_count * j] = norm_second_value;
+      d2norm[j + penalty_count * i] = norm_second_value;
+    }
+  }
+  __syncthreads();
+  const double score_scale = __ddiv_rn(
+    static_cast<double>(n), __dmul_rn(delta, delta));
+  const double delta_scale = __ddiv_rn(
+    __dmul_rn(__dmul_rn(2.0, score_scale), rss), delta);
+  const double cross_scale = __ddiv_rn(
+    __dmul_rn(-2.0, score_scale), delta);
+  const double curvature_scale = __ddiv_rn(
+    __dmul_rn(3.0, delta_scale), delta);
+  for (int i = threadIdx.x; i < penalty_count; i += blockDim.x) {
+    result->gradient[i] = __dadd_rn(
+      __dmul_rn(score_scale, dnorm[i]),
+      -__dmul_rn(delta_scale, ddelta[i]));
+  }
+  for (int pair = threadIdx.x; pair < penalty_count * penalty_count;
+       pair += blockDim.x) {
+    const int i = pair % penalty_count;
+    const int j = pair / penalty_count;
+    if (i >= j) {
+      double value = __dmul_rn(
+        cross_scale,
+        __dadd_rn(__dmul_rn(ddelta[j], dnorm[i]),
+                  __dmul_rn(ddelta[i], dnorm[j])));
+      value = __dadd_rn(
+        value,
+        __dmul_rn(score_scale, d2norm[i + penalty_count * j]));
+      value = __dadd_rn(
+        value,
+        __dmul_rn(curvature_scale,
+                  __dmul_rn(ddelta[i], ddelta[j])));
+      value = __dadd_rn(
+        value,
+        -__dmul_rn(delta_scale, d2delta[i + penalty_count * j]));
+      result->hessian[i + penalty_count * j] = value;
+      result->hessian[j + penalty_count * i] = value;
+    }
+  }
+  __syncthreads();
+
+  for (int component = threadIdx.x; component < rank;
+       component += blockDim.x) {
+    fitted_coordinates[component] = __ddiv_rn(
+      projected[component], decomposition->bidiagonal[component]);
+  }
+  __syncthreads();
+  for (int row = threadIdx.x; row < q; row += blockDim.x) {
+    double value = 0.0;
+    for (int component = 0; component < rank; ++component) {
+      value = rounded_multiply_add(
+        value,
+        decomposition->bidiagonal_vt[component + q * row],
+        fitted_coordinates[component]);
+    }
+    result->coefficients[magic_pivot[row]] = value;
+  }
+}
+
+__global__ void complete_grouped_prototype_targets_kernel(
+    const int* magic_pivot,
+    const double* penalty_roots,
+    const int* root_offsets,
+    const int* penalty_ranks,
+    const double* y0,
+    const double* squared_norm,
+    const double* log_sp,
+    DeviceEvaluationWorkspace* workspaces,
+    DeviceTargetEvaluation* results,
+    int n,
+    int q,
+    int penalty_count,
+    int target_count,
+    double rank_tolerance) {
+  const int target = blockIdx.x;
+  if (target >= target_count) return;
+  complete_grouped_prototype_target_device(
+    magic_pivot, penalty_roots, root_offsets, penalty_ranks,
+    y0 + static_cast<std::size_t>(q) * target,
+    squared_norm[target],
+    log_sp + static_cast<std::size_t>(penalty_count) * target,
+    workspaces + target, results + target, n, q, penalty_count,
+    rank_tolerance);
 }
 
 __device__ double direct_qr_residual_score(
@@ -3034,6 +3689,561 @@ MultiPenaltyGcvCudaEvaluation multi_penalty_gcv_evaluate_cuda(
   }
   diagnostics.total_host_ms = std::chrono::duration<double, std::milli>(
     std::chrono::steady_clock::now() - started).count();
+  return output;
+}
+
+namespace {
+
+double grouped_prototype_median(std::vector<double> values) {
+  if (values.empty()) return 0.0;
+  std::sort(values.begin(), values.end());
+  const std::size_t middle = values.size() / 2U;
+  if ((values.size() & 1U) != 0U) return values[middle];
+  return 0.5 * (values[middle - 1U] + values[middle]);
+}
+
+bool grouped_prototype_host_double_bits_equal(double left, double right) {
+  std::uint64_t left_bits = 0;
+  std::uint64_t right_bits = 0;
+  std::memcpy(&left_bits, &left, sizeof(left_bits));
+  std::memcpy(&right_bits, &right, sizeof(right_bits));
+  return left_bits == right_bits;
+}
+
+int grouped_prototype_nonfinite_class(double value) {
+  if (std::isfinite(value)) return 0;
+  if (std::isnan(value)) return 1;
+  return std::signbit(value) ? 2 : 3;
+}
+
+}  // namespace
+
+MultiPenaltyGcvCudaGroupedPrototypeResult
+multi_penalty_gcv_grouped_evaluate_prototype_cuda(
+    const double* X,
+    const double* Y,
+    const double* magic_qr_packed,
+    const double* magic_tau,
+    const double* magic_r,
+    const int* magic_pivot_zero_based,
+    const std::vector<std::vector<double>>& penalty_roots,
+    const std::vector<std::vector<double>>& penalty_matrices,
+    const std::vector<int>& penalty_ranks,
+    const double* log_sp,
+    const int* force_stable_svd,
+    int n,
+    int coefficient_dim,
+    int penalty_count,
+    int target_count,
+    double rank_tolerance,
+    int grouped_warps_per_block,
+    int timing_repetitions) {
+  const auto started = std::chrono::steady_clock::now();
+  if (X == nullptr || Y == nullptr || magic_qr_packed == nullptr ||
+      magic_tau == nullptr || magic_r == nullptr ||
+      magic_pivot_zero_based == nullptr || log_sp == nullptr ||
+      force_stable_svd == nullptr || n <= coefficient_dim ||
+      coefficient_dim <= FASTKPC_LAPACK_SMALL_SMLSIZ ||
+      coefficient_dim > kMultiPenaltyGcvMaximumCoefficientDim ||
+      penalty_count <= 1 ||
+      penalty_count > kMultiPenaltyGcvMaximumPenaltyCount ||
+      target_count <= 1 || target_count > 512 ||
+      !std::isfinite(rank_tolerance) || rank_tolerance <= 0.0 ||
+      rank_tolerance >= 1.0 ||
+      static_cast<int>(penalty_roots.size()) != penalty_count ||
+      static_cast<int>(penalty_matrices.size()) != penalty_count ||
+      static_cast<int>(penalty_ranks.size()) != penalty_count ||
+      (grouped_warps_per_block != 2 &&
+       grouped_warps_per_block != 4 &&
+       grouped_warps_per_block != 8) ||
+      timing_repetitions <= 0 || timing_repetitions > 50) {
+    throw std::runtime_error(
+      "grouped multi-penalty CUDA prototype inputs are invalid");
+  }
+  const int q = coefficient_dim;
+  const std::size_t square = static_cast<std::size_t>(q) * q;
+  int total_root_rank = 0;
+  std::vector<int> root_offsets(static_cast<std::size_t>(penalty_count));
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const int rank = penalty_ranks[static_cast<std::size_t>(penalty)];
+    if (rank <= 0 || rank > q ||
+        penalty_roots[static_cast<std::size_t>(penalty)].size() !=
+          static_cast<std::size_t>(q) * rank ||
+        penalty_matrices[static_cast<std::size_t>(penalty)].size() !=
+          square) {
+      throw std::runtime_error(
+        "grouped multi-penalty CUDA prototype geometry is invalid");
+    }
+    root_offsets[static_cast<std::size_t>(penalty)] = total_root_rank;
+    total_root_rank += rank;
+  }
+  if (q + total_root_rank > kMaximumRows) {
+    throw std::runtime_error(
+      "grouped multi-penalty CUDA prototype exceeds the row envelope");
+  }
+  std::vector<double> roots(
+    static_cast<std::size_t>(q) * total_root_rank);
+  std::vector<double> matrices(square * penalty_count);
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const std::vector<double>& root =
+      penalty_roots[static_cast<std::size_t>(penalty)];
+    std::copy(root.begin(), root.end(), roots.begin() +
+      static_cast<std::size_t>(q) *
+        root_offsets[static_cast<std::size_t>(penalty)]);
+    const std::vector<double>& matrix =
+      penalty_matrices[static_cast<std::size_t>(penalty)];
+    std::copy(matrix.begin(), matrix.end(),
+              matrices.begin() + square * penalty);
+  }
+
+  MultiPenaltyGcvCudaGroupedPrototypeResult output;
+  MultiPenaltyGcvCudaEvaluation& evaluation = output.evaluation;
+  evaluation.schema_version =
+    "full-cuda-ci-multi-penalty-grouped-evaluation-prototype-v1";
+  evaluation.rank_path =
+    "development-only-grouped-guarded-qr-stable-svd-queue-v1";
+  evaluation.n = n;
+  evaluation.coefficient_dim = q;
+  evaluation.penalty_count = penalty_count;
+  evaluation.target_count = target_count;
+  MultiPenaltyGcvCudaDiagnostics& evaluation_diagnostics =
+    evaluation.diagnostics;
+  evaluation_diagnostics.schema_version =
+    "full-cuda-ci-multi-penalty-grouped-prototype-diagnostics-v1";
+  evaluation_diagnostics.execution_strategy =
+    "development-only-staged-grouped-guarded-qr";
+  evaluation_diagnostics.prepared_setup_upload_count = 1;
+  evaluation_diagnostics.target_batch_upload_count = 1;
+  evaluation_diagnostics.cuda_qt_y_kernel_launch_count = 1;
+  evaluation_diagnostics.cuda_objective_kernel_launch_count = 3;
+  evaluation_diagnostics.cuda_objective_target_count = target_count;
+  evaluation_diagnostics.target_specific_log_sp = true;
+  evaluation_diagnostics.true_batched_kernel = target_count > 1;
+  evaluation_diagnostics.normal_equations_used = false;
+  check_cuda(cudaGetDevice(&evaluation_diagnostics.device_id),
+             "query grouped prototype CUDA device");
+  cudaDeviceProp properties{};
+  check_cuda(cudaGetDeviceProperties(
+               &properties, evaluation_diagnostics.device_id),
+             "query grouped prototype CUDA properties");
+  evaluation_diagnostics.gpu_name = properties.name;
+
+  Stream stream;
+  DeviceBuffer<double> d_Y;
+  DeviceBuffer<double> d_qr_packed;
+  DeviceBuffer<double> d_tau;
+  DeviceBuffer<double> d_r;
+  DeviceBuffer<int> d_pivot;
+  DeviceBuffer<double> d_roots;
+  DeviceBuffer<int> d_root_offsets;
+  DeviceBuffer<int> d_ranks;
+  DeviceBuffer<double> d_matrices;
+  DeviceBuffer<double> d_log_sp;
+  DeviceBuffer<int> d_force_stable_svd;
+  DeviceBuffer<double> d_qt_work;
+  DeviceBuffer<double> d_y0;
+  DeviceBuffer<double> d_squared_norm;
+  DeviceBuffer<DeviceEvaluationWorkspace> d_baseline_workspaces;
+  DeviceBuffer<DeviceEvaluationWorkspace> d_grouped_workspaces;
+  DeviceBuffer<DeviceTargetEvaluation> d_baseline_results;
+  DeviceBuffer<DeviceTargetEvaluation> d_grouped_results;
+  DeviceBuffer<int> d_baseline_rows;
+  DeviceBuffer<int> d_grouped_rows;
+  DeviceBuffer<int> d_failure_targets;
+  DeviceBuffer<unsigned int> d_failure_count;
+  DeviceBuffer<DeviceGroupedPrototypeParity> d_parity;
+  const std::size_t y_count = static_cast<std::size_t>(n) * target_count;
+  d_Y.allocate(y_count, &evaluation_diagnostics);
+  d_qr_packed.allocate(
+    static_cast<std::size_t>(n) * q, &evaluation_diagnostics);
+  d_tau.allocate(q, &evaluation_diagnostics);
+  d_r.allocate(square, &evaluation_diagnostics);
+  d_pivot.allocate(q, &evaluation_diagnostics);
+  d_roots.allocate(roots.size(), &evaluation_diagnostics);
+  d_root_offsets.allocate(penalty_count, &evaluation_diagnostics);
+  d_ranks.allocate(penalty_count, &evaluation_diagnostics);
+  d_matrices.allocate(matrices.size(), &evaluation_diagnostics);
+  d_log_sp.allocate(
+    static_cast<std::size_t>(penalty_count) * target_count,
+    &evaluation_diagnostics);
+  d_force_stable_svd.allocate(target_count, &evaluation_diagnostics);
+  d_qt_work.allocate(y_count, &evaluation_diagnostics);
+  d_y0.allocate(
+    static_cast<std::size_t>(q) * target_count, &evaluation_diagnostics);
+  d_squared_norm.allocate(target_count, &evaluation_diagnostics);
+  d_baseline_workspaces.allocate(target_count, &evaluation_diagnostics);
+  d_grouped_workspaces.allocate(target_count, &evaluation_diagnostics);
+  d_baseline_results.allocate(target_count, &evaluation_diagnostics);
+  d_grouped_results.allocate(target_count, &evaluation_diagnostics);
+  d_baseline_rows.allocate(target_count, &evaluation_diagnostics);
+  d_grouped_rows.allocate(target_count, &evaluation_diagnostics);
+  d_failure_targets.allocate(target_count, &evaluation_diagnostics);
+  d_failure_count.allocate(1, &evaluation_diagnostics);
+  d_parity.allocate(1, &evaluation_diagnostics);
+  upload_async(&d_Y, Y, y_count, stream.get(), &evaluation_diagnostics);
+  upload_async(&d_qr_packed, magic_qr_packed,
+               static_cast<std::size_t>(n) * q, stream.get(),
+               &evaluation_diagnostics);
+  upload_async(&d_tau, magic_tau, q, stream.get(),
+               &evaluation_diagnostics);
+  upload_async(&d_r, magic_r, square, stream.get(),
+               &evaluation_diagnostics);
+  upload_async(&d_pivot, magic_pivot_zero_based, q, stream.get(),
+               &evaluation_diagnostics);
+  upload_async(&d_roots, roots.data(), roots.size(), stream.get(),
+               &evaluation_diagnostics);
+  upload_async(&d_root_offsets, root_offsets.data(), penalty_count,
+               stream.get(), &evaluation_diagnostics);
+  upload_async(&d_ranks, penalty_ranks.data(), penalty_count,
+               stream.get(), &evaluation_diagnostics);
+  upload_async(&d_matrices, matrices.data(), matrices.size(), stream.get(),
+               &evaluation_diagnostics);
+  upload_async(&d_log_sp, log_sp,
+               static_cast<std::size_t>(penalty_count) * target_count,
+               stream.get(), &evaluation_diagnostics);
+  upload_async(&d_force_stable_svd, force_stable_svd, target_count,
+               stream.get(), &evaluation_diagnostics);
+
+  const int target_blocks = (target_count + kBlockSize - 1) / kBlockSize;
+  target_squared_norm_kernel<<<target_blocks, kBlockSize, 0, stream.get()>>>(
+    d_Y.get(), d_squared_norm.get(), n, target_count);
+  check_cuda(cudaGetLastError(),
+             "launch grouped prototype target norm kernel");
+  magic_qt_y_kernel<<<target_blocks, kBlockSize, 0, stream.get()>>>(
+    d_qr_packed.get(), d_tau.get(), d_Y.get(), d_qt_work.get(),
+    d_y0.get(), n, q, target_count);
+  check_cuda(cudaGetLastError(),
+             "launch grouped prototype QR projection kernel");
+
+  const int grouped_threads = grouped_warps_per_block * 32;
+  const int grouped_blocks =
+    (target_count + grouped_warps_per_block - 1) /
+      grouped_warps_per_block;
+  auto prepare = [&](DeviceEvaluationWorkspace* workspaces,
+                     DeviceTargetEvaluation* results,
+                     int* rows) {
+    prepare_grouped_prototype_targets_kernel<<<
+      target_count, kBlockSize, 0, stream.get()>>>(
+        d_r.get(), d_matrices.get(), d_log_sp.get(), workspaces, results,
+        rows, q, penalty_count, target_count);
+    check_cuda(cudaGetLastError(),
+               "launch grouped prototype preparation kernel");
+  };
+  auto launch_baseline = [&]() {
+    baseline_grouped_prototype_decomposition_kernel<<<
+      target_count, kBlockSize, 0, stream.get()>>>(
+        d_baseline_workspaces.get(), d_baseline_results.get(),
+        d_baseline_rows.get(), d_force_stable_svd.get(), q, target_count);
+    check_cuda(cudaGetLastError(),
+               "launch grouped prototype baseline decomposition");
+  };
+  auto launch_grouped = [&]() {
+    check_cuda(cudaMemsetAsync(
+      d_failure_count.get(), 0, sizeof(unsigned int), stream.get()),
+      "reset grouped prototype failure queue");
+    grouped_prototype_guarded_qr_kernel<<<
+      grouped_blocks, grouped_threads, 0, stream.get()>>>(
+        d_grouped_workspaces.get(), d_grouped_results.get(),
+        d_grouped_rows.get(), d_force_stable_svd.get(),
+        d_failure_targets.get(), d_failure_count.get(), q, target_count);
+    check_cuda(cudaGetLastError(),
+               "launch grouped prototype guarded QR");
+    grouped_prototype_stable_svd_kernel<<<
+      target_count, kBlockSize, 0, stream.get()>>>(
+        d_grouped_workspaces.get(), d_grouped_results.get(),
+        d_grouped_rows.get(), d_failure_targets.get(),
+        d_failure_count.get(), q);
+    check_cuda(cudaGetLastError(),
+               "launch grouped prototype stable SVD queue");
+  };
+
+  prepare(d_baseline_workspaces.get(), d_baseline_results.get(),
+          d_baseline_rows.get());
+  launch_baseline();
+  prepare(d_grouped_workspaces.get(), d_grouped_results.get(),
+          d_grouped_rows.get());
+  launch_grouped();
+  check_cuda(cudaStreamSynchronize(stream.get()),
+             "warm grouped prototype decomposition paths");
+
+  TimingEvent timing_start;
+  TimingEvent timing_stop;
+  output.diagnostics.baseline_qr_ms.reserve(timing_repetitions);
+  output.diagnostics.grouped_qr_ms.reserve(timing_repetitions);
+  for (int repetition = 0; repetition < timing_repetitions; ++repetition) {
+    prepare(d_baseline_workspaces.get(), d_baseline_results.get(),
+            d_baseline_rows.get());
+    check_cuda(cudaEventRecord(timing_start.get(), stream.get()),
+               "record grouped prototype baseline start");
+    launch_baseline();
+    check_cuda(cudaEventRecord(timing_stop.get(), stream.get()),
+               "record grouped prototype baseline stop");
+    check_cuda(cudaEventSynchronize(timing_stop.get()),
+               "synchronize grouped prototype baseline timing");
+    float elapsed_ms = 0.0F;
+    check_cuda(cudaEventElapsedTime(
+      &elapsed_ms, timing_start.get(), timing_stop.get()),
+      "measure grouped prototype baseline QR");
+    output.diagnostics.baseline_qr_ms.push_back(
+      static_cast<double>(elapsed_ms));
+
+    prepare(d_grouped_workspaces.get(), d_grouped_results.get(),
+            d_grouped_rows.get());
+    check_cuda(cudaMemsetAsync(
+      d_failure_count.get(), 0, sizeof(unsigned int), stream.get()),
+      "reset grouped prototype timed failure queue");
+    check_cuda(cudaEventRecord(timing_start.get(), stream.get()),
+               "record grouped prototype grouped start");
+    grouped_prototype_guarded_qr_kernel<<<
+      grouped_blocks, grouped_threads, 0, stream.get()>>>(
+        d_grouped_workspaces.get(), d_grouped_results.get(),
+        d_grouped_rows.get(), d_force_stable_svd.get(),
+        d_failure_targets.get(), d_failure_count.get(), q, target_count);
+    check_cuda(cudaGetLastError(),
+               "launch timed grouped prototype guarded QR");
+    grouped_prototype_stable_svd_kernel<<<
+      target_count, kBlockSize, 0, stream.get()>>>(
+        d_grouped_workspaces.get(), d_grouped_results.get(),
+        d_grouped_rows.get(), d_failure_targets.get(),
+        d_failure_count.get(), q);
+    check_cuda(cudaGetLastError(),
+               "launch timed grouped prototype stable SVD queue");
+    check_cuda(cudaEventRecord(timing_stop.get(), stream.get()),
+               "record grouped prototype grouped stop");
+    check_cuda(cudaEventSynchronize(timing_stop.get()),
+               "synchronize grouped prototype grouped timing");
+    elapsed_ms = 0.0F;
+    check_cuda(cudaEventElapsedTime(
+      &elapsed_ms, timing_start.get(), timing_stop.get()),
+      "measure grouped prototype grouped QR");
+    output.diagnostics.grouped_qr_ms.push_back(
+      static_cast<double>(elapsed_ms));
+  }
+
+  prepare(d_baseline_workspaces.get(), d_baseline_results.get(),
+          d_baseline_rows.get());
+  launch_baseline();
+  prepare(d_grouped_workspaces.get(), d_grouped_results.get(),
+          d_grouped_rows.get());
+  launch_grouped();
+  check_cuda(cudaMemsetAsync(
+    d_parity.get(), 0, sizeof(DeviceGroupedPrototypeParity), stream.get()),
+    "reset grouped prototype parity counters");
+  compare_grouped_prototype_decompositions_kernel<<<
+    target_count, kBlockSize, 0, stream.get()>>>(
+      d_baseline_workspaces.get(), d_grouped_workspaces.get(),
+      d_baseline_results.get(), d_grouped_results.get(),
+      d_baseline_rows.get(), d_grouped_rows.get(), d_parity.get(), q,
+      target_count);
+  check_cuda(cudaGetLastError(),
+             "launch grouped prototype decomposition comparison");
+  complete_grouped_prototype_targets_kernel<<<
+    target_count, kBlockSize, 0, stream.get()>>>(
+      d_pivot.get(), d_roots.get(), d_root_offsets.get(), d_ranks.get(),
+      d_y0.get(), d_squared_norm.get(), d_log_sp.get(),
+      d_baseline_workspaces.get(), d_baseline_results.get(), n, q,
+      penalty_count, target_count, rank_tolerance);
+  check_cuda(cudaGetLastError(),
+             "launch grouped prototype baseline completion");
+  complete_grouped_prototype_targets_kernel<<<
+    target_count, kBlockSize, 0, stream.get()>>>(
+      d_pivot.get(), d_roots.get(), d_root_offsets.get(), d_ranks.get(),
+      d_y0.get(), d_squared_norm.get(), d_log_sp.get(),
+      d_grouped_workspaces.get(), d_grouped_results.get(), n, q,
+      penalty_count, target_count, rank_tolerance);
+  check_cuda(cudaGetLastError(),
+             "launch grouped prototype grouped completion");
+
+  std::vector<DeviceTargetEvaluation> baseline_results(
+    static_cast<std::size_t>(target_count));
+  std::vector<DeviceTargetEvaluation> grouped_results(
+    static_cast<std::size_t>(target_count));
+  DeviceGroupedPrototypeParity parity{};
+  unsigned int failure_count = 0;
+  check_cuda(cudaMemcpyAsync(
+    baseline_results.data(), d_baseline_results.get(),
+    baseline_results.size() * sizeof(DeviceTargetEvaluation),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download grouped prototype baseline results");
+  check_cuda(cudaMemcpyAsync(
+    grouped_results.data(), d_grouped_results.get(),
+    grouped_results.size() * sizeof(DeviceTargetEvaluation),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download grouped prototype grouped results");
+  check_cuda(cudaMemcpyAsync(
+    &parity, d_parity.get(), sizeof(parity), cudaMemcpyDeviceToHost,
+    stream.get()),
+    "download grouped prototype parity counters");
+  check_cuda(cudaMemcpyAsync(
+    &failure_count, d_failure_count.get(), sizeof(failure_count),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download grouped prototype failure count");
+  evaluation_diagnostics.d2h_copy_count = 4;
+  check_cuda(cudaStreamSynchronize(stream.get()),
+             "synchronize grouped prototype results");
+
+  evaluation.rss.resize(target_count);
+  evaluation.edf.resize(target_count);
+  evaluation.score.resize(target_count);
+  evaluation.condition.resize(target_count);
+  evaluation.aggregate_penalty_rank.resize(target_count);
+  evaluation.numerical_rank.resize(target_count);
+  evaluation.solver_info.resize(target_count);
+  evaluation.gradient.resize(
+    static_cast<std::size_t>(penalty_count) * target_count);
+  evaluation.hessian.resize(
+    static_cast<std::size_t>(penalty_count) * penalty_count * target_count);
+  evaluation.coefficients.resize(static_cast<std::size_t>(q) * target_count);
+
+  MultiPenaltyGcvCudaGroupedPrototypeDiagnostics& diagnostics =
+    output.diagnostics;
+  diagnostics.schema_version =
+    "full-cuda-ci-multi-penalty-grouped-prototype-diagnostics-v1";
+  diagnostics.execution_strategy =
+    "development-only-warp-grouped-qr-stable-svd-queue";
+  diagnostics.device_id = evaluation_diagnostics.device_id;
+  diagnostics.gpu_name = evaluation_diagnostics.gpu_name;
+  diagnostics.grouped_warps_per_block = grouped_warps_per_block;
+  diagnostics.timing_repetitions = timing_repetitions;
+  diagnostics.target_count = target_count;
+  diagnostics.grouped_failure_queue_count =
+    static_cast<int>(failure_count);
+  diagnostics.solver_route_mismatch_count =
+    parity.solver_route_mismatch_count;
+  diagnostics.solver_info_mismatch_count =
+    parity.solver_info_mismatch_count;
+  diagnostics.aggregate_rank_mismatch_count =
+    parity.aggregate_rank_mismatch_count;
+  diagnostics.augmented_rows_mismatch_count =
+    parity.augmented_rows_mismatch_count;
+  diagnostics.r_bitwise_mismatch_count = parity.r_bitwise_mismatch_count;
+  diagnostics.explicit_q_bitwise_mismatch_count =
+    parity.explicit_q_bitwise_mismatch_count;
+  diagnostics.left_basis_bitwise_mismatch_count =
+    parity.left_basis_bitwise_mismatch_count;
+  diagnostics.singular_value_bitwise_mismatch_count =
+    parity.singular_value_bitwise_mismatch_count;
+  diagnostics.right_basis_bitwise_mismatch_count =
+    parity.right_basis_bitwise_mismatch_count;
+  diagnostics.qr_condition_estimate_bitwise_mismatch_count =
+    parity.qr_condition_estimate_bitwise_mismatch_count;
+
+  auto compare_scalar = [&](double baseline, double grouped,
+                            std::uint64_t* mismatch_count) {
+    if (!grouped_prototype_host_double_bits_equal(baseline, grouped)) {
+      *mismatch_count += 1U;
+    }
+    if (grouped_prototype_nonfinite_class(baseline) !=
+        grouped_prototype_nonfinite_class(grouped)) {
+      diagnostics.nonfinite_status_mismatch_count += 1U;
+    }
+  };
+  for (int target = 0; target < target_count; ++target) {
+    const DeviceTargetEvaluation& baseline =
+      baseline_results[static_cast<std::size_t>(target)];
+    const DeviceTargetEvaluation& grouped =
+      grouped_results[static_cast<std::size_t>(target)];
+    if (baseline.decomposition_route == kDecompositionGuardedQr) {
+      diagnostics.baseline_guarded_qr_count += 1;
+    } else if (baseline.decomposition_route == kDecompositionStableSvd) {
+      diagnostics.baseline_stable_svd_count += 1;
+    }
+    if (grouped.decomposition_route == kDecompositionGuardedQr) {
+      diagnostics.grouped_guarded_qr_count += 1;
+    } else if (grouped.decomposition_route == kDecompositionStableSvd) {
+      diagnostics.grouped_stable_svd_count += 1;
+    }
+    if (baseline.numerical_rank != grouped.numerical_rank) {
+      diagnostics.numerical_rank_mismatch_count += 1U;
+    }
+    if (baseline.solver_info != grouped.solver_info) {
+      diagnostics.solver_info_mismatch_count += 1U;
+    }
+    compare_scalar(
+      baseline.rss, grouped.rss, &diagnostics.rss_bitwise_mismatch_count);
+    compare_scalar(
+      baseline.edf, grouped.edf, &diagnostics.edf_bitwise_mismatch_count);
+    compare_scalar(
+      baseline.score, grouped.score,
+      &diagnostics.score_bitwise_mismatch_count);
+    compare_scalar(
+      baseline.condition, grouped.condition,
+      &diagnostics.condition_bitwise_mismatch_count);
+    evaluation.rss[static_cast<std::size_t>(target)] = grouped.rss;
+    evaluation.edf[static_cast<std::size_t>(target)] = grouped.edf;
+    evaluation.score[static_cast<std::size_t>(target)] = grouped.score;
+    evaluation.condition[static_cast<std::size_t>(target)] =
+      grouped.condition;
+    evaluation.aggregate_penalty_rank[static_cast<std::size_t>(target)] =
+      grouped.aggregate_penalty_rank;
+    evaluation.numerical_rank[static_cast<std::size_t>(target)] =
+      grouped.numerical_rank;
+    evaluation.solver_info[static_cast<std::size_t>(target)] =
+      grouped.solver_info;
+    if (grouped.solver_info != 0) evaluation_diagnostics.cuda_error_count += 1;
+    if (grouped.solver_info > 0) {
+      evaluation_diagnostics.svd_nonconverged_count += 1;
+    }
+    if (grouped.solver_info == -1) {
+      evaluation_diagnostics.aggregate_rank_failure_count += 1;
+    }
+    for (int penalty = 0; penalty < penalty_count; ++penalty) {
+      compare_scalar(
+        baseline.gradient[penalty], grouped.gradient[penalty],
+        &diagnostics.gradient_bitwise_mismatch_count);
+      evaluation.gradient[penalty + penalty_count * target] =
+        grouped.gradient[penalty];
+      for (int other = 0; other < penalty_count; ++other) {
+        const int index = penalty + penalty_count * other;
+        compare_scalar(
+          baseline.hessian[index], grouped.hessian[index],
+          &diagnostics.hessian_bitwise_mismatch_count);
+        evaluation.hessian[penalty + penalty_count *
+          (other + penalty_count * target)] = grouped.hessian[index];
+      }
+    }
+    for (int row = 0; row < q; ++row) {
+      compare_scalar(
+        baseline.coefficients[row], grouped.coefficients[row],
+        &diagnostics.coefficient_bitwise_mismatch_count);
+      evaluation.coefficients[row + q * target] = grouped.coefficients[row];
+    }
+  }
+  evaluation_diagnostics.cuda_guarded_qr_evaluation_count =
+    diagnostics.grouped_guarded_qr_count;
+  evaluation_diagnostics.cuda_stable_svd_evaluation_count =
+    diagnostics.grouped_stable_svd_count;
+  diagnostics.baseline_qr_median_ms = grouped_prototype_median(
+    diagnostics.baseline_qr_ms);
+  diagnostics.grouped_qr_median_ms = grouped_prototype_median(
+    diagnostics.grouped_qr_ms);
+  diagnostics.qr_throughput_speedup =
+    diagnostics.grouped_qr_median_ms > 0.0 ?
+      diagnostics.baseline_qr_median_ms /
+        diagnostics.grouped_qr_median_ms : 0.0;
+  diagnostics.exact_parity =
+    diagnostics.solver_route_mismatch_count == 0U &&
+    diagnostics.solver_info_mismatch_count == 0U &&
+    diagnostics.aggregate_rank_mismatch_count == 0U &&
+    diagnostics.numerical_rank_mismatch_count == 0U &&
+    diagnostics.augmented_rows_mismatch_count == 0U &&
+    diagnostics.r_bitwise_mismatch_count == 0U &&
+    diagnostics.explicit_q_bitwise_mismatch_count == 0U &&
+    diagnostics.left_basis_bitwise_mismatch_count == 0U &&
+    diagnostics.singular_value_bitwise_mismatch_count == 0U &&
+    diagnostics.right_basis_bitwise_mismatch_count == 0U &&
+    diagnostics.qr_condition_estimate_bitwise_mismatch_count == 0U &&
+    diagnostics.condition_bitwise_mismatch_count == 0U &&
+    diagnostics.rss_bitwise_mismatch_count == 0U &&
+    diagnostics.edf_bitwise_mismatch_count == 0U &&
+    diagnostics.score_bitwise_mismatch_count == 0U &&
+    diagnostics.gradient_bitwise_mismatch_count == 0U &&
+    diagnostics.hessian_bitwise_mismatch_count == 0U &&
+    diagnostics.coefficient_bitwise_mismatch_count == 0U &&
+    diagnostics.nonfinite_status_mismatch_count == 0U;
+  evaluation_diagnostics.total_host_ms =
+    std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - started).count();
   return output;
 }
 
