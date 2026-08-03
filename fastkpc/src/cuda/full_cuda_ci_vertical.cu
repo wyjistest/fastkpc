@@ -1,4 +1,5 @@
 #include "full_cuda_ci_vertical.hpp"
+#include "mgcv_multi_penalty_gcv.hpp"
 
 #include "../full_cuda_ci_contract.hpp"
 
@@ -19,6 +20,11 @@
 
 namespace fastkpc {
 namespace {
+
+constexpr char kFixedSpResidualProducerSemanticIdentity[] =
+  "full-cuda-ci-fixed-sp-runtime-residual-v1";
+constexpr char kOptimizerResidualProducerSemanticIdentity[] =
+  "full-cuda-ci-multi-penalty-optimizer-accepted-residual-v1";
 
 constexpr int kVerticalBlockSize = 256;
 constexpr double kCanonicalAlpha = 0.1;
@@ -974,6 +980,43 @@ bool equal_double_bits(double left, double right) {
   return std::memcmp(&left, &right, sizeof(double)) == 0;
 }
 
+struct DeviceResidualParityAccumulator {
+  unsigned long long mismatch_count = 0ULL;
+  unsigned long long max_abs_difference_bits = 0ULL;
+  double squared_difference_sum = 0.0;
+  double squared_reference_sum = 0.0;
+};
+
+__global__ void compare_residuals_by_target_kernel(
+    const double* optimizer_residuals,
+    const double* fixed_residuals,
+    int n,
+    int target_count,
+    DeviceResidualParityAccumulator* accumulators) {
+  const int target = static_cast<int>(blockIdx.x);
+  if (target >= target_count) return;
+  DeviceResidualParityAccumulator* accumulator = accumulators + target;
+  for (int row = static_cast<int>(threadIdx.x); row < n;
+       row += static_cast<int>(blockDim.x)) {
+    const std::size_t index = static_cast<std::size_t>(target) * n + row;
+    const double optimizer = optimizer_residuals[index];
+    const double fixed = fixed_residuals[index];
+    if (__double_as_longlong(optimizer) != __double_as_longlong(fixed)) {
+      atomicAdd(&accumulator->mismatch_count, 1ULL);
+    }
+    const double difference = fabs(optimizer - fixed);
+    atomicMax(
+      &accumulator->max_abs_difference_bits,
+      static_cast<unsigned long long>(__double_as_longlong(difference)));
+    atomicAdd(
+      &accumulator->squared_difference_sum,
+      __dmul_rn(difference, difference));
+    atomicAdd(
+      &accumulator->squared_reference_sum,
+      __dmul_rn(fixed, fixed));
+  }
+}
+
 double host_elapsed_ms(
     const std::chrono::steady_clock::time_point& start) {
   return std::chrono::duration<double, std::milli>(
@@ -1709,10 +1752,12 @@ FullCudaCiVerticalResult run_full_cuda_ci_phase35_vertical(
   return result;
 }
 
-FullCudaCiExactBatchResult run_full_cuda_ci_phase35_exact_batch(
+FullCudaCiExactBatchResult run_full_cuda_ci_phase35_exact_batch_impl(
     const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
     const FixedSpBatchHostView& batch,
-    const FullCudaCiExactBatchRequest& request) {
+    const FullCudaCiExactBatchRequest& request,
+    const MultiPenaltyGcvCudaResidualConsumerView*
+      optimizer_residual_view) {
   const std::chrono::steady_clock::time_point total_start =
     std::chrono::steady_clock::now();
   const PreparedSInfo prepared_info = prepared_s_gpu_info(prepared_s);
@@ -1824,6 +1869,11 @@ FullCudaCiExactBatchResult run_full_cuda_ci_phase35_exact_batch(
   diagnostics.request_identity_authenticated = true;
   diagnostics.prepared_identity_authenticated = true;
   diagnostics.target_identity_authenticated = true;
+  diagnostics.residual_producer_semantic_identity =
+    optimizer_residual_view == nullptr ?
+      kFixedSpResidualProducerSemanticIdentity :
+      kOptimizerResidualProducerSemanticIdentity;
+  diagnostics.residual_solve_bypassed = optimizer_residual_view != nullptr;
   diagnostics.component_bytes_per_target = checked_multiply(
     cell_count + n_size + 2U, sizeof(double),
     "exact batch component bytes per target");
@@ -1835,14 +1885,32 @@ FullCudaCiExactBatchResult run_full_cuda_ci_phase35_exact_batch(
   check_cuda(cudaGetDevice(&caller_device_id),
              "capture caller CUDA device for exact batch");
   std::shared_ptr<DeviceResidualBatch> residual_token;
+  DeviceResidualConsumerView residual_view;
   bool consumer_registered = false;
   cudaStream_t producer_stream = nullptr;
   try {
     const std::chrono::steady_clock::time_point residual_solve_start =
       std::chrono::steady_clock::now();
-    residual_token = solve_fixed_sp_batch(prepared_s, batch);
-    const DeviceResidualConsumerView residual_view =
-      acquire_device_residual_consumer_view(residual_token);
+    if (optimizer_residual_view == nullptr) {
+      residual_token = solve_fixed_sp_batch(prepared_s, batch);
+      residual_view = acquire_device_residual_consumer_view(residual_token);
+    } else {
+      residual_view.residuals = optimizer_residual_view->residuals;
+      residual_view.n = optimizer_residual_view->n;
+      residual_view.target_count = optimizer_residual_view->target_count;
+      residual_view.device_id = optimizer_residual_view->device_id;
+      residual_view.producer_stream =
+        optimizer_residual_view->producer_stream;
+      residual_view.producer_completion_event =
+        optimizer_residual_view->producer_completion_event;
+      residual_view.target_keys = optimizer_residual_view->target_keys;
+      residual_view.executed_routes.assign(
+        static_cast<std::size_t>(residual_view.target_count),
+        FixedSpRoute::Unset);
+      residual_view.solver_statuses.assign(
+        static_cast<std::size_t>(residual_view.target_count),
+        FixedSpStatus::OkAugmentedQr);
+    }
     producer_stream = residual_view.producer_stream;
     if (residual_view.target_keys != batch.target_keys ||
         residual_view.n != batch.n ||
@@ -1852,17 +1920,19 @@ FullCudaCiExactBatchResult run_full_cuda_ci_phase35_exact_batch(
       throw std::runtime_error(
         "exact batch residual view does not match the authenticated request");
     }
-    const DeviceResidualInfo residual_info =
-      device_residual_info(residual_token);
-    if (residual_info.implicit_residual_d2h_count != 0 ||
-        residual_info.shadow_d2h_bytes != 0U ||
-        residual_info.shadow_materialize_call_count != 0) {
-      throw std::runtime_error(
-        "exact batch residual path observed a forbidden numeric D2H transfer");
+    if (residual_token) {
+      const DeviceResidualInfo residual_info =
+        device_residual_info(residual_token);
+      if (residual_info.implicit_residual_d2h_count != 0 ||
+          residual_info.shadow_d2h_bytes != 0U ||
+          residual_info.shadow_materialize_call_count != 0) {
+        throw std::runtime_error(
+          "exact batch residual path observed a forbidden numeric D2H transfer");
+      }
     }
     diagnostics.residuals_device_resident = true;
-    diagnostics.residual_solve_host_ms =
-      host_elapsed_ms(residual_solve_start);
+    diagnostics.residual_solve_host_ms = residual_token ?
+      host_elapsed_ms(residual_solve_start) : 0.0;
 
     check_cuda(cudaSetDevice(residual_view.device_id),
                "select exact batch residual device");
@@ -1992,10 +2062,12 @@ FullCudaCiExactBatchResult run_full_cuda_ci_phase35_exact_batch(
     diagnostics.compact_result_d2h_bytes = result_bytes;
     check_cuda(cudaEventRecord(completion.get(), consumer_stream.get()),
                "record exact batch completion");
-    register_device_residual_consumer_event(
-      residual_token, completion.get());
-    consumer_registered = true;
-    diagnostics.consumer_event_registration_count = 1;
+    if (residual_token) {
+      register_device_residual_consumer_event(
+        residual_token, completion.get());
+      consumer_registered = true;
+      diagnostics.consumer_event_registration_count = 1;
+    }
     check_cuda(cudaEventSynchronize(completion.get()),
                "wait for compact exact batch results");
     diagnostics.explicit_host_wait_count += 1;
@@ -2051,8 +2123,10 @@ FullCudaCiExactBatchResult run_full_cuda_ci_phase35_exact_batch(
     consumer_stream.close();
     diagnostics.dcov_host_boundary_ms = host_elapsed_ms(dcov_start);
 
-    release_device_residual(residual_token);
-    free_device_residual(&residual_token);
+    if (residual_token) {
+      release_device_residual(residual_token);
+      free_device_residual(&residual_token);
+    }
     check_cuda(cudaSetDevice(caller_device_id),
                "restore caller CUDA device after exact batch");
     diagnostics.caller_device_restored = true;
@@ -2128,10 +2202,45 @@ FullCudaCiExactBatchResult run_full_cuda_ci_phase35_exact_batch(
   return result;
 }
 
-FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch(
+FullCudaCiExactBatchResult run_full_cuda_ci_phase35_exact_batch(
     const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
     const FixedSpBatchHostView& batch,
-    const FullCudaCiLegacyEigBatchRequest& request) {
+    const FullCudaCiExactBatchRequest& request) {
+  return run_full_cuda_ci_phase35_exact_batch_impl(
+    prepared_s, batch, request, nullptr);
+}
+
+FullCudaCiExactBatchResult
+run_full_cuda_ci_phase35_exact_batch_from_optimizer_residual(
+    const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+    const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& residual,
+    const FullCudaCiExactBatchRequest& request) {
+  const PreparedSInfo prepared_info = prepared_s_gpu_info(prepared_s);
+  const MultiPenaltyGcvCudaResidualConsumerView residual_view =
+    acquire_multi_penalty_gcv_cuda_residual_consumer_view(residual);
+  FixedSpBatchHostView batch;
+  batch.n = residual_view.n;
+  batch.null_dim = prepared_info.null_dim;
+  batch.penalty_count = prepared_info.penalty_count;
+  batch.target_count = residual_view.target_count;
+  batch.output_mask = FixedSpOutputResiduals;
+  batch.target_keys = residual_view.target_keys;
+  FullCudaCiExactBatchResult result =
+    run_full_cuda_ci_phase35_exact_batch_impl(
+      prepared_s, batch, request, &residual_view);
+  for (FullCudaCiCompactHostRecord& record : result.records) {
+    record.solver_route = "OPTIMIZER_ACCEPTED|OPTIMIZER_ACCEPTED";
+    record.optimizer_status = "LIVE_CUDA_GCV_ACCEPTED";
+  }
+  return result;
+}
+
+FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
+    const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+    const FixedSpBatchHostView& batch,
+    const FullCudaCiLegacyEigBatchRequest& request,
+    const MultiPenaltyGcvCudaResidualConsumerView*
+      optimizer_residual_view) {
   const std::chrono::steady_clock::time_point total_start =
     std::chrono::steady_clock::now();
   const PreparedSInfo prepared_info = prepared_s_gpu_info(prepared_s);
@@ -2248,19 +2357,42 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch(
   diagnostics.deterministic_logical_order = true;
   diagnostics.component_capacity_respected =
     component_count <= request.component_capacity;
+  diagnostics.residual_producer_semantic_identity =
+    optimizer_residual_view == nullptr ?
+      kFixedSpResidualProducerSemanticIdentity :
+      kOptimizerResidualProducerSemanticIdentity;
+  diagnostics.residual_solve_bypassed = optimizer_residual_view != nullptr;
 
   int caller_device_id = -1;
   check_cuda(cudaGetDevice(&caller_device_id),
              "capture caller CUDA device for legacy eig batch");
   std::shared_ptr<DeviceResidualBatch> residual_token;
+  DeviceResidualConsumerView residual_view;
   bool consumer_registered = false;
   cudaStream_t producer_stream = nullptr;
   try {
     const std::chrono::steady_clock::time_point residual_start =
       std::chrono::steady_clock::now();
-    residual_token = solve_fixed_sp_batch(prepared_s, batch);
-    const DeviceResidualConsumerView residual_view =
-      acquire_device_residual_consumer_view(residual_token);
+    if (optimizer_residual_view == nullptr) {
+      residual_token = solve_fixed_sp_batch(prepared_s, batch);
+      residual_view = acquire_device_residual_consumer_view(residual_token);
+    } else {
+      residual_view.residuals = optimizer_residual_view->residuals;
+      residual_view.n = optimizer_residual_view->n;
+      residual_view.target_count = optimizer_residual_view->target_count;
+      residual_view.device_id = optimizer_residual_view->device_id;
+      residual_view.producer_stream =
+        optimizer_residual_view->producer_stream;
+      residual_view.producer_completion_event =
+        optimizer_residual_view->producer_completion_event;
+      residual_view.target_keys = optimizer_residual_view->target_keys;
+      residual_view.executed_routes.assign(
+        static_cast<std::size_t>(residual_view.target_count),
+        FixedSpRoute::Unset);
+      residual_view.solver_statuses.assign(
+        static_cast<std::size_t>(residual_view.target_count),
+        FixedSpStatus::OkAugmentedQr);
+    }
     producer_stream = residual_view.producer_stream;
     if (residual_view.target_keys != batch.target_keys ||
         residual_view.n != batch.n ||
@@ -2270,16 +2402,19 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch(
       throw std::runtime_error(
         "legacy eig residual view does not match the authenticated request");
     }
-    const DeviceResidualInfo residual_info =
-      device_residual_info(residual_token);
-    if (residual_info.implicit_residual_d2h_count != 0 ||
-        residual_info.shadow_d2h_bytes != 0U ||
-        residual_info.shadow_materialize_call_count != 0) {
-      throw std::runtime_error(
-        "legacy eig residual path observed forbidden numeric D2H");
+    if (residual_token) {
+      const DeviceResidualInfo residual_info =
+        device_residual_info(residual_token);
+      if (residual_info.implicit_residual_d2h_count != 0 ||
+          residual_info.shadow_d2h_bytes != 0U ||
+          residual_info.shadow_materialize_call_count != 0) {
+        throw std::runtime_error(
+          "legacy eig residual path observed forbidden numeric D2H");
+      }
     }
     diagnostics.residuals_device_resident = true;
-    diagnostics.residual_solve_host_ms = host_elapsed_ms(residual_start);
+    diagnostics.residual_solve_host_ms = residual_token ?
+      host_elapsed_ms(residual_start) : 0.0;
     check_cuda(cudaSetDevice(residual_view.device_id),
                "select legacy eig residual device");
 
@@ -2542,10 +2677,12 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch(
                        "legacy eig solver status bytes");
     check_cuda(cudaEventRecord(completion.get(), stream.get()),
                "record legacy eig completion");
-    register_device_residual_consumer_event(
-      residual_token, completion.get());
-    consumer_registered = true;
-    diagnostics.consumer_event_registration_count = 1;
+    if (residual_token) {
+      register_device_residual_consumer_event(
+        residual_token, completion.get());
+      consumer_registered = true;
+      diagnostics.consumer_event_registration_count = 1;
+    }
     check_cuda(cudaEventSynchronize(completion.get()),
                "wait for compact legacy eig results");
     diagnostics.explicit_host_wait_count += 1;
@@ -2622,8 +2759,10 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch(
     metadata_start.close();
     completion.close();
     stream.close();
-    release_device_residual(residual_token);
-    free_device_residual(&residual_token);
+    if (residual_token) {
+      release_device_residual(residual_token);
+      free_device_residual(&residual_token);
+    }
     check_cuda(cudaSetDevice(caller_device_id),
                "restore caller CUDA device after legacy eig batch");
     diagnostics.caller_device_restored = true;
@@ -2685,6 +2824,207 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch(
   }
   diagnostics.total_host_ms = host_elapsed_ms(total_start);
   return result;
+}
+
+FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch(
+    const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+    const FixedSpBatchHostView& batch,
+    const FullCudaCiLegacyEigBatchRequest& request) {
+  return run_full_cuda_ci_phase35_legacy_eig_batch_impl(
+    prepared_s, batch, request, nullptr);
+}
+
+FullCudaCiLegacyEigBatchResult
+run_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual(
+    const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+    const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& residual,
+    const FullCudaCiLegacyEigBatchRequest& request) {
+  const PreparedSInfo prepared_info = prepared_s_gpu_info(prepared_s);
+  const MultiPenaltyGcvCudaResidualConsumerView residual_view =
+    acquire_multi_penalty_gcv_cuda_residual_consumer_view(residual);
+  FixedSpBatchHostView batch;
+  batch.n = residual_view.n;
+  batch.null_dim = prepared_info.null_dim;
+  batch.penalty_count = prepared_info.penalty_count;
+  batch.target_count = residual_view.target_count;
+  batch.output_mask = FixedSpOutputResiduals;
+  batch.target_keys = residual_view.target_keys;
+  FullCudaCiLegacyEigBatchResult result =
+    run_full_cuda_ci_phase35_legacy_eig_batch_impl(
+      prepared_s, batch, request, &residual_view);
+  for (FullCudaCiCompactHostRecord& record : result.records) {
+    record.solver_route = "OPTIMIZER_ACCEPTED|OPTIMIZER_ACCEPTED";
+    record.optimizer_status = "LIVE_CUDA_GCV_ACCEPTED";
+  }
+  return result;
+}
+
+FullCudaCiOptimizerResidualParityDiagnostics
+compare_full_cuda_ci_optimizer_and_fixed_residuals(
+    const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>&
+      optimizer_residual,
+    const std::shared_ptr<DeviceResidualBatch>& fixed_residual) {
+  const auto started = std::chrono::steady_clock::now();
+  FullCudaCiOptimizerResidualParityDiagnostics diagnostics;
+  diagnostics.schema_version =
+    "full-cuda-ci-phase10-optimizer-residual-parity-v1";
+  const MultiPenaltyGcvCudaResidualInfo optimizer_info =
+    multi_penalty_gcv_cuda_residual_info(optimizer_residual);
+  const DeviceResidualInfo fixed_info = device_residual_info(fixed_residual);
+  diagnostics.n = optimizer_info.n;
+  diagnostics.target_count = optimizer_info.target_count;
+  diagnostics.optimizer_status_failure_count = static_cast<int>(
+    std::count_if(
+      optimizer_info.optimizer_status.begin(),
+      optimizer_info.optimizer_status.end(),
+      [](int status) { return status != 0; }));
+  diagnostics.fixed_status_failure_count = static_cast<int>(std::count_if(
+    fixed_info.solver_statuses.begin(), fixed_info.solver_statuses.end(),
+    [](FixedSpStatus status) {
+      return static_cast<int>(status) >= 10;
+    }));
+  for (std::size_t index = 0; index < fixed_info.executed_routes.size();
+       ++index) {
+    const FixedSpRoute route = fixed_info.executed_routes[index];
+    const FixedSpStatus status = fixed_info.solver_statuses[index];
+    const bool consistent =
+      (route == FixedSpRoute::CholeskyBatched &&
+       (status == FixedSpStatus::OkCholeskyBatched ||
+        status == FixedSpStatus::OkCholeskySingle)) ||
+      (route == FixedSpRoute::AugmentedQr &&
+       status == FixedSpStatus::OkAugmentedQr) ||
+      (route == FixedSpRoute::AugmentedSvd &&
+       status == FixedSpStatus::OkAugmentedSvd);
+    if (!consistent) diagnostics.fixed_route_status_mismatch_count += 1;
+  }
+  if (optimizer_info.released || !optimizer_info.device_resident ||
+      diagnostics.optimizer_status_failure_count != 0 ||
+      diagnostics.fixed_status_failure_count != 0 ||
+      diagnostics.fixed_route_status_mismatch_count != 0) {
+    throw std::runtime_error(
+      "optimizer residual parity rejects an unsuccessful producer");
+  }
+  const MultiPenaltyGcvCudaResidualConsumerView optimizer_view =
+    acquire_multi_penalty_gcv_cuda_residual_consumer_view(
+      optimizer_residual);
+  const DeviceResidualConsumerView fixed_view =
+    acquire_device_residual_consumer_view(fixed_residual);
+  if (optimizer_view.n != fixed_view.n ||
+      optimizer_view.target_count != fixed_view.target_count ||
+      optimizer_view.device_id != fixed_view.device_id ||
+      optimizer_view.target_keys != fixed_view.target_keys ||
+      optimizer_view.residuals == nullptr || fixed_view.residuals == nullptr ||
+      optimizer_view.producer_completion_event == nullptr ||
+      fixed_view.producer_completion_event == nullptr) {
+    throw std::runtime_error(
+      "optimizer residual parity identity mismatch");
+  }
+  diagnostics.target_identity_authenticated = true;
+  diagnostics.device_identity_authenticated = true;
+  diagnostics.residual_payload_device_resident = true;
+  diagnostics.value_count = checked_multiply(
+    static_cast<std::size_t>(optimizer_view.n),
+    static_cast<std::size_t>(optimizer_view.target_count),
+    "optimizer residual parity values");
+
+  int caller_device_id = -1;
+  check_cuda(cudaGetDevice(&caller_device_id),
+             "capture caller device for optimizer residual parity");
+  try {
+    check_cuda(cudaSetDevice(optimizer_view.device_id),
+               "select optimizer residual parity device");
+    VerticalCallAccounting accounting;
+    const std::size_t compact_bytes = checked_multiply(
+      static_cast<std::size_t>(optimizer_view.target_count),
+      sizeof(DeviceResidualParityAccumulator),
+      "optimizer residual parity compact bytes");
+    TrackedCudaStream stream;
+    TrackedCudaEvent comparison_start(true);
+    TrackedCudaEvent comparison_end(true);
+    TrackedCudaEvent completion(true);
+    TrackedDeviceBuffer device_accumulators(compact_bytes, &accounting);
+    check_cuda(cudaStreamWaitEvent(
+      stream.get(), optimizer_view.producer_completion_event, 0),
+      "wait for optimizer residual producer during parity");
+    check_cuda(cudaStreamWaitEvent(
+      stream.get(), fixed_view.producer_completion_event, 0),
+      "wait for fixed residual producer during parity");
+    diagnostics.producer_event_wait_count = 2;
+    check_cuda(cudaMemsetAsync(
+      device_accumulators.get(), 0, compact_bytes, stream.get()),
+      "initialize optimizer residual parity accumulators");
+    check_cuda(cudaEventRecord(comparison_start.get(), stream.get()),
+               "record optimizer residual parity start");
+    compare_residuals_by_target_kernel<<<
+      static_cast<unsigned int>(optimizer_view.target_count),
+      kVerticalBlockSize, 0, stream.get()
+    >>>(
+      optimizer_view.residuals, fixed_view.residuals, optimizer_view.n,
+      optimizer_view.target_count,
+      static_cast<DeviceResidualParityAccumulator*>(
+        device_accumulators.get()));
+    check_cuda(cudaGetLastError(),
+               "launch optimizer residual parity kernel");
+    check_cuda(cudaEventRecord(comparison_end.get(), stream.get()),
+               "record optimizer residual parity end");
+    std::vector<DeviceResidualParityAccumulator> host_accumulators(
+      static_cast<std::size_t>(optimizer_view.target_count));
+    check_cuda(cudaMemcpyAsync(
+      host_accumulators.data(), device_accumulators.get(), compact_bytes,
+      cudaMemcpyDeviceToHost, stream.get()),
+      "copy optimizer residual parity compact diagnostics");
+    diagnostics.compact_d2h_count = 1;
+    diagnostics.compact_d2h_bytes = compact_bytes;
+    check_cuda(cudaEventRecord(completion.get(), stream.get()),
+               "record optimizer residual parity completion");
+    register_device_residual_consumer_event(
+      fixed_residual, completion.get());
+    diagnostics.consumer_event_registration_count = 1;
+    check_cuda(cudaEventSynchronize(completion.get()),
+               "wait for optimizer residual parity diagnostics");
+    check_cuda(cudaStreamSynchronize(fixed_view.producer_stream),
+               "wait for fixed residual parity consumer proxy");
+    diagnostics.comparison_cuda_ms = cuda_elapsed_ms(
+      comparison_start.get(), comparison_end.get());
+
+    double squared_difference_sum = 0.0;
+    double squared_reference_sum = 0.0;
+    for (const DeviceResidualParityAccumulator& value : host_accumulators) {
+      diagnostics.mismatch_value_count += value.mismatch_count;
+      diagnostics.mismatch_target_count += value.mismatch_count > 0 ? 1 : 0;
+      double maximum = 0.0;
+      const std::uint64_t maximum_bits = value.max_abs_difference_bits;
+      std::memcpy(&maximum, &maximum_bits, sizeof(maximum));
+      diagnostics.max_abs_difference = std::max(
+        diagnostics.max_abs_difference, maximum);
+      squared_difference_sum += value.squared_difference_sum;
+      squared_reference_sum += value.squared_reference_sum;
+    }
+    diagnostics.bitwise_equal_target_count =
+      diagnostics.target_count - diagnostics.mismatch_target_count;
+    diagnostics.bitwise_equal_value_count =
+      diagnostics.value_count - diagnostics.mismatch_value_count;
+    diagnostics.relative_l2_difference = std::sqrt(squared_difference_sum) /
+      std::max(std::sqrt(squared_reference_sum), 1e-300);
+    diagnostics.compact_diagnostics_only_d2h =
+      diagnostics.residual_d2h_count == 0 &&
+      diagnostics.residual_d2h_bytes == 0U &&
+      diagnostics.compact_d2h_count == 1;
+
+    device_accumulators.close();
+    completion.close();
+    comparison_end.close();
+    comparison_start.close();
+    stream.close();
+    check_cuda(cudaSetDevice(caller_device_id),
+               "restore caller device after optimizer residual parity");
+    diagnostics.caller_device_restored = true;
+  } catch (...) {
+    if (caller_device_id >= 0) (void)cudaSetDevice(caller_device_id);
+    throw;
+  }
+  diagnostics.total_host_ms = host_elapsed_ms(started);
+  return diagnostics;
 }
 
 }  // namespace fastkpc

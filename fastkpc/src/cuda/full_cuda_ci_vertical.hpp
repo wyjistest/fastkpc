@@ -11,6 +11,8 @@
 
 namespace fastkpc {
 
+class MultiPenaltyGcvCudaResidualBatch;
+
 constexpr char kFullCudaCiVerticalRequestSchemaVersion[] =
   "full-cuda-ci-phase35-vertical-request-v1";
 constexpr char kFullCudaCiVerticalResultSchemaVersion[] =
@@ -191,6 +193,8 @@ struct FullCudaCiExactBatchDiagnostics {
   double dcov_host_boundary_ms = 0.0;
   double teardown_host_ms = 0.0;
   double total_host_ms = 0.0;
+  std::string residual_producer_semantic_identity;
+  bool residual_solve_bypassed = false;
   bool request_identity_authenticated = false;
   bool prepared_identity_authenticated = false;
   bool target_identity_authenticated = false;
@@ -270,6 +274,8 @@ struct FullCudaCiLegacyEigBatchDiagnostics {
   double dcov_host_boundary_ms = 0.0;
   double teardown_host_ms = 0.0;
   double total_host_ms = 0.0;
+  std::string residual_producer_semantic_identity;
+  bool residual_solve_bypassed = false;
   bool request_identity_authenticated = false;
   bool prepared_identity_authenticated = false;
   bool target_identity_authenticated = false;
@@ -293,6 +299,35 @@ struct FullCudaCiLegacyEigBatchResult {
   FullCudaCiLegacyEigBatchDiagnostics diagnostics;
 };
 
+struct FullCudaCiOptimizerResidualParityDiagnostics {
+  std::string schema_version;
+  int n = 0;
+  int target_count = 0;
+  std::uint64_t value_count = 0;
+  int bitwise_equal_target_count = 0;
+  int mismatch_target_count = 0;
+  std::uint64_t bitwise_equal_value_count = 0;
+  std::uint64_t mismatch_value_count = 0;
+  double max_abs_difference = 0.0;
+  double relative_l2_difference = 0.0;
+  int optimizer_status_failure_count = 0;
+  int fixed_status_failure_count = 0;
+  int fixed_route_status_mismatch_count = 0;
+  int producer_event_wait_count = 0;
+  int consumer_event_registration_count = 0;
+  int compact_d2h_count = 0;
+  std::size_t compact_d2h_bytes = 0;
+  int residual_d2h_count = 0;
+  std::size_t residual_d2h_bytes = 0;
+  double comparison_cuda_ms = 0.0;
+  double total_host_ms = 0.0;
+  bool target_identity_authenticated = false;
+  bool device_identity_authenticated = false;
+  bool residual_payload_device_resident = false;
+  bool compact_diagnostics_only_d2h = false;
+  bool caller_device_restored = false;
+};
+
 std::string full_cuda_ci_vertical_request_identity(
   const FullCudaCiVerticalRequest& request,
   const std::vector<std::string>& target_keys);
@@ -314,6 +349,12 @@ FullCudaCiExactBatchResult run_full_cuda_ci_phase35_exact_batch(
   const FixedSpBatchHostView& batch,
   const FullCudaCiExactBatchRequest& request);
 
+FullCudaCiExactBatchResult
+run_full_cuda_ci_phase35_exact_batch_from_optimizer_residual(
+  const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+  const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& residual,
+  const FullCudaCiExactBatchRequest& request);
+
 std::string full_cuda_ci_legacy_eig_batch_request_identity(
   const FullCudaCiLegacyEigBatchRequest& request,
   const std::vector<std::string>& target_keys);
@@ -322,6 +363,17 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch(
   const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
   const FixedSpBatchHostView& batch,
   const FullCudaCiLegacyEigBatchRequest& request);
+
+FullCudaCiLegacyEigBatchResult
+run_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual(
+  const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+  const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& residual,
+  const FullCudaCiLegacyEigBatchRequest& request);
+
+FullCudaCiOptimizerResidualParityDiagnostics
+compare_full_cuda_ci_optimizer_and_fixed_residuals(
+  const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& optimizer_residual,
+  const std::shared_ptr<DeviceResidualBatch>& fixed_residual);
 
 }  // namespace fastkpc
 

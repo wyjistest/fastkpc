@@ -289,15 +289,65 @@ The diagnostic decision is `STOP_SCHEDULER_OPPORTUNITY_TOO_SMALL`. Do not
 implement lazy original-window activation or setup-cohort coalescing for this
 contract epoch. Preserving the v5 cohort/window numerical shape removes almost
 all scheduler-side savings; trimming inside demanded cohorts reopens the
-bitwise and batch-amortization failures already observed. The next independent
-routes are optimizer accepted-residual reuse and a pure-C++ owned Prepared-S
-pipeline that overlaps native setup with GPU optimization.
+bitwise and batch-amortization failures already observed.
+
+The next diagnostic tested whether the multi-penalty optimizer's accepted
+device residual can replace the later fixed-SP residual solve. A real
+`q=64`, seven-penalty, two-target fixture compared both residual buffers on the
+device and returned only 64 bytes of compact diagnostics. All 702 residual
+values differed, both targets failed bitwise parity, the maximum absolute
+difference was `0.2399546`, and relative L2 difference was `0.0288145`.
+Optimizer and fixed solver statuses were successful and route/status metadata
+was consistent, so this is numerical producer drift rather than an error path.
+
+Development-only residual-view entrypoints then fed the still-device-resident
+optimizer payload directly into the exact screen and legacy full-eig CUDA
+consumers. They bypassed the fixed-SP solve with zero residual payload D2H, but
+neither p-value was bitwise identical to its fixed-SP counterpart:
+
+```text
+consumer       fixed-SP p-value       optimizer-residual p-value
+exact screen   3.58933903915984e-14   6.41771967688960e-14
+legacy eig     4.48319202981132e-14   7.89308561131647e-14
+```
+
+There were zero decision flips on this fixture, but the current contract
+requires consumed p-values to remain bitwise identical. The qualification
+decision is therefore `STOP_OPTIMIZER_RESIDUAL_NUMERICAL_PARITY`. A released
+optimizer token was also rejected as stale, residual shadow D2H remained zero,
+and the original fixed-SP exact/legacy and persistent optimizer tests still
+pass. D2D detach and arena retention were not attempted because the numerical
+gate fails before memory/lifetime qualification. The production one-call path
+still releases optimizer residuals and uses the authenticated fixed-SP solver.
+The optimizer residual remains optimizer-internal evidence: it does not define
+production ResidualKey authority and must not enter dCov or the residual cache.
+
+The next measurement is a trace-free full level-7 compute-profile v6. New
+one-call fields split authoritative fixed-SP residual time both by penalty
+class (single/multi) and by consumer stage (exact screen/guarded refinement),
+with batch, target, component, and pair accounting. If guarded refinement
+repeats enough fixed-SP work to matter, the next low-risk implementation is to
+share one authenticated fixed-SP residual view between exact and legacy-eig
+consumers, followed by a persistent dCov execution context. A pure-C++ owned
+Prepared-S pipeline that overlaps native setup with the unchanged v5 GPU
+optimizer windows remains the next system-level route. A later single-matrix
+QR/Q kernel prototype is still necessary if these routes cannot close
+Checkpoint B.
 
 Rebuild the opportunity receipt without CUDA numerical work with:
 
 ```bash
 Rscript fastkpc/tools/profile_full_cuda_ci_phase10_coalescing_opportunity.R
 Rscript fastkpc/tests/test_full_cuda_ci_phase10_coalescing_opportunity.R
+```
+
+Reproduce the optimizer accepted-residual qualification with:
+
+```bash
+FASTKPC_RUN_CUDA_TESTS=1 \
+Rscript fastkpc/tools/profile_full_cuda_ci_phase10_optimizer_residual_reuse.R
+FASTKPC_RUN_CUDA_TESTS=1 \
+Rscript fastkpc/tests/test_full_cuda_ci_phase10_optimizer_residual_reuse.R
 ```
 
 Reproduce the exactness and stop/go campaign with:

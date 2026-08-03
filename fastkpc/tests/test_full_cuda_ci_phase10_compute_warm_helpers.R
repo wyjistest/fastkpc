@@ -62,11 +62,11 @@ evidence <- fastkpc_full_cuda_phase10_capture_compute_warm(
 fastkpc_full_cuda_phase10_validate_compute_warm_evidence(evidence)
 profile <- fastkpc_full_cuda_phase10_compute_profile(evidence$result$summary)
 assert_true(
-    identical(profile$schema_version, "full-cuda-ci-compute-profile-v5") &&
+    identical(profile$schema_version, "full-cuda-ci-compute-profile-v6") &&
     is.data.frame(profile$stage_timing) &&
-    nrow(profile$stage_timing) == 36L &&
+    nrow(profile$stage_timing) == 40L &&
     is.data.frame(profile$physical_work) &&
-    nrow(profile$physical_work) == 106L &&
+    nrow(profile$physical_work) == 116L &&
     is.data.frame(profile$prefill_batches) &&
     nrow(profile$prefill_batches) ==
       evidence$result$summary$prefill_window_count &&

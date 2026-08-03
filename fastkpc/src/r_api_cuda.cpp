@@ -4066,6 +4066,10 @@ Rcpp::List full_cuda_ci_exact_batch_diagnostics_to_list(
                    "dcov_host_boundary_ms");
   result.push_back(value.teardown_host_ms, "teardown_host_ms");
   result.push_back(value.total_host_ms, "total_host_ms");
+  result.push_back(value.residual_producer_semantic_identity,
+                   "residual_producer_semantic_identity");
+  result.push_back(value.residual_solve_bypassed,
+                   "residual_solve_bypassed");
   result.push_back(value.request_identity_authenticated,
                    "request_identity_authenticated");
   result.push_back(value.prepared_identity_authenticated,
@@ -4162,6 +4166,10 @@ Rcpp::List full_cuda_ci_legacy_eig_batch_diagnostics_to_list(
   result.push_back(value.dcov_host_boundary_ms, "dcov_host_boundary_ms");
   result.push_back(value.teardown_host_ms, "teardown_host_ms");
   result.push_back(value.total_host_ms, "total_host_ms");
+  result.push_back(value.residual_producer_semantic_identity,
+                   "residual_producer_semantic_identity");
+  result.push_back(value.residual_solve_bypassed,
+                   "residual_solve_bypassed");
   result.push_back(value.request_identity_authenticated,
                    "request_identity_authenticated");
   result.push_back(value.prepared_identity_authenticated,
@@ -4482,6 +4490,126 @@ extern "C" SEXP C_full_cuda_ci_phase35_legacy_eig_batch(
       full_cuda_ci_exact_batch_numerical_to_frame(result.numerical),
     Rcpp::Named("diagnostics") =
       full_cuda_ci_legacy_eig_batch_diagnostics_to_list(result.diagnostics)
+  );
+  END_RCPP
+}
+
+extern "C" SEXP
+C_full_cuda_ci_phase35_exact_batch_from_optimizer_residual(
+    SEXP prepared_s,
+    SEXP residual_s,
+    SEXP request_s) {
+  BEGIN_RCPP
+  FixedSpPreparedHolder* prepared_holder =
+    fixed_sp_cuda_prepared_holder(prepared_s, true);
+  MultiPenaltyCudaResidualHolder* residual_holder =
+    multi_penalty_cuda_residual_holder(residual_s, true);
+  const fastkpc::FullCudaCiExactBatchRequest request =
+    parse_full_cuda_ci_exact_batch_request(request_s);
+  const fastkpc::FullCudaCiExactBatchResult result =
+    fastkpc::run_full_cuda_ci_phase35_exact_batch_from_optimizer_residual(
+      prepared_holder->value, residual_holder->value, request);
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") = result.schema_version,
+    Rcpp::Named("request_identity_sha256") =
+      result.request_identity_sha256,
+    Rcpp::Named("prepared_s_key_sha256") =
+      result.prepared_s_key_sha256,
+    Rcpp::Named("target_keys") = Rcpp::wrap(result.target_keys),
+    Rcpp::Named("records") =
+      full_cuda_ci_exact_batch_records_to_frame(result.records),
+    Rcpp::Named("numerical") =
+      full_cuda_ci_exact_batch_numerical_to_frame(result.numerical),
+    Rcpp::Named("diagnostics") =
+      full_cuda_ci_exact_batch_diagnostics_to_list(result.diagnostics)
+  );
+  END_RCPP
+}
+
+extern "C" SEXP
+C_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual(
+    SEXP prepared_s,
+    SEXP residual_s,
+    SEXP request_s) {
+  BEGIN_RCPP
+  FixedSpPreparedHolder* prepared_holder =
+    fixed_sp_cuda_prepared_holder(prepared_s, true);
+  MultiPenaltyCudaResidualHolder* residual_holder =
+    multi_penalty_cuda_residual_holder(residual_s, true);
+  const fastkpc::FullCudaCiLegacyEigBatchRequest request =
+    parse_full_cuda_ci_legacy_eig_batch_request(request_s);
+  const fastkpc::FullCudaCiLegacyEigBatchResult result =
+    fastkpc::run_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual(
+      prepared_holder->value, residual_holder->value, request);
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") = result.schema_version,
+    Rcpp::Named("request_identity_sha256") =
+      result.request_identity_sha256,
+    Rcpp::Named("prepared_s_key_sha256") =
+      result.prepared_s_key_sha256,
+    Rcpp::Named("target_keys") = Rcpp::wrap(result.target_keys),
+    Rcpp::Named("records") =
+      full_cuda_ci_exact_batch_records_to_frame(result.records),
+    Rcpp::Named("numerical") =
+      full_cuda_ci_exact_batch_numerical_to_frame(result.numerical),
+    Rcpp::Named("diagnostics") =
+      full_cuda_ci_legacy_eig_batch_diagnostics_to_list(result.diagnostics)
+  );
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_phase10_optimizer_residual_parity(
+    SEXP optimizer_residual_s,
+    SEXP fixed_residual_s) {
+  BEGIN_RCPP
+  MultiPenaltyCudaResidualHolder* optimizer_holder =
+    multi_penalty_cuda_residual_holder(optimizer_residual_s, true);
+  FixedSpResidualHolder* fixed_holder =
+    fixed_sp_cuda_residual_holder(fixed_residual_s, true);
+  const fastkpc::FullCudaCiOptimizerResidualParityDiagnostics value =
+    fastkpc::compare_full_cuda_ci_optimizer_and_fixed_residuals(
+      optimizer_holder->value, fixed_holder->value);
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") = value.schema_version,
+    Rcpp::Named("n") = value.n,
+    Rcpp::Named("target_count") = value.target_count,
+    Rcpp::Named("value_count") = static_cast<double>(value.value_count),
+    Rcpp::Named("bitwise_equal_target_count") =
+      value.bitwise_equal_target_count,
+    Rcpp::Named("mismatch_target_count") = value.mismatch_target_count,
+    Rcpp::Named("bitwise_equal_value_count") =
+      static_cast<double>(value.bitwise_equal_value_count),
+    Rcpp::Named("mismatch_value_count") =
+      static_cast<double>(value.mismatch_value_count),
+    Rcpp::Named("max_abs_difference") = value.max_abs_difference,
+    Rcpp::Named("relative_l2_difference") = value.relative_l2_difference,
+    Rcpp::Named("optimizer_status_failure_count") =
+      value.optimizer_status_failure_count,
+    Rcpp::Named("fixed_status_failure_count") =
+      value.fixed_status_failure_count,
+    Rcpp::Named("fixed_route_status_mismatch_count") =
+      value.fixed_route_status_mismatch_count,
+    Rcpp::Named("producer_event_wait_count") =
+      value.producer_event_wait_count,
+    Rcpp::Named("consumer_event_registration_count") =
+      value.consumer_event_registration_count,
+    Rcpp::Named("compact_d2h_count") = value.compact_d2h_count,
+    Rcpp::Named("compact_d2h_bytes") =
+      static_cast<double>(value.compact_d2h_bytes),
+    Rcpp::Named("residual_d2h_count") = value.residual_d2h_count,
+    Rcpp::Named("residual_d2h_bytes") =
+      static_cast<double>(value.residual_d2h_bytes),
+    Rcpp::Named("comparison_cuda_ms") = value.comparison_cuda_ms,
+    Rcpp::Named("total_host_ms") = value.total_host_ms,
+    Rcpp::Named("target_identity_authenticated") =
+      value.target_identity_authenticated,
+    Rcpp::Named("device_identity_authenticated") =
+      value.device_identity_authenticated,
+    Rcpp::Named("residual_payload_device_resident") =
+      value.residual_payload_device_resident,
+    Rcpp::Named("compact_diagnostics_only_d2h") =
+      value.compact_diagnostics_only_d2h,
+    Rcpp::Named("caller_device_restored") = value.caller_device_restored
   );
   END_RCPP
 }
@@ -13257,6 +13385,9 @@ static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_phase35_vertical", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical), 6},
   {"C_full_cuda_ci_phase35_exact_batch", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_exact_batch), 6},
   {"C_full_cuda_ci_phase35_legacy_eig_batch", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_legacy_eig_batch), 6},
+  {"C_full_cuda_ci_phase35_exact_batch_from_optimizer_residual", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_exact_batch_from_optimizer_residual), 3},
+  {"C_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual), 3},
+  {"C_full_cuda_ci_phase10_optimizer_residual_parity", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase10_optimizer_residual_parity), 2},
   {"C_fastkpc_cuda_available", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_available), 0},
   {"C_fastkpc_cuda_device_info", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_device_info), 0},
   {"C_fastkpc_cuda_phase3_environment_identity", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_phase3_environment_identity), 1},

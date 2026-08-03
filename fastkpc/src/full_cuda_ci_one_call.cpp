@@ -407,6 +407,14 @@ struct OneCallDiagnostics {
   int singleton_padding_batch_count = 0;
   int singleton_padding_target_count = 0;
   int cuda_residual_batch_count = 0;
+  int cuda_exact_screen_residual_batch_count = 0;
+  int cuda_exact_screen_residual_target_count = 0;
+  int cuda_exact_screen_component_count = 0;
+  int cuda_exact_screen_pair_count = 0;
+  int cuda_guard_refinement_residual_batch_count = 0;
+  int cuda_guard_refinement_residual_target_count = 0;
+  int cuda_guard_refinement_component_count = 0;
+  int cuda_guard_refinement_pair_count = 0;
   int logical_residual_request_count = 0;
   int physical_residual_fit_count = 0;
   int cuda_dcov_component_count = 0;
@@ -475,6 +483,10 @@ struct OneCallDiagnostics {
   double frontier_optimizer_host_ms = 0.0;
   double singleton_padding_batch_host_ms = 0.0;
   double cuda_residual_solve_host_ms = 0.0;
+  double cuda_single_penalty_residual_solve_host_ms = 0.0;
+  double cuda_multi_penalty_residual_solve_host_ms = 0.0;
+  double cuda_exact_screen_residual_solve_host_ms = 0.0;
+  double cuda_guard_refinement_residual_solve_host_ms = 0.0;
   double cuda_dcov_metadata_h2d_ms = 0.0;
   double cuda_dcov_component_build_ms = 0.0;
   double cuda_dcov_pair_gamma_ms = 0.0;
@@ -1427,6 +1439,11 @@ void accumulate_exact_diagnostics(
     const FullCudaCiExactBatchDiagnostics& value,
     OneCallDiagnostics* diagnostics) {
   diagnostics->cuda_residual_batch_count += 1;
+  diagnostics->cuda_exact_screen_residual_batch_count += 1;
+  diagnostics->cuda_exact_screen_residual_target_count += value.target_count;
+  diagnostics->cuda_exact_screen_component_count +=
+    value.component_build_count;
+  diagnostics->cuda_exact_screen_pair_count += value.pair_evaluation_count;
   diagnostics->cuda_dcov_component_count += value.component_build_count;
   diagnostics->cuda_dcov_pair_count += value.pair_evaluation_count;
   diagnostics->cuda_gamma_pvalue_count += value.pair_evaluation_count;
@@ -1445,6 +1462,8 @@ void accumulate_exact_diagnostics(
   diagnostics->component_d2h_bytes += value.component_d2h_bytes;
   diagnostics->compact_result_d2h_bytes += value.compact_result_d2h_bytes;
   diagnostics->cuda_residual_solve_host_ms += value.residual_solve_host_ms;
+  diagnostics->cuda_exact_screen_residual_solve_host_ms +=
+    value.residual_solve_host_ms;
   diagnostics->cuda_dcov_metadata_h2d_ms += value.metadata_h2d_cuda_ms;
   diagnostics->cuda_dcov_component_build_ms += value.component_build_cuda_ms;
   diagnostics->cuda_dcov_pair_gamma_ms += value.pair_evaluation_cuda_ms;
@@ -1465,6 +1484,12 @@ void accumulate_refinement_diagnostics(
     const FullCudaCiLegacyEigBatchDiagnostics& value,
     OneCallDiagnostics* diagnostics) {
   diagnostics->cuda_residual_batch_count += 1;
+  diagnostics->cuda_guard_refinement_residual_batch_count += 1;
+  diagnostics->cuda_guard_refinement_residual_target_count +=
+    value.target_count;
+  diagnostics->cuda_guard_refinement_component_count +=
+    value.component_build_count;
+  diagnostics->cuda_guard_refinement_pair_count += value.pair_count;
   diagnostics->cuda_dcov_component_count += value.component_build_count;
   diagnostics->cuda_dcov_pair_count += value.cuda_pair_count;
   diagnostics->cuda_gamma_pvalue_count += value.cuda_gamma_count;
@@ -1482,6 +1507,8 @@ void accumulate_refinement_diagnostics(
   diagnostics->component_d2h_bytes += value.component_d2h_bytes;
   diagnostics->compact_result_d2h_bytes += value.compact_result_d2h_bytes;
   diagnostics->cuda_residual_solve_host_ms += value.residual_solve_host_ms;
+  diagnostics->cuda_guard_refinement_residual_solve_host_ms +=
+    value.residual_solve_host_ms;
   diagnostics->cuda_dcov_metadata_h2d_ms += value.metadata_h2d_cuda_ms;
   diagnostics->cuda_dcov_component_build_ms += value.component_build_cuda_ms;
   diagnostics->cuda_dcov_pair_gamma_ms += value.pair_evaluation_cuda_ms;
@@ -2795,6 +2822,13 @@ GroupResult execute_group(
   FullCudaCiExactBatchResult exact = run_full_cuda_ci_phase35_exact_batch(
     context->fixed_sp, batch, exact_request);
   accumulate_exact_diagnostics(exact.diagnostics, diagnostics);
+  if (context->penalty_count == 1) {
+    diagnostics->cuda_single_penalty_residual_solve_host_ms +=
+      exact.diagnostics.residual_solve_host_ms;
+  } else {
+    diagnostics->cuda_multi_penalty_residual_solve_host_ms +=
+      exact.diagnostics.residual_solve_host_ms;
+  }
   require(exact.records.size() == task_indices.size(),
           "exact CUDA dCov result count changed");
 
@@ -2830,6 +2864,13 @@ GroupResult execute_group(
       run_full_cuda_ci_phase35_legacy_eig_batch(
         context->fixed_sp, batch, refinement_request);
     accumulate_refinement_diagnostics(refinement.diagnostics, diagnostics);
+    if (context->penalty_count == 1) {
+      diagnostics->cuda_single_penalty_residual_solve_host_ms +=
+        refinement.diagnostics.residual_solve_host_ms;
+    } else {
+      diagnostics->cuda_multi_penalty_residual_solve_host_ms +=
+        refinement.diagnostics.residual_solve_host_ms;
+    }
     require(refinement.records.size() == guarded.size(),
             "guarded CUDA dCov result count changed");
     for (std::size_t index = 0; index < guarded.size(); ++index) {
@@ -3607,6 +3648,22 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.cuda_optimizer_host_boundary_count,
       Rcpp::Named("cuda_residual_batch_count") =
         diagnostics.cuda_residual_batch_count,
+      Rcpp::Named("cuda_exact_screen_residual_batch_count") =
+        diagnostics.cuda_exact_screen_residual_batch_count,
+      Rcpp::Named("cuda_exact_screen_residual_target_count") =
+        diagnostics.cuda_exact_screen_residual_target_count,
+      Rcpp::Named("cuda_exact_screen_component_count") =
+        diagnostics.cuda_exact_screen_component_count,
+      Rcpp::Named("cuda_exact_screen_pair_count") =
+        diagnostics.cuda_exact_screen_pair_count,
+      Rcpp::Named("cuda_guard_refinement_residual_batch_count") =
+        diagnostics.cuda_guard_refinement_residual_batch_count,
+      Rcpp::Named("cuda_guard_refinement_residual_target_count") =
+        diagnostics.cuda_guard_refinement_residual_target_count,
+      Rcpp::Named("cuda_guard_refinement_component_count") =
+        diagnostics.cuda_guard_refinement_component_count,
+      Rcpp::Named("cuda_guard_refinement_pair_count") =
+        diagnostics.cuda_guard_refinement_pair_count,
       Rcpp::Named("logical_residual_requests") =
         diagnostics.logical_residual_request_count,
       Rcpp::Named("physical_residual_fits") =
@@ -3784,6 +3841,14 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.singleton_padding_batch_host_ms,
       Rcpp::Named("cuda_residual_solve_host_ms") =
         diagnostics.cuda_residual_solve_host_ms,
+      Rcpp::Named("cuda_single_penalty_residual_solve_host_ms") =
+        diagnostics.cuda_single_penalty_residual_solve_host_ms,
+      Rcpp::Named("cuda_multi_penalty_residual_solve_host_ms") =
+        diagnostics.cuda_multi_penalty_residual_solve_host_ms,
+      Rcpp::Named("cuda_exact_screen_residual_solve_host_ms") =
+        diagnostics.cuda_exact_screen_residual_solve_host_ms,
+      Rcpp::Named("cuda_guard_refinement_residual_solve_host_ms") =
+        diagnostics.cuda_guard_refinement_residual_solve_host_ms,
       Rcpp::Named("cuda_dcov_metadata_h2d_ms") =
         diagnostics.cuda_dcov_metadata_h2d_ms,
       Rcpp::Named("cuda_dcov_component_build_ms") =

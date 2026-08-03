@@ -1872,6 +1872,16 @@ full_cuda_ci_multi_penalty_gcv_residual_free_native <- function(token) {
   ))
 }
 
+full_cuda_ci_phase10_optimizer_residual_parity_native <- function(
+    optimizer_residual, fixed_residual) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_full_cuda_ci_phase10_optimizer_residual_parity",
+    optimizer_residual, fixed_residual,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
 full_cuda_ci_single_penalty_gcv_cuda <- function(
     X, Y, rhs_transform, eigenvalues, magic_qr_packed, magic_tau, magic_r,
     magic_penalty_root, magic_penalty_matrix, target_ids, penalty_rank, initial_sp,

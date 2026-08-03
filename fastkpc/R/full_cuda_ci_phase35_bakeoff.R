@@ -145,6 +145,16 @@ fastkpc_full_cuda_phase35_exact_batch_ci <- function(
   )
 }
 
+fastkpc_full_cuda_phase35_exact_batch_from_optimizer_residual <- function(
+    prepared_s, optimizer_residual, request) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_full_cuda_ci_phase35_exact_batch_from_optimizer_residual",
+    prepared_s, optimizer_residual, request,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
 fastkpc_full_cuda_phase35_validate_exact_batch_result <- function(
     result, request, target_keys) {
   compact_fields <- c(
@@ -307,6 +317,16 @@ fastkpc_full_cuda_phase35_legacy_eig_batch_ci <- function(
     as.character(planned_route),
     as.character(target_keys),
     request,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+fastkpc_full_cuda_phase35_legacy_eig_batch_from_optimizer_residual <-
+function(prepared_s, optimizer_residual, request) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual",
+    prepared_s, optimizer_residual, request,
     PACKAGE = "fastkpc_cuda"
   )
 }

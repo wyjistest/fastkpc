@@ -6,7 +6,9 @@
 >
 > **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. The historical Phase 10 v1 campaign producer `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556` is accepted for canonical correctness, CUDA authority, hardening, artifact integrity, and replay latency only. Its `0.699`-second measurement is replay-warm after a complete same-data call; fresh-process cold is `1290.664` seconds versus a `601.431`-second correct baseline. Under `performance_budget_v2`, the public 500x50 development fixture passes and the best full fresh-data compute-warm development run remains `263.305` seconds. Per-call univariate primitive reuse reduced native setup from `77.650` to `38.997` seconds while preserving bitwise-identical consumed p-values, exact graph/sepset/count/trace parity, and zero CPU numerical authority or fallback. A development-only grouped guarded-QR/stable-SVD-queue prototype has exact internal and public-output parity across real q=28/37/46/55/64 shapes, but its best 512-target QR/Q speedup is only `1.032x`, below the `1.3x` stop threshold; it is not integrated into the optimizer. Compute-profile v5 proves that all `132,908` physical target optimizations occur in whole-level prefill: `110,617` TargetKeys are eventually consumed and `22,291` are never consumed, while frontier live optimization and singleton padding are both zero. Its `269.426`-second diagnostic run is bitwise identical to the `263.305`-second result and is not a new performance claim. A subsequent zero-lookahead canonical-frontier prototype was rejected at max conditioning size 3: it took `394.993` seconds versus `179.914` seconds for v5, increased optimizer boundaries from 83 to 1,898 and setup submissions from 5,239 to 46,691, created 14,507 singleton padding targets, and changed 120,991 consumed p-values in low bits (maximum `3.33e-14`) despite exact structural graph semantics and zero decision flips. The v5 production path is restored. Checkpoint A passes, but Checkpoint B (`<180` seconds) and the final five-run median gate (`<=120` seconds) still fail. No new candidate is frozen; Phase 10 is not complete, and the external promotion holdout remains `SEALED_NOT_RELEASED` and must stay unopened.
 >
-> **Latest scheduler opportunity diagnostic:** A no-CUDA-CI native-plan replay reconstructed all 137 original v5 windows, 8,637 setup cohorts, 132,908 target optimizations, and 110,617 consumed TargetKeys exactly. Every v5 window is eventually demanded; only three setup cohorts are never demanded, containing nine targets. Of the 22,291 unconsumed targets, 22,282 are inside demanded cohorts. Lazy original-window activation therefore skips zero recorded windows and zero recorded batch wall time; through level 3 it still requires exactly 83 boundaries, 5,239 setup submissions, and 107,053 target optimizations. The decision is `STOP_SCHEDULER_OPPORTUNITY_TOO_SMALL`: stop scheduler-prefill work for this contract epoch and move to accepted optimizer-residual reuse or pure-C++ setup/optimizer pipelining.
+> **Latest scheduler opportunity diagnostic:** A no-CUDA-CI native-plan replay reconstructed all 137 original v5 windows, 8,637 setup cohorts, 132,908 target optimizations, and 110,617 consumed TargetKeys exactly. Every v5 window is eventually demanded; only three setup cohorts are never demanded, containing nine targets. Of the 22,291 unconsumed targets, 22,282 are inside demanded cohorts. Lazy original-window activation therefore skips zero recorded windows and zero recorded batch wall time; through level 3 it still requires exactly 83 boundaries, 5,239 setup submissions, and 107,053 target optimizations. The decision is `STOP_SCHEDULER_OPPORTUNITY_TOO_SMALL`: stop scheduler-prefill work for this contract epoch.
+>
+> **Latest optimizer-residual qualification:** A development-only real `q=64`, seven-penalty, two-target fixture compared the accepted optimizer residual with the later selected-SP fixed solve entirely on the device. All 702 values differed; maximum absolute difference was `0.2399546` and relative L2 difference was `0.0288145`, with zero optimizer/fixed status failures and zero route/status mismatches. Direct device-residual-view exact and legacy-eig consumers had zero residual payload D2H but both produced non-bitwise-identical p-values (`3.58933903915984e-14` versus `6.41771967688960e-14`, and `4.48319202981132e-14` versus `7.89308561131647e-14`). There were zero decision flips, but the numerical producers are not semantically interchangeable under the current contract. The decision is `STOP_OPTIMIZER_RESIDUAL_NUMERICAL_PARITY`; do not implement D2D detach/arena retention or production reuse in this contract epoch. The optimizer residual remains optimizer-internal evidence and does not define production ResidualKey authority. Fixed-SP residual solving remains authoritative. Run a trace-free full level-7 compute-profile v6 to attribute fixed-SP time by penalty class and exact/refinement stage; then qualify sharing one authoritative fixed-SP residual across dCov consumers, persistent dCov resources, and pure-C++ Prepared-S setup/optimizer pipelining before single-matrix QR/Q work.
 >
 > **Active roadmap phase:** Phase 10, full performance gate, hardening, and promotion.
 >
@@ -3614,9 +3616,21 @@ activation therefore skips zero recorded batch wall time and, through level 3,
 retains exactly the v5 shape of 83 boundaries, 5,239 setup submissions, and
 107,053 target optimizations. The scheduler opportunity decision is
 `STOP_SCHEDULER_OPPORTUNITY_TOO_SMALL`. Stop this optimization family for the
-current contract epoch; continue with accepted optimizer-residual reuse or a
-pure-C++ setup/optimizer pipeline. Pass the v2 checkpoints and refreeze before
-opening the external sealed holdout. Promotion remains forbidden.
+current contract epoch. A subsequent device-only optimizer accepted-residual
+qualification also stops before integration: on a real q=64, seven-penalty,
+two-target fixture all 702 residual values differ from the selected-SP fixed
+solve (maximum absolute difference `0.2399546`, relative L2 `0.0288145`). The
+exact screen and legacy full-eig consumers both produce non-bitwise-identical
+p-values with zero residual payload D2H. Zero decision flips do not waive this
+contract failure. The decision is `STOP_OPTIMIZER_RESIDUAL_NUMERICAL_PARITY`;
+do not implement detached residual arenas or production optimizer-residual
+reuse in this epoch. First run a trace-free full level-7 compute-profile v6 and
+use its single/multi plus exact/refinement fixed-SP breakdown to decide whether
+one authoritative residual can be shared across both dCov consumers and
+whether persistent dCov resources are justified. Then continue with a
+pure-C++ setup/optimizer pipeline and, if needed, single-matrix QR/Q work. Pass
+the v2 checkpoints and refreeze before opening the external sealed holdout.
+Promotion remains forbidden.
 
 ---
 
