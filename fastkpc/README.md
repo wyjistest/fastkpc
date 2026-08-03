@@ -322,17 +322,47 @@ still releases optimizer residuals and uses the authenticated fixed-SP solver.
 The optimizer residual remains optimizer-internal evidence: it does not define
 production ResidualKey authority and must not enter dCov or the residual cache.
 
-The next measurement is a trace-free full level-7 compute-profile v6. New
-one-call fields split authoritative fixed-SP residual time both by penalty
-class (single/multi) and by consumer stage (exact screen/guarded refinement),
-with batch, target, component, and pair accounting. If guarded refinement
-repeats enough fixed-SP work to matter, the next low-risk implementation is to
-share one authenticated fixed-SP residual view between exact and legacy-eig
-consumers, followed by a persistent dCov execution context. A pure-C++ owned
-Prepared-S pipeline that overlaps native setup with the unchanged v5 GPU
-optimizer windows remains the next system-level route. A later single-matrix
-QR/Q kernel prototype is still necessary if these routes cannot close
-Checkpoint B.
+A trace-free full level-7 compute-profile v6 then split authoritative fixed-SP
+residual time both by penalty class and by consumer stage. Its `274.728`-second
+development runtime includes the new diagnostic accounting and is not a new
+performance baseline; the best development runtime remains `263.305` seconds.
+The graph, sepsets, counts, all 240,489 task rows (including consumed p-values),
+and the semantic level trace are bitwise identical to the primitive-cache
+artifact. CPU numerical authority, fallback, residual D2H, and component D2H
+remain zero.
+
+```text
+fixed-SP residual total                  15.315 s
+single-penalty                           10.272 s
+multi-penalty                             5.043 s
+exact screen                             14.833 s
+guarded legacy-eig refinement             0.482 s
+
+exact residual batches                   38,613
+guarded refinement residual batches         553
+exact residual target fits              228,015
+guarded refinement residual target fits   9,939
+unique ResidualKeys                     110,665
+excess exact residual fits              117,350
+```
+
+Guarded refinement accounts for only `3.15%` of residual-solve time, below the
+`3-5` second implementation gate. Do not build a large exact/refinement sharing
+route for a measured upper bound of `0.482` seconds. The larger independent
+question is whether the `51.47%` excess exact fits can reuse an authoritative
+fixed-SP residual across different batch cohorts. This is not yet qualified:
+the next diagnostic must prove bitwise residual and p-value parity for repeated
+ResidualKeys, measure reuse distance and peak live bytes, and fail closed on
+any cohort-dependent output.
+
+Persistent dCov resources remain a separate low-risk candidate. The v6 run
+records 39,166 dCov calls, `3.440` seconds of teardown, and `7.416` seconds of
+dCov host time not attributed to metadata H2D, component kernels, pair/gamma,
+or compact D2H. Their sum is an orchestration upper bound, not a promised
+speedup. A pure-C++ owned Prepared-S pipeline that overlaps CPU setup with the
+unchanged v5 GPU optimizer windows remains the next system-level route. A later
+single-matrix QR/Q kernel prototype is still necessary if these routes cannot
+close Checkpoint B.
 
 Rebuild the opportunity receipt without CUDA numerical work with:
 

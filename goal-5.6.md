@@ -8,7 +8,9 @@
 >
 > **Latest scheduler opportunity diagnostic:** A no-CUDA-CI native-plan replay reconstructed all 137 original v5 windows, 8,637 setup cohorts, 132,908 target optimizations, and 110,617 consumed TargetKeys exactly. Every v5 window is eventually demanded; only three setup cohorts are never demanded, containing nine targets. Of the 22,291 unconsumed targets, 22,282 are inside demanded cohorts. Lazy original-window activation therefore skips zero recorded windows and zero recorded batch wall time; through level 3 it still requires exactly 83 boundaries, 5,239 setup submissions, and 107,053 target optimizations. The decision is `STOP_SCHEDULER_OPPORTUNITY_TOO_SMALL`: stop scheduler-prefill work for this contract epoch.
 >
-> **Latest optimizer-residual qualification:** A development-only real `q=64`, seven-penalty, two-target fixture compared the accepted optimizer residual with the later selected-SP fixed solve entirely on the device. All 702 values differed; maximum absolute difference was `0.2399546` and relative L2 difference was `0.0288145`, with zero optimizer/fixed status failures and zero route/status mismatches. Direct device-residual-view exact and legacy-eig consumers had zero residual payload D2H but both produced non-bitwise-identical p-values (`3.58933903915984e-14` versus `6.41771967688960e-14`, and `4.48319202981132e-14` versus `7.89308561131647e-14`). There were zero decision flips, but the numerical producers are not semantically interchangeable under the current contract. The decision is `STOP_OPTIMIZER_RESIDUAL_NUMERICAL_PARITY`; do not implement D2D detach/arena retention or production reuse in this contract epoch. The optimizer residual remains optimizer-internal evidence and does not define production ResidualKey authority. Fixed-SP residual solving remains authoritative. Run a trace-free full level-7 compute-profile v6 to attribute fixed-SP time by penalty class and exact/refinement stage; then qualify sharing one authoritative fixed-SP residual across dCov consumers, persistent dCov resources, and pure-C++ Prepared-S setup/optimizer pipelining before single-matrix QR/Q work.
+> **Latest optimizer-residual qualification:** A development-only real `q=64`, seven-penalty, two-target fixture compared the accepted optimizer residual with the later selected-SP fixed solve entirely on the device. All 702 values differed; maximum absolute difference was `0.2399546` and relative L2 difference was `0.0288145`, with zero optimizer/fixed status failures and zero route/status mismatches. Direct device-residual-view exact and legacy-eig consumers had zero residual payload D2H but both produced non-bitwise-identical p-values (`3.58933903915984e-14` versus `6.41771967688960e-14`, and `4.48319202981132e-14` versus `7.89308561131647e-14`). There were zero decision flips, but the numerical producers are not semantically interchangeable under the current contract. The decision is `STOP_OPTIMIZER_RESIDUAL_NUMERICAL_PARITY`; do not implement D2D detach/arena retention or production reuse in this contract epoch. The optimizer residual remains optimizer-internal evidence and does not define production ResidualKey authority. Fixed-SP residual solving remains authoritative; the subsequent v6 attribution is recorded below.
+>
+> **Latest fixed-SP residual attribution:** The trace-free full level-7 compute-profile v6 takes `274.728` seconds as a development diagnostic and does not replace the `263.305`-second best runtime. Its graph, sepsets, counts, 240,489 task rows including consumed p-values, and semantic level trace are bitwise identical to the primitive-cache artifact, with zero CPU numerical authority, fallback, residual D2H, or component D2H. Authoritative fixed-SP residual solve time is `15.315` seconds: single-penalty `10.272`, multi-penalty `5.043`, exact screen `14.833`, and guarded legacy-eig refinement only `0.482`. The run executes 38,613 exact residual batches and 553 refinement batches; refinement is only `3.15%` of residual time, so exact/refinement residual sharing is below the `3-5` second implementation gate and stops as a main route. Exact screens nevertheless perform 228,015 residual target fits for 110,665 unique ResidualKeys, leaving 117,350 excess fits (`51.47%`). Do not assume these are reusable: first qualify bitwise fixed-SP residual and p-value identity across different batch cohorts, reuse distance, and bounded live memory. The same run records 39,166 dCov calls, `3.440` seconds of teardown, and `7.416` seconds of otherwise unattributed dCov host time; this is only an upper bound for a persistent dCov execution context.
 >
 > **Active roadmap phase:** Phase 10, full performance gate, hardening, and promotion.
 >
@@ -3624,13 +3626,19 @@ exact screen and legacy full-eig consumers both produce non-bitwise-identical
 p-values with zero residual payload D2H. Zero decision flips do not waive this
 contract failure. The decision is `STOP_OPTIMIZER_RESIDUAL_NUMERICAL_PARITY`;
 do not implement detached residual arenas or production optimizer-residual
-reuse in this epoch. First run a trace-free full level-7 compute-profile v6 and
-use its single/multi plus exact/refinement fixed-SP breakdown to decide whether
-one authoritative residual can be shared across both dCov consumers and
-whether persistent dCov resources are justified. Then continue with a
-pure-C++ setup/optimizer pipeline and, if needed, single-matrix QR/Q work. Pass
-the v2 checkpoints and refreeze before opening the external sealed holdout.
-Promotion remains forbidden.
+reuse in this epoch. The subsequent trace-free full level-7 compute-profile v6
+is complete: fixed-SP residual time is `15.315` seconds, of which guarded
+refinement accounts for only `0.482` seconds, below the implementation gate. Do
+not build the
+exact/refinement sharing route. Instead, qualify the larger but unproven
+cross-batch opportunity: 228,015 exact residual target fits map to 110,665
+unique ResidualKeys. Require bitwise residual and p-value identity, bounded
+reuse distance, and explicit memory accounting before any cache integration.
+In parallel, a persistent dCov context has an orchestration upper bound of
+`3.440` seconds teardown plus `7.416` seconds otherwise unattributed dCov host
+time. Then continue with a pure-C++ setup/optimizer pipeline and, if needed,
+single-matrix QR/Q work. Pass the v2 checkpoints and refreeze before opening
+the external sealed holdout. Promotion remains forbidden.
 
 ---
 
