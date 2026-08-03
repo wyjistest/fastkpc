@@ -197,6 +197,41 @@ candidate identity, and promotion boundary are unchanged. Any next optimizer
 route needs new evidence for a materially different decomposition kernel or
 work organization, not another direct per-warp CTA packing variant.
 
+Compute-profile v5 now attributes the existing whole-level target prefill
+without changing its schedule. A full max-conditioning-size-7 diagnostic run
+completed in `269.426` seconds. This is an instrumented development run, not a
+new performance claim. Its adjacency, normalized sepsets, pMax,
+`n.edgetests`, task structure, and every consumed p-value were bitwise
+identical to the `263.305`-second result. CPU numerical authority, fallback,
+and residual/component D2H counters remained zero.
+
+The attribution closes every physical optimizer target and boundary:
+
+```text
+physical target optimizations             132908
+whole-level prefill target optimizations   132908
+prefill TargetKeys eventually consumed     110617
+prefill TargetKeys never consumed           22291
+frontier-required target optimizations          0
+singleton requests skipped by prefill           0
+singleton padding targets                       0
+
+prefill optimizer host time                162.321 seconds
+prefill end-to-end batch wall time          178.574 seconds
+frontier optimizer host time                  0.000 seconds
+singleton-padding batch host time             0.000 seconds
+```
+
+Thus all 22,291 excess optimizations in this run are distinct TargetKeys that
+whole-level prefill computed before canonical deletion made them unreachable;
+none comes from singleton padding or repeated optimization. The per-window
+receipt records level, penalty class, conditioning groups, optimizer setups,
+optimized TargetKeys, eventually consumed/unconsumed TargetKeys, and exact
+batch/optimizer host time. It deliberately does not assign a fabricated
+per-target time to mixed batches. The next low-risk performance experiment is
+therefore a deterministic bounded canonical frontier/look-ahead. A dedicated
+multi-penalty singleton tail is not currently justified by measured work.
+
 Reproduce the exactness and stop/go campaign with:
 
 ```bash
@@ -216,6 +251,17 @@ FASTKPC_PHASE10_DECOMPOSITION_TRACE_CAPACITY=4096 \
 Rscript fastkpc/tools/profile_full_cuda_ci_phase10_fresh_data.R \
   7 \
   fastkpc/artifacts/full_cuda_ci/phase10_profile_v2/fresh-data-level-07-exact-decomposition-reuse-development.rds \
+  development
+```
+
+Reproduce the prefill attribution profile with a distinct ignored artifact:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
+Rscript fastkpc/tools/profile_full_cuda_ci_phase10_fresh_data.R \
+  7 \
+  fastkpc/artifacts/full_cuda_ci/phase10_profile_v2/fresh-data-level-07-prefill-attribution-profile-v5-development.rds \
   development
 ```
 

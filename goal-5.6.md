@@ -4,7 +4,7 @@
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
-> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. The historical Phase 10 v1 campaign producer `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556` is accepted for canonical correctness, CUDA authority, hardening, artifact integrity, and replay latency only. Its `0.699`-second measurement is replay-warm after a complete same-data call; fresh-process cold is `1290.664` seconds versus a `601.431`-second correct baseline. Under `performance_budget_v2`, the public 500x50 development fixture passes and a single full fresh-data compute-warm development run now completes in `263.305` seconds. Per-call univariate primitive reuse reduced native setup from `77.650` to `38.997` seconds while preserving bitwise-identical consumed p-values, exact graph/sepset/count/trace parity, and zero CPU numerical authority or fallback. A development-only grouped guarded-QR/stable-SVD-queue prototype has exact internal and public-output parity across real q=28/37/46/55/64 shapes, but its best 512-target QR/Q speedup is only `1.032x`, below the `1.3x` stop threshold; it is not integrated into the optimizer. Checkpoint A passes, but Checkpoint B (`<180` seconds) and the final five-run median gate (`<=120` seconds) still fail. No new candidate is frozen; Phase 10 is not complete, and the external promotion holdout remains `SEALED_NOT_RELEASED` and must stay unopened.
+> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. The historical Phase 10 v1 campaign producer `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556` is accepted for canonical correctness, CUDA authority, hardening, artifact integrity, and replay latency only. Its `0.699`-second measurement is replay-warm after a complete same-data call; fresh-process cold is `1290.664` seconds versus a `601.431`-second correct baseline. Under `performance_budget_v2`, the public 500x50 development fixture passes and the best full fresh-data compute-warm development run remains `263.305` seconds. Per-call univariate primitive reuse reduced native setup from `77.650` to `38.997` seconds while preserving bitwise-identical consumed p-values, exact graph/sepset/count/trace parity, and zero CPU numerical authority or fallback. A development-only grouped guarded-QR/stable-SVD-queue prototype has exact internal and public-output parity across real q=28/37/46/55/64 shapes, but its best 512-target QR/Q speedup is only `1.032x`, below the `1.3x` stop threshold; it is not integrated into the optimizer. Compute-profile v5 now proves that all `132,908` physical target optimizations occur in whole-level prefill: `110,617` TargetKeys are eventually consumed and `22,291` are never consumed, while frontier live optimization and singleton padding are both zero. Its `269.426`-second diagnostic run is bitwise identical to the `263.305`-second result and is not a new performance claim. The next low-risk change is bounded canonical-frontier prefill. Checkpoint A passes, but Checkpoint B (`<180` seconds) and the final five-run median gate (`<=120` seconds) still fail. No new candidate is frozen; Phase 10 is not complete, and the external promotion holdout remains `SEALED_NOT_RELEASED` and must stay unopened.
 >
 > **Active roadmap phase:** Phase 10, full performance gate, hardening, and promotion.
 >
@@ -3586,8 +3586,19 @@ Its 512-target 2/4/8-warp campaign reaches at best `1.032x` QR/Q throughput;
 regress. This is below the `1.3x` stop threshold, so do not convert the
 optimizer into a grouped state machine from this prototype. Require evidence
 for a materially different decomposition kernel/work organization before the
-next optimizer integration attempt. Pass the v2 checkpoints and refreeze
-before opening the external sealed holdout. Promotion remains forbidden.
+next optimizer integration attempt. Compute-profile v5 closes the existing
+optimizer work accounting: all `132,908` physical target optimizations are
+issued by whole-level prefill, `110,617` distinct TargetKeys are eventually
+consumed, and `22,291` are not consumed. Frontier-required optimization,
+prefill singleton skips, and singleton padding are all zero. The diagnostic
+run takes `269.426` seconds, records `162.321` seconds of prefill optimizer host
+time and `178.574` seconds of end-to-end prefill batch wall time, and remains
+bitwise identical to the `263.305`-second result with zero CPU authority,
+fallback, or large-payload D2H. Do not invent per-target time attribution for
+mixed windows. Replace whole-level prefill with a deterministic bounded
+canonical frontier/look-ahead before spending work on singleton-tail support.
+Pass the v2 checkpoints and refreeze before opening the external sealed
+holdout. Promotion remains forbidden.
 
 ---
 

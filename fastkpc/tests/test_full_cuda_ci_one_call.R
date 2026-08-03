@@ -91,6 +91,61 @@ assert_canonical_task_order <- function(candidate_tasks, reference_tasks,
   )
 }
 
+assert_optimizer_attribution <- function(summary, label) {
+  batches <- summary$prefill_batches
+  required_columns <- c(
+    "level", "penalty_class", "window_id", "conditioning_group_count",
+    "optimizer_setup_count", "target_optimization_count",
+    "unique_target_key_count", "consumed_unique_target_key_count",
+    "unconsumed_unique_target_key_count",
+    "singleton_skipped_request_count", "singleton_skipped_target_count",
+    "optimizer_host_ms", "batch_wall_ms"
+  )
+  close_sum <- function(left, right) {
+    abs(left - right) <= 1e-9 * max(1, abs(right))
+  }
+  assert_true(
+    is.data.frame(batches) && identical(names(batches), required_columns) &&
+      nrow(batches) == summary$prefill_window_count &&
+      summary$prefill_conditioning_group_count ==
+        sum(batches$conditioning_group_count) &&
+      summary$prefill_optimizer_boundary_count ==
+        sum(batches$optimizer_setup_count > 0L) &&
+      summary$prefill_optimizer_setup_count ==
+        sum(batches$optimizer_setup_count) &&
+      summary$prefill_target_optimization_count ==
+        sum(batches$target_optimization_count) &&
+      summary$prefill_target_optimization_count ==
+        summary$prefill_single_penalty_target_count +
+          summary$prefill_multi_penalty_target_count &&
+      summary$prefill_unique_target_key_count ==
+        summary$prefill_consumed_unique_target_key_count +
+          summary$prefill_unconsumed_unique_target_key_count &&
+      summary$prefill_singleton_skipped_request_count ==
+        sum(batches$singleton_skipped_request_count) &&
+      summary$prefill_singleton_skipped_target_count ==
+        sum(batches$singleton_skipped_target_count) &&
+      summary$physical_target_optimization_count ==
+        summary$prefill_target_optimization_count +
+          summary$frontier_physical_target_optimization_count &&
+      summary$frontier_physical_target_optimization_count ==
+        summary$frontier_live_target_optimization_count +
+          summary$singleton_padding_target_count &&
+      summary$singleton_padding_batch_count ==
+        summary$singleton_padding_target_count &&
+      summary$cuda_optimizer_host_boundary_count ==
+        summary$prefill_optimizer_boundary_count +
+          summary$frontier_optimizer_boundary_count &&
+      close_sum(
+        summary$prefill_optimizer_host_ms,
+        sum(batches$optimizer_host_ms)
+      ) &&
+      close_sum(summary$prefill_batch_wall_ms, sum(batches$batch_wall_ms)),
+    paste0("Phase 10 ", label,
+           " optimizer work attribution is malformed")
+  )
+}
+
 assert_true(
   identical(candidate$adjacency, reference$adjacency),
   "Phase 9 focused adjacency differs from the legacy oracle"
@@ -117,6 +172,7 @@ assert_true(
 )
 
 summary <- candidate$summary
+assert_optimizer_attribution(summary, "single-penalty")
 required_zero <- c(
   "r_callback_count",
   "legacy_mgcv_fit_count",
@@ -202,6 +258,7 @@ multi_candidate <- tryCatch(
   finally = Sys.unsetenv(trace_environment)
 )
 multi_summary <- multi_candidate$summary
+assert_optimizer_attribution(multi_summary, "multi-penalty")
 multi_reuse_profile <-
   fastkpc_full_cuda_phase10_decomposition_reuse_profile(multi_summary)
 assert_true(

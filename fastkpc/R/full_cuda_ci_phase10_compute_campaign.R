@@ -445,6 +445,8 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "cuda_multi_penalty_optimizer_max_setup_host_ms",
     "cuda_multi_penalty_prepared_build_ms",
     "cuda_single_penalty_optimizer_cuda_ms",
+    "prefill_optimizer_host_ms", "prefill_batch_wall_ms",
+    "frontier_optimizer_host_ms", "singleton_padding_batch_host_ms",
     "cuda_residual_solve_host_ms", "cuda_dcov_host_ms",
     "cuda_dcov_metadata_h2d_ms", "cuda_dcov_component_build_ms",
     "cuda_dcov_pair_gamma_ms", "cuda_dcov_compact_d2h_ms",
@@ -478,6 +480,20 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "cuda_multi_penalty_target_count",
     "physical_target_optimization_count",
     "excess_target_optimization_count", "reused_target_state_count",
+    "prefill_conditioning_group_count", "prefill_window_count",
+    "prefill_optimizer_boundary_count", "prefill_optimizer_setup_count",
+    "prefill_target_optimization_count",
+    "prefill_single_penalty_target_count",
+    "prefill_multi_penalty_target_count",
+    "prefill_unique_target_key_count",
+    "prefill_consumed_unique_target_key_count",
+    "prefill_unconsumed_unique_target_key_count",
+    "prefill_singleton_skipped_request_count",
+    "prefill_singleton_skipped_target_count",
+    "frontier_optimizer_boundary_count",
+    "frontier_live_target_optimization_count",
+    "frontier_physical_target_optimization_count",
+    "singleton_padding_batch_count", "singleton_padding_target_count",
     "cuda_single_penalty_optimizer_setup_count",
     "cuda_single_penalty_optimizer_call_count",
     "cuda_multi_penalty_optimizer_setup_count",
@@ -532,6 +548,47 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     value <- summary[[field]]
     if (is.null(value)) NA_real_ else as.numeric(value)
   }, numeric(1L))
+  prefill_batches <- summary$prefill_batches
+  prefill_batch_columns <- c(
+    "level", "penalty_class", "window_id", "conditioning_group_count",
+    "optimizer_setup_count", "target_optimization_count",
+    "unique_target_key_count", "consumed_unique_target_key_count",
+    "unconsumed_unique_target_key_count",
+    "singleton_skipped_request_count", "singleton_skipped_target_count",
+    "optimizer_host_ms", "batch_wall_ms"
+  )
+  prefill_count_columns <- setdiff(
+    prefill_batch_columns,
+    c("penalty_class", "optimizer_host_ms", "batch_wall_ms")
+  )
+  valid_prefill_batches <- is.data.frame(prefill_batches) &&
+    identical(names(prefill_batches), prefill_batch_columns) &&
+    nrow(prefill_batches) == counters[["prefill_window_count"]] &&
+    all(prefill_batches$penalty_class %in% c("single", "multi")) &&
+    all(vapply(prefill_batches[prefill_count_columns], function(column) {
+      is.numeric(column) && all(is.finite(column)) && all(column >= 0) &&
+        all(column == floor(column))
+    }, logical(1L))) &&
+    all(is.finite(prefill_batches$optimizer_host_ms) &
+          prefill_batches$optimizer_host_ms >= 0) &&
+    all(is.finite(prefill_batches$batch_wall_ms) &
+          prefill_batches$batch_wall_ms >= 0) &&
+    all(prefill_batches$level >= 1) &&
+    all(prefill_batches$window_id >= 1) &&
+    all(prefill_batches$conditioning_group_count >= 1) &&
+    all(prefill_batches$target_optimization_count ==
+          prefill_batches$unique_target_key_count) &&
+    all(prefill_batches$unique_target_key_count ==
+          prefill_batches$consumed_unique_target_key_count +
+            prefill_batches$unconsumed_unique_target_key_count) &&
+    all(prefill_batches$singleton_skipped_request_count ==
+          prefill_batches$singleton_skipped_target_count) &&
+    all((prefill_batches$optimizer_setup_count > 0) ==
+          (prefill_batches$target_optimization_count > 0))
+  close_sum <- function(value, expected) {
+    is.finite(value) && is.finite(expected) &&
+      abs(value - expected) <= 1e-9 * max(1, abs(expected))
+  }
   total_ms <- as.numeric(summary$elapsed_sec) * 1000
   known_top_level_ms <- sum(timings[c(
     "native_setup_ms", "native_setup_device_rehydrate_ms",
@@ -543,6 +600,27 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     length(total_ms) == 1L && is.finite(total_ms) && total_ms > 0 &&
       all(is.finite(timings) & timings >= 0) &&
       all(is.finite(counters) & counters >= 0) &&
+      valid_prefill_batches &&
+      counters[["prefill_conditioning_group_count"]] ==
+        sum(prefill_batches$conditioning_group_count) &&
+      counters[["prefill_optimizer_boundary_count"]] ==
+        sum(prefill_batches$optimizer_setup_count > 0) &&
+      counters[["prefill_optimizer_setup_count"]] ==
+        sum(prefill_batches$optimizer_setup_count) &&
+      counters[["prefill_target_optimization_count"]] ==
+        sum(prefill_batches$target_optimization_count) &&
+      counters[["prefill_singleton_skipped_request_count"]] ==
+        sum(prefill_batches$singleton_skipped_request_count) &&
+      counters[["prefill_singleton_skipped_target_count"]] ==
+        sum(prefill_batches$singleton_skipped_target_count) &&
+      close_sum(
+        timings[["prefill_optimizer_host_ms"]],
+        sum(prefill_batches$optimizer_host_ms)
+      ) &&
+      close_sum(
+        timings[["prefill_batch_wall_ms"]],
+        sum(prefill_batches$batch_wall_ms)
+      ) &&
       counters[["unique_prepared_s_key_count"]] <=
         counters[["physical_prepared_s_key_count"]] &&
       counters[["physical_prepared_s_key_count"]] <=
@@ -571,6 +649,22 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
       counters[["physical_target_optimization_count"]] ==
         counters[["cuda_single_penalty_target_count"]] +
           counters[["cuda_multi_penalty_target_count"]] &&
+      counters[["prefill_target_optimization_count"]] ==
+        counters[["prefill_single_penalty_target_count"]] +
+          counters[["prefill_multi_penalty_target_count"]] &&
+      counters[["prefill_unique_target_key_count"]] ==
+        counters[["prefill_consumed_unique_target_key_count"]] +
+          counters[["prefill_unconsumed_unique_target_key_count"]] &&
+      counters[["prefill_target_optimization_count"]] >=
+        counters[["prefill_unique_target_key_count"]] &&
+      counters[["physical_target_optimization_count"]] ==
+        counters[["prefill_target_optimization_count"]] +
+          counters[["frontier_physical_target_optimization_count"]] &&
+      counters[["frontier_physical_target_optimization_count"]] ==
+        counters[["frontier_live_target_optimization_count"]] +
+          counters[["singleton_padding_target_count"]] &&
+      counters[["singleton_padding_batch_count"]] ==
+        counters[["singleton_padding_target_count"]] &&
       counters[["cuda_multi_penalty_prepared_build_count"]] ==
         counters[["cuda_multi_penalty_optimizer_setup_count"]] &&
       counters[["cuda_multi_penalty_prepared_release_count"]] ==
@@ -612,11 +706,14 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
           counters[["physical_prepared_s_key_count"]] &&
       counters[["cuda_optimizer_host_boundary_count"]] ==
         counters[["cuda_single_penalty_optimizer_call_count"]] +
-          counters[["cuda_multi_penalty_optimizer_call_count"]],
+          counters[["cuda_multi_penalty_optimizer_call_count"]] &&
+      counters[["cuda_optimizer_host_boundary_count"]] ==
+        counters[["prefill_optimizer_boundary_count"]] +
+          counters[["frontier_optimizer_boundary_count"]],
     "Phase 10 fresh-data compute profile is malformed"
   )
   list(
-    schema_version = "full-cuda-ci-compute-profile-v4",
+    schema_version = "full-cuda-ci-compute-profile-v5",
     stage_timing = data.frame(
       stage = c(
         "native_setup",
@@ -642,6 +739,10 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
         "optimizer_multi_summed_setup_host_nested",
         "optimizer_multi_max_setup_host_nested",
         "optimizer_multi_prepared_build_nested",
+        "optimizer_prefill_host_nested",
+        "optimizer_prefill_batch_wall_nested",
+        "optimizer_frontier_host_nested",
+        "optimizer_singleton_padding_batch_host_nested",
         "residual_solve_host",
         "dcov_host_boundary", "dcov_metadata_h2d_nested",
         "dcov_component_build_nested", "dcov_pair_gamma_nested",
@@ -673,6 +774,10 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
         timings[["cuda_multi_penalty_optimizer_summed_setup_host_ms"]],
         timings[["cuda_multi_penalty_optimizer_max_setup_host_ms"]],
         timings[["cuda_multi_penalty_prepared_build_ms"]],
+        timings[["prefill_optimizer_host_ms"]],
+        timings[["prefill_batch_wall_ms"]],
+        timings[["frontier_optimizer_host_ms"]],
+        timings[["singleton_padding_batch_host_ms"]],
         timings[["cuda_residual_solve_host_ms"]],
         timings[["cuda_dcov_host_ms"]],
         timings[["cuda_dcov_metadata_h2d_ms"]],
@@ -689,6 +794,7 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
       value = unname(counters),
       stringsAsFactors = FALSE
     ),
+    prefill_batches = prefill_batches,
     total_elapsed_ms = total_ms,
     known_top_level_ms = known_top_level_ms
   )

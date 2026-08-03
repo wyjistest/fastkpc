@@ -89,6 +89,22 @@ assert_true(
     summary$physical_target_optimization_count ==
       summary$cuda_single_penalty_target_count +
         summary$cuda_multi_penalty_target_count &&
+    summary$prefill_target_optimization_count ==
+      summary$prefill_single_penalty_target_count +
+        summary$prefill_multi_penalty_target_count &&
+    summary$prefill_unique_target_key_count ==
+      summary$prefill_consumed_unique_target_key_count +
+        summary$prefill_unconsumed_unique_target_key_count &&
+    summary$physical_target_optimization_count ==
+      summary$prefill_target_optimization_count +
+        summary$frontier_physical_target_optimization_count &&
+    summary$frontier_physical_target_optimization_count ==
+      summary$frontier_live_target_optimization_count +
+        summary$singleton_padding_target_count &&
+    summary$singleton_padding_batch_count ==
+      summary$singleton_padding_target_count &&
+    is.data.frame(summary$prefill_batches) &&
+    nrow(summary$prefill_batches) == summary$prefill_window_count &&
     summary$excess_target_optimization_count ==
       summary$physical_target_optimization_count -
         summary$unique_target_key_count &&

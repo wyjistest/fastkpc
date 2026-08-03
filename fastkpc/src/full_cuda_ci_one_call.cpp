@@ -316,11 +316,27 @@ struct DecompositionIterationReuseRow {
   std::uint64_t reuse_count = 0;
 };
 
+struct PrefillBatchDiagnostic {
+  int level = 0;
+  std::string penalty_class;
+  int window_id = 0;
+  int conditioning_group_count = 0;
+  int optimizer_setup_count = 0;
+  int target_optimization_count = 0;
+  int singleton_skipped_request_count = 0;
+  int singleton_skipped_target_count = 0;
+  double optimizer_host_ms = 0.0;
+  double batch_wall_ms = 0.0;
+  std::vector<std::string> optimized_target_keys;
+};
+
 struct OneCallDiagnostics {
   std::unordered_set<std::string> physical_prepared_keys;
   std::unordered_set<std::string> consumed_prepared_keys;
   std::unordered_set<std::string> unique_target_keys;
   std::unordered_set<std::string> unique_residual_keys;
+  std::unordered_set<std::string> prefill_target_keys;
+  std::vector<PrefillBatchDiagnostic> prefill_batches;
   int native_setup_count = 0;
   int native_setup_cache_request_count = 0;
   int native_setup_cache_hit_count = 0;
@@ -385,6 +401,11 @@ struct OneCallDiagnostics {
   std::uint64_t cuda_multi_penalty_terminal_confirmation_cycles = 0;
   int cuda_optimizer_kernel_launch_count = 0;
   int cuda_optimizer_host_boundary_count = 0;
+  int frontier_optimizer_boundary_count = 0;
+  int frontier_live_target_optimization_count = 0;
+  int frontier_physical_target_optimization_count = 0;
+  int singleton_padding_batch_count = 0;
+  int singleton_padding_target_count = 0;
   int cuda_residual_batch_count = 0;
   int logical_residual_request_count = 0;
   int physical_residual_fit_count = 0;
@@ -451,6 +472,8 @@ struct OneCallDiagnostics {
   double cuda_multi_penalty_optimizer_max_setup_host_ms = 0.0;
   double cuda_multi_penalty_prepared_build_ms = 0.0;
   double cuda_single_penalty_optimizer_cuda_ms = 0.0;
+  double frontier_optimizer_host_ms = 0.0;
+  double singleton_padding_batch_host_ms = 0.0;
   double cuda_residual_solve_host_ms = 0.0;
   double cuda_dcov_metadata_h2d_ms = 0.0;
   double cuda_dcov_component_build_ms = 0.0;
@@ -1853,6 +1876,132 @@ Rcpp::DataFrame decomposition_iteration_reuse_frame(
     Rcpp::Named("stringsAsFactors") = false);
 }
 
+struct PrefillAttributionSummary {
+  int conditioning_group_count = 0;
+  int window_count = 0;
+  int optimizer_boundary_count = 0;
+  int optimizer_setup_count = 0;
+  int target_optimization_count = 0;
+  int single_penalty_target_count = 0;
+  int multi_penalty_target_count = 0;
+  int unique_target_key_count = 0;
+  int consumed_unique_target_key_count = 0;
+  int unconsumed_unique_target_key_count = 0;
+  int singleton_skipped_request_count = 0;
+  int singleton_skipped_target_count = 0;
+  double optimizer_host_ms = 0.0;
+  double batch_wall_ms = 0.0;
+};
+
+PrefillAttributionSummary summarize_prefill_attribution(
+    const OneCallDiagnostics& diagnostics) {
+  PrefillAttributionSummary value;
+  value.window_count = static_cast<int>(diagnostics.prefill_batches.size());
+  for (const PrefillBatchDiagnostic& batch : diagnostics.prefill_batches) {
+    require(batch.level >= 1 &&
+              (batch.penalty_class == "single" ||
+               batch.penalty_class == "multi") &&
+              batch.window_id > 0 && batch.conditioning_group_count > 0 &&
+              batch.optimizer_setup_count >= 0 &&
+              batch.target_optimization_count >= 0 &&
+              batch.singleton_skipped_request_count >= 0 &&
+              batch.singleton_skipped_target_count >= 0 &&
+              batch.optimizer_host_ms >= 0.0 && batch.batch_wall_ms >= 0.0 &&
+              batch.target_optimization_count ==
+                static_cast<int>(batch.optimized_target_keys.size()),
+            "prefill batch attribution is malformed");
+    value.conditioning_group_count += batch.conditioning_group_count;
+    value.optimizer_boundary_count += batch.optimizer_setup_count > 0 ? 1 : 0;
+    value.optimizer_setup_count += batch.optimizer_setup_count;
+    value.target_optimization_count += batch.target_optimization_count;
+    if (batch.penalty_class == "single") {
+      value.single_penalty_target_count += batch.target_optimization_count;
+    } else {
+      value.multi_penalty_target_count += batch.target_optimization_count;
+    }
+    value.singleton_skipped_request_count +=
+      batch.singleton_skipped_request_count;
+    value.singleton_skipped_target_count +=
+      batch.singleton_skipped_target_count;
+    value.optimizer_host_ms += batch.optimizer_host_ms;
+    value.batch_wall_ms += batch.batch_wall_ms;
+    for (const std::string& key : batch.optimized_target_keys) {
+      require(diagnostics.prefill_target_keys.count(key) == 1U,
+              "prefill batch target key was not published globally");
+    }
+  }
+  value.unique_target_key_count = static_cast<int>(
+    diagnostics.prefill_target_keys.size());
+  for (const std::string& key : diagnostics.prefill_target_keys) {
+    if (diagnostics.unique_target_keys.count(key) == 1U) {
+      value.consumed_unique_target_key_count += 1;
+    }
+  }
+  value.unconsumed_unique_target_key_count =
+    value.unique_target_key_count - value.consumed_unique_target_key_count;
+  require(value.target_optimization_count >= value.unique_target_key_count &&
+            value.unique_target_key_count >=
+              value.consumed_unique_target_key_count &&
+            value.singleton_skipped_request_count ==
+              value.singleton_skipped_target_count,
+          "prefill aggregate attribution is malformed");
+  return value;
+}
+
+Rcpp::DataFrame prefill_batch_diagnostics_frame(
+    const std::vector<PrefillBatchDiagnostic>& batches,
+    const std::unordered_set<std::string>& consumed_target_keys) {
+  const int count = static_cast<int>(batches.size());
+  Rcpp::IntegerVector level(count), window_id(count), conditioning_groups(count),
+    optimizer_setups(count), target_optimizations(count), unique_targets(count),
+    consumed_targets(count), unconsumed_targets(count),
+    singleton_skipped_requests(count), singleton_skipped_targets(count);
+  Rcpp::CharacterVector penalty_class(count);
+  Rcpp::NumericVector optimizer_host_ms(count), batch_wall_ms(count);
+  for (int index = 0; index < count; ++index) {
+    const PrefillBatchDiagnostic& batch =
+      batches[static_cast<std::size_t>(index)];
+    const std::unordered_set<std::string> unique(
+      batch.optimized_target_keys.begin(), batch.optimized_target_keys.end());
+    require(unique.size() == batch.optimized_target_keys.size(),
+            "prefill batch optimized a duplicate TargetKey");
+    int consumed = 0;
+    for (const std::string& key : unique) {
+      consumed += consumed_target_keys.count(key) == 1U ? 1 : 0;
+    }
+    level[index] = batch.level;
+    penalty_class[index] = batch.penalty_class;
+    window_id[index] = batch.window_id;
+    conditioning_groups[index] = batch.conditioning_group_count;
+    optimizer_setups[index] = batch.optimizer_setup_count;
+    target_optimizations[index] = batch.target_optimization_count;
+    unique_targets[index] = static_cast<int>(unique.size());
+    consumed_targets[index] = consumed;
+    unconsumed_targets[index] = static_cast<int>(unique.size()) - consumed;
+    singleton_skipped_requests[index] =
+      batch.singleton_skipped_request_count;
+    singleton_skipped_targets[index] = batch.singleton_skipped_target_count;
+    optimizer_host_ms[index] = batch.optimizer_host_ms;
+    batch_wall_ms[index] = batch.batch_wall_ms;
+  }
+  return Rcpp::DataFrame::create(
+    Rcpp::Named("level") = level,
+    Rcpp::Named("penalty_class") = penalty_class,
+    Rcpp::Named("window_id") = window_id,
+    Rcpp::Named("conditioning_group_count") = conditioning_groups,
+    Rcpp::Named("optimizer_setup_count") = optimizer_setups,
+    Rcpp::Named("target_optimization_count") = target_optimizations,
+    Rcpp::Named("unique_target_key_count") = unique_targets,
+    Rcpp::Named("consumed_unique_target_key_count") = consumed_targets,
+    Rcpp::Named("unconsumed_unique_target_key_count") = unconsumed_targets,
+    Rcpp::Named("singleton_skipped_request_count") =
+      singleton_skipped_requests,
+    Rcpp::Named("singleton_skipped_target_count") = singleton_skipped_targets,
+    Rcpp::Named("optimizer_host_ms") = optimizer_host_ms,
+    Rcpp::Named("batch_wall_ms") = batch_wall_ms,
+    Rcpp::Named("stringsAsFactors") = false);
+}
+
 struct SinglePenaltyPrefillGroup {
   std::shared_ptr<NativeSetupContext> context;
   std::vector<int> task_indices;
@@ -1861,6 +2010,7 @@ struct SinglePenaltyPrefillGroup {
 struct SinglePenaltyPrefillRequest {
   std::shared_ptr<NativeSetupContext> context;
   std::vector<int> targets;
+  std::vector<std::string> base_target_keys;
   std::vector<std::string> optimizer_state_keys;
 };
 
@@ -1868,8 +2018,15 @@ void prefill_single_penalty_target_states(
     const Rcpp::NumericMatrix& data,
     const LayerPlan& plan,
     const std::vector<SinglePenaltyPrefillGroup>& groups,
+    PrefillBatchDiagnostic* batch,
     OneCallDiagnostics* diagnostics) {
   const auto started = std::chrono::steady_clock::now();
+  require(batch != nullptr && diagnostics != nullptr &&
+            batch->level == plan.level &&
+            batch->penalty_class == "single" &&
+            batch->conditioning_group_count ==
+              static_cast<int>(groups.size()),
+          "single-penalty prefill diagnostics are malformed");
   std::vector<SinglePenaltyPrefillRequest> requests;
   std::vector<SinglePenaltyGcvCudaOwnedInput> inputs;
   requests.reserve(groups.size());
@@ -1903,6 +2060,7 @@ void prefill_single_penalty_target_states(
             optimizer_key, context->dataset_key, 1, &cached,
             diagnostics)) {
         request.targets.push_back(target);
+        request.base_target_keys.push_back(base_key);
         request.optimizer_state_keys.push_back(optimizer_key);
       }
     }
@@ -1941,7 +2099,10 @@ void prefill_single_penalty_target_states(
     requests.push_back(std::move(request));
   }
 
-  if (requests.empty()) return;
+  if (requests.empty()) {
+    batch->batch_wall_ms = elapsed_ms(started);
+    return;
+  }
   const SinglePenaltyGcvCudaMultiResult optimization =
     single_penalty_gcv_cuda_multi(
       inputs, std::min(
@@ -1989,6 +2150,10 @@ void prefill_single_penalty_target_states(
       target_state_cache().insert(
         request.optimizer_state_keys[target_index],
         request.context->dataset_key, state, diagnostics);
+      const std::string& base_key =
+        request.base_target_keys[target_index];
+      batch->optimized_target_keys.push_back(base_key);
+      diagnostics->prefill_target_keys.insert(base_key);
     }
     optimized_targets += static_cast<int>(request.targets.size());
   }
@@ -1998,6 +2163,10 @@ void prefill_single_penalty_target_states(
   diagnostics->cuda_single_penalty_optimizer_host_ms +=
     optimization.diagnostics.wall_host_ms;
   diagnostics->cuda_optimizer_host_ms += elapsed_ms(started);
+  batch->optimizer_setup_count = static_cast<int>(requests.size());
+  batch->target_optimization_count = optimized_targets;
+  batch->optimizer_host_ms = optimization.diagnostics.wall_host_ms;
+  batch->batch_wall_ms = elapsed_ms(started);
 }
 
 void prefill_single_penalty_level_target_states(
@@ -2021,6 +2190,20 @@ void prefill_single_penalty_level_target_states(
 
   std::vector<SinglePenaltyPrefillGroup> window;
   window.reserve(kSinglePenaltyLevelPrefillGroupWindow);
+  int window_id = 0;
+  const auto run_window = [&]() {
+    require(!window.empty(),
+            "single-penalty level prefill window is empty");
+    PrefillBatchDiagnostic batch;
+    batch.level = plan.level;
+    batch.penalty_class = "single";
+    batch.window_id = ++window_id;
+    batch.conditioning_group_count = static_cast<int>(window.size());
+    diagnostics->prefill_batches.push_back(std::move(batch));
+    prefill_single_penalty_target_states(
+      data, plan, window, &diagnostics->prefill_batches.back(), diagnostics);
+    window.clear();
+  };
   for (const auto& entry : tasks_by_conditioning) {
     require(!entry.second.empty(),
             "single-penalty level prefill group is empty");
@@ -2032,19 +2215,18 @@ void prefill_single_penalty_level_target_states(
             "single-penalty level prefill shape changed");
     window.push_back(SinglePenaltyPrefillGroup{context, entry.second});
     if (window.size() == kSinglePenaltyLevelPrefillGroupWindow) {
-      prefill_single_penalty_target_states(
-        data, plan, window, diagnostics);
-      window.clear();
+      run_window();
     }
   }
   if (!window.empty()) {
-    prefill_single_penalty_target_states(data, plan, window, diagnostics);
+    run_window();
   }
 }
 
 struct MultiPenaltyPrefillRequest {
   std::shared_ptr<NativeSetupContext> context;
   std::vector<int> targets;
+  std::vector<std::string> base_target_keys;
   std::vector<std::string> optimizer_state_keys;
 };
 
@@ -2052,8 +2234,15 @@ void prefill_multi_penalty_target_states(
     const Rcpp::NumericMatrix& data,
     const LayerPlan& plan,
     const std::vector<SinglePenaltyPrefillGroup>& groups,
+    PrefillBatchDiagnostic* batch,
     OneCallDiagnostics* diagnostics) {
   const auto started = std::chrono::steady_clock::now();
+  require(batch != nullptr && diagnostics != nullptr &&
+            batch->level == plan.level &&
+            batch->penalty_class == "multi" &&
+            batch->conditioning_group_count ==
+              static_cast<int>(groups.size()),
+          "multi-penalty prefill diagnostics are malformed");
   std::vector<MultiPenaltyPrefillRequest> metadata;
   std::vector<MultiPenaltyGcvCudaMultiRequest> requests;
   metadata.reserve(groups.size());
@@ -2091,10 +2280,17 @@ void prefill_multi_penalty_target_states(
         base_target_keys.push_back(base_key);
       }
     }
-    if (request.targets.size() < 2U) continue;
+    if (request.targets.size() < 2U) {
+      if (request.targets.size() == 1U) {
+        batch->singleton_skipped_request_count += 1;
+        batch->singleton_skipped_target_count += 1;
+      }
+      continue;
+    }
 
     ensure_multi_penalty_handle(
       context, static_cast<int>(request.targets.size()), diagnostics);
+    request.base_target_keys = base_target_keys;
     input.prepared = context->multi_penalty;
     input.n = context->n;
     input.target_count = static_cast<int>(request.targets.size());
@@ -2115,7 +2311,10 @@ void prefill_multi_penalty_target_states(
     requests.push_back(std::move(input));
   }
 
-  if (requests.empty()) return;
+  if (requests.empty()) {
+    batch->batch_wall_ms = elapsed_ms(started);
+    return;
+  }
   MultiPenaltyGcvCudaMultiResult optimization;
   try {
     optimization = multi_penalty_gcv_cuda_optimize_multi(
@@ -2175,6 +2374,10 @@ void prefill_multi_penalty_target_states(
         target_state_cache().insert(
           request.optimizer_state_keys[static_cast<std::size_t>(target_index)],
           request.context->dataset_key, state, diagnostics);
+        const std::string& base_key = request.base_target_keys[
+          static_cast<std::size_t>(target_index)];
+        batch->optimized_target_keys.push_back(base_key);
+        diagnostics->prefill_target_keys.insert(base_key);
       }
       diagnostics->cuda_multi_penalty_target_count += target_count;
       release_multi_penalty_gcv_cuda_residual(setup.residual);
@@ -2206,6 +2409,11 @@ void prefill_multi_penalty_target_states(
   diagnostics->cuda_multi_penalty_optimizer_host_ms +=
     optimization.diagnostics.wall_host_ms;
   diagnostics->cuda_optimizer_host_ms += elapsed_ms(started);
+  batch->optimizer_setup_count = static_cast<int>(metadata.size());
+  batch->target_optimization_count = static_cast<int>(
+    batch->optimized_target_keys.size());
+  batch->optimizer_host_ms = optimization.diagnostics.wall_host_ms;
+  batch->batch_wall_ms = elapsed_ms(started);
 }
 
 void prefill_multi_penalty_level_target_states(
@@ -2227,6 +2435,20 @@ void prefill_multi_penalty_level_target_states(
   std::vector<SinglePenaltyPrefillGroup> window;
   window.reserve(
     static_cast<std::size_t>(kMultiPenaltyGcvMaximumConcurrentSetups));
+  int window_id = 0;
+  const auto run_window = [&]() {
+    require(!window.empty(),
+            "multi-penalty level prefill window is empty");
+    PrefillBatchDiagnostic batch;
+    batch.level = plan.level;
+    batch.penalty_class = "multi";
+    batch.window_id = ++window_id;
+    batch.conditioning_group_count = static_cast<int>(window.size());
+    diagnostics->prefill_batches.push_back(std::move(batch));
+    prefill_multi_penalty_target_states(
+      data, plan, window, &diagnostics->prefill_batches.back(), diagnostics);
+    window.clear();
+  };
   for (const auto& entry : tasks_by_conditioning) {
     require(!entry.second.empty(),
             "multi-penalty level prefill group is empty");
@@ -2239,13 +2461,11 @@ void prefill_multi_penalty_level_target_states(
     window.push_back(SinglePenaltyPrefillGroup{context, entry.second});
     if (window.size() == static_cast<std::size_t>(
           kMultiPenaltyGcvMaximumConcurrentSetups)) {
-      prefill_multi_penalty_target_states(
-        data, plan, window, diagnostics);
-      window.clear();
+      run_window();
     }
   }
   if (!window.empty()) {
-    prefill_multi_penalty_target_states(data, plan, window, diagnostics);
+    run_window();
   }
 }
 
@@ -2327,17 +2547,24 @@ GroupResult execute_group(
     if (!missing_positions.empty()) {
       const auto optimize_start = std::chrono::steady_clock::now();
       std::vector<int> optimization_positions = missing_positions;
+      bool singleton_padding = false;
       if (context->penalty_count > 1 &&
           optimization_positions.size() == 1U) {
         for (int position = 0; position < target_count; ++position) {
           if (position != optimization_positions.front()) {
             optimization_positions.push_back(position);
+            singleton_padding = true;
             break;
           }
         }
       }
       const int optimization_count =
         static_cast<int>(optimization_positions.size());
+      require(optimization_count ==
+                static_cast<int>(missing_positions.size()) +
+                  (singleton_padding ? 1 : 0),
+              "live optimizer singleton padding accounting changed");
+      double optimizer_host_ms = 0.0;
       std::vector<double> optimization_Y(
         static_cast<std::size_t>(context->n) * optimization_count);
       std::vector<std::string> optimization_base_keys;
@@ -2382,6 +2609,7 @@ GroupResult execute_group(
       diagnostics->cuda_optimizer_host_boundary_count += 1;
       diagnostics->cuda_single_penalty_optimizer_host_ms +=
         optimization.diagnostics.total_host_ms;
+      optimizer_host_ms = optimization.diagnostics.total_host_ms;
       require(optimization.target_count == optimization_count &&
                 optimization.diagnostics.legacy_mgcv_target_calls == 0 &&
                 optimization.diagnostics.cpu_score_count == 0 &&
@@ -2428,6 +2656,7 @@ GroupResult execute_group(
         diagnostics->cuda_optimizer_host_boundary_count += 1;
         diagnostics->cuda_multi_penalty_optimizer_host_ms +=
           result.diagnostics.total_host_ms;
+        optimizer_host_ms = result.diagnostics.total_host_ms;
         diagnostics->cuda_optimizer_kernel_launch_count +=
           result.diagnostics.cuda_qt_y_kernel_launch_count +
           result.diagnostics.cuda_optimizer_kernel_launch_count +
@@ -2489,6 +2718,18 @@ GroupResult execute_group(
       }
       diagnostics->cuda_multi_penalty_target_count += optimization_count;
     }
+
+      diagnostics->frontier_optimizer_boundary_count += 1;
+      diagnostics->frontier_live_target_optimization_count +=
+        static_cast<int>(missing_positions.size());
+      diagnostics->frontier_physical_target_optimization_count +=
+        optimization_count;
+      diagnostics->frontier_optimizer_host_ms += optimizer_host_ms;
+      if (singleton_padding) {
+        diagnostics->singleton_padding_batch_count += 1;
+        diagnostics->singleton_padding_target_count += 1;
+        diagnostics->singleton_padding_batch_host_ms += optimizer_host_ms;
+      }
 
       for (int position : optimization_positions) {
         CachedTargetState state;
@@ -3042,6 +3283,10 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
   const int physical_target_optimization_count =
     diagnostics.cuda_single_penalty_target_count +
       diagnostics.cuda_multi_penalty_target_count;
+  const PrefillAttributionSummary prefill =
+    summarize_prefill_attribution(diagnostics);
+  const Rcpp::DataFrame prefill_batches = prefill_batch_diagnostics_frame(
+    diagnostics.prefill_batches, diagnostics.unique_target_keys);
   require(diagnostics.native_setup_count >= physical_prepared_s_key_count &&
             physical_prepared_s_key_count >= unique_prepared_s_key_count &&
             diagnostics.physical_residual_fit_count >=
@@ -3056,7 +3301,21 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
             diagnostics.cuda_multi_penalty_prepared_build_count ==
               diagnostics.cuda_multi_penalty_prepared_release_count &&
             diagnostics.cuda_multi_penalty_prepared_target_capacity_peak <=
-              64,
+              64 &&
+            prefill.target_optimization_count ==
+              prefill.single_penalty_target_count +
+                prefill.multi_penalty_target_count &&
+            physical_target_optimization_count ==
+              prefill.target_optimization_count +
+                diagnostics.frontier_physical_target_optimization_count &&
+            diagnostics.frontier_physical_target_optimization_count ==
+              diagnostics.frontier_live_target_optimization_count +
+                diagnostics.singleton_padding_target_count &&
+            diagnostics.singleton_padding_batch_count ==
+              diagnostics.singleton_padding_target_count &&
+            diagnostics.cuda_optimizer_host_boundary_count ==
+              prefill.optimizer_boundary_count +
+                diagnostics.frontier_optimizer_boundary_count,
           "compatible.cuda one-call physical work accounting changed");
   const bool authority_clean =
     diagnostics.cpu_dcov_component_count == 0 &&
@@ -3170,6 +3429,40 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         std::max(0, physical_target_optimization_count - unique_target_key_count),
       Rcpp::Named("reused_target_state_count") =
         std::max(0, unique_target_key_count - physical_target_optimization_count),
+      Rcpp::Named("prefill_conditioning_group_count") =
+        prefill.conditioning_group_count,
+      Rcpp::Named("prefill_window_count") = prefill.window_count,
+      Rcpp::Named("prefill_optimizer_boundary_count") =
+        prefill.optimizer_boundary_count,
+      Rcpp::Named("prefill_optimizer_setup_count") =
+        prefill.optimizer_setup_count,
+      Rcpp::Named("prefill_target_optimization_count") =
+        prefill.target_optimization_count,
+      Rcpp::Named("prefill_single_penalty_target_count") =
+        prefill.single_penalty_target_count,
+      Rcpp::Named("prefill_multi_penalty_target_count") =
+        prefill.multi_penalty_target_count,
+      Rcpp::Named("prefill_unique_target_key_count") =
+        prefill.unique_target_key_count,
+      Rcpp::Named("prefill_consumed_unique_target_key_count") =
+        prefill.consumed_unique_target_key_count,
+      Rcpp::Named("prefill_unconsumed_unique_target_key_count") =
+        prefill.unconsumed_unique_target_key_count,
+      Rcpp::Named("prefill_singleton_skipped_request_count") =
+        prefill.singleton_skipped_request_count,
+      Rcpp::Named("prefill_singleton_skipped_target_count") =
+        prefill.singleton_skipped_target_count,
+      Rcpp::Named("frontier_optimizer_boundary_count") =
+        diagnostics.frontier_optimizer_boundary_count,
+      Rcpp::Named("frontier_live_target_optimization_count") =
+        diagnostics.frontier_live_target_optimization_count,
+      Rcpp::Named("frontier_physical_target_optimization_count") =
+        diagnostics.frontier_physical_target_optimization_count,
+      Rcpp::Named("singleton_padding_batch_count") =
+        diagnostics.singleton_padding_batch_count,
+      Rcpp::Named("singleton_padding_target_count") =
+        diagnostics.singleton_padding_target_count,
+      Rcpp::Named("prefill_batches") = prefill_batches,
       Rcpp::Named("cuda_single_penalty_optimizer_setup_count") =
         diagnostics.cuda_single_penalty_optimizer_setup_count,
       Rcpp::Named("cuda_single_penalty_optimizer_call_count") =
@@ -3482,6 +3775,13 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.cuda_multi_penalty_prepared_build_ms,
       Rcpp::Named("cuda_single_penalty_optimizer_cuda_ms") =
         diagnostics.cuda_single_penalty_optimizer_cuda_ms,
+      Rcpp::Named("prefill_optimizer_host_ms") =
+        prefill.optimizer_host_ms,
+      Rcpp::Named("prefill_batch_wall_ms") = prefill.batch_wall_ms,
+      Rcpp::Named("frontier_optimizer_host_ms") =
+        diagnostics.frontier_optimizer_host_ms,
+      Rcpp::Named("singleton_padding_batch_host_ms") =
+        diagnostics.singleton_padding_batch_host_ms,
       Rcpp::Named("cuda_residual_solve_host_ms") =
         diagnostics.cuda_residual_solve_host_ms,
       Rcpp::Named("cuda_dcov_metadata_h2d_ms") =

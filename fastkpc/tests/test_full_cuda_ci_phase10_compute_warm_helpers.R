@@ -62,14 +62,33 @@ evidence <- fastkpc_full_cuda_phase10_capture_compute_warm(
 fastkpc_full_cuda_phase10_validate_compute_warm_evidence(evidence)
 profile <- fastkpc_full_cuda_phase10_compute_profile(evidence$result$summary)
 assert_true(
-    identical(profile$schema_version, "full-cuda-ci-compute-profile-v4") &&
+    identical(profile$schema_version, "full-cuda-ci-compute-profile-v5") &&
     is.data.frame(profile$stage_timing) &&
-    nrow(profile$stage_timing) == 32L &&
+    nrow(profile$stage_timing) == 36L &&
     is.data.frame(profile$physical_work) &&
-    nrow(profile$physical_work) == 89L &&
+    nrow(profile$physical_work) == 106L &&
+    is.data.frame(profile$prefill_batches) &&
+    nrow(profile$prefill_batches) ==
+      evidence$result$summary$prefill_window_count &&
     all(is.finite(profile$stage_timing$elapsed_ms)) &&
     all(is.finite(profile$physical_work$value)),
   "compute-warm profile must expose complete finite stage/work counters"
+)
+tampered_summary <- evidence$result$summary
+tampered_summary$prefill_batches$target_optimization_count[[1L]] <-
+  tampered_summary$prefill_batches$target_optimization_count[[1L]] + 1L
+assert_error(
+  fastkpc_full_cuda_phase10_compute_profile(tampered_summary),
+  "Phase 10 fresh-data compute profile is malformed",
+  "compute profile must reject a malformed prefill window receipt"
+)
+tampered_summary <- evidence$result$summary
+tampered_summary$singleton_padding_target_count <-
+  tampered_summary$singleton_padding_target_count + 1L
+assert_error(
+  fastkpc_full_cuda_phase10_compute_profile(tampered_summary),
+  "Phase 10 fresh-data compute profile is malformed",
+  "compute profile must reject unbalanced singleton padding"
 )
 assert_true(
   !isTRUE(evidence$result$summary[[
