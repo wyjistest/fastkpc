@@ -328,6 +328,56 @@ struct FullCudaCiOptimizerResidualParityDiagnostics {
   bool caller_device_restored = false;
 };
 
+struct FullCudaCiFixedResidualIdentityDiagnostics {
+  std::string schema_version;
+  int n = 0;
+  int left_target_count = 0;
+  int right_target_count = 0;
+  int matched_target_count = 0;
+  int left_only_target_count = 0;
+  int right_only_target_count = 0;
+  std::vector<std::string> matched_target_keys;
+  std::uint64_t residual_value_count = 0;
+  std::uint64_t residual_mismatch_value_count = 0;
+  int residual_mismatch_target_count = 0;
+  double residual_max_abs_difference = 0.0;
+  double residual_relative_l2_difference = 0.0;
+  std::uint64_t centered_component_value_count = 0;
+  std::uint64_t centered_component_mismatch_value_count = 0;
+  std::uint64_t row_sum_value_count = 0;
+  std::uint64_t row_sum_mismatch_value_count = 0;
+  std::uint64_t total_mismatch_value_count = 0;
+  std::uint64_t self_moment_mismatch_value_count = 0;
+  int component_mismatch_target_count = 0;
+  double component_max_abs_difference = 0.0;
+  double component_relative_l2_difference = 0.0;
+  int planned_route_mismatch_count = 0;
+  int executed_route_mismatch_count = 0;
+  int solver_status_mismatch_count = 0;
+  int left_status_failure_count = 0;
+  int right_status_failure_count = 0;
+  int producer_event_wait_count = 0;
+  int consumer_event_registration_count = 0;
+  int metadata_h2d_count = 0;
+  std::size_t metadata_h2d_bytes = 0;
+  int compact_d2h_count = 0;
+  std::size_t compact_d2h_bytes = 0;
+  int residual_d2h_count = 0;
+  std::size_t residual_d2h_bytes = 0;
+  double residual_compare_cuda_ms = 0.0;
+  double component_build_cuda_ms = 0.0;
+  double component_compare_cuda_ms = 0.0;
+  double total_host_ms = 0.0;
+  bool target_identity_authenticated = false;
+  bool device_identity_authenticated = false;
+  bool residual_payload_device_resident = false;
+  bool component_payload_device_resident = false;
+  bool compact_diagnostics_only_d2h = false;
+  bool bounded_allocation = false;
+  bool leak_free_teardown = false;
+  bool caller_device_restored = false;
+};
+
 std::string full_cuda_ci_vertical_request_identity(
   const FullCudaCiVerticalRequest& request,
   const std::vector<std::string>& target_keys);
@@ -374,6 +424,11 @@ FullCudaCiOptimizerResidualParityDiagnostics
 compare_full_cuda_ci_optimizer_and_fixed_residuals(
   const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& optimizer_residual,
   const std::shared_ptr<DeviceResidualBatch>& fixed_residual);
+
+FullCudaCiFixedResidualIdentityDiagnostics
+compare_full_cuda_ci_fixed_residuals_and_exact_components(
+  const std::shared_ptr<DeviceResidualBatch>& left_residual,
+  const std::shared_ptr<DeviceResidualBatch>& right_residual);
 
 }  // namespace fastkpc
 

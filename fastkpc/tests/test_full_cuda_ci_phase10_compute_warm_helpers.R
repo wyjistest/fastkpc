@@ -25,6 +25,9 @@ source("fastkpc/R/full_cuda_ci_phase9_artifact.R")
 source("fastkpc/R/full_cuda_ci_phase10_hardening.R")
 source("fastkpc/R/full_cuda_ci_phase10_campaign.R")
 source("fastkpc/R/full_cuda_ci_phase10_compute_campaign.R")
+source(
+  "fastkpc/R/full_cuda_ci_phase10_fixed_residual_cohort_opportunity.R"
+)
 
 fail <- function(message) stop(message, call. = FALSE)
 assert_true <- function(value, message) if (!isTRUE(value)) fail(message)
@@ -61,6 +64,13 @@ evidence <- fastkpc_full_cuda_phase10_capture_compute_warm(
 )
 fastkpc_full_cuda_phase10_validate_compute_warm_evidence(evidence)
 profile <- fastkpc_full_cuda_phase10_compute_profile(evidence$result$summary)
+cohort_opportunity <-
+  fastkpc_full_cuda_phase10_fixed_residual_cohort_opportunity(
+    evidence$result$summary
+  )
+fastkpc_full_cuda_phase10_validate_fixed_residual_cohort_opportunity(
+  cohort_opportunity
+)
 assert_true(
     identical(profile$schema_version, "full-cuda-ci-compute-profile-v6") &&
     is.data.frame(profile$stage_timing) &&
@@ -73,6 +83,39 @@ assert_true(
     all(is.finite(profile$stage_timing$elapsed_ms)) &&
     all(is.finite(profile$physical_work$value)),
   "compute-warm profile must expose complete finite stage/work counters"
+)
+assert_true(
+  identical(
+    cohort_opportunity$schema_version,
+    "full-cuda-ci-phase10-fixed-residual-cohort-opportunity-v1"
+  ) &&
+    sum(cohort_opportunity$categories$batch_count) ==
+      evidence$result$summary$cuda_exact_screen_residual_batch_count &&
+    sum(cohort_opportunity$categories$target_count) ==
+      evidence$result$summary$cuda_exact_screen_residual_target_count &&
+    isTRUE(cohort_opportunity$gates$category_accounting) &&
+    isTRUE(cohort_opportunity$gates$strict_authority),
+  "fixed residual cohort opportunity accounting drifted"
+)
+tampered_opportunity <- cohort_opportunity
+tampered_opportunity$categories$batch_count[[1L]] <-
+  tampered_opportunity$categories$batch_count[[1L]] + 1L
+assert_error(
+  fastkpc_full_cuda_phase10_validate_fixed_residual_cohort_opportunity(
+    tampered_opportunity
+  ),
+  "Phase 10 fixed residual cohort opportunity is malformed",
+  "fixed residual cohort opportunity must reject count drift"
+)
+tampered_opportunity <- cohort_opportunity
+tampered_opportunity$qualified_opportunity$combined_upper_bound_ms <-
+  tampered_opportunity$qualified_opportunity$combined_upper_bound_ms + 1
+assert_error(
+  fastkpc_full_cuda_phase10_validate_fixed_residual_cohort_opportunity(
+    tampered_opportunity
+  ),
+  "Phase 10 fixed residual cohort opportunity is malformed",
+  "fixed residual cohort opportunity must reject timing drift"
 )
 tampered_summary <- evidence$result$summary
 tampered_summary$prefill_batches$target_optimization_count[[1L]] <-

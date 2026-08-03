@@ -335,6 +335,7 @@ struct OneCallDiagnostics {
   std::unordered_set<std::string> consumed_prepared_keys;
   std::unordered_set<std::string> unique_target_keys;
   std::unordered_set<std::string> unique_residual_keys;
+  std::unordered_set<std::string> exact_residual_cohort_signatures;
   std::unordered_set<std::string> prefill_target_keys;
   std::vector<PrefillBatchDiagnostic> prefill_batches;
   int native_setup_count = 0;
@@ -415,6 +416,14 @@ struct OneCallDiagnostics {
   int cuda_guard_refinement_residual_target_count = 0;
   int cuda_guard_refinement_component_count = 0;
   int cuda_guard_refinement_pair_count = 0;
+  int exact_residual_all_miss_batch_count = 0;
+  int exact_residual_all_miss_target_count = 0;
+  int exact_residual_mixed_batch_count = 0;
+  int exact_residual_mixed_target_count = 0;
+  int exact_residual_all_hit_new_cohort_batch_count = 0;
+  int exact_residual_all_hit_new_cohort_target_count = 0;
+  int exact_residual_all_hit_repeated_cohort_batch_count = 0;
+  int exact_residual_all_hit_repeated_cohort_target_count = 0;
   int logical_residual_request_count = 0;
   int physical_residual_fit_count = 0;
   int cuda_dcov_component_count = 0;
@@ -487,6 +496,15 @@ struct OneCallDiagnostics {
   double cuda_multi_penalty_residual_solve_host_ms = 0.0;
   double cuda_exact_screen_residual_solve_host_ms = 0.0;
   double cuda_guard_refinement_residual_solve_host_ms = 0.0;
+  double cuda_exact_screen_component_build_ms = 0.0;
+  double exact_residual_all_miss_solve_host_ms = 0.0;
+  double exact_residual_all_miss_component_build_ms = 0.0;
+  double exact_residual_mixed_solve_host_ms = 0.0;
+  double exact_residual_mixed_component_build_ms = 0.0;
+  double exact_residual_all_hit_new_cohort_solve_host_ms = 0.0;
+  double exact_residual_all_hit_new_cohort_component_build_ms = 0.0;
+  double exact_residual_all_hit_repeated_cohort_solve_host_ms = 0.0;
+  double exact_residual_all_hit_repeated_cohort_component_build_ms = 0.0;
   double cuda_dcov_metadata_h2d_ms = 0.0;
   double cuda_dcov_component_build_ms = 0.0;
   double cuda_dcov_pair_gamma_ms = 0.0;
@@ -1435,6 +1453,57 @@ struct GroupResult {
   std::vector<double> p_values;
 };
 
+enum class ExactResidualOpportunityClass {
+  AllMiss,
+  Mixed,
+  AllHitNewCohort,
+  AllHitRepeatedCohort
+};
+
+void accumulate_exact_residual_opportunity(
+    ExactResidualOpportunityClass category,
+    int target_count,
+    const FullCudaCiExactBatchDiagnostics& value,
+    OneCallDiagnostics* diagnostics) {
+  switch (category) {
+    case ExactResidualOpportunityClass::AllMiss:
+      diagnostics->exact_residual_all_miss_batch_count += 1;
+      diagnostics->exact_residual_all_miss_target_count += target_count;
+      diagnostics->exact_residual_all_miss_solve_host_ms +=
+        value.residual_solve_host_ms;
+      diagnostics->exact_residual_all_miss_component_build_ms +=
+        value.component_build_cuda_ms;
+      return;
+    case ExactResidualOpportunityClass::Mixed:
+      diagnostics->exact_residual_mixed_batch_count += 1;
+      diagnostics->exact_residual_mixed_target_count += target_count;
+      diagnostics->exact_residual_mixed_solve_host_ms +=
+        value.residual_solve_host_ms;
+      diagnostics->exact_residual_mixed_component_build_ms +=
+        value.component_build_cuda_ms;
+      return;
+    case ExactResidualOpportunityClass::AllHitNewCohort:
+      diagnostics->exact_residual_all_hit_new_cohort_batch_count += 1;
+      diagnostics->exact_residual_all_hit_new_cohort_target_count +=
+        target_count;
+      diagnostics->exact_residual_all_hit_new_cohort_solve_host_ms +=
+        value.residual_solve_host_ms;
+      diagnostics->exact_residual_all_hit_new_cohort_component_build_ms +=
+        value.component_build_cuda_ms;
+      return;
+    case ExactResidualOpportunityClass::AllHitRepeatedCohort:
+      diagnostics->exact_residual_all_hit_repeated_cohort_batch_count += 1;
+      diagnostics->exact_residual_all_hit_repeated_cohort_target_count +=
+        target_count;
+      diagnostics->exact_residual_all_hit_repeated_cohort_solve_host_ms +=
+        value.residual_solve_host_ms;
+      diagnostics->exact_residual_all_hit_repeated_cohort_component_build_ms +=
+        value.component_build_cuda_ms;
+      return;
+  }
+  throw std::runtime_error("unknown exact residual opportunity class");
+}
+
 void accumulate_exact_diagnostics(
     const FullCudaCiExactBatchDiagnostics& value,
     OneCallDiagnostics* diagnostics) {
@@ -1466,6 +1535,8 @@ void accumulate_exact_diagnostics(
     value.residual_solve_host_ms;
   diagnostics->cuda_dcov_metadata_h2d_ms += value.metadata_h2d_cuda_ms;
   diagnostics->cuda_dcov_component_build_ms += value.component_build_cuda_ms;
+  diagnostics->cuda_exact_screen_component_build_ms +=
+    value.component_build_cuda_ms;
   diagnostics->cuda_dcov_pair_gamma_ms += value.pair_evaluation_cuda_ms;
   diagnostics->cuda_dcov_compact_d2h_ms += value.compact_d2h_cuda_ms;
   diagnostics->cuda_dcov_teardown_host_ms += value.teardown_host_ms;
@@ -2779,13 +2850,46 @@ GroupResult execute_group(
 
   std::vector<std::string> residual_keys;
   residual_keys.reserve(static_cast<std::size_t>(target_count));
+  int new_residual_key_count = 0;
   for (int target = 0; target < target_count; ++target) {
     residual_keys.push_back(residual_key(
       base_target_keys[static_cast<std::size_t>(target)],
       selected_sp.data() +
         static_cast<std::size_t>(context->penalty_count) * target,
       context->penalty_count));
-    diagnostics->unique_residual_keys.insert(residual_keys.back());
+    if (diagnostics->unique_residual_keys.insert(
+          residual_keys.back()).second) {
+      new_residual_key_count += 1;
+    }
+  }
+  std::vector<std::string> cohort_entries;
+  cohort_entries.reserve(static_cast<std::size_t>(target_count));
+  for (int target = 0; target < target_count; ++target) {
+    cohort_entries.push_back(
+      residual_keys[static_cast<std::size_t>(target)] + "|" +
+      fixed_sp_route_name(planned_routes[static_cast<std::size_t>(target)]));
+  }
+  std::sort(cohort_entries.begin(), cohort_entries.end());
+  std::ostringstream cohort_payload;
+  cohort_payload <<
+    "schema=full-cuda-ci-phase10-exact-residual-cohort-v1\n" <<
+    "target_count=" << target_count << "\n";
+  for (const std::string& entry : cohort_entries) {
+    cohort_payload << "target=" << entry << "\n";
+  }
+  const std::string cohort_signature = full_cuda_ci_sha256_utf8(
+    cohort_payload.str());
+  const bool repeated_cohort =
+    !diagnostics->exact_residual_cohort_signatures.insert(
+      cohort_signature).second;
+  ExactResidualOpportunityClass opportunity_class =
+    ExactResidualOpportunityClass::Mixed;
+  if (new_residual_key_count == target_count) {
+    opportunity_class = ExactResidualOpportunityClass::AllMiss;
+  } else if (new_residual_key_count == 0) {
+    opportunity_class = repeated_cohort ?
+      ExactResidualOpportunityClass::AllHitRepeatedCohort :
+      ExactResidualOpportunityClass::AllHitNewCohort;
   }
   diagnostics->logical_residual_request_count += target_count;
   diagnostics->physical_residual_fit_count += target_count;
@@ -2822,6 +2926,8 @@ GroupResult execute_group(
   FullCudaCiExactBatchResult exact = run_full_cuda_ci_phase35_exact_batch(
     context->fixed_sp, batch, exact_request);
   accumulate_exact_diagnostics(exact.diagnostics, diagnostics);
+  accumulate_exact_residual_opportunity(
+    opportunity_class, target_count, exact.diagnostics, diagnostics);
   if (context->penalty_count == 1) {
     diagnostics->cuda_single_penalty_residual_solve_host_ms +=
       exact.diagnostics.residual_solve_host_ms;
@@ -3664,6 +3770,22 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.cuda_guard_refinement_component_count,
       Rcpp::Named("cuda_guard_refinement_pair_count") =
         diagnostics.cuda_guard_refinement_pair_count,
+      Rcpp::Named("exact_residual_all_miss_batch_count") =
+        diagnostics.exact_residual_all_miss_batch_count,
+      Rcpp::Named("exact_residual_all_miss_target_count") =
+        diagnostics.exact_residual_all_miss_target_count,
+      Rcpp::Named("exact_residual_mixed_batch_count") =
+        diagnostics.exact_residual_mixed_batch_count,
+      Rcpp::Named("exact_residual_mixed_target_count") =
+        diagnostics.exact_residual_mixed_target_count,
+      Rcpp::Named("exact_residual_all_hit_new_cohort_batch_count") =
+        diagnostics.exact_residual_all_hit_new_cohort_batch_count,
+      Rcpp::Named("exact_residual_all_hit_new_cohort_target_count") =
+        diagnostics.exact_residual_all_hit_new_cohort_target_count,
+      Rcpp::Named("exact_residual_all_hit_repeated_cohort_batch_count") =
+        diagnostics.exact_residual_all_hit_repeated_cohort_batch_count,
+      Rcpp::Named("exact_residual_all_hit_repeated_cohort_target_count") =
+        diagnostics.exact_residual_all_hit_repeated_cohort_target_count,
       Rcpp::Named("logical_residual_requests") =
         diagnostics.logical_residual_request_count,
       Rcpp::Named("physical_residual_fits") =
@@ -3849,6 +3971,26 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.cuda_exact_screen_residual_solve_host_ms,
       Rcpp::Named("cuda_guard_refinement_residual_solve_host_ms") =
         diagnostics.cuda_guard_refinement_residual_solve_host_ms,
+      Rcpp::Named("cuda_exact_screen_component_build_ms") =
+        diagnostics.cuda_exact_screen_component_build_ms,
+      Rcpp::Named("exact_residual_all_miss_solve_host_ms") =
+        diagnostics.exact_residual_all_miss_solve_host_ms,
+      Rcpp::Named("exact_residual_all_miss_component_build_ms") =
+        diagnostics.exact_residual_all_miss_component_build_ms,
+      Rcpp::Named("exact_residual_mixed_solve_host_ms") =
+        diagnostics.exact_residual_mixed_solve_host_ms,
+      Rcpp::Named("exact_residual_mixed_component_build_ms") =
+        diagnostics.exact_residual_mixed_component_build_ms,
+      Rcpp::Named("exact_residual_all_hit_new_cohort_solve_host_ms") =
+        diagnostics.exact_residual_all_hit_new_cohort_solve_host_ms,
+      Rcpp::Named("exact_residual_all_hit_new_cohort_component_build_ms") =
+        diagnostics.exact_residual_all_hit_new_cohort_component_build_ms,
+      Rcpp::Named("exact_residual_all_hit_repeated_cohort_solve_host_ms") =
+        diagnostics.exact_residual_all_hit_repeated_cohort_solve_host_ms,
+      Rcpp::Named(
+        "exact_residual_all_hit_repeated_cohort_component_build_ms") =
+          diagnostics
+            .exact_residual_all_hit_repeated_cohort_component_build_ms,
       Rcpp::Named("cuda_dcov_metadata_h2d_ms") =
         diagnostics.cuda_dcov_metadata_h2d_ms,
       Rcpp::Named("cuda_dcov_component_build_ms") =

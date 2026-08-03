@@ -4614,6 +4614,102 @@ extern "C" SEXP C_full_cuda_ci_phase10_optimizer_residual_parity(
   END_RCPP
 }
 
+extern "C" SEXP C_full_cuda_ci_phase10_fixed_residual_identity(
+    SEXP left_residual_s,
+    SEXP right_residual_s) {
+  BEGIN_RCPP
+  FixedSpResidualHolder* left_holder =
+    fixed_sp_cuda_residual_holder(left_residual_s, true);
+  FixedSpResidualHolder* right_holder =
+    fixed_sp_cuda_residual_holder(right_residual_s, true);
+  const fastkpc::FullCudaCiFixedResidualIdentityDiagnostics value =
+    fastkpc::compare_full_cuda_ci_fixed_residuals_and_exact_components(
+      left_holder->value, right_holder->value);
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") = value.schema_version,
+    Rcpp::Named("n") = value.n,
+    Rcpp::Named("left_target_count") = value.left_target_count,
+    Rcpp::Named("right_target_count") = value.right_target_count,
+    Rcpp::Named("matched_target_count") = value.matched_target_count,
+    Rcpp::Named("left_only_target_count") = value.left_only_target_count,
+    Rcpp::Named("right_only_target_count") = value.right_only_target_count,
+    Rcpp::Named("matched_target_keys") =
+      Rcpp::wrap(value.matched_target_keys),
+    Rcpp::Named("residual_value_count") =
+      static_cast<double>(value.residual_value_count),
+    Rcpp::Named("residual_mismatch_value_count") =
+      static_cast<double>(value.residual_mismatch_value_count),
+    Rcpp::Named("residual_mismatch_target_count") =
+      value.residual_mismatch_target_count,
+    Rcpp::Named("residual_max_abs_difference") =
+      value.residual_max_abs_difference,
+    Rcpp::Named("residual_relative_l2_difference") =
+      value.residual_relative_l2_difference,
+    Rcpp::Named("centered_component_value_count") =
+      static_cast<double>(value.centered_component_value_count),
+    Rcpp::Named("centered_component_mismatch_value_count") =
+      static_cast<double>(value.centered_component_mismatch_value_count),
+    Rcpp::Named("row_sum_value_count") =
+      static_cast<double>(value.row_sum_value_count),
+    Rcpp::Named("row_sum_mismatch_value_count") =
+      static_cast<double>(value.row_sum_mismatch_value_count),
+    Rcpp::Named("total_mismatch_value_count") =
+      static_cast<double>(value.total_mismatch_value_count),
+    Rcpp::Named("self_moment_mismatch_value_count") =
+      static_cast<double>(value.self_moment_mismatch_value_count),
+    Rcpp::Named("component_mismatch_target_count") =
+      value.component_mismatch_target_count,
+    Rcpp::Named("component_max_abs_difference") =
+      value.component_max_abs_difference,
+    Rcpp::Named("component_relative_l2_difference") =
+      value.component_relative_l2_difference,
+    Rcpp::Named("planned_route_mismatch_count") =
+      value.planned_route_mismatch_count,
+    Rcpp::Named("executed_route_mismatch_count") =
+      value.executed_route_mismatch_count,
+    Rcpp::Named("solver_status_mismatch_count") =
+      value.solver_status_mismatch_count,
+    Rcpp::Named("left_status_failure_count") =
+      value.left_status_failure_count,
+    Rcpp::Named("right_status_failure_count") =
+      value.right_status_failure_count,
+    Rcpp::Named("producer_event_wait_count") =
+      value.producer_event_wait_count,
+    Rcpp::Named("consumer_event_registration_count") =
+      value.consumer_event_registration_count,
+    Rcpp::Named("metadata_h2d_count") = value.metadata_h2d_count,
+    Rcpp::Named("metadata_h2d_bytes") =
+      static_cast<double>(value.metadata_h2d_bytes),
+    Rcpp::Named("compact_d2h_count") = value.compact_d2h_count,
+    Rcpp::Named("compact_d2h_bytes") =
+      static_cast<double>(value.compact_d2h_bytes),
+    Rcpp::Named("residual_d2h_count") = value.residual_d2h_count,
+    Rcpp::Named("residual_d2h_bytes") =
+      static_cast<double>(value.residual_d2h_bytes),
+    Rcpp::Named("residual_compare_cuda_ms") =
+      value.residual_compare_cuda_ms,
+    Rcpp::Named("component_build_cuda_ms") =
+      value.component_build_cuda_ms,
+    Rcpp::Named("component_compare_cuda_ms") =
+      value.component_compare_cuda_ms,
+    Rcpp::Named("total_host_ms") = value.total_host_ms,
+    Rcpp::Named("target_identity_authenticated") =
+      value.target_identity_authenticated,
+    Rcpp::Named("device_identity_authenticated") =
+      value.device_identity_authenticated,
+    Rcpp::Named("residual_payload_device_resident") =
+      value.residual_payload_device_resident,
+    Rcpp::Named("component_payload_device_resident") =
+      value.component_payload_device_resident,
+    Rcpp::Named("compact_diagnostics_only_d2h") =
+      value.compact_diagnostics_only_d2h,
+    Rcpp::Named("bounded_allocation") = value.bounded_allocation,
+    Rcpp::Named("leak_free_teardown") = value.leak_free_teardown,
+    Rcpp::Named("caller_device_restored") = value.caller_device_restored
+  );
+  END_RCPP
+}
+
 extern "C" SEXP C_fastkpc_cuda_available() {
   BEGIN_RCPP
   std::string error;
@@ -13388,6 +13484,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_phase35_exact_batch_from_optimizer_residual", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_exact_batch_from_optimizer_residual), 3},
   {"C_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual), 3},
   {"C_full_cuda_ci_phase10_optimizer_residual_parity", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase10_optimizer_residual_parity), 2},
+  {"C_full_cuda_ci_phase10_fixed_residual_identity", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase10_fixed_residual_identity), 2},
   {"C_fastkpc_cuda_available", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_available), 0},
   {"C_fastkpc_cuda_device_info", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_device_info), 0},
   {"C_fastkpc_cuda_phase3_environment_identity", reinterpret_cast<DL_FUNC>(&C_fastkpc_cuda_phase3_environment_identity), 1},

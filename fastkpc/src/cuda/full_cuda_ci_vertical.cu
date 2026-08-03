@@ -16,6 +16,7 @@
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 namespace fastkpc {
@@ -986,6 +987,116 @@ struct DeviceResidualParityAccumulator {
   double squared_difference_sum = 0.0;
   double squared_reference_sum = 0.0;
 };
+
+struct DeviceFixedResidualIdentityAccumulator {
+  unsigned long long residual_mismatch_count = 0ULL;
+  unsigned long long centered_mismatch_count = 0ULL;
+  unsigned long long row_sum_mismatch_count = 0ULL;
+  unsigned long long total_mismatch_count = 0ULL;
+  unsigned long long self_moment_mismatch_count = 0ULL;
+  unsigned long long residual_max_abs_difference_bits = 0ULL;
+  unsigned long long component_max_abs_difference_bits = 0ULL;
+  double residual_squared_difference_sum = 0.0;
+  double residual_squared_reference_sum = 0.0;
+  double component_squared_difference_sum = 0.0;
+  double component_squared_reference_sum = 0.0;
+};
+
+__device__ void accumulate_fixed_identity_value(
+    double left,
+    double right,
+    unsigned long long* mismatch_count,
+    unsigned long long* max_abs_difference_bits,
+    double* squared_difference_sum,
+    double* squared_reference_sum) {
+  if (__double_as_longlong(left) != __double_as_longlong(right)) {
+    atomicAdd(mismatch_count, 1ULL);
+  }
+  const double difference = fabs(left - right);
+  atomicMax(
+    max_abs_difference_bits,
+    static_cast<unsigned long long>(__double_as_longlong(difference)));
+  atomicAdd(
+    squared_difference_sum, __dmul_rn(difference, difference));
+  atomicAdd(squared_reference_sum, __dmul_rn(left, left));
+}
+
+__global__ void compare_fixed_residuals_by_key_kernel(
+    const double* left_residuals,
+    const double* right_residuals,
+    const int* left_target_indices,
+    const int* right_target_indices,
+    int n,
+    int matched_target_count,
+    DeviceFixedResidualIdentityAccumulator* accumulators) {
+  const int match = static_cast<int>(blockIdx.x);
+  if (match >= matched_target_count) return;
+  DeviceFixedResidualIdentityAccumulator* accumulator = accumulators + match;
+  const double* left = left_residuals +
+    static_cast<std::size_t>(left_target_indices[match]) * n;
+  const double* right = right_residuals +
+    static_cast<std::size_t>(right_target_indices[match]) * n;
+  for (int row = static_cast<int>(threadIdx.x); row < n;
+       row += static_cast<int>(blockDim.x)) {
+    accumulate_fixed_identity_value(
+      left[row], right[row], &accumulator->residual_mismatch_count,
+      &accumulator->residual_max_abs_difference_bits,
+      &accumulator->residual_squared_difference_sum,
+      &accumulator->residual_squared_reference_sum);
+  }
+}
+
+__global__ void compare_exact_components_by_key_kernel(
+    const double* left_centered,
+    const double* right_centered,
+    const double* left_row_sums,
+    const double* right_row_sums,
+    const double* left_totals,
+    const double* right_totals,
+    const double* left_self_moments,
+    const double* right_self_moments,
+    int n,
+    int matched_target_count,
+    std::size_t cell_count,
+    DeviceFixedResidualIdentityAccumulator* accumulators) {
+  const int match = static_cast<int>(blockIdx.x);
+  if (match >= matched_target_count) return;
+  DeviceFixedResidualIdentityAccumulator* accumulator = accumulators + match;
+  const std::size_t cell_offset = static_cast<std::size_t>(match) * cell_count;
+  const std::size_t row_offset = static_cast<std::size_t>(match) * n;
+  for (std::size_t cell = threadIdx.x; cell < cell_count;
+       cell += blockDim.x) {
+    accumulate_fixed_identity_value(
+      left_centered[cell_offset + cell], right_centered[cell_offset + cell],
+      &accumulator->centered_mismatch_count,
+      &accumulator->component_max_abs_difference_bits,
+      &accumulator->component_squared_difference_sum,
+      &accumulator->component_squared_reference_sum);
+  }
+  for (int row = static_cast<int>(threadIdx.x); row < n;
+       row += static_cast<int>(blockDim.x)) {
+    accumulate_fixed_identity_value(
+      left_row_sums[row_offset + row], right_row_sums[row_offset + row],
+      &accumulator->row_sum_mismatch_count,
+      &accumulator->component_max_abs_difference_bits,
+      &accumulator->component_squared_difference_sum,
+      &accumulator->component_squared_reference_sum);
+  }
+  if (threadIdx.x == 0) {
+    accumulate_fixed_identity_value(
+      left_totals[match], right_totals[match],
+      &accumulator->total_mismatch_count,
+      &accumulator->component_max_abs_difference_bits,
+      &accumulator->component_squared_difference_sum,
+      &accumulator->component_squared_reference_sum);
+    accumulate_fixed_identity_value(
+      left_self_moments[match], right_self_moments[match],
+      &accumulator->self_moment_mismatch_count,
+      &accumulator->component_max_abs_difference_bits,
+      &accumulator->component_squared_difference_sum,
+      &accumulator->component_squared_reference_sum);
+  }
+}
 
 __global__ void compare_residuals_by_target_kernel(
     const double* optimizer_residuals,
@@ -3022,6 +3133,428 @@ compare_full_cuda_ci_optimizer_and_fixed_residuals(
   } catch (...) {
     if (caller_device_id >= 0) (void)cudaSetDevice(caller_device_id);
     throw;
+  }
+  diagnostics.total_host_ms = host_elapsed_ms(started);
+  return diagnostics;
+}
+
+FullCudaCiFixedResidualIdentityDiagnostics
+compare_full_cuda_ci_fixed_residuals_and_exact_components(
+    const std::shared_ptr<DeviceResidualBatch>& left_residual,
+    const std::shared_ptr<DeviceResidualBatch>& right_residual) {
+  const auto started = std::chrono::steady_clock::now();
+  FullCudaCiFixedResidualIdentityDiagnostics diagnostics;
+  diagnostics.schema_version =
+    "full-cuda-ci-phase10-fixed-residual-identity-v1";
+  const DeviceResidualInfo left_info = device_residual_info(left_residual);
+  const DeviceResidualInfo right_info = device_residual_info(right_residual);
+  diagnostics.n = left_info.n;
+  diagnostics.left_target_count = left_info.target_count;
+  diagnostics.right_target_count = right_info.target_count;
+  diagnostics.left_status_failure_count = static_cast<int>(std::count_if(
+    left_info.solver_statuses.begin(), left_info.solver_statuses.end(),
+    [](FixedSpStatus status) { return static_cast<int>(status) >= 10; }));
+  diagnostics.right_status_failure_count = static_cast<int>(std::count_if(
+    right_info.solver_statuses.begin(), right_info.solver_statuses.end(),
+    [](FixedSpStatus status) { return static_cast<int>(status) >= 10; }));
+  if (diagnostics.left_status_failure_count != 0 ||
+      diagnostics.right_status_failure_count != 0) {
+    throw std::runtime_error(
+      "fixed residual identity rejects an unsuccessful producer");
+  }
+
+  const DeviceResidualConsumerView left_view =
+    acquire_device_residual_consumer_view(left_residual);
+  const DeviceResidualConsumerView right_view =
+    acquire_device_residual_consumer_view(right_residual);
+  if (left_view.n != right_view.n || left_view.n <= 0 ||
+      left_view.device_id != right_view.device_id ||
+      left_view.residuals == nullptr || right_view.residuals == nullptr ||
+      left_view.producer_completion_event == nullptr ||
+      right_view.producer_completion_event == nullptr) {
+    throw std::runtime_error("fixed residual identity producer mismatch");
+  }
+  diagnostics.device_identity_authenticated = true;
+  diagnostics.residual_payload_device_resident = true;
+
+  std::unordered_map<std::string, int> right_index;
+  right_index.reserve(right_info.target_keys.size());
+  for (int index = 0; index < right_info.target_count; ++index) {
+    const bool inserted = right_index.emplace(
+      right_info.target_keys[static_cast<std::size_t>(index)], index).second;
+    if (!inserted) {
+      throw std::runtime_error(
+        "fixed residual identity found duplicate right TargetKeys");
+    }
+  }
+  std::vector<int> left_target_indices;
+  std::vector<int> right_target_indices;
+  left_target_indices.reserve(left_info.target_keys.size());
+  right_target_indices.reserve(left_info.target_keys.size());
+  diagnostics.matched_target_keys.reserve(left_info.target_keys.size());
+  for (int left = 0; left < left_info.target_count; ++left) {
+    const std::string& key =
+      left_info.target_keys[static_cast<std::size_t>(left)];
+    const auto found = right_index.find(key);
+    if (found == right_index.end()) {
+      diagnostics.left_only_target_count += 1;
+      continue;
+    }
+    const int right = found->second;
+    left_target_indices.push_back(left);
+    right_target_indices.push_back(right);
+    diagnostics.matched_target_keys.push_back(key);
+    if (left_info.planned_routes[static_cast<std::size_t>(left)] !=
+        right_info.planned_routes[static_cast<std::size_t>(right)]) {
+      diagnostics.planned_route_mismatch_count += 1;
+    }
+    if (left_info.executed_routes[static_cast<std::size_t>(left)] !=
+        right_info.executed_routes[static_cast<std::size_t>(right)]) {
+      diagnostics.executed_route_mismatch_count += 1;
+    }
+    if (left_info.solver_statuses[static_cast<std::size_t>(left)] !=
+        right_info.solver_statuses[static_cast<std::size_t>(right)]) {
+      diagnostics.solver_status_mismatch_count += 1;
+    }
+  }
+  diagnostics.matched_target_count =
+    static_cast<int>(left_target_indices.size());
+  diagnostics.right_only_target_count = right_info.target_count -
+    diagnostics.matched_target_count;
+  if (diagnostics.matched_target_count <= 0) {
+    throw std::runtime_error(
+      "fixed residual identity requires at least one common TargetKey");
+  }
+  diagnostics.target_identity_authenticated = true;
+
+  const std::size_t matched =
+    static_cast<std::size_t>(diagnostics.matched_target_count);
+  const std::size_t n = static_cast<std::size_t>(diagnostics.n);
+  const std::size_t cell_count = checked_multiply(
+    n, n, "fixed residual identity component cells");
+  const std::size_t component_cells = checked_multiply(
+    matched, cell_count, "fixed residual identity component pool cells");
+  const std::size_t component_rows = checked_multiply(
+    matched, n, "fixed residual identity component rows");
+  diagnostics.residual_value_count = checked_multiply(
+    matched, n, "fixed residual identity residual values");
+  diagnostics.centered_component_value_count = component_cells;
+  diagnostics.row_sum_value_count = component_rows;
+
+  const std::size_t index_bytes = checked_multiply(
+    2U * matched, sizeof(int), "fixed residual identity target indices");
+  const std::size_t accumulator_bytes = checked_multiply(
+    matched, sizeof(DeviceFixedResidualIdentityAccumulator),
+    "fixed residual identity compact accumulators");
+  const std::size_t component_bytes = checked_multiply(
+    component_cells, sizeof(double),
+    "fixed residual identity component bytes");
+  const std::size_t row_bytes = checked_multiply(
+    component_rows, sizeof(double), "fixed residual identity row bytes");
+  const std::size_t scalar_bytes = checked_multiply(
+    matched, sizeof(double), "fixed residual identity scalar bytes");
+
+  const FullCudaCiVerticalResourceSnapshot resources_before =
+    full_cuda_ci_vertical_resource_snapshot();
+  VerticalCallAccounting accounting;
+  int caller_device_id = -1;
+  check_cuda(cudaGetDevice(&caller_device_id),
+             "capture caller device for fixed residual identity");
+  try {
+    check_cuda(cudaSetDevice(left_view.device_id),
+               "select fixed residual identity device");
+    TrackedCudaStream stream;
+    TrackedCudaEvent residual_start(true);
+    TrackedCudaEvent residual_end(true);
+    TrackedCudaEvent component_end(true);
+    TrackedCudaEvent comparison_end(true);
+    TrackedCudaEvent completion(true);
+    TrackedDeviceBuffer target_indices(index_bytes, &accounting);
+    TrackedDeviceBuffer accumulators(accumulator_bytes, &accounting);
+    TrackedDeviceBuffer left_centered(component_bytes, &accounting);
+    TrackedDeviceBuffer right_centered(component_bytes, &accounting);
+    TrackedDeviceBuffer left_rows(row_bytes, &accounting);
+    TrackedDeviceBuffer right_rows(row_bytes, &accounting);
+    TrackedDeviceBuffer left_totals(scalar_bytes, &accounting);
+    TrackedDeviceBuffer right_totals(scalar_bytes, &accounting);
+    TrackedDeviceBuffer left_self_moments(scalar_bytes, &accounting);
+    TrackedDeviceBuffer right_self_moments(scalar_bytes, &accounting);
+
+    check_cuda(cudaStreamWaitEvent(
+      stream.get(), left_view.producer_completion_event, 0),
+      "wait for left fixed residual producer");
+    check_cuda(cudaStreamWaitEvent(
+      stream.get(), right_view.producer_completion_event, 0),
+      "wait for right fixed residual producer");
+    diagnostics.producer_event_wait_count = 2;
+    std::vector<int> host_indices;
+    host_indices.reserve(2U * matched);
+    host_indices.insert(host_indices.end(), left_target_indices.begin(),
+                        left_target_indices.end());
+    host_indices.insert(host_indices.end(), right_target_indices.begin(),
+                        right_target_indices.end());
+    check_cuda(cudaMemcpyAsync(
+      target_indices.get(), host_indices.data(), index_bytes,
+      cudaMemcpyHostToDevice, stream.get()),
+      "copy fixed residual identity target indices");
+    diagnostics.metadata_h2d_count = 1;
+    diagnostics.metadata_h2d_bytes = index_bytes;
+    check_cuda(cudaMemsetAsync(
+      accumulators.get(), 0, accumulator_bytes, stream.get()),
+      "initialize fixed residual identity accumulators");
+
+    const int* device_left_indices =
+      static_cast<const int*>(target_indices.get());
+    const int* device_right_indices = device_left_indices + matched;
+    auto* device_accumulators =
+      static_cast<DeviceFixedResidualIdentityAccumulator*>(
+        accumulators.get());
+    check_cuda(cudaEventRecord(residual_start.get(), stream.get()),
+               "record fixed residual identity residual start");
+    compare_fixed_residuals_by_key_kernel<<<
+      static_cast<unsigned int>(matched), kVerticalBlockSize, 0, stream.get()
+    >>>(
+      left_view.residuals, right_view.residuals, device_left_indices,
+      device_right_indices, diagnostics.n, diagnostics.matched_target_count,
+      device_accumulators);
+    check_cuda(cudaGetLastError(),
+               "launch fixed residual identity residual comparison");
+    check_cuda(cudaEventRecord(residual_end.get(), stream.get()),
+               "record fixed residual identity residual end");
+
+    const dim3 distance_grid(
+      static_cast<unsigned int>(diagnostics.n),
+      static_cast<unsigned int>(matched), 1U);
+    build_distance_rows_batch_kernel<<<
+      distance_grid, kVerticalBlockSize, 0, stream.get()
+    >>>(
+      left_view.residuals, device_left_indices, diagnostics.n,
+      diagnostics.matched_target_count, cell_count,
+      static_cast<double*>(left_centered.get()),
+      static_cast<double*>(left_rows.get()));
+    check_cuda(cudaGetLastError(),
+               "build left fixed residual identity components");
+    build_distance_rows_batch_kernel<<<
+      distance_grid, kVerticalBlockSize, 0, stream.get()
+    >>>(
+      right_view.residuals, device_right_indices, diagnostics.n,
+      diagnostics.matched_target_count, cell_count,
+      static_cast<double*>(right_centered.get()),
+      static_cast<double*>(right_rows.get()));
+    check_cuda(cudaGetLastError(),
+               "build right fixed residual identity components");
+    reduce_rows_batch_kernel<<<
+      static_cast<unsigned int>(matched), kVerticalBlockSize, 0, stream.get()
+    >>>(
+      static_cast<const double*>(left_rows.get()), diagnostics.n,
+      diagnostics.matched_target_count,
+      static_cast<double*>(left_totals.get()));
+    check_cuda(cudaGetLastError(),
+               "reduce left fixed residual identity component rows");
+    reduce_rows_batch_kernel<<<
+      static_cast<unsigned int>(matched), kVerticalBlockSize, 0, stream.get()
+    >>>(
+      static_cast<const double*>(right_rows.get()), diagnostics.n,
+      diagnostics.matched_target_count,
+      static_cast<double*>(right_totals.get()));
+    check_cuda(cudaGetLastError(),
+               "reduce right fixed residual identity component rows");
+    const std::size_t center_blocks =
+      (component_cells + kVerticalBlockSize - 1U) / kVerticalBlockSize;
+    if (center_blocks == 0U ||
+        center_blocks > std::numeric_limits<unsigned int>::max()) {
+      throw std::runtime_error(
+        "fixed residual identity component launch overflow");
+    }
+    center_distance_batch_kernel<<<
+      static_cast<unsigned int>(center_blocks), kVerticalBlockSize, 0,
+      stream.get()
+    >>>(
+      static_cast<double*>(left_centered.get()),
+      static_cast<const double*>(left_rows.get()),
+      static_cast<const double*>(left_totals.get()), diagnostics.n,
+      cell_count, component_cells);
+    check_cuda(cudaGetLastError(),
+               "center left fixed residual identity components");
+    center_distance_batch_kernel<<<
+      static_cast<unsigned int>(center_blocks), kVerticalBlockSize, 0,
+      stream.get()
+    >>>(
+      static_cast<double*>(right_centered.get()),
+      static_cast<const double*>(right_rows.get()),
+      static_cast<const double*>(right_totals.get()), diagnostics.n,
+      cell_count, component_cells);
+    check_cuda(cudaGetLastError(),
+               "center right fixed residual identity components");
+    self_moment_batch_kernel<<<
+      static_cast<unsigned int>(matched), kVerticalBlockSize, 0, stream.get()
+    >>>(
+      static_cast<const double*>(left_centered.get()),
+      diagnostics.matched_target_count, cell_count,
+      static_cast<double*>(left_self_moments.get()));
+    check_cuda(cudaGetLastError(),
+               "build left fixed residual identity self moments");
+    self_moment_batch_kernel<<<
+      static_cast<unsigned int>(matched), kVerticalBlockSize, 0, stream.get()
+    >>>(
+      static_cast<const double*>(right_centered.get()),
+      diagnostics.matched_target_count, cell_count,
+      static_cast<double*>(right_self_moments.get()));
+    check_cuda(cudaGetLastError(),
+               "build right fixed residual identity self moments");
+    check_cuda(cudaEventRecord(component_end.get(), stream.get()),
+               "record fixed residual identity component end");
+
+    compare_exact_components_by_key_kernel<<<
+      static_cast<unsigned int>(matched), kVerticalBlockSize, 0, stream.get()
+    >>>(
+      static_cast<const double*>(left_centered.get()),
+      static_cast<const double*>(right_centered.get()),
+      static_cast<const double*>(left_rows.get()),
+      static_cast<const double*>(right_rows.get()),
+      static_cast<const double*>(left_totals.get()),
+      static_cast<const double*>(right_totals.get()),
+      static_cast<const double*>(left_self_moments.get()),
+      static_cast<const double*>(right_self_moments.get()), diagnostics.n,
+      diagnostics.matched_target_count, cell_count, device_accumulators);
+    check_cuda(cudaGetLastError(),
+               "compare fixed residual identity exact components");
+    check_cuda(cudaEventRecord(comparison_end.get(), stream.get()),
+               "record fixed residual identity component comparison end");
+
+    std::vector<DeviceFixedResidualIdentityAccumulator> host_accumulators(
+      matched);
+    check_cuda(cudaMemcpyAsync(
+      host_accumulators.data(), accumulators.get(), accumulator_bytes,
+      cudaMemcpyDeviceToHost, stream.get()),
+      "copy fixed residual identity compact diagnostics");
+    diagnostics.compact_d2h_count = 1;
+    diagnostics.compact_d2h_bytes = accumulator_bytes;
+    check_cuda(cudaEventRecord(completion.get(), stream.get()),
+               "record fixed residual identity completion");
+    register_device_residual_consumer_event(left_residual, completion.get());
+    register_device_residual_consumer_event(right_residual, completion.get());
+    diagnostics.consumer_event_registration_count = 2;
+    check_cuda(cudaEventSynchronize(completion.get()),
+               "wait for fixed residual identity diagnostics");
+    check_cuda(cudaStreamSynchronize(left_view.producer_stream),
+               "wait for left fixed residual consumer proxy");
+    if (right_view.producer_stream != left_view.producer_stream) {
+      check_cuda(cudaStreamSynchronize(right_view.producer_stream),
+                 "wait for right fixed residual consumer proxy");
+    }
+    diagnostics.residual_compare_cuda_ms = cuda_elapsed_ms(
+      residual_start.get(), residual_end.get());
+    diagnostics.component_build_cuda_ms = cuda_elapsed_ms(
+      residual_end.get(), component_end.get());
+    diagnostics.component_compare_cuda_ms = cuda_elapsed_ms(
+      component_end.get(), comparison_end.get());
+
+    double residual_squared_difference_sum = 0.0;
+    double residual_squared_reference_sum = 0.0;
+    double component_squared_difference_sum = 0.0;
+    double component_squared_reference_sum = 0.0;
+    for (const DeviceFixedResidualIdentityAccumulator& value :
+         host_accumulators) {
+      diagnostics.residual_mismatch_value_count +=
+        value.residual_mismatch_count;
+      diagnostics.residual_mismatch_target_count +=
+        value.residual_mismatch_count > 0 ? 1 : 0;
+      diagnostics.centered_component_mismatch_value_count +=
+        value.centered_mismatch_count;
+      diagnostics.row_sum_mismatch_value_count +=
+        value.row_sum_mismatch_count;
+      diagnostics.total_mismatch_value_count += value.total_mismatch_count;
+      diagnostics.self_moment_mismatch_value_count +=
+        value.self_moment_mismatch_count;
+      const bool component_mismatch = value.centered_mismatch_count != 0 ||
+        value.row_sum_mismatch_count != 0 ||
+        value.total_mismatch_count != 0 ||
+        value.self_moment_mismatch_count != 0;
+      diagnostics.component_mismatch_target_count +=
+        component_mismatch ? 1 : 0;
+      double residual_maximum = 0.0;
+      const std::uint64_t residual_maximum_bits =
+        value.residual_max_abs_difference_bits;
+      std::memcpy(
+        &residual_maximum, &residual_maximum_bits,
+        sizeof(residual_maximum));
+      diagnostics.residual_max_abs_difference = std::max(
+        diagnostics.residual_max_abs_difference, residual_maximum);
+      double component_maximum = 0.0;
+      const std::uint64_t component_maximum_bits =
+        value.component_max_abs_difference_bits;
+      std::memcpy(
+        &component_maximum, &component_maximum_bits,
+        sizeof(component_maximum));
+      diagnostics.component_max_abs_difference = std::max(
+        diagnostics.component_max_abs_difference, component_maximum);
+      residual_squared_difference_sum +=
+        value.residual_squared_difference_sum;
+      residual_squared_reference_sum +=
+        value.residual_squared_reference_sum;
+      component_squared_difference_sum +=
+        value.component_squared_difference_sum;
+      component_squared_reference_sum +=
+        value.component_squared_reference_sum;
+    }
+    diagnostics.residual_relative_l2_difference =
+      std::sqrt(residual_squared_difference_sum) /
+      std::max(std::sqrt(residual_squared_reference_sum), 1e-300);
+    diagnostics.component_relative_l2_difference =
+      std::sqrt(component_squared_difference_sum) /
+      std::max(std::sqrt(component_squared_reference_sum), 1e-300);
+    diagnostics.component_payload_device_resident = true;
+    diagnostics.compact_diagnostics_only_d2h =
+      diagnostics.residual_d2h_count == 0 &&
+      diagnostics.residual_d2h_bytes == 0U &&
+      diagnostics.compact_d2h_count == 1;
+
+    right_self_moments.close();
+    left_self_moments.close();
+    right_totals.close();
+    left_totals.close();
+    right_rows.close();
+    left_rows.close();
+    right_centered.close();
+    left_centered.close();
+    accumulators.close();
+    target_indices.close();
+    completion.close();
+    comparison_end.close();
+    component_end.close();
+    residual_end.close();
+    residual_start.close();
+    stream.close();
+    check_cuda(cudaSetDevice(caller_device_id),
+               "restore caller device after fixed residual identity");
+    diagnostics.caller_device_restored = true;
+  } catch (...) {
+    if (caller_device_id >= 0) (void)cudaSetDevice(caller_device_id);
+    throw;
+  }
+
+  const FullCudaCiVerticalResourceSnapshot resources_after =
+    full_cuda_ci_vertical_resource_snapshot();
+  const std::size_t expected_allocation_bytes = index_bytes +
+    accumulator_bytes + 2U * (component_bytes + row_bytes +
+                               2U * scalar_bytes);
+  diagnostics.bounded_allocation =
+    accounting.device_allocation_count == 10 &&
+    accounting.device_allocation_bytes == expected_allocation_bytes;
+  diagnostics.leak_free_teardown =
+    resources_after.live_device_allocations ==
+      resources_before.live_device_allocations &&
+    resources_after.live_device_bytes == resources_before.live_device_bytes &&
+    resources_after.live_streams == resources_before.live_streams &&
+    resources_after.live_events == resources_before.live_events &&
+    accounting.device_allocation_count == accounting.device_free_count &&
+    accounting.live_device_bytes == 0U;
+  if (!diagnostics.compact_diagnostics_only_d2h ||
+      !diagnostics.bounded_allocation || !diagnostics.leak_free_teardown ||
+      !diagnostics.caller_device_restored) {
+    throw std::runtime_error(
+      "fixed residual identity structural accounting gate failed closed");
   }
   diagnostics.total_host_ms = host_elapsed_ms(started);
   return diagnostics;

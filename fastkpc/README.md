@@ -348,12 +348,42 @@ excess exact residual fits              117,350
 
 Guarded refinement accounts for only `3.15%` of residual-solve time, below the
 `3-5` second implementation gate. Do not build a large exact/refinement sharing
-route for a measured upper bound of `0.482` seconds. The larger independent
-question is whether the `51.47%` excess exact fits can reuse an authoritative
-fixed-SP residual across different batch cohorts. This is not yet qualified:
-the next diagnostic must prove bitwise residual and p-value parity for repeated
-ResidualKeys, measure reuse distance and peak live bytes, and fail closed on
-any cohort-dependent output.
+route for a measured upper bound of `0.482` seconds.
+
+A device-only cross-batch qualification then tested repeated, permuted,
+subset, singleton, and mixed-route fixed-SP cohorts. Identical and permuted
+complete cohorts were bitwise exact. QR and SVD singleton subsets were also
+exact, but changing a batched-Cholesky cohort to a subset or singleton changed
+913 residual values, 332,530 exact-component values/moments, three solver
+statuses, and two unconditional legacy-eig p-values. Final guarded p-values and
+decisions happened to remain unchanged, but that does not satisfy the strict
+contract. The decision was `CONDITIONAL_ALL_HIT_BATCH_ONLY`: target-granular
+miss-only execution is rejected, and only a previously observed complete
+cohort is qualified for possible reuse.
+
+The follow-up trace-free level-7 opportunity run closed that remaining case.
+Its `266.801`-second runtime contains diagnostic hashing and is not a new
+performance baseline. Adjacency, sepsets, pMax, `n.edgetests`, all 240,489 task
+rows, and every semantic level field were bitwise identical to the prior v6
+artifact; only per-level elapsed times differed. Authority, fallback, residual
+D2H, and component D2H remained zero. The four exact-screen categories were:
+
+```text
+category                  batches  targets  solve ms  component ms  total ms
+all miss                     8925    76750  3330.604      1214.481  4545.086
+mixed                       16047    87666  6132.209      1820.599  7952.808
+all hit, new cohort         13595    61746  5338.055      1455.815  6793.871
+all hit, repeated cohort       46     1853    54.209        17.145    71.354
+```
+
+The category counts sum exactly to 38,613 batches and 228,015 targets; their
+solve and component times sum to the exact-screen totals. Only the last row is
+numerically qualified. Its combined measured upper bound is `71.354` ms, far
+below the `5`-second stop gate. The final decision is
+`STOP_CROSS_BATCH_FIXED_RESIDUAL_CACHE_OPPORTUNITY`. Do not build a residual
+slab, exact-component cache, capacity trace, or whole-cohort reuse prototype
+for this contract epoch; the apparent `51.47%` target-level duplication is not
+convertible under the required batch-cohort numerical shape.
 
 Persistent dCov resources remain a separate low-risk candidate. The v6 run
 records 39,166 dCov calls, `3.440` seconds of teardown, and `7.416` seconds of
@@ -378,6 +408,25 @@ FASTKPC_RUN_CUDA_TESTS=1 \
 Rscript fastkpc/tools/profile_full_cuda_ci_phase10_optimizer_residual_reuse.R
 FASTKPC_RUN_CUDA_TESTS=1 \
 Rscript fastkpc/tests/test_full_cuda_ci_phase10_optimizer_residual_reuse.R
+```
+
+Reproduce the fixed-SP cross-batch identity and opportunity STOP with:
+
+```bash
+FASTKPC_RUN_CUDA_TESTS=1 \
+Rscript fastkpc/tools/profile_full_cuda_ci_phase10_fixed_residual_identity.R
+FASTKPC_RUN_CUDA_TESTS=1 \
+Rscript fastkpc/tests/test_full_cuda_ci_phase10_fixed_residual_identity.R
+
+CUDA_VISIBLE_DEVICES=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
+Rscript fastkpc/tools/profile_full_cuda_ci_phase10_fresh_data.R \
+  7 \
+  fastkpc/artifacts/full_cuda_ci/phase10_profile_v2/fresh-data-level-07-fixed-residual-cohort-opportunity-profile-v6-development.rds \
+  development
+Rscript \
+  fastkpc/tools/profile_full_cuda_ci_phase10_fixed_residual_cohort_opportunity.R \
+  fastkpc/artifacts/full_cuda_ci/phase10_profile_v2/fresh-data-level-07-fixed-residual-cohort-opportunity-profile-v6-development.rds
 ```
 
 Reproduce the exactness and stop/go campaign with:
