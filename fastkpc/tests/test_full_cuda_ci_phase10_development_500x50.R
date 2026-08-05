@@ -60,9 +60,8 @@ assert_true(
   "Phase 10 public 500x50 test did not start from empty semantic caches"
 )
 
-result <- fastkpc_full_cuda_phase10_compute_candidate_call(
-  data, max_conditioning_size = 7L
-)
+# Omit max_conditioning_size deliberately: this exercises the public Inf default.
+result <- fastkpc_full_cuda_phase10_compute_candidate_call(data)
 comparison <- fastkpc_full_cuda_compare_candidate_skeleton(
   artifact$oracle, result
 )
@@ -76,6 +75,12 @@ assert_true(
     isTRUE(comparison$summary$deletions_identical) &&
     isTRUE(comparison$summary$logical_ci_trace_identical) &&
     summary$n == 500L && summary$p == 50L &&
+    identical(summary$max_conditioning_size_requested, "Inf") &&
+    identical(summary$max_conditioning_size_resolved, 48L) &&
+    identical(
+      as.integer(result$levels$level),
+      seq.int(0L, artifact$configuration$natural_stop_level)
+    ) &&
     summary$native_call_count == 1L &&
     summary$logical_tests_consumed == sum(result$n.edgetests) &&
     summary$physical_tests_evaluated > 0L &&

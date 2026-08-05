@@ -87,7 +87,16 @@ main <- function() {
   cat("ci_method=", result$config$ci_method, "\n", sep = "")
   cat("ci_backend=", result$config$ci_backend, "\n", sep = "")
   cat("cuda_hsic_used=", isTRUE(result$config$cuda_hsic_used), "\n", sep = "")
+  cat("cuda_dcov_permutation_used=",
+      isTRUE(result$config$cuda_dcov_permutation_used), "\n", sep = "")
   ci_diag <- result$skeleton$ci_diagnostics %||% list()
+  cat("ci_dcc_perm_tests=", ci_diag$ci_dcc_perm_tests %||% 0L, "\n", sep = "")
+  cat("ci_dcc_perm_cuda_tests=", ci_diag$ci_dcc_perm_cuda_tests %||% 0L,
+      "\n", sep = "")
+  cat("ci_dcc_permutation_replicates=",
+      ci_diag$ci_dcc_permutation_replicates %||% 0L, "\n", sep = "")
+  cat("ci_dcc_cuda_fallback_tests=",
+      ci_diag$ci_dcc_cuda_fallback_tests %||% 0L, "\n", sep = "")
   cat("ci_hsic_gamma_tests=", ci_diag$ci_hsic_gamma_tests %||% 0L, "\n", sep = "")
   cat("ci_hsic_perm_tests=", ci_diag$ci_hsic_perm_tests %||% 0L, "\n", sep = "")
   cat("ci_hsic_cuda_batches=", ci_diag$ci_hsic_cuda_batches %||% 0L, "\n", sep = "")
@@ -104,6 +113,10 @@ main <- function() {
         orientation_diag$orientation_cuda_residual_fits %||% 0L, "\n", sep = "")
     cat("orientation_cpu_fallback_fits=",
         orientation_diag$orientation_cpu_fallback_fits %||% 0L, "\n", sep = "")
+    cat("regrvonps_dcc_perm_tests=",
+        orientation_diag$regrvonps_dcc_perm_tests %||% 0L, "\n", sep = "")
+    cat("regrvonps_dcc_perm_cuda_tests=",
+        orientation_diag$regrvonps_dcc_perm_cuda_tests %||% 0L, "\n", sep = "")
   }
 }
 

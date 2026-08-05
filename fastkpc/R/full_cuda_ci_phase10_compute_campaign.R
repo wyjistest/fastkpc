@@ -33,7 +33,7 @@ fastkpc_full_cuda_phase10_compute_prewarm_data <- function() {
 }
 
 fastkpc_full_cuda_phase10_compute_candidate_call <- function(
-    data, max_conditioning_size = 7L) {
+    data, max_conditioning_size = Inf) {
   fastkpc_compatible_cuda_skeleton(
     data = data,
     alpha = 0.1,
@@ -41,7 +41,7 @@ fastkpc_full_cuda_phase10_compute_candidate_call <- function(
     options = list(
       route = "full_cuda",
       compatible_cuda_strict = TRUE,
-      max_conditioning_size = as.integer(max_conditioning_size),
+      max_conditioning_size = max_conditioning_size,
       index = 1,
       numCol = 35L,
       trace_level = "logical"
@@ -186,7 +186,7 @@ fastkpc_full_cuda_phase10_compute_validate_measured_result <- function(
 }
 
 fastkpc_full_cuda_phase10_capture_compute_warm <- function(
-    data, repetition = 1L, max_conditioning_size = 7L,
+    data, repetition = 1L, max_conditioning_size = Inf,
     formal_canonical = TRUE, capture_machine = formal_canonical) {
   fastkpc_full_cuda_phase10_compute_run_path(repetition)
   data <- as.matrix(data)
@@ -202,7 +202,7 @@ fastkpc_full_cuda_phase10_capture_compute_warm <- function(
     )
     fastkpc_full_cuda_phase10_compute_require(
       identical(dim(data), c(351L, 48L)) &&
-        as.integer(max_conditioning_size) == 7L &&
+        is.infinite(max_conditioning_size) &&
         trace_capacity %in% c("", "0"),
       "Phase 10 formal compute-warm boundary requires canonical 351x48 data"
     )

@@ -11,6 +11,12 @@ build/
 # Generated reports and local validation output
 fastkpc/reports/
 fastkpc/artifacts/
+!fastkpc/artifacts/
+fastkpc/artifacts/*
+!fastkpc/artifacts/strict_ci_methods_351x48_v1/
+fastkpc/artifacts/strict_ci_methods_351x48_v1/*
+!fastkpc/artifacts/strict_ci_methods_351x48_v1/README.md
+!fastkpc/artifacts/strict_ci_methods_351x48_v1/manifest.json
 *.log
 *.csv
 *.tsv
@@ -18,6 +24,7 @@ fastkpc/artifacts/
 *.rds
 !fastkpc/tests/fixtures/legacy_dcov_gamma_oracle_v1.rds
 !fastkpc/tests/fixtures/full_cuda_ci_development_500x50_v1.rds
+!fastkpc/tests/fixtures/full_cuda_ci_development_500x50_v2.rds
 *.RData
 
 # R session/editor files

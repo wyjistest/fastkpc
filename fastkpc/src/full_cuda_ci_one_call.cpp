@@ -3,12 +3,14 @@
 #include "full_cuda_ci_contract.hpp"
 #include "full_cuda_ci_native_setup.hpp"
 #include "skeleton_task_scheduler.hpp"
+#include "cuda/full_cuda_ci_method_batch.hpp"
 #include "cuda/full_cuda_ci_vertical.hpp"
 #include "cuda/mgcv_fixed_sp_runtime.hpp"
-#include "cuda/mgcv_multi_penalty_gcv.hpp"
+#include "cuda/mgcv_multi_penalty_gcv_capacity.hpp"
 #include "cuda/mgcv_single_penalty_gcv.hpp"
 
 #include <RcppEigen.h>
+#include <R_ext/Random.h>
 
 #include <algorithm>
 #include <array>
@@ -24,6 +26,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
+#include <random>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -112,13 +116,25 @@ std::string compact_result_key(const std::string& dataset,
                                int num_col,
                                int level,
                                int task_index,
-                               const LayerCiTask& task) {
+                               const LayerCiTask& task,
+                               const FullCudaCiOneCallMethodOptions& method) {
   std::ostringstream output;
-  output << "schema=full-cuda-ci-compact-result-key-v1\n"
+  output << "schema=full-cuda-ci-compact-result-key-v2\n"
          << "backend=compatible-cuda-full-skeleton-native-v1\n"
          << "dataset=" << dataset << "\n"
          << "alpha=0.1\nindex=1\n"
          << "numCol=" << num_col << "\n"
+         << "ci_method=" << method.ci_method << "\n"
+         << "hsic_sig_bits=" << std::hex << std::setfill('0');
+  std::uint64_t sig_bits = 0;
+  std::memcpy(&sig_bits, &method.hsic_sig, sizeof(sig_bits));
+  output << std::setw(16) << sig_bits << std::dec << "\n"
+         << "permutation_replicates=" << method.permutation_replicates << "\n"
+         << "permutation_include_observed="
+         << (method.permutation_include_observed ? 1 : 0) << "\n"
+         << "permutation_has_seed="
+         << (method.permutation_has_seed ? 1 : 0) << "\n"
+         << "permutation_seed=" << method.permutation_seed << "\n"
          << "level=" << level << "\n"
          << "task_index=" << task_index + 1 << "\n"
          << "edge=" << task.edge_x + 1 << "|" << task.edge_y + 1 << "\n"
@@ -126,6 +142,132 @@ std::string compact_result_key(const std::string& dataset,
          << task.orientation_y + 1 << "\n"
          << "S=" << conditioning_key(task.conditioning_set) << "\n";
   return output.str();
+}
+
+bool is_permutation_method(const std::string& method) {
+  return method == "dcc.perm" || method == "hsic.perm";
+}
+
+unsigned int task_permutation_seed(
+    const FullCudaCiOneCallMethodOptions& method,
+    const LayerCiTask& task) {
+  constexpr std::uint64_t modulus = 2147483647ULL;
+  std::ostringstream payload;
+  payload << "schema=full-cuda-ci-task-permutation-seed-v1\n"
+          << "method=" << method.ci_method << "\n"
+          << "level=" << task.level << "\n"
+          << "edge=" << task.edge_x + 1 << "|" << task.edge_y + 1 << "\n"
+          << "orientation=" << task.orientation_x + 1 << "|"
+          << task.orientation_y + 1 << "\n"
+          << "S=" << conditioning_key(task.conditioning_set) << "\n";
+  const std::string digest = full_cuda_ci_sha256_utf8(payload.str());
+  require(digest.size() == 64U,
+          "permutation task identity digest has invalid length");
+  std::uint64_t prefix = 0U;
+  for (std::size_t index = 0; index < 8U; ++index) {
+    const char value = digest[index];
+    const unsigned int nibble = value >= '0' && value <= '9' ?
+      static_cast<unsigned int>(value - '0') :
+      static_cast<unsigned int>(value - 'a' + 10);
+    require(nibble < 16U,
+            "permutation task identity digest is not lowercase hex");
+    prefix = (prefix << 4U) | nibble;
+  }
+  const std::uint64_t seed =
+    (static_cast<std::uint64_t>(method.permutation_seed) +
+     prefix % modulus) % modulus;
+  return static_cast<unsigned int>(seed);
+}
+
+bool pcalg_task_less(const LayerCiTask& left, const LayerCiTask& right) {
+  if (left.orientation_x != right.orientation_x) {
+    return left.orientation_x < right.orientation_x;
+  }
+  if (left.orientation_y != right.orientation_y) {
+    return left.orientation_y < right.orientation_y;
+  }
+  return std::lexicographical_compare(
+    left.conditioning_set.begin(), left.conditioning_set.end(),
+    right.conditioning_set.begin(), right.conditioning_set.end());
+}
+
+std::vector<int> make_legacy_r_permutation_table(
+    const FullCudaCiOneCallMethodOptions& method,
+    int n,
+    std::size_t pair_count) {
+  require(is_permutation_method(method.ci_method) && n >= 2 &&
+            method.permutation_replicates >= 1 && pair_count >= 1U,
+          "legacy R permutation table request is malformed");
+  const std::size_t replicate_count =
+    static_cast<std::size_t>(method.permutation_replicates);
+  require(pair_count <= std::numeric_limits<std::size_t>::max() /
+            replicate_count &&
+            pair_count * replicate_count <=
+              std::numeric_limits<std::size_t>::max() /
+                static_cast<std::size_t>(n),
+          "legacy R permutation table size overflow");
+  std::vector<int> table(
+    pair_count * replicate_count * static_cast<std::size_t>(n));
+
+  for (std::size_t pair = 0; pair < pair_count; ++pair) {
+    if (method.ci_method == "dcc.perm") {
+      // energy::dCOVtest keeps one permutation vector per CI call and
+      // mutates it across replicates using runif(0, remaining).
+      std::vector<int> permutation(static_cast<std::size_t>(n));
+      std::iota(permutation.begin(), permutation.end(), 0);
+      for (int replicate = 0; replicate < method.permutation_replicates;
+           ++replicate) {
+        int remaining = n;
+        for (int index = 0; index < n - 1; ++index) {
+          int picked = static_cast<int>(std::floor(
+            R::unif_rand() * static_cast<double>(remaining)));
+          if (picked < 0) picked = 0;
+          if (picked >= remaining) picked = remaining - 1;
+          --remaining;
+          std::swap(permutation[static_cast<std::size_t>(picked)],
+                    permutation[static_cast<std::size_t>(remaining)]);
+        }
+        std::copy(
+          permutation.begin(), permutation.end(), table.begin() +
+            (pair * replicate_count + static_cast<std::size_t>(replicate)) *
+              static_cast<std::size_t>(n));
+      }
+      continue;
+    }
+
+    // stats::sample.int(n, n, replace = FALSE) uses R_unif_index with a
+    // shrinking pool under R's configured sample.kind contract.
+    for (int replicate = 0; replicate < method.permutation_replicates;
+         ++replicate) {
+      std::vector<int> pool(static_cast<std::size_t>(n));
+      std::iota(pool.begin(), pool.end(), 0);
+      int remaining = n;
+      int* output = table.data() +
+        (pair * replicate_count + static_cast<std::size_t>(replicate)) *
+          static_cast<std::size_t>(n);
+      for (int index = 0; index < n; ++index) {
+        int picked = static_cast<int>(R_unif_index(
+          static_cast<double>(remaining)));
+        if (picked < 0) picked = 0;
+        if (picked >= remaining) picked = remaining - 1;
+        output[index] = pool[static_cast<std::size_t>(picked)];
+        --remaining;
+        pool[static_cast<std::size_t>(picked)] =
+          pool[static_cast<std::size_t>(remaining)];
+      }
+    }
+  }
+  return table;
+}
+
+std::vector<int> make_method_permutation_table(
+    const FullCudaCiOneCallMethodOptions& method,
+    int n,
+    const LayerPlan& plan,
+    const std::vector<int>& task_indices) {
+  if (!is_permutation_method(method.ci_method)) return {};
+  (void)plan;
+  return make_legacy_r_permutation_table(method, n, task_indices.size());
 }
 
 std::string dataset_key(const Rcpp::NumericMatrix& data) {
@@ -272,7 +414,7 @@ struct NativeSetupContext {
   int penalty_count = 0;
   int multi_penalty_target_capacity = 0;
   std::shared_ptr<PreparedSGpuHandle> fixed_sp;
-  std::shared_ptr<MultiPenaltyGcvCudaPrepared> multi_penalty;
+  std::shared_ptr<MultiPenaltyGcvCapacityPrepared> multi_penalty;
   std::unique_ptr<SinglePenaltyGeometry> single_penalty;
 };
 
@@ -1005,7 +1147,7 @@ std::vector<std::vector<double>> numeric_matrix_list(
   return output;
 }
 
-std::shared_ptr<MultiPenaltyGcvCudaPrepared> create_multi_penalty_handle(
+std::shared_ptr<MultiPenaltyGcvCapacityPrepared> create_multi_penalty_handle(
     const std::shared_ptr<NativeSetupContext>& context,
     int target_capacity) {
   Rcpp::NumericMatrix X = context->setup["X"];
@@ -1030,7 +1172,7 @@ std::shared_ptr<MultiPenaltyGcvCudaPrepared> create_multi_penalty_handle(
     roots_input, q, "multi-penalty roots");
   const std::vector<std::vector<double>> matrices = numeric_matrix_list(
     matrices_input, q, "multi-penalty matrices");
-  return create_multi_penalty_gcv_cuda_prepared(
+  return create_multi_penalty_gcv_capacity_prepared(
     X.begin(), qr.begin(), tau.begin(), R.begin(), pivot_zero.data(),
     roots, matrices, ranks, initial_log_sp.begin(), context->n, q,
     context->penalty_count, target_capacity, 0);
@@ -1047,7 +1189,7 @@ void release_multi_penalty_handle(
     return;
   }
   const MultiPenaltyGcvCudaPreparedInfo info =
-    multi_penalty_gcv_cuda_prepared_info(context->multi_penalty);
+    multi_penalty_gcv_capacity_prepared_info(context->multi_penalty);
   require(!info.residual_slot_leased,
           "multi-penalty prepared release observed a live residual");
   context->multi_penalty.reset();
@@ -1083,16 +1225,95 @@ void ensure_multi_penalty_handle(
   diagnostics->cuda_multi_penalty_prepared_build_ms += elapsed_ms(started);
 }
 
+class FixedSpRuntimePool {
+ public:
+  explicit FixedSpRuntimePool(int n) : n_(n) {
+    runtime_for(64, 7);
+  }
+
+  std::shared_ptr<CudaRuntimeContext> base_runtime() {
+    return runtime_for(64, 7);
+  }
+
+  std::shared_ptr<CudaRuntimeContext> runtime_for(
+      int coefficient_dim, int penalty_count) {
+    int q_capacity = 64;
+    int penalty_capacity = 7;
+    if (coefficient_dim > 64 || penalty_count > 7) {
+      switch (multi_penalty_gcv_capacity_bucket(
+                coefficient_dim, penalty_count)) {
+        case MultiPenaltyGcvCapacityBucket::Small64:
+          break;
+        case MultiPenaltyGcvCapacityBucket::Base80:
+          q_capacity = 80;
+          penalty_capacity = 8;
+          break;
+        case MultiPenaltyGcvCapacityBucket::Extended192:
+          q_capacity = 192;
+          penalty_capacity = 21;
+          break;
+        case MultiPenaltyGcvCapacityBucket::Extended384:
+          q_capacity = 384;
+          penalty_capacity = 42;
+          break;
+        case MultiPenaltyGcvCapacityBucket::Extended559:
+          q_capacity = 559;
+          penalty_capacity = 62;
+          break;
+      }
+    }
+    auto found = runtimes_.find(q_capacity);
+    if (found != runtimes_.end()) return found->second;
+
+    std::shared_ptr<CudaRuntimeContext> runtime = create_fixed_sp_runtime(0);
+    FixedSpCapacities capacities;
+    capacities.n = n_;
+    capacities.null_dim = q_capacity;
+    capacities.target_count = 64;
+    capacities.penalty_count = penalty_capacity;
+    capacities.augmented_rows = n_ + q_capacity;
+    reserve_fixed_sp_runtime(runtime, capacities);
+    runtimes_.emplace(q_capacity, runtime);
+    return runtime;
+  }
+
+  std::size_t close() {
+    if (closed_) return workspace_bytes_;
+    for (auto& entry : runtimes_) {
+      if (!entry.second) continue;
+      workspace_bytes_ += fixed_sp_runtime_info(entry.second).workspace_bytes;
+      free_fixed_sp_runtime(&entry.second);
+    }
+    runtimes_.clear();
+    closed_ = true;
+    return workspace_bytes_;
+  }
+
+  ~FixedSpRuntimePool() {
+    if (closed_) return;
+    try {
+      close();
+    } catch (...) {
+    }
+  }
+
+ private:
+  int n_ = 0;
+  std::map<int, std::shared_ptr<CudaRuntimeContext>> runtimes_;
+  std::size_t workspace_bytes_ = 0U;
+  bool closed_ = false;
+};
+
 std::shared_ptr<NativeSetupContext> build_native_context(
     const Rcpp::NumericMatrix& data,
     const std::string& dataset,
     const std::vector<int>& conditioning_set,
-    const std::shared_ptr<CudaRuntimeContext>& runtime,
+    FixedSpRuntimePool* runtime_pool,
     OneCallDiagnostics* diagnostics,
     std::vector<std::shared_ptr<const NativeUnivariateSmooth>>*
       univariate_smooths) {
   const auto started = std::chrono::steady_clock::now();
-  require(univariate_smooths != nullptr &&
+  require(runtime_pool != nullptr && univariate_smooths != nullptr &&
             univariate_smooths->size() ==
               static_cast<std::size_t>(data.ncol()),
           "native univariate smooth cache is malformed");
@@ -1150,7 +1371,10 @@ std::shared_ptr<NativeSetupContext> build_native_context(
     X, blocks, offsets, ranks, &setup_profile);
   const double geometry_ms = elapsed_ms(stage_started);
   stage_started = std::chrono::steady_clock::now();
-  context->fixed_sp = create_fixed_sp_handle(runtime, dataset, context);
+  context->fixed_sp = create_fixed_sp_handle(
+    runtime_pool->runtime_for(
+      context->coefficient_dim, context->penalty_count),
+    dataset, context);
   const double fixed_sp_h2d_ms = elapsed_ms(stage_started);
   double single_penalty_geometry_ms = 0.0;
   if (context->penalty_count == 1) {
@@ -1241,14 +1465,17 @@ void close_context(const std::shared_ptr<NativeSetupContext>& context) {
 
 void rehydrate_native_context(
     const std::shared_ptr<NativeSetupContext>& context,
-    const std::shared_ptr<CudaRuntimeContext>& runtime,
+    FixedSpRuntimePool* runtime_pool,
     OneCallDiagnostics* diagnostics) {
   const auto started = std::chrono::steady_clock::now();
-  require(context && !context->fixed_sp && !context->multi_penalty,
+  require(context && runtime_pool != nullptr &&
+            !context->fixed_sp && !context->multi_penalty,
           "native setup device rehydrate state is invalid");
   try {
     context->fixed_sp = create_fixed_sp_handle(
-      runtime, context->dataset_key, context);
+      runtime_pool->runtime_for(
+        context->coefficient_dim, context->penalty_count),
+      context->dataset_key, context);
   } catch (...) {
     close_context(context);
     throw;
@@ -1261,14 +1488,14 @@ class NativeSetupCache {
  public:
   NativeSetupCache(const Rcpp::NumericMatrix& data,
                    std::string dataset,
-                   std::shared_ptr<CudaRuntimeContext> runtime,
+                   FixedSpRuntimePool* runtime_pool,
                    OneCallDiagnostics* diagnostics)
       : data_(data),
         dataset_(std::move(dataset)),
-        runtime_(std::move(runtime)),
+        runtime_pool_(runtime_pool),
         diagnostics_(diagnostics),
         univariate_smooths_(static_cast<std::size_t>(data.ncol())) {
-    require(diagnostics_ != nullptr,
+    require(runtime_pool_ != nullptr && diagnostics_ != nullptr,
             "native setup diagnostics are missing");
     diagnostics_->native_setup_univariate_primitive_cache_capacity =
       data.ncol();
@@ -1303,7 +1530,7 @@ class NativeSetupCache {
       const std::size_t capacity = static_cast<std::size_t>(single_penalty ?
         kSinglePenaltyPreparedCacheCapacity : kMultiPenaltyPreparedCacheCapacity);
       if (order.size() >= capacity) evict_one(&order);
-      rehydrate_native_context(context, runtime_, diagnostics_);
+      rehydrate_native_context(context, runtime_pool_, diagnostics_);
       order.push_front(key);
       entries_.emplace(
         key, Entry{context, single_penalty, order.begin()});
@@ -1318,7 +1545,7 @@ class NativeSetupCache {
       evict_host_one();
     }
     std::shared_ptr<NativeSetupContext> context = build_native_context(
-      data_, dataset_, conditioning_set, runtime_, diagnostics_,
+      data_, dataset_, conditioning_set, runtime_pool_, diagnostics_,
       &univariate_smooths_);
     const bool single_penalty = context->penalty_count == 1;
     std::list<std::string>& order = single_penalty ?
@@ -1411,7 +1638,7 @@ class NativeSetupCache {
 
   Rcpp::NumericMatrix data_;
   std::string dataset_;
-  std::shared_ptr<CudaRuntimeContext> runtime_;
+  FixedSpRuntimePool* runtime_pool_ = nullptr;
   OneCallDiagnostics* diagnostics_;
   std::list<std::string> single_penalty_order_;
   std::list<std::string> multi_penalty_order_;
@@ -1451,6 +1678,9 @@ double single_penalty_condition(const SinglePenaltyGeometry& geometry,
 
 struct GroupResult {
   std::vector<double> p_values;
+  std::vector<double> statistics;
+  std::vector<double> means;
+  std::vector<double> variances;
 };
 
 enum class ExactResidualOpportunityClass {
@@ -1595,6 +1825,47 @@ void accumulate_refinement_diagnostics(
             value.cpu_dcov_pair_statistic_count == 0 &&
             value.cpu_gamma_p_value_count == 0,
           "one-call guarded CUDA legacy dCov authority gate failed closed");
+}
+
+void accumulate_method_diagnostics(
+    const FullCudaCiMethodBatchDiagnostics& value,
+    OneCallDiagnostics* diagnostics) {
+  diagnostics->cuda_residual_batch_count += 1;
+  diagnostics->cuda_exact_screen_residual_batch_count += 1;
+  diagnostics->cuda_exact_screen_residual_target_count += value.target_count;
+  diagnostics->cuda_exact_screen_component_count +=
+    value.component_build_count;
+  diagnostics->cuda_exact_screen_pair_count += value.pair_evaluation_count;
+  diagnostics->cuda_dcov_component_count += value.component_build_count;
+  diagnostics->cuda_dcov_pair_count += value.pair_evaluation_count;
+  if (value.ci_method == "hsic.gamma") {
+    diagnostics->cuda_gamma_pvalue_count += value.pair_evaluation_count;
+  }
+  diagnostics->component_cache_request_count += 2 * value.pair_count;
+  diagnostics->component_cache_miss_count += value.referenced_component_count;
+  diagnostics->component_cache_hit_count +=
+    2 * value.pair_count - value.referenced_component_count;
+  diagnostics->residual_d2h_bytes += value.residual_d2h_bytes;
+  diagnostics->component_d2h_bytes += value.component_d2h_bytes;
+  diagnostics->compact_result_d2h_bytes += value.compact_result_d2h_bytes;
+  diagnostics->cuda_residual_solve_host_ms += value.residual_solve_host_ms;
+  diagnostics->cuda_exact_screen_residual_solve_host_ms +=
+    value.residual_solve_host_ms;
+  diagnostics->cuda_dcov_component_build_ms += value.component_build_cuda_ms;
+  diagnostics->cuda_exact_screen_component_build_ms +=
+    value.component_build_cuda_ms;
+  diagnostics->cuda_dcov_pair_gamma_ms += value.pair_evaluation_cuda_ms;
+  diagnostics->cuda_dcov_compact_d2h_ms += value.compact_d2h_cuda_ms;
+  diagnostics->cuda_dcov_host_ms += value.total_host_ms;
+  require(value.request_identity_authenticated &&
+            value.prepared_identity_authenticated &&
+            value.target_identity_authenticated &&
+            value.residuals_device_resident &&
+            value.compact_result_only_d2h &&
+            value.caller_device_restored &&
+            value.residual_d2h_bytes == 0U &&
+            value.component_d2h_bytes == 0U,
+          "one-call strict CUDA CI method authority gate failed closed");
 }
 
 void accumulate_single_penalty_optimizer_diagnostics(
@@ -2342,7 +2613,7 @@ void prefill_multi_penalty_target_states(
               static_cast<int>(groups.size()),
           "multi-penalty prefill diagnostics are malformed");
   std::vector<MultiPenaltyPrefillRequest> metadata;
-  std::vector<MultiPenaltyGcvCudaMultiRequest> requests;
+  std::vector<MultiPenaltyGcvCapacityRequest> requests;
   metadata.reserve(groups.size());
   requests.reserve(groups.size());
 
@@ -2362,7 +2633,7 @@ void prefill_multi_penalty_target_states(
 
     MultiPenaltyPrefillRequest request;
     request.context = context;
-    MultiPenaltyGcvCudaMultiRequest input;
+    MultiPenaltyGcvCapacityRequest input;
     std::vector<std::string> base_target_keys;
     for (int target : target_set) {
       const std::string base_key = target_key(context->prepared_key, target);
@@ -2413,12 +2684,19 @@ void prefill_multi_penalty_target_states(
     batch->batch_wall_ms = elapsed_ms(started);
     return;
   }
-  MultiPenaltyGcvCudaMultiResult optimization;
+  MultiPenaltyGcvCapacityMultiResult optimization;
   try {
-    optimization = multi_penalty_gcv_cuda_optimize_multi(
+    int maximum_concurrency = kMultiPenaltyGcvMaximumConcurrentSetups;
+    for (const MultiPenaltyPrefillRequest& request : metadata) {
+      maximum_concurrency = std::min(
+        maximum_concurrency,
+        multi_penalty_gcv_capacity_max_concurrent_setups(
+          request.context->coefficient_dim,
+          request.context->penalty_count));
+    }
+    optimization = multi_penalty_gcv_capacity_optimize_multi(
       std::move(requests), std::min(
-        kMultiPenaltyGcvMaximumConcurrentSetups,
-        static_cast<int>(metadata.size())));
+        maximum_concurrency, static_cast<int>(metadata.size())));
     require(optimization.setups.size() == metadata.size() &&
               optimization.diagnostics.setup_count ==
                 static_cast<int>(metadata.size()) &&
@@ -2427,9 +2705,8 @@ void prefill_multi_penalty_target_states(
     for (std::size_t setup_index = 0; setup_index < metadata.size();
          ++setup_index) {
       const MultiPenaltyPrefillRequest& request = metadata[setup_index];
-      MultiPenaltyGcvCudaBatchResult& setup =
+      const MultiPenaltyGcvCudaOptimization& result =
         optimization.setups[setup_index];
-      const MultiPenaltyGcvCudaOptimization& result = setup.optimization;
       const int target_count = static_cast<int>(request.targets.size());
       const int penalty_count = request.context->penalty_count;
       diagnostics->cuda_multi_penalty_optimizer_setup_count += 1;
@@ -2478,20 +2755,9 @@ void prefill_multi_penalty_target_states(
         diagnostics->prefill_target_keys.insert(base_key);
       }
       diagnostics->cuda_multi_penalty_target_count += target_count;
-      release_multi_penalty_gcv_cuda_residual(setup.residual);
-      setup.residual.reset();
       release_multi_penalty_handle(request.context, diagnostics);
     }
   } catch (...) {
-    for (MultiPenaltyGcvCudaBatchResult& setup : optimization.setups) {
-      if (setup.residual) {
-        try {
-          release_multi_penalty_gcv_cuda_residual(setup.residual);
-        } catch (...) {
-        }
-        setup.residual.reset();
-      }
-    }
     for (const MultiPenaltyPrefillRequest& request : metadata) {
       if (request.context && request.context->multi_penalty) {
         try {
@@ -2533,6 +2799,8 @@ void prefill_multi_penalty_level_target_states(
   std::vector<SinglePenaltyPrefillGroup> window;
   window.reserve(
     static_cast<std::size_t>(kMultiPenaltyGcvMaximumConcurrentSetups));
+  std::size_t window_capacity =
+    static_cast<std::size_t>(kMultiPenaltyGcvMaximumConcurrentSetups);
   int window_id = 0;
   const auto run_window = [&]() {
     require(!window.empty(),
@@ -2556,9 +2824,15 @@ void prefill_multi_penalty_level_target_states(
       setup_cache->get(representative.conditioning_set);
     require(context->penalty_count > 1,
             "multi-penalty level prefill shape changed");
+    const std::size_t context_window_capacity = static_cast<std::size_t>(
+      multi_penalty_gcv_capacity_max_concurrent_setups(
+        context->coefficient_dim, context->penalty_count));
+    if (!window.empty() && context_window_capacity != window_capacity) {
+      run_window();
+    }
+    window_capacity = context_window_capacity;
     window.push_back(SinglePenaltyPrefillGroup{context, entry.second});
-    if (window.size() == static_cast<std::size_t>(
-          kMultiPenaltyGcvMaximumConcurrentSetups)) {
+    if (window.size() == window_capacity) {
       run_window();
     }
   }
@@ -2575,6 +2849,7 @@ GroupResult execute_group(
     const std::vector<std::uint64_t>& logical_sequence_ids,
     int num_col,
     bool direct,
+    const FullCudaCiOneCallMethodOptions& method_options,
     OneCallDiagnostics* diagnostics) {
   require(!task_indices.empty() &&
             task_indices.size() == logical_sequence_ids.size(),
@@ -2742,13 +3017,13 @@ GroupResult execute_group(
       control.decomposition_trace_capacity_per_target =
         diagnostics
           ->cuda_multi_penalty_decomposition_trace_capacity_per_target;
-      MultiPenaltyGcvCudaBatchResult optimization;
+      MultiPenaltyGcvCudaOptimization optimization;
       try {
-        optimization = multi_penalty_gcv_cuda_optimize_batch(
+        optimization = multi_penalty_gcv_capacity_optimize_batch(
           context->multi_penalty, optimization_Y.data(), context->n,
           optimization_count, optimization_base_keys, control);
         const MultiPenaltyGcvCudaOptimization& result =
-          optimization.optimization;
+          optimization;
         diagnostics->cuda_multi_penalty_optimizer_setup_count += 1;
         diagnostics->cuda_multi_penalty_optimizer_call_count += 1;
         diagnostics->cuda_optimizer_host_boundary_count += 1;
@@ -2796,16 +3071,8 @@ GroupResult execute_group(
               result.numerical_rank[static_cast<std::size_t>(local)] ==
                 context->coefficient_dim);
         }
-        release_multi_penalty_gcv_cuda_residual(optimization.residual);
-        optimization.residual.reset();
         release_multi_penalty_handle(context, diagnostics);
       } catch (...) {
-        if (optimization.residual) {
-          try {
-            release_multi_penalty_gcv_cuda_residual(optimization.residual);
-          } catch (...) {
-          }
-        }
         if (context->multi_penalty) {
           try {
             release_multi_penalty_handle(context, diagnostics);
@@ -2846,6 +3113,16 @@ GroupResult execute_group(
       }
       diagnostics->cuda_optimizer_host_ms += elapsed_ms(optimize_start);
     }
+  }
+
+  // Incomplete-Cholesky HSIC and permutation decisions can change when a
+  // nominally successful normal-equation/augmented-QR solve loses residual
+  // accuracy under large multi-penalty dynamic ranges. The strict opt-in
+  // methods therefore use the stable fixed-SP SVD authority for conditional
+  // residuals; the qualified dcc.gamma route retains its existing plan.
+  if (!direct && method_options.ci_method != "dcc.gamma") {
+    std::fill(planned_routes.begin(), planned_routes.end(),
+              FixedSpRoute::AugmentedSvd);
   }
 
   std::vector<std::string> residual_keys;
@@ -2906,6 +3183,64 @@ GroupResult execute_group(
   batch.output_mask = FixedSpOutputResiduals;
   batch.planned_routes = planned_routes;
   batch.target_keys = residual_keys;
+
+  if (method_options.ci_method != "dcc.gamma") {
+    FullCudaCiMethodBatchRequest method_request;
+    method_request.expected_prepared_s_key_sha256 = context->prepared_key;
+    method_request.ci_method = method_options.ci_method;
+    method_request.alpha = kQualifiedAlpha;
+    method_request.index = 1.0;
+    method_request.num_col = num_col;
+    method_request.hsic_sig = method_options.hsic_sig;
+    method_request.permutation_replicates =
+      is_permutation_method(method_options.ci_method) ?
+        method_options.permutation_replicates : 0;
+    method_request.permutation_include_observed =
+      method_options.permutation_include_observed;
+    method_request.pairs.reserve(task_indices.size());
+    for (std::size_t index = 0; index < task_indices.size(); ++index) {
+      const LayerCiTask& task =
+        plan.tasks[static_cast<std::size_t>(task_indices[index])];
+      FullCudaCiMethodPairRequest pair;
+      pair.logical_sequence_id = logical_sequence_ids[index];
+      pair.left_target_index = target_position.at(task.orientation_x);
+      pair.right_target_index = target_position.at(task.orientation_y);
+      method_request.pairs.push_back(pair);
+    }
+    method_request.permutations = make_method_permutation_table(
+      method_options, context->n, plan, task_indices);
+    method_request.request_identity_sha256 =
+      full_cuda_ci_method_batch_request_identity(
+        method_request, residual_keys, context->n);
+    FullCudaCiMethodBatchResult method_result =
+      run_full_cuda_ci_method_batch(
+        context->fixed_sp, batch, method_request);
+    accumulate_method_diagnostics(method_result.diagnostics, diagnostics);
+    if (context->penalty_count == 1) {
+      diagnostics->cuda_single_penalty_residual_solve_host_ms +=
+        method_result.diagnostics.residual_solve_host_ms;
+    } else {
+      diagnostics->cuda_multi_penalty_residual_solve_host_ms +=
+        method_result.diagnostics.residual_solve_host_ms;
+    }
+    require(method_result.records.size() == task_indices.size(),
+            "strict CUDA CI method result count changed");
+    GroupResult method_output;
+    method_output.p_values.reserve(method_result.records.size());
+    method_output.statistics.reserve(method_result.records.size());
+    method_output.means.reserve(method_result.records.size());
+    method_output.variances.reserve(method_result.records.size());
+    for (const FullCudaCiMethodCompactRecord& record : method_result.records) {
+      require(record.status == 0 && std::isfinite(record.p_value) &&
+                record.p_value >= 0.0 && record.p_value <= 1.0,
+              "strict CUDA CI method returned an invalid result");
+      method_output.p_values.push_back(record.p_value);
+      method_output.statistics.push_back(record.statistic);
+      method_output.means.push_back(record.mean);
+      method_output.variances.push_back(record.variance);
+    }
+    return method_output;
+  }
 
   FullCudaCiExactBatchRequest exact_request;
   exact_request.expected_prepared_s_key_sha256 = context->prepared_key;
@@ -2992,14 +3327,15 @@ GroupResult execute_group(
 
 }  // namespace
 
-Rcpp::List full_cuda_ci_one_call_skeleton(
+Rcpp::List full_cuda_ci_one_call_skeleton_method(
     const Rcpp::NumericMatrix& data,
     double alpha,
     int max_conditioning_size,
     double index,
     int num_col,
     const std::string& trace_level,
-    bool compatible_cuda_strict) {
+    bool compatible_cuda_strict,
+    const FullCudaCiOneCallMethodOptions& method_options) {
   const auto run_started = std::chrono::steady_clock::now();
   const int n = data.nrow();
   const int p = data.ncol();
@@ -3015,25 +3351,41 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
           "compatible.cuda one-call index is outside the qualified value 1");
   require(num_col == 35 && num_col < n,
           "compatible.cuda one-call numCol is outside the qualified value 35");
-  require(max_conditioning_size >= 0 && max_conditioning_size <= 7,
-          "compatible.cuda one-call conditioning size is outside [0, 7]");
+  require(max_conditioning_size >= 0 && max_conditioning_size <= p - 2,
+          "compatible.cuda one-call conditioning size is outside [0, p-2]");
   require(trace_level == "summary" || trace_level == "logical" ||
             trace_level == "full" || trace_level == "none",
           "compatible.cuda one-call trace level is invalid");
   require(finite_matrix(data),
           "compatible.cuda one-call data must contain finite doubles");
+  require(method_options.ci_method == "dcc.gamma" ||
+            method_options.ci_method == "dcc.perm" ||
+            method_options.ci_method == "hsic.gamma" ||
+            method_options.ci_method == "hsic.perm",
+          "compatible.cuda one-call CI method is unsupported");
+  require(std::isfinite(method_options.hsic_sig) &&
+            method_options.hsic_sig > 0.0,
+          "compatible.cuda one-call HSIC sig must be positive and finite");
+  if (is_permutation_method(method_options.ci_method)) {
+    require(method_options.permutation_has_seed,
+            "compatible.cuda one-call permutation method requires a seed");
+    require(method_options.permutation_replicates >= 1 &&
+              method_options.permutation_replicates <= 10000,
+            "compatible.cuda one-call permutation replicates are outside [1,10000]");
+    require(method_options.permutation_include_observed,
+            "compatible.cuda one-call strict permutation requires observed inclusion");
+  }
   const bool collect_trace = trace_level == "logical" ||
     trace_level == "full";
+  const bool legacy_r_permutation =
+    is_permutation_method(method_options.ci_method);
+  std::unique_ptr<Rcpp::RNGScope> rng_scope;
+  if (legacy_r_permutation) {
+    rng_scope.reset(new Rcpp::RNGScope());
+  }
 
   const std::string dataset = dataset_key(data);
-  std::shared_ptr<CudaRuntimeContext> runtime = create_fixed_sp_runtime(0);
-  FixedSpCapacities capacities;
-  capacities.n = n;
-  capacities.null_dim = 64;
-  capacities.target_count = 64;
-  capacities.penalty_count = 7;
-  capacities.augmented_rows = n + 64;
-  reserve_fixed_sp_runtime(runtime, capacities);
+  FixedSpRuntimePool runtime_pool(n);
 
   OneCallDiagnostics diagnostics;
   diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target =
@@ -3059,9 +3411,9 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
     target_cache_start.dataset_entries == 0U;
   diagnostics.dataset_cache_epoch_at_start =
     dataset_cache_epoch().load(std::memory_order_acquire);
-  NativeSetupCache setup_cache(data, dataset, runtime, &diagnostics);
+  NativeSetupCache setup_cache(data, dataset, &runtime_pool, &diagnostics);
   std::shared_ptr<NativeSetupContext> direct = build_direct_context(
-    data, dataset, runtime);
+    data, dataset, runtime_pool.base_runtime());
 
   std::vector<int> adjacency(static_cast<std::size_t>(p) * p, 1);
   std::vector<double> pmax(
@@ -3087,7 +3439,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
     trace_edge_x, trace_edge_y, trace_x, trace_y,
     trace_conditioning_size;
   std::vector<std::string> trace_s_key;
-  std::vector<double> trace_p_used;
+  std::vector<double> trace_p_used, trace_permutation_seed,
+    trace_method_statistic, trace_method_mean, trace_method_variance;
   std::vector<int> trace_deleted;
 
   std::uint64_t next_request_sequence_id = 1U;
@@ -3109,11 +3462,18 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         static_cast<std::size_t>(task_count), 0U);
       std::vector<double> task_p_values(
         static_cast<std::size_t>(task_count), NA_REAL);
+      std::vector<double> task_method_statistics(
+        static_cast<std::size_t>(task_count), NA_REAL);
+      std::vector<double> task_method_means(
+        static_cast<std::size_t>(task_count), NA_REAL);
+      std::vector<double> task_method_variances(
+        static_cast<std::size_t>(task_count), NA_REAL);
       int remaining = task_count;
       int tests_replayed = 0;
       int ignored = 0;
       int deletions = 0;
       int rounds = 0;
+      bool pcalg_done = true;
 
       std::vector<std::vector<int>> edge_tasks(
         static_cast<std::size_t>(p) * p);
@@ -3163,29 +3523,66 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         wave.reserve(static_cast<std::size_t>(wave_capacity));
 
         for (int wave_index = 0; wave_index < wave_capacity; ++wave_index) {
-          auto global_largest = ready_by_conditioning.begin();
-          auto cached_largest = ready_by_conditioning.end();
-          for (auto candidate = ready_by_conditioning.begin();
-               candidate != ready_by_conditioning.end(); ++candidate) {
-            if (candidate->second.size() > global_largest->second.size()) {
-              global_largest = candidate;
+          std::vector<int> selected_edges;
+          if (legacy_r_permutation) {
+            auto selected_bucket = ready_by_conditioning.end();
+            std::size_t selected_position = 0U;
+            int selected_task = -1;
+            for (auto candidate = ready_by_conditioning.begin();
+                 candidate != ready_by_conditioning.end(); ++candidate) {
+              for (std::size_t position = 0;
+                   position < candidate->second.size(); ++position) {
+                const std::size_t edge = static_cast<std::size_t>(
+                  candidate->second[position]);
+                require(edge < edge_tasks.size() &&
+                          edge_positions[edge] < edge_tasks[edge].size(),
+                        "legacy R permutation frontier is malformed");
+                const int task_index =
+                  edge_tasks[edge][edge_positions[edge]];
+                if (selected_task < 0 || pcalg_task_less(
+                      plan.tasks[static_cast<std::size_t>(task_index)],
+                      plan.tasks[static_cast<std::size_t>(selected_task)])) {
+                  selected_bucket = candidate;
+                  selected_position = position;
+                  selected_task = task_index;
+                }
+              }
             }
-            if (!candidate->first.empty() &&
-                setup_cache.contains_conditioning_key(candidate->first) &&
-                (cached_largest == ready_by_conditioning.end() ||
-                 candidate->second.size() > cached_largest->second.size())) {
-              cached_largest = candidate;
+            require(selected_bucket != ready_by_conditioning.end() &&
+                      selected_task >= 0,
+                    "legacy R permutation scheduler selected no task");
+            selected_edges.push_back(
+              selected_bucket->second[selected_position]);
+            selected_bucket->second.erase(
+              selected_bucket->second.begin() +
+                static_cast<std::ptrdiff_t>(selected_position));
+            if (selected_bucket->second.empty()) {
+              ready_by_conditioning.erase(selected_bucket);
             }
+          } else {
+            auto global_largest = ready_by_conditioning.begin();
+            auto cached_largest = ready_by_conditioning.end();
+            for (auto candidate = ready_by_conditioning.begin();
+                 candidate != ready_by_conditioning.end(); ++candidate) {
+              if (candidate->second.size() > global_largest->second.size()) {
+                global_largest = candidate;
+              }
+              if (!candidate->first.empty() &&
+                  setup_cache.contains_conditioning_key(candidate->first) &&
+                  (cached_largest == ready_by_conditioning.end() ||
+                   candidate->second.size() > cached_largest->second.size())) {
+                cached_largest = candidate;
+              }
+            }
+            auto selected_bucket = global_largest;
+            if (cached_largest != ready_by_conditioning.end() &&
+                cached_largest->second.size() * 4U >=
+                  global_largest->second.size()) {
+              selected_bucket = cached_largest;
+            }
+            selected_edges = std::move(selected_bucket->second);
+            ready_by_conditioning.erase(selected_bucket);
           }
-          auto selected_bucket = global_largest;
-          if (cached_largest != ready_by_conditioning.end() &&
-              cached_largest->second.size() * 4U >=
-                global_largest->second.size()) {
-            selected_bucket = cached_largest;
-          }
-          std::vector<int> selected_edges =
-            std::move(selected_bucket->second);
-          ready_by_conditioning.erase(selected_bucket);
 
           FrontierWork work;
           work.selected.reserve(selected_edges.size());
@@ -3222,9 +3619,9 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
             const LayerCiTask& task =
               plan.tasks[static_cast<std::size_t>(task_index)];
             work.selected_cache_keys[position] = compact_result_key(
-              dataset, num_col, level, task_index, task);
+              dataset, num_col, level, task_index, task, method_options);
             double cached_p_value = NA_REAL;
-            if (compact_result_cache().lookup(
+            if (!legacy_r_permutation && compact_result_cache().lookup(
                   work.selected_cache_keys[position], dataset,
                   &cached_p_value, &diagnostics)) {
               require(std::isfinite(cached_p_value) &&
@@ -3249,18 +3646,35 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
           if (!work.group_tasks.empty()) {
             const GroupResult result = execute_group(
               data, work.context, plan, work.group_tasks, work.group_ids,
-              num_col, work.direct, &diagnostics);
+              num_col, work.direct, method_options, &diagnostics);
             require(result.p_values.size() == work.missing_positions.size(),
                     "compatible.cuda group result alignment changed");
+            const bool method_records =
+              result.statistics.size() == result.p_values.size() &&
+              result.means.size() == result.p_values.size() &&
+              result.variances.size() == result.p_values.size();
             for (std::size_t index = 0;
                  index < work.missing_positions.size(); ++index) {
               const std::size_t selected_position =
                 work.missing_positions[index];
               work.selected_pvalues[selected_position] =
                 result.p_values[index];
-              compact_result_cache().insert(
-                work.selected_cache_keys[selected_position], dataset,
-                result.p_values[index], &diagnostics);
+              if (method_records) {
+                const int task_index = work.group_tasks[index];
+                task_method_statistics[
+                  static_cast<std::size_t>(task_index)] =
+                    result.statistics[index];
+                task_method_means[static_cast<std::size_t>(task_index)] =
+                  result.means[index];
+                task_method_variances[
+                  static_cast<std::size_t>(task_index)] =
+                    result.variances[index];
+              }
+              if (!legacy_r_permutation) {
+                compact_result_cache().insert(
+                  work.selected_cache_keys[selected_position], dataset,
+                  result.p_values[index], &diagnostics);
+              }
             }
           }
 
@@ -3274,6 +3688,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
                     "compatible.cuda replay received a non-finite p-value");
             consumed[static_cast<std::size_t>(task_index)] = 1U;
             task_p_values[static_cast<std::size_t>(task_index)] = p_value;
+            if (task.opens_next_level) pcalg_done = false;
             --remaining;
             const std::size_t forward =
               static_cast<std::size_t>(task.edge_x) * p + task.edge_y;
@@ -3352,6 +3767,18 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
           trace_conditioning_size.push_back(
             static_cast<int>(task.conditioning_set.size()));
           trace_p_used.push_back(p_value);
+          if (method_options.ci_method == "hsic.gamma") {
+            trace_method_statistic.push_back(task_method_statistics[
+              static_cast<std::size_t>(task_index)]);
+            trace_method_mean.push_back(task_method_means[
+              static_cast<std::size_t>(task_index)]);
+            trace_method_variance.push_back(task_method_variances[
+              static_cast<std::size_t>(task_index)]);
+          }
+          if (is_permutation_method(method_options.ci_method)) {
+            trace_permutation_seed.push_back(static_cast<double>(
+              task_permutation_seed(method_options, task)));
+          }
           trace_deleted.push_back(deleted ? 1 : 0);
         }
       }
@@ -3373,19 +3800,18 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
       level_deletions.push_back(deletions);
       level_rounds.push_back(rounds);
       level_elapsed_ms.push_back(elapsed_ms(level_started));
-      if (level > 0 && deletions == 0) break;
+      if (pcalg_done) break;
     }
   } catch (...) {
     close_context(direct);
     setup_cache.clear();
-    free_fixed_sp_runtime(&runtime);
+    runtime_pool.close();
     throw;
   }
 
   close_context(direct);
   setup_cache.clear();
-  const FixedSpRuntimeInfo runtime_info = fixed_sp_runtime_info(runtime);
-  free_fixed_sp_runtime(&runtime);
+  const std::size_t runtime_workspace_bytes = runtime_pool.close();
 
   Rcpp::LogicalVector deleted_trace(trace_deleted.size());
   for (std::size_t index_value = 0;
@@ -3408,6 +3834,25 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
     Rcpp::Named("native_edge_ignored") =
       Rcpp::LogicalVector(trace_deleted.size(), false),
     Rcpp::Named("stringsAsFactors") = false);
+  if (is_permutation_method(method_options.ci_method)) {
+    require(trace_permutation_seed.size() == trace_deleted.size(),
+            "permutation trace seed count changed");
+    task_rows["permutation_seed"] = Rcpp::wrap(trace_permutation_seed);
+    task_rows.attr("class") = "data.frame";
+    task_rows.attr("row.names") = Rcpp::IntegerVector::create(
+      NA_INTEGER, -static_cast<int>(trace_deleted.size()));
+  } else if (method_options.ci_method == "hsic.gamma") {
+    require(trace_method_statistic.size() == trace_deleted.size() &&
+              trace_method_mean.size() == trace_deleted.size() &&
+              trace_method_variance.size() == trace_deleted.size(),
+            "HSIC gamma compact trace count changed");
+    task_rows["method_statistic"] = Rcpp::wrap(trace_method_statistic);
+    task_rows["method_mean"] = Rcpp::wrap(trace_method_mean);
+    task_rows["method_variance"] = Rcpp::wrap(trace_method_variance);
+    task_rows.attr("class") = "data.frame";
+    task_rows.attr("row.names") = Rcpp::IntegerVector::create(
+      NA_INTEGER, -static_cast<int>(trace_deleted.size()));
+  }
   Rcpp::DataFrame level_rows = Rcpp::DataFrame::create(
     Rcpp::Named("level") = Rcpp::wrap(level_values),
     Rcpp::Named("tasks_planned") = Rcpp::wrap(level_tasks_planned),
@@ -3544,6 +3989,21 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
       Rcpp::Named("alpha") = alpha,
       Rcpp::Named("index") = index,
       Rcpp::Named("numCol") = num_col,
+      Rcpp::Named("ci_method") = method_options.ci_method,
+      Rcpp::Named("ci_backend") = method_options.ci_method == "dcc.gamma" ?
+        "guarded-exact-screen-legacy-full-eig-cuda" :
+        "strict-device-residual-ci-cuda-v1",
+      Rcpp::Named("hsic_sig") = method_options.hsic_sig,
+      Rcpp::Named("permutation_replicates") =
+        is_permutation_method(method_options.ci_method) ?
+          method_options.permutation_replicates : 0,
+      Rcpp::Named("permutation_include_observed") =
+        method_options.permutation_include_observed,
+      Rcpp::Named("permutation_has_seed") =
+        method_options.permutation_has_seed,
+      Rcpp::Named("permutation_seed") =
+        method_options.permutation_has_seed ?
+          static_cast<double>(method_options.permutation_seed) : NA_REAL,
       Rcpp::Named("scheduler") = "cuda-level-target-prefill-host-v5",
       Rcpp::Named("frontier_batch_count") = total_frontier_batches,
       Rcpp::Named("levels") = static_cast<int>(level_values.size()),
@@ -4003,9 +4463,23 @@ Rcpp::List full_cuda_ci_one_call_skeleton(
         diagnostics.cuda_dcov_teardown_host_ms,
       Rcpp::Named("cuda_dcov_host_ms") = diagnostics.cuda_dcov_host_ms,
       Rcpp::Named("runtime_workspace_bytes") =
-        static_cast<double>(runtime_info.workspace_bytes),
+        static_cast<double>(runtime_workspace_bytes),
       Rcpp::Named("elapsed_sec") = elapsed_ms(run_started) / 1000.0,
       Rcpp::Named("authority_gate_pass") = authority_clean));
+}
+
+Rcpp::List full_cuda_ci_one_call_skeleton(
+    const Rcpp::NumericMatrix& data,
+    double alpha,
+    int max_conditioning_size,
+    double index,
+    int num_col,
+    const std::string& trace_level,
+    bool compatible_cuda_strict) {
+  FullCudaCiOneCallMethodOptions method_options;
+  return full_cuda_ci_one_call_skeleton_method(
+    data, alpha, max_conditioning_size, index, num_col, trace_level,
+    compatible_cuda_strict, method_options);
 }
 
 Rcpp::List full_cuda_ci_one_call_cache_control(

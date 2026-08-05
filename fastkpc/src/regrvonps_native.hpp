@@ -17,6 +17,9 @@ struct RegrVonPsResult {
   int dcov_batches;
   int dcov_pairs;
   int dcc_gamma_tests;
+  int dcc_perm_tests = 0;
+  int dcc_permutation_replicates = 0;
+  int dcc_perm_cuda_tests = 0;
   int hsic_gamma_tests;
   int hsic_perm_tests;
   int hsic_permutation_replicates;

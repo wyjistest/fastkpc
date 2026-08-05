@@ -158,8 +158,20 @@ fastkpc_flatten_ci_method_diagnostics <- function(result, run_id) {
     ci_backend_reason = result$config$ci_backend_reason %||% "",
     cuda_hsic_requested = isTRUE(result$config$cuda_hsic_requested),
     cuda_hsic_used = isTRUE(result$config$cuda_hsic_used),
+    cuda_dcov_permutation_requested =
+      isTRUE(result$config$cuda_dcov_permutation_requested),
+    cuda_dcov_permutation_used =
+      isTRUE(result$config$cuda_dcov_permutation_used),
     ci_dcc_gamma_tests =
       as.integer(skeleton_diag$ci_dcc_gamma_tests %||% 0L),
+    ci_dcc_perm_tests =
+      as.integer(skeleton_diag$ci_dcc_perm_tests %||% 0L),
+    ci_dcc_permutation_replicates =
+      as.integer(skeleton_diag$ci_dcc_permutation_replicates %||% 0L),
+    ci_dcc_perm_cuda_tests =
+      as.integer(skeleton_diag$ci_dcc_perm_cuda_tests %||% 0L),
+    ci_dcc_cuda_fallback_tests =
+      as.integer(skeleton_diag$ci_dcc_cuda_fallback_tests %||% 0L),
     ci_hsic_gamma_tests =
       as.integer(skeleton_diag$ci_hsic_gamma_tests %||% 0L),
     ci_hsic_perm_tests =
@@ -178,10 +190,17 @@ fastkpc_flatten_ci_method_diagnostics <- function(result, run_id) {
       as.integer(skeleton_diag$ci_hsic_cuda_fallback_tests %||% 0L),
     ci_tests =
       as.integer((skeleton_diag$ci_dcc_gamma_tests %||% 0L) +
+                   (skeleton_diag$ci_dcc_perm_tests %||% 0L) +
                    (skeleton_diag$ci_hsic_gamma_tests %||% 0L) +
                    (skeleton_diag$ci_hsic_perm_tests %||% 0L)),
     regrvonps_dcc_gamma_tests =
       as.integer(orientation_diag$regrvonps_dcc_gamma_tests %||% 0L),
+    regrvonps_dcc_perm_tests =
+      as.integer(orientation_diag$regrvonps_dcc_perm_tests %||% 0L),
+    regrvonps_dcc_permutation_replicates =
+      as.integer(orientation_diag$regrvonps_dcc_permutation_replicates %||% 0L),
+    regrvonps_dcc_perm_cuda_tests =
+      as.integer(orientation_diag$regrvonps_dcc_perm_cuda_tests %||% 0L),
     regrvonps_hsic_gamma_tests =
       as.integer(orientation_diag$regrvonps_hsic_gamma_tests %||% 0L),
     regrvonps_hsic_perm_tests =
@@ -921,7 +940,8 @@ run_fastkpc_validation_campaign <- function(seeds = c(11, 12, 13),
               several.ok = TRUE)
   schedulers <- match.arg(schedulers, c("auto", "layer", "legacy"),
                           several.ok = TRUE)
-  ci_methods <- match.arg(ci_methods, c("dcc.gamma", "hsic.gamma", "hsic.perm"),
+  ci_methods <- match.arg(ci_methods,
+                          c("dcc.gamma", "dcc.perm", "hsic.gamma", "hsic.perm"),
                           several.ok = TRUE)
   grid <- expand.grid(
     seed = as.integer(seeds),
@@ -1240,8 +1260,13 @@ run_fastkpc_validation_campaign <- function(seeds = c(11, 12, 13),
                        "orientation_residual_device", "scheduler", "ci_method",
                        "ci_backend", "ci_backend_requested",
                        "ci_backend_reason", "cuda_hsic_requested",
-                       "cuda_hsic_used",
-                       "ci_dcc_gamma_tests", "ci_hsic_gamma_tests",
+                       "cuda_hsic_used", "cuda_dcov_permutation_requested",
+                       "cuda_dcov_permutation_used",
+                       "ci_dcc_gamma_tests", "ci_dcc_perm_tests",
+                       "ci_dcc_permutation_replicates",
+                       "ci_dcc_perm_cuda_tests",
+                       "ci_dcc_cuda_fallback_tests",
+                       "ci_hsic_gamma_tests",
                        "ci_hsic_perm_tests",
                        "ci_hsic_permutation_replicates",
                        "ci_hsic_gamma_cuda_tests",
@@ -1250,6 +1275,9 @@ run_fastkpc_validation_campaign <- function(seeds = c(11, 12, 13),
                        "ci_hsic_cuda_pairs",
                        "ci_hsic_cuda_fallback_tests", "ci_tests",
                        "regrvonps_dcc_gamma_tests",
+                       "regrvonps_dcc_perm_tests",
+                       "regrvonps_dcc_permutation_replicates",
+                       "regrvonps_dcc_perm_cuda_tests",
                        "regrvonps_hsic_gamma_tests",
                        "regrvonps_hsic_perm_tests",
                        "regrvonps_hsic_permutation_replicates",

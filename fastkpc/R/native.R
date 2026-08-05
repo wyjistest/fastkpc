@@ -32,6 +32,21 @@ fast_dcov_exact_cpp <- function(x, y, index = 1, legacy_index = TRUE) {
   )
 }
 
+fast_dcov_perm_cpp <- function(x, y, index = 1, legacy_index = TRUE,
+                               replicates = 100L, seed = NULL,
+                               include_observed = TRUE) {
+  build_fastkpc_native()
+  fast_dcov_perm_cpp_export(
+    as.numeric(x),
+    as.numeric(y),
+    as.numeric(index),
+    isTRUE(legacy_index),
+    as.integer(replicates),
+    if (is.null(seed)) NULL else as.integer(seed),
+    isTRUE(include_observed)
+  )
+}
+
 fastkpc_legacy_dcov_gamma_cpp_oracle <- function(
     x, y, numCol = floor(length(x) / 10), index = 1) {
   build_fastkpc_native()

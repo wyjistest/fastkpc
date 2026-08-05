@@ -119,6 +119,21 @@ run_test(
   "semantic-abi",
   "fastkpc/tests/test_full_cuda_ci_phase35_semantic_abi.R"
 )
+run_test(
+  "default-inf-level8-qualification",
+  "fastkpc/tests/test_full_cuda_ci_default_inf_level8.R",
+  "FASTKPC_RUN_CUDA_TESTS=1"
+)
+run_test(
+  "default-inf-extended-capacity",
+  "fastkpc/tests/test_full_cuda_ci_default_inf_level9_capacity.R",
+  "FASTKPC_RUN_CUDA_TESTS=1"
+)
+run_test(
+  "default-inf-full-regression",
+  "fastkpc/tests/test_full_cuda_ci_default_inf_production.R",
+  "FASTKPC_RUN_FULL_DEFAULT_INF_CUDA_TEST=1"
+)
 
 fastkpc_full_cuda_phase10_hardening_require(
   file.exists(hardening_path) && file.exists(stream_path),

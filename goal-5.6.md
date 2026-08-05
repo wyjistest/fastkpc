@@ -4,7 +4,7 @@
 >
 > **Document origin baseline:** `main` at `7b36668` (`feat: add CUDA Spectra handle projection primitive`).
 >
-> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. The historical Phase 10 v1 campaign producer `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556` is accepted for canonical correctness, CUDA authority, hardening, artifact integrity, and replay latency only. Its `0.699`-second measurement is replay-warm after a complete same-data call; fresh-process cold is `1290.664` seconds versus a `601.431`-second correct baseline. Under `performance_budget_v2`, the public 500x50 development fixture passes and the best full fresh-data compute-warm development run remains `263.305` seconds. Per-call univariate primitive reuse reduced native setup from `77.650` to `38.997` seconds while preserving bitwise-identical consumed p-values, exact graph/sepset/count/trace parity, and zero CPU numerical authority or fallback. A development-only grouped guarded-QR/stable-SVD-queue prototype has exact internal and public-output parity across real q=28/37/46/55/64 shapes, but its best 512-target QR/Q speedup is only `1.032x`, below the `1.3x` stop threshold; it is not integrated into the optimizer. Compute-profile v5 proves that all `132,908` physical target optimizations occur in whole-level prefill: `110,617` TargetKeys are eventually consumed and `22,291` are never consumed, while frontier live optimization and singleton padding are both zero. Its `269.426`-second diagnostic run is bitwise identical to the `263.305`-second result and is not a new performance claim. A subsequent zero-lookahead canonical-frontier prototype was rejected at max conditioning size 3: it took `394.993` seconds versus `179.914` seconds for v5, increased optimizer boundaries from 83 to 1,898 and setup submissions from 5,239 to 46,691, created 14,507 singleton padding targets, and changed 120,991 consumed p-values in low bits (maximum `3.33e-14`) despite exact structural graph semantics and zero decision flips. The v5 production path is restored. Checkpoint A passes, but Checkpoint B (`<180` seconds) and the final five-run median gate (`<=120` seconds) still fail. No new candidate is frozen; Phase 10 is not complete, and the external promotion holdout remains `SEALED_NOT_RELEASED` and must stay unopened.
+> **Current accepted implementation/evidence snapshot:** Phase 9 is COMPLETE. The historical Phase 10 v1 campaign producer `592dd982673c62d996ebff404dd68f9bdde71f83d5784e4235325cc1a2ffc556` is accepted for canonical correctness, CUDA authority, hardening, artifact integrity, and replay latency only. Its `0.699`-second measurement is replay-warm after a complete same-data call; fresh-process cold is `1290.664` seconds versus a `601.431`-second correct baseline. Under `performance_budget_v2`, the public 500x50 development fixture passes and the best explicit-max-7 fresh-data compute-warm development run remains `263.305` seconds. Per-call univariate primitive reuse reduced native setup from `77.650` to `38.997` seconds while preserving bitwise-identical consumed p-values, exact graph/sepset/count/trace parity, and zero CPU numerical authority or fallback. A development-only grouped guarded-QR/stable-SVD-queue prototype has exact internal and public-output parity across real q=28/37/46/55/64 shapes, but its best 512-target QR/Q speedup is only `1.032x`, below the `1.3x` stop threshold; it is not integrated into the optimizer. Compute-profile v5 proves that all `132,908` physical target optimizations occur in whole-level prefill: `110,617` TargetKeys are eventually consumed and `22,291` are never consumed, while frontier live optimization and singleton padding are both zero. Its `269.426`-second diagnostic run is bitwise identical to the `263.305`-second result and is not a new performance claim. A subsequent zero-lookahead canonical-frontier prototype was rejected at max conditioning size 3: it took `394.993` seconds versus `179.914` seconds for v5, increased optimizer boundaries from 83 to 1,898 and setup submissions from 5,239 to 46,691, created 14,507 singleton padding targets, and changed 120,991 consumed p-values in low bits (maximum `3.33e-14`) despite exact structural graph semantics and zero decision flips. The v5 production path is restored. Checkpoint A passes, but Checkpoint B (`<180` seconds) and the final five-run median gate (`<=120` seconds) still fail. No new candidate is frozen; Phase 10 is not complete, and the external promotion holdout remains `SEALED_NOT_RELEASED` and must stay unopened.
 >
 > **Latest scheduler opportunity diagnostic:** A no-CUDA-CI native-plan replay reconstructed all 137 original v5 windows, 8,637 setup cohorts, 132,908 target optimizations, and 110,617 consumed TargetKeys exactly. Every v5 window is eventually demanded; only three setup cohorts are never demanded, containing nine targets. Of the 22,291 unconsumed targets, 22,282 are inside demanded cohorts. Lazy original-window activation therefore skips zero recorded windows and zero recorded batch wall time; through level 3 it still requires exactly 83 boundaries, 5,239 setup submissions, and 107,053 target optimizations. The decision is `STOP_SCHEDULER_OPPORTUNITY_TOO_SMALL`: stop scheduler-prefill work for this contract epoch.
 >
@@ -13,6 +13,10 @@
 > **Latest fixed-SP residual attribution:** The trace-free full level-7 compute-profile v6 takes `274.728` seconds as a development diagnostic and does not replace the `263.305`-second best runtime. Its graph, sepsets, counts, 240,489 task rows including consumed p-values, and semantic level trace are bitwise identical to the primitive-cache artifact, with zero CPU numerical authority, fallback, residual D2H, or component D2H. Authoritative fixed-SP residual solve time is `15.315` seconds: single-penalty `10.272`, multi-penalty `5.043`, exact screen `14.833`, and guarded legacy-eig refinement only `0.482`. The run executes 38,613 exact residual batches and 553 refinement batches; refinement is only `3.15%` of residual time, so exact/refinement residual sharing is below the `3-5` second implementation gate and stops as a main route. Exact screens nevertheless perform 228,015 residual target fits for 110,665 unique ResidualKeys, leaving 117,350 excess fits (`51.47%`). That apparent target-level opportunity motivated the cross-batch qualification recorded below; it was not treated as reusable without evidence. The same run records 39,166 dCov calls, `3.440` seconds of teardown, and `7.416` seconds of otherwise unattributed dCov host time; this is only an upper bound for a persistent dCov execution context.
 >
 > **Latest fixed-SP cross-batch qualification:** Device-only repeat/permutation/subset/singleton/route-mix fixtures show that complete identical or permuted cohorts are bitwise exact, but batched-Cholesky miss-only subsets are not. Across the fixtures there are 913 residual-value mismatches, 332,530 exact-component value/moment mismatches, three solver-status mismatches, and two unconditional legacy-eig p-value mismatches. Final guarded p-values and decisions remain unchanged, but the target-granular strict gate fails; the intermediate decision is `CONDITIONAL_ALL_HIT_BATCH_ONLY`. A trace-free full level-7 opportunity run then classifies all 38,613 exact batches and 228,015 target fits with exact accounting. Only 46 batches and 1,853 targets are both all-hit and a repeated complete cohort. Their measured residual solve plus exact-component upper bound is only `71.354` ms (`54.209 + 17.145`), below the 5-second stop gate. The final decision is `STOP_CROSS_BATCH_FIXED_RESIDUAL_CACHE_OPPORTUNITY`: do not implement target-granular caching, residual slabs, exact-component caching, capacity traces, or whole-cohort reuse in this contract epoch. The diagnostic run takes `266.801` seconds and does not replace the `263.305`-second baseline; its graph/task outputs and semantic level fields remain bitwise exact with zero CPU authority, fallback, or large-payload D2H.
+>
+> **Default-Inf semantic and capacity qualification:** `kpcalg::kpc()` defaults to `m.max = Inf`; for finite `p`, the search ceiling is `p - 2` and the graph should stop naturally. The previous `263.305`-second evidence explicitly stopped at `|S| = 7` and is not a default-Inf timing. On the canonical 351x48 graph, default Inf requires nine level-8 tests, giving counts `2213,52659,125293,40694,13293,5422,835,80,9`, and then naturally stops. The one-call route resolves Inf to 46 and dispatches multi-penalty CUDA work through `q/penalty` capacity buckets `64/7`, `80/8`, `192/21`, `384/42`, and `559/62`, with bounded concurrency `64,64,8,2,1`. The q192 level-9 fixture has CPU optimizer-trajectory qualification; q384 and the maximum `n=600,p=64,|S|=62,q=559` shape have CUDA authority/capacity qualification. The current-binary Phase 9 v2 artifact completed in `277.868` seconds, and the default-Inf hardening v2 full regression completed in `272.3` seconds. An independent current-source same-process cold/replay-warm qualification measured `274.91` / `0.848` seconds; cold evaluated 241,686 physical pairs, while warm had 240,498 result-cache hits and zero physical numerical work. Adjacency, sepsets, pMax, all task rows, and every p-value bit are exact, with zero CPU authority, fallback, residual D2H, or component D2H. The public 500x50 v2 fixture also uses default Inf and stops naturally at level 3. These results do not pass Checkpoint B and do not replace the explicit-max-7 performance baseline.
+>
+> **Four-method strict process qualification:** The same default-Inf full-CUDA skeleton now has full 351x48 receipts for `hsic.gamma`, `dcc.perm`, and `hsic.perm`. Their logical test counts are 322,679, 229,675, and 282,113; all have SHD 0, exact adjacency, undirected sepset union, `n.edgetests`, deletion decisions, and logical CI identities. Both permutation methods have bitwise-exact skeleton p-values; `hsic.gamma` has maximum absolute p-value difference `8.78298545003986e-11`, within its accepted `1e-10` continuous-gamma tolerance, with zero decision flips. Production WAN-PDAG completion is `fastkpc_compatible_cuda_wanpdag()`: CUDA remains skeleton authority and the original kpcalg R implementation is orientation authority. Production-helper v3 receipts show exact orientation CI identities, p-values, decisions, final PDAG, and R RNG state for all three methods. Native CUDA orientation is retained only as explicit failure evidence where it differs; it is not the strict route.
 >
 > **Active roadmap phase:** Phase 10, full performance gate, hardening, and promotion.
 >
@@ -59,7 +63,7 @@ n                   = 351
 p                   = 48
 alpha               = 0.1
 reference edge count = 110
-reference n.edgetests = 2213,52659,125293,40694,13293,5422,835,80
+reference n.edgetests = 2213,52659,125293,40694,13293,5422,835,80,9
 ```
 
 Every route proposed for compatible-CUDA promotion must satisfy:
@@ -71,7 +75,7 @@ adjacency identical         = TRUE
 SHD                         = 0
 normalized sepsets identical = TRUE
 logical n.edgetests identical = TRUE
-logical n.edgetests          = 2213,52659,125293,40694,13293,5422,835,80
+logical n.edgetests          = 2213,52659,125293,40694,13293,5422,835,80,9
 canonical deletion trace identical = TRUE
 unknown fallback count      = 0
 approximate backend count   = 0
@@ -643,8 +647,8 @@ Existing code may provide substrate for a phase, but a phase is not complete unt
 | 6 | CUDA multi-penalty same-S target batches | COMPLETE - all 65,676 multi-penalty targets use persistent CUDA optimization and residual solves; the full residual route has SHD 0 and a 0.7693 same-trace performance ratio |
 | 7 | Native setup builder; remove R/mgcv from CI loop | COMPLETE - all 8,634 native setups and the complete residual/graph route pass with zero R/mgcv setup authority or fallback |
 | 8 | Legacy-compatible device-resident CUDA dCov | COMPLETE - all 240,489 logical tests use guarded device-resident CUDA dCov with zero final flips, zero CPU numerical authority, SHD 0, and a 17.499-second dCov boundary |
-| 9 | Fused one-call compatible CUDA skeleton | COMPLETE - one native call reproduces all 240,489 canonical tests, exact graph semantics, and zero R/CPU numerical authority |
-| 10 | Full gate, hardening, and promotion | ACTIVE - v1 correctness/hardening/replay evidence passes; the public 500x50 fixture and a 263.305-second single-run fresh-data development profile pass, but Checkpoint B, the formal five-run 120-second gate, refreeze, sealed holdout, and completion audit remain |
+| 9 | Fused one-call compatible CUDA skeleton | COMPLETE - one native call reproduces all 240,498 default-Inf canonical tests, exact graph semantics, and zero R/CPU numerical authority |
+| 10 | Full gate, hardening, and promotion | ACTIVE - default-Inf Phase 9 v2, hardening v2, public 500x50 v2, and cold/replay-warm correctness pass; the current-source cold is 274.91 seconds, so Checkpoint B, the formal five-run 120-second gate, refreeze, sealed holdout, and completion audit remain |
 
 **Codex starts at the earliest phase whose exit gate is not complete.** Do not skip Phase 0 because later code already exists.
 
@@ -2877,7 +2881,7 @@ Keep this route env-gated or explicitly selected until Phase 10 promotion.
 ### Required artifact
 
 ```text
-fastkpc/artifacts/full_cuda_ci/one_call_full_cuda_351x48_v1/
+fastkpc/artifacts/full_cuda_ci/one_call_full_cuda_351x48_default_inf_v2/
 ```
 
 ### Hard gate
@@ -2899,7 +2903,7 @@ approximate backend count = 0
 
 One native call runs the complete compatible skeleton with a CUDA numerical CI data plane and no hidden R/CPU numerical authority.
 
-### Accepted Phase 9 closure (2026-07-31)
+### Historical accepted Phase 9 max-7 closure (2026-07-31)
 
 The explicit `compatible.cuda` / `route="full_cuda"` facade now makes one
 native call. C++ owns the complete stable skeleton state machine and canonical
@@ -2939,6 +2943,44 @@ misses/rebuilds, `294,877` physical residual fits, `699.592` seconds of setup
 time, and `2,257.702` seconds at the CUDA optimizer host boundary. Phase 9
 accepts correctness and authority only; Phase 10 must remove this repeated work
 and cannot promote the route at the recorded timing.
+
+### Current default-Inf Phase 9 closure (2026-08-03)
+
+The active Phase 9 producer requests `Inf`, resolves it to 46 for `p=48`,
+executes all nine level-8 tests, and stops naturally after level 8. Its standard
+artifact validates current source/native identity, the complete logical and
+deletion traces, and every consumed p-value bit.
+
+```text
+artifact =
+  fastkpc/artifacts/full_cuda_ci/one_call_full_cuda_351x48_default_inf_v2/
+producer identity SHA-256 =
+  588b6e9fb6937de98feccc8d0bb34c25083c22f94a2e5ed29f2b73a32c85510c
+source closure SHA-256 =
+  5da77cb2699f89f9f6e8ac3a5b7784cd72a3e75c48f0e82fccdc4c599786494d
+native binary SHA-256 =
+  eb450c56a16e6ba23e8019d690b56304b0a9966383dc8a3262ffe3c2537cb9bf
+manifest SHA-256 =
+  447ea1c88fff411c727b6606636e171d5b8010d9b6ba76c017ed7583f12878e8
+
+requested / resolved max conditioning size = Inf / 46
+natural stop level = 8
+logical n.edgetests = 2213,52659,125293,40694,13293,5422,835,80,9
+logical / physical tests = 240,498 / 241,686
+physical target optimizations = 132,926
+native setups / optimizer boundaries = 8,646 / 138
+elapsed = 277.868 sec
+CPU numerical authority / fallback / large D2H = 0 / 0 / 0
+```
+
+The corresponding hardening artifact is
+`fastkpc/artifacts/full_cuda_ci/failure_injection_default_inf_v2/`; its ten
+recorded tests include level-8, extended-capacity (`516.774` seconds), and a
+`272.3`-second full default-Inf production regression. Its summary rejects a forged natural-stop
+claim of level 7. The independent current-source cold/replay-warm evidence is
+`/tmp/fastkpc-default-inf-cold-warm-v2.rds` (SHA-256
+`e9dc6cd3d70ad36edd4362872ff0e0516e3231c9a15d01ae0a83aa74fc678138`),
+with `274.91` / `0.848` seconds and zero warm physical work.
 
 ---
 
@@ -3052,10 +3094,10 @@ shadow
 
 ```text
 fastkpc/artifacts/full_cuda_ci/promotion_351x48_v1/
-fastkpc/artifacts/full_cuda_ci/promotion_351x48_v2/
-fastkpc/artifacts/full_cuda_ci/development_500x50_v1/
+fastkpc/artifacts/full_cuda_ci/promotion_351x48_default_inf_v2/
+fastkpc/tests/fixtures/full_cuda_ci_development_500x50_v2.rds
 fastkpc/artifacts/full_cuda_ci/sealed_promotion_holdout_v1/
-fastkpc/artifacts/full_cuda_ci/failure_injection_v1/
+fastkpc/artifacts/full_cuda_ci/failure_injection_default_inf_v2/
 ```
 
 ### Documentation updates

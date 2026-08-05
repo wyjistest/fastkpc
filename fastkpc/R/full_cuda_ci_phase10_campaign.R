@@ -15,12 +15,12 @@ fastkpc_full_cuda_phase10_campaign_json_equivalent <- function(left, right) {
 
 fastkpc_full_cuda_phase10_campaign_artifact_dir <- function(
     root = file.path("fastkpc", "artifacts", "full_cuda_ci")) {
-  file.path(root, "promotion_351x48_v1")
+  file.path(root, "promotion_351x48_default_inf_v2")
 }
 
 fastkpc_full_cuda_phase10_campaign_staging_dir <- function(
     root = file.path("fastkpc", "artifacts", "full_cuda_ci")) {
-  file.path(root, "phase10_promotion_staging_v1")
+  file.path(root, "phase10_promotion_staging_default_inf_v2")
 }
 
 fastkpc_full_cuda_phase10_campaign_required_files <- function() {
@@ -47,6 +47,7 @@ fastkpc_full_cuda_phase10_campaign_source_paths <- function() {
     "fastkpc/tests/test_full_cuda_ci_phase10_campaign_helpers.R",
     "fastkpc/tools/run_full_cuda_ci_phase10_campaign.R",
     "fastkpc/tools/run_full_cuda_ci_phase10_campaign.sh",
+    "fastkpc/tools/run_full_cuda_ci_default_inf_cold_warm.R",
     "fastkpc/tools/run_full_cuda_ci_phase10_worker.R",
     "fastkpc/tools/run_full_cuda_ci_gate.sh"
   )), method = "radix")
@@ -82,15 +83,15 @@ fastkpc_full_cuda_phase10_campaign_paths <- function() {
       "cancer_RD-causalDiscoveryInput.rds"
     ),
     oracle_manifest = file.path(
-      "fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1",
+      fastkpc_full_cuda_default_kpcalg_oracle_dir(),
       "manifest.json"
     ),
     logical = file.path(
-      "fastkpc", "artifacts", "full_cuda_ci",
-      "workload_census_351x48_v1", "logical_ci_tests.rds"
+      fastkpc_full_cuda_default_kpcalg_oracle_dir(),
+      "logical_ci_trace.rds"
     ),
     hardening_manifest = file.path(
-      "fastkpc", "artifacts", "full_cuda_ci", "failure_injection_v1",
+      fastkpc_full_cuda_phase10_hardening_artifact_dir(),
       "manifest.json"
     ),
     phase8_rank_condition = file.path(
@@ -102,7 +103,7 @@ fastkpc_full_cuda_phase10_campaign_paths <- function() {
 
 fastkpc_full_cuda_phase10_campaign_backend_configuration <- function() {
   value <- list(
-    schema_version = "full-cuda-ci-phase10-campaign-configuration-v1",
+    schema_version = "full-cuda-ci-phase10-campaign-configuration-v2",
     candidate_route = "compatible.cuda/full_cuda-explicit",
     native_entrypoint = "compatible-cuda-full-skeleton-native-v1",
     scheduler = "cache-aware-frontier-4x-v1",
@@ -126,7 +127,9 @@ fastkpc_full_cuda_phase10_campaign_backend_configuration <- function() {
     alpha = "0.1",
     index = 1L,
     num_col = 35L,
-    maximum_conditioning_size = 7L,
+    requested_max_conditioning_size = "Inf",
+    resolved_max_conditioning_size = 46L,
+    natural_stop_level = 8L,
     trace_level = "logical",
     precision = "float64",
     fmad = FALSE,
@@ -609,13 +612,8 @@ fastkpc_full_cuda_phase10_campaign_authority_zero_fields <- function() {
 
 fastkpc_full_cuda_phase10_validate_candidate_result <- function(
     result, boundary = c("cold", "warm"),
-    oracle_dir = file.path(
-      "fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1"
-    ),
-    logical_path = file.path(
-      "fastkpc", "artifacts", "full_cuda_ci",
-      "workload_census_351x48_v1", "logical_ci_tests.rds"
-    )) {
+    oracle_dir = fastkpc_full_cuda_default_kpcalg_oracle_dir(),
+    logical_path = file.path(oracle_dir, "logical_ci_trace.rds")) {
   boundary <- match.arg(boundary)
   fastkpc_full_cuda_phase10_campaign_require(
     fastkpc_full_cuda_is_skeleton(result) && file.exists(logical_path),
@@ -623,11 +621,11 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
   )
   oracle <- fastkpc_load_full_cuda_ci_oracle(oracle_dir)
   comparison <- fastkpc_full_cuda_compare_candidate_skeleton(oracle, result)
-  logical <- readRDS(logical_path)
+  logical <- fastkpc_full_cuda_phase9_load_logical(logical_path)
   tasks <- result$tasks
-  expected_n_edgetests <- c(
-    2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L
-  )
+  contract <- fastkpc_full_cuda_default_kpcalg_contract()
+  expected_n_edgetests <- contract$n_edgetests
+  logical_length_exact <- nrow(tasks) == nrow(logical)
   structural_fields_exact <- c(
     logical_id = identical(
       as.integer(tasks$canonical_test_order_id),
@@ -647,7 +645,11 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
       as.logical(tasks$native_edge_deleted), as.logical(logical$deletes_edge)
     )
   )
-  decision_flip <- (tasks$p_used >= 0.1) != logical$reference_independent
+  decision_flip <- if (logical_length_exact) {
+    (tasks$p_used >= 0.1) != logical$reference_independent
+  } else {
+    TRUE
+  }
   zero_fields <- fastkpc_full_cuda_phase10_campaign_authority_zero_fields()
   zero_values <- vapply(zero_fields, function(field) {
     value <- result$summary[[field]]
@@ -657,7 +659,9 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
   summary <- result$summary
   common_gate <- isTRUE(comparison$summary$pass) &&
     identical(as.integer(result$n.edgetests), expected_n_edgetests) &&
-    nrow(tasks) == 240489L && all(structural_fields_exact) &&
+    nrow(tasks) == contract$logical_test_count &&
+    logical_length_exact &&
+    all(structural_fields_exact) &&
     !any(decision_flip) && all(is.finite(tasks$p_used)) &&
     all(!is.na(zero_values) & zero_values == 0) &&
     identical(summary$run_status, "ok") &&
@@ -667,7 +671,13 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
     isTRUE(summary$compatible_cuda_strict) &&
     isTRUE(summary$authority_gate_pass) &&
     as.integer(summary$native_call_count) == 1L &&
-    as.integer(summary$logical_tests_consumed) == 240489L &&
+    identical(summary$max_conditioning_size_requested,
+              contract$requested_max_conditioning_size) &&
+    as.integer(summary$max_conditioning_size_resolved) ==
+      contract$resolved_max_conditioning_size &&
+    max(as.integer(result$levels$level)) == contract$natural_stop_level &&
+    as.integer(summary$logical_tests_consumed) ==
+      contract$logical_test_count &&
     as.integer(summary$speculative_tests_ignored) == 0L &&
     summary$scheduler %in% c(
       "cache-aware-frontier-4x-v1", "cuda-level-target-prefill-host-v5"
@@ -675,7 +685,8 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
     as.integer(summary$frontier_batch_count) == sum(result$levels$rounds) &&
     as.integer(summary$result_cache_capacity) == 262144L &&
     as.integer(summary$target_cache_capacity) == 131072L &&
-    as.integer(summary$result_cache_request_count) == 240489L &&
+    as.integer(summary$result_cache_request_count) ==
+      contract$logical_test_count &&
     as.integer(summary$result_cache_request_count) ==
       as.integer(summary$result_cache_hit_count) +
         as.integer(summary$result_cache_miss_count) &&
@@ -687,19 +698,29 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
         as.integer(summary$native_setup_cache_miss_count) &&
     is.finite(summary$elapsed_sec) && summary$elapsed_sec > 0
   boundary_gate <- if (identical(boundary, "cold")) {
-    as.integer(summary$physical_tests_evaluated) == 241677L &&
-      as.integer(summary$guarded_pair_count) == 1188L &&
-      as.integer(summary$cuda_dcov_pair_count) == 241677L &&
-      as.integer(summary$cuda_gamma_pvalue_count) == 241677L &&
+    as.integer(summary$physical_tests_evaluated) ==
+      contract$physical_test_count &&
+      as.integer(summary$guarded_pair_count) ==
+        contract$guarded_pair_count &&
+      as.integer(summary$cuda_dcov_pair_count) ==
+        contract$physical_test_count &&
+      as.integer(summary$cuda_gamma_pvalue_count) ==
+        contract$physical_test_count &&
       as.integer(summary$result_cache_warm_start_entries) == 0L &&
       as.integer(summary$result_cache_hit_count) == 0L &&
-      as.integer(summary$result_cache_miss_count) == 240489L &&
-      as.integer(summary$result_cache_insert_count) == 240489L &&
+      as.integer(summary$result_cache_miss_count) ==
+        contract$logical_test_count &&
+      as.integer(summary$result_cache_insert_count) ==
+        contract$logical_test_count &&
       as.integer(summary$result_cache_eviction_count) == 0L &&
       as.integer(summary$target_cache_warm_start_entries) == 0L &&
-      as.integer(summary$target_cache_miss_count) == 110617L &&
-      as.integer(summary$target_cache_insert_count) == 110617L &&
-      as.integer(summary$target_cache_eviction_count) == 0L &&
+      as.integer(summary$target_cache_miss_count) ==
+        contract$physical_target_optimization_count &&
+      as.integer(summary$target_cache_insert_count) ==
+        contract$physical_target_optimization_count &&
+      as.integer(summary$target_cache_eviction_count) ==
+        contract$physical_target_optimization_count -
+          as.integer(summary$target_cache_capacity) &&
       as.integer(summary$native_setup_count) ==
         as.integer(summary$native_setup_cache_miss_count) &&
       as.integer(summary$cuda_single_penalty_target_count) > 0L &&
@@ -710,12 +731,15 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
       as.integer(summary$guarded_pair_count) == 0L &&
       as.integer(summary$cuda_dcov_pair_count) == 0L &&
       as.integer(summary$cuda_gamma_pvalue_count) == 0L &&
-      as.integer(summary$result_cache_warm_start_entries) >= 240489L &&
-      as.integer(summary$result_cache_hit_count) == 240489L &&
+      as.integer(summary$result_cache_warm_start_entries) >=
+        contract$logical_test_count &&
+      as.integer(summary$result_cache_hit_count) ==
+        contract$logical_test_count &&
       as.integer(summary$result_cache_miss_count) == 0L &&
       as.integer(summary$result_cache_insert_count) == 0L &&
       as.integer(summary$result_cache_eviction_count) == 0L &&
-      as.integer(summary$target_cache_warm_start_entries) == 110617L &&
+      as.integer(summary$target_cache_warm_start_entries) ==
+        as.integer(summary$target_cache_capacity) &&
       as.integer(summary$target_cache_request_count) == 0L &&
       as.integer(summary$native_setup_count) == 0L &&
       as.integer(summary$cuda_single_penalty_target_count) == 0L &&
@@ -742,9 +766,7 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
 
 fastkpc_full_cuda_phase10_validate_baseline_result <- function(
     result,
-    oracle_dir = file.path(
-      "fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1"
-    )) {
+    oracle_dir = fastkpc_full_cuda_default_kpcalg_oracle_dir()) {
   fastkpc_full_cuda_phase10_campaign_require(
     fastkpc_full_cuda_is_skeleton(result),
     "Phase 10 correct baseline result is missing"
@@ -754,9 +776,10 @@ fastkpc_full_cuda_phase10_validate_baseline_result <- function(
   )
   summary <- result$summary
   clean <- isTRUE(comparison$summary$pass) &&
-    identical(as.integer(result$n.edgetests), c(
-      2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L
-    )) && nrow(result$tasks) == 240489L &&
+    identical(as.integer(result$n.edgetests),
+              fastkpc_full_cuda_default_kpcalg_contract()$n_edgetests) &&
+    nrow(result$tasks) ==
+      fastkpc_full_cuda_default_kpcalg_contract()$logical_test_count &&
     all(is.finite(result$tasks$p_used)) &&
     identical(summary$compatible_cuda_route,
               "legacy-mgcv-provider-native-legacy-dcov") &&
@@ -768,7 +791,8 @@ fastkpc_full_cuda_phase10_validate_baseline_result <- function(
     as.integer(summary$residual_provider_parallel_cores) == 20L &&
     isTRUE(summary$legacy_dcov_native_batch_enabled) &&
     identical(summary$legacy_dcov_native_batch_mode, "round") &&
-    as.integer(summary$legacy_dcov_native_batch_pair_count) == 240489L &&
+    as.integer(summary$legacy_dcov_native_batch_pair_count) ==
+      fastkpc_full_cuda_default_kpcalg_contract()$logical_test_count &&
     as.integer(summary$unknown_fallback_count) == 0L &&
     as.integer(summary$approximate_backend_count) == 0L
   fastkpc_full_cuda_phase10_campaign_require(
@@ -816,7 +840,7 @@ fastkpc_full_cuda_phase10_campaign_candidate_call <- function(data) {
     options = list(
       route = "full_cuda",
       compatible_cuda_strict = TRUE,
-      max_conditioning_size = 7L,
+      max_conditioning_size = Inf,
       index = 1,
       numCol = 35L,
       trace_level = "logical"
@@ -845,7 +869,7 @@ fastkpc_full_cuda_phase10_campaign_baseline_call <- function(data) {
     options = list(
       route = "legacy",
       compatible_cuda_strict = TRUE,
-      max_conditioning_size = 7L,
+      max_conditioning_size = Inf,
       index = 1,
       numCol = 35L,
       trace_level = "logical",
@@ -1334,11 +1358,15 @@ fastkpc_full_cuda_phase10_campaign_statistics_table <- function(aggregate) {
 fastkpc_full_cuda_phase10_campaign_cases <- function(
     result,
     logical_path = file.path(
-      "fastkpc", "artifacts", "full_cuda_ci",
-      "workload_census_351x48_v1", "logical_ci_tests.rds"
+      fastkpc_full_cuda_default_kpcalg_oracle_dir(),
+      "logical_ci_trace.rds"
     )) {
   tasks <- result$tasks
-  logical <- readRDS(logical_path)
+  logical <- fastkpc_full_cuda_phase9_load_logical(logical_path)
+  fastkpc_full_cuda_phase10_campaign_require(
+    nrow(tasks) == nrow(logical),
+    "Phase 10 candidate and canonical trace lengths differ"
+  )
   data.frame(
     logical_sequence_id = as.integer(tasks$canonical_test_order_id),
     level = as.integer(tasks$level),
@@ -1405,7 +1433,8 @@ fastkpc_full_cuda_phase10_campaign_producer <- function(
     fastkpc_full_cuda_phase35_canonical_json(list(
       dataset_sha256 = freeze$canonical_input_sha256$data,
       logical_sha256 = freeze$canonical_input_sha256$logical,
-      logical_test_count = 240489L,
+      logical_test_count =
+        fastkpc_full_cuda_default_kpcalg_contract()$logical_test_count,
       campaign_run_sha256 = unname(lapply(
         aggregate$runs, `[[`, "evidence_sha256"
       ))
@@ -1415,7 +1444,7 @@ fastkpc_full_cuda_phase10_campaign_producer <- function(
     producer_source_closure_sha256 = source_closure$sha256,
     native_binary_sha256 = native_identity$sha256,
     route_semantic_version =
-      "full-cuda-ci-phase10-canonical-promotion-campaign-v1",
+      "full-cuda-ci-phase10-default-kpcalg-promotion-campaign-v2",
     dataset_or_corpus_sha256 = corpus_sha256,
     oracle_sha256 = freeze$canonical_input_sha256$oracle_manifest,
     backend_configuration_sha256 = backend$sha256,
@@ -1435,8 +1464,10 @@ fastkpc_full_cuda_phase10_campaign_summary <- function(
     run_status = "ok",
     timeout = FALSE,
     source_commit = freeze$source_commit,
-    oracle_artifact =
-      "fastkpc/artifacts/full_cuda_ci/oracle_351x48_v1",
+    oracle_artifact = fastkpc_full_cuda_default_kpcalg_oracle_dir(),
+    max_conditioning_size_requested = "Inf",
+    max_conditioning_size_resolved = 46L,
+    natural_stop_level = 8L,
     candidate_route = "compatible.cuda/full_cuda-explicit",
     baseline_route = "legacy-mgcv-provider-native-legacy-dcov-20-core",
     edge_count_reference =
@@ -1555,7 +1586,11 @@ fastkpc_full_cuda_phase10_campaign_validate_summary <- function(summary) {
     isTRUE(summary$n_edgetests_identical) &&
     isTRUE(summary$deletions_identical) &&
     isTRUE(summary$logical_ci_trace_identical) &&
-    summary$logical_tests_consumed == 240489L &&
+    identical(summary$max_conditioning_size_requested, "Inf") &&
+    summary$max_conditioning_size_resolved == 46L &&
+    summary$natural_stop_level == 8L &&
+    summary$logical_tests_consumed ==
+      fastkpc_full_cuda_default_kpcalg_contract()$logical_test_count &&
     summary$candidate_cold_repetitions == 5L &&
     summary$candidate_warm_repetitions == 5L &&
     summary$correct_baseline_repetitions == 5L &&
@@ -1630,9 +1665,7 @@ fastkpc_full_cuda_phase10_validate_campaign_payload <- function(
   representative <- warm[[1L]]$result
   comparison <- fastkpc_full_cuda_compare_candidate_skeleton(
     fastkpc_load_full_cuda_ci_oracle(
-      file.path(
-        "fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1"
-      )
+      fastkpc_full_cuda_default_kpcalg_oracle_dir()
     ), representative
   )
   graph <- fastkpc_full_cuda_phase10_campaign_read_table(
@@ -1678,9 +1711,8 @@ fastkpc_full_cuda_phase10_validate_campaign_payload <- function(
   inputs <- fastkpc_full_cuda_phase10_campaign_read_table(
     artifact_dir, "evidence_inputs.csv"
   )
-  expected_n_edgetests <- c(
-    2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L
-  )
+  contract <- fastkpc_full_cuda_default_kpcalg_contract()
+  expected_n_edgetests <- contract$n_edgetests
   graph_gate <- nrow(graph) == 1L &&
     graph$edge_count_reference[[1L]] == 110L &&
     graph$edge_count_candidate[[1L]] == 110L &&
@@ -1688,7 +1720,7 @@ fastkpc_full_cuda_phase10_validate_campaign_payload <- function(
     isTRUE(as.logical(graph$adjacency_identical[[1L]])) &&
     nrow(sepsets) == nrow(comparison$sepset_agreement) &&
     nrow(sepsets) > 0L && all(as.logical(sepsets$identical)) &&
-    nrow(n_edgetests) == 8L &&
+    nrow(n_edgetests) == length(expected_n_edgetests) &&
     identical(as.integer(n_edgetests$reference), expected_n_edgetests) &&
     identical(as.integer(n_edgetests$candidate), expected_n_edgetests) &&
     all(as.logical(n_edgetests$identical)) &&
@@ -1749,8 +1781,9 @@ fastkpc_full_cuda_phase10_validate_campaign_payload <- function(
     "Phase 10 campaign run or timing payload is malformed"
   )
 
-  case_gate <- nrow(cases) == 240489L &&
-    identical(as.integer(cases$logical_sequence_id), seq_len(240489L)) &&
+  case_gate <- nrow(cases) == contract$logical_test_count &&
+    identical(as.integer(cases$logical_sequence_id),
+              seq_len(contract$logical_test_count)) &&
     all(is.finite(cases$reference_p_value)) &&
     all(is.finite(cases$candidate_p_value)) &&
     !any(as.logical(cases$decision_flip)) &&
@@ -2104,9 +2137,7 @@ fastkpc_full_cuda_phase10_validate_campaign_artifact <- function(
   representative <- warm_runs[[1L]]$result
   representative_comparison <- fastkpc_full_cuda_compare_candidate_skeleton(
     fastkpc_load_full_cuda_ci_oracle(
-      file.path(
-        "fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1"
-      )
+      fastkpc_full_cuda_default_kpcalg_oracle_dir()
     ), representative
   )
   expected_summary <- fastkpc_full_cuda_phase10_campaign_summary(
@@ -2205,7 +2236,7 @@ fastkpc_full_cuda_phase10_publish_campaign <- function(
   }, logical(1L))]
   representative <- warm_runs[[1L]]$result
   oracle <- fastkpc_load_full_cuda_ci_oracle(
-    "fastkpc/artifacts/full_cuda_ci/oracle_351x48_v1"
+    fastkpc_full_cuda_default_kpcalg_oracle_dir()
   )
   comparison <- fastkpc_full_cuda_compare_candidate_skeleton(
     oracle, representative

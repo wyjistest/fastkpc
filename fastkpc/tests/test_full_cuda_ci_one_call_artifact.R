@@ -32,7 +32,10 @@ stopifnot(
   isTRUE(validated$summary$pass),
   isTRUE(validated$summary$phase9_correctness_gate),
   validated$summary$SHD == 0L,
-  validated$summary$logical_tests_consumed == 240489L,
+  validated$summary$logical_tests_consumed == 240498L,
+  identical(validated$summary$max_conditioning_size_requested, "Inf"),
+  validated$summary$max_conditioning_size_resolved == 46L,
+  validated$summary$natural_stop_level == 8L,
   validated$summary$unknown_fallback_count == 0L,
   validated$summary$approximate_backend_count == 0L
 )

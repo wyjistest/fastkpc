@@ -84,6 +84,7 @@ LayerPlan make_layer_plan(const std::vector<int>& adjacency_snapshot,
       if (adjacency_snapshot[idx(x, y, p)] == 0) continue;
 
       const std::vector<int> nx = neighbors_from_snapshot(adjacency_snapshot, p, x, y);
+      bool first_x_task = true;
       enumerate_combinations(nx, level, [&](const std::vector<int>& cond) {
         LayerCiTask task;
         task.task_id = task_id++;
@@ -94,10 +95,14 @@ LayerPlan make_layer_plan(const std::vector<int>& adjacency_snapshot,
         task.orientation_y = y;
         task.conditioning_set = cond;
         task.edge_key = idx(x, y, p);
+        task.opens_next_level =
+          first_x_task && static_cast<int>(nx.size()) > level;
         plan.tasks.push_back(task);
+        first_x_task = false;
       });
 
       const std::vector<int> ny = neighbors_from_snapshot(adjacency_snapshot, p, y, x);
+      bool first_y_task = true;
       enumerate_combinations(ny, level, [&](const std::vector<int>& cond) {
         LayerCiTask task;
         task.task_id = task_id++;
@@ -108,7 +113,10 @@ LayerPlan make_layer_plan(const std::vector<int>& adjacency_snapshot,
         task.orientation_y = x;
         task.conditioning_set = cond;
         task.edge_key = idx(x, y, p);
+        task.opens_next_level =
+          first_y_task && static_cast<int>(ny.size()) > level;
         plan.tasks.push_back(task);
+        first_y_task = false;
       });
     }
   }

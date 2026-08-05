@@ -1210,6 +1210,47 @@ fastkpc_full_cuda_canonical_contract <- function() {
   )
 }
 
+fastkpc_full_cuda_default_kpcalg_contract <- function() {
+  list(
+    schema_version = "full-cuda-ci-default-kpcalg-contract-v1",
+    requested_max_conditioning_size = "Inf",
+    resolved_max_conditioning_size = 46L,
+    natural_stop_level = 8L,
+    n_edgetests = c(
+      2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L, 9L
+    ),
+    logical_test_count = 240498L,
+    physical_test_count = 241686L,
+    guarded_pair_count = 1188L,
+    physical_target_optimization_count = 132926L,
+    unique_target_key_count = 110635L,
+    unique_residual_key_count = 110683L,
+    native_setup_count = 8646L,
+    optimizer_boundary_count = 138L
+  )
+}
+
+fastkpc_full_cuda_default_kpcalg_oracle_dir <- function(
+    root = file.path("fastkpc", "artifacts", "full_cuda_ci")) {
+  file.path(root, "oracle_351x48_default_inf_v2")
+}
+
+fastkpc_full_cuda_default_kpcalg_logical_trace <- function(
+    oracle_dir = fastkpc_full_cuda_default_kpcalg_oracle_dir()) {
+  path <- file.path(oracle_dir, "logical_ci_trace.rds")
+  if (!file.exists(path)) {
+    stop("default-kpcalg logical trace is missing", call. = FALSE)
+  }
+  trace <- readRDS(path)
+  contract <- fastkpc_full_cuda_default_kpcalg_contract()
+  fastkpc_full_cuda_validate_logical_trace(
+    trace, contract$n_edgetests, role = "default-kpcalg oracle"
+  )
+  trace$S_size <- as.integer(trace$level)
+  trace$reference_independent <- as.logical(trace$p_value >= 0.1)
+  trace
+}
+
 fastkpc_full_cuda_validate_canonical_fixture <- function(
     data, skeleton, alpha, index, numCol, max_conditioning_size,
     source_result_path = NULL,

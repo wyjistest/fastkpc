@@ -6909,7 +6909,6 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
       n_edgetests = n_edgetests[ord1],
       remaining_edges = n_edges[ord1]
     )
-    if (ord > 0L && isTRUE(n_edges[ord1] == n_edges[ord])) break
     ord <- ord + 1L
   }
 
@@ -6990,6 +6989,18 @@ fastkpc_legacy_parallel_skeleton <- function(data, alpha, max_conditioning_size,
       } else {
         0L
       },
+      ci_dcc_perm_tests = if (identical(ic.method, "dcc.perm")) {
+        as.integer(total_tests)
+      } else {
+        0L
+      },
+      ci_dcc_permutation_replicates = if (identical(ic.method, "dcc.perm")) {
+        as.integer(total_tests) * 100L
+      } else {
+        0L
+      },
+      ci_dcc_perm_cuda_tests = 0L,
+      ci_dcc_cuda_fallback_tests = 0L,
       ci_hsic_gamma_tests = if (identical(ic.method, "hsic.gamma")) {
         as.integer(total_tests)
       } else {

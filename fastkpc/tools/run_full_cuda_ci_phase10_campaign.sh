@@ -12,8 +12,8 @@ export MKL_NUM_THREADS=1
 export BLIS_NUM_THREADS=1
 export VECLIB_MAXIMUM_THREADS=1
 
-staging_dir=${FASTKPC_PHASE10_CAMPAIGN_STAGING_DIR:-fastkpc/artifacts/full_cuda_ci/phase10_promotion_staging_v1}
-artifact_dir=${FASTKPC_PHASE10_CAMPAIGN_ARTIFACT_DIR:-fastkpc/artifacts/full_cuda_ci/promotion_351x48_v1}
+staging_dir=${FASTKPC_PHASE10_CAMPAIGN_STAGING_DIR:-fastkpc/artifacts/full_cuda_ci/phase10_promotion_staging_default_inf_v2}
+artifact_dir=${FASTKPC_PHASE10_CAMPAIGN_ARTIFACT_DIR:-fastkpc/artifacts/full_cuda_ci/promotion_351x48_default_inf_v2}
 affinity=${FASTKPC_PHASE10_CPU_AFFINITY:-0-19}
 
 run_r() {

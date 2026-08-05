@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <mutex>
+#include <numeric>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -228,6 +230,64 @@ __global__ void row_product_reduce_kernel(const double* row_k,
   }
 }
 
+__global__ void dcov_permutation_reduce_kernel(
+    const double* x,
+    const double* y,
+    const double* row_k,
+    const double* row_l,
+    const double* total_k,
+    const double* total_l,
+    const int* permutations,
+    int n,
+    int batch,
+    int replicates,
+    double index,
+    bool legacy_index,
+    double* out) {
+  __shared__ double scratch[kBlock];
+  const int replicate = blockIdx.x;
+  const int task = blockIdx.y;
+  if (replicate >= replicates || task >= batch) return;
+
+  const int* permutation = permutations +
+    (static_cast<std::size_t>(task) * replicates + replicate) * n;
+  const double* rk = row_k + static_cast<std::size_t>(task) * n;
+  const double* rl = row_l + static_cast<std::size_t>(task) * n;
+  const double inv_n = 1.0 / static_cast<double>(n);
+  const double inv_n2 = inv_n * inv_n;
+  const double grand_k = total_k[task] * inv_n2;
+  const double grand_l = total_l[task] * inv_n2;
+
+  double sum = 0.0;
+  for (int cell = threadIdx.x; cell < n * n; cell += blockDim.x) {
+    const int row = cell / n;
+    const int col = cell - row * n;
+    const int permuted_row = permutation[row];
+    const int permuted_col = permutation[col];
+    const double a = pair_dist_1d(
+      x, n, task, row, col, index, legacy_index) -
+      rk[row] * inv_n - rk[col] * inv_n + grand_k;
+    const double b = pair_dist_1d(
+      y, n, task, permuted_row, permuted_col, index, legacy_index) -
+      rl[permuted_row] * inv_n - rl[permuted_col] * inv_n + grand_l;
+    sum += a * b;
+  }
+  scratch[threadIdx.x] = sum;
+  __syncthreads();
+
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      scratch[threadIdx.x] += scratch[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    out[static_cast<std::size_t>(task) * replicates + replicate] =
+      scratch[0] * inv_n;
+  }
+}
+
 void check_cuda(cudaError_t err, const char* stage) {
   if (err != cudaSuccess) {
     throw std::runtime_error(std::string("CUDA error (") + stage + "): " +
@@ -285,6 +345,10 @@ void add_timing(DcovBatchResult* out, const DcovBatchResult& value) {
   out->grid_limit_cache_hit_count += value.grid_limit_cache_hit_count;
   out->grid_limit_process_cache_hit_count +=
     value.grid_limit_process_cache_hit_count;
+  out->permutation_h2d_sec += value.permutation_h2d_sec;
+  out->permutation_reduce_sec += value.permutation_reduce_sec;
+  out->permutation_d2h_sec += value.permutation_d2h_sec;
+  out->permutation_host_sec += value.permutation_host_sec;
 }
 
 double nonnegative_gap(double total, double accounted) {
@@ -341,6 +405,10 @@ struct DcovChunkBuffers {
   std::size_t d_total_l_capacity = 0;
   double* d_scalars = nullptr;
   std::size_t d_scalars_capacity = 0;
+  int* d_permutations = nullptr;
+  std::size_t d_permutations_capacity = 0;
+  double* d_permutation_statistics = nullptr;
+  std::size_t d_permutation_statistics_capacity = 0;
   std::vector<double> h_total_k;
   std::vector<double> h_total_l;
   std::vector<double> h_device_scalars;
@@ -423,6 +491,32 @@ void free_dcov_buffers(DcovChunkBuffers* buffers) {
   cudaFree(buffers->d_scalars);
   buffers->d_scalars = nullptr;
   buffers->d_scalars_capacity = 0;
+  cudaFree(buffers->d_permutations);
+  buffers->d_permutations = nullptr;
+  buffers->d_permutations_capacity = 0;
+  cudaFree(buffers->d_permutation_statistics);
+  buffers->d_permutation_statistics = nullptr;
+  buffers->d_permutation_statistics_capacity = 0;
+}
+
+std::vector<int> make_dcov_permutation_table(int n,
+                                             int batch,
+                                             int replicates,
+                                             unsigned int seed) {
+  std::vector<int> table(
+    static_cast<std::size_t>(n) * batch * replicates);
+  for (int replicate = 0; replicate < replicates; ++replicate) {
+    std::vector<int> permutation(n);
+    std::iota(permutation.begin(), permutation.end(), 0);
+    std::mt19937 rng(seed + static_cast<unsigned int>(replicate));
+    std::shuffle(permutation.begin(), permutation.end(), rng);
+    for (int task = 0; task < batch; ++task) {
+      const std::size_t base =
+        (static_cast<std::size_t>(task) * replicates + replicate) * n;
+      std::copy(permutation.begin(), permutation.end(), table.begin() + base);
+    }
+  }
+  return table;
 }
 
 }  // namespace
@@ -803,4 +897,154 @@ DcovBatchResult dcov_batch_cuda(const double* x,
                                 int batch,
                                 const DcovBatchOptions& options) {
   return dcov_batch_cuda(x, y, n, batch, options, nullptr);
+}
+
+bool dcov_cuda_available(std::string* reason) {
+  int count = 0;
+  const cudaError_t err = cudaGetDeviceCount(&count);
+  if (err != cudaSuccess) {
+    if (reason != nullptr) *reason = cudaGetErrorString(err);
+    return false;
+  }
+  if (count <= 0) {
+    if (reason != nullptr) *reason = "no CUDA devices available";
+    return false;
+  }
+  if (reason != nullptr) reason->clear();
+  return true;
+}
+
+DcovBatchResult dcov_permutation_batch_cuda(
+    const double* x,
+    const double* y,
+    int n,
+    int batch,
+    const DcovBatchOptions& options,
+    DcovCudaWorkspace* workspace) {
+  if (n <= 5) {
+    throw std::runtime_error("CUDA dCov permutation requires n > 5");
+  }
+  if (batch < 1) throw std::runtime_error("batch must be positive");
+  if (options.permutation_replicates < 0) {
+    throw std::runtime_error(
+      "dCov permutation replicates must be non-negative");
+  }
+  if (!options.has_seed) {
+    throw std::runtime_error(
+      "CUDA dCov permutation requires explicit seed in this stage");
+  }
+  if (options.max_n > 0 && n > options.max_n) {
+    throw std::runtime_error("CUDA dCov permutation n exceeds configured max_n");
+  }
+  if (options.max_batch_pairs > 0 && batch > options.max_batch_pairs) {
+    throw std::runtime_error(
+      "CUDA dCov permutation pairs exceed configured max_batch_pairs");
+  }
+
+  const std::chrono::steady_clock::time_point call_start =
+    std::chrono::steady_clock::now();
+  DcovCudaWorkspace local_workspace;
+  DcovCudaWorkspace* active_workspace =
+    workspace == nullptr ? &local_workspace : workspace;
+  DcovBatchOptions gamma_options = options;
+  gamma_options.permutation_replicates = 0;
+  gamma_options.return_replicates = false;
+
+  try {
+    DcovBatchResult result = dcov_batch_cuda(
+      x, y, n, batch, gamma_options, active_workspace);
+    result.permutation_replicates = options.permutation_replicates;
+    result.permutation_used_seed = true;
+    result.permutation_seed = options.seed;
+
+    const int replicates = options.permutation_replicates;
+    if (replicates == 0) {
+      std::fill(result.p_values.begin(), result.p_values.end(), 1.0);
+      result.top_level_wall_sec = elapsed_since(call_start);
+      if (workspace == nullptr) free_dcov_buffers(&local_workspace.buffers);
+      return result;
+    }
+
+    const std::vector<int> permutations = make_dcov_permutation_table(
+      n, batch, replicates, options.seed);
+    const std::size_t statistic_count =
+      static_cast<std::size_t>(batch) * replicates;
+    result.permutation_bytes =
+      sizeof(int) * permutations.size() +
+      sizeof(double) * statistic_count;
+
+    std::chrono::steady_clock::time_point stage =
+      std::chrono::steady_clock::now();
+    ensure_device_capacity(
+      &active_workspace->buffers.d_permutations,
+      &active_workspace->buffers.d_permutations_capacity,
+      permutations.size(), "alloc dCov permutations", &result,
+      workspace != nullptr);
+    ensure_device_capacity(
+      &active_workspace->buffers.d_permutation_statistics,
+      &active_workspace->buffers.d_permutation_statistics_capacity,
+      statistic_count, "alloc dCov permutation statistics", &result,
+      workspace != nullptr);
+    check_cuda(cudaMemcpy(
+      active_workspace->buffers.d_permutations, permutations.data(),
+      sizeof(int) * permutations.size(), cudaMemcpyHostToDevice),
+      "copy dCov permutations");
+    result.permutation_h2d_sec += elapsed_since(stage);
+
+    stage = std::chrono::steady_clock::now();
+    const dim3 permutation_grid(replicates, batch);
+    dcov_permutation_reduce_kernel<<<permutation_grid, kBlock>>>(
+      active_workspace->buffers.d_x,
+      active_workspace->buffers.d_y,
+      active_workspace->buffers.d_row_k,
+      active_workspace->buffers.d_row_l,
+      active_workspace->buffers.d_total_k,
+      active_workspace->buffers.d_total_l,
+      active_workspace->buffers.d_permutations,
+      n, batch, replicates, options.index, options.legacy_index,
+      active_workspace->buffers.d_permutation_statistics);
+    check_cuda(cudaGetLastError(), "launch dCov permutation reduce");
+    check_cuda(cudaDeviceSynchronize(),
+               "dCov permutation reduce synchronize");
+    result.permutation_reduce_sec += elapsed_since(stage);
+
+    stage = std::chrono::steady_clock::now();
+    result.permutation_statistics.assign(statistic_count, 0.0);
+    check_cuda(cudaMemcpy(
+      result.permutation_statistics.data(),
+      active_workspace->buffers.d_permutation_statistics,
+      sizeof(double) * statistic_count, cudaMemcpyDeviceToHost),
+      "copy dCov permutation statistics");
+    result.permutation_d2h_sec += elapsed_since(stage);
+
+    stage = std::chrono::steady_clock::now();
+    for (int task = 0; task < batch; ++task) {
+      int exceedances = options.include_observed ? 1 : 0;
+      const std::size_t base = static_cast<std::size_t>(task) * replicates;
+      for (int replicate = 0; replicate < replicates; ++replicate) {
+        if (result.permutation_statistics[base + replicate] >=
+            result.nV2[task]) {
+          ++exceedances;
+        }
+      }
+      const int denominator =
+        replicates + (options.include_observed ? 1 : 0);
+      result.p_values[task] = denominator > 0 ?
+        static_cast<double>(exceedances) /
+          static_cast<double>(denominator) : 1.0;
+    }
+    if (!options.return_replicates) result.permutation_statistics.clear();
+    result.permutation_host_sec += elapsed_since(stage);
+    const double permutation_sec = result.permutation_h2d_sec +
+      result.permutation_reduce_sec + result.permutation_d2h_sec +
+      result.permutation_host_sec;
+    result.total_sec += permutation_sec;
+    result.top_level_wall_sec = elapsed_since(call_start);
+
+    if (workspace == nullptr) free_dcov_buffers(&local_workspace.buffers);
+    return result;
+  } catch (...) {
+    if (workspace == nullptr) free_dcov_buffers(&local_workspace.buffers);
+    throw;
+  }
 }

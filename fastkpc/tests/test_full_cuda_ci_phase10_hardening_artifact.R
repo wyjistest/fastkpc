@@ -48,8 +48,26 @@ assert_true(
     isTRUE(validated$summary$hardening_gate) &&
     validated$summary$fail_closed_case_count >= 10L &&
     identical(validated$summary$stream_counts, "1|2|4") &&
+    identical(validated$summary$max_conditioning_size_requested, "Inf") &&
+    validated$summary$max_conditioning_size_resolved == 46L &&
+    validated$summary$natural_stop_level == 8L &&
+    validated$summary$logical_test_count == 240498L &&
+    validated$summary$level8_test_count == 9L &&
+    isTRUE(validated$summary$default_inf_full_regression_pass) &&
+    isTRUE(validated$summary$default_inf_level8_qualification_pass) &&
+    isTRUE(
+      validated$summary$default_inf_extended_capacity_qualification_pass
+    ) &&
     validated$summary$tracked_resource_leak_count == 0L,
   "Phase 10 hardening artifact summary is not promotable evidence"
+)
+
+level7_claim <- validated$summary
+level7_claim$natural_stop_level <- 7L
+assert_error(
+  fastkpc_full_cuda_phase10_hardening_validate_summary(level7_claim),
+  "Phase 10 hardening summary gate failed",
+  "Phase 10 hardening must reject a max-7 natural-stop claim"
 )
 
 copy_artifact <- function(label) {

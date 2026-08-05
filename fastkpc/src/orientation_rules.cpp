@@ -85,8 +85,8 @@ bool orient_rule_edge(std::vector<int>* pdag,
 std::vector<std::pair<int, int> > directed_pairs(const std::vector<int>& pdag,
                                                  int p) {
   std::vector<std::pair<int, int> > pairs;
-  for (int a = 0; a < p; ++a) {
-    for (int b = 0; b < p; ++b) {
+  for (int b = 0; b < p; ++b) {
+    for (int a = 0; a < p; ++a) {
       if (a != b && has_directed_edge(pdag, p, a, b)) {
         pairs.push_back(std::make_pair(a, b));
       }
@@ -99,8 +99,8 @@ std::vector<std::pair<int, int> > undirected_scan_pairs(
     const std::vector<int>& pdag,
     int p) {
   std::vector<std::pair<int, int> > pairs;
-  for (int a = 0; a < p; ++a) {
-    for (int b = 0; b < p; ++b) {
+  for (int b = 0; b < p; ++b) {
+    for (int a = 0; a < p; ++a) {
       if (a != b && has_undirected_edge(pdag, p, a, b)) {
         pairs.push_back(std::make_pair(a, b));
       }
@@ -161,8 +161,9 @@ int orient_colliders(std::vector<int>* pdag,
   add_unf_diagnostic(unf_vect, events, "collider");
   int count = 0;
   const std::vector<int> initial = *pdag;
-  for (int x = 0; x < p; ++x) {
-    for (int y = 0; y < p; ++y) {
+  // R's which(..., arr.ind = TRUE) enumerates matrix columns first.
+  for (int y = 0; y < p; ++y) {
+    for (int x = 0; x < p; ++x) {
       if (x == y || pdag_get(initial, p, x, y) == FASTKPC_EDGE_NONE) continue;
       for (int z = 0; z < p; ++z) {
         if (z == x || z == y) continue;

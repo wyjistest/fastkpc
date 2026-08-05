@@ -1173,8 +1173,8 @@ void validate_native_conditioning(
     const Rcpp::NumericMatrix& conditioning) {
   const int n = conditioning.nrow();
   const int conditioning_size = conditioning.ncol();
-  if (n <= 0 || conditioning_size < 1 || conditioning_size > 7) {
-    Rcpp::stop("native setup requires n > 0 and 1 <= |S| <= 7");
+  if (n <= 0 || conditioning_size < 1) {
+    Rcpp::stop("native setup requires n > 0 and |S| >= 1");
   }
   for (int column = 0; column < conditioning_size; ++column) {
     for (int row = 0; row < n; ++row) {
@@ -1204,6 +1204,10 @@ Rcpp::List assemble_native_setup(
   int coefficient_count = 1;
   for (const SmoothSetup* smooth : smooths) {
     coefficient_count += smooth->X.cols();
+  }
+  if (coefficient_count >= n) {
+    Rcpp::stop(
+      "native setup requires the model coefficient dimension to be less than n");
   }
   Rcpp::NumericMatrix X(n, coefficient_count);
   for (int row = 0; row < n; ++row) X(row, 0) = 1.0;

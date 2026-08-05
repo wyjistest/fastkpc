@@ -19,8 +19,8 @@ fastkpc_full_cuda_phase6_prepare <- function(prepared_setup) {
   constraint_is_identity <- is.null(constraint) ||
     (is.matrix(constraint) && nrow(constraint) == 0L && ncol(constraint) == p)
   fastkpc_full_cuda_phase6_require(
-    is.numeric(X) && nrow(X) > p && p > 0L && p <= 64L &&
-      all(is.finite(X)) && penalty_count <= 7L &&
+    is.numeric(X) && nrow(X) > p && p > 0L && p <= 80L &&
+      all(is.finite(X)) && penalty_count <= 8L &&
       length(ranks) == penalty_count && all(ranks > 0L) &&
       length(offsets) == penalty_count && constraint_is_identity &&
       is.null(prepared_setup$H),
@@ -51,7 +51,7 @@ fastkpc_full_cuda_phase6_prepare <- function(prepared_setup) {
       identical(dim(magic_qr_packed), c(nrow(X), p)) &&
       length(magic_tau) == p && length(magic_pivot) == p &&
       identical(sort(magic_pivot), seq_len(p)) &&
-      sum(ranks) + p <= 128L &&
+      sum(ranks) + p <= 160L &&
       length(initial_log_sp) == penalty_count &&
       all(is.finite(initial_log_sp)) &&
       all(vapply(penalty_roots, function(root) {

@@ -3,6 +3,8 @@
 
 #include "../dcov_batch_types.hpp"
 
+#include <string>
+
 struct DcovCudaWorkspace;
 
 DcovCudaWorkspace* create_dcov_cuda_workspace();
@@ -29,5 +31,15 @@ DcovBatchResult dcov_batch_cuda_pvalues_into(const double* x,
                                              const DcovBatchOptions& options,
                                              DcovCudaWorkspace* workspace,
                                              double* out_pvalues);
+
+DcovBatchResult dcov_permutation_batch_cuda(
+    const double* x,
+    const double* y,
+    int n,
+    int batch,
+    const DcovBatchOptions& options,
+    DcovCudaWorkspace* workspace = nullptr);
+
+bool dcov_cuda_available(std::string* reason);
 
 #endif

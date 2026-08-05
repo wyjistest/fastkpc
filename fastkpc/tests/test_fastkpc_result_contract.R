@@ -29,6 +29,8 @@ required_config <- c("alpha", "max_conditioning_size", "engine_requested",
                      "residual_cache", "index", "legacy_index", "batch_size",
                      "orient_collider", "solve_confl", "rules",
                      "fastspline_params", "cuda_residual_fallback",
+                     "cuda_dcov_permutation_requested",
+                     "cuda_dcov_permutation_used",
                      "validate", "benchmark", "legacy",
                      "seed")
 assert_true(all(required_config %in% names(result$config)),

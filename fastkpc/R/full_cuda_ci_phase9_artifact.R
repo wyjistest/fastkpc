@@ -5,7 +5,7 @@ fastkpc_full_cuda_phase9_require <- function(condition, message) {
 
 fastkpc_full_cuda_phase9_artifact_dir <- function(
     root = file.path("fastkpc", "artifacts", "full_cuda_ci")) {
-  file.path(root, "one_call_full_cuda_351x48_v1")
+  file.path(root, "one_call_full_cuda_351x48_default_inf_v2")
 }
 
 fastkpc_full_cuda_phase9_required_files <- function() {
@@ -31,8 +31,17 @@ fastkpc_full_cuda_phase9_source_paths <- function() {
     "fastkpc/R/full_cuda_ci_phase9_artifact.R",
     "fastkpc/src/full_cuda_ci_one_call.cpp",
     "fastkpc/src/full_cuda_ci_one_call.hpp",
+    "fastkpc/src/cuda/mgcv_multi_penalty_gcv_capacity.cpp",
+    "fastkpc/src/cuda/mgcv_multi_penalty_gcv_capacity.hpp",
+    "fastkpc/src/cuda/mgcv_multi_penalty_gcv_extended.hpp",
+    "fastkpc/src/cuda/mgcv_multi_penalty_gcv_small64.cu",
+    "fastkpc/src/cuda/mgcv_multi_penalty_gcv_ext192.cu",
+    "fastkpc/src/cuda/mgcv_multi_penalty_gcv_ext384.cu",
+    "fastkpc/src/cuda/mgcv_multi_penalty_gcv_ext559.cu",
     "fastkpc/tests/test_full_cuda_ci_one_call.R",
+    "fastkpc/tests/test_full_cuda_ci_default_inf_production.R",
     "fastkpc/tests/test_full_cuda_ci_one_call_artifact.R",
+    "fastkpc/tools/run_full_cuda_ci_default_inf_oracle.R",
     "fastkpc/tools/run_full_cuda_ci_phase9.R"
   )), method = "radix")
   fastkpc_full_cuda_phase9_require(
@@ -62,7 +71,7 @@ fastkpc_full_cuda_phase9_source_closure <- function() {
 
 fastkpc_full_cuda_phase9_backend_configuration <- function() {
   value <- list(
-    schema_version = "full-cuda-ci-phase9-backend-configuration-v1",
+    schema_version = "full-cuda-ci-phase9-backend-configuration-v2",
     route = "compatible.cuda",
     native_entrypoint = "compatible-cuda-full-skeleton-native-v1",
     native_call_count = 1L,
@@ -79,7 +88,10 @@ fastkpc_full_cuda_phase9_backend_configuration <- function() {
     alpha = "0.1",
     index = 1L,
     num_col = 35L,
-    maximum_conditioning_size = 7L,
+    requested_max_conditioning_size = "Inf",
+    resolved_max_conditioning_size = 46L,
+    natural_stop_level = 8L,
+    multi_penalty_capacity_buckets = "64/7|80/8|192/21|384/42|559/62",
     precision = "float64",
     fmad = FALSE,
     fast_math = FALSE,
@@ -96,7 +108,7 @@ fastkpc_full_cuda_phase9_backend_configuration <- function() {
 
 fastkpc_full_cuda_phase9_build_recipe <- function() {
   value <- list(
-    schema_version = "full-cuda-ci-phase9-build-recipe-v1",
+    schema_version = "full-cuda-ci-phase9-build-recipe-v2",
     build_script_sha256 = fastkpc_full_cuda_census_file_hash(
       "fastkpc/tools/build_cuda_native.sh"
     ),
@@ -154,19 +166,37 @@ fastkpc_full_cuda_phase9_elapsed <- function(raw, result) {
   elapsed
 }
 
+fastkpc_full_cuda_phase9_load_logical <- function(path) {
+  fastkpc_full_cuda_phase9_require(
+    file.exists(path), "Phase 9 canonical logical trace is missing"
+  )
+  logical <- readRDS(path)
+  fastkpc_full_cuda_phase9_require(
+    is.data.frame(logical) && nrow(logical) > 0L,
+    "Phase 9 canonical logical trace is malformed"
+  )
+  if (!"S_size" %in% names(logical)) {
+    logical$S_size <- as.integer(logical$level)
+  }
+  if (!"reference_p_value" %in% names(logical)) {
+    logical$reference_p_value <- as.numeric(logical$p_value)
+  }
+  if (!"reference_independent" %in% names(logical)) {
+    logical$reference_independent <- as.logical(
+      logical$reference_p_value >= 0.1
+    )
+  }
+  logical
+}
+
 fastkpc_full_cuda_phase9_validate_evidence <- function(
     raw,
     data_path = file.path(
       "fastkpc", "artifacts", "kpc_tprs_real_zhu",
       "cancer_RD-causalDiscoveryInput.rds"
     ),
-    oracle_dir = file.path(
-      "fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1"
-    ),
-    logical_path = file.path(
-      "fastkpc", "artifacts", "full_cuda_ci",
-      "workload_census_351x48_v1", "logical_ci_tests.rds"
-    )) {
+    oracle_dir = fastkpc_full_cuda_default_kpcalg_oracle_dir(),
+    logical_path = file.path(oracle_dir, "logical_ci_trace.rds")) {
   fastkpc_full_cuda_phase9_require(
     file.exists(data_path) && file.exists(logical_path),
     "Phase 9 canonical inputs are missing"
@@ -184,11 +214,10 @@ fastkpc_full_cuda_phase9_validate_evidence <- function(
   result$summary$elapsed_sec <- elapsed
   oracle <- fastkpc_load_full_cuda_ci_oracle(oracle_dir)
   comparison <- fastkpc_full_cuda_compare_candidate_skeleton(oracle, result)
-  logical <- readRDS(logical_path)
+  logical <- fastkpc_full_cuda_phase9_load_logical(logical_path)
   tasks <- result$tasks
-  expected_n_edgetests <- c(
-    2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L
-  )
+  contract <- fastkpc_full_cuda_default_kpcalg_contract()
+  expected_n_edgetests <- contract$n_edgetests
   structural_fields_exact <- c(
     logical_id = identical(
       as.integer(tasks$canonical_test_order_id),
@@ -225,7 +254,8 @@ fastkpc_full_cuda_phase9_validate_evidence <- function(
   }, numeric(1L))
   hard_gate <- isTRUE(comparison$summary$pass) &&
     identical(as.integer(result$n.edgetests), expected_n_edgetests) &&
-    nrow(tasks) == 240489L && all(structural_fields_exact) &&
+    nrow(tasks) == contract$logical_test_count &&
+    all(structural_fields_exact) &&
     !any(decision_flip) && all(is.finite(tasks$p_used)) &&
     all(!is.na(zero_values) & zero_values == 0) &&
     identical(result$summary$run_status, "ok") &&
@@ -234,11 +264,21 @@ fastkpc_full_cuda_phase9_validate_evidence <- function(
     identical(result$summary$compatible_cuda_route, "compatible.cuda") &&
     isTRUE(result$summary$compatible_cuda_strict) &&
     as.integer(result$summary$native_call_count) == 1L &&
-    as.integer(result$summary$logical_tests_consumed) == 240489L &&
-    as.integer(result$summary$physical_tests_evaluated) == 241677L &&
-    as.integer(result$summary$guarded_pair_count) == 1188L &&
-    as.integer(result$summary$cuda_dcov_pair_count) == 241677L &&
-    as.integer(result$summary$cuda_gamma_pvalue_count) == 241677L &&
+    identical(result$summary$max_conditioning_size_requested,
+              contract$requested_max_conditioning_size) &&
+    as.integer(result$summary$max_conditioning_size_resolved) ==
+      contract$resolved_max_conditioning_size &&
+    max(as.integer(result$levels$level)) == contract$natural_stop_level &&
+    as.integer(result$summary$logical_tests_consumed) ==
+      contract$logical_test_count &&
+    as.integer(result$summary$physical_tests_evaluated) ==
+      contract$physical_test_count &&
+    as.integer(result$summary$guarded_pair_count) ==
+      contract$guarded_pair_count &&
+    as.integer(result$summary$cuda_dcov_pair_count) ==
+      contract$physical_test_count &&
+    as.integer(result$summary$cuda_gamma_pvalue_count) ==
+      contract$physical_test_count &&
     result$summary$cuda_single_penalty_target_count > 0L &&
     result$summary$cuda_multi_penalty_target_count > 0L &&
     result$summary$native_setup_cache_request_count ==
@@ -255,7 +295,7 @@ fastkpc_full_cuda_phase9_validate_evidence <- function(
     format(Sys.time(), tz = "UTC", usetz = TRUE)
   }
   list(
-    schema_version = "full-cuda-ci-phase9-one-call-evidence-v1",
+    schema_version = "full-cuda-ci-phase9-one-call-evidence-v2",
     captured_at_utc = captured_at,
     validated_at_utc = format(Sys.time(), tz = "UTC", usetz = TRUE),
     source_commit = fastkpc_full_cuda_source_commit(),
@@ -292,7 +332,7 @@ fastkpc_full_cuda_phase9_capture <- function(
     options = list(
       route = "full_cuda",
       compatible_cuda_strict = TRUE,
-      max_conditioning_size = 7L,
+      max_conditioning_size = Inf,
       index = 1,
       numCol = 35L,
       trace_level = "logical"
@@ -310,15 +350,17 @@ fastkpc_full_cuda_phase9_producer <- function(
   backend <- fastkpc_full_cuda_phase9_backend_configuration()
   build <- fastkpc_full_cuda_phase9_build_recipe()
   corpus_sha256 <- fastkpc_full_cuda_census_named_metadata_hash(list(
-    schema_version = "full-cuda-ci-phase9-canonical-corpus-v1",
+    schema_version = "full-cuda-ci-phase9-canonical-corpus-v2",
     dataset_sha256 = evidence$data_sha256,
     logical_sha256 = evidence$logical_sha256,
-    logical_test_count = 240489L
+    logical_test_count =
+      fastkpc_full_cuda_default_kpcalg_contract()$logical_test_count
   ))
   producer <- fastkpc_full_cuda_phase35_producer_identity(
     producer_source_closure_sha256 = source_closure$sha256,
     native_binary_sha256 = native_identity$sha256,
-    route_semantic_version = "full-cuda-ci-one-call-compatible-skeleton-v1",
+    route_semantic_version =
+      "full-cuda-ci-one-call-compatible-skeleton-default-inf-v2",
     dataset_or_corpus_sha256 = corpus_sha256,
     oracle_sha256 = evidence$oracle_manifest_sha256,
     backend_configuration_sha256 = backend$sha256,
@@ -333,7 +375,7 @@ fastkpc_full_cuda_phase9_summary <- function(
   source <- evidence$result$summary
   comparison <- evidence$comparison_summary
   list(
-    schema_version = "full-cuda-ci-phase9-one-call-summary-v1",
+    schema_version = "full-cuda-ci-phase9-one-call-summary-v2",
     run_status = "ok",
     timeout = FALSE,
     source_commit = evidence$source_commit,
@@ -347,6 +389,11 @@ fastkpc_full_cuda_phase9_summary <- function(
     n_edgetests_identical = comparison$n_edgetests_identical,
     deletions_identical = comparison$deletions_identical,
     logical_ci_trace_identical = comparison$logical_ci_trace_identical,
+    max_conditioning_size_requested =
+      source$max_conditioning_size_requested,
+    max_conditioning_size_resolved =
+      source$max_conditioning_size_resolved,
+    natural_stop_level = max(as.integer(evidence$result$levels$level)),
     logical_tests_consumed = source$logical_tests_consumed,
     physical_tests_evaluated = source$physical_tests_evaluated,
     guarded_pair_count = source$guarded_pair_count,
@@ -406,7 +453,7 @@ fastkpc_full_cuda_phase9_summary <- function(
 
 fastkpc_full_cuda_phase9_cases <- function(evidence) {
   tasks <- evidence$result$tasks
-  logical <- readRDS(evidence$logical_path)
+  logical <- fastkpc_full_cuda_phase9_load_logical(evidence$logical_path)
   data.frame(
     logical_sequence_id = as.integer(tasks$canonical_test_order_id),
     level = as.integer(tasks$level),
@@ -506,7 +553,7 @@ fastkpc_full_cuda_phase9_validate_summary <- function(summary) {
   )
   clean <- is.list(summary) &&
     identical(summary$schema_version,
-              "full-cuda-ci-phase9-one-call-summary-v1") &&
+              "full-cuda-ci-phase9-one-call-summary-v2") &&
     identical(summary$run_status, "ok") && !isTRUE(summary$timeout) &&
     summary$edge_count_reference == 110L &&
     summary$edge_count_candidate == 110L && summary$SHD == 0L &&
@@ -515,11 +562,17 @@ fastkpc_full_cuda_phase9_validate_summary <- function(summary) {
     isTRUE(summary$n_edgetests_identical) &&
     isTRUE(summary$deletions_identical) &&
     isTRUE(summary$logical_ci_trace_identical) &&
-    summary$logical_tests_consumed == 240489L &&
-    summary$physical_tests_evaluated == 241677L &&
+    identical(summary$max_conditioning_size_requested,
+              fastkpc_full_cuda_default_kpcalg_contract()[[
+                "requested_max_conditioning_size"
+              ]]) &&
+    summary$max_conditioning_size_resolved == 46L &&
+    summary$natural_stop_level == 8L &&
+    summary$logical_tests_consumed == 240498L &&
+    summary$physical_tests_evaluated == 241686L &&
     summary$guarded_pair_count == 1188L &&
-    summary$cuda_dcov_pair_count == 241677L &&
-    summary$cuda_gamma_pvalue_count == 241677L &&
+    summary$cuda_dcov_pair_count == 241686L &&
+    summary$cuda_gamma_pvalue_count == 241686L &&
     summary$cuda_single_penalty_target_count > 0L &&
     summary$cuda_multi_penalty_target_count > 0L &&
     summary$native_setup_cache_request_count ==
@@ -691,7 +744,7 @@ fastkpc_full_cuda_phase9_publish <- function(
   attestation <- fastkpc_full_cuda_phase35_validator_attestation(
     producer = producer_bundle$producer,
     validator_source_closure_sha256 = source_closure$sha256,
-    validator_semantic_version = "full-cuda-ci-phase9-validator-v1",
+    validator_semantic_version = "full-cuda-ci-phase9-validator-v2",
     validator_contracts = contracts,
     validation_timestamp_utc = timestamp,
     environment_sha256 = environment_sha256,
@@ -723,9 +776,9 @@ fastkpc_full_cuda_phase9_publish <- function(
     file.path(stage, "execution_receipts.json")
   )
   manifest <- list(
-    schema_version = "full-cuda-ci-phase9-artifact-manifest-v1",
-    artifact_kind = "one_call_full_cuda_351x48",
-    claim_scope = "phase9-one-call-correctness-and-authority",
+    schema_version = "full-cuda-ci-phase9-artifact-manifest-v2",
+    artifact_kind = "one_call_full_cuda_351x48_default_inf",
+    claim_scope = "phase9-default-kpcalg-one-call-correctness-and-authority",
     producer_semantic_envelope = envelope,
     payload_manifest_sha256 = payload_sha256,
     payload_file_sha256 = payload_hashes,
@@ -789,10 +842,11 @@ fastkpc_full_cuda_phase9_validate_artifact <- function(
   )
   fastkpc_full_cuda_phase9_require(
     identical(manifest$schema_version,
-              "full-cuda-ci-phase9-artifact-manifest-v1") &&
-      identical(manifest$artifact_kind, "one_call_full_cuda_351x48") &&
+              "full-cuda-ci-phase9-artifact-manifest-v2") &&
+      identical(manifest$artifact_kind,
+                "one_call_full_cuda_351x48_default_inf") &&
       identical(manifest$claim_scope,
-                "phase9-one-call-correctness-and-authority"),
+                "phase9-default-kpcalg-one-call-correctness-and-authority"),
     "Phase 9 artifact manifest schema mismatch"
   )
   excluded <- c(
@@ -881,17 +935,20 @@ fastkpc_full_cuda_phase9_validate_artifact <- function(
   cases <- read_table("case_results.csv")
   cache <- read_table("cache.csv")
   fallbacks <- read_table("fallbacks.csv")
-  expected_n <- c(2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L)
+  contract <- fastkpc_full_cuda_default_kpcalg_contract()
+  expected_n <- contract$n_edgetests
   payload_gate <- nrow(graph) == 1L && graph$SHD[[1L]] == 0L &&
     graph$edge_count_reference[[1L]] == 110L &&
     graph$edge_count_candidate[[1L]] == 110L &&
     isTRUE(as.logical(graph$adjacency_identical[[1L]])) &&
-    all(as.logical(sepsets$identical)) && nrow(tests) == 8L &&
+    all(as.logical(sepsets$identical)) &&
+    nrow(tests) == length(expected_n) &&
     identical(as.integer(tests$reference), expected_n) &&
     identical(as.integer(tests$candidate), expected_n) &&
     all(as.logical(tests$identical)) && nrow(deletions) == 1018L &&
-    nrow(cases) == 240489L &&
-    identical(as.integer(cases$logical_sequence_id), 1:240489) &&
+    nrow(cases) == contract$logical_test_count &&
+    identical(as.integer(cases$logical_sequence_id),
+              seq_len(contract$logical_test_count)) &&
     !any(as.logical(cases$decision_flip)) &&
     all(is.finite(cases$candidate_p_value)) &&
     nrow(cache) == 2L && all(as.logical(cache$bounded)) &&

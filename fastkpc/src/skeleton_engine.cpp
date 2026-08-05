@@ -80,6 +80,9 @@ void record_ci_diagnostic(CiMethodKind kind,
                           SkeletonResult* result) {
   if (kind == CiMethodKind::DccGamma) {
     ++result->ci_dcc_gamma_tests;
+  } else if (kind == CiMethodKind::DccPermutation) {
+    ++result->ci_dcc_perm_tests;
+    result->ci_dcc_permutation_replicates += hsic_options.replicates;
   } else if (kind == CiMethodKind::HsicGamma) {
     ++result->ci_hsic_gamma_tests;
   } else {
@@ -110,6 +113,10 @@ SkeletonResult run_skeleton_exact(const Rcpp::NumericMatrix& data,
   result.ci_backend = "native-cpu";
   result.ci_backend_reason = "";
   result.ci_dcc_gamma_tests = 0;
+  result.ci_dcc_perm_tests = 0;
+  result.ci_dcc_permutation_replicates = 0;
+  result.ci_dcc_perm_cuda_tests = 0;
+  result.ci_dcc_cuda_fallback_tests = 0;
   result.ci_hsic_gamma_tests = 0;
   result.ci_hsic_perm_tests = 0;
   result.ci_hsic_permutation_replicates = 0;

@@ -4,13 +4,18 @@ This repository keeps the legacy `kpcalg` sources and the staged `fastkpc`
 backend work in one workspace. The active fast backend code is under
 `fastkpc/`.
 
-## Full-CUDA compatible skeleton candidate
+## Full-CUDA compatible skeleton and WAN-PDAG candidate
 
 The explicit full-CUDA skeleton route has passed the historical Phase 10 v1
 canonical correctness, CUDA-authority, hardening, and replay campaign. It has
 not passed the revised fresh-data performance gate and is not promoted or
 recommended. The externally held sealed promotion corpus remains
 `SEALED_NOT_RELEASED` and must not be opened for this candidate.
+
+The active correctness contract is now default `kpcalg`: `m.max = Inf`, resolved
+to `p - 2`, with graph-driven natural stopping. Current Phase 9 and hardening v2
+artifacts cover all 240,498 canonical tests through level 8, including the nine
+tests omitted by the historical max-7 campaign.
 
 The route is separate from the older `fast_kpc(precision = "compatible")`
 bridge described below. Invoke it explicitly:
@@ -24,7 +29,7 @@ skeleton <- fastkpc_compatible_cuda_skeleton(
   options = list(
     route = "full_cuda",
     compatible_cuda_strict = TRUE,
-    max_conditioning_size = 7L,
+    max_conditioning_size = Inf,
     index = 1,
     numCol = 35L,
     trace_level = "logical"
@@ -32,42 +37,68 @@ skeleton <- fastkpc_compatible_cuda_skeleton(
 )
 ```
 
+The strict end-to-end entrypoint keeps that CUDA skeleton and uses the original
+kpcalg implementation for the short WAN-PDAG orientation stage:
+
+```r
+result <- fastkpc_compatible_cuda_wanpdag(
+  data,
+  alpha = 0.1,
+  options = list(
+    max_conditioning_size = Inf,
+    index = 1,
+    numCol = 35L,
+    trace_level = "logical",
+    ci_method = "hsic.gamma",
+    hsic_params = list(sig = 1)
+  )
+)
+```
+
+This authority route records every orientation CI identity, p-value, decision,
+and RNG boundary. The native fastkpc orientation implementation remains an
+explicit development route and is not used for strict 351 x 48 claims.
+
 This route implements the exact Gaussian/identity `regrXonS` subset used by
 the KPC skeleton: a joint thin-plate smooth for `|S| <= 2`, additive smooths
 for `|S| > 2`, target-specific GCV selection, CUDA residual formation, and
-legacy-compatible CUDA `dcov.gamma`. It is not a general mgcv clone.
+legacy-compatible CUDA evaluation for `dcc.gamma`, `dcc.perm`, `hsic.gamma`,
+and `hsic.perm`. It is not a general mgcv clone.
 
 The currently qualified public envelope is deliberately narrow:
 
 ```text
 finite binary64 matrix; n > 35; 2 <= p <= 64
 alpha = 0.1; index = 1; numCol = 35
-0 <= max_conditioning_size <= 7
+max_conditioning_size defaults to Inf and resolves to p - 2
+additive CUDA capacity through |S| = 62, subject to q = 1 + 9|S| < n
 Gaussian family; identity link; unweighted; zero offset
-skeleton stage only
+CUDA skeleton plus optional kpcalg-authority WAN-PDAG orientation
 ```
 
-Strict mode fails closed outside that envelope. It does not silently call
-legacy mgcv, a CPU numerical CI path, `fastSplineCUDA`, or another approximate
-backend. C++ owns canonical skeleton replay; CUDA owns repeated numerical CI
-work. The result and target-state caches are capacity-bounded and keyed by
-semantic dataset/test identities.
+Strict skeleton mode fails closed outside that envelope. It does not silently
+call legacy mgcv, a CPU numerical skeleton CI path, `fastSplineCUDA`, or another
+approximate backend. C++ owns canonical skeleton replay; CUDA owns repeated
+skeleton CI work. When WAN-PDAG is requested, kpcalg CPU orientation is an
+explicit authority stage rather than a fallback. The result and target-state
+caches are capacity-bounded and keyed by semantic dataset/test identities.
 
-Build and validate the frozen candidate with:
+Build and validate the current explicit route with:
 
 ```bash
 bash fastkpc/tools/clean_cuda_native.sh
 bash fastkpc/tools/build_cuda_native.sh
 Rscript fastkpc/tests/test_full_cuda_ci_one_call.R
 Rscript fastkpc/tests/test_full_cuda_ci_one_call_cache.R
+Rscript fastkpc/tests/test_compatible_cuda_wanpdag_authority.R
 Rscript fastkpc/tests/test_full_cuda_ci_phase10_hardening_artifact.R
 Rscript fastkpc/tests/test_full_cuda_ci_phase10_campaign_artifact.R
 Rscript fastkpc/tests/test_full_cuda_ci_phase10_completion_audit.R
 ```
 
-The completion audit intentionally fails until the v2 fresh-data campaign, the
-public 500x50 development fixture, the sealed holdout artifact, and the final
-`COMPLETE` roadmap state all exist.
+The public 500x50 default-Inf development fixture now passes. The completion
+audit intentionally fails until the v2 five-run performance campaign, the
+sealed holdout artifact, and the final `COMPLETE` roadmap state all exist.
 
 Historical v1 campaign evidence is under
 `fastkpc/artifacts/full_cuda_ci/promotion_351x48_v1/`. Five fresh-process cold,
@@ -90,16 +121,21 @@ for promotion until the v2 campaign and public 500x50 development fixture pass:
 FASTKPC_RUN_CUDA_TESTS=1 bash fastkpc/tools/run_full_cuda_ci_gate.sh
 ```
 
-The current development producer has reduced one canonical fresh-data
-compute-warm run from `1300.19` to `376.461` seconds while preserving exact
-graph/sepset/test-count/deletion decisions and zero CPU numerical authority.
-This passes the `< 600`-second development Checkpoint A only. It does not pass
-the `< 180` Checkpoint B or the final five-run 120-second promotion gate, so no
-candidate has been frozen and the sealed holdout remains unopened.
+The best explicit `max_conditioning_size = 7` canonical fresh-data development
+run remains `263.305` seconds. That number is not a default-`Inf` result. The
+351x48 default-`Inf` route resolves its ceiling to 46, executes nine required
+level-8 tests, and then stops naturally. The current-binary Phase 9 artifact
+completed that workload in `277.868` seconds. A separate same-process
+cold/replay-warm qualification measured `274.91` / `0.848` seconds; cold did
+241,686 physical tests, while warm had 240,498 result-cache hits and zero
+physical tests or residual fits. All graph, sepset, trace, and production
+p-value bits are exact. These results do not pass the `< 180` Checkpoint B or
+the final five-run 120-second promotion gate, so no candidate has been frozen
+and the sealed holdout remains unopened.
 
 Only after those prerequisites and a new source/native/contract freeze may an
 external custodian release be supplied. No holdout release input should be
-provided for commit `25db2a6`.
+provided for the current candidate.
 
 ## Operational backend positioning
 

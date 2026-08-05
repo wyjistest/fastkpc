@@ -57,7 +57,7 @@ if (file.exists(path)) {
 
 data <- readRDS(fastkpc_full_cuda_phase10_campaign_paths()[["data"]])
 evidence <- fastkpc_full_cuda_phase10_capture_compute_warm(
-  data, repetition = repetition, max_conditioning_size = 7L,
+  data, repetition = repetition, max_conditioning_size = Inf,
   formal_canonical = TRUE, capture_machine = TRUE
 )
 fastkpc_full_cuda_phase10_write_compute_warm_evidence(evidence, path)

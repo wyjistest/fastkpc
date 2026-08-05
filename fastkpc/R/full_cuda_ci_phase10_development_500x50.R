@@ -7,7 +7,7 @@ fastkpc_full_cuda_phase10_development_require <- function(
 fastkpc_full_cuda_phase10_development_500x50_path <- function() {
   file.path(
     "fastkpc", "tests", "fixtures",
-    "full_cuda_ci_development_500x50_v1.rds"
+    "full_cuda_ci_development_500x50_v2.rds"
   )
 }
 
@@ -84,7 +84,7 @@ fastkpc_full_cuda_phase10_build_development_500x50 <- function() {
       labels = colnames(data),
       options = list(
         route = "legacy", compatible_cuda_strict = TRUE,
-        max_conditioning_size = 7L, index = 1, numCol = 35L,
+        index = 1, numCol = 35L,
         trace_level = "logical", dcov_batch = "round",
         mgcv_residual_backend = "r"
       )
@@ -93,8 +93,8 @@ fastkpc_full_cuda_phase10_build_development_500x50 <- function() {
   result <- captured$value
   oracle <- fastkpc_full_cuda_phase10_development_oracle(result)
   list(
-    schema_version = "full-cuda-ci-development-500x50-v1",
-    fixture_id = "public-development-500x50-v1",
+    schema_version = "full-cuda-ci-development-500x50-v2",
+    fixture_id = "public-development-500x50-v2",
     generator = list(
       RNGkind = c("Mersenne-Twister", "Inversion", "Rejection"),
       seed = 1050050L,
@@ -106,7 +106,9 @@ fastkpc_full_cuda_phase10_build_development_500x50 <- function() {
     ),
     configuration = list(
       n = 500L, p = 50L, alpha = "0.1", index = 1L, num_col = 35L,
-      maximum_conditioning_size = 7L,
+      requested_max_conditioning_size = "Inf",
+      resolved_max_conditioning_size = 48L,
+      natural_stop_level = max(seq_along(result$n.edgetests) - 1L),
       model = "Gaussian-identity-unweighted-zero-offset",
       oracle_route = "legacy-mgcv-provider-native-legacy-dcov-20-core"
     ),
@@ -129,11 +131,18 @@ fastkpc_full_cuda_phase10_validate_development_500x50 <- function(
     artifact) {
   generated <- fastkpc_full_cuda_phase10_development_500x50_data()
   clean <- is.list(artifact) && identical(
-    artifact$schema_version, "full-cuda-ci-development-500x50-v1"
-  ) && identical(artifact$fixture_id, "public-development-500x50-v1") &&
+    artifact$schema_version, "full-cuda-ci-development-500x50-v2"
+  ) && identical(artifact$fixture_id, "public-development-500x50-v2") &&
     identical(artifact$configuration$n, 500L) &&
     identical(artifact$configuration$p, 50L) &&
-    identical(artifact$configuration$maximum_conditioning_size, 7L) &&
+    identical(artifact$configuration$requested_max_conditioning_size, "Inf") &&
+    identical(artifact$configuration$resolved_max_conditioning_size, 48L) &&
+    identical(artifact$configuration$natural_stop_level, 3L) &&
+    identical(
+      artifact$configuration$natural_stop_level,
+      length(artifact$oracle$reference$n.edgetests) - 1L
+    ) && artifact$configuration$natural_stop_level <
+      artifact$configuration$resolved_max_conditioning_size &&
     identical(dim(artifact$data), c(500L, 50L)) &&
     identical(artifact$data, generated) && all(is.finite(artifact$data)) &&
     identical(
@@ -146,6 +155,11 @@ fastkpc_full_cuda_phase10_validate_development_500x50 <- function(
       )
     ) && is.list(artifact$oracle) &&
     fastkpc_full_cuda_is_skeleton(artifact$oracle$reference) &&
+    identical(
+      artifact$baseline_summary$max_conditioning_size_requested, "Inf"
+    ) && identical(
+      artifact$baseline_summary$max_conditioning_size_resolved, 48L
+    ) &&
     nrow(artifact$oracle$logical_trace) ==
       sum(artifact$oracle$reference$n.edgetests) &&
     all(is.finite(artifact$oracle$logical_trace$p_value)) &&

@@ -68,6 +68,9 @@ RegrVonPsResult make_empty_result(const Rcpp::NumericMatrix& data,
   result.dcov_batches = 0;
   result.dcov_pairs = 0;
   result.dcc_gamma_tests = 0;
+  result.dcc_perm_tests = 0;
+  result.dcc_permutation_replicates = 0;
+  result.dcc_perm_cuda_tests = 0;
   result.hsic_gamma_tests = 0;
   result.hsic_perm_tests = 0;
   result.hsic_permutation_replicates = 0;
@@ -268,9 +271,16 @@ RegrVonPsResult regrvonps_device(
     throw std::runtime_error("residual cache is required");
   }
   const CiMethodKind ci_method = parse_ci_method_kind(options.ci_method);
-  if (ci_method != CiMethodKind::DccGamma) {
+  if (ci_method == CiMethodKind::HsicGamma ||
+      ci_method == CiMethodKind::HsicPermutation) {
     return regrvonps_hsic_cuda(data, pdag, p, V, S, options,
                                residual_cache, ci_method);
+  }
+  if (ci_method == CiMethodKind::DccPermutation &&
+      !options.hsic_options.has_seed) {
+    return make_native_fallback(
+      data, pdag, p, V, S, options, residual_cache,
+      "CUDA dCov permutation requires explicit seed in this stage");
   }
   if (options.orientation_residual_device != "cuda" ||
       options.residual_backend_name != "fastSpline") {
@@ -296,9 +306,25 @@ RegrVonPsResult regrvonps_device(
       DcovBatchOptions dcov_options;
       dcov_options.index = options.index;
       dcov_options.legacy_index = options.legacy_index;
-      const int actual_batch_size =
+      dcov_options.permutation_replicates =
+        options.hsic_options.replicates;
+      dcov_options.include_observed =
+        options.hsic_options.include_observed;
+      dcov_options.has_seed = options.hsic_options.has_seed;
+      dcov_options.seed = options.hsic_options.seed;
+      dcov_options.return_replicates = false;
+      dcov_options.max_n = options.hsic_options.cuda_max_n;
+      dcov_options.max_batch_pairs =
+        options.hsic_options.cuda_max_batch_pairs;
+      int actual_batch_size =
         resolve_orientation_batch_size(options.orientation_batch_size,
                                        static_cast<int>(S.size()));
+      if (ci_method == CiMethodKind::DccPermutation &&
+          dcov_options.max_batch_pairs > 0) {
+        actual_batch_size = std::min(
+          actual_batch_size, dcov_options.max_batch_pairs);
+      }
+      actual_batch_size = std::max(1, actual_batch_size);
       std::vector<double> xmat;
       std::vector<double> ymat;
       for (int start = 0; start < static_cast<int>(S.size());
@@ -308,8 +334,11 @@ RegrVonPsResult regrvonps_device(
         fill_repeated_residual_and_columns(data, fit.fit.residuals, S, start,
                                            count, &xmat, &ymat);
         const DcovBatchResult batch =
-          dcov_batch_cuda(xmat.data(), ymat.data(), data.nrow(), count,
-                          dcov_options);
+          ci_method == CiMethodKind::DccPermutation ?
+            dcov_permutation_batch_cuda(
+              xmat.data(), ymat.data(), data.nrow(), count, dcov_options) :
+            dcov_batch_cuda(
+              xmat.data(), ymat.data(), data.nrow(), count, dcov_options);
         for (int k = 0; k < count; ++k) {
           const double p_value = batch.p_values[k];
           result.p_values.push_back(p_value);
@@ -317,17 +346,27 @@ RegrVonPsResult regrvonps_device(
         }
         ++result.dcov_batches;
         result.dcov_pairs += count;
+        if (ci_method == CiMethodKind::DccPermutation) {
+          result.dcc_perm_tests += count;
+          result.dcc_perm_cuda_tests += count;
+          result.dcc_permutation_replicates +=
+            count * batch.permutation_replicates;
+        } else {
+          result.dcc_gamma_tests += count;
+        }
       }
     }
 
     result.cache_requests_after = result.cache_requests_before;
     result.cache_hits_after = result.cache_hits_before;
     return result;
-  } catch (...) {
-    if (!options.cuda_residual_fallback) throw;
-    RegrVonPsResult fallback =
-      regrvonps_native(data, pdag, p, V, S, options, residual_cache);
-    fallback.used_cpu_fallback = true;
+  } catch (const std::exception& ex) {
+    if (!options.cuda_residual_fallback ||
+        !options.hsic_options.cuda_memory_fallback) {
+      throw;
+    }
+    RegrVonPsResult fallback = make_native_fallback(
+      data, pdag, p, V, S, options, residual_cache, ex.what());
     fallback.cpu_fallback_fits = 1;
     return fallback;
   }

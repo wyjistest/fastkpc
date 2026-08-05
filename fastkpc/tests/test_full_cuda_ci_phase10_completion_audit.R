@@ -55,7 +55,7 @@ campaign_summary <- campaign$summary
 hardening_summary <- hardening$summary
 holdout_summary <- holdout$summary
 expected_n_edgetests <- c(
-  2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L
+  2213L, 52659L, 125293L, 40694L, 13293L, 5422L, 835L, 80L, 9L
 )
 authority_fields <- fastkpc_full_cuda_phase10_campaign_authority_zero_fields()
 
@@ -72,7 +72,10 @@ assert_true(
     isTRUE(campaign_summary$n_edgetests_identical) &&
     isTRUE(campaign_summary$deletions_identical) &&
     isTRUE(campaign_summary$logical_ci_trace_identical) &&
-    campaign_summary$logical_tests_consumed == 240489L &&
+    identical(campaign_summary$max_conditioning_size_requested, "Inf") &&
+    campaign_summary$max_conditioning_size_resolved == 46L &&
+    campaign_summary$natural_stop_level == 8L &&
+    campaign_summary$logical_tests_consumed == 240498L &&
     campaign_summary$candidate_cold_repetitions == 5L &&
     campaign_summary$candidate_warm_repetitions == 5L &&
     campaign_summary$correct_baseline_repetitions == 5L &&

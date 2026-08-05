@@ -12,9 +12,21 @@
 
 namespace fastkpc {
 
-constexpr int kMultiPenaltyGcvMaximumCoefficientDim = 64;
-constexpr int kMultiPenaltyGcvMaximumPenaltyCount = 7;
+#ifndef FASTKPC_MULTI_PENALTY_MAX_COEFFICIENT_DIM
+#define FASTKPC_MULTI_PENALTY_MAX_COEFFICIENT_DIM 80
+#endif
+
+#ifndef FASTKPC_MULTI_PENALTY_MAX_PENALTY_COUNT
+#define FASTKPC_MULTI_PENALTY_MAX_PENALTY_COUNT 8
+#endif
+
+constexpr int kMultiPenaltyGcvMaximumCoefficientDim =
+  FASTKPC_MULTI_PENALTY_MAX_COEFFICIENT_DIM;
+constexpr int kMultiPenaltyGcvMaximumPenaltyCount =
+  FASTKPC_MULTI_PENALTY_MAX_PENALTY_COUNT;
 constexpr int kMultiPenaltyGcvMaximumConcurrentSetups = 64;
+constexpr int kMultiPenaltyGcvDefaultKpcMaximumPenaltyCount = 62;
+constexpr int kMultiPenaltyGcvDefaultKpcMaximumCoefficientDim = 559;
 constexpr int kMultiPenaltyGcvDecompositionTraceStageCount = 8;
 constexpr int kMultiPenaltyGcvDecompositionTraceRouteCount = 3;
 

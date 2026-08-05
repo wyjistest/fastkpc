@@ -23,6 +23,16 @@ struct OrientationEvent {
   std::string message;
 };
 
+struct OrientationCiTest {
+  std::string context;
+  int target;
+  int other;
+  std::vector<int> subset;
+  std::vector<int> residual_conditioning_set;
+  double p_value;
+  bool rejected;
+};
+
 struct OrientationOptions {
   double alpha;
   bool verbose;
@@ -51,6 +61,7 @@ struct OrientationResult {
   std::vector<int> pdag;
   int p;
   std::vector<OrientationEvent> events;
+  std::vector<OrientationCiTest> ci_trace;
   int collider_orientations;
   int rule1_orientations;
   int rule2_orientations;
@@ -62,6 +73,9 @@ struct OrientationResult {
   int orientation_dcov_batches;
   int orientation_dcov_pairs;
   int regrvonps_dcc_gamma_tests;
+  int regrvonps_dcc_perm_tests = 0;
+  int regrvonps_dcc_permutation_replicates = 0;
+  int regrvonps_dcc_perm_cuda_tests = 0;
   int regrvonps_hsic_gamma_tests;
   int regrvonps_hsic_perm_tests;
   int regrvonps_hsic_permutation_replicates;

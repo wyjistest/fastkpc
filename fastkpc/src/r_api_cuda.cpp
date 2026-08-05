@@ -17,6 +17,7 @@
 #include "cuda/cuda_status.hpp"
 #include "cuda/dcov_batch_cuda.hpp"
 #include "cuda/fastspline_residual_cuda.hpp"
+#include "cuda/full_cuda_ci_method_batch.hpp"
 #include "cuda/full_cuda_ci_vertical.hpp"
 #include "cuda/hsic_batch_cuda.hpp"
 #include "cuda/legacy_dcov_spectra_matvec_cuda.hpp"
@@ -58,6 +59,9 @@
 #include <sys/sysmacros.h>
 #include <unistd.h>
 #endif
+
+extern "C" SEXP C_full_cuda_ci_multi_penalty_capacity_qualify(
+    SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP, SEXP);
 
 namespace {
 
@@ -2947,6 +2951,13 @@ Rcpp::List skeleton_result_to_list(const SkeletonResult& result, int p) {
     Rcpp::Named("ci_backend_reason") = result.ci_backend_reason,
     Rcpp::Named("ci_diagnostics") = Rcpp::List::create(
       Rcpp::Named("ci_dcc_gamma_tests") = result.ci_dcc_gamma_tests,
+      Rcpp::Named("ci_dcc_perm_tests") = result.ci_dcc_perm_tests,
+      Rcpp::Named("ci_dcc_permutation_replicates") =
+        result.ci_dcc_permutation_replicates,
+      Rcpp::Named("ci_dcc_perm_cuda_tests") =
+        result.ci_dcc_perm_cuda_tests,
+      Rcpp::Named("ci_dcc_cuda_fallback_tests") =
+        result.ci_dcc_cuda_fallback_tests,
       Rcpp::Named("ci_hsic_gamma_tests") = result.ci_hsic_gamma_tests,
       Rcpp::Named("ci_hsic_perm_tests") = result.ci_hsic_perm_tests,
       Rcpp::Named("ci_hsic_permutation_replicates") =
@@ -3022,6 +3033,59 @@ Rcpp::IntegerMatrix pdag_to_matrix(const std::vector<int>& pdag, int p) {
   return out;
 }
 
+SkeletonResult skeleton_result_from_orientation_R(
+    Rcpp::LogicalMatrix adjacency,
+    Rcpp::List sepsets) {
+  const int p = adjacency.nrow();
+  if (adjacency.ncol() != p || sepsets.size() != p) {
+    Rcpp::stop("orientation skeleton dimensions differ");
+  }
+  SkeletonResult result;
+  result.adjacency.assign(static_cast<std::size_t>(p) * p, 0);
+  for (int row = 0; row < p; ++row) {
+    for (int col = 0; col < p; ++col) {
+      const int edge = adjacency(row, col);
+      if (edge == NA_LOGICAL) {
+        Rcpp::stop("orientation skeleton adjacency contains NA");
+      }
+      result.adjacency[static_cast<std::size_t>(row) * p + col] =
+        edge == TRUE ? 1 : 0;
+    }
+  }
+  result.sepsets.assign(p, std::vector<std::vector<int> >(p));
+  for (int row = 0; row < p; ++row) {
+    Rcpp::List sepset_row = sepsets[row];
+    if (sepset_row.size() != p) {
+      Rcpp::stop("orientation skeleton sepsets dimensions differ");
+    }
+    for (int col = 0; col < p; ++col) {
+      Rcpp::IntegerVector value = sepset_row[col];
+      std::vector<int>& output = result.sepsets[row][col];
+      for (int index = 0; index < value.size(); ++index) {
+        if (Rcpp::IntegerVector::is_na(value[index])) continue;
+        const int node = value[index] - 1;
+        if (node < 0 || node >= p) {
+          Rcpp::stop("orientation skeleton sepset index is out of range");
+        }
+        output.push_back(node);
+      }
+      std::sort(output.begin(), output.end());
+      output.erase(std::unique(output.begin(), output.end()), output.end());
+    }
+  }
+  result.pmax.assign(static_cast<std::size_t>(p) * p, 0.0);
+  result.residual_cache_enabled = false;
+  result.residual_cache_requests = 0;
+  result.residual_cache_hits = 0;
+  result.residual_cache_misses = 0;
+  result.residual_cache_computations = 0;
+  result.residual_cache_stored_vectors = 0;
+  result.residual_cache_stored_values = 0;
+  result.residual_backend = "";
+  result.residual_backend_params = "";
+  return result;
+}
+
 Rcpp::List orientation_events_to_list(const std::vector<OrientationEvent>& events) {
   Rcpp::List out(events.size());
   for (int i = 0; i < static_cast<int>(events.size()); ++i) {
@@ -3043,10 +3107,38 @@ Rcpp::List orientation_events_to_list(const std::vector<OrientationEvent>& event
   return out;
 }
 
+Rcpp::List orientation_ci_trace_to_list(
+    const std::vector<OrientationCiTest>& trace) {
+  Rcpp::List out(trace.size());
+  for (int index = 0; index < static_cast<int>(trace.size()); ++index) {
+    const OrientationCiTest& entry = trace[index];
+    Rcpp::IntegerVector subset(entry.subset.size());
+    for (int item = 0; item < subset.size(); ++item) {
+      subset[item] = entry.subset[item] + 1;
+    }
+    Rcpp::IntegerVector conditioning(
+      entry.residual_conditioning_set.size());
+    for (int item = 0; item < conditioning.size(); ++item) {
+      conditioning[item] = entry.residual_conditioning_set[item] + 1;
+    }
+    out[index] = Rcpp::List::create(
+      Rcpp::Named("context") = entry.context,
+      Rcpp::Named("target") = entry.target + 1,
+      Rcpp::Named("other") = entry.other + 1,
+      Rcpp::Named("subset") = subset,
+      Rcpp::Named("residual_conditioning_set") = conditioning,
+      Rcpp::Named("p.value") = entry.p_value,
+      Rcpp::Named("rejected") = entry.rejected
+    );
+  }
+  return out;
+}
+
 Rcpp::List orientation_result_to_list(const OrientationResult& result) {
   return Rcpp::List::create(
     Rcpp::Named("pdag") = pdag_to_matrix(result.pdag, result.p),
     Rcpp::Named("events") = orientation_events_to_list(result.events),
+    Rcpp::Named("ci_trace") = orientation_ci_trace_to_list(result.ci_trace),
     Rcpp::Named("counts") = Rcpp::List::create(
       Rcpp::Named("collider") = result.collider_orientations,
       Rcpp::Named("rule1") = result.rule1_orientations,
@@ -3087,6 +3179,12 @@ Rcpp::List orientation_result_to_list(const OrientationResult& result) {
       Rcpp::Named("orientation_dcov_pairs") = result.orientation_dcov_pairs,
       Rcpp::Named("regrvonps_dcc_gamma_tests") =
         result.regrvonps_dcc_gamma_tests,
+      Rcpp::Named("regrvonps_dcc_perm_tests") =
+        result.regrvonps_dcc_perm_tests,
+      Rcpp::Named("regrvonps_dcc_permutation_replicates") =
+        result.regrvonps_dcc_permutation_replicates,
+      Rcpp::Named("regrvonps_dcc_perm_cuda_tests") =
+        result.regrvonps_dcc_perm_cuda_tests,
       Rcpp::Named("regrvonps_hsic_gamma_tests") =
         result.regrvonps_hsic_gamma_tests,
       Rcpp::Named("regrvonps_hsic_perm_tests") =
@@ -3122,6 +3220,12 @@ Rcpp::List orientation_result_to_list(const OrientationResult& result) {
     Rcpp::Named("ci_diagnostics") = Rcpp::List::create(
       Rcpp::Named("regrvonps_dcc_gamma_tests") =
         result.regrvonps_dcc_gamma_tests,
+      Rcpp::Named("regrvonps_dcc_perm_tests") =
+        result.regrvonps_dcc_perm_tests,
+      Rcpp::Named("regrvonps_dcc_permutation_replicates") =
+        result.regrvonps_dcc_permutation_replicates,
+      Rcpp::Named("regrvonps_dcc_perm_cuda_tests") =
+        result.regrvonps_dcc_perm_cuda_tests,
       Rcpp::Named("regrvonps_hsic_gamma_tests") =
         result.regrvonps_hsic_gamma_tests,
       Rcpp::Named("regrvonps_hsic_perm_tests") =
@@ -9017,6 +9121,51 @@ extern "C" SEXP C_full_cuda_ci_one_call_skeleton(
   END_RCPP
 }
 
+extern "C" SEXP C_full_cuda_ci_one_call_skeleton_method(
+    SEXP data_s,
+    SEXP alpha_s,
+    SEXP max_conditioning_size_s,
+    SEXP index_s,
+    SEXP num_col_s,
+    SEXP trace_level_s,
+    SEXP compatible_cuda_strict_s,
+    SEXP ci_method_s,
+    SEXP hsic_sig_s,
+    SEXP permutation_replicates_s,
+    SEXP permutation_include_observed_s,
+    SEXP permutation_has_seed_s,
+    SEXP permutation_seed_s) {
+  BEGIN_RCPP
+  if (!Rf_isReal(data_s) || !Rf_isMatrix(data_s)) {
+    Rcpp::stop("compatible.cuda one-call data must be a numeric matrix");
+  }
+  fastkpc::FullCudaCiOneCallMethodOptions method_options;
+  method_options.ci_method = Rcpp::as<std::string>(ci_method_s);
+  method_options.hsic_sig = Rcpp::as<double>(hsic_sig_s);
+  method_options.permutation_replicates =
+    Rcpp::as<int>(permutation_replicates_s);
+  method_options.permutation_include_observed =
+    Rcpp::as<bool>(permutation_include_observed_s);
+  method_options.permutation_has_seed =
+    Rcpp::as<bool>(permutation_has_seed_s);
+  const int permutation_seed = Rcpp::as<int>(permutation_seed_s);
+  if (permutation_seed < 0) {
+    Rcpp::stop("compatible.cuda one-call permutation seed must be non-negative");
+  }
+  method_options.permutation_seed =
+    static_cast<unsigned int>(permutation_seed);
+  return fastkpc::full_cuda_ci_one_call_skeleton_method(
+    Rcpp::NumericMatrix(data_s),
+    Rcpp::as<double>(alpha_s),
+    Rcpp::as<int>(max_conditioning_size_s),
+    Rcpp::as<double>(index_s),
+    Rcpp::as<int>(num_col_s),
+    Rcpp::as<std::string>(trace_level_s),
+    Rcpp::as<bool>(compatible_cuda_strict_s),
+    method_options);
+  END_RCPP
+}
+
 extern "C" SEXP C_full_cuda_ci_one_call_cache_control(
     SEXP action_s,
     SEXP capacity_s) {
@@ -9024,6 +9173,34 @@ extern "C" SEXP C_full_cuda_ci_one_call_cache_control(
   return fastkpc::full_cuda_ci_one_call_cache_control(
     Rcpp::as<std::string>(action_s),
     Rcpp::as<int>(capacity_s));
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_method_seeded_permutations(
+    SEXP ci_method_s,
+    SEXP n_s,
+    SEXP replicates_s,
+    SEXP seeds_s) {
+  BEGIN_RCPP
+  const std::string ci_method = Rcpp::as<std::string>(ci_method_s);
+  const int n = Rcpp::as<int>(n_s);
+  const int replicates = Rcpp::as<int>(replicates_s);
+  const Rcpp::IntegerVector seed_values(seeds_s);
+  std::vector<unsigned int> seeds;
+  seeds.reserve(static_cast<std::size_t>(seed_values.size()));
+  for (int seed : seed_values) {
+    if (seed < 0) {
+      Rcpp::stop("strict CI permutation seeds must be non-negative");
+    }
+    seeds.push_back(static_cast<unsigned int>(seed));
+  }
+  const std::vector<int> table =
+    fastkpc::full_cuda_ci_method_seeded_permutation_table(
+      ci_method, n, replicates, seeds);
+  Rcpp::IntegerVector output = Rcpp::wrap(table);
+  output.attr("dim") = Rcpp::IntegerVector::create(
+    n, replicates, seed_values.size());
+  return output;
   END_RCPP
 }
 
@@ -10716,6 +10893,59 @@ extern "C" SEXP C_fast_kpc_wanpdag_cuda(SEXP data, SEXP alphas,
   END_RCPP
 }
 
+extern "C" SEXP C_fast_orient_wanpdag_cuda(
+    SEXP data,
+    SEXP adjacencys,
+    SEXP sepsetss,
+    SEXP alphas,
+    SEXP indexs,
+    SEXP legacy_indexs,
+    SEXP residual_caches,
+    SEXP residual_backends,
+    SEXP orientation_devices,
+    SEXP orientation_batch_sizes,
+    SEXP orientation_diagnosticss,
+    SEXP fastspline_paramss,
+    SEXP cuda_residual_fallbacks,
+    SEXP orient_colliders,
+    SEXP solve_confls,
+    SEXP ruless,
+    SEXP ci_methods,
+    SEXP hsic_paramss,
+    SEXP permutation_paramss,
+    SEXP ci_diagnosticss) {
+  BEGIN_RCPP
+  Rcpp::NumericMatrix matrix(data);
+  Rcpp::LogicalMatrix adjacency(adjacencys);
+  Rcpp::List sepsets(sepsetss);
+  const double alpha = Rf_asReal(alphas);
+  const double index = Rf_asReal(indexs);
+  const bool legacy_index = Rcpp::as<bool>(legacy_indexs);
+  const bool residual_cache = Rcpp::as<bool>(residual_caches);
+  const std::string residual_backend = Rcpp::as<std::string>(residual_backends);
+  const std::string orientation_device =
+    Rcpp::as<std::string>(orientation_devices);
+  const FastSplineParams fastspline_params =
+    parse_fastspline_params(Rcpp::as<Rcpp::List>(fastspline_paramss));
+  make_residual_backend_config(residual_backend, fastspline_params);
+  const SkeletonResult skeleton =
+    skeleton_result_from_orientation_R(adjacency, sepsets);
+  const OrientationOptions orientation_options = make_orientation_options(
+    alpha, index, legacy_index, residual_cache, residual_backend,
+    orientation_device, Rf_asInteger(orientation_batch_sizes),
+    Rcpp::as<bool>(orientation_diagnosticss),
+    Rcpp::as<bool>(cuda_residual_fallbacks), fastspline_params,
+    Rcpp::as<bool>(orient_colliders), Rcpp::as<bool>(solve_confls),
+    Rcpp::as<Rcpp::LogicalVector>(ruless),
+    Rcpp::as<std::string>(ci_methods), Rcpp::as<Rcpp::List>(hsic_paramss),
+    Rcpp::as<Rcpp::List>(permutation_paramss),
+    Rcpp::as<bool>(ci_diagnosticss));
+  const OrientationResult orientation = orient_wanpdag_native(
+    matrix, skeleton, orientation_options, regrvonps_device);
+  return orientation_result_to_list(orientation);
+  END_RCPP
+}
+
 extern "C" SEXP C_precision_replay_layer_native(SEXP adjacencys,
                                                 SEXP pmaxs,
                                                 SEXP edge_xs,
@@ -12263,6 +12493,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       task_ignored.reserve(capacity);
     }
     int level_provider_request_count = 0;
+    bool pcalg_done = true;
     double level_provider_call_ms = 0.0;
     double level_provider_matrix_copy_ms = 0.0;
     double level_dcov_materialize_ms = 0.0;
@@ -12897,6 +13128,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       if (ignored) {
         ++ignored_after_delete;
       } else {
+        if (task.opens_next_level) pcalg_done = false;
         ++tests_replayed;
         pval = pvalue;
         if (!std::isfinite(pval)) pval = 1.0;
@@ -13186,7 +13418,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
       level_dcov_materialize_ms,
       level_dcov_call_ms,
       elapsed_ms_since(level_start));
-    if (level > 0 && deletions == 0) break;
+    if (pcalg_done) break;
   }
 
   Rcpp::LogicalVector task_deleted_out(task_deleted.size());
@@ -13474,8 +13706,10 @@ static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_semantic_abi_info", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_semantic_abi_info), 0},
   {"C_full_cuda_ci_native_setup", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_setup), 1},
   {"C_full_cuda_ci_one_call_skeleton", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_skeleton), 7},
+  {"C_full_cuda_ci_one_call_skeleton_method", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_skeleton_method), 13},
   {"C_full_cuda_ci_one_call_cache_control", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_cache_control), 2},
   {"C_full_cuda_ci_one_call_cache_state", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_cache_state), 1},
+  {"C_full_cuda_ci_method_seeded_permutations", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_method_seeded_permutations), 4},
   {"C_full_cuda_ci_native_geometry_prepare", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_geometry_prepare), 4},
   {"C_full_cuda_ci_phase35_vertical_resource_snapshot", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical_resource_snapshot), 0},
   {"C_full_cuda_ci_phase35_vertical", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical), 6},
@@ -13544,6 +13778,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_multi_penalty_gcv_evaluate_cuda", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_evaluate_cuda), 11},
   {"C_full_cuda_ci_multi_penalty_gcv_grouped_prototype", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_grouped_prototype), 7},
   {"C_full_cuda_ci_multi_penalty_gcv_optimize_cuda", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_optimize_cuda), 11},
+  {"C_full_cuda_ci_multi_penalty_capacity_qualify", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_capacity_qualify), 10},
   {"C_full_cuda_ci_multi_penalty_gcv_prepared_create", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_prepared_create), 11},
   {"C_full_cuda_ci_multi_penalty_gcv_prepared_info", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_prepared_info), 1},
   {"C_full_cuda_ci_multi_penalty_gcv_prepared_free", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_multi_penalty_gcv_prepared_free), 1},
@@ -13563,6 +13798,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fast_skeleton_cuda_cached", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda_cached), 7},
   {"C_fast_skeleton_cuda_backend", reinterpret_cast<DL_FUNC>(&C_fast_skeleton_cuda_backend), 18},
   {"C_fast_kpc_wanpdag_cuda", reinterpret_cast<DL_FUNC>(&C_fast_kpc_wanpdag_cuda), 24},
+  {"C_fast_orient_wanpdag_cuda", reinterpret_cast<DL_FUNC>(&C_fast_orient_wanpdag_cuda), 20},
   {"C_precision_make_layer_plan_native", reinterpret_cast<DL_FUNC>(&C_precision_make_layer_plan_native), 2},
   {"C_precision_run_skeleton_ptable_native", reinterpret_cast<DL_FUNC>(&C_precision_run_skeleton_ptable_native), 4},
   {"C_precision_run_skeleton_provider_native", reinterpret_cast<DL_FUNC>(&C_precision_run_skeleton_provider_native), 5},

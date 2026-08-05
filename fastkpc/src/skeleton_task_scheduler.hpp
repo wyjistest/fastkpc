@@ -13,6 +13,7 @@ struct LayerCiTask {
   int orientation_y;
   std::vector<int> conditioning_set;
   int edge_key;
+  bool opens_next_level = false;
 };
 
 struct LayerResidualRequest {

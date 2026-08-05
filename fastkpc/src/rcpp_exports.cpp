@@ -1,4 +1,5 @@
 #include <RcppArmadillo.h>
+#include <R_ext/Random.h>
 // [[Rcpp::depends(RcppArmadillo, RcppEigen, RSpectra)]]
 // [[Rcpp::plugins(cpp17)]]
 
@@ -921,6 +922,23 @@ Rcpp::List hsic_result_to_list(const HsicResult& result) {
   );
 }
 
+Rcpp::List dcov_permutation_result_to_list(
+    const DcovPermutationResult& result) {
+  return Rcpp::List::create(
+    Rcpp::Named("method") = result.method,
+    Rcpp::Named("statistic") = result.statistic,
+    Rcpp::Named("p.value") = result.p_value,
+    Rcpp::Named("replicates") = Rcpp::NumericVector(
+      result.replicate_statistics.begin(),
+      result.replicate_statistics.end()),
+    Rcpp::Named("diagnostics") = Rcpp::List::create(
+      Rcpp::Named("n") = result.n,
+      Rcpp::Named("replicates") = result.replicates,
+      Rcpp::Named("used_seed") = result.used_seed,
+      Rcpp::Named("seed") = result.used_seed ?
+        static_cast<int>(result.seed) : NA_INTEGER));
+}
+
 Rcpp::List skeleton_result_to_list(const SkeletonResult& result, int p,
                                    const char* backend) {
   return Rcpp::List::create(
@@ -939,6 +957,13 @@ Rcpp::List skeleton_result_to_list(const SkeletonResult& result, int p,
     Rcpp::Named("ci_backend_reason") = result.ci_backend_reason,
     Rcpp::Named("ci_diagnostics") = Rcpp::List::create(
       Rcpp::Named("ci_dcc_gamma_tests") = result.ci_dcc_gamma_tests,
+      Rcpp::Named("ci_dcc_perm_tests") = result.ci_dcc_perm_tests,
+      Rcpp::Named("ci_dcc_permutation_replicates") =
+        result.ci_dcc_permutation_replicates,
+      Rcpp::Named("ci_dcc_perm_cuda_tests") =
+        result.ci_dcc_perm_cuda_tests,
+      Rcpp::Named("ci_dcc_cuda_fallback_tests") =
+        result.ci_dcc_cuda_fallback_tests,
       Rcpp::Named("ci_hsic_gamma_tests") = result.ci_hsic_gamma_tests,
       Rcpp::Named("ci_hsic_perm_tests") = result.ci_hsic_perm_tests,
       Rcpp::Named("ci_hsic_permutation_replicates") =
@@ -1004,10 +1029,38 @@ Rcpp::List orientation_events_to_list(const std::vector<OrientationEvent>& event
   return out;
 }
 
+Rcpp::List orientation_ci_trace_to_list(
+    const std::vector<OrientationCiTest>& trace) {
+  Rcpp::List out(trace.size());
+  for (int index = 0; index < static_cast<int>(trace.size()); ++index) {
+    const OrientationCiTest& entry = trace[index];
+    Rcpp::IntegerVector subset(entry.subset.size());
+    for (int item = 0; item < subset.size(); ++item) {
+      subset[item] = entry.subset[item] + 1;
+    }
+    Rcpp::IntegerVector conditioning(
+      entry.residual_conditioning_set.size());
+    for (int item = 0; item < conditioning.size(); ++item) {
+      conditioning[item] = entry.residual_conditioning_set[item] + 1;
+    }
+    out[index] = Rcpp::List::create(
+      Rcpp::Named("context") = entry.context,
+      Rcpp::Named("target") = entry.target + 1,
+      Rcpp::Named("other") = entry.other + 1,
+      Rcpp::Named("subset") = subset,
+      Rcpp::Named("residual_conditioning_set") = conditioning,
+      Rcpp::Named("p.value") = entry.p_value,
+      Rcpp::Named("rejected") = entry.rejected
+    );
+  }
+  return out;
+}
+
 Rcpp::List orientation_result_to_list(const OrientationResult& result) {
   return Rcpp::List::create(
     Rcpp::Named("pdag") = pdag_to_matrix(result.pdag, result.p),
     Rcpp::Named("events") = orientation_events_to_list(result.events),
+    Rcpp::Named("ci_trace") = orientation_ci_trace_to_list(result.ci_trace),
     Rcpp::Named("counts") = Rcpp::List::create(
       Rcpp::Named("collider") = result.collider_orientations,
       Rcpp::Named("rule1") = result.rule1_orientations,
@@ -1048,6 +1101,12 @@ Rcpp::List orientation_result_to_list(const OrientationResult& result) {
       Rcpp::Named("orientation_dcov_pairs") = result.orientation_dcov_pairs,
       Rcpp::Named("regrvonps_dcc_gamma_tests") =
         result.regrvonps_dcc_gamma_tests,
+      Rcpp::Named("regrvonps_dcc_perm_tests") =
+        result.regrvonps_dcc_perm_tests,
+      Rcpp::Named("regrvonps_dcc_permutation_replicates") =
+        result.regrvonps_dcc_permutation_replicates,
+      Rcpp::Named("regrvonps_dcc_perm_cuda_tests") =
+        result.regrvonps_dcc_perm_cuda_tests,
       Rcpp::Named("regrvonps_hsic_gamma_tests") =
         result.regrvonps_hsic_gamma_tests,
       Rcpp::Named("regrvonps_hsic_perm_tests") =
@@ -1083,6 +1142,12 @@ Rcpp::List orientation_result_to_list(const OrientationResult& result) {
     Rcpp::Named("ci_diagnostics") = Rcpp::List::create(
       Rcpp::Named("regrvonps_dcc_gamma_tests") =
         result.regrvonps_dcc_gamma_tests,
+      Rcpp::Named("regrvonps_dcc_perm_tests") =
+        result.regrvonps_dcc_perm_tests,
+      Rcpp::Named("regrvonps_dcc_permutation_replicates") =
+        result.regrvonps_dcc_permutation_replicates,
+      Rcpp::Named("regrvonps_dcc_perm_cuda_tests") =
+        result.regrvonps_dcc_perm_cuda_tests,
       Rcpp::Named("regrvonps_hsic_gamma_tests") =
         result.regrvonps_hsic_gamma_tests,
       Rcpp::Named("regrvonps_hsic_perm_tests") =
@@ -1706,6 +1771,27 @@ double fast_dcov_exact_cpp_export(Rcpp::NumericVector x,
 }
 
 // [[Rcpp::export]]
+Rcpp::List fast_dcov_perm_cpp_export(
+    Rcpp::NumericVector x,
+    Rcpp::NumericVector y,
+    double index = 1.0,
+    bool legacy_index = true,
+    int replicates = 100,
+    Rcpp::Nullable<int> seed = R_NilValue,
+    bool include_observed = true) {
+  const bool has_seed = seed.isNotNull();
+  unsigned int parsed_seed = 0U;
+  if (has_seed) {
+    parsed_seed = static_cast<unsigned int>(Rcpp::as<int>(seed));
+  }
+  Rcpp::RNGScope rng_scope;
+  return dcov_permutation_result_to_list(dcov_permutation_cpu(
+    numeric_vector_to_std(x), numeric_vector_to_std(y), index,
+    legacy_index, replicates, include_observed, has_seed, parsed_seed,
+    true));
+}
+
+// [[Rcpp::export]]
 Rcpp::List legacy_dcov_gamma_cpp_oracle_export(Rcpp::NumericVector x,
                                                Rcpp::NumericVector y,
                                                int numCol,
@@ -1755,6 +1841,32 @@ Rcpp::List fast_hsic_perm_cpp_export(Rcpp::NumericVector x,
     hsic_permutation_cpu(numeric_vector_to_std(x), numeric_vector_to_std(y),
                          options)
   );
+}
+
+// [[Rcpp::export]]
+void fastkpc_consume_legacy_permutation_tasks_export(
+    std::string method,
+    int n,
+    int replicates,
+    int task_count) {
+  if ((method != "dcc.perm" && method != "hsic.perm") || n < 2 ||
+      replicates < 1 || task_count < 0) {
+    Rcpp::stop("invalid legacy permutation RNG advance request");
+  }
+  Rcpp::RNGScope rng_scope;
+  for (int task = 0; task < task_count; ++task) {
+    for (int replicate = 0; replicate < replicates; ++replicate) {
+      if (method == "dcc.perm") {
+        for (int remaining = n; remaining > 1; --remaining) {
+          (void)R::unif_rand();
+        }
+      } else {
+        for (int remaining = n; remaining > 0; --remaining) {
+          (void)R_unif_index(static_cast<double>(remaining));
+        }
+      }
+    }
+  }
 }
 
 // [[Rcpp::export]]

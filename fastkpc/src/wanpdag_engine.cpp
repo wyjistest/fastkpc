@@ -147,6 +147,7 @@ RegrVonPsResult evaluate_regrvonps(
   const CiMethodKind ci_method = parse_ci_method_kind(options.ci_method);
   if (evaluator != NULL &&
       (options.orientation_residual_device == "cuda" ||
+       ci_method == CiMethodKind::DccPermutation ||
        ci_method == CiMethodKind::HsicGamma ||
        ci_method == CiMethodKind::HsicPermutation)) {
     return evaluator(data, pdag, p, V, S, options, residual_cache);
@@ -164,6 +165,10 @@ void add_regrvonps_diagnostics(OrientationResult* result,
   result->orientation_dcov_batches += value.dcov_batches;
   result->orientation_dcov_pairs += value.dcov_pairs;
   result->regrvonps_dcc_gamma_tests += value.dcc_gamma_tests;
+  result->regrvonps_dcc_perm_tests += value.dcc_perm_tests;
+  result->regrvonps_dcc_permutation_replicates +=
+    value.dcc_permutation_replicates;
+  result->regrvonps_dcc_perm_cuda_tests += value.dcc_perm_cuda_tests;
   result->regrvonps_hsic_gamma_tests += value.hsic_gamma_tests;
   result->regrvonps_hsic_perm_tests += value.hsic_perm_tests;
   result->regrvonps_hsic_permutation_replicates +=
@@ -178,6 +183,10 @@ void add_regrvonps_diagnostics(OrientationResult* result,
       (value.hsic_gamma_cuda_tests + value.hsic_perm_cuda_tests) > 0) {
     result->ci_backend = "cuda-hsic";
     result->ci_backend_reason = "";
+  } else if (value.ci_backend == "cuda-dcov" &&
+             (value.dcc_gamma_tests + value.dcc_perm_cuda_tests) > 0) {
+    result->ci_backend = "cuda-dcov";
+    result->ci_backend_reason = "";
   } else if (value.ci_backend == "native-cpu" &&
              !value.ci_backend_reason.empty() &&
              result->ci_backend != "cuda-hsic") {
@@ -187,6 +196,28 @@ void add_regrvonps_diagnostics(OrientationResult* result,
   result->orientation_residual_fits += value.residual_fits;
   result->orientation_cuda_residual_fits += value.cuda_residual_fits;
   result->orientation_cpu_fallback_fits += value.cpu_fallback_fits;
+}
+
+void append_regrvonps_ci_trace(OrientationResult* result,
+                               const std::string& context,
+                               int target,
+                               const std::vector<int>& subset,
+                               const RegrVonPsResult& value,
+                               double alpha) {
+  if (value.p_values.size() != subset.size()) {
+    throw std::runtime_error("orientation CI trace alignment changed");
+  }
+  for (std::size_t index = 0; index < subset.size(); ++index) {
+    OrientationCiTest entry;
+    entry.context = context;
+    entry.target = target;
+    entry.other = subset[index];
+    entry.subset = subset;
+    entry.residual_conditioning_set = value.conditioning_set;
+    entry.p_value = value.p_values[index];
+    entry.rejected = entry.p_value < alpha;
+    result->ci_trace.push_back(entry);
+  }
 }
 
 }  // namespace
@@ -218,6 +249,9 @@ OrientationResult orient_wanpdag_native(
   result.orientation_dcov_batches = 0;
   result.orientation_dcov_pairs = 0;
   result.regrvonps_dcc_gamma_tests = 0;
+  result.regrvonps_dcc_perm_tests = 0;
+  result.regrvonps_dcc_permutation_replicates = 0;
+  result.regrvonps_dcc_perm_cuda_tests = 0;
   result.regrvonps_hsic_gamma_tests = 0;
   result.regrvonps_hsic_perm_tests = 0;
   result.regrvonps_hsic_permutation_replicates = 0;
@@ -290,6 +324,8 @@ OrientationResult orient_wanpdag_native(
                                &residual_cache, evaluator);
           ++result.regrvonps_calls;
           add_regrvonps_diagnostics(&result, pval1);
+          append_regrvonps_ci_trace(
+            &result, "regrVonPS", V, S, pval1, options.alpha);
           if (pval1.reject_count > 0) {
             result.events.push_back(make_generalized_event(
               "regrVonPS", -1, V, S, first_or_nan(pval1.p_values), false,
@@ -314,6 +350,9 @@ OrientationResult orient_wanpdag_native(
                                      &residual_cache, evaluator);
                 ++result.regrvonps_calls;
                 add_regrvonps_diagnostics(&result, pval2);
+                append_regrvonps_ci_trace(
+                  &result, "reverseRegrVonPS", W, S2, pval2,
+                  options.alpha);
                 if (pval2.reject_count == 0) {
                   to_update = false;
                   keep_searching = false;

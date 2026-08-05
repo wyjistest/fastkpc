@@ -36,27 +36,38 @@ if (length(arguments) < 1L || length(arguments) > 3L) {
     call. = FALSE
   )
 }
-max_conditioning_size <- suppressWarnings(as.integer(arguments[[1L]]))
+requested_max <- arguments[[1L]]
+max_conditioning_size <- if (tolower(requested_max) %in% c("inf", "infinity")) {
+  Inf
+} else {
+  suppressWarnings(as.integer(requested_max))
+}
 fastkpc_full_cuda_phase10_compute_require(
   length(max_conditioning_size) == 1L &&
     !is.na(max_conditioning_size) &&
-    max_conditioning_size >= 0L && max_conditioning_size <= 7L,
-  "Phase 10 profile max conditioning size is outside [0, 7]"
+    max_conditioning_size >= 0 &&
+    (is.infinite(max_conditioning_size) || max_conditioning_size <= 46L),
+  "Phase 10 profile max conditioning size is outside [0, 46] or Inf"
 )
+profile_slug <- if (is.infinite(max_conditioning_size)) {
+  "default-inf"
+} else {
+  sprintf("level-%02d", max_conditioning_size)
+}
 path <- if (length(arguments) >= 2L) arguments[[2L]] else file.path(
   "fastkpc", "artifacts", "full_cuda_ci", "phase10_profile_v2",
-  sprintf("fresh-data-level-%02d.rds", max_conditioning_size)
+  paste0("fresh-data-", profile_slug, ".rds")
 )
 profile_mode <- if (length(arguments) == 3L) {
   match.arg(arguments[[3L]], c("formal", "development"))
-} else if (max_conditioning_size == 7L) {
+} else if (is.infinite(max_conditioning_size)) {
   "formal"
 } else {
   "development"
 }
 fastkpc_full_cuda_phase10_compute_require(
-  profile_mode != "formal" || max_conditioning_size == 7L,
-  "Phase 10 formal profile requires max conditioning size 7"
+  profile_mode != "formal" || is.infinite(max_conditioning_size),
+  "Phase 10 formal profile requires default max conditioning size Inf"
 )
 trace_capacity_raw <- Sys.getenv(
   "FASTKPC_PHASE10_DECOMPOSITION_TRACE_CAPACITY", unset = "0"
@@ -112,7 +123,8 @@ fastkpc_full_cuda_phase10_compute_require(
 )
 profile <- fastkpc_full_cuda_phase10_compute_profile(evidence$result$summary)
 cat(
-  "PASS Phase 10 fresh-data profile; max_S=", max_conditioning_size,
+  "PASS Phase 10 fresh-data profile; max_S=",
+  if (is.infinite(max_conditioning_size)) "Inf" else max_conditioning_size,
   " mode=", profile_mode,
   " elapsed_sec=", evidence$elapsed_sec, "\n", sep = ""
 )

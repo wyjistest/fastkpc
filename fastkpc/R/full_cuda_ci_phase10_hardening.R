@@ -5,7 +5,7 @@ fastkpc_full_cuda_phase10_hardening_require <- function(condition, message) {
 
 fastkpc_full_cuda_phase10_hardening_artifact_dir <- function(
     root = file.path("fastkpc", "artifacts", "full_cuda_ci")) {
-  file.path(root, "failure_injection_v1")
+  file.path(root, "failure_injection_default_inf_v2")
 }
 
 fastkpc_full_cuda_phase10_hardening_required_files <- function() {
@@ -33,6 +33,10 @@ fastkpc_full_cuda_phase10_hardening_source_paths <- function() {
     "fastkpc/tests/test_full_cuda_ci_phase10_hardening_artifact.R",
     "fastkpc/tests/test_full_cuda_ci_phase10_hardening.R",
     "fastkpc/tests/test_full_cuda_ci_phase10_stream_determinism.R",
+    "fastkpc/tests/test_full_cuda_ci_default_inf_level8.R",
+    "fastkpc/tests/test_full_cuda_ci_default_inf_level9_capacity.R",
+    "fastkpc/tests/fixtures/default_inf_level8_oracle_v1.json",
+    "fastkpc/tests/fixtures/default_inf_production_cuda_v1.json",
     "fastkpc/tools/analyze_full_cuda_ci_phase10_frontier.R",
     "fastkpc/tools/run_full_cuda_ci_phase10_hardening.R"
   )), method = "radix")
@@ -62,8 +66,9 @@ fastkpc_full_cuda_phase10_hardening_source_closure <- function() {
 }
 
 fastkpc_full_cuda_phase10_hardening_backend_configuration <- function() {
+  contract <- fastkpc_full_cuda_default_kpcalg_contract()
   value <- list(
-    schema_version = "full-cuda-ci-phase10-hardening-configuration-v1",
+    schema_version = "full-cuda-ci-phase10-hardening-configuration-v2",
     candidate_route = "compatible.cuda/full_cuda-explicit",
     native_entrypoint = "compatible-cuda-full-skeleton-native-v1",
     scheduler = "cache-aware-frontier-4x-v1",
@@ -79,6 +84,13 @@ fastkpc_full_cuda_phase10_hardening_backend_configuration <- function() {
     alpha = "0.1",
     index = 1L,
     num_col = 35L,
+    requested_max_conditioning_size = contract$requested_max_conditioning_size,
+    resolved_max_conditioning_size = contract$resolved_max_conditioning_size,
+    natural_stop_level = contract$natural_stop_level,
+    logical_test_count = contract$logical_test_count,
+    default_inf_full_regression_required = TRUE,
+    default_inf_level8_qualification_required = TRUE,
+    default_inf_extended_capacity_qualification_required = TRUE,
     precision = "float64",
     fmad = FALSE,
     fast_math = FALSE
@@ -93,7 +105,7 @@ fastkpc_full_cuda_phase10_hardening_backend_configuration <- function() {
 
 fastkpc_full_cuda_phase10_hardening_build_recipe <- function() {
   value <- list(
-    schema_version = "full-cuda-ci-phase10-hardening-build-recipe-v1",
+    schema_version = "full-cuda-ci-phase10-hardening-build-recipe-v2",
     build_script_sha256 = fastkpc_full_cuda_census_file_hash(
       "fastkpc/tools/build_cuda_native.sh"
     ),
@@ -227,8 +239,13 @@ fastkpc_full_cuda_phase10_hardening_evidence_inputs <- function(
       "rank_condition_results.csv"
     ),
     oracle_manifest = file.path(
-      "fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1",
-      "manifest.json"
+      fastkpc_full_cuda_default_kpcalg_oracle_dir(), "manifest.json"
+    ),
+    default_inf_level8_fixture = file.path(
+      "fastkpc", "tests", "fixtures", "default_inf_level8_oracle_v1.json"
+    ),
+    default_inf_production_fixture = file.path(
+      "fastkpc", "tests", "fixtures", "default_inf_production_cuda_v1.json"
     )
   )
   fastkpc_full_cuda_phase10_hardening_require(
@@ -249,13 +266,29 @@ fastkpc_full_cuda_phase10_hardening_summary <- function(
     evidence, comparison, tests, near_alpha, producer_bundle,
     source_evidence_sha256, contracts) {
   final_flip_count <- sum(as.logical(near_alpha$final_decision_flip))
+  default_contract <- fastkpc_full_cuda_default_kpcalg_contract()
   list(
-    schema_version = "full-cuda-ci-phase10-hardening-summary-v1",
+    schema_version = "full-cuda-ci-phase10-hardening-summary-v2",
     run_status = "ok",
     timeout = FALSE,
     source_commit = fastkpc_full_cuda_source_commit(),
-    oracle_artifact =
-      "fastkpc/artifacts/full_cuda_ci/oracle_351x48_v1",
+    oracle_artifact = fastkpc_full_cuda_default_kpcalg_oracle_dir(),
+    max_conditioning_size_requested =
+      default_contract$requested_max_conditioning_size,
+    max_conditioning_size_resolved =
+      default_contract$resolved_max_conditioning_size,
+    natural_stop_level = default_contract$natural_stop_level,
+    logical_test_count = default_contract$logical_test_count,
+    level8_test_count = default_contract$n_edgetests[[9L]],
+    default_inf_full_regression_pass = any(
+      tests$test == "default-inf-full-regression" & tests$pass
+    ),
+    default_inf_level8_qualification_pass = any(
+      tests$test == "default-inf-level8-qualification" & tests$pass
+    ),
+    default_inf_extended_capacity_qualification_pass = any(
+      tests$test == "default-inf-extended-capacity" & tests$pass
+    ),
     candidate_route = "compatible.cuda/full_cuda-explicit",
     edge_count_reference = comparison$summary$edge_count_reference,
     edge_count_candidate = comparison$summary$edge_count_candidate,
@@ -316,8 +349,20 @@ fastkpc_full_cuda_phase10_hardening_validate_summary <- function(summary) {
     "native_binary_sha256"
   )
   clean <- is.list(summary) && identical(
-    summary$schema_version, "full-cuda-ci-phase10-hardening-summary-v1"
+    summary$schema_version, "full-cuda-ci-phase10-hardening-summary-v2"
   ) && identical(summary$run_status, "ok") && !isTRUE(summary$timeout) &&
+    identical(
+      summary$oracle_artifact,
+      fastkpc_full_cuda_default_kpcalg_oracle_dir()
+    ) &&
+    identical(summary$max_conditioning_size_requested, "Inf") &&
+    as.integer(summary$max_conditioning_size_resolved) == 46L &&
+    as.integer(summary$natural_stop_level) == 8L &&
+    as.integer(summary$logical_test_count) == 240498L &&
+    as.integer(summary$level8_test_count) == 9L &&
+    isTRUE(summary$default_inf_full_regression_pass) &&
+    isTRUE(summary$default_inf_level8_qualification_pass) &&
+    isTRUE(summary$default_inf_extended_capacity_qualification_pass) &&
     summary$SHD == 0L && isTRUE(summary$adjacency_identical) &&
     isTRUE(summary$sepsets_identical) &&
     isTRUE(summary$n_edgetests_identical) &&
@@ -336,7 +381,7 @@ fastkpc_full_cuda_phase10_hardening_validate_summary <- function(summary) {
     summary$tracked_resource_leak_count == 0L &&
     summary$near_alpha_case_count >= 1L &&
     summary$near_alpha_final_decision_flip_count == 0L &&
-    summary$test_count >= 3L && summary$test_failure_count == 0L &&
+    summary$test_count >= 10L && summary$test_failure_count == 0L &&
     summary$unknown_fallback_count == 0L &&
     summary$approximate_backend_count == 0L &&
     is.finite(summary$elapsed_sec) && summary$elapsed_sec > 0 &&
@@ -354,21 +399,20 @@ fastkpc_full_cuda_phase10_hardening_validate_summary <- function(summary) {
 fastkpc_full_cuda_phase10_hardening_producer <- function(
     source_closure, native_identity, backend, build, contracts) {
   oracle_manifest <- file.path(
-    "fastkpc", "artifacts", "full_cuda_ci", "oracle_351x48_v1",
-    "manifest.json"
+    fastkpc_full_cuda_default_kpcalg_oracle_dir(), "manifest.json"
   )
   corpus_sha256 <- fastkpc_full_cuda_phase35_sha256_utf8(
     fastkpc_full_cuda_phase35_canonical_json(list(
       development_contract =
         contracts$development_qualification_corpus_v1$sha256,
       metamorphic_contract = contracts$metamorphic_contract_v1$sha256,
-      claim_scope = "phase10-complete-route-hardening"
+      claim_scope = "phase10-default-kpcalg-hardening"
     ))
   )
   fastkpc_full_cuda_phase35_producer_identity(
     producer_source_closure_sha256 = source_closure$sha256,
     native_binary_sha256 = native_identity$sha256,
-    route_semantic_version = "full-cuda-ci-phase10-hardening-v1",
+    route_semantic_version = "full-cuda-ci-phase10-hardening-v2",
     dataset_or_corpus_sha256 = corpus_sha256,
     oracle_sha256 = fastkpc_full_cuda_census_file_hash(oracle_manifest),
     backend_configuration_sha256 = backend$sha256,
@@ -415,7 +459,7 @@ fastkpc_full_cuda_phase10_publish_hardening <- function(
     "Phase 10 inherited near-alpha evidence failed validation"
   )
   evidence <- list(
-    schema_version = "full-cuda-ci-phase10-hardening-publication-evidence-v1",
+    schema_version = "full-cuda-ci-phase10-hardening-publication-evidence-v2",
     hardening = hardening,
     streams = streams,
     test_results = test_results,
@@ -533,6 +577,18 @@ fastkpc_full_cuda_phase10_publish_hardening <- function(
     paste0("- fail-closed cases: ", summary$fail_closed_case_count),
     paste0("- capacity points: ", summary$cache_capacity_point_count),
     paste0("- stream counts: ", summary$stream_counts),
+    paste0("- max conditioning size requested: ",
+           summary$max_conditioning_size_requested),
+    paste0("- max conditioning size resolved: ",
+           summary$max_conditioning_size_resolved),
+    paste0("- natural stop level: ", summary$natural_stop_level),
+    paste0("- default-Inf logical tests: ", summary$logical_test_count),
+    paste0("- default-Inf full regression: ",
+           summary$default_inf_full_regression_pass),
+    paste0("- level-8 qualification: ",
+           summary$default_inf_level8_qualification_pass),
+    paste0("- extended capacity qualification: ",
+           summary$default_inf_extended_capacity_qualification_pass),
     paste0("- pathology cases: ", summary$pathology_case_count),
     paste0("- repeated runs: ", summary$repeated_run_count),
     paste0("- tracked resource leaks: ",
@@ -588,7 +644,7 @@ fastkpc_full_cuda_phase10_publish_hardening <- function(
   attestation <- fastkpc_full_cuda_phase35_validator_attestation(
     producer = producer,
     validator_source_closure_sha256 = source_closure$sha256,
-    validator_semantic_version = "full-cuda-ci-phase10-hardening-validator-v1",
+    validator_semantic_version = "full-cuda-ci-phase10-hardening-validator-v2",
     validator_contracts = contracts,
     validation_timestamp_utc = timestamp,
     environment_sha256 = environment_sha256,
@@ -619,9 +675,9 @@ fastkpc_full_cuda_phase10_publish_hardening <- function(
     file.path(stage, "execution_receipts.json")
   )
   manifest <- list(
-    schema_version = "full-cuda-ci-phase10-hardening-manifest-v1",
+    schema_version = "full-cuda-ci-phase10-hardening-manifest-v2",
     artifact_kind = "failure_injection",
-    claim_scope = "phase10-complete-route-hardening",
+    claim_scope = "phase10-default-kpcalg-hardening",
     producer_semantic_envelope = envelope,
     payload_manifest_sha256 = payload_sha256,
     payload_file_sha256 = payload_hashes,
@@ -686,10 +742,10 @@ fastkpc_full_cuda_phase10_validate_hardening_artifact <- function(
   )
   fastkpc_full_cuda_phase10_hardening_require(
     identical(manifest$schema_version,
-              "full-cuda-ci-phase10-hardening-manifest-v1") &&
+              "full-cuda-ci-phase10-hardening-manifest-v2") &&
       identical(manifest$artifact_kind, "failure_injection") &&
       identical(manifest$claim_scope,
-                "phase10-complete-route-hardening"),
+                "phase10-default-kpcalg-hardening"),
     "Phase 10 hardening artifact manifest schema mismatch"
   )
   excluded <- c(
@@ -768,7 +824,7 @@ fastkpc_full_cuda_phase10_validate_hardening_artifact <- function(
   fastkpc_full_cuda_phase10_hardening_require(
     is.list(evidence) && identical(
       evidence$schema_version,
-      "full-cuda-ci-phase10-hardening-publication-evidence-v1"
+      "full-cuda-ci-phase10-hardening-publication-evidence-v2"
     ) && isTRUE(evidence$pass) && is.data.frame(evidence$test_results) &&
       all(evidence$test_results$pass),
     "Phase 10 hardening publication evidence is malformed"
@@ -789,12 +845,38 @@ fastkpc_full_cuda_phase10_validate_hardening_artifact <- function(
   fallbacks <- read_table("fallbacks.csv")
   near <- read_table("near_alpha_results.csv")
   inputs <- read_table("evidence_inputs.csv")
+  required_input_kinds <- c(
+    "hardening_evidence", "stream_evidence", "phase8_backend_manifest",
+    "phase8_near_alpha", "phase8_rank_condition", "oracle_manifest",
+    "default_inf_level8_fixture", "default_inf_production_fixture"
+  )
   phase8_near <- inputs$input_file[
     inputs$input_kind == "phase8_near_alpha"
   ]
   phase8_rank <- inputs$input_file[
     inputs$input_kind == "phase8_rank_condition"
   ]
+  oracle_manifest <- inputs$input_file[
+    inputs$input_kind == "oracle_manifest"
+  ]
+  input_identity_gate <- identical(
+    sort(as.character(inputs$input_kind), method = "radix"),
+    sort(required_input_kinds, method = "radix")
+  ) && all(file.exists(inputs$input_file) & !dir.exists(inputs$input_file)) &&
+    identical(
+      as.character(inputs$sha256),
+      unname(vapply(
+        inputs$input_file, fastkpc_full_cuda_census_file_hash, character(1L)
+      ))
+    ) && length(oracle_manifest) == 1L && identical(
+      normalizePath(oracle_manifest, winslash = "/", mustWork = TRUE),
+      normalizePath(
+        file.path(
+          fastkpc_full_cuda_default_kpcalg_oracle_dir(), "manifest.json"
+        ),
+        winslash = "/", mustWork = TRUE
+      )
+    )
   payload_gate <- nrow(cases) >= 10L && all(cases$fail_closed) &&
     !any(cases$partial_graph_published) && nrow(capacities) >= 4L &&
     all(capacities$pass) && nrow(pathologies) >= 2L &&
@@ -802,7 +884,12 @@ fastkpc_full_cuda_phase10_validate_hardening_artifact <- function(
     nrow(resources) > 0L && all(resources$active_count == 0) &&
     identical(as.integer(streams$stream_count), c(1L, 2L, 4L)) &&
     all(streams$pass) && all(streams$optimizer_status_ok) &&
-    nrow(tests) >= 3L && all(tests$pass) && sum(fallbacks$count) == 0L &&
+    nrow(tests) >= 10L && all(tests$pass) &&
+    all(c(
+      "default-inf-level8-qualification", "default-inf-extended-capacity",
+      "default-inf-full-regression"
+    ) %in% tests$test) && input_identity_gate &&
+    sum(fallbacks$count) == 0L &&
     nrow(near) >= 1L && !any(as.logical(near$final_decision_flip)) &&
     length(phase8_near) == 1L && length(phase8_rank) == 1L &&
     identical(

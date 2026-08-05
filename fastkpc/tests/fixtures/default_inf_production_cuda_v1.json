@@ -1,0 +1,43 @@
+{
+  "schema_version": "fastkpc-default-inf-production-cuda-v1",
+  "data_sha256": "971f1e0784817c6febfc84154f19540be02a92f6e4acad784dc7f92b979f1df7",
+  "n": 351,
+  "p": 48,
+  "alpha": 0.1,
+  "requested_max_conditioning_size": "Inf",
+  "resolved_max_conditioning_size": 46,
+  "natural_stop_level": 8,
+  "n_edgetests": [2213, 52659, 125293, 40694, 13293, 5422, 835, 80, 9],
+  "logical_test_count": 240498,
+  "physical_test_count": 241686,
+  "physical_target_optimization_count": 132926,
+  "unique_target_key_count": 110635,
+  "unique_residual_key_count": 110683,
+  "native_setup_count": 8646,
+  "optimizer_boundary_count": 138,
+  "runtime_workspace_bytes": 14428192,
+  "development_timing": {
+    "boundary": "different-DatasetKey CUDA prewarm followed by dataset-cache reset",
+    "wall_sec": 271.923,
+    "native_elapsed_sec": 271.695268186,
+    "performance_gate_evidence": false
+  },
+  "hashes": {
+    "adjacency_int32_le": "cc23ea2799475a2326099ed71edfd1deae3ff660463b684be0d7aaa909c38dfd",
+    "sepsets_canonical_text": "8d7d0dd8370bb11925ba452b33b46207e9a602b4c0e568122dc62f67d81332e9",
+    "pmax_binary64_le": "05d8e104c9de19939a876180b66b494cabc74069af8bdaec0b659b8f2a5f0e09",
+    "task_structure_canonical_text": "f1044b4c3dfcb888a5bfe3a7dd932c9e06e16b10e5f622257f60e9dba41add04",
+    "task_p_used_binary64_le": "31e1c0a4526e4b4312df055a338bedfa2de4d0a1ef5cd3e880f6496faa926423"
+  },
+  "level8_production_p_value_bits_le": [
+    "c95eebdf25c0bb3d",
+    "ec714e1e6a02a63d",
+    "a23918f0473c873e",
+    "49e362b473c8073e",
+    "5d4973b567e55e3e",
+    "2386cdf144a5463e",
+    "1782d8a301644e3e",
+    "8c46ee1137a78d3d",
+    "8c577025f53b983b"
+  ]
+}

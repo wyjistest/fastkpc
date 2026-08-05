@@ -1,6 +1,7 @@
 #include "mgcv_multi_penalty_gcv.hpp"
 
-#define FASTKPC_LAPACK_SMALL_MAX_COLUMNS 64
+#define FASTKPC_LAPACK_SMALL_MAX_COLUMNS \
+  FASTKPC_MULTI_PENALTY_MAX_COEFFICIENT_DIM
 #define FASTKPC_LAPACK_SMALL_NAMESPACE lapack312_multi
 #include "lapack_312_small_dgesdd.cuh"
 #undef FASTKPC_LAPACK_SMALL_NAMESPACE
@@ -32,7 +33,8 @@ namespace fastkpc {
 namespace {
 
 constexpr int kBlockSize = 64;
-constexpr int kMaximumRows = 128;
+constexpr int kMaximumRows =
+  2 * kMultiPenaltyGcvMaximumCoefficientDim;
 constexpr double kLapackEpsilon =
   1.1102230246251565404236316680908203125e-16;
 constexpr double kDenominatorFloor = 1e-8;

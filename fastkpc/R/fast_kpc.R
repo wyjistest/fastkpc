@@ -63,33 +63,45 @@ fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
                        "mgcv_residual_backend",
                        "mgcv_residual_backend_native_s_size_limit",
                        "mgcv_residual_backend_condition_threshold",
-                       "route", "compatible_cuda_strict")
+                       "route", "compatible_cuda_strict", "ci_method",
+                       "hsic_params", "permutation_params")
   unknown_options <- setdiff(names(options), allowed_options)
   if (length(unknown_options) > 0L) {
     stop("unknown compatible CUDA option(s): ",
          paste(unknown_options, collapse = ","), call. = FALSE)
   }
-  if (is.null(options$max_conditioning_size)) {
-    stop("options$max_conditioning_size must be supplied", call. = FALSE)
-  }
-
   normalized <- fastkpc_normalize_data(data, labels = labels)
   data <- normalized$data
   labels <- normalized$info$labels
+  requested_max_conditioning_size <-
+    options$max_conditioning_size %||% Inf
+  max_conditioning_size <- fastkpc_resolve_max_conditioning_size(
+    requested_max_conditioning_size, ncol(data)
+  )
   index <- options$index %||% 1
   numCol <- options$numCol %||% floor(nrow(data) / 10)
   trace_level <- options$trace_level %||% "summary"
   route <- match.arg(options$route %||% "legacy", c("legacy", "full_cuda"))
   compatible_cuda_strict <- options$compatible_cuda_strict %||% TRUE
+  ci_method <- match.arg(
+    options$ci_method %||% "dcc.gamma",
+    c("dcc.gamma", "dcc.perm", "hsic.gamma", "hsic.perm")
+  )
+  hsic_params <- options$hsic_params %||% list(sig = 1)
+  permutation_params <- options$permutation_params %||%
+    list(replicates = 100L, seed = NULL, include_observed = TRUE)
   if (identical(route, "full_cuda")) {
     result <- precision_run_skeleton_full_cuda_native(
       data = data,
       alpha = alpha,
-      max_conditioning_size = as.integer(options$max_conditioning_size),
+      max_conditioning_size = max_conditioning_size,
       index = index,
       numCol = numCol,
       trace_level = trace_level,
-      compatible_cuda_strict = compatible_cuda_strict
+      compatible_cuda_strict = compatible_cuda_strict,
+      ci_method = ci_method,
+      hsic_params = hsic_params,
+      permutation_params = permutation_params
     )
     dimnames(result$adjacency) <- list(labels, labels)
     dimnames(result$pMax) <- list(labels, labels)
@@ -105,8 +117,15 @@ fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
     result$summary$compatible_cuda_residual_authority <-
       "native-setup-live-cuda-gcv-device-residual"
     result$summary$compatible_cuda_ci_authority <-
-      "guarded-exact-screen-legacy-full-eig-cuda"
+      result$summary$ci_backend
     result$summary$labels <- labels
+    result$summary$max_conditioning_size_requested <-
+      if (is.infinite(requested_max_conditioning_size)) {
+        "Inf"
+      } else {
+        as.character(requested_max_conditioning_size)
+      }
+    result$summary$max_conditioning_size_resolved <- max_conditioning_size
     return(result)
   }
   dcov_batch <- options$dcov_batch %||% "env"
@@ -145,7 +164,7 @@ fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
   result <- precision_run_skeleton_legacy_mgcv_legacy_dcov_native(
     data = data,
     alpha = alpha,
-    max_conditioning_size = as.integer(options$max_conditioning_size),
+    max_conditioning_size = max_conditioning_size,
     index = index,
     numCol = numCol,
     trace_level = trace_level,
@@ -181,6 +200,406 @@ fastkpc_compatible_cuda_skeleton <- function(data, alpha, labels = NULL,
   result$summary$compatible_cuda_mgcv_residual_backend_condition_threshold <-
     as.numeric(mgcv_residual_backend_condition_threshold)
   result$summary$labels <- labels
+  result$summary$max_conditioning_size_requested <-
+    if (is.infinite(requested_max_conditioning_size)) {
+      "Inf"
+    } else {
+      as.character(requested_max_conditioning_size)
+    }
+  result$summary$max_conditioning_size_resolved <- max_conditioning_size
+  result
+}
+
+fastkpc_skeleton_as_pc_algo <- function(skeleton, data) {
+  if (!requireNamespace("pcalg", quietly = TRUE) ||
+      !requireNamespace("graph", quietly = TRUE)) {
+    stop("pcalg and graph are required for kpcalg-authority orientation",
+         call. = FALSE)
+  }
+  data <- as.matrix(data)
+  adjacency <- as.matrix(skeleton$adjacency)
+  p <- ncol(data)
+  if (!identical(dim(adjacency), c(p, p)) ||
+      !identical(adjacency, t(adjacency)) ||
+      any(diag(adjacency) != 0)) {
+    stop("skeleton adjacency is not a symmetric zero-diagonal p by p matrix",
+         call. = FALSE)
+  }
+  labels <- colnames(data) %||% paste0("V", seq_len(p))
+  storage.mode(adjacency) <- "integer"
+  dimnames(adjacency) <- list(labels, labels)
+
+  pmax <- as.matrix(skeleton$pMax)
+  if (!identical(dim(pmax), c(p, p)) || anyNA(pmax)) {
+    stop("skeleton pMax is not a complete p by p matrix", call. = FALSE)
+  }
+  storage.mode(pmax) <- "double"
+  dimnames(pmax) <- dimnames(adjacency)
+  sepsets <- skeleton$sepsets
+  if (!is.list(sepsets) || length(sepsets) != p ||
+      any(vapply(sepsets, length, integer(1L)) != p)) {
+    stop("skeleton sepsets are not a complete p by p list", call. = FALSE)
+  }
+  n_edgetests <- as.numeric(skeleton$n.edgetests)
+  if (!length(n_edgetests) || anyNA(n_edgetests) ||
+      any(n_edgetests < 0)) {
+    stop("skeleton n.edgetests are invalid", call. = FALSE)
+  }
+
+  methods::new(
+    "pcAlgo",
+    graph = methods::as(adjacency, "graphNEL"),
+    zMin = matrix(NA_real_, nrow = p, ncol = p,
+                  dimnames = dimnames(adjacency)),
+    call = match.call(),
+    n = as.integer(nrow(data)),
+    max.ord = as.integer(length(n_edgetests) - 1L),
+    n.edgetests = n_edgetests,
+    sepset = sepsets,
+    pMax = pmax
+  )
+}
+
+fastkpc_orient_wanpdag_kpcalg_authority <- function(
+    skeleton, data, alpha = 0.1, index = 1,
+    numCol = floor(nrow(as.matrix(data)) / 10),
+    ci_method = c("dcc.gamma", "dcc.perm", "hsic.gamma", "hsic.perm"),
+    hsic_params = list(sig = 1),
+    permutation_params = list(replicates = 100L, seed = NULL,
+                              include_observed = TRUE),
+    orient_collider = TRUE, solve_confl = FALSE,
+    rules = c(TRUE, TRUE, TRUE), rng_state = NULL) {
+  ci_method <- match.arg(ci_method)
+  data <- as.matrix(data)
+  storage.mode(data) <- "double"
+  if (!all(is.finite(data)) || ncol(data) < 2L || nrow(data) < 2L) {
+    stop("kpcalg-authority orientation requires a finite numeric data matrix",
+         call. = FALSE)
+  }
+  if (!is.numeric(alpha) || length(alpha) != 1L || !is.finite(alpha) ||
+      alpha <= 0 || alpha >= 1) {
+    stop("alpha must be one finite value in (0, 1)", call. = FALSE)
+  }
+  if (length(rules) != 3L || anyNA(rules)) {
+    stop("rules must contain three non-missing logical values", call. = FALSE)
+  }
+  replicates <- as.integer(permutation_params$replicates %||% 100L)[1L]
+  include_observed <- isTRUE(permutation_params$include_observed %||% TRUE)
+  permutation_seed <- permutation_params$seed %||% NULL
+  if (ci_method %in% c("dcc.perm", "hsic.perm")) {
+    if (is.null(permutation_seed) || length(permutation_seed) != 1L ||
+        is.na(permutation_seed) || permutation_seed < 0L ||
+        is.na(replicates) || replicates < 1L || !include_observed) {
+      stop(paste0(
+        "strict kpcalg-authority permutation orientation requires an ",
+        "explicit non-negative seed, positive replicates, and observed inclusion"
+      ), call. = FALSE)
+    }
+  }
+  if (!is.null(rng_state)) {
+    if (!is.integer(rng_state) || !length(rng_state) || anyNA(rng_state)) {
+      stop("rng_state must be an authenticated integer .Random.seed",
+           call. = FALSE)
+    }
+    assign(".Random.seed", rng_state, envir = .GlobalEnv)
+  }
+  rng_start_state <- if (exists(
+      ".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+    get(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+  } else {
+    NULL
+  }
+
+  fastkpc_require_legacy_packages(c(
+    "pcalg", "graph",
+    fastkpc_legacy_packages_for_method(ci_method, conditional = TRUE)
+  ))
+  env <- fastkpc_legacy_env()
+  pc_skeleton <- fastkpc_skeleton_as_pc_algo(skeleton, data)
+  suff_stat <- list(
+    data = data,
+    ic.method = ci_method,
+    index = as.numeric(index),
+    numCol = as.integer(numCol),
+    sig = as.numeric(hsic_params$sig %||% 1),
+    p = replicates
+  )
+
+  ci_trace <- list()
+  call_events <- list()
+  ci_count <- 0L
+  call_count <- 0L
+  original_regrvonps <- env$regrVonPS
+  env$regrVonPS <- function(G, V, S, suffStat,
+                            indepTest = env$kernelCItest, alpha = 0.2) {
+    call_count <<- call_count + 1L
+    call_index <- call_count
+    subset <- as.integer(S)
+    parents <- which(G[, V] == 1 & G[V, ] == 0, arr.ind = TRUE)
+    conditioning <- sort(unique(c(subset, as.integer(parents))))
+    call_position <- 0L
+    first_ci_index <- ci_count + 1L
+    traced_indep_test <- function(x, y, S = NULL, suffStat) {
+      call_position <<- call_position + 1L
+      if (call_position > length(subset)) {
+        stop("kpcalg-authority regrVonPS trace alignment changed",
+             call. = FALSE)
+      }
+      p_value <- indepTest(x = x, y = y, S = S, suffStat = suffStat)
+      ci_count <<- ci_count + 1L
+      ci_trace[[ci_count]] <<- list(
+        context = "kpcalg-regrVonPS",
+        target = as.integer(V),
+        other = subset[[call_position]],
+        subset = subset,
+        residual_conditioning_set = conditioning,
+        p.value = as.numeric(p_value),
+        rejected = as.numeric(p_value) < alpha
+      )
+      p_value
+    }
+    value <- original_regrvonps(
+      G = G, V = V, S = subset, suffStat = suffStat,
+      indepTest = traced_indep_test, alpha = alpha
+    )
+    last_ci_index <- ci_count
+    call_events[[call_index]] <<- list(
+      type = "kpcalg-regrVonPS",
+      call_index = call_index,
+      target = as.integer(V),
+      subset = subset,
+      parents = as.integer(parents),
+      residual_conditioning_set = conditioning,
+      first_ci_index = first_ci_index,
+      last_ci_index = last_ci_index,
+      reject_count = as.integer(value)
+    )
+    value
+  }
+
+  started <- proc.time()[["elapsed"]]
+  oriented <- env$udag2wanpdag(
+    gInput = pc_skeleton,
+    suffStat = suff_stat,
+    indepTest = env$kernelCItest,
+    alpha = alpha,
+    verbose = FALSE,
+    solve.confl = isTRUE(solve_confl),
+    orientCollider = isTRUE(orient_collider),
+    rules = as.logical(rules)
+  )
+  elapsed <- proc.time()[["elapsed"]] - started
+  pdag <- methods::as(oriented@graph, "matrix")
+  storage.mode(pdag) <- "integer"
+  dimnames(pdag) <- dimnames(as.matrix(skeleton$adjacency))
+  rng_end_state <- if (exists(
+      ".Random.seed", envir = .GlobalEnv, inherits = FALSE)) {
+    get(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+  } else {
+    NULL
+  }
+  method_counts <- list(
+    regrvonps_dcc_gamma_tests = if (ci_method == "dcc.gamma") ci_count else 0L,
+    regrvonps_dcc_perm_tests = if (ci_method == "dcc.perm") ci_count else 0L,
+    regrvonps_dcc_permutation_replicates =
+      if (ci_method == "dcc.perm") ci_count * replicates else 0L,
+    regrvonps_hsic_gamma_tests = if (ci_method == "hsic.gamma") ci_count else 0L,
+    regrvonps_hsic_perm_tests = if (ci_method == "hsic.perm") ci_count else 0L,
+    regrvonps_hsic_permutation_replicates =
+      if (ci_method == "hsic.perm") ci_count * replicates else 0L
+  )
+
+  list(
+    pdag = pdag,
+    events = call_events,
+    ci_trace = ci_trace,
+    counts = list(
+      collider = NA_integer_, rule1 = NA_integer_, rule2 = NA_integer_,
+      rule3 = NA_integer_, generalized = NA_integer_,
+      regrvonps_calls = call_count
+    ),
+    residual_backend = "kpcalg::regrXonS",
+    residual_backend_params = "kpcalg-authority",
+    residual_device = "cpu",
+    residual_device_requested = "cpu",
+    residual_device_reason = "strict kpcalg WAN-PDAG authority",
+    orientation_batch_size_requested = 0L,
+    orientation_batch_size_used = 0L,
+    residual_cache = fastkpc_zero_cache(),
+    diagnostics = c(list(
+      orientation_authority = "kpcalg",
+      kpcalg_version = as.character(utils::packageVersion("kpcalg")),
+      orientation_elapsed_sec = as.numeric(elapsed),
+      regrvonps_calls = call_count,
+      ci_test_count = ci_count,
+      rng_start_state = rng_start_state,
+      rng_end_state = rng_end_state,
+      native_orientation_executed = FALSE
+    ), method_counts),
+    ci_method = ci_method,
+    ci_backend = "kpcalg-cpu-authority",
+    ci_backend_reason = "strict-compatible WAN-PDAG authority",
+    ci_diagnostics = method_counts,
+    authority = "kpcalg::udag2wanpdag"
+  )
+}
+
+fastkpc_compatible_cuda_wanpdag <- function(data, alpha = 0.1,
+                                            labels = NULL,
+                                            options = list()) {
+  if (!is.list(options)) stop("options must be a list", call. = FALSE)
+  allowed_options <- c(
+    "max_conditioning_size", "index", "numCol", "trace_level",
+    "route", "compatible_cuda_strict", "ci_method", "hsic_params",
+    "permutation_params", "orient_collider", "solve_confl", "rules"
+  )
+  unknown_options <- setdiff(names(options), allowed_options)
+  if (length(unknown_options)) {
+    stop("unknown compatible CUDA WAN-PDAG option(s): ",
+         paste(unknown_options, collapse = ","), call. = FALSE)
+  }
+  if (!identical(options$route %||% "full_cuda", "full_cuda") ||
+      !isTRUE(options$compatible_cuda_strict %||% TRUE)) {
+    stop("compatible CUDA WAN-PDAG requires strict full_cuda skeleton execution",
+         call. = FALSE)
+  }
+  trace_level <- options$trace_level %||% "logical"
+  if (!trace_level %in% c("logical", "full")) {
+    stop("compatible CUDA WAN-PDAG requires logical or full skeleton trace",
+         call. = FALSE)
+  }
+  normalized <- fastkpc_normalize_data(data, labels = labels)
+  data <- normalized$data
+  ci_method <- match.arg(
+    options$ci_method %||% "dcc.gamma",
+    c("dcc.gamma", "dcc.perm", "hsic.gamma", "hsic.perm")
+  )
+  hsic_params <- options$hsic_params %||% list(sig = 1)
+  permutation_params <- options$permutation_params %||%
+    list(replicates = 100L, seed = NULL, include_observed = TRUE)
+  skeleton_options <- list(
+    route = "full_cuda",
+    compatible_cuda_strict = TRUE,
+    max_conditioning_size = options$max_conditioning_size %||% Inf,
+    index = options$index %||% 1,
+    numCol = options$numCol %||% floor(nrow(data) / 10),
+    trace_level = trace_level,
+    ci_method = ci_method,
+    hsic_params = hsic_params,
+    permutation_params = permutation_params
+  )
+
+  total_started <- proc.time()[["elapsed"]]
+  skeleton_started <- proc.time()[["elapsed"]]
+  skeleton <- fastkpc_compatible_cuda_skeleton(
+    data, alpha = alpha, labels = normalized$info$labels,
+    options = skeleton_options
+  )
+  skeleton_elapsed <- proc.time()[["elapsed"]] - skeleton_started
+  orientation <- fastkpc_orient_wanpdag_kpcalg_authority(
+    skeleton = skeleton,
+    data = data,
+    alpha = alpha,
+    index = skeleton_options$index,
+    numCol = skeleton_options$numCol,
+    ci_method = ci_method,
+    hsic_params = hsic_params,
+    permutation_params = permutation_params,
+    orient_collider = options$orient_collider %||% TRUE,
+    solve_confl = options$solve_confl %||% FALSE,
+    rules = options$rules %||% c(TRUE, TRUE, TRUE)
+  )
+  total_elapsed <- proc.time()[["elapsed"]] - total_started
+  orientation_elapsed <- orientation$diagnostics$orientation_elapsed_sec
+  edge_counts <- fastkpc_pdag_edge_counts(orientation$pdag)
+  permutation_method <- ci_method %in% c("dcc.perm", "hsic.perm")
+  numerical_contract <- list(
+    schema_version = "fastkpc-strict-process-contract-v1",
+    skeleton_ci_identity = "exact",
+    skeleton_p_value = if (ci_method == "hsic.gamma") {
+      "absolute-tolerance-1e-10"
+    } else {
+      "bitwise-exact"
+    },
+    skeleton_decision_trace = "exact",
+    adjacency = "exact",
+    undirected_sepset_union = "exact",
+    pMax = if (ci_method == "hsic.gamma") {
+      "absolute-tolerance-1e-10"
+    } else {
+      "bitwise-exact"
+    },
+    n_edgetests = "exact",
+    orientation_ci_identity = "exact",
+    orientation_p_value = "bitwise-exact",
+    orientation_decision_trace = "exact",
+    final_pdag = "exact"
+  )
+  permutation_rng_contract <- list(
+    applicable = permutation_method,
+    contract = if (permutation_method) {
+      "legacy-r-global-stream-exact"
+    } else {
+      "not-applicable"
+    },
+    explicit_seed_required = permutation_method,
+    initial_state_recorded = permutation_method,
+    final_state_recorded = permutation_method
+  )
+  authority_receipt <- list(
+    schema_version = "fastkpc-wanpdag-authority-receipt-v1",
+    skeleton_authority = "full_cuda",
+    orientation_authority = "kpcalg_cpu_wanpdag",
+    native_cuda_orientation_status = "experimental",
+    ci_method = ci_method,
+    numerical_contract = numerical_contract,
+    permutation_rng_contract = permutation_rng_contract,
+    skeleton_ci_test_count = as.integer(sum(skeleton$n.edgetests)),
+    orientation_ci_test_count =
+      as.integer(orientation$diagnostics$ci_test_count),
+    orientation_rng_start_state =
+      orientation$diagnostics$rng_start_state,
+    orientation_rng_end_state = orientation$diagnostics$rng_end_state
+  )
+  result <- list(
+    schema_version = "fastkpc-compatible-cuda-wanpdag-v1",
+    config = list(
+      alpha = alpha,
+      max_conditioning_size_requested =
+        skeleton$summary$max_conditioning_size_requested,
+      max_conditioning_size_resolved =
+        skeleton$summary$max_conditioning_size_resolved,
+      ci_method = ci_method,
+      ci_backend = skeleton$summary$ci_backend,
+      skeleton_authority = "full_cuda",
+      orientation_authority = "kpcalg_cpu_wanpdag",
+      native_cuda_orientation_status = "experimental",
+      orientation_ci_backend = orientation$ci_backend,
+      numerical_contract = numerical_contract,
+      permutation_rng_contract = permutation_rng_contract,
+      hsic_params = hsic_params,
+      permutation_params = permutation_params
+    ),
+    data_info = normalized$info,
+    skeleton = skeleton,
+    orientation = orientation,
+    authority_receipt = authority_receipt,
+    timings = data.frame(
+      stage = c("skeleton", "orientation", "total"),
+      elapsed_sec = c(skeleton_elapsed, orientation_elapsed, total_elapsed)
+    ),
+    metrics = list(
+      skeleton_edge_count =
+        as.integer(fastkpc_skeleton_edge_count(skeleton$adjacency)),
+      directed_edge_count = edge_counts$directed,
+      undirected_edge_count = edge_counts$undirected,
+      bidirected_edge_count = edge_counts$bidirected,
+      skeleton_ci_test_count = as.integer(sum(skeleton$n.edgetests)),
+      orientation_ci_test_count =
+        as.integer(orientation$diagnostics$ci_test_count)
+    )
+  )
+  class(result) <- c("fastkpc_compatible_cuda_wanpdag", "list")
   result
 }
 
@@ -1286,6 +1705,10 @@ fastkpc_batched_cuda_precision_skeleton <- function(data, alpha,
     ci_backend_reason = "",
     ci_diagnostics = list(
       ci_dcc_gamma_tests = state$test_id,
+      ci_dcc_perm_tests = 0L,
+      ci_dcc_permutation_replicates = 0L,
+      ci_dcc_perm_cuda_tests = 0L,
+      ci_dcc_cuda_fallback_tests = 0L,
       ci_hsic_gamma_tests = 0L,
       ci_hsic_perm_tests = 0L,
       ci_hsic_permutation_replicates = 0L,
@@ -1540,6 +1963,8 @@ validate_fastkpc_result <- function(result) {
                        "ci_method_requested", "ci_backend",
                        "ci_backend_requested", "ci_backend_reason",
                        "cuda_hsic_requested", "cuda_hsic_used",
+                       "cuda_dcov_permutation_requested",
+                       "cuda_dcov_permutation_used",
                        "hsic_params", "permutation_params")
   missing_config <- setdiff(required_config, names(result$config))
   if (length(missing_config) > 0L) {
@@ -1615,7 +2040,8 @@ fast_kpc <- function(data,
                      engine = c("auto", "cuda", "cpu"),
                      precision = c("legacy", "fast", "compatible", "hybrid"),
                      tau = log(2),
-                     ci_method = c("dcc.gamma", "hsic.gamma", "hsic.perm"),
+                     ci_method = c("dcc.gamma", "dcc.perm", "hsic.gamma",
+                                   "hsic.perm"),
                      residual_backend = c("fastSpline", "linear"),
                      residual_device = c("auto", "cpu", "cuda"),
                      orientation_residual_device = c("auto", "cpu", "cuda"),
@@ -1679,6 +2105,8 @@ fast_kpc <- function(data,
   ci_backend_requested <- if (engine_used == "cuda") "cuda" else "cpu"
   cuda_hsic_requested <- engine_used == "cuda" &&
     ci_method %in% c("hsic.gamma", "hsic.perm")
+  cuda_dcov_permutation_requested <- engine_used == "cuda" &&
+    identical(ci_method, "dcc.perm")
   if (!is.null(seed)) set.seed(seed)
   normalized <- fastkpc_normalize_data(data, labels = labels)
   matrix_data <- normalized$data
@@ -1793,6 +2221,9 @@ fast_kpc <- function(data,
     ci_backend_reason = "",
     cuda_hsic_requested = isTRUE(cuda_hsic_requested),
     cuda_hsic_used = FALSE,
+    cuda_dcov_permutation_requested =
+      isTRUE(cuda_dcov_permutation_requested),
+    cuda_dcov_permutation_used = FALSE,
     hsic_params = hsic_params,
     permutation_params = permutation_params,
     ci_diagnostics = isTRUE(ci_diagnostics),
@@ -2044,6 +2475,9 @@ fast_kpc <- function(data,
   }
   config$cuda_hsic_used <- isTRUE(config$cuda_hsic_requested) &&
     identical(config$ci_backend, "cuda-hsic")
+  config$cuda_dcov_permutation_used <-
+    isTRUE(config$cuda_dcov_permutation_requested) &&
+    identical(config$ci_backend, "cuda-dcov")
   if (!is.null(timed$value$orientation)) {
     config$orientation_residual_device_used <-
       timed$value$orientation$residual_device %||% config$orientation_residual_device_used
@@ -2052,6 +2486,9 @@ fast_kpc <- function(data,
         config$orientation_residual_device_reason
     if (identical(timed$value$orientation$ci_backend, "cuda-hsic")) {
       config$cuda_hsic_used <- TRUE
+    } else if (isTRUE(config$cuda_dcov_permutation_requested) &&
+               identical(timed$value$orientation$ci_backend, "cuda-dcov")) {
+      config$cuda_dcov_permutation_used <- TRUE
     }
   }
   validation <- list(enabled = isTRUE(validate), legacy_requested = isTRUE(legacy))

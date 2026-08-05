@@ -6,6 +6,7 @@
 
 CiMethodKind parse_ci_method_kind(const std::string& method) {
   if (method.empty() || method == "dcc.gamma") return CiMethodKind::DccGamma;
+  if (method == "dcc.perm") return CiMethodKind::DccPermutation;
   if (method == "hsic.gamma") return CiMethodKind::HsicGamma;
   if (method == "hsic.perm") return CiMethodKind::HsicPermutation;
   throw std::runtime_error("Unknown ci_method: " + method);
@@ -15,6 +16,8 @@ std::string ci_method_name(CiMethodKind kind) {
   switch (kind) {
     case CiMethodKind::DccGamma:
       return "dcc.gamma";
+    case CiMethodKind::DccPermutation:
+      return "dcc.perm";
     case CiMethodKind::HsicGamma:
       return "hsic.gamma";
     case CiMethodKind::HsicPermutation:
@@ -40,6 +43,17 @@ CiEvaluation evaluate_ci_vectors(const std::vector<double>& x,
 
   if (kind == CiMethodKind::DccGamma) {
     out.p_value = dcov_exact_pvalue(x, y, index, legacy_index);
+    return out;
+  }
+
+  if (kind == CiMethodKind::DccPermutation) {
+    const DcovPermutationResult result = dcov_permutation_cpu(
+      x, y, index, legacy_index, hsic_options.replicates,
+      hsic_options.include_observed, hsic_options.has_seed,
+      hsic_options.seed, false);
+    out.p_value = result.p_value;
+    out.statistic = result.statistic;
+    out.permutation_replicates = result.replicates;
     return out;
   }
 

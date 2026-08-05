@@ -72,6 +72,9 @@ RegrVonPsResult regrvonps_native(
   result.dcov_batches = 0;
   result.dcov_pairs = 0;
   result.dcc_gamma_tests = 0;
+  result.dcc_perm_tests = 0;
+  result.dcc_permutation_replicates = 0;
+  result.dcc_perm_cuda_tests = 0;
   result.hsic_gamma_tests = 0;
   result.hsic_perm_tests = 0;
   result.hsic_permutation_replicates = 0;
@@ -106,6 +109,9 @@ RegrVonPsResult regrvonps_native(
       if (p_value < options.alpha) ++result.reject_count;
       if (ci.kind == CiMethodKind::DccGamma) {
         ++result.dcc_gamma_tests;
+      } else if (ci.kind == CiMethodKind::DccPermutation) {
+        ++result.dcc_perm_tests;
+        result.dcc_permutation_replicates += options.hsic_options.replicates;
       } else if (ci.kind == CiMethodKind::HsicGamma) {
         ++result.hsic_gamma_tests;
       } else {
@@ -113,7 +119,8 @@ RegrVonPsResult regrvonps_native(
         result.hsic_permutation_replicates += options.hsic_options.replicates;
       }
     }
-    if (ci_method == CiMethodKind::DccGamma) {
+    if (ci_method == CiMethodKind::DccGamma ||
+        ci_method == CiMethodKind::DccPermutation) {
       result.dcov_batches = static_cast<int>(S.size());
       result.dcov_pairs = static_cast<int>(S.size());
     }

@@ -4,6 +4,28 @@
        call. = FALSE)
 }
 
+fastkpc_resolve_max_conditioning_size <- function(
+    max_conditioning_size = Inf, p) {
+  if (!is.numeric(max_conditioning_size) ||
+      length(max_conditioning_size) != 1L ||
+      is.object(max_conditioning_size) ||
+      !is.null(attributes(max_conditioning_size)) ||
+      is.na(max_conditioning_size) || max_conditioning_size < 0 ||
+      !is.numeric(p) || length(p) != 1L || is.na(p) ||
+      p < 2 || p != as.integer(p)) {
+    stop("max_conditioning_size must be one non-negative number and p must be an integer >= 2",
+         call. = FALSE)
+  }
+  maximum <- as.integer(p) - 2L
+  if (is.infinite(max_conditioning_size)) {
+    if (max_conditioning_size < 0) {
+      stop("max_conditioning_size must be non-negative", call. = FALSE)
+    }
+    return(maximum)
+  }
+  as.integer(min(floor(max_conditioning_size), maximum))
+}
+
 .fastkpc_cuda_so <- function() {
   file.path(.fastkpc_cuda_root(), "build", "fastkpc_cuda.so")
 }
@@ -1609,6 +1631,27 @@ full_cuda_ci_native_setup_native <- function(conditioning) {
   )
 }
 
+full_cuda_ci_multi_penalty_capacity_qualify_native <- function(
+    setup, geometry, Y) {
+  load_fastkpc_cuda_native()
+  Y <- as.matrix(Y)
+  storage.mode(Y) <- "double"
+  .Call(
+    "C_full_cuda_ci_multi_penalty_capacity_qualify",
+    setup$X,
+    geometry$magic_qr_packed,
+    geometry$magic_tau,
+    geometry$magic_r,
+    geometry$magic_pivot,
+    geometry$penalty_roots,
+    geometry$penalty_matrices,
+    as.integer(setup$penalty_ranks),
+    geometry$initial_log_sp,
+    Y,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
 full_cuda_ci_native_geometry_prepare_native <- function(
     X, penalty_blocks, penalty_offsets, penalty_ranks) {
   load_fastkpc_cuda_native()
@@ -2192,23 +2235,78 @@ precision_run_skeleton_residual_provider_legacy_dcov_native <- function(
 }
 
 precision_run_skeleton_full_cuda_native <- function(
-    data, alpha, max_conditioning_size,
+    data, alpha, max_conditioning_size = Inf,
     index = 1, numCol = floor(nrow(as.matrix(data)) / 10),
     trace_level = c("summary", "logical", "full", "none"),
-    compatible_cuda_strict = TRUE) {
+    compatible_cuda_strict = TRUE,
+    ci_method = c("dcc.gamma", "dcc.perm", "hsic.gamma", "hsic.perm"),
+    hsic_params = list(sig = 1),
+    permutation_params = list(replicates = 100L, seed = NULL,
+                              include_observed = TRUE)) {
   load_fastkpc_cuda_native()
   trace_level <- match.arg(trace_level)
+  ci_method <- match.arg(ci_method)
   data <- as.matrix(data)
   storage.mode(data) <- "double"
+  max_conditioning_size <- fastkpc_resolve_max_conditioning_size(
+    max_conditioning_size, ncol(data)
+  )
+  if (identical(ci_method, "dcc.gamma")) {
+    return(.Call(
+      "C_full_cuda_ci_one_call_skeleton",
+      data,
+      as.numeric(alpha),
+      max_conditioning_size,
+      as.numeric(index),
+      as.integer(numCol),
+      as.character(trace_level),
+      as.logical(compatible_cuda_strict),
+      PACKAGE = "fastkpc_cuda"
+    ))
+  }
+  hsic_sig <- as.numeric(if (is.null(hsic_params$sig)) 1 else
+    hsic_params$sig)[1L]
+  permutation_replicates <- as.integer(
+    if (is.null(permutation_params$replicates)) 100L else
+      permutation_params$replicates
+  )[1L]
+  permutation_seed <- if (is.null(permutation_params$seed)) NULL else
+    permutation_params$seed
+  permutation_has_seed <- !is.null(permutation_seed)
+  if (ci_method %in% c("dcc.perm", "hsic.perm") &&
+      !isTRUE(permutation_has_seed)) {
+    stop("strict compatible CUDA permutation methods require an explicit seed",
+         call. = FALSE)
+  }
+  permutation_seed_value <- if (isTRUE(permutation_has_seed)) {
+    as.integer(permutation_seed)[1L]
+  } else {
+    0L
+  }
+  if (!is.finite(hsic_sig) || hsic_sig <= 0 ||
+      is.na(permutation_replicates) || permutation_replicates < 1L ||
+      is.na(permutation_seed_value) || permutation_seed_value < 0L) {
+    stop("invalid strict compatible CUDA CI method parameters", call. = FALSE)
+  }
+  if (ci_method %in% c("dcc.perm", "hsic.perm")) {
+    set.seed(permutation_seed_value)
+  }
   .Call(
-    "C_full_cuda_ci_one_call_skeleton",
+    "C_full_cuda_ci_one_call_skeleton_method",
     data,
     as.numeric(alpha),
-    as.integer(max_conditioning_size),
+    max_conditioning_size,
     as.numeric(index),
     as.integer(numCol),
     as.character(trace_level),
     as.logical(compatible_cuda_strict),
+    as.character(ci_method),
+    hsic_sig,
+    permutation_replicates,
+    as.logical(if (is.null(permutation_params$include_observed)) TRUE else
+      permutation_params$include_observed),
+    as.logical(permutation_has_seed),
+    permutation_seed_value,
     PACKAGE = "fastkpc_cuda"
   )
 }
@@ -2232,6 +2330,20 @@ full_cuda_ci_one_call_cache_state_native <- function(data) {
   storage.mode(data) <- "double"
   .Call(
     "C_full_cuda_ci_one_call_cache_state", data,
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_method_seeded_permutations_native <- function(
+    ci_method = c("dcc.perm", "hsic.perm"), n, replicates, seeds) {
+  load_fastkpc_cuda_native()
+  ci_method <- match.arg(ci_method)
+  .Call(
+    "C_full_cuda_ci_method_seeded_permutations",
+    as.character(ci_method),
+    as.integer(n),
+    as.integer(replicates),
+    as.integer(seeds),
     PACKAGE = "fastkpc_cuda"
   )
 }
@@ -2578,6 +2690,47 @@ precision_run_skeleton_legacy_mgcv_legacy_dcov_native <- function(
   result$summary$entrypoint <- "legacy-mgcv-legacy-dcov-native"
   result$summary$residual_provider_hidden <- TRUE
   result
+}
+
+fast_orient_wanpdag_cuda <- function(
+    skeleton_result, data, alpha = 0.2,
+    residual_backend = "fastSpline",
+    orientation_residual_device = c("auto", "cpu", "cuda"),
+    residual_cache = TRUE, index = 1, legacy_index = TRUE,
+    orientation_batch_size = 0, orientation_diagnostics = TRUE,
+    orient_collider = TRUE, solve_confl = FALSE,
+    rules = c(TRUE, TRUE, TRUE), fastspline_params = list(),
+    cuda_residual_fallback = TRUE, ci_method = "dcc.gamma",
+    hsic_params = list(), permutation_params = list(),
+    ci_diagnostics = TRUE) {
+  load_fastkpc_cuda_native()
+  orientation_residual_device <- match.arg(orientation_residual_device)
+  data <- as.matrix(data)
+  storage.mode(data) <- "double"
+  .Call(
+    "C_fast_orient_wanpdag_cuda",
+    data,
+    as.matrix(skeleton_result$adjacency),
+    skeleton_result$sepsets,
+    as.numeric(alpha),
+    as.numeric(index),
+    isTRUE(legacy_index),
+    isTRUE(residual_cache),
+    as.character(residual_backend),
+    as.character(orientation_residual_device),
+    as.integer(orientation_batch_size),
+    isTRUE(orientation_diagnostics),
+    fastspline_params,
+    isTRUE(cuda_residual_fallback),
+    isTRUE(orient_collider),
+    isTRUE(solve_confl),
+    as.logical(rules),
+    as.character(ci_method),
+    hsic_params,
+    permutation_params,
+    isTRUE(ci_diagnostics),
+    PACKAGE = "fastkpc_cuda"
+  )
 }
 
 fast_kpc_wanpdag_cuda <- function(data, alpha, max_conditioning_size,

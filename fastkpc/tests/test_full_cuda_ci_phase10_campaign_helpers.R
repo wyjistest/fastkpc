@@ -119,7 +119,11 @@ summary <- list(
   edge_count_reference = 110L, edge_count_candidate = 110L, SHD = 0L,
   adjacency_identical = TRUE, sepsets_identical = TRUE,
   n_edgetests_identical = TRUE, deletions_identical = TRUE,
-  logical_ci_trace_identical = TRUE, logical_tests_consumed = 240489L,
+  logical_ci_trace_identical = TRUE,
+  max_conditioning_size_requested = "Inf",
+  max_conditioning_size_resolved = 46L,
+  natural_stop_level = 8L,
+  logical_tests_consumed = 240498L,
   candidate_cold_repetitions = 5L,
   candidate_warm_repetitions = 5L,
   correct_baseline_repetitions = 5L,
@@ -176,13 +180,14 @@ assert_true(
 
 cold_warm_path <- Sys.getenv(
   "FASTKPC_PHASE10_COLD_WARM_DIAGNOSTIC_RDS",
-  unset = "/tmp/fastkpc-phase10-cold-warm-boundary.rds"
+  unset = ""
 )
 baseline_path <- Sys.getenv(
   "FASTKPC_PHASE10_BASELINE_DIAGNOSTIC_RDS",
-  unset = "/tmp/fastkpc-phase10-baseline-boundary.rds"
+  unset = ""
 )
-if (file.exists(cold_warm_path) && file.exists(baseline_path)) {
+if (nzchar(cold_warm_path) && nzchar(baseline_path) &&
+    file.exists(cold_warm_path) && file.exists(baseline_path)) {
   cold_warm <- readRDS(cold_warm_path)
   baseline <- readRDS(baseline_path)
   fastkpc_full_cuda_phase10_validate_candidate_result(

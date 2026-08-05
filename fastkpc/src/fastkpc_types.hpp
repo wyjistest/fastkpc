@@ -74,6 +74,10 @@ struct SkeletonResult {
   std::string ci_backend;
   std::string ci_backend_reason;
   int ci_dcc_gamma_tests;
+  int ci_dcc_perm_tests = 0;
+  int ci_dcc_permutation_replicates = 0;
+  int ci_dcc_perm_cuda_tests = 0;
+  int ci_dcc_cuda_fallback_tests = 0;
   int ci_hsic_gamma_tests;
   int ci_hsic_perm_tests;
   int ci_hsic_permutation_replicates;

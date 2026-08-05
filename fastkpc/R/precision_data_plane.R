@@ -34,10 +34,11 @@ fastkpc_precision_combinations <- function(values, choose) {
 
 fastkpc_precision_ci_randomness <- function(ci_method, permutation_params,
                                             canonical_test_order_id) {
+  is_permutation <- ci_method %in% c("dcc.perm", "hsic.perm")
   replicates <- as.integer(permutation_params$replicates %||% 100L)
   base_seed <- as.double((permutation_params$seed %||% 0L)[1L])
   if (!is.finite(base_seed) || is.na(base_seed)) base_seed <- 0
-  effective_seed <- if (identical(ci_method, "hsic.perm")) {
+  effective_seed <- if (is_permutation) {
     test_id <- as.double(canonical_test_order_id[1L])
     if (!is.finite(test_id) || is.na(test_id)) test_id <- 0
     seed <- as.integer((base_seed + 1000003 * test_id) %%
@@ -49,7 +50,7 @@ fastkpc_precision_ci_randomness <- function(ci_method, permutation_params,
   } else {
     NA_integer_
   }
-  plan_spec_hash <- if (identical(ci_method, "hsic.perm")) {
+  plan_spec_hash <- if (is_permutation) {
     fastkpc_hash_object(list(
       ci_method = ci_method,
       base_seed = as.integer(base_seed %% .Machine$integer.max),
@@ -62,8 +63,8 @@ fastkpc_precision_ci_randomness <- function(ci_method, permutation_params,
     ""
   }
   list(
-    ci_randomness_id = if (identical(ci_method, "hsic.perm")) {
-      paste("hsic.perm", as.integer(canonical_test_order_id),
+    ci_randomness_id = if (is_permutation) {
+      paste(ci_method, as.integer(canonical_test_order_id),
             effective_seed, replicates, sep = ":")
     } else {
       ""
@@ -71,7 +72,7 @@ fastkpc_precision_ci_randomness <- function(ci_method, permutation_params,
     permutation_seed_effective = effective_seed,
     permutation_plan_spec_hash = plan_spec_hash,
     permutation_plan_hash = plan_spec_hash,
-    permutation_replicates = if (identical(ci_method, "hsic.perm")) {
+    permutation_replicates = if (is_permutation) {
       replicates
     } else {
       NA_integer_
@@ -82,7 +83,9 @@ fastkpc_precision_ci_randomness <- function(ci_method, permutation_params,
 fastkpc_precision_effective_permutation_params <- function(ci_method,
                                                            permutation_params,
                                                            randomness) {
-  if (!identical(ci_method, "hsic.perm")) return(permutation_params)
+  if (!ci_method %in% c("dcc.perm", "hsic.perm")) {
+    return(permutation_params)
+  }
   out <- permutation_params
   out$seed <- randomness$permutation_seed_effective
   out
@@ -491,8 +494,8 @@ fastkpc_execute_ci_fast_spline_cpu <- function(data, x, y, S, ci_method,
     ry <- data[, y]
   } else {
     S_data <- data[, S, drop = FALSE]
-    rx <- fastspline_residual(data[, x], S_data)$residuals
-    ry <- fastspline_residual(data[, y], S_data)$residuals
+    rx <- fastspline_residual(data[, x], S_data)$residual
+    ry <- fastspline_residual(data[, y], S_data)$residual
   }
   ci <- fastkpc_precision_ci_from_residuals(
     rx, ry, ci_method = ci_method, index = index,
@@ -2269,6 +2272,14 @@ fastkpc_precision_ci_from_residuals <- function(rx, ry, ci_method,
     return(dcov_gamma_exact(rx, ry, index = index,
                             legacy_index = legacy_index))
   }
+  if (identical(ci_method, "dcc.perm")) {
+    return(fast_dcov_perm_cpp(
+      rx, ry, index = index, legacy_index = legacy_index,
+      replicates = permutation_params$replicates %||% 100L,
+      seed = permutation_params$seed %||% NULL,
+      include_observed = permutation_params$include_observed %||% TRUE
+    ))
+  }
   if (identical(ci_method, "hsic.gamma")) {
     sig <- hsic_params$sig %||% 1
     return(fast_hsic_gamma_cpp(rx, ry, sig = sig))
@@ -2956,6 +2967,14 @@ fastkpc_r_skeleton_precision <- function(data, alpha, max_conditioning_size,
     ci_backend_reason = "",
     ci_diagnostics = list(
       ci_dcc_gamma_tests = if (identical(ci_method, "dcc.gamma")) test_id else 0L,
+      ci_dcc_perm_tests = if (identical(ci_method, "dcc.perm")) test_id else 0L,
+      ci_dcc_permutation_replicates = if (identical(ci_method, "dcc.perm")) {
+        test_id * as.integer(permutation_params$replicates %||% 100L)
+      } else {
+        0L
+      },
+      ci_dcc_perm_cuda_tests = 0L,
+      ci_dcc_cuda_fallback_tests = 0L,
       ci_hsic_gamma_tests = if (identical(ci_method, "hsic.gamma")) test_id else 0L,
       ci_hsic_perm_tests = if (identical(ci_method, "hsic.perm")) test_id else 0L,
       ci_hsic_permutation_replicates = if (identical(ci_method, "hsic.perm")) {

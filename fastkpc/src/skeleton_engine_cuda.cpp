@@ -45,6 +45,16 @@ struct HsicCudaEvalCounters {
   int max_batch_pairs = 0;
 };
 
+struct DccPermutationCudaEvalCounters {
+  int tests = 0;
+  int batches = 0;
+  int pairs = 0;
+  int permutation_replicates = 0;
+  std::size_t memory_bytes = 0;
+  int max_n = 0;
+  int max_batch_pairs = 0;
+};
+
 struct DcovWorkspaceHolder {
   DcovCudaWorkspace* value = nullptr;
   explicit DcovWorkspaceHolder(bool enabled)
@@ -981,6 +991,119 @@ std::vector<double> evaluate_tasks_cuda(const Rcpp::NumericMatrix& data,
   return pvalues;
 }
 
+std::vector<double> evaluate_tasks_dcov_permutation_cuda(
+    const Rcpp::NumericMatrix& data,
+    const std::vector<LayerCiTask>& tasks,
+    int batch_size,
+    double index,
+    bool legacy_index,
+    const HsicOptions& permutation_options,
+    int level,
+    CudaSkeletonResidualCache* residual_cache,
+    DcovCudaWorkspace* dcov_workspace,
+    SchedulerDiagnostics* diagnostics,
+    int* dcov_batches,
+    DccPermutationCudaEvalCounters* counters) {
+  const int n = data.nrow();
+  std::vector<double> pvalues(
+    tasks.size(), std::numeric_limits<double>::quiet_NaN());
+  if (tasks.empty()) return pvalues;
+
+  DcovBatchOptions options;
+  options.index = index;
+  options.legacy_index = legacy_index;
+  options.permutation_replicates = permutation_options.replicates;
+  options.include_observed = permutation_options.include_observed;
+  options.has_seed = permutation_options.has_seed;
+  options.seed = permutation_options.seed;
+  options.return_replicates = false;
+  options.max_n = permutation_options.cuda_max_n;
+  options.max_batch_pairs = permutation_options.cuda_max_batch_pairs;
+  counters->max_n = options.max_n;
+  counters->max_batch_pairs = options.max_batch_pairs;
+
+  int actual_batch_size = resolve_dcov_batch_size(
+    batch_size, n, static_cast<int>(tasks.size()));
+  if (options.max_batch_pairs > 0) {
+    actual_batch_size = std::min(actual_batch_size, options.max_batch_pairs);
+  }
+  actual_batch_size = std::max(1, actual_batch_size);
+  diagnostics->dcov_batch_size_used =
+    std::max(diagnostics->dcov_batch_size_used, actual_batch_size);
+
+  std::vector<double> xmat(static_cast<std::size_t>(n) * actual_batch_size);
+  std::vector<double> ymat(static_cast<std::size_t>(n) * actual_batch_size);
+  for (int start = 0; start < static_cast<int>(tasks.size());
+       start += actual_batch_size) {
+    const int count = std::min(
+      actual_batch_size, static_cast<int>(tasks.size()) - start);
+    diagnostics->ci_host_pack_sec += pack_ci_task_batch(
+      data, tasks, start, count, n, residual_cache,
+      xmat.data(), ymat.data());
+
+    const std::chrono::steady_clock::time_point stage =
+      std::chrono::steady_clock::now();
+    const DcovBatchResult batch = dcov_permutation_batch_cuda(
+      xmat.data(), ymat.data(), n, count, options, dcov_workspace);
+    diagnostics->ci_dcov_call_wall_sec += seconds_since(stage);
+    for (int k = 0; k < count; ++k) {
+      pvalues[start + k] = batch.p_values[k];
+    }
+
+    diagnostics->dcov_alloc_sec += batch.alloc_sec;
+    diagnostics->dcov_h2d_sec +=
+      batch.h2d_sec + batch.permutation_h2d_sec;
+    diagnostics->dcov_memset_sec += batch.memset_sec;
+    diagnostics->dcov_rowsum_sec += batch.rowsum_sec;
+    diagnostics->dcov_totals_d2h_sec += batch.totals_d2h_sec;
+    diagnostics->dcov_reduce_sec +=
+      batch.reduce_sec + batch.permutation_reduce_sec;
+    diagnostics->dcov_scalars_d2h_sec +=
+      batch.scalars_d2h_sec + batch.permutation_d2h_sec;
+    diagnostics->dcov_host_scalar_sec +=
+      batch.host_scalar_sec + batch.permutation_host_sec;
+    diagnostics->dcov_result_materialize_sec += batch.result_materialize_sec;
+    diagnostics->dcov_free_sec += batch.free_sec;
+    diagnostics->dcov_total_sec += batch.total_sec;
+    diagnostics->dcov_top_level_wall_sec += batch.top_level_wall_sec;
+    diagnostics->dcov_chunks += batch.chunks;
+    diagnostics->dcov_max_chunk_batch =
+      std::max(diagnostics->dcov_max_chunk_batch, batch.max_chunk_batch);
+    diagnostics->dcov_workspace_reuse_count += batch.workspace_reuse_count;
+    diagnostics->dcov_workspace_grow_count += batch.workspace_grow_count;
+    diagnostics->dcov_raw_aggregate_fused_count +=
+      batch.raw_aggregate_fused_count;
+    diagnostics->dcov_rowsum_kernel_launch_count +=
+      batch.rowsum_kernel_launch_count;
+    diagnostics->dcov_rowsum_chunk_count += batch.rowsum_chunk_count;
+    diagnostics->dcov_rowsum_total_blocks += batch.rowsum_total_blocks;
+    diagnostics->dcov_rowsum_pair_count += batch.rowsum_pair_count;
+    diagnostics->dcov_rowsum_abs_fast_count += batch.rowsum_abs_fast_count;
+    diagnostics->dcov_rowsum_pow_generic_count +=
+      batch.rowsum_pow_generic_count;
+    diagnostics->dcov_rowsum_abs_pair_count += batch.rowsum_abs_pair_count;
+    diagnostics->dcov_rowsum_generic_pair_count +=
+      batch.rowsum_generic_pair_count;
+    diagnostics->dcov_row_product_reduce_count +=
+      batch.row_product_reduce_count;
+    diagnostics->dcov_full_result_materialize_count +=
+      batch.full_result_materialize_count;
+
+    ++(*dcov_batches);
+    ++counters->batches;
+    counters->tests += count;
+    counters->pairs += count;
+    counters->permutation_replicates +=
+      count * batch.permutation_replicates;
+    counters->memory_bytes =
+      std::max(counters->memory_bytes, batch.permutation_bytes);
+    diagnostics->batches.push_back(SchedulerBatchDiagnostic{
+      level, *dcov_batches - 1, "dcov.perm", tasks[start].task_id,
+      count, n, "ok", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+  }
+  return pvalues;
+}
+
 HsicBatchOptions make_hsic_batch_options(const HsicOptions& hsic_options,
                                          CiMethodKind kind) {
   HsicBatchOptions options = default_hsic_batch_options();
@@ -1144,9 +1267,15 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
   result.scheduler_requested = scheduler_requested;
   result.ci_method = ci_method_name(ci_method);
   result.ci_backend =
-    ci_method == CiMethodKind::DccGamma ? "cuda-dcov" : "cuda-hsic";
+    (ci_method == CiMethodKind::DccGamma ||
+     ci_method == CiMethodKind::DccPermutation) ?
+      "cuda-dcov" : "cuda-hsic";
   result.ci_backend_reason = "";
   result.ci_dcc_gamma_tests = 0;
+  result.ci_dcc_perm_tests = 0;
+  result.ci_dcc_permutation_replicates = 0;
+  result.ci_dcc_perm_cuda_tests = 0;
+  result.ci_dcc_cuda_fallback_tests = 0;
   result.ci_hsic_gamma_tests = 0;
   result.ci_hsic_perm_tests = 0;
   result.ci_hsic_permutation_replicates = 0;
@@ -1167,7 +1296,10 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
   SchedulerDiagnostics diagnostics = make_scheduler_diagnostics(
     scheduler, scheduler_requested, batch_size, options.residual_batch_size);
   HsicCudaEvalCounters hsic_counters;
-  DcovWorkspaceHolder dcov_workspace(ci_method == CiMethodKind::DccGamma);
+  DccPermutationCudaEvalCounters dcc_perm_counters;
+  DcovWorkspaceHolder dcov_workspace(
+    ci_method == CiMethodKind::DccGamma ||
+    ci_method == CiMethodKind::DccPermutation);
 
   const int max_order = std::max(0, options.max_conditioning_size);
   for (int ord = 0; ord <= max_order; ++ord) {
@@ -1234,6 +1366,11 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
         data, plan.tasks, batch_size, options.index, options.legacy_index,
         ord, &residual_cache, dcov_workspace.value, &diagnostics,
         &dcov_batches);
+    } else if (ci_method == CiMethodKind::DccPermutation) {
+      pvalues = evaluate_tasks_dcov_permutation_cuda(
+        data, plan.tasks, batch_size, options.index, options.legacy_index,
+        options.hsic_options, ord, &residual_cache, dcov_workspace.value,
+        &diagnostics, &dcov_batches, &dcc_perm_counters);
     } else {
       pvalues = evaluate_tasks_hsic_cuda(
         data, plan.tasks, batch_size, ci_method, options.hsic_options,
@@ -1302,6 +1439,11 @@ SkeletonResult run_skeleton_cuda_impl(const Rcpp::NumericMatrix& data,
   result.scheduler_diagnostics = diagnostics;
   if (ci_method == CiMethodKind::DccGamma) {
     result.ci_dcc_gamma_tests = diagnostics.tests_replayed;
+  } else if (ci_method == CiMethodKind::DccPermutation) {
+    result.ci_dcc_perm_tests = diagnostics.tests_replayed;
+    result.ci_dcc_perm_cuda_tests = dcc_perm_counters.tests;
+    result.ci_dcc_permutation_replicates =
+      dcc_perm_counters.permutation_replicates;
   } else if (ci_method == CiMethodKind::HsicGamma) {
     result.ci_hsic_gamma_tests = diagnostics.tests_replayed;
     result.ci_hsic_gamma_cuda_tests = hsic_counters.gamma_tests;
@@ -1368,6 +1510,8 @@ SkeletonResult run_skeleton_cuda_cpu_fallback(const Rcpp::NumericMatrix& data,
     result.ci_hsic_cuda_fallback_tests = result.ci_hsic_gamma_tests;
   } else if (kind == CiMethodKind::HsicPermutation) {
     result.ci_hsic_cuda_fallback_tests = result.ci_hsic_perm_tests;
+  } else if (kind == CiMethodKind::DccPermutation) {
+    result.ci_dcc_cuda_fallback_tests = result.ci_dcc_perm_tests;
   }
   return result;
 }
@@ -1378,13 +1522,37 @@ SkeletonResult run_skeleton_cuda_batch(const Rcpp::NumericMatrix& data,
                                        const SkeletonOptions& options,
                                        int batch_size) {
   const CiMethodKind kind = parse_ci_method_kind(options.ci_method);
-  if (kind == CiMethodKind::HsicPermutation &&
+  if ((kind == CiMethodKind::DccPermutation ||
+       kind == CiMethodKind::HsicPermutation) &&
       !options.hsic_options.has_seed) {
     return run_skeleton_cuda_cpu_fallback(
       data, options, batch_size, kind,
-      "CUDA HSIC permutation requires explicit seed in this stage");
+      kind == CiMethodKind::DccPermutation ?
+        "CUDA dCov permutation requires explicit seed in this stage" :
+        "CUDA HSIC permutation requires explicit seed in this stage");
   }
-  if (kind != CiMethodKind::DccGamma) {
+  if (kind == CiMethodKind::DccPermutation) {
+    std::string reason;
+    if (!dcov_cuda_available(&reason)) {
+      if (!options.hsic_options.cuda_memory_fallback) {
+        throw std::runtime_error(
+          reason.empty() ? "CUDA dCov backend is unavailable" : reason);
+      }
+      return run_skeleton_cuda_cpu_fallback(
+        data, options, batch_size, kind,
+        reason.empty() ? "CUDA dCov backend is unavailable" : reason);
+    }
+    try {
+      return run_skeleton_cuda_impl(data, options, batch_size,
+                                    resolve_scheduler(options));
+    } catch (const std::exception& ex) {
+      if (!options.hsic_options.cuda_memory_fallback) throw;
+      return run_skeleton_cuda_cpu_fallback(
+        data, options, batch_size, kind, ex.what());
+    }
+  }
+  if (kind == CiMethodKind::HsicGamma ||
+      kind == CiMethodKind::HsicPermutation) {
     std::string reason;
     if (!hsic_cuda_available(&reason)) {
       if (!options.hsic_options.cuda_memory_fallback) {

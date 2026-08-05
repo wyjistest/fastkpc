@@ -36,6 +36,10 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
 "$CXX" $COMMON_CXX -c "$ROOT/src/hsic_cpu.cpp" -o "$BUILD/hsic_cpu.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/legacy_dcov_gamma_cpp.cpp" -o "$BUILD/legacy_dcov_gamma_cpp.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/mgcv_multi_penalty_cpp.cpp" -o "$BUILD/mgcv_multi_penalty_cpp.o"
+"$CXX" $COMMON_CXX -c "$ROOT/src/cuda/mgcv_multi_penalty_gcv_capacity.cpp" \
+  -o "$BUILD/mgcv_multi_penalty_gcv_capacity.o"
+"$CXX" $COMMON_CXX -c "$ROOT/src/r_api_multi_penalty_capacity.cpp" \
+  -o "$BUILD/r_api_multi_penalty_capacity.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/ci_method.cpp" -o "$BUILD/ci_method.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/fastspline_basis.cpp" -o "$BUILD/fastspline_basis.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/fastspline_solver.cpp" -o "$BUILD/fastspline_solver.o"
@@ -60,6 +64,10 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
 "$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
   $COMMON_INC -c "$ROOT/src/cuda/full_cuda_ci_vertical.cu" \
   -o "$BUILD/full_cuda_ci_vertical.o"
+
+"$NVCC" -O3 -arch=sm_89 --fmad=false -Xcompiler -fPIC -std=c++17 \
+  $COMMON_INC -c "$ROOT/src/cuda/full_cuda_ci_method_batch.cu" \
+  -o "$BUILD/full_cuda_ci_method_batch.o"
 
 "$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
   $COMMON_INC -c "$ROOT/src/cuda/legacy_dcov_spectra_matvec_cuda.cu" \
@@ -95,6 +103,19 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   $COMMON_INC -c "$ROOT/src/cuda/mgcv_multi_penalty_gcv.cu" \
   -o "$BUILD/mgcv_multi_penalty_gcv.o"
 
+for CAPACITY in 192 384 559; do
+  "$NVCC" -O3 -arch=sm_89 --fmad=false -diag-suppress 2464 \
+    -Xcompiler -fPIC -std=c++17 \
+    $COMMON_INC -c \
+    "$ROOT/src/cuda/mgcv_multi_penalty_gcv_ext${CAPACITY}.cu" \
+    -o "$BUILD/mgcv_multi_penalty_gcv_ext${CAPACITY}.o"
+done
+
+"$NVCC" -O3 -arch=sm_89 --fmad=false -diag-suppress 2464 \
+  -Xcompiler -fPIC -std=c++17 \
+  $COMMON_INC -c "$ROOT/src/cuda/mgcv_multi_penalty_gcv_small64.cu" \
+  -o "$BUILD/mgcv_multi_penalty_gcv_small64.o"
+
 "$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
   $COMMON_INC -c "$ROOT/src/cuda/mgcv_extract_fixed_sp_cuda.cu" \
   -o "$BUILD/mgcv_extract_fixed_sp_cuda.o"
@@ -108,6 +129,8 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   "$BUILD/hsic_cpu.o" \
   "$BUILD/legacy_dcov_gamma_cpp.o" \
   "$BUILD/mgcv_multi_penalty_cpp.o" \
+  "$BUILD/mgcv_multi_penalty_gcv_capacity.o" \
+  "$BUILD/r_api_multi_penalty_capacity.o" \
   "$BUILD/ci_method.o" \
   "$BUILD/fastspline_basis.o" \
   "$BUILD/fastspline_solver.o" \
@@ -126,6 +149,7 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   "$BUILD/r_api_cuda.o" \
   "$BUILD/dcov_batch_cuda.o" \
   "$BUILD/full_cuda_ci_vertical.o" \
+  "$BUILD/full_cuda_ci_method_batch.o" \
   "$BUILD/legacy_dcov_spectra_matvec_cuda.o" \
   "$BUILD/hsic_batch_cuda.o" \
   "$BUILD/fastspline_batched_solver.o" \
@@ -134,6 +158,10 @@ trap 'rm -f "$TMP_SO"' EXIT INT TERM
   "$BUILD/mgcv_fixed_sp_runtime.o" \
   "$BUILD/mgcv_single_penalty_gcv.o" \
   "$BUILD/mgcv_multi_penalty_gcv.o" \
+  "$BUILD/mgcv_multi_penalty_gcv_small64.o" \
+  "$BUILD/mgcv_multi_penalty_gcv_ext192.o" \
+  "$BUILD/mgcv_multi_penalty_gcv_ext384.o" \
+  "$BUILD/mgcv_multi_penalty_gcv_ext559.o" \
   "$BUILD/mgcv_extract_fixed_sp_cuda.o" \
   $LAPACK_LIBS $BLAS_LIBS $FLIBS \
   -L/usr/local/cuda/lib64 -lcudart -lcublas -lcusolver \

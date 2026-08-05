@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numeric>
+#include <random>
 #include <stdexcept>
 
 namespace {
@@ -75,6 +77,54 @@ bool finite_vector(const std::vector<double>& values) {
     if (!std::isfinite(value)) return false;
   }
   return true;
+}
+
+double dcov_statistic_from_centered(const std::vector<double>& A,
+                                    const std::vector<double>& B,
+                                    int n) {
+  double total = 0.0;
+  for (std::size_t i = 0; i < A.size(); ++i) total += A[i] * B[i];
+  return total / static_cast<double>(n);
+}
+
+double dcov_statistic_permuted(const std::vector<double>& A,
+                               const std::vector<double>& B,
+                               const std::vector<int>& permutation,
+                               int n) {
+  double total = 0.0;
+  for (int i = 0; i < n; ++i) {
+    for (int j = 0; j < n; ++j) {
+      total += A[static_cast<std::size_t>(i) * n + j] *
+        B[static_cast<std::size_t>(permutation[i]) * n + permutation[j]];
+    }
+  }
+  return total / static_cast<double>(n);
+}
+
+std::vector<int> seeded_dcov_permutation(int n,
+                                         unsigned int seed,
+                                         int replicate) {
+  std::vector<int> permutation(n);
+  std::iota(permutation.begin(), permutation.end(), 0);
+  std::mt19937 rng(seed + static_cast<unsigned int>(replicate));
+  std::shuffle(permutation.begin(), permutation.end(), rng);
+  return permutation;
+}
+
+std::vector<int> r_rng_dcov_permutation(int n) {
+  std::vector<int> remaining(n);
+  std::iota(remaining.begin(), remaining.end(), 0);
+  std::vector<int> permutation;
+  permutation.reserve(n);
+  while (!remaining.empty()) {
+    const int picked = static_cast<int>(
+      std::floor(R::unif_rand() * static_cast<double>(remaining.size())));
+    const int bounded = std::min(
+      picked, static_cast<int>(remaining.size()) - 1);
+    permutation.push_back(remaining[bounded]);
+    remaining.erase(remaining.begin() + bounded);
+  }
+  return permutation;
 }
 
 std::vector<double> solve_linear_system(std::vector<double> A,
@@ -165,6 +215,68 @@ double dcov_exact_pvalue(const std::vector<double>& x,
   const double beta = nV2Variance / nV2Mean;
   const double p = R::pgamma(nV2, alpha, beta, false, false);
   return p;
+}
+
+DcovPermutationResult dcov_permutation_cpu(
+    const std::vector<double>& x,
+    const std::vector<double>& y,
+    double index,
+    bool legacy_index,
+    int replicates,
+    bool include_observed,
+    bool has_seed,
+    unsigned int seed,
+    bool return_replicates) {
+  const int n = static_cast<int>(x.size());
+  if (n != static_cast<int>(y.size())) {
+    throw std::runtime_error("Sample sizes must agree");
+  }
+  if (n < 2) {
+    throw std::runtime_error("dCov permutation requires at least 2 observations");
+  }
+  if (replicates < 0) {
+    throw std::runtime_error("dCov permutation replicates must be non-negative");
+  }
+  if (!finite_vector(x) || !finite_vector(y)) {
+    throw std::runtime_error("Data contains missing or infinite values");
+  }
+  if (index < 0.0 || index > 2.0) index = 1.0;
+
+  const std::vector<double> A = center_distance(
+    pairwise_distance_vector(x, index, legacy_index), n);
+  const std::vector<double> B = center_distance(
+    pairwise_distance_vector(y, index, legacy_index), n);
+
+  DcovPermutationResult result;
+  result.statistic = dcov_statistic_from_centered(A, B, n);
+  result.p_value = 1.0;
+  result.n = n;
+  result.replicates = replicates;
+  result.used_seed = has_seed;
+  result.seed = has_seed ? seed : 0U;
+  result.method = "dcc.perm";
+  if (return_replicates) {
+    result.replicate_statistics.reserve(
+      static_cast<std::size_t>(replicates));
+  }
+
+  int exceedances = include_observed ? 1 : 0;
+  for (int replicate = 0; replicate < replicates; ++replicate) {
+    const std::vector<int> permutation = has_seed ?
+      seeded_dcov_permutation(n, seed, replicate) :
+      r_rng_dcov_permutation(n);
+    const double statistic = dcov_statistic_permuted(
+      A, B, permutation, n);
+    if (return_replicates) {
+      result.replicate_statistics.push_back(statistic);
+    }
+    if (statistic >= result.statistic) ++exceedances;
+  }
+
+  const int denominator = replicates + (include_observed ? 1 : 0);
+  result.p_value = denominator > 0 ?
+    static_cast<double>(exceedances) / static_cast<double>(denominator) : 1.0;
+  return result;
 }
 
 std::vector<double> residualize_lm(const Rcpp::NumericMatrix& data,

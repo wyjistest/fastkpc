@@ -8,6 +8,7 @@
 
 enum class CiMethodKind {
   DccGamma,
+  DccPermutation,
   HsicGamma,
   HsicPermutation
 };

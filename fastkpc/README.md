@@ -5,7 +5,7 @@ Staged fast kPC backend for this workspace.
 This directory is intentionally separate from `kpcalg/R`. The legacy package
 files stay unchanged while the fast backend is developed and validated.
 
-## Full-CUDA legacy-compatible skeleton candidate
+## Full-CUDA legacy-compatible skeleton and WAN-PDAG candidate
 
 An explicit one-call full-CUDA route now implements the numerical CI data plane
 for the exact `regrXonS`/KPC subset. The historical Phase 10 v1 campaign passed
@@ -13,6 +13,10 @@ canonical correctness, CUDA authority, hardening, and replay-latency gates, but
 did not measure acceptable fresh-data performance. The sealed holdout remains
 `SEALED_NOT_RELEASED` and must not be opened for this candidate. The route is
 explicit, not the default, and not recommended.
+
+The current Phase 9 v2 and hardening v2 artifacts use the actual default
+`kpcalg` conditioning contract (`m.max = Inf`) and cover the canonical graph
+through its natural stop after level 8.
 
 ```r
 source("fastkpc/R/fast_kpc.R")
@@ -23,7 +27,7 @@ skeleton <- fastkpc_compatible_cuda_skeleton(
   options = list(
     route = "full_cuda",
     compatible_cuda_strict = TRUE,
-    max_conditioning_size = 7L,
+    max_conditioning_size = Inf,
     index = 1,
     numCol = 35L,
     trace_level = "logical"
@@ -31,12 +35,40 @@ skeleton <- fastkpc_compatible_cuda_skeleton(
 )
 ```
 
+For a strict end-to-end KPC result, use the same CUDA skeleton followed by the
+kpcalg WAN-PDAG authority in one process:
+
+```r
+result <- fastkpc_compatible_cuda_wanpdag(
+  data,
+  alpha = 0.1,
+  options = list(
+    max_conditioning_size = Inf,
+    index = 1,
+    numCol = 35L,
+    trace_level = "logical",
+    ci_method = "hsic.perm",
+    hsic_params = list(sig = 1),
+    permutation_params = list(
+      replicates = 100L, seed = 707L, include_observed = TRUE
+    )
+  )
+)
+```
+
+The skeleton remains CUDA-authoritative. The short orientation stage uses
+`kpcalg::udag2wanpdag` and `kpcalg::kernelCItest` as CPU numerical authority,
+records every orientation CI identity, p-value, and decision, and preserves the
+legacy R RNG stream for permutation methods. The native fastkpc orientation
+engine remains available for development, but it is not the strict authority
+for the canonical 351 x 48 route.
+
 This API is separate from `fast_kpc(precision = "compatible")`, which remains
 the older mgcvExtractGPU compatibility bridge documented below. The full-CUDA
 candidate uses one native skeleton call, a C++ canonical control plane, native
 response-independent setup construction, CUDA target-specific GCV and stable
-residual solves, device-resident CUDA dCov components, CUDA gamma p-values,
-and canonical compact-result replay.
+residual solves, device-resident CUDA dCov/HSIC components, method-specific
+gamma or permutation p-values, and canonical compact-result replay.
 
 Qualified semantic envelope:
 
@@ -44,17 +76,31 @@ Qualified semantic envelope:
 input: finite binary64 matrix; n > 35; 2 <= p <= 64
 alpha: exactly 0.1
 index / numCol: 1 / 35
-maximum conditioning size: 0 through 7
+maximum conditioning size: defaults to Inf and resolves to p - 2
+multi-penalty CUDA capacity: |S| through 62, with q = 1 + 9|S| < n
 model: Gaussian, identity, unweighted, zero offset
 smooth route: joint thin-plate smooth for |S| <= 2
               additive thin-plate smooths for |S| > 2
-graph stage: skeleton
+graph stage: CUDA skeleton, optionally followed by kpcalg-authority WAN-PDAG
 ```
 
 This is a compatible implementation of that exact subset, not a full mgcv
-clone. Unsupported values fail before canonical replay. Strict execution has
-no legacy-mgcv target fit or setup call in the CI loop, no R callback, no CPU
-residual/dCov/gamma numerical fallback, and no approximate fallback.
+clone. Unsupported values fail before canonical replay. Strict skeleton
+execution has no legacy-mgcv target fit or setup call in the CI loop, no R
+callback, no CPU residual/CI numerical fallback, and no approximate fallback.
+The optional WAN-PDAG completion deliberately uses kpcalg CPU authority; that
+expected orientation work is not a skeleton fallback.
+
+`Inf` is a finite graph-search contract, not an instruction to execute
+unbounded levels. With `p` variables, `kpcalg` can use at most `p - 2`
+conditioning variables, and the stable graph normally stops earlier when no
+live edge has enough neighbors. On the canonical 351x48 input the search needs
+level 8: its per-level test counts are
+`2213,52659,125293,40694,13293,5422,835,80,9`, after which it stops naturally.
+The CUDA optimizer is compiled in q/penalty buckets `64/7`, `80/8`, `192/21`,
+`384/42`, and `559/62`; larger buckets reduce concurrent setups to bound VRAM.
+If a reached additive model violates `q = 1 + 9|S| < n`, strict mode fails
+closed instead of silently truncating the `Inf` search.
 
 The candidate uses these bounded caches:
 
@@ -98,7 +144,8 @@ replay-warm: report only
 
 The current development producer has passed the first optimization checkpoint,
 but it is not a frozen candidate. A fresh-data compute-warm development run on
-the canonical 351x48 input completed in `263.305` seconds, down from the
+the canonical 351x48 input with explicit `max_conditioning_size = 7` completed
+in `263.305` seconds, down from the
 initial `1300.19`-second measurement, the `376.461`-second Checkpoint A run, and
 the prior `301.971`-second development run. Lazy, right-sized multi-penalty
 optimizer handles eliminated all device rehydration. A per-call cache now
@@ -107,18 +154,32 @@ assembling additive `|S| > 2` setups. The measured stage totals were 38.997
 seconds for native setup, 173.246 seconds for the optimizer boundary, 15.270
 seconds for residual solves, and 29.891 seconds for dCov.
 
-The run consumed 8,634 unique PreparedS keys and physically built 8,637 setups
-(three bounded speculative builds). It used 137 optimizer host boundaries,
-built and released 7,463 right-sized multi-penalty handles with a peak target
-capacity of 33, and recorded 22,291 bounded excess target optimizations. The
-additive setup path made 27,364 primitive requests, built exactly 48 primitives,
-and served the remaining 27,316 requests from the per-call cache.
+The `263.305`-second measurement does not cover the default `Inf` contract. The
+current-binary Phase 9 default-Inf artifact took `277.868` seconds. A separate
+same-process cold/replay-warm qualification took `274.91` / `0.848` seconds.
+It resolved `Inf` to 46, executed levels 0 through 8, and produced 240,498
+logical tests. Cold evaluated 241,686 physical pairs; warm served all 240,498
+logical rows from the result cache with zero physical tests, setup builds,
+optimizer targets, or residual fits.
+
+The default-Inf cold run consumed 8,643 unique PreparedS keys and physically
+built 8,646 setups (three bounded speculative builds). It used 138 optimizer
+host boundaries, built and released 7,472 right-sized multi-penalty handles
+with a peak target capacity of 33, and recorded 22,291 bounded excess target
+optimizations out of 132,926. The additive setup path made 27,436 primitive
+requests, built exactly 48 primitives, and served the remaining 27,388 requests
+from the per-call cache.
 Adjacency, normalized sepsets, `n.edgetests`, task order, and deletion decisions
 matched the prior canonical result; the maximum p-value difference was
 zero (all consumed p-values were bitwise identical), and every CPU numerical
 authority, fallback, and residual/component D2H counter was zero. The public
-500x50 production-shape fixture also passes with empty dataset-specific caches
-and one native skeleton call.
+500x50 v2 production-shape fixture omits the conditioning limit, resolves the
+default `Inf` ceiling to 48, stops naturally at level 3, and also passes with
+empty dataset-specific caches and one native skeleton call. The default-Inf
+hardening artifact is `artifacts/full_cuda_ci/failure_injection_default_inf_v2/`.
+Its opt-in extended test executes q192, q384, and the maximum
+`n=600,p=64,|S|=62,q=559` capacity shape; all remain CUDA-authoritative with
+zero fallback.
 
 A non-formal max-conditioning-size-3 profile now exposes the optimizer work
 instead of treating the CUDA boundary as one opaque stage. It completed in
@@ -481,6 +542,14 @@ Build and focused validation:
 bash fastkpc/tools/clean_cuda_native.sh
 bash fastkpc/tools/build_cuda_native.sh
 Rscript fastkpc/tests/test_full_cuda_ci_one_call.R
+Rscript fastkpc/tests/test_compatible_cuda_wanpdag_authority.R
+Rscript fastkpc/tests/test_default_max_conditioning_size.R
+FASTKPC_RUN_CUDA_TESTS=1 \
+  Rscript fastkpc/tests/test_full_cuda_ci_default_inf_level9_capacity.R
+CUDA_VISIBLE_DEVICES=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
+  FASTKPC_RUN_FULL_DEFAULT_INF_CUDA_TEST=1 \
+  Rscript fastkpc/tests/test_full_cuda_ci_default_inf_production.R
 Rscript fastkpc/tests/test_full_cuda_ci_one_call_cache.R
 Rscript fastkpc/tests/test_full_cuda_ci_phase10_hardening_artifact.R
 Rscript fastkpc/tests/test_full_cuda_ci_phase10_campaign_artifact.R
@@ -524,6 +593,7 @@ Implemented:
 - Opt-in CUDA WAN-PDAG orientation residual/dCov execution for fastSpline
 - Scheduler validation and benchmark helpers: `R/scheduler_validation.R`
 - Opt-in native CPU HSIC gamma and HSIC permutation CI methods
+- Opt-in native CPU and fixed-seed CUDA dCov permutation CI method
 - CUDA HSIC kernels for `hsic.gamma` and fixed-seed `hsic.perm`
 - CUDA HSIC skeleton and WAN-PDAG orientation diagnostics
 - CUDA HSIC validation and benchmark helpers: `R/hsic_cuda_validation.R`
@@ -722,11 +792,14 @@ The default conditional-independence method remains exact dCov gamma:
 fast_kpc(data, ci_method = "dcc.gamma")
 ```
 
-HSIC methods are opt-in. Set `ci_diagnostics = TRUE` to keep CI method counts
-and backend-resolution fields in the result:
+Permutation dCov and HSIC methods are opt-in. Set `ci_diagnostics = TRUE` to
+keep CI method counts and backend-resolution fields in the result:
 
 ```r
 fast_kpc(data, ci_method = "hsic.gamma", hsic_params = list(sig = 1))
+fast_kpc(data, ci_method = "dcc.perm",
+         permutation_params = list(replicates = 100, seed = 42,
+                                   include_observed = TRUE))
 fast_kpc(data, ci_method = "hsic.perm",
          permutation_params = list(replicates = 100, seed = 42,
                                    include_observed = TRUE))
@@ -734,15 +807,37 @@ fast_kpc(data, ci_method = "hsic.perm",
 
 Native HSIC uses dense RBF Gram matrices on CPU. Conditional tests reuse the
 selected residual backend: raw vectors are tested when the conditioning set is
-empty, and residual vectors are tested otherwise. CUDA dCov remains the CUDA
-path for `ci_method = "dcc.gamma"`.
+empty, and residual vectors are tested otherwise. CUDA dCov is used for
+`ci_method = "dcc.gamma"` and fixed-seed `ci_method = "dcc.perm"`.
 
-## CUDA HSIC kernels
+## CUDA CI kernels
 
 CUDA HSIC kernels are available for CUDA runs with `ci_method = "hsic.gamma"`
 and for `ci_method = "hsic.perm"` when an explicit permutation seed is supplied.
 Successful GPU execution records `ci_backend = "cuda-hsic"` and positive CUDA
 HSIC counters such as `ci_hsic_cuda_batches` and `ci_hsic_cuda_pairs`.
+
+CUDA dCov permutation is available with `ci_method = "dcc.perm"` when an
+explicit permutation seed is supplied. Successful execution records
+`ci_backend = "cuda-dcov"`, positive `ci_dcc_perm_cuda_tests`, and the exact
+number of executed permutation replicates. A missing seed fails closed to the
+native CPU path with an explicit backend reason, as for CUDA HSIC permutation.
+The observed dCov statistic follows `energy::dcov.test`, while fixed-seed
+fastkpc runs use a deterministic CPU/CUDA permutation plan. That plan does not
+claim bitwise identity with the legacy `energy` global-RNG permutation stream.
+
+The specialized Phase 9/10 full-CUDA one-call path used by the 351 x 48
+performance campaign remains separate from the generic CUDA path. Its strict
+one-call skeleton supports `dcc.gamma`, `dcc.perm`, `hsic.gamma`, and
+`hsic.perm`; use `fastkpc_compatible_cuda_wanpdag()` when the final graph must
+also follow the kpcalg WAN-PDAG authority. The generic native WAN-PDAG path is a
+separate implementation and does not inherit that strict claim.
+
+The R precision data plane also accepts all four methods. In that path,
+`engine = "cuda"` may use CUDA residualization while reporting
+`ci_backend = "native-cpu"` for these opt-in CI methods; this is distinct from
+the generic CUDA skeleton path, which executes `dcc.perm` on `cuda-dcov` and
+HSIC on `cuda-hsic`.
 
 `hsic.perm` on CUDA requires an explicit permutation seed. If the seed is
 missing, the run uses native-cpu fallback and records the reason
@@ -1196,10 +1291,36 @@ orients collider triples, applies the native orientation rules, and runs the
 generalized transitive orientation checks with the existing residual backend and
 per-run residual cache.
 
+The strict compatible route is separate: `fastkpc_compatible_cuda_wanpdag()`
+uses the full-CUDA skeleton but delegates orientation to the original kpcalg R
+implementation. It records the complete `regrVonPS` CI trace and is the
+production authority when process-level parity is required. Native CPU/CUDA
+orientation remains useful for development and small fixtures, but is not
+strict-compatible on every canonical method.
+
 The orientation engine lives under `fastkpc/src` and does not modify legacy
 package files. kpcalg/R/*.R files are not modified, and kpcalg::kpc() is not replaced.
 
 ## WAN-PDAG API
+
+Strict CUDA skeleton plus kpcalg-authority orientation:
+
+```r
+source("fastkpc/R/fast_kpc.R")
+fastkpc_compatible_cuda_wanpdag(
+  data,
+  alpha = 0.1,
+  options = list(
+    max_conditioning_size = Inf,
+    numCol = 35L,
+    trace_level = "logical",
+    ci_method = "dcc.perm",
+    permutation_params = list(
+      replicates = 100L, seed = 707L, include_observed = TRUE
+    )
+  )
+)
+```
 
 CPU skeleton plus native orientation:
 
