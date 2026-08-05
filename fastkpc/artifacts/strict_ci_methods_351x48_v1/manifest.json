@@ -1,7 +1,7 @@
 {
   "schema_version": "fastkpc-strict-ci-methods-351x48-evidence-v1",
   "scope": "canonical-development-qualification",
-  "created_at": "2026-08-05 01:51:02 UTC",
+  "created_at": "2026-08-05 01:52:34 UTC",
   "promotion_status": "NOT_PROMOTED",
   "phase10_status": "ACTIVE",
   "sealed_holdout_status": "SEALED_NOT_RELEASED",
@@ -14,10 +14,10 @@
   },
   "provenance": {
     "mode": "working-tree-execution-snapshot-v1",
-    "head_base_commit": "ccd110409bb5a22d20e45da91c2e09cd031d7dd7",
-    "origin_main": "92dd44a25986add7114fe37cf9796a49900c3ba8",
-    "head_equals_origin_main": false,
-    "producer_commit": "ccd110409bb5a22d20e45da91c2e09cd031d7dd7",
+    "head_base_commit": "845d8a7838ff576ec79f0affbfa1e01b75444113",
+    "origin_main": "845d8a7838ff576ec79f0affbfa1e01b75444113",
+    "head_equals_origin_main": true,
+    "producer_commit": "845d8a7838ff576ec79f0affbfa1e01b75444113",
     "producer_commit_status": "COMMITTED",
     "relevant_sources_dirty_or_untracked": false,
     "source_file_paths": [
