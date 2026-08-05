@@ -1,7 +1,7 @@
 {
   "schema_version": "fastkpc-strict-ci-methods-351x48-evidence-v1",
   "scope": "canonical-development-qualification",
-  "created_at": "2026-08-05 01:52:34 UTC",
+  "created_at": "2026-08-05 05:12:03 UTC",
   "promotion_status": "NOT_PROMOTED",
   "phase10_status": "ACTIVE",
   "sealed_holdout_status": "SEALED_NOT_RELEASED",
@@ -14,10 +14,10 @@
   },
   "provenance": {
     "mode": "working-tree-execution-snapshot-v1",
-    "head_base_commit": "845d8a7838ff576ec79f0affbfa1e01b75444113",
-    "origin_main": "845d8a7838ff576ec79f0affbfa1e01b75444113",
+    "head_base_commit": "3663240270bc51c9a7efa12ac63f5869d5d7cb17",
+    "origin_main": "3663240270bc51c9a7efa12ac63f5869d5d7cb17",
     "head_equals_origin_main": true,
-    "producer_commit": "845d8a7838ff576ec79f0affbfa1e01b75444113",
+    "producer_commit": "3663240270bc51c9a7efa12ac63f5869d5d7cb17",
     "producer_commit_status": "COMMITTED",
     "relevant_sources_dirty_or_untracked": false,
     "source_file_paths": [
@@ -40,7 +40,7 @@
     },
     "source_file_sha256": {
       "strict_api": "221a83a795bc215e750bf0ea084f55c7956900c23f2125858f4c95df468aecd4",
-      "wanpdag_validator": "4190e971b50eaa2e801c2847adc1be45b48bc0dc62d4b96151cbc9f37b3b2016",
+      "wanpdag_validator": "1cf2ee5d934a3b71b03f417dbe0df2fec4f283ccafdf5981f3f5705a7d5667a6",
       "evidence_publisher": "cb187443947f6adadc7d9d996a020aad1bd1495cced457919294c2b626582bf4",
       "authority_regression": "55b4c7707c7f5cf17099ef733081c24ddd3a708e1a2794693a571b5c57e5f198",
       "strict_method_regression": "f36776b78ef43ee3c15d47c51affd20e12f6a381d54a374214d22c9e1b68cfa4",
@@ -57,8 +57,8 @@
       "cuda_builder": "clean"
     },
     "native_library_path": "/data/wenyujianData/kpcalg/fastkpc/build/fastkpc_cuda.so",
-    "native_library_bytes": 353607904,
-    "native_library_sha256": "98b36213057e6bdb8437bdddbe4312778c875ed29c993df3ee0c23d77e5a02ff",
+    "native_library_bytes": 354293944,
+    "native_library_sha256": "0e54ca23de3585ef5d604ac4912ade07257aa945388e26cee2a679a7abd5c6a7",
     "dataset_path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/kpc_tprs_real_zhu/cancer_RD-causalDiscoveryInput.rds",
     "dataset_bytes": 114769,
     "dataset_sha256": "e03cbfafed3336f3da7725878e92af24556b5ebdc6227b94ea84469e62e94036"
@@ -67,7 +67,7 @@
     "identity": "verify_strict_wanpdag_trace.R:kpcalg_authority",
     "schema_version": "fastkpc-strict-wanpdag-trace-oracle-v2",
     "source_path": "/data/wenyujianData/kpcalg/fastkpc/tools/verify_strict_wanpdag_trace.R",
-    "source_sha256": "4190e971b50eaa2e801c2847adc1be45b48bc0dc62d4b96151cbc9f37b3b2016",
+    "source_sha256": "1cf2ee5d934a3b71b03f417dbe0df2fec4f283ccafdf5981f3f5705a7d5667a6",
     "authority_regression": "fastkpc/tests/test_compatible_cuda_wanpdag_authority.R",
     "strict_method_regression": "fastkpc/tests/test_full_cuda_ci_strict_methods.R"
   },
