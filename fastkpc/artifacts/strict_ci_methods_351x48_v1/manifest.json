@@ -1,0 +1,311 @@
+{
+  "schema_version": "fastkpc-strict-ci-methods-351x48-evidence-v1",
+  "scope": "canonical-development-qualification",
+  "created_at": "2026-08-05 01:51:02 UTC",
+  "promotion_status": "NOT_PROMOTED",
+  "phase10_status": "ACTIVE",
+  "sealed_holdout_status": "SEALED_NOT_RELEASED",
+  "recommended_route_changed": false,
+  "architecture": {
+    "input": "R binary64 matrix",
+    "skeleton": "full-CUDA",
+    "orientation": "kpcalg CPU WAN-PDAG authority",
+    "full_cuda_wanpdag_claim": false
+  },
+  "provenance": {
+    "mode": "working-tree-execution-snapshot-v1",
+    "head_base_commit": "ccd110409bb5a22d20e45da91c2e09cd031d7dd7",
+    "origin_main": "92dd44a25986add7114fe37cf9796a49900c3ba8",
+    "head_equals_origin_main": false,
+    "producer_commit": "ccd110409bb5a22d20e45da91c2e09cd031d7dd7",
+    "producer_commit_status": "COMMITTED",
+    "relevant_sources_dirty_or_untracked": false,
+    "source_file_paths": [
+      "/data/wenyujianData/kpcalg/fastkpc/R/fast_kpc.R",
+      "/data/wenyujianData/kpcalg/fastkpc/tools/verify_strict_wanpdag_trace.R",
+      "/data/wenyujianData/kpcalg/fastkpc/tools/publish_strict_ci_methods_351x48_evidence.R",
+      "/data/wenyujianData/kpcalg/fastkpc/tests/test_compatible_cuda_wanpdag_authority.R",
+      "/data/wenyujianData/kpcalg/fastkpc/tests/test_full_cuda_ci_strict_methods.R",
+      "/data/wenyujianData/kpcalg/fastkpc/tests/test_strict_ci_methods_351x48_manifest.R",
+      "/data/wenyujianData/kpcalg/fastkpc/tools/build_cuda_native.sh"
+    ],
+    "source_file_relative_paths": {
+      "strict_api": "fastkpc/R/fast_kpc.R",
+      "wanpdag_validator": "fastkpc/tools/verify_strict_wanpdag_trace.R",
+      "evidence_publisher": "fastkpc/tools/publish_strict_ci_methods_351x48_evidence.R",
+      "authority_regression": "fastkpc/tests/test_compatible_cuda_wanpdag_authority.R",
+      "strict_method_regression": "fastkpc/tests/test_full_cuda_ci_strict_methods.R",
+      "manifest_regression": "fastkpc/tests/test_strict_ci_methods_351x48_manifest.R",
+      "cuda_builder": "fastkpc/tools/build_cuda_native.sh"
+    },
+    "source_file_sha256": {
+      "strict_api": "221a83a795bc215e750bf0ea084f55c7956900c23f2125858f4c95df468aecd4",
+      "wanpdag_validator": "4190e971b50eaa2e801c2847adc1be45b48bc0dc62d4b96151cbc9f37b3b2016",
+      "evidence_publisher": "cb187443947f6adadc7d9d996a020aad1bd1495cced457919294c2b626582bf4",
+      "authority_regression": "55b4c7707c7f5cf17099ef733081c24ddd3a708e1a2794693a571b5c57e5f198",
+      "strict_method_regression": "f36776b78ef43ee3c15d47c51affd20e12f6a381d54a374214d22c9e1b68cfa4",
+      "manifest_regression": "a3afedf7efc66e1ad8e83db7570baa6afdb9c5eac549842629aebb964e6a4164",
+      "cuda_builder": "ded8cb944e07bee4e58f32390a63a3e27f344291f6996d7477630790d23556e2"
+    },
+    "source_file_git_state": {
+      "strict_api": "clean",
+      "wanpdag_validator": "clean",
+      "evidence_publisher": "clean",
+      "authority_regression": "clean",
+      "strict_method_regression": "clean",
+      "manifest_regression": "clean",
+      "cuda_builder": "clean"
+    },
+    "native_library_path": "/data/wenyujianData/kpcalg/fastkpc/build/fastkpc_cuda.so",
+    "native_library_bytes": 353607904,
+    "native_library_sha256": "98b36213057e6bdb8437bdddbe4312778c875ed29c993df3ee0c23d77e5a02ff",
+    "dataset_path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/kpc_tprs_real_zhu/cancer_RD-causalDiscoveryInput.rds",
+    "dataset_bytes": 114769,
+    "dataset_sha256": "e03cbfafed3336f3da7725878e92af24556b5ebdc6227b94ea84469e62e94036"
+  },
+  "validator": {
+    "identity": "verify_strict_wanpdag_trace.R:kpcalg_authority",
+    "schema_version": "fastkpc-strict-wanpdag-trace-oracle-v2",
+    "source_path": "/data/wenyujianData/kpcalg/fastkpc/tools/verify_strict_wanpdag_trace.R",
+    "source_sha256": "4190e971b50eaa2e801c2847adc1be45b48bc0dc62d4b96151cbc9f37b3b2016",
+    "authority_regression": "fastkpc/tests/test_compatible_cuda_wanpdag_authority.R",
+    "strict_method_regression": "fastkpc/tests/test_full_cuda_ci_strict_methods.R"
+  },
+  "methods": {
+    "hsic.gamma": {
+      "ci_method": "hsic.gamma",
+      "config": {
+        "n": 351,
+        "p": 48,
+        "alpha": 0.1,
+        "max_conditioning_size": "Inf",
+        "index": 1,
+        "numCol": 35,
+        "hsic_sig": 1,
+        "permutation_replicates": null,
+        "permutation_seed": null,
+        "permutation_include_observed": null
+      },
+      "authority": {
+        "skeleton_authority": "full_cuda",
+        "orientation_authority": "kpcalg_cpu_wanpdag",
+        "native_cuda_orientation_status": "experimental"
+      },
+      "numerical_contract": {
+        "skeleton_p_value": "absolute-tolerance-1e-10",
+        "skeleton_decision_trace": "exact",
+        "graph_and_process": "exact",
+        "orientation_ci_and_pdag": "bitwise-exact"
+      },
+      "permutation_rng_contract": {
+        "applicable": false,
+        "contract": "not-applicable",
+        "initial_state_sha256": null,
+        "skeleton_end_orientation_start_state_sha256": null,
+        "final_state_sha256": null,
+        "final_state_identical_to_oracle": true
+      },
+      "performance": {
+        "skeleton_elapsed_sec": 1562.052,
+        "orientation_elapsed_sec": 0.478
+      },
+      "parity": {
+        "skeleton_ci_test_count": 322679,
+        "orientation_ci_test_count": 6,
+        "skeleton_SHD": 0,
+        "skeleton_max_abs_p_diff": 8.78298545003986e-11,
+        "orientation_max_abs_p_diff": 0,
+        "logical_trace_identical": true,
+        "adjacency_identical": true,
+        "sepsets_identical": true,
+        "pmax_within_tolerance": true,
+        "n_edgetests_identical": true,
+        "orientation_trace_identical": true,
+        "orientation_decisions_identical": true,
+        "final_pdag_identical": true,
+        "pass": true
+      },
+      "payloads": {
+        "candidate": {
+          "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_v1/payload/hsic.gamma/candidate.rds",
+          "relative_path": "payload/hsic.gamma/candidate.rds",
+          "bytes": 27447145,
+          "sha256": "1b536523c3804af6dc2941b863635a7fdf130c1c5bf3e2e72c9e426094932c2e"
+        },
+        "oracle": {
+          "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_v1/payload/hsic.gamma/skeleton_oracle.rds",
+          "relative_path": "payload/hsic.gamma/skeleton_oracle.rds",
+          "bytes": 1100024,
+          "sha256": "4741f39fd93cc69c2408f6bdb0026fdb48ce0beb1128cd50bfaa68f4c193cacc"
+        },
+        "wanpdag_receipt": {
+          "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_v1/payload/hsic.gamma/wanpdag_receipt.rds",
+          "relative_path": "payload/hsic.gamma/wanpdag_receipt.rds",
+          "bytes": 4632,
+          "sha256": "fbebc9f11cd6da8a4d3f27db9f2aad30c5d2f6a273109e2194773830ec2aa60d"
+        }
+      }
+    },
+    "dcc.perm": {
+      "ci_method": "dcc.perm",
+      "config": {
+        "n": 351,
+        "p": 48,
+        "alpha": 0.1,
+        "max_conditioning_size": "Inf",
+        "index": 1,
+        "numCol": 35,
+        "hsic_sig": null,
+        "permutation_replicates": 100,
+        "permutation_seed": 707,
+        "permutation_include_observed": true
+      },
+      "authority": {
+        "skeleton_authority": "full_cuda",
+        "orientation_authority": "kpcalg_cpu_wanpdag",
+        "native_cuda_orientation_status": "experimental"
+      },
+      "numerical_contract": {
+        "skeleton_p_value": "bitwise-exact",
+        "skeleton_decision_trace": "exact",
+        "graph_and_process": "exact",
+        "orientation_ci_and_pdag": "bitwise-exact"
+      },
+      "permutation_rng_contract": {
+        "applicable": true,
+        "contract": "legacy-r-global-stream-exact",
+        "initial_state_sha256": "edbcd054e86b7ada48a98e378ec926c51c49a05a576f1a13d503f0824f11a1ce",
+        "skeleton_end_orientation_start_state_sha256": "57c3aae254aab87e0ee06522c661004bf19489c5d96b1c620ac46443e094c822",
+        "final_state_sha256": "257bbe1adb44b93c9a0ee6c2307282afe8370c7d4834dd29d94b51ffba874e16",
+        "final_state_identical_to_oracle": true
+      },
+      "performance": {
+        "skeleton_elapsed_sec": 2131.261,
+        "orientation_elapsed_sec": 0.478
+      },
+      "parity": {
+        "skeleton_ci_test_count": 229675,
+        "orientation_ci_test_count": 11,
+        "skeleton_SHD": 0,
+        "skeleton_max_abs_p_diff": 0,
+        "orientation_max_abs_p_diff": 0,
+        "logical_trace_identical": true,
+        "adjacency_identical": true,
+        "sepsets_identical": true,
+        "pmax_within_tolerance": true,
+        "n_edgetests_identical": true,
+        "orientation_trace_identical": true,
+        "orientation_decisions_identical": true,
+        "final_pdag_identical": true,
+        "pass": true
+      },
+      "payloads": {
+        "candidate": {
+          "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_v1/payload/dcc.perm/candidate.rds",
+          "relative_path": "payload/dcc.perm/candidate.rds",
+          "bytes": 15888678,
+          "sha256": "a77751f313229f529dfb0d41fbeb234d96f17788ce2be5a43da6ccd3daab4508"
+        },
+        "oracle": {
+          "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_v1/payload/dcc.perm/skeleton_oracle.rds",
+          "relative_path": "payload/dcc.perm/skeleton_oracle.rds",
+          "bytes": 24568,
+          "sha256": "0dff14b5faa406472fd95d239f6308caca5c33bd4930dde6f6e532050efb1bb7"
+        },
+        "wanpdag_receipt": {
+          "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_v1/payload/dcc.perm/wanpdag_receipt.rds",
+          "relative_path": "payload/dcc.perm/wanpdag_receipt.rds",
+          "bytes": 7128,
+          "sha256": "9a582f0d6753e9ea46943eb1d2aeba6b6b06f50c5478b7994db53c7084fe42cf"
+        }
+      }
+    },
+    "hsic.perm": {
+      "ci_method": "hsic.perm",
+      "config": {
+        "n": 351,
+        "p": 48,
+        "alpha": 0.1,
+        "max_conditioning_size": "Inf",
+        "index": 1,
+        "numCol": 35,
+        "hsic_sig": 1,
+        "permutation_replicates": 100,
+        "permutation_seed": 707,
+        "permutation_include_observed": true
+      },
+      "authority": {
+        "skeleton_authority": "full_cuda",
+        "orientation_authority": "kpcalg_cpu_wanpdag",
+        "native_cuda_orientation_status": "experimental"
+      },
+      "numerical_contract": {
+        "skeleton_p_value": "bitwise-exact",
+        "skeleton_decision_trace": "exact",
+        "graph_and_process": "exact",
+        "orientation_ci_and_pdag": "bitwise-exact"
+      },
+      "permutation_rng_contract": {
+        "applicable": true,
+        "contract": "legacy-r-global-stream-exact",
+        "initial_state_sha256": "edbcd054e86b7ada48a98e378ec926c51c49a05a576f1a13d503f0824f11a1ce",
+        "skeleton_end_orientation_start_state_sha256": "7db12132b77463a8e08577f53b58de8123acd16b333fa2723f26f5ce01408fa9",
+        "final_state_sha256": "a7cb88b971cb83e0e5da176e113e983440d71a2d8003e54b48d1c036b008c077",
+        "final_state_identical_to_oracle": true
+      },
+      "performance": {
+        "skeleton_elapsed_sec": 3877.316,
+        "orientation_elapsed_sec": 0.644
+      },
+      "parity": {
+        "skeleton_ci_test_count": 282113,
+        "orientation_ci_test_count": 2,
+        "skeleton_SHD": 0,
+        "skeleton_max_abs_p_diff": 0,
+        "orientation_max_abs_p_diff": 0,
+        "logical_trace_identical": true,
+        "adjacency_identical": true,
+        "sepsets_identical": true,
+        "pmax_within_tolerance": true,
+        "n_edgetests_identical": true,
+        "orientation_trace_identical": true,
+        "orientation_decisions_identical": true,
+        "final_pdag_identical": true,
+        "pass": true
+      },
+      "payloads": {
+        "candidate": {
+          "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_v1/payload/hsic.perm/candidate.rds",
+          "relative_path": "payload/hsic.perm/candidate.rds",
+          "bytes": 19449931,
+          "sha256": "acaa735d44d9a789d4be99b64abe89240685fc8c3a91d6cd7880788f87bae0a7"
+        },
+        "oracle": {
+          "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_v1/payload/hsic.perm/skeleton_oracle.rds",
+          "relative_path": "payload/hsic.perm/skeleton_oracle.rds",
+          "bytes": 29208,
+          "sha256": "d31848a1f32b0a6ead49b2068dc59640134a3065e3be1f35ae22cebf89c554dd"
+        },
+        "wanpdag_receipt": {
+          "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_v1/payload/hsic.perm/wanpdag_receipt.rds",
+          "relative_path": "payload/hsic.perm/wanpdag_receipt.rds",
+          "bytes": 7028,
+          "sha256": "df1041fe0ffca443b5fe15c199ea656379587c2c87ac45c6ef534344e757aa08"
+        }
+      }
+    }
+  },
+  "aggregate": {
+    "method_count": 3,
+    "skeleton_ci_test_count": 834467,
+    "orientation_ci_test_count": 19,
+    "all_SHD_zero": true,
+    "all_process_gates_pass": true
+  },
+  "rebuild_commands": {
+    "native": "bash fastkpc/tools/build_cuda_native.sh",
+    "strict_method_regression": "CUDA_VISIBLE_DEVICES=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 Rscript fastkpc/tests/test_full_cuda_ci_strict_methods.R",
+    "authority_regression": "CUDA_VISIBLE_DEVICES=0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 Rscript fastkpc/tests/test_compatible_cuda_wanpdag_authority.R",
+    "publish": "Rscript fastkpc/tools/publish_strict_ci_methods_351x48_evidence.R fastkpc/artifacts/strict_ci_methods_351x48_v1"
+  }
+}
