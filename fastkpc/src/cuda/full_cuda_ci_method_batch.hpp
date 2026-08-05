@@ -11,6 +11,8 @@
 
 namespace fastkpc {
 
+class FullCudaCiMethodResidualCache;
+
 constexpr char kFullCudaCiMethodBatchRequestSchemaVersion[] =
   "full-cuda-ci-method-batch-request-v1";
 constexpr char kFullCudaCiMethodBatchResultSchemaVersion[] =
@@ -67,6 +69,15 @@ struct FullCudaCiMethodBatchDiagnostics {
   std::size_t metadata_h2d_bytes = 0;
   std::size_t device_allocation_bytes = 0;
   std::size_t peak_device_allocation_bytes = 0;
+  int residual_cache_lookup_count = 0;
+  int residual_cache_hit_count = 0;
+  int residual_cache_insert_count = 0;
+  int residual_cache_eviction_count = 0;
+  int residual_cache_all_hit_batch_count = 0;
+  int residual_cache_bypassed_target_count = 0;
+  std::size_t residual_cache_capacity_entries = 0;
+  std::size_t residual_cache_device_bytes = 0;
+  std::size_t residual_cache_gather_d2d_bytes = 0;
   double residual_solve_host_ms = 0.0;
   double component_build_cuda_ms = 0.0;
   double pair_evaluation_cuda_ms = 0.0;
@@ -100,10 +111,17 @@ std::vector<int> full_cuda_ci_method_seeded_permutation_table(
   int replicates,
   const std::vector<unsigned int>& seeds);
 
+std::shared_ptr<FullCudaCiMethodResidualCache>
+create_full_cuda_ci_method_residual_cache(
+  int n,
+  std::size_t byte_budget);
+
 FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
   const FixedSpBatchHostView& batch,
-  const FullCudaCiMethodBatchRequest& request);
+  const FullCudaCiMethodBatchRequest& request,
+  const std::shared_ptr<FullCudaCiMethodResidualCache>& residual_cache =
+    std::shared_ptr<FullCudaCiMethodResidualCache>());
 
 }  // namespace fastkpc
 

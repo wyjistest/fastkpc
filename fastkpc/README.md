@@ -110,7 +110,38 @@ target optimizer state cache: 131072 entries
 native Prepared-S active device cache: 2048 single-penalty + 8192 multi-penalty
 per-call native Prepared-S host cache: 16384 entries
 device dCov component capacity: 47 entries
+strict-method residual cache: <= 384 MiB, <= 131072 entries
 ```
+
+The strict `hsic.gamma`, `dcc.perm`, and `hsic.perm` routes now use a
+one-call-scoped residual slab. A batch with any cache miss still executes its
+complete original fixed-SP SVD cohort. Only an all-hit batch bypasses the
+solve, and its residuals are gathered D2D in the original target order. The
+cache identity includes the authenticated ResidualKey and planned solver
+route. This preserves the batch-dependent numerical shape of every newly
+computed residual and never changes permutation generation or R RNG
+consumption.
+
+The HSIC incomplete-Cholesky component kernel also parallelizes independent
+row work across one 256-thread block per component. Pivot selection,
+triangular solves, mean accumulation, and final reductions retain their
+original order. Full default-Inf 351x48 development receipts measured:
+
+```text
+method       previous     optimized    speedup   physical residual fits
+hsic.gamma   1562.052 s    979.870 s     1.594x   308199 -> 194687
+dcc.perm     2131.261 s   1455.935 s     1.464x   459350 -> 189896
+hsic.perm    3877.316 s   1875.133 s     2.068x   564226 -> 189258
+```
+
+All 834,467 skeleton p-values retain their established contracts:
+`hsic.gamma` is unchanged from its previously CPU-qualified candidate, and
+both permutation methods are bitwise exact. Logical traces, adjacency,
+undirected sepsets, `pMax`, `n.edgetests`, permutation RNG terminal state, the
+19 kpcalg-authority orientation CI tests, and final PDAGs are exact. All three
+runs report zero residual/component D2H, zero CPU numerical authority, zero
+fallback, and zero cache eviction. These timings extend the three opt-in
+methods; they do not replace the `dcc.gamma` Phase 10 performance baseline.
 
 The historical canonical artifact is
 `artifacts/full_cuda_ci/promotion_351x48_v1/`. Across five fresh-process cold

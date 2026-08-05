@@ -17,6 +17,10 @@ fastkpc/artifacts/*
 fastkpc/artifacts/strict_ci_methods_351x48_v1/*
 !fastkpc/artifacts/strict_ci_methods_351x48_v1/README.md
 !fastkpc/artifacts/strict_ci_methods_351x48_v1/manifest.json
+!fastkpc/artifacts/strict_ci_methods_351x48_optimized_v1/
+fastkpc/artifacts/strict_ci_methods_351x48_optimized_v1/*
+!fastkpc/artifacts/strict_ci_methods_351x48_optimized_v1/README.md
+!fastkpc/artifacts/strict_ci_methods_351x48_optimized_v1/manifest.json
 *.log
 *.csv
 *.tsv

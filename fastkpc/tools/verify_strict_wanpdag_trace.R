@@ -91,6 +91,7 @@ require_true(is.finite(tolerance) && tolerance >= 0,
 require_true(gate_mode %in% c("native_cuda", "kpcalg_authority"),
              "gate mode must be native_cuda or kpcalg_authority")
 
+build_fastkpc_native()
 payload <- readRDS(candidate_path)
 candidate <- if (is.list(payload) && !is.null(payload$result)) {
   payload$result

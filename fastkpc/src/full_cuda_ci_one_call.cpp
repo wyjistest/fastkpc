@@ -576,6 +576,15 @@ struct OneCallDiagnostics {
   int component_cache_hit_count = 0;
   int component_cache_miss_count = 0;
   int component_cache_eviction_count = 0;
+  int method_residual_cache_lookup_count = 0;
+  int method_residual_cache_hit_count = 0;
+  int method_residual_cache_insert_count = 0;
+  int method_residual_cache_eviction_count = 0;
+  int method_residual_cache_all_hit_batch_count = 0;
+  int method_residual_cache_bypassed_target_count = 0;
+  std::size_t method_residual_cache_capacity_entries = 0U;
+  std::size_t method_residual_cache_device_bytes = 0U;
+  std::size_t method_residual_cache_gather_d2d_bytes = 0U;
   int host_synchronization_count = 0;
   int result_cache_capacity = 0;
   int result_cache_warm_start_entries = 0;
@@ -1830,9 +1839,12 @@ void accumulate_refinement_diagnostics(
 void accumulate_method_diagnostics(
     const FullCudaCiMethodBatchDiagnostics& value,
     OneCallDiagnostics* diagnostics) {
-  diagnostics->cuda_residual_batch_count += 1;
-  diagnostics->cuda_exact_screen_residual_batch_count += 1;
-  diagnostics->cuda_exact_screen_residual_target_count += value.target_count;
+  const int solved_target_count = value.residual_cache_all_hit_batch_count > 0 ?
+    0 : value.target_count;
+  const int solved_batch_count = solved_target_count > 0 ? 1 : 0;
+  diagnostics->cuda_residual_batch_count += solved_batch_count;
+  diagnostics->cuda_exact_screen_residual_batch_count += solved_batch_count;
+  diagnostics->cuda_exact_screen_residual_target_count += solved_target_count;
   diagnostics->cuda_exact_screen_component_count +=
     value.component_build_count;
   diagnostics->cuda_exact_screen_pair_count += value.pair_evaluation_count;
@@ -1845,6 +1857,26 @@ void accumulate_method_diagnostics(
   diagnostics->component_cache_miss_count += value.referenced_component_count;
   diagnostics->component_cache_hit_count +=
     2 * value.pair_count - value.referenced_component_count;
+  diagnostics->method_residual_cache_lookup_count +=
+    value.residual_cache_lookup_count;
+  diagnostics->method_residual_cache_hit_count +=
+    value.residual_cache_hit_count;
+  diagnostics->method_residual_cache_insert_count +=
+    value.residual_cache_insert_count;
+  diagnostics->method_residual_cache_eviction_count +=
+    value.residual_cache_eviction_count;
+  diagnostics->method_residual_cache_all_hit_batch_count +=
+    value.residual_cache_all_hit_batch_count;
+  diagnostics->method_residual_cache_bypassed_target_count +=
+    value.residual_cache_bypassed_target_count;
+  diagnostics->method_residual_cache_capacity_entries = std::max(
+    diagnostics->method_residual_cache_capacity_entries,
+    value.residual_cache_capacity_entries);
+  diagnostics->method_residual_cache_device_bytes = std::max(
+    diagnostics->method_residual_cache_device_bytes,
+    value.residual_cache_device_bytes);
+  diagnostics->method_residual_cache_gather_d2d_bytes +=
+    value.residual_cache_gather_d2d_bytes;
   diagnostics->residual_d2h_bytes += value.residual_d2h_bytes;
   diagnostics->component_d2h_bytes += value.component_d2h_bytes;
   diagnostics->compact_result_d2h_bytes += value.compact_result_d2h_bytes;
@@ -2850,6 +2882,7 @@ GroupResult execute_group(
     int num_col,
     bool direct,
     const FullCudaCiOneCallMethodOptions& method_options,
+    const std::shared_ptr<FullCudaCiMethodResidualCache>& method_residual_cache,
     OneCallDiagnostics* diagnostics) {
   require(!task_indices.empty() &&
             task_indices.size() == logical_sequence_ids.size(),
@@ -3170,8 +3203,9 @@ GroupResult execute_group(
   }
   diagnostics->logical_residual_request_count += target_count;
   diagnostics->physical_residual_fit_count += target_count;
-  diagnostics->matrix_h2d_bytes +=
+  const std::size_t fixed_sp_batch_h2d_bytes =
     (Y.size() + selected_sp.size()) * sizeof(double);
+  diagnostics->matrix_h2d_bytes += fixed_sp_batch_h2d_bytes;
 
   FixedSpBatchHostView batch;
   batch.Y = Y.data();
@@ -3214,8 +3248,23 @@ GroupResult execute_group(
         method_request, residual_keys, context->n);
     FullCudaCiMethodBatchResult method_result =
       run_full_cuda_ci_method_batch(
-        context->fixed_sp, batch, method_request);
+        context->fixed_sp, batch, method_request, method_residual_cache);
     accumulate_method_diagnostics(method_result.diagnostics, diagnostics);
+    if (method_result.diagnostics.residual_cache_all_hit_batch_count > 0) {
+      require(method_result.diagnostics.residual_solve_host_ms == 0.0,
+              "strict CI cached residual batch unexpectedly ran a solve");
+      require(
+        method_result.diagnostics.residual_cache_bypassed_target_count ==
+          target_count &&
+        diagnostics->matrix_h2d_bytes >= fixed_sp_batch_h2d_bytes,
+        "strict CI cached residual batch accounting changed");
+      diagnostics->physical_residual_fit_count -= target_count;
+      diagnostics->matrix_h2d_bytes -= fixed_sp_batch_h2d_bytes;
+    } else {
+      require(
+        method_result.diagnostics.residual_cache_bypassed_target_count == 0,
+        "strict CI residual cache reported an unexplained bypass");
+    }
     if (context->penalty_count == 1) {
       diagnostics->cuda_single_penalty_residual_solve_host_ms +=
         method_result.diagnostics.residual_solve_host_ms;
@@ -3414,6 +3463,13 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   NativeSetupCache setup_cache(data, dataset, &runtime_pool, &diagnostics);
   std::shared_ptr<NativeSetupContext> direct = build_direct_context(
     data, dataset, runtime_pool.base_runtime());
+  constexpr std::size_t kStrictMethodResidualCacheBudget =
+    384U * 1024U * 1024U;
+  std::shared_ptr<FullCudaCiMethodResidualCache> method_residual_cache;
+  if (method_options.ci_method != "dcc.gamma") {
+    method_residual_cache = create_full_cuda_ci_method_residual_cache(
+      n, kStrictMethodResidualCacheBudget);
+  }
 
   std::vector<int> adjacency(static_cast<std::size_t>(p) * p, 1);
   std::vector<double> pmax(
@@ -3646,7 +3702,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
           if (!work.group_tasks.empty()) {
             const GroupResult result = execute_group(
               data, work.context, plan, work.group_tasks, work.group_ids,
-              num_col, work.direct, method_options, &diagnostics);
+              num_col, work.direct, method_options, method_residual_cache,
+              &diagnostics);
             require(result.p_values.size() == work.missing_positions.size(),
                     "compatible.cuda group result alignment changed");
             const bool method_records =
@@ -3879,6 +3936,39 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     summarize_prefill_attribution(diagnostics);
   const Rcpp::DataFrame prefill_batches = prefill_batch_diagnostics_frame(
     diagnostics.prefill_batches, diagnostics.unique_target_keys);
+  const bool method_residual_cache_enabled =
+    static_cast<bool>(method_residual_cache);
+  const bool cacheable_strict_method =
+    method_options.ci_method != "dcc.gamma";
+  const bool method_residual_cache_accounted = !cacheable_strict_method ||
+    ((!method_residual_cache_enabled &&
+       diagnostics.method_residual_cache_lookup_count == 0 &&
+       diagnostics.method_residual_cache_hit_count == 0 &&
+       diagnostics.method_residual_cache_insert_count == 0 &&
+       diagnostics.method_residual_cache_all_hit_batch_count == 0 &&
+       diagnostics.method_residual_cache_bypassed_target_count == 0 &&
+       diagnostics.physical_residual_fit_count ==
+         diagnostics.logical_residual_request_count) ||
+     (method_residual_cache_enabled &&
+       diagnostics.method_residual_cache_lookup_count ==
+         diagnostics.logical_residual_request_count &&
+       diagnostics.method_residual_cache_lookup_count ==
+         diagnostics.method_residual_cache_hit_count +
+           diagnostics.method_residual_cache_insert_count &&
+       diagnostics.method_residual_cache_bypassed_target_count >=
+         diagnostics.method_residual_cache_all_hit_batch_count &&
+       diagnostics.physical_residual_fit_count ==
+         diagnostics.logical_residual_request_count -
+           diagnostics.method_residual_cache_bypassed_target_count &&
+       diagnostics.cuda_exact_screen_residual_target_count ==
+         diagnostics.physical_residual_fit_count &&
+       diagnostics.cuda_exact_screen_residual_batch_count +
+           diagnostics.method_residual_cache_all_hit_batch_count ==
+         total_frontier_batches &&
+       diagnostics.method_residual_cache_gather_d2d_bytes ==
+         static_cast<std::size_t>(
+           diagnostics.method_residual_cache_bypassed_target_count) *
+           static_cast<std::size_t>(n) * sizeof(double)));
   require(diagnostics.native_setup_count >= physical_prepared_s_key_count &&
             physical_prepared_s_key_count >= unique_prepared_s_key_count &&
             diagnostics.physical_residual_fit_count >=
@@ -3907,7 +3997,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
               diagnostics.singleton_padding_target_count &&
             diagnostics.cuda_optimizer_host_boundary_count ==
               prefill.optimizer_boundary_count +
-                diagnostics.frontier_optimizer_boundary_count,
+                diagnostics.frontier_optimizer_boundary_count &&
+            method_residual_cache_accounted,
           "compatible.cuda one-call physical work accounting changed");
   const bool authority_clean =
     diagnostics.cpu_dcov_component_count == 0 &&
@@ -4309,6 +4400,26 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         kReferenceComponentCapacity,
       Rcpp::Named("component_cache_warm_start_entries") = 0,
       Rcpp::Named("residual_cache_warm_start_entries") = 0,
+      Rcpp::Named("method_residual_cache_capacity_entries") =
+        static_cast<double>(
+          diagnostics.method_residual_cache_capacity_entries),
+      Rcpp::Named("method_residual_cache_device_bytes") =
+        static_cast<double>(diagnostics.method_residual_cache_device_bytes),
+      Rcpp::Named("method_residual_cache_lookup_count") =
+        diagnostics.method_residual_cache_lookup_count,
+      Rcpp::Named("method_residual_cache_hit_count") =
+        diagnostics.method_residual_cache_hit_count,
+      Rcpp::Named("method_residual_cache_insert_count") =
+        diagnostics.method_residual_cache_insert_count,
+      Rcpp::Named("method_residual_cache_eviction_count") =
+        diagnostics.method_residual_cache_eviction_count,
+      Rcpp::Named("method_residual_cache_all_hit_batch_count") =
+        diagnostics.method_residual_cache_all_hit_batch_count,
+      Rcpp::Named("method_residual_cache_bypassed_target_count") =
+        diagnostics.method_residual_cache_bypassed_target_count,
+      Rcpp::Named("method_residual_cache_gather_d2d_bytes") =
+        static_cast<double>(
+          diagnostics.method_residual_cache_gather_d2d_bytes),
       Rcpp::Named("component_cache_request_count") =
         diagnostics.component_cache_request_count,
       Rcpp::Named("component_cache_hit_count") =

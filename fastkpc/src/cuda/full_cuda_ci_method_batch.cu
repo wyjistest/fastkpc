@@ -16,6 +16,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -362,7 +363,7 @@ __global__ void build_inchol_components_kernel(
     int* ranks,
     double* off_diagonal_sums) {
   const int component = static_cast<int>(blockIdx.x);
-  if (component >= component_count || threadIdx.x != 0) return;
+  if (component >= component_count) return;
   const int target = component_targets[component];
   const double* values = residuals + static_cast<std::size_t>(target) * n;
   double* factor = factors +
@@ -377,41 +378,83 @@ __global__ void build_inchol_components_kernel(
   int* component_pivots = pivots +
     static_cast<std::size_t>(component) * max_rank;
 
-  for (int row = 0; row < n; ++row) diagonal[row] = 1.0;
-  for (int entry = 0; entry < max_rank * max_rank; ++entry) {
+  for (int row = static_cast<int>(threadIdx.x); row < n;
+       row += static_cast<int>(blockDim.x)) {
+    diagonal[row] = 1.0;
+  }
+  for (int entry = static_cast<int>(threadIdx.x);
+       entry < max_rank * max_rank;
+       entry += static_cast<int>(blockDim.x)) {
     upper[entry] = 0.0;
   }
-  double residue = 1.0;
-  int pivot = 0;
-  int rank = 0;
-  while (residue > kIncholTolerance && rank < max_rank) {
-    const double pivot_value = values[pivot];
-    for (int row = 0; row < n; ++row) {
+  __shared__ double shared_pivot_value;
+  __shared__ double shared_residue;
+  __shared__ double shared_tau;
+  __shared__ int shared_pivot;
+  __shared__ int shared_rank;
+  __shared__ int shared_active;
+  if (threadIdx.x == 0) {
+    shared_residue = 1.0;
+    shared_pivot = 0;
+    shared_rank = 0;
+    shared_active = 1;
+  }
+  __syncthreads();
+
+  while (true) {
+    if (threadIdx.x == 0) {
+      shared_active = shared_residue > kIncholTolerance &&
+        shared_rank < max_rank;
+      if (shared_active != 0) {
+        shared_pivot_value = values[shared_pivot];
+      }
+    }
+    __syncthreads();
+    if (shared_active == 0) break;
+
+    for (int row = static_cast<int>(threadIdx.x); row < n;
+         row += static_cast<int>(blockDim.x)) {
+      const double pivot_value = shared_pivot_value;
       const double difference = values[row] - pivot_value;
       column[row] = glibc235::exp_fma_rn(
         -sigma * difference * difference);
     }
+    __syncthreads();
 
-    double tau_square = column[pivot];
-    if (rank == 0) {
-      upper[0] = sqrt(tau_square);
-    } else {
-      for (int row = 0; row < rank; ++row) {
-        double value = column[component_pivots[row]];
-        for (int previous = 0; previous < row; ++previous) {
-          value -= upper[previous + static_cast<std::size_t>(max_rank) * row] *
-            solve[previous];
+    if (threadIdx.x == 0) {
+      double tau_square = column[shared_pivot];
+      if (shared_rank == 0) {
+        upper[0] = sqrt(tau_square);
+      } else {
+        for (int row = 0; row < shared_rank; ++row) {
+          double value = column[component_pivots[row]];
+          for (int previous = 0; previous < row; ++previous) {
+            value -= upper[
+              previous + static_cast<std::size_t>(max_rank) * row] *
+              solve[previous];
+          }
+          solve[row] = value /
+            upper[row + static_cast<std::size_t>(max_rank) * row];
+          tau_square -= solve[row] * solve[row];
+          upper[row + static_cast<std::size_t>(max_rank) * shared_rank] =
+            solve[row];
         }
-        solve[row] = value /
-          upper[row + static_cast<std::size_t>(max_rank) * row];
-        tau_square -= solve[row] * solve[row];
-        upper[row + static_cast<std::size_t>(max_rank) * rank] = solve[row];
+      }
+      if (!(tau_square > 0.0) || !isfinite(tau_square)) {
+        shared_active = 0;
+      } else {
+        shared_tau = sqrt(tau_square);
+        upper[shared_rank +
+              static_cast<std::size_t>(max_rank) * shared_rank] = shared_tau;
       }
     }
-    if (!(tau_square > 0.0) || !isfinite(tau_square)) break;
-    const double tau = sqrt(tau_square);
-    upper[rank + static_cast<std::size_t>(max_rank) * rank] = tau;
-    for (int row = 0; row < n; ++row) {
+    __syncthreads();
+    if (shared_active == 0) break;
+
+    const int rank = shared_rank;
+    const double tau = shared_tau;
+    for (int row = static_cast<int>(threadIdx.x); row < n;
+         row += static_cast<int>(blockDim.x)) {
       double projection = 0.0;
       for (int previous = 0; previous < rank; ++previous) {
         projection += factor[row + static_cast<std::size_t>(n) * previous] *
@@ -421,32 +464,39 @@ __global__ void build_inchol_components_kernel(
       factor[row + static_cast<std::size_t>(n) * rank] = update;
       diagonal[row] -= update * update;
     }
-    component_pivots[rank] = pivot;
-    ++rank;
-    residue = diagonal[0];
-    pivot = 0;
-    for (int row = 1; row < n; ++row) {
-      if (diagonal[row] > residue) {
-        residue = diagonal[row];
-        pivot = row;
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+      component_pivots[shared_rank] = shared_pivot;
+      ++shared_rank;
+      shared_residue = diagonal[0];
+      shared_pivot = 0;
+      for (int row = 1; row < n; ++row) {
+        if (diagonal[row] > shared_residue) {
+          shared_residue = diagonal[row];
+          shared_pivot = row;
+        }
       }
     }
+    __syncthreads();
   }
-  ranks[component] = rank;
 
-  double total_sum = 0.0;
-  double diagonal_sum = 0.0;
-  for (int column_index = 0; column_index < rank; ++column_index) {
-    double column_sum = 0.0;
-    for (int row = 0; row < n; ++row) {
-      const double value = factor[
-        row + static_cast<std::size_t>(n) * column_index];
-      column_sum += value;
-      diagonal_sum += value * value;
+  if (threadIdx.x == 0) {
+    ranks[component] = shared_rank;
+    double total_sum = 0.0;
+    double diagonal_sum = 0.0;
+    for (int column_index = 0; column_index < shared_rank; ++column_index) {
+      double column_sum = 0.0;
+      for (int row = 0; row < n; ++row) {
+        const double value = factor[
+          row + static_cast<std::size_t>(n) * column_index];
+        column_sum += value;
+        diagonal_sum += value * value;
+      }
+      total_sum += column_sum * column_sum;
     }
-    total_sum += column_sum * column_sum;
+    off_diagonal_sums[component] = total_sum - diagonal_sum;
   }
-  off_diagonal_sums[component] = total_sum - diagonal_sum;
 }
 
 __global__ void center_inchol_components_kernel(double* factors,
@@ -455,19 +505,25 @@ __global__ void center_inchol_components_kernel(double* factors,
                                                 int component_count,
                                                 int max_rank) {
   const int component = static_cast<int>(blockIdx.x);
-  if (component >= component_count || threadIdx.x != 0) return;
+  if (component >= component_count) return;
   double* factor = factors +
     static_cast<std::size_t>(component) * n * max_rank;
   const int rank = ranks[component];
+  __shared__ double shared_mean;
   for (int column = 0; column < rank; ++column) {
-    double mean = 0.0;
-    for (int row = 0; row < n; ++row) {
-      mean += factor[row + static_cast<std::size_t>(n) * column];
+    if (threadIdx.x == 0) {
+      double mean = 0.0;
+      for (int row = 0; row < n; ++row) {
+        mean += factor[row + static_cast<std::size_t>(n) * column];
+      }
+      shared_mean = mean / static_cast<double>(n);
     }
-    mean /= static_cast<double>(n);
-    for (int row = 0; row < n; ++row) {
-      factor[row + static_cast<std::size_t>(n) * column] -= mean;
+    __syncthreads();
+    for (int row = static_cast<int>(threadIdx.x); row < n;
+         row += static_cast<int>(blockDim.x)) {
+      factor[row + static_cast<std::size_t>(n) * column] -= shared_mean;
     }
+    __syncthreads();
   }
 }
 
@@ -819,6 +875,209 @@ void validate_request(const FullCudaCiMethodBatchRequest& request,
 
 }  // namespace
 
+class FullCudaCiMethodResidualCache {
+ public:
+  static constexpr std::size_t kGatherCapacity = 64U;
+
+  struct Entry {
+    std::size_t slot = 0U;
+    FixedSpRoute route = FixedSpRoute::Unset;
+    FixedSpStatus status = static_cast<FixedSpStatus>(-1);
+  };
+
+  FullCudaCiMethodResidualCache(int n,
+                                int device_id,
+                                std::size_t capacity_entries)
+      : n_(n), device_id_(device_id), capacity_entries_(capacity_entries),
+        slab_(checked_multiply(
+          checked_multiply(capacity_entries_, static_cast<std::size_t>(n_),
+                           "strict CI residual cache entries"),
+          sizeof(double), "strict CI residual cache bytes")),
+        gather_(checked_multiply(
+          checked_multiply(kGatherCapacity, static_cast<std::size_t>(n_),
+                           "strict CI residual gather entries"),
+          sizeof(double), "strict CI residual gather bytes")),
+        slot_keys_(capacity_entries_) {
+    if (n_ <= 0 || device_id_ < 0 || capacity_entries_ < 2U) {
+      throw std::runtime_error("strict CI residual cache shape is invalid");
+    }
+  }
+
+  FullCudaCiMethodResidualCache(const FullCudaCiMethodResidualCache&) = delete;
+  FullCudaCiMethodResidualCache& operator=(
+    const FullCudaCiMethodResidualCache&) = delete;
+
+  int device_id() const { return device_id_; }
+  std::size_t gather_capacity() const { return kGatherCapacity; }
+
+  bool lookup_all(const std::vector<std::string>& keys,
+                  const std::vector<FixedSpRoute>& planned_routes,
+                  std::vector<Entry>* found,
+                  FullCudaCiMethodBatchDiagnostics* diagnostics) const {
+    if (keys.empty() || keys.size() > kGatherCapacity ||
+        planned_routes.size() != keys.size() ||
+        found == nullptr || diagnostics == nullptr) {
+      throw std::runtime_error("strict CI residual cache lookup is malformed");
+    }
+    found->clear();
+    found->reserve(keys.size());
+    bool all_hit = true;
+    diagnostics->residual_cache_lookup_count +=
+      static_cast<int>(keys.size());
+    diagnostics->residual_cache_capacity_entries = capacity_entries_;
+    diagnostics->residual_cache_device_bytes = slab_.bytes() + gather_.bytes();
+    for (std::size_t target = 0; target < keys.size(); ++target) {
+      const auto entry = entries_.find(cache_identity(
+        keys[target], planned_routes[target]));
+      if (entry == entries_.end()) {
+        all_hit = false;
+        found->push_back(Entry{});
+      } else {
+        diagnostics->residual_cache_hit_count += 1;
+        found->push_back(entry->second);
+      }
+    }
+    if (all_hit) {
+      diagnostics->residual_cache_all_hit_batch_count += 1;
+      diagnostics->residual_cache_bypassed_target_count +=
+        static_cast<int>(keys.size());
+    }
+    return all_hit;
+  }
+
+  void store_missing(const DeviceResidualConsumerView& residual,
+                     const std::vector<FixedSpRoute>& planned_routes,
+                     cudaStream_t stream,
+                     FullCudaCiMethodBatchDiagnostics* diagnostics) {
+    if (diagnostics == nullptr || residual.n != n_ ||
+        residual.device_id != device_id_ || residual.residuals == nullptr ||
+        residual.target_keys.size() !=
+          static_cast<std::size_t>(residual.target_count) ||
+        planned_routes.size() != residual.target_keys.size() ||
+        residual.executed_routes.size() != residual.target_keys.size() ||
+        residual.solver_statuses.size() != residual.target_keys.size()) {
+      throw std::runtime_error("strict CI residual cache insert is malformed");
+    }
+    for (int target = 0; target < residual.target_count; ++target) {
+      const std::string key = cache_identity(
+        residual.target_keys[static_cast<std::size_t>(target)],
+        planned_routes[static_cast<std::size_t>(target)]);
+      if (entries_.find(key) != entries_.end()) continue;
+
+      std::size_t slot = 0U;
+      if (slots_used_ < capacity_entries_) {
+        slot = slots_used_++;
+      } else {
+        slot = next_evict_slot_;
+        const std::string& evicted = slot_keys_[slot];
+        const std::size_t erased = entries_.erase(evicted);
+        if (evicted.empty() || erased != 1U) {
+          throw std::runtime_error(
+            "strict CI residual cache eviction identity changed");
+        }
+        next_evict_slot_ = (next_evict_slot_ + 1U) % capacity_entries_;
+        diagnostics->residual_cache_eviction_count += 1;
+      }
+
+      check_cuda(cudaMemcpyAsync(
+        static_cast<double*>(slab_.get()) + slot * n_,
+        residual.residuals + static_cast<std::size_t>(target) * n_,
+        sizeof(double) * static_cast<std::size_t>(n_),
+        cudaMemcpyDeviceToDevice, stream),
+        "store strict CI residual cache entry");
+      Entry entry;
+      entry.slot = slot;
+      entry.route = residual.executed_routes[static_cast<std::size_t>(target)];
+      entry.status = residual.solver_statuses[static_cast<std::size_t>(target)];
+      entries_.emplace(key, entry);
+      slot_keys_[slot] = key;
+      diagnostics->residual_cache_insert_count += 1;
+    }
+  }
+
+  const double* gather(const std::vector<Entry>& entries,
+                       cudaStream_t stream,
+                       std::vector<FixedSpRoute>* routes,
+                       std::vector<FixedSpStatus>* statuses,
+                       FullCudaCiMethodBatchDiagnostics* diagnostics) {
+    if (entries.empty() || entries.size() > kGatherCapacity ||
+        routes == nullptr || statuses == nullptr ||
+        diagnostics == nullptr) {
+      throw std::runtime_error("strict CI residual cache gather is malformed");
+    }
+    routes->clear();
+    statuses->clear();
+    routes->reserve(entries.size());
+    statuses->reserve(entries.size());
+    for (std::size_t target = 0; target < entries.size(); ++target) {
+      if (entries[target].route == FixedSpRoute::Unset ||
+          static_cast<int>(entries[target].status) < 0 ||
+          entries[target].slot >= slots_used_) {
+        throw std::runtime_error(
+          "strict CI residual cache gathered an invalid entry");
+      }
+      check_cuda(cudaMemcpyAsync(
+        static_cast<double*>(gather_.get()) + target * n_,
+        static_cast<const double*>(slab_.get()) + entries[target].slot * n_,
+        sizeof(double) * static_cast<std::size_t>(n_),
+        cudaMemcpyDeviceToDevice, stream),
+        "gather strict CI residual cache entry");
+      routes->push_back(entries[target].route);
+      statuses->push_back(entries[target].status);
+    }
+    diagnostics->residual_cache_gather_d2d_bytes +=
+      sizeof(double) * static_cast<std::size_t>(n_) * entries.size();
+    return static_cast<const double*>(gather_.get());
+  }
+
+ private:
+  static std::string cache_identity(const std::string& residual_key,
+                                    FixedSpRoute planned_route) {
+    return residual_key + "|planned-route=" +
+      fixed_sp_route_name(planned_route);
+  }
+
+  int n_ = 0;
+  int device_id_ = -1;
+  std::size_t capacity_entries_ = 0U;
+  DeviceBuffer slab_;
+  DeviceBuffer gather_;
+  std::unordered_map<std::string, Entry> entries_;
+  std::vector<std::string> slot_keys_;
+  std::size_t slots_used_ = 0U;
+  std::size_t next_evict_slot_ = 0U;
+};
+
+std::shared_ptr<FullCudaCiMethodResidualCache>
+create_full_cuda_ci_method_residual_cache(int n, std::size_t byte_budget) {
+  if (n <= 0) {
+    return std::shared_ptr<FullCudaCiMethodResidualCache>();
+  }
+  int device_id = -1;
+  check_cuda(cudaGetDevice(&device_id),
+             "capture strict CI residual cache device");
+  std::size_t free_bytes = 0U;
+  std::size_t total_bytes = 0U;
+  check_cuda(cudaMemGetInfo(&free_bytes, &total_bytes),
+             "query strict CI residual cache memory");
+  (void)total_bytes;
+  const std::size_t bounded_budget = std::min(byte_budget, free_bytes / 8U);
+  const std::size_t bytes_per_entry =
+    sizeof(double) * static_cast<std::size_t>(n);
+  const std::size_t gather_bytes =
+    FullCudaCiMethodResidualCache::kGatherCapacity * bytes_per_entry;
+  if (bounded_budget < gather_bytes + 2U * bytes_per_entry) {
+    return std::shared_ptr<FullCudaCiMethodResidualCache>();
+  }
+  const std::size_t capacity = std::min<std::size_t>(
+    131072U, (bounded_budget - gather_bytes) / bytes_per_entry);
+  if (capacity < 2U) {
+    return std::shared_ptr<FullCudaCiMethodResidualCache>();
+  }
+  return std::make_shared<FullCudaCiMethodResidualCache>(
+    n, device_id, capacity);
+}
+
 std::vector<int> full_cuda_ci_method_seeded_permutation_table(
     const std::string& ci_method,
     int n,
@@ -899,7 +1158,8 @@ std::string full_cuda_ci_method_batch_request_identity(
 FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
     const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
     const FixedSpBatchHostView& batch,
-    const FullCudaCiMethodBatchRequest& request) {
+    const FullCudaCiMethodBatchRequest& request,
+    const std::shared_ptr<FullCudaCiMethodResidualCache>& residual_cache) {
   const auto call_started = std::chrono::steady_clock::now();
   validate_request(request, batch);
   const PreparedSInfo prepared_info = prepared_s_gpu_info(prepared_s);
@@ -965,33 +1225,67 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   check_cuda(cudaGetDevice(&caller_device), "capture strict CI caller device");
   std::shared_ptr<DeviceResidualBatch> residual_token;
   cudaEvent_t registered_completion = nullptr;
+  std::vector<FullCudaCiMethodResidualCache::Entry> cached_entries;
+  const bool residual_cache_eligible = residual_cache &&
+    batch.target_count >= 1 &&
+    static_cast<std::size_t>(batch.target_count) <=
+      residual_cache->gather_capacity();
+  const bool residual_cache_all_hit = residual_cache_eligible &&
+    residual_cache->lookup_all(
+      batch.target_keys, batch.planned_routes, &cached_entries, &diagnostics);
   try {
-    const auto solve_started = std::chrono::steady_clock::now();
-    residual_token = solve_fixed_sp_batch(prepared_s, batch);
-    diagnostics.residual_solve_host_ms =
-      std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - solve_started).count();
-    const DeviceResidualConsumerView residual_view =
-      acquire_device_residual_consumer_view(residual_token);
-    if (residual_view.n != batch.n ||
-        residual_view.target_count != batch.target_count ||
-        residual_view.target_keys != batch.target_keys ||
-        residual_view.residuals == nullptr ||
-        residual_view.producer_completion_event == nullptr) {
-      throw std::runtime_error("strict CI residual view identity mismatch");
+    DeviceResidualConsumerView residual_view;
+    if (!residual_cache_all_hit) {
+      const auto solve_started = std::chrono::steady_clock::now();
+      residual_token = solve_fixed_sp_batch(prepared_s, batch);
+      diagnostics.residual_solve_host_ms =
+        std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - solve_started).count();
+      residual_view = acquire_device_residual_consumer_view(residual_token);
+      if (residual_view.n != batch.n ||
+          residual_view.target_count != batch.target_count ||
+          residual_view.target_keys != batch.target_keys ||
+          residual_view.residuals == nullptr ||
+          residual_view.producer_completion_event == nullptr) {
+        throw std::runtime_error("strict CI residual view identity mismatch");
+      }
+      check_cuda(cudaSetDevice(residual_view.device_id),
+                 "select strict CI residual device");
+    } else {
+      check_cuda(cudaSetDevice(residual_cache->device_id()),
+                 "select strict CI cached residual device");
     }
     diagnostics.target_identity_authenticated = true;
     diagnostics.residuals_device_resident = true;
-    check_cuda(cudaSetDevice(residual_view.device_id),
-               "select strict CI residual device");
 
     CudaStream stream;
     CudaEvent stage_start(true);
     CudaEvent stage_stop(true);
     CudaEvent consumer_completion(false);
-    check_cuda(cudaStreamWaitEvent(
-                 stream.get(), residual_view.producer_completion_event, 0),
-               "wait for strict CI residual producer");
+    const double* residual_values = nullptr;
+    std::vector<FixedSpRoute> executed_routes;
+    std::vector<FixedSpStatus> solver_statuses;
+    if (residual_cache_all_hit) {
+      residual_values = residual_cache->gather(
+        cached_entries, stream.get(), &executed_routes, &solver_statuses,
+        &diagnostics);
+    } else {
+      check_cuda(cudaStreamWaitEvent(
+                   stream.get(), residual_view.producer_completion_event, 0),
+                 "wait for strict CI residual producer");
+      if (residual_cache_eligible) {
+        residual_cache->store_missing(
+          residual_view, batch.planned_routes, stream.get(), &diagnostics);
+      }
+      residual_values = residual_view.residuals;
+      executed_routes = residual_view.executed_routes;
+      solver_statuses = residual_view.solver_statuses;
+    }
+    if (residual_values == nullptr ||
+        executed_routes.size() != static_cast<std::size_t>(batch.target_count) ||
+        solver_statuses.size() != static_cast<std::size_t>(batch.target_count)) {
+      throw std::runtime_error("strict CI residual source identity changed");
+    }
 
     const std::size_t component_count = component_targets.size();
     const std::size_t pair_count = request.pairs.size();
@@ -1056,7 +1350,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
                                static_cast<unsigned int>(component_count));
       build_distance_components_kernel<<<distance_grid, kBlockSize, 0,
           stream.get()>>>(
-        residual_view.residuals,
+        residual_values,
         static_cast<const int*>(d_component_targets.get()), batch.n,
         static_cast<int>(component_count), centered, row_sums);
       const int cell_blocks = static_cast<int>(
@@ -1149,8 +1443,9 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
         factors, 0, method_buffers[0]->bytes(), stream.get()),
         "zero strict HSIC factors");
       build_inchol_components_kernel<<<
-        static_cast<unsigned int>(component_count), 1, 0, stream.get()>>>(
-        residual_view.residuals,
+        static_cast<unsigned int>(component_count), kBlockSize, 0,
+        stream.get()>>>(
+        residual_values,
         static_cast<const int*>(d_component_targets.get()), batch.n,
         static_cast<int>(component_count), max_rank, 1.0 / request.hsic_sig,
         factors,
@@ -1160,7 +1455,8 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
         static_cast<double*>(method_buffers[4]->get()),
         static_cast<int*>(method_buffers[5]->get()), ranks, off_diagonal);
       center_inchol_components_kernel<<<
-        static_cast<unsigned int>(component_count), 1, 0, stream.get()>>>(
+        static_cast<unsigned int>(component_count), kBlockSize, 0,
+        stream.get()>>>(
         factors, ranks, batch.n, static_cast<int>(component_count), max_rank);
       const std::size_t shared_bytes = sizeof(double) *
         static_cast<std::size_t>(max_rank) * max_rank;
@@ -1242,9 +1538,11 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       "copy strict CI compact records");
     check_cuda(cudaEventRecord(consumer_completion.get(), stream.get()),
                "record strict CI consumer completion");
-    registered_completion = consumer_completion.get();
-    register_device_residual_consumer_event(
-      residual_token, registered_completion);
+    if (residual_token) {
+      registered_completion = consumer_completion.get();
+      register_device_residual_consumer_event(
+        residual_token, registered_completion);
+    }
     check_cuda(cudaEventRecord(stage_stop.get(), stream.get()),
                "record strict CI compact stop");
     check_cuda(cudaEventSynchronize(stage_stop.get()),
@@ -1273,9 +1571,9 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       const int left_target = request.pairs[pair].left_target_index;
       const int right_target = request.pairs[pair].right_target_index;
       record.solver_route = std::string(fixed_sp_route_name(
-        residual_view.executed_routes[static_cast<std::size_t>(left_target)])) +
+        executed_routes[static_cast<std::size_t>(left_target)])) +
         "+" + fixed_sp_route_name(
-          residual_view.executed_routes[static_cast<std::size_t>(right_target)]);
+          executed_routes[static_cast<std::size_t>(right_target)]);
       result.records.push_back(std::move(record));
     }
 
@@ -1290,8 +1588,10 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
 
     check_cuda(cudaEventSynchronize(consumer_completion.get()),
                "wait strict CI residual consumer completion");
-    release_device_residual(residual_token);
-    free_device_residual(&residual_token);
+    if (residual_token) {
+      release_device_residual(residual_token);
+      free_device_residual(&residual_token);
+    }
     registered_completion = nullptr;
     for (std::unique_ptr<DeviceBuffer>& buffer : method_buffers) buffer->close();
     d_permutations.close();
