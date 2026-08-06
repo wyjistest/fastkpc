@@ -7,12 +7,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iomanip>
 #include <list>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -24,6 +26,20 @@
 
 namespace fastkpc {
 namespace {
+
+struct StrictMethodFailureInjectionState {
+  std::mutex mutex;
+  std::atomic<bool> armed{false};
+  std::string armed_stage;
+  std::string observed_stage;
+  int checkpoint_count = 0;
+  bool triggered = false;
+};
+
+StrictMethodFailureInjectionState& strict_method_failure_injection_state() {
+  static StrictMethodFailureInjectionState state;
+  return state;
+}
 
 constexpr int kBlockSize = 256;
 constexpr int kStatusOk = 0;
@@ -874,6 +890,60 @@ void validate_request(const FullCudaCiMethodBatchRequest& request,
 
 }  // namespace
 
+void test_arm_strict_method_failure_injection(const std::string& stage) {
+  if (stage.empty() || stage.size() > 96U) {
+    throw std::runtime_error("strict method failure stage is invalid");
+  }
+  StrictMethodFailureInjectionState& state =
+    strict_method_failure_injection_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (state.armed.load(std::memory_order_relaxed)) {
+    throw std::runtime_error(
+      "strict method failure injection is already armed");
+  }
+  state.armed_stage = stage;
+  state.observed_stage.clear();
+  state.checkpoint_count = 0;
+  state.triggered = false;
+  state.armed.store(true, std::memory_order_release);
+}
+
+StrictMethodFailureInjectionSnapshot
+test_strict_method_failure_injection_snapshot() {
+  StrictMethodFailureInjectionState& state =
+    strict_method_failure_injection_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  StrictMethodFailureInjectionSnapshot snapshot;
+  snapshot.armed_stage = state.armed_stage;
+  snapshot.observed_stage = state.observed_stage;
+  snapshot.checkpoint_count = state.checkpoint_count;
+  snapshot.triggered = state.triggered;
+  return snapshot;
+}
+
+void strict_method_failure_checkpoint(const char* stage) {
+  StrictMethodFailureInjectionState& state =
+    strict_method_failure_injection_state();
+  if (!state.armed.load(std::memory_order_acquire)) return;
+  const std::string observed = stage == nullptr ? std::string() : stage;
+  bool trigger = false;
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (!state.armed.load(std::memory_order_relaxed)) return;
+    state.checkpoint_count += 1;
+    if (observed == state.armed_stage) {
+      state.observed_stage = observed;
+      state.triggered = true;
+      state.armed.store(false, std::memory_order_release);
+      trigger = true;
+    }
+  }
+  if (trigger) {
+    throw std::runtime_error(
+      "injected strict method failure: " + observed);
+  }
+}
+
 SealedPermutationTableHandle::SealedPermutationTableHandle(
     SealedPermutationTableHandle&& other) noexcept
     : values_(std::move(other.values_)),
@@ -1408,7 +1478,9 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
     const std::shared_ptr<FullCudaCiMethodExecutionContext>&
       execution_context) {
   const auto call_started = std::chrono::steady_clock::now();
+  strict_method_failure_checkpoint("before_validate_request");
   validate_request(request, batch);
+  strict_method_failure_checkpoint("after_validate_request");
   std::shared_ptr<FullCudaCiMethodExecutionContext> active_context =
     execution_context;
   if (!active_context) {
@@ -1417,6 +1489,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       request.permutation_replicates);
   }
   active_context->validate(request, batch.n);
+  strict_method_failure_checkpoint("after_execution_context_validate");
   const int context_growth_before = active_context->buffer_growth_count();
   const bool context_reused = active_context->begin_call();
   const PreparedSInfo prepared_info = prepared_s_gpu_info(prepared_s);
@@ -1426,6 +1499,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       batch.output_mask != FixedSpOutputResiduals) {
     throw std::runtime_error("strict CI method prepared/batch identity mismatch");
   }
+  strict_method_failure_checkpoint("after_prepared_identity_validate");
   const auto identity_started = std::chrono::steady_clock::now();
   const std::string actual_identity = full_cuda_ci_method_batch_request_identity(
     request, batch.target_keys, batch.n);
@@ -1503,11 +1577,13 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
     DeviceResidualConsumerView residual_view;
     if (!residual_cache_all_hit) {
       const auto solve_started = std::chrono::steady_clock::now();
+      strict_method_failure_checkpoint("before_residual_solve");
       residual_token = solve_fixed_sp_batch(prepared_s, batch);
       diagnostics.residual_solve_host_ms =
         std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - solve_started).count();
       residual_view = acquire_device_residual_consumer_view(residual_token);
+      strict_method_failure_checkpoint("after_residual_acquire");
       if (residual_view.n != batch.n ||
           residual_view.target_count != batch.target_count ||
           residual_view.target_keys != batch.target_keys ||
@@ -1724,6 +1800,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       check_cuda(cudaEventSynchronize(stage_stop.get()),
                  "wait strict dcc.perm components");
       diagnostics.component_host_wait_count += 1;
+      strict_method_failure_checkpoint("after_component_wait");
       diagnostics.component_build_cuda_ms =
         elapsed_event_ms(stage_start.get(), stage_stop.get());
 
@@ -1903,6 +1980,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       check_cuda(cudaEventSynchronize(stage_stop.get()),
                  "wait strict HSIC components");
       diagnostics.component_host_wait_count += 1;
+      strict_method_failure_checkpoint("after_component_wait");
       diagnostics.component_build_cuda_ms =
         elapsed_event_ms(stage_start.get(), stage_stop.get());
 
@@ -1960,6 +2038,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
     check_cuda(cudaEventSynchronize(stage_stop.get()),
                "wait strict CI pairs");
     diagnostics.pair_host_wait_count += 1;
+    strict_method_failure_checkpoint("after_pair_wait");
     diagnostics.pair_evaluation_cuda_ms =
       elapsed_event_ms(stage_start.get(), stage_stop.get());
 
@@ -1984,6 +2063,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
     check_cuda(cudaEventSynchronize(stage_stop.get()),
                "wait strict CI compact results");
     diagnostics.compact_host_wait_count += 1;
+    strict_method_failure_checkpoint("after_compact_wait");
     diagnostics.compact_d2h_cuda_ms =
       elapsed_event_ms(stage_start.get(), stage_stop.get());
     diagnostics.compact_result_d2h_count = 1;
@@ -2048,6 +2128,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
     check_cuda(cudaEventSynchronize(consumer_completion.get()),
                "wait strict CI residual consumer completion");
     diagnostics.consumer_host_wait_count += 1;
+    strict_method_failure_checkpoint("after_consumer_wait");
     if (residual_token) {
       release_device_residual(residual_token);
       free_device_residual(&residual_token);

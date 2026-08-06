@@ -4145,9 +4145,11 @@ GroupResult execute_group(
       permutation_workspace->table_growth_count;
     const int scratch_growth_before = permutation_workspace == nullptr ? 0 :
       permutation_workspace->scratch_growth_count;
+    strict_method_failure_checkpoint("before_permutation_generation");
     make_method_permutation_table(
       method_options, context->n, plan, task_indices,
       permutation_workspace);
+    strict_method_failure_checkpoint("after_permutation_generation");
     double permutation_table_host_ms = 0.0;
     if (is_permutation_method(method_options.ci_method)) {
       permutation_table_host_ms = elapsed_ms(permutation_started);
@@ -4171,17 +4173,21 @@ GroupResult execute_group(
     const auto identity_started = std::chrono::steady_clock::now();
     if (is_permutation_method(method_options.ci_method)) {
       method_request.permutation_table = permutation_workspace->table.seal();
+      strict_method_failure_checkpoint("after_permutation_seal");
     }
     method_request.request_identity_sha256 =
       full_cuda_ci_method_batch_request_identity(
         method_request, residual_keys, context->n);
     const double identity_build_host_ms = elapsed_ms(identity_started);
+    strict_method_failure_checkpoint("after_request_identity_build");
     diagnostics->method_request_identity_build_host_ms +=
       identity_build_host_ms;
+    strict_method_failure_checkpoint("before_synchronous_method_call");
     FullCudaCiMethodBatchResult method_result =
       run_full_cuda_ci_method_batch(
         context->fixed_sp, batch, method_request, method_residual_cache,
         method_execution_context);
+    strict_method_failure_checkpoint("after_synchronous_method_call");
     if (is_permutation_method(method_options.ci_method)) {
       permutation_workspace->table.reclaim(
         std::move(method_request.permutation_table));

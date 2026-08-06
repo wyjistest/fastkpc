@@ -175,6 +175,18 @@ struct FullCudaCiMethodBatchResult {
   FullCudaCiMethodBatchDiagnostics diagnostics;
 };
 
+struct StrictMethodFailureInjectionSnapshot {
+  std::string armed_stage;
+  std::string observed_stage;
+  int checkpoint_count = 0;
+  bool triggered = false;
+};
+
+void test_arm_strict_method_failure_injection(const std::string& stage);
+StrictMethodFailureInjectionSnapshot
+test_strict_method_failure_injection_snapshot();
+void strict_method_failure_checkpoint(const char* stage);
+
 std::string full_cuda_ci_method_batch_request_identity(
   const FullCudaCiMethodBatchRequest& request,
   const std::vector<std::string>& target_keys,

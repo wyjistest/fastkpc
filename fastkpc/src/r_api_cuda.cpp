@@ -9265,6 +9265,28 @@ extern "C" SEXP C_full_cuda_ci_one_call_cache_state(SEXP data_s) {
   END_RCPP
 }
 
+extern "C" SEXP C_full_cuda_ci_test_arm_method_failure(SEXP stage_s) {
+  BEGIN_RCPP
+  fastkpc::test_arm_strict_method_failure_injection(
+    Rcpp::as<std::string>(stage_s));
+  return R_NilValue;
+  END_RCPP
+}
+
+extern "C" SEXP C_full_cuda_ci_test_method_failure_snapshot() {
+  BEGIN_RCPP
+  const fastkpc::StrictMethodFailureInjectionSnapshot snapshot =
+    fastkpc::test_strict_method_failure_injection_snapshot();
+  return Rcpp::List::create(
+    Rcpp::Named("schema_version") =
+      "strict-method-failure-injection-snapshot-v1",
+    Rcpp::Named("armed_stage") = snapshot.armed_stage,
+    Rcpp::Named("observed_stage") = snapshot.observed_stage,
+    Rcpp::Named("checkpoint_count") = snapshot.checkpoint_count,
+    Rcpp::Named("triggered") = snapshot.triggered);
+  END_RCPP
+}
+
 extern "C" SEXP C_full_cuda_ci_native_geometry_prepare(
     SEXP X_s,
     SEXP penalty_blocks_s,
@@ -13761,6 +13783,8 @@ static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_one_call_skeleton_method", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_skeleton_method), 13},
   {"C_full_cuda_ci_one_call_cache_control", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_cache_control), 2},
   {"C_full_cuda_ci_one_call_cache_state", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_cache_state), 1},
+  {"C_full_cuda_ci_test_arm_method_failure", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_test_arm_method_failure), 1},
+  {"C_full_cuda_ci_test_method_failure_snapshot", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_test_method_failure_snapshot), 0},
   {"C_full_cuda_ci_method_seeded_permutations", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_method_seeded_permutations), 4},
   {"C_full_cuda_ci_native_geometry_prepare", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_geometry_prepare), 4},
   {"C_full_cuda_ci_phase35_vertical_resource_snapshot", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical_resource_snapshot), 0},
