@@ -132,17 +132,21 @@ with the exact `R_unif_index()` draw/rejection order; unsupported sample kinds
 or larger `n` fall back to the R API. Set
 `FASTKPC_STRICT_HSIC_PERM_INLINE_R_UNIF_INDEX=0` to disable that path.
 
-Permutation request authentication still uses SHA-256 over every table byte.
-The production builder uses OpenSSL SHA-256 and hashes the integer payload
-without an intermediate string copy; the portable implementation remains a
-compile-time fallback and produces the same digest. Full default-Inf 351x48
-development receipts from the final binary measured:
+Permutation request authentication still covers every table byte. A C++17
+move-only builder owns the payload, hashes each completed row incrementally,
+and seals it into an immutable handle. The trusted one-call consumer uses the
+sealed OpenSSL SHA-256 attestation without scanning the payload a second time;
+untrusted boundaries still require a complete rehash. The portable SHA-256
+implementation remains a compile-time fallback and produces the same digest.
+
+Clean default-Inf 351x48 development receipts from producer `830cfbe` measured:
 
 ```text
-method       previous     optimized    speedup   physical residual fits
-hsic.gamma   1562.052 s    631.522 s     2.473x   308199 -> 194687
-dcc.perm     2131.261 s    945.359 s     2.254x   459350 -> 189896
-hsic.perm    3877.316 s   1152.905 s     3.363x   564226 -> 189258
+method       original     50595ce      830cfbe      latest reduction
+hsic.gamma   1562.052 s    631.522 s    593.814 s       5.97%
+dcc.perm     2131.261 s    945.359 s    849.693 s      10.12%
+hsic.perm    3877.316 s   1152.905 s   1042.358 s       9.59%
+total        7570.629 s   2729.786 s   2485.865 s       8.94%
 ```
 
 The final `hsic.gamma` maximum absolute p-value difference is
@@ -152,15 +156,19 @@ undirected sepsets, `pMax`, `n.edgetests`, permutation RNG terminal state, the
 19 kpcalg-authority orientation CI tests, and final PDAGs are exact. All three
 runs report zero residual/component D2H, zero CPU numerical authority, zero
 fallback, and zero residual-cache eviction. The bounded `hsic.perm` component
-LRU records 240,685 hits and 234,199 deterministic evictions.
+LRU records 240,685 hits and 234,199 deterministic evictions. The clean
+receipt and source closure are indexed by
+`artifacts/strict_ci_methods_351x48_optimized_v2/manifest.json`.
 
 These routes are not exhausted. The remaining dominant exact work is the
 level-3-and-deeper stable-SVD residual path: residual solving still costs
-`383.057`, `455.455`, and `439.446` seconds respectively. `hsic.perm` also
-spends `185.970` seconds generating permutation tables and `135.129` seconds
-authenticating them. Further material gains require a qualified deeper-level
-residual kernel, an equally strict permutation pipeline, or both. These timings
-extend the three opt-in methods; they do not replace the `dcc.gamma` Phase 10
+`383.800`, `455.173`, and `433.361` seconds respectively. Permutation table
+generation plus incremental SHA-256 costs `117.275` seconds for `dcc.perm` and
+`255.772` seconds for `hsic.perm`; trusted request-identity build and validation
+now add only `1.469` and `1.764` seconds. GPU residual/component preparation is
+not yet overlapped with R permutation generation. Further material gains
+require that strictly ordered asynchronous pipeline, a qualified deeper-level
+residual kernel, or both. These timings do not replace the `dcc.gamma` Phase 10
 performance baseline.
 
 The historical canonical artifact is
@@ -213,8 +221,9 @@ field, sepset, count, and level semantic is exact against the older authority
 artifact; CPU numerical authority, fallback, residual D2H, and component D2H
 remain zero.
 
-An opt-in CPU-only setup/optimizer pipeline now provides the best development
-result. It keeps R and Rcpp objects on the main thread, passes only owned
+An opt-in CPU-only setup/optimizer pipeline now applies to all supported
+full-CUDA CI methods and provides the best `dcc.gamma` development result. It
+keeps R and Rcpp objects on the main thread, passes only owned
 optimizer inputs through one background future, and preserves every original
 window, setup cohort, target vector, and target order. With a fixed 5 ms
 optimizer head start, level 3 fell from `114.038` to `102.770` seconds and the
@@ -227,14 +236,17 @@ exact; authority and transfer gates remain zero. The route is enabled with
 production default or a frozen candidate. GPU-side setup overlap, CPU affinity,
 and synchronous level-tail variants were rejected on measured wall time.
 
-The fixed-SP root cache is enabled by default only for the `dcc.gamma` one-call
-route and can be disabled deterministically with
+The fixed-SP root cache is enabled for all supported one-call CI methods and
+can be disabled deterministically with
 `FASTKPC_PHASE10_FIXED_SP_ROOT_CACHE=0`. It authenticates the coefficient
 dimension, offset, rank, and every penalty-block bit on each hit. Each runtime
 is bounded to 4,096 entries and 256 MiB. The default-`Inf` receipt records
 28,611 lookups, 26,925 hits, 1,686 inserts, zero bypasses, zero identity
-rejections, and 8,691,624 live device bytes at peak. Cached roots move only D2D;
-the runtime resource ledger returns to its pre-call active counts at teardown.
+rejections, and 8,691,624 live device bytes at peak. The clean strict-method
+receipts record hit/lookup counts of `29,544/31,325`, `25,250/26,967`, and
+`24,844/26,646` for `hsic.gamma`, `dcc.perm`, and `hsic.perm`, with zero bypass
+or identity rejection. Cached roots move only D2D; the runtime resource ledger
+returns to its pre-call active counts at teardown.
 
 The default-Inf cold run consumed 8,643 unique PreparedS keys and physically
 built 8,646 setups (three bounded speculative builds). It used 138 optimizer
