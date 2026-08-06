@@ -1,0 +1,303 @@
+{
+  "schema_version": "fastkpc-strict-ci-permutation-overlap-351x48-evidence-v1",
+  "created_at": "2026-08-06 14:26:30 UTC",
+  "scope": "canonical-development-351x48-default-Inf-permutation-methods",
+  "phase10_status": "ACTIVE",
+  "promotion_status": "NOT_PROMOTED",
+  "sealed_holdout_status": "SEALED_NOT_RELEASED",
+  "recommended_route_changed": false,
+  "runtime_producer_commit": "6c01d71cd357cda5b9b78827c892a2b1105683a4",
+  "architecture": {
+    "skeleton": "full-CUDA",
+    "orientation": "kpcalg CPU WAN-PDAG authority",
+    "full_cuda_wanpdag_claim": false
+  },
+  "methods": {
+    "dcc.perm": {
+      "ci_method": "dcc.perm",
+      "config": {
+        "n": 351,
+        "p": 48,
+        "alpha": 0.10000000000000001,
+        "max_conditioning_size": "Inf",
+        "index": 1,
+        "numCol": 35,
+        "hsic_sig": 1,
+        "permutation_replicates": 100,
+        "permutation_seed": 707,
+        "permutation_include_observed": true,
+        "setup_optimizer_pipeline": true,
+        "setup_optimizer_producer_delay_us": 5000,
+        "in_flight_limit": 1
+      },
+      "authority": {
+        "skeleton_authority": "full_cuda",
+        "orientation_authority": "kpcalg_cpu_wanpdag",
+        "native_cuda_orientation_status": "experimental"
+      },
+      "performance": {
+        "previous_elapsed_sec": 849.6930000000001,
+        "overlap_elapsed_sec": 839.72600000000011,
+        "elapsed_saved_sec": 9.9669999999999845,
+        "reduction_fraction": 0.011730118995919683,
+        "speedup": 1.0118693478587062,
+        "classification": "conditional-small-improvement",
+        "previous_residual_solve_sec": 455.17272813600238,
+        "overlap_residual_solve_sec": 452.32259342800393,
+        "previous_component_build_sec": 41.944133954748509,
+        "overlap_component_build_sec": 41.318074849978089,
+        "previous_permutation_table_sec": 117.27530515800309,
+        "overlap_permutation_table_sec": 139.87645542500147,
+        "native_setup_sec": 23.165528039999923,
+        "optimizer_sec": 163.62452242700004
+      },
+      "overlap": {
+        "enabled": true,
+        "preparation_submit_before_rng_count": 229675,
+        "preparation_ready_at_submit_count": 0,
+        "preparation_ready_after_permutation_count": 229675,
+        "deferred_preparation_error_count": 0,
+        "preparation_submit_host_sec": 459.42892864999664,
+        "measured_lower_bound_sec": 0,
+        "modeled_upper_bound_sec": 81.539350865017937,
+        "hidden_stream_sync_count": 0,
+        "hidden_device_sync_count": 0,
+        "submit_completion_event_wait_count": 0,
+        "intermediate_host_wait_count": 0,
+        "final_host_wait_count": 229675,
+        "in_flight_peak": 1
+      },
+      "identity_and_rng": {
+        "static_authentication_count": 229675,
+        "permutation_attestation_count": 229675,
+        "combined_authentication_count": 229675,
+        "exact_rng_receipt_count": 229675,
+        "trusted_payload_rescan_count": 0,
+        "rng_state_identical": true
+      },
+      "parity": {
+        "skeleton_ci_test_count": 229675,
+        "orientation_ci_test_count": 11,
+        "max_abs_p_diff": 0,
+        "p_values_bitwise_exact": true,
+        "decision_flip_count": 0,
+        "logical_trace_identical": true,
+        "adjacency_identical": true,
+        "sepsets_identical": true,
+        "pmax_bitwise_exact": true,
+        "n_edgetests_identical": true,
+        "authority_clean": true,
+        "cache_accounted": true,
+        "orientation_trace_identical": true,
+        "orientation_decisions_identical": true,
+        "orientation_p_values_bitwise_exact": true,
+        "final_pdag_identical": true,
+        "pass": true
+      },
+      "payloads": {
+        "candidate": {
+          "relative_path": "payload/dcc.perm/candidate.rds",
+          "bytes": 1211804,
+          "sha256": "ae06f108f67b7e1a1dac6f83c1cdfcf660d73caae193979caee597cc66a550ae"
+        },
+        "wanpdag_receipt": {
+          "relative_path": "payload/dcc.perm/wanpdag_receipt.rds",
+          "bytes": 7144,
+          "sha256": "6bf37fcd4360ed63ea70584a0eb180e8ea9a015e2fa0a062ed46b493e3dae1b6"
+        }
+      }
+    },
+    "hsic.perm": {
+      "ci_method": "hsic.perm",
+      "config": {
+        "n": 351,
+        "p": 48,
+        "alpha": 0.10000000000000001,
+        "max_conditioning_size": "Inf",
+        "index": 1,
+        "numCol": 35,
+        "hsic_sig": 1,
+        "permutation_replicates": 100,
+        "permutation_seed": 707,
+        "permutation_include_observed": true,
+        "setup_optimizer_pipeline": true,
+        "setup_optimizer_producer_delay_us": 5000,
+        "in_flight_limit": 1
+      },
+      "authority": {
+        "skeleton_authority": "full_cuda",
+        "orientation_authority": "kpcalg_cpu_wanpdag",
+        "native_cuda_orientation_status": "experimental"
+      },
+      "performance": {
+        "previous_elapsed_sec": 1042.3580000000002,
+        "overlap_elapsed_sec": 950.00800000000004,
+        "elapsed_saved_sec": 92.350000000000136,
+        "reduction_fraction": 0.088597199810429933,
+        "speedup": 1.0972097077077247,
+        "classification": "go-material-improvement",
+        "previous_residual_solve_sec": 433.36116283200107,
+        "overlap_residual_solve_sec": 429.87058914599857,
+        "previous_component_build_sec": 120.49220526585123,
+        "overlap_component_build_sec": 121.75244627571107,
+        "previous_permutation_table_sec": 255.7724298079994,
+        "overlap_permutation_table_sec": 278.27068261500523,
+        "native_setup_sec": 23.061617273000081,
+        "optimizer_sec": 137.06508101899993
+      },
+      "overlap": {
+        "enabled": true,
+        "preparation_submit_before_rng_count": 282113,
+        "preparation_ready_at_submit_count": 68,
+        "preparation_ready_after_permutation_count": 281890,
+        "deferred_preparation_error_count": 0,
+        "preparation_submit_host_sec": 442.12973684100564,
+        "measured_lower_bound_sec": 0.2180941000000001,
+        "modeled_upper_bound_sec": 157.41982303793131,
+        "hidden_stream_sync_count": 0,
+        "hidden_device_sync_count": 0,
+        "submit_completion_event_wait_count": 0,
+        "intermediate_host_wait_count": 0,
+        "final_host_wait_count": 282113,
+        "in_flight_peak": 1
+      },
+      "identity_and_rng": {
+        "static_authentication_count": 282113,
+        "permutation_attestation_count": 282113,
+        "combined_authentication_count": 282113,
+        "exact_rng_receipt_count": 282113,
+        "trusted_payload_rescan_count": 0,
+        "rng_state_identical": true
+      },
+      "parity": {
+        "skeleton_ci_test_count": 282113,
+        "orientation_ci_test_count": 2,
+        "max_abs_p_diff": 0,
+        "p_values_bitwise_exact": true,
+        "decision_flip_count": 0,
+        "logical_trace_identical": true,
+        "adjacency_identical": true,
+        "sepsets_identical": true,
+        "pmax_bitwise_exact": true,
+        "n_edgetests_identical": true,
+        "authority_clean": true,
+        "cache_accounted": true,
+        "orientation_trace_identical": true,
+        "orientation_decisions_identical": true,
+        "orientation_p_values_bitwise_exact": true,
+        "final_pdag_identical": true,
+        "pass": true
+      },
+      "payloads": {
+        "candidate": {
+          "relative_path": "payload/hsic.perm/candidate.rds",
+          "bytes": 1386244,
+          "sha256": "39534493ac0c7a855c05086cf31ba8f2fdb250c969cf5fcc597edfb3bb5bb157"
+        },
+        "wanpdag_receipt": {
+          "relative_path": "payload/hsic.perm/wanpdag_receipt.rds",
+          "bytes": 7052,
+          "sha256": "5a15979a734ac721570c8ec1f877aed24be4d24706c2aa66959b6d13d3f25f48"
+        }
+      }
+    }
+  },
+  "aggregate": {
+    "method_count": 2,
+    "skeleton_ci_test_count": 511788,
+    "orientation_ci_test_count": 13,
+    "previous_elapsed_sec": 1892.0510000000004,
+    "overlap_elapsed_sec": 1789.7340000000002,
+    "elapsed_saved_sec": 102.31700000000023,
+    "reduction_fraction": 0.054077294956637115,
+    "speedup": 1.0571688306753966,
+    "all_process_gates_pass": true
+  },
+  "unchanged_method_reference": {
+    "ci_method": "hsic.gamma",
+    "evidence_manifest": "../strict_ci_methods_351x48_optimized_v2/manifest.json",
+    "elapsed_sec": 593.81399999999996,
+    "rerun_in_this_evidence": false
+  },
+  "provenance": {
+    "head_commit": "6c01d71cd357cda5b9b78827c892a2b1105683a4",
+    "origin_main": "6c01d71cd357cda5b9b78827c892a2b1105683a4",
+    "head_equals_origin_main": true,
+    "runtime_sources_dirty_or_untracked": false,
+    "runtime_source_relative_paths": {
+      "contract": "fastkpc/src/full_cuda_ci_contract.cpp",
+      "contract_api": "fastkpc/src/full_cuda_ci_contract.hpp",
+      "r_api": "fastkpc/src/r_api_cuda.cpp",
+      "method_batch_cuda": "fastkpc/src/cuda/full_cuda_ci_method_batch.cu",
+      "method_batch_api": "fastkpc/src/cuda/full_cuda_ci_method_batch.hpp",
+      "fixed_sp_runtime": "fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu",
+      "fixed_sp_runtime_types": "fastkpc/src/cuda/mgcv_fixed_sp_runtime_types.hpp",
+      "one_call": "fastkpc/src/full_cuda_ci_one_call.cpp",
+      "candidate_runner": "fastkpc/tools/run_strict_ci_method_351x48_candidate.R",
+      "wanpdag_validator": "fastkpc/tools/verify_strict_wanpdag_trace.R",
+      "overlap_regression": "fastkpc/tests/test_full_cuda_ci_method_permutation_overlap.R",
+      "failure_order_regression": "fastkpc/tests/test_full_cuda_ci_method_failure_order.R",
+      "critical_path_regression": "fastkpc/tests/test_full_cuda_ci_method_critical_path_diagnostics.R",
+      "layered_identity_regression": "fastkpc/tests/test_full_cuda_ci_method_layered_identity.R",
+      "cuda_builder": "fastkpc/tools/build_cuda_native.sh"
+    },
+    "runtime_source_sha256": {
+      "contract": "6fc8c23261892f4570dec059e2f6e662b306f23dc3f4a12d05e04d45e459a57f",
+      "contract_api": "160340c93c1a2890350c112da46174666170699171fdda2b8d1adb8a139e6e52",
+      "r_api": "6fd3a608a801ed5215873ec2d8e67ddccd4f5f3bb19741787528ed451dac32c4",
+      "method_batch_cuda": "e28c5380f5d5a92fe2955df6475b9d6f98c47873bebbe623856ed0f0feb67fdd",
+      "method_batch_api": "12de844f9dc27c19991e6a53b6a05182b777786905107f1359e2f3fabb779eb9",
+      "fixed_sp_runtime": "2ab5b6ab47435296f45eb598208d6c296a8472fab60785a97eda315f1ddaba72",
+      "fixed_sp_runtime_types": "e39b15afb801b598c9fcb050bc89ddfc7f64c8e7f3b30003a3dd34ff0153b45c",
+      "one_call": "dba258cecd0aab9461df59cfeb47788c333cef5320b8946c8acb75d7d6c0157b",
+      "candidate_runner": "cec53a02922077e1fd0114770e836828f5105cc986f0b54ad11b2ce825554e24",
+      "wanpdag_validator": "1cf2ee5d934a3b71b03f417dbe0df2fec4f283ccafdf5981f3f5705a7d5667a6",
+      "overlap_regression": "19df75612268ed582f234e4a87f1aa3ff036d562e0cf93fba1982fe55ebabbe2",
+      "failure_order_regression": "62fd45af42a3cde5e2d5bc84dee4169637483fdb26bfaf76d4a04ef8decb629c",
+      "critical_path_regression": "686db9e7ee0bbdec5a42b9f2e851d8baef32da5ddc75e1ae31acd2e84d1cec0d",
+      "layered_identity_regression": "e94ab438af3bbd37dc2b91fa57fab958d132f97bd7def2d4dad6148bb6063c7c",
+      "cuda_builder": "f8cb055100b579c64d1931667411d8bbe23dbd7a6018400ddca545b0b7cf79a6"
+    },
+    "runtime_source_git_state": {
+      "contract": "clean",
+      "contract_api": "clean",
+      "r_api": "clean",
+      "method_batch_cuda": "clean",
+      "method_batch_api": "clean",
+      "fixed_sp_runtime": "clean",
+      "fixed_sp_runtime_types": "clean",
+      "one_call": "clean",
+      "candidate_runner": "clean",
+      "wanpdag_validator": "clean",
+      "overlap_regression": "clean",
+      "failure_order_regression": "clean",
+      "critical_path_regression": "clean",
+      "layered_identity_regression": "clean",
+      "cuda_builder": "clean"
+    },
+    "evidence_tool_relative_paths": {
+      "publisher": "fastkpc/tools/publish_strict_ci_permutation_overlap_351x48_evidence.R",
+      "manifest_regression": "fastkpc/tests/test_strict_ci_permutation_overlap_351x48_manifest.R",
+      "evidence_readme": "fastkpc/artifacts/strict_ci_methods_351x48_permutation_overlap_v1/README.md"
+    },
+    "evidence_tool_sha256": {
+      "publisher": "4c02b5c6e25b6b91e9900789a60c261bf793913470805bdf0483656b6ea56970",
+      "manifest_regression": "baa54f6056bf77937016b87ce1085905c3433e1d9d3c0b9758025d1e831442c6",
+      "evidence_readme": "1868cc194022735a7a7b932294108a9e6ecde888a8262d0332d7b650eabecd93"
+    },
+    "native_library_path": "/data/wenyujianData/kpcalg/fastkpc/build/fastkpc_cuda.so",
+    "native_library_bytes": 355178136,
+    "native_library_sha256": "88eb8939759e6beb119126b06a2a110d2f7ca44ccda4333c8fef0109bc5fa59b",
+    "previous_manifest_relative_path": "../strict_ci_methods_351x48_optimized_v2/manifest.json",
+    "previous_manifest_sha256": "fe3208949cb6b86c92b4bb673ef7189f1617d2cbdf4742abea32f2a52dd1825b",
+    "dataset_path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/kpc_tprs_real_zhu/cancer_RD-causalDiscoveryInput.rds",
+    "dataset_bytes": 114769,
+    "dataset_sha256": "e03cbfafed3336f3da7725878e92af24556b5ebdc6227b94ea84469e62e94036"
+  },
+  "rebuild_commands": {
+    "native": "bash fastkpc/tools/build_cuda_native.sh",
+    "candidate": "FASTKPC_PHASE10_SETUP_OPTIMIZER_PIPELINE=1 FASTKPC_PHASE10_SETUP_OPTIMIZER_PRODUCER_DELAY_US=5000 FASTKPC_STRICT_METHOD_PERMUTATION_GPU_OVERLAP=1 Rscript fastkpc/tools/run_strict_ci_method_351x48_candidate.R <dcc.perm|hsic.perm> <candidate-output.rds>",
+    "wanpdag": "Rscript fastkpc/tools/verify_strict_wanpdag_trace.R <candidate> <skeleton-oracle> <method> <receipt> <data> 707 0 kpcalg_authority",
+    "publish": "Rscript fastkpc/tools/publish_strict_ci_permutation_overlap_351x48_evidence.R fastkpc/artifacts/strict_ci_methods_351x48_permutation_overlap_v1"
+  }
+}

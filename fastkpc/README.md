@@ -139,14 +139,14 @@ sealed OpenSSL SHA-256 attestation without scanning the payload a second time;
 untrusted boundaries still require a complete rehash. The portable SHA-256
 implementation remains a compile-time fallback and produces the same digest.
 
-Clean default-Inf 351x48 development receipts from producer `830cfbe` measured:
+Clean default-Inf 351x48 development receipts now measure:
 
 ```text
-method       original     50595ce      830cfbe      latest reduction
-hsic.gamma   1562.052 s    631.522 s    593.814 s       5.97%
-dcc.perm     2131.261 s    945.359 s    849.693 s      10.12%
-hsic.perm    3877.316 s   1152.905 s   1042.358 s       9.59%
-total        7570.629 s   2729.786 s   2485.865 s       8.94%
+method       original     50595ce      830cfbe      6c01d71    latest change
+hsic.gamma   1562.052 s    631.522 s    593.814 s   not rerun      unchanged
+dcc.perm     2131.261 s    945.359 s    849.693 s    839.726 s       -1.17%
+hsic.perm    3877.316 s   1152.905 s   1042.358 s    950.008 s       -8.86%
+total        7570.629 s   2729.786 s   2485.865 s   2383.548 s       -4.12%
 ```
 
 The final `hsic.gamma` maximum absolute p-value difference is
@@ -158,24 +158,28 @@ runs report zero residual/component D2H, zero CPU numerical authority, zero
 fallback, and zero residual-cache eviction. The bounded `hsic.perm` component
 LRU records 240,685 hits and 234,199 deterministic evictions. The clean
 receipt and source closure are indexed by
-`artifacts/strict_ci_methods_351x48_optimized_v2/manifest.json`.
+`artifacts/strict_ci_methods_351x48_optimized_v2/manifest.json`. The two newer
+permutation receipts and their clean `6c01d71` producer closure are indexed by
+`artifacts/strict_ci_methods_351x48_permutation_overlap_v1/manifest.json`.
 
 These routes are not exhausted. The remaining dominant exact work is the
 level-3-and-deeper stable-SVD residual path: residual solving still costs
-`383.800`, `455.173`, and `433.361` seconds respectively. Permutation table
+`383.800`, `452.323`, and `429.871` seconds respectively. Permutation table
 generation plus incremental SHA-256 costs `117.275` seconds for `dcc.perm` and
-`255.772` seconds for `hsic.perm`; trusted request-identity build and validation
-now add only `1.469` and `1.764` seconds. The development path now submits one
+`255.772` seconds for `hsic.perm` before overlap; trusted request-identity build
+and validation add only `1.469` and `1.764` seconds. The retained path submits one
 GPU residual/component preparation before each R permutation build and queues
 permutation finalization on the same stream, with no intermediate host event
 wait. Stable-SVD cohorts use the qualified nonblocking submission path; QR
 cohorts may still wait inside submission. The overlap is enabled by default for
 `dcc.perm` and `hsic.perm` and can be disabled with
 `FASTKPC_STRICT_METHOD_PERMUTATION_GPU_OVERLAP=0`. Fixture-level bitwise,
-failure-order, RNG, resource, and WAN-PDAG gates pass, but the canonical
-`351x48` wall times have not yet been rerun for this implementation. The prior
-timings remain the current clean performance evidence and do not replace the
-`dcc.gamma` Phase 10 baseline.
+failure-order, RNG, resource, and WAN-PDAG gates pass. Clean canonical runs take
+`839.726` seconds for `dcc.perm` and `950.008` seconds for `hsic.perm`, saving
+`9.967` and `92.350` seconds from optimized v2. Concurrent permutation build
+time rises to `139.876` and `278.271` seconds, so theoretical overlap bounds are
+not wall-time forecasts. These receipts do not replace the `dcc.gamma` Phase 10
+baseline.
 
 The historical canonical artifact is
 `artifacts/full_cuda_ci/promotion_351x48_v1/`. Across five fresh-process cold

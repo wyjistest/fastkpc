@@ -25,6 +25,10 @@ fastkpc/artifacts/strict_ci_methods_351x48_optimized_v1/*
 fastkpc/artifacts/strict_ci_methods_351x48_optimized_v2/*
 !fastkpc/artifacts/strict_ci_methods_351x48_optimized_v2/README.md
 !fastkpc/artifacts/strict_ci_methods_351x48_optimized_v2/manifest.json
+!fastkpc/artifacts/strict_ci_methods_351x48_permutation_overlap_v1/
+fastkpc/artifacts/strict_ci_methods_351x48_permutation_overlap_v1/*
+!fastkpc/artifacts/strict_ci_methods_351x48_permutation_overlap_v1/README.md
+!fastkpc/artifacts/strict_ci_methods_351x48_permutation_overlap_v1/manifest.json
 *.log
 *.csv
 *.tsv
