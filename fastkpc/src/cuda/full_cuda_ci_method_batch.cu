@@ -65,6 +65,26 @@ bool is_lower_sha256(const std::string& value) {
     });
 }
 
+bool rng_receipt_equal(const RngReceipt& left, const RngReceipt& right) {
+  return left.initial_state_sha256 == right.initial_state_sha256 &&
+    left.final_state_sha256 == right.final_state_sha256 &&
+    left.uniform_draw_count == right.uniform_draw_count &&
+    left.rejection_count == right.rejection_count &&
+    left.count_exact == right.count_exact;
+}
+
+bool permutation_attestation_equal(
+    const PermutationAttestation& left,
+    const PermutationAttestation& right) {
+  return left.schema_version == right.schema_version &&
+    left.payload_sha256 == right.payload_sha256 &&
+    left.value_count == right.value_count &&
+    left.byte_count == right.byte_count &&
+    left.replicates == right.replicates &&
+    rng_receipt_equal(left.rng, right.rng) &&
+    left.sha256 == right.sha256;
+}
+
 bool deferred_svd_submission_enabled() {
   const char* raw = std::getenv(
     "FASTKPC_STRICT_METHOD_DEFERRED_SVD_SUBMISSION");
@@ -893,8 +913,13 @@ void validate_static_request(const FullCudaCiMethodStaticRequest& request,
 
 void validate_permutation_request(
     const FullCudaCiMethodStaticRequest& request,
-    const SealedPermutationTableHandle& permutation_table,
+    const SealedPermutationArtifact& permutation_artifact,
     const FixedSpBatchHostView& batch) {
+  if (!permutation_artifact.valid()) {
+    throw std::runtime_error("strict permutation artifact is invalid");
+  }
+  const SealedPermutationTableHandle& permutation_table =
+    permutation_artifact.table();
   const bool permutation = request.ci_method == "dcc.perm" ||
     request.ci_method == "hsic.perm";
   if (permutation) {
@@ -920,7 +945,8 @@ void validate_request(const FullCudaCiMethodBatchRequest& request,
   const FullCudaCiMethodStaticRequest static_request =
     full_cuda_ci_method_static_request(request);
   validate_static_request(static_request, batch);
-  validate_permutation_request(static_request, request.permutation_table, batch);
+  validate_permutation_request(
+    static_request, request.permutation_artifact, batch);
 }
 
 }  // namespace
@@ -1049,6 +1075,26 @@ SealedPermutationTableHandle::sha256() const noexcept {
 
 bool SealedPermutationTableHandle::sealed() const noexcept {
   return sealed_;
+}
+
+SealedPermutationArtifact::SealedPermutationArtifact(
+    SealedPermutationArtifact&&) noexcept = default;
+
+SealedPermutationArtifact& SealedPermutationArtifact::operator=(
+    SealedPermutationArtifact&&) noexcept = default;
+
+const SealedPermutationTableHandle&
+SealedPermutationArtifact::table() const noexcept {
+  return table_;
+}
+
+const PermutationAttestation&
+SealedPermutationArtifact::attestation() const noexcept {
+  return attestation_;
+}
+
+bool SealedPermutationArtifact::valid() const noexcept {
+  return valid_;
 }
 
 class FullCudaCiMethodResidualCache {
@@ -1682,22 +1728,39 @@ namespace {
 
 PermutationAttestation permutation_attestation_from_table(
     const SealedPermutationTableHandle& permutation_table,
-    int permutation_replicates) {
+    int permutation_replicates,
+    const RngReceipt& rng_receipt) {
   static_assert(sizeof(int) == 4U,
                 "strict permutation payload requires 32-bit int");
   PermutationAttestation attestation;
   attestation.schema_version =
     kFullCudaCiMethodPermutationAttestationSchemaVersion;
   if (permutation_table.sealed()) {
+    if (!is_lower_sha256(rng_receipt.initial_state_sha256) ||
+        !is_lower_sha256(rng_receipt.final_state_sha256) ||
+        rng_receipt.rejection_count > rng_receipt.uniform_draw_count) {
+      throw std::runtime_error(
+        "strict permutation RNG receipt is invalid");
+    }
     attestation.payload_sha256 = permutation_table.sha256();
     attestation.value_count = permutation_table.size();
     attestation.byte_count = permutation_table.byte_size();
   } else {
+    if (permutation_replicates != 0 ||
+        !rng_receipt.initial_state_sha256.empty() ||
+        !rng_receipt.final_state_sha256.empty() ||
+        rng_receipt.uniform_draw_count != 0U ||
+        rng_receipt.rejection_count != 0U ||
+        !rng_receipt.count_exact) {
+      throw std::runtime_error(
+        "non-permutation RNG receipt must be empty");
+    }
     FullCudaCiSha256Builder empty_digest;
     empty_digest.reset();
     attestation.payload_sha256 = empty_digest.finish();
   }
   attestation.replicates = permutation_replicates;
+  attestation.rng = rng_receipt;
   std::ostringstream payload;
   payload << "schema="
           << kFullCudaCiMethodPermutationAttestationSchemaVersion << "\n"
@@ -1706,7 +1769,16 @@ PermutationAttestation permutation_attestation_from_table(
           << "byte_count=" << attestation.byte_count << "\n"
           << "replicates=" << attestation.replicates << "\n"
           << "payload_sha256="
-          << full_cuda_ci_sha256_hex(attestation.payload_sha256) << "\n";
+          << full_cuda_ci_sha256_hex(attestation.payload_sha256) << "\n"
+          << "rng_initial_state_sha256="
+          << attestation.rng.initial_state_sha256 << "\n"
+          << "rng_final_state_sha256="
+          << attestation.rng.final_state_sha256 << "\n"
+          << "rng_uniform_draw_count="
+          << attestation.rng.uniform_draw_count << "\n"
+          << "rng_rejection_count=" << attestation.rng.rejection_count << "\n"
+          << "rng_count_exact=" << (attestation.rng.count_exact ? 1 : 0)
+          << "\n";
   attestation.sha256 = full_cuda_ci_sha256_utf8(payload.str());
   return attestation;
 }
@@ -1715,8 +1787,26 @@ PermutationAttestation permutation_attestation_from_table(
 
 PermutationAttestation full_cuda_ci_method_permutation_attestation(
     const FullCudaCiMethodBatchRequest& request) {
+  if (!request.permutation_artifact.valid()) {
+    throw std::runtime_error("strict permutation artifact is invalid");
+  }
+  return request.permutation_artifact.attestation();
+}
+
+PermutationAttestation full_cuda_ci_method_permutation_attestation(
+    const SealedPermutationTableHandle& permutation_table,
+    int replicates,
+    const RngReceipt& rng_receipt) {
   return permutation_attestation_from_table(
-    request.permutation_table, request.permutation_replicates);
+    permutation_table, replicates, rng_receipt);
+}
+
+SealedPermutationArtifact full_cuda_ci_method_empty_permutation_artifact() {
+  SealedPermutationArtifact artifact;
+  artifact.attestation_ = permutation_attestation_from_table(
+    artifact.table_, 0, RngReceipt{});
+  artifact.valid_ = true;
+  return artifact;
 }
 
 CombinedRequestIdentity full_cuda_ci_method_combined_request_identity(
@@ -2284,7 +2374,7 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
     MethodPreparationTicket&& preparation,
     const PermutationAttestation& permutation_attestation,
     const CombinedRequestIdentity& combined_identity,
-    const SealedPermutationTableHandle& permutation_table) {
+    const SealedPermutationArtifact& permutation_artifact) {
   if (!preparation.valid()) {
     throw std::runtime_error("strict CI method preparation ticket is invalid");
   }
@@ -2292,25 +2382,29 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
     std::move(preparation.impl_);
   FullCudaCiMethodBatchDiagnostics& diagnostics = state->result.diagnostics;
   try {
+    if (!permutation_artifact.valid()) {
+      throw std::runtime_error("strict permutation artifact is invalid");
+    }
+    const SealedPermutationTableHandle& permutation_table =
+      permutation_artifact.table();
     validate_permutation_request(
-      state->request, permutation_table, state->batch);
+      state->request, permutation_artifact, state->batch);
 
     const auto attestation_started = std::chrono::steady_clock::now();
     const PermutationAttestation actual_attestation =
       permutation_attestation_from_table(
-        permutation_table, state->request.permutation_replicates);
+        permutation_table, state->request.permutation_replicates,
+        permutation_artifact.attestation().rng);
     diagnostics.permutation_attestation_validation_host_ms =
       std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - attestation_started).count();
-    if (permutation_attestation.schema_version !=
+    if (!permutation_attestation_equal(
+          permutation_artifact.attestation(), actual_attestation) ||
+        permutation_attestation.schema_version !=
           kFullCudaCiMethodPermutationAttestationSchemaVersion ||
         !is_lower_sha256(permutation_attestation.sha256) ||
-        permutation_attestation.payload_sha256 !=
-          actual_attestation.payload_sha256 ||
-        permutation_attestation.value_count != actual_attestation.value_count ||
-        permutation_attestation.byte_count != actual_attestation.byte_count ||
-        permutation_attestation.replicates != actual_attestation.replicates ||
-        permutation_attestation.sha256 != actual_attestation.sha256) {
+        !permutation_attestation_equal(
+          permutation_attestation, actual_attestation)) {
       throw std::runtime_error(
         "strict CI method permutation attestation mismatch");
     }
@@ -2645,19 +2739,16 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   }
   strict_method_failure_checkpoint("after_static_identity_validate");
   const PermutationAttestation actual_attestation =
-    full_cuda_ci_method_permutation_attestation(request);
-  if (request.permutation_attestation.schema_version !=
+    full_cuda_ci_method_permutation_attestation(
+      request.permutation_artifact.table(), request.permutation_replicates,
+      request.permutation_artifact.attestation().rng);
+  if (!permutation_attestation_equal(
+        request.permutation_artifact.attestation(), actual_attestation) ||
+      request.permutation_attestation.schema_version !=
         kFullCudaCiMethodPermutationAttestationSchemaVersion ||
       !is_lower_sha256(request.permutation_attestation.sha256) ||
-      request.permutation_attestation.payload_sha256 !=
-        actual_attestation.payload_sha256 ||
-      request.permutation_attestation.value_count !=
-        actual_attestation.value_count ||
-      request.permutation_attestation.byte_count !=
-        actual_attestation.byte_count ||
-      request.permutation_attestation.replicates !=
-        actual_attestation.replicates ||
-      request.permutation_attestation.sha256 != actual_attestation.sha256) {
+      !permutation_attestation_equal(
+        request.permutation_attestation, actual_attestation)) {
     throw std::runtime_error(
       "strict CI method permutation attestation mismatch");
   }
@@ -2680,7 +2771,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   strict_method_failure_checkpoint("before_method_finalization");
   FullCudaCiMethodBatchResult result = finalize_method_from_permutation(
     std::move(preparation), request.permutation_attestation,
-    request.combined_identity, request.permutation_table);
+    request.combined_identity, request.permutation_artifact);
   strict_method_failure_checkpoint("after_method_finalization");
   result.diagnostics.total_host_ms =
     std::chrono::duration<double, std::milli>(

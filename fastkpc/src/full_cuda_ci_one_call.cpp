@@ -384,7 +384,9 @@ void PermutationTableBuilder::commit_row(
   impl_->committed += size;
 }
 
-SealedPermutationTableHandle PermutationTableBuilder::seal() {
+SealedPermutationArtifact PermutationTableBuilder::seal(
+    const RngReceipt& rng_receipt,
+    int replicates) {
   require(impl_ != nullptr && impl_->active &&
             impl_->committed == impl_->values.size() &&
             !impl_->values.empty(),
@@ -393,22 +395,28 @@ SealedPermutationTableHandle PermutationTableBuilder::seal() {
   if (impl_->deferred_digest_error) {
     std::rethrow_exception(impl_->deferred_digest_error);
   }
-  SealedPermutationTableHandle handle;
-  handle.values_ = std::move(impl_->values);
-  handle.sha256_ = impl_->digest.finish();
-  handle.sealed_ = true;
-  return handle;
+  SealedPermutationArtifact artifact;
+  artifact.table_.values_ = std::move(impl_->values);
+  artifact.table_.sha256_ = impl_->digest.finish();
+  artifact.table_.sealed_ = true;
+  artifact.attestation_ = full_cuda_ci_method_permutation_attestation(
+    artifact.table_, replicates, rng_receipt);
+  artifact.valid_ = true;
+  return artifact;
 }
 
 void PermutationTableBuilder::reclaim(
-    SealedPermutationTableHandle&& handle) {
+    SealedPermutationArtifact&& artifact) {
   require(impl_ != nullptr && !impl_->active,
           "permutation table builder is still active");
-  require(handle.sealed_, "cannot reclaim an unsealed permutation table");
-  impl_->values = std::move(handle.values_);
+  require(artifact.valid_ && artifact.table_.sealed_,
+          "cannot reclaim an invalid permutation artifact");
+  impl_->values = std::move(artifact.table_.values_);
   impl_->committed = 0U;
-  handle.sha256_.fill(0U);
-  handle.sealed_ = false;
+  artifact.table_.sha256_.fill(0U);
+  artifact.table_.sealed_ = false;
+  artifact.attestation_ = PermutationAttestation{};
+  artifact.valid_ = false;
 }
 
 namespace {
@@ -424,6 +432,9 @@ struct LegacyRPermutationWorkspace {
   bool inline_r_index_active = false;
   std::uint64_t inline_r_index_count = 0U;
   std::uint64_t inline_r_draw_count = 0U;
+  std::uint64_t last_uniform_draw_count = 0U;
+  std::uint64_t last_rejection_count = 0U;
+  bool last_rng_count_exact = true;
 };
 
 void make_legacy_r_permutation_table(
@@ -457,6 +468,9 @@ void make_legacy_r_permutation_table(
   workspace->scratch.resize(static_cast<std::size_t>(n));
   std::uint64_t inline_index_count = 0U;
   std::uint64_t inline_draw_count = 0U;
+  std::uint64_t uniform_draw_count = 0U;
+  std::uint64_t rejection_count = 0U;
+  bool rng_count_exact = true;
 
   for (std::size_t pair = 0; pair < pair_count; ++pair) {
     if (method.ci_method == "dcc.perm") {
@@ -470,6 +484,7 @@ void make_legacy_r_permutation_table(
         for (int index = 0; index < n - 1; ++index) {
           int picked = static_cast<int>(std::floor(
             R::unif_rand() * static_cast<double>(remaining)));
+          uniform_draw_count += 1U;
           if (picked < 0) picked = 0;
           if (picked >= remaining) picked = remaining - 1;
           --remaining;
@@ -500,10 +515,13 @@ void make_legacy_r_permutation_table(
             const int bits = static_cast<int>(std::floor(
               R::unif_rand() * 65536.0));
             inline_draw_count += 1U;
+            uniform_draw_count += 1U;
             picked = bits & static_cast<int>(mask);
+            if (picked >= remaining) rejection_count += 1U;
           } while (picked >= remaining);
           inline_index_count += 1U;
         } else {
+          rng_count_exact = false;
           picked = static_cast<int>(R_unif_index(
             static_cast<double>(remaining)));
         }
@@ -519,6 +537,9 @@ void make_legacy_r_permutation_table(
   }
   workspace->inline_r_index_count += inline_index_count;
   workspace->inline_r_draw_count += inline_draw_count;
+  workspace->last_uniform_draw_count = uniform_draw_count;
+  workspace->last_rejection_count = rejection_count;
+  workspace->last_rng_count_exact = rng_count_exact;
 }
 
 void make_method_permutation_table(
@@ -533,6 +554,28 @@ void make_method_permutation_table(
   (void)plan;
   make_legacy_r_permutation_table(
     method, n, task_indices.size(), workspace);
+}
+
+std::string current_r_rng_state_sha256() {
+  PutRNGstate();
+  try {
+    SEXP state = Rf_findVar(Rf_install(".Random.seed"), R_GlobalEnv);
+    require(state != R_UnboundValue && TYPEOF(state) == INTSXP,
+            "R RNG state is unavailable");
+    std::ostringstream payload;
+    payload << "schema=fastkpc-r-rng-state-v1\n"
+            << "length=" << XLENGTH(state) << "\n";
+    const int* values = INTEGER(state);
+    for (R_xlen_t index = 0; index < XLENGTH(state); ++index) {
+      payload << values[index] << "\n";
+    }
+    const std::string digest = full_cuda_ci_sha256_utf8(payload.str());
+    GetRNGstate();
+    return digest;
+  } catch (...) {
+    GetRNGstate();
+    throw;
+  }
 }
 
 std::string dataset_key(const Rcpp::NumericMatrix& data) {
@@ -931,6 +974,12 @@ struct OneCallDiagnostics {
   bool method_permutation_inline_r_index_active = false;
   std::uint64_t method_permutation_inline_r_index_count = 0U;
   std::uint64_t method_permutation_inline_r_draw_count = 0U;
+  int method_permutation_rng_receipt_count = 0;
+  int method_permutation_rng_exact_receipt_count = 0;
+  std::uint64_t method_permutation_rng_uniform_draw_count = 0U;
+  std::uint64_t method_permutation_rng_rejection_count = 0U;
+  std::string method_permutation_rng_initial_state_sha256;
+  std::string method_permutation_rng_final_state_sha256;
   int host_synchronization_count = 0;
   int result_cache_capacity = 0;
   int result_cache_warm_start_entries = 0;
@@ -4218,10 +4267,23 @@ GroupResult execute_group(
       permutation_workspace->table_growth_count;
     const int scratch_growth_before = permutation_workspace == nullptr ? 0 :
       permutation_workspace->scratch_growth_count;
+    RngReceipt rng_receipt;
     strict_method_failure_checkpoint("before_permutation_generation");
+    if (is_permutation_method(method_options.ci_method)) {
+      rng_receipt.initial_state_sha256 = current_r_rng_state_sha256();
+    }
     make_method_permutation_table(
       method_options, context->n, plan, task_indices,
       permutation_workspace);
+    if (is_permutation_method(method_options.ci_method)) {
+      rng_receipt.final_state_sha256 = current_r_rng_state_sha256();
+      rng_receipt.uniform_draw_count =
+        permutation_workspace->last_uniform_draw_count;
+      rng_receipt.rejection_count =
+        permutation_workspace->last_rejection_count;
+      rng_receipt.count_exact =
+        permutation_workspace->last_rng_count_exact;
+    }
     strict_method_failure_checkpoint("after_permutation_generation");
     double permutation_table_host_ms = 0.0;
     if (is_permutation_method(method_options.ci_method)) {
@@ -4242,11 +4304,28 @@ GroupResult execute_group(
         permutation_workspace->inline_r_index_count;
       diagnostics->method_permutation_inline_r_draw_count =
         permutation_workspace->inline_r_draw_count;
+      diagnostics->method_permutation_rng_receipt_count += 1;
+      diagnostics->method_permutation_rng_exact_receipt_count +=
+        rng_receipt.count_exact ? 1 : 0;
+      diagnostics->method_permutation_rng_uniform_draw_count +=
+        rng_receipt.uniform_draw_count;
+      diagnostics->method_permutation_rng_rejection_count +=
+        rng_receipt.rejection_count;
+      if (diagnostics->method_permutation_rng_initial_state_sha256.empty()) {
+        diagnostics->method_permutation_rng_initial_state_sha256 =
+          rng_receipt.initial_state_sha256;
+      }
+      diagnostics->method_permutation_rng_final_state_sha256 =
+        rng_receipt.final_state_sha256;
     }
     const auto identity_started = std::chrono::steady_clock::now();
     if (is_permutation_method(method_options.ci_method)) {
-      method_request.permutation_table = permutation_workspace->table.seal();
+      method_request.permutation_artifact = permutation_workspace->table.seal(
+        rng_receipt, method_request.permutation_replicates);
       strict_method_failure_checkpoint("after_permutation_seal");
+    } else {
+      method_request.permutation_artifact =
+        full_cuda_ci_method_empty_permutation_artifact();
     }
     method_request.static_identity =
       full_cuda_ci_method_static_request_identity(
@@ -4278,7 +4357,7 @@ GroupResult execute_group(
     strict_method_failure_checkpoint("after_synchronous_method_call");
     if (is_permutation_method(method_options.ci_method)) {
       permutation_workspace->table.reclaim(
-        std::move(method_request.permutation_table));
+        std::move(method_request.permutation_artifact));
     }
     const double gpu_preparation_upper_bound_ms =
       method_result.diagnostics.residual_solve_host_ms +
@@ -5202,6 +5281,43 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.method_permutation_table_value_count &&
       diagnostics.method_permutation_inline_r_draw_count >=
         diagnostics.method_permutation_inline_r_index_count);
+  const bool permutation_method =
+    is_permutation_method(method_options.ci_method);
+  const bool method_permutation_rng_receipt_accounted =
+    (!permutation_method &&
+      diagnostics.method_permutation_rng_receipt_count == 0 &&
+      diagnostics.method_permutation_rng_exact_receipt_count == 0 &&
+      diagnostics.method_permutation_rng_uniform_draw_count == 0U &&
+      diagnostics.method_permutation_rng_rejection_count == 0U &&
+      diagnostics.method_permutation_rng_initial_state_sha256.empty() &&
+      diagnostics.method_permutation_rng_final_state_sha256.empty()) ||
+    (permutation_method &&
+      diagnostics.method_permutation_rng_receipt_count ==
+        total_frontier_batches &&
+      diagnostics.method_permutation_rng_exact_receipt_count <=
+        diagnostics.method_permutation_rng_receipt_count &&
+      diagnostics.method_permutation_rng_rejection_count <=
+        diagnostics.method_permutation_rng_uniform_draw_count &&
+      is_lower_sha256(
+        diagnostics.method_permutation_rng_initial_state_sha256) &&
+      is_lower_sha256(
+        diagnostics.method_permutation_rng_final_state_sha256) &&
+      ((method_options.ci_method == "dcc.perm" &&
+        diagnostics.method_permutation_rng_exact_receipt_count ==
+          diagnostics.method_permutation_rng_receipt_count &&
+        diagnostics.method_permutation_rng_uniform_draw_count > 0U &&
+        diagnostics.method_permutation_rng_rejection_count == 0U) ||
+       (method_options.ci_method == "hsic.perm" &&
+        ((!diagnostics.method_permutation_inline_r_index_active &&
+          diagnostics.method_permutation_rng_exact_receipt_count == 0) ||
+         (diagnostics.method_permutation_inline_r_index_active &&
+          diagnostics.method_permutation_rng_exact_receipt_count ==
+            diagnostics.method_permutation_rng_receipt_count &&
+          diagnostics.method_permutation_rng_uniform_draw_count ==
+            diagnostics.method_permutation_inline_r_draw_count &&
+          diagnostics.method_permutation_rng_rejection_count ==
+            diagnostics.method_permutation_inline_r_draw_count -
+              diagnostics.method_permutation_inline_r_index_count)))));
   require(diagnostics.native_setup_count >= physical_prepared_s_key_count &&
             physical_prepared_s_key_count >= unique_prepared_s_key_count &&
             diagnostics.physical_residual_fit_count >=
@@ -5235,6 +5351,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
             method_execution_context_accounted &&
             method_component_cache_accounted &&
             method_permutation_inline_r_index_accounted &&
+            method_permutation_rng_receipt_accounted &&
             fixed_sp_root_cache_accounted,
           "compatible.cuda one-call physical work accounting changed");
   const bool authority_clean =
@@ -5759,6 +5876,20 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
           diagnostics.method_permutation_inline_r_index_count),
       Rcpp::Named("method_permutation_inline_r_draw_count") =
         static_cast<double>(diagnostics.method_permutation_inline_r_draw_count),
+      Rcpp::Named("method_permutation_rng_receipt_count") =
+        diagnostics.method_permutation_rng_receipt_count,
+      Rcpp::Named("method_permutation_rng_exact_receipt_count") =
+        diagnostics.method_permutation_rng_exact_receipt_count,
+      Rcpp::Named("method_permutation_rng_uniform_draw_count") =
+        static_cast<double>(
+          diagnostics.method_permutation_rng_uniform_draw_count),
+      Rcpp::Named("method_permutation_rng_rejection_count") =
+        static_cast<double>(
+          diagnostics.method_permutation_rng_rejection_count),
+      Rcpp::Named("method_permutation_rng_initial_state_sha256") =
+        diagnostics.method_permutation_rng_initial_state_sha256,
+      Rcpp::Named("method_permutation_rng_final_state_sha256") =
+        diagnostics.method_permutation_rng_final_state_sha256,
       Rcpp::Named("setup_optimizer_pipeline_enabled") =
         diagnostics.setup_optimizer_pipeline_enabled,
       Rcpp::Named("setup_optimizer_pipeline_window_count") =

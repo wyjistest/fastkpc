@@ -48,6 +48,11 @@ assert_true(
         header, fixed = TRUE) &&
     grepl("friend class PermutationTableBuilder", header, fixed = TRUE) &&
     grepl("const int* data() const noexcept", header, fixed = TRUE) &&
+    grepl("SealedPermutationArtifact(const SealedPermutationArtifact&) = delete",
+          header, fixed = TRUE) &&
+    grepl("const PermutationAttestation& attestation() const noexcept", header,
+          fixed = TRUE) &&
+    grepl("const RngReceipt& rng_receipt", header, fixed = TRUE) &&
     !grepl("int* data() noexcept", header, fixed = TRUE) &&
     !grepl("seal_full_cuda_ci_permutation_table", header, fixed = TRUE),
   "sealed permutation handle copy or mutable-data contract changed"

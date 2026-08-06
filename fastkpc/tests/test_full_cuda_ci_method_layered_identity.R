@@ -24,6 +24,14 @@ arm_tamper <- function(layer) {
     layer, PACKAGE = "fastkpc_cuda"
   ))
 }
+rng_state_hash <- function(state) {
+  payload <- paste0(
+    "schema=fastkpc-r-rng-state-v1\n",
+    "length=", length(state), "\n",
+    paste0(as.integer(state), "\n", collapse = "")
+  )
+  .Call("C_full_cuda_ci_sha256_utf8", payload, PACKAGE = "fastkpc_cuda")
+}
 
 set.seed(8401)
 n <- 48L
@@ -56,35 +64,75 @@ run_method <- function(method) {
 for (method in c("hsic.gamma", "dcc.perm", "hsic.perm")) {
   invisible(full_cuda_ci_one_call_cache_control_native("reset"))
   set.seed(707)
+  rng_initial_sha256 <- rng_state_hash(.Random.seed)
   result <- run_method(method)
+  rng_final_sha256 <- rng_state_hash(.Random.seed)
   summary <- result$summary
-  assert_true(
+  permutation <- method %in% c("dcc.perm", "hsic.perm")
+  rng_receipt_ok <- if (permutation) {
+    summary$method_permutation_rng_receipt_count ==
+        summary$frontier_batch_count &&
+      summary$method_permutation_rng_exact_receipt_count ==
+        summary$frontier_batch_count &&
+      grepl("^[0-9a-f]{64}$",
+            summary$method_permutation_rng_initial_state_sha256) &&
+      grepl("^[0-9a-f]{64}$",
+            summary$method_permutation_rng_final_state_sha256) &&
+      identical(summary$method_permutation_rng_initial_state_sha256,
+                rng_initial_sha256) &&
+      identical(summary$method_permutation_rng_final_state_sha256,
+                rng_final_sha256)
+  } else {
+    summary$method_permutation_rng_receipt_count == 0L &&
+      summary$method_permutation_rng_exact_receipt_count == 0L &&
+      identical(summary$method_permutation_rng_initial_state_sha256, "") &&
+      identical(summary$method_permutation_rng_final_state_sha256, "")
+  }
+  identity_layers_ok <-
     summary$method_static_identity_authentication_count ==
         summary$frontier_batch_count &&
       summary$method_permutation_attestation_count ==
         summary$frontier_batch_count &&
       summary$method_combined_identity_authentication_count ==
-        summary$frontier_batch_count &&
-      summary$method_preparation_submit_count ==
+        summary$frontier_batch_count
+  ticket_ok <-
+    summary$method_preparation_submit_count ==
         summary$frontier_batch_count &&
       summary$method_finalization_count == summary$frontier_batch_count &&
       summary$method_preparation_ticket_consumed_count ==
-        summary$frontier_batch_count &&
-      summary$method_in_flight_peak == 1L &&
-      summary$method_intermediate_host_event_wait_count == 0L &&
-      summary$method_final_result_host_event_wait_count ==
-        summary$frontier_batch_count &&
-      summary$method_submit_hidden_stream_sync_count == 0L &&
-      summary$method_submit_hidden_device_sync_count == 0L &&
-      summary$method_submit_completion_event_wait_count == 0L &&
-      summary$method_static_identity_validation_host_ms >= 0 &&
-      summary$method_permutation_attestation_validation_host_ms >= 0 &&
-      summary$method_combined_identity_validation_host_ms >= 0 &&
-      summary$method_request_identity_validation_host_ms >=
-        summary$method_static_identity_validation_host_ms +
-          summary$method_permutation_attestation_validation_host_ms +
-          summary$method_combined_identity_validation_host_ms,
-    paste(method, "did not authenticate all three identity layers")
+        summary$frontier_batch_count
+  event_ok <- summary$method_in_flight_peak == 1L &&
+    summary$method_intermediate_host_event_wait_count == 0L &&
+    summary$method_final_result_host_event_wait_count ==
+      summary$frontier_batch_count &&
+    summary$method_submit_hidden_stream_sync_count == 0L &&
+    summary$method_submit_hidden_device_sync_count == 0L &&
+    summary$method_submit_completion_event_wait_count == 0L
+  timing_ok <- summary$method_static_identity_validation_host_ms >= 0 &&
+    summary$method_permutation_attestation_validation_host_ms >= 0 &&
+    summary$method_combined_identity_validation_host_ms >= 0 &&
+    summary$method_request_identity_validation_host_ms + 1e-9 >=
+      summary$method_static_identity_validation_host_ms +
+        summary$method_permutation_attestation_validation_host_ms +
+        summary$method_combined_identity_validation_host_ms
+  assert_true(
+    identity_layers_ok && ticket_ok && event_ok && timing_ok && rng_receipt_ok,
+    paste(
+      method, "did not authenticate all three identity layers:",
+      paste(c(
+        batches = summary$frontier_batch_count,
+        static = summary$method_static_identity_authentication_count,
+        permutation = summary$method_permutation_attestation_count,
+        combined = summary$method_combined_identity_authentication_count,
+        rng_receipts = summary$method_permutation_rng_receipt_count,
+        rng_exact = summary$method_permutation_rng_exact_receipt_count,
+        identity_layers_ok = identity_layers_ok,
+        ticket_ok = ticket_ok,
+        event_ok = event_ok,
+        timing_ok = timing_ok,
+        rng_receipt_ok = rng_receipt_ok
+      ), collapse = ", ")
+    )
   )
 }
 
@@ -151,10 +199,12 @@ submit_body <- if (length(submit_start) == 1L &&
 assert_true(
   grepl("full-cuda-ci-method-static-request-identity-v1", header,
         fixed = TRUE) &&
-    grepl("full-cuda-ci-method-permutation-attestation-v1", header,
+    grepl("full-cuda-ci-method-permutation-attestation-v2", header,
           fixed = TRUE) &&
-    grepl("full-cuda-ci-method-combined-request-identity-v1", header,
+    grepl("full-cuda-ci-method-combined-request-identity-v2", header,
           fixed = TRUE) &&
+    grepl("SealedPermutationArtifact(const SealedPermutationArtifact&) = delete",
+          header, fixed = TRUE) &&
     grepl("MethodPreparationTicket(const MethodPreparationTicket&) = delete",
           header, fixed = TRUE) &&
     grepl("const FullCudaCiMethodStaticRequest& request", header,

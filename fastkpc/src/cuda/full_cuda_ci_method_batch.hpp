@@ -19,11 +19,11 @@ struct FullCudaCiMethodBatchResult;
 constexpr char kFullCudaCiMethodStaticRequestIdentitySchemaVersion[] =
   "full-cuda-ci-method-static-request-identity-v1";
 constexpr char kFullCudaCiMethodPermutationAttestationSchemaVersion[] =
-  "full-cuda-ci-method-permutation-attestation-v1";
+  "full-cuda-ci-method-permutation-attestation-v2";
 constexpr char kFullCudaCiMethodCombinedRequestIdentitySchemaVersion[] =
-  "full-cuda-ci-method-combined-request-identity-v1";
+  "full-cuda-ci-method-combined-request-identity-v2";
 constexpr char kFullCudaCiMethodBatchResultSchemaVersion[] =
-  "full-cuda-ci-method-batch-result-v2";
+  "full-cuda-ci-method-batch-result-v3";
 
 struct FullCudaCiMethodPairRequest {
   std::uint64_t logical_sequence_id = 0;
@@ -36,12 +36,21 @@ struct StaticRequestIdentity {
   std::string sha256;
 };
 
+struct RngReceipt {
+  std::string initial_state_sha256;
+  std::string final_state_sha256;
+  std::uint64_t uniform_draw_count = 0U;
+  std::uint64_t rejection_count = 0U;
+  bool count_exact = true;
+};
+
 struct PermutationAttestation {
   std::string schema_version;
   std::array<unsigned char, 32> payload_sha256{};
   std::size_t value_count = 0U;
   std::size_t byte_count = 0U;
   int replicates = 0;
+  RngReceipt rng;
   std::string sha256;
 };
 
@@ -64,6 +73,7 @@ struct FullCudaCiMethodStaticRequest {
 };
 
 class PermutationTableBuilder;
+class SealedPermutationArtifact;
 
 class SealedPermutationTableHandle {
  public:
@@ -90,6 +100,31 @@ class SealedPermutationTableHandle {
   bool sealed_ = false;
 };
 
+class SealedPermutationArtifact {
+ public:
+  SealedPermutationArtifact() = default;
+  ~SealedPermutationArtifact() = default;
+  SealedPermutationArtifact(SealedPermutationArtifact&&) noexcept;
+  SealedPermutationArtifact& operator=(
+    SealedPermutationArtifact&&) noexcept;
+  SealedPermutationArtifact(const SealedPermutationArtifact&) = delete;
+  SealedPermutationArtifact& operator=(
+    const SealedPermutationArtifact&) = delete;
+
+  const SealedPermutationTableHandle& table() const noexcept;
+  const PermutationAttestation& attestation() const noexcept;
+  bool valid() const noexcept;
+
+ private:
+  friend class PermutationTableBuilder;
+  friend SealedPermutationArtifact
+  full_cuda_ci_method_empty_permutation_artifact();
+
+  SealedPermutationTableHandle table_;
+  PermutationAttestation attestation_;
+  bool valid_ = false;
+};
+
 class PermutationTableBuilder {
  public:
   PermutationTableBuilder();
@@ -105,8 +140,10 @@ class PermutationTableBuilder {
   void append_row(const int* values, std::size_t size);
   int* begin_row(std::size_t size);
   void commit_row(const int* values, std::size_t size);
-  SealedPermutationTableHandle seal();
-  void reclaim(SealedPermutationTableHandle&& handle);
+  SealedPermutationArtifact seal(
+    const RngReceipt& rng_receipt,
+    int replicates);
+  void reclaim(SealedPermutationArtifact&& artifact);
 
  private:
   struct Impl;
@@ -138,7 +175,7 @@ class MethodPreparationTicket {
     MethodPreparationTicket&&,
     const PermutationAttestation&,
     const CombinedRequestIdentity&,
-    const SealedPermutationTableHandle&);
+    const SealedPermutationArtifact&);
 };
 
 struct FullCudaCiMethodBatchRequest {
@@ -155,7 +192,7 @@ struct FullCudaCiMethodBatchRequest {
   int permutation_replicates = 0;
   bool permutation_include_observed = true;
   // Pair-major, then replicate-major, then row-major zero-based indices.
-  SealedPermutationTableHandle permutation_table;
+  SealedPermutationArtifact permutation_artifact;
 };
 
 struct FullCudaCiMethodCompactRecord {
@@ -288,6 +325,11 @@ StaticRequestIdentity full_cuda_ci_method_static_request_identity(
   int n);
 PermutationAttestation full_cuda_ci_method_permutation_attestation(
   const FullCudaCiMethodBatchRequest& request);
+PermutationAttestation full_cuda_ci_method_permutation_attestation(
+  const SealedPermutationTableHandle& permutation_table,
+  int replicates,
+  const RngReceipt& rng_receipt);
+SealedPermutationArtifact full_cuda_ci_method_empty_permutation_artifact();
 CombinedRequestIdentity full_cuda_ci_method_combined_request_identity(
   const StaticRequestIdentity& static_identity,
   const PermutationAttestation& permutation_attestation);
@@ -324,7 +366,7 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
   MethodPreparationTicket&& preparation,
   const PermutationAttestation& permutation_attestation,
   const CombinedRequestIdentity& combined_identity,
-  const SealedPermutationTableHandle& permutation_table);
+  const SealedPermutationArtifact& permutation_artifact);
 
 FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
