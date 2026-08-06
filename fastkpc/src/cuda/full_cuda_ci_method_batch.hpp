@@ -3,6 +3,7 @@
 
 #include "mgcv_fixed_sp_runtime.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -25,6 +26,56 @@ struct FullCudaCiMethodPairRequest {
   int right_target_index = -1;
 };
 
+class PermutationTableBuilder;
+
+class SealedPermutationTableHandle {
+ public:
+  SealedPermutationTableHandle() = default;
+  ~SealedPermutationTableHandle() = default;
+  SealedPermutationTableHandle(SealedPermutationTableHandle&&) noexcept;
+  SealedPermutationTableHandle& operator=(
+    SealedPermutationTableHandle&&) noexcept;
+  SealedPermutationTableHandle(const SealedPermutationTableHandle&) = delete;
+  SealedPermutationTableHandle& operator=(
+    const SealedPermutationTableHandle&) = delete;
+
+  const int* data() const noexcept;
+  std::size_t size() const noexcept;
+  std::size_t byte_size() const noexcept;
+  const std::array<unsigned char, 32>& sha256() const noexcept;
+ bool sealed() const noexcept;
+
+ private:
+  friend class PermutationTableBuilder;
+
+  std::vector<int> values_;
+  std::array<unsigned char, 32> sha256_{};
+  bool sealed_ = false;
+};
+
+class PermutationTableBuilder {
+ public:
+  PermutationTableBuilder();
+  ~PermutationTableBuilder();
+  PermutationTableBuilder(PermutationTableBuilder&&) noexcept;
+  PermutationTableBuilder& operator=(PermutationTableBuilder&&) noexcept;
+  PermutationTableBuilder(const PermutationTableBuilder&) = delete;
+  PermutationTableBuilder& operator=(const PermutationTableBuilder&) = delete;
+
+  void reset(std::size_t size);
+  std::size_t capacity() const noexcept;
+  std::size_t size() const noexcept;
+  void append_row(const int* values, std::size_t size);
+  int* begin_row(std::size_t size);
+  void commit_row(const int* values, std::size_t size);
+  SealedPermutationTableHandle seal();
+  void reclaim(SealedPermutationTableHandle&& handle);
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 struct FullCudaCiMethodBatchRequest {
   std::string expected_prepared_s_key_sha256;
   std::string request_identity_sha256;
@@ -37,7 +88,7 @@ struct FullCudaCiMethodBatchRequest {
   int permutation_replicates = 0;
   bool permutation_include_observed = true;
   // Pair-major, then replicate-major, then row-major zero-based indices.
-  std::vector<int> permutations;
+  SealedPermutationTableHandle permutation_table;
 };
 
 struct FullCudaCiMethodCompactRecord {
@@ -99,7 +150,10 @@ struct FullCudaCiMethodBatchDiagnostics {
   double compact_d2h_cuda_ms = 0.0;
   double request_identity_validation_host_ms = 0.0;
   double total_host_ms = 0.0;
+  int permutation_payload_validation_scan_count = 0;
+  std::size_t permutation_payload_validation_scan_bytes = 0;
   bool request_identity_authenticated = false;
+  bool permutation_attestation_authenticated = false;
   bool prepared_identity_authenticated = false;
   bool target_identity_authenticated = false;
   bool residuals_device_resident = false;

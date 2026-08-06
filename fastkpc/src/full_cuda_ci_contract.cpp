@@ -14,6 +14,7 @@
 #include <vector>
 
 #ifdef FASTKPC_USE_OPENSSL_SHA256
+#include <openssl/evp.h>
 #include <openssl/sha.h>
 #endif
 
@@ -855,6 +856,88 @@ std::array<std::uint8_t, 32> sha256_bytes(const std::string& input) {
 
 }  // namespace
 
+struct FullCudaCiSha256Builder::Impl {
+#ifdef FASTKPC_USE_OPENSSL_SHA256
+  EVP_MD_CTX* context = nullptr;
+#else
+  std::vector<unsigned char> bytes;
+#endif
+  bool active = false;
+
+  ~Impl() {
+#ifdef FASTKPC_USE_OPENSSL_SHA256
+    if (context != nullptr) EVP_MD_CTX_free(context);
+#endif
+  }
+};
+
+FullCudaCiSha256Builder::FullCudaCiSha256Builder()
+    : impl_(new Impl()) {}
+
+FullCudaCiSha256Builder::~FullCudaCiSha256Builder() = default;
+FullCudaCiSha256Builder::FullCudaCiSha256Builder(
+    FullCudaCiSha256Builder&&) noexcept = default;
+FullCudaCiSha256Builder& FullCudaCiSha256Builder::operator=(
+    FullCudaCiSha256Builder&&) noexcept = default;
+
+void FullCudaCiSha256Builder::reset() {
+  if (!impl_) throw std::runtime_error("SHA-256 builder has been moved");
+#ifdef FASTKPC_USE_OPENSSL_SHA256
+  if (impl_->context == nullptr) {
+    impl_->context = EVP_MD_CTX_new();
+    if (impl_->context == nullptr) {
+      throw std::runtime_error("OpenSSL SHA-256 context allocation failed");
+    }
+  }
+  if (EVP_DigestInit_ex(impl_->context, EVP_sha256(), nullptr) != 1) {
+    throw std::runtime_error("OpenSSL SHA-256 initialization failed");
+  }
+#else
+  impl_->bytes.clear();
+#endif
+  impl_->active = true;
+}
+
+void FullCudaCiSha256Builder::update(const void* value, std::size_t size) {
+  if (!impl_ || !impl_->active) {
+    throw std::runtime_error("SHA-256 builder is not active");
+  }
+  if (value == nullptr && size != 0U) {
+    throw std::runtime_error("SHA-256 byte input is null");
+  }
+  if (size == 0U) return;
+#ifdef FASTKPC_USE_OPENSSL_SHA256
+  if (EVP_DigestUpdate(impl_->context, value, size) != 1) {
+    throw std::runtime_error("OpenSSL SHA-256 update failed");
+  }
+#else
+  const auto* begin = static_cast<const unsigned char*>(value);
+  impl_->bytes.insert(impl_->bytes.end(), begin, begin + size);
+#endif
+}
+
+std::array<unsigned char, 32> FullCudaCiSha256Builder::finish() {
+  if (!impl_ || !impl_->active) {
+    throw std::runtime_error("SHA-256 builder is not active");
+  }
+  std::array<unsigned char, 32> digest{};
+#ifdef FASTKPC_USE_OPENSSL_SHA256
+  unsigned int size = 0U;
+  if (EVP_DigestFinal_ex(impl_->context, digest.data(), &size) != 1 ||
+      size != digest.size()) {
+    throw std::runtime_error("OpenSSL SHA-256 finalization failed");
+  }
+#else
+  const std::string input = impl_->bytes.empty() ? std::string() :
+    std::string(reinterpret_cast<const char*>(impl_->bytes.data()),
+                impl_->bytes.size());
+  const std::array<std::uint8_t, 32> portable = sha256_bytes(input);
+  std::copy(portable.begin(), portable.end(), digest.begin());
+#endif
+  impl_->active = false;
+  return digest;
+}
+
 std::string full_cuda_ci_sha256_utf8(const std::string& value) {
 #ifdef FASTKPC_USE_OPENSSL_SHA256
   return full_cuda_ci_sha256_bytes(value.data(), value.size());
@@ -881,18 +964,23 @@ std::string full_cuda_ci_sha256_bytes(const void* value, std::size_t size) {
   if (SHA256(input, size, digest.data()) == nullptr) {
     throw std::runtime_error("OpenSSL SHA-256 failed");
   }
-  static constexpr char hexadecimal[] = "0123456789abcdef";
-  std::string output(SHA256_DIGEST_LENGTH * 2U, '0');
-  for (std::size_t index = 0; index < digest.size(); ++index) {
-    output[index * 2U] = hexadecimal[digest[index] >> 4U];
-    output[index * 2U + 1U] = hexadecimal[digest[index] & 0x0fU];
-  }
-  return output;
+  return full_cuda_ci_sha256_hex(digest);
 #else
   const auto* input = static_cast<const char*>(value);
   return full_cuda_ci_sha256_utf8(
     size == 0U ? std::string() : std::string(input, size));
 #endif
+}
+
+std::string full_cuda_ci_sha256_hex(
+    const std::array<unsigned char, 32>& digest) {
+  static constexpr char hexadecimal[] = "0123456789abcdef";
+  std::string output(digest.size() * 2U, '0');
+  for (std::size_t index = 0; index < digest.size(); ++index) {
+    output[index * 2U] = hexadecimal[digest[index] >> 4U];
+    output[index * 2U + 1U] = hexadecimal[digest[index] & 0x0fU];
+  }
+  return output;
 }
 
 const char* full_cuda_ci_sha256_backend() {

@@ -853,7 +853,8 @@ void validate_request(const FullCudaCiMethodBatchRequest& request,
   const bool permutation = request.ci_method == "dcc.perm" ||
     request.ci_method == "hsic.perm";
   if (permutation) {
-    if (request.permutation_replicates < 1) {
+    if (request.permutation_replicates < 1 ||
+        !request.permutation_table.sealed()) {
       throw std::runtime_error("strict permutation CI requires replicates");
     }
     const std::size_t expected = checked_multiply(
@@ -861,21 +862,58 @@ void validate_request(const FullCudaCiMethodBatchRequest& request,
                        static_cast<std::size_t>(request.permutation_replicates),
                        "strict CI permutation pairs"),
       static_cast<std::size_t>(batch.n), "strict CI permutation rows");
-    if (request.permutations.size() != expected) {
+    if (request.permutation_table.size() != expected) {
       throw std::runtime_error("strict CI permutation table size mismatch");
     }
-    for (int index : request.permutations) {
-      if (index < 0 || index >= batch.n) {
-        throw std::runtime_error("strict CI permutation index is invalid");
-      }
-    }
   } else if (request.permutation_replicates != 0 ||
-             !request.permutations.empty()) {
+             request.permutation_table.sealed() ||
+             request.permutation_table.size() != 0U) {
     throw std::runtime_error("HSIC gamma received permutation metadata");
   }
 }
 
 }  // namespace
+
+SealedPermutationTableHandle::SealedPermutationTableHandle(
+    SealedPermutationTableHandle&& other) noexcept
+    : values_(std::move(other.values_)),
+      sha256_(other.sha256_),
+      sealed_(other.sealed_) {
+  other.sha256_.fill(0U);
+  other.sealed_ = false;
+}
+
+SealedPermutationTableHandle& SealedPermutationTableHandle::operator=(
+    SealedPermutationTableHandle&& other) noexcept {
+  if (this == &other) return *this;
+  values_ = std::move(other.values_);
+  sha256_ = other.sha256_;
+  sealed_ = other.sealed_;
+  other.sha256_.fill(0U);
+  other.sealed_ = false;
+  return *this;
+}
+
+const int* SealedPermutationTableHandle::data() const noexcept {
+  return values_.empty() ? nullptr : values_.data();
+}
+
+std::size_t SealedPermutationTableHandle::size() const noexcept {
+  return values_.size();
+}
+
+std::size_t SealedPermutationTableHandle::byte_size() const noexcept {
+  return values_.size() * sizeof(int);
+}
+
+const std::array<unsigned char, 32>&
+SealedPermutationTableHandle::sha256() const noexcept {
+  return sha256_;
+}
+
+bool SealedPermutationTableHandle::sealed() const noexcept {
+  return sealed_;
+}
 
 class FullCudaCiMethodResidualCache {
  public:
@@ -1333,9 +1371,9 @@ std::string full_cuda_ci_method_batch_request_identity(
     const FullCudaCiMethodBatchRequest& request,
     const std::vector<std::string>& target_keys,
     int n) {
-  const std::string permutation_sha = full_cuda_ci_sha256_bytes(
-    request.permutations.empty() ? nullptr : request.permutations.data(),
-    request.permutations.size() * sizeof(int));
+  const std::string permutation_sha = request.permutation_table.sealed() ?
+    full_cuda_ci_sha256_hex(request.permutation_table.sha256()) :
+    full_cuda_ci_sha256_bytes(nullptr, 0U);
   std::ostringstream payload;
   payload << "schema=" << kFullCudaCiMethodBatchRequestSchemaVersion << "\n"
           << "prepared=" << request.expected_prepared_s_key_sha256 << "\n"
@@ -1418,6 +1456,8 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   diagnostics.request_identity_validation_host_ms =
     identity_validation_host_ms;
   diagnostics.request_identity_authenticated = true;
+  diagnostics.permutation_attestation_authenticated =
+    request.ci_method == "hsic.gamma" || request.permutation_table.sealed();
   diagnostics.prepared_identity_authenticated = true;
 
   std::vector<int> component_targets;
@@ -1593,7 +1633,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
     const std::size_t record_bytes =
       sizeof(DeviceMethodRecord) * pair_count;
     const std::size_t permutation_bytes =
-      sizeof(int) * request.permutations.size();
+      request.permutation_table.byte_size();
     DeviceBuffer& d_component_targets = active_context->component_targets_;
     DeviceBuffer& d_left_components = active_context->left_components_;
     DeviceBuffer& d_right_components = active_context->right_components_;
@@ -1625,12 +1665,12 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       cudaMemcpyHostToDevice, stream.get()),
       "copy strict CI logical IDs");
 
-    if (!request.permutations.empty()) {
+    if (request.permutation_table.size() != 0U) {
       active_context->ensure(&d_permutations, permutation_bytes);
       ++diagnostics.metadata_h2d_count;
       diagnostics.metadata_h2d_bytes += permutation_bytes;
       check_cuda(cudaMemcpyAsync(
-        d_permutations.get(), request.permutations.data(),
+        d_permutations.get(), request.permutation_table.data(),
         permutation_bytes, cudaMemcpyHostToDevice, stream.get()),
         "copy strict CI permutations");
     }

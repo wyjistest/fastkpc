@@ -47,12 +47,13 @@ same_result <- function(left, right) {
     identical(left$tasks, right$tasks)
 }
 
-run_candidate <- function(data, pipeline) {
+run_candidate <- function(data, pipeline, ci_method) {
   full_cuda_ci_one_call_cache_control_native("reset")
   do.call(
     Sys.setenv,
     setNames(list(if (pipeline) "1" else "0"), pipeline_environment)
   )
+  if (ci_method %in% c("dcc.perm", "hsic.perm")) set.seed(707)
   precision_run_skeleton_full_cuda_native(
     data = data,
     alpha = 0.1,
@@ -60,7 +61,14 @@ run_candidate <- function(data, pipeline) {
     index = 1,
     numCol = 35L,
     trace_level = "logical",
-    compatible_cuda_strict = TRUE
+    compatible_cuda_strict = TRUE,
+    ci_method = ci_method,
+    hsic_params = list(sig = 1),
+    permutation_params = list(
+      replicates = 100L,
+      seed = 707L,
+      include_observed = TRUE
+    )
   )
 }
 
@@ -74,59 +82,69 @@ data <- sapply(seq_len(p), function(column) {
 colnames(data) <- paste0("v", seq_len(p))
 
 before <- resource_snapshot()
-baseline <- run_candidate(data, FALSE)
-candidate <- run_candidate(data, TRUE)
+total_windows <- 0L
+total_overlap_ms <- 0
+total_wait_ms <- 0
+for (ci_method in c("dcc.gamma", "hsic.gamma", "dcc.perm", "hsic.perm")) {
+  baseline <- run_candidate(data, FALSE, ci_method)
+  candidate <- run_candidate(data, TRUE, ci_method)
+  summary <- candidate$summary
+
+  assert_true(
+    same_result(baseline, candidate),
+    paste(ci_method, "setup/optimizer pipeline changed one-call output bits")
+  )
+  assert_true(
+    !isTRUE(baseline$summary$setup_optimizer_pipeline_enabled) &&
+      baseline$summary$setup_optimizer_pipeline_window_count == 0L &&
+      baseline$summary$setup_optimizer_pipeline_peak_pending_count == 0L &&
+      baseline$summary$setup_optimizer_pipeline_producer_delay_us == 0L &&
+      baseline$summary$setup_optimizer_pipeline_producer_delay_count == 0L &&
+      baseline$summary$setup_optimizer_pipeline_producer_delay_ms == 0 &&
+      baseline$summary$setup_optimizer_pipeline_prepare_ms == 0 &&
+      baseline$summary$setup_optimizer_pipeline_device_prepare_ms == 0 &&
+      baseline$summary$setup_optimizer_pipeline_wait_ms == 0 &&
+      baseline$summary$setup_optimizer_pipeline_overlap_ms == 0 &&
+      baseline$summary$setup_optimizer_pipeline_level_wall_ms == 0,
+    paste(ci_method, "disabled setup/optimizer pipeline performed work")
+  )
+  assert_true(
+    isTRUE(summary$setup_optimizer_pipeline_enabled) &&
+      summary$setup_optimizer_pipeline_window_count >= 2L &&
+      summary$setup_optimizer_pipeline_window_count ==
+        summary$cuda_single_penalty_optimizer_call_count +
+          summary$cuda_multi_penalty_optimizer_call_count &&
+      summary$setup_optimizer_pipeline_peak_pending_count == 1L &&
+      summary$setup_optimizer_pipeline_producer_delay_us == 0L &&
+      summary$setup_optimizer_pipeline_producer_delay_count == 0L &&
+      summary$setup_optimizer_pipeline_producer_delay_ms == 0 &&
+      summary$setup_optimizer_pipeline_prepare_ms > 0 &&
+      summary$setup_optimizer_pipeline_device_prepare_ms > 0 &&
+      summary$setup_optimizer_pipeline_wait_ms >= 0 &&
+      summary$setup_optimizer_pipeline_overlap_ms >= 0 &&
+      summary$setup_optimizer_pipeline_level_wall_ms > 0,
+    paste(ci_method, "setup/optimizer pipeline receipt is malformed")
+  )
+  assert_true(
+    summary$cuda_multi_penalty_prepared_build_count ==
+        summary$cuda_multi_penalty_prepared_release_count &&
+      summary$cuda_multi_penalty_optimizer_setup_count ==
+        baseline$summary$cuda_multi_penalty_optimizer_setup_count &&
+      summary$cuda_multi_penalty_optimizer_iteration_sum ==
+        baseline$summary$cuda_multi_penalty_optimizer_iteration_sum &&
+      summary$cuda_multi_penalty_objective_call_sum ==
+        baseline$summary$cuda_multi_penalty_objective_call_sum &&
+      summary$cuda_multi_penalty_step_halving_sum ==
+        baseline$summary$cuda_multi_penalty_step_halving_sum,
+    paste(ci_method, "setup/optimizer pipeline changed optimizer work")
+  )
+  total_windows <- total_windows +
+    summary$setup_optimizer_pipeline_window_count
+  total_overlap_ms <- total_overlap_ms +
+    summary$setup_optimizer_pipeline_overlap_ms
+  total_wait_ms <- total_wait_ms + summary$setup_optimizer_pipeline_wait_ms
+}
 after <- resource_snapshot()
-
-assert_true(
-  same_result(baseline, candidate),
-  "setup/optimizer pipeline changed strict one-call output bits"
-)
-assert_true(
-  !isTRUE(baseline$summary$setup_optimizer_pipeline_enabled) &&
-    baseline$summary$setup_optimizer_pipeline_window_count == 0L &&
-    baseline$summary$setup_optimizer_pipeline_peak_pending_count == 0L &&
-    baseline$summary$setup_optimizer_pipeline_producer_delay_us == 0L &&
-    baseline$summary$setup_optimizer_pipeline_producer_delay_count == 0L &&
-    baseline$summary$setup_optimizer_pipeline_producer_delay_ms == 0 &&
-    baseline$summary$setup_optimizer_pipeline_prepare_ms == 0 &&
-    baseline$summary$setup_optimizer_pipeline_device_prepare_ms == 0 &&
-    baseline$summary$setup_optimizer_pipeline_wait_ms == 0 &&
-    baseline$summary$setup_optimizer_pipeline_overlap_ms == 0 &&
-    baseline$summary$setup_optimizer_pipeline_level_wall_ms == 0,
-  "disabled setup/optimizer pipeline performed pipeline work"
-)
-
-summary <- candidate$summary
-assert_true(
-  isTRUE(summary$setup_optimizer_pipeline_enabled) &&
-    summary$setup_optimizer_pipeline_window_count >= 2L &&
-    summary$setup_optimizer_pipeline_window_count ==
-      summary$cuda_single_penalty_optimizer_call_count +
-        summary$cuda_multi_penalty_optimizer_call_count &&
-    summary$setup_optimizer_pipeline_peak_pending_count == 1L &&
-    summary$setup_optimizer_pipeline_producer_delay_us == 0L &&
-    summary$setup_optimizer_pipeline_producer_delay_count == 0L &&
-    summary$setup_optimizer_pipeline_producer_delay_ms == 0 &&
-    summary$setup_optimizer_pipeline_prepare_ms > 0 &&
-    summary$setup_optimizer_pipeline_device_prepare_ms > 0 &&
-    summary$setup_optimizer_pipeline_wait_ms >= 0 &&
-    summary$setup_optimizer_pipeline_overlap_ms >= 0 &&
-    summary$setup_optimizer_pipeline_level_wall_ms > 0,
-  "setup/optimizer pipeline receipt is malformed"
-)
-assert_true(
-  summary$cuda_multi_penalty_prepared_build_count ==
-      summary$cuda_multi_penalty_prepared_release_count &&
-    summary$cuda_multi_penalty_optimizer_setup_count > 0 &&
-    summary$cuda_multi_penalty_optimizer_iteration_sum ==
-      baseline$summary$cuda_multi_penalty_optimizer_iteration_sum &&
-    summary$cuda_multi_penalty_objective_call_sum ==
-      baseline$summary$cuda_multi_penalty_objective_call_sum &&
-    summary$cuda_multi_penalty_step_halving_sum ==
-      baseline$summary$cuda_multi_penalty_step_halving_sum,
-  "setup/optimizer pipeline changed optimizer work or lifecycle"
-)
 
 active_fields <- grep("_active_count$", names(before), value = TRUE)
 assert_true(
@@ -137,10 +155,10 @@ assert_true(
 )
 
 cat(
-  "PASS Phase 10 setup/optimizer pipeline; windows=",
-  summary$setup_optimizer_pipeline_window_count,
-  " overlap_ms=", summary$setup_optimizer_pipeline_overlap_ms,
-  " wait_ms=", summary$setup_optimizer_pipeline_wait_ms,
+  "PASS setup/optimizer pipeline across all CI methods; windows=",
+  total_windows,
+  " overlap_ms=", total_overlap_ms,
+  " wait_ms=", total_wait_ms,
   "\n",
   sep = ""
 )

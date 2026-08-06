@@ -180,7 +180,11 @@ for (method in c("dcc.perm", "hsic.perm")) {
   assert_true(
     identical(summary$sha256_backend, "openssl-sha256") &&
       summary$method_request_identity_build_host_ms >= 0 &&
-      summary$method_request_identity_validation_host_ms >= 0,
+      summary$method_request_identity_validation_host_ms >= 0 &&
+      summary$method_permutation_attestation_count ==
+        summary$frontier_batch_count &&
+      summary$method_permutation_payload_validation_scan_count == 0L &&
+      summary$method_permutation_payload_validation_scan_bytes == 0,
     paste(method, "accelerated request authentication changed")
   )
 }

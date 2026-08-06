@@ -3848,6 +3848,29 @@ extern "C" SEXP C_full_cuda_ci_sha256_utf8(SEXP value_s) {
   END_RCPP
 }
 
+extern "C" SEXP C_full_cuda_ci_test_sha256_incremental_utf8(
+    SEXP value_s,
+    SEXP chunk_size_s) {
+  BEGIN_RCPP
+  Rcpp::CharacterVector value(value_s);
+  const int chunk_size = Rcpp::as<int>(chunk_size_s);
+  if (value.size() != 1 || value[0] == NA_STRING || chunk_size < 1) {
+    Rcpp::stop(
+      "incremental SHA-256 input requires one string and a positive chunk");
+  }
+  const std::string input = Rcpp::as<std::string>(value);
+  fastkpc::FullCudaCiSha256Builder builder;
+  builder.reset();
+  for (std::size_t offset = 0U; offset < input.size();) {
+    const std::size_t size = std::min(
+      static_cast<std::size_t>(chunk_size), input.size() - offset);
+    builder.update(input.data() + offset, size);
+    offset += size;
+  }
+  return Rcpp::wrap(fastkpc::full_cuda_ci_sha256_hex(builder.finish()));
+  END_RCPP
+}
+
 extern "C" SEXP C_full_cuda_ci_contract_identity(
     SEXP json_s,
     SEXP expected_name_s) {
@@ -13730,6 +13753,7 @@ extern "C" SEXP C_precision_run_skeleton_residual_provider_legacy_dcov_native(
 
 static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_sha256_utf8", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_sha256_utf8), 1},
+  {"C_full_cuda_ci_test_sha256_incremental_utf8", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_test_sha256_incremental_utf8), 2},
   {"C_full_cuda_ci_contract_identity", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_contract_identity), 2},
   {"C_full_cuda_ci_semantic_abi_info", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_semantic_abi_info), 0},
   {"C_full_cuda_ci_native_setup", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_setup), 1},

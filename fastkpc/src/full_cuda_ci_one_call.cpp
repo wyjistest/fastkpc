@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <future>
 #include <iomanip>
 #include <limits>
@@ -293,8 +294,109 @@ bool pcalg_task_less(const LayerCiTask& left, const LayerCiTask& right) {
     right.conditioning_set.begin(), right.conditioning_set.end());
 }
 
+}  // namespace
+
+struct PermutationTableBuilder::Impl {
+  std::vector<int> values;
+  FullCudaCiSha256Builder digest;
+  std::size_t committed = 0U;
+  std::exception_ptr deferred_digest_error;
+  bool active = false;
+};
+
+PermutationTableBuilder::PermutationTableBuilder() : impl_(new Impl()) {}
+PermutationTableBuilder::~PermutationTableBuilder() = default;
+PermutationTableBuilder::PermutationTableBuilder(
+    PermutationTableBuilder&&) noexcept = default;
+PermutationTableBuilder& PermutationTableBuilder::operator=(
+    PermutationTableBuilder&&) noexcept = default;
+
+void PermutationTableBuilder::reset(std::size_t size) {
+  require(impl_ != nullptr, "permutation table builder has been moved");
+  impl_->values.resize(size);
+  impl_->committed = 0U;
+  impl_->deferred_digest_error = std::exception_ptr();
+  impl_->active = true;
+  try {
+    impl_->digest.reset();
+  } catch (...) {
+    impl_->deferred_digest_error = std::current_exception();
+  }
+}
+
+std::size_t PermutationTableBuilder::capacity() const noexcept {
+  return impl_ ? impl_->values.capacity() : 0U;
+}
+
+std::size_t PermutationTableBuilder::size() const noexcept {
+  return impl_ ? impl_->values.size() : 0U;
+}
+
+void PermutationTableBuilder::append_row(
+    const int* values,
+    std::size_t size) {
+  int* output = begin_row(size);
+  std::copy_n(values, size, output);
+  commit_row(output, size);
+}
+
+int* PermutationTableBuilder::begin_row(std::size_t size) {
+  require(impl_ != nullptr && impl_->active &&
+            impl_->committed <= impl_->values.size() &&
+            size <= impl_->values.size() - impl_->committed,
+          "permutation table builder row exceeds capacity");
+  return impl_->values.data() + impl_->committed;
+}
+
+void PermutationTableBuilder::commit_row(
+    const int* values,
+    std::size_t size) {
+  require(impl_ != nullptr && impl_->active &&
+            impl_->committed <= impl_->values.size() &&
+            values == impl_->values.data() + impl_->committed &&
+            size <= impl_->values.size() - impl_->committed,
+          "permutation table builder row identity changed");
+  if (!impl_->deferred_digest_error) {
+    try {
+      impl_->digest.update(values, size * sizeof(int));
+    } catch (...) {
+      impl_->deferred_digest_error = std::current_exception();
+    }
+  }
+  impl_->committed += size;
+}
+
+SealedPermutationTableHandle PermutationTableBuilder::seal() {
+  require(impl_ != nullptr && impl_->active &&
+            impl_->committed == impl_->values.size() &&
+            !impl_->values.empty(),
+          "permutation table builder is incomplete");
+  impl_->active = false;
+  if (impl_->deferred_digest_error) {
+    std::rethrow_exception(impl_->deferred_digest_error);
+  }
+  SealedPermutationTableHandle handle;
+  handle.values_ = std::move(impl_->values);
+  handle.sha256_ = impl_->digest.finish();
+  handle.sealed_ = true;
+  return handle;
+}
+
+void PermutationTableBuilder::reclaim(
+    SealedPermutationTableHandle&& handle) {
+  require(impl_ != nullptr && !impl_->active,
+          "permutation table builder is still active");
+  require(handle.sealed_, "cannot reclaim an unsealed permutation table");
+  impl_->values = std::move(handle.values_);
+  impl_->committed = 0U;
+  handle.sha256_.fill(0U);
+  handle.sealed_ = false;
+}
+
+namespace {
+
 struct LegacyRPermutationWorkspace {
-  std::vector<int> table;
+  PermutationTableBuilder table;
   std::vector<int> scratch;
   std::vector<unsigned int> rejection_masks;
   int table_growth_count = 0;
@@ -328,7 +430,7 @@ void make_legacy_r_permutation_table(
   if (workspace->table.capacity() < table_values) {
     workspace->table_growth_count += 1;
   }
-  workspace->table.resize(table_values);
+  workspace->table.reset(table_values);
   workspace->peak_table_values = std::max(
     workspace->peak_table_values, table_values);
   if (workspace->scratch.capacity() < static_cast<std::size_t>(n)) {
@@ -356,10 +458,8 @@ void make_legacy_r_permutation_table(
           std::swap(permutation[static_cast<std::size_t>(picked)],
                     permutation[static_cast<std::size_t>(remaining)]);
         }
-        std::copy(
-          permutation.begin(), permutation.end(), workspace->table.begin() +
-            (pair * replicate_count + static_cast<std::size_t>(replicate)) *
-              static_cast<std::size_t>(n));
+        workspace->table.append_row(
+          permutation.data(), static_cast<std::size_t>(n));
       }
       continue;
     }
@@ -371,9 +471,8 @@ void make_legacy_r_permutation_table(
       std::vector<int>& pool = workspace->scratch;
       std::iota(pool.begin(), pool.end(), 0);
       int remaining = n;
-      int* output = workspace->table.data() +
-        (pair * replicate_count + static_cast<std::size_t>(replicate)) *
-          static_cast<std::size_t>(n);
+      int* output = workspace->table.begin_row(
+        static_cast<std::size_t>(n));
       for (int index = 0; index < n; ++index) {
         int picked = 0;
         if (workspace->inline_r_index_active) {
@@ -397,6 +496,7 @@ void make_legacy_r_permutation_table(
         pool[static_cast<std::size_t>(picked)] =
           pool[static_cast<std::size_t>(remaining)];
       }
+      workspace->table.commit_row(output, static_cast<std::size_t>(n));
     }
   }
   workspace->inline_r_index_count += inline_index_count;
@@ -408,18 +508,13 @@ void make_method_permutation_table(
     int n,
     const LayerPlan& plan,
     const std::vector<int>& task_indices,
-    LegacyRPermutationWorkspace* workspace,
-    std::vector<int>* output) {
-  require(output != nullptr,
-          "method permutation output workspace is missing");
+    LegacyRPermutationWorkspace* workspace) {
   if (!is_permutation_method(method.ci_method)) {
-    output->clear();
     return;
   }
   (void)plan;
   make_legacy_r_permutation_table(
     method, n, task_indices.size(), workspace);
-  output->swap(workspace->table);
 }
 
 std::string dataset_key(const Rcpp::NumericMatrix& data) {
@@ -759,6 +854,9 @@ struct OneCallDiagnostics {
   double method_permutation_table_host_ms = 0.0;
   double method_request_identity_build_host_ms = 0.0;
   double method_request_identity_validation_host_ms = 0.0;
+  int method_permutation_payload_validation_scan_count = 0;
+  std::size_t method_permutation_payload_validation_scan_bytes = 0U;
+  int method_permutation_attestation_count = 0;
   std::string strict_hsic_gamma_residual_route = "stable-svd";
   std::string strict_permutation_residual_route = "stable-svd";
   bool method_permutation_inline_r_index_requested = false;
@@ -2256,7 +2354,14 @@ void accumulate_method_diagnostics(
   diagnostics->cuda_dcov_host_ms += value.total_host_ms;
   diagnostics->method_request_identity_validation_host_ms +=
     value.request_identity_validation_host_ms;
+  diagnostics->method_permutation_payload_validation_scan_count +=
+    value.permutation_payload_validation_scan_count;
+  diagnostics->method_permutation_payload_validation_scan_bytes +=
+    value.permutation_payload_validation_scan_bytes;
+  diagnostics->method_permutation_attestation_count +=
+    value.permutation_attestation_authenticated ? 1 : 0;
   require(value.request_identity_authenticated &&
+            value.permutation_attestation_authenticated &&
             value.prepared_identity_authenticated &&
             value.target_identity_authenticated &&
             value.residuals_device_resident &&
@@ -3911,11 +4016,11 @@ GroupResult execute_group(
       permutation_workspace->scratch_growth_count;
     make_method_permutation_table(
       method_options, context->n, plan, task_indices,
-      permutation_workspace, &method_request.permutations);
+      permutation_workspace);
     if (is_permutation_method(method_options.ci_method)) {
       diagnostics->method_permutation_table_build_count += 1;
       diagnostics->method_permutation_table_value_count +=
-        method_request.permutations.size();
+        permutation_workspace->table.size();
       diagnostics->method_permutation_table_host_ms +=
         elapsed_ms(permutation_started);
       diagnostics->method_permutation_table_growth_count +=
@@ -3931,6 +4036,9 @@ GroupResult execute_group(
         permutation_workspace->inline_r_draw_count;
     }
     const auto identity_started = std::chrono::steady_clock::now();
+    if (is_permutation_method(method_options.ci_method)) {
+      method_request.permutation_table = permutation_workspace->table.seal();
+    }
     method_request.request_identity_sha256 =
       full_cuda_ci_method_batch_request_identity(
         method_request, residual_keys, context->n);
@@ -3941,7 +4049,8 @@ GroupResult execute_group(
         context->fixed_sp, batch, method_request, method_residual_cache,
         method_execution_context);
     if (is_permutation_method(method_options.ci_method)) {
-      permutation_workspace->table.swap(method_request.permutations);
+      permutation_workspace->table.reclaim(
+        std::move(method_request.permutation_table));
     }
     accumulate_method_diagnostics(method_result.diagnostics, diagnostics);
     if (method_result.diagnostics.residual_cache_all_hit_batch_count > 0) {
@@ -4142,15 +4251,11 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     setup_optimizer_pipeline_policy_enabled();
   diagnostics.setup_optimizer_pipeline_producer_delay_us =
     setup_optimizer_pipeline_producer_delay_us();
-  require(!diagnostics.setup_optimizer_pipeline_enabled ||
-            method_options.ci_method == "dcc.gamma",
-          "setup/optimizer pipeline is restricted to dcc.gamma");
   require(diagnostics.setup_optimizer_pipeline_enabled ||
             diagnostics.setup_optimizer_pipeline_producer_delay_us == 0,
           "setup/optimizer producer delay requires the pipeline");
   const bool enable_fixed_sp_root_cache =
-    method_options.ci_method == "dcc.gamma" &&
-      fixed_sp_root_cache_policy_enabled();
+    fixed_sp_root_cache_policy_enabled();
   diagnostics.fixed_sp_root_cache_enabled = enable_fixed_sp_root_cache;
   diagnostics.cuda_multi_penalty_decomposition_trace_capacity_per_target =
     decomposition_trace_capacity_from_environment();
@@ -5294,6 +5399,13 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.method_request_identity_build_host_ms,
       Rcpp::Named("method_request_identity_validation_host_ms") =
         diagnostics.method_request_identity_validation_host_ms,
+      Rcpp::Named("method_permutation_payload_validation_scan_count") =
+        diagnostics.method_permutation_payload_validation_scan_count,
+      Rcpp::Named("method_permutation_payload_validation_scan_bytes") =
+        static_cast<double>(
+          diagnostics.method_permutation_payload_validation_scan_bytes),
+      Rcpp::Named("method_permutation_attestation_count") =
+        diagnostics.method_permutation_attestation_count,
       Rcpp::Named("sha256_backend") = full_cuda_ci_sha256_backend(),
       Rcpp::Named("strict_hsic_gamma_residual_route") =
         diagnostics.strict_hsic_gamma_residual_route,
