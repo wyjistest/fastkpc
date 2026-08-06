@@ -885,6 +885,9 @@ struct OneCallDiagnostics {
   int method_execution_context_reuse_count = 0;
   int method_execution_context_buffer_growth_count = 0;
   std::size_t method_execution_context_peak_device_bytes = 0U;
+  int method_preparation_submit_count = 0;
+  int method_finalization_count = 0;
+  int method_preparation_ticket_consumed_count = 0;
   int method_permutation_table_build_count = 0;
   int method_permutation_table_growth_count = 0;
   int method_permutation_scratch_growth_count = 0;
@@ -2466,6 +2469,11 @@ void accumulate_method_diagnostics(
   diagnostics->method_execution_context_peak_device_bytes = std::max(
     diagnostics->method_execution_context_peak_device_bytes,
     value.execution_context_device_bytes);
+  diagnostics->method_preparation_submit_count +=
+    value.preparation_submit_count;
+  diagnostics->method_finalization_count += value.finalization_count;
+  diagnostics->method_preparation_ticket_consumed_count +=
+    value.preparation_ticket_consumed ? 1 : 0;
   diagnostics->residual_d2h_bytes += value.residual_d2h_bytes;
   diagnostics->component_d2h_bytes += value.component_d2h_bytes;
   diagnostics->compact_result_d2h_bytes += value.compact_result_d2h_bytes;
@@ -2515,6 +2523,9 @@ void accumulate_method_diagnostics(
             value.residuals_device_resident &&
             value.compact_result_only_d2h &&
             value.caller_device_restored &&
+            value.preparation_submit_count == 1 &&
+            value.finalization_count == 1 &&
+            value.preparation_ticket_consumed &&
             value.residual_d2h_bytes == 0U &&
             value.component_d2h_bytes == 0U,
           "one-call strict CUDA CI method authority gate failed closed");
@@ -5608,6 +5619,12 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       Rcpp::Named("method_execution_context_peak_device_bytes") =
         static_cast<double>(
           diagnostics.method_execution_context_peak_device_bytes),
+      Rcpp::Named("method_preparation_submit_count") =
+        diagnostics.method_preparation_submit_count,
+      Rcpp::Named("method_finalization_count") =
+        diagnostics.method_finalization_count,
+      Rcpp::Named("method_preparation_ticket_consumed_count") =
+        diagnostics.method_preparation_ticket_consumed_count,
       Rcpp::Named("method_permutation_table_build_count") =
         diagnostics.method_permutation_table_build_count,
       Rcpp::Named("method_permutation_table_growth_count") =

@@ -65,6 +65,11 @@ for (method in c("hsic.gamma", "dcc.perm", "hsic.perm")) {
         summary$frontier_batch_count &&
       summary$method_combined_identity_authentication_count ==
         summary$frontier_batch_count &&
+      summary$method_preparation_submit_count ==
+        summary$frontier_batch_count &&
+      summary$method_finalization_count == summary$frontier_batch_count &&
+      summary$method_preparation_ticket_consumed_count ==
+        summary$frontier_batch_count &&
       summary$method_static_identity_validation_host_ms >= 0 &&
       summary$method_permutation_attestation_validation_host_ms >= 0 &&
       summary$method_combined_identity_validation_host_ms >= 0 &&
@@ -116,10 +121,26 @@ header <- paste(
   readLines("fastkpc/src/cuda/full_cuda_ci_method_batch.hpp", warn = FALSE),
   collapse = "\n"
 )
-implementation <- paste(
-  readLines("fastkpc/src/cuda/full_cuda_ci_method_batch.cu", warn = FALSE),
-  collapse = "\n"
+implementation_lines <- readLines(
+  "fastkpc/src/cuda/full_cuda_ci_method_batch.cu", warn = FALSE
 )
+implementation <- paste(implementation_lines, collapse = "\n")
+submit_start <- grep(
+  "^MethodPreparationTicket submit_method_preparation\\(",
+  implementation_lines
+)
+finalize_start <- grep(
+  "^FullCudaCiMethodBatchResult finalize_method_from_permutation\\(",
+  implementation_lines
+)
+submit_body <- if (length(submit_start) == 1L &&
+                   length(finalize_start) == 1L &&
+                   submit_start < finalize_start) {
+  paste(implementation_lines[submit_start:(finalize_start - 1L)],
+        collapse = "\n")
+} else {
+  ""
+}
 assert_true(
   grepl("full-cuda-ci-method-static-request-identity-v1", header,
         fixed = TRUE) &&
@@ -127,6 +148,15 @@ assert_true(
           fixed = TRUE) &&
     grepl("full-cuda-ci-method-combined-request-identity-v1", header,
           fixed = TRUE) &&
+    grepl("MethodPreparationTicket(const MethodPreparationTicket&) = delete",
+          header, fixed = TRUE) &&
+    grepl("const FullCudaCiMethodStaticRequest& request", header,
+          fixed = TRUE) &&
+    grepl("finalize_method_from_permutation", header, fixed = TRUE) &&
+    nzchar(submit_body) &&
+    !grepl("permutation_table", submit_body, fixed = TRUE) &&
+    !grepl("PermutationAttestation", submit_body, fixed = TRUE) &&
+    !grepl("CombinedRequestIdentity", submit_body, fixed = TRUE) &&
     grepl("planned_route[", implementation, fixed = TRUE),
   "layered identity schemas or planned-route binding changed"
 )

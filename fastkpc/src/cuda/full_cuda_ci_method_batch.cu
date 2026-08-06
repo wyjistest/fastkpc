@@ -839,8 +839,8 @@ float elapsed_event_ms(cudaEvent_t start, cudaEvent_t stop) {
   return elapsed;
 }
 
-void validate_request(const FullCudaCiMethodBatchRequest& request,
-                      const FixedSpBatchHostView& batch) {
+void validate_static_request(const FullCudaCiMethodStaticRequest& request,
+                             const FixedSpBatchHostView& batch) {
   if (request.ci_method != "dcc.perm" &&
       request.ci_method != "hsic.gamma" &&
       request.ci_method != "hsic.perm") {
@@ -871,8 +871,22 @@ void validate_request(const FullCudaCiMethodBatchRequest& request,
   const bool permutation = request.ci_method == "dcc.perm" ||
     request.ci_method == "hsic.perm";
   if (permutation) {
-    if (request.permutation_replicates < 1 ||
-        !request.permutation_table.sealed()) {
+    if (request.permutation_replicates < 1) {
+      throw std::runtime_error("strict permutation CI requires replicates");
+    }
+  } else if (request.permutation_replicates != 0) {
+    throw std::runtime_error("HSIC gamma received permutation metadata");
+  }
+}
+
+void validate_permutation_request(
+    const FullCudaCiMethodStaticRequest& request,
+    const SealedPermutationTableHandle& permutation_table,
+    const FixedSpBatchHostView& batch) {
+  const bool permutation = request.ci_method == "dcc.perm" ||
+    request.ci_method == "hsic.perm";
+  if (permutation) {
+    if (!permutation_table.sealed()) {
       throw std::runtime_error("strict permutation CI requires replicates");
     }
     const std::size_t expected = checked_multiply(
@@ -880,14 +894,21 @@ void validate_request(const FullCudaCiMethodBatchRequest& request,
                        static_cast<std::size_t>(request.permutation_replicates),
                        "strict CI permutation pairs"),
       static_cast<std::size_t>(batch.n), "strict CI permutation rows");
-    if (request.permutation_table.size() != expected) {
+    if (permutation_table.size() != expected) {
       throw std::runtime_error("strict CI permutation table size mismatch");
     }
-  } else if (request.permutation_replicates != 0 ||
-             request.permutation_table.sealed() ||
-             request.permutation_table.size() != 0U) {
+  } else if (permutation_table.sealed() ||
+             permutation_table.size() != 0U) {
     throw std::runtime_error("HSIC gamma received permutation metadata");
   }
+}
+
+void validate_request(const FullCudaCiMethodBatchRequest& request,
+                      const FixedSpBatchHostView& batch) {
+  const FullCudaCiMethodStaticRequest static_request =
+    full_cuda_ci_method_static_request(request);
+  validate_static_request(static_request, batch);
+  validate_permutation_request(static_request, request.permutation_table, batch);
 }
 
 }  // namespace
@@ -1219,7 +1240,7 @@ class FullCudaCiMethodExecutionContext {
     initialize_hsic_component_cache();
   }
 
-  void validate(const FullCudaCiMethodBatchRequest& request, int n) const {
+  void validate(const FullCudaCiMethodStaticRequest& request, int n) const {
     if (n != n_ || request.ci_method != ci_method_ ||
         request.num_col != num_col_ ||
         request.permutation_replicates != permutation_replicates_) {
@@ -1431,6 +1452,67 @@ create_full_cuda_ci_method_execution_context(
     n, ci_method, num_col, permutation_replicates, device_id);
 }
 
+struct MethodPreparationTicket::Impl {
+  std::chrono::steady_clock::time_point call_started;
+  FullCudaCiMethodStaticRequest request;
+  FixedSpBatchHostView batch;
+  std::shared_ptr<PreparedSGpuHandle> prepared_s;
+  std::shared_ptr<FullCudaCiMethodResidualCache> residual_cache;
+  std::shared_ptr<FullCudaCiMethodExecutionContext> active_context;
+  FullCudaCiMethodBatchResult result;
+  std::shared_ptr<DeviceResidualBatch> residual_token;
+  cudaEvent_t registered_completion = nullptr;
+  cudaEvent_t preparation_completion_event = nullptr;
+  std::vector<FixedSpRoute> executed_routes;
+  std::vector<FixedSpStatus> solver_statuses;
+  std::vector<std::size_t> method_buffer_bytes;
+  std::size_t component_count = 0U;
+  std::size_t pair_count = 0U;
+  std::size_t cells = 0U;
+  std::size_t component_target_bytes = 0U;
+  std::size_t component_index_bytes = 0U;
+  std::size_t logical_id_bytes = 0U;
+  std::size_t record_bytes = 0U;
+  int context_growth_before = 0;
+  int caller_device = -1;
+  bool hsic_component_cache = false;
+  bool finalized = false;
+
+  void cleanup_noexcept() noexcept {
+    if (residual_token) {
+      try {
+        release_device_residual(residual_token);
+      } catch (...) {
+      }
+      try {
+        free_device_residual(&residual_token);
+      } catch (...) {
+      }
+    }
+    registered_completion = nullptr;
+    if (caller_device >= 0) cudaSetDevice(caller_device);
+    finalized = true;
+  }
+};
+
+MethodPreparationTicket::~MethodPreparationTicket() {
+  if (impl_ && !impl_->finalized) impl_->cleanup_noexcept();
+}
+
+MethodPreparationTicket::MethodPreparationTicket(
+    MethodPreparationTicket&&) noexcept = default;
+MethodPreparationTicket& MethodPreparationTicket::operator=(
+    MethodPreparationTicket&& other) noexcept {
+  if (this == &other) return *this;
+  if (impl_ && !impl_->finalized) impl_->cleanup_noexcept();
+  impl_ = std::move(other.impl_);
+  return *this;
+}
+
+bool MethodPreparationTicket::valid() const noexcept {
+  return impl_ != nullptr && !impl_->finalized;
+}
+
 std::vector<int> full_cuda_ci_method_seeded_permutation_table(
     const std::string& ci_method,
     int n,
@@ -1470,8 +1552,26 @@ std::vector<int> full_cuda_ci_method_seeded_permutation_table(
   return table;
 }
 
+FullCudaCiMethodStaticRequest full_cuda_ci_method_static_request(
+    const FullCudaCiMethodBatchRequest& request) {
+  FullCudaCiMethodStaticRequest output;
+  output.expected_prepared_s_key_sha256 =
+    request.expected_prepared_s_key_sha256;
+  output.identity = request.static_identity;
+  output.ci_method = request.ci_method;
+  output.pairs = request.pairs;
+  output.alpha = request.alpha;
+  output.index = request.index;
+  output.num_col = request.num_col;
+  output.hsic_sig = request.hsic_sig;
+  output.permutation_replicates = request.permutation_replicates;
+  output.permutation_include_observed =
+    request.permutation_include_observed;
+  return output;
+}
+
 StaticRequestIdentity full_cuda_ci_method_static_request_identity(
-    const FullCudaCiMethodBatchRequest& request,
+    const FullCudaCiMethodStaticRequest& request,
     const std::vector<std::string>& target_keys,
     const std::vector<FixedSpRoute>& planned_routes,
     int n) {
@@ -1511,23 +1611,36 @@ StaticRequestIdentity full_cuda_ci_method_static_request_identity(
   return identity;
 }
 
-PermutationAttestation full_cuda_ci_method_permutation_attestation(
-    const FullCudaCiMethodBatchRequest& request) {
+StaticRequestIdentity full_cuda_ci_method_static_request_identity(
+    const FullCudaCiMethodBatchRequest& request,
+    const std::vector<std::string>& target_keys,
+    const std::vector<FixedSpRoute>& planned_routes,
+    int n) {
+  return full_cuda_ci_method_static_request_identity(
+    full_cuda_ci_method_static_request(request), target_keys, planned_routes,
+    n);
+}
+
+namespace {
+
+PermutationAttestation permutation_attestation_from_table(
+    const SealedPermutationTableHandle& permutation_table,
+    int permutation_replicates) {
   static_assert(sizeof(int) == 4U,
                 "strict permutation payload requires 32-bit int");
   PermutationAttestation attestation;
   attestation.schema_version =
     kFullCudaCiMethodPermutationAttestationSchemaVersion;
-  if (request.permutation_table.sealed()) {
-    attestation.payload_sha256 = request.permutation_table.sha256();
-    attestation.value_count = request.permutation_table.size();
-    attestation.byte_count = request.permutation_table.byte_size();
+  if (permutation_table.sealed()) {
+    attestation.payload_sha256 = permutation_table.sha256();
+    attestation.value_count = permutation_table.size();
+    attestation.byte_count = permutation_table.byte_size();
   } else {
     FullCudaCiSha256Builder empty_digest;
     empty_digest.reset();
     attestation.payload_sha256 = empty_digest.finish();
   }
-  attestation.replicates = request.permutation_replicates;
+  attestation.replicates = permutation_replicates;
   std::ostringstream payload;
   payload << "schema="
           << kFullCudaCiMethodPermutationAttestationSchemaVersion << "\n"
@@ -1539,6 +1652,14 @@ PermutationAttestation full_cuda_ci_method_permutation_attestation(
           << full_cuda_ci_sha256_hex(attestation.payload_sha256) << "\n";
   attestation.sha256 = full_cuda_ci_sha256_utf8(payload.str());
   return attestation;
+}
+
+}  // namespace
+
+PermutationAttestation full_cuda_ci_method_permutation_attestation(
+    const FullCudaCiMethodBatchRequest& request) {
+  return permutation_attestation_from_table(
+    request.permutation_table, request.permutation_replicates);
 }
 
 CombinedRequestIdentity full_cuda_ci_method_combined_request_identity(
@@ -1560,16 +1681,16 @@ CombinedRequestIdentity full_cuda_ci_method_combined_request_identity(
   return identity;
 }
 
-FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
+MethodPreparationTicket submit_method_preparation(
     const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
     const FixedSpBatchHostView& batch,
-    const FullCudaCiMethodBatchRequest& request,
+    const FullCudaCiMethodStaticRequest& request,
     const std::shared_ptr<FullCudaCiMethodResidualCache>& residual_cache,
     const std::shared_ptr<FullCudaCiMethodExecutionContext>&
       execution_context) {
   const auto call_started = std::chrono::steady_clock::now();
   strict_method_failure_checkpoint("before_validate_request");
-  validate_request(request, batch);
+  validate_static_request(request, batch);
   strict_method_failure_checkpoint("after_validate_request");
   std::shared_ptr<FullCudaCiMethodExecutionContext> active_context =
     execution_context;
@@ -1591,69 +1712,23 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   }
   strict_method_failure_checkpoint("after_prepared_identity_validate");
   const auto identity_started = std::chrono::steady_clock::now();
-  const auto static_identity_started = std::chrono::steady_clock::now();
   const StaticRequestIdentity actual_static_identity =
     full_cuda_ci_method_static_request_identity(
       request, batch.target_keys, batch.planned_routes, batch.n);
   const double static_identity_validation_host_ms =
     std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() - static_identity_started).count();
-  if (request.static_identity.schema_version !=
+      std::chrono::steady_clock::now() - identity_started).count();
+  if (request.identity.schema_version !=
         kFullCudaCiMethodStaticRequestIdentitySchemaVersion ||
-      !is_lower_sha256(request.static_identity.sha256) ||
-      request.static_identity.sha256 != actual_static_identity.sha256) {
+      !is_lower_sha256(request.identity.sha256) ||
+      request.identity.sha256 != actual_static_identity.sha256) {
     throw std::runtime_error("strict CI method static identity mismatch");
   }
   strict_method_failure_checkpoint("after_static_identity_validate");
 
-  const auto attestation_started = std::chrono::steady_clock::now();
-  const PermutationAttestation actual_attestation =
-    full_cuda_ci_method_permutation_attestation(request);
-  const double permutation_attestation_validation_host_ms =
-    std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() - attestation_started).count();
-  if (request.permutation_attestation.schema_version !=
-        kFullCudaCiMethodPermutationAttestationSchemaVersion ||
-      !is_lower_sha256(request.permutation_attestation.sha256) ||
-      request.permutation_attestation.payload_sha256 !=
-        actual_attestation.payload_sha256 ||
-      request.permutation_attestation.value_count !=
-        actual_attestation.value_count ||
-      request.permutation_attestation.byte_count !=
-        actual_attestation.byte_count ||
-      request.permutation_attestation.replicates !=
-        actual_attestation.replicates ||
-      request.permutation_attestation.sha256 != actual_attestation.sha256) {
-    throw std::runtime_error(
-      "strict CI method permutation attestation mismatch");
-  }
-  strict_method_failure_checkpoint("after_permutation_attestation_validate");
-
-  const auto combined_identity_started = std::chrono::steady_clock::now();
-  const CombinedRequestIdentity actual_combined_identity =
-    full_cuda_ci_method_combined_request_identity(
-      actual_static_identity, actual_attestation);
-  const double combined_identity_validation_host_ms =
-    std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() - combined_identity_started).count();
-  if (request.combined_identity.schema_version !=
-        kFullCudaCiMethodCombinedRequestIdentitySchemaVersion ||
-      !is_lower_sha256(request.combined_identity.sha256) ||
-      request.combined_identity.sha256 != actual_combined_identity.sha256) {
-    throw std::runtime_error("strict CI method combined identity mismatch");
-  }
-  strict_method_failure_checkpoint("after_combined_identity_validate");
-  const double identity_validation_host_ms =
-    std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() - identity_started).count();
-
   FullCudaCiMethodBatchResult result;
   result.schema_version = kFullCudaCiMethodBatchResultSchemaVersion;
-  result.static_request_identity_sha256 = request.static_identity.sha256;
-  result.permutation_attestation_sha256 =
-    request.permutation_attestation.sha256;
-  result.combined_request_identity_sha256 = request.combined_identity.sha256;
-  result.request_identity_sha256 = request.combined_identity.sha256;
+  result.static_request_identity_sha256 = request.identity.sha256;
   result.prepared_s_key_sha256 = prepared_info.prepared_s_key_sha256;
   result.target_keys = batch.target_keys;
   FullCudaCiMethodBatchDiagnostics& diagnostics = result.diagnostics;
@@ -1667,18 +1742,12 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   diagnostics.permutation_replicates = request.permutation_replicates;
   diagnostics.execution_context_call_count = 1;
   diagnostics.execution_context_reuse_count = context_reused ? 1 : 0;
+  diagnostics.preparation_submit_count = 1;
   diagnostics.static_identity_validation_host_ms =
     static_identity_validation_host_ms;
-  diagnostics.permutation_attestation_validation_host_ms =
-    permutation_attestation_validation_host_ms;
-  diagnostics.combined_identity_validation_host_ms =
-    combined_identity_validation_host_ms;
   diagnostics.request_identity_validation_host_ms =
-    identity_validation_host_ms;
+    static_identity_validation_host_ms;
   diagnostics.static_identity_authenticated = true;
-  diagnostics.request_identity_authenticated = true;
-  diagnostics.permutation_attestation_authenticated = true;
-  diagnostics.combined_identity_authenticated = true;
   diagnostics.prepared_identity_authenticated = true;
 
   std::vector<int> component_targets;
@@ -1855,14 +1924,11 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       sizeof(unsigned long long) * pair_count;
     const std::size_t record_bytes =
       sizeof(DeviceMethodRecord) * pair_count;
-    const std::size_t permutation_bytes =
-      request.permutation_table.byte_size();
     DeviceBuffer& d_component_targets = active_context->component_targets_;
     DeviceBuffer& d_left_components = active_context->left_components_;
     DeviceBuffer& d_right_components = active_context->right_components_;
     DeviceBuffer& d_logical_ids = active_context->logical_ids_;
     DeviceBuffer& d_records = active_context->records_;
-    DeviceBuffer& d_permutations = active_context->permutations_;
     active_context->ensure(&d_component_targets, component_target_bytes);
     active_context->ensure(&d_left_components, component_index_bytes);
     active_context->ensure(&d_right_components, component_index_bytes);
@@ -1888,20 +1954,6 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       cudaMemcpyHostToDevice, stream.get()),
       "copy strict CI logical IDs");
 
-    if (request.permutation_table.size() != 0U) {
-      active_context->ensure(&d_permutations, permutation_bytes);
-      ++diagnostics.metadata_h2d_count;
-      diagnostics.metadata_h2d_bytes += permutation_bytes;
-      const auto permutation_h2d_started = std::chrono::steady_clock::now();
-      check_cuda(cudaMemcpyAsync(
-        d_permutations.get(), request.permutation_table.data(),
-        permutation_bytes, cudaMemcpyHostToDevice, stream.get()),
-        "copy strict CI permutations");
-      diagnostics.permutation_h2d_submit_host_ms =
-        std::chrono::duration<double, std::milli>(
-          std::chrono::steady_clock::now() - permutation_h2d_started).count();
-    }
-
     check_cuda(cudaEventRecord(stage_start.get(), stream.get()),
                "record strict CI component start");
     std::vector<DeviceBuffer*> method_buffers;
@@ -1924,9 +1976,6 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       add_method_buffer(sizeof(int) * pair_count);
       double* centered = static_cast<double*>(method_buffers[0]->get());
       double* row_sums = static_cast<double*>(method_buffers[1]->get());
-      double* observed_sums =
-        static_cast<double*>(method_buffers[2]->get());
-      int* exceedances = static_cast<int*>(method_buffers[3]->get());
       const dim3 distance_grid(batch.n,
                                static_cast<unsigned int>(component_count));
       build_distance_components_kernel<<<distance_grid, kBlockSize, 0,
@@ -1950,38 +1999,6 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       strict_method_failure_checkpoint("after_component_wait");
       diagnostics.component_build_cuda_ms =
         elapsed_event_ms(stage_start.get(), stage_stop.get());
-
-      check_cuda(cudaEventRecord(stage_start.get(), stream.get()),
-                 "record strict dcc.perm pair start");
-      initialize_dcc_permutation_pairs_kernel<<<
-        static_cast<unsigned int>(pair_count), kBlockSize, 0, stream.get()>>>(
-        centered,
-        static_cast<const int*>(d_left_components.get()),
-        static_cast<const int*>(d_right_components.get()),
-        batch.n, static_cast<int>(pair_count),
-        request.permutation_include_observed ? 1 : 0,
-        observed_sums, exceedances);
-      const dim3 permutation_grid(
-        static_cast<unsigned int>(pair_count),
-        static_cast<unsigned int>(request.permutation_replicates));
-      evaluate_dcc_permutation_replicates_kernel<<<
-        permutation_grid, kBlockSize, 0, stream.get()>>>(
-        centered,
-        static_cast<const int*>(d_left_components.get()),
-        static_cast<const int*>(d_right_components.get()),
-        static_cast<const int*>(d_permutations.get()), observed_sums,
-        batch.n, static_cast<int>(pair_count),
-        request.permutation_replicates, exceedances);
-      const int finalize_blocks = static_cast<int>(
-        (pair_count + kBlockSize - 1U) / kBlockSize);
-      finalize_dcc_permutation_pairs_kernel<<<
-        finalize_blocks, kBlockSize, 0, stream.get()>>>(
-        static_cast<const unsigned long long*>(d_logical_ids.get()),
-        observed_sums, exceedances, batch.n,
-        static_cast<int>(pair_count), request.permutation_replicates,
-        request.permutation_include_observed ? 1 : 0,
-        static_cast<DeviceMethodRecord*>(d_records.get()));
-      check_cuda(cudaGetLastError(), "launch strict dcc.perm pairs");
     } else {
       const int max_rank = std::min(request.num_col, batch.n);
       const std::size_t factor_values = checked_multiply(
@@ -2130,52 +2147,240 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       strict_method_failure_checkpoint("after_component_wait");
       diagnostics.component_build_cuda_ms =
         elapsed_event_ms(stage_start.get(), stage_stop.get());
+    }
+    MethodPreparationTicket ticket;
+    ticket.impl_.reset(new MethodPreparationTicket::Impl());
+    MethodPreparationTicket::Impl& state = *ticket.impl_;
+    state.call_started = call_started;
+    state.request = request;
+    state.batch = batch;
+    state.prepared_s = prepared_s;
+    state.residual_cache = residual_cache;
+    state.active_context = active_context;
+    state.result = std::move(result);
+    state.residual_token = std::move(residual_token);
+    state.registered_completion = registered_completion;
+    state.preparation_completion_event = stage_stop.get();
+    state.executed_routes = std::move(executed_routes);
+    state.solver_statuses = std::move(solver_statuses);
+    state.method_buffer_bytes = std::move(method_buffer_bytes);
+    state.component_count = component_count;
+    state.pair_count = pair_count;
+    state.cells = cells;
+    state.component_target_bytes = component_target_bytes;
+    state.component_index_bytes = component_index_bytes;
+    state.logical_id_bytes = logical_id_bytes;
+    state.record_bytes = record_bytes;
+    state.context_growth_before = context_growth_before;
+    state.caller_device = caller_device;
+    state.hsic_component_cache = hsic_component_cache;
+    return ticket;
+  } catch (...) {
+    if (residual_token) {
+      try {
+        release_device_residual(residual_token);
+      } catch (...) {
+      }
+      try {
+        free_device_residual(&residual_token);
+      } catch (...) {
+      }
+    }
+    (void)registered_completion;
+    cudaSetDevice(caller_device);
+    throw;
+  }
+}
 
-      check_cuda(cudaEventRecord(stage_start.get(), stream.get()),
-                 "record strict HSIC pair start");
-      if (request.permutation_replicates > 0) {
-        double* observed_statistics =
-          static_cast<double*>(method_buffers[9]->get());
-        int* exceedances = static_cast<int*>(method_buffers[10]->get());
+FullCudaCiMethodBatchResult finalize_method_from_permutation(
+    MethodPreparationTicket&& preparation,
+    const PermutationAttestation& permutation_attestation,
+    const CombinedRequestIdentity& combined_identity,
+    const SealedPermutationTableHandle& permutation_table) {
+  if (!preparation.valid()) {
+    throw std::runtime_error("strict CI method preparation ticket is invalid");
+  }
+  std::unique_ptr<MethodPreparationTicket::Impl> state =
+    std::move(preparation.impl_);
+  FullCudaCiMethodBatchDiagnostics& diagnostics = state->result.diagnostics;
+  try {
+    validate_permutation_request(
+      state->request, permutation_table, state->batch);
+
+    const auto attestation_started = std::chrono::steady_clock::now();
+    const PermutationAttestation actual_attestation =
+      permutation_attestation_from_table(
+        permutation_table, state->request.permutation_replicates);
+    diagnostics.permutation_attestation_validation_host_ms =
+      std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - attestation_started).count();
+    if (permutation_attestation.schema_version !=
+          kFullCudaCiMethodPermutationAttestationSchemaVersion ||
+        !is_lower_sha256(permutation_attestation.sha256) ||
+        permutation_attestation.payload_sha256 !=
+          actual_attestation.payload_sha256 ||
+        permutation_attestation.value_count != actual_attestation.value_count ||
+        permutation_attestation.byte_count != actual_attestation.byte_count ||
+        permutation_attestation.replicates != actual_attestation.replicates ||
+        permutation_attestation.sha256 != actual_attestation.sha256) {
+      throw std::runtime_error(
+        "strict CI method permutation attestation mismatch");
+    }
+    strict_method_failure_checkpoint(
+      "after_permutation_attestation_validate");
+
+    const auto combined_started = std::chrono::steady_clock::now();
+    const CombinedRequestIdentity actual_combined =
+      full_cuda_ci_method_combined_request_identity(
+        state->request.identity, actual_attestation);
+    diagnostics.combined_identity_validation_host_ms =
+      std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - combined_started).count();
+    if (combined_identity.schema_version !=
+          kFullCudaCiMethodCombinedRequestIdentitySchemaVersion ||
+        !is_lower_sha256(combined_identity.sha256) ||
+        combined_identity.sha256 != actual_combined.sha256) {
+      throw std::runtime_error("strict CI method combined identity mismatch");
+    }
+    strict_method_failure_checkpoint("after_combined_identity_validate");
+
+    diagnostics.request_identity_validation_host_ms +=
+      diagnostics.permutation_attestation_validation_host_ms +
+      diagnostics.combined_identity_validation_host_ms;
+    diagnostics.finalization_count = 1;
+    diagnostics.preparation_ticket_consumed = true;
+    diagnostics.permutation_attestation_authenticated = true;
+    diagnostics.combined_identity_authenticated = true;
+    diagnostics.request_identity_authenticated = true;
+    state->result.permutation_attestation_sha256 =
+      permutation_attestation.sha256;
+    state->result.combined_request_identity_sha256 = combined_identity.sha256;
+    state->result.request_identity_sha256 = combined_identity.sha256;
+
+    check_cuda(cudaSetDevice(state->active_context->device_id()),
+               "select strict CI finalization device");
+    CudaStream& stream = state->active_context->stream_;
+    CudaEvent& stage_start = state->active_context->stage_start_;
+    CudaEvent& stage_stop = state->active_context->stage_stop_;
+    CudaEvent& consumer_completion =
+      state->active_context->consumer_completion_;
+    DeviceBuffer& d_left_components =
+      state->active_context->left_components_;
+    DeviceBuffer& d_right_components =
+      state->active_context->right_components_;
+    DeviceBuffer& d_logical_ids = state->active_context->logical_ids_;
+    DeviceBuffer& d_records = state->active_context->records_;
+    DeviceBuffer& d_permutations = state->active_context->permutations_;
+    const std::size_t permutation_bytes = permutation_table.byte_size();
+    if (permutation_table.size() != 0U) {
+      state->active_context->ensure(&d_permutations, permutation_bytes);
+      diagnostics.metadata_h2d_count += 1;
+      diagnostics.metadata_h2d_bytes += permutation_bytes;
+      const auto permutation_h2d_started = std::chrono::steady_clock::now();
+      check_cuda(cudaMemcpyAsync(
+        d_permutations.get(), permutation_table.data(), permutation_bytes,
+        cudaMemcpyHostToDevice, stream.get()),
+        "copy strict CI permutations");
+      diagnostics.permutation_h2d_submit_host_ms =
+        std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - permutation_h2d_started).count();
+    }
+
+    check_cuda(cudaEventRecord(stage_start.get(), stream.get()),
+               "record strict CI pair start");
+    if (state->request.ci_method == "dcc.perm") {
+      double* centered = static_cast<double*>(
+        state->active_context->method_buffers_[0].get());
+      double* observed_sums = static_cast<double*>(
+        state->active_context->method_buffers_[2].get());
+      int* exceedances = static_cast<int*>(
+        state->active_context->method_buffers_[3].get());
+      initialize_dcc_permutation_pairs_kernel<<<
+        static_cast<unsigned int>(state->pair_count), kBlockSize, 0,
+        stream.get()>>>(
+        centered, static_cast<const int*>(d_left_components.get()),
+        static_cast<const int*>(d_right_components.get()), state->batch.n,
+        static_cast<int>(state->pair_count),
+        state->request.permutation_include_observed ? 1 : 0,
+        observed_sums, exceedances);
+      const dim3 permutation_grid(
+        static_cast<unsigned int>(state->pair_count),
+        static_cast<unsigned int>(state->request.permutation_replicates));
+      evaluate_dcc_permutation_replicates_kernel<<<
+        permutation_grid, kBlockSize, 0, stream.get()>>>(
+        centered, static_cast<const int*>(d_left_components.get()),
+        static_cast<const int*>(d_right_components.get()),
+        static_cast<const int*>(d_permutations.get()), observed_sums,
+        state->batch.n, static_cast<int>(state->pair_count),
+        state->request.permutation_replicates, exceedances);
+      const int finalize_blocks = static_cast<int>(
+        (state->pair_count + kBlockSize - 1U) / kBlockSize);
+      finalize_dcc_permutation_pairs_kernel<<<
+        finalize_blocks, kBlockSize, 0, stream.get()>>>(
+        static_cast<const unsigned long long*>(d_logical_ids.get()),
+        observed_sums, exceedances, state->batch.n,
+        static_cast<int>(state->pair_count),
+        state->request.permutation_replicates,
+        state->request.permutation_include_observed ? 1 : 0,
+        static_cast<DeviceMethodRecord*>(d_records.get()));
+      check_cuda(cudaGetLastError(), "launch strict dcc.perm pairs");
+    } else {
+      const int max_rank = std::min(state->request.num_col, state->batch.n);
+      const std::size_t shared_bytes = sizeof(double) *
+        static_cast<std::size_t>(max_rank) * max_rank;
+      double* factors = static_cast<double*>(
+        state->active_context->method_buffers_[0].get());
+      int* ranks = static_cast<int*>(
+        state->active_context->method_buffers_[6].get());
+      double* off_diagonal = static_cast<double*>(
+        state->active_context->method_buffers_[7].get());
+      double* self_moments = static_cast<double*>(
+        state->active_context->method_buffers_[8].get());
+      if (state->request.permutation_replicates > 0) {
+        double* observed_statistics = static_cast<double*>(
+          state->active_context->method_buffers_[9].get());
+        int* exceedances = static_cast<int*>(
+          state->active_context->method_buffers_[10].get());
         initialize_hsic_permutation_pairs_kernel<<<
-          static_cast<unsigned int>(pair_count), kBlockSize, shared_bytes,
-          stream.get()>>>(
-          factors, ranks,
-          static_cast<const int*>(d_left_components.get()),
-          static_cast<const int*>(d_right_components.get()),
-          batch.n, static_cast<int>(pair_count), max_rank,
-          request.permutation_include_observed ? 1 : 0,
+          static_cast<unsigned int>(state->pair_count), kBlockSize,
+          shared_bytes, stream.get()>>>(
+          factors, ranks, static_cast<const int*>(d_left_components.get()),
+          static_cast<const int*>(d_right_components.get()), state->batch.n,
+          static_cast<int>(state->pair_count), max_rank,
+          state->request.permutation_include_observed ? 1 : 0,
           observed_statistics, exceedances);
         const dim3 permutation_grid(
-          static_cast<unsigned int>(pair_count),
-          static_cast<unsigned int>(request.permutation_replicates));
+          static_cast<unsigned int>(state->pair_count),
+          static_cast<unsigned int>(state->request.permutation_replicates));
         evaluate_hsic_permutation_replicates_kernel<<<
           permutation_grid, kBlockSize, shared_bytes, stream.get()>>>(
-          factors, ranks,
-          static_cast<const int*>(d_left_components.get()),
+          factors, ranks, static_cast<const int*>(d_left_components.get()),
           static_cast<const int*>(d_right_components.get()),
-          static_cast<const int*>(d_permutations.get()),
-          observed_statistics, batch.n, static_cast<int>(pair_count),
-          max_rank, request.permutation_replicates, exceedances);
+          static_cast<const int*>(d_permutations.get()), observed_statistics,
+          state->batch.n, static_cast<int>(state->pair_count), max_rank,
+          state->request.permutation_replicates, exceedances);
         const int finalize_blocks = static_cast<int>(
-          (pair_count + kBlockSize - 1U) / kBlockSize);
+          (state->pair_count + kBlockSize - 1U) / kBlockSize);
         finalize_hsic_permutation_pairs_kernel<<<
           finalize_blocks, kBlockSize, 0, stream.get()>>>(
           static_cast<const unsigned long long*>(d_logical_ids.get()),
-          observed_statistics, exceedances, static_cast<int>(pair_count),
-          request.permutation_replicates,
-          request.permutation_include_observed ? 1 : 0,
+          observed_statistics, exceedances,
+          static_cast<int>(state->pair_count),
+          state->request.permutation_replicates,
+          state->request.permutation_include_observed ? 1 : 0,
           static_cast<DeviceMethodRecord*>(d_records.get()));
       } else {
         evaluate_hsic_kernel<<<
-          static_cast<unsigned int>(pair_count), kBlockSize, shared_bytes,
-          stream.get()>>>(
+          static_cast<unsigned int>(state->pair_count), kBlockSize,
+          shared_bytes, stream.get()>>>(
           factors, ranks, off_diagonal, self_moments,
           static_cast<const int*>(d_left_components.get()),
           static_cast<const int*>(d_right_components.get()),
           static_cast<const unsigned long long*>(d_logical_ids.get()),
-          nullptr, batch.n, static_cast<int>(pair_count), max_rank, 0,
-          request.permutation_include_observed ? 1 : 0, request.alpha,
+          nullptr, state->batch.n, static_cast<int>(state->pair_count),
+          max_rank, 0,
+          state->request.permutation_include_observed ? 1 : 0,
+          state->request.alpha,
           static_cast<DeviceMethodRecord*>(d_records.get()));
       }
       check_cuda(cudaGetLastError(), "launch strict HSIC pairs");
@@ -2192,18 +2397,18 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
     check_cuda(cudaEventRecord(stage_start.get(), stream.get()),
                "record strict CI compact start");
     std::vector<DeviceMethodRecord>& host_records =
-      active_context->host_records_;
-    host_records.resize(pair_count);
+      state->active_context->host_records_;
+    host_records.resize(state->pair_count);
     check_cuda(cudaMemcpyAsync(
-      host_records.data(), d_records.get(), record_bytes,
+      host_records.data(), d_records.get(), state->record_bytes,
       cudaMemcpyDeviceToHost, stream.get()),
       "copy strict CI compact records");
     check_cuda(cudaEventRecord(consumer_completion.get(), stream.get()),
                "record strict CI consumer completion");
-    if (residual_token) {
-      registered_completion = consumer_completion.get();
+    if (state->residual_token) {
+      state->registered_completion = consumer_completion.get();
       register_device_residual_consumer_event(
-        residual_token, registered_completion);
+        state->residual_token, state->registered_completion);
     }
     check_cuda(cudaEventRecord(stage_stop.get(), stream.get()),
                "record strict CI compact stop");
@@ -2214,13 +2419,14 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
     diagnostics.compact_d2h_cuda_ms =
       elapsed_event_ms(stage_start.get(), stage_stop.get());
     diagnostics.compact_result_d2h_count = 1;
-    diagnostics.compact_result_d2h_bytes = record_bytes;
+    diagnostics.compact_result_d2h_bytes = state->record_bytes;
     diagnostics.compact_result_only_d2h = true;
 
-    result.records.reserve(pair_count);
-    for (std::size_t pair = 0; pair < pair_count; ++pair) {
+    state->result.records.reserve(state->pair_count);
+    for (std::size_t pair = 0; pair < state->pair_count; ++pair) {
       const DeviceMethodRecord& source = host_records[pair];
-      if (source.logical_sequence_id != request.pairs[pair].logical_sequence_id ||
+      if (source.logical_sequence_id !=
+            state->request.pairs[pair].logical_sequence_id ||
           !std::isfinite(source.p_value) || source.p_value < 0.0 ||
           source.p_value > 1.0) {
         throw std::runtime_error("strict CI compact result is invalid");
@@ -2232,28 +2438,31 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       record.mean = source.mean;
       record.variance = source.variance;
       record.status = source.status;
-      const int left_target = request.pairs[pair].left_target_index;
-      const int right_target = request.pairs[pair].right_target_index;
+      const int left_target =
+        state->request.pairs[pair].left_target_index;
+      const int right_target =
+        state->request.pairs[pair].right_target_index;
       record.solver_route = std::string(fixed_sp_route_name(
-        executed_routes[static_cast<std::size_t>(left_target)])) +
+        state->executed_routes[static_cast<std::size_t>(left_target)])) +
         "+" + fixed_sp_route_name(
-          executed_routes[static_cast<std::size_t>(right_target)]);
-      result.records.push_back(std::move(record));
+          state->executed_routes[static_cast<std::size_t>(right_target)]);
+      state->result.records.push_back(std::move(record));
     }
 
-    std::size_t allocated = component_target_bytes +
-      2U * component_index_bytes + logical_id_bytes + record_bytes +
-      permutation_bytes;
-    for (std::size_t bytes : method_buffer_bytes) allocated += bytes;
+    std::size_t allocated = state->component_target_bytes +
+      2U * state->component_index_bytes + state->logical_id_bytes +
+      state->record_bytes + permutation_bytes;
+    for (std::size_t bytes : state->method_buffer_bytes) allocated += bytes;
     diagnostics.device_allocation_bytes = allocated;
     diagnostics.peak_device_allocation_bytes = allocated;
     diagnostics.execution_context_buffer_growth_count =
-      active_context->buffer_growth_count() - context_growth_before;
+      state->active_context->buffer_growth_count() -
+        state->context_growth_before;
     diagnostics.execution_context_device_bytes =
-      active_context->device_bytes();
-    if (hsic_component_cache) {
-      const std::size_t cached_component_bytes =
-        sizeof(double) * active_context->hsic_factor_stride() + sizeof(int);
+      state->active_context->device_bytes();
+    if (state->hsic_component_cache) {
+      const std::size_t cached_component_bytes = sizeof(double) *
+        state->active_context->hsic_factor_stride() + sizeof(int);
       if (diagnostics.component_cache_persistent_request_count !=
             diagnostics.component_cache_persistent_hit_count +
               diagnostics.component_cache_persistent_miss_count ||
@@ -2276,30 +2485,85 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
                "wait strict CI residual consumer completion");
     diagnostics.consumer_host_wait_count += 1;
     strict_method_failure_checkpoint("after_consumer_wait");
-    if (residual_token) {
-      release_device_residual(residual_token);
-      free_device_residual(&residual_token);
+    if (state->residual_token) {
+      release_device_residual(state->residual_token);
+      free_device_residual(&state->residual_token);
     }
-    registered_completion = nullptr;
-    check_cuda(cudaSetDevice(caller_device), "restore strict CI caller device");
+    state->registered_completion = nullptr;
+    check_cuda(cudaSetDevice(state->caller_device),
+               "restore strict CI caller device");
     diagnostics.caller_device_restored = true;
+    diagnostics.total_host_ms =
+      std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - state->call_started).count();
+    state->finalized = true;
+    return std::move(state->result);
   } catch (...) {
-    if (residual_token) {
-      try {
-        release_device_residual(residual_token);
-      } catch (...) {
-      }
-      try {
-        free_device_residual(&residual_token);
-      } catch (...) {
-      }
-    }
-    (void)registered_completion;
-    cudaSetDevice(caller_device);
+    state->cleanup_noexcept();
     throw;
   }
-  diagnostics.total_host_ms = std::chrono::duration<double, std::milli>(
-    std::chrono::steady_clock::now() - call_started).count();
+}
+
+FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
+    const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+    const FixedSpBatchHostView& batch,
+    const FullCudaCiMethodBatchRequest& request,
+    const std::shared_ptr<FullCudaCiMethodResidualCache>& residual_cache,
+    const std::shared_ptr<FullCudaCiMethodExecutionContext>&
+      execution_context) {
+  const auto call_started = std::chrono::steady_clock::now();
+  validate_request(request, batch);
+  const StaticRequestIdentity actual_static =
+    full_cuda_ci_method_static_request_identity(
+      request, batch.target_keys, batch.planned_routes, batch.n);
+  if (request.static_identity.schema_version !=
+        kFullCudaCiMethodStaticRequestIdentitySchemaVersion ||
+      !is_lower_sha256(request.static_identity.sha256) ||
+      request.static_identity.sha256 != actual_static.sha256) {
+    throw std::runtime_error("strict CI method static identity mismatch");
+  }
+  strict_method_failure_checkpoint("after_static_identity_validate");
+  const PermutationAttestation actual_attestation =
+    full_cuda_ci_method_permutation_attestation(request);
+  if (request.permutation_attestation.schema_version !=
+        kFullCudaCiMethodPermutationAttestationSchemaVersion ||
+      !is_lower_sha256(request.permutation_attestation.sha256) ||
+      request.permutation_attestation.payload_sha256 !=
+        actual_attestation.payload_sha256 ||
+      request.permutation_attestation.value_count !=
+        actual_attestation.value_count ||
+      request.permutation_attestation.byte_count !=
+        actual_attestation.byte_count ||
+      request.permutation_attestation.replicates !=
+        actual_attestation.replicates ||
+      request.permutation_attestation.sha256 != actual_attestation.sha256) {
+    throw std::runtime_error(
+      "strict CI method permutation attestation mismatch");
+  }
+  strict_method_failure_checkpoint("after_permutation_attestation_validate");
+  const CombinedRequestIdentity actual_combined =
+    full_cuda_ci_method_combined_request_identity(
+      actual_static, actual_attestation);
+  if (request.combined_identity.schema_version !=
+        kFullCudaCiMethodCombinedRequestIdentitySchemaVersion ||
+      !is_lower_sha256(request.combined_identity.sha256) ||
+      request.combined_identity.sha256 != actual_combined.sha256) {
+    throw std::runtime_error("strict CI method combined identity mismatch");
+  }
+  strict_method_failure_checkpoint("after_combined_identity_validate");
+
+  MethodPreparationTicket preparation = submit_method_preparation(
+    prepared_s, batch, full_cuda_ci_method_static_request(request),
+    residual_cache, execution_context);
+  strict_method_failure_checkpoint("after_method_preparation_submit");
+  strict_method_failure_checkpoint("before_method_finalization");
+  FullCudaCiMethodBatchResult result = finalize_method_from_permutation(
+    std::move(preparation), request.permutation_attestation,
+    request.combined_identity, request.permutation_table);
+  strict_method_failure_checkpoint("after_method_finalization");
+  result.diagnostics.total_host_ms =
+    std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - call_started).count();
   return result;
 }
 

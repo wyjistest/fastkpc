@@ -14,6 +14,7 @@ namespace fastkpc {
 
 class FullCudaCiMethodResidualCache;
 class FullCudaCiMethodExecutionContext;
+struct FullCudaCiMethodBatchResult;
 
 constexpr char kFullCudaCiMethodStaticRequestIdentitySchemaVersion[] =
   "full-cuda-ci-method-static-request-identity-v1";
@@ -47,6 +48,19 @@ struct PermutationAttestation {
 struct CombinedRequestIdentity {
   std::string schema_version;
   std::string sha256;
+};
+
+struct FullCudaCiMethodStaticRequest {
+  std::string expected_prepared_s_key_sha256;
+  StaticRequestIdentity identity;
+  std::string ci_method;
+  std::vector<FullCudaCiMethodPairRequest> pairs;
+  double alpha = 0.1;
+  double index = 1.0;
+  int num_col = 35;
+  double hsic_sig = 1.0;
+  int permutation_replicates = 0;
+  bool permutation_include_observed = true;
 };
 
 class PermutationTableBuilder;
@@ -97,6 +111,34 @@ class PermutationTableBuilder {
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
+};
+
+class MethodPreparationTicket {
+ public:
+  MethodPreparationTicket() = default;
+  ~MethodPreparationTicket();
+  MethodPreparationTicket(MethodPreparationTicket&&) noexcept;
+  MethodPreparationTicket& operator=(MethodPreparationTicket&&) noexcept;
+  MethodPreparationTicket(const MethodPreparationTicket&) = delete;
+  MethodPreparationTicket& operator=(const MethodPreparationTicket&) = delete;
+
+  bool valid() const noexcept;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+
+  friend MethodPreparationTicket submit_method_preparation(
+    const std::shared_ptr<PreparedSGpuHandle>&,
+    const FixedSpBatchHostView&,
+    const FullCudaCiMethodStaticRequest&,
+    const std::shared_ptr<FullCudaCiMethodResidualCache>&,
+    const std::shared_ptr<FullCudaCiMethodExecutionContext>&);
+  friend FullCudaCiMethodBatchResult finalize_method_from_permutation(
+    MethodPreparationTicket&&,
+    const PermutationAttestation&,
+    const CombinedRequestIdentity&,
+    const SealedPermutationTableHandle&);
 };
 
 struct FullCudaCiMethodBatchRequest {
@@ -159,6 +201,9 @@ struct FullCudaCiMethodBatchDiagnostics {
   int execution_context_reuse_count = 0;
   int execution_context_buffer_growth_count = 0;
   std::size_t execution_context_device_bytes = 0;
+  int preparation_submit_count = 0;
+  int finalization_count = 0;
+  bool preparation_ticket_consumed = false;
   int component_cache_persistent_request_count = 0;
   int component_cache_persistent_lookup_count = 0;
   int component_cache_persistent_hit_count = 0;
@@ -228,11 +273,18 @@ StaticRequestIdentity full_cuda_ci_method_static_request_identity(
   const std::vector<std::string>& target_keys,
   const std::vector<FixedSpRoute>& planned_routes,
   int n);
+StaticRequestIdentity full_cuda_ci_method_static_request_identity(
+  const FullCudaCiMethodStaticRequest& request,
+  const std::vector<std::string>& target_keys,
+  const std::vector<FixedSpRoute>& planned_routes,
+  int n);
 PermutationAttestation full_cuda_ci_method_permutation_attestation(
   const FullCudaCiMethodBatchRequest& request);
 CombinedRequestIdentity full_cuda_ci_method_combined_request_identity(
   const StaticRequestIdentity& static_identity,
   const PermutationAttestation& permutation_attestation);
+FullCudaCiMethodStaticRequest full_cuda_ci_method_static_request(
+  const FullCudaCiMethodBatchRequest& request);
 
 std::vector<int> full_cuda_ci_method_seeded_permutation_table(
   const std::string& ci_method,
@@ -251,6 +303,20 @@ create_full_cuda_ci_method_execution_context(
   const std::string& ci_method,
   int num_col,
   int permutation_replicates);
+
+MethodPreparationTicket submit_method_preparation(
+  const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+  const FixedSpBatchHostView& batch,
+  const FullCudaCiMethodStaticRequest& request,
+  const std::shared_ptr<FullCudaCiMethodResidualCache>& residual_cache =
+    std::shared_ptr<FullCudaCiMethodResidualCache>(),
+  const std::shared_ptr<FullCudaCiMethodExecutionContext>& execution_context =
+    std::shared_ptr<FullCudaCiMethodExecutionContext>());
+FullCudaCiMethodBatchResult finalize_method_from_permutation(
+  MethodPreparationTicket&& preparation,
+  const PermutationAttestation& permutation_attestation,
+  const CombinedRequestIdentity& combined_identity,
+  const SealedPermutationTableHandle& permutation_table);
 
 FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   const std::shared_ptr<PreparedSGpuHandle>& prepared_s,

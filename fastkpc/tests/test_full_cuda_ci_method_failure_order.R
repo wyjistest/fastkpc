@@ -106,9 +106,12 @@ post_generation_stages <- c(
   "before_residual_solve",
   "after_residual_acquire",
   "after_component_wait",
+  "after_method_preparation_submit",
+  "before_method_finalization",
   "after_pair_wait",
   "after_compact_wait",
   "after_consumer_wait",
+  "after_method_finalization",
   "after_synchronous_method_call"
 )
 
