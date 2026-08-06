@@ -58,7 +58,11 @@ run_method <- function(method) {
   )
 }
 
-run_failure <- function(method, stage) {
+run_failure <- function(method, stage, overlap) {
+  Sys.setenv(
+    FASTKPC_STRICT_METHOD_PERMUTATION_GPU_OVERLAP =
+      if (overlap) "1" else "0"
+  )
   invisible(full_cuda_ci_one_call_cache_control_native("reset"))
   set.seed(707)
   rng_before <- .Random.seed
@@ -91,6 +95,10 @@ run_failure <- function(method, stage) {
   list(before = rng_before, after = rng_after, error_class = class(error))
 }
 
+on.exit(Sys.unsetenv(
+  "FASTKPC_STRICT_METHOD_PERMUTATION_GPU_OVERLAP"
+), add = TRUE)
+
 post_generation_stages <- c(
   "after_permutation_generation",
   "after_permutation_seal",
@@ -116,35 +124,50 @@ post_generation_stages <- c(
 )
 
 for (method in c("dcc.perm", "hsic.perm")) {
-  before_generation <- run_failure(method, "before_permutation_generation")
+  before_generation_sync <- run_failure(
+    method, "before_permutation_generation", FALSE
+  )
+  before_generation_overlap <- run_failure(
+    method, "before_permutation_generation", TRUE
+  )
   assert_true(
-    identical(before_generation$before, before_generation$after),
+    identical(before_generation_sync$before, before_generation_sync$after) &&
+      identical(before_generation_overlap$before,
+                before_generation_overlap$after) &&
+      identical(before_generation_sync$error_class,
+                before_generation_overlap$error_class),
     paste(method, "pre-permutation failure advanced R RNG state")
   )
 
-  post_generation <- lapply(
+  post_generation_sync <- lapply(
     post_generation_stages,
-    function(stage) run_failure(method, stage)
+    function(stage) run_failure(method, stage, FALSE)
   )
-  reference_rng <- post_generation[[1L]]$after
-  reference_error_class <- post_generation[[1L]]$error_class
-  rng_matches <- vapply(post_generation, function(value) {
+  post_generation_overlap <- lapply(
+    post_generation_stages,
+    function(stage) run_failure(method, stage, TRUE)
+  )
+  reference_rng <- post_generation_sync[[1L]]$after
+  reference_error_class <- post_generation_sync[[1L]]$error_class
+  all_post_generation <- c(
+    post_generation_sync, post_generation_overlap
+  )
+  rng_matches <- vapply(all_post_generation, function(value) {
     identical(value$after, reference_rng)
   }, logical(1L))
   assert_true(
-    !identical(post_generation[[1L]]$before, reference_rng) &&
+    !identical(post_generation_sync[[1L]]$before, reference_rng) &&
       all(rng_matches),
     paste(
       method,
-      "post-permutation failure changed R RNG consumption order at",
-      paste(post_generation_stages[!rng_matches], collapse = ", ")
+      "overlap changed post-permutation failure RNG consumption"
     )
   )
   assert_true(
-    all(vapply(post_generation, function(value) {
+    all(vapply(all_post_generation, function(value) {
       identical(value$error_class, reference_error_class)
     }, logical(1L))),
-    paste(method, "failure checkpoints changed the observable error class")
+    paste(method, "overlap changed the observable failure error class")
   )
 }
 

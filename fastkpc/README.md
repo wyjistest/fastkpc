@@ -165,11 +165,17 @@ level-3-and-deeper stable-SVD residual path: residual solving still costs
 `383.800`, `455.173`, and `433.361` seconds respectively. Permutation table
 generation plus incremental SHA-256 costs `117.275` seconds for `dcc.perm` and
 `255.772` seconds for `hsic.perm`; trusted request-identity build and validation
-now add only `1.469` and `1.764` seconds. GPU residual/component preparation is
-not yet overlapped with R permutation generation. Further material gains
-require that strictly ordered asynchronous pipeline, a qualified deeper-level
-residual kernel, or both. These timings do not replace the `dcc.gamma` Phase 10
-performance baseline.
+now add only `1.469` and `1.764` seconds. The development path now submits one
+GPU residual/component preparation before each R permutation build and queues
+permutation finalization on the same stream, with no intermediate host event
+wait. Stable-SVD cohorts use the qualified nonblocking submission path; QR
+cohorts may still wait inside submission. The overlap is enabled by default for
+`dcc.perm` and `hsic.perm` and can be disabled with
+`FASTKPC_STRICT_METHOD_PERMUTATION_GPU_OVERLAP=0`. Fixture-level bitwise,
+failure-order, RNG, resource, and WAN-PDAG gates pass, but the canonical
+`351x48` wall times have not yet been rerun for this implementation. The prior
+timings remain the current clean performance evidence and do not replace the
+`dcc.gamma` Phase 10 baseline.
 
 The historical canonical artifact is
 `artifacts/full_cuda_ci/promotion_351x48_v1/`. Across five fresh-process cold

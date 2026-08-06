@@ -163,6 +163,19 @@ bool strict_hsic_perm_inline_r_index_policy_enabled(
   return true;
 }
 
+bool strict_method_permutation_gpu_overlap_enabled(
+    const std::string& ci_method) {
+  const bool permutation = ci_method == "dcc.perm" || ci_method == "hsic.perm";
+  const char* raw = std::getenv(
+    "FASTKPC_STRICT_METHOD_PERMUTATION_GPU_OVERLAP");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "1") {
+    return permutation;
+  }
+  if (std::string(raw) == "0") return false;
+  throw std::runtime_error(
+    "FASTKPC_STRICT_METHOD_PERMUTATION_GPU_OVERLAP must be 0 or 1");
+}
+
 bool setup_optimizer_pipeline_policy_enabled() {
   const char* raw = std::getenv(
     "FASTKPC_PHASE10_SETUP_OPTIMIZER_PIPELINE");
@@ -790,7 +803,10 @@ struct MethodCriticalPathRecord {
   bool residual_cache_all_hit = false;
   bool deferred_svd_submission = false;
   bool preparation_submit_nonblocking = false;
+  bool preparation_ready_at_submit = false;
+  bool preparation_ready_after_permutation = false;
   double permutation_table_host_ms = 0.0;
+  double preparation_submit_host_ms = 0.0;
   double identity_build_host_ms = 0.0;
   double identity_validation_host_ms = 0.0;
   double residual_solve_host_ms = 0.0;
@@ -800,6 +816,7 @@ struct MethodCriticalPathRecord {
   double compact_d2h_cuda_ms = 0.0;
   double method_total_host_ms = 0.0;
   double overlap_upper_bound_ms = 0.0;
+  double overlap_lower_bound_ms = 0.0;
   int intermediate_host_wait_count = 0;
   int final_host_wait_count = 0;
 };
@@ -956,6 +973,13 @@ struct OneCallDiagnostics {
   double method_permutation_h2d_submit_host_ms = 0.0;
   double method_gpu_preparation_upper_bound_ms = 0.0;
   double method_permutation_gpu_overlap_upper_bound_ms = 0.0;
+  bool method_permutation_gpu_overlap_enabled = false;
+  int method_preparation_submit_before_rng_count = 0;
+  int method_preparation_ready_at_submit_count = 0;
+  int method_preparation_ready_after_permutation_count = 0;
+  int method_deferred_preparation_error_count = 0;
+  double method_preparation_submit_host_ms = 0.0;
+  double method_permutation_gpu_overlap_lower_bound_ms = 0.0;
   int method_component_host_wait_count = 0;
   int method_pair_host_wait_count = 0;
   int method_compact_host_wait_count = 0;
@@ -1099,7 +1123,10 @@ Rcpp::DataFrame method_critical_path_frame(
   Rcpp::LogicalVector residual_cache_all_hit(size);
   Rcpp::LogicalVector deferred_svd_submission(size);
   Rcpp::LogicalVector preparation_submit_nonblocking(size);
+  Rcpp::LogicalVector preparation_ready_at_submit(size);
+  Rcpp::LogicalVector preparation_ready_after_permutation(size);
   Rcpp::NumericVector permutation_table_host_ms(size);
+  Rcpp::NumericVector preparation_submit_host_ms(size);
   Rcpp::NumericVector identity_build_host_ms(size);
   Rcpp::NumericVector identity_validation_host_ms(size);
   Rcpp::NumericVector residual_solve_host_ms(size);
@@ -1109,6 +1136,7 @@ Rcpp::DataFrame method_critical_path_frame(
   Rcpp::NumericVector compact_d2h_cuda_ms(size);
   Rcpp::NumericVector method_total_host_ms(size);
   Rcpp::NumericVector overlap_upper_bound_ms(size);
+  Rcpp::NumericVector overlap_lower_bound_ms(size);
   Rcpp::IntegerVector intermediate_host_wait_count(size);
   Rcpp::IntegerVector final_host_wait_count(size);
   for (R_xlen_t index = 0; index < size; ++index) {
@@ -1126,7 +1154,11 @@ Rcpp::DataFrame method_critical_path_frame(
     deferred_svd_submission[index] = record.deferred_svd_submission;
     preparation_submit_nonblocking[index] =
       record.preparation_submit_nonblocking;
+    preparation_ready_at_submit[index] = record.preparation_ready_at_submit;
+    preparation_ready_after_permutation[index] =
+      record.preparation_ready_after_permutation;
     permutation_table_host_ms[index] = record.permutation_table_host_ms;
+    preparation_submit_host_ms[index] = record.preparation_submit_host_ms;
     identity_build_host_ms[index] = record.identity_build_host_ms;
     identity_validation_host_ms[index] =
       record.identity_validation_host_ms;
@@ -1138,6 +1170,7 @@ Rcpp::DataFrame method_critical_path_frame(
     compact_d2h_cuda_ms[index] = record.compact_d2h_cuda_ms;
     method_total_host_ms[index] = record.method_total_host_ms;
     overlap_upper_bound_ms[index] = record.overlap_upper_bound_ms;
+    overlap_lower_bound_ms[index] = record.overlap_lower_bound_ms;
     intermediate_host_wait_count[index] =
       record.intermediate_host_wait_count;
     final_host_wait_count[index] = record.final_host_wait_count;
@@ -1153,7 +1186,11 @@ Rcpp::DataFrame method_critical_path_frame(
     Rcpp::Named("deferred_svd_submission") = deferred_svd_submission,
     Rcpp::Named("preparation_submit_nonblocking") =
       preparation_submit_nonblocking,
+    Rcpp::Named("preparation_ready_at_submit") = preparation_ready_at_submit,
+    Rcpp::Named("preparation_ready_after_permutation") =
+      preparation_ready_after_permutation,
     Rcpp::Named("permutation_table_host_ms") = permutation_table_host_ms,
+    Rcpp::Named("preparation_submit_host_ms") = preparation_submit_host_ms,
     Rcpp::Named("identity_build_host_ms") = identity_build_host_ms,
     Rcpp::Named("identity_validation_host_ms") =
       identity_validation_host_ms,
@@ -1165,6 +1202,7 @@ Rcpp::DataFrame method_critical_path_frame(
     Rcpp::Named("compact_d2h_cuda_ms") = compact_d2h_cuda_ms,
     Rcpp::Named("method_total_host_ms") = method_total_host_ms,
     Rcpp::Named("overlap_upper_bound_ms") = overlap_upper_bound_ms,
+    Rcpp::Named("overlap_lower_bound_ms") = overlap_lower_bound_ms,
     Rcpp::Named("intermediate_host_wait_count") =
       intermediate_host_wait_count,
     Rcpp::Named("final_host_wait_count") = final_host_wait_count);
@@ -4262,6 +4300,46 @@ GroupResult execute_group(
       pair.right_target_index = target_position.at(task.orientation_y);
       method_request.pairs.push_back(pair);
     }
+    const bool overlap_permutation_preparation =
+      diagnostics->method_permutation_gpu_overlap_enabled &&
+        is_permutation_method(method_options.ci_method);
+    MethodPreparationTicket early_preparation;
+    std::exception_ptr deferred_static_identity_error;
+    std::exception_ptr deferred_preparation_error;
+    double early_identity_build_host_ms = 0.0;
+    double preparation_submit_host_ms = 0.0;
+    bool preparation_ready_at_submit = false;
+    if (overlap_permutation_preparation) {
+      const auto early_identity_started = std::chrono::steady_clock::now();
+      try {
+        method_request.static_identity =
+          full_cuda_ci_method_static_request_identity(
+            method_request, residual_keys, batch.planned_routes, context->n);
+      } catch (...) {
+        deferred_static_identity_error = std::current_exception();
+        diagnostics->method_deferred_preparation_error_count += 1;
+      }
+      early_identity_build_host_ms = elapsed_ms(early_identity_started);
+      if (!deferred_static_identity_error) {
+        const auto submit_started = std::chrono::steady_clock::now();
+        try {
+          early_preparation = submit_method_preparation(
+            context->fixed_sp, batch,
+            full_cuda_ci_method_static_request(method_request),
+            method_residual_cache, method_execution_context);
+          diagnostics->method_preparation_submit_before_rng_count += 1;
+          preparation_ready_at_submit = early_preparation.query_ready();
+          diagnostics->method_preparation_ready_at_submit_count +=
+            preparation_ready_at_submit ? 1 : 0;
+        } catch (...) {
+          deferred_preparation_error = std::current_exception();
+          diagnostics->method_deferred_preparation_error_count += 1;
+        }
+        preparation_submit_host_ms = elapsed_ms(submit_started);
+        diagnostics->method_preparation_submit_host_ms +=
+          preparation_submit_host_ms;
+      }
+    }
     const auto permutation_started = std::chrono::steady_clock::now();
     const int table_growth_before = permutation_workspace == nullptr ? 0 :
       permutation_workspace->table_growth_count;
@@ -4286,8 +4364,19 @@ GroupResult execute_group(
     }
     strict_method_failure_checkpoint("after_permutation_generation");
     double permutation_table_host_ms = 0.0;
+    bool preparation_ready_after_permutation = false;
     if (is_permutation_method(method_options.ci_method)) {
       permutation_table_host_ms = elapsed_ms(permutation_started);
+      if (overlap_permutation_preparation && early_preparation.valid()) {
+        preparation_ready_after_permutation = early_preparation.query_ready();
+        diagnostics->method_preparation_ready_after_permutation_count +=
+          preparation_ready_after_permutation ? 1 : 0;
+        if (!preparation_ready_at_submit &&
+            !preparation_ready_after_permutation) {
+          diagnostics->method_permutation_gpu_overlap_lower_bound_ms +=
+            permutation_table_host_ms;
+        }
+      }
       diagnostics->method_permutation_table_build_count += 1;
       diagnostics->method_permutation_table_value_count +=
         permutation_workspace->table.size();
@@ -4327,9 +4416,14 @@ GroupResult execute_group(
       method_request.permutation_artifact =
         full_cuda_ci_method_empty_permutation_artifact();
     }
-    method_request.static_identity =
-      full_cuda_ci_method_static_request_identity(
-        method_request, residual_keys, batch.planned_routes, context->n);
+    if (deferred_static_identity_error) {
+      std::rethrow_exception(deferred_static_identity_error);
+    }
+    if (!overlap_permutation_preparation) {
+      method_request.static_identity =
+        full_cuda_ci_method_static_request_identity(
+          method_request, residual_keys, batch.planned_routes, context->n);
+    }
     method_request.permutation_attestation =
       full_cuda_ci_method_permutation_attestation(method_request);
     method_request.combined_identity =
@@ -4345,23 +4439,46 @@ GroupResult execute_group(
     } else if (identity_tamper_layer == "combined") {
       method_request.combined_identity.sha256.assign(64U, '0');
     }
-    const double identity_build_host_ms = elapsed_ms(identity_started);
+    const double identity_build_host_ms =
+      early_identity_build_host_ms + elapsed_ms(identity_started);
     strict_method_failure_checkpoint("after_request_identity_build");
     diagnostics->method_request_identity_build_host_ms +=
       identity_build_host_ms;
     strict_method_failure_checkpoint("before_synchronous_method_call");
-    FullCudaCiMethodBatchResult method_result =
-      run_full_cuda_ci_method_batch(
+    FullCudaCiMethodBatchResult method_result;
+    if (overlap_permutation_preparation) {
+      validate_full_cuda_ci_method_request(method_request, batch);
+      if (deferred_preparation_error) {
+        std::rethrow_exception(deferred_preparation_error);
+      }
+      require(early_preparation.valid(),
+              "strict CI early preparation ticket is invalid");
+      strict_method_failure_checkpoint("after_method_preparation_submit");
+      strict_method_failure_checkpoint("before_method_finalization");
+      method_result = finalize_method_from_permutation(
+        std::move(early_preparation), method_request.static_identity,
+        method_request.permutation_attestation,
+        method_request.combined_identity,
+        method_request.permutation_artifact);
+      strict_method_failure_checkpoint("after_method_finalization");
+    } else {
+      method_result = run_full_cuda_ci_method_batch(
         context->fixed_sp, batch, method_request, method_residual_cache,
         method_execution_context);
+    }
     strict_method_failure_checkpoint("after_synchronous_method_call");
     if (is_permutation_method(method_options.ci_method)) {
       permutation_workspace->table.reclaim(
         std::move(method_request.permutation_artifact));
     }
-    const double gpu_preparation_upper_bound_ms =
+    const double overlap_lower_bound_ms =
+      overlap_permutation_preparation && !preparation_ready_at_submit &&
+        !preparation_ready_after_permutation ?
+          permutation_table_host_ms : 0.0;
+    const double gpu_preparation_upper_bound_ms = std::max(
       method_result.diagnostics.residual_solve_host_ms +
-        method_result.diagnostics.component_build_cuda_ms;
+        method_result.diagnostics.component_build_cuda_ms,
+      overlap_lower_bound_ms);
     const double overlap_upper_bound_ms = std::min(
       permutation_table_host_ms, gpu_preparation_upper_bound_ms);
     diagnostics->method_permutation_gpu_overlap_upper_bound_ms +=
@@ -4383,7 +4500,11 @@ GroupResult execute_group(
           method_result.diagnostics.deferred_svd_submission;
         record.preparation_submit_nonblocking =
           method_result.diagnostics.preparation_submit_nonblocking;
+        record.preparation_ready_at_submit = preparation_ready_at_submit;
+        record.preparation_ready_after_permutation =
+          preparation_ready_after_permutation;
         record.permutation_table_host_ms = permutation_table_host_ms;
+        record.preparation_submit_host_ms = preparation_submit_host_ms;
         record.identity_build_host_ms = identity_build_host_ms;
         record.identity_validation_host_ms =
           method_result.diagnostics.request_identity_validation_host_ms;
@@ -4399,6 +4520,7 @@ GroupResult execute_group(
           method_result.diagnostics.compact_d2h_cuda_ms;
         record.method_total_host_ms = method_result.diagnostics.total_host_ms;
         record.overlap_upper_bound_ms = overlap_upper_bound_ms;
+        record.overlap_lower_bound_ms = overlap_lower_bound_ms;
         record.intermediate_host_wait_count =
           method_result.diagnostics.component_host_wait_count +
           method_result.diagnostics.pair_host_wait_count +
@@ -4608,6 +4730,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     strict_hsic_gamma_residual_route_policy(method_options.ci_method);
   diagnostics.strict_permutation_residual_route =
     strict_permutation_residual_route_policy(method_options.ci_method);
+  diagnostics.method_permutation_gpu_overlap_enabled =
+    strict_method_permutation_gpu_overlap_enabled(method_options.ci_method);
   require(method_options.ci_method == "hsic.gamma" ||
             diagnostics.strict_hsic_gamma_residual_route == "stable-svd",
           "HSIC gamma residual route override requires hsic.gamma");
@@ -5318,6 +5442,27 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
           diagnostics.method_permutation_rng_rejection_count ==
             diagnostics.method_permutation_inline_r_draw_count -
               diagnostics.method_permutation_inline_r_index_count)))));
+  const bool method_permutation_gpu_overlap_accounted =
+    (!diagnostics.method_permutation_gpu_overlap_enabled &&
+      diagnostics.method_preparation_submit_before_rng_count == 0 &&
+      diagnostics.method_preparation_ready_at_submit_count == 0 &&
+      diagnostics.method_preparation_ready_after_permutation_count == 0 &&
+      diagnostics.method_deferred_preparation_error_count == 0 &&
+      diagnostics.method_preparation_submit_host_ms == 0.0 &&
+      diagnostics.method_permutation_gpu_overlap_lower_bound_ms == 0.0) ||
+    (diagnostics.method_permutation_gpu_overlap_enabled &&
+      permutation_method &&
+      diagnostics.method_preparation_submit_before_rng_count ==
+        total_frontier_batches &&
+      diagnostics.method_preparation_ready_at_submit_count <=
+        diagnostics.method_preparation_submit_before_rng_count &&
+      diagnostics.method_preparation_ready_after_permutation_count <=
+        diagnostics.method_preparation_submit_before_rng_count &&
+      diagnostics.method_deferred_preparation_error_count == 0 &&
+      diagnostics.method_preparation_submit_host_ms >= 0.0 &&
+      diagnostics.method_permutation_gpu_overlap_lower_bound_ms >= 0.0 &&
+      diagnostics.method_permutation_gpu_overlap_lower_bound_ms <=
+        diagnostics.method_permutation_table_host_ms);
   require(diagnostics.native_setup_count >= physical_prepared_s_key_count &&
             physical_prepared_s_key_count >= unique_prepared_s_key_count &&
             diagnostics.physical_residual_fit_count >=
@@ -5352,6 +5497,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
             method_component_cache_accounted &&
             method_permutation_inline_r_index_accounted &&
             method_permutation_rng_receipt_accounted &&
+            method_permutation_gpu_overlap_accounted &&
             fixed_sp_root_cache_accounted,
           "compatible.cuda one-call physical work accounting changed");
   const bool authority_clean =
@@ -5837,6 +5983,20 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.method_gpu_preparation_upper_bound_ms,
       Rcpp::Named("method_permutation_gpu_overlap_upper_bound_ms") =
         diagnostics.method_permutation_gpu_overlap_upper_bound_ms,
+      Rcpp::Named("method_permutation_gpu_overlap_enabled") =
+        diagnostics.method_permutation_gpu_overlap_enabled,
+      Rcpp::Named("method_preparation_submit_before_rng_count") =
+        diagnostics.method_preparation_submit_before_rng_count,
+      Rcpp::Named("method_preparation_ready_at_submit_count") =
+        diagnostics.method_preparation_ready_at_submit_count,
+      Rcpp::Named("method_preparation_ready_after_permutation_count") =
+        diagnostics.method_preparation_ready_after_permutation_count,
+      Rcpp::Named("method_deferred_preparation_error_count") =
+        diagnostics.method_deferred_preparation_error_count,
+      Rcpp::Named("method_preparation_submit_host_ms") =
+        diagnostics.method_preparation_submit_host_ms,
+      Rcpp::Named("method_permutation_gpu_overlap_lower_bound_ms") =
+        diagnostics.method_permutation_gpu_overlap_lower_bound_ms,
       Rcpp::Named("method_component_host_wait_count") =
         diagnostics.method_component_host_wait_count,
       Rcpp::Named("method_pair_host_wait_count") =

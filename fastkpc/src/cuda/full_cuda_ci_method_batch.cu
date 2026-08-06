@@ -1598,6 +1598,8 @@ struct MethodPreparationTicket::Impl {
   }
 };
 
+MethodPreparationTicket::MethodPreparationTicket() = default;
+
 MethodPreparationTicket::~MethodPreparationTicket() {
   if (impl_ && !impl_->finalized) impl_->cleanup_noexcept();
 }
@@ -1614,6 +1616,23 @@ MethodPreparationTicket& MethodPreparationTicket::operator=(
 
 bool MethodPreparationTicket::valid() const noexcept {
   return impl_ != nullptr && !impl_->finalized;
+}
+
+bool MethodPreparationTicket::query_ready() const noexcept {
+  if (!valid() || !impl_->preparation_event_recorded ||
+      impl_->preparation_completion_event == nullptr ||
+      !impl_->active_context) {
+    return false;
+  }
+  int caller_device = -1;
+  if (cudaGetDevice(&caller_device) != cudaSuccess ||
+      cudaSetDevice(impl_->active_context->device_id()) != cudaSuccess) {
+    return false;
+  }
+  const cudaError_t status =
+    cudaEventQuery(impl_->preparation_completion_event);
+  const cudaError_t restore = cudaSetDevice(caller_device);
+  return status == cudaSuccess && restore == cudaSuccess;
 }
 
 std::vector<int> full_cuda_ci_method_seeded_permutation_table(
@@ -2372,6 +2391,7 @@ MethodPreparationTicket submit_method_preparation(
 
 FullCudaCiMethodBatchResult finalize_method_from_permutation(
     MethodPreparationTicket&& preparation,
+    const StaticRequestIdentity& static_identity,
     const PermutationAttestation& permutation_attestation,
     const CombinedRequestIdentity& combined_identity,
     const SealedPermutationArtifact& permutation_artifact) {
@@ -2382,6 +2402,12 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
     std::move(preparation.impl_);
   FullCudaCiMethodBatchDiagnostics& diagnostics = state->result.diagnostics;
   try {
+    if (static_identity.schema_version !=
+          kFullCudaCiMethodStaticRequestIdentitySchemaVersion ||
+        !is_lower_sha256(static_identity.sha256) ||
+        static_identity.sha256 != state->request.identity.sha256) {
+      throw std::runtime_error("strict CI method static identity mismatch");
+    }
     if (!permutation_artifact.valid()) {
       throw std::runtime_error("strict permutation artifact is invalid");
     }
@@ -2719,14 +2745,9 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
   }
 }
 
-FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
-    const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
-    const FixedSpBatchHostView& batch,
+void validate_full_cuda_ci_method_request(
     const FullCudaCiMethodBatchRequest& request,
-    const std::shared_ptr<FullCudaCiMethodResidualCache>& residual_cache,
-    const std::shared_ptr<FullCudaCiMethodExecutionContext>&
-      execution_context) {
-  const auto call_started = std::chrono::steady_clock::now();
+    const FixedSpBatchHostView& batch) {
   validate_request(request, batch);
   const StaticRequestIdentity actual_static =
     full_cuda_ci_method_static_request_identity(
@@ -2763,6 +2784,17 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
     throw std::runtime_error("strict CI method combined identity mismatch");
   }
   strict_method_failure_checkpoint("after_combined_identity_validate");
+}
+
+FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
+    const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+    const FixedSpBatchHostView& batch,
+    const FullCudaCiMethodBatchRequest& request,
+    const std::shared_ptr<FullCudaCiMethodResidualCache>& residual_cache,
+    const std::shared_ptr<FullCudaCiMethodExecutionContext>&
+      execution_context) {
+  const auto call_started = std::chrono::steady_clock::now();
+  validate_full_cuda_ci_method_request(request, batch);
 
   MethodPreparationTicket preparation = submit_method_preparation(
     prepared_s, batch, full_cuda_ci_method_static_request(request),
@@ -2770,7 +2802,8 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   strict_method_failure_checkpoint("after_method_preparation_submit");
   strict_method_failure_checkpoint("before_method_finalization");
   FullCudaCiMethodBatchResult result = finalize_method_from_permutation(
-    std::move(preparation), request.permutation_attestation,
+    std::move(preparation), request.static_identity,
+    request.permutation_attestation,
     request.combined_identity, request.permutation_artifact);
   strict_method_failure_checkpoint("after_method_finalization");
   result.diagnostics.total_host_ms =

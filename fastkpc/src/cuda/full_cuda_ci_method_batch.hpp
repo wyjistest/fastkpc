@@ -152,7 +152,7 @@ class PermutationTableBuilder {
 
 class MethodPreparationTicket {
  public:
-  MethodPreparationTicket() = default;
+  MethodPreparationTicket();
   ~MethodPreparationTicket();
   MethodPreparationTicket(MethodPreparationTicket&&) noexcept;
   MethodPreparationTicket& operator=(MethodPreparationTicket&&) noexcept;
@@ -160,6 +160,7 @@ class MethodPreparationTicket {
   MethodPreparationTicket& operator=(const MethodPreparationTicket&) = delete;
 
   bool valid() const noexcept;
+  bool query_ready() const noexcept;
 
  private:
   struct Impl;
@@ -173,6 +174,7 @@ class MethodPreparationTicket {
     const std::shared_ptr<FullCudaCiMethodExecutionContext>&);
   friend FullCudaCiMethodBatchResult finalize_method_from_permutation(
     MethodPreparationTicket&&,
+    const StaticRequestIdentity&,
     const PermutationAttestation&,
     const CombinedRequestIdentity&,
     const SealedPermutationArtifact&);
@@ -364,9 +366,13 @@ MethodPreparationTicket submit_method_preparation(
     std::shared_ptr<FullCudaCiMethodExecutionContext>());
 FullCudaCiMethodBatchResult finalize_method_from_permutation(
   MethodPreparationTicket&& preparation,
+  const StaticRequestIdentity& static_identity,
   const PermutationAttestation& permutation_attestation,
   const CombinedRequestIdentity& combined_identity,
   const SealedPermutationArtifact& permutation_artifact);
+void validate_full_cuda_ci_method_request(
+  const FullCudaCiMethodBatchRequest& request,
+  const FixedSpBatchHostView& batch);
 
 FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   const std::shared_ptr<PreparedSGpuHandle>& prepared_s,

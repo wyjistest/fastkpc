@@ -141,7 +141,11 @@ expected_messages <- c(
   permutation = "strict CI method permutation attestation mismatch",
   combined = "strict CI method combined identity mismatch"
 )
-tamper_results <- lapply(names(expected_messages), function(layer) {
+run_tamper <- function(layer, overlap) {
+  Sys.setenv(
+    FASTKPC_STRICT_METHOD_PERMUTATION_GPU_OVERLAP =
+      if (overlap) "1" else "0"
+  )
   invisible(full_cuda_ci_one_call_cache_control_native("reset"))
   set.seed(707)
   rng_before <- .Random.seed
@@ -158,16 +162,30 @@ tamper_results <- lapply(names(expected_messages), function(layer) {
       identical(resources_before, resources_after),
     paste(layer, "identity tamper did not fail closed")
   )
-  list(rng_before = rng_before, rng_after = .Random.seed,
-       error_class = class(error))
-})
+  list(
+    rng_before = rng_before,
+    rng_after = .Random.seed,
+    error_class = class(error),
+    error_message = conditionMessage(error)
+  )
+}
+on.exit(Sys.unsetenv(
+  "FASTKPC_STRICT_METHOD_PERMUTATION_GPU_OVERLAP"
+), add = TRUE)
+tamper_results <- unlist(lapply(names(expected_messages), function(layer) {
+  list(
+    run_tamper(layer, FALSE),
+    run_tamper(layer, TRUE)
+  )
+}), recursive = FALSE)
 reference_rng <- tamper_results[[1L]]$rng_after
 reference_error_class <- tamper_results[[1L]]$error_class
 assert_true(
   !identical(tamper_results[[1L]]$rng_before, reference_rng) &&
     all(vapply(tamper_results, function(value) {
       identical(value$rng_after, reference_rng) &&
-        identical(value$error_class, reference_error_class)
+        identical(value$error_class, reference_error_class) &&
+        value$error_message %in% expected_messages
     }, logical(1L))),
   "identity tamper layers changed RNG consumption or observable error class"
 )

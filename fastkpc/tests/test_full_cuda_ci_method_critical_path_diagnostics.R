@@ -92,12 +92,15 @@ expected_names <- c(
   "level", "penalty_count", "target_count", "pair_count",
   "first_logical_sequence_id", "last_logical_sequence_id",
   "residual_cache_all_hit", "deferred_svd_submission",
-  "preparation_submit_nonblocking", "permutation_table_host_ms",
+  "preparation_submit_nonblocking", "preparation_ready_at_submit",
+  "preparation_ready_after_permutation", "permutation_table_host_ms",
+  "preparation_submit_host_ms",
   "identity_build_host_ms", "identity_validation_host_ms",
   "residual_solve_host_ms", "component_cuda_ms",
   "permutation_h2d_submit_host_ms", "pair_cuda_ms",
   "compact_d2h_cuda_ms", "method_total_host_ms",
-  "overlap_upper_bound_ms", "intermediate_host_wait_count",
+  "overlap_upper_bound_ms", "overlap_lower_bound_ms",
+  "intermediate_host_wait_count",
   "final_host_wait_count"
 )
 assert_true(
@@ -111,6 +114,8 @@ assert_true(
 assert_true(
   near(sum(trace$permutation_table_host_ms),
        summary$method_permutation_table_host_ms) &&
+    near(sum(trace$preparation_submit_host_ms),
+         summary$method_preparation_submit_host_ms) &&
     near(sum(trace$identity_build_host_ms),
          summary$method_request_identity_build_host_ms) &&
     near(sum(trace$identity_validation_host_ms),
@@ -122,13 +127,26 @@ assert_true(
     near(sum(trace$permutation_h2d_submit_host_ms),
          summary$method_permutation_h2d_submit_host_ms) &&
     near(sum(trace$overlap_upper_bound_ms),
-         summary$method_permutation_gpu_overlap_upper_bound_ms),
+         summary$method_permutation_gpu_overlap_upper_bound_ms) &&
+    near(sum(trace$overlap_lower_bound_ms),
+         summary$method_permutation_gpu_overlap_lower_bound_ms),
   "critical-path trace timing accounting changed"
 )
 assert_true(
   all(trace$overlap_upper_bound_ms <= trace$permutation_table_host_ms) &&
-    all(trace$overlap_upper_bound_ms <=
-      trace$residual_solve_host_ms + trace$component_cuda_ms) &&
+    all(trace$overlap_lower_bound_ms <= trace$overlap_upper_bound_ms) &&
+    all(trace$overlap_lower_bound_ms <= trace$permutation_table_host_ms) &&
+    all(trace$overlap_upper_bound_ms <= pmax(
+      trace$residual_solve_host_ms + trace$component_cuda_ms,
+      trace$overlap_lower_bound_ms
+    )) &&
+    isTRUE(summary$method_permutation_gpu_overlap_enabled) &&
+    summary$method_preparation_submit_before_rng_count == nrow(trace) &&
+    summary$method_deferred_preparation_error_count == 0L &&
+    summary$method_preparation_ready_at_submit_count ==
+      sum(trace$preparation_ready_at_submit) &&
+    summary$method_preparation_ready_after_permutation_count ==
+      sum(trace$preparation_ready_after_permutation) &&
     summary$method_component_host_wait_count == 0L &&
     summary$method_pair_host_wait_count == 0L &&
     summary$method_compact_host_wait_count == nrow(trace) &&
