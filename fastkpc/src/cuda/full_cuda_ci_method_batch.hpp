@@ -15,15 +15,38 @@ namespace fastkpc {
 class FullCudaCiMethodResidualCache;
 class FullCudaCiMethodExecutionContext;
 
-constexpr char kFullCudaCiMethodBatchRequestSchemaVersion[] =
-  "full-cuda-ci-method-batch-request-v1";
+constexpr char kFullCudaCiMethodStaticRequestIdentitySchemaVersion[] =
+  "full-cuda-ci-method-static-request-identity-v1";
+constexpr char kFullCudaCiMethodPermutationAttestationSchemaVersion[] =
+  "full-cuda-ci-method-permutation-attestation-v1";
+constexpr char kFullCudaCiMethodCombinedRequestIdentitySchemaVersion[] =
+  "full-cuda-ci-method-combined-request-identity-v1";
 constexpr char kFullCudaCiMethodBatchResultSchemaVersion[] =
-  "full-cuda-ci-method-batch-result-v1";
+  "full-cuda-ci-method-batch-result-v2";
 
 struct FullCudaCiMethodPairRequest {
   std::uint64_t logical_sequence_id = 0;
   int left_target_index = -1;
   int right_target_index = -1;
+};
+
+struct StaticRequestIdentity {
+  std::string schema_version;
+  std::string sha256;
+};
+
+struct PermutationAttestation {
+  std::string schema_version;
+  std::array<unsigned char, 32> payload_sha256{};
+  std::size_t value_count = 0U;
+  std::size_t byte_count = 0U;
+  int replicates = 0;
+  std::string sha256;
+};
+
+struct CombinedRequestIdentity {
+  std::string schema_version;
+  std::string sha256;
 };
 
 class PermutationTableBuilder;
@@ -43,7 +66,7 @@ class SealedPermutationTableHandle {
   std::size_t size() const noexcept;
   std::size_t byte_size() const noexcept;
   const std::array<unsigned char, 32>& sha256() const noexcept;
- bool sealed() const noexcept;
+  bool sealed() const noexcept;
 
  private:
   friend class PermutationTableBuilder;
@@ -78,7 +101,9 @@ class PermutationTableBuilder {
 
 struct FullCudaCiMethodBatchRequest {
   std::string expected_prepared_s_key_sha256;
-  std::string request_identity_sha256;
+  StaticRequestIdentity static_identity;
+  PermutationAttestation permutation_attestation;
+  CombinedRequestIdentity combined_identity;
   std::string ci_method;
   std::vector<FullCudaCiMethodPairRequest> pairs;
   double alpha = 0.1;
@@ -149,6 +174,9 @@ struct FullCudaCiMethodBatchDiagnostics {
   double pair_evaluation_cuda_ms = 0.0;
   double compact_d2h_cuda_ms = 0.0;
   double permutation_h2d_submit_host_ms = 0.0;
+  double static_identity_validation_host_ms = 0.0;
+  double permutation_attestation_validation_host_ms = 0.0;
+  double combined_identity_validation_host_ms = 0.0;
   double request_identity_validation_host_ms = 0.0;
   double total_host_ms = 0.0;
   int component_host_wait_count = 0;
@@ -157,8 +185,10 @@ struct FullCudaCiMethodBatchDiagnostics {
   int consumer_host_wait_count = 0;
   int permutation_payload_validation_scan_count = 0;
   std::size_t permutation_payload_validation_scan_bytes = 0;
+  bool static_identity_authenticated = false;
   bool request_identity_authenticated = false;
   bool permutation_attestation_authenticated = false;
+  bool combined_identity_authenticated = false;
   bool prepared_identity_authenticated = false;
   bool target_identity_authenticated = false;
   bool residuals_device_resident = false;
@@ -168,6 +198,10 @@ struct FullCudaCiMethodBatchDiagnostics {
 
 struct FullCudaCiMethodBatchResult {
   std::string schema_version;
+  std::string static_request_identity_sha256;
+  std::string permutation_attestation_sha256;
+  std::string combined_request_identity_sha256;
+  // Compatibility alias for the combined request identity.
   std::string request_identity_sha256;
   std::string prepared_s_key_sha256;
   std::vector<std::string> target_keys;
@@ -186,11 +220,19 @@ void test_arm_strict_method_failure_injection(const std::string& stage);
 StrictMethodFailureInjectionSnapshot
 test_strict_method_failure_injection_snapshot();
 void strict_method_failure_checkpoint(const char* stage);
+void test_arm_strict_method_identity_tamper(const std::string& layer);
+std::string test_take_strict_method_identity_tamper();
 
-std::string full_cuda_ci_method_batch_request_identity(
+StaticRequestIdentity full_cuda_ci_method_static_request_identity(
   const FullCudaCiMethodBatchRequest& request,
   const std::vector<std::string>& target_keys,
+  const std::vector<FixedSpRoute>& planned_routes,
   int n);
+PermutationAttestation full_cuda_ci_method_permutation_attestation(
+  const FullCudaCiMethodBatchRequest& request);
+CombinedRequestIdentity full_cuda_ci_method_combined_request_identity(
+  const StaticRequestIdentity& static_identity,
+  const PermutationAttestation& permutation_attestation);
 
 std::vector<int> full_cuda_ci_method_seeded_permutation_table(
   const std::string& ci_method,

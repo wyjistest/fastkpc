@@ -9287,6 +9287,15 @@ extern "C" SEXP C_full_cuda_ci_test_method_failure_snapshot() {
   END_RCPP
 }
 
+extern "C" SEXP C_full_cuda_ci_test_arm_method_identity_tamper(
+    SEXP layer_s) {
+  BEGIN_RCPP
+  fastkpc::test_arm_strict_method_identity_tamper(
+    Rcpp::as<std::string>(layer_s));
+  return R_NilValue;
+  END_RCPP
+}
+
 extern "C" SEXP C_full_cuda_ci_native_geometry_prepare(
     SEXP X_s,
     SEXP penalty_blocks_s,
@@ -13785,6 +13794,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_full_cuda_ci_one_call_cache_state", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_one_call_cache_state), 1},
   {"C_full_cuda_ci_test_arm_method_failure", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_test_arm_method_failure), 1},
   {"C_full_cuda_ci_test_method_failure_snapshot", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_test_method_failure_snapshot), 0},
+  {"C_full_cuda_ci_test_arm_method_identity_tamper", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_test_arm_method_identity_tamper), 1},
   {"C_full_cuda_ci_method_seeded_permutations", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_method_seeded_permutations), 4},
   {"C_full_cuda_ci_native_geometry_prepare", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_native_geometry_prepare), 4},
   {"C_full_cuda_ci_phase35_vertical_resource_snapshot", reinterpret_cast<DL_FUNC>(&C_full_cuda_ci_phase35_vertical_resource_snapshot), 0},

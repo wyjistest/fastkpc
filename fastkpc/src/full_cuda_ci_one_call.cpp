@@ -892,6 +892,9 @@ struct OneCallDiagnostics {
   std::size_t method_permutation_peak_table_values = 0U;
   double method_permutation_table_host_ms = 0.0;
   double method_request_identity_build_host_ms = 0.0;
+  double method_static_identity_validation_host_ms = 0.0;
+  double method_permutation_attestation_validation_host_ms = 0.0;
+  double method_combined_identity_validation_host_ms = 0.0;
   double method_request_identity_validation_host_ms = 0.0;
   double method_permutation_h2d_submit_host_ms = 0.0;
   double method_gpu_preparation_upper_bound_ms = 0.0;
@@ -905,7 +908,9 @@ struct OneCallDiagnostics {
   std::vector<MethodCriticalPathRecord> method_critical_path_trace;
   int method_permutation_payload_validation_scan_count = 0;
   std::size_t method_permutation_payload_validation_scan_bytes = 0U;
+  int method_static_identity_authentication_count = 0;
   int method_permutation_attestation_count = 0;
+  int method_combined_identity_authentication_count = 0;
   std::string strict_hsic_gamma_residual_route = "stable-svd";
   std::string strict_permutation_residual_route = "stable-svd";
   bool method_permutation_inline_r_index_requested = false;
@@ -2473,6 +2478,12 @@ void accumulate_method_diagnostics(
   diagnostics->cuda_dcov_pair_gamma_ms += value.pair_evaluation_cuda_ms;
   diagnostics->cuda_dcov_compact_d2h_ms += value.compact_d2h_cuda_ms;
   diagnostics->cuda_dcov_host_ms += value.total_host_ms;
+  diagnostics->method_static_identity_validation_host_ms +=
+    value.static_identity_validation_host_ms;
+  diagnostics->method_permutation_attestation_validation_host_ms +=
+    value.permutation_attestation_validation_host_ms;
+  diagnostics->method_combined_identity_validation_host_ms +=
+    value.combined_identity_validation_host_ms;
   diagnostics->method_request_identity_validation_host_ms +=
     value.request_identity_validation_host_ms;
   diagnostics->method_permutation_h2d_submit_host_ms +=
@@ -2489,10 +2500,16 @@ void accumulate_method_diagnostics(
     value.permutation_payload_validation_scan_count;
   diagnostics->method_permutation_payload_validation_scan_bytes +=
     value.permutation_payload_validation_scan_bytes;
+  diagnostics->method_static_identity_authentication_count +=
+    value.static_identity_authenticated ? 1 : 0;
   diagnostics->method_permutation_attestation_count +=
     value.permutation_attestation_authenticated ? 1 : 0;
-  require(value.request_identity_authenticated &&
+  diagnostics->method_combined_identity_authentication_count +=
+    value.combined_identity_authenticated ? 1 : 0;
+  require(value.static_identity_authenticated &&
+            value.request_identity_authenticated &&
             value.permutation_attestation_authenticated &&
+            value.combined_identity_authenticated &&
             value.prepared_identity_authenticated &&
             value.target_identity_authenticated &&
             value.residuals_device_resident &&
@@ -4175,9 +4192,24 @@ GroupResult execute_group(
       method_request.permutation_table = permutation_workspace->table.seal();
       strict_method_failure_checkpoint("after_permutation_seal");
     }
-    method_request.request_identity_sha256 =
-      full_cuda_ci_method_batch_request_identity(
-        method_request, residual_keys, context->n);
+    method_request.static_identity =
+      full_cuda_ci_method_static_request_identity(
+        method_request, residual_keys, batch.planned_routes, context->n);
+    method_request.permutation_attestation =
+      full_cuda_ci_method_permutation_attestation(method_request);
+    method_request.combined_identity =
+      full_cuda_ci_method_combined_request_identity(
+        method_request.static_identity,
+        method_request.permutation_attestation);
+    const std::string identity_tamper_layer =
+      test_take_strict_method_identity_tamper();
+    if (identity_tamper_layer == "static") {
+      method_request.static_identity.sha256.assign(64U, '0');
+    } else if (identity_tamper_layer == "permutation") {
+      method_request.permutation_attestation.sha256.assign(64U, '0');
+    } else if (identity_tamper_layer == "combined") {
+      method_request.combined_identity.sha256.assign(64U, '0');
+    }
     const double identity_build_host_ms = elapsed_ms(identity_started);
     strict_method_failure_checkpoint("after_request_identity_build");
     diagnostics->method_request_identity_build_host_ms +=
@@ -5592,6 +5624,12 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.method_permutation_table_host_ms,
       Rcpp::Named("method_request_identity_build_host_ms") =
         diagnostics.method_request_identity_build_host_ms,
+      Rcpp::Named("method_static_identity_validation_host_ms") =
+        diagnostics.method_static_identity_validation_host_ms,
+      Rcpp::Named("method_permutation_attestation_validation_host_ms") =
+        diagnostics.method_permutation_attestation_validation_host_ms,
+      Rcpp::Named("method_combined_identity_validation_host_ms") =
+        diagnostics.method_combined_identity_validation_host_ms,
       Rcpp::Named("method_request_identity_validation_host_ms") =
         diagnostics.method_request_identity_validation_host_ms,
       Rcpp::Named("method_permutation_h2d_submit_host_ms") =
@@ -5619,8 +5657,12 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       Rcpp::Named("method_permutation_payload_validation_scan_bytes") =
         static_cast<double>(
           diagnostics.method_permutation_payload_validation_scan_bytes),
+      Rcpp::Named("method_static_identity_authentication_count") =
+        diagnostics.method_static_identity_authentication_count,
       Rcpp::Named("method_permutation_attestation_count") =
         diagnostics.method_permutation_attestation_count,
+      Rcpp::Named("method_combined_identity_authentication_count") =
+        diagnostics.method_combined_identity_authentication_count,
       Rcpp::Named("sha256_backend") = full_cuda_ci_sha256_backend(),
       Rcpp::Named("strict_hsic_gamma_residual_route") =
         diagnostics.strict_hsic_gamma_residual_route,

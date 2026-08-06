@@ -1,0 +1,134 @@
+source("fastkpc/R/fast_kpc.R")
+
+fail <- function(message) stop(message, call. = FALSE)
+assert_true <- function(value, message) if (!isTRUE(value)) fail(message)
+
+if (!isTRUE(tryCatch(
+  fastkpc_cuda_available(),
+  error = function(error) FALSE
+))) {
+  cat("SKIP strict method layered identity: CUDA unavailable\n")
+  quit(save = "no", status = 0L)
+}
+
+resource_snapshot <- function() {
+  value <- .Call(
+    "C_fixed_sp_cuda_test_resource_snapshot", PACKAGE = "fastkpc_cuda"
+  )
+  fields <- grep("_active_count$", names(value), value = TRUE)
+  stats::setNames(as.numeric(unlist(value[fields], use.names = FALSE)), fields)
+}
+arm_tamper <- function(layer) {
+  invisible(.Call(
+    "C_full_cuda_ci_test_arm_method_identity_tamper",
+    layer, PACKAGE = "fastkpc_cuda"
+  ))
+}
+
+set.seed(8401)
+n <- 48L
+p <- 3L
+common <- stats::rnorm(n)
+data <- sapply(seq_len(p), function(index) {
+  common + 0.25 * stats::rnorm(n)
+})
+colnames(data) <- paste0("x", seq_len(p))
+
+run_method <- function(method) {
+  precision_run_skeleton_full_cuda_native(
+    data = data,
+    alpha = 0.1,
+    max_conditioning_size = 0L,
+    index = 1,
+    numCol = 35L,
+    trace_level = "logical",
+    compatible_cuda_strict = TRUE,
+    ci_method = method,
+    hsic_params = list(sig = 1),
+    permutation_params = list(
+      replicates = 10L,
+      seed = 707L,
+      include_observed = TRUE
+    )
+  )
+}
+
+for (method in c("hsic.gamma", "dcc.perm", "hsic.perm")) {
+  invisible(full_cuda_ci_one_call_cache_control_native("reset"))
+  set.seed(707)
+  result <- run_method(method)
+  summary <- result$summary
+  assert_true(
+    summary$method_static_identity_authentication_count ==
+        summary$frontier_batch_count &&
+      summary$method_permutation_attestation_count ==
+        summary$frontier_batch_count &&
+      summary$method_combined_identity_authentication_count ==
+        summary$frontier_batch_count &&
+      summary$method_static_identity_validation_host_ms >= 0 &&
+      summary$method_permutation_attestation_validation_host_ms >= 0 &&
+      summary$method_combined_identity_validation_host_ms >= 0 &&
+      summary$method_request_identity_validation_host_ms >=
+        summary$method_static_identity_validation_host_ms +
+          summary$method_permutation_attestation_validation_host_ms +
+          summary$method_combined_identity_validation_host_ms,
+    paste(method, "did not authenticate all three identity layers")
+  )
+}
+
+expected_messages <- c(
+  static = "strict CI method static identity mismatch",
+  permutation = "strict CI method permutation attestation mismatch",
+  combined = "strict CI method combined identity mismatch"
+)
+tamper_results <- lapply(names(expected_messages), function(layer) {
+  invisible(full_cuda_ci_one_call_cache_control_native("reset"))
+  set.seed(707)
+  rng_before <- .Random.seed
+  resources_before <- resource_snapshot()
+  arm_tamper(layer)
+  error <- tryCatch({
+    run_method("dcc.perm")
+    NULL
+  }, error = identity)
+  resources_after <- resource_snapshot()
+  assert_true(
+    inherits(error, "error") &&
+      identical(conditionMessage(error), expected_messages[[layer]]) &&
+      identical(resources_before, resources_after),
+    paste(layer, "identity tamper did not fail closed")
+  )
+  list(rng_before = rng_before, rng_after = .Random.seed,
+       error_class = class(error))
+})
+reference_rng <- tamper_results[[1L]]$rng_after
+reference_error_class <- tamper_results[[1L]]$error_class
+assert_true(
+  !identical(tamper_results[[1L]]$rng_before, reference_rng) &&
+    all(vapply(tamper_results, function(value) {
+      identical(value$rng_after, reference_rng) &&
+        identical(value$error_class, reference_error_class)
+    }, logical(1L))),
+  "identity tamper layers changed RNG consumption or observable error class"
+)
+
+header <- paste(
+  readLines("fastkpc/src/cuda/full_cuda_ci_method_batch.hpp", warn = FALSE),
+  collapse = "\n"
+)
+implementation <- paste(
+  readLines("fastkpc/src/cuda/full_cuda_ci_method_batch.cu", warn = FALSE),
+  collapse = "\n"
+)
+assert_true(
+  grepl("full-cuda-ci-method-static-request-identity-v1", header,
+        fixed = TRUE) &&
+    grepl("full-cuda-ci-method-permutation-attestation-v1", header,
+          fixed = TRUE) &&
+    grepl("full-cuda-ci-method-combined-request-identity-v1", header,
+          fixed = TRUE) &&
+    grepl("planned_route[", implementation, fixed = TRUE),
+  "layered identity schemas or planned-route binding changed"
+)
+
+cat("test_full_cuda_ci_method_layered_identity.R: PASS\n")

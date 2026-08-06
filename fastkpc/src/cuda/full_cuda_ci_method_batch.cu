@@ -30,8 +30,10 @@ namespace {
 struct StrictMethodFailureInjectionState {
   std::mutex mutex;
   std::atomic<bool> armed{false};
+  std::atomic<bool> identity_tamper_armed{false};
   std::string armed_stage;
   std::string observed_stage;
+  std::string identity_tamper_layer;
   int checkpoint_count = 0;
   bool triggered = false;
 };
@@ -944,6 +946,37 @@ void strict_method_failure_checkpoint(const char* stage) {
   }
 }
 
+void test_arm_strict_method_identity_tamper(const std::string& layer) {
+  if (layer != "static" && layer != "permutation" && layer != "combined") {
+    throw std::runtime_error("strict method identity tamper layer is invalid");
+  }
+  StrictMethodFailureInjectionState& state =
+    strict_method_failure_injection_state();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (state.identity_tamper_armed.load(std::memory_order_relaxed)) {
+    throw std::runtime_error(
+      "strict method identity tamper injection is already armed");
+  }
+  state.identity_tamper_layer = layer;
+  state.identity_tamper_armed.store(true, std::memory_order_release);
+}
+
+std::string test_take_strict_method_identity_tamper() {
+  StrictMethodFailureInjectionState& state =
+    strict_method_failure_injection_state();
+  if (!state.identity_tamper_armed.load(std::memory_order_acquire)) {
+    return std::string();
+  }
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (!state.identity_tamper_armed.load(std::memory_order_relaxed)) {
+    return std::string();
+  }
+  std::string layer = state.identity_tamper_layer;
+  state.identity_tamper_layer.clear();
+  state.identity_tamper_armed.store(false, std::memory_order_release);
+  return layer;
+}
+
 SealedPermutationTableHandle::SealedPermutationTableHandle(
     SealedPermutationTableHandle&& other) noexcept
     : values_(std::move(other.values_)),
@@ -1437,15 +1470,18 @@ std::vector<int> full_cuda_ci_method_seeded_permutation_table(
   return table;
 }
 
-std::string full_cuda_ci_method_batch_request_identity(
+StaticRequestIdentity full_cuda_ci_method_static_request_identity(
     const FullCudaCiMethodBatchRequest& request,
     const std::vector<std::string>& target_keys,
+    const std::vector<FixedSpRoute>& planned_routes,
     int n) {
-  const std::string permutation_sha = request.permutation_table.sealed() ?
-    full_cuda_ci_sha256_hex(request.permutation_table.sha256()) :
-    full_cuda_ci_sha256_bytes(nullptr, 0U);
+  if (target_keys.size() != planned_routes.size()) {
+    throw std::runtime_error(
+      "strict CI static identity target route count changed");
+  }
   std::ostringstream payload;
-  payload << "schema=" << kFullCudaCiMethodBatchRequestSchemaVersion << "\n"
+  payload << "schema="
+          << kFullCudaCiMethodStaticRequestIdentitySchemaVersion << "\n"
           << "prepared=" << request.expected_prepared_s_key_sha256 << "\n"
           << "method=" << request.ci_method << "\n"
           << "n=" << n << "\n"
@@ -1456,10 +1492,11 @@ std::string full_cuda_ci_method_batch_request_identity(
           << "replicates=" << std::defaultfloat
           << request.permutation_replicates << "\n"
           << "include_observed="
-          << (request.permutation_include_observed ? 1 : 0) << "\n"
-          << "permutation_sha256=" << permutation_sha << "\n";
+          << (request.permutation_include_observed ? 1 : 0) << "\n";
   for (std::size_t target = 0; target < target_keys.size(); ++target) {
     payload << "target[" << target << "]=" << target_keys[target] << "\n";
+    payload << "planned_route[" << target << "]="
+            << fixed_sp_route_name(planned_routes[target]) << "\n";
   }
   for (std::size_t pair = 0; pair < request.pairs.size(); ++pair) {
     const FullCudaCiMethodPairRequest& value = request.pairs[pair];
@@ -1467,7 +1504,60 @@ std::string full_cuda_ci_method_batch_request_identity(
             << value.left_target_index << "|" << value.right_target_index
             << "\n";
   }
-  return full_cuda_ci_sha256_utf8(payload.str());
+  StaticRequestIdentity identity;
+  identity.schema_version =
+    kFullCudaCiMethodStaticRequestIdentitySchemaVersion;
+  identity.sha256 = full_cuda_ci_sha256_utf8(payload.str());
+  return identity;
+}
+
+PermutationAttestation full_cuda_ci_method_permutation_attestation(
+    const FullCudaCiMethodBatchRequest& request) {
+  static_assert(sizeof(int) == 4U,
+                "strict permutation payload requires 32-bit int");
+  PermutationAttestation attestation;
+  attestation.schema_version =
+    kFullCudaCiMethodPermutationAttestationSchemaVersion;
+  if (request.permutation_table.sealed()) {
+    attestation.payload_sha256 = request.permutation_table.sha256();
+    attestation.value_count = request.permutation_table.size();
+    attestation.byte_count = request.permutation_table.byte_size();
+  } else {
+    FullCudaCiSha256Builder empty_digest;
+    empty_digest.reset();
+    attestation.payload_sha256 = empty_digest.finish();
+  }
+  attestation.replicates = request.permutation_replicates;
+  std::ostringstream payload;
+  payload << "schema="
+          << kFullCudaCiMethodPermutationAttestationSchemaVersion << "\n"
+          << "payload_layout=pair-major-replicate-major-row-major-int32\n"
+          << "value_count=" << attestation.value_count << "\n"
+          << "byte_count=" << attestation.byte_count << "\n"
+          << "replicates=" << attestation.replicates << "\n"
+          << "payload_sha256="
+          << full_cuda_ci_sha256_hex(attestation.payload_sha256) << "\n";
+  attestation.sha256 = full_cuda_ci_sha256_utf8(payload.str());
+  return attestation;
+}
+
+CombinedRequestIdentity full_cuda_ci_method_combined_request_identity(
+    const StaticRequestIdentity& static_identity,
+    const PermutationAttestation& permutation_attestation) {
+  std::ostringstream payload;
+  payload << "schema="
+          << kFullCudaCiMethodCombinedRequestIdentitySchemaVersion << "\n"
+          << "static_schema=" << static_identity.schema_version << "\n"
+          << "static_sha256=" << static_identity.sha256 << "\n"
+          << "permutation_schema="
+          << permutation_attestation.schema_version << "\n"
+          << "permutation_attestation_sha256="
+          << permutation_attestation.sha256 << "\n";
+  CombinedRequestIdentity identity;
+  identity.schema_version =
+    kFullCudaCiMethodCombinedRequestIdentitySchemaVersion;
+  identity.sha256 = full_cuda_ci_sha256_utf8(payload.str());
+  return identity;
 }
 
 FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
@@ -1501,19 +1591,69 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   }
   strict_method_failure_checkpoint("after_prepared_identity_validate");
   const auto identity_started = std::chrono::steady_clock::now();
-  const std::string actual_identity = full_cuda_ci_method_batch_request_identity(
-    request, batch.target_keys, batch.n);
+  const auto static_identity_started = std::chrono::steady_clock::now();
+  const StaticRequestIdentity actual_static_identity =
+    full_cuda_ci_method_static_request_identity(
+      request, batch.target_keys, batch.planned_routes, batch.n);
+  const double static_identity_validation_host_ms =
+    std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - static_identity_started).count();
+  if (request.static_identity.schema_version !=
+        kFullCudaCiMethodStaticRequestIdentitySchemaVersion ||
+      !is_lower_sha256(request.static_identity.sha256) ||
+      request.static_identity.sha256 != actual_static_identity.sha256) {
+    throw std::runtime_error("strict CI method static identity mismatch");
+  }
+  strict_method_failure_checkpoint("after_static_identity_validate");
+
+  const auto attestation_started = std::chrono::steady_clock::now();
+  const PermutationAttestation actual_attestation =
+    full_cuda_ci_method_permutation_attestation(request);
+  const double permutation_attestation_validation_host_ms =
+    std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - attestation_started).count();
+  if (request.permutation_attestation.schema_version !=
+        kFullCudaCiMethodPermutationAttestationSchemaVersion ||
+      !is_lower_sha256(request.permutation_attestation.sha256) ||
+      request.permutation_attestation.payload_sha256 !=
+        actual_attestation.payload_sha256 ||
+      request.permutation_attestation.value_count !=
+        actual_attestation.value_count ||
+      request.permutation_attestation.byte_count !=
+        actual_attestation.byte_count ||
+      request.permutation_attestation.replicates !=
+        actual_attestation.replicates ||
+      request.permutation_attestation.sha256 != actual_attestation.sha256) {
+    throw std::runtime_error(
+      "strict CI method permutation attestation mismatch");
+  }
+  strict_method_failure_checkpoint("after_permutation_attestation_validate");
+
+  const auto combined_identity_started = std::chrono::steady_clock::now();
+  const CombinedRequestIdentity actual_combined_identity =
+    full_cuda_ci_method_combined_request_identity(
+      actual_static_identity, actual_attestation);
+  const double combined_identity_validation_host_ms =
+    std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - combined_identity_started).count();
+  if (request.combined_identity.schema_version !=
+        kFullCudaCiMethodCombinedRequestIdentitySchemaVersion ||
+      !is_lower_sha256(request.combined_identity.sha256) ||
+      request.combined_identity.sha256 != actual_combined_identity.sha256) {
+    throw std::runtime_error("strict CI method combined identity mismatch");
+  }
+  strict_method_failure_checkpoint("after_combined_identity_validate");
   const double identity_validation_host_ms =
     std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - identity_started).count();
-  if (!is_lower_sha256(request.request_identity_sha256) ||
-      request.request_identity_sha256 != actual_identity) {
-    throw std::runtime_error("strict CI method request identity mismatch");
-  }
 
   FullCudaCiMethodBatchResult result;
   result.schema_version = kFullCudaCiMethodBatchResultSchemaVersion;
-  result.request_identity_sha256 = request.request_identity_sha256;
+  result.static_request_identity_sha256 = request.static_identity.sha256;
+  result.permutation_attestation_sha256 =
+    request.permutation_attestation.sha256;
+  result.combined_request_identity_sha256 = request.combined_identity.sha256;
+  result.request_identity_sha256 = request.combined_identity.sha256;
   result.prepared_s_key_sha256 = prepared_info.prepared_s_key_sha256;
   result.target_keys = batch.target_keys;
   FullCudaCiMethodBatchDiagnostics& diagnostics = result.diagnostics;
@@ -1527,11 +1667,18 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   diagnostics.permutation_replicates = request.permutation_replicates;
   diagnostics.execution_context_call_count = 1;
   diagnostics.execution_context_reuse_count = context_reused ? 1 : 0;
+  diagnostics.static_identity_validation_host_ms =
+    static_identity_validation_host_ms;
+  diagnostics.permutation_attestation_validation_host_ms =
+    permutation_attestation_validation_host_ms;
+  diagnostics.combined_identity_validation_host_ms =
+    combined_identity_validation_host_ms;
   diagnostics.request_identity_validation_host_ms =
     identity_validation_host_ms;
+  diagnostics.static_identity_authenticated = true;
   diagnostics.request_identity_authenticated = true;
-  diagnostics.permutation_attestation_authenticated =
-    request.ci_method == "hsic.gamma" || request.permutation_table.sealed();
+  diagnostics.permutation_attestation_authenticated = true;
+  diagnostics.combined_identity_authenticated = true;
   diagnostics.prepared_identity_authenticated = true;
 
   std::vector<int> component_targets;
