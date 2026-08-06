@@ -816,6 +816,33 @@ __device__ int grouped_stable_svd_two_warp_continuation(
   return 0;
 }
 
+__device__ int complete_stable_right_vectors_after_score(
+    integer n, Workspace* workspace) {
+  if (workspace->qr_basis_used != 0) return 0;
+  if (blockDim.x != 64 || n <= FASTKPC_LAPACK_SMALL_SMLSIZ) return -100;
+  const integer warp = static_cast<integer>(threadIdx.x) >> 5;
+  const integer lane = static_cast<integer>(threadIdx.x) & 31;
+  integer info = 0;
+  if (warp == 0) {
+    char right = 'R';
+    for (integer reflector = n - 2; reflector >= 0; --reflector) {
+      integer reflector_order = n - reflector - 1;
+      doublereal* vector =
+        workspace->r + reflector + n * (reflector + 1);
+      const doublereal saved = *vector;
+      *vector = 1.0;
+      dlarf_(&right, &n, &reflector_order, vector, &n,
+             workspace->tau_p + reflector,
+             workspace->bidiagonal_vt + n * (reflector + 1), &n,
+             workspace->work, 1);
+      *vector = saved;
+    }
+    if (lane == 0) workspace->iwork[0] = info;
+  }
+  __syncthreads();
+  return workspace->iwork[0];
+}
+
 __device__ int small_dgesdd_left(
     integer m, integer n, Workspace* workspace,
     bool compute_right_vectors = true,

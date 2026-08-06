@@ -5259,6 +5259,34 @@ extern "C" SEXP C_fixed_sp_cuda_runtime_info(SEXP runtime_s) {
       info.svd_checkpoint_record_count,
     Rcpp::Named("svd_checkpoint_wait_count") =
       info.svd_checkpoint_wait_count,
+    Rcpp::Named("penalty_root_cache_capacity_entries") =
+      static_cast<double>(info.penalty_root_cache_capacity_entries),
+    Rcpp::Named("penalty_root_cache_capacity_bytes") =
+      static_cast<double>(info.penalty_root_cache_capacity_bytes),
+    Rcpp::Named("penalty_root_cache_lookup_count") =
+      static_cast<double>(info.penalty_root_cache_lookup_count),
+    Rcpp::Named("penalty_root_cache_hit_count") =
+      static_cast<double>(info.penalty_root_cache_hit_count),
+    Rcpp::Named("penalty_root_cache_miss_count") =
+      static_cast<double>(info.penalty_root_cache_miss_count),
+    Rcpp::Named("penalty_root_cache_insert_count") =
+      static_cast<double>(info.penalty_root_cache_insert_count),
+    Rcpp::Named("penalty_root_cache_bypass_count") =
+      static_cast<double>(info.penalty_root_cache_bypass_count),
+    Rcpp::Named("penalty_root_cache_identity_rejection_count") =
+      static_cast<double>(info.penalty_root_cache_identity_rejection_count),
+    Rcpp::Named("penalty_root_cache_entries") =
+      static_cast<double>(info.penalty_root_cache_entries),
+    Rcpp::Named("penalty_root_cache_peak_entries") =
+      static_cast<double>(info.penalty_root_cache_peak_entries),
+    Rcpp::Named("penalty_root_cache_device_bytes") =
+      static_cast<double>(info.penalty_root_cache_device_bytes),
+    Rcpp::Named("penalty_root_cache_peak_device_bytes") =
+      static_cast<double>(info.penalty_root_cache_peak_device_bytes),
+    Rcpp::Named("penalty_root_cache_hit_d2d_bytes") =
+      static_cast<double>(info.penalty_root_cache_hit_d2d_bytes),
+    Rcpp::Named("penalty_root_cache_insert_d2d_bytes") =
+      static_cast<double>(info.penalty_root_cache_insert_d2d_bytes),
     Rcpp::Named("workspace_bytes") =
       static_cast<double>(info.workspace_bytes),
     Rcpp::Named("cublas_workspace_bytes") =

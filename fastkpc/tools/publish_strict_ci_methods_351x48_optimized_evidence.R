@@ -85,6 +85,23 @@ for (method in names(expected)) {
   summary <- candidate$summary
   old_summary <- baseline$summary
   validation <- candidate_payload$validation
+  residual_route <- if (method == "hsic.gamma") {
+    summary$strict_hsic_gamma_residual_route
+  } else {
+    summary$strict_permutation_residual_route
+  }
+  permutation_accounted <- if (method == "hsic.perm") {
+    isTRUE(summary$method_permutation_inline_r_index_requested) &&
+      isTRUE(summary$method_permutation_inline_r_index_active) &&
+      summary$method_permutation_inline_r_index_count ==
+        summary$method_permutation_table_value_count &&
+      summary$method_permutation_inline_r_draw_count >=
+        summary$method_permutation_inline_r_index_count
+  } else {
+    !isTRUE(summary$method_permutation_inline_r_index_requested) &&
+      !isTRUE(summary$method_permutation_inline_r_index_active) &&
+      summary$method_permutation_inline_r_index_count == 0
+  }
   require_true(
     identical(summary$ci_method, method) && isTRUE(validation$pass) &&
       identical(receipt$method, method) && isTRUE(receipt$pass) &&
@@ -95,7 +112,12 @@ for (method in names(expected)) {
                 expected[[method]][["orientation"]]) &&
       summary$residual_d2h_bytes == 0 &&
       summary$component_d2h_bytes == 0 &&
-      summary$method_residual_cache_eviction_count == 0L,
+      summary$method_residual_cache_eviction_count == 0L &&
+      identical(residual_route, "qr-through-2") &&
+      identical(summary$sha256_backend, "openssl-sha256") &&
+      summary$method_request_identity_build_host_ms >= 0 &&
+      summary$method_request_identity_validation_host_ms >= 0 &&
+      isTRUE(permutation_accounted),
     paste(method, "optimized evidence gate failed")
   )
 
@@ -123,6 +145,14 @@ for (method in names(expected)) {
       graph_and_process = "exact",
       orientation_ci_and_pdag = "bitwise-exact"
     ),
+    optimization = list(
+      residual_route = residual_route,
+      sha256_backend = summary$sha256_backend,
+      persistent_execution_context = TRUE,
+      hsic_permutation_inline_r_index =
+        isTRUE(summary$method_permutation_inline_r_index_active),
+      hsic_component_cache = method == "hsic.perm"
+    ),
     performance = list(
       previous_skeleton_elapsed_sec = old_elapsed,
       optimized_skeleton_elapsed_sec = elapsed,
@@ -135,7 +165,13 @@ for (method in names(expected)) {
       component_build_previous_sec =
         as.numeric(old_summary$cuda_dcov_component_build_ms) / 1000,
       component_build_optimized_sec =
-        as.numeric(summary$cuda_dcov_component_build_ms) / 1000
+        as.numeric(summary$cuda_dcov_component_build_ms) / 1000,
+      permutation_table_sec =
+        as.numeric(summary$method_permutation_table_host_ms) / 1000,
+      request_identity_build_sec =
+        as.numeric(summary$method_request_identity_build_host_ms) / 1000,
+      request_identity_validation_sec =
+        as.numeric(summary$method_request_identity_validation_host_ms) / 1000
     ),
     physical_work = list(
       logical_residual_requests =
@@ -159,6 +195,24 @@ for (method in names(expected)) {
         as.numeric(summary$method_residual_cache_device_bytes),
       gather_d2d_bytes =
         as.numeric(summary$method_residual_cache_gather_d2d_bytes),
+      execution_context_call_count =
+        as.integer(summary$method_execution_context_call_count),
+      execution_context_reuse_count =
+        as.integer(summary$method_execution_context_reuse_count),
+      component_cache_hit_count =
+        as.integer(summary$method_component_cache_hit_count),
+      component_cache_miss_count =
+        as.integer(summary$method_component_cache_miss_count),
+      component_cache_eviction_count =
+        as.integer(summary$method_component_cache_eviction_count),
+      component_cache_device_bytes =
+        as.numeric(summary$method_component_cache_device_bytes),
+      permutation_table_value_count =
+        as.numeric(summary$method_permutation_table_value_count),
+      permutation_inline_index_count =
+        as.numeric(summary$method_permutation_inline_r_index_count),
+      permutation_inline_draw_count =
+        as.numeric(summary$method_permutation_inline_r_draw_count),
       residual_d2h_bytes = as.numeric(summary$residual_d2h_bytes),
       component_d2h_bytes = as.numeric(summary$component_d2h_bytes)
     ),
@@ -198,8 +252,13 @@ for (method in names(expected)) {
 }
 
 source_paths <- c(
+  contract = "fastkpc/src/full_cuda_ci_contract.cpp",
+  contract_api = "fastkpc/src/full_cuda_ci_contract.hpp",
   method_batch_cuda = "fastkpc/src/cuda/full_cuda_ci_method_batch.cu",
   method_batch_api = "fastkpc/src/cuda/full_cuda_ci_method_batch.hpp",
+  fixed_sp_runtime = "fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu",
+  fixed_sp_runtime_types =
+    "fastkpc/src/cuda/mgcv_fixed_sp_runtime_types.hpp",
   one_call = "fastkpc/src/full_cuda_ci_one_call.cpp",
   candidate_runner =
     "fastkpc/tools/run_strict_ci_method_351x48_candidate.R",
@@ -244,7 +303,11 @@ manifest <- list(
     residual_cache_policy = "all-hit-complete-original-cohort-only",
     residual_cache_budget_bytes = 384 * 1024^2,
     residual_payload_transfer = "device-to-device-gather",
-    hsic_component_policy = "parallel-rows-serial-numerical-order"
+    hsic_component_policy = "parallel-rows-serial-numerical-order",
+    fixed_sp_residual_route = "augmented-QR-through-2-then-stable-SVD",
+    hsic_permutation_component_cache_budget_bytes = 384 * 1024^2,
+    hsic_permutation_index_policy = "inline-R-Rejection-through-n32768",
+    request_authentication = "OpenSSL-SHA256-no-intermediate-payload-copy"
   ),
   methods = methods,
   aggregate = list(
@@ -278,6 +341,10 @@ manifest <- list(
     native_library_path = native_path,
     native_library_bytes = unname(as.numeric(file.info(native_path)$size)),
     native_library_sha256 = sha256_file(native_path),
+    sha256_backend = "openssl-sha256",
+    openssl_version = paste(system2(
+      "openssl", "version", stdout = TRUE, stderr = TRUE
+    ), collapse = " "),
     dataset_path = dataset_path,
     dataset_bytes = unname(as.numeric(file.info(dataset_path)$size)),
     dataset_sha256 = sha256_file(dataset_path)

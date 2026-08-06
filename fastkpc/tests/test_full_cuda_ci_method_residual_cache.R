@@ -132,6 +132,57 @@ for (method in c("dcc.perm", "hsic.perm")) {
       summary$unknown_fallback_count == 0L,
     paste(method, "residual cache authority failed closed")
   )
+  assert_true(
+    summary$method_execution_context_call_count ==
+        summary$frontier_batch_count &&
+      summary$method_execution_context_reuse_count ==
+        summary$method_execution_context_call_count - 1L &&
+      summary$method_execution_context_buffer_growth_count > 0L,
+    paste(method, "persistent execution context accounting changed")
+  )
+  assert_true(
+    identical(summary$strict_permutation_residual_route, "qr-through-2"),
+    paste(method, "did not use the qualified QR-through-2 residual route")
+  )
+  if (method == "hsic.perm") {
+    component_bytes <- n * 35L * 8 + 4L
+    assert_true(
+      summary$method_component_cache_request_count ==
+          summary$method_component_cache_hit_count +
+            summary$method_component_cache_miss_count &&
+        summary$method_component_cache_miss_count ==
+          summary$cuda_exact_screen_component_count &&
+        summary$method_component_cache_gather_d2d_bytes ==
+          summary$method_component_cache_hit_count * component_bytes &&
+        summary$method_component_cache_store_d2d_bytes ==
+          summary$method_component_cache_insert_count * component_bytes &&
+        summary$method_component_cache_eviction_count <=
+          summary$method_component_cache_insert_count &&
+        isTRUE(summary$method_permutation_inline_r_index_requested) &&
+        isTRUE(summary$method_permutation_inline_r_index_active) &&
+        summary$method_permutation_inline_r_index_count ==
+          summary$method_permutation_table_value_count &&
+        summary$method_permutation_inline_r_draw_count >=
+          summary$method_permutation_inline_r_index_count,
+      "hsic.perm persistent component cache accounting changed"
+    )
+  } else {
+    assert_true(
+      summary$method_component_cache_request_count == 0L &&
+        summary$method_component_cache_hit_count == 0L &&
+        summary$method_component_cache_miss_count == 0L &&
+        !isTRUE(summary$method_permutation_inline_r_index_requested) &&
+        !isTRUE(summary$method_permutation_inline_r_index_active) &&
+        summary$method_permutation_inline_r_index_count == 0,
+      "dcc.perm unexpectedly used the HSIC component cache"
+    )
+  }
+  assert_true(
+    identical(summary$sha256_backend, "openssl-sha256") &&
+      summary$method_request_identity_build_host_ms >= 0 &&
+      summary$method_request_identity_validation_host_ms >= 0,
+    paste(method, "accelerated request authentication changed")
+  )
 }
 
 oracle <- run_cpu("hsic.gamma")
@@ -194,6 +245,20 @@ assert_true(
     summary$cpu_residual_solve_count == 0L &&
     summary$unknown_fallback_count == 0L,
   "hsic.gamma residual cache authority failed closed"
+)
+assert_true(
+  summary$method_execution_context_call_count == summary$frontier_batch_count &&
+    summary$method_execution_context_reuse_count ==
+      summary$method_execution_context_call_count - 1L &&
+    summary$method_execution_context_buffer_growth_count > 0L &&
+    summary$method_component_cache_request_count == 0L &&
+    summary$method_component_cache_hit_count == 0L &&
+    summary$method_component_cache_miss_count == 0L,
+  "hsic.gamma persistent execution context accounting changed"
+)
+assert_true(
+  identical(summary$strict_hsic_gamma_residual_route, "qr-through-2"),
+  "hsic.gamma did not use the qualified QR-through-2 residual route"
 )
 
 cat("test_full_cuda_ci_method_residual_cache.R: PASS\n")

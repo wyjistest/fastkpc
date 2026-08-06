@@ -12,6 +12,7 @@
 namespace fastkpc {
 
 class FullCudaCiMethodResidualCache;
+class FullCudaCiMethodExecutionContext;
 
 constexpr char kFullCudaCiMethodBatchRequestSchemaVersion[] =
   "full-cuda-ci-method-batch-request-v1";
@@ -78,10 +79,25 @@ struct FullCudaCiMethodBatchDiagnostics {
   std::size_t residual_cache_capacity_entries = 0;
   std::size_t residual_cache_device_bytes = 0;
   std::size_t residual_cache_gather_d2d_bytes = 0;
+  int execution_context_call_count = 0;
+  int execution_context_reuse_count = 0;
+  int execution_context_buffer_growth_count = 0;
+  std::size_t execution_context_device_bytes = 0;
+  int component_cache_persistent_request_count = 0;
+  int component_cache_persistent_lookup_count = 0;
+  int component_cache_persistent_hit_count = 0;
+  int component_cache_persistent_miss_count = 0;
+  int component_cache_persistent_insert_count = 0;
+  int component_cache_persistent_eviction_count = 0;
+  std::size_t component_cache_persistent_capacity_entries = 0;
+  std::size_t component_cache_persistent_device_bytes = 0;
+  std::size_t component_cache_persistent_gather_d2d_bytes = 0;
+  std::size_t component_cache_persistent_store_d2d_bytes = 0;
   double residual_solve_host_ms = 0.0;
   double component_build_cuda_ms = 0.0;
   double pair_evaluation_cuda_ms = 0.0;
   double compact_d2h_cuda_ms = 0.0;
+  double request_identity_validation_host_ms = 0.0;
   double total_host_ms = 0.0;
   bool request_identity_authenticated = false;
   bool prepared_identity_authenticated = false;
@@ -116,12 +132,21 @@ create_full_cuda_ci_method_residual_cache(
   int n,
   std::size_t byte_budget);
 
+std::shared_ptr<FullCudaCiMethodExecutionContext>
+create_full_cuda_ci_method_execution_context(
+  int n,
+  const std::string& ci_method,
+  int num_col,
+  int permutation_replicates);
+
 FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
   const FixedSpBatchHostView& batch,
   const FullCudaCiMethodBatchRequest& request,
   const std::shared_ptr<FullCudaCiMethodResidualCache>& residual_cache =
-    std::shared_ptr<FullCudaCiMethodResidualCache>());
+    std::shared_ptr<FullCudaCiMethodResidualCache>(),
+  const std::shared_ptr<FullCudaCiMethodExecutionContext>& execution_context =
+    std::shared_ptr<FullCudaCiMethodExecutionContext>());
 
 }  // namespace fastkpc
 

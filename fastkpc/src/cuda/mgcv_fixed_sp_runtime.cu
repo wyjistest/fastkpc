@@ -12,6 +12,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <memory>
@@ -20,6 +21,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -30,6 +32,9 @@ namespace {
 constexpr std::size_t kStableBaseIntArraysPerTarget = 6U;
 constexpr std::size_t kStableAggregateIntArraysPerTarget = 3U;
 constexpr std::size_t kStableDoubleArraysPerTarget = 3U;
+constexpr std::size_t kFixedSpPenaltyRootCacheCapacity = 4096U;
+constexpr std::size_t kFixedSpPenaltyRootCacheByteCapacity =
+  256U * 1024U * 1024U;
 static_assert(sizeof(double) % sizeof(int) == 0U,
               "double diagnostics must fit an integral number of ints");
 constexpr std::size_t kIntsPerDouble = sizeof(double) / sizeof(int);
@@ -1850,6 +1855,96 @@ enum class FixedSpOwnerLifecycle {
   Freed
 };
 
+struct FixedSpPenaltyRootCacheEntry {
+  double* values = nullptr;
+  int coefficient_dim = 0;
+  int null_dim = 0;
+  int penalty_dimension = 0;
+  int penalty_offset_zero_based = 0;
+  int rank = 0;
+  std::size_t bytes = 0U;
+  std::vector<std::uint64_t> penalty_block_bits;
+};
+
+struct PendingFixedSpPenaltyRootCacheEntry {
+  std::string key;
+  FixedSpPenaltyRootCacheEntry entry;
+  int validation_index = -1;
+};
+
+namespace {
+
+bool is_lower_sha256_string(const std::string& value) {
+  return value.size() == 64U &&
+    std::all_of(value.begin(), value.end(), [](char character) {
+      return (character >= '0' && character <= '9') ||
+        (character >= 'a' && character <= 'f');
+    });
+}
+
+std::uint64_t double_bits(double value) {
+  std::uint64_t bits = 0U;
+  static_assert(sizeof(bits) == sizeof(value),
+                "double cache identity requires 64-bit doubles");
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+void set_penalty_root_cache_identity(
+    FixedSpPenaltyRootCacheEntry* entry,
+    const PreparedSHostView& setup,
+    int penalty) {
+  entry->coefficient_dim = setup.coefficient_dim;
+  entry->null_dim = setup.null_dim;
+  entry->penalty_dimension = setup.penalty_dimensions[
+    static_cast<std::size_t>(penalty)];
+  entry->penalty_offset_zero_based = setup.penalty_offsets_zero_based[
+    static_cast<std::size_t>(penalty)];
+  entry->rank = setup.penalty_ranks[static_cast<std::size_t>(penalty)];
+  const std::size_t block_count = checked_multiply(
+    static_cast<std::size_t>(entry->penalty_dimension),
+    static_cast<std::size_t>(entry->penalty_dimension),
+    "prepared cached root identity");
+  const double* block = setup.penalty_blocks[
+    static_cast<std::size_t>(penalty)];
+  entry->penalty_block_bits.resize(block_count);
+  for (std::size_t index = 0; index < block_count; ++index) {
+    entry->penalty_block_bits[index] = double_bits(block[index]);
+  }
+}
+
+bool penalty_root_cache_identity_matches(
+    const FixedSpPenaltyRootCacheEntry& entry,
+    const PreparedSHostView& setup,
+    int penalty) {
+  const int dimension = setup.penalty_dimensions[
+    static_cast<std::size_t>(penalty)];
+  if (entry.values == nullptr ||
+      entry.coefficient_dim != setup.coefficient_dim ||
+      entry.null_dim != setup.null_dim ||
+      entry.penalty_dimension != dimension ||
+      entry.penalty_offset_zero_based != setup.penalty_offsets_zero_based[
+        static_cast<std::size_t>(penalty)] ||
+      entry.rank != setup.penalty_ranks[static_cast<std::size_t>(penalty)]) {
+    return false;
+  }
+  const std::size_t block_count = checked_multiply(
+    static_cast<std::size_t>(dimension),
+    static_cast<std::size_t>(dimension),
+    "prepared cached root identity");
+  if (entry.penalty_block_bits.size() != block_count) return false;
+  const double* block = setup.penalty_blocks[
+    static_cast<std::size_t>(penalty)];
+  for (std::size_t index = 0; index < block_count; ++index) {
+    if (entry.penalty_block_bits[index] != double_bits(block[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
 class CudaRuntimeContext {
  public:
   explicit CudaRuntimeContext(int requested_device);
@@ -1886,6 +1981,8 @@ class CudaRuntimeContext {
   std::shared_ptr<FixedSpResourceLedger> resource_ledger =
     std::make_shared<FixedSpResourceLedger>();
   FixedSpRuntimeInfo diagnostics;
+  std::unordered_map<std::string, FixedSpPenaltyRootCacheEntry>
+    penalty_root_cache;
   std::atomic<int> active_prepared_handle_count{0};
   FixedSpOwnerLifecycle lifecycle = FixedSpOwnerLifecycle::Usable;
   mutable std::mutex mutex;
@@ -2521,6 +2618,10 @@ CudaRuntimeContext::CudaRuntimeContext(int requested_device) {
   diagnostics.creator_pid = creator_pid;
   diagnostics.generation = generation;
   diagnostics.runtime_context_create_count = 1;
+  diagnostics.penalty_root_cache_capacity_entries =
+    kFixedSpPenaltyRootCacheCapacity;
+  diagnostics.penalty_root_cache_capacity_bytes =
+    kFixedSpPenaltyRootCacheByteCapacity;
 
   try {
     check_cuda(cudaSetDevice(device_id), "set CUDA device");
@@ -2637,6 +2738,8 @@ OwnerTeardownStatus CudaRuntimeContext::close_once_noexcept() noexcept {
     pointer_arena = nullptr;
     cublas_workspace = nullptr;
     stable_workspace = FixedSpStableWorkspace{};
+    for (auto& entry : penalty_root_cache) entry.second.values = nullptr;
+    penalty_root_cache.clear();
     diagnostics.freed = true;
     lifecycle = FixedSpOwnerLifecycle::Freed;
     return status;
@@ -2645,6 +2748,13 @@ OwnerTeardownStatus CudaRuntimeContext::close_once_noexcept() noexcept {
   FixedSpResourceLedger* ledger = resource_ledger.get();
   ScopedCleanupCudaDevice cleanup_device(creator_pid, device_id, ledger);
   if (cleanup_device.ready()) {
+    bool root_cache_freed = true;
+    for (auto& entry : penalty_root_cache) {
+      status.observe(tracked_cuda_free_noexcept(
+        ledger, &entry.second.values));
+      if (entry.second.values != nullptr) root_cache_freed = false;
+    }
+    if (root_cache_freed) penalty_root_cache.clear();
     status.observe(tracked_cuda_free_noexcept(ledger, &double_arena));
     if (double_arena == nullptr) stable_workspace = FixedSpStableWorkspace{};
     status.observe(tracked_cuda_free_noexcept(ledger, &int_arena));
@@ -3479,6 +3589,55 @@ static std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu_impl(
     positive_size(setup.null_dim, "prepared root null dimension"),
     "prepared penalty roots");
   const bool has_H = setup.H != nullptr;
+  const bool root_cache_requested =
+    !transient_fixed_sp_compatibility &&
+    !setup.penalty_root_cache_keys.empty();
+  if (root_cache_requested && (setup.Z != nullptr || setup.H != nullptr)) {
+    context->diagnostics.penalty_root_cache_identity_rejection_count += 1;
+    throw std::runtime_error(
+      "prepared penalty root cache requires identity Z and null H");
+  }
+  if (root_cache_requested &&
+      setup.penalty_root_cache_keys.size() !=
+        static_cast<std::size_t>(setup.penalty_count)) {
+    context->diagnostics.penalty_root_cache_identity_rejection_count += 1;
+    throw std::runtime_error(
+      "prepared penalty root cache key count is malformed");
+  }
+  std::vector<double*> cached_penalty_roots(
+    static_cast<std::size_t>(setup.penalty_count), nullptr);
+  std::vector<bool> penalty_root_cache_hits(
+    static_cast<std::size_t>(setup.penalty_count), false);
+  bool penalty_root_build_required = !root_cache_requested;
+  if (root_cache_requested) {
+    for (int penalty = 0; penalty < setup.penalty_count; ++penalty) {
+      context->diagnostics.penalty_root_cache_lookup_count += 1;
+      const std::string& key = setup.penalty_root_cache_keys[
+        static_cast<std::size_t>(penalty)];
+      if (!is_lower_sha256_string(key)) {
+        context->diagnostics.penalty_root_cache_identity_rejection_count += 1;
+        throw std::runtime_error(
+          "prepared penalty root cache key is malformed");
+      }
+      const auto found = context->penalty_root_cache.find(key);
+      if (found == context->penalty_root_cache.end()) {
+        context->diagnostics.penalty_root_cache_miss_count += 1;
+        penalty_root_build_required = true;
+        continue;
+      }
+      if (!penalty_root_cache_identity_matches(
+            found->second, setup, penalty)) {
+        context->diagnostics.penalty_root_cache_identity_rejection_count += 1;
+        throw std::runtime_error(
+          "prepared penalty root cache identity is malformed");
+      }
+      context->diagnostics.penalty_root_cache_hit_count += 1;
+      cached_penalty_roots[static_cast<std::size_t>(penalty)] =
+        found->second.values;
+      penalty_root_cache_hits[static_cast<std::size_t>(penalty)] = true;
+    }
+  }
+  penalty_root_build_required = penalty_root_build_required || has_H;
   const std::size_t validation_count = transient_fixed_sp_compatibility ?
     1U : checked_add(
       positive_size(setup.penalty_count, "prepared penalty count"),
@@ -3528,6 +3687,7 @@ static std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu_impl(
              "set CUDA device for prepared setup");
   FixedSpRootValidationRecord* d_root_validation = nullptr;
   FixedSpRootValidationRecord* host_root_validation = nullptr;
+  std::vector<PendingFixedSpPenaltyRootCacheEntry> pending_root_cache_entries;
   try {
     tracked_cuda_malloc(
       context->resource_ledger.get(),
@@ -3578,12 +3738,14 @@ static std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu_impl(
     const std::size_t validation_bytes = allocation_bytes(
       validation_count, sizeof(FixedSpRootValidationRecord),
       "prepared root validation records");
-    tracked_cuda_malloc(
-      context->resource_ledger.get(), &d_root_validation,
-      validation_bytes, "allocate prepared root validation records");
-    tracked_cuda_malloc_host(
-      context->resource_ledger.get(), &host_root_validation,
-      validation_bytes, "allocate prepared root host validation records");
+    if (penalty_root_build_required) {
+      tracked_cuda_malloc(
+        context->resource_ledger.get(), &d_root_validation,
+        validation_bytes, "allocate prepared root validation records");
+      tracked_cuda_malloc_host(
+        context->resource_ledger.get(), &host_root_validation,
+        validation_bytes, "allocate prepared root host validation records");
+    }
 
     tracked_cuda_malloc(
       context->resource_ledger.get(),
@@ -3659,9 +3821,10 @@ static std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu_impl(
 
     if (!transient_fixed_sp_compatibility) {
     FixedSpStableWorkspace& stable = context->stable_workspace;
-    if (stable.scaled_projection == nullptr || stable.diagonal == nullptr ||
-        stable.eigen_work == nullptr || stable.info == nullptr ||
-        stable.eigen_lwork <= 0 || stable.max_q < setup.null_dim) {
+    if (penalty_root_build_required &&
+        (stable.scaled_projection == nullptr || stable.diagonal == nullptr ||
+         stable.eigen_work == nullptr || stable.info == nullptr ||
+         stable.eigen_lwork <= 0 || stable.max_q < setup.null_dim)) {
       throw std::runtime_error(
         "prepared penalty root eigensolver workspace is unavailable");
     }
@@ -3688,7 +3851,34 @@ static std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu_impl(
         d_root_validation + validation_index, context->stream);
     };
 
+    pending_root_cache_entries.reserve(
+      static_cast<std::size_t>(setup.penalty_count));
     for (int penalty = 0; penalty < setup.penalty_count; ++penalty) {
+      const int rank =
+        handle->penalty_root_ranks[static_cast<std::size_t>(penalty)];
+      const int root_offset =
+        handle->penalty_root_offsets[static_cast<std::size_t>(penalty)];
+      const std::size_t root_width = allocation_bytes(
+        static_cast<std::size_t>(rank), sizeof(double),
+        "prepared cached root row");
+      const std::size_t root_bytes = checked_multiply(
+        root_width, static_cast<std::size_t>(setup.null_dim),
+        "prepared cached root bytes");
+      if (penalty_root_cache_hits[static_cast<std::size_t>(penalty)]) {
+        check_cuda(cudaMemcpy2DAsync(
+          handle->d_penalty_roots + root_offset,
+          allocation_bytes(
+            static_cast<std::size_t>(handle->total_penalty_root_rows),
+            sizeof(double), "prepared root destination pitch"),
+          cached_penalty_roots[static_cast<std::size_t>(penalty)],
+          root_width, root_width, static_cast<std::size_t>(setup.null_dim),
+          cudaMemcpyDeviceToDevice, context->stream
+        ), "copy cached prepared penalty root");
+        context->diagnostics.penalty_root_cache_hit_d2d_bytes = checked_add(
+          context->diagnostics.penalty_root_cache_hit_d2d_bytes,
+          root_bytes, "cached prepared root hit D2D bytes");
+        continue;
+      }
       check_cuda(cudaMemcpyAsync(
         stable.scaled_projection,
         handle->d_projected_penalties +
@@ -3698,10 +3888,50 @@ static std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu_impl(
       decompose_and_build(
         penalty, handle->d_penalty_roots,
         handle->total_penalty_root_rows,
-        handle->penalty_root_offsets[static_cast<std::size_t>(penalty)],
-        handle->penalty_root_ranks[static_cast<std::size_t>(penalty)],
-        handle->penalty_root_ranks[static_cast<std::size_t>(penalty)],
+        root_offset, rank, rank,
         "decompose projected smooth penalty");
+      const bool cache_entry_capacity_available =
+        context->penalty_root_cache.size() +
+          pending_root_cache_entries.size() <
+            kFixedSpPenaltyRootCacheCapacity;
+      std::size_t pending_cache_bytes = 0U;
+      for (const PendingFixedSpPenaltyRootCacheEntry& pending :
+           pending_root_cache_entries) {
+        pending_cache_bytes = checked_add(
+          pending_cache_bytes, pending.entry.bytes,
+          "pending prepared root cache bytes");
+      }
+      const bool cache_byte_capacity_available =
+        root_bytes <= kFixedSpPenaltyRootCacheByteCapacity &&
+        context->diagnostics.penalty_root_cache_device_bytes <=
+          kFixedSpPenaltyRootCacheByteCapacity - root_bytes &&
+        pending_cache_bytes <=
+          kFixedSpPenaltyRootCacheByteCapacity - root_bytes -
+            context->diagnostics.penalty_root_cache_device_bytes;
+      if (root_cache_requested && cache_entry_capacity_available &&
+          cache_byte_capacity_available) {
+        PendingFixedSpPenaltyRootCacheEntry pending;
+        pending.key = setup.penalty_root_cache_keys[
+          static_cast<std::size_t>(penalty)];
+        set_penalty_root_cache_identity(&pending.entry, setup, penalty);
+        pending.entry.bytes = root_bytes;
+        pending.validation_index = penalty;
+        tracked_cuda_malloc(
+          context->resource_ledger.get(), &pending.entry.values,
+          pending.entry.bytes, "allocate cached prepared penalty root");
+        check_cuda(cudaMemcpy2DAsync(
+          pending.entry.values, root_width,
+          handle->d_penalty_roots + root_offset,
+          allocation_bytes(
+            static_cast<std::size_t>(handle->total_penalty_root_rows),
+            sizeof(double), "prepared root source pitch"),
+          root_width, static_cast<std::size_t>(setup.null_dim),
+          cudaMemcpyDeviceToDevice, context->stream
+        ), "store cached prepared penalty root");
+        pending_root_cache_entries.push_back(std::move(pending));
+      } else if (root_cache_requested) {
+        context->diagnostics.penalty_root_cache_bypass_count += 1;
+      }
     }
     if (has_H) {
       check_cuda(cudaMemcpyAsync(
@@ -3713,10 +3943,12 @@ static std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu_impl(
         setup.null_dim, -1, "decompose projected H");
     }
 
-    check_cuda(cudaMemcpyAsync(
-      host_root_validation, d_root_validation, validation_bytes,
-      cudaMemcpyDeviceToHost, context->stream
-    ), "download prepared root validation records");
+    if (penalty_root_build_required) {
+      check_cuda(cudaMemcpyAsync(
+        host_root_validation, d_root_validation, validation_bytes,
+        cudaMemcpyDeviceToHost, context->stream
+      ), "download prepared root validation records");
+    }
     check_cuda(cudaEventRecord(
       handle->setup_completion_event, context->stream
     ), "record prepared setup completion");
@@ -3753,6 +3985,9 @@ static std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu_impl(
       return record.rank;
     };
     for (int penalty = 0; penalty < setup.penalty_count; ++penalty) {
+      if (penalty_root_cache_hits[static_cast<std::size_t>(penalty)]) {
+        continue;
+      }
       validate_root_record(
         penalty, "smooth penalty",
         handle->penalty_root_ranks[static_cast<std::size_t>(penalty)]);
@@ -3760,6 +3995,32 @@ static std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu_impl(
     if (has_H) {
       handle->H_root_rank = validate_root_record(
         setup.penalty_count, "H", -1);
+    }
+    for (PendingFixedSpPenaltyRootCacheEntry& pending :
+         pending_root_cache_entries) {
+      const auto inserted = context->penalty_root_cache.emplace(
+        pending.key, pending.entry);
+      if (!inserted.second) {
+        context->diagnostics.penalty_root_cache_identity_rejection_count += 1;
+        throw std::runtime_error(
+          "prepared penalty root cache inserted a duplicate key");
+      }
+      context->diagnostics.penalty_root_cache_insert_count += 1;
+      context->diagnostics.penalty_root_cache_device_bytes = checked_add(
+        context->diagnostics.penalty_root_cache_device_bytes,
+        pending.entry.bytes, "prepared root cache device bytes");
+      context->diagnostics.penalty_root_cache_insert_d2d_bytes = checked_add(
+        context->diagnostics.penalty_root_cache_insert_d2d_bytes,
+        pending.entry.bytes, "prepared root cache insert D2D bytes");
+      context->diagnostics.penalty_root_cache_entries =
+        context->penalty_root_cache.size();
+      context->diagnostics.penalty_root_cache_peak_entries = std::max(
+        context->diagnostics.penalty_root_cache_peak_entries,
+        context->diagnostics.penalty_root_cache_entries);
+      context->diagnostics.penalty_root_cache_peak_device_bytes = std::max(
+        context->diagnostics.penalty_root_cache_peak_device_bytes,
+        context->diagnostics.penalty_root_cache_device_bytes);
+      pending.entry.values = nullptr;
     }
     const auto root_build_end = std::chrono::steady_clock::now();
     handle->penalty_root_build_ms =
@@ -3781,6 +4042,11 @@ static std::shared_ptr<PreparedSGpuHandle> create_prepared_s_gpu_impl(
       context->resource_ledger.get(), &host_root_validation,
       "free prepared root host validation records");
   } catch (...) {
+    for (PendingFixedSpPenaltyRootCacheEntry& pending :
+         pending_root_cache_entries) {
+      cleanup_local_cuda_allocation_noexcept(
+        context->resource_ledger.get(), &pending.entry.values);
+    }
     cleanup_local_cuda_allocation_noexcept(
       context->resource_ledger.get(), &d_root_validation);
     cleanup_local_cuda_host_allocation_noexcept(

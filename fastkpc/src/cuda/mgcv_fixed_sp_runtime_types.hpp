@@ -106,6 +106,20 @@ struct FixedSpRuntimeInfo {
   int qr_checkpoint_wait_count = 0;
   int svd_checkpoint_record_count = 0;
   int svd_checkpoint_wait_count = 0;
+  std::size_t penalty_root_cache_capacity_entries = 0;
+  std::size_t penalty_root_cache_capacity_bytes = 0;
+  std::uint64_t penalty_root_cache_lookup_count = 0;
+  std::uint64_t penalty_root_cache_hit_count = 0;
+  std::uint64_t penalty_root_cache_miss_count = 0;
+  std::uint64_t penalty_root_cache_insert_count = 0;
+  std::uint64_t penalty_root_cache_bypass_count = 0;
+  std::uint64_t penalty_root_cache_identity_rejection_count = 0;
+  std::size_t penalty_root_cache_entries = 0;
+  std::size_t penalty_root_cache_peak_entries = 0;
+  std::size_t penalty_root_cache_device_bytes = 0;
+  std::size_t penalty_root_cache_peak_device_bytes = 0;
+  std::size_t penalty_root_cache_hit_d2d_bytes = 0;
+  std::size_t penalty_root_cache_insert_d2d_bytes = 0;
   std::size_t workspace_bytes = 0;
   std::size_t cublas_workspace_bytes = 0;
   std::size_t cublas_workspace_alignment = 0;
@@ -167,6 +181,7 @@ struct PreparedSHostView {
   std::vector<int> penalty_offsets_zero_based;
   std::vector<int> penalty_ranks;
   std::vector<int> penalty_sp_indices_zero_based;
+  std::vector<std::string> penalty_root_cache_keys;
 };
 
 struct PreparedSInfo {

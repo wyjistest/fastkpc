@@ -1,6 +1,6 @@
 {
   "schema_version": "fastkpc-strict-ci-methods-351x48-optimized-evidence-v1",
-  "created_at": "2026-08-05 05:10:50 UTC",
+  "created_at": "2026-08-05 21:19:41 UTC",
   "scope": "canonical-development-351x48-default-Inf",
   "phase10_status": "ACTIVE",
   "promotion_status": "NOT_PROMOTED",
@@ -15,7 +15,11 @@
     "residual_cache_policy": "all-hit-complete-original-cohort-only",
     "residual_cache_budget_bytes": 402653184,
     "residual_payload_transfer": "device-to-device-gather",
-    "hsic_component_policy": "parallel-rows-serial-numerical-order"
+    "hsic_component_policy": "parallel-rows-serial-numerical-order",
+    "fixed_sp_residual_route": "augmented-QR-through-2-then-stable-SVD",
+    "hsic_permutation_component_cache_budget_bytes": 402653184,
+    "hsic_permutation_index_policy": "inline-R-Rejection-through-n32768",
+    "request_authentication": "OpenSSL-SHA256-no-intermediate-payload-copy"
   },
   "methods": {
     "hsic.gamma": {
@@ -43,15 +47,25 @@
         "graph_and_process": "exact",
         "orientation_ci_and_pdag": "bitwise-exact"
       },
+      "optimization": {
+        "residual_route": "qr-through-2",
+        "sha256_backend": "openssl-sha256",
+        "persistent_execution_context": true,
+        "hsic_permutation_inline_r_index": false,
+        "hsic_component_cache": false
+      },
       "performance": {
         "previous_skeleton_elapsed_sec": 1562.0520000000001,
-        "optimized_skeleton_elapsed_sec": 979.87,
-        "elapsed_saved_sec": 582.18200000000013,
-        "speedup": 1.5941420800718464,
+        "optimized_skeleton_elapsed_sec": 631.52200000000005,
+        "elapsed_saved_sec": 930.53000000000009,
+        "speedup": 2.4734720247275628,
         "residual_solve_previous_sec": 1078.9943432459988,
-        "residual_solve_optimized_sec": 702.84455294599775,
+        "residual_solve_optimized_sec": 383.05692171200008,
         "component_build_previous_sec": 233.558912617445,
-        "component_build_optimized_sec": 34.585695287406445
+        "component_build_optimized_sec": 30.99813965165615,
+        "permutation_table_sec": 0,
+        "request_identity_build_sec": 0.29220292900000039,
+        "request_identity_validation_sec": 0.23302010000000259
       },
       "physical_work": {
         "logical_residual_requests": 308199,
@@ -65,13 +79,22 @@
         "cache_eviction_count": 0,
         "cache_device_bytes": 368229888,
         "gather_d2d_bytes": 318741696,
+        "execution_context_call_count": 49046,
+        "execution_context_reuse_count": 49045,
+        "component_cache_hit_count": 0,
+        "component_cache_miss_count": 0,
+        "component_cache_eviction_count": 0,
+        "component_cache_device_bytes": 0,
+        "permutation_table_value_count": 0,
+        "permutation_inline_index_count": 0,
+        "permutation_inline_draw_count": 0,
         "residual_d2h_bytes": 0,
         "component_d2h_bytes": 0
       },
       "parity": {
         "skeleton_ci_test_count": 322679,
         "orientation_ci_test_count": 6,
-        "max_abs_p_diff_from_previous": 0,
+        "max_abs_p_diff_from_previous": 8.2711615334574162e-14,
         "p_values_within_contract": true,
         "decision_flip_count": 0,
         "logical_trace_identical": true,
@@ -91,14 +114,14 @@
         "candidate": {
           "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_optimized_v1/payload/hsic.gamma/candidate.rds",
           "relative_path": "payload/hsic.gamma/candidate.rds",
-          "bytes": 6534196,
-          "sha256": "d3e901edb7644fe9c02a4e235aab07bf31d16ed0f8cd3f729eace307e32289c8"
+          "bytes": 6556212,
+          "sha256": "f9867a8f977714794f77a6cc4c409d583e4c4c6628cdb582ce8d8808bb87d768"
         },
         "wanpdag_receipt": {
           "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_optimized_v1/payload/hsic.gamma/wanpdag_receipt.rds",
           "relative_path": "payload/hsic.gamma/wanpdag_receipt.rds",
           "bytes": 4660,
-          "sha256": "f71f2b89e9463a8523c072535302f9da1c02d0afae6a971df265c9241f6503e2"
+          "sha256": "8eb058e15b7f8cec09e0cfd15083171c245e4a485c87527363fac018ccd3963d"
         },
         "baseline_candidate": {
           "relative_path": "../strict_ci_methods_351x48_v1/payload/hsic.gamma/candidate.rds",
@@ -131,15 +154,25 @@
         "graph_and_process": "exact",
         "orientation_ci_and_pdag": "bitwise-exact"
       },
+      "optimization": {
+        "residual_route": "qr-through-2",
+        "sha256_backend": "openssl-sha256",
+        "persistent_execution_context": true,
+        "hsic_permutation_inline_r_index": false,
+        "hsic_component_cache": false
+      },
       "performance": {
         "previous_skeleton_elapsed_sec": 2131.2610000000004,
-        "optimized_skeleton_elapsed_sec": 1455.9349999999999,
-        "elapsed_saved_sec": 675.32600000000048,
-        "speedup": 1.4638435094973337,
+        "optimized_skeleton_elapsed_sec": 945.35900000000004,
+        "elapsed_saved_sec": 1185.9020000000005,
+        "speedup": 2.2544461945144652,
         "residual_solve_previous_sec": 1389.0446822120132,
-        "residual_solve_optimized_sec": 707.89344703098902,
+        "residual_solve_optimized_sec": 455.45538981999943,
         "component_build_previous_sec": 58.069284255057575,
-        "component_build_optimized_sec": 56.773019434764983
+        "component_build_optimized_sec": 42.973000769570469,
+        "permutation_table_sec": 61.090807626998135,
+        "request_identity_build_sec": 54.589536280999113,
+        "request_identity_validation_sec": 54.261798839998107
       },
       "physical_work": {
         "logical_residual_requests": 459350,
@@ -153,6 +186,15 @@
         "cache_eviction_count": 0,
         "cache_device_bytes": 368229888,
         "gather_d2d_bytes": 756626832,
+        "execution_context_call_count": 229675,
+        "execution_context_reuse_count": 229674,
+        "component_cache_hit_count": 0,
+        "component_cache_miss_count": 0,
+        "component_cache_eviction_count": 0,
+        "component_cache_device_bytes": 0,
+        "permutation_table_value_count": 8061592500,
+        "permutation_inline_index_count": 0,
+        "permutation_inline_draw_count": 0,
         "residual_d2h_bytes": 0,
         "component_d2h_bytes": 0
       },
@@ -179,14 +221,14 @@
         "candidate": {
           "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_optimized_v1/payload/dcc.perm/candidate.rds",
           "relative_path": "payload/dcc.perm/candidate.rds",
-          "bytes": 1193368,
-          "sha256": "ca6d1dbd5e6e27ea7c0017dcd920cd2239774dbbd0f97fbe226e52ed5196a709"
+          "bytes": 1211000,
+          "sha256": "e45747213bb236547fb61f467325f88534387ac40c9e31a3b8f3160481888f7d"
         },
         "wanpdag_receipt": {
           "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_optimized_v1/payload/dcc.perm/wanpdag_receipt.rds",
           "relative_path": "payload/dcc.perm/wanpdag_receipt.rds",
           "bytes": 7140,
-          "sha256": "2442fc63fe15546628c94527888ca3fee7cc98d58d2390294ad3d447860b8f52"
+          "sha256": "e1f44b13f3fbe4ead1ef4bcb285d72feff249db2db20b80e9ed9eff90b49b053"
         },
         "baseline_candidate": {
           "relative_path": "../strict_ci_methods_351x48_v1/payload/dcc.perm/candidate.rds",
@@ -219,15 +261,25 @@
         "graph_and_process": "exact",
         "orientation_ci_and_pdag": "bitwise-exact"
       },
+      "optimization": {
+        "residual_route": "qr-through-2",
+        "sha256_backend": "openssl-sha256",
+        "persistent_execution_context": true,
+        "hsic_permutation_inline_r_index": true,
+        "hsic_component_cache": true
+      },
       "performance": {
         "previous_skeleton_elapsed_sec": 3877.3159999999998,
-        "optimized_skeleton_elapsed_sec": 1875.133,
-        "elapsed_saved_sec": 2002.1829999999998,
-        "speedup": 2.0677551938982459,
+        "optimized_skeleton_elapsed_sec": 1152.905,
+        "elapsed_saved_sec": 2724.4110000000001,
+        "speedup": 3.363083688595331,
         "residual_solve_previous_sec": 1714.2425991620207,
-        "residual_solve_optimized_sec": 698.35781059299984,
+        "residual_solve_optimized_sec": 439.44628248499851,
         "component_build_previous_sec": 1155.1247214877606,
-        "component_build_optimized_sec": 172.45380239540339
+        "component_build_optimized_sec": 122.69061775344611,
+        "permutation_table_sec": 185.9704446940022,
+        "request_identity_build_sec": 68.438034993000016,
+        "request_identity_validation_sec": 66.690665011997055
       },
       "physical_work": {
         "logical_residual_requests": 564226,
@@ -241,6 +293,15 @@
         "cache_eviction_count": 0,
         "cache_device_bytes": 368229888,
         "gather_d2d_bytes": 1052910144,
+        "execution_context_call_count": 282113,
+        "execution_context_reuse_count": 282112,
+        "component_cache_hit_count": 240685,
+        "component_cache_miss_count": 323541,
+        "component_cache_eviction_count": 234199,
+        "component_cache_device_bytes": 402571264,
+        "permutation_table_value_count": 9902166300,
+        "permutation_inline_index_count": 9902166300,
+        "permutation_inline_draw_count": 14445947268,
         "residual_d2h_bytes": 0,
         "component_d2h_bytes": 0
       },
@@ -267,14 +328,14 @@
         "candidate": {
           "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_optimized_v1/payload/hsic.perm/candidate.rds",
           "relative_path": "payload/hsic.perm/candidate.rds",
-          "bytes": 1388376,
-          "sha256": "8a5835b36ba78351d59e7abb602b27c81d66e9b5bf4c677de686caeab797b576"
+          "bytes": 1392048,
+          "sha256": "27c84a1e7478f38f7190e08933f4ed17a9374291d313f9aa5e9cfe86a8d8492f"
         },
         "wanpdag_receipt": {
           "path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/strict_ci_methods_351x48_optimized_v1/payload/hsic.perm/wanpdag_receipt.rds",
           "relative_path": "payload/hsic.perm/wanpdag_receipt.rds",
-          "bytes": 7036,
-          "sha256": "985bbd8c55c3e5f68b37c4241d53fbab55bf2a55562eac084a95944fb0036693"
+          "bytes": 7040,
+          "sha256": "e45a712b1377beee8228772e50a3a05f19a77791a0b4db7fa09c3df8db486a8f"
         },
         "baseline_candidate": {
           "relative_path": "../strict_ci_methods_351x48_v1/payload/hsic.perm/candidate.rds",
@@ -288,17 +349,21 @@
     "skeleton_ci_test_count": 834467,
     "orientation_ci_test_count": 19,
     "previous_elapsed_sec": 7570.6290000000008,
-    "optimized_elapsed_sec": 4310.9380000000001,
+    "optimized_elapsed_sec": 2729.7860000000001,
     "all_process_gates_pass": true
   },
   "provenance": {
-    "head_base_commit": "3663240270bc51c9a7efa12ac63f5869d5d7cb17",
-    "origin_main": "3663240270bc51c9a7efa12ac63f5869d5d7cb17",
+    "head_base_commit": "8077493d451f8c4b1246dba37bfe0ff9ad5d908e",
+    "origin_main": "8077493d451f8c4b1246dba37bfe0ff9ad5d908e",
     "head_equals_origin_main": true,
-    "relevant_sources_dirty_or_untracked": false,
+    "relevant_sources_dirty_or_untracked": true,
     "source_file_relative_paths": {
+      "contract": "fastkpc/src/full_cuda_ci_contract.cpp",
+      "contract_api": "fastkpc/src/full_cuda_ci_contract.hpp",
       "method_batch_cuda": "fastkpc/src/cuda/full_cuda_ci_method_batch.cu",
       "method_batch_api": "fastkpc/src/cuda/full_cuda_ci_method_batch.hpp",
+      "fixed_sp_runtime": "fastkpc/src/cuda/mgcv_fixed_sp_runtime.cu",
+      "fixed_sp_runtime_types": "fastkpc/src/cuda/mgcv_fixed_sp_runtime_types.hpp",
       "one_call": "fastkpc/src/full_cuda_ci_one_call.cpp",
       "candidate_runner": "fastkpc/tools/run_strict_ci_method_351x48_candidate.R",
       "wanpdag_validator": "fastkpc/tools/verify_strict_wanpdag_trace.R",
@@ -309,32 +374,42 @@
       "cuda_builder": "fastkpc/tools/build_cuda_native.sh"
     },
     "source_file_sha256": {
-      "method_batch_cuda": "9eb33b12048b4b6f1193755ceb317563c80b9d4b993a02e6f591f4bdda369488",
-      "method_batch_api": "784a02bd5bb1e3ae41eebbcd8dec251d9cb156941368f342d1e01b94d8812331",
-      "one_call": "007c7f0e8ca4fbdecd620caa289bd1cdccf45b3492413420384c0800bdfea3cd",
+      "contract": "d96e8dce223911b24d326060e0b440e0471572023d8909e098c6eb6ebb93c5fd",
+      "contract_api": "8af8781d97948249c5ee60a28ae5818cd41dc61517b772110db2ab2c0141afd4",
+      "method_batch_cuda": "456f76528f666af08964aab46c1324b2e3f2ac90ff080ce07735ffbfffde574e",
+      "method_batch_api": "5d193fee840e2ec0db71bca4f2735e8cbd5a4f87a0f81ec4bc50561fd9c0ddea",
+      "fixed_sp_runtime": "2eeff5722d4cda9d2b5d06d043a4e0631c3b1326af49788c460a022ea80dada3",
+      "fixed_sp_runtime_types": "fdbe69cb8846398170ad814710a5faca17aac3f3023e294d9611d5f630cbaed6",
+      "one_call": "2c4b7f20dfff2a2346813a031743a491ddb2a6d575e6553610bee1ec8d4a73ec",
       "candidate_runner": "cec53a02922077e1fd0114770e836828f5105cc986f0b54ad11b2ce825554e24",
       "wanpdag_validator": "1cf2ee5d934a3b71b03f417dbe0df2fec4f283ccafdf5981f3f5705a7d5667a6",
-      "evidence_publisher": "a59d1e5286703417b1d3e7a447553a095c2940a2611df5adce253babfef6f30a",
-      "cache_regression": "ce3993a61190392b38fa015407085dac1e7dcd146e4f1f442b9c4ddd5b3bd280",
+      "evidence_publisher": "6799f8ef7accfe9dde21d56d5d87c55b3c10f7551afed1f213256ceb991df8c7",
+      "cache_regression": "364ad59c406da27edadd5249c5d37f3f625d0bcafb3a4cb3bfc7d8e7051cbde2",
       "strict_method_regression": "f36776b78ef43ee3c15d47c51affd20e12f6a381d54a374214d22c9e1b68cfa4",
-      "manifest_regression": "b257beacfe312ed25345bbf85fa74ba7f612a7f1d794593513430b5959304d7d",
-      "cuda_builder": "ded8cb944e07bee4e58f32390a63a3e27f344291f6996d7477630790d23556e2"
+      "manifest_regression": "3e292a5be70b09e9efae7d1daaf2ca17a1a7cf486b8330f2f9c1f461fd8c27a0",
+      "cuda_builder": "f8cb055100b579c64d1931667411d8bbe23dbd7a6018400ddca545b0b7cf79a6"
     },
     "source_file_git_state": {
-      "method_batch_cuda": "clean",
-      "method_batch_api": "clean",
-      "one_call": "clean",
+      "contract": "tracked-dirty",
+      "contract_api": "tracked-dirty",
+      "method_batch_cuda": "tracked-dirty",
+      "method_batch_api": "tracked-dirty",
+      "fixed_sp_runtime": "tracked-dirty",
+      "fixed_sp_runtime_types": "tracked-dirty",
+      "one_call": "tracked-dirty",
       "candidate_runner": "clean",
       "wanpdag_validator": "clean",
-      "evidence_publisher": "clean",
-      "cache_regression": "clean",
+      "evidence_publisher": "tracked-dirty",
+      "cache_regression": "tracked-dirty",
       "strict_method_regression": "clean",
-      "manifest_regression": "clean",
-      "cuda_builder": "clean"
+      "manifest_regression": "tracked-dirty",
+      "cuda_builder": "tracked-dirty"
     },
     "native_library_path": "/data/wenyujianData/kpcalg/fastkpc/build/fastkpc_cuda.so",
-    "native_library_bytes": 354293944,
-    "native_library_sha256": "0e54ca23de3585ef5d604ac4912ade07257aa945388e26cee2a679a7abd5c6a7",
+    "native_library_bytes": 351756640,
+    "native_library_sha256": "d7cfcf9ebd779b2a425553b3d7423d74c13752dbadc2799d0bcc8c4569607184",
+    "sha256_backend": "openssl-sha256",
+    "openssl_version": "OpenSSL 1.1.1f  31 Mar 2020",
     "dataset_path": "/data/wenyujianData/kpcalg/fastkpc/artifacts/kpc_tprs_real_zhu/cancer_RD-causalDiscoveryInput.rds",
     "dataset_bytes": 114769,
     "dataset_sha256": "e03cbfafed3336f3da7725878e92af24556b5ebdc6227b94ea84469e62e94036"

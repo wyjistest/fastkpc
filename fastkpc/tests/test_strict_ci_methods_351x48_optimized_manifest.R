@@ -45,6 +45,7 @@ for (method in names(expected)) {
   value <- manifest$methods[[method]]
   work <- value$physical_work
   parity <- value$parity
+  optimization <- value$optimization
   assert_true(
     identical(as.integer(parity$skeleton_ci_test_count),
               expected[[method]]$tests) &&
@@ -56,10 +57,18 @@ for (method in names(expected)) {
                 expected[[method]]$new_fits) &&
       as.numeric(value$performance$speedup) > 1 &&
       as.numeric(value$performance$elapsed_saved_sec) > 0 &&
+      identical(optimization$residual_route, "qr-through-2") &&
+      identical(optimization$sha256_backend, "openssl-sha256") &&
+      isTRUE(optimization$persistent_execution_context) &&
+      as.numeric(value$performance$request_identity_build_sec) >= 0 &&
+      as.numeric(value$performance$request_identity_validation_sec) >= 0 &&
       as.integer(work$optimized_physical_residual_fits) ==
         as.integer(work$logical_residual_requests) -
           as.integer(work$bypassed_target_count) &&
       identical(as.integer(work$cache_eviction_count), 0L) &&
+      as.integer(work$execution_context_call_count) > 0L &&
+      as.integer(work$execution_context_reuse_count) ==
+        as.integer(work$execution_context_call_count) - 1L &&
       as.numeric(work$residual_d2h_bytes) == 0 &&
       as.numeric(work$component_d2h_bytes) == 0 &&
       isTRUE(parity$p_values_within_contract) &&
@@ -77,6 +86,27 @@ for (method in names(expected)) {
       isTRUE(parity$cache_accounted) && isTRUE(parity$pass),
     paste(method, "optimized manifest gate failed")
   )
+  if (method == "hsic.perm") {
+    assert_true(
+      isTRUE(optimization$hsic_permutation_inline_r_index) &&
+        isTRUE(optimization$hsic_component_cache) &&
+        as.numeric(work$permutation_inline_index_count) ==
+          as.numeric(work$permutation_table_value_count) &&
+        as.numeric(work$permutation_inline_draw_count) >=
+          as.numeric(work$permutation_inline_index_count) &&
+        as.integer(work$component_cache_hit_count) > 0L &&
+        as.integer(work$component_cache_eviction_count) > 0L,
+      "hsic.perm optimized cache/RNG evidence changed"
+    )
+  } else {
+    assert_true(
+      !isTRUE(optimization$hsic_permutation_inline_r_index) &&
+        !isTRUE(optimization$hsic_component_cache) &&
+        as.numeric(work$permutation_inline_index_count) == 0 &&
+        as.integer(work$component_cache_hit_count) == 0L,
+      paste(method, "unexpected HSIC permutation optimization evidence")
+    )
+  }
 }
 assert_true(
   identical(as.integer(manifest$aggregate$method_count), 3L) &&
@@ -87,6 +117,13 @@ assert_true(
       as.numeric(manifest$aggregate$previous_elapsed_sec) &&
     isTRUE(manifest$aggregate$all_process_gates_pass),
   "optimized aggregate gate failed"
+)
+assert_true(
+  identical(manifest$optimization$request_authentication,
+            "OpenSSL-SHA256-no-intermediate-payload-copy") &&
+    identical(manifest$provenance$sha256_backend, "openssl-sha256") &&
+    nzchar(manifest$provenance$openssl_version),
+  "optimized SHA-256 provenance changed"
 )
 
 source_paths <- unlist(

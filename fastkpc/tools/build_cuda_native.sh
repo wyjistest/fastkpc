@@ -29,7 +29,8 @@ flock 9
 trap 'rm -f "$TMP_SO"' EXIT INT TERM
 
 "$CXX" $COMMON_CXX -c "$ROOT/src/dcov_exact_cpu.cpp" -o "$BUILD/dcov_exact_cpu.o"
-"$CXX" $COMMON_CXX -c "$ROOT/src/full_cuda_ci_contract.cpp" -o "$BUILD/full_cuda_ci_contract.o"
+"$CXX" $COMMON_CXX -DFASTKPC_USE_OPENSSL_SHA256 \
+  -c "$ROOT/src/full_cuda_ci_contract.cpp" -o "$BUILD/full_cuda_ci_contract.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/full_cuda_ci_semantic_abi.cpp" -o "$BUILD/full_cuda_ci_semantic_abi.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/full_cuda_ci_native_setup.cpp" -o "$BUILD/full_cuda_ci_native_setup.o"
 "$CXX" $COMMON_CXX -c "$ROOT/src/full_cuda_ci_one_call.cpp" -o "$BUILD/full_cuda_ci_one_call.o"
@@ -163,7 +164,7 @@ done
   "$BUILD/mgcv_multi_penalty_gcv_ext384.o" \
   "$BUILD/mgcv_multi_penalty_gcv_ext559.o" \
   "$BUILD/mgcv_extract_fixed_sp_cuda.o" \
-  $LAPACK_LIBS $BLAS_LIBS $FLIBS \
+  $LAPACK_LIBS $BLAS_LIBS $FLIBS -lcrypto \
   -L/usr/local/cuda/lib64 -lcudart -lcublas -lcusolver \
   -L"$(R RHOME)/lib" -lR
 

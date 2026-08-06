@@ -111,37 +111,57 @@ native Prepared-S active device cache: 2048 single-penalty + 8192 multi-penalty
 per-call native Prepared-S host cache: 16384 entries
 device dCov component capacity: 47 entries
 strict-method residual cache: <= 384 MiB, <= 131072 entries
+strict hsic.perm component cache: <= 384 MiB, deterministic LRU
 ```
 
-The strict `hsic.gamma`, `dcc.perm`, and `hsic.perm` routes now use a
-one-call-scoped residual slab. A batch with any cache miss still executes its
-complete original fixed-SP SVD cohort. Only an all-hit batch bypasses the
-solve, and its residuals are gathered D2D in the original target order. The
-cache identity includes the authenticated ResidualKey and planned solver
-route. This preserves the batch-dependent numerical shape of every newly
-computed residual and never changes permutation generation or R RNG
-consumption.
+The strict `hsic.gamma`, `dcc.perm`, and `hsic.perm` routes use a
+one-call-scoped residual slab and persistent CUDA execution context. A batch
+with any residual-cache miss still executes its complete original fixed-SP
+cohort. Only an all-hit batch bypasses the solve, and its residuals are gathered
+D2D in the original target order. The cache identity includes the authenticated
+ResidualKey and solver route. Conditioning systems with at most two penalties
+use the fully qualified augmented-QR residual path; larger systems retain the
+authoritative stable-SVD path.
 
 The HSIC incomplete-Cholesky component kernel also parallelizes independent
 row work across one 256-thread block per component. Pivot selection,
 triangular solves, mean accumulation, and final reductions retain their
-original order. Full default-Inf 351x48 development receipts measured:
+original order. `hsic.perm` additionally keeps a bounded persistent component
+LRU. Its R 4.4 Rejection-sampler index operation is inlined for `n <= 32768`
+with the exact `R_unif_index()` draw/rejection order; unsupported sample kinds
+or larger `n` fall back to the R API. Set
+`FASTKPC_STRICT_HSIC_PERM_INLINE_R_UNIF_INDEX=0` to disable that path.
+
+Permutation request authentication still uses SHA-256 over every table byte.
+The production builder uses OpenSSL SHA-256 and hashes the integer payload
+without an intermediate string copy; the portable implementation remains a
+compile-time fallback and produces the same digest. Full default-Inf 351x48
+development receipts from the final binary measured:
 
 ```text
 method       previous     optimized    speedup   physical residual fits
-hsic.gamma   1562.052 s    979.870 s     1.594x   308199 -> 194687
-dcc.perm     2131.261 s   1455.935 s     1.464x   459350 -> 189896
-hsic.perm    3877.316 s   1875.133 s     2.068x   564226 -> 189258
+hsic.gamma   1562.052 s    631.522 s     2.473x   308199 -> 194687
+dcc.perm     2131.261 s    945.359 s     2.254x   459350 -> 189896
+hsic.perm    3877.316 s   1152.905 s     3.363x   564226 -> 189258
 ```
 
-All 834,467 skeleton p-values retain their established contracts:
-`hsic.gamma` is unchanged from its previously CPU-qualified candidate, and
-both permutation methods are bitwise exact. Logical traces, adjacency,
+The final `hsic.gamma` maximum absolute p-value difference is
+`8.271161533457416e-14`, below its `1e-10` contract with zero decision flips;
+both permutation methods remain bitwise exact. Logical traces, adjacency,
 undirected sepsets, `pMax`, `n.edgetests`, permutation RNG terminal state, the
 19 kpcalg-authority orientation CI tests, and final PDAGs are exact. All three
 runs report zero residual/component D2H, zero CPU numerical authority, zero
-fallback, and zero cache eviction. These timings extend the three opt-in
-methods; they do not replace the `dcc.gamma` Phase 10 performance baseline.
+fallback, and zero residual-cache eviction. The bounded `hsic.perm` component
+LRU records 240,685 hits and 234,199 deterministic evictions.
+
+These routes are not exhausted. The remaining dominant exact work is the
+level-3-and-deeper stable-SVD residual path: residual solving still costs
+`383.057`, `455.455`, and `439.446` seconds respectively. `hsic.perm` also
+spends `185.970` seconds generating permutation tables and `135.129` seconds
+authenticating them. Further material gains require a qualified deeper-level
+residual kernel, an equally strict permutation pipeline, or both. These timings
+extend the three opt-in methods; they do not replace the `dcc.gamma` Phase 10
+performance baseline.
 
 The historical canonical artifact is
 `artifacts/full_cuda_ci/promotion_351x48_v1/`. Across five fresh-process cold
@@ -176,22 +196,45 @@ replay-warm: report only
 The current development producer has passed the first optimization checkpoint,
 but it is not a frozen candidate. A fresh-data compute-warm development run on
 the canonical 351x48 input with explicit `max_conditioning_size = 7` completed
-in `263.305` seconds, down from the
-initial `1300.19`-second measurement, the `376.461`-second Checkpoint A run, and
-the prior `301.971`-second development run. Lazy, right-sized multi-penalty
-optimizer handles eliminated all device rehydration. A per-call cache now
-builds each dataset column's univariate smooth primitive once and reuses it when
-assembling additive `|S| > 2` setups. The measured stage totals were 38.997
-seconds for native setup, 173.246 seconds for the optimizer boundary, 15.270
-seconds for residual solves, and 29.891 seconds for dCov.
+in `235.058` seconds, down from the prior `263.305`-second best. Score-first
+line-search evaluation first reduced the optimizer boundary from `173.246` to
+`158.189` seconds. A one-call-scoped fixed-SP penalty-root cache then reused
+only roots produced and validated by the authoritative fixed-SP eigensolver.
+The retained run measured 23.642 seconds for native setup, 159.511 seconds for
+the optimizer boundary, 15.375 seconds for residual solves, and 29.933 seconds
+for dCov. All 240,489 task rows and p-value bits, graph fields, sepsets, counts,
+levels, and optimizer trajectory counters remain exact.
 
-The `263.305`-second measurement does not cover the default `Inf` contract. The
-current-binary Phase 9 default-Inf artifact took `277.868` seconds. A separate
-same-process cold/replay-warm qualification took `274.91` / `0.848` seconds.
-It resolved `Inf` to 46, executed levels 0 through 8, and produced 240,498
-logical tests. Cold evaluated 241,686 physical pairs; warm served all 240,498
-logical rows from the result cache with zero physical tests, setup builds,
-optimizer targets, or residual fits.
+The default-`Inf` development run with the same implementation took `233.848`
+seconds, down from the score-first `252.616`-second run and the Phase 9
+`277.868`-second artifact. It resolved `Inf` to 46, executed levels 0 through
+8, and produced 240,498 logical tests. Every task row and p-value bit, graph
+field, sepset, count, and level semantic is exact against the older authority
+artifact; CPU numerical authority, fallback, residual D2H, and component D2H
+remain zero.
+
+An opt-in CPU-only setup/optimizer pipeline now provides the best development
+result. It keeps R and Rcpp objects on the main thread, passes only owned
+optimizer inputs through one background future, and preserves every original
+window, setup cohort, target vector, and target order. With a fixed 5 ms
+optimizer head start, level 3 fell from `114.038` to `102.770` seconds and the
+default-`Inf` run fell from `233.848` to `219.513` seconds. The latter overlaps
+`19.319` seconds of setup work across 138 windows. All 240,498 task and p-value
+bits, graph/sepset/count/level fields, and optimizer trajectory counters are
+exact; authority and transfer gates remain zero. The route is enabled with
+`FASTKPC_PHASE10_SETUP_OPTIMIZER_PIPELINE=1` and
+`FASTKPC_PHASE10_SETUP_OPTIMIZER_PRODUCER_DELAY_US=5000`; it is not yet the
+production default or a frozen candidate. GPU-side setup overlap, CPU affinity,
+and synchronous level-tail variants were rejected on measured wall time.
+
+The fixed-SP root cache is enabled by default only for the `dcc.gamma` one-call
+route and can be disabled deterministically with
+`FASTKPC_PHASE10_FIXED_SP_ROOT_CACHE=0`. It authenticates the coefficient
+dimension, offset, rank, and every penalty-block bit on each hit. Each runtime
+is bounded to 4,096 entries and 256 MiB. The default-`Inf` receipt records
+28,611 lookups, 26,925 hits, 1,686 inserts, zero bypasses, zero identity
+rejections, and 8,691,624 live device bytes at peak. Cached roots move only D2D;
+the runtime resource ledger returns to its pre-call active counts at teardown.
 
 The default-Inf cold run consumed 8,643 unique PreparedS keys and physically
 built 8,646 setups (three bounded speculative builds). It used 138 optimizer
@@ -213,8 +256,10 @@ Its opt-in extended test executes q192, q384, and the maximum
 zero fallback.
 
 A non-formal max-conditioning-size-3 profile now exposes the optimizer work
-instead of treating the CUDA boundary as one opaque stage. It completed in
-`121.848` seconds, including `40.330` seconds in the multi-penalty optimizer.
+instead of treating the CUDA boundary as one opaque stage. With score-first
+evaluation it completed in `118.729` seconds, including `36.883` seconds in the
+multi-penalty optimizer, down from `40.939` seconds under the immediately prior
+penalty-hoist build.
 Across 54,878 targets it recorded 563,638 optimizer iterations, 700,893 score
 calls, 1,053,964 objective calls, 137,255 step halvings, 941,534 guarded-QR
 evaluations, and 85,596 stable-SVD evaluations. Multi-penalty prepared-handle
@@ -229,6 +274,63 @@ launch bound were rejected because full level-3 wall time stayed flat or
 regressed. These experiments are not present in the production path. The next
 optimizer change therefore needs decomposition reuse or a larger execution-
 shape change while preserving the authenticated optimizer transcript.
+
+A guarded-QR Q-copy-elision prototype also preserved every one of the 220,859
+level-3 task rows and p-value bits, graph field, semantic level field, and
+optimizer trajectory counter. Its `114.002`-second wall time was effectively
+identical to the `114.038`-second fixed-root-cache baseline, however, and the
+instrumented QR/Q cycle changes were within run-to-run noise. The prototype was
+reverted as `STOP_GUARDED_Q_COPY_ELISION_WALL_TIME`; removing the final Q copy
+is not a substitute for restructuring QR factorization or Q generation.
+
+Three subsequent small64 resource prototypes also preserved every level-3 task
+and p-value bit, graph/level field, and optimizer trajectory counter, but failed
+against the pipelined `102.770`-second baseline. Dynamic-shared augmented QR
+through q=46 took `103.084` seconds; QR/SVD cycles fell `2.58%`, but the
+multi-optimizer boundary was flat at `36.137` versus `36.159` seconds
+(`STOP_SHARED_QR_MATRIX_WALL_TIME`). Fusing each left Householder dot/update
+reduced Q-generation cycles `6.67%`, but increased per-thread stack from 672 to
+704 bytes and regressed to `103.529` seconds and `36.740` multi-optimizer seconds
+(`STOP_FUSED_LEFT_REFLECTOR_WALL_TIME`). A `--maxrregcount=192` build traded 255
+registers for a 928-byte thread stack and regressed to `104.373` seconds and
+`37.429` multi-optimizer seconds (`STOP_OPTIMIZER_REGISTER_CAP_WALL_TIME`). The
+three prototypes are absent from retained source and binary. Their receipts are
+`fresh-data-level-03-shared-qr-q46-v1-development.rds`,
+`fresh-data-level-03-fused-left-reflector-v1-development.rds`, and
+`fresh-data-level-03-optimizer-reg192-v1-development.rds`.
+
+A same-stream `cudaMallocAsync/cudaFreeAsync` exact-dCov prototype also
+preserved every level-3 task bit, graph field, and level semantic. It reduced
+exact dCov host time only from `26.844` to `26.111` seconds and teardown from
+`2.994` to `2.719` seconds, while fixed-SP residual time rose from `13.271` to
+`26.601` seconds as allocator-pool work entered the producer/consumer critical
+path. Total time regressed from `102.770` to `116.948` seconds. The decision is
+`STOP_EXACT_ASYNC_ALLOCATOR_CRITICAL_PATH`; the prototype is absent from
+retained source and binary. Any future persistent context must preallocate a
+bounded arena outside both stage boundaries rather than allocate per batch.
+
+Compile-time specialization of the optimizer into separate primary and
+stability-replay kernel instances also preserved all task bits, graph/level
+fields, and trajectory counters. It did not release the dominant resource
+pressure: the primary instance remained at 255 registers and its thread stack
+increased from 672 to 704 bytes. Level 3 regressed to `104.125` seconds and the
+multi-optimizer boundary to `37.234` seconds. This is recorded as
+`STOP_PRIMARY_REPLAY_SPECIALIZATION_WALL_TIME`; the prototype is absent from
+retained source and binary.
+
+The current numerical-contract epoch therefore stops before Checkpoint B. The
+retained exact default-`Inf` best is `219.513` seconds, leaving `39.513` seconds
+to the `<180` gate. Even treating all measured dCov teardown (`3.459` seconds)
+and otherwise unattributed dCov host time (`7.416` seconds) as free leaves
+`208.638` seconds and a `28.638`-second optimizer deficit. Setup overlap has
+already recovered `19.319` seconds, while GPU-side setup overlap raised
+fixed-SP H2D to `38.169` seconds. The decision is
+`STOP_PHASE10_STRICT_180_NO_QUALIFIED_ROUTE`: no candidate is frozen, the
+external holdout remains sealed, and the route remains unrecommended. This is
+not a claim that the RTX 4090 cannot reach 180 seconds; reopening requires a
+real-shape single-matrix evaluator showing at least `1.5x` QR/Q throughput and
+an expected `>=1.35x` full multi-optimizer speedup, or a separately versioned
+and qualified numerical contract.
 
 An opt-in exact-bit decomposition trace then measured whether response-
 independent decomposition reuse is large enough to justify that first route.
@@ -417,7 +519,8 @@ production ResidualKey authority and must not enter dCov or the residual cache.
 A trace-free full level-7 compute-profile v6 then split authoritative fixed-SP
 residual time both by penalty class and by consumer stage. Its `274.728`-second
 development runtime includes the new diagnostic accounting and is not a new
-performance baseline; the best development runtime remains `263.305` seconds.
+performance baseline; the best explicit-max-7 development runtime is now
+`235.058` seconds, and the default-`Inf` development run is `233.848` seconds.
 The graph, sepsets, counts, all 240,489 task rows (including consumed p-values),
 and the semantic level trace are bitwise identical to the primitive-cache
 artifact. CPU numerical authority, fallback, residual D2H, and component D2H

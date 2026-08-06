@@ -533,6 +533,8 @@ struct DeviceOptimizerState {
   int converged;
   int trying;
   int tries;
+  int trial_requires_complete_evaluation;
+  int trial_accepted;
   int selected_evaluation_reuse_count;
   int ambiguous_step_descent_count;
   int ambiguous_step_non_descent_count;
@@ -1025,12 +1027,16 @@ __device__ void evaluate_multi_penalty_target_device(
     unsigned int decomposition_trace_capacity = 0U,
     int trace_target = -1,
     int trace_iteration = -1,
-    unsigned int trace_flags = 0U) {
+    unsigned int trace_flags = 0U,
+    bool defer_complete_evaluation = false) {
   lapack312_multi::Workspace* decomposition = &workspace->decomposition;
+  const bool execute_complete_evaluation =
+    complete_evaluation && !defer_complete_evaluation;
   const int square = q * q;
   double* aggregate = decomposition->bidiagonal_vt;
   int* pivot = decomposition->iwork;
   double* factor_work = decomposition->work;
+  double* penalty_multipliers = workspace->derivative_delta;
   unsigned long long phase_started = 0;
   if (threadIdx.x == 0 && phase_timing != nullptr) {
     phase_started = clock64();
@@ -1058,15 +1064,19 @@ __device__ void evaluate_multi_penalty_target_device(
       result->coefficients[index] = CUDART_NAN;
     }
   }
+  for (int penalty = threadIdx.x; penalty < penalty_count;
+       penalty += blockDim.x) {
+    penalty_multipliers[penalty] = glibc235::exp_fma_rn(
+      target_log_sp[penalty]);
+  }
+  __syncthreads();
   for (int element = threadIdx.x; element < square;
        element += blockDim.x) {
     double value = 0.0;
     for (int penalty = 0; penalty < penalty_count; ++penalty) {
-      const double multiplier = glibc235::exp_fma_rn(
-        target_log_sp[penalty]);
       value = __dadd_rn(
         value,
-        __dmul_rn(multiplier,
+        __dmul_rn(penalty_multipliers[penalty],
           penalty_matrices[element + square * penalty]));
     }
     aggregate[element] = value;
@@ -1074,6 +1084,11 @@ __device__ void evaluate_multi_penalty_target_device(
   __syncthreads();
   const int factor_rank = dpstf2_upper_block(
     aggregate, pivot, factor_work, q);
+  int* inverse_pivot = pivot + q;
+  for (int factor_column = threadIdx.x; factor_column < q;
+       factor_column += blockDim.x) {
+    inverse_pivot[pivot[factor_column] - 1] = factor_column;
+  }
   if (threadIdx.x == 0) {
     result->aggregate_penalty_rank = factor_rank;
     decomposition->iwork[2 * q] = factor_rank;
@@ -1094,11 +1109,8 @@ __device__ void evaluate_multi_penalty_target_device(
       value = magic_r[row + q * column];
     } else {
       const int root_row = row - q;
-      int factor_column = 0;
-      while (factor_column < q && pivot[factor_column] != column + 1) {
-        ++factor_column;
-      }
-      if (factor_column < q && root_row <= factor_column) {
+      const int factor_column = inverse_pivot[column];
+      if (root_row <= factor_column) {
         value = aggregate[root_row + q * factor_column];
       }
     }
@@ -1140,7 +1152,7 @@ __device__ void evaluate_multi_penalty_target_device(
   }
   const int solver_info =
     lapack312_multi::small_dgesdd_left(
-      rows, q, decomposition, complete_evaluation,
+      rows, q, decomposition, execute_complete_evaluation,
       phase_timing == nullptr ? nullptr :
         phase_timing->decomposition_stage_cycles,
       true, force_stable_svd);
@@ -1252,7 +1264,7 @@ __device__ void evaluate_multi_penalty_target_device(
       ++phase_timing->stable_svd_evaluation_count;
     }
   }
-  if (result->solver_info != 0 || !complete_evaluation) return;
+  if (result->solver_info != 0 || !execute_complete_evaluation) return;
   if (threadIdx.x == 0 && phase_timing != nullptr) {
     phase_started = clock64();
   }
@@ -1375,8 +1387,7 @@ __device__ void evaluate_multi_penalty_target_device(
   double* d2norm = workspace->second_derivative_norm;
   double* d2delta = workspace->second_derivative_delta;
   for (int i = threadIdx.x; i < penalty_count; i += blockDim.x) {
-    const double lambda_i = glibc235::exp_fma_rn(
-      target_log_sp[i]);
+    const double lambda_i = penalty_multipliers[i];
     const double* influence_i = workspace->influence +
       static_cast<std::size_t>(i) * square;
     double trace = 0.0;
@@ -1410,10 +1421,9 @@ __device__ void evaluate_multi_penalty_target_device(
         product_sum = rounded_multiply_add(
           product_sum, metric_j[element], influence_i[element]);
       }
-      double value = __dmul_rn(
-        -2.0,
-        glibc235::exp_fma_rn(__dadd_rn(
-          target_log_sp[i], target_log_sp[j])));
+      const double pair_multiplier = glibc235::exp_fma_rn(__dadd_rn(
+        target_log_sp[i], target_log_sp[j]));
+      double value = __dmul_rn(-2.0, pair_multiplier);
       value = __dmul_rn(value, product_sum);
       if (i == j) value = __dadd_rn(value, ddelta[i]);
       d2delta[i + penalty_count * j] = value;
@@ -1432,10 +1442,7 @@ __device__ void evaluate_multi_penalty_target_device(
           __dmul_rn(workspace->y_influence[i * q + component], my_j));
         norm_value = __dadd_rn(norm_value, term);
       }
-      double norm_second_value = __dmul_rn(
-        2.0,
-        glibc235::exp_fma_rn(__dadd_rn(
-          target_log_sp[i], target_log_sp[j])));
+      double norm_second_value = __dmul_rn(2.0, pair_multiplier);
       norm_second_value = __dmul_rn(norm_second_value, norm_value);
       if (i == j) {
         norm_second_value = __dadd_rn(norm_second_value, dnorm[i]);
@@ -1598,18 +1605,23 @@ __global__ void prepare_grouped_prototype_targets_kernel(
   double* aggregate = decomposition->bidiagonal_vt;
   int* pivot = decomposition->iwork;
   double* factor_work = decomposition->work;
+  double* penalty_multipliers = workspace->derivative_delta;
 
   initialize_grouped_prototype_result(result);
   if (threadIdx.x == 0) augmented_rows[target] = 0;
+  for (int penalty = threadIdx.x; penalty < penalty_count;
+       penalty += blockDim.x) {
+    penalty_multipliers[penalty] = glibc235::exp_fma_rn(
+      target_log_sp[penalty]);
+  }
+  __syncthreads();
   for (int element = threadIdx.x; element < square;
        element += blockDim.x) {
     double value = 0.0;
     for (int penalty = 0; penalty < penalty_count; ++penalty) {
-      const double multiplier = glibc235::exp_fma_rn(
-        target_log_sp[penalty]);
       value = __dadd_rn(
         value,
-        __dmul_rn(multiplier,
+        __dmul_rn(penalty_multipliers[penalty],
           penalty_matrices[element + square * penalty]));
     }
     aggregate[element] = value;
@@ -1617,6 +1629,11 @@ __global__ void prepare_grouped_prototype_targets_kernel(
   __syncthreads();
   const int factor_rank = dpstf2_upper_block(
     aggregate, pivot, factor_work, q);
+  int* inverse_pivot = pivot + q;
+  for (int factor_column = threadIdx.x; factor_column < q;
+       factor_column += blockDim.x) {
+    inverse_pivot[pivot[factor_column] - 1] = factor_column;
+  }
   if (threadIdx.x == 0) {
     result->aggregate_penalty_rank = factor_rank;
     decomposition->iwork[2 * q] = factor_rank;
@@ -1638,11 +1655,8 @@ __global__ void prepare_grouped_prototype_targets_kernel(
       value = magic_r[row + q * column];
     } else {
       const int root_row = row - q;
-      int factor_column = 0;
-      while (factor_column < q && pivot[factor_column] != column + 1) {
-        ++factor_column;
-      }
-      if (factor_column < q && root_row <= factor_column) {
+      const int factor_column = inverse_pivot[column];
+      if (root_row <= factor_column) {
         value = aggregate[root_row + q * factor_column];
       }
     }
@@ -1813,12 +1827,14 @@ __device__ void complete_grouped_prototype_target_device(
     int n,
     int q,
     int penalty_count,
-    double rank_tolerance) {
+    double rank_tolerance,
+    bool score_ready = false,
+    DevicePhaseTiming* phase_timing = nullptr) {
   if (result->solver_info != 0) return;
   lapack312_multi::Workspace* decomposition = &workspace->decomposition;
   const int rows = q + result->aggregate_penalty_rank;
   const int square = q * q;
-  if (threadIdx.x == 0) {
+  if (!score_ready && threadIdx.x == 0) {
     int rank = q;
     const double threshold =
       __dmul_rn(decomposition->bidiagonal[0], rank_tolerance);
@@ -1834,69 +1850,76 @@ __device__ void complete_grouped_prototype_target_device(
     if (threadIdx.x == 0) result->solver_info = -2;
     return;
   }
+  const double* left_basis = decomposition->left_u;
   double* projected = decomposition->qr_tau;
-  for (int component = threadIdx.x; component < rank;
-       component += blockDim.x) {
-    double value = 0.0;
-    for (int row = 0; row < q; ++row) {
-      value = rounded_multiply_add(
-        value, decomposition->left_u[row + rows * component],
-        target_y0[row]);
-    }
-    projected[component] = value;
-  }
-  __syncthreads();
   double* fitted_coordinates = decomposition->tau_q;
-  for (int row = threadIdx.x; row < q; row += blockDim.x) {
-    double value = 0.0;
-    for (int component = 0; component < rank; ++component) {
-      value = rounded_multiply_add(
-        value, decomposition->left_u[row + rows * component],
-        projected[component]);
-    }
-    fitted_coordinates[row] = value;
-  }
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    double y_ay = 0.0;
-    for (int component = 0; component < rank; ++component) {
-      y_ay = rounded_multiply_add(
-        y_ay, projected[component], projected[component]);
-    }
-    double y_aay = 0.0;
-    for (int row = 0; row < q; ++row) {
-      y_aay = rounded_multiply_add(
-        y_aay, fitted_coordinates[row], fitted_coordinates[row]);
-    }
-    double edf = 0.0;
-    for (int column = 0; column < rank; ++column) {
+  if (!score_ready) {
+    for (int component = threadIdx.x; component < rank;
+         component += blockDim.x) {
+      double value = 0.0;
       for (int row = 0; row < q; ++row) {
-        const double value = decomposition->left_u[row + rows * column];
-        edf = rounded_multiply_add(edf, value, value);
+        value = rounded_multiply_add(
+          value, left_basis[row + rows * component],
+          target_y0[row]);
+      }
+      projected[component] = value;
+    }
+    __syncthreads();
+    for (int row = threadIdx.x; row < q; row += blockDim.x) {
+      double value = 0.0;
+      for (int component = 0; component < rank; ++component) {
+        value = rounded_multiply_add(
+          value, left_basis[row + rows * component],
+          projected[component]);
+      }
+      fitted_coordinates[row] = value;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      double y_ay = 0.0;
+      for (int component = 0; component < rank; ++component) {
+        y_ay = rounded_multiply_add(
+          y_ay, projected[component], projected[component]);
+      }
+      double y_aay = 0.0;
+      for (int row = 0; row < q; ++row) {
+        y_aay = rounded_multiply_add(
+          y_aay, fitted_coordinates[row], fitted_coordinates[row]);
+      }
+      double edf = 0.0;
+      for (int column = 0; column < rank; ++column) {
+        for (int row = 0; row < q; ++row) {
+          const double value = left_basis[row + rows * column];
+          edf = rounded_multiply_add(edf, value, value);
+        }
+      }
+      double rss = __dadd_rn(
+        __dadd_rn(target_squared_norm, __dmul_rn(-2.0, y_ay)), y_aay);
+      if (rss < 0.0 && isfinite(rss)) rss = 0.0;
+      const double delta = static_cast<double>(n) - edf;
+      if (!isfinite(rss) || !isfinite(edf) || delta <= kDenominatorFloor) {
+        result->solver_info = -3;
+      } else {
+        const double score = __ddiv_rn(
+          __dmul_rn(static_cast<double>(n), rss),
+          __dmul_rn(delta, delta));
+        result->rss = rss;
+        result->edf = edf;
+        result->score = score;
+        result->condition = decomposition->qr_basis_used != 0 ?
+          decomposition->qr_condition_estimate :
+          __ddiv_rn(
+            decomposition->bidiagonal[0],
+            decomposition->bidiagonal[rank - 1]);
       }
     }
-    double rss = __dadd_rn(
-      __dadd_rn(target_squared_norm, __dmul_rn(-2.0, y_ay)), y_aay);
-    if (rss < 0.0 && isfinite(rss)) rss = 0.0;
-    const double delta = static_cast<double>(n) - edf;
-    if (!isfinite(rss) || !isfinite(edf) || delta <= kDenominatorFloor) {
-      result->solver_info = -3;
-    } else {
-      const double score = __ddiv_rn(
-        __dmul_rn(static_cast<double>(n), rss),
-        __dmul_rn(delta, delta));
-      result->rss = rss;
-      result->edf = edf;
-      result->score = score;
-      result->condition = decomposition->qr_basis_used != 0 ?
-        decomposition->qr_condition_estimate :
-        __ddiv_rn(
-          decomposition->bidiagonal[0],
-          decomposition->bidiagonal[rank - 1]);
-    }
+    __syncthreads();
   }
-  __syncthreads();
   if (result->solver_info != 0) return;
+  unsigned long long phase_started = 0;
+  if (score_ready && threadIdx.x == 0 && phase_timing != nullptr) {
+    phase_started = clock64();
+  }
   const double rss = result->rss;
   const double delta = static_cast<double>(n) - result->edf;
 
@@ -1910,8 +1933,8 @@ __device__ void complete_grouped_prototype_target_device(
       for (int coordinate = 0; coordinate < q; ++coordinate) {
         value = rounded_multiply_add(
           value,
-          decomposition->left_u[coordinate + rows * row],
-          decomposition->left_u[coordinate + rows * column]);
+          left_basis[coordinate + rows * row],
+          left_basis[coordinate + rows * column]);
       }
       u1_u1[row + rank * column] = value;
       u1_u1[column + rank * row] = value;
@@ -2018,7 +2041,7 @@ __device__ void complete_grouped_prototype_target_device(
   double* d2norm = workspace->second_derivative_norm;
   double* d2delta = workspace->second_derivative_delta;
   for (int i = threadIdx.x; i < penalty_count; i += blockDim.x) {
-    const double lambda_i = glibc235::exp_fma_rn(target_log_sp[i]);
+    const double lambda_i = ddelta[i];
     const double* influence_i = workspace->influence +
       static_cast<std::size_t>(i) * square;
     double trace = 0.0;
@@ -2052,10 +2075,9 @@ __device__ void complete_grouped_prototype_target_device(
         product_sum = rounded_multiply_add(
           product_sum, metric_j[element], influence_i[element]);
       }
-      double value = __dmul_rn(
-        -2.0,
-        glibc235::exp_fma_rn(__dadd_rn(
-          target_log_sp[i], target_log_sp[j])));
+      const double pair_multiplier = glibc235::exp_fma_rn(__dadd_rn(
+        target_log_sp[i], target_log_sp[j]));
+      double value = __dmul_rn(-2.0, pair_multiplier);
       value = __dmul_rn(value, product_sum);
       if (i == j) value = __dadd_rn(value, ddelta[i]);
       d2delta[i + penalty_count * j] = value;
@@ -2076,10 +2098,7 @@ __device__ void complete_grouped_prototype_target_device(
             workspace->y_influence[i * q + component], my_j));
         norm_value = __dadd_rn(norm_value, term);
       }
-      double norm_second_value = __dmul_rn(
-        2.0,
-        glibc235::exp_fma_rn(__dadd_rn(
-          target_log_sp[i], target_log_sp[j])));
+      double norm_second_value = __dmul_rn(2.0, pair_multiplier);
       norm_second_value = __dmul_rn(norm_second_value, norm_value);
       if (i == j) {
         norm_second_value = __dadd_rn(norm_second_value, dnorm[i]);
@@ -2126,6 +2145,9 @@ __device__ void complete_grouped_prototype_target_device(
     }
   }
   __syncthreads();
+  if (score_ready && threadIdx.x == 0 && phase_timing != nullptr) {
+    phase_timing->derivative_hessian_cycles += clock64() - phase_started;
+  }
 
   for (int component = threadIdx.x; component < rank;
        component += blockDim.x) {
@@ -2143,6 +2165,44 @@ __device__ void complete_grouped_prototype_target_device(
     }
     result->coefficients[magic_pivot[row]] = value;
   }
+}
+
+__device__ void complete_deferred_multi_penalty_target_device(
+    const int* magic_pivot,
+    const double* penalty_roots,
+    const int* root_offsets,
+    const int* penalty_ranks,
+    const double* target_y0,
+    double target_squared_norm,
+    const double* target_log_sp,
+    DeviceEvaluationWorkspace* workspace,
+    DeviceTargetEvaluation* result,
+    int n,
+    int q,
+    int penalty_count,
+    double rank_tolerance,
+    DevicePhaseTiming* phase_timing) {
+  if (result->solver_info != 0) return;
+  if (result->decomposition_route == kDecompositionStableSvd) {
+    unsigned long long started = 0;
+    if (threadIdx.x == 0 && phase_timing != nullptr) started = clock64();
+    const int info = lapack312_multi::complete_stable_right_vectors_after_score(
+      q, &workspace->decomposition);
+    if (threadIdx.x == 0) {
+      result->solver_info = info;
+      if (phase_timing != nullptr) {
+        const unsigned long long cycles = clock64() - started;
+        phase_timing->qr_svd_cycles += cycles;
+        phase_timing->decomposition_stage_cycles[2] += cycles;
+      }
+    }
+    __syncthreads();
+    if (result->solver_info != 0) return;
+  }
+  complete_grouped_prototype_target_device(
+    magic_pivot, penalty_roots, root_offsets, penalty_ranks,
+    target_y0, target_squared_norm, target_log_sp, workspace, result,
+    n, q, penalty_count, rank_tolerance, true, phase_timing);
 }
 
 __global__ void complete_grouped_prototype_targets_kernel(
@@ -2292,6 +2352,8 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->converged = 0;
     state->trying = 0;
     state->tries = 0;
+    state->trial_requires_complete_evaluation = 0;
+    state->trial_accepted = 0;
     state->selected_evaluation_reuse_count = 0;
     state->ambiguous_step_descent_count = 0;
     state->ambiguous_step_non_descent_count = 0;
@@ -2459,13 +2521,75 @@ __global__ void optimize_multi_penalty_targets_kernel(
             kDecompositionTraceNewtonTrial :
             kDecompositionTraceSteepestTrial) |
             (trial_index > 1 ? kDecompositionTraceStepHalving : 0U) |
-            stability_trace_flag);
+            stability_trace_flag, true);
         __syncthreads();
         if (threadIdx.x == 0) {
           ++state->score_calls;
           ++state->objective_calls;
+          state->trial_requires_complete_evaluation = 0;
+          state->trial_accepted = 0;
           if (state->trial.solver_info != 0 ||
               !isfinite(state->trial.score)) {
+            state->optimizer_status = 2;
+            state->trying = 0;
+          } else {
+            double directional_derivative = 0.0;
+            double maximum_step = 0.0;
+            double maximum_log_sp = 0.0;
+            for (int penalty = 0; penalty < penalty_count; ++penalty) {
+              directional_derivative = rounded_multiply_add(
+                directional_derivative, state->gradient[penalty],
+                state->working_step[penalty]);
+              maximum_step = fmax(
+                maximum_step, fabs(state->working_step[penalty]));
+              maximum_log_sp = fmax(
+                maximum_log_sp, fabs(state->log_sp[penalty]));
+            }
+            const double score_delta = __dadd_rn(
+              state->trial.score, -state->minimum_score);
+            const double convergence_step = __dmul_rn(
+              convergence_tolerance, __dadd_rn(1.0, maximum_log_sp));
+            const double ambiguity_tolerance = __dmul_rn(
+              kAmbiguousStepRelativeTolerance,
+              __dadd_rn(1.0, fabs(state->minimum_score)));
+            const bool ambiguous_first_newton_step =
+              state->use_steepest_descent == 0 &&
+              trial_index == 1 && directional_derivative < 0.0 &&
+              maximum_step > convergence_step &&
+              fabs(score_delta) <= ambiguity_tolerance;
+            double smallest_hessian_eigenvalue = fabs(
+              state->hessian_eigenvalues[0]);
+            double largest_hessian_eigenvalue =
+              smallest_hessian_eigenvalue;
+            for (int penalty = 1; penalty < penalty_count; ++penalty) {
+              const double value = fabs(
+                state->hessian_eigenvalues[penalty]);
+              smallest_hessian_eigenvalue = fmin(
+                smallest_hessian_eigenvalue, value);
+              largest_hessian_eigenvalue = fmax(
+                largest_hessian_eigenvalue, value);
+            }
+            const bool conservative_hessian_condition =
+              smallest_hessian_eigenvalue > 0.0 &&
+              largest_hessian_eigenvalue >= __dmul_rn(
+                kAmbiguousStepConservativeMinimumHessianCondition,
+                smallest_hessian_eigenvalue);
+            state->trial_requires_complete_evaluation =
+              !stability_replay && ambiguous_first_newton_step &&
+              score_delta < 0.0 && conservative_hessian_condition ? 1 : 0;
+          }
+        }
+        __syncthreads();
+        if (state->trial_requires_complete_evaluation != 0) {
+          complete_deferred_multi_penalty_target_device(
+            magic_pivot, penalty_roots, root_offsets, penalty_ranks,
+            target_y0, target_squared_norm, state->trial_log_sp,
+            workspace, &state->trial, n, q, penalty_count,
+            rank_tolerance, &state->phase_timing);
+        }
+        __syncthreads();
+        if (threadIdx.x == 0 && state->optimizer_status == 0) {
+          if (state->trial.solver_info != 0) {
             state->optimizer_status = 2;
             state->trying = 0;
           } else {
@@ -2555,7 +2679,26 @@ __global__ void optimize_multi_penalty_targets_kernel(
               !conservative_replay_halving &&
               (state->trial.score < state->minimum_score ||
                roundoff_limited_newton_descent);
-            if (accepted) {
+            state->trial_accepted = accepted ? 1 : 0;
+          }
+        }
+        __syncthreads();
+        if (state->trial_accepted != 0 &&
+            state->trial_requires_complete_evaluation == 0) {
+          complete_deferred_multi_penalty_target_device(
+            magic_pivot, penalty_roots, root_offsets, penalty_ranks,
+            target_y0, target_squared_norm, state->trial_log_sp,
+            workspace, &state->trial, n, q, penalty_count,
+            rank_tolerance, &state->phase_timing);
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+          if (state->optimizer_status == 0 &&
+              state->trial.solver_info != 0) {
+            state->optimizer_status = 2;
+            state->trying = 0;
+          } else if (state->optimizer_status == 0) {
+            if (state->trial_accepted != 0) {
               state->score_reduction = __dadd_rn(
                 state->minimum_score, -state->trial.score);
               state->minimum_score = state->trial.score;

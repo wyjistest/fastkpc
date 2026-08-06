@@ -13,6 +13,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef FASTKPC_USE_OPENSSL_SHA256
+#include <openssl/sha.h>
+#endif
+
 namespace fastkpc {
 namespace {
 
@@ -852,6 +856,9 @@ std::array<std::uint8_t, 32> sha256_bytes(const std::string& input) {
 }  // namespace
 
 std::string full_cuda_ci_sha256_utf8(const std::string& value) {
+#ifdef FASTKPC_USE_OPENSSL_SHA256
+  return full_cuda_ci_sha256_bytes(value.data(), value.size());
+#else
   const auto bytes = sha256_bytes(value);
   std::ostringstream output;
   output << std::hex << std::setfill('0');
@@ -859,6 +866,41 @@ std::string full_cuda_ci_sha256_utf8(const std::string& value) {
     output << std::setw(2) << static_cast<int>(byte);
   }
   return output.str();
+#endif
+}
+
+std::string full_cuda_ci_sha256_bytes(const void* value, std::size_t size) {
+  if (value == nullptr && size != 0U) {
+    throw std::runtime_error("SHA-256 byte input is null");
+  }
+#ifdef FASTKPC_USE_OPENSSL_SHA256
+  static const unsigned char empty = 0U;
+  const auto* input = size == 0U ? &empty :
+    static_cast<const unsigned char*>(value);
+  std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+  if (SHA256(input, size, digest.data()) == nullptr) {
+    throw std::runtime_error("OpenSSL SHA-256 failed");
+  }
+  static constexpr char hexadecimal[] = "0123456789abcdef";
+  std::string output(SHA256_DIGEST_LENGTH * 2U, '0');
+  for (std::size_t index = 0; index < digest.size(); ++index) {
+    output[index * 2U] = hexadecimal[digest[index] >> 4U];
+    output[index * 2U + 1U] = hexadecimal[digest[index] & 0x0fU];
+  }
+  return output;
+#else
+  const auto* input = static_cast<const char*>(value);
+  return full_cuda_ci_sha256_utf8(
+    size == 0U ? std::string() : std::string(input, size));
+#endif
+}
+
+const char* full_cuda_ci_sha256_backend() {
+#ifdef FASTKPC_USE_OPENSSL_SHA256
+  return "openssl-sha256";
+#else
+  return "portable-sha256";
+#endif
 }
 
 FullCudaCiContractIdentity full_cuda_ci_contract_identity(

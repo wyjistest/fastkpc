@@ -6,10 +6,12 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iomanip>
+#include <list>
 #include <limits>
 #include <numeric>
 #include <random>
@@ -69,6 +71,16 @@ class DeviceBuffer {
     bytes_ = bytes;
   }
 
+  bool ensure_capacity(std::size_t bytes) {
+    if (bytes == 0U) {
+      throw std::runtime_error("invalid strict CI device capacity request");
+    }
+    if (bytes <= bytes_) return false;
+    close();
+    allocate(bytes);
+    return true;
+  }
+
   void close() {
     if (pointer_ == nullptr) return;
     check_cuda(cudaFree(pointer_), "free strict CI buffer");
@@ -92,11 +104,6 @@ class CudaStream {
   }
   ~CudaStream() { if (value_ != nullptr) cudaStreamDestroy(value_); }
   cudaStream_t get() const { return value_; }
-  void close() {
-    if (value_ == nullptr) return;
-    check_cuda(cudaStreamDestroy(value_), "destroy strict CI stream");
-    value_ = nullptr;
-  }
  private:
   cudaStream_t value_ = nullptr;
 };
@@ -110,11 +117,6 @@ class CudaEvent {
   }
   ~CudaEvent() { if (value_ != nullptr) cudaEventDestroy(value_); }
   cudaEvent_t get() const { return value_; }
-  void close() {
-    if (value_ == nullptr) return;
-    check_cuda(cudaEventDestroy(value_), "destroy strict CI event");
-    value_ = nullptr;
-  }
  private:
   cudaEvent_t value_ = nullptr;
 };
@@ -1048,6 +1050,203 @@ class FullCudaCiMethodResidualCache {
   std::size_t next_evict_slot_ = 0U;
 };
 
+class FullCudaCiMethodExecutionContext {
+ public:
+  struct HsicComponentEntry {
+    std::size_t slot = 0U;
+    std::list<std::string>::iterator order;
+  };
+
+  FullCudaCiMethodExecutionContext(int n,
+                                   std::string ci_method,
+                                   int num_col,
+                                   int permutation_replicates,
+                                   int device_id)
+      : n_(n), ci_method_(std::move(ci_method)), num_col_(num_col),
+        permutation_replicates_(permutation_replicates),
+        device_id_(device_id), stage_start_(true), stage_stop_(true),
+        consumer_completion_(false) {
+    if (n_ < 6 || device_id_ < 0 || num_col_ < 1 || num_col_ > 64 ||
+        (ci_method_ != "dcc.perm" && ci_method_ != "hsic.gamma" &&
+         ci_method_ != "hsic.perm") ||
+        ((ci_method_ == "dcc.perm" || ci_method_ == "hsic.perm") &&
+         permutation_replicates_ < 1) ||
+        (ci_method_ == "hsic.gamma" && permutation_replicates_ != 0)) {
+      throw std::runtime_error(
+        "strict CI execution context shape is invalid");
+    }
+    initialize_hsic_component_cache();
+  }
+
+  void validate(const FullCudaCiMethodBatchRequest& request, int n) const {
+    if (n != n_ || request.ci_method != ci_method_ ||
+        request.num_col != num_col_ ||
+        request.permutation_replicates != permutation_replicates_) {
+      throw std::runtime_error(
+        "strict CI execution context identity changed");
+    }
+  }
+
+  bool begin_call() {
+    const bool reused = call_count_ > 0;
+    ++call_count_;
+    return reused;
+  }
+
+  void ensure(DeviceBuffer* buffer, std::size_t bytes) {
+    if (buffer == nullptr) {
+      throw std::runtime_error("strict CI execution buffer is missing");
+    }
+    if (buffer->ensure_capacity(bytes)) ++buffer_growth_count_;
+  }
+
+  std::size_t device_bytes() const {
+    std::size_t bytes = component_targets_.bytes() +
+      left_components_.bytes() + right_components_.bytes() +
+      logical_ids_.bytes() + records_.bytes() + permutations_.bytes();
+    for (const DeviceBuffer& buffer : method_buffers_) {
+      bytes += buffer.bytes();
+    }
+    bytes += hsic_cache_factors_.bytes() + hsic_cache_ranks_.bytes();
+    return bytes;
+  }
+
+  bool hsic_component_cache_enabled() const {
+    return hsic_cache_capacity_ >= 2U;
+  }
+
+  std::size_t hsic_component_cache_capacity() const {
+    return hsic_cache_capacity_;
+  }
+
+  std::size_t hsic_component_cache_bytes() const {
+    return hsic_cache_factors_.bytes() + hsic_cache_ranks_.bytes();
+  }
+
+  std::string hsic_component_key(const std::string& residual_key,
+                                 FixedSpRoute route,
+                                 FixedSpStatus status,
+                                 double hsic_sig) const {
+    std::ostringstream output;
+    output << "semantic=kernlab-inchol-rbf-tol0.001-centered-factor-v1\n"
+           << "residual=" << residual_key << "\n"
+           << "route=" << fixed_sp_route_name(route) << "\n"
+           << "status=" << static_cast<int>(status) << "\n"
+           << "n=" << n_ << "\n"
+           << "numCol=" << num_col_ << "\n"
+           << "sig=" << std::hexfloat << hsic_sig << "\n";
+    return output.str();
+  }
+
+  bool lookup_hsic_component(const std::string& key,
+                             std::size_t* slot) {
+    const auto found = hsic_cache_entries_.find(key);
+    if (found == hsic_cache_entries_.end()) return false;
+    hsic_cache_order_.splice(
+      hsic_cache_order_.begin(), hsic_cache_order_, found->second.order);
+    found->second.order = hsic_cache_order_.begin();
+    *slot = found->second.slot;
+    return true;
+  }
+
+  std::size_t reserve_hsic_component(const std::string& key,
+                                     bool* inserted,
+                                     bool* evicted) {
+    const auto found = hsic_cache_entries_.find(key);
+    if (found != hsic_cache_entries_.end()) {
+      hsic_cache_order_.splice(
+        hsic_cache_order_.begin(), hsic_cache_order_, found->second.order);
+      found->second.order = hsic_cache_order_.begin();
+      *inserted = false;
+      *evicted = false;
+      return found->second.slot;
+    }
+    std::size_t slot = 0U;
+    *evicted = false;
+    if (hsic_cache_slots_used_ < hsic_cache_capacity_) {
+      slot = hsic_cache_slots_used_++;
+    } else {
+      if (hsic_cache_order_.empty()) {
+        throw std::runtime_error("strict HSIC component cache is malformed");
+      }
+      const std::string victim = hsic_cache_order_.back();
+      const auto victim_entry = hsic_cache_entries_.find(victim);
+      if (victim_entry == hsic_cache_entries_.end()) {
+        throw std::runtime_error(
+          "strict HSIC component cache victim is missing");
+      }
+      slot = victim_entry->second.slot;
+      hsic_cache_entries_.erase(victim_entry);
+      hsic_cache_order_.pop_back();
+      *evicted = true;
+    }
+    hsic_cache_order_.push_front(key);
+    hsic_cache_entries_.emplace(
+      key, HsicComponentEntry{slot, hsic_cache_order_.begin()});
+    *inserted = true;
+    return slot;
+  }
+
+  std::size_t hsic_factor_stride() const {
+    return static_cast<std::size_t>(n_) * std::min(num_col_, n_);
+  }
+
+ private:
+  void initialize_hsic_component_cache() {
+    if (ci_method_ != "hsic.perm") return;
+    std::size_t free_bytes = 0U;
+    std::size_t total_bytes = 0U;
+    check_cuda(cudaMemGetInfo(&free_bytes, &total_bytes),
+               "query strict HSIC component cache memory");
+    (void)total_bytes;
+    constexpr std::size_t budget = 384U * 1024U * 1024U;
+    const std::size_t bounded_budget = std::min(budget, free_bytes / 8U);
+    const std::size_t slot_bytes = hsic_factor_stride() * sizeof(double) +
+      sizeof(int);
+    hsic_cache_capacity_ = std::min<std::size_t>(
+      131072U, slot_bytes == 0U ? 0U : bounded_budget / slot_bytes);
+    if (hsic_cache_capacity_ < 2U) {
+      hsic_cache_capacity_ = 0U;
+      return;
+    }
+    hsic_cache_factors_.allocate(
+      hsic_cache_capacity_ * hsic_factor_stride() * sizeof(double));
+    hsic_cache_ranks_.allocate(hsic_cache_capacity_ * sizeof(int));
+  }
+
+ public:
+
+  int device_id() const { return device_id_; }
+  int call_count() const { return call_count_; }
+  int buffer_growth_count() const { return buffer_growth_count_; }
+
+  int n_ = 0;
+  std::string ci_method_;
+  int num_col_ = 0;
+  int permutation_replicates_ = 0;
+  int device_id_ = -1;
+  int call_count_ = 0;
+  int buffer_growth_count_ = 0;
+  CudaStream stream_;
+  CudaEvent stage_start_;
+  CudaEvent stage_stop_;
+  CudaEvent consumer_completion_;
+  DeviceBuffer component_targets_;
+  DeviceBuffer left_components_;
+  DeviceBuffer right_components_;
+  DeviceBuffer logical_ids_;
+  DeviceBuffer records_;
+  DeviceBuffer permutations_;
+  std::array<DeviceBuffer, 11> method_buffers_;
+  std::vector<DeviceMethodRecord> host_records_;
+  std::size_t hsic_cache_capacity_ = 0U;
+  std::size_t hsic_cache_slots_used_ = 0U;
+  DeviceBuffer hsic_cache_factors_;
+  DeviceBuffer hsic_cache_ranks_;
+  std::list<std::string> hsic_cache_order_;
+  std::unordered_map<std::string, HsicComponentEntry> hsic_cache_entries_;
+};
+
 std::shared_ptr<FullCudaCiMethodResidualCache>
 create_full_cuda_ci_method_residual_cache(int n, std::size_t byte_budget) {
   if (n <= 0) {
@@ -1076,6 +1275,19 @@ create_full_cuda_ci_method_residual_cache(int n, std::size_t byte_budget) {
   }
   return std::make_shared<FullCudaCiMethodResidualCache>(
     n, device_id, capacity);
+}
+
+std::shared_ptr<FullCudaCiMethodExecutionContext>
+create_full_cuda_ci_method_execution_context(
+    int n,
+    const std::string& ci_method,
+    int num_col,
+    int permutation_replicates) {
+  int device_id = -1;
+  check_cuda(cudaGetDevice(&device_id),
+             "capture strict CI execution context device");
+  return std::make_shared<FullCudaCiMethodExecutionContext>(
+    n, ci_method, num_col, permutation_replicates, device_id);
 }
 
 std::vector<int> full_cuda_ci_method_seeded_permutation_table(
@@ -1121,14 +1333,9 @@ std::string full_cuda_ci_method_batch_request_identity(
     const FullCudaCiMethodBatchRequest& request,
     const std::vector<std::string>& target_keys,
     int n) {
-  std::string permutation_bytes;
-  if (!request.permutations.empty()) {
-    permutation_bytes.assign(
-      reinterpret_cast<const char*>(request.permutations.data()),
-      request.permutations.size() * sizeof(int));
-  }
-  const std::string permutation_sha = full_cuda_ci_sha256_utf8(
-    permutation_bytes);
+  const std::string permutation_sha = full_cuda_ci_sha256_bytes(
+    request.permutations.empty() ? nullptr : request.permutations.data(),
+    request.permutations.size() * sizeof(int));
   std::ostringstream payload;
   payload << "schema=" << kFullCudaCiMethodBatchRequestSchemaVersion << "\n"
           << "prepared=" << request.expected_prepared_s_key_sha256 << "\n"
@@ -1159,9 +1366,21 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
     const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
     const FixedSpBatchHostView& batch,
     const FullCudaCiMethodBatchRequest& request,
-    const std::shared_ptr<FullCudaCiMethodResidualCache>& residual_cache) {
+    const std::shared_ptr<FullCudaCiMethodResidualCache>& residual_cache,
+    const std::shared_ptr<FullCudaCiMethodExecutionContext>&
+      execution_context) {
   const auto call_started = std::chrono::steady_clock::now();
   validate_request(request, batch);
+  std::shared_ptr<FullCudaCiMethodExecutionContext> active_context =
+    execution_context;
+  if (!active_context) {
+    active_context = create_full_cuda_ci_method_execution_context(
+      batch.n, request.ci_method, request.num_col,
+      request.permutation_replicates);
+  }
+  active_context->validate(request, batch.n);
+  const int context_growth_before = active_context->buffer_growth_count();
+  const bool context_reused = active_context->begin_call();
   const PreparedSInfo prepared_info = prepared_s_gpu_info(prepared_s);
   if (prepared_info.prepared_s_key_sha256 !=
       request.expected_prepared_s_key_sha256 ||
@@ -1169,8 +1388,12 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       batch.output_mask != FixedSpOutputResiduals) {
     throw std::runtime_error("strict CI method prepared/batch identity mismatch");
   }
+  const auto identity_started = std::chrono::steady_clock::now();
   const std::string actual_identity = full_cuda_ci_method_batch_request_identity(
     request, batch.target_keys, batch.n);
+  const double identity_validation_host_ms =
+    std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - identity_started).count();
   if (!is_lower_sha256(request.request_identity_sha256) ||
       request.request_identity_sha256 != actual_identity) {
     throw std::runtime_error("strict CI method request identity mismatch");
@@ -1190,6 +1413,10 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   diagnostics.target_count = batch.target_count;
   diagnostics.pair_count = static_cast<int>(request.pairs.size());
   diagnostics.permutation_replicates = request.permutation_replicates;
+  diagnostics.execution_context_call_count = 1;
+  diagnostics.execution_context_reuse_count = context_reused ? 1 : 0;
+  diagnostics.request_identity_validation_host_ms =
+    identity_validation_host_ms;
   diagnostics.request_identity_authenticated = true;
   diagnostics.prepared_identity_authenticated = true;
 
@@ -1207,7 +1434,6 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
   }
   diagnostics.referenced_component_count =
     static_cast<int>(component_targets.size());
-  diagnostics.component_build_count = diagnostics.referenced_component_count;
   diagnostics.pair_evaluation_count = diagnostics.pair_count;
 
   std::vector<int> left_components(request.pairs.size());
@@ -1251,17 +1477,25 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       }
       check_cuda(cudaSetDevice(residual_view.device_id),
                  "select strict CI residual device");
+      if (residual_view.device_id != active_context->device_id()) {
+        throw std::runtime_error(
+          "strict CI execution context device changed");
+      }
     } else {
       check_cuda(cudaSetDevice(residual_cache->device_id()),
                  "select strict CI cached residual device");
+      if (residual_cache->device_id() != active_context->device_id()) {
+        throw std::runtime_error(
+          "strict CI cached execution context device changed");
+      }
     }
     diagnostics.target_identity_authenticated = true;
     diagnostics.residuals_device_resident = true;
 
-    CudaStream stream;
-    CudaEvent stage_start(true);
-    CudaEvent stage_stop(true);
-    CudaEvent consumer_completion(false);
+    CudaStream& stream = active_context->stream_;
+    CudaEvent& stage_start = active_context->stage_start_;
+    CudaEvent& stage_stop = active_context->stage_stop_;
+    CudaEvent& consumer_completion = active_context->consumer_completion_;
     const double* residual_values = nullptr;
     std::vector<FixedSpRoute> executed_routes;
     std::vector<FixedSpStatus> solver_statuses;
@@ -1287,60 +1521,140 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       throw std::runtime_error("strict CI residual source identity changed");
     }
 
+    std::vector<int> component_misses;
+    std::vector<unsigned char> component_store_after_build(
+      component_targets.size(), 0U);
+    std::vector<std::size_t> component_cache_slots(
+      component_targets.size(), std::numeric_limits<std::size_t>::max());
+    std::vector<std::string> component_cache_keys(component_targets.size());
+    const bool hsic_component_cache =
+      active_context->hsic_component_cache_enabled();
+    if (hsic_component_cache) {
+      diagnostics.component_cache_persistent_capacity_entries =
+        active_context->hsic_component_cache_capacity();
+      diagnostics.component_cache_persistent_device_bytes =
+        active_context->hsic_component_cache_bytes();
+      diagnostics.component_cache_persistent_request_count =
+        static_cast<int>(component_targets.size());
+    }
+    for (std::size_t component = 0;
+         component < component_targets.size(); ++component) {
+      const int target = component_targets[component];
+      const bool first_residual = residual_cache_eligible &&
+        !residual_cache_all_hit &&
+        cached_entries[static_cast<std::size_t>(target)].route ==
+          FixedSpRoute::Unset;
+      const bool cache_payload_authoritative =
+        residual_cache_all_hit || first_residual;
+      bool hit = false;
+      if (hsic_component_cache && residual_cache_all_hit) {
+        component_cache_keys[component] =
+          active_context->hsic_component_key(
+            batch.target_keys[static_cast<std::size_t>(target)],
+            executed_routes[static_cast<std::size_t>(target)],
+            solver_statuses[static_cast<std::size_t>(target)],
+            request.hsic_sig);
+        diagnostics.component_cache_persistent_lookup_count += 1;
+        hit = active_context->lookup_hsic_component(
+          component_cache_keys[component],
+          &component_cache_slots[component]);
+        if (hit) diagnostics.component_cache_persistent_hit_count += 1;
+      }
+      if (!hit) {
+        component_misses.push_back(static_cast<int>(component));
+        if (hsic_component_cache && cache_payload_authoritative) {
+          if (component_cache_keys[component].empty()) {
+            component_cache_keys[component] =
+              active_context->hsic_component_key(
+                batch.target_keys[static_cast<std::size_t>(target)],
+                executed_routes[static_cast<std::size_t>(target)],
+                solver_statuses[static_cast<std::size_t>(target)],
+                request.hsic_sig);
+          }
+          component_store_after_build[component] = 1U;
+        }
+      }
+    }
+    diagnostics.component_build_count =
+      static_cast<int>(component_misses.size());
+    diagnostics.component_cache_persistent_miss_count =
+      hsic_component_cache ? diagnostics.component_build_count : 0;
+
     const std::size_t component_count = component_targets.size();
     const std::size_t pair_count = request.pairs.size();
     const std::size_t cells = checked_multiply(
       static_cast<std::size_t>(batch.n), static_cast<std::size_t>(batch.n),
       "strict CI component cells");
-    DeviceBuffer d_component_targets(sizeof(int) * component_count);
-    DeviceBuffer d_left_components(sizeof(int) * pair_count);
-    DeviceBuffer d_right_components(sizeof(int) * pair_count);
-    DeviceBuffer d_logical_ids(sizeof(unsigned long long) * pair_count);
-    DeviceBuffer d_records(sizeof(DeviceMethodRecord) * pair_count);
+    const std::size_t component_target_bytes =
+      sizeof(int) * component_count;
+    const std::size_t component_index_bytes = sizeof(int) * pair_count;
+    const std::size_t logical_id_bytes =
+      sizeof(unsigned long long) * pair_count;
+    const std::size_t record_bytes =
+      sizeof(DeviceMethodRecord) * pair_count;
+    const std::size_t permutation_bytes =
+      sizeof(int) * request.permutations.size();
+    DeviceBuffer& d_component_targets = active_context->component_targets_;
+    DeviceBuffer& d_left_components = active_context->left_components_;
+    DeviceBuffer& d_right_components = active_context->right_components_;
+    DeviceBuffer& d_logical_ids = active_context->logical_ids_;
+    DeviceBuffer& d_records = active_context->records_;
+    DeviceBuffer& d_permutations = active_context->permutations_;
+    active_context->ensure(&d_component_targets, component_target_bytes);
+    active_context->ensure(&d_left_components, component_index_bytes);
+    active_context->ensure(&d_right_components, component_index_bytes);
+    active_context->ensure(&d_logical_ids, logical_id_bytes);
+    active_context->ensure(&d_records, record_bytes);
     diagnostics.metadata_h2d_count = 4;
-    diagnostics.metadata_h2d_bytes = d_component_targets.bytes() +
-      d_left_components.bytes() + d_right_components.bytes() +
-      d_logical_ids.bytes();
+    diagnostics.metadata_h2d_bytes = component_target_bytes +
+      2U * component_index_bytes + logical_id_bytes;
     check_cuda(cudaMemcpyAsync(
       d_component_targets.get(), component_targets.data(),
-      d_component_targets.bytes(), cudaMemcpyHostToDevice, stream.get()),
+      component_target_bytes, cudaMemcpyHostToDevice, stream.get()),
       "copy strict CI component targets");
     check_cuda(cudaMemcpyAsync(
       d_left_components.get(), left_components.data(),
-      d_left_components.bytes(), cudaMemcpyHostToDevice, stream.get()),
+      component_index_bytes, cudaMemcpyHostToDevice, stream.get()),
       "copy strict CI left components");
     check_cuda(cudaMemcpyAsync(
       d_right_components.get(), right_components.data(),
-      d_right_components.bytes(), cudaMemcpyHostToDevice, stream.get()),
+      component_index_bytes, cudaMemcpyHostToDevice, stream.get()),
       "copy strict CI right components");
     check_cuda(cudaMemcpyAsync(
-      d_logical_ids.get(), logical_ids.data(), d_logical_ids.bytes(),
+      d_logical_ids.get(), logical_ids.data(), logical_id_bytes,
       cudaMemcpyHostToDevice, stream.get()),
       "copy strict CI logical IDs");
 
-    DeviceBuffer d_permutations;
     if (!request.permutations.empty()) {
-      d_permutations.allocate(sizeof(int) * request.permutations.size());
+      active_context->ensure(&d_permutations, permutation_bytes);
       ++diagnostics.metadata_h2d_count;
-      diagnostics.metadata_h2d_bytes += d_permutations.bytes();
+      diagnostics.metadata_h2d_bytes += permutation_bytes;
       check_cuda(cudaMemcpyAsync(
         d_permutations.get(), request.permutations.data(),
-        d_permutations.bytes(), cudaMemcpyHostToDevice, stream.get()),
+        permutation_bytes, cudaMemcpyHostToDevice, stream.get()),
         "copy strict CI permutations");
     }
 
     check_cuda(cudaEventRecord(stage_start.get(), stream.get()),
                "record strict CI component start");
-    std::vector<std::unique_ptr<DeviceBuffer>> method_buffers;
+    std::vector<DeviceBuffer*> method_buffers;
+    std::vector<std::size_t> method_buffer_bytes;
+    const auto add_method_buffer = [&](std::size_t bytes) {
+      const std::size_t index = method_buffers.size();
+      if (index >= active_context->method_buffers_.size()) {
+        throw std::runtime_error(
+          "strict CI method workspace capacity changed");
+      }
+      DeviceBuffer* buffer = &active_context->method_buffers_[index];
+      active_context->ensure(buffer, bytes);
+      method_buffers.push_back(buffer);
+      method_buffer_bytes.push_back(bytes);
+    };
     if (request.ci_method == "dcc.perm") {
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(double) * component_count * cells));
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(double) * component_count * batch.n));
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(double) * pair_count));
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(int) * pair_count));
+      add_method_buffer(sizeof(double) * component_count * cells);
+      add_method_buffer(sizeof(double) * component_count * batch.n);
+      add_method_buffer(sizeof(double) * pair_count);
+      add_method_buffer(sizeof(int) * pair_count);
       double* centered = static_cast<double*>(method_buffers[0]->get());
       double* row_sums = static_cast<double*>(method_buffers[1]->get());
       double* observed_sums =
@@ -1411,60 +1725,133 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
                          static_cast<std::size_t>(max_rank),
                          "strict HSIC triangular square"),
         "strict HSIC triangular components");
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(double) * factor_values));
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(double) * triangular_values));
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(double) * component_count * batch.n));
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(double) * component_count * batch.n));
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(double) * component_count * max_rank));
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(int) * component_count * max_rank));
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(int) * component_count));
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(double) * component_count));
-      method_buffers.emplace_back(new DeviceBuffer(
-        sizeof(double) * component_count));
+      add_method_buffer(sizeof(double) * factor_values);
+      add_method_buffer(sizeof(double) * triangular_values);
+      add_method_buffer(sizeof(double) * component_count * batch.n);
+      add_method_buffer(sizeof(double) * component_count * batch.n);
+      add_method_buffer(sizeof(double) * component_count * max_rank);
+      add_method_buffer(sizeof(int) * component_count * max_rank);
+      add_method_buffer(sizeof(int) * component_count);
+      add_method_buffer(sizeof(double) * component_count);
+      add_method_buffer(sizeof(double) * component_count);
       if (request.permutation_replicates > 0) {
-        method_buffers.emplace_back(new DeviceBuffer(
-          sizeof(double) * pair_count));
-        method_buffers.emplace_back(new DeviceBuffer(
-          sizeof(int) * pair_count));
+        add_method_buffer(sizeof(double) * pair_count);
+        add_method_buffer(sizeof(int) * pair_count);
       }
       double* factors = static_cast<double*>(method_buffers[0]->get());
       int* ranks = static_cast<int*>(method_buffers[6]->get());
       double* off_diagonal = static_cast<double*>(method_buffers[7]->get());
       double* self_moments = static_cast<double*>(method_buffers[8]->get());
-      check_cuda(cudaMemsetAsync(
-        factors, 0, method_buffers[0]->bytes(), stream.get()),
-        "zero strict HSIC factors");
-      build_inchol_components_kernel<<<
-        static_cast<unsigned int>(component_count), kBlockSize, 0,
-        stream.get()>>>(
-        residual_values,
-        static_cast<const int*>(d_component_targets.get()), batch.n,
-        static_cast<int>(component_count), max_rank, 1.0 / request.hsic_sig,
-        factors,
-        static_cast<double*>(method_buffers[1]->get()),
-        static_cast<double*>(method_buffers[2]->get()),
-        static_cast<double*>(method_buffers[3]->get()),
-        static_cast<double*>(method_buffers[4]->get()),
-        static_cast<int*>(method_buffers[5]->get()), ranks, off_diagonal);
-      center_inchol_components_kernel<<<
-        static_cast<unsigned int>(component_count), kBlockSize, 0,
-        stream.get()>>>(
-        factors, ranks, batch.n, static_cast<int>(component_count), max_rank);
+      const std::size_t factor_stride =
+        static_cast<std::size_t>(batch.n) * max_rank;
+      const std::size_t triangular_stride =
+        static_cast<std::size_t>(max_rank) * max_rank;
+      for (std::size_t component = 0; component < component_count;
+           ++component) {
+        const std::size_t slot = component_cache_slots[component];
+        if (slot == std::numeric_limits<std::size_t>::max()) continue;
+        check_cuda(cudaMemcpyAsync(
+          factors + component * factor_stride,
+          static_cast<const double*>(
+            active_context->hsic_cache_factors_.get()) +
+              slot * factor_stride,
+          sizeof(double) * factor_stride, cudaMemcpyDeviceToDevice,
+          stream.get()),
+          "gather strict HSIC component factors");
+        check_cuda(cudaMemcpyAsync(
+          ranks + component,
+          static_cast<const int*>(active_context->hsic_cache_ranks_.get()) +
+            slot,
+          sizeof(int), cudaMemcpyDeviceToDevice, stream.get()),
+          "gather strict HSIC component rank");
+        diagnostics.component_cache_persistent_gather_d2d_bytes +=
+          sizeof(double) * factor_stride + sizeof(int);
+      }
       const std::size_t shared_bytes = sizeof(double) *
         static_cast<std::size_t>(max_rank) * max_rank;
-      reduce_inchol_self_moments_kernel<<<
-        static_cast<unsigned int>(component_count), kBlockSize, shared_bytes,
-        stream.get()>>>(factors, ranks, batch.n,
-                        static_cast<int>(component_count), max_rank,
-                        self_moments);
+      if (component_misses.size() == component_count) {
+        check_cuda(cudaMemsetAsync(
+          factors, 0, sizeof(double) * factor_values, stream.get()),
+          "zero strict HSIC factors");
+        build_inchol_components_kernel<<<
+          static_cast<unsigned int>(component_count), kBlockSize, 0,
+          stream.get()>>>(
+          residual_values,
+          static_cast<const int*>(d_component_targets.get()), batch.n,
+          static_cast<int>(component_count), max_rank, 1.0 / request.hsic_sig,
+          factors,
+          static_cast<double*>(method_buffers[1]->get()),
+          static_cast<double*>(method_buffers[2]->get()),
+          static_cast<double*>(method_buffers[3]->get()),
+          static_cast<double*>(method_buffers[4]->get()),
+          static_cast<int*>(method_buffers[5]->get()), ranks, off_diagonal);
+        center_inchol_components_kernel<<<
+          static_cast<unsigned int>(component_count), kBlockSize, 0,
+          stream.get()>>>(
+          factors, ranks, batch.n, static_cast<int>(component_count),
+          max_rank);
+        reduce_inchol_self_moments_kernel<<<
+          static_cast<unsigned int>(component_count), kBlockSize, shared_bytes,
+          stream.get()>>>(factors, ranks, batch.n,
+                          static_cast<int>(component_count), max_rank,
+                          self_moments);
+      } else {
+        for (int component : component_misses) {
+          const std::size_t output = static_cast<std::size_t>(component);
+          check_cuda(cudaMemsetAsync(
+            factors + output * factor_stride, 0,
+            sizeof(double) * factor_stride, stream.get()),
+            "zero strict HSIC component factors");
+          build_inchol_components_kernel<<<1U, kBlockSize, 0, stream.get()>>>(
+            residual_values,
+            static_cast<const int*>(d_component_targets.get()) + output,
+            batch.n, 1, max_rank, 1.0 / request.hsic_sig,
+            factors + output * factor_stride,
+            static_cast<double*>(method_buffers[1]->get()) +
+              output * triangular_stride,
+            static_cast<double*>(method_buffers[2]->get()) + output * batch.n,
+            static_cast<double*>(method_buffers[3]->get()) + output * batch.n,
+            static_cast<double*>(method_buffers[4]->get()) + output * max_rank,
+            static_cast<int*>(method_buffers[5]->get()) + output * max_rank,
+            ranks + output, off_diagonal + output);
+          center_inchol_components_kernel<<<1U, kBlockSize, 0, stream.get()>>>(
+            factors + output * factor_stride, ranks + output, batch.n, 1,
+            max_rank);
+          reduce_inchol_self_moments_kernel<<<
+            1U, kBlockSize, shared_bytes, stream.get()>>>(
+            factors + output * factor_stride, ranks + output, batch.n, 1,
+            max_rank, self_moments + output);
+        }
+      }
+      for (int component : component_misses) {
+        const std::size_t output = static_cast<std::size_t>(component);
+        if (component_store_after_build[output] == 0U) continue;
+        bool inserted = false;
+        bool evicted = false;
+        const std::size_t slot = active_context->reserve_hsic_component(
+          component_cache_keys[output], &inserted, &evicted);
+        if (!inserted) {
+          throw std::runtime_error(
+            "strict HSIC component cache duplicate store identity");
+        }
+        diagnostics.component_cache_persistent_insert_count += 1;
+        if (evicted) {
+          diagnostics.component_cache_persistent_eviction_count += 1;
+        }
+        check_cuda(cudaMemcpyAsync(
+          static_cast<double*>(active_context->hsic_cache_factors_.get()) +
+            slot * factor_stride,
+          factors + output * factor_stride,
+          sizeof(double) * factor_stride, cudaMemcpyDeviceToDevice,
+          stream.get()),
+          "store strict HSIC component factors");
+        check_cuda(cudaMemcpyAsync(
+          static_cast<int*>(active_context->hsic_cache_ranks_.get()) + slot,
+          ranks + output, sizeof(int), cudaMemcpyDeviceToDevice, stream.get()),
+          "store strict HSIC component rank");
+        diagnostics.component_cache_persistent_store_d2d_bytes +=
+          sizeof(double) * factor_stride + sizeof(int);
+      }
       check_cuda(cudaGetLastError(), "launch strict HSIC components");
       check_cuda(cudaEventRecord(stage_stop.get(), stream.get()),
                  "record strict HSIC component stop");
@@ -1531,9 +1918,11 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
 
     check_cuda(cudaEventRecord(stage_start.get(), stream.get()),
                "record strict CI compact start");
-    std::vector<DeviceMethodRecord> host_records(pair_count);
+    std::vector<DeviceMethodRecord>& host_records =
+      active_context->host_records_;
+    host_records.resize(pair_count);
     check_cuda(cudaMemcpyAsync(
-      host_records.data(), d_records.get(), d_records.bytes(),
+      host_records.data(), d_records.get(), record_bytes,
       cudaMemcpyDeviceToHost, stream.get()),
       "copy strict CI compact records");
     check_cuda(cudaEventRecord(consumer_completion.get(), stream.get()),
@@ -1550,7 +1939,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
     diagnostics.compact_d2h_cuda_ms =
       elapsed_event_ms(stage_start.get(), stage_stop.get());
     diagnostics.compact_result_d2h_count = 1;
-    diagnostics.compact_result_d2h_bytes = d_records.bytes();
+    diagnostics.compact_result_d2h_bytes = record_bytes;
     diagnostics.compact_result_only_d2h = true;
 
     result.records.reserve(pair_count);
@@ -1577,14 +1966,36 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       result.records.push_back(std::move(record));
     }
 
-    std::size_t allocated = d_component_targets.bytes() +
-      d_left_components.bytes() + d_right_components.bytes() +
-      d_logical_ids.bytes() + d_records.bytes() + d_permutations.bytes();
-    for (const std::unique_ptr<DeviceBuffer>& buffer : method_buffers) {
-      allocated += buffer->bytes();
-    }
+    std::size_t allocated = component_target_bytes +
+      2U * component_index_bytes + logical_id_bytes + record_bytes +
+      permutation_bytes;
+    for (std::size_t bytes : method_buffer_bytes) allocated += bytes;
     diagnostics.device_allocation_bytes = allocated;
     diagnostics.peak_device_allocation_bytes = allocated;
+    diagnostics.execution_context_buffer_growth_count =
+      active_context->buffer_growth_count() - context_growth_before;
+    diagnostics.execution_context_device_bytes =
+      active_context->device_bytes();
+    if (hsic_component_cache) {
+      const std::size_t cached_component_bytes =
+        sizeof(double) * active_context->hsic_factor_stride() + sizeof(int);
+      if (diagnostics.component_cache_persistent_request_count !=
+            diagnostics.component_cache_persistent_hit_count +
+              diagnostics.component_cache_persistent_miss_count ||
+          diagnostics.component_cache_persistent_miss_count !=
+            diagnostics.component_build_count ||
+          diagnostics.component_cache_persistent_gather_d2d_bytes !=
+            static_cast<std::size_t>(
+              diagnostics.component_cache_persistent_hit_count) *
+              cached_component_bytes ||
+          diagnostics.component_cache_persistent_store_d2d_bytes !=
+            static_cast<std::size_t>(
+              diagnostics.component_cache_persistent_insert_count) *
+              cached_component_bytes) {
+        throw std::runtime_error(
+          "strict HSIC component cache accounting changed");
+      }
+    }
 
     check_cuda(cudaEventSynchronize(consumer_completion.get()),
                "wait strict CI residual consumer completion");
@@ -1593,17 +2004,6 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       free_device_residual(&residual_token);
     }
     registered_completion = nullptr;
-    for (std::unique_ptr<DeviceBuffer>& buffer : method_buffers) buffer->close();
-    d_permutations.close();
-    d_records.close();
-    d_logical_ids.close();
-    d_right_components.close();
-    d_left_components.close();
-    d_component_targets.close();
-    consumer_completion.close();
-    stage_stop.close();
-    stage_start.close();
-    stream.close();
     check_cuda(cudaSetDevice(caller_device), "restore strict CI caller device");
     diagnostics.caller_device_restored = true;
   } catch (...) {
