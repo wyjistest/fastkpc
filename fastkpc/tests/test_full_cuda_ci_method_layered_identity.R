@@ -70,6 +70,13 @@ for (method in c("hsic.gamma", "dcc.perm", "hsic.perm")) {
       summary$method_finalization_count == summary$frontier_batch_count &&
       summary$method_preparation_ticket_consumed_count ==
         summary$frontier_batch_count &&
+      summary$method_in_flight_peak == 1L &&
+      summary$method_intermediate_host_event_wait_count == 0L &&
+      summary$method_final_result_host_event_wait_count ==
+        summary$frontier_batch_count &&
+      summary$method_submit_hidden_stream_sync_count == 0L &&
+      summary$method_submit_hidden_device_sync_count == 0L &&
+      summary$method_submit_completion_event_wait_count == 0L &&
       summary$method_static_identity_validation_host_ms >= 0 &&
       summary$method_permutation_attestation_validation_host_ms >= 0 &&
       summary$method_combined_identity_validation_host_ms >= 0 &&

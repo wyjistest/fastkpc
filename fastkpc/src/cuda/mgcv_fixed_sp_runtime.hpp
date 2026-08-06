@@ -36,6 +36,7 @@ struct DeviceResidualConsumerView {
   std::vector<std::string> target_keys;
   std::vector<FixedSpRoute> executed_routes;
   std::vector<FixedSpStatus> solver_statuses;
+  bool metadata_provisional = false;
 };
 
 std::shared_ptr<CudaRuntimeContext> create_fixed_sp_runtime(int device_id);
@@ -69,9 +70,16 @@ FixedSpAugmentedSystemShadow test_build_fixed_sp_augmented_shadow(
 std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
   const std::shared_ptr<PreparedSGpuHandle>& handle,
   const FixedSpBatchHostView& batch);
+std::shared_ptr<DeviceResidualBatch> submit_fixed_sp_batch_deferred_svd(
+  const std::shared_ptr<PreparedSGpuHandle>& handle,
+  const FixedSpBatchHostView& batch);
 DeviceResidualInfo device_residual_info(
   const std::shared_ptr<DeviceResidualBatch>& token);
 DeviceResidualConsumerView acquire_device_residual_consumer_view(
+  const std::shared_ptr<DeviceResidualBatch>& token);
+DeviceResidualConsumerView acquire_device_residual_submission_view(
+  const std::shared_ptr<DeviceResidualBatch>& token);
+void complete_device_residual_after_stream_wait(
   const std::shared_ptr<DeviceResidualBatch>& token);
 FixedSpShadowResult materialize_fixed_sp_shadow(
   const std::shared_ptr<DeviceResidualBatch>& token,

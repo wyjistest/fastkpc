@@ -1984,6 +1984,7 @@ class CudaRuntimeContext {
   std::unordered_map<std::string, FixedSpPenaltyRootCacheEntry>
     penalty_root_cache;
   std::atomic<int> active_prepared_handle_count{0};
+  bool deferred_solve_in_flight = false;
   FixedSpOwnerLifecycle lifecycle = FixedSpOwnerLifecycle::Usable;
   mutable std::mutex mutex;
 };
@@ -2210,6 +2211,13 @@ class DeviceResidualBatch {
   std::vector<bool> target_true_batched;
   DeviceResidualInfo diagnostics;
   std::shared_ptr<TestBlockedConsumerResources> test_blocked_consumer_resources;
+  int* pending_svd_integer_diagnostics = nullptr;
+  double* pending_svd_double_diagnostics = nullptr;
+  std::size_t pending_svd_reserved_targets = 0U;
+  std::size_t pending_svd_reserved_q = 0U;
+  int pending_svd_target_count = 0;
+  bool svd_diagnostics_pending = false;
+  bool owns_deferred_context_lease = false;
   bool output_status_resolved = false;
   bool lease_released = false;
   bool freed = false;
@@ -2474,22 +2482,121 @@ bool fixed_sp_status_is_successful(FixedSpStatus status) {
     status == FixedSpStatus::OkAugmentedSvd;
 }
 
-void resolve_fixed_sp_output_status_locked(
+void resolve_pending_svd_diagnostics_locked(
+    DeviceResidualBatch* token,
+    CudaRuntimeContext* context) {
+  if (token == nullptr || !token->svd_diagnostics_pending) return;
+  if (context == nullptr || token->pending_svd_integer_diagnostics == nullptr ||
+      token->pending_svd_double_diagnostics == nullptr ||
+      token->pending_svd_reserved_targets == 0U ||
+      token->pending_svd_reserved_q == 0U ||
+      token->pending_svd_target_count <= 0) {
+    throw std::runtime_error(
+      "fixed-sp pending SVD diagnostic storage is invalid");
+  }
+
+  const std::size_t reserved_targets = token->pending_svd_reserved_targets;
+  const std::size_t reserved_q = token->pending_svd_reserved_q;
+  int* const h_geqrf_info = token->pending_svd_integer_diagnostics;
+  int* const h_qr_rank = h_geqrf_info + 2U * reserved_targets;
+  int* const h_svd_info = h_geqrf_info + 5U * reserved_targets;
+  int* const h_aggregate_root_rank =
+    h_geqrf_info + 6U * reserved_targets;
+  int* const h_aggregate_factor_call_count =
+    h_geqrf_info + 7U * reserved_targets;
+  int* const h_aggregate_b_build_count =
+    h_geqrf_info + 8U * reserved_targets;
+  int* const h_aggregate_pivots =
+    h_geqrf_info + 9U * reserved_targets;
+  double* const h_sigma_max = token->pending_svd_double_diagnostics;
+  double* const h_smallest_retained_sigma =
+    h_sigma_max + reserved_targets;
+  double* const h_aggregate_dstop =
+    h_smallest_retained_sigma + reserved_targets;
+
+  const auto target_uses_svd = [&](std::size_t target_offset) {
+    const FixedSpRoute route = token->planned_routes[target_offset];
+    const std::string& reason = token->reroute_reasons[target_offset];
+    return route == FixedSpRoute::AugmentedSvd ||
+      (route == FixedSpRoute::CholeskyBatched &&
+       reason == "CHOLESKY_NON_POSITIVE_PIVOT") ||
+      (route == FixedSpRoute::AugmentedQr &&
+       reason == "QR_RANK_GUARD_REJECTED");
+  };
+
+  int observed_svd_count = 0;
+  for (int target = 0; target < token->target_count; ++target) {
+    const std::size_t target_offset = static_cast<std::size_t>(target);
+    if (!target_uses_svd(target_offset)) continue;
+    observed_svd_count += 1;
+
+    const int info = h_svd_info[target_offset];
+    const int rank = h_qr_rank[target_offset];
+    const double maximum = h_sigma_max[target_offset];
+    const double smallest = h_smallest_retained_sigma[target_offset];
+    const int aggregate_rank = h_aggregate_root_rank[target_offset];
+    const int factor_count = h_aggregate_factor_call_count[target_offset];
+    const int b_build_count = h_aggregate_b_build_count[target_offset];
+    const double aggregate_dstop = h_aggregate_dstop[target_offset];
+    token->diagnostics.svd_info[target_offset] = info;
+    token->diagnostics.effective_rank[target_offset] = rank;
+    token->diagnostics.sigma_max[target_offset] = maximum;
+    token->diagnostics.smallest_retained_sigma[target_offset] = smallest;
+    token->diagnostics.aggregate_penalty_root_rank[target_offset] =
+      aggregate_rank;
+    token->diagnostics.aggregate_factor_call_count[target_offset] =
+      factor_count;
+    token->diagnostics.aggregate_b_build_count[target_offset] = b_build_count;
+    token->diagnostics.aggregate_dstop[target_offset] = aggregate_dstop;
+    std::copy_n(
+      h_aggregate_pivots + target_offset * reserved_q,
+      static_cast<std::size_t>(token->owner->q),
+      token->diagnostics.aggregate_penalty_root_pivot.begin() +
+        static_cast<std::ptrdiff_t>(target_offset *
+          static_cast<std::size_t>(token->owner->q)));
+    token->executed_routes[target_offset] = FixedSpRoute::AugmentedSvd;
+    token->target_true_batched[target_offset] = false;
+
+    const bool rank_diagnostics_valid =
+      rank >= 0 && rank <= token->owner->q &&
+      std::isfinite(maximum) && maximum >= 0.0 &&
+      std::isfinite(smallest) && smallest >= 0.0 &&
+      smallest <= maximum &&
+      ((rank == 0 && smallest == 0.0) ||
+       (rank > 0 && smallest > 0.0)) &&
+      aggregate_rank >= 0 && aggregate_rank <= token->owner->q &&
+      factor_count == 1 && b_build_count == 2 &&
+      std::isfinite(aggregate_dstop) && aggregate_dstop >= 0.0;
+    if (info != 0 || !rank_diagnostics_valid) {
+      token->solver_statuses[target_offset] = FixedSpStatus::ErrSvdFailed;
+      continue;
+    }
+    token->solver_statuses[target_offset] = FixedSpStatus::OkAugmentedSvd;
+    token->diagnostics.executed_svd_target_count += 1;
+  }
+  if (observed_svd_count != token->pending_svd_target_count) {
+    throw std::runtime_error("fixed-sp SVD target accounting mismatch");
+  }
+  token->diagnostics.aggregate_penalty_factor_count = std::accumulate(
+    token->diagnostics.aggregate_factor_call_count.begin(),
+    token->diagnostics.aggregate_factor_call_count.end(), 0);
+  token->diagnostics.aggregate_svd_b_build_count = std::accumulate(
+    token->diagnostics.aggregate_b_build_count.begin(),
+    token->diagnostics.aggregate_b_build_count.end(), 0);
+  token->svd_diagnostics_pending = false;
+  token->pending_svd_integer_diagnostics = nullptr;
+  token->pending_svd_double_diagnostics = nullptr;
+}
+
+void resolve_fixed_sp_output_status_after_ready_locked(
     DeviceResidualBatch* token,
     CudaRuntimeContext* context) {
   if (token == nullptr || token->output_status_resolved) return;
-  if (context == nullptr || !token->slot ||
-      token->slot_generation != token->slot->generation ||
-      token->slot->solve_completion_event == nullptr ||
-      token->slot->host_finite_status == nullptr ||
-      static_cast<std::size_t>(token->target_count) >
-        token->slot->finite_status_capacity) {
-    throw std::runtime_error(
-      "STALE_TOKEN: fixed-sp output status storage mismatch");
+  if (token->owns_deferred_context_lease) {
+    context->deferred_solve_in_flight = false;
+    token->owns_deferred_context_lease = false;
   }
-
-  check_cuda(cudaEventSynchronize(token->slot->solve_completion_event),
-             "wait for fixed-sp output status");
+  resolve_pending_svd_diagnostics_locked(token, context);
   for (int target = 0; target < token->target_count; ++target) {
     const std::size_t target_offset = static_cast<std::size_t>(target);
     if (fixed_sp_status_is_successful(
@@ -2521,9 +2628,32 @@ void resolve_fixed_sp_output_status_locked(
       [](FixedSpStatus status) {
         return fixed_sp_status_is_successful(status);
       }));
+  token->diagnostics.executed_routes = token->executed_routes;
   token->diagnostics.solver_statuses = token->solver_statuses;
   token->diagnostics.target_true_batched = token->target_true_batched;
   token->output_status_resolved = true;
+}
+
+void resolve_fixed_sp_output_status_locked(
+    DeviceResidualBatch* token,
+    CudaRuntimeContext* context) {
+  if (token == nullptr || token->output_status_resolved) return;
+  if (context == nullptr || !token->slot ||
+      token->slot_generation != token->slot->generation ||
+      token->slot->solve_completion_event == nullptr ||
+      token->slot->host_finite_status == nullptr ||
+      static_cast<std::size_t>(token->target_count) >
+        token->slot->finite_status_capacity) {
+    throw std::runtime_error(
+      "STALE_TOKEN: fixed-sp output status storage mismatch");
+  }
+
+  check_cuda(cudaEventSynchronize(token->slot->solve_completion_event),
+             "wait for fixed-sp output status");
+  if (token->diagnostics.deferred_svd_submission) {
+    token->diagnostics.deferred_completion_event_wait_count += 1;
+  }
+  resolve_fixed_sp_output_status_after_ready_locked(token, context);
 }
 
 }  // namespace
@@ -2558,6 +2688,10 @@ void DeviceResidualBatch::cleanup_noexcept() noexcept {
     }
     if (slot->state == TransientResidualSlotState::Poisoned) {
       test_blocked_consumer_resources.reset();
+      if (owns_deferred_context_lease) {
+        context->deferred_solve_in_flight = false;
+        owns_deferred_context_lease = false;
+      }
       poison_transient_residual_slot(
         slot.get(), slot_generation, nullptr, true);
       lease_released = true;
@@ -2576,6 +2710,12 @@ void DeviceResidualBatch::cleanup_noexcept() noexcept {
         throw std::runtime_error(
           "select CUDA device for residual token cleanup");
       }
+      if (owns_deferred_context_lease) {
+        check_cuda(cudaEventSynchronize(slot->solve_completion_event),
+                   "wait for deferred residual submission during cleanup");
+        context->deferred_solve_in_flight = false;
+        owns_deferred_context_lease = false;
+      }
       if (slot->consumer_event_registered) {
         check_cuda(cudaEventSynchronize(slot->consumer_completion_event),
                    "wait for residual consumer during token cleanup");
@@ -2584,6 +2724,10 @@ void DeviceResidualBatch::cleanup_noexcept() noexcept {
       test_blocked_consumer_resources.reset();
     } catch (const std::exception& error) {
       test_blocked_consumer_resources.reset();
+      if (owns_deferred_context_lease) {
+        context->deferred_solve_in_flight = false;
+        owns_deferred_context_lease = false;
+      }
       poison_transient_residual_slot(
         slot.get(), slot_generation, error.what(), true);
       lease_released = true;
@@ -2591,6 +2735,10 @@ void DeviceResidualBatch::cleanup_noexcept() noexcept {
       return;
     } catch (...) {
       test_blocked_consumer_resources.reset();
+      if (owns_deferred_context_lease) {
+        context->deferred_solve_in_flight = false;
+        owns_deferred_context_lease = false;
+      }
       poison_transient_residual_slot(
         slot.get(), slot_generation,
         "unknown residual token cleanup failure", true);
@@ -4201,14 +4349,20 @@ void free_prepared_s_gpu(std::shared_ptr<PreparedSGpuHandle>* handle) {
   handle->reset();
 }
 
-std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
+namespace {
+
+std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
     const std::shared_ptr<PreparedSGpuHandle>& handle,
-    const FixedSpBatchHostView& batch) {
+    const FixedSpBatchHostView& batch,
+    bool defer_svd_completion) {
   const std::shared_ptr<CudaRuntimeContext> context =
     require_prepared_host_identity(handle);
 
   std::lock_guard<std::mutex> lock(context->mutex);
   require_prepared_host_identity(handle);
+  if (context->deferred_solve_in_flight) {
+    throw std::runtime_error("ERR_FIXED_SP_DEFERRED_SOLVE_BUSY");
+  }
   const std::shared_ptr<TransientResidualSlot> slot = handle->residual_slot;
   if (slot->state == TransientResidualSlotState::Poisoned) {
     throw_output_slot_poisoned(*slot);
@@ -4220,6 +4374,15 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
   }
   context->require_usable();
   validate_fixed_sp_batch(*handle, *context, batch);
+  if (defer_svd_completion &&
+      !std::all_of(
+        batch.planned_routes.begin(), batch.planned_routes.end(),
+        [](FixedSpRoute route) {
+          return route == FixedSpRoute::AugmentedSvd;
+        })) {
+    throw std::runtime_error(
+      "deferred fixed-sp submission requires an all-SVD cohort");
+  }
   const FixedSpResourceCounters resources_before_solve =
     resource_counters_snapshot(context->resource_ledger);
 
@@ -4232,6 +4395,10 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
 
   std::shared_ptr<DeviceResidualBatch> token;
   auto restore_slot = [&]() noexcept {
+    if (token && token->owns_deferred_context_lease) {
+      context->deferred_solve_in_flight = false;
+      token->owns_deferred_context_lease = false;
+    }
     if (slot->generation == acquired_generation &&
         slot->state == TransientResidualSlotState::Leased) {
       slot->state = TransientResidualSlotState::Free;
@@ -4263,6 +4430,11 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       FixedSpStatus::ErrStablePathNotImplemented);
     token->target_true_batched.assign(
       static_cast<std::size_t>(batch.target_count), false);
+    if (defer_svd_completion) {
+      context->deferred_solve_in_flight = true;
+      token->owns_deferred_context_lease = true;
+      token->diagnostics.deferred_svd_submission = true;
+    }
 
     token->diagnostics.n = batch.n;
     token->diagnostics.coefficient_dim = handle->p;
@@ -5281,76 +5453,19 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
         context->cholesky_factor_checkpoint_event, context->stream
       ), "record fixed-sp SVD checkpoint");
       context->diagnostics.svd_checkpoint_record_count += 1;
-      check_cuda(cudaEventSynchronize(
-        context->cholesky_factor_checkpoint_event
-      ), "wait for fixed-sp SVD checkpoint");
-      context->diagnostics.svd_checkpoint_wait_count += 1;
-
-      int observed_svd_count = 0;
-      for (int target = 0; target < batch.target_count; ++target) {
-        const std::size_t target_offset = static_cast<std::size_t>(target);
-        if (!target_uses_svd(target_offset)) continue;
-        observed_svd_count += 1;
-
-        const int info = h_svd_info[target_offset];
-        const int rank = h_qr_rank[target_offset];
-        const double maximum = h_sigma_max[target_offset];
-        const double smallest = h_smallest_retained_sigma[target_offset];
-        const int aggregate_rank = h_aggregate_root_rank[target_offset];
-        const int factor_count =
-          h_aggregate_factor_call_count[target_offset];
-        const int b_build_count = h_aggregate_b_build_count[target_offset];
-        const double aggregate_dstop = h_aggregate_dstop[target_offset];
-        token->diagnostics.svd_info[target_offset] = info;
-        token->diagnostics.effective_rank[target_offset] = rank;
-        token->diagnostics.sigma_max[target_offset] = maximum;
-        token->diagnostics.smallest_retained_sigma[target_offset] = smallest;
-        token->diagnostics.aggregate_penalty_root_rank[target_offset] =
-          aggregate_rank;
-        token->diagnostics.aggregate_factor_call_count[target_offset] =
-          factor_count;
-        token->diagnostics.aggregate_b_build_count[target_offset] =
-          b_build_count;
-        token->diagnostics.aggregate_dstop[target_offset] = aggregate_dstop;
-        std::copy_n(
-          h_aggregate_pivots + target_offset * reserved_q,
-          static_cast<std::size_t>(handle->q),
-          token->diagnostics.aggregate_penalty_root_pivot.begin() +
-            static_cast<std::ptrdiff_t>(target_offset *
-              static_cast<std::size_t>(handle->q)));
-        token->executed_routes[target_offset] = FixedSpRoute::AugmentedSvd;
-        token->target_true_batched[target_offset] = false;
-
-        const bool rank_diagnostics_valid =
-          rank >= 0 && rank <= handle->q &&
-          std::isfinite(maximum) && maximum >= 0.0 &&
-          std::isfinite(smallest) && smallest >= 0.0 &&
-          smallest <= maximum &&
-          ((rank == 0 && smallest == 0.0) ||
-           (rank > 0 && smallest > 0.0)) &&
-          aggregate_rank >= 0 && aggregate_rank <= handle->q &&
-          factor_count == 1 && b_build_count == 2 &&
-          std::isfinite(aggregate_dstop) && aggregate_dstop >= 0.0;
-        if (info != 0 || !rank_diagnostics_valid) {
-          token->solver_statuses[target_offset] =
-            FixedSpStatus::ErrSvdFailed;
-          continue;
-        }
-        token->solver_statuses[target_offset] = FixedSpStatus::OkAugmentedSvd;
-        token->diagnostics.executed_svd_target_count += 1;
+      token->pending_svd_integer_diagnostics = h_geqrf_info;
+      token->pending_svd_double_diagnostics = h_sigma_max;
+      token->pending_svd_reserved_targets = reserved_targets;
+      token->pending_svd_reserved_q = reserved_q;
+      token->pending_svd_target_count = svd_target_count;
+      token->svd_diagnostics_pending = true;
+      if (!defer_svd_completion) {
+        check_cuda(cudaEventSynchronize(
+          context->cholesky_factor_checkpoint_event
+        ), "wait for fixed-sp SVD checkpoint");
+        context->diagnostics.svd_checkpoint_wait_count += 1;
+        resolve_pending_svd_diagnostics_locked(token.get(), context.get());
       }
-      if (observed_svd_count != svd_target_count) {
-        throw std::runtime_error(
-          "fixed-sp SVD target accounting mismatch");
-      }
-      token->diagnostics.aggregate_penalty_factor_count =
-        std::accumulate(
-          token->diagnostics.aggregate_factor_call_count.begin(),
-          token->diagnostics.aggregate_factor_call_count.end(), 0);
-      token->diagnostics.aggregate_svd_b_build_count =
-        std::accumulate(
-          token->diagnostics.aggregate_b_build_count.begin(),
-          token->diagnostics.aggregate_b_build_count.end(), 0);
     }
 
     for (int safe_ordinal = 0; safe_ordinal < safe_count; ++safe_ordinal) {
@@ -5392,6 +5507,7 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
       check_cuda(cudaGetLastError(), "launch fixed-sp output finite check");
     }
     if (token->diagnostics.planned_qr_target_count > 0 ||
+        token->diagnostics.planned_svd_target_count > 0 ||
         token->diagnostics.executed_svd_target_count > 0) {
       const std::size_t stable_finite_blocks =
         (targets + threads - 1U) / threads;
@@ -5435,6 +5551,20 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
     restore_slot();
     throw;
   }
+}
+
+}  // namespace
+
+std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch(
+    const std::shared_ptr<PreparedSGpuHandle>& handle,
+    const FixedSpBatchHostView& batch) {
+  return solve_fixed_sp_batch_impl(handle, batch, false);
+}
+
+std::shared_ptr<DeviceResidualBatch> submit_fixed_sp_batch_deferred_svd(
+    const std::shared_ptr<PreparedSGpuHandle>& handle,
+    const FixedSpBatchHostView& batch) {
+  return solve_fixed_sp_batch_impl(handle, batch, true);
 }
 
 DeviceResidualInfo device_residual_info(
@@ -5513,6 +5643,87 @@ DeviceResidualConsumerView acquire_device_residual_consumer_view(
   view.executed_routes = token->executed_routes;
   view.solver_statuses = token->solver_statuses;
   return view;
+}
+
+DeviceResidualConsumerView acquire_device_residual_submission_view(
+    const std::shared_ptr<DeviceResidualBatch>& token) {
+  const std::shared_ptr<CudaRuntimeContext> context =
+    require_residual_host_identity(token, true);
+  std::lock_guard<std::mutex> lock(context->mutex);
+  require_residual_host_identity(token, true);
+  if (token->slot->state == TransientResidualSlotState::Poisoned) {
+    throw_output_slot_poisoned(*token->slot);
+  }
+  if (token->slot->state ==
+        TransientResidualSlotState::ConsumerRegistrationPending ||
+      token->slot->consumer_event_registered) {
+    token->diagnostics.output_slot_busy_count += 1;
+    throw std::runtime_error("ERR_OUTPUT_SLOT_BUSY");
+  }
+  context->require_usable();
+  if (!token->diagnostics.deferred_svd_submission ||
+      !token->svd_diagnostics_pending ||
+      !token->owns_deferred_context_lease ||
+      !context->deferred_solve_in_flight ||
+      (token->output_mask & FixedSpOutputResiduals) == 0U ||
+      token->slot->residuals == nullptr ||
+      token->slot->solve_completion_event == nullptr ||
+      token->target_count <= 0 ||
+      token->target_count > token->slot->target_capacity ||
+      token->target_keys.size() !=
+        static_cast<std::size_t>(token->target_count) ||
+      !std::all_of(
+        token->planned_routes.begin(), token->planned_routes.end(),
+        [](FixedSpRoute route) {
+          return route == FixedSpRoute::AugmentedSvd;
+        })) {
+    throw std::runtime_error(
+      "device residual deferred submission identity changed");
+  }
+
+  DeviceResidualConsumerView view;
+  view.residuals = token->slot->residuals;
+  view.n = token->n;
+  view.target_count = token->target_count;
+  view.device_id = token->device_id;
+  view.producer_stream = context->stream;
+  view.producer_completion_event = token->slot->solve_completion_event;
+  view.target_keys = token->target_keys;
+  view.executed_routes.assign(
+    static_cast<std::size_t>(token->target_count),
+    FixedSpRoute::AugmentedSvd);
+  view.solver_statuses.assign(
+    static_cast<std::size_t>(token->target_count),
+    FixedSpStatus::OkAugmentedSvd);
+  view.metadata_provisional = true;
+  return view;
+}
+
+void complete_device_residual_after_stream_wait(
+    const std::shared_ptr<DeviceResidualBatch>& token) {
+  const std::shared_ptr<CudaRuntimeContext> context =
+    require_residual_host_identity(token, true);
+  std::lock_guard<std::mutex> lock(context->mutex);
+  require_residual_host_identity(token, true);
+  if (token->slot->state == TransientResidualSlotState::Poisoned) {
+    throw_output_slot_poisoned(*token->slot);
+  }
+  context->require_usable();
+  if (!token->diagnostics.deferred_svd_submission ||
+      token->slot->solve_completion_event == nullptr) {
+    throw std::runtime_error(
+      "fixed-sp deferred completion identity changed");
+  }
+  if (token->output_status_resolved) return;
+  const cudaError_t query =
+    cudaEventQuery(token->slot->solve_completion_event);
+  token->diagnostics.deferred_completion_event_query_count += 1;
+  if (query == cudaErrorNotReady) {
+    throw std::runtime_error(
+      "ERR_FIXED_SP_DEFERRED_COMPLETION_NOT_READY");
+  }
+  check_cuda(query, "query fixed-sp deferred completion");
+  resolve_fixed_sp_output_status_after_ready_locked(token.get(), context.get());
 }
 
 FixedSpShadowResult materialize_fixed_sp_shadow(

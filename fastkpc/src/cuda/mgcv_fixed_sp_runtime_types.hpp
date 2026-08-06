@@ -308,6 +308,12 @@ struct DeviceResidualInfo {
   int shadow_materialize_call_count = 0;
   int shadow_materialize_target_count = 0;
   std::size_t shadow_d2h_bytes = 0;
+  bool deferred_svd_submission = false;
+  int deferred_submit_stream_sync_count = 0;
+  int deferred_submit_device_sync_count = 0;
+  int deferred_submit_event_wait_count = 0;
+  int deferred_completion_event_query_count = 0;
+  int deferred_completion_event_wait_count = 0;
   std::uint64_t owner_generation = 0;
   std::uint64_t slot_generation = 0;
 };

@@ -204,6 +204,14 @@ struct FullCudaCiMethodBatchDiagnostics {
   int preparation_submit_count = 0;
   int finalization_count = 0;
   bool preparation_ticket_consumed = false;
+  bool deferred_svd_submission = false;
+  bool preparation_submit_nonblocking = false;
+  int submit_hidden_stream_sync_count = 0;
+  int submit_hidden_device_sync_count = 0;
+  int submit_completion_event_wait_count = 0;
+  int in_flight_peak = 0;
+  int intermediate_host_event_wait_count = 0;
+  int final_result_host_event_wait_count = 0;
   int component_cache_persistent_request_count = 0;
   int component_cache_persistent_lookup_count = 0;
   int component_cache_persistent_hit_count = 0;

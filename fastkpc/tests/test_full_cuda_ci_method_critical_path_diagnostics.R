@@ -91,19 +91,22 @@ assert_true(
 expected_names <- c(
   "level", "penalty_count", "target_count", "pair_count",
   "first_logical_sequence_id", "last_logical_sequence_id",
-  "residual_cache_all_hit", "permutation_table_host_ms",
+  "residual_cache_all_hit", "deferred_svd_submission",
+  "preparation_submit_nonblocking", "permutation_table_host_ms",
   "identity_build_host_ms", "identity_validation_host_ms",
   "residual_solve_host_ms", "component_cuda_ms",
   "permutation_h2d_submit_host_ms", "pair_cuda_ms",
   "compact_d2h_cuda_ms", "method_total_host_ms",
-  "overlap_upper_bound_ms", "intermediate_host_wait_count"
+  "overlap_upper_bound_ms", "intermediate_host_wait_count",
+  "final_host_wait_count"
 )
 assert_true(
   identical(names(trace), expected_names) &&
     all(trace$target_count >= 2L) && all(trace$pair_count >= 1L) &&
     all(trace$first_logical_sequence_id <= trace$last_logical_sequence_id) &&
-    all(trace$intermediate_host_wait_count == 4L),
-  "critical-path trace shape or synchronous wait census changed"
+    all(trace$intermediate_host_wait_count == 0L) &&
+    all(trace$final_host_wait_count == 1L),
+  "critical-path trace shape or event-wait census changed"
 )
 assert_true(
   near(sum(trace$permutation_table_host_ms),
@@ -126,10 +129,16 @@ assert_true(
   all(trace$overlap_upper_bound_ms <= trace$permutation_table_host_ms) &&
     all(trace$overlap_upper_bound_ms <=
       trace$residual_solve_host_ms + trace$component_cuda_ms) &&
-    summary$method_component_host_wait_count == nrow(trace) &&
-    summary$method_pair_host_wait_count == nrow(trace) &&
+    summary$method_component_host_wait_count == 0L &&
+    summary$method_pair_host_wait_count == 0L &&
     summary$method_compact_host_wait_count == nrow(trace) &&
-    summary$method_consumer_host_wait_count == nrow(trace),
+    summary$method_consumer_host_wait_count == 0L &&
+    summary$method_intermediate_host_event_wait_count == 0L &&
+    summary$method_final_result_host_event_wait_count == nrow(trace) &&
+    summary$method_in_flight_peak == 1L &&
+    summary$method_submit_hidden_stream_sync_count == 0L &&
+    summary$method_submit_hidden_device_sync_count == 0L &&
+    summary$method_submit_completion_event_wait_count == 0L,
   "critical-path overlap bound or host-wait accounting changed"
 )
 

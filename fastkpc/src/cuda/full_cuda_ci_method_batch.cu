@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <list>
@@ -62,6 +63,17 @@ bool is_lower_sha256(const std::string& value) {
       return (character >= '0' && character <= '9') ||
         (character >= 'a' && character <= 'f');
     });
+}
+
+bool deferred_svd_submission_enabled() {
+  const char* raw = std::getenv(
+    "FASTKPC_STRICT_METHOD_DEFERRED_SVD_SUBMISSION");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "1") {
+    return true;
+  }
+  if (std::string(raw) == "0") return false;
+  throw std::runtime_error(
+    "FASTKPC_STRICT_METHOD_DEFERRED_SVD_SUBMISSION must be 0 or 1");
 }
 
 std::size_t checked_multiply(std::size_t left,
@@ -1109,6 +1121,13 @@ class FullCudaCiMethodResidualCache {
     return all_hit;
   }
 
+  void invalidate() noexcept {
+    entries_.clear();
+    std::fill(slot_keys_.begin(), slot_keys_.end(), std::string());
+    slots_used_ = 0U;
+    next_evict_slot_ = 0U;
+  }
+
   void store_missing(const DeviceResidualConsumerView& residual,
                      const std::vector<FixedSpRoute>& planned_routes,
                      cudaStream_t stream,
@@ -1226,7 +1245,9 @@ class FullCudaCiMethodExecutionContext {
                                    int device_id)
       : n_(n), ci_method_(std::move(ci_method)), num_col_(num_col),
         permutation_replicates_(permutation_replicates),
-        device_id_(device_id), stage_start_(true), stage_stop_(true),
+        device_id_(device_id), component_start_(true), component_stop_(true),
+        pair_start_(true), pair_stop_(true), compact_start_(true),
+        compact_stop_(true),
         consumer_completion_(false) {
     if (n_ < 6 || device_id_ < 0 || num_col_ < 1 || num_col_ > 64 ||
         (ci_method_ != "dcc.perm" && ci_method_ != "hsic.gamma" &&
@@ -1250,10 +1271,16 @@ class FullCudaCiMethodExecutionContext {
   }
 
   bool begin_call() {
+    if (in_flight_) {
+      throw std::runtime_error("strict CI method context already has in-flight work");
+    }
     const bool reused = call_count_ > 0;
     ++call_count_;
+    in_flight_ = true;
     return reused;
   }
+
+  void end_call() noexcept { in_flight_ = false; }
 
   void ensure(DeviceBuffer* buffer, std::size_t bytes) {
     if (buffer == nullptr) {
@@ -1353,6 +1380,12 @@ class FullCudaCiMethodExecutionContext {
     return static_cast<std::size_t>(n_) * std::min(num_col_, n_);
   }
 
+  void invalidate_hsic_component_cache() noexcept {
+    hsic_cache_entries_.clear();
+    hsic_cache_order_.clear();
+    hsic_cache_slots_used_ = 0U;
+  }
+
  private:
   void initialize_hsic_component_cache() {
     if (ci_method_ != "hsic.perm") return;
@@ -1389,9 +1422,14 @@ class FullCudaCiMethodExecutionContext {
   int device_id_ = -1;
   int call_count_ = 0;
   int buffer_growth_count_ = 0;
+  bool in_flight_ = false;
   CudaStream stream_;
-  CudaEvent stage_start_;
-  CudaEvent stage_stop_;
+  CudaEvent component_start_;
+  CudaEvent component_stop_;
+  CudaEvent pair_start_;
+  CudaEvent pair_stop_;
+  CudaEvent compact_start_;
+  CudaEvent compact_stop_;
   CudaEvent consumer_completion_;
   DeviceBuffer component_targets_;
   DeviceBuffer left_components_;
@@ -1408,6 +1446,13 @@ class FullCudaCiMethodExecutionContext {
   std::list<std::string> hsic_cache_order_;
   std::unordered_map<std::string, HsicComponentEntry> hsic_cache_entries_;
 };
+
+void drain_method_execution_context_noexcept(
+    const std::shared_ptr<FullCudaCiMethodExecutionContext>& context) noexcept {
+  if (!context) return;
+  cudaSetDevice(context->device_id());
+  cudaStreamSynchronize(context->stream_.get());
+}
 
 std::shared_ptr<FullCudaCiMethodResidualCache>
 create_full_cuda_ci_method_residual_cache(int n, std::size_t byte_budget) {
@@ -1476,9 +1521,20 @@ struct MethodPreparationTicket::Impl {
   int context_growth_before = 0;
   int caller_device = -1;
   bool hsic_component_cache = false;
+  bool deferred_residual_submission = false;
+  bool provisional_cache_state = false;
+  bool preparation_event_recorded = false;
   bool finalized = false;
 
   void cleanup_noexcept() noexcept {
+    if (active_context && preparation_event_recorded) {
+      drain_method_execution_context_noexcept(active_context);
+    }
+    if (provisional_cache_state) {
+      if (residual_cache) residual_cache->invalidate();
+      if (active_context) active_context->invalidate_hsic_component_cache();
+      provisional_cache_state = false;
+    }
     if (residual_token) {
       try {
         release_device_residual(residual_token);
@@ -1490,6 +1546,7 @@ struct MethodPreparationTicket::Impl {
       }
     }
     registered_completion = nullptr;
+    if (active_context) active_context->end_call();
     if (caller_device >= 0) cudaSetDevice(caller_device);
     finalized = true;
   }
@@ -1702,7 +1759,7 @@ MethodPreparationTicket submit_method_preparation(
   active_context->validate(request, batch.n);
   strict_method_failure_checkpoint("after_execution_context_validate");
   const int context_growth_before = active_context->buffer_growth_count();
-  const bool context_reused = active_context->begin_call();
+  const bool context_reused = active_context->call_count() > 0;
   const PreparedSInfo prepared_info = prepared_s_gpu_info(prepared_s);
   if (prepared_info.prepared_s_key_sha256 !=
       request.expected_prepared_s_key_sha256 ||
@@ -1781,6 +1838,9 @@ MethodPreparationTicket submit_method_preparation(
   check_cuda(cudaGetDevice(&caller_device), "capture strict CI caller device");
   std::shared_ptr<DeviceResidualBatch> residual_token;
   cudaEvent_t registered_completion = nullptr;
+  bool context_call_begun = false;
+  bool deferred_residual_submission = false;
+  bool provisional_cache_state = false;
   std::vector<FullCudaCiMethodResidualCache::Entry> cached_entries;
   const bool residual_cache_eligible = residual_cache &&
     batch.target_count >= 1 &&
@@ -1790,15 +1850,31 @@ MethodPreparationTicket submit_method_preparation(
     residual_cache->lookup_all(
       batch.target_keys, batch.planned_routes, &cached_entries, &diagnostics);
   try {
+    const bool observed_context_reuse = active_context->begin_call();
+    context_call_begun = true;
+    if (observed_context_reuse != context_reused) {
+      throw std::runtime_error(
+        "strict CI execution context reuse accounting changed");
+    }
     DeviceResidualConsumerView residual_view;
     if (!residual_cache_all_hit) {
       const auto solve_started = std::chrono::steady_clock::now();
       strict_method_failure_checkpoint("before_residual_solve");
-      residual_token = solve_fixed_sp_batch(prepared_s, batch);
+      const bool all_svd = std::all_of(
+        batch.planned_routes.begin(), batch.planned_routes.end(),
+        [](FixedSpRoute route) {
+          return route == FixedSpRoute::AugmentedSvd;
+        });
+      const bool defer_svd = all_svd && deferred_svd_submission_enabled();
+      residual_token = defer_svd ?
+        submit_fixed_sp_batch_deferred_svd(prepared_s, batch) :
+        solve_fixed_sp_batch(prepared_s, batch);
       diagnostics.residual_solve_host_ms =
         std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - solve_started).count();
-      residual_view = acquire_device_residual_consumer_view(residual_token);
+      residual_view = defer_svd ?
+        acquire_device_residual_submission_view(residual_token) :
+        acquire_device_residual_consumer_view(residual_token);
       strict_method_failure_checkpoint("after_residual_acquire");
       if (residual_view.n != batch.n ||
           residual_view.target_count != batch.target_count ||
@@ -1823,10 +1899,13 @@ MethodPreparationTicket submit_method_preparation(
     }
     diagnostics.target_identity_authenticated = true;
     diagnostics.residuals_device_resident = true;
+    deferred_residual_submission = residual_view.metadata_provisional;
+    provisional_cache_state =
+      deferred_residual_submission && residual_cache_eligible;
 
     CudaStream& stream = active_context->stream_;
-    CudaEvent& stage_start = active_context->stage_start_;
-    CudaEvent& stage_stop = active_context->stage_stop_;
+    CudaEvent& stage_start = active_context->component_start_;
+    CudaEvent& stage_stop = active_context->component_stop_;
     CudaEvent& consumer_completion = active_context->consumer_completion_;
     const double* residual_values = nullptr;
     std::vector<FixedSpRoute> executed_routes;
@@ -1861,6 +1940,8 @@ MethodPreparationTicket submit_method_preparation(
     std::vector<std::string> component_cache_keys(component_targets.size());
     const bool hsic_component_cache =
       active_context->hsic_component_cache_enabled();
+    provisional_cache_state = provisional_cache_state ||
+      (deferred_residual_submission && hsic_component_cache);
     if (hsic_component_cache) {
       diagnostics.component_cache_persistent_capacity_entries =
         active_context->hsic_component_cache_capacity();
@@ -1993,12 +2074,7 @@ MethodPreparationTicket submit_method_preparation(
       check_cuda(cudaGetLastError(), "launch strict dcc.perm components");
       check_cuda(cudaEventRecord(stage_stop.get(), stream.get()),
                  "record strict dcc.perm component stop");
-      check_cuda(cudaEventSynchronize(stage_stop.get()),
-                 "wait strict dcc.perm components");
-      diagnostics.component_host_wait_count += 1;
       strict_method_failure_checkpoint("after_component_wait");
-      diagnostics.component_build_cuda_ms =
-        elapsed_event_ms(stage_start.get(), stage_stop.get());
     } else {
       const int max_rank = std::min(request.num_col, batch.n);
       const std::size_t factor_values = checked_multiply(
@@ -2141,12 +2217,7 @@ MethodPreparationTicket submit_method_preparation(
       check_cuda(cudaGetLastError(), "launch strict HSIC components");
       check_cuda(cudaEventRecord(stage_stop.get(), stream.get()),
                  "record strict HSIC component stop");
-      check_cuda(cudaEventSynchronize(stage_stop.get()),
-                 "wait strict HSIC components");
-      diagnostics.component_host_wait_count += 1;
       strict_method_failure_checkpoint("after_component_wait");
-      diagnostics.component_build_cuda_ms =
-        elapsed_event_ms(stage_start.get(), stage_stop.get());
     }
     MethodPreparationTicket ticket;
     ticket.impl_.reset(new MethodPreparationTicket::Impl());
@@ -2174,8 +2245,24 @@ MethodPreparationTicket submit_method_preparation(
     state.context_growth_before = context_growth_before;
     state.caller_device = caller_device;
     state.hsic_component_cache = hsic_component_cache;
+    state.deferred_residual_submission = deferred_residual_submission;
+    state.provisional_cache_state = provisional_cache_state;
+    state.preparation_event_recorded = true;
+    state.result.diagnostics.deferred_svd_submission =
+      deferred_residual_submission;
+    state.result.diagnostics.preparation_submit_nonblocking =
+      residual_cache_all_hit || deferred_residual_submission;
+    state.result.diagnostics.in_flight_peak = 1;
     return ticket;
   } catch (...) {
+    if (context_call_begun) {
+      drain_method_execution_context_noexcept(active_context);
+    }
+    if (provisional_cache_state) {
+      if (residual_cache) residual_cache->invalidate();
+      active_context->invalidate_hsic_component_cache();
+      provisional_cache_state = false;
+    }
     if (residual_token) {
       try {
         release_device_residual(residual_token);
@@ -2187,6 +2274,7 @@ MethodPreparationTicket submit_method_preparation(
       }
     }
     (void)registered_completion;
+    if (context_call_begun) active_context->end_call();
     cudaSetDevice(caller_device);
     throw;
   }
@@ -2260,8 +2348,10 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
     check_cuda(cudaSetDevice(state->active_context->device_id()),
                "select strict CI finalization device");
     CudaStream& stream = state->active_context->stream_;
-    CudaEvent& stage_start = state->active_context->stage_start_;
-    CudaEvent& stage_stop = state->active_context->stage_stop_;
+    CudaEvent& pair_start = state->active_context->pair_start_;
+    CudaEvent& pair_stop = state->active_context->pair_stop_;
+    CudaEvent& compact_start = state->active_context->compact_start_;
+    CudaEvent& compact_stop = state->active_context->compact_stop_;
     CudaEvent& consumer_completion =
       state->active_context->consumer_completion_;
     DeviceBuffer& d_left_components =
@@ -2286,7 +2376,7 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
           std::chrono::steady_clock::now() - permutation_h2d_started).count();
     }
 
-    check_cuda(cudaEventRecord(stage_start.get(), stream.get()),
+    check_cuda(cudaEventRecord(pair_start.get(), stream.get()),
                "record strict CI pair start");
     if (state->request.ci_method == "dcc.perm") {
       double* centered = static_cast<double*>(
@@ -2385,16 +2475,11 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
       }
       check_cuda(cudaGetLastError(), "launch strict HSIC pairs");
     }
-    check_cuda(cudaEventRecord(stage_stop.get(), stream.get()),
+    check_cuda(cudaEventRecord(pair_stop.get(), stream.get()),
                "record strict CI pair stop");
-    check_cuda(cudaEventSynchronize(stage_stop.get()),
-               "wait strict CI pairs");
-    diagnostics.pair_host_wait_count += 1;
     strict_method_failure_checkpoint("after_pair_wait");
-    diagnostics.pair_evaluation_cuda_ms =
-      elapsed_event_ms(stage_start.get(), stage_stop.get());
 
-    check_cuda(cudaEventRecord(stage_start.get(), stream.get()),
+    check_cuda(cudaEventRecord(compact_start.get(), stream.get()),
                "record strict CI compact start");
     std::vector<DeviceMethodRecord>& host_records =
       state->active_context->host_records_;
@@ -2407,20 +2492,57 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
                "record strict CI consumer completion");
     if (state->residual_token) {
       state->registered_completion = consumer_completion.get();
-      register_device_residual_consumer_event(
-        state->residual_token, state->registered_completion);
     }
-    check_cuda(cudaEventRecord(stage_stop.get(), stream.get()),
+    check_cuda(cudaEventRecord(compact_stop.get(), stream.get()),
                "record strict CI compact stop");
-    check_cuda(cudaEventSynchronize(stage_stop.get()),
+    check_cuda(cudaEventSynchronize(compact_stop.get()),
                "wait strict CI compact results");
     diagnostics.compact_host_wait_count += 1;
     strict_method_failure_checkpoint("after_compact_wait");
+    diagnostics.component_build_cuda_ms = elapsed_event_ms(
+      state->active_context->component_start_.get(),
+      state->active_context->component_stop_.get());
+    diagnostics.pair_evaluation_cuda_ms =
+      elapsed_event_ms(pair_start.get(), pair_stop.get());
     diagnostics.compact_d2h_cuda_ms =
-      elapsed_event_ms(stage_start.get(), stage_stop.get());
+      elapsed_event_ms(compact_start.get(), compact_stop.get());
     diagnostics.compact_result_d2h_count = 1;
     diagnostics.compact_result_d2h_bytes = state->record_bytes;
     diagnostics.compact_result_only_d2h = true;
+
+    if (state->residual_token) {
+      if (state->deferred_residual_submission) {
+        complete_device_residual_after_stream_wait(state->residual_token);
+      }
+      const DeviceResidualConsumerView resolved_view =
+        acquire_device_residual_consumer_view(state->residual_token);
+      const DeviceResidualInfo residual_info =
+        device_residual_info(state->residual_token);
+      diagnostics.submit_hidden_stream_sync_count =
+        residual_info.deferred_submit_stream_sync_count;
+      diagnostics.submit_hidden_device_sync_count =
+        residual_info.deferred_submit_device_sync_count;
+      diagnostics.submit_completion_event_wait_count =
+        residual_info.deferred_submit_event_wait_count;
+      if (resolved_view.metadata_provisional ||
+          resolved_view.target_keys != state->batch.target_keys ||
+          resolved_view.executed_routes != state->executed_routes ||
+          resolved_view.solver_statuses != state->solver_statuses) {
+        throw std::runtime_error(
+          "strict CI deferred residual metadata changed");
+      }
+      state->executed_routes = resolved_view.executed_routes;
+      state->solver_statuses = resolved_view.solver_statuses;
+      register_device_residual_consumer_event(
+        state->residual_token, state->registered_completion);
+      state->provisional_cache_state = false;
+    }
+    diagnostics.intermediate_host_event_wait_count =
+      diagnostics.component_host_wait_count +
+      diagnostics.pair_host_wait_count +
+      diagnostics.consumer_host_wait_count;
+    diagnostics.final_result_host_event_wait_count =
+      diagnostics.compact_host_wait_count;
 
     state->result.records.reserve(state->pair_count);
     for (std::size_t pair = 0; pair < state->pair_count; ++pair) {
@@ -2481,9 +2603,6 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
       }
     }
 
-    check_cuda(cudaEventSynchronize(consumer_completion.get()),
-               "wait strict CI residual consumer completion");
-    diagnostics.consumer_host_wait_count += 1;
     strict_method_failure_checkpoint("after_consumer_wait");
     if (state->residual_token) {
       release_device_residual(state->residual_token);
@@ -2496,6 +2615,8 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
     diagnostics.total_host_ms =
       std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - state->call_started).count();
+    state->active_context->end_call();
+    state->preparation_event_recorded = false;
     state->finalized = true;
     return std::move(state->result);
   } catch (...) {

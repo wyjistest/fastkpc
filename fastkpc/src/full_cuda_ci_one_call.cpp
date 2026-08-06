@@ -745,6 +745,8 @@ struct MethodCriticalPathRecord {
   std::uint64_t first_logical_sequence_id = 0U;
   std::uint64_t last_logical_sequence_id = 0U;
   bool residual_cache_all_hit = false;
+  bool deferred_svd_submission = false;
+  bool preparation_submit_nonblocking = false;
   double permutation_table_host_ms = 0.0;
   double identity_build_host_ms = 0.0;
   double identity_validation_host_ms = 0.0;
@@ -756,6 +758,7 @@ struct MethodCriticalPathRecord {
   double method_total_host_ms = 0.0;
   double overlap_upper_bound_ms = 0.0;
   int intermediate_host_wait_count = 0;
+  int final_host_wait_count = 0;
 };
 
 struct OneCallDiagnostics {
@@ -888,6 +891,14 @@ struct OneCallDiagnostics {
   int method_preparation_submit_count = 0;
   int method_finalization_count = 0;
   int method_preparation_ticket_consumed_count = 0;
+  int method_deferred_svd_submission_count = 0;
+  int method_nonblocking_preparation_submit_count = 0;
+  int method_submit_hidden_stream_sync_count = 0;
+  int method_submit_hidden_device_sync_count = 0;
+  int method_submit_completion_event_wait_count = 0;
+  int method_in_flight_peak = 0;
+  int method_intermediate_host_event_wait_count = 0;
+  int method_final_result_host_event_wait_count = 0;
   int method_permutation_table_build_count = 0;
   int method_permutation_table_growth_count = 0;
   int method_permutation_scratch_growth_count = 0;
@@ -1037,6 +1048,8 @@ Rcpp::DataFrame method_critical_path_frame(
   Rcpp::NumericVector first_sequence(size);
   Rcpp::NumericVector last_sequence(size);
   Rcpp::LogicalVector residual_cache_all_hit(size);
+  Rcpp::LogicalVector deferred_svd_submission(size);
+  Rcpp::LogicalVector preparation_submit_nonblocking(size);
   Rcpp::NumericVector permutation_table_host_ms(size);
   Rcpp::NumericVector identity_build_host_ms(size);
   Rcpp::NumericVector identity_validation_host_ms(size);
@@ -1048,6 +1061,7 @@ Rcpp::DataFrame method_critical_path_frame(
   Rcpp::NumericVector method_total_host_ms(size);
   Rcpp::NumericVector overlap_upper_bound_ms(size);
   Rcpp::IntegerVector intermediate_host_wait_count(size);
+  Rcpp::IntegerVector final_host_wait_count(size);
   for (R_xlen_t index = 0; index < size; ++index) {
     const MethodCriticalPathRecord& record =
       records[static_cast<std::size_t>(index)];
@@ -1060,6 +1074,9 @@ Rcpp::DataFrame method_critical_path_frame(
     last_sequence[index] =
       static_cast<double>(record.last_logical_sequence_id);
     residual_cache_all_hit[index] = record.residual_cache_all_hit;
+    deferred_svd_submission[index] = record.deferred_svd_submission;
+    preparation_submit_nonblocking[index] =
+      record.preparation_submit_nonblocking;
     permutation_table_host_ms[index] = record.permutation_table_host_ms;
     identity_build_host_ms[index] = record.identity_build_host_ms;
     identity_validation_host_ms[index] =
@@ -1074,6 +1091,7 @@ Rcpp::DataFrame method_critical_path_frame(
     overlap_upper_bound_ms[index] = record.overlap_upper_bound_ms;
     intermediate_host_wait_count[index] =
       record.intermediate_host_wait_count;
+    final_host_wait_count[index] = record.final_host_wait_count;
   }
   return Rcpp::DataFrame::create(
     Rcpp::Named("level") = level,
@@ -1083,6 +1101,9 @@ Rcpp::DataFrame method_critical_path_frame(
     Rcpp::Named("first_logical_sequence_id") = first_sequence,
     Rcpp::Named("last_logical_sequence_id") = last_sequence,
     Rcpp::Named("residual_cache_all_hit") = residual_cache_all_hit,
+    Rcpp::Named("deferred_svd_submission") = deferred_svd_submission,
+    Rcpp::Named("preparation_submit_nonblocking") =
+      preparation_submit_nonblocking,
     Rcpp::Named("permutation_table_host_ms") = permutation_table_host_ms,
     Rcpp::Named("identity_build_host_ms") = identity_build_host_ms,
     Rcpp::Named("identity_validation_host_ms") =
@@ -1096,7 +1117,8 @@ Rcpp::DataFrame method_critical_path_frame(
     Rcpp::Named("method_total_host_ms") = method_total_host_ms,
     Rcpp::Named("overlap_upper_bound_ms") = overlap_upper_bound_ms,
     Rcpp::Named("intermediate_host_wait_count") =
-      intermediate_host_wait_count);
+      intermediate_host_wait_count,
+    Rcpp::Named("final_host_wait_count") = final_host_wait_count);
 }
 
 void delay_setup_optimizer_pipeline_producer(
@@ -2474,6 +2496,22 @@ void accumulate_method_diagnostics(
   diagnostics->method_finalization_count += value.finalization_count;
   diagnostics->method_preparation_ticket_consumed_count +=
     value.preparation_ticket_consumed ? 1 : 0;
+  diagnostics->method_deferred_svd_submission_count +=
+    value.deferred_svd_submission ? 1 : 0;
+  diagnostics->method_nonblocking_preparation_submit_count +=
+    value.preparation_submit_nonblocking ? 1 : 0;
+  diagnostics->method_submit_hidden_stream_sync_count +=
+    value.submit_hidden_stream_sync_count;
+  diagnostics->method_submit_hidden_device_sync_count +=
+    value.submit_hidden_device_sync_count;
+  diagnostics->method_submit_completion_event_wait_count +=
+    value.submit_completion_event_wait_count;
+  diagnostics->method_in_flight_peak = std::max(
+    diagnostics->method_in_flight_peak, value.in_flight_peak);
+  diagnostics->method_intermediate_host_event_wait_count +=
+    value.intermediate_host_event_wait_count;
+  diagnostics->method_final_result_host_event_wait_count +=
+    value.final_result_host_event_wait_count;
   diagnostics->residual_d2h_bytes += value.residual_d2h_bytes;
   diagnostics->component_d2h_bytes += value.component_d2h_bytes;
   diagnostics->compact_result_d2h_bytes += value.compact_result_d2h_bytes;
@@ -2526,6 +2564,13 @@ void accumulate_method_diagnostics(
             value.preparation_submit_count == 1 &&
             value.finalization_count == 1 &&
             value.preparation_ticket_consumed &&
+            value.in_flight_peak == 1 &&
+            value.intermediate_host_event_wait_count == 0 &&
+            value.final_result_host_event_wait_count == 1 &&
+            (!value.preparation_submit_nonblocking ||
+              (value.submit_hidden_stream_sync_count == 0 &&
+               value.submit_hidden_device_sync_count == 0 &&
+               value.submit_completion_event_wait_count == 0)) &&
             value.residual_d2h_bytes == 0U &&
             value.component_d2h_bytes == 0U,
           "one-call strict CUDA CI method authority gate failed closed");
@@ -4255,6 +4300,10 @@ GroupResult execute_group(
         record.last_logical_sequence_id = logical_sequence_ids.back();
         record.residual_cache_all_hit =
           method_result.diagnostics.residual_cache_all_hit_batch_count > 0;
+        record.deferred_svd_submission =
+          method_result.diagnostics.deferred_svd_submission;
+        record.preparation_submit_nonblocking =
+          method_result.diagnostics.preparation_submit_nonblocking;
         record.permutation_table_host_ms = permutation_table_host_ms;
         record.identity_build_host_ms = identity_build_host_ms;
         record.identity_validation_host_ms =
@@ -4274,8 +4323,9 @@ GroupResult execute_group(
         record.intermediate_host_wait_count =
           method_result.diagnostics.component_host_wait_count +
           method_result.diagnostics.pair_host_wait_count +
-          method_result.diagnostics.compact_host_wait_count +
           method_result.diagnostics.consumer_host_wait_count;
+        record.final_host_wait_count =
+          method_result.diagnostics.compact_host_wait_count;
         diagnostics->method_critical_path_trace.push_back(record);
       } else {
         diagnostics->method_critical_path_trace_overflow_count += 1;
@@ -5625,6 +5675,21 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.method_finalization_count,
       Rcpp::Named("method_preparation_ticket_consumed_count") =
         diagnostics.method_preparation_ticket_consumed_count,
+      Rcpp::Named("method_deferred_svd_submission_count") =
+        diagnostics.method_deferred_svd_submission_count,
+      Rcpp::Named("method_nonblocking_preparation_submit_count") =
+        diagnostics.method_nonblocking_preparation_submit_count,
+      Rcpp::Named("method_submit_hidden_stream_sync_count") =
+        diagnostics.method_submit_hidden_stream_sync_count,
+      Rcpp::Named("method_submit_hidden_device_sync_count") =
+        diagnostics.method_submit_hidden_device_sync_count,
+      Rcpp::Named("method_submit_completion_event_wait_count") =
+        diagnostics.method_submit_completion_event_wait_count,
+      Rcpp::Named("method_in_flight_peak") = diagnostics.method_in_flight_peak,
+      Rcpp::Named("method_intermediate_host_event_wait_count") =
+        diagnostics.method_intermediate_host_event_wait_count,
+      Rcpp::Named("method_final_result_host_event_wait_count") =
+        diagnostics.method_final_result_host_event_wait_count,
       Rcpp::Named("method_permutation_table_build_count") =
         diagnostics.method_permutation_table_build_count,
       Rcpp::Named("method_permutation_table_growth_count") =
