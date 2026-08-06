@@ -192,6 +192,24 @@ int setup_optimizer_pipeline_producer_delay_us() {
   return delay;
 }
 
+int strict_method_critical_path_trace_capacity() {
+  const char* raw = std::getenv(
+    "FASTKPC_STRICT_METHOD_CRITICAL_PATH_TRACE_CAPACITY");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "0") return 0;
+  std::size_t parsed = 0U;
+  int capacity = 0;
+  try {
+    capacity = std::stoi(raw, &parsed);
+  } catch (...) {
+    throw std::runtime_error(
+      "strict method critical-path trace capacity is not an integer");
+  }
+  require(parsed == std::string(raw).size() &&
+            capacity >= 1 && capacity <= 1000000,
+          "strict method critical-path trace capacity is outside [1,1000000]");
+  return capacity;
+}
+
 bool finite_matrix(const Rcpp::NumericMatrix& values) {
   return std::all_of(values.begin(), values.end(), [](double value) {
     return std::isfinite(value);
@@ -719,6 +737,27 @@ struct PrefillBatchDiagnostic {
   std::vector<std::string> optimized_target_keys;
 };
 
+struct MethodCriticalPathRecord {
+  int level = 0;
+  int penalty_count = 0;
+  int target_count = 0;
+  int pair_count = 0;
+  std::uint64_t first_logical_sequence_id = 0U;
+  std::uint64_t last_logical_sequence_id = 0U;
+  bool residual_cache_all_hit = false;
+  double permutation_table_host_ms = 0.0;
+  double identity_build_host_ms = 0.0;
+  double identity_validation_host_ms = 0.0;
+  double residual_solve_host_ms = 0.0;
+  double component_cuda_ms = 0.0;
+  double permutation_h2d_submit_host_ms = 0.0;
+  double pair_cuda_ms = 0.0;
+  double compact_d2h_cuda_ms = 0.0;
+  double method_total_host_ms = 0.0;
+  double overlap_upper_bound_ms = 0.0;
+  int intermediate_host_wait_count = 0;
+};
+
 struct OneCallDiagnostics {
   std::unordered_set<std::string> physical_prepared_keys;
   std::unordered_set<std::string> consumed_prepared_keys;
@@ -854,6 +893,16 @@ struct OneCallDiagnostics {
   double method_permutation_table_host_ms = 0.0;
   double method_request_identity_build_host_ms = 0.0;
   double method_request_identity_validation_host_ms = 0.0;
+  double method_permutation_h2d_submit_host_ms = 0.0;
+  double method_gpu_preparation_upper_bound_ms = 0.0;
+  double method_permutation_gpu_overlap_upper_bound_ms = 0.0;
+  int method_component_host_wait_count = 0;
+  int method_pair_host_wait_count = 0;
+  int method_compact_host_wait_count = 0;
+  int method_consumer_host_wait_count = 0;
+  int method_critical_path_trace_capacity = 0;
+  int method_critical_path_trace_overflow_count = 0;
+  std::vector<MethodCriticalPathRecord> method_critical_path_trace;
   int method_permutation_payload_validation_scan_count = 0;
   std::size_t method_permutation_payload_validation_scan_bytes = 0U;
   int method_permutation_attestation_count = 0;
@@ -969,6 +1018,78 @@ struct OneCallDiagnostics {
   double cuda_dcov_teardown_host_ms = 0.0;
   double cuda_dcov_host_ms = 0.0;
 };
+
+Rcpp::DataFrame method_critical_path_frame(
+    const std::vector<MethodCriticalPathRecord>& records) {
+  const R_xlen_t size = static_cast<R_xlen_t>(records.size());
+  Rcpp::IntegerVector level(size);
+  Rcpp::IntegerVector penalty_count(size);
+  Rcpp::IntegerVector target_count(size);
+  Rcpp::IntegerVector pair_count(size);
+  Rcpp::NumericVector first_sequence(size);
+  Rcpp::NumericVector last_sequence(size);
+  Rcpp::LogicalVector residual_cache_all_hit(size);
+  Rcpp::NumericVector permutation_table_host_ms(size);
+  Rcpp::NumericVector identity_build_host_ms(size);
+  Rcpp::NumericVector identity_validation_host_ms(size);
+  Rcpp::NumericVector residual_solve_host_ms(size);
+  Rcpp::NumericVector component_cuda_ms(size);
+  Rcpp::NumericVector permutation_h2d_submit_host_ms(size);
+  Rcpp::NumericVector pair_cuda_ms(size);
+  Rcpp::NumericVector compact_d2h_cuda_ms(size);
+  Rcpp::NumericVector method_total_host_ms(size);
+  Rcpp::NumericVector overlap_upper_bound_ms(size);
+  Rcpp::IntegerVector intermediate_host_wait_count(size);
+  for (R_xlen_t index = 0; index < size; ++index) {
+    const MethodCriticalPathRecord& record =
+      records[static_cast<std::size_t>(index)];
+    level[index] = record.level;
+    penalty_count[index] = record.penalty_count;
+    target_count[index] = record.target_count;
+    pair_count[index] = record.pair_count;
+    first_sequence[index] =
+      static_cast<double>(record.first_logical_sequence_id);
+    last_sequence[index] =
+      static_cast<double>(record.last_logical_sequence_id);
+    residual_cache_all_hit[index] = record.residual_cache_all_hit;
+    permutation_table_host_ms[index] = record.permutation_table_host_ms;
+    identity_build_host_ms[index] = record.identity_build_host_ms;
+    identity_validation_host_ms[index] =
+      record.identity_validation_host_ms;
+    residual_solve_host_ms[index] = record.residual_solve_host_ms;
+    component_cuda_ms[index] = record.component_cuda_ms;
+    permutation_h2d_submit_host_ms[index] =
+      record.permutation_h2d_submit_host_ms;
+    pair_cuda_ms[index] = record.pair_cuda_ms;
+    compact_d2h_cuda_ms[index] = record.compact_d2h_cuda_ms;
+    method_total_host_ms[index] = record.method_total_host_ms;
+    overlap_upper_bound_ms[index] = record.overlap_upper_bound_ms;
+    intermediate_host_wait_count[index] =
+      record.intermediate_host_wait_count;
+  }
+  return Rcpp::DataFrame::create(
+    Rcpp::Named("level") = level,
+    Rcpp::Named("penalty_count") = penalty_count,
+    Rcpp::Named("target_count") = target_count,
+    Rcpp::Named("pair_count") = pair_count,
+    Rcpp::Named("first_logical_sequence_id") = first_sequence,
+    Rcpp::Named("last_logical_sequence_id") = last_sequence,
+    Rcpp::Named("residual_cache_all_hit") = residual_cache_all_hit,
+    Rcpp::Named("permutation_table_host_ms") = permutation_table_host_ms,
+    Rcpp::Named("identity_build_host_ms") = identity_build_host_ms,
+    Rcpp::Named("identity_validation_host_ms") =
+      identity_validation_host_ms,
+    Rcpp::Named("residual_solve_host_ms") = residual_solve_host_ms,
+    Rcpp::Named("component_cuda_ms") = component_cuda_ms,
+    Rcpp::Named("permutation_h2d_submit_host_ms") =
+      permutation_h2d_submit_host_ms,
+    Rcpp::Named("pair_cuda_ms") = pair_cuda_ms,
+    Rcpp::Named("compact_d2h_cuda_ms") = compact_d2h_cuda_ms,
+    Rcpp::Named("method_total_host_ms") = method_total_host_ms,
+    Rcpp::Named("overlap_upper_bound_ms") = overlap_upper_bound_ms,
+    Rcpp::Named("intermediate_host_wait_count") =
+      intermediate_host_wait_count);
+}
 
 void delay_setup_optimizer_pipeline_producer(
     OneCallDiagnostics* diagnostics) {
@@ -2354,6 +2475,16 @@ void accumulate_method_diagnostics(
   diagnostics->cuda_dcov_host_ms += value.total_host_ms;
   diagnostics->method_request_identity_validation_host_ms +=
     value.request_identity_validation_host_ms;
+  diagnostics->method_permutation_h2d_submit_host_ms +=
+    value.permutation_h2d_submit_host_ms;
+  diagnostics->method_gpu_preparation_upper_bound_ms +=
+    value.residual_solve_host_ms + value.component_build_cuda_ms;
+  diagnostics->method_component_host_wait_count +=
+    value.component_host_wait_count;
+  diagnostics->method_pair_host_wait_count += value.pair_host_wait_count;
+  diagnostics->method_compact_host_wait_count += value.compact_host_wait_count;
+  diagnostics->method_consumer_host_wait_count +=
+    value.consumer_host_wait_count;
   diagnostics->method_permutation_payload_validation_scan_count +=
     value.permutation_payload_validation_scan_count;
   diagnostics->method_permutation_payload_validation_scan_bytes +=
@@ -4017,12 +4148,14 @@ GroupResult execute_group(
     make_method_permutation_table(
       method_options, context->n, plan, task_indices,
       permutation_workspace);
+    double permutation_table_host_ms = 0.0;
     if (is_permutation_method(method_options.ci_method)) {
+      permutation_table_host_ms = elapsed_ms(permutation_started);
       diagnostics->method_permutation_table_build_count += 1;
       diagnostics->method_permutation_table_value_count +=
         permutation_workspace->table.size();
       diagnostics->method_permutation_table_host_ms +=
-        elapsed_ms(permutation_started);
+        permutation_table_host_ms;
       diagnostics->method_permutation_table_growth_count +=
         permutation_workspace->table_growth_count - table_growth_before;
       diagnostics->method_permutation_scratch_growth_count +=
@@ -4042,8 +4175,9 @@ GroupResult execute_group(
     method_request.request_identity_sha256 =
       full_cuda_ci_method_batch_request_identity(
         method_request, residual_keys, context->n);
+    const double identity_build_host_ms = elapsed_ms(identity_started);
     diagnostics->method_request_identity_build_host_ms +=
-      elapsed_ms(identity_started);
+      identity_build_host_ms;
     FullCudaCiMethodBatchResult method_result =
       run_full_cuda_ci_method_batch(
         context->fixed_sp, batch, method_request, method_residual_cache,
@@ -4051,6 +4185,52 @@ GroupResult execute_group(
     if (is_permutation_method(method_options.ci_method)) {
       permutation_workspace->table.reclaim(
         std::move(method_request.permutation_table));
+    }
+    const double gpu_preparation_upper_bound_ms =
+      method_result.diagnostics.residual_solve_host_ms +
+        method_result.diagnostics.component_build_cuda_ms;
+    const double overlap_upper_bound_ms = std::min(
+      permutation_table_host_ms, gpu_preparation_upper_bound_ms);
+    diagnostics->method_permutation_gpu_overlap_upper_bound_ms +=
+      overlap_upper_bound_ms;
+    if (diagnostics->method_critical_path_trace_capacity > 0) {
+      if (diagnostics->method_critical_path_trace.size() <
+          static_cast<std::size_t>(
+            diagnostics->method_critical_path_trace_capacity)) {
+        MethodCriticalPathRecord record;
+        record.level = plan.level;
+        record.penalty_count = context->penalty_count;
+        record.target_count = target_count;
+        record.pair_count = static_cast<int>(task_indices.size());
+        record.first_logical_sequence_id = logical_sequence_ids.front();
+        record.last_logical_sequence_id = logical_sequence_ids.back();
+        record.residual_cache_all_hit =
+          method_result.diagnostics.residual_cache_all_hit_batch_count > 0;
+        record.permutation_table_host_ms = permutation_table_host_ms;
+        record.identity_build_host_ms = identity_build_host_ms;
+        record.identity_validation_host_ms =
+          method_result.diagnostics.request_identity_validation_host_ms;
+        record.residual_solve_host_ms =
+          method_result.diagnostics.residual_solve_host_ms;
+        record.component_cuda_ms =
+          method_result.diagnostics.component_build_cuda_ms;
+        record.permutation_h2d_submit_host_ms =
+          method_result.diagnostics.permutation_h2d_submit_host_ms;
+        record.pair_cuda_ms =
+          method_result.diagnostics.pair_evaluation_cuda_ms;
+        record.compact_d2h_cuda_ms =
+          method_result.diagnostics.compact_d2h_cuda_ms;
+        record.method_total_host_ms = method_result.diagnostics.total_host_ms;
+        record.overlap_upper_bound_ms = overlap_upper_bound_ms;
+        record.intermediate_host_wait_count =
+          method_result.diagnostics.component_host_wait_count +
+          method_result.diagnostics.pair_host_wait_count +
+          method_result.diagnostics.compact_host_wait_count +
+          method_result.diagnostics.consumer_host_wait_count;
+        diagnostics->method_critical_path_trace.push_back(record);
+      } else {
+        diagnostics->method_critical_path_trace_overflow_count += 1;
+      }
     }
     accumulate_method_diagnostics(method_result.diagnostics, diagnostics);
     if (method_result.diagnostics.residual_cache_all_hit_batch_count > 0) {
@@ -4240,6 +4420,12 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   FixedSpRuntimePool runtime_pool(n);
 
   OneCallDiagnostics diagnostics;
+  diagnostics.method_critical_path_trace_capacity =
+    strict_method_critical_path_trace_capacity();
+  if (diagnostics.method_critical_path_trace_capacity > 0) {
+    diagnostics.method_critical_path_trace.reserve(
+      static_cast<std::size_t>(diagnostics.method_critical_path_trace_capacity));
+  }
   diagnostics.strict_hsic_gamma_residual_route =
     strict_hsic_gamma_residual_route_policy(method_options.ci_method);
   diagnostics.strict_permutation_residual_route =
@@ -5011,6 +5197,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   const Rcpp::DataFrame decomposition_reuse_by_iteration =
     decomposition_iteration_reuse_frame(
       diagnostics.cuda_multi_penalty_decomposition_iteration_reuse);
+  const Rcpp::DataFrame method_critical_path =
+    method_critical_path_frame(diagnostics.method_critical_path_trace);
 
   return Rcpp::List::create(
     Rcpp::Named("adjacency") = adjacency_matrix(adjacency, p),
@@ -5019,6 +5207,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     Rcpp::Named("n.edgetests") = Rcpp::wrap(n_edgetests),
     Rcpp::Named("tasks") = task_rows,
     Rcpp::Named("levels") = level_rows,
+    Rcpp::Named("method_critical_path") = method_critical_path,
     Rcpp::Named("summary") = Rcpp::List::create(
       Rcpp::Named("run_status") = "ok",
       Rcpp::Named("entrypoint") =
@@ -5399,6 +5588,26 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.method_request_identity_build_host_ms,
       Rcpp::Named("method_request_identity_validation_host_ms") =
         diagnostics.method_request_identity_validation_host_ms,
+      Rcpp::Named("method_permutation_h2d_submit_host_ms") =
+        diagnostics.method_permutation_h2d_submit_host_ms,
+      Rcpp::Named("method_gpu_preparation_upper_bound_ms") =
+        diagnostics.method_gpu_preparation_upper_bound_ms,
+      Rcpp::Named("method_permutation_gpu_overlap_upper_bound_ms") =
+        diagnostics.method_permutation_gpu_overlap_upper_bound_ms,
+      Rcpp::Named("method_component_host_wait_count") =
+        diagnostics.method_component_host_wait_count,
+      Rcpp::Named("method_pair_host_wait_count") =
+        diagnostics.method_pair_host_wait_count,
+      Rcpp::Named("method_compact_host_wait_count") =
+        diagnostics.method_compact_host_wait_count,
+      Rcpp::Named("method_consumer_host_wait_count") =
+        diagnostics.method_consumer_host_wait_count,
+      Rcpp::Named("method_critical_path_trace_capacity") =
+        diagnostics.method_critical_path_trace_capacity,
+      Rcpp::Named("method_critical_path_trace_count") =
+        static_cast<int>(diagnostics.method_critical_path_trace.size()),
+      Rcpp::Named("method_critical_path_trace_overflow_count") =
+        diagnostics.method_critical_path_trace_overflow_count,
       Rcpp::Named("method_permutation_payload_validation_scan_count") =
         diagnostics.method_permutation_payload_validation_scan_count,
       Rcpp::Named("method_permutation_payload_validation_scan_bytes") =

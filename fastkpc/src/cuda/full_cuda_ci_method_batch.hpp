@@ -148,8 +148,13 @@ struct FullCudaCiMethodBatchDiagnostics {
   double component_build_cuda_ms = 0.0;
   double pair_evaluation_cuda_ms = 0.0;
   double compact_d2h_cuda_ms = 0.0;
+  double permutation_h2d_submit_host_ms = 0.0;
   double request_identity_validation_host_ms = 0.0;
   double total_host_ms = 0.0;
+  int component_host_wait_count = 0;
+  int pair_host_wait_count = 0;
+  int compact_host_wait_count = 0;
+  int consumer_host_wait_count = 0;
   int permutation_payload_validation_scan_count = 0;
   std::size_t permutation_payload_validation_scan_bytes = 0;
   bool request_identity_authenticated = false;

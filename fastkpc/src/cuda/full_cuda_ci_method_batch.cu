@@ -1669,10 +1669,14 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
       active_context->ensure(&d_permutations, permutation_bytes);
       ++diagnostics.metadata_h2d_count;
       diagnostics.metadata_h2d_bytes += permutation_bytes;
+      const auto permutation_h2d_started = std::chrono::steady_clock::now();
       check_cuda(cudaMemcpyAsync(
         d_permutations.get(), request.permutation_table.data(),
         permutation_bytes, cudaMemcpyHostToDevice, stream.get()),
         "copy strict CI permutations");
+      diagnostics.permutation_h2d_submit_host_ms =
+        std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - permutation_h2d_started).count();
     }
 
     check_cuda(cudaEventRecord(stage_start.get(), stream.get()),
@@ -1719,6 +1723,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
                  "record strict dcc.perm component stop");
       check_cuda(cudaEventSynchronize(stage_stop.get()),
                  "wait strict dcc.perm components");
+      diagnostics.component_host_wait_count += 1;
       diagnostics.component_build_cuda_ms =
         elapsed_event_ms(stage_start.get(), stage_stop.get());
 
@@ -1897,6 +1902,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
                  "record strict HSIC component stop");
       check_cuda(cudaEventSynchronize(stage_stop.get()),
                  "wait strict HSIC components");
+      diagnostics.component_host_wait_count += 1;
       diagnostics.component_build_cuda_ms =
         elapsed_event_ms(stage_start.get(), stage_stop.get());
 
@@ -1953,6 +1959,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
                "record strict CI pair stop");
     check_cuda(cudaEventSynchronize(stage_stop.get()),
                "wait strict CI pairs");
+    diagnostics.pair_host_wait_count += 1;
     diagnostics.pair_evaluation_cuda_ms =
       elapsed_event_ms(stage_start.get(), stage_stop.get());
 
@@ -1976,6 +1983,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
                "record strict CI compact stop");
     check_cuda(cudaEventSynchronize(stage_stop.get()),
                "wait strict CI compact results");
+    diagnostics.compact_host_wait_count += 1;
     diagnostics.compact_d2h_cuda_ms =
       elapsed_event_ms(stage_start.get(), stage_stop.get());
     diagnostics.compact_result_d2h_count = 1;
@@ -2039,6 +2047,7 @@ FullCudaCiMethodBatchResult run_full_cuda_ci_method_batch(
 
     check_cuda(cudaEventSynchronize(consumer_completion.get()),
                "wait strict CI residual consumer completion");
+    diagnostics.consumer_host_wait_count += 1;
     if (residual_token) {
       release_device_residual(residual_token);
       free_device_residual(&residual_token);
