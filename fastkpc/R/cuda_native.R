@@ -2853,6 +2853,17 @@ fixed_sp_cuda_solve_batch <- function(
   )
 }
 
+fixed_sp_cuda_submit_deferred_svd_for_test <- function(
+    handle, Y, SP, planned_route, target_keys,
+    outputs = c("residuals")) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_fixed_sp_cuda_submit_deferred_svd_for_test", handle, Y, SP,
+    as.character(planned_route), as.character(target_keys),
+    as.character(outputs), PACKAGE = "fastkpc_cuda"
+  )
+}
+
 fixed_sp_cuda_residual_info <- function(token) {
   load_fastkpc_cuda_native()
   .Call("C_fixed_sp_cuda_residual_info", token, PACKAGE = "fastkpc_cuda")

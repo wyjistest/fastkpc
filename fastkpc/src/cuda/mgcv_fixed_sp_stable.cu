@@ -436,50 +436,68 @@ __global__ void factor_fixed_sp_aggregate_penalty_kernel(
     int* aggregate_factor_call_count,
     int* pivots,
     double* aggregate_dstop) {
-  if (blockIdx.x != 0U || threadIdx.x != 0U) return;
+  if (blockIdx.x != 0U) return;
 
   const std::size_t q_size = static_cast<std::size_t>(q);
   const std::size_t q_squared = q_size * q_size;
-  double max_initial_diagonal = 0.0;
-  int initial_pivot = 0;
-  for (int column = 0; column < q; ++column) {
-    for (int row = 0; row <= column; ++row) {
-      const std::size_t element = static_cast<std::size_t>(row) +
-        q_size * static_cast<std::size_t>(column);
-      double value = projected_H == nullptr ? 0.0 : projected_H[element];
-      for (int penalty = 0; penalty < penalty_count; ++penalty) {
-        value += SP[static_cast<std::size_t>(penalty)] *
-          projected_penalties[element + q_squared *
-            static_cast<std::size_t>(penalty)];
-      }
-      factor[element] = value;
+  for (std::size_t element = static_cast<std::size_t>(threadIdx.x);
+       element < q_squared;
+       element += static_cast<std::size_t>(blockDim.x)) {
+    const int row = static_cast<int>(element % q_size);
+    const int column = static_cast<int>(element / q_size);
+    if (row > column) continue;
+    double value = projected_H == nullptr ? 0.0 : projected_H[element];
+    for (int penalty = 0; penalty < penalty_count; ++penalty) {
+      value += SP[static_cast<std::size_t>(penalty)] *
+        projected_penalties[element + q_squared *
+          static_cast<std::size_t>(penalty)];
     }
-    const double diagonal = factor[static_cast<std::size_t>(column) +
-      q_size * static_cast<std::size_t>(column)];
-    if (column == 0 || diagonal > max_initial_diagonal) {
-      max_initial_diagonal = diagonal;
-      initial_pivot = column;
-    }
+    factor[element] = value;
+  }
+  for (int column = static_cast<int>(threadIdx.x); column < q;
+       column += static_cast<int>(blockDim.x)) {
     pivots[column] = column;
     work[column] = 0.0;
     work[q + column] = 0.0;
   }
+  __syncthreads();
 
-  const double unit_roundoff = DBL_EPSILON / 2.0;
-  const double dstop = static_cast<double>(q) * unit_roundoff *
-    max_initial_diagonal;
-  *aggregate_dstop = dstop;
-  int rank = 0;
-  if (!(max_initial_diagonal > 0.0) || !isfinite(max_initial_diagonal)) {
-    *aggregate_root_rank = 0;
-    *aggregate_factor_call_count += 1;
-    return;
+  __shared__ double shared_ajj;
+  __shared__ double shared_dstop;
+  __shared__ int shared_pivot;
+  __shared__ int shared_rank;
+  __shared__ int shared_active;
+  if (threadIdx.x == 0U) {
+    double max_initial_diagonal = 0.0;
+    int initial_pivot = 0;
+    for (int column = 0; column < q; ++column) {
+      const double diagonal = factor[static_cast<std::size_t>(column) +
+        q_size * static_cast<std::size_t>(column)];
+      if (column == 0 || diagonal > max_initial_diagonal) {
+        max_initial_diagonal = diagonal;
+        initial_pivot = column;
+      }
+    }
+    const double unit_roundoff = DBL_EPSILON / 2.0;
+    shared_dstop = static_cast<double>(q) * unit_roundoff *
+      max_initial_diagonal;
+    *aggregate_dstop = shared_dstop;
+    shared_pivot = initial_pivot;
+    shared_ajj = max_initial_diagonal;
+    shared_rank = 0;
+    shared_active =
+      max_initial_diagonal > 0.0 && isfinite(max_initial_diagonal) ? 1 : 0;
+    if (shared_active == 0) {
+      *aggregate_root_rank = 0;
+      *aggregate_factor_call_count += 1;
+    }
   }
+  __syncthreads();
+  if (shared_active == 0) return;
 
-  int pivot = initial_pivot;
-  double ajj = max_initial_diagonal;
   for (int j = 0; j < q; ++j) {
-    for (int i = j; i < q; ++i) {
+    for (int i = j + static_cast<int>(threadIdx.x); i < q;
+         i += static_cast<int>(blockDim.x)) {
       if (j > 0) {
         const double previous = factor[
           static_cast<std::size_t>(j - 1) + q_size *
@@ -489,66 +507,79 @@ __global__ void factor_fixed_sp_aggregate_penalty_kernel(
       work[q + i] = factor[static_cast<std::size_t>(i) + q_size *
         static_cast<std::size_t>(i)] - work[i];
     }
-    if (j > 0) {
-      pivot = j;
-      ajj = work[q + j];
+    __syncthreads();
+
+    if (threadIdx.x == 0U && j > 0) {
+      shared_pivot = j;
+      shared_ajj = work[q + j];
       for (int i = j + 1; i < q; ++i) {
-        if (work[q + i] > ajj) {
-          pivot = i;
-          ajj = work[q + i];
+        if (work[q + i] > shared_ajj) {
+          shared_pivot = i;
+          shared_ajj = work[q + i];
         }
       }
-      if (!(ajj > dstop) || !isfinite(ajj)) {
+      if (!(shared_ajj > shared_dstop) || !isfinite(shared_ajj)) {
         factor[static_cast<std::size_t>(j) + q_size *
-          static_cast<std::size_t>(j)] = ajj;
-        break;
+          static_cast<std::size_t>(j)] = shared_ajj;
+        shared_active = 0;
       }
     }
+    __syncthreads();
+    if (shared_active == 0) break;
 
+    const int pivot = shared_pivot;
     if (j != pivot) {
-      factor[static_cast<std::size_t>(pivot) + q_size *
-        static_cast<std::size_t>(pivot)] =
+      for (int i = static_cast<int>(threadIdx.x); i < q;
+           i += static_cast<int>(blockDim.x)) {
+        if (i < j) {
+          const std::size_t left = static_cast<std::size_t>(i) +
+            q_size * static_cast<std::size_t>(j);
+          const std::size_t right = static_cast<std::size_t>(i) +
+            q_size * static_cast<std::size_t>(pivot);
+          const double temporary = factor[left];
+          factor[left] = factor[right];
+          factor[right] = temporary;
+        } else if (i > pivot) {
+          const std::size_t left = static_cast<std::size_t>(j) +
+            q_size * static_cast<std::size_t>(i);
+          const std::size_t right = static_cast<std::size_t>(pivot) +
+            q_size * static_cast<std::size_t>(i);
+          const double temporary = factor[left];
+          factor[left] = factor[right];
+          factor[right] = temporary;
+        } else if (i > j && i < pivot) {
+          const std::size_t left = static_cast<std::size_t>(j) +
+            q_size * static_cast<std::size_t>(i);
+          const std::size_t right = static_cast<std::size_t>(i) +
+            q_size * static_cast<std::size_t>(pivot);
+          const double temporary = factor[left];
+          factor[left] = factor[right];
+          factor[right] = temporary;
+        }
+      }
+      if (threadIdx.x == 0U) {
+        factor[static_cast<std::size_t>(pivot) + q_size *
+          static_cast<std::size_t>(pivot)] =
           factor[static_cast<std::size_t>(j) + q_size *
             static_cast<std::size_t>(j)];
-      for (int i = 0; i < j; ++i) {
-        const std::size_t left = static_cast<std::size_t>(i) +
-          q_size * static_cast<std::size_t>(j);
-        const std::size_t right = static_cast<std::size_t>(i) +
-          q_size * static_cast<std::size_t>(pivot);
-        const double temporary = factor[left];
-        factor[left] = factor[right];
-        factor[right] = temporary;
+        const double work_temporary = work[j];
+        work[j] = work[pivot];
+        work[pivot] = work_temporary;
+        const int pivot_temporary = pivots[pivot];
+        pivots[pivot] = pivots[j];
+        pivots[j] = pivot_temporary;
       }
-      for (int i = pivot + 1; i < q; ++i) {
-        const std::size_t left = static_cast<std::size_t>(j) +
-          q_size * static_cast<std::size_t>(i);
-        const std::size_t right = static_cast<std::size_t>(pivot) +
-          q_size * static_cast<std::size_t>(i);
-        const double temporary = factor[left];
-        factor[left] = factor[right];
-        factor[right] = temporary;
-      }
-      for (int i = j + 1; i < pivot; ++i) {
-        const std::size_t left = static_cast<std::size_t>(j) +
-          q_size * static_cast<std::size_t>(i);
-        const std::size_t right = static_cast<std::size_t>(i) +
-          q_size * static_cast<std::size_t>(pivot);
-        const double temporary = factor[left];
-        factor[left] = factor[right];
-        factor[right] = temporary;
-      }
-      const double work_temporary = work[j];
-      work[j] = work[pivot];
-      work[pivot] = work_temporary;
-      const int pivot_temporary = pivots[pivot];
-      pivots[pivot] = pivots[j];
-      pivots[j] = pivot_temporary;
+      __syncthreads();
     }
 
-    ajj = sqrt(ajj);
-    factor[static_cast<std::size_t>(j) + q_size *
-      static_cast<std::size_t>(j)] = ajj;
-    for (int column = j + 1; column < q; ++column) {
+    if (threadIdx.x == 0U) {
+      shared_ajj = sqrt(shared_ajj);
+      factor[static_cast<std::size_t>(j) + q_size *
+        static_cast<std::size_t>(j)] = shared_ajj;
+    }
+    __syncthreads();
+    for (int column = j + 1 + static_cast<int>(threadIdx.x); column < q;
+         column += static_cast<int>(blockDim.x)) {
       double value = factor[static_cast<std::size_t>(j) +
         q_size * static_cast<std::size_t>(column)];
       for (int row = 0; row < j; ++row) {
@@ -558,12 +589,16 @@ __global__ void factor_fixed_sp_aggregate_penalty_kernel(
             q_size * static_cast<std::size_t>(j)];
       }
       factor[static_cast<std::size_t>(j) +
-        q_size * static_cast<std::size_t>(column)] = value / ajj;
+        q_size * static_cast<std::size_t>(column)] = value / shared_ajj;
     }
-    rank = j + 1;
+    __syncthreads();
+    if (threadIdx.x == 0U) shared_rank = j + 1;
+    __syncthreads();
   }
-  *aggregate_root_rank = rank;
-  *aggregate_factor_call_count += 1;
+  if (threadIdx.x == 0U) {
+    *aggregate_root_rank = shared_rank;
+    *aggregate_factor_call_count += 1;
+  }
 }
 
 __global__ void emit_fixed_sp_aggregate_root_kernel(
@@ -1015,7 +1050,7 @@ void launch_fixed_sp_aggregate_factor(
       aggregate_dstop == nullptr || stream == nullptr) {
     throw std::runtime_error("fixed-sp aggregate factor inputs are invalid");
   }
-  factor_fixed_sp_aggregate_penalty_kernel<<<1U, 1U, 0, stream>>>(
+  factor_fixed_sp_aggregate_penalty_kernel<<<1U, 256U, 0, stream>>>(
     projected_penalties, projected_H, SP, penalty_count, q,
     aggregate_penalty_factor, aggregate_factor_work,
     aggregate_root_rank, aggregate_factor_call_count,

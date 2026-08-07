@@ -5726,14 +5726,16 @@ extern "C" SEXP C_fixed_sp_cuda_build_augmented_for_test(
   END_RCPP
 }
 
-extern "C" SEXP C_fixed_sp_cuda_solve_batch(
+namespace {
+
+SEXP fixed_sp_cuda_submit_batch(
     SEXP prepared_s,
     SEXP Y_s,
     SEXP SP_s,
     SEXP planned_route_s,
     SEXP target_keys_s,
-    SEXP outputs_s) {
-  BEGIN_RCPP
+    SEXP outputs_s,
+    bool defer_svd_completion) {
   FixedSpPreparedHolder* prepared_holder =
     fixed_sp_cuda_prepared_holder(prepared_s, true);
   const fastkpc::PreparedSInfo prepared_info =
@@ -5801,8 +5803,10 @@ extern "C" SEXP C_fixed_sp_cuda_solve_batch(
   };
   R_SetExternalPtrAddr(ext, holder);
   try {
-    holder->value = fastkpc::solve_fixed_sp_batch(
-      prepared_holder->value, batch);
+    holder->value = defer_svd_completion ?
+      fastkpc::submit_fixed_sp_batch_deferred_svd(
+        prepared_holder->value, batch) :
+      fastkpc::solve_fixed_sp_batch(prepared_holder->value, batch);
   } catch (...) {
     delete holder;
     R_ClearExternalPtr(ext);
@@ -5812,6 +5816,33 @@ extern "C" SEXP C_fixed_sp_cuda_solve_batch(
   fixed_sp_owner_acquire(holder, FixedSpOwnerKind::Residual);
   UNPROTECT(1);
   return ext;
+}
+
+}  // namespace
+
+extern "C" SEXP C_fixed_sp_cuda_solve_batch(
+    SEXP prepared_s,
+    SEXP Y_s,
+    SEXP SP_s,
+    SEXP planned_route_s,
+    SEXP target_keys_s,
+    SEXP outputs_s) {
+  BEGIN_RCPP
+  return fixed_sp_cuda_submit_batch(
+    prepared_s, Y_s, SP_s, planned_route_s, target_keys_s, outputs_s, false);
+  END_RCPP
+}
+
+extern "C" SEXP C_fixed_sp_cuda_submit_deferred_svd_for_test(
+    SEXP prepared_s,
+    SEXP Y_s,
+    SEXP SP_s,
+    SEXP planned_route_s,
+    SEXP target_keys_s,
+    SEXP outputs_s) {
+  BEGIN_RCPP
+  return fixed_sp_cuda_submit_batch(
+    prepared_s, Y_s, SP_s, planned_route_s, target_keys_s, outputs_s, true);
   END_RCPP
 }
 
@@ -13845,6 +13876,7 @@ static const R_CallMethodDef call_methods[] = {
   {"C_fixed_sp_cuda_prepared_materialize_roots_for_test", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_prepared_materialize_roots_for_test), 1},
   {"C_fixed_sp_cuda_build_augmented_for_test", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_build_augmented_for_test), 4},
   {"C_fixed_sp_cuda_solve_batch", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_solve_batch), 6},
+  {"C_fixed_sp_cuda_submit_deferred_svd_for_test", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_submit_deferred_svd_for_test), 6},
   {"C_fixed_sp_cuda_residual_info", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_info), 1},
   {"C_fixed_sp_cuda_materialize_shadow", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_materialize_shadow), 2},
   {"C_fixed_sp_cuda_residual_release", reinterpret_cast<DL_FUNC>(&C_fixed_sp_cuda_residual_release), 1},
