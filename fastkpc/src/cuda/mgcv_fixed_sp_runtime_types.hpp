@@ -223,6 +223,7 @@ struct FixedSpBatchHostView {
   std::uint32_t output_mask = 0;
   std::vector<FixedSpRoute> planned_routes;
   std::vector<std::string> target_keys;
+  bool route_wait_diagnostics = false;
 };
 
 struct DeviceResidualInfo {
@@ -275,6 +276,19 @@ struct DeviceResidualInfo {
   int executed_svd_target_count = 0;
   int cholesky_to_svd_count = 0;
   int qr_to_svd_count = 0;
+  bool route_wait_diagnostics_enabled = false;
+  int cholesky_factor_checkpoint_wait_count = 0;
+  double cholesky_factor_checkpoint_host_wait_ms = 0.0;
+  int cholesky_solve_checkpoint_wait_count = 0;
+  double cholesky_solve_checkpoint_host_wait_ms = 0.0;
+  int qr_checkpoint_wait_count = 0;
+  double qr_checkpoint_host_wait_ms = 0.0;
+  int svd_checkpoint_wait_count = 0;
+  double svd_checkpoint_host_wait_ms = 0.0;
+  int output_status_wait_count = 0;
+  double output_status_host_wait_ms = 0.0;
+  double route_resolution_cpu_ms = 0.0;
+  double output_status_resolution_cpu_ms = 0.0;
   int aggregate_penalty_factor_count = 0;
   int aggregate_svd_b_build_count = 0;
   int aggregate_penalty_root_d2h_count = 0;

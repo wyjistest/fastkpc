@@ -85,6 +85,49 @@ bool permutation_attestation_equal(
     left.sha256 == right.sha256;
 }
 
+void record_route_composition(
+    const FixedSpBatchHostView& batch,
+    const std::vector<FixedSpRoute>& executed_routes,
+    FullCudaCiMethodBatchDiagnostics* diagnostics) {
+  if (diagnostics == nullptr ||
+      executed_routes.size() != batch.planned_routes.size()) {
+    throw std::runtime_error(
+      "strict CI route diagnostic metadata size changed");
+  }
+  for (std::size_t target = 0; target < executed_routes.size(); ++target) {
+    const FixedSpRoute planned = batch.planned_routes[target];
+    const FixedSpRoute executed = executed_routes[target];
+    if (planned == FixedSpRoute::CholeskyBatched) {
+      diagnostics->planned_cholesky_target_count += 1;
+    } else if (planned == FixedSpRoute::AugmentedQr) {
+      diagnostics->planned_qr_target_count += 1;
+    } else if (planned == FixedSpRoute::AugmentedSvd) {
+      diagnostics->planned_svd_target_count += 1;
+    } else {
+      throw std::runtime_error(
+        "strict CI planned route diagnostic is invalid");
+    }
+    if (executed == FixedSpRoute::CholeskyBatched) {
+      diagnostics->executed_cholesky_target_count += 1;
+    } else if (executed == FixedSpRoute::AugmentedQr) {
+      diagnostics->executed_qr_target_count += 1;
+    } else if (executed == FixedSpRoute::AugmentedSvd) {
+      diagnostics->executed_svd_target_count += 1;
+    } else {
+      throw std::runtime_error(
+        "strict CI executed route diagnostic is invalid");
+    }
+    if (planned == FixedSpRoute::CholeskyBatched &&
+        executed == FixedSpRoute::AugmentedSvd) {
+      diagnostics->cholesky_to_svd_count += 1;
+    }
+    if (planned == FixedSpRoute::AugmentedQr &&
+        executed == FixedSpRoute::AugmentedSvd) {
+      diagnostics->qr_to_svd_count += 1;
+    }
+  }
+}
+
 bool deferred_svd_submission_enabled() {
   const char* raw = std::getenv(
     "FASTKPC_STRICT_METHOD_DEFERRED_SVD_SUBMISSION");
@@ -1909,6 +1952,8 @@ MethodPreparationTicket submit_method_preparation(
   diagnostics.execution_context_call_count = 1;
   diagnostics.execution_context_reuse_count = context_reused ? 1 : 0;
   diagnostics.preparation_submit_count = 1;
+  diagnostics.route_wait_diagnostics_enabled =
+    batch.route_wait_diagnostics;
   diagnostics.static_identity_validation_host_ms =
     static_identity_validation_host_ms;
   diagnostics.request_identity_validation_host_ms =
@@ -1981,9 +2026,19 @@ MethodPreparationTicket submit_method_preparation(
       diagnostics.residual_solve_host_ms =
         std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - solve_started).count();
+      std::chrono::steady_clock::time_point metadata_resolution_started;
+      if (diagnostics.route_wait_diagnostics_enabled) {
+        metadata_resolution_started = std::chrono::steady_clock::now();
+      }
       residual_view = defer_svd ?
         acquire_device_residual_submission_view(residual_token) :
         acquire_device_residual_consumer_view(residual_token);
+      if (diagnostics.route_wait_diagnostics_enabled) {
+        diagnostics.residual_metadata_resolution_host_ms =
+          std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() -
+              metadata_resolution_started).count();
+      }
       strict_method_failure_checkpoint("after_residual_acquire");
       if (residual_view.n != batch.n ||
           residual_view.target_count != batch.target_count ||
@@ -2012,6 +2067,10 @@ MethodPreparationTicket submit_method_preparation(
     provisional_cache_state =
       deferred_residual_submission && residual_cache_eligible;
 
+    std::chrono::steady_clock::time_point component_submission_started;
+    if (diagnostics.route_wait_diagnostics_enabled) {
+      component_submission_started = std::chrono::steady_clock::now();
+    }
     CudaStream& stream = active_context->stream_;
     CudaEvent& stage_start = active_context->component_start_;
     CudaEvent& stage_stop = active_context->component_stop_;
@@ -2328,6 +2387,13 @@ MethodPreparationTicket submit_method_preparation(
                  "record strict HSIC component stop");
       strict_method_failure_checkpoint("after_component_wait");
     }
+    if (diagnostics.route_wait_diagnostics_enabled) {
+      diagnostics.component_submission_host_ms =
+        std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() -
+            component_submission_started).count();
+      record_route_composition(batch, executed_routes, &diagnostics);
+    }
     MethodPreparationTicket ticket;
     ticket.impl_.reset(new MethodPreparationTicket::Impl());
     MethodPreparationTicket::Impl& state = *ticket.impl_;
@@ -2401,6 +2467,11 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
   std::unique_ptr<MethodPreparationTicket::Impl> state =
     std::move(preparation.impl_);
   FullCudaCiMethodBatchDiagnostics& diagnostics = state->result.diagnostics;
+  std::chrono::steady_clock::time_point finalization_started;
+  std::chrono::steady_clock::time_point post_compact_started;
+  if (diagnostics.route_wait_diagnostics_enabled) {
+    finalization_started = std::chrono::steady_clock::now();
+  }
   try {
     if (static_identity.schema_version !=
           kFullCudaCiMethodStaticRequestIdentitySchemaVersion ||
@@ -2615,8 +2686,18 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
     }
     check_cuda(cudaEventRecord(compact_stop.get(), stream.get()),
                "record strict CI compact stop");
+    std::chrono::steady_clock::time_point compact_wait_started;
+    if (diagnostics.route_wait_diagnostics_enabled) {
+      compact_wait_started = std::chrono::steady_clock::now();
+    }
     check_cuda(cudaEventSynchronize(compact_stop.get()),
                "wait strict CI compact results");
+    if (diagnostics.route_wait_diagnostics_enabled) {
+      diagnostics.compact_result_host_wait_ms =
+        std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - compact_wait_started).count();
+      post_compact_started = std::chrono::steady_clock::now();
+    }
     diagnostics.compact_host_wait_count += 1;
     strict_method_failure_checkpoint("after_compact_wait");
     diagnostics.component_build_cuda_ms = elapsed_event_ms(
@@ -2644,6 +2725,51 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
         residual_info.deferred_submit_device_sync_count;
       diagnostics.submit_completion_event_wait_count =
         residual_info.deferred_submit_event_wait_count;
+      if (diagnostics.route_wait_diagnostics_enabled) {
+        if (!residual_info.route_wait_diagnostics_enabled ||
+            diagnostics.planned_cholesky_target_count !=
+              residual_info.planned_cholesky_target_count ||
+            diagnostics.planned_qr_target_count !=
+              residual_info.planned_qr_target_count ||
+            diagnostics.planned_svd_target_count !=
+              residual_info.planned_svd_target_count ||
+            diagnostics.executed_cholesky_target_count !=
+              residual_info.executed_cholesky_target_count ||
+            diagnostics.executed_qr_target_count !=
+              residual_info.executed_qr_target_count ||
+            diagnostics.executed_svd_target_count !=
+              residual_info.executed_svd_target_count ||
+            diagnostics.cholesky_to_svd_count !=
+              residual_info.cholesky_to_svd_count ||
+            diagnostics.qr_to_svd_count != residual_info.qr_to_svd_count) {
+          throw std::runtime_error(
+            "strict CI fixed-SP route diagnostic accounting changed");
+        }
+        diagnostics.cholesky_factor_checkpoint_wait_count =
+          residual_info.cholesky_factor_checkpoint_wait_count;
+        diagnostics.cholesky_factor_checkpoint_host_wait_ms =
+          residual_info.cholesky_factor_checkpoint_host_wait_ms;
+        diagnostics.cholesky_solve_checkpoint_wait_count =
+          residual_info.cholesky_solve_checkpoint_wait_count;
+        diagnostics.cholesky_solve_checkpoint_host_wait_ms =
+          residual_info.cholesky_solve_checkpoint_host_wait_ms;
+        diagnostics.qr_checkpoint_wait_count =
+          residual_info.qr_checkpoint_wait_count;
+        diagnostics.qr_checkpoint_host_wait_ms =
+          residual_info.qr_checkpoint_host_wait_ms;
+        diagnostics.svd_checkpoint_wait_count =
+          residual_info.svd_checkpoint_wait_count;
+        diagnostics.svd_checkpoint_host_wait_ms =
+          residual_info.svd_checkpoint_host_wait_ms;
+        diagnostics.output_status_wait_count =
+          residual_info.output_status_wait_count;
+        diagnostics.output_status_host_wait_ms =
+          residual_info.output_status_host_wait_ms;
+        diagnostics.route_resolution_cpu_ms =
+          residual_info.route_resolution_cpu_ms;
+        diagnostics.output_status_resolution_cpu_ms =
+          residual_info.output_status_resolution_cpu_ms;
+      }
       if (resolved_view.metadata_provisional ||
           resolved_view.target_keys != state->batch.target_keys ||
           resolved_view.executed_routes != state->executed_routes ||
@@ -2735,6 +2861,14 @@ FullCudaCiMethodBatchResult finalize_method_from_permutation(
     diagnostics.total_host_ms =
       std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - state->call_started).count();
+    if (diagnostics.route_wait_diagnostics_enabled) {
+      diagnostics.post_compact_finalize_host_ms =
+        std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - post_compact_started).count();
+      diagnostics.finalization_host_ms =
+        std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - finalization_started).count();
+    }
     state->active_context->end_call();
     state->preparation_event_recorded = false;
     state->finalized = true;

@@ -46,6 +46,30 @@ void check_cuda(cudaError_t status, const char* stage) {
   }
 }
 
+void synchronize_route_checkpoint(
+    cudaEvent_t event,
+    const char* stage,
+    bool diagnostics_enabled,
+    int* wait_count,
+    double* host_wait_ms) {
+  std::chrono::steady_clock::time_point started;
+  if (diagnostics_enabled) started = std::chrono::steady_clock::now();
+  check_cuda(cudaEventSynchronize(event), stage);
+  if (!diagnostics_enabled) return;
+  *wait_count += 1;
+  *host_wait_ms += std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - started).count();
+}
+
+void accumulate_route_resolution_time(
+    bool diagnostics_enabled,
+    const std::chrono::steady_clock::time_point& started,
+    double* host_ms) {
+  if (!diagnostics_enabled) return;
+  *host_ms += std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - started).count();
+}
+
 void check_cublas(cublasStatus_t status, const char* stage) {
   if (status != CUBLAS_STATUS_SUCCESS) {
     throw std::runtime_error(std::string(stage) + ": cuBLAS status " +
@@ -2486,6 +2510,10 @@ void resolve_pending_svd_diagnostics_locked(
     DeviceResidualBatch* token,
     CudaRuntimeContext* context) {
   if (token == nullptr || !token->svd_diagnostics_pending) return;
+  std::chrono::steady_clock::time_point resolution_started;
+  if (token->diagnostics.route_wait_diagnostics_enabled) {
+    resolution_started = std::chrono::steady_clock::now();
+  }
   if (context == nullptr || token->pending_svd_integer_diagnostics == nullptr ||
       token->pending_svd_double_diagnostics == nullptr ||
       token->pending_svd_reserved_targets == 0U ||
@@ -2586,6 +2614,11 @@ void resolve_pending_svd_diagnostics_locked(
   token->svd_diagnostics_pending = false;
   token->pending_svd_integer_diagnostics = nullptr;
   token->pending_svd_double_diagnostics = nullptr;
+  if (token->diagnostics.route_wait_diagnostics_enabled) {
+    token->diagnostics.route_resolution_cpu_ms +=
+      std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - resolution_started).count();
+  }
 }
 
 void resolve_fixed_sp_output_status_after_ready_locked(
@@ -2597,6 +2630,10 @@ void resolve_fixed_sp_output_status_after_ready_locked(
     token->owns_deferred_context_lease = false;
   }
   resolve_pending_svd_diagnostics_locked(token, context);
+  std::chrono::steady_clock::time_point resolution_started;
+  if (token->diagnostics.route_wait_diagnostics_enabled) {
+    resolution_started = std::chrono::steady_clock::now();
+  }
   for (int target = 0; target < token->target_count; ++target) {
     const std::size_t target_offset = static_cast<std::size_t>(target);
     if (fixed_sp_status_is_successful(
@@ -2632,6 +2669,11 @@ void resolve_fixed_sp_output_status_after_ready_locked(
   token->diagnostics.solver_statuses = token->solver_statuses;
   token->diagnostics.target_true_batched = token->target_true_batched;
   token->output_status_resolved = true;
+  if (token->diagnostics.route_wait_diagnostics_enabled) {
+    token->diagnostics.output_status_resolution_cpu_ms +=
+      std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - resolution_started).count();
+  }
 }
 
 void resolve_fixed_sp_output_status_locked(
@@ -2648,8 +2690,12 @@ void resolve_fixed_sp_output_status_locked(
       "STALE_TOKEN: fixed-sp output status storage mismatch");
   }
 
-  check_cuda(cudaEventSynchronize(token->slot->solve_completion_event),
-             "wait for fixed-sp output status");
+  synchronize_route_checkpoint(
+    token->slot->solve_completion_event,
+    "wait for fixed-sp output status",
+    token->diagnostics.route_wait_diagnostics_enabled,
+    &token->diagnostics.output_status_wait_count,
+    &token->diagnostics.output_status_host_wait_ms);
   if (token->diagnostics.deferred_svd_submission) {
     token->diagnostics.deferred_completion_event_wait_count += 1;
   }
@@ -4445,6 +4491,8 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
     token->diagnostics.output_slot_acquire_count = 1;
     token->diagnostics.owner_generation = handle->generation;
     token->diagnostics.slot_generation = acquired_generation;
+    token->diagnostics.route_wait_diagnostics_enabled =
+      batch.route_wait_diagnostics;
     token->diagnostics.qr_rank.assign(
       static_cast<std::size_t>(batch.target_count), -1);
     token->diagnostics.geqrf_info.assign(
@@ -4841,10 +4889,17 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
         context->cholesky_factor_checkpoint_event, context->stream
       ), "record fixed-sp Cholesky factor checkpoint");
       context->diagnostics.cholesky_factor_checkpoint_record_count += 1;
-      check_cuda(cudaEventSynchronize(
-        context->cholesky_factor_checkpoint_event
-      ), "wait for fixed-sp Cholesky factor checkpoint");
+      synchronize_route_checkpoint(
+        context->cholesky_factor_checkpoint_event,
+        "wait for fixed-sp Cholesky factor checkpoint",
+        token->diagnostics.route_wait_diagnostics_enabled,
+        &token->diagnostics.cholesky_factor_checkpoint_wait_count,
+        &token->diagnostics.cholesky_factor_checkpoint_host_wait_ms);
       context->diagnostics.cholesky_factor_checkpoint_wait_count += 1;
+      std::chrono::steady_clock::time_point factor_resolution_started;
+      if (token->diagnostics.route_wait_diagnostics_enabled) {
+        factor_resolution_started = std::chrono::steady_clock::now();
+      }
       if (*h_potrf_info < 0) {
         throw std::runtime_error(
           "fixed-sp Cholesky potrf reported an invalid argument");
@@ -4856,7 +4911,15 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
           "CHOLESKY_NON_POSITIVE_PIVOT";
         token->diagnostics.stable_reroute_count += 1;
         token->diagnostics.cholesky_to_svd_count += 1;
+        accumulate_route_resolution_time(
+          token->diagnostics.route_wait_diagnostics_enabled,
+          factor_resolution_started,
+          &token->diagnostics.route_resolution_cpu_ms);
       } else {
+        accumulate_route_resolution_time(
+          token->diagnostics.route_wait_diagnostics_enabled,
+          factor_resolution_started,
+          &token->diagnostics.route_resolution_cpu_ms);
         check_cusolver(cusolverDnDpotrs(
           context->solver, CUBLAS_FILL_MODE_UPPER, handle->q, 1,
           d_systems, handle->q, d_theta, handle->q, d_potrs_info
@@ -4869,15 +4932,26 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
           context->cholesky_solve_checkpoint_event, context->stream
         ), "record fixed-sp Cholesky solve checkpoint");
         context->diagnostics.cholesky_solve_checkpoint_record_count += 1;
-        check_cuda(cudaEventSynchronize(
-          context->cholesky_solve_checkpoint_event
-        ), "wait for fixed-sp Cholesky solve checkpoint");
+        synchronize_route_checkpoint(
+          context->cholesky_solve_checkpoint_event,
+          "wait for fixed-sp Cholesky solve checkpoint",
+          token->diagnostics.route_wait_diagnostics_enabled,
+          &token->diagnostics.cholesky_solve_checkpoint_wait_count,
+          &token->diagnostics.cholesky_solve_checkpoint_host_wait_ms);
         context->diagnostics.cholesky_solve_checkpoint_wait_count += 1;
+        std::chrono::steady_clock::time_point solve_resolution_started;
+        if (token->diagnostics.route_wait_diagnostics_enabled) {
+          solve_resolution_started = std::chrono::steady_clock::now();
+        }
         if (*h_potrs_info != 0) {
           throw std::runtime_error(
             "fixed-sp Cholesky potrs reported a batch failure");
         }
         successful_factor_count = 1;
+        accumulate_route_resolution_time(
+          token->diagnostics.route_wait_diagnostics_enabled,
+          solve_resolution_started,
+          &token->diagnostics.route_resolution_cpu_ms);
       }
     } else if (safe_count >= 2) {
       token->diagnostics.true_batched_subgroup_count = 1;
@@ -4936,10 +5010,17 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
         context->cholesky_factor_checkpoint_event, context->stream
       ), "record Phase 3B batched factor checkpoint");
       context->diagnostics.cholesky_factor_checkpoint_record_count += 1;
-      check_cuda(cudaEventSynchronize(
-        context->cholesky_factor_checkpoint_event
-      ), "wait for Phase 3B batched factor checkpoint");
+      synchronize_route_checkpoint(
+        context->cholesky_factor_checkpoint_event,
+        "wait for Phase 3B batched factor checkpoint",
+        token->diagnostics.route_wait_diagnostics_enabled,
+        &token->diagnostics.cholesky_factor_checkpoint_wait_count,
+        &token->diagnostics.cholesky_factor_checkpoint_host_wait_ms);
       context->diagnostics.cholesky_factor_checkpoint_wait_count += 1;
+      std::chrono::steady_clock::time_point factor_resolution_started;
+      if (token->diagnostics.route_wait_diagnostics_enabled) {
+        factor_resolution_started = std::chrono::steady_clock::now();
+      }
 
       for (int safe_ordinal = 0; safe_ordinal < safe_count; ++safe_ordinal) {
         if (h_potrf_info[safe_ordinal] < 0) {
@@ -4959,6 +5040,10 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
         token->diagnostics.stable_reroute_count += 1;
         token->diagnostics.cholesky_to_svd_count += 1;
       }
+      accumulate_route_resolution_time(
+        token->diagnostics.route_wait_diagnostics_enabled,
+        factor_resolution_started,
+        &token->diagnostics.route_resolution_cpu_ms);
 
       if (successful_factor_count > 0) {
         compact_fixed_sp_success_pointer_arrays<<<
@@ -4995,16 +5080,27 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
           context->cholesky_solve_checkpoint_event, context->stream
         ), "record Phase 3B batched solve checkpoint");
         context->diagnostics.cholesky_solve_checkpoint_record_count += 1;
-        check_cuda(cudaEventSynchronize(
-          context->cholesky_solve_checkpoint_event
-        ), "wait for Phase 3B batched solve checkpoint");
+        synchronize_route_checkpoint(
+          context->cholesky_solve_checkpoint_event,
+          "wait for Phase 3B batched solve checkpoint",
+          token->diagnostics.route_wait_diagnostics_enabled,
+          &token->diagnostics.cholesky_solve_checkpoint_wait_count,
+          &token->diagnostics.cholesky_solve_checkpoint_host_wait_ms);
         context->diagnostics.cholesky_solve_checkpoint_wait_count += 1;
+        std::chrono::steady_clock::time_point solve_resolution_started;
+        if (token->diagnostics.route_wait_diagnostics_enabled) {
+          solve_resolution_started = std::chrono::steady_clock::now();
+        }
         if (*h_potrs_info != 0) {
           throw std::runtime_error(
             "Phase 3B batched potrs info is nonzero");
         }
         token->diagnostics.true_batched_target_count =
           successful_factor_count;
+        accumulate_route_resolution_time(
+          token->diagnostics.route_wait_diagnostics_enabled,
+          solve_resolution_started,
+          &token->diagnostics.route_resolution_cpu_ms);
       }
     }
 
@@ -5199,10 +5295,17 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
         context->cholesky_factor_checkpoint_event, context->stream
       ), "record fixed-sp QR checkpoint");
       context->diagnostics.qr_checkpoint_record_count += 1;
-      check_cuda(cudaEventSynchronize(
-        context->cholesky_factor_checkpoint_event
-      ), "wait for fixed-sp QR checkpoint");
+      synchronize_route_checkpoint(
+        context->cholesky_factor_checkpoint_event,
+        "wait for fixed-sp QR checkpoint",
+        token->diagnostics.route_wait_diagnostics_enabled,
+        &token->diagnostics.qr_checkpoint_wait_count,
+        &token->diagnostics.qr_checkpoint_host_wait_ms);
       context->diagnostics.qr_checkpoint_wait_count += 1;
+      std::chrono::steady_clock::time_point qr_resolution_started;
+      if (token->diagnostics.route_wait_diagnostics_enabled) {
+        qr_resolution_started = std::chrono::steady_clock::now();
+      }
 
       for (int target = 0; target < batch.target_count; ++target) {
         const std::size_t target_offset = static_cast<std::size_t>(target);
@@ -5245,6 +5348,10 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
         token->solver_statuses[target_offset] = FixedSpStatus::OkAugmentedQr;
         token->diagnostics.executed_qr_target_count += 1;
       }
+      accumulate_route_resolution_time(
+        token->diagnostics.route_wait_diagnostics_enabled,
+        qr_resolution_started,
+        &token->diagnostics.route_resolution_cpu_ms);
     }
 
     auto target_uses_svd = [&](std::size_t target_offset) {
@@ -5460,9 +5567,12 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
       token->pending_svd_target_count = svd_target_count;
       token->svd_diagnostics_pending = true;
       if (!defer_svd_completion) {
-        check_cuda(cudaEventSynchronize(
-          context->cholesky_factor_checkpoint_event
-        ), "wait for fixed-sp SVD checkpoint");
+        synchronize_route_checkpoint(
+          context->cholesky_factor_checkpoint_event,
+          "wait for fixed-sp SVD checkpoint",
+          token->diagnostics.route_wait_diagnostics_enabled,
+          &token->diagnostics.svd_checkpoint_wait_count,
+          &token->diagnostics.svd_checkpoint_host_wait_ms);
         context->diagnostics.svd_checkpoint_wait_count += 1;
         resolve_pending_svd_diagnostics_locked(token.get(), context.get());
       }

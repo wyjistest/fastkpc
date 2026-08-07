@@ -223,6 +223,17 @@ int strict_method_critical_path_trace_capacity() {
   return capacity;
 }
 
+bool strict_method_route_wait_diagnostics_enabled() {
+  const char* raw = std::getenv(
+    "FASTKPC_STRICT_METHOD_ROUTE_WAIT_DIAGNOSTICS");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "0") {
+    return false;
+  }
+  if (std::string(raw) == "1") return true;
+  throw std::runtime_error(
+    "FASTKPC_STRICT_METHOD_ROUTE_WAIT_DIAGNOSTICS must be 0 or 1");
+}
+
 bool finite_matrix(const Rcpp::NumericMatrix& values) {
   return std::all_of(values.begin(), values.end(), [](double value) {
     return std::isfinite(value);
@@ -794,6 +805,8 @@ struct PrefillBatchDiagnostic {
 };
 
 struct MethodCriticalPathRecord {
+  int batch_index = 0;
+  std::string ci_method;
   int level = 0;
   int penalty_count = 0;
   int target_count = 0;
@@ -805,6 +818,12 @@ struct MethodCriticalPathRecord {
   bool preparation_submit_nonblocking = false;
   bool preparation_ready_at_submit = false;
   bool preparation_ready_after_permutation = false;
+  double preparation_submit_start_ms = -1.0;
+  double preparation_submit_return_ms = -1.0;
+  double permutation_start_ms = -1.0;
+  double permutation_end_ms = -1.0;
+  double finalization_start_ms = -1.0;
+  double finalization_end_ms = -1.0;
   double permutation_table_host_ms = 0.0;
   double preparation_submit_host_ms = 0.0;
   double identity_build_host_ms = 0.0;
@@ -814,6 +833,35 @@ struct MethodCriticalPathRecord {
   double permutation_h2d_submit_host_ms = 0.0;
   double pair_cuda_ms = 0.0;
   double compact_d2h_cuda_ms = 0.0;
+  int planned_cholesky_target_count = 0;
+  int planned_qr_target_count = 0;
+  int planned_svd_target_count = 0;
+  int executed_cholesky_target_count = 0;
+  int executed_qr_target_count = 0;
+  int executed_svd_target_count = 0;
+  int cholesky_to_svd_count = 0;
+  int qr_to_svd_count = 0;
+  int cholesky_factor_checkpoint_wait_count = 0;
+  double cholesky_factor_checkpoint_host_wait_ms = 0.0;
+  int cholesky_solve_checkpoint_wait_count = 0;
+  double cholesky_solve_checkpoint_host_wait_ms = 0.0;
+  int qr_checkpoint_wait_count = 0;
+  double qr_checkpoint_host_wait_ms = 0.0;
+  int svd_checkpoint_wait_count = 0;
+  double svd_checkpoint_host_wait_ms = 0.0;
+  int output_status_wait_count = 0;
+  double output_status_host_wait_ms = 0.0;
+  double route_resolution_cpu_ms = 0.0;
+  double output_status_resolution_cpu_ms = 0.0;
+  int component_cache_request_count = 0;
+  int component_cache_hit_count = 0;
+  int component_cache_miss_count = 0;
+  double residual_metadata_resolution_host_ms = 0.0;
+  double component_submission_host_ms = 0.0;
+  double finalization_host_ms = 0.0;
+  double compact_result_host_wait_ms = 0.0;
+  double post_compact_finalize_host_ms = 0.0;
+  double qr_checkpoint_overlap_opportunity_ms = 0.0;
   double method_total_host_ms = 0.0;
   double overlap_upper_bound_ms = 0.0;
   double overlap_lower_bound_ms = 0.0;
@@ -984,6 +1032,35 @@ struct OneCallDiagnostics {
   int method_pair_host_wait_count = 0;
   int method_compact_host_wait_count = 0;
   int method_consumer_host_wait_count = 0;
+  bool method_route_wait_diagnostics_enabled = false;
+  int method_route_wait_diagnostics_batch_count = 0;
+  int method_route_wait_diagnostics_target_count = 0;
+  int method_planned_cholesky_target_count = 0;
+  int method_planned_qr_target_count = 0;
+  int method_planned_svd_target_count = 0;
+  int method_executed_cholesky_target_count = 0;
+  int method_executed_qr_target_count = 0;
+  int method_executed_svd_target_count = 0;
+  int method_cholesky_to_svd_count = 0;
+  int method_qr_to_svd_count = 0;
+  int method_cholesky_factor_checkpoint_wait_count = 0;
+  double method_cholesky_factor_checkpoint_host_wait_ms = 0.0;
+  int method_cholesky_solve_checkpoint_wait_count = 0;
+  double method_cholesky_solve_checkpoint_host_wait_ms = 0.0;
+  int method_qr_checkpoint_wait_count = 0;
+  double method_qr_checkpoint_host_wait_ms = 0.0;
+  int method_svd_checkpoint_wait_count = 0;
+  double method_svd_checkpoint_host_wait_ms = 0.0;
+  int method_output_status_wait_count = 0;
+  double method_output_status_host_wait_ms = 0.0;
+  double method_route_resolution_cpu_ms = 0.0;
+  double method_output_status_resolution_cpu_ms = 0.0;
+  double method_residual_metadata_resolution_host_ms = 0.0;
+  double method_component_submission_host_ms = 0.0;
+  double method_finalization_host_ms = 0.0;
+  double method_compact_result_host_wait_ms = 0.0;
+  double method_post_compact_finalize_host_ms = 0.0;
+  double method_qr_checkpoint_overlap_opportunity_ms = 0.0;
   int method_critical_path_trace_capacity = 0;
   int method_critical_path_trace_overflow_count = 0;
   std::vector<MethodCriticalPathRecord> method_critical_path_trace;
@@ -1114,6 +1191,8 @@ struct OneCallDiagnostics {
 Rcpp::DataFrame method_critical_path_frame(
     const std::vector<MethodCriticalPathRecord>& records) {
   const R_xlen_t size = static_cast<R_xlen_t>(records.size());
+  Rcpp::IntegerVector batch_index(size);
+  Rcpp::CharacterVector ci_method(size);
   Rcpp::IntegerVector level(size);
   Rcpp::IntegerVector penalty_count(size);
   Rcpp::IntegerVector target_count(size);
@@ -1125,6 +1204,12 @@ Rcpp::DataFrame method_critical_path_frame(
   Rcpp::LogicalVector preparation_submit_nonblocking(size);
   Rcpp::LogicalVector preparation_ready_at_submit(size);
   Rcpp::LogicalVector preparation_ready_after_permutation(size);
+  Rcpp::NumericVector preparation_submit_start_ms(size);
+  Rcpp::NumericVector preparation_submit_return_ms(size);
+  Rcpp::NumericVector permutation_start_ms(size);
+  Rcpp::NumericVector permutation_end_ms(size);
+  Rcpp::NumericVector finalization_start_ms(size);
+  Rcpp::NumericVector finalization_end_ms(size);
   Rcpp::NumericVector permutation_table_host_ms(size);
   Rcpp::NumericVector preparation_submit_host_ms(size);
   Rcpp::NumericVector identity_build_host_ms(size);
@@ -1134,6 +1219,35 @@ Rcpp::DataFrame method_critical_path_frame(
   Rcpp::NumericVector permutation_h2d_submit_host_ms(size);
   Rcpp::NumericVector pair_cuda_ms(size);
   Rcpp::NumericVector compact_d2h_cuda_ms(size);
+  Rcpp::IntegerVector planned_cholesky_target_count(size);
+  Rcpp::IntegerVector planned_qr_target_count(size);
+  Rcpp::IntegerVector planned_svd_target_count(size);
+  Rcpp::IntegerVector executed_cholesky_target_count(size);
+  Rcpp::IntegerVector executed_qr_target_count(size);
+  Rcpp::IntegerVector executed_svd_target_count(size);
+  Rcpp::IntegerVector cholesky_to_svd_count(size);
+  Rcpp::IntegerVector qr_to_svd_count(size);
+  Rcpp::IntegerVector cholesky_factor_checkpoint_wait_count(size);
+  Rcpp::NumericVector cholesky_factor_checkpoint_host_wait_ms(size);
+  Rcpp::IntegerVector cholesky_solve_checkpoint_wait_count(size);
+  Rcpp::NumericVector cholesky_solve_checkpoint_host_wait_ms(size);
+  Rcpp::IntegerVector qr_checkpoint_wait_count(size);
+  Rcpp::NumericVector qr_checkpoint_host_wait_ms(size);
+  Rcpp::IntegerVector svd_checkpoint_wait_count(size);
+  Rcpp::NumericVector svd_checkpoint_host_wait_ms(size);
+  Rcpp::IntegerVector output_status_wait_count(size);
+  Rcpp::NumericVector output_status_host_wait_ms(size);
+  Rcpp::NumericVector route_resolution_cpu_ms(size);
+  Rcpp::NumericVector output_status_resolution_cpu_ms(size);
+  Rcpp::IntegerVector component_cache_request_count(size);
+  Rcpp::IntegerVector component_cache_hit_count(size);
+  Rcpp::IntegerVector component_cache_miss_count(size);
+  Rcpp::NumericVector residual_metadata_resolution_host_ms(size);
+  Rcpp::NumericVector component_submission_host_ms(size);
+  Rcpp::NumericVector finalization_host_ms(size);
+  Rcpp::NumericVector compact_result_host_wait_ms(size);
+  Rcpp::NumericVector post_compact_finalize_host_ms(size);
+  Rcpp::NumericVector qr_checkpoint_overlap_opportunity_ms(size);
   Rcpp::NumericVector method_total_host_ms(size);
   Rcpp::NumericVector overlap_upper_bound_ms(size);
   Rcpp::NumericVector overlap_lower_bound_ms(size);
@@ -1142,6 +1256,8 @@ Rcpp::DataFrame method_critical_path_frame(
   for (R_xlen_t index = 0; index < size; ++index) {
     const MethodCriticalPathRecord& record =
       records[static_cast<std::size_t>(index)];
+    batch_index[index] = record.batch_index;
+    ci_method[index] = record.ci_method;
     level[index] = record.level;
     penalty_count[index] = record.penalty_count;
     target_count[index] = record.target_count;
@@ -1157,6 +1273,14 @@ Rcpp::DataFrame method_critical_path_frame(
     preparation_ready_at_submit[index] = record.preparation_ready_at_submit;
     preparation_ready_after_permutation[index] =
       record.preparation_ready_after_permutation;
+    preparation_submit_start_ms[index] =
+      record.preparation_submit_start_ms;
+    preparation_submit_return_ms[index] =
+      record.preparation_submit_return_ms;
+    permutation_start_ms[index] = record.permutation_start_ms;
+    permutation_end_ms[index] = record.permutation_end_ms;
+    finalization_start_ms[index] = record.finalization_start_ms;
+    finalization_end_ms[index] = record.finalization_end_ms;
     permutation_table_host_ms[index] = record.permutation_table_host_ms;
     preparation_submit_host_ms[index] = record.preparation_submit_host_ms;
     identity_build_host_ms[index] = record.identity_build_host_ms;
@@ -1168,6 +1292,48 @@ Rcpp::DataFrame method_critical_path_frame(
       record.permutation_h2d_submit_host_ms;
     pair_cuda_ms[index] = record.pair_cuda_ms;
     compact_d2h_cuda_ms[index] = record.compact_d2h_cuda_ms;
+    planned_cholesky_target_count[index] =
+      record.planned_cholesky_target_count;
+    planned_qr_target_count[index] = record.planned_qr_target_count;
+    planned_svd_target_count[index] = record.planned_svd_target_count;
+    executed_cholesky_target_count[index] =
+      record.executed_cholesky_target_count;
+    executed_qr_target_count[index] = record.executed_qr_target_count;
+    executed_svd_target_count[index] = record.executed_svd_target_count;
+    cholesky_to_svd_count[index] = record.cholesky_to_svd_count;
+    qr_to_svd_count[index] = record.qr_to_svd_count;
+    cholesky_factor_checkpoint_wait_count[index] =
+      record.cholesky_factor_checkpoint_wait_count;
+    cholesky_factor_checkpoint_host_wait_ms[index] =
+      record.cholesky_factor_checkpoint_host_wait_ms;
+    cholesky_solve_checkpoint_wait_count[index] =
+      record.cholesky_solve_checkpoint_wait_count;
+    cholesky_solve_checkpoint_host_wait_ms[index] =
+      record.cholesky_solve_checkpoint_host_wait_ms;
+    qr_checkpoint_wait_count[index] = record.qr_checkpoint_wait_count;
+    qr_checkpoint_host_wait_ms[index] = record.qr_checkpoint_host_wait_ms;
+    svd_checkpoint_wait_count[index] = record.svd_checkpoint_wait_count;
+    svd_checkpoint_host_wait_ms[index] = record.svd_checkpoint_host_wait_ms;
+    output_status_wait_count[index] = record.output_status_wait_count;
+    output_status_host_wait_ms[index] = record.output_status_host_wait_ms;
+    route_resolution_cpu_ms[index] = record.route_resolution_cpu_ms;
+    output_status_resolution_cpu_ms[index] =
+      record.output_status_resolution_cpu_ms;
+    component_cache_request_count[index] =
+      record.component_cache_request_count;
+    component_cache_hit_count[index] = record.component_cache_hit_count;
+    component_cache_miss_count[index] = record.component_cache_miss_count;
+    residual_metadata_resolution_host_ms[index] =
+      record.residual_metadata_resolution_host_ms;
+    component_submission_host_ms[index] =
+      record.component_submission_host_ms;
+    finalization_host_ms[index] = record.finalization_host_ms;
+    compact_result_host_wait_ms[index] =
+      record.compact_result_host_wait_ms;
+    post_compact_finalize_host_ms[index] =
+      record.post_compact_finalize_host_ms;
+    qr_checkpoint_overlap_opportunity_ms[index] =
+      record.qr_checkpoint_overlap_opportunity_ms;
     method_total_host_ms[index] = record.method_total_host_ms;
     overlap_upper_bound_ms[index] = record.overlap_upper_bound_ms;
     overlap_lower_bound_ms[index] = record.overlap_lower_bound_ms;
@@ -1176,6 +1342,8 @@ Rcpp::DataFrame method_critical_path_frame(
     final_host_wait_count[index] = record.final_host_wait_count;
   }
   return Rcpp::DataFrame::create(
+    Rcpp::Named("batch_index") = batch_index,
+    Rcpp::Named("ci_method") = ci_method,
     Rcpp::Named("level") = level,
     Rcpp::Named("penalty_count") = penalty_count,
     Rcpp::Named("target_count") = target_count,
@@ -1189,6 +1357,14 @@ Rcpp::DataFrame method_critical_path_frame(
     Rcpp::Named("preparation_ready_at_submit") = preparation_ready_at_submit,
     Rcpp::Named("preparation_ready_after_permutation") =
       preparation_ready_after_permutation,
+    Rcpp::Named("preparation_submit_start_ms") =
+      preparation_submit_start_ms,
+    Rcpp::Named("preparation_submit_return_ms") =
+      preparation_submit_return_ms,
+    Rcpp::Named("permutation_start_ms") = permutation_start_ms,
+    Rcpp::Named("permutation_end_ms") = permutation_end_ms,
+    Rcpp::Named("finalization_start_ms") = finalization_start_ms,
+    Rcpp::Named("finalization_end_ms") = finalization_end_ms,
     Rcpp::Named("permutation_table_host_ms") = permutation_table_host_ms,
     Rcpp::Named("preparation_submit_host_ms") = preparation_submit_host_ms,
     Rcpp::Named("identity_build_host_ms") = identity_build_host_ms,
@@ -1200,6 +1376,49 @@ Rcpp::DataFrame method_critical_path_frame(
       permutation_h2d_submit_host_ms,
     Rcpp::Named("pair_cuda_ms") = pair_cuda_ms,
     Rcpp::Named("compact_d2h_cuda_ms") = compact_d2h_cuda_ms,
+    Rcpp::Named("planned_cholesky_target_count") =
+      planned_cholesky_target_count,
+    Rcpp::Named("planned_qr_target_count") = planned_qr_target_count,
+    Rcpp::Named("planned_svd_target_count") = planned_svd_target_count,
+    Rcpp::Named("executed_cholesky_target_count") =
+      executed_cholesky_target_count,
+    Rcpp::Named("executed_qr_target_count") = executed_qr_target_count,
+    Rcpp::Named("executed_svd_target_count") = executed_svd_target_count,
+    Rcpp::Named("cholesky_to_svd_count") = cholesky_to_svd_count,
+    Rcpp::Named("qr_to_svd_count") = qr_to_svd_count,
+    Rcpp::Named("cholesky_factor_checkpoint_wait_count") =
+      cholesky_factor_checkpoint_wait_count,
+    Rcpp::Named("cholesky_factor_checkpoint_host_wait_ms") =
+      cholesky_factor_checkpoint_host_wait_ms,
+    Rcpp::Named("cholesky_solve_checkpoint_wait_count") =
+      cholesky_solve_checkpoint_wait_count,
+    Rcpp::Named("cholesky_solve_checkpoint_host_wait_ms") =
+      cholesky_solve_checkpoint_host_wait_ms,
+    Rcpp::Named("qr_checkpoint_wait_count") = qr_checkpoint_wait_count,
+    Rcpp::Named("qr_checkpoint_host_wait_ms") = qr_checkpoint_host_wait_ms,
+    Rcpp::Named("svd_checkpoint_wait_count") = svd_checkpoint_wait_count,
+    Rcpp::Named("svd_checkpoint_host_wait_ms") =
+      svd_checkpoint_host_wait_ms,
+    Rcpp::Named("output_status_wait_count") = output_status_wait_count,
+    Rcpp::Named("output_status_host_wait_ms") = output_status_host_wait_ms,
+    Rcpp::Named("route_resolution_cpu_ms") = route_resolution_cpu_ms,
+    Rcpp::Named("output_status_resolution_cpu_ms") =
+      output_status_resolution_cpu_ms,
+    Rcpp::Named("component_cache_request_count") =
+      component_cache_request_count,
+    Rcpp::Named("component_cache_hit_count") = component_cache_hit_count,
+    Rcpp::Named("component_cache_miss_count") = component_cache_miss_count,
+    Rcpp::Named("residual_metadata_resolution_host_ms") =
+      residual_metadata_resolution_host_ms,
+    Rcpp::Named("component_submission_host_ms") =
+      component_submission_host_ms,
+    Rcpp::Named("finalization_host_ms") = finalization_host_ms,
+    Rcpp::Named("compact_result_host_wait_ms") =
+      compact_result_host_wait_ms,
+    Rcpp::Named("post_compact_finalize_host_ms") =
+      post_compact_finalize_host_ms,
+    Rcpp::Named("qr_checkpoint_overlap_opportunity_ms") =
+      qr_checkpoint_overlap_opportunity_ms,
     Rcpp::Named("method_total_host_ms") = method_total_host_ms,
     Rcpp::Named("overlap_upper_bound_ms") = overlap_upper_bound_ms,
     Rcpp::Named("overlap_lower_bound_ms") = overlap_lower_bound_ms,
@@ -2629,6 +2848,60 @@ void accumulate_method_diagnostics(
   diagnostics->method_compact_host_wait_count += value.compact_host_wait_count;
   diagnostics->method_consumer_host_wait_count +=
     value.consumer_host_wait_count;
+  diagnostics->method_route_wait_diagnostics_batch_count +=
+    value.route_wait_diagnostics_enabled ? 1 : 0;
+  if (value.route_wait_diagnostics_enabled) {
+    diagnostics->method_route_wait_diagnostics_target_count +=
+      value.target_count;
+  }
+  diagnostics->method_planned_cholesky_target_count +=
+    value.planned_cholesky_target_count;
+  diagnostics->method_planned_qr_target_count +=
+    value.planned_qr_target_count;
+  diagnostics->method_planned_svd_target_count +=
+    value.planned_svd_target_count;
+  diagnostics->method_executed_cholesky_target_count +=
+    value.executed_cholesky_target_count;
+  diagnostics->method_executed_qr_target_count +=
+    value.executed_qr_target_count;
+  diagnostics->method_executed_svd_target_count +=
+    value.executed_svd_target_count;
+  diagnostics->method_cholesky_to_svd_count +=
+    value.cholesky_to_svd_count;
+  diagnostics->method_qr_to_svd_count += value.qr_to_svd_count;
+  diagnostics->method_cholesky_factor_checkpoint_wait_count +=
+    value.cholesky_factor_checkpoint_wait_count;
+  diagnostics->method_cholesky_factor_checkpoint_host_wait_ms +=
+    value.cholesky_factor_checkpoint_host_wait_ms;
+  diagnostics->method_cholesky_solve_checkpoint_wait_count +=
+    value.cholesky_solve_checkpoint_wait_count;
+  diagnostics->method_cholesky_solve_checkpoint_host_wait_ms +=
+    value.cholesky_solve_checkpoint_host_wait_ms;
+  diagnostics->method_qr_checkpoint_wait_count +=
+    value.qr_checkpoint_wait_count;
+  diagnostics->method_qr_checkpoint_host_wait_ms +=
+    value.qr_checkpoint_host_wait_ms;
+  diagnostics->method_svd_checkpoint_wait_count +=
+    value.svd_checkpoint_wait_count;
+  diagnostics->method_svd_checkpoint_host_wait_ms +=
+    value.svd_checkpoint_host_wait_ms;
+  diagnostics->method_output_status_wait_count +=
+    value.output_status_wait_count;
+  diagnostics->method_output_status_host_wait_ms +=
+    value.output_status_host_wait_ms;
+  diagnostics->method_route_resolution_cpu_ms +=
+    value.route_resolution_cpu_ms;
+  diagnostics->method_output_status_resolution_cpu_ms +=
+    value.output_status_resolution_cpu_ms;
+  diagnostics->method_residual_metadata_resolution_host_ms +=
+    value.residual_metadata_resolution_host_ms;
+  diagnostics->method_component_submission_host_ms +=
+    value.component_submission_host_ms;
+  diagnostics->method_finalization_host_ms += value.finalization_host_ms;
+  diagnostics->method_compact_result_host_wait_ms +=
+    value.compact_result_host_wait_ms;
+  diagnostics->method_post_compact_finalize_host_ms +=
+    value.post_compact_finalize_host_ms;
   diagnostics->method_permutation_payload_validation_scan_count +=
     value.permutation_payload_validation_scan_count;
   diagnostics->method_permutation_payload_validation_scan_bytes +=
@@ -4276,8 +4549,17 @@ GroupResult execute_group(
   batch.output_mask = FixedSpOutputResiduals;
   batch.planned_routes = planned_routes;
   batch.target_keys = residual_keys;
+  batch.route_wait_diagnostics =
+    diagnostics->method_route_wait_diagnostics_enabled;
 
   if (method_options.ci_method != "dcc.gamma") {
+    const auto method_batch_started = std::chrono::steady_clock::now();
+    double preparation_submit_start_ms = -1.0;
+    double preparation_submit_return_ms = -1.0;
+    double permutation_start_ms = -1.0;
+    double permutation_end_ms = -1.0;
+    double finalization_start_ms = -1.0;
+    double finalization_end_ms = -1.0;
     FullCudaCiMethodBatchRequest method_request;
     method_request.expected_prepared_s_key_sha256 = context->prepared_key;
     method_request.ci_method = method_options.ci_method;
@@ -4321,6 +4603,9 @@ GroupResult execute_group(
       }
       early_identity_build_host_ms = elapsed_ms(early_identity_started);
       if (!deferred_static_identity_error) {
+        if (diagnostics->method_route_wait_diagnostics_enabled) {
+          preparation_submit_start_ms = elapsed_ms(method_batch_started);
+        }
         const auto submit_started = std::chrono::steady_clock::now();
         try {
           early_preparation = submit_method_preparation(
@@ -4338,9 +4623,16 @@ GroupResult execute_group(
         preparation_submit_host_ms = elapsed_ms(submit_started);
         diagnostics->method_preparation_submit_host_ms +=
           preparation_submit_host_ms;
+        if (diagnostics->method_route_wait_diagnostics_enabled) {
+          preparation_submit_return_ms = elapsed_ms(method_batch_started);
+        }
       }
     }
     const auto permutation_started = std::chrono::steady_clock::now();
+    if (diagnostics->method_route_wait_diagnostics_enabled &&
+        is_permutation_method(method_options.ci_method)) {
+      permutation_start_ms = elapsed_ms(method_batch_started);
+    }
     const int table_growth_before = permutation_workspace == nullptr ? 0 :
       permutation_workspace->table_growth_count;
     const int scratch_growth_before = permutation_workspace == nullptr ? 0 :
@@ -4363,6 +4655,10 @@ GroupResult execute_group(
         permutation_workspace->last_rng_count_exact;
     }
     strict_method_failure_checkpoint("after_permutation_generation");
+    if (diagnostics->method_route_wait_diagnostics_enabled &&
+        is_permutation_method(method_options.ci_method)) {
+      permutation_end_ms = elapsed_ms(method_batch_started);
+    }
     double permutation_table_host_ms = 0.0;
     bool preparation_ready_after_permutation = false;
     if (is_permutation_method(method_options.ci_method)) {
@@ -4455,11 +4751,17 @@ GroupResult execute_group(
               "strict CI early preparation ticket is invalid");
       strict_method_failure_checkpoint("after_method_preparation_submit");
       strict_method_failure_checkpoint("before_method_finalization");
+      if (diagnostics->method_route_wait_diagnostics_enabled) {
+        finalization_start_ms = elapsed_ms(method_batch_started);
+      }
       method_result = finalize_method_from_permutation(
         std::move(early_preparation), method_request.static_identity,
         method_request.permutation_attestation,
         method_request.combined_identity,
         method_request.permutation_artifact);
+      if (diagnostics->method_route_wait_diagnostics_enabled) {
+        finalization_end_ms = elapsed_ms(method_batch_started);
+      }
       strict_method_failure_checkpoint("after_method_finalization");
     } else {
       method_result = run_full_cuda_ci_method_batch(
@@ -4481,13 +4783,23 @@ GroupResult execute_group(
       overlap_lower_bound_ms);
     const double overlap_upper_bound_ms = std::min(
       permutation_table_host_ms, gpu_preparation_upper_bound_ms);
+    const double qr_checkpoint_overlap_opportunity_ms =
+      diagnostics->method_route_wait_diagnostics_enabled ?
+        std::min(
+          method_result.diagnostics.qr_checkpoint_host_wait_ms,
+          permutation_table_host_ms) : 0.0;
     diagnostics->method_permutation_gpu_overlap_upper_bound_ms +=
       overlap_upper_bound_ms;
+    diagnostics->method_qr_checkpoint_overlap_opportunity_ms +=
+      qr_checkpoint_overlap_opportunity_ms;
     if (diagnostics->method_critical_path_trace_capacity > 0) {
       if (diagnostics->method_critical_path_trace.size() <
           static_cast<std::size_t>(
             diagnostics->method_critical_path_trace_capacity)) {
         MethodCriticalPathRecord record;
+        record.batch_index =
+          diagnostics->method_execution_context_call_count + 1;
+        record.ci_method = method_options.ci_method;
         record.level = plan.level;
         record.penalty_count = context->penalty_count;
         record.target_count = target_count;
@@ -4503,6 +4815,12 @@ GroupResult execute_group(
         record.preparation_ready_at_submit = preparation_ready_at_submit;
         record.preparation_ready_after_permutation =
           preparation_ready_after_permutation;
+        record.preparation_submit_start_ms = preparation_submit_start_ms;
+        record.preparation_submit_return_ms = preparation_submit_return_ms;
+        record.permutation_start_ms = permutation_start_ms;
+        record.permutation_end_ms = permutation_end_ms;
+        record.finalization_start_ms = finalization_start_ms;
+        record.finalization_end_ms = finalization_end_ms;
         record.permutation_table_host_ms = permutation_table_host_ms;
         record.preparation_submit_host_ms = preparation_submit_host_ms;
         record.identity_build_host_ms = identity_build_host_ms;
@@ -4518,6 +4836,66 @@ GroupResult execute_group(
           method_result.diagnostics.pair_evaluation_cuda_ms;
         record.compact_d2h_cuda_ms =
           method_result.diagnostics.compact_d2h_cuda_ms;
+        record.planned_cholesky_target_count =
+          method_result.diagnostics.planned_cholesky_target_count;
+        record.planned_qr_target_count =
+          method_result.diagnostics.planned_qr_target_count;
+        record.planned_svd_target_count =
+          method_result.diagnostics.planned_svd_target_count;
+        record.executed_cholesky_target_count =
+          method_result.diagnostics.executed_cholesky_target_count;
+        record.executed_qr_target_count =
+          method_result.diagnostics.executed_qr_target_count;
+        record.executed_svd_target_count =
+          method_result.diagnostics.executed_svd_target_count;
+        record.cholesky_to_svd_count =
+          method_result.diagnostics.cholesky_to_svd_count;
+        record.qr_to_svd_count =
+          method_result.diagnostics.qr_to_svd_count;
+        record.cholesky_factor_checkpoint_wait_count =
+          method_result.diagnostics.cholesky_factor_checkpoint_wait_count;
+        record.cholesky_factor_checkpoint_host_wait_ms =
+          method_result.diagnostics
+            .cholesky_factor_checkpoint_host_wait_ms;
+        record.cholesky_solve_checkpoint_wait_count =
+          method_result.diagnostics.cholesky_solve_checkpoint_wait_count;
+        record.cholesky_solve_checkpoint_host_wait_ms =
+          method_result.diagnostics
+            .cholesky_solve_checkpoint_host_wait_ms;
+        record.qr_checkpoint_wait_count =
+          method_result.diagnostics.qr_checkpoint_wait_count;
+        record.qr_checkpoint_host_wait_ms =
+          method_result.diagnostics.qr_checkpoint_host_wait_ms;
+        record.svd_checkpoint_wait_count =
+          method_result.diagnostics.svd_checkpoint_wait_count;
+        record.svd_checkpoint_host_wait_ms =
+          method_result.diagnostics.svd_checkpoint_host_wait_ms;
+        record.output_status_wait_count =
+          method_result.diagnostics.output_status_wait_count;
+        record.output_status_host_wait_ms =
+          method_result.diagnostics.output_status_host_wait_ms;
+        record.route_resolution_cpu_ms =
+          method_result.diagnostics.route_resolution_cpu_ms;
+        record.output_status_resolution_cpu_ms =
+          method_result.diagnostics.output_status_resolution_cpu_ms;
+        record.component_cache_request_count =
+          method_result.diagnostics.component_cache_persistent_request_count;
+        record.component_cache_hit_count =
+          method_result.diagnostics.component_cache_persistent_hit_count;
+        record.component_cache_miss_count =
+          method_result.diagnostics.component_cache_persistent_miss_count;
+        record.residual_metadata_resolution_host_ms =
+          method_result.diagnostics.residual_metadata_resolution_host_ms;
+        record.component_submission_host_ms =
+          method_result.diagnostics.component_submission_host_ms;
+        record.finalization_host_ms =
+          method_result.diagnostics.finalization_host_ms;
+        record.compact_result_host_wait_ms =
+          method_result.diagnostics.compact_result_host_wait_ms;
+        record.post_compact_finalize_host_ms =
+          method_result.diagnostics.post_compact_finalize_host_ms;
+        record.qr_checkpoint_overlap_opportunity_ms =
+          qr_checkpoint_overlap_opportunity_ms;
         record.method_total_host_ms = method_result.diagnostics.total_host_ms;
         record.overlap_upper_bound_ms = overlap_upper_bound_ms;
         record.overlap_lower_bound_ms = overlap_lower_bound_ms;
@@ -4732,6 +5110,9 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     strict_permutation_residual_route_policy(method_options.ci_method);
   diagnostics.method_permutation_gpu_overlap_enabled =
     strict_method_permutation_gpu_overlap_enabled(method_options.ci_method);
+  diagnostics.method_route_wait_diagnostics_enabled =
+    method_options.ci_method != "dcc.gamma" &&
+      strict_method_route_wait_diagnostics_enabled();
   require(method_options.ci_method == "hsic.gamma" ||
             diagnostics.strict_hsic_gamma_residual_route == "stable-svd",
           "HSIC gamma residual route override requires hsic.gamma");
@@ -5463,6 +5844,67 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       diagnostics.method_permutation_gpu_overlap_lower_bound_ms >= 0.0 &&
       diagnostics.method_permutation_gpu_overlap_lower_bound_ms <=
         diagnostics.method_permutation_table_host_ms);
+  const int planned_route_target_count =
+    diagnostics.method_planned_cholesky_target_count +
+      diagnostics.method_planned_qr_target_count +
+      diagnostics.method_planned_svd_target_count;
+  const int executed_route_target_count =
+    diagnostics.method_executed_cholesky_target_count +
+      diagnostics.method_executed_qr_target_count +
+      diagnostics.method_executed_svd_target_count;
+  const bool method_route_wait_diagnostics_accounted =
+    (!diagnostics.method_route_wait_diagnostics_enabled &&
+      diagnostics.method_route_wait_diagnostics_batch_count == 0 &&
+      diagnostics.method_route_wait_diagnostics_target_count == 0 &&
+      planned_route_target_count == 0 && executed_route_target_count == 0 &&
+      diagnostics.method_cholesky_to_svd_count == 0 &&
+      diagnostics.method_qr_to_svd_count == 0 &&
+      diagnostics.method_cholesky_factor_checkpoint_wait_count == 0 &&
+      diagnostics.method_cholesky_factor_checkpoint_host_wait_ms == 0.0 &&
+      diagnostics.method_cholesky_solve_checkpoint_wait_count == 0 &&
+      diagnostics.method_cholesky_solve_checkpoint_host_wait_ms == 0.0 &&
+      diagnostics.method_qr_checkpoint_wait_count == 0 &&
+      diagnostics.method_qr_checkpoint_host_wait_ms == 0.0 &&
+      diagnostics.method_svd_checkpoint_wait_count == 0 &&
+      diagnostics.method_svd_checkpoint_host_wait_ms == 0.0 &&
+      diagnostics.method_output_status_wait_count == 0 &&
+      diagnostics.method_output_status_host_wait_ms == 0.0 &&
+      diagnostics.method_route_resolution_cpu_ms == 0.0 &&
+      diagnostics.method_output_status_resolution_cpu_ms == 0.0 &&
+      diagnostics.method_residual_metadata_resolution_host_ms == 0.0 &&
+      diagnostics.method_component_submission_host_ms == 0.0 &&
+      diagnostics.method_finalization_host_ms == 0.0 &&
+      diagnostics.method_compact_result_host_wait_ms == 0.0 &&
+      diagnostics.method_post_compact_finalize_host_ms == 0.0 &&
+      diagnostics.method_qr_checkpoint_overlap_opportunity_ms == 0.0) ||
+    (diagnostics.method_route_wait_diagnostics_enabled &&
+      cacheable_strict_method &&
+      diagnostics.method_route_wait_diagnostics_batch_count ==
+        total_frontier_batches &&
+      diagnostics.method_route_wait_diagnostics_target_count ==
+        planned_route_target_count &&
+      planned_route_target_count == executed_route_target_count &&
+      diagnostics.method_cholesky_to_svd_count <=
+        diagnostics.method_planned_cholesky_target_count &&
+      diagnostics.method_qr_to_svd_count <=
+        diagnostics.method_planned_qr_target_count &&
+      diagnostics.method_cholesky_factor_checkpoint_host_wait_ms >= 0.0 &&
+      diagnostics.method_cholesky_solve_checkpoint_host_wait_ms >= 0.0 &&
+      diagnostics.method_qr_checkpoint_host_wait_ms >= 0.0 &&
+      diagnostics.method_svd_checkpoint_host_wait_ms >= 0.0 &&
+      diagnostics.method_output_status_host_wait_ms >= 0.0 &&
+      diagnostics.method_route_resolution_cpu_ms >= 0.0 &&
+      diagnostics.method_output_status_resolution_cpu_ms >= 0.0 &&
+      diagnostics.method_residual_metadata_resolution_host_ms >= 0.0 &&
+      diagnostics.method_component_submission_host_ms >= 0.0 &&
+      diagnostics.method_finalization_host_ms >= 0.0 &&
+      diagnostics.method_compact_result_host_wait_ms >= 0.0 &&
+      diagnostics.method_post_compact_finalize_host_ms >= 0.0 &&
+      diagnostics.method_qr_checkpoint_overlap_opportunity_ms >= 0.0 &&
+      diagnostics.method_qr_checkpoint_overlap_opportunity_ms <=
+        diagnostics.method_qr_checkpoint_host_wait_ms &&
+      diagnostics.method_qr_checkpoint_overlap_opportunity_ms <=
+        diagnostics.method_permutation_table_host_ms);
   require(diagnostics.native_setup_count >= physical_prepared_s_key_count &&
             physical_prepared_s_key_count >= unique_prepared_s_key_count &&
             diagnostics.physical_residual_fit_count >=
@@ -5498,6 +5940,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
             method_permutation_inline_r_index_accounted &&
             method_permutation_rng_receipt_accounted &&
             method_permutation_gpu_overlap_accounted &&
+            method_route_wait_diagnostics_accounted &&
             fixed_sp_root_cache_accounted,
           "compatible.cuda one-call physical work accounting changed");
   const bool authority_clean =
@@ -6005,6 +6448,64 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.method_compact_host_wait_count,
       Rcpp::Named("method_consumer_host_wait_count") =
         diagnostics.method_consumer_host_wait_count,
+      Rcpp::Named("method_route_wait_diagnostics_enabled") =
+        diagnostics.method_route_wait_diagnostics_enabled,
+      Rcpp::Named("method_route_wait_diagnostics_batch_count") =
+        diagnostics.method_route_wait_diagnostics_batch_count,
+      Rcpp::Named("method_route_wait_diagnostics_target_count") =
+        diagnostics.method_route_wait_diagnostics_target_count,
+      Rcpp::Named("method_planned_cholesky_target_count") =
+        diagnostics.method_planned_cholesky_target_count,
+      Rcpp::Named("method_planned_qr_target_count") =
+        diagnostics.method_planned_qr_target_count,
+      Rcpp::Named("method_planned_svd_target_count") =
+        diagnostics.method_planned_svd_target_count,
+      Rcpp::Named("method_executed_cholesky_target_count") =
+        diagnostics.method_executed_cholesky_target_count,
+      Rcpp::Named("method_executed_qr_target_count") =
+        diagnostics.method_executed_qr_target_count,
+      Rcpp::Named("method_executed_svd_target_count") =
+        diagnostics.method_executed_svd_target_count,
+      Rcpp::Named("method_cholesky_to_svd_count") =
+        diagnostics.method_cholesky_to_svd_count,
+      Rcpp::Named("method_qr_to_svd_count") =
+        diagnostics.method_qr_to_svd_count,
+      Rcpp::Named("method_cholesky_factor_checkpoint_wait_count") =
+        diagnostics.method_cholesky_factor_checkpoint_wait_count,
+      Rcpp::Named("method_cholesky_factor_checkpoint_host_wait_ms") =
+        diagnostics.method_cholesky_factor_checkpoint_host_wait_ms,
+      Rcpp::Named("method_cholesky_solve_checkpoint_wait_count") =
+        diagnostics.method_cholesky_solve_checkpoint_wait_count,
+      Rcpp::Named("method_cholesky_solve_checkpoint_host_wait_ms") =
+        diagnostics.method_cholesky_solve_checkpoint_host_wait_ms,
+      Rcpp::Named("method_qr_checkpoint_wait_count") =
+        diagnostics.method_qr_checkpoint_wait_count,
+      Rcpp::Named("method_qr_checkpoint_host_wait_ms") =
+        diagnostics.method_qr_checkpoint_host_wait_ms,
+      Rcpp::Named("method_svd_checkpoint_wait_count") =
+        diagnostics.method_svd_checkpoint_wait_count,
+      Rcpp::Named("method_svd_checkpoint_host_wait_ms") =
+        diagnostics.method_svd_checkpoint_host_wait_ms,
+      Rcpp::Named("method_output_status_wait_count") =
+        diagnostics.method_output_status_wait_count,
+      Rcpp::Named("method_output_status_host_wait_ms") =
+        diagnostics.method_output_status_host_wait_ms,
+      Rcpp::Named("method_route_resolution_cpu_ms") =
+        diagnostics.method_route_resolution_cpu_ms,
+      Rcpp::Named("method_output_status_resolution_cpu_ms") =
+        diagnostics.method_output_status_resolution_cpu_ms,
+      Rcpp::Named("method_residual_metadata_resolution_host_ms") =
+        diagnostics.method_residual_metadata_resolution_host_ms,
+      Rcpp::Named("method_component_submission_host_ms") =
+        diagnostics.method_component_submission_host_ms,
+      Rcpp::Named("method_finalization_host_ms") =
+        diagnostics.method_finalization_host_ms,
+      Rcpp::Named("method_compact_result_host_wait_ms") =
+        diagnostics.method_compact_result_host_wait_ms,
+      Rcpp::Named("method_post_compact_finalize_host_ms") =
+        diagnostics.method_post_compact_finalize_host_ms,
+      Rcpp::Named("method_qr_checkpoint_overlap_opportunity_ms") =
+        diagnostics.method_qr_checkpoint_overlap_opportunity_ms,
       Rcpp::Named("method_critical_path_trace_capacity") =
         diagnostics.method_critical_path_trace_capacity,
       Rcpp::Named("method_critical_path_trace_count") =
