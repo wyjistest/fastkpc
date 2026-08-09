@@ -8,11 +8,33 @@ files stay unchanged while the fast backend is developed and validated.
 ## Full-CUDA legacy-compatible skeleton and WAN-PDAG candidate
 
 An explicit one-call full-CUDA route now implements the numerical CI data plane
-for the exact `regrXonS`/KPC subset. The historical Phase 10 v1 campaign passed
-canonical correctness, CUDA authority, hardening, and replay-latency gates, but
-did not measure acceptable fresh-data performance. The sealed holdout remains
-`SEALED_NOT_RELEASED` and must not be opened for this candidate. The route is
-explicit, not the default, and not recommended.
+for the exact `regrXonS`/KPC subset. The historical Phase 10 v1 campaign is
+invalid under `numerical_contract_v1`: it checked deletion and graph parity but
+did not enforce the required absolute `1e-10` bound for every CI p-value and
+`pMax`. A retrospective canonical audit found 79,012 CI p-values and 1,398
+`pMax` cells outside tolerance, with maximum drift `0.045461329947135143`.
+Those receipts are historical diagnostic evidence only and are not correctness
+or performance-candidate evidence.
+
+The current GPU-only repair returns every `dcc.gamma` p-value from the CUDA
+legacy-compatible full-eigensolver and uses augmented QR only through two
+penalties, with deeper conditional residuals forced through CUDA stable-SVD.
+On the complete default-`Inf` 351x48 workload, all 240,498 CI p-values and all
+finite `pMax` cells are within `6.9555444737190442e-11` of the legacy oracle.
+Task identity, deletion trace, adjacency, semantic sepsets, `n.edgetests`, and
+authority gates pass; CPU residual/dCov/gamma counts and residual/component D2H
+are zero. The repaired uncached baseline took `2293.965` seconds. A bounded
+device component cache, complete all-hit residual bypass, and eight persistent
+deterministic eig lanes reduce the final current-binary development run to
+`928.720` seconds, with native SHA-256
+`e3ee4a97624bb64d69e8de55fd86f78748e3375670282b0b5b8cf0a19d9ffc9d`.
+The historical `219.513`-second result is invalidated rather than retained as a
+development best. Current single-GPU strict full-eig component work is closed
+after measured packing, lane, host-submission, and solver alternatives leave
+only noise-scale qualified opportunity; see
+`docs/PHASE10_FULL_EIG_COMPONENT_CLOSURE.md`. Broader Phase 10 remains active,
+Checkpoint B `<180s` is not passed, no candidate is frozen, the route is not
+recommended, and the sealed holdout remains `SEALED_NOT_RELEASED`.
 
 The current Phase 9 v2 and hardening v2 artifacts use the actual default
 `kpcalg` conditioning contract (`m.max = Inf`) and cover the canonical graph
@@ -211,8 +233,11 @@ fresh-process cold median <= same-run correct baseline median
 replay-warm: report only
 ```
 
-The current development producer has passed the first optimization checkpoint,
-but it is not a frozen candidate. A fresh-data compute-warm development run on
+The following Phase 10 optimization record predates the p-value contract
+repair. Its timings remain useful only for locating costs in the invalidated
+exact-screen route; none of its `dcc.gamma` performance values is a current
+best or promotion result. In that historical route, a fresh-data compute-warm
+development run on
 the canonical 351x48 input with explicit `max_conditioning_size = 7` completed
 in `235.058` seconds, down from the prior `263.305`-second best. Score-first
 line-search evaluation first reduced the optimizer boundary from `173.246` to
@@ -223,24 +248,20 @@ the optimizer boundary, 15.375 seconds for residual solves, and 29.933 seconds
 for dCov. All 240,489 task rows and p-value bits, graph fields, sepsets, counts,
 levels, and optimizer trajectory counters remain exact.
 
-The default-`Inf` development run with the same implementation took `233.848`
-seconds, down from the score-first `252.616`-second run and the Phase 9
-`277.868`-second artifact. It resolved `Inf` to 46, executed levels 0 through
-8, and produced 240,498 logical tests. Every task row and p-value bit, graph
-field, sepset, count, and level semantic is exact against the older authority
-artifact; CPU numerical authority, fallback, residual D2H, and component D2H
-remain zero.
+Under the now-invalid conditional-screen epoch, a default-`Inf` development
+run took `233.848` seconds, down from the score-first `252.616`-second run and
+the Phase 9 `277.868`-second artifact. It resolved `Inf` to 46, executed levels
+0 through 8, and produced 240,498 logical tests. Its parity was measured
+against the older conditional-screen artifact, not the all-CI legacy oracle;
+these timings are retained only as historical diagnostics.
 
-An opt-in CPU-only setup/optimizer pipeline now applies to all supported
-full-CUDA CI methods and provides the best `dcc.gamma` development result. It
-keeps R and Rcpp objects on the main thread, passes only owned
-optimizer inputs through one background future, and preserves every original
-window, setup cohort, target vector, and target order. With a fixed 5 ms
-optimizer head start, level 3 fell from `114.038` to `102.770` seconds and the
-default-`Inf` run fell from `233.848` to `219.513` seconds. The latter overlaps
-`19.319` seconds of setup work across 138 windows. All 240,498 task and p-value
-bits, graph/sepset/count/level fields, and optimizer trajectory counters are
-exact; authority and transfer gates remain zero. The route is enabled with
+An opt-in CPU-only setup/optimizer pipeline applies to all supported full-CUDA
+CI methods. In the invalid conditional-screen `dcc.gamma` route, a fixed 5 ms
+optimizer head start reduced level 3 from `114.038` to `102.770` seconds and
+default `Inf` from `233.848` to `219.513` seconds, overlapping `19.319` seconds
+of setup work across 138 windows. Those `dcc.gamma` timings are not current
+performance evidence. The pipeline remains separately qualified for the other
+strict methods. It is enabled with
 `FASTKPC_PHASE10_SETUP_OPTIMIZER_PIPELINE=1` and
 `FASTKPC_PHASE10_SETUP_OPTIMIZER_PRODUCER_DELAY_US=5000`; it is not yet the
 production default or a frozen candidate. GPU-side setup overlap, CPU affinity,
@@ -340,19 +361,15 @@ multi-optimizer boundary to `37.234` seconds. This is recorded as
 `STOP_PRIMARY_REPLAY_SPECIALIZATION_WALL_TIME`; the prototype is absent from
 retained source and binary.
 
-The current numerical-contract epoch therefore stops before Checkpoint B. The
-retained exact default-`Inf` best is `219.513` seconds, leaving `39.513` seconds
-to the `<180` gate. Even treating all measured dCov teardown (`3.459` seconds)
-and otherwise unattributed dCov host time (`7.416` seconds) as free leaves
-`208.638` seconds and a `28.638`-second optimizer deficit. Setup overlap has
-already recovered `19.319` seconds, while GPU-side setup overlap raised
-fixed-SP H2D to `38.169` seconds. The decision is
-`STOP_PHASE10_STRICT_180_NO_QUALIFIED_ROUTE`: no candidate is frozen, the
-external holdout remains sealed, and the route remains unrecommended. This is
-not a claim that the RTX 4090 cannot reach 180 seconds; reopening requires a
-real-shape single-matrix evaluator showing at least `1.5x` QR/Q throughput and
-an expected `>=1.35x` full multi-optimizer speedup, or a separately versioned
-and qualified numerical contract.
+The corrected numerical-contract epoch remains before Checkpoint B. The
+uncached correctness baseline is `2293.965` seconds, the retained optimized
+strict GPU-only development result is `928.720` seconds, and `219.513` seconds
+belongs to the invalidated conditional-screen route. The current decision is
+`PHASE10_ACTIVE_FULL_EIG_COMPONENT_CLOSED`: no candidate is frozen, the
+external holdout remains sealed, and the route remains unrecommended.
+Reopening this component requires a material full-run improvement while
+retaining the all-CI and `pMax` absolute `1e-10` gates and zero CPU
+authority/fallback counts.
 
 An opt-in exact-bit decomposition trace then measured whether response-
 independent decomposition reuse is large enough to justify that first route.
