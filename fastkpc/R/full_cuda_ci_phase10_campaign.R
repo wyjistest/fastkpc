@@ -610,6 +610,92 @@ fastkpc_full_cuda_phase10_campaign_authority_zero_fields <- function() {
   )
 }
 
+fastkpc_full_cuda_phase10_pvalue_tolerance <- function(
+    contracts = fastkpc_full_cuda_phase35_load_contract_set()) {
+  value <- as.numeric(
+    contracts$numerical_contract_v1$payload$tolerances$p_value$absolute
+  )
+  fastkpc_full_cuda_phase10_campaign_require(
+    length(value) == 1L && is.finite(value) && value == 1e-10,
+    "Phase 10 numerical contract p-value tolerance is not exactly 1e-10"
+  )
+  value
+}
+
+fastkpc_full_cuda_phase10_numeric_contract_comparison <- function(
+    candidate, reference, tolerance, label) {
+  same_shape <- identical(dim(candidate), dim(reference)) &&
+    length(candidate) == length(reference)
+  if (!same_shape) {
+    return(list(
+      label = label,
+      same_shape = FALSE,
+      comparable_count = 0L,
+      mismatch_count = max(length(candidate), length(reference)),
+      maximum_absolute_error = Inf,
+      pass = FALSE
+    ))
+  }
+  candidate <- as.numeric(candidate)
+  reference <- as.numeric(reference)
+  same_na <- identical(is.na(candidate), is.na(reference))
+  same_infinite <- identical(
+    candidate[is.infinite(candidate)], reference[is.infinite(reference)]
+  ) && identical(is.infinite(candidate), is.infinite(reference))
+  comparable <- is.finite(candidate) & is.finite(reference)
+  errors <- abs(candidate[comparable] - reference[comparable])
+  maximum <- if (length(errors)) max(errors) else 0
+  mismatch_count <- if (same_na && same_infinite) {
+    sum(errors > tolerance)
+  } else {
+    length(candidate)
+  }
+  list(
+    label = label,
+    same_shape = TRUE,
+    comparable_count = sum(comparable),
+    mismatch_count = as.integer(mismatch_count),
+    maximum_absolute_error = maximum,
+    pass = same_na && same_infinite && all(errors <= tolerance)
+  )
+}
+
+fastkpc_full_cuda_phase10_pvalue_contract_gate <- function(
+    result, logical, oracle,
+    tolerance = fastkpc_full_cuda_phase10_pvalue_tolerance()) {
+  tasks <- result$tasks
+  logical_length_exact <- nrow(tasks) == nrow(logical)
+  logical_identity_exact <- logical_length_exact && identical(
+    as.integer(tasks$canonical_test_order_id),
+    as.integer(logical$logical_sequence_id)
+  )
+  task_comparison <- if (logical_identity_exact) {
+    fastkpc_full_cuda_phase10_numeric_contract_comparison(
+      tasks$p_used, logical$reference_p_value, tolerance, "all_ci_p_values"
+    )
+  } else {
+    list(
+      label = "all_ci_p_values",
+      same_shape = FALSE,
+      comparable_count = 0L,
+      mismatch_count = max(nrow(tasks), nrow(logical)),
+      maximum_absolute_error = Inf,
+      pass = FALSE
+    )
+  }
+  pmax_comparison <- fastkpc_full_cuda_phase10_numeric_contract_comparison(
+    result$pMax, oracle$reference$pMax, tolerance, "pMax"
+  )
+  list(
+    schema_version = "full-cuda-ci-phase10-pvalue-contract-v1",
+    tolerance = tolerance,
+    logical_identity_exact = logical_identity_exact,
+    ci = task_comparison,
+    pMax = pmax_comparison,
+    pass = isTRUE(task_comparison$pass) && isTRUE(pmax_comparison$pass)
+  )
+}
+
 fastkpc_full_cuda_phase10_validate_candidate_result <- function(
     result, boundary = c("cold", "warm"),
     oracle_dir = fastkpc_full_cuda_default_kpcalg_oracle_dir(),
@@ -623,8 +709,12 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
   comparison <- fastkpc_full_cuda_compare_candidate_skeleton(oracle, result)
   logical <- fastkpc_full_cuda_phase9_load_logical(logical_path)
   tasks <- result$tasks
+  pvalue_contract <- fastkpc_full_cuda_phase10_pvalue_contract_gate(
+    result, logical, oracle
+  )
   contract <- fastkpc_full_cuda_default_kpcalg_contract()
   expected_n_edgetests <- contract$n_edgetests
+  expected_physical_test_count <- contract$logical_test_count
   logical_length_exact <- nrow(tasks) == nrow(logical)
   structural_fields_exact <- c(
     logical_id = identical(
@@ -663,12 +753,15 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
     logical_length_exact &&
     all(structural_fields_exact) &&
     !any(decision_flip) && all(is.finite(tasks$p_used)) &&
+    isTRUE(pvalue_contract$pass) &&
     all(!is.na(zero_values) & zero_values == 0) &&
     identical(summary$run_status, "ok") &&
     identical(summary$entrypoint,
               "compatible-cuda-full-skeleton-native-v1") &&
     identical(summary$compatible_cuda_route, "compatible.cuda") &&
     isTRUE(summary$compatible_cuda_strict) &&
+    identical(summary$ci_backend,
+              "legacy-compatible-full-eig-cuda-v1") &&
     isTRUE(summary$authority_gate_pass) &&
     as.integer(summary$native_call_count) == 1L &&
     identical(summary$max_conditioning_size_requested,
@@ -699,13 +792,18 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
     is.finite(summary$elapsed_sec) && summary$elapsed_sec > 0
   boundary_gate <- if (identical(boundary, "cold")) {
     as.integer(summary$physical_tests_evaluated) ==
-      contract$physical_test_count &&
-      as.integer(summary$guarded_pair_count) ==
-        contract$guarded_pair_count &&
+      expected_physical_test_count &&
+      as.integer(summary$guarded_pair_count) == 0L &&
+      as.integer(summary$cuda_exact_screen_pair_count) == 0L &&
+      as.integer(summary$cuda_guard_refinement_pair_count) == 0L &&
+      as.integer(summary$cuda_legacy_compatible_pair_count) ==
+        expected_physical_test_count &&
+      as.integer(summary$legacy_compatible_pair_count) ==
+        expected_physical_test_count &&
       as.integer(summary$cuda_dcov_pair_count) ==
-        contract$physical_test_count &&
+        expected_physical_test_count &&
       as.integer(summary$cuda_gamma_pvalue_count) ==
-        contract$physical_test_count &&
+        expected_physical_test_count &&
       as.integer(summary$result_cache_warm_start_entries) == 0L &&
       as.integer(summary$result_cache_hit_count) == 0L &&
       as.integer(summary$result_cache_miss_count) ==
@@ -729,6 +827,10 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
   } else {
     as.integer(summary$physical_tests_evaluated) == 0L &&
       as.integer(summary$guarded_pair_count) == 0L &&
+      as.integer(summary$cuda_exact_screen_pair_count) == 0L &&
+      as.integer(summary$cuda_guard_refinement_pair_count) == 0L &&
+      as.integer(summary$cuda_legacy_compatible_pair_count) == 0L &&
+      as.integer(summary$legacy_compatible_pair_count) == 0L &&
       as.integer(summary$cuda_dcov_pair_count) == 0L &&
       as.integer(summary$cuda_gamma_pvalue_count) == 0L &&
       as.integer(summary$result_cache_warm_start_entries) >=
@@ -752,12 +854,13 @@ fastkpc_full_cuda_phase10_validate_candidate_result <- function(
            " candidate correctness or authority gate failed")
   )
   list(
-    schema_version = "full-cuda-ci-phase10-candidate-validation-v1",
+    schema_version = "full-cuda-ci-phase10-candidate-validation-v2",
     boundary = boundary,
     comparison_summary = comparison$summary,
     first_divergence = comparison$first_divergence,
     structural_fields_exact = structural_fields_exact,
     decision_flip_count = sum(decision_flip),
+    pvalue_contract = pvalue_contract,
     authority_zero_values = zero_values,
     cache_gate = TRUE,
     pass = TRUE

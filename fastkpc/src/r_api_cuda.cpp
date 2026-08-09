@@ -4262,6 +4262,48 @@ Rcpp::List full_cuda_ci_legacy_eig_batch_diagnostics_to_list(
   result.push_back(value.cuda_full_eig_count, "cuda_full_eig_count");
   result.push_back(value.cuda_pair_count, "cuda_pair_count");
   result.push_back(value.cuda_gamma_count, "cuda_gamma_count");
+  result.push_back(value.component_eig_configured_lane_count,
+                   "component_eig_configured_lane_count");
+  result.push_back(value.component_eig_active_lane_count,
+                   "component_eig_active_lane_count");
+  result.push_back(value.component_eig_multilane_batch_count,
+                   "component_eig_multilane_batch_count");
+  result.push_back(value.component_execution_context_reuse_count,
+                   "component_execution_context_reuse_count");
+  result.push_back(
+    static_cast<double>(value.component_execution_context_device_bytes),
+    "component_execution_context_device_bytes");
+  result.push_back(value.component_cache_persistent_request_count,
+                   "component_cache_persistent_request_count");
+  result.push_back(value.component_cache_persistent_hit_count,
+                   "component_cache_persistent_hit_count");
+  result.push_back(value.component_cache_persistent_miss_count,
+                   "component_cache_persistent_miss_count");
+  result.push_back(value.component_cache_persistent_insert_count,
+                   "component_cache_persistent_insert_count");
+  result.push_back(value.component_cache_persistent_bypass_count,
+                   "component_cache_persistent_bypass_count");
+  result.push_back(value.component_cache_persistent_route_mismatch_count,
+                   "component_cache_persistent_route_mismatch_count");
+  result.push_back(value.component_cache_persistent_status_mismatch_count,
+                   "component_cache_persistent_status_mismatch_count");
+  result.push_back(value.component_cache_persistent_residual_bypass_count,
+                   "component_cache_persistent_residual_bypass_count");
+  result.push_back(
+    static_cast<double>(value.component_cache_persistent_capacity_entries),
+    "component_cache_persistent_capacity_entries");
+  result.push_back(
+    static_cast<double>(value.component_cache_persistent_entries_before),
+    "component_cache_persistent_entries_before");
+  result.push_back(
+    static_cast<double>(value.component_cache_persistent_entries_after),
+    "component_cache_persistent_entries_after");
+  result.push_back(
+    static_cast<double>(value.component_cache_persistent_device_bytes),
+    "component_cache_persistent_device_bytes");
+  result.push_back(
+    static_cast<double>(value.component_cache_persistent_store_d2d_bytes),
+    "component_cache_persistent_store_d2d_bytes");
   result.push_back(value.consumer_event_registration_count,
                    "consumer_event_registration_count");
   result.push_back(value.explicit_host_wait_count,
@@ -4297,6 +4339,8 @@ Rcpp::List full_cuda_ci_legacy_eig_batch_diagnostics_to_list(
                    "residual_producer_semantic_identity");
   result.push_back(value.residual_solve_bypassed,
                    "residual_solve_bypassed");
+  result.push_back(value.residual_solve_bypassed_by_component_cache,
+                   "residual_solve_bypassed_by_component_cache");
   result.push_back(value.request_identity_authenticated,
                    "request_identity_authenticated");
   result.push_back(value.prepared_identity_authenticated,

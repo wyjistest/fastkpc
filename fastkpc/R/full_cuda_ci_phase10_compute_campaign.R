@@ -451,7 +451,8 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "cuda_single_penalty_residual_solve_host_ms",
     "cuda_multi_penalty_residual_solve_host_ms",
     "cuda_exact_screen_residual_solve_host_ms",
-    "cuda_guard_refinement_residual_solve_host_ms", "cuda_dcov_host_ms",
+    "cuda_guard_refinement_residual_solve_host_ms",
+    "cuda_legacy_compatible_residual_solve_host_ms", "cuda_dcov_host_ms",
     "cuda_dcov_metadata_h2d_ms", "cuda_dcov_component_build_ms",
     "cuda_dcov_pair_gamma_ms", "cuda_dcov_compact_d2h_ms",
     "cuda_dcov_teardown_host_ms"
@@ -547,7 +548,12 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "cuda_guard_refinement_residual_batch_count",
     "cuda_guard_refinement_residual_target_count",
     "cuda_guard_refinement_component_count",
-    "cuda_guard_refinement_pair_count", "guarded_pair_count",
+    "cuda_guard_refinement_pair_count",
+    "cuda_legacy_compatible_residual_batch_count",
+    "cuda_legacy_compatible_residual_target_count",
+    "cuda_legacy_compatible_component_count",
+    "cuda_legacy_compatible_pair_count", "guarded_pair_count",
+    "legacy_compatible_pair_count",
     "unique_residual_key_count",
     "logical_residual_requests", "physical_residual_fits",
     "excess_residual_fit_count", "excess_native_setup_build_count",
@@ -642,26 +648,29 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
       ) &&
       close_sum(
         timings[["cuda_residual_solve_host_ms"]],
-        timings[["cuda_exact_screen_residual_solve_host_ms"]] +
-          timings[["cuda_guard_refinement_residual_solve_host_ms"]]
+        timings[["cuda_legacy_compatible_residual_solve_host_ms"]]
       ) &&
       counters[["cuda_residual_batch_count"]] ==
-        counters[["cuda_exact_screen_residual_batch_count"]] +
-          counters[["cuda_guard_refinement_residual_batch_count"]] &&
+        counters[["cuda_legacy_compatible_residual_batch_count"]] &&
       counters[["physical_residual_fits"]] ==
-        counters[["cuda_exact_screen_residual_target_count"]] &&
+        counters[["cuda_legacy_compatible_residual_target_count"]] &&
       counters[["cuda_dcov_component_count"]] ==
-        counters[["cuda_exact_screen_component_count"]] +
-          counters[["cuda_guard_refinement_component_count"]] &&
+        counters[["cuda_legacy_compatible_component_count"]] &&
       counters[["cuda_dcov_pair_count"]] ==
-        counters[["cuda_exact_screen_pair_count"]] +
-          counters[["cuda_guard_refinement_pair_count"]] &&
-      counters[["cuda_guard_refinement_residual_batch_count"]] <=
-        counters[["cuda_exact_screen_residual_batch_count"]] &&
-      counters[["cuda_guard_refinement_pair_count"]] ==
-        counters[["guarded_pair_count"]] &&
-      counters[["cuda_guard_refinement_component_count"]] <=
-        counters[["cuda_guard_refinement_residual_target_count"]] &&
+        counters[["cuda_legacy_compatible_pair_count"]] &&
+      counters[["cuda_legacy_compatible_pair_count"]] ==
+        counters[["legacy_compatible_pair_count"]] &&
+      counters[["cuda_exact_screen_residual_batch_count"]] == 0 &&
+      counters[["cuda_exact_screen_residual_target_count"]] == 0 &&
+      counters[["cuda_exact_screen_component_count"]] == 0 &&
+      counters[["cuda_exact_screen_pair_count"]] == 0 &&
+      counters[["cuda_guard_refinement_residual_batch_count"]] == 0 &&
+      counters[["cuda_guard_refinement_residual_target_count"]] == 0 &&
+      counters[["cuda_guard_refinement_component_count"]] == 0 &&
+      counters[["cuda_guard_refinement_pair_count"]] == 0 &&
+      counters[["guarded_pair_count"]] == 0 &&
+      counters[["cuda_legacy_compatible_component_count"]] <=
+        counters[["cuda_legacy_compatible_residual_target_count"]] &&
       counters[["unique_prepared_s_key_count"]] <=
         counters[["physical_prepared_s_key_count"]] &&
       counters[["physical_prepared_s_key_count"]] <=
@@ -754,7 +763,7 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "Phase 10 fresh-data compute profile is malformed"
   )
   list(
-    schema_version = "full-cuda-ci-compute-profile-v6",
+    schema_version = "full-cuda-ci-compute-profile-v7",
     stage_timing = data.frame(
       stage = c(
         "native_setup",
@@ -789,6 +798,7 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
         "residual_solve_multi_penalty_host_nested",
         "residual_solve_exact_screen_host_nested",
         "residual_solve_guard_refinement_host_nested",
+        "residual_solve_legacy_compatible_host_nested",
         "dcov_host_boundary", "dcov_metadata_h2d_nested",
         "dcov_component_build_nested", "dcov_pair_gamma_nested",
         "dcov_compact_d2h_nested", "dcov_teardown_host",
@@ -828,6 +838,7 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
         timings[["cuda_multi_penalty_residual_solve_host_ms"]],
         timings[["cuda_exact_screen_residual_solve_host_ms"]],
         timings[["cuda_guard_refinement_residual_solve_host_ms"]],
+        timings[["cuda_legacy_compatible_residual_solve_host_ms"]],
         timings[["cuda_dcov_host_ms"]],
         timings[["cuda_dcov_metadata_h2d_ms"]],
         timings[["cuda_dcov_component_build_ms"]],

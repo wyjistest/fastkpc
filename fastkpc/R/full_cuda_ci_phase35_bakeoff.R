@@ -410,9 +410,24 @@ fastkpc_full_cuda_phase35_validate_legacy_eig_batch_result <- function(
     diagnostics$compact_result_d2h_bytes != 72 * pair_count ||
     diagnostics$compact_status_d2h_count != 1L ||
     diagnostics$compact_status_d2h_bytes != 4 * referenced_count ||
-    diagnostics$metadata_h2d_count != 7L ||
+    diagnostics$metadata_h2d_count != 2L ||
     diagnostics$metadata_h2d_bytes !=
-      4 * referenced_count + 40 * pair_count ||
+      4 * referenced_count + 80 * pair_count ||
+    any(unlist(diagnostics[c(
+      "component_cache_persistent_request_count",
+      "component_cache_persistent_hit_count",
+      "component_cache_persistent_miss_count",
+      "component_cache_persistent_insert_count",
+      "component_cache_persistent_bypass_count",
+      "component_cache_persistent_route_mismatch_count",
+      "component_cache_persistent_status_mismatch_count",
+      "component_cache_persistent_residual_bypass_count",
+      "component_cache_persistent_capacity_entries",
+      "component_cache_persistent_entries_before",
+      "component_cache_persistent_entries_after",
+      "component_cache_persistent_device_bytes",
+      "component_cache_persistent_store_d2d_bytes"
+    )], use.names = FALSE) != 0) ||
     diagnostics$cpu_dcov_component_count != 0L ||
     diagnostics$cpu_dcov_eigen_count != 0L ||
     diagnostics$cpu_dcov_pair_statistic_count != 0L ||
@@ -422,7 +437,7 @@ fastkpc_full_cuda_phase35_validate_legacy_eig_batch_result <- function(
     diagnostics$cuda_gamma_count != pair_count ||
     diagnostics$consumer_event_registration_count != 1L ||
     diagnostics$explicit_host_wait_count != 2L ||
-    diagnostics$device_allocation_count != 19L ||
+    diagnostics$device_allocation_count != 14L ||
     diagnostics$device_allocation_count != diagnostics$device_free_count ||
     any(!is.finite(unlist(diagnostics[timing_fields], use.names = FALSE))) ||
     any(unlist(diagnostics[timing_fields], use.names = FALSE) < 0) ||

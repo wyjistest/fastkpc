@@ -91,6 +91,34 @@ assert_canonical_task_order <- function(candidate_tasks, reference_tasks,
   )
 }
 
+assert_pvalue_contract <- function(candidate, reference, label) {
+  candidate_tasks <- canonicalize_tasks(candidate$tasks)
+  reference_tasks <- canonicalize_tasks(reference$tasks)
+  task_error <- max(abs(
+    as.numeric(candidate_tasks$p_used) - as.numeric(reference_tasks$p_used)
+  ))
+  pmax_error <- max(abs(
+    as.numeric(candidate$pMax) - as.numeric(reference$pMax)
+  ), na.rm = TRUE)
+  summary <- candidate$summary
+  assert_true(
+    is.finite(task_error) && task_error <= 1e-10 &&
+      is.finite(pmax_error) && pmax_error <= 1e-10 &&
+      identical(summary$ci_backend,
+                "legacy-compatible-full-eig-cuda-v1") &&
+      identical(summary$strict_gamma_residual_route, "qr-through-2") &&
+      summary$cuda_legacy_compatible_pair_count ==
+        summary$physical_tests_evaluated &&
+      summary$legacy_compatible_pair_count ==
+        summary$physical_tests_evaluated &&
+      summary$guarded_pair_count == 0L &&
+      summary$cuda_exact_screen_pair_count == 0L &&
+      summary$cuda_guard_refinement_pair_count == 0L,
+    paste0("Phase 10 ", label,
+           " dcc.gamma p-value or GPU authority contract failed")
+  )
+}
+
 assert_optimizer_attribution <- function(summary, label) {
   batches <- summary$prefill_batches
   required_columns <- c(
@@ -216,6 +244,7 @@ assert_true(
   "Phase 9 focused logical replay trace is malformed"
 )
 assert_canonical_task_order(candidate$tasks, reference$tasks, "focused")
+assert_pvalue_contract(candidate, reference, "focused")
 
 set.seed(6001)
 multi_n <- 90L
@@ -316,6 +345,9 @@ assert_true(
 )
 assert_canonical_task_order(
   multi_candidate$tasks, multi_reference$tasks, "multi-penalty"
+)
+assert_pvalue_contract(
+  multi_candidate, multi_reference, "multi-penalty"
 )
 
 invalid_alpha <- tryCatch(

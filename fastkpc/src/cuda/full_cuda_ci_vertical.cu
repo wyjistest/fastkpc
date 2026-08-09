@@ -11,12 +11,14 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace fastkpc {
@@ -26,6 +28,8 @@ constexpr char kFixedSpResidualProducerSemanticIdentity[] =
   "full-cuda-ci-fixed-sp-runtime-residual-v1";
 constexpr char kOptimizerResidualProducerSemanticIdentity[] =
   "full-cuda-ci-multi-penalty-optimizer-accepted-residual-v1";
+constexpr char kLegacyComponentCacheResidualBypassSemanticIdentity[] =
+  "full-cuda-ci-legacy-component-cache-residual-bypass-v1";
 
 constexpr int kVerticalBlockSize = 256;
 constexpr double kCanonicalAlpha = 0.1;
@@ -133,6 +137,13 @@ bool is_lower_sha256(const std::string& value) {
       return (character >= '0' && character <= '9') ||
         (character >= 'a' && character <= 'f');
     });
+}
+
+bool is_successful_fixed_sp_status(FixedSpStatus status) {
+  return status == FixedSpStatus::OkCholeskyBatched ||
+    status == FixedSpStatus::OkCholeskySingle ||
+    status == FixedSpStatus::OkAugmentedQr ||
+    status == FixedSpStatus::OkAugmentedSvd;
 }
 
 std::size_t checked_multiply(std::size_t left,
@@ -877,11 +888,12 @@ __global__ void reduce_legacy_self_moment_kernel(
 
 __global__ void evaluate_legacy_eig_pair_batch_kernel(
     const double* pair_cross,
-    const double* selected_values,
-    const double* totals,
-    const double* self_moments,
-    const int* left_components,
-    const int* right_components,
+    const double* const* left_selected_values,
+    const double* const* right_selected_values,
+    const double* const* left_totals,
+    const double* const* right_totals,
+    const double* const* left_self_moments,
+    const double* const* right_self_moments,
     const unsigned long long* logical_sequence_ids,
     int pair_count,
     int num_col,
@@ -891,12 +903,8 @@ __global__ void evaluate_legacy_eig_pair_batch_kernel(
   __shared__ double reduction[kVerticalBlockSize];
   const int pair = static_cast<int>(blockIdx.x);
   if (pair >= pair_count) return;
-  const int left_component = left_components[pair];
-  const int right_component = right_components[pair];
-  const double* left_values = selected_values +
-    static_cast<std::size_t>(left_component) * num_col;
-  const double* right_values = selected_values +
-    static_cast<std::size_t>(right_component) * num_col;
+  const double* left_values = left_selected_values[pair];
+  const double* right_values = right_selected_values[pair];
   const std::size_t square =
     static_cast<std::size_t>(num_col) * num_col;
   const double* cross = pair_cross +
@@ -925,14 +933,14 @@ __global__ void evaluate_legacy_eig_pair_batch_kernel(
   output.diagnostic_flags = kDiagnosticLegacyFullEig;
   const double nd = static_cast<double>(n);
   output.statistic = reduction[0] / nd;
-  output.mean = (totals[left_component] / (nd * nd)) *
-    (totals[right_component] / (nd * nd));
+  output.mean = (*left_totals[pair] / (nd * nd)) *
+    (*right_totals[pair] / (nd * nd));
   const double variance_factor =
     2.0 * (nd - 4.0) * (nd - 5.0) /
     nd / (nd - 1.0) / (nd - 2.0) / (nd - 3.0);
   // Preserve the qualified legacy low-rank representation scaling.
-  output.variance = variance_factor * self_moments[left_component] *
-    self_moments[right_component] / (nd * nd);
+  output.variance = variance_factor * *left_self_moments[pair] *
+    *right_self_moments[pair] / (nd * nd);
   if (!isfinite(output.statistic) || !isfinite(output.mean) ||
       !isfinite(output.variance)) {
     output.status = kDcovStatusNonfinite;
@@ -1304,6 +1312,489 @@ class CompactCiResult {
   DeviceCompactCiResult device_record;
 };
 
+class FullCudaCiLegacyEigExecutionContext {
+ public:
+  FullCudaCiLegacyEigExecutionContext(
+      int device_id, int n, int num_col, int maximum_component_count,
+      int maximum_pair_count, int eig_lane_count,
+      VerticalCallAccounting* accounting)
+      : device_id_(device_id),
+        n_(n),
+        num_col_(num_col),
+        maximum_component_count_(maximum_component_count),
+        maximum_pair_count_(maximum_pair_count),
+        eig_lane_count_(eig_lane_count),
+        accounting_(accounting) {
+    if (device_id_ < 0 || n_ < 2 || num_col_ < 1 || num_col_ > 64 ||
+        maximum_component_count_ < 0 || maximum_pair_count_ < 1 ||
+        eig_lane_count_ < 0 ||
+        (maximum_component_count_ == 0 && eig_lane_count_ != 0) ||
+        (maximum_component_count_ > 0 && eig_lane_count_ < 1) ||
+        eig_lane_count_ > maximum_component_count_ || accounting_ == nullptr) {
+      throw std::runtime_error(
+        "legacy eig execution context shape is invalid");
+    }
+    int current_device = -1;
+    check_cuda(cudaGetDevice(&current_device),
+               "query legacy eig execution context device");
+    if (current_device != device_id_) {
+      throw std::runtime_error(
+        "legacy eig execution context device does not match caller");
+    }
+
+    stream_ = std::make_unique<TrackedCudaStream>();
+    completion_ = std::make_unique<TrackedCudaEvent>(true);
+    metadata_start_ = std::make_unique<TrackedCudaEvent>(true);
+    metadata_end_ = std::make_unique<TrackedCudaEvent>(true);
+    pair_start_ = std::make_unique<TrackedCudaEvent>(true);
+    pair_end_ = std::make_unique<TrackedCudaEvent>(true);
+    blas_ = std::make_unique<VerticalCublasHandle>(stream_->get());
+    if (maximum_component_count_ > 0) {
+      distance_start_ = std::make_unique<TrackedCudaEvent>(true);
+      distance_end_ = std::make_unique<TrackedCudaEvent>(true);
+      eig_start_ = std::make_unique<TrackedCudaEvent>(true);
+      eig_end_ = std::make_unique<TrackedCudaEvent>(true);
+      finalize_end_ = std::make_unique<TrackedCudaEvent>(true);
+    }
+
+    const std::size_t n_size = static_cast<std::size_t>(n_);
+    const std::size_t component_size =
+      static_cast<std::size_t>(maximum_component_count_);
+    const std::size_t pair_size = static_cast<std::size_t>(maximum_pair_count_);
+    const std::size_t k_size = static_cast<std::size_t>(num_col_);
+    const std::size_t cells = checked_multiply(
+      n_size, n_size, "legacy eig context component cells");
+    const std::size_t vector_stride = checked_multiply(
+      n_size, k_size, "legacy eig context vector stride");
+    const std::size_t cross_stride = checked_multiply(
+      k_size, k_size, "legacy eig context cross stride");
+    if (maximum_component_count_ > 0) {
+      component_target_buffer_ = allocate_buffer(checked_multiply(
+        component_size, sizeof(int),
+        "legacy eig context component target bytes"));
+      component_matrix_buffer_ = allocate_buffer(checked_multiply(
+        checked_multiply(component_size, cells,
+                         "legacy eig context component matrix values"),
+        sizeof(double), "legacy eig context component matrix bytes"));
+      row_sum_buffer_ = allocate_buffer(checked_multiply(
+        checked_multiply(component_size, n_size,
+                         "legacy eig context row sum values"),
+        sizeof(double), "legacy eig context row sum bytes"));
+      total_buffer_ = allocate_buffer(checked_multiply(
+        component_size, sizeof(double), "legacy eig context total bytes"));
+      eigenvalue_buffer_ = allocate_buffer(checked_multiply(
+        checked_multiply(component_size, n_size,
+                         "legacy eig context eigenvalue values"),
+        sizeof(double), "legacy eig context eigenvalue bytes"));
+      selected_value_buffer_ = allocate_buffer(checked_multiply(
+        checked_multiply(component_size, k_size,
+                         "legacy eig context selected values"),
+        sizeof(double), "legacy eig context selected value bytes"));
+      vector_buffer_ = allocate_buffer(checked_multiply(
+        checked_multiply(component_size, vector_stride,
+                         "legacy eig context vector values"),
+        sizeof(double), "legacy eig context vector bytes"));
+      component_gram_buffer_ = allocate_buffer(checked_multiply(
+        checked_multiply(component_size, cross_stride,
+                         "legacy eig context component Gram values"),
+        sizeof(double), "legacy eig context component Gram bytes"));
+      self_moment_buffer_ = allocate_buffer(checked_multiply(
+        component_size, sizeof(double),
+        "legacy eig context self moment bytes"));
+      solver_info_buffer_ = allocate_buffer(checked_multiply(
+        component_size, sizeof(int), "legacy eig context solver info bytes"));
+    }
+    const std::size_t metadata_words = checked_multiply(
+      10U, pair_size, "legacy eig context pair metadata words");
+    pair_metadata_buffer_ = allocate_buffer(checked_multiply(
+      metadata_words, sizeof(std::uintptr_t),
+      "legacy eig context pair metadata bytes"));
+    pair_cross_buffer_ = allocate_buffer(checked_multiply(
+      checked_multiply(pair_size, cross_stride,
+                       "legacy eig context pair cross values"),
+      sizeof(double), "legacy eig context pair cross bytes"));
+    device_result_buffer_ = allocate_buffer(checked_multiply(
+      pair_size, sizeof(DeviceCompactCiResult),
+      "legacy eig context result bytes"));
+
+    if (maximum_component_count_ > 0) {
+      auxiliary_streams_.reserve(
+        static_cast<std::size_t>(eig_lane_count_ - 1));
+      auxiliary_completion_events_.reserve(
+        static_cast<std::size_t>(eig_lane_count_ - 1));
+      for (int lane = 1; lane < eig_lane_count_; ++lane) {
+        auxiliary_streams_.push_back(
+          std::make_unique<TrackedCudaStream>());
+        auxiliary_completion_events_.push_back(
+          std::make_unique<TrackedCudaEvent>(false));
+      }
+      solvers_.reserve(static_cast<std::size_t>(eig_lane_count_));
+      for (int lane = 0; lane < eig_lane_count_; ++lane) {
+        solvers_.push_back(std::make_unique<VerticalCusolverHandle>(
+          lane_stream(lane)));
+      }
+      check_cusolver(cusolverDnDsyevd_bufferSize(
+        solvers_.front()->get(), CUSOLVER_EIG_MODE_VECTOR,
+        CUBLAS_FILL_MODE_LOWER, n_, component_matrices(), n_,
+        eigenvalues(), &eigen_lwork_),
+        "query persistent legacy eig workspace");
+      if (eigen_lwork_ <= 0) {
+        throw std::runtime_error(
+          "persistent legacy eig workspace query failed");
+      }
+      eigen_work_buffers_.reserve(static_cast<std::size_t>(eig_lane_count_));
+      for (int lane = 0; lane < eig_lane_count_; ++lane) {
+        eigen_work_buffers_.push_back(allocate_buffer(checked_multiply(
+          static_cast<std::size_t>(eigen_lwork_), sizeof(double),
+          "persistent legacy eig workspace bytes")));
+      }
+    }
+  }
+
+  FullCudaCiLegacyEigExecutionContext(
+      const FullCudaCiLegacyEigExecutionContext&) = delete;
+  FullCudaCiLegacyEigExecutionContext& operator=(
+      const FullCudaCiLegacyEigExecutionContext&) = delete;
+
+  cudaStream_t stream() const { return stream_->get(); }
+  cudaEvent_t completion() const { return completion_->get(); }
+  cudaEvent_t metadata_start() const { return metadata_start_->get(); }
+  cudaEvent_t metadata_end() const { return metadata_end_->get(); }
+  cudaEvent_t pair_start() const { return pair_start_->get(); }
+  cudaEvent_t pair_end() const { return pair_end_->get(); }
+  cudaEvent_t distance_start() const { return distance_start_->get(); }
+  cudaEvent_t distance_end() const { return distance_end_->get(); }
+  cudaEvent_t eig_start() const { return eig_start_->get(); }
+  cudaEvent_t eig_end() const { return eig_end_->get(); }
+  cudaEvent_t finalize_end() const { return finalize_end_->get(); }
+  cublasHandle_t blas() const { return blas_->get(); }
+  void* component_targets() const { return component_target_buffer_->get(); }
+  double* component_matrices() const {
+    return static_cast<double*>(component_matrix_buffer_->get());
+  }
+  double* row_sums() const {
+    return static_cast<double*>(row_sum_buffer_->get());
+  }
+  double* totals() const {
+    return static_cast<double*>(total_buffer_->get());
+  }
+  double* eigenvalues() const {
+    return static_cast<double*>(eigenvalue_buffer_->get());
+  }
+  double* selected_values() const {
+    return static_cast<double*>(selected_value_buffer_->get());
+  }
+  double* vectors() const {
+    return static_cast<double*>(vector_buffer_->get());
+  }
+  double* component_grams() const {
+    return static_cast<double*>(component_gram_buffer_->get());
+  }
+  double* self_moments() const {
+    return static_cast<double*>(self_moment_buffer_->get());
+  }
+  int* solver_info() const {
+    return static_cast<int*>(solver_info_buffer_->get());
+  }
+  void* pair_metadata() const { return pair_metadata_buffer_->get(); }
+  double* pair_cross() const {
+    return static_cast<double*>(pair_cross_buffer_->get());
+  }
+  void* device_results() const { return device_result_buffer_->get(); }
+  std::size_t device_bytes() const { return device_bytes_; }
+  std::size_t eig_workspace_bytes() const {
+    return checked_multiply(
+      checked_multiply(static_cast<std::size_t>(eig_lane_count_),
+                       static_cast<std::size_t>(eigen_lwork_),
+                       "legacy eig context total workspace values"),
+      sizeof(double), "legacy eig context total workspace bytes");
+  }
+  int eig_lane_count() const { return eig_lane_count_; }
+
+  void require_capacity(int component_count, int pair_count) const {
+    if (component_count < 0 || component_count > maximum_component_count_ ||
+        pair_count < 1 || pair_count > maximum_pair_count_) {
+      throw std::runtime_error(
+        "legacy eig execution context capacity is insufficient");
+    }
+  }
+
+  int submit_eigensolves(int component_count) {
+    if (component_count < 1 || component_count > maximum_component_count_ ||
+        eig_lane_count_ < 1) {
+      throw std::runtime_error(
+        "legacy eig context submission count is invalid");
+    }
+    const int active_lane_count = std::min(component_count, eig_lane_count_);
+    check_cuda(cudaEventRecord(eig_start(), stream()),
+               "record persistent legacy eig solve start");
+    for (int lane = 1; lane < active_lane_count; ++lane) {
+      check_cuda(cudaStreamWaitEvent(lane_stream(lane), eig_start(), 0),
+                 "gate persistent legacy eig lane");
+    }
+    const std::size_t cells = checked_multiply(
+      static_cast<std::size_t>(n_), static_cast<std::size_t>(n_),
+      "legacy eig context submission cells");
+    for (int component = 0; component < component_count; ++component) {
+      const int lane = component % active_lane_count;
+      check_cusolver(cusolverDnDsyevd(
+        solvers_[static_cast<std::size_t>(lane)]->get(),
+        CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
+        n_, component_matrices() + static_cast<std::size_t>(component) * cells,
+        n_, eigenvalues() + static_cast<std::size_t>(component) * n_,
+        static_cast<double*>(
+          eigen_work_buffers_[static_cast<std::size_t>(lane)]->get()),
+        eigen_lwork_, solver_info() + component),
+        "run persistent legacy full eig component");
+    }
+    for (int lane = 1; lane < active_lane_count; ++lane) {
+      cudaEvent_t lane_completion =
+        auxiliary_completion_events_[static_cast<std::size_t>(lane - 1)]->get();
+      check_cuda(cudaEventRecord(lane_completion, lane_stream(lane)),
+                 "record persistent legacy eig lane completion");
+      check_cuda(cudaStreamWaitEvent(stream(), lane_completion, 0),
+                 "join persistent legacy eig lane");
+    }
+    check_cuda(cudaEventRecord(eig_end(), stream()),
+               "record persistent legacy eig solve end");
+    return active_lane_count;
+  }
+
+ private:
+  std::unique_ptr<TrackedDeviceBuffer> allocate_buffer(std::size_t bytes) {
+    auto buffer = std::make_unique<TrackedDeviceBuffer>(bytes, accounting_);
+    device_bytes_ += bytes;
+    return buffer;
+  }
+
+  cudaStream_t lane_stream(int lane) const {
+    if (lane == 0) return stream_->get();
+    if (lane < 0 || lane >= eig_lane_count_) {
+      throw std::runtime_error("legacy eig lane index is invalid");
+    }
+    return auxiliary_streams_[static_cast<std::size_t>(lane - 1)]->get();
+  }
+
+  int device_id_ = -1;
+  int n_ = 0;
+  int num_col_ = 0;
+  int maximum_component_count_ = 0;
+  int maximum_pair_count_ = 0;
+  int eig_lane_count_ = 0;
+  int eigen_lwork_ = 0;
+  VerticalCallAccounting* accounting_ = nullptr;
+  std::size_t device_bytes_ = 0U;
+  std::unique_ptr<TrackedCudaStream> stream_;
+  std::unique_ptr<TrackedCudaEvent> completion_;
+  std::unique_ptr<TrackedCudaEvent> metadata_start_;
+  std::unique_ptr<TrackedCudaEvent> metadata_end_;
+  std::unique_ptr<TrackedCudaEvent> pair_start_;
+  std::unique_ptr<TrackedCudaEvent> pair_end_;
+  std::unique_ptr<TrackedCudaEvent> distance_start_;
+  std::unique_ptr<TrackedCudaEvent> distance_end_;
+  std::unique_ptr<TrackedCudaEvent> eig_start_;
+  std::unique_ptr<TrackedCudaEvent> eig_end_;
+  std::unique_ptr<TrackedCudaEvent> finalize_end_;
+  std::unique_ptr<VerticalCublasHandle> blas_;
+  std::vector<std::unique_ptr<TrackedCudaStream>> auxiliary_streams_;
+  std::vector<std::unique_ptr<TrackedCudaEvent>>
+    auxiliary_completion_events_;
+  std::vector<std::unique_ptr<VerticalCusolverHandle>> solvers_;
+  std::vector<std::unique_ptr<TrackedDeviceBuffer>> eigen_work_buffers_;
+  std::unique_ptr<TrackedDeviceBuffer> component_target_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> component_matrix_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> row_sum_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> total_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> eigenvalue_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> selected_value_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> vector_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> component_gram_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> self_moment_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> solver_info_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> pair_metadata_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> pair_cross_buffer_;
+  std::unique_ptr<TrackedDeviceBuffer> device_result_buffer_;
+};
+
+class FullCudaCiLegacyEigComponentCache {
+ public:
+  FullCudaCiLegacyEigComponentCache(
+      int device_id, int n, int num_col, std::size_t capacity_entries,
+      bool residual_bypass_enabled, int maximum_component_count,
+      int maximum_pair_count, int eig_lane_count)
+      : device_id_(device_id),
+        n_(n),
+        num_col_(num_col),
+        vector_value_count_(checked_multiply(
+          static_cast<std::size_t>(n), static_cast<std::size_t>(num_col),
+          "legacy eig cache vector values")),
+        entry_value_count_(vector_value_count_ +
+          static_cast<std::size_t>(num_col) + 2U),
+        capacity_entries_(capacity_entries),
+        residual_bypass_enabled_(residual_bypass_enabled),
+        storage_(checked_multiply(
+          checked_multiply(capacity_entries_, entry_value_count_,
+                           "legacy eig cache values"),
+          sizeof(double), "legacy eig cache bytes"), &accounting_) {
+    if (device_id_ < 0 || n_ < 2 || num_col_ < 1 ||
+        capacity_entries_ < 2U || maximum_component_count < 0 ||
+        maximum_pair_count < 0 || eig_lane_count < 0 ||
+        (eig_lane_count > 0 &&
+          (maximum_component_count < eig_lane_count ||
+           maximum_pair_count < 1))) {
+      throw std::runtime_error("legacy eig component cache shape is invalid");
+    }
+    int current_device = -1;
+    check_cuda(cudaGetDevice(&current_device),
+               "query legacy eig component cache device");
+    if (current_device != device_id_) {
+      throw std::runtime_error(
+        "legacy eig component cache device does not match caller");
+    }
+    keys_.reserve(capacity_entries_);
+    if (eig_lane_count > 0) {
+      execution_context_ =
+        std::make_unique<FullCudaCiLegacyEigExecutionContext>(
+          device_id_, n_, num_col_, maximum_component_count,
+          maximum_pair_count, eig_lane_count, &context_accounting_);
+    }
+  }
+
+  FullCudaCiLegacyEigComponentCache(
+      const FullCudaCiLegacyEigComponentCache&) = delete;
+  FullCudaCiLegacyEigComponentCache& operator=(
+      const FullCudaCiLegacyEigComponentCache&) = delete;
+
+  bool lookup(const std::string& key, std::size_t* slot,
+              FixedSpRoute* route, FixedSpStatus* status) {
+    if (slot == nullptr || route == nullptr || status == nullptr ||
+        !is_lower_sha256(key)) {
+      throw std::runtime_error("legacy eig component cache lookup is invalid");
+    }
+    lookup_count_ += 1U;
+    const auto found = keys_.find(key);
+    if (found == keys_.end()) {
+      miss_count_ += 1U;
+      return false;
+    }
+    hit_count_ += 1U;
+    *slot = found->second.slot;
+    *route = found->second.route;
+    *status = found->second.status;
+    return true;
+  }
+
+  bool reserve_slot(std::size_t* slot) {
+    if (slot == nullptr) {
+      throw std::runtime_error(
+        "legacy eig component cache reservation is invalid");
+    }
+    if (next_slot_ >= capacity_entries_) {
+      bypass_count_ += 1U;
+      return false;
+    }
+    *slot = next_slot_++;
+    return true;
+  }
+
+  void commit(const std::string& key, std::size_t slot,
+              FixedSpRoute route, FixedSpStatus status) {
+    if (!is_lower_sha256(key) || slot >= next_slot_ ||
+        route == FixedSpRoute::Unset ||
+        !is_successful_fixed_sp_status(status)) {
+      throw std::runtime_error("legacy eig component cache commit is invalid");
+    }
+    const auto inserted = keys_.emplace(
+      key, EntryMetadata{slot, route, status});
+    if (!inserted.second || inserted.first->second.slot != slot) {
+      throw std::runtime_error(
+        "legacy eig component cache key was committed twice");
+    }
+    insert_count_ += 1U;
+  }
+
+  double* vectors(std::size_t slot) const {
+    return entry(slot);
+  }
+  double* selected_values(std::size_t slot) const {
+    return entry(slot) + vector_value_count_;
+  }
+  double* total(std::size_t slot) const {
+    return selected_values(slot) + num_col_;
+  }
+  double* self_moment(std::size_t slot) const {
+    return total(slot) + 1;
+  }
+  bool residual_bypass_enabled() const noexcept {
+    return residual_bypass_enabled_;
+  }
+  bool contains(const std::string& key) const {
+    if (!is_lower_sha256(key)) {
+      throw std::runtime_error(
+        "legacy eig component cache contains key is invalid");
+    }
+    return keys_.find(key) != keys_.end();
+  }
+  FullCudaCiLegacyEigExecutionContext* execution_context() const noexcept {
+    return execution_context_.get();
+  }
+
+  FullCudaCiLegacyEigComponentCacheInfo info() const {
+    FullCudaCiLegacyEigComponentCacheInfo value;
+    value.device_id = device_id_;
+    value.n = n_;
+    value.num_col = num_col_;
+    value.capacity_entries = capacity_entries_;
+    value.entries = keys_.size();
+    value.bytes_per_entry = entry_value_count_ * sizeof(double);
+    value.device_bytes = storage_.bytes();
+    value.lookup_count = lookup_count_;
+    value.hit_count = hit_count_;
+    value.miss_count = miss_count_;
+    value.insert_count = insert_count_;
+    value.bypass_count = bypass_count_;
+    value.eig_lane_count = execution_context_ ?
+      execution_context_->eig_lane_count() : 0;
+    value.execution_context_device_bytes = execution_context_ ?
+      execution_context_->device_bytes() : 0U;
+    value.residual_bypass_enabled = residual_bypass_enabled_;
+    return value;
+  }
+
+ private:
+  struct EntryMetadata {
+    std::size_t slot = 0U;
+    FixedSpRoute route = FixedSpRoute::Unset;
+    FixedSpStatus status = FixedSpStatus::ErrInternalCuda;
+  };
+
+  double* entry(std::size_t slot) const {
+    if (slot >= capacity_entries_) {
+      throw std::runtime_error("legacy eig component cache slot is invalid");
+    }
+    return static_cast<double*>(storage_.get()) + slot * entry_value_count_;
+  }
+
+  int device_id_ = -1;
+  int n_ = 0;
+  int num_col_ = 0;
+  std::size_t vector_value_count_ = 0U;
+  std::size_t entry_value_count_ = 0U;
+  std::size_t capacity_entries_ = 0U;
+  bool residual_bypass_enabled_ = false;
+  std::size_t next_slot_ = 0U;
+  VerticalCallAccounting accounting_;
+  VerticalCallAccounting context_accounting_;
+  TrackedDeviceBuffer storage_;
+  std::unique_ptr<FullCudaCiLegacyEigExecutionContext> execution_context_;
+  std::unordered_map<std::string, EntryMetadata> keys_;
+  std::uint64_t lookup_count_ = 0U;
+  std::uint64_t hit_count_ = 0U;
+  std::uint64_t miss_count_ = 0U;
+  std::uint64_t insert_count_ = 0U;
+  std::uint64_t bypass_count_ = 0U;
+};
+
 namespace {
 
 std::shared_ptr<DcovComponentHandle> build_component(
@@ -1365,6 +1856,69 @@ void close_component(std::shared_ptr<DcovComponentHandle>* component) {
 }
 
 }  // namespace
+
+std::shared_ptr<FullCudaCiLegacyEigComponentCache>
+create_full_cuda_ci_legacy_eig_component_cache(
+    int n, int num_col, std::size_t budget_bytes,
+    bool residual_bypass_enabled, int maximum_component_count,
+    int maximum_pair_count, int eig_lane_count) {
+  if (n < 2 || num_col < 1 || num_col > 64 || budget_bytes == 0U ||
+      maximum_component_count < 0 || maximum_pair_count < 0 ||
+      eig_lane_count < 0 ||
+      (eig_lane_count > 0 &&
+        (maximum_component_count < eig_lane_count ||
+         maximum_pair_count < 1))) {
+    throw std::runtime_error(
+      "legacy eig component cache creation parameters are invalid");
+  }
+  const std::size_t vector_values = checked_multiply(
+    static_cast<std::size_t>(n), static_cast<std::size_t>(num_col),
+    "legacy eig cache vector values");
+  const std::size_t entry_bytes = checked_multiply(
+    vector_values + static_cast<std::size_t>(num_col) + 2U,
+    sizeof(double), "legacy eig cache entry bytes");
+  const std::size_t capacity = budget_bytes / entry_bytes;
+  if (capacity < 2U) {
+    throw std::runtime_error(
+      "legacy eig component cache budget holds fewer than two entries");
+  }
+  int device_id = -1;
+  check_cuda(cudaGetDevice(&device_id),
+             "capture legacy eig component cache device");
+  return std::make_shared<FullCudaCiLegacyEigComponentCache>(
+    device_id, n, num_col, capacity, residual_bypass_enabled,
+    maximum_component_count, maximum_pair_count, eig_lane_count);
+}
+
+FullCudaCiLegacyEigComponentCacheInfo
+full_cuda_ci_legacy_eig_component_cache_info(
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache) {
+  if (!cache) {
+    throw std::runtime_error("legacy eig component cache is null");
+  }
+  return cache->info();
+}
+
+std::vector<unsigned char>
+full_cuda_ci_legacy_eig_component_cache_contains(
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache,
+    const std::vector<std::string>& keys) {
+  if (!cache) {
+    throw std::runtime_error("legacy eig component cache is null");
+  }
+  std::unordered_set<std::string> unique;
+  unique.reserve(keys.size());
+  std::vector<unsigned char> present;
+  present.reserve(keys.size());
+  for (const std::string& key : keys) {
+    if (!unique.insert(key).second) {
+      throw std::runtime_error(
+        "legacy eig component cache contains keys are not unique");
+    }
+    present.push_back(cache->contains(key) ? 1U : 0U);
+  }
+  return present;
+}
 
 std::string full_cuda_ci_vertical_request_identity(
     const FullCudaCiVerticalRequest& request,
@@ -2351,7 +2905,9 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
     const FixedSpBatchHostView& batch,
     const FullCudaCiLegacyEigBatchRequest& request,
     const MultiPenaltyGcvCudaResidualConsumerView*
-      optimizer_residual_view) {
+      optimizer_residual_view,
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>&
+      component_cache) {
   const std::chrono::steady_clock::time_point total_start =
     std::chrono::steady_clock::now();
   const PreparedSInfo prepared_info = prepared_s_gpu_info(prepared_s);
@@ -2394,6 +2950,58 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
   const int component_count = static_cast<int>(component_targets.size());
   const int pair_count = static_cast<int>(request.pairs.size());
   const int num_col = request.num_col;
+  FullCudaCiLegacyEigComponentCacheInfo cache_info_before;
+  if (component_cache) {
+    cache_info_before = component_cache->info();
+    if (cache_info_before.n != batch.n ||
+        cache_info_before.num_col != num_col) {
+      throw std::runtime_error(
+        "legacy eig component cache shape does not match request");
+    }
+  }
+  std::vector<std::size_t> component_cache_slots(
+    static_cast<std::size_t>(component_count),
+    std::numeric_limits<std::size_t>::max());
+  std::vector<unsigned char> component_cache_hits(
+    static_cast<std::size_t>(component_count), 0U);
+  std::vector<unsigned char> component_cache_reservations(
+    static_cast<std::size_t>(component_count), 0U);
+  std::vector<FixedSpRoute> component_cache_routes(
+    static_cast<std::size_t>(component_count), FixedSpRoute::Unset);
+  std::vector<FixedSpStatus> component_cache_statuses(
+    static_cast<std::size_t>(component_count),
+    FixedSpStatus::ErrInternalCuda);
+  std::vector<int> component_to_miss(
+    static_cast<std::size_t>(component_count), -1);
+  std::vector<int> miss_targets;
+  std::vector<std::string> miss_keys;
+  miss_targets.reserve(static_cast<std::size_t>(component_count));
+  miss_keys.reserve(static_cast<std::size_t>(component_count));
+  for (int component = 0; component < component_count; ++component) {
+    const int target = component_targets[static_cast<std::size_t>(component)];
+    const std::string& key =
+      batch.target_keys[static_cast<std::size_t>(target)];
+    std::size_t slot = std::numeric_limits<std::size_t>::max();
+    const bool hit = component_cache && component_cache->lookup(
+      key, &slot,
+      &component_cache_routes[static_cast<std::size_t>(component)],
+      &component_cache_statuses[static_cast<std::size_t>(component)]);
+    component_cache_slots[static_cast<std::size_t>(component)] = slot;
+    component_cache_hits[static_cast<std::size_t>(component)] = hit ? 1U : 0U;
+    if (!hit) {
+      component_to_miss[static_cast<std::size_t>(component)] =
+        static_cast<int>(miss_targets.size());
+      miss_targets.push_back(target);
+      miss_keys.push_back(key);
+      if (component_cache && component_cache->reserve_slot(&slot)) {
+        component_cache_slots[static_cast<std::size_t>(component)] = slot;
+        component_cache_reservations[static_cast<std::size_t>(component)] = 1U;
+      }
+    }
+  }
+  const int miss_count = static_cast<int>(miss_targets.size());
+  const bool residual_cache_bypass = component_cache && miss_count == 0 &&
+    component_cache->residual_bypass_enabled();
   std::vector<int> left_components(static_cast<std::size_t>(pair_count));
   std::vector<int> right_components(static_cast<std::size_t>(pair_count));
   std::vector<unsigned long long> logical_sequence_ids(
@@ -2411,22 +3019,23 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
 
   const std::size_t n_size = static_cast<std::size_t>(batch.n);
   const std::size_t component_size = static_cast<std::size_t>(component_count);
+  const std::size_t miss_size = static_cast<std::size_t>(miss_count);
   const std::size_t pair_size = static_cast<std::size_t>(pair_count);
   const std::size_t k_size = static_cast<std::size_t>(num_col);
   const std::size_t cell_count = checked_multiply(
     n_size, n_size, "legacy eig component cells");
   const std::size_t component_cells = checked_multiply(
-    component_size, cell_count, "legacy eig component pool cells");
+    miss_size, cell_count, "legacy eig component pool cells");
   const std::size_t component_rows = checked_multiply(
-    component_size, n_size, "legacy eig component rows");
+    miss_size, n_size, "legacy eig component rows");
   const std::size_t vector_cells = checked_multiply(
-    checked_multiply(component_size, n_size,
+    checked_multiply(miss_size, n_size,
                      "legacy eig component vector rows"),
     k_size, "legacy eig component vectors");
   const std::size_t component_value_count = checked_multiply(
-    component_size, k_size, "legacy eig component values");
+    miss_size, k_size, "legacy eig component values");
   const std::size_t component_gram_cells = checked_multiply(
-    checked_multiply(component_size, k_size,
+    checked_multiply(miss_size, k_size,
                      "legacy eig component Gram rows"),
     k_size, "legacy eig component Gram cells");
   const std::size_t pair_cross_cells = checked_multiply(
@@ -2435,15 +3044,15 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
   const std::size_t result_bytes = checked_multiply(
     pair_size, sizeof(DeviceCompactCiResult),
     "legacy eig compact result bytes");
-  const std::size_t component_target_bytes = checked_multiply(
-    component_size, sizeof(int), "legacy eig component target bytes");
-  const std::size_t pair_index_bytes = checked_multiply(
-    pair_size, sizeof(int), "legacy eig pair index bytes");
-  const std::size_t pair_sequence_bytes = checked_multiply(
-    pair_size, sizeof(unsigned long long),
-    "legacy eig pair sequence bytes");
-  const std::size_t pair_pointer_bytes = checked_multiply(
-    pair_size, sizeof(double*), "legacy eig pair pointer bytes");
+  const std::size_t component_target_copy_bytes = checked_multiply(
+    miss_size, sizeof(int), "legacy eig component target copy bytes");
+  static_assert(sizeof(std::uintptr_t) == sizeof(unsigned long long),
+                "legacy eig metadata requires 64-bit device pointers");
+  const std::size_t pair_metadata_word_count = checked_multiply(
+    10U, pair_size, "legacy eig pair metadata words");
+  const std::size_t pair_metadata_bytes = checked_multiply(
+    pair_metadata_word_count, sizeof(std::uintptr_t),
+    "legacy eig pair metadata bytes");
 
   const FullCudaCiVerticalResourceSnapshot resources_before =
     full_cuda_ci_vertical_resource_snapshot();
@@ -2462,21 +3071,43 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
   diagnostics.referenced_component_count = component_count;
   diagnostics.component_capacity = request.component_capacity;
   diagnostics.num_col = num_col;
+  diagnostics.component_cache_persistent_request_count =
+    component_cache ? component_count : 0;
+  diagnostics.component_cache_persistent_hit_count =
+    component_count - miss_count;
+  diagnostics.component_cache_persistent_miss_count =
+    component_cache ? miss_count : 0;
+  diagnostics.component_cache_persistent_capacity_entries =
+    cache_info_before.capacity_entries;
+  diagnostics.component_cache_persistent_entries_before =
+    cache_info_before.entries;
+  diagnostics.component_cache_persistent_device_bytes =
+    cache_info_before.device_bytes;
   diagnostics.request_identity_authenticated = true;
   diagnostics.prepared_identity_authenticated = true;
   diagnostics.target_identity_authenticated = true;
   diagnostics.deterministic_logical_order = true;
   diagnostics.component_capacity_respected =
     component_count <= request.component_capacity;
-  diagnostics.residual_producer_semantic_identity =
-    optimizer_residual_view == nullptr ?
+  diagnostics.residual_producer_semantic_identity = residual_cache_bypass ?
+    kLegacyComponentCacheResidualBypassSemanticIdentity :
+    (optimizer_residual_view == nullptr ?
       kFixedSpResidualProducerSemanticIdentity :
-      kOptimizerResidualProducerSemanticIdentity;
-  diagnostics.residual_solve_bypassed = optimizer_residual_view != nullptr;
+      kOptimizerResidualProducerSemanticIdentity);
+  diagnostics.residual_solve_bypassed =
+    optimizer_residual_view != nullptr || residual_cache_bypass;
+  diagnostics.residual_solve_bypassed_by_component_cache =
+    residual_cache_bypass;
+  diagnostics.component_cache_persistent_residual_bypass_count =
+    residual_cache_bypass ? 1 : 0;
 
   int caller_device_id = -1;
   check_cuda(cudaGetDevice(&caller_device_id),
              "capture caller CUDA device for legacy eig batch");
+  if (component_cache && cache_info_before.device_id != caller_device_id) {
+    throw std::runtime_error(
+      "legacy eig component cache device does not match batch device");
+  }
   std::shared_ptr<DeviceResidualBatch> residual_token;
   DeviceResidualConsumerView residual_view;
   bool consumer_registered = false;
@@ -2484,7 +3115,38 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
   try {
     const std::chrono::steady_clock::time_point residual_start =
       std::chrono::steady_clock::now();
-    if (optimizer_residual_view == nullptr) {
+    if (residual_cache_bypass) {
+      residual_view.n = batch.n;
+      residual_view.target_count = batch.target_count;
+      residual_view.device_id = cache_info_before.device_id;
+      residual_view.target_keys = batch.target_keys;
+      residual_view.executed_routes.assign(
+        static_cast<std::size_t>(batch.target_count), FixedSpRoute::Unset);
+      residual_view.solver_statuses.assign(
+        static_cast<std::size_t>(batch.target_count),
+        FixedSpStatus::ErrInternalCuda);
+      for (int component = 0; component < component_count; ++component) {
+        const int target =
+          component_targets[static_cast<std::size_t>(component)];
+        residual_view.executed_routes[static_cast<std::size_t>(target)] =
+          component_cache_routes[static_cast<std::size_t>(component)];
+        residual_view.solver_statuses[static_cast<std::size_t>(target)] =
+          component_cache_statuses[static_cast<std::size_t>(component)];
+      }
+      for (const FullCudaCiExactBatchPairRequest& pair : request.pairs) {
+        const std::size_t left =
+          static_cast<std::size_t>(pair.left_target_index);
+        const std::size_t right =
+          static_cast<std::size_t>(pair.right_target_index);
+        if (residual_view.executed_routes[left] == FixedSpRoute::Unset ||
+            residual_view.executed_routes[right] == FixedSpRoute::Unset ||
+            !is_successful_fixed_sp_status(residual_view.solver_statuses[left]) ||
+            !is_successful_fixed_sp_status(residual_view.solver_statuses[right])) {
+          throw std::runtime_error(
+            "legacy eig component cache residual metadata is incomplete");
+        }
+      }
+    } else if (optimizer_residual_view == nullptr) {
       residual_token = solve_fixed_sp_batch(prepared_s, batch);
       residual_view = acquire_device_residual_consumer_view(residual_token);
     } else {
@@ -2508,8 +3170,9 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
     if (residual_view.target_keys != batch.target_keys ||
         residual_view.n != batch.n ||
         residual_view.target_count != batch.target_count ||
-        residual_view.residuals == nullptr ||
-        residual_view.producer_completion_event == nullptr) {
+        (!residual_cache_bypass &&
+          (residual_view.residuals == nullptr ||
+           residual_view.producer_completion_event == nullptr))) {
       throw std::runtime_error(
         "legacy eig residual view does not match the authenticated request");
     }
@@ -2523,7 +3186,28 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
           "legacy eig residual path observed forbidden numeric D2H");
       }
     }
-    diagnostics.residuals_device_resident = true;
+    diagnostics.residuals_device_resident = !residual_cache_bypass;
+    for (int component = 0;
+         !residual_cache_bypass && component < component_count; ++component) {
+      if (component_cache_hits[static_cast<std::size_t>(component)] == 0U) {
+        continue;
+      }
+      const int target =
+        component_targets[static_cast<std::size_t>(component)];
+      if (component_cache_routes[static_cast<std::size_t>(component)] !=
+          residual_view.executed_routes[static_cast<std::size_t>(target)]) {
+        diagnostics.component_cache_persistent_route_mismatch_count += 1;
+      }
+      if (component_cache_statuses[static_cast<std::size_t>(component)] !=
+          residual_view.solver_statuses[static_cast<std::size_t>(target)]) {
+        diagnostics.component_cache_persistent_status_mismatch_count += 1;
+      }
+    }
+    if (diagnostics.component_cache_persistent_route_mismatch_count != 0 ||
+        diagnostics.component_cache_persistent_status_mismatch_count != 0) {
+      throw std::runtime_error(
+        "legacy eig component cache residual route identity mismatch");
+    }
     diagnostics.residual_solve_host_ms = residual_token ?
       host_elapsed_ms(residual_start) : 0.0;
     check_cuda(cudaSetDevice(residual_view.device_id),
@@ -2531,287 +3215,311 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
 
     const std::chrono::steady_clock::time_point dcov_start =
       std::chrono::steady_clock::now();
-    TrackedCudaStream stream;
-    TrackedCudaEvent completion(true);
-    TrackedCudaEvent metadata_start(true);
-    TrackedCudaEvent metadata_end(true);
-    TrackedCudaEvent distance_start(true);
-    TrackedCudaEvent distance_end(true);
-    TrackedCudaEvent eig_start(true);
-    TrackedCudaEvent eig_end(true);
-    TrackedCudaEvent finalize_end(true);
-    TrackedCudaEvent pair_start(true);
-    TrackedCudaEvent pair_end(true);
-    VerticalCublasHandle blas(stream.get());
-    VerticalCusolverHandle solver(stream.get());
-    check_cuda(cudaStreamWaitEvent(
-      stream.get(), residual_view.producer_completion_event, 0),
-      "wait for legacy eig residual producer");
+    FullCudaCiLegacyEigExecutionContext* execution_context =
+      component_cache ? component_cache->execution_context() : nullptr;
+    const bool persistent_execution_context = execution_context != nullptr;
+    std::unique_ptr<FullCudaCiLegacyEigExecutionContext>
+      local_execution_context;
+    if (execution_context == nullptr) {
+      local_execution_context =
+        std::make_unique<FullCudaCiLegacyEigExecutionContext>(
+          residual_view.device_id, batch.n, num_col, miss_count, pair_count,
+          miss_count > 0 ? 1 : 0, &accounting);
+      execution_context = local_execution_context.get();
+    }
+    execution_context->require_capacity(miss_count, pair_count);
+    diagnostics.component_eig_configured_lane_count =
+      execution_context->eig_lane_count();
+    diagnostics.component_execution_context_reuse_count =
+      persistent_execution_context ? 1 : 0;
+    diagnostics.component_execution_context_device_bytes =
+      persistent_execution_context ? execution_context->device_bytes() : 0U;
+    cudaStream_t stream = execution_context->stream();
+    if (!residual_cache_bypass) {
+      check_cuda(cudaStreamWaitEvent(
+        stream, residual_view.producer_completion_event, 0),
+        "wait for legacy eig residual producer");
+    }
 
-    TrackedDeviceBuffer component_target_buffer(
-      component_target_bytes, &accounting);
-    TrackedDeviceBuffer component_matrix_buffer(
-      checked_multiply(component_cells, sizeof(double),
-                       "legacy eig component matrix bytes"), &accounting);
-    TrackedDeviceBuffer row_sum_buffer(
-      checked_multiply(component_rows, sizeof(double),
-                       "legacy eig row sum bytes"), &accounting);
-    TrackedDeviceBuffer total_buffer(
-      checked_multiply(component_size, sizeof(double),
-                       "legacy eig total bytes"), &accounting);
-    TrackedDeviceBuffer eigenvalue_buffer(
-      checked_multiply(component_rows, sizeof(double),
-                       "legacy eig eigenvalue bytes"), &accounting);
-    TrackedDeviceBuffer selected_value_buffer(
-      checked_multiply(component_value_count, sizeof(double),
-                       "legacy eig selected value bytes"), &accounting);
-    TrackedDeviceBuffer vector_buffer(
-      checked_multiply(vector_cells, sizeof(double),
-                       "legacy eig vector bytes"), &accounting);
-    TrackedDeviceBuffer component_gram_buffer(
-      checked_multiply(component_gram_cells, sizeof(double),
-                       "legacy eig component Gram bytes"), &accounting);
-    TrackedDeviceBuffer self_moment_buffer(
-      checked_multiply(component_size, sizeof(double),
-                       "legacy eig moment bytes"), &accounting);
-    TrackedDeviceBuffer left_component_buffer(pair_index_bytes, &accounting);
-    TrackedDeviceBuffer right_component_buffer(pair_index_bytes, &accounting);
-    TrackedDeviceBuffer sequence_buffer(pair_sequence_bytes, &accounting);
-    TrackedDeviceBuffer pair_cross_buffer(
-      checked_multiply(pair_cross_cells, sizeof(double),
-                       "legacy eig pair cross bytes"), &accounting);
-    TrackedDeviceBuffer device_result(result_bytes, &accounting);
-    TrackedDeviceBuffer solver_info_buffer(
-      checked_multiply(component_size, sizeof(int),
-                       "legacy eig solver info bytes"), &accounting);
-    TrackedDeviceBuffer left_pointer_buffer(pair_pointer_bytes, &accounting);
-    TrackedDeviceBuffer right_pointer_buffer(pair_pointer_bytes, &accounting);
-    TrackedDeviceBuffer cross_pointer_buffer(pair_pointer_bytes, &accounting);
-
-    std::vector<double*> left_pointers(pair_size);
-    std::vector<double*> right_pointers(pair_size);
-    std::vector<double*> cross_pointers(pair_size);
-    double* vectors = static_cast<double*>(vector_buffer.get());
-    double* pair_cross = static_cast<double*>(pair_cross_buffer.get());
+    std::vector<std::uintptr_t> pair_metadata(pair_metadata_word_count, 0U);
+    double* vectors = miss_count > 0 ? execution_context->vectors() : nullptr;
+    double* selected_values = miss_count > 0 ?
+      execution_context->selected_values() : nullptr;
+    double* totals = miss_count > 0 ? execution_context->totals() : nullptr;
+    double* self_moments = miss_count > 0 ?
+      execution_context->self_moments() : nullptr;
+    double* pair_cross = execution_context->pair_cross();
     const std::size_t vector_stride = checked_multiply(
       n_size, k_size, "legacy eig vector stride");
     const std::size_t cross_stride = checked_multiply(
       k_size, k_size, "legacy eig cross stride");
-    for (int index = 0; index < pair_count; ++index) {
-      left_pointers[static_cast<std::size_t>(index)] = vectors +
-        static_cast<std::size_t>(
-          left_components[static_cast<std::size_t>(index)]) * vector_stride;
-      right_pointers[static_cast<std::size_t>(index)] = vectors +
-        static_cast<std::size_t>(
-          right_components[static_cast<std::size_t>(index)]) * vector_stride;
-      cross_pointers[static_cast<std::size_t>(index)] = pair_cross +
-        static_cast<std::size_t>(index) * cross_stride;
-    }
-
-    check_cuda(cudaEventRecord(metadata_start.get(), stream.get()),
-               "record legacy eig metadata start");
-    check_cuda(cudaMemcpyAsync(
-      component_target_buffer.get(), component_targets.data(),
-      component_target_bytes, cudaMemcpyHostToDevice, stream.get()),
-      "copy legacy eig component targets");
-    check_cuda(cudaMemcpyAsync(
-      left_component_buffer.get(), left_components.data(), pair_index_bytes,
-      cudaMemcpyHostToDevice, stream.get()),
-      "copy legacy eig left components");
-    check_cuda(cudaMemcpyAsync(
-      right_component_buffer.get(), right_components.data(), pair_index_bytes,
-      cudaMemcpyHostToDevice, stream.get()),
-      "copy legacy eig right components");
-    check_cuda(cudaMemcpyAsync(
-      sequence_buffer.get(), logical_sequence_ids.data(), pair_sequence_bytes,
-      cudaMemcpyHostToDevice, stream.get()),
-      "copy legacy eig logical sequence IDs");
-    check_cuda(cudaMemcpyAsync(
-      left_pointer_buffer.get(), left_pointers.data(), pair_pointer_bytes,
-      cudaMemcpyHostToDevice, stream.get()),
-      "copy legacy eig left pointers");
-    check_cuda(cudaMemcpyAsync(
-      right_pointer_buffer.get(), right_pointers.data(), pair_pointer_bytes,
-      cudaMemcpyHostToDevice, stream.get()),
-      "copy legacy eig right pointers");
-    check_cuda(cudaMemcpyAsync(
-      cross_pointer_buffer.get(), cross_pointers.data(), pair_pointer_bytes,
-      cudaMemcpyHostToDevice, stream.get()),
-      "copy legacy eig output pointers");
-    check_cuda(cudaEventRecord(metadata_end.get(), stream.get()),
-               "record legacy eig metadata end");
-    diagnostics.metadata_h2d_count = 7;
-    diagnostics.metadata_h2d_bytes = component_target_bytes +
-      2U * pair_index_bytes + pair_sequence_bytes +
-      3U * pair_pointer_bytes;
-
-    check_cuda(cudaEventRecord(distance_start.get(), stream.get()),
-               "record legacy eig distance start");
-    const dim3 distance_grid(
-      static_cast<unsigned int>(batch.n),
-      static_cast<unsigned int>(component_count), 1U);
-    build_distance_rows_batch_kernel<<<
-      distance_grid, kVerticalBlockSize, 0, stream.get()
-    >>>(
-      residual_view.residuals,
-      static_cast<const int*>(component_target_buffer.get()), batch.n,
-      component_count, cell_count,
-      static_cast<double*>(component_matrix_buffer.get()),
-      static_cast<double*>(row_sum_buffer.get()));
-    check_cuda(cudaGetLastError(), "launch legacy eig distance rows");
-    reduce_rows_batch_kernel<<<
-      static_cast<unsigned int>(component_count), kVerticalBlockSize,
-      0, stream.get()
-    >>>(
-      static_cast<const double*>(row_sum_buffer.get()), batch.n,
-      component_count, static_cast<double*>(total_buffer.get()));
-    check_cuda(cudaGetLastError(), "launch legacy eig distance totals");
-    check_cuda(cudaEventRecord(distance_end.get(), stream.get()),
-               "record legacy eig distance end");
-
-    int eigen_lwork = 0;
-    check_cusolver(cusolverDnDsyevd_bufferSize(
-      solver.get(), CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
-      batch.n, static_cast<double*>(component_matrix_buffer.get()), batch.n,
-      static_cast<double*>(eigenvalue_buffer.get()), &eigen_lwork),
-      "query legacy eig workspace");
-    if (eigen_lwork <= 0) {
-      throw std::runtime_error("legacy eig workspace query failed");
-    }
-    TrackedDeviceBuffer eigen_work_buffer(
-      checked_multiply(static_cast<std::size_t>(eigen_lwork), sizeof(double),
-                       "legacy eig solver workspace bytes"), &accounting);
-    diagnostics.eig_workspace_bytes = eigen_work_buffer.bytes();
-    check_cuda(cudaEventRecord(eig_start.get(), stream.get()),
-               "record legacy eig solve start");
-    double* component_matrices =
-      static_cast<double*>(component_matrix_buffer.get());
-    double* all_eigenvalues =
-      static_cast<double*>(eigenvalue_buffer.get());
-    int* solver_info = static_cast<int*>(solver_info_buffer.get());
+    struct ComponentPointers {
+      double* vectors = nullptr;
+      double* selected_values = nullptr;
+      double* total = nullptr;
+      double* self_moment = nullptr;
+    };
+    std::vector<ComponentPointers> component_pointers(component_size);
     for (int component = 0; component < component_count; ++component) {
-      check_cusolver(cusolverDnDsyevd(
-        solver.get(), CUSOLVER_EIG_MODE_VECTOR, CUBLAS_FILL_MODE_LOWER,
-        batch.n,
-        component_matrices + static_cast<std::size_t>(component) * cell_count,
-        batch.n,
-        all_eigenvalues + static_cast<std::size_t>(component) * n_size,
-        static_cast<double*>(eigen_work_buffer.get()), eigen_lwork,
-        solver_info + component), "run legacy full eig component");
+      ComponentPointers& pointers =
+        component_pointers[static_cast<std::size_t>(component)];
+      if (component_cache_hits[static_cast<std::size_t>(component)] != 0U) {
+        const std::size_t slot =
+          component_cache_slots[static_cast<std::size_t>(component)];
+        pointers.vectors = component_cache->vectors(slot);
+        pointers.selected_values = component_cache->selected_values(slot);
+        pointers.total = component_cache->total(slot);
+        pointers.self_moment = component_cache->self_moment(slot);
+      } else {
+        const std::size_t miss = static_cast<std::size_t>(
+          component_to_miss[static_cast<std::size_t>(component)]);
+        pointers.vectors = vectors + miss * vector_stride;
+        pointers.selected_values = selected_values + miss * k_size;
+        pointers.total = totals + miss;
+        pointers.self_moment = self_moments + miss;
+      }
     }
-    check_cuda(cudaEventRecord(eig_end.get(), stream.get()),
-               "record legacy eig solve end");
-    select_center_legacy_eigencomponent_kernel<<<
-      static_cast<unsigned int>(component_count), kVerticalBlockSize,
-      n_size * sizeof(unsigned char), stream.get()
-    >>>(
-      all_eigenvalues, component_matrices, batch.n, num_col, component_count,
-      static_cast<double*>(selected_value_buffer.get()), vectors);
-    check_cuda(cudaGetLastError(),
-               "launch legacy eig component selection");
+    for (int index = 0; index < pair_count; ++index) {
+      const std::size_t pair = static_cast<std::size_t>(index);
+      const ComponentPointers& left = component_pointers[
+        static_cast<std::size_t>(left_components[pair])];
+      const ComponentPointers& right = component_pointers[
+        static_cast<std::size_t>(right_components[pair])];
+      pair_metadata[pair] = static_cast<std::uintptr_t>(
+        logical_sequence_ids[pair]);
+      pair_metadata[pair_size + pair] =
+        reinterpret_cast<std::uintptr_t>(left.vectors);
+      pair_metadata[2U * pair_size + pair] =
+        reinterpret_cast<std::uintptr_t>(right.vectors);
+      pair_metadata[3U * pair_size + pair] = reinterpret_cast<std::uintptr_t>(
+        pair_cross + pair * cross_stride);
+      pair_metadata[4U * pair_size + pair] =
+        reinterpret_cast<std::uintptr_t>(left.selected_values);
+      pair_metadata[5U * pair_size + pair] =
+        reinterpret_cast<std::uintptr_t>(right.selected_values);
+      pair_metadata[6U * pair_size + pair] =
+        reinterpret_cast<std::uintptr_t>(left.total);
+      pair_metadata[7U * pair_size + pair] =
+        reinterpret_cast<std::uintptr_t>(right.total);
+      pair_metadata[8U * pair_size + pair] =
+        reinterpret_cast<std::uintptr_t>(left.self_moment);
+      pair_metadata[9U * pair_size + pair] =
+        reinterpret_cast<std::uintptr_t>(right.self_moment);
+    }
+
+    check_cuda(cudaEventRecord(execution_context->metadata_start(), stream),
+               "record legacy eig metadata start");
+    if (miss_count > 0) {
+      check_cuda(cudaMemcpyAsync(
+        execution_context->component_targets(), miss_targets.data(),
+        component_target_copy_bytes, cudaMemcpyHostToDevice, stream),
+        "copy legacy eig component targets");
+    }
+    check_cuda(cudaMemcpyAsync(
+      execution_context->pair_metadata(), pair_metadata.data(),
+      pair_metadata_bytes, cudaMemcpyHostToDevice, stream),
+      "copy legacy eig pair metadata");
+    check_cuda(cudaEventRecord(execution_context->metadata_end(), stream),
+               "record legacy eig metadata end");
+    diagnostics.metadata_h2d_count = 1 + (miss_count > 0 ? 1 : 0);
+    diagnostics.metadata_h2d_bytes =
+      component_target_copy_bytes + pair_metadata_bytes;
+
     const double one = 1.0;
     const double zero = 0.0;
-    check_cublas(cublasDgemmStridedBatched(
-      blas.get(), CUBLAS_OP_T, CUBLAS_OP_N,
-      num_col, num_col, batch.n, &one,
-      vectors, batch.n, static_cast<long long>(vector_stride),
-      vectors, batch.n, static_cast<long long>(vector_stride),
-      &zero, static_cast<double*>(component_gram_buffer.get()), num_col,
-      static_cast<long long>(cross_stride), component_count),
-      "form legacy eig component Gram matrices");
-    reduce_legacy_self_moment_kernel<<<
-      static_cast<unsigned int>(component_count), kVerticalBlockSize,
-      0, stream.get()
-    >>>(
-      static_cast<const double*>(component_gram_buffer.get()),
-      static_cast<const double*>(selected_value_buffer.get()),
-      component_count, num_col,
-      static_cast<double*>(self_moment_buffer.get()));
-    check_cuda(cudaGetLastError(), "launch legacy eig self moments");
-    check_cuda(cudaEventRecord(finalize_end.get(), stream.get()),
-               "record legacy eig finalize end");
+    if (miss_count > 0) {
+      check_cuda(cudaEventRecord(execution_context->distance_start(), stream),
+                 "record legacy eig distance start");
+      const dim3 distance_grid(
+        static_cast<unsigned int>(batch.n),
+        static_cast<unsigned int>(miss_count), 1U);
+      build_distance_rows_batch_kernel<<<
+        distance_grid, kVerticalBlockSize, 0, stream
+      >>>(
+        residual_view.residuals,
+        static_cast<const int*>(execution_context->component_targets()), batch.n,
+        miss_count, cell_count,
+        execution_context->component_matrices(),
+        execution_context->row_sums());
+      check_cuda(cudaGetLastError(), "launch legacy eig distance rows");
+      reduce_rows_batch_kernel<<<
+        static_cast<unsigned int>(miss_count), kVerticalBlockSize,
+        0, stream
+      >>>(
+        execution_context->row_sums(), batch.n,
+        miss_count, execution_context->totals());
+      check_cuda(cudaGetLastError(), "launch legacy eig distance totals");
+      check_cuda(cudaEventRecord(execution_context->distance_end(), stream),
+                 "record legacy eig distance end");
+      diagnostics.eig_workspace_bytes =
+        execution_context->eig_workspace_bytes();
+      diagnostics.component_eig_active_lane_count =
+        execution_context->submit_eigensolves(miss_count);
+      diagnostics.component_eig_multilane_batch_count =
+        diagnostics.component_eig_active_lane_count > 1 ? 1 : 0;
+      double* component_matrices = execution_context->component_matrices();
+      double* all_eigenvalues = execution_context->eigenvalues();
+      select_center_legacy_eigencomponent_kernel<<<
+        static_cast<unsigned int>(miss_count), kVerticalBlockSize,
+        n_size * sizeof(unsigned char), stream
+      >>>(
+        all_eigenvalues, component_matrices, batch.n, num_col, miss_count,
+        execution_context->selected_values(), vectors);
+      check_cuda(cudaGetLastError(),
+                 "launch legacy eig component selection");
+      check_cublas(cublasDgemmStridedBatched(
+        execution_context->blas(), CUBLAS_OP_T, CUBLAS_OP_N,
+        num_col, num_col, batch.n, &one,
+        vectors, batch.n, static_cast<long long>(vector_stride),
+        vectors, batch.n, static_cast<long long>(vector_stride),
+        &zero, execution_context->component_grams(), num_col,
+        static_cast<long long>(cross_stride), miss_count),
+        "form legacy eig component Gram matrices");
+      reduce_legacy_self_moment_kernel<<<
+        static_cast<unsigned int>(miss_count), kVerticalBlockSize,
+        0, stream
+      >>>(
+        execution_context->component_grams(),
+        execution_context->selected_values(),
+        miss_count, num_col,
+        execution_context->self_moments());
+      check_cuda(cudaGetLastError(), "launch legacy eig self moments");
+      const std::size_t selected_value_bytes = k_size * sizeof(double);
+      const std::size_t vector_bytes = vector_stride * sizeof(double);
+      for (int component = 0; component < component_count; ++component) {
+        if (component_cache_reservations[
+              static_cast<std::size_t>(component)] == 0U) {
+          continue;
+        }
+        const std::size_t miss = static_cast<std::size_t>(
+          component_to_miss[static_cast<std::size_t>(component)]);
+        const std::size_t slot =
+          component_cache_slots[static_cast<std::size_t>(component)];
+        check_cuda(cudaMemcpyAsync(
+          component_cache->vectors(slot), vectors + miss * vector_stride,
+          vector_bytes, cudaMemcpyDeviceToDevice, stream),
+          "store legacy eig cached vectors");
+        check_cuda(cudaMemcpyAsync(
+          component_cache->selected_values(slot),
+          selected_values + miss * k_size, selected_value_bytes,
+          cudaMemcpyDeviceToDevice, stream),
+          "store legacy eig cached eigenvalues");
+        check_cuda(cudaMemcpyAsync(
+          component_cache->total(slot), totals + miss, sizeof(double),
+          cudaMemcpyDeviceToDevice, stream),
+          "store legacy eig cached total");
+        check_cuda(cudaMemcpyAsync(
+          component_cache->self_moment(slot), self_moments + miss,
+          sizeof(double), cudaMemcpyDeviceToDevice, stream),
+          "store legacy eig cached self moment");
+        diagnostics.component_cache_persistent_store_d2d_bytes +=
+          vector_bytes + selected_value_bytes + 2U * sizeof(double);
+        diagnostics.component_cache_persistent_insert_count += 1;
+      }
+      check_cuda(cudaEventRecord(execution_context->finalize_end(), stream),
+                 "record legacy eig finalize end");
+    }
 
-    diagnostics.component_build_count = component_count;
-    diagnostics.cuda_full_eig_count = component_count;
+    diagnostics.component_build_count = miss_count;
+    diagnostics.cuda_full_eig_count = miss_count;
     diagnostics.components_device_resident = true;
-    diagnostics.persistent_component_bytes =
-      selected_value_buffer.bytes() + vector_buffer.bytes() +
-      total_buffer.bytes() + self_moment_buffer.bytes();
+    diagnostics.persistent_component_bytes = miss_size *
+      (vector_stride * sizeof(double) + k_size * sizeof(double) +
+       2U * sizeof(double));
 
-    check_cuda(cudaEventRecord(pair_start.get(), stream.get()),
+    check_cuda(cudaEventRecord(execution_context->pair_start(), stream),
                "record legacy eig pair start");
+    std::uintptr_t* device_pair_metadata =
+      static_cast<std::uintptr_t*>(execution_context->pair_metadata());
     check_cublas(cublasDgemmBatched(
-      blas.get(), CUBLAS_OP_T, CUBLAS_OP_N,
+      execution_context->blas(), CUBLAS_OP_T, CUBLAS_OP_N,
       num_col, num_col, batch.n, &one,
-      reinterpret_cast<const double**>(left_pointer_buffer.get()), batch.n,
-      reinterpret_cast<const double**>(right_pointer_buffer.get()), batch.n,
-      &zero, reinterpret_cast<double**>(cross_pointer_buffer.get()), num_col,
+      reinterpret_cast<const double**>(device_pair_metadata + pair_size),
+      batch.n,
+      reinterpret_cast<const double**>(device_pair_metadata +
+                                       2U * pair_size), batch.n,
+      &zero,
+      reinterpret_cast<double**>(device_pair_metadata + 3U * pair_size),
+      num_col,
       pair_count), "form legacy eig pair cross matrices");
     evaluate_legacy_eig_pair_batch_kernel<<<
       static_cast<unsigned int>(pair_count), kVerticalBlockSize,
-      0, stream.get()
+      0, stream
     >>>(
-      static_cast<const double*>(pair_cross_buffer.get()),
-      static_cast<const double*>(selected_value_buffer.get()),
-      static_cast<const double*>(total_buffer.get()),
-      static_cast<const double*>(self_moment_buffer.get()),
-      static_cast<const int*>(left_component_buffer.get()),
-      static_cast<const int*>(right_component_buffer.get()),
-      static_cast<const unsigned long long*>(sequence_buffer.get()),
+      execution_context->pair_cross(),
+      reinterpret_cast<const double* const*>(
+        device_pair_metadata + 4U * pair_size),
+      reinterpret_cast<const double* const*>(
+        device_pair_metadata + 5U * pair_size),
+      reinterpret_cast<const double* const*>(
+        device_pair_metadata + 6U * pair_size),
+      reinterpret_cast<const double* const*>(
+        device_pair_metadata + 7U * pair_size),
+      reinterpret_cast<const double* const*>(
+        device_pair_metadata + 8U * pair_size),
+      reinterpret_cast<const double* const*>(
+        device_pair_metadata + 9U * pair_size),
+      reinterpret_cast<const unsigned long long*>(device_pair_metadata),
       pair_count, num_col, batch.n, kCanonicalAlpha,
-      static_cast<DeviceCompactCiResult*>(device_result.get()));
+      static_cast<DeviceCompactCiResult*>(execution_context->device_results()));
     check_cuda(cudaGetLastError(), "launch legacy eig pair evaluation");
-    check_cuda(cudaEventRecord(pair_end.get(), stream.get()),
+    check_cuda(cudaEventRecord(execution_context->pair_end(), stream),
                "record legacy eig pair end");
     diagnostics.pair_evaluation_count = pair_count;
     diagnostics.cuda_pair_count = pair_count;
     diagnostics.cuda_gamma_count = pair_count;
-    diagnostics.pair_workspace_bytes = pair_cross_buffer.bytes();
+    diagnostics.pair_workspace_bytes =
+      checked_multiply(pair_cross_cells, sizeof(double),
+                       "legacy eig pair cross diagnostic bytes");
 
     std::vector<DeviceCompactCiResult> host_results(pair_size);
-    std::vector<int> host_solver_info(component_size, -1);
+    std::vector<int> host_solver_info(miss_size, -1);
     check_cuda(cudaMemcpyAsync(
-      host_results.data(), device_result.get(), result_bytes,
-      cudaMemcpyDeviceToHost, stream.get()),
+      host_results.data(), execution_context->device_results(), result_bytes,
+      cudaMemcpyDeviceToHost, stream),
       "copy compact legacy eig results");
-    check_cuda(cudaMemcpyAsync(
-      host_solver_info.data(), solver_info_buffer.get(),
-      checked_multiply(component_size, sizeof(int),
-                       "legacy eig solver status copy bytes"),
-      cudaMemcpyDeviceToHost, stream.get()),
-      "copy compact legacy eig solver status");
+    if (miss_count > 0) {
+      check_cuda(cudaMemcpyAsync(
+        host_solver_info.data(), execution_context->solver_info(),
+        checked_multiply(miss_size, sizeof(int),
+                         "legacy eig solver status copy bytes"),
+        cudaMemcpyDeviceToHost, stream),
+        "copy compact legacy eig solver status");
+    }
     diagnostics.compact_result_d2h_count = 1;
     diagnostics.compact_result_d2h_bytes = result_bytes;
-    diagnostics.compact_status_d2h_count = 1;
+    diagnostics.compact_status_d2h_count = miss_count > 0 ? 1 : 0;
     diagnostics.compact_status_d2h_bytes =
-      checked_multiply(component_size, sizeof(int),
+      checked_multiply(miss_size, sizeof(int),
                        "legacy eig solver status bytes");
-    check_cuda(cudaEventRecord(completion.get(), stream.get()),
+    check_cuda(cudaEventRecord(execution_context->completion(), stream),
                "record legacy eig completion");
     if (residual_token) {
       register_device_residual_consumer_event(
-        residual_token, completion.get());
+        residual_token, execution_context->completion());
       consumer_registered = true;
       diagnostics.consumer_event_registration_count = 1;
     }
-    check_cuda(cudaEventSynchronize(completion.get()),
+    check_cuda(cudaEventSynchronize(execution_context->completion()),
                "wait for compact legacy eig results");
     diagnostics.explicit_host_wait_count += 1;
     diagnostics.metadata_h2d_cuda_ms = cuda_elapsed_ms(
-      metadata_start.get(), metadata_end.get());
-    diagnostics.distance_build_cuda_ms = cuda_elapsed_ms(
-      distance_start.get(), distance_end.get());
-    diagnostics.full_eig_cuda_ms = cuda_elapsed_ms(
-      eig_start.get(), eig_end.get());
-    diagnostics.component_finalize_cuda_ms = cuda_elapsed_ms(
-      eig_end.get(), finalize_end.get());
+      execution_context->metadata_start(), execution_context->metadata_end());
+    if (miss_count > 0) {
+      diagnostics.distance_build_cuda_ms = cuda_elapsed_ms(
+        execution_context->distance_start(), execution_context->distance_end());
+      diagnostics.full_eig_cuda_ms = cuda_elapsed_ms(
+        execution_context->eig_start(), execution_context->eig_end());
+      diagnostics.component_finalize_cuda_ms = cuda_elapsed_ms(
+        execution_context->eig_end(), execution_context->finalize_end());
+    }
     diagnostics.component_build_cuda_ms =
       diagnostics.distance_build_cuda_ms + diagnostics.full_eig_cuda_ms +
       diagnostics.component_finalize_cuda_ms;
     diagnostics.pair_evaluation_cuda_ms = cuda_elapsed_ms(
-      pair_start.get(), pair_end.get());
+      execution_context->pair_start(), execution_context->pair_end());
     diagnostics.compact_d2h_cuda_ms = cuda_elapsed_ms(
-      pair_end.get(), completion.get());
+      execution_context->pair_end(), execution_context->completion());
     diagnostics.dcov_host_boundary_ms = host_elapsed_ms(dcov_start);
     diagnostics.solver_failure_count = static_cast<int>(std::count_if(
       host_solver_info.begin(), host_solver_info.end(),
@@ -2822,9 +3530,32 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
     for (const DeviceCompactCiResult& host_result : host_results) {
       require_ok(host_result);
     }
-    check_cuda(cudaStreamSynchronize(residual_view.producer_stream),
-               "wait for legacy eig residual consumer proxy");
-    diagnostics.explicit_host_wait_count += 1;
+    if (component_cache) {
+      for (int component = 0; component < component_count; ++component) {
+        if (component_cache_reservations[
+              static_cast<std::size_t>(component)] == 0U) {
+          continue;
+        }
+        const int target =
+          component_targets[static_cast<std::size_t>(component)];
+        component_cache->commit(
+          batch.target_keys[static_cast<std::size_t>(target)],
+          component_cache_slots[static_cast<std::size_t>(component)],
+          residual_view.executed_routes[static_cast<std::size_t>(target)],
+          residual_view.solver_statuses[static_cast<std::size_t>(target)]);
+      }
+      const FullCudaCiLegacyEigComponentCacheInfo cache_info_after =
+        component_cache->info();
+      diagnostics.component_cache_persistent_entries_after =
+        cache_info_after.entries;
+      diagnostics.component_cache_persistent_bypass_count = static_cast<int>(
+        cache_info_after.bypass_count - cache_info_before.bypass_count);
+    }
+    if (!residual_cache_bypass) {
+      check_cuda(cudaStreamSynchronize(residual_view.producer_stream),
+                 "wait for legacy eig residual consumer proxy");
+      diagnostics.explicit_host_wait_count += 1;
+    }
 
     result.records.reserve(pair_size);
     result.numerical.reserve(pair_size);
@@ -2838,38 +3569,7 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
 
     const std::chrono::steady_clock::time_point teardown_start =
       std::chrono::steady_clock::now();
-    cross_pointer_buffer.close();
-    right_pointer_buffer.close();
-    left_pointer_buffer.close();
-    solver_info_buffer.close();
-    device_result.close();
-    pair_cross_buffer.close();
-    sequence_buffer.close();
-    right_component_buffer.close();
-    left_component_buffer.close();
-    self_moment_buffer.close();
-    component_gram_buffer.close();
-    vector_buffer.close();
-    selected_value_buffer.close();
-    eigen_work_buffer.close();
-    eigenvalue_buffer.close();
-    total_buffer.close();
-    row_sum_buffer.close();
-    component_matrix_buffer.close();
-    component_target_buffer.close();
-    solver.close();
-    blas.close();
-    pair_end.close();
-    pair_start.close();
-    finalize_end.close();
-    eig_end.close();
-    eig_start.close();
-    distance_end.close();
-    distance_start.close();
-    metadata_end.close();
-    metadata_start.close();
-    completion.close();
-    stream.close();
+    local_execution_context.reset();
     if (residual_token) {
       release_device_residual(residual_token);
       free_device_residual(&residual_token);
@@ -2912,7 +3612,7 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
     diagnostics.cpu_dcov_pair_statistic_count == 0 &&
     diagnostics.cpu_gamma_p_value_count == 0 &&
     diagnostics.compact_result_d2h_count == 1 &&
-    diagnostics.compact_status_d2h_count == 1;
+    diagnostics.compact_status_d2h_count == (miss_count > 0 ? 1 : 0);
   diagnostics.bounded_allocation =
     accounting.peak_live_device_bytes <= accounting.device_allocation_bytes;
   diagnostics.leak_free_teardown =
@@ -2923,11 +3623,51 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
     resources_after.live_events == resources_before.live_events &&
     accounting.device_allocation_count == accounting.device_free_count &&
     accounting.live_device_bytes == 0U;
+  const bool component_cache_accounted = component_cache ?
+    diagnostics.component_cache_persistent_request_count == component_count &&
+      diagnostics.component_cache_persistent_request_count ==
+        diagnostics.component_cache_persistent_hit_count +
+          diagnostics.component_cache_persistent_miss_count &&
+      diagnostics.component_cache_persistent_miss_count ==
+        diagnostics.component_cache_persistent_insert_count +
+          diagnostics.component_cache_persistent_bypass_count &&
+      diagnostics.component_cache_persistent_route_mismatch_count == 0 &&
+      diagnostics.component_cache_persistent_status_mismatch_count == 0 &&
+      diagnostics.component_cache_persistent_residual_bypass_count ==
+        (residual_cache_bypass ? 1 : 0) &&
+      diagnostics.component_cache_persistent_entries_after ==
+        diagnostics.component_cache_persistent_entries_before +
+          static_cast<std::size_t>(
+            diagnostics.component_cache_persistent_insert_count) &&
+      diagnostics.component_cache_persistent_capacity_entries >=
+        diagnostics.component_cache_persistent_entries_after &&
+      diagnostics.component_cache_persistent_device_bytes ==
+        cache_info_before.device_bytes &&
+      diagnostics.component_cache_persistent_store_d2d_bytes ==
+        static_cast<std::size_t>(
+          diagnostics.component_cache_persistent_insert_count) *
+            cache_info_before.bytes_per_entry :
+    diagnostics.component_cache_persistent_request_count == 0 &&
+      diagnostics.component_cache_persistent_hit_count == 0 &&
+      diagnostics.component_cache_persistent_miss_count == 0 &&
+      diagnostics.component_cache_persistent_insert_count == 0 &&
+      diagnostics.component_cache_persistent_bypass_count == 0 &&
+      diagnostics.component_cache_persistent_route_mismatch_count == 0 &&
+      diagnostics.component_cache_persistent_status_mismatch_count == 0 &&
+      diagnostics.component_cache_persistent_residual_bypass_count == 0 &&
+      diagnostics.component_cache_persistent_capacity_entries == 0U &&
+      diagnostics.component_cache_persistent_entries_before == 0U &&
+      diagnostics.component_cache_persistent_entries_after == 0U &&
+      diagnostics.component_cache_persistent_device_bytes == 0U &&
+      diagnostics.component_cache_persistent_store_d2d_bytes == 0U;
   if (!diagnostics.compact_result_only_d2h ||
       !diagnostics.deterministic_logical_order ||
       !diagnostics.component_capacity_respected ||
+      (!diagnostics.residuals_device_resident &&
+       !diagnostics.residual_solve_bypassed_by_component_cache) ||
       !diagnostics.bounded_allocation ||
       !diagnostics.leak_free_teardown ||
+      !component_cache_accounted ||
       !diagnostics.caller_device_restored ||
       diagnostics.solver_failure_count != 0) {
     throw std::runtime_error(
@@ -2942,7 +3682,20 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch(
     const FixedSpBatchHostView& batch,
     const FullCudaCiLegacyEigBatchRequest& request) {
   return run_full_cuda_ci_phase35_legacy_eig_batch_impl(
-    prepared_s, batch, request, nullptr);
+    prepared_s, batch, request, nullptr, nullptr);
+}
+
+FullCudaCiLegacyEigBatchResult
+run_full_cuda_ci_phase35_legacy_eig_batch_with_component_cache(
+    const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+    const FixedSpBatchHostView& batch,
+    const FullCudaCiLegacyEigBatchRequest& request,
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache) {
+  if (!cache) {
+    throw std::runtime_error("legacy eig component cache is null");
+  }
+  return run_full_cuda_ci_phase35_legacy_eig_batch_impl(
+    prepared_s, batch, request, nullptr, cache);
 }
 
 FullCudaCiLegacyEigBatchResult
@@ -2962,7 +3715,7 @@ run_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual(
   batch.target_keys = residual_view.target_keys;
   FullCudaCiLegacyEigBatchResult result =
     run_full_cuda_ci_phase35_legacy_eig_batch_impl(
-      prepared_s, batch, request, &residual_view);
+      prepared_s, batch, request, &residual_view, nullptr);
   for (FullCudaCiCompactHostRecord& record : result.records) {
     record.solver_route = "OPTIMIZER_ACCEPTED|OPTIMIZER_ACCEPTED";
     record.optimizer_status = "LIVE_CUDA_GCV_ACCEPTED";

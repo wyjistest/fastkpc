@@ -28,6 +28,13 @@ COMMON_CXX="$CXXSTD $CXXFLAGS -fPIC $COMMON_INC"
 flock 9
 trap 'rm -f "$TMP_SO"' EXIT INT TERM
 
+if [ "${FASTKPC_INCREMENTAL_EIG_ONLY:-0}" = "1" ]; then
+"$CXX" $COMMON_CXX -c "$ROOT/src/full_cuda_ci_one_call.cpp" -o "$BUILD/full_cuda_ci_one_call.o"
+"$CXX" $COMMON_CXX -c "$ROOT/src/r_api_cuda.cpp" -o "$BUILD/r_api_cuda.o"
+"$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
+  $COMMON_INC -c "$ROOT/src/cuda/full_cuda_ci_vertical.cu" \
+  -o "$BUILD/full_cuda_ci_vertical.o"
+else
 "$CXX" $COMMON_CXX -c "$ROOT/src/dcov_exact_cpu.cpp" -o "$BUILD/dcov_exact_cpu.o"
 "$CXX" $COMMON_CXX -DFASTKPC_USE_OPENSSL_SHA256 \
   -c "$ROOT/src/full_cuda_ci_contract.cpp" -o "$BUILD/full_cuda_ci_contract.o"
@@ -120,6 +127,7 @@ done
 "$NVCC" -O3 -arch=sm_89 -Xcompiler -fPIC -std=c++17 \
   $COMMON_INC -c "$ROOT/src/cuda/mgcv_extract_fixed_sp_cuda.cu" \
   -o "$BUILD/mgcv_extract_fixed_sp_cuda.o"
+fi
 
 "$CXX" -shared -Wl,-x -o "$TMP_SO" \
   "$BUILD/dcov_exact_cpu.o" \

@@ -12,6 +12,7 @@
 namespace fastkpc {
 
 class MultiPenaltyGcvCudaResidualBatch;
+class FullCudaCiLegacyEigComponentCache;
 
 constexpr char kFullCudaCiVerticalRequestSchemaVersion[] =
   "full-cuda-ci-phase35-vertical-request-v1";
@@ -254,6 +255,24 @@ struct FullCudaCiLegacyEigBatchDiagnostics {
   int cuda_full_eig_count = 0;
   int cuda_pair_count = 0;
   int cuda_gamma_count = 0;
+  int component_eig_configured_lane_count = 0;
+  int component_eig_active_lane_count = 0;
+  int component_eig_multilane_batch_count = 0;
+  int component_execution_context_reuse_count = 0;
+  std::size_t component_execution_context_device_bytes = 0;
+  int component_cache_persistent_request_count = 0;
+  int component_cache_persistent_hit_count = 0;
+  int component_cache_persistent_miss_count = 0;
+  int component_cache_persistent_insert_count = 0;
+  int component_cache_persistent_bypass_count = 0;
+  int component_cache_persistent_route_mismatch_count = 0;
+  int component_cache_persistent_status_mismatch_count = 0;
+  int component_cache_persistent_residual_bypass_count = 0;
+  std::size_t component_cache_persistent_capacity_entries = 0;
+  std::size_t component_cache_persistent_entries_before = 0;
+  std::size_t component_cache_persistent_entries_after = 0;
+  std::size_t component_cache_persistent_device_bytes = 0;
+  std::size_t component_cache_persistent_store_d2d_bytes = 0;
   int consumer_event_registration_count = 0;
   int explicit_host_wait_count = 0;
   int device_allocation_count = 0;
@@ -276,6 +295,7 @@ struct FullCudaCiLegacyEigBatchDiagnostics {
   double total_host_ms = 0.0;
   std::string residual_producer_semantic_identity;
   bool residual_solve_bypassed = false;
+  bool residual_solve_bypassed_by_component_cache = false;
   bool request_identity_authenticated = false;
   bool prepared_identity_authenticated = false;
   bool target_identity_authenticated = false;
@@ -287,6 +307,24 @@ struct FullCudaCiLegacyEigBatchDiagnostics {
   bool bounded_allocation = false;
   bool leak_free_teardown = false;
   bool caller_device_restored = false;
+};
+
+struct FullCudaCiLegacyEigComponentCacheInfo {
+  int device_id = -1;
+  int n = 0;
+  int num_col = 0;
+  std::size_t capacity_entries = 0;
+  std::size_t entries = 0;
+  std::size_t bytes_per_entry = 0;
+  std::size_t device_bytes = 0;
+  std::uint64_t lookup_count = 0;
+  std::uint64_t hit_count = 0;
+  std::uint64_t miss_count = 0;
+  std::uint64_t insert_count = 0;
+  std::uint64_t bypass_count = 0;
+  int eig_lane_count = 0;
+  std::size_t execution_context_device_bytes = 0;
+  bool residual_bypass_enabled = false;
 };
 
 struct FullCudaCiLegacyEigBatchResult {
@@ -413,6 +451,30 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch(
   const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
   const FixedSpBatchHostView& batch,
   const FullCudaCiLegacyEigBatchRequest& request);
+
+std::shared_ptr<FullCudaCiLegacyEigComponentCache>
+create_full_cuda_ci_legacy_eig_component_cache(
+  int n, int num_col, std::size_t budget_bytes,
+  bool residual_bypass_enabled = false,
+  int maximum_component_count = 0,
+  int maximum_pair_count = 0,
+  int eig_lane_count = 0);
+
+FullCudaCiLegacyEigComponentCacheInfo
+full_cuda_ci_legacy_eig_component_cache_info(
+  const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache);
+
+std::vector<unsigned char>
+full_cuda_ci_legacy_eig_component_cache_contains(
+  const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache,
+  const std::vector<std::string>& keys);
+
+FullCudaCiLegacyEigBatchResult
+run_full_cuda_ci_phase35_legacy_eig_batch_with_component_cache(
+  const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+  const FixedSpBatchHostView& batch,
+  const FullCudaCiLegacyEigBatchRequest& request,
+  const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache);
 
 FullCudaCiLegacyEigBatchResult
 run_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual(

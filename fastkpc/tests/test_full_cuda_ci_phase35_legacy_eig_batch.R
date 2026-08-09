@@ -148,9 +148,9 @@ assert_true(
   identical(device_after, device_before) &&
     identical(resources_after[live_fields], resources_before[live_fields]) &&
     resources_after$total_device_allocations -
-      resources_before$total_device_allocations == 19 &&
+      resources_before$total_device_allocations == 14 &&
     resources_after$total_device_frees -
-      resources_before$total_device_frees == 19 &&
+      resources_before$total_device_frees == 14 &&
     resources_after$total_stream_creates -
       resources_before$total_stream_creates == 1 &&
     resources_after$total_stream_destroys -

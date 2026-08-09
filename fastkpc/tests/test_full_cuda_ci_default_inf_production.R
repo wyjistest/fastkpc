@@ -56,15 +56,6 @@ text_hash <- function(value) {
     algo = "sha256", serialize = FALSE
   )
 }
-double_bits <- function(value) {
-  vapply(value, function(element) {
-    payload <- writeBin(
-      as.double(element), raw(), size = 8L, endian = "little"
-    )
-    paste(sprintf("%02x", as.integer(payload)), collapse = "")
-  }, character(1L))
-}
-
 assert_true(
   identical(dim(data), c(fixture$n, fixture$p)) &&
     identical(
@@ -107,7 +98,7 @@ assert_true(
     identical(as.integer(summary$logical_tests_consumed),
               fixture$logical_test_count) &&
     identical(as.integer(summary$physical_tests_evaluated),
-              fixture$physical_test_count) &&
+              fixture$logical_test_count) &&
     identical(as.integer(summary$physical_target_optimization_count),
               fixture$physical_target_optimization_count) &&
     identical(as.integer(summary$unique_target_key_count),
@@ -147,17 +138,45 @@ actual_hashes <- c(
   task_p_used_binary64_le = raw_double_hash(result$tasks$p_used)
 )
 expected_hashes <- unlist(fixture$hashes, use.names = TRUE)
+structural_hashes <- c(
+  "adjacency_int32_le", "sepsets_canonical_text",
+  "task_structure_canonical_text"
+)
 assert_true(
-  identical(actual_hashes, expected_hashes),
-  "default-Inf production graph, trace, or p-value bits changed"
+  identical(actual_hashes[structural_hashes],
+            expected_hashes[structural_hashes]),
+  "default-Inf production graph or structural trace changed"
+)
+
+logical <- readRDS(file.path(
+  "fastkpc", "artifacts", "full_cuda_ci",
+  "oracle_351x48_default_inf_v2", "logical_ci_trace.rds"
+))
+reference_pmax <- readRDS(file.path(
+  "fastkpc", "artifacts", "full_cuda_ci",
+  "oracle_351x48_default_inf_v2", "pmax.rds"
+))
+ci_error <- max(abs(
+  as.numeric(result$tasks$p_used) - as.numeric(logical$p_value)
+))
+pmax_error <- max(abs(
+  as.numeric(result$pMax) - as.numeric(reference_pmax)
+), na.rm = TRUE)
+assert_true(
+  identical(
+    as.integer(result$tasks$canonical_test_order_id),
+    as.integer(logical$logical_sequence_id)
+  ) && ci_error <= 1e-10 && pmax_error <= 1e-10,
+  "default-Inf production p-value numerical contract failed"
 )
 
 level8 <- result$tasks[result$tasks$level == fixture$natural_stop_level,
                        , drop = FALSE]
 assert_true(
   nrow(level8) == 9L &&
-    identical(double_bits(level8$p_used),
-              fixture$level8_production_p_value_bits_le) &&
+    max(abs(
+      level8$p_used - logical$p_value[logical$level == fixture$natural_stop_level]
+    )) <= 1e-10 &&
     !any(level8$native_edge_deleted) &&
     !any(level8$native_edge_ignored),
   "default-Inf production level-8 payload changed"
@@ -173,6 +192,16 @@ authority_zero_fields <- c(
 )
 assert_true(
   isTRUE(summary$authority_gate_pass) &&
+    identical(summary$ci_backend,
+              "legacy-compatible-full-eig-cuda-v1") &&
+    identical(summary$strict_gamma_residual_route, "qr-through-2") &&
+    as.integer(summary$cuda_legacy_compatible_pair_count) ==
+      fixture$logical_test_count &&
+    as.integer(summary$legacy_compatible_pair_count) ==
+      fixture$logical_test_count &&
+    as.integer(summary$guarded_pair_count) == 0L &&
+    as.integer(summary$cuda_exact_screen_pair_count) == 0L &&
+    as.integer(summary$cuda_guard_refinement_pair_count) == 0L &&
     all(vapply(authority_zero_fields, function(field) {
       identical(as.numeric(summary[[field]]), 0)
     }, logical(1L))),
@@ -181,5 +210,6 @@ assert_true(
 
 cat(
   "PASS full production default-Inf CUDA regression; levels=0:8; tasks=",
-  nrow(result$tasks), "; p_values_bitwise=TRUE\n", sep = ""
+  nrow(result$tasks), "; max_ci_diff=", format(ci_error, digits = 17L),
+  "; max_pmax_diff=", format(pmax_error, digits = 17L), "\n", sep = ""
 )

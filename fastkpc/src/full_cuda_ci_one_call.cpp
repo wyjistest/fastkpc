@@ -48,8 +48,6 @@ using Matrix = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic,
                              Eigen::ColMajor>;
 
 constexpr double kQualifiedAlpha = 0.1;
-constexpr double kGuardLower = 0.05;
-constexpr double kGuardUpper = 0.15;
 constexpr int kSinglePenaltyPreparedCacheCapacity = 2048;
 constexpr int kMultiPenaltyPreparedCacheCapacity = 8192;
 constexpr int kPreparedCacheCapacity =
@@ -103,12 +101,95 @@ bool fixed_sp_root_cache_policy_enabled() {
     "FASTKPC_PHASE10_FIXED_SP_ROOT_CACHE must be 0 or 1");
 }
 
+std::size_t dcc_gamma_legacy_component_cache_budget_policy() {
+  const char* raw = std::getenv(
+    "FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_CACHE_BYTES");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "0") {
+    return 0U;
+  }
+  std::size_t parsed = 0U;
+  unsigned long long value = 0U;
+  try {
+    value = std::stoull(raw, &parsed);
+  } catch (...) {
+    throw std::runtime_error(
+      "dcc.gamma legacy component cache budget is not an integer");
+  }
+  constexpr std::size_t kMinimumBudget = 1024U * 1024U;
+  constexpr std::size_t kMaximumBudget = 16ULL * 1024ULL * 1024ULL * 1024ULL;
+  require(parsed == std::string(raw).size() &&
+            value >= kMinimumBudget && value <= kMaximumBudget,
+          "dcc.gamma legacy component cache budget is outside [1 MiB, 16 GiB]");
+  return static_cast<std::size_t>(value);
+}
+
+bool dcc_gamma_legacy_component_cache_residual_bypass_policy() {
+  const char* raw = std::getenv(
+    "FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_CACHE_RESIDUAL_BYPASS");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "0") {
+    return false;
+  }
+  require(std::string(raw) == "1",
+          "dcc.gamma legacy component cache residual bypass must be 0 or 1");
+  return true;
+}
+
+int dcc_gamma_legacy_component_eig_lane_policy() {
+  const char* raw = std::getenv(
+    "FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_EIG_LANES");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "0") {
+    return 0;
+  }
+  std::size_t parsed = 0U;
+  int value = 0;
+  try {
+    value = std::stoi(raw, &parsed);
+  } catch (...) {
+    throw std::runtime_error(
+      "dcc.gamma legacy component eig lane count is not an integer");
+  }
+  require(parsed == std::string(raw).size() &&
+            (value == 1 || value == 2 || value == 4 || value == 8),
+          "dcc.gamma legacy component eig lane count must be 0, 1, 2, 4, or 8");
+  return value;
+}
+
+int dcc_gamma_legacy_component_wave_capacity_policy() {
+  const char* raw = std::getenv(
+    "FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_WAVE_CAPACITY");
+  if (raw == nullptr || raw[0] == '\0') return 1;
+  std::size_t parsed = 0U;
+  int value = 0;
+  try {
+    value = std::stoi(raw, &parsed);
+  } catch (...) {
+    throw std::runtime_error(
+      "dcc.gamma legacy component wave capacity is not an integer");
+  }
+  require(parsed == std::string(raw).size() &&
+            (value == 1 || value == 2 || value == 4 || value == 8),
+          "dcc.gamma legacy component wave capacity must be 1, 2, 4, or 8");
+  return value;
+}
+
+bool dcc_gamma_legacy_component_wave_positive_miss_policy() {
+  const char* raw = std::getenv(
+    "FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_WAVE_POSITIVE_MISS_ONLY");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "0") {
+    return false;
+  }
+  require(std::string(raw) == "1",
+          "dcc.gamma positive-miss wave policy must be 0 or 1");
+  return true;
+}
+
 std::string strict_hsic_gamma_residual_route_policy(
     const std::string& ci_method) {
   const char* raw = std::getenv(
     "FASTKPC_STRICT_HSIC_GAMMA_RESIDUAL_ROUTE");
   if (raw == nullptr || raw[0] == '\0') {
-    return ci_method == "hsic.gamma" ? "qr-through-2" : "stable-svd";
+    return (ci_method == "dcc.gamma" || ci_method == "hsic.gamma") ?
+      "qr-through-2" : "stable-svd";
   }
   const std::string value(raw);
   if (value == "stable-svd" || value == "qr-through-2") {
@@ -869,6 +950,22 @@ struct MethodCriticalPathRecord {
   int final_host_wait_count = 0;
 };
 
+struct LegacyComponentWaveGroupTraceRow {
+  int level = 0;
+  int wave_index = 0;
+  int group_position = 0;
+  int ready_bucket_count = 0;
+  int selected_task_count = 0;
+  int executed_pair_count = 0;
+  int component_request_count = 0;
+  int component_hit_count = 0;
+  int component_miss_count = 0;
+  double residual_host_ms = 0.0;
+  double full_eig_cuda_ms = 0.0;
+  double component_build_cuda_ms = 0.0;
+  double dcov_host_ms = 0.0;
+};
+
 struct OneCallDiagnostics {
   std::unordered_set<std::string> physical_prepared_keys;
   std::unordered_set<std::string> consumed_prepared_keys;
@@ -877,6 +974,8 @@ struct OneCallDiagnostics {
   std::unordered_set<std::string> exact_residual_cohort_signatures;
   std::unordered_set<std::string> prefill_target_keys;
   std::vector<PrefillBatchDiagnostic> prefill_batches;
+  std::vector<LegacyComponentWaveGroupTraceRow>
+    legacy_component_wave_group_trace;
   int native_setup_count = 0;
   int native_setup_cache_request_count = 0;
   int native_setup_cache_hit_count = 0;
@@ -955,6 +1054,10 @@ struct OneCallDiagnostics {
   int cuda_guard_refinement_residual_target_count = 0;
   int cuda_guard_refinement_component_count = 0;
   int cuda_guard_refinement_pair_count = 0;
+  int cuda_legacy_compatible_residual_batch_count = 0;
+  int cuda_legacy_compatible_residual_target_count = 0;
+  int cuda_legacy_compatible_component_count = 0;
+  int cuda_legacy_compatible_pair_count = 0;
   int exact_residual_all_miss_batch_count = 0;
   int exact_residual_all_miss_target_count = 0;
   int exact_residual_mixed_batch_count = 0;
@@ -969,6 +1072,55 @@ struct OneCallDiagnostics {
   int cuda_dcov_pair_count = 0;
   int cuda_gamma_pvalue_count = 0;
   int guarded_pair_count = 0;
+  int legacy_compatible_pair_count = 0;
+  std::size_t legacy_component_cache_requested_budget_bytes = 0U;
+  std::size_t legacy_component_cache_capacity_entries = 0U;
+  std::size_t legacy_component_cache_device_bytes = 0U;
+  std::size_t legacy_component_cache_entries = 0U;
+  std::uint64_t legacy_component_cache_request_count = 0U;
+  std::uint64_t legacy_component_cache_hit_count = 0U;
+  std::uint64_t legacy_component_cache_miss_count = 0U;
+  std::uint64_t legacy_component_cache_insert_count = 0U;
+  std::uint64_t legacy_component_cache_bypass_count = 0U;
+  std::uint64_t legacy_component_cache_route_mismatch_count = 0U;
+  std::uint64_t legacy_component_cache_status_mismatch_count = 0U;
+  std::size_t legacy_component_cache_store_d2d_bytes = 0U;
+  double legacy_component_cache_create_host_ms = 0.0;
+  bool legacy_component_cache_residual_bypass_requested = false;
+  int legacy_component_cache_residual_bypass_batch_count = 0;
+  int legacy_component_cache_residual_bypass_target_count = 0;
+  int legacy_component_cache_batch_count = 0;
+  int legacy_component_cache_all_hit_batch_count = 0;
+  int legacy_component_cache_mixed_batch_count = 0;
+  int legacy_component_cache_all_miss_batch_count = 0;
+  int legacy_component_eig_lane_count_requested = 0;
+  int legacy_component_eig_lane_count = 0;
+  int legacy_component_eig_active_lane_peak = 0;
+  int legacy_component_eig_multilane_batch_count = 0;
+  int legacy_component_execution_context_reuse_count = 0;
+  std::size_t legacy_component_execution_context_device_bytes = 0U;
+  int legacy_component_wave_capacity_requested = 1;
+  int legacy_component_wave_count = 0;
+  int legacy_component_wave_group_count = 0;
+  int legacy_component_wave_peak_group_count = 0;
+  std::uint64_t legacy_component_wave_ready_bucket_count_sum = 0U;
+  int legacy_component_wave_ready_bucket_count_peak = 0;
+  int legacy_component_wave_ready_ge2_count = 0;
+  int legacy_component_wave_ready_ge4_count = 0;
+  int legacy_component_wave_ready_ge8_count = 0;
+  bool legacy_component_wave_positive_miss_only_requested = false;
+  int legacy_component_wave_prediction_count = 0;
+  int legacy_component_wave_prediction_incomplete_count = 0;
+  int legacy_component_wave_zero_miss_rejection_count = 0;
+  int legacy_component_wave_missing_key_overlap_rejection_count = 0;
+  int legacy_component_wave_selective_pair_count = 0;
+  double legacy_component_wave_prediction_host_ms = 0.0;
+  std::array<std::uint64_t, 65U>
+    legacy_component_eig_batch_count_by_miss{};
+  std::array<std::uint64_t, 65U>
+    legacy_component_eig_component_count_by_miss{};
+  std::array<double, 65U> legacy_component_eig_cuda_ms_by_miss{};
+  std::array<double, 65U> legacy_component_build_cuda_ms_by_miss{};
   int component_cache_request_count = 0;
   int component_cache_hit_count = 0;
   int component_cache_miss_count = 0;
@@ -1171,6 +1323,7 @@ struct OneCallDiagnostics {
   double cuda_multi_penalty_residual_solve_host_ms = 0.0;
   double cuda_exact_screen_residual_solve_host_ms = 0.0;
   double cuda_guard_refinement_residual_solve_host_ms = 0.0;
+  double cuda_legacy_compatible_residual_solve_host_ms = 0.0;
   double cuda_exact_screen_component_build_ms = 0.0;
   double exact_residual_all_miss_solve_host_ms = 0.0;
   double exact_residual_all_miss_component_build_ms = 0.0;
@@ -1182,10 +1335,22 @@ struct OneCallDiagnostics {
   double exact_residual_all_hit_repeated_cohort_component_build_ms = 0.0;
   double cuda_dcov_metadata_h2d_ms = 0.0;
   double cuda_dcov_component_build_ms = 0.0;
+  double cuda_dcov_distance_build_ms = 0.0;
+  double cuda_dcov_full_eig_ms = 0.0;
+  double cuda_dcov_component_finalize_ms = 0.0;
   double cuda_dcov_pair_gamma_ms = 0.0;
   double cuda_dcov_compact_d2h_ms = 0.0;
   double cuda_dcov_teardown_host_ms = 0.0;
   double cuda_dcov_host_ms = 0.0;
+  double legacy_component_cache_all_hit_host_ms = 0.0;
+  double legacy_component_cache_all_hit_teardown_host_ms = 0.0;
+  double legacy_component_cache_all_hit_residual_solve_host_ms = 0.0;
+  double legacy_component_cache_mixed_host_ms = 0.0;
+  double legacy_component_cache_mixed_teardown_host_ms = 0.0;
+  double legacy_component_cache_mixed_residual_solve_host_ms = 0.0;
+  double legacy_component_cache_all_miss_host_ms = 0.0;
+  double legacy_component_cache_all_miss_teardown_host_ms = 0.0;
+  double legacy_component_cache_all_miss_residual_solve_host_ms = 0.0;
 };
 
 Rcpp::DataFrame method_critical_path_frame(
@@ -1641,6 +1806,24 @@ class TargetStateCache {
     return true;
   }
 
+  bool peek(const std::string& key,
+            const std::string& dataset,
+            int penalty_count,
+            CachedTargetState* state) const {
+    require(state != nullptr,
+            "target optimizer cache peek output is null");
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = entries_.find(key);
+    if (found == entries_.end()) return false;
+    require(found->second.dataset == dataset,
+            "target optimizer cache DatasetKey identity changed during peek");
+    require(static_cast<int>(found->second.state.selected_sp.size()) ==
+              penalty_count,
+            "target optimizer cache penalty shape changed during peek");
+    *state = found->second.state;
+    return true;
+  }
+
   void insert(const std::string& key,
               const std::string& dataset,
               const CachedTargetState& state,
@@ -1751,6 +1934,70 @@ class TargetStateCache {
 TargetStateCache& target_state_cache() {
   static TargetStateCache cache;
   return cache;
+}
+
+struct LegacyComponentWavePrediction {
+  bool complete = false;
+  std::vector<std::string> residual_keys;
+  std::vector<std::string> missing_keys;
+};
+
+LegacyComponentWavePrediction predict_legacy_component_wave_group(
+    const std::shared_ptr<NativeSetupContext>& context,
+    const LayerPlan& plan,
+    const std::vector<int>& task_indices,
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& component_cache) {
+  LegacyComponentWavePrediction prediction;
+  if (!context || !component_cache) return prediction;
+  if (task_indices.empty()) {
+    prediction.complete = true;
+    return prediction;
+  }
+
+  std::set<int> targets;
+  for (int task_index : task_indices) {
+    require(task_index >= 0 &&
+              task_index < static_cast<int>(plan.tasks.size()),
+            "legacy component wave prediction task is out of range");
+    const LayerCiTask& task =
+      plan.tasks[static_cast<std::size_t>(task_index)];
+    targets.insert(task.orientation_x);
+    targets.insert(task.orientation_y);
+  }
+  prediction.residual_keys.reserve(targets.size());
+  for (int target : targets) {
+    const std::string base_key = target_key(context->prepared_key, target);
+    if (context->conditioning_set.empty()) {
+      const std::vector<double> direct_sp(
+        static_cast<std::size_t>(context->penalty_count), 0.0);
+      prediction.residual_keys.push_back(residual_key(
+        base_key, direct_sp.data(), context->penalty_count));
+      continue;
+    }
+    const std::string optimizer_key =
+      "schema=full-cuda-ci-target-optimizer-state-v1\ntarget=" +
+      base_key + "\n";
+    CachedTargetState state;
+    if (!target_state_cache().peek(
+          optimizer_key, context->dataset_key, context->penalty_count, &state)) {
+      return prediction;
+    }
+    prediction.residual_keys.push_back(residual_key(
+      base_key, state.selected_sp.data(), context->penalty_count));
+  }
+
+  const std::vector<unsigned char> present =
+    full_cuda_ci_legacy_eig_component_cache_contains(
+      component_cache, prediction.residual_keys);
+  require(present.size() == prediction.residual_keys.size(),
+          "legacy component wave cache prediction is misaligned");
+  for (std::size_t index = 0; index < present.size(); ++index) {
+    if (present[index] == 0U) {
+      prediction.missing_keys.push_back(prediction.residual_keys[index]);
+    }
+  }
+  prediction.complete = true;
+  return prediction;
 }
 
 std::atomic<std::uint64_t>& dataset_cache_epoch() {
@@ -2579,114 +2826,24 @@ struct GroupResult {
   std::vector<double> variances;
 };
 
-enum class ExactResidualOpportunityClass {
-  AllMiss,
-  Mixed,
-  AllHitNewCohort,
-  AllHitRepeatedCohort
-};
-
-void accumulate_exact_residual_opportunity(
-    ExactResidualOpportunityClass category,
-    int target_count,
-    const FullCudaCiExactBatchDiagnostics& value,
-    OneCallDiagnostics* diagnostics) {
-  switch (category) {
-    case ExactResidualOpportunityClass::AllMiss:
-      diagnostics->exact_residual_all_miss_batch_count += 1;
-      diagnostics->exact_residual_all_miss_target_count += target_count;
-      diagnostics->exact_residual_all_miss_solve_host_ms +=
-        value.residual_solve_host_ms;
-      diagnostics->exact_residual_all_miss_component_build_ms +=
-        value.component_build_cuda_ms;
-      return;
-    case ExactResidualOpportunityClass::Mixed:
-      diagnostics->exact_residual_mixed_batch_count += 1;
-      diagnostics->exact_residual_mixed_target_count += target_count;
-      diagnostics->exact_residual_mixed_solve_host_ms +=
-        value.residual_solve_host_ms;
-      diagnostics->exact_residual_mixed_component_build_ms +=
-        value.component_build_cuda_ms;
-      return;
-    case ExactResidualOpportunityClass::AllHitNewCohort:
-      diagnostics->exact_residual_all_hit_new_cohort_batch_count += 1;
-      diagnostics->exact_residual_all_hit_new_cohort_target_count +=
-        target_count;
-      diagnostics->exact_residual_all_hit_new_cohort_solve_host_ms +=
-        value.residual_solve_host_ms;
-      diagnostics->exact_residual_all_hit_new_cohort_component_build_ms +=
-        value.component_build_cuda_ms;
-      return;
-    case ExactResidualOpportunityClass::AllHitRepeatedCohort:
-      diagnostics->exact_residual_all_hit_repeated_cohort_batch_count += 1;
-      diagnostics->exact_residual_all_hit_repeated_cohort_target_count +=
-        target_count;
-      diagnostics->exact_residual_all_hit_repeated_cohort_solve_host_ms +=
-        value.residual_solve_host_ms;
-      diagnostics->exact_residual_all_hit_repeated_cohort_component_build_ms +=
-        value.component_build_cuda_ms;
-      return;
-  }
-  throw std::runtime_error("unknown exact residual opportunity class");
-}
-
-void accumulate_exact_diagnostics(
-    const FullCudaCiExactBatchDiagnostics& value,
-    OneCallDiagnostics* diagnostics) {
-  diagnostics->cuda_residual_batch_count += 1;
-  diagnostics->cuda_exact_screen_residual_batch_count += 1;
-  diagnostics->cuda_exact_screen_residual_target_count += value.target_count;
-  diagnostics->cuda_exact_screen_component_count +=
-    value.component_build_count;
-  diagnostics->cuda_exact_screen_pair_count += value.pair_evaluation_count;
-  diagnostics->cuda_dcov_component_count += value.component_build_count;
-  diagnostics->cuda_dcov_pair_count += value.pair_evaluation_count;
-  diagnostics->cuda_gamma_pvalue_count += value.pair_evaluation_count;
-  diagnostics->component_cache_request_count +=
-    value.component_cache_lookup_count;
-  diagnostics->component_cache_hit_count += value.component_cache_hit_count;
-  diagnostics->component_cache_miss_count += value.component_cache_miss_count;
-  diagnostics->component_cache_eviction_count +=
-    value.component_cache_eviction_count;
-  diagnostics->host_synchronization_count += value.explicit_host_wait_count;
-  diagnostics->cpu_dcov_component_count += value.cpu_dcov_component_count;
-  diagnostics->cpu_dcov_pair_stat_count +=
-    value.cpu_dcov_pair_statistic_count;
-  diagnostics->cpu_gamma_pvalue_count += value.cpu_gamma_p_value_count;
-  diagnostics->residual_d2h_bytes += value.residual_d2h_bytes;
-  diagnostics->component_d2h_bytes += value.component_d2h_bytes;
-  diagnostics->compact_result_d2h_bytes += value.compact_result_d2h_bytes;
-  diagnostics->cuda_residual_solve_host_ms += value.residual_solve_host_ms;
-  diagnostics->cuda_exact_screen_residual_solve_host_ms +=
-    value.residual_solve_host_ms;
-  diagnostics->cuda_dcov_metadata_h2d_ms += value.metadata_h2d_cuda_ms;
-  diagnostics->cuda_dcov_component_build_ms += value.component_build_cuda_ms;
-  diagnostics->cuda_exact_screen_component_build_ms +=
-    value.component_build_cuda_ms;
-  diagnostics->cuda_dcov_pair_gamma_ms += value.pair_evaluation_cuda_ms;
-  diagnostics->cuda_dcov_compact_d2h_ms += value.compact_d2h_cuda_ms;
-  diagnostics->cuda_dcov_teardown_host_ms += value.teardown_host_ms;
-  diagnostics->cuda_dcov_host_ms += value.dcov_host_boundary_ms;
-  require(value.bounded_allocation && value.leak_free_teardown &&
-            value.component_capacity_respected &&
-            value.residual_d2h_bytes == 0U &&
-            value.component_d2h_bytes == 0U &&
-            value.cpu_dcov_component_count == 0 &&
-            value.cpu_dcov_pair_statistic_count == 0 &&
-            value.cpu_gamma_p_value_count == 0,
-          "one-call exact CUDA dCov authority gate failed closed");
-}
-
-void accumulate_refinement_diagnostics(
+void accumulate_legacy_compatible_diagnostics(
     const FullCudaCiLegacyEigBatchDiagnostics& value,
     OneCallDiagnostics* diagnostics) {
   diagnostics->cuda_residual_batch_count += 1;
-  diagnostics->cuda_guard_refinement_residual_batch_count += 1;
-  diagnostics->cuda_guard_refinement_residual_target_count +=
+  diagnostics->cuda_legacy_compatible_residual_batch_count += 1;
+  diagnostics->cuda_legacy_compatible_residual_target_count +=
     value.target_count;
-  diagnostics->cuda_guard_refinement_component_count +=
+  if (value.residual_solve_bypassed_by_component_cache) {
+    require(diagnostics->physical_residual_fit_count >= value.target_count,
+            "legacy component cache residual fit accounting underflow");
+    diagnostics->physical_residual_fit_count -= value.target_count;
+    diagnostics->legacy_component_cache_residual_bypass_batch_count += 1;
+    diagnostics->legacy_component_cache_residual_bypass_target_count +=
+      value.target_count;
+  }
+  diagnostics->cuda_legacy_compatible_component_count +=
     value.component_build_count;
-  diagnostics->cuda_guard_refinement_pair_count += value.pair_count;
+  diagnostics->cuda_legacy_compatible_pair_count += value.pair_count;
   diagnostics->cuda_dcov_component_count += value.component_build_count;
   diagnostics->cuda_dcov_pair_count += value.cuda_pair_count;
   diagnostics->cuda_gamma_pvalue_count += value.cuda_gamma_count;
@@ -2694,6 +2851,87 @@ void accumulate_refinement_diagnostics(
   diagnostics->component_cache_miss_count += value.component_build_count;
   diagnostics->component_cache_hit_count +=
     2 * value.pair_count - value.component_build_count;
+  diagnostics->legacy_component_cache_capacity_entries = std::max(
+    diagnostics->legacy_component_cache_capacity_entries,
+    value.component_cache_persistent_capacity_entries);
+  diagnostics->legacy_component_cache_device_bytes = std::max(
+    diagnostics->legacy_component_cache_device_bytes,
+    value.component_cache_persistent_device_bytes);
+  diagnostics->legacy_component_cache_entries = std::max(
+    diagnostics->legacy_component_cache_entries,
+    value.component_cache_persistent_entries_after);
+  diagnostics->legacy_component_cache_request_count +=
+    value.component_cache_persistent_request_count;
+  diagnostics->legacy_component_cache_hit_count +=
+    value.component_cache_persistent_hit_count;
+  diagnostics->legacy_component_cache_miss_count +=
+    value.component_cache_persistent_miss_count;
+  diagnostics->legacy_component_cache_insert_count +=
+    value.component_cache_persistent_insert_count;
+  diagnostics->legacy_component_cache_bypass_count +=
+    value.component_cache_persistent_bypass_count;
+  diagnostics->legacy_component_cache_route_mismatch_count +=
+    value.component_cache_persistent_route_mismatch_count;
+  diagnostics->legacy_component_cache_status_mismatch_count +=
+    value.component_cache_persistent_status_mismatch_count;
+  diagnostics->legacy_component_cache_store_d2d_bytes +=
+    value.component_cache_persistent_store_d2d_bytes;
+  if (value.component_execution_context_reuse_count > 0) {
+    diagnostics->legacy_component_eig_lane_count = std::max(
+      diagnostics->legacy_component_eig_lane_count,
+      value.component_eig_configured_lane_count);
+    diagnostics->legacy_component_eig_active_lane_peak = std::max(
+      diagnostics->legacy_component_eig_active_lane_peak,
+      value.component_eig_active_lane_count);
+    diagnostics->legacy_component_eig_multilane_batch_count +=
+      value.component_eig_multilane_batch_count;
+    diagnostics->legacy_component_execution_context_reuse_count +=
+      value.component_execution_context_reuse_count;
+    diagnostics->legacy_component_execution_context_device_bytes = std::max(
+      diagnostics->legacy_component_execution_context_device_bytes,
+      value.component_execution_context_device_bytes);
+    require(value.component_build_count >= 0 &&
+              value.component_build_count <= 64,
+            "legacy component eig miss count is outside the histogram");
+    const std::size_t miss =
+      static_cast<std::size_t>(value.component_build_count);
+    diagnostics->legacy_component_eig_batch_count_by_miss[miss] += 1U;
+    diagnostics->legacy_component_eig_component_count_by_miss[miss] +=
+      static_cast<std::uint64_t>(value.component_build_count);
+    diagnostics->legacy_component_eig_cuda_ms_by_miss[miss] +=
+      value.full_eig_cuda_ms;
+    diagnostics->legacy_component_build_cuda_ms_by_miss[miss] +=
+      value.component_build_cuda_ms;
+  }
+  if (value.component_cache_persistent_request_count > 0) {
+    diagnostics->legacy_component_cache_batch_count += 1;
+    if (value.component_cache_persistent_hit_count ==
+        value.component_cache_persistent_request_count) {
+      diagnostics->legacy_component_cache_all_hit_batch_count += 1;
+      diagnostics->legacy_component_cache_all_hit_host_ms +=
+        value.dcov_host_boundary_ms;
+      diagnostics->legacy_component_cache_all_hit_teardown_host_ms +=
+        value.teardown_host_ms;
+      diagnostics->legacy_component_cache_all_hit_residual_solve_host_ms +=
+        value.residual_solve_host_ms;
+    } else if (value.component_cache_persistent_hit_count > 0) {
+      diagnostics->legacy_component_cache_mixed_batch_count += 1;
+      diagnostics->legacy_component_cache_mixed_host_ms +=
+        value.dcov_host_boundary_ms;
+      diagnostics->legacy_component_cache_mixed_teardown_host_ms +=
+        value.teardown_host_ms;
+      diagnostics->legacy_component_cache_mixed_residual_solve_host_ms +=
+        value.residual_solve_host_ms;
+    } else {
+      diagnostics->legacy_component_cache_all_miss_batch_count += 1;
+      diagnostics->legacy_component_cache_all_miss_host_ms +=
+        value.dcov_host_boundary_ms;
+      diagnostics->legacy_component_cache_all_miss_teardown_host_ms +=
+        value.teardown_host_ms;
+      diagnostics->legacy_component_cache_all_miss_residual_solve_host_ms +=
+        value.residual_solve_host_ms;
+    }
+  }
   diagnostics->host_synchronization_count += value.explicit_host_wait_count;
   diagnostics->cpu_dcov_component_count += value.cpu_dcov_component_count;
   diagnostics->cpu_dcov_eigen_or_lowrank_count += value.cpu_dcov_eigen_count;
@@ -2704,23 +2942,29 @@ void accumulate_refinement_diagnostics(
   diagnostics->component_d2h_bytes += value.component_d2h_bytes;
   diagnostics->compact_result_d2h_bytes += value.compact_result_d2h_bytes;
   diagnostics->cuda_residual_solve_host_ms += value.residual_solve_host_ms;
-  diagnostics->cuda_guard_refinement_residual_solve_host_ms +=
+  diagnostics->cuda_legacy_compatible_residual_solve_host_ms +=
     value.residual_solve_host_ms;
   diagnostics->cuda_dcov_metadata_h2d_ms += value.metadata_h2d_cuda_ms;
   diagnostics->cuda_dcov_component_build_ms += value.component_build_cuda_ms;
+  diagnostics->cuda_dcov_distance_build_ms += value.distance_build_cuda_ms;
+  diagnostics->cuda_dcov_full_eig_ms += value.full_eig_cuda_ms;
+  diagnostics->cuda_dcov_component_finalize_ms +=
+    value.component_finalize_cuda_ms;
   diagnostics->cuda_dcov_pair_gamma_ms += value.pair_evaluation_cuda_ms;
   diagnostics->cuda_dcov_compact_d2h_ms += value.compact_d2h_cuda_ms;
   diagnostics->cuda_dcov_teardown_host_ms += value.teardown_host_ms;
   diagnostics->cuda_dcov_host_ms += value.dcov_host_boundary_ms;
   require(value.solver_failure_count == 0 && value.bounded_allocation &&
             value.leak_free_teardown && value.component_capacity_respected &&
+            (value.residuals_device_resident ||
+             value.residual_solve_bypassed_by_component_cache) &&
             value.residual_d2h_bytes == 0U &&
             value.component_d2h_bytes == 0U &&
             value.cpu_dcov_component_count == 0 &&
             value.cpu_dcov_eigen_count == 0 &&
             value.cpu_dcov_pair_statistic_count == 0 &&
             value.cpu_gamma_p_value_count == 0,
-          "one-call guarded CUDA legacy dCov authority gate failed closed");
+          "one-call legacy-compatible CUDA dCov authority gate failed closed");
 }
 
 void accumulate_method_diagnostics(
@@ -3310,6 +3554,76 @@ Rcpp::DataFrame decomposition_iteration_reuse_frame(
     Rcpp::Named("request_count") = requests,
     Rcpp::Named("unique_key_count") = unique_keys,
     Rcpp::Named("reuse_count") = reuse,
+    Rcpp::Named("stringsAsFactors") = false);
+}
+
+Rcpp::DataFrame legacy_component_eig_miss_histogram_frame(
+    const std::array<std::uint64_t, 65U>& batch_counts,
+    const std::array<std::uint64_t, 65U>& component_counts,
+    const std::array<double, 65U>& eig_cuda_ms,
+    const std::array<double, 65U>& component_cuda_ms) {
+  std::vector<int> miss_count;
+  std::vector<double> batch_count;
+  std::vector<double> component_count;
+  std::vector<double> eig_ms;
+  std::vector<double> component_ms;
+  for (std::size_t miss = 0U; miss < batch_counts.size(); ++miss) {
+    if (batch_counts[miss] == 0U) continue;
+    miss_count.push_back(static_cast<int>(miss));
+    batch_count.push_back(static_cast<double>(batch_counts[miss]));
+    component_count.push_back(static_cast<double>(component_counts[miss]));
+    eig_ms.push_back(eig_cuda_ms[miss]);
+    component_ms.push_back(component_cuda_ms[miss]);
+  }
+  return Rcpp::DataFrame::create(
+    Rcpp::Named("miss_count") = Rcpp::wrap(miss_count),
+    Rcpp::Named("batch_count") = Rcpp::wrap(batch_count),
+    Rcpp::Named("component_count") = Rcpp::wrap(component_count),
+    Rcpp::Named("full_eig_cuda_ms") = Rcpp::wrap(eig_ms),
+    Rcpp::Named("component_build_cuda_ms") = Rcpp::wrap(component_ms),
+    Rcpp::Named("stringsAsFactors") = false);
+}
+
+Rcpp::DataFrame legacy_component_wave_group_trace_frame(
+    const std::vector<LegacyComponentWaveGroupTraceRow>& rows) {
+  const int count = static_cast<int>(rows.size());
+  Rcpp::IntegerVector level(count), wave_index(count), group_position(count),
+    ready_bucket_count(count), selected_task_count(count),
+    executed_pair_count(count), component_request_count(count),
+    component_hit_count(count), component_miss_count(count);
+  Rcpp::NumericVector residual_host_ms(count), full_eig_cuda_ms(count),
+    component_build_cuda_ms(count), dcov_host_ms(count);
+  for (int index = 0; index < count; ++index) {
+    const LegacyComponentWaveGroupTraceRow& row =
+      rows[static_cast<std::size_t>(index)];
+    level[index] = row.level;
+    wave_index[index] = row.wave_index;
+    group_position[index] = row.group_position;
+    ready_bucket_count[index] = row.ready_bucket_count;
+    selected_task_count[index] = row.selected_task_count;
+    executed_pair_count[index] = row.executed_pair_count;
+    component_request_count[index] = row.component_request_count;
+    component_hit_count[index] = row.component_hit_count;
+    component_miss_count[index] = row.component_miss_count;
+    residual_host_ms[index] = row.residual_host_ms;
+    full_eig_cuda_ms[index] = row.full_eig_cuda_ms;
+    component_build_cuda_ms[index] = row.component_build_cuda_ms;
+    dcov_host_ms[index] = row.dcov_host_ms;
+  }
+  return Rcpp::DataFrame::create(
+    Rcpp::Named("level") = level,
+    Rcpp::Named("wave_index") = wave_index,
+    Rcpp::Named("group_position") = group_position,
+    Rcpp::Named("ready_bucket_count") = ready_bucket_count,
+    Rcpp::Named("selected_task_count") = selected_task_count,
+    Rcpp::Named("executed_pair_count") = executed_pair_count,
+    Rcpp::Named("component_request_count") = component_request_count,
+    Rcpp::Named("component_hit_count") = component_hit_count,
+    Rcpp::Named("component_miss_count") = component_miss_count,
+    Rcpp::Named("residual_host_ms") = residual_host_ms,
+    Rcpp::Named("full_eig_cuda_ms") = full_eig_cuda_ms,
+    Rcpp::Named("component_build_cuda_ms") = component_build_cuda_ms,
+    Rcpp::Named("dcov_host_ms") = dcov_host_ms,
     Rcpp::Named("stringsAsFactors") = false);
 }
 
@@ -4206,6 +4520,8 @@ GroupResult execute_group(
     const std::shared_ptr<FullCudaCiMethodResidualCache>& method_residual_cache,
     const std::shared_ptr<FullCudaCiMethodExecutionContext>&
       method_execution_context,
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>&
+      legacy_component_cache,
     LegacyRPermutationWorkspace* permutation_workspace,
     OneCallDiagnostics* diagnostics) {
   require(!task_indices.empty() &&
@@ -4472,12 +4788,13 @@ GroupResult execute_group(
     }
   }
 
-  // Strict permutation methods retain stable SVD residual authority. HSIC
-  // gamma admits augmented QR only through two penalties; larger additive
-  // systems retain SVD because their QR residuals exceed the 1e-10 contract.
-  if (!direct && method_options.ci_method != "dcc.gamma") {
+  // Strict methods admit augmented QR only through two penalties. Larger
+  // additive systems retain SVD because their QR residuals exceed the 1e-10
+  // p-value contract.
+  if (!direct) {
     FixedSpRoute forced_route = FixedSpRoute::AugmentedSvd;
-    if (method_options.ci_method == "hsic.gamma" &&
+    if ((method_options.ci_method == "dcc.gamma" ||
+         method_options.ci_method == "hsic.gamma") &&
         diagnostics->strict_hsic_gamma_residual_route == "qr-through-2") {
       forced_route = context->penalty_count <= 2 ?
         FixedSpRoute::AugmentedQr : FixedSpRoute::AugmentedSvd;
@@ -4492,46 +4809,13 @@ GroupResult execute_group(
 
   std::vector<std::string> residual_keys;
   residual_keys.reserve(static_cast<std::size_t>(target_count));
-  int new_residual_key_count = 0;
   for (int target = 0; target < target_count; ++target) {
     residual_keys.push_back(residual_key(
       base_target_keys[static_cast<std::size_t>(target)],
       selected_sp.data() +
         static_cast<std::size_t>(context->penalty_count) * target,
       context->penalty_count));
-    if (diagnostics->unique_residual_keys.insert(
-          residual_keys.back()).second) {
-      new_residual_key_count += 1;
-    }
-  }
-  std::vector<std::string> cohort_entries;
-  cohort_entries.reserve(static_cast<std::size_t>(target_count));
-  for (int target = 0; target < target_count; ++target) {
-    cohort_entries.push_back(
-      residual_keys[static_cast<std::size_t>(target)] + "|" +
-      fixed_sp_route_name(planned_routes[static_cast<std::size_t>(target)]));
-  }
-  std::sort(cohort_entries.begin(), cohort_entries.end());
-  std::ostringstream cohort_payload;
-  cohort_payload <<
-    "schema=full-cuda-ci-phase10-exact-residual-cohort-v1\n" <<
-    "target_count=" << target_count << "\n";
-  for (const std::string& entry : cohort_entries) {
-    cohort_payload << "target=" << entry << "\n";
-  }
-  const std::string cohort_signature = full_cuda_ci_sha256_utf8(
-    cohort_payload.str());
-  const bool repeated_cohort =
-    !diagnostics->exact_residual_cohort_signatures.insert(
-      cohort_signature).second;
-  ExactResidualOpportunityClass opportunity_class =
-    ExactResidualOpportunityClass::Mixed;
-  if (new_residual_key_count == target_count) {
-    opportunity_class = ExactResidualOpportunityClass::AllMiss;
-  } else if (new_residual_key_count == 0) {
-    opportunity_class = repeated_cohort ?
-      ExactResidualOpportunityClass::AllHitRepeatedCohort :
-      ExactResidualOpportunityClass::AllHitNewCohort;
+    diagnostics->unique_residual_keys.insert(residual_keys.back());
   }
   diagnostics->logical_residual_request_count += target_count;
   diagnostics->physical_residual_fit_count += target_count;
@@ -4952,10 +5236,11 @@ GroupResult execute_group(
     return method_output;
   }
 
-  FullCudaCiExactBatchRequest exact_request;
-  exact_request.expected_prepared_s_key_sha256 = context->prepared_key;
-  exact_request.component_capacity = target_count;
-  exact_request.pairs.reserve(task_indices.size());
+  FullCudaCiLegacyEigBatchRequest legacy_request;
+  legacy_request.expected_prepared_s_key_sha256 = context->prepared_key;
+  legacy_request.component_capacity = target_count;
+  legacy_request.num_col = num_col;
+  legacy_request.pairs.reserve(task_indices.size());
   for (std::size_t index = 0; index < task_indices.size(); ++index) {
     const LayerCiTask& task =
       plan.tasks[static_cast<std::size_t>(task_indices[index])];
@@ -4964,74 +5249,39 @@ GroupResult execute_group(
     pair.left_target_index = target_position.at(task.orientation_x);
     pair.right_target_index = target_position.at(task.orientation_y);
     pair.alpha = kQualifiedAlpha;
-    exact_request.pairs.push_back(pair);
+    legacy_request.pairs.push_back(pair);
   }
-  exact_request.request_identity_sha256 =
-    full_cuda_ci_exact_batch_request_identity(exact_request, residual_keys);
-  FullCudaCiExactBatchResult exact = run_full_cuda_ci_phase35_exact_batch(
-    context->fixed_sp, batch, exact_request);
-  accumulate_exact_diagnostics(exact.diagnostics, diagnostics);
-  accumulate_exact_residual_opportunity(
-    opportunity_class, target_count, exact.diagnostics, diagnostics);
+  legacy_request.request_identity_sha256 =
+    full_cuda_ci_legacy_eig_batch_request_identity(
+      legacy_request, residual_keys);
+  FullCudaCiLegacyEigBatchResult legacy = legacy_component_cache ?
+    run_full_cuda_ci_phase35_legacy_eig_batch_with_component_cache(
+      context->fixed_sp, batch, legacy_request, legacy_component_cache) :
+    run_full_cuda_ci_phase35_legacy_eig_batch(
+      context->fixed_sp, batch, legacy_request);
+  accumulate_legacy_compatible_diagnostics(legacy.diagnostics, diagnostics);
   if (context->penalty_count == 1) {
     diagnostics->cuda_single_penalty_residual_solve_host_ms +=
-      exact.diagnostics.residual_solve_host_ms;
+      legacy.diagnostics.residual_solve_host_ms;
   } else {
     diagnostics->cuda_multi_penalty_residual_solve_host_ms +=
-      exact.diagnostics.residual_solve_host_ms;
+      legacy.diagnostics.residual_solve_host_ms;
   }
-  require(exact.records.size() == task_indices.size(),
-          "exact CUDA dCov result count changed");
+  require(legacy.records.size() == task_indices.size(),
+          "legacy-compatible CUDA dCov result count changed");
 
   GroupResult output;
-  output.p_values.resize(task_indices.size());
-  std::vector<std::size_t> guarded;
-  for (std::size_t index = 0; index < exact.records.size(); ++index) {
-    exact.records[index].optimizer_status = direct ?
+  output.p_values.reserve(task_indices.size());
+  for (FullCudaCiCompactHostRecord& record : legacy.records) {
+    record.optimizer_status = direct ?
       "DIRECT_SHIFT_INVARIANT" : "LIVE_CUDA_GCV_ACCEPTED";
-    const double p_value = exact.records[index].p_value;
+    const double p_value = record.p_value;
     require(std::isfinite(p_value) && p_value >= 0.0 && p_value <= 1.0,
-            "exact CUDA dCov returned a non-finite p-value");
-    output.p_values[index] = p_value;
-    if (p_value >= kGuardLower && p_value <= kGuardUpper) {
-      guarded.push_back(index);
-    }
+            "legacy-compatible CUDA dCov returned a non-finite p-value");
+    output.p_values.push_back(p_value);
   }
-
-  if (!guarded.empty()) {
-    FullCudaCiLegacyEigBatchRequest refinement_request;
-    refinement_request.expected_prepared_s_key_sha256 =
-      context->prepared_key;
-    refinement_request.component_capacity = target_count;
-    refinement_request.num_col = num_col;
-    refinement_request.pairs.reserve(guarded.size());
-    for (std::size_t index : guarded) {
-      refinement_request.pairs.push_back(exact_request.pairs[index]);
-    }
-    refinement_request.request_identity_sha256 =
-      full_cuda_ci_legacy_eig_batch_request_identity(
-        refinement_request, residual_keys);
-    FullCudaCiLegacyEigBatchResult refinement =
-      run_full_cuda_ci_phase35_legacy_eig_batch(
-        context->fixed_sp, batch, refinement_request);
-    accumulate_refinement_diagnostics(refinement.diagnostics, diagnostics);
-    if (context->penalty_count == 1) {
-      diagnostics->cuda_single_penalty_residual_solve_host_ms +=
-        refinement.diagnostics.residual_solve_host_ms;
-    } else {
-      diagnostics->cuda_multi_penalty_residual_solve_host_ms +=
-        refinement.diagnostics.residual_solve_host_ms;
-    }
-    require(refinement.records.size() == guarded.size(),
-            "guarded CUDA dCov result count changed");
-    for (std::size_t index = 0; index < guarded.size(); ++index) {
-      const double p_value = refinement.records[index].p_value;
-      require(std::isfinite(p_value) && p_value >= 0.0 && p_value <= 1.0,
-              "guarded CUDA dCov returned a non-finite p-value");
-      output.p_values[guarded[index]] = p_value;
-    }
-    diagnostics->guarded_pair_count += static_cast<int>(guarded.size());
-  }
+  diagnostics->legacy_compatible_pair_count +=
+    static_cast<int>(legacy.records.size());
   return output;
 }
 
@@ -5113,9 +5363,10 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   diagnostics.method_route_wait_diagnostics_enabled =
     method_options.ci_method != "dcc.gamma" &&
       strict_method_route_wait_diagnostics_enabled();
-  require(method_options.ci_method == "hsic.gamma" ||
+  require(method_options.ci_method == "dcc.gamma" ||
+            method_options.ci_method == "hsic.gamma" ||
             diagnostics.strict_hsic_gamma_residual_route == "stable-svd",
-          "HSIC gamma residual route override requires hsic.gamma");
+          "gamma residual route override requires a gamma CI method");
   diagnostics.setup_optimizer_pipeline_enabled =
     setup_optimizer_pipeline_policy_enabled();
   diagnostics.setup_optimizer_pipeline_producer_delay_us =
@@ -5159,6 +5410,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     384U * 1024U * 1024U;
   std::shared_ptr<FullCudaCiMethodResidualCache> method_residual_cache;
   std::shared_ptr<FullCudaCiMethodExecutionContext> method_execution_context;
+  std::shared_ptr<FullCudaCiLegacyEigComponentCache>
+    legacy_component_cache;
   if (method_options.ci_method != "dcc.gamma") {
     method_residual_cache = create_full_cuda_ci_method_residual_cache(
       n, kStrictMethodResidualCacheBudget);
@@ -5166,6 +5419,53 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       n, method_options.ci_method, num_col,
       is_permutation_method(method_options.ci_method) ?
         method_options.permutation_replicates : 0);
+  }
+  if (method_options.ci_method == "dcc.gamma") {
+    diagnostics.legacy_component_cache_requested_budget_bytes =
+      dcc_gamma_legacy_component_cache_budget_policy();
+    diagnostics.legacy_component_cache_residual_bypass_requested =
+      dcc_gamma_legacy_component_cache_residual_bypass_policy();
+    diagnostics.legacy_component_eig_lane_count_requested =
+      dcc_gamma_legacy_component_eig_lane_policy();
+    diagnostics.legacy_component_wave_capacity_requested =
+      dcc_gamma_legacy_component_wave_capacity_policy();
+    diagnostics.legacy_component_wave_positive_miss_only_requested =
+      dcc_gamma_legacy_component_wave_positive_miss_policy();
+    require(
+      (!diagnostics.legacy_component_cache_residual_bypass_requested &&
+       diagnostics.legacy_component_eig_lane_count_requested == 0) ||
+        diagnostics.legacy_component_cache_requested_budget_bytes > 0U,
+      "dcc.gamma residual bypass and eig lanes require a legacy component "
+      "cache budget");
+    require(
+      !diagnostics.legacy_component_wave_positive_miss_only_requested ||
+        (diagnostics.legacy_component_wave_capacity_requested == 2 &&
+         diagnostics.legacy_component_cache_requested_budget_bytes > 0U &&
+         diagnostics.legacy_component_eig_lane_count_requested > 0),
+      "dcc.gamma positive-miss wave policy requires capacity 2, component "
+      "cache, and eig lanes");
+    if (diagnostics.legacy_component_cache_requested_budget_bytes > 0U) {
+      const auto cache_create_started = std::chrono::steady_clock::now();
+      legacy_component_cache =
+        create_full_cuda_ci_legacy_eig_component_cache(
+          n, num_col,
+          diagnostics.legacy_component_cache_requested_budget_bytes,
+          diagnostics.legacy_component_cache_residual_bypass_requested,
+          p, p * p,
+          std::min(diagnostics.legacy_component_eig_lane_count_requested, p));
+      diagnostics.legacy_component_cache_create_host_ms =
+        elapsed_ms(cache_create_started);
+      const FullCudaCiLegacyEigComponentCacheInfo cache_info =
+        full_cuda_ci_legacy_eig_component_cache_info(
+          legacy_component_cache);
+      diagnostics.legacy_component_cache_capacity_entries =
+        cache_info.capacity_entries;
+      diagnostics.legacy_component_cache_device_bytes =
+        cache_info.device_bytes;
+      diagnostics.legacy_component_eig_lane_count = cache_info.eig_lane_count;
+      diagnostics.legacy_component_execution_context_device_bytes =
+        cache_info.execution_context_device_bytes;
+    }
   }
   LegacyRPermutationWorkspace permutation_workspace;
   permutation_workspace.inline_r_index_requested =
@@ -5281,6 +5581,19 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       while (active_edges > 0) {
         require(!ready_by_conditioning.empty(),
                 "compatible.cuda frontier scheduler made no progress");
+        const int ready_bucket_count =
+          static_cast<int>(ready_by_conditioning.size());
+        diagnostics.legacy_component_wave_ready_bucket_count_sum +=
+          static_cast<std::uint64_t>(ready_bucket_count);
+        diagnostics.legacy_component_wave_ready_bucket_count_peak = std::max(
+          diagnostics.legacy_component_wave_ready_bucket_count_peak,
+          ready_bucket_count);
+        diagnostics.legacy_component_wave_ready_ge2_count +=
+          ready_bucket_count >= 2 ? 1 : 0;
+        diagnostics.legacy_component_wave_ready_ge4_count +=
+          ready_bucket_count >= 4 ? 1 : 0;
+        diagnostics.legacy_component_wave_ready_ge8_count +=
+          ready_bucket_count >= 8 ? 1 : 0;
         struct FrontierWork {
           std::vector<int> selected;
           std::vector<std::uint64_t> selected_ids;
@@ -5290,14 +5603,31 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
           std::vector<int> group_tasks;
           std::vector<std::uint64_t> group_ids;
           std::shared_ptr<NativeSetupContext> context;
+          LegacyComponentWavePrediction component_prediction;
           bool direct = false;
         };
         std::vector<FrontierWork> wave;
-        const int wave_capacity = 1;
+        const int wave_capacity =
+          method_options.ci_method == "dcc.gamma" ?
+            diagnostics.legacy_component_wave_capacity_requested : 1;
         wave.reserve(static_cast<std::size_t>(wave_capacity));
 
-        for (int wave_index = 0; wave_index < wave_capacity; ++wave_index) {
+        for (int wave_index = 0;
+             wave_index < wave_capacity && !ready_by_conditioning.empty();
+             ++wave_index) {
+          const bool positive_miss_only =
+            diagnostics.legacy_component_wave_positive_miss_only_requested;
+          if (positive_miss_only && wave_index > 0) {
+            require(wave.size() == 1U,
+                    "positive-miss wave has an invalid first group");
+            if (!wave.front().component_prediction.complete) break;
+            if (wave.front().component_prediction.missing_keys.empty()) {
+              diagnostics.legacy_component_wave_zero_miss_rejection_count += 1;
+              break;
+            }
+          }
           std::vector<int> selected_edges;
+          LegacyComponentWavePrediction selected_prediction;
           if (legacy_r_permutation) {
             auto selected_bucket = ready_by_conditioning.end();
             std::size_t selected_position = 0U;
@@ -5353,6 +5683,59 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
                 cached_largest->second.size() * 4U >=
                   global_largest->second.size()) {
               selected_bucket = cached_largest;
+            }
+            if (positive_miss_only && wave_index > 0) {
+              std::vector<int> candidate_tasks;
+              candidate_tasks.reserve(selected_bucket->second.size());
+              for (int edge_value : selected_bucket->second) {
+                const std::size_t edge = static_cast<std::size_t>(edge_value);
+                require(edge < edge_tasks.size() &&
+                          edge_positions[edge] < edge_tasks[edge].size(),
+                        "positive-miss wave candidate edge is invalid");
+                candidate_tasks.push_back(
+                  edge_tasks[edge][edge_positions[edge]]);
+              }
+              require(!candidate_tasks.empty(),
+                      "positive-miss wave candidate is empty");
+              const LayerCiTask& candidate_representative = plan.tasks[
+                static_cast<std::size_t>(candidate_tasks.front())];
+              const bool candidate_direct =
+                candidate_representative.conditioning_set.empty();
+              const std::shared_ptr<NativeSetupContext> candidate_context =
+                candidate_direct ? direct :
+                  setup_cache.get(candidate_representative.conditioning_set);
+              const auto prediction_started =
+                std::chrono::steady_clock::now();
+              selected_prediction = predict_legacy_component_wave_group(
+                candidate_context, plan, candidate_tasks,
+                legacy_component_cache);
+              diagnostics.legacy_component_wave_prediction_host_ms +=
+                elapsed_ms(prediction_started);
+              diagnostics.legacy_component_wave_prediction_count += 1;
+              if (!selected_prediction.complete) {
+                diagnostics
+                  .legacy_component_wave_prediction_incomplete_count += 1;
+                break;
+              }
+              if (selected_prediction.missing_keys.empty()) {
+                diagnostics.legacy_component_wave_zero_miss_rejection_count += 1;
+                break;
+              }
+              const std::unordered_set<std::string> first_missing(
+                wave.front().component_prediction.missing_keys.begin(),
+                wave.front().component_prediction.missing_keys.end());
+              const bool overlaps_missing_key = std::any_of(
+                selected_prediction.missing_keys.begin(),
+                selected_prediction.missing_keys.end(),
+                [&first_missing](const std::string& key) {
+                  return first_missing.count(key) != 0U;
+                });
+              if (overlaps_missing_key) {
+                diagnostics
+                  .legacy_component_wave_missing_key_overlap_rejection_count +=
+                    1;
+                break;
+              }
             }
             selected_edges = std::move(selected_bucket->second);
             ready_by_conditioning.erase(selected_bucket);
@@ -5414,15 +5797,55 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
               setup_cache.get(representative.conditioning_set);
             if (!work.direct) setup_cache.materialize_device(work.context);
           }
+          if (positive_miss_only) {
+            if (wave_index > 0) {
+              require(work.group_tasks.size() == work.selected.size(),
+                      "positive-miss wave does not allow compact-result hits");
+              work.component_prediction = std::move(selected_prediction);
+              diagnostics.legacy_component_wave_selective_pair_count += 1;
+            } else {
+              const auto prediction_started =
+                std::chrono::steady_clock::now();
+              work.component_prediction = predict_legacy_component_wave_group(
+                work.context, plan, work.group_tasks, legacy_component_cache);
+              diagnostics.legacy_component_wave_prediction_host_ms +=
+                elapsed_ms(prediction_started);
+              diagnostics.legacy_component_wave_prediction_count += 1;
+              diagnostics
+                .legacy_component_wave_prediction_incomplete_count +=
+                  work.component_prediction.complete ? 0 : 1;
+            }
+          }
           wave.push_back(std::move(work));
         }
+        diagnostics.legacy_component_wave_count += 1;
+        diagnostics.legacy_component_wave_group_count +=
+          static_cast<int>(wave.size());
+        diagnostics.legacy_component_wave_peak_group_count = std::max(
+          diagnostics.legacy_component_wave_peak_group_count,
+          static_cast<int>(wave.size()));
 
+        int wave_group_position = 0;
         for (FrontierWork& work : wave) {
+          const std::uint64_t component_requests_before =
+            diagnostics.legacy_component_cache_request_count;
+          const std::uint64_t component_hits_before =
+            diagnostics.legacy_component_cache_hit_count;
+          const std::uint64_t component_misses_before =
+            diagnostics.legacy_component_cache_miss_count;
+          const double residual_host_ms_before =
+            diagnostics.cuda_legacy_compatible_residual_solve_host_ms;
+          const double full_eig_cuda_ms_before =
+            diagnostics.cuda_dcov_full_eig_ms;
+          const double component_build_cuda_ms_before =
+            diagnostics.cuda_dcov_component_build_ms;
+          const double dcov_host_ms_before = diagnostics.cuda_dcov_host_ms;
           if (!work.group_tasks.empty()) {
             const GroupResult result = execute_group(
               data, work.context, plan, work.group_tasks, work.group_ids,
               num_col, work.direct, method_options, method_residual_cache,
-              method_execution_context, &permutation_workspace, &diagnostics);
+              method_execution_context, legacy_component_cache,
+              &permutation_workspace, &diagnostics);
             require(result.p_values.size() == work.missing_positions.size(),
                     "compatible.cuda group result alignment changed");
             const bool method_records =
@@ -5452,6 +5875,45 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
                   result.p_values[index], &diagnostics);
               }
             }
+          }
+
+          if (method_options.ci_method == "dcc.gamma") {
+            LegacyComponentWaveGroupTraceRow row;
+            row.level = level;
+            row.wave_index = diagnostics.legacy_component_wave_count;
+            row.group_position = ++wave_group_position;
+            row.ready_bucket_count = ready_bucket_count;
+            row.selected_task_count = static_cast<int>(work.selected.size());
+            row.executed_pair_count =
+              static_cast<int>(work.group_tasks.size());
+            row.component_request_count = static_cast<int>(
+              diagnostics.legacy_component_cache_request_count -
+                component_requests_before);
+            row.component_hit_count = static_cast<int>(
+              diagnostics.legacy_component_cache_hit_count -
+                component_hits_before);
+            row.component_miss_count = static_cast<int>(
+              diagnostics.legacy_component_cache_miss_count -
+                component_misses_before);
+            if (diagnostics
+                  .legacy_component_wave_positive_miss_only_requested) {
+              require(work.component_prediction.complete &&
+                        row.component_miss_count == static_cast<int>(
+                          work.component_prediction.missing_keys.size()),
+                      "positive-miss wave cache prediction changed before "
+                      "execution");
+            }
+            row.residual_host_ms =
+              diagnostics.cuda_legacy_compatible_residual_solve_host_ms -
+                residual_host_ms_before;
+            row.full_eig_cuda_ms = diagnostics.cuda_dcov_full_eig_ms -
+              full_eig_cuda_ms_before;
+            row.component_build_cuda_ms =
+              diagnostics.cuda_dcov_component_build_ms -
+                component_build_cuda_ms_before;
+            row.dcov_host_ms = diagnostics.cuda_dcov_host_ms -
+              dcov_host_ms_before;
+            diagnostics.legacy_component_wave_group_trace.push_back(row);
           }
 
           for (std::size_t position = 0; position < work.selected.size();
@@ -5655,6 +6117,215 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     summarize_prefill_attribution(diagnostics);
   const Rcpp::DataFrame prefill_batches = prefill_batch_diagnostics_frame(
     diagnostics.prefill_batches, diagnostics.unique_target_keys);
+  FullCudaCiLegacyEigComponentCacheInfo legacy_component_cache_info;
+  if (legacy_component_cache) {
+    legacy_component_cache_info =
+      full_cuda_ci_legacy_eig_component_cache_info(legacy_component_cache);
+      diagnostics.legacy_component_cache_entries =
+      legacy_component_cache_info.entries;
+  }
+  const std::uint64_t legacy_component_eig_histogram_batch_count =
+    std::accumulate(
+      diagnostics.legacy_component_eig_batch_count_by_miss.begin(),
+      diagnostics.legacy_component_eig_batch_count_by_miss.end(),
+      std::uint64_t{0});
+  const std::uint64_t legacy_component_eig_histogram_component_count =
+    std::accumulate(
+      diagnostics.legacy_component_eig_component_count_by_miss.begin(),
+      diagnostics.legacy_component_eig_component_count_by_miss.end(),
+      std::uint64_t{0});
+  const bool legacy_component_eig_histogram_accounted = legacy_component_cache ?
+    ((legacy_component_cache_info.eig_lane_count > 0 &&
+      legacy_component_eig_histogram_batch_count ==
+        static_cast<std::uint64_t>(
+          diagnostics.legacy_component_cache_batch_count) &&
+      legacy_component_eig_histogram_component_count ==
+        diagnostics.legacy_component_cache_miss_count) ||
+     (legacy_component_cache_info.eig_lane_count == 0 &&
+      legacy_component_eig_histogram_batch_count == 0U &&
+      legacy_component_eig_histogram_component_count == 0U)) :
+    legacy_component_eig_histogram_batch_count == 0U &&
+      legacy_component_eig_histogram_component_count == 0U;
+  const bool legacy_component_cache_accounted = legacy_component_cache ?
+    method_options.ci_method == "dcc.gamma" &&
+      diagnostics.legacy_component_cache_requested_budget_bytes >=
+        diagnostics.legacy_component_cache_device_bytes &&
+      diagnostics.legacy_component_cache_capacity_entries ==
+        legacy_component_cache_info.capacity_entries &&
+      diagnostics.legacy_component_cache_device_bytes ==
+        legacy_component_cache_info.device_bytes &&
+      diagnostics.legacy_component_cache_residual_bypass_requested ==
+        legacy_component_cache_info.residual_bypass_enabled &&
+      diagnostics.legacy_component_cache_entries ==
+        legacy_component_cache_info.entries &&
+      diagnostics.legacy_component_cache_request_count ==
+        legacy_component_cache_info.lookup_count &&
+      diagnostics.legacy_component_cache_hit_count ==
+        legacy_component_cache_info.hit_count &&
+      diagnostics.legacy_component_cache_miss_count ==
+        legacy_component_cache_info.miss_count &&
+      diagnostics.legacy_component_cache_insert_count ==
+        legacy_component_cache_info.insert_count &&
+      diagnostics.legacy_component_cache_bypass_count ==
+        legacy_component_cache_info.bypass_count &&
+      diagnostics.legacy_component_cache_route_mismatch_count == 0U &&
+      diagnostics.legacy_component_cache_status_mismatch_count == 0U &&
+      diagnostics.legacy_component_cache_request_count ==
+        diagnostics.legacy_component_cache_hit_count +
+          diagnostics.legacy_component_cache_miss_count &&
+      diagnostics.legacy_component_cache_miss_count ==
+        diagnostics.legacy_component_cache_insert_count +
+          diagnostics.legacy_component_cache_bypass_count &&
+      diagnostics.legacy_component_cache_entries ==
+        diagnostics.legacy_component_cache_insert_count &&
+      diagnostics.legacy_component_cache_store_d2d_bytes ==
+        diagnostics.legacy_component_cache_insert_count *
+          legacy_component_cache_info.bytes_per_entry &&
+      diagnostics.legacy_component_cache_batch_count ==
+        diagnostics.cuda_legacy_compatible_residual_batch_count &&
+      diagnostics.legacy_component_cache_batch_count ==
+        diagnostics.legacy_component_cache_all_hit_batch_count +
+          diagnostics.legacy_component_cache_mixed_batch_count +
+          diagnostics.legacy_component_cache_all_miss_batch_count &&
+      diagnostics.legacy_component_cache_residual_bypass_batch_count ==
+        (diagnostics.legacy_component_cache_residual_bypass_requested ?
+          diagnostics.legacy_component_cache_all_hit_batch_count : 0) &&
+      diagnostics.legacy_component_cache_residual_bypass_target_count >=
+        diagnostics.legacy_component_cache_residual_bypass_batch_count &&
+      diagnostics.legacy_component_eig_lane_count ==
+        legacy_component_cache_info.eig_lane_count &&
+      diagnostics.legacy_component_execution_context_device_bytes ==
+        legacy_component_cache_info.execution_context_device_bytes &&
+      ((legacy_component_cache_info.eig_lane_count == 0 &&
+        diagnostics.legacy_component_eig_lane_count_requested == 0 &&
+        diagnostics.legacy_component_eig_active_lane_peak == 0 &&
+        diagnostics.legacy_component_eig_multilane_batch_count == 0 &&
+        diagnostics.legacy_component_execution_context_reuse_count == 0 &&
+        diagnostics.legacy_component_execution_context_device_bytes == 0U) ||
+       (legacy_component_cache_info.eig_lane_count > 0 &&
+        diagnostics.legacy_component_eig_lane_count_requested > 0 &&
+        diagnostics.legacy_component_eig_active_lane_peak >= 1 &&
+        diagnostics.legacy_component_eig_active_lane_peak <=
+          diagnostics.legacy_component_eig_lane_count &&
+        diagnostics.legacy_component_eig_multilane_batch_count <=
+          diagnostics.legacy_component_cache_mixed_batch_count +
+            diagnostics.legacy_component_cache_all_miss_batch_count &&
+        diagnostics.legacy_component_execution_context_reuse_count ==
+          diagnostics.legacy_component_cache_batch_count &&
+        diagnostics.legacy_component_execution_context_device_bytes > 0U)) :
+    diagnostics.legacy_component_cache_requested_budget_bytes == 0U &&
+      !diagnostics.legacy_component_cache_residual_bypass_requested &&
+      diagnostics.legacy_component_eig_lane_count_requested == 0 &&
+      diagnostics.legacy_component_cache_capacity_entries == 0U &&
+      diagnostics.legacy_component_cache_device_bytes == 0U &&
+      diagnostics.legacy_component_cache_entries == 0U &&
+      diagnostics.legacy_component_cache_request_count == 0U &&
+      diagnostics.legacy_component_cache_hit_count == 0U &&
+      diagnostics.legacy_component_cache_miss_count == 0U &&
+      diagnostics.legacy_component_cache_insert_count == 0U &&
+      diagnostics.legacy_component_cache_bypass_count == 0U &&
+      diagnostics.legacy_component_cache_route_mismatch_count == 0U &&
+      diagnostics.legacy_component_cache_status_mismatch_count == 0U &&
+      diagnostics.legacy_component_cache_store_d2d_bytes == 0U &&
+      diagnostics.legacy_component_cache_create_host_ms == 0.0 &&
+      diagnostics.legacy_component_cache_batch_count == 0 &&
+      diagnostics.legacy_component_cache_all_hit_batch_count == 0 &&
+      diagnostics.legacy_component_cache_mixed_batch_count == 0 &&
+      diagnostics.legacy_component_cache_all_miss_batch_count == 0 &&
+      diagnostics.legacy_component_eig_lane_count == 0 &&
+      diagnostics.legacy_component_eig_active_lane_peak == 0 &&
+      diagnostics.legacy_component_eig_multilane_batch_count == 0 &&
+      diagnostics.legacy_component_execution_context_reuse_count == 0 &&
+      diagnostics.legacy_component_execution_context_device_bytes == 0U;
+  const bool legacy_component_cache_residual_bypass_accounted =
+    diagnostics.legacy_component_cache_residual_bypass_requested ?
+      legacy_component_cache &&
+        diagnostics.legacy_component_cache_residual_bypass_batch_count ==
+          diagnostics.legacy_component_cache_all_hit_batch_count &&
+        diagnostics.legacy_component_cache_residual_bypass_target_count >=
+          diagnostics.legacy_component_cache_residual_bypass_batch_count :
+      diagnostics.legacy_component_cache_residual_bypass_batch_count == 0 &&
+        diagnostics.legacy_component_cache_residual_bypass_target_count == 0;
+  std::uint64_t legacy_component_wave_trace_request_count = 0U;
+  std::uint64_t legacy_component_wave_trace_hit_count = 0U;
+  std::uint64_t legacy_component_wave_trace_miss_count = 0U;
+  int legacy_component_wave_trace_pair_count = 0;
+  for (const LegacyComponentWaveGroupTraceRow& row :
+       diagnostics.legacy_component_wave_group_trace) {
+    legacy_component_wave_trace_request_count +=
+      static_cast<std::uint64_t>(row.component_request_count);
+    legacy_component_wave_trace_hit_count +=
+      static_cast<std::uint64_t>(row.component_hit_count);
+    legacy_component_wave_trace_miss_count +=
+      static_cast<std::uint64_t>(row.component_miss_count);
+    legacy_component_wave_trace_pair_count += row.executed_pair_count;
+  }
+  const bool legacy_component_wave_trace_accounted =
+    method_options.ci_method == "dcc.gamma" ?
+      diagnostics.legacy_component_wave_group_trace.size() ==
+        static_cast<std::size_t>(
+          diagnostics.legacy_component_wave_group_count) &&
+      legacy_component_wave_trace_request_count ==
+        diagnostics.legacy_component_cache_request_count &&
+      legacy_component_wave_trace_hit_count ==
+        diagnostics.legacy_component_cache_hit_count &&
+      legacy_component_wave_trace_miss_count ==
+        diagnostics.legacy_component_cache_miss_count &&
+      legacy_component_wave_trace_pair_count ==
+        diagnostics.cuda_legacy_compatible_pair_count :
+      diagnostics.legacy_component_wave_group_trace.empty();
+  const bool legacy_component_wave_accounted =
+    diagnostics.legacy_component_wave_capacity_requested >= 1 &&
+    diagnostics.legacy_component_wave_capacity_requested <= 8 &&
+    diagnostics.legacy_component_wave_group_count == total_frontier_batches &&
+    diagnostics.legacy_component_wave_count >= 0 &&
+    diagnostics.legacy_component_wave_count <=
+      diagnostics.legacy_component_wave_group_count &&
+    diagnostics.legacy_component_wave_peak_group_count >= 0 &&
+    diagnostics.legacy_component_wave_peak_group_count <=
+      diagnostics.legacy_component_wave_capacity_requested &&
+    diagnostics.legacy_component_wave_ready_ge2_count >= 0 &&
+    diagnostics.legacy_component_wave_ready_ge2_count <=
+      diagnostics.legacy_component_wave_count &&
+    diagnostics.legacy_component_wave_ready_ge4_count >= 0 &&
+    diagnostics.legacy_component_wave_ready_ge4_count <=
+      diagnostics.legacy_component_wave_ready_ge2_count &&
+    diagnostics.legacy_component_wave_ready_ge8_count >= 0 &&
+      diagnostics.legacy_component_wave_ready_ge8_count <=
+        diagnostics.legacy_component_wave_ready_ge4_count &&
+    ((!diagnostics.legacy_component_wave_positive_miss_only_requested &&
+      diagnostics.legacy_component_wave_prediction_count == 0 &&
+      diagnostics.legacy_component_wave_prediction_incomplete_count == 0 &&
+      diagnostics.legacy_component_wave_zero_miss_rejection_count == 0 &&
+      diagnostics
+          .legacy_component_wave_missing_key_overlap_rejection_count == 0 &&
+      diagnostics.legacy_component_wave_selective_pair_count == 0 &&
+      diagnostics.legacy_component_wave_prediction_host_ms == 0.0) ||
+     (diagnostics.legacy_component_wave_positive_miss_only_requested &&
+      diagnostics.legacy_component_wave_capacity_requested == 2 &&
+      diagnostics.legacy_component_wave_prediction_count >=
+        diagnostics.legacy_component_wave_count +
+          diagnostics.legacy_component_wave_selective_pair_count &&
+      diagnostics.legacy_component_wave_prediction_incomplete_count >= 0 &&
+      diagnostics.legacy_component_wave_zero_miss_rejection_count >= 0 &&
+      diagnostics
+          .legacy_component_wave_missing_key_overlap_rejection_count >= 0 &&
+      diagnostics.legacy_component_wave_selective_pair_count ==
+        diagnostics.legacy_component_wave_group_count -
+          diagnostics.legacy_component_wave_count &&
+      diagnostics.legacy_component_wave_prediction_host_ms >= 0.0)) &&
+    ((diagnostics.legacy_component_wave_group_count == 0 &&
+      diagnostics.legacy_component_wave_count == 0 &&
+      diagnostics.legacy_component_wave_peak_group_count == 0 &&
+      diagnostics.legacy_component_wave_ready_bucket_count_sum == 0U &&
+      diagnostics.legacy_component_wave_ready_bucket_count_peak == 0) ||
+     (diagnostics.legacy_component_wave_group_count > 0 &&
+      diagnostics.legacy_component_wave_count > 0 &&
+      diagnostics.legacy_component_wave_peak_group_count > 0 &&
+      diagnostics.legacy_component_wave_ready_bucket_count_sum >=
+        static_cast<std::uint64_t>(
+          diagnostics.legacy_component_wave_count) &&
+      diagnostics.legacy_component_wave_ready_bucket_count_peak >= 1));
   const bool method_residual_cache_enabled =
     static_cast<bool>(method_residual_cache);
   const bool cacheable_strict_method =
@@ -5935,14 +6606,19 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
               prefill.optimizer_boundary_count +
                 diagnostics.frontier_optimizer_boundary_count &&
             method_residual_cache_accounted &&
+            legacy_component_cache_accounted &&
+            legacy_component_cache_residual_bypass_accounted &&
+            legacy_component_wave_accounted &&
+            legacy_component_wave_trace_accounted &&
             method_execution_context_accounted &&
             method_component_cache_accounted &&
             method_permutation_inline_r_index_accounted &&
             method_permutation_rng_receipt_accounted &&
             method_permutation_gpu_overlap_accounted &&
             method_route_wait_diagnostics_accounted &&
-            fixed_sp_root_cache_accounted,
-          "compatible.cuda one-call physical work accounting changed");
+            fixed_sp_root_cache_accounted &&
+            legacy_component_eig_histogram_accounted,
+            "compatible.cuda one-call physical work accounting changed");
   const bool authority_clean =
     diagnostics.cpu_dcov_component_count == 0 &&
     diagnostics.cpu_dcov_eigen_or_lowrank_count == 0 &&
@@ -6004,6 +6680,15 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       diagnostics.cuda_multi_penalty_decomposition_iteration_reuse);
   const Rcpp::DataFrame method_critical_path =
     method_critical_path_frame(diagnostics.method_critical_path_trace);
+  const Rcpp::DataFrame legacy_component_eig_miss_histogram =
+    legacy_component_eig_miss_histogram_frame(
+      diagnostics.legacy_component_eig_batch_count_by_miss,
+      diagnostics.legacy_component_eig_component_count_by_miss,
+      diagnostics.legacy_component_eig_cuda_ms_by_miss,
+      diagnostics.legacy_component_build_cuda_ms_by_miss);
+  const Rcpp::DataFrame legacy_component_wave_group_trace =
+    legacy_component_wave_group_trace_frame(
+      diagnostics.legacy_component_wave_group_trace);
 
   return Rcpp::List::create(
     Rcpp::Named("adjacency") = adjacency_matrix(adjacency, p),
@@ -6013,6 +6698,10 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
     Rcpp::Named("tasks") = task_rows,
     Rcpp::Named("levels") = level_rows,
     Rcpp::Named("method_critical_path") = method_critical_path,
+    Rcpp::Named("legacy_component_eig_miss_histogram") =
+      legacy_component_eig_miss_histogram,
+    Rcpp::Named("legacy_component_wave_group_trace") =
+      legacy_component_wave_group_trace,
     Rcpp::Named("summary") = Rcpp::List::create(
       Rcpp::Named("run_status") = "ok",
       Rcpp::Named("entrypoint") =
@@ -6028,7 +6717,7 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       Rcpp::Named("numCol") = num_col,
       Rcpp::Named("ci_method") = method_options.ci_method,
       Rcpp::Named("ci_backend") = method_options.ci_method == "dcc.gamma" ?
-        "guarded-exact-screen-legacy-full-eig-cuda" :
+        "legacy-compatible-full-eig-cuda-v1" :
         "strict-device-residual-ci-cuda-v1",
       Rcpp::Named("hsic_sig") = method_options.hsic_sig,
       Rcpp::Named("permutation_replicates") =
@@ -6267,6 +6956,14 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.cuda_guard_refinement_component_count,
       Rcpp::Named("cuda_guard_refinement_pair_count") =
         diagnostics.cuda_guard_refinement_pair_count,
+      Rcpp::Named("cuda_legacy_compatible_residual_batch_count") =
+        diagnostics.cuda_legacy_compatible_residual_batch_count,
+      Rcpp::Named("cuda_legacy_compatible_residual_target_count") =
+        diagnostics.cuda_legacy_compatible_residual_target_count,
+      Rcpp::Named("cuda_legacy_compatible_component_count") =
+        diagnostics.cuda_legacy_compatible_component_count,
+      Rcpp::Named("cuda_legacy_compatible_pair_count") =
+        diagnostics.cuda_legacy_compatible_pair_count,
       Rcpp::Named("exact_residual_all_miss_batch_count") =
         diagnostics.exact_residual_all_miss_batch_count,
       Rcpp::Named("exact_residual_all_miss_target_count") =
@@ -6295,6 +6992,100 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       Rcpp::Named("cuda_gamma_pvalue_count") =
         diagnostics.cuda_gamma_pvalue_count,
       Rcpp::Named("guarded_pair_count") = diagnostics.guarded_pair_count,
+      Rcpp::Named("legacy_compatible_pair_count") =
+        diagnostics.legacy_compatible_pair_count,
+      Rcpp::Named("legacy_component_cache_requested_budget_bytes") =
+        static_cast<double>(
+          diagnostics.legacy_component_cache_requested_budget_bytes),
+      Rcpp::Named("legacy_component_cache_capacity_entries") =
+        static_cast<double>(
+          diagnostics.legacy_component_cache_capacity_entries),
+      Rcpp::Named("legacy_component_cache_device_bytes") =
+        static_cast<double>(diagnostics.legacy_component_cache_device_bytes),
+      Rcpp::Named("legacy_component_cache_entries") =
+        static_cast<double>(diagnostics.legacy_component_cache_entries),
+      Rcpp::Named("legacy_component_cache_request_count") =
+        static_cast<double>(diagnostics.legacy_component_cache_request_count),
+      Rcpp::Named("legacy_component_cache_hit_count") =
+        static_cast<double>(diagnostics.legacy_component_cache_hit_count),
+      Rcpp::Named("legacy_component_cache_miss_count") =
+        static_cast<double>(diagnostics.legacy_component_cache_miss_count),
+      Rcpp::Named("legacy_component_cache_insert_count") =
+        static_cast<double>(diagnostics.legacy_component_cache_insert_count),
+      Rcpp::Named("legacy_component_cache_bypass_count") =
+        static_cast<double>(diagnostics.legacy_component_cache_bypass_count),
+      Rcpp::Named("legacy_component_cache_route_mismatch_count") =
+        static_cast<double>(
+          diagnostics.legacy_component_cache_route_mismatch_count),
+      Rcpp::Named("legacy_component_cache_status_mismatch_count") =
+        static_cast<double>(
+          diagnostics.legacy_component_cache_status_mismatch_count),
+      Rcpp::Named("legacy_component_cache_store_d2d_bytes") =
+        static_cast<double>(diagnostics.legacy_component_cache_store_d2d_bytes),
+      Rcpp::Named("legacy_component_cache_create_host_ms") =
+        diagnostics.legacy_component_cache_create_host_ms,
+      Rcpp::Named("legacy_component_cache_residual_bypass_requested") =
+        diagnostics.legacy_component_cache_residual_bypass_requested,
+      Rcpp::Named("legacy_component_cache_residual_bypass_batch_count") =
+        diagnostics.legacy_component_cache_residual_bypass_batch_count,
+      Rcpp::Named("legacy_component_cache_residual_bypass_target_count") =
+        diagnostics.legacy_component_cache_residual_bypass_target_count,
+      Rcpp::Named("legacy_component_cache_batch_count") =
+        diagnostics.legacy_component_cache_batch_count,
+      Rcpp::Named("legacy_component_cache_all_hit_batch_count") =
+        diagnostics.legacy_component_cache_all_hit_batch_count,
+      Rcpp::Named("legacy_component_cache_mixed_batch_count") =
+        diagnostics.legacy_component_cache_mixed_batch_count,
+      Rcpp::Named("legacy_component_cache_all_miss_batch_count") =
+        diagnostics.legacy_component_cache_all_miss_batch_count,
+      Rcpp::Named("legacy_component_eig_lane_count_requested") =
+        diagnostics.legacy_component_eig_lane_count_requested,
+      Rcpp::Named("legacy_component_eig_lane_count") =
+        diagnostics.legacy_component_eig_lane_count,
+      Rcpp::Named("legacy_component_eig_active_lane_peak") =
+        diagnostics.legacy_component_eig_active_lane_peak,
+      Rcpp::Named("legacy_component_eig_multilane_batch_count") =
+        diagnostics.legacy_component_eig_multilane_batch_count,
+      Rcpp::Named("legacy_component_execution_context_reuse_count") =
+        diagnostics.legacy_component_execution_context_reuse_count,
+      Rcpp::Named("legacy_component_execution_context_device_bytes") =
+        static_cast<double>(
+          diagnostics.legacy_component_execution_context_device_bytes),
+      Rcpp::Named("legacy_component_wave_capacity_requested") =
+        diagnostics.legacy_component_wave_capacity_requested,
+      Rcpp::Named("legacy_component_wave_count") =
+        diagnostics.legacy_component_wave_count,
+      Rcpp::Named("legacy_component_wave_group_count") =
+        diagnostics.legacy_component_wave_group_count,
+      Rcpp::Named("legacy_component_wave_peak_group_count") =
+        diagnostics.legacy_component_wave_peak_group_count,
+      Rcpp::Named("legacy_component_wave_ready_bucket_count_sum") =
+        static_cast<double>(
+          diagnostics.legacy_component_wave_ready_bucket_count_sum),
+      Rcpp::Named("legacy_component_wave_ready_bucket_count_peak") =
+        diagnostics.legacy_component_wave_ready_bucket_count_peak,
+      Rcpp::Named("legacy_component_wave_ready_ge2_count") =
+        diagnostics.legacy_component_wave_ready_ge2_count,
+      Rcpp::Named("legacy_component_wave_ready_ge4_count") =
+        diagnostics.legacy_component_wave_ready_ge4_count,
+      Rcpp::Named("legacy_component_wave_ready_ge8_count") =
+        diagnostics.legacy_component_wave_ready_ge8_count,
+      Rcpp::Named("legacy_component_wave_positive_miss_only_requested") =
+        diagnostics.legacy_component_wave_positive_miss_only_requested,
+      Rcpp::Named("legacy_component_wave_prediction_count") =
+        diagnostics.legacy_component_wave_prediction_count,
+      Rcpp::Named("legacy_component_wave_prediction_incomplete_count") =
+        diagnostics.legacy_component_wave_prediction_incomplete_count,
+      Rcpp::Named("legacy_component_wave_zero_miss_rejection_count") =
+        diagnostics.legacy_component_wave_zero_miss_rejection_count,
+      Rcpp::Named(
+        "legacy_component_wave_missing_key_overlap_rejection_count") =
+          diagnostics
+            .legacy_component_wave_missing_key_overlap_rejection_count,
+      Rcpp::Named("legacy_component_wave_selective_pair_count") =
+        diagnostics.legacy_component_wave_selective_pair_count,
+      Rcpp::Named("legacy_component_wave_prediction_host_ms") =
+        diagnostics.legacy_component_wave_prediction_host_ms,
       Rcpp::Named("unique_prepared_s_key_count") =
         unique_prepared_s_key_count,
       Rcpp::Named("physical_prepared_s_key_count") =
@@ -6525,6 +7316,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.method_combined_identity_authentication_count,
       Rcpp::Named("sha256_backend") = full_cuda_ci_sha256_backend(),
       Rcpp::Named("strict_hsic_gamma_residual_route") =
+        diagnostics.strict_hsic_gamma_residual_route,
+      Rcpp::Named("strict_gamma_residual_route") =
         diagnostics.strict_hsic_gamma_residual_route,
       Rcpp::Named("strict_permutation_residual_route") =
         diagnostics.strict_permutation_residual_route,
@@ -6758,6 +7551,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.cuda_exact_screen_residual_solve_host_ms,
       Rcpp::Named("cuda_guard_refinement_residual_solve_host_ms") =
         diagnostics.cuda_guard_refinement_residual_solve_host_ms,
+      Rcpp::Named("cuda_legacy_compatible_residual_solve_host_ms") =
+        diagnostics.cuda_legacy_compatible_residual_solve_host_ms,
       Rcpp::Named("cuda_exact_screen_component_build_ms") =
         diagnostics.cuda_exact_screen_component_build_ms,
       Rcpp::Named("exact_residual_all_miss_solve_host_ms") =
@@ -6782,6 +7577,12 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.cuda_dcov_metadata_h2d_ms,
       Rcpp::Named("cuda_dcov_component_build_ms") =
         diagnostics.cuda_dcov_component_build_ms,
+      Rcpp::Named("cuda_dcov_distance_build_ms") =
+        diagnostics.cuda_dcov_distance_build_ms,
+      Rcpp::Named("cuda_dcov_full_eig_ms") =
+        diagnostics.cuda_dcov_full_eig_ms,
+      Rcpp::Named("cuda_dcov_component_finalize_ms") =
+        diagnostics.cuda_dcov_component_finalize_ms,
       Rcpp::Named("cuda_dcov_pair_gamma_ms") =
         diagnostics.cuda_dcov_pair_gamma_ms,
       Rcpp::Named("cuda_dcov_compact_d2h_ms") =
@@ -6789,6 +7590,26 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       Rcpp::Named("cuda_dcov_teardown_host_ms") =
         diagnostics.cuda_dcov_teardown_host_ms,
       Rcpp::Named("cuda_dcov_host_ms") = diagnostics.cuda_dcov_host_ms,
+      Rcpp::Named("legacy_component_cache_all_hit_host_ms") =
+        diagnostics.legacy_component_cache_all_hit_host_ms,
+      Rcpp::Named("legacy_component_cache_all_hit_teardown_host_ms") =
+        diagnostics.legacy_component_cache_all_hit_teardown_host_ms,
+      Rcpp::Named(
+        "legacy_component_cache_all_hit_residual_solve_host_ms") =
+          diagnostics.legacy_component_cache_all_hit_residual_solve_host_ms,
+      Rcpp::Named("legacy_component_cache_mixed_host_ms") =
+        diagnostics.legacy_component_cache_mixed_host_ms,
+      Rcpp::Named("legacy_component_cache_mixed_teardown_host_ms") =
+        diagnostics.legacy_component_cache_mixed_teardown_host_ms,
+      Rcpp::Named("legacy_component_cache_mixed_residual_solve_host_ms") =
+        diagnostics.legacy_component_cache_mixed_residual_solve_host_ms,
+      Rcpp::Named("legacy_component_cache_all_miss_host_ms") =
+        diagnostics.legacy_component_cache_all_miss_host_ms,
+      Rcpp::Named("legacy_component_cache_all_miss_teardown_host_ms") =
+        diagnostics.legacy_component_cache_all_miss_teardown_host_ms,
+      Rcpp::Named(
+        "legacy_component_cache_all_miss_residual_solve_host_ms") =
+          diagnostics.legacy_component_cache_all_miss_residual_solve_host_ms,
       Rcpp::Named("runtime_workspace_bytes") =
         static_cast<double>(runtime_workspace_bytes),
       Rcpp::Named("elapsed_sec") = elapsed_ms(run_started) / 1000.0,
