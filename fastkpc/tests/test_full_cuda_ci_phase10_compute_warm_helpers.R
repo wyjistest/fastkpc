@@ -65,17 +65,54 @@ evidence <- fastkpc_full_cuda_phase10_capture_compute_warm(
 fastkpc_full_cuda_phase10_validate_compute_warm_evidence(evidence)
 profile <- fastkpc_full_cuda_phase10_compute_profile(evidence$result$summary)
 assert_true(
-    identical(profile$schema_version, "full-cuda-ci-compute-profile-v7") &&
+    identical(profile$schema_version, "full-cuda-ci-compute-profile-v8") &&
     is.data.frame(profile$stage_timing) &&
     nrow(profile$stage_timing) == 41L &&
     is.data.frame(profile$physical_work) &&
-    nrow(profile$physical_work) == 121L &&
+    nrow(profile$physical_work) == 126L &&
     is.data.frame(profile$prefill_batches) &&
     nrow(profile$prefill_batches) ==
       evidence$result$summary$prefill_window_count &&
     all(is.finite(profile$stage_timing$elapsed_ms)) &&
     all(is.finite(profile$physical_work$value)),
   "compute-warm profile must expose complete finite stage/work counters"
+)
+assert_true(
+  isTRUE(
+    evidence$result$summary$dcc_gamma_exact_primary_optimizer_requested
+  ) &&
+    evidence$result$summary$cuda_multi_penalty_exact_primary_target_count ==
+      evidence$result$summary$cuda_multi_penalty_target_count &&
+    evidence$result$summary$cuda_multi_penalty_stability_replay_target_count ==
+      0L &&
+    evidence$result$summary$cuda_multi_penalty_stability_replay_selected_count ==
+      0L &&
+    evidence$result$summary$cuda_multi_penalty_terminal_confirmation_count ==
+      0L,
+  "compute-warm profile must preserve exact-primary optimizer identity"
+)
+bypass_summary <- evidence$result$summary
+bypass_summary$legacy_component_cache_residual_bypass_target_count <- 1L
+bypass_summary$cuda_legacy_compatible_residual_target_count <-
+  bypass_summary$cuda_legacy_compatible_residual_target_count + 1L
+bypass_profile <- fastkpc_full_cuda_phase10_compute_profile(bypass_summary)
+assert_true(
+  bypass_profile$physical_work$value[
+    bypass_profile$physical_work$metric ==
+      "legacy_component_cache_residual_bypass_target_count"
+  ] == 1 &&
+    bypass_summary$physical_residual_fits +
+      bypass_summary$legacy_component_cache_residual_bypass_target_count ==
+      bypass_summary$cuda_legacy_compatible_residual_target_count,
+  "compute profile must account for all-hit residual bypass targets"
+)
+tampered_bypass_summary <- bypass_summary
+tampered_bypass_summary$legacy_component_cache_residual_bypass_target_count <-
+  2L
+assert_error(
+  fastkpc_full_cuda_phase10_compute_profile(tampered_bypass_summary),
+  "Phase 10 fresh-data compute profile is malformed",
+  "compute profile must reject unbalanced residual bypass targets"
 )
 assert_true(
   evidence$result$summary$cuda_exact_screen_residual_batch_count == 0L &&

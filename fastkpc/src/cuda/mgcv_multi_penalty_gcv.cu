@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -62,6 +63,18 @@ constexpr double kRejectedBoundaryReplayDeltaRatio = 2.0;
 constexpr double kTerminalBoundaryTieCondition = 8388608.0;
 constexpr double kTerminalBoundaryTieRelativeTolerance =
   1e-10;
+
+bool exact_primary_test_override() {
+  const char* raw = std::getenv(
+    "FASTKPC_TEST_MULTI_PENALTY_EXACT_ONLY");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "0") {
+    return false;
+  }
+  const std::string value(raw);
+  if (value == "1" || value == "exact-primary") return true;
+  throw std::runtime_error(
+    "FASTKPC_TEST_MULTI_PENALTY_EXACT_ONLY must be 0, 1, or exact-primary");
+}
 
 enum DeviceDecompositionTraceFlag : unsigned int {
   kDecompositionTraceInitial = 1U << 0,
@@ -5022,19 +5035,25 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
   output.target_count = target_count;
   output.initial_log_sp.assign(
     initial_log_sp, initial_log_sp + penalty_count);
+  const bool exact_primary_only = control.exact_primary_only ||
+    exact_primary_test_override();
   MultiPenaltyGcvCudaDiagnostics& diagnostics = output.diagnostics;
   diagnostics.schema_version =
     "full-cuda-ci-multi-penalty-gcv-cuda-diagnostics-v1";
-  diagnostics.execution_strategy =
+  diagnostics.execution_strategy = exact_primary_only ?
+    "exact-primary-only-one-block-per-target" :
     "one-setup-one-block-per-target-independent-optimizer";
   diagnostics.prepared_setup_upload_count = 1;
   diagnostics.target_batch_upload_count = 1;
   diagnostics.cuda_qt_y_kernel_launch_count = 1;
   diagnostics.cuda_optimizer_kernel_launch_count = 1;
   diagnostics.cuda_optimizer_target_count = target_count;
+  diagnostics.cuda_exact_primary_target_count = exact_primary_only ?
+    target_count : 0;
   diagnostics.independent_target_states = true;
   diagnostics.target_specific_log_sp = true;
   diagnostics.true_batched_kernel = target_count > 1;
+  diagnostics.exact_primary_only = exact_primary_only;
   diagnostics.normal_equations_used = false;
   check_cuda(cudaGetDevice(&diagnostics.device_id),
              "query multi-penalty optimizer device");
@@ -5116,30 +5135,33 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
       gradient_tolerance_factor, control.max_step_halving,
       control.max_iterations, control.max_newton_step,
       control.boundary_probe_step, control.max_boundary_probes,
-      control.rank_tolerance, false, false, false, nullptr, nullptr, 0U);
+      control.rank_tolerance, false, false, exact_primary_only,
+      nullptr, nullptr, 0U);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty optimizer batch kernel");
-  optimize_multi_penalty_targets_kernel<<<
-    target_count, kBlockSize, 0, stream.get()>>>(
-      d_r.get(), d_pivot.get(), d_roots.get(), d_root_offsets.get(),
-      d_ranks.get(), d_matrices.get(), d_y0.get(), d_squared_norm.get(),
-      d_initial_log_sp.get(), d_workspaces.get(), d_replay_states.get(),
-      d_states.get(), n, q, penalty_count, target_count,
-      control.convergence_tolerance, gradient_tolerance_factor,
-      control.max_step_halving, control.max_iterations,
-      control.max_newton_step, control.boundary_probe_step,
-      control.max_boundary_probes, control.rank_tolerance, true,
-      control.force_stability_replay_all, true, nullptr, nullptr, 0U);
-  check_cuda(cudaGetLastError(),
-             "launch multi-penalty stability replay kernel");
-  diagnostics.cuda_stability_replay_kernel_launch_count = 1;
-  merge_stability_replay_states_kernel<<<
-    target_blocks, kBlockSize, 0, stream.get()>>>(
-      d_states.get(), d_replay_states.get(), target_count,
-      control.force_stability_replay_all);
-  check_cuda(cudaGetLastError(),
-             "launch multi-penalty stability replay merge kernel");
-  diagnostics.cuda_stability_merge_kernel_launch_count = 1;
+  if (!exact_primary_only) {
+    optimize_multi_penalty_targets_kernel<<<
+      target_count, kBlockSize, 0, stream.get()>>>(
+        d_r.get(), d_pivot.get(), d_roots.get(), d_root_offsets.get(),
+        d_ranks.get(), d_matrices.get(), d_y0.get(), d_squared_norm.get(),
+        d_initial_log_sp.get(), d_workspaces.get(), d_replay_states.get(),
+        d_states.get(), n, q, penalty_count, target_count,
+        control.convergence_tolerance, gradient_tolerance_factor,
+        control.max_step_halving, control.max_iterations,
+        control.max_newton_step, control.boundary_probe_step,
+        control.max_boundary_probes, control.rank_tolerance, true,
+        control.force_stability_replay_all, true, nullptr, nullptr, 0U);
+    check_cuda(cudaGetLastError(),
+               "launch multi-penalty stability replay kernel");
+    diagnostics.cuda_stability_replay_kernel_launch_count = 1;
+    merge_stability_replay_states_kernel<<<
+      target_blocks, kBlockSize, 0, stream.get()>>>(
+        d_states.get(), d_replay_states.get(), target_count,
+        control.force_stability_replay_all);
+    check_cuda(cudaGetLastError(),
+               "launch multi-penalty stability replay merge kernel");
+    diagnostics.cuda_stability_merge_kernel_launch_count = 1;
+  }
   std::vector<DeviceOptimizerState> host_states(
     static_cast<std::size_t>(target_count));
   check_cuda(cudaMemcpyAsync(
@@ -5668,12 +5690,15 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
   try {
     const int q = prepared->q;
     const int penalty_count = prepared->penalty_count;
+    const bool exact_primary_only = control.exact_primary_only ||
+      exact_primary_test_override();
     const std::size_t y_count =
       static_cast<std::size_t>(n) * target_count;
     MultiPenaltyGcvCudaDiagnostics diagnostics;
     diagnostics.schema_version =
       "full-cuda-ci-multi-penalty-gcv-cuda-diagnostics-v1";
-    diagnostics.execution_strategy =
+    diagnostics.execution_strategy = exact_primary_only ?
+      "persistent-exact-primary-only-one-block-per-target" :
       "persistent-one-setup-one-block-per-target-independent-optimizer";
     diagnostics.device_id = prepared->device_id;
     diagnostics.gpu_name = prepared->info.gpu_name;
@@ -5683,9 +5708,12 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
     diagnostics.cuda_qt_y_kernel_launch_count = 1;
     diagnostics.cuda_optimizer_kernel_launch_count = 1;
     diagnostics.cuda_optimizer_target_count = target_count;
+    diagnostics.cuda_exact_primary_target_count = exact_primary_only ?
+      target_count : 0;
     diagnostics.independent_target_states = true;
     diagnostics.target_specific_log_sp = true;
     diagnostics.true_batched_kernel = true;
+    diagnostics.exact_primary_only = exact_primary_only;
     diagnostics.normal_equations_used = false;
     DeviceDecompositionTraceRecord* decomposition_trace = nullptr;
     unsigned int* decomposition_trace_counters = nullptr;
@@ -5756,35 +5784,38 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
         control.max_step_halving, control.max_iterations,
         control.max_newton_step, control.boundary_probe_step,
         control.max_boundary_probes, control.rank_tolerance, false, false,
-        false, decomposition_trace, decomposition_trace_counters,
-        decomposition_trace_capacity);
+        exact_primary_only, decomposition_trace,
+        decomposition_trace_counters, decomposition_trace_capacity);
     check_cuda(cudaGetLastError(),
                "launch persistent multi-penalty optimizer kernel");
-    optimize_multi_penalty_targets_kernel<<<
-      target_count, kBlockSize, 0, prepared->stream.get()>>>(
-        prepared->d_r.get(), prepared->d_pivot.get(),
-        prepared->d_roots.get(), prepared->d_root_offsets.get(),
-        prepared->d_ranks.get(), prepared->d_matrices.get(),
-        prepared->d_y0.get(), prepared->d_squared_norm.get(),
-        prepared->d_initial_log_sp.get(), prepared->d_workspaces.get(),
-        prepared->d_replay_states.get(), prepared->d_states.get(),
-        n, q, penalty_count, target_count, control.convergence_tolerance,
-        gradient_tolerance_factor, control.max_step_halving,
-        control.max_iterations, control.max_newton_step,
-        control.boundary_probe_step, control.max_boundary_probes,
-        control.rank_tolerance, true, control.force_stability_replay_all,
-        true, decomposition_trace, decomposition_trace_counters,
-        decomposition_trace_capacity);
-    check_cuda(cudaGetLastError(),
-               "launch persistent multi-penalty stability replay kernel");
-    diagnostics.cuda_stability_replay_kernel_launch_count = 1;
-    merge_stability_replay_states_kernel<<<
-      target_blocks, kBlockSize, 0, prepared->stream.get()>>>(
-        prepared->d_states.get(), prepared->d_replay_states.get(),
-        target_count, control.force_stability_replay_all);
-    check_cuda(cudaGetLastError(),
-               "launch persistent multi-penalty stability merge kernel");
-    diagnostics.cuda_stability_merge_kernel_launch_count = 1;
+    if (!exact_primary_only) {
+      optimize_multi_penalty_targets_kernel<<<
+        target_count, kBlockSize, 0, prepared->stream.get()>>>(
+          prepared->d_r.get(), prepared->d_pivot.get(),
+          prepared->d_roots.get(), prepared->d_root_offsets.get(),
+          prepared->d_ranks.get(), prepared->d_matrices.get(),
+          prepared->d_y0.get(), prepared->d_squared_norm.get(),
+          prepared->d_initial_log_sp.get(), prepared->d_workspaces.get(),
+          prepared->d_replay_states.get(), prepared->d_states.get(),
+          n, q, penalty_count, target_count, control.convergence_tolerance,
+          gradient_tolerance_factor, control.max_step_halving,
+          control.max_iterations, control.max_newton_step,
+          control.boundary_probe_step, control.max_boundary_probes,
+          control.rank_tolerance, true,
+          control.force_stability_replay_all, true,
+          decomposition_trace, decomposition_trace_counters,
+          decomposition_trace_capacity);
+      check_cuda(cudaGetLastError(),
+                 "launch persistent multi-penalty stability replay kernel");
+      diagnostics.cuda_stability_replay_kernel_launch_count = 1;
+      merge_stability_replay_states_kernel<<<
+        target_blocks, kBlockSize, 0, prepared->stream.get()>>>(
+          prepared->d_states.get(), prepared->d_replay_states.get(),
+          target_count, control.force_stability_replay_all);
+      check_cuda(cudaGetLastError(),
+                 "launch persistent multi-penalty stability merge kernel");
+      diagnostics.cuda_stability_merge_kernel_launch_count = 1;
+    }
     const int coefficient_count = q * target_count;
     const int coefficient_blocks =
       (coefficient_count + 255) / 256;

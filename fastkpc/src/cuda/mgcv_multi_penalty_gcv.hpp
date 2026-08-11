@@ -56,6 +56,7 @@ struct MultiPenaltyGcvCudaDiagnostics {
   int cuda_objective_target_count = 0;
   int cuda_optimizer_kernel_launch_count = 0;
   int cuda_optimizer_target_count = 0;
+  int cuda_exact_primary_target_count = 0;
   int cuda_optimizer_objective_count = 0;
   std::uint64_t cuda_penalty_factor_augmentation_cycles = 0;
   std::uint64_t cuda_qr_svd_cycles = 0;
@@ -155,6 +156,7 @@ struct MultiPenaltyGcvCudaDiagnostics {
   bool target_specific_log_sp = false;
   bool true_batched_kernel = false;
   bool independent_target_states = false;
+  bool exact_primary_only = false;
   bool normal_equations_used = false;
   bool double_precision = true;
   double total_host_ms = 0.0;
@@ -298,6 +300,7 @@ struct MultiPenaltyGcvCudaOptimizerControl {
   double rank_tolerance = 1.4901161193847656e-8;
   int decomposition_trace_capacity_per_target = 0;
   bool force_stability_replay_all = false;
+  bool exact_primary_only = false;
 };
 
 struct MultiPenaltyGcvCudaOptimization {

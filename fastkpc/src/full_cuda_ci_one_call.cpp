@@ -134,6 +134,17 @@ bool dcc_gamma_legacy_component_cache_residual_bypass_policy() {
   return true;
 }
 
+bool dcc_gamma_exact_primary_optimizer_policy() {
+  const char* raw = std::getenv(
+    "FASTKPC_DCC_GAMMA_EXACT_PRIMARY_OPTIMIZER");
+  if (raw == nullptr || raw[0] == '\0' || std::string(raw) == "1") {
+    return true;
+  }
+  if (std::string(raw) == "0") return false;
+  throw std::runtime_error(
+    "FASTKPC_DCC_GAMMA_EXACT_PRIMARY_OPTIMIZER must be 0 or 1");
+}
+
 int dcc_gamma_legacy_component_eig_lane_policy() {
   const char* raw = std::getenv(
     "FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_EIG_LANES");
@@ -996,6 +1007,7 @@ struct OneCallDiagnostics {
   std::vector<PrefillBatchDiagnostic> prefill_batches;
   std::vector<LegacyComponentWaveGroupTraceRow>
     legacy_component_wave_group_trace;
+  bool dcc_gamma_exact_primary_optimizer_requested = false;
   int native_setup_count = 0;
   int native_setup_cache_request_count = 0;
   int native_setup_cache_hit_count = 0;
@@ -1046,6 +1058,7 @@ struct OneCallDiagnostics {
   std::uint64_t cuda_multi_penalty_stability_replay_target_count = 0;
   std::uint64_t cuda_multi_penalty_stability_replay_selected_count = 0;
   std::uint64_t cuda_multi_penalty_terminal_confirmation_count = 0;
+  std::uint64_t cuda_multi_penalty_exact_primary_target_count = 0;
   std::uint64_t cuda_multi_penalty_hessian_eigensolver_count = 0;
   std::uint64_t cuda_multi_penalty_penalty_factor_cycles = 0;
   std::uint64_t cuda_multi_penalty_qr_svd_cycles = 0;
@@ -3332,6 +3345,20 @@ void accumulate_multi_penalty_optimizer_diagnostics(
   require(diagnostics != nullptr && value.target_count > 0,
           "multi-penalty optimizer diagnostics are malformed");
   const MultiPenaltyGcvCudaDiagnostics& source = value.diagnostics;
+  if (diagnostics->dcc_gamma_exact_primary_optimizer_requested) {
+    require(source.exact_primary_only &&
+              source.cuda_exact_primary_target_count == value.target_count &&
+              source.cuda_stability_replay_kernel_launch_count == 0 &&
+              source.cuda_stability_merge_kernel_launch_count == 0 &&
+              source.cuda_stability_replay_target_count == 0 &&
+              source.cuda_stability_replay_selected_count == 0 &&
+              source.cuda_terminal_boundary_confirmation_count == 0,
+            "dcc.gamma exact-primary optimizer execution identity changed");
+  } else {
+    require(!source.exact_primary_only &&
+              source.cuda_exact_primary_target_count == 0,
+            "non-dcc.gamma optimizer unexpectedly used exact-primary mode");
+  }
   accumulate_decomposition_reuse_diagnostics(
     value, prepared_key, diagnostics);
   diagnostics->cuda_multi_penalty_optimizer_summed_setup_host_ms +=
@@ -3355,6 +3382,8 @@ void accumulate_multi_penalty_optimizer_diagnostics(
     source.cuda_stability_replay_selected_count;
   diagnostics->cuda_multi_penalty_terminal_confirmation_count +=
     source.cuda_terminal_boundary_confirmation_count;
+  diagnostics->cuda_multi_penalty_exact_primary_target_count +=
+    source.cuda_exact_primary_target_count;
   diagnostics->cuda_multi_penalty_hessian_eigensolver_count +=
     source.cuda_hessian_eigensolver_count;
   diagnostics->cuda_multi_penalty_penalty_factor_cycles +=
@@ -4220,6 +4249,8 @@ MultiPenaltyPrefillWindowWork prepare_multi_penalty_prefill_window(
     input.control.decomposition_trace_capacity_per_target =
       diagnostics
         ->cuda_multi_penalty_decomposition_trace_capacity_per_target;
+    input.control.exact_primary_only =
+      diagnostics->dcc_gamma_exact_primary_optimizer_requested;
     input.Y.resize(
       static_cast<std::size_t>(context->n) * request.targets.size());
     for (std::size_t index = 0; index < request.targets.size(); ++index) {
@@ -4734,6 +4765,8 @@ GroupResult execute_group(
       control.decomposition_trace_capacity_per_target =
         diagnostics
           ->cuda_multi_penalty_decomposition_trace_capacity_per_target;
+      control.exact_primary_only =
+        diagnostics->dcc_gamma_exact_primary_optimizer_requested;
       MultiPenaltyGcvCudaOptimization optimization;
       try {
         optimization = multi_penalty_gcv_capacity_optimize_batch(
@@ -5497,6 +5530,9 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
   FixedSpRuntimePool runtime_pool(n);
 
   OneCallDiagnostics diagnostics;
+  diagnostics.dcc_gamma_exact_primary_optimizer_requested =
+    method_options.ci_method == "dcc.gamma" &&
+      dcc_gamma_exact_primary_optimizer_policy();
   diagnostics.method_critical_path_trace_capacity =
     strict_method_critical_path_trace_capacity();
   if (diagnostics.method_critical_path_trace_capacity > 0) {
@@ -7051,6 +7087,11 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
       Rcpp::Named("cuda_multi_penalty_terminal_confirmation_count") =
         static_cast<double>(
           diagnostics.cuda_multi_penalty_terminal_confirmation_count),
+      Rcpp::Named("dcc_gamma_exact_primary_optimizer_requested") =
+        diagnostics.dcc_gamma_exact_primary_optimizer_requested,
+      Rcpp::Named("cuda_multi_penalty_exact_primary_target_count") =
+        static_cast<double>(
+          diagnostics.cuda_multi_penalty_exact_primary_target_count),
       Rcpp::Named("cuda_multi_penalty_hessian_eigensolver_count") =
         static_cast<double>(
           diagnostics.cuda_multi_penalty_hessian_eigensolver_count),

@@ -524,6 +524,7 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "cuda_multi_penalty_guarded_qr_evaluation_count",
     "cuda_multi_penalty_stable_svd_evaluation_count",
     "cuda_multi_penalty_selected_evaluation_reuse_count",
+    "cuda_multi_penalty_exact_primary_target_count",
     "cuda_multi_penalty_stability_replay_target_count",
     "cuda_multi_penalty_stability_replay_selected_count",
     "cuda_multi_penalty_terminal_confirmation_count",
@@ -558,6 +559,7 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "cuda_legacy_compatible_component_count",
     "cuda_legacy_compatible_pair_count", "guarded_pair_count",
     "legacy_compatible_pair_count",
+    "legacy_component_cache_residual_bypass_target_count",
     "unique_residual_key_count",
     "logical_residual_requests", "physical_residual_fits",
     "excess_residual_fit_count", "excess_native_setup_build_count",
@@ -656,7 +658,8 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
       ) &&
       counters[["cuda_residual_batch_count"]] ==
         counters[["cuda_legacy_compatible_residual_batch_count"]] &&
-      counters[["physical_residual_fits"]] ==
+      counters[["physical_residual_fits"]] +
+        counters[["legacy_component_cache_residual_bypass_target_count"]] ==
         counters[["cuda_legacy_compatible_residual_target_count"]] &&
       counters[["cuda_dcov_component_count"]] ==
         counters[["cuda_legacy_compatible_component_count"]] &&
@@ -731,6 +734,16 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
         2 * counters[["cuda_exact_fixed_evaluator_batch_count"]] &&
       counters[["cuda_exact_fixed_evaluator_stable_svd_target_count"]] ==
         counters[["cuda_exact_fixed_evaluator_target_count"]] &&
+      ((isTRUE(summary$dcc_gamma_exact_primary_optimizer_requested) &&
+        counters[["cuda_multi_penalty_exact_primary_target_count"]] ==
+          counters[["cuda_multi_penalty_target_count"]] &&
+        counters[["cuda_multi_penalty_stability_replay_target_count"]] ==
+          0 &&
+        counters[["cuda_multi_penalty_stability_replay_selected_count"]] ==
+          0 &&
+        counters[["cuda_multi_penalty_terminal_confirmation_count"]] == 0) ||
+       (!isTRUE(summary$dcc_gamma_exact_primary_optimizer_requested) &&
+        counters[["cuda_multi_penalty_exact_primary_target_count"]] == 0)) &&
       (counters[["cuda_multi_penalty_target_count"]] == 0 || (
         counters[["cuda_multi_penalty_optimizer_iteration_sum"]] > 0 &&
         counters[["cuda_multi_penalty_optimizer_iteration_max"]] > 0 &&
@@ -772,7 +785,7 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "Phase 10 fresh-data compute profile is malformed"
   )
   list(
-    schema_version = "full-cuda-ci-compute-profile-v7",
+    schema_version = "full-cuda-ci-compute-profile-v8",
     stage_timing = data.frame(
       stage = c(
         "native_setup",

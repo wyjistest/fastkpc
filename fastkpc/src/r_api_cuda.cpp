@@ -8601,6 +8601,8 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
         diagnostics.cuda_optimizer_kernel_launch_count,
       Rcpp::Named("cuda_optimizer_target_count") =
         diagnostics.cuda_optimizer_target_count,
+      Rcpp::Named("cuda_exact_primary_target_count") =
+        diagnostics.cuda_exact_primary_target_count,
       Rcpp::Named("cuda_optimizer_objective_count") =
         diagnostics.cuda_optimizer_objective_count,
       Rcpp::Named("cuda_penalty_factor_augmentation_cycles") =
@@ -8804,6 +8806,8 @@ Rcpp::List multi_penalty_cuda_optimization_to_list(
       Rcpp::Named("true_batched_kernel") = diagnostics.true_batched_kernel,
       Rcpp::Named("independent_target_states") =
         diagnostics.independent_target_states,
+      Rcpp::Named("exact_primary_only") =
+        diagnostics.exact_primary_only,
       Rcpp::Named("normal_equations_used") =
         diagnostics.normal_equations_used,
       Rcpp::Named("double_precision") = diagnostics.double_precision,
@@ -9091,6 +9095,8 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cuda(
         diagnostics.cuda_optimizer_kernel_launch_count,
       Rcpp::Named("cuda_optimizer_target_count") =
         diagnostics.cuda_optimizer_target_count,
+      Rcpp::Named("cuda_exact_primary_target_count") =
+        diagnostics.cuda_exact_primary_target_count,
       Rcpp::Named("cuda_optimizer_objective_count") =
         diagnostics.cuda_optimizer_objective_count,
       Rcpp::Named("cuda_penalty_factor_augmentation_cycles") =
@@ -9259,6 +9265,8 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_gcv_optimize_cuda(
       Rcpp::Named("true_batched_kernel") = diagnostics.true_batched_kernel,
       Rcpp::Named("independent_target_states") =
         diagnostics.independent_target_states,
+      Rcpp::Named("exact_primary_only") =
+        diagnostics.exact_primary_only,
       Rcpp::Named("normal_equations_used") =
         diagnostics.normal_equations_used,
       Rcpp::Named("double_precision") = diagnostics.double_precision,

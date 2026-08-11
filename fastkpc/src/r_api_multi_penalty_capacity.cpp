@@ -280,6 +280,8 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_capacity_qualify(
         result.diagnostics.cuda_guarded_qr_evaluation_count,
       Rcpp::Named("cuda_stable_svd_evaluation_count") =
         result.diagnostics.cuda_stable_svd_evaluation_count,
+      Rcpp::Named("cuda_exact_primary_target_count") =
+        result.diagnostics.cuda_exact_primary_target_count,
       Rcpp::Named("cuda_stability_replay_target_count") =
         result.diagnostics.cuda_stability_replay_target_count,
       Rcpp::Named("cuda_stability_replay_screened_count") =
@@ -288,6 +290,8 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_capacity_qualify(
         result.diagnostics.cuda_stability_replay_selected_count,
       Rcpp::Named("cuda_stability_replay_error_count") =
         result.diagnostics.cuda_stability_replay_error_count,
+      Rcpp::Named("cuda_terminal_boundary_confirmation_count") =
+        result.diagnostics.cuda_terminal_boundary_confirmation_count,
       Rcpp::Named(
         "cuda_stability_replay_guarded_qr_trajectory_reason_count") =
           result.diagnostics
@@ -303,6 +307,8 @@ extern "C" SEXP C_full_cuda_ci_multi_penalty_capacity_qualify(
       Rcpp::Named("true_batched_kernel") =
         result.diagnostics.true_batched_kernel,
       Rcpp::Named("independent_target_states") =
-        result.diagnostics.independent_target_states));
+        result.diagnostics.independent_target_states,
+      Rcpp::Named("exact_primary_only") =
+        result.diagnostics.exact_primary_only));
   END_RCPP
 }

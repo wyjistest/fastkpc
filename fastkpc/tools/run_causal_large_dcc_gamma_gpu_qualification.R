@@ -256,6 +256,18 @@ receipt <- list(
   cpu_spectra_count = summary$cpu_spectra_count,
   unknown_fallback_count = summary$unknown_fallback_count,
   approximate_backend_count = summary$approximate_backend_count,
+  exact_primary_optimizer_requested =
+    summary$dcc_gamma_exact_primary_optimizer_requested,
+  multi_penalty_target_count =
+    summary$cuda_multi_penalty_target_count,
+  exact_primary_target_count =
+    summary$cuda_multi_penalty_exact_primary_target_count,
+  stability_replay_target_count =
+    summary$cuda_multi_penalty_stability_replay_target_count,
+  stability_replay_selected_count =
+    summary$cuda_multi_penalty_stability_replay_selected_count,
+  terminal_confirmation_count =
+    summary$cuda_multi_penalty_terminal_confirmation_count,
   exact_fixed_evaluator_batch_count =
     summary$cuda_exact_fixed_evaluator_batch_count,
   exact_fixed_evaluator_target_count =
@@ -296,6 +308,13 @@ receipt$pass <- isTRUE(receipt$task_identity_exact) &&
   receipt$cpu_spectra_count == 0L &&
   receipt$unknown_fallback_count == 0L &&
   receipt$approximate_backend_count == 0L &&
+  isTRUE(receipt$exact_primary_optimizer_requested) &&
+  receipt$multi_penalty_target_count > 0L &&
+  receipt$exact_primary_target_count ==
+    receipt$multi_penalty_target_count &&
+  receipt$stability_replay_target_count == 0L &&
+  receipt$stability_replay_selected_count == 0L &&
+  receipt$terminal_confirmation_count == 0L &&
   receipt$exact_fixed_evaluator_batch_count > 0L &&
   receipt$exact_fixed_evaluator_target_count > 0L &&
   receipt$exact_fixed_evaluator_stable_svd_target_count ==

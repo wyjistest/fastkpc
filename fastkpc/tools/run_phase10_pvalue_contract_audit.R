@@ -161,6 +161,14 @@ gpu_route_gate <- identical(
   as.integer(summary$guarded_pair_count) == 0L &&
   as.integer(summary$cuda_exact_screen_pair_count) == 0L &&
   as.integer(summary$cuda_guard_refinement_pair_count) == 0L
+exact_primary_optimizer_gate <- isTRUE(
+  summary$dcc_gamma_exact_primary_optimizer_requested
+) && as.numeric(summary$cuda_multi_penalty_target_count) > 0 &&
+  as.numeric(summary$cuda_multi_penalty_exact_primary_target_count) ==
+    as.numeric(summary$cuda_multi_penalty_target_count) &&
+  as.numeric(summary$cuda_multi_penalty_stability_replay_target_count) == 0 &&
+  as.numeric(summary$cuda_multi_penalty_stability_replay_selected_count) == 0 &&
+  as.numeric(summary$cuda_multi_penalty_terminal_confirmation_count) == 0
 cache_enabled <- summary$legacy_component_cache_requested_budget_bytes > 0
 cache_fields <- list(
   requested_budget_bytes = summary$legacy_component_cache_requested_budget_bytes,
@@ -264,6 +272,7 @@ audit <- list(
   ),
   authority_zero = authority_zero,
   gpu_route_gate = gpu_route_gate,
+  exact_primary_optimizer_gate = exact_primary_optimizer_gate,
   authority_gate_pass = isTRUE(summary$authority_gate_pass),
   legacy_component_cache = c(
     list(enabled = cache_enabled, accounted = cache_accounted),
@@ -276,6 +285,7 @@ audit$pass <- isTRUE(audit$task_identity_exact) && isTRUE(audit$ci$pass) &&
   isTRUE(audit$semantic_sepsets_exact) &&
   isTRUE(audit$n_edgetests_exact) &&
   all(audit$authority_zero) && isTRUE(audit$gpu_route_gate) &&
+  isTRUE(audit$exact_primary_optimizer_gate) &&
   isTRUE(audit$authority_gate_pass) &&
   isTRUE(audit$legacy_component_cache$accounted) &&
   isTRUE(audit$vertical_resource_closed)
