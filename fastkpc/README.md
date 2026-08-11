@@ -17,24 +17,24 @@ Those receipts are historical diagnostic evidence only and are not correctness
 or performance-candidate evidence.
 
 The current GPU-only repair returns every `dcc.gamma` p-value from the CUDA
-legacy-compatible full-eigensolver and uses augmented QR only through two
-penalties, with deeper conditional residuals forced through CUDA stable-SVD.
-On the complete default-`Inf` 351x48 workload, all 240,498 CI p-values and all
-finite `pMax` cells are within `6.9555444737190442e-11` of the legacy oracle.
-Task identity, deletion trace, adjacency, semantic sepsets, `n.edgetests`, and
-authority gates pass; CPU residual/dCov/gamma counts and residual/component D2H
-are zero. The repaired uncached baseline took `2293.965` seconds. A bounded
-device component cache, complete all-hit residual bypass, and eight persistent
-deterministic eig lanes reduce the final current-binary development run to
-`928.720` seconds, with native SHA-256
-`e3ee4a97624bb64d69e8de55fd86f78748e3375670282b0b5b8cf0a19d9ffc9d`.
-The historical `219.513`-second result is invalidated rather than retained as a
-development best. Current single-GPU strict full-eig component work is closed
-after measured packing, lane, host-submission, and solver alternatives leave
-only noise-scale qualified opportunity; see
-`docs/PHASE10_FULL_EIG_COMPONENT_CLOSURE.md`. Broader Phase 10 remains active,
-Checkpoint B `<180s` is not passed, no candidate is frozen, the route is not
-recommended, and the sealed holdout remains `SEALED_NOT_RELEASED`.
+legacy-compatible full-eigensolver and now reproduces both mgcv selected-SP
+finalization and the fixed-SP residual execution without CPU numerical
+authority or fallback. Producer `377676f` and native SHA-256
+`6f417bce389fa1d852e6aba8d35fb2a836e9f5a9ba30cabdbbb4c5ba789b5697`
+pass all 240,498 default-`Inf` CI tests with maximum CI and `pMax` error
+`3.0547508966805026e-12`. Three larger real-input campaigns add 223,217 tasks
+with maximum p-value error `4.8635392588258775e-12`; graph, trace, orientation,
+RNG, authority, and resource gates pass. The generic KKT/refinement prototype
+is not mgcv authority: a real witness passed its `1e-15` KKT certificate while
+missing the p-value contract, so that axis is stopped and production uses the
+GPU exact evaluator. See `docs/MGCV_GPU_SEMANTIC_CLOSURE.md`.
+
+The historical `219.513`-second result remains invalid. The later
+`928.720`-second full-eig optimization evidence predates this exact semantic
+closure and is not current-producer performance evidence. Broader Phase 10
+remains active, Checkpoint B `<180s` is not passed, no candidate is frozen, the
+route is not recommended, and the sealed holdout remains
+`SEALED_NOT_RELEASED`.
 
 The current Phase 9 v2 and hardening v2 artifacts use the actual default
 `kpcalg` conditioning contract (`m.max = Inf`) and cover the canonical graph
@@ -362,11 +362,13 @@ multi-optimizer boundary to `37.234` seconds. This is recorded as
 retained source and binary.
 
 The corrected numerical-contract epoch remains before Checkpoint B. The
-uncached correctness baseline is `2293.965` seconds, the retained optimized
-strict GPU-only development result is `928.720` seconds, and `219.513` seconds
-belongs to the invalidated conditional-screen route. The current decision is
-`PHASE10_ACTIVE_FULL_EIG_COMPONENT_CLOSED`: no candidate is frozen, the
-external holdout remains sealed, and the route remains unrecommended.
+`2293.965`-second uncached repair and `928.720`-second full-eig optimization are
+historical results from before the exact selected-SP/fixed-SP semantic closure;
+`219.513` seconds belongs to the invalidated conditional-screen route. Producer
+`377676f` has correctness evidence but no repeated performance campaign. The
+current decision is `PHASE10_ACTIVE_FULL_EIG_COMPONENT_CLOSED`: no candidate is
+frozen, the external holdout remains sealed, and the route remains
+unrecommended.
 Reopening this component requires a material full-run improvement while
 retaining the all-CI and `pMax` absolute `1e-10` gates and zero CPU
 authority/fallback counts.

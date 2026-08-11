@@ -134,3 +134,25 @@ artifact hashes, and reopen conditions are recorded in
 Candidate freezing, recommendation, and holdout release remain blocked. The
 full-eig component is closed, but broader Phase 10 promotion status is still
 active and has not passed Checkpoint B or the final repeated-run gate.
+
+## Exact mgcv semantic closure
+
+Producer `377676f` subsequently closed the selected-SP and fixed-SP semantic
+gap on the GPU-only route. Its fully rebuilt native SHA-256 is
+`6f417bce389fa1d852e6aba8d35fb2a836e9f5a9ba30cabdbbb4c5ba789b5697`.
+The complete default-`Inf` audit now has maximum CI and `pMax` error
+`3.0547508966805026e-12`; three larger real-input campaigns add 223,217 tests
+with zero errors above `1e-10` and maximum error
+`4.8635392588258775e-12`. CPU numerical authority and fallback remain zero.
+
+The attempted KKT/iterative-refinement certificate is retained only as a
+test-only fail-closed diagnostic. Real rank-deficient witnesses prove that a
+small KKT residual is not sufficient to identify mgcv's pseudoinverse result,
+including one certificate pass with p-value error
+`1.454857345706273e-10`. Production therefore uses the GPU exact fixed-SP
+evaluator. Full evidence and receipt hashes are recorded in
+`MGCV_GPU_SEMANTIC_CLOSURE.md`.
+
+The earlier `928.720`-second result remains historical full-eig optimization
+evidence and is not a performance measurement for producer `377676f`.
+Promotion status remains unchanged.
