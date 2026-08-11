@@ -156,3 +156,23 @@ evaluator. Full evidence and receipt hashes are recorded in
 The earlier `928.720`-second result remains historical full-eig optimization
 evidence and is not a performance measurement for producer `377676f`.
 Promotion status remains unchanged.
+
+## Exact-primary production update
+
+Runtime producer `305d7a7` removes the redundant selected-SP stability replay
+for `dcc.gamma` by running its deterministic stable-SVD path once as the exact
+primary. With the retained 11-GiB component cache, all-hit residual bypass, and
+eight eig lanes, the current canonical source-closure audit passes all 240,498
+CI tests in `1272.360s`; maximum CI and `pMax` error remain
+`3.0547508966805026e-12`.
+
+All 80,751 multi-penalty targets carry exact-primary identity, while replay and
+terminal-confirmation counts are zero. The canonical result is bitwise
+identical to the qualified test-only prototype, and the current 12-shape
+selected-SP/fixed-finalization campaign also passes. Full counters, native and
+receipt SHA-256 values, real-input prototype evidence, and the v8 residual
+bypass accounting rule are recorded in `MGCV_GPU_SEMANTIC_CLOSURE.md`.
+
+This is source-closure development evidence, not a clean-checkout repeated
+campaign or promotion evidence. Checkpoint B, the five-run final gate,
+candidate freeze, recommendation, and sealed holdout state remain unchanged.

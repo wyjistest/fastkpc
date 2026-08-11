@@ -6,9 +6,10 @@ The GPU-only semantic repair is complete for the qualified `dcc.gamma`
 production route.
 
 ```text
-runtime producer commit:       377676f
-audited native SHA-256:        6f417bce389fa1d852e6aba8d35fb2a836e9f5a9ba30cabdbbb4c5ba789b5697
-selected-SP finalization:      GO_EXACT_GPU_REPLAY
+semantic closure commit:       377676f
+current runtime commit:        305d7a7
+audited native SHA-256:        20ab56e7de5a88982c46140df4a90ee8ab544e3ee020bae6a67ef6d73c0bb5eb
+selected-SP finalization:      GO_EXACT_GPU_PRIMARY
 fixed-SP execution:            GO_EXACT_GPU_EVALUATOR
 CPU numerical authority:       0
 CPU/unknown fallback:          0
@@ -30,8 +31,7 @@ The one-call route now keeps both smoothing-parameter selection and the final
 fixed-SP residual execution on the GPU:
 
 ```text
-CUDA selected-SP optimizer
-  -> risk-gated CUDA exact objective replay
+CUDA stable-SVD exact-primary selected-SP optimizer
   -> selected log-SP retained in native ownership
   -> CUDA exact fixed-SP evaluator at that log-SP
   -> device-resident residual/component/full-eig/gamma path
@@ -50,9 +50,103 @@ refinement API. Every one-call exact-evaluator target uses the stable-SVD route,
 and no CPU residual, optimizer, dCov component, eigensolver, gamma p-value, or
 fallback result is accepted.
 
-## Final native gates
+Producer `305d7a7` makes the exact-primary optimizer the `dcc.gamma` one-call
+default. `FASTKPC_DCC_GAMMA_EXACT_PRIMARY_OPTIMIZER=0` retains the former
+primary-plus-replay shape only as an explicit regression escape hatch. Other CI
+methods do not opt into exact-primary execution.
 
-The final full rebuild and focused tests passed under the audited native SHA:
+## Exact-primary and retained full-eig requalification
+
+The exact producer was first qualified with the retained full-eig stack:
+
+```text
+FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_CACHE_BYTES=11811160064
+FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_CACHE_RESIDUAL_BYPASS=1
+FASTKPC_DCC_GAMMA_LEGACY_COMPONENT_EIG_LANES=8
+```
+
+The isolated exact baseline took `2960.106s`. Three retained-stack repeats took
+`1512.117s`, `1540.782s`, and `1538.940s`, for a `1538.940s` median. Profiling
+then showed that every multi-penalty target executed the stability replay and
+selected its result; a captured primary and replay consumed `13.946s` and
+`13.226s`, respectively, while merge cost was only `0.443ms`.
+
+The production optimization therefore runs that same deterministic stable-SVD
+optimizer once as the primary and omits the redundant replay and merge. The
+current source-closure canonical audit produced:
+
+| Reference route | Elapsed (s) | Current reduction from reference |
+| --- | ---: | ---: |
+| exact baseline A | `2960.106` | `57.02%` |
+| retained stack C, three-run median | `1538.940` | `17.32%` |
+| exact-primary production | **`1272.360`** | reference |
+
+This latest value is one isolated source-closure development run, not a clean
+checkout or repeated promotion median. Its hard gates passed:
+
+```text
+logical CI tests                         240498 / 240498
+maximum CI absolute error               3.0547508966805026e-12
+maximum pMax absolute error             3.0547508966805026e-12
+exact-primary multi-penalty targets     80751 / 80751
+stability replay targets / selected     0 / 0
+terminal confirmations                  0
+exact fixed stable-SVD targets          164386 / 164386
+component requests / hits / misses      228033 / 117350 / 110683
+all-hit residual-bypass batches         13641
+eig lanes requested / active peak       8 / 8
+cache route/status mismatches            0 / 0
+CPU residual authority / fallback        0 / 0
+resource closure                         PASS
+```
+
+The v8 compute profile now accounts for residual bypass explicitly:
+
+```text
+physical residual fits + bypass targets = legacy residual targets
+164434 + 63599                           = 228033
+```
+
+Its current top-level attribution is:
+
+| Stage | Host boundary (s) |
+| --- | ---: |
+| selected-SP optimizer | `585.585` |
+| dCov/full-eig | `437.221` |
+| exact residual solve | `177.935` |
+| native setup | `22.663` |
+| control/packaging, unattributed | `48.615` |
+
+The current canonical tasks, `pMax`, adjacency, and sepsets are bitwise
+identical to the earlier `c700c1b1` exact-primary prototype. The final
+12-witness run covers `q=28,37,55,64,73,82`; all 12 exact-primary identities,
+stable-SVD finalizations, and numerical contracts pass. The current evidence
+identities are:
+
+```text
+runtime commit                         305d7a7
+native SHA-256                         20ab56e7de5a88982c46140df4a90ee8ab544e3ee020bae6a67ef6d73c0bb5eb
+canonical receipt SHA-256              cc8fec635c91df0ad925a3b3c34afa8048d5ee64ffd81b910a960403328d5662
+12-witness receipt SHA-256             384a3b2b694d0df69b391b2757c536da5653974c06a02b798e20e327113e9fe4
+```
+
+The test-only prototype also passed all three larger real inputs in
+`1251.553s`, `1051.098s`, and `628.140s`, with the same maximum p-value errors
+already listed below. Their receipt SHA-256 values are, respectively,
+`30a21a70b828701262195b5cf3119f56cad11b52c45b7b4786f181bc573bf069`,
+`b63a1e64c9edbebffe8c44b625df229d4a3d33773172826644dd8971330d3d94`,
+and `bdf090a0cefff4efa8c1c25803ca7a789a23243c9a9c2d605bd86e6988bba4a2`.
+Those three receipts use native SHA
+`c700c1b16127791c8d922e4029922f48f5f408fc605ded7c68c13d2b0887a928`;
+they are not relabelled as current-runtime runs. Production cleanup is attested
+by the current canonical bitwise identity and the current 12-shape witness
+campaign. A candidate freeze would still require fresh repeated runs from a
+clean checkout of the frozen producer.
+
+## Semantic-closure native gates
+
+The original semantic-closure full rebuild and focused tests passed under
+native SHA `6f417bce...b5697`:
 
 ```text
 PASS Phase 4 single-penalty CUDA GCV
