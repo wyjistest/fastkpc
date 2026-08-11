@@ -17,6 +17,9 @@ if (!isTRUE(tryCatch(fastkpc_cuda_available(), error = function(error) FALSE))) 
   cat("SKIP Phase 6 CUDA optimizer: CUDA unavailable\n")
   quit(save = "no", status = 0)
 }
+force_stability_replay_all <- identical(
+  Sys.getenv("FASTKPC_FORCE_STABILITY_REPLAY_ALL", unset = "0"), "1"
+)
 
 data <- readRDS(file.path(
   "fastkpc", "artifacts", "kpc_tprs_real_zhu",
@@ -156,7 +159,10 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
   })
   Y <- do.call(cbind, lapply(contexts, `[[`, "y"))
   prepared <- fastkpc_full_cuda_phase6_prepare(setup)
-  candidate <- fastkpc_full_cuda_phase6_optimize_cuda(prepared, Y)
+  candidate <- fastkpc_full_cuda_phase6_optimize_cuda(
+    prepared, Y,
+    force_stability_replay_all = force_stability_replay_all
+  )
   reference <- lapply(seq_len(ncol(Y)), function(target) {
     fastkpc_full_cuda_phase5_optimize_cpp(setup, Y[, target])
   })
@@ -192,6 +198,9 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
   reference_fully_converged <- vapply(
     reference, `[[`, logical(1L), "fully_converged"
   )
+  reference_step_failed <- vapply(
+    reference, `[[`, logical(1L), "step_failed"
+  )
   reference_residuals <- do.call(cbind, lapply(reference, `[[`, "residuals"))
   candidate_residuals <- Y - prepared$X %*% candidate$coefficients
   diagnostics <- candidate$diagnostics
@@ -221,7 +230,9 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
     diagnostics$cuda_stability_replay_high_condition_reason_count,
     diagnostics$cuda_stability_replay_ambiguous_step_reason_count,
     diagnostics$cuda_stability_replay_rejected_boundary_reason_count,
-    diagnostics$cuda_stability_replay_direct_newton_reason_count
+    diagnostics$cuda_stability_replay_direct_newton_reason_count,
+    diagnostics$cuda_stability_replay_step_failed_reason_count,
+    diagnostics$cuda_stability_replay_guarded_qr_trajectory_reason_count
   )
   assert_true(
     identical(
@@ -229,7 +240,7 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       "full-cuda-ci-multi-penalty-gcv-cuda-optimization-v1"
     ) && identical(
       candidate$rank_path,
-      "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd"
+      "cuda-dpstrf-nb64-guarded-qr-lapack-3.12-dgesdd"
     ) && all(candidate$optimizer_status == 0L) &&
       identical(
         diagnostics$execution_strategy,
@@ -265,8 +276,9 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       all(replay_reason_counts >= 0L) &&
       all(replay_reason_counts <=
             diagnostics$cuda_stability_replay_target_count) &&
-      sum(replay_reason_counts) >=
-        diagnostics$cuda_stability_replay_target_count &&
+      (force_stability_replay_all ||
+        sum(replay_reason_counts) >=
+          diagnostics$cuda_stability_replay_target_count) &&
       diagnostics$cuda_stability_replay_dense_score_guard_rejected_count >=
         0L &&
       diagnostics$cuda_stability_replay_dense_score_guard_rejected_count <=
@@ -302,7 +314,10 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
         "cuda_terminal_boundary_confirmation_max_delta_ratio"
       ]] >= 0 &&
       physical_evaluations == physical_factorizations &&
-      diagnostics$cuda_guarded_qr_evaluation_count > 0L &&
+      (diagnostics$cuda_guarded_qr_evaluation_count > 0L ||
+        diagnostics[[
+          "cuda_stability_replay_discarded_guarded_qr_evaluation_count"
+        ]] > 0L) &&
       diagnostics$cuda_penalty_factor_augmentation_cycles > 0 &&
       diagnostics$cuda_qr_svd_cycles > 0 &&
       diagnostics$cuda_qr_bidiagonal_reduction_cycles > 0 &&
@@ -349,6 +364,8 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
         reference_hessian_positive
       ) && identical(
         candidate$fully_converged, reference_fully_converged
+      ) && identical(
+        candidate$step_failed, reference_step_failed
       ),
     paste0("Phase 6 CUDA optimizer trajectory drifted: ", case$label)
   )
@@ -383,6 +400,7 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
     )),
     witness_optimizer_iterations = candidate$optimizer_iterations[[1L]],
     witness_step_halving_count = candidate$step_halving_count[[1L]],
+    witness_step_failed = candidate$step_failed[[1L]],
     witness_boundary_accepted_count =
       candidate$boundary_accepted_count[[1L]],
     qr_reduction_share =
@@ -418,6 +436,10 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       diagnostics$cuda_stability_replay_rejected_boundary_reason_count,
     stability_replay_direct_newton_reason_count =
       diagnostics$cuda_stability_replay_direct_newton_reason_count,
+    stability_replay_step_failed_reason_count =
+      diagnostics$cuda_stability_replay_step_failed_reason_count,
+    stability_replay_guarded_qr_trajectory_reason_count =
+      diagnostics$cuda_stability_replay_guarded_qr_trajectory_reason_count,
     stability_replay_dense_score_guard_rejected_count =
       diagnostics$cuda_stability_replay_dense_score_guard_rejected_count,
     stability_replay_extrapolation_target_count =
@@ -431,6 +453,10 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
         diagnostics[[
           "cuda_stability_replay_discarded_score_only_evaluation_count"
         ]],
+    stability_replay_discarded_guarded_qr_evaluation_count =
+      diagnostics[[
+        "cuda_stability_replay_discarded_guarded_qr_evaluation_count"
+      ]],
     terminal_boundary_confirmation_count =
       diagnostics$cuda_terminal_boundary_confirmation_count,
     terminal_boundary_confirmation_accepted_count =
@@ -479,6 +505,53 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
 })
 
 rows <- do.call(rbind, rows)
+diagnostic_rows_path <- Sys.getenv(
+  "FASTKPC_MULTI_PENALTY_OPTIMIZER_CENSUS_PATH", unset = ""
+)
+if (nzchar(diagnostic_rows_path)) {
+  saveRDS(rows, diagnostic_rows_path, compress = "xz", version = 3L)
+}
+strict_guarded_qr_replay <- all(
+  rows$stability_replay_guarded_qr_trajectory_reason_count ==
+    rows$target_count
+)
+if (force_stability_replay_all || strict_guarded_qr_replay) {
+  assert_true(
+    all(rows$stability_replay_target_count == rows$target_count) &&
+      all(rows$stability_replay_selected_count == rows$target_count) &&
+      all(rows$stability_replay_error_count == 0L) &&
+      all(rows$stability_replay_screened_count == 0L) &&
+      all(rows$stability_replay_extrapolation_target_count == 0L) &&
+      all(rows$stability_replay_max_extrapolation == 0) &&
+      sum(rows$stability_replay_discarded_guarded_qr_evaluation_count) > 0L &&
+      sum(rows$stable_svd_evaluation_count) > 0L &&
+      max(rows$max_iteration_delta) == 0L &&
+      max(rows$max_score_call_delta) == 0L &&
+      max(rows$max_log_sp_error) <= 1e-12 &&
+      max(rows$max_score_error) <= 1e-12 &&
+      max(rows$max_edf_error) <= 1e-12 &&
+      max(rows$max_residual_error) <= 1e-12,
+    "Phase 6 strict guarded-QR trajectory replay contract failed"
+  )
+  assert_true(
+    sum(rows$stability_replay_long_trajectory_reason_count) > 0L &&
+      sum(rows$stability_replay_dense_boundary_reason_count) > 0L &&
+      sum(rows$stability_replay_high_condition_reason_count) > 0L &&
+      sum(rows$stability_replay_ambiguous_step_reason_count) > 0L &&
+      sum(rows$stability_replay_rejected_boundary_reason_count) > 0L &&
+      sum(rows$stability_replay_direct_newton_reason_count) > 0L &&
+      sum(rows$terminal_boundary_confirmation_accepted_count) > 0L &&
+      sum(rows$terminal_boundary_confirmation_rejected_count) > 0L,
+    "Phase 6 strict replay reason or boundary coverage is incomplete"
+  )
+  print(rows, row.names = FALSE, digits = 17)
+  cat(if (force_stability_replay_all) {
+    "PASS Phase 6 forced stable-replay optimizer census\n"
+  } else {
+    "PASS Phase 6 strict guarded-QR trajectory replay census\n"
+  })
+  quit(save = "no", status = 0)
+}
 assert_true(
   sum(rows$guarded_qr_evaluation_count) > 0L &&
     sum(rows$stable_svd_evaluation_count) > 0L,

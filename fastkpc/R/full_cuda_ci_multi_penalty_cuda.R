@@ -167,7 +167,8 @@ fastkpc_full_cuda_phase6_optimize_cuda <- function(
     max_step_halving = 25L, max_iterations = 400L,
     max_newton_step = 5, boundary_probe_step = 2,
     max_boundary_probes = 5L,
-    rank_tolerance = sqrt(.Machine$double.eps)) {
+    rank_tolerance = sqrt(.Machine$double.eps),
+    force_stability_replay_all = FALSE) {
   fastkpc_full_cuda_phase6_require(
     is.list(prepared) && identical(
       prepared$schema_version,
@@ -188,7 +189,8 @@ fastkpc_full_cuda_phase6_optimize_cuda <- function(
     max_newton_step = as.numeric(max_newton_step),
     boundary_probe_step = as.numeric(boundary_probe_step),
     max_boundary_probes = as.integer(max_boundary_probes),
-    rank_tolerance = as.numeric(rank_tolerance)
+    rank_tolerance = as.numeric(rank_tolerance),
+    force_stability_replay_all = isTRUE(force_stability_replay_all)
   )
   full_cuda_ci_multi_penalty_gcv_optimize_cuda_native(
     X = prepared$X,

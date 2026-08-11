@@ -1632,10 +1632,14 @@ full_cuda_ci_native_setup_native <- function(conditioning) {
 }
 
 full_cuda_ci_multi_penalty_capacity_qualify_native <- function(
-    setup, geometry, Y) {
+    setup, geometry, Y, fixed_log_sp = NULL) {
   load_fastkpc_cuda_native()
   Y <- as.matrix(Y)
   storage.mode(Y) <- "double"
+  if (!is.null(fixed_log_sp)) {
+    fixed_log_sp <- as.matrix(fixed_log_sp)
+    storage.mode(fixed_log_sp) <- "double"
+  }
   .Call(
     "C_full_cuda_ci_multi_penalty_capacity_qualify",
     setup$X,
@@ -1648,6 +1652,7 @@ full_cuda_ci_multi_penalty_capacity_qualify_native <- function(
     as.integer(setup$penalty_ranks),
     geometry$initial_log_sp,
     Y,
+    fixed_log_sp,
     PACKAGE = "fastkpc_cuda"
   )
 }
@@ -1756,6 +1761,59 @@ full_cuda_ci_multi_penalty_gcv_evaluate_cuda_native <- function(
     X, Y, magic_qr_packed, as.double(magic_tau), magic_r,
     as.integer(magic_pivot), penalty_roots, penalty_matrices,
     as.integer(penalty_ranks), log_sp, as.double(rank_tolerance),
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_response_transcript_for_test <- function(
+    Y, magic_qr_packed, magic_tau) {
+  load_fastkpc_cuda_native()
+  Y <- as.matrix(Y)
+  magic_qr_packed <- as.matrix(magic_qr_packed)
+  storage.mode(Y) <- "double"
+  storage.mode(magic_qr_packed) <- "double"
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_response_transcript_for_test",
+    Y, magic_qr_packed, as.double(magic_tau), PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_objective_transcript_for_test <- function(
+    prepared, y0, squared_norm, log_sp,
+    rank_tolerance = sqrt(.Machine$double.eps), force_stable_svd = TRUE) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_objective_transcript_for_test",
+    prepared, as.double(y0), as.double(squared_norm), as.double(log_sp),
+    as.double(rank_tolerance), isTRUE(force_stable_svd),
+    PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_svd_transcript_for_test <- function(
+    augmented, force_stable_svd = TRUE) {
+  load_fastkpc_cuda_native()
+  augmented <- as.matrix(augmented)
+  storage.mode(augmented) <- "double"
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_svd_transcript_for_test",
+    augmented, isTRUE(force_stable_svd), PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_augmented_transcript_for_test <- function(
+    magic_r, penalty_matrices, log_sp) {
+  load_fastkpc_cuda_native()
+  magic_r <- as.matrix(magic_r)
+  penalty_matrices <- lapply(penalty_matrices, function(value) {
+    value <- as.matrix(value)
+    storage.mode(value) <- "double"
+    value
+  })
+  storage.mode(magic_r) <- "double"
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_augmented_transcript_for_test",
+    magic_r, penalty_matrices, as.double(log_sp),
     PACKAGE = "fastkpc_cuda"
   )
 }
@@ -1870,6 +1928,21 @@ full_cuda_ci_multi_penalty_gcv_optimize_batch_native <- function(
     "C_full_cuda_ci_multi_penalty_gcv_optimize_batch",
     handle, Y, as.character(target_keys), control,
     PACKAGE = "fastkpc_cuda"
+  )
+}
+
+full_cuda_ci_multi_penalty_gcv_evaluate_fixed_batch_native <- function(
+    handle, Y, log_sp, target_keys,
+    rank_tolerance = sqrt(.Machine$double.eps)) {
+  load_fastkpc_cuda_native()
+  Y <- as.matrix(Y)
+  log_sp <- as.matrix(log_sp)
+  storage.mode(Y) <- "double"
+  storage.mode(log_sp) <- "double"
+  .Call(
+    "C_full_cuda_ci_multi_penalty_gcv_evaluate_fixed_batch",
+    handle, Y, log_sp, as.character(target_keys),
+    as.double(rank_tolerance), PACKAGE = "fastkpc_cuda"
   )
 }
 
@@ -2861,6 +2934,20 @@ fixed_sp_cuda_submit_deferred_svd_for_test <- function(
     "C_fixed_sp_cuda_submit_deferred_svd_for_test", handle, Y, SP,
     as.character(planned_route), as.character(target_keys),
     as.character(outputs), PACKAGE = "fastkpc_cuda"
+  )
+}
+
+fixed_sp_cuda_solve_certified_batch_for_test <- function(
+    handle, Y, SP, planned_route, target_keys,
+    outputs = c("residuals"), refinement_max_iterations = 4L,
+    backward_error_tolerance = 1e-15, fail_closed = TRUE) {
+  load_fastkpc_cuda_native()
+  .Call(
+    "C_fixed_sp_cuda_solve_certified_batch_for_test",
+    handle, Y, SP, as.character(planned_route), as.character(target_keys),
+    as.character(outputs), as.integer(refinement_max_iterations),
+    as.double(backward_error_tolerance), as.logical(fail_closed),
+    PACKAGE = "fastkpc_cuda"
   )
 }
 

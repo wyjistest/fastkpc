@@ -98,7 +98,7 @@ fastkpc_full_cuda_phase6_backend_configuration <- function(kind) {
     guarded_qr_minimum_diagonal_ratio = "1e-6",
     guarded_qr_condition_upper_bound = "1e7",
     stable_solver_backend =
-      "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd",
+      "cuda-dpstrf-nb64-guarded-qr-lapack-3.12-dgesdd",
     execution_strategy = "bounded-independent-prepared-streams-v1",
     maximum_concurrent_setups = 64L,
     target_optimizer_state = "independent-per-target",
@@ -388,7 +388,7 @@ fastkpc_full_cuda_phase6_validate_merged_evidence <- function(
     !any(evidence$logical_rows$spectra_fallback) &&
     all(evidence$targets$fallback_reason == "NONE") &&
     all(evidence$targets$rank_path ==
-          "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd") &&
+          "cuda-dpstrf-nb64-guarded-qr-lapack-3.12-dgesdd") &&
     all(evidence$targets$optimizer_backend_executed ==
           "cuda-magic-multi-penalty") &&
     all(evidence$targets$residual_backend_executed ==
@@ -1341,7 +1341,7 @@ fastkpc_full_cuda_phase6_validate_artifact <- function(
   payload_gate <- nrow(cases) == 65676L &&
     all(cases$fallback_reason == "NONE") &&
     all(cases$rank_path ==
-          "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd") &&
+          "cuda-dpstrf-nb64-guarded-qr-lapack-3.12-dgesdd") &&
     all(cases$optimizer_backend_executed ==
           "cuda-magic-multi-penalty") &&
     all(cases$residual_backend_executed ==

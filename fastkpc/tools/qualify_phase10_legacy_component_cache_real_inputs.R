@@ -254,7 +254,8 @@ for (index in seq_len(nrow(datasets))) {
       uncached_summary$cuda_dcov_component_count
   route_gate <- identical(
     summary$ci_backend, "legacy-compatible-full-eig-cuda-v1"
-  ) && identical(summary$strict_gamma_residual_route, "qr-through-2") &&
+  ) && identical(summary$strict_gamma_residual_route,
+                 "exact-fixed-stable-svd") &&
     summary$cuda_legacy_compatible_pair_count ==
       summary$physical_tests_evaluated &&
     summary$legacy_compatible_pair_count == summary$physical_tests_evaluated &&

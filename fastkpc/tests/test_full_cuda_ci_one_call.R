@@ -3,6 +3,12 @@ source("fastkpc/R/full_cuda_ci_phase10_compute_campaign.R")
 
 fail <- function(message) stop(message, call. = FALSE)
 assert_true <- function(value, message) if (!isTRUE(value)) fail(message)
+assert_named_true <- function(values, message) {
+  failed <- names(values)[!vapply(values, isTRUE, logical(1L))]
+  if (length(failed) > 0L) {
+    fail(paste0(message, ": ", paste(failed, collapse = ", ")))
+  }
+}
 
 if (!isTRUE(tryCatch(
   fastkpc_cuda_available(),
@@ -106,7 +112,8 @@ assert_pvalue_contract <- function(candidate, reference, label) {
       is.finite(pmax_error) && pmax_error <= 1e-10 &&
       identical(summary$ci_backend,
                 "legacy-compatible-full-eig-cuda-v1") &&
-      identical(summary$strict_gamma_residual_route, "qr-through-2") &&
+      identical(summary$strict_gamma_residual_route,
+                "exact-fixed-stable-svd") &&
       summary$cuda_legacy_compatible_pair_count ==
         summary$physical_tests_evaluated &&
       summary$legacy_compatible_pair_count ==
@@ -290,57 +297,88 @@ multi_summary <- multi_candidate$summary
 assert_optimizer_attribution(multi_summary, "multi-penalty")
 multi_reuse_profile <-
   fastkpc_full_cuda_phase10_decomposition_reuse_profile(multi_summary)
-assert_true(
-  length(multi_candidate$n.edgetests) == 4L &&
-    multi_summary$cuda_multi_penalty_target_count > 0L &&
-    multi_summary$native_setup_multi_penalty_cache_capacity == 8192L &&
-    multi_summary$native_setup_device_rehydrate_count == 0L &&
-    multi_summary$native_setup_cache_eviction_count == 0L &&
-    multi_summary$native_setup_univariate_primitive_request_count ==
-      multi_summary$native_setup_univariate_primitive_hit_count +
-        multi_summary$native_setup_univariate_primitive_build_count &&
-    multi_summary$native_setup_univariate_primitive_build_count ==
-      multi_summary$native_setup_univariate_primitive_cache_peak_entries &&
-    multi_summary$native_setup_univariate_primitive_build_count <= multi_p &&
-    multi_summary$native_setup_univariate_primitive_cache_capacity == multi_p &&
-    multi_summary$cuda_multi_penalty_prepared_build_count ==
-      multi_summary$cuda_multi_penalty_optimizer_setup_count &&
-    multi_summary$cuda_multi_penalty_prepared_release_count ==
-      multi_summary$cuda_multi_penalty_prepared_build_count &&
-    multi_summary$cuda_multi_penalty_prepared_target_capacity_sum <
-      64L * multi_summary$cuda_multi_penalty_prepared_build_count &&
-    multi_summary$cuda_multi_penalty_prepared_target_capacity_peak <=
-      multi_p &&
-    multi_summary$cuda_multi_penalty_optimizer_iteration_sum > 0 &&
-    multi_summary$cuda_multi_penalty_optimizer_iteration_max > 0 &&
-    multi_summary$cuda_multi_penalty_qr_svd_cycles > 0 &&
-    multi_summary$cuda_multi_penalty_qr_factorization_cycles > 0 &&
-    multi_summary$cuda_multi_penalty_q_generation_cycles > 0 &&
-    multi_summary$cuda_multi_penalty_qr_guard_cycles > 0 &&
-    multi_summary$cuda_multi_penalty_stable_bidiagonal_reduction_cycles > 0 &&
-    multi_summary$cuda_multi_penalty_hessian_eigensolver_count ==
-      multi_summary$cuda_multi_penalty_optimizer_iteration_sum &&
-    identical(
+assert_named_true(
+  list(
+    n_edgetest_levels = length(multi_candidate$n.edgetests) == 4L,
+    multi_penalty_targets = multi_summary$cuda_multi_penalty_target_count > 0L,
+    setup_cache_capacity =
+      multi_summary$native_setup_multi_penalty_cache_capacity == 8192L,
+    no_device_rehydrate =
+      multi_summary$native_setup_device_rehydrate_count == 0L,
+    no_setup_cache_eviction =
+      multi_summary$native_setup_cache_eviction_count == 0L,
+    univariate_request_accounting =
+      multi_summary$native_setup_univariate_primitive_request_count ==
+        multi_summary$native_setup_univariate_primitive_hit_count +
+          multi_summary$native_setup_univariate_primitive_build_count,
+    univariate_peak_accounting =
+      multi_summary$native_setup_univariate_primitive_build_count ==
+        multi_summary$native_setup_univariate_primitive_cache_peak_entries,
+    univariate_build_bound =
+      multi_summary$native_setup_univariate_primitive_build_count <= multi_p,
+    univariate_cache_capacity =
+      multi_summary$native_setup_univariate_primitive_cache_capacity == multi_p,
+    prepared_build_accounting =
+      multi_summary$cuda_multi_penalty_prepared_build_count ==
+        multi_summary$cuda_multi_penalty_optimizer_setup_count +
+          multi_summary$cuda_exact_fixed_evaluator_batch_count,
+    prepared_release_accounting =
+      multi_summary$cuda_multi_penalty_prepared_release_count ==
+        multi_summary$cuda_multi_penalty_prepared_build_count,
+    prepared_capacity_reduction =
+      multi_summary$cuda_multi_penalty_prepared_target_capacity_sum <
+        64L * multi_summary$cuda_multi_penalty_prepared_build_count,
+    prepared_capacity_bound =
+      multi_summary$cuda_multi_penalty_prepared_target_capacity_peak <= multi_p,
+    exact_fixed_target_accounting =
+      multi_summary$cuda_exact_fixed_evaluator_target_count >=
+        2L * multi_summary$cuda_exact_fixed_evaluator_batch_count,
+    exact_fixed_route_accounting =
+      multi_summary$cuda_exact_fixed_evaluator_stable_svd_target_count ==
+        multi_summary$cuda_exact_fixed_evaluator_target_count,
+    optimizer_iterations =
+      multi_summary$cuda_multi_penalty_optimizer_iteration_sum > 0,
+    optimizer_iteration_max =
+      multi_summary$cuda_multi_penalty_optimizer_iteration_max > 0,
+    qr_svd_cycles = multi_summary$cuda_multi_penalty_qr_svd_cycles > 0,
+    qr_factorization_cycles =
+      multi_summary$cuda_multi_penalty_qr_factorization_cycles > 0,
+    q_generation_cycles =
+      multi_summary$cuda_multi_penalty_q_generation_cycles > 0,
+    qr_guard_cycles = multi_summary$cuda_multi_penalty_qr_guard_cycles > 0,
+    stable_bidiagonal_cycles =
+      multi_summary$cuda_multi_penalty_stable_bidiagonal_reduction_cycles > 0,
+    hessian_eigensolver_accounting =
+      multi_summary$cuda_multi_penalty_hessian_eigensolver_count ==
+        multi_summary$cuda_multi_penalty_optimizer_iteration_sum,
+    decomposition_schema = identical(
       multi_reuse_profile$schema_version,
       "full-cuda-ci-decomposition-reuse-profile-v1"
-    ) &&
-    isTRUE(multi_summary[[
+    ),
+    decomposition_trace_enabled = isTRUE(multi_summary[[
       "cuda_multi_penalty_decomposition_trace_enabled"
-    ]]) &&
-    multi_summary$cuda_multi_penalty_decomposition_request_count ==
-      multi_summary$cuda_multi_penalty_decomposition_stored_count &&
-    multi_summary[[
+    ]]),
+    decomposition_storage_accounting =
+      multi_summary$cuda_multi_penalty_decomposition_request_count ==
+        multi_summary$cuda_multi_penalty_decomposition_stored_count,
+    no_decomposition_trace_overflow = multi_summary[[
       "cuda_multi_penalty_decomposition_trace_overflow_count"
-    ]] == 0L &&
-    multi_summary[[
+    ]] == 0L,
+    no_decomposition_route_mismatch = multi_summary[[
       "cuda_multi_penalty_decomposition_route_mismatch_count"
-    ]] == 0L &&
-    multi_summary$cuda_multi_penalty_decomposition_reuse_count > 0L &&
-    identical(multi_candidate$adjacency, multi_reference$adjacency) &&
-    identical(normalize_sepsets(multi_candidate$sepsets),
-              normalize_sepsets(multi_reference$sepsets)) &&
-    identical(as.integer(multi_candidate$n.edgetests),
-              as.integer(multi_reference$n.edgetests)),
+    ]] == 0L,
+    decomposition_reuse =
+      multi_summary$cuda_multi_penalty_decomposition_reuse_count > 0L,
+    adjacency = identical(multi_candidate$adjacency, multi_reference$adjacency),
+    sepsets = identical(
+      normalize_sepsets(multi_candidate$sepsets),
+      normalize_sepsets(multi_reference$sepsets)
+    ),
+    n_edgetests = identical(
+      as.integer(multi_candidate$n.edgetests),
+      as.integer(multi_reference$n.edgetests)
+    )
+  ),
   "Phase 9 focused multi-penalty live CUDA replay differs from legacy"
 )
 assert_canonical_task_order(

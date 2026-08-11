@@ -448,9 +448,12 @@ __global__ void factor_fixed_sp_aggregate_penalty_kernel(
     if (row > column) continue;
     double value = projected_H == nullptr ? 0.0 : projected_H[element];
     for (int penalty = 0; penalty < penalty_count; ++penalty) {
-      value += SP[static_cast<std::size_t>(penalty)] *
-        projected_penalties[element + q_squared *
-          static_cast<std::size_t>(penalty)];
+      value = __dadd_rn(
+        value,
+        __dmul_rn(
+          SP[static_cast<std::size_t>(penalty)],
+          projected_penalties[element + q_squared *
+            static_cast<std::size_t>(penalty)]));
     }
     factor[element] = value;
   }
@@ -502,10 +505,12 @@ __global__ void factor_fixed_sp_aggregate_penalty_kernel(
         const double previous = factor[
           static_cast<std::size_t>(j - 1) + q_size *
             static_cast<std::size_t>(i)];
-        work[i] += previous * previous;
+        work[i] = __dadd_rn(work[i], __dmul_rn(previous, previous));
       }
-      work[q + i] = factor[static_cast<std::size_t>(i) + q_size *
-        static_cast<std::size_t>(i)] - work[i];
+      work[q + i] = __dadd_rn(
+        factor[static_cast<std::size_t>(i) + q_size *
+          static_cast<std::size_t>(i)],
+        -work[i]);
     }
     __syncthreads();
 
@@ -578,18 +583,26 @@ __global__ void factor_fixed_sp_aggregate_penalty_kernel(
         static_cast<std::size_t>(j)] = shared_ajj;
     }
     __syncthreads();
+    const double inverse_diagonal = __ddiv_rn(1.0, shared_ajj);
     for (int column = j + 1 + static_cast<int>(threadIdx.x); column < q;
          column += static_cast<int>(blockDim.x)) {
-      double value = factor[static_cast<std::size_t>(j) +
-        q_size * static_cast<std::size_t>(column)];
+      double dot = 0.0;
       for (int row = 0; row < j; ++row) {
-        value -= factor[static_cast<std::size_t>(row) +
-          q_size * static_cast<std::size_t>(column)] *
-          factor[static_cast<std::size_t>(row) +
-            q_size * static_cast<std::size_t>(j)];
+        dot = __dadd_rn(
+          dot,
+          __dmul_rn(
+            factor[static_cast<std::size_t>(row) +
+              q_size * static_cast<std::size_t>(column)],
+            factor[static_cast<std::size_t>(row) +
+              q_size * static_cast<std::size_t>(j)]));
       }
+      const double value = __dadd_rn(
+        factor[static_cast<std::size_t>(j) +
+          q_size * static_cast<std::size_t>(column)],
+        -dot);
       factor[static_cast<std::size_t>(j) +
-        q_size * static_cast<std::size_t>(column)] = value / shared_ajj;
+        q_size * static_cast<std::size_t>(column)] =
+          __dmul_rn(value, inverse_diagonal);
     }
     __syncthreads();
     if (threadIdx.x == 0U) shared_rank = j + 1;

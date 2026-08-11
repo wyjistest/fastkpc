@@ -29,9 +29,9 @@
 namespace fastkpc {
 namespace {
 
-constexpr std::size_t kStableBaseIntArraysPerTarget = 6U;
+constexpr std::size_t kStableBaseIntArraysPerTarget = 7U;
 constexpr std::size_t kStableAggregateIntArraysPerTarget = 3U;
-constexpr std::size_t kStableDoubleArraysPerTarget = 3U;
+constexpr std::size_t kStableDoubleArraysPerTarget = 5U;
 constexpr std::size_t kFixedSpPenaltyRootCacheCapacity = 4096U;
 constexpr std::size_t kFixedSpPenaltyRootCacheByteCapacity =
   256U * 1024U * 1024U;
@@ -1407,6 +1407,73 @@ __global__ void build_fixed_sp_systems_kernel(
     value;
 }
 
+__global__ void initialize_fixed_sp_certificate_metrics(
+    int target_count,
+    double* initial_backward_error,
+    double* final_backward_error) {
+  const int target = static_cast<int>(blockIdx.x) *
+      static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+  if (target >= target_count) return;
+  const double invalid = __longlong_as_double(0x7ff8000000000000ULL);
+  initial_backward_error[target] = invalid;
+  final_backward_error[target] = invalid;
+}
+
+// This deliberately uses one GPU thread. The canonical q is small and the
+// fixed row/column order makes both backward-error measures reproducible.
+__global__ void compute_fixed_sp_kkt_backward_error(
+    const double* system,
+    const double* canonical_rhs,
+    const double* theta,
+    int target,
+    int q,
+    double* kkt_residual,
+    double* backward_error) {
+  if (blockIdx.x != 0U || threadIdx.x != 0U) return;
+
+  double system_norm = 0.0;
+  double theta_norm = 0.0;
+  double rhs_norm = 0.0;
+  double residual_norm = 0.0;
+  double componentwise_error = 0.0;
+  for (int column = 0; column < q; ++column) {
+    theta_norm = fmax(theta_norm, fabs(theta[column]));
+  }
+  for (int row = 0; row < q; ++row) {
+    double row_norm = 0.0;
+    double product = 0.0;
+    double componentwise_denominator = 0.0;
+    for (int column = 0; column < q; ++column) {
+      const double value = system[
+        static_cast<std::size_t>(row) +
+        static_cast<std::size_t>(q) * static_cast<std::size_t>(column)];
+      row_norm += fabs(value);
+      product += value * theta[column];
+      componentwise_denominator += fabs(value) * fabs(theta[column]);
+    }
+    system_norm = fmax(system_norm, row_norm);
+    const double rhs = canonical_rhs[
+      static_cast<std::size_t>(row) +
+      static_cast<std::size_t>(q) * static_cast<std::size_t>(target)];
+    rhs_norm = fmax(rhs_norm, fabs(rhs));
+    componentwise_denominator += fabs(rhs);
+    const double residual = rhs - product;
+    kkt_residual[row] = residual;
+    residual_norm = fmax(residual_norm, fabs(residual));
+    const double row_error = componentwise_denominator == 0.0 ?
+      (residual == 0.0 ? 0.0 :
+        __longlong_as_double(0x7ff0000000000000ULL)) :
+      fabs(residual) / componentwise_denominator;
+    componentwise_error = fmax(componentwise_error, row_error);
+  }
+  const double denominator = system_norm * theta_norm + rhs_norm;
+  const double normwise_error = denominator == 0.0 ?
+    (residual_norm == 0.0 ? 0.0 :
+      __longlong_as_double(0x7ff0000000000000ULL)) :
+    residual_norm / denominator;
+  backward_error[target] = fmax(normwise_error, componentwise_error);
+}
+
 __global__ void gather_fixed_sp_safe_rhs_kernel(
     const double* canonical_rhs,
     const int* safe_target_indices,
@@ -2241,6 +2308,9 @@ class DeviceResidualBatch {
   std::size_t pending_svd_reserved_q = 0U;
   int pending_svd_target_count = 0;
   bool svd_diagnostics_pending = false;
+  double* pending_certificate_diagnostics = nullptr;
+  std::size_t pending_certificate_reserved_targets = 0U;
+  bool certificate_diagnostics_pending = false;
   bool owns_deferred_context_lease = false;
   bool output_status_resolved = false;
   bool lease_released = false;
@@ -2436,6 +2506,20 @@ void validate_fixed_sp_batch(const PreparedSGpuHandle& handle,
       (batch.output_mask & ~kFixedSpPublicOutputMask) != 0) {
     throw std::runtime_error("fixed-sp output mask is invalid");
   }
+  if (batch.residual_certificate_enabled) {
+    if (batch.refinement_max_iterations <= 0 ||
+        batch.refinement_max_iterations > 8 ||
+        !std::isfinite(batch.backward_error_tolerance) ||
+        batch.backward_error_tolerance <= 0.0) {
+      throw std::runtime_error(
+        "fixed-sp residual certificate control is invalid");
+    }
+  } else if (batch.refinement_max_iterations != 0 ||
+             batch.backward_error_tolerance != 0.0 ||
+             batch.fail_closed_on_certificate) {
+    throw std::runtime_error(
+      "fixed-sp residual certificate control requires opt-in");
+  }
   const std::size_t targets = static_cast<std::size_t>(batch.target_count);
   if (batch.planned_routes.size() != targets ||
       batch.target_keys.size() != targets) {
@@ -2528,14 +2612,16 @@ void resolve_pending_svd_diagnostics_locked(
   int* const h_geqrf_info = token->pending_svd_integer_diagnostics;
   int* const h_qr_rank = h_geqrf_info + 2U * reserved_targets;
   int* const h_svd_info = h_geqrf_info + 5U * reserved_targets;
-  int* const h_aggregate_root_rank =
+  int* const h_refinement_solver_info =
     h_geqrf_info + 6U * reserved_targets;
-  int* const h_aggregate_factor_call_count =
+  int* const h_aggregate_root_rank =
     h_geqrf_info + 7U * reserved_targets;
-  int* const h_aggregate_b_build_count =
+  int* const h_aggregate_factor_call_count =
     h_geqrf_info + 8U * reserved_targets;
-  int* const h_aggregate_pivots =
+  int* const h_aggregate_b_build_count =
     h_geqrf_info + 9U * reserved_targets;
+  int* const h_aggregate_pivots =
+    h_geqrf_info + 10U * reserved_targets;
   double* const h_sigma_max = token->pending_svd_double_diagnostics;
   double* const h_smallest_retained_sigma =
     h_sigma_max + reserved_targets;
@@ -2566,6 +2652,7 @@ void resolve_pending_svd_diagnostics_locked(
     const int factor_count = h_aggregate_factor_call_count[target_offset];
     const int b_build_count = h_aggregate_b_build_count[target_offset];
     const double aggregate_dstop = h_aggregate_dstop[target_offset];
+    const int expected_b_build_count = 2;
     token->diagnostics.svd_info[target_offset] = info;
     token->diagnostics.effective_rank[target_offset] = rank;
     token->diagnostics.sigma_max[target_offset] = maximum;
@@ -2576,6 +2663,12 @@ void resolve_pending_svd_diagnostics_locked(
       factor_count;
     token->diagnostics.aggregate_b_build_count[target_offset] = b_build_count;
     token->diagnostics.aggregate_dstop[target_offset] = aggregate_dstop;
+    if (token->diagnostics.residual_certificate_enabled) {
+      token->diagnostics.refinement_solver[target_offset] =
+        "INDEPENDENT_AUGMENTED_QR";
+      token->diagnostics.refinement_solver_info[target_offset] =
+        h_refinement_solver_info[target_offset];
+    }
     std::copy_n(
       h_aggregate_pivots + target_offset * reserved_q,
       static_cast<std::size_t>(token->owner->q),
@@ -2593,7 +2686,7 @@ void resolve_pending_svd_diagnostics_locked(
       ((rank == 0 && smallest == 0.0) ||
        (rank > 0 && smallest > 0.0)) &&
       aggregate_rank >= 0 && aggregate_rank <= token->owner->q &&
-      factor_count == 1 && b_build_count == 2 &&
+      factor_count == 1 && b_build_count == expected_b_build_count &&
       std::isfinite(aggregate_dstop) && aggregate_dstop >= 0.0;
     if (info != 0 || !rank_diagnostics_valid) {
       token->solver_statuses[target_offset] = FixedSpStatus::ErrSvdFailed;
@@ -2621,6 +2714,49 @@ void resolve_pending_svd_diagnostics_locked(
   }
 }
 
+void resolve_pending_certificate_diagnostics_locked(
+    DeviceResidualBatch* token) {
+  if (token == nullptr || !token->certificate_diagnostics_pending) return;
+  if (!token->diagnostics.residual_certificate_enabled ||
+      token->pending_certificate_diagnostics == nullptr ||
+      token->pending_certificate_reserved_targets <
+        static_cast<std::size_t>(token->target_count)) {
+    throw std::runtime_error(
+      "fixed-sp pending certificate diagnostic storage is invalid");
+  }
+
+  const std::size_t reserved_targets =
+    token->pending_certificate_reserved_targets;
+  const double* const initial = token->pending_certificate_diagnostics;
+  const double* const final = initial + reserved_targets;
+  for (int target = 0; target < token->target_count; ++target) {
+    const std::size_t offset = static_cast<std::size_t>(target);
+    token->diagnostics.initial_kkt_backward_error[offset] = initial[offset];
+    token->diagnostics.final_kkt_backward_error[offset] = final[offset];
+    token->diagnostics.refinement_iterations[offset] =
+      token->diagnostics.refinement_max_iterations;
+    const bool refinement_solver_passed =
+      token->diagnostics.refinement_solver[offset] !=
+        "INDEPENDENT_AUGMENTED_QR" ||
+      token->diagnostics.refinement_solver_info[offset] == 0;
+    const bool passed = refinement_solver_passed &&
+      std::isfinite(final[offset]) &&
+      final[offset] <= token->diagnostics.backward_error_tolerance;
+    token->diagnostics.residual_certificate_passed[offset] = passed;
+    if (!passed) {
+      token->diagnostics.residual_certificate_failure_count += 1;
+      if (token->diagnostics.fail_closed_on_certificate &&
+          fixed_sp_status_is_successful(token->solver_statuses[offset])) {
+        token->solver_statuses[offset] =
+          FixedSpStatus::ErrCertificateFailed;
+      }
+    }
+  }
+  token->pending_certificate_diagnostics = nullptr;
+  token->pending_certificate_reserved_targets = 0U;
+  token->certificate_diagnostics_pending = false;
+}
+
 void resolve_fixed_sp_output_status_after_ready_locked(
     DeviceResidualBatch* token,
     CudaRuntimeContext* context) {
@@ -2630,6 +2766,7 @@ void resolve_fixed_sp_output_status_after_ready_locked(
     token->owns_deferred_context_lease = false;
   }
   resolve_pending_svd_diagnostics_locked(token, context);
+  resolve_pending_certificate_diagnostics_locked(token);
   std::chrono::steady_clock::time_point resolution_started;
   if (token->diagnostics.route_wait_diagnostics_enabled) {
     resolution_started = std::chrono::steady_clock::now();
@@ -4493,6 +4630,14 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
     token->diagnostics.slot_generation = acquired_generation;
     token->diagnostics.route_wait_diagnostics_enabled =
       batch.route_wait_diagnostics;
+    token->diagnostics.residual_certificate_enabled =
+      batch.residual_certificate_enabled;
+    token->diagnostics.refinement_max_iterations =
+      batch.refinement_max_iterations;
+    token->diagnostics.backward_error_tolerance =
+      batch.backward_error_tolerance;
+    token->diagnostics.fail_closed_on_certificate =
+      batch.fail_closed_on_certificate;
     token->diagnostics.qr_rank.assign(
       static_cast<std::size_t>(batch.target_count), -1);
     token->diagnostics.geqrf_info.assign(
@@ -4524,6 +4669,20 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
     token->diagnostics.aggregate_dstop.assign(
       static_cast<std::size_t>(batch.target_count),
       std::numeric_limits<double>::quiet_NaN());
+    token->diagnostics.initial_kkt_backward_error.assign(
+      static_cast<std::size_t>(batch.target_count),
+      std::numeric_limits<double>::quiet_NaN());
+    token->diagnostics.final_kkt_backward_error.assign(
+      static_cast<std::size_t>(batch.target_count),
+      std::numeric_limits<double>::quiet_NaN());
+    token->diagnostics.refinement_iterations.assign(
+      static_cast<std::size_t>(batch.target_count), 0);
+    token->diagnostics.refinement_solver.assign(
+      static_cast<std::size_t>(batch.target_count), "NONE");
+    token->diagnostics.refinement_solver_info.assign(
+      static_cast<std::size_t>(batch.target_count), -1);
+    token->diagnostics.residual_certificate_passed.assign(
+      static_cast<std::size_t>(batch.target_count), false);
     token->diagnostics.target_true_batched.assign(
       static_cast<std::size_t>(batch.target_count), false);
     slot->lease_owner = token;
@@ -4606,7 +4765,11 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
       d_sigma_max + reserved_targets;
     double* d_aggregate_dstop =
       d_smallest_retained_sigma + reserved_targets;
-    if (d_aggregate_dstop + reserved_targets !=
+    double* d_initial_kkt_backward_error =
+      d_aggregate_dstop + reserved_targets;
+    double* d_final_kkt_backward_error =
+      d_initial_kkt_backward_error + reserved_targets;
+    if (d_final_kkt_backward_error + reserved_targets !=
         context->stable_workspace.B) {
       throw std::runtime_error(
         "fixed-sp stable double arena binding mismatch");
@@ -4660,7 +4823,9 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
     int* d_qr_reroute = d_qr_rank + reserved_targets;
     int* d_qr_finite_status = d_qr_reroute + reserved_targets;
     int* d_svd_info = d_qr_finite_status + reserved_targets;
-    int* d_aggregate_root_rank = d_svd_info + reserved_targets;
+    int* d_refinement_solver_info = d_svd_info + reserved_targets;
+    int* d_aggregate_root_rank =
+      d_refinement_solver_info + reserved_targets;
     int* d_aggregate_factor_call_count =
       d_aggregate_root_rank + reserved_targets;
     int* d_aggregate_b_build_count =
@@ -4678,7 +4843,9 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
     int* h_qr_reroute = h_qr_rank + reserved_targets;
     int* h_qr_finite_status = h_qr_reroute + reserved_targets;
     int* h_svd_info = h_qr_finite_status + reserved_targets;
-    int* h_aggregate_root_rank = h_svd_info + reserved_targets;
+    int* h_refinement_solver_info = h_svd_info + reserved_targets;
+    int* h_aggregate_root_rank =
+      h_refinement_solver_info + reserved_targets;
     int* h_aggregate_factor_call_count =
       h_aggregate_root_rank + reserved_targets;
     int* h_aggregate_b_build_count =
@@ -4690,6 +4857,10 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
     double* h_smallest_retained_sigma = h_sigma_max + reserved_targets;
     double* h_aggregate_dstop =
       h_smallest_retained_sigma + reserved_targets;
+    double* h_initial_kkt_backward_error =
+      h_aggregate_dstop + reserved_targets;
+    double* h_final_kkt_backward_error =
+      h_initial_kkt_backward_error + reserved_targets;
     if (d_aggregate_pivots +
           checked_multiply(reserved_targets, reserved_q,
                            "fixed-sp aggregate pivot layout") !=
@@ -4698,7 +4869,8 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
           checked_multiply(reserved_targets, reserved_q,
                            "fixed-sp host aggregate pivot layout") !=
           context->host_status_arena + stable_shared_info_offset ||
-        reinterpret_cast<int*>(h_aggregate_dstop + reserved_targets) !=
+        reinterpret_cast<int*>(h_final_kkt_backward_error +
+          reserved_targets) !=
           context->host_status_arena + host_layout_required ||
         context->stable_workspace.info !=
           context->int_arena + stable_shared_info_offset) {
@@ -4789,6 +4961,18 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
       d_aggregate_root_rank, d_aggregate_factor_call_count,
       d_aggregate_b_build_count, d_aggregate_pivots,
       d_aggregate_dstop, context->stream);
+    if (batch.residual_certificate_enabled) {
+      const std::size_t certificate_blocks =
+        (targets + threads - 1U) / threads;
+      initialize_fixed_sp_certificate_metrics<<<
+        static_cast<unsigned int>(certificate_blocks), threads,
+        0, context->stream
+      >>>(
+        batch.target_count, d_initial_kkt_backward_error,
+        d_final_kkt_backward_error);
+      check_cuda(cudaGetLastError(),
+                 "launch fixed-sp certificate metric initialization");
+    }
 
     const std::size_t y_count = checked_multiply(
       static_cast<std::size_t>(batch.n), targets, "fixed-sp solve Y");
@@ -5104,6 +5288,83 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
       }
     }
 
+    if (batch.residual_certificate_enabled && successful_factor_count > 0) {
+      constexpr unsigned int certificate_system_tile = 16U;
+      const dim3 certificate_system_block(
+        certificate_system_tile, certificate_system_tile, 1U);
+      const dim3 certificate_system_grid(
+        (static_cast<unsigned int>(handle->q) +
+          certificate_system_tile - 1U) / certificate_system_tile,
+        (static_cast<unsigned int>(handle->q) +
+          certificate_system_tile - 1U) / certificate_system_tile,
+        1U);
+      const std::size_t q_squared = checked_multiply(
+        static_cast<std::size_t>(handle->q),
+        static_cast<std::size_t>(handle->q),
+        "fixed-sp Cholesky certificate system");
+      for (int safe_ordinal = 0; safe_ordinal < safe_count; ++safe_ordinal) {
+        if (h_potrf_info[safe_ordinal] != 0) continue;
+        const int target = h_safe_target_indices[safe_ordinal];
+        const std::size_t target_offset = static_cast<std::size_t>(target);
+        double* const target_theta = d_theta +
+          static_cast<std::size_t>(handle->q) *
+            static_cast<std::size_t>(safe_ordinal);
+        const double* const target_factor = d_systems +
+          q_squared * static_cast<std::size_t>(safe_ordinal);
+
+        build_fixed_sp_systems_kernel<<<
+          certificate_system_grid, certificate_system_block,
+          0, context->stream
+        >>>(
+          handle->d_gram, handle->d_projected_H,
+          handle->d_projected_penalties, d_sp,
+          d_safe_target_indices + safe_ordinal, 1,
+          handle->penalty_count, handle->q,
+          context->stable_workspace.B);
+        check_cuda(cudaGetLastError(),
+                   "launch fixed-sp Cholesky certificate system build");
+        compute_fixed_sp_kkt_backward_error<<<1U, 1U, 0, context->stream>>>(
+          context->stable_workspace.B, d_rhs, target_theta,
+          target, handle->q, context->stable_workspace.diagonal,
+          d_initial_kkt_backward_error);
+        check_cuda(cudaGetLastError(),
+                   "launch fixed-sp initial Cholesky KKT certificate");
+
+        for (int iteration = 0;
+             iteration < batch.refinement_max_iterations; ++iteration) {
+          check_cublas(cublasDtrsv(
+            context->blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T,
+            CUBLAS_DIAG_NON_UNIT, handle->q,
+            target_factor, handle->q,
+            context->stable_workspace.diagonal, 1
+          ), "solve fixed-sp Cholesky refinement transpose system");
+          check_cublas(cublasDtrsv(
+            context->blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
+            CUBLAS_DIAG_NON_UNIT, handle->q,
+            target_factor, handle->q,
+            context->stable_workspace.diagonal, 1
+          ), "solve fixed-sp Cholesky refinement system");
+          check_cublas(cublasDaxpy(
+            context->blas, handle->q, &one,
+            context->stable_workspace.diagonal, 1,
+            target_theta, 1
+          ), "apply fixed-sp Cholesky iterative refinement");
+          compute_fixed_sp_kkt_backward_error<<<
+            1U, 1U, 0, context->stream
+          >>>(
+            context->stable_workspace.B, d_rhs, target_theta,
+            target, handle->q, context->stable_workspace.diagonal,
+            d_final_kkt_backward_error);
+          check_cuda(cudaGetLastError(),
+                     "launch fixed-sp refined Cholesky KKT certificate");
+        }
+        token->diagnostics.refinement_solver[target_offset] =
+          "PRIMARY_CHOLESKY";
+        token->diagnostics.refinement_solver_info[target_offset] =
+          h_potrf_info[safe_ordinal];
+      }
+    }
+
     const bool write_coefficients =
       (batch.output_mask & FixedSpOutputCoefficients) != 0U;
     const bool needs_fitted =
@@ -5229,6 +5490,57 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
         std::numeric_limits<double>::epsilon(),
         d_qr_rank, d_qr_reroute, d_qr_finite_status, context->stream);
 
+      if (batch.residual_certificate_enabled) {
+        constexpr unsigned int certificate_system_tile = 16U;
+        const dim3 certificate_system_block(
+          certificate_system_tile, certificate_system_tile, 1U);
+        const dim3 certificate_system_grid(
+          (static_cast<unsigned int>(handle->q) +
+            certificate_system_tile - 1U) / certificate_system_tile,
+          (static_cast<unsigned int>(handle->q) +
+            certificate_system_tile - 1U) / certificate_system_tile,
+          1U);
+        build_fixed_sp_systems_kernel<<<
+          certificate_system_grid, certificate_system_block,
+          0, context->stream
+        >>>(
+          handle->d_gram, handle->d_projected_H,
+          handle->d_projected_penalties, d_sp,
+          d_stable_target_indices + target_stable_ordinal, 1,
+          handle->penalty_count, handle->q, d_systems);
+        check_cuda(cudaGetLastError(),
+                   "launch fixed-sp QR certificate system build");
+        compute_fixed_sp_kkt_backward_error<<<1U, 1U, 0, context->stream>>>(
+          d_systems, d_rhs, augmented.c, target, handle->q, d_theta,
+          d_initial_kkt_backward_error);
+        check_cuda(cudaGetLastError(),
+                   "launch fixed-sp initial QR KKT certificate");
+
+        for (int iteration = 0;
+             iteration < batch.refinement_max_iterations; ++iteration) {
+          check_cublas(cublasDtrsv(
+            context->blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T,
+            CUBLAS_DIAG_NON_UNIT, handle->q,
+            augmented.B, augmented.leading_dimension, d_theta, 1
+          ), "solve fixed-sp QR refinement transpose system");
+          check_cublas(cublasDtrsv(
+            context->blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
+            CUBLAS_DIAG_NON_UNIT, handle->q,
+            augmented.B, augmented.leading_dimension, d_theta, 1
+          ), "solve fixed-sp QR refinement system");
+          check_cublas(cublasDaxpy(
+            context->blas, handle->q, &one, d_theta, 1, augmented.c, 1
+          ), "apply fixed-sp QR iterative refinement");
+          compute_fixed_sp_kkt_backward_error<<<
+            1U, 1U, 0, context->stream
+          >>>(
+            d_systems, d_rhs, augmented.c, target, handle->q, d_theta,
+            d_final_kkt_backward_error);
+          check_cuda(cudaGetLastError(),
+                     "launch fixed-sp refined QR KKT certificate");
+        }
+      }
+
       if (write_coefficients) {
         const std::size_t coefficient_blocks =
           (static_cast<std::size_t>(handle->p) + threads - 1U) / threads;
@@ -5318,6 +5630,12 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
         token->diagnostics.ormqr_info[target_offset] =
           h_ormqr_info[target_offset];
         token->diagnostics.qr_rank[target_offset] = h_qr_rank[target_offset];
+        if (batch.residual_certificate_enabled) {
+          token->diagnostics.refinement_solver[target_offset] =
+            "PRIMARY_AUGMENTED_QR";
+          token->diagnostics.refinement_solver_info[target_offset] =
+            h_geqrf_info[target_offset];
+        }
 
         if (h_geqrf_info[target_offset] != 0 ||
             h_ormqr_info[target_offset] != 0) {
@@ -5492,6 +5810,72 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
         context->stable_workspace.diagonal, 1
       ), "apply fixed-sp augmented SVD correction");
 
+      if (batch.residual_certificate_enabled) {
+        constexpr unsigned int certificate_system_tile = 16U;
+        const dim3 certificate_system_block(
+          certificate_system_tile, certificate_system_tile, 1U);
+        const dim3 certificate_system_grid(
+          (static_cast<unsigned int>(handle->q) +
+            certificate_system_tile - 1U) / certificate_system_tile,
+          (static_cast<unsigned int>(handle->q) +
+            certificate_system_tile - 1U) / certificate_system_tile,
+          1U);
+        build_fixed_sp_systems_kernel<<<
+          certificate_system_grid, certificate_system_block,
+          0, context->stream
+        >>>(
+          handle->d_gram, handle->d_projected_H,
+          handle->d_projected_penalties, d_sp,
+          device_target_index(target), 1, handle->penalty_count,
+          handle->q, d_systems);
+        check_cuda(cudaGetLastError(),
+                   "launch fixed-sp SVD certificate system build");
+        compute_fixed_sp_kkt_backward_error<<<1U, 1U, 0, context->stream>>>(
+          d_systems, d_rhs, context->stable_workspace.diagonal,
+          target, handle->q, d_theta, d_initial_kkt_backward_error);
+        check_cuda(cudaGetLastError(),
+                   "launch fixed-sp initial SVD KKT certificate");
+
+        check_cusolver(cusolverDnDgeqrf(
+          context->solver, correction.rows, handle->q,
+          correction.B, correction.leading_dimension,
+          context->stable_workspace.tau,
+          context->stable_workspace.qr_work,
+          context->stable_workspace.qr_lwork,
+          context->stable_workspace.info
+        ), "factor fixed-sp independent QR refinement system");
+        check_cuda(cudaMemcpyAsync(
+          d_refinement_solver_info + target_offset,
+          context->stable_workspace.info,
+          sizeof(int), cudaMemcpyDeviceToDevice, context->stream
+        ), "snapshot fixed-sp independent QR refinement info");
+
+        for (int iteration = 0;
+             iteration < batch.refinement_max_iterations; ++iteration) {
+          check_cublas(cublasDtrsv(
+            context->blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T,
+            CUBLAS_DIAG_NON_UNIT, handle->q,
+            correction.B, correction.leading_dimension, d_theta, 1
+          ), "solve fixed-sp SVD refinement transpose system by QR");
+          check_cublas(cublasDtrsv(
+            context->blas, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
+            CUBLAS_DIAG_NON_UNIT, handle->q,
+            correction.B, correction.leading_dimension, d_theta, 1
+          ), "solve fixed-sp SVD refinement system by QR");
+          check_cublas(cublasDaxpy(
+            context->blas, handle->q, &one, d_theta, 1,
+            context->stable_workspace.diagonal, 1
+          ), "apply fixed-sp independent QR refinement");
+          compute_fixed_sp_kkt_backward_error<<<
+            1U, 1U, 0, context->stream
+          >>>(
+            d_systems, d_rhs, context->stable_workspace.diagonal,
+            target, handle->q, d_theta, d_final_kkt_backward_error);
+          check_cuda(cudaGetLastError(),
+                     "launch fixed-sp independently refined SVD KKT certificate");
+        }
+      }
+
       if (write_coefficients) {
         const std::size_t coefficient_blocks =
           (static_cast<std::size_t>(handle->p) + threads - 1U) / threads;
@@ -5576,6 +5960,24 @@ std::shared_ptr<DeviceResidualBatch> solve_fixed_sp_batch_impl(
         context->diagnostics.svd_checkpoint_wait_count += 1;
         resolve_pending_svd_diagnostics_locked(token.get(), context.get());
       }
+    }
+    if (batch.residual_certificate_enabled) {
+      if (svd_target_count == 0) {
+        check_cuda(cudaMemcpyAsync(
+          h_sigma_max, d_sigma_max,
+          allocation_bytes(
+            checked_multiply(
+              reserved_targets, kStableDoubleArraysPerTarget,
+              "fixed-sp certificate compact double diagnostics"),
+            sizeof(double),
+            "fixed-sp certificate compact double diagnostics"),
+          cudaMemcpyDeviceToHost, context->stream
+        ), "copy fixed-sp certificate compact double diagnostics");
+      }
+      token->pending_certificate_diagnostics =
+        h_initial_kkt_backward_error;
+      token->pending_certificate_reserved_targets = reserved_targets;
+      token->certificate_diagnostics_pending = true;
     }
 
     for (int safe_ordinal = 0; safe_ordinal < safe_count; ++safe_ordinal) {
@@ -5891,6 +6293,16 @@ FixedSpShadowResult materialize_fixed_sp_shadow(
       "fixed-sp shadow exceeds the prepared output slot capacity");
   }
   resolve_fixed_sp_output_status_locked(token.get(), context.get());
+  if (token->diagnostics.residual_certificate_enabled &&
+      token->diagnostics.fail_closed_on_certificate &&
+      std::any_of(
+        token->solver_statuses.begin(), token->solver_statuses.end(),
+        [](FixedSpStatus status) {
+          return status == FixedSpStatus::ErrCertificateFailed;
+        })) {
+    throw std::runtime_error(
+      "ERR_CERTIFICATE_FAILED: fixed-sp shadow output is unavailable");
+  }
 
   FixedSpShadowResult result;
   result.n = token->n;
@@ -6598,6 +7010,8 @@ const char* fixed_sp_status_name(FixedSpStatus status) {
     case FixedSpStatus::ErrSvdFailed: return "ERR_SVD_FAILED";
     case FixedSpStatus::ErrNonfiniteOutput: return "ERR_NONFINITE_OUTPUT";
     case FixedSpStatus::ErrInternalCuda: return "ERR_INTERNAL_CUDA";
+    case FixedSpStatus::ErrCertificateFailed:
+      return "ERR_CERTIFICATE_FAILED";
   }
   return "UNKNOWN";
 }

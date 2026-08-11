@@ -41,6 +41,9 @@ struct MultiPenaltyGcvCudaDecompositionIterationReuse {
 class MultiPenaltyGcvCudaPrepared;
 class MultiPenaltyGcvCudaResidualBatch;
 
+constexpr int kMultiPenaltyGcvDecompositionGuardedQr = 1;
+constexpr int kMultiPenaltyGcvDecompositionStableSvd = 2;
+
 struct MultiPenaltyGcvCudaDiagnostics {
   std::string schema_version;
   std::string execution_strategy;
@@ -83,6 +86,8 @@ struct MultiPenaltyGcvCudaDiagnostics {
   int cuda_stability_replay_ambiguous_step_reason_count = 0;
   int cuda_stability_replay_rejected_boundary_reason_count = 0;
   int cuda_stability_replay_direct_newton_reason_count = 0;
+  int cuda_stability_replay_step_failed_reason_count = 0;
+  int cuda_stability_replay_guarded_qr_trajectory_reason_count = 0;
   int cuda_stability_replay_dense_score_guard_rejected_count = 0;
   int cuda_stability_replay_extrapolation_target_count = 0;
   int cuda_stability_replay_discarded_complete_evaluation_count = 0;
@@ -175,6 +180,69 @@ struct MultiPenaltyGcvCudaEvaluation {
   MultiPenaltyGcvCudaDiagnostics diagnostics;
 };
 
+struct MultiPenaltyGcvCudaResponseTranscript {
+  int n = 0;
+  int coefficient_dim = 0;
+  int target_count = 0;
+  std::vector<double> y0;
+  std::vector<double> squared_norm;
+};
+
+struct MultiPenaltyGcvCudaObjectiveTranscript {
+  int rows = 0;
+  int columns = 0;
+  int penalty_count = 0;
+  int aggregate_penalty_rank = 0;
+  int numerical_rank = 0;
+  int solver_info = 0;
+  int decomposition_route = 0;
+  double rss = 0.0;
+  double edf = 0.0;
+  double score = 0.0;
+  double condition = 0.0;
+  std::vector<double> singular_values;
+  std::vector<double> left_vectors;
+  std::vector<double> right_vectors_transposed;
+  std::vector<double> projected_response;
+  std::vector<double> scaled_projection;
+  std::vector<double> u1_u1;
+  std::vector<double> metric;
+  std::vector<double> influence;
+  std::vector<double> metric_y;
+  std::vector<double> influence_y;
+  std::vector<double> y_influence;
+  std::vector<double> derivative_norm;
+  std::vector<double> derivative_delta;
+  std::vector<double> second_derivative_norm;
+  std::vector<double> second_derivative_delta;
+  std::vector<double> gradient;
+  std::vector<double> hessian;
+  std::vector<double> coefficients;
+};
+
+struct MultiPenaltyGcvCudaSvdTranscript {
+  int rows = 0;
+  int columns = 0;
+  int solver_info = 0;
+  int decomposition_route = 0;
+  std::vector<double> singular_values;
+  std::vector<double> left_vectors;
+  std::vector<double> right_vectors_transposed;
+};
+
+struct MultiPenaltyGcvCudaAugmentedTranscript {
+  int rows = 0;
+  int columns = 0;
+  int aggregate_penalty_rank = 0;
+  double aggregate_dstop = 0.0;
+  std::vector<double> penalty_multipliers;
+  std::vector<double> aggregate_penalty;
+  std::vector<int> aggregate_pivot;
+  std::vector<double> aggregate_factor;
+  std::vector<double> aggregate_root;
+  std::vector<double> augmented;
+};
+
 struct MultiPenaltyGcvCudaGroupedPrototypeDiagnostics {
   std::string schema_version;
   std::string execution_strategy;
@@ -229,6 +297,7 @@ struct MultiPenaltyGcvCudaOptimizerControl {
   int max_boundary_probes = 5;
   double rank_tolerance = 1.4901161193847656e-8;
   int decomposition_trace_capacity_per_target = 0;
+  bool force_stability_replay_all = false;
 };
 
 struct MultiPenaltyGcvCudaOptimization {
@@ -296,6 +365,10 @@ struct MultiPenaltyGcvCudaResidualInfo {
   int device_id = -1;
   std::vector<std::string> target_keys;
   std::vector<int> optimizer_status;
+  std::vector<int> solver_info;
+  std::vector<int> decomposition_route;
+  std::vector<int> numerical_rank;
+  bool fixed_sp_evaluation = false;
   bool device_resident = false;
   bool released = false;
   std::uint64_t generation = 0;
@@ -309,6 +382,9 @@ struct MultiPenaltyGcvCudaResidualConsumerView {
   cudaStream_t producer_stream = nullptr;
   cudaEvent_t producer_completion_event = nullptr;
   std::vector<std::string> target_keys;
+  std::vector<int> solver_info;
+  std::vector<int> decomposition_route;
+  bool fixed_sp_evaluation = false;
 };
 
 struct MultiPenaltyGcvCudaResidualShadow {
@@ -370,6 +446,46 @@ MultiPenaltyGcvCudaEvaluation multi_penalty_gcv_evaluate_cuda(
     int penalty_count,
     int target_count,
     double rank_tolerance);
+
+MultiPenaltyGcvCudaResponseTranscript
+multi_penalty_gcv_response_transcript_cuda_for_test(
+    const double* Y,
+    const double* magic_qr_packed,
+    const double* magic_tau,
+    int n,
+    int coefficient_dim,
+    int target_count);
+
+MultiPenaltyGcvCudaObjectiveTranscript
+multi_penalty_gcv_objective_transcript_cuda_for_test(
+    const double* magic_r,
+    const int* magic_pivot_zero_based,
+    const std::vector<std::vector<double>>& penalty_roots,
+    const std::vector<std::vector<double>>& penalty_matrices,
+    const std::vector<int>& penalty_ranks,
+    const double* y0,
+    double squared_norm,
+    const double* log_sp,
+    int n,
+    int coefficient_dim,
+    int penalty_count,
+    double rank_tolerance,
+    bool force_stable_svd);
+
+MultiPenaltyGcvCudaSvdTranscript
+multi_penalty_gcv_svd_transcript_cuda_for_test(
+    const double* augmented,
+    int rows,
+    int columns,
+    bool force_stable_svd);
+
+MultiPenaltyGcvCudaAugmentedTranscript
+multi_penalty_gcv_augmented_transcript_cuda_for_test(
+    const double* magic_r,
+    const std::vector<std::vector<double>>& penalty_matrices,
+    const double* log_sp,
+    int columns,
+    int penalty_count);
 
 MultiPenaltyGcvCudaGroupedPrototypeResult
 multi_penalty_gcv_grouped_evaluate_prototype_cuda(
@@ -436,6 +552,16 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
     int target_count,
     const std::vector<std::string>& target_keys,
     const MultiPenaltyGcvCudaOptimizerControl& control);
+
+std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>
+multi_penalty_gcv_cuda_evaluate_fixed_batch(
+    const std::shared_ptr<MultiPenaltyGcvCudaPrepared>& prepared,
+    const double* Y,
+    const double* log_sp,
+    int n,
+    int target_count,
+    const std::vector<std::string>& target_keys,
+    double rank_tolerance);
 
 MultiPenaltyGcvCudaMultiResult multi_penalty_gcv_cuda_optimize_multi(
     std::vector<MultiPenaltyGcvCudaMultiRequest> requests,

@@ -18,6 +18,7 @@ enum class MultiPenaltyGcvCapacityBucket {
 };
 
 class MultiPenaltyGcvCapacityPrepared;
+class MultiPenaltyGcvCapacityResidualBatch;
 
 struct MultiPenaltyGcvCapacityRequest {
   std::shared_ptr<MultiPenaltyGcvCapacityPrepared> prepared;
@@ -66,6 +67,30 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_capacity_optimize_batch(
     int target_count,
     const std::vector<std::string>& target_keys,
     const MultiPenaltyGcvCudaOptimizerControl& control);
+
+std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch>
+multi_penalty_gcv_capacity_evaluate_fixed_batch(
+    const std::shared_ptr<MultiPenaltyGcvCapacityPrepared>& prepared,
+    const double* Y,
+    const double* log_sp,
+    int n,
+    int target_count,
+    const std::vector<std::string>& target_keys,
+    double rank_tolerance);
+
+MultiPenaltyGcvCudaResidualInfo multi_penalty_gcv_capacity_residual_info(
+    const std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch>& residual);
+
+MultiPenaltyGcvCudaResidualConsumerView
+acquire_multi_penalty_gcv_capacity_residual_consumer_view(
+    const std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch>& residual);
+
+MultiPenaltyGcvCudaResidualShadow
+materialize_multi_penalty_gcv_capacity_residual_shadow(
+    const std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch>& residual);
+
+void release_multi_penalty_gcv_capacity_residual(
+    const std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch>& residual);
 
 MultiPenaltyGcvCapacityMultiResult multi_penalty_gcv_capacity_optimize_multi(
     std::vector<MultiPenaltyGcvCapacityRequest> requests,

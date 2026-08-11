@@ -28,6 +28,8 @@ constexpr char kFixedSpResidualProducerSemanticIdentity[] =
   "full-cuda-ci-fixed-sp-runtime-residual-v1";
 constexpr char kOptimizerResidualProducerSemanticIdentity[] =
   "full-cuda-ci-multi-penalty-optimizer-accepted-residual-v1";
+constexpr char kFixedEvaluatorResidualProducerSemanticIdentity[] =
+  "full-cuda-ci-mgcv-exact-fixed-evaluator-residual-v1";
 constexpr char kLegacyComponentCacheResidualBypassSemanticIdentity[] =
   "full-cuda-ci-legacy-component-cache-residual-bypass-v1";
 
@@ -144,6 +146,26 @@ bool is_successful_fixed_sp_status(FixedSpStatus status) {
     status == FixedSpStatus::OkCholeskySingle ||
     status == FixedSpStatus::OkAugmentedQr ||
     status == FixedSpStatus::OkAugmentedSvd;
+}
+
+FixedSpRoute multi_penalty_fixed_sp_route(int decomposition_route) {
+  if (decomposition_route == kMultiPenaltyGcvDecompositionGuardedQr) {
+    return FixedSpRoute::AugmentedQr;
+  }
+  if (decomposition_route == kMultiPenaltyGcvDecompositionStableSvd) {
+    return FixedSpRoute::AugmentedSvd;
+  }
+  return FixedSpRoute::Unset;
+}
+
+FixedSpStatus multi_penalty_fixed_sp_status(
+    int decomposition_route, int solver_info) {
+  if (solver_info != 0) {
+    return decomposition_route == kMultiPenaltyGcvDecompositionGuardedQr ?
+      FixedSpStatus::ErrQrFailed : FixedSpStatus::ErrSvdFailed;
+  }
+  return decomposition_route == kMultiPenaltyGcvDecompositionGuardedQr ?
+    FixedSpStatus::OkAugmentedQr : FixedSpStatus::OkAugmentedSvd;
 }
 
 std::size_t checked_multiply(std::size_t left,
@@ -2574,7 +2596,36 @@ FullCudaCiExactBatchResult run_full_cuda_ci_phase35_exact_batch_impl(
         FixedSpRoute::Unset);
       residual_view.solver_statuses.assign(
         static_cast<std::size_t>(residual_view.target_count),
-        FixedSpStatus::OkAugmentedQr);
+        optimizer_residual_view->fixed_sp_evaluation ?
+          FixedSpStatus::ErrInternalCuda : FixedSpStatus::OkAugmentedQr);
+      if (optimizer_residual_view->fixed_sp_evaluation) {
+        if (optimizer_residual_view->solver_info.size() !=
+              static_cast<std::size_t>(residual_view.target_count) ||
+            optimizer_residual_view->decomposition_route.size() !=
+              static_cast<std::size_t>(residual_view.target_count)) {
+          throw std::runtime_error(
+            "legacy eig exact fixed residual metadata is incomplete");
+        }
+        for (int target = 0; target < residual_view.target_count; ++target) {
+          const int route = optimizer_residual_view->decomposition_route[
+            static_cast<std::size_t>(target)];
+          const int solver_info = optimizer_residual_view->solver_info[
+            static_cast<std::size_t>(target)];
+          if (solver_info != 0 ||
+              (route != kMultiPenaltyGcvDecompositionGuardedQr &&
+               route != kMultiPenaltyGcvDecompositionStableSvd)) {
+            throw std::runtime_error(
+              "legacy eig exact fixed residual solver metadata failed closed");
+          }
+          const bool stable =
+            route == kMultiPenaltyGcvDecompositionStableSvd;
+          residual_view.executed_routes[static_cast<std::size_t>(target)] =
+            stable ? FixedSpRoute::AugmentedSvd : FixedSpRoute::AugmentedQr;
+          residual_view.solver_statuses[static_cast<std::size_t>(target)] =
+            stable ? FixedSpStatus::OkAugmentedSvd :
+              FixedSpStatus::OkAugmentedQr;
+        }
+      }
     }
     producer_stream = residual_view.producer_stream;
     if (residual_view.target_keys != batch.target_keys ||
@@ -2906,6 +2957,7 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
     const FullCudaCiLegacyEigBatchRequest& request,
     const MultiPenaltyGcvCudaResidualConsumerView*
       optimizer_residual_view,
+    const char* external_residual_semantic_identity,
     const std::shared_ptr<FullCudaCiLegacyEigComponentCache>&
       component_cache) {
   const std::chrono::steady_clock::time_point total_start =
@@ -3089,11 +3141,16 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
   diagnostics.deterministic_logical_order = true;
   diagnostics.component_capacity_respected =
     component_count <= request.component_capacity;
+  if (optimizer_residual_view != nullptr &&
+      external_residual_semantic_identity == nullptr) {
+    throw std::runtime_error(
+      "legacy eig external residual semantic identity is missing");
+  }
   diagnostics.residual_producer_semantic_identity = residual_cache_bypass ?
     kLegacyComponentCacheResidualBypassSemanticIdentity :
     (optimizer_residual_view == nullptr ?
       kFixedSpResidualProducerSemanticIdentity :
-      kOptimizerResidualProducerSemanticIdentity);
+      external_residual_semantic_identity);
   diagnostics.residual_solve_bypassed =
     optimizer_residual_view != nullptr || residual_cache_bypass;
   diagnostics.residual_solve_bypassed_by_component_cache =
@@ -3159,12 +3216,36 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch_impl(
       residual_view.producer_completion_event =
         optimizer_residual_view->producer_completion_event;
       residual_view.target_keys = optimizer_residual_view->target_keys;
-      residual_view.executed_routes.assign(
-        static_cast<std::size_t>(residual_view.target_count),
-        FixedSpRoute::Unset);
-      residual_view.solver_statuses.assign(
-        static_cast<std::size_t>(residual_view.target_count),
-        FixedSpStatus::OkAugmentedQr);
+      if (optimizer_residual_view->solver_info.size() !=
+            static_cast<std::size_t>(residual_view.target_count) ||
+          optimizer_residual_view->decomposition_route.size() !=
+            static_cast<std::size_t>(residual_view.target_count)) {
+        throw std::runtime_error(
+          "legacy eig external residual metadata shape changed");
+      }
+      residual_view.executed_routes.resize(
+        static_cast<std::size_t>(residual_view.target_count));
+      residual_view.solver_statuses.resize(
+        static_cast<std::size_t>(residual_view.target_count));
+      for (int target = 0; target < residual_view.target_count; ++target) {
+        const int decomposition_route =
+          optimizer_residual_view->decomposition_route[
+            static_cast<std::size_t>(target)];
+        const int solver_info = optimizer_residual_view->solver_info[
+          static_cast<std::size_t>(target)];
+        residual_view.executed_routes[static_cast<std::size_t>(target)] =
+          multi_penalty_fixed_sp_route(decomposition_route);
+        residual_view.solver_statuses[static_cast<std::size_t>(target)] =
+          multi_penalty_fixed_sp_status(decomposition_route, solver_info);
+        if (residual_view.executed_routes[static_cast<std::size_t>(target)] ==
+              FixedSpRoute::Unset ||
+            !is_successful_fixed_sp_status(
+              residual_view.solver_statuses[
+                static_cast<std::size_t>(target)])) {
+          throw std::runtime_error(
+            "legacy eig external residual route failed closed");
+        }
+      }
     }
     producer_stream = residual_view.producer_stream;
     if (residual_view.target_keys != batch.target_keys ||
@@ -3682,7 +3763,7 @@ FullCudaCiLegacyEigBatchResult run_full_cuda_ci_phase35_legacy_eig_batch(
     const FixedSpBatchHostView& batch,
     const FullCudaCiLegacyEigBatchRequest& request) {
   return run_full_cuda_ci_phase35_legacy_eig_batch_impl(
-    prepared_s, batch, request, nullptr, nullptr);
+    prepared_s, batch, request, nullptr, nullptr, nullptr);
 }
 
 FullCudaCiLegacyEigBatchResult
@@ -3695,7 +3776,7 @@ run_full_cuda_ci_phase35_legacy_eig_batch_with_component_cache(
     throw std::runtime_error("legacy eig component cache is null");
   }
   return run_full_cuda_ci_phase35_legacy_eig_batch_impl(
-    prepared_s, batch, request, nullptr, cache);
+    prepared_s, batch, request, nullptr, nullptr, cache);
 }
 
 FullCudaCiLegacyEigBatchResult
@@ -3715,9 +3796,40 @@ run_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual(
   batch.target_keys = residual_view.target_keys;
   FullCudaCiLegacyEigBatchResult result =
     run_full_cuda_ci_phase35_legacy_eig_batch_impl(
-      prepared_s, batch, request, &residual_view, nullptr);
+      prepared_s, batch, request, &residual_view,
+      kOptimizerResidualProducerSemanticIdentity, nullptr);
   for (FullCudaCiCompactHostRecord& record : result.records) {
     record.solver_route = "OPTIMIZER_ACCEPTED|OPTIMIZER_ACCEPTED";
+    record.optimizer_status = "LIVE_CUDA_GCV_ACCEPTED";
+  }
+  return result;
+}
+
+FullCudaCiLegacyEigBatchResult
+run_full_cuda_ci_phase35_legacy_eig_batch_from_fixed_evaluator_residual(
+    const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+    const MultiPenaltyGcvCudaResidualConsumerView& residual_view,
+    const FullCudaCiLegacyEigBatchRequest& request,
+    const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache) {
+  if (!residual_view.fixed_sp_evaluation) {
+    throw std::runtime_error(
+      "legacy eig exact fixed evaluator residual identity is missing");
+  }
+  const PreparedSInfo prepared_info = prepared_s_gpu_info(prepared_s);
+  FixedSpBatchHostView batch;
+  batch.n = residual_view.n;
+  batch.null_dim = prepared_info.null_dim;
+  batch.penalty_count = prepared_info.penalty_count;
+  batch.target_count = residual_view.target_count;
+  batch.output_mask = FixedSpOutputResiduals;
+  batch.target_keys = residual_view.target_keys;
+  FullCudaCiLegacyEigBatchResult result =
+    run_full_cuda_ci_phase35_legacy_eig_batch_impl(
+      prepared_s, batch, request, &residual_view,
+      kFixedEvaluatorResidualProducerSemanticIdentity, cache);
+  for (FullCudaCiCompactHostRecord& record : result.records) {
+    record.solver_route =
+      "MGCV_EXACT_STABLE_SVD|MGCV_EXACT_STABLE_SVD";
     record.optimizer_status = "LIVE_CUDA_GCV_ACCEPTED";
   }
   return result;

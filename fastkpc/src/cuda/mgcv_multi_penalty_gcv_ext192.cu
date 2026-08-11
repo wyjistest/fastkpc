@@ -1,5 +1,7 @@
 #define FASTKPC_MULTI_PENALTY_MAX_COEFFICIENT_DIM 192
 #define FASTKPC_MULTI_PENALTY_MAX_PENALTY_COUNT 21
+#define FASTKPC_MULTI_PENALTY_GCV_EXTENSION 1
+#define FASTKPC_MULTI_PENALTY_GCV_EXTENSION_TEST_TRANSCRIPTS 1
 #define lapack312_multi lapack312_multi_ext192
 #define MultiPenaltyGcvCudaPrepared MultiPenaltyGcvCudaPreparedext192
 #define MultiPenaltyGcvCudaResidualBatch MultiPenaltyGcvCudaResidualBatchext192
@@ -16,6 +18,8 @@
   multi_penalty_gcv_cuda_prepared_info_ext192
 #define multi_penalty_gcv_cuda_optimize_batch \
   multi_penalty_gcv_cuda_optimize_batch_ext192
+#define multi_penalty_gcv_cuda_evaluate_fixed_batch \
+  multi_penalty_gcv_cuda_evaluate_fixed_batch_ext192
 #define multi_penalty_gcv_cuda_optimize_multi \
   multi_penalty_gcv_cuda_optimize_multi_ext192
 #define multi_penalty_gcv_cuda_residual_info \
@@ -26,5 +30,13 @@
   materialize_multi_penalty_gcv_cuda_residual_shadow_ext192
 #define release_multi_penalty_gcv_cuda_residual \
   release_multi_penalty_gcv_cuda_residual_ext192
+#define multi_penalty_gcv_response_transcript_cuda_for_test \
+  multi_penalty_gcv_response_transcript_cuda_for_test_ext192
+#define multi_penalty_gcv_objective_transcript_cuda_for_test \
+  multi_penalty_gcv_objective_transcript_cuda_for_test_ext192
+#define multi_penalty_gcv_svd_transcript_cuda_for_test \
+  multi_penalty_gcv_svd_transcript_cuda_for_test_ext192
+#define multi_penalty_gcv_augmented_transcript_cuda_for_test \
+  multi_penalty_gcv_augmented_transcript_cuda_for_test_ext192
 
 #include "mgcv_multi_penalty_gcv.cu"

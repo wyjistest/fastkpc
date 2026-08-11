@@ -12,6 +12,7 @@
 namespace fastkpc {
 
 class MultiPenaltyGcvCudaResidualBatch;
+struct MultiPenaltyGcvCudaResidualConsumerView;
 class FullCudaCiLegacyEigComponentCache;
 
 constexpr char kFullCudaCiVerticalRequestSchemaVersion[] =
@@ -481,6 +482,13 @@ run_full_cuda_ci_phase35_legacy_eig_batch_from_optimizer_residual(
   const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
   const std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>& residual,
   const FullCudaCiLegacyEigBatchRequest& request);
+
+FullCudaCiLegacyEigBatchResult
+run_full_cuda_ci_phase35_legacy_eig_batch_from_fixed_evaluator_residual(
+  const std::shared_ptr<PreparedSGpuHandle>& prepared_s,
+  const MultiPenaltyGcvCudaResidualConsumerView& residual_view,
+  const FullCudaCiLegacyEigBatchRequest& request,
+  const std::shared_ptr<FullCudaCiLegacyEigComponentCache>& cache);
 
 FullCudaCiOptimizerResidualParityDiagnostics
 compare_full_cuda_ci_optimizer_and_fixed_residuals(

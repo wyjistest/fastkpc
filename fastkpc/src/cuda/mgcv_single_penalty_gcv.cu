@@ -28,6 +28,7 @@ constexpr int kExactWarp = 32;
 constexpr int kMagicEigensolverBatch = 64;
 constexpr double kDenominatorFloor = 1e-8;
 constexpr double kConvergenceTolerance = 1e-7;
+constexpr double kSpectralExactReplayGradientMultiplier = 2.0;
 constexpr int kMaxStepHalving = 15;
 constexpr int kMaxIterations = 400;
 constexpr double kMaxNewtonStep = 5.0;
@@ -1073,7 +1074,8 @@ __global__ void mark_spectral_exact_replay_kernel(
   const bool boundary_risk = result.boundary_accepted_count > 0;
   const bool spectral_precision_floor_risk =
     !isfinite(result.reported_rms_gradient) ||
-    result.reported_rms_gradient <= 0.5 * kConvergenceTolerance;
+    result.reported_rms_gradient <=
+      kSpectralExactReplayGradientMultiplier * kConvergenceTolerance;
   const bool numerical_risk = !isfinite(result.sp) ||
     !isfinite(result.score) || !isfinite(result.edf) ||
     !isfinite(result.rss) || !isfinite(result.gradient) ||

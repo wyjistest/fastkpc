@@ -1322,7 +1322,13 @@ MultiPenaltyGcvOptimization multi_penalty_gcv_optimize_cpp(
         &result, control, "boundary_probe", result.optimizer_iterations,
         probe, coordinate, log_sp, step, trial_log_sp, trial, eigenvalues,
         accepted, "mgcv_infinity_probe");
-      if (!accepted) break;
+      if (!accepted) {
+        // magic.c probes by changing sp0 in place and rolls a rejected probe
+        // back with the opposite addition. Preserve that rounding transcript.
+        log_sp[coordinate] =
+          trial_log_sp[coordinate] + -step[coordinate];
+        break;
+      }
       log_sp = trial_log_sp;
       current = std::move(trial);
       minimum_score = current.score;

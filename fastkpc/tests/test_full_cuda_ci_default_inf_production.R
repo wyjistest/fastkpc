@@ -194,7 +194,8 @@ assert_true(
   isTRUE(summary$authority_gate_pass) &&
     identical(summary$ci_backend,
               "legacy-compatible-full-eig-cuda-v1") &&
-    identical(summary$strict_gamma_residual_route, "qr-through-2") &&
+    identical(summary$strict_gamma_residual_route,
+              "exact-fixed-stable-svd") &&
     as.integer(summary$cuda_legacy_compatible_pair_count) ==
       fixture$logical_test_count &&
     as.integer(summary$legacy_compatible_pair_count) ==
@@ -208,8 +209,13 @@ assert_true(
   "default-Inf production CUDA authority gate failed"
 )
 
+native_path <- getLoadedDLLs()[["fastkpc_cuda"]][["path"]]
+native_sha256 <- digest::digest(
+  file = native_path, algo = "sha256", serialize = FALSE
+)
 cat(
   "PASS full production default-Inf CUDA regression; levels=0:8; tasks=",
   nrow(result$tasks), "; max_ci_diff=", format(ci_error, digits = 17L),
-  "; max_pmax_diff=", format(pmax_error, digits = 17L), "\n", sep = ""
+  "; max_pmax_diff=", format(pmax_error, digits = 17L),
+  "; native_sha256=", native_sha256, "\n", sep = ""
 )

@@ -79,7 +79,7 @@ rows <- lapply(seq_len(nrow(cases)), function(case_index) {
       "full-cuda-ci-multi-penalty-gcv-cuda-evaluation-v1"
     ) && identical(
       candidate$rank_path,
-      "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd"
+      "cuda-dpstrf-nb64-guarded-qr-lapack-3.12-dgesdd"
     ) && candidate$n == nrow(Y) &&
       candidate$coefficient_dim == case$expected_p &&
       candidate$penalty_count == case$expected_penalty_count &&

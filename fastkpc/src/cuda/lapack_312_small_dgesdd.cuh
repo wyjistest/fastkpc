@@ -447,6 +447,39 @@ __device__ int dlasda_(integer*, integer*, integer*, integer*, doublereal*,
 
 #include "third_party/lapack_3_12_small_dgesdd_device.inc"
 
+namespace reference_blocked_reflector {
+#include "third_party/lapack_3_12_block_reflector_device.inc"
+
+namespace dormbr_reference {
+using address = char*;
+
+__device__ int s_cat(char* destination, address* sources,
+                     integer* source_lengths, integer* source_count,
+                     ftnlen destination_length) {
+  ftnlen output = 0;
+  for (integer source = 0; source < *source_count; ++source) {
+    for (integer index = 0;
+         index < source_lengths[source] && output < destination_length;
+         ++index) {
+      destination[output++] = sources[source][index];
+    }
+  }
+  while (output < destination_length) destination[output++] = ' ';
+  return 0;
+}
+
+__device__ integer ilaenv_(integer* ispec, char*, char*, integer*, integer*,
+                           integer*, integer*, ftnlen, ftnlen) {
+  if (*ispec == 1) return 32;
+  if (*ispec == 2) return 2;
+  if (*ispec == 3) return 128;
+  return 1;
+}
+
+#include "third_party/lapack_3_12_dormbr_device.inc"
+}  // namespace dormbr_reference
+}  // namespace reference_blocked_reflector
+
 #undef max
 #undef min
 #undef dabs
@@ -481,7 +514,104 @@ struct Workspace {
   integer qr_basis_used;
   integer qr_guard_accepted;
   doublereal qr_condition_estimate;
+  integer direct_bidiagonal_path_used;
+  integer decomposition_rows;
+  integer right_vectors_complete;
+  integer lapack_blocked_reflector_path_used;
 };
+
+constexpr integer kReferenceReflectorBlockSize = 32;
+constexpr integer kReferenceReflectorLeadingDimension = 65;
+
+__device__ integer dgesdd_bdspac(integer n) {
+  return 3 * n * n + 4 * n;
+}
+
+__device__ integer apply_reference_blocked_q_left(
+    integer m, integer n, integer reflector_count,
+    doublereal* reflector_matrix, integer reflector_leading_dimension,
+    doublereal* tau, doublereal* output, integer output_leading_dimension,
+    doublereal* scratch) {
+  const integer lane = static_cast<integer>(threadIdx.x) & 31;
+  integer info = 0;
+  if (lane == 0) {
+    char vectors = 'Q';
+    char left = 'L';
+    char no_transpose = 'N';
+    // DGESDD hands its full BDSPAC tail to DORMBR. That workspace budget is
+    // part of the numerical contract because DORMQR/DORMLQ derive their
+    // reflector block size from LWORK.
+    integer lwork = dgesdd_bdspac(n);
+    reference_blocked_reflector::dormbr_reference::dormbr_(
+      &vectors, &left, &no_transpose, &m, &n, &reflector_count,
+      reflector_matrix, &reflector_leading_dimension, tau, output,
+      &output_leading_dimension, scratch, &lwork, &info, 1, 1, 1);
+  }
+  cooperative_sync(32);
+  return info;
+}
+
+__device__ void apply_reference_blocked_q_left_transpose(
+    integer m, integer n, integer reflector_count,
+    doublereal* reflector_matrix, integer reflector_leading_dimension,
+    doublereal* tau, doublereal* output, integer output_leading_dimension,
+    doublereal* scratch) {
+  const integer lane = static_cast<integer>(threadIdx.x) & 31;
+  if (lane == 0) {
+    doublereal* block_work = scratch;
+    doublereal* triangular =
+      scratch + kMaximumColumns * kReferenceReflectorBlockSize;
+    integer work_leading_dimension = n;
+    integer triangular_leading_dimension =
+      kReferenceReflectorLeadingDimension;
+    char left = 'L';
+    char transpose = 'T';
+    char forward = 'F';
+    char columnwise = 'C';
+    for (integer offset = 0; offset < reflector_count;
+         offset += kReferenceReflectorBlockSize) {
+      integer block_size = min(
+        kReferenceReflectorBlockSize, reflector_count - offset);
+      integer reflector_order = m - offset;
+      reference_blocked_reflector::dlarft_(
+        &forward, &columnwise, &reflector_order, &block_size,
+        reflector_matrix + offset + reflector_leading_dimension * offset,
+        &reflector_leading_dimension, tau + offset, triangular,
+        &triangular_leading_dimension, 1, 1);
+      integer output_rows = m - offset;
+      reference_blocked_reflector::dlarfb_(
+        &left, &transpose, &forward, &columnwise,
+        &output_rows, &n, &block_size,
+        reflector_matrix + offset + reflector_leading_dimension * offset,
+        &reflector_leading_dimension, triangular,
+        &triangular_leading_dimension, output + offset,
+        &output_leading_dimension, block_work,
+        &work_leading_dimension, 1, 1, 1, 1);
+    }
+  }
+  cooperative_sync(32);
+}
+
+__device__ integer apply_reference_blocked_p_right_transpose(
+    integer n, doublereal* reflector_matrix,
+    integer reflector_leading_dimension, doublereal* tau,
+    doublereal* output, integer output_leading_dimension,
+    doublereal* scratch) {
+  const integer lane = static_cast<integer>(threadIdx.x) & 31;
+  integer info = 0;
+  if (lane == 0) {
+    char vectors = 'P';
+    char right = 'R';
+    char transpose = 'T';
+    integer lwork = dgesdd_bdspac(n);
+    reference_blocked_reflector::dormbr_reference::dormbr_(
+      &vectors, &right, &transpose, &n, &n, &n,
+      reflector_matrix, &reflector_leading_dimension, tau, output,
+      &output_leading_dimension, scratch, &lwork, &info, 1, 1, 1);
+  }
+  cooperative_sync(32);
+  return info;
+}
 
 __device__ int small_dbdsdc_upper_i_two_warp(
     integer n, Workspace* workspace) {
@@ -669,6 +799,10 @@ __device__ int grouped_guarded_qr_warp(
   if (lane == 0) {
     workspace->qr_basis_used = 0;
     workspace->qr_guard_accepted = 0;
+    workspace->direct_bidiagonal_path_used = 0;
+    workspace->decomposition_rows = m;
+    workspace->right_vectors_complete = 0;
+    workspace->lapack_blocked_reflector_path_used = 0;
   }
   cooperative_sync(32);
   dgeqr2_(&m, &n, workspace->a, &m, workspace->qr_tau,
@@ -757,6 +891,8 @@ __device__ int grouped_guarded_qr_warp(
     workspace->iwork[0] = info;
     workspace->qr_basis_used =
       info == 0 && workspace->qr_guard_accepted != 0 ? 1 : 0;
+    workspace->right_vectors_complete =
+      workspace->qr_basis_used != 0 ? 1 : 0;
   }
   cooperative_sync(32);
   return workspace->iwork[0];
@@ -796,7 +932,11 @@ __device__ int grouped_stable_svd_two_warp_continuation(
         *vector = saved;
       }
     }
-    if (lane == 0) workspace->iwork[0] = info;
+    if (lane == 0) {
+      workspace->iwork[0] = info;
+      workspace->right_vectors_complete =
+        compute_right_vectors ? 1 : 0;
+    }
   }
   __syncthreads();
   if (workspace->iwork[0] != 0) return workspace->iwork[0];
@@ -819,16 +959,238 @@ __device__ int grouped_stable_svd_two_warp_continuation(
 __device__ int complete_stable_right_vectors_after_score(
     integer n, Workspace* workspace) {
   if (workspace->qr_basis_used != 0) return 0;
+  if (workspace->right_vectors_complete != 0) return 0;
   if (blockDim.x != 64 || n <= FASTKPC_LAPACK_SMALL_SMLSIZ) return -100;
   const integer warp = static_cast<integer>(threadIdx.x) >> 5;
   const integer lane = static_cast<integer>(threadIdx.x) & 31;
   integer info = 0;
   if (warp == 0) {
+    integer leading_dimension =
+      workspace->direct_bidiagonal_path_used != 0 ?
+        workspace->decomposition_rows : n;
+    doublereal* reflector_matrix =
+      workspace->direct_bidiagonal_path_used != 0 ?
+        workspace->a : workspace->r;
+    if (workspace->lapack_blocked_reflector_path_used != 0 &&
+        n > kReferenceReflectorBlockSize) {
+      info = apply_reference_blocked_p_right_transpose(
+        n, reflector_matrix, leading_dimension, workspace->tau_p,
+        workspace->bidiagonal_vt, n, workspace->work);
+    } else {
+      char right = 'R';
+      for (integer reflector = n - 2; reflector >= 0; --reflector) {
+        integer reflector_order = n - reflector - 1;
+        doublereal* vector =
+          reflector_matrix + reflector +
+            leading_dimension * (reflector + 1);
+        const doublereal saved = *vector;
+        *vector = 1.0;
+        dlarf_(&right, &n, &reflector_order, vector, &leading_dimension,
+               workspace->tau_p + reflector,
+               workspace->bidiagonal_vt + n * (reflector + 1), &n,
+               workspace->work, 1);
+        *vector = saved;
+      }
+    }
+    if (lane == 0) {
+      workspace->iwork[0] = info;
+      workspace->right_vectors_complete = info == 0 ? 1 : 0;
+    }
+  }
+  __syncthreads();
+  return workspace->iwork[0];
+}
+
+// DGESDD uses a direct bidiagonal reduction when a tall matrix is below its
+// MNTHR boundary.
+__device__ int small_dgesdd_left_direct_two_warp(
+    integer m, integer n, Workspace* workspace,
+    bool compute_right_vectors,
+    unsigned long long* stage_cycles = nullptr) {
+  if (blockDim.x != 64 || m < n) return -100;
+  const integer warp = static_cast<integer>(threadIdx.x) >> 5;
+  const integer lane = static_cast<integer>(threadIdx.x) & 31;
+  integer info = 0;
+  unsigned long long stage_started = 0;
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_started = clock64();
+  }
+  if (threadIdx.x == 0) {
+    workspace->qr_basis_used = 0;
+    workspace->qr_guard_accepted = 0;
+    workspace->direct_bidiagonal_path_used = 1;
+    workspace->decomposition_rows = m;
+    workspace->right_vectors_complete = 0;
+    workspace->lapack_blocked_reflector_path_used = 1;
+  }
+  __syncthreads();
+
+  if (warp == 0) {
+    dgebd2_(&m, &n, workspace->a, &m, workspace->bidiagonal,
+            workspace->bidiagonal_e, workspace->tau_q,
+            workspace->tau_p, workspace->work, &info);
+    if (lane == 0) workspace->iwork[0] = info;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[0] += clock64() - stage_started;
+    stage_cycles[7] += clock64() - stage_started;
+    stage_started = clock64();
+  }
+  if (workspace->iwork[0] != 0) return workspace->iwork[0];
+
+  info = small_dbdsdc_upper_i_two_warp(n, workspace);
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[1] += clock64() - stage_started;
+    stage_started = clock64();
+  }
+  if (info != 0) return info;
+
+  for (integer output = static_cast<integer>(threadIdx.x);
+       output < m * n; output += static_cast<integer>(blockDim.x)) {
+    const integer row = output % m;
+    const integer column = output / m;
+    workspace->left_u[output] = row < n ?
+      workspace->bidiagonal_u[row + n * column] : 0.0;
+  }
+  __syncthreads();
+
+  if (warp == 0) {
+    if (n > kReferenceReflectorBlockSize) {
+      info = apply_reference_blocked_q_left(
+        m, n, n, workspace->a, m, workspace->tau_q,
+        workspace->left_u, m, workspace->work);
+      if (info == 0 && compute_right_vectors) {
+        info = apply_reference_blocked_p_right_transpose(
+          n, workspace->a, m, workspace->tau_p,
+          workspace->bidiagonal_vt, n, workspace->work);
+      }
+    } else {
+      char left = 'L';
+      char right = 'R';
+      integer one = 1;
+      for (integer reflector = n - 1; reflector >= 0; --reflector) {
+        integer reflector_order = m - reflector;
+        doublereal* vector =
+          workspace->a + reflector + m * reflector;
+        const doublereal saved = *vector;
+        *vector = 1.0;
+        dlarf_(&left, &reflector_order, &n, vector, &one,
+               workspace->tau_q + reflector,
+               workspace->left_u + reflector, &m,
+               workspace->work, 1);
+        *vector = saved;
+      }
+      if (compute_right_vectors) {
+        for (integer reflector = n - 2; reflector >= 0; --reflector) {
+          integer reflector_order = n - reflector - 1;
+          doublereal* vector =
+            workspace->a + reflector + m * (reflector + 1);
+          const doublereal saved = *vector;
+          *vector = 1.0;
+          dlarf_(&right, &n, &reflector_order, vector, &m,
+                 workspace->tau_p + reflector,
+                 workspace->bidiagonal_vt + n * (reflector + 1), &n,
+                 workspace->work, 1);
+          *vector = saved;
+        }
+      }
+    }
+    if (lane == 0) {
+      workspace->iwork[0] = info;
+      workspace->right_vectors_complete =
+        info == 0 && compute_right_vectors ? 1 : 0;
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[2] += clock64() - stage_started;
+    stage_cycles[3] += clock64() - stage_started;
+  }
+  return workspace->iwork[0];
+}
+
+__device__ int small_dgesdd_left_single_warp(
+    integer m, integer n, Workspace* workspace,
+    bool compute_right_vectors,
+    unsigned long long* stage_cycles) {
+  integer info = 0;
+  if (threadIdx.x == 0) {
+    workspace->qr_basis_used = 0;
+    workspace->qr_guard_accepted = 0;
+    workspace->direct_bidiagonal_path_used = 0;
+    workspace->decomposition_rows = m;
+    workspace->right_vectors_complete = 0;
+    workspace->lapack_blocked_reflector_path_used = 0;
+  }
+  unsigned long long stage_started = 0;
+  unsigned long long detail_started = 0;
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_started = clock64();
+    detail_started = stage_started;
+  }
+  dgeqr2_(&m, &n, workspace->a, &m, workspace->qr_tau,
+          workspace->work, &info);
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[4] += clock64() - detail_started;
+    detail_started = clock64();
+  }
+  if (info != 0) return info;
+  const int lane_count = cooperative_lane_count();
+  const int lane = cooperative_lane_index(lane_count);
+  for (integer index = lane; index < n * n; index += lane_count) {
+    const integer row = index % n;
+    const integer column = index / n;
+    workspace->r[index] =
+      row <= column ? workspace->a[row + m * column] : 0.0;
+  }
+  cooperative_sync(lane_count);
+  dorg2r_(&m, &n, &n, workspace->a, &m, workspace->qr_tau,
+          workspace->work, &info);
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[5] += clock64() - detail_started;
+    detail_started = clock64();
+  }
+  if (info != 0) return info;
+  dgebd2_(&n, &n, workspace->r, &n, workspace->bidiagonal,
+          workspace->bidiagonal_e, workspace->tau_q, workspace->tau_p,
+          workspace->work, &info);
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[7] += clock64() - detail_started;
+  }
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[0] += clock64() - stage_started;
+    stage_started = clock64();
+  }
+  if (info != 0) return info;
+  char upper = 'U';
+  char vectors = 'I';
+  doublereal compact_dummy = 0.0;
+  integer integer_dummy = 0;
+  dbdsdc_(&upper, &vectors, &n, workspace->bidiagonal,
+          workspace->bidiagonal_e, workspace->bidiagonal_u, &n,
+          workspace->bidiagonal_vt, &n, &compact_dummy, &integer_dummy,
+          workspace->work, workspace->iwork, &info, 1, 1);
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[1] += clock64() - stage_started;
+    stage_started = clock64();
+  }
+  if (info != 0) return info;
+  char left = 'L';
+  char no_transpose = 'N';
+  dorm2r_(&left, &no_transpose, &n, &n, &n, workspace->r, &n,
+          workspace->tau_q, workspace->bidiagonal_u, &n,
+          workspace->work, &info, 1, 1);
+  if (info != 0) return info;
+
+  // DORMBR('P','R','T') for the square upper-bidiagonal reduction.  In
+  // this case DORMBR dispatches to the unblocked DORML2 path on columns
+  // 2:n, applying G(n-1), ..., G(1) from the right.
+  if (compute_right_vectors) {
     char right = 'R';
     for (integer reflector = n - 2; reflector >= 0; --reflector) {
       integer reflector_order = n - reflector - 1;
-      doublereal* vector =
-        workspace->r + reflector + n * (reflector + 1);
+      doublereal* vector = workspace->r + reflector + n * (reflector + 1);
       const doublereal saved = *vector;
       *vector = 1.0;
       dlarf_(&right, &n, &reflector_order, vector, &n,
@@ -837,10 +1199,29 @@ __device__ int complete_stable_right_vectors_after_score(
              workspace->work, 1);
       *vector = saved;
     }
-    if (lane == 0) workspace->iwork[0] = info;
   }
-  __syncthreads();
-  return workspace->iwork[0];
+  if (threadIdx.x == 0) {
+    workspace->right_vectors_complete = compute_right_vectors ? 1 : 0;
+  }
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[2] += clock64() - stage_started;
+    stage_started = clock64();
+  }
+  for (integer output = lane; output < m * n; output += lane_count) {
+    const integer row = output % m;
+    const integer column = output / m;
+    doublereal value = 0.0;
+    for (integer inner = 0; inner < n; ++inner) {
+      value += workspace->a[row + m * inner] *
+               workspace->bidiagonal_u[inner + n * column];
+    }
+    workspace->left_u[output] = value;
+  }
+  cooperative_sync(lane_count);
+  if (threadIdx.x == 0 && stage_cycles != nullptr) {
+    stage_cycles[3] += clock64() - stage_started;
+  }
+  return 0;
 }
 
 __device__ int small_dgesdd_left(
@@ -848,7 +1229,14 @@ __device__ int small_dgesdd_left(
     bool compute_right_vectors = true,
     unsigned long long* stage_cycles = nullptr,
     bool allow_qr_complete = false,
-    bool force_stable_svd = false) {
+    bool force_stable_svd = false,
+    bool match_lapack_shape_path = false) {
+  const integer mnthr = n * 11 / 6;
+  if (match_lapack_shape_path && blockDim.x == 64 &&
+      n > FASTKPC_LAPACK_SMALL_SMLSIZ && m < mnthr) {
+    return small_dgesdd_left_direct_two_warp(
+      m, n, workspace, compute_right_vectors, stage_cycles);
+  }
   if (blockDim.x == 64 && n > FASTKPC_LAPACK_SMALL_SMLSIZ) {
     const integer warp = static_cast<integer>(threadIdx.x) >> 5;
     const integer lane = static_cast<integer>(threadIdx.x) & 31;
@@ -863,6 +1251,11 @@ __device__ int small_dgesdd_left(
       if (lane == 0) {
         workspace->qr_basis_used = 0;
         workspace->qr_guard_accepted = 0;
+        workspace->direct_bidiagonal_path_used = 0;
+        workspace->decomposition_rows = m;
+        workspace->right_vectors_complete = 0;
+        workspace->lapack_blocked_reflector_path_used =
+          match_lapack_shape_path ? 1 : 0;
       }
       cooperative_sync(32);
       dgeqr2_(&m, &n, workspace->a, &m, workspace->qr_tau,
@@ -964,7 +1357,11 @@ __device__ int small_dgesdd_left(
       if (lane == 0 && stage_cycles != nullptr) {
         stage_cycles[7] += clock64() - detail_started;
       }
-      if (lane == 0) workspace->iwork[0] = info;
+      if (lane == 0) {
+        workspace->iwork[0] = info;
+        workspace->right_vectors_complete =
+          compute_right_vectors ? 1 : 0;
+      }
     }
     __syncthreads();
     if (threadIdx.x == 0 && stage_cycles != nullptr) {
@@ -986,24 +1383,36 @@ __device__ int small_dgesdd_left(
     if (info != 0) return info;
 
     if (warp == 0) {
-      char left = 'L';
-      char no_transpose = 'N';
-      dorm2r_(&left, &no_transpose, &n, &n, &n, workspace->r, &n,
-              workspace->tau_q, workspace->bidiagonal_u, &n,
-              workspace->work, &info, 1, 1);
-      if (info == 0 && compute_right_vectors) {
-        char right = 'R';
-        for (integer reflector = n - 2; reflector >= 0; --reflector) {
-          integer reflector_order = n - reflector - 1;
-          doublereal* vector =
-            workspace->r + reflector + n * (reflector + 1);
-          const doublereal saved = *vector;
-          *vector = 1.0;
-          dlarf_(&right, &n, &reflector_order, vector, &n,
-                 workspace->tau_p + reflector,
-                 workspace->bidiagonal_vt + n * (reflector + 1), &n,
-                 workspace->work, 1);
-          *vector = saved;
+      if (workspace->lapack_blocked_reflector_path_used != 0 &&
+          n > kReferenceReflectorBlockSize) {
+        info = apply_reference_blocked_q_left(
+          n, n, n, workspace->r, n, workspace->tau_q,
+          workspace->bidiagonal_u, n, workspace->work);
+        if (info == 0 && compute_right_vectors) {
+          info = apply_reference_blocked_p_right_transpose(
+            n, workspace->r, n, workspace->tau_p,
+            workspace->bidiagonal_vt, n, workspace->work);
+        }
+      } else {
+        char left = 'L';
+        char no_transpose = 'N';
+        dorm2r_(&left, &no_transpose, &n, &n, &n, workspace->r, &n,
+                workspace->tau_q, workspace->bidiagonal_u, &n,
+                workspace->work, &info, 1, 1);
+        if (info == 0 && compute_right_vectors) {
+          char right = 'R';
+          for (integer reflector = n - 2; reflector >= 0; --reflector) {
+            integer reflector_order = n - reflector - 1;
+            doublereal* vector =
+              workspace->r + reflector + n * (reflector + 1);
+            const doublereal saved = *vector;
+            *vector = 1.0;
+            dlarf_(&right, &n, &reflector_order, vector, &n,
+                   workspace->tau_p + reflector,
+                   workspace->bidiagonal_vt + n * (reflector + 1), &n,
+                   workspace->work, 1);
+            *vector = saved;
+          }
         }
       }
       if (lane == 0) workspace->iwork[0] = info;
@@ -1033,104 +1442,14 @@ __device__ int small_dgesdd_left(
     return 0;
   }
 
-  integer info = 0;
-  if (threadIdx.x == 0) workspace->qr_basis_used = 0;
-  unsigned long long stage_started = 0;
-  unsigned long long detail_started = 0;
-  if (threadIdx.x == 0 && stage_cycles != nullptr) {
-    stage_started = clock64();
-    detail_started = stage_started;
+  int info = 0;
+  if (threadIdx.x < 32) {
+    info = small_dgesdd_left_single_warp(
+      m, n, workspace, compute_right_vectors, stage_cycles);
   }
-  dgeqr2_(&m, &n, workspace->a, &m, workspace->qr_tau,
-          workspace->work, &info);
-  if (threadIdx.x == 0 && stage_cycles != nullptr) {
-    stage_cycles[4] += clock64() - detail_started;
-    detail_started = clock64();
-  }
-  if (info != 0) return info;
-  const int lane_count = cooperative_lane_count();
-  const int lane = cooperative_lane_index(lane_count);
-  for (integer index = lane; index < n * n; index += lane_count) {
-    const integer row = index % n;
-    const integer column = index / n;
-    workspace->r[index] =
-      row <= column ? workspace->a[row + m * column] : 0.0;
-  }
-  cooperative_sync(lane_count);
-  dorg2r_(&m, &n, &n, workspace->a, &m, workspace->qr_tau,
-          workspace->work, &info);
-  if (threadIdx.x == 0 && stage_cycles != nullptr) {
-    stage_cycles[5] += clock64() - detail_started;
-    detail_started = clock64();
-  }
-  if (info != 0) return info;
-  dgebd2_(&n, &n, workspace->r, &n, workspace->bidiagonal,
-          workspace->bidiagonal_e, workspace->tau_q, workspace->tau_p,
-          workspace->work, &info);
-  if (threadIdx.x == 0 && stage_cycles != nullptr) {
-    stage_cycles[7] += clock64() - detail_started;
-  }
-  if (threadIdx.x == 0 && stage_cycles != nullptr) {
-    stage_cycles[0] += clock64() - stage_started;
-    stage_started = clock64();
-  }
-  if (info != 0) return info;
-  char upper = 'U';
-  char vectors = 'I';
-  doublereal compact_dummy = 0.0;
-  integer integer_dummy = 0;
-  dbdsdc_(&upper, &vectors, &n, workspace->bidiagonal,
-          workspace->bidiagonal_e, workspace->bidiagonal_u, &n,
-          workspace->bidiagonal_vt, &n, &compact_dummy, &integer_dummy,
-          workspace->work, workspace->iwork, &info, 1, 1);
-  if (threadIdx.x == 0 && stage_cycles != nullptr) {
-    stage_cycles[1] += clock64() - stage_started;
-    stage_started = clock64();
-  }
-  if (info != 0) return info;
-  char left = 'L';
-  char no_transpose = 'N';
-  dorm2r_(&left, &no_transpose, &n, &n, &n, workspace->r, &n,
-          workspace->tau_q, workspace->bidiagonal_u, &n,
-          workspace->work, &info, 1, 1);
-  if (info != 0) return info;
-
-  // DORMBR('P','R','T') for the square upper-bidiagonal reduction.  In
-  // this case DORMBR dispatches to the unblocked DORML2 path on columns
-  // 2:n, applying G(n-1), ..., G(1) from the right.
-  if (compute_right_vectors) {
-    char right = 'R';
-    for (integer reflector = n - 2; reflector >= 0; --reflector) {
-      integer reflector_order = n - reflector - 1;
-      doublereal* vector = workspace->r + reflector + n * (reflector + 1);
-      const doublereal saved = *vector;
-      *vector = 1.0;
-      dlarf_(&right, &n, &reflector_order, vector, &n,
-             workspace->tau_p + reflector,
-             workspace->bidiagonal_vt + n * (reflector + 1), &n,
-             workspace->work, 1);
-      *vector = saved;
-    }
-  }
-  if (threadIdx.x == 0 && stage_cycles != nullptr) {
-    stage_cycles[2] += clock64() - stage_started;
-    stage_started = clock64();
-  }
-  for (integer output = lane; output < m * n; output += lane_count) {
-    const integer row = output % m;
-    const integer column = output / m;
-    doublereal value = 0.0;
-    for (integer inner = 0; inner < n; ++inner) {
-      value += workspace->a[row + m * inner] *
-               workspace->bidiagonal_u[inner + n * column];
-    }
-    workspace->left_u[output] = value;
-  }
-  cooperative_sync(lane_count);
-  if (threadIdx.x == 0 && stage_cycles != nullptr) {
-    stage_cycles[3] += clock64() - stage_started;
-  }
-  return 0;
+  if (threadIdx.x == 0) workspace->iwork[0] = info;
+  __syncthreads();
+  return workspace->iwork[0];
 }
 
 }  // namespace FASTKPC_LAPACK_SMALL_NAMESPACE

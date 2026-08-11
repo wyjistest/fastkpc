@@ -5,6 +5,7 @@
 #define FASTKPC_LAPACK_SMALL_NAMESPACE lapack312_multi
 #include "lapack_312_small_dgesdd.cuh"
 #undef FASTKPC_LAPACK_SMALL_NAMESPACE
+#include "lapack_312_small_dsyevr.cuh"
 #include "third_party/glibc_2_35_exp_fma.cuh"
 
 #include <cublas_v2.h>
@@ -44,10 +45,6 @@ constexpr int kStabilityReplayBoundaryMaximumIterations = 100;
 constexpr int kStabilityReplayBoundaryMinimumAcceptedProbes = 2;
 constexpr int kStabilityReplayBoundaryStepHalvingNumerator = 9;
 constexpr int kStabilityReplayBoundaryStepHalvingDenominator = 4;
-constexpr int kStabilityReplayDenseRiskMaximumStepHalvingNumerator = 49;
-constexpr int kStabilityReplayDenseRiskMaximumStepHalvingDenominator = 20;
-constexpr double kStabilityReplayDenseRiskConditionOverride = 8388608.0;
-constexpr int kStabilityReplayLongRiskStepHalvingMultiplier = 4;
 constexpr int kStabilityReplayHighConditionMinimumIterations = 16;
 constexpr int kStabilityReplayHighConditionStepHalvingNumerator = 3;
 constexpr int kStabilityReplayHighConditionStepHalvingDenominator = 4;
@@ -56,14 +53,6 @@ constexpr int kDirectNewtonReplayMaximumIterations = 20;
 constexpr int kDirectNewtonReplayMinimumAcceptedProbes = 1;
 constexpr double kDirectNewtonReplayMaximumSmallestEigenvalue = 1e-12;
 constexpr double kDirectNewtonReplayMinimumHessianCondition = 1e9;
-constexpr double kDirectNewtonHalvingExtrapolationFraction = 0.75;
-constexpr double kDirectNewtonMaximumExtrapolation = 2e-5;
-constexpr double kStabilityReplayLogSpSpread = 3e-8;
-constexpr double kStabilityReplayDenseBoundaryMaximumSpread = 5e-8;
-constexpr double kStabilityReplayMaximumInwardShift = 1e-6;
-constexpr double kStabilityReplayExtrapolationFraction = 0.25;
-constexpr double kStabilityReplayDenseBoundaryExtrapolationFraction = 8.0;
-constexpr double kStabilityReplayMaximumExtrapolation = 4e-6;
 constexpr double kAmbiguousStepRelativeTolerance =
   128.0 * kLapackEpsilon;
 constexpr double kAmbiguousStepConservativeDescentFraction = 0.5;
@@ -71,7 +60,6 @@ constexpr double kAmbiguousStepConservativeMinimumHessianCondition = 5.0;
 constexpr double kAmbiguousStepDirectDeltaDisagreementFraction = 0.25;
 constexpr double kRejectedBoundaryReplayDeltaRatio = 2.0;
 constexpr double kTerminalBoundaryTieCondition = 8388608.0;
-constexpr double kTerminalBoundaryOverrideCondition = 33554432.0;
 constexpr double kTerminalBoundaryTieRelativeTolerance =
   1e-10;
 
@@ -274,50 +262,16 @@ __global__ void target_squared_norm_kernel(
   squared_norm[target] = value;
 }
 
-__global__ void magic_qt_y_kernel(
-    const double* qr_packed,
-    const double* tau,
-    const double* Y,
-    double* work,
-    double* y0,
-    int n,
-    int q,
-    int target_count) {
-  const int target = blockIdx.x * blockDim.x + threadIdx.x;
-  if (target >= target_count) return;
-  double* target_work = work + static_cast<std::size_t>(n) * target;
-  const double* target_y = Y + static_cast<std::size_t>(n) * target;
-  for (int row = 0; row < n; ++row) target_work[row] = target_y[row];
-  for (int reflector = 0; reflector < q; ++reflector) {
-    double dot = target_work[reflector];
-    const double* vector =
-      qr_packed + static_cast<std::size_t>(n) * reflector;
-    for (int row = reflector + 1; row < n; ++row) {
-      dot = rounded_multiply_add(dot, vector[row], target_work[row]);
-    }
-    const double scale = __dmul_rn(-tau[reflector], dot);
-    target_work[reflector] = __dadd_rn(target_work[reflector], scale);
-    for (int row = reflector + 1; row < n; ++row) {
-      target_work[row] = rounded_multiply_add(
-        target_work[row], vector[row], scale);
-    }
-  }
-  for (int row = 0; row < q; ++row) {
-    y0[row + q * target] = target_work[row];
-  }
-}
-
 __device__ void swap_double(double* left, double* right) {
   const double saved = *left;
   *left = *right;
   *right = saved;
 }
 
-__device__ int dpstf2_upper_block(
+__device__ int dpstrf_upper_block(
     double* matrix, int* pivot, double* work, int q) {
   for (int index = threadIdx.x; index < q; index += blockDim.x) {
     pivot[index] = index + 1;
-    work[index] = 0.0;
   }
   __syncthreads();
   if (threadIdx.x == 0) {
@@ -338,77 +292,112 @@ __device__ int dpstf2_upper_block(
   }
   __syncthreads();
   if (pivot[q] == 0) return 0;
-  for (int column = 0; column < q; ++column) {
-    for (int index = column + threadIdx.x; index < q;
+  // R's LAPACK 3.12 ILAENV selects NB=64 for DPOTRF, which DPSTRF uses.
+  constexpr int kDpstrfBlockSize = 64;
+  for (int block_start = 0; block_start < q;
+       block_start += kDpstrfBlockSize) {
+    const int block_width =
+      min(kDpstrfBlockSize, q - block_start);
+    const int block_end = block_start + block_width;
+    for (int index = block_start + threadIdx.x; index < q;
          index += blockDim.x) {
-      if (column > 0) {
-        const double previous = matrix[(column - 1) + q * index];
-        work[index] = rounded_multiply_add(
-          work[index], previous, previous);
-      }
-      work[q + index] = __dadd_rn(
-        matrix[index + q * index], -work[index]);
+      work[index] = 0.0;
     }
     __syncthreads();
-    if (threadIdx.x == 0) {
-      int pivot_index = pivot[q + 1];
-      double diagonal = work[2 * q + 1];
-      if (column > 0) {
-        pivot_index = column;
-        diagonal = work[q + column];
-        for (int index = column + 1; index < q; ++index) {
-          const double candidate = work[q + index];
-          if (candidate > diagonal) {
-            pivot_index = index;
-            diagonal = candidate;
+
+    for (int column = block_start; column < block_end; ++column) {
+      for (int index = column + threadIdx.x; index < q;
+           index += blockDim.x) {
+        if (column > block_start) {
+          const double previous = matrix[(column - 1) + q * index];
+          work[index] = rounded_multiply_add(
+            work[index], previous, previous);
+        }
+        work[q + index] = __dadd_rn(
+          matrix[index + q * index], -work[index]);
+      }
+      __syncthreads();
+      if (threadIdx.x == 0) {
+        int pivot_index = pivot[q + 1];
+        double diagonal = work[2 * q + 1];
+        if (column > 0) {
+          pivot_index = column;
+          diagonal = work[q + column];
+          for (int index = column + 1; index < q; ++index) {
+            const double candidate = work[q + index];
+            if (candidate > diagonal) {
+              pivot_index = index;
+              diagonal = candidate;
+            }
+          }
+          if (diagonal <= work[2 * q] || isnan(diagonal)) {
+            matrix[column + q * column] = diagonal;
+            pivot[q] = column;
           }
         }
-        if (diagonal <= work[2 * q] || isnan(diagonal)) {
+        if (pivot[q] < 0) {
+          if (column != pivot_index) {
+            matrix[pivot_index + q * pivot_index] =
+              matrix[column + q * column];
+            for (int row = 0; row < column; ++row) {
+              swap_double(matrix + row + q * column,
+                          matrix + row + q * pivot_index);
+            }
+            for (int trailing = pivot_index + 1; trailing < q; ++trailing) {
+              swap_double(matrix + column + q * trailing,
+                          matrix + pivot_index + q * trailing);
+            }
+            for (int index = column + 1; index < pivot_index; ++index) {
+              swap_double(matrix + column + q * index,
+                          matrix + index + q * pivot_index);
+            }
+            swap_double(work + column, work + pivot_index);
+            const int saved_pivot = pivot[pivot_index];
+            pivot[pivot_index] = pivot[column];
+            pivot[column] = saved_pivot;
+          }
+          diagonal = sqrt(diagonal);
           matrix[column + q * column] = diagonal;
-          pivot[q] = column;
+          work[2 * q + 1] = diagonal;
+          pivot[q + 1] = pivot_index;
         }
       }
-      if (pivot[q] < 0) {
-        if (column != pivot_index) {
-          matrix[pivot_index + q * pivot_index] =
-            matrix[column + q * column];
-          for (int row = 0; row < column; ++row) {
-            swap_double(matrix + row + q * column,
-                        matrix + row + q * pivot_index);
+      __syncthreads();
+      if (pivot[q] >= 0) return pivot[q];
+      const double diagonal = work[2 * q + 1];
+      if (column + 1 < q) {
+        const double inverse_diagonal = __ddiv_rn(1.0, diagonal);
+        for (int trailing = column + 1 + threadIdx.x; trailing < q;
+             trailing += blockDim.x) {
+          double dot = 0.0;
+          for (int row = block_start; row < column; ++row) {
+            dot = rounded_multiply_add(
+              dot, matrix[row + q * trailing],
+              matrix[row + q * column]);
           }
-          for (int trailing = pivot_index + 1; trailing < q; ++trailing) {
-            swap_double(matrix + column + q * trailing,
-                        matrix + pivot_index + q * trailing);
-          }
-          for (int index = column + 1; index < pivot_index; ++index) {
-            swap_double(matrix + column + q * index,
-                        matrix + index + q * pivot_index);
-          }
-          swap_double(work + column, work + pivot_index);
-          const int saved_pivot = pivot[pivot_index];
-          pivot[pivot_index] = pivot[column];
-          pivot[column] = saved_pivot;
+          const double value = __dadd_rn(
+            matrix[column + q * trailing], -dot);
+          matrix[column + q * trailing] =
+            __dmul_rn(value, inverse_diagonal);
         }
-        diagonal = sqrt(diagonal);
-        matrix[column + q * column] = diagonal;
-        work[2 * q + 1] = diagonal;
-        pivot[q + 1] = pivot_index;
       }
+      __syncthreads();
     }
-    __syncthreads();
-    if (pivot[q] >= 0) return pivot[q];
-    const double diagonal = work[2 * q + 1];
-    if (column + 1 < q) {
-      for (int trailing = column + 1 + threadIdx.x; trailing < q;
-           trailing += blockDim.x) {
-        double dot = 0.0;
-        for (int row = 0; row < column; ++row) {
-          dot = rounded_multiply_add(
-            dot, matrix[row + q * trailing],
-            matrix[row + q * column]);
+
+    if (block_end < q) {
+      for (int trailing_column = block_end + threadIdx.x;
+           trailing_column < q; trailing_column += blockDim.x) {
+        for (int trailing_row = block_end;
+             trailing_row <= trailing_column; ++trailing_row) {
+          double dot = 0.0;
+          for (int row = block_start; row < block_end; ++row) {
+            dot = rounded_multiply_add(
+              dot, matrix[row + q * trailing_row],
+              matrix[row + q * trailing_column]);
+          }
+          matrix[trailing_row + q * trailing_column] = __dadd_rn(
+            matrix[trailing_row + q * trailing_column], -dot);
         }
-        matrix[column + q * trailing] = __ddiv_rn(
-          __dadd_rn(matrix[column + q * trailing], -dot), diagonal);
       }
     }
     __syncthreads();
@@ -434,12 +423,13 @@ struct DeviceTargetEvaluation {
 
 enum DeviceDecompositionRoute : int {
   kDecompositionUnknown = 0,
-  kDecompositionGuardedQr = 1,
-  kDecompositionStableSvd = 2
+  kDecompositionGuardedQr = kMultiPenaltyGcvDecompositionGuardedQr,
+  kDecompositionStableSvd = kMultiPenaltyGcvDecompositionStableSvd
 };
 
 struct DeviceEvaluationWorkspace {
   lapack312_multi::Workspace decomposition;
+  lapack312_multi::symmetric_eigen::Workspace hessian_eigen;
   double metric[
     kMultiPenaltyGcvMaximumPenaltyCount *
     kMultiPenaltyGcvMaximumCoefficientDim *
@@ -466,6 +456,53 @@ struct DeviceEvaluationWorkspace {
     kMultiPenaltyGcvMaximumPenaltyCount *
     kMultiPenaltyGcvMaximumPenaltyCount];
 };
+
+__global__ void magic_qt_y_kernel(
+    const double* qr_packed,
+    const double* tau,
+    const double* Y,
+    double* work,
+    double* y0,
+    DeviceEvaluationWorkspace* evaluation_workspaces,
+    int n,
+    int q,
+    int target_count) {
+  const int target = blockIdx.x;
+  if (target >= target_count) return;
+  double* target_work = work + static_cast<std::size_t>(n) * target;
+  const double* target_y = Y + static_cast<std::size_t>(n) * target;
+  for (int row = threadIdx.x; row < n; row += blockDim.x) {
+    target_work[row] = target_y[row];
+  }
+  __syncthreads();
+  if (q > lapack312_multi::kReferenceReflectorBlockSize) {
+    if (threadIdx.x < 32) {
+      lapack312_multi::apply_reference_blocked_q_left_transpose(
+        n, 1, q, const_cast<double*>(qr_packed), n,
+        const_cast<double*>(tau), target_work, n,
+        evaluation_workspaces[target].decomposition.work);
+    }
+  } else if (threadIdx.x == 0) {
+    for (int reflector = 0; reflector < q; ++reflector) {
+      double dot = target_work[reflector];
+      const double* vector =
+        qr_packed + static_cast<std::size_t>(n) * reflector;
+      for (int row = reflector + 1; row < n; ++row) {
+        dot = rounded_multiply_add(dot, vector[row], target_work[row]);
+      }
+      const double scale = __dmul_rn(-tau[reflector], dot);
+      target_work[reflector] = __dadd_rn(target_work[reflector], scale);
+      for (int row = reflector + 1; row < n; ++row) {
+        target_work[row] = rounded_multiply_add(
+          target_work[row], vector[row], scale);
+      }
+    }
+  }
+  __syncthreads();
+  for (int row = threadIdx.x; row < q; row += blockDim.x) {
+    y0[row + q * target] = target_work[row];
+  }
+}
 
 enum DeviceBoundaryStatus : int {
   kBoundaryFiniteInterior = 0,
@@ -548,6 +585,8 @@ struct DeviceOptimizerState {
   int stability_replay_ambiguous_step_reason;
   int stability_replay_rejected_boundary_reason;
   int stability_replay_direct_newton_reason;
+  int stability_replay_step_failed_reason;
+  int stability_replay_guarded_qr_trajectory_reason;
   int stability_replay_dense_score_guard_rejected;
   int stability_replay_extrapolation_applied;
   int terminal_boundary_confirmation_count;
@@ -787,6 +826,17 @@ __device__ bool requires_rejected_boundary_stability_replay(
       kRejectedBoundaryReplayDeltaRatio;
 }
 
+__device__ bool requires_step_failed_stability_replay(
+    const DeviceOptimizerState& state) {
+  return state.optimizer_status == 0 && state.step_failed != 0;
+}
+
+__device__ bool requires_guarded_qr_trajectory_stability_replay(
+    const DeviceOptimizerState& state) {
+  return state.optimizer_status == 0 &&
+    state.phase_timing.guarded_qr_evaluation_count > 0;
+}
+
 __device__ bool requires_direct_newton_stability_replay(
     const DeviceOptimizerState& state) {
   const double smallest = fabs(state.hessian_eigenvalues[0]);
@@ -817,30 +867,9 @@ __device__ bool is_stability_replay_candidate(
     requires_high_condition_stability_replay(state) ||
     requires_ambiguous_step_stability_replay(state) ||
     requires_rejected_boundary_stability_replay(state) ||
-    requires_direct_newton_stability_replay(state);
-}
-
-__device__ bool requires_full_stability_replay(
-    const DeviceOptimizerState& state) {
-  if (state.optimizer_status != 0) return false;
-  if (requires_ambiguous_step_stability_replay(state) ||
-      requires_rejected_boundary_stability_replay(state) ||
-      requires_direct_newton_stability_replay(state) ||
-      requires_high_condition_stability_replay(state)) {
-    return true;
-  }
-  if (requires_long_trajectory_stability_replay(state)) {
-    return state.step_halving_count >=
-      kStabilityReplayLongRiskStepHalvingMultiplier *
-        state.optimizer_iterations;
-  }
-  return requires_dense_boundary_stability_replay(state) &&
-    (state.step_halving_count *
-         kStabilityReplayDenseRiskMaximumStepHalvingDenominator <=
-       state.optimizer_iterations *
-         kStabilityReplayDenseRiskMaximumStepHalvingNumerator ||
-     state.current.condition >=
-       kStabilityReplayDenseRiskConditionOverride);
+    requires_direct_newton_stability_replay(state) ||
+    requires_step_failed_stability_replay(state) ||
+    requires_guarded_qr_trajectory_stability_replay(state);
 }
 
 __device__ bool symmetric_jacobi_eigen(
@@ -1019,6 +1048,7 @@ __device__ void evaluate_multi_penalty_target_device(
     int q,
     int penalty_count,
     bool complete_evaluation,
+    bool compute_derivatives,
     DevicePhaseTiming* phase_timing,
     double rank_tolerance,
     bool force_stable_svd = false,
@@ -1082,7 +1112,7 @@ __device__ void evaluate_multi_penalty_target_device(
     aggregate[element] = value;
   }
   __syncthreads();
-  const int factor_rank = dpstf2_upper_block(
+  const int factor_rank = dpstrf_upper_block(
     aggregate, pivot, factor_work, q);
   int* inverse_pivot = pivot + q;
   for (int factor_column = threadIdx.x; factor_column < q;
@@ -1155,7 +1185,7 @@ __device__ void evaluate_multi_penalty_target_device(
       rows, q, decomposition, execute_complete_evaluation,
       phase_timing == nullptr ? nullptr :
         phase_timing->decomposition_stage_cycles,
-      true, force_stable_svd);
+      true, force_stable_svd, true);
   if (threadIdx.x == 0) {
     result->solver_info = solver_info;
     result->decomposition_route = decomposition->qr_basis_used != 0 ?
@@ -1268,12 +1298,13 @@ __device__ void evaluate_multi_penalty_target_device(
   if (threadIdx.x == 0 && phase_timing != nullptr) {
     phase_started = clock64();
   }
-  const double rss = result->rss;
-  const double delta = static_cast<double>(n) - result->edf;
+  if (compute_derivatives) {
+    const double rss = result->rss;
+    const double delta = static_cast<double>(n) - result->edf;
 
-  double* u1_u1 = decomposition->a;
-  for (int element = threadIdx.x; element < rank * rank;
-       element += blockDim.x) {
+    double* u1_u1 = decomposition->a;
+    for (int element = threadIdx.x; element < rank * rank;
+         element += blockDim.x) {
     const int row = element % rank;
     const int column = element / rank;
     if (row >= column) {
@@ -1287,11 +1318,11 @@ __device__ void evaluate_multi_penalty_target_device(
       u1_u1[row + rank * column] = value;
       u1_u1[column + rank * row] = value;
     }
-  }
-  __syncthreads();
-  double* transformed = decomposition->r;
-  double* intermediate = decomposition->bidiagonal_u;
-  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    }
+    __syncthreads();
+    double* transformed = decomposition->r;
+    double* intermediate = decomposition->bidiagonal_u;
+    for (int penalty = 0; penalty < penalty_count; ++penalty) {
     const int penalty_rank = penalty_ranks[penalty];
     const int root_offset = root_offsets[penalty];
     for (int output = threadIdx.x; output < rank * penalty_rank;
@@ -1380,13 +1411,13 @@ __device__ void evaluate_multi_penalty_target_device(
       workspace->y_influence[penalty * q + output] = y_influence_value;
     }
     __syncthreads();
-  }
+    }
 
-  double* dnorm = workspace->derivative_norm;
-  double* ddelta = workspace->derivative_delta;
-  double* d2norm = workspace->second_derivative_norm;
-  double* d2delta = workspace->second_derivative_delta;
-  for (int i = threadIdx.x; i < penalty_count; i += blockDim.x) {
+    double* dnorm = workspace->derivative_norm;
+    double* ddelta = workspace->derivative_delta;
+    double* d2norm = workspace->second_derivative_norm;
+    double* d2delta = workspace->second_derivative_delta;
+    for (int i = threadIdx.x; i < penalty_count; i += blockDim.x) {
     const double lambda_i = penalty_multipliers[i];
     const double* influence_i = workspace->influence +
       static_cast<std::size_t>(i) * square;
@@ -1405,10 +1436,10 @@ __device__ void evaluate_multi_penalty_target_device(
     }
     dnorm[i] = __dmul_rn(
       __dmul_rn(2.0, lambda_i), norm_derivative);
-  }
-  __syncthreads();
-  for (int pair = threadIdx.x; pair < penalty_count * penalty_count;
-       pair += blockDim.x) {
+    }
+    __syncthreads();
+    for (int pair = threadIdx.x; pair < penalty_count * penalty_count;
+         pair += blockDim.x) {
     const int i = pair % penalty_count;
     const int j = pair / penalty_count;
     if (i >= j) {
@@ -1450,23 +1481,23 @@ __device__ void evaluate_multi_penalty_target_device(
       d2norm[i + penalty_count * j] = norm_second_value;
       d2norm[j + penalty_count * i] = norm_second_value;
     }
-  }
-  __syncthreads();
-  const double score_scale = __ddiv_rn(
-    static_cast<double>(n), __dmul_rn(delta, delta));
-  const double delta_scale = __ddiv_rn(
-    __dmul_rn(__dmul_rn(2.0, score_scale), rss), delta);
-  const double cross_scale = __ddiv_rn(
-    __dmul_rn(-2.0, score_scale), delta);
-  const double curvature_scale = __ddiv_rn(
-    __dmul_rn(3.0, delta_scale), delta);
-  for (int i = threadIdx.x; i < penalty_count; i += blockDim.x) {
+    }
+    __syncthreads();
+    const double score_scale = __ddiv_rn(
+      static_cast<double>(n), __dmul_rn(delta, delta));
+    const double delta_scale = __ddiv_rn(
+      __dmul_rn(__dmul_rn(2.0, score_scale), rss), delta);
+    const double cross_scale = __ddiv_rn(
+      __dmul_rn(-2.0, score_scale), delta);
+    const double curvature_scale = __ddiv_rn(
+      __dmul_rn(3.0, delta_scale), delta);
+    for (int i = threadIdx.x; i < penalty_count; i += blockDim.x) {
     result->gradient[i] = __dadd_rn(
       __dmul_rn(score_scale, dnorm[i]),
       -__dmul_rn(delta_scale, ddelta[i]));
-  }
-  for (int pair = threadIdx.x; pair < penalty_count * penalty_count;
-       pair += blockDim.x) {
+    }
+    for (int pair = threadIdx.x; pair < penalty_count * penalty_count;
+         pair += blockDim.x) {
     const int i = pair % penalty_count;
     const int j = pair / penalty_count;
     if (i >= j) {
@@ -1479,18 +1510,19 @@ __device__ void evaluate_multi_penalty_target_device(
         __dmul_rn(score_scale, d2norm[i + penalty_count * j]));
       value = __dadd_rn(
         value,
-        __dmul_rn(curvature_scale,
-                  __dmul_rn(ddelta[i], ddelta[j])));
+        __dmul_rn(
+          __dmul_rn(curvature_scale, ddelta[i]), ddelta[j]));
       value = __dadd_rn(
         value,
         -__dmul_rn(delta_scale, d2delta[i + penalty_count * j]));
       result->hessian[i + penalty_count * j] = value;
       result->hessian[j + penalty_count * i] = value;
     }
-  }
-  __syncthreads();
-  if (threadIdx.x == 0 && phase_timing != nullptr) {
-    phase_timing->derivative_hessian_cycles += clock64() - phase_started;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0 && phase_timing != nullptr) {
+      phase_timing->derivative_hessian_cycles += clock64() - phase_started;
+    }
   }
 
   for (int component = threadIdx.x; component < rank;
@@ -1527,7 +1559,9 @@ __global__ void evaluate_multi_penalty_targets_kernel(
     int q,
     int penalty_count,
     int target_count,
-    double rank_tolerance) {
+    double rank_tolerance,
+    bool force_stable_svd,
+    bool compute_derivatives) {
   const int target = blockIdx.x;
   if (target >= target_count) return;
   evaluate_multi_penalty_target_device(
@@ -1537,8 +1571,50 @@ __global__ void evaluate_multi_penalty_targets_kernel(
     squared_norm[target],
     log_sp + static_cast<std::size_t>(penalty_count) * target,
     workspaces + target, results + target, n, q, penalty_count, true,
-    nullptr, rank_tolerance);
+    compute_derivatives, nullptr, rank_tolerance, force_stable_svd);
 }
+
+#if !defined(FASTKPC_MULTI_PENALTY_GCV_EXTENSION) || \
+    defined(FASTKPC_MULTI_PENALTY_GCV_EXTENSION_TEST_TRANSCRIPTS)
+__global__ void run_multi_penalty_svd_transcript_kernel(
+    DeviceEvaluationWorkspace* workspace,
+    int* status,
+    int rows,
+    int columns,
+    bool force_stable_svd) {
+  const int info = lapack312_multi::small_dgesdd_left(
+    rows, columns, &workspace->decomposition, true, nullptr, true,
+    force_stable_svd, true);
+  if (threadIdx.x == 0) {
+    status[0] = info;
+    status[1] = workspace->decomposition.qr_basis_used != 0 ?
+      kDecompositionGuardedQr : kDecompositionStableSvd;
+  }
+}
+
+__global__ void run_multi_penalty_objective_transcript_kernel(
+    const double* magic_r,
+    const int* magic_pivot,
+    const double* penalty_roots,
+    const int* root_offsets,
+    const int* penalty_ranks,
+    const double* penalty_matrices,
+    const double* y0,
+    double squared_norm,
+    const double* log_sp,
+    DeviceEvaluationWorkspace* workspace,
+    DeviceTargetEvaluation* result,
+    int n,
+    int q,
+    int penalty_count,
+    double rank_tolerance,
+    bool force_stable_svd) {
+  evaluate_multi_penalty_target_device(
+    magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
+    penalty_matrices, y0, squared_norm, log_sp, workspace, result, n, q,
+    penalty_count, true, true, nullptr, rank_tolerance, force_stable_svd);
+}
+#endif
 
 struct DeviceGroupedPrototypeParity {
   unsigned long long solver_route_mismatch_count;
@@ -1591,6 +1667,7 @@ __global__ void prepare_grouped_prototype_targets_kernel(
     DeviceEvaluationWorkspace* workspaces,
     DeviceTargetEvaluation* results,
     int* augmented_rows,
+    double* aggregate_transcript,
     int q,
     int penalty_count,
     int target_count) {
@@ -1625,9 +1702,13 @@ __global__ void prepare_grouped_prototype_targets_kernel(
           penalty_matrices[element + square * penalty]));
     }
     aggregate[element] = value;
+    if (aggregate_transcript != nullptr) {
+      aggregate_transcript[element +
+        static_cast<std::size_t>(square) * target] = value;
+    }
   }
   __syncthreads();
-  const int factor_rank = dpstf2_upper_block(
+  const int factor_rank = dpstrf_upper_block(
     aggregate, pivot, factor_work, q);
   int* inverse_pivot = pivot + q;
   for (int factor_column = threadIdx.x; factor_column < q;
@@ -2135,8 +2216,8 @@ __device__ void complete_grouped_prototype_target_device(
         __dmul_rn(score_scale, d2norm[i + penalty_count * j]));
       value = __dadd_rn(
         value,
-        __dmul_rn(curvature_scale,
-                  __dmul_rn(ddelta[i], ddelta[j])));
+        __dmul_rn(
+          __dmul_rn(curvature_scale, ddelta[i]), ddelta[j]));
       value = __dadd_rn(
         value,
         -__dmul_rn(delta_scale, d2delta[i + penalty_count * j]));
@@ -2290,6 +2371,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     int max_boundary_probes,
     double rank_tolerance,
     bool stability_replay,
+    bool force_stability_replay_all,
     bool force_stable_svd,
     DeviceDecompositionTraceRecord* decomposition_trace,
     unsigned int* decomposition_trace_counters,
@@ -2298,7 +2380,8 @@ __global__ void optimize_multi_penalty_targets_kernel(
   if (target >= target_count) return;
   if (stability_replay &&
       (primary_states == nullptr ||
-       !is_stability_replay_candidate(primary_states[target]))) {
+       (!force_stability_replay_all &&
+        !is_stability_replay_candidate(primary_states[target])))) {
     return;
   }
   DeviceEvaluationWorkspace* workspace = workspaces + target;
@@ -2321,11 +2404,13 @@ __global__ void optimize_multi_penalty_targets_kernel(
   const bool direct_newton_replay = stability_replay &&
     primary_states != nullptr &&
     requires_direct_newton_stability_replay(primary_states[target]);
-  const bool full_stability_replay = stability_replay &&
+  const bool step_failed_replay = stability_replay &&
     primary_states != nullptr &&
-    requires_full_stability_replay(primary_states[target]);
-  const bool target_force_stable_svd =
-    force_stable_svd && !direct_newton_replay;
+    requires_step_failed_stability_replay(primary_states[target]);
+  const bool guarded_qr_trajectory_replay = stability_replay &&
+    primary_states != nullptr &&
+    requires_guarded_qr_trajectory_stability_replay(primary_states[target]);
+  const bool target_force_stable_svd = force_stable_svd;
   const unsigned int stability_trace_flag = stability_replay ?
     kDecompositionTraceStabilityReplay : 0U;
   const double* target_y0 = y0 + static_cast<std::size_t>(q) * target;
@@ -2358,8 +2443,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
     state->ambiguous_step_descent_count = 0;
     state->ambiguous_step_non_descent_count = 0;
     state->stability_replay_attempted = stability_replay ? 1 : 0;
-    state->stability_replay_screened =
-      stability_replay && !full_stability_replay ? 1 : 0;
+    state->stability_replay_screened = 0;
     state->stability_replay_selected = 0;
     state->stability_replay_error = 0;
     state->stability_replay_long_trajectory_reason =
@@ -2374,6 +2458,10 @@ __global__ void optimize_multi_penalty_targets_kernel(
       rejected_boundary_replay ? 1 : 0;
     state->stability_replay_direct_newton_reason =
       direct_newton_replay ? 1 : 0;
+    state->stability_replay_step_failed_reason =
+      step_failed_replay ? 1 : 0;
+    state->stability_replay_guarded_qr_trajectory_reason =
+      guarded_qr_trajectory_replay ? 1 : 0;
     state->stability_replay_dense_score_guard_rejected = 0;
     state->stability_replay_extrapolation_applied = 0;
     state->terminal_boundary_confirmation_count = 0;
@@ -2447,11 +2535,10 @@ __global__ void optimize_multi_penalty_targets_kernel(
     }
   }
   __syncthreads();
-  if (stability_replay && !full_stability_replay) return;
   evaluate_multi_penalty_target_device(
     magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
     penalty_matrices, target_y0, target_squared_norm, state->log_sp,
-    workspace, &state->current, n, q, penalty_count, true,
+    workspace, &state->current, n, q, penalty_count, true, true,
     &state->phase_timing, rank_tolerance, target_force_stable_svd,
     decomposition_trace, decomposition_trace_counters,
     decomposition_trace_capacity, target, 0,
@@ -2513,7 +2600,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
           magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
           penalty_matrices, target_y0, target_squared_norm,
           state->trial_log_sp, workspace, &state->trial, n, q,
-          penalty_count, true, &state->phase_timing, rank_tolerance,
+          penalty_count, true, true, &state->phase_timing, rank_tolerance,
           target_force_stable_svd, decomposition_trace,
           decomposition_trace_counters, decomposition_trace_capacity,
           target, iteration,
@@ -2757,12 +2844,22 @@ __global__ void optimize_multi_penalty_targets_kernel(
       for (int penalty = 0; penalty < penalty_count; ++penalty) {
         state->gradient[penalty] = state->current.gradient[penalty];
       }
-      const bool eigen_converged = symmetric_jacobi_eigen(
-        state->current.hessian, penalty_count, state->hessian_work,
-        state->hessian_eigenvalues, state->hessian_eigenvectors);
+      const bool eigen_converged =
+        lapack312_multi::symmetric_eigen::solve_lower(
+          state->current.hessian, penalty_count,
+          &workspace->hessian_eigen);
       if (!eigen_converged) {
         state->optimizer_status = 3;
       } else {
+        for (int penalty = 0; penalty < penalty_count; ++penalty) {
+          state->hessian_eigenvalues[penalty] =
+            workspace->hessian_eigen.values[penalty];
+        }
+        for (int element = 0;
+             element < penalty_count * penalty_count; ++element) {
+          state->hessian_eigenvectors[element] =
+            workspace->hessian_eigen.vectors[element];
+        }
         state->use_steepest_descent = 0;
         for (int penalty = 0; penalty < penalty_count; ++penalty) {
           if (state->hessian_eigenvalues[penalty] < 0.0) {
@@ -2793,16 +2890,8 @@ __global__ void optimize_multi_penalty_targets_kernel(
             }
             spectral_step[row] = -value;
           }
-          bool direct_solved = false;
-          if (direct_newton_replay) {
-            direct_solved = solve_newton_system_direct(
-              state->current.hessian, state->gradient, penalty_count,
-              state->hessian_work, state->newton_step);
-          }
-          if (!direct_newton_replay || !direct_solved) {
-            for (int row = 0; row < penalty_count; ++row) {
-              state->newton_step[row] = spectral_step[row];
-            }
+          for (int row = 0; row < penalty_count; ++row) {
+            state->newton_step[row] = spectral_step[row];
           }
           double maximum_component = fabs(state->newton_step[0]);
           for (int penalty = 1; penalty < penalty_count; ++penalty) {
@@ -2873,7 +2962,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
         magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
         penalty_matrices, target_y0, target_squared_norm,
         state->trial_log_sp, workspace, &state->trial, n, q,
-        penalty_count, false, &state->phase_timing, rank_tolerance,
+        penalty_count, false, false, &state->phase_timing, rank_tolerance,
         target_force_stable_svd, decomposition_trace,
         decomposition_trace_counters, decomposition_trace_capacity,
         target, -1,
@@ -2899,11 +2988,9 @@ __global__ void optimize_multi_penalty_targets_kernel(
             __dadd_rn(1.0, fabs(state->minimum_score)));
           state->terminal_boundary_confirmation_pending =
             !target_force_stable_svd &&
-            probe == max_boundary_probes &&
-            state->trial.condition >= kTerminalBoundaryTieCondition &&
-            (state->trial.condition >= kTerminalBoundaryOverrideCondition ||
-             score_delta >= 0.0) &&
-            fabs(score_delta) <= tie_tolerance ? 1 : 0;
+            (score_delta >= 0.0 ||
+             (state->trial.condition >= kTerminalBoundaryTieCondition &&
+              fabs(score_delta) <= tie_tolerance)) ? 1 : 0;
         }
       }
       __syncthreads();
@@ -2912,7 +2999,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
         evaluate_multi_penalty_target_device(
           magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
           penalty_matrices, target_y0, target_squared_norm, state->log_sp,
-          workspace, &state->trial, n, q, penalty_count, true,
+          workspace, &state->trial, n, q, penalty_count, true, true,
           &state->terminal_boundary_confirmation_phase_timing,
           rank_tolerance, true, decomposition_trace,
           decomposition_trace_counters, decomposition_trace_capacity,
@@ -2939,7 +3026,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
           magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
           penalty_matrices, target_y0, target_squared_norm,
           state->trial_log_sp, workspace, &state->trial, n, q,
-          penalty_count, true,
+          penalty_count, true, true,
           &state->terminal_boundary_confirmation_phase_timing,
           rank_tolerance, true, decomposition_trace,
           decomposition_trace_counters, decomposition_trace_capacity,
@@ -3040,6 +3127,12 @@ __global__ void optimize_multi_penalty_targets_kernel(
             ++state->tries;
             ++state->boundary_accepted_count;
           } else {
+            // magic.c mutates sp0 before evaluating a boundary probe, then
+            // reverses the addition in place when the probe is rejected.
+            // The round trip can intentionally move the value by an ulp.
+            state->log_sp[coordinate] = __dadd_rn(
+              state->trial_log_sp[coordinate],
+              -state->working_step[coordinate]);
             state->trying = 0;
           }
         }
@@ -3072,60 +3165,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
           -primary_states[target].log_sp[penalty])));
     }
     state->stability_replay_log_sp_spread = maximum_spread;
-    if (maximum_spread > kStabilityReplayLogSpSpread) {
-      state->stability_replay_selected = 1;
-      double extrapolation_fraction = 0.0;
-      double maximum_extrapolation =
-        kStabilityReplayMaximumExtrapolation;
-      if (direct_newton_replay &&
-          primary_states[target].step_halving_count > 0) {
-        extrapolation_fraction =
-          kDirectNewtonHalvingExtrapolationFraction;
-        maximum_extrapolation = kDirectNewtonMaximumExtrapolation;
-      } else if (
-          requires_high_condition_stability_replay(primary_states[target])) {
-        extrapolation_fraction = kStabilityReplayExtrapolationFraction;
-      } else if (
-          requires_dense_boundary_stability_replay(primary_states[target]) &&
-          maximum_spread <= kStabilityReplayDenseBoundaryMaximumSpread) {
-        extrapolation_fraction =
-          kStabilityReplayDenseBoundaryExtrapolationFraction;
-      }
-      if (extrapolation_fraction > 0.0) {
-        for (int penalty = 0; penalty < penalty_count; ++penalty) {
-          const double path_delta = __dadd_rn(
-            state->log_sp[penalty],
-            -primary_states[target].log_sp[penalty]);
-          const double extrapolation = copysign(
-            fmin(
-              maximum_extrapolation,
-              fabs(__dmul_rn(
-                extrapolation_fraction, path_delta))),
-            path_delta);
-          state->log_sp[penalty] = __dadd_rn(
-            state->log_sp[penalty], extrapolation);
-          state->stability_replay_max_extrapolation = fmax(
-            state->stability_replay_max_extrapolation,
-            fabs(extrapolation));
-        }
-        state->stability_replay_extrapolation_applied = 1;
-      }
-      if (primary_states[target].optimizer_iterations >=
-          kStabilityReplayLongTrajectoryMinimumIterations) {
-        const double inward_shift = fmin(
-          kStabilityReplayMaximumInwardShift,
-          __dmul_rn(2.0, maximum_spread));
-        for (int penalty = 0; penalty < penalty_count; ++penalty) {
-          if (state->boundary_status[penalty] == kBoundaryPositive) {
-            state->log_sp[penalty] = __dadd_rn(
-              state->log_sp[penalty], -inward_shift);
-          } else if (state->boundary_status[penalty] == kBoundaryNegative) {
-            state->log_sp[penalty] = __dadd_rn(
-              state->log_sp[penalty], inward_shift);
-          }
-        }
-      }
-    }
+    state->stability_replay_selected = 1;
   }
   __syncthreads();
 
@@ -3140,7 +3180,7 @@ __global__ void optimize_multi_penalty_targets_kernel(
   evaluate_multi_penalty_target_device(
     magic_r, magic_pivot, penalty_roots, root_offsets, penalty_ranks,
     penalty_matrices, target_y0, target_squared_norm, state->log_sp,
-    workspace, &state->trial, n, q, penalty_count, true,
+    workspace, &state->trial, n, q, penalty_count, true, true,
     &state->phase_timing, rank_tolerance, target_force_stable_svd,
     decomposition_trace, decomposition_trace_counters,
     decomposition_trace_capacity, target, -1,
@@ -3152,13 +3192,6 @@ __global__ void optimize_multi_penalty_targets_kernel(
       state->optimizer_status = 6;
     } else {
       state->current = state->trial;
-      if (stability_replay && state->stability_replay_selected != 0 &&
-          requires_dense_boundary_stability_replay(
-            primary_states[target]) &&
-          state->current.score >= primary_states[target].current.score) {
-        state->stability_replay_selected = 0;
-        state->stability_replay_dense_score_guard_rejected = 1;
-      }
     }
   }
 }
@@ -3166,10 +3199,12 @@ __global__ void optimize_multi_penalty_targets_kernel(
 __global__ void merge_stability_replay_states_kernel(
     DeviceOptimizerState* primary_states,
     const DeviceOptimizerState* replay_states,
-    int target_count) {
+    int target_count,
+    bool force_stability_replay_all) {
   const int target = blockIdx.x * blockDim.x + threadIdx.x;
   if (target >= target_count ||
-      !is_stability_replay_candidate(primary_states[target])) {
+      (!force_stability_replay_all &&
+       !is_stability_replay_candidate(primary_states[target]))) {
     return;
   }
   DeviceOptimizerState& primary = primary_states[target];
@@ -3196,8 +3231,6 @@ __global__ void merge_stability_replay_states_kernel(
     primary.terminal_boundary_confirmation_max_delta_ratio;
   const DevicePhaseTiming primary_confirmation_timing =
     primary.terminal_boundary_confirmation_phase_timing;
-  const int replay_screened =
-    requires_full_stability_replay(primary) ? 0 : 1;
   const bool selected = replay.stability_replay_selected != 0 &&
     replay.optimizer_status == 0;
   const DevicePhaseTiming discarded = selected ?
@@ -3228,9 +3261,11 @@ __global__ void merge_stability_replay_states_kernel(
       primary_confirmation_max_delta_ratio;
     primary.terminal_boundary_confirmation_phase_timing =
       primary_confirmation_timing;
+  } else if (replay.optimizer_status != 0) {
+    primary.optimizer_status = replay.optimizer_status;
   }
   primary.stability_replay_attempted = 1;
-  primary.stability_replay_screened = replay_screened;
+  primary.stability_replay_screened = 0;
   primary.stability_replay_selected = selected ? 1 : 0;
   primary.stability_replay_error = replay_error;
   primary.stability_replay_long_trajectory_reason =
@@ -3245,6 +3280,10 @@ __global__ void merge_stability_replay_states_kernel(
     replay.stability_replay_rejected_boundary_reason;
   primary.stability_replay_direct_newton_reason =
     replay.stability_replay_direct_newton_reason;
+  primary.stability_replay_step_failed_reason =
+    replay.stability_replay_step_failed_reason;
+  primary.stability_replay_guarded_qr_trajectory_reason =
+    replay.stability_replay_guarded_qr_trajectory_reason;
   primary.stability_replay_dense_score_guard_rejected =
     replay.stability_replay_dense_score_guard_rejected;
   primary.stability_replay_log_sp_spread = spread;
@@ -3273,6 +3312,27 @@ __global__ void form_multi_penalty_residuals_kernel(
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index >= count) return;
   residuals[index] = __dadd_rn(Y[index], -fitted[index]);
+}
+
+__global__ void gather_multi_penalty_fixed_evaluation_kernel(
+    const DeviceTargetEvaluation* evaluations,
+    double* coefficients,
+    int* diagnostics,
+    int q,
+    int target_count) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int count = q * target_count;
+  if (index >= count) return;
+  const int target = index / q;
+  const int row = index - target * q;
+  const DeviceTargetEvaluation& evaluation = evaluations[target];
+  coefficients[index] = evaluation.solver_info == 0 ?
+    evaluation.coefficients[row] : CUDART_NAN;
+  if (row == 0) {
+    diagnostics[3 * target] = evaluation.solver_info;
+    diagnostics[3 * target + 1] = evaluation.decomposition_route;
+    diagnostics[3 * target + 2] = evaluation.numerical_rank;
+  }
 }
 
 }  // namespace
@@ -3305,6 +3365,7 @@ class MultiPenaltyGcvCudaPrepared {
   DeviceBuffer<int> d_ranks;
   DeviceBuffer<double> d_matrices;
   DeviceBuffer<double> d_initial_log_sp;
+  DeviceBuffer<double> d_fixed_log_sp;
   DeviceBuffer<double> d_Y;
   DeviceBuffer<double> d_qt_work;
   DeviceBuffer<double> d_y0;
@@ -3312,12 +3373,15 @@ class MultiPenaltyGcvCudaPrepared {
   DeviceBuffer<DeviceEvaluationWorkspace> d_workspaces;
   DeviceBuffer<DeviceOptimizerState> d_states;
   DeviceBuffer<DeviceOptimizerState> d_replay_states;
+  DeviceBuffer<DeviceTargetEvaluation> d_fixed_evaluations;
+  DeviceBuffer<int> d_fixed_diagnostics;
   DeviceBuffer<DeviceDecompositionTraceRecord> d_decomposition_trace;
   DeviceBuffer<unsigned int> d_decomposition_trace_counters;
   DeviceBuffer<double> d_coefficients;
   DeviceBuffer<double> d_fitted;
   DeviceBuffer<double> d_residuals;
   std::vector<DeviceOptimizerState> host_states;
+  std::vector<int> host_fixed_diagnostics;
   int decomposition_trace_capacity_per_target = 0;
   MultiPenaltyGcvCudaPreparedInfo info;
   std::uint64_t generation = 0;
@@ -3344,6 +3408,10 @@ class MultiPenaltyGcvCudaResidualBatch {
   int device_id = -1;
   std::vector<std::string> target_keys;
   std::vector<int> optimizer_status;
+  std::vector<int> solver_info;
+  std::vector<int> decomposition_route;
+  std::vector<int> numerical_rank;
+  bool fixed_sp_evaluation = false;
   std::uint64_t generation = 0;
   bool released = false;
 };
@@ -3362,7 +3430,7 @@ MultiPenaltyGcvCudaOptimization materialize_optimizer_output(
   output.schema_version =
     "full-cuda-ci-multi-penalty-gcv-cuda-optimization-v1";
   output.rank_path =
-    "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd";
+    "cuda-dpstrf-nb64-guarded-qr-lapack-3.12-dgesdd";
   output.optimizer_path =
     "cuda-independent-target-newton-steepest-boundary-v1";
   output.n = n;
@@ -3535,6 +3603,11 @@ MultiPenaltyGcvCudaOptimization materialize_optimizer_output(
         state.stability_replay_rejected_boundary_reason != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_direct_newton_reason_count +=
         state.stability_replay_direct_newton_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_step_failed_reason_count +=
+        state.stability_replay_step_failed_reason != 0 ? 1 : 0;
+      diagnostics
+        .cuda_stability_replay_guarded_qr_trajectory_reason_count +=
+          state.stability_replay_guarded_qr_trajectory_reason != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_dense_score_guard_rejected_count +=
         state.stability_replay_dense_score_guard_rejected != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_extrapolation_target_count +=
@@ -3630,7 +3703,7 @@ MultiPenaltyGcvCudaEvaluation multi_penalty_gcv_evaluate_cuda(
       magic_pivot_zero_based == nullptr || log_sp == nullptr ||
       n <= coefficient_dim || coefficient_dim <= 0 ||
       coefficient_dim > kMultiPenaltyGcvMaximumCoefficientDim ||
-      penalty_count <= 1 ||
+      penalty_count <= 0 ||
       penalty_count > kMultiPenaltyGcvMaximumPenaltyCount ||
       target_count <= 1 || !std::isfinite(rank_tolerance) ||
       rank_tolerance <= 0.0 || rank_tolerance >= 1.0 ||
@@ -3679,7 +3752,7 @@ MultiPenaltyGcvCudaEvaluation multi_penalty_gcv_evaluate_cuda(
   output.schema_version =
     "full-cuda-ci-multi-penalty-gcv-cuda-evaluation-v1";
   output.rank_path =
-    "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd";
+    "cuda-dpstrf-nb64-guarded-qr-lapack-3.12-dgesdd";
   output.n = n;
   output.coefficient_dim = q;
   output.penalty_count = penalty_count;
@@ -3761,9 +3834,9 @@ MultiPenaltyGcvCudaEvaluation multi_penalty_gcv_evaluate_cuda(
     d_Y.get(), d_squared_norm.get(), n, target_count);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty target norm kernel");
-  magic_qt_y_kernel<<<target_blocks, kBlockSize, 0, stream.get()>>>(
+  magic_qt_y_kernel<<<target_count, kBlockSize, 0, stream.get()>>>(
     d_qr_packed.get(), d_tau.get(), d_Y.get(), d_qt_work.get(),
-    d_y0.get(), n, q, target_count);
+    d_y0.get(), d_workspaces.get(), n, q, target_count);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty QR projection kernel");
   evaluate_multi_penalty_targets_kernel<<<
@@ -3771,7 +3844,7 @@ MultiPenaltyGcvCudaEvaluation multi_penalty_gcv_evaluate_cuda(
       d_r.get(), d_pivot.get(), d_roots.get(), d_root_offsets.get(),
       d_ranks.get(), d_matrices.get(), d_y0.get(), d_squared_norm.get(),
       d_log_sp.get(), d_workspaces.get(), d_results.get(), n, q,
-      penalty_count, target_count, rank_tolerance);
+      penalty_count, target_count, rank_tolerance, false, true);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty objective batch kernel");
   std::vector<DeviceTargetEvaluation> host_results(
@@ -3836,6 +3909,470 @@ MultiPenaltyGcvCudaEvaluation multi_penalty_gcv_evaluate_cuda(
     std::chrono::steady_clock::now() - started).count();
   return output;
 }
+
+#if !defined(FASTKPC_MULTI_PENALTY_GCV_EXTENSION) || \
+    defined(FASTKPC_MULTI_PENALTY_GCV_EXTENSION_TEST_TRANSCRIPTS)
+MultiPenaltyGcvCudaResponseTranscript
+multi_penalty_gcv_response_transcript_cuda_for_test(
+    const double* Y,
+    const double* magic_qr_packed,
+    const double* magic_tau,
+    int n,
+    int q,
+    int target_count) {
+  if (Y == nullptr || magic_qr_packed == nullptr || magic_tau == nullptr ||
+      n <= 0 || q <= 0 || q > n ||
+      q > kMultiPenaltyGcvMaximumCoefficientDim ||
+      target_count <= 0) {
+    throw std::runtime_error(
+      "multi-penalty CUDA response transcript dimensions are invalid");
+  }
+
+  MultiPenaltyGcvCudaDiagnostics diagnostics;
+  Stream stream;
+  DeviceBuffer<double> d_Y;
+  DeviceBuffer<double> d_qr_packed;
+  DeviceBuffer<double> d_tau;
+  DeviceBuffer<double> d_qt_work;
+  DeviceBuffer<double> d_y0;
+  DeviceBuffer<double> d_squared_norm;
+  DeviceBuffer<DeviceEvaluationWorkspace> d_workspaces;
+  const std::size_t response_count =
+    static_cast<std::size_t>(n) * target_count;
+  const std::size_t projected_count =
+    static_cast<std::size_t>(q) * target_count;
+  d_Y.allocate(response_count, &diagnostics);
+  d_qr_packed.allocate(static_cast<std::size_t>(n) * q, &diagnostics);
+  d_tau.allocate(static_cast<std::size_t>(q), &diagnostics);
+  d_qt_work.allocate(response_count, &diagnostics);
+  d_y0.allocate(projected_count, &diagnostics);
+  d_squared_norm.allocate(static_cast<std::size_t>(target_count),
+                          &diagnostics);
+  d_workspaces.allocate(static_cast<std::size_t>(target_count),
+                        &diagnostics);
+  upload_async(&d_Y, Y, response_count, stream.get(), &diagnostics);
+  upload_async(&d_qr_packed, magic_qr_packed,
+               static_cast<std::size_t>(n) * q, stream.get(), &diagnostics);
+  upload_async(&d_tau, magic_tau, static_cast<std::size_t>(q), stream.get(),
+               &diagnostics);
+
+  const int target_blocks = (target_count + kBlockSize - 1) / kBlockSize;
+  target_squared_norm_kernel<<<target_blocks, kBlockSize, 0, stream.get()>>>(
+    d_Y.get(), d_squared_norm.get(), n, target_count);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty response transcript norm kernel");
+  magic_qt_y_kernel<<<target_count, kBlockSize, 0, stream.get()>>>(
+    d_qr_packed.get(), d_tau.get(), d_Y.get(), d_qt_work.get(), d_y0.get(),
+    d_workspaces.get(), n, q, target_count);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty response transcript projection kernel");
+
+  MultiPenaltyGcvCudaResponseTranscript output;
+  output.n = n;
+  output.coefficient_dim = q;
+  output.target_count = target_count;
+  output.y0.resize(projected_count);
+  output.squared_norm.resize(static_cast<std::size_t>(target_count));
+  check_cuda(cudaMemcpyAsync(
+    output.y0.data(), d_y0.get(), projected_count * sizeof(double),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download multi-penalty CUDA response transcript projection");
+  check_cuda(cudaMemcpyAsync(
+    output.squared_norm.data(), d_squared_norm.get(),
+    static_cast<std::size_t>(target_count) * sizeof(double),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download multi-penalty CUDA response transcript norm");
+  check_cuda(cudaStreamSynchronize(stream.get()),
+             "synchronize multi-penalty CUDA response transcript");
+  return output;
+}
+
+MultiPenaltyGcvCudaObjectiveTranscript
+multi_penalty_gcv_objective_transcript_cuda_for_test(
+    const double* magic_r,
+    const int* magic_pivot_zero_based,
+    const std::vector<std::vector<double>>& penalty_roots,
+    const std::vector<std::vector<double>>& penalty_matrices,
+    const std::vector<int>& penalty_ranks,
+    const double* y0,
+    double squared_norm,
+    const double* log_sp,
+    int n,
+    int q,
+    int penalty_count,
+    double rank_tolerance,
+    bool force_stable_svd) {
+  if (magic_r == nullptr || magic_pivot_zero_based == nullptr ||
+      y0 == nullptr || log_sp == nullptr || n <= q || q <= 0 ||
+      q > kMultiPenaltyGcvMaximumCoefficientDim || penalty_count <= 1 ||
+      penalty_count > kMultiPenaltyGcvMaximumPenaltyCount ||
+      !std::isfinite(squared_norm) || squared_norm < 0.0 ||
+      !std::isfinite(rank_tolerance) || rank_tolerance <= 0.0 ||
+      rank_tolerance >= 1.0 ||
+      static_cast<int>(penalty_roots.size()) != penalty_count ||
+      static_cast<int>(penalty_matrices.size()) != penalty_count ||
+      static_cast<int>(penalty_ranks.size()) != penalty_count) {
+    throw std::runtime_error(
+      "multi-penalty CUDA objective transcript inputs are invalid");
+  }
+  const std::size_t square = static_cast<std::size_t>(q) * q;
+  int total_root_rank = 0;
+  std::vector<int> root_offsets(static_cast<std::size_t>(penalty_count));
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const int rank = penalty_ranks[static_cast<std::size_t>(penalty)];
+    if (rank <= 0 || rank > q ||
+        penalty_roots[static_cast<std::size_t>(penalty)].size() !=
+          static_cast<std::size_t>(q) * rank ||
+        penalty_matrices[static_cast<std::size_t>(penalty)].size() !=
+          square) {
+      throw std::runtime_error(
+        "multi-penalty CUDA objective transcript geometry is invalid");
+    }
+    root_offsets[static_cast<std::size_t>(penalty)] = total_root_rank;
+    total_root_rank += rank;
+  }
+  if (q + total_root_rank > kMaximumRows) {
+    throw std::runtime_error(
+      "multi-penalty CUDA objective transcript exceeds the row envelope");
+  }
+  std::vector<double> roots(
+    static_cast<std::size_t>(q) * total_root_rank);
+  std::vector<double> matrices(square * penalty_count);
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const std::vector<double>& root =
+      penalty_roots[static_cast<std::size_t>(penalty)];
+    std::copy(root.begin(), root.end(), roots.begin() +
+      static_cast<std::size_t>(q) *
+        root_offsets[static_cast<std::size_t>(penalty)]);
+    const std::vector<double>& matrix =
+      penalty_matrices[static_cast<std::size_t>(penalty)];
+    std::copy(matrix.begin(), matrix.end(),
+              matrices.begin() + square * penalty);
+  }
+
+  MultiPenaltyGcvCudaDiagnostics diagnostics;
+  Stream stream;
+  DeviceBuffer<double> d_r;
+  DeviceBuffer<int> d_pivot;
+  DeviceBuffer<double> d_roots;
+  DeviceBuffer<int> d_root_offsets;
+  DeviceBuffer<int> d_ranks;
+  DeviceBuffer<double> d_matrices;
+  DeviceBuffer<double> d_y0;
+  DeviceBuffer<double> d_log_sp;
+  DeviceBuffer<DeviceEvaluationWorkspace> d_workspace;
+  DeviceBuffer<DeviceTargetEvaluation> d_result;
+  d_r.allocate(square, &diagnostics);
+  d_pivot.allocate(static_cast<std::size_t>(q), &diagnostics);
+  d_roots.allocate(roots.size(), &diagnostics);
+  d_root_offsets.allocate(static_cast<std::size_t>(penalty_count),
+                          &diagnostics);
+  d_ranks.allocate(static_cast<std::size_t>(penalty_count), &diagnostics);
+  d_matrices.allocate(matrices.size(), &diagnostics);
+  d_y0.allocate(static_cast<std::size_t>(q), &diagnostics);
+  d_log_sp.allocate(static_cast<std::size_t>(penalty_count), &diagnostics);
+  d_workspace.allocate(1U, &diagnostics);
+  d_result.allocate(1U, &diagnostics);
+  upload_async(&d_r, magic_r, square, stream.get(), &diagnostics);
+  upload_async(&d_pivot, magic_pivot_zero_based,
+               static_cast<std::size_t>(q), stream.get(), &diagnostics);
+  upload_async(&d_roots, roots.data(), roots.size(), stream.get(),
+               &diagnostics);
+  upload_async(&d_root_offsets, root_offsets.data(),
+               static_cast<std::size_t>(penalty_count), stream.get(),
+               &diagnostics);
+  upload_async(&d_ranks, penalty_ranks.data(),
+               static_cast<std::size_t>(penalty_count), stream.get(),
+               &diagnostics);
+  upload_async(&d_matrices, matrices.data(), matrices.size(), stream.get(),
+               &diagnostics);
+  upload_async(&d_y0, y0, static_cast<std::size_t>(q), stream.get(),
+               &diagnostics);
+  upload_async(&d_log_sp, log_sp, static_cast<std::size_t>(penalty_count),
+               stream.get(), &diagnostics);
+  run_multi_penalty_objective_transcript_kernel<<<
+    1U, kBlockSize, 0, stream.get()>>>(
+      d_r.get(), d_pivot.get(), d_roots.get(), d_root_offsets.get(),
+      d_ranks.get(), d_matrices.get(), d_y0.get(), squared_norm,
+      d_log_sp.get(), d_workspace.get(), d_result.get(), n, q,
+      penalty_count, rank_tolerance, force_stable_svd);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty CUDA objective transcript");
+
+  auto host_workspace = std::make_unique<DeviceEvaluationWorkspace>();
+  DeviceTargetEvaluation host_result{};
+  check_cuda(cudaMemcpyAsync(
+    host_workspace.get(), d_workspace.get(), sizeof(DeviceEvaluationWorkspace),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download multi-penalty CUDA objective transcript workspace");
+  check_cuda(cudaMemcpyAsync(
+    &host_result, d_result.get(), sizeof(DeviceTargetEvaluation),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download multi-penalty CUDA objective transcript result");
+  check_cuda(cudaStreamSynchronize(stream.get()),
+             "synchronize multi-penalty CUDA objective transcript");
+
+  MultiPenaltyGcvCudaObjectiveTranscript output;
+  output.columns = q;
+  output.penalty_count = penalty_count;
+  output.aggregate_penalty_rank = host_result.aggregate_penalty_rank;
+  output.rows = q + output.aggregate_penalty_rank;
+  output.numerical_rank = host_result.numerical_rank;
+  output.solver_info = host_result.solver_info;
+  output.decomposition_route = host_result.decomposition_route;
+  output.rss = host_result.rss;
+  output.edf = host_result.edf;
+  output.score = host_result.score;
+  output.condition = host_result.condition;
+  if (output.solver_info != 0 || output.numerical_rank <= 0 ||
+      output.rows <= q || output.rows > kMaximumRows) {
+    return output;
+  }
+  const int rank = output.numerical_rank;
+  const std::size_t rank_square =
+    static_cast<std::size_t>(rank) * rank;
+  const lapack312_multi::Workspace& decomposition =
+    host_workspace->decomposition;
+  output.singular_values.assign(
+    decomposition.bidiagonal, decomposition.bidiagonal + q);
+  output.left_vectors.assign(
+    decomposition.left_u,
+    decomposition.left_u + static_cast<std::size_t>(output.rows) * q);
+  output.right_vectors_transposed.assign(
+    decomposition.bidiagonal_vt,
+    decomposition.bidiagonal_vt + square);
+  output.projected_response.assign(
+    decomposition.qr_tau, decomposition.qr_tau + rank);
+  output.scaled_projection.assign(
+    decomposition.tau_q, decomposition.tau_q + rank);
+  output.u1_u1.assign(decomposition.a, decomposition.a + rank_square);
+  output.metric.resize(rank_square * penalty_count);
+  output.influence.resize(rank_square * penalty_count);
+  output.metric_y.resize(static_cast<std::size_t>(rank) * penalty_count);
+  output.influence_y.resize(static_cast<std::size_t>(rank) * penalty_count);
+  output.y_influence.resize(static_cast<std::size_t>(rank) * penalty_count);
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    std::copy_n(
+      host_workspace->metric + square * penalty, rank_square,
+      output.metric.begin() + rank_square * penalty);
+    std::copy_n(
+      host_workspace->influence + square * penalty, rank_square,
+      output.influence.begin() + rank_square * penalty);
+    std::copy_n(
+      host_workspace->metric_y + q * penalty, rank,
+      output.metric_y.begin() + static_cast<std::size_t>(rank) * penalty);
+    std::copy_n(
+      host_workspace->influence_y + q * penalty, rank,
+      output.influence_y.begin() +
+        static_cast<std::size_t>(rank) * penalty);
+    std::copy_n(
+      host_workspace->y_influence + q * penalty, rank,
+      output.y_influence.begin() +
+        static_cast<std::size_t>(rank) * penalty);
+  }
+  output.derivative_norm.assign(
+    host_workspace->derivative_norm,
+    host_workspace->derivative_norm + penalty_count);
+  output.derivative_delta.assign(
+    host_workspace->derivative_delta,
+    host_workspace->derivative_delta + penalty_count);
+  output.second_derivative_norm.assign(
+    host_workspace->second_derivative_norm,
+    host_workspace->second_derivative_norm +
+      static_cast<std::size_t>(penalty_count) * penalty_count);
+  output.second_derivative_delta.assign(
+    host_workspace->second_derivative_delta,
+    host_workspace->second_derivative_delta +
+      static_cast<std::size_t>(penalty_count) * penalty_count);
+  output.gradient.assign(host_result.gradient,
+                         host_result.gradient + penalty_count);
+  output.hessian.assign(
+    host_result.hessian,
+    host_result.hessian +
+      static_cast<std::size_t>(penalty_count) * penalty_count);
+  output.coefficients.assign(host_result.coefficients,
+                             host_result.coefficients + q);
+  return output;
+}
+
+MultiPenaltyGcvCudaSvdTranscript
+multi_penalty_gcv_svd_transcript_cuda_for_test(
+    const double* augmented,
+    int rows,
+    int columns,
+    bool force_stable_svd) {
+  if (augmented == nullptr || columns <= 0 || rows < columns ||
+      columns > kMultiPenaltyGcvMaximumCoefficientDim ||
+      rows > kMaximumRows) {
+    throw std::runtime_error(
+      "multi-penalty CUDA SVD transcript dimensions are invalid");
+  }
+
+  MultiPenaltyGcvCudaDiagnostics diagnostics;
+  Stream stream;
+  DeviceBuffer<DeviceEvaluationWorkspace> d_workspace;
+  DeviceBuffer<int> d_status;
+  d_workspace.allocate(1U, &diagnostics);
+  d_status.allocate(2U, &diagnostics);
+  check_cuda(cudaMemcpyAsync(
+    &d_workspace.get()->decomposition.a[0], augmented,
+    static_cast<std::size_t>(rows) * columns * sizeof(double),
+    cudaMemcpyHostToDevice, stream.get()),
+    "upload multi-penalty CUDA SVD transcript matrix");
+  run_multi_penalty_svd_transcript_kernel<<<1U, kBlockSize, 0, stream.get()>>>(
+    d_workspace.get(), d_status.get(), rows, columns, force_stable_svd);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty CUDA SVD transcript kernel");
+
+  auto host_workspace = std::make_unique<DeviceEvaluationWorkspace>();
+  int host_status[2] = {0, 0};
+  check_cuda(cudaMemcpyAsync(
+    host_workspace.get(), d_workspace.get(), sizeof(DeviceEvaluationWorkspace),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download multi-penalty CUDA SVD transcript workspace");
+  check_cuda(cudaMemcpyAsync(
+    host_status, d_status.get(), sizeof(host_status),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download multi-penalty CUDA SVD transcript status");
+  check_cuda(cudaStreamSynchronize(stream.get()),
+             "synchronize multi-penalty CUDA SVD transcript");
+
+  MultiPenaltyGcvCudaSvdTranscript output;
+  output.rows = rows;
+  output.columns = columns;
+  output.solver_info = host_status[0];
+  output.decomposition_route = host_status[1];
+  const lapack312_multi::Workspace& decomposition =
+    host_workspace->decomposition;
+  output.singular_values.assign(
+    decomposition.bidiagonal, decomposition.bidiagonal + columns);
+  output.left_vectors.assign(
+    decomposition.left_u,
+    decomposition.left_u + static_cast<std::size_t>(rows) * columns);
+  output.right_vectors_transposed.assign(
+    decomposition.bidiagonal_vt,
+    decomposition.bidiagonal_vt + static_cast<std::size_t>(columns) * columns);
+  return output;
+}
+
+MultiPenaltyGcvCudaAugmentedTranscript
+multi_penalty_gcv_augmented_transcript_cuda_for_test(
+    const double* magic_r,
+    const std::vector<std::vector<double>>& penalty_matrices,
+    const double* log_sp,
+    int columns,
+    int penalty_count) {
+  if (magic_r == nullptr || log_sp == nullptr || columns <= 0 ||
+      columns > kMultiPenaltyGcvMaximumCoefficientDim ||
+      penalty_count <= 0 ||
+      penalty_count > kMultiPenaltyGcvMaximumPenaltyCount ||
+      static_cast<int>(penalty_matrices.size()) != penalty_count) {
+    throw std::runtime_error(
+      "multi-penalty CUDA augmented transcript inputs are invalid");
+  }
+  const std::size_t square =
+    static_cast<std::size_t>(columns) * columns;
+  std::vector<double> matrices(square * penalty_count);
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    const std::vector<double>& matrix =
+      penalty_matrices[static_cast<std::size_t>(penalty)];
+    if (matrix.size() != square) {
+      throw std::runtime_error(
+        "multi-penalty CUDA augmented transcript matrix is invalid");
+    }
+    std::copy(matrix.begin(), matrix.end(),
+              matrices.begin() + square * penalty);
+  }
+
+  MultiPenaltyGcvCudaDiagnostics diagnostics;
+  Stream stream;
+  DeviceBuffer<double> d_magic_r;
+  DeviceBuffer<double> d_matrices;
+  DeviceBuffer<double> d_log_sp;
+  DeviceBuffer<DeviceEvaluationWorkspace> d_workspace;
+  DeviceBuffer<DeviceTargetEvaluation> d_result;
+  DeviceBuffer<int> d_rows;
+  DeviceBuffer<double> d_aggregate;
+  d_magic_r.allocate(square, &diagnostics);
+  d_matrices.allocate(matrices.size(), &diagnostics);
+  d_log_sp.allocate(static_cast<std::size_t>(penalty_count), &diagnostics);
+  d_workspace.allocate(1U, &diagnostics);
+  d_result.allocate(1U, &diagnostics);
+  d_rows.allocate(1U, &diagnostics);
+  d_aggregate.allocate(square, &diagnostics);
+  upload_async(&d_magic_r, magic_r, square, stream.get(), &diagnostics);
+  upload_async(&d_matrices, matrices.data(), matrices.size(), stream.get(),
+               &diagnostics);
+  upload_async(&d_log_sp, log_sp, static_cast<std::size_t>(penalty_count),
+               stream.get(), &diagnostics);
+  prepare_grouped_prototype_targets_kernel<<<1U, kBlockSize, 0, stream.get()>>>(
+    d_magic_r.get(), d_matrices.get(), d_log_sp.get(), d_workspace.get(),
+    d_result.get(), d_rows.get(), d_aggregate.get(), columns, penalty_count, 1);
+  check_cuda(cudaGetLastError(),
+             "launch multi-penalty CUDA augmented transcript");
+
+  auto host_workspace = std::make_unique<DeviceEvaluationWorkspace>();
+  std::vector<double> host_aggregate(square);
+  DeviceTargetEvaluation host_result{};
+  int rows = 0;
+  check_cuda(cudaMemcpyAsync(
+    host_workspace.get(), d_workspace.get(), sizeof(DeviceEvaluationWorkspace),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download multi-penalty CUDA augmented transcript workspace");
+  check_cuda(cudaMemcpyAsync(
+    &host_result, d_result.get(), sizeof(DeviceTargetEvaluation),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download multi-penalty CUDA augmented transcript result");
+  check_cuda(cudaMemcpyAsync(
+    &rows, d_rows.get(), sizeof(int), cudaMemcpyDeviceToHost, stream.get()),
+    "download multi-penalty CUDA augmented transcript rows");
+  check_cuda(cudaMemcpyAsync(
+    host_aggregate.data(), d_aggregate.get(), square * sizeof(double),
+    cudaMemcpyDeviceToHost, stream.get()),
+    "download multi-penalty CUDA aggregate transcript");
+  check_cuda(cudaStreamSynchronize(stream.get()),
+             "synchronize multi-penalty CUDA augmented transcript");
+  if (rows < columns || rows > kMaximumRows ||
+      host_result.aggregate_penalty_rank != rows - columns) {
+    throw std::runtime_error(
+      "multi-penalty CUDA augmented transcript result is invalid");
+  }
+
+  MultiPenaltyGcvCudaAugmentedTranscript output;
+  output.rows = rows;
+  output.columns = columns;
+  output.aggregate_penalty_rank = host_result.aggregate_penalty_rank;
+  const lapack312_multi::Workspace& decomposition =
+    host_workspace->decomposition;
+  output.aggregate_dstop = decomposition.work[2 * columns];
+  output.penalty_multipliers.assign(
+    host_workspace->derivative_delta,
+    host_workspace->derivative_delta + penalty_count);
+  output.aggregate_penalty = std::move(host_aggregate);
+  output.aggregate_pivot.assign(
+    decomposition.iwork, decomposition.iwork + columns);
+  output.aggregate_factor.assign(
+    decomposition.bidiagonal_vt,
+    decomposition.bidiagonal_vt + square);
+  output.aggregate_root.resize(
+    static_cast<std::size_t>(output.aggregate_penalty_rank) * columns);
+  for (int column = 0; column < columns; ++column) {
+    for (int row = 0; row < output.aggregate_penalty_rank; ++row) {
+      output.aggregate_root[
+        static_cast<std::size_t>(row) +
+          static_cast<std::size_t>(output.aggregate_penalty_rank) * column] =
+        decomposition.a[
+          static_cast<std::size_t>(columns + row) +
+            static_cast<std::size_t>(rows) * column];
+    }
+  }
+  output.augmented.assign(
+    decomposition.a,
+    decomposition.a +
+      static_cast<std::size_t>(rows) * columns);
+  return output;
+}
+#endif
 
 namespace {
 
@@ -4054,9 +4591,9 @@ multi_penalty_gcv_grouped_evaluate_prototype_cuda(
     d_Y.get(), d_squared_norm.get(), n, target_count);
   check_cuda(cudaGetLastError(),
              "launch grouped prototype target norm kernel");
-  magic_qt_y_kernel<<<target_blocks, kBlockSize, 0, stream.get()>>>(
+  magic_qt_y_kernel<<<target_count, kBlockSize, 0, stream.get()>>>(
     d_qr_packed.get(), d_tau.get(), d_Y.get(), d_qt_work.get(),
-    d_y0.get(), n, q, target_count);
+    d_y0.get(), d_baseline_workspaces.get(), n, q, target_count);
   check_cuda(cudaGetLastError(),
              "launch grouped prototype QR projection kernel");
 
@@ -4070,7 +4607,7 @@ multi_penalty_gcv_grouped_evaluate_prototype_cuda(
     prepare_grouped_prototype_targets_kernel<<<
       target_count, kBlockSize, 0, stream.get()>>>(
         d_r.get(), d_matrices.get(), d_log_sp.get(), workspaces, results,
-        rows, q, penalty_count, target_count);
+        rows, nullptr, q, penalty_count, target_count);
     check_cuda(cudaGetLastError(),
                "launch grouped prototype preparation kernel");
   };
@@ -4476,7 +5013,7 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
   output.schema_version =
     "full-cuda-ci-multi-penalty-gcv-cuda-optimization-v1";
   output.rank_path =
-    "cuda-dpstf2-guarded-qr-lapack-3.12-dgesdd";
+    "cuda-dpstrf-nb64-guarded-qr-lapack-3.12-dgesdd";
   output.optimizer_path =
     "cuda-independent-target-newton-steepest-boundary-v1";
   output.n = n;
@@ -4563,9 +5100,9 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
     d_Y.get(), d_squared_norm.get(), n, target_count);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty optimizer norm kernel");
-  magic_qt_y_kernel<<<target_blocks, kBlockSize, 0, stream.get()>>>(
+  magic_qt_y_kernel<<<target_count, kBlockSize, 0, stream.get()>>>(
     d_qr_packed.get(), d_tau.get(), d_Y.get(), d_qt_work.get(),
-    d_y0.get(), n, q, target_count);
+    d_y0.get(), d_workspaces.get(), n, q, target_count);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty optimizer QR projection kernel");
   const double gradient_tolerance_factor = std::pow(
@@ -4579,7 +5116,7 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
       gradient_tolerance_factor, control.max_step_halving,
       control.max_iterations, control.max_newton_step,
       control.boundary_probe_step, control.max_boundary_probes,
-      control.rank_tolerance, false, false, nullptr, nullptr, 0U);
+      control.rank_tolerance, false, false, false, nullptr, nullptr, 0U);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty optimizer batch kernel");
   optimize_multi_penalty_targets_kernel<<<
@@ -4591,14 +5128,15 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
       control.convergence_tolerance, gradient_tolerance_factor,
       control.max_step_halving, control.max_iterations,
       control.max_newton_step, control.boundary_probe_step,
-      control.max_boundary_probes, control.rank_tolerance, true, true,
-      nullptr, nullptr, 0U);
+      control.max_boundary_probes, control.rank_tolerance, true,
+      control.force_stability_replay_all, true, nullptr, nullptr, 0U);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty stability replay kernel");
   diagnostics.cuda_stability_replay_kernel_launch_count = 1;
   merge_stability_replay_states_kernel<<<
     target_blocks, kBlockSize, 0, stream.get()>>>(
-      d_states.get(), d_replay_states.get(), target_count);
+      d_states.get(), d_replay_states.get(), target_count,
+      control.force_stability_replay_all);
   check_cuda(cudaGetLastError(),
              "launch multi-penalty stability replay merge kernel");
   diagnostics.cuda_stability_merge_kernel_launch_count = 1;
@@ -4779,6 +5317,11 @@ MultiPenaltyGcvCudaOptimization multi_penalty_gcv_optimize_cuda(
         state.stability_replay_rejected_boundary_reason != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_direct_newton_reason_count +=
         state.stability_replay_direct_newton_reason != 0 ? 1 : 0;
+      diagnostics.cuda_stability_replay_step_failed_reason_count +=
+        state.stability_replay_step_failed_reason != 0 ? 1 : 0;
+      diagnostics
+        .cuda_stability_replay_guarded_qr_trajectory_reason_count +=
+          state.stability_replay_guarded_qr_trajectory_reason != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_dense_score_guard_rejected_count +=
         state.stability_replay_dense_score_guard_rejected != 0 ? 1 : 0;
       diagnostics.cuda_stability_replay_extrapolation_target_count +=
@@ -4862,7 +5405,7 @@ create_multi_penalty_gcv_cuda_prepared(
       initial_log_sp == nullptr || n <= coefficient_dim ||
       coefficient_dim <= 0 ||
       coefficient_dim > kMultiPenaltyGcvMaximumCoefficientDim ||
-      penalty_count <= 1 ||
+      penalty_count <= 0 ||
       penalty_count > kMultiPenaltyGcvMaximumPenaltyCount ||
       target_capacity <= 1 || device_id < 0 ||
       static_cast<int>(penalty_roots.size()) != penalty_count ||
@@ -4924,6 +5467,8 @@ create_multi_penalty_gcv_cuda_prepared(
     prepared->initial_log_sp.assign(
       initial_log_sp, initial_log_sp + penalty_count);
     prepared->host_states.resize(static_cast<std::size_t>(target_capacity));
+    prepared->host_fixed_diagnostics.resize(
+      static_cast<std::size_t>(3) * target_capacity);
     MultiPenaltyGcvCudaDiagnostics allocation_diagnostics;
     const std::size_t y_capacity =
       static_cast<std::size_t>(n) * target_capacity;
@@ -4942,6 +5487,9 @@ create_multi_penalty_gcv_cuda_prepared(
     arena_bytes = arena_advance<int>(arena_bytes, penalty_count);
     arena_bytes = arena_advance<double>(arena_bytes, matrices.size());
     arena_bytes = arena_advance<double>(arena_bytes, penalty_count);
+    arena_bytes = arena_advance<double>(
+      arena_bytes,
+      static_cast<std::size_t>(penalty_count) * target_capacity);
     arena_bytes = arena_advance<double>(arena_bytes, y_capacity);
     arena_bytes = arena_advance<double>(arena_bytes, y_capacity);
     arena_bytes = arena_advance<double>(arena_bytes, q_targets);
@@ -4950,6 +5498,10 @@ create_multi_penalty_gcv_cuda_prepared(
       arena_bytes, target_capacity);
     arena_bytes = arena_advance<DeviceOptimizerState>(
       arena_bytes, target_capacity);
+    arena_bytes = arena_advance<DeviceTargetEvaluation>(
+      arena_bytes, target_capacity);
+    arena_bytes = arena_advance<int>(
+      arena_bytes, static_cast<std::size_t>(3) * target_capacity);
     arena_bytes = arena_advance<DeviceOptimizerState>(
       arena_bytes, target_capacity);
     arena_bytes = arena_advance<double>(arena_bytes, q_targets);
@@ -4978,6 +5530,9 @@ create_multi_penalty_gcv_cuda_prepared(
       arena, arena_offset, matrices.size());
     arena_offset = prepared->d_initial_log_sp.bind_from_arena(
       arena, arena_offset, penalty_count);
+    arena_offset = prepared->d_fixed_log_sp.bind_from_arena(
+      arena, arena_offset,
+      static_cast<std::size_t>(penalty_count) * target_capacity);
     arena_offset = prepared->d_Y.bind_from_arena(
       arena, arena_offset, y_capacity);
     arena_offset = prepared->d_qt_work.bind_from_arena(
@@ -4992,6 +5547,10 @@ create_multi_penalty_gcv_cuda_prepared(
       arena, arena_offset, target_capacity);
     arena_offset = prepared->d_replay_states.bind_from_arena(
       arena, arena_offset, target_capacity);
+    arena_offset = prepared->d_fixed_evaluations.bind_from_arena(
+      arena, arena_offset, target_capacity);
+    arena_offset = prepared->d_fixed_diagnostics.bind_from_arena(
+      arena, arena_offset, static_cast<std::size_t>(3) * target_capacity);
     arena_offset = prepared->d_coefficients.bind_from_arena(
       arena, arena_offset, q_targets);
     arena_offset = prepared->d_fitted.bind_from_arena(
@@ -5175,10 +5734,11 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
     check_cuda(cudaGetLastError(),
                "launch persistent multi-penalty norm kernel");
     magic_qt_y_kernel<<<
-      target_blocks, kBlockSize, 0, prepared->stream.get()>>>(
+      target_count, kBlockSize, 0, prepared->stream.get()>>>(
         prepared->d_qr_packed.get(), prepared->d_tau.get(),
         prepared->d_Y.get(), prepared->d_qt_work.get(),
-        prepared->d_y0.get(), n, q, target_count);
+        prepared->d_y0.get(), prepared->d_workspaces.get(),
+        n, q, target_count);
     check_cuda(cudaGetLastError(),
                "launch persistent multi-penalty QR projection kernel");
     const double gradient_tolerance_factor = std::pow(
@@ -5196,7 +5756,7 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
         control.max_step_halving, control.max_iterations,
         control.max_newton_step, control.boundary_probe_step,
         control.max_boundary_probes, control.rank_tolerance, false, false,
-        decomposition_trace, decomposition_trace_counters,
+        false, decomposition_trace, decomposition_trace_counters,
         decomposition_trace_capacity);
     check_cuda(cudaGetLastError(),
                "launch persistent multi-penalty optimizer kernel");
@@ -5212,15 +5772,16 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
         gradient_tolerance_factor, control.max_step_halving,
         control.max_iterations, control.max_newton_step,
         control.boundary_probe_step, control.max_boundary_probes,
-        control.rank_tolerance, true, true, decomposition_trace,
-        decomposition_trace_counters, decomposition_trace_capacity);
+        control.rank_tolerance, true, control.force_stability_replay_all,
+        true, decomposition_trace, decomposition_trace_counters,
+        decomposition_trace_capacity);
     check_cuda(cudaGetLastError(),
                "launch persistent multi-penalty stability replay kernel");
     diagnostics.cuda_stability_replay_kernel_launch_count = 1;
     merge_stability_replay_states_kernel<<<
       target_blocks, kBlockSize, 0, prepared->stream.get()>>>(
         prepared->d_states.get(), prepared->d_replay_states.get(),
-        target_count);
+        target_count, control.force_stability_replay_all);
     check_cuda(cudaGetLastError(),
                "launch persistent multi-penalty stability merge kernel");
     diagnostics.cuda_stability_merge_kernel_launch_count = 1;
@@ -5322,6 +5883,163 @@ MultiPenaltyGcvCudaBatchResult multi_penalty_gcv_cuda_optimize_batch(
     result.residual->generation = prepared->generation;
     check_cuda(cudaSetDevice(previous_device),
                "restore device after persistent multi-penalty batch");
+    return result;
+  } catch (...) {
+    cudaSetDevice(previous_device);
+    throw;
+  }
+}
+
+std::shared_ptr<MultiPenaltyGcvCudaResidualBatch>
+multi_penalty_gcv_cuda_evaluate_fixed_batch(
+    const std::shared_ptr<MultiPenaltyGcvCudaPrepared>& prepared,
+    const double* Y,
+    const double* log_sp,
+    int n,
+    int target_count,
+    const std::vector<std::string>& target_keys,
+    double rank_tolerance) {
+  if (!prepared || Y == nullptr || log_sp == nullptr) {
+    throw std::runtime_error(
+      "persistent multi-penalty fixed evaluation inputs are invalid");
+  }
+  std::lock_guard<std::mutex> lock(prepared->mutex);
+  if (prepared->residual_slot_leased) {
+    throw std::runtime_error("ERR_MULTI_PENALTY_OUTPUT_SLOT_BUSY");
+  }
+  const int penalty_count = prepared->penalty_count;
+  const std::size_t log_sp_count =
+    static_cast<std::size_t>(penalty_count) * target_count;
+  if (n != prepared->n || target_count <= 1 ||
+      target_count > prepared->target_capacity ||
+      target_keys.size() != static_cast<std::size_t>(target_count) ||
+      !std::isfinite(rank_tolerance) || rank_tolerance <= 0.0 ||
+      rank_tolerance >= 1.0 ||
+      !std::all_of(log_sp, log_sp + log_sp_count,
+                   [](double value) { return std::isfinite(value); })) {
+    throw std::runtime_error(
+      "persistent multi-penalty fixed evaluation dimensions are invalid");
+  }
+
+  int previous_device = -1;
+  check_cuda(cudaGetDevice(&previous_device),
+             "query device before persistent fixed evaluation");
+  check_cuda(cudaSetDevice(prepared->device_id),
+             "select device for persistent fixed evaluation");
+  try {
+    const int q = prepared->q;
+    const std::size_t y_count =
+      static_cast<std::size_t>(n) * target_count;
+    check_cuda(cudaMemcpyAsync(
+      prepared->d_Y.get(), Y, y_count * sizeof(double),
+      cudaMemcpyHostToDevice, prepared->stream.get()),
+      "upload persistent fixed-evaluation targets");
+    check_cuda(cudaMemcpyAsync(
+      prepared->d_fixed_log_sp.get(), log_sp,
+      log_sp_count * sizeof(double), cudaMemcpyHostToDevice,
+      prepared->stream.get()),
+      "upload persistent fixed-evaluation log smoothing parameters");
+
+    const int target_blocks =
+      (target_count + kBlockSize - 1) / kBlockSize;
+    target_squared_norm_kernel<<<
+      target_blocks, kBlockSize, 0, prepared->stream.get()>>>(
+        prepared->d_Y.get(), prepared->d_squared_norm.get(),
+        n, target_count);
+    check_cuda(cudaGetLastError(),
+               "launch persistent fixed-evaluation norm kernel");
+    magic_qt_y_kernel<<<
+      target_count, kBlockSize, 0, prepared->stream.get()>>>(
+        prepared->d_qr_packed.get(), prepared->d_tau.get(),
+        prepared->d_Y.get(), prepared->d_qt_work.get(),
+        prepared->d_y0.get(), prepared->d_workspaces.get(),
+        n, q, target_count);
+    check_cuda(cudaGetLastError(),
+               "launch persistent fixed-evaluation response projection");
+    evaluate_multi_penalty_targets_kernel<<<
+      target_count, kBlockSize, 0, prepared->stream.get()>>>(
+        prepared->d_r.get(), prepared->d_pivot.get(),
+        prepared->d_roots.get(), prepared->d_root_offsets.get(),
+        prepared->d_ranks.get(), prepared->d_matrices.get(),
+        prepared->d_y0.get(), prepared->d_squared_norm.get(),
+        prepared->d_fixed_log_sp.get(), prepared->d_workspaces.get(),
+        prepared->d_fixed_evaluations.get(), n, q, penalty_count,
+        target_count, rank_tolerance, true, false);
+    check_cuda(cudaGetLastError(),
+               "launch persistent fixed evaluation");
+
+    const int coefficient_count = q * target_count;
+    const int coefficient_blocks = (coefficient_count + 255) / 256;
+    gather_multi_penalty_fixed_evaluation_kernel<<<
+      coefficient_blocks, 256, 0, prepared->stream.get()>>>(
+        prepared->d_fixed_evaluations.get(),
+        prepared->d_coefficients.get(),
+        prepared->d_fixed_diagnostics.get(), q, target_count);
+    check_cuda(cudaGetLastError(),
+               "launch persistent fixed-evaluation coefficient gather");
+    const double alpha = 1.0;
+    const double beta = 0.0;
+    check_cublas(cublasDgemm(
+      prepared->cublas.get(), CUBLAS_OP_N, CUBLAS_OP_N,
+      n, target_count, q, &alpha, prepared->d_X.get(), n,
+      prepared->d_coefficients.get(), q, &beta,
+      prepared->d_fitted.get(), n),
+      "form persistent fixed-evaluation fits");
+    const int residual_blocks =
+      (static_cast<int>(y_count) + 255) / 256;
+    form_multi_penalty_residuals_kernel<<<
+      residual_blocks, 256, 0, prepared->stream.get()>>>(
+        prepared->d_Y.get(), prepared->d_fitted.get(),
+        prepared->d_residuals.get(), static_cast<int>(y_count));
+    check_cuda(cudaGetLastError(),
+               "launch persistent fixed-evaluation residual kernel");
+    check_cuda(cudaEventRecord(
+      prepared->completion_event.get(), prepared->stream.get()),
+      "record persistent fixed-evaluation completion");
+    check_cuda(cudaMemcpyAsync(
+      prepared->host_fixed_diagnostics.data(),
+      prepared->d_fixed_diagnostics.get(),
+      static_cast<std::size_t>(3) * target_count * sizeof(int),
+      cudaMemcpyDeviceToHost, prepared->stream.get()),
+      "download persistent fixed-evaluation diagnostics");
+    check_cuda(cudaStreamSynchronize(prepared->stream.get()),
+               "synchronize persistent fixed evaluation");
+
+    std::shared_ptr<MultiPenaltyGcvCudaResidualBatch> result =
+      std::make_shared<MultiPenaltyGcvCudaResidualBatch>();
+    result->owner = prepared;
+    result->n = n;
+    result->q = q;
+    result->target_count = target_count;
+    result->device_id = prepared->device_id;
+    result->target_keys = target_keys;
+    result->optimizer_status.resize(static_cast<std::size_t>(target_count));
+    result->solver_info.resize(static_cast<std::size_t>(target_count));
+    result->decomposition_route.resize(
+      static_cast<std::size_t>(target_count));
+    result->numerical_rank.resize(static_cast<std::size_t>(target_count));
+    result->fixed_sp_evaluation = true;
+    for (int target = 0; target < target_count; ++target) {
+      const int solver_info =
+        prepared->host_fixed_diagnostics[3 * target];
+      result->optimizer_status[static_cast<std::size_t>(target)] =
+        solver_info;
+      result->solver_info[static_cast<std::size_t>(target)] = solver_info;
+      result->decomposition_route[static_cast<std::size_t>(target)] =
+        prepared->host_fixed_diagnostics[3 * target + 1];
+      result->numerical_rank[static_cast<std::size_t>(target)] =
+        prepared->host_fixed_diagnostics[3 * target + 2];
+    }
+    prepared->generation += 1;
+    prepared->residual_slot_leased = true;
+    prepared->info.solve_count += 1;
+    prepared->info.cublas_gemm_count += 1;
+    prepared->info.residual_kernel_count += 1;
+    prepared->info.generation = prepared->generation;
+    prepared->info.residual_slot_leased = true;
+    result->generation = prepared->generation;
+    check_cuda(cudaSetDevice(previous_device),
+               "restore device after persistent fixed evaluation");
     return result;
   } catch (...) {
     cudaSetDevice(previous_device);
@@ -5451,6 +6169,10 @@ MultiPenaltyGcvCudaResidualInfo multi_penalty_gcv_cuda_residual_info(
   info.device_id = residual->device_id;
   info.target_keys = residual->target_keys;
   info.optimizer_status = residual->optimizer_status;
+  info.solver_info = residual->solver_info;
+  info.decomposition_route = residual->decomposition_route;
+  info.numerical_rank = residual->numerical_rank;
+  info.fixed_sp_evaluation = residual->fixed_sp_evaluation;
   info.released = residual->released;
   info.generation = residual->generation;
   info.device_resident = !residual->released &&
@@ -5483,6 +6205,9 @@ acquire_multi_penalty_gcv_cuda_residual_consumer_view(
   view.producer_completion_event =
     residual->owner->completion_event.get();
   view.target_keys = residual->target_keys;
+  view.solver_info = residual->solver_info;
+  view.decomposition_route = residual->decomposition_route;
+  view.fixed_sp_evaluation = residual->fixed_sp_evaluation;
   return view;
 }
 

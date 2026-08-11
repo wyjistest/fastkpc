@@ -1,0 +1,2 @@
+# Preserve deterministic f2c/LAPACK generator output verbatim.
+lapack_3_12_*_device.inc -whitespace

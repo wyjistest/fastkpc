@@ -153,7 +153,7 @@ authority_zero <- vapply(authority_zero_fields, function(field) {
 gpu_route_gate <- identical(
   summary$ci_backend, "legacy-compatible-full-eig-cuda-v1"
 ) && identical(
-  summary$strict_gamma_residual_route, "qr-through-2"
+  summary$strict_gamma_residual_route, "exact-fixed-stable-svd"
 ) && as.integer(summary$cuda_legacy_compatible_pair_count) ==
   as.integer(summary$physical_tests_evaluated) &&
   as.integer(summary$legacy_compatible_pair_count) ==

@@ -131,7 +131,7 @@ fastkpc_full_cuda_phase4_publication_backend_configuration <- function(kind) {
     exact_replay_backend = "cuda-dpstf2-lapack-3.12-dgesdd",
     exact_replay_origin = "initial_sp",
     spectral_precision_floor_rule =
-      "reported_rms_gradient<=0.5*convergence_tolerance",
+      "reported_rms_gradient<=2.0*convergence_tolerance",
     convergence_tolerance = 1e-7,
     execution_strategy = "cuda-cross-setup-fused-exact-replay",
     concurrency = 1L,

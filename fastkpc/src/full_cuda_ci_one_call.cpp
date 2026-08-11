@@ -185,19 +185,22 @@ bool dcc_gamma_legacy_component_wave_positive_miss_policy() {
 
 std::string strict_hsic_gamma_residual_route_policy(
     const std::string& ci_method) {
+  if (ci_method == "dcc.gamma") return "exact-fixed-stable-svd";
   const char* raw = std::getenv(
     "FASTKPC_STRICT_HSIC_GAMMA_RESIDUAL_ROUTE");
   if (raw == nullptr || raw[0] == '\0') {
-    return (ci_method == "dcc.gamma" || ci_method == "hsic.gamma") ?
+    return ci_method == "hsic.gamma" ?
       "qr-through-2" : "stable-svd";
   }
   const std::string value(raw);
-  if (value == "stable-svd" || value == "qr-through-2") {
-    return value;
+  if (value != "stable-svd" && value != "qr-through-2") {
+    throw std::runtime_error(
+      "FASTKPC_STRICT_HSIC_GAMMA_RESIDUAL_ROUTE must be stable-svd or "
+      "qr-through-2");
   }
-  throw std::runtime_error(
-    "FASTKPC_STRICT_HSIC_GAMMA_RESIDUAL_ROUTE must be stable-svd or "
-    "qr-through-2");
+  require(ci_method == "hsic.gamma" || value == "stable-svd",
+          "strict HSIC gamma residual route override requires hsic.gamma");
+  return value;
 }
 
 std::string strict_permutation_residual_route_policy(
@@ -735,6 +738,23 @@ std::string residual_key(const std::string& target,
   return full_cuda_ci_sha256_utf8(payload.str());
 }
 
+std::string exact_fixed_residual_key(const std::string& target,
+                                     const double* selected_log_sp,
+                                     int penalty_count) {
+  std::ostringstream payload;
+  payload << "schema=full-cuda-ci-residual-key-v2\n"
+          << "target=" << target << "\n"
+          << "solver=full-cuda-ci-mgcv-exact-fixed-evaluator-v1\n"
+          << "selected_log_sp_bits=" << std::hex << std::setfill('0');
+  for (int penalty = 0; penalty < penalty_count; ++penalty) {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, selected_log_sp + penalty, sizeof(bits));
+    payload << std::setw(16) << bits;
+  }
+  payload << "\n";
+  return full_cuda_ci_sha256_utf8(payload.str());
+}
+
 Rcpp::LogicalMatrix adjacency_matrix(const std::vector<int>& adjacency,
                                      int p) {
   Rcpp::LogicalMatrix output(p, p);
@@ -1001,6 +1021,9 @@ struct OneCallDiagnostics {
   int cuda_multi_penalty_prepared_release_count = 0;
   int cuda_multi_penalty_prepared_target_capacity_sum = 0;
   int cuda_multi_penalty_prepared_target_capacity_peak = 0;
+  int cuda_exact_fixed_evaluator_batch_count = 0;
+  int cuda_exact_fixed_evaluator_target_count = 0;
+  int cuda_exact_fixed_evaluator_stable_svd_target_count = 0;
   int cuda_multi_penalty_decomposition_trace_capacity_per_target = 0;
   DecompositionReuseAggregate cuda_multi_penalty_decomposition_reuse;
   std::map<std::pair<int, int>, DecompositionReuseAggregate>
@@ -1321,6 +1344,7 @@ struct OneCallDiagnostics {
   double cuda_residual_solve_host_ms = 0.0;
   double cuda_single_penalty_residual_solve_host_ms = 0.0;
   double cuda_multi_penalty_residual_solve_host_ms = 0.0;
+  double cuda_exact_fixed_evaluator_host_ms = 0.0;
   double cuda_exact_screen_residual_solve_host_ms = 0.0;
   double cuda_guard_refinement_residual_solve_host_ms = 0.0;
   double cuda_legacy_compatible_residual_solve_host_ms = 0.0;
@@ -1757,6 +1781,7 @@ CompactResultCache& compact_result_cache() {
 
 struct CachedTargetState {
   std::vector<double> selected_sp;
+  std::vector<double> selected_log_sp;
   FixedSpRoute planned_route = FixedSpRoute::CholeskyBatched;
 };
 
@@ -1791,7 +1816,9 @@ class TargetStateCache {
     require(found->second.dataset == dataset,
             "target optimizer cache DatasetKey identity changed");
     require(static_cast<int>(found->second.state.selected_sp.size()) ==
-              penalty_count,
+              penalty_count &&
+              static_cast<int>(
+                found->second.state.selected_log_sp.size()) == penalty_count,
             "target optimizer cache penalty shape changed");
     ++total_hits_;
     ++diagnostics->target_cache_hit_count;
@@ -1818,7 +1845,9 @@ class TargetStateCache {
     require(found->second.dataset == dataset,
             "target optimizer cache DatasetKey identity changed during peek");
     require(static_cast<int>(found->second.state.selected_sp.size()) ==
-              penalty_count,
+              penalty_count &&
+              static_cast<int>(
+                found->second.state.selected_log_sp.size()) == penalty_count,
             "target optimizer cache penalty shape changed during peek");
     *state = found->second.state;
     return true;
@@ -1829,10 +1858,14 @@ class TargetStateCache {
               const CachedTargetState& state,
               OneCallDiagnostics* diagnostics) {
     require(!state.selected_sp.empty() &&
+              state.selected_log_sp.size() == state.selected_sp.size() &&
               std::all_of(state.selected_sp.begin(), state.selected_sp.end(),
                           [](double value) {
                             return std::isfinite(value) && value > 0.0;
-                          }),
+                          }) &&
+              std::all_of(
+                state.selected_log_sp.begin(), state.selected_log_sp.end(),
+                [](double value) { return std::isfinite(value); }),
             "target optimizer cache refuses invalid smoothing parameters");
     std::lock_guard<std::mutex> lock(mutex_);
     auto found = entries_.find(key);
@@ -1982,8 +2015,8 @@ LegacyComponentWavePrediction predict_legacy_component_wave_group(
           optimizer_key, context->dataset_key, context->penalty_count, &state)) {
       return prediction;
     }
-    prediction.residual_keys.push_back(residual_key(
-      base_key, state.selected_sp.data(), context->penalty_count));
+    prediction.residual_keys.push_back(exact_fixed_residual_key(
+      base_key, state.selected_log_sp.data(), context->penalty_count));
   }
 
   const std::vector<unsigned char> present =
@@ -2265,7 +2298,7 @@ void ensure_multi_penalty_handle(
     int target_capacity,
     OneCallDiagnostics* diagnostics) {
   require(context != nullptr && diagnostics != nullptr &&
-            context->penalty_count > 1 && target_capacity >= 2 &&
+            context->penalty_count >= 1 && target_capacity >= 2 &&
             target_capacity <= 64,
           "multi-penalty prepared demand is invalid");
   if (context->multi_penalty &&
@@ -3936,6 +3969,7 @@ void complete_single_penalty_prefill_window(
               "single-penalty cross-setup CUDA optimizer failed closed");
       CachedTargetState state;
       state.selected_sp.push_back(result.sp);
+      state.selected_log_sp.push_back(result.log_sp);
       state.planned_route = route_from_condition(
         single_penalty_condition(geometry, result.sp), true);
       target_state_cache().insert(
@@ -4313,12 +4347,16 @@ void complete_multi_penalty_prefill_window(
                 "multi-penalty cross-setup optimizer returned an error");
         CachedTargetState state;
         state.selected_sp.resize(static_cast<std::size_t>(penalty_count));
+        state.selected_log_sp.resize(
+          static_cast<std::size_t>(penalty_count));
         for (int penalty = 0; penalty < penalty_count; ++penalty) {
-          const double sp = std::exp(result.selected_log_sp[
-            static_cast<std::size_t>(penalty_count) * target_index + penalty]);
+          const double log_sp = result.selected_log_sp[
+            static_cast<std::size_t>(penalty_count) * target_index + penalty];
+          const double sp = std::exp(log_sp);
           require(std::isfinite(sp) && sp > 0.0,
                   "multi-penalty cross-setup selected sp is non-finite");
           state.selected_sp[static_cast<std::size_t>(penalty)] = sp;
+          state.selected_log_sp[static_cast<std::size_t>(penalty)] = log_sp;
         }
         state.planned_route = route_from_condition(
           result.condition[static_cast<std::size_t>(target_index)],
@@ -4555,6 +4593,7 @@ GroupResult execute_group(
 
   std::vector<double> selected_sp(
     static_cast<std::size_t>(context->penalty_count) * target_count, 0.0);
+  std::vector<double> selected_log_sp(selected_sp.size(), 0.0);
   std::vector<FixedSpRoute> planned_routes(
     static_cast<std::size_t>(target_count), FixedSpRoute::CholeskyBatched);
   std::vector<std::string> base_target_keys;
@@ -4582,6 +4621,10 @@ GroupResult execute_group(
           selected_sp[
             static_cast<std::size_t>(context->penalty_count) * position +
             penalty] = cached.selected_sp[static_cast<std::size_t>(penalty)];
+          selected_log_sp[
+            static_cast<std::size_t>(context->penalty_count) * position +
+            penalty] =
+              cached.selected_log_sp[static_cast<std::size_t>(penalty)];
         }
         planned_routes[static_cast<std::size_t>(position)] =
           cached.planned_route;
@@ -4678,6 +4721,7 @@ GroupResult execute_group(
         require(accepted && std::isfinite(result.sp) && result.sp > 0.0,
                 "single-penalty live CUDA optimizer failed closed");
         selected_sp[static_cast<std::size_t>(position)] = result.sp;
+        selected_log_sp[static_cast<std::size_t>(position)] = result.log_sp;
         planned_routes[static_cast<std::size_t>(position)] =
           route_from_condition(
             single_penalty_condition(geometry, result.sp), true);
@@ -4727,14 +4771,18 @@ GroupResult execute_group(
           const int position =
             optimization_positions[static_cast<std::size_t>(local)];
           for (int penalty = 0; penalty < context->penalty_count; ++penalty) {
-            const double sp = std::exp(result.selected_log_sp[
+            const double log_sp = result.selected_log_sp[
               static_cast<std::size_t>(context->penalty_count) * local +
-              penalty]);
+              penalty];
+            const double sp = std::exp(log_sp);
             require(std::isfinite(sp) && sp > 0,
                     "multi-penalty selected sp is non-finite");
             selected_sp[
               static_cast<std::size_t>(context->penalty_count) * position +
               penalty] = sp;
+            selected_log_sp[
+              static_cast<std::size_t>(context->penalty_count) * position +
+              penalty] = log_sp;
           }
           require(result.optimizer_status[static_cast<std::size_t>(local)] == 0,
                   "multi-penalty CUDA optimizer returned an error status");
@@ -4773,10 +4821,16 @@ GroupResult execute_group(
         CachedTargetState state;
         state.selected_sp.resize(
           static_cast<std::size_t>(context->penalty_count));
+        state.selected_log_sp.resize(
+          static_cast<std::size_t>(context->penalty_count));
         for (int penalty = 0; penalty < context->penalty_count; ++penalty) {
           state.selected_sp[static_cast<std::size_t>(penalty)] = selected_sp[
             static_cast<std::size_t>(context->penalty_count) * position +
             penalty];
+          state.selected_log_sp[static_cast<std::size_t>(penalty)] =
+            selected_log_sp[
+              static_cast<std::size_t>(context->penalty_count) * position +
+              penalty];
         }
         state.planned_route =
           planned_routes[static_cast<std::size_t>(position)];
@@ -4793,8 +4847,7 @@ GroupResult execute_group(
   // p-value contract.
   if (!direct) {
     FixedSpRoute forced_route = FixedSpRoute::AugmentedSvd;
-    if ((method_options.ci_method == "dcc.gamma" ||
-         method_options.ci_method == "hsic.gamma") &&
+    if (method_options.ci_method == "hsic.gamma" &&
         diagnostics->strict_hsic_gamma_residual_route == "qr-through-2") {
       forced_route = context->penalty_count <= 2 ?
         FixedSpRoute::AugmentedQr : FixedSpRoute::AugmentedSvd;
@@ -4810,11 +4863,18 @@ GroupResult execute_group(
   std::vector<std::string> residual_keys;
   residual_keys.reserve(static_cast<std::size_t>(target_count));
   for (int target = 0; target < target_count; ++target) {
-    residual_keys.push_back(residual_key(
-      base_target_keys[static_cast<std::size_t>(target)],
-      selected_sp.data() +
-        static_cast<std::size_t>(context->penalty_count) * target,
-      context->penalty_count));
+    residual_keys.push_back(
+      method_options.ci_method == "dcc.gamma" && !direct ?
+        exact_fixed_residual_key(
+          base_target_keys[static_cast<std::size_t>(target)],
+          selected_log_sp.data() +
+            static_cast<std::size_t>(context->penalty_count) * target,
+          context->penalty_count) :
+        residual_key(
+          base_target_keys[static_cast<std::size_t>(target)],
+          selected_sp.data() +
+            static_cast<std::size_t>(context->penalty_count) * target,
+          context->penalty_count));
     diagnostics->unique_residual_keys.insert(residual_keys.back());
   }
   diagnostics->logical_residual_request_count += target_count;
@@ -5254,11 +5314,100 @@ GroupResult execute_group(
   legacy_request.request_identity_sha256 =
     full_cuda_ci_legacy_eig_batch_request_identity(
       legacy_request, residual_keys);
-  FullCudaCiLegacyEigBatchResult legacy = legacy_component_cache ?
-    run_full_cuda_ci_phase35_legacy_eig_batch_with_component_cache(
-      context->fixed_sp, batch, legacy_request, legacy_component_cache) :
-    run_full_cuda_ci_phase35_legacy_eig_batch(
-      context->fixed_sp, batch, legacy_request);
+  bool component_cache_all_hit = false;
+  if (legacy_component_cache) {
+    const std::vector<unsigned char> cache_hits =
+      full_cuda_ci_legacy_eig_component_cache_contains(
+        legacy_component_cache, residual_keys);
+    require(cache_hits.size() == residual_keys.size(),
+            "legacy component cache probe size changed");
+    component_cache_all_hit = std::all_of(
+      cache_hits.begin(), cache_hits.end(),
+      [](unsigned char value) { return value != 0U; });
+  }
+
+  FullCudaCiLegacyEigBatchResult legacy;
+  if (direct || component_cache_all_hit) {
+    legacy = legacy_component_cache ?
+      run_full_cuda_ci_phase35_legacy_eig_batch_with_component_cache(
+        context->fixed_sp, batch, legacy_request, legacy_component_cache) :
+      run_full_cuda_ci_phase35_legacy_eig_batch(
+        context->fixed_sp, batch, legacy_request);
+  } else {
+    ensure_multi_penalty_handle(context, target_count, diagnostics);
+    for (std::size_t index = 0; index < selected_sp.size(); ++index) {
+      require(std::isfinite(selected_sp[index]) && selected_sp[index] > 0.0,
+              "exact fixed evaluator selected SP is invalid");
+      require(std::isfinite(selected_log_sp[index]),
+              "exact fixed evaluator selected log-SP is invalid");
+    }
+    std::shared_ptr<MultiPenaltyGcvCapacityResidualBatch> exact_residual;
+    try {
+      const auto solve_started = std::chrono::steady_clock::now();
+      exact_residual = multi_penalty_gcv_capacity_evaluate_fixed_batch(
+        context->multi_penalty, Y.data(), selected_log_sp.data(), context->n,
+        target_count, residual_keys,
+        std::sqrt(std::numeric_limits<double>::epsilon()));
+      const double exact_solve_host_ms = elapsed_ms(solve_started);
+      const MultiPenaltyGcvCudaResidualInfo exact_info =
+        multi_penalty_gcv_capacity_residual_info(exact_residual);
+      require(exact_info.n == context->n &&
+                exact_info.coefficient_dim == context->coefficient_dim &&
+                exact_info.target_count == target_count &&
+                exact_info.target_keys == residual_keys &&
+                exact_info.solver_info.size() == residual_keys.size() &&
+                exact_info.decomposition_route.size() ==
+                  residual_keys.size() &&
+                exact_info.numerical_rank.size() == residual_keys.size() &&
+                exact_info.fixed_sp_evaluation && exact_info.device_resident &&
+                !exact_info.released &&
+                std::all_of(
+                  exact_info.solver_info.begin(), exact_info.solver_info.end(),
+                  [](int value) { return value == 0; }) &&
+                std::all_of(
+                  exact_info.decomposition_route.begin(),
+                  exact_info.decomposition_route.end(),
+                  [](int value) {
+                    return value ==
+                      kMultiPenaltyGcvDecompositionStableSvd;
+                  }) &&
+                std::all_of(
+                  exact_info.numerical_rank.begin(),
+                  exact_info.numerical_rank.end(),
+                  [](int value) { return value > 0; }),
+              "exact fixed evaluator authority gate failed closed");
+      diagnostics->cuda_exact_fixed_evaluator_batch_count += 1;
+      diagnostics->cuda_exact_fixed_evaluator_target_count += target_count;
+      diagnostics->cuda_exact_fixed_evaluator_stable_svd_target_count +=
+        target_count;
+      diagnostics->cuda_exact_fixed_evaluator_host_ms += exact_solve_host_ms;
+      const MultiPenaltyGcvCudaResidualConsumerView exact_view =
+        acquire_multi_penalty_gcv_capacity_residual_consumer_view(
+          exact_residual);
+      legacy =
+        run_full_cuda_ci_phase35_legacy_eig_batch_from_fixed_evaluator_residual(
+          context->fixed_sp, exact_view, legacy_request,
+          legacy_component_cache);
+      legacy.diagnostics.residual_solve_host_ms += exact_solve_host_ms;
+      release_multi_penalty_gcv_capacity_residual(exact_residual);
+      exact_residual.reset();
+      release_multi_penalty_handle(context, diagnostics);
+    } catch (...) {
+      if (exact_residual) {
+        try {
+          release_multi_penalty_gcv_capacity_residual(exact_residual);
+        } catch (...) {
+        }
+      }
+      if (context->multi_penalty) {
+        try {
+          release_multi_penalty_handle(context, diagnostics);
+        } catch (...) {
+        }
+      }
+      throw;
+    }
+  }
   accumulate_legacy_compatible_diagnostics(legacy.diagnostics, diagnostics);
   if (context->penalty_count == 1) {
     diagnostics->cuda_single_penalty_residual_solve_host_ms +=
@@ -6654,6 +6803,10 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
           decomposition_reuse.stored_count -
             decomposition_reuse.unique_key_count))),
     "compatible.cuda decomposition trace summary is malformed");
+  require(
+    diagnostics.cuda_exact_fixed_evaluator_stable_svd_target_count ==
+      diagnostics.cuda_exact_fixed_evaluator_target_count,
+    "compatible.cuda exact fixed evaluator route accounting changed");
   const double decomposition_reuse_ratio =
     decomposition_reuse.stored_count > 0U ?
       static_cast<double>(decomposition_reuse.reuse_count) /
@@ -6812,6 +6965,12 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.cuda_multi_penalty_prepared_target_capacity_sum,
       Rcpp::Named("cuda_multi_penalty_prepared_target_capacity_peak") =
         diagnostics.cuda_multi_penalty_prepared_target_capacity_peak,
+      Rcpp::Named("cuda_exact_fixed_evaluator_batch_count") =
+        diagnostics.cuda_exact_fixed_evaluator_batch_count,
+      Rcpp::Named("cuda_exact_fixed_evaluator_target_count") =
+        diagnostics.cuda_exact_fixed_evaluator_target_count,
+      Rcpp::Named("cuda_exact_fixed_evaluator_stable_svd_target_count") =
+        diagnostics.cuda_exact_fixed_evaluator_stable_svd_target_count,
       Rcpp::Named("cuda_multi_penalty_decomposition_trace_enabled") =
         decomposition_trace_enabled,
       Rcpp::Named(
@@ -7547,6 +7706,8 @@ Rcpp::List full_cuda_ci_one_call_skeleton_method(
         diagnostics.cuda_single_penalty_residual_solve_host_ms,
       Rcpp::Named("cuda_multi_penalty_residual_solve_host_ms") =
         diagnostics.cuda_multi_penalty_residual_solve_host_ms,
+      Rcpp::Named("cuda_exact_fixed_evaluator_host_ms") =
+        diagnostics.cuda_exact_fixed_evaluator_host_ms,
       Rcpp::Named("cuda_exact_screen_residual_solve_host_ms") =
         diagnostics.cuda_exact_screen_residual_solve_host_ms,
       Rcpp::Named("cuda_guard_refinement_residual_solve_host_ms") =

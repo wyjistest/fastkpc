@@ -58,7 +58,8 @@ enum class FixedSpStatus : int {
   ErrQrFailed = 14,
   ErrSvdFailed = 15,
   ErrNonfiniteOutput = 16,
-  ErrInternalCuda = 17
+  ErrInternalCuda = 17,
+  ErrCertificateFailed = 18
 };
 
 struct FixedSpCapacities {
@@ -224,6 +225,10 @@ struct FixedSpBatchHostView {
   std::vector<FixedSpRoute> planned_routes;
   std::vector<std::string> target_keys;
   bool route_wait_diagnostics = false;
+  bool residual_certificate_enabled = false;
+  int refinement_max_iterations = 0;
+  double backward_error_tolerance = 0.0;
+  bool fail_closed_on_certificate = false;
 };
 
 struct DeviceResidualInfo {
@@ -249,6 +254,17 @@ struct DeviceResidualInfo {
   std::vector<int> aggregate_penalty_root_pivot;
   std::vector<double> aggregate_dstop;
   std::vector<bool> target_true_batched;
+  std::vector<double> initial_kkt_backward_error;
+  std::vector<double> final_kkt_backward_error;
+  std::vector<int> refinement_iterations;
+  std::vector<std::string> refinement_solver;
+  std::vector<int> refinement_solver_info;
+  std::vector<bool> residual_certificate_passed;
+  bool residual_certificate_enabled = false;
+  int refinement_max_iterations = 0;
+  double backward_error_tolerance = 0.0;
+  bool fail_closed_on_certificate = false;
+  int residual_certificate_failure_count = 0;
   bool native_batch_call = false;
   int batch_call_count = 0;
   bool true_batched_kernel = false;

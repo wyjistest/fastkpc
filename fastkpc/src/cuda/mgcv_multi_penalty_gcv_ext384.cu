@@ -1,5 +1,6 @@
 #define FASTKPC_MULTI_PENALTY_MAX_COEFFICIENT_DIM 384
 #define FASTKPC_MULTI_PENALTY_MAX_PENALTY_COUNT 42
+#define FASTKPC_MULTI_PENALTY_GCV_EXTENSION 1
 #define lapack312_multi lapack312_multi_ext384
 #define MultiPenaltyGcvCudaPrepared MultiPenaltyGcvCudaPreparedext384
 #define MultiPenaltyGcvCudaResidualBatch MultiPenaltyGcvCudaResidualBatchext384
@@ -16,6 +17,8 @@
   multi_penalty_gcv_cuda_prepared_info_ext384
 #define multi_penalty_gcv_cuda_optimize_batch \
   multi_penalty_gcv_cuda_optimize_batch_ext384
+#define multi_penalty_gcv_cuda_evaluate_fixed_batch \
+  multi_penalty_gcv_cuda_evaluate_fixed_batch_ext384
 #define multi_penalty_gcv_cuda_optimize_multi \
   multi_penalty_gcv_cuda_optimize_multi_ext384
 #define multi_penalty_gcv_cuda_residual_info \

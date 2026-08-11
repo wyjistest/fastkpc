@@ -79,7 +79,7 @@ candidate <- full_cuda_ci_multi_penalty_capacity_qualify_native(
 )
 assert_true(
   identical(candidate$schema_version,
-            "full-cuda-ci-multi-penalty-capacity-qualification-v1") &&
+            "full-cuda-ci-multi-penalty-capacity-qualification-v2") &&
     identical(candidate$capacity_bucket, "q192-p21") &&
     identical(candidate$max_concurrent_setups, 8L) &&
     identical(candidate$coefficient_dim, 82L) &&
@@ -92,7 +92,13 @@ assert_true(
     identical(candidate$diagnostics$fallback_count, 0L) &&
     identical(candidate$diagnostics$cuda_error_count, 0L) &&
     isTRUE(candidate$diagnostics$true_batched_kernel) &&
-    isTRUE(candidate$diagnostics$independent_target_states),
+    isTRUE(candidate$diagnostics$independent_target_states) &&
+    isTRUE(candidate$fixed_sp_evaluation) &&
+    isTRUE(candidate$fixed_device_resident_before_release) &&
+    isTRUE(candidate$fixed_residual_slot_released) &&
+    all(candidate$fixed_solver_info == 0L) &&
+    all(candidate$fixed_decomposition_route == 2L) &&
+    all(candidate$fixed_numerical_rank > 0L),
   "level-9 capacity backend authority gate failed"
 )
 
@@ -131,6 +137,23 @@ assert_true(
   is.finite(max_log_sp_error) && max_log_sp_error <= 1e-6,
   "level-9 capacity selected log-sp exceeded the qualified tolerance"
 )
+fixed_references <- lapply(seq_len(ncol(Y)), function(target_index) {
+  full_cuda_ci_multi_penalty_gcv_evaluate_cpp_native(
+    setup$X, Y[, target_index], setup$penalty_blocks,
+    setup$penalty_offsets, setup$penalty_ranks,
+    log_sp = candidate$selected_log_sp[, target_index]
+  )
+})
+reference_fixed_residuals <- do.call(cbind, lapply(
+  fixed_references, `[[`, "residuals"
+))
+max_fixed_residual_error <- max(abs(
+  candidate$fixed_residuals - reference_fixed_residuals
+))
+assert_true(
+  is.finite(max_fixed_residual_error) && max_fixed_residual_error <= 1e-10,
+  "level-9 capacity fixed residual exceeded the mgcv contract"
+)
 
 assert_capacity_authority <- function(candidate, bucket, concurrency, q,
                                       penalty_count, label) {
@@ -148,7 +171,13 @@ assert_capacity_authority <- function(candidate, bucket, concurrency, q,
       identical(candidate$diagnostics$fallback_count, 0L) &&
       identical(candidate$diagnostics$cuda_error_count, 0L) &&
       isTRUE(candidate$diagnostics$true_batched_kernel) &&
-      isTRUE(candidate$diagnostics$independent_target_states),
+      isTRUE(candidate$diagnostics$independent_target_states) &&
+      isTRUE(candidate$fixed_sp_evaluation) &&
+      isTRUE(candidate$fixed_device_resident_before_release) &&
+      isTRUE(candidate$fixed_residual_slot_released) &&
+      all(candidate$fixed_solver_info == 0L) &&
+      all(candidate$fixed_decomposition_route == 2L) &&
+      all(candidate$fixed_numerical_rank > 0L),
     paste0(label, " capacity backend authority gate failed")
   )
 }
@@ -198,5 +227,7 @@ assert_capacity_authority(
 cat(
   "PASS default-Inf extended CUDA capacity qualification; ",
   "q192_max_log_sp_error=", format(max_log_sp_error, digits = 7L),
+  "; q192_max_fixed_residual_error=",
+  format(max_fixed_residual_error, digits = 7L),
   "; q384_sec=", elapsed384, "; q559_sec=", elapsed559, "\n", sep = ""
 )

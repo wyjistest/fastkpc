@@ -450,6 +450,7 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "cuda_residual_solve_host_ms",
     "cuda_single_penalty_residual_solve_host_ms",
     "cuda_multi_penalty_residual_solve_host_ms",
+    "cuda_exact_fixed_evaluator_host_ms",
     "cuda_exact_screen_residual_solve_host_ms",
     "cuda_guard_refinement_residual_solve_host_ms",
     "cuda_legacy_compatible_residual_solve_host_ms", "cuda_dcov_host_ms",
@@ -507,6 +508,9 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
     "cuda_multi_penalty_prepared_release_count",
     "cuda_multi_penalty_prepared_target_capacity_sum",
     "cuda_multi_penalty_prepared_target_capacity_peak",
+    "cuda_exact_fixed_evaluator_batch_count",
+    "cuda_exact_fixed_evaluator_target_count",
+    "cuda_exact_fixed_evaluator_stable_svd_target_count",
     "cuda_multi_penalty_optimizer_iteration_sum",
     "cuda_multi_penalty_optimizer_iteration_max",
     "cuda_multi_penalty_score_call_sum",
@@ -716,12 +720,17 @@ fastkpc_full_cuda_phase10_compute_profile <- function(summary) {
       counters[["singleton_padding_batch_count"]] ==
         counters[["singleton_padding_target_count"]] &&
       counters[["cuda_multi_penalty_prepared_build_count"]] ==
-        counters[["cuda_multi_penalty_optimizer_setup_count"]] &&
+        counters[["cuda_multi_penalty_optimizer_setup_count"]] +
+          counters[["cuda_exact_fixed_evaluator_batch_count"]] &&
       counters[["cuda_multi_penalty_prepared_release_count"]] ==
         counters[["cuda_multi_penalty_prepared_build_count"]] &&
       counters[["cuda_multi_penalty_prepared_target_capacity_sum"]] >=
         2 * counters[["cuda_multi_penalty_prepared_build_count"]] &&
       counters[["cuda_multi_penalty_prepared_target_capacity_peak"]] <= 64 &&
+      counters[["cuda_exact_fixed_evaluator_target_count"]] >=
+        2 * counters[["cuda_exact_fixed_evaluator_batch_count"]] &&
+      counters[["cuda_exact_fixed_evaluator_stable_svd_target_count"]] ==
+        counters[["cuda_exact_fixed_evaluator_target_count"]] &&
       (counters[["cuda_multi_penalty_target_count"]] == 0 || (
         counters[["cuda_multi_penalty_optimizer_iteration_sum"]] > 0 &&
         counters[["cuda_multi_penalty_optimizer_iteration_max"]] > 0 &&
