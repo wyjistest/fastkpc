@@ -7,10 +7,12 @@ production route.
 
 ```text
 semantic closure commit:       377676f
-current runtime commit:        305d7a7
-audited native SHA-256:        20ab56e7de5a88982c46140df4a90ee8ab544e3ee020bae6a67ef6d73c0bb5eb
+exact-primary commit:          305d7a7
+current runtime commit:        dcb1749
+audited native SHA-256:        fe8286f7e6c6114ef66e040b16b693f5abcb23333dc9c0fd767c042c509c3c50
 selected-SP finalization:      GO_EXACT_GPU_PRIMARY
 fixed-SP execution:            GO_EXACT_GPU_EVALUATOR
+exact-primary/fixed reuse:     GO_COEFFICIENT_ONLY
 CPU numerical authority:       0
 CPU/unknown fallback:          0
 KKT refinement authority:      STOP_NOT_MGCV_SEMANTIC_AUTHORITY
@@ -33,7 +35,10 @@ fixed-SP residual execution on the GPU:
 ```text
 CUDA stable-SVD exact-primary selected-SP optimizer
   -> selected log-SP retained in native ownership
-  -> CUDA exact fixed-SP evaluator at that log-SP
+  -> final selected-SP stable-SVD coefficient identity
+  -> level-scoped device coefficient arena
+  -> original cohort-ordered CUDA fitted/residual materialization
+     (independent exact fixed-SP evaluator when no arena identity exists)
   -> device-resident residual/component/full-eig/gamma path
   -> compact p-value result only
 ```
@@ -55,6 +60,17 @@ default. `FASTKPC_DCC_GAMMA_EXACT_PRIMARY_OPTIMIZER=0` retains the former
 primary-plus-replay shape only as an explicit regression escape hatch. Other CI
 methods do not opt into exact-primary execution.
 
+Producer `dcb1749` additionally makes exact-primary coefficient reuse the
+`dcc.gamma` default. Targets whose accepted optimizer state previously reused
+an earlier evaluation first receive one deterministic stable-SVD refresh at
+the final selected log-SP. The runtime detaches only the resulting
+coefficients, route, rank, and solver status into a level-scoped device arena.
+At CI consumption it gathers coefficients in the original exact-fixed cohort
+order and reruns the same `X beta` and `Y - X beta` materialization. It does not
+reuse the old optimizer residual. `FASTKPC_DCC_GAMMA_EXACT_PRIMARY_FIXED_REUSE=0`
+disables this path; disabling exact-primary also disables reuse and restores
+the primary-plus-replay route without requiring a second setting.
+
 ## Exact-primary and retained full-eig requalification
 
 The exact producer was first qualified with the retained full-eig stack:
@@ -72,8 +88,8 @@ selected its result; a captured primary and replay consumed `13.946s` and
 `13.226s`, respectively, while merge cost was only `0.443ms`.
 
 The production optimization therefore runs that same deterministic stable-SVD
-optimizer once as the primary and omits the redundant replay and merge. The
-current source-closure canonical audit produced:
+optimizer once as the primary and omits the redundant replay and merge. Its
+`305d7a7` source-closure canonical audit produced:
 
 | Reference route | Elapsed (s) | Current reduction from reference |
 | --- | ---: | ---: |
@@ -81,7 +97,7 @@ current source-closure canonical audit produced:
 | retained stack C, three-run median | `1538.940` | `17.32%` |
 | exact-primary production | **`1272.360`** | reference |
 
-This latest value is one isolated source-closure development run, not a clean
+That value is one isolated source-closure development run, not a clean
 checkout or repeated promotion median. Its hard gates passed:
 
 ```text
@@ -107,7 +123,7 @@ physical residual fits + bypass targets = legacy residual targets
 164434 + 63599                           = 228033
 ```
 
-Its current top-level attribution is:
+Its top-level attribution was:
 
 | Stage | Host boundary (s) |
 | --- | ---: |
@@ -117,11 +133,11 @@ Its current top-level attribution is:
 | native setup | `22.663` |
 | control/packaging, unattributed | `48.615` |
 
-The current canonical tasks, `pMax`, adjacency, and sepsets are bitwise
+That canonical run's tasks, `pMax`, adjacency, and sepsets are bitwise
 identical to the earlier `c700c1b1` exact-primary prototype. The final
 12-witness run covers `q=28,37,55,64,73,82`; all 12 exact-primary identities,
-stable-SVD finalizations, and numerical contracts pass. The current evidence
-identities are:
+stable-SVD finalizations, and numerical contracts pass. Its exact-primary
+evidence identities are:
 
 ```text
 runtime commit                         305d7a7
@@ -139,9 +155,114 @@ and `bdf090a0cefff4efa8c1c25803ca7a789a23243c9a9c2d605bd86e6988bba4a2`.
 Those three receipts use native SHA
 `c700c1b16127791c8d922e4029922f48f5f408fc605ded7c68c13d2b0887a928`;
 they are not relabelled as current-runtime runs. Production cleanup is attested
-by the current canonical bitwise identity and the current 12-shape witness
+by that canonical bitwise identity and the 12-shape witness
 campaign. A candidate freeze would still require fresh repeated runs from a
 clean checkout of the frozen producer.
+
+## Exact-primary coefficient reuse closure
+
+The prior `STOP_OPTIMIZER_RESIDUAL_NUMERICAL_PARITY` remains valid. That
+experiment attempted to consume the optimizer's existing residual, whose
+rank-deficient coefficient representative did not match exact fixed-SP
+finalization. The accepted route instead forces the final selected-SP
+stable-SVD evaluation when needed, proves coefficient identity, retains only
+those coefficients, and reproduces fitted values and residuals through the
+original finalization operations.
+
+Three clean exact-primary baseline runs took `1266.594s`, `1284.209s`, and
+`1283.663s`, for a median of `1283.663s`. Two coefficient-only candidate runs
+took `1149.219s` and `1141.963s`, for a two-run median of `1145.591s`. The
+median reduction is `138.072s` (`10.76%`). The work ledger explains the change:
+
+```text
+final selected-SP refresh targets             35059
+coefficient-reuse hit targets                 75020
+reuse fallback targets                            0
+baseline exact-fixed stable-SVD targets      164386
+candidate exact-fixed stable-SVD targets      89366
+optimizer stable-SVD target delta            +35059
+exact-fixed stable-SVD target delta          -75020
+
+baseline median optimizer boundary          596.616 s
+candidate median optimizer boundary         600.311 s
+baseline median exact-fixed boundary        177.958 s
+candidate median exact-fixed boundary        34.679 s
+```
+
+After default-on policy and regression escape-hatch hardening, a complete
+native rebuild produced SHA-256
+`fe8286f7e6c6114ef66e040b16b693f5abcb23333dc9c0fd767c042c509c3c50`.
+With the reuse environment variable unset, the final source-closure canonical
+audit took `1140.851s` and passed:
+
+```text
+logical CI tests                         240498 / 240498
+maximum CI / pMax absolute error         3.0547508966805026e-12
+exact-primary targets                    80751 / 80751
+selected-SP refresh targets              35059
+coefficient arena stores / reuse hits    80751 / 75020
+reuse hit batches / fallback targets     15264 / 0
+remaining exact-fixed stable-SVD targets 89366 / 89366
+arena peak device bytes                  16991872
+arena allocations / frees / live bytes   9 / 9 / 0
+component requests / hits / misses       228033 / 117350 / 110683
+all-hit residual-bypass batches          13641
+eig lanes requested / active peak        8 / 8
+CPU numerical authority / fallback       0 / 0
+task, p-value, pMax and graph identity    PASS
+resource closure                         PASS
+```
+
+The final default-bound result is bitwise identical to the pre-default
+candidate for tasks, p-values, `pMax`, adjacency, sepsets, and `n.edgetests`.
+Its receipt SHA-256 is
+`b3414ca690bde1301ee6393aa5aed6208a60628e4e91d54de09b423441c67af4`.
+The two candidate receipt SHA-256 values are
+`81407bf94afbdae0e7360b8c9e09c7be53330b2e44fa271727480189c4b5eb83`
+and `1dbdb8c915c576c65eb89c377c95a25177d7ee69a9813aa2bdcd6b144dcee08c`.
+
+The final default-bound single-run attribution is:
+
+| Stage | Host boundary (s) |
+| --- | ---: |
+| selected-SP optimizer | `596.810` |
+| dCov/full eig | `437.082` |
+| exact-fixed residual evaluation | `34.420` |
+| native setup | `22.814` |
+| control/packaging, unattributed | `49.725` |
+
+Exact-fixed finalization is therefore no longer the third large stage. The
+remaining dominant measured boundaries are selected-SP exact-primary itself
+and the retained dCov/full-eig stack. This is attribution, not authorization to
+reopen an already stopped optimizer or eig prototype without new evidence.
+
+A 12-witness campaign spanning `q=28,37,55,64,73,82` reports bitwise-identical
+selected log-SP, route, rank, solver info, coefficients, fitted values,
+residuals, and derived p-values between refreshed exact-primary output and
+independent exact-fixed finalization. Its receipt SHA-256 is
+`fc9f802461f31d5ddf17506381c19cfb8e93c165f20410546118d76e3dbf42a9`.
+The candidate campaign also passed maximum-capacity q192/q384/q559
+qualification. The generic optimizer, persistent residual-token, Phase 10
+hardening, and focused one-call regression suites pass on the final full-build
+binary.
+
+Three final-binary real-input fixtures independently compare reuse disabled
+and enabled:
+
+| Shape | Baseline (s) | Reuse (s) | Reuse hits | p-value / pMax / graph |
+| --- | ---: | ---: | ---: | --- |
+| `179x8` | `2.186` | `1.965` | 8 | bitwise exact |
+| `243x9` | `3.842` | `3.665` | 121 | bitwise exact |
+| `300x10` | `6.222` | `5.946` | 104 | bitwise exact |
+
+All three have zero fallback and closed resources. Their combined receipt
+SHA-256 is
+`9cb38dfa1937846bf0a0996dcaf7b7332b1a7821d0662cad6f926b060ba42b86`.
+
+The `1140.851s` value is one isolated source-closure development run. The
+`1145.591s` value is a two-run development median generated before the final
+default-policy patch. Neither is a clean-checkout repeated producer median or
+promotion evidence.
 
 ## Semantic-closure native gates
 
@@ -263,10 +384,12 @@ semantic false positive. Its receipt SHA-256 is
 The production conclusion is narrow:
 
 ```text
-GPU exact selected-SP replay + exact fixed-SP evaluator: GO
-generic KKT/refinement as mgcv authority:                 STOP
-CPU fallback:                                             FORBIDDEN
-all-task p-value tolerance:                               1e-10
+GPU exact selected-SP + exact fixed-SP evaluator:          GO
+refreshed exact-primary coefficient reuse:                 GO
+unrefreshed optimizer residual reuse:                      STOP
+generic KKT/refinement as mgcv authority:                  STOP
+CPU fallback:                                              FORBIDDEN
+all-task p-value tolerance:                                1e-10
 ```
 
 This completes the requested GPU semantic replication on the qualified route.

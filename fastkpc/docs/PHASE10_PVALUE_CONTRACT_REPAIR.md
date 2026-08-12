@@ -11,6 +11,7 @@ to have absolute error at most `1e-10` from the legacy reference.
 historical Phase 10 candidate: INVALIDATED_NUMERICAL_CONTRACT
 GPU-only correctness repair:  FRESH_REBUILD_CANONICAL_PASS
 full-eig component status:     CLOSED_STRICT_SINGLE_GPU
+exact-primary/fixed reuse:     DEVELOPMENT_GO_DEFAULT
 Checkpoint B <180s:             FAIL
 candidate:                      NOT_FROZEN
 recommended route:              false
@@ -162,13 +163,13 @@ Promotion status remains unchanged.
 Runtime producer `305d7a7` removes the redundant selected-SP stability replay
 for `dcc.gamma` by running its deterministic stable-SVD path once as the exact
 primary. With the retained 11-GiB component cache, all-hit residual bypass, and
-eight eig lanes, the current canonical source-closure audit passes all 240,498
+eight eig lanes, that canonical source-closure audit passes all 240,498
 CI tests in `1272.360s`; maximum CI and `pMax` error remain
 `3.0547508966805026e-12`.
 
 All 80,751 multi-penalty targets carry exact-primary identity, while replay and
 terminal-confirmation counts are zero. The canonical result is bitwise
-identical to the qualified test-only prototype, and the current 12-shape
+identical to the qualified test-only prototype, and its 12-shape
 selected-SP/fixed-finalization campaign also passes. Full counters, native and
 receipt SHA-256 values, real-input prototype evidence, and the v8 residual
 bypass accounting rule are recorded in `MGCV_GPU_SEMANTIC_CLOSURE.md`.
@@ -176,3 +177,59 @@ bypass accounting rule are recorded in `MGCV_GPU_SEMANTIC_CLOSURE.md`.
 This is source-closure development evidence, not a clean-checkout repeated
 campaign or promotion evidence. Checkpoint B, the five-run final gate,
 candidate freeze, recommendation, and sealed holdout state remain unchanged.
+
+## Exact-primary coefficient reuse update
+
+Runtime producer `dcb1749` removes a second class of duplicate stable-SVD
+work. It does not reuse the previously rejected optimizer residual. For
+targets whose final accepted optimizer state did not already materialize the
+selected coefficient representative, it performs one deterministic
+stable-SVD refresh at the final selected log-SP. It stores only the resulting
+coefficients and exact route/rank/info identity in a level-scoped GPU arena.
+The subsequent CI consumer gathers those coefficients in the original cohort
+order and repeats the existing CUDA `X beta` and `Y - X beta` finalization.
+
+The old decision remains in force:
+
+```text
+unrefreshed optimizer residual reuse: STOP_OPTIMIZER_RESIDUAL_NUMERICAL_PARITY
+refreshed exact-primary coefficient reuse: GO
+```
+
+Three exact-primary baseline runs took `1266.594s`, `1284.209s`, and
+`1283.663s`, giving a median of `1283.663s`. Two coefficient-reuse candidate
+runs took `1149.219s` and `1141.963s`, giving a two-run median of `1145.591s`.
+That is a `138.072s` (`10.76%`) median reduction. The optimizer boundary moved
+from a `596.616s` baseline median to `600.311s` because 35,059 final selected-SP
+refreshes were added. In exchange, 75,020 target evaluations were reused and
+the exact-fixed boundary fell from `177.958s` to `34.679s`; remaining
+exact-fixed stable-SVD targets fell from 164,386 to 89,366 with zero fallback.
+
+After a complete rebuild, with the reuse environment variable unset, the
+default-bound source-closure audit took `1140.851s` and passed all 240,498
+canonical CI tests. Maximum CI and `pMax` error remained
+`3.0547508966805026e-12`; task order, every p-value, `pMax`, adjacency,
+sepsets, and `n.edgetests` are bitwise identical to the pre-default candidate.
+CPU numerical authority and fallback remain zero. The coefficient arena peaked
+at 16,991,872 bytes and closed with 9 allocations, 9 frees, and zero live
+bytes.
+
+```text
+runtime producer                      dcb1749
+full-build native SHA-256             fe8286f7e6c6114ef66e040b16b693f5abcb23333dc9c0fd767c042c509c3c50
+default canonical receipt SHA-256     b3414ca690bde1301ee6393aa5aed6208a60628e4e91d54de09b423441c67af4
+real-input qualification SHA-256      9cb38dfa1937846bf0a0996dcaf7b7332b1a7821d0662cad6f926b060ba42b86
+```
+
+All three final-binary real-input fixtures are bitwise exact between reuse-off
+and reuse-on for p-values, `pMax`, and graph outputs, with zero fallback and
+closed resources. Generic optimizer replay, persistent residual-token, Phase
+10 hardening, focused one-call, 12-witness, and maximum-capacity qualification
+also pass. `FASTKPC_DCC_GAMMA_EXACT_PRIMARY_FIXED_REUSE=0` is the explicit
+regression escape hatch; `FASTKPC_DCC_GAMMA_EXACT_PRIMARY_OPTIMIZER=0`
+automatically disables reuse and restores primary-plus-replay.
+
+The two-run candidate median and final default-bound single run are development
+evidence only. They are not a clean-checkout repeated runtime median or
+promotion evidence. Checkpoint B, the five-run 120-second gate, candidate
+freeze, recommendation, and sealed holdout remain unchanged.
